@@ -369,7 +369,8 @@ func ReadBuffConn(ctx context.Context, logger *zap.Logger, conn net.Conn, buffer
 			if conn == nil {
 				logger.Debug("the conn is nil")
 			}
-			buffer, err := ReadBytes(ctx, logger, conn)
+			// A relay's side can wait for hours: a small read (WaitReadSize).
+			buffer, err := ReadBytesWaiting(ctx, logger, conn)
 			if err != nil {
 				if ctx.Err() != nil { // to avoid sending buffer to closed channel if the context is cancelled
 					return
@@ -552,7 +553,16 @@ const (
 // never answered, so the caller waited forever. ctx is checked before every
 // Read; a panic in Read ends the read with an error.
 func ReadBytes(ctx context.Context, logger *zap.Logger, reader io.Reader) ([]byte, error) {
-	return readBytes(ctx, logger, reader, HandshakeEOFRetryMax)
+	return readBytes(ctx, logger, reader, HandshakeEOFRetryMax, &readScratch)
+}
+
+// ReadBytesWaiting is ReadBytes for a read that may wait long for the
+// connection's next bytes: a pass-through's reader (ReadBuffConn), an HTTP
+// keep-alive connection's wait for its next request. It reads at most
+// WaitReadSize, so a connection that waits holds that much while it waits,
+// not ReadChunkSize.
+func ReadBytesWaiting(ctx context.Context, logger *zap.Logger, reader io.Reader) ([]byte, error) {
+	return readBytes(ctx, logger, reader, HandshakeEOFRetryMax, &waitScratch)
 }
 
 // ReadBytesUntilEOF is ReadBytes for a reader whose end is its peer's close:
@@ -560,24 +570,34 @@ func ReadBytes(ctx context.Context, logger *zap.Logger, reader io.Reader) ([]byt
 // retry, under a read deadline shorter than its sleep, comes back as the
 // deadline's timeout, which hides that the peer closed.
 func ReadBytesUntilEOF(ctx context.Context, logger *zap.Logger, reader io.Reader) ([]byte, error) {
-	return readBytes(ctx, logger, reader, 0)
+	return readBytes(ctx, logger, reader, 0, &readScratch)
 }
 
-// ReadChunkSize is the most one ReadBytes returns: the most a relay reader
-// (ReadBuffConn) holds of a connection's bytes while it waits for its taker.
-// It is the size the relay that records a connection reads with
+// ReadChunkSize is the most one ReadBytes or ReadBytesUntilEOF returns. It is
+// the size the relay that records a connection reads with
 // (relay.DefaultForwardBuf), so a replay that matches a request piece by piece
 // (the generic parser) reads it in the pieces its recording read.
 const ReadChunkSize = 32 << 10
 
-// readScratch holds the ReadChunkSize buffers ReadBytes reads into. What it
-// returns is copied out, sized to the read, so a scratch buffer is never held
-// past the call.
-var readScratch = sync.Pool{New: func() any { b := make([]byte, ReadChunkSize); return &b }}
+// WaitReadSize is the most one ReadBytesWaiting returns, and the most a relay
+// reader (ReadBuffConn) holds of a connection's bytes while it waits for its
+// taker: the size the old ReadBytes loop read with. A read holds its buffer
+// for as long as it waits, and a pass-through or a keep-alive connection can
+// wait for hours, so these reads take 1 KiB, not ReadChunkSize: 10k idle
+// pass-throughs (two readers each) held about 600 MiB more at 32 KiB.
+const WaitReadSize = 1 << 10
 
-func readBytes(ctx context.Context, logger *zap.Logger, reader io.Reader, eofRetryMax int) ([]byte, error) {
-	scratch := readScratch.Get().(*[]byte)
-	defer readScratch.Put(scratch)
+// readScratch and waitScratch hold the buffers ReadBytes and ReadBytesWaiting
+// read into. What they return is copied out, sized to the read, so a scratch
+// buffer is never held past the call.
+var (
+	readScratch = sync.Pool{New: func() any { b := make([]byte, ReadChunkSize); return &b }}
+	waitScratch = sync.Pool{New: func() any { b := make([]byte, WaitReadSize); return &b }}
+)
+
+func readBytes(ctx context.Context, logger *zap.Logger, reader io.Reader, eofRetryMax int, scratchPool *sync.Pool) ([]byte, error) {
+	scratch := scratchPool.Get().(*[]byte)
+	defer scratchPool.Put(scratch)
 	emptyEOFRetries := 0
 	for {
 		if err := ctx.Err(); err != nil {

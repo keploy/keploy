@@ -108,9 +108,9 @@ func (c *endlessConn) Read(p []byte) (int, error) {
 }
 
 // A peer streaming 1 GB keeps what the relay holds of it under a small fixed
-// bound: each read is handed on as it comes, at most ReadChunkSize, and
-// nothing accumulates. A relay reader used to append 1 KiB reads until a short
-// one, which a fast streamer never gives, and one held 69 MB.
+// bound: each read is handed on as it comes, at most WaitReadSize, and nothing
+// accumulates. A relay reader used to append 1 KiB reads until a short one,
+// which a fast streamer never gives, and one held 69 MB.
 func TestReadBuffConnHoldsAStreamInBoundedChunks(t *testing.T) {
 	const total = 1 << 30
 	conn := &endlessConn{left: total}
@@ -124,8 +124,8 @@ func TestReadBuffConnHoldsAStreamInBoundedChunks(t *testing.T) {
 	for taken < total {
 		select {
 		case buf := <-bufCh:
-			if len(buf) > ReadChunkSize {
-				t.Fatalf("a hand-off of %d bytes, past ReadChunkSize (%d)", len(buf), ReadChunkSize)
+			if len(buf) > WaitReadSize {
+				t.Fatalf("a hand-off of %d bytes, past WaitReadSize (%d)", len(buf), WaitReadSize)
 			}
 			conn.held.Add(-int64(len(buf)))
 			taken += int64(len(buf))
@@ -137,7 +137,64 @@ func TestReadBuffConnHoldsAStreamInBoundedChunks(t *testing.T) {
 		t.Fatalf("the reader ended with %v, want io.EOF", err)
 	}
 	// One chunk handed on and not yet counted taken, and the next one read.
-	if got := conn.maxHeld.Load(); got > 2*ReadChunkSize {
-		t.Fatalf("the relay held up to %d bytes of the stream, want at most %d", got, 2*ReadChunkSize)
+	if got := conn.maxHeld.Load(); got > 2*WaitReadSize {
+		t.Fatalf("the relay held up to %d bytes of the stream, want at most %d", got, 2*WaitReadSize)
+	}
+}
+
+// sizeTellingConn answers each Read with one byte and tells the size of the
+// buffer the Read was given; once done is closed, a Read is answered EOF.
+type sizeTellingConn struct {
+	net.Conn
+	sizes chan int
+	done  <-chan struct{}
+}
+
+func (c *sizeTellingConn) Read(p []byte) (int, error) {
+	select {
+	case c.sizes <- len(p):
+	case <-c.done:
+		return 0, io.EOF
+	}
+	p[0] = 'x'
+	return 1, nil
+}
+
+// Each path reads with its own size, and a read holds its buffer for as long
+// as it waits. The reads that can wait for hours on an idle connection (a
+// pass-through's readers, ReadBuffConn; an HTTP keep-alive connection's wait
+// for its next request) take WaitReadSize, the old loop's 1 KiB: at
+// ReadChunkSize, 10k idle pass-throughs held about 600 MiB more. ReadBytes,
+// whose callers read a message on, and ReadBytesUntilEOF, generic replay's,
+// which matches pieces recorded at the relay's read size, take ReadChunkSize.
+func TestEachReadPathReadsWithItsSize(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	for _, tc := range []struct {
+		name string
+		read func(io.Reader) ([]byte, error)
+		want int
+	}{
+		{"ReadBytes", func(r io.Reader) ([]byte, error) { return ReadBytes(ctx, zap.NewNop(), r) }, ReadChunkSize},
+		{"ReadBytesUntilEOF", func(r io.Reader) ([]byte, error) { return ReadBytesUntilEOF(ctx, zap.NewNop(), r) }, ReadChunkSize},
+		{"ReadBytesWaiting", func(r io.Reader) ([]byte, error) { return ReadBytesWaiting(ctx, zap.NewNop(), r) }, WaitReadSize},
+	} {
+		conn := &sizeTellingConn{sizes: make(chan int, 1)}
+		if got, err := tc.read(conn); err != nil || string(got) != "x" {
+			t.Fatalf("%s = (%q, %v), want the byte read", tc.name, got, err)
+		}
+		if got := <-conn.sizes; got != tc.want {
+			t.Errorf("%s read with a %d-byte buffer, want %d", tc.name, got, tc.want)
+		}
+	}
+
+	conn := &sizeTellingConn{sizes: make(chan int), done: ctx.Done()}
+	bufCh := make(chan []byte, 1)
+	go ReadBuffConn(ctx, zap.NewNop(), conn, bufCh, make(chan error, 1), false)
+	for i := 0; i < 3; i++ {
+		if got := awaitTaken(t, conn.sizes, "a read of ReadBuffConn"); got != WaitReadSize {
+			t.Fatalf("ReadBuffConn's read %d had a %d-byte buffer, want WaitReadSize (%d)", i, got, WaitReadSize)
+		}
+		<-bufCh
 	}
 }

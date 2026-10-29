@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg"
+	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/pkg/platform/yaml/mockdb"
@@ -34,6 +35,9 @@ type readWatchedConn struct {
 	inFlight atomic.Int32
 	answered atomic.Bool
 	reading  chan struct{}
+	// waitSize is the buffer size of the first read that started once the
+	// connection had been written to.
+	waitSize atomic.Int32
 }
 
 func (c *readWatchedConn) Write(p []byte) (int, error) {
@@ -46,12 +50,44 @@ func (c *readWatchedConn) Read(p []byte) (int, error) {
 	c.inFlight.Add(1)
 	defer c.inFlight.Add(-1)
 	if c.answered.Load() {
+		c.waitSize.CompareAndSwap(0, int32(len(p)))
 		select {
 		case c.reading <- struct{}{}:
 		default:
 		}
 	}
 	return c.Conn.Read(p)
+}
+
+// A replay waits for a keep-alive connection's next request on a small read
+// (pUtil.WaitReadSize, as the old loop read): the read holds its buffer for as
+// long as the connection is idle, which for a client's pool is hours. The
+// rest of the request is read on by its framing (readRequestHead).
+func TestDecodeHTTPWaitsForTheNextRequestOnASmallRead(t *testing.T) {
+	app, proxy := tcpPair(t)
+	conn := &readWatchedConn{Conn: proxy, reading: make(chan struct{}, 1)}
+	h := &HTTP{Logger: zap.NewNop()}
+	rec := recorded("u", "/u", nil, "")
+	rec.Spec.HTTPReq.ProtoMajor, rec.Spec.HTTPReq.ProtoMinor = 1, 1
+	ctx, cancel := context.WithCancel(context.Background())
+	returned := make(chan error, 1)
+	go func() {
+		returned <- h.decodeHTTP(ctx, []byte("POST /u HTTP/1.1\r\nHost: api.example\r\nContent-Length: 0\r\n\r\n"), conn, nil,
+			&mockMemDb{mocks: []*models.Mock{rec}, updateUnFilteredReturn: true}, models.OutgoingOptions{})
+	}()
+	t.Cleanup(func() { cancel(); <-returned })
+	// The bounds below only turn a hang into a failure.
+	if got := readUntil(app, "\r\n\r\n", time.Minute); !strings.HasPrefix(got, "HTTP/1.1 200") {
+		t.Fatalf("the request was answered %q, want the mock's 200", got)
+	}
+	select {
+	case <-conn.reading: // waiting for the next request
+	case <-time.After(time.Minute):
+		t.Fatal("decodeHTTP did not read on for the next request")
+	}
+	if got := conn.waitSize.Load(); got != pUtil.WaitReadSize {
+		t.Fatalf("decodeHTTP waits for the next request on a %d-byte read, want pUtil.WaitReadSize (%d)", got, pUtil.WaitReadSize)
+	}
 }
 
 // A replay whose context ends while decodeHTTP waits for the client's next

@@ -129,7 +129,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					errCh <- nil
 					return
 				}
-				reqBuf, err = pUtil.ReadBytes(ctx, h.Logger, clientConn)
+				reqBuf, err = pUtil.ReadBytesWaiting(ctx, h.Logger, clientConn)
 				if err != nil {
 					h.Logger.Debug("bypassRule passthrough: client closed connection", zap.Error(err))
 					errCh <- nil
@@ -248,7 +248,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				}
 				// Read the next request on this keep-alive connection and loop,
 				// mirroring the matched-response path below.
-				reqBuf, err = pUtil.ReadBytes(ctx, h.Logger, clientConn)
+				reqBuf, err = pUtil.ReadBytesWaiting(ctx, h.Logger, clientConn)
 				if err != nil {
 					h.Logger.Debug("egress passthrough: client closed connection", zap.Error(err))
 					errCh <- nil
@@ -293,7 +293,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					}
 					// Read the next poll on this keep-alive connection and loop,
 					// mirroring the telemetry short-circuit and matched-response paths.
-					reqBuf, err = pUtil.ReadBytes(ctx, h.Logger, clientConn)
+					reqBuf, err = pUtil.ReadBytesWaiting(ctx, h.Logger, clientConn)
 					if err != nil {
 						h.Logger.Debug("async: client closed connection after delivery/keep-alive", zap.Error(err))
 						errCh <- nil
@@ -499,7 +499,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					} else if handled {
 						// Served live — continue the keep-alive loop for the next
 						// request on this connection. Not reported as a miss.
-						reqBuf, err = pUtil.ReadBytes(ctx, h.Logger, clientConn)
+						reqBuf, err = pUtil.ReadBytesWaiting(ctx, h.Logger, clientConn)
 						if err != nil {
 							h.Logger.Debug("client closed connection after on-miss passthrough", zap.Error(err))
 							errCh <- nil
@@ -576,7 +576,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				return
 			}
 
-			reqBuf, err = pUtil.ReadBytes(ctx, h.Logger, clientConn)
+			reqBuf, err = pUtil.ReadBytesWaiting(ctx, h.Logger, clientConn)
 			if err != nil {
 				h.Logger.Debug("failed to read the request buffer from the client", zap.Error(err))
 				if ce := h.Logger.Check(zap.DebugLevel, "This was the last response from the server"); ce != nil {

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"sync"
 	"time"
 
 	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
@@ -60,8 +61,11 @@ func (p *Proxy) globalPassThrough(ctx context.Context, client, dest net.Conn) er
 		zap.String("Client IP Address", client.RemoteAddr().String()),
 	)
 
-	clientBuffChan := make(chan []byte)
-	destBuffChan := make(chan []byte)
+	// Each side's reads (at most pUtil.WaitReadSize each, the small read a
+	// side that waits holds) queue for the write to the other, which takes
+	// what has queued in one write (writeQueued).
+	clientBuffChan := make(chan []byte, passThroughQueue)
+	destBuffChan := make(chan []byte, passThroughQueue)
 	// One error channel a side: a side's EOF is forwarded to the other.
 	clientErrChan := make(chan error, 1)
 	destErrChan := make(chan error, 1)
@@ -81,6 +85,51 @@ func (p *Proxy) globalPassThrough(ctx context.Context, client, dest net.Conn) er
 	// clientSent and destSent: that side sent its EOF, and the other side was
 	// half-closed for it.
 	var clientSent, destSent bool
+	// toDest and toClient write a read, and those queued behind it, to the
+	// other side; end reports that the relay ends, and with what.
+	toDest := func(buffer []byte) (end bool, err error) {
+		if err := writeQueued(dest, buffer, clientBuffChan); err != nil {
+			if ctx.Err() != nil {
+				return true, ctx.Err()
+			}
+			if destSent {
+				logger.Debug("the destination, which had sent all it would, took no more of the client's bytes: it closed", zap.Error(err))
+				return true, nil
+			}
+			utils.LogError(logger, err, "failed to write request message to the destination server")
+			return true, fmt.Errorf("error writing to destination")
+		}
+		return false, nil
+	}
+	toClient := func(buffer []byte) (end bool, err error) {
+		if err := writeQueued(client, buffer, destBuffChan); err != nil {
+			if ctx.Err() != nil {
+				return true, ctx.Err()
+			}
+			if clientSent {
+				logger.Debug("the client, which had sent all it would, took no more of the destination's bytes: it closed", zap.Error(err))
+				return true, nil
+			}
+			utils.LogError(logger, err, "failed to write response message to the client")
+			return true, fmt.Errorf("error writing to client")
+		}
+		return false, nil
+	}
+	// A side's reads before its error queue ahead of it: they are written
+	// before the error is acted on, or its EOF's half-close would overtake
+	// its last bytes.
+	drain := func(queue chan []byte, write func([]byte) (bool, error)) (end bool, err error) {
+		for len(queue) > 0 {
+			buffer, ok := <-queue
+			if !ok {
+				break
+			}
+			if end, err := write(buffer); end {
+				return true, err
+			}
+		}
+		return false, nil
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -90,37 +139,22 @@ func (p *Proxy) globalPassThrough(ctx context.Context, client, dest net.Conn) er
 				clientBuffChan = nil
 				continue
 			}
-			// Write the request message to the destination
-			if _, err := dest.Write(buffer); err != nil {
-				if ctx.Err() != nil {
-					return ctx.Err()
-				}
-				if destSent {
-					logger.Debug("the destination, which had sent all it would, took no more of the client's bytes: it closed", zap.Error(err))
-					return nil
-				}
-				utils.LogError(logger, err, "failed to write request message to the destination server")
-				return fmt.Errorf("error writing to destination")
+			if end, err := toDest(buffer); end {
+				return err
 			}
 		case buffer, ok := <-destBuffChan:
 			if !ok { // the destination's reader ended; its error says why
 				destBuffChan = nil
 				continue
 			}
-			// Write the response message to the client
-			if _, err := client.Write(buffer); err != nil {
-				if ctx.Err() != nil {
-					return ctx.Err()
-				}
-				if clientSent {
-					logger.Debug("the client, which had sent all it would, took no more of the destination's bytes: it closed", zap.Error(err))
-					return nil
-				}
-				utils.LogError(logger, err, "failed to write response message to the client")
-				return fmt.Errorf("error writing to client")
+			if end, err := toClient(buffer); end {
+				return err
 			}
 		case err := <-clientErrChan:
 			clientErrChan = nil
+			if end, werr := drain(clientBuffChan, toDest); end {
+				return werr
+			}
 			if err != io.EOF {
 				return err
 			}
@@ -130,6 +164,9 @@ func (p *Proxy) globalPassThrough(ctx context.Context, client, dest net.Conn) er
 			clientSent = true
 		case err := <-destErrChan:
 			destErrChan = nil
+			if end, werr := drain(destBuffChan, toClient); end {
+				return werr
+			}
 			if err != io.EOF {
 				return err
 			}
@@ -139,6 +176,40 @@ func (p *Proxy) globalPassThrough(ctx context.Context, client, dest net.Conn) er
 			destSent = true
 		}
 	}
+}
+
+// passThroughQueue is how many reads of a side wait for globalPassThrough's
+// write to the other: as many as one write of pUtil.ReadChunkSize takes.
+const passThroughQueue = pUtil.ReadChunkSize / pUtil.WaitReadSize
+
+// gatherScratch holds the buffers writeQueued gathers queued reads into.
+var gatherScratch = sync.Pool{New: func() any { b := make([]byte, 0, pUtil.ReadChunkSize); return &b }}
+
+// writeQueued writes b to w with the reads already queued behind it on queue
+// gathered in, up to pUtil.ReadChunkSize: a side that streams is written a
+// few reads at a time, not one write a read, and what has arrived is written
+// at once, never held for more. queue has one taker, its relay, so a queued
+// read is taken without waiting.
+func writeQueued(w net.Conn, b []byte, queue chan []byte) error {
+	if len(queue) == 0 || len(b) >= pUtil.ReadChunkSize {
+		_, err := w.Write(b)
+		return err
+	}
+	sp := gatherScratch.Get().(*[]byte)
+	buf := append((*sp)[:0], b...)
+	for len(queue) > 0 && len(buf)+pUtil.WaitReadSize <= pUtil.ReadChunkSize {
+		more, ok := <-queue
+		if !ok {
+			break
+		}
+		buf = append(buf, more...)
+	}
+	_, err := w.Write(buf)
+	if cap(buf) == pUtil.ReadChunkSize { // a bigger read (a carry-over drain) grew it: not kept
+		*sp = buf[:0]
+		gatherScratch.Put(sp)
+	}
+	return err
 }
 
 // halfClose ends what c sends, its reading side left open (CloseWrite: a FIN

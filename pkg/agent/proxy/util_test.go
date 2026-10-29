@@ -10,6 +10,7 @@ import (
 	"sync"
 	"testing"
 
+	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"golang.org/x/sync/errgroup"
 )
@@ -282,5 +283,133 @@ func handshake(t *testing.T, conns ...*tls.Conn) {
 		if err := awaitEvent(t, errs, "a TLS handshake"); err != nil {
 			t.Fatalf("handshake: %v", err)
 		}
+	}
+}
+
+// streamingConn is a client that sends data and then its EOF, telling the size
+// of each Read's buffer.
+type streamingConn struct {
+	net.Conn
+	data  []byte
+	sizes chan int
+	// endWithLast: its last bytes come with its EOF, in one Read.
+	endWithLast bool
+	// rest, when set, holds every Read after the first until it is closed.
+	rest  chan struct{}
+	reads int
+}
+
+func (c *streamingConn) Read(b []byte) (int, error) {
+	c.sizes <- len(b)
+	if c.reads++; c.reads > 1 && c.rest != nil {
+		<-c.rest
+	}
+	n := copy(b, c.data)
+	c.data = c.data[n:]
+	if len(c.data) == 0 && c.endWithLast {
+		return n, io.EOF
+	}
+	if n == 0 {
+		return 0, io.EOF
+	}
+	return n, nil
+}
+
+// heldWriteConn is a destination that cannot half-close, keeps what is written to
+// it, tells the size of each write, and holds the first write until release
+// is closed.
+type heldWriteConn struct {
+	net.Conn
+	writes  chan int
+	release chan struct{}
+	mu      sync.Mutex
+	got     []byte
+}
+
+func (c *heldWriteConn) Write(b []byte) (int, error) {
+	c.writes <- len(b)
+	<-c.release
+	c.mu.Lock()
+	c.got = append(c.got, b...)
+	c.mu.Unlock()
+	return len(b), nil
+}
+
+// A pass-through's reads are small, for each can wait for hours and holds its
+// buffer while it does (pUtil.WaitReadSize, as the old loop read), and the
+// reads that queue while the other side is written are gathered into one
+// write of up to pUtil.ReadChunkSize, so a stream costs a write a few reads,
+// not one a read. The client's last reads, queued behind its EOF, are written
+// before its end ends the relay. No clock: the first write is held until the
+// client's reads have filled the queue and its reader waits on it.
+func TestGlobalPassThroughReadsSmallAndGathersWhatQueues(t *testing.T) {
+	const chunks = 80
+	app, cp := net.Pipe()
+	dp, srv := net.Pipe()
+	t.Cleanup(func() { _ = app.Close(); _ = srv.Close() })
+	want := counted(chunks*pUtil.WaitReadSize, 7)
+	client := &streamingConn{Conn: cp, data: want, sizes: make(chan int, 2*chunks)}
+	dest := &heldWriteConn{Conn: dp, writes: make(chan int, 2*chunks), release: make(chan struct{})}
+	_, ended := passThrough(t, client, dest)
+
+	first := awaitEvent(t, dest.writes, "the first write to the destination")
+	// The reads in the first write, the queue's, and the one its reader holds.
+	for i := 0; i < first/pUtil.WaitReadSize+passThroughQueue+1; i++ {
+		if got := awaitEvent(t, client.sizes, "a read of the client"); got != pUtil.WaitReadSize {
+			t.Fatalf("the client's read %d had a %d-byte buffer, want pUtil.WaitReadSize (%d)", i, got, pUtil.WaitReadSize)
+		}
+	}
+	close(dest.release)
+	if got := awaitEvent(t, dest.writes, "the second write to the destination"); got != pUtil.ReadChunkSize {
+		t.Fatalf("with %d reads queued, the next write took %d bytes, want them gathered into pUtil.ReadChunkSize (%d)",
+			passThroughQueue, got, pUtil.ReadChunkSize)
+	}
+	if err := awaitEvent(t, ended, "the pass-through's end on the client's EOF"); err != nil {
+		t.Fatalf("globalPassThrough = %v, want nil on the client's end", err)
+	}
+	dest.mu.Lock()
+	defer dest.mu.Unlock()
+	if !bytes.Equal(dest.got, want) {
+		t.Fatalf("the destination got %d bytes, want the client's %d in order", len(dest.got), len(want))
+	}
+	for len(client.sizes) > 0 {
+		if got := <-client.sizes; got != pUtil.WaitReadSize {
+			t.Fatalf("a read of the client had a %d-byte buffer, want pUtil.WaitReadSize (%d)", got, pUtil.WaitReadSize)
+		}
+	}
+}
+
+// A side's reads queued behind its EOF are written to the other side before
+// that EOF ends the relay: the relay takes a side's error from its own channel,
+// and one taken first would end the relay with them unwritten. The client's
+// first read is written alone, and that write is held until its last read,
+// which comes with its EOF, has been made, so its error waits beside its
+// queued reads. The relay then takes either first (a select): with the queued
+// reads dropped at the end, about one run in two fails. No clock.
+func TestGlobalPassThroughWritesASidesQueuedReadsBeforeItsEnd(t *testing.T) {
+	const chunks = 20 // fewer than passThroughQueue: all of them queue
+	app, cp := net.Pipe()
+	dp, srv := net.Pipe()
+	t.Cleanup(func() { _ = app.Close(); _ = srv.Close() })
+	want := counted(chunks*pUtil.WaitReadSize, 9)
+	client := &streamingConn{Conn: cp, data: want, sizes: make(chan int, 2*chunks), endWithLast: true, rest: make(chan struct{})}
+	dest := &heldWriteConn{Conn: dp, writes: make(chan int, 2*chunks), release: make(chan struct{})}
+	_, ended := passThrough(t, client, dest)
+
+	if got := awaitEvent(t, dest.writes, "the first write to the destination"); got != pUtil.WaitReadSize {
+		t.Fatalf("the first write took %d bytes, want the client's first read alone (%d)", got, pUtil.WaitReadSize)
+	}
+	close(client.rest)
+	for i := 0; i < chunks; i++ { // its last read comes with its EOF
+		awaitEvent(t, client.sizes, "a read of the client")
+	}
+	close(dest.release)
+	if err := awaitEvent(t, ended, "the pass-through's end on the client's EOF"); err != nil {
+		t.Fatalf("globalPassThrough = %v, want nil on the client's end", err)
+	}
+	dest.mu.Lock()
+	defer dest.mu.Unlock()
+	if !bytes.Equal(dest.got, want) {
+		t.Fatalf("the destination got %d bytes, want the client's %d in order: its last reads were dropped at its end", len(dest.got), len(want))
 	}
 }
