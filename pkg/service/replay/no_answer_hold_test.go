@@ -565,17 +565,56 @@ func agentServes(t *testing.T, m *models.Mock, session, strict, disk bool, ws []
 	stage(ws[test].Start, ws[test].End, false)
 	sched, req := models.NewWindowSchedule(ws), m.Spec.ReqTimestampMock
 	pushed := staged && models.IsStagedAtStaging(m) && sched.Released(req, ws[test].Start) && (test == 0 || !sched.Released(req, ws[test-1].Start))
+	served := pkg.NotServed
 	switch {
 	case holds(mm.GetFilteredMocks):
-		return pkg.ServedPerTest
+		served = pkg.ServedPerTest
 	case holds(mm.GetStartupMocks):
-		return pkg.ServedStartup
+		served = pkg.ServedStartup
 	case pushed, holds(mm.GetCarryOverMocks) && !carriedBefore:
-		return pkg.ServedReleased
+		served = pkg.ServedReleased
 	case holds(mm.GetUnFilteredMocks):
-		return pkg.ServedSession
+		served = pkg.ServedSession
 	}
-	return pkg.NotServed
+	reChecksOnlyNarrow(t, mm, m, holds)
+	return served
+}
+
+// reChecksOnlyNarrow requires the mock manager's re-checks of the open window
+// to serve m only where its staging filed it. The windowed read
+// (GetFilteredMocksInWindow) and the open test's ownership (OwnedByOpenTest)
+// re-check the staged per-test tree and read nothing else. A consume
+// (MarkMockAsUsed, whose out-of-window mark is consumedOutOfWindow) labels the
+// consumption and files m in no tier. So a re-check can narrow what the
+// staging built, never widen it, and the hold, built on the staging's serve
+// decision, keeps at least what any read serves the window.
+func reChecksOnlyNarrow(t *testing.T, mm *proxyPkg.MockManager, m *models.Mock, holds func(...func() ([]*models.Mock, error)) bool) {
+	t.Helper()
+	tiers := []struct {
+		name string
+		read func() ([]*models.Mock, error)
+	}{
+		{"per-test", mm.GetFilteredMocks},
+		{"startup", mm.GetStartupMocks},
+		{"carry-over", mm.GetCarryOverMocks},
+		{"session", mm.GetUnFilteredMocks},
+	}
+	staged := make([]bool, len(tiers))
+	for i, tier := range tiers {
+		staged[i] = holds(tier.read)
+	}
+	if holds(mm.GetFilteredMocksInWindow) && !staged[0] {
+		t.Errorf("the windowed read serves %s, which the staging did not file in the per-test tree", m.Name)
+	}
+	if mm.OwnedByOpenTest(m) && !staged[0] {
+		t.Errorf("the open test owns %s, which the staging did not file in the per-test tree", m.Name)
+	}
+	mm.MarkMockAsUsed(*m)
+	for i, tier := range tiers {
+		if holds(tier.read) && !staged[i] {
+			t.Errorf("consuming %s filed it in the %s tier, which the staging did not", m.Name, tier.name)
+		}
+	}
 }
 
 // stagedPastTheFilter is how the agent's mock manager serves m in the window
@@ -646,27 +685,106 @@ func heldByTheAgent(m *models.Mock, start, end time.Time, served ...pkg.WindowSe
 	return false
 }
 
-// The hold asks the agent's own decision (pkg.ServeInWindow) for every class
-// of mock, and holds what it serves the unanswered test's window as that
-// window's own: its per-test pool, what it releases first, and of what every
-// window is served, what was recorded in it or at no time. Each row runs one
-// mock through the agent's code paths (agentServes), its mock manager on a
-// windowed proxy (managerServes), the shared predicate and the hold
-// (holdNoAnswerMocks), and requires the same answer of all four. The mock
-// manager handed the mock past the filter, as the carry-over lookahead hands
-// it, must stage it as the shared predicate says for it (pkg.StageInWindow,
-// both strict flags set, placed whatever its lifetime): the manager keeps no
-// rule of its own.
-func TestHoldNoAnswerMocksHoldsWhatTheAgentServesTheTest(t *testing.T) {
-	registerNoAnswerCarryOver(t)
+// holdRow is a mock of one lifetime and kind class, and how the hold and the
+// agent serve it in test-7's window of the hold table's set (holdTableSet):
+// want of the shared predicate (pkg.ServeInWindow on the hold's window), disk
+// and resident of the real agent's two residencies (agentServes), held of the
+// hold.
+type holdRow struct {
+	name     string
+	mock     *models.Mock
+	session  bool
+	strict   bool
+	want     pkg.WindowServe
+	disk     pkg.WindowServe
+	resident pkg.WindowServe
+	held     bool
+}
+
+// holdTableSet is the hold table's set: eight tests, test-i recorded over
+// [10i, 10i+2] seconds past base, the hour before now; at places a time there.
+func holdTableSet() (cases []*models.TestCase, at func(s float64) time.Time) {
 	base := time.Now().Add(-time.Hour).Truncate(time.Second)
-	at := func(s float64) time.Time { return base.Add(time.Duration(s * float64(time.Second))) }
-	var cases []*models.TestCase
+	at = func(s float64) time.Time { return base.Add(time.Duration(s * float64(time.Second))) }
 	for i := 1; i <= 8; i++ {
 		tc := &models.TestCase{Name: fmt.Sprintf("test-%d", i), Kind: models.HTTP}
 		tc.HTTPReq.Timestamp, tc.HTTPResp.Timestamp = at(float64(10*i)), at(float64(10*i+2))
 		cases = append(cases, tc)
 	}
+	return cases, at
+}
+
+// checkHoldRow runs tc's mock through the real agent on both residencies, the
+// shared predicate, the mock manager handed it past the filter, and the hold
+// for test-7, and requires each to serve or hold it as tc says, and the hold
+// to equal the union of what the agent serves test-7's window as its own.
+func checkHoldRow(t *testing.T, cases []*models.TestCase, tc holdRow) {
+	t.Helper()
+	tc.mock.Name = "mock-under-test"
+	tc.mock.DeriveLifetime()
+	ws := recordedTestWindows(cases)
+	sched := models.NewWindowSchedule(ws)
+	const test = 6
+	w := ws[test]
+	if w.TestCase != "test-7" {
+		t.Fatalf("precondition: window %d is %s's, not test-7's", test, w.TestCase)
+	}
+	disk := agentServes(t, tc.mock.DeepCopy(), tc.session, tc.strict, onDisk, ws, test)
+	res := agentServes(t, tc.mock.DeepCopy(), tc.session, tc.strict, resident, ws, test)
+	if disk != tc.disk || res != tc.resident {
+		t.Errorf("the agent serves the mock in test-7's window as %d on disk and %d resident, want %d and %d", disk, res, tc.disk, tc.resident)
+	}
+	sw := serveWindowOf(sched, w, tc.strict, false)
+	if got := pkg.ServeInWindow(tc.mock, tc.session, sw); got != tc.want {
+		t.Errorf("pkg.ServeInWindow on the hold's window: %d, want %d", got, tc.want)
+	}
+	if !tc.session {
+		strict, strictPrev := sw, serveWindowOf(sched, ws[test-1], tc.strict, false)
+		strict.StrictPerCall, strict.StrictWindow = true, true
+		strictPrev.StrictPerCall, strictPrev.StrictWindow = true, true
+		want, _ := pkg.StageInWindow(zap.NewNop(), tc.mock, strict)
+		if got := stagedPastTheFilter(t, tc.mock, sched, strict, strictPrev); got != want {
+			t.Errorf("the mock manager, handed the mock past the filter, serves it as %d; pkg.StageInWindow, strict: %d", got, want)
+		}
+	}
+	store := walkedSet{prMockDB: &prMockDB{}}
+	if tc.session {
+		store.session = []*models.Mock{tc.mock}
+	} else {
+		store.perTest = []*models.Mock{tc.mock}
+	}
+	r := &Replayer{logger: zap.NewNop(), mockDB: store, config: &config.Config{}}
+	r.config.Test.StrictMockWindow = tc.strict
+	keep := map[string]models.MockState{}
+	held, err := r.holdNoAnswerMocks(context.Background(), "test-set-0", []string{"test-7"}, cases,
+		newCarryOverAttribution(cases), false, nil, nil, keep)
+	if err != nil {
+		t.Fatalf("hold: %v", err)
+	}
+	_, kept := keep[tc.mock.Name]
+	if kept != tc.held {
+		t.Errorf("the hold for test-7 keeps the mock: %v, want %v (held %+v)", kept, tc.held, held)
+	}
+	if union := heldByTheAgent(tc.mock, w.Start, w.End, disk, res); kept != union {
+		t.Errorf("the hold for test-7 keeps the mock: %v; what the agent serves it on disk (%d) and resident (%d) says %v", kept, disk, res, union)
+	}
+}
+
+// The hold asks the agent's own decision (pkg.ServeInWindow) for every class
+// of mock, and holds what it serves the unanswered test's window as that
+// window's own: its per-test pool, what it releases first, and of what every
+// window is served, what was recorded in it or at no time. Each row runs one
+// mock through the real agent on both its residencies (agentServes: on disk
+// and resident), the shared predicate and the hold (holdNoAnswerMocks), and
+// requires the hold to equal the union of what the two residencies serve the
+// window as its own; the mock manager's re-checks of the window serve nothing
+// past its staging (reChecksOnlyNarrow). The mock manager handed the mock past
+// the filter, as the carry-over lookahead hands it, must stage it as the
+// shared predicate says for it (pkg.StageInWindow, both strict flags set,
+// placed whatever its lifetime): the manager keeps no rule of its own.
+func TestHoldNoAnswerMocksHoldsWhatTheAgentServesTheTest(t *testing.T) {
+	registerNoAnswerCarryOver(t)
+	cases, at := holdTableSet()
 	grpc := func(op string, s float64) *models.Mock { return noAnswerHoldMock(models.GRPC_EXPORT, op, at(s)) }
 	http := func(op string, s float64) *models.Mock { return noAnswerHoldMock(models.HTTP, op, at(s)) }
 	answered := func(m *models.Mock, s float64) *models.Mock {
@@ -696,16 +814,7 @@ func TestHoldNoAnswerMocksHoldsWhatTheAgentServesTheTest(t *testing.T) {
 		perTest    = false
 		session    = true
 	)
-	for _, tc := range []struct {
-		name     string
-		mock     *models.Mock
-		session  bool
-		strict   bool
-		want     pkg.WindowServe
-		disk     pkg.WindowServe
-		resident pkg.WindowServe
-		held     bool
-	}{
+	for _, tc := range []holdRow{
 		{"placed in the window", grpc("Window", 71), perTest, strictMode, pkg.ServedPerTest, pkg.ServedPerTest, pkg.ServedPerTest, true},
 		{"placed at the window's start exactly", grpc("AtStart", 70), perTest, strictMode, pkg.ServedPerTest, pkg.ServedPerTest, pkg.ServedPerTest, true},
 		{"placed at the window's end exactly", grpc("AtEnd", 72), perTest, strictMode, pkg.ServedPerTest, pkg.ServedPerTest, pkg.ServedPerTest, true},
@@ -751,56 +860,7 @@ func TestHoldNoAnswerMocksHoldsWhatTheAgentServesTheTest(t *testing.T) {
 		{"a session-pool mock with a response time outside the window and no request time", stamped(http("Shared", 0), time.Time{}, at(65)), session, strictMode, pkg.ServedSession, pkg.ServedSession, pkg.ServedSession, true},
 		{"a session-lifetime mock answered before asked (the session short-circuit comes first)", stamped(http("Shared", 0), at(71), at(70.9)), session, strictMode, pkg.ServedSession, pkg.ServedSession, pkg.ServedSession, true},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			tc.mock.Name = "mock-under-test"
-			tc.mock.DeriveLifetime()
-			ws := recordedTestWindows(cases)
-			sched := models.NewWindowSchedule(ws)
-			const test = 6
-			w := ws[test]
-			if w.TestCase != "test-7" {
-				t.Fatalf("precondition: window %d is %s's, not test-7's", test, w.TestCase)
-			}
-			disk := agentServes(t, tc.mock.DeepCopy(), tc.session, tc.strict, onDisk, ws, test)
-			res := agentServes(t, tc.mock.DeepCopy(), tc.session, tc.strict, resident, ws, test)
-			if disk != tc.disk || res != tc.resident {
-				t.Errorf("the agent serves the mock in test-7's window as %d on disk and %d resident, want %d and %d", disk, res, tc.disk, tc.resident)
-			}
-			sw := serveWindowOf(sched, w, tc.strict, false)
-			if got := pkg.ServeInWindow(tc.mock, tc.session, sw); got != tc.want {
-				t.Errorf("pkg.ServeInWindow on the hold's window: %d, want %d", got, tc.want)
-			}
-			if !tc.session {
-				strict, strictPrev := sw, serveWindowOf(sched, ws[test-1], tc.strict, false)
-				strict.StrictPerCall, strict.StrictWindow = true, true
-				strictPrev.StrictPerCall, strictPrev.StrictWindow = true, true
-				want, _ := pkg.StageInWindow(zap.NewNop(), tc.mock, strict)
-				if got := stagedPastTheFilter(t, tc.mock, sched, strict, strictPrev); got != want {
-					t.Errorf("the mock manager, handed the mock past the filter, serves it as %d; pkg.StageInWindow, strict: %d", got, want)
-				}
-			}
-			store := walkedSet{prMockDB: &prMockDB{}}
-			if tc.session {
-				store.session = []*models.Mock{tc.mock}
-			} else {
-				store.perTest = []*models.Mock{tc.mock}
-			}
-			r := &Replayer{logger: zap.NewNop(), mockDB: store, config: &config.Config{}}
-			r.config.Test.StrictMockWindow = tc.strict
-			keep := map[string]models.MockState{}
-			held, err := r.holdNoAnswerMocks(context.Background(), "test-set-0", []string{"test-7"}, cases,
-				newCarryOverAttribution(cases), false, nil, nil, keep)
-			if err != nil {
-				t.Fatalf("hold: %v", err)
-			}
-			_, kept := keep[tc.mock.Name]
-			if kept != tc.held {
-				t.Errorf("the hold for test-7 keeps the mock: %v, want %v (held %+v)", kept, tc.held, held)
-			}
-			if union := heldByTheAgent(tc.mock, w.Start, w.End, disk, res); kept != union {
-				t.Errorf("the hold for test-7 keeps the mock: %v; what the agent serves it on disk (%d) and resident (%d) says %v", kept, disk, res, union)
-			}
-		})
+		t.Run(tc.name, func(t *testing.T) { checkHoldRow(t, cases, tc) })
 	}
 }
 
