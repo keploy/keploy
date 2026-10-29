@@ -55,6 +55,27 @@ func xnuTCPInfo(fd int) (rcvNxt uint32, state uint8, err error) {
 	return binary.LittleEndian.Uint32(buf[xnuTCPInfoOffRcvNxt:]), buf[xnuTCPInfoOffState], nil
 }
 
+// getsockopt reads a socket option into a caller's buffer. It stays a raw
+// call only for xnuTCPInfo: x/sys/unix wraps getsockopt for ints, strings
+// and its own structs (TCP_CONNECTION_INFO among them), but not for XNU's
+// private struct tcp_info, so there is no wrapper to read it into a buffer.
+// Everything else (SO_NREAD in readUnread) goes through x/sys's wrappers.
+func getsockopt(fd, level, name int, val unsafe.Pointer, vallen *uint32) error {
+	_, _, errno := unix.Syscall6(
+		unix.SYS_GETSOCKOPT,
+		uintptr(fd),
+		uintptr(level),
+		uintptr(name),
+		uintptr(val),
+		uintptr(unsafe.Pointer(vallen)),
+		0,
+	)
+	if errno != 0 {
+		return errno
+	}
+	return nil
+}
+
 // proveXNUCounts proves, once, on a loopback connection of its own, that this
 // macOS gives the counts the wait reads in the layout keploy reads them: the
 // table finds both ends, they began from one sequence number, the writer's
