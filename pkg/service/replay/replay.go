@@ -6506,7 +6506,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// branch (file exists), leaving autoreplay permanently without
 	// the mappings the feature relies on. UpdateTestMapping=true
 	// still creates a file that maps no mock when some test passed and
-	// each passing test consumed nothing (each gets an empty entry);
+	// each passing test consumed nothing of its own in a run that served
+	// mocks (each gets an empty entry);
 	// it creates none from a run where no test passed. It maps no
 	// mock, so each test is served its recorded window as with no
 	// file, and every later flag run merges into it; only a later
@@ -6544,10 +6545,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// (enterprise's auto-replay, for one).
 	passing := passingTests(testCaseResults, consumptionUnread, obsoleteShaped, passedMissShaped(testCaseResults, leftRecordedUnconsumed))
 	mappingDoc, keptRecorded := passingEntriesOf(actualTestMockMappings, passing)
-	// Read only when instrumented: otherwise the agent was never asked what a
-	// test consumed, and an empty list would claim what nobody read.
+	// Read only when instrumented and the run served mocks: otherwise the
+	// agent was never asked what a test consumed, or (--mocking=false, a
+	// global passthrough) every call went to the real dependency and nothing
+	// was served to consume, and an empty list would claim what nobody read.
 	var consumedNothing map[string]struct{}
-	if r.instrument {
+	if r.instrument && r.mocksDependencies() {
 		consumedNothing = carryAttr.consumedNothing()
 	}
 	addConsumedNothingEntries(mappingDoc, testCaseResults, passing, consumedNothing)
@@ -6572,6 +6575,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// heldForNoEntry: the hold is for a passing test a new file would give no
 	// entry (unentered), whom the warning names.
 	heldForNoEntry := false
+	// holdNextStep: what the user can do about the hold, when there is a step.
+	holdNextStep := ""
 	// Whether the run had anything to write at all, before the verdicts took
 	// their part: what the holds below are about. The empty entries the
 	// passing tests got do not count: a default-flag run that mapped no mock
@@ -6649,7 +6654,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// (see above): the set keeps its whole recording until a run that
 		// can give each passing test one.
 		if exists, existsErr := mappingExists(); existsErr != nil || !exists {
-			holdMappings = "keploy could not tell what a passing test consumed (its mocks fell in no test's window or in another test's, or were not read), so a new file would give it no entry, and a replay that skips a test with no entry would skip it"
+			holdMappings, holdNextStep = noEntryHold(r.instrument, r.mocksDependencies())
 			heldForNoEntry = true
 		}
 	}
@@ -6681,6 +6686,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		} else if !r.config.Test.UpdateTestMapping {
 			if exists, existsErr := mappingExists(); existsErr == nil && exists {
 				logHold = r.logger.Debug
+			} else if heldForNoEntry {
+				// Nothing asked for a write, and nothing is lost: the set
+				// replays from each test's recorded window, as with no file.
+				logHold = r.logger.Info
 			}
 		}
 		fields := []zap.Field{zap.String("testSetID", testSetID), zap.String("reason", holdMappings)}
@@ -6689,6 +6698,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 		if n := len(unentered); heldForNoEntry {
 			fields = append(fields, zap.Int("passingWithNoEntryCount", n), zap.Strings("passingTestsWithNoEntry", unentered[:min(n, 20)]))
+		}
+		if holdNextStep != "" {
+			fields = append(fields, zap.String("next_step", holdNextStep))
 		}
 		logHold("not writing mappings.yaml", fields...)
 	} else if !shouldWriteMappings && r.mappingDB != nil && len(mappingDoc.Startup) > 0 {

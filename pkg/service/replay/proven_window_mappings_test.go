@@ -9,6 +9,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
 )
 
@@ -160,8 +161,8 @@ func TestRunTestSetUnderTheProvenSwitchCreatesNoMappings(t *testing.T) {
 				} else {
 					t.Setenv(provenswitch.Env, "")
 				}
-				core, logs := observer.New(zap.WarnLevel)
-				h := newPartialRunHarness(t, 2, 0)
+				core, logs := observer.New(zap.InfoLevel)
+				h := newMappingRunHarness(t, 2)
 				pinWindows(h)
 				h.replayer.logger = zap.New(core)
 				h.replayer.config.Test.UpdateTestMapping = tc.update
@@ -203,6 +204,11 @@ func TestRunTestSetUnderTheProvenSwitchCreatesNoMappings(t *testing.T) {
 				if got := fmt.Sprint(held[0].ContextMap()["passingTestsWithNoEntry"]); got != tc.offHeldFor {
 					t.Fatalf("the warning names passing tests with no entry %s; want %s", got, tc.offHeldFor)
 				}
+				// A warning with --update-test-mapping; at Info under the
+				// default flag, which asked for no write.
+				if want := map[bool]zapcore.Level{true: zap.WarnLevel, false: zap.InfoLevel}[tc.update]; held[0].Level != want {
+					t.Fatalf("the hold is logged at %s; want %s", held[0].Level, want)
+				}
 			})
 		}
 	}
@@ -214,7 +220,7 @@ func TestRunTestSetUnderTheProvenSwitchCreatesNoMappings(t *testing.T) {
 // it; test-1 consumed a mock more than it owns).
 func TestRunTestSetUnderTheProvenSwitchARecordedMappingStaysAsRecordWroteIt(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
-	h := newPartialRunHarness(t, 2, 0)
+	h := newMappingRunHarness(t, 2)
 	pinWindows(h)
 	h.replayer.config.Test.UpdateTestMapping = true
 	h.mocks.filtered = []*models.Mock{mongoMockAt("mock-1", 1010), mongoMockAt("mock-2", 2010), mongoMockAt("mock-3", 1020)}

@@ -16,6 +16,7 @@ import (
 	"go.keploy.io/server/v3/pkg/platform/yaml/mapdb"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
 )
 
@@ -34,6 +35,18 @@ func mongoAt(name string, ms int) models.MockState {
 		ReqTimestampMock: models.FormatMockTimestamp(attrAt(ms)),
 		ResTimestampMock: models.FormatMockTimestamp(attrAt(ms + 1)),
 	}
+}
+
+// newMappingRunHarness is newPartialRunHarness for a run that answers the
+// application's dependency calls from the recording, as keploy test does by
+// default (--mocking): only such a run has served mocks for a test to consume,
+// and reads what each consumed as its mapping. (The harness's config leaves
+// Mocking off, a run that sends every call to the real dependency.)
+func newMappingRunHarness(t *testing.T, n int) *prRun {
+	t.Helper()
+	h := newPartialRunHarness(t, n, 0)
+	h.replayer.config.Test.Mocking = true
+	return h
 }
 
 func mongoEntries(names ...string) []models.MockEntry {
@@ -133,7 +146,7 @@ func TestRunTestSetKeepsAFailedTestsRecordedMapping(t *testing.T) {
 		{name: "--strict-failure", strictFailure: true, want: models.TestStatusFailed},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			h := newPartialRunHarness(t, 2, 0)
+			h := newMappingRunHarness(t, 2)
 			pinWindows(h)
 			// What enterprise's sandbox auto-replay sets (cmd/enterprise/cli/auto_replay.go).
 			h.replayer.config.Test.UpdateTestMapping = true
@@ -336,7 +349,7 @@ func TestRunTestSetOnlyAPassingTestsConsumptionIsItsMapping(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			setSwitch(t, tc.proven)
-			h := newPartialRunHarness(t, 2, 0)
+			h := newMappingRunHarness(t, 2)
 			pinWindows(h)
 			h.replayer.config.Test.UpdateTestMapping = tc.updateMapping
 			h.replayer.config.Test.StrictFailure = tc.strictFailure
@@ -425,7 +438,7 @@ func TestRunTestSetMapsByTheVerdictTheHookLeft(t *testing.T) {
 		{name: "a test the hook quarantined is not a pass", loopSaid: models.TestStatusPassed, hookSets: models.TestStatusIgnored, want: []string{"mock-a", "mock-b"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			h := newPartialRunHarness(t, 2, 0)
+			h := newMappingRunHarness(t, 2)
 			pinWindows(h)
 			h.replayer.config.Test.UpdateTestMapping = true
 			db := mappingFile(t, h, map[string][]models.MockEntry{
@@ -473,7 +486,7 @@ func TestRunTestSetMapsByTheVerdictTheHookLeft(t *testing.T) {
 // A failed test's entry is the recorded one field for field (name, kind and
 // timestamps), not a list of the same names rebuilt from what it consumed.
 func TestRunTestSetLeavesAFailedTestsEntryAsRecorded(t *testing.T) {
-	h := newPartialRunHarness(t, 2, 0)
+	h := newMappingRunHarness(t, 2)
 	pinWindows(h)
 	h.replayer.config.Test.UpdateTestMapping = true
 	h.replayer.config.Test.StrictFailure = true
@@ -517,7 +530,7 @@ func TestRunTestSetKeepsAFailedStreamedTestsRecordedMapping(t *testing.T) {
 			name = "the hook passed it"
 		}
 		t.Run(name, func(t *testing.T) {
-			h := newPartialRunHarness(t, 2, 0)
+			h := newMappingRunHarness(t, 2)
 			pinWindows(h)
 			h.streaming("test-2")
 			h.replayer.config.Test.UpdateTestMapping = true
@@ -577,7 +590,7 @@ func TestRunTestSetKeepsTheMappingOfAStreamedPassThatSwallowedAMiss(t *testing.T
 			name = "every call answered: the control"
 		}
 		t.Run(name, func(t *testing.T) {
-			h := newPartialRunHarness(t, 2, 0)
+			h := newMappingRunHarness(t, 2)
 			pinWindows(h)
 			h.streaming("test-2")
 			h.replayer.config.Test.UpdateTestMapping = true
@@ -648,7 +661,7 @@ func TestRunTestSetKeepsTheMappingOfAStreamedPassThatSwallowedAMiss(t *testing.T
 // recorded entry too.
 func TestRunTestSetUnderTheProvenSwitchAnUnreadMissKeepsTheRecordedMapping(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
-	h := newPartialRunHarness(t, 2, 0)
+	h := newMappingRunHarness(t, 2)
 	pinWindows(h)
 	h.replayer.config.Test.UpdateTestMapping = true
 	db := mappingFile(t, h, map[string][]models.MockEntry{
@@ -744,7 +757,7 @@ func TestRunTestSetKeepsTheMappingOfATestWhoseConsumptionWasNotRead(t *testing.T
 		for _, on := range []bool{false, true} {
 			t.Run(tc.name+"/"+switchName(on), func(t *testing.T) {
 				setSwitch(t, on)
-				h := newPartialRunHarness(t, 2, 0)
+				h := newMappingRunHarness(t, 2)
 				pinWindows(h)
 				if tc.streamed {
 					h.streaming(tc.unread)
@@ -929,7 +942,7 @@ func TestRunTestSetCreatesNoFileThatMapsNoTest(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			core, logs := observer.New(zap.WarnLevel)
-			h := newPartialRunHarness(t, 2, 0)
+			h := newMappingRunHarness(t, 2)
 			pinWindows(h)
 			h.replayer.logger = zap.New(core)
 			h.replayer.config.Test.UpdateTestMapping = tc.updateMapping
@@ -1047,7 +1060,7 @@ func (h retryHooks) SimulateRequest(ctx context.Context, tc *models.TestCase, te
 // not its mapping. test-2 fails the first cycle (which is what makes the
 // passing tests run again); test-3 passes every cycle and is the control.
 func TestRunTestSetRetryPassingKeepsTheMappingOfATestThatFailedALaterCycle(t *testing.T) {
-	h := newPartialRunHarness(t, 3, 0)
+	h := newMappingRunHarness(t, 3)
 	pinWindows(h)
 	h.replayer.config.RetryPassing = true
 	h.replayer.config.Test.UpdateTestMapping = true
@@ -1136,9 +1149,12 @@ func entriesOnDisk(t *testing.T, db *mapdb.MappingDb) map[string][]string {
 // file the run writes, so that a test with no entry is only one the run gave
 // no verdict on (a replay that downloads only the mapped mocks skips those).
 // Before, it got no entry, which kept its recorded one or, with none, left it
-// unmapped for good. A failed test, a test whose consumed mocks all went to
-// other windows, and every test of a run that read no consumption (not
-// instrumented) get no new entry.
+// unmapped for good. A failed test, a test whose consumed mocks all went, by
+// their recorded time, to other windows (unflagged mocks), and every test of
+// a run that read no consumption (not instrumented) or served no mock
+// (--mocking=false, a global passthrough) get no new entry. A test that
+// consumed only another test's flagged mock consumed nothing of its own and
+// gets one; the owner's entry lists the mock.
 //
 // --update-test-mapping (auto-replay) creates the file for those entries
 // though a test not counted as passing consumed mocks and no passing test
@@ -1156,6 +1172,8 @@ func TestRunTestSetGivesAPassingTestThatConsumedNothingAnEmptyEntry(t *testing.T
 		wrongBody       map[string]bool
 		test1None       bool // test-1 consumed nothing; else mock-a
 		test2Consumed   []models.MockState
+		// ignored names the tests the run skips.
+		ignored []string
 		// want is each test's entry after the run; nil: no file.
 		want map[string][]string
 	}{
@@ -1197,6 +1215,24 @@ func TestRunTestSetGivesAPassingTestThatConsumedNothingAnEmptyEntry(t *testing.T
 			want:          map[string][]string{"test-1": {"mock-a"}, "test-2": {"mock-old-c"}},
 		},
 		{
+			// test-2 consumed only test-1's flagged mock (a carry-over), which
+			// is test-1's by the release rule: test-1's entry lists it, and
+			// test-2, which consumed nothing of its own, gets an empty entry
+			// in place of its recorded one, as a test that consumed nothing
+			// does.
+			name: "--update-test-mapping, file exists, test-1 consumed nothing, test-2's drain caught only test-1's flagged mock", updateMapping: true, fileExists: true,
+			test1None: true, test2Consumed: []models.MockState{carriedAt("mock-f1", 1050)},
+			want: map[string][]string{"test-1": {"mock-f1"}, "test-2": {}},
+		},
+		{
+			// The same with test-1 ignored: the run maps no entry for it, so
+			// its recorded one stays, and the flagged mock is in no entry this
+			// run writes.
+			name: "--update-test-mapping, file exists, test-1 ignored, test-2's drain caught only test-1's flagged mock", updateMapping: true, fileExists: true,
+			ignored: []string{"test-1"}, test2Consumed: []models.MockState{carriedAt("mock-f1", 1050)},
+			want: map[string][]string{"test-1": {"mock-a", "mock-b"}, "test-2": {}},
+		},
+		{
 			name: "not instrumented: no consumption read, the file stays", updateMapping: true, fileExists: true, notInstrumented: true,
 			want: map[string][]string{"test-1": {"mock-a", "mock-b"}, "test-2": {"mock-old-c"}},
 		},
@@ -1206,10 +1242,13 @@ func TestRunTestSetGivesAPassingTestThatConsumedNothingAnEmptyEntry(t *testing.T
 			if n == 0 {
 				n = 2
 			}
-			h := newPartialRunHarness(t, n, 0)
+			h := newMappingRunHarness(t, n)
 			pinWindows(h)
 			h.replayer.config.Test.UpdateTestMapping = tc.updateMapping
 			h.replayer.instrument = !tc.notInstrumented
+			if tc.ignored != nil {
+				h.replayer.config.Test.IgnoredTests = map[string][]string{"test-set-0": tc.ignored}
+			}
 			db := mappingFile(t, h, nil)
 			if tc.fileExists {
 				if err := db.Insert(context.Background(), &models.Mapping{
@@ -1238,6 +1277,11 @@ func TestRunTestSetGivesAPassingTestThatConsumedNothingAnEmptyEntry(t *testing.T
 					t.Fatalf("precondition: %s is %s, want %s", test, statusOf(t, h, test), want)
 				}
 			}
+			for _, test := range tc.ignored {
+				if got, want := statusOf(t, h, test), models.TestStatusIgnored; got != want {
+					t.Fatalf("precondition: %s is %s, want %s", test, got, want)
+				}
+			}
 			if got := entriesOnDisk(t, db); !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("mappings.yaml holds %v; want %v (nil: no file)", got, tc.want)
 			}
@@ -1249,8 +1293,9 @@ func TestRunTestSetGivesAPassingTestThatConsumedNothingAnEmptyEntry(t *testing.T
 // a passing test with no entry in it is "no verdict" to a replay that skips a
 // test with no entry, which would skip a test that passed, run after run. A
 // passing test gets no entry when keploy could not tell what it consumed: each
-// mock it consumed fell in no test's window, or in another test's, or the run
-// read no consumption. With no file the set keeps its whole recording. Under
+// unflagged mock it consumed fell in no test's window, or in another test's,
+// or the run read no consumption, or served none. With no file the set keeps
+// its whole recording. Under
 // either flag; the default flag's own hold, where a new file would map no mock,
 // comes first, with its reason as before. (A file that exists is written as
 // before: TestRunTestSetGivesAPassingTestThatConsumedNothingAnEmptyEntry.)
@@ -1293,6 +1338,15 @@ func TestRunTestSetCreatesNoFileThatLeavesAPassingTestWithNoEntry(t *testing.T) 
 		// wantNotCounted is the warning's tests not counted as passing; empty:
 		// the warning does not name any.
 		wantNotCounted string
+		// wantNextStep is in the next_step of a warning that names passing
+		// tests with no entry (every such warning has one).
+		wantNextStep string
+		// wantInfo: the hold is logged at Info, not Warn: under the default
+		// flag nothing asked for a write, and a hold for a passing test with
+		// no entry loses nothing (the set replays from its recorded windows).
+		wantInfo bool
+		// mockingOff: --mocking=false.
+		mockingOff bool
 		// wantQuiet is the reason of a hold logged at Debug, with no warning.
 		wantQuiet string
 	}{
@@ -1300,13 +1354,13 @@ func TestRunTestSetCreatesNoFileThatLeavesAPassingTestWithNoEntry(t *testing.T) 
 			name: "--update-test-mapping, test-1 failed after consuming a mock, test-2 passed consuming only a mock of no window", updateMapping: true,
 			wrongBody: map[string]bool{"test-1": true},
 			consumed:  map[string][]models.MockState{"test-1": {mongoAt("mock-a", 1010)}, "test-2": {mongoAt("mock-x", 1500)}},
-			wantNamed: "[test-2]", wantReason: "could not tell what a passing test consumed", wantNotCounted: "[test-1]",
+			wantNamed: "[test-2]", wantReason: "a new file would leave it with no entry", wantNotCounted: "[test-1]",
 		},
 		{
 			name: "--update-test-mapping, test-1 failed after consuming a mock, test-2 passed consuming only a mock of test-1's window", updateMapping: true,
 			wrongBody: map[string]bool{"test-1": true},
 			consumed:  map[string][]models.MockState{"test-1": {mongoAt("mock-a", 1010)}, "test-2": {mongoAt("mock-y", 1050)}},
-			wantNamed: "[test-2]", wantReason: "could not tell what a passing test consumed", wantNotCounted: "[test-1]",
+			wantNamed: "[test-2]", wantReason: "a new file would leave it with no entry", wantNotCounted: "[test-1]",
 		},
 		{
 			// test-2's empty entry maps no mock: test-1 is named as not
@@ -1314,7 +1368,7 @@ func TestRunTestSetCreatesNoFileThatLeavesAPassingTestWithNoEntry(t *testing.T) 
 			name: "--update-test-mapping, test-1 failed after consuming a mock, test-2 consumed nothing, test-3 only a mock of no window", tests: 3, updateMapping: true,
 			wrongBody: map[string]bool{"test-1": true},
 			consumed:  map[string][]models.MockState{"test-1": {mongoAt("mock-a", 1010)}, "test-3": {mongoAt("mock-x", 2500)}},
-			wantNamed: "[test-3]", wantReason: "could not tell what a passing test consumed", wantNotCounted: "[test-1]",
+			wantNamed: "[test-3]", wantReason: "a new file would leave it with no entry", wantNotCounted: "[test-1]",
 		},
 		{
 			// test-2's entry maps mock-c, so the warning does not name test-1
@@ -1325,23 +1379,53 @@ func TestRunTestSetCreatesNoFileThatLeavesAPassingTestWithNoEntry(t *testing.T) 
 			consumed: map[string][]models.MockState{
 				"test-1": {mongoAt("mock-a", 1010)}, "test-2": {mongoAt("mock-c", 2010)}, "test-3": {mongoAt("mock-x", 2500)},
 			},
-			wantNamed: "[test-3]", wantReason: "could not tell what a passing test consumed",
+			wantNamed: "[test-3]", wantReason: "a new file would leave it with no entry",
 		},
 		{
 			name: "--update-test-mapping, every test passed, each consuming only a mock of no window", updateMapping: true,
 			consumed:  map[string][]models.MockState{"test-1": {mongoAt("mock-x", 1500)}, "test-2": {mongoAt("mock-z", 2500)}},
-			wantNamed: "[test-1 test-2]", wantReason: "could not tell what a passing test consumed",
+			wantNamed: "[test-1 test-2]", wantReason: "a new file would leave it with no entry",
 		},
 		{
 			name: "--update-test-mapping, not instrumented: no consumption read", updateMapping: true, notInstrumented: true,
 			consumed:  map[string][]models.MockState{"test-1": {mongoAt("mock-a", 1010)}},
-			wantNamed: "[test-1 test-2]", wantReason: "could not tell what a passing test consumed",
+			wantNamed: "[test-1 test-2]", wantReason: "keploy did not run the application, so it read nothing a passing test consumed",
+			wantNextStep: "the application's command (-c)",
+		},
+		{
+			// The first cause that applies is named: with no application run,
+			// nothing was read, whatever the mocking.
+			name: "--update-test-mapping, not instrumented and --mocking=false", updateMapping: true, notInstrumented: true, mockingOff: true,
+			wantNamed: "[test-1 test-2]", wantReason: "keploy did not run the application, so it read nothing a passing test consumed",
+			wantNextStep: "the application's command (-c)",
 		},
 		{
 			name: "default flag, both passed, test-2 consumed only a mock of no window", consumed: map[string][]models.MockState{
 				"test-1": {mongoAt("mock-a", 1010)}, "test-2": {mongoAt("mock-x", 1500)},
 			},
-			wantNamed: "[test-2]", wantReason: "could not tell what a passing test consumed",
+			wantNamed: "[test-2]", wantReason: "fell, by its recorded time, in no test's window or in another test's",
+			wantNextStep: "nothing to do", wantInfo: true,
+		},
+		// A flagged mock (a carry-over: a pushed message, a send the app
+		// published early or late) is the test's whose window it was recorded
+		// in, by the release rule, whichever test's drain caught it: that
+		// test's entry lists it, as it always has. The test that caught it
+		// consumed nothing of its own and gets an empty entry, so the file
+		// main creates is created, with no warning.
+		{
+			name:     "default flag, both passed, test-1 consumed nothing, test-2's drain caught only test-1's flagged mock",
+			consumed: map[string][]models.MockState{"test-2": {carriedAt("mock-f1", 1050)}},
+			wantFile: map[string][]string{"test-1": {"mock-f1"}, "test-2": {}},
+		},
+		{
+			name:     "default flag, both passed, test-1's drain caught only test-2's flagged mock, test-2 consumed nothing",
+			consumed: map[string][]models.MockState{"test-1": {carriedAt("mock-f2", 2050)}},
+			wantFile: map[string][]string{"test-1": {}, "test-2": {"mock-f2"}},
+		},
+		{
+			name: "--update-test-mapping, test-1 consumed mock-a, test-2's drain caught only test-1's flagged mock", updateMapping: true,
+			consumed: map[string][]models.MockState{"test-1": {mongoAt("mock-a", 1010)}, "test-2": {carriedAt("mock-f1", 1050)}},
+			wantFile: map[string][]string{"test-1": {"mock-a", "mock-f1"}, "test-2": {}},
 		},
 		{
 			// The default flag's hold for a new file that would map no mock
@@ -1362,7 +1446,7 @@ func TestRunTestSetCreatesNoFileThatLeavesAPassingTestWithNoEntry(t *testing.T) 
 		{
 			name: "--update-test-mapping, both passed, test-1 consumed mock-a, test-2 consumed only a mock of test-1's window", updateMapping: true,
 			consumed:  map[string][]models.MockState{"test-1": {mongoAt("mock-a", 1010)}, "test-2": {mongoAt("mock-y", 1050)}},
-			wantNamed: "[test-2]", wantReason: "could not tell what a passing test consumed",
+			wantNamed: "[test-2]", wantReason: "a new file would leave it with no entry",
 		},
 		{
 			// Whether a file exists cannot be read: it is taken as absent, and
@@ -1371,7 +1455,7 @@ func TestRunTestSetCreatesNoFileThatLeavesAPassingTestWithNoEntry(t *testing.T) 
 			existsFails: true,
 			wrongBody:   map[string]bool{"test-1": true},
 			consumed:    map[string][]models.MockState{"test-1": {mongoAt("mock-a", 1010)}, "test-2": {mongoAt("mock-x", 1500)}},
-			wantNamed:   "[test-2]", wantReason: "could not tell what a passing test consumed", wantNotCounted: "[test-1]",
+			wantNamed:   "[test-2]", wantReason: "a new file would leave it with no entry", wantNotCounted: "[test-1]",
 		},
 		// The default flag, nothing mapped: no file, and no hold logged.
 		{
@@ -1446,11 +1530,14 @@ func TestRunTestSetCreatesNoFileThatLeavesAPassingTestWithNoEntry(t *testing.T) 
 				n = 2
 			}
 			core, logs := observer.New(zap.DebugLevel)
-			h := newPartialRunHarness(t, n, 0)
+			h := newMappingRunHarness(t, n)
 			pinWindows(h)
 			h.replayer.logger = zap.New(core)
 			h.replayer.config.Test.UpdateTestMapping = tc.updateMapping
 			h.replayer.instrument = !tc.notInstrumented
+			if tc.mockingOff {
+				h.replayer.config.Test.Mocking = false
+			}
 			if len(tc.selected) > 0 {
 				h.replayer.config.Test.SelectedTests = map[string][]string{"test-set-0": tc.selected}
 			}
@@ -1509,7 +1596,7 @@ func TestRunTestSetCreatesNoFileThatLeavesAPassingTestWithNoEntry(t *testing.T) 
 			}
 			var held, quiet []observer.LoggedEntry
 			for _, e := range logs.FilterMessage("not writing mappings.yaml").All() {
-				if e.Level >= zap.WarnLevel {
+				if e.Level >= zap.InfoLevel {
 					held = append(held, e)
 				} else {
 					quiet = append(quiet, e)
@@ -1535,6 +1622,9 @@ func TestRunTestSetCreatesNoFileThatLeavesAPassingTestWithNoEntry(t *testing.T) 
 			if len(held) != 1 {
 				t.Fatalf("want one \"not writing mappings.yaml\" warning, got %+v", held)
 			}
+			if want := map[bool]zapcore.Level{false: zap.WarnLevel, true: zap.InfoLevel}[tc.wantInfo]; held[0].Level != want {
+				t.Fatalf("the hold is logged at %s; want %s", held[0].Level, want)
+			}
 			ctx := held[0].ContextMap()
 			if reason := fmt.Sprint(ctx["reason"]); !strings.Contains(reason, tc.wantReason) {
 				t.Fatalf("the warning's reason is %q; want it to say %q", reason, tc.wantReason)
@@ -1556,7 +1646,28 @@ func TestRunTestSetCreatesNoFileThatLeavesAPassingTestWithNoEntry(t *testing.T) 
 			if got := fmt.Sprint(named); got != tc.wantNamed {
 				t.Fatalf("the warning names passing tests with no entry %s; want %s", got, tc.wantNamed)
 			}
+			assertNoEntryHoldSaysWhatToDo(t, ctx, tc.wantNextStep)
 		})
+	}
+}
+
+// assertNoEntryHoldSaysWhatToDo checks the "not writing mappings.yaml" warning
+// for a passing test with no entry: it says what to do (next_step, holding
+// wantNextStep), and says it to any keploy user: it cites no replay that
+// skips a test with no entry, which only the enterprise cloud replay is.
+func assertNoEntryHoldSaysWhatToDo(t *testing.T, fields map[string]interface{}, wantNextStep string) {
+	t.Helper()
+	next, _ := fields["next_step"].(string)
+	if next == "" {
+		t.Fatalf("the warning has no next_step: %+v", fields)
+	}
+	if !strings.Contains(next, wantNextStep) {
+		t.Fatalf("the warning's next_step is %q; want it to say %q", next, wantNextStep)
+	}
+	for _, said := range []string{fmt.Sprint(fields["reason"]), next} {
+		if strings.Contains(said, "skip") {
+			t.Fatalf("the warning cites a replay that skips a test: %q", said)
+		}
 	}
 }
 
@@ -1633,4 +1744,215 @@ func TestAddConsumedNothingEntries(t *testing.T) {
 		t.Fatalf("no consumption read must add nothing, and an entry with no mock maps none: %+v", empty.TestCases)
 	}
 	addConsumedNothingEntries(nil, results, passing, none) // must not panic
+}
+
+// With --mocking=false, or a global passthrough, keploy test sends every
+// dependency call to the real dependency: it serves no mock, and the agent
+// reports none consumed for any test. That is not "consumed nothing": the run
+// has no consumption to map. With or without --update-test-mapping, a file
+// that exists is left byte for byte as it is (its recorded entries, its
+// source), and none is created. With the flag and no file, the hold says the
+// run served no mock and how to create the file.
+func TestRunTestSetWithMockingOffWritesNoMapping(t *testing.T) {
+	for _, mode := range []struct {
+		name string
+		set  func(h *prRun)
+	}{
+		{"--mocking=false", func(h *prRun) { h.replayer.config.Test.Mocking = false }},
+		{"a global passthrough", func(h *prRun) { h.replayer.config.Record.GlobalPassthrough = true }},
+	} {
+		for _, flag := range []bool{true, false} {
+			for _, exists := range []bool{true, false} {
+				name := fmt.Sprintf("%s, --update-test-mapping %v, file exists %v", mode.name, flag, exists)
+				t.Run(name, func(t *testing.T) {
+					core, logs := observer.New(zap.DebugLevel)
+					h := newMappingRunHarness(t, 2)
+					pinWindows(h)
+					h.replayer.logger = zap.New(core)
+					h.replayer.config.Test.UpdateTestMapping = flag
+					mode.set(h)
+					var recorded map[string][]models.MockEntry
+					if exists {
+						recorded = map[string][]models.MockEntry{
+							"test-1": mongoEntries("mock-a", "mock-b"),
+							"test-2": mongoEntries("mock-c"),
+						}
+					}
+					db := mappingFile(t, h, recorded)
+					mappingsPath := filepath.Join(h.replayer.config.Path, "test-set-0", "mappings.yaml")
+					var before []byte
+					if exists {
+						var err error
+						if before, err = os.ReadFile(mappingsPath); err != nil {
+							t.Fatal(err)
+						}
+					}
+					// The agent served no mock: every call went to the real
+					// dependency.
+					h.replayer.hookImpl = prHooks{}
+					_ = h.run(t)
+
+					for _, id := range []string{"test-1", "test-2"} {
+						if got := statusOf(t, h, id); got != models.TestStatusPassed {
+							t.Fatalf("precondition: %s is %s, want PASSED", id, got)
+						}
+					}
+					var held []observer.LoggedEntry
+					for _, e := range logs.FilterMessage("not writing mappings.yaml").All() {
+						if e.Level >= zap.WarnLevel {
+							held = append(held, e)
+						}
+					}
+					if exists {
+						after, err := os.ReadFile(mappingsPath)
+						if err != nil {
+							t.Fatal(err)
+						}
+						if string(after) != string(before) {
+							t.Fatalf("a run that served no mock rewrote mappings.yaml:\n%s\nwas:\n%s", after, before)
+						}
+						if len(held) != 0 {
+							t.Fatalf("want no warning for a file that exists, got %+v", held)
+						}
+						return
+					}
+					if got := entriesOnDisk(t, db); got != nil {
+						t.Fatalf("a run that served no mock created mappings.yaml holding %v", got)
+					}
+					if !flag {
+						// Nothing was mapped and nothing asked for a write: no
+						// hold, as before the empty entries.
+						if all := logs.FilterMessage("not writing mappings.yaml").All(); len(all) != 0 {
+							t.Fatalf("want no hold logged, got %+v", all)
+						}
+						return
+					}
+					if len(held) != 1 {
+						t.Fatalf("want one \"not writing mappings.yaml\" warning, got %+v", held)
+					}
+					fields := held[0].ContextMap()
+					if reason := fmt.Sprint(fields["reason"]); !strings.Contains(reason, "the run served no mock") {
+						t.Fatalf("the warning's reason is %q; want it to say the run served no mock", reason)
+					}
+					if got := fmt.Sprint(fields["passingTestsWithNoEntry"]); got != "[test-1 test-2]" {
+						t.Fatalf("the warning names passing tests with no entry %s; want [test-1 test-2]", got)
+					}
+					assertNoEntryHoldSaysWhatToDo(t, fields, "mocking on")
+				})
+			}
+		}
+	}
+}
+
+// A --update-test-mapping run that writes a passing test's empty entry over
+// what record wrote names keploy test the file's source, as any write of
+// test entries does. An entry keploy test wrote says what a replay consumed,
+// not what the test owns: under the proven switch a record-written entry with
+// no mock would say the test owns no call.
+func TestRunTestSetNamesKeployTestTheSourceOfTheEmptyEntriesItWrites(t *testing.T) {
+	h := newMappingRunHarness(t, 2)
+	pinWindows(h)
+	h.replayer.config.Test.UpdateTestMapping = true
+	db := mappingFile(t, h, map[string][]models.MockEntry{
+		"test-1": mongoEntries("mock-a", "mock-b"),
+		"test-2": mongoEntries("mock-c"),
+	})
+	if src, err := db.GetSource(context.Background(), "test-set-0"); err != nil || src != "" {
+		t.Fatalf("precondition: the recorded file's source is %q (err %v), want record's empty one", src, err)
+	}
+	// Both pass, and neither consumed a mock.
+	h.replayer.hookImpl = prHooks{consumedFor: consumedByWindow(h, nil)}
+	_ = h.run(t)
+
+	if got, want := entriesOnDisk(t, db), map[string][]string{"test-1": {}, "test-2": {}}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("mappings.yaml holds %v; want %v", got, want)
+	}
+	if src, err := db.GetSource(context.Background(), "test-set-0"); err != nil || src != models.MappingSourceKeployTest {
+		t.Fatalf("the file's source is %q (err %v); want %q", src, err, models.MappingSourceKeployTest)
+	}
+}
+
+// What a test consumed in one call of mapConsumed counts in every later one:
+// a RetryPassing cycle maps each passing test again, and a test that consumed
+// a mock of its own in any cycle did not consume nothing, whatever a later
+// cycle read.
+func TestConsumedNothingCountsEveryCall(t *testing.T) {
+	cases := []*models.TestCase{{Name: "test-1", Kind: models.HTTP}, {Name: "test-2", Kind: models.HTTP}}
+	for i, tc := range cases {
+		tc.HTTPReq.Timestamp = attrAt(1000 * (i + 1))
+		tc.HTTPResp.Timestamp = attrAt(1000*(i+1) + 100)
+	}
+	a := newCarryOverAttribution(cases)
+	doc := &models.Mapping{}
+	w1, w2 := attrAt(1000), attrAt(1100)
+	a.mapConsumed(doc, "test-1", w1, w2, []models.MockState{mongoAt("mock-x", 1500)})
+	a.mapConsumed(doc, "test-2", attrAt(2000), attrAt(2100), nil)
+	a.mapConsumed(doc, "test-1", w1, w2, nil) // the next cycle read nothing
+	got := a.consumedNothing()
+	if _, ok := got["test-1"]; ok {
+		t.Fatalf("consumedNothing = %v: test-1 consumed mock-x in its first cycle", got)
+	}
+	if _, ok := got["test-2"]; !ok {
+		t.Fatalf("consumedNothing = %v: want test-2, which consumed nothing", got)
+	}
+}
+
+// The same through RetryPassing: test-2 fails, so the tests that passed run
+// again. test-3 consumed, in its first cycle only, a mock of no window, which
+// keploy cannot place in its window: a new file would leave it with no entry,
+// and none is created, the warning naming test-3. Read from its last cycle
+// alone, it would have consumed nothing and got an empty entry.
+func TestRunTestSetRetryPassingCountsWhatATestConsumedInAnyCycle(t *testing.T) {
+	core, logs := observer.New(zap.InfoLevel)
+	h := newMappingRunHarness(t, 3)
+	pinWindows(h)
+	h.replayer.logger = zap.New(core)
+	h.replayer.config.RetryPassing = true
+	h.replayer.config.Test.UpdateTestMapping = true
+	db := mappingFile(t, h, nil)
+	byStart := map[string]string{}
+	for _, tc := range h.cases {
+		byStart[tc.HTTPReq.Timestamp.String()] = tc.Name
+	}
+	hooks := retryHooks{
+		mu:       &sync.Mutex{},
+		calls:    map[string]int{},
+		wrongAll: map[string]bool{"test-2": true},
+	}
+	hooks.consumedFor = func() []models.MockState {
+		h.instr.mu.Lock()
+		test := byStart[h.instr.windowAfter.String()]
+		h.instr.mu.Unlock()
+		hooks.mu.Lock()
+		cycle := hooks.calls[test]
+		hooks.mu.Unlock()
+		switch {
+		case test == "test-1":
+			return []models.MockState{mongoAt("mock-a", 1010)}
+		case test == "test-3" && cycle <= 1:
+			return []models.MockState{mongoAt("mock-x", 3500)}
+		}
+		return nil
+	}
+	h.replayer.hookImpl = hooks
+	_ = h.run(t)
+
+	if n := hooks.calls["test-3"]; n < 2 {
+		t.Fatalf("precondition: test-3 ran %d time(s); want a second RetryPassing cycle", n)
+	}
+	for _, r := range h.report.results {
+		if r.TestCaseID == "test-3" && r.Status != models.TestStatusPassed {
+			t.Fatalf("precondition: test-3 has a %s row, want every row PASSED", r.Status)
+		}
+	}
+	if got := entriesOnDisk(t, db); got != nil {
+		t.Fatalf("mappings.yaml holds %v; want no file: test-3 consumed a mock of no window in its first cycle", got)
+	}
+	held := logs.FilterMessage("not writing mappings.yaml").All()
+	if len(held) != 1 {
+		t.Fatalf("want one \"not writing mappings.yaml\" warning, got %+v", held)
+	}
+	if got := fmt.Sprint(held[0].ContextMap()["passingTestsWithNoEntry"]); got != "[test-3]" {
+		t.Fatalf("the warning names passing tests with no entry %s; want [test-3]", got)
+	}
 }

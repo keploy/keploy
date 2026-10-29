@@ -223,13 +223,14 @@ func markWrittenByKeployTest(doc *models.Mapping) {
 }
 
 // addConsumedNothingEntries gives every passing test that has no entry in doc
-// an entry with no mock: it passed, and consumed no mock but the startup
-// section's, which the same file lists. none names the tests whose consumption
-// the run read and found empty of any other
-// (carryOverAttribution.consumedNothing); a test outside it gets nothing, and
-// none does when the run read no test's consumption (none nil: not
-// instrumented, so the agent was never asked). The entries are added in the
-// order of results; the write sorts them by test (mapdb).
+// an entry with no mock: it passed, and consumed no mock of its own (only, if
+// anything, the startup section's or a flagged mock another test owns, which
+// the same file lists). none names the tests whose consumption the run read
+// and found empty of any of their own (carryOverAttribution.consumedNothing);
+// a test outside it gets nothing, and none does when the run read no test's
+// consumption (none nil: not instrumented, so the agent was never asked, or
+// the run served no mock to consume). The entries are added in the order of
+// results; the write sorts them by test (mapdb).
 //
 // Without this "no entry" meant two things: the test needs no mock, or the run
 // gave no verdict on it (it failed, was held, or got none). A replay that
@@ -286,6 +287,27 @@ func passingWithNoEntry(doc *models.Mapping, results []models.TestResult, passin
 	}
 	sort.Strings(out)
 	return out
+}
+
+// noEntryHold is the reason, and the next step, of the hold that keeps a run
+// from creating a mappings.yaml that would leave a passing test with no entry
+// (passingWithNoEntry): such a test would read as one the run gave no verdict
+// on. instrumented: keploy ran the application and asked the agent what each
+// test consumed; servedMocks: the run answered dependency calls from the
+// recording (not --mocking=false, not a global passthrough), so there was
+// something to consume.
+func noEntryHold(instrumented, servedMocks bool) (reason, nextStep string) {
+	switch {
+	case !instrumented:
+		return "keploy did not run the application, so it read nothing a passing test consumed, and a new file would leave it with no entry, as if the run had given it no verdict",
+			"run keploy test with the application's command (-c), so that keploy reads what each test consumes; until a run can map every passing test, each is served the mocks of its recorded window, as with no mappings.yaml"
+	case !servedMocks:
+		return "the run served no mock (--mocking=false or a global passthrough), so a passing test consumed none, and a new file would leave it with no entry, as if the run had given it no verdict",
+			"run keploy test with mocking on (the default) and without a global passthrough, so that each test consumes the mocks it is served; until a run can map every passing test, each is served the mocks of its recorded window, as with no mappings.yaml"
+	default:
+		return "what a passing test consumed fell, by its recorded time, in no test's window or in another test's, so a new file would leave it with no entry, as if the run had given it no verdict",
+			"nothing to do: with no mappings.yaml each test is served the mocks of its recorded window, as before. A call the application makes after it answers, or between tests, is recorded outside the test's window, and a later run creates the file once it can place what each passing test consumes in that test's window"
+	}
 }
 
 // mapsAMock reports whether doc maps at least one mock to a test.
