@@ -1840,12 +1840,6 @@ func (ys *MockYaml) readMockPools(ctx context.Context, testSetID string, afterTi
 	}
 	defer reader.Close()
 
-	// When the mocks file is JSON we go through ReadNextDocJSON +
-	// DecodeMocksJSON, skipping the yaml.Node bridge entirely. YAML files
-	// keep the original path for full backwards compatibility with
-	// existing recordings.
-	readerIsJSON := reader.Format() == yaml.FormatJSON
-
 	// The decoders' skip ERRORs name the mock, and mock names repeat in every
 	// test set, so they say which file.
 	logger := ys.Logger.With(zap.String("mock_file", reader.Path()))
@@ -1858,14 +1852,70 @@ func (ys *MockYaml) readMockPools(ctx context.Context, testSetID string, afterTi
 	}
 	hasContent := false
 	connFailures := 0
+	var unmet []models.UnmetRequirement
+	// An index read keeps its index for a later read of the same content,
+	// and is answered from one kept, when the process keeps them (see
+	// indexCache).
+	var (
+		probe   *fileProbe
+		builder *indexBuilder
+		kept    *indexedFile
+	)
+	if src != nil && mockIndexCache.on() {
+		if probe, err = newFileProbe(reader); err == nil {
+			if kept = mockIndexCache.lookup(probe); kept == nil {
+				builder = newIndexBuilder(mockIndexCache.budgetNow())
+			}
+		}
+	}
+	if kept != nil {
+		kept.logAgain(logger)
+		for _, d := range kept.docs {
+			if d.skipped != nil {
+				d.skipped.addTo(&out)
+			}
+			for _, entry := range d.mocks {
+				r.route(entry.IndexEntryFrom(src), false)
+			}
+		}
+		hasContent, connFailures, unmet = kept.hasContent, kept.connFailures, kept.unmet
+	} else {
+		if unmet, hasContent, connFailures, err = ys.decodeMockDocs(reader, logger, builder, src, r, &out, path); err != nil {
+			return models.TestSetMocks{}, err
+		}
+		if builder != nil {
+			builder.finish(probe, hasContent, connFailures, unmet)
+		}
+	}
+	warnConnFailuresNotReplayed(logger, testSetID, connFailures)
+	warnUnmetRequirements(logger, testSetID, reader.Path(), unmet)
+	return ys.finishMockPools(ctx, r, want, hasContent, path, afterTime, beforeTime, out)
+}
+
+// decodeMockDocs decodes every document of a yaml or json mock file, routing
+// each mock it decodes (r) and listing the documents it skips in out. With
+// src, each mock's payload is left in the file; with builder, each document
+// is recorded for the index cache, and what the decoders log through it. It
+// returns the requirements no mock of the file meets, whether the file holds
+// any document, and how many connection failures it holds.
+func (ys *MockYaml) decodeMockDocs(reader *yaml.MockReader, logger *zap.Logger, builder *indexBuilder, src *payloadSource, r *mockRouter, out *models.TestSetMocks, path string) (unmet []models.UnmetRequirement, hasContent bool, connFailures int, err error) {
+	// When the mocks file is JSON we go through ReadNextDocJSON +
+	// DecodeMocksJSON, skipping the yaml.Node bridge entirely. YAML files
+	// keep the original path for full backwards compatibility with
+	// existing recordings.
+	readerIsJSON := reader.Format() == yaml.FormatJSON
+	decodeLogger := logger
+	if builder != nil {
+		decodeLogger = builder.decodeLogger(logger)
+	}
 	var deps models.MockDepsCheck
 	for {
-		doc, readErr, decodeErr := nextDoc(reader, logger, false)
+		doc, readErr, decodeErr := nextDoc(reader, decodeLogger, false)
 		if errors.Is(readErr, io.EOF) {
 			break
 		}
 		if readErr != nil {
-			return models.TestSetMocks{}, fmt.Errorf("failed to decode the file documents. error: %v", readErr.Error())
+			return nil, false, 0, fmt.Errorf("failed to decode the file documents. error: %v", readErr.Error())
 		}
 		hasContent = true
 		if decodeErr != nil {
@@ -1874,10 +1924,12 @@ func (ys *MockYaml) readMockPools(ctx context.Context, testSetID string, afterTi
 				msg = "failed to decode the config mocks from json doc"
 			}
 			utils.LogError(ys.Logger, decodeErr, msg, zap.String("session", filepath.Base(path)))
-			return models.TestSetMocks{}, fmt.Errorf("failed to decode the mocks in %s: %w", reader.Path(), decodeErr)
+			return nil, false, 0, fmt.Errorf("failed to decode the mocks in %s: %w", reader.Path(), decodeErr)
 		}
+		var skipped *skippedEntry
 		if len(doc.mocks) == 0 {
-			addSkippedDoc(&out, doc.raw, readerIsJSON, doc.incomplete, doc.name, doc.kind)
+			skipped = skippedDocOf(doc.raw, readerIsJSON, doc.incomplete, doc.name, doc.kind)
+			skipped.addTo(out)
 		}
 		for _, mock := range doc.mocks {
 			if mock.Kind == models.ConnectionFailure {
@@ -1890,10 +1942,16 @@ func (ys *MockYaml) readMockPools(ctx context.Context, testSetID string, afterTi
 				mock.LeavePayloadOnDisk(src, models.PayloadAt{Offset: doc.off, Length: doc.n, Name: mock.Name})
 			}
 		}
+		if builder != nil {
+			builder.add(doc.mocks, skipped)
+		}
 	}
-	warnConnFailuresNotReplayed(logger, testSetID, connFailures)
-	warnUnmetRequirements(logger, testSetID, reader.Path(), deps.Unmet())
+	return deps.Unmet(), hasContent, connFailures, nil
+}
 
+// finishMockPools builds the wanted pools of a yaml or json mock file from
+// the candidates its documents were routed to (r).
+func (ys *MockYaml) finishMockPools(ctx context.Context, r *mockRouter, want mockPools, hasContent bool, path string, afterTime, beforeTime time.Time, out models.TestSetMocks) (models.TestSetMocks, error) {
 	if want&poolPerTest != 0 {
 		if !hasContent {
 			// The file exists and parsed cleanly; it just holds no documents. That

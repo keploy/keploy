@@ -24,6 +24,7 @@ import "sync"
 func RegisterRequestKeys(kind Kind, keys func(*Mock) []string) (unregister func()) {
 	requestKeys.mu.Lock()
 	defer requestKeys.mu.Unlock()
+	defer mockRulesChanged()
 	if requestKeys.byKind == nil {
 		requestKeys.byKind = map[Kind]func(*Mock) []string{}
 	}
@@ -32,6 +33,7 @@ func RegisterRequestKeys(kind Kind, keys func(*Mock) []string) (unregister func(
 	return func() {
 		requestKeys.mu.Lock()
 		defer requestKeys.mu.Unlock()
+		defer mockRulesChanged()
 		requestKeys.byKind[kind] = prev
 	}
 }

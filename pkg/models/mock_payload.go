@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
+	"unsafe"
 )
 
 // A replay reads a test set's mocks before its first test: it sorts them into
@@ -162,6 +164,73 @@ func (d *payloadOnDisk) display(m *Mock, of func(*Mock) string, unknown string) 
 	c.onDisk = nil
 	c.Spec = read.Spec
 	return of(&c)
+}
+
+// IndexEntryFrom is a copy of m, a mock whose payload is on disk
+// (LeavePayloadOnDisk), whose payload src reads back from the same place in
+// its file: the entry a read of a mock file left, reused for a later read of a
+// file of the same content (mockdb's index cache). The copy is m as that read
+// left it, unpooled, and shares nothing a replay changes in place with m: its
+// metadata, async block and origin are its own. It is nil when m's payload is
+// not on disk.
+func (m *Mock) IndexEntryFrom(src PayloadSource) *Mock {
+	if !m.PayloadOnDisk() {
+		return nil
+	}
+	c := *m
+	c.pooled = false
+	c.responseHydrator = nil
+	d := *m.onDisk
+	d.src = src
+	c.onDisk = &d
+	if m.Spec.Metadata != nil {
+		c.Spec.Metadata = maps.Clone(m.Spec.Metadata)
+	}
+	if m.Spec.Async != nil {
+		a := *m.Spec.Async
+		c.Spec.Async = &a
+	}
+	c.Origin = m.Origin.clone()
+	return &c
+}
+
+// IndexEntryBytes estimates the heap m, a mock whose payload is on disk, holds
+// of its own: the Mock and what LeavePayloadOnDisk kept of it (its strings,
+// metadata, async block and origin, and the payload's place and the answers
+// read from it). It is what a kept entry costs a cache of entries, 0 when m's
+// payload is not on disk.
+func (m *Mock) IndexEntryBytes() int64 {
+	if !m.PayloadOnDisk() {
+		return 0
+	}
+	// A string's bytes are allocated in a size class, a little more than
+	// its length; a map takes its header and groups of eight slots, each
+	// slot a key's and a value's string header, filled to seven.
+	const slot = 2 * int(unsafe.Sizeof(""))
+	str := func(s string) int {
+		if s == "" {
+			return 0
+		}
+		return len(s) + 8
+	}
+	n := int(unsafe.Sizeof(*m)) + int(unsafe.Sizeof(*m.onDisk))
+	n += str(string(m.Version)) + str(m.Name) + str(string(m.Kind)) + str(m.ConnectionID) + str(m.Start) + str(m.StartRef)
+	if md := m.Spec.Metadata; md != nil {
+		n += 48 + max(1, (len(md)+6)/7)*(8+8*slot)
+		for k, v := range md {
+			n += str(k) + str(v)
+		}
+	}
+	if a := m.Spec.Async; a != nil {
+		n += int(unsafe.Sizeof(*a)) + str(a.Lane) + str(a.AnchorAfter)
+	}
+	if o := m.Origin; o != nil {
+		n += int(unsafe.Sizeof(*o)) + str(o.Clock) + str(o.Comm) + str(o.Exe)
+	}
+	d := m.onDisk
+	// d.at.Name is m.Name's string, not a copy.
+	n += str(d.summary) + str(d.target) + str(d.fingerprint)
+	return int64(n)
 }
 
 // PayloadOnDisk reports whether m's payload was left on disk

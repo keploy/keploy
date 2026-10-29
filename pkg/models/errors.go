@@ -131,6 +131,20 @@ func (c UnmatchedCall) CountsAgainstTest() bool {
 	return !c.Background && c.Answer == "" && !strings.EqualFold(c.Protocol, "DNS") && c.MatchPhase != MatchPhaseNoRequest
 }
 
+// UnansweredWhy is why nothing answered the call, as its matcher said it:
+// where the match stopped, and the closest recording. A background miss's
+// line says it (Background), since no test's diff does.
+func (c UnmatchedCall) UnansweredWhy() string {
+	why := "no recording of the set is this call"
+	if c.MatchPhase != "" {
+		why = "the match stopped at " + c.MatchPhase
+	}
+	if c.ClosestMock != "" {
+		why += "; closest " + c.ClosestMock
+	}
+	return why
+}
+
 // CountsAgainstTest is UnmatchedCall.CountsAgainstTest for the report a miss
 // is made from, for the places that hold the report and not the call.
 func (r *MockMismatchReport) CountsAgainstTest() bool {
