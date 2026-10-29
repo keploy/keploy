@@ -2,6 +2,7 @@ package learn
 
 import (
 	"container/list"
+	"slices"
 	"strings"
 	"sync"
 )
@@ -39,6 +40,7 @@ import (
 //     recordings kept stay kept. A set that let the recording read least
 //     recently go was read anew on every call past its budget (api-server's
 //     round: 14 813 recordings, 335 MB of payloads, 76-86% of the agent's CPU).
+//
 //   - words: a payload's words and texts (searchedTokens, readAnswerWords,
 //     payloadExtra, setSearched), within derivedBudget, the recording read
 //     least recently let go first. A payload's words take more memory than
@@ -47,17 +49,33 @@ import (
 //     again where a rule next reads it; the word search reads them only
 //     where a payload's filter may hold a value's words (mayHold).
 //
+//   - forms: what a payload's readings decode (decoded: its escapes, its
+//     quoted-printable form, its encoded runs' text), within formsBudget,
+//     kept for the set as held is. Its words and texts (words) are built
+//     from them where they were let go, by case-folding alone, so a
+//     payload is decoded once for the set, never once per call: decoding
+//     it again each time its words were let go was 30% of the agent's CPU
+//     on api-server's round, and its instants' reads (instantSpans) 75%
+//     before the test that timed out.
+//
 // A part larger than its whole budget is handed to its reader and kept by
 // none. Handlers of one set read it at once: where one is reading a part of
 // a recording, another that needs it waits for it (derive), so a part is
-// read once, not once per handler.
+// read once, not once per handler. Before its rules read them, a call reads
+// what they read of each payload (warm), taking only the recordings no
+// other handler is reading, so handlers needing the set's payloads at once
+// read different ones at the same time, not each in turn behind one reader.
 type setDerived struct {
 	mu    sync.Mutex
 	held  tier[heldParts]
 	words tier[wordParts]
+	forms tier[formParts]
 	// reading are the parts being read (derive), by recording and part:
 	// closed when read.
 	reading map[readingKey]chan struct{}
+	// warming are the recordings a handler took to read (warm), by
+	// recording: closed when read.
+	warming map[string]chan struct{}
 	// waits is how many times a handler waited for another's read, for the
 	// rows.
 	waits int
@@ -79,6 +97,14 @@ type heldParts struct {
 	answerAt []givenMoment
 	filter   [2]wordFilter // by keep
 	plain    [2]bool       // by keep (partPlain)
+	keys     []instantKey  // partKeys
+}
+
+// formParts are what setDerived keeps of a recording's decoded forms
+// (forms): of its text, and of its text with its stamps blanked
+// (decodedOf).
+type formParts struct {
+	d [2]decoded
 }
 
 // wordParts are what setDerived keeps of a recording within its budget
@@ -90,8 +116,9 @@ type wordParts struct {
 	searched [2][2]string // by keep, where not plain (partPlain)
 }
 
-// part is one part a tier keeps of a recording, a bit of slot.has.
-type part uint16
+// part is one part a tier keeps of a recording, a bit of slot.has: wide
+// enough for each part by keep (byKeep).
+type part uint32
 
 const (
 	partMoments part = 1 << iota
@@ -112,6 +139,9 @@ const (
 	_
 	partExtra
 	partSearched // by keep
+	_
+	partKeys
+	partDecoded // by whether the stamps are blanked: partDecoded<<1
 )
 
 // byKeep is p, a part kept by keep, for keep.
@@ -206,10 +236,19 @@ func (t *tier[P]) keep(id string, p part, size int64, put func(*P)) {
 // every call.
 func (t *tier[P]) room() bool { return t.lru || !t.full }
 
+// tierOf names one of setDerived's tiers in a readingKey.
+type tierOf uint8
+
+const (
+	tierWords tierOf = iota
+	tierHeld
+	tierForms
+)
+
 type readingKey struct {
-	id     string
-	part   part
-	inHeld bool
+	id   string
+	part part
+	tier tierOf
 }
 
 // derive is part p of x's recording that t keeps (get), read by read where
@@ -218,8 +257,8 @@ type readingKey struct {
 // was not kept (past t's budget) is read again by each. read is told whether
 // t may keep what it reads (room): a part t will not keep is read through the
 // test's cache of texts, once per test.
-func derive[P, V any](s *setDerived, t *tier[P], inHeld bool, id string, p part, get func(*P) V, read func(kept bool) V, put func(*P, V), size func(V) int64) V {
-	k := readingKey{id, p, inHeld}
+func derive[P, V any](s *setDerived, t *tier[P], in tierOf, id string, p part, get func(*P) V, read func(kept bool) V, put func(*P, V), size func(V) int64) V {
+	k := readingKey{id, p, in}
 	for waited := false; ; waited = true {
 		s.mu.Lock()
 		if sl := t.find(id, p); sl != nil {
@@ -269,6 +308,11 @@ func readOnce[P, V any](s *setDerived, t *tier[P], k readingKey, ch chan struct{
 // keeps (words).
 var derivedBudget int64 = 32 << 20
 
+// formsBudget is the bytes of a set's payloads' decoded forms setDerived
+// keeps (forms): a hard ceiling. Most payloads decode to nothing beyond
+// their own text, and keep only their slot.
+var formsBudget int64 = 64 << 20
+
 // heldBudget is the bytes of a set's payloads' instants, places, stamps and
 // word filters setDerived keeps (held): a hard ceiling, far past what a
 // set's recordings hold of them (api-server's round of 14 813 recordings
@@ -296,7 +340,7 @@ func wordsBytes(words map[string]bool) int64 {
 }
 
 func newSetDerived() *setDerived {
-	return &setDerived{held: newTier[heldParts](heldBudget, false), words: newTier[wordParts](derivedBudget, true), reading: map[readingKey]chan struct{}{}, offsets: newOffsetIndex(offsetBudget)}
+	return &setDerived{held: newTier[heldParts](heldBudget, false), words: newTier[wordParts](derivedBudget, true), forms: newTier[formParts](formsBudget, false), reading: map[readingKey]chan struct{}{}, warming: map[string]chan struct{}{}, offsets: newOffsetIndex(offsetBudget)}
 }
 
 // keptBytes is the bytes setDerived counts as kept of the set's words and
@@ -318,13 +362,13 @@ func (s *setDerived) heldBytes() int64 {
 // heldPart is part p of x's recording that s keeps for the set (held); see
 // derive.
 func heldPart[V any](s *setDerived, x Raw, p part, get func(*heldParts) V, read func(kept bool) V, put func(*heldParts, V), size func(V) int64) V {
-	return derive(s, &s.held, true, x.id, p, get, read, put, size)
+	return derive(s, &s.held, tierHeld, x.id, p, get, read, put, size)
 }
 
 // wordPart is part p of x's recording that s keeps within its budget
 // (words); see derive.
 func wordPart[V any](s *setDerived, x Raw, p part, get func(*wordParts) V, read func(kept bool) V, put func(*wordParts, V), size func(V) int64) V {
-	return derive(s, &s.words, false, x.id, p, get, read, put, size)
+	return derive(s, &s.words, tierWords, x.id, p, get, read, put, size)
 }
 
 func momentsBytes(m []moment) int64 { return headerBytes + momentBytes*int64(len(m)) }
@@ -407,7 +451,7 @@ func (dc *DriftCache) setTokens(x Raw, keep bool) (out []map[string]bool, ok boo
 	}
 	k := keepIndex(keep)
 	return wordPart(s, x, byKeep(partTokens, keep), func(e *wordParts) []map[string]bool { return e.tokens[k] }, func(bool) []map[string]bool {
-		return copyWords(tokensIn(x, keep))
+		return copyWords(tokensWith(x, keep, func(y Raw) (string, decoded) { return dc.decodedOf(s, y) }))
 	}, func(e *wordParts, v []map[string]bool) { e.tokens[k] = v }, tokensBytes), true
 }
 
@@ -734,7 +778,8 @@ func (dc *DriftCache) payloadExtra(x Raw) string {
 		return dc.rawExtra(x.payload().text)
 	}
 	return wordPart(s, x, partExtra, func(e *wordParts) string { return e.extra }, func(bool) string {
-		return strings.Clone(extraOf(x.payload().text))
+		text, d := dc.decodedOf(s, x.withoutStamps())
+		return strings.Clone(d.extraOf(text))
 	}, func(e *wordParts, v string) { e.extra = v }, func(v string) int64 { return headerBytes + int64(len(v)) })
 }
 
@@ -745,14 +790,7 @@ func (dc *DriftCache) payloadExtra(x Raw) string {
 // (held).
 func (dc *DriftCache) setSearched(s *setDerived, x Raw, keep bool) [2]string {
 	k := keepIndex(keep)
-	plain := heldPart(s, x, byKeep(partPlain, keep), func(e *heldParts) bool { return e.plain[k] }, func(bool) bool {
-		y := x
-		if keep {
-			y = x.withoutStamps()
-		}
-		return len(clockKeys(y)) == 0 && len(y.payload().stamps) == 0
-	}, func(e *heldParts, v bool) { e.plain[k] = v }, func(bool) int64 { return 0 })
-	if plain {
+	if dc.setPlain(s, x, keep) {
 		return [2]string{x.payload().text, dc.payloadExtra(x)}
 	}
 	return wordPart(s, x, byKeep(partSearched, keep), func(e *wordParts) [2]string { return e.searched[k] }, func(bool) [2]string {
@@ -760,7 +798,172 @@ func (dc *DriftCache) setSearched(s *setDerived, x Raw, keep bool) [2]string {
 		if keep {
 			y = x.withoutStamps()
 		}
-		yb := y.payload()
-		return blankedPair(yb.text, yb.stamps, clockKeys(y))
+		t, d := dc.decodedOf(s, y)
+		return blankedPairOf(t, d.extraOf(t), clockKeys(y))
 	}, func(e *wordParts, v [2]string) { e.searched[k] = v }, func(v [2]string) int64 { return headerBytes + pairBytes(v) })
+}
+
+// setPlain is whether searched(x, keep) of an x whose set s keeps it is
+// its own text and payloadExtra (no stamp or clock read to blank), read
+// once for the set.
+func (dc *DriftCache) setPlain(s *setDerived, x Raw, keep bool) bool {
+	k := keepIndex(keep)
+	return heldPart(s, x, byKeep(partPlain, keep), func(e *heldParts) bool { return e.plain[k] }, func(bool) bool {
+		y := x
+		if keep {
+			y = x.withoutStamps()
+		}
+		return len(clockKeys(y)) == 0 && len(y.payload().stamps) == 0
+	}, func(e *heldParts, v bool) { e.plain[k] = v }, func(bool) int64 { return 0 })
+}
+
+// decodedOf is the text y's searches decode, its stamps blanked
+// (blankStamps; withoutStamps keeps them), and what its readings decode of
+// it (decoded), decoded once for the set s, which keeps y's (forms): its
+// words and other forms are read from them, never by decoding it again.
+// Past the set's budget each is decoded once per test (textCache).
+func (dc *DriftCache) decodedOf(s *setDerived, y Raw) (string, decoded) {
+	yb := y.payload()
+	text, i := yb.text, 0
+	if len(yb.stamps) > 0 {
+		text, i = blankStamps(text, yb.stamps), 1
+	}
+	return text, derive(s, &s.forms, tierForms, y.id, partDecoded<<i, func(e *formParts) decoded { return e.d[i] }, func(kept bool) decoded {
+		if !kept {
+			return derivedOfText(dc, textDecoded, text, func(own string) decoded { return decodeForms(own) }, func(d decoded) int64 { return d.size() })
+		}
+		return decodeForms(text).clone()
+	}, func(e *formParts, d decoded) { e.d[i] = d }, func(d decoded) int64 { return d.size() })
+}
+
+// searchedKeys are the keys of the instants searched(x, false) holds, in
+// its text or its other forms, read once for the set where dc keeps x's
+// (setOf), sorted, each once: whether it holds a moment as an instant of
+// its own (holdsExact) is told without reading its texts again. ok is
+// false where the set keeps none.
+func (dc *DriftCache) searchedKeys(x Raw) (out []instantKey, ok bool) {
+	s := dc.setOf(x)
+	if s == nil {
+		return nil, false
+	}
+	return heldPart(s, x, partKeys, func(e *heldParts) []instantKey { return e.keys }, func(kept bool) []instantKey {
+		var keys []instantKey
+		if dc.setPlain(s, x, false) {
+			// Its searched texts are its text and its other forms, whose
+			// instants payloadMoments holds.
+			for _, m := range dc.payloadMoments(x) {
+				keys = append(keys, m.key)
+			}
+		} else {
+			spans := instantSpans
+			if !kept {
+				spans = dc.spansOf
+			}
+			for _, text := range dc.searched(x, false) {
+				if text == "" {
+					continue
+				}
+				for _, sp := range spans(text) {
+					if sp.keyed {
+						keys = append(keys, sp.key)
+					}
+				}
+			}
+		}
+		slices.SortFunc(keys, func(a, b instantKey) int {
+			if a.at != b.at {
+				if a.at < b.at {
+					return -1
+				}
+				return 1
+			}
+			switch {
+			case a.day == b.day:
+				return 0
+			case b.day:
+				return -1
+			}
+			return 1
+		})
+		return slices.Compact(keys)
+	}, func(e *heldParts, v []instantKey) { e.keys = v }, func(v []instantKey) int64 { return headerBytes + 16*int64(len(v)) }), true
+}
+
+// mayHoldInstant reports whether x's searched texts (searched(x, false)) may
+// hold m as an instant of its own (holdsExact), as the set's keys of them
+// tell (searchedKeys); any x the set keeps none of may.
+func (dc *DriftCache) mayHoldInstant(x Raw, m moment) bool {
+	keys, ok := dc.searchedKeys(x)
+	return !ok || slices.Contains(keys, m.key)
+}
+
+// warmed stands for each recording a handler has read (warm).
+var warmed = func() chan struct{} {
+	ch := make(chan struct{})
+	close(ch)
+	return ch
+}()
+
+// warm reads, for each recording of raw the set keeps (setOf), what the
+// rules of every call read of its payload (warmOne), once for the set. A
+// handler reads, in raw's order, each recording no other handler has
+// taken, and only once none is left to take waits for those others are
+// reading. So handlers that need a set's payloads at once read different
+// ones at the same time, instead of each waiting in turn on the one reading
+// the first (derive): one payload read is never a wait for every handler.
+func (dc *DriftCache) warm(raw []Raw) {
+	if dc == nil || dc.set == nil {
+		return
+	}
+	s := dc.set
+	var others []chan struct{}
+	for _, x := range raw {
+		if dc.setOf(x) == nil {
+			continue
+		}
+		s.mu.Lock()
+		if !s.held.room() {
+			s.mu.Unlock()
+			break
+		}
+		ch, taken := s.warming[x.id]
+		if !taken {
+			ch = make(chan struct{})
+			s.warming[strings.Clone(x.id)] = ch
+		}
+		s.mu.Unlock()
+		if taken {
+			if ch != warmed {
+				others = append(others, ch)
+			}
+			continue
+		}
+		dc.warmOne(s, x, ch)
+	}
+	for _, ch := range others {
+		select {
+		case <-ch:
+		default:
+			s.mu.Lock()
+			s.waits++
+			s.mu.Unlock()
+			<-ch
+		}
+	}
+}
+
+// warmOne reads what the rules of every call read of x's payload: its
+// decoded forms and instants (payloadMoments), its words' filter
+// (searchWords) and its searched instants (searchedKeys), then lets the
+// handlers waiting for it go, whatever the reads do.
+func (dc *DriftCache) warmOne(s *setDerived, x Raw, ch chan struct{}) {
+	defer func() {
+		s.mu.Lock()
+		s.warming[x.id] = warmed
+		s.mu.Unlock()
+		close(ch)
+	}()
+	dc.payloadMoments(x)
+	dc.searchWords(x, false)
+	dc.searchedKeys(x)
 }

@@ -1504,7 +1504,7 @@ func (dc *DriftCache) instantLeafFrom(r Leaf, rec moment, served []Earlier) (Pla
 // (copiedInBoth).
 func (dc *DriftCache) instantRawFrom(r Leaf, rec, live moment, at time.Time, raw []Raw) (Place, bool) {
 	for _, x := range raw {
-		if !x.earlierThan(at) {
+		if !x.earlierThan(at) || !dc.mayHoldInstant(x, rec) {
 			continue
 		}
 		texts := dc.searched(x, false)

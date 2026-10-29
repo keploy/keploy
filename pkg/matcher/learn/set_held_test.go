@@ -18,6 +18,9 @@ import (
 type heldRow struct {
 	raw      func() []Raw
 	classify func(dc *DriftCache) []Learned
+	// run is classify of a dc whose application reads its clock already
+	// (appClock): handlers sharing dc run it at once.
+	run func(dc *DriftCache) []Learned
 }
 
 func newHeldRow(n, words int) heldRow {
@@ -39,9 +42,12 @@ func newHeldRow(n, words int) heldRow {
 	const clock, word = "Req.query.bind[0]", "Req.query.bind[1]"
 	rec := Shape{Leaves: map[string]Leaf{clock: {Path: clock, Type: String, Value: "2026-10-24T09:55:53.9Z"}, word: {Path: word, Type: String, Value: "a1b2c3d4"}}}
 	live := Shape{Leaves: map[string]Leaf{clock: {Path: clock, Type: String, Value: "2026-10-24T09:56:54.1Z"}, word: {Path: word, Type: String, Value: "z9y8x7w6"}}}
-	return heldRow{raw: func() []Raw { return raw }, classify: func(dc *DriftCache) []Learned {
-		dc.appClock = true
+	run := func(dc *DriftCache) []Learned {
 		return ClassifyFollowing(dc, []string{clock, word}, live, rec, at, nil, raw, nil, nil, nil)
+	}
+	return heldRow{raw: func() []Raw { return raw }, run: run, classify: func(dc *DriftCache) []Learned {
+		dc.appClock = true
+		return run(dc)
 	}}
 }
 
