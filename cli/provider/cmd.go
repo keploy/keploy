@@ -610,7 +610,7 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().Bool("update-template", c.cfg.Test.UpdateTemplate, "[DEPRECATED] This flag is ignored. config.yaml keeps the recorded template values; {{capture ...}} placeholders take each run's values as it goes.")
 		_ = cmd.Flags().MarkDeprecated("update-template", "keploy test no longer writes a run's template values into config.yaml; this flag is ignored")
 		cmd.Flags().Bool("mocking", true, "enable/disable mocking for the testcases")
-		cmd.Flags().StringSlice("allow-egress", c.cfg.Test.AllowEgress, "What the replay may reach on the real network (repeat or comma-separated). \"dns\" forwards a DNS mock miss to the host's and public resolvers too; without it a miss is forwarded only to a resolver inside the replay's own network (docker's, the container network's or the cluster's)")
+		cmd.Flags().StringSlice("allow-egress", c.cfg.Test.AllowEgress, "What the replay may reach on the real network (repeat or comma-separated). \"dns\" forwards a DNS query no mock answers to the host's and public resolvers too; without it a miss is forwarded only to a resolver inside the replay's own network (docker's, the container network's or the cluster's)")
 		cmd.Flags().Bool("disable-line-coverage", c.cfg.Test.DisableLineCoverage, "Disable line coverage generation.")
 		cmd.Flags().Bool("must-pass", c.cfg.Test.MustPass, "enforces that the tests must pass, if it doesn't, remove failing testcases")
 		cmd.Flags().Uint32Var(&c.cfg.Test.MaxFailAttempts, "max-fail-attempts", 5, "maximum number of testset failure that can be allowed during must-pass mode")
@@ -2745,7 +2745,7 @@ func (c *CmdConfigurator) addMockFlags(cmd *cobra.Command) error {
 		cmd.Flags().Float64("min-coverage", c.cfg.Mock.MinCoverage, "Fail the replay when the test run covers less than this percentage of the code, from the coverage report the test command writes (0 disables)")
 		cmd.Flags().String("coverage-report", c.cfg.Mock.CoverageReport, "Coverage report the test command writes, when it is not a default location (coverage.out, coverage/lcov.info, coverage.xml, jacoco.xml, ...)")
 		cmd.Flags().StringArray("run-only", c.cfg.Mock.RunOnly, "Run only this test (repeat the flag for more; the name as the test runner's harness reports it, and a subtest runs with its test); the harness skips the rest")
-		cmd.Flags().StringSlice("allow-egress", c.cfg.Test.AllowEgress, "What the replay may reach on the real network (repeat or comma-separated), the same list as keploy test's test.allowEgress. \"dns\" forwards a DNS mock miss to the host's and public resolvers too; without it a miss is forwarded only to a resolver inside the replay's own network (docker's, the container network's or the cluster's)")
+		cmd.Flags().StringSlice("allow-egress", c.cfg.Test.AllowEgress, "What the replay may reach on the real network (repeat or comma-separated), the same list as keploy test's test.allowEgress. \"dns\" forwards a DNS query no mock answers to the host's and public resolvers too; without it a miss is forwarded only to a resolver inside the replay's own network (docker's, the container network's or the cluster's)")
 	}
 	return nil
 }

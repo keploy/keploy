@@ -77,7 +77,7 @@ func (a *AgentClient) pushNetworkNames(ctx context.Context) {
 	}
 	if err != nil {
 		if ctx.Err() == nil {
-			a.logger.Warn("keploy could not give its agent the names the replay's docker networks answer: until it does, a DNS mock miss for a container or service name is answered by keploy, not docker's resolver",
+			a.logger.Warn("keploy could not give its agent the names the replay's docker networks answer: until it does, a DNS query no mock answers for a container or service name is answered by keploy, not docker's resolver",
 				zap.Error(err), zap.String("next_step", "check that keploy's agent and the Docker daemon are up; the next test set or agent restart gives the list again"))
 		}
 		return
@@ -105,7 +105,7 @@ func (a *AgentClient) answerNameAsks(ctx context.Context, uri, agentContainer st
 		var listErr *nameListError
 		if errors.As(err, &listErr) {
 			if ctx.Err() == nil {
-				a.logger.Warn("keploy could not give its agent a fresh list of the names the replay's docker networks answer: a DNS mock miss for a container started since is answered by keploy",
+				a.logger.Warn("keploy could not give its agent a fresh list of the names the replay's docker networks answer: a DNS query no mock answers for a container started since is answered by keploy",
 					zap.Error(listErr.err))
 			}
 			continue
