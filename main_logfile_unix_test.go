@@ -135,7 +135,7 @@ func TestNativeAgentAppendsToItsCLIsLog(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer held.Close()
+	defer func() { _ = held.Close() }()
 
 	// The agent logs a warning: its KEPLOY_DEBUG_FILE cannot be opened.
 	agentTmp := t.TempDir()

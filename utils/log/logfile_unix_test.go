@@ -650,6 +650,12 @@ func TestCreateLogFile_UnderSudoHandsTheLogToTheSudoUser(t *testing.T) {
 		{name: "under sudo, no SUDO_GID", uid: "4242", want: &chownCall{uid: 4242, gid: -1}},
 		{name: "without sudo"},
 		{name: "a hand-over that fails", uid: "4242", gid: "4343", want: &chownCall{uid: 4242, gid: 4343}, fail: true},
+		// Ids from 2^31 up are refused on every arch (giveLogToSudoUser says
+		// why); the largest id below it is handed over as it is.
+		{name: "a SUDO_UID of 2^31-1", uid: "2147483647", gid: "2147483647", want: &chownCall{uid: 2147483647, gid: 2147483647}},
+		{name: "a SUDO_UID past 2^31-1", uid: "2147483648", gid: "4343", fail: true},
+		{name: "a SUDO_UID of 4294967295, fchown's keep-the-owner", uid: "4294967295", gid: "4343", fail: true},
+		{name: "a SUDO_GID past 2^31-1", uid: "4242", gid: "2147483648", want: &chownCall{uid: 4242, gid: -1}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			inRun(t)
@@ -667,7 +673,7 @@ func TestCreateLogFile_UnderSudoHandsTheLogToTheSudoUser(t *testing.T) {
 			t.Cleanup(func() { _ = CloseLogFile(f) })
 			switch {
 			case c.want == nil && len(*calls) != 0:
-				t.Errorf("a run without SUDO_UID changed its log's owner: %+v", *calls)
+				t.Errorf("SUDO_UID %q changed its log's owner: %+v; want no hand-over", c.uid, *calls)
 			case c.want != nil && (len(*calls) != 1 || (*calls)[0].f != f || (*calls)[0].uid != c.want.uid || (*calls)[0].gid != c.want.gid):
 				t.Errorf("the log %s was handed over by %+v; want once, by its descriptor, to uid %d gid %d", f.Name(), *calls, c.want.uid, c.want.gid)
 			}

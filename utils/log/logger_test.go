@@ -1161,7 +1161,7 @@ func TestLogFileWriterHelperProcess(t *testing.T) {
 			t.Fatal(err)
 		}
 		for i := 0; i < lines; i, n = i+1, n+1 {
-			if _, err := w.Write([]byte(fmt.Sprintf("other %04d %s\n", n, strings.Repeat("o", 68)))); err != nil {
+			if _, err := fmt.Fprintf(w, "other %04d %s\n", n, strings.Repeat("o", 68)); err != nil {
 				t.Fatal(err)
 			}
 		}

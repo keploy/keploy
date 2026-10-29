@@ -4,6 +4,7 @@ package log
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"strconv"
 	"syscall"
@@ -95,8 +96,16 @@ func giveLogToSudoUser(f *os.File) error {
 	if err != nil {
 		return fmt.Errorf("SUDO_UID %q is not a uid: %w", s, err)
 	}
+	// Chown takes an int, which is 32 bits on 386 and arm, and systemd tells
+	// distributions to avoid ids from 2^31 up, since tools read uid_t as
+	// signed. So keploy hands a log only to a uid below 2^31, the same on
+	// every arch. That also refuses 4294967295, which fchown reads as -1,
+	// "keep the owner": the log would stay root's with nothing said.
+	if uid > math.MaxInt32 {
+		return fmt.Errorf("SUDO_UID %d is past the largest uid keploy hands a file to (%d)", uid, math.MaxInt32)
+	}
 	gid := -1
-	if g, err := strconv.ParseUint(os.Getenv("SUDO_GID"), 10, 32); err == nil {
+	if g, err := strconv.ParseUint(os.Getenv("SUDO_GID"), 10, 32); err == nil && g <= math.MaxInt32 {
 		gid = int(g)
 	}
 	if err := chownFile(f, int(uid), gid); err != nil {
