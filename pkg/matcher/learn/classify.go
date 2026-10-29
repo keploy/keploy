@@ -747,8 +747,8 @@ func classifyGiven(dc *DriftCache, drift []string, live, rec Shape, at time.Time
 // (CheckClockRead). One keploy could not read or name (dc read it in the
 // process's zone, read with no name, else in the agent's own: InZone,
 // Tracker.SetAppZoneUnnamed) names none: a replay that cannot read the
-// application's zone either reads it in the agent's own, refusing a plain
-// read cut to an hour or coarser, and its Meet with a named learning of the place names no zone
+// application's zone either reads it in the agent's own, refusing a read
+// cut to an hour or coarser (plain, or plus an offset), and its Meet with a named learning of the place names no zone
 // (models.AppZoneApart), which a replay checks as CheckClockRead says.
 func (dc *DriftCache) withAppZone(out []Learned, at time.Time) []Learned {
 	if dc.zone == nil || dc.zoneNoName {

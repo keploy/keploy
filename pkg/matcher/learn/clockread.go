@@ -717,15 +717,18 @@ func spanOf(o models.ClockOffset, s Span) (Span, string) {
 // learn step read (o.Res, where it is one coarser than the value's
 // encoding: models.ClockOffset.CheckedAt), within one cut of the span plus the offset on either
 // side (models.ClockOffset.Holds), whatever finer cut the value shows (a
-// time to live of no whole number of cuts), and its cut is no coarser than
-// a minute, the same in every zone (learn's offsetReading).
+// time to live of no whole number of cuts); an hour or a day it is cut to
+// is read in the application's zone alone (checkReadIn), which this replay
+// tells as it does a plain read's: an hour cut in UTC+05:30 starts on the
+// half hour in UTC.
 // The application's zone is the one its process writes its clock in in
 // this run, where the agent read it from the process that made the call
 // (s.Own: a wall clock of no zone is the application's own, so a recording
 // learned on a laptop in IST is checked in UTC where the application now
 // runs in UTC). Where keploy could not read it, it is the one the learn
 // step named (models.ClockOffset.AppZone: a wall clock of no zone read in
-// it, a value that names its moment cut coarser than a minute), on any
+// it, a value that names its moment cut coarser than a minute, plain or
+// plus an offset), on any
 // machine, never the agent's own, and a name this keploy cannot read
 // refuses the value, naming it; there a wall clock of no zone
 // (models.ZoneApp) checked at a cut of an hour or coarser holds only where
@@ -744,8 +747,8 @@ func spanOf(o models.ClockOffset, s Span) (Span, string) {
 // process that exits or runs another program as keploy reads its zone
 // (ProcZones keeps a zone it read for each program a process runs, so a
 // long-lived application's later calls are read in its own). Where
-// neither is known, a plain read cut to an hour or coarser, whose cut the
-// zone moves, is refused, saying so,
+// neither is known, a read cut to an hour or coarser (plain, or plus an
+// offset), whose cut the zone moves, is refused, saying so,
 // except a wall clock either zone held (models.ZoneEither), which is
 // checked at its cut in UTC and in s.Zone, passing where either reading
 // holds (a cut read is checked, never refused for its cut, 2026-10-28); any
@@ -824,7 +827,7 @@ func CheckClockRead(path string, o models.ClockOffset, live Leaf, s Span, known 
 		// either reading holds at its cut, as it does at a finer one; a
 		// refusal says where it was read.
 		hint = ". keploy could not read the zone of the process that made this call and the learn step named none, so it checked the value in UTC and in the agent's own zone (" + s.Zone.String() + ")"
-	case o.AppZoneMatters() && o.Zone != models.ZoneEither && o.Plain() && o.Res >= time.Hour:
+	case o.AppZoneMatters() && o.Zone != models.ZoneEither && o.Res >= time.Hour:
 		return false, learned + ", cut to " + models.ShortDuration(o.Res) + ", which a replay checks in the application's zone, but keploy could not read the zone of the process that made this call, and the learn step named none, so it refuses the value rather than check its cut in another zone. Record the test again where keploy reads the application's zone (keploy in the host PID namespace, the application's process and its files readable; the agent's debug log says why it could not)"
 	}
 	ok, cut, why := checkReadIn(o, live, s, learned, read, hint, 0)
@@ -982,6 +985,34 @@ func checkReadIn(o models.ClockOffset, live Leaf, s Span, learned, read, hint st
 		made = " made after this test began and no later than this call"
 	}
 	if !o.Plain() {
+		// A read plus an offset checked at an hour or a day (CheckedAt) is
+		// checked at that cut read in the zone the value shows it whole in,
+		// as a plain read's (cutZones: UTC, the offset it writes, the
+		// application's zone, s.Zone), since Holds reads a cut's start and
+		// its calendar days in the zone the value is read in: a Go
+		// application in IST cuts to UTC's hour (Truncate counts from UTC),
+		// one in Java to IST's. A value that shows the cut in none (a time
+		// to live of no whole number of cuts) is read in the application's
+		// zone. Its verdict never turns on when in the hour the replay ran.
+		// CheckClockRead has refused a zone it cannot tell; this fails
+		// closed all the same.
+		in := ""
+		if c := o.CheckedAt(res); o.AppZoneMatters() && c >= time.Hour {
+			for i, at := range ats {
+				if ci, ati := readCut(at, cutZones(o, at, s), res, c); ci == c {
+					ats[i] = ati
+					continue
+				}
+				if s.Zone == nil {
+					return false, 0, learned + ", which a replay checks at its cut in the application's zone, but keploy cannot tell the application's zone at this call, so it refuses the value rather than read its cut in another zone" + hint
+				}
+				ats[i] = at.In(s.Zone)
+			}
+			in = ", read here in " + strings.TrimPrefix(zoneName(ats[0]), " in ")
+			if ats[0].Location() == time.UTC {
+				in = ", read here in UTC"
+			}
+		}
 		if holdsAny(o, ats, res, s.From, s.To) {
 			return true, o.CheckedAt(res), ""
 		}
@@ -990,7 +1021,7 @@ func checkReadIn(o models.ClockOffset, live Leaf, s Span, learned, read, hint st
 		}
 		cut := ""
 		if c := o.CheckedAt(res); c > res {
-			cut = " (checked as standing for the whole " + models.ShortDuration(c) + " the learn step read it cut to)"
+			cut = " (checked as standing for the whole " + models.ShortDuration(c) + " the learn step read it cut to" + in + ")"
 		}
 		return false, o.CheckedAt(res), learned + ", and the value this call carries is not " + read + made + ": it changed" + cut + hint
 	}

@@ -155,14 +155,19 @@ func (r ClockRead) inOneSecond(o ClockRead) bool {
 // values, or the gap between them, are whole multiples of (an application
 // that cuts its value and then adds a time to live that is no whole number
 // of cuts, 30m30s after a minute's start, puts its two values a whole number
-// of cuts apart, though neither is a whole cut), no coarser than a minute
-// (learn's offsetReading: a cut to an hour or a day, which a zone's offset
-// moves, shows no offset). The learn step bounds Min and Max at it, as
+// of cuts apart, though neither is a whole cut), read in UTC, in the
+// offsets they write and in the application's zone, as a plain read's: an
+// hour or a day, which a zone's offset moves, is read in the application's
+// zone (AppZone names it; AppZoneMatters), at learn and at replay. The
+// learn step bounds Min and Max at it, as
 // standing for its whole cut (truncated: a value v stands for reads from v
 // up to v plus Res), and the sums that decide whether a replay can compare
 // the offset (Within, at the learn step and in Holds) count it, so thirty
 // minutes cut to the minute, which a replay could not tell from thirty-one,
-// is refused as too wide, and thirty days cut to the second is learned.
+// is refused as too wide, and thirty days cut to the second is learned;
+// so is a day cut to the hour (a day's unit holds its width and three
+// hours), and every offset cut to a day is refused as too wide (no unit
+// coarser than a day holds three days).
 // Holds checks a replay's value at Res where it is such a step coarser than
 // the value's own encoding (a cut), as standing for its whole cut, within
 // one Res of the call's span plus the offset on either side, as a plain
@@ -238,8 +243,9 @@ func (r ClockRead) inOneSecond(o ClockRead) bool {
 // AppZone names the application's zone the learn step read the value in,
 // where what it learned depends on that zone (AppZoneMatters): a wall clock
 // of no zone read in it (ZoneApp, ZoneEither), or a value that names its
-// moment cut coarser than a minute, to an hour or a day, which a zone's
-// offset moves (an hour in UTC+05:30 is no hour in UTC). It is "UTC" or a
+// moment cut coarser than a minute, to an hour or a day, a plain read or
+// one plus an offset, which a zone's offset moves (an hour in UTC+05:30 is
+// no hour in UTC). It is "UTC" or a
 // fixed offset ("+05:30") of a zone with no change of offset ahead, else
 // an IANA name ("Europe/Berlin"), as ZoneNameOf names it (ZoneLocation
 // reads each). A replay reads the application's zone as
@@ -257,9 +263,9 @@ func (r ClockRead) inOneSecond(o ClockRead) bool {
 // changes): the learn step read the value in the process's zone where it
 // read one it could not name, else in the agent's own, either of which may
 // be any zone; a replay that cannot read the application's zone either
-// reads it in the agent's own, except that it refuses a plain read cut to
-// an hour or coarser, whose cut the zone moves, read in the application's
-// zone alone (ZoneApp, or an instant that names its moment); one in either
+// reads it in the agent's own, except that it refuses a read cut to an
+// hour or coarser (plain, or plus an offset), whose cut the zone moves,
+// read in the application's zone alone (ZoneApp, or an instant that names its moment); one in either
 // zone (ZoneEither) it checks at its cut in UTC and the agent's own. A
 // recording learned before
 // AppZone was reads the same. Two learnings of one place read with the
@@ -285,14 +291,16 @@ type ClockOffset struct {
 
 // AppZoneMatters reports whether what the learn step learned of o depends
 // on the application's zone, so it names that zone in AppZone: a wall clock
-// of no zone read in it (ZoneApp, ZoneEither), or a plain read of a value
-// that names its moment cut coarser than a minute (an hour, a day), whose
-// cut a replay reads in the application's zone beside UTC and the offset it
-// writes (learn's cutZones). A minute or any finer cut is one in every zone
-// (zones' offsets are whole minutes); a wall clock read in UTC (ZoneUTC) is
-// cut in UTC alone.
+// of no zone read in it (ZoneApp, ZoneEither), or a value that names its
+// moment cut coarser than a minute (an hour, a day), whose cut a replay
+// reads in the application's zone: a plain read's beside UTC and the
+// offset it writes (learn's cutZones), a read plus an offset's there alone
+// (learn's checkReadIn: the hour or the day its read plus the offset was
+// cut to). A minute or any finer cut is one in every zone (zones' offsets
+// are whole minutes); a wall clock read in UTC (ZoneUTC) is cut in UTC
+// alone.
 func (o ClockOffset) AppZoneMatters() bool {
-	return o.Zone == ZoneApp || o.Zone == ZoneEither || o.Zone == "" && o.Plain() && o.Res > time.Minute
+	return o.Zone == ZoneApp || o.Zone == ZoneEither || o.Zone == "" && o.Res > time.Minute
 }
 
 // ZoneLocation is the zone name names (ClockOffset.AppZone): "UTC", a fixed

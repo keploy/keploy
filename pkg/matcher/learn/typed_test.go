@@ -1416,7 +1416,7 @@ func TestAClockOffsetNeedsClockYearsAWindowAndAResolution(t *testing.T) {
 	late, early := clockTo.Add(time.Second), clockTo.Add(-time.Second)
 	earlier := early.Add(-2 * time.Second)
 	in := &Window{Rec: span(earlier.Add(-30 * time.Minute)), F: span(early.Add(-30 * time.Minute))}
-	if _, ok := clockOffsetOf(at(earlier), at(early), in); !ok {
+	if _, ok := clockOffsetOf(at(earlier), at(early), in, nil); !ok {
 		t.Fatalf("both in the clock's years: no offset; want one")
 	}
 	for _, row := range []struct {
@@ -1428,7 +1428,7 @@ func TestAClockOffsetNeedsClockYearsAWindowAndAResolution(t *testing.T) {
 		{"seen past the clock's years", early, late, &Window{Rec: span(early.Add(-30 * time.Minute)), F: span(late.Add(-30 * time.Minute))}},
 		{"no window", early, early, nil},
 	} {
-		if off, ok := clockOffsetOf(at(row.r), at(row.l), row.w); ok {
+		if off, ok := clockOffsetOf(at(row.r), at(row.l), row.w, nil); ok {
 			t.Errorf("%s: offset %s; want none", row.name, off)
 		}
 	}
@@ -1924,10 +1924,10 @@ func TestACutCoarserThanTheLeadShowsNoOffset(t *testing.T) {
 	if g := sharedGrain(r.at, l.at); g != 30*time.Minute {
 		t.Fatalf("precondition: the two values share %s, want thirty minutes", g)
 	}
-	if o, ok := clockOffsetOf(r, l, w); ok {
+	if o, ok := clockOffsetOf(r, l, w, nil); ok {
 		t.Errorf("FALSE GREEN? an hour cut on a zone's half hour: %+v (%s); want no offset", o, o)
 	}
-	if o, ok := clockOffsetOf(r, r, w); ok {
+	if o, ok := clockOffsetOf(r, r, w, nil); ok {
 		t.Errorf("a value that did not move: %+v; want no offset", o)
 	}
 	// N1 of the offset rule's third review: Truncate(time.Hour) plus ninety
@@ -1942,7 +1942,7 @@ func TestACutCoarserThanTheLeadShowsNoOffset(t *testing.T) {
 	if g := sharedGrain(r.at, l.at); g != 30*time.Minute {
 		t.Fatalf("precondition: an hour cut plus ninety minutes shares %s, want thirty minutes", g)
 	}
-	if o, ok := clockOffsetOf(r, l, w); ok {
+	if o, ok := clockOffsetOf(r, l, w, nil); ok {
 		t.Errorf("FALSE GREEN? an hour cut plus ninety minutes: %+v (%s); want no offset", o, o)
 	}
 	// The recording reads at 12:02:58.5, F FullRoundLead later, past two
@@ -1954,7 +1954,7 @@ func TestACutCoarserThanTheLeadShowsNoOffset(t *testing.T) {
 	if g := sharedGrain(r.at, l.at); g != 2*time.Minute {
 		t.Fatalf("precondition: the two minute values share %s, want two minutes", g)
 	}
-	if o, ok := clockOffsetOf(r, l, w); !ok || o.Res != time.Minute || o.Min >= 2*time.Hour || o.Max <= 2*time.Hour {
+	if o, ok := clockOffsetOf(r, l, w, nil); !ok || o.Res != time.Minute || o.Min >= 2*time.Hour || o.Max <= 2*time.Hour {
 		t.Errorf("FALSE RED: two hours cut to the minute, its values sharing two minutes: %+v, %v; want two hours at the minute", o, ok)
 	}
 }
@@ -1986,8 +1986,10 @@ func TestAReasonSaysWhatSetTheResolution(t *testing.T) {
 // offset); 10 ms values at a microsecond's encoding: 10 ms; at a
 // millisecond's: the millisecond (a decimal step counts only at 1,000
 // times the encoding: such a writer is checked at its encoding, the flake
-// the PR text states); an hour apart on the half hour: refused naming the
-// hour; a value that did not move: none, no reason.
+// the PR text states); an hour apart on the half hour: the hour, which a
+// cut is checked at, never refused for (clockOffset then refuses two hours
+// at an hour's cut as too wide); a value that did not move: none, no
+// reason.
 func TestAnOffsetsCutIsTheOneItsValuesShowOrItsGapsWhereTheirsHoldsNone(t *testing.T) {
 	us, ms, sec, min := time.Microsecond, time.Millisecond, time.Second, time.Minute
 	read := time.Date(2026, 10, 26, 11, 14, 17, 123e6, time.UTC)
@@ -2009,10 +2011,10 @@ func TestAnOffsetsCutIsTheOneItsValuesShowOrItsGapsWhereTheirsHoldsNone(t *testi
 		{"a minute's start plus 30m30s", sec, read.Truncate(min).Add(30*min + 30*sec), fread.Truncate(min).Add(30*min + 30*sec), narrow, min, ""},
 		{"10 ms at a microsecond's encoding", us, read.Add(time.Hour).Truncate(10 * ms), fread.Add(time.Hour).Truncate(10 * ms), narrow, 10 * ms, ""},
 		{"10 ms at a millisecond's encoding", ms, read.Add(time.Hour).Truncate(10 * ms), fread.Add(time.Hour).Truncate(10 * ms), narrow, ms, ""},
-		{"an hour cut on the half hour, plus two hours", ms, time.Date(2026, 10, 26, 13, 30, 0, 0, time.UTC), time.Date(2026, 10, 26, 14, 30, 0, 0, time.UTC), &Window{Rec: Span{From: time.Date(2026, 10, 26, 12, 29, 58, 950e6, time.UTC), To: time.Date(2026, 10, 26, 12, 29, 59, 50e6, time.UTC)}, F: Span{From: time.Date(2026, 10, 26, 12, 31, 0, 495e6, time.UTC), To: time.Date(2026, 10, 26, 12, 31, 0, 595e6, time.UTC)}}, 0, "cut to 1h, but keploy checks a clock read plus an offset only at a cut of a minute or finer"},
+		{"an hour cut on the half hour, plus two hours", ms, time.Date(2026, 10, 26, 13, 30, 0, 0, time.UTC), time.Date(2026, 10, 26, 14, 30, 0, 0, time.UTC), &Window{Rec: Span{From: time.Date(2026, 10, 26, 12, 29, 58, 950e6, time.UTC), To: time.Date(2026, 10, 26, 12, 29, 59, 50e6, time.UTC)}, F: Span{From: time.Date(2026, 10, 26, 12, 31, 0, 495e6, time.UTC), To: time.Date(2026, 10, 26, 12, 31, 0, 595e6, time.UTC)}}, time.Hour, ""},
 		{"a value that did not move", ms, read.Add(time.Hour), read.Add(time.Hour), narrow, 0, ""},
 	} {
-		o, why, ok := offsetReading("p", in(row.a, row.enc), in(row.b, row.enc), row.w)
+		o, why, ok := offsetReading("p", in(row.a, row.enc), in(row.b, row.enc), row.w, nil)
 		if row.want != 0 && (!ok || why != "" || o.Res != row.want) || row.want == 0 && (ok || !strings.Contains(why, row.why) || (row.why == "") != (why == "")) {
 			t.Errorf("%s: %+v %v (%s); want the cut %s, why %q", row.name, o, ok, why, row.want, row.why)
 		}

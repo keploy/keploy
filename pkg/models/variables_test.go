@@ -942,8 +942,13 @@ func TestAClockOffsetNamesTheApplicationsZoneItWasLearnedIn(t *testing.T) {
 	if !o.AppZoneMatters() || !(ClockOffset{Res: 24 * time.Hour}).AppZoneMatters() || !(ClockOffset{Res: time.Millisecond, Zone: ZoneEither}).AppZoneMatters() {
 		t.Errorf("AppZoneMatters is false for a wall clock in the application's zone, or a day's cut")
 	}
-	if (ClockOffset{Res: time.Minute}).AppZoneMatters() || (ClockOffset{Res: time.Hour, Zone: ZoneUTC}).AppZoneMatters() || (ClockOffset{Min: time.Hour, Max: time.Hour + time.Second, Res: 24 * time.Hour}).AppZoneMatters() {
-		t.Errorf("AppZoneMatters is true of a minute's cut, a wall clock in UTC, or an offset")
+	if (ClockOffset{Res: time.Minute}).AppZoneMatters() || (ClockOffset{Res: time.Hour, Zone: ZoneUTC}).AppZoneMatters() || (ClockOffset{Min: time.Hour, Max: time.Hour + time.Second, Res: time.Minute}).AppZoneMatters() {
+		t.Errorf("AppZoneMatters is true of a minute's cut, a wall clock in UTC, or an offset cut to the minute")
+	}
+	// A read plus an offset cut to an hour or a day: its cut is read in the
+	// application's zone (an hour in UTC+05:30 is no hour in UTC).
+	if !(ClockOffset{Min: 24 * time.Hour, Max: 25 * time.Hour, Res: time.Hour}).AppZoneMatters() || !(ClockOffset{Min: -49 * time.Hour, Max: -47 * time.Hour, Res: 24 * time.Hour}).AppZoneMatters() {
+		t.Errorf("AppZoneMatters is false of an offset cut to an hour or a day")
 	}
 	if s := o.String(); !strings.HasSuffix(s, ", read with the application's zone as Asia/Kolkata") {
 		t.Errorf("String %q; want it to name the zone", s)

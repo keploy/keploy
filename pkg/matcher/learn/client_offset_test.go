@@ -398,7 +398,7 @@ func TestAClockOffsetIsOnOneSideOfItsWindowInBothRuns(t *testing.T) {
 		// made there, no offset.
 		{"its cut holding the recording's wide window's start", call.Add(-min2), fcall.Add(-45*ms - min2), &Window{Rec: Span{From: call.Add(-min2 + ms - 1), To: call.Add(11 * ms)}, F: narrow.F}, 0},
 	} {
-		o, ok := clockOffsetOf(at(tc.rec), at(tc.live), tc.w)
+		o, ok := clockOffsetOf(at(tc.rec), at(tc.live), tc.w, nil)
 		switch {
 		case tc.sign == 0 && ok:
 			t.Errorf("%s: an offset %+v, want none", tc.name, o)
