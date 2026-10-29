@@ -852,7 +852,16 @@ func TestDNSForwardLinesSayMockMissOnlyOnAMiss(t *testing.T) {
 			m := new(dns.Msg)
 			m.SetRcode(r, rcode)
 			if answer {
-				rr, _ := dns.NewRR(r.Question[0].Name + " 30 IN A 10.0.0.7")
+				// A record of the type asked: the gRPC probe asks for TXT.
+				data := "A 10.0.0.7"
+				if r.Question[0].Qtype == dns.TypeTXT {
+					data = `TXT "grpc_config=[]"`
+				}
+				rr, err := dns.NewRR(r.Question[0].Name + " 30 IN " + data)
+				if err != nil {
+					t.Errorf("build the answer: %v", err)
+					return
+				}
 				m.Answer = []dns.RR{rr}
 			}
 			_ = w.WriteMsg(m)
@@ -907,6 +916,15 @@ func TestDNSForwardLinesSayMockMissOnlyOnAMiss(t *testing.T) {
 			on:     "DNS mock miss + upstream forward failed; falling back to synthetic response",
 			off:    failedOff,
 			onMiss: true},
+		{name: "grpc-probe-answered", handler: reply(dns.RcodeSuccess, true), timeout: 5 * time.Second, q: grpcProbe,
+			on:  "DNS upstream forward answered a query keploy does not report as a miss; relaying upstream answer",
+			off: "DNS query resolved via upstream forward; mocking disabled"},
+		{name: "grpc-probe-nodata", handler: reply(dns.RcodeSuccess, false), timeout: 5 * time.Second, q: grpcProbe,
+			on:  "DNS NODATA (empty NOERROR) for a query keploy does not report as a miss; relaying upstream answer",
+			off: "DNS NODATA (empty NOERROR); mocking disabled, relaying real upstream answer"},
+		{name: "search-expansion-nodata", handler: reply(dns.RcodeSuccess, false), timeout: 5 * time.Second, q: searchExpansion,
+			on:  "DNS NODATA (empty NOERROR) for a query keploy does not report as a miss; relaying upstream answer",
+			off: "DNS NODATA (empty NOERROR); mocking disabled, relaying real upstream answer"},
 		{name: "grpc-probe-unanswered", handler: unanswered, timeout: 200 * time.Millisecond, q: grpcProbe,
 			on:  "DNS upstream forward failed for a query keploy does not report as a miss; falling back to synthetic response",
 			off: failedOff},

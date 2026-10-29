@@ -41,8 +41,8 @@ type missLine struct {
 // what it means without the phrase. A registered line that is reworded or
 // removed fails the row too, so a miss line keeps the wording users grep for.
 var missLines = map[missLiteral]missLine{
-	{"pkg/agent/proxy/dns.go", "(*Proxy).resolveUncachedDNSResponse", "DNS mock miss resolved via upstream forward"}:                                                                                                                {1, "mocking on, no DNS mock answered, an in-network or opted-in resolver did"},
-	{"pkg/agent/proxy/dns.go", "(*Proxy).resolveUncachedDNSResponse", "DNS mock miss: upstream NODATA (empty NOERROR), relaying as valid negative answer (a genuinely unrecorded record of this type would also relay empty here)"}: {1, "mocking on, no DNS mock answered, upstream said NODATA"},
+	{"pkg/agent/proxy/dns.go", "(*Proxy).resolveUncachedDNSResponse", "DNS mock miss resolved via upstream forward"}:                                                                                                                {1, "mocking on, a query keploy reports, no DNS mock answered, an in-network or opted-in resolver did"},
+	{"pkg/agent/proxy/dns.go", "(*Proxy).resolveUncachedDNSResponse", "DNS mock miss: upstream NODATA (empty NOERROR), relaying as valid negative answer (a genuinely unrecorded record of this type would also relay empty here)"}: {1, "mocking on, a query keploy reports, no DNS mock answered, upstream said NODATA"},
 	{"pkg/agent/proxy/dns.go", "(*Proxy).resolveUncachedDNSResponse", "DNS mock miss: upstream NODATA, relaying (already logged for this name/qtype)"}:                                                                              {1, "the same miss, deduplicated"},
 	{"pkg/agent/proxy/dns.go", "(*Proxy).resolveUncachedDNSResponse", "DNS mock miss: upstream returned negative answer; falling back to synthetic DNS response"}:                                                                   {1, "mocking on, no DNS mock answered, upstream could not answer (SERVFAIL, REFUSED, ...)"},
 	{"pkg/agent/proxy/dns.go", "(*Proxy).resolveUncachedDNSResponse", "DNS mock miss + upstream forward failed; falling back to synthetic response"}:                                                                                {1, "mocking on, no DNS mock answered, and the forward got no answer"},
@@ -62,8 +62,10 @@ var missLines = map[missLiteral]missLine{
 // Comments are not output and are not read. Test files,
 // testdata, hidden directories (.github's sample apps) and nested modules are
 // not keploy's own output and are skipped. Whether a registered line is logged
-// only on a miss is held by the rows of its own package (for DNS,
-// TestDNSForwardLinesSayMockMissOnlyOnAMiss).
+// only on a miss is held, for DNS, by TestDNSForwardLinesSayMockMissOnlyOnAMiss
+// and, for HTTP, by TestMockOutgoingSaysMockMissOnlyOnAMiss. MySQL's two lines
+// were read from their call site (the branch where no mock matched the
+// command), not run.
 func TestMockMissMeansAMiss(t *testing.T) {
 	found := map[missLiteral][]token.Position{}
 	fset := token.NewFileSet()
