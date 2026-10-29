@@ -93,31 +93,38 @@ func (h *heapPeak) now() {
 }
 
 // largeStreamMiB is how many recordings of 1 MiB a bound row reads: 256 by
-// default, KEPLOY_LARGE_STREAM_MIB for the 1 GB+ run on a test box.
-func largeStreamMiB(t *testing.T) int {
+// default, KEPLOY_LARGE_STREAM_MIB where it is set (CI's step for the bound
+// row's higher limits, or the 1 GB+ run on a test box). set says whether it
+// is.
+func largeStreamMiB(t *testing.T) (mib int, set bool) {
 	t.Helper()
 	v := os.Getenv("KEPLOY_LARGE_STREAM_MIB")
 	if v == "" {
-		return 256
+		return 256, false
 	}
 	n, err := strconv.Atoi(v)
 	if err != nil || n <= 0 {
 		t.Fatalf("KEPLOY_LARGE_STREAM_MIB=%q: want a positive number of MiB", v)
 	}
-	return n
+	return n, true
 }
 
 // boundLimits are the agent memory limits the bound row runs at, each with
 // the set budget it gives (learn's setBudget: a quarter of the limit), and
 // boundOverhead is what the row lets the heap pass that budget by: the
 // recording read in flight (1 MiB of text, its decoded forms and words) and
-// the tiers' bookkeeping, measured at 3, 4 and 6 MiB at these limits.
+// the tiers' bookkeeping, measured at 3, 4 and 6 MiB at these limits. A
+// large limit's legs (large) run only with KEPLOY_LARGE_STREAM_MIB set:
+// each takes 40-50 s on 4 CPUs, and the least limit's already streams four
+// times its budget. CI runs them in a step of their own
+// (.github/workflows/go-test.yaml).
 var boundLimits = []struct {
 	limit, budget int64
+	large         bool
 }{
-	{256 << 20, 64 << 20},
-	{512 << 20, 128 << 20},
-	{1 << 30, 256 << 20},
+	{256 << 20, 64 << 20, false},
+	{512 << 20, 128 << 20, true},
+	{1 << 30, 256 << 20, true},
 }
 
 const boundOverhead = 16 << 20
@@ -137,16 +144,20 @@ const boundOverhead = 16 << 20
 // Either set (256 MiB of answers by default, four times the least budget;
 // KEPLOY_LARGE_STREAM_MIB=1100 for the 1 GB+ run on a test box) is learned
 // within the bound with the verdict a small set gives: refused, the token
-// answered earlier, by mock-0.
+// answered earlier, by mock-0. The 512 MiB and 1 GiB limits run only with
+// KEPLOY_LARGE_STREAM_MIB set (boundLimits).
 func TestLearnMatchReadsTheRecordingsBeforeACallWithinTheSetsBudget(t *testing.T) {
 	if raceOn {
 		t.Skip("a heap bound is the plain run's to check: the race detector's own allocations are no part of the learn step's")
 	}
 	const size = 1 << 20
-	mib := largeStreamMiB(t)
+	mib, set := largeStreamMiB(t)
 	for _, l := range boundLimits {
 		for _, way := range []string{"on disk", "staged"} {
 			t.Run(fmt.Sprintf("%d MiB limit %s", l.limit>>20, way), func(t *testing.T) {
+				if l.large && !set {
+					t.Skip("a large limit's leg runs with KEPLOY_LARGE_STREAM_MIB set (CI's go-test step for it, or a test box)")
+				}
 				prev := debug.SetMemoryLimit(l.limit)
 				defer debug.SetMemoryLimit(prev)
 				bound := l.budget + boundOverhead
