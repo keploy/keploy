@@ -229,6 +229,21 @@ type TestsReceipt struct {
 	// "<mock> <path> (<kind>)"; a test's own is on its line (design v14
 	// §7.2 step 10).
 	Learned []string `yaml:"learned,omitempty" json:"learned,omitempty"`
+	// Background is, in a replay's file under the proven switch, the calls
+	// the application made outside every test's window that no recording
+	// answered (models.UnmatchedCall.Background): its background work, a
+	// timer's or a start-up job's call. They are charged to no test and fail
+	// none (founder D1); each says what was called, when (At), and why
+	// nothing answered it (MatchPhase, ClosestMock, Differs, NextSteps).
+	Background []models.UnmatchedCall `yaml:"background,omitempty" json:"background,omitempty"`
+}
+
+// persistedBackground is the background misses as a receipt keeps them,
+// each naming its process as persisted (models.PersistedCalls); the agent
+// already kept them as evidence (no value the application sent).
+func persistedBackground(misses []models.UnmatchedCall) []models.UnmatchedCall {
+	out, _ := models.PersistedCalls(misses)
+	return out
 }
 
 // empty reports whether the run reported no test and keploy refused

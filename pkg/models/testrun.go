@@ -562,6 +562,17 @@ type UnmatchedCall struct {
 	// no test's: the replay fails the set with it, naming the call, and
 	// charges no test (the read of the set's first test carries it).
 	BeforeSet bool `json:"before_set,omitempty" yaml:"before_set,omitempty"`
+	// Background says, under the proven switch, that keploy mock's agent
+	// found the call made outside every test's window: after the test before
+	// it stopped being served (or before the set's first test) and before
+	// the test whose read took it began being served. Such a call is the
+	// application's background work (a timer, a start-up job): no test made
+	// it, so it is charged to none and fails none, and the run reports it
+	// once, at the set's level, with when it was made and why nothing
+	// answered it. A call made in an earlier test's window and filed late is
+	// no background call: it is still charged to the test whose read took
+	// it.
+	Background bool `json:"background,omitempty" yaml:"background,omitempty"`
 	// Differs mirrors MockMismatchReport.Differs: the names of the fields in
 	// which the call differs from its closest recording, without values.
 	Differs []string `json:"differs,omitempty" yaml:"differs,omitempty"`
