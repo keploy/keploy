@@ -9,7 +9,11 @@ package http_test
 
 import (
 	"context"
+	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -58,6 +62,9 @@ func TestTheClientHoldsByHowTheAgentSaidItServedTheWindows(t *testing.T) {
 		{"strict, by window", []models.MockFilterParams{staging(true, false), window(true, false)}, models.MockWindowsSaid{Strict: true, Lookahead: true}},
 		{"lax, by window", []models.MockFilterParams{staging(false, false), window(false, false)}, models.MockWindowsSaid{}},
 		{"lax, by mapping", []models.MockFilterParams{staging(false, true), window(false, true)}, models.MockWindowsSaid{Lookahead: true}},
+		// A later answer that says less takes back nothing an earlier one
+		// said: a test served by its mapping, then one lax with none.
+		{"answers that differ", []models.MockFilterParams{staging(true, false), window(false, true), window(false, false)}, models.MockWindowsSaid{Strict: true, Lookahead: true}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := newClient(t, serveWindows(t, &windowSvc{}))
@@ -91,6 +98,39 @@ func TestTheClientHoldsByHowTheAgentSaidItServedTheWindows(t *testing.T) {
 		}
 		if got, ok := c.AgentMockWindow(); ok {
 			t.Fatalf("an agent that said nothing was taken to have said %+v", got)
+		}
+	})
+
+	// An agent in the set's place that stops saying, as one older than the
+	// header started again mid-set: what the others said is not all of how
+	// the set's windows were served.
+	t.Run("an agent that stops saying", func(t *testing.T) {
+		saying, silent := serveWindows(t, &windowSvc{}), serveWindows(t, &paramsSvc{})
+		var calls atomic.Int32
+		front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			to := saying
+			if r.URL.Path == "/agent/updatemockparams" && calls.Add(1) > 1 {
+				to = silent
+			}
+			u, err := url.Parse(to)
+			if err != nil {
+				t.Errorf("parse %q: %v", to, err)
+				return
+			}
+			httputil.NewSingleHostReverseProxy(&url.URL{Scheme: u.Scheme, Host: u.Host}).ServeHTTP(w, r)
+		}))
+		t.Cleanup(front.Close)
+		c := newClient(t, front.URL+"/agent")
+		for _, p := range []models.MockFilterParams{staging(false, false), window(false, false)} {
+			if err := c.UpdateMockParams(ctx, p); err != nil {
+				t.Fatalf("UpdateMockParams: %v", err)
+			}
+		}
+		if calls.Load() != 2 {
+			t.Fatalf("the agent was asked %d times, want 2", calls.Load())
+		}
+		if got, ok := c.AgentMockWindow(); ok {
+			t.Fatalf("a set whose last answer said nothing was taken to have said %+v", got)
 		}
 	})
 }

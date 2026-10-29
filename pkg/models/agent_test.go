@@ -77,4 +77,10 @@ func TestMockWindowModeReadsBackWhatTheAgentSaid(t *testing.T) {
 	if s != (MockWindowsSaid{Strict: true, Lookahead: true}) {
 		t.Fatalf("a set's calls fold to %+v, want both", s)
 	}
+	// A later call that says less takes nothing back: the fold is the mode
+	// that holds the most of any call, not the last call's.
+	s.Add(MockWindowMode{Strict: false, Load: MockLoadLaxAll})
+	if s != (MockWindowsSaid{Strict: true, Lookahead: true}) {
+		t.Fatalf("a lax call after the others folds the set's calls to %+v, want both kept", s)
+	}
 }
