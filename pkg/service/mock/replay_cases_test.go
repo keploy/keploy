@@ -516,6 +516,80 @@ func TestAnAppendedMockNeverTakesASkippedDocumentsName(t *testing.T) {
 		"mock-9 (a kind this keploy cannot read) and mock-7 (a connection failure it cannot replay) are in the file")
 }
 
+// --on-miss record over a set on disk keeps the set's recorded mocks and adds
+// the captured ones, in either format, and they are in the set when it says
+// they were appended. Over a gob set it used to leave an empty mocks.gob: the
+// writer truncated the set's file, and keploy exited without closing it, the
+// captured mock still in its queue.
+func TestOnMissRecordKeepsTheRecordedSetAndAddsTheCapturedCalls(t *testing.T) {
+	for _, format := range []string{"yaml", "gob"} {
+		t.Run(format, func(t *testing.T) {
+			t.Setenv("KEPLOY_MOCK_FORMAT", format)
+			dir := t.TempDir()
+			httpTo := func(url string) *models.Mock {
+				return &models.Mock{Version: "api.keploy.io/v1beta1", Kind: models.HTTP, Spec: models.MockSpec{
+					HTTPReq:  &models.HTTPReq{Method: "GET", URL: url},
+					HTTPResp: &models.HTTPResp{StatusCode: 200},
+				}}
+			}
+			recorded := mockdb.New(zap.NewNop(), dir, "mocks")
+			for _, u := range []string{"http://dep/a", "http://dep/b", "http://dep/c"} {
+				require.NoError(t, recorded.InsertMock(context.Background(), httpTo(u), "set-0"))
+			}
+			require.NoError(t, recorded.Close())
+
+			core, logs := observer.New(zapcore.InfoLevel)
+			m := &mockService{logger: zap.New(core), instrumentation: capturingInstr{captured: []*models.Mock{httpTo("http://dep/new")}},
+				mockDB: mockdb.New(zap.NewNop(), dir, "mocks"), store: FileStore{}}
+			m.persistCaptured(context.Background(), "set-0")
+			require.Empty(t, logs.FilterLevelExact(zapcore.ErrorLevel).All())
+			require.Equal(t, 1, logs.FilterMessageSnippet("appended new dependency calls").Len())
+
+			var got []string
+			require.NoError(t, mockdb.New(zap.NewNop(), dir, "mocks").WalkTestSetMocks(context.Background(), "set-0", func(mk *models.Mock, _, _ bool) {
+				got = append(got, mk.Name+" "+mk.Spec.HTTPReq.URL)
+			}))
+			require.Equal(t, []string{"mock-0 http://dep/a", "mock-1 http://dep/b", "mock-2 http://dep/c", "mock-3 http://dep/new"}, got)
+		})
+	}
+}
+
+// closeFailStore is a mock set written in the background whose writer could
+// not write what it was handed: closing it says so.
+type closeFailStore struct {
+	appendStore
+	pushes int
+}
+
+func (s *closeFailStore) CloseUnless(<-chan struct{}) error {
+	return fmt.Errorf("%w: 1 of 1", models.ErrMocksNotWritten)
+}
+
+func (s *closeFailStore) MocksLeft() uint64 { return 0 }
+
+// countingPush is a Store that counts its pushes.
+type countingPush struct {
+	FileStore
+	pushes *int
+}
+
+func (p countingPush) Push(context.Context, string) error { *p.pushes++; return nil }
+
+// Captured calls the store could not write are not said to be appended, nor
+// the set published: the run says, at ERROR, that they were not all added.
+func TestOnMissRecordSaysWhenTheCapturedCallsWereNotWritten(t *testing.T) {
+	core, logs := observer.New(zapcore.InfoLevel)
+	s := &closeFailStore{}
+	m := &mockService{logger: zap.New(core), instrumentation: capturingInstr{captured: []*models.Mock{{Kind: models.HTTP}}},
+		mockDB: s, store: countingPush{pushes: &s.pushes}}
+	m.persistCaptured(context.Background(), "set-0")
+	require.Equal(t, 0, logs.FilterMessageSnippet("appended new dependency calls").Len())
+	errs := logs.FilterLevelExact(zapcore.ErrorLevel).All()
+	require.Len(t, errs, 1)
+	require.Contains(t, errs[0].Message, "were not all added to the mock set")
+	require.Zero(t, s.pushes, "a set whose captured calls were not written was published")
+}
+
 // capturingInstr is an agent connection that captured these calls on miss.
 type capturingInstr struct {
 	Instrumentation

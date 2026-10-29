@@ -826,6 +826,21 @@ type mockStoreWriter interface {
 // stops it now (the rest is then not written, a capture loss), as the stop's
 // other drains do (reportDrainProgress).
 func (r *Recorder) closeMockStore(store any, every time.Duration) error {
+	return CloseMockStore(r.logger, store, every,
+		"Still writing the recording's mocks to the mock file",
+		"press Ctrl+C again to stop now: the rest is then not written, and this recording fails as incomplete",
+		func() { r.mockWriteStopped.Store(true) })
+}
+
+// CloseMockStore closes store, which writes what it still holds (a store that
+// writes in the background, mockStoreWriter, writes the rest). Such a store
+// is waited for for as long as it writes: every `every` the wait logs still
+// with how many mocks are left, and, once the run has been interrupted,
+// stopNow, the offer that another interrupt stops the writing now. That
+// interrupt calls stopped (when not nil) and stops it: the rest is then not
+// written, and the error says how many (models.ErrMocksNotWritten).
+// keploy record's stop and keploy mock replay --on-miss record use it.
+func CloseMockStore(logger *zap.Logger, store any, every time.Duration, still, stopNow string, stopped func()) error {
 	w, ok := store.(mockStoreWriter)
 	if !ok {
 		if closer, ok := store.(io.Closer); ok {
@@ -847,7 +862,9 @@ func (r *Recorder) closeMockStore(store any, every time.Duration) error {
 		case err := <-done:
 			return err
 		case <-notice.Interrupt():
-			r.mockWriteStopped.Store(true)
+			if stopped != nil {
+				stopped()
+			}
 			close(stop)
 			return <-done
 		case <-t.C:
@@ -856,11 +873,11 @@ func (r *Recorder) closeMockStore(store any, every time.Duration) error {
 		wasOffering := offering
 		offering = notice.Next()
 		if left != last || !said || offering != wasOffering {
-			msg := "Still writing the recording's mocks to the mock file"
+			msg := still
 			if offering {
-				msg += "; press Ctrl+C again to stop now: the rest is then not written, and this recording fails as incomplete"
+				msg += "; " + stopNow
 			}
-			r.logger.Info(msg, zap.Uint64("mocksLeft", left))
+			logger.Info(msg, zap.Uint64("mocksLeft", left))
 			said, last = true, left
 		}
 	}

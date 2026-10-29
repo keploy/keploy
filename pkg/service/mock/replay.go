@@ -20,6 +20,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/coverage/report"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/pkg/service/record"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -979,13 +980,26 @@ func (m *mockService) persistCaptured(ctx context.Context, name string) {
 		}
 		appended++
 	}
-	if appended > 0 {
-		m.logger.Info("appended new dependency calls to the mock set (--on-miss record)",
-			zap.Int("new", appended), zap.String("mock-set", name),
-			zap.String("next_step", "review the added mocks and commit them; the next replay serves them without the real dependency"))
-		if err := m.store.Push(ctx, name); err != nil {
-			m.logger.Warn("failed to publish the refreshed mock set", zap.Error(err))
-		}
+	if appended == 0 {
+		return
+	}
+	// The mock store may write in the background (the gob format): what it
+	// was handed is in the set only once it is closed. It used to be left
+	// open, and keploy exited with the captured calls still in the writer's
+	// queue, after saying they were appended.
+	if err := record.CloseMockStore(m.logger, m.mockDB, mockDrainNotice,
+		"Still writing the calls captured on miss to the mock set",
+		"press Ctrl+C again to stop now: the ones not written yet are then not added to it", nil); err != nil {
+		utils.LogError(m.logger, err, "the calls captured on miss were not all added to the mock set",
+			zap.String("mock-set", name), zap.Int("captured", appended),
+			zap.String("next_step", "check the disk the mock set is on (space, permissions), then run again with --on-miss record to capture them"))
+		return
+	}
+	m.logger.Info("appended new dependency calls to the mock set (--on-miss record)",
+		zap.Int("new", appended), zap.String("mock-set", name),
+		zap.String("next_step", "review the added mocks and commit them; the next replay serves them without the real dependency"))
+	if err := m.store.Push(ctx, name); err != nil {
+		m.logger.Warn("failed to publish the refreshed mock set", zap.Error(err))
 	}
 }
 
