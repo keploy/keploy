@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 // Tracker keeps, for the test that is running, the mocks F has served in it
@@ -131,8 +132,10 @@ type Tracker struct {
 	taken map[string]bool
 	// run are the exchanges the learn step served before the first test
 	// began (the start-up's) that carried a value the run made (one that
-	// drifted from its recording): an earlier place of every test of the set
-	// (Run). runNames are the variables bound at them, by mock and place, and
+	// drifted from its recording), and, under the proven switch, the calls
+	// of each test of the set that did, kept as its next begins (ranCalls):
+	// an earlier place of every later test of the set (Run). runNames are
+	// the variables bound at them, by mock and place, and
 	// runTaken their names, which no test's variable takes. setTaken are the
 	// names every test of the set has taken so far, which no run's variable
 	// takes: a run's variable is named when a test first uses it, after
@@ -547,6 +550,9 @@ func (t *Tracker) BeginAwaitingAt(at time.Time) {
 func (t *Tracker) beginAt(at time.Time) func() {
 	say := t.closeUnread()
 	t.epoch++
+	if provenswitch.On() {
+		t.run = append(t.run, ranCalls(t.served)...)
+	}
 	t.served = nil
 	t.before, t.mocks, t.kept = t.mocks, nil, nil
 	t.answered = nil
@@ -1184,7 +1190,9 @@ func (t *Tracker) Unanswer(n uint64, name string) {
 
 // Served adds a mock F served to test number n's history, until the next test
 // begins: a request of that test answered after it ended, or between it and
-// the next, lands there too, and the next Begin forgets it. Served before the
+// the next, lands there too, and the next Begin forgets it, but for the
+// test's own calls that carried a value the run made, which it keeps as the
+// run's under the proven switch (ranCalls). Served before the
 // set's first test began (the start-up's), it is the run's when it carried a
 // value the run made (Earlier.Run): an earlier place of every test of the
 // set. Either way it is the start-up's (Earlier.StartUp). A set has no
@@ -1343,6 +1351,27 @@ func drifted(e Earlier) bool {
 	return false
 }
 
+// ranCalls are the run's exchanges the ended test's own calls (served)
+// leave to the tests after it in the set: each call whose request carried a
+// value the run made (drifted), as an exchange of the run's (Earlier.Run, no
+// longer Own), as the start-up's are. A later test's call that sends such a
+// value is read with the same rule as one its own earlier call sent, and
+// binds it by the run's name (RunName) where the earlier test's call sent
+// it: a value one test made and a later one reuses is followed, never
+// learned as noise. A call of the pool's (not Own) carries no test's
+// variable, and leaves none; nor does one that carried no value the run
+// made, which the later test reads as another test's recording (Raw).
+func ranCalls(served []Earlier) []Earlier {
+	var out []Earlier
+	for _, e := range served {
+		if e.Own && drifted(e) {
+			e.Own, e.Run = false, true
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
 // Name is the name of test number n's variable bound at place of mock: the
 // same for every call that uses it, no other variable's in the test
 // (variables are named per test), and none of reserved (the test case's
@@ -1385,14 +1414,15 @@ func (t *Tracker) Name(n uint64, mock, place string, reserved map[string]bool) (
 	return name, true
 }
 
-// runPrefix begins the name of a run's variable: "run-session". A test's
-// variable is named by its place alone, so a run's name, given once for the
-// whole set when a test first uses the value, collides with none in any
-// later test. A test case's template keys are the test's own, and hold no
+// runPrefix begins the name of a run's variable: "run-session"
+// (models.RunVariablePrefix). A test's variable is named by its place alone,
+// never with it (varName), so a run's name, given once for the whole set
+// when a test first uses the value, collides with none in any later test.
+// A test case's template keys are the test's own, and hold no
 // '-' (templates.IsKey): none is a run's name. One given from elsewhere that
 // is cannot be renamed in its test, since the run's name is the set's (its
 // start-up's bind carries it): the place is refused there (RunName).
-const runPrefix = "run-"
+const runPrefix = models.RunVariablePrefix
 
 // RunName names, for a request of test number n (its start-up's included),
 // the variable bound at place of mock, an exchange of the run (Earlier.Run):
@@ -1427,6 +1457,16 @@ func (t *Tracker) RunName(n uint64, mock, place string, reserved map[string]bool
 	name := t.free(runPrefix+varName(place), reserved, t.setTaken)
 	t.runNames[key], t.runTaken[name] = name, true
 	return name, true
+}
+
+// PlaceName names, for a request of test number n, the variable bound at
+// p, the earlier place a value came from: the run's variable (RunName) at
+// an exchange of the run (Place.Run), the test's own (Name) at any other.
+func (t *Tracker) PlaceName(n uint64, p Place, reserved map[string]bool) (string, bool) {
+	if p.Run {
+		return t.RunName(n, p.Mock, p.Var, reserved)
+	}
+	return t.Name(n, p.Mock, p.Var, reserved)
 }
 
 // free is a name beginning with base that none of reserved, the run's names

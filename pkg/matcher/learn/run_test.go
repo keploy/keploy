@@ -1,11 +1,13 @@
 package learn
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/templates"
 )
 
@@ -139,9 +141,12 @@ func TestTheRunsVariableTakesNoTestsName(t *testing.T) {
 
 // Only what the start-up served, before the first test began, is the run's.
 // A request of a test answered after it ended, or between it and the next,
-// is that test's, forgotten by the next Begin; a start-up exchange that did
-// not drift is kept until the first test begins.
+// is that test's, forgotten by the next Begin (without the proven switch:
+// with it, ranCalls keeps its drifted request places, as
+// TestAnEarlierTestsCallIsAPlaceOfTheRun shows); a start-up exchange that
+// did not drift is kept until the first test begins.
 func TestOnlyTheStartUpsExchangesAreTheRuns(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0")
 	tr := NewTracker()
 	t0 := time.Unix(1_792_000_000, 0)
 	tr.Served(0, sent("mock-1", t0, "body.status", "body.status", "ok", "ok"))
@@ -595,7 +600,8 @@ func TestAValueComesFromWhereItWasSentWhole(t *testing.T) {
 
 // A run's name and a test's name never meet, whichever is named first: a
 // test's own variable at a place named like the run's takes another name, and
-// a run's variable first named after a test took its name takes another.
+// one at a place a run's name would begin with is named apart from every
+// run's name (varName), which a replay keeps for the set.
 func TestARunsNameAndATestsNameNeverMeet(t *testing.T) {
 	t0 := time.Unix(1_792_000_000, 0)
 	// The run's first: run-x, then a test's own at body.run-x.
@@ -618,8 +624,8 @@ func TestARunsNameAndATestsNameNeverMeet(t *testing.T) {
 	tr.Begin()
 	n, _, _, _ = tr.Test()
 	run, _ = tr.RunName(n, "mock-1", "body.x", nil)
-	if own != "run-x" || run == own {
-		t.Fatalf("test's first: the test's own is %q, the run's %q; want run-x and another", own, run)
+	if own != "var-run-x" || run != "run-x" {
+		t.Fatalf("test's first: the test's own is %q, the run's %q; want var-run-x (no test's variable takes a run's name) and run-x", own, run)
 	}
 }
 
@@ -712,5 +718,128 @@ func TestAStartUpCallNamesItsEarlierPlacesEarlierInTheRecording(t *testing.T) {
 	between.Served(n, sent("mock-3", t0, "body.retries", "body.retries", "7", "7"))
 	if why := classify(between); !strings.Contains(why, "appears earlier in the test, in mock-3 at body.retries") {
 		t.Errorf("a call between tests: %q, want the previous test's exchange named earlier in the test", why)
+	}
+}
+
+// ranCall is a test's own call: a request place that carried a value the run
+// made (rec drifted to live), one that did not, and an answer that drifted.
+func ranCall(mock string, at time.Time, rec, live string) Earlier {
+	return Earlier{Mock: mock, At: at, Own: true, Seen: []Seen{
+		{Side: Request, Leaf: Leaf{Path: "body.order", Type: String, Value: rec}, Live: live, Place: "body.order", Written: true, Record: "orders"},
+		{Side: Request, Leaf: Leaf{Path: "body.item", Type: String, Value: "pen"}, Live: "pen", Place: "body.item"},
+		{Side: Response, Leaf: Leaf{Path: "body.id", Type: String, Value: rec}, Live: live, Place: "body.id"},
+	}}
+}
+
+// Under the proven switch, a test's own call that sent a value the run made
+// is a place of the run's for every later test of the set: a later test's
+// call that sends the value finds it there with the rule its own earlier
+// calls are read by, and names it by the run's name, one for the set. Each
+// own call whose request drifted is kept whole, one answered after the test
+// ended among them; one whose request did not drift and a pool call leave
+// none, and a new set none of the previous set's.
+func TestAnEarlierTestsCallIsAPlaceOfTheRun(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	tr := NewTracker()
+	t0 := time.Unix(1_792_000_000, 0)
+	tr.Begin()
+	a, _, _, _ := tr.Test()
+	tr.Served(a, ranCall("mock-a", t0, "o-1", "o-9"))
+	pool := ranCall("pool-a", t0, "s-1", "s-9")
+	pool.Own = false
+	tr.Served(a, pool)
+	tr.Served(a, ranCall("mock-same", t0, "o-3", "o-3"))
+	tr.End()
+	tr.Served(a, ranCall("mock-late", t0.Add(time.Second), "o-2", "o-8"))
+	tr.Begin()
+	b, earlier, _, _ := tr.Test()
+	var want []Earlier
+	for _, e := range []Earlier{ranCall("mock-a", t0, "o-1", "o-9"), ranCall("mock-late", t0.Add(time.Second), "o-2", "o-8")} {
+		e.Own, e.Run = false, true
+		want = append(want, e)
+	}
+	if !reflect.DeepEqual(earlier, want) {
+		t.Fatalf("test B's earlier places are %+v, want test A's own calls that drifted, as the run's", earlier)
+	}
+	p, ok := appeared(clockedDrifts(), "o-1", "o-9", t0.Add(time.Minute), earlier, nil)
+	if !ok || !p.Run || p.Own || p.Mock != "mock-a" || p.Var != "body.order" || !p.Whole {
+		t.Fatalf("test B's value comes from %+v (%v), want test A's call, as the run's", p, ok)
+	}
+	name, ok := tr.PlaceName(b, p, nil)
+	if !ok || name != runPrefix+"order" {
+		t.Fatalf("test B names test A's value %q (%v), want the run's name", name, ok)
+	}
+	if own, _ := tr.PlaceName(b, Place{Mock: "mock-b", Var: "body.order"}, nil); own != "order" {
+		t.Fatalf("test B's own place is named %q, want its own name", own)
+	}
+	tr.Served(b, ranCall("mock-b", t0.Add(2*time.Second), "o-1", "o-9"))
+	tr.End()
+	tr.Begin()
+	c, earlier, _, _ := tr.Test()
+	if len(earlier) != 3 {
+		t.Fatalf("test C reads %d of the run's places, want test A's two and test B's one", len(earlier))
+	}
+	if p, _ := appeared(clockedDrifts(), "o-1", "o-9", t0.Add(time.Minute), earlier, nil); p.Mock != "mock-a" {
+		t.Fatalf("test C's value comes from %s, want the earliest call that sent it", p.Mock)
+	} else if again, _ := tr.PlaceName(c, p, nil); again != name {
+		t.Fatalf("test C names the value %q, test B %q: the run's name is the set's", again, name)
+	}
+	tr.End()
+	tr.NewSet()
+	tr.Begin()
+	if _, earlier, _, _ := tr.Test(); len(earlier) != 0 {
+		t.Fatalf("a new set reads the previous set's tests' calls: %+v", earlier)
+	}
+}
+
+// Without the proven switch nothing learns variables, and what a test's
+// calls sent is forgotten as the next test begins, as it was before the run
+// kept them.
+func TestWithoutTheSwitchATestsCallsAreNoPlaceOfTheNext(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0")
+	tr := NewTracker()
+	t0 := time.Unix(1_792_000_000, 0)
+	tr.Begin()
+	a, _, _, _ := tr.Test()
+	tr.Served(a, ranCall("mock-a", t0, "o-1", "o-9"))
+	tr.End()
+	tr.Begin()
+	if _, earlier, _, _ := tr.Test(); len(earlier) != 0 {
+		t.Fatalf("with the switch off test B reads test A's calls: %+v", earlier)
+	}
+}
+
+// A test's own variable is never named a run's name: a replay keeps a run's
+// binding for the whole set (models.RunVariable), and one a test's place
+// would have been named so is named apart from it.
+func TestATestsVariableTakesNoRunsName(t *testing.T) {
+	tr := NewTracker()
+	tr.Begin()
+	n, _, _, _ := tr.Test()
+	name, ok := tr.Name(n, "mock-1", "header.run-id", nil)
+	if !ok || models.RunVariable(name) {
+		t.Fatalf("a test's variable at header.run-id is named %q (%v), a run's name", name, ok)
+	}
+	if run, _ := tr.RunName(n, "mock-0", "header.run-id", nil); !models.RunVariable(run) || run == name {
+		t.Fatalf("the run's variable there is named %q, the test's %q", run, name)
+	}
+}
+
+// The word rule's exclusions hold across tests as in one: a clock read the
+// lead moved, which test A's call sent, is no source of another clock read
+// of its minute that test B's call sends, whether A's call is read as B's
+// own or as the run's.
+func TestARunsPlaceKeepsTheWordRulesClockExclusions(t *testing.T) {
+	rec := time.Date(2026, 10, 1, 9, 0, 0, 0, time.UTC)
+	text := func(at time.Time) string { return at.Format(time.RFC3339Nano) }
+	bRec := rec.Add(10 * time.Second)
+	for _, own := range []bool{false, true} {
+		a := Earlier{Mock: "mock-a", At: rec, Own: own, Run: !own, Seen: []Seen{{Side: Request, Leaf: Leaf{Path: "body.sent_at", Type: String, Value: text(rec)}, Live: text(rec.Add(FullRoundLead)), Place: "body.sent_at"}}}
+		if p, ok := appeared(clockedDrifts(), text(bRec), text(bRec.Add(FullRoundLead)), bRec.Add(time.Minute), []Earlier{a}, nil); ok && p.Mock == "mock-a" {
+			t.Fatalf("own %v: test B's clock read comes from test A's clock read of its minute: %+v", own, p)
+		}
+		if p, ok := appeared(clockedDrifts(), text(rec), text(rec.Add(FullRoundLead)), bRec.Add(time.Minute), []Earlier{a}, nil); !ok || p.Mock != "mock-a" {
+			t.Fatalf("own %v: test B's copy of test A's clock read whole is not followed: %+v (%v)", own, p, ok)
+		}
 	}
 }

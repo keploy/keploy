@@ -79,8 +79,10 @@ type Earlier struct {
 	// Own: the mock is one of the test's own, not the pool's. Only a test's
 	// own mocks carry its variables.
 	Own bool
-	// Run: served while no test was open (Tracker.Served): a variable bound
-	// at it is the run's, which every later test uses (Tracker.RunName).
+	// Run: served while no test was open (Tracker.Served), or the request
+	// places of an earlier test's own call that carried a value the run made
+	// (Tracker's ranCalls; StartUp false): a variable bound at it is the
+	// run's, which every later test uses (Tracker.RunName).
 	Run bool
 	// StartUp: served before the set's first test began (Tracker.Served),
 	// so the call it is an earlier place of was made then too: no test was
@@ -691,7 +693,8 @@ type Place struct {
 	Whole bool
 	// Own: the mock is one of the test's own (Earlier.Own).
 	Own bool
-	// Run: the mock was served while no test was open (Earlier.Run).
+	// Run: the mock was served while no test was open, or in an earlier
+	// test of the set (Earlier.Run).
 	Run bool
 	// Given: the place is the test case's own request (Earlier.Given), no
 	// call of the test: nothing binds a variable there, and a value found

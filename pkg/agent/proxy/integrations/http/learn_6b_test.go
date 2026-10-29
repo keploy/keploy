@@ -3,7 +3,6 @@ package http
 import (
 	"context"
 	"fmt"
-	"strings"
 	"testing"
 	"time"
 
@@ -158,10 +157,10 @@ func TestLearnMatchAnUnservedStartUpRecordingIsAnEarlierPlace(t *testing.T) {
 // A start-up call the learn step itself paired, carrying a value the run made
 // (a client id minted at start-up), is the run's exchange (learn.Earlier.Run):
 // an earlier place, with its live value, of every test of the set. A test's
-// call that carries that value is refused there, in its first test and in
-// later ones, because only a test's own calls carry its variables; it is never
-// learned as noise.
-func TestLearnMatchADriftedStartUpValueIsRefusedInEveryTest(t *testing.T) {
+// call that carries that value uses the run's variable, bound at the
+// start-up's call, in its first test and in later ones, by one name: it is
+// neither learned as noise nor refused, so no test is set aside over it.
+func TestLearnMatchADriftedStartUpValueIsTheRunsVariableInEveryTest(t *testing.T) {
 	for _, tests := range []int{1, 2} {
 		h, n, opts := learnOn(t)
 		opts.LearnPool = true
@@ -178,14 +177,16 @@ func TestLearnMatchADriftedStartUpValueIsRefusedInEveryTest(t *testing.T) {
 		own := learnRecorded("mock-1", time.Duration(tests)*time.Second, "GET", "/v1/items", "", map[string]string{"X-Client-Id": "cid-7f3a9e21"}, `{"items":[]}`)
 		tdb := &learnDb{perTest: []*models.Mock{own}, pool: map[time.Time]bool{boot.Spec.ReqTimestampMock: true}}
 		served, miss, err := h.learnMatch(ctx, live("GET", "/v1/items", "", map[string]string{"X-Client-Id": "cid-0b5d4c88"}), tdb, n, opts)
-		if err != nil {
-			t.Fatal(err)
+		if err != nil || served == nil || miss != nil {
+			t.Fatalf("test %d: the start-up client id is not followed: served %v, miss %+v, err %v", tests, served != nil, miss, err)
 		}
-		if served != nil || miss == nil || miss.res.Reason != models.MissRequestChanged || !strings.Contains(miss.res.Why, "only a test's own calls carry its variables") {
-			t.Errorf("test %d: the start-up client id was not refused as the run's: served %v, miss %+v", tests, served != nil, miss)
+		name := models.RunVariablePrefix + "client"
+		use, bind := tdb.consumed[0].Spec.Learned(), tdb.consumed[0].Spec.LearnedBinds()["mock-s"]
+		if len(use) != 1 || len(use[name].Use) != 1 || len(bind) != 1 || bind[name].Bind != "body.client" {
+			t.Errorf("test %d: the call uses %+v and binds %+v at the start-up, want the run's %s", tests, use, bind, name)
 		}
-		if len(tdb.consumed) != 0 || len(tdb.perTest) != 1 {
-			t.Errorf("test %d: the refused call consumed its recording", tests)
+		if len(tdb.consumed[0].Spec.ReqBodyNoise) != 0 {
+			t.Errorf("test %d: the client id was learned as noise too: %v", tests, tdb.consumed[0].Spec.ReqBodyNoise)
 		}
 	}
 }

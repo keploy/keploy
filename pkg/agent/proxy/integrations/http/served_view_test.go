@@ -20,15 +20,16 @@ import (
 // otherwise (learn.Earlier.View). A later test's call then reads the
 // recording with that view (learn.Order.ServedView): its value that holds no
 // word of it is noise, as before, and one that holds a word only what the
-// application sent there holds is refused, naming the recording as record's
-// full round gave it. A serve whose view HTTP does not know (one the mock
+// application sent there holds is refused, naming the recording: as an
+// earlier test's call that sent a value the run made (a place of the run's,
+// learn.Tracker's ranCalls), where it did. A serve whose view HTTP does not know (one the mock
 // manager told alone) is a view no adapter stated: the value's new word is
 // refused, naming the recording (fail closed: a false red, never a word F may
 // have given passed as noise).
 func TestLearnMatchAServedRecordingsViewIsStatedOnlyWhereHTTPKnowsIt(t *testing.T) {
 	const (
-		unstated   = "where its adapter did not say what it gave the application there"
-		givenThere = "as record's full round gave it"
+		unstated    = "where its adapter did not say what it gave the application there"
+		earlierTest = "appears in an earlier test of the set, in mock-2 at body.max, which did not drift with it"
 	)
 	for _, tc := range []struct {
 		name  string
@@ -39,7 +40,7 @@ func TestLearnMatchAServedRecordingsViewIsStatedOnlyWhereHTTPKnowsIt(t *testing.
 	}{
 		{"served as recorded by the learn step", true, `{"max":10}`, "42", ""},
 		{"served by the learn step with a learned noise", true, `{"max":12}`, "42", ""},
-		{"served by the learn step with a learned noise the value holds", true, `{"max":1203}`, "1203", givenThere},
+		{"served by the learn step with a learned noise the value holds", true, `{"max":1203}`, "1203", earlierTest},
 		{"told by the mock manager alone", false, "", "42", unstated},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

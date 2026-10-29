@@ -1682,6 +1682,16 @@ func appendNewPlaces(list []string, vs ...string) []string {
 	return list
 }
 
+// RunVariablePrefix begins the name of a run's variable: one bound for the
+// whole test set, by its start-up or by an earlier test's call, which every
+// later test of the set reads (learn.Tracker.RunName). No test's own variable
+// is named with it, so a replay keeps a binding of such a name for the set
+// (variables.Table), and forgets every other one when the next test begins.
+const RunVariablePrefix = "run-"
+
+// RunVariable reports whether name is a run's variable's (RunVariablePrefix).
+func RunVariable(name string) bool { return strings.HasPrefix(name, RunVariablePrefix) }
+
 // TestVariablesResp is the answer of GET /agent/variables.
 type TestVariablesResp struct {
 	Variables []VariableBinding `json:"variables"`
