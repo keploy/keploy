@@ -14,24 +14,27 @@ import (
 // replay skipped made none of its calls, so a cache it filled at record is
 // empty, and the next test makes that call in its own window. It is served
 // unchecked and never required of the test (the store names it on the test's
-// evidence). nil when the store shows none, when the request is one call more
-// than the open test recorded (its extra call stays a miss: keploy #4745's
-// F20), when no set-aside recording is the request exactly, and when another
-// call took the one it is first.
+// evidence). nil when the store shows none, when no set-aside recording is
+// the request exactly, and when another call took the one it is first.
+//
+// A request one more than the open test recorded (extraCall) is served too
+// when such a copy is left: the copy is the set's own recording of the call,
+// and each set-aside recording answers once in the staging, so the calls of
+// that shape across the set never exceed what the set recorded. Past every
+// exact copy, the test's own and the set-aside ones, the request stays an
+// extra call (keploy #4745's F20: never another recording of the call, nor
+// one served again).
 //
 // The set-aside recordings are matched as the live pool's would be, on a view
 // that holds only them and that no match can consume, and on a copy of the
 // test's bindings: the answer binds nothing, as it is another test's.
-func (h *HTTP) setAsideAnswer(ctx context.Context, input *req, mockDb integrations.MockMemDb, headerNoise, bodyNoise map[string][]string, urlNoise []string, autoURLDynamic, schemaNoiseDetection, schemaNoiseStrict, mockCorrelation bool) (*models.Mock, error) {
+func (h *HTTP) setAsideAnswer(ctx context.Context, input *req, mockDb integrations.MockMemDb, headerNoise, bodyNoise map[string][]string, urlNoise []string, autoURLDynamic, schemaNoiseStrict bool) (*models.Mock, error) {
 	sr, ok := mockDb.(integrations.SetAsideReader)
 	if !ok {
 		return nil, nil
 	}
 	aside := FilterHTTPMocks(sr.SetAsideMocks(models.HTTP))
 	if len(aside) == 0 {
-		return nil, nil
-	}
-	if n, _ := h.extraCall(ctx, input, mockDb, headerNoise, bodyNoise, urlNoise, autoURLDynamic, schemaNoiseDetection, schemaNoiseStrict, mockCorrelation); n > 0 {
 		return nil, nil
 	}
 	vars := variableTable(mockDb)
