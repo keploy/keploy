@@ -79,13 +79,9 @@ func newSlowDisk(t *testing.T, dir string, chunk int, pause time.Duration) *slow
 // Close waits for a writer that keeps writing, however long a slow disk
 // takes: it used to give up after a fixed 5 s, and a recording that ended
 // then lost every mock not yet written (on a disk taking about 640 KiB/s,
-// 3.3 MB of 9.9 MB were on it). Here the disk takes about 7 s, with progress
-// every 100 ms, against a stall window of 1 s.
+// 3.3 MB of 9.9 MB were on it). Here the disk takes about 7 s.
 func TestClose_WaitsForASlowDiskThatKeepsWriting(t *testing.T) {
 	t.Setenv("KEPLOY_MOCK_FORMAT", "gob")
-	saved := gobStallAfter
-	gobStallAfter = time.Second
-	t.Cleanup(func() { gobStallAfter = saved })
 	dir := t.TempDir()
 	disk := newSlowDisk(t, dir, 64<<10, 100*time.Millisecond)
 	ys := New(zap.NewNop(), dir, "mocks")
@@ -104,14 +100,13 @@ func TestClose_WaitsForASlowDiskThatKeepsWriting(t *testing.T) {
 	}
 }
 
-// A write the disk takes longer over than the stall window is waited for
-// while it goes: the file's buffer writes 256 KiB at once, which a disk
-// taking 32 KiB every 100 ms takes 800 ms over, against a window of 500 ms.
+// A write the disk takes long over is waited for while it goes: the file's
+// buffer writes 256 KiB at once, which a disk taking 32 KiB every 100 ms
+// takes 800 ms over, and far longer on a loaded box. Close used to give up
+// on a writer that made no progress for a while, and on a loaded box (45 of
+// 60 mocks not encoded, the test's window 500 ms) dropped the rest.
 func TestClose_WaitsForAWriteTheDiskTakesLongOver(t *testing.T) {
 	t.Setenv("KEPLOY_MOCK_FORMAT", "gob")
-	saved := gobStallAfter
-	gobStallAfter = 500 * time.Millisecond
-	t.Cleanup(func() { gobStallAfter = saved })
 	dir := t.TempDir()
 	disk := newSlowDisk(t, dir, 32<<10, 100*time.Millisecond)
 	ys := New(zap.NewNop(), dir, "mocks")
@@ -129,26 +124,24 @@ func TestClose_WaitsForAWriteTheDiskTakesLongOver(t *testing.T) {
 	}
 }
 
-// A writer that makes no progress (a stuck disk) is not waited for forever:
-// once it has made none for gobStallAfter, Close says how many mocks were not
-// written, as models.ErrMocksNotWritten. A later Close waits for it again,
-// and once the disk takes the rest, every mock is on it.
+// A stuck disk ends at the caller's stop: CloseUnless says how many mocks
+// were not written, as models.ErrMocksNotWritten. A later Close waits for the
+// writer again, and once the disk takes the rest, every mock is on it.
 func TestClose_SaysWhatAStuckWriterDidNotWrite(t *testing.T) {
 	t.Setenv("KEPLOY_MOCK_FORMAT", "gob")
-	saved := gobStallAfter
-	gobStallAfter = 300 * time.Millisecond
-	t.Cleanup(func() { gobStallAfter = saved })
 	dir := t.TempDir()
 	disk := newSlowDisk(t, dir, 64<<10, 10*time.Millisecond)
 	disk.paused.Store(true)
 	ys := New(zap.NewNop(), dir, "mocks")
 	const n = 100
 	insertGobMocks(t, ys, n)
-	err := ys.Close()
+	stop := make(chan struct{})
+	close(stop)
+	err := ys.CloseUnless(stop)
 	if !errors.Is(err, models.ErrMocksNotWritten) {
 		t.Fatalf("Close returned %v on a stuck disk, want models.ErrMocksNotWritten", err)
 	}
-	if !strings.Contains(err.Error(), fmt.Sprintf("of the %d mocks handed to it were not encoded", n)) {
+	if !strings.Contains(err.Error(), fmt.Sprintf("of the %d mocks handed to the gob mock writer were not written", n)) {
 		t.Fatalf("Close said %q; want how many of the %d mocks were not written", err, n)
 	}
 
@@ -165,16 +158,13 @@ func TestClose_SaysWhatAStuckWriterDidNotWrite(t *testing.T) {
 	}
 }
 
-// Close does not wait behind an insert that holds the writer's lifecycle
-// lock while the disk is stuck: one the full queue sent to the synchronous
-// fallback holds it while it waits for the stuck writer, and Close used to
-// wait for it for as long as the disk stayed stuck. It says what was not
-// written; once the disk takes the rest, a later Close lands every mock.
+// CloseUnless does not wait behind an insert that holds the writer's
+// lifecycle lock once its stop closes: one the full queue sent to the
+// synchronous fallback holds it while it waits for the stuck writer. It says
+// what was not written; once the disk takes the rest, a later Close lands
+// every mock.
 func TestClose_DoesNotWaitBehindAnInsertOnAStuckDisk(t *testing.T) {
 	t.Setenv("KEPLOY_MOCK_FORMAT", "gob")
-	saved := gobStallAfter
-	gobStallAfter = 300 * time.Millisecond
-	t.Cleanup(func() { gobStallAfter = saved })
 	dir := t.TempDir()
 	disk := newSlowDisk(t, dir, 256<<10, time.Millisecond)
 	disk.paused.Store(true)
@@ -206,7 +196,9 @@ func TestClose_DoesNotWaitBehindAnInsertOnAStuckDisk(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	stop.Store(true)
-	if err := ys.Close(); !errors.Is(err, models.ErrMocksNotWritten) {
+	stopNow := make(chan struct{})
+	close(stopNow)
+	if err := ys.CloseUnless(stopNow); !errors.Is(err, models.ErrMocksNotWritten) {
 		t.Fatalf("Close returned %v behind an insert held on a stuck disk, want models.ErrMocksNotWritten", err)
 	}
 

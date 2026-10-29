@@ -519,8 +519,9 @@ func (l CaptureLosses) NotJudgedRemedy() string {
 }
 
 // ErrMocksNotWritten says mocks the recording captured were not written to
-// the mock file (its writer was stuck, or a write failed): the recording is
-// incomplete, a capture loss as much as a call never captured.
+// the mock file (a write failed, or the stop was asked to end before a slow
+// or stuck disk had taken them): the recording is incomplete, a capture loss
+// as much as a call never captured.
 var ErrMocksNotWritten = errors.New("mocks the recording captured were not written to the mock file")
 
 // CaptureLoss is how many times one kind of capture loss happened in the
