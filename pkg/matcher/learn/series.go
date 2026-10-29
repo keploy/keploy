@@ -4,6 +4,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"go.keploy.io/server/v3/pkg/models"
 )
 
 // A RECURRING CALL'S SERIES.
@@ -22,11 +24,13 @@ import (
 // checked against the run's clock on the call's own span, so no value is
 // left unchecked and a read off the run's clock is a miss.
 
-// SeriesRead is one recording of a call: Shape, its request as the learn
-// step reads it, its values typed (an Instant leaf where the decoder types
-// the field as one), and Span, when the application can have read its
-// clock for it on the recording's app clock (Window.Rec, EpochRead.Span).
+// SeriesRead is one recording of a call: Kind, its parser's, Shape, its
+// request as the learn step reads it, its values typed (an Instant leaf
+// where the decoder types the field as one), and Span, when the application
+// can have read its clock for it on the recording's app clock (Window.Rec,
+// EpochRead.Span).
 type SeriesRead struct {
+	Kind  models.Kind
 	Shape Shape
 	Span  Span
 }
@@ -56,9 +60,9 @@ type Series struct {
 }
 
 // SeriesOf parts reads, the recordings of a set (in the order of their
-// calls), into series: recordings of one operation key, with the same fixed
-// parts and the same leaves (by path and type), are one series when each
-// leaf either holds one value in all of them or, written as a bare epoch
+// calls), into series: recordings of one kind (never two parsers') and one
+// operation key, with the same fixed parts and the same leaves (by path and
+// type), are one series when each leaf either holds one value in all of them or, written as a bare epoch
 // number or a typed instant, tracks every recording's call by one offset
 // (EpochTrack: MinEpochReads values at least, every read inside its own
 // span). A leaf that varies but tracks no offset (a phone number, a counter,
@@ -77,7 +81,7 @@ func SeriesOf(reads []SeriesRead, known Known) []Series {
 	groups := map[string][]int{}
 	var order []string
 	for i, r := range reads {
-		k := b.shapeKey(r.Shape)
+		k := string(r.Kind) + "\x02" + b.shapeKey(r.Shape)
 		if _, ok := groups[k]; !ok {
 			order = append(order, k)
 		}
