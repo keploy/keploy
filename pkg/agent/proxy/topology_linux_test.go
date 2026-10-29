@@ -33,6 +33,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/starts"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // rowSink is a TopologySink that keeps what it is told.
@@ -1154,7 +1155,7 @@ func TestHandleConnectionEndsAPassThroughOnCancelAndOnEitherSidesClose(t *testin
 					}
 				}
 			}()
-			p := bypassRecordProxy(t, ln.Addr().String())
+			p, logs := bypassRecordProxyLogging(t, ln.Addr().String())
 			app, src := acceptedConn(t)
 			conn := newStallingConn(src)
 			ctx, cancel := context.WithCancel(context.Background())
@@ -1210,6 +1211,9 @@ func TestHandleConnectionEndsAPassThroughOnCancelAndOnEitherSidesClose(t *testin
 				_ = app.Close()
 			}
 			_ = awaitEvent(t, done, "handleConnection returning")
+			if tc.end == cancelled || tc.end == clientStalls {
+				noErrorLogged(t, logs)
+			}
 		})
 	}
 }
@@ -1246,7 +1250,7 @@ func TestHandleConnectionEndsAPassThroughWhoseReaderHoldsTheServersLastBytes(t *
 		}
 	}()
 	t.Cleanup(func() { close(lines) })
-	p := bypassRecordProxy(t, ln.Addr().String())
+	p, logs := bypassRecordProxyLogging(t, ln.Addr().String())
 	app, src := acceptedConn(t)
 	// The proxy's connection to the server tells what it has read.
 	up, err := net.Dial("tcp4", ln.Addr().String())
@@ -1276,6 +1280,61 @@ func TestHandleConnectionEndsAPassThroughWhoseReaderHoldsTheServersLastBytes(t *
 	}
 	cancel()
 	_ = awaitEvent(t, done, "handleConnection returning")
+	noErrorLogged(t, logs)
+}
+
+// A pass-through ends on cancel whatever the server still has not read: the
+// relay's write of the client's bytes to a server that reads nothing more
+// waits for room, and the context's end puts the server connection's deadline
+// in the past, so the write returns, quietly (the relay ended because the
+// context did). The connection to the server is the proxy's own, made to
+// stall its writes as a full socket does.
+func TestHandleConnectionEndsAPassThroughOnCancelAsTheServerReadsNothingMore(t *testing.T) {
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	// The server greets, so a record passes the connection through for the
+	// rule, and reads to the connection's end.
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		if _, err := conn.Write([]byte("hello\n")); err == nil {
+			_, _ = io.Copy(io.Discard, conn)
+		}
+	}()
+	p, logs := bypassRecordProxyLogging(t, ln.Addr().String())
+	app, src := acceptedConn(t)
+	up, err := net.Dial("tcp4", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = up.Close() })
+	server := newStallingConn(&closeCountingConn{Conn: up})
+	end, ok := clientEnd(src.RemoteAddr())
+	if !ok {
+		t.Fatalf("no client end for %v", src.RemoteAddr())
+	}
+	p.predials.put(end, util.NewPredialed(ln.Addr().String(), connseq.NewUpstream(server)))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- p.handleConnection(ctx, src) }()
+	if got := <-readN(app, len("hello\n")); got != "hello\n" {
+		t.Fatalf("the client got %q, want the server's greeting", got)
+	}
+	server.stall()
+	if _, err := app.Write([]byte("request\n")); err != nil {
+		t.Fatal(err)
+	}
+	_ = awaitEvent(t, server.stalled, "the relay's write of the client's bytes to the server waiting for room")
+	cancel()
+	_ = awaitEvent(t, done, "handleConnection returning")
+	noErrorLogged(t, logs)
 }
 
 // A client of a connection a bypassRule passes through that half-closes to
@@ -1353,6 +1412,14 @@ func (c *readsTellingConn) Read(b []byte) (int, error) {
 // no host (one whose server speaks first) is passed through.
 func bypassRecordProxy(t *testing.T, addr string) *Proxy {
 	t.Helper()
+	p, _ := bypassRecordProxyLogging(t, addr)
+	return p
+}
+
+// bypassRecordProxyLogging is bypassRecordProxy with what the proxy logs at
+// the Error level and above.
+func bypassRecordProxyLogging(t *testing.T, addr string) (*Proxy, *observer.ObservedLogs) {
+	t.Helper()
 	recorded.reset()
 	t.Cleanup(recorded.reset)
 	resetBypassRulesWarned(t)
@@ -1366,7 +1433,8 @@ func bypassRecordProxy(t *testing.T, addr string) *Proxy {
 	cfg.Agent.Mode = models.MODE_RECORD
 	cfg.Agent.MockMode = true
 	cfg.Agent.ClientNSPID = uint32(hold(t).Process.Pid)
-	p := New(zap.NewNop(), fakeDestInfo{dest: ipv4Dest(t, addr)}, cfg)
+	core, logs := observer.New(zap.ErrorLevel)
+	p := New(zap.New(core), fakeDestInfo{dest: ipv4Dest(t, addr)}, cfg)
 	p.nsswitchData = []byte("preseeded-by-test") // see testProxy
 	p.Integrations = map[integrations.IntegrationType]integrations.Integrations{
 		integrations.MYSQL: mysql.New(zap.NewNop()),
@@ -1377,7 +1445,21 @@ func bypassRecordProxy(t *testing.T, addr string) *Proxy {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { syncMock.Get().SetOutputChannel(nil) })
-	return p
+	// The session's mock manager sweeps its pools on a ticker until it is
+	// closed: closed here, or each run leaves its sweeper behind. (The
+	// proxy's expiring caches keep their janitors: golang-lru's expirable
+	// LRU has no way to stop one.)
+	t.Cleanup(func() { p.setMockManager(nil) })
+	return p, logs
+}
+
+// noErrorLogged fails t if the proxy logged at the Error level or above: a
+// pass-through that ends because its context did ends quietly.
+func noErrorLogged(t *testing.T, logs *observer.ObservedLogs) {
+	t.Helper()
+	for _, e := range logs.All() {
+		t.Errorf("the proxy logged %s %q (%v), want nothing at Error on the context's end", e.Level, e.Message, e.ContextMap())
+	}
 }
 
 // stallingConn is the client's connection as the proxy holds it, which can

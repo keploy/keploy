@@ -21,8 +21,19 @@ import (
 // waited for. ended delivers what it returned, after all that.
 func passThrough(t *testing.T, client, dest net.Conn) (cancel context.CancelFunc, ended <-chan error) {
 	t.Helper()
+	cancel, ended, _ = passThroughLimited(t, client, dest, -1)
+	return cancel, ended
+}
+
+// passThroughLimited is passThrough with the errgroup the readers run in,
+// whose number of goroutines is limited to limit (-1: no limit): with a limit
+// of the two readers, a goroutine the test adds to g runs only once one of
+// them has returned, so it tells, by a count, that a reader has ended.
+func passThroughLimited(t *testing.T, client, dest net.Conn, limit int) (cancel context.CancelFunc, ended <-chan error, g *errgroup.Group) {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(limit)
 	gctx = context.WithValue(gctx, models.ErrGroupKey, g)
 	gctx = context.WithValue(gctx, models.ClientConnectionIDKey, "1")
 	gctx = context.WithValue(gctx, models.DestConnectionIDKey, "2")
@@ -40,7 +51,7 @@ func passThrough(t *testing.T, client, dest net.Conn) (cancel context.CancelFunc
 		_ = client.Close()
 		_ = dest.Close()
 	})
-	return cancel, out
+	return cancel, out, g
 }
 
 // loopbackPair is a connected pair of TCP connections, closed when t ends.
@@ -382,34 +393,103 @@ func TestGlobalPassThroughReadsSmallAndGathersWhatQueues(t *testing.T) {
 // A side's reads queued behind its EOF are written to the other side before
 // that EOF ends the relay: the relay takes a side's error from its own channel,
 // and one taken first would end the relay with them unwritten. The client's
-// first read is written alone, and that write is held until its last read,
-// which comes with its EOF, has been made, so its error waits beside its
-// queued reads. The relay then takes either first (a select): with the queued
-// reads dropped at the end, about one run in two fails. No clock.
+// first read is written alone, and that write is held until the client's
+// reader has returned (a goroutine added to its errgroup, limited to the two
+// readers, runs only then), so its last reads and its EOF both wait for the
+// relay when it next selects, and it takes either first. With the queued reads
+// dropped at the end, each round fails one time in two, so the row runs the
+// round 64 times: the drop goes unseen once in 2^64. A count, no clock.
 func TestGlobalPassThroughWritesASidesQueuedReadsBeforeItsEnd(t *testing.T) {
+	for round := 0; round < 64; round++ {
+		if !writesQueuedReadsBeforeItsEnd(t, round) {
+			return
+		}
+	}
+}
+
+// writesQueuedReadsBeforeItsEnd is one round of
+// TestGlobalPassThroughWritesASidesQueuedReadsBeforeItsEnd, and reports whether
+// it passed.
+func writesQueuedReadsBeforeItsEnd(t *testing.T, round int) bool {
+	t.Helper()
 	const chunks = 20 // fewer than passThroughQueue: all of them queue
 	app, cp := net.Pipe()
 	dp, srv := net.Pipe()
 	t.Cleanup(func() { _ = app.Close(); _ = srv.Close() })
-	want := counted(chunks*pUtil.WaitReadSize, 9)
+	want := counted(chunks*pUtil.WaitReadSize, byte(round))
 	client := &streamingConn{Conn: cp, data: want, sizes: make(chan int, 2*chunks), endWithLast: true, rest: make(chan struct{})}
 	dest := &heldWriteConn{Conn: dp, writes: make(chan int, 2*chunks), release: make(chan struct{})}
-	_, ended := passThrough(t, client, dest)
+	_, ended, g := passThroughLimited(t, client, dest, 2)
 
+	// Both readers run by the first write: the relay starts them first.
 	if got := awaitEvent(t, dest.writes, "the first write to the destination"); got != pUtil.WaitReadSize {
-		t.Fatalf("the first write took %d bytes, want the client's first read alone (%d)", got, pUtil.WaitReadSize)
+		t.Errorf("round %d: the first write took %d bytes, want the client's first read alone (%d)", round, got, pUtil.WaitReadSize)
+		return false
 	}
-	close(client.rest)
-	for i := 0; i < chunks; i++ { // its last read comes with its EOF
-		awaitEvent(t, client.sizes, "a read of the client")
-	}
+	close(client.rest) // its last read comes with its EOF
+	clientReaderEnded := make(chan struct{})
+	go g.Go(func() error { close(clientReaderEnded); return nil })
+	awaitEvent(t, clientReaderEnded, "the client's reader returning, its last reads and its EOF queued")
 	close(dest.release)
 	if err := awaitEvent(t, ended, "the pass-through's end on the client's EOF"); err != nil {
-		t.Fatalf("globalPassThrough = %v, want nil on the client's end", err)
+		t.Errorf("round %d: globalPassThrough = %v, want nil on the client's end", round, err)
+		return false
 	}
 	dest.mu.Lock()
 	defer dest.mu.Unlock()
 	if !bytes.Equal(dest.got, want) {
-		t.Fatalf("the destination got %d bytes, want the client's %d in order: its last reads were dropped at its end", len(dest.got), len(want))
+		t.Errorf("round %d: the destination got %d bytes, want the client's %d in order: its last reads were dropped at its end", round, len(dest.got), len(want))
+		return false
 	}
+	return true
+}
+
+// A pass-through's readers end with it, while its context lasts: a reader
+// holding a read the ended relay will never take returns once the relay does.
+// Here the relay ends on a write to the destination that fails, while the
+// client streams on, so its reader fills its queue and holds a read more.
+// handleConnection ends the context its readers run under before it waits for
+// them, so it does not show there: the errgroup here is waited for with its
+// context still open, and the readers must still end. Red with the readers'
+// context the call's own: the client's reader waits on its full queue forever.
+func TestGlobalPassThroughEndsItsReadersWithIt(t *testing.T) {
+	app, cp := net.Pipe()
+	dp, srv := net.Pipe()
+	t.Cleanup(func() { _ = app.Close(); _ = srv.Close() })
+	client := &endlessConn{Conn: cp}
+	dest := &failingWriteConn{Conn: dp}
+	g, gctx := errgroup.WithContext(context.Background())
+	gctx = context.WithValue(gctx, models.ErrGroupKey, g)
+	gctx = context.WithValue(gctx, models.ClientConnectionIDKey, "1")
+	gctx = context.WithValue(gctx, models.DestConnectionIDKey, "2")
+	returned := make(chan error, 1)
+	go func() { returned <- p0().globalPassThrough(gctx, client, dest) }()
+	if err := awaitEvent(t, returned, "the pass-through's end on its failed write"); err == nil {
+		t.Fatal("globalPassThrough = nil, want the failed write's error")
+	}
+	// Closed, as its caller closes them: the destination's reader, in its
+	// read, returns on that; the client's never reads an error.
+	_ = client.Close()
+	_ = dest.Close()
+	waited := make(chan error, 1)
+	go func() { waited <- g.Wait() }()
+	_ = awaitEvent(t, waited, "the pass-through's readers ending with it, their context still open")
+}
+
+// endlessConn is a client that always has more to send: each Read fills its
+// buffer, and none waits or fails.
+type endlessConn struct{ net.Conn }
+
+func (endlessConn) Read(b []byte) (int, error) {
+	for i := range b {
+		b[i] = 'c'
+	}
+	return len(b), nil
+}
+
+// failingWriteConn is a destination whose every write fails.
+type failingWriteConn struct{ net.Conn }
+
+func (failingWriteConn) Write([]byte) (int, error) {
+	return 0, errors.New("the destination reset the connection")
 }
