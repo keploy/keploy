@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
-	"math"
 	"net"
 	"sync/atomic"
 
@@ -15,6 +14,12 @@ import (
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.uber.org/zap"
 )
+
+// maxEncodedAnswer is the largest encoded answer (1 GiB) whose framed copy
+// EncodeToBinary sizes up front. It decides only that: a larger answer, which
+// a result set of many packets may legally be, is still served, its copy
+// grown by append.
+const maxEncodedAnswer = 1 << 30
 
 // resultSetEncodes counts the result sets EncodeToBinary encoded rather than
 // served from their cache.
@@ -181,19 +186,24 @@ func EncodeToBinary(ctx context.Context, logger *zap.Logger, packet *mysql.Packe
 	// Encode the header for the packet. data may be a result set's cached
 	// payload, shared by every serve of that answer: it is only read here,
 	// into a new slice that holds the header and then the payload.
-	// Bound the payload before sizing the slice, so 4+n cannot overflow.
-	// No recorded MySQL answer comes near 2 GiB.
-	n := len(data)
-	if n > math.MaxInt32 {
-		return nil, fmt.Errorf("encoded %T is %d bytes, more than the 2 GiB limit for one answer", packet.Message, n)
+	// The slice is sized for the header and the payload only when the
+	// payload is at most maxEncodedAnswer, so 4+len(data) cannot overflow
+	// even where int is 32 bits. The guard compares len(data) itself, the
+	// bound static analysis accepts for the size. A larger payload gets a
+	// 4-byte header that append grows. The bytes are the same either way,
+	// and no answer is refused.
+	var header []byte
+	if len(data) <= maxEncodedAnswer {
+		header = make([]byte, 4, 4+len(data))
+	} else {
+		header = make([]byte, 4)
 	}
-	header := make([]byte, 4, 4+n)
 	// IMPORTANT:
 	// For composite (multi-packet) messages, `data` contains multiple packets where
 	// only the FIRST sub-packet lacks its 4-byte header. The recorded header's
 	// PayloadLength corresponds to that first payload only (e.g., column-count = 1).
 	// For single-packet messages, we can safely use len(data).
-	payloadLen := n
+	payloadLen := len(data)
 	if isCompositeMessage(packet.Message) && packet.Header.Header != nil {
 		payloadLen = int(packet.Header.Header.PayloadLength)
 	}
