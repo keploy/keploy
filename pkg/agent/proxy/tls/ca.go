@@ -854,6 +854,7 @@ func runAlias(ca *caState) string        { return "keploy-mitm-" + ca.runID }
 // per-user CA (Windows), which is kept so the user is not re-prompted next run.
 type nativeInstall struct {
 	certFile string // system-store filename (Linux)
+	nssDir   string // NSS shared database the CA was added to (Linux)
 	alias    string // JDK keystore alias
 	cn       string // certificate CN, for the Windows ROOT-store removal
 	remove   bool
@@ -955,7 +956,8 @@ func setupNativeForApp(ctx context.Context, logger *zap.Logger, ca *caState, sto
 	// cancels ctx, which kills the store's update after the anchors are
 	// written). Recorded only once the update had succeeded, such an install
 	// left its anchor trusted until the next run's sweep.
-	recordNativeInstall(&nativeInstall{certFile: certFileName, alias: alias, remove: true})
+	nssDir := nssDBDir(appPID)
+	recordNativeInstall(&nativeInstall{certFile: certFileName, alias: alias, nssDir: nssDir, remove: true})
 	var finalCAPath string
 	for _, path := range caPaths {
 		caPath := filepath.Join(path, certFileName)
@@ -1006,6 +1008,9 @@ func setupNativeForApp(ctx context.Context, logger *zap.Logger, ca *caState, sto
 	if err := SetEnvForPath(logger, finalCAPath); err != nil {
 		return err
 	}
+	// Chromium-based browsers and other NSS clients read neither the system
+	// store nor the variables above (ca_nss.go).
+	installNSSCA(ctx, logger, nssDir, finalCAPath, alias)
 
 	// Native mode completed successfully — the CA is now installed in
 	// the system store (and the Java keystore if Java is present).
@@ -1053,6 +1058,7 @@ func TeardownNativeCA(logger *zap.Logger) {
 		}
 	}
 	removeJavaAlias(ctx, logger, n.alias)
+	removeNSSCA(ctx, logger, n.nssDir, n.alias)
 	if runtime.GOOS == "windows" {
 		removeWindowsCAByName(ctx, logger, n.cn)
 	}

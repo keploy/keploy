@@ -118,11 +118,11 @@ func (p *acceptingProxy) WaitPairedBytes(_ context.Context, n uint64) error {
 	return p.bytesErr
 }
 func (p *acceptingProxy) PairedBytesProgress() uint64 { return 0 }
-func (p *acceptingProxy) ListenDrops() (uint64, error) {
+func (p *acceptingProxy) ListenDrops() (models.ListenDrops, error) {
 	if p.unmarked != nil {
-		return 0, p.unmarked
+		return models.ListenDrops{}, p.unmarked
 	}
-	return p.drops, nil
+	return models.ListenDrops{Listener: p.drops, Net: 2, NetKnown: true}, nil
 }
 
 // The agent answers the proxy's accepts and drops and the kernel's count.
@@ -140,8 +140,8 @@ func TestProxyConnsAreTheHooksCountAndTheProxysAccepts(t *testing.T) {
 	hooks.appSettled.Add(3)
 	a := &Agent{logger: zap.NewNop(), Hooks: hooks, Proxy: proxy}
 	got, err := a.ProxyConns(ctx)
-	if err != nil || got != (models.ProxyConnCounts{Established: 5, Accepted: 2, ListenDrops: 7, AppConns: 4, AppSettled: 3}) {
-		t.Fatalf("ProxyConns = %+v, %v; want Established 5, Accepted 2, ListenDrops 7, AppConns 4, AppSettled 3", got, err)
+	if err != nil || got != (models.ProxyConnCounts{Established: 5, Accepted: 2, ListenDrops: models.ListenDrops{Listener: 7, Net: 2, NetKnown: true}, AppConns: 4, AppSettled: 3}) {
+		t.Fatalf("ProxyConns = %+v, %v; want Established 5, Accepted 2, ListenDrops 7 (2 in the namespace), AppConns 4, AppSettled 3", got, err)
 	}
 	lostApp := &connHooks{established: 5, app: 1}
 	lostApp.appSettled.Add(1)
@@ -393,7 +393,9 @@ func (p *acceptingProxyNoBytes) Accepted() (uint64, error) { return p.p.Accepted
 func (p *acceptingProxyNoBytes) WaitAccepted(ctx context.Context, n uint64) error {
 	return p.p.WaitAccepted(ctx, n)
 }
-func (p *acceptingProxyNoBytes) ListenDrops() (uint64, error) { return p.p.ListenDrops() }
+func (p *acceptingProxyNoBytes) ListenDrops() (models.ListenDrops, error) {
+	return p.p.ListenDrops()
+}
 
 // markingProxy can have its listener marked, and notes the order of the calls
 // the agent makes.

@@ -18,6 +18,7 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent/token"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/agentargs"
 	"go.keploy.io/server/v3/pkg/platform/engine"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
@@ -913,9 +914,11 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 		command = append(command, "--client-pid-ns", ns)
 	}
 
-	if idc.conf.Debug {
-		command = append(command, "--debug")
-	}
+	// The CLI's root-level settings (--debug, --disable-tele, --disable-ansi,
+	// --disable-mapping), each with its value: the keploy.yml directory is not
+	// bind-mounted into the agent's filesystem, so the agent's own config
+	// would otherwise hold the defaults, whatever the CLI resolved.
+	command = append(command, agentargs.Root(idc.conf)...)
 	if opts.MockMode && opts.AgentPort != 0 {
 		idc.mockAgentURL = fmt.Sprintf("http://localhost:%d", opts.AgentPort)
 	}
@@ -936,12 +939,6 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	if idc.conf.Record.Synchronous {
 		command = append(command, "--sync")
 	}
-	// Forward the operator's --disable-mapping (root-level config) into
-	// the agent container. The keploy.yml directory isn't bind-mounted
-	// into the agent's filesystem, so viper inside the container would
-	// otherwise default to true and disable record-side mapping
-	// production regardless of the host config.
-	command = append(command, fmt.Sprintf("--disable-mapping=%t", idc.conf.DisableMapping))
 	if idc.conf.Record.EnableSampling > 0 {
 		command = append(command, fmt.Sprintf("--enable-sampling=%d", idc.conf.Record.EnableSampling))
 	}
@@ -971,7 +968,7 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 		command = append(command, "--channel-binding-shim")
 	}
 	// Upstream TLS verification. Forwarded unconditionally as =%t, matching
-	// --disable-mapping above and the native launcher, so that the precedence
+	// the root settings above and the native launcher, so that the precedence
 	// flag > yaml > default resolves IDENTICALLY here and on a native run —
 	// see proxy.resolveUpstreamTLSConfig. The CA path is resolved inside the
 	// agent container, so the operator must bind-mount the PEM (or point at a
@@ -985,9 +982,6 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	}
 	if opts.MemoryLimit > 0 {
 		command = append(command, "--memory-limit", strconv.FormatUint(opts.MemoryLimit, 10))
-	}
-	if models.IsAnsiDisabled {
-		command = append(command, "--disable-ansi")
 	}
 	if len(opts.PassThroughPorts) > 0 {
 		portStrings := make([]string, len(opts.PassThroughPorts))

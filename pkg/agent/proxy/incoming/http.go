@@ -932,14 +932,18 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 	// upstream unblocks http.ReadResponse / req.Write if the loop is
 	// stuck in upstream I/O on a hung backend. Race-safe via the
 	// atomic — we always close whatever connHolder pointer is current,
-	// even if redial swapped it concurrently.
-	go func() {
-		<-ctx.Done()
+	// even if redial swapped it concurrently. ctx lives as long as the
+	// ingress, not the connection, so the close is registered for this
+	// call's life only: a goroutine parked on ctx.Done() outlived every
+	// connection that ended on its own, one per connection the agent ever
+	// proxied, each holding its closed connection until the agent stopped.
+	stopCloseOnCancel := context.AfterFunc(ctx, func() {
 		_ = clientConn.Close()
 		if h := upConnHolder.Load(); h != nil {
 			_ = h.c.Close()
 		}
-	}()
+	})
+	defer stopCloseOnCancel()
 
 	wireConn := &wireTimeConn{Conn: clientConn}
 	clientReader := bufio.NewReader(wireConn)
@@ -1627,12 +1631,14 @@ func ingressConnName(clientConn net.Conn, app string) string {
 // Keep-alive is preserved (no Connection: close injected), so the client
 // can reuse the connection for multiple requests.
 func forwardRawTCP(ctx context.Context, clientConn, upConn net.Conn) {
-	// Close connections on context cancellation (shutdown).
-	go func() {
-		<-ctx.Done()
+	// Close connections on context cancellation (shutdown), for this call's
+	// life only: ctx is the ingress's, and a goroutine parked on it outlived
+	// every connection that ended on its own.
+	stopCloseOnCancel := context.AfterFunc(ctx, func() {
 		clientConn.Close()
 		upConn.Close()
-	}()
+	})
+	defer stopCloseOnCancel()
 
 	done := make(chan struct{}, 2)
 	// The FIN forwarding below used to assert *net.TCPConn concretely,

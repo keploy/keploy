@@ -1,13 +1,16 @@
 package provider
 
 import (
+	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 )
 
@@ -65,5 +68,52 @@ func TestMockRecordPassThroughPortsLoadWithARulesConfig(t *testing.T) {
 	config.SetByPassPorts(cfg, ports)
 	if got := config.GetByPassPorts(cfg); len(got) != 1 || got[0] != 8080 {
 		t.Fatalf("the flag did not reach bypassRules: %v", got)
+	}
+}
+
+// keploy mock refuses at start, as record and test do, a bypassRule with a
+// host or a path on a mysqlPorts port, naming it and the port-only rule; a
+// port-only rule on that port is taken.
+func TestMockRecordRefusesAHostRuleOnAMysqlPort(t *testing.T) {
+	t.Setenv(provenswitch.Env, "")
+	original := NativeCommandSupported
+	t.Cleanup(func() { NativeCommandSupported = original })
+	RegisterNativeCommandSupport(func(string, string) bool { return true })
+	t.Cleanup(viper.Reset)
+	for _, tc := range []struct {
+		name, rule, refused string
+	}{
+		{"a host rule", "  - host: db.internal\n    port: 3307\n", `{host: "db.internal", path: "", port: 3307}`},
+		{"a port-only rule", "  - port: 3307\n", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			viper.Reset()
+			dir := t.TempDir()
+			t.Chdir(dir)
+			yml := "mysqlPorts: [3307]\nbypassRules:\n" + tc.rule
+			if err := os.WriteFile(filepath.Join(dir, "keploy.yml"), []byte(yml), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			cmd, cfg, c := mockRecordCmd(t, dir)
+			if err := cmd.ParseFlags([]string{"-c", "python app.py", "-p", dir}); err != nil {
+				t.Fatal(err)
+			}
+			if err := c.PreProcessFlags(cmd); err != nil {
+				t.Fatalf("PreProcessFlags: %v", err)
+			}
+			err := c.ValidateFlags(context.Background(), cmd)
+			if tc.refused != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.refused) || !strings.Contains(err.Error(), "{port: N}") {
+					t.Fatalf("ValidateFlags = %v, want a refusal naming %s and the port-only rule", err, tc.refused)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ValidateFlags = %v, want a port-only rule on a mysql port taken", err)
+			}
+			if got := config.GetByPassPorts(cfg); len(got) != 1 || got[0] != 3307 {
+				t.Fatalf("the kernel's ports = %v, want [3307]", got)
+			}
+		})
 	}
 }

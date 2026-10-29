@@ -47,7 +47,7 @@ func TestGetAlias_LinuxSaysTheCLIsPidNamespace(t *testing.T) {
 	want := " --client-pid 4242 --client-pid-ns " + ownPIDNamespace(t) + " "
 	for _, mode := range []models.Mode{models.MODE_RECORD, models.MODE_TEST} {
 		opts := models.SetupOptions{KeployContainer: "keploy-test", AgentPort: 16789, ProxyPort: 16790, DnsPort: 16791, ClientNSPID: 4242, Mode: mode}
-		alias, err := getAlias(context.Background(), zap.NewNop(), opts, false)
+		alias, err := getAlias(context.Background(), zap.NewNop(), opts, &config.Config{})
 		if err != nil {
 			t.Fatalf("%s: getAlias: %v", mode, err)
 		}

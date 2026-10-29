@@ -446,22 +446,34 @@ func (p *Proxy) WaitAccepted(ctx context.Context, n uint64) error {
 	return p.accepts.WaitAccepted(ctx, n)
 }
 
-// ListenDrops is the kernel's count of the packets it dropped at the proxy's
-// marked listener (models.ProxyConnCounts' ListenDrops). It fails as Accepted
-// does, and where the platform cannot read it.
-func (p *Proxy) ListenDrops() (uint64, error) {
+// ListenDrops are the kernel's counts of what it dropped at the proxy's
+// marked listener (models.ListenDrops): the listener's own, then its network
+// namespace's. It fails as Accepted does, and where the platform cannot read
+// the listener's; the namespace's it cannot read is said in NetUnread, and
+// every drop at the listener then counts.
+func (p *Proxy) ListenDrops() (models.ListenDrops, error) {
 	ln, err := p.markedListener()
 	if err != nil {
-		return 0, err
+		return models.ListenDrops{}, err
 	}
 	if _, err := p.accepts.Accepted(); err != nil {
-		return 0, err
+		return models.ListenDrops{}, err
 	}
 	rc, err := ln.(*net.TCPListener).SyscallConn()
 	if err != nil {
-		return 0, fmt.Errorf("%w: reach the proxy's listener: %v", models.ErrProxyConnsUnsupported, err)
+		return models.ListenDrops{}, fmt.Errorf("%w: reach the proxy's listener: %v", models.ErrProxyConnsUnsupported, err)
 	}
-	return listenerDrops(rc)
+	own, err := listenerDrops(rc)
+	if err != nil {
+		return models.ListenDrops{}, err
+	}
+	d := models.ListenDrops{Listener: own}
+	if d.Net, err = netListenDrops(rc); err != nil {
+		d.Net, d.NetUnread = 0, err.Error()
+	} else {
+		d.NetKnown = true
+	}
+	return d, nil
 }
 
 // Serve is the proxy's listener and accept loop, which StartProxy runs (and

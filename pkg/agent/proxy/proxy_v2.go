@@ -336,7 +336,7 @@ func (p *Proxy) recordViaSupervisor(
 	relayDone := make(chan error, 1)
 	// A client-side TLS upgrade the relay makes is charged as every
 	// client-side handshake is (clientTLS), to this connection's destination.
-	relayCtx, relayCancel := context.WithCancel(p.withClientTLS(ctx, remoteOf(dstConn)))
+	relayCtx, relayCancel := context.WithCancel(p.withClientTLS(ctx, remoteOf(dstConn), opts.SrcPid))
 	defer relayCancel()
 	go func() { relayDone <- r.Run(relayCtx) }()
 
