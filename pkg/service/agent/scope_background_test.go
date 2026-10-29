@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/pkg/models"
@@ -39,7 +40,7 @@ func TestUnusedBackgroundRecordingsAreSaidApartFromUnmadeCalls(t *testing.T) {
 			require.NoError(t, a.serveTestExactly(context.Background(), "orders::TestPlaceOrder"))
 			a.Proxy = unusedBackgroundProxy{wireProxy: p, test: tc.test, unused: []string{"mock-2"}}
 
-			ev, err := a.testEvidence(context.Background(), "orders::TestPlaceOrder", true)
+			ev, err := a.testEvidence(context.Background(), "orders::TestPlaceOrder", true, time.Time{}, servedSpan{})
 			require.NoError(t, err)
 			require.Equal(t, tc.want, ev.Background)
 		})
