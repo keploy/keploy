@@ -431,6 +431,13 @@ func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFi
 		if err := a.readUnstagedFromDisk(); err != nil {
 			return err
 		}
+		// The learn step reads the set's recordings now, in the background,
+		// not on its first call's answer path (record's full round alone).
+		if w, ok := a.Proxy.(coreAgent.LearnSetWarmer); ok {
+			if err := w.WarmLearnSet(); err != nil {
+				return fmt.Errorf("read the test set's recordings for the learn step: %w", err)
+			}
+		}
 		bg := a.settleBackground(ex)
 		if _, can := es.(coreAgent.ExactBackgroundServer); bg != nil && !can {
 			// A proxy that cannot serve the background rules serves the set as

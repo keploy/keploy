@@ -4953,6 +4953,42 @@ func (p *Proxy) SetRecordedBefore(src func(t time.Time, visit func(*models.Mock)
 
 var _ agent.RecordedBeforeSetter = (*Proxy)(nil)
 
+// lastRecorded is the latest instant a recording's request can be read at
+// (time.Time.UnixNano's last): every recording is recorded before it.
+var lastRecorded = time.Unix(0, math.MaxInt64)
+
+// WarmLearnSet implements agent.LearnSetWarmer: in record's full round,
+// while the set's learn step is on (MockManager.learns), the learn tracker
+// reads, in the background, what the learn step reads of each recording of
+// the staged set (learn.Tracker.WarmSet): every one the manager stages and
+// the agent keeps on disk (RangeRecordedBefore), in recorded order. The set's
+// calls then find its payloads read, off their answer path, and each waits
+// only for a recording of its own the staging is reading. Any other session
+// reads nothing: no learn step reads the recordings. With no mock manager
+// there is no set (errNoMockManager).
+func (p *Proxy) WarmLearnSet() error {
+	m := p.getMockManager()
+	if m == nil {
+		return errNoMockManager
+	}
+	if !provenswitch.On() || !m.learns() {
+		return nil
+	}
+	done := p.learnTracker.WarmSet(func(visit func(*models.Mock) bool) error {
+		return m.RangeRecordedBefore(lastRecorded, visit)
+	})
+	go func() {
+		u := <-done
+		p.logger.Info("the learn step read the test set's recordings as it was staged, before its calls read them",
+			zap.Int("read_at_staging", u.Staged), zap.Int("read_by_calls", u.Called),
+			zap.Int64("kept_held_bytes", u.Held), zap.Int64("kept_words_bytes", u.Words), zap.Int64("kept_forms_bytes", u.Forms),
+			zap.Int64("set_budget_bytes", u.Budget), zap.Bool("held_full", u.HeldFull), zap.Bool("forms_full", u.FormsFull))
+	}()
+	return nil
+}
+
+var _ agent.LearnSetWarmer = (*Proxy)(nil)
+
 // SetLearnEnded implements agent.LearnEndSetter: the mock store says it
 // (MockManager.SetLearnEnded, integrations.LearnEnded), and so does the learn
 // tracker the parsers find on their connection's context

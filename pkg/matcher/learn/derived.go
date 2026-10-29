@@ -78,6 +78,9 @@ import (
 // what they read of each payload (warm), taking only the recordings no
 // other handler is reading, so handlers needing the set's payloads at once
 // read different ones at the same time, not each in turn behind one reader.
+// The agent reads them as it stages the set (WarmSet), in the background,
+// so a call finds the set's payloads read, and reads only those the
+// staging has not read yet.
 type setDerived struct {
 	mu sync.Mutex
 	// budget is the bytes the three tiers keep in all (setBudget).
@@ -94,6 +97,9 @@ type setDerived struct {
 	// waits is how many times a handler waited for another's read, for the
 	// rows.
 	waits int
+	// staged and called are the payloads read for the set (warmOne) by its
+	// staging (WarmSet) and by its calls, for the rows.
+	staged, called int
 	// bodies are the set's lazy Raws' payloads, loaded within a fixed
 	// budget (bodyStore), made at the first lazy Raw.
 	bodies *bodyStore
@@ -1042,34 +1048,40 @@ var warmed = func() chan struct{} {
 // reading. So handlers that need a set's payloads at once read different
 // ones at the same time, instead of each waiting in turn on the one reading
 // the first (derive): one payload read is never a wait for every handler.
+// The set's staging (WarmSet) is one more reader, taking one recording at a
+// time: a call waits for it only on a recording of its own the staging is
+// reading, and a call after the staging read the set's takes none, finding
+// each read under one look at the set.
 func (dc *DriftCache) warm(raw []Raw) {
 	if dc == nil || dc.set == nil {
 		return
 	}
 	s := dc.set
-	var others []chan struct{}
+	s.mu.Lock()
+	var left []Raw
 	for _, x := range raw {
 		if dc.setOf(x) == nil {
 			continue
 		}
-		s.mu.Lock()
-		if !s.held.room() {
-			s.mu.Unlock()
+		if ch, ok := s.warming[x.id]; ok && ch == warmed {
+			continue
+		}
+		left = append(left, x)
+	}
+	s.mu.Unlock()
+	var others []chan struct{}
+	for _, x := range left {
+		ch, mine := s.take(x)
+		if ch == nil {
 			break
 		}
-		ch, taken := s.warming[x.id]
-		if !taken {
-			ch = make(chan struct{})
-			s.warming[strings.Clone(x.id)] = ch
-		}
-		s.mu.Unlock()
-		if taken {
+		if !mine {
 			if ch != warmed {
 				others = append(others, ch)
 			}
 			continue
 		}
-		dc.warmOne(s, x, ch)
+		dc.warmOne(s, x, ch, false)
 	}
 	for _, ch := range others {
 		select {
@@ -1083,14 +1095,38 @@ func (dc *DriftCache) warm(raw []Raw) {
 	}
 }
 
+// take is the channel closed once x's payload is read (warmOne), and
+// whether the caller is to read it: the first to ask for x takes it. nil
+// where the set keeps no more (held has no room: past its budget, or after
+// its NewSet), where nobody reads it for the set.
+func (s *setDerived) take(x Raw) (ch chan struct{}, mine bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.held.room() {
+		return nil, false
+	}
+	ch, taken := s.warming[x.id]
+	if !taken {
+		ch = make(chan struct{})
+		s.warming[strings.Clone(x.id)] = ch
+	}
+	return ch, !taken
+}
+
 // warmOne reads what the rules of every call read of x's payload: its
 // decoded forms and instants (payloadMoments), its words' filter
 // (searchWords) and its searched instants (searchedKeys), then lets the
-// handlers waiting for it go, whatever the reads do.
-func (dc *DriftCache) warmOne(s *setDerived, x Raw, ch chan struct{}) {
+// handlers waiting for it go, whatever the reads do. staged says the set's
+// staging read it (WarmSet), not a call.
+func (dc *DriftCache) warmOne(s *setDerived, x Raw, ch chan struct{}, staged bool) {
 	defer func() {
 		s.mu.Lock()
 		s.warming[x.id] = warmed
+		if staged {
+			s.staged++
+		} else {
+			s.called++
+		}
 		s.mu.Unlock()
 		close(ch)
 	}()
