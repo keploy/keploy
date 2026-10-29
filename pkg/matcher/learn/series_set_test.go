@@ -3,7 +3,9 @@ package learn
 import (
 	"errors"
 	"reflect"
+	"runtime"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -281,5 +283,113 @@ func TestSeriesOfRangeIsSeriesOfSetKeepingOnlyWhatItIsAskedTo(t *testing.T) {
 	if got, err := SeriesOfRange(func(func(*models.Mock) bool) error { return boom },
 		func(*models.Mock) bool { return true }, nil); !errors.Is(err, boom) || got.Series != nil || got.Mocks != nil {
 		t.Fatalf("a failed read returned %+v, %v; want no series and its error", got, err)
+	}
+}
+
+// liveHeap is the heap's live bytes, collected first.
+func liveHeap() uint64 {
+	runtime.GC()
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&ms)
+	return ms.HeapAlloc
+}
+
+// SeriesOfRange holds in memory, while it reads, only the requests of the
+// operations a recording it keeps has (kind, key and fixed parts): a set's
+// other calls, however many and however large, are never read into memory
+// together (founder rule: no component OOMs). A store of 256 writes of 64 KiB
+// each beside a timer's claims, only the claims kept: the live heap while it
+// reads stays under a quarter of the writes' size, and the claims' series is
+// what SeriesOfSet reads of the claims alone.
+func TestSeriesOfRangeHoldsNoRequestOfACallNoKeptOneShares(t *testing.T) {
+	const writes, size = 256, 64 << 10
+	defer RegisterSeriesShape(seriesKind, func(m *models.Mock) (Shape, bool) {
+		s, ok := readSeriesRow(m)
+		if ok && m.Spec.Metadata["big"] != "" {
+			s.Leaves["body.big"] = Leaf{Path: "body.big", Noise: "body.big", Type: String, Value: m.Spec.Metadata["big"]}
+		}
+		return s, ok
+	})()
+	base := time.Date(2026, 10, 29, 10, 0, 0, 0, time.UTC)
+	var claims []*models.Mock
+	for i := 0; i <= 6; i++ {
+		at := base.Add(time.Duration(2*i)*time.Second + 500*time.Millisecond)
+		claims = append(claims,
+			rowMock("http-"+strconv.Itoa(i), models.HTTP, at.Add(-700*time.Millisecond), at.Add(-600*time.Millisecond), nil),
+			rowMock("claim-"+strconv.Itoa(i), seriesKind, at, at.Add(3*time.Millisecond),
+				map[string]string{"op": "claim", "at": strconv.FormatInt(at.Add(-time.Millisecond).Unix(), 10)}))
+	}
+	want := SeriesOfSet(claims, nil)
+	before := liveHeap()
+	var peak uint64
+	got, err := SeriesOfRange(func(visit func(*models.Mock) bool) error {
+		for _, m := range claims {
+			if !visit(m) {
+				return nil
+			}
+		}
+		for i := 0; i < writes; i++ {
+			at := base.Add(20*time.Second + time.Duration(i)*37*time.Millisecond) // after the claims: their spans stay
+			// Each write is decoded as it is visited, as the on-disk store
+			// does: the range holds none of them.
+			if !visit(rowMock("write-"+strconv.Itoa(i), seriesKind, at, at.Add(time.Millisecond),
+				map[string]string{"op": "write-" + strconv.Itoa(i), "at": "7", "big": strings.Repeat(string(rune('a'+i%26)), size)})) {
+				return nil
+			}
+		}
+		if h := liveHeap(); h > peak {
+			peak = h
+		}
+		return nil
+	}, func(m *models.Mock) bool { return strings.HasPrefix(m.Name, "claim-") }, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if held := int64(peak) - int64(before); held > writes*size/4 {
+		t.Fatalf("SeriesOfRange held %d KiB live while it read %d writes of %d KiB none it keeps shares an operation with; want under %d KiB",
+			held>>10, writes, size>>10, writes*size/4>>10)
+	}
+	if len(got.Series) != 1 || !reflect.DeepEqual(got.Series, want.Series) {
+		t.Fatalf("SeriesOfRange read %d series %+v; want the claims' one, SeriesOfSet's of the claims %+v", len(got.Series), got.Series, want.Series)
+	}
+	for _, m := range got.Mocks {
+		if !strings.HasPrefix(m.Name, "claim-") {
+			t.Errorf("SeriesOfRange read %q, which shares no operation with a recording it keeps", m.Name)
+		}
+	}
+}
+
+// Recordings of two kinds are never one series, even where their readings
+// give them one key and one shape: a call of one parser is never answered
+// from another's recording, and judging never learns one series across them.
+func TestSeriesOfSetNeverReadsTwoKindsIntoOneSeries(t *testing.T) {
+	const otherKind models.Kind = "SeriesRowOtherKind"
+	defer RegisterSeriesShape(seriesKind, readSeriesRow)()
+	defer RegisterSeriesShape(otherKind, readSeriesRow)()
+	base := time.Date(2026, 10, 29, 10, 0, 0, 0, time.UTC)
+	var recorded []*models.Mock
+	for i := 0; i <= 6; i++ {
+		at := base.Add(time.Duration(2*i)*time.Second + 500*time.Millisecond)
+		kind := seriesKind
+		if i%2 == 1 {
+			kind = otherKind
+		}
+		recorded = append(recorded,
+			rowMock("http-"+strconv.Itoa(i), models.HTTP, at.Add(-700*time.Millisecond), at.Add(-600*time.Millisecond), nil),
+			rowMock("claim-"+strconv.Itoa(i), kind, at, at.Add(3*time.Millisecond),
+				map[string]string{"op": "claim", "at": strconv.FormatInt(at.Add(-time.Millisecond).Unix(), 10)}))
+	}
+	got := SeriesOfSet(recorded, nil)
+	for _, s := range got.Series {
+		kinds := map[models.Kind]bool{}
+		for _, i := range s.Members {
+			kinds[got.Mocks[i].Kind] = true
+		}
+		if len(kinds) != 1 {
+			t.Errorf("a series %q holds recordings of %d kinds: %v", s.Key, len(kinds), kinds)
+		}
+	}
+	if len(got.Series) != 2 {
+		t.Fatalf("got %d series; want one of each kind's claims", len(got.Series))
 	}
 }
