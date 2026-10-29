@@ -55,11 +55,19 @@ type answeredStore struct {
 
 func (s answeredStore) ConsumedTestMocks() []*models.Mock { return s.answered }
 
-// missReport is the report of the miss decodeGeneric returns for req.
+// missReport is the report of the miss decodeGeneric returns for req. A
+// request answered instead writes its answer to the app, which reads it
+// and hangs up: the decoder ends with no miss, and the row fails at once
+// rather than leaving the answer blocked on a pipe nobody reads.
 func missReport(t *testing.T, store integrations.MockMemDb, req string) *models.MockMismatchReport {
 	t.Helper()
 	app, proxySide := net.Pipe()
 	defer app.Close()
+	go func() {
+		if _, err := app.Read(make([]byte, 1)); err == nil {
+			app.Close()
+		}
+	}()
 	err := decodeGeneric(context.Background(), zap.NewNop(), []byte(req), proxySide, nil, store, models.OutgoingOptions{})
 	var r interface {
 		MismatchReport() *models.MockMismatchReport
