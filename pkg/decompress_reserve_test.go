@@ -22,11 +22,13 @@ type reserveLedger struct {
 	calls               int
 	room                int64 // it refuses n > 0 past this (0: never)
 	refused             int
-	badGiveBack         bool // a give-back took it below zero
+	badGiveBack         bool    // a give-back took it below zero
+	log                 []int64 // every call's n, in order
 }
 
 func (l *reserveLedger) reserve(n int64) bool {
 	l.calls++
+	l.log = append(l.log, n)
 	if n > 0 && l.room > 0 && l.held+n > l.room {
 		l.refused++
 		return false
@@ -406,4 +408,37 @@ func TestBrotliDecoderStateIsReservedAtTheFormatsLimits(t *testing.T) {
 	}
 	runtime.KeepAlive(rd)
 	t.Logf("a %d-byte stream: the decoder held %d bytes once it had begun (reserved %d); its tables %d, the rest %d (brotliReaderBytes %d)", len(wire), held, reserved, brotliTableBytes, rest, brotliReaderBytes)
+}
+
+// TestADecodeAsksForEachGrownBufferWholeBeforeItGivesTheOldOneBack pins the
+// copy as the output grows: while it copies the buffer it outgrew into the
+// new one it holds both, so it asks for the new buffer's whole capacity, not
+// the growth, and gives the old one back only once it has copied it. A
+// decode that asked for the growth alone would end with the same books (its
+// output's capacity) and hold half as much again as it had reserved while
+// it copied.
+func TestADecodeAsksForEachGrownBufferWholeBeforeItGivesTheOldOneBack(t *testing.T) {
+	body := textBody(600<<10, 11) // grows 64 KiB to 1 MiB, and ends short of it
+	for _, c := range []encoded{
+		{"gzip", "gzip", gzipOf(t, body), body},
+		{"br", "br", brotliOf(t, body, 5, 18), body},
+	} {
+		var l reserveLedger
+		out, err := DecompressReserving(zap.NewNop(), c.enc, c.wire, 5<<20, l.reserve)
+		if err != nil || !bytes.Equal(out, c.body) {
+			t.Fatalf("%s: %d bytes, err %v; want the body", c.name, len(out), err)
+		}
+		if len(l.log) == 0 || l.log[0] <= 0 {
+			t.Fatalf("%s: calls %v; want the decoder's state asked for first", c.name, l.log)
+		}
+		state := l.log[0]
+		want := []int64{state, 64 << 10}
+		for buf := int64(64 << 10); buf < int64(len(body)); buf *= 2 {
+			want = append(want, 2*buf, -buf)
+		}
+		want = append(want, -state)
+		if fmt.Sprint(l.log) != fmt.Sprint(want) {
+			t.Errorf("%s: asked and gave back %v, want %v", c.name, l.log, want)
+		}
+	}
 }

@@ -241,6 +241,7 @@ type decodeBooks struct {
 	held, asks int64
 	refuseAt   int // refuse the refuseAt-th ask for room (1-based; 0 never)
 	refused    int
+	heldThen   int64  // what the books held when they refused
 	after      func() // called after each ask or give-back, on the capture's goroutine
 }
 
@@ -249,6 +250,7 @@ func (b *decodeBooks) reserve(n int64) bool {
 		b.asks++
 		if b.refuseAt > 0 && int(b.asks) == b.refuseAt {
 			b.refused++
+			b.heldThen = b.held
 			return false
 		}
 	}
@@ -391,9 +393,14 @@ func TestACaptureLeftOutAfterItsDecodesHoldsNoRoom(t *testing.T) {
 // modes: Capture stops there, sends nothing, never calls BodiesDecodedFunc,
 // closes the response body, and leaves nothing reserved.
 func TestARefusedDecodeLeavesTheExchangeOut(t *testing.T) {
-	body := []byte(strings.Repeat(`{"id":1,"name":"a record"},`, 20000))
+	body := []byte(strings.Repeat(`{"id":1,"name":"a record"},`, 20000)) // 540 KB
+	// The request's gzip decode asks 6 times: its decoder's state, its first
+	// 64 KiB buffer, and its growths to 128 KiB, 256 KiB, 512 KiB and 1 MiB.
+	// The response's brotli decode asks next: its decoder's state (7), its
+	// first buffer (8).
+	const requestAsks = 6
 	for _, synchronous := range []bool{false, true} {
-		for _, refuseAt := range []int{1, 2, 4, 6} { // the request's decoder, its buffer, the response's ...
+		for _, refuseAt := range []int{1, 2, 4, 6, 7, 8} {
 			books := decodeBooks{refuseAt: refuseAt}
 			calls := 0
 			ctx := WithDecodeReserve(context.Background(), books.reserve)
@@ -409,6 +416,11 @@ func TestARefusedDecodeLeavesTheExchangeOut(t *testing.T) {
 			Capture(ctx, zap.NewNop(), tcs, req, resp, time.Now(), time.Now(), models.IncomingOptions{}, synchronous, false, 8080)
 			if books.refused != 1 {
 				t.Fatalf("synchronous=%v, refuse at %d: refused %d times; the row's exchange must reach it", synchronous, refuseAt, books.refused)
+			}
+			// A refusal past the request's asks lands in the response's
+			// decode: the request's is done, its decoded body held.
+			if requestDone := books.heldThen >= bufferFor(len(body)); requestDone != (refuseAt > requestAsks) {
+				t.Fatalf("synchronous=%v, refuse at %d: %d bytes held at the refusal; it must land in the %s's decode", synchronous, refuseAt, books.heldThen, map[bool]string{false: "request", true: "response"}[refuseAt > requestAsks])
 			}
 			select {
 			case tc := <-tcs:
