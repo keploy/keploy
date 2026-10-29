@@ -36,6 +36,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/cbshim"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/async"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mismatch"
 	"go.keploy.io/server/v3/pkg/agent/proxy/relay"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
@@ -5837,6 +5838,10 @@ func (p *Proxy) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 					Source:     parserErr.MismatchReport.Source,
 					RecordedIn: parserErr.MismatchReport.RecordedIn,
 					Repeat:     parserErr.MismatchReport.Repeat.Clone(),
+					// The call is its closest recording with the clock
+					// moved, by the field diff, when that diff is whole.
+					Clock: provenswitch.On() && learn.ClockOnly(parserErr.MismatchReport.FieldDiffs,
+						len(parserErr.MismatchReport.FieldDiffs) >= mismatch.MaxFieldDiffs),
 				})
 			} else if errors.Is(parserErr.Err, models.ErrNoMockMatched) {
 				// A genuine miss without a structured report must still reach
