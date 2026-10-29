@@ -973,7 +973,11 @@ func TestOpenFilesAreDescriptorsWhereTheKernelCannotCompareThem(t *testing.T) {
 
 // A descriptor closed while its process's files are read is not held: one
 // listed and closed before it is compared is not counted, and one counted
-// already and closed since gives way to the descriptor compared with it.
+// already and closed since gives way to the descriptor compared with it. One
+// that closes and opens again as they are read (a churn, as dash's
+// `exec 3<&-` makes) takes none of the other files with it, nor counts its
+// file twice: the files read stay between the fewest and the most the
+// process held as they were read.
 func TestOpenFilesLetGoOfADescriptorClosedAsTheyAreRead(t *testing.T) {
 	ents := func(fds ...int) []os.DirEntry {
 		var es []os.DirEntry
@@ -982,19 +986,39 @@ func TestOpenFilesLetGoOfADescriptorClosedAsTheyAreRead(t *testing.T) {
 		}
 		return es
 	}
+	const closed = -1
 	for _, tc := range []struct {
-		name    string
-		files   map[int]int // descriptor to file, as the read begins
-		closeAt int         // a comparison with it closes descriptor close
-		close   int
-		want    int
+		name  string
+		files map[int]int // descriptor to file, as the read begins; files order as their numbers
+		// at[fd][n] changes descriptors (to the file each names from then
+		// on, or closed) as the read compares fd for the n+1st time.
+		at    map[int][]map[int]int
+		churn int // closed as it is compared with another, open on a new file as it is with itself
+		want  int
 	}{
-		{"one file over two descriptors", map[int]int{0: 1, 1: 2, 2: 2, 3: 3, 10: 3}, -1, -1, 3},
-		{"a duplicate of a file read before the last", map[int]int{0: 2, 1: 1, 5: 2}, -1, -1, 2},
-		{"a listed descriptor closed before it is compared", map[int]int{0: 1, 1: 2, 2: 2, 3: 3}, 3, 3, 2},
-		{"a counted descriptor closed, its duplicate read after", map[int]int{0: 1, 1: 2, 3: 3, 10: 3}, 10, 3, 3},
-		{"a counted descriptor closed, its duplicate and another file read after", map[int]int{0: 1, 3: 3, 10: 3, 11: 5}, 10, 3, 3},
-		{"a counted descriptor closed, another file read after", map[int]int{0: 1, 3: 3, 10: 4}, 10, 3, 2},
+		{"one file over two descriptors", map[int]int{0: 1, 1: 2, 2: 2, 3: 3, 10: 3}, nil, -1, 3},
+		{"a duplicate of a file read before the last", map[int]int{0: 2, 1: 1, 5: 2}, nil, -1, 2},
+		{"a listed descriptor closed before it is compared", map[int]int{0: 1, 1: 2, 2: 2, 3: 3},
+			map[int][]map[int]int{3: {{3: closed}}}, -1, 2},
+		{"a counted descriptor closed, its duplicate read after", map[int]int{0: 1, 1: 2, 3: 3, 10: 3},
+			map[int][]map[int]int{10: {{3: closed}}}, -1, 3},
+		{"a counted descriptor closed, its duplicate and another file read after", map[int]int{0: 1, 3: 3, 10: 3, 11: 5},
+			map[int][]map[int]int{10: {{3: closed}}}, -1, 3},
+		{"a counted descriptor closed, another file read after", map[int]int{0: 1, 3: 3, 10: 4},
+			map[int][]map[int]int{10: {{3: closed}}}, -1, 2},
+		// Closed as it is compared with a counted one, open again as it is
+		// asked of itself: the counted one is not let go for it.
+		{"a descriptor closed and opened again between two looks at it", map[int]int{0: 1, 1: 2, 2: 2, 3: 3},
+			map[int][]map[int]int{3: {{3: closed}, {3: 4}, {3: closed}}}, -1, 2},
+		// fd 3 and its duplicate fd 10 closed, and fd 3 opened again on a
+		// file that orders after both others, then duplicated to fd 10: fd
+		// 3 is held where its first file ordered, and fd 10 is not found
+		// there.
+		{"a counted descriptor opened again on a file of another order", map[int]int{0: 10, 1: 20, 3: 5, 10: 5},
+			map[int][]map[int]int{10: {{3: 25, 10: 25}}}, -1, 3},
+		{"a counted file whose duplicate is opened again on another file", map[int]int{0: 10, 3: 5, 10: 5, 11: 30},
+			map[int][]map[int]int{11: {{3: closed, 10: 25}}}, -1, 3},
+		{"a descriptor that never holds still as it is read", map[int]int{0: 1, 1: 2, 2: 2, 3: 3}, nil, 3, 3},
 	} {
 		files := map[int]int{}
 		var fds []int
@@ -1003,9 +1027,31 @@ func TestOpenFilesLetGoOfADescriptorClosedAsTheyAreRead(t *testing.T) {
 			fds = append(fds, fd)
 		}
 		sort.Ints(fds)
+		seen, next := map[int]int{}, 100
+		change := func(fd int) {
+			if steps := tc.at[fd]; seen[fd] < len(steps) {
+				for d, f := range steps[seen[fd]] {
+					if f == closed {
+						delete(files, d)
+					} else {
+						files[d] = f
+					}
+				}
+			}
+			seen[fd]++
+		}
 		kcmp := func(_, a, b int) (int, error) {
-			if a == tc.closeAt || b == tc.closeAt {
-				delete(files, tc.close)
+			change(a)
+			if b != a {
+				change(b)
+			}
+			if a == tc.churn || b == tc.churn {
+				if a == b {
+					next++
+					files[a] = next
+				} else {
+					delete(files, tc.churn)
+				}
 			}
 			fa, okA := files[a]
 			fb, okB := files[b]

@@ -5,6 +5,7 @@ package utils
 import (
 	"errors"
 	"fmt"
+	"math/bits"
 	"os"
 	"slices"
 	"strconv"
@@ -108,59 +109,171 @@ const kcmpFile = 0
 // closed) holds no fewer files as it does, and read by its descriptors its
 // churn would look one step deeper than it is (ExitRatchet). Two descriptors
 // name one file where kcmp(2) says so; one closed since the listing is not
-// held, and not counted. Where the kernel cannot compare them (no kcmp, or
-// keploy may not ask: a seccomp filter, a process it may not trace), each
-// descriptor counts.
+// held, and not counted, and one closed and opened again as they are read
+// takes none of the others' files with it (fileTally). Where the kernel
+// cannot compare them (no kcmp, or keploy may not ask: a seccomp filter, a
+// process it may not trace), each descriptor counts.
 func openFiles(task int, fds []os.DirEntry) int { return openFilesBy(kcmpFiles, task, fds) }
 
 // openFilesBy is openFiles with the kernel's comparison of two descriptors'
 // files (kcmpFiles; the tests' own).
 func openFilesBy(kcmp func(task, a, b int) (int, error), task int, fds []os.DirEntry) int {
-	held := make([]int, 0, len(fds))
+	t := fileTally{kcmp: kcmp, task: task}
 	for _, e := range fds {
-		fd, err := strconv.Atoi(e.Name())
-		if err != nil {
-			continue
-		}
-		if held, err = holdFile(kcmp, task, fd, held); err != nil {
-			return len(fds)
+		if fd, err := strconv.Atoi(e.Name()); err == nil {
+			t.todo = append(t.todo, fd)
 		}
 	}
-	return len(held)
+	n := len(t.todo)
+	t.left = 4 * (n + 1) * (bits.Len(uint(n)) + 2)
+	held, err := t.settle()
+	if err != nil && !errors.Is(err, errTallySpent) {
+		return len(fds)
+	}
+	return held
 }
 
-// holdFile adds descriptor fd of task to held, one descriptor of each file
-// the process holds, in kcmp's order of the files, unless one there names its
-// file already, or it was closed since the listing; one there closed since is
-// let go. Its error is kcmp's where it cannot compare them.
-func holdFile(kcmp func(task, a, b int) (int, error), task, fd int, held []int) ([]int, error) {
-	lo, hi := 0, len(held)
+// fileTally is a read of the open files a process holds through its
+// descriptors (openFiles), as it goes: those held, one descriptor of each
+// file in kcmp's order of the files, each with the others found naming its
+// file; and the listed descriptors left to read. Descriptors close and open
+// again as it reads (a churn of them: dash's `exec 3<&-` dups fd 3 to fd 10
+// and closes both), so it acts only on what a descriptor says of itself: one
+// is let go where it reads closed, never where the other compared with it
+// may be the one closed (it may have opened again since); and one held that
+// closed and opened again on another file can stand out of the files' order,
+// so the files are counted only once each reads before the next.
+type fileTally struct {
+	kcmp func(task, a, b int) (int, error)
+	task int
+	held []heldFile
+	todo []int
+	left int // comparisons it may yet make (errTallySpent)
+}
+
+// heldFile is a descriptor of a file a process holds, and the other
+// descriptors found naming it.
+type heldFile struct {
+	fd   int
+	dups []int
+}
+
+// errTallySpent is a read of open files that made the comparisons it may
+// (fileTally.left) with its process's descriptors still closing and opening
+// again under it: each descriptor it has not settled counts as a file.
+var errTallySpent = errors.New("the descriptors kept changing as their files were read")
+
+// settle reads the descriptors left, then counts the files held once each
+// reads before the next in kcmp's order; one that does not is read again.
+// The count is what it holds, and each descriptor it has not settled, where
+// it errs (errTallySpent; kcmp's own error).
+func (t *fileTally) settle() (int, error) {
+	for {
+		for len(t.todo) > 0 {
+			if err := t.hold(t.todo[0]); err != nil {
+				return len(t.held) + len(t.todo), err
+			}
+			t.todo = t.todo[1:]
+		}
+		if done, err := t.ordered(); err != nil || done {
+			return len(t.held) + len(t.todo), err
+		}
+	}
+}
+
+// hold adds descriptor fd to the files held, in kcmp's order of the files,
+// or to the duplicates of the one there that names its file; one closed is
+// not held. Where one of two compared was closed, each is asked of itself:
+// one closed is let go, and where both are open again (one closed and opened
+// again in between), they are compared again.
+func (t *fileTally) hold(fd int) error {
+	lo, hi := 0, len(t.held)
 	for lo < hi {
 		mid := int(uint(lo+hi) >> 1)
-		order, err := kcmp(task, fd, held[mid])
+		order, err := t.cmp(fd, t.held[mid].fd)
 		switch {
 		case errors.Is(err, unix.EBADF):
-			// One of the two was closed since the listing.
-			if _, err := kcmp(task, fd, fd); errors.Is(err, unix.EBADF) {
-				return held, nil
-			} else if err != nil {
-				return held, err
+			if open, err := t.open(fd); err != nil || !open {
+				return err
 			}
-			held = slices.Delete(held, mid, mid+1)
-			lo, hi = 0, len(held)
+			if err := t.drop(mid); err != nil {
+				return err
+			}
+			lo, hi = 0, len(t.held)
 		case err != nil:
-			return held, err
+			return err
 		case order == 0:
-			return held, nil
+			t.held[mid].dups = append(t.held[mid].dups, fd)
+			return nil
 		case order == 1:
 			hi = mid
 		case order == 2:
 			lo = mid + 1
 		default:
-			return held, fmt.Errorf("kcmp gave no order of two files (%d)", order)
+			return fmt.Errorf("kcmp gave no order of two files (%d)", order)
 		}
 	}
-	return slices.Insert(held, lo, fd), nil
+	t.held = slices.Insert(t.held, lo, heldFile{fd: fd})
+	return nil
+}
+
+// ordered reports whether each file held reads before the next in kcmp's
+// order, so that no two of them are one file. Where one does not (one
+// compared with it closed and opened again since it was held: it names
+// another file, or the next one's), the next is read again, with its
+// duplicates; where one of two is closed, it is let go.
+func (t *fileTally) ordered() (bool, error) {
+	for i := 0; i+1 < len(t.held); i++ {
+		order, err := t.cmp(t.held[i].fd, t.held[i+1].fd)
+		switch {
+		case errors.Is(err, unix.EBADF):
+			if err := t.drop(i + 1); err != nil {
+				return false, err
+			}
+			return false, t.drop(i)
+		case err != nil:
+			return false, err
+		case order == 1:
+			continue
+		case order != 0 && order != 2:
+			return false, fmt.Errorf("kcmp gave no order of two files (%d)", order)
+		}
+		next := t.held[i+1]
+		t.held = slices.Delete(t.held, i+1, i+2)
+		t.todo = append(append(t.todo, next.fd), next.dups...)
+		return false, nil
+	}
+	return true, nil
+}
+
+// drop lets go of held file i where its descriptor reads closed now. Its
+// duplicates are read again: one may hold its file yet.
+func (t *fileTally) drop(i int) error {
+	if open, err := t.open(t.held[i].fd); err != nil || open {
+		return err
+	}
+	t.todo = append(t.todo, t.held[i].dups...)
+	t.held = slices.Delete(t.held, i, i+1)
+	return nil
+}
+
+// open reports whether descriptor fd is open now.
+func (t *fileTally) open(fd int) (bool, error) {
+	_, err := t.cmp(fd, fd)
+	if errors.Is(err, unix.EBADF) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+// cmp is kcmp of descriptors a and b, while the tally may yet compare
+// (errTallySpent).
+func (t *fileTally) cmp(a, b int) (int, error) {
+	if t.left <= 0 {
+		return 0, errTallySpent
+	}
+	t.left--
+	return t.kcmp(t.task, a, b)
 }
 
 // kcmpFiles is kcmp(2) of descriptors a and b of process (or thread) task:
