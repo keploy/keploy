@@ -20,8 +20,10 @@ import "context"
 // wire sizes when it starts the capture, lets the capture's decodes hold only
 // what it has reserved for them (DecodeReserveFunc), and settles the weight
 // here, so each body is inflated once, by the capture. What the decodes
-// reserved is still reserved when it is called: the decoded bodies'
-// buffers, at their capacity.
+// reserved is still reserved when it is called, the decoded bodies' buffers
+// at their capacity, and stays reserved while the test case is built from
+// them: what it weighs here is the test case's copies beside them. Capture
+// gives the buffers back once the test case is built, before it hands it on.
 type BodiesDecodedFunc func(reqBytes, respBytes int) bool
 
 // bodiesDecodedCtxKey carries a capture's BodiesDecodedFunc (WithBodiesDecoded).
@@ -57,9 +59,11 @@ func BodiesDecoded(ctx context.Context, reqBytes, respBytes int) bool {
 // at once, holding nothing, and the capture leaves the exchange out and
 // sends nothing, as when BodiesDecodedFunc refuses; the caller that refused
 // counts and reports it. A decode that is not refused leaves its output's
-// buffer reserved, at its capacity, until the caller settles the weight in
-// BodiesDecodedFunc; one that fails leaves nothing reserved
-// (pkg.DecompressReserving).
+// buffer reserved, at its capacity, while Capture holds it: Capture gives it
+// back (n < 0) once it has built the test case from it, before it hands the
+// test case on, or as it returns without one. A decode that fails leaves
+// nothing reserved (pkg.DecompressReserving). So once Capture has returned
+// nothing its decodes reserved is reserved still.
 //
 // With it a caller that bounds what its captures hold bounds them while they
 // decode too: no decoded byte is held that it has not counted, however many
@@ -86,4 +90,35 @@ func DecodeReserve(ctx context.Context) DecodeReserveFunc {
 	}
 	fn, _ := ctx.Value(decodeReserveCtxKey{}).(DecodeReserveFunc)
 	return fn
+}
+
+// decodeRoom keeps a capture's books with its caller's DecodeReserveFunc:
+// what its decodes hold reserved, so that it gives that back once it no
+// longer holds the decoded buffers.
+type decodeRoom struct {
+	fn   DecodeReserveFunc
+	held int64
+}
+
+// reserve is the func the capture's decodes ask for room
+// (pkg.DecompressReserving), or nil when the caller set no DecodeReserveFunc.
+func (r *decodeRoom) reserve() func(int64) bool {
+	if r.fn == nil {
+		return nil
+	}
+	return func(n int64) bool {
+		if !r.fn(n) && n > 0 {
+			return false
+		}
+		r.held += n
+		return true
+	}
+}
+
+// giveBack gives back all the capture's decodes hold reserved.
+func (r *decodeRoom) giveBack() {
+	if r.fn != nil && r.held > 0 {
+		r.fn(-r.held)
+	}
+	r.held = 0
 }

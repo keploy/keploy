@@ -241,6 +241,7 @@ type decodeBooks struct {
 	held, asks int64
 	refuseAt   int // refuse the refuseAt-th ask for room (1-based; 0 never)
 	refused    int
+	after      func() // called after each ask or give-back, on the capture's goroutine
 }
 
 func (b *decodeBooks) reserve(n int64) bool {
@@ -252,6 +253,9 @@ func (b *decodeBooks) reserve(n int64) bool {
 		}
 	}
 	b.held += n
+	if b.after != nil {
+		b.after()
+	}
 	return true
 }
 
@@ -262,7 +266,7 @@ func (b *decodeBooks) reserve(n int64) bool {
 // reserved (at their buffers' capacity, the decoders' state given back); a
 // plain exchange asks nothing.
 func TestCaptureDecodesOnlyIntoRoomItsCallerReserved(t *testing.T) {
-	reqJSON := []byte(strings.Repeat(`{"q":"a repeated query"},`, 4000))   // 100 KB
+	reqJSON := []byte(strings.Repeat(`{"q":"a repeated query"},`, 4000))     // 100 KB
 	respJSON := []byte(strings.Repeat(`{"id":1,"name":"a record"},`, 20000)) // 540 KB
 	for _, c := range []struct {
 		name, reqEnc, respEnc string
@@ -291,12 +295,34 @@ func TestCaptureDecodesOnlyIntoRoomItsCallerReserved(t *testing.T) {
 		if c.respEnc != "" {
 			resp.Header.Set("Content-Encoding", c.respEnc)
 		}
+		// What the books hold whenever they change, beside whether the test
+		// case was sent yet: the books and the send are both the capture's,
+		// on its goroutine, and the row reads the channel only once Capture
+		// has returned, so the order is the capture's own.
 		tcs := make(chan *models.TestCase, 1)
+		atSend := int64(-1)
+		books.after = func() {
+			if len(tcs) == 0 {
+				atSend = books.held
+			}
+		}
 		Capture(ctx, zap.NewNop(), tcs, req, resp, time.Now(), time.Now(), models.IncomingOptions{}, false, false, 8080)
+		var tc *models.TestCase
 		select {
-		case <-tcs:
+		case tc = <-tcs:
 		default:
 			t.Fatalf("%s: no test case sent", c.name)
+		}
+		if !c.wantAsks {
+			atSend = 0 // a plain exchange asks nothing; checked below
+		}
+		if tc.HTTPReq.Body != string(reqJSON) || tc.HTTPResp.Body != string(respJSON) {
+			t.Fatalf("%s: the test case holds %d and %d bytes of body, want %d and %d", c.name, len(tc.HTTPReq.Body), len(tc.HTTPResp.Body), len(reqJSON), len(respJSON))
+		}
+		// The test case holds its own copies: the decoded buffers' room is
+		// given back before it waits to be handed on.
+		if atSend != 0 || books.held != 0 {
+			t.Errorf("%s: %d bytes reserved when the test case was handed on, %d once Capture returned; want none", c.name, atSend, books.held)
 		}
 		if got.reqBytes != len(reqJSON) || got.respBytes != len(respJSON) {
 			t.Fatalf("%s: BodiesDecodedFunc told %+v, want %d and %d", c.name, got, len(reqJSON), len(respJSON))
@@ -313,6 +339,49 @@ func TestCaptureDecodesOnlyIntoRoomItsCallerReserved(t *testing.T) {
 		want := bufferFor(len(reqJSON)) + bufferFor(len(respJSON))
 		if atDecoded != want {
 			t.Errorf("%s: %d bytes reserved when the bodies were decoded, want both decoded bodies' buffers, %d", c.name, atDecoded, want)
+		}
+	}
+}
+
+// TestACaptureLeftOutAfterItsDecodesHoldsNoRoom pins that a capture that
+// decoded its bodies and builds no test case from them (its caller's
+// BodiesDecodedFunc says no, its bodies are over MaxTestCaseSize decoded, or
+// the request is filtered) gives back what its decodes reserved as it
+// returns.
+func TestACaptureLeftOutAfterItsDecodesHoldsNoRoom(t *testing.T) {
+	small := []byte(strings.Repeat(`{"id":1,"name":"a record"},`, 2000))
+	big := bytes.Repeat([]byte("x"), MaxTestCaseSize/2+1)
+	for _, c := range []struct {
+		name      string
+		req, resp []byte
+		say       bool
+		opts      models.IncomingOptions
+	}{
+		{"its caller says no", small, small, false, models.IncomingOptions{}},
+		{"over MaxTestCaseSize decoded", big, big, true, models.IncomingOptions{}},
+		{"filtered", small, small, true, models.IncomingOptions{Filters: []models.Filter{{BypassRule: models.BypassRule{Path: "/q"}}}}},
+	} {
+		var books decodeBooks
+		ctx := WithDecodeReserve(context.Background(), books.reserve)
+		ctx = WithBodiesDecoded(ctx, func(int, int) bool { return c.say })
+		req, err := http.NewRequest(http.MethodPost, "http://localhost:8080/q", bytes.NewReader(encodeBody(t, "gzip", c.req)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Encoding", "gzip")
+		resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Encoding": {"br"}}, Body: &trackCloser{Reader: bytes.NewReader(encodeBody(t, "br", c.resp))}}
+		tcs := make(chan *models.TestCase, 1)
+		Capture(ctx, zap.NewNop(), tcs, req, resp, time.Now(), time.Now(), c.opts, false, false, 8080)
+		select {
+		case <-tcs:
+			t.Fatalf("%s: a test case was sent", c.name)
+		default:
+		}
+		if books.asks == 0 {
+			t.Fatalf("%s: no decode asked for room; the row needs the bodies decoded", c.name)
+		}
+		if books.held != 0 {
+			t.Errorf("%s: %d bytes reserved once Capture returned, want none", c.name, books.held)
 		}
 	}
 }
@@ -352,11 +421,10 @@ func TestARefusedDecodeLeavesTheExchangeOut(t *testing.T) {
 			if !rb.closed {
 				t.Errorf("synchronous=%v, refuse at %d: response body not closed", synchronous, refuseAt)
 			}
-			// What the request's decode left reserved (its body, decoded) is
-			// the caller's: it gives the room back as the capture returns. The
-			// refused decode itself left nothing.
-			if refuseAt <= 2 && books.held != 0 {
-				t.Errorf("synchronous=%v, refuse at %d: %d bytes reserved after the request's decode was refused", synchronous, refuseAt, books.held)
+			// The refused decode left nothing, and the capture gives back
+			// what the request's decode reserved as it returns.
+			if books.held != 0 {
+				t.Errorf("synchronous=%v, refuse at %d: %d bytes reserved once Capture returned", synchronous, refuseAt, books.held)
 			}
 		}
 	}
