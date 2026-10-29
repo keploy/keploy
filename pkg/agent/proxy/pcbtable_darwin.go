@@ -50,7 +50,7 @@ const (
 // and its TCP state, both from one copy of its tcp_info.
 func xnuTCPInfo(fd int) (rcvNxt uint32, state uint8, err error) {
 	var buf [512]byte
-	l, err := readTCPInfo(fd, buf[:])
+	l, err := readTCPOpt(fd, xnuTCPInfoOpt, buf[:])
 	if err != nil {
 		return 0, 0, fmt.Errorf("getsockopt TCP_INFO: %w", err)
 	}
@@ -60,19 +60,22 @@ func xnuTCPInfo(fd int) (rcvNxt uint32, state uint8, err error) {
 	return binary.LittleEndian.Uint32(buf[xnuTCPInfoOffRcvNxt:]), buf[xnuTCPInfoOffState], nil
 }
 
-// readTCPInfo copies the socket fd's struct tcp_info into buf, and says how
-// many bytes of it the kernel gave. Its rows hand the counts a socket that
-// received a segment twice.
-var readTCPInfo = func(fd int, buf []byte) (uint32, error) {
+// readTCPOpt copies the TCP-level socket option opt of socket fd into buf
+// (XNU's struct tcp_info, xnuTCPInfoOpt), and says how many bytes of it the
+// kernel gave. It is the one way keploy's macOS proxy reads a TCP option
+// (TestTheMacOSProxyReadsTCPOptionsOnlyThroughReadTCPOpt), so its rows reach
+// every such read: they hand the counts a socket that received a segment
+// twice, or whose tcp_info cannot be read.
+var readTCPOpt = func(fd, opt int, buf []byte) (uint32, error) {
 	l := uint32(len(buf))
-	if err := getsockopt(fd, unix.IPPROTO_TCP, xnuTCPInfoOpt, unsafe.Pointer(&buf[0]), &l); err != nil {
+	if err := getsockopt(fd, unix.IPPROTO_TCP, opt, unsafe.Pointer(&buf[0]), &l); err != nil {
 		return 0, err
 	}
 	return l, nil
 }
 
 // getsockopt reads a socket option into a caller's buffer. It stays a raw
-// call only for xnuTCPInfo: x/sys/unix wraps getsockopt for ints, strings
+// call only for readTCPOpt: x/sys/unix wraps getsockopt for ints, strings
 // and its own structs (TCP_CONNECTION_INFO among them), but not for XNU's
 // private struct tcp_info, so there is no wrapper to read it into a buffer.
 // Everything else (SO_NREAD in readUnread) goes through x/sys's wrappers.

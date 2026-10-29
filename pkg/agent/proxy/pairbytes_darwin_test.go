@@ -10,8 +10,10 @@ import (
 	"runtime"
 	"slices"
 	"testing"
+	"unsafe"
 
 	"go.uber.org/zap"
+	"golang.org/x/sys/unix"
 
 	"go.keploy.io/server/v3/pkg/models"
 )
@@ -214,9 +216,9 @@ const (
 	xnuTCPInfoOffRxdupbytes = 116 // tcpi_rxduplicatebytes
 )
 
-// onTCPInfo makes every read of a socket's tcp_info, until the row ends, go
-// through spoil, which changes what macOS gave (n bytes of buf).
-func onTCPInfo(t *testing.T, spoil func(t *testing.T, buf []byte, n uint32)) {
+// onTCPOptRead makes every read of a socket's TCP options (readTCPOpt),
+// until the row ends, go through read, which is handed macOS's own.
+func onTCPOptRead(t *testing.T, read func(fd, opt int, buf []byte, macOS func(fd, opt int, buf []byte) (uint32, error)) (uint32, error)) {
 	t.Helper()
 	// The counts' layout is proven first, from what macOS gives: a proof
 	// that read the spoiled copies would leave the counts unknown for
@@ -224,15 +226,60 @@ func onTCPInfo(t *testing.T, spoil func(t *testing.T, buf []byte, n uint32)) {
 	if err := xnuTableReadable(); err != nil {
 		t.Fatalf("the counts' proof: %v", err)
 	}
-	read := readTCPInfo
-	readTCPInfo = func(fd int, buf []byte) (uint32, error) {
-		n, err := read(fd, buf)
+	macOS := readTCPOpt
+	readTCPOpt = func(fd, opt int, buf []byte) (uint32, error) { return read(fd, opt, buf, macOS) }
+	t.Cleanup(func() { readTCPOpt = macOS })
+}
+
+// onTCPOpt makes every read of a socket's TCP options, until the row ends,
+// go through spoil, which changes what macOS gave (n bytes of buf, of
+// option opt).
+func onTCPOpt(t *testing.T, spoil func(t *testing.T, opt int, buf []byte, n uint32)) {
+	t.Helper()
+	onTCPOptRead(t, func(fd, opt int, buf []byte, macOS func(int, int, []byte) (uint32, error)) (uint32, error) {
+		n, err := macOS(fd, opt, buf)
 		if err == nil {
-			spoil(t, buf, n)
+			spoil(t, opt, buf, n)
 		}
 		return n, err
+	})
+}
+
+// onTCPInfo is onTCPOpt for the copies of a socket's tcp_info alone.
+func onTCPInfo(t *testing.T, spoil func(t *testing.T, buf []byte, n uint32)) {
+	t.Helper()
+	onTCPOpt(t, func(t *testing.T, opt int, buf []byte, n uint32) {
+		if opt == xnuTCPInfoOpt {
+			spoil(t, buf, n)
+		}
+	})
+}
+
+// xnuConnInfoOffRxbytes is where TCP_CONNECTION_INFO's struct puts its
+// tcpi_rxbytes, the count keploy's settle once read.
+var xnuConnInfoOffRxbytes = unsafe.Offsetof(unix.TCPConnectionInfo{}.Rxbytes)
+
+// rxbytesOf reads the socket under conn's byte count, tcpi_rxbytes, from
+// option opt (tcp_info's, or TCP_CONNECTION_INFO's), through readTCPOpt.
+func rxbytesOf(t *testing.T, conn *net.TCPConn, opt int) uint64 {
+	t.Helper()
+	rc, err := conn.SyscallConn()
+	if err != nil {
+		t.Fatal(err)
 	}
-	t.Cleanup(func() { readTCPInfo = read })
+	off := uintptr(xnuTCPInfoOffRxbytes)
+	if opt == unix.TCP_CONNECTION_INFO {
+		off = xnuConnInfoOffRxbytes
+	}
+	var buf [512]byte
+	var n uint32
+	if cerr := rc.Control(func(fd uintptr) { n, err = readTCPOpt(int(fd), opt, buf[:]) }); cerr != nil || err != nil {
+		t.Fatalf("read TCP option %#x: %v %v", opt, cerr, err)
+	}
+	if uintptr(n) < off+8 {
+		t.Fatalf("TCP option %#x gave %d bytes, too few to hold tcpi_rxbytes", opt, n)
+	}
+	return binary.LittleEndian.Uint64(buf[off:])
 }
 
 // A segment the proxy's side received twice (a spurious retransmit, its
@@ -244,22 +291,40 @@ func onTCPInfo(t *testing.T, spoil func(t *testing.T, buf []byte, n uint32)) {
 // work. (A count from tcpi_rxbytes would leave the 100 duplicate bytes
 // untaken for good, and hold every settle that cuts the connection until
 // its watchdog gave up.)
+//
+// The duplicate reaches both of macOS's byte counts, tcp_info's and
+// TCP_CONNECTION_INFO's (the one the settle read before it counted by
+// sequence numbers), so a count read from either goes red here.
 func TestASegmentReceivedTwiceHoldsNoSettleOnDarwin(t *testing.T) {
-	_, app, _, reader := darwinPair(t)
+	_, app, proxySide, reader := darwinPair(t)
 	const dup = 100
-	onTCPInfo(t, func(t *testing.T, buf []byte, n uint32) {
-		if n < xnuTCPInfoOffRxdupbytes+8 {
-			t.Errorf("tcp_info gave %d bytes, too few to hold tcpi_rxduplicatebytes", n)
-			return
+	onTCPOpt(t, func(t *testing.T, opt int, buf []byte, n uint32) {
+		switch opt {
+		case xnuTCPInfoOpt:
+			if n < xnuTCPInfoOffRxdupbytes+8 {
+				t.Errorf("tcp_info gave %d bytes, too few to hold tcpi_rxduplicatebytes", n)
+				return
+			}
+			binary.LittleEndian.PutUint64(buf[xnuTCPInfoOffRxbytes:], binary.LittleEndian.Uint64(buf[xnuTCPInfoOffRxbytes:])+dup)
+			binary.LittleEndian.PutUint64(buf[xnuTCPInfoOffRxdupbytes:], binary.LittleEndian.Uint64(buf[xnuTCPInfoOffRxdupbytes:])+dup)
+		case unix.TCP_CONNECTION_INFO:
+			if uintptr(n) < xnuConnInfoOffRxbytes+8 {
+				t.Errorf("TCP_CONNECTION_INFO gave %d bytes, too few to hold tcpi_rxbytes", n)
+				return
+			}
+			binary.LittleEndian.PutUint64(buf[xnuConnInfoOffRxbytes:], binary.LittleEndian.Uint64(buf[xnuConnInfoOffRxbytes:])+dup)
 		}
-		binary.LittleEndian.PutUint64(buf[xnuTCPInfoOffRxbytes:], binary.LittleEndian.Uint64(buf[xnuTCPInfoOffRxbytes:])+dup)
-		binary.LittleEndian.PutUint64(buf[xnuTCPInfoOffRxdupbytes:], binary.LittleEndian.Uint64(buf[xnuTCPInfoOffRxdupbytes:])+dup)
 	})
 	if _, err := app.Write(make([]byte, 100)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := io.ReadFull(reader, make([]byte, 100)); err != nil {
 		t.Fatal(err)
+	}
+	for _, opt := range []int{xnuTCPInfoOpt, unix.TCP_CONNECTION_INFO} {
+		if rx := rxbytesOf(t, proxySide, opt); rx != 100+dup {
+			t.Fatalf("TCP option %#x counts %d bytes received, want the 100 sent and the %d received twice", opt, rx, dup)
+		}
 	}
 	if n := reader.untaken(reader.view()); n != 0 {
 		t.Fatalf("untaken = %d with every byte read and %d received twice, want 0", n, dup)
@@ -359,6 +424,135 @@ func TestBytesBeforeTheConnectionIsKeptAreCountedOnDarwin(t *testing.T) {
 		t.Fatalf("untaken = %d with every byte read, want 0", n)
 	}
 	if u := p.inflight.Unknown(true); len(u) != 0 {
+		t.Fatalf("the connection's requests are unknown (%v) with its counts read", u)
+	}
+}
+
+// A socket that can be asked, but whose tcp_info cannot be read (the read
+// fails, or gives fewer bytes than keploy reads, as a macOS whose tcp_info got
+// shorter would), has no count of what it received: the connection's
+// requests are unknown, and its unread bytes hold no settle. (Taken as
+// nothing untaken without saying so, the settle would close over bytes still
+// queued for the handler: a false settle. The counts' proof does not catch a
+// shorter tcp_info first: this read fails before it is asked.)
+func TestATCPInfoThatCannotBeReadIsUnknownOnDarwin(t *testing.T) {
+	type macOSRead = func(fd, opt int, buf []byte) (uint32, error)
+	for _, tc := range []struct {
+		name string
+		read func(fd, opt int, buf []byte, macOS macOSRead) (uint32, error)
+	}{
+		{"the read fails", func(int, int, []byte, macOSRead) (uint32, error) { return 0, unix.EINVAL }},
+		{"a short copy", func(fd, opt int, buf []byte, macOS macOSRead) (uint32, error) {
+			n, err := macOS(fd, opt, buf)
+			return min(n, xnuTCPInfoMinLen-1), err
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, app, proxySide, reader := darwinPair(t)
+			if _, err := app.Write(make([]byte, 10)); err != nil {
+				t.Fatal(err)
+			}
+			untilUnread(t, proxySide, 10)
+			if n := reader.untaken(reader.view()); n != 10 {
+				t.Fatalf("untaken = %d with 10 bytes unread, want 10", n)
+			}
+			onTCPOptRead(t, tc.read)
+			if n := reader.untaken(reader.view()); n != 0 {
+				t.Fatalf("untaken = %d with tcp_info unreadable, want 0 (unknown)", n)
+			}
+			if u := reader.t.Unknown(true); !slices.Contains(u, xnuCountsUnknown) {
+				t.Fatalf("the connection's requests are %v with tcp_info unreadable, want unknown (%q)", u, xnuCountsUnknown)
+			}
+		})
+	}
+}
+
+// Bytes that come between beginCounts's reads of where the counts begin (its
+// first read of the next expected number, then SO_NREAD) would put the first
+// byte's number too low, and the count too high for good: bytes untaken that
+// no read returns, holding every settle that cuts the connection until its
+// watchdog. The reads are taken as one only when the expected number read on
+// each side of SO_NREAD agree, so a first read from before the last 3 bytes
+// came is read again, and the count stays exact.
+func TestBytesThatComeBetweenTheFirstReadsAreCountedOnceOnDarwin(t *testing.T) {
+	p := &Proxy{logger: zap.NewNop()}
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	c, err := net.Dial("tcp4", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := c.(*net.TCPConn)
+	t.Cleanup(func() { _ = app.Close() })
+	if _, err := app.Write(make([]byte, 5)); err != nil {
+		t.Fatal(err)
+	}
+	s, err := ln.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxySide := s.(*net.TCPConn)
+	t.Cleanup(func() { _ = proxySide.Close() })
+	untilUnread(t, proxySide, 5)
+	const late = 3
+	reads := 0
+	onTCPInfo(t, func(_ *testing.T, buf []byte, _ uint32) {
+		reads++
+		if reads == 1 {
+			binary.LittleEndian.PutUint32(buf[xnuTCPInfoOffRcvNxt:], binary.LittleEndian.Uint32(buf[xnuTCPInfoOffRcvNxt:])-late)
+		}
+	})
+	reader := p.inflight.track(proxySide)
+	t.Cleanup(func() { p.inflight.forget(reader) })
+	if reads == 0 {
+		t.Fatal("where the counts begin was not read as the connection was kept")
+	}
+	if n := reader.untaken(reader.view()); n != 5 {
+		t.Fatalf("untaken = %d with 5 bytes in, %d of them after the first read of where the counts begin, want 5", n, late)
+	}
+	if _, err := io.ReadFull(reader, make([]byte, 5)); err != nil {
+		t.Fatal(err)
+	}
+	if n := reader.untaken(reader.view()); n != 0 {
+		t.Fatalf("untaken = %d with every byte read, want 0", n)
+	}
+	if u := p.inflight.Unknown(true); len(u) != 0 {
+		t.Fatalf("the connection's requests are unknown (%v) with its counts read", u)
+	}
+}
+
+// A handler that read the application's FIN (a read returned the end of the
+// stream) and then closed its own side for writing: the proxy's socket goes
+// LAST_ACK and, once the application acknowledges that FIN, CLOSED, its fd
+// still held. The count (rcv_nxt) still holds the application's FIN, which
+// the read that returned the end took: nothing is untaken. (Left in, it is
+// one untaken byte no read returns, and every settle that cuts the
+// connection would wait for it until its watchdog.)
+func TestAHandlerThatReadTheEndAndClosedItsSideHoldsNothingOnDarwin(t *testing.T) {
+	_, app, proxySide, reader := darwinPair(t)
+	if _, err := app.Write(make([]byte, 10)); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	got, err := io.ReadAll(reader)
+	if err != nil || len(got) != 10 {
+		t.Fatalf("the handler read %d bytes (%v) before the end, want 10", len(got), err)
+	}
+	if err := proxySide.CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	if s := untilStateLeaves(t, proxySide, xnuTCPCloseWait, xnuTCPLastAck); s != xnuTCPClosed {
+		t.Fatalf("the proxy's side is in state %d after both FINs, want CLOSED (%d)", s, xnuTCPClosed)
+	}
+	if n := reader.untaken(reader.view()); n != 0 {
+		t.Fatalf("untaken = %d with every byte and the FIN read, in CLOSED, want 0", n)
+	}
+	if u := reader.t.Unknown(true); len(u) != 0 {
 		t.Fatalf("the connection's requests are unknown (%v) with its counts read", u)
 	}
 }

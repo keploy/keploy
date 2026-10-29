@@ -3,7 +3,12 @@ package proxy
 import (
 	"encoding/binary"
 	"errors"
+	"go/ast"
+	"go/build"
+	"go/parser"
+	"go/token"
 	"net/netip"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -175,4 +180,95 @@ func TestTheCountsProofRefusesWhatAMovedLayoutReads(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Every TCP-level socket option keploy's macOS proxy reads goes through one
+// seam, readTCPOpt (pcbtable_darwin.go). A read of its own (x/sys's
+// GetsockoptTCPConnectionInfo, or a getsockopt at IPPROTO_TCP) is out of reach
+// of the rows that hand the counts a socket that received a segment twice, or
+// whose tcp_info cannot be read: the byte count the settle once read
+// (TCP_CONNECTION_INFO's tcpi_rxbytes, which counts such a segment twice)
+// could come back with no row going red. Read from the sources that build for
+// darwin/arm64, so it runs on Linux too. (A level or option spelt as a bare
+// number is not seen.)
+func TestTheMacOSProxyReadsTCPOptionsOnlyThroughReadTCPOpt(t *testing.T) {
+	ctx := build.Default
+	ctx.GOOS, ctx.GOARCH, ctx.CgoEnabled = "darwin", "arm64", false
+	names, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fset := token.NewFileSet()
+	seam := false
+	for _, name := range names {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		if ok, err := ctx.MatchFile(".", name); err != nil || !ok {
+			if err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
+		f, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, d := range f.Decls {
+			// The seam itself, and the raw getsockopt it calls, are where
+			// such a read belongs.
+			switch d := d.(type) {
+			case *ast.FuncDecl:
+				if d.Recv == nil && d.Name.Name == "getsockopt" {
+					continue
+				}
+			case *ast.GenDecl:
+				if declares(d, "readTCPOpt") {
+					seam = true
+					continue
+				}
+			}
+			ast.Inspect(d, func(n ast.Node) bool {
+				if sel, ok := n.(*ast.SelectorExpr); ok && isSysPkg(sel.X) {
+					switch sel.Sel.Name {
+					case "GetsockoptTCPConnectionInfo", "TCP_CONNECTION_INFO", "SYS_GETSOCKOPT":
+						t.Errorf("%s: %s.%s outside readTCPOpt: read TCP options through readTCPOpt", fset.Position(sel.Pos()), sel.X, sel.Sel.Name)
+					}
+				}
+				call, ok := n.(*ast.CallExpr)
+				if !ok || len(call.Args) < 2 {
+					return true
+				}
+				if fn, ok := call.Fun.(*ast.SelectorExpr); ok && isSysPkg(fn.X) && strings.HasPrefix(fn.Sel.Name, "Getsockopt") {
+					if lvl, ok := call.Args[1].(*ast.SelectorExpr); ok && isSysPkg(lvl.X) && lvl.Sel.Name == "IPPROTO_TCP" {
+						t.Errorf("%s: %s at IPPROTO_TCP outside readTCPOpt: read TCP options through readTCPOpt", fset.Position(call.Pos()), fn.Sel.Name)
+					}
+				}
+				return true
+			})
+		}
+	}
+	if !seam {
+		t.Fatal("no file that builds for darwin declares readTCPOpt: the rows' seam for TCP options is gone")
+	}
+}
+
+// declares reports whether d declares name.
+func declares(d *ast.GenDecl, name string) bool {
+	for _, s := range d.Specs {
+		if v, ok := s.(*ast.ValueSpec); ok {
+			for _, n := range v.Names {
+				if n.Name == name {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// isSysPkg reports whether x names x/sys/unix or syscall.
+func isSysPkg(x ast.Expr) bool {
+	id, ok := x.(*ast.Ident)
+	return ok && (id.Name == "unix" || id.Name == "syscall")
 }
