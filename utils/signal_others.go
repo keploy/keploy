@@ -101,17 +101,22 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, kin
 	if cmdType == DockerCompose {
 		logger.Debug("Output is NOT a TTY (Docker Compose -> Stdout/Stderr)")
 	}
-	// Set the output of the command to stdout/stderr
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	// Set the output of the command to stdout/stderr, cut of the values the
+	// redactor holds when it holds any (ChildConsole).
+	console, err := SetChildConsole(cmd)
+	if err != nil {
+		return CmdError{Type: Init, Err: err}
+	}
 
 	logger.Info("Starting Application :", zap.String("executing_cmd", cmd.String()))
 	err = cmd.Start()
+	console.Started()
 	if err != nil {
 		return CmdError{Type: Init, Err: err}
 	}
 
 	err = cmd.Wait()
+	console.Exited()
 	if err != nil {
 		return CmdError{Type: Runtime, Err: err}
 	}
@@ -155,14 +160,8 @@ func executeWithPTY(_ context.Context, logger *zap.Logger, cmd *exec.Cmd) CmdErr
 	// Trigger initial resize
 	resizeCh <- syscall.SIGWINCH
 
-	// Copy PTY output to real stdout
-	// This goroutine will exit when ptmx is closed after cmd.Wait() returns
-	outputDone := make(chan struct{})
-	var copyErr error
-	go func() {
-		_, copyErr = io.Copy(os.Stdout, ptmx)
-		close(outputDone)
-	}()
+	// Copy PTY output to real stdout, cut as ChildConsole's would be.
+	output := StartChildOutputCopy(os.Stdout, ptmx, false)
 
 	// Wait for the command to finish
 	cmdErr := cmd.Wait()
@@ -180,17 +179,13 @@ func executeWithPTY(_ context.Context, logger *zap.Logger, cmd *exec.Cmd) CmdErr
 	// Wait for the resize goroutine to finish to ensure it's done using the PTY
 	wg.Wait()
 
-	// Close PTY - this will unblock the io.Copy goroutine reading from ptmx
+	// The copy ends at EIO, once the command and all it left holding the
+	// terminal have closed it and the kernel has moved to ptmx all they
+	// wrote. Only then is ptmx closed: closing it first dropped what the
+	// copy had not yet read.
+	<-output.Done()
 	if closeErr := ptmx.Close(); closeErr != nil {
 		logger.Debug("failed to close PTY", zap.Error(closeErr))
-	}
-
-	// Wait for output copy to finish to ensure all output is flushed
-	<-outputDone
-
-	// Log copy error if it's not due to PTY being closed (which is expected)
-	if copyErr != nil && !isClosedPTYError(copyErr) {
-		logger.Debug("error copying PTY output to stdout", zap.Error(copyErr))
 	}
 
 	if cmdErr != nil {

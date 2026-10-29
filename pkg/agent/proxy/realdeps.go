@@ -100,7 +100,7 @@ func (p *Proxy) SetRealDeps(ctx context.Context, raw []string) error {
 		book.Resolved(name, addrs)
 	}
 	p.real.Store(&realState{list: list, book: book, search: append([]string(nil), p.dnsSearch...)})
-	p.logger.Info("keploy relays these destinations to the real thing, never recording or mocking them (mock.real)",
+	agent.LogRealEgress(p.logger, "mock.real", "keploy relays these destinations to the real thing, never recording or mocking them",
 		zap.Strings("real", list.Labels()))
 	// A replay's session holds REAL connects only while a list is installed:
 	// one set up before this list arrived starts holding now.

@@ -947,6 +947,7 @@ func (a *AgentClient) MockOutgoing(ctx context.Context, opts models.OutgoingOpti
 		}
 	}()
 	a.pushContainers(ctx)
+	a.pushNetworkNames(ctx)
 	// Only a successful answer that says so (models.ClientTestsReadHeader)
 	// sets it again below.
 	a.clientTestsRead.Store(false)
@@ -2222,6 +2223,9 @@ func (a *AgentClient) nativeAgentArgs(opts models.SetupOptions) []string {
 	if opts.GlobalPassthrough {
 		args = append(args, "--global-passthrough")
 	}
+	for _, e := range opts.AllowEgress {
+		args = append(args, "--allow-egress="+e)
+	}
 	if opts.DisableHandshakeHold {
 		args = append(args, "--disable-handshake-hold")
 	}
@@ -2349,14 +2353,13 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	// If credentials are cached, this will use sudo -n (non-interactive)
 	cmd := newNativeAgentCommand(keployBin, args, sudoCached)
 
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
 	a.mu.Lock()
 	a.agentCmd = cmd // this has been set for proper stopping of the native agent
 	a.mu.Unlock()
-	// Start (OS-specific tweaks happen inside utils.StartCommand)
-	if err := agentUtils.StartCommand(cmd); err != nil {
+	// Start (OS-specific tweaks happen inside utils.StartCommand), its lines
+	// reaching keploy's console cut (startWithConsole)
+	console, err := startWithConsole(cmd, agentUtils.StartCommand)
+	if err != nil {
 		removeProgress()
 		utils.LogError(a.logger, err, "failed to start keploy agent")
 		return err
@@ -2373,6 +2376,7 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	go func() {
 		defer utils.Recover(a.logger)
 		err := cmd.Wait()
+		console.Exited()
 		run.exited()
 		removeProgress()
 		// Reported BEFORE the group goroutine below can return it: returning
@@ -3268,6 +3272,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	a.conf.DNSPort = dnsPort
 	a.conf.Agent.AgentURI = opts.AgentURI
 	forgetContainers(opts.AgentURI)
+	forgetNetworkNames(opts.AgentURI)
 
 	a.logger.Debug("Using available ports",
 		zap.Uint32("agent-port", agentPort),
@@ -3710,12 +3715,18 @@ func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opt
 		return a.startInDockerWithPTY(ctx, logger, cmd)
 	}
 
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	if err := cmd.Run(); err != nil {
+	// As the native agent's (startWithConsole).
+	console, err := startWithConsole(cmd, (*exec.Cmd).Start)
+	if err == nil {
+		err = cmd.Wait()
+		console.Exited()
+	}
+	if err != nil {
 		if ctx.Err() == context.Canceled {
-			cmd.Process.Kill()
+			// A start a cancelled context refused left no process.
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
+			}
 			logger.Info("Keploy agent in docker stopped gracefully.")
 			return nil
 		}
@@ -4417,6 +4428,13 @@ func (a *AgentClient) MakeAgentReadyForDockerCompose(ctx context.Context) (retEr
 			resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
 				a.logger.Debug("Successfully marked agent as ready")
+				// A docker-mode agent is given the names its replay's
+				// networks answer once it takes its release, not only at a
+				// test set's start (MockOutgoing): a launcher that never
+				// calls MockOutgoing, as enterprise's in-Pod replay stack
+				// (whose agent k8s-proxy drives), would otherwise leave it
+				// answering its own network's names itself.
+				a.pushNetworkNames(parent)
 				return nil
 			}
 			// A CA setup failure is latched in the agent (pTls.MarkCAFailed):
@@ -5613,4 +5631,21 @@ func (a *AgentClient) TestVariables(ctx context.Context) ([]models.VariableBindi
 		return nil, err
 	}
 	return out.Variables, nil
+}
+
+// startWithConsole starts an agent's cmd through start, its output going to
+// keploy's console through a utils.ChildConsole: so the agent's lines are cut
+// of the values the log redactor holds, when it holds any. Call the console's
+// Exited once cmd.Wait has returned.
+func startWithConsole(cmd *exec.Cmd, start func(*exec.Cmd) error) (*utils.ChildConsole, error) {
+	console, err := utils.SetChildConsole(cmd)
+	if err != nil {
+		return nil, err
+	}
+	err = start(cmd)
+	console.Started()
+	if err != nil {
+		return nil, err
+	}
+	return console, nil
 }

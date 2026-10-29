@@ -38,15 +38,7 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 	// User request-body noise from test.globalNoise.requestBody — the same
 	// DEDICATED request-matching bucket HTTP consumes (see http/decode.go for
 	// why the response "body" bucket must not soften request matching).
-	// Lowercased, presence-only: request-body matching and drift detection are
-	// path-based, a value-regex cannot gate here.
-	var userBodyNoise map[string][]string
-	if bn, ok := opts.NoiseConfig["requestbody"]; ok {
-		userBodyNoise = make(map[string][]string, len(bn))
-		for k := range bn {
-			userBodyNoise[strings.ToLower(k)] = []string{}
-		}
-	}
+	userBodyNoise := requestBodyNoise(opts.NoiseConfig)
 
 	commandCount := 0
 	for {
@@ -319,4 +311,24 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 				zap.String("last_request", req.Header.Type))
 		}
 	}
+}
+
+// requestBodyNoise is the requestBody bucket of the user's noise
+// (test.globalNoise) as the matcher compares it: lowercased, presence-only
+// (request-body matching and drift detection are path-based, a value-regex
+// cannot gate here), and root-relative (parameters.0.value). A key may also
+// be written as a miss lists the field, with its leading "body."
+// (body.parameters.0.value): a MySQL command's body has no field named
+// body, so the prefix only ever names the body itself. Without it, the
+// field a miss lists, copied as listed, changed nothing.
+func requestBodyNoise(cfg map[string]map[string][]string) map[string][]string {
+	bn, ok := cfg["requestbody"]
+	if !ok {
+		return nil
+	}
+	out := make(map[string][]string, len(bn))
+	for k := range bn {
+		out[strings.TrimPrefix(strings.ToLower(k), "body.")] = []string{}
+	}
+	return out
 }

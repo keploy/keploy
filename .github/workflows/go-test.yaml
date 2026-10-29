@@ -176,8 +176,14 @@ jobs:
       # instead — it is not slower in any way that matters, because package tests
       # run in parallel: measured 43s for all 29 packages against 40.5s for
       # ./pkg/agent/proxy/ alone, which dominates either way.
+      #
+      # The proxy's store of the names a docker replay's networks answer lives
+      # in pkg/agent/netnames, and the agent's routes fill it: its waiters rely
+      # on each change closing a channel under the store's lock, and a close
+      # moved outside the lock passes a plain run while it can panic the agent
+      # with "close of closed channel". Only -race sees it, so race both too.
       - name: Running Race Detector (agent proxy)
-        run: go test -race -count=1 ./pkg/agent/proxy/...
+        run: go test -race -count=1 ./pkg/agent/proxy/... ./pkg/agent/netnames/... ./pkg/agent/routes/...
 
       # Same argument, different subtree: pkg/agent/token holds the
       # control-plane token behind a mutex that Session and Adopt share, and a
