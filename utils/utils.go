@@ -1468,6 +1468,10 @@ func EnsureAvailablePorts(port uint32, exclude ...uint32) (uint32, error) {
 	return 0, fmt.Errorf("failed to allocate new port: %w", err)
 }
 
+// EnsureRmBeforeName puts --rm in front of --name in a `docker run` command, so
+// the container is removed when it exits. --name is read in either spelling
+// ("--name app" or "--name=app"), as dockerLongFlagValue reads it. A --rm that
+// already stands before --name is left alone.
 func EnsureRmBeforeName(cmd string) string {
 	parts := strings.Split(cmd, " ")
 	rmIndex := -1
@@ -1476,7 +1480,7 @@ func EnsureRmBeforeName(cmd string) string {
 	for i, part := range parts {
 		if part == "--rm" {
 			rmIndex = i
-		} else if part == "--name" {
+		} else if part == "--name" || strings.HasPrefix(part, "--name=") {
 			nameIndex = i
 			break // Assuming --name will always have an argument, we can break here
 		}
