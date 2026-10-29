@@ -1,6 +1,8 @@
 package learn
 
 import (
+	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -270,5 +272,78 @@ func TestOrderServedViewMarksARecordingServedOnlyBeforeTheRunningTest(t *testing
 	}
 	if RawOf(m, true).ServedIn(1, 1).ServedInAnOlderTest().WithServed(false).ServedIn(2, 2).InAnOlderTest() {
 		t.Errorf("WithServed(false) kept served in an older test")
+	}
+}
+
+// A connection's start-up an older test opened holds the open test's instant
+// whole where a swap of start-ups can change it: in its backend secret key (a
+// ten-digit key reads as seconds since the epoch), or in a server parameter
+// the set's other start-up recorded otherwise. F gave that start-up as
+// recorded in the older test while the value moved. An older test's answer
+// in its place is set aside as no source, and the value learned as a read of
+// the clock (the row above). A start-up's word is never set aside so
+// (swapHolds): F may have given the application's connection another
+// connection's start-up, whose word the value then copied, and a clock read
+// is checked only against its call's window, which a copied word passes too.
+// The value stays refused, naming the start-up, under keploy test's rules and
+// a client test's.
+func TestClassifyFollowing_AnOlderTestsStartUpTheValueMovedApartFromStaysRefused(t *testing.T) {
+	o := newOlderTestAnswer()
+	ts := func(sec, nsec int) time.Time { return time.Date(2026, 10, 29, 12, 38, sec, nsec, time.UTC) }
+	s, err := strconv.ParseInt(olderS, 10, 32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := func(name string, nsec int, key int32, app string) *models.Mock {
+		return &models.Mock{Name: name, Kind: models.PostgresV3, Spec: models.MockSpec{
+			ReqTimestampMock: ts(54, nsec),
+			ResTimestampMock: ts(54, nsec+1000000),
+			Metadata:         map[string]string{"type": "config"},
+			PostgresV3: &models.PostgresV3Spec{Type: models.PostgresV3TypeSession, Session: &models.PostgresV3SessionSpec{
+				ServerVersion: "15.2", BackendProcessID: 81, BackendSecretKey: key,
+				ParameterStatus: map[string]string{"application_name": app, "TimeZone": "UTC"},
+			}},
+		}}
+	}
+	shape := func(v string) Shape {
+		return Shape{Leaves: map[string]Leaf{olderPath: {Path: olderPath, Noise: "body.docs.msgs.0.app.createdAt", Type: String, Value: v}}}
+	}
+	for _, c := range []struct {
+		name, field string
+		older       *models.Mock
+		others      []*models.Mock
+	}{
+		{"its secret key", "backendSecretKey", session("mock-hs-81", 4000000, int32(s), "api"), nil},
+		{"a server parameter the other start-up recorded otherwise", "parameterStatus.application_name",
+			session("mock-hs-81", 4000000, 7081, olderS), []*models.Mock{session("mock-hs-82", 3000000, 7082, "api")}},
+	} {
+		for _, client := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s, client tests %v", c.name, client), func(t *testing.T) {
+				tr := NewTracker()
+				for _, m := range c.others {
+					tr.ServedMock(m)
+					tr.ServedMockAsRecorded(m)
+				}
+				tr.Begin()
+				tr.ServedMock(c.older)
+				tr.ServedMockAsRecorded(c.older)
+				tr.End()
+				tr.Begin()
+				p := tr.Placed()
+				dc := clockedDrifts()
+				dc.clientTests = client
+				var raw []Raw
+				for _, m := range append([]*models.Mock{c.older}, c.others...) {
+					raw = append(raw, p.Order.ServedView(m, dc.RawOf(m, true).ServedIn(p.Order.Of(m))))
+				}
+				if !raw[0].InAnOlderTest() {
+					t.Fatalf("%s not read as served in an older test; the row needs it so", c.older.Name)
+				}
+				ln := ClassifyFollowing(dc, []string{olderPath}, shape(olderSLive), shape(olderS), o.call, nil, raw, nil, o.w, nil)[0]
+				if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "mock-hs-81 at spec.postgresV3.session."+c.field+", a connection's recorded start-up") || !strings.Contains(ln.Why, "never varies") {
+					t.Fatalf("FALSE GREEN? learned %s from %q (%q, set aside %q); want refused, naming mock-hs-81's %s", ln.Kind, ln.From.Mock, ln.Why, ln.Refuted, c.field)
+				}
+			})
+		}
 	}
 }
