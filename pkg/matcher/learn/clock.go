@@ -56,6 +56,9 @@ type clockLayout struct {
 	timeWord func(match string, i int) bool
 	// wraps: the instant is a time of day, compared modulo a day.
 	wraps bool
+	// epoch: the instant is a bare number (readEpoch), which a value that
+	// only looks like one also is (ClockOnly reads it only in a typed date).
+	epoch bool
 }
 
 // Every layout reads its text in UTC where the text names no offset, and an
@@ -69,7 +72,7 @@ var clockLayouts = []clockLayout{
 	{re: regexp.MustCompile(`\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:[.,]\d{1,9})?)?|T\d{2})?(?:Z|[+-]\d{2}(?::?\d{2})?| ?(?:UTC|GMT))?`), read: readISO},
 	{re: regexp.MustCompile(`\d{8}T\d{6}Z?`), read: readCompact},
 	{re: regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[17][0-9a-fA-F]{3}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`), read: readUUIDTime, timeWord: uuidTimeWord},
-	{re: regexp.MustCompile(`\d{10}\.\d{1,9}|\d{19}|\d{16}|\d{13}|\d{10}`), read: readEpoch},
+	{re: regexp.MustCompile(`\d{10}\.\d{1,9}|\d{19}|\d{16}|\d{13}|\d{10}`), read: readEpoch, epoch: true},
 	{re: regexp.MustCompile(`\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?`), read: readTimeOfDay, wraps: true},
 }
 
