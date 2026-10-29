@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"go.keploy.io/server/v3/pkg/models"
 )
 
 // heldRow is the row's set: n recordings, each a row of its own words
@@ -16,6 +18,8 @@ import (
 // changed, so the echo reads every earlier payload's instants and the word
 // rule their words.
 type heldRow struct {
+	// mocks are the recordings raw reads, in raw's order.
+	mocks    []*models.Mock
 	raw      func() []Raw
 	classify func(dc *DriftCache) []Learned
 	// run is classify of a dc whose application reads its clock already
@@ -45,7 +49,7 @@ func newHeldRow(n, words int) heldRow {
 	run := func(dc *DriftCache) []Learned {
 		return ClassifyFollowing(dc, []string{clock, word}, live, rec, at, nil, raw, nil, nil, nil)
 	}
-	return heldRow{raw: func() []Raw { return raw }, run: run, classify: func(dc *DriftCache) []Learned {
+	return heldRow{mocks: mocks, raw: func() []Raw { return raw }, run: run, classify: func(dc *DriftCache) []Learned {
 		dc.appClock = true
 		return run(dc)
 	}}

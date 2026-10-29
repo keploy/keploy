@@ -657,6 +657,15 @@ type RecordedBeforeSetter interface {
 	SetRecordedBefore(src func(t time.Time, visit func(*models.Mock) bool) error) error
 }
 
+// LearnSetWarmer is implemented by a proxy whose learn step reads the staged
+// set's recordings before its tests' calls do: WarmLearnSet, called once the
+// set is staged and its on-disk recordings are set (RecordedBeforeSetter),
+// starts that read in the background, in record's full round alone, and
+// returns at once. Nothing it reads is served.
+type LearnSetWarmer interface {
+	WarmLearnSet() error
+}
+
 // LearnEndSetter is implemented by a proxy whose learn step a keploy test
 // filter can end for the rest of a test set (models.MockFilterParams.
 // LearnEnded): SetLearnEnded says whether it has ended. The agent sets it from

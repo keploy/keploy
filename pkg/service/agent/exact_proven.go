@@ -335,6 +335,13 @@ func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFi
 				return fmt.Errorf("set the test set's recordings before an instant: %w", err)
 			}
 		}
+		// The learn step reads the set's recordings now, in the background,
+		// not on its first call's answer path (record's full round alone).
+		if w, ok := a.Proxy.(coreAgent.LearnSetWarmer); ok {
+			if err := w.WarmLearnSet(); err != nil {
+				return fmt.Errorf("read the test set's recordings for the learn step: %w", err)
+			}
+		}
 		// Record's full round pairs with the recordings of tests not begun
 		// yet too, which the on-disk store keeps.
 		if rk, ok := a.Proxy.(coreAgent.RecordedOfKindSetter); ok {
