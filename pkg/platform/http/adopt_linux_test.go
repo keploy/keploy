@@ -758,25 +758,29 @@ func TestADaemonThatOnlyChurnsMovesNoTeardown(t *testing.T) {
 	churn := daemonize(t, `trap '' TERM; : > "$1"; while :; do exec 3</dev/null; exec 3<&-; done`, ready)
 	await(t, "the daemon ready", func() bool { _, err := os.Stat(ready); return err == nil })
 	scope := &utils.TeardownScope{}
-	core, logs := observer.New(zapcore.InfoLevel)
-	done := make(chan struct{})
-	go func() { stopAdopted(zap.New(core), nil, scope); close(done) }()
-	// Read as the stop decides to kill it: what the kill does after (the
-	// kernel freeing what it held) is not the daemon's way out.
-	var before uint64
-	await(t, "the stall kill", func() bool {
-		if logs.FilterMessageSnippet("made no progress on its way out after it was asked to stop; killing it").Len() == 0 {
-			return false
+	// Read as the stop decides to kill it, on the stop's own goroutine as it
+	// says so: what the kill does after (the kernel freeing what it held, the
+	// stop's next look finding the daemon gone, a move) is not the daemon's
+	// way out. Read later, once the test saw the kill in the log, the count
+	// can take that look in too: on a loaded box the stop gets to it first.
+	before := atomic.Int64{}
+	before.Store(-1)
+	core, _ := observer.New(zapcore.InfoLevel)
+	logger := zap.New(core, zap.Hooks(func(e zapcore.Entry) error {
+		if strings.Contains(e.Message, "made no progress on its way out after it was asked to stop; killing it") {
+			before.CompareAndSwap(-1, int64(scope.Moves()))
 		}
-		before = scope.Moves()
-		return true
-	})
-	<-done
+		return nil
+	}))
+	stopAdopted(logger, nil, scope)
 	if parentIs(churn, os.Getpid()) {
 		t.Fatal("the churning daemon outlived its stop")
 	}
-	if before > 1 {
-		t.Fatalf("a daemon that only churned moved the run's teardown %d times before its kill", before)
+	switch n := before.Load(); {
+	case n < 0:
+		t.Fatal("the stop did not kill the churning daemon on its stall")
+	case n > 1:
+		t.Fatalf("a daemon that only churned moved the run's teardown %d times before its kill", n)
 	}
 }
 
