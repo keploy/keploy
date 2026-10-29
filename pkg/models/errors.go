@@ -317,6 +317,13 @@ type MockMismatchReport struct {
 	// similarity): likely one another test recorded, which the replay names
 	// (UnmatchedCall.RecordedIn).
 	NotOwned bool
+	// Background says, under the proven switch, that the call is of a
+	// series judging marked as the application's background work (a timer's
+	// call, learn.Series.HasShape) and no recording of the series answers it
+	// on the run's clock: the miss is the application's background work
+	// wherever it was made, charged to no test and failing none
+	// (UnmatchedCall.Background), never the open test's.
+	Background bool
 	// Reason is why the call missed, when the learn step decided it
 	// (UnmatchedCall.Reason): only in record's full round.
 	Reason string
@@ -333,8 +340,11 @@ type MockMismatchReport struct {
 	// AnswerByKind: a background write answered by its kind, unchecked;
 	// Reused says the kind's recordings were used up. AnswerBackgroundAgain:
 	// a background call made again in its test's window, answered again with
-	// ClosestMock, the marked recording it repeated, unchecked. An answer
-	// never counts against a test and never lands in a miss list. The proxy's sink copies
+	// ClosestMock, the marked recording it repeated, unchecked.
+	// AnswerBackgroundSeries: a call of a marked background series answered
+	// with ClosestMock, a recording of the series, its clock reads checked on
+	// the run's clock. An answer never counts against a test and never lands
+	// in a miss list. The proxy's sink copies
 	// these to the UnmatchedCall it makes of the report, as it copies the
 	// miss fields.
 	Answer    string `json:"answer,omitempty" yaml:"answer,omitempty"`

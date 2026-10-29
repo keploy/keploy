@@ -205,3 +205,69 @@ func TestEveryReadOfAWindowBoundsTheGapAfterIt(t *testing.T) {
 		t.Fatalf("the next read %+v; want the timer's call, made after the read, background", got)
 	}
 }
+
+// A call of a series judging marked as the application's background work
+// that no recording of the series answered (its parser's report says
+// Background) is background wherever it was made: in the open test's
+// window it is charged to no test, and before the set's first test it is
+// no call of the set's startup (never BeforeSet), failing nothing. An
+// unmarked miss beside each keeps its rule. With the switch off the mark is
+// not read: no parser reports a series then, and the read is as it was.
+func TestAMarkedSeriesCallNothingAnswersIsBackgroundWhereverItWasMade(t *testing.T) {
+	series := func(summary, kind string) models.ParserError {
+		m := mockMiss(summary)
+		m.MismatchReport.Background = true
+		m.MissKind = kind
+		return m
+	}
+	read := func(t *testing.T, p *Proxy) map[string]models.UnmatchedCall {
+		t.Helper()
+		got, err := p.GetMockErrors(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := map[string]models.UnmatchedCall{}
+		for _, c := range got {
+			out[c.ActualSummary] = c
+		}
+		if len(out) != len(got) {
+			t.Fatalf("the read took %+v; want each call once", got)
+		}
+		return out
+	}
+
+	t.Run("switch on", func(t *testing.T) {
+		t.Setenv(provenswitch.Env, "1")
+		p := &Proxy{logger: zap.NewNop(), errChannel: make(chan error, 16)}
+		p.pendingMockErrors.addBounded(series("claim at boot", ""), maxPendingMockErrors)
+		p.pendingMockErrors.addBounded(mockMiss("insert on events"), maxPendingMockErrors)
+		p.BeginTestErrorCapture()
+		p.errChannel <- series("claim in t1", models.MissInTest)
+		p.errChannel <- mockMiss("POST /t1")
+		got := read(t, p)
+		if len(got) != 4 {
+			t.Fatalf("the first test read %+v; want all four calls", got)
+		}
+		for _, s := range []string{"claim at boot", "claim in t1"} {
+			if c := got[s]; !c.Background || c.CountsAgainstTest() || c.BeforeSet {
+				t.Errorf("%q reads %+v; want it background, charged to no test, never the set's startup", s, c)
+			}
+		}
+		if c := got["insert on events"]; c.Background || !c.BeforeSet {
+			t.Errorf("the startup's own miss reads %+v; want it the set's (BeforeSet)", c)
+		}
+		if c := got["POST /t1"]; c.Background || !c.CountsAgainstTest() || c.BeforeSet {
+			t.Errorf("the test's own miss reads %+v; want it its own", c)
+		}
+	})
+	t.Run("switch off", func(t *testing.T) {
+		t.Setenv(provenswitch.Env, "")
+		p := &Proxy{logger: zap.NewNop(), errChannel: make(chan error, 16)}
+		p.BeginTestErrorCapture()
+		p.errChannel <- series("claim in t1", "")
+		got := read(t, p)
+		if c, ok := got["claim in t1"]; !ok || c.Background || !c.CountsAgainstTest() {
+			t.Errorf("without the switch the claim reads %+v (%v); want the test's miss, as it was", c, ok)
+		}
+	})
+}

@@ -7,6 +7,7 @@ import (
 	"net"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/variables"
 	"go.uber.org/zap"
@@ -454,6 +455,52 @@ type SetAsideReader interface {
 // other call, and each still answered once in the test's own count.
 type AnsweredBackgroundReader interface {
 	AnsweredBackground() []*models.Mock
+}
+
+// MarkedSeriesReader is an optional MockMemDb capability under the proven
+// switch and the background rules: a timer's call that judging marked as the
+// application's background work wherever it was recorded (a series, set-wide).
+// Such a call comes again and again with only its reads of the clock changed
+// (learn.SeriesOf), so at replay its copies are no recording's very request,
+// and they come as often as the replay's timing makes them, not as recorded:
+// none is the open test's. MarkedSeries is the staged set's series of kind
+// (learn.SeriesOfSet, read as judging reads them: every recording of the set,
+// each in its call's span) whose every recording is background, judging's
+// mark on a test's list (models.MockEntry.Background, of any test) or the
+// set's worker scope or pool, and at least one marked: a series a test's
+// unmarked recording is in is a call that test must make, and is none. known
+// excuses leaves as SeriesOf's: keploy.yml's noise of kind, one reading for
+// the staging (the series are read once per staging, with the first call's).
+// The set's recordings are read as it is staged, before any call: a call
+// that comes while they are still being read waits for them, or for ctx
+// (the call's: its error is then ctx's).
+// The parser answers a call of a marked series (Series.HasShape) whose reads
+// of the clock hold on the run's clock (Series.Holds on the call's span) with
+// one of its recordings, unchecked, consuming none, as often as it comes; and
+// a call of one that does not hold is a miss of the set's background
+// (models.MockMismatchReport.Background), never the open test's. err is why
+// the store could not read the set's recordings: then no series is marked.
+// The agent's MockManager implements it, and every MockMemDb wrapper must
+// forward it.
+type MarkedSeriesReader interface {
+	MarkedSeries(ctx context.Context, kind models.Kind, known learn.Known) ([]MarkedSeries, error)
+}
+
+// MarkedSeries is one series judging marked (MarkedSeriesReader): what was
+// learned of it, and its recordings (Series.Members), in the order of their
+// calls, the newest last. The recordings are the store's; read-only.
+type MarkedSeries struct {
+	Series     learn.Series
+	Recordings []*models.Mock
+}
+
+// MarkedSeriesOf is db's MarkedSeriesReader.MarkedSeries: none when db does
+// not implement it.
+func MarkedSeriesOf(ctx context.Context, db MockMemDb, kind models.Kind, known learn.Known) ([]MarkedSeries, error) {
+	if r, ok := db.(MarkedSeriesReader); ok {
+		return r.MarkedSeries(ctx, kind, known)
+	}
+	return nil, nil
 }
 
 // ExactServedReader is an optional MockMemDb extension of a store that

@@ -589,6 +589,10 @@ type UnmatchedCall struct {
 	// and why nothing answered it (keploy test: TestReport.BackgroundCalls).
 	// A call made in an earlier test's window and filed late is no
 	// background call: it is still charged to the test whose read took it.
+	// A call of a series judging marked as background work that no
+	// recording of the series answered (MockMismatchReport.Background) is
+	// one wherever it was made, in a test's window or before the set's
+	// first test (never BeforeSet): a timer's call, no test's.
 	Background bool `json:"background,omitempty" yaml:"background,omitempty"`
 	// Differs mirrors MockMismatchReport.Differs: the names of the fields in
 	// which the call differs from its closest recording, without values.
@@ -642,8 +646,10 @@ type UnmatchedCall struct {
 	// ClosestMock, the marked recording it repeated, unchecked.
 	// AnswerBeforeUnmadeWrite: a read made before a write of its test the
 	// replay had not made yet, answered with ClosestMock, recorded before
-	// that write; NextSteps names the write. An answer never counts
-	// against a test and never lands in a miss list.
+	// that write; NextSteps names the write. AnswerBackgroundSeries: a call
+	// of a marked background series answered with ClosestMock, a recording
+	// of the series, its clock reads checked on the run's clock. An answer
+	// never counts against a test and never lands in a miss list.
 	Answer    string `json:"answer,omitempty" yaml:"answer,omitempty"`
 	Drift     bool   `json:"drift,omitempty" yaml:"drift,omitempty"`
 	Reused    bool   `json:"reused,omitempty" yaml:"reused,omitempty"`
@@ -811,6 +817,13 @@ const (
 	// request made before the write, consuming nothing. Nothing is learned
 	// from it; the report names it (BeforeWriteLines).
 	AnswerBeforeUnmadeWrite = "before_unmade_write"
+	// AnswerBackgroundSeries: a call of a series judging marked as the
+	// application's background work set-wide (a call shape whose count
+	// varied between recording and replay with only clock reads differing),
+	// its clock reads holding on the run's clock, answered with the series'
+	// newest recording the open test's unmade writes admit (ClosestMock),
+	// consuming none, unchecked otherwise. Every copy of it is answered so.
+	AnswerBackgroundSeries = "background_series"
 )
 
 // The reasons a miss of record's full round carries (UnmatchedCall.Reason),

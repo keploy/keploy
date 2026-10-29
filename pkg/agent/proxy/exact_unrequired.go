@@ -36,6 +36,7 @@ func (m *MockManager) SetUnrequired(marks models.BackgroundMarks) {
 		set = models.BackgroundMarks{}
 	}
 	m.exact.unrequired.Store(&set)
+	m.beginMarkedSeries()
 }
 
 // unrequiredOf is the marks SetUnrequired last installed on test's own list;
