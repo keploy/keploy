@@ -126,16 +126,16 @@ func TestACallWithNoSeriesAnswererMissesAsBefore(t *testing.T) {
 	}
 }
 
-// viewDb is againDb whose open view shows own, the open test's recordings,
+// ownViewDb is againDb whose open view shows own, the open test's recordings,
 // none of them consumed, read in the round the call first read.
-type viewDb struct {
+type ownViewDb struct {
 	againDb
 	own []*models.Mock
 }
 
-func (d viewDb) GetPerTestMocksInWindow() ([]*models.Mock, error)  { return d.own, nil }
-func (d viewDb) GetFilteredMocksInWindow() ([]*models.Mock, error) { return d.own, nil }
-func (d viewDb) HoldToRound(integrations.CallRound) (integrations.MockMemDb, func() bool) {
+func (d ownViewDb) GetPerTestMocksInWindow() ([]*models.Mock, error)  { return d.own, nil }
+func (d ownViewDb) GetFilteredMocksInWindow() ([]*models.Mock, error) { return d.own, nil }
+func (d ownViewDb) HoldToRound(integrations.CallRound) (integrations.MockMemDb, func() bool) {
 	return d, func() bool { return false }
 }
 
@@ -189,7 +189,7 @@ func TestAMarkedSeriesMissIsTheSetsBackgroundMissAndNothingElse(t *testing.T) {
 		},
 		{
 			"an array in another order than the open test's recording",
-			viewDb{againDb: againDb{gateDb: gateDb{earlierDb: earlierDb{mockMemDb: &mockMemDb{}}}}, own: []*models.Mock{inOrder}},
+			ownViewDb{againDb: againDb{gateDb: gateDb{earlierDb: earlierDb{mockMemDb: &mockMemDb{}}}}, own: []*models.Mock{inOrder}},
 			post,
 			func(r *models.MockMismatchReport) bool { return r.Reason == models.MissUnstableOrder },
 		},
