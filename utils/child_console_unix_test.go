@@ -331,8 +331,8 @@ func TestChildOutputCopyDrainsWithoutWaitingForTheEnd(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer r.Close()
-			defer w.Close()
+			defer func() { _ = r.Close() }()
+			defer func() { _ = w.Close() }()
 			var dst syncBuffer
 			cp := StartChildOutputCopy(&dst, r, keep)
 			if _, err := w.WriteString("a " + plantedConsoleValue + "\ntail " + plantedConsoleValue); err != nil {
@@ -489,8 +489,8 @@ func TestChildOutputCopyDrainsWhatItHadNotRead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer r.Close()
-	defer w.Close()
+	defer func() { _ = r.Close() }()
+	defer func() { _ = w.Close() }()
 	g := newGatedConsole()
 	// Not kept on: the copy stops at the drain, so only the drain can have
 	// written the rest.
@@ -511,8 +511,8 @@ func TestChildOutputCopyDrainReadsNoMoreThanThePipeHeld(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer r.Close()
-	defer w.Close()
+	defer func() { _ = r.Close() }()
+	defer func() { _ = w.Close() }()
 	g := newGatedConsole()
 	cp := StartChildOutputCopy(g, r, false)
 	g.mu.Lock()

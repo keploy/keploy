@@ -65,11 +65,11 @@ type composeLogConsumer struct {
 }
 
 func (c composeLogConsumer) Log(containerName, message string) {
-	fmt.Fprintf(c.out, "%s  | %s\n", containerName, keployLog.RedactChildOutput(message))
+	_, _ = fmt.Fprintf(c.out, "%s  | %s\n", containerName, keployLog.RedactChildOutput(message))
 }
 
 func (c composeLogConsumer) Err(containerName, message string) {
-	fmt.Fprintf(c.err, "%s  | %s\n", containerName, keployLog.RedactChildOutput(message))
+	_, _ = fmt.Fprintf(c.err, "%s  | %s\n", containerName, keployLog.RedactChildOutput(message))
 }
 
 func (c composeLogConsumer) Status(container, msg string) {
