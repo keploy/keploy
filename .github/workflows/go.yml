@@ -27,6 +27,15 @@ jobs:
       - name: Build arm
         run: GOOS=linux GOARCH=arm64 go build -v ./...
 
+      # No build above compiles the darwin files. When shared proxy code
+      # started calling a function that only the Linux and other-platform
+      # files defined (netListenDrops), the darwin build broke without a
+      # textual conflict, and every Linux check stayed green. This step fails
+      # such a change on Linux, before the macOS job runs. Vet also compiles
+      # the test files, which go_macos.yaml's builds do not.
+      - name: Vet darwin/arm64
+        run: GOOS=darwin GOARCH=arm64 go vet ./...
+
       # SECURITY: codfish/semantic-release-action was compromised on
       # 2026-06-24 15:39 UTC — the attacker force-pushed malicious commit
       # 5792aba (full: 6b9501e1889cc45c91726729610cf69c2442b8c5) and repointed
