@@ -243,4 +243,82 @@ func (r *setSeriesRead) answerOnce(name string) bool {
 	return true
 }
 
+// keepSeriesRead keeps, as h's own (heldScope.series), the read of the
+// set's series current now while it is of h's call's staging: the read
+// another of the call's staging takes the place of (new marks, the store's
+// recordings changed), and none when nothing is marked in it. A read of a
+// later staging is never kept: a call made in one test set is never handed
+// the series of the set the replay staged after it (MarkedSeries). Called
+// as h is held (HoldToRound), so a call whose staging moves before it asks
+// still has its own staging's read, and as it asks.
+func (h *heldScope) keepSeriesRead() {
+	r := h.currentSeriesRead()
+	switch {
+	case r != nil && r.key.epoch == h.g.at.Epoch:
+		h.series = r
+	case r == nil && h.stagingEpoch.Load() == h.g.at.Epoch:
+		h.series = nil
+	}
+}
+
+// MarkedSeries is the manager's (integrations.MarkedSeriesReader) for h's
+// call: its own staging's series (keepSeriesRead), read whole. Once the
+// replay staged a test set after the call's mark (the next set, or this one
+// again), they are handed as that staging's (integrations.MarkedSeries.
+// Restaged), answering no call: recordings' names restart in each set, and
+// a call is never answered from the series of a set it was not made in, nor
+// charged to that set's test. A staging whose read another read took the
+// place of before it ended (the next staging's) hands none: its series were
+// never read whole, and the call goes on as any other call the replay
+// staged a set under.
+func (h *heldScope) MarkedSeries(ctx context.Context, kind models.Kind, known learn.Known) ([]integrations.MarkedSeries, error) {
+	if h.exactView() == nil {
+		return nil, nil
+	}
+	for {
+		h.keepSeriesRead()
+		r := h.series
+		if r == nil {
+			h.moved()
+			return nil, nil
+		}
+		select {
+		case <-r.done:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		if r.stopped {
+			// Its reads are no set's: within the call's staging the read
+			// that took its place is kept next; after a staging, none is.
+			h.series = nil
+			continue
+		}
+		if r.err != nil {
+			if h.moved() {
+				return nil, nil
+			}
+			return nil, r.err
+		}
+		s := r.seriesOf(kind, known)
+		if !h.moved() {
+			return s, nil
+		}
+		return restagedSeries(s), nil
+	}
+}
+
+// restagedSeries is s, a call's staging's series, handed after the replay
+// staged a test set under the call (integrations.MarkedSeries.Restaged):
+// none answers a call, also for a parser that does not tell the mark, as a
+// recording neither answered again (Again) nor spent once (Once) answers
+// none.
+func restagedSeries(s []integrations.MarkedSeries) []integrations.MarkedSeries {
+	out := make([]integrations.MarkedSeries, len(s))
+	for i, m := range s {
+		m.Restaged, m.Again, m.Once = true, false, nil
+		out[i] = m
+	}
+	return out
+}
+
 var _ integrations.MarkedSeriesReader = (*MockManager)(nil)
