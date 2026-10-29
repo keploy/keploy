@@ -7,6 +7,9 @@ import (
 	"errors"
 	"io"
 	"net"
+	"runtime"
+	"slices"
+	"strings"
 	"sync"
 	"testing"
 
@@ -33,6 +36,12 @@ func passThrough(t *testing.T, client, dest net.Conn) (cancel context.CancelFunc
 // them has returned, so it tells, by a count, that a reader has ended.
 func passThroughLimited(t *testing.T, client, dest net.Conn, limit int) (cancel context.CancelFunc, ended <-chan error, g *errgroup.Group) {
 	t.Helper()
+	return passThroughBy(t, p0(), client, dest, limit)
+}
+
+// passThroughBy is passThroughLimited by p, whose logger the test reads.
+func passThroughBy(t *testing.T, p *Proxy, client, dest net.Conn, limit int) (cancel context.CancelFunc, ended <-chan error, g *errgroup.Group) {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(limit)
@@ -41,7 +50,7 @@ func passThroughLimited(t *testing.T, client, dest net.Conn, limit int) (cancel 
 	gctx = context.WithValue(gctx, models.DestConnectionIDKey, "2")
 	out := make(chan error, 1)
 	go func() {
-		err := p0().globalPassThrough(gctx, client, dest)
+		err := p.globalPassThrough(gctx, client, dest)
 		_ = client.Close()
 		_ = dest.Close()
 		cancel()
@@ -346,6 +355,60 @@ type unwrapOnly struct{ net.Conn }
 
 func (c unwrapOnly) Unwrap() net.Conn { return c.Conn }
 
+// A side that sent its EOF and then closed whole takes no more of the other
+// side's bytes: the write to it fails, and that ends the relay with no error,
+// for the side had ended what it would hear (and nothing is logged at Error).
+// The other side writes on until the relay ends, so the relay's write to the
+// closed side comes, whenever the reset that closes it arrives: a count of
+// writes, no clock. Red with that write taken for a failure (logged at Error,
+// and the relay's error).
+func TestGlobalPassThroughEndsQuietlyOnAWriteToASideThatEndedAndClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// ender is the side that sends its EOF and then closes whole, and
+		// writer the side that writes on; each is given the test's ends in
+		// (client, server) order.
+		ender, writer func(app, server net.Conn) net.Conn
+	}{
+		{"the server", func(_, server net.Conn) net.Conn { return server }, func(app, _ net.Conn) net.Conn { return app }},
+		{"the client", func(app, _ net.Conn) net.Conn { return app }, func(_, server net.Conn) net.Conn { return server }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			app, client := loopbackPair(t)
+			dest, server := loopbackPair(t)
+			core, logs := observer.New(zap.ErrorLevel)
+			_, ended, _ := passThroughBy(t, &Proxy{logger: zap.New(core)}, client, dest, -1)
+			ender, writer := tc.ender(app, server), tc.writer(app, server)
+			halfCloseOf(t, ender)
+			// The relay forwarded its end: the writer reads its own.
+			if got := awaitEvent(t, readAll(writer), "the other side reading the end forwarded to it"); len(got) != 0 {
+				t.Fatalf("the other side read %q, want only its end", got)
+			}
+			_ = ender.Close()
+			chunk := counted(pUtil.WaitReadSize, 5)
+			var err error
+		writing:
+			for {
+				select {
+				case err = <-ended:
+					break writing
+				default:
+				}
+				if _, werr := writer.Write(chunk); werr != nil { // the relay ended, and its caller closed the conns
+					err = awaitEvent(t, ended, "the relay ending")
+					break
+				}
+			}
+			if err != nil {
+				t.Errorf("the relay ended with %v, want nil: the side it could not write to had ended and closed", err)
+			}
+			for _, e := range logs.All() {
+				t.Errorf("the proxy logged %s %q (%v), want nothing at Error", e.Level, e.Message, e.ContextMap())
+			}
+		})
+	}
+}
+
 // A TLS 1.2 server's last answer, read together with the close_notify that
 // follows it (crypto/tls returns them as one read: the bytes and io.EOF),
 // reaches the client: a relay reader that dropped the bytes that came with
@@ -448,11 +511,12 @@ func (c *streamingConn) Read(b []byte) (int, error) {
 
 // heldWriteConn is a destination that cannot half-close, keeps what is written to
 // it, tells the size of each write, and holds the first write until release
-// is closed.
+// is closed. With err set, a write released fails with it instead.
 type heldWriteConn struct {
 	net.Conn
 	writes  chan int
 	release chan struct{}
+	err     error
 	mu      sync.Mutex
 	got     []byte
 }
@@ -460,6 +524,9 @@ type heldWriteConn struct {
 func (c *heldWriteConn) Write(b []byte) (int, error) {
 	c.writes <- len(b)
 	<-c.release
+	if c.err != nil {
+		return 0, c.err
+	}
 	c.mu.Lock()
 	c.got = append(c.got, b...)
 	c.mu.Unlock()
@@ -596,6 +663,87 @@ func TestGlobalPassThroughEndsItsReadersWithIt(t *testing.T) {
 	_ = awaitEvent(t, waited, "the pass-through's readers ending with it, their context still open")
 }
 
+// A reader holding its side's last bytes, read with its EOF, returns with the
+// relay while its queue is full: the hand-off of the bytes that came with a
+// read's error waits for a taker only while the relay's context lasts, as
+// every hand-off does. The relay is held in its first write to the
+// destination until the client's reader, its queue full, holds that last
+// read (its goroutine parked in the hand-off); then the write fails, and the
+// relay ends and will take nothing more. Events and a count, no clock. Red
+// with that hand-off a plain send: the reader waits for a taker forever, and
+// the connection's wait for its goroutines never returns.
+func TestGlobalPassThroughEndsAReaderHoldingItsSidesLastBytes(t *testing.T) {
+	app, cp := net.Pipe()
+	dp, srv := net.Pipe()
+	t.Cleanup(func() { _ = app.Close(); _ = srv.Close() })
+	// The read the first write takes, the queue's, and the one held.
+	const reads = 1 + passThroughQueue + 1
+	client := &streamingConn{Conn: cp, data: counted(reads*pUtil.WaitReadSize, 9), sizes: make(chan int, reads+1),
+		endWithLast: true, rest: make(chan struct{})}
+	dest := &heldWriteConn{Conn: dp, writes: make(chan int, 1), release: make(chan struct{}),
+		err: errors.New("the destination reset the connection")}
+	_, ended := passThrough(t, client, dest)
+
+	// The client's reads after its first wait for rest, so that first one is
+	// written alone, and the write holds the relay.
+	awaitEvent(t, dest.writes, "the first write to the destination")
+	close(client.rest)
+	for i := 0; i < reads; i++ {
+		awaitEvent(t, client.sizes, "a read of the client")
+	}
+	// Its last read began after the one before it was queued; once the
+	// reader parks, it holds that read's bytes, with the queue full.
+	for !parkedInAHandOff() {
+		runtime.Gosched()
+	}
+	close(dest.release)
+	if err := awaitEvent(t, ended, "the pass-through and its readers ending"); err == nil {
+		t.Fatal("globalPassThrough = nil, want the failed write's error")
+	}
+}
+
+// parkedInAHandOff reports whether a relay reader (a goroutine in
+// ReadBuffConn) waits on a channel send or a select in package pUtil itself,
+// outside readBytes: handing on what it read, in ReadBuffConn or in any
+// helper of pUtil's it hands on through. Only relay readers count, so a
+// goroutine an earlier test left in a pUtil wait does not. A reader blocked
+// in its read waits in the conn's read (net.(*pipe)'s here, or the test's
+// streamingConn's), outside pUtil; one in readBytes waits in its read or
+// before it retries an empty EOF, and is handing nothing on.
+func parkedInAHandOff() bool {
+	buf := make([]byte, 1<<16)
+	for {
+		n := runtime.Stack(buf, true)
+		if n < len(buf) {
+			buf = buf[:n]
+			break
+		}
+		buf = make([]byte, 2*len(buf))
+	}
+	for _, g := range strings.Split(string(buf), "\n\n") {
+		lines := strings.Split(g, "\n")
+		if !strings.Contains(lines[0], "[chan send") && !strings.Contains(lines[0], "[select") {
+			continue
+		}
+		// A relay reader, and not in its read: readBytes waits in package
+		// pUtil too, before it retries an empty EOF.
+		if !strings.Contains(g, "go.keploy.io/server/v3/pkg/agent/proxy/util.ReadBuffConn(") ||
+			strings.Contains(g, "go.keploy.io/server/v3/pkg/agent/proxy/util.readBytes(") {
+			continue
+		}
+		for _, f := range lines[1:] { // its first frame past package runtime's
+			if f == "" || strings.HasPrefix(f, "\t") || strings.HasPrefix(f, "runtime.") {
+				continue
+			}
+			if strings.HasPrefix(f, "go.keploy.io/server/v3/pkg/agent/proxy/util.") {
+				return true
+			}
+			break
+		}
+	}
+	return false
+}
+
 // A pass-through that ends because its context did ends quietly: the
 // interrupt that puts both connections' deadlines in the past runs only once
 // the context its relay and readers judge an interrupted read or write by
@@ -603,15 +751,31 @@ func TestGlobalPassThroughEndsItsReadersWithIt(t *testing.T) {
 // returns the context's error, and nothing is logged at Error.
 //
 // Which runs first is otherwise down to the order a context's end reaches
-// what waits on it, which the context package leaves open. The caller's
-// context here (orderedCtx) fixes it: it runs what waits on its end one at a
-// time, in the order each began to wait, and before the next lets what the
-// last one set off settle: here, until the pass-through has returned. An
-// interrupt that waits on the caller's context, ahead of the relay's own
-// context made from it (as one did), then fires while the relay's context is
-// still open, on every run: the readers' interrupted reads are logged as
-// failures, and the relay returns their i/o timeout.
+// what waits on it, which the context package leaves open (its waits are a
+// map's). The caller's context here (orderedCtx) fixes it: it runs what
+// waits on its end one at a time, in the order each began to wait or in the
+// reverse of it, and before the next lets what the last one set off settle:
+// here, until the pass-through has returned. The row runs both orders. An
+// interrupt that waits on the caller's context beside the relay's own context
+// made from it (as one did), whichever began to wait first, then fires while
+// the relay's context is still open in one of them, on every run: the
+// readers' interrupted reads are logged as failures, and the relay returns
+// their i/o timeout. A stated limit: an interrupt run by a goroutine that
+// waits on the caller's Done() itself, not by an AfterFunc, is not ordered by
+// this row.
 func TestGlobalPassThroughInterruptsOnlyOnceItsContextHasEnded(t *testing.T) {
+	for _, order := range []struct {
+		name    string
+		reverse bool
+	}{{"in the order they began to wait", false}, {"in the reverse of it", true}} {
+		t.Run(order.name, func(t *testing.T) { interruptsOnlyOnceItsContextHasEnded(t, order.reverse) })
+	}
+}
+
+// interruptsOnlyOnceItsContextHasEnded is
+// TestGlobalPassThroughInterruptsOnlyOnceItsContextHasEnded with the caller's
+// context running its waits in reverse when reverse is set.
+func interruptsOnlyOnceItsContextHasEnded(t *testing.T, reverse bool) {
 	// The far ends stay open (until t ends) and send nothing: the relay
 	// waits on its reads.
 	client, _ := loopbackPair(t)
@@ -623,7 +787,7 @@ func TestGlobalPassThroughInterruptsOnlyOnceItsContextHasEnded(t *testing.T) {
 	ctx := newOrderedCtx(context.WithValue(context.WithValue(context.WithValue(context.Background(),
 		models.ErrGroupKey, g),
 		models.ClientConnectionIDKey, "1"),
-		models.DestConnectionIDKey, "2"))
+		models.DestConnectionIDKey, "2"), reverse)
 	var err error
 	returned := make(chan struct{})
 	go func() {
@@ -652,10 +816,11 @@ func TestGlobalPassThroughInterruptsOnlyOnceItsContextHasEnded(t *testing.T) {
 // orderedCtx is a context whose end runs what waits on it (a context made
 // from it, a context.AfterFunc on it: the context package hands a parent with
 // an AfterFunc method each such wait) one at a time, in the order each began
-// to wait, with what end is given run after each. Its values are its
-// Context's, which never ends.
+// to wait (or, reverse, the last first), with what end is given run after
+// each. Its values are its Context's, which never ends.
 type orderedCtx struct {
 	context.Context
+	reverse bool
 	done    chan struct{}
 	mu      sync.Mutex
 	err     error
@@ -668,8 +833,8 @@ type orderedWait struct {
 	stopped, took bool
 }
 
-func newOrderedCtx(values context.Context) *orderedCtx {
-	return &orderedCtx{Context: values, done: make(chan struct{})}
+func newOrderedCtx(values context.Context, reverse bool) *orderedCtx {
+	return &orderedCtx{Context: values, reverse: reverse, done: make(chan struct{})}
 }
 
 func (c *orderedCtx) Done() <-chan struct{} { return c.done }
@@ -704,13 +869,16 @@ func (c *orderedCtx) AfterFunc(f func()) (stop func() bool) {
 }
 
 // end ends c, then runs each wait not stopped by then, in the order they
-// began, calling settle after each.
+// began (or its reverse), calling settle after each.
 func (c *orderedCtx) end(settle func()) {
 	c.mu.Lock()
 	c.err = context.Canceled
 	close(c.done)
-	waiting := c.waiting
+	waiting := slices.Clone(c.waiting)
 	c.mu.Unlock()
+	if c.reverse {
+		slices.Reverse(waiting)
+	}
 	for _, w := range waiting {
 		c.mu.Lock()
 		run := !w.stopped

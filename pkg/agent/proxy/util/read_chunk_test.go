@@ -198,3 +198,51 @@ func TestEachReadPathReadsWithItsSize(t *testing.T) {
 		<-bufCh
 	}
 }
+
+// The bytes a read returns with its error are handed on before the error: a
+// relay that takes a side's error first ends without that side's last bytes
+// (a TLS peer's last record, read together with its close_notify, comes back
+// with io.EOF). Both channels are unbuffered and the test takes from
+// whichever is ready, so the reader is ready on one only, the one it hands on
+// to first. No clock decides it.
+func TestReadBuffConnHandsOnTheBytesThatComeWithItsEnd(t *testing.T) {
+	peer, c := net.Pipe()
+	t.Cleanup(func() { _ = peer.Close(); _ = c.Close() })
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	bufCh := make(chan []byte)
+	errCh := make(chan error)
+	go ReadBuffConn(ctx, zap.NewNop(), &lastBytesConn{Conn: c, last: []byte("x")}, bufCh, errCh, false)
+
+	var expired <-chan time.Time
+	if dl, ok := t.Deadline(); ok {
+		timer := time.NewTimer(time.Until(dl) / 4)
+		defer timer.Stop()
+		expired = timer.C
+	}
+	select {
+	case b := <-bufCh:
+		if string(b) != "x" {
+			t.Fatalf("the reader handed on %q, want the bytes that came with its end, %q", b, "x")
+		}
+	case err := <-errCh:
+		t.Fatalf("the reader handed on its end (%v) before the bytes that came with it", err)
+	case <-expired:
+		t.Fatal("the reader handing on its read never happened")
+	}
+	if err := awaitTaken(t, errCh, "the reader handing on its end"); err != io.EOF {
+		t.Fatalf("the reader ended with %v, want io.EOF", err)
+	}
+}
+
+// lastBytesConn's one read returns its last bytes with io.EOF.
+type lastBytesConn struct {
+	net.Conn
+	last []byte
+}
+
+func (c *lastBytesConn) Read(p []byte) (int, error) {
+	n := copy(p, c.last)
+	c.last = c.last[n:]
+	return n, io.EOF
+}
