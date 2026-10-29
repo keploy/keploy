@@ -4786,6 +4786,27 @@ func (p *Proxy) SetUnrequired(marks models.BackgroundMarks) error {
 	return nil
 }
 
+// ServeExactAside implements agent.ExactAsideServer
+// (MockManager.ServeExactAside).
+func (p *Proxy) ServeExactAside(from string, mocks []*models.Mock) error {
+	m := p.getMockManager()
+	if m == nil {
+		return errNoMockManager
+	}
+	m.ServeExactAside(from, mocks)
+	return nil
+}
+
+// ExactTestServedAside implements agent.ExactAsideServer
+// (MockManager.ExactTestServedAside).
+func (p *Proxy) ExactTestServedAside() (string, []string, bool) {
+	m := p.getMockManager()
+	if m == nil {
+		return "", nil, false
+	}
+	return m.ExactTestServedAside()
+}
+
 // ExactTestUnusedBackground implements agent.UnusedBackgroundReader
 // (MockManager.ExactTestUnusedBackground).
 func (p *Proxy) ExactTestUnusedBackground() (string, []string, bool) {

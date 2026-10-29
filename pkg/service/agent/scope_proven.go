@@ -601,6 +601,7 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 	a.provenMu.Unlock()
 	if a.replaying() && gated {
 		a.NoteScopeGated(id, 0, at)
+		a.serveAside(id)
 		return models.ScopeBeginResp{V: models.ScopeProtocolVersion, Status: "ok", Action: models.ScopeActionSkip, Reason: reason}, nil
 	}
 
@@ -931,7 +932,7 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, w
 	// A test that passed keeps the background recordings it did not call on
 	// its window too: never a failure, they tell judging which ones a replay
 	// did not use.
-	if ev != nil && (ev.Reason != "" || !ev.Empty() || len(ev.Background) > 0) {
+	if ev != nil && (ev.Reason != "" || !ev.Empty() || len(ev.Background) > 0 || len(ev.ServedAside) > 0) {
 		a.noteScopeEvidence(id, ev)
 	}
 	if err := a.EndScopeAt(ctx, id, 0, at); err != nil {
@@ -1200,7 +1201,44 @@ func (a *Agent) testEvidence(ctx context.Context, id string, unmade bool, beganA
 			ev.Background = unused
 		}
 	}
+	// The calls of its window a set-aside test's recording answered:
+	// unchecked, never a failure, each named with that test.
+	if r, ok := es.(coreAgent.ExactAsideServer); ok {
+		if st, served, ok := r.ExactTestServedAside(); ok && st == id {
+			ev.ServedAside = served
+		}
+	}
 	return ev, nil
+}
+
+// serveAside hands the proxy the recordings of test id, which the replay
+// set aside (its begin was answered skip), to serve the calls made after it
+// (coreAgent.ExactAsideServer): a set-aside test makes none of its calls, so
+// what they did (a cache fill) is missing for the tests after it, and one of
+// them may make the call in its own window. Each is served, by exact match
+// only, unchecked and never required, at most once, and named on the
+// evidence of the test it lands in (founder D1: serve, don't require). A
+// proxy that cannot serves them to no one, as before.
+func (a *Agent) serveAside(id string) {
+	as, ok := a.Proxy.(coreAgent.ExactAsideServer)
+	if !ok {
+		return
+	}
+	a.scopeMu.Lock()
+	names := append([]string(nil), a.scopeTable[id]...)
+	a.scopeMu.Unlock()
+	if len(names) == 0 {
+		return
+	}
+	mocks, err := a.mocksByName(names)
+	if err != nil {
+		a.logger.Warn("keploy could not read a set-aside test's recordings: no later test is served them",
+			zap.String("test", id), zap.Error(err), zap.String("next_step", "check that the recording's mocks are all loaded"))
+		return
+	}
+	if err := as.ServeExactAside(id, a.notReal(id, testMocks(names, mocks))); err != nil {
+		a.logger.Warn("keploy could not serve a set-aside test's recordings to the tests after it", zap.String("test", id), zap.Error(err))
+	}
 }
 
 // mocksByName finds every stored mock named, resident or on disk. A name the

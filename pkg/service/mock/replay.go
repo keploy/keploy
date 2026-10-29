@@ -2193,13 +2193,14 @@ func withEvidence(tests []TestReceipt, windows []models.ScopeWindow) []TestRecei
 	for _, w := range windows {
 		// Evidence with only a reason (a test whose process exited, or
 		// whose evidence could not be read) is keploy's verdict too.
-		if w.Evidence == nil || (w.Evidence.Empty() && w.Evidence.Reason == "") {
+		if w.Evidence == nil || (w.Evidence.Empty() && w.Evidence.Reason == "" && len(w.Evidence.ServedAside) == 0) {
 			continue
 		}
 		ev := evidenceOf(w.Name, w.Evidence.Reason)
 		ev.Misses = append(ev.Misses, w.Evidence.Misses...)
 		ev.Unconsumed = append(ev.Unconsumed, w.Evidence.Unconsumed...)
 		ev.Incomplete = append(ev.Incomplete, w.Evidence.Incomplete...)
+		ev.ServedAside = append(ev.ServedAside, w.Evidence.ServedAside...)
 		// One attempt keploy could not read leaves the test unread, with
 		// that attempt's reason.
 		if w.Evidence.Unread && !ev.Unread {

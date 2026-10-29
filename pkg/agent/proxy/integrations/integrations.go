@@ -425,6 +425,20 @@ type ExactConsumedReader interface {
 	ConsumedTestMocks() []*models.Mock
 }
 
+// SetAsideReader is an optional MockMemDb extension of a store under exact
+// serving: SetAsideMocks are the recordings of the tests the replay set aside
+// before the open test (models.TestModeInfo.SetAsideFrom names each one's),
+// of kind ("" for every kind), that have not answered. They are in none of
+// the store's reads. A parser asks for them only for a call that no
+// recording it read answered and that is not one call more than the open
+// test recorded; it matches the call exactly against them alone, binding
+// nothing, and serves the one it matched only when the store's consume door
+// takes it (each answers at most once in the staging). None while no test is
+// open.
+type SetAsideReader interface {
+	SetAsideMocks(kind models.Kind) []*models.Mock
+}
+
 // AnsweredBackgroundReader is an optional MockMemDb extension of a store
 // that serves each test its own mocks exactly (the proven switch).
 // AnsweredBackground returns the open test's own recordings that judging

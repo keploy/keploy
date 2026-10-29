@@ -112,6 +112,16 @@ type exactView struct {
 	cand []bool
 	// claims is the manager's claims on the shared recordings.
 	claims *exactClaims
+	// aside names, by position in owned, the set-aside test whose recording
+	// each of the open test's set-aside recordings is (ServeExactAside):
+	// filed after every one of its own and its shared ones, in no read
+	// (unanswered) but SetAsideMocks, each answers at most once in the
+	// staging (asideClaims), for whichever later test makes its call first,
+	// and none is required of the test. "" for its own and its shared ones;
+	// nil for a view with none.
+	aside []string
+	// asideClaims is the manager's claims on the set-aside recordings.
+	asideClaims *exactClaims
 	// bg is the set's background under the background rules (ServeExactBackground)
 	// when the view was installed; nil for today's rules.
 	bg *backgroundState
@@ -313,6 +323,11 @@ type exactState struct {
 	// claims are the shared recordings the tests of the current staging
 	// answered with (exactClaims).
 	claims exactClaims
+	// setAside is the recordings of the tests the replay set aside so far
+	// in the session (ServeExactAside), and asideClaims the tests that
+	// answered calls with them in the current staging.
+	setAside    atomic.Pointer[[]asideRecording]
+	asideClaims exactClaims
 	// round is what exact serving's round changes holding its one lock
 	// (exact_round.go): the generation, the take log, the learn tracker's
 	// boundaries.
@@ -1125,10 +1140,11 @@ func (m *MockManager) serveExactTest(test string, owned, cands []*models.Mock, b
 			}
 		}
 	}
-	v.claims = &m.exact.claims
+	v.addAside(m.setAsideRecordings())
+	v.claims, v.asideClaims = &m.exact.claims, &m.exact.asideClaims
 	v.consumed = make([]bool, len(v.owned))
 	for _, name := range ahead {
-		if i, ok := v.index[name]; ok && !v.isCand(i) {
+		if i, ok := v.index[name]; ok && !v.notOwn(i) {
 			if v.inFlight == nil {
 				v.inFlight = map[string]bool{}
 			}
@@ -1137,7 +1153,7 @@ func (m *MockManager) serveExactTest(test string, owned, cands []*models.Mock, b
 	}
 	for _, a := range answered {
 		i, ok := v.index[a.owned.Name]
-		if !ok || v.consumed[i] || v.isCand(i) {
+		if !ok || v.consumed[i] || v.notOwn(i) {
 			continue
 		}
 		v.consumed[i] = true
@@ -1167,6 +1183,7 @@ func (m *MockManager) serveExactTest(test string, owned, cands []*models.Mock, b
 			v.stamp = m.exact.stampTest(m.openTestEpoch.Load(), test)
 			epoch := m.stagingEpoch.Load()
 			m.exact.claims.release(epoch, test)
+			m.exact.asideClaims.release(epoch, test)
 			m.reopenLocked(v)
 			m.exact.begun.add(epoch, owned)
 			m.exact.fired.Store(true)
@@ -1257,6 +1274,28 @@ func (v *exactView) addShared(cands []*models.Mock) {
 // isCand reports whether owned position i is a shared recording.
 func (v *exactView) isCand(i int) bool {
 	return i < len(v.cand) && v.cand[i]
+}
+
+// asideOf is the set-aside test whose recording owned position i is; "" for
+// the test's own and its shared ones.
+func (v *exactView) asideOf(i int) string {
+	if i < len(v.aside) {
+		return v.aside[i]
+	}
+	return ""
+}
+
+// notOwn reports whether owned position i is no recording of the open test's
+// own mapping: a shared one, or a set-aside test's. Neither is required of
+// the test, carried into it, or in flight into it.
+func (v *exactView) notOwn(i int) bool {
+	return v.isCand(i) || v.asideOf(i) != ""
+}
+
+// asideTaken reports whether owned position i is a set-aside recording a
+// test other than the open one answered a call with in the current staging.
+func (v *exactView) asideTaken(i int) bool {
+	return v.asideOf(i) != "" && v.epoch != nil && v.asideClaims.takenByOther(v.epoch.Load(), v.owned[i].Name, v.test)
 }
 
 // takenByOther reports whether owned position i is a shared recording another
@@ -1569,17 +1608,17 @@ func (m *MockManager) ExactTestOutcome() (test string, consumed, unconsumed []st
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	// Only the test's own: a shared recording is never required of it, nor
-	// one judging marked, on this test's own entry, as the application's
+	// a set-aside test's (ServeExactAside), nor one judging marked, on this test's own entry, as the application's
 	// background work (SetUnrequired): another test's mark on the same
 	// recording does not reach it.
 	for _, i := range v.order {
-		if !v.isCand(i) {
+		if !v.notOwn(i) {
 			consumed = append(consumed, v.owned[i].Name)
 		}
 	}
 	unrequired := m.unrequiredOf(v.test)
 	for i, done := range v.consumed {
-		if !done && !v.isCand(i) {
+		if !done && !v.notOwn(i) {
 			if _, bg := unrequired[v.owned[i].Name]; bg {
 				continue
 			}
@@ -1717,7 +1756,7 @@ func (v *exactView) unanswered(kind models.Kind, sessionOnly ...bool) []*models.
 	defer v.mu.Unlock()
 	out := make([]*models.Mock, 0, len(v.owned))
 	for i, mk := range v.owned {
-		if !v.consumed[i] && (kind == "" || mk.Kind == kind) && (!only || v.session[i]) && !v.takenByOther(i) {
+		if !v.consumed[i] && (kind == "" || mk.Kind == kind) && (!only || v.session[i]) && !v.takenByOther(i) && v.asideOf(i) == "" {
 			out = append(out, mk)
 		}
 	}
@@ -2181,6 +2220,12 @@ func (m *MockManager) exactConsumeIn(v *exactView, mk *models.Mock, evicts bool)
 			// A shared recording answers once in the staging: for the
 			// first of the tests it is shared with to make its call.
 			if v.isCand(i) && !m.exact.claims.claim(m.stagingEpoch.Load(), mk.Name, v.test) {
+				v.mu.Unlock()
+				return exactRefused, nil, nil
+			}
+			// So does a set-aside test's recording: for the first later
+			// test to make its call.
+			if v.asideOf(i) != "" && !m.exact.asideClaims.claim(m.stagingEpoch.Load(), mk.Name, v.test) {
 				v.mu.Unlock()
 				return exactRefused, nil, nil
 			}
