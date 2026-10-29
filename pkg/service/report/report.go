@@ -1598,12 +1598,17 @@ func (r *Report) printDefaultBodyDiff(bodyResult models.BodyResult) error {
 
 // uncheckedLines is test's line for the background writes its window, or the
 // gap before it, answered by their kind, unchecked (models.UncheckedLine),
-// indented under its status and newline-ended; "" for a test with
-// none, as every report written without the proven switch has.
+// then a line for each read it answered from before a write the replay had
+// not made yet (models.BeforeWriteLines), each indented under its status and
+// newline-ended; "" for a test with none, as every report written without
+// the proven switch has.
 func uncheckedLines(test models.TestResult) string {
-	line := models.UncheckedLine(test.TestCaseID, test.Answers)
-	if line == "" {
-		return ""
+	var sb strings.Builder
+	if line := models.UncheckedLine(test.TestCaseID, test.Answers); line != "" {
+		sb.WriteString("  " + line + "\n")
 	}
-	return "  " + line + "\n"
+	for _, line := range models.BeforeWriteLines(test.TestCaseID, test.Answers) {
+		sb.WriteString("  " + line + "\n")
+	}
+	return sb.String()
 }
