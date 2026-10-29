@@ -761,7 +761,7 @@ func TestASelfSkippedTestIsNotFailedForCallsItNeverMade(t *testing.T) {
 	a, _ := wireAgent(t, models.MODE_TEST)
 	storeMocks(a, httpMock("mock-1", "POST", "http://h/audit"))
 	a.scopeTable = map[string][]string{"t": {"mock-1"}}
-	ev, err := a.testEvidence(context.Background(), "t", false)
+	ev, err := a.testEvidence(context.Background(), "t", false, time.Time{}, servedSpan{})
 	require.NoError(t, err)
 	require.True(t, ev.Empty())
 }
@@ -883,7 +883,7 @@ func TestAnUnmadeRecordedCallIsEvidence(t *testing.T) {
 	require.NoError(t, a.serveTestExactly(context.Background(), "orders::TestPlaceOrder"))
 	p.served["mock-2"]++
 
-	ev, err := a.testEvidence(context.Background(), "orders::TestPlaceOrder", true)
+	ev, err := a.testEvidence(context.Background(), "orders::TestPlaceOrder", true, time.Time{}, servedSpan{})
 	require.NoError(t, err)
 	require.Equal(t, []string{"mock-1"}, ev.Unconsumed, "the audit call was not made; DNS is protocol-phase")
 
@@ -1079,7 +1079,7 @@ func TestAFailedConsumptionReadKeepsTheTestsMisses(t *testing.T) {
 	storeMocks(a, httpMock("mock-1", "GET", "http://h/x"))
 	a.scopeTable = map[string][]string{"o::TestA": {"mock-1"}}
 	p.misses = []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "POST /audit"}}
-	ev, err := a.testEvidence(context.Background(), "o::TestA", true)
+	ev, err := a.testEvidence(context.Background(), "o::TestA", true, time.Time{}, servedSpan{})
 	require.ErrorContains(t, err, "was not serving o::TestA exactly")
 	require.NotNil(t, ev)
 	require.Len(t, ev.Misses, 1)
@@ -1754,4 +1754,35 @@ func TestABeginWhoseClockCannotMoveOpensNoWindow(t *testing.T) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	require.Empty(t, p.order, "no window opened, none taken back, nothing served")
+}
+
+// A miss is background only when it was made before the reading test began
+// being served and after the test before it stopped being served (or before
+// the set's first test); a late call of that test, one made in the reading
+// test, and one of unknown time are charged as before.
+func TestBackgroundMissIsOnlyACallMadeOutsideEveryWindow(t *testing.T) {
+	t0 := time.Unix(1000, 0)
+	last := servedSpan{since: t0, until: t0.Add(10 * time.Second)}
+	began := t0.Add(20 * time.Second)
+	at := func(d time.Duration) models.UnmatchedCall { return models.UnmatchedCall{At: t0.Add(d)} }
+	for _, tc := range []struct {
+		name  string
+		m     models.UnmatchedCall
+		began time.Time
+		last  servedSpan
+		want  bool
+	}{
+		{"in the gap after the last test", at(15 * time.Second), began, last, true},
+		{"as the last test's end swapped the pool in", at(10 * time.Second), began, last, true},
+		{"before the set's first test", at(5 * time.Second), began, servedSpan{}, true},
+		{"the last test's late call", at(9 * time.Second), began, last, false},
+		{"before the last test began", at(-time.Second), began, last, false},
+		{"in the reading test", at(20 * time.Second), began, last, false},
+		{"of unknown time", models.UnmatchedCall{}, began, last, false},
+		{"no test served", at(15 * time.Second), time.Time{}, last, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, backgroundMiss(tc.m, tc.began, tc.last))
+		})
+	}
 }
