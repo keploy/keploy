@@ -4626,9 +4626,39 @@ var ErrDecodeRefused = errors.New("decode refused: no room for the decoded body"
 // it against what the decoder allocates.
 const gzipDecoderStateBytes = 64 << 10
 
-// brotliReaderBytes is what a brotli decoder holds beside its ring buffer:
-// its 32 KiB input buffer, its Huffman tables and its state.
+// brotliReaderBytes is what a brotli decoder holds beside its ring buffer and
+// its prefix-code tables (brotliTableBytes): its 32 KiB input buffer, its
+// state, its block-type trees, and one metablock's context maps and tree
+// headers, at the format's limits (86,808 bytes in
+// github.com/andybalholm/brotli v1.2.0).
+// TestBrotliDecoderStateIsReservedAtTheFormatsLimits pins it against the
+// decoder.
 const brotliReaderBytes = 96 << 10
+
+// The format's limits on a brotli decoder's prefix-code tables. Each
+// metablock has three groups of prefix codes, one per alphabet, each of at
+// most 256 trees (RFC 7932 §9.2: NTREESL, NBLTYPESI, NTREESD), and
+// github.com/andybalholm/brotli allocates every tree of a group at the most
+// its alphabet's table can take (kMaxHuffmanTableSize: root table bits 8,
+// codes up to 15 bits), as soon as it has read the group's count and before
+// it reads a tree. So the tables a stream makes the decoder hold are the
+// count its header declares, never what its trees need, and a few bytes can
+// declare the most.
+const (
+	brotliMaxTreesPerGroup     = 256
+	brotliTableEntryBytes      = 4    // one entry: its bits and its symbol
+	brotliLiteralTableEntries  = 630  // a tree of the 256 literals
+	brotliCommandTableEntries  = 1080 // of the 704 insert-and-copy codes
+	brotliDistanceTableEntries = 920  // of the most distance codes a stream may declare: 520 (NPOSTFIX 3, NDIRECT 120)
+)
+
+// brotliTableBytes is the most a brotli decoder holds of its prefix-code
+// tables: one metablock's three groups, each at the format's limit
+// (2,693,120 bytes). It drops a metablock's tables as the next metablock
+// begins (decoderStateMetablockBegin), before it allocates that one's, so it
+// holds one metablock's at a time.
+const brotliTableBytes = brotliMaxTreesPerGroup * brotliTableEntryBytes *
+	(brotliLiteralTableEntries + brotliCommandTableEntries + brotliDistanceTableEntries)
 
 // brotliRingBytes is the most a brotli decoder holds of its ring buffer for
 // a stream that declares a window of 2^wbits bytes (RFC 7932 §9.1): the
@@ -4746,7 +4776,8 @@ func Decompress(logger *zap.Logger, encoding string, data []byte, limit int64) (
 // decodes hold (the enterprise agent's capture bound): the decode asks
 // reserve(n), n > 0, before it holds n more bytes (its output buffer as it
 // grows it, and the decoder's own state: gzip's window and tables, brotli's
-// ring buffer as large as the stream's window allows), and tells it
+// ring buffer as large as the stream's window allows and its prefix-code
+// tables as large as the format allows), and tells it
 // reserve(-n) once it holds n bytes less (the buffer it outgrew, the decoder
 // it closed). A refusal stops the decode at once: it returns
 // ErrDecodeRefused, holding nothing. On success what stays reserved is the
@@ -4763,7 +4794,7 @@ func DecompressReserving(logger *zap.Logger, encoding string, data []byte, limit
 			if !ok {
 				wbits = 24 // the largest window a stream may declare without the large-window flag
 			}
-			state = brotliReaderBytes + brotliRingBytes(wbits)
+			state = brotliReaderBytes + brotliTableBytes + brotliRingBytes(wbits)
 			if !reserveFor(reserve, state) {
 				return nil, ErrDecodeRefused
 			}

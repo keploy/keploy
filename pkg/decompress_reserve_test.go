@@ -5,7 +5,9 @@ import (
 	"compress/gzip"
 	"errors"
 	"fmt"
+	"math/bits"
 	"math/rand"
+	"reflect"
 	"runtime"
 	"testing"
 
@@ -51,6 +53,28 @@ func textBody(n int, seed int64) []byte {
 		fmt.Fprintf(&b, `{"id":%d,"name":"user-%x","score":%d},`, r.Intn(1e6), r.Int63(), r.Intn(100))
 	}
 	return b.Bytes()[:n]
+}
+
+// manyTreeBody is n bytes made of segments of seg bytes, each drawn from its
+// own small skewed alphabet, so a brotli encoder at quality 9 or more splits
+// it into many literal block types and clusters their contexts into many
+// prefix codes: 120 to 255 literal trees in the first metablock of the
+// streams reserveCases makes of it, where JSON text gets 5 or 6.
+func manyTreeBody(n, seg int, seed int64) []byte {
+	r := rand.New(rand.NewSource(seed))
+	out := make([]byte, 0, n)
+	for i := 0; len(out) < n; i++ {
+		base := byte((i * 37) % 240)
+		k := 4 + i%12
+		for j := 0; j < seg && len(out) < n; j++ {
+			s := 0
+			for s < k-1 && r.Intn(3) != 0 {
+				s++
+			}
+			out = append(out, base+byte(s))
+		}
+	}
+	return out
 }
 
 func gzipOf(t *testing.T, body []byte) []byte {
@@ -99,6 +123,14 @@ func reserveCases(t *testing.T) []encoded {
 			}
 		}
 	}
+	// Streams whose metablocks have many prefix codes, so the decoder's
+	// tables are past its other state: the encoder's, and the most the
+	// format allows.
+	cs = append(cs, encoded{"br-most-tables/100000", "br", mostTablesBrotli(100_000), bytes.Repeat([]byte("a"), 100_000)})
+	for _, m := range []struct{ n, q, lgwin int }{{1 << 20, 9, 16}, {512 << 10, 9, 18}, {256 << 10, 11, 18}} {
+		body := manyTreeBody(m.n, 2048, 2048)
+		cs = append(cs, encoded{fmt.Sprintf("br-many-trees-q%d-w%d/%d", m.q, m.lgwin, m.n), "br", brotliOf(t, body, m.q, m.lgwin), body})
+	}
 	return cs
 }
 
@@ -110,21 +142,34 @@ func liveHeap() int64 {
 	return int64(m.HeapAlloc)
 }
 
+// settledHeap is liveHeap once what the encoders pooled is gone:
+// andybalholm/brotli's encoder keeps its state in sync.Pools, whose victim
+// cache lives through one collection, so a base taken one collection after an
+// encode counts that state, and a decode measured against it, as the pool is
+// emptied under it, looks smaller than it is.
+func settledHeap() int64 {
+	runtime.GC()
+	runtime.GC()
+	return liveHeap()
+}
+
 // TestDecompressReservingHoldsNoByteItHasNotReserved pins
 // DecompressReserving's books against the decode: at every point it asks for
 // room (each time it grows its output, and as it starts), and once it has
 // returned, the heap it holds (its output buffer, the decoder's own state:
-// gzip's window and tables, brotli's ring buffer and tables) is within what
-// it has reserved; once it has returned what stays reserved is exactly its
-// output's capacity; and the output is the body. A decode whose reservations
-// were under what it holds would let a caller that bounds its captures'
-// memory hold more than its bound while they decode.
+// gzip's window and tables, brotli's ring buffer and prefix-code tables) is
+// within what it has reserved; once it has returned what stays reserved is
+// exactly its output's capacity; and the output is the body. A decode whose
+// reservations were under what it holds would let a caller that bounds its
+// captures' memory hold more than its bound while they decode. The
+// many-tree brotli streams hold 0.4 to 0.6 MB of tables, so a decode that
+// reserved its decoder's state without them fails here.
 func TestDecompressReservingHoldsNoByteItHasNotReserved(t *testing.T) {
 	const slack = 16 << 10 // the readers over data, an error value: not the body's
 	for _, c := range reserveCases(t) {
 		var l reserveLedger
 		var worst, worstHeld int64 = -1 << 62, 0
-		base := liveHeap()
+		base := settledHeap()
 		probe := func(n int64) bool {
 			// What the decode holds now, against what it had reserved
 			// before this call.
@@ -212,4 +257,153 @@ func TestBrotliWindowBitsReadsTheStreamsWindow(t *testing.T) {
 	if _, ok := brotliWindowBits(nil); ok {
 		t.Error("an empty stream declared a window")
 	}
+}
+
+// brotliBits writes a brotli stream's bits, each field least significant bit
+// first (RFC 7932 §2).
+type brotliBits struct {
+	buf []byte
+	n   uint
+}
+
+func (w *brotliBits) bits(n uint, v uint64) {
+	for i := uint(0); i < n; i++ {
+		if w.n%8 == 0 {
+			w.buf = append(w.buf, 0)
+		}
+		w.buf[len(w.buf)-1] |= byte(v>>i&1) << (w.n % 8)
+		w.n++
+	}
+}
+
+// count writes a count from 1 to 256 as a VarLenUint8 of count-1 (§9.2).
+func (w *brotliBits) count(c int) {
+	v := uint64(c - 1)
+	if v == 0 {
+		w.bits(1, 0)
+		return
+	}
+	w.bits(1, 1)
+	nb := uint(bits.Len64(v)) - 1
+	w.bits(3, uint64(nb))
+	w.bits(nb, v-1<<nb)
+}
+
+// oneSymbolCode writes a simple prefix code of one symbol from an alphabet
+// of size symbols (§3.4): the symbol then takes no bits.
+func (w *brotliBits) oneSymbolCode(size, sym int) {
+	w.bits(2, 1) // HSKIP 1: a simple code
+	w.bits(2, 0) // NSYM - 1
+	w.bits(uint(bits.Len(uint(size-1))), uint64(sym))
+}
+
+// mostTablesBrotli is a valid brotli stream of n bytes of 'a' (22,594 <= n
+// < 2^24) whose one metablock declares the most prefix codes the format
+// allows: 256 literal trees, 256 insert-and-copy block types (so 256 of
+// their trees), 256 distance trees over the largest distance alphabet (520
+// codes: NPOSTFIX 3, NDIRECT 120). Every tree is a one-symbol code, so the
+// whole stream is about 1.3 KB, and its one command inserts the n literals.
+// It makes a decoder hold the most tables a stream can.
+func mostTablesBrotli(n int) []byte {
+	var w brotliBits
+	w.bits(1, 0) // WBITS: a 64 KiB window
+	w.bits(1, 1) // ISLAST
+	w.bits(1, 0) // ISLASTEMPTY
+	mlen := uint64(n - 1)
+	nibbles := (bits.Len64(mlen) + 3) / 4
+	if nibbles < 4 {
+		nibbles = 4
+	}
+	w.bits(2, uint64(nibbles-4)) // MNIBBLES
+	w.bits(uint(4*nibbles), mlen)
+	w.count(1)                // literal block types
+	w.count(256)              // insert-and-copy block types
+	w.oneSymbolCode(256+2, 0) // their block-type code
+	w.oneSymbolCode(26, 0)    // their block-count code: count code 0,
+	w.bits(2, 0)              // and its extra bits: a first block of 1
+	w.count(1)                // distance block types
+	w.bits(2, 3)              // NPOSTFIX
+	w.bits(4, 15)             // NDIRECT >> NPOSTFIX
+	w.bits(2, 0)              // the literal block type's context mode
+	for range 2 {             // the literal context map, then the distance one
+		w.count(256)            // trees
+		w.bits(1, 0)            // no run-length codes
+		w.oneSymbolCode(256, 0) // every context uses tree 0
+		w.bits(1, 0)            // no move-to-front
+	}
+	for i := range 256 {
+		w.oneSymbolCode(256, map[bool]int{true: 'a'}[i == 0])
+	}
+	for i := range 256 {
+		// Tree 0's symbol, 504, is insert code 23 (22,594 and 24 extra
+		// bits) and copy code 0.
+		w.oneSymbolCode(704, map[bool]int{true: 504}[i == 0])
+	}
+	for range 256 {
+		w.oneSymbolCode(520, 0)
+	}
+	w.bits(24, uint64(n-22594)) // the one command's insert length; its literals take no bits
+	return w.buf
+}
+
+// TestBrotliDecoderStateIsReservedAtTheFormatsLimits pins what a brotli
+// decode reserves for its decoder (brotliReaderBytes and brotliTableBytes)
+// against github.com/andybalholm/brotli's own, on a stream of about 1.3 KB
+// that declares the most prefix codes the format allows: the tables it
+// allocates are brotliTableBytes exactly, and the heap it holds once it has
+// begun is within the reservation. A version of the decoder that sizes its
+// state or its tables otherwise fails here, and the constants must be
+// recomputed from it.
+func TestBrotliDecoderStateIsReservedAtTheFormatsLimits(t *testing.T) {
+	const maxBlockTypes = 256 // RFC 7932 §6: NBLTYPESL, NBLTYPESI, NBLTYPESD
+	wire := mostTablesBrotli(100_000)
+	base := settledHeap()
+	rd := brotli.NewReader(bytes.NewReader(wire))
+	if _, err := rd.Read(make([]byte, 1)); err != nil {
+		t.Fatal(err)
+	}
+	held := liveHeap() - base
+	v := reflect.ValueOf(rd).Elem()
+	field := func(v reflect.Value, name string) reflect.Value {
+		f := v.FieldByName(name)
+		if !f.IsValid() {
+			t.Fatalf("brotli.Reader has no field %q: recompute brotliReaderBytes and brotliTableBytes from this version of the decoder", name)
+		}
+		return f
+	}
+	lit, cmd, dist := field(v, "literal_hgroup"), field(v, "insert_copy_hgroup"), field(v, "distance_hgroup")
+	if got := int64(field(lit, "codes").Type().Elem().Size()); got != brotliTableEntryBytes {
+		t.Fatalf("a table entry is %d bytes, brotliTableEntryBytes says %d", got, brotliTableEntryBytes)
+	}
+	for _, g := range []struct {
+		name    string
+		group   reflect.Value
+		entries int
+	}{
+		{"literal", lit, brotliLiteralTableEntries},
+		{"insert-and-copy", cmd, brotliCommandTableEntries},
+		{"distance", dist, brotliDistanceTableEntries},
+	} {
+		if got, want := field(g.group, "codes").Len(), brotliMaxTreesPerGroup*g.entries; got != want {
+			t.Errorf("the %s group's tables are %d entries, want %d: %d trees at %d", g.name, got, want, brotliMaxTreesPerGroup, g.entries)
+		}
+	}
+	// The rest: its state, its input buffer, its block-type trees, and one
+	// metablock's context maps (64 literal and 4 distance contexts per block
+	// type, and a mode per literal block type) and tree headers.
+	header := int64(field(lit, "htrees").Type().Elem().Size())
+	rest := int64(v.Type().Size()) +
+		int64(field(v, "buf").Len()) +
+		int64(field(v, "block_type_trees").Len())*brotliTableEntryBytes +
+		maxBlockTypes<<6 + maxBlockTypes<<2 + maxBlockTypes +
+		3*brotliMaxTreesPerGroup*header
+	if rest > brotliReaderBytes {
+		t.Errorf("the decoder's state, buffer, block-type trees, context maps and tree headers are %d bytes, past brotliReaderBytes %d", rest, brotliReaderBytes)
+	}
+	reserved := brotliReaderBytes + brotliTableBytes + brotliRingBytes(16)
+	if held < brotliTableBytes || held > reserved {
+		t.Errorf("the decoder held %d bytes once it had begun; want its tables (%d) and no more than a decode reserves for it (%d)", held, brotliTableBytes, reserved)
+	}
+	runtime.KeepAlive(rd)
+	t.Logf("a %d-byte stream: the decoder held %d bytes once it had begun (reserved %d); its tables %d, the rest %d (brotliReaderBytes %d)", len(wire), held, reserved, brotliTableBytes, rest, brotliReaderBytes)
 }
