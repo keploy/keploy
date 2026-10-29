@@ -150,6 +150,17 @@ type exactView struct {
 	// positions in the order they did.
 	consumed []bool
 	order    []int
+	// stood marks, by position in owned, the open test's own recordings a
+	// read answered from before a write the replay had not made stood in
+	// for (StandIn): each still answers a call made later, once; one none
+	// took counts as answered as the view closes (standInsLocked). nil for
+	// a view with none.
+	stood []bool
+	// atEnd are what parsers kept for this view alone, to forget when it
+	// ends (AtViewEnd); ended says the view has ended (endLocked): they
+	// ran, and nothing more is filed.
+	atEnd []func()
+	ended bool
 	// spent are the staged mocks this view shows that a parser consumed
 	// through a delete door in its test, or a protocol-phase mock one
 	// evicted outside every test: gone until the view changes. The staged
@@ -1520,12 +1531,23 @@ func (m *MockManager) installExactWith(v *exactView, under func(r *roundState)) 
 		m.openTestCursors(v.gen)
 	}
 	prev := m.exact.view.Swap(v)
+	var stoodIn []*models.Mock
+	var ends []func()
 	if prev != nil {
 		prev.mu.Lock()
 		prev.closed = true
+		// Final with the close: no consume reaches prev after it.
+		stoodIn = prev.standInsLocked()
+		ends = prev.endLocked()
 		prev.mu.Unlock()
 	}
 	r.mu.Unlock()
+	for _, mk := range stoodIn {
+		m.noteExactStoodIn(mk)
+	}
+	for _, f := range ends {
+		f()
+	}
 	if m.exact.beforeBump != nil {
 		m.exact.beforeBump(prev)
 	}
@@ -2413,7 +2435,27 @@ func (m *MockManager) noteExactSpent(mk *models.Mock) {
 // learned onto it (its variables and the binds it carries onto earlier
 // calls), as the other doors' states do.
 func (m *MockManager) noteExactServed(owned, served *models.Mock) {
-	if err := m.flagMockAsUsed(models.MockState{
+	state := exactUsedState(owned)
+	state.ReqBodyNoise = reqBodyNoiseOf(served.Spec)
+	state.Variables = variablesOf(served.Spec)
+	state.Clocks = clocksOf(served.Spec)
+	state.Binds = bindsOf(served.Spec)
+	state.LearnedAfterEnd = m.learnedAfterEnd(m.servedAs(owned), served)
+	if err := m.flagMockAsUsed(state, 0); err != nil && m.logger != nil {
+		m.logger.Error("failed to flag mock as used", zap.Error(err))
+	}
+	// Whichever door the parser consumed it through, the test's recording
+	// answered a call of the set (FindAnsweredEarlier).
+	m.noteAnswered(*owned)
+	m.bumpRevisionKind(owned.Kind)
+	m.bumpRevisionAll()
+}
+
+// exactUsedState is how a consumed test mock of an exact view, owned, is
+// flagged as used, before what the copy that answered learned (noise,
+// variables, binds).
+func exactUsedState(owned *models.Mock) models.MockState {
+	return models.MockState{
 		Name:             owned.Name,
 		Kind:             owned.Kind,
 		Usage:            models.Deleted,
@@ -2425,21 +2467,9 @@ func (m *MockManager) noteExactServed(owned, served *models.Mock) {
 		ReqTimestampMock: models.FormatMockTimestamp(owned.Spec.ReqTimestampMock),
 		ResTimestampMock: models.FormatMockTimestamp(owned.Spec.ResTimestampMock),
 		AnswerPlaced:     models.IsAnswerPlaced(owned),
-		ReqBodyNoise:     reqBodyNoiseOf(served.Spec),
-		Variables:        variablesOf(served.Spec),
-		Clocks:           clocksOf(served.Spec),
-		Binds:            bindsOf(served.Spec),
 		Concurrent:       owned.TestModeInfo.Concurrent,
-		LearnedAfterEnd:  m.learnedAfterEnd(m.servedAs(owned), served),
 		SetAsideFrom:     owned.TestModeInfo.SetAsideFrom,
-	}, 0); err != nil && m.logger != nil {
-		m.logger.Error("failed to flag mock as used", zap.Error(err))
 	}
-	// Whichever door the parser consumed it through, the test's recording
-	// answered a call of the set (FindAnsweredEarlier).
-	m.noteAnswered(*owned)
-	m.bumpRevisionKind(owned.Kind)
-	m.bumpRevisionAll()
 }
 
 // cursorSlot is where a stateful cursor key is kept (cursorSlotIn): in the
