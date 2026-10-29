@@ -380,6 +380,17 @@ func ReadBuffConn(ctx context.Context, logger *zap.Logger, conn net.Conn, buffer
 						logger.Debug("Failed to read buffer", zap.String("base64_encoded", util.EncodeBase64(buffer)))
 					}
 				}
+				// The bytes that came with the error are the peer's last
+				// ones (a TLS peer's last record read together with its
+				// close_notify comes back with io.EOF): handed on before
+				// the error, or a relay ends without them.
+				if len(buffer) > 0 {
+					select {
+					case bufferChannel <- buffer:
+					case <-ctx.Done():
+						return
+					}
+				}
 				select {
 				case errChannel <- err:
 				case <-ctx.Done():

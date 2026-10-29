@@ -1081,18 +1081,20 @@ func TestHandleConnectionNeverListsADestinationABypassRulePassesThroughMocked(t 
 	}
 }
 
-// A connection a bypassRule passes through ends when its context does and when
-// the client closes, with the server held open, whatever the client still has
-// to read: the relay's write to a client that reads nothing more waited
-// for it to read, and kept handleConnection, which waits for the relay, from
-// returning, and the connection's goroutines and its port with it.
+// A connection a bypassRule passes through ends when its context does,
+// whatever the client still has to read: the relay's write to a client that
+// reads nothing more waited for it to read, and kept handleConnection, which
+// waits for the relay, from returning, and the connection's goroutines and its
+// port with it. It ends too when either side closes and the other, told of it,
+// closes in turn: each side's end is forwarded to the other (a half-close),
+// so a side's close alone ends only its direction.
 func TestHandleConnectionEndsAPassThroughOnCancelAndOnEitherSidesClose(t *testing.T) {
 	type end int
 	const (
 		cancelled    end = iota // the context ends as the client reads on
 		clientStalls            // the context ends as the client reads nothing more
-		clientCloses            // the client closes; the context lasts
-		serverCloses            // the server closes with the client's bytes unread; the context lasts
+		clientCloses            // the client closes, and the server, told, closes; the context lasts
+		serverCloses            // the server closes with the client's bytes unread, and the client, told, closes; the context lasts
 	)
 	for _, tc := range []struct {
 		name string
@@ -1100,8 +1102,8 @@ func TestHandleConnectionEndsAPassThroughOnCancelAndOnEitherSidesClose(t *testin
 	}{
 		{"the context ends as the client reads on", cancelled},
 		{"the context ends as the client reads nothing more", clientStalls},
-		{"the client closes", clientCloses},
-		{"the server closes with the client's bytes unread", serverCloses},
+		{"the client closes, and the server told of it", clientCloses},
+		{"the server closes with the client's bytes unread, and the client told of it", serverCloses},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ln, err := net.Listen("tcp4", "127.0.0.1:0")
@@ -1112,8 +1114,10 @@ func TestHandleConnectionEndsAPassThroughOnCancelAndOnEitherSidesClose(t *testin
 			// The server speaks first, so a record passes the connection
 			// through for the rule (a server-first connection shows no
 			// host): a line and 64 KiB, then a line more for each of more,
-			// and it holds the connection open.
+			// and it holds the connection open until it reads the client's
+			// end.
 			more := make(chan struct{}, 1)
+			t.Cleanup(func() { close(more) })
 			served := make(chan net.Conn, 1)
 			t.Cleanup(func() {
 				select {
@@ -1140,7 +1144,10 @@ func TestHandleConnectionEndsAPassThroughOnCancelAndOnEitherSidesClose(t *testin
 				if _, err := conn.Write(append([]byte("hello\n"), bytes.Repeat([]byte("s"), 64<<10)...)); err != nil {
 					return
 				}
-				go func() { _, _ = io.Copy(io.Discard, conn) }()
+				go func() {
+					_, _ = io.Copy(io.Discard, conn)
+					_ = conn.Close()
+				}()
 				for range more {
 					if _, err := conn.Write([]byte("more\n")); err != nil {
 						return
@@ -1166,6 +1173,11 @@ func TestHandleConnectionEndsAPassThroughOnCancelAndOnEitherSidesClose(t *testin
 				if _, err := app.Write(bytes.Repeat([]byte("c"), 128<<10)); err != nil {
 					t.Fatal(err)
 				}
+				// The server's end reaches the client, which closes on it.
+				if rest := awaitEvent(t, readAll(app), "the client reading to the server's end"); len(rest) != 0 {
+					t.Fatalf("the client got %q after the greeting, want the server's end", rest)
+				}
+				_ = app.Close()
 				_ = awaitEvent(t, done, "handleConnection returning")
 				return
 			}
@@ -1263,6 +1275,59 @@ func TestHandleConnectionEndsAPassThroughWhoseReaderHoldsTheServersLastBytes(t *
 	for awaitEvent(t, server.read, "the relay reading the server's last line") != "last\n" {
 	}
 	cancel()
+	_ = awaitEvent(t, done, "handleConnection returning")
+}
+
+// A client of a connection a bypassRule passes through that half-closes to
+// end its request gets the server's whole answer, a MiB each way, every byte
+// in its place: the client's end is forwarded to the server, which answers
+// only then. The relay used to end on the client's EOF, and the caller's close
+// left the client with no answer at all.
+func TestHandleConnectionPassesAHalfCloseThroughABypassRule(t *testing.T) {
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	request, answer := counted(1<<20, 5), counted(1<<20, 6)
+	heard := make(chan []byte, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		// It greets, so a record passes the connection through for the
+		// rule, and answers once the request has ended.
+		if _, err := conn.Write([]byte("hello\n")); err != nil {
+			return
+		}
+		got, _ := io.ReadAll(conn)
+		heard <- got
+		_, _ = conn.Write(answer)
+	}()
+	p := bypassRecordProxy(t, ln.Addr().String())
+	app, src := acceptedConn(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- p.handleConnection(ctx, src) }()
+	if got := <-readN(app, len("hello\n")); got != "hello\n" {
+		t.Fatalf("the client got %q, want the server's greeting", got)
+	}
+	got := readAll(app)
+	if _, err := app.Write(request); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	if h := awaitEvent(t, heard, "the server reading the request to its end"); !bytes.Equal(h, request) {
+		t.Fatalf("the server got %d bytes of the request, want its %d in order", len(h), len(request))
+	}
+	if a := awaitEvent(t, got, "the client reading the answer to its end"); !bytes.Equal(a, answer) {
+		t.Fatalf("the client got %d bytes of the answer, want its %d in order", len(a), len(answer))
+	}
 	_ = awaitEvent(t, done, "handleConnection returning")
 }
 
