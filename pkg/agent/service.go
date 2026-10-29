@@ -756,6 +756,18 @@ type UnusedBackgroundReader interface {
 	ExactTestUnusedBackground() (test string, unused []string, ok bool)
 }
 
+// ExactAsideServer is an optional ExactServer capability: ServeExactAside
+// adds the recordings of a test the replay set aside (the proven gate skipped
+// it) to those served to the tests after it, by exact match only, unchecked,
+// at most once in the staging and never required (models.TestModeInfo.
+// SetAsideFrom); ExactTestServedAside names the latest test opened and the
+// calls of its window one of them answered (models.ScopeEvidence.ServedAside).
+// A proxy without it serves a set-aside test's recordings to no one.
+type ExactAsideServer interface {
+	ServeExactAside(from string, mocks []*models.Mock) error
+	ExactTestServedAside() (test string, served []string, ok bool)
+}
+
 // ExactAheadServer is an optional ExactServer capability: ServeExactPoolAhead
 // is ServeExactPool that also answers, while no test is open, the next test's
 // mocks that were in flight when it began (ahead, models.ExactServing.Ahead),

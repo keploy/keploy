@@ -318,6 +318,15 @@ type TestModeInfo struct {
 	// test. Its matcher prefers the test's own recordings to it. Runtime-only,
 	// like the fields above.
 	Concurrent bool `json:"-" bson:"-"`
+
+	// SetAsideFrom is, on a copy exact serving serves an open test
+	// (KEPLOY_PROVEN), the test whose recording it is when that test was set
+	// aside earlier in the replay (the proven gate skipped it): served to the
+	// open test's call that is it exactly, unchecked, answered at most once
+	// in the staging, never required of the open test, and filed after its
+	// own, so its matcher prefers them. "" for every other copy.
+	// Runtime-only, like the fields above.
+	SetAsideFrom string `json:"-" bson:"-"`
 }
 
 func (m *Mock) GetKind() string {
