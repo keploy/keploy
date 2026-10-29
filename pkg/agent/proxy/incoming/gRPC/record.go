@@ -29,12 +29,15 @@ import (
 // without creating a separate gRPC session.
 func RecordIncoming(ctx context.Context, logger *zap.Logger, clientConn, destConn net.Conn, t chan *models.TestCase, appPort uint16, _ string, synchronous, mapping bool) error {
 	// Close connections on ctx cancellation to unblock all goroutines.
-	// This ensures no goroutine leaks during shutdown/StopIngress.
-	go func() {
-		<-ctx.Done()
+	// This ensures no goroutine leaks during shutdown/StopIngress. ctx is
+	// the ingress's, so the close is registered for this call's life only:
+	// a goroutine parked on ctx.Done() outlived every conversation that
+	// ended on its own.
+	stopCloseOnCancel := context.AfterFunc(ctx, func() {
 		clientConn.Close()
 		destConn.Close()
-	}()
+	})
+	defer stopCloseOnCancel()
 
 	defer func() {
 		if err := clientConn.Close(); err != nil &&

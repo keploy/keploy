@@ -50,7 +50,6 @@ import (
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/service/agent"
 	"go.keploy.io/server/v3/utils"
-	keployLog "go.keploy.io/server/v3/utils/log"
 	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -2363,16 +2362,13 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	// If credentials are cached, this will use sudo -n (non-interactive)
 	cmd := newNativeAgentCommand(keployBin, args, sudoCached)
 
-	// Under a run log (keploy mock replay), the agent's info lines go to
-	// the run's keploy.log, its warnings and errors to the console.
-	cmd.Stdout = keployLog.RunLogWriter(os.Stdout)
-	cmd.Stderr = keployLog.RunLogWriter(os.Stderr)
-
 	a.mu.Lock()
 	a.agentCmd = cmd // this has been set for proper stopping of the native agent
 	a.mu.Unlock()
-	// Start (OS-specific tweaks happen inside utils.StartCommand)
-	if err := agentUtils.StartCommand(cmd); err != nil {
+	// Start (OS-specific tweaks happen inside utils.StartCommand), its lines
+	// reaching keploy's console cut (startWithConsole)
+	console, err := startWithConsole(cmd, agentUtils.StartCommand)
+	if err != nil {
 		removeProgress()
 		utils.LogError(a.logger, err, "failed to start keploy agent")
 		return err
@@ -2389,7 +2385,7 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	go func() {
 		defer utils.Recover(a.logger)
 		err := cmd.Wait()
-		flushAgentOutput(cmd)
+		console.Exited()
 		run.exited()
 		removeProgress()
 		// Reported BEFORE the group goroutine below can return it: returning
@@ -3727,15 +3723,18 @@ func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opt
 		return a.startInDockerWithPTY(ctx, logger, cmd)
 	}
 
-	// Under a run log (keploy mock replay), the agent's info lines go to
-	// the run's keploy.log, its warnings and errors to the console.
-	cmd.Stdout = keployLog.RunLogWriter(os.Stdout)
-	cmd.Stderr = keployLog.RunLogWriter(os.Stderr)
-	defer flushAgentOutput(cmd)
-
-	if err := cmd.Run(); err != nil {
+	// As the native agent's (startWithConsole).
+	console, err := startWithConsole(cmd, (*exec.Cmd).Start)
+	if err == nil {
+		err = cmd.Wait()
+		console.Exited()
+	}
+	if err != nil {
 		if ctx.Err() == context.Canceled {
-			cmd.Process.Kill()
+			// A start a cancelled context refused left no process.
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
+			}
 			logger.Info("Keploy agent in docker stopped gracefully.")
 			return nil
 		}
@@ -3744,14 +3743,6 @@ func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opt
 	}
 
 	return nil
-}
-
-// flushAgentOutput writes out the last line of the exited agent's output
-// that had no line break (keployLog.FlushRunLogWriter): the console's when
-// it is the end of a crash.
-func flushAgentOutput(cmd *exec.Cmd) {
-	_ = keployLog.FlushRunLogWriter(cmd.Stdout)
-	_ = keployLog.FlushRunLogWriter(cmd.Stderr)
 }
 
 // dockerAgentCancel is the `docker run` command's Cancel: it stops the agent's
@@ -5642,4 +5633,23 @@ func (a *AgentClient) TestVariables(ctx context.Context) ([]models.VariableBindi
 		return nil, err
 	}
 	return out.Variables, nil
+}
+
+// startWithConsole starts an agent's cmd through start, its output going to
+// keploy's console through a utils.ChildConsole: so the agent's lines are cut
+// of the values the log redactor holds, when it holds any, and under a run
+// log (keploy mock replay) its info lines go to the run's keploy.log, its
+// warnings and errors to the console (utils.SetAgentConsole). Call the
+// console's Exited once cmd.Wait has returned.
+func startWithConsole(cmd *exec.Cmd, start func(*exec.Cmd) error) (*utils.ChildConsole, error) {
+	console, err := utils.SetAgentConsole(cmd)
+	if err != nil {
+		return nil, err
+	}
+	err = start(cmd)
+	console.Started()
+	if err != nil {
+		return nil, err
+	}
+	return console, nil
 }
