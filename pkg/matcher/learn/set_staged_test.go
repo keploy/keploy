@@ -238,3 +238,112 @@ func TestASetsStagingSaysWhyItStoppedShort(t *testing.T) {
 		t.Fatalf("a staging that read the whole set reported %+v: want %d read and no error", use, n)
 	}
 }
+
+// A call that takes recordings ahead of the set's staging (warm) reads the
+// three parts every call's rules read of each; the staging, finding them
+// taken, reads the rest a set's first drifted call reads of every
+// recording: its keyed places, its answer's stamps and its fields' instants
+// as the echo reads them. So no later call reads any of those of them on
+// its answer path, whether the call ended its reads before the staging
+// began or was still reading one as the staging came to it (the staging
+// then waits for what that read keeps, and reads it not again). Before, the
+// staging passed over a recording a call took, and the set's next drifted
+// call read those four parts of each such recording while its client
+// waited. Counted by part, not timed; the test after learns what the set
+// with no staging learns.
+func TestACallAheadOfTheStagingLeavesNoPartOfItsRecordingsToALaterCall(t *testing.T) {
+	const n, ahead, touched = 48, 20, 31
+	tokens := map[readTally]bool{{tierWords, byKeep(partTokens, false)}: true, {tierWords, byKeep(partTokens, true)}: true}
+	for _, c := range []struct {
+		name string
+		// held is the call's recording whose read the staging comes to
+		// while the call is still reading it; -1: the call ended its reads
+		// before the staging began.
+		held int
+	}{{"the call ended its reads first", -1}, {"the call is still reading one", ahead / 2}} {
+		t.Run(c.name, func(t *testing.T) {
+			row := newHeldRow(n, 4)
+			// What F saw of the drifted clock read, held by an earlier
+			// recording, so the echo reads every recording's fields; and a
+			// changed word one recording holds.
+			row.mocks[n/2].Spec.PostgresV3.Query.Response.Rows[0][1].Value = "2026-10-24T09:56:54.1Z"
+			cell := &row.mocks[touched].Spec.PostgresV3.Query.Response.Rows[0][0]
+			cell.Value = fmt.Sprint(cell.Value) + " z9y8x7w6"
+			raw := row.raw()
+			for i, m := range row.mocks {
+				raw[i] = RawOf(m, true).ServedAs(i + 1).ServedAsRecorded()
+			}
+			plain := NewTracker()
+			plain.NewSet()
+			plain.Begin()
+			want := row.classify(plain.Drifts())
+			plain.End()
+
+			var counts *sync.Map
+			var reading chan struct{}
+			var begun *atomic.Int64
+			release := func() {}
+			if c.held >= 0 {
+				counts, reading, begun, release = heldUntil(t, raw, raw[c.held].payload().text)
+			} else {
+				counts = countDecodes(t, raw, nil)
+			}
+			tr := NewTracker()
+			tr.NewSet()
+			tr.Begin()
+			dc := tr.Drifts()
+			s := dc.set
+			// A test's call warms the set's first recordings before the
+			// staging begins (or, held, as it runs).
+			warmed := make(chan struct{})
+			go func() {
+				defer close(warmed)
+				dc.warm(raw[:ahead])
+			}()
+			if c.held < 0 {
+				<-warmed
+			} else {
+				<-reading
+			}
+			done := tr.WarmSet(srcOf(row.mocks))
+			release()
+			<-warmed
+			use := <-done
+			tr.End()
+			_, called, _ := readsOf(s)
+			// The call took its recordings up to the one held; the staging
+			// may take those after it before the call comes to them.
+			took := ahead
+			if c.held >= 0 {
+				took = c.held + 1
+			}
+			if use.Staged+called != n || called < took || use.Finished != called || use.HeldFull || use.FormsFull {
+				t.Fatalf("the staging reported %+v and the call read %d payloads: want the call's %d or more, the staging the rest of the %d and the rest of the parts of each the call read, within the set's budget", use, called, took, n)
+			}
+			if c.held >= 0 && begun.Load() != 1 {
+				t.Fatalf("the payload the call was reading as the staging came to it was decoded %d times: want once, by the call", begun.Load())
+			}
+			before := tallyOf(s)
+			tr.Begin()
+			got := row.classify(tr.Drifts())
+			tr.End()
+			if fmt.Sprint(got) != fmt.Sprint(want) {
+				t.Fatalf("the test after the staging learned\n%v\nwhere the set with no staging learned\n%v", got, want)
+			}
+			read := readSince(before, tallyOf(s))
+			words := 0
+			for k, d := range read {
+				if !tokens[k] {
+					t.Fatalf("the test after the staging read part %#x (tier %d) of %d of the set's recordings on its answer path: want none, the staging read them (all reads %v)", uint32(k.part), k.tier, d, read)
+				}
+				words += d
+			}
+			if words == 0 || words > len(tokens) {
+				t.Fatalf("the test after the staging read the words of recordings %d times (all reads %v): want the one that holds a changed word (%d), once for each way it is searched", words, read, touched)
+			}
+			if payloads, decodes := decodesOf(counts); payloads != n || decodes != n {
+				t.Errorf("the call and the staging decoded %d of the set's %d payloads, %d times in all: want each once", payloads, n, decodes)
+			}
+		})
+	}
+}
