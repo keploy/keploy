@@ -367,6 +367,58 @@ func (a *carryOverAttribution) mapConsumed(mapping *models.Mapping, running stri
 	addStartupMocks(mapping, startup)
 }
 
+// mapDrained attributes, by the release rule, the flagged mocks of a drain no
+// test's mapping reads (a connection reset's check, the set's end): each goes
+// to the entry of the test whose window recorded it, or, that test not mapped
+// yet, is held for it (early), as mapConsumed does with a test's own drain.
+// So a test whose carry-over (a publish it made after it answered, a send it
+// made early) landed in such a drain consumed it all the same, and is not
+// taken for one that consumed nothing. A mock its owner's entry already lists
+// is not listed again. Every other mock of the drain is left out of the
+// mapping, as before.
+func (a *carryOverAttribution) mapDrained(mapping *models.Mapping, consumed []models.MockState) {
+	if a == nil || mapping == nil {
+		return
+	}
+	listed := map[string]map[string]bool{}
+	for _, tc := range mapping.TestCases {
+		for _, m := range tc.Mocks {
+			if listed[tc.ID] == nil {
+				listed[tc.ID] = map[string]bool{}
+			}
+			listed[tc.ID][m.Name] = true
+		}
+	}
+	byOwner := map[int][]models.MockState{}
+	for _, st := range consumed {
+		idx, ok := a.releaseIndex(st)
+		if !ok || idx < 0 {
+			continue
+		}
+		owner := a.sched.Window(idx).TestCase
+		if _, mapped := a.mapped[owner]; !mapped {
+			a.early[owner] = append(a.early[owner], st)
+			continue
+		}
+		if listed[owner][st.Name] {
+			continue
+		}
+		if listed[owner] == nil {
+			listed[owner] = map[string]bool{}
+		}
+		listed[owner][st.Name] = true
+		byOwner[idx] = append(byOwner[idx], st)
+	}
+	owners := make([]int, 0, len(byOwner))
+	for idx := range byOwner {
+		owners = append(owners, idx)
+	}
+	sort.Ints(owners)
+	for _, idx := range owners {
+		upsertActualTestMockMapping(mapping, a.sched.Window(idx).TestCase, byOwner[idx], time.Time{}, time.Time{})
+	}
+}
+
 // inFlightAnsweredLate is the unflagged per-test mocks of consumed that were in
 // flight when the test of window [tcReq, tcResp] began (models.WindowSchedule.
 // InFlightInto) and answered after it ended: the test's own, which the window

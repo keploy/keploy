@@ -298,8 +298,9 @@ func passingWithNoEntry(doc *models.Mapping, results []models.TestResult, passin
 // on. instrumented: keploy ran the application and asked the agent what each
 // test consumed; servedMocks: the run answered dependency calls from the
 // recording (not --mocking=false, not a global passthrough), so there was
-// something to consume.
-func noEntryHold(instrumented, servedMocks bool) (reason, nextStep string) {
+// something to consume. unread names a read of what the application consumed
+// that failed: no test can then be said to have consumed nothing.
+func noEntryHold(instrumented, servedMocks bool, unread string) (reason, nextStep string) {
 	switch {
 	case !instrumented:
 		return "keploy did not run the application, so it read nothing a passing test consumed, and a new file would leave it with no entry, as if the run had given it no verdict",
@@ -307,6 +308,9 @@ func noEntryHold(instrumented, servedMocks bool) (reason, nextStep string) {
 	case !servedMocks:
 		return "the run served no mock (--mocking=false or a global passthrough), so a passing test consumed none, and a new file would leave it with no entry, as if the run had given it no verdict",
 			"run keploy test with mocking on (the default) and without a global passthrough, so that each test consumes the mocks it is served; until a run can map every passing test, each is served the mocks of its recorded window, as with no mappings.yaml"
+	case unread != "":
+		return "keploy could not read from its agent " + unread + ", which may hold a mock a passing test consumed, so it cannot tell that the test consumed nothing, and a new file would leave it with no entry, as if the run had given it no verdict",
+			"run keploy test again; a run in which every read of what the application consumed succeeds creates mappings.yaml. Until then each test is served the mocks of its recorded window, as with no mappings.yaml"
 	default:
 		return "what a passing test consumed fell, by its recorded time, in no test's window or in another test's, so a new file would leave it with no entry, as if the run had given it no verdict",
 			"nothing to do: with no mappings.yaml each test is served the mocks of its recorded window, as before. A call the application makes after it answers, or between tests, is recorded outside the test's window, and a later run creates the file once it can place what each passing test consumes in that test's window"

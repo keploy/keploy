@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -1502,6 +1503,33 @@ func TestRunTestSetCreatesNoFileThatLeavesAPassingTestWithNoEntry(t *testing.T) 
 			wantReason: "consumed only flagged mocks other tests own",
 		},
 		{
+			// Under the default flag that hold is quiet, as the no-mock hold
+			// is: nothing asked for a write. (Startup traffic gives the run
+			// something to write at all.)
+			name:      "default flag, test-1 ignored, test-2's drain caught startup traffic and only test-1's flagged mock",
+			ignored:   []string{"test-1"},
+			consumed:  map[string][]models.MockState{"test-2": {mongoAt("mock-boot", 500), carriedAt("mock-f1", 1050)}},
+			wantQuiet: "consumed only flagged mocks other tests own",
+		},
+		{
+			// A catcher next to a passing test whose mock fell in no window:
+			// the catcher needs no entry, but the other test holds the file.
+			name: "--update-test-mapping, test-1 consumed mock-a, test-2 caught only test-1's flagged mock, test-3 only a mock of no window", tests: 3, updateMapping: true,
+			consumed: map[string][]models.MockState{
+				"test-1": {mongoAt("mock-a", 1010)}, "test-2": {carriedAt("mock-f1", 1050)}, "test-3": {mongoAt("mock-x", 3500)},
+			},
+			wantNamed: "[test-3]", wantReason: "fell, by its recorded time, in no test's window or in another test's",
+			wantNextStep: "nothing to do",
+		},
+		{
+			name: "default flag, test-1 consumed mock-a, test-2 caught only test-1's flagged mock, test-3 only a mock of no window", tests: 3,
+			consumed: map[string][]models.MockState{
+				"test-1": {mongoAt("mock-a", 1010)}, "test-2": {carriedAt("mock-f1", 1050)}, "test-3": {mongoAt("mock-x", 3500)},
+			},
+			wantNamed: "[test-3]", wantReason: "fell, by its recorded time, in no test's window or in another test's",
+			wantNextStep: "nothing to do", wantInfo: true,
+		},
+		{
 			// A mock of test-2's own fell in no window: that still holds the
 			// file, whatever other test's flagged mock it caught too.
 			name: "default flag, both passed, test-2 consumed a mock of no window and test-1's flagged mock",
@@ -2055,5 +2083,295 @@ func TestRunTestSetRetryPassingCountsWhatATestConsumedInAnyCycle(t *testing.T) {
 	}
 	if got := fmt.Sprint(held[0].ContextMap()["passingTestsWithNoEntry"]); got != "[test-3]" {
 		t.Fatalf("the warning names passing tests with no entry %s; want [test-3]", got)
+	}
+}
+
+// failReads fails the n-th read of what the application consumed made while
+// each named test's window is the agent's current one ("" for before the
+// first test's); every other read is prHooks'. Unlike the agent, whose reads
+// drain (each returns only what is new), prHooks' consumedByWindow answers
+// every read in a window with the same list: the read at the set's end gets
+// the last test's list again (mapDrained lists a mock once in its owner's
+// entry). onRead gives a window's reads lists of their own.
+type failReads struct {
+	prHooks
+	h      *prRun
+	failOn map[string]int
+	// onRead answers the n-th read in a test's window with its own list (what
+	// arrived after the window's earlier reads).
+	onRead map[string]map[int][]models.MockState
+	mu     *sync.Mutex
+	reads  map[string]int
+}
+
+func (f failReads) GetConsumedMocks(ctx context.Context) ([]models.MockState, error) {
+	byStart := map[string]string{}
+	for _, tc := range f.h.cases {
+		byStart[tc.HTTPReq.Timestamp.String()] = tc.Name
+	}
+	f.h.instr.mu.Lock()
+	after := f.h.instr.windowAfter
+	f.h.instr.mu.Unlock()
+	test := byStart[after.String()]
+	if after.IsZero() {
+		test = ""
+	}
+	f.mu.Lock()
+	f.reads[test]++
+	n := f.reads[test]
+	f.mu.Unlock()
+	if want, ok := f.failOn[test]; ok && n == want {
+		return nil, errors.New("the agent read failed")
+	}
+	if byRead, ok := f.onRead[test]; ok {
+		return byRead[n], nil
+	}
+	return f.prHooks.GetConsumedMocks(ctx)
+}
+
+// A test's own flagged mock (a publish it makes after it answers, recorded in
+// the gap after its window: its own by the release rule) is consumed in the
+// next drain. When no test's mapping reads that drain, the test is still not
+// one that consumed nothing: a drain the run takes but does not map (a
+// connection reset's check, the read at the set's end of what came after the
+// last read) gives the mock to its owner by the release rule, and a read that
+// failed (the next test's, the reset check's, the set's setup drain, the
+// set's end) leaves no test of the run with an empty entry. Under
+// --update-test-mapping, a file that exists keeps such a test's recorded
+// entry (every field, where the read failed); with no file, a failed read
+// holds the file, naming the read.
+func TestRunTestSetMapsACarryOverInADrainNoTestReads(t *testing.T) {
+	type want struct {
+		statuses string
+		// file is each test's entry after the run; nil: no file.
+		file map[string][]string
+		// kept is a test whose recorded entry stays every field the same.
+		kept string
+		// held is in the reason of the warning that holds a new file.
+		held string
+	}
+	for _, sc := range []struct {
+		name     string
+		tests    int
+		consumed map[string][]models.MockState
+		// failOn: the n-th read in a test's window fails ("" before the first).
+		failOn map[string]int
+		simErr map[string]error
+		// streamed names the tests replayed in the streaming pass.
+		streamed []string
+		// ignored names the tests the run skips.
+		ignored []string
+		// onRead: the n-th read in a test's window answers this list.
+		onRead map[string]map[int][]models.MockState
+		file   want // the file exists
+		none   want // no file
+	}{
+		{
+			name: "test-2's read fails", tests: 3, failOn: map[string]int{"test-2": 1},
+			file: want{statuses: "[PASSED PASSED PASSED]", file: map[string][]string{"test-1": {"mock-f1"}, "test-2": {"mock-old-c"}, "test-3": {"mock-c3"}}, kept: "test-1"},
+			none: want{statuses: "[PASSED PASSED PASSED]", held: "keploy could not read from its agent what test-2 consumed"},
+		},
+		{
+			name: "test-2's connection resets, its reset check drains test-1's flagged mock", tests: 3, simErr: map[string]error{"test-2": io.ErrUnexpectedEOF},
+			// The reset check's read drains it: no later read sees it again.
+			onRead: map[string]map[int][]models.MockState{"test-2": {1: {carriedAt("mock-f1", 1500)}}},
+			file:   want{statuses: "[PASSED FAILED PASSED]", file: map[string][]string{"test-1": {"mock-f1"}, "test-2": {"mock-old-c"}, "test-3": {"mock-c3"}}},
+			none:   want{statuses: "[PASSED FAILED PASSED]", file: map[string][]string{"test-1": {"mock-f1"}, "test-3": {"mock-c3"}}},
+		},
+		{
+			name: "streamed test-2's connection resets, its reset check drains test-1's flagged mock", tests: 3, simErr: map[string]error{"test-2": io.ErrUnexpectedEOF},
+			streamed: []string{"test-2"},
+			// The reset check's read drains it: the read at the set's end, in
+			// test-2's window (the streaming pass runs last), sees nothing.
+			onRead: map[string]map[int][]models.MockState{"test-2": {1: {carriedAt("mock-f1", 1500)}}},
+			file:   want{statuses: "[PASSED FAILED PASSED]", file: map[string][]string{"test-1": {"mock-f1"}, "test-2": {"mock-old-c"}, "test-3": {"mock-c3"}}},
+			none:   want{statuses: "[PASSED FAILED PASSED]", file: map[string][]string{"test-1": {"mock-f1"}, "test-3": {"mock-c3"}}},
+		},
+		{
+			name: "test-2's connection resets and its reset check's read fails", tests: 3, simErr: map[string]error{"test-2": io.ErrUnexpectedEOF}, failOn: map[string]int{"test-2": 1},
+			file: want{statuses: "[PASSED FAILED PASSED]", file: map[string][]string{"test-1": {"mock-f1"}, "test-2": {"mock-old-c"}, "test-3": {"mock-c3"}}, kept: "test-1"},
+			none: want{statuses: "[PASSED FAILED PASSED]", held: "consumed before its connection reset"},
+		},
+		{
+			// The set's end reads what came after the last read, test-1's
+			// mock among it, consumed while test-2, the last test, ran.
+			name: "test-2, the last test, gets no answer, and the set's end reads test-1's flagged mock", tests: 2, simErr: map[string]error{"test-2": nil},
+			file: want{statuses: "[PASSED FAILED]", file: map[string][]string{"test-1": {"mock-f1"}, "test-2": {"mock-old-c"}}},
+			none: want{statuses: "[PASSED FAILED]", file: map[string][]string{"test-1": {"mock-f1"}}},
+		},
+		{
+			// test-1's publish, made after it answered, comes after its own
+			// read, and no test runs after it: the set's end reads it.
+			name: "test-2 ignored, test-1's flagged mock comes after its own read", tests: 2, ignored: []string{"test-2"},
+			onRead: map[string]map[int][]models.MockState{"test-1": {2: {carriedAt("mock-f1", 1500)}}},
+			file:   want{statuses: "[PASSED IGNORED]", file: map[string][]string{"test-1": {"mock-f1"}, "test-2": {"mock-old-c"}}},
+			none:   want{statuses: "[PASSED IGNORED]", file: map[string][]string{"test-1": {"mock-f1"}}},
+		},
+		{
+			name: "the read at the set's end fails, test-2 consumed nothing", tests: 2, failOn: map[string]int{"test-2": 2},
+			consumed: map[string][]models.MockState{"test-1": {mongoAt("mock-a", 1010)}},
+			file:     want{statuses: "[PASSED PASSED]", file: map[string][]string{"test-1": {"mock-a"}, "test-2": {"mock-old-c"}}, kept: "test-2"},
+			none:     want{statuses: "[PASSED PASSED]", held: "after the set's last read"},
+		},
+		{
+			name: "the set's setup drain read fails, test-2 consumed nothing", tests: 3, failOn: map[string]int{"": 1},
+			consumed: map[string][]models.MockState{"test-1": {mongoAt("mock-a", 1010)}, "test-3": {mongoAt("mock-c3", 3010)}},
+			file:     want{statuses: "[PASSED PASSED PASSED]", file: map[string][]string{"test-1": {"mock-a"}, "test-2": {"mock-old-c"}, "test-3": {"mock-c3"}}, kept: "test-2"},
+			none:     want{statuses: "[PASSED PASSED PASSED]", held: "consumed before the first test"},
+		},
+		{
+			// test-2's drain is read: test-1's mock goes to test-1, and test-2,
+			// which caught only that, gets no entry from the run.
+			name: "control: test-2 passes, its drain read", tests: 3,
+			file: want{statuses: "[PASSED PASSED PASSED]", file: map[string][]string{"test-1": {"mock-f1"}, "test-2": {"mock-old-c"}, "test-3": {"mock-c3"}}},
+			none: want{statuses: "[PASSED PASSED PASSED]", file: map[string][]string{"test-1": {"mock-f1"}, "test-3": {"mock-c3"}}},
+		},
+	} {
+		for _, exists := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/file exists %v", sc.name, exists), func(t *testing.T) {
+				w := sc.none
+				if exists {
+					w = sc.file
+				}
+				core, logs := observer.New(zap.InfoLevel)
+				h := newMappingRunHarness(t, sc.tests)
+				pinWindows(h)
+				h.replayer.logger = zap.New(core)
+				h.replayer.config.Test.UpdateTestMapping = true
+				h.streaming(sc.streamed...)
+				if sc.ignored != nil {
+					h.replayer.config.Test.IgnoredTests = map[string][]string{"test-set-0": sc.ignored}
+				}
+				var recorded map[string][]models.MockEntry
+				if exists {
+					recorded = map[string][]models.MockEntry{"test-1": mongoEntries("mock-f1"), "test-2": mongoEntries("mock-old-c")}
+					if sc.tests == 3 {
+						recorded["test-3"] = mongoEntries("mock-c3")
+					}
+				}
+				db := mappingFile(t, h, recorded)
+				var keptBefore []byte
+				if w.kept != "" {
+					keptBefore = recordedEntryYAML(t, db, w.kept)
+				}
+				consumed := sc.consumed
+				if consumed == nil {
+					// test-1's only call is a publish it makes after answering:
+					// recorded in the gap after its window (its own by the
+					// release rule), consumed while test-2 runs.
+					consumed = map[string][]models.MockState{"test-2": {carriedAt("mock-f1", 1500)}}
+					if sc.tests == 3 {
+						consumed["test-3"] = []models.MockState{mongoAt("mock-c3", 3010)}
+					}
+				}
+				base := prHooks{consumedFor: consumedByWindow(h, consumed)}
+				if sc.simErr != nil {
+					base.simErr = map[string]error{}
+					for id, err := range sc.simErr {
+						if err == nil {
+							err = prClientTimeoutErr(t)
+						}
+						base.simErr[id] = err
+					}
+				}
+				h.replayer.hookImpl = failReads{prHooks: base, h: h, failOn: sc.failOn, onRead: sc.onRead, mu: &sync.Mutex{}, reads: map[string]int{}}
+				_ = h.run(t)
+
+				var st []string
+				for i := 1; i <= sc.tests; i++ {
+					st = append(st, string(statusOf(t, h, fmt.Sprintf("test-%d", i))))
+				}
+				if got := fmt.Sprint(st); got != w.statuses {
+					t.Fatalf("precondition: statuses %s, want %s", got, w.statuses)
+				}
+				if got := entriesOnDisk(t, db); !reflect.DeepEqual(got, w.file) {
+					t.Fatalf("mappings.yaml: %s; want %s", fileState(got), fileState(w.file))
+				}
+				if w.kept != "" {
+					if after := recordedEntryYAML(t, db, w.kept); string(after) != string(keptBefore) {
+						t.Fatalf("%s's recorded entry was rewritten:\n%s\nwas:\n%s", w.kept, after, keptBefore)
+					}
+				}
+				var warned []observer.LoggedEntry
+				for _, e := range logs.FilterMessage("not writing mappings.yaml").All() {
+					if e.Level >= zap.WarnLevel {
+						warned = append(warned, e)
+					}
+				}
+				if w.held == "" {
+					if len(warned) != 0 {
+						t.Fatalf("want no \"not writing mappings.yaml\" warning, got %+v", warned)
+					}
+					return
+				}
+				if len(warned) != 1 {
+					t.Fatalf("want one \"not writing mappings.yaml\" warning, got %+v", warned)
+				}
+				fields := warned[0].ContextMap()
+				if reason := fmt.Sprint(fields["reason"]); !strings.Contains(reason, w.held) {
+					t.Fatalf("the warning's reason is %q; want it to say %q", reason, w.held)
+				}
+				assertNoEntryHoldSaysWhatToDo(t, fields, "run keploy test again")
+			})
+		}
+	}
+}
+
+// What the read at the set's end gives a test is what the prune keeps: a
+// flagged mock it read is counted as consumed, kept whatever the verdict, and
+// mapped to its owner, so a mappings.yaml this run writes names no mock the
+// same run deleted (--remove-unused-mocks, as auto-replay runs).
+func TestRunTestSetKeepsTheTailMockTheSetsEndReadMaps(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		ignored  []string
+		consumed map[string][]models.MockState
+		// onRead: the n-th read in a test's window answers this list.
+		onRead map[string]map[int][]models.MockState
+		want   map[string][]string
+		tail   string
+	}{
+		{
+			name:     "test-2's publish comes after its own read, the last",
+			consumed: map[string][]models.MockState{"test-1": {mongoAt("mock-a", 1010)}},
+			onRead:   map[string]map[int][]models.MockState{"test-2": {1: {mongoAt("mock-c", 2010)}, 2: {carriedAt("mock-f2", 2500)}}},
+			want:     map[string][]string{"test-1": {"mock-a"}, "test-2": {"mock-c", "mock-f2"}},
+			tail:     "mock-f2",
+		},
+		{
+			name:     "test-2 ignored, test-1's publish comes after its own read",
+			ignored:  []string{"test-2"},
+			consumed: map[string][]models.MockState{},
+			onRead:   map[string]map[int][]models.MockState{"test-1": {1: {mongoAt("mock-a", 1010)}, 2: {carriedAt("mock-f1", 1500)}}},
+			want:     map[string][]string{"test-1": {"mock-a", "mock-f1"}},
+			tail:     "mock-f1",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newMappingRunHarness(t, 2)
+			pinWindows(h)
+			h.replayer.config.Test.UpdateTestMapping = true
+			h.replayer.config.Test.RemoveUnusedMocks = true
+			if tc.ignored != nil {
+				h.replayer.config.Test.IgnoredTests = map[string][]string{"test-set-0": tc.ignored}
+			}
+			db := mappingFile(t, h, nil)
+			base := prHooks{consumedFor: consumedByWindow(h, tc.consumed)}
+			h.replayer.hookImpl = failReads{prHooks: base, h: h, onRead: tc.onRead, mu: &sync.Mutex{}, reads: map[string]int{}}
+			_ = h.run(t)
+
+			if got := entriesOnDisk(t, db); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("mappings.yaml: %s; want %s", fileState(got), fileState(tc.want))
+			}
+			if h.mocks.pruneCalls() != 1 {
+				t.Fatalf("prune ran %d times, want 1", h.mocks.pruneCalls())
+			}
+			h.mocks.mu.Lock()
+			_, kept := h.mocks.kept[tc.tail]
+			h.mocks.mu.Unlock()
+			if !kept {
+				t.Fatalf("the prune deletes %s, which mappings.yaml maps", tc.tail)
+			}
+		})
 	}
 }

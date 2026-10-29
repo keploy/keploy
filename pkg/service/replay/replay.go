@@ -2865,10 +2865,16 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		TestSetID: testSetID,
 	}
 	var consumedMocks []models.MockState
+	// unreadDrain says which read of what the application consumed failed,
+	// outside a test's own read (consumptionUnread): the set's setup drain,
+	// a connection reset's check. A run with any failed read writes no empty
+	// entry (see the mapping write).
+	unreadDrain := ""
 	// A base path mocks nothing: none was consumed, and no agent could say.
 	if !r.noAgent {
 		consumedMocks, err = r.hookImpl.GetConsumedMocks(runTestSetCtx) // Getting mocks consumed during initial setup
 		if err != nil {
+			unreadDrain = "what the application consumed before the first test"
 			if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), err); ok {
 				testSetStatus = resolvedStatus
 				exitLoop = true
@@ -3488,12 +3494,18 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// affects keploy-side reporting, never the agent's own serving
 			// state — see retryResetOnce).
 			if loopErr != nil && pkg.IsTransportConnReset(loopErr) {
-				retryResp, retried, drainedConsumed := r.retryResetOnce(runTestSetCtx, &sent, testSetID, loopErr)
+				retryResp, retried, drainedConsumed, drainErr := r.retryResetOnce(runTestSetCtx, &sent, testSetID, loopErr)
 				if retried {
 					resp, loopErr = retryResp, nil
 				} else {
 					for _, m := range drainedConsumed {
 						totalConsumedMocks.Set(m)
+					}
+					// No test's mapping reads this drain: its flagged mocks go
+					// to their owners by the release rule.
+					carryAttr.mapDrained(actualTestMockMappings, drainedConsumed)
+					if drainErr != nil && unreadDrain == "" {
+						unreadDrain = "what " + testCase.Name + " consumed before its connection reset"
 					}
 				}
 			}
@@ -4680,12 +4692,16 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// streaming tc; on the unsafe refusal path we fold its drained mocks into
 			// totalConsumedMocks identically to the non-streaming loop.
 			if simErr != nil && pkg.IsTransportConnReset(simErr) {
-				retryResp, retried, drainedConsumed := r.retryResetOnce(runTestSetCtx, &sent, testSetID, simErr)
+				retryResp, retried, drainedConsumed, drainErr := r.retryResetOnce(runTestSetCtx, &sent, testSetID, simErr)
 				if retried {
 					resp, simErr = retryResp, nil
 				} else {
 					for _, m := range drainedConsumed {
 						totalConsumedMocks.Set(m)
+					}
+					carryAttr.mapDrained(actualTestMockMappings, drainedConsumed)
+					if drainErr != nil && unreadDrain == "" {
+						unreadDrain = "what " + tc.Name + " consumed before its connection reset"
 					}
 				}
 			}
@@ -5799,6 +5815,35 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			r.markNotJudged(testSetID)
 		}
 	}
+	// With the proven switch off nothing else reads what the application
+	// consumed after the set's last read: the last test's publish made after
+	// it answered (its own by the release rule), or what a last test that got
+	// no answer consumed (drainBeforeFiling reads only under the switch), an
+	// earlier test's carry-over among it. Read now, before the prune and the
+	// mapping, as the set's own, as the switch's stop drain is read: counted
+	// as consumed (so the prune keeps what was consumed, and a flagged mock
+	// whatever the verdict, keepWhateverTheVerdict), and its flagged mocks
+	// given to their owners by the release rule (mapDrained), so no such owner
+	// is taken for a test that consumed nothing. A read that fails leaves no
+	// test an empty entry (the mapping write). The next set's setup drain no
+	// longer reads this set's tail as its own.
+	if !provenswitch.On() && r.instrument && r.mocksDependencies() {
+		drainCtx, cancelDrain := context.WithTimeout(ctx, setEndDrainBudget)
+		late, lateErr := r.hookImpl.GetConsumedMocks(drainCtx)
+		cancelDrain()
+		if lateErr != nil {
+			if unreadDrain == "" {
+				unreadDrain = "what the application consumed after the set's last read"
+			}
+		} else {
+			for _, m := range late {
+				totalConsumedMocks.Set(m)
+				allConsumedAcrossCycles[m.Name] = m
+			}
+			carryAttr.keepWhateverTheVerdict(passingTotalConsumedMocks, "", late)
+			carryAttr.mapDrained(actualTestMockMappings, late)
+		}
+	}
 	if conf.PostScript != "" {
 		//Execute the Post-script after each test-set if provided
 		r.logger.Info("Running Post-script", zap.String("script", conf.PostScript), zap.String("test-set", testSetID))
@@ -6552,12 +6597,19 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// (enterprise's auto-replay, for one).
 	passing := passingTests(testCaseResults, consumptionUnread, obsoleteShaped, passedMissShaped(testCaseResults, leftRecordedUnconsumed))
 	mappingDoc, keptRecorded := passingEntriesOf(actualTestMockMappings, passing)
-	// Read only when instrumented and the run served mocks: otherwise the
-	// agent was never asked what a test consumed, or (--mocking=false, a
-	// global passthrough) every call went to the real dependency and nothing
-	// was served to consume, and an empty list would claim what nobody read.
+	// Read only when instrumented, the run served mocks, and every read of
+	// what the application consumed succeeded: otherwise the agent was never
+	// asked what a test consumed, or (--mocking=false, a global passthrough)
+	// every call went to the real dependency and nothing was served to
+	// consume, or a drain nobody read may hold a test's own mock (a publish
+	// it made after it answered, landed in the next test's drain), and an
+	// empty list would claim what nobody read. The first failed read is
+	// named in the hold.
+	if unreadDrain == "" && len(consumptionUnread) > 0 {
+		unreadDrain = "what " + strings.Join(consumptionUnread[:min(len(consumptionUnread), 5)], ", ") + " consumed"
+	}
 	var consumedNothing, caughtOnlyOthers map[string]struct{}
-	if r.instrument && r.mocksDependencies() {
+	if r.instrument && r.mocksDependencies() && unreadDrain == "" {
 		consumedNothing = carryAttr.consumedNothing()
 		caughtOnlyOthers = carryAttr.caughtOnlyOthers()
 	}
@@ -6567,6 +6619,18 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// before the empty entries: its consumption is its owners' (their
 	// entries list it), not a mock keploy could not place.
 	unentered := withoutTests(passingWithNoEntry(mappingDoc, testCaseResults, passing), caughtOnlyOthers)
+	// withheld: the passing tests a failed read kept from an empty entry (they
+	// consumed nothing the run read), which a file that exists keeps as
+	// recorded.
+	var withheld []string
+	if unreadDrain != "" && r.instrument && r.mocksDependencies() {
+		nothing := carryAttr.consumedNothing()
+		for _, id := range unentered {
+			if _, ok := nothing[id]; ok {
+				withheld = append(withheld, id)
+			}
+		}
+	}
 	markWrittenByKeployTest(mappingDoc)
 	// Whether a boot consumer's fetch was caught by the set's setup drain or
 	// by a test's drain is timing: a startup section holding the app's
@@ -6676,7 +6740,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// its whole recording until a run that can give each passing test
 		// one.
 		if exists, existsErr := mappingExists(); existsErr != nil || !exists {
-			holdMappings, holdNextStep = noEntryHold(r.instrument, r.mocksDependencies())
+			holdMappings, holdNextStep = noEntryHold(r.instrument, r.mocksDependencies(), unreadDrain)
 			heldForNoEntry = true
 		}
 	}
@@ -6755,6 +6819,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					zap.String("testSetID", testSetID),
 					zap.Int("count", n),
 					zap.Strings("tests", keptRecorded[:min(n, 20)]))
+			}
+			if n := len(withheld); n > 0 {
+				// A read failed: no passing test is said to have consumed
+				// nothing, and the entry of one that consumed nothing the run
+				// read stays as recorded.
+				r.logger.Info("left the entries of passing tests that consumed nothing keploy read as recorded: keploy could not read from its agent "+unreadDrain+", which may hold a mock one of them consumed",
+					zap.String("testSetID", testSetID),
+					zap.Int("count", n),
+					zap.Strings("tests", withheld[:min(n, 20)]))
 			}
 		}
 		// A document with no entry and no startup section has nothing to put
@@ -8765,34 +8838,38 @@ const resetResendReadyTimeout = 5 * time.Second
 // totalConsumedMocks. On the SAFE path (count==0) the drain is a no-op, and the
 // successful re-send's consumption is still accounted by the subsequent per-test
 // GetConsumedMocks in RunTestSet (loopErr becomes nil, so that block runs).
-func (r *Replayer) retryResetOnce(ctx context.Context, testCase *models.TestCase, testSetID string, origErr error) (interface{}, bool, []models.MockState) {
+//
+// readErr is the gate's read of the agent, when it failed: what the failed
+// request consumed is then unknown to the mapping (RunTestSet writes no empty
+// entry from such a run).
+func (r *Replayer) retryResetOnce(ctx context.Context, testCase *models.TestCase, testSetID string, origErr error) (resp interface{}, retried bool, drained []models.MockState, readErr error) {
 	// The gate below is the agent's word that the request consumed no mock,
 	// which proves the app never processed it only while its dependencies are
 	// mocks. At a base path they are real and no agent can give that word: a
 	// request the app may have processed is never sent twice.
 	if r.noAgent {
-		return nil, false, nil
+		return nil, false, nil, nil
 	}
 	// A reset at an address the app can never be reached at (a published port
 	// it listens behind only on 127.0.0.1 in its container) comes back on every
 	// re-send, and waiting for it to serve first would wait out each gate.
 	if pkg.IsUnreachableAppPort(origErr) {
-		return nil, false, nil
+		return nil, false, nil, nil
 	}
 	for attempt := 1; attempt <= maxResetResends; attempt++ {
 		if ctx.Err() != nil {
-			return nil, false, nil
+			return nil, false, nil, nil
 		}
 
 		// Refuse to retry if THIS request consumed a new mock (per-call count
 		// > 0 since the last drain) — that means it was (at least partially)
 		// processed and a re-send would not be idempotent. Hand the drained
 		// mocks back so the caller can keep totalConsumedMocks accurate.
-		if unsafe, drained := r.resetResendUnsafe(ctx); unsafe {
+		if unsafe, drained, err := r.resetResendUnsafe(ctx); unsafe {
 			r.logger.Debug("transport reset is not safe to re-send (a mock was consumed); leaving the original error",
 				zap.String("testSetID", testSetID),
 				zap.String("testCaseID", testCase.Name))
-			return nil, false, drained
+			return nil, false, drained, err
 		}
 
 		// Re-gate on the app actually serving again (HTTP-level, on the same
@@ -8815,23 +8892,23 @@ func (r *Replayer) retryResetOnce(ctx context.Context, testCase *models.TestCase
 		// it would drop them.
 		resp, err := r.hookImpl.SimulateRequest(ctx, testCase, testSetID)
 		if err == nil {
-			return resp, true, nil
+			return resp, true, nil, nil
 		}
 		if !pkg.IsTransportConnReset(err) {
 			// A different failure on the re-send (e.g. the app really is down):
 			// stop and let the caller report the original transport reset.
-			return nil, false, nil
+			return nil, false, nil, nil
 		}
 		origErr = err
 		// Back off (growing) before the next re-send so the bounded attempts
 		// spread across the docker-proxy reset burst rather than hammering it.
 		select {
 		case <-ctx.Done():
-			return nil, false, nil
+			return nil, false, nil, nil
 		case <-time.After(time.Duration(attempt) * resetResendBackoff):
 		}
 	}
-	return nil, false, nil
+	return nil, false, nil, nil
 }
 
 // resetResendUnsafe reports whether re-sending is unsafe because the failed
@@ -8844,17 +8921,17 @@ func (r *Replayer) retryResetOnce(ctx context.Context, testCase *models.TestCase
 // here for a failed request). So the per-call result IS exactly this request's
 // consumption, and the gate is unsafe iff that count is > 0. On a fetch error it
 // returns unsafe=true with no drained mocks (fail safe): if we cannot prove
-// nothing was consumed, we must not retry.
-func (r *Replayer) resetResendUnsafe(ctx context.Context) (bool, []models.MockState) {
+// nothing was consumed, we must not retry. The error is returned too.
+func (r *Replayer) resetResendUnsafe(ctx context.Context) (bool, []models.MockState, error) {
 	consumed, err := r.hookImpl.GetConsumedMocks(ctx)
 	if err != nil {
 		r.logger.Debug("could not fetch consumed mocks to validate reset re-send; not retrying", zap.Error(err))
-		return true, nil
+		return true, nil, err
 	}
 	if len(consumed) > 0 {
-		return true, consumed
+		return true, consumed, nil
 	}
-	return false, nil
+	return false, nil, nil
 }
 
 // waitForResetResendReady best-effort gates a reset re-send on the app actually
