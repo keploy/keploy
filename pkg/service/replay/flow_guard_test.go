@@ -152,3 +152,29 @@ func TestFlowGuard_AnAfterLastCallReachesNoTest(t *testing.T) {
 		t.Fatalf("the set lists %+v; want the call, made after the last test", got)
 	}
 }
+
+// A marked background series' call made inside a test's window is guarded
+// against that test, as a call made between two tests is against the next:
+// one whose recorded answer gave a word the test changed is the test's miss,
+// named as made inside its window; one whose answer did not is background
+// work.
+func TestFlowGuard_AMarkedSeriesCallInsideATestsWindowIsTheTestsWhenItsAnswerReachesIt(t *testing.T) {
+	for _, c := range []struct {
+		live    string
+		charged bool
+	}{{`{"tenant":""}`, true}, {`{"tenant":"tenantA7K29Q"}`, false}} {
+		var s setCalls
+		s.reset(newFlowGuard([]*models.TestCase{guardCase("test-1", `{"item":"pen"}`, `{"tenant":"tenantA7K29Q"}`)}, nil,
+			[]*models.Mock{guardMock(`{"tenant":"tenantA7K29Q"}`)}))
+		rest := s.take(context.Background(), []models.UnmatchedCall{inTestSeries("GET /boot")}, "test-1", live(c.live))
+		if c.charged {
+			if len(rest) != 1 || rest[0].Background || !strings.Contains(rest[0].ReachesTest, madeInside("test-1")) {
+				t.Fatalf("the test keeps %+v; want the series' call, charged, named as made inside test-1's window", rest)
+			}
+			continue
+		}
+		if len(rest) != 0 || len(s.backgroundCalls()) != 1 || s.backgroundCalls()[0].BackgroundWhy != madeInside("test-1")+", and its recorded answer reaches no test" {
+			t.Fatalf("kept %+v, listed %+v; want the series' call as background work made inside test-1's window", rest, s.backgroundCalls())
+		}
+	}
+}

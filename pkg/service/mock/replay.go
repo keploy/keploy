@@ -2169,10 +2169,12 @@ func logMiss(logger *zap.Logger, miss models.UnmatchedCall) {
 	}
 	msg := "no recorded mock matched an outgoing call"
 	if miss.Background {
-		// Made outside every test's window: the application's own work (a
-		// timer, a start-up job), which may fail in the application, but
-		// fails no test (founder D1). Said once, for the set, with when.
-		logger.Warn("a call the application made outside every test had no recorded answer: its background work, charged to no test",
+		// Made outside every test's window, or inside one as a call of a
+		// marked background series (MadeInTest): the application's own
+		// work (a timer, a start-up job), which may fail in the
+		// application, but fails no test (founder D1). Said once, for the
+		// set, with when, and worded from where it was made.
+		logger.Warn(miss.BackgroundLine(),
 			zap.String("protocol", miss.Protocol),
 			zap.String("call", miss.ActualSummary),
 			zap.String("destination", miss.Destination),
