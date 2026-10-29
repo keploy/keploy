@@ -26,6 +26,7 @@ import (
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/containerkey"
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
+	"go.keploy.io/server/v3/pkg/agent/proxy"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/engine"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -252,6 +253,11 @@ var pinProvenSwitch = provenswitch.Pin
 // endpoint its container keys are resolved through. A variable so a test can
 // see the call.
 var setDockerHost = containerkey.SetDockerHost
+
+// setExactViewVerify is what the agent's --exact-view-verify flag decides: the
+// exact view's verify mode (proxy.SetExactViewVerify). A variable so a test can
+// see the call without turning the mode on for the rest of its process.
+var setExactViewVerify = proxy.SetExactViewVerify
 
 // usePushedContainers is what a docker-mode agent does at start under the
 // proven switch: it has no Docker socket, so it names container destinations
@@ -487,6 +493,11 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		// which must never decide an agent's switch.
 		cmd.Flags().Bool(provenswitch.AgentFlag, false, "Internal: the proven model's staging switch (KEPLOY_PROVEN=1), passed by the keploy client that starts this agent. Not intended to be set by users directly.")
 		_ = cmd.Flags().MarkHidden(provenswitch.AgentFlag)
+		// Internal orchestrator→agent flag: the exact view's verify mode
+		// (KEPLOY_EXACT_VIEW_VERIFY=1 on the client, CI's lanes under the
+		// proven switch), which the agent does not inherit either.
+		cmd.Flags().Bool(provenswitch.VerifyFlag, false, "Internal: recompute each read of the exact view and fail on any difference (KEPLOY_EXACT_VIEW_VERIFY=1), passed by the keploy client that starts this agent. Not intended to be set by users directly.")
+		_ = cmd.Flags().MarkHidden(provenswitch.VerifyFlag)
 		// Internal orchestrator→agent flag: the Docker endpoint the client
 		// uses (its DOCKER_HOST), which sudo drops, for naming container
 		// destinations (containerkey.AgentArgs). Passed only under the proven
@@ -2321,6 +2332,10 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 		if host, err := cmd.Flags().GetString(containerkey.AgentFlag); err == nil && host != "" {
 			setDockerHost(host)
+		}
+		if verify, err := cmd.Flags().GetBool(provenswitch.VerifyFlag); err == nil && verify {
+			setExactViewVerify(true)
+			c.logger.Info("the exact view's verify mode is on in this agent: each read it keeps is recomputed, and a difference fails the read (KEPLOY_EXACT_VIEW_VERIFY=1, passed as --exact-view-verify)")
 		}
 
 		// Upstream TLS verification, forwarded from the orchestrator. Gated on

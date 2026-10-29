@@ -452,6 +452,11 @@ type MockFilterParams struct {
 	// in: an enabling value forces strict; an explicit disabling value
 	// ("0") forces strict off regardless of the per-call flag.
 	StrictMockWindow bool `json:"strictMockWindow,omitempty"`
+	// ExactStaging marks the agent's own staging of keploy mock replay, which
+	// asks for the strict window's staging load (StrictMockWindow) but is no
+	// user's strict window: the strict window's notice, about keploy test's
+	// per-test windows, is not printed for it. Never on the wire.
+	ExactStaging bool `json:"-"`
 
 	// Variables are the test variables the test's own request carries (its
 	// test case's template values), under the proven switch: a mock filter
