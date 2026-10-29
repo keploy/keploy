@@ -865,6 +865,35 @@ func TestTheExitRatchetTakesOnlyProgress(t *testing.T) {
 			t.Fatalf("%+v: progress %v, want %v", tc.m, got, tc.want)
 		}
 	}
+	// A read of open files that did not settle is no evidence: it neither
+	// passes the mark nor sets it, and the first settled one sets it.
+	for _, seq := range [][]struct {
+		m    ExitMark
+		want bool
+	}{
+		{
+			{ExitMark{Running: 1, Fds: 9}, false},
+			{ExitMark{Running: 1, Fds: 5, FilesUnsettled: true}, false},
+			{ExitMark{Running: 1, Fds: 9}, false},
+			{ExitMark{Running: 1, Fds: 8}, true},
+		},
+		// A first read that counted too many: the later, true ones are
+		// no progress, until one passes the first settled one.
+		{
+			{ExitMark{Running: 1, Fds: 5, FilesUnsettled: true}, false},
+			{ExitMark{Running: 1, Fds: 3}, false},
+			{ExitMark{Running: 1, Fds: 3}, false},
+			{ExitMark{Running: 1, Fds: 2, FilesUnsettled: true}, false},
+			{ExitMark{Running: 1, Fds: 2}, true},
+		},
+	} {
+		var r ExitRatchet
+		for i, tc := range seq {
+			if got := r.Advance(tc.m); got != tc.want {
+				t.Fatalf("reading %d, %+v: progress %v, want %v", i, tc.m, got, tc.want)
+			}
+		}
+	}
 	// A process gone, or whose pid names another, is not running.
 	if m := MarkExit([]Reached{{PID: os.Getpid(), Start: 1}}); m.Running != 0 {
 		t.Fatalf("a pid naming another process counted: %+v", m)
@@ -902,9 +931,6 @@ func TestTheExitRatchetTakesOnlyProgress(t *testing.T) {
 // file read by descriptors looks two steps deep). Closing the last descriptor
 // of a file is one, and two opens of one file are two files.
 func TestMarkExitCountsOpenFilesNotDescriptors(t *testing.T) {
-	if _, err := kcmpFiles(os.Getpid(), 0, 0); err != nil {
-		t.Skipf("the kernel compares no files here (kcmp: %v): each descriptor counts", err)
-	}
 	dir := t.TempDir()
 	open := func(name string) *os.File {
 		f, err := os.OpenFile(filepath.Join(dir, name), os.O_RDWR|os.O_CREATE, 0o600)
@@ -915,6 +941,9 @@ func TestMarkExitCountsOpenFilesNotDescriptors(t *testing.T) {
 		return f
 	}
 	in, out, f := open("in"), open("out"), open("f")
+	if _, err := kcmpFiles(os.Getpid(), int(in.Fd()), int(in.Fd())); err != nil {
+		t.Skipf("the kernel compares no files here (kcmp: %v): each descriptor counts", err)
+	}
 	g, err := os.Open(f.Name()) // f's file opened again: another open file
 	if err != nil {
 		t.Fatal(err)
@@ -940,24 +969,48 @@ func TestMarkExitCountsOpenFilesNotDescriptors(t *testing.T) {
 	procs := []Reached{{PID: cmd.Process.Pid, Start: st.StartTime}}
 	var r ExitRatchet
 	m := MarkExit(procs)
-	if m.Fds != 4 {
-		t.Fatalf("a process holding stdin, one file as stdout and stderr, and two opens of one file over three descriptors reads %d open files; want 4", m.Fds)
+	if m.Fds != 4 || m.FilesUnsettled {
+		t.Fatalf("a process holding stdin, one file as stdout and stderr, and two opens of one file over three descriptors reads %d open files (unsettled %v); want 4, settled", m.Fds, m.FilesUnsettled)
 	}
 	r.Advance(m)
 	_ = cmd.Process.Signal(syscall.SIGUSR1)
 	awaitFile(t, closedDup, reaped)
-	if m := MarkExit(procs); m.Fds != 4 || r.Advance(m) {
-		t.Fatalf("closing a duplicate read as %d open files (progress %v); want 4, and no progress", m.Fds, r.Advance(m))
+	if m := MarkExit(procs); m.Fds != 4 || m.FilesUnsettled || r.Advance(m) {
+		t.Fatalf("closing a duplicate read as %d open files (unsettled %v, progress %v); want 4, settled, and no progress", m.Fds, m.FilesUnsettled, r.Advance(m))
 	}
 	_ = cmd.Process.Signal(syscall.SIGUSR2)
 	awaitFile(t, closedLast, reaped)
-	if m := MarkExit(procs); m.Fds != 3 || !r.Advance(m) {
-		t.Fatalf("closing a file's last descriptor read as %d open files; want 3, and progress", m.Fds)
+	if m := MarkExit(procs); m.Fds != 3 || m.FilesUnsettled || !r.Advance(m) {
+		t.Fatalf("closing a file's last descriptor read as %d open files (unsettled %v); want 3, settled, and progress", m.Fds, m.FilesUnsettled)
+	}
+}
+
+// A read of a process's open files that did not settle (its descriptors
+// kept changing as they were compared) says so in the reading: it is no
+// evidence (ExitRatchet).
+func TestMarkExitSaysWhereItsFilesDidNotSettle(t *testing.T) {
+	st, ok := ReadProcStat(os.Getpid())
+	if !ok {
+		t.Fatal("premise: this process's stat could not be read")
+	}
+	// Each descriptor closed as it is compared with another, and open as
+	// it is with itself.
+	never := func(_, a, b int) (int, error) {
+		if a != b {
+			return 0, syscall.EBADF
+		}
+		return 0, nil
+	}
+	filesCompared.Store(&never)
+	t.Cleanup(func() { filesCompared.Store(nil) })
+	if m := MarkExit([]Reached{{PID: os.Getpid(), Start: st.StartTime}}); m.Running != 1 || !m.FilesUnsettled {
+		t.Fatalf("this process, its descriptors never holding still, read as %+v; want running, its files unsettled", m)
 	}
 }
 
 // A kernel that cannot compare files (no kcmp, or keploy may not ask) leaves
-// each descriptor counted.
+// each descriptor counted; one that stops comparing part way through a read
+// leaves it unsettled, no evidence.
 func TestOpenFilesAreDescriptorsWhereTheKernelCannotCompareThem(t *testing.T) {
 	ents, err := os.ReadDir("/proc/self/fd")
 	if err != nil {
@@ -965,12 +1018,12 @@ func TestOpenFilesAreDescriptorsWhereTheKernelCannotCompareThem(t *testing.T) {
 	}
 	for _, no := range []error{syscall.ENOSYS, syscall.EPERM} {
 		cannot := func(int, int, int) (int, error) { return 0, no }
-		if n := openFilesBy(cannot, os.Getpid(), ents); n != len(ents) {
-			t.Fatalf("kcmp failing with %v: %d open files of %d descriptors; want each counted", no, n, len(ents))
+		if n, settled := openFilesBy(cannot, os.Getpid(), ents); n != len(ents) || !settled {
+			t.Fatalf("kcmp failing with %v: %d open files of %d descriptors (settled %v); want each counted, settled", no, n, len(ents), settled)
 		}
 	}
 	// One refused part way through a read (as the files are checked, each
-	// against the next: the process's credentials changed) counts each too.
+	// against the next: the process's credentials changed) did not settle.
 	files := map[int]int{0: 1, 1: 2, 2: 2, 3: 3}
 	refused := func(_, a, b int) (int, error) {
 		switch {
@@ -984,8 +1037,29 @@ func TestOpenFilesAreDescriptorsWhereTheKernelCannotCompareThem(t *testing.T) {
 		return 0, nil
 	}
 	listed := []os.DirEntry{fdEntry("0"), fdEntry("1"), fdEntry("2"), fdEntry("3")}
-	if n := openFilesBy(refused, 1, listed); n != len(listed) {
-		t.Fatalf("kcmp refused part way through: %d open files of %d descriptors; want each counted", n, len(listed))
+	if n, settled := openFilesBy(refused, 1, listed); settled || n > 3 {
+		t.Fatalf("kcmp refused part way through: %d open files of %d descriptors, settled %v; want at most the 3 files, unsettled", n, len(listed), settled)
+	}
+	// One that reads closed as it is compared with another, then is
+	// refused as it is asked of itself, is not taken for open: the read did
+	// not settle.
+	calls := 0
+	selfRefused := func(_, a, b int) (int, error) {
+		calls++
+		switch {
+		case a == b:
+			return 0, syscall.EPERM
+		case calls == 1:
+			return 0, syscall.EBADF
+		case files[a] < files[b]:
+			return 1, nil
+		case files[a] > files[b]:
+			return 2, nil
+		}
+		return 0, nil
+	}
+	if n, settled := openFilesBy(selfRefused, 1, []os.DirEntry{fdEntry("0"), fdEntry("3")}); settled || n > 2 {
+		t.Fatalf("kcmp refused asking a descriptor of itself: %d open files, settled %v; want at most 2, unsettled", n, settled)
 	}
 }
 
@@ -995,62 +1069,80 @@ func TestOpenFilesAreDescriptorsWhereTheKernelCannotCompareThem(t *testing.T) {
 // that closes and opens again as they are read (a churn, as dash's
 // `exec 3<&-` makes) takes none of the other files with it, nor counts its
 // file twice: the files read stay between the fewest and the most the
-// process held as they were read.
+// process held as they were read. One that never holds still spends its own
+// share of the comparisons, not the others': it is set aside, the read did
+// not settle, and the stable files are still each counted once. The
+// descriptors are listed as os.ReadDir lists /proc/<pid>/fd, by name (0 1 10
+// 2 3), as the product reads them.
 func TestOpenFilesLetGoOfADescriptorClosedAsTheyAreRead(t *testing.T) {
-	ents := func(fds ...int) []os.DirEntry {
-		var es []os.DirEntry
-		for _, fd := range fds {
-			es = append(es, fdEntry(strconv.Itoa(fd)))
-		}
-		return es
-	}
 	const closed = -1
 	for _, tc := range []struct {
 		name  string
 		files map[int]int // descriptor to file, as the read begins; files order as their numbers
 		// at[fd][n] changes descriptors (to the file each names from then
 		// on, or closed) as the read compares fd for the n+1st time.
-		at    map[int][]map[int]int
-		churn int // closed as it is compared with another, open on a new file as it is with itself
-		want  int
+		at map[int][]map[int]int
+		// churn, from its churnFrom+1st comparison on, is closed as it is
+		// compared with another, and open on a new file as it is with
+		// itself.
+		churn, churnFrom int
+		want             int
+		unsettled        bool
 	}{
-		{"one file over two descriptors", map[int]int{0: 1, 1: 2, 2: 2, 3: 3, 10: 3}, nil, -1, 3},
-		{"a duplicate of a file read before the last", map[int]int{0: 2, 1: 1, 5: 2}, nil, -1, 2},
+		{"one file over two descriptors", map[int]int{0: 1, 1: 2, 2: 2, 3: 3, 10: 3}, nil, -1, 0, 3, false},
+		{"a duplicate of a file read before the last", map[int]int{0: 2, 1: 1, 5: 2}, nil, -1, 0, 2, false},
 		{"a listed descriptor closed before it is compared", map[int]int{0: 1, 1: 2, 2: 2, 3: 3},
-			map[int][]map[int]int{3: {{3: closed}}}, -1, 2},
-		{"a counted descriptor closed, its duplicate read after", map[int]int{0: 1, 1: 2, 3: 3, 10: 3},
-			map[int][]map[int]int{10: {{3: closed}}}, -1, 3},
-		{"a counted descriptor closed, its duplicate and another file read after", map[int]int{0: 1, 3: 3, 10: 3, 11: 5},
-			map[int][]map[int]int{10: {{3: closed}}}, -1, 3},
-		{"a counted descriptor closed, another file read after", map[int]int{0: 1, 3: 3, 10: 4},
-			map[int][]map[int]int{10: {{3: closed}}}, -1, 2},
+			map[int][]map[int]int{3: {{3: closed}}}, -1, 0, 2, false},
+		{"a counted descriptor closed, its duplicate read after", map[int]int{0: 1, 1: 2, 3: 3, 4: 3},
+			map[int][]map[int]int{4: {{3: closed}}}, -1, 0, 3, false},
+		{"a counted descriptor closed, its duplicate and another file read after", map[int]int{0: 1, 3: 3, 4: 3, 5: 5},
+			map[int][]map[int]int{4: {{3: closed}}}, -1, 0, 3, false},
+		{"a counted descriptor closed, another file read after", map[int]int{0: 1, 3: 3, 4: 4},
+			map[int][]map[int]int{4: {{3: closed}}}, -1, 0, 2, false},
 		// Closed as it is compared with a counted one, open again as it is
 		// asked of itself: the counted one is not let go for it.
 		{"a descriptor closed and opened again between two looks at it", map[int]int{0: 1, 1: 2, 2: 2, 3: 3},
-			map[int][]map[int]int{3: {{3: closed}, {3: 4}, {3: closed}}}, -1, 2},
-		// fd 3 and its duplicate fd 10 closed, and fd 3 opened again on a
-		// file that orders after both others, then duplicated to fd 10: fd
-		// 3 is held where its first file ordered, and fd 10 is not found
+			map[int][]map[int]int{3: {{3: closed}, {3: 4}, {3: closed}}}, -1, 0, 2, false},
+		// fd 3 and its duplicate fd 4 closed, and fd 3 opened again on a
+		// file that orders after both others, then duplicated to fd 4: fd
+		// 3 is held where its first file ordered, and fd 4 is not found
 		// there.
-		{"a counted descriptor opened again on a file of another order", map[int]int{0: 10, 1: 20, 3: 5, 10: 5},
-			map[int][]map[int]int{10: {{3: 25, 10: 25}}}, -1, 3},
-		{"a counted file whose duplicate is opened again on another file", map[int]int{0: 10, 3: 5, 10: 5, 11: 30},
-			map[int][]map[int]int{11: {{3: closed, 10: 25}}}, -1, 3},
+		{"a counted descriptor opened again on a file of another order", map[int]int{0: 10, 1: 20, 3: 5, 4: 5},
+			map[int][]map[int]int{4: {{3: 25, 4: 25}}}, -1, 0, 3, false},
+		{"a counted file whose duplicate is opened again on another file", map[int]int{0: 10, 3: 5, 4: 5, 5: 30},
+			map[int][]map[int]int{5: {{3: closed, 4: 25}}}, -1, 0, 3, false},
 		{"a counted descriptor closed as the files are checked", map[int]int{0: 1, 1: 2, 3: 3},
-			map[int][]map[int]int{3: {nil, {3: closed}}}, -1, 2},
+			map[int][]map[int]int{3: {nil, {3: closed}}}, -1, 0, 2, false},
+		// The first of two compared closed as the files are checked: it is
+		// let go, and the read settles.
+		{"the first of two counted descriptors closed as the files are checked", map[int]int{0: 1, 1: 2, 3: 3},
+			map[int][]map[int]int{1: {nil, nil, nil, {1: closed}}}, -1, 0, 2, false},
+		// Closed as the files are checked, its duplicate holding its file
+		// yet: the duplicate is read again, and counted.
+		{"a counted descriptor closed as the files are checked, its duplicate holding its file yet", map[int]int{0: 1, 3: 3, 4: 3},
+			map[int][]map[int]int{3: {nil, nil, {3: closed}}}, -1, 0, 2, false},
 		// fd 3 opened again on a file that orders first as the files are
 		// checked, and fd 7 closed: fd 4 holds fd 3's first file yet.
 		{"a counted descriptor opened again on a file ordering first, its duplicate holding its file yet", map[int]int{0: 10, 3: 30, 4: 30, 7: 40},
-			map[int][]map[int]int{3: {nil, nil, nil, {3: 5, 7: closed}}}, -1, 3},
-		{"a descriptor that never holds still as it is read", map[int]int{0: 1, 1: 2, 2: 2, 3: 3}, nil, 3, 3},
+			map[int][]map[int]int{3: {nil, nil, nil, {3: 5, 7: closed}}}, -1, 0, 3, false},
+		// Never holding still: set aside, the stable files counted.
+		{"a descriptor that never holds still as it is read", map[int]int{0: 1, 1: 2, 2: 2, 3: 3}, nil, 3, 0, 2, true},
+		// dash's saved descriptor fd 10 lists before fd 2, the duplicate of
+		// stdout: it spends its own share, and fd 2 is still found to be
+		// stdout's file.
+		{"a churning descriptor listed before a stable duplicate", map[int]int{0: 1, 1: 2, 2: 2, 10: 3}, nil, 10, 0, 2, true},
+		{"a churning saved descriptor listed before a stable duplicate and its own", map[int]int{0: 1, 1: 2, 2: 2, 3: 3, 10: 3}, nil, 10, 0, 3, true},
+		// A counted descriptor that starts to churn as the files are
+		// checked: set aside, its duplicate holds and counts its file.
+		{"a counted descriptor churning from the check of the files, its duplicate holding its file", map[int]int{0: 1, 3: 3, 4: 3}, nil, 3, 2, 2, true},
 	} {
 		files := map[int]int{}
-		var fds []int
+		var names []string
 		for fd, file := range tc.files {
 			files[fd] = file
-			fds = append(fds, fd)
+			names = append(names, strconv.Itoa(fd))
 		}
-		sort.Ints(fds)
+		sort.Strings(names)
 		seen, next := map[int]int{}, 100
 		change := func(fd int) {
 			if steps := tc.at[fd]; seen[fd] < len(steps) {
@@ -1069,7 +1161,7 @@ func TestOpenFilesLetGoOfADescriptorClosedAsTheyAreRead(t *testing.T) {
 			if b != a {
 				change(b)
 			}
-			if a == tc.churn || b == tc.churn {
+			if (a == tc.churn || b == tc.churn) && seen[tc.churn] > tc.churnFrom {
 				if a == b {
 					next++
 					files[a] = next
@@ -1089,8 +1181,12 @@ func TestOpenFilesLetGoOfADescriptorClosedAsTheyAreRead(t *testing.T) {
 			}
 			return 0, nil
 		}
-		if n := openFilesBy(kcmp, 1, ents(fds...)); n != tc.want {
-			t.Fatalf("%s: %d open files; want %d", tc.name, n, tc.want)
+		var listed []os.DirEntry
+		for _, n := range names {
+			listed = append(listed, fdEntry(n))
+		}
+		if n, settled := openFilesBy(kcmp, 1, listed); n != tc.want || settled == tc.unsettled {
+			t.Errorf("%s (listed %v): %d open files, settled %v; want %d, settled %v", tc.name, names, n, settled, tc.want, !tc.unsettled)
 		}
 	}
 }

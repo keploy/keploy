@@ -51,11 +51,13 @@ func StopStallSaid() string { return StopStallBudget.String() + " of keploy's ru
 // ExitMark is how far processes are on their way out: how many still run,
 // with how many threads and open files (files, not descriptors: openFiles),
 // how much storage they have read and written, and whether one waits on
-// storage (an uninterruptible sleep, D).
+// storage (an uninterruptible sleep, D). FilesUnsettled is a read of their
+// open files that did not settle (openFiles): its Fds are no evidence.
 type ExitMark struct {
 	Running, Threads, Fds int
 	IO                    uint64
 	OnStorage             bool
+	FilesUnsettled        bool
 }
 
 // MarkExit reads how far procs are on their way out, each named by its pid
@@ -89,7 +91,9 @@ func MarkExit(procs []Reached) ExitMark {
 		}
 		m.Threads += processThreads(p.PID)
 		if fds, err := os.ReadDir(fdDir); err == nil {
-			m.Fds += openFiles(task, fds)
+			n, settled := openFiles(task, fds)
+			m.Fds += n
+			m.FilesUnsettled = m.FilesUnsettled || !settled
 		}
 		m.IO += readStorageIO(dir + "/io")
 	}
@@ -101,36 +105,51 @@ const kcmpFile = 0
 
 // openFiles is how many open files a process holds through the descriptors
 // its fd directory listed (fds, read through task, the process or a thread of
-// it that runs): a descriptor naming the file another of them names (a
-// duplicate: dup, dup2, stdout and stderr made one, a shell saving a
-// descriptor as it redirects it) counts once with it. Closing a duplicate
-// releases nothing: a process that copies a descriptor and closes the copy
-// over and over (dash runs `exec 3<&-` so: fd 3 saved to fd 10, then both
-// closed) holds no fewer files as it does, and read by its descriptors its
-// churn would look one step deeper than it is (ExitRatchet). Two descriptors
-// name one file where kcmp(2) says so; one closed since the listing is not
-// held, and not counted, and one closed and opened again as they are read
-// takes none of the others' files with it (fileTally). Where the kernel
-// cannot compare them (no kcmp, or keploy may not ask: a seccomp filter, a
-// process it may not trace), each descriptor counts.
-func openFiles(task int, fds []os.DirEntry) int { return openFilesBy(kcmpFiles, task, fds) }
+// it that runs), and whether the read settled: a descriptor naming the file
+// another of them names (a duplicate: dup, dup2, stdout and stderr made one,
+// a shell saving a descriptor as it redirects it) counts once with it.
+// Closing a duplicate releases nothing: a process that copies a descriptor
+// and closes the copy over and over (dash runs `exec 3<&-` so: fd 3 saved to
+// fd 10, then both closed) holds no fewer files as it does, and read by its
+// descriptors its churn would look one step deeper than it is (ExitRatchet).
+// Two descriptors name one file where kcmp(2) says so; one closed since the
+// listing is not held, and not counted, and one closed and opened again as
+// they are read takes none of the others' files with it (fileTally). A read
+// that did not settle (a descriptor that kept closing and opening again as it
+// was compared, or the kernel refusing to compare part way through) counts
+// the files it settled, and is no evidence (ExitMark.FilesUnsettled). Where
+// the kernel cannot compare them at all (no kcmp, or keploy may not ask: a
+// seccomp filter, a process it may not trace), each descriptor counts.
+func openFiles(task int, fds []os.DirEntry) (int, bool) {
+	if cmp := filesCompared.Load(); cmp != nil {
+		return openFilesBy(*cmp, task, fds)
+	}
+	return openFilesBy(kcmpFiles, task, fds)
+}
+
+// filesCompared, where a test sets it, is how openFiles compares two
+// descriptors' files in place of kcmp(2); atomic, as a test may reset it
+// while a stop it left runs on.
+var filesCompared atomic.Pointer[func(task, a, b int) (int, error)]
 
 // openFilesBy is openFiles with the kernel's comparison of two descriptors'
 // files (kcmpFiles; the tests' own).
-func openFilesBy(kcmp func(task, a, b int) (int, error), task int, fds []os.DirEntry) int {
-	t := fileTally{kcmp: kcmp, task: task}
+func openFilesBy(kcmp func(task, a, b int) (int, error), task int, fds []os.DirEntry) (int, bool) {
+	t := fileTally{kcmp: kcmp, task: task, spent: map[int]int{}}
 	for _, e := range fds {
 		if fd, err := strconv.Atoi(e.Name()); err == nil {
 			t.todo = append(t.todo, fd)
 		}
 	}
-	n := len(t.todo)
-	t.left = 4 * (n + 1) * (bits.Len(uint(n)) + 2)
-	held, err := t.settle()
-	if err != nil && !errors.Is(err, errTallySpent) {
-		return len(fds)
+	t.share = 4 * (bits.Len(uint(len(t.todo))) + 2)
+	switch err := t.settle(); {
+	case err == nil:
+		return len(t.held), !t.unsettled
+	case t.answered:
+		// Refused part way through: the files held by then, no evidence.
+		return len(t.held), false
 	}
-	return held
+	return len(fds), true
 }
 
 // fileTally is a read of the open files a process holds through its
@@ -142,13 +161,21 @@ func openFilesBy(kcmp func(task, a, b int) (int, error), task int, fds []os.DirE
 // is let go where it reads closed, never where the other compared with it
 // may be the one closed (it may have opened again since); and one held that
 // closed and opened again on another file can stand out of the files' order,
-// so the files are counted only once each reads before the next.
+// so the files are counted only once each reads before the next. Each
+// descriptor makes its own share of the comparisons: the search for its
+// file's place, and the check of its place after the one before it. One that
+// spent its share (it kept closing and opening again as it was compared) is
+// set aside, not counted, and the read did not settle; the others are read
+// on their own shares, so a stable duplicate after it is still found.
 type fileTally struct {
-	kcmp func(task, a, b int) (int, error)
-	task int
-	held []heldFile
-	todo []int
-	left int // comparisons it may yet make (errTallySpent)
+	kcmp      func(task, a, b int) (int, error)
+	task      int
+	held      []heldFile
+	todo      []int
+	share     int         // comparisons each descriptor may make (errShareSpent)
+	spent     map[int]int // comparisons each has made
+	answered  bool        // kcmp has answered: a refusal now is part way through
+	unsettled bool        // a descriptor was set aside
 }
 
 // heldFile is a descriptor of a file a process holds, and the other
@@ -158,25 +185,26 @@ type heldFile struct {
 	dups []int
 }
 
-// errTallySpent is a read of open files that made the comparisons it may
-// (fileTally.left) with its process's descriptors still closing and opening
-// again under it: each descriptor it has not settled counts as a file.
-var errTallySpent = errors.New("the descriptors kept changing as their files were read")
+// errShareSpent is a descriptor that made its share of a read's comparisons
+// (fileTally.share), still closing and opening again under them.
+var errShareSpent = errors.New("the descriptor kept changing as its file was read")
 
-// settle reads the descriptors left, then counts the files held once each
-// reads before the next in kcmp's order; one that does not is read again.
-// The count is what it holds, and each descriptor it has not settled, where
-// it errs (errTallySpent; kcmp's own error).
-func (t *fileTally) settle() (int, error) {
+// settle reads the descriptors left, then checks that each file held reads
+// before the next in kcmp's order; one that does not is read again. One that
+// spent its share is set aside (fileTally.unsettled).
+func (t *fileTally) settle() error {
 	for {
 		for len(t.todo) > 0 {
-			if err := t.hold(t.todo[0]); err != nil {
-				return len(t.held) + len(t.todo), err
-			}
+			fd := t.todo[0]
 			t.todo = t.todo[1:]
+			if err := t.hold(fd); errors.Is(err, errShareSpent) {
+				t.unsettled = true
+			} else if err != nil {
+				return err
+			}
 		}
 		if done, err := t.ordered(); err != nil || done {
-			return len(t.held) + len(t.todo), err
+			return err
 		}
 	}
 }
@@ -185,18 +213,18 @@ func (t *fileTally) settle() (int, error) {
 // or to the duplicates of the one there that names its file; one closed is
 // not held. Where one of two compared was closed, each is asked of itself:
 // one closed is let go, and where both are open again (one closed and opened
-// again in between), they are compared again.
+// again in between), they are compared again. Each comparison is fd's.
 func (t *fileTally) hold(fd int) error {
 	lo, hi := 0, len(t.held)
 	for lo < hi {
 		mid := int(uint(lo+hi) >> 1)
-		order, err := t.cmp(fd, t.held[mid].fd)
+		order, err := t.cmp(fd, t.held[mid].fd, fd)
 		switch {
 		case errors.Is(err, unix.EBADF):
-			if open, err := t.open(fd); err != nil || !open {
+			if open, err := t.open(fd, fd); err != nil || !open {
 				return err
 			}
-			if err := t.drop(mid); err != nil {
+			if err := t.drop(mid, fd); err != nil {
 				return err
 			}
 			lo, hi = 0, len(t.held)
@@ -218,27 +246,28 @@ func (t *fileTally) hold(fd int) error {
 }
 
 // ordered reports whether each file held reads before the next in kcmp's
-// order, so that no two of them are one file. Where one does not (one
-// compared with it closed and opened again since it was held: it names
-// another file, or the next one's), the next is read again, with its
-// duplicates; where one of two is closed, it is let go.
+// order, so that no two of them are one file; the comparison of two is the
+// next one's. Where one does not (one compared with it closed and opened
+// again since it was held: it names another file, or the next one's), the
+// next is read again, with its duplicates; where one of two is closed, each
+// is asked of itself, on its own share, and one closed is let go.
 func (t *fileTally) ordered() (bool, error) {
 	for i := 0; i+1 < len(t.held); i++ {
-		order, err := t.cmp(t.held[i].fd, t.held[i+1].fd)
+		cur, next := t.held[i].fd, t.held[i+1]
+		order, err := t.cmp(cur, next.fd, next.fd)
 		switch {
 		case errors.Is(err, unix.EBADF):
-			if err := t.drop(i + 1); err != nil {
+			if err := t.spentBy(next.fd, t.drop(i+1, next.fd)); err != nil {
 				return false, err
 			}
-			return false, t.drop(i)
+			return false, t.spentBy(cur, t.drop(i, cur))
 		case err != nil:
-			return false, err
+			return false, t.spentBy(next.fd, err)
 		case order == 1:
 			continue
 		case order != 0 && order != 2:
 			return false, fmt.Errorf("kcmp gave no order of two files (%d)", order)
 		}
-		next := t.held[i+1]
 		t.held = slices.Delete(t.held, i+1, i+2)
 		t.todo = append(append(t.todo, next.fd), next.dups...)
 		return false, nil
@@ -246,10 +275,29 @@ func (t *fileTally) ordered() (bool, error) {
 	return true, nil
 }
 
-// drop lets go of held file i where its descriptor reads closed now. Its
-// duplicates are read again: one may hold its file yet.
-func (t *fileTally) drop(i int) error {
-	if open, err := t.open(t.held[i].fd); err != nil || open {
+// spentBy sets held descriptor fd aside where err is its spent share
+// (errShareSpent), and is err otherwise. One set aside is not counted, and
+// the read did not settle; its duplicates are read again: one may hold its
+// file yet.
+func (t *fileTally) spentBy(fd int, err error) error {
+	if !errors.Is(err, errShareSpent) {
+		return err
+	}
+	for i, h := range t.held {
+		if h.fd == fd {
+			t.todo = append(t.todo, h.dups...)
+			t.held = slices.Delete(t.held, i, i+1)
+			t.unsettled = true
+			break
+		}
+	}
+	return nil
+}
+
+// drop lets go of held file i where its descriptor reads closed now, asked
+// on by's share. Its duplicates are read again: one may hold its file yet.
+func (t *fileTally) drop(i, by int) error {
+	if open, err := t.open(t.held[i].fd, by); err != nil || open {
 		return err
 	}
 	t.todo = append(t.todo, t.held[i].dups...)
@@ -257,23 +305,27 @@ func (t *fileTally) drop(i int) error {
 	return nil
 }
 
-// open reports whether descriptor fd is open now.
-func (t *fileTally) open(fd int) (bool, error) {
-	_, err := t.cmp(fd, fd)
+// open reports whether descriptor fd is open now, asked on by's share.
+func (t *fileTally) open(fd, by int) (bool, error) {
+	_, err := t.cmp(fd, fd, by)
 	if errors.Is(err, unix.EBADF) {
 		return false, nil
 	}
 	return err == nil, err
 }
 
-// cmp is kcmp of descriptors a and b, while the tally may yet compare
-// (errTallySpent).
-func (t *fileTally) cmp(a, b int) (int, error) {
-	if t.left <= 0 {
-		return 0, errTallySpent
+// cmp is kcmp of descriptors a and b, one of by's share of comparisons
+// (errShareSpent).
+func (t *fileTally) cmp(a, b, by int) (int, error) {
+	if t.spent[by] >= t.share {
+		return 0, errShareSpent
 	}
-	t.left--
-	return t.kcmp(t.task, a, b)
+	t.spent[by]++
+	order, err := t.kcmp(t.task, a, b)
+	if err == nil || errors.Is(err, unix.EBADF) {
+		t.answered = true
+	}
+	return order, err
 }
 
 // kcmpFiles is kcmp(2) of descriptors a and b of process (or thread) task:
@@ -313,17 +365,23 @@ var processThreads = func(pid int) int {
 // and falls back (a socket opened and closed, a thread started and ended: a
 // retry loop, a DNS lookup, a pool) is none; and storage I/O counts only
 // while one of them waits on it: one that logs as it waits on its own makes
-// none. The stop of the daemons an app leaves behind reads them so too
-// (stopMembers, pkg/platform/http/adopt_linux.go).
+// none. A reading whose open files did not settle (ExitMark.FilesUnsettled:
+// descriptors that kept changing as they were read) neither sets nor passes
+// the open-file mark: a look that could not tell the files apart is no
+// evidence, and so a first look that counted too many cannot make a later,
+// true one look like progress. The stop of the daemons an app leaves behind
+// reads them so too (stopMembers, pkg/platform/http/adopt_linux.go).
 type ExitRatchet struct {
-	best ExitMark
-	set  bool
+	best  ExitMark
+	set   bool
+	files bool // best.Fds is a settled reading's
 }
 
 // Advance takes reading m and reports whether it passed the mark.
 func (r *ExitRatchet) Advance(m ExitMark) bool {
+	files := !m.FilesUnsettled
 	if !r.set {
-		r.best, r.set = m, true
+		r.best, r.set, r.files = m, true, files
 		return false
 	}
 	moved := false
@@ -333,7 +391,11 @@ func (r *ExitRatchet) Advance(m ExitMark) bool {
 	if m.Threads < r.best.Threads {
 		r.best.Threads, moved = m.Threads, true
 	}
-	if m.Fds < r.best.Fds {
+	switch {
+	case !files:
+	case !r.files:
+		r.best.Fds, r.files = m.Fds, true
+	case m.Fds < r.best.Fds:
 		r.best.Fds, moved = m.Fds, true
 	}
 	if m.IO > r.best.IO {
