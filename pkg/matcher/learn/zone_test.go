@@ -1662,119 +1662,176 @@ func TestAnOffsetLearnedInAWallTimeShownTwicePassesNoShorterTimeToLiveElsewhere(
 	}
 }
 
-// An application in Pacific/Chatham that resolves a wall time shown twice
-// to its first showing and cuts its clock to the hour, before adding two
-// hours or after: Chatham's clocks go back from 03:45 +1345 to 02:45 +1245
-// (2026-04-05, 14:00 UTC the day before), and the wall time shown twice
-// holds 03:00. A
-// recording at 02:59 in the second showing cuts to 02:00, shown once, and
-// writes the right value; its full round, a lead later, reads 03:00 in the
-// second showing and writes 03:00's first showing, an hour early, so the
-// two show clock + 1h of clock + 2h. The learn step refuses an hour's cut
-// near that turn, naming it and the hour it holds, with Chatham known and
-// with no zone known (any zone's turn whose wall time shown twice holds an
-// hour's start): without the refusal it learns clock + 1h there, and a
-// replay on another day passes a time to live two hours shorter at every
-// read. Away from the turn it learns clock + 2h, and a replay of that
-// passes the shorter one only near the cut's own turn. (Berlin's wall time
-// shown twice is a whole hour: its hour's cut learns near its turn, its own
+// An application that resolves a wall time shown twice to its first
+// showing and cuts its clock to the hour, before adding its time to live or
+// after, near a turn whose wall time shown twice holds the start of one of
+// its zone's wall hours strictly inside it.
+//   - Pacific/Chatham's clocks go back from 03:45 +1345 to 02:45 +1245
+//     (2026-04-05, 14:00 UTC the day before), and 02:45 to 03:45 holds
+//     03:00. A recording at 02:59 in the second showing cuts to 02:00,
+//     shown once, and writes the right value; its full round, a lead later,
+//     reads 03:00 in the second showing and writes 03:00's first showing,
+//     an hour early, so of a time to live of 2h the two show clock + 1h.
+//   - Antarctica/Troll's clocks go back from 03:00 +02 to 01:00 +00
+//     (2026-10-25, 01:00 UTC), and 01:00 to 03:00 holds 02:00, with 01:00
+//     shown twice too. A recording at 01:59 in the second showing writes
+//     01:00's first showing and its full round 02:00's, both two hours
+//     early, so of a time to live of 3h the two show one offset, clock + 1h.
+//
+// The learn step refuses an hour's cut near such a turn, naming it, the
+// hour it holds and why the runs there stand from the application's
+// offset, with the zone known and with no zone known (any zone's such
+// turn): without the refusal it learns clock + 1h there, and a replay on
+// another day passes a time to live two hours shorter at every read. Away
+// from the turn it learns the time to live, and a replay of that passes
+// the shorter one only near the cut's own turn. (Berlin's wall time shown
+// twice is one whole hour: its hour's cut learns near its turn, its own
 // row above.)
 func TestAnOffsetCutToAnHourIsRefusedNearATurnWhoseWallTimeShownTwiceHoldsAnHoursStart(t *testing.T) {
-	chat, err := time.LoadLocation("Pacific/Chatham")
-	if err != nil {
-		t.Fatal(err)
-	}
 	const p = "body.expiresAt"
 	hour, ms := time.Hour, time.Millisecond
-	turn := time.Date(2026, 4, 4, 14, 0, 0, 0, time.UTC)
-	if _, b := turn.Add(-time.Nanosecond).In(chat).Zone(); b != 13*3600+45*60 {
-		t.Fatalf("Pacific/Chatham before %s: offset %ds, want +1345", turn, b)
+	legs := []struct {
+		zone          string
+		turn          time.Time
+		before, after int
+		// held is the instant the hour the turn holds starts at in the
+		// second showing; ttl the application's time to live.
+		held, ttl time.Duration
+		// near is where a refusal for the turn may fall, from the turn;
+		// from and to the calls swept.
+		near     [2]time.Duration
+		from, to time.Duration
+		day      time.Time
+		want     []string
+	}{
+		{
+			zone: "Pacific/Chatham", turn: time.Date(2026, 4, 4, 14, 0, 0, 0, time.UTC),
+			before: 13*3600 + 45*60, after: 12*3600 + 45*60, held: 15 * time.Minute, ttl: 2 * hour,
+			near: [2]time.Duration{-5 * hour, 2 * hour}, from: -6 * hour, to: 6 * hour,
+			day: time.Date(2026, 5, 5, 0, 0, 0, 0, time.UTC),
+			want: []string{
+				"shows twice as its clocks go back from 03:45 +1345 to 02:45 +1245 on 2026-04-05, which holds the start of the wall hour 03:00",
+				"a run in the second showing before 03:00 writes the hour before it, shown once, and so the right value, and one after it 03:00's first showing, an hour early",
+				"writes a value an hour early there",
+			},
+		},
+		{
+			zone: "Antarctica/Troll", turn: time.Date(2026, 10, 25, 1, 0, 0, 0, time.UTC),
+			before: 2 * 3600, after: 0, held: hour, ttl: 3 * hour,
+			near: [2]time.Duration{-7 * hour, 2*hour + time.Minute}, from: -10 * hour, to: 6 * hour,
+			day: time.Date(2026, 11, 24, 0, 0, 0, 0, time.UTC),
+			want: []string{
+				"the 2h Antarctica/Troll shows twice as its clocks go back from 03:00 +02 to 01:00 +00 on 2026-10-25, which holds the start of the wall hour 02:00",
+				"a run in the second showing before 02:00 writes 01:00's first showing, shown twice too, and one after it 02:00's, so both are two hours early",
+				"writes a value two hours early there",
+			},
+		},
 	}
-	if _, a := turn.In(chat).Zone(); a != 12*3600+45*60 {
-		t.Fatalf("Pacific/Chatham at %s: offset %ds, want +1245", turn, a)
-	}
-	day := time.Date(2026, 5, 5, 0, 0, 0, 0, time.UTC)
-	// The recording at local 02:58:59 to 02:59:59 in the second showing,
-	// whose full round reads 03:00 or later there.
-	straddle := func(call time.Time) bool {
-		return !call.Before(turn.Add(13*time.Minute+59*time.Second)) && !call.After(turn.Add(14*time.Minute+59*time.Second))
-	}
-	for _, shape := range []string{"cut-then-add", "add-then-cut"} {
-		val := func(r time.Time, ttl time.Duration) time.Time {
-			if shape == "cut-then-add" {
-				return firstShowingIn(r, hour, chat).Add(ttl)
-			}
-			return firstShowingIn(r.Add(ttl), hour, chat)
+	for _, leg := range legs {
+		zl, err := time.LoadLocation(leg.zone)
+		if err != nil {
+			t.Fatal(err)
 		}
-		// shorter is how many of a day's reads a replay on another day,
-		// in the process's zone, passes a time to live two hours shorter at.
-		shorter := func(o models.ClockOffset) (int, int) {
-			pass, n := 0, 0
-			for from := day; from.Before(day.Add(24 * hour)); from = from.Add(7 * time.Minute) {
-				n++
-				s := Span{From: from, To: from.Add(time.Second), Zone: chat, Own: true}
-				if ok, _ := CheckClockRead(p, o, InstantLeaf(p, p, val(from.Add(500*ms), 0), ms), s, true); ok {
-					pass++
-				}
-			}
-			return pass, n
+		turn := leg.turn
+		if _, b := turn.Add(-time.Nanosecond).In(zl).Zone(); b != leg.before {
+			t.Fatalf("%s before %s: offset %ds, want %ds", leg.zone, turn, b, leg.before)
 		}
-		for _, lz := range []*time.Location{chat, nil} {
-			name := shape + ", the learn step in Pacific/Chatham"
-			if lz == nil {
-				name = shape + ", the learn step knowing no zone"
-			}
-			learned, refused, straddled := 0, 0, 0
-			for call := turn.Add(-6*hour - 950*ms); call.Before(turn.Add(6 * hour)); call = call.Add(13*time.Second + 17*ms) {
-				dc := clockedDrifts()
-				dc.zone = lz
-				fcall := call.Add(FullRoundLead)
-				w := (&Window{Rec: Span{From: call.Add(-100 * ms), To: call}, F: Span{From: fcall.Add(-100 * ms), To: fcall}}).ComparesOffsets()
-				leaf := func(at time.Time) Shape { return Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, at, ms)}} }
-				ln := ClassifyIn(dc, []string{p}, leaf(val(fcall.Add(-30*ms), 2*hour)), leaf(val(call.Add(-30*ms), 2*hour)), call, nil, nil, nil, w)[0]
-				near := !call.Before(turn.Add(-5*hour)) && call.Before(turn.Add(2*hour))
-				if straddle(call) {
-					straddled++
+		if _, a := turn.In(zl).Zone(); a != leg.after {
+			t.Fatalf("%s at %s: offset %ds, want %ds", leg.zone, turn, a, leg.after)
+		}
+		if h := turn.Add(leg.held).In(zl); h.Minute() != 0 || h.Second() != 0 {
+			t.Fatalf("%s: the hour held starts at %s in the second showing, not on the hour", leg.zone, h)
+		}
+		for _, shape := range []string{"cut-then-add", "add-then-cut"} {
+			val := func(r time.Time, ttl time.Duration) time.Time {
+				if shape == "cut-then-add" {
+					return firstShowingIn(r, hour, zl).Add(ttl)
 				}
-				if ln.Kind == KindClockOffset && ln.Offset != nil {
-					o := *ln.Offset
-					if o.Min > 2*hour+time.Minute || o.Max < 2*hour-2*time.Minute || o.Res != hour {
-						t.Errorf("FALSE GREEN: %s: learned at %s (local %s), %s from the turn: %s; want clock + 2h at the hour, or refused naming the turn", name, call, call.In(chat).Format("15:04:05 MST"), call.Sub(turn), o.String())
-					} else if straddle(call) {
-						t.Errorf("FALSE GREEN: %s: learned at %s (local %s), in the straddle: %s; want refused naming the turn", name, call, call.In(chat).Format("15:04:05 MST"), o.String())
+				return firstShowingIn(r.Add(ttl), hour, zl)
+			}
+			// The straddle: the recording at a wall time 61 s to 1 s
+			// before the hour held, in the second showing, whose full round
+			// reads it or later there; read there by the call itself
+			// (cut-then-add) or by the call plus its time to live
+			// (add-then-cut).
+			straddle := func(call time.Time) bool {
+				at := call
+				if shape == "add-then-cut" {
+					at = call.Add(leg.ttl)
+				}
+				h := turn.Add(leg.held)
+				return !at.Before(h.Add(-61*time.Second)) && !at.After(h.Add(-time.Second))
+			}
+			// shorter is how many of a day's reads a replay on another day,
+			// in the process's zone, passes a time to live two hours shorter at.
+			shorter := func(o models.ClockOffset) (int, int) {
+				pass, n := 0, 0
+				for from := leg.day; from.Before(leg.day.Add(24 * hour)); from = from.Add(7 * time.Minute) {
+					n++
+					s := Span{From: from, To: from.Add(time.Second), Zone: zl, Own: true}
+					if ok, _ := CheckClockRead(p, o, InstantLeaf(p, p, val(from.Add(500*ms), leg.ttl-2*hour), ms), s, true); ok {
+						pass++
 					}
-					if near {
-						if pass, n := shorter(o); pass > n/10 {
-							t.Errorf("FALSE GREEN: %s: learned at %s, %s from the turn, as %s: a replay on %s passed a time to live two hours shorter at %d of %d reads", name, call, call.Sub(turn), o.String(), day.Format("2006-01-02"), pass, n)
+				}
+				return pass, n
+			}
+			for _, lz := range []*time.Location{zl, nil} {
+				name := shape + ", the learn step in " + leg.zone
+				if lz == nil {
+					name = shape + ", the learn step knowing no zone, an application in " + leg.zone
+				}
+				learned, refused, straddled := 0, 0, 0
+				for call := turn.Add(leg.from - 950*ms); call.Before(turn.Add(leg.to)); call = call.Add(13*time.Second + 17*ms) {
+					dc := clockedDrifts()
+					dc.zone = lz
+					fcall := call.Add(FullRoundLead)
+					w := (&Window{Rec: Span{From: call.Add(-100 * ms), To: call}, F: Span{From: fcall.Add(-100 * ms), To: fcall}}).ComparesOffsets()
+					leaf := func(at time.Time) Shape { return Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, at, ms)}} }
+					ln := ClassifyIn(dc, []string{p}, leaf(val(fcall.Add(-30*ms), leg.ttl)), leaf(val(call.Add(-30*ms), leg.ttl)), call, nil, nil, nil, w)[0]
+					near := !call.Before(turn.Add(leg.near[0])) && call.Before(turn.Add(leg.near[1]))
+					if straddle(call) {
+						straddled++
+					}
+					if ln.Kind == KindClockOffset && ln.Offset != nil {
+						o := *ln.Offset
+						if o.Min > leg.ttl+time.Minute || o.Max < leg.ttl-2*time.Minute || o.Res != hour {
+							t.Errorf("FALSE GREEN: %s: learned at %s (local %s), %s from the turn: %s; want clock + %s at the hour, or refused naming the turn", name, call, call.In(zl).Format("15:04:05 MST"), call.Sub(turn), o.String(), models.ShortDuration(leg.ttl))
+						} else if straddle(call) {
+							t.Errorf("FALSE GREEN: %s: learned at %s (local %s), in the straddle: %s; want refused naming the turn", name, call, call.In(zl).Format("15:04:05 MST"), o.String())
+						}
+						if near {
+							if pass, n := shorter(o); pass > n/10 {
+								t.Errorf("FALSE GREEN: %s: learned at %s, %s from the turn, as %s: a replay on %s passed a time to live two hours shorter at %d of %d reads", name, call, call.Sub(turn), o.String(), leg.day.Format("2006-01-02"), pass, n)
+							}
+						}
+						learned++
+						continue
+					}
+					if !strings.Contains(ln.Why, "clocks go back") {
+						if straddle(call) {
+							t.Errorf("%s: at %s (local %s), in the straddle: %s (%s); want refused naming the turn", name, call, call.In(zl).Format("15:04:05 MST"), ln.Kind, ln.Why)
+						}
+						continue
+					}
+					refused++
+					if !near {
+						t.Errorf("FALSE RED: %s: refused for a turn at %s, %s from %s's: %s", name, call, call.Sub(turn), leg.zone, ln.Why)
+					}
+					for _, want := range leg.want {
+						if !strings.Contains(ln.Why, want) {
+							t.Errorf("%s: refused at %s: %q; want it to name %q", name, call, ln.Why, want)
 						}
 					}
-					learned++
-					continue
-				}
-				if !strings.Contains(ln.Why, "clocks go back") {
-					if straddle(call) {
-						t.Errorf("%s: at %s (local %s), in the straddle: %s (%s); want refused naming the turn", name, call, call.In(chat).Format("15:04:05 MST"), ln.Kind, ln.Why)
+					if lz != nil && !strings.Contains(ln.Why, leg.zone+" shows twice") {
+						t.Errorf("%s: refused at %s: %q; want it to name %s", name, call, ln.Why, leg.zone)
 					}
-					continue
-				}
-				refused++
-				if !near {
-					t.Errorf("FALSE RED: %s: refused for a turn at %s, %s from Chatham's: %s", name, call, call.Sub(turn), ln.Why)
-				}
-				for _, want := range []string{"shows twice as its clocks go back from 03:45 +1345 to 02:45 +1245 on 2026-04-05, which holds the start of the wall hour 03:00", "a run in the second showing before 03:00 writes the hour before it, shown once"} {
-					if !strings.Contains(ln.Why, want) {
-						t.Errorf("%s: refused at %s: %q; want it to name %q", name, call, ln.Why, want)
+					if lz == nil && !strings.Contains(ln.Why, "keploy knows no zone of the application's here") {
+						t.Errorf("%s: refused at %s: %q; want it to say keploy knows no zone", name, call, ln.Why)
 					}
 				}
-				if lz != nil && !strings.Contains(ln.Why, "Pacific/Chatham shows twice") {
-					t.Errorf("%s: refused at %s: %q; want it to name Pacific/Chatham", name, call, ln.Why)
+				if learned < 20 || refused < 5 || straddled < 4 {
+					t.Errorf("%s: learned %d, refused for the turn %d, calls in the straddle %d; want 20, 5 and 4 or more", name, learned, refused, straddled)
 				}
-				if lz == nil && !strings.Contains(ln.Why, "keploy knows no zone of the application's here") {
-					t.Errorf("%s: refused at %s: %q; want it to say keploy knows no zone", name, call, ln.Why)
-				}
-			}
-			if learned < 20 || refused < 5 || straddled < 4 {
-				t.Errorf("%s: learned %d, refused for the turn %d, calls in the straddle %d; want 20, 5 and 4 or more", name, learned, refused, straddled)
 			}
 		}
 	}

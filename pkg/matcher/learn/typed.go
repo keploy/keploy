@@ -1067,7 +1067,7 @@ func clockOffsetEvidence(path string, off models.ClockOffset) string {
 		outside, on := cutExceptions(off.Res)
 		return clockOffsetSeen(path, off) + ", cut to " + aUnit(off.Res) + ". A replay checks the offset at the " + w + ", read in the zone the value shows a whole " + w + " in, else the application's, as standing for its whole " + w + ", within one " + w + " of its call's window plus the offset on either side, as a date cut to a day passes from yesterday: " + offsetNamed(off) + " changed by less than two " + w + "s can pass there, by where the replay's read falls in its " + w + ", " + outside + "one changed by two " + w + "s fails unless the replay's read falls within its call's window and the offset's range (" + models.ShortDuration(off.Max-off.Min) + ") of the " + w + "'s turn, and one changed by three " + w + "s or more fails" + on + "; if the field is a time the application reads from its own clock with no rule, declare it noise in keploy.yml, and keploy stops comparing it"
 	}
-	return clockOffsetSeen(path, off) + ". A replay compares the offset: " + offsetNamed(off) + " changed by " + aUnit(off.Unit()) + " or more still fails; near a wall time the application's zone shows twice as its clocks go back (any zone's, where keploy knows none of the application's) a replay refuses the value, since an application that resolves that wall time to its first showing writes a value an hour early there; if the field is a time the application reads from its own clock with no rule, declare it noise in keploy.yml, and keploy stops comparing it"
+	return clockOffsetSeen(path, off) + ". A replay compares the offset: " + offsetNamed(off) + " changed by " + aUnit(off.Unit()) + " or more still fails; near a wall time the application's zone shows twice as its clocks go back (any zone's, where keploy knows none of the application's) a replay refuses the value, since an application that resolves that wall time to its first showing writes a value an hour early there (two hours in Antarctica/Troll); if the field is a time the application reads from its own clock with no rule, declare it noise in keploy.yml, and keploy stops comparing it"
 }
 
 // offsetFallBackWhy is why an instant at the clock plus the offset off,
@@ -1086,16 +1086,21 @@ func clockOffsetEvidence(path string, off models.ClockOffset) string {
 //
 // At an hour's cut, only a turn whose wall time shown twice holds the
 // start of one of the zone's wall hours strictly inside it is refused
-// (FallBackAcrossHour, FallBackAnywhereAcrossHour): Pacific/Chatham's 02:45
-// to 03:45 holds 03:00, so a run in the second showing at 02:59 cuts to
-// 02:00, shown once, and writes the right value, while its full round at
-// 03:00 writes 03:00's first showing, an hour early, and the two show clock
-// + 1h of clock + 2h (Troll's 01:00 to 03:00 holds 02:00, though its runs
-// there show no one offset). Where the wall time shown twice is whole
-// hours (Europe/Berlin's 02:00 to 03:00), both runs in the second showing
-// cut into one hour and write one value, which shows no read of the clock,
-// and one in each show no one offset, so a right learning near such a turn
-// is not refused.
+// (FallBackAcrossHour, FallBackAnywhereAcrossHour): there two runs in the
+// second showing on either side of that start cut to different hours,
+// which resolve to different showings, or both to an early one
+// (acrossHourNamed). Pacific/Chatham's 02:45 to 03:45 holds 03:00: a run in
+// the second showing at 02:59 cuts to 02:00, shown once, and writes the
+// right value, while its full round at 03:00 writes 03:00's first showing,
+// an hour early, and the two show clock + 1h of clock + 2h.
+// Antarctica/Troll's 01:00 to 03:00 holds 02:00, and its 01:00 is shown
+// twice too: runs at 01:59 and 02:00 in the second showing write 01:00's
+// and 02:00's first showings, both two hours early, and show clock + 1h of
+// clock + 3h. Where the wall time shown twice is one whole hour
+// (Europe/Berlin's 02:00 to 03:00), both runs in the second showing cut
+// into one hour and write one value, which shows no read of the clock, and
+// one in each show no one offset, so a right learning near such a turn is
+// not refused.
 func (dc *DriftCache) offsetFallBackWhy(path string, off models.ClockOffset, enc time.Duration, w *Window) string {
 	c := off.CheckedAt(enc)
 	if w == nil || c >= 24*time.Hour {
@@ -1106,16 +1111,16 @@ func (dc *DriftCache) offsetFallBackWhy(path string, off models.ClockOffset, enc
 		fallBack, anywhere = off.FallBackAcrossHour, off.FallBackAnywhereAcrossHour
 	}
 	for _, s := range []Span{w.Rec, w.F} {
-		named := ""
+		named, early := "", ""
 		if turn, back, met := fallBack(enc, s.From, s.To, dc.zone); met {
-			named = fallBackNamed(turn, back, dc.zone) + acrossHourNamed(hour, turn, dc.zone)
+			named, early = fallBackNamed(turn, back, dc.zone)+acrossHourNamed(hour, turn, dc.zone), backWords(back)
 		} else if dc.zone == nil || dc.zoneNoName {
 			if turn, back, loc, met := anywhere(enc, s.From, s.To); met {
-				named = fallBackNamed(turn, back, loc) + acrossHourNamed(hour, turn, loc) + " (keploy knows no zone of the application's here, so it reads every zone's clocks going back)"
+				named, early = fallBackNamed(turn, back, loc)+acrossHourNamed(hour, turn, loc)+" (keploy knows no zone of the application's here, so it reads every zone's clocks going back)", backWords(back)
 			}
 		}
 		if named != "" {
-			return clockOffsetSeen(path, off) + ", but a run's call's window, or the values a check of it admits there, meets " + named + ": an application that resolves a wall time shown twice to its first showing (JavaScript's Date setters; java.time's LocalDateTime then atZone) writes a value an hour early there, so the offset a run there shows can stand an hour from the one it adds, and keploy refuses it rather than learn it. Record the test again outside that hour; if the field is a time the application reads from its own clock with no rule, declare it noise in keploy.yml, and keploy stops comparing it"
+			return clockOffsetSeen(path, off) + ", but a run's call's window, or the values a check of it admits there, meets " + named + ": an application that resolves a wall time shown twice to its first showing (JavaScript's Date setters; java.time's LocalDateTime then atZone) writes a value " + early + " early there, so the offset a run there shows can stand " + early + " from the one it adds, and keploy refuses it rather than learn it. Record the test again outside that hour; if the field is a time the application reads from its own clock with no rule, declare it noise in keploy.yml, and keploy stops comparing it"
 		}
 	}
 	return ""
@@ -1124,15 +1129,44 @@ func (dc *DriftCache) offsetFallBackWhy(path string, off models.ClockOffset, enc
 // acrossHourNamed is what offsetFallBackWhy adds, at an hour's cut (hour),
 // to the turn named, at which loc's clocks go back and whose wall time
 // shown twice holds the start of one of loc's wall hours
-// (models.AcrossHour): that hour, and why two runs a minute apart there
-// show an offset an hour from the one the application adds. "" elsewhere.
+// (models.AcrossHour): that hour, and why two runs a minute apart in the
+// second showing, either side of it, show an offset that stands from the
+// one the application adds. Where the wall time shown twice starts within
+// an hour (Pacific/Chatham's 02:45 holds 03:00), the hour before the one
+// held is shown once, so a run before it writes the right value and one
+// after it the held hour's first showing, early by what the clocks go
+// back; where it starts on the hour (Antarctica/Troll's 01:00 to 03:00
+// holds 02:00), that hour is shown twice too, so both write their hour's
+// first showing and both are early by it. "" elsewhere.
 func acrossHourNamed(hour bool, turn time.Time, loc *time.Location) string {
 	if !hour || !models.AcrossHour(turn, loc) {
 		return ""
 	}
 	after := turn.In(loc)
-	start := after.Add(time.Hour - time.Duration(after.Minute())*time.Minute - time.Duration(after.Second())*time.Second - time.Duration(after.Nanosecond())).Format("15:04")
-	return ", which holds the start of the wall hour " + start + ": cut to the hour, a run in the second showing before " + start + " writes the hour before it, shown once, and so the right value, and one after it " + start + "'s first showing, an hour early"
+	_, b := turn.Add(-time.Nanosecond).In(loc).Zone()
+	_, a := after.Zone()
+	early := backWords(time.Duration(b-a) * time.Second)
+	into := time.Duration(after.Minute())*time.Minute + time.Duration(after.Second())*time.Second + time.Duration(after.Nanosecond())
+	start := after.Add(time.Hour - into).Format("15:04")
+	if into != 0 {
+		return ", which holds the start of the wall hour " + start + ": cut to the hour, a run in the second showing before " + start + " writes the hour before it, shown once, and so the right value, and one after it " + start + "'s first showing, " + early + " early"
+	}
+	return ", which holds the start of the wall hour " + start + ": cut to the hour, a run in the second showing before " + start + " writes " + after.Format("15:04") + "'s first showing, shown twice too, and one after it " + start + "'s, so both are " + early + " early and the two show one offset " + early + " short of the one the application adds"
+}
+
+// backWords names what a zone's clocks go back by at a turn, back: "an
+// hour", "two hours" (Antarctica/Troll), "half an hour" (Australia/Lord_Howe),
+// else its short form.
+func backWords(back time.Duration) string {
+	switch back {
+	case 30 * time.Minute:
+		return "half an hour"
+	case time.Hour:
+		return "an hour"
+	case 2 * time.Hour:
+		return "two hours"
+	}
+	return models.ShortDuration(back)
 }
 
 // clockOffsetFineWhy is why an instant at the clock plus an offset off is

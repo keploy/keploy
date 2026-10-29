@@ -305,8 +305,8 @@ type ClockOffset struct {
 // replay reads in that zone (CutInAppZone), or a read plus an offset at any
 // cut, whose check fails closed near the zone's backward turns (FallBack:
 // an application that resolves a wall time its zone shows twice to the
-// first showing writes a value an hour early there, so a time to live made
-// an hour longer would pass).
+// first showing writes a value an hour early there, two in Troll, so a time
+// to live made that much longer would pass).
 func (o ClockOffset) AppZoneMatters() bool {
 	return o.CutInAppZone() || !o.Plain()
 }
@@ -904,11 +904,15 @@ func (o ClockOffset) FallBack(res time.Duration, from, to time.Time, loc *time.L
 // (AcrossHour: Pacific/Chatham's 02:45 to 03:45 holds 03:00, Troll's 01:00
 // to 03:00 holds 02:00; Europe/Berlin's 02:00 to 03:00 and Lord Howe's
 // 01:30 to 02:00 hold none). The learn step reads it at an hour's cut
-// (learn.DriftCache.offsetFallBackWhy): there a run in the second showing
-// before that hour's start cuts to the hour before it, which is shown once,
-// and writes the right value, while one in the second showing after it
-// writes the value an hour early, so a recording and its full round a
-// minute apart can show clock + 1h of clock + 2h.
+// (learn.DriftCache.offsetFallBackWhy): there two runs in the second
+// showing on either side of that hour's start cut to different hours,
+// which resolve to different showings or both to an early one, so a
+// recording and its full round a minute apart can show an offset that
+// stands from the one the application adds. In Chatham the hour before
+// 03:00 is shown once, so a run before it writes the right value and one
+// after it 03:00's first showing, an hour early: clock + 1h of clock + 2h.
+// In Troll 01:00 is shown twice too, so both write their hour's first
+// showing, two hours early: clock + 1h of clock + 3h.
 func (o ClockOffset) FallBackAcrossHour(res time.Duration, from, to time.Time, loc *time.Location) (turn time.Time, back time.Duration, met bool) {
 	return o.fallBack(res, from, to, loc, true)
 }
@@ -930,8 +934,10 @@ func (o ClockOffset) fallBack(res time.Duration, from, to time.Time, loc *time.L
 // AcrossHour reports whether the wall time loc shows twice as its clocks
 // go back at turn, from the wall time they show just after it up to the one
 // just before it, holds the start of one of loc's wall hours strictly
-// inside it: one a wall clock cut to the hour resolves to its first showing
-// while the hour before it is shown once.
+// inside it: a wall clock cut to the hour in the second showing resolves
+// that hour to its first showing, and the hour before it to another
+// showing (Chatham's 02:00, shown once) or to its own first showing too
+// (Troll's 01:00, shown twice).
 func AcrossHour(turn time.Time, loc *time.Location) bool {
 	if loc == nil {
 		return false
