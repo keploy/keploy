@@ -2286,6 +2286,7 @@ func exactUsedState(owned *models.Mock) models.MockState {
 		ResTimestampMock: models.FormatMockTimestamp(owned.Spec.ResTimestampMock),
 		AnswerPlaced:     models.IsAnswerPlaced(owned),
 		Concurrent:       owned.TestModeInfo.Concurrent,
+		SetAsideFrom:     owned.TestModeInfo.SetAsideFrom,
 	}
 }
 
