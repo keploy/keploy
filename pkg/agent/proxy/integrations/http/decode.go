@@ -449,6 +449,10 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				if lmiss == nil && provenswitch.On() && offSeries == nil {
 					// A call that came with an array in another order is
 					// unstable_order in every round, not only the full one.
+					// Not a marked series' call: its miss is the set's
+					// background miss, which no learn reason explains, so
+					// lmiss stays nil for it (its reads of the clock are
+					// checked, never noise).
 					lmiss = h.orderMiss(reqCtx, input, db, h.newLearnNoise(opts, bodyNoise, urlNoise))
 				}
 				if lmiss != nil {
@@ -468,9 +472,8 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				report := h.buildHTTPMismatchReport(request, input.body, db, nil, headerNoise, bodyNoise, diag)
 				if offSeries != nil {
 					// A marked series' call: named as its newest recording,
-					// never one more than a test recorded nor a recording made
-					// elsewhere, and no learn reason explains it (its reads of
-					// the clock are checked, never noise).
+					// never one more than a test recorded, a recording made
+					// elsewhere nor a repeat (below).
 					n = 0
 					offSeries.Mark(report)
 				}
@@ -497,7 +500,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				}
 				if elsewhere != nil {
 					markNotOwned(report, elsewhere)
-				} else if lmiss != nil && offSeries == nil {
+				} else if lmiss != nil {
 					lmiss.explain(report)
 				}
 				if restaged {

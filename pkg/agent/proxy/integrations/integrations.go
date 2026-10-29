@@ -543,6 +543,10 @@ type SeriesMiss struct {
 
 // Mark marks report as a miss of the set's background work
 // (models.MockMismatchReport.Background): charged to no test, failing none.
+// The report names the series' newest recording and shows nothing of the
+// closest recording the parser's report read in the open view (its request,
+// field diffs and diff): that one is no recording of the series, and the
+// replay prints a request beside the name it shows.
 func (m *SeriesMiss) Mark(report *models.MockMismatchReport) {
 	if m == nil || report == nil {
 		return
@@ -551,6 +555,8 @@ func (m *SeriesMiss) Mark(report *models.MockMismatchReport) {
 	if m.Newest != nil {
 		report.ClosestMock = m.Newest.Name
 	}
+	report.ClosestMockReq, report.Diff = "", ""
+	report.FieldDiffs, report.Differs, report.FieldReasons = nil, nil, nil
 	report.NextSteps = m.NextSteps
 }
 
