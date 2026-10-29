@@ -143,16 +143,18 @@ func withAnswer(m *models.Mock) func() (*models.Mock, error) {
 // SetUse is what the running set's learn step has read and kept of its
 // payloads (setDerived), for the agent's log: how many its staging read
 // (WarmSet) and its calls read for the set, the readers the staging read
-// with (stageReaders; 0 where no staging read), the bytes each tier keeps,
+// with (stageReaders; 0 where no staging read), the bytes each tier keeps
+// (Bodies: the payloads, bodyStore), how many payloads were decoded for the
+// set (Decoded: each first read, and each read again after it was let go),
 // the set's budget (setBudget), and whether the tiers that let none go
 // (held, forms) were full, past which the set's payloads are read once per
 // test. Err is why the staging stopped short of the set where src failed
 // (the on-disk store, mid-read): its calls then read the rest themselves.
 type SetUse struct {
-	Staged, Called, Readers    int
-	Held, Words, Forms, Budget int64
-	HeldFull, FormsFull        bool
-	Err                        error
+	Staged, Called, Readers, Decoded   int
+	Held, Words, Forms, Bodies, Budget int64
+	HeldFull, FormsFull                bool
+	Err                                error
 }
 
 func (s *setDerived) use() SetUse {
@@ -161,6 +163,6 @@ func (s *setDerived) use() SetUse {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return SetUse{Staged: s.staged, Called: s.called, Held: s.held.used, Words: s.words.used, Forms: s.forms.used,
-		Budget: s.budget.limit, HeldFull: s.held.full, FormsFull: s.forms.full}
+	return SetUse{Staged: s.staged, Called: s.called, Decoded: s.bodies.loads, Held: s.held.used, Words: s.words.used, Forms: s.forms.used,
+		Bodies: s.bodies.kept.used, Budget: s.budget.limit, HeldFull: s.held.full, FormsFull: s.forms.full}
 }

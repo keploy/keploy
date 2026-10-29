@@ -106,11 +106,11 @@ func TestTheSetsPayloadsAreKeptWithinABudget(t *testing.T) {
 		}
 	}
 	s := dc.set.bodies
-	if total <= 4*s.budget {
-		t.Fatalf("the row's payloads are %d bytes, not past the budget %d: it pins nothing", total, s.budget)
+	if total <= 4*s.kept.cap {
+		t.Fatalf("the row's payloads are %d bytes, not past the budget %d: it pins nothing", total, s.kept.cap)
 	}
-	if s.used > s.budget {
-		t.Errorf("the store keeps %d bytes of payloads, over its budget %d (%d read)", s.used, s.budget, total)
+	if s.kept.used > s.kept.cap {
+		t.Errorf("the store keeps %d bytes of payloads, over its budget %d (%d read)", s.kept.used, s.kept.cap, total)
 	}
 	if n := dc.Loads(); n != len(mocks) {
 		t.Errorf("reading each payload once loaded %d, want %d", n, len(mocks))
@@ -122,12 +122,12 @@ func TestTheSetsPayloadsAreKeptWithinABudget(t *testing.T) {
 		t.Errorf("a payload let go is read again as it was, once (%d loads, want %d)", dc.Loads(), len(mocks)+1)
 	}
 	// A payload larger than the whole budget is read, and not kept.
-	big := getAnswer("mock-big", "http://api/items/big", `{"note":"`+strings.Repeat("big ", int(s.budget))+`"}`, at.Add(-time.Second/2))
-	if got := dc.LazyRawOf(big, false, nil).payload(); !got.read || got.size() <= s.budget {
+	big := getAnswer("mock-big", "http://api/items/big", `{"note":"`+strings.Repeat("big ", int(s.kept.cap))+`"}`, at.Add(-time.Second/2))
+	if got := dc.LazyRawOf(big, false, nil).payload(); !got.read || got.size() <= s.kept.cap {
 		t.Fatalf("the payload past the budget was not read whole (%d bytes)", got.size())
 	}
-	if _, kept := s.by[MockID(big)]; kept || s.used > s.budget {
-		t.Errorf("a payload larger than the budget is kept (%v), the store at %d bytes of %d", kept, s.used, s.budget)
+	if _, kept := s.kept.by[MockID(big)]; kept || s.kept.used > s.kept.cap {
+		t.Errorf("a payload larger than the budget is kept (%v), the store at %d bytes of %d", kept, s.kept.used, s.kept.cap)
 	}
 	tr.End()
 	// The next set starts with an empty store.

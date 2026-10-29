@@ -83,7 +83,7 @@ import (
 // staging has not read yet.
 type setDerived struct {
 	mu sync.Mutex
-	// budget is the bytes the three tiers keep in all (setBudget).
+	// budget is the bytes the four tiers keep in all (setBudget).
 	budget *budget
 	held   tier[heldParts]
 	words  tier[wordParts]
@@ -103,8 +103,8 @@ type setDerived struct {
 	// reads are the parts of the set's recordings read (derive), by tier
 	// and part, for the rows.
 	reads map[readTally]int
-	// bodies are the set's lazy Raws' payloads, loaded within a fixed
-	// budget (bodyStore), made at the first lazy Raw.
+	// bodies are the payloads of the set's recordings its readers loaded
+	// (bodyStore), one more tier on budget.
 	bodies *bodyStore
 	// offsets are the set's places the offset rule reads, by place and
 	// moment (offsetIndex), within offsetBudget: its handlers share them.
@@ -205,9 +205,10 @@ func newTier[P any](cap int64, set *budget, lru bool) tier[P] {
 }
 
 // budget is the bytes a set's tiers keep in all: one account, so a part is
-// kept while the set is within it, whichever tier the part is of. letGo,
-// the words tier's, lets go of its recordings read least recently to free
-// need bytes for another tier's part.
+// kept while the set is within it, whichever tier the part is of. letGo
+// frees need bytes for a part: the words tier lets go of its recordings
+// read least recently, then, where that is not enough, the payloads tier
+// (bodyStore) of its own (newSetDerived).
 type budget struct {
 	limit, used int64
 	letGo       func(need int64)
@@ -226,12 +227,13 @@ func (t *tier[P]) find(id string, p part) *slot[P] {
 }
 
 // keep puts p, of size bytes, into id's slot (put), within the tier's cap
-// and the set's budget. Where the tier lets go (words), it then lets go of
-// its recordings read least recently until both hold; where it does not,
-// it first has the words tier let go of what the part needs past the set's
-// budget, and keeps none past it (full). A part past the whole of either is
-// kept by none and lets go of nothing. A recording's first part counts its
-// slot.
+// and the set's budget. Where the tier lets go (words, payloads), it then
+// has the budget let go of what the set is past it (budget.letGo: words
+// first), and lets go of its own recordings read least recently until both
+// hold; where it does not, it first has the budget let go of what the part
+// needs past the set's budget, and keeps none past it (full). A part past
+// the whole of either is kept by none and lets go of nothing. A
+// recording's first part counts its slot.
 func (t *tier[P]) keep(id string, p part, size int64, put func(*P)) {
 	sl := t.by[id]
 	if sl != nil && sl.has&p != 0 {
@@ -270,7 +272,13 @@ func (t *tier[P]) keep(id string, p part, size int64, put func(*P)) {
 	sl.size += size
 	t.used += size
 	t.set.used += size
-	for t.lru && (t.used > t.cap || t.set.used > t.set.limit) {
+	if !t.lru {
+		return
+	}
+	if need := t.set.used - t.set.limit; need > 0 && t.set.letGo != nil {
+		t.set.letGo(need)
+	}
+	for t.used > t.cap || t.set.used > t.set.limit {
 		if !t.letGoLast() {
 			break
 		}
@@ -278,15 +286,16 @@ func (t *tier[P]) keep(id string, p part, size int64, put func(*P)) {
 }
 
 // letGo lets go of the tier's recordings read least recently until need
-// bytes are freed or it keeps none (budget.letGo).
-func (t *tier[P]) letGo(need int64) {
-	for freed := int64(0); freed < need; {
+// bytes are freed or it keeps none (budget.letGo), and is what it freed.
+func (t *tier[P]) letGo(need int64) (freed int64) {
+	for freed < need {
 		before := t.used
 		if !t.letGoLast() {
-			return
+			return freed
 		}
 		freed += before - t.used
 	}
+	return freed
 }
 
 // letGoLast lets go of the recording the tier read least recently; false
@@ -394,12 +403,12 @@ func readOnce[P, V any](s *setDerived, t *tier[P], k readingKey, ch chan struct{
 	return v
 }
 
-// setBudget is the bytes one set's tiers keep in all (held, words and
-// forms together): learnBudget where a row sets it, else a quarter of the
-// agent's memory limit (memoryLimit), at most maxSetBudget and at least
-// minSetBudget, and minSetBudget where no limit is known. Each set reads
-// it when it starts, so a limit the agent sets after it started (its memory
-// guard's GOMEMLIMIT) holds from its next set.
+// setBudget is the bytes one set's tiers keep in all (held, words, forms
+// and its payloads, bodyStore, together): learnBudget where a row sets it,
+// else a quarter of the agent's memory limit (memoryLimit), at most
+// maxSetBudget and at least minSetBudget, and minSetBudget where no limit
+// is known. Each set reads it when it starts, so a limit the agent sets
+// after it started (its memory guard's GOMEMLIMIT) holds from its next set.
 func setBudget() int64 {
 	if learnBudget > 0 {
 		return learnBudget
@@ -464,14 +473,23 @@ func wordsBytes(words map[string]bool) int64 {
 func newSetDerived() *setDerived {
 	b := &budget{limit: setBudget()}
 	s := &setDerived{budget: b, held: newTier[heldParts](heldBudget, b, false), words: newTier[wordParts](derivedBudget, b, true), forms: newTier[formParts](formsBudget, b, false), reading: map[readingKey]chan struct{}{}, reads: map[readTally]int{}, warming: map[string]chan struct{}{}, offsets: newOffsetIndex(offsetBudget)}
-	b.letGo = s.words.letGo
+	s.bodies = newSetBodyStore(&s.mu, b, bodyBudget)
+	// The words go first: a recording's words are read again from its
+	// payload, where one let go is decoded again (a JSON encode and decode
+	// of the whole recording) before any of its parts can be read.
+	b.letGo = func(need int64) {
+		if freed := s.words.letGo(need); freed < need {
+			s.bodies.kept.letGo(need - freed)
+		}
+	}
 	return s
 }
 
 // drop lets go of all s keeps, once its set is over (Tracker.NewSet), and
 // keeps nothing more: a handler still reading the earlier set reads what it
-// needs once per test (textCache), and the agent holds one set's budget at
-// a time, not one for each set a handler still reads.
+// needs once per test (textCache), a recording's payload once per test
+// (DriftCache.RawOf) or once per Raw (LazyRawOf), and the agent holds one
+// set's budget at a time, not one for each set a handler still reads.
 func (s *setDerived) drop() {
 	if s == nil {
 		return
@@ -481,14 +499,29 @@ func (s *setDerived) drop() {
 	s.held.drop()
 	s.words.drop()
 	s.forms.drop()
+	s.bodies.kept.drop()
+	s.bodies.over = true
 }
 
-// usedBytes is the bytes s counts as kept in all its tiers, each tier's
-// count, not the budget's, for the rows.
+// keepsPayloads reports whether the set's store keeps the payloads a test
+// reads (DriftCache.RawOf): not once the set is over (drop) or where a row
+// gives the store no room, nor once a tier that lets none go was refused a
+// part (held or forms full). Past that, the words and payloads have let go
+// of all they kept, and a payload read lazily would be read again at each
+// read, where a test's own reads it once: the set's payloads are then read
+// once per test, as each part the set keeps no more is.
+func (s *setDerived) keepsPayloads() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.bodies.kept.cap > 0 && !s.bodies.over && s.held.room() && s.forms.room()
+}
+
+// usedBytes is the bytes s counts as kept in all its tiers, its payloads'
+// among them, each tier's count, not the budget's, for the rows.
 func (s *setDerived) usedBytes() int64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.held.used + s.words.used + s.forms.used
+	return s.held.used + s.words.used + s.forms.used + s.bodies.kept.used
 }
 
 // keptBytes is the bytes setDerived counts as kept of the set's words and
