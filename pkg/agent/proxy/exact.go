@@ -1030,9 +1030,10 @@ type recordedBeforeSource struct {
 // set.
 func (m *MockManager) SetRecordedBefore(src func(t time.Time, visit func(*models.Mock) bool) error) {
 	m.exact.before.mu.Lock()
-	defer m.exact.before.mu.Unlock()
 	m.exact.before.src = src
+	m.exact.before.mu.Unlock()
 	m.exact.series.forget()
+	m.beginMarkedSeries()
 }
 
 // RangeRecordedBefore visits every recording of the staged set made before
