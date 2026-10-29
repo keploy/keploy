@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/models/mysql"
 )
 
 // Side is the half of an exchange a value is in.
@@ -3258,8 +3259,14 @@ func callOf(m *models.Mock) string {
 // sequence; models.PostgresV3QuerySpec.InvocationID). Its date and time words
 // are the recording's own clock, and a value found there did not flow from
 // it: read as payload, a clock the app read late in F (past what the lead
-// accounts for) was a value from that recording, refused as changed. spec is
-// not changed: the copy is.
+// accounts for) was a value from that recording, refused as changed.
+//
+// Nor what frames it on the wire: a Mongo frame's header (its length, its
+// request id, the id it answers, its opcode) and a MySQL packet's (its
+// payload's length, its sequence id). The driver and the server count
+// them, the application never reads them, and a number of them that is a
+// word of a value (a 4-digit group of a minted UUID that is a reply's
+// requestId) is chance, never its source. spec is not changed: the copy is.
 func payloadSpec(spec models.MockSpec) models.MockSpec {
 	if pg := spec.PostgresV3; pg != nil && pg.Query != nil && pg.Query.InvocationID != "" {
 		q := *pg.Query
@@ -3268,7 +3275,48 @@ func payloadSpec(spec models.MockSpec) models.MockSpec {
 		p.Query = &q
 		spec.PostgresV3 = &p
 	}
+	if len(spec.MongoRequests) > 0 {
+		reqs := make([]models.MongoRequest, len(spec.MongoRequests))
+		for i, r := range spec.MongoRequests {
+			r.Header = nil
+			reqs[i] = r
+		}
+		spec.MongoRequests = reqs
+	}
+	if len(spec.MongoResponses) > 0 {
+		resps := make([]models.MongoResponse, len(spec.MongoResponses))
+		for i, r := range spec.MongoResponses {
+			r.Header = nil
+			resps[i] = r
+		}
+		spec.MongoResponses = resps
+	}
+	if len(spec.MySQLRequests) > 0 {
+		reqs := make([]mysql.Request, len(spec.MySQLRequests))
+		for i, r := range spec.MySQLRequests {
+			r.Header = unframed(r.Header)
+			reqs[i] = r
+		}
+		spec.MySQLRequests = reqs
+	}
+	if len(spec.MySQLResponses) > 0 {
+		resps := make([]mysql.Response, len(spec.MySQLResponses))
+		for i, r := range spec.MySQLResponses {
+			r.Header = unframed(r.Header)
+			resps[i] = r
+		}
+		spec.MySQLResponses = resps
+	}
 	return spec
+}
+
+// unframed is a MySQL packet's info without its header (payloadSpec): its
+// type alone. A copy: p is not changed.
+func unframed(p *mysql.PacketInfo) *mysql.PacketInfo {
+	if p == nil {
+		return nil
+	}
+	return &mysql.PacketInfo{Type: p.Type}
 }
 
 // textOf writes v's keys and scalars to sb, each on a line of its own, in a
