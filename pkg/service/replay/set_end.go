@@ -54,10 +54,13 @@ type SetAnswersHook interface {
 
 // SetBackgroundHook is an optional TestHooks extension, under the proven
 // switch: with each run of each set's end (SetCallsHook's moment) it is told
-// the calls the set's application made between two tests that no mock
-// answered (TestReport.BackgroundCalls): its background work, charged to no
-// test and failing nothing; none when there were none. Each carries what its
-// parser found of it, for record's judging to read. A notification only.
+// the calls the set's application made outside every test's window that no
+// mock answered and whose recorded answer reaches no test (before the set's
+// first test, between two tests, or after its last:
+// TestReport.BackgroundCalls): its background work, charged to no test and
+// failing nothing; none when there were none. Each carries what its parser
+// found of it and where it was made (UnmatchedCall.BackgroundWhy), for
+// record's judging to read. A notification only.
 type SetBackgroundHook interface {
 	SetBackground(testSetID string, calls []models.UnmatchedCall)
 }
