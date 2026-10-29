@@ -55,6 +55,14 @@ func TestAClientTestsGivenValueIsBindableWhereItIsFirstSent(t *testing.T) {
 			t.Errorf("first sent, its answer holding it %s: %s bindable=%v (%s); want refused, not bindable", what, ln.Kind, ln.Bindable, ln.Why)
 		}
 	}
+	// Its own answer holds the instant in it in another layout, a typed
+	// instant of the same moment: an echo (Echoes reads the moment a typed
+	// instant holds, where echoedPart reads words, which a typed instant has
+	// none of), so a value the answer gives back, never a binding place.
+	createdAt := []Leaf{{Path: "body.cursor.firstBatch.0.createdAt", Noise: "body.cursor.firstBatch.0.createdAt", Type: Instant, Value: "2026-10-28T21:53:40.036884439Z"}}
+	if ln := ClassifyIn(clientTestCache(), []string{p}, str(live), str(rec), at, nil, nil, createdAt, w)[0]; ln.Kind != KindUnaccounted || ln.Bindable {
+		t.Errorf("first sent, its answer holding its instant typed: %s bindable=%v (%s); want refused, not bindable", ln.Kind, ln.Bindable, ln.Why)
+	}
 	// The insert that first sent it, an earlier call of the test.
 	const insert = "body.cmd.documents.0.name"
 	first := []Earlier{{Mock: "mock-1", At: at.Add(-time.Second), Payload: payloadOf("mock-1", at.Add(-time.Second)), Own: true, Seen: []Seen{{Side: Request, Leaf: Leaf{Path: insert, Noise: insert, Type: String, Value: rec}, Live: live, Place: insert}}}}
