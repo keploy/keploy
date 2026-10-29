@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"slices"
 	"testing"
 	"time"
 
@@ -219,7 +220,7 @@ func TestAMovedLayoutLeavesTheBytesWaitUnknownOnDarwin(t *testing.T) {
 	readable := xnuTableReadable
 	xnuTableReadable = xnuCountsProven(func() error { return proveXNUCountsFrom(movedLayout) })
 	t.Cleanup(func() { xnuTableReadable = readable })
-	p, app, proxySide, _ := darwinPair(t)
+	p, app, proxySide, reader := darwinPair(t)
 	if err := p.PairedBytesErr(); !errors.Is(err, models.ErrProxyConnsUnsupported) {
 		t.Fatalf("PairedBytesErr = %v with the counts' proof failed, want one wrapping ErrProxyConnsUnsupported", err)
 	}
@@ -229,5 +230,13 @@ func TestAMovedLayoutLeavesTheBytesWaitUnknownOnDarwin(t *testing.T) {
 	untilUnread(t, proxySide, 3)
 	if err := p.WaitPairedBytes(context.Background(), 1); !errors.Is(err, models.ErrProxyConnsUnsupported) {
 		t.Fatalf("WaitPairedBytes = %v with the counts' proof failed, want unknown (ErrProxyConnsUnsupported)", err)
+	}
+	// The settle does not read them either: the connection's requests are
+	// unknown, and its 3 unread bytes hold nothing.
+	if n := reader.untaken(reader.view()); n != 0 {
+		t.Fatalf("untaken = %d with the counts' proof failed, want 0 (unknown)", n)
+	}
+	if u := p.inflight.Unknown(true); !slices.Contains(u, xnuCountsUnknown) {
+		t.Fatalf("the connection's requests are %v with the counts' proof failed, want unknown (%q)", u, xnuCountsUnknown)
 	}
 }
