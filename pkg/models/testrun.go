@@ -619,8 +619,10 @@ type UnmatchedCall struct {
 	// ClosestMock, the marked recording it repeated, unchecked.
 	// AnswerBeforeUnmadeWrite: a read made before a write of its test the
 	// replay had not made yet, answered with ClosestMock, recorded before
-	// that write; NextSteps names the write. An answer never counts
-	// against a test and never lands in a miss list.
+	// that write; NextSteps names the write. AnswerBackgroundSeries: a call
+	// of a marked background series answered with ClosestMock, a recording
+	// of the series, its clock reads checked on the run's clock. An answer
+	// never counts against a test and never lands in a miss list.
 	Answer    string `json:"answer,omitempty" yaml:"answer,omitempty"`
 	Drift     bool   `json:"drift,omitempty" yaml:"drift,omitempty"`
 	Reused    bool   `json:"reused,omitempty" yaml:"reused,omitempty"`
@@ -788,6 +790,13 @@ const (
 	// request made before the write, consuming nothing. Nothing is learned
 	// from it; the report names it (BeforeWriteLines).
 	AnswerBeforeUnmadeWrite = "before_unmade_write"
+	// AnswerBackgroundSeries: a call of a series judging marked as the
+	// application's background work set-wide (a call shape whose count
+	// varied between recording and replay with only clock reads differing),
+	// its clock reads holding on the run's clock, answered with the series'
+	// newest recording the open test's unmade writes admit (ClosestMock),
+	// consuming none, unchecked otherwise. Every copy of it is answered so.
+	AnswerBackgroundSeries = "background_series"
 )
 
 // The reasons a miss of record's full round carries (UnmatchedCall.Reason),
