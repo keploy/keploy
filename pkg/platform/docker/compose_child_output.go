@@ -37,12 +37,13 @@ type ComposeChildOutput struct {
 }
 
 // StartComposeChildOutput loads content as `docker compose` will, from
-// workingDir (the current directory when "") under projectName (compose's own
-// precedence when ""), to know the project's name and its services, and
+// workingDir (the current directory when "") with envFiles (the command's
+// --env-file values) under projectName (compose's own precedence when ""),
+// to know the project's name and its services, and
 // starts a new run of that project's tails. It reads no daemon. Call it before
 // the child starts, and hand each of the child's output streams its own
 // Stream.
-func StartComposeChildOutput(ctx context.Context, content []byte, projectName, workingDir string) (*ComposeChildOutput, error) {
+func StartComposeChildOutput(ctx context.Context, content []byte, projectName, workingDir string, envFiles []string) (*ComposeChildOutput, error) {
 	if len(content) == 0 {
 		return nil, fmt.Errorf("compose content is empty")
 	}
@@ -50,7 +51,7 @@ func StartComposeChildOutput(ctx context.Context, content []byte, projectName, w
 	if err != nil {
 		return nil, err
 	}
-	project, err := loadComposeProject(ctx, content, projectName, absWorkingDir)
+	project, err := loadComposeProject(ctx, content, projectName, absWorkingDir, envFiles)
 	if err != nil {
 		return nil, err
 	}

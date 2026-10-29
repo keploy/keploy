@@ -46,6 +46,7 @@ func TestRecentAppLogsReadsARealComposeChildsTail(t *testing.T) {
     image: busybox:1.36
     container_name: %[2]s-database
     command: ["sh", "-c", "echo db ready; sleep 60"]
+    init: true
     logging: {driver: none}
 `, plantedAppValue, project)
 	t.Cleanup(func() {
@@ -64,17 +65,19 @@ func TestRecentAppLogsReadsARealComposeChildsTail(t *testing.T) {
 	killGroup := func(cmd *exec.Cmd) func() error {
 		return func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
 	}
-	_ = a.executeCommand(ctx, a.cmd, nil, killGroup)
+	// The app exits 3, so the child's error is expected; it is said with any
+	// failure below, so a failed pull is not read as a missing tail.
+	cmdErr := a.executeCommand(ctx, a.cmd, nil, killGroup)
 
 	// The app's stdout and stderr lines are on two streams, compose's and
 	// keploy's copies of each; their order across the streams is not kept.
 	got := strings.Split(a.recentAppLogs(ctx), "\n")
 	sort.Strings(got)
 	if want := []string{"DB_PASSWORD=***", "listening"}; strings.Join(got, "\n") != strings.Join(want, "\n") {
-		t.Fatalf("recentAppLogs lines = %q, want %q in any order", got, want)
+		t.Fatalf("recentAppLogs lines = %q, want %q in any order (the child: %v)", got, want, cmdErr.Err)
 	}
 	if got := docker.AppOutputTail(project, project+"-database"); !bytes.Equal(got, []byte("db ready\n")) {
 		all, _ := docker.AppOutputTails()
-		t.Fatalf("the container_name service's tail = %q; tails held: %+v", got, all)
+		t.Fatalf("the container_name service's tail = %q; tails held: %+v (the child: %v)", got, all, cmdErr.Err)
 	}
 }
