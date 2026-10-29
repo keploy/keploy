@@ -6406,7 +6406,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	var noAnswerHeld []noAnswerHold
 	var noAnswerHoldErr error
 	if prune && len(noAnswerTests) > 0 {
-		noAnswerHeld, noAnswerHoldErr = r.holdNoAnswerMocks(runTestSetCtx, testSetID, noAnswerTests, testCases, carryAttr, expectedTestMockMappings, consumers, passingTotalConsumedMocks)
+		noAnswerHeld, noAnswerHoldErr = r.holdNoAnswerMocks(runTestSetCtx, testSetID, noAnswerTests, testCases, carryAttr, useMappingBased, expectedTestMockMappings, consumers, passingTotalConsumedMocks)
 		if noAnswerHoldErr != nil {
 			pruneIn.noAnswerUnheld = true
 			prune, pruneRefusal = shouldPrune(r.removeUnusedMocks(), r.instrument, pruneIn)
@@ -6418,7 +6418,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			names, kept = append(names, h.test), append(kept, h.kept)
 		}
 		// Capped so an outage does not log every test.
-		r.logger.Info("pruning unused mocks around the tests that got no answer: each one keeps its mapping entry's mocks, those the agent serves in its recorded window (placed in it, in flight when it began, carried over into it), and what it consumed",
+		r.logger.Info("pruning unused mocks around the tests that got no answer: each one keeps its mapping entry's mocks, the mocks of its recorded window (placed in it, in flight when it began, or released first at it: a carry-over mock or a server push), and what it consumed",
 			zap.String("testSetID", testSetID),
 			zap.Int("noAnswerCount", len(noAnswerHeld)),
 			zap.Strings("noAnswerTests", names),

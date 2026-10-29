@@ -1,7 +1,9 @@
 package replay
 
 import (
+	"bytes"
 	"context"
+	"encoding/gob"
 	"errors"
 	"fmt"
 	"os"
@@ -15,9 +17,11 @@ import (
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
+	coreAgent "go.keploy.io/server/v3/pkg/agent"
 	proxyPkg "go.keploy.io/server/v3/pkg/agent/proxy"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml/mockdb"
+	agentsvc "go.keploy.io/server/v3/pkg/service/agent"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 )
@@ -365,7 +369,7 @@ func TestHoldNoAnswerMocksFailsClosedForATestWithNoWindow(t *testing.T) {
 	keep := map[string]models.MockState{"mock-kept": {Name: "mock-kept"}}
 	tc := &models.TestCase{Name: "test-1", Kind: models.HTTP}
 	held, err := r.holdNoAnswerMocks(context.Background(), "test-set-0", []string{"test-1"}, []*models.TestCase{tc},
-		newCarryOverAttribution([]*models.TestCase{tc}), map[string][]models.MockEntry{"test-1": {{Name: "mock-mapped"}}}, nil, keep)
+		newCarryOverAttribution([]*models.TestCase{tc}), false, map[string][]models.MockEntry{"test-1": {{Name: "mock-mapped"}}}, nil, keep)
 	if err == nil {
 		t.Fatalf("a test with no recorded window was held: %v", held)
 	}
@@ -460,65 +464,130 @@ func (w walkedSet) WalkTestSetMocks(_ context.Context, _ string, visit func(m *m
 	return nil
 }
 
-// agentServes is how the agent serves m, of the per-test pool or the session
-// pool, while the window sw is open, read off the agent's own code paths and
-// not off pkg.ServeInWindow: its window filter (the per-test pool through
-// pkg.FilterPerTestAndLaxPromotedInFlightAware, the session pool through
-// pkg.FilterConfigMocksTierAware, as UpdateMockParams calls them on a
-// windowed proxy), then the push hub's release (Released at sw and not at
-// prev, the window before it) for a staged push, then the carry-over tier's
-// reach (CarryOverReachable) for a carry-over mock the filter drops.
-func agentServes(m *models.Mock, session bool, sw pkg.ServeWindow, prev time.Time) pkg.WindowServe {
+// plannedProxy is managerProxy with the mock manager's planners as well, as
+// the agent's proxy forwards them (proxy.Proxy.CarryOverLoadRange and
+// InFlightFrom): the agent then loads the carry-over lookahead and the calls
+// in flight into a window, as a replay's does.
+type plannedProxy struct{ *managerProxy }
+
+func (p plannedProxy) CarryOverLoadRange(start time.Time) (time.Time, time.Time, bool) {
+	return p.mm.CarryOverLoadRange(start)
+}
+func (p plannedProxy) InFlightFrom(start time.Time) (time.Time, bool) {
+	return p.mm.InFlightFrom(start)
+}
+
+// The agent's residencies of the set's per-test mocks (StoreMocksStream).
+const (
+	// onDisk: the on-disk store, the agent's default in the strict window
+	// mode, which loads each window's mocks and the carry-over lookahead.
+	onDisk = true
+	// resident: the fallback when the store cannot be made, and the lax
+	// mode's residency, where the window filter routes every mock.
+	resident = false
+)
+
+// agentServes is how the agent itself serves m, of the per-test pool or the
+// session pool, in the window of ws[test]: a real agent (agentsvc.New) holding
+// the set's one mock as StoreMocksStream stores the stream the replayer sends,
+// on disk or resident, its mock manager staged by the agent's own
+// UpdateMockParams with the replayer's parameters: the set's staging, then
+// every window in order up to ws[test]'s. The answer is the tier that holds m
+// once that window is staged: the per-test tree, the startup tree, a release
+// first at the window (the carry-over tier, which did not hold it at the
+// window before; or a server push the staging handed the manager, which the
+// push hub delivers from its release window on,
+// models.WindowSchedule.Released), the session tree, else none.
+func agentServes(t *testing.T, m *models.Mock, session, strict, disk bool, ws []models.TestWindow, test int) pkg.WindowServe {
+	t.Helper()
 	ctx, nop := context.Background(), zap.NewNop()
-	if session {
-		if len(pkg.FilterConfigMocksTierAware(ctx, nop, []*models.Mock{m}, sw.Start, sw.End, false, sw.FirstStart)) == 1 {
-			return pkg.ServedSession
-		}
-		return pkg.NotServed
+	mm := proxyPkg.NewMockManager(nil, nil, nop)
+	t.Cleanup(mm.Close)
+	mm.ResetForReplaySession()
+	cfg := &config.Config{}
+	cfg.Test.StrictMockWindow = disk
+	// agentsvc.New registers its incoming proxy and the pool's idle
+	// retention globally: both are put back as they were.
+	prevIncoming := coreAgent.ActiveIncomingProxy
+	t.Cleanup(func() {
+		coreAgent.RegisterIncomingProxy(prevIncoming)
+		proxyPkg.SetConnectionIdleRetention(0)
+	})
+	a := agentsvc.New(nop, nil, plannedProxy{&managerProxy{mm: mm}}, nil, nil, cfg)
+	var stream bytes.Buffer
+	enc := gob.NewEncoder(&stream)
+	if err := enc.Encode(m); err != nil {
+		t.Fatalf("encode the mock: %v", err)
 	}
-	perTest, promoted := pkg.FilterPerTestAndLaxPromotedInFlightAware(ctx, nop, []*models.Mock{m}, sw.Start, sw.End, false, sw.FirstStart, sw.InFlightFrom, sw.StrictWindow)
-	req := m.Spec.ReqTimestampMock
+	header := models.MockStreamHeader{FilteredCount: 1}
+	if session {
+		header = models.MockStreamHeader{UnfilteredCount: 1}
+	}
+	if err := a.StoreMocksStream(ctx, header, gob.NewDecoder(&stream)); err != nil {
+		t.Fatalf("store the mock: %v", err)
+	}
+	t.Cleanup(func() {
+		// Storing again closes the on-disk store the stream made.
+		cfg.Test.StrictMockWindow = false
+		_ = a.StoreMocks(ctx, nil, nil)
+	})
+	stage := func(after, before time.Time, staging bool) {
+		t.Helper()
+		p := models.MockFilterParams{AfterTime: after, BeforeTime: before, StrictMockWindow: strict}
+		if staging {
+			p.FirstRecordedTestStart, p.RecordedWindows = ws[0].Start, ws
+		}
+		if err := a.UpdateMockParams(ctx, p); err != nil {
+			t.Fatalf("UpdateMockParams: %v", err)
+		}
+	}
+	holds := func(reads ...func() ([]*models.Mock, error)) bool {
+		t.Helper()
+		for _, read := range reads {
+			got, err := read()
+			if err != nil {
+				t.Fatalf("read the mock manager's tier: %v", err)
+			}
+			for _, mk := range got {
+				if mk != nil && mk.Name == m.Name {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	stage(models.BaseTime, time.Now(), true)
+	staged := holds(mm.GetFilteredMocks, mm.GetStartupMocks, mm.GetUnFilteredMocks, mm.GetCarryOverMocks)
+	for i := 0; i < test; i++ {
+		stage(ws[i].Start, ws[i].End, false)
+	}
+	carriedBefore := holds(mm.GetCarryOverMocks)
+	stage(ws[test].Start, ws[test].End, false)
+	sched, req := models.NewWindowSchedule(ws), m.Spec.ReqTimestampMock
+	pushed := staged && models.IsStagedAtStaging(m) && sched.Released(req, ws[test].Start) && (test == 0 || !sched.Released(req, ws[test-1].Start))
 	switch {
-	case len(perTest) == 1 && !req.IsZero() && !m.Spec.ResTimestampMock.IsZero() && models.PlaceOf(m).Before(sw.FirstStart):
-		return pkg.ServedStartup
-	case len(perTest) == 1:
+	case holds(mm.GetFilteredMocks):
 		return pkg.ServedPerTest
-	case pushReleased(m, sw.Recorded, sw.Start, prev):
+	case holds(mm.GetStartupMocks):
+		return pkg.ServedStartup
+	case pushed, holds(mm.GetCarryOverMocks) && !carriedBefore:
 		return pkg.ServedReleased
-	case len(promoted) == 1:
+	case holds(mm.GetUnFilteredMocks):
 		return pkg.ServedSession
-	case models.IsCarryOver(m) && sw.Recorded.CarryOverReachable(req, sw.Start) && !sw.Recorded.CarryOverReachable(req, prev):
-		return pkg.ServedReleased
 	}
 	return pkg.NotServed
 }
 
-// pushReleased reports whether the push hub delivers m, a server push the
-// set's staging files (models.IsStagedAtStaging), first in the window that
-// starts at start: released there (models.WindowSchedule.Released) and not in
-// the window before it, which starts at prev.
-func pushReleased(m *models.Mock, sched *models.WindowSchedule, start, prev time.Time) bool {
-	req := m.Spec.ReqTimestampMock
-	return models.IsStagedAtStaging(m) && sched.Released(req, start) && !sched.Released(req, prev)
-}
-
-// managerServes is how the agent's mock manager serves m, of the per-test pool
-// or the session pool, while sw is open, read off a real proxy.MockManager
-// staged over the set's recorded windows (sched) as a windowed proxy stages
-// it: the set's staging, then the window before sw (prev), then sw. Each
-// staging hands the manager what the agent hands it: the window filter's
-// slices for that window (as agentServes runs it, what the filter promotes
-// going to the session pool) and, in the strict window mode, a carry-over
-// mock the filter leaves out, which the agent's lookahead appends past it
-// (appendCarryOver). direct hands m to the manager as a per-test mock past the
-// filter, as the lookahead does. The answer is the tier that holds m once sw
-// is staged: the per-test tree, the startup tree, the push hub's release of a
-// staged push (pushReleased), the session tree, or the carry-over tier, which
-// did not hold it at prev.
-func managerServes(t *testing.T, m *models.Mock, session, direct bool, sched *models.WindowSchedule, sw, prev pkg.ServeWindow) pkg.WindowServe {
+// stagedPastTheFilter is how the agent's mock manager serves m in the window
+// sw when handed it as a per-test mock past the window filter, as the agent's
+// carry-over lookahead hands it (appendCarryOver): a real proxy.MockManager
+// staged over the set's recorded windows (sched), the set's staging, then the
+// window before sw (prev), then sw. The answer is the tier that holds m once
+// sw is staged, as agentServes reads it.
+func stagedPastTheFilter(t *testing.T, m *models.Mock, sched *models.WindowSchedule, sw, prev pkg.ServeWindow) pkg.WindowServe {
 	t.Helper()
-	ctx, nop := context.Background(), zap.NewNop()
-	mm := proxyPkg.NewMockManager(nil, nil, nop)
+	mm := proxyPkg.NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
 	mm.ResetForReplaySession()
 	mm.SeedStartupCutoff(sw.FirstStart)
 	var windows []models.TestWindow
@@ -527,21 +596,6 @@ func managerServes(t *testing.T, m *models.Mock, session, direct bool, sched *mo
 	}
 	mm.SeedRecordedWindows(windows)
 	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
-	stage := func(w pkg.ServeWindow) {
-		var filtered, unfiltered []*models.Mock
-		switch {
-		case session:
-			unfiltered = pkg.FilterConfigMocksTierAware(ctx, nop, []*models.Mock{m}, w.Start, w.End, false, w.FirstStart)
-		case direct:
-			filtered = []*models.Mock{m.DeepCopy()}
-		default:
-			filtered, unfiltered = pkg.FilterPerTestAndLaxPromotedInFlightAware(ctx, nop, []*models.Mock{m}, w.Start, w.End, false, w.FirstStart, w.InFlightFrom, w.StrictWindow)
-			if len(filtered) == 0 && w.StrictWindow && models.IsCarryOver(m) {
-				filtered = []*models.Mock{m.DeepCopy()}
-			}
-		}
-		mm.SetMocksWithWindow(filtered, unfiltered, w.Start, w.End)
-	}
 	holds := func(read func() ([]*models.Mock, error)) bool {
 		got, err := read()
 		if err != nil {
@@ -554,15 +608,16 @@ func managerServes(t *testing.T, m *models.Mock, session, direct bool, sched *mo
 		}
 		return false
 	}
-	stage(prev)
+	mm.SetMocksWithWindow([]*models.Mock{m.DeepCopy()}, nil, prev.Start, prev.End)
 	carriedAtPrev := holds(mm.GetCarryOverMocks)
-	stage(sw)
+	mm.SetMocksWithWindow([]*models.Mock{m.DeepCopy()}, nil, sw.Start, sw.End)
+	req := m.Spec.ReqTimestampMock
 	switch {
 	case holds(mm.GetFilteredMocks):
 		return pkg.ServedPerTest
 	case holds(mm.GetStartupMocks):
 		return pkg.ServedStartup
-	case !session && pushReleased(m, sched, sw.Start, prev.Start):
+	case models.IsStagedAtStaging(m) && sched.Released(req, sw.Start) && !sched.Released(req, prev.Start):
 		return pkg.ServedReleased
 	case holds(mm.GetUnFilteredMocks):
 		return pkg.ServedSession
@@ -570,6 +625,25 @@ func managerServes(t *testing.T, m *models.Mock, session, direct bool, sched *mo
 		return pkg.ServedReleased
 	}
 	return pkg.NotServed
+}
+
+// heldByTheAgent is what the hold keeps of m for the unanswered test whose
+// window [start, end] is, read off how the agent serves it there on each of
+// its residencies (agentServes): the union, since the replayer cannot tell
+// which one the agent has. A mock either serves the window's own pool or
+// releases first there is held; of what the session pool hands every window,
+// one recorded in the window or at no time. Not the startup tier, nor a
+// session-pool mock recorded elsewhere, which some test's consumption holds or
+// none (the hold's stated limit).
+func heldByTheAgent(m *models.Mock, start, end time.Time, served ...pkg.WindowServe) bool {
+	req, res := m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock
+	recordedIn := req.IsZero() || res.IsZero() || !models.PlaceOf(m).Before(start) && !models.PlaceOf(m).After(end)
+	for _, s := range served {
+		if s == pkg.ServedPerTest || s == pkg.ServedReleased || s == pkg.ServedSession && recordedIn {
+			return true
+		}
+	}
+	return false
 }
 
 // The hold asks the agent's own decision (pkg.ServeInWindow) for every class
@@ -623,79 +697,85 @@ func TestHoldNoAnswerMocksHoldsWhatTheAgentServesTheTest(t *testing.T) {
 		session    = true
 	)
 	for _, tc := range []struct {
-		name    string
-		mock    *models.Mock
-		session bool
-		strict  bool
-		want    pkg.WindowServe
-		held    bool
+		name     string
+		mock     *models.Mock
+		session  bool
+		strict   bool
+		want     pkg.WindowServe
+		disk     pkg.WindowServe
+		resident pkg.WindowServe
+		held     bool
 	}{
-		{"placed in the window", grpc("Window", 71), perTest, strictMode, pkg.ServedPerTest, true},
-		{"placed at the window's start exactly", grpc("AtStart", 70), perTest, strictMode, pkg.ServedPerTest, true},
-		{"placed at the window's end exactly", grpc("AtEnd", 72), perTest, strictMode, pkg.ServedPerTest, true},
-		{"a stated mock placed in the window", statedPerTest(http("Window", 71)), perTest, strictMode, pkg.ServedPerTest, true},
-		{"no recorded time", stamped(grpc("Untimed", 0), time.Time{}, time.Time{}), perTest, strictMode, pkg.ServedPerTest, true},
-		{"a request time outside the window and no response time", stamped(grpc("NoAnswerTime", 0), at(65), time.Time{}), perTest, strictMode, pkg.ServedPerTest, true},
-		{"a response time outside the window and no request time", stamped(grpc("NoAskTime", 0), time.Time{}, at(65)), perTest, strictMode, pkg.ServedPerTest, true},
-		{"in flight when the window began", answered(grpc("InFlight", 69.5), 70.5), perTest, strictMode, pkg.ServedPerTest, true},
-		{"a stated mock in flight when the window began, lax mode", answered(statedPerTest(http("InFlight", 69.5)), 70.5), perTest, laxMode, pkg.ServedPerTest, true},
-		{"in flight when the window began, lax mode (promoted)", answered(grpc("InFlight", 69.5), 70.5), perTest, laxMode, pkg.ServedSession, false},
-		{"in flight into the next window", answered(grpc("InFlightLater", 79.5), 80.5), perTest, strictMode, pkg.ServedSession, false},
-		{"sent and answered in the gap before the window", grpc("InGap", 69.5), perTest, strictMode, pkg.ServedSession, false},
-		{"a stated mock in the gap after the window", statedPerTest(http("After", 75)), perTest, strictMode, pkg.NotServed, false},
-		{"a stated carry-over call in the gap after the window", statedPerTest(http(noAnswerCarryOverOp, 73)), perTest, strictMode, pkg.ServedReleased, true},
-		{"a stated carry-over call the next window holds, reached a lookahead before it", statedPerTest(http(noAnswerCarryOverOp, 80.5)), perTest, strictMode, pkg.ServedReleased, true},
-		{"a stated carry-over call in the gap before the window", statedPerTest(http(noAnswerCarryOverOp, 65)), perTest, strictMode, pkg.NotServed, false},
-		{"an unstated carry-over call in the gap after the window (promoted)", grpc(noAnswerCarryOverOp, 73), perTest, strictMode, pkg.ServedSession, false},
-		{"a server push in the gap after the window", grpc(noAnswerPushOp, 73), perTest, strictMode, pkg.ServedReleased, true},
-		{"a server push in the gap after the window, lax mode", grpc(noAnswerPushOp, 73.5), perTest, laxMode, pkg.ServedReleased, true},
-		{"a server push in the gap before the window (promoted)", grpc(noAnswerPushOp, 65), perTest, strictMode, pkg.ServedSession, false},
-		{"a server push in the window", grpc(noAnswerPushOp, 71), perTest, strictMode, pkg.ServedPerTest, true},
-		{"startup traffic", grpc("Boot", 5), perTest, strictMode, pkg.ServedStartup, false},
-		{"answered before asked", stamped(grpc("Skewed", 0), at(71), at(70.9)), perTest, strictMode, pkg.NotServed, false},
-		{"a session-lifetime mock in the window", sessionLifetime(http("Session", 71)), perTest, strictMode, pkg.ServedSession, true},
-		{"a session-lifetime mock in the gap after the window", sessionLifetime(http("Session", 75)), perTest, strictMode, pkg.ServedSession, false},
-		{"a config-tagged mock in the gap after the window", tagged(grpc("Config", 75), "config"), perTest, strictMode, pkg.ServedSession, false},
-		{"a connection-tagged mock in the window", tagged(grpc("Conn", 71), "connection"), perTest, strictMode, pkg.ServedSession, true},
-		{"a connection failure in the window", failure(71), perTest, strictMode, pkg.ServedPerTest, true},
-		{"a connection failure in the gap after the window", failure(75), perTest, strictMode, pkg.NotServed, false},
-		{"a connection failure before the first window", failure(5), perTest, strictMode, pkg.ServedStartup, false},
-		{"a connection failure with no recorded time", stamped(failure(0), time.Time{}, time.Time{}), perTest, strictMode, pkg.NotServed, false},
-		{"a session-lifetime mock before the first window", sessionLifetime(http("SessionBoot", 5)), perTest, strictMode, pkg.ServedSession, false},
-		{"a session-pool mock in the window", http("Shared", 71), session, strictMode, pkg.ServedSession, true},
-		{"a session-pool mock in the gap after the window", http("Shared", 75), session, strictMode, pkg.ServedSession, false},
-		{"a session-pool mock with no recorded time", stamped(http("Shared", 0), time.Time{}, time.Time{}), session, strictMode, pkg.ServedSession, true},
-		{"a session-lifetime mock answered before asked (the session short-circuit comes first)", stamped(http("Shared", 0), at(71), at(70.9)), session, strictMode, pkg.ServedSession, true},
+		{"placed in the window", grpc("Window", 71), perTest, strictMode, pkg.ServedPerTest, pkg.ServedPerTest, pkg.ServedPerTest, true},
+		{"placed at the window's start exactly", grpc("AtStart", 70), perTest, strictMode, pkg.ServedPerTest, pkg.ServedPerTest, pkg.ServedPerTest, true},
+		{"placed at the window's end exactly", grpc("AtEnd", 72), perTest, strictMode, pkg.ServedPerTest, pkg.ServedPerTest, pkg.ServedPerTest, true},
+		{"a stated mock placed in the window", statedPerTest(http("Window", 71)), perTest, strictMode, pkg.ServedPerTest, pkg.ServedPerTest, pkg.ServedPerTest, true},
+		{"no recorded time", stamped(grpc("Untimed", 0), time.Time{}, time.Time{}), perTest, strictMode, pkg.ServedPerTest, pkg.ServedPerTest, pkg.ServedPerTest, true},
+		{"a request time outside the window and no response time", stamped(grpc("NoAnswerTime", 0), at(65), time.Time{}), perTest, strictMode, pkg.ServedPerTest, pkg.ServedPerTest, pkg.ServedPerTest, true},
+		{"a response time outside the window and no request time", stamped(grpc("NoAskTime", 0), time.Time{}, at(65)), perTest, strictMode, pkg.ServedPerTest, pkg.ServedPerTest, pkg.ServedPerTest, true},
+		{"in flight when the window began", answered(grpc("InFlight", 69.5), 70.5), perTest, strictMode, pkg.ServedPerTest, pkg.ServedPerTest, pkg.ServedPerTest, true},
+		{"a stated mock in flight when the window began, lax mode", answered(statedPerTest(http("InFlight", 69.5)), 70.5), perTest, laxMode, pkg.ServedPerTest, pkg.ServedPerTest, pkg.ServedPerTest, true},
+		{"in flight when the window began, lax mode (promoted)", answered(grpc("InFlight", 69.5), 70.5), perTest, laxMode, pkg.ServedSession, pkg.ServedSession, pkg.ServedSession, false},
+		{"in flight into the next window", answered(grpc("InFlightLater", 79.5), 80.5), perTest, strictMode, pkg.ServedSession, pkg.NotServed, pkg.ServedSession, false},
+		{"sent and answered in the gap before the window", grpc("InGap", 69.5), perTest, strictMode, pkg.ServedSession, pkg.NotServed, pkg.ServedSession, false},
+		{"a stated mock in the gap after the window", statedPerTest(http("After", 75)), perTest, strictMode, pkg.NotServed, pkg.NotServed, pkg.NotServed, false},
+		{"a stated carry-over call in the gap after the window", statedPerTest(http(noAnswerCarryOverOp, 73)), perTest, strictMode, pkg.ServedReleased, pkg.ServedReleased, pkg.NotServed, true},
+		{"a stated carry-over call the next window holds, reached a lookahead before it", statedPerTest(http(noAnswerCarryOverOp, 80.5)), perTest, strictMode, pkg.ServedReleased, pkg.ServedReleased, pkg.NotServed, true},
+		{"a stated carry-over call in the gap before the window", statedPerTest(http(noAnswerCarryOverOp, 65)), perTest, strictMode, pkg.NotServed, pkg.NotServed, pkg.NotServed, false},
+		{"an unstated carry-over call in the gap after the window (promoted resident)", grpc(noAnswerCarryOverOp, 73), perTest, strictMode, pkg.ServedReleased, pkg.ServedReleased, pkg.ServedSession, true},
+		{"an unstated carry-over call the next window holds, reached a lookahead before it", grpc(noAnswerCarryOverOp, 80.5), perTest, strictMode, pkg.ServedReleased, pkg.ServedReleased, pkg.ServedSession, true},
+		{"an unstated carry-over call in the gap before the window, released at an earlier window", grpc(noAnswerCarryOverOp, 65), perTest, strictMode, pkg.ServedSession, pkg.NotServed, pkg.ServedSession, false},
+		{"an unstated carry-over call in the gap after the window, lax mode (promoted)", grpc(noAnswerCarryOverOp, 73), perTest, laxMode, pkg.ServedSession, pkg.ServedSession, pkg.ServedSession, false},
+		{"a server push in the gap after the window", grpc(noAnswerPushOp, 73), perTest, strictMode, pkg.ServedReleased, pkg.ServedReleased, pkg.ServedReleased, true},
+		{"a server push in the gap after the window, lax mode", grpc(noAnswerPushOp, 73.5), perTest, laxMode, pkg.ServedReleased, pkg.ServedReleased, pkg.ServedReleased, true},
+		{"a server push in the gap before the window (promoted resident)", grpc(noAnswerPushOp, 65), perTest, strictMode, pkg.ServedSession, pkg.NotServed, pkg.ServedSession, false},
+		{"a server push in the window", grpc(noAnswerPushOp, 71), perTest, strictMode, pkg.ServedPerTest, pkg.ServedPerTest, pkg.ServedPerTest, true},
+		{"startup traffic", grpc("Boot", 5), perTest, strictMode, pkg.ServedStartup, pkg.ServedStartup, pkg.ServedStartup, false},
+		{"answered before asked", stamped(grpc("Skewed", 0), at(71), at(70.9)), perTest, strictMode, pkg.NotServed, pkg.NotServed, pkg.NotServed, false},
+		{"a session-lifetime mock in the window", sessionLifetime(http("Session", 71)), perTest, strictMode, pkg.ServedSession, pkg.ServedSession, pkg.ServedSession, true},
+		{"a session-lifetime mock in the gap after the window", sessionLifetime(http("Session", 75)), perTest, strictMode, pkg.ServedSession, pkg.ServedSession, pkg.ServedSession, false},
+		{"a config-tagged mock in the gap after the window", tagged(grpc("Config", 75), "config"), perTest, strictMode, pkg.ServedSession, pkg.ServedSession, pkg.ServedSession, false},
+		{"a connection-tagged mock in the window", tagged(grpc("Conn", 71), "connection"), perTest, strictMode, pkg.ServedSession, pkg.ServedSession, pkg.ServedSession, true},
+		{"a connection failure in the window", failure(71), perTest, strictMode, pkg.ServedPerTest, pkg.ServedPerTest, pkg.ServedPerTest, true},
+		{"a connection failure in the gap after the window", failure(75), perTest, strictMode, pkg.NotServed, pkg.NotServed, pkg.NotServed, false},
+		{"a connection failure before the first window", failure(5), perTest, strictMode, pkg.ServedStartup, pkg.ServedStartup, pkg.ServedStartup, false},
+		{"a connection failure with no recorded time", stamped(failure(0), time.Time{}, time.Time{}), perTest, strictMode, pkg.NotServed, pkg.NotServed, pkg.NotServed, false},
+		{"a session-lifetime mock before the first window", sessionLifetime(http("SessionBoot", 5)), perTest, strictMode, pkg.ServedSession, pkg.ServedSession, pkg.ServedSession, false},
+		{"a session-pool mock in the window", http("Shared", 71), session, strictMode, pkg.ServedSession, pkg.ServedSession, pkg.ServedSession, true},
+		{"a session-pool mock in the gap after the window", http("Shared", 75), session, strictMode, pkg.ServedSession, pkg.ServedSession, pkg.ServedSession, false},
+		{"a session-pool mock with no recorded time", stamped(http("Shared", 0), time.Time{}, time.Time{}), session, strictMode, pkg.ServedSession, pkg.ServedSession, pkg.ServedSession, true},
+		{"a session-pool mock at the window's start exactly", http("Shared", 70), session, strictMode, pkg.ServedSession, pkg.ServedSession, pkg.ServedSession, true},
+		{"a session-pool mock at the window's end exactly", http("Shared", 72), session, strictMode, pkg.ServedSession, pkg.ServedSession, pkg.ServedSession, true},
+		{"a session-pool mock just after the window's end", stamped(http("Shared", 0), at(72.0005), at(72.001)), session, strictMode, pkg.ServedSession, pkg.ServedSession, pkg.ServedSession, false},
+		{"a session-pool mock with a request time outside the window and no response time", stamped(http("Shared", 0), at(65), time.Time{}), session, strictMode, pkg.ServedSession, pkg.ServedSession, pkg.ServedSession, true},
+		{"a session-pool mock with a response time outside the window and no request time", stamped(http("Shared", 0), time.Time{}, at(65)), session, strictMode, pkg.ServedSession, pkg.ServedSession, pkg.ServedSession, true},
+		{"a session-lifetime mock answered before asked (the session short-circuit comes first)", stamped(http("Shared", 0), at(71), at(70.9)), session, strictMode, pkg.ServedSession, pkg.ServedSession, pkg.ServedSession, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tc.mock.Name = "mock-under-test"
 			tc.mock.DeriveLifetime()
-			sched := models.NewWindowSchedule(recordedTestWindows(cases))
-			w, ok := sched.Of("test-7")
-			if !ok {
-				t.Fatal("precondition: test-7 has no recorded window")
+			ws := recordedTestWindows(cases)
+			sched := models.NewWindowSchedule(ws)
+			const test = 6
+			w := ws[test]
+			if w.TestCase != "test-7" {
+				t.Fatalf("precondition: window %d is %s's, not test-7's", test, w.TestCase)
 			}
-			sw := serveWindowOf(sched, w, tc.strict)
-			if got := agentServes(tc.mock, tc.session, sw, at(60)); got != tc.want {
-				t.Fatalf("precondition: the agent serves the mock in test-7's window as %d, want %d", got, tc.want)
+			disk := agentServes(t, tc.mock.DeepCopy(), tc.session, tc.strict, onDisk, ws, test)
+			res := agentServes(t, tc.mock.DeepCopy(), tc.session, tc.strict, resident, ws, test)
+			if disk != tc.disk || res != tc.resident {
+				t.Errorf("the agent serves the mock in test-7's window as %d on disk and %d resident, want %d and %d", disk, res, tc.disk, tc.resident)
 			}
+			sw := serveWindowOf(sched, w, tc.strict, false)
 			if got := pkg.ServeInWindow(tc.mock, tc.session, sw); got != tc.want {
-				t.Errorf("pkg.ServeInWindow: %d, the agent: %d", got, tc.want)
-			}
-			prevW, ok := sched.Of("test-6")
-			if !ok {
-				t.Fatal("precondition: test-6 has no recorded window")
-			}
-			prev := serveWindowOf(sched, prevW, tc.strict)
-			if got := managerServes(t, tc.mock, tc.session, false, sched, sw, prev); got != tc.want {
-				t.Errorf("the mock manager serves the mock in test-7's window as %d, the agent: %d", got, tc.want)
+				t.Errorf("pkg.ServeInWindow on the hold's window: %d, want %d", got, tc.want)
 			}
 			if !tc.session {
-				strict, strictPrev := sw, prev
+				strict, strictPrev := sw, serveWindowOf(sched, ws[test-1], tc.strict, false)
 				strict.StrictPerCall, strict.StrictWindow = true, true
 				strictPrev.StrictPerCall, strictPrev.StrictWindow = true, true
 				want, _ := pkg.StageInWindow(zap.NewNop(), tc.mock, strict)
-				if got := managerServes(t, tc.mock, false, true, sched, strict, strictPrev); got != want {
+				if got := stagedPastTheFilter(t, tc.mock, sched, strict, strictPrev); got != want {
 					t.Errorf("the mock manager, handed the mock past the filter, serves it as %d; pkg.StageInWindow, strict: %d", got, want)
 				}
 			}
@@ -709,12 +789,16 @@ func TestHoldNoAnswerMocksHoldsWhatTheAgentServesTheTest(t *testing.T) {
 			r.config.Test.StrictMockWindow = tc.strict
 			keep := map[string]models.MockState{}
 			held, err := r.holdNoAnswerMocks(context.Background(), "test-set-0", []string{"test-7"}, cases,
-				newCarryOverAttribution(cases), nil, nil, keep)
+				newCarryOverAttribution(cases), false, nil, nil, keep)
 			if err != nil {
 				t.Fatalf("hold: %v", err)
 			}
-			if _, kept := keep[tc.mock.Name]; kept != tc.held {
+			_, kept := keep[tc.mock.Name]
+			if kept != tc.held {
 				t.Errorf("the hold for test-7 keeps the mock: %v, want %v (held %+v)", kept, tc.held, held)
+			}
+			if union := heldByTheAgent(tc.mock, w.Start, w.End, disk, res); kept != union {
+				t.Errorf("the hold for test-7 keeps the mock: %v; what the agent serves it on disk (%d) and resident (%d) says %v", kept, disk, res, union)
 			}
 		})
 	}
@@ -745,6 +829,43 @@ func TestRunTestSetHoldsAServerPushReleasedAtTheUnansweredTestsWindow(t *testing
 			}
 			if !left[push.Name] {
 				t.Errorf("the push released at test-7's window (%s) was pruned; keeps %v", push.Name, sortedNames(left))
+			}
+		})
+	}
+}
+
+// A carry-over call whose recorder stated no lifetime, as enterprise's Pulsar
+// SEND and Redis carry-over mocks are, recorded in the gap after the
+// unanswered test and unconsumed, survives the prune around that test on both
+// formats. The agent's default, the strict window over its on-disk store,
+// loads it by the carry-over lookahead at that test's window and serves it
+// from its carry-over tier there (TestUpdateMockParamsServesAnUnstatedCarryOverFromTheCarryTier
+// in pkg/service/agent); no window filter sees it to promote it to the session
+// pool.
+func TestRunTestSetHoldsAnUnstatedCarryOverReleasedAtTheUnansweredTestsWindow(t *testing.T) {
+	timeout := prClientTimeoutErr(t)
+	for _, format := range []string{"yaml", "gob"} {
+		t.Run(format, func(t *testing.T) {
+			h, set, extras, _ := noAnswerHoldRun(t, format, func(at noAnswerAt) *models.Mock {
+				return noAnswerHoldMock(models.GRPC_EXPORT, noAnswerCarryOverOp, at(73.2))
+			})
+			carry := extras[0]
+			if carry.StatesLifetime() {
+				t.Fatal("precondition: the carry-over call states a lifetime")
+			}
+			hooks := h.replayer.hookImpl.(prHooks)
+			hooks.simErr = map[string]error{"test-7": timeout}
+			h.replayer.hookImpl = hooks
+			_ = h.run(t)
+			left := storedMockNames(t, h)
+			if left[set.orphan.Name] {
+				t.Fatalf("precondition: not pruned, keeps %v", sortedNames(left))
+			}
+			if !left[set.carriedOver.Name] {
+				t.Fatalf("precondition: the stated carry-over call in the same gap was pruned, keeps %v", sortedNames(left))
+			}
+			if !left[carry.Name] {
+				t.Errorf("the unstated carry-over call test-7's window releases (%s) was pruned; keeps %v", carry.Name, sortedNames(left))
 			}
 		})
 	}
@@ -866,7 +987,7 @@ func TestHoldNoAnswerMocksHoldsOneMockAtATime(t *testing.T) {
 			r := &Replayer{logger: zap.NewNop(), mockDB: store, config: &config.Config{}}
 			r.config.Test.StrictMockWindow = true
 			held, err := r.holdNoAnswerMocks(context.Background(), "set-0", []string{"test-2"}, cases,
-				newCarryOverAttribution(cases), nil, nil, keep)
+				newCarryOverAttribution(cases), false, nil, nil, keep)
 			if err != nil {
 				t.Fatalf("hold: %v", err)
 			}

@@ -65,6 +65,16 @@ type ServeWindow struct {
 	// as in the window filter's own call; the carry-over tier and the push
 	// hub serve those mocks apart from it.
 	Recorded *models.WindowSchedule
+	// Lookahead says the agent's per-test load runs the carry-over
+	// lookahead for the window (the agent's perTestLoadMode: the strict
+	// window mode, or a load by the test's mapping): it hands the mock
+	// manager the carry-over mocks of the range CarryOverLoadRange names
+	// past the window filter, and the manager files them into its carry-over
+	// tier, whether or not their recorder stated a lifetime. Without it the
+	// filter alone routes a carry-over mock, and promotes an unstated one
+	// placed outside the window to the session pool in lax mode. Asked only
+	// with Recorded.
+	Lookahead bool
 	// split says m is of a per-test slice a window filter has split by
 	// lifetime already, the mock manager's (StageInWindow): the rules that
 	// route a mock to the session pool by what it is, not where it is placed
@@ -170,10 +180,10 @@ func serveRuleOf(logger *zap.Logger, p *models.Mock, w ServeWindow) serveRule {
 		}
 		return ruleWindowBoundDropped
 	}
-	req, res := p.Spec.ReqTimestampMock, p.Spec.ResTimestampMock
-	if req.IsZero() || res.IsZero() {
+	if untimedMock(p) {
 		return ruleUntimed
 	}
+	req, res := p.Spec.ReqTimestampMock, p.Spec.ResTimestampMock
 	if !w.split && (p.TestModeInfo.Lifetime == models.LifetimeSession || p.TestModeInfo.Lifetime == models.LifetimeConnection) {
 		return ruleSessionLifetime
 	}
@@ -188,11 +198,10 @@ func serveRuleOf(logger *zap.Logger, p *models.Mock, w ServeWindow) serveRule {
 			return ruleTaggedConnection
 		}
 	}
-	place := models.PlaceOf(p)
-	if !place.Before(w.Start) && !place.After(w.End) {
+	if placedIn(p, w) {
 		return ruleInWindow
 	}
-	if !w.FirstStart.IsZero() && place.Before(w.FirstStart) {
+	if !w.FirstStart.IsZero() && models.PlaceOf(p).Before(w.FirstStart) {
 		return ruleStartup
 	}
 	if !w.InFlightFrom.IsZero() && (strictWindowEnabled(w.StrictWindow) || p.StatesLifetime()) && models.InFlightEligible(p) &&
@@ -205,15 +214,47 @@ func serveRuleOf(logger *zap.Logger, p *models.Mock, w ServeWindow) serveRule {
 	if w.Recorded != nil && models.IsStagedAtStaging(p) && w.Recorded.ReleasedFirstAt(req, w.Start) {
 		return ruleReleased
 	}
-	if strictWindowEnabled(w.StrictPerCall) || p.StatesLifetime() {
-		// The carry-over tier reaches a carry-over mock from the release
-		// window of its recorded time less the lookahead, where the filter
-		// drops it; in lax mode the session pool serves an unstated one,
-		// and the tier skips it.
-		if w.Recorded != nil && models.IsCarryOver(p) && w.Recorded.CarryOverReachedFirstAt(req, w.Start) {
-			return ruleReleased
-		}
+	// The carry-over tier reaches a carry-over mock from the release window
+	// of its recorded time less the lookahead, where the filter drops it.
+	// The tier is handed an unstated one too when the agent's load runs the
+	// lookahead (w.Lookahead): the agent's default, the strict window mode
+	// over its on-disk store, parks every timed per-test mock there and loads
+	// only the window's, the startup band, the calls in flight and the
+	// lookahead, so no filter sees it out of its window to promote it. Where
+	// the filter is lax and handed it (lax mode, the resident store), it
+	// promotes it to the session pool instead, which the hold's caller asks
+	// apart (Lookahead false).
+	carry := strictWindowEnabled(w.StrictPerCall) || p.StatesLifetime()
+	if w.Recorded != nil && (carry || w.Lookahead) && models.IsCarryOver(p) && w.Recorded.CarryOverReachedFirstAt(req, w.Start) {
+		return ruleReleased
+	}
+	if carry {
 		return ruleOutOfWindow
 	}
 	return ruleLaxPromoted
+}
+
+// untimedMock reports whether p has no recorded request or response time,
+// which every window's per-test pool is served.
+func untimedMock(p *models.Mock) bool {
+	return p.Spec.ReqTimestampMock.IsZero() || p.Spec.ResTimestampMock.IsZero()
+}
+
+// placedIn reports whether p, recorded with both times, is placed in w
+// (models.PlaceOf, both ends included).
+func placedIn(p *models.Mock, w ServeWindow) bool {
+	place := models.PlaceOf(p)
+	return !place.Before(w.Start) && !place.After(w.End)
+}
+
+// RecordedInWindow reports whether m has no recorded time or is placed in w,
+// ends included: the placements by which serveRuleOf serves a mock to the
+// window's own per-test pool (ruleUntimed, ruleInWindow), asked of any mock
+// whatever its pool or lifetime. The replayer's mock prune holds a mock of
+// the session pool for a test that got no answer by it.
+func RecordedInWindow(m *models.Mock, w ServeWindow) bool {
+	if m == nil {
+		return false
+	}
+	return untimedMock(m) || placedIn(m, w)
 }
