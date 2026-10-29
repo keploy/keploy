@@ -52,19 +52,6 @@ type SetAnswersHook interface {
 	SetAnswers(testSetID string, answers []models.UnmatchedCall)
 }
 
-// SetBackgroundHook is an optional TestHooks extension, under the proven
-// switch: with each run of each set's end (SetCallsHook's moment) it is told
-// the calls the set's application made outside every test's window that no
-// mock answered and whose recorded answer reaches no test (before the set's
-// first test, between two tests, or after its last:
-// TestReport.BackgroundCalls): its background work, charged to no test and
-// failing nothing; none when there were none. Each carries what its parser
-// found of it and where it was made (UnmatchedCall.BackgroundWhy), for
-// record's judging to read. A notification only.
-type SetBackgroundHook interface {
-	SetBackground(testSetID string, calls []models.UnmatchedCall)
-}
-
 // noteSetEnd keeps how a final report of the set RunTestSet is running ends
 // it, for tellSetEnd: each place RunTestSet writes one (the end of the set,
 // a set with no test case to run, a set ignored whole, a set refused when it
@@ -73,7 +60,6 @@ func (r *Replayer) noteSetEnd(rep *models.TestReport) {
 	r.setEnd = &models.SetEnd{Status: models.TestSetStatus(rep.Status), Why: rep.FailureReason}
 	r.setEndCalls = rep.UnclaimedCalls
 	r.setEndAnswers = rep.SetAnswers
-	r.setEndBackground = rep.BackgroundCalls
 }
 
 // tellSetEnd tells the hooks, when they take it (SetEndHook), how a run of
@@ -100,13 +86,6 @@ func (r *Replayer) tellSetEnd(testSetID string, status models.TestSetStatus, err
 			answers = append(answers, r.setEndAnswers...)
 		}
 		h.SetAnswers(testSetID, answers)
-	}
-	if h, ok := r.hookImpl.(SetBackgroundHook); ok && provenswitch.On() {
-		var calls []models.UnmatchedCall
-		if noted := r.setEnd; noted != nil && noted.Status == status {
-			calls = append(calls, r.setEndBackground...)
-		}
-		h.SetBackground(testSetID, calls)
 	}
 	h, ok := r.hookImpl.(SetEndHook)
 	if !ok {
