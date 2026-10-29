@@ -908,6 +908,7 @@ const restagedWhy = "the staging moved: the test set was staged again"
 func (m *MockManager) HoldToRound(call integrations.CallRound) (integrations.MockMemDb, func() bool) {
 	h := &heldScope{roundScope: roundScope{MockManager: m, g: roundGuard{at: integrations.RoundAt{Epoch: call.Epoch()}, staging: true}}}
 	h.seq, h.seqOK = call.Sequence()
+	h.keepSeriesRead()
 	return h, h.restaged
 }
 
@@ -929,6 +930,10 @@ type heldScope struct {
 	// (integrations.CallRound.Sequence), seqOK whether its mark kept one.
 	seq   integrations.SequenceView
 	seqOK bool
+	// series is the read of the set's series of the call's staging, kept
+	// as the call is held and as it asks for them (keepSeriesRead): a
+	// call is never handed a later staging's (MarkedSeries).
+	series *setSeriesRead
 }
 
 // SequenceView implements integrations.SequenceViewer: the sequence view of
@@ -1079,17 +1084,6 @@ func (h *heldScope) ConsumedTestMocks() []*models.Mock {
 // staged set's, and recordings' names restart in each set.
 func (h *heldScope) AnsweredBackground() []*models.Mock {
 	return h.heldOf(h.MockManager.AnsweredBackground())
-}
-
-// MarkedSeries is the manager's (integrations.MarkedSeriesReader) while the
-// staging is still h's call's: the series and their recordings are the
-// staged set's, and recordings' names restart in each set.
-func (h *heldScope) MarkedSeries(ctx context.Context, kind models.Kind, known learn.Known) ([]integrations.MarkedSeries, error) {
-	s, err := h.MockManager.MarkedSeries(ctx, kind, known)
-	if h.moved() {
-		return nil, nil
-	}
-	return s, err
 }
 
 // FindAnsweredEarlier is the manager's (integrations.AnsweredFinder) while

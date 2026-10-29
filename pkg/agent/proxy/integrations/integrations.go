@@ -503,12 +503,24 @@ type MarkedSeriesReader interface {
 // call so and reports whether it had not before in the staging; it takes
 // nothing from a test's own recordings (its own window still answers it as
 // recorded). nil Once spends nothing: a one-off then answers none.
+//
+// Restaged says the replay staged a test set (the next set, or this one
+// again) after the call asking was marked (CallRound): the series is of the
+// call's own staging, and answers no call (Again false, Once nil), since a
+// call is never answered from the series of a set it was not made in. A
+// call of it is the set's background miss, never a test's
+// (SeriesRestagedNote).
 type MarkedSeries struct {
 	Series     learn.Series
 	Recordings []*models.Mock
 	Again      bool
 	Once       func(name string) bool
+	Restaged   bool
 }
+
+// SeriesRestagedNote is what the miss of a call of a restaged series says
+// (MarkedSeries.Restaged), for every parser alike.
+const SeriesRestagedNote = "This call is of a series judging marked as the application's background work set-wide (a timer's call, recorded with only its reads of the clock changing), and the replay staged a test set again (the next set, or this one once more) after the call was made and before keploy answered it: a call is answered only from the series of the staging it was made in, so no recording answered it. It is the set's background miss, charged to no test of either staging."
 
 // MarkedSeriesOf is db's MarkedSeriesReader.MarkedSeries: none when db does
 // not implement it.
