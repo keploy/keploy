@@ -2375,3 +2375,227 @@ func TestRunTestSetKeepsTheTailMockTheSetsEndReadMaps(t *testing.T) {
 		})
 	}
 }
+
+// A passing test whose recording holds a carry-over mock (the application's
+// asynchronous output, its own by the release rule: a publish recorded in its
+// window or the gap after it) that the run attributed to no one is not one
+// that consumed nothing: the publish may come after every read, and not seeing
+// it does not show the test needs nothing. It gets no entry, decided by what
+// the mapping lists, not by time: a mappings.yaml that exists keeps its
+// recorded entry byte for byte, under --update-test-mapping too, and a new
+// file is created without it, as on main. The run names such tests (Info). A
+// read that took the publish but placed it nowhere (it came unflagged, its
+// window then current, and a later window filter or the set's end dropped it)
+// counts as unattributed. A carry-over mock the run placed gives its owner its
+// entry as before; a recorded mock of another kind, unconsumed, does not keep a
+// test from an empty entry; one placed before every window is set-level (the
+// startup section's) and keeps no test from one either; a test that did not
+// pass is not named; and a test with an entry from the run (another of its
+// publishes was placed) is written as before.
+func TestRunTestSetLeavesATestWithAnUnattributedCarryOverAsRecorded(t *testing.T) {
+	unregister := models.RegisterCarryOver(models.Mongo, func(m *models.Mock) bool { return strings.HasPrefix(m.Name, "pub-") })
+	t.Cleanup(unregister)
+	type want struct {
+		file   map[string][]string
+		kept   string
+		logged string
+		// held is in the reason of the warning that holds a new file.
+		held string
+	}
+	for _, tc := range []struct {
+		name     string
+		recorded []*models.Mock
+		consumed map[string][]models.MockState
+		// onRead: the n-th read in a test's window answers this list.
+		onRead map[string]map[int][]models.MockState
+		// wantReads: the number of reads made in a test's window.
+		wantReads map[string]int
+		wrongBody map[string]bool
+		// flagFile, flagNone, defaultNone: the flag with a file, the flag
+		// with none, the default flag with none.
+		flagFile, flagNone, defaultNone want
+	}{
+		{
+			name:     "test-1's publish is never read: attributed to no one",
+			recorded: []*models.Mock{mongoMockAt("pub-1", 1500), mongoMockAt("mock-c", 2010)},
+			consumed: map[string][]models.MockState{"test-2": {mongoAt("mock-c", 2010)}},
+			flagFile: want{file: map[string][]string{"test-1": {"pub-1"}, "test-2": {"mock-c"}}, kept: "test-1", logged: "[test-1]"},
+			flagNone: want{file: map[string][]string{"test-2": {"mock-c"}}, logged: "[test-1]"},
+			// The default flag: nothing asked for a write, but the run still
+			// gives test-1 no entry.
+			defaultNone: want{file: map[string][]string{"test-2": {"mock-c"}}, logged: "[test-1]"},
+		},
+		{
+			name:        "control: test-2's drain reads test-1's publish",
+			recorded:    []*models.Mock{mongoMockAt("pub-1", 1500), mongoMockAt("mock-c", 2010)},
+			consumed:    map[string][]models.MockState{"test-2": {carriedAt("pub-1", 1500), mongoAt("mock-c", 2010)}},
+			flagFile:    want{file: map[string][]string{"test-1": {"pub-1"}, "test-2": {"mock-c"}}},
+			flagNone:    want{file: map[string][]string{"test-1": {"pub-1"}, "test-2": {"mock-c"}}},
+			defaultNone: want{file: map[string][]string{"test-1": {"pub-1"}, "test-2": {"mock-c"}}},
+		},
+		{
+			// Consumed before the first test, it is the startup section's,
+			// read: test-1 consumed nothing.
+			name:        "the setup drain reads test-1's publish",
+			recorded:    []*models.Mock{mongoMockAt("pub-1", 1050), mongoMockAt("mock-c", 2010)},
+			consumed:    map[string][]models.MockState{"": {carriedAt("pub-1", 1050)}, "test-2": {mongoAt("mock-c", 2010)}},
+			flagFile:    want{file: map[string][]string{"test-1": {}, "test-2": {"mock-c"}}},
+			flagNone:    want{file: map[string][]string{"test-1": {}, "test-2": {"mock-c"}}},
+			defaultNone: want{file: map[string][]string{"test-1": {}, "test-2": {"mock-c"}}},
+		},
+		{
+			name:        "test-1's recorded mock of another kind is not consumed",
+			recorded:    []*models.Mock{mongoMockAt("mock-y", 1050), mongoMockAt("mock-c", 2010)},
+			consumed:    map[string][]models.MockState{"test-2": {mongoAt("mock-c", 2010)}},
+			flagFile:    want{file: map[string][]string{"test-1": {}, "test-2": {"mock-c"}}},
+			flagNone:    want{file: map[string][]string{"test-1": {}, "test-2": {"mock-c"}}},
+			defaultNone: want{file: map[string][]string{"test-1": {}, "test-2": {"mock-c"}}},
+		},
+		{
+			name:        "a publish recorded before the first test is not read",
+			recorded:    []*models.Mock{mongoMockAt("pub-0", 500), mongoMockAt("mock-c", 2010)},
+			consumed:    map[string][]models.MockState{"test-2": {mongoAt("mock-c", 2010)}},
+			flagFile:    want{file: map[string][]string{"test-1": {}, "test-2": {"mock-c"}}},
+			flagNone:    want{file: map[string][]string{"test-1": {}, "test-2": {"mock-c"}}},
+			defaultNone: want{file: map[string][]string{"test-1": {}, "test-2": {"mock-c"}}},
+		},
+		{
+			// test-2's own publish, recorded in its window, came after its
+			// drain, its window still current: the read at the set's end takes
+			// it unflagged and places it nowhere.
+			name:     "test-2's in-window publish comes unflagged after its drain, the last",
+			recorded: []*models.Mock{mongoMockAt("mock-a", 1010), mongoMockAt("pub-2", 2050)},
+			consumed: map[string][]models.MockState{"test-1": {mongoAt("mock-a", 1010)}},
+			onRead:   map[string]map[int][]models.MockState{"test-2": {1: nil, 2: {mongoAt("pub-2", 2050)}}},
+			// test-2's drain, then the read at the set's end, which takes it.
+			wantReads:   map[string]int{"test-2": 2},
+			flagFile:    want{file: map[string][]string{"test-1": {"mock-a"}, "test-2": {"mock-old-c"}}, kept: "test-2", logged: "[test-2]"},
+			flagNone:    want{file: map[string][]string{"test-1": {"mock-a"}}, logged: "[test-2]"},
+			defaultNone: want{file: map[string][]string{"test-1": {"mock-a"}}, logged: "[test-2]"},
+		},
+		{
+			// test-1's in-window publish came after its drain, unflagged, in
+			// test-2's drain, whose window filter drops it.
+			name:        "test-1's in-window publish comes unflagged in test-2's drain",
+			recorded:    []*models.Mock{mongoMockAt("pub-1", 1050), mongoMockAt("mock-c", 2010)},
+			consumed:    map[string][]models.MockState{"test-2": {mongoAt("pub-1", 1050), mongoAt("mock-c", 2010)}},
+			flagFile:    want{file: map[string][]string{"test-1": {"pub-1"}, "test-2": {"mock-c"}}, kept: "test-1", logged: "[test-1]"},
+			flagNone:    want{file: map[string][]string{"test-2": {"mock-c"}}, logged: "[test-1]"},
+			defaultNone: want{file: map[string][]string{"test-2": {"mock-c"}}, logged: "[test-1]"},
+		},
+		{
+			// One of test-1's publishes was placed: it has an entry from the
+			// run, written as before, and is not named.
+			name:        "test-1's first publish is placed, its second never comes",
+			recorded:    []*models.Mock{mongoMockAt("pub-1", 1500), mongoMockAt("pub-1b", 1600), mongoMockAt("mock-c", 2010)},
+			consumed:    map[string][]models.MockState{"test-2": {carriedAt("pub-1", 1500), mongoAt("mock-c", 2010)}},
+			flagFile:    want{file: map[string][]string{"test-1": {"pub-1"}, "test-2": {"mock-c"}}},
+			flagNone:    want{file: map[string][]string{"test-1": {"pub-1"}, "test-2": {"mock-c"}}},
+			defaultNone: want{file: map[string][]string{"test-1": {"pub-1"}, "test-2": {"mock-c"}}},
+		},
+		{
+			// test-1 is the only test that passed, and gets no entry: a new
+			// file would map no test, and is held, as main creates none with
+			// an entry (main's has none). The default flag maps nothing and
+			// logs no hold.
+			name:        "test-2 fails consuming nothing, test-1's publish attributed to no one",
+			recorded:    []*models.Mock{mongoMockAt("pub-1", 1500), mongoMockAt("mock-c", 2010)},
+			wrongBody:   map[string]bool{"test-2": true},
+			flagFile:    want{file: map[string][]string{"test-1": {"pub-1"}, "test-2": {"mock-old-c"}}, kept: "test-1", logged: "[test-1]"},
+			flagNone:    want{held: "holds a carry-over mock the run attributed to no one", logged: "[test-1]"},
+			defaultNone: want{logged: "[test-1]"},
+		},
+		{
+			// test-1 did not pass: it keeps its recorded entry anyway, and
+			// the run names no test.
+			name:        "test-1 fails, its publish never read",
+			recorded:    []*models.Mock{mongoMockAt("pub-1", 1500), mongoMockAt("mock-c", 2010)},
+			consumed:    map[string][]models.MockState{"test-2": {mongoAt("mock-c", 2010)}},
+			wrongBody:   map[string]bool{"test-1": true},
+			flagFile:    want{file: map[string][]string{"test-1": {"pub-1"}, "test-2": {"mock-c"}}, kept: "test-1"},
+			flagNone:    want{file: map[string][]string{"test-2": {"mock-c"}}},
+			defaultNone: want{file: map[string][]string{"test-2": {"mock-c"}}},
+		},
+	} {
+		for _, run := range []struct {
+			name   string
+			flag   bool
+			exists bool
+			w      want
+		}{
+			{"--update-test-mapping, file exists", true, true, tc.flagFile},
+			{"--update-test-mapping, no file", true, false, tc.flagNone},
+			{"default flag, no file", false, false, tc.defaultNone},
+			// The default flag writes nothing into a file that exists, and
+			// names no test.
+			{"default flag, file exists", false, true, want{file: map[string][]string{"test-1": {"pub-1"}, "test-2": {"mock-old-c"}}}},
+		} {
+			t.Run(tc.name+"/"+run.name, func(t *testing.T) {
+				core, logs := observer.New(zap.InfoLevel)
+				h := newMappingRunHarness(t, 2)
+				pinWindows(h)
+				h.replayer.logger = zap.New(core)
+				h.replayer.config.Test.UpdateTestMapping = run.flag
+				h.mocks.filtered = tc.recorded
+				var recorded map[string][]models.MockEntry
+				if run.exists {
+					recorded = map[string][]models.MockEntry{"test-1": mongoEntries("pub-1"), "test-2": mongoEntries("mock-old-c")}
+				}
+				db := mappingFile(t, h, recorded)
+				var keptBefore []byte
+				if run.w.kept != "" {
+					keptBefore = recordedEntryYAML(t, db, run.w.kept)
+				}
+				base := prHooks{wrongBody: tc.wrongBody, consumedFor: consumedByWindow(h, tc.consumed)}
+				reads := map[string]int{}
+				h.replayer.hookImpl = failReads{prHooks: base, h: h, onRead: tc.onRead, mu: &sync.Mutex{}, reads: reads}
+				_ = h.run(t)
+				for id, n := range tc.wantReads {
+					if reads[id] != n {
+						t.Fatalf("precondition: %d read(s) in %s's window, want %d", reads[id], id, n)
+					}
+				}
+
+				for _, id := range []string{"test-1", "test-2"} {
+					// A wrong answer fails the test (OBSOLETE where its
+					// recorded entry is left unconsumed): not passing either way.
+					if got := statusOf(t, h, id); (got == models.TestStatusPassed) == tc.wrongBody[id] {
+						t.Fatalf("precondition: %s is %s, want it to pass: %v", id, got, !tc.wrongBody[id])
+					}
+				}
+				if got := entriesOnDisk(t, db); !reflect.DeepEqual(got, run.w.file) {
+					t.Fatalf("mappings.yaml: %s; want %s", fileState(got), fileState(run.w.file))
+				}
+				if run.w.kept != "" {
+					if after := recordedEntryYAML(t, db, run.w.kept); string(after) != string(keptBefore) {
+						t.Fatalf("%s's recorded entry was rewritten:\n%s\nwas:\n%s", run.w.kept, after, keptBefore)
+					}
+				}
+				var logged []string
+				for _, e := range logs.All() {
+					if strings.HasPrefix(e.Message, "gave no entry to passing tests whose recording holds a carry-over mock") {
+						logged = append(logged, fmt.Sprint(e.ContextMap()["tests"]))
+					}
+				}
+				switch {
+				case run.w.logged == "" && len(logged) != 0:
+					t.Fatalf("the run names %v as holding an unattributed carry-over; want none", logged)
+				case run.w.logged != "" && (len(logged) != 1 || logged[0] != run.w.logged):
+					t.Fatalf("the run names %v as holding an unattributed carry-over; want %s", logged, run.w.logged)
+				}
+				var warned []string
+				for _, e := range logs.FilterMessage("not writing mappings.yaml").All() {
+					if e.Level >= zap.WarnLevel {
+						warned = append(warned, fmt.Sprint(e.ContextMap()["reason"]))
+					}
+				}
+				switch {
+				case run.w.held == "" && len(warned) != 0:
+					t.Fatalf("want no \"not writing mappings.yaml\" warning, got %v", warned)
+				case run.w.held != "" && (len(warned) != 1 || !strings.Contains(warned[0], run.w.held)):
+					t.Fatalf("want one \"not writing mappings.yaml\" warning saying %q, got %v", run.w.held, warned)
+				}
+			})
+		}
+	}
+}

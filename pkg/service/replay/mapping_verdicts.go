@@ -68,9 +68,11 @@ import (
 //
 // A passing test that consumed nothing, or only the startup section's mocks,
 // gets an entry with none (addConsumedNothingEntries), so a test with no entry
-// is one the run gave no verdict on, with one exception: a passing test whose
-// drain caught only other tests' flagged mocks gets no entry from the run
-// (carryOverAttribution.caughtOnlyOthers), as before.
+// is one the run gave no verdict on, with two exceptions, which get no entry
+// from the run, as before: a passing test whose drain caught only other tests'
+// flagged mocks (carryOverAttribution.caughtOnlyOthers), and one whose
+// recording holds a carry-over mock the run attributed to no one
+// (carryOverAttribution.unattributedCarryOverOwners).
 //
 //   - PASSED: passing. A pass that left a recorded mock unconsumed is a pass
 //     when its answer matched (it stays PASSED only while --assert-dependencies
@@ -246,7 +248,8 @@ func markWrittenByKeployTest(doc *models.Mapping) {
 // default flag's create, decide on mapsAMock, and an empty entry maps none. A
 // new file is created only when every passing test has an entry
 // (passingWithNoEntry), an empty one counting, but for a test that caught
-// only other tests' flagged mocks, which a new file leaves out, as before.
+// only other tests' flagged mocks, or whose recording holds a carry-over mock
+// the run attributed to no one, which a new file leaves out, as before.
 func addConsumedNothingEntries(doc *models.Mapping, results []models.TestResult, passing map[string]bool, none map[string]struct{}) {
 	if doc == nil || len(none) == 0 {
 		return

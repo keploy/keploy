@@ -6559,19 +6559,21 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// default run's create is skipped, as for any file that exists.
 	//
 	// A new file gives every passing test an entry, or is not created,
-	// with one exception. A passing test with no entry in it (its
+	// with two exceptions. A passing test with no entry in it (its
 	// consumption fell in no test's window or in another test's, or was
 	// not read) is "no verdict" to a replay that skips a test with no
 	// entry, which would skip a test that passed, run after run: no
 	// default run writes into a file that exists. With no file the set
 	// keeps its whole recording. (A file that exists is written as
-	// before.) The exception: a passing test whose drain caught only other
-	// tests' flagged mocks (caughtOnlyOthers) gets no entry and does not
-	// hold the file, as before the empty entries. Its consumption is its
-	// owners', whose entries list it, and the run did not establish what
-	// the test itself needs, so it gets no empty entry; a new file is
-	// created without it, as main creates it, and a replay that skips a
-	// test with no entry skips it, as with main's file.
+	// before.) The exceptions (leftAsRecorded) get no entry and do not
+	// hold the file, as before the empty entries, because the run did not
+	// establish what such a test needs, so it gets no empty entry: a
+	// passing test whose drain caught only other tests' flagged mocks (its
+	// consumption is its owners', whose entries list it), and one whose
+	// recording holds a carry-over mock the run attributed to no one (its
+	// publish may come after every read). A new file is created without
+	// it, as main creates it, and a replay that skips a test with no entry
+	// skips it, as with main's file.
 	//
 	// No write may leave a loaded test out of the file for good because the
 	// run lost it, as no default run adds to a file that exists. A run that did
@@ -6608,17 +6610,43 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	if unreadDrain == "" && len(consumptionUnread) > 0 {
 		unreadDrain = "what " + strings.Join(consumptionUnread[:min(len(consumptionUnread), 5)], ", ") + " consumed"
 	}
-	var consumedNothing, caughtOnlyOthers map[string]struct{}
+	// leftAsRecorded: the passing tests that get no entry from this run and
+	// do not hold a new file (see above): a catcher (caughtOnlyOthers), and
+	// a test in carryOverUnattributed.
+	var consumedNothing, leftAsRecorded map[string]struct{}
+	// carryOverUnattributed: the passing tests that consumed nothing this
+	// run read and have no entry, whose recording holds a carry-over mock
+	// (the application's asynchronous output, its own by the release rule)
+	// that the run attributed to no one. Not seeing it does not show the
+	// test needs nothing: its publish may come after every read. Decided by
+	// what the mapping lists, never by time. It gets no empty entry: a file
+	// that exists keeps its recorded one, and a new file is created without
+	// it. A test that has an entry from the run (another of its carry-overs
+	// was read) is written as before.
+	var carryOverUnattributed []string
 	if r.instrument && r.mocksDependencies() && unreadDrain == "" {
 		consumedNothing = carryAttr.consumedNothing()
-		caughtOnlyOthers = carryAttr.caughtOnlyOthers()
+		leftAsRecorded = carryAttr.caughtOnlyOthers()
+		owners := carryAttr.unattributedCarryOverOwners(mockLookup, actualTestMockMappings)
+		hasEntry := make(map[string]bool, len(mappingDoc.TestCases))
+		for _, tc := range mappingDoc.TestCases {
+			hasEntry[tc.ID] = true
+		}
+		for id := range consumedNothing {
+			if _, ok := owners[id]; ok && passing[id] && !hasEntry[id] {
+				carryOverUnattributed = append(carryOverUnattributed, id)
+			}
+		}
+		sort.Strings(carryOverUnattributed)
+		for _, id := range carryOverUnattributed {
+			delete(consumedNothing, id)
+			leftAsRecorded[id] = struct{}{}
+		}
 	}
 	addConsumedNothingEntries(mappingDoc, testCaseResults, passing, consumedNothing)
-	// A passing test whose drain caught only other tests' flagged mocks gets
-	// no entry from this run, and a new file is created without one, as
-	// before the empty entries: its consumption is its owners' (their
-	// entries list it), not a mock keploy could not place.
-	unentered := withoutTests(passingWithNoEntry(mappingDoc, testCaseResults, passing), caughtOnlyOthers)
+	// A test in leftAsRecorded gets no entry from this run, and a new file
+	// is created without one, as before the empty entries.
+	unentered := withoutTests(passingWithNoEntry(mappingDoc, testCaseResults, passing), leftAsRecorded)
 	// withheld: the passing tests a failed read kept from an empty entry (they
 	// consumed nothing the run read), which a file that exists keeps as
 	// recorded.
@@ -6645,6 +6673,17 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		mappingDoc.Startup = nil
 	}
 	mappingExists := sync.OnceValues(func() (bool, error) { return r.mappingDB.Exists(ctx, testSetID) })
+	// Named where a write may put their entries: under the flag, or into a
+	// file the run may create (the proven switch writes none).
+	if n := len(carryOverUnattributed); n > 0 && !provenswitch.On() && r.mappingDB != nil {
+		exists, existsErr := mappingExists()
+		if r.config.Test.UpdateTestMapping || existsErr != nil || !exists {
+			r.logger.Info("gave no entry to passing tests whose recording holds a carry-over mock this run attributed to no one (its publish may come after every read): a mappings.yaml that exists keeps their recorded entries, and one this run creates leaves them out",
+				zap.String("testSetID", testSetID),
+				zap.Int("count", n),
+				zap.Strings("tests", carryOverUnattributed[:min(n, 20)]))
+		}
+	}
 	holdMappings := ""
 	// holdQuietly: a hold that is the expected outcome, logged at Debug.
 	holdQuietly := false
@@ -6709,7 +6748,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// (the case below holds it when a passing test would have no
 		// entry), but never a file with no entry at all, which it would be
 		// when every passing test caught only other tests' flagged mocks
-		// (caughtOnlyOthers: no entry, and no hold below). The set then has a mapping, by which a replay that loads
+		// (leftAsRecorded: no entry, and no hold below). The set then has a mapping, by which a replay that loads
 		// only the mapped mocks uses the set's cut. The test not counted as
 		// passing gets no entry: a local replay serves it its recorded
 		// window, and a replay that skips a test with no entry reports it
@@ -6725,9 +6764,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			case len(mappingDoc.TestCases) == 0 && len(unentered) == 0:
 				// Tests passed, none has an entry and none is held for: every
 				// one caught only flagged mocks of tests this run maps no entry
-				// for (an ignored one, say; caughtOnlyOthers). Quiet only where
+				// for (an ignored one, say), or holds a carry-over mock the run
+				// attributed to no one (leftAsRecorded). Quiet only where
 				// nothing asked for a write.
-				holdMappings = "every test that passed consumed only flagged mocks other tests own (carried over), so a new file would map no test; a later run in which a test that consumes a mock of its own passes creates it"
+				holdMappings = "every test that passed consumed only flagged mocks other tests own (carried over), or its recording holds a carry-over mock the run attributed to no one, so a new file would map no test; a later run in which a test that consumes a mock of its own passes creates it"
 				holdQuietly = !r.config.Test.UpdateTestMapping
 			default:
 				holdMappings = "no test consumed a mock, so a new file would map no test"
@@ -7180,21 +7220,26 @@ func newMockLookup(perTest, session []*models.Mock) map[string]mockDisplayInfo {
 
 // addMockDisplayInfo adds each mock's display info to the lookup, keyed by
 // name; a later mock of the same name replaces an earlier one. A mock whose
-// payload is on disk is kept itself, and asked when a report names it.
+// payload is on disk is kept itself, and asked when a report names it. Each
+// says whether it is a carry-over mock, and its place, for the mapping
+// (carryOverAttribution.unattributedCarryOverOwners).
 func addMockDisplayInfo(lookup map[string]mockDisplayInfo, mocks []*models.Mock) {
 	for _, mock := range mocks {
+		var info mockDisplayInfo
 		if mock.PayloadOnDisk() {
-			lookup[mock.Name] = mockDisplayInfo{protocol: string(mock.Kind), onDisk: mock}
-			continue
+			info = mockDisplayInfo{protocol: string(mock.Kind), onDisk: mock}
+		} else {
+			info = mockDisplayInfo{
+				summary:    models.MockSummaryFromSpec(mock),
+				protocol:   string(mock.Kind),
+				target:     mockTargetFromSpec(mock),
+				request:    mock.RequestFingerprint(),
+				recordedAt: mock.Spec.ReqTimestampMock,
+				lifetime:   mock.TestModeInfo.Lifetime,
+			}
 		}
-		lookup[mock.Name] = mockDisplayInfo{
-			summary:    models.MockSummaryFromSpec(mock),
-			protocol:   string(mock.Kind),
-			target:     mockTargetFromSpec(mock),
-			request:    mock.RequestFingerprint(),
-			recordedAt: mock.Spec.ReqTimestampMock,
-			lifetime:   mock.TestModeInfo.Lifetime,
-		}
+		info.carryOver, info.place = models.IsCarryOver(mock), models.PlaceOf(mock)
+		lookup[mock.Name] = info
 	}
 }
 

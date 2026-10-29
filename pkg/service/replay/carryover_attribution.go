@@ -419,6 +419,40 @@ func (a *carryOverAttribution) mapDrained(mapping *models.Mapping, consumed []mo
 	}
 }
 
+// unattributedCarryOverOwners names the tests whose recording holds a
+// carry-over mock (mockDisplayInfo.carryOver) that the run attributed to no one:
+// mapping, as this run builds it, lists it in no test's entry and not in the
+// startup section. A read that took it does not count unless it placed it: a
+// publish consumed while its own window was the agent's current one comes
+// unflagged, and a later test's window filter, or the read at the set's end,
+// places it nowhere. Each is named under the test the release rule gives its
+// place to (its window, or the gap after it); one placed before every window
+// is the startup section's, set-level, and names no test.
+func (a *carryOverAttribution) unattributedCarryOverOwners(lookup map[string]mockDisplayInfo, mapping *models.Mapping) map[string]struct{} {
+	out := map[string]struct{}{}
+	if a == nil || a.sched.Len() == 0 || mapping == nil {
+		return out
+	}
+	listed := map[string]bool{}
+	for _, tc := range mapping.TestCases {
+		for _, m := range tc.Mocks {
+			listed[m.Name] = true
+		}
+	}
+	for _, m := range mapping.Startup {
+		listed[m.Name] = true
+	}
+	for name, info := range lookup {
+		if !info.carryOver || info.place.IsZero() || listed[name] {
+			continue
+		}
+		if idx := a.sched.ReleaseIndex(info.place); idx >= 0 {
+			out[a.sched.Window(idx).TestCase] = struct{}{}
+		}
+	}
+	return out
+}
+
 // inFlightAnsweredLate is the unflagged per-test mocks of consumed that were in
 // flight when the test of window [tcReq, tcResp] began (models.WindowSchedule.
 // InFlightInto) and answered after it ended: the test's own, which the window
