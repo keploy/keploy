@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 )
 
@@ -28,31 +29,45 @@ func TestAMissWithoutATimeIsStampedOnACopy(t *testing.T) {
 // The miss the agent returns is its report field for field: every field the
 // two share is carried from one to the other (see the reverse in
 // pkg/service/replay), so a field added to both is carried or fails here.
+// The one field only the proven switch reads (Background: a call of a
+// series judging marked, charged to no test) is carried under the switch,
+// and without it never: a miss is then what it was before the switch.
 func TestAMissCarriesEveryFieldOfItsReport(t *testing.T) {
-	// Both ways through sendMockNotFoundError: a report with its time, and one
-	// without, which it stamps on a copy -- that copy carries the rest.
-	for _, stamped := range []bool{false, true} {
-		var report models.MockMismatchReport
-		fillEveryField(reflect.ValueOf(&report).Elem())
-		if stamped {
-			report.At = time.Time{}
+	for _, proven := range []bool{false, true} {
+		if proven {
+			t.Setenv(provenswitch.Env, "1")
+		} else {
+			t.Setenv(provenswitch.Env, "")
 		}
-		p := &Proxy{logger: zap.NewNop(), errChannel: make(chan error, 4)}
-		p.BeginTestErrorCapture()
-		p.sendMockNotFoundError(models.NewMockMismatchError(models.ErrNoMockMatched, &report))
-		got, err := p.GetMockErrors(context.Background())
-		if err != nil || len(got) != 1 {
-			t.Fatalf("stamped=%v: want the one miss, got %+v (%v)", stamped, got, err)
-		}
-		from, to := reflect.ValueOf(report), reflect.ValueOf(got[0])
-		for i := 0; i < from.NumField(); i++ {
-			name := from.Type().Field(i).Name
-			field := to.FieldByName(name)
-			if !field.IsValid() || (stamped && name == "At") {
-				continue // the miss has no such field, or its time is the stamp
+		// Both ways through sendMockNotFoundError: a report with its time, and one
+		// without, which it stamps on a copy -- that copy carries the rest.
+		for _, stamped := range []bool{false, true} {
+			var report models.MockMismatchReport
+			fillEveryField(reflect.ValueOf(&report).Elem())
+			if stamped {
+				report.At = time.Time{}
 			}
-			if !reflect.DeepEqual(field.Interface(), from.Field(i).Interface()) {
-				t.Errorf("stamped=%v: the miss dropped its report's %s: got %v, want %v", stamped, name, field.Interface(), from.Field(i).Interface())
+			p := &Proxy{logger: zap.NewNop(), errChannel: make(chan error, 4)}
+			p.BeginTestErrorCapture()
+			p.sendMockNotFoundError(models.NewMockMismatchError(models.ErrNoMockMatched, &report))
+			got, err := p.GetMockErrors(context.Background())
+			if err != nil || len(got) != 1 {
+				t.Fatalf("proven=%v stamped=%v: want the one miss, got %+v (%v)", proven, stamped, got, err)
+			}
+			from, to := reflect.ValueOf(report), reflect.ValueOf(got[0])
+			for i := 0; i < from.NumField(); i++ {
+				name := from.Type().Field(i).Name
+				field := to.FieldByName(name)
+				if !field.IsValid() || (stamped && name == "At") {
+					continue // the miss has no such field, or its time is the stamp
+				}
+				want := from.Field(i).Interface()
+				if !proven && name == "Background" {
+					want = reflect.Zero(field.Type()).Interface()
+				}
+				if !reflect.DeepEqual(field.Interface(), want) {
+					t.Errorf("proven=%v stamped=%v: the miss carries %s %v; want %v", proven, stamped, name, field.Interface(), want)
+				}
 			}
 		}
 	}
