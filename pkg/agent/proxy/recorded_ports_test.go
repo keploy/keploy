@@ -6,8 +6,10 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/proxy/internal/testnet"
+	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/agent/proxy/synhold"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -188,8 +190,47 @@ func TestAPortReachedOnlyInsideATestIsRecordedUnderTheProvenSwitch(t *testing.T)
 	}
 }
 
-// keploy test refuses no local connect, with the switch on or off: the same
-// store and staging accept every one of them, as before.
+// The agent's own Mock and Record decide what becomes of the seed: a real
+// proxy's Mock after the store keeps the ports the store seeded (keploy
+// test publishes the store before its Mock), and its Record forgets them (a
+// recording reaches nothing a previous replay's store reached, so a call to a
+// stopped one of those ports is not left to the record path).
+func TestAProxysMockKeepsTheSeededPortsAndItsRecordForgetsThem(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	plain, kid := testnet.RefusedAddr(t, "tcp"), testnet.RefusedAddr(t, "tcp")
+	store := localPortsStore(t, plain, kid)
+	recorded.forget()
+	t.Cleanup(recorded.forget)
+	t.Cleanup(func() { syncMock.Get().SetOutputChannel(nil) })
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	p := New(zap.NewNop(), fakeDestInfo{}, config.New())
+	p.nsswitchData = []byte("preseeded-by-test") // Mock leaves the host's DNS alone
+	seed, err := store.LoadDestinations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.SeedRecordedDestinations(seed)
+	port := uint32(mustPort(t, plain))
+	if !RecordedPort(port) {
+		t.Fatal("the store's seed did not list the port the recording reached only inside a test")
+	}
+	if err := p.Mock(ctx, models.OutgoingOptions{Mocking: true}); err != nil {
+		t.Fatal(err)
+	}
+	if !RecordedPort(port) {
+		t.Fatal("a Proxy.Mock after the store dropped the seeded port")
+	}
+	if err := p.Record(ctx, make(chan *models.Mock, 16), models.OutgoingOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if RecordedPort(port) {
+		t.Fatal("a Proxy.Record kept the seeded port")
+	}
+}
+
+// keploy test's handshake hold refuses no local connect, with the switch on or
+// off: the same store and staging accept every one of them, as before.
 func TestKeployTestAcceptsTheLocalPortsOfTheSameStore(t *testing.T) {
 	for _, on := range []string{"1", "0"} {
 		t.Run("KEPLOY_PROVEN="+on, func(t *testing.T) {
@@ -227,6 +268,151 @@ func TestWithoutTheSwitchThePortsAreOnlyWhatIsStaged(t *testing.T) {
 	recorded.add(inTest)
 	if got := decide(plain); got != synhold.Accept {
 		t.Fatalf("after its test's staging: %v, want accept", got)
+	}
+}
+
+// A local MySQL the recording reached only inside a test: the store keeps its
+// first mock as a destination for the MySQL rules, with the switch on or off.
+// Under the switch that mock is its port's first too, kept once, and the seed
+// lists its port, so its connect is not refused while it is stopped. Without
+// the switch the store seeds no port from it: its connect is refused before
+// its test's staging, as before.
+func TestAStoredLocalMySQLDestinationIsARecordedPortOnlyUnderTheSwitch(t *testing.T) {
+	for _, on := range []string{"1", "0"} {
+		t.Run(provenswitch.Env+"="+on, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, on)
+			db := testnet.RefusedAddr(t, "tcp")
+			s, err := NewDiskMocks(zap.NewNop())
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = s.Close() })
+			inTest := perTestMockAt("db-in-test", 20)
+			inTest.Kind = models.MySQL
+			inTest.Spec.Metadata = map[string]string{"destAddr": db}
+			if err := s.Add(inTest); err != nil {
+				t.Fatal(err)
+			}
+			s.Finalize()
+			if seed, err := s.LoadDestinations(); err != nil || len(seed) != 1 {
+				t.Fatalf("the store keeps %d destinations (%v); want the MySQL one, once", len(seed), err)
+			}
+			decide := replayLocalPorts(t, true, s)
+			want := synhold.Refuse
+			if on == "1" {
+				want = synhold.Accept
+			}
+			if got := decide(db); got != want {
+				t.Fatalf("a stopped local MySQL the recording reached only inside a test, before its test's staging: %v, want %v", got, want)
+			}
+		})
+	}
+}
+
+// A mock whose destination its recording does not say could be for any
+// port, whether a staging stages it or the store seeds it: under the switch
+// one recorded only inside a test makes every local port a recorded one, as
+// it did when keploy mock replay staged the whole recording. Without the
+// switch only its test's staging does.
+func TestAMockOfNoKnownDestinationInsideATestCountsForEveryPort(t *testing.T) {
+	for _, on := range []string{"1", "0"} {
+		t.Run(provenswitch.Env+"="+on, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, on)
+			local := testnet.RefusedAddr(t, "tcp")
+			s, err := NewDiskMocks(zap.NewNop())
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = s.Close() })
+			inTest := perTestMockAt("no-address-in-test", 20)
+			inTest.Kind = models.GENERIC
+			if err := s.Add(inTest); err != nil {
+				t.Fatal(err)
+			}
+			s.Finalize()
+			decide := replayLocalPorts(t, true, s)
+			want := synhold.Refuse
+			if on == "1" {
+				want = synhold.Accept
+			}
+			if got := decide(local); got != want {
+				t.Fatalf("a local port, beside a mock of no known destination recorded inside a test: %v, want %v", got, want)
+			}
+		})
+	}
+}
+
+// A port a process the test command started reached, and the recording also
+// reached as an outside dependency, is not the started process's alone,
+// whether each reach is staged or seeded: the two are read together, as when
+// keploy mock replay staged the whole recording. Under the switch, with the
+// outside dependency reached only inside tests (seeded), its connect is
+// served from mocks while it is down, whether the started process reached it
+// inside a test too (seeded) or before the first test (staged).
+func TestAPortAlsoReachedAsAnOutsideDependencyIsNoChild(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		startedAt int64
+	}{
+		{"both reaches inside tests", 20},
+		{"the started process's reach before the first test", 5},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, "1")
+			shared := testnet.RefusedAddr(t, "tcp")
+			s, err := NewDiskMocks(zap.NewNop())
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = s.Close() })
+			started := perTestMockAt("started", c.startedAt)
+			started.Spec.Metadata = map[string]string{"destAddr": shared, "startedByTests": "true"}
+			outside := perTestMockAt("outside-in-test", 25)
+			outside.Spec.Metadata = map[string]string{"destAddr": shared}
+			for _, m := range []*models.Mock{started, outside} {
+				if err := s.Add(m); err != nil {
+					t.Fatal(err)
+				}
+			}
+			s.Finalize()
+			decide := replayLocalPorts(t, true, s)
+			if got := decide(shared); got != synhold.Accept {
+				t.Fatalf("a stopped local port reached by a started process and, only inside tests, as an outside dependency: %v, want accept", got)
+			}
+		})
+	}
+}
+
+// A recording replays nothing: its start forgets the ports a replay's
+// stagings staged, not only those its store seeded, with the switch on or
+// off. A stopped local port the recording reached before the first test,
+// accepted while the set replays, is refused once a recording starts.
+func TestARecordingForgetsTheStagedPorts(t *testing.T) {
+	for _, on := range []string{"1", "0"} {
+		t.Run(provenswitch.Env+"="+on, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, on)
+			local := testnet.RefusedAddr(t, "tcp")
+			s, err := NewDiskMocks(zap.NewNop())
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = s.Close() })
+			boot := perTestMockAt("boot", 5)
+			boot.TestModeInfo.Lifetime = models.LifetimeSession
+			boot.Spec.Metadata = map[string]string{"destAddr": local}
+			if err := s.Add(boot); err != nil {
+				t.Fatal(err)
+			}
+			s.Finalize()
+			decide := replayLocalPorts(t, true, s)
+			if got := decide(local); got != synhold.Accept {
+				t.Fatalf("a stopped local port the staging staged: %v, want accept", got)
+			}
+			recorded.forget() // a Record
+			if got := decide(local); got != synhold.Refuse {
+				t.Fatalf("after a recording starts: %v, want refuse", got)
+			}
+		})
 	}
 }
 
