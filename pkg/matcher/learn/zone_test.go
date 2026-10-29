@@ -663,3 +663,137 @@ func TestAnOffsetCutToAnHourInTheApplicationsZoneIsLearnedAndCheckedThere(t *tes
 		t.Errorf("thirty days on, cut to the IST day: %s %+v (%s); want refused as too wide, naming the day's cut", d.Kind, d.Offset, d.Why)
 	}
 }
+
+// A client test's text that names its moment, a day after a read of the
+// application's clock cut to its IST hour, written with its offset
+// ("+05:30") or in UTC ("Z", a Java Instant of the IST hour), is learned as
+// clock + 1d at the hour naming +05:30, in the text's layout, and a replay
+// checks it at the IST hour in the process's zone and in the stored one:
+// the widened span's edges hold and a second past either fails (a value
+// off the hour is read in the application's zone, which sets the start),
+// an hour stale passes, three hours stale fails. Met with a learning in another zone
+// (models.AppZoneApart), it is checked in the zone read from the
+// application's process, and refused, saying why, where none is read.
+//
+// textClockOffset reads the cut in the application's zone: a slow call's
+// windows (70 minutes) show the UTC text's hour only read in IST (read in
+// UTC alone it shows a minute, at which one offset holds both runs too,
+// its gap a whole hour), so with the zone unread no offset is learned and
+// the client test's refusal stands. A quick call's gap is the hour (one
+// offset holds both runs at no finer cut), learned naming no zone, as is
+// the "+05:30" text, which shows its hour whole in the offset it writes,
+// at either speed. A replay that cannot read the application's zone
+// either refuses such a learning, saying so; one that reads IST from the
+// process checks it there.
+func TestAClientTestsTextOffsetCutToAnHourIsLearnedInTheApplicationsZone(t *testing.T) {
+	ist, err := time.LoadLocation("Asia/Kolkata")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const p = "body.docs.msgs.{}.expires_at"
+	const day = 24 * time.Hour
+	ms := time.Millisecond
+	call := time.Date(2026, 10, 26, 12, 29, 59, 50e6, time.UTC)
+	fcall := call.Add(FullRoundLead)
+	inIST := func(at time.Time) string { return at.In(ist).Format(time.RFC3339) }
+	inUTC := func(at time.Time) string { return at.UTC().Format(time.RFC3339) }
+	text := func(f func(time.Time) string, at time.Time) Leaf {
+		return Leaf{Path: p, Noise: p, Type: String, Value: f(at)}
+	}
+	learn := func(zone *time.Location, f func(time.Time) string, open time.Duration) Learned {
+		t.Helper()
+		w := (&Window{Rec: Span{From: call.Add(-open), To: call}, F: Span{From: fcall.Add(-open), To: fcall}}).ComparesOffsets()
+		dc := clockedDrifts()
+		dc.clientTests = true
+		dc.zone = zone
+		at := func(c time.Time) Shape {
+			return Shape{Leaves: map[string]Leaf{p: text(f, models.ReadCut(c, time.Hour, ist).Add(day))}}
+		}
+		return ClassifyIn(dc, []string{p}, at(fcall), at(call), call, nil, nil, nil, w)[0]
+	}
+	verdict := map[bool]string{true: "FALSE RED", false: "FALSE GREEN"}
+	from := time.Date(2026, 11, 2, 9, 0, 0, 0, time.UTC)
+	to := from.Add(time.Second)
+	v := models.ReadCut(from, time.Hour, ist).Add(day)
+	inProcess := Span{From: from, To: to, Zone: ist, Own: true}
+	for _, layout := range []struct {
+		name string
+		f    func(time.Time) string
+	}{
+		{"written with +05:30", inIST},
+		{"written in UTC", inUTC},
+	} {
+		ln := learn(ist, layout.f, 100*ms)
+		o := ln.Offset
+		if ln.Kind != KindClockOffset || o == nil || o.Res != time.Hour || o.AppZone != "+05:30" || o.Min > day || o.Max <= day || o.Layout != clockTextLayout(layout.f(call)) {
+			t.Fatalf("FALSE RED: a client test's text %s, a day on, cut to the IST hour, learned in IST: %s %+v (%s); want clock + 1d at the hour in the text's layout, naming +05:30", layout.name, ln.Kind, o, ln.Why)
+		}
+		lo, hi := models.ReadCut(from.Add(o.Min), time.Hour, ist).Add(-time.Hour), to.Add(o.Max).Add(time.Hour).Truncate(time.Second)
+		for _, own := range []bool{true, false} {
+			s := inProcess
+			if !own {
+				s = Span{From: from, To: to, Zone: time.UTC}
+			}
+			for _, row := range []struct {
+				name string
+				at   time.Time
+				want bool
+			}{
+				{"the read plus a day, cut to the IST hour", v, true},
+				{"the widened span's start", lo, true},
+				{"a second before it", lo.Add(-time.Second), false},
+				{"the widened span's end", hi, true},
+				{"a second after it", hi.Add(time.Second), false},
+				{"an hour stale", v.Add(-time.Hour), true},
+				{"three hours stale", v.Add(-3 * time.Hour), false},
+			} {
+				if got, why := CheckClockRead(p, *o, text(layout.f, row.at), s, true); got != row.want {
+					t.Errorf("%s: %s, clock + 1d at the IST hour (its process's zone read: %v), %s (%s): holds %v (%s), want %v", verdict[row.want], layout.name, own, row.name, layout.f(row.at), got, why, row.want)
+				}
+			}
+		}
+		apart := *o
+		apart.AppZone = models.AppZoneApart
+		if ok, why := CheckClockRead(p, apart, text(layout.f, v.Add(-time.Hour)), inProcess, true); !ok {
+			t.Errorf("FALSE RED: %s, clock + 1d at the hour learned in two zones, a replay that reads IST from the process, an hour stale: refused (%s)", layout.name, why)
+		}
+		if ok, _ := CheckClockRead(p, apart, text(layout.f, v.Add(-3*time.Hour)), inProcess, true); ok {
+			t.Errorf("FALSE GREEN: %s, clock + 1d at the hour learned in two zones, a replay that reads IST from the process, three hours stale: passed", layout.name)
+		}
+		if ok, why := CheckClockRead(p, apart, text(layout.f, v), Span{From: from, To: to, Zone: time.UTC}, true); ok || !strings.Contains(why, "the learn step read the application's zone as no one zone") {
+			t.Errorf("%s, clock + 1d at the hour learned in two zones, a replay that cannot read the process's zone: %v (%s); want refused, saying so", layout.name, ok, why)
+		}
+	}
+	// The zone guard: only read in IST does a slow call's UTC text show its
+	// hour.
+	if slow := learn(ist, inUTC, 70*time.Minute); slow.Kind != KindClockOffset || slow.Offset == nil || slow.Offset.Res != time.Hour || slow.Offset.AppZone != "+05:30" {
+		t.Fatalf("FALSE RED: a client test's text written in UTC, a slow call's windows, learned in IST: %s %+v (%s); want clock + 1d at the IST hour, naming +05:30", slow.Kind, slow.Offset, slow.Why)
+	}
+	if slow := learn(nil, inUTC, 70*time.Minute); slow.Kind != KindUnaccounted || slow.Offset != nil || !strings.Contains(slow.Why, "no clock read by the app matched it") {
+		t.Errorf("FALSE GREEN: a client test's text written in UTC, a slow call's windows, the zone unread: %s %+v (%s); want no offset learned, the client test's refusal standing", slow.Kind, slow.Offset, slow.Why)
+	}
+	for _, row := range []struct {
+		name string
+		f    func(time.Time) string
+		open time.Duration
+	}{
+		{"written in UTC, a quick call", inUTC, 100 * ms},
+		{"written with +05:30, a quick call", inIST, 100 * ms},
+		{"written with +05:30, a slow call", inIST, 70 * time.Minute},
+	} {
+		n := learn(nil, row.f, row.open)
+		o := n.Offset
+		if n.Kind != KindClockOffset || o == nil || o.Res != time.Hour || o.AppZone != "" || o.Min > day || o.Max <= day || o.Layout != clockTextLayout(row.f(call)) {
+			t.Fatalf("FALSE RED: a client test's text %s, the zone unread: %s %+v (%s); want clock + 1d at the hour in the text's layout, naming no zone", row.name, n.Kind, o, n.Why)
+		}
+		if ok, why := CheckClockRead(p, *o, text(row.f, v), Span{From: from, To: to, Zone: time.UTC}, true); ok || !strings.Contains(why, "the learn step named none") {
+			t.Errorf("a client test's text %s, learned with no zone named, a replay that cannot read the application's zone either: %v (%s); want refused, saying so", row.name, ok, why)
+		}
+		if ok, why := CheckClockRead(p, *o, text(row.f, v.Add(-time.Hour)), inProcess, true); !ok {
+			t.Errorf("FALSE RED: a client test's text %s, learned with no zone named, a replay that reads IST from the process, an hour stale: refused (%s)", row.name, why)
+		}
+		if ok, _ := CheckClockRead(p, *o, text(row.f, v.Add(-3*time.Hour)), inProcess, true); ok {
+			t.Errorf("FALSE GREEN: a client test's text %s, learned with no zone named, a replay that reads IST from the process, three hours stale: passed", row.name)
+		}
+	}
+}

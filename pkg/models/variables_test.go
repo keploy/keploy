@@ -1003,6 +1003,36 @@ func TestAClockOffsetNamesTheApplicationsZoneItWasLearnedIn(t *testing.T) {
 	if m := o.Meet(utc); m.AppZone != AppZoneApart {
 		t.Errorf("learnings in IST and UTC meet as %+v; want AppZoneApart", m)
 	}
+	// A read plus an offset cut to an hour reads the application's zone too,
+	// so its learnings meet as a plain read's: one cut to the minute (no
+	// zone of the application's) met with one cut to the IST hour, in either
+	// order, is the hour's cut and zone over the bounds both hold, and an
+	// hour's in IST met with one of no name or one in UTC names no one zone.
+	// Learned before the hour's offsets read the zone, each of these met as
+	// naming none.
+	day := 24 * time.Hour
+	offMin := ClockOffset{Min: day - 2*time.Minute, Max: day + time.Minute, Res: time.Minute, Layout: LayoutTyped}
+	offIST := ClockOffset{Min: day - time.Hour, Max: day + time.Hour, Res: time.Hour, Layout: LayoutTyped, AppZone: "+05:30"}
+	want := ClockOffset{Min: day - 2*time.Minute, Max: day + time.Minute, Res: time.Hour, Layout: LayoutTyped, AppZone: "+05:30"}
+	if m := offMin.Meet(offIST); m != want {
+		t.Errorf("an offset cut to the minute meets one cut to the IST hour: %+v; want %+v", m, want)
+	}
+	if m := offIST.Meet(offMin); m != want {
+		t.Errorf("an offset cut to the IST hour meets one cut to the minute: %+v; want %+v", m, want)
+	}
+	for _, other := range []string{"", "UTC"} {
+		p := offIST
+		p.AppZone = other
+		if m := offIST.Meet(p); m.AppZone != AppZoneApart || m.Empty() {
+			t.Errorf("an offset cut to the IST hour meets one cut to the hour read with the zone as %q: %+v; want AppZoneApart", other, m)
+		}
+		if m := p.Meet(offIST); m.AppZone != AppZoneApart {
+			t.Errorf("an offset cut to the hour read with the zone as %q meets one cut to the IST hour: %+v; want AppZoneApart", other, m)
+		}
+	}
+	if m := MergeClocks(map[string]ClockOffset{"body.exp": offMin}, map[string]ClockOffset{"body.exp": offIST})["body.exp"]; m != want {
+		t.Errorf("MergeClocks of an offset cut to the minute and one cut to the IST hour: %+v; want %+v", m, want)
+	}
 	// Meet is the same however a place's learnings are grouped: a wall
 	// clock either zone held, in IST and in UTC, met with one in UTC.
 	eIST := ClockOffset{Res: time.Millisecond, Zone: ZoneEither, AppZone: "Asia/Kolkata"}

@@ -265,12 +265,12 @@ func (r ClockRead) inOneSecond(o ClockRead) bool {
 // be any zone; a replay that cannot read the application's zone either
 // reads it in the agent's own, except that it refuses a read cut to an
 // hour or coarser (plain, or plus an offset), whose cut the zone moves,
-// read in the application's zone alone (ZoneApp, or an instant that names its moment); one in either
-// zone (ZoneEither) it checks at its cut in UTC and the agent's own. A
-// recording learned before
-// AppZone was reads the same. Two learnings of one place read with the
-// application's zone as two zones, two named ones or a named one and one
-// of no name, meet as AppZoneApart (Meet), which names none.
+// read in the application's zone alone (ZoneApp, or an instant that names
+// its moment); one in either zone (ZoneEither) it checks at its cut in UTC
+// and the agent's own. A recording learned before AppZone was reads the
+// same. Two learnings of one place read with the application's zone as
+// two zones, two named ones or a named one and one of no name, meet as
+// AppZoneApart (Meet), which names none.
 type ClockOffset struct {
 	Min     time.Duration `json:"min" yaml:"min" bson:"min"`
 	Max     time.Duration `json:"max" yaml:"max" bson:"max"`
