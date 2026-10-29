@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/cespare/xxhash/v2"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.uber.org/zap"
@@ -215,7 +217,9 @@ func appendDoc(t *testing.T, ys *MockYaml, format, kind, name string) {
 // A kept index answers only the content it was read from, by the rules it was
 // read by: a file appended to, a file put in its place with other bytes of the
 // same size, an edit at either end that kept the size and the modification
-// time, and a registration since, are each read whole again.
+// time (on a file longer than both ends, each end in turn), and a
+// registration since (a models hook, a YAML mapper), are each read whole
+// again.
 func TestIndexCacheRereadsWhatChanged(t *testing.T) {
 	t.Setenv("KEPLOY_MOCK_FORMAT", "")
 	ctx := context.Background()
@@ -280,35 +284,37 @@ func TestIndexCacheRereadsWhatChanged(t *testing.T) {
 				t.Fatal(err)
 			}
 		}},
-		{"edited in place at its end, size and time kept", false, func(t *testing.T, ys *MockYaml) {
-			p := mockFilePath(t, ys)
-			info, err := os.Stat(p)
-			if err != nil {
-				t.Fatal(err)
-			}
-			data, err := os.ReadFile(p)
-			if err != nil {
-				t.Fatal(err)
-			}
-			at := strings.LastIndex(string(data), "config-again")
-			if at < 0 {
-				t.Fatal("precondition: nothing to edit")
-			}
-			f, err := os.OpenFile(p, os.O_WRONLY, 0)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, err := f.WriteAt([]byte("CONFIG"), int64(at)); err != nil {
-				t.Fatal(err)
-			}
-			_ = f.Close()
-			if err := os.Chtimes(p, info.ModTime(), info.ModTime()); err != nil {
-				t.Fatal(err)
-			}
+		{"edited in place, a file shorter than both ends, size and time kept", false, func(t *testing.T, ys *MockYaml) {
+			editKeepingTime(t, mockFilePath(t, ys), func(data []byte) int {
+				return strings.LastIndex(string(data), "config-again")
+			}, "CONFIG")
+		}},
+		// On a file longer than both ends, an edit in either end with the size
+		// and the time kept is seen only by that end's hash.
+		{"edited in place in its first 64 KiB, size and time kept", true, func(t *testing.T, ys *MockYaml) {
+			editKeepingTime(t, mockFilePath(t, ys), func(data []byte) int {
+				at := strings.LastIndex(string(data), "config-again")
+				if at < 0 || at+len("CONFIG") > edgeBytes || len(data) <= 2*edgeBytes {
+					t.Fatalf("precondition: config-again at %d of %d bytes is not in the first end only", at, len(data))
+				}
+				return at
+			}, "CONFIG")
+		}},
+		{"edited in place in its last 64 KiB, size and time kept", true, func(t *testing.T, ys *MockYaml) {
+			editKeepingTime(t, mockFilePath(t, ys), func(data []byte) int {
+				// The last byte of padTestSet's pad, before its line's end.
+				at := len(data) - 2
+				if data[at] != 'x' || at < edgeBytes || len(data) <= 2*edgeBytes {
+					t.Fatalf("precondition: byte %d of %d is %q, not the pad's last, in the last end only", at, len(data), data[at])
+				}
+				return at
+			}, "y")
 		}},
 		{"a registration since", false, func(t *testing.T, _ *MockYaml) {
 			models.RegisterIdleAnswer("Acme-Queue", func(*models.Mock) bool { return false })()
 		}},
+		// padTestSet's pad is an Acme-Queue document, which a mapper now decodes.
+		{"a YAML mapper registered since", true, func(t *testing.T, _ *MockYaml) { registerAcmeQueueMapper(t) }},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			ys := writeTestSetMocks(t, t.TempDir(), "yaml")
@@ -326,6 +332,59 @@ func TestIndexCacheRereadsWhatChanged(t *testing.T) {
 			sameAsRead(t, got, whole(t, ys))
 		})
 	}
+}
+
+// editKeepingTime writes with over the file at p at the offset at picks,
+// in place, and puts the file's modification time back.
+func editKeepingTime(t *testing.T, p string, at func(data []byte) int, with string) {
+	t.Helper()
+	info, err := os.Stat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	off := at(data)
+	if off < 0 || off+len(with) > len(data) || string(data[off:off+len(with)]) == with {
+		t.Fatalf("precondition: nothing to edit at %d", off)
+	}
+	f, err := os.OpenFile(p, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteAt([]byte(with), int64(off)); err != nil {
+		_ = f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(p, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	if now, err := os.Stat(p); err != nil || !now.ModTime().Equal(info.ModTime()) || now.Size() != info.Size() {
+		t.Fatalf("precondition: the edit did not keep the size and time: %v", err)
+	}
+}
+
+// acmeQueue is a kind this keploy cannot read (padTestSet's and the rows'
+// appended documents) unless a YAML mapper decodes it.
+const acmeQueue models.Kind = "Acme-Queue"
+
+// registerAcmeQueueMapper registers, until the test ends, a YAML mapper that
+// decodes each acmeQueue document to a mock of its name.
+func registerAcmeQueueMapper(t *testing.T) {
+	t.Helper()
+	t.Cleanup(func() { mockYAMLMappers.Delete(acmeQueue) })
+	RegisterMockYAMLMapper(acmeQueue, MockYAMLMapper{
+		Encode: func(*models.Mock, *yaml.NetworkTrafficDoc) error { return nil },
+		Decode: func(doc *yaml.NetworkTrafficDoc, m *models.Mock) error {
+			*m = models.Mock{Version: doc.Version, Name: doc.Name, Kind: doc.Kind}
+			return nil
+		},
+	})
 }
 
 // padTestSet appends a document of a kind this keploy cannot read, big
@@ -1030,5 +1089,239 @@ func TestIndexCacheCountsTheLogsItKeeps(t *testing.T) {
 	more := logged.Bytes - quiet.Bytes + docs*int64(len(kind))
 	if least := int64(maxIndexLogs) * int64(unsafe.Sizeof(loggedEntry{})); logged.Files != 1 || quiet.Files != 1 || more < least {
 		t.Fatalf("the index that kept %d log entries counts %d bytes more than one that kept none; want at least %d (%+v, %+v)", maxIndexLogs, more, least, logged, quiet)
+	}
+}
+
+// An index kept by a read under one window and mapping answers a read under
+// every other window and mapping as a whole read under that one does: prod's
+// auto-replay reads one set again under another window or mapping (a cycle
+// that runs a subset of its tests, a re-run of one test).
+func TestIndexCacheAnswersUnderEveryOtherWindowAndMapping(t *testing.T) {
+	t.Setenv("KEPLOY_MOCK_FORMAT", "")
+	ctx := context.Background()
+	for _, format := range []string{"yaml", "json"} {
+		t.Run(format, func(t *testing.T) {
+			ys := writeTestSetMocks(t, t.TempDir(), format)
+			appendDoc(t, ys, format, string(acmeQueue), "q-data")
+			cases := testSetMocksCases()
+			wholes := make([]models.TestSetMocks, len(cases))
+			SetIndexCacheBudget(0)
+			for i, c := range cases {
+				w, err := ys.IndexTestSetMocks(ctx, "set-0", c.after, c.before, c.mapped, c.needed)
+				if err != nil {
+					t.Fatal(err)
+				}
+				wholes[i] = w
+			}
+			for _, a := range cases {
+				t.Run("kept under "+a.window+"/"+a.maps, func(t *testing.T) {
+					withIndexCache(t, 64<<20)
+					if _, err := ys.IndexTestSetMocks(ctx, "set-0", a.after, a.before, a.mapped, a.needed); err != nil {
+						t.Fatal(err)
+					}
+					for j, b := range cases {
+						before := MockIndexCacheStats()
+						got, err := ys.IndexTestSetMocks(ctx, "set-0", b.after, b.before, b.mapped, b.needed)
+						if err != nil {
+							t.Fatal(err)
+						}
+						if d := indexCacheDelta(before); d.SameFileHits != 1 || d.ContentHits+d.Misses != 0 {
+							t.Fatalf("read under %s/%s: %+v; want a same-file hit", b.window, b.maps, d)
+						}
+						t.Run("read under "+b.window+"/"+b.maps, func(t *testing.T) {
+							sameAsRead(t, got, wholes[j])
+						})
+					}
+				})
+			}
+		})
+	}
+}
+
+// A read that keeps the payloads in memory (GetTestSetMocks, no payload
+// source) never consults the cache, even for a file an index read kept the
+// index of: it returns what it returns with the cache off, every payload in
+// memory.
+func TestIndexCacheIsNotUsedByAFullRead(t *testing.T) {
+	t.Setenv("KEPLOY_MOCK_FORMAT", "")
+	ctx := context.Background()
+	for _, format := range []string{"yaml", "json"} {
+		t.Run(format, func(t *testing.T) {
+			ys := writeTestSetMocks(t, t.TempDir(), format)
+			for _, c := range testSetMocksCases() {
+				t.Run(c.window+"/"+c.maps, func(t *testing.T) {
+					SetIndexCacheBudget(0)
+					want, err := ys.GetTestSetMocks(ctx, "set-0", c.after, c.before, c.mapped, c.needed)
+					if err != nil {
+						t.Fatal(err)
+					}
+					withIndexCache(t, 64<<20)
+					if _, err := ys.IndexTestSetMocks(ctx, "set-0", c.after, c.before, c.mapped, c.needed); err != nil {
+						t.Fatal(err)
+					}
+					before := MockIndexCacheStats()
+					got, err := ys.GetTestSetMocks(ctx, "set-0", c.after, c.before, c.mapped, c.needed)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if d := indexCacheDelta(before); d.SameFileHits+d.ContentHits+d.Misses != 0 {
+						t.Fatalf("a full read consulted the cache: %+v", d)
+					}
+					for _, pool := range [][2][]*models.Mock{
+						{got.Filtered, want.Filtered}, {got.Unfiltered, want.Unfiltered},
+						{got.AllSession, want.AllSession}, {got.AllPerTest, want.AllPerTest},
+					} {
+						if g, w := poolString(pool[0]), poolString(pool[1]); g != w {
+							t.Fatalf("full read with an index kept: %s; cache off: %s", g, w)
+						}
+						for i, m := range pool[0] {
+							if m.PayloadOnDisk() {
+								t.Fatalf("full read gave %s with its payload on disk", m.Name)
+							}
+							if !reflect.DeepEqual(m.Spec, pool[1][i].Spec) {
+								t.Fatalf("full read gave %s as %+v; cache off %+v", m.Name, m.Spec, pool[1][i].Spec)
+							}
+						}
+					}
+				})
+			}
+		})
+	}
+}
+
+// A read the rules change during keeps its index under the generation the
+// read began at, so the index never answers a read by the new rules: the
+// next read is whole, and returns what the new rules decode. That holds for
+// a change while the read decodes, and for one after it decoded, before the
+// pass that hashes the file (where the index is not yet kept).
+func TestIndexCacheKeepsAnIndexUnderTheRulesItsReadBeganWith(t *testing.T) {
+	t.Setenv("KEPLOY_MOCK_FORMAT", "")
+	ctx := context.Background()
+	for _, c := range []struct {
+		name string
+		// when has change run once, at its moment of the read.
+		when func(t *testing.T, change func())
+		// decodedBefore says the whole read decoded the acmeQueue document
+		// before the change, so what the read returned is not what the new
+		// rules return.
+		decodedBefore bool
+	}{
+		{"while it decodes", func(t *testing.T, change func()) { whileDecoding(t, change) }, false},
+		{"before it hashes", func(t *testing.T, change func()) {
+			hashAllHook = change
+			t.Cleanup(func() { hashAllHook = nil })
+		}, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			ys := writeTestSetMocks(t, t.TempDir(), "yaml")
+			appendDoc(t, ys, "yaml", string(acmeQueue), "q-data")
+			var changed bool
+			c.when(t, func() {
+				if !changed {
+					changed = true
+					registerAcmeQueueMapper(t)
+				}
+			})
+			withIndexCache(t, 64<<20)
+			before := MockIndexCacheStats()
+			first, err := ys.IndexTestSetMocks(ctx, "set-0", models.BaseTime, time.Now(), nil, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if d := indexCacheDelta(before); !changed || d.Misses != 1 || d.Files != 1 {
+				t.Fatalf("the read the rules changed during (changed %v): %+v; want it read whole and kept", changed, d)
+			}
+			got, err := ys.IndexTestSetMocks(ctx, "set-0", models.BaseTime, time.Now(), nil, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if d := indexCacheDelta(before); d.Misses != 2 || d.SameFileHits+d.ContentHits != 0 {
+				t.Fatalf("the next read: %+v; want it read whole", d)
+			}
+			SetIndexCacheBudget(0)
+			want, err := ys.IndexTestSetMocks(ctx, "set-0", models.BaseTime, time.Now(), nil, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sameAsRead(t, got, want)
+			if c.decodedBefore && reflect.DeepEqual(first.Skipped, want.Skipped) {
+				t.Fatalf("precondition: the mapper changed nothing the read skipped (%v)", want.Skipped)
+			}
+		})
+	}
+}
+
+// RegisterMockYAMLMapper starts a new rules generation, as each models
+// registry does (TestEveryRuleChangeStartsANewGeneration): a document of its
+// kind decodes otherwise once it is registered, and again once replaced.
+func TestRegisterMockYAMLMapperStartsANewGeneration(t *testing.T) {
+	for _, step := range []string{"registered", "replaced"} {
+		gen := models.MockRulesGeneration()
+		registerAcmeQueueMapper(t)
+		if models.MockRulesGeneration() == gen {
+			t.Fatalf("a mapper %s left the generation at %d", step, gen)
+		}
+	}
+}
+
+// hashSeedEnv makes TestIndexCacheHashesAreSeededPerProcess's child print its
+// process's hashSeed and stop.
+const hashSeedEnv = "KEPLOY_TEST_PRINT_INDEX_HASH_SEED"
+
+// The hashes the cache keys a file by are seeded with hashSeed, a random seed
+// per process: not xxhash64's fixed seed, and another in another process.
+func TestIndexCacheHashesAreSeededPerProcess(t *testing.T) {
+	if os.Getenv(hashSeedEnv) == "1" {
+		fmt.Printf("seed=%d\n", hashSeed)
+		return
+	}
+	ys := writeTestSetMocks(t, t.TempDir(), "yaml")
+	padTestSet(t, ys)
+	path := mockFilePath(t, ys)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &fileProbe{path: path, info: info}
+	if err := p.hashAll(); err != nil {
+		t.Fatal(err)
+	}
+	seeded := func(parts ...[]byte) uint64 {
+		h := xxhash.NewWithSeed(hashSeed)
+		for _, b := range parts {
+			_, _ = h.Write(b)
+		}
+		return h.Sum64()
+	}
+	ends := [][]byte{data[:edgeBytes], data[len(data)-edgeBytes:]}
+	if p.sum != seeded(data) || p.edges != seeded(ends...) {
+		t.Fatalf("sum %x edges %x; want the file hashed with hashSeed %x, %x", p.sum, p.edges, seeded(data), seeded(ends...))
+	}
+	if p.sum == xxhash.Sum64(data) {
+		t.Fatalf("the content key is xxhash64 with its fixed seed")
+	}
+	seeds := map[string]bool{fmt.Sprintf("seed=%d", hashSeed): true}
+	for range 2 {
+		cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestIndexCacheHashesAreSeededPerProcess$", "-test.count=1")
+		cmd.Env = append(os.Environ(), hashSeedEnv+"=1")
+		cmd.WaitDelay = 5 * time.Second
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("child: %v\n%s", err, out)
+		}
+		var seed string
+		for _, line := range strings.Split(string(out), "\n") {
+			if strings.HasPrefix(line, "seed=") {
+				seed = line
+			}
+		}
+		if seed == "" || seeds[seed] {
+			t.Fatalf("a child process's seed %q is not its own (seen %v)", seed, seeds)
+		}
+		seeds[seed] = true
 	}
 }

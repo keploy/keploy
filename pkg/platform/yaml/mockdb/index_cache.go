@@ -2,6 +2,8 @@ package mockdb
 
 import (
 	"container/list"
+	"crypto/rand"
+	"encoding/binary"
 	"errors"
 	"io"
 	"os"
@@ -36,13 +38,15 @@ import (
 //     second read of the file a process read before, and costs those
 //     128 KiB.
 //   - Another file of the same size whose whole content hashes the same
-//     (xxhash64). A replay that downloads the set into a new directory each
+//     (xxhash64, seeded per process: hashSeed). A replay that downloads the set into a new directory each
 //     time (k8s-proxy in DaemonSet mode) reads a new file each time, which no
 //     file identity matches. That costs one pass over the file, which reads
 //     no document.
 //   - The same format (a json file is decoded otherwise), and the same
-//     models.MockRulesGeneration: a registration or the declared session
-//     calls changed since would derive the mocks otherwise.
+//     models.MockRulesGeneration: a registration (a models hook, or a YAML
+//     mapper here) or the declared session calls changed since would decode
+//     or derive the mocks otherwise. The generation a read began at is the
+//     one its index is kept under, so a change during the read is one too.
 //
 // A read the file changed under (appended to by a live recording, rewritten)
 // is not kept. A read the cache answers is what the read that made the index
@@ -149,7 +153,8 @@ type indexedFile struct {
 	format yaml.Format
 	size   int64
 	gen    uint64
-	// sum is xxhash64 of the whole file, edges of its first and last 64 KiB.
+	// sum is xxhash64 (seeded with hashSeed) of the whole file, edges of its
+	// first and last 64 KiB.
 	sum, edges uint64
 	// docs are the file's documents in file order.
 	docs         []indexedDoc
@@ -214,6 +219,18 @@ func newFileProbe(reader *yaml.MockReader) (*fileProbe, error) {
 // edgeBytes is how much of each end of a file the same-file check hashes.
 const edgeBytes = 64 << 10
 
+// hashSeed seeds every hash the cache keys by, a random one per process.
+// xxhash64 is not collision-resistant: with a fixed seed, a recording made to
+// collide with another set's file of the same size could be answered with
+// that set's index in a process that serves several apps (k8s-proxy). A seed
+// the recording's author cannot know leaves them no collision to aim at.
+// xxhash64 is still no keyed MAC; the seed takes away the known target.
+var hashSeed = func() uint64 {
+	var b [8]byte
+	_, _ = rand.Read(b[:]) // crypto/rand.Read never fails: it crashes instead.
+	return binary.LittleEndian.Uint64(b[:])
+}()
+
 // openSame opens the probe's file and checks it is still the one probed.
 func (p *fileProbe) openSame() (*os.File, error) {
 	f, err := os.Open(p.path)
@@ -231,8 +248,9 @@ func (p *fileProbe) openSame() (*os.File, error) {
 	return f, nil
 }
 
-// hashEdges sets p.edges: xxhash64 of the first and the last edgeBytes of
-// the probed size (the whole file when it is shorter than two of them).
+// hashEdges sets p.edges: xxhash64 (seeded with hashSeed) of the first and
+// the last edgeBytes of the probed size (the whole file when it is shorter
+// than two of them).
 func (p *fileProbe) hashEdges() error {
 	if p.hasEdges {
 		return nil
@@ -243,7 +261,7 @@ func (p *fileProbe) hashEdges() error {
 	}
 	defer func() { _ = f.Close() }()
 	size := p.info.Size()
-	h := xxhash.New()
+	h := xxhash.NewWithSeed(hashSeed)
 	if size <= 2*edgeBytes {
 		if _, err := io.Copy(h, io.NewSectionReader(f, 0, size)); err != nil {
 			return err
@@ -264,7 +282,8 @@ func (p *fileProbe) hashEdges() error {
 // test changes the file there.
 var hashAllHook func()
 
-// hashAll sets p.sum: xxhash64 of the file's probed size, read once.
+// hashAll sets p.sum: xxhash64 (seeded with hashSeed) of the file's probed
+// size, read once.
 func (p *fileProbe) hashAll() error {
 	if p.hasSum {
 		return nil
@@ -280,7 +299,7 @@ func (p *fileProbe) hashAll() error {
 		return err
 	}
 	defer func() { _ = f.Close() }()
-	h := xxhash.New()
+	h := xxhash.NewWithSeed(hashSeed)
 	buf := make([]byte, 1<<20)
 	if _, err := io.CopyBuffer(h, io.NewSectionReader(f, 0, p.info.Size()), buf); err != nil {
 		return err
