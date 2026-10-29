@@ -1251,6 +1251,44 @@ func TestIndexCacheKeepsAnIndexUnderTheRulesItsReadBeganWith(t *testing.T) {
 	}
 }
 
+// The content key keeps to the generation too. An index of content A kept
+// under the old rules never answers a copy of A read under the new rules,
+// even when an index of content B, of the same size and kept under the new
+// rules, sends the lookup past the size check into the content loop.
+func TestIndexCacheContentKeyKeepsToTheGeneration(t *testing.T) {
+	t.Setenv("KEPLOY_MOCK_FORMAT", "")
+	ctx := context.Background()
+	withIndexCache(t, 64<<20)
+	readAll := func(ys *MockYaml) models.TestSetMocks {
+		t.Helper()
+		got, err := ys.IndexTestSetMocks(ctx, "set-0", models.BaseTime, time.Now(), nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	a := writeTestSetMocks(t, t.TempDir(), "yaml")
+	appendDoc(t, a, "yaml", string(acmeQueue), "q-data")
+	readAll(a) // kept under the old rules
+	registerAcmeQueueMapper(t)
+	b := writeTestSetMocks(t, t.TempDir(), "yaml")
+	appendDoc(t, b, "yaml", string(acmeQueue), "q-datb") // a's size, other content
+	readAll(b)                                           // kept under the new rules
+	if st := MockIndexCacheStats(); st.Files != 2 {
+		t.Fatalf("precondition: want both indexes kept, got %+v", st)
+	}
+	dir := t.TempDir()
+	copyTestSet(t, a, dir)
+	c := NewWithFormat(zap.NewNop(), dir, "mocks", a.Format)
+	before := MockIndexCacheStats()
+	got := readAll(c)
+	if d := indexCacheDelta(before); d.Misses != 1 || d.SameFileHits+d.ContentHits != 0 {
+		t.Fatalf("a copy of a, read under the new rules: %+v; want it read whole", d)
+	}
+	SetIndexCacheBudget(0)
+	sameAsRead(t, got, readAll(c))
+}
+
 // RegisterMockYAMLMapper starts a new rules generation, as each models
 // registry does (TestEveryRuleChangeStartsANewGeneration): a document of its
 // kind decodes otherwise once it is registered, and again once replaced.
