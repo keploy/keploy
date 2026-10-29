@@ -205,3 +205,54 @@ func TestEveryReadOfAWindowBoundsTheGapAfterIt(t *testing.T) {
 		t.Fatalf("the next read %+v; want the timer's call, made after the read, background", got)
 	}
 }
+
+// The set's end reads with no test's window open (item b): under the switch a
+// miss made after the set's last test was read is the application's
+// background work (Background), and one made before that read and filed late
+// is still the set's to charge. With the switch off both read unmarked, as
+// before: the switch-off read is unchanged.
+func TestTheSetsEndMarksAMissMadeAfterTheLastReadBackgroundUnderTheSwitchOnly(t *testing.T) {
+	for _, on := range []bool{true, false} {
+		name := "switch off"
+		if on {
+			name = "switch on"
+		}
+		t.Run(name, func(t *testing.T) {
+			v := ""
+			if on {
+				v = "1"
+			}
+			t.Setenv(provenswitch.Env, v)
+			p := &Proxy{logger: zap.NewNop(), errChannel: make(chan error, 16)}
+			ctx := context.Background()
+
+			p.BeginTestErrorCapture()
+			if _, err := p.GetMockErrors(ctx); err != nil {
+				t.Fatal(err)
+			}
+			readAt := p.windowReadAt
+			if readAt.IsZero() || p.activeTestErrors.Load() != nil {
+				t.Fatalf("premise: the last test's read closed its window (%v) and noted when (%v)", p.activeTestErrors.Load() == nil, readAt)
+			}
+			p.pendingMockErrors.addBounded(timedMiss("late in the last test", readAt.Add(-time.Millisecond)), maxPendingMockErrors)
+			p.pendingMockErrors.addBounded(timedMiss("POST /publish", readAt.Add(time.Millisecond)), maxPendingMockErrors)
+			inTest := timedMiss("in test", readAt.Add(time.Millisecond))
+			inTest.MissKind = models.MissInTest
+			p.pendingMockErrors.addBounded(inTest, maxPendingMockErrors)
+
+			got, err := p.GetMockErrors(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got) != 3 || got[0].ActualSummary != "late in the last test" || got[1].ActualSummary != "POST /publish" || got[2].ActualSummary != "in test" {
+				t.Fatalf("the set's end read %+v; want the three calls, in order", got)
+			}
+			want := map[string]bool{"POST /publish": on}
+			for _, c := range got {
+				if c.Background != want[c.ActualSummary] || c.BeforeSet {
+					t.Errorf("%q: background %v before-set %v, want background %v and not before the set", c.ActualSummary, c.Background, c.BeforeSet, want[c.ActualSummary])
+				}
+			}
+		})
+	}
+}
