@@ -270,6 +270,12 @@ type DirectChunkReader interface {
 // self-aware memory guard pauses recording, allowing record-mode parsers to
 // fall back to passthrough without reading more data for decoding.
 // errChannel should be buffered to hold one terminal error per reader goroutine.
+//
+// Every hand-off, of a read and of the error that ends the reader, waits for
+// its taker only while ctx lasts: a relay that stops taking (it ended on the
+// other side's close, or on its own write's error) cancels ctx, and the reader
+// holding a read then returns instead of waiting for a taker forever. One that
+// did wait kept its caller, which waits for its readers, from ever returning.
 func ReadBuffConn(ctx context.Context, logger *zap.Logger, conn net.Conn, bufferChannel chan []byte, errChannel chan error, stopOnRecordingPause bool) {
 	if dcr, ok := conn.(DirectChunkReader); ok {
 		// Drain ALL pending carry-over in a loop before switching to
@@ -374,14 +380,21 @@ func ReadBuffConn(ctx context.Context, logger *zap.Logger, conn net.Conn, buffer
 						logger.Debug("Failed to read buffer", zap.String("base64_encoded", util.EncodeBase64(buffer)))
 					}
 				}
-				errChannel <- err
+				select {
+				case errChannel <- err:
+				case <-ctx.Done():
+				}
 				return
 			}
 			if ctx.Err() != nil { // to avoid sending buffer to closed channel if the context is cancelled
 				return
 			}
 
-			bufferChannel <- buffer
+			select {
+			case bufferChannel <- buffer:
+			case <-ctx.Done():
+				return
+			}
 		}
 	}
 }

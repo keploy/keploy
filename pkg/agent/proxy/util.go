@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"time"
 
 	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
@@ -24,7 +25,22 @@ func writeNsswitchConfig(logger *zap.Logger, nsSwitchConfig string, data []byte,
 	return nil
 }
 
+// globalPassThrough relays client and dest to each other, unread, until either
+// side closes or errs, or ctx ends. It ends on each of those whatever the other
+// side still has to send or still has not read: ctx's end puts both
+// connections' deadlines in the past, so a write to a peer that reads nothing
+// returns (closing them is the caller's: a TLS layer writes as it closes), and
+// its return ends its readers, so one holding a read it can no longer hand on
+// returns too (pUtil.ReadBuffConn). The caller's wait for its connection's
+// goroutines (the errgroup in ctx) then returns.
 func (p *Proxy) globalPassThrough(ctx context.Context, client, dest net.Conn) error {
+	stopInterrupting := context.AfterFunc(ctx, func() {
+		_ = client.SetDeadline(time.Unix(1, 0))
+		_ = dest.SetDeadline(time.Unix(1, 0))
+	})
+	defer stopInterrupting()
+	ctx, endReaders := context.WithCancel(ctx)
+	defer endReaders()
 
 	logger := p.logger.With(
 		zap.String("Client ConnectionID", ctx.Value(models.ClientConnectionIDKey).(string)),
@@ -57,6 +73,9 @@ func (p *Proxy) globalPassThrough(ctx context.Context, client, dest net.Conn) er
 			// Write the request message to the destination
 			_, err := dest.Write(buffer)
 			if err != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
 				utils.LogError(logger, err, "failed to write request message to the destination server")
 				return fmt.Errorf("error writing to destination")
 			}
@@ -64,6 +83,9 @@ func (p *Proxy) globalPassThrough(ctx context.Context, client, dest net.Conn) er
 			// Write the response message to the client
 			_, err := client.Write(buffer)
 			if err != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
 				utils.LogError(logger, err, "failed to write response message to the client")
 				return fmt.Errorf("error writing to client")
 			}

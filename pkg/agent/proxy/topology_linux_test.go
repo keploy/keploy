@@ -4,6 +4,7 @@ package proxy
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/tls"
 	"fmt"
@@ -22,6 +23,7 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/containerkey"
+	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	httpint "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql"
@@ -1077,6 +1079,267 @@ func TestHandleConnectionNeverListsADestinationABypassRulePassesThroughMocked(t 
 			}
 		})
 	}
+}
+
+// A connection a bypassRule passes through ends when its context does and when
+// the client closes, with the server held open, whatever the client still has
+// to read: the relay's write to a client that reads nothing more waited
+// for it to read, and kept handleConnection, which waits for the relay, from
+// returning, and the connection's goroutines and its port with it.
+func TestHandleConnectionEndsAPassThroughOnCancelAndOnTheClientsClose(t *testing.T) {
+	type end int
+	const (
+		cancelled    end = iota // the context ends as the client reads on
+		clientStalls            // the context ends as the client reads nothing more
+		clientCloses            // the client closes; the context lasts
+	)
+	for _, tc := range []struct {
+		name string
+		end  end
+	}{
+		{"the context ends as the client reads on", cancelled},
+		{"the context ends as the client reads nothing more", clientStalls},
+		{"the client closes", clientCloses},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ln, err := net.Listen("tcp4", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = ln.Close() })
+			// The server speaks first, so a record passes the connection
+			// through for the rule (a server-first connection shows no
+			// host): a line and 64 KiB, then a line more for each of more,
+			// and it holds the connection open.
+			more := make(chan struct{}, 1)
+			served := make(chan net.Conn, 1)
+			t.Cleanup(func() {
+				select {
+				case c := <-served:
+					_ = c.Close()
+				default:
+				}
+			})
+			go func() {
+				conn, err := ln.Accept()
+				if err != nil {
+					return
+				}
+				served <- conn
+				if _, err := conn.Write(append([]byte("hello\n"), bytes.Repeat([]byte("s"), 64<<10)...)); err != nil {
+					return
+				}
+				go func() { _, _ = io.Copy(io.Discard, conn) }()
+				for range more {
+					if _, err := conn.Write([]byte("more\n")); err != nil {
+						return
+					}
+				}
+			}()
+			p := bypassRecordProxy(t, ln.Addr().String())
+			app, src := acceptedConn(t)
+			conn := newStallingConn(src)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan error, 1)
+			go func() { done <- p.handleConnection(ctx, conn) }()
+
+			// The client reads on, so the proxy's writes to it never wait
+			// for room, until it closes.
+			relayed := make(chan struct{})
+			go func() {
+				buf := make([]byte, 32<<10)
+				for n := 0; ; {
+					m, err := app.Read(buf)
+					if n < 64<<10 && n+m >= 64<<10 {
+						close(relayed)
+					}
+					n += m
+					if err != nil {
+						return
+					}
+				}
+			}()
+			_ = awaitEvent(t, relayed, "the client getting the server's first 64 KiB")
+			switch tc.end {
+			case cancelled:
+				cancel()
+			case clientStalls:
+				conn.stall()
+				more <- struct{}{}
+				_ = awaitEvent(t, conn.stalled, "a write to the client waiting for room")
+				cancel()
+			case clientCloses:
+				_ = app.Close()
+			}
+			_ = awaitEvent(t, done, "handleConnection returning")
+		})
+	}
+}
+
+// A relay reader holding the server's last bytes when the relay ends returns
+// with it: here the relay waits on a write to a client that reads nothing
+// more, the reader has read what the server sent after, and the context ends.
+func TestHandleConnectionEndsAPassThroughWhoseReaderHoldsTheServersLastBytes(t *testing.T) {
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	// The server greets (so a record passes the connection through for the
+	// rule), then sends each line it is given.
+	lines := make(chan string, 2)
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer func() { _ = conn.Close() }()
+				if _, err := conn.Write([]byte("hello\n")); err != nil {
+					return
+				}
+				for line := range lines {
+					if _, err := conn.Write([]byte(line)); err != nil {
+						return
+					}
+				}
+			}()
+		}
+	}()
+	t.Cleanup(func() { close(lines) })
+	p := bypassRecordProxy(t, ln.Addr().String())
+	app, src := acceptedConn(t)
+	// The proxy's connection to the server tells what it has read.
+	up, err := net.Dial("tcp4", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = up.Close() })
+	server := &readsTellingConn{Conn: up, read: make(chan string, 16)}
+	end, ok := clientEnd(src.RemoteAddr())
+	if !ok {
+		t.Fatalf("no client end for %v", src.RemoteAddr())
+	}
+	p.predials.put(end, util.NewPredialed(ln.Addr().String(), connseq.NewUpstream(server)))
+	conn := newStallingConn(src)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- p.handleConnection(ctx, conn) }()
+	if got := <-readN(app, len("hello\n")); got != "hello\n" {
+		t.Fatalf("the client got %q, want the server's greeting", got)
+	}
+	conn.stall()
+	lines <- "held\n"
+	_ = awaitEvent(t, conn.stalled, "the relay's write of the server's line waiting for room")
+	lines <- "last\n"
+	for awaitEvent(t, server.read, "the relay reading the server's last line") != "last\n" {
+	}
+	cancel()
+	_ = awaitEvent(t, done, "handleConnection returning")
+}
+
+// readsTellingConn tells each read of its connection that returned bytes.
+type readsTellingConn struct {
+	net.Conn
+	read chan string
+}
+
+func (c *readsTellingConn) Read(b []byte) (int, error) {
+	n, err := c.Conn.Read(b)
+	if n > 0 {
+		select {
+		case c.read <- string(b[:n]):
+		default:
+		}
+	}
+	return n, err
+}
+
+// bypassRecordProxy is a record's proxy, under the proven switch, for a server
+// at addr, whose port a bypassRule with a host names: a connection that shows
+// no host (one whose server speaks first) is passed through.
+func bypassRecordProxy(t *testing.T, addr string) *Proxy {
+	t.Helper()
+	recorded.reset()
+	t.Cleanup(recorded.reset)
+	resetBypassRulesWarned(t)
+	t.Setenv("KEPLOY_PROVEN", "1")
+	_, portText, _ := net.SplitHostPort(addr)
+	port, _ := strconv.Atoi(portText)
+	saved := containerkey.Default
+	t.Cleanup(func() { containerkey.Default = saved })
+	containerkey.Default = containerkey.NewKeyer(containerAt{})
+	cfg := config.New()
+	cfg.Agent.Mode = models.MODE_RECORD
+	cfg.Agent.MockMode = true
+	cfg.Agent.ClientNSPID = uint32(hold(t).Process.Pid)
+	p := New(zap.NewNop(), fakeDestInfo{dest: ipv4Dest(t, addr)}, cfg)
+	p.nsswitchData = []byte("preseeded-by-test") // see testProxy
+	p.Integrations = map[integrations.IntegrationType]integrations.Integrations{
+		integrations.MYSQL: mysql.New(zap.NewNop()),
+	}
+	p.SetTopologySink(chanSink{mocked: make(chan models.MockedRow, 1)})
+	opts := models.OutgoingOptions{Rules: []models.BypassRule{{Host: "db.internal", Port: uint(port)}}}
+	if err := p.Record(context.Background(), make(chan *models.Mock, 16), opts); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { syncMock.Get().SetOutputChannel(nil) })
+	return p
+}
+
+// stallingConn is the client's connection as the proxy holds it, which can
+// stand for a client that reads nothing more: once stalled, a write to it
+// waits, as one to a full socket does, until its deadline is put in the past
+// or it is closed.
+type stallingConn struct {
+	*closeCountingConn
+	stalls      chan struct{} // closed: writes wait
+	stalled     chan struct{} // closed once a write waits
+	interrupted chan struct{} // closed by a past deadline, or the close
+	stallOnce   sync.Once
+	waitOnce    sync.Once
+	stopOnce    sync.Once
+}
+
+func newStallingConn(c *closeCountingConn) *stallingConn {
+	return &stallingConn{closeCountingConn: c, stalls: make(chan struct{}), stalled: make(chan struct{}), interrupted: make(chan struct{})}
+}
+
+func (c *stallingConn) stall() { c.stallOnce.Do(func() { close(c.stalls) }) }
+
+func (c *stallingConn) Write(b []byte) (int, error) {
+	select {
+	case <-c.stalls:
+	default:
+		return c.closeCountingConn.Write(b)
+	}
+	c.waitOnce.Do(func() { close(c.stalled) })
+	<-c.interrupted
+	return 0, os.ErrDeadlineExceeded
+}
+
+func (c *stallingConn) interruptIfPast(d time.Time) {
+	if !d.IsZero() && !d.After(time.Now()) {
+		c.stopOnce.Do(func() { close(c.interrupted) })
+	}
+}
+
+func (c *stallingConn) SetDeadline(d time.Time) error {
+	c.interruptIfPast(d)
+	return c.closeCountingConn.SetDeadline(d)
+}
+
+func (c *stallingConn) SetWriteDeadline(d time.Time) error {
+	c.interruptIfPast(d)
+	return c.closeCountingConn.SetWriteDeadline(d)
+}
+
+func (c *stallingConn) Close() error {
+	c.stopOnce.Do(func() { close(c.interrupted) })
+	return c.closeCountingConn.Close()
 }
 
 // Under the proven switch an HTTP connection whose every call a bypassRule
