@@ -606,6 +606,26 @@ type ExactServing struct {
 	// still must. Absent when no entry is marked. An agent that predates it
 	// ignores it and requires them, which is never looser.
 	Unrequired BackgroundMarks `json:"unrequired_by_test,omitempty"`
+	// Aside is, on a call that opens a test case (Test), the test cases
+	// recorded before it that the replay set aside (skipped as quarantined,
+	// under the proven switch) and no earlier call named, in recorded order,
+	// each with the recordings of its mapping. A set-aside test case makes
+	// none of its calls, so what they did (a cache it filled) is missing for
+	// the test cases after it, and one of them may make such a call in its
+	// own window. From this test case on, the agent serves such a call the
+	// set-aside recording it is, by exact match only, unchecked, never
+	// required, at most once in the staging (agent.ExactAsideServer), and
+	// says so on the consume it reports (MockState.SetAsideFrom). An agent
+	// that predates it ignores it and serves none: the call misses, as
+	// before, which is never looser.
+	Aside []AsideTest `json:"aside,omitempty"`
+}
+
+// AsideTest is one test case the replay set aside (ExactServing.Aside): its
+// name and the recordings of its mapping.
+type AsideTest struct {
+	Test  string   `json:"test"`
+	Owned []string `json:"owned,omitempty"`
 }
 
 // ExactConcurrentHeader is the /storemocks response header in which an agent
