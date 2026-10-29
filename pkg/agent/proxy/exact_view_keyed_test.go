@@ -176,6 +176,32 @@ func TestTheVerifyModeRefusesAStaleKeptKey(t *testing.T) {
 	}
 }
 
+// TestTheVerifyModeRefusesAKeyTheKeptIndexLost: the verify mode still walks
+// a key the view's kept index files no owned mock under. A keyed read of such
+// a key normally reads nothing, under no lock; under the verify mode it is
+// walked and recomputed, so a kept index that lost a mock's key panics on the
+// read. With the verify mode off, the same read gives nothing, the false miss
+// the mode exists to stop.
+func TestTheVerifyModeRefusesAKeyTheKeptIndexLost(t *testing.T) {
+	mm, _, ix, _ := keyedSet(t, 4)
+	v := mm.exactView()
+	lists := v.ownedKeys(ix)
+	delete(lists, "mock-1")
+	func() {
+		defer func() {
+			if r := recover(); r == nil || !strings.Contains(fmt.Sprint(r), "exact view verify") {
+				t.Fatalf("a key the kept index lost, read under the verify mode: recovered %v; want the verify mode's panic", r)
+			}
+		}()
+		keyedWalk(t, mm, ix, "mock-1")
+	}()
+	defer exactViewVerify.Store(exactViewVerify.Load())
+	exactViewVerify.Store(false)
+	if got := keyedWalk(t, mm, ix, "mock-1"); len(got) != 0 {
+		t.Fatalf("precondition: the read of the lost key gives %v", got)
+	}
+}
+
 // keyedReadCost answers, in recorded order, every mock of one test that owns
 // n, all filed under one key (one statement the test ran n times), one call
 // at a time, as the MySQL matcher's keyed pass does: a keyed read of the
