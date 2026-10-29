@@ -319,11 +319,28 @@ func (s *diffSide) ownWholeSet() {
 	s.mm.ServeExactTest("whole-set", owned)
 }
 
+// learnParameterNoise marks the first parameter of every recorded EXECUTE of
+// query in pool as learned noise (req_body_noise): under exact serving a
+// recording of the statement made with another parameter answers only then,
+// so the test's own FIFO candidate settles an EXECUTE no recording binds. A
+// recording without that noise is another call's rows: the EXECUTE misses.
+func learnParameterNoise(pool []*models.Mock, query string) {
+	for _, m := range pool {
+		if len(m.Spec.MySQLRequests) == 1 && m.Spec.MySQLRequests[0].Header.Type == "COM_STMT_EXECUTE" &&
+			strings.EqualFold(m.Spec.MySQLRequests[0].StoredQuery(), query) {
+			m.Spec.ReqBodyNoise = map[string][]string{"body.parameters.0.value": {}}
+		}
+	}
+}
+
 // TestExactServingWholeSetServesWhatTheFullScanServes: one test owns a set of
 // 1,000 mocks, and each command is matched by the keyed pass on one side and
 // by the full scan on the other: recorded reads, EXECUTEs whose parameters no
-// recording bound (each settled by the test's own FIFO candidate) and reads
-// of rows the set never recorded. Both serve, consume and report the same.
+// recording bound and reads of rows the set never recorded. Both serve,
+// consume and report the same. Statement 7's recordings learned their
+// parameter as noise, so its EXECUTEs no recording binds are settled by the
+// test's own FIFO candidate; statement 8's are a miss that names the drifted
+// parameter (a recording with another parameter is another call's rows).
 func TestExactServingWholeSetServesWhatTheFullScanServes(t *testing.T) {
 	// Each kind of command 13 times under -race (see raceEnabled), 50 without.
 	commands := 400
@@ -332,6 +349,7 @@ func TestExactServingWholeSetServesWhatTheFullScanServes(t *testing.T) {
 	}
 	for _, strict := range []bool{false, true} {
 		pool := keyedSet(1000, models.LifetimePerTest)
+		learnParameterNoise(pool, diffQueryA)
 		ref, fast := newDiffSide(pool), newDiffSide(pool)
 		var eng *mocknoise.Engine
 		if strict {
@@ -360,8 +378,11 @@ func TestExactServingWholeSetServesWhatTheFullScanServes(t *testing.T) {
 			if want != got {
 				t.Fatalf("strict=%v command %d:\n full scan:  %s\n keyed pass: %s", strict, i, want, got)
 			}
-			if i == 5 && !strict && !strings.Contains(want, "ok=true") {
-				t.Fatalf("the FIFO candidate was not served: %s", want)
+			if i == 5 && (!strings.HasPrefix(want, "ok=false ") || !strings.Contains(want, "body.parameters.0.value")) {
+				t.Fatalf("strict=%v: statement 8's EXECUTE no recording binds was not a miss naming its parameter: %s", strict, want)
+			}
+			if i == 6 && !strings.Contains(want, "ok=true") {
+				t.Fatalf("strict=%v: statement 7's FIFO candidate, its parameter learned noise, was not served: %s", strict, want)
 			}
 		}
 		ref.mm.Close()
@@ -373,8 +394,9 @@ func TestExactServingWholeSetServesWhatTheFullScanServes(t *testing.T) {
 // serving while one test owns a whole set of 1,000 or 10,000 mocks:
 //
 //   - an EXECUTE visits at most the candidates the full scan visits;
-//   - an EXECUTE whose parameters no recording bound is settled by the test's
-//     own FIFO candidate: it visits each of the test's mocks once, in the
+//   - an EXECUTE whose parameters no recording bound, its statement's
+//     recordings having learned the parameter as noise, is settled by the
+//     test's own FIFO candidate: it visits each of the test's mocks once, in the
 //     per-test tier (the keyed walk of the session tier leaves them out), and
 //     the full scan does not run on top;
 //   - once the staged trees' indexes are built, no command computes a mock's
@@ -397,18 +419,23 @@ func TestExactServingOwnedSetCommandCosts(t *testing.T) {
 	}
 	for _, n := range sizes {
 		for _, tc := range []struct {
-			name string
-			req  mysql.Request
-			max  int // visits at most, besides the full scan's
+			name  string
+			req   mysql.Request
+			max   int  // visits at most, besides the full scan's
+			noise bool // statement 8's recordings learned their parameter as noise
 		}{
-			{"EXECUTE, parameters no recording binds", executeReq(8, "no-such-key"), n},
-			{"EXECUTE, its own recording at pool index 3", executeReq(8, "k3"), 4},
-			{"EXECUTE, its own recording at pool index 499", executeReq(8, "k499"), 500},
+			{"EXECUTE, parameters no recording binds, learned as noise", executeReq(8, "no-such-key"), n, true},
+			{"EXECUTE, its own recording at pool index 3", executeReq(8, "k3"), 4, false},
+			{"EXECUTE, its own recording at pool index 499", executeReq(8, "k499"), 500, false},
 		} {
 			var visits [2]int
 			var served [2]string
 			for k, full := range []bool{false, true} {
-				s := newDiffSide(keyedSet(n, models.LifetimePerTest))
+				pool := keyedSet(n, models.LifetimePerTest)
+				if tc.noise {
+					learnParameterNoise(pool, diffQueryB)
+				}
+				s := newDiffSide(pool)
 				s.stageNoWindow()
 				s.ownWholeSet()
 				resp, ok, examined, err := replayer.MatchCommandExaminedForTest(context.Background(), tc.req, s.mm, s.dctx, nil, full)
@@ -429,7 +456,12 @@ func TestExactServingOwnedSetCommandCosts(t *testing.T) {
 			}
 		}
 
-		s := newDiffSide(keyedSet(n, models.LifetimePerTest))
+		// The test's EXECUTEs that no recording binds are settled by its
+		// FIFO candidate: statement 8's recordings learned the parameter as
+		// noise.
+		pool := keyedSet(n, models.LifetimePerTest)
+		learnParameterNoise(pool, diffQueryB)
+		s := newDiffSide(pool)
 		s.stageNoWindow()
 		match := func(req mysql.Request) {
 			if _, ok, _, err := replayer.MatchCommandExaminedForTest(context.Background(), req, s.mm, s.dctx, nil, false); err != nil || !ok {
@@ -561,13 +593,22 @@ func TestStagingsFirstUnsettledCommandComputesOnlyItsOwnKeys(t *testing.T) {
 //     one of the same query. The keyed walk of the session tier reads none of
 //     the test's mocks, and the look-up of an unnamed one none either: the
 //     keyed pass reads the test's mocks in the per-test tier, the unnamed one
-//     first, as the full scan does.
+//     first, as the full scan does. With their parameter learned as noise the
+//     unnamed one answers (the FIFO candidate); without, both sides miss: a
+//     recording with another parameter is another call's rows.
 func TestNoWindowExecuteServesWhatTheFullScanServesAcrossTheStatementIndex(t *testing.T) {
 	at := func(ms int) time.Time { return diffBase.Add(time.Duration(ms) * time.Millisecond) }
 	named := func(name, param string, ms int) *models.Mock {
 		req := executeReq(7, param)
 		req.SetStoredQuery(diffQueryA)
 		return diffMock(name, "c1", []mysql.Request{req}, at(ms), models.LifetimeSession, "mocks")
+	}
+	// noisy is m with its parameter learned as noise: under exact serving a
+	// recording of the statement made with another parameter answers only
+	// then.
+	noisy := func(m *models.Mock) *models.Mock {
+		m.Spec.ReqBodyNoise = map[string][]string{"body.parameters.0.value": {}}
+		return m
 	}
 	for _, c := range []struct {
 		name  string
@@ -592,7 +633,17 @@ func TestNoWindowExecuteServesWhatTheFullScanServesAcrossTheStatementIndex(t *te
 		live:  executeReq(7, "k1"),
 		want:  "served definitive ",
 	}, {
-		name: "under exact serving, the open test owns an EXECUTE recorded without its query before one recorded with it",
+		name: "under exact serving, the open test owns an EXECUTE recorded without its query before one recorded with it, their parameter learned as noise",
+		pool: []*models.Mock{
+			diffPrepareMock("prepare", "c1", diffQueryA, 7, at(0)),
+			noisy(diffMock("unnamed", "c1", []mysql.Request{executeReq(7, "k1")}, at(1), models.LifetimePerTest, "mocks")),
+			noisy(named("named", "k2", 2)),
+		},
+		owned: true,
+		live:  executeReq(7, "app-made"),
+		want:  "served unnamed ",
+	}, {
+		name: "under exact serving, the open test owns an EXECUTE recorded without its query before one recorded with it, their parameter not noise",
 		pool: []*models.Mock{
 			diffPrepareMock("prepare", "c1", diffQueryA, 7, at(0)),
 			diffMock("unnamed", "c1", []mysql.Request{executeReq(7, "k1")}, at(1), models.LifetimePerTest, "mocks"),
@@ -600,7 +651,7 @@ func TestNoWindowExecuteServesWhatTheFullScanServesAcrossTheStatementIndex(t *te
 		},
 		owned: true,
 		live:  executeReq(7, "app-made"),
-		want:  "served unnamed ",
+		want:  "ok=false ",
 	}, {
 		name: "under exact serving, the open test owns an EXECUTE recorded without its query, and one recorded with it binds the live parameters",
 		pool: []*models.Mock{
