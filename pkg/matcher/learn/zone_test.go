@@ -1661,3 +1661,121 @@ func TestAnOffsetLearnedInAWallTimeShownTwicePassesNoShorterTimeToLiveElsewhere(
 		}
 	}
 }
+
+// An application in Pacific/Chatham that resolves a wall time shown twice
+// to its first showing and cuts its clock to the hour, before adding two
+// hours or after: Chatham's clocks go back from 03:45 +1345 to 02:45 +1245
+// (2026-04-05, 14:00 UTC the day before), and the wall time shown twice
+// holds 03:00. A
+// recording at 02:59 in the second showing cuts to 02:00, shown once, and
+// writes the right value; its full round, a lead later, reads 03:00 in the
+// second showing and writes 03:00's first showing, an hour early, so the
+// two show clock + 1h of clock + 2h. The learn step refuses an hour's cut
+// near that turn, naming it and the hour it holds, with Chatham known and
+// with no zone known (any zone's turn whose wall time shown twice holds an
+// hour's start): without the refusal it learns clock + 1h there, and a
+// replay on another day passes a time to live two hours shorter at every
+// read. Away from the turn it learns clock + 2h, and a replay of that
+// passes the shorter one only near the cut's own turn. (Berlin's wall time
+// shown twice is a whole hour: its hour's cut learns near its turn, its own
+// row above.)
+func TestAnOffsetCutToAnHourIsRefusedNearATurnWhoseWallTimeShownTwiceHoldsAnHoursStart(t *testing.T) {
+	chat, err := time.LoadLocation("Pacific/Chatham")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const p = "body.expiresAt"
+	hour, ms := time.Hour, time.Millisecond
+	turn := time.Date(2026, 4, 4, 14, 0, 0, 0, time.UTC)
+	if _, b := turn.Add(-time.Nanosecond).In(chat).Zone(); b != 13*3600+45*60 {
+		t.Fatalf("Pacific/Chatham before %s: offset %ds, want +1345", turn, b)
+	}
+	if _, a := turn.In(chat).Zone(); a != 12*3600+45*60 {
+		t.Fatalf("Pacific/Chatham at %s: offset %ds, want +1245", turn, a)
+	}
+	day := time.Date(2026, 5, 5, 0, 0, 0, 0, time.UTC)
+	// The recording at local 02:58:59 to 02:59:59 in the second showing,
+	// whose full round reads 03:00 or later there.
+	straddle := func(call time.Time) bool {
+		return !call.Before(turn.Add(13*time.Minute+59*time.Second)) && !call.After(turn.Add(14*time.Minute+59*time.Second))
+	}
+	for _, shape := range []string{"cut-then-add", "add-then-cut"} {
+		val := func(r time.Time, ttl time.Duration) time.Time {
+			if shape == "cut-then-add" {
+				return firstShowingIn(r, hour, chat).Add(ttl)
+			}
+			return firstShowingIn(r.Add(ttl), hour, chat)
+		}
+		// shorter is how many of a day's reads a replay on another day,
+		// in the process's zone, passes a time to live two hours shorter at.
+		shorter := func(o models.ClockOffset) (int, int) {
+			pass, n := 0, 0
+			for from := day; from.Before(day.Add(24 * hour)); from = from.Add(7 * time.Minute) {
+				n++
+				s := Span{From: from, To: from.Add(time.Second), Zone: chat, Own: true}
+				if ok, _ := CheckClockRead(p, o, InstantLeaf(p, p, val(from.Add(500*ms), 0), ms), s, true); ok {
+					pass++
+				}
+			}
+			return pass, n
+		}
+		for _, lz := range []*time.Location{chat, nil} {
+			name := shape + ", the learn step in Pacific/Chatham"
+			if lz == nil {
+				name = shape + ", the learn step knowing no zone"
+			}
+			learned, refused, straddled := 0, 0, 0
+			for call := turn.Add(-6*hour - 950*ms); call.Before(turn.Add(6 * hour)); call = call.Add(13*time.Second + 17*ms) {
+				dc := clockedDrifts()
+				dc.zone = lz
+				fcall := call.Add(FullRoundLead)
+				w := (&Window{Rec: Span{From: call.Add(-100 * ms), To: call}, F: Span{From: fcall.Add(-100 * ms), To: fcall}}).ComparesOffsets()
+				leaf := func(at time.Time) Shape { return Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, at, ms)}} }
+				ln := ClassifyIn(dc, []string{p}, leaf(val(fcall.Add(-30*ms), 2*hour)), leaf(val(call.Add(-30*ms), 2*hour)), call, nil, nil, nil, w)[0]
+				near := !call.Before(turn.Add(-5*hour)) && call.Before(turn.Add(2*hour))
+				if straddle(call) {
+					straddled++
+				}
+				if ln.Kind == KindClockOffset && ln.Offset != nil {
+					o := *ln.Offset
+					if o.Min > 2*hour+time.Minute || o.Max < 2*hour-2*time.Minute || o.Res != hour {
+						t.Errorf("FALSE GREEN: %s: learned at %s (local %s), %s from the turn: %s; want clock + 2h at the hour, or refused naming the turn", name, call, call.In(chat).Format("15:04:05 MST"), call.Sub(turn), o.String())
+					} else if straddle(call) {
+						t.Errorf("FALSE GREEN: %s: learned at %s (local %s), in the straddle: %s; want refused naming the turn", name, call, call.In(chat).Format("15:04:05 MST"), o.String())
+					}
+					if near {
+						if pass, n := shorter(o); pass > n/10 {
+							t.Errorf("FALSE GREEN: %s: learned at %s, %s from the turn, as %s: a replay on %s passed a time to live two hours shorter at %d of %d reads", name, call, call.Sub(turn), o.String(), day.Format("2006-01-02"), pass, n)
+						}
+					}
+					learned++
+					continue
+				}
+				if !strings.Contains(ln.Why, "clocks go back") {
+					if straddle(call) {
+						t.Errorf("%s: at %s (local %s), in the straddle: %s (%s); want refused naming the turn", name, call, call.In(chat).Format("15:04:05 MST"), ln.Kind, ln.Why)
+					}
+					continue
+				}
+				refused++
+				if !near {
+					t.Errorf("FALSE RED: %s: refused for a turn at %s, %s from Chatham's: %s", name, call, call.Sub(turn), ln.Why)
+				}
+				for _, want := range []string{"shows twice as its clocks go back from 03:45 +1345 to 02:45 +1245 on 2026-04-05, which holds the start of the wall hour 03:00", "a run in the second showing before 03:00 writes the hour before it, shown once"} {
+					if !strings.Contains(ln.Why, want) {
+						t.Errorf("%s: refused at %s: %q; want it to name %q", name, call, ln.Why, want)
+					}
+				}
+				if lz != nil && !strings.Contains(ln.Why, "Pacific/Chatham shows twice") {
+					t.Errorf("%s: refused at %s: %q; want it to name Pacific/Chatham", name, call, ln.Why)
+				}
+				if lz == nil && !strings.Contains(ln.Why, "keploy knows no zone of the application's here") {
+					t.Errorf("%s: refused at %s: %q; want it to say keploy knows no zone", name, call, ln.Why)
+				}
+			}
+			if learned < 20 || refused < 5 || straddled < 4 {
+				t.Errorf("%s: learned %d, refused for the turn %d, calls in the straddle %d; want 20, 5 and 4 or more", name, learned, refused, straddled)
+			}
+		}
+	}
+}

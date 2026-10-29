@@ -896,27 +896,91 @@ func (o ClockOffset) Holds(at time.Time, res time.Duration, from, to time.Time) 
 // met is false where none is, for a Plain o (no time to live to change), a
 // nil loc and a window with no start or that ends before it starts.
 func (o ClockOffset) FallBack(res time.Duration, from, to time.Time, loc *time.Location) (turn time.Time, back time.Duration, met bool) {
+	return o.fallBack(res, from, to, loc, false)
+}
+
+// FallBackAcrossHour is FallBack kept to the turns whose wall time shown
+// twice holds the start of one of loc's wall hours strictly inside it
+// (AcrossHour: Pacific/Chatham's 02:45 to 03:45 holds 03:00, Troll's 01:00
+// to 03:00 holds 02:00; Europe/Berlin's 02:00 to 03:00 and Lord Howe's
+// 01:30 to 02:00 hold none). The learn step reads it at an hour's cut
+// (learn.DriftCache.offsetFallBackWhy): there a run in the second showing
+// before that hour's start cuts to the hour before it, which is shown once,
+// and writes the right value, while one in the second showing after it
+// writes the value an hour early, so a recording and its full round a
+// minute apart can show clock + 1h of clock + 2h.
+func (o ClockOffset) FallBackAcrossHour(res time.Duration, from, to time.Time, loc *time.Location) (turn time.Time, back time.Duration, met bool) {
+	return o.fallBack(res, from, to, loc, true)
+}
+
+// fallBack is FallBack, kept to the turns AcrossHour holds where across.
+func (o ClockOffset) fallBack(res time.Duration, from, to time.Time, loc *time.Location, across bool) (turn time.Time, back time.Duration, met bool) {
 	lo, hi, ok := o.fallBackSpan(res, from, to, loc)
 	if !ok || loc == nil {
 		return time.Time{}, 0, false
 	}
 	for _, s := range [][2]time.Time{{from, to}, {lo, hi}} {
-		if turn, back, met := fallBackIn(s[0], s[1], loc); met {
+		if turn, back, met := fallBackIn(s[0], s[1], loc, across); met {
 			return turn, back, true
 		}
 	}
 	return time.Time{}, 0, false
 }
 
+// AcrossHour reports whether the wall time loc shows twice as its clocks
+// go back at turn, from the wall time they show just after it up to the one
+// just before it, holds the start of one of loc's wall hours strictly
+// inside it: one a wall clock cut to the hour resolves to its first showing
+// while the hour before it is shown once.
+func AcrossHour(turn time.Time, loc *time.Location) bool {
+	if loc == nil {
+		return false
+	}
+	_, before := turn.Add(-time.Nanosecond).In(loc).Zone()
+	_, after := turn.In(loc).Zone()
+	return acrossHour(turn, before, after)
+}
+
+// acrossHour is AcrossHour of a turn whose zone's offset east of UTC goes
+// from before to after (seconds) there.
+func acrossHour(turn time.Time, before, after int) bool {
+	lo, hi := turn.Unix()+int64(after), turn.Unix()+int64(before)
+	h := lo / 3600
+	if lo%3600 < 0 {
+		h--
+	}
+	return (h+1)*3600 < hi
+}
+
 // FallBackAnywhere is FallBack read in every zone of the tz database
 // (tzNames), for a replay that knows no zone of the application's: the
 // first turn any zone's clocks go back at that the window or the values a
 // check of o admits meet, by how much, and that zone. The values' span is
-// read one cut wider before (a zone whose cut starts elsewhere, an hour in
-// one at UTC+05:30). That is a handful of dates a year, a few hours each,
+// read one cut wider before (a zone whose cut starts elsewhere): that is
+// reached at an hour's cut alone, by the learn step's
+// FallBackAnywhereAcrossHour (an hour in Pacific/Chatham, at UTC+12:45,
+// starts at a quarter past one of UTC's), since a replay with no zone known
+// refuses an hour's cut before it reads this (learn.CheckClockRead), and at
+// a minute's cut or finer every zone's cuts are UTC's (offsets are whole
+// minutes). That is a handful of dates a year, a few hours each,
 // where such a replay refuses the value: false reds, never a pass of a
 // value an application in an unknown zone may have written an hour early.
 func (o ClockOffset) FallBackAnywhere(res time.Duration, from, to time.Time) (turn time.Time, back time.Duration, loc *time.Location, met bool) {
+	return o.fallBackAnywhere(res, from, to, false)
+}
+
+// FallBackAnywhereAcrossHour is FallBackAnywhere kept to the turns whose
+// wall time shown twice holds the start of one of their zone's wall hours
+// strictly inside it (AcrossHour; FallBackAcrossHour), for the learn step
+// at an hour's cut where it knows no zone of the application's: today
+// Pacific/Chatham's and Antarctica/Troll's, some hours a year.
+func (o ClockOffset) FallBackAnywhereAcrossHour(res time.Duration, from, to time.Time) (turn time.Time, back time.Duration, loc *time.Location, met bool) {
+	return o.fallBackAnywhere(res, from, to, true)
+}
+
+// fallBackAnywhere is FallBackAnywhere, kept to the turns AcrossHour holds
+// where across.
+func (o ClockOffset) fallBackAnywhere(res time.Duration, from, to time.Time, across bool) (turn time.Time, back time.Duration, loc *time.Location, met bool) {
 	lo, hi, ok := o.fallBackSpan(res, from, to, time.UTC)
 	if !ok {
 		return time.Time{}, 0, nil, false
@@ -925,7 +989,7 @@ func (o ClockOffset) FallBackAnywhere(res time.Duration, from, to time.Time) (tu
 	for _, s := range [][2]time.Time{{from, to}, {lo, hi}} {
 		for y := s[0].Add(-maxFallBack).Year(); y <= s[1].Add(maxFallBack).Year(); y++ {
 			for _, f := range yearFallBacks(y) {
-				if !f.at.Add(-f.back).After(s[1]) && f.at.Add(f.back).After(s[0]) {
+				if (f.across || !across) && !f.at.Add(-f.back).After(s[1]) && f.at.Add(f.back).After(s[0]) {
 					return f.at, f.back, f.loc, true
 				}
 			}
@@ -957,8 +1021,8 @@ const maxFallBack = 3 * time.Hour
 // fallBackIn is the first turn at which loc's clocks go back whose wall
 // time shown twice (from the turn less what they go back by up to the turn
 // plus it) meets the span from lo to hi, both included, and what they go
-// back by there.
-func fallBackIn(lo, hi time.Time, loc *time.Location) (time.Time, time.Duration, bool) {
+// back by there; where across, only a turn AcrossHour holds.
+func fallBackIn(lo, hi time.Time, loc *time.Location, across bool) (time.Time, time.Duration, bool) {
 	for t := lo.Add(-maxFallBack); ; {
 		_, end := t.In(loc).ZoneBounds()
 		if end.IsZero() || !end.After(t) || end.After(hi.Add(maxFallBack)) {
@@ -966,7 +1030,7 @@ func fallBackIn(lo, hi time.Time, loc *time.Location) (time.Time, time.Duration,
 		}
 		_, before := end.Add(-time.Nanosecond).In(loc).Zone()
 		_, after := end.In(loc).Zone()
-		if back := time.Duration(before-after) * time.Second; back > 0 && !end.Add(-back).After(hi) && end.Add(back).After(lo) {
+		if back := time.Duration(before-after) * time.Second; back > 0 && (!across || acrossHour(end, before, after)) && !end.Add(-back).After(hi) && end.Add(back).After(lo) {
 			return end, back, true
 		}
 		t = end
@@ -974,11 +1038,13 @@ func fallBackIn(lo, hi time.Time, loc *time.Location) (time.Time, time.Duration,
 }
 
 // zoneFallBack is one turn at which a zone's clocks go back (at), by how
-// much (back), and the zone (loc).
+// much (back), the zone (loc), and whether its wall time shown twice holds
+// the start of one of loc's wall hours strictly inside it (AcrossHour).
 type zoneFallBack struct {
-	at   time.Time
-	back time.Duration
-	loc  *time.Location
+	at     time.Time
+	back   time.Duration
+	loc    *time.Location
+	across bool
 }
 
 // fallBackYears keeps yearFallBacks by year, read once per process.
@@ -988,9 +1054,11 @@ var fallBackYears = struct {
 }{m: map[int][]zoneFallBack{}}
 
 // yearFallBacks is every turn in year y (UTC) at which a zone of tzNames
-// goes back, earliest first, one per instant and step (the first zone, by
-// name, that turns there), as the zone files keploy reads hold them (the
-// host's, else its embedded copy). A name no file holds is skipped.
+// goes back, earliest first, one per instant, step and AcrossHour (the
+// first zone, by name, that turns there so: Pacific/Chatham's turn, at
+// Auckland's instant and step, is kept beside Auckland's), as the zone
+// files keploy reads hold them (the host's, else its embedded copy). A name
+// no file holds is skipped.
 func yearFallBacks(y int) []zoneFallBack {
 	fallBackYears.Lock()
 	defer fallBackYears.Unlock()
@@ -999,8 +1067,9 @@ func yearFallBacks(y int) []zoneFallBack {
 	}
 	start, end := time.Date(y, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(y+1, 1, 1, 0, 0, 0, 0, time.UTC)
 	type key struct {
-		at   int64
-		back time.Duration
+		at     int64
+		back   time.Duration
+		across bool
 	}
 	seen := map[key]bool{}
 	var fs []zoneFallBack
@@ -1016,9 +1085,12 @@ func yearFallBacks(y int) []zoneFallBack {
 			}
 			_, before := e.Add(-time.Nanosecond).In(loc).Zone()
 			_, after := e.In(loc).Zone()
-			if back := time.Duration(before-after) * time.Second; back > 0 && !seen[key{e.UnixNano(), back}] {
-				seen[key{e.UnixNano(), back}] = true
-				fs = append(fs, zoneFallBack{at: e, back: back, loc: loc})
+			if back := time.Duration(before-after) * time.Second; back > 0 {
+				k := key{e.UnixNano(), back, acrossHour(e, before, after)}
+				if !seen[k] {
+					seen[k] = true
+					fs = append(fs, zoneFallBack{at: e, back: back, loc: loc, across: k.across})
+				}
 			}
 			t = e
 		}

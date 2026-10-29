@@ -1071,32 +1071,47 @@ func clockOffsetEvidence(path string, off models.ClockOffset) string {
 }
 
 // offsetFallBackWhy is why an instant at the clock plus the offset off,
-// checked at a cut finer than an hour (none, a second, a minute: CheckedAt
-// at enc, the resolution its values' encoding writes), is refused where a
-// run's call's window, or the values a check of it admits there, meets a
-// wall time the application's zone (dc.zone) shows twice as its clocks go
-// back (models.ClockOffset.FallBack), or, where the learn step knows no
-// zone of the application's, one any zone does (FallBackAnywhere): an
-// application that resolves that wall time to its first showing writes a
-// value an hour early there (two in Troll), so where both runs fall in the
-// second showing the offset they show stands an hour short of the one the
-// application adds (clock + 1h of clock + 2h), and a replay would then
-// pass a time to live made an hour shorter, at any read, and refuse the
-// right one. "" where none does. An hour's cut is not refused: there both
-// runs in the second showing write one value, which shows no read of the
-// clock, and one in each show no one offset, so the learn step never
-// learns a wrong one.
+// checked at a cut finer than a day (none, a second, a minute, an hour:
+// CheckedAt at enc, the resolution its values' encoding writes), is
+// refused where a run's call's window, or the values a check of it admits
+// there, meets a wall time the application's zone (dc.zone) shows twice as
+// its clocks go back (models.ClockOffset.FallBack), or, where the learn
+// step knows no zone of the application's, one any zone does
+// (FallBackAnywhere): an application that resolves that wall time to its
+// first showing writes a value an hour early there (two in Troll), so
+// where both runs fall in the second showing the offset they show stands
+// an hour short of the one the application adds (clock + 1h of clock +
+// 2h), and a replay would then pass a time to live made an hour shorter,
+// at any read, and refuse the right one. "" where none does.
+//
+// At an hour's cut, only a turn whose wall time shown twice holds the
+// start of one of the zone's wall hours strictly inside it is refused
+// (FallBackAcrossHour, FallBackAnywhereAcrossHour): Pacific/Chatham's 02:45
+// to 03:45 holds 03:00, so a run in the second showing at 02:59 cuts to
+// 02:00, shown once, and writes the right value, while its full round at
+// 03:00 writes 03:00's first showing, an hour early, and the two show clock
+// + 1h of clock + 2h (Troll's 01:00 to 03:00 holds 02:00, though its runs
+// there show no one offset). Where the wall time shown twice is whole
+// hours (Europe/Berlin's 02:00 to 03:00), both runs in the second showing
+// cut into one hour and write one value, which shows no read of the clock,
+// and one in each show no one offset, so a right learning near such a turn
+// is not refused.
 func (dc *DriftCache) offsetFallBackWhy(path string, off models.ClockOffset, enc time.Duration, w *Window) string {
-	if w == nil || off.CheckedAt(enc) >= time.Hour {
+	c := off.CheckedAt(enc)
+	if w == nil || c >= 24*time.Hour {
 		return ""
+	}
+	fallBack, anywhere, hour := off.FallBack, off.FallBackAnywhere, c >= time.Hour
+	if hour {
+		fallBack, anywhere = off.FallBackAcrossHour, off.FallBackAnywhereAcrossHour
 	}
 	for _, s := range []Span{w.Rec, w.F} {
 		named := ""
-		if turn, back, met := off.FallBack(enc, s.From, s.To, dc.zone); met {
-			named = fallBackNamed(turn, back, dc.zone)
+		if turn, back, met := fallBack(enc, s.From, s.To, dc.zone); met {
+			named = fallBackNamed(turn, back, dc.zone) + acrossHourNamed(hour, turn, dc.zone)
 		} else if dc.zone == nil || dc.zoneNoName {
-			if turn, back, loc, met := off.FallBackAnywhere(enc, s.From, s.To); met {
-				named = fallBackNamed(turn, back, loc) + " (keploy knows no zone of the application's here, so it reads every zone's clocks going back)"
+			if turn, back, loc, met := anywhere(enc, s.From, s.To); met {
+				named = fallBackNamed(turn, back, loc) + acrossHourNamed(hour, turn, loc) + " (keploy knows no zone of the application's here, so it reads every zone's clocks going back)"
 			}
 		}
 		if named != "" {
@@ -1104,6 +1119,20 @@ func (dc *DriftCache) offsetFallBackWhy(path string, off models.ClockOffset, enc
 		}
 	}
 	return ""
+}
+
+// acrossHourNamed is what offsetFallBackWhy adds, at an hour's cut (hour),
+// to the turn named, at which loc's clocks go back and whose wall time
+// shown twice holds the start of one of loc's wall hours
+// (models.AcrossHour): that hour, and why two runs a minute apart there
+// show an offset an hour from the one the application adds. "" elsewhere.
+func acrossHourNamed(hour bool, turn time.Time, loc *time.Location) string {
+	if !hour || !models.AcrossHour(turn, loc) {
+		return ""
+	}
+	after := turn.In(loc)
+	start := after.Add(time.Hour - time.Duration(after.Minute())*time.Minute - time.Duration(after.Second())*time.Second - time.Duration(after.Nanosecond())).Format("15:04")
+	return ", which holds the start of the wall hour " + start + ": cut to the hour, a run in the second showing before " + start + " writes the hour before it, shown once, and so the right value, and one after it " + start + "'s first showing, an hour early"
 }
 
 // clockOffsetFineWhy is why an instant at the clock plus an offset off is

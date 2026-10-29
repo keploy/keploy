@@ -1465,3 +1465,74 @@ func TestAReadPlusAnOffsetHoldsNothingNearAWallTimeShownTwiceAtAnyCut(t *testing
 		}
 	}
 }
+
+// AcrossHour holds where a zone's wall time shown twice as its clocks go
+// back holds the start of one of its wall hours strictly inside it
+// (Pacific/Chatham's 02:45 to 03:45 holds 03:00; Antarctica/Troll's 01:00
+// to 03:00 holds 02:00), and nowhere it is whole hours or within one
+// (Europe/Berlin's 02:00 to 03:00, Newfoundland's 01:00 to 02:00, Lord
+// Howe's 01:30 to 02:00). The learn step reads the turns it holds at an
+// hour's cut: FallBackAcrossHour in the zone known, and with none every
+// zone's (FallBackAnywhereAcrossHour), which keeps Chatham's turn though
+// Auckland turns at the same instant by the same hour and holds none. A
+// window at Chatham's turn meets it; one at Berlin's meets none in Berlin,
+// and among every zone's meets Troll's, at the same instant; one at New
+// York's meets none.
+func TestAWallTimeShownTwiceHoldingAnHoursStartIsReadAtAnHoursCut(t *testing.T) {
+	hour := time.Hour
+	for _, c := range []struct {
+		zone string
+		turn time.Time
+		want bool
+	}{
+		{"Pacific/Chatham", time.Date(2026, 4, 4, 14, 0, 0, 0, time.UTC), true},
+		{"Antarctica/Troll", time.Date(2026, 10, 25, 1, 0, 0, 0, time.UTC), true},
+		{"Pacific/Auckland", time.Date(2026, 4, 4, 14, 0, 0, 0, time.UTC), false},
+		{"Europe/Berlin", time.Date(2026, 10, 25, 1, 0, 0, 0, time.UTC), false},
+		{"America/St_Johns", time.Date(2026, 11, 1, 4, 30, 0, 0, time.UTC), false},
+		{"Australia/Lord_Howe", time.Date(2026, 4, 4, 15, 0, 0, 0, time.UTC), false},
+	} {
+		loc, err := time.LoadLocation(c.zone)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, end := c.turn.Add(-time.Second).In(loc).ZoneBounds(); !end.Equal(c.turn) {
+			t.Fatalf("%s: the zone's next change after %s is at %s, not then", c.zone, c.turn.Add(-time.Second), end)
+		}
+		if got := AcrossHour(c.turn, loc); got != c.want {
+			t.Errorf("AcrossHour(%s, %s) = %v; want %v", c.turn, c.zone, got, c.want)
+		}
+	}
+	o := ClockOffset{Min: 2*hour - time.Minute, Max: 2*hour + time.Minute, Res: hour}
+	chat, _ := time.LoadLocation("Pacific/Chatham")
+	ber, _ := time.LoadLocation("Europe/Berlin")
+	at := time.Date(2026, 4, 4, 14, 14, 0, 0, time.UTC)
+	if turn, back, met := o.FallBackAcrossHour(hour, at, at.Add(time.Second), chat); !met || !turn.Equal(time.Date(2026, 4, 4, 14, 0, 0, 0, time.UTC)) || back != hour {
+		t.Errorf("FallBackAcrossHour at %s in Chatham = %s, %s, %v; want its turn at 14:00 UTC, an hour", at, turn, back, met)
+	}
+	turn, back, loc, met := o.FallBackAnywhereAcrossHour(hour, at, at.Add(time.Second))
+	if !met || !turn.Equal(time.Date(2026, 4, 4, 14, 0, 0, 0, time.UTC)) || back != hour || loc == nil || !AcrossHour(turn, loc) {
+		t.Errorf("FallBackAnywhereAcrossHour at %s = %s, %s, %v, %v; want Chatham's turn at 14:00 UTC, an hour, in a zone whose wall time shown twice holds an hour's start", at, turn, back, loc, met)
+	}
+	if _, _, l, met := o.FallBackAnywhere(hour, at, at.Add(time.Second)); !met || AcrossHour(turn, l) {
+		t.Errorf("FallBackAnywhere at %s names %v (met %v); want the first zone by name that turns there, Auckland's rules, as before", at, l, met)
+	}
+	bt := time.Date(2026, 10, 25, 0, 30, 0, 0, time.UTC)
+	if turn, _, met := o.FallBackAcrossHour(hour, bt, bt.Add(time.Second), ber); met {
+		t.Errorf("FallBackAcrossHour at %s in Berlin met its turn at %s; want none: its wall time shown twice is a whole hour", bt, turn)
+	}
+	if _, _, met := o.FallBack(hour, bt, bt.Add(time.Second), ber); !met {
+		t.Errorf("FallBack at %s in Berlin met no turn; want its turn", bt)
+	}
+	if turn, _, l, met := o.FallBackAnywhereAcrossHour(hour, bt, bt.Add(time.Second)); !met || l == nil || l.String() != "Antarctica/Troll" || !turn.Equal(time.Date(2026, 10, 25, 1, 0, 0, 0, time.UTC)) {
+		t.Errorf("FallBackAnywhereAcrossHour at %s = %s, %v, %v; want Antarctica/Troll's turn, at Berlin's instant", bt, turn, l, met)
+	}
+	ny, _ := time.LoadLocation("America/New_York")
+	nt := time.Date(2026, 11, 1, 5, 30, 0, 0, time.UTC)
+	if _, _, met := o.FallBack(hour, nt, nt.Add(time.Second), ny); !met {
+		t.Errorf("FallBack at %s in New York met no turn; want its turn", nt)
+	}
+	if turn, _, l, met := o.FallBackAnywhereAcrossHour(hour, nt, nt.Add(time.Second)); met {
+		t.Errorf("FallBackAnywhereAcrossHour at %s met %s's turn at %s; want none of a zone whose wall time shown twice holds an hour's start", nt, l, turn)
+	}
+}
