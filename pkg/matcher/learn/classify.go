@@ -754,6 +754,25 @@ type Learned struct {
 	// the value is a clock read, and how to correct it (evidence). It never
 	// holds a value: it names a part of one by where it stands.
 	Why string
+	// Bindable, of a KindUnaccounted leaf of keploy mock's client test
+	// (DriftCache.ClientTests), says the value is one its test gave the
+	// application, first sent at this call: keploy found no source of it
+	// at an earlier place, no word of what changed standing at one, no echo
+	// of it in the call's answer, and no read of the application's clock
+	// in its call's window for the instant in it that changed (the
+	// harness's `[E2E] app-crud-<UnixNano>`, made by the test's own clock,
+	// which keploy does not see: clientTestUnread). Why stays the client
+	// test's refusal (clientTestWhy), and a caller that binds no variable
+	// refuses it so. A caller that does may learn it, in the test's own
+	// recording only, as a variable of the test bound here: every replay
+	// binds the value the call sends at this place, and a later call of
+	// the test that sends it finds this place as its source (KindVariable)
+	// and is held to the bound value, while a later call that sends
+	// another value in its place is refused (no source; the recorded word
+	// stands at this earlier place). It is never noise: a value the test
+	// sends at one call only is bound and used nowhere, and the binding
+	// place names it.
+	Bindable bool
 }
 
 // Classify decides each drifted leaf of the mock rec was paired with
@@ -1433,6 +1452,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 			}
 			// In keploy mock's client tests, a changed instant only where the
 			// call's window shows it a read of the application's clock.
+			bindable := false
 			if why == "" && dc.clientTests {
 				why = dc.clientTestUnread(v, w)
 				// One instant whole in both runs that its window holds as
@@ -1450,10 +1470,21 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 					if cutWhy != "" {
 						why = clientCutAmbiguousWhy(cutWhy)
 					}
+					// The test's value, first sent here (Learned.Bindable):
+					// no source, no echo, no word of it at an earlier place
+					// (unaccounted and givenWhy found none), none of it in
+					// the call's own answer (echoedPart), and no word the
+					// word rule let go in record's full round (follows), so
+					// no order of places is needed either. Never where the
+					// value may be a clock read at a cut keploy cannot tell
+					// (cutWhy): that stays refused.
+					bindable = cutWhy == "" && ln.Kind == KindNoise && skip&skipSource == 0 && echoedPart(dc, v, resp) == "" &&
+						(fol == nil || fol.first == "" && fol.refuted == "")
 				}
 			}
 			if why != "" {
 				ln.Kind, ln.Why, ln.Echo = KindUnaccounted, why, nil
+				ln.Bindable = bindable
 			}
 		}
 		// Noise only where no word of what changed comes back in the

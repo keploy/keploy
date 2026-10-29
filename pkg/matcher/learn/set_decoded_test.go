@@ -95,7 +95,7 @@ func TestEachPayloadOfTheSetIsDecodedAndReadForItsInstantsOnceNotOncePerCall(t *
 			dc.searchedTokens(x, false)
 			dc.searchedTokens(x, true)
 		}
-		if p, ok := dc.instantRawFrom(Leaf{}, none, eRecAt.Add(time.Hour), raw); ok {
+		if p, ok := dc.instantRawFrom(Leaf{}, none, none, eRecAt.Add(time.Hour), raw); ok {
 			t.Fatalf("a moment no payload holds was found in %v", p)
 		}
 		tr.End()
