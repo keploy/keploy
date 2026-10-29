@@ -1007,8 +1007,11 @@ func TestIndexCacheWarnsAsAWholeReadDoes(t *testing.T) {
 }
 
 // An index is of one format: the same bytes in a file of the other format
-// are read whole, whether that file is a copy (the content key) or the same
-// file under the other name, a hard link (the same-file key).
+// are read whole, whether that file is a copy or the same file under the
+// other name, a hard link. With only that one index kept, the size check
+// refuses the read before the content loop; a kept index of the other
+// format and the same size reaching the content loop is
+// TestIndexCacheContentKeyKeepsToTheFormat.
 func TestIndexCacheIsPerFormat(t *testing.T) {
 	t.Setenv("KEPLOY_MOCK_FORMAT", "")
 	ctx := context.Background()
