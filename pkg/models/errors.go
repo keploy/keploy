@@ -124,10 +124,11 @@ const (
 // itself) and a connection whose client sent nothing (MatchPhaseNoRequest: no
 // call was made, and a dependency's TCP health check closes the same way). An
 // answered call (Answer, under the proven switch) is no miss, and counts
-// against nothing. Every verdict, count and evidence line that judges misses
-// reads this.
+// against nothing, nor is a call made outside every test's window
+// (Background): the application's background work, charged to no test.
+// Every verdict, count and evidence line that judges misses reads this.
 func (c UnmatchedCall) CountsAgainstTest() bool {
-	return c.Answer == "" && !strings.EqualFold(c.Protocol, "DNS") && c.MatchPhase != MatchPhaseNoRequest
+	return !c.Background && c.Answer == "" && !strings.EqualFold(c.Protocol, "DNS") && c.MatchPhase != MatchPhaseNoRequest
 }
 
 // CountsAgainstTest is UnmatchedCall.CountsAgainstTest for the report a miss
