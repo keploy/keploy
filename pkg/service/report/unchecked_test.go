@@ -87,3 +87,34 @@ func TestRenderSingleFailedTest_SaysATestsUncheckedWrites(t *testing.T) {
 		t.Fatalf("a failed test with no answers has an unchecked line:\n%s", sb.String())
 	}
 }
+
+// The text report names, under a test's status, each read the agent
+// answered from before a write the replay had not made yet, after the
+// test's unchecked writes, and changes nothing else.
+func TestPrintTests_NamesAReadAnsweredFromBeforeAWrite(t *testing.T) {
+	render := func(tests ...models.TestResult) string {
+		r := New(zap.NewNop(), &config.Config{DisableANSI: true}, nil, nil)
+		var buf bytes.Buffer
+		r.out = bufio.NewWriter(&buf)
+		if err := r.printTests(context.Background(), tests); err != nil {
+			t.Fatalf("printTests: %v", err)
+		}
+		return buf.String()
+	}
+	passed := models.TestResult{TestCaseID: "post-url-1", Name: "test-set-0", Status: models.TestStatusPassed}
+	bare := render(passed)
+	answered := passed
+	answered.Answers = []models.UnmatchedCall{
+		{Protocol: "MongoDB", ActualSummary: "find oauth.blocklist", Answer: models.AnswerBeforeUnmadeWrite, ClosestMock: "mock-3",
+			NextSteps: "an extra read before mock-7, answered from mock-3", Kind: models.MissInTest},
+		byKindAnswer(),
+	}
+	const want = "  post-url-1: MongoDB find oauth.blocklist: an extra read before mock-7, answered from mock-3\n"
+	got := render(answered)
+	if strings.Count(got, want) != 1 || strings.Index(got, want) < strings.Index(got, uncheckedWant) {
+		t.Fatalf("the report does not name the read once, after the unchecked writes:\n%s", got)
+	}
+	if strings.Replace(strings.Replace(got, want, "", 1), uncheckedWant, "", 1) != bare {
+		t.Fatalf("the lines changed more than themselves:\n%s\nvs\n%s", got, bare)
+	}
+}
