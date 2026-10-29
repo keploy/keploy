@@ -73,24 +73,56 @@ type Conn struct {
 	mu     sync.Mutex
 }
 
+// ErrCannotHalfClose is what a half-close of a conn that has no way to
+// end only what it sends reports: nothing was sent, and its peer was
+// told nothing. It is errors.ErrUnsupported.
+var ErrCannotHalfClose = fmt.Errorf("the connection cannot half-close: %w", errors.ErrUnsupported)
+
 // CloseWriteIfPossible forwards a FIN on c when the conn supports
-// half-close, and does nothing when it does not. Doing nothing is the
-// right fallback: losing a half-close costs a protocol signal, whereas
-// closing the connection to compensate would cost the connection.
+// half-close, and does nothing when it does not, but says so: it
+// returns ErrCannotHalfClose. Doing nothing is the right fallback for a
+// caller that only passes the signal on (losing a half-close costs a
+// protocol signal, whereas closing the connection to compensate would
+// cost the connection), and it ignores the error. A caller that keeps
+// the other direction open for the peer's answer to the FIN must know
+// the peer got one: a wrapper that answered nil for a FIN it never sent
+// held a pass-through open for an end its peer never knew to send.
 //
 // It lives here because this package defines the wrappers that sit
 // between the proxy and every real socket, and is the only one able to
-// see through them.
+// see through them. A conn with a CloseWrite of its own is asked, and
+// each wrapper's CloseWrite returns what this returns for the conn it
+// wraps. A conn with none is looked through to the conn it wraps (its
+// NetConn, the convention *tls.Conn set, or its Unwrap), so a wrapper
+// that only filters what is read, such as the HTTP/2 preface's
+// ackFilter, does not hide a leaf that can half-close. So the answer is
+// the leaf's, however they nest: ErrCannotHalfClose only when no conn
+// down the chain has a CloseWrite, or the chain is deeper than
+// maxHalfCloseDepth (a wrapper that returns itself must not hang this).
 func CloseWriteIfPossible(c net.Conn) error {
 	if c == nil {
 		return nil
 	}
 	type closeWriter interface{ CloseWrite() error }
-	if cw, ok := c.(closeWriter); ok {
-		return cw.CloseWrite()
+	for i := 0; i < maxHalfCloseDepth && c != nil; i++ {
+		if cw, ok := c.(closeWriter); ok {
+			return cw.CloseWrite()
+		}
+		switch u := c.(type) {
+		case interface{ NetConn() net.Conn }:
+			c = u.NetConn()
+		case interface{ Unwrap() net.Conn }:
+			c = u.Unwrap()
+		default:
+			return ErrCannotHalfClose
+		}
 	}
-	return nil
+	return ErrCannotHalfClose
 }
+
+// maxHalfCloseDepth bounds CloseWriteIfPossible's walk down a conn's
+// wrappers. The proxy nests a handful at most.
+const maxHalfCloseDepth = 16
 
 // CloseWrite forwards a half-close to the conn underneath.
 //

@@ -210,23 +210,141 @@ func TestGlobalPassThroughForwardsEachSidesEnd(t *testing.T) {
 		}
 	})
 
-	t.Run("a side that cannot half-close is closed on the other's end, as before", func(t *testing.T) {
+	// However it is wrapped: handleConnection hands the relay a pUtil.Conn (or
+	// a SafeConn, a trackedConn, ...), whose CloseWrite answers for the conn
+	// it wraps. And where a CloseWrite fails, as a *tls.Conn's does when its
+	// close_notify cannot be written. Red with a wrapper's CloseWrite taken
+	// for a half-close when the conn beneath has none, with CloseWrite's
+	// error ignored, or with only pUtil.ErrCannotHalfClose taken for a
+	// failure: the client, never told the server's end, never sees its own,
+	// and the relay waits for an EOF the client was never asked to send.
+	for _, tc := range []struct {
+		name string
+		wrap func(net.Conn) net.Conn
+	}{
+		{"bare", func(c net.Conn) net.Conn { return noCloseWriteConn{c} }},
+		{"in a pUtil.Conn, as handleConnection hands it", func(c net.Conn) net.Conn {
+			l := noCloseWriteConn{c}
+			return &pUtil.Conn{Conn: l, Reader: l, Logger: zap.NewNop()}
+		}},
+		{"in a SafeConn in a pUtil.Conn", func(c net.Conn) net.Conn {
+			s := proxyOwned{SafeConn: pUtil.NewSafeConn(noCloseWriteConn{c}, zap.NewNop()), leaf: c}
+			return &pUtil.Conn{Conn: s, Reader: s, Logger: zap.NewNop()}
+		}},
+		{"its CloseWrite fails", func(c net.Conn) net.Conn { return failingCloseWrite{c} }},
+	} {
+		t.Run("a side that cannot half-close is closed on the other's end, as before: "+tc.name, func(t *testing.T) {
+			app, client := loopbackPair(t)
+			dest, server := loopbackPair(t)
+			go func() {
+				_, _ = server.Write([]byte("answer"))
+				_ = server.Close()
+			}()
+			// The client holds its connection open, and reads.
+			_, ended := passThrough(t, tc.wrap(client), dest)
+			if a := awaitEvent(t, readAll(app), "the client reading to its end"); string(a) != "answer" {
+				t.Fatalf("the client got %q, want %q", a, "answer")
+			}
+			if err := awaitEvent(t, ended, "the relay ending"); err != nil {
+				t.Fatalf("the relay ended with %v, want nil", err)
+			}
+		})
+	}
+
+	// And the other way: where the destination's CloseWrite fails, the
+	// client's end ends the relay and the caller closes both, so the server
+	// hears the end. Red with only pUtil.ErrCannotHalfClose taken for a
+	// failure there: the server, never told, waits for more of the request.
+	t.Run("a destination whose CloseWrite fails is closed on the client's end, as before", func(t *testing.T) {
 		app, client := loopbackPair(t)
 		dest, server := loopbackPair(t)
+		heard := make(chan []byte, 1)
 		go func() {
-			_, _ = server.Write([]byte("answer"))
-			_ = server.Close()
+			got, _ := io.ReadAll(server)
+			heard <- got
 		}()
-		// The client holds its connection open, and reads.
-		_, ended := passThrough(t, struct{ net.Conn }{client}, dest)
-		if a := awaitEvent(t, readAll(app), "the client reading to its end"); string(a) != "answer" {
-			t.Fatalf("the client got %q, want %q", a, "answer")
+		_, ended := passThrough(t, client, failingCloseWrite{dest})
+		if _, err := app.Write([]byte("request")); err != nil {
+			t.Fatal(err)
+		}
+		halfCloseOf(t, app)
+		if h := awaitEvent(t, heard, "the server reading the client to its end"); string(h) != "request" {
+			t.Fatalf("the server got %q, want %q", h, "request")
 		}
 		if err := awaitEvent(t, ended, "the relay ending"); err != nil {
 			t.Fatalf("the relay ended with %v, want nil", err)
 		}
 	})
+
+	// A wrapper with no CloseWrite of its own is half-closed through the conn
+	// it wraps (NetConn, Unwrap). Red with that look-through gone: the relay
+	// ends on the server's end, and the server never hears the client again.
+	for _, tc := range []struct {
+		name string
+		wrap func(net.Conn) net.Conn
+	}{
+		{"NetConn", func(c net.Conn) net.Conn { return netConnOnly{c} }},
+		{"Unwrap", func(c net.Conn) net.Conn { return unwrapOnly{c} }},
+	} {
+		t.Run("a wrapper with no CloseWrite is half-closed through the conn it wraps: "+tc.name, func(t *testing.T) {
+			app, client := loopbackPair(t)
+			dest, server := loopbackPair(t)
+			heard := make(chan []byte, 1)
+			go func() {
+				if _, err := server.Write([]byte("answer")); err != nil {
+					return
+				}
+				_ = server.(*net.TCPConn).CloseWrite()
+				got, _ := io.ReadAll(server)
+				heard <- got
+			}()
+			_, ended := passThrough(t, tc.wrap(client), dest)
+			if a := awaitEvent(t, readAll(app), "the client reading the server's answer to its end"); string(a) != "answer" {
+				t.Fatalf("the client got %q, want the server's %q", a, "answer")
+			}
+			if _, err := app.Write([]byte("after")); err != nil {
+				t.Fatal(err)
+			}
+			halfCloseOf(t, app)
+			if h := awaitEvent(t, heard, "the server reading the client to its end"); string(h) != "after" {
+				t.Fatalf("the server got %q after its half-close, want the client's %q", h, "after")
+			}
+			if err := awaitEvent(t, ended, "the relay ending"); err != nil {
+				t.Fatalf("the relay ended with %v, want nil", err)
+			}
+		})
+	}
 }
+
+// noCloseWriteConn is a conn that cannot half-close: no CloseWrite, and
+// nothing beneath it to look through to.
+type noCloseWriteConn struct{ net.Conn }
+
+// failingCloseWrite is a conn whose CloseWrite fails with an error other than
+// pUtil.ErrCannotHalfClose, as a *tls.Conn's does when its close_notify
+// cannot be written: no FIN was sent.
+type failingCloseWrite struct{ net.Conn }
+
+func (failingCloseWrite) CloseWrite() error { return errors.New("shutdown: broken pipe") }
+
+// proxyOwned is a SafeConn closed as the proxy, which owns the conn beneath,
+// closes it: a SafeConn's own Close does nothing.
+type proxyOwned struct {
+	*pUtil.SafeConn
+	leaf net.Conn
+}
+
+func (c proxyOwned) Close() error { return c.leaf.Close() }
+
+// netConnOnly and unwrapOnly wrap a conn with no CloseWrite of their own,
+// telling the conn beneath by NetConn or Unwrap.
+type netConnOnly struct{ net.Conn }
+
+func (c netConnOnly) NetConn() net.Conn { return c.Conn }
+
+type unwrapOnly struct{ net.Conn }
+
+func (c unwrapOnly) Unwrap() net.Conn { return c.Conn }
 
 // A TLS 1.2 server's last answer, read together with the close_notify that
 // follows it (crypto/tls returns them as one read: the bytes and io.EOF),

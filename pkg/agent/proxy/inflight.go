@@ -14,6 +14,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 )
@@ -866,14 +867,11 @@ func (c *trackedConn) Close() error {
 func (c *trackedConn) HoldTLSLayer(l *tls.Conn) { c.tlsLayer.Store(l) }
 
 // CloseWrite forwards a half-close to the conn underneath: a request
-// still aloft is given no answer on c (endUntold).
+// still aloft is given no answer on c (endUntold). A conn underneath that
+// cannot half-close says so (util.ErrCannotHalfClose).
 func (c *trackedConn) CloseWrite() error {
 	c.endUntold(false)
-	type closeWriter interface{ CloseWrite() error }
-	if cw, ok := c.Conn.(closeWriter); ok {
-		return cw.CloseWrite()
-	}
-	return nil
+	return util.CloseWriteIfPossible(c.Conn)
 }
 
 // NetConn is the conn c reads and writes through (the *tls.Conn convention),

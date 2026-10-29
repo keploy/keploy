@@ -33,10 +33,11 @@ func writeNsswitchConfig(logger *zap.Logger, nsSwitchConfig string, data []byte,
 // direction still open goes on until its own EOF or error, or ctx's end, so a
 // client that half-closes to end its request gets the server's whole answer,
 // and a server that half-closes is heard as one. Where the other side cannot
-// half-close (its conn has no CloseWrite, or it fails), the first EOF ends the
-// relay and the caller closes both, as before. A read's error ends the relay at
-// once, as does a write's, except a write to a side that already sent its EOF:
-// it closed whole, and that ends the relay with no error.
+// half-close (no conn down its wrappers has a CloseWrite,
+// pUtil.ErrCannotHalfClose, or its CloseWrite fails), the first EOF ends the
+// relay and the caller closes both, as before. A read's error ends the relay
+// at once, as does a write's, except a write to a side that already sent its
+// EOF: it closed whole, and that ends the relay with no error.
 //
 // It ends on each of those whatever the other side still has to send or still
 // has not read: ctx's end puts both connections' deadlines in the past, so a
@@ -221,20 +222,11 @@ func writeQueued(w net.Conn, b []byte, queue chan []byte) error {
 }
 
 // halfClose ends what c sends, its reading side left open (CloseWrite: a FIN
-// on TCP, a close_notify on TLS), and reports whether it did. A conn with no
-// CloseWrite is looked through to the one it wraps (NetConn, the convention
-// *tls.Conn set). A wrapper's CloseWrite answers for the conn it wraps.
+// on TCP, a close_notify on TLS), and reports whether it did. The answer is
+// pUtil.CloseWriteIfPossible's: the leaf's, looked up through c's wrappers,
+// whether or not each has a CloseWrite of its own, and
+// pUtil.ErrCannotHalfClose, not nil, where the leaf cannot half-close, so a
+// peer told nothing is not waited for.
 func halfClose(c net.Conn) bool {
-	type closeWriter interface{ CloseWrite() error }
-	for i := 0; i < 8 && c != nil; i++ { // wrappers nest; a cycle must not hang
-		if cw, ok := c.(closeWriter); ok {
-			return cw.CloseWrite() == nil
-		}
-		u, ok := c.(interface{ NetConn() net.Conn })
-		if !ok || u.NetConn() == c {
-			return false
-		}
-		c = u.NetConn()
-	}
-	return false
+	return c != nil && pUtil.CloseWriteIfPossible(c) == nil
 }
