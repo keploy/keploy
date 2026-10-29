@@ -497,8 +497,8 @@ var _ integrations.AnsweredBackgroundReader = (*scopedMockDb)(nil)
 // MarkedSeries forwards the store's marked series (integrations.
 // MarkedSeriesReader), none when it reads none, so a parser on a view made
 // before exact serving began still answers a timer's call judging marked.
-func (s *scopedMockDb) MarkedSeries(kind models.Kind, known learn.Known) ([]integrations.MarkedSeries, error) {
-	return integrations.MarkedSeriesOf(s.MockMemDb, kind, known)
+func (s *scopedMockDb) MarkedSeries(ctx context.Context, kind models.Kind, known learn.Known) ([]integrations.MarkedSeries, error) {
+	return integrations.MarkedSeriesOf(ctx, s.MockMemDb, kind, known)
 }
 
 var _ integrations.MarkedSeriesReader = (*scopedMockDb)(nil)

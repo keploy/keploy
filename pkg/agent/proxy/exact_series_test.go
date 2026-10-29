@@ -1,8 +1,10 @@
 package proxy
 
 import (
+	"context"
 	"errors"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -79,7 +81,7 @@ func TestMarkedSeriesIsATimersCallMarkedWhereverItWasRecorded(t *testing.T) {
 	mm := timerSet(t)
 	mm.SetUnrequired(all)
 	mm.ServeExactTest("T1", nil)
-	got, err := mm.MarkedSeries(seriesRowKind, nil)
+	got, err := mm.MarkedSeries(context.Background(), seriesRowKind, nil)
 	if err != nil || len(got) != 1 {
 		t.Fatalf("MarkedSeries = %d series, %v; want the claims' one", len(got), err)
 	}
@@ -89,7 +91,7 @@ func TestMarkedSeriesIsATimersCallMarkedWhereverItWasRecorded(t *testing.T) {
 	if _, ok := got[0].Series.Clock["body.at"]; !ok {
 		t.Fatalf("the series learned %+v; want its at a read of the clock", got[0].Series)
 	}
-	if other, _ := mm.MarkedSeries(models.HTTP, nil); len(other) != 0 {
+	if other, _ := mm.MarkedSeries(context.Background(), models.HTTP, nil); len(other) != 0 {
 		t.Fatalf("another kind's series were handed out: %d", len(other))
 	}
 
@@ -108,7 +110,7 @@ func TestMarkedSeriesIsATimersCallMarkedWhereverItWasRecorded(t *testing.T) {
 			mm := timerSet(t)
 			mm.SetUnrequired(c.marks)
 			mm.ServeExactTest("T1", nil)
-			if got, err := mm.MarkedSeries(seriesRowKind, nil); err != nil || len(got) != 0 {
+			if got, err := mm.MarkedSeries(context.Background(), seriesRowKind, nil); err != nil || len(got) != 0 {
 				t.Fatalf("MarkedSeries = %d series, %v; want none", len(got), err)
 			}
 		})
@@ -119,7 +121,7 @@ func TestMarkedSeriesIsATimersCallMarkedWhereverItWasRecorded(t *testing.T) {
 			[]string{"claim-1", "claim-2", "claim-3", "claim-4", "claim-5", "claim-6"}, nil)
 		mm.SetUnrequired(models.BackgroundMarks{"T1": {"app-3": "a delayed write"}})
 		mm.ServeExactTest("T1", nil)
-		if got, _ := mm.MarkedSeries(seriesRowKind, nil); len(got) != 0 {
+		if got, _ := mm.MarkedSeries(context.Background(), seriesRowKind, nil); len(got) != 0 {
 			t.Fatalf("a series judging marked none of has %d marked series", len(got))
 		}
 	})
@@ -135,7 +137,7 @@ func TestMarkedSeriesIsATimersCallMarkedWhereverItWasRecorded(t *testing.T) {
 		})
 		mm.ServeExactTest("T1", nil)
 		mm.StageExactBackground(models.RecordedWithS12Routing) // the next set's staging
-		if got, _ := mm.MarkedSeries(seriesRowKind, nil); len(got) != 0 {
+		if got, _ := mm.MarkedSeries(context.Background(), seriesRowKind, nil); len(got) != 0 {
 			t.Fatalf("a staging whose background is not named yet has %d marked series", len(got))
 		}
 	})
@@ -144,7 +146,7 @@ func TestMarkedSeriesIsATimersCallMarkedWhereverItWasRecorded(t *testing.T) {
 		mm.ServeExactBackground("", nil, nil)
 		mm.SetUnrequired(all)
 		mm.ServeExactTest("T1", nil)
-		if got, _ := mm.MarkedSeries(seriesRowKind, nil); len(got) != 0 {
+		if got, _ := mm.MarkedSeries(context.Background(), seriesRowKind, nil); len(got) != 0 {
 			t.Fatalf("a set served by today's rules has %d marked series", len(got))
 		}
 	})
@@ -154,7 +156,7 @@ func TestMarkedSeriesIsATimersCallMarkedWhereverItWasRecorded(t *testing.T) {
 		mm.ServeExactTest("T1", nil)
 		t.Setenv(provenswitch.Env, "")
 		mm.ServeExactBackground(models.RecordedWithS12Routing, []string{"claim-1", "claim-2"}, nil)
-		if got, _ := mm.MarkedSeries(seriesRowKind, nil); len(got) != 0 {
+		if got, _ := mm.MarkedSeries(context.Background(), seriesRowKind, nil); len(got) != 0 {
 			t.Fatalf("with the switch off %d series are marked", len(got))
 		}
 	})
@@ -168,17 +170,17 @@ func TestMarkedSeriesIsReadAgainWhenTheMarksOrTheRecordingsChange(t *testing.T) 
 	partial := models.BackgroundMarks{"T1": {"claim-3": "a timer's call"}, "T2": {"claim-5": "w", "claim-6": "w"}}
 	mm.SetUnrequired(partial)
 	mm.ServeExactTest("T1", nil)
-	if got, _ := mm.MarkedSeries(seriesRowKind, nil); len(got) != 0 {
+	if got, _ := mm.MarkedSeries(context.Background(), seriesRowKind, nil); len(got) != 0 {
 		t.Fatalf("claim-4 is unmarked, yet %d series are marked", len(got))
 	}
 	mm.SetUnrequired(models.BackgroundMarks{"T1": {"claim-3": "w", "claim-4": "w"}, "T2": {"claim-5": "w", "claim-6": "w"}})
-	if got, _ := mm.MarkedSeries(seriesRowKind, nil); len(got) != 1 {
+	if got, _ := mm.MarkedSeries(context.Background(), seriesRowKind, nil); len(got) != 1 {
 		t.Fatalf("after the marks changed %d series are marked; want the claims' one read again", len(got))
 	}
 	reads := 0
 	mm.SetRecordedBefore(func(time.Time, func(*models.Mock) bool) error { reads++; return nil })
 	for i := 0; i < 3; i++ {
-		if got, _ := mm.MarkedSeries(seriesRowKind, nil); len(got) != 1 {
+		if got, _ := mm.MarkedSeries(context.Background(), seriesRowKind, nil); len(got) != 1 {
 			t.Fatalf("call %d: %d series are marked; want the claims' one", i, len(got))
 		}
 	}
@@ -187,11 +189,11 @@ func TestMarkedSeriesIsReadAgainWhenTheMarksOrTheRecordingsChange(t *testing.T) 
 	}
 	boom := errors.New("disk store closed")
 	mm.SetRecordedBefore(func(time.Time, func(*models.Mock) bool) error { return boom })
-	if got, err := mm.MarkedSeries(seriesRowKind, nil); !errors.Is(err, boom) || len(got) != 0 {
+	if got, err := mm.MarkedSeries(context.Background(), seriesRowKind, nil); !errors.Is(err, boom) || len(got) != 0 {
 		t.Fatalf("with the recordings unreadable MarkedSeries = %d series, %v; want none and why", len(got), err)
 	}
 	mm.SetRecordedBefore(nil)
-	if got, err := mm.MarkedSeries(seriesRowKind, nil); err != nil || len(got) != 1 {
+	if got, err := mm.MarkedSeries(context.Background(), seriesRowKind, nil); err != nil || len(got) != 1 {
 		t.Fatalf("with the recordings readable again MarkedSeries = %d series, %v; want the claims' one", len(got), err)
 	}
 }
@@ -204,18 +206,177 @@ func TestMarkedSeriesIsForwardedByTheStoresWrappers(t *testing.T) {
 	mm.SetUnrequired(models.BackgroundMarks{"T1": {"claim-3": "w", "claim-4": "w"}, "T2": {"claim-5": "w", "claim-6": "w"}})
 	mm.ServeExactTest("T1", nil)
 	scoped := &scopedMockDb{MockMemDb: mm}
-	if got, err := integrations.MarkedSeriesOf(scoped, seriesRowKind, nil); err != nil || len(got) != 1 {
+	if got, err := integrations.MarkedSeriesOf(context.Background(), scoped, seriesRowKind, nil); err != nil || len(got) != 1 {
 		t.Fatalf("a scoped view forwarded %d series, %v; want the store's one", len(got), err)
 	}
 	held, restaged := mm.HoldToRound(integrations.NewCallRound(mm.stagingEpoch.Load(), nil))
-	if got, err := integrations.MarkedSeriesOf(held, seriesRowKind, nil); err != nil || len(got) != 1 {
+	if got, err := integrations.MarkedSeriesOf(context.Background(), held, seriesRowKind, nil); err != nil || len(got) != 1 {
 		t.Fatalf("a call's held round forwarded %d series, %v; want the store's one", len(got), err)
 	}
 	mm.bumpStagingEpoch()
-	if got, _ := integrations.MarkedSeriesOf(held, seriesRowKind, nil); len(got) != 0 || !restaged() {
+	if got, _ := integrations.MarkedSeriesOf(context.Background(), held, seriesRowKind, nil); len(got) != 0 || !restaged() {
 		t.Fatalf("once another set was staged the held call is handed %d series (restaged %v); want none, restaged", len(got), restaged())
 	}
-	if got, _ := integrations.MarkedSeriesOf(nil, seriesRowKind, nil); got != nil {
+	if got, _ := integrations.MarkedSeriesOf(context.Background(), nil, seriesRowKind, nil); got != nil {
 		t.Fatalf("a store without the capability handed out %d series", len(got))
 	}
 }
+
+// The set's recordings are read for its series as it is staged, on a
+// goroutine of the manager's, so no call pays for the read: whichever of
+// what they are read from is named last (the marks, the background, the
+// on-disk store, a staging of the set again), the read is under way before
+// the first call, which never reads them itself, and a call that comes while
+// they are still being read waits for the read (event-driven, no budget), or
+// for its own ctx. A read another takes the place of (the marks or the store
+// changed, the next set's staging) stops at its next recording, and a call
+// that waited for it is handed the read that took its place.
+func TestMarkedSeriesIsReadAtStagingNotByTheFirstCall(t *testing.T) {
+	all := models.BackgroundMarks{"T1": {"claim-3": "w", "claim-4": "w"}, "T2": {"claim-5": "w", "claim-6": "w"}}
+	partial := models.BackgroundMarks{"T1": {"claim-3": "w"}, "T2": {"claim-5": "w", "claim-6": "w"}}
+	// gated is an on-disk source whose first read once armed waits for
+	// gate, then offers one recording and keeps whether the read went on
+	// (went); reads counts its reads once armed.
+	type gated struct {
+		armed         atomic.Bool
+		reads         atomic.Int32
+		entered, gate chan struct{}
+		went          atomic.Bool
+	}
+	newGated := func() *gated {
+		g := &gated{entered: make(chan struct{}, 1), gate: make(chan struct{})}
+		g.armed.Store(true)
+		return g
+	}
+	src := func(g *gated) func(time.Time, func(*models.Mock) bool) error {
+		return func(_ time.Time, visit func(*models.Mock) bool) error {
+			if g.armed.Load() && g.reads.Add(1) == 1 {
+				g.entered <- struct{}{}
+				<-g.gate
+				g.went.Store(visit(exactMock("late", time.Second, models.LifetimeSession)))
+			}
+			return nil
+		}
+	}
+	pending := func(mm *MockManager) *setSeriesRead {
+		mm.exact.series.mu.Lock()
+		defer mm.exact.series.mu.Unlock()
+		return mm.exact.series.read
+	}
+	for _, c := range []struct {
+		name string
+		last func(mm *MockManager, g *gated)
+	}{
+		{"the marks named last", func(mm *MockManager, g *gated) {
+			mm.SetRecordedBefore(src(g))
+			mm.SetUnrequired(all)
+		}},
+		{"the background named last", func(mm *MockManager, g *gated) {
+			mm.StageExactBackground(models.RecordedWithS12Routing)
+			mm.SetRecordedBefore(src(g))
+			mm.SetUnrequired(all)
+			mm.ServeExactBackground(models.RecordedWithS12Routing, []string{"claim-1", "claim-2"}, nil)
+		}},
+		{"the on-disk store named last", func(mm *MockManager, g *gated) {
+			mm.SetUnrequired(all)
+			<-pending(mm).done
+			mm.SetRecordedBefore(src(g))
+		}},
+		{"the set staged again", func(mm *MockManager, g *gated) {
+			g.armed.Store(false)
+			mm.SetRecordedBefore(src(g))
+			mm.SetUnrequired(all)
+			<-pending(mm).done
+			g.armed.Store(true)
+			mm.bumpStagingEpoch()
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			mm := timerSet(t)
+			g := newGated()
+			c.last(mm, g)
+			r := pending(mm)
+			if r == nil || r.key.epoch != mm.stagingEpoch.Load() {
+				close(g.gate)
+				t.Fatal("no read of the set's series began as it was staged: the first call would do it")
+			}
+			<-g.entered
+			mm.ServeExactTest("T1", nil)
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			if got, err := mm.MarkedSeries(ctx, seriesRowKind, nil); !errors.Is(err, context.Canceled) || len(got) != 0 {
+				close(g.gate)
+				t.Fatalf("a call whose ctx ended while the read was under way got %d series, %v; want none and ctx's error", len(got), err)
+			}
+			close(g.gate)
+			got, err := mm.MarkedSeries(context.Background(), seriesRowKind, nil)
+			if err != nil || len(got) != 1 {
+				t.Fatalf("MarkedSeries = %d series, %v; want the claims' one, the staging's read", len(got), err)
+			}
+			if n := g.reads.Load(); n != 1 {
+				t.Fatalf("the set's on-disk recordings were read %d times; want once, as it was staged", n)
+			}
+		})
+	}
+	for _, c := range []struct {
+		name  string
+		first func(mm *MockManager, g *gated)
+		next  func(mm *MockManager)
+		want  int
+	}{
+		{"the marks changed", func(mm *MockManager, g *gated) {
+			mm.SetRecordedBefore(src(g))
+			mm.SetUnrequired(partial) // claim-4 unmarked: no series
+		}, func(mm *MockManager) { mm.SetUnrequired(all) }, 1},
+		{"the store changed", func(mm *MockManager, g *gated) {
+			mm.SetUnrequired(all)
+			<-pending(mm).done
+			mm.SetRecordedBefore(src(g))
+		}, func(mm *MockManager) { mm.SetRecordedBefore(nil) }, 1},
+		{"the next set's staging", func(mm *MockManager, g *gated) {
+			mm.SetRecordedBefore(src(g))
+			mm.SetUnrequired(all)
+		}, func(mm *MockManager) { mm.StageExactBackground(models.RecordedWithS12Routing) }, 0},
+	} {
+		t.Run("a read another takes the place of: "+c.name, func(t *testing.T) {
+			mm := timerSet(t)
+			mm.ServeExactTest("T1", nil)
+			g := newGated()
+			c.first(mm, g)
+			old := pending(mm)
+			if old == nil {
+				close(g.gate)
+				t.Fatal("no read of the set's series began as it was staged")
+			}
+			<-g.entered
+			c.next(mm)
+			close(g.gate)
+			<-old.done
+			if !old.stopped || g.went.Load() {
+				t.Fatalf("the read of what was named first was not stopped at its next recording (stopped %v, went on %v)", old.stopped, g.went.Load())
+			}
+			got, err := mm.seriesFrom(context.Background(), old, seriesRowKind, nil)
+			if err != nil || len(got) != c.want {
+				t.Fatalf("a call that waited for the stopped read got %d series, %v; want %d, the read that took its place", len(got), err, c.want)
+			}
+			if c.want == 0 && pending(mm) != nil {
+				t.Fatal("a read of the set's series is pending while the next set's background is not named")
+			}
+		})
+	}
+	t.Run("each kind's series are learned once", func(t *testing.T) {
+		mm := timerSet(t)
+		mm.SetUnrequired(all)
+		mm.ServeExactTest("T1", nil)
+		first, _ := mm.MarkedSeries(context.Background(), seriesRowKind, nil)
+		again, _ := mm.MarkedSeries(context.Background(), seriesRowKind, excuseAll{})
+		if len(first) != 1 || len(again) != 1 || len(again[0].Series.Clock) != len(first[0].Series.Clock) {
+			t.Fatalf("the series were learned again for a later call (%d, then %d); want the first call's, once per staging", len(first), len(again))
+		}
+	})
+}
+
+// excuseAll excuses every leaf (as keploy.yml noise would).
+type excuseAll struct{}
+
+func (excuseAll) Excused(learn.Leaf) (bool, bool) { return true, false }
