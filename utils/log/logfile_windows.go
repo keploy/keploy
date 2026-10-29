@@ -1,27 +1,46 @@
 package log
 
-import "os"
+import (
+	"fmt"
+	"os"
+)
 
-// Windows has neither O_NOFOLLOW nor O_NONBLOCK. A reparse point at the log's
-// name is refused by the Lstat below instead, which leaves a window between
-// the check and the open; creating a symlink needs a privilege or developer
-// mode, which narrows who can use it.
+// Windows has neither O_NOFOLLOW nor O_NONBLOCK. ReadLogFile's identity check
+// (os.SameFile against the file this run created) still refuses whatever
+// replaced the log at its name.
 const (
 	oNoFollow = 0
 	oNonBlock = 0
 )
 
-// openLogFile opens LogFileName in the working directory for this run to
-// append to. A symlink there is refused -- nil, and why -- and the run logs to
-// the console; a log that cannot be opened at all is an error, which New
-// turns into a console-only run too.
-func openLogFile() (*os.File, string, error) {
-	if fi, err := os.Lstat(LogFileName); err == nil && fi.Mode()&os.ModeSymlink != 0 {
-		return nil, "it is a symbolic link", nil
-	}
-	f, err := os.OpenFile(LogFileName, os.O_APPEND|os.O_CREATE|os.O_WRONLY, logFileMode)
+// openClientLogFile opens path, the log the CLI that started this agent named
+// (ClientLogFileFlag), to append to: only a regular file that already exists,
+// no link, and the one that name was when it was checked. The agent runs as
+// the CLI's user here (no sudo stands between them), so there is no owner to
+// check.
+func openClientLogFile(path string) (*os.File, error) {
+	named, err := os.Lstat(path)
 	if err != nil {
-		return nil, "", err
+		return nil, fmt.Errorf("the CLI's log: %w", err)
 	}
-	return f, "", nil
+	if !named.Mode().IsRegular() {
+		return nil, fmt.Errorf("the CLI's log %s is not a regular file (%v)", path, named.Mode().Type())
+	}
+	f, err := openFile(path, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		return nil, fmt.Errorf("the CLI's log: %w", err)
+	}
+	opened, err := f.Stat()
+	if err == nil && (!opened.Mode().IsRegular() || !os.SameFile(named, opened)) {
+		err = fmt.Errorf("the CLI's log %s was replaced while it was opened", path)
+	}
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	return f, nil
 }
+
+// giveLogToSudoUser does nothing: there is no sudo, and the log is the
+// user's own.
+func giveLogToSudoUser(*os.File) error { return nil }

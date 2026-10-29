@@ -287,7 +287,7 @@ jobs:
       # `keploy mock record` on a terminal that hangs up -- SIGHUP, then the
       # terminal closed, with and without a gap between the two -- must stop
       # as it does on SIGTERM: by itself, with SIGTERM's exit code, leaving
-      # nothing running and no keploy-logs.txt. The script says why.
+      # nothing running and no log behind. The script says why.
       - name: Run mock-mode hang-up e2e
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
