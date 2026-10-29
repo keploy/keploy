@@ -274,6 +274,14 @@ type FailureInfo struct {
 	// out of the recording. In recorded order. Empty with the switch off,
 	// and for a test whose consumption was not read.
 	UnusedBackground []UnconsumedMock `json:"unused_background,omitempty" yaml:"unused_background,omitempty"`
+	// ServedAside are, under KEPLOY_PROVEN=1, the calls of this test's
+	// window that the recording of a test the replay set aside answered
+	// (MockState.SetAsideFrom), in the order they did, each as
+	// ServedAsideLine names it: "<mock> served from <test> (set aside)". A
+	// set-aside test makes none of its calls, so a later test may make one
+	// of them (a cache it filled at record is empty); it is answered,
+	// unchecked, and fails nothing. Empty with the switch off.
+	ServedAside []string `json:"served_aside,omitempty" yaml:"served_aside,omitempty"`
 	// CaptureIncomplete is, under KEPLOY_PROVEN=1, what keploy's agent could
 	// not capture that is charged to this test, each of which fails it:
 	//   - an agent-life kind (pid_map_refused, app_subtree_untracked, and any
