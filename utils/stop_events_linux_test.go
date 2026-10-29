@@ -831,8 +831,10 @@ func TestMarkExitCountsAProcessWhoseMainThreadExited(t *testing.T) {
 		t.Fatal("premise: its stat could not be read")
 	}
 	p := Reached{PID: cmd.Process.Pid, Start: st.StartTime}
-	if m := MarkExit([]Reached{p}); m.Running != 1 || m.Threads < 2 || m.Fds == 0 {
-		t.Fatalf("MarkExit = %+v; want it running, with its threads and open files", m)
+	// Its open files are at least its stdin, stdout and stderr: three opens
+	// of /dev/null (os/exec's, for streams it was given none of).
+	if m := MarkExit([]Reached{p}); m.Running != 1 || m.Threads < 2 || m.Fds < 3 {
+		t.Fatalf("MarkExit = %+v; want it running, with its threads and open files (its stdin, stdout and stderr at least)", m)
 	}
 	_ = cmd.Process.Kill()
 	deadline := time.Now().Add(time.Minute) // turns a hang into a failure
