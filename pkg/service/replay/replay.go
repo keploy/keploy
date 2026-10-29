@@ -7169,10 +7169,7 @@ func (r *Replayer) SendMockFilterParamsToAgent(ctx context.Context, expectedMock
 	// config.Test.StrictMockWindow. The env override applies at the
 	// agent so KEPLOY_STRICT_MOCK_WINDOW=0 still opts out without
 	// touching code.
-	strictMockWindow := true
-	if r.config != nil {
-		strictMockWindow = r.config.Test.StrictMockWindow
-	}
+	strictMockWindow := r.strictMockWindow()
 	// EXPERIMENTAL, default OFF: when KEPLOY_AGENT_OWNS_CONSUMED is set, the
 	// agent applies filterOutDeleted from its own persistent consumption history
 	// instead of us re-sending the ever-growing TotalConsumedMocks map every
@@ -9387,4 +9384,14 @@ func newStreamingTest(testCase *models.TestCase, mappings map[string][]models.Mo
 		names[i] = m.Name
 	}
 	return streamingTest{testCase: &tcCopy, expectedMocks: names}
+}
+
+// strictMockWindow is the user's window mode the replayer sends the agent
+// (MockFilterParams.StrictMockWindow): config.Test.StrictMockWindow, strict
+// when r.config is nil (unit tests, embedders), as the shipped default.
+func (r *Replayer) strictMockWindow() bool {
+	if r.config == nil {
+		return true
+	}
+	return r.config.Test.StrictMockWindow
 }

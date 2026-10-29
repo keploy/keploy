@@ -199,34 +199,10 @@ func (a *carryOverAttribution) releaseIndex(st models.MockState) (int, bool) {
 		placed = st.ResTimestampMock
 	}
 	t, err := models.ParseMockTimestamp(placed)
-	if err != nil {
-		return 0, false
-	}
-	return a.releaseIndexAt(t)
-}
-
-// releaseIndexAt is the recorded window a carry-over mock placed at t belongs
-// to (-1: before every window), by the rule the agent releases one at
-// (models.WindowSchedule.ReleaseIndex). ok is false when t is zero or there
-// are no windows.
-func (a *carryOverAttribution) releaseIndexAt(t time.Time) (int, bool) {
-	if a == nil || a.sched.Len() == 0 || t.IsZero() {
+	if err != nil || t.IsZero() {
 		return 0, false
 	}
 	return a.sched.ReleaseIndex(t), true
-}
-
-// releasedInto reports whether m is a carry-over mock (models.IsCarryOver;
-// its lifetime derived) that the agent releases at the recorded window of the
-// test named test: the window its place (models.PlaceOf) belongs to, by the
-// rule releaseIndex reads a consumed one's by. A moment in the gap after a
-// test is that test's.
-func (a *carryOverAttribution) releasedInto(m *models.Mock, test string) bool {
-	if !models.IsCarryOver(m) {
-		return false
-	}
-	idx, ok := a.releaseIndexAt(models.PlaceOf(m))
-	return ok && idx >= 0 && a.sched.Window(idx).TestCase == test
 }
 
 // consumedOutsideOwnWindow reports whether the running test consumed st

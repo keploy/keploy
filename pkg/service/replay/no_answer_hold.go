@@ -98,9 +98,13 @@ func (r *Replayer) holdNoAnswerMocks(ctx context.Context, testSetID string, unan
 		}
 	}
 
-	err := r.eachSetMock(ctx, testSetID, true, func(m *models.Mock, _ bool) {
-		for i, w := range windows {
-			if carry.servedInWindow(m, w) {
+	serve := make([]pkg.ServeWindow, len(windows))
+	for i, w := range windows {
+		serve[i] = serveWindowOf(carry.sched, w, r.strictMockWindow())
+	}
+	err := r.eachSetMock(ctx, testSetID, true, func(m *models.Mock, session bool) {
+		for i := range serve {
+			if heldFor(m, session, serve[i]) {
 				hold(i, m.Name, m.Kind)
 			}
 		}
@@ -142,32 +146,50 @@ func (r *Replayer) holdNoAnswerMocks(ctx context.Context, testSetID string, unan
 	return held, nil
 }
 
-// servedInWindow reports whether the agent serves m in w, one of a.sched's
-// recorded windows, by the rules it serves a window's mocks by
-// (pkg.FilterPerTestAndLaxPromotedInFlightAware, the carry-over tier):
+// heldFor reports whether the hold keeps m, a mock of the set's per-test pool
+// (session false) or its session pool, for the unanswered test whose window w
+// is. It asks the agent's own decision (pkg.ServeInWindow), and keeps:
 //
-//   - its place (models.PlaceOf) is in w, ends included;
-//   - it has no recorded time, which the window filter hands every window;
-//   - it was in flight when w began (models.InFlightEligible,
-//     WindowSchedule.InFlightInto): sent in the gap before w and answered at
-//     or after its start, a consumer's long poll;
-//   - it is a carry-over mock released at w (carryOverAttribution
-//     releasedInto): one whose place is in w or in the gap after it.
-func (a *carryOverAttribution) servedInWindow(m *models.Mock, w models.TestWindow) bool {
-	if m == nil {
-		return false
-	}
-	req, res := m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock
-	if req.IsZero() || res.IsZero() {
+//   - what the window's per-test pool gets: placed in it, in flight when it
+//     began, with no recorded time, a window-bound mock recorded in it;
+//   - what it releases first: a carry-over mock the carry-over tier reaches
+//     from it, a server push the push hub delivers from it;
+//   - of what the session pool hands every window, a mock placed in the
+//     window or with no recorded time. One placed outside it is held only
+//     when some test consumed it, as for a test that failed on its answer:
+//     holding every such mock would be the whole-set rule again. So is a
+//     per-test mock lax mode promotes to the session pool, which is outside
+//     the window, and the startup tier.
+func heldFor(m *models.Mock, session bool, w pkg.ServeWindow) bool {
+	switch pkg.ServeInWindow(m, session, w) {
+	case pkg.ServedPerTest, pkg.ServedReleased:
 		return true
+	case pkg.ServedSession:
+		req, res := m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock
+		if req.IsZero() || res.IsZero() {
+			return true
+		}
+		place := models.PlaceOf(m)
+		return !place.Before(w.Start) && !place.After(w.End)
 	}
-	if place := models.PlaceOf(m); !place.Before(w.Start) && !place.After(w.End) {
-		return true
+	return false
+}
+
+// serveWindowOf is the window the agent opens for the test whose recorded
+// window w is, one of sched's, as the replayer asks it to
+// (pkg.FilterPerTestAndLaxPromotedInFlightAware's arguments on a windowed
+// proxy): the first recorded window starts the startup band, the gap before
+// w's start says which calls were in flight, and the filter is not strict
+// per call, the mock manager filtering what it is handed.
+func serveWindowOf(sched *models.WindowSchedule, w models.TestWindow, strictWindow bool) pkg.ServeWindow {
+	sw := pkg.ServeWindow{Start: w.Start, End: w.End, StrictWindow: strictWindow, Recorded: sched}
+	if sched.Len() > 0 {
+		sw.FirstStart = sched.Window(0).Start
 	}
-	if models.InFlightEligible(m) && a.sched.InFlightInto(req, res, w.Start) {
-		return true
+	if from, ok := sched.GapBefore(w.Start); ok {
+		sw.InFlightFrom = from
 	}
-	return a.releasedInto(m, w.TestCase)
+	return sw
 }
 
 // eachSetMock hands visit every mock of the set's mock file before the mapping
