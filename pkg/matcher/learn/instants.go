@@ -1507,19 +1507,9 @@ func (dc *DriftCache) searchedTokens(x Raw, keep bool) []map[string]bool {
 	return dc.readTokens(x, keep)
 }
 
-// tokensIn reads searchedTokens(x, keep) from x's text now; each word may
-// be a part of x's text.
-func tokensIn(x Raw, keep bool) []map[string]bool {
-	return tokensWith(x, keep, func(y Raw) (string, decoded) {
-		yb := y.payload()
-		t := blankStamps(yb.text, yb.stamps)
-		return t, decodeForms(t)
-	})
-}
-
-// tokensWith is tokensIn(x, keep), each of x's forms read from what
-// decodedOf decodes of it (the text its searches decode, and its decoded
-// forms).
+// tokensWith reads searchedTokens(x, keep), each of x's forms read from
+// what decodedOf decodes of it (the text its searches decode, and its decoded
+// forms); each word may be a part of x's text.
 func tokensWith(x Raw, keep bool, decodedOf func(Raw) (string, decoded)) []map[string]bool {
 	if keep {
 		x = x.withoutStamps()
