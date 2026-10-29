@@ -196,3 +196,38 @@ func TestAProxysCloseShortOfTheBytesIsOneLossAndNoHoldOnDarwin(t *testing.T) {
 		t.Fatalf("%d app_bytes_lost after a second look, want still 1", l)
 	}
 }
+
+// movedLayout reads macOS's TCP table as a layout that moved would: every
+// socket's send buffer read at the wrong offset.
+func movedLayout() ([]xnuPCB, error) {
+	table, err := readXNUPCBs()
+	for i := range table {
+		table[i].sndCC += 4096
+	}
+	return table, err
+}
+
+// A macOS whose counts the proof does not find in the layout keploy reads
+// leaves the bytes wait unknown, never settled: the proof refuses the moved
+// table, PairedBytesErr says the counts cannot be read, and a wait whose
+// bytes had all arrived (one that read the counts would settle at once)
+// ends unknown.
+func TestAMovedLayoutLeavesTheBytesWaitUnknownOnDarwin(t *testing.T) {
+	if err := proveXNUCountsFrom(movedLayout); err == nil {
+		t.Fatal("the counts' proof passes macOS's TCP table read in a moved layout")
+	}
+	readable := xnuTableReadable
+	xnuTableReadable = xnuCountsProven(func() error { return proveXNUCountsFrom(movedLayout) })
+	t.Cleanup(func() { xnuTableReadable = readable })
+	p, app, proxySide, _ := darwinPair(t)
+	if err := p.PairedBytesErr(); !errors.Is(err, models.ErrProxyConnsUnsupported) {
+		t.Fatalf("PairedBytesErr = %v with the counts' proof failed, want one wrapping ErrProxyConnsUnsupported", err)
+	}
+	if _, err := app.Write(make([]byte, 3)); err != nil {
+		t.Fatal(err)
+	}
+	untilUnread(t, proxySide, 3)
+	if err := p.WaitPairedBytes(context.Background(), 1); !errors.Is(err, models.ErrProxyConnsUnsupported) {
+		t.Fatalf("WaitPairedBytes = %v with the counts' proof failed, want unknown (ErrProxyConnsUnsupported)", err)
+	}
+}

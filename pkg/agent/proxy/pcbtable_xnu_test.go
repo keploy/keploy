@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"net/netip"
+	"strings"
 	"testing"
 )
 
@@ -104,5 +105,74 @@ func TestMacOSsTCPTableInAnotherLayoutIsRefused(t *testing.T) {
 		if _, err := parseXNUPCBs(buf); !errors.Is(err, errXNUTableLayout) {
 			t.Errorf("%s: err = %v, want errXNUTableLayout", name, err)
 		}
+	}
+}
+
+// The counts' proof (checkXNUCounts) passes what macOS gives keploy's own
+// loopback connection once 3 bytes went across, and refuses each thing a
+// layout that moved would read instead: a send buffer read at the wrong
+// offset, two ends that began from different numbers, a state that is not
+// ESTABLISHED, a received count that is not the 3 sent, a tcp_info that
+// disagrees with the table, and a table that lists either end nowhere.
+// Checked on every platform: the verdict is plain Go.
+func TestTheCountsProofRefusesWhatAMovedLayoutReads(t *testing.T) {
+	const n = 3
+	writer := netip.MustParseAddrPort("127.0.0.1:50000")
+	reader := netip.MustParseAddrPort("127.0.0.1:40000")
+	const wIss, rIss = 1000, 9000
+	good := func() ([]xnuPCB, proxySide) {
+		w := xnuPCB{local: writer, remote: reader, state: xnuTCPEstablished, sndUna: wIss + 1 + n, iss: wIss, irs: rIss, rcvNxt: rIss + 1}
+		r := xnuPCB{local: reader, remote: writer, state: xnuTCPEstablished, sndUna: rIss + 1, iss: rIss, irs: wIss, rcvNxt: wIss + 1 + n}
+		return []xnuPCB{w, r}, proxySide{rcvNxt: wIss + 1 + n, state: xnuTCPEstablished}
+	}
+	if table, ps := good(); checkXNUCounts(table, writer, reader, ps, n) != nil {
+		t.Fatalf("the counts of a layout read where it is refused: %v", checkXNUCounts(table, writer, reader, ps, n))
+	}
+	for _, c := range []struct {
+		name  string
+		spoil func(table []xnuPCB, ps *proxySide) []xnuPCB
+		// says is what the refusal must say, where a later check would
+		// refuse the spoiled read too, for another reason.
+		says string
+	}{
+		{"a moved send buffer (sndCC)", func(tb []xnuPCB, _ *proxySide) []xnuPCB { tb[0].sndCC = 4096; return tb }, ""},
+		{"a moved snd_una", func(tb []xnuPCB, _ *proxySide) []xnuPCB { tb[0].sndUna = 0; return tb }, ""},
+		// The reader's counts move with its irs, so that only the two
+		// ends' first numbers disagree.
+		{"two ends from different first numbers (iss/irs)", func(tb []xnuPCB, ps *proxySide) []xnuPCB {
+			tb[1].irs += 7
+			tb[1].rcvNxt += 7
+			ps.rcvNxt += 7
+			return tb
+		}, ""},
+		{"a writer not ESTABLISHED in the table", func(tb []xnuPCB, _ *proxySide) []xnuPCB { tb[0].state = xnuTCPTimeWait; return tb }, ""},
+		{"a reader not ESTABLISHED in the table", func(tb []xnuPCB, _ *proxySide) []xnuPCB { tb[1].state = xnuTCPFinWait2; return tb }, ""},
+		// The tcp_info agrees with the table, so that only the count is off.
+		{"a received count short of what was sent", func(tb []xnuPCB, ps *proxySide) []xnuPCB {
+			tb[1].rcvNxt = wIss + 1
+			ps.rcvNxt = wIss + 1
+			return tb
+		}, ""},
+		{"a tcp_info rcv_nxt the table disagrees with", func(tb []xnuPCB, ps *proxySide) []xnuPCB { ps.rcvNxt += 2; return tb }, ""},
+		{"a tcp_info state not ESTABLISHED", func(tb []xnuPCB, ps *proxySide) []xnuPCB { ps.state = xnuTCPCloseWait; return tb }, ""},
+		{"a tcp_info that cannot be read", func(tb []xnuPCB, ps *proxySide) []xnuPCB {
+			ps.err = errors.New("getsockopt TCP_INFO: invalid argument")
+			return tb
+		}, ""},
+		{"no writer row", func(tb []xnuPCB, _ *proxySide) []xnuPCB { return tb[1:] }, "does not list"},
+		{"no reader row", func(tb []xnuPCB, _ *proxySide) []xnuPCB { return tb[:1] }, "does not list"},
+		{"an empty table", func([]xnuPCB, *proxySide) []xnuPCB { return nil }, "does not list"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			table, ps := good()
+			table = c.spoil(table, &ps)
+			err := checkXNUCounts(table, writer, reader, ps, n)
+			if err == nil {
+				t.Fatalf("the counts' proof passes %s", c.name)
+			}
+			if c.says != "" && !strings.Contains(err.Error(), c.says) {
+				t.Fatalf("the counts' proof refuses %s with %q, which does not say %q", c.name, err, c.says)
+			}
+		})
 	}
 }

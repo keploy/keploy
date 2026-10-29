@@ -77,12 +77,14 @@ func getsockopt(fd, level, name int, val unsafe.Pointer, vallen *uint32) error {
 }
 
 // proveXNUCounts proves, once, on a loopback connection of its own, that this
-// macOS gives the counts the wait reads in the layout keploy reads them: the
-// table finds both ends, they began from one sequence number, the writer's
-// writeSeq counts the three bytes it wrote, and the reader's rcv_nxt, in the
-// table and in its tcp_info alike, counts the three it read. A layout that
-// moved would read other numbers, and leaves every wait unknown.
-func proveXNUCounts() error {
+// macOS gives the counts the waits read in the layout keploy reads them
+// (checkXNUCounts says what is checked). A layout that moved would read other
+// numbers, and leaves every wait unknown.
+func proveXNUCounts() error { return proveXNUCountsFrom(readXNUPCBs) }
+
+// proveXNUCountsFrom is proveXNUCounts reading macOS's TCP table through
+// readTable: its rows hand it a table read in a moved layout.
+func proveXNUCountsFrom(readTable func() ([]xnuPCB, error)) error {
 	ln, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
 		return fmt.Errorf("listen for the counts' proof: %w", err)
@@ -112,25 +114,9 @@ func proveXNUCounts() error {
 	if !ok1 || !ok2 {
 		return errors.New("the counts' proof's addresses are not TCP")
 	}
-	table, err := readXNUPCBs()
+	table, err := readTable()
 	if err != nil {
 		return err
 	}
-	w, ok1 := findXNUPCB(table, a, r)
-	rd, ok2 := findXNUPCB(table, r, a)
-	if !ok1 || !ok2 {
-		return fmt.Errorf("macOS's TCP table does not list keploy's own loopback connection %s -> %s (writer found %v, reader %v)", a, r, ok1, ok2)
-	}
-	ps := readProxySide(s.(*net.TCPConn))
-	switch {
-	case ps.err != nil:
-		return ps.err
-	case w.iss != rd.irs:
-		return fmt.Errorf("macOS's TCP table gives the two ends of one connection different first sequence numbers (%d, %d)", w.iss, rd.irs)
-	case w.writeSeq()-w.iss-1 != n || rd.rcvNxt-rd.irs-1 != n:
-		return fmt.Errorf("macOS's TCP table counts %d bytes written and %d received of the %d keploy sent", w.writeSeq()-w.iss-1, rd.rcvNxt-rd.irs-1, n)
-	case ps.rcvNxt != rd.rcvNxt || ps.state != xnuTCPEstablished:
-		return fmt.Errorf("the socket's tcp_info (rcv_nxt %d, state %d) disagrees with macOS's TCP table (rcv_nxt %d, state %d)", ps.rcvNxt, ps.state, rd.rcvNxt, xnuTCPEstablished)
-	}
-	return nil
+	return checkXNUCounts(table, a, r, readProxySide(s.(*net.TCPConn)), n)
 }

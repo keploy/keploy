@@ -143,3 +143,33 @@ func findXNUPCB(table []xnuPCB, local, remote netip.AddrPort) (xnuPCB, bool) {
 	}
 	return xnuPCB{}, false
 }
+
+// checkXNUCounts is the verdict of the counts' proof (proveXNUCounts) on what
+// it read once its writer had written n bytes and its reader had read them
+// all: table, macOS's TCP table, which must list the writer's socket (ends
+// writer -> reader) and the reader's (reader -> writer), and ps, the reader's
+// own tcp_info. The two ends began from one sequence number; both are
+// ESTABLISHED in the table; the writer's writeSeq counts the n bytes it
+// wrote; the reader's rcv_nxt, in the table and in its tcp_info alike,
+// counts the n it read; and its tcp_info says ESTABLISHED too. A layout that
+// moved reads other numbers, and the answer is an error: every wait is then
+// unknown. Plain Go with no build tag, so its rows run on every platform.
+func checkXNUCounts(table []xnuPCB, writer, reader netip.AddrPort, ps proxySide, n uint32) error {
+	w, ok1 := findXNUPCB(table, writer, reader)
+	rd, ok2 := findXNUPCB(table, reader, writer)
+	switch {
+	case !ok1 || !ok2:
+		return fmt.Errorf("macOS's TCP table does not list keploy's own loopback connection %s -> %s (writer found %v, reader %v)", writer, reader, ok1, ok2)
+	case ps.err != nil:
+		return ps.err
+	case w.iss != rd.irs:
+		return fmt.Errorf("macOS's TCP table gives the two ends of one connection different first sequence numbers (%d, %d)", w.iss, rd.irs)
+	case w.state != xnuTCPEstablished || rd.state != xnuTCPEstablished:
+		return fmt.Errorf("macOS's TCP table gives the two ends of an open connection the TCP states %d and %d, not ESTABLISHED (%d)", w.state, rd.state, xnuTCPEstablished)
+	case w.writeSeq()-w.iss-1 != n || rd.rcvNxt-rd.irs-1 != n:
+		return fmt.Errorf("macOS's TCP table counts %d bytes written and %d received of the %d keploy sent", w.writeSeq()-w.iss-1, rd.rcvNxt-rd.irs-1, n)
+	case ps.rcvNxt != rd.rcvNxt || ps.state != xnuTCPEstablished:
+		return fmt.Errorf("the socket's tcp_info (rcv_nxt %d, state %d) disagrees with macOS's TCP table (rcv_nxt %d, state %d)", ps.rcvNxt, ps.state, rd.rcvNxt, xnuTCPEstablished)
+	}
+	return nil
+}
