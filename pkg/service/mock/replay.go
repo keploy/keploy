@@ -838,6 +838,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		Real:          realRun,
 		CannotCapture: lostNotJudged,
 		Learned:       counts.learnedPool,
+		Background:    persistedBackground(counts.background),
 	})
 	return keployFailure
 }
@@ -1727,6 +1728,10 @@ type replayCounts struct {
 	consumed   int
 	missed     int
 	missedData int
+	// background are the misses keploy's agent found made outside every
+	// test's window (models.UnmatchedCall.Background): charged to no test,
+	// and reported for the set (TestsReceipt.Background).
+	background []models.UnmatchedCall
 	// missesUnread is why the read of the calls no mock answered was
 	// incomplete (models.UnreadCause), when missed is -1.
 	missesUnread string
@@ -1898,6 +1903,9 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 		if miss.CountsAgainstTest() {
 			counts.missedData++
 		}
+		if miss.Background {
+			counts.background = append(counts.background, miss)
+		}
 	}
 	if consumedErr != nil {
 		counts.consumed = -1
@@ -1927,6 +1935,19 @@ func logMiss(logger *zap.Logger, miss models.UnmatchedCall) {
 		next = "record this call with --on-miss record, or re-record the set"
 	}
 	msg := "no recorded mock matched an outgoing call"
+	if miss.Background {
+		// Made outside every test's window: the application's own work (a
+		// timer, a start-up job), which may fail in the application, but
+		// fails no test (founder D1). Said once, for the set, with when.
+		logger.Warn("a call the application made outside every test had no recorded answer: its background work, charged to no test",
+			zap.String("protocol", miss.Protocol),
+			zap.String("call", miss.ActualSummary),
+			zap.String("destination", miss.Destination),
+			zap.Time("at", miss.At),
+			zap.String("why", backgroundWhy(miss)),
+			zap.String("next_step", next))
+		return
+	}
 	if miss.MatchPhase == models.MatchPhaseNoRequest {
 		msg = "a connection ended with nothing sent: if its client was waiting for its server to speak first, no recorded mock answered it"
 	}
@@ -1935,6 +1956,19 @@ func logMiss(logger *zap.Logger, miss models.UnmatchedCall) {
 		zap.String("call", miss.ActualSummary),
 		zap.String("destination", miss.Destination),
 		zap.String("next_step", next))
+}
+
+// backgroundWhy is why nothing answered a background miss, as its matcher
+// said it: where the match stopped, and the closest recording.
+func backgroundWhy(miss models.UnmatchedCall) string {
+	why := "no recording of the set is this call"
+	if miss.MatchPhase != "" {
+		why = "the match stopped at " + miss.MatchPhase
+	}
+	if miss.ClosestMock != "" {
+		why += "; closest " + miss.ClosestMock
+	}
+	return why
 }
 
 // provenCount is n under the proven switch, and nothing with it off, so a
