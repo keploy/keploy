@@ -332,11 +332,16 @@ func TestMockReplayHoldsAsMuchWithTheStrictWindowOff(t *testing.T) {
 	})
 	t.Run("env", func(t *testing.T) {
 		// The child is bounded: its own -test.timeout, the row's context, and
-		// its own process group, killed whole when the row ends, so a parent
-		// that dies early leaves nothing running.
+		// its own process group, killed whole when the row ends. The kernel
+		// kills it too when its parent dies by a signal (go test's own
+		// timeout kill), so a parent that dies early leaves nothing running.
+		// The parent-death signal follows the thread that starts the child,
+		// so this goroutine keeps that thread until the child is reaped.
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
 		cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestMockReplayHoldsAsMuchWithTheStrictWindowOff$", "-test.count=1", "-test.v", "-test.timeout=5m")
 		cmd.Env = append(os.Environ(), child+"=1", "KEPLOY_STRICT_MOCK_WINDOW=0")
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
 		cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
 		t.Cleanup(func() {
 			if cmd.Process != nil {
