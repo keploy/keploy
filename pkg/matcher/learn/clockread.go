@@ -789,9 +789,22 @@ func CheckClockRead(path string, o models.ClockOffset, live Leaf, s Span, known 
 		// The zone the application writes its clock in in this run, read
 		// from the process that made the call, wins over the one the learn
 		// step named: a wall clock of no zone is the application's own.
-		if o.AppZone != "" && o.AppZone != models.AppZoneApart {
+		if o.AppZone != "" && o.AppZone != models.AppZoneApart && o.CutInAppZone() {
 			loc, _ := models.ZoneLocation(o.AppZone)
 			hint = appZoneHint(o.AppZone, loc, s)
+		}
+	case o.AppZone != "" && !o.CutInAppZone():
+		// A read plus an offset whose value a replay reads in no zone of
+		// the application's (one that names its moment, cut to a minute or
+		// finer; a wall clock in UTC): its stored zone serves the check near
+		// the zone's backward turns alone (models.ClockOffset.FallBack). One
+		// learned as two zones (AppZoneApart), or one this keploy cannot
+		// read, names none, and that check reads every zone's
+		// (FallBackAnywhere), never refusing the value for its zone.
+		if loc, err := models.ZoneLocation(o.AppZone); o.AppZone != models.AppZoneApart && err == nil {
+			s.Zone = loc
+		} else {
+			o.AppZone = ""
 		}
 	case o.AppZone == models.AppZoneApart && o.Zone == models.ZoneEither:
 		// A wall clock either zone held, learned with the application's
@@ -830,7 +843,7 @@ func CheckClockRead(path string, o models.ClockOffset, live Leaf, s Span, known 
 		// either reading holds at its cut, as it does at a finer one; a
 		// refusal says where it was read.
 		hint = ". keploy could not read the zone of the process that made this call and the learn step named none, so it checked the value in UTC and in the agent's own zone (" + s.Zone.String() + ")"
-	case o.AppZoneMatters() && o.Zone != models.ZoneEither && o.Res >= time.Hour:
+	case o.CutInAppZone() && o.Zone != models.ZoneEither && o.Res >= time.Hour:
 		return false, learned + ", cut to " + models.ShortDuration(o.Res) + ", which a replay checks in the application's zone, but keploy could not read the zone of the process that made this call, and the learn step named none, so it refuses the value rather than check its cut in another zone. Record the test again where keploy reads the application's zone (keploy in the host PID namespace, the application's process and its files readable; the agent's debug log says why it could not)"
 	}
 	ok, cut, why := checkReadIn(o, live, s, learned, read, hint, 0)
@@ -1006,7 +1019,7 @@ func checkReadIn(o models.ClockOffset, live Leaf, s Span, learned, read, hint st
 		// CheckClockRead has refused a zone it cannot tell; this fails
 		// closed all the same.
 		in := ""
-		if c := o.CheckedAt(res); o.AppZoneMatters() && c >= time.Hour {
+		if c := o.CheckedAt(res); o.CutInAppZone() && c >= time.Hour {
 			for i, at := range ats {
 				if ci, ati := readCut(at, cutZones(o, at, s), res, c); ci == c {
 					ats[i] = ati
@@ -1022,9 +1035,11 @@ func checkReadIn(o models.ClockOffset, live Leaf, s Span, learned, read, hint st
 				in = ", read here in UTC"
 			}
 		}
-		// An hour's cut the application's zone shows twice as its clocks go
-		// back fails closed near that hour (models.ClockOffset.FallBack),
-		// read in that zone as well as in the ones the value was read in.
+		// A read plus an offset fails closed near a wall time the
+		// application's zone shows twice as its clocks go back, at any cut
+		// finer than a day (models.ClockOffset.FallBack), read in that zone
+		// (a belt: as well as in a named zone the value is read in), and in
+		// every zone where keploy knows none of the application's.
 		if why := fallBackWhy(o, ats, res, s); why != "" {
 			return false, o.CheckedAt(res), learned + why + hint
 		}
@@ -1070,13 +1085,15 @@ func checkReadIn(o models.ClockOffset, live Leaf, s Span, learned, read, hint st
 }
 
 // fallBackWhy is why a replay refuses a value of o, a read plus an offset
-// cut to an hour, in s, the call's span, read after "<o> was learned as
-// ...": the call's window, or the values a check at the hour admits there,
-// meets an hour the application's zone (s.Zone) or a zone the value is read
-// in (ats) shows twice as its clocks go back (models.ClockOffset.FallBack),
-// where an application that cuts to that hour's first showing writes a
-// value up to two hours early, so a time to live made two hours longer
-// would pass. "" where none does.
+// checked at a cut finer than a day, in s, the call's span, read after "<o>
+// was learned as ...": the call's window, or the values the check admits
+// there, meets a wall time the application's zone (s.Zone) or a zone the
+// value is read in (ats) shows twice as its clocks go back
+// (models.ClockOffset.FallBack), or, where keploy knows no zone of the
+// application's at this call (appZoneKnown), one any zone does
+// (FallBackAnywhere): an application that resolves that wall time to its
+// first showing writes a value an hour early there (two in Troll), so a
+// time to live made an hour longer would pass. "" where none does.
 func fallBackWhy(o models.ClockOffset, ats []time.Time, res time.Duration, s Span) string {
 	zones := []*time.Location{s.Zone}
 	for _, at := range ats {
@@ -1084,10 +1101,35 @@ func fallBackWhy(o models.ClockOffset, ats []time.Time, res time.Duration, s Spa
 	}
 	for _, loc := range zones {
 		if turn, back, met := o.FallBack(res, s.From, s.To, loc); met {
-			return ", which a replay checks at the hour it is cut to, but this call's window, or the values that check admits, meets " + fallBackNamed(turn, back, loc) + ": an application that cuts its clock to that hour's first showing (JavaScript; java.time's LocalDateTime then atZone) writes a value up to " + models.ShortDuration(back+time.Hour) + " before the instant it cuts, so " + offsetNamed(o) + " made " + models.ShortDuration(back+time.Hour) + " longer would pass there, and keploy refuses the value rather than pass it unchecked. Replay the test outside that hour; if the field is a time the application reads from its own clock with no rule, declare it noise in keploy.yml"
+			return fallBackReplayWhy(o, res, back, fallBackNamed(turn, back, loc), "")
 		}
 	}
+	if appZoneKnown(o, s) {
+		return ""
+	}
+	if turn, back, loc, met := o.FallBackAnywhere(res, s.From, s.To); met {
+		return fallBackReplayWhy(o, res, back, fallBackNamed(turn, back, loc)+" (keploy knows no zone of the application's at this call, so it reads every zone's clocks going back)", ", or where keploy reads the application's zone (keploy in the host PID namespace, the application's process and its files readable)")
+	}
 	return ""
+}
+
+// appZoneKnown reports whether a replay knows the application's zone at
+// the call of s: read from its process (s.Own), or as the zone the learn
+// step named (models.ClockOffset.AppZone, which CheckClockRead moved into
+// s.Zone).
+func appZoneKnown(o models.ClockOffset, s Span) bool {
+	return s.Own || o.AppZone != "" && o.AppZone != models.AppZoneApart
+}
+
+// fallBackReplayWhy is fallBackWhy's reason for o checked at res, where its
+// zone's clocks go back by back at the turn named, and where (else) a
+// replay might check the value instead of outside that hour.
+func fallBackReplayWhy(o models.ClockOffset, res, back time.Duration, named, elsewhere string) string {
+	early := models.ShortDuration(back)
+	if c := o.CheckedAt(res); c >= time.Hour {
+		early = "up to " + models.ShortDuration(back+c)
+	}
+	return ", which a replay checks against its call's window, but this call's window, or the values that check admits, meets " + named + ": an application that resolves a wall time shown twice to its first showing (JavaScript's Date setters; java.time's LocalDateTime then atZone) writes a value " + early + " before the instant it reads there, so " + offsetNamed(o) + " made " + early + " longer would pass, and keploy refuses the value rather than pass it unchecked. Replay the test outside that hour" + elsewhere + "; if the field is a time the application reads from its own clock with no rule, declare it noise in keploy.yml"
 }
 
 // fallBackNamed names the wall time loc shows twice as its clocks go back by

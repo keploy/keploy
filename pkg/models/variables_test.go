@@ -1101,8 +1101,17 @@ func TestAClockOffsetNamesTheApplicationsZoneItWasLearnedIn(t *testing.T) {
 	if !o.AppZoneMatters() || !(ClockOffset{Res: 24 * time.Hour}).AppZoneMatters() || !(ClockOffset{Res: time.Millisecond, Zone: ZoneEither}).AppZoneMatters() {
 		t.Errorf("AppZoneMatters is false for a wall clock in the application's zone, or a day's cut")
 	}
-	if (ClockOffset{Res: time.Minute}).AppZoneMatters() || (ClockOffset{Res: time.Hour, Zone: ZoneUTC}).AppZoneMatters() || (ClockOffset{Min: time.Hour, Max: time.Hour + time.Second, Res: time.Minute}).AppZoneMatters() {
-		t.Errorf("AppZoneMatters is true of a minute's cut, a wall clock in UTC, or an offset cut to the minute")
+	if (ClockOffset{Res: time.Minute}).AppZoneMatters() || (ClockOffset{Res: time.Hour, Zone: ZoneUTC}).AppZoneMatters() {
+		t.Errorf("AppZoneMatters is true of a plain read cut to the minute, or a wall clock in UTC")
+	}
+	// A read plus an offset at any cut names the zone (its check fails
+	// closed near that zone's backward turns: FallBack), though a replay
+	// reads a minute's cut, or a wall clock in UTC, in no zone of the
+	// application's.
+	for _, off := range []ClockOffset{{Min: time.Hour, Max: time.Hour + time.Second, Res: time.Minute}, {Min: time.Hour, Max: time.Hour + time.Second, Res: time.Millisecond}, {Min: time.Hour, Max: time.Hour + time.Second, Res: time.Hour, Zone: ZoneUTC}} {
+		if !off.AppZoneMatters() || off.CutInAppZone() {
+			t.Errorf("%+v: AppZoneMatters %v, CutInAppZone %v; want the zone named, the value read in none of the application's", off, off.AppZoneMatters(), off.CutInAppZone())
+		}
 	}
 	// A read plus an offset cut to an hour or a day: its cut is read in the
 	// application's zone (an hour in UTC+05:30 is no hour in UTC).
@@ -1317,10 +1326,38 @@ func TestAnHourCutOffsetHoldsNothingNearTheHourTheClocksGoBack(t *testing.T) {
 			}
 		}
 	}
-	if troll, err := time.LoadLocation("Antarctica/Troll"); err == nil {
-		at := time.Date(2026, 10, 25, 1, 30, 0, 0, time.UTC)
-		if got, back, met := o.FallBack(ms, at, at.Add(time.Second), troll); !met || !got.Equal(turn) || back != 2*hour {
-			t.Errorf("Antarctica/Troll, read at %s: FallBack %s back %s met %v; want the turn %s, two hours back", at, got, back, met, turn)
+	// Troll's clocks go back two hours (03:00 to 01:00 local): every read
+	// from three hours before the turn to two hours after it (the values'
+	// span reaches back five) meets it, two hours back, and none later.
+	troll := zoneOr(t, "Antarctica/Troll")
+	for from := turn.Add(-3 * hour); from.Before(turn.Add(3 * hour)); from = from.Add(time.Minute) {
+		got, back, met := o.FallBack(ms, from, from.Add(time.Second), troll)
+		if want := from.Before(turn.Add(2 * hour)); met != want || met && (!got.Equal(turn) || back != 2*hour) {
+			t.Errorf("Antarctica/Troll, read at %s, %s from the turn: FallBack %s back %s met %v; want met %v, the turn %s, two hours back", from, from.Sub(turn), got, back, met, want, turn)
+		}
+	}
+	// Lord Howe's go back thirty minutes (2026-04-05, 02:00 +11 to 01:30
+	// +10:30): clock + 2h meets the turn from three and a half hours before
+	// it to thirty minutes after, and clock - 2h (the values' span one cut
+	// before the hour that holds the read less two hours, whose hours start
+	// thirty minutes after the turn) from thirty minutes before it to three
+	// and a half hours after.
+	lhi := zoneOr(t, "Australia/Lord_Howe")
+	lturn := time.Date(2026, 4, 4, 15, 0, 0, 0, time.UTC)
+	neg := ClockOffset{Min: -2*hour - 30*time.Second, Max: -2*hour + 62*time.Second, Res: hour}
+	for _, row := range []struct {
+		name   string
+		o      ClockOffset
+		lo, hi time.Duration
+	}{
+		{"clock + 2h", o, -3*hour - 30*time.Minute, 30 * time.Minute},
+		{"clock - 2h", neg, -30 * time.Minute, 3*hour + 31*time.Minute},
+	} {
+		for from := lturn.Add(-5 * hour); from.Before(lturn.Add(5 * hour)); from = from.Add(time.Minute) {
+			got, back, met := row.o.FallBack(ms, from, from.Add(time.Second), lhi)
+			if want := !from.Before(lturn.Add(row.lo)) && from.Before(lturn.Add(row.hi)); met != want || met && (!got.Equal(lturn) || back != 30*time.Minute) {
+				t.Errorf("Australia/Lord_Howe, %s read at %s, %s from the turn: FallBack %s back %s met %v; want met %v, the turn %s, thirty minutes back", row.name, from, from.Sub(lturn), got, back, met, want, lturn)
+			}
 		}
 	}
 	at := turn.Add(30 * time.Minute)
@@ -1329,5 +1366,102 @@ func TestAnHourCutOffsetHoldsNothingNearTheHourTheClocksGoBack(t *testing.T) {
 	}
 	if _, _, met := (ClockOffset{Min: 30*24*hour - 62*time.Second, Max: 30*24*hour + 30*time.Second, Res: 24 * hour}).FallBack(ms, at, at.Add(time.Second), ber); met {
 		t.Errorf("an offset cut to a day, read in Berlin's second showing: FallBack met; a day's start shows once")
+	}
+}
+
+// firstShowingAt is x's wall clock in loc cut to c, resolved to the first
+// instant loc shows that wall time at, as JavaScript's Date setters
+// (setMilliseconds(0), setSeconds(0, 0), setMinutes(0, 0, 0)) and
+// java.time's LocalDateTime then atZone (c of a millisecond: no cut)
+// resolve a wall time shown twice: in the second showing of the hour
+// Berlin's clocks go back, an hour before x (two in Troll).
+func firstShowingAt(x time.Time, c time.Duration, loc *time.Location) time.Time {
+	_, off := x.In(loc).Zone()
+	wall := x.Add(time.Duration(off) * time.Second).UTC().Truncate(c)
+	first := wall.Add(-time.Duration(off) * time.Second)
+	for _, d := range []time.Duration{30 * time.Minute, time.Hour, 90 * time.Minute, 2 * time.Hour} {
+		e := first.Add(-d)
+		if _, eo := e.In(loc).Zone(); e.Add(time.Duration(eo) * time.Second).UTC().Equal(wall) {
+			first = e
+		}
+	}
+	return first.In(loc)
+}
+
+// A read plus an offset checked at a cut finer than an hour (a second, a
+// minute, none) in Europe/Berlin around the hour its clocks go back, of an
+// application that resolves the wall time shown twice to its first showing
+// before adding the time to live or after. Without FallBack a time to live
+// an hour longer holds at every read whose cut (or converted) instant lies
+// in the second showing. With it, Holds holds nothing where the call's
+// window or the values it admits meet the hour shown twice, the right value
+// holds at every read more than four hours before the turn or two after,
+// and FallBackAnywhere, for a replay that knows no zone, meets the
+// European Union's turn there and none in July. A plain read and a day's
+// cut meet none.
+func TestAReadPlusAnOffsetHoldsNothingNearAWallTimeShownTwiceAtAnyCut(t *testing.T) {
+	ber := zoneOr(t, "Europe/Berlin")
+	ms, hour := time.Millisecond, time.Hour
+	turn := time.Date(2026, 10, 25, 1, 0, 0, 0, time.UTC)
+	for _, row := range []struct {
+		name  string
+		cut   time.Duration
+		o     ClockOffset
+		shape string
+	}{
+		{"cut to the second", time.Second, ClockOffset{Min: 2*hour - 300*ms, Max: 2*hour + 255*ms, Res: time.Second}, "cut, then add"},
+		{"cut to the second", time.Second, ClockOffset{Min: 2*hour - 300*ms, Max: 2*hour + 255*ms, Res: time.Second}, "add, then cut"},
+		{"cut to the minute", time.Minute, ClockOffset{Min: 2*hour - 7300*ms, Max: 2*hour + 51255*ms, Res: time.Minute}, "cut, then add"},
+		{"cut to the minute", time.Minute, ClockOffset{Min: 2*hour - 7300*ms, Max: 2*hour + 51255*ms, Res: time.Minute}, "add, then cut"},
+		{"not cut (LocalDateTime then atZone)", ms, ClockOffset{Min: 2*hour - 30*ms, Max: 2*hour + 71*ms, Res: ms}, "cut, then add"},
+	} {
+		val := func(read time.Time, ttl time.Duration) time.Time {
+			if row.shape == "cut, then add" {
+				return firstShowingAt(read, row.cut, ber).Add(ttl)
+			}
+			return firstShowingAt(read.Add(ttl), row.cut, ber)
+		}
+		second := 0
+		for from := turn.Add(-5 * hour); from.Before(turn.Add(5 * hour)); from = from.Add(37 * time.Second) {
+			to := from.Add(time.Second)
+			read := from.Add(500 * ms)
+			x := read
+			if row.shape == "add, then cut" {
+				x = read.Add(2*hour + hour)
+			}
+			_, _, met := row.o.FallBack(ms, from, to, ber)
+			if !x.Before(turn) && x.Before(turn.Add(hour)) {
+				second++
+				if row.o.Holds(val(read, 3*hour), ms, from, to) {
+					t.Errorf("FALSE GREEN: %s, %s, read at %s (FallBack met %v): a time to live an hour longer holds in the second showing", row.name, row.shape, read, met)
+				}
+			}
+			if right := row.o.Holds(val(read, 2*hour), ms, from, to); right == met {
+				t.Errorf("%s, %s, read at %s, %s from the turn (FallBack met %v): the right value holds %v", row.name, row.shape, read, from.Sub(turn), met, right)
+			}
+			if far := from.Before(turn.Add(-4*hour)) || !from.Before(turn.Add(2*hour)); far && met {
+				t.Errorf("FALSE RED: %s, %s, read at %s, %s from the turn: FallBack met; want checked as on any other hour", row.name, row.shape, read, from.Sub(turn))
+			}
+		}
+		if second < 90 {
+			t.Fatalf("%s, %s: %d reads in the second showing; want 90 or more", row.name, row.shape, second)
+		}
+	}
+	o := ClockOffset{Min: 2*hour - 300*ms, Max: 2*hour + 255*ms, Res: time.Second}
+	at := turn.Add(30 * time.Minute)
+	if got, back, loc, met := o.FallBackAnywhere(ms, at, at.Add(time.Second)); !met || !got.Equal(turn) || back != hour || loc == nil || loc.String() != "Europe/Amsterdam" {
+		t.Errorf("FallBackAnywhere at %s: %s back %s in %v met %v; want the European Union's turn %s, an hour back, named as Europe/Amsterdam", at, got, back, loc, met, turn)
+	}
+	july := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	if got, _, loc, met := o.FallBackAnywhere(ms, july, july.Add(time.Second)); met {
+		t.Errorf("FALSE RED: FallBackAnywhere in July: met %s in %v; no zone's clocks go back then", got, loc)
+	}
+	for _, none := range []ClockOffset{{Res: time.Second}, {Min: 30*24*hour - 62*time.Second, Max: 30*24*hour + 30*time.Second, Res: 24 * hour}} {
+		if _, _, met := none.FallBack(ms, at, at.Add(time.Second), ber); met {
+			t.Errorf("%+v, read in Berlin's second showing: FallBack met; a plain read has no time to live, and a day's cut keeps the date both showings share", none)
+		}
+		if _, _, _, met := none.FallBackAnywhere(ms, at, at.Add(time.Second)); met {
+			t.Errorf("%+v, read in Berlin's second showing: FallBackAnywhere met", none)
+		}
 	}
 }

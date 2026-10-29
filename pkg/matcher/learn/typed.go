@@ -1067,27 +1067,40 @@ func clockOffsetEvidence(path string, off models.ClockOffset) string {
 		outside, on := cutExceptions(off.Res)
 		return clockOffsetSeen(path, off) + ", cut to " + aUnit(off.Res) + ". A replay checks the offset at the " + w + ", read in the zone the value shows a whole " + w + " in, else the application's, as standing for its whole " + w + ", within one " + w + " of its call's window plus the offset on either side, as a date cut to a day passes from yesterday: " + offsetNamed(off) + " changed by less than two " + w + "s can pass there, by where the replay's read falls in its " + w + ", " + outside + "one changed by two " + w + "s fails unless the replay's read falls within its call's window and the offset's range (" + models.ShortDuration(off.Max-off.Min) + ") of the " + w + "'s turn, and one changed by three " + w + "s or more fails" + on + "; if the field is a time the application reads from its own clock with no rule, declare it noise in keploy.yml, and keploy stops comparing it"
 	}
-	return clockOffsetSeen(path, off) + ". A replay compares the offset: " + offsetNamed(off) + " changed by " + aUnit(off.Unit()) + " or more still fails; if the field is a time the application reads from its own clock with no rule, declare it noise in keploy.yml, and keploy stops comparing it"
+	return clockOffsetSeen(path, off) + ". A replay compares the offset: " + offsetNamed(off) + " changed by " + aUnit(off.Unit()) + " or more still fails; near a wall time the application's zone shows twice as its clocks go back (any zone's, where keploy knows none of the application's) a replay refuses the value, since an application that resolves that wall time to its first showing writes a value an hour early there; if the field is a time the application reads from its own clock with no rule, declare it noise in keploy.yml, and keploy stops comparing it"
 }
 
-// offsetFallBackWhy is why an instant at the clock plus the offset off, cut
-// to an hour, is refused where a run's call's window, or the values a check
-// of it at the hour admits there, meets an hour the application's zone
-// (dc.zone) shows twice as its clocks go back (models.ClockOffset.FallBack,
-// at enc, the resolution its values' encoding writes): an application that
-// cuts its clock to that hour's first showing writes a value up to two
-// hours before the instant it cuts there, so the offset that run shows can
-// stand an hour or two from the one it adds, and a replay would check a
-// time to live two hours off as the right one. "" where none does, and
-// where the learn step knows no zone of the application's (a replay then
-// checks it in the zone it reads, and refuses it near such an hour there).
+// offsetFallBackWhy is why an instant at the clock plus the offset off,
+// checked at a cut finer than an hour (none, a second, a minute: CheckedAt
+// at enc, the resolution its values' encoding writes), is refused where a
+// run's call's window, or the values a check of it admits there, meets a
+// wall time the application's zone (dc.zone) shows twice as its clocks go
+// back (models.ClockOffset.FallBack), or, where the learn step knows no
+// zone of the application's, one any zone does (FallBackAnywhere): an
+// application that resolves that wall time to its first showing writes a
+// value an hour early there (two in Troll), so where both runs fall in the
+// second showing the offset they show stands an hour short of the one the
+// application adds (clock + 1h of clock + 2h), and a replay would then
+// pass a time to live made an hour shorter, at any read, and refuse the
+// right one. "" where none does. An hour's cut is not refused: there both
+// runs in the second showing write one value, which shows no read of the
+// clock, and one in each show no one offset, so the learn step never
+// learns a wrong one.
 func (dc *DriftCache) offsetFallBackWhy(path string, off models.ClockOffset, enc time.Duration, w *Window) string {
-	if w == nil {
+	if w == nil || off.CheckedAt(enc) >= time.Hour {
 		return ""
 	}
 	for _, s := range []Span{w.Rec, w.F} {
+		named := ""
 		if turn, back, met := off.FallBack(enc, s.From, s.To, dc.zone); met {
-			return clockOffsetSeen(path, off) + ", cut to an hour, but a run's call's window, or the values a check at the hour admits there, meets " + fallBackNamed(turn, back, dc.zone) + ": an application that cuts its clock to that hour's first showing (JavaScript; java.time's LocalDateTime then atZone) writes a value up to " + models.ShortDuration(back+time.Hour) + " before the instant it cuts there, so the offset that run shows can stand an hour or more from the one it adds, and keploy refuses it rather than learn it. Record the test again outside that hour; if the field is a time the application reads from its own clock with no rule, declare it noise in keploy.yml, and keploy stops comparing it"
+			named = fallBackNamed(turn, back, dc.zone)
+		} else if dc.zone == nil || dc.zoneNoName {
+			if turn, back, loc, met := off.FallBackAnywhere(enc, s.From, s.To); met {
+				named = fallBackNamed(turn, back, loc) + " (keploy knows no zone of the application's here, so it reads every zone's clocks going back)"
+			}
+		}
+		if named != "" {
+			return clockOffsetSeen(path, off) + ", but a run's call's window, or the values a check of it admits there, meets " + named + ": an application that resolves a wall time shown twice to its first showing (JavaScript's Date setters; java.time's LocalDateTime then atZone) writes a value an hour early there, so the offset a run there shows can stand an hour from the one it adds, and keploy refuses it rather than learn it. Record the test again outside that hour; if the field is a time the application reads from its own clock with no rule, declare it noise in keploy.yml, and keploy stops comparing it"
 		}
 	}
 	return ""

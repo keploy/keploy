@@ -2,6 +2,7 @@ package models
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -300,16 +301,26 @@ type ClockOffset struct {
 }
 
 // AppZoneMatters reports whether what the learn step learned of o depends
-// on the application's zone, so it names that zone in AppZone: a wall clock
-// of no zone read in it (ZoneApp, ZoneEither), or a value that names its
-// moment cut coarser than a minute (an hour, a day), whose cut a replay
-// reads in the application's zone: a plain read's beside UTC and the
-// offset it writes (learn's cutZones), a read plus an offset's there alone
-// (learn's checkReadIn: the hour or the day its read plus the offset was
-// cut to). A minute or any finer cut is one in every zone (zones' offsets
-// are whole minutes); a wall clock read in UTC (ZoneUTC) is cut in UTC
-// alone.
+// on the application's zone, so it names that zone in AppZone: a read a
+// replay reads in that zone (CutInAppZone), or a read plus an offset at any
+// cut, whose check fails closed near the zone's backward turns (FallBack:
+// an application that resolves a wall time its zone shows twice to the
+// first showing writes a value an hour early there, so a time to live made
+// an hour longer would pass).
 func (o ClockOffset) AppZoneMatters() bool {
+	return o.CutInAppZone() || !o.Plain()
+}
+
+// CutInAppZone reports whether a replay reads o's value in the
+// application's zone: a wall clock of no zone read in it (ZoneApp,
+// ZoneEither), or a value that names its moment cut coarser than a minute
+// (an hour, a day), whose cut it reads there: a plain read's beside UTC and
+// the offset it writes (learn's cutZones), a read plus an offset's there
+// alone (learn's checkReadIn: the hour or the day its read plus the offset
+// was cut to). A minute or any finer cut is one in every zone (zones'
+// offsets are whole minutes); a wall clock read in UTC (ZoneUTC) is cut in
+// UTC alone. Of an o that is not, AppZone serves FallBack alone.
+func (o ClockOffset) CutInAppZone() bool {
 	return o.Zone == ZoneApp || o.Zone == ZoneEither || o.Zone == "" && o.Res > time.Minute
 }
 
@@ -662,10 +673,10 @@ func (o ClockOffset) CheckedAt(res time.Duration) time.Duration {
 // and one changed by three or more never does, but for a day a
 // daylight-saving turn shortens to 23 hours, still one day (holdsRead):
 // there three days can hold where the window and o's width are within an
-// hour of the day, a call some 23 hours long (a stated limit). Of an hour's
-// cut, where the zone the value is read in shows an hour twice as its
-// clocks go back, Holds holds nothing near that hour (FallBack). A Plain o
-// is always checkable.
+// hour of the day, a call some 23 hours long (a stated limit). Where the zone
+// the value is read in shows a wall time twice as its clocks go back, Holds
+// holds nothing near that turn, at any cut finer than a day (FallBack). A
+// Plain o is always checkable.
 func (o ClockOffset) Checkable(res time.Duration, from, to time.Time) bool {
 	if o.Plain() {
 		return true
@@ -823,10 +834,11 @@ func (o ClockOffset) Within(spans ...time.Duration) bool {
 // admits as a date's admits yesterday: a time to live changed by less than
 // two cuts can hold, by where the read falls in its cut, one changed by two
 // only near the cut's turn, and one changed by three or more never, but
-// for the 23-hour day (Checkable). Nor, of an hour's cut, where the call's
-// window or that span meets the wall time at's zone shows twice as its
-// clocks go back (FallBack): an application that cuts to the hour's first
-// showing writes a value up to two hours early there. Nor
+// for the 23-hour day (Checkable). Nor, at any cut finer than a day, where
+// the call's window or that span meets the wall time at's zone shows twice
+// as its clocks go back (FallBack): an application that resolves that wall
+// time to its first showing writes a value an hour early there (two in
+// Troll), and up to one cut more where it cuts. Nor
 // for an o whose Unit is a second or finer: an application that cuts its
 // value to that unit makes a time to live changed by one look the same. Nor
 // for an o whose Zone a replay reads no value in (ZoneKnown: ZoneApart, or one
@@ -862,37 +874,80 @@ func (o ClockOffset) Holds(at time.Time, res time.Duration, from, to time.Time) 
 }
 
 // FallBack is the turn at which loc's clocks go back, and by how much, that
-// a check of o, an offset cut to an hour (CoarseChecked at res, its Res
-// below a day), in a call's window from from to to meets: one whose wall
-// time shown twice (from the turn less what the clocks go back by up to the
-// turn plus it: both showings) meets the window itself or the values Holds
-// admits there (from the start of the hour before the one that holds
-// from+o.Min, up to an hour after to+o.Max). An application that cuts its
-// clock to an hour's first showing (JavaScript's setMinutes(0, 0, 0);
-// java.time's LocalDateTime then atZone) writes, of an instant in its
-// second showing, the first's hour, up to two hours before the instant it
-// cuts (three in Troll's two-hour turn): of a read in the window where it
-// cuts and then adds its time to live, of the value itself where it adds
-// and then cuts. Checked within one hour of the call's span plus the
-// offset, a time to live made two hours longer would pass there at any
-// read, so Holds holds nothing where a turn is met, and the learn step
-// neither learns such an offset from a run that meets one nor passes a
-// replay's value there (learn's clockOffset, checkReadIn), naming the turn:
-// a false red some hours a year, never a false pass (2026-10-29). met is
-// false where none is, for any other o, a nil loc and a window with no
-// start or that ends before it starts.
+// a check of o, a read plus an offset checked at a cut finer than a day
+// (CheckedAt(res): none, a millisecond, a second, a minute or an hour), in
+// a call's window from from to to meets: one whose wall time shown twice
+// (from the turn less what the clocks go back by up to the turn plus it:
+// both showings) meets the window itself or the values Holds admits there
+// (from one cut before the cut that holds from+o.Min, up to one cut after
+// to+o.Max). An application that resolves a wall time shown twice to its
+// first showing (JavaScript's Date setters, setMilliseconds(0),
+// setSeconds(0, 0) and setMinutes(0, 0, 0) alike; java.time's
+// LocalDateTime then atZone, with no cut at all) writes, of an instant in
+// the second showing, a value an hour before it (two in Troll's turn), and
+// up to one cut more where it cuts: of a read in the window where it cuts
+// (or converts) and then adds its time to live, of the value itself where
+// it adds and then cuts. Checked against the call's span plus the offset,
+// a time to live made an hour longer would pass there at any read, so
+// Holds holds nothing where a turn is met, and a replay refuses such a
+// value, naming the turn (learn's checkReadIn): a false red some hours a
+// year. A day's cut meets none: the cut keeps the date alone, which both
+// showings share, so the first showing's day is the instant's.
+// met is false where none is, for a Plain o (no time to live to change), a
+// nil loc and a window with no start or that ends before it starts.
 func (o ClockOffset) FallBack(res time.Duration, from, to time.Time, loc *time.Location) (turn time.Time, back time.Duration, met bool) {
-	if loc == nil || !o.CoarseChecked(res) || o.Res >= 24*time.Hour || from.IsZero() || to.Before(from) {
+	lo, hi, ok := o.fallBackSpan(res, from, to, loc)
+	if !ok || loc == nil {
 		return time.Time{}, 0, false
 	}
-	c := o.Res
-	lo, hi := CutBefore(ReadCut(from.Add(o.Min), c, loc), c, loc), CutAfter(to.Add(o.Max), c, loc)
 	for _, s := range [][2]time.Time{{from, to}, {lo, hi}} {
 		if turn, back, met := fallBackIn(s[0], s[1], loc); met {
 			return turn, back, true
 		}
 	}
 	return time.Time{}, 0, false
+}
+
+// FallBackAnywhere is FallBack read in every zone of the tz database
+// (tzNames), for a replay that knows no zone of the application's: the
+// first turn any zone's clocks go back at that the window or the values a
+// check of o admits meet, by how much, and that zone. The values' span is
+// read one cut wider before (a zone whose cut starts elsewhere, an hour in
+// one at UTC+05:30). That is a handful of dates a year, a few hours each,
+// where such a replay refuses the value: false reds, never a pass of a
+// value an application in an unknown zone may have written an hour early.
+func (o ClockOffset) FallBackAnywhere(res time.Duration, from, to time.Time) (turn time.Time, back time.Duration, loc *time.Location, met bool) {
+	lo, hi, ok := o.fallBackSpan(res, from, to, time.UTC)
+	if !ok {
+		return time.Time{}, 0, nil, false
+	}
+	lo = lo.Add(-o.CheckedAt(res))
+	for _, s := range [][2]time.Time{{from, to}, {lo, hi}} {
+		for y := s[0].Add(-maxFallBack).Year(); y <= s[1].Add(maxFallBack).Year(); y++ {
+			for _, f := range yearFallBacks(y) {
+				if !f.at.Add(-f.back).After(s[1]) && f.at.Add(f.back).After(s[0]) {
+					return f.at, f.back, f.loc, true
+				}
+			}
+		}
+	}
+	return time.Time{}, 0, nil, false
+}
+
+// fallBackSpan is the span of values a check of o at res admits in a
+// call's window from from to to, read in loc (Holds: from one cut before
+// the cut that holds from+o.Min up to one cut after to+o.Max), and whether
+// FallBack reads o at all: a read plus an offset checked at a cut finer
+// than a day, in a window with a start that ends no earlier.
+func (o ClockOffset) fallBackSpan(res time.Duration, from, to time.Time, loc *time.Location) (lo, hi time.Time, ok bool) {
+	c := o.CheckedAt(res)
+	if o.Plain() || o.Res <= 0 || res <= 0 || c >= 24*time.Hour || o.Res >= 24*time.Hour || from.IsZero() || to.Before(from) {
+		return time.Time{}, time.Time{}, false
+	}
+	if loc == nil {
+		loc = time.UTC
+	}
+	return CutBefore(ReadCut(from.Add(o.Min), c, loc), c, loc), CutAfter(to.Add(o.Max), c, loc), true
 }
 
 // maxFallBack is more than any zone's clocks go back by at one turn
@@ -916,6 +971,61 @@ func fallBackIn(lo, hi time.Time, loc *time.Location) (time.Time, time.Duration,
 		}
 		t = end
 	}
+}
+
+// zoneFallBack is one turn at which a zone's clocks go back (at), by how
+// much (back), and the zone (loc).
+type zoneFallBack struct {
+	at   time.Time
+	back time.Duration
+	loc  *time.Location
+}
+
+// fallBackYears keeps yearFallBacks by year, read once per process.
+var fallBackYears = struct {
+	sync.Mutex
+	m map[int][]zoneFallBack
+}{m: map[int][]zoneFallBack{}}
+
+// yearFallBacks is every turn in year y (UTC) at which a zone of tzNames
+// goes back, earliest first, one per instant and step (the first zone, by
+// name, that turns there), as the zone files keploy reads hold them (the
+// host's, else its embedded copy). A name no file holds is skipped.
+func yearFallBacks(y int) []zoneFallBack {
+	fallBackYears.Lock()
+	defer fallBackYears.Unlock()
+	if fs, ok := fallBackYears.m[y]; ok {
+		return fs
+	}
+	start, end := time.Date(y, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(y+1, 1, 1, 0, 0, 0, 0, time.UTC)
+	type key struct {
+		at   int64
+		back time.Duration
+	}
+	seen := map[key]bool{}
+	var fs []zoneFallBack
+	for _, name := range tzNames {
+		loc, err := time.LoadLocation(name)
+		if err != nil {
+			continue
+		}
+		for t := start.Add(-time.Nanosecond); ; {
+			_, e := t.In(loc).ZoneBounds()
+			if e.IsZero() || !e.After(t) || !e.Before(end) {
+				break
+			}
+			_, before := e.Add(-time.Nanosecond).In(loc).Zone()
+			_, after := e.In(loc).Zone()
+			if back := time.Duration(before-after) * time.Second; back > 0 && !seen[key{e.UnixNano(), back}] {
+				seen[key{e.UnixNano(), back}] = true
+				fs = append(fs, zoneFallBack{at: e, back: back, loc: loc})
+			}
+			t = e
+		}
+	}
+	sort.SliceStable(fs, func(i, j int) bool { return fs[i].at.Before(fs[j].at) })
+	fallBackYears.m[y] = fs
+	return fs
 }
 
 // Plain reports whether o is a zero offset: a plain read of the
@@ -959,12 +1069,19 @@ func (o ClockOffset) signed() bool {
 // pairings came in.
 func (o ClockOffset) Meet(p ClockOffset) ClockOffset {
 	m := ClockOffset{Min: max(o.Min, p.Min), Max: min(o.Max, p.Max), Res: max(o.Res, p.Res), Zone: meetZones(o.Zone, p.Zone), Layout: meetLayouts(o.Layout, p.Layout), Since: meetSince(o.Since, p.Since)}
+	// A learning whose value a replay reads in no zone of the application's
+	// (CutInAppZone: one cut to the minute or finer), that names none, says
+	// nothing of the zone a meet read in it holds: the other's reading says
+	// which (as before such learnings named their zone for FallBack). Met
+	// with another of its kind, it names no one zone, and FallBack reads
+	// every zone's turns (learn's CheckClockRead).
+	silent := func(x ClockOffset) bool { return x.AppZone == "" && !x.CutInAppZone() && m.CutInAppZone() }
 	switch {
-	case !o.AppZoneMatters():
-		// o's learning read no zone of the application's (a read cut to
-		// the second, a wall clock in UTC), so p's reading says which.
+	case !o.AppZoneMatters() || silent(o):
+		// o's learning read no zone of the application's (a plain read cut
+		// to the second, a wall clock in UTC), so p's reading says which.
 		m.AppZone = p.AppZone
-	case !p.AppZoneMatters() || p.AppZone == o.AppZone:
+	case !p.AppZoneMatters() || silent(p) || p.AppZone == o.AppZone:
 		m.AppZone = o.AppZone
 	default:
 		// Read with the application's zone as two zones (two named ones,
