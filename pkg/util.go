@@ -1099,6 +1099,18 @@ func IsAppNoAnswer(err error) bool {
 		errors.Is(err, ErrAnswerStalled)
 }
 
+// IsNoAnswerCanceled reports whether err is a no-answer (IsAppNoAnswer) that a
+// cancel ended: context.Canceled, or a gRPC call's Canceled code. That is a
+// stop's, the user's or the run's, and says nothing of the test whose request
+// it ended, so replay's mock prune holds the whole set for it, where it holds
+// only each test's own mocks for a test that got no answer of its own.
+func IsNoAnswerCanceled(err error) bool {
+	if err == nil {
+		return false
+	}
+	return errors.Is(err, context.Canceled) || isGRPCCanceled(err)
+}
+
 // IsTransportConnReset reports whether err is a transport-level connection
 // reset / unexpected close while exchanging the request with the app: the
 // connection dropping before any of an answer came back (isConnDropped), or

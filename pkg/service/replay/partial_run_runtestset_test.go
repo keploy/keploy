@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/iotest"
 	"time"
@@ -60,12 +61,22 @@ type prMockDB struct {
 	kept map[string]models.MockState
 	// filtered is the set's per-test mocks; none by default.
 	filtered []*models.Mock
+	// failReads fails every read once set.
+	failReads atomic.Bool
 }
 
+var errPRMockReads = errors.New("the mock store is unreadable")
+
 func (m *prMockDB) GetFilteredMocks(context.Context, string, time.Time, time.Time, map[string]bool, map[string]bool) ([]*models.Mock, error) {
+	if m.failReads.Load() {
+		return nil, errPRMockReads
+	}
 	return m.filtered, nil
 }
-func (*prMockDB) GetUnFilteredMocks(context.Context, string, time.Time, time.Time, map[string]bool, map[string]bool) ([]*models.Mock, error) {
+func (m *prMockDB) GetUnFilteredMocks(context.Context, string, time.Time, time.Time, map[string]bool, map[string]bool) ([]*models.Mock, error) {
+	if m.failReads.Load() {
+		return nil, errPRMockReads
+	}
 	return nil, nil
 }
 func (m *prMockDB) UpdateMocks(_ context.Context, _ string, keep map[string]models.MockState, _ time.Time, _ time.Time) error {
@@ -740,22 +751,43 @@ func prCanceledErr(t *testing.T) error {
 	return err
 }
 
-// TestRunTestSetNoAnswerFailuresDoNotPruneMocks: a run that scored every test,
-// but where the app never answered some of them, must not prune. A request that
-// timed out or was cancelled consumed nothing for want of an answer, not for
-// want of need, so its test's mocks look unused and PreserveFailedMocks=false
-// (what k8s-proxy auto-replay sets) would let the prune delete them.
-func TestRunTestSetNoAnswerFailuresDoNotPruneMocks(t *testing.T) {
+// TestRunTestSetNoAnswerFailuresHoldTheirMocks: a run that scored every test,
+// but where the app never answered some of them, prunes only around them. A
+// request that timed out consumed nothing for want of an answer, not for want
+// of need, so its test's mocks look unused and PreserveFailedMocks=false (what
+// k8s-proxy auto-replay sets) would let the prune delete them: the keep-set
+// holds them (holdNoAnswerMocks). A cancel says nothing of the test it ended,
+// and a hold whose read fails names nothing: neither run prunes.
+func TestRunTestSetNoAnswerFailuresHoldTheirMocks(t *testing.T) {
+	base := time.Now().Add(-time.Hour)
+	inWindow := func(name string, i int) *models.Mock {
+		at := base.Add(time.Duration(10*i+1) * time.Second)
+		return &models.Mock{Name: name, Kind: models.GRPC_EXPORT, Spec: models.MockSpec{ReqTimestampMock: at, ResTimestampMock: at.Add(time.Millisecond)}}
+	}
 	for _, tc := range []struct {
-		name string
-		err  func(*testing.T) error
+		name      string
+		err       func(*testing.T) error
+		failRead  bool
+		wantPrune int
 	}{
-		{"client timeout", prClientTimeoutErr},
-		{"context canceled", prCanceledErr},
+		{"client timeout", prClientTimeoutErr, false, 1},
+		{"client timeout, the hold's read fails", prClientTimeoutErr, true, 0},
+		{"context canceled", prCanceledErr, false, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := tc.err(t)
 			h := newPartialRunHarness(t, 4, 0)
+			for i, c := range h.cases {
+				c.HTTPReq.Timestamp = base.Add(time.Duration(10*(i+1)) * time.Second)
+				c.HTTPResp.Timestamp = c.HTTPReq.Timestamp.Add(2 * time.Second)
+			}
+			// The fake store hands back its per-test pool whatever the
+			// window, as a no-window read does: one mock in each of test-1's
+			// and test-3's windows.
+			h.mocks.filtered = []*models.Mock{inWindow("mock-t1", 1), inWindow("mock-t3", 3)}
+			if tc.failRead {
+				h.report.onRead = func() { h.mocks.failReads.Store(true) }
+			}
 			h.replayer.hookImpl = prHooks{simErr: map[string]error{"test-2": err, "test-3": err, "test-4": err}}
 			h.replayer.config.Test.RemoveUnusedMocks = true
 			_ = h.run(t)
@@ -764,9 +796,17 @@ func TestRunTestSetNoAnswerFailuresDoNotPruneMocks(t *testing.T) {
 			if rep == nil || rep.Success != 1 || rep.Failure != 3 {
 				t.Fatalf("precondition: want a complete run with 1 pass and 3 failures, got %+v", rep)
 			}
-			if got := h.mocks.pruneCalls(); got != 0 {
-				t.Fatalf("3 of 4 tests got no answer (%v) and the run still made %d UpdateMocks calls; "+
-					"it must make none", err, got)
+			if got := h.mocks.pruneCalls(); got != tc.wantPrune {
+				t.Fatalf("3 of 4 tests got no answer (%v) and the run made %d UpdateMocks calls; want %d", err, got, tc.wantPrune)
+			}
+			if tc.wantPrune == 0 {
+				return
+			}
+			if _, kept := h.mocks.kept["mock-t3"]; !kept {
+				t.Errorf("the prune's keep-set left out mock-t3, recorded in unanswered test-3's window: %v", h.mocks.kept)
+			}
+			if _, kept := h.mocks.kept["mock-t1"]; kept {
+				t.Errorf("the prune's keep-set holds mock-t1, recorded in test-1's window, which passed and did not consume it: %v", h.mocks.kept)
 			}
 		})
 	}
@@ -820,17 +860,22 @@ func TestRunTestSetUnrunStreamingTestsBlockThePrune(t *testing.T) {
 	}
 }
 
-// TestRunTestSetNoAnswerInTheStreamingPhaseBlocksThePrune pins the two
+// TestRunTestSetNoAnswerInTheStreamingPhaseHoldsItsTest pins the two
 // streaming-phase sites where a transport error becomes a synthetic result:
-// the request itself, and the body read after the headers arrived.
-func TestRunTestSetNoAnswerInTheStreamingPhaseBlocksThePrune(t *testing.T) {
+// the request itself, and the body read after the headers arrived. A timeout
+// there prunes around its test, and a cancel holds the whole set.
+func TestRunTestSetNoAnswerInTheStreamingPhaseHoldsItsTest(t *testing.T) {
 	timeout := prClientTimeoutErr(t)
+	canceled := prCanceledErr(t)
 	for _, tc := range []struct {
-		name  string
-		hooks prHooks
+		name       string
+		hooks      prHooks
+		wantPrunes int
 	}{
-		{"request timed out", prHooks{simErr: map[string]error{"test-4": timeout}}},
-		{"body read timed out", prHooks{streamErr: map[string]error{"test-4": timeout}}},
+		{"request timed out", prHooks{simErr: map[string]error{"test-4": timeout}}, 1},
+		{"body read timed out", prHooks{streamErr: map[string]error{"test-4": timeout}}, 1},
+		{"request cancelled", prHooks{simErr: map[string]error{"test-4": canceled}}, 0},
+		{"body read cancelled", prHooks{streamErr: map[string]error{"test-4": canceled}}, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newPartialRunHarness(t, 4, 0)
@@ -843,8 +888,8 @@ func TestRunTestSetNoAnswerInTheStreamingPhaseBlocksThePrune(t *testing.T) {
 			if rep == nil || rep.Success != 3 || rep.Failure != 1 {
 				t.Fatalf("precondition: want a complete run with 3 passes and 1 failure, got %+v", rep)
 			}
-			if got := h.mocks.pruneCalls(); got != 0 {
-				t.Fatalf("the streaming test got no answer and the run made %d UpdateMocks calls; want 0", got)
+			if got := h.mocks.pruneCalls(); got != tc.wantPrunes {
+				t.Fatalf("the streaming test got no answer and the run made %d UpdateMocks calls; want %d", got, tc.wantPrunes)
 			}
 		})
 	}
@@ -1160,7 +1205,7 @@ func TestRunTestSetUnreadableResultsBlockThePrune(t *testing.T) {
 // the tests. A set where one test keeps timing out is never pruned again, and
 // this line is the only place that says why.
 func TestRunTestSetPruneRefusalNamesTheRule(t *testing.T) {
-	timeout := prClientTimeoutErr(t)
+	canceled := prCanceledErr(t)
 	refused := prRefusedErr(t)
 	ordinary := errors.New(`net/http: HTTP/1.x transport connection broken: malformed HTTP response "\x00"`)
 	for _, tc := range []struct {
@@ -1180,8 +1225,8 @@ func TestRunTestSetPruneRefusalNamesTheRule(t *testing.T) {
 			h.instr.stopAppAfterNUpdates, h.instr.stopErr = 5, models.ErrInternal
 		}, "internal_error", ""},
 		{"a short read", func(h *prRun) { h.report.dropOnRead = "test-4" }, "results_unreadable", ""},
-		{"requests that got no answer", func(h *prRun) {
-			h.replayer.hookImpl = prHooks{simErr: map[string]error{"test-2": timeout, "test-4": timeout}}
+		{"requests a cancel ended", func(h *prRun) {
+			h.replayer.hookImpl = prHooks{simErr: map[string]error{"test-2": canceled, "test-4": canceled}}
 		}, "no_answer", "[test-2 test-4]"},
 		{"a refused request", func(h *prRun) {
 			h.replayer.hookImpl = prHooks{simErr: map[string]error{"test-4": refused}}

@@ -3140,11 +3140,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// those cases.
 	stoppedEarly := false
 	// Tests whose request got no answer, classified off the error in hand by
-	// pkg.IsAppNoAnswer.
+	// pkg.IsAppNoAnswer, and whether a cancel ended one (pkg.IsNoAnswerCanceled:
+	// a stop's, which says nothing of the test it ended).
 	var noAnswerTests []string
+	noAnswerCanceled := false
 	noteNoAnswer := func(name string, err error) {
 		if pkg.IsAppNoAnswer(err) {
 			noAnswerTests = append(noAnswerTests, name)
+			noAnswerCanceled = noAnswerCanceled || pkg.IsNoAnswerCanceled(err)
 		}
 	}
 	// drainBeforeFiling reads, under the proven switch, what a test that
@@ -6380,11 +6383,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	internalErr := testSetStatus == models.TestSetStatusInternalErr && !unverifiedNotJudged && (staleOnly == "" || notJudged != staleOnly)
 	// Read once: the prune and the mappings hold below decide on the same value.
 	appUnreachable := anyAppConnectionError(testCaseResults)
-	prune, pruneRefusal := shouldPrune(r.removeUnusedMocks(), r.instrument, pruneRun{
+	pruneIn := pruneRun{
 		allTestsGotAVerdict: allTestsGotAVerdict,
 		internalErr:         internalErr,
 		resultsComplete:     resultsComplete,
 		noAnswer:            len(noAnswerTests) > 0,
+		noAnswerCanceled:    noAnswerCanceled,
 		appUnreachable:      appUnreachable,
 		captureIncomplete:   captureIncomplete != "" || testsLostCapture,
 		captureUnverified:   captureUnverified != "",
@@ -6394,7 +6398,32 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		failure:             failure,
 		obsolete:            obsolete,
 		preserveFailedMocks: r.config.Test.PreserveFailedMocks,
-	})
+	}
+	prune, pruneRefusal := shouldPrune(r.removeUnusedMocks(), r.instrument, pruneIn)
+	// A prune that runs past tests that got no answer keeps each one's own
+	// mocks (holdNoAnswerMocks), read only now that nothing else refuses it.
+	// When they cannot be read, the whole set is held for them, as before.
+	var noAnswerHeld []noAnswerHold
+	var noAnswerHoldErr error
+	if prune && len(noAnswerTests) > 0 {
+		noAnswerHeld, noAnswerHoldErr = r.holdNoAnswerMocks(runTestSetCtx, testSetID, noAnswerTests, testCases, expectedTestMockMappings, actualTestMockMappings, consumers, passingTotalConsumedMocks)
+		if noAnswerHoldErr != nil {
+			pruneIn.noAnswerUnheld = true
+			prune, pruneRefusal = shouldPrune(r.removeUnusedMocks(), r.instrument, pruneIn)
+		}
+	}
+	if prune && len(noAnswerHeld) > 0 {
+		names, kept := make([]string, 0, min(len(noAnswerHeld), 20)), make([]int, 0, min(len(noAnswerHeld), 20))
+		for _, h := range noAnswerHeld[:min(len(noAnswerHeld), 20)] {
+			names, kept = append(names, h.test), append(kept, h.kept)
+		}
+		// Capped so an outage does not log every test.
+		r.logger.Info("pruning unused mocks around the tests that got no answer: each one keeps the mocks its next replay is served (its mapping entry, its recorded window, what it consumed)",
+			zap.String("testSetID", testSetID),
+			zap.Int("noAnswerCount", len(noAnswerHeld)),
+			zap.Strings("noAnswerTests", names),
+			zap.Ints("keptMocks", kept))
+	}
 	if pruneEnabled && !prune {
 		fields := []zap.Field{
 			zap.String("testSetID", testSetID),
@@ -6407,9 +6436,18 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			zap.Error(resultsErr),
 		}
 		if n := len(noAnswerTests); n > 0 {
-			// One chronically unanswered test stops pruning for the whole set;
-			// this names it. Capped so an outage does not log every test.
+			// A stop's cancel, or a failed read of the unanswered tests' own
+			// mocks, holds the whole set for them; this names them. Capped so
+			// an outage does not log every test.
 			fields = append(fields, zap.Int("noAnswerCount", n), zap.Strings("noAnswerTests", noAnswerTests[:min(n, 20)]))
+		}
+		switch {
+		case pruneRefusal != "no_answer":
+		case noAnswerCanceled:
+			// A stop's cancel says nothing of each test: the whole set is held.
+			fields = append(fields, zap.String("noAnswerHold", "a cancel (a stop) ended a request, which says nothing of the test it ended, so the whole set is held"))
+		case noAnswerHoldErr != nil:
+			fields = append(fields, zap.String("noAnswerHold", "the unanswered tests' own mocks could not be read, so the whole set is held"), zap.NamedError("noAnswerHoldError", noAnswerHoldErr))
 		}
 		r.logger.Warn("skipping mock pruning: this run's consumed-mock set is not trustworthy enough to delete against, so recorded mocks are preserved", fields...)
 	}
@@ -8203,7 +8241,12 @@ func pruneInputUntrustworthy(success int, appUnreachable bool) bool {
 //     re-record shows it still needs.
 //   - internal_error: keploy lost part of the run, such as a result insert.
 //   - results_unreadable: the results the rules below read are missing or short.
-//   - no_answer: a request consumed nothing for want of an answer.
+//   - no_answer: a request consumed nothing for want of an answer, and its
+//     test's own mocks cannot be held alone: a cancel ended it (a stop's,
+//     which says nothing of that test), or the read of the set's mocks that
+//     holds them failed (noAnswerUnheld). Otherwise the prune runs, and the
+//     caller keeps each such test's mocks (holdNoAnswerMocks): one test that
+//     keeps timing out no longer keeps every mock of its set.
 //   - capture_unverified: the agent counts untracked processes, but the count
 //     could not be read, so nothing shows the consumed-mock set is complete.
 //     It is no evidence of a loss, so it comes after the rules that name what
@@ -8232,7 +8275,7 @@ func shouldPrune(removeUnusedMocks, instrument bool, run pruneRun) (bool, string
 		return false, "internal_error"
 	case !run.resultsComplete:
 		return false, "results_unreadable"
-	case run.noAnswer:
+	case run.noAnswer && (run.noAnswerCanceled || run.noAnswerUnheld):
 		return false, "no_answer"
 	case run.captureUnverified:
 		return false, "capture_unverified"
@@ -8252,6 +8295,8 @@ type pruneRun struct {
 	internalErr                bool // the set ended INTERNAL_ERR
 	resultsComplete            bool // results read back, none short of the verdicts
 	noAnswer                   bool // a request got no answer (pkg.IsAppNoAnswer)
+	noAnswerCanceled           bool // a cancel ended one (pkg.IsNoAnswerCanceled): a stop's
+	noAnswerUnheld             bool // the unanswered tests' own mocks could not be read (holdNoAnswerMocks)
 	appUnreachable             bool // anyAppConnectionError over the results read back
 	captureIncomplete          bool // the agent could not track a process (pidMapCaptureIncomplete), or lost a call (proven switch)
 	captureUnverified          bool // the agent counts, but its count could not be read (pidMapVerdict)
