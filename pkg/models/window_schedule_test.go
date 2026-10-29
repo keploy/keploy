@@ -205,3 +205,30 @@ func TestWindowScheduleGapBeforeAndInFlight(t *testing.T) {
 		t.Error("a call with no answer time was in flight")
 	}
 }
+
+// After is past every window's End, the latest End and not the last-started
+// window's: a long early window that a later, shorter one starts inside still
+// holds what was recorded before its own End. A moment at that End is the
+// window's (Contains), not after it. An empty schedule and a zero moment tell
+// no teardown.
+func TestWindowScheduleAfterIsPastEveryWindowsEnd(t *testing.T) {
+	s := NewWindowSchedule([]TestWindow{
+		{TestCase: "test-2", Start: at(200), End: at(300)},
+		{TestCase: "test-1", Start: at(100), End: at(5000)},
+	})
+	for _, c := range []struct {
+		ms   int
+		want bool
+	}{{50, false}, {150, false}, {250, false}, {400, false}, {5000, false}, {5001, true}, {9000, true}} {
+		if got := s.After(at(c.ms)); got != c.want {
+			t.Fatalf("After(%d) = %v, want %v", c.ms, got, c.want)
+		}
+	}
+	if s.After(time.Time{}) {
+		t.Fatal("a zero moment is after the windows")
+	}
+	var none *WindowSchedule
+	if none.After(at(9000)) || NewWindowSchedule(nil).After(at(9000)) {
+		t.Fatal("with no schedule a moment is after the windows")
+	}
+}

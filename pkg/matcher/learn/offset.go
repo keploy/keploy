@@ -312,7 +312,9 @@ func (dc *DriftCache) offsetPlacesOf(at time.Time, served []Earlier, raw []Raw, 
 			merge(p, true, g.first, g.last)
 			continue
 		}
-		op.words = append(op.words, g.words)
+		w := g.words
+		w.set = true
+		op.words = append(op.words, w)
 		op.answers = append(op.answers, g.answer...)
 		others = append(others, g)
 	}
@@ -570,7 +572,7 @@ func (dc *DriftCache) echoedElsewhere(pairs []driftedInstant, at time.Time, serv
 	for _, g := range op.answers {
 		for _, e := range echoed {
 			if namesMomentApart(g.m, e.live, e.rec, e.rules) {
-				return "the moment record's full round saw in it stands in " + g.where + ", a recording record's full round gave the application before the call that " + givenWhose(g.at, at, g.late, g.noTime) + ", so it cannot tell whether the value is a copy of what the application was given there, or a pick from it by its clock, which moves as a read of the clock does, or a read of the clock. " + correction(g.mock)
+				return "the moment record's full round saw in it stands in " + g.where + ", a recording record's full round gave the application before the call that " + givenWhose(g.at, at, g.late, g.noTime) + ", so it cannot tell whether the value is a copy of what the application was given there, or a pick from it by its clock, which moves as a read of the clock does, or a read of the clock. " + correction(g.mock, false)
 			}
 		}
 	}
@@ -589,7 +591,7 @@ func (dc *DriftCache) echoedElsewhere(pairs []driftedInstant, at time.Time, serv
 		}
 		for _, e := range echoed {
 			if namesMomentApart(g.m, e.rec, e.live, e.rules) {
-				return "the moment record's full round saw in it stands " + where + ", and the moment it was recorded with stands in " + g.where + ", a recording record's full round gave the application before the call that " + givenWhose(g.at, at, g.late, g.noTime) + ", so it cannot tell whether the value is a copy of what the application was given, cut by one rule in both runs, or a read of the clock. " + correction(g.mock)
+				return "the moment record's full round saw in it stands " + where + ", and the moment it was recorded with stands in " + g.where + ", a recording record's full round gave the application before the call that " + givenWhose(g.at, at, g.late, g.noTime) + ", so it cannot tell whether the value is a copy of what the application was given, cut by one rule in both runs, or a read of the clock. " + correction(g.mock, false)
 			}
 		}
 	}
@@ -645,11 +647,35 @@ type givenWords struct {
 	// late is Raw.late: the reason says the recording is read both ways;
 	// noTime, Raw.noTime: that keploy cannot read when it was recorded.
 	late, noTime bool
+	// same are the words of words, in each reading, that record's full
+	// round gave the application at the fields the recording gave them at
+	// (sameWords): what the rule a copy follows its source reads as a word
+	// both runs gave there (follows.excusedGiven).
+	same [][]string
+	// gave are the words of its answer, in each reading, as record's full
+	// round gave the application them where F served it changed and gave
+	// its view (ServedLive), stamps read as any text; none otherwise (served
+	// as recorded, F gave words and stamped). Where the value that lacks a
+	// word both runs gave holds a word of the payload, or of any other place
+	// the word rule reads, as either run gave it (inAnswer), the word shows
+	// nothing (follows.tookElsewhere).
+	gave [][]string
+	// answered, conn and pos are the recording's (Raw), first and last F's
+	// serves of it: where the rule lets a word of it go, they place it in
+	// the order the recording and F gave the application the value's
+	// candidate sources (follows.followed). set: a recording F gave the
+	// application earlier in the set (GivenEarlier), which no Raw handed to
+	// the call stands for.
+	answered    time.Time
+	conn        string
+	pos         uint64
+	first, last int
+	set         bool
 }
 
 // wordsOf is x's givenWords, every word a copy.
 func (dc *DriftCache) wordsOf(x Raw) givenWords {
-	g := givenWords{mock: strings.Clone(x.mock), at: x.at, late: x.late, noTime: x.noTime}
+	g := givenWords{mock: strings.Clone(x.mock), at: x.at, late: x.late, noTime: x.noTime, answered: x.answered, conn: strings.Clone(x.conn), pos: x.pos, first: x.first, last: x.last}
 	plain := dc.answerWords(x, false)
 	kept := plain
 	if len(x.stamps) > 0 {
@@ -659,7 +685,106 @@ func (dc *DriftCache) wordsOf(x Raw) givenWords {
 		g.words = append(g.words, sortedWords(plain[i], nil))
 		g.stamped = append(g.stamped, sortedWords(kept[i], plain[i]))
 	}
+	// Served unchanged, every word is one both gave: the same lists.
+	if x.AsRecorded() {
+		g.same = g.words
+		return g
+	}
+	for _, same := range dc.sameWords(x, plain) {
+		g.same = append(g.same, sortedWords(same, nil))
+	}
+	if x.Live() {
+		for _, gave := range dc.answerWords(*x.live, true) {
+			g.gave = append(g.gave, sortedWords(gave, nil))
+		}
+	}
 	return g
+}
+
+// sameWords are the words of words (x's answer's, by reading) that record's
+// full round gave the application at every field of x's payload the
+// recording gave them at, and at no other: every one where F served x
+// unchanged (Raw.AsRecorded); of a payload F served changed and gave its
+// view of (ServedLive), those the view holds at exactly the fields (by
+// path) whose recorded text holds them, as liveAt reads a place F gave the
+// word at (fSame); none of a recording F did not serve, or served changed
+// with no view (F may have given another word there, which keploy does not
+// see). Payloads are read as searched: stamps and protocol-phase clock reads
+// blanked, so a word only a stamp holds is no word both gave.
+func (dc *DriftCache) sameWords(x Raw, words []map[string]bool) []map[string]bool {
+	out := make([]map[string]bool, len(words))
+	switch {
+	case x.AsRecorded():
+		return words
+	case !x.Live():
+		return out
+	}
+	rec := dc.searched(x, false)[0]
+	live := dc.searched(*x.live, false)[0]
+	tokensAt := func(fields []rawField, text string, f rawField) ([]map[string]bool, bool) {
+		for _, g := range fields {
+			if g.path == f.path && g.key == f.key {
+				if g.end > len(text) {
+					return nil, false
+				}
+				return dc.rawTokens(text[g.start:g.end]), true
+			}
+		}
+		return nil, false
+	}
+	held := make([]map[string]bool, len(words))
+	bad := make([]map[string]bool, len(words))
+	for i := range words {
+		held[i], bad[i] = map[string]bool{}, map[string]bool{}
+	}
+	// One side's field holding a word: the other's field of its path must
+	// hold it too, or the word is not given there alike.
+	read := func(fields []rawField, text string, other []rawField, otherText string, recorded bool) {
+		for _, f := range fields {
+			own, ok := tokensAt(fields, text, f)
+			if !ok {
+				continue
+			}
+			there, found := tokensAt(other, otherText, f)
+			for i := range words {
+				if i >= len(own) {
+					break
+				}
+				for w := range own[i] {
+					if !words[i][w] {
+						continue
+					}
+					switch {
+					case !found || i >= len(there) || !there[i][w]:
+						bad[i][w] = true
+					case recorded:
+						held[i][w] = true
+					}
+				}
+			}
+		}
+	}
+	read(x.fields, rec, x.live.fields, live, true)
+	read(x.live.fields, live, x.fields, rec, false)
+	for i := range words {
+		out[i] = map[string]bool{}
+		for w := range held[i] {
+			if !bad[i][w] {
+				out[i][w] = true
+			}
+		}
+	}
+	return out
+}
+
+// sameHolds reports whether record's full round gave the application t at
+// the fields the recording gave it at, in reading i (givenWords.same).
+func (g givenWords) sameHolds(i int, t string) bool {
+	if i >= len(g.same) {
+		return false
+	}
+	k := sort.SearchStrings(g.same[i], t)
+	return k < len(g.same[i]) && g.same[i][k] == t
 }
 
 // sortedWords are the words of set that minus does not hold, each a copy,
@@ -689,6 +814,23 @@ func (g givenWords) holds(i int, t string, keep bool) bool {
 		}
 	}
 	return false
+}
+
+// inAnswer says how t stands in g's answer in reading i, "" where it does
+// not: as the recording gave it (its words and the words only its stamps
+// hold), or as record's full round gave it (its view's words, stamps too).
+func (g givenWords) inAnswer(i int, t string) string {
+	for _, l := range []struct {
+		list [][]string
+		as   string
+	}{{g.words, "as the recording gave it"}, {g.stamped, "as the recording gave it"}, {g.gave, "as record's full round gave it"}} {
+		if i < len(l.list) {
+			if k := sort.SearchStrings(l.list[i], t); k < len(l.list[i]) && l.list[i][k] == t {
+				return l.as
+			}
+		}
+	}
+	return ""
 }
 
 // answerWords are the words of x's answer in every declared form, by

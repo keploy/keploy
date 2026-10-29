@@ -3,6 +3,7 @@ package mockdb
 import (
 	"bytes"
 	"fmt"
+	"maps"
 	"sync"
 	"time"
 
@@ -42,8 +43,9 @@ type inPlaceDoc struct {
 	Curl         string              `yaml:"curl,omitempty"`
 	ConnectionID string              `yaml:"connectionId,omitempty"`
 
-	Variables models.MockVariables `yaml:"variables,omitempty"`
-	Origin    *models.Origin       `yaml:"origin,omitempty"`
+	Variables models.MockVariables          `yaml:"variables,omitempty"`
+	Clocks    map[string]models.ClockOffset `yaml:"clocks,omitempty"`
+	Origin    *models.Origin                `yaml:"origin,omitempty"`
 }
 
 // mysqlPacketInPlace is mysql.RequestYaml (and ResponseYaml, the same shape)
@@ -80,6 +82,7 @@ func encodeMockInPlace(mock *models.Mock) (any, bool) {
 		Async:        mock.Spec.Async,
 		Noise:        yaml.NewDocNoise(mock.Noise, mock.Spec.ReqBodyNoise),
 		Variables:    mock.Spec.Variables.Clone(),
+		Clocks:       maps.Clone(mock.Spec.Clocks),
 		Origin:       mock.Origin.Persisted(),
 	}
 	switch mock.Kind {

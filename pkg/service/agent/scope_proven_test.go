@@ -61,6 +61,9 @@ type wireProxy struct {
 	// poolNames are the names the agent last handed the proxy as the pool's
 	// (SetPoolNames), nil until it did.
 	poolNames []string
+	// poolOwners are the owners handed with them (the key of each test-listed
+	// mock's process), nil until they were.
+	poolOwners map[string]string
 	// failPools fails that many pool serves, then serves again.
 	failPools int
 	// staged counts the stagings (SetMocks).
@@ -128,11 +131,12 @@ func (p *wireProxy) ServeExactTest(test string, owned []*models.Mock) error {
 	return nil
 }
 
-func (p *wireProxy) SetPoolNames(names []string) error {
+func (p *wireProxy) SetPoolNames(names []string, owners map[string]string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.poolNames = append([]string{}, names...)
 	sort.Strings(p.poolNames)
+	p.poolOwners = owners
 	return nil
 }
 
@@ -1205,6 +1209,32 @@ func TestTheScopePoolTellsTheProxyWhatIsThePools(t *testing.T) {
 	require.Empty(t, p.poolNames)
 }
 
+// With the pool names, the proxy is told the key of the test process whose
+// tests list each mock (teardownOwners), which bounds each process's
+// teardown: a test's key is its ID's path where that path is a pool slice's
+// key. A test whose ID names its test file, a test of a key with no pool
+// slice (or the keyless one), and a mock tests of two keys list give "":
+// such a mock bounds every process's teardown.
+func TestTheScopePoolTellsTheProxyWhoseTestsListEachMock(t *testing.T) {
+	a, p := wireAgent(t, models.MODE_TEST)
+	storeMocks(a, httpMock("mock-1", "GET", "http://h/a"), httpMock("mock-2", "GET", "http://h/b"))
+	a.scopeTable = map[string][]string{
+		"a::TestA1":             {"m-a1", "m-shared"},
+		"proj::a::TestA2":       {"m-a2"},
+		"b::TestB":              {"m-b", "m-shared"},
+		"a/a_test.go::TestFile": {"m-file"},
+		"c::TestC":              {"m-c"},
+		"-::TestNone":           {"m-none"},
+		"TestBare":              {"m-bare"},
+		"b::TestB/[%3A%3A1]":    {"m-b2"},
+	}
+	require.NoError(t, a.SetScopePool(context.Background(), map[string][]string{"a": {"mock-1"}, "b": {"mock-2"}, models.PoolKeyNone: {}}))
+	require.Equal(t, map[string]string{
+		"m-a1": "a", "m-a2": "a", "m-b": "b", "m-b2": "b",
+		"m-shared": "", "m-file": "", "m-c": "", "m-none": "", "m-bare": "",
+	}, p.poolOwners)
+}
+
 // Without the slices (a CLI that sent none) no data-plane pool mock answers
 // between tests: the whole pool is never armed.
 func TestWithoutPoolSlicesNoPoolMockIsServed(t *testing.T) {
@@ -1432,6 +1462,79 @@ func TestAMissNamesWhatDiffersWithoutValues(t *testing.T) {
 	require.Contains(t, none, "GET /x had no recorded answer.")
 }
 
+// A miss's reason says why a replay refused a field for a reason of its own
+// (models.UnmatchedCall.FieldReasons: a learned read of the application's
+// clock the call does not carry), the field and why, after the fields that
+// differ, wherever the miss was made; never a value: the evidence keeps only
+// a reason whose field is its own shape (an object key the app sent may be
+// a value its why quotes), once.
+func TestAMissSaysWhyAFieldWasRefused(t *testing.T) {
+	since := "body.since was learned as a read of the application's clock, and the value this call carries is not a read of the application's clock made in this call's window: it changed"
+	ttl := "body.expires was learned as clock + 30m, a read of the application's clock plus that offset, and the value this call carries is not a read of the application's clock plus that offset made in this call's window: it changed"
+	miss := sanitizedMiss(models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "GET /v1/usage", Destination: "api.internal",
+		Differs:      []string{"body.since", "body.users.kqzx9w.since"},
+		FieldReasons: []models.FieldReason{{Field: "body.since", Why: since}, {Field: "body.users.kqzx9w.since", Why: "body.users.kqzx9w.since was learned as a read of the application's clock"}, {Field: "body.since", Why: since}}})
+	require.Equal(t, []models.FieldReason{{Field: "body.since", Why: since}}, miss.FieldReasons)
+	began := time.Date(2026, 10, 27, 1, 0, 0, 0, time.UTC)
+	for _, c := range []struct {
+		name    string
+		kind    string
+		at      time.Time
+		beganAt time.Time
+		where   string
+	}{
+		{"in the test", models.MissInTest, began.Add(time.Second), began, " had no recorded answer"},
+		{"before it began", models.MissInTest, began.Add(-time.Second), began, ", made before this one began, had no recorded answer"},
+		{"as it ended", models.MissOutsideTest, began.Add(time.Second), began, ", made as this test ended, had no recorded answer"},
+		{"outside every test", models.MissOutsideTest, time.Time{}, time.Time{}, ", made outside every test before this one began, had no recorded answer"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			m := miss
+			m.Kind, m.At = c.kind, c.at
+			reason := evidenceReason("usage::TestUsage", &models.ScopeEvidence{Misses: []models.UnmatchedCall{m}}, nil, c.beganAt)
+			require.Contains(t, reason, "GET /v1/usage to api.internal"+c.where+" (body.since and body.users.{}.since differ: "+since+")")
+			require.NotContains(t, reason, "kqzx9w")
+		})
+	}
+	// Not sanitized first, the reason still drops a why its field may quote
+	// a value in; with no field named as differing it gives the why alone,
+	// and two are joined.
+	two := evidenceReason("t", &models.ScopeEvidence{Misses: []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "GET /x",
+		FieldReasons: []models.FieldReason{{Field: "body.since", Why: since}, {Field: "body.users.kqzx9w.since", Why: "kqzx9w"}, {Field: "body.expires", Why: ttl}}}}}, nil, time.Time{})
+	require.Contains(t, two, "GET /x had no recorded answer ("+since+"; "+ttl+")")
+	require.NotContains(t, two, "kqzx9w")
+	plain := evidenceReason("t", &models.ScopeEvidence{Misses: []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "GET /x", Differs: []string{"body.q"}}}}, nil, time.Time{})
+	require.Contains(t, plain, "GET /x had no recorded answer (body.q differs).")
+
+	// The run's summary shows a miss's next step as evidence keeps it
+	// (nextStepOf): a next step that names a field the call differs in is
+	// replaced by fixed advice, and the why still reaches the summary, with
+	// no value; the matcher's own advice keeps it too, once.
+	advice := "2 field(s) of the call differ from the recording; if the change is expected, re-record the mock set with 'keploy mock record'"
+	mongo := sanitizedMiss(models.UnmatchedCall{Protocol: "MongoDB", Destination: "127.0.0.1:27017", MatchPhase: "body_mismatch", ClosestMock: "mock-12",
+		NextSteps:    "fields differ: body.since, body.users.kqzx9w.since",
+		FieldDiffs:   []models.MockFieldDiff{{Path: "body.since"}, {Path: "body.users.kqzx9w.since"}},
+		FieldReasons: []models.FieldReason{{Field: "body.since", Why: since}, {Field: "body.users.kqzx9w.since", Why: "kqzx9w"}}})
+	require.Equal(t, advice+" ("+since+")", mongo.NextSteps)
+	own := sanitizedMiss(models.UnmatchedCall{Protocol: "HTTP", NextSteps: "re-record the test",
+		FieldReasons: []models.FieldReason{{Field: "body.since", Why: since}, {Field: "body.expires", Why: ttl}}})
+	require.Equal(t, "re-record the test ("+since+"; "+ttl+")", own.NextSteps)
+	said := sanitizedMiss(models.UnmatchedCall{Protocol: "HTTP", NextSteps: since, FieldReasons: []models.FieldReason{{Field: "body.since", Why: since}}})
+	require.Equal(t, since, said.NextSteps, "a why the advice says already is not said twice")
+	bare := sanitizedMiss(models.UnmatchedCall{Protocol: "HTTP", FieldReasons: []models.FieldReason{{Field: "body.since", Why: since}}})
+	require.Equal(t, since, bare.NextSteps)
+
+	// A Postgres miss's place names (bind.$N, literal.N) are positions, not
+	// values: its why reaches the test's reason, with the place it names.
+	bound := "bind.$1 was learned as clock, a read of the application's clock, and the call sends no value there: it changed"
+	pg := sanitizedMiss(models.UnmatchedCall{Protocol: "Postgres", ActualSummary: "INSERT INTO audit (at) VALUES ($1)", Destination: "db:5432",
+		Differs: []string{"bind.$1"}, FieldReasons: []models.FieldReason{{Field: "bind.$1", Why: bound}}})
+	require.Equal(t, []models.FieldReason{{Field: "bind.$1", Why: bound}}, pg.FieldReasons)
+	require.Equal(t, []string{"bind.$1"}, pg.Differs)
+	pgReason := evidenceReason("t", &models.ScopeEvidence{Misses: []models.UnmatchedCall{pg}}, nil, time.Time{})
+	require.Contains(t, pgReason, " (bind.$1 differs: "+bound+")")
+}
+
 // endOrderProxy notes when the test stops being served and when its outcome
 // is read.
 type endOrderProxy struct {
@@ -1498,8 +1601,15 @@ type clockHook struct {
 
 func (h *clockHook) AppClock(real time.Time) (time.Time, bool) { return real.Add(h.offset), true }
 
+// otherHooks are hooks of another build that report no app clock: they may
+// move it, so keploy cannot tell which clock the app reads.
+type otherHooks struct{ AgentHook }
+
 // Once the mocks are stored, the proxy reads the app's clock as the hooks
-// move it; hooks that move none hand it nothing.
+// move it. Under the proven switch this build's own hooks, which move no
+// clock, hand it the real clock; hooks of another build that report none
+// hand it nothing (keploy cannot tell), and nor does any hook with the switch
+// off, as before it.
 func TestStoredMocksHandTheProxyTheHooksAppClock(t *testing.T) {
 	prev := ActiveHooks
 	t.Cleanup(func() { ActiveHooks = prev })
@@ -1507,15 +1617,98 @@ func TestStoredMocksHandTheProxyTheHooksAppClock(t *testing.T) {
 
 	ActiveHooks = &AgentHook{}
 	a, p := wireAgent(t, models.MODE_TEST)
+	t.Setenv(provenswitch.Env, "")
 	a.finalizeClientMocks(context.Background(), &ClientMockStorage{})
-	require.Nil(t, p.appClock, "hooks with no app clock")
+	require.Nil(t, p.appClock, "the switch off: no app clock, as before")
+
+	t.Setenv(provenswitch.Env, "1")
+	ActiveHooks = &otherHooks{}
+	a, p = wireAgent(t, models.MODE_TEST)
+	a.finalizeClientMocks(context.Background(), &ClientMockStorage{})
+	require.Nil(t, p.appClock, "another build's hooks that report no app clock: keploy cannot tell it")
+
+	ActiveHooks = &AgentHook{}
+	a.finalizeClientMocks(context.Background(), &ClientMockStorage{})
+	require.NotNil(t, p.appClock, "this build's own hooks move no clock: the app reads the real one")
+	got, ok := p.appClock(at)
+	require.True(t, ok)
+	require.Equal(t, at, got)
 
 	ActiveHooks = &clockHook{offset: 21 * time.Second}
 	a.finalizeClientMocks(context.Background(), &ClientMockStorage{})
 	require.NotNil(t, p.appClock)
-	got, ok := p.appClock(at)
+	got, ok = p.appClock(at)
 	require.True(t, ok)
 	require.Equal(t, at.Add(21*time.Second), got)
+}
+
+// runClockHook is clockHook that also tells where the app's clock's run to
+// an instant began (AppClockRunReader).
+type runClockHook struct {
+	clockHook
+	began time.Time
+}
+
+func (h *runClockHook) AppClockRunBegan(time.Time) (time.Time, bool) { return h.began, true }
+
+// runProxy is a wireProxy that takes the run's begin
+// (coreAgent.AppClockRunSetter).
+type runProxy struct {
+	*wireProxy
+	set bool
+	run func(time.Time) (time.Time, bool)
+}
+
+func (p *runProxy) SetAppClockRun(f func(time.Time) (time.Time, bool)) { p.set, p.run = true, f }
+
+// Once the mocks are stored, the proxy is handed where the app's clock's
+// run began, from hooks that report the app's clock and tell it, and under
+// the proven switch from this build's own hooks, whose real clock's run
+// began nowhere keploy reads; hooks that do not tell it, or report no app
+// clock, hand it none, replacing any handed before.
+func TestStoredMocksHandTheProxyWhereTheAppsClocksRunBegan(t *testing.T) {
+	prev := ActiveHooks
+	t.Cleanup(func() { ActiveHooks = prev })
+	t.Setenv(provenswitch.Env, "1")
+	at := time.Date(2026, 10, 28, 9, 0, 0, 0, time.UTC)
+
+	ActiveHooks = &runClockHook{clockHook: clockHook{offset: time.Second}, began: at}
+	a, wp := wireAgent(t, models.MODE_TEST)
+	p := &runProxy{wireProxy: wp}
+	a.Proxy = p
+	a.finalizeClientMocks(context.Background(), &ClientMockStorage{})
+	require.NotNil(t, wp.appClock, "the hooks' clock")
+	require.NotNil(t, p.run, "the hooks' run of the clock")
+	got, ok := p.run(at.Add(time.Minute))
+	require.True(t, ok)
+	require.Equal(t, at, got)
+
+	ActiveHooks = &clockHook{offset: time.Second}
+	a.finalizeClientMocks(context.Background(), &ClientMockStorage{})
+	require.NotNil(t, wp.appClock)
+	require.True(t, p.set)
+	require.Nil(t, p.run, "hooks that tell no run: none, replacing the earlier")
+
+	p.run = (&runClockHook{began: at}).AppClockRunBegan
+	ActiveHooks = &otherHooks{}
+	a.finalizeClientMocks(context.Background(), &ClientMockStorage{})
+	require.Nil(t, p.run, "hooks that report no app clock: no run")
+
+	// This build's own hooks move no clock: the real clock's run began
+	// nowhere keploy reads, so a span starts at its own bound (a set's
+	// first server test's call at the set's begin). The switch off hands
+	// none, as it hands no clock.
+	ActiveHooks = &AgentHook{}
+	a.finalizeClientMocks(context.Background(), &ClientMockStorage{})
+	require.NotNil(t, wp.appClock, "the real clock")
+	require.NotNil(t, p.run, "the real clock's run")
+	got, ok = p.run(at)
+	require.True(t, ok)
+	require.True(t, got.IsZero(), "the real clock's run began at %v; want the zero instant", got)
+
+	t.Setenv(provenswitch.Env, "")
+	a.finalizeClientMocks(context.Background(), &ClientMockStorage{})
+	require.Nil(t, p.run, "the switch off: no run")
 }
 
 // recBeginProxy is a wireProxy that takes a test's recorded begin
@@ -1638,7 +1831,9 @@ func (p *trackerProxy) ContinueTestErrorCapture() {
 // app's clock from the tracker's begin, so a test that stamps its own time
 // (pg-learn-e2e's TestStampAnEvent) is read as a read of the app's clock.
 // A tracker begun before the move gives that call a span the clock did not
-// run as one, so no window, and keploy mock record refuses the test.
+// run as one, so no window, and keploy mock record refuses the test (unless
+// the hooks tell where the clock's run began, AppClockRunReader: then the
+// window starts at the move).
 func TestAClientTestsFirstCallHasAWindowOnTheClockItsBeginMoved(t *testing.T) {
 	prev := ActiveHooks
 	t.Cleanup(func() { ActiveHooks = prev })

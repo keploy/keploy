@@ -88,6 +88,9 @@ func (m *mockService) learnedOnto(consumed []models.MockState, expected map[stri
 		for field := range st.ReqBodyNoise {
 			out = append(out, st.Name+" "+field+" (noise)")
 		}
+		for field, o := range st.Clocks {
+			out = append(out, st.Name+" "+field+" ("+o.String()+")")
+		}
 		for v, mv := range st.Variables {
 			kind := "variable"
 			if mv.Echo {

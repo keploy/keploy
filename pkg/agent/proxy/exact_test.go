@@ -263,6 +263,373 @@ func TestBetweenTestsThePoolSliceAnswers(t *testing.T) {
 	}
 }
 
+// exactMongo is an untagged Mongo recording of lifetime lt.
+func exactMongo(name string, at time.Duration, lt models.Lifetime) *models.Mock {
+	m := exactMock(name, at, lt)
+	m.Kind = models.Mongo
+	return m
+}
+
+// perTestReads checks every per-test read of mm (GetFilteredMocks, by kind,
+// in window, and the round snapshot's) shows want, of kind Mongo, and that
+// another kind's read shows nothing.
+func perTestReads(t *testing.T, mm *MockManager, what string, want ...string) {
+	t.Helper()
+	pt, _ := mm.GetFilteredMocks()
+	equalNames(t, what+": GetFilteredMocks", pt, want...)
+	byKind, _ := mm.GetFilteredMocksByKind(models.Mongo)
+	equalNames(t, what+": GetFilteredMocksByKind", byKind, want...)
+	inWindow, _ := mm.GetFilteredMocksInWindow()
+	equalNames(t, what+": GetFilteredMocksInWindow", inWindow, want...)
+	other, _ := mm.GetFilteredMocksByKind(models.HTTP)
+	equalNames(t, what+": another kind's read", other)
+	snap, ok := mm.RoundSnapshot(integrations.RoundQuery{Kind: models.Mongo})
+	if !ok {
+		t.Fatalf("%s: no round snapshot under exact serving", what)
+	}
+	equalNames(t, what+": the round snapshot's per-test read", snap.PerTest, want...)
+}
+
+// exactWindows seeds mm's recorded windows of the set (the staging call's
+// RecordedWindows): T over [0.5s, 1.5s] and T2 over [1.7s, 2.5s] of exactT0.
+func exactWindows(mm *MockManager) {
+	mm.SeedRecordedWindows([]models.TestWindow{
+		{TestCase: "T", Start: exactT0.Add(500 * time.Millisecond), End: exactT0.Add(1500 * time.Millisecond)},
+		{TestCase: "T2", Start: exactT0.Add(1700 * time.Millisecond), End: exactT0.Add(2500 * time.Millisecond)},
+	})
+}
+
+// A per-test recording the pool slice holds that was sent after the set's
+// last recorded test (a Go mongo-driver's endSessions at client.Disconnect)
+// is filed by the staging in the startup tree alone. Once the first test
+// fired a parser reads only the per-test tier for it (Mongo's index), so
+// every per-test read shows it while no test is open after a test, and the
+// round snapshot shows the same. Before the first test the startup read is
+// the parsers' own and nothing is added, and in a test nothing changes. It
+// stays fail-closed: the slice's per-test recordings sent before the first
+// test, in the gap between two tests, or in the last test's window (answered
+// after it) are never shown in a per-test read
+// (a late call paired with one, made before another test's own recording,
+// would learn what that test's answer gave the app), nor is a teardown
+// recording outside the slice, and once the teardown recording answered
+// through Mongo's delete door, a second call finds nothing through any door.
+func TestAfterTheLastTestTheSetsTeardownRecordingAnswersAPerTestRead(t *testing.T) {
+	boot := exactMongo("boot", 200*time.Millisecond, models.LifetimePerTest)
+	owned := exactMongo("owned", time.Second, models.LifetimePerTest)
+	gap := exactMongo("gap", 1600*time.Millisecond, models.LifetimePerTest)
+	owned2 := exactMongo("owned-2", 2*time.Second, models.LifetimePerTest)
+	// Sent in T2's window and answered after it: in flight as the last
+	// test ended, not sent after it.
+	straddle := exactMongo("straddle", 2400*time.Millisecond, models.LifetimePerTest)
+	straddle.Spec.ResTimestampMock = exactT0.Add(2600 * time.Millisecond)
+	end := exactMongo("end-sessions", 3*time.Second, models.LifetimePerTest)
+	unlisted := exactMongo("unlisted", 4*time.Second, models.LifetimePerTest)
+	// A session-tier recording of the slice is a reusable read's (the
+	// staging files it in the session tree too), never a per-test read's.
+	session := exactMongo("session-tier", 5*time.Second, models.LifetimeSession)
+	mm := stagedManager(t, []*models.Mock{boot, owned, gap, owned2, straddle, end, unlisted}, []*models.Mock{session})
+	exactWindows(mm)
+	slice := []string{"boot", "gap", "straddle", "end-sessions", "session-tier"}
+	mm.ServeExactPool("k", slice)
+	perTestReads(t, mm, "before the first test")
+	mm.ServeExactTest("T", []*models.Mock{owned})
+	perTestReads(t, mm, "in the first test", "owned")
+	if !mm.DeleteFilteredMock(*owned) {
+		t.Fatal("precondition: the test's own recording did not answer it")
+	}
+	mm.ServeExactPool("k", slice)
+	perTestReads(t, mm, "between two tests", "end-sessions")
+	mm.ServeExactTest("T2", []*models.Mock{owned2})
+	perTestReads(t, mm, "in the second test", "owned-2")
+	if !mm.DeleteFilteredMock(*owned2) {
+		t.Fatal("precondition: the second test's own recording did not answer it")
+	}
+	mm.ServeExactPool("k", slice)
+	perTestReads(t, mm, "after the last test", "end-sessions")
+	if sess, _ := mm.GetSessionMocks(); !hasName(sess, "session-tier") {
+		t.Fatalf("after the last test the reusable read lost the slice's session-tier recording: %v", exactNames(sess))
+	}
+	if !mm.DeleteFilteredMock(*end) {
+		t.Fatal("the pool's recording of the call after the last test did not answer it")
+	}
+	perTestReads(t, mm, "after it answered")
+	c := *end
+	if mm.DeleteFilteredMock(*end) || mm.DeleteStartupMock(*end) || mm.UpdateUnFilteredMock(end, &c) || mm.MarkMockAsUsed(*end) {
+		t.Fatal("the call after the last test, made once more, was answered by the recording that already answered it")
+	}
+	if mm.DeleteFilteredMock(*unlisted) {
+		t.Fatal("a call after the last test was answered by a recording the pool slice does not hold")
+	}
+}
+
+// keploy mock replay sends no recorded windows but stages the whole
+// recording and names the pool's recordings (SetPoolNames): there the set's
+// teardown is what was sent after every recording a test owns, consumed or
+// not, so after the tests a per-test read shows the pool's recording made
+// after the last test's, never one made before the first test or between two
+// tests. With neither windows nor pool names, or with pool names but no
+// recording a test owns, nothing tells the teardown, and a per-test read
+// after the test shows none.
+func TestWithNoRecordedWindowsTheTeardownIsAfterEveryRecordingATestOwns(t *testing.T) {
+	boot := exactMongo("boot", 200*time.Millisecond, models.LifetimePerTest)
+	owned := exactMongo("owned", time.Second, models.LifetimePerTest)
+	gap := exactMongo("gap", 1600*time.Millisecond, models.LifetimePerTest)
+	owned2 := exactMongo("owned-2", 2*time.Second, models.LifetimePerTest)
+	// A session-tier recording a test owns, answered later than its request.
+	reused := exactMongo("reused", 2100*time.Millisecond, models.LifetimeSession)
+	reused.Spec.ResTimestampMock = exactT0.Add(2900 * time.Millisecond)
+	early := exactMongo("before-answer", 2800*time.Millisecond, models.LifetimePerTest)
+	end := exactMongo("end-sessions", 3*time.Second, models.LifetimePerTest)
+	// A protocol-phase recording made later is no test's.
+	hs := configMock("handshake", 3500*time.Millisecond)
+	slice := []string{"boot", "gap", "before-answer", "end-sessions"}
+	mm := stagedManager(t, []*models.Mock{boot, owned, gap, owned2, early, end}, []*models.Mock{reused, hs})
+	mm.SetPoolNames(slice)
+	mm.ServeExactPool("k", slice)
+	perTestReads(t, mm, "before the first test")
+	mm.ServeExactTest("T", []*models.Mock{owned})
+	if !mm.DeleteFilteredMock(*owned) {
+		t.Fatal("precondition: the test's own recording did not answer it")
+	}
+	mm.ServeExactPool("k", slice)
+	perTestReads(t, mm, "between two tests", "end-sessions")
+	mm.ServeExactTest("T2", []*models.Mock{owned2, reused})
+	if !mm.DeleteFilteredMock(*owned2) {
+		t.Fatal("precondition: the second test's own recording did not answer it")
+	}
+	mm.ServeExactPool("k", slice)
+	perTestReads(t, mm, "after the last test", "end-sessions")
+
+	bare := stagedManager(t, []*models.Mock{owned, end}, nil)
+	bare.ServeExactPool("k", []string{"end-sessions"})
+	bare.ServeExactTest("T", []*models.Mock{owned})
+	bare.ServeExactPool("k", []string{"end-sessions"})
+	perTestReads(t, bare, "after the test, no windows and no pool names")
+
+	// Pool names, but no test owns a recording: nothing tells where the
+	// tests were, so none is added either.
+	pooled := stagedManager(t, []*models.Mock{boot, end}, nil)
+	pooled.SetPoolNames([]string{"boot", "end-sessions"})
+	pooled.ServeExactPool("k", []string{"boot", "end-sessions"})
+	pooled.ServeExactTest("T", nil)
+	pooled.ServeExactPool("k", []string{"boot", "end-sessions"})
+	perTestReads(t, pooled, "after a test, no recording a test owns")
+}
+
+// keploy mock replay of a suite of several test processes run one after
+// another (go test ./..., one test binary per package): each binary sends
+// its own calls after its own last test (a Go mongo-driver's endSessions at
+// client.Disconnect), recorded in its key's pool slice. Each process's
+// teardown is bounded by its own tests' recordings alone (SetPoolOwners): a
+// recording only another key's tests list is no bound of it. So after a's
+// last test a per-test read shows a's teardown, though b's tests were
+// recorded later, and b's after b's; neither before its first test (b's is
+// shown in b's start-up, once a test fired: a stated limit), nor another
+// key's. It stays fail-closed: with no owners (an agent that sent none), a
+// recording whose owner key is not known (its test's ID names its test file
+// rather than a key, or tests of both keys list it), or a second process of
+// key a after b, a's teardown is bounded by those tests too, and no per-test
+// read shows it after a's last test.
+func TestEachTestProcessesTeardownIsBoundedByItsOwnTests(t *testing.T) {
+	aBoot := exactMongo("a-boot", 100*time.Millisecond, models.LifetimePerTest)
+	a1 := exactMongo("a1", time.Second, models.LifetimePerTest)
+	a2 := exactMongo("a2", 1500*time.Millisecond, models.LifetimePerTest)
+	aEnd := exactMongo("a-end", 2*time.Second, models.LifetimePerTest)
+	bBoot := exactMongo("b-boot", 2500*time.Millisecond, models.LifetimePerTest)
+	b1 := exactMongo("b1", 3*time.Second, models.LifetimePerTest)
+	bEnd := exactMongo("b-end", 3500*time.Millisecond, models.LifetimePerTest)
+	aSlice, bSlice := []string{"a-boot", "a-end"}, []string{"b-boot", "b-end"}
+	all := []*models.Mock{aBoot, a1, a2, aEnd, bBoot, b1, bEnd}
+	owners := map[string]string{"a1": "a", "a2": "a", "b1": "b"}
+	// As the agent hands them (agent.PoolNamesSetter): the owners with the
+	// pool names, through the proxy.
+	setup := func(owners map[string]string) *MockManager {
+		mm := stagedManager(t, all, nil)
+		if err := (&Proxy{mockManager: mm}).SetPoolNames(append(append([]string{}, aSlice...), bSlice...), owners); err != nil {
+			t.Fatalf("SetPoolNames: %v", err)
+		}
+		return mm
+	}
+	runA := func(mm *MockManager) {
+		mm.ServeExactPool("a", aSlice)
+		perTestReads(t, mm, "a's start-up")
+		mm.ServeExactTest("a::TestA1", []*models.Mock{a1})
+		if !mm.DeleteFilteredMock(*a1) {
+			t.Fatal("precondition: a1 did not answer TestA1")
+		}
+		mm.ServeExactPool("a", aSlice)
+		mm.ServeExactTest("a::TestA2", []*models.Mock{a2})
+		if !mm.DeleteFilteredMock(*a2) {
+			t.Fatal("precondition: a2 did not answer TestA2")
+		}
+		mm.ServeExactPool("a", aSlice)
+	}
+
+	// One revision, bounds read by key in turn: each key's own (the cache
+	// is one key's), and outside every claim (PoolKeyNone) every test's.
+	mm := setup(owners)
+	at := aEnd.Spec.ReqTimestampMock
+	for i, tc := range []struct {
+		key  string
+		want bool
+	}{{"a", true}, {"a", true}, {"b", false}, {"a", true}, {models.PoolKeyNone, false}} {
+		if after := mm.teardownAfter(tc.key); after == nil || after(at) != tc.want {
+			t.Errorf("read %d, key %q: a-end is the teardown = %v, want %v", i, tc.key, after != nil && after(at), tc.want)
+		}
+	}
+	if after := mm.teardownAfter("b"); after == nil || !after(bEnd.Spec.ReqTimestampMock) {
+		t.Errorf("key b: b-end is not b's teardown")
+	}
+	// New owners in the same revision move a's bound: b1 now a's too.
+	mm.teardownAfter("a")
+	mm.SetPoolOwners(map[string]string{"a1": "a", "a2": "a", "b1": "a"})
+	if after := mm.teardownAfter("a"); after == nil || after(at) {
+		t.Errorf("FALSE GREEN? new owners naming b1 a's: a-end still a's teardown (a stale bound)")
+	}
+	mm.SetPoolOwners(owners)
+	runA(mm)
+	perTestReads(t, mm, "after a's last test", "a-end")
+	if !mm.DeleteFilteredMock(*aEnd) {
+		t.Fatal("a's call after its last test was not answered by its own recording of it")
+	}
+	perTestReads(t, mm, "after a's teardown answered")
+	mm.ServeExactPool("b", bSlice)
+	perTestReads(t, mm, "b's start-up, a test fired", "b-end")
+	mm.ServeExactTest("b::TestB", []*models.Mock{b1})
+	if !mm.DeleteFilteredMock(*b1) {
+		t.Fatal("precondition: b1 did not answer TestB")
+	}
+	mm.ServeExactPool("b", bSlice)
+	perTestReads(t, mm, "after b's last test", "b-end")
+	if !mm.DeleteFilteredMock(*bEnd) {
+		t.Fatal("b's call after its last test was not answered by its own recording of it")
+	}
+
+	for _, tc := range []struct {
+		name   string
+		owners map[string]string
+	}{
+		{"no owners sent", nil},
+		{"b's recording of no known key", map[string]string{"a1": "a", "a2": "a", "b1": ""}},
+		{"a second process of key a after b", map[string]string{"a1": "a", "a2": "a", "b1": "a"}},
+	} {
+		mm := setup(tc.owners)
+		runA(mm)
+		perTestReads(t, mm, "FALSE GREEN? after a's last test, "+tc.name)
+	}
+}
+
+// keploy mock replay's teardown bound is read once per revision of the
+// trees: the per-test reads of one burst (GetFilteredMocks, its by-kind
+// read, ...) reuse it while the revision and the scope table stand, not
+// every staged recording at every read. An exact serve bumps the revision,
+// so the next burst reads it afresh, to the same bound (exact serving hides
+// what it serves rather than deleting it). A new staging (a recording a test
+// owns, made later) moves it, so the pool's recording made before that one
+// is no teardown any more; a new scope table moves it too.
+func TestTheTeardownBoundIsReadOncePerTreeRevision(t *testing.T) {
+	owned := exactMongo("owned", time.Second, models.LifetimePerTest)
+	end := exactMongo("end-sessions", 3*time.Second, models.LifetimePerTest)
+	mm := stagedManager(t, []*models.Mock{owned, end}, nil)
+	mm.SetPoolNames([]string{"end-sessions"})
+	after := mm.teardownAfter("k")
+	b := mm.exact.teardownLast.Load()
+	if after == nil || b == nil || !after(end.Spec.ReqTimestampMock) || after(owned.Spec.ReqTimestampMock) {
+		t.Fatalf("precondition: end-sessions is not the teardown alone (bound %+v)", b)
+	}
+	if mm.teardownAfter("k"); mm.exact.teardownLast.Load() != b {
+		t.Errorf("a second read in one revision read the trees again")
+	}
+	// Three bursts of three reads, an exact serve after the second: two scans
+	// of the trees, where every read scanned them (nine).
+	slice := []string{"end-sessions"}
+	mm.ServeExactPool("k", slice)
+	mm.ServeExactTest("T", []*models.Mock{owned})
+	if !mm.DeleteFilteredMock(*owned) {
+		t.Fatalf("precondition: owned did not answer its test")
+	}
+	mm.ServeExactPool("k", slice)
+	scans, last := 0, mm.exact.teardownLast.Load()
+	burst := func() {
+		for _, read := range []func(){
+			func() { _, _ = mm.GetFilteredMocks() },
+			func() { _, _ = mm.GetFilteredMocksByKind(models.Mongo) },
+			func() { mm.teardownAfter("k") },
+		} {
+			read()
+			if c := mm.exact.teardownLast.Load(); c != last {
+				scans, last = scans+1, c
+			}
+		}
+	}
+	burst()
+	burst()
+	rev := mm.Revision()
+	if !mm.DeleteFilteredMock(*end) {
+		t.Fatalf("precondition: end-sessions, the teardown, did not answer from the pool")
+	}
+	if mm.Revision() == rev {
+		t.Fatalf("precondition: an exact serve did not move the revision")
+	}
+	burst()
+	if scans != 2 || last == nil || last.last != b.last {
+		t.Errorf("three bursts, an exact serve between: %d scans (bound %+v), want 2 to the same bound %s", scans, last, b.last)
+	}
+	mm.ServeExactPool("k", nil)
+	late := exactMongo("owned-late", 4*time.Second, models.LifetimePerTest)
+	mm.SetMocksWithWindow([]*models.Mock{owned, end, late}, nil, models.BaseTime, time.Now())
+	if after := mm.teardownAfter("k"); after == nil || after(end.Spec.ReqTimestampMock) || !after(late.Spec.ResTimestampMock.Add(time.Millisecond)) {
+		t.Errorf("FALSE GREEN? a new staging, a test's recording made after end-sessions: end-sessions still the teardown (a stale bound)")
+	}
+	mm.SetPoolNames([]string{"end-sessions", "owned-late"})
+	if after := mm.teardownAfter("k"); after == nil || !after(end.Spec.ReqTimestampMock) {
+		t.Errorf("a new scope table naming owned-late the pool's: end-sessions is not the teardown (a stale bound)")
+	}
+}
+
+// The reached worker scope is shown whether a test is open or not, so after
+// a test a per-test read shows its per-test recordings of the set's teardown,
+// as it shows the pool slice's, and never one made before the set's last test
+// ended. In a test a per-test read is unchanged: it shows the test's own
+// alone (the worker scope's per-test recordings there are a stated limit,
+// read through no per-test read).
+func TestAfterTheLastTestAPerTestReadShowsTheReachedWorkerScopesTeardown(t *testing.T) {
+	early := exactMongo("worker-early", 200*time.Millisecond, models.LifetimePerTest)
+	owned := exactMongo("owned", time.Second, models.LifetimePerTest)
+	w := exactMongo("worker", 3*time.Second, models.LifetimePerTest)
+	mm := stagedManager(t, []*models.Mock{early, owned, w}, nil)
+	exactWindows(mm)
+	mm.ServeExactWorker([]string{"worker-early", "worker"})
+	mm.ServeExactPool("k", nil)
+	perTestReads(t, mm, "before the first test")
+	mm.ServeExactTest("T", []*models.Mock{owned})
+	perTestReads(t, mm, "in the test", "owned")
+	mm.ServeExactPool("k", nil)
+	perTestReads(t, mm, "after the test", "worker")
+}
+
+// Under the background rules (a set recorded with proven routing) the call
+// after the last test is answered from the pool's recording too, once.
+func TestUnderTheBackgroundRulesTheCallAfterTheLastTestAnswersOnce(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	owned := exactMongo("owned", time.Second, models.LifetimePerTest)
+	end := exactMongo("end-sessions", 3*time.Second, models.LifetimePerTest)
+	mm := stagedManager(t, []*models.Mock{owned, end}, nil)
+	exactWindows(mm)
+	mm.ServeExactBackground(models.RecordedWithS12Routing, []string{"end-sessions"}, nil)
+	mm.ServeExactPool(models.PoolKeyNone, []string{"end-sessions"})
+	perTestReads(t, mm, "before the first test")
+	mm.ServeExactTest("T", []*models.Mock{owned})
+	if !mm.DeleteFilteredMock(*owned) {
+		t.Fatal("precondition: the test's own recording did not answer it")
+	}
+	mm.ServeExactPool(models.PoolKeyNone, []string{"end-sessions"})
+	perTestReads(t, mm, "after the last test", "end-sessions")
+	if !mm.DeleteFilteredMock(*end) || mm.DeleteFilteredMock(*end) {
+		t.Fatal("under the background rules the call after the last test was not answered exactly once")
+	}
+}
+
 // The pool slice's stateful cursors are its key's own, and a test's are its
 // own: a test does not read the pool's, and a cursor moved in a test leaves
 // the pool's where it was.
