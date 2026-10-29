@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
-	"math"
 	"net"
 	"sync/atomic"
 
@@ -15,6 +14,11 @@ import (
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.uber.org/zap"
 )
+
+// maxEncodedAnswer is the most bytes one encoded answer may hold: 1 GiB,
+// the largest single packet MySQL allows. A result set is many packets, but
+// no recorded one comes near this.
+const maxEncodedAnswer = 1 << 30
 
 // resultSetEncodes counts the result sets EncodeToBinary encoded rather than
 // served from their cache.
@@ -181,11 +185,11 @@ func EncodeToBinary(ctx context.Context, logger *zap.Logger, packet *mysql.Packe
 	// Encode the header for the packet. data may be a result set's cached
 	// payload, shared by every serve of that answer: it is only read here,
 	// into a new slice that holds the header and then the payload.
-	// Bound the payload before sizing the slice, so 4+n cannot overflow.
-	// No recorded MySQL answer comes near 2 GiB.
+	// Bound the payload before sizing the slice, so 4+n cannot overflow,
+	// even where int is 32 bits.
 	n := len(data)
-	if n > math.MaxInt32 {
-		return nil, fmt.Errorf("encoded %T is %d bytes, more than the 2 GiB limit for one answer", packet.Message, n)
+	if n > maxEncodedAnswer {
+		return nil, fmt.Errorf("encoded %T is %d bytes, more than the %d an answer may be", packet.Message, n, maxEncodedAnswer)
 	}
 	header := make([]byte, 4, 4+n)
 	// IMPORTANT:
