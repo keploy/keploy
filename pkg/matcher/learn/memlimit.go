@@ -14,7 +14,12 @@ import (
 // memoryLimit is the agent's memory limit in bytes, 0 where none is known:
 // the least of the Go runtime's (GOMEMLIMIT, or the one the agent's memory
 // guard sets), its cgroup's and each of its parents' (memory.max, or
-// memory.limit_in_bytes under cgroup v1), and the machine's memory.
+// memory.limit_in_bytes under cgroup v1), and the machine's memory. It
+// walks the parents where the staging's readers (stageReaders) do not:
+// those follow GOMAXPROCS, which reads the process's own cpu.max alone. The
+// two fail differently. A parent's memory.max passed OOM-kills the agent,
+// so a set's budget must sit under the lowest one; a parent's CPU quota
+// only throttles, and readers past it share its CPU time, never more.
 func memoryLimit() int64 {
 	return memoryLimitAt(debug.SetMemoryLimit(-1), "/proc/self/cgroup", "/sys/fs/cgroup", "/proc/meminfo")
 }
