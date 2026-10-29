@@ -99,3 +99,28 @@ func TestWhatASetAsideTestDoesNotServe(t *testing.T) {
 		t.Fatalf("a session reset kept %d set-aside recordings", len(got))
 	}
 }
+
+// A set-aside recording whose request holds a read of the application's
+// clock the learn step learned (MockSpec.Clocks) is offered to the tests
+// after it, unlike one that places or binds variables: a clock read's value
+// comes from the clock at the call, not from its own test's other calls, so
+// the parser checks it against the later call's own window, as it does in
+// its own test (the HTTP parser's row:
+// TestASetAsideRecordingsClockReadIsCheckedInTheLaterCallsWindow). Not
+// offering it would leave the later test's call unanswered (a false red);
+// serving it unchecked would be a false green.
+func TestASetAsideRecordingWithALearnedClockReadIsOffered(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	clock := exactMock("clock", 0, models.LifetimeSession)
+	clock.Spec.Clocks = map[string]models.ClockOffset{"body.since": {Res: time.Second}}
+	mm := stagedManager(t, nil, []*models.Mock{clock})
+	mm.ServeExactAside("Q", []*models.Mock{clock})
+	mm.ServeExactTest("T", nil)
+	sa := mm.SetAsideMocks(models.HTTP)
+	if got := asideNames(sa); !slices.Equal(got, []string{"clock<Q"}) {
+		t.Fatalf("set-aside copies %v; want the recording with a learned clock read offered", got)
+	}
+	if len(sa[0].Spec.Clocks) != 1 {
+		t.Fatalf("the offered copy lost its learned clock read: %v", sa[0].Spec.Clocks)
+	}
+}
