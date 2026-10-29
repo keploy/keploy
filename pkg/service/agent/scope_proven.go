@@ -99,6 +99,11 @@ type provenWire struct {
 	// servedSince is when exact serving began serving the open test
 	// (serveTestExactly): a miss made before it is no call of the test's.
 	servedSince time.Time
+	// servedLast is when exact serving served the test that ended last,
+	// from its begin to its end's swap to the pool: a miss the next test's
+	// read takes that was made after it, and before that test began being
+	// served, was made outside every test's window (backgroundMiss).
+	servedLast servedSpan
 	// realSaid names the recorded mocks already said to go to a mock.real
 	// destination (notReal).
 	realSaid map[string]bool
@@ -1043,7 +1048,13 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, w
 		if err := a.servePoolExactly(ctx); err != nil {
 			a.logger.Warn("keploy could not stop serving the test before reading it; its end serves the pool again", zap.String("test", id), zap.Error(err))
 		}
-		ev, readErr = a.testEvidence(ctx, id, outcome != models.ScopeOutcomeSkipped)
+		// The test stopped being served now: a miss the next test's read
+		// takes that was made from here on was made outside every test.
+		a.provenMu.Lock()
+		last := a.proven.servedLast
+		a.proven.servedLast = servedSpan{since: beganAt, until: time.Now()}
+		a.provenMu.Unlock()
+		ev, readErr = a.testEvidence(ctx, id, outcome != models.ScopeOutcomeSkipped, beganAt, last)
 	}
 	if len(incomplete) > 0 {
 		if ev == nil {
@@ -1324,12 +1335,20 @@ func (a *Agent) failClosedWindow(id, why string) {
 // a connection that sent nothing made no call), and the test mocks it did not
 // consume while it was open (exact serving tells which). A failed read is an
 // error. Every miss is still charged to the run, so its next step is said.
-func (a *Agent) testEvidence(ctx context.Context, id string, unmade bool) (*models.ScopeEvidence, error) {
+func (a *Agent) testEvidence(ctx context.Context, id string, unmade bool, beganAt time.Time, last servedSpan) (*models.ScopeEvidence, error) {
 	if a.Proxy == nil {
 		return nil, errors.New("no proxy")
 	}
 	ev := &models.ScopeEvidence{}
 	misses, err := a.Proxy.GetMockErrors(ctx)
+	// A miss made outside every test's window is the application's
+	// background work (founder D1): charged to no test, this one included;
+	// the run's read reports it once, at the set's level (Background).
+	for i := range misses {
+		if misses[i].CountsAgainstTest() && backgroundMiss(misses[i], beganAt, last) {
+			misses[i].Background = true
+		}
+	}
 	// Misses a read returned with its error are this test's all the same.
 	a.charge(misses, id)
 	for _, m := range misses {
@@ -1424,6 +1443,27 @@ func (a *Agent) mocksByName(names []string) (map[string]*models.Mock, error) {
 		return nil, fmt.Errorf("its mappings file (mappings.yaml, or mappings.json) names mocks the loaded recording does not have: %s; if you edited it, correct those names, otherwise record the set again", strings.Join(missing, ", "))
 	}
 	return out, nil
+}
+
+// servedSpan is when exact serving served one test: from since, when its
+// view was installed, until its end swapped the pool in. Zero for none.
+type servedSpan struct{ since, until time.Time }
+
+// backgroundMiss reports whether miss m, taken by the read of a test exact
+// serving began serving at beganAt, was made outside every test's window:
+// before beganAt, and not while last, the test that ended before it, was
+// served (a call that test made, filed late, is still charged where it is
+// read, as before). With no such test, before beganAt is before the set's
+// first test: the application's start-up. A miss of unknown time is never
+// said to be one.
+func backgroundMiss(m models.UnmatchedCall, beganAt time.Time, last servedSpan) bool {
+	if beganAt.IsZero() || m.At.IsZero() || !m.At.Before(beganAt) {
+		return false
+	}
+	if last.since.IsZero() {
+		return true
+	}
+	return !m.At.Before(last.until)
 }
 
 // servedSince is when exact serving began serving the open test; zero
