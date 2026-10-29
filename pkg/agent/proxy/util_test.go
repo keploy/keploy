@@ -12,6 +12,8 @@ import (
 
 	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -474,6 +476,147 @@ func TestGlobalPassThroughEndsItsReadersWithIt(t *testing.T) {
 	waited := make(chan error, 1)
 	go func() { waited <- g.Wait() }()
 	_ = awaitEvent(t, waited, "the pass-through's readers ending with it, their context still open")
+}
+
+// A pass-through that ends because its context did ends quietly: the
+// interrupt that puts both connections' deadlines in the past runs only once
+// the context its relay and readers judge an interrupted read or write by
+// reads as ended, so they take the interruption for that end, the relay
+// returns the context's error, and nothing is logged at Error.
+//
+// Which runs first is otherwise down to the order a context's end reaches
+// what waits on it, which the context package leaves open. The caller's
+// context here (orderedCtx) fixes it: it runs what waits on its end one at a
+// time, in the order each began to wait, and before the next lets what the
+// last one set off settle: here, until the pass-through has returned. An
+// interrupt that waits on the caller's context, ahead of the relay's own
+// context made from it (as one did), then fires while the relay's context is
+// still open, on every run: the readers' interrupted reads are logged as
+// failures, and the relay returns their i/o timeout.
+func TestGlobalPassThroughInterruptsOnlyOnceItsContextHasEnded(t *testing.T) {
+	// The far ends stay open (until t ends) and send nothing: the relay
+	// waits on its reads.
+	client, _ := loopbackPair(t)
+	dest, _ := loopbackPair(t)
+	reading := make(chan struct{}, 2)
+	core, logs := observer.New(zap.ErrorLevel)
+	p := &Proxy{logger: zap.New(core)}
+	g := new(errgroup.Group)
+	ctx := newOrderedCtx(context.WithValue(context.WithValue(context.WithValue(context.Background(),
+		models.ErrGroupKey, g),
+		models.ClientConnectionIDKey, "1"),
+		models.DestConnectionIDKey, "2"))
+	var err error
+	returned := make(chan struct{})
+	go func() {
+		defer close(returned)
+		err = p.globalPassThrough(ctx, &readEnteredConn{Conn: client, entered: reading}, &readEnteredConn{Conn: dest, entered: reading})
+	}()
+	// Both readers waiting on a read: the relay made its waits on ctx, which
+	// come before it starts them.
+	awaitEvent(t, reading, "the client's reader waiting on a read")
+	awaitEvent(t, reading, "the destination's reader waiting on a read")
+	ctx.end(func() { awaitEvent(t, returned, "the pass-through returning") })
+	awaitEvent(t, returned, "the pass-through returning")
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("globalPassThrough = %v, want the context's end (%v)", err, context.Canceled)
+	}
+	_ = client.Close()
+	_ = dest.Close()
+	waited := make(chan error, 1)
+	go func() { waited <- g.Wait() }()
+	_ = awaitEvent(t, waited, "the pass-through's readers ending")
+	for _, e := range logs.All() {
+		t.Errorf("the proxy logged %s %q (%v), want nothing at Error on the context's end", e.Level, e.Message, e.ContextMap())
+	}
+}
+
+// orderedCtx is a context whose end runs what waits on it (a context made
+// from it, a context.AfterFunc on it: the context package hands a parent with
+// an AfterFunc method each such wait) one at a time, in the order each began
+// to wait, with what end is given run after each. Its values are its
+// Context's, which never ends.
+type orderedCtx struct {
+	context.Context
+	done    chan struct{}
+	mu      sync.Mutex
+	err     error
+	waiting []*orderedWait
+}
+
+// orderedWait is one wait on an orderedCtx: f, unless stopped first.
+type orderedWait struct {
+	f             func()
+	stopped, took bool
+}
+
+func newOrderedCtx(values context.Context) *orderedCtx {
+	return &orderedCtx{Context: values, done: make(chan struct{})}
+}
+
+func (c *orderedCtx) Done() <-chan struct{} { return c.done }
+
+func (c *orderedCtx) Err() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.err
+}
+
+// AfterFunc has f run at c's end, in its turn; on a c already ended, at once
+// in its own goroutine, as context.AfterFunc does.
+func (c *orderedCtx) AfterFunc(f func()) (stop func() bool) {
+	w := &orderedWait{f: f}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.err != nil {
+		w.took = true
+		go f()
+	} else {
+		c.waiting = append(c.waiting, w)
+	}
+	return func() bool {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if w.took || w.stopped {
+			return false
+		}
+		w.stopped = true
+		return true
+	}
+}
+
+// end ends c, then runs each wait not stopped by then, in the order they
+// began, calling settle after each.
+func (c *orderedCtx) end(settle func()) {
+	c.mu.Lock()
+	c.err = context.Canceled
+	close(c.done)
+	waiting := c.waiting
+	c.mu.Unlock()
+	for _, w := range waiting {
+		c.mu.Lock()
+		run := !w.stopped
+		w.took = true
+		c.mu.Unlock()
+		if run {
+			w.f()
+			settle()
+		}
+	}
+}
+
+// readEnteredConn says on entered each time a Read begins.
+type readEnteredConn struct {
+	net.Conn
+	entered chan<- struct{}
+}
+
+func (c *readEnteredConn) Read(b []byte) (int, error) {
+	select {
+	case c.entered <- struct{}{}:
+	default:
+	}
+	return c.Conn.Read(b)
 }
 
 // endlessConn is a client that always has more to send: each Read fills its
