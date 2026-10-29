@@ -669,6 +669,8 @@ func (m *MockManager) RoundSnapshot(q integrations.RoundQuery) (integrations.Rou
 			} else {
 				owners[mk.Name] = integrations.OwnerShared
 			}
+		case v.asideOf(i) != "":
+			owners[mk.Name] = integrations.OwnerSetAside
 		case v.inFlight[mk.Name]:
 			owners[mk.Name] = integrations.OwnerInFlight
 		default:

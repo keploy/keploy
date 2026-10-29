@@ -68,7 +68,7 @@ func (m *MockManager) ExactTestUnusedBackground() (test string, unused []string,
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	for i, done := range v.consumed {
-		if done || v.isCand(i) {
+		if done || v.notOwn(i) {
 			continue
 		}
 		if _, bg := unrequired[v.owned[i].Name]; bg {
@@ -95,7 +95,7 @@ func (m *MockManager) AnsweredBackground() []*models.Mock {
 	defer v.mu.Unlock()
 	var out []*models.Mock
 	for _, i := range v.order {
-		if v.isCand(i) {
+		if v.notOwn(i) {
 			continue
 		}
 		if _, bg := unrequired[v.owned[i].Name]; bg {
