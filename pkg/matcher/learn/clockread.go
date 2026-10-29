@@ -1022,6 +1022,12 @@ func checkReadIn(o models.ClockOffset, live Leaf, s Span, learned, read, hint st
 				in = ", read here in UTC"
 			}
 		}
+		// An hour's cut the application's zone shows twice as its clocks go
+		// back fails closed near that hour (models.ClockOffset.FallBack),
+		// read in that zone as well as in the ones the value was read in.
+		if why := fallBackWhy(o, ats, res, s); why != "" {
+			return false, o.CheckedAt(res), learned + why + hint
+		}
 		if holdsAny(o, ats, res, s.From, s.To) {
 			return true, o.CheckedAt(res), ""
 		}
@@ -1061,6 +1067,43 @@ func checkReadIn(o models.ClockOffset, live Leaf, s Span, learned, read, hint st
 		checked = max(checked, c)
 	}
 	return false, checked, learned + ", and the value this call carries is not " + read + made + ": it changed" + cut + hint
+}
+
+// fallBackWhy is why a replay refuses a value of o, a read plus an offset
+// cut to an hour, in s, the call's span, read after "<o> was learned as
+// ...": the call's window, or the values a check at the hour admits there,
+// meets an hour the application's zone (s.Zone) or a zone the value is read
+// in (ats) shows twice as its clocks go back (models.ClockOffset.FallBack),
+// where an application that cuts to that hour's first showing writes a
+// value up to two hours early, so a time to live made two hours longer
+// would pass. "" where none does.
+func fallBackWhy(o models.ClockOffset, ats []time.Time, res time.Duration, s Span) string {
+	zones := []*time.Location{s.Zone}
+	for _, at := range ats {
+		zones = append(zones, at.Location())
+	}
+	for _, loc := range zones {
+		if turn, back, met := o.FallBack(res, s.From, s.To, loc); met {
+			return ", which a replay checks at the hour it is cut to, but this call's window, or the values that check admits, meets " + fallBackNamed(turn, back, loc) + ": an application that cuts its clock to that hour's first showing (JavaScript; java.time's LocalDateTime then atZone) writes a value up to " + models.ShortDuration(back+time.Hour) + " before the instant it cuts, so " + offsetNamed(o) + " made " + models.ShortDuration(back+time.Hour) + " longer would pass there, and keploy refuses the value rather than pass it unchecked. Replay the test outside that hour; if the field is a time the application reads from its own clock with no rule, declare it noise in keploy.yml"
+		}
+	}
+	return ""
+}
+
+// fallBackNamed names the wall time loc shows twice as its clocks go back by
+// back at turn: "the hour Europe/Berlin shows twice as its clocks go back
+// from 03:00 CEST to 02:00 CET on 2026-10-25".
+func fallBackNamed(turn time.Time, back time.Duration, loc *time.Location) string {
+	name := loc.String()
+	if name == "" || name == "Local" {
+		name = "the application's zone"
+	}
+	abbr, off := turn.Add(-time.Nanosecond).In(loc).Zone()
+	what := "the hour"
+	if back != time.Hour {
+		what = "the " + models.ShortDuration(back)
+	}
+	return what + " " + name + " shows twice as its clocks go back from " + turn.In(time.FixedZone(abbr, off)).Format("15:04 MST") + " to " + turn.In(loc).Format("15:04 MST on 2006-01-02")
 }
 
 // appZoneHint is what a refusal of a value at a place learned with the

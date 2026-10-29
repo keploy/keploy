@@ -659,19 +659,13 @@ func (o ClockOffset) CheckedAt(res time.Duration) time.Duration {
 // read plus the offset cut down to the cut; where the application adds time
 // after its cut, only at some), one changed by two holds only where the
 // replay's read falls within the window and o's width of the cut's turn,
-// and one changed by three or more never does, with two exceptions (stated
-// limits). Of a day's cut: a day a daylight-saving turn shortens to 23
-// hours is still one day (holdsRead), so three days can hold where the
-// window and o's width are within an hour of the day, a call some 23 hours
-// long. Of an hour's: holdsRead reads the hour's start in the value's zone
-// from the clock's instant (ReadCut of the window's start plus Min), so in
-// the hour the clocks go back it reads the showing that instant is in, but
-// an application that cuts to the hour's first showing (JavaScript;
-// java.time's LocalDateTime then atZone) writes a value up to two hours
-// before the instant it cuts (three in Troll's two-hour turn): there a time
-// to live made two hours longer can hold at any read, and three near the
-// hour's turn. Such a value lies within one cut of the call's span plus the
-// offset all the same. A Plain o is always checkable.
+// and one changed by three or more never does, but for a day a
+// daylight-saving turn shortens to 23 hours, still one day (holdsRead):
+// there three days can hold where the window and o's width are within an
+// hour of the day, a call some 23 hours long (a stated limit). Of an hour's
+// cut, where the zone the value is read in shows an hour twice as its
+// clocks go back, Holds holds nothing near that hour (FallBack). A Plain o
+// is always checkable.
 func (o ClockOffset) Checkable(res time.Duration, from, to time.Time) bool {
 	if o.Plain() {
 		return true
@@ -829,7 +823,10 @@ func (o ClockOffset) Within(spans ...time.Duration) bool {
 // admits as a date's admits yesterday: a time to live changed by less than
 // two cuts can hold, by where the read falls in its cut, one changed by two
 // only near the cut's turn, and one changed by three or more never, but
-// for the 23-hour day and the hour the clocks go back (Checkable). Nor
+// for the 23-hour day (Checkable). Nor, of an hour's cut, where the call's
+// window or that span meets the wall time at's zone shows twice as its
+// clocks go back (FallBack): an application that cuts to the hour's first
+// showing writes a value up to two hours early there. Nor
 // for an o whose Unit is a second or finer: an application that cuts its
 // value to that unit makes a time to live changed by one look the same. Nor
 // for an o whose Zone a replay reads no value in (ZoneKnown: ZoneApart, or one
@@ -857,8 +854,68 @@ func (o ClockOffset) Holds(at time.Time, res time.Duration, from, to time.Time) 
 	if !o.Checkable(res, from, to) {
 		return false
 	}
+	if _, _, met := o.FallBack(res, from, to, at.Location()); met {
+		return false
+	}
 	c := o.CheckedAt(res)
 	return ClockOffset{Res: c}.holdsRead(at, c, from.Add(o.Min), to.Add(o.Max))
+}
+
+// FallBack is the turn at which loc's clocks go back, and by how much, that
+// a check of o, an offset cut to an hour (CoarseChecked at res, its Res
+// below a day), in a call's window from from to to meets: one whose wall
+// time shown twice (from the turn less what the clocks go back by up to the
+// turn plus it: both showings) meets the window itself or the values Holds
+// admits there (from the start of the hour before the one that holds
+// from+o.Min, up to an hour after to+o.Max). An application that cuts its
+// clock to an hour's first showing (JavaScript's setMinutes(0, 0, 0);
+// java.time's LocalDateTime then atZone) writes, of an instant in its
+// second showing, the first's hour, up to two hours before the instant it
+// cuts (three in Troll's two-hour turn): of a read in the window where it
+// cuts and then adds its time to live, of the value itself where it adds
+// and then cuts. Checked within one hour of the call's span plus the
+// offset, a time to live made two hours longer would pass there at any
+// read, so Holds holds nothing where a turn is met, and the learn step
+// neither learns such an offset from a run that meets one nor passes a
+// replay's value there (learn's clockOffset, checkReadIn), naming the turn:
+// a false red some hours a year, never a false pass (2026-10-29). met is
+// false where none is, for any other o, a nil loc and a window with no
+// start or that ends before it starts.
+func (o ClockOffset) FallBack(res time.Duration, from, to time.Time, loc *time.Location) (turn time.Time, back time.Duration, met bool) {
+	if loc == nil || !o.CoarseChecked(res) || o.Res >= 24*time.Hour || from.IsZero() || to.Before(from) {
+		return time.Time{}, 0, false
+	}
+	c := o.Res
+	lo, hi := CutBefore(ReadCut(from.Add(o.Min), c, loc), c, loc), CutAfter(to.Add(o.Max), c, loc)
+	for _, s := range [][2]time.Time{{from, to}, {lo, hi}} {
+		if turn, back, met := fallBackIn(s[0], s[1], loc); met {
+			return turn, back, true
+		}
+	}
+	return time.Time{}, 0, false
+}
+
+// maxFallBack is more than any zone's clocks go back by at one turn
+// (Troll's two hours are the most).
+const maxFallBack = 3 * time.Hour
+
+// fallBackIn is the first turn at which loc's clocks go back whose wall
+// time shown twice (from the turn less what they go back by up to the turn
+// plus it) meets the span from lo to hi, both included, and what they go
+// back by there.
+func fallBackIn(lo, hi time.Time, loc *time.Location) (time.Time, time.Duration, bool) {
+	for t := lo.Add(-maxFallBack); ; {
+		_, end := t.In(loc).ZoneBounds()
+		if end.IsZero() || !end.After(t) || end.After(hi.Add(maxFallBack)) {
+			return time.Time{}, 0, false
+		}
+		_, before := end.Add(-time.Nanosecond).In(loc).Zone()
+		_, after := end.In(loc).Zone()
+		if back := time.Duration(before-after) * time.Second; back > 0 && !end.Add(-back).After(hi) && end.Add(back).After(lo) {
+			return end, back, true
+		}
+		t = end
+	}
 }
 
 // Plain reports whether o is a zero offset: a plain read of the

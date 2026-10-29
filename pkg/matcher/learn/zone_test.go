@@ -1091,7 +1091,7 @@ func TestAnOffsetCutToAnHourThatReadsInHoursIsLearnedAndCheckedAtTheHour(t *test
 	call := time.Date(2026, 10, 26, 10, 29, 59, 50e6, time.UTC)
 	ln := learn(call, 2*hour, 100*ms)
 	o := ln.Offset
-	if ln.Kind != KindClockOffset || o == nil || o.Res != hour || o.AppZone != "+05:30" || o.Min > 2*hour || o.Max <= 2*hour || !strings.HasPrefix(ln.Why, p+" = clock + 2h (") || !strings.Contains(ln.Why, "cut to an hour. A replay checks the offset at the hour, read in the zone the value shows a whole hour in, else the application's,") || !strings.Contains(ln.Why, "a time to live changed by less than two hours can pass there, by where the replay's read falls in its hour,") || !strings.Contains(ln.Why, "falls in its hour, outside the hour the clocks go back (where an application that cuts to that hour's first showing writes a value up to two hours before the instant it cuts, so a time to live two or three hours longer can pass), one changed by two hours fails unless") || !strings.Contains(ln.Why, "within its call's window and the offset's range ("+models.ShortDuration(o.Max-o.Min)+") of the hour's turn, and one changed by three hours or more fails; if the field") {
+	if ln.Kind != KindClockOffset || o == nil || o.Res != hour || o.AppZone != "+05:30" || o.Min > 2*hour || o.Max <= 2*hour || !strings.HasPrefix(ln.Why, p+" = clock + 2h (") || !strings.Contains(ln.Why, "cut to an hour. A replay checks the offset at the hour, read in the zone the value shows a whole hour in, else the application's,") || !strings.Contains(ln.Why, "a time to live changed by less than two hours can pass there, by where the replay's read falls in its hour,") || !strings.Contains(ln.Why, "falls in its hour, one changed by two hours fails unless") || !strings.Contains(ln.Why, "within its call's window and the offset's range ("+models.ShortDuration(o.Max-o.Min)+") of the hour's turn, and one changed by three hours or more fails, and near an hour the application's zone shows twice as its clocks go back a replay refuses the value (an application that cuts to that hour's first showing writes a value up to two hours early there); if the field") {
 		t.Fatalf("FALSE RED: two hours on, cut to the IST hour, learned in IST: %s %+v (%s); want clock + 2h at the hour, naming +05:30, not refused for the three hours no unit holds", ln.Kind, o, ln.Why)
 	}
 	if w := learn(call, 2*hour, 61*time.Minute); w.Kind != KindUnaccounted || w.Offset != nil || !strings.Contains(w.Why, "the range is not narrower than the hour the value is cut to, so a replay checking it at the hour could not tell a time to live changed by hours from it") {
@@ -1312,6 +1312,112 @@ func TestAClientTestsTextOffsetCutToAnHourIsLearnedInTheApplicationsZone(t *test
 		}
 		if ok, _ := CheckClockRead(p, *o, text(row.f, v.Add(-3*time.Hour)), inProcess, true); ok {
 			t.Errorf("FALSE GREEN: a client test's text %s, learned with no zone named, a replay that reads IST from the process, three hours stale: passed", row.name)
+		}
+	}
+}
+
+// An application in Europe/Berlin that cuts its clock to the hour's first
+// showing (JavaScript's setMinutes(0, 0, 0)) and then adds two hours writes,
+// in the hour its clocks go back (2026-10-25, 03:00 CEST to 02:00 CET), a
+// value an hour earlier than at any other read. The learn step refuses the
+// offset learned near that hour, naming the turn, and learns it at every
+// other hour of the day. A replay of the offset learned elsewhere, the value
+// read in UTC (where it shows its hour whole), in the process's zone and in
+// the stored one, refuses a value near that hour, naming the turn (without
+// the refusal one two hours longer passes at every read in the second
+// showing); away from it the right value passes, one two hours off passes
+// only near the hour's turn, and one three hours off never does.
+func TestAnOffsetCutToAnHourIsRefusedNearTheHourTheClocksGoBack(t *testing.T) {
+	ber, err := time.LoadLocation("Europe/Berlin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const p = "body.expiresAt"
+	hour, ms := time.Hour, time.Millisecond
+	turn := time.Date(2026, 10, 25, 1, 0, 0, 0, time.UTC)
+	first := func(x time.Time) time.Time {
+		l := x.In(ber)
+		c := time.Date(l.Year(), l.Month(), l.Day(), l.Hour(), 0, 0, 0, ber)
+		if e := c.Add(-hour).In(ber); e.Hour() == c.In(ber).Hour() && e.Day() == c.In(ber).Day() {
+			c = c.Add(-hour)
+		}
+		return c.UTC()
+	}
+	learn := func(call time.Time) Learned {
+		t.Helper()
+		dc := clockedDrifts()
+		dc.zone = ber
+		fcall := call.Add(FullRoundLead)
+		w := (&Window{Rec: Span{From: call.Add(-100 * ms), To: call}, F: Span{From: fcall.Add(-100 * ms), To: fcall}}).ComparesOffsets()
+		shape := func(at time.Time) Shape { return Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, at, ms)}} }
+		return ClassifyIn(dc, []string{p}, shape(first(fcall).Add(2*hour)), shape(first(call).Add(2*hour)), call, nil, nil, nil, w)[0]
+	}
+	const named = "meets the hour Europe/Berlin shows twice as its clocks go back from 03:00 CEST to 02:00 CET on 2026-10-25: an application that cuts its clock to that hour's first showing"
+	var o *models.ClockOffset
+	namedTurn := 0
+	// At hh:59:59.05 the full round, a lead later, reads the next hour.
+	for call := turn.Add(-12*hour - 950*ms); call.Before(turn.Add(11 * hour)); call = call.Add(hour) {
+		ln := learn(call)
+		if near := !call.Before(turn.Add(-4*hour-time.Second)) && call.Before(turn.Add(hour)); near {
+			// Where the first showing's cut gives the two runs no one
+			// offset (in the hour shown twice), none is learned at all;
+			// elsewhere the refusal names the turn.
+			if ln.Kind != KindUnaccounted || ln.Offset != nil {
+				t.Errorf("FALSE GREEN: clock + 2h at the Berlin hour, learned at %s, %s from the turn: %s %+v (%s); want refused", call, call.Sub(turn), ln.Kind, ln.Offset, ln.Why)
+			}
+			if strings.Contains(ln.Why, named) && strings.Contains(ln.Why, "keploy refuses it rather than learn it. Record the test again outside that hour") {
+				namedTurn++
+			}
+			continue
+		}
+		if ln.Kind != KindClockOffset || ln.Offset == nil || ln.Offset.Res != hour || ln.Offset.AppZone != "Europe/Berlin" {
+			t.Errorf("FALSE RED: clock + 2h at the Berlin hour, learned at %s, %s from the turn: %s %+v (%s); want learned at the hour, naming Europe/Berlin", call, call.Sub(turn), ln.Kind, ln.Offset, ln.Why)
+		} else if o == nil && call.After(turn) {
+			o = ln.Offset
+		}
+	}
+	if o == nil || namedTurn < 4 {
+		t.Fatalf("learned after the turn: %+v; refusals naming the turn: %d, want 4 or more", o, namedTurn)
+	}
+	spans := []struct {
+		name string
+		s    func(from, to time.Time) Span
+	}{
+		{"its process's zone, Berlin", func(from, to time.Time) Span { return Span{From: from, To: to, Zone: ber, Own: true} }},
+		{"the stored Berlin (the process's zone unread, the agent's UTC)", func(from, to time.Time) Span { return Span{From: from, To: to, Zone: time.UTC} }},
+	}
+	for _, sp := range spans {
+		type key struct {
+			k      time.Duration
+			bucket int
+		}
+		far := map[key]int{}
+		for from := turn.Add(-8 * hour); from.Before(turn.Add(5 * hour)); from = from.Add(2 * time.Minute) {
+			s := sp.s(from, from.Add(time.Second))
+			check := func(ttl time.Duration) (bool, string) {
+				return CheckClockRead(p, *o, InstantLeaf(p, p, first(from).Add(ttl), ms), s, true)
+			}
+			ok, why := check(2 * hour)
+			near := !from.Before(turn.Add(-4*hour)) && from.Before(turn.Add(2*hour))
+			switch {
+			case !ok && (!near || !strings.Contains(why, named)):
+				t.Errorf("FALSE RED: clock + 2h at the Berlin hour, read in %s at %s, %s from the turn: refused (%s); want passed, or near the turn refused naming it", sp.name, from, from.Sub(turn), why)
+			case ok && !from.Before(turn.Add(-hour)) && from.Before(turn.Add(hour)):
+				t.Errorf("FALSE GREEN: clock + 2h at the Berlin hour, read in %s at %s, in the hour shown twice: passed; want refused, naming the turn", sp.name, from)
+			}
+			for _, k := range []time.Duration{2 * hour, -2 * hour, 3 * hour, -3 * hour} {
+				if ok, _ := check(2*hour + k); ok {
+					far[key{k, int(from.Sub(turn.Add(-8*hour)) / hour)}]++
+					if k == 3*hour || k == -3*hour {
+						t.Errorf("FALSE GREEN: clock + 2h at the Berlin hour, read in %s at %s: a time to live %s off passed", sp.name, from, k)
+					}
+				}
+			}
+		}
+		for kb, n := range far {
+			if n > 2 {
+				t.Errorf("FALSE GREEN: clock + 2h at the Berlin hour, read in %s: a time to live %s off passed at %d of the 30 reads in the hour %d hours after %s; want only near the hour's turn", sp.name, kb.k, n, kb.bucket, turn.Add(-8*hour))
+			}
 		}
 	}
 }

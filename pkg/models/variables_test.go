@@ -1233,3 +1233,101 @@ func zoneOr(t *testing.T, name string) *time.Location {
 	}
 	return loc
 }
+
+// firstShowingCut is an hour cut of x the way JavaScript's setMinutes(0, 0,
+// 0) and java.time's LocalDateTime truncatedTo then atZone make it in loc:
+// the start of x's wall hour there at its first showing, in the hour the
+// clocks go back an hour (or two) before the instant keploy reads the cut
+// at (ReadCut).
+func firstShowingCut(x time.Time, loc *time.Location) time.Time {
+	l := x.In(loc)
+	c := time.Date(l.Year(), l.Month(), l.Day(), l.Hour(), 0, 0, 0, loc)
+	for e := c.Add(-time.Hour); ; e = e.Add(-time.Hour) {
+		if el := e.In(loc); el.Hour() != c.In(loc).Hour() || el.Day() != c.In(loc).Day() {
+			break
+		}
+		c = e
+	}
+	return c
+}
+
+// An offset cut to an hour (clock + 2h) in Europe/Berlin around the hour its
+// clocks go back (2026-10-25 01:00Z, 03:00 CEST to 02:00 CET), the value
+// read in Berlin, of an application that cuts to the hour's first showing,
+// before adding the two hours or after. Without FallBack a time to live two
+// hours longer holds at every read in the second showing (cut, then add)
+// and in the hour four hours before the turn (add, then cut). With it,
+// Holds holds nothing where the call's window or the values it admits meet
+// the hour shown twice, which FallBack names (the turn, an hour back), a
+// time to live two hours off holds only near the hour's turn, three never,
+// and the right value holds at every read more than four hours before the
+// turn or two after it: the rest of the day is checked as before.
+// Troll's turn goes back two hours, and UTC and an offset cut to a day meet
+// none.
+func TestAnHourCutOffsetHoldsNothingNearTheHourTheClocksGoBack(t *testing.T) {
+	ber, err := time.LoadLocation("Europe/Berlin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ms, hour := time.Millisecond, time.Hour
+	turn := time.Date(2026, 10, 25, 1, 0, 0, 0, time.UTC)
+	o := ClockOffset{Min: 2*hour - 62*time.Second, Max: 2*hour + 30*time.Second, Res: hour}
+	for _, shape := range []string{"cut, then add", "add, then cut"} {
+		val := func(read time.Time, ttl time.Duration) time.Time {
+			if shape == "cut, then add" {
+				return firstShowingCut(read, ber).Add(ttl).In(ber)
+			}
+			return firstShowingCut(read.Add(ttl), ber).In(ber)
+		}
+		far := map[int]int{}
+		for from := turn.Add(-8 * hour); from.Before(turn.Add(5 * hour)); from = from.Add(time.Minute) {
+			to := from.Add(time.Second)
+			bucket := int(from.Sub(turn) / hour)
+			if from.Before(turn) {
+				bucket--
+			}
+			got, back, met := o.FallBack(ms, from, to, ber)
+			if met && (!got.Equal(turn) || back != hour) {
+				t.Fatalf("%s, read at %s: FallBack names %s back %s; want the turn %s, an hour back", shape, from, got, back, turn)
+			}
+			near := !from.Before(turn.Add(-4*hour)) && from.Before(turn.Add(2*hour))
+			if met && !near {
+				t.Errorf("FALSE RED: %s, read at %s, %s from the turn: FallBack met; want checked as on any other hour", shape, from, from.Sub(turn))
+			}
+			if from.Before(turn.Add(-3*hour)) == false && from.Before(turn.Add(hour)) && !met {
+				t.Errorf("FALSE GREEN: %s, read at %s, %s from the turn: FallBack not met", shape, from, from.Sub(turn))
+			}
+			if right := o.Holds(val(from, 2*hour), ms, from, to); right == met {
+				t.Errorf("%s, read at %s (FallBack met %v): the right value holds %v", shape, from, met, right)
+			}
+			for _, k := range []time.Duration{2 * hour, -2 * hour} {
+				if o.Holds(val(from, 2*hour+k), ms, from, to) {
+					far[bucket]++
+				}
+			}
+			for _, k := range []time.Duration{3 * hour, -3 * hour} {
+				if o.Holds(val(from, 2*hour+k), ms, from, to) {
+					t.Errorf("FALSE GREEN: %s, read at %s: a time to live %s off holds", shape, from, k)
+				}
+			}
+		}
+		for b, n := range far {
+			if n > 4 {
+				t.Errorf("FALSE GREEN: %s, reads in the hour %d from the turn: a time to live two hours longer or shorter holds %d times in 60 reads; want only near the hour's turn", shape, b, n)
+			}
+		}
+	}
+	if troll, err := time.LoadLocation("Antarctica/Troll"); err == nil {
+		at := time.Date(2026, 10, 25, 1, 30, 0, 0, time.UTC)
+		if got, back, met := o.FallBack(ms, at, at.Add(time.Second), troll); !met || !got.Equal(turn) || back != 2*hour {
+			t.Errorf("Antarctica/Troll, read at %s: FallBack %s back %s met %v; want the turn %s, two hours back", at, got, back, met, turn)
+		}
+	}
+	at := turn.Add(30 * time.Minute)
+	if _, _, met := o.FallBack(ms, at, at.Add(time.Second), time.UTC); met {
+		t.Errorf("UTC: FallBack met; UTC's clocks never go back")
+	}
+	if _, _, met := (ClockOffset{Min: 30*24*hour - 62*time.Second, Max: 30*24*hour + 30*time.Second, Res: 24 * hour}).FallBack(ms, at, at.Add(time.Second), ber); met {
+		t.Errorf("an offset cut to a day, read in Berlin's second showing: FallBack met; a day's start shows once")
+	}
+}

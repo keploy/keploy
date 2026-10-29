@@ -944,11 +944,14 @@ func offsetBounds(v time.Time, res time.Duration, s Span) (lo, hi time.Duration,
 // second is learned, and a replay checks it at the second.
 func (dc *DriftCache) clockOffset(ln Learned, off models.ClockOffset, enc time.Duration, w *Window, unread string, rec moment, resp []Leaf) Learned {
 	path := fieldName(ln.Recorded)
+	fallBack := dc.offsetFallBackWhy(path, off, enc, w)
 	switch {
 	case off.Unit() <= time.Second:
 		ln.Kind, ln.Why = KindUnaccounted, clockOffsetFineWhy(path, off)
 	case !off.Narrow():
 		ln.Kind, ln.Why = KindUnaccounted, clockOffsetWideWhy(path, off, enc)
+	case fallBack != "":
+		ln.Kind, ln.Why = KindUnaccounted, fallBack
 	case !w.offsets:
 		ln.Kind, ln.Why = KindUnaccounted, clockOffsetUncomparedWhy(path, off)
 	case unread != "":
@@ -1056,8 +1059,8 @@ func clockOffsetSeen(path string, off models.ClockOffset) string {
 // passes at every read where the application cuts the value down to the
 // cut, Go's Truncate; where it cuts and then adds time, only at some), one
 // changed by two only near the cut's turn, and one changed by three or more
-// never, on a day of 24 hours, and outside the hour the clocks go back
-// (cutExceptions).
+// never, on a day of 24 hours; of an hour's cut, a replay refuses the value
+// near an hour the application's zone shows twice (cutExceptions).
 func clockOffsetEvidence(path string, off models.ClockOffset) string {
 	if off.CoarseCut() {
 		w := unitWord(off.Res)
@@ -1065,6 +1068,29 @@ func clockOffsetEvidence(path string, off models.ClockOffset) string {
 		return clockOffsetSeen(path, off) + ", cut to " + aUnit(off.Res) + ". A replay checks the offset at the " + w + ", read in the zone the value shows a whole " + w + " in, else the application's, as standing for its whole " + w + ", within one " + w + " of its call's window plus the offset on either side, as a date cut to a day passes from yesterday: " + offsetNamed(off) + " changed by less than two " + w + "s can pass there, by where the replay's read falls in its " + w + ", " + outside + "one changed by two " + w + "s fails unless the replay's read falls within its call's window and the offset's range (" + models.ShortDuration(off.Max-off.Min) + ") of the " + w + "'s turn, and one changed by three " + w + "s or more fails" + on + "; if the field is a time the application reads from its own clock with no rule, declare it noise in keploy.yml, and keploy stops comparing it"
 	}
 	return clockOffsetSeen(path, off) + ". A replay compares the offset: " + offsetNamed(off) + " changed by " + aUnit(off.Unit()) + " or more still fails; if the field is a time the application reads from its own clock with no rule, declare it noise in keploy.yml, and keploy stops comparing it"
+}
+
+// offsetFallBackWhy is why an instant at the clock plus the offset off, cut
+// to an hour, is refused where a run's call's window, or the values a check
+// of it at the hour admits there, meets an hour the application's zone
+// (dc.zone) shows twice as its clocks go back (models.ClockOffset.FallBack,
+// at enc, the resolution its values' encoding writes): an application that
+// cuts its clock to that hour's first showing writes a value up to two
+// hours before the instant it cuts there, so the offset that run shows can
+// stand an hour or two from the one it adds, and a replay would check a
+// time to live two hours off as the right one. "" where none does, and
+// where the learn step knows no zone of the application's (a replay then
+// checks it in the zone it reads, and refuses it near such an hour there).
+func (dc *DriftCache) offsetFallBackWhy(path string, off models.ClockOffset, enc time.Duration, w *Window) string {
+	if w == nil {
+		return ""
+	}
+	for _, s := range []Span{w.Rec, w.F} {
+		if turn, back, met := off.FallBack(enc, s.From, s.To, dc.zone); met {
+			return clockOffsetSeen(path, off) + ", cut to an hour, but a run's call's window, or the values a check at the hour admits there, meets " + fallBackNamed(turn, back, dc.zone) + ": an application that cuts its clock to that hour's first showing (JavaScript; java.time's LocalDateTime then atZone) writes a value up to " + models.ShortDuration(back+time.Hour) + " before the instant it cuts there, so the offset that run shows can stand an hour or more from the one it adds, and keploy refuses it rather than learn it. Record the test again outside that hour; if the field is a time the application reads from its own clock with no rule, declare it noise in keploy.yml, and keploy stops comparing it"
+		}
+	}
+	return ""
 }
 
 // clockOffsetFineWhy is why an instant at the clock plus an offset off is
@@ -1104,14 +1130,14 @@ func resolutionOf(res, enc time.Duration) string {
 // cutExceptions are where a reason's claims on a time to live changed by
 // two or three of the cut c, an hour or a day, do not hold
 // (models.ClockOffset.Checkable): outside goes before both claims, on after
-// the last. A daylight-saving turn makes a day 23 or 25 hours long, and in
-// the hour the clocks go back an application that cuts to the hour's first
+// the last. A daylight-saving turn makes a day 23 or 25 hours long; near the
+// hour the clocks go back an application that cuts to the hour's first
 // showing (JavaScript; java.time's LocalDateTime then atZone) writes a value
-// up to two hours before the instant it cuts, so there a time to live two
-// hours longer can pass at any read and three near the hour's turn.
+// up to two hours before the instant it cuts, so a replay refuses an hour's
+// cut there (models.ClockOffset.FallBack).
 func cutExceptions(c time.Duration) (outside, on string) {
 	if c == time.Hour {
-		return "outside the hour the clocks go back (where an application that cuts to that hour's first showing writes a value up to two hours before the instant it cuts, so a time to live two or three hours longer can pass), ", ""
+		return "", ", and near an hour the application's zone shows twice as its clocks go back a replay refuses the value (an application that cuts to that hour's first showing writes a value up to two hours early there)"
 	}
 	return "", " on a day of 24 hours"
 }
