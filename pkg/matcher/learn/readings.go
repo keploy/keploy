@@ -1048,12 +1048,10 @@ func givenWhy(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, raw
 		// reached here past a recording holding it was let go there by the
 		// rule a copy follows its source, which reads F's view of it too
 		// (follows.excusedGiven), as a place of the call's own test lets it
-		// go past that view (unaccounted).
+		// go past that view (unaccounted). The first loop read keep for
+		// every word the value holds now, wherever there is a recording.
 		if recorded {
 			return ""
-		}
-		if !kept && len(op.words) > 0 {
-			keep, kept = dc.stampsEchoed(v, served, raw), true
 		}
 		for _, g := range op.words {
 			if why := g.servedWhy(i, t, v.wordOf(t, recorded), givenWhose(g.at, at, g.late, g.noTime), keep); why != "" {

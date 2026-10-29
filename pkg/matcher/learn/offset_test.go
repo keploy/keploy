@@ -1025,6 +1025,136 @@ func TestAStampOfFsViewOfAnotherTestsAnswerIsSearchedAsTheCallsOwnPlacesSay(t *t
 	}
 }
 
+// A word of a value that echoes no clock stamp, which only the recording's
+// own Date stamp holds of its text and the body of F's view of it holds, is
+// one F gave the application there that the recording did not, as the word
+// rule reads the recording (stamps searched only where the value echoes one:
+// answerLists.holds with the call's keep): refused naming the recording,
+// another test's too, as in the call's own test. servedWhy reading the
+// recording's own words with its stamps whatever the value echoes would let
+// the word go as one the recording gave (a false green; mutant R12).
+func TestAWordOnlyTheRecordingsStampHoldsAndFsViewsBodyHoldsIsRefused(t *testing.T) {
+	const p = "body.slot"
+	rec, live := stampEchoValues()
+	recAt, viewAt := r1Insert.Add(-20*time.Minute), r1Insert.Add(-21*time.Minute)
+	m := receiveOf("mock-21", "aaaaaaaa-1111-4222-8333-bbbbbbbbbbbb", recAt)
+	m.Spec.HTTPResp.Header["Date"] = recAt.Format(http.TimeFormat)
+	v := receiveOf("mock-21", "aaaaaaaa-1111-4222-8333-bbbbbbbbbbbb", recAt)
+	v.Spec.HTTPResp.Header["Date"] = viewAt.Format(http.TimeFormat)
+	v.Spec.HTTPResp.Body = strings.Replace(v.Spec.HTTPResp.Body, `"Body": "S12 message"`, `"Body": "54 message"`, 1)
+	if !strings.Contains(m.Spec.HTTPResp.Header["Date"], ":54:") || strings.Contains(v.Spec.HTTPResp.Header["Date"], "54") || v.Spec.HTTPResp.Body == m.Spec.HTTPResp.Body {
+		t.Fatalf("fixture: recorded Date %q, view Date %q", m.Spec.HTTPResp.Header["Date"], v.Spec.HTTPResp.Header["Date"])
+	}
+	for _, other := range []bool{false, true} {
+		dc := clockedDrifts()
+		x := dc.RawOf(m, true).ServedAs(3).ServedLive(dc.RawOf(v, true))
+		if other {
+			x = x.OfAnotherTest()
+		}
+		ln := ClassifyIn(dc, []string{p}, strLeaf(p, live), strLeaf(p, rec), r1Insert, nil, []Raw{x}, nil, nil)[0]
+		if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "mock-21") {
+			t.Errorf("FALSE GREEN: another test's %v: %s (%s); want refused naming mock-21: only F's view's body gave 54", other, ln.Kind, ln.Why)
+		}
+	}
+}
+
+// Two recordings F gave the application in another test, each told with its
+// own view, of which only the second's holds the value's word: refused
+// naming the second, read as Raws and as the set reads them (GivenPlaces, a
+// first read and one from the set's cache). Each recording's views are its
+// own in the set's cache (setPlaces.views, keyed by the recording), and the
+// word rule searches every recording's view (servedWhy), not the first's
+// alone: either slip lets the word go (false greens; mutants R1, R30).
+func TestOnlyTheSecondRecordingsViewHoldsTheWordAndItIsRefused(t *testing.T) {
+	const p = "body.slot"
+	rec, live := stampEchoValues()
+	at := r1Insert.Add(-21 * time.Minute)
+	mk := func(name, id, body string) *models.Mock {
+		m := receiveOf(name, id, at)
+		m.Spec.HTTPResp.Header["Date"] = at.Format(http.TimeFormat)
+		if body != "" {
+			m.Spec.HTTPResp.Body = strings.Replace(m.Spec.HTTPResp.Body, `"Body": "S12 message"`, `"Body": "`+body+`"`, 1)
+		}
+		return m
+	}
+	a, b := mk("mock-21", "aaaaaaaa-1111-4222-8333-bbbbbbbbbbbb", ""), mk("mock-22", "cccccccc-1111-4222-8333-dddddddddddd", "")
+	va, vb := mk("mock-21", "aaaaaaaa-1111-4222-8333-bbbbbbbbbbbb", "S13 message"), mk("mock-22", "cccccccc-1111-4222-8333-dddddddddddd", "54 message")
+	t.Run("raw", func(t *testing.T) {
+		dc := clockedDrifts()
+		xa := dc.RawOf(a, true).ServedAs(3).ServedLive(dc.RawOf(va, true)).OfAnotherTest()
+		xb := dc.RawOf(b, true).ServedAs(4).ServedLive(dc.RawOf(vb, true)).OfAnotherTest()
+		ln := ClassifyIn(dc, []string{p}, strLeaf(p, live), strLeaf(p, rec), r1Insert, nil, []Raw{xa, xb}, nil, nil)[0]
+		if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "mock-22") {
+			t.Errorf("FALSE GREEN: %s (%s); want refused naming mock-22", ln.Kind, ln.Why)
+		}
+	})
+	t.Run("set", func(t *testing.T) {
+		tr := NewTracker()
+		tr.Begin()
+		tr.ServedMock(a)
+		tr.ServedMockLive(a, "k", func() (*models.Mock, error) { return va, nil })
+		tr.ServedMock(b)
+		tr.ServedMockLive(b, "k", func() (*models.Mock, error) { return vb, nil })
+		tr.End()
+		tr.Begin()
+		tr.End()
+		tr.Begin()
+		o := tr.Placed().Order
+		for _, read := range []string{"first read", "cached read"} {
+			ln := ClassifyGiven(clockedDrifts(), []string{p}, strLeaf(p, live), strLeaf(p, rec), r1Insert, nil, nil, nil, nil, func() ([]GivenPlaces, error) {
+				ga, err := o.GivenPlaces(a)
+				if err != nil {
+					return nil, err
+				}
+				gb, err := o.GivenPlaces(b)
+				return []GivenPlaces{ga, gb}, err
+			})[0]
+			if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "mock-22") {
+				t.Errorf("FALSE GREEN: %s: %s (%s); want refused naming mock-22", read, ln.Kind, ln.Why)
+			}
+		}
+	})
+}
+
+// The set reads a recording's statements as of each read (Order.GivenPlaces
+// reads them under the tracker's lock), never as of its first: told as
+// recorded in one test, a fresh value learns; served again in the next and
+// told with a view that holds the value's word, the next read refuses it
+// naming the recording. Statements kept for the set from the first read
+// would let the word go (a false green; mutant R2).
+func TestAViewToldAfterAFirstReadIsReadByTheNext(t *testing.T) {
+	const p = "body.slot"
+	rec, live := stampEchoValues()
+	at := r1Insert.Add(-21 * time.Minute)
+	m := receiveOf("mock-21", "aaaaaaaa-1111-4222-8333-bbbbbbbbbbbb", at)
+	m.Spec.HTTPResp.Header["Date"] = at.Format(http.TimeFormat)
+	v := receiveOf("mock-21", "aaaaaaaa-1111-4222-8333-bbbbbbbbbbbb", at)
+	v.Spec.HTTPResp.Header["Date"] = at.Format(http.TimeFormat)
+	v.Spec.HTTPResp.Body = strings.Replace(v.Spec.HTTPResp.Body, `"Body": "S12 message"`, `"Body": "54 message"`, 1)
+	read := func(o Order) Learned {
+		return ClassifyGiven(clockedDrifts(), []string{p}, strLeaf(p, live), strLeaf(p, rec), r1Insert, nil, nil, nil, nil, func() ([]GivenPlaces, error) {
+			g, err := o.GivenPlaces(m)
+			return []GivenPlaces{g}, err
+		})[0]
+	}
+	tr := NewTracker()
+	tr.Begin()
+	tr.ServedMock(m)
+	tr.ServedMockAsRecorded(m)
+	tr.End()
+	tr.Begin()
+	if ln := read(tr.Placed().Order); ln.Kind == KindUnaccounted {
+		t.Fatalf("told as recorded: refused (%s); want learned", ln.Why)
+	}
+	tr.ServedMock(m)
+	tr.ServedMockLive(m, "k", func() (*models.Mock, error) { return v, nil })
+	tr.End()
+	tr.Begin()
+	if ln := read(tr.Placed().Order); ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "mock-21") {
+		t.Errorf("FALSE GREEN: told as recorded, then with a view holding the word: %s (%s); want refused naming mock-21", ln.Kind, ln.Why)
+	}
+}
+
 // A recording of a kind that holds its answer apart from its request that
 // holds no answer (a generic parser's frames the application sent, that
 // nothing answered) gave the application nothing (answerApart): the offset

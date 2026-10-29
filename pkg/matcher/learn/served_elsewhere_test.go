@@ -274,6 +274,93 @@ func TestALateExchangeIsReadWithTheViewItsAdapterGave(t *testing.T) {
 	}
 }
 
+// An exchange F served leaf by leaf in the call's test, recorded after the
+// call or at its instant (two calls a pooled driver's replay sent in the
+// other order than recorded), whose adapter stated its serve to the tracker
+// alone (Tracker.ServedMockAsRecorded, ServedMockLive after ServedMock: the
+// Mongo adapter's keepServedView, Postgres' served_view.go), never on its
+// Earlier, is read with that statement where a later call reads it as a
+// recording F gave the application before the call (Earlier.lateOf through
+// Earlier.told, which InServeOrder hands it: Order.ServedView, as a later
+// call's Raw is read): told as recorded, or with
+// a view that holds no word of the value, a fresh value learns; told with a
+// view that holds its word, or one that cannot be read, it is refused naming
+// that; told nothing, it is refused saying its adapter did not say. lateOf
+// read only the Earlier's own statement, so a fresh value beside any such
+// Mongo exchange was refused saying its adapter did not say what it gave the
+// application there, which the adapter had (FALSE RED).
+func TestALateExchangeItsAdapterStatedToTheTrackerAloneIsReadWithThatStatement(t *testing.T) {
+	const path = "bind.$8"
+	rec := Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: "82"}}}
+	live := Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: "6c7d"}}}
+	const (
+		learns   = ""
+		unstated = "where its adapter did not say what it gave the application there"
+		gave     = "appears in mock-6 as record's full round gave it"
+		unread   = "where keploy could not read what it gave the application"
+	)
+	for _, after := range []time.Duration{time.Second, 0} {
+		m := jobsMock(chanceSrcRec, "5")
+		m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock = eRecAt.Add(after), eRecAt.Add(after+time.Millisecond)
+		view := func(id string) func() (*models.Mock, error) {
+			return func() (*models.Mock, error) {
+				v := jobsMock(id, "9")
+				v.Spec.ReqTimestampMock, v.Spec.ResTimestampMock = m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock
+				return v, nil
+			}
+		}
+		for _, c := range []struct {
+			name string
+			tell func(tr *Tracker)
+			want string
+		}{
+			{"told nothing", func(*Tracker) {}, unstated},
+			{"told as recorded", func(tr *Tracker) { tr.ServedMockAsRecorded(m) }, learns},
+			{"told with a view that holds no word of the value", func(tr *Tracker) { tr.ServedMockLive(m, "a", view(chanceSrcRec)) }, learns},
+			{"told with a view that holds the value's word", func(tr *Tracker) { tr.ServedMockLive(m, "a", view("6c7d")) }, gave},
+			{"told with a view that cannot be read", func(tr *Tracker) {
+				tr.ServedMockLive(m, "a", func() (*models.Mock, error) { return nil, errors.New("gone") })
+			}, unread},
+		} {
+			tr := NewTracker()
+			tr.Begin()
+			tr.ServedMock(m)
+			// The Mongo adapter's Earlier: no AsRecorded, no View.
+			tr.Served(tr.Placed().Test, Earlier{Mock: m.Name, At: m.Spec.ReqTimestampMock, Own: true, Payload: RawOf(m, true),
+				Seen: []Seen{{Side: Response, Leaf: Leaf{Path: "row.0.n", Type: String, Value: "5"}, Live: "5"}}})
+			c.tell(tr)
+			// As the adapters read it: InServeOrder hands the exchange the
+			// read's statements of its recording (Earlier.told).
+			p := tr.Placed()
+			earlier := InServeOrder(p.Earlier, []*models.Mock{m}, p.Order)
+			if len(earlier) != 1 {
+				t.Fatalf("%d places; want the exchange", len(earlier))
+			}
+			for _, cl := range []struct {
+				name string
+				run  func() []Learned
+			}{
+				{"ClassifyGiven", func() []Learned {
+					return ClassifyGiven(clockedDrifts(), []string{path}, live, rec, eRecAt, earlier, eStartup(), nil, nil, nil)
+				}},
+				{"ClassifyFollowing", func() []Learned {
+					return ClassifyFollowing(clockedDrifts(), []string{path}, live, rec, eRecAt, earlier, eStartup(), nil, nil, nil)
+				}},
+			} {
+				got := cl.run()[0]
+				switch {
+				case c.want == learns && got.Kind == KindUnaccounted:
+					t.Errorf("FALSE RED: %s, recorded %v after the call, %s: refused (%q); want learned", cl.name, after, c.name, got.Why)
+				case c.want != learns && got.Kind != KindUnaccounted:
+					t.Errorf("FALSE GREEN: %s, recorded %v after the call, %s: %s (%q); want refused: %q", cl.name, after, c.name, got.Kind, got.Why, c.want)
+				case c.want != learns && !strings.Contains(got.Why, c.want):
+					t.Errorf("FALSE REASON: %s, recorded %v after the call, %s: refused (%q); want the reason to say %q", cl.name, after, c.name, got.Why, c.want)
+				}
+			}
+		}
+	}
+}
+
 // A recording F served in an older test of the running set, read among the
 // recordings F gave the application earlier in the set (Order.GivenPlaces,
 // GivenEarlier: the place an HTTP or Mongo call reads it at), is read with
