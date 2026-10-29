@@ -389,6 +389,7 @@ func (m *MockManager) bumpStagingEpoch() {
 	// outside every test, which may come only well into this staging, or
 	// never.
 	m.exact.outside.cur.Store(nil)
+	m.beginMarkedSeries()
 	// The set the tracker began last is staged now, whichever it is: the
 	// tracker's own (SetTrackerSetAt), as its set may have begun before any
 	// of its boundaries reached this manager.
@@ -921,6 +922,7 @@ const restagedWhy = "the staging moved: the test set was staged again"
 func (m *MockManager) HoldToRound(call integrations.CallRound) (integrations.MockMemDb, func() bool) {
 	h := &heldScope{roundScope: roundScope{MockManager: m, g: roundGuard{at: integrations.RoundAt{Epoch: call.Epoch()}, staging: true}}}
 	h.seq, h.seqOK = call.Sequence()
+	h.keepSeriesRead()
 	return h, h.restaged
 }
 
@@ -945,6 +947,10 @@ type heldScope struct {
 	// (integrations.CallRound.Sequence), seqOK whether its mark kept one.
 	seq   integrations.SequenceView
 	seqOK bool
+	// series is the read of the set's series of the call's staging, kept
+	// as the call is held and as it asks for them (keepSeriesRead): a
+	// call is never handed a later staging's (MarkedSeries).
+	series *setSeriesRead
 }
 
 // SequenceView implements integrations.SequenceViewer: the sequence view of
