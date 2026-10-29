@@ -312,6 +312,10 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// found it made (integrations.CallRound): a miss's lookup
 				// of a recording made elsewhere is asked of that round.
 				call integrations.CallRound
+				// offSeries is why no recording of the marked series the
+				// request is a call of answered it (integrations.AnswerSeries):
+				// its miss is then the set's background miss.
+				offSeries *integrations.SeriesMiss
 				// db is the store the request's matcher and its miss read:
 				// under the switch held to call's staging
 				// (integrations.HoldToRound), so a request is never answered
@@ -392,6 +396,30 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					}
 				}
 				if !ok && err == nil && proven {
+					// A call of a series judging marked as the application's
+					// background work set-wide (a timer's call, only its reads
+					// of the clock changed): answered with a recording of it
+					// whose reads of the clock hold on the run's clock, consuming
+					// none of a test's, or the set's background miss, never the
+					// open test's (integrations.AnswerSeries, by what the build
+					// registers: none in keploy itself). Before a set-aside copy,
+					// as for every parser: a series' call spends no copy, and of
+					// the later steps only a set-aside copy that is exactly the
+					// call may still answer it. Record's full round (the learn
+					// step's, above) replays the build just recorded, which
+					// judging has marked nothing of yet.
+					served, miss, serr := integrations.AnswerSeries(reqCtx, mockDb, seriesCall(input), input.arrived, httpKnown{n: h.newLearnNoise(opts, bodyNoise, urlNoise)})
+					switch {
+					case serr != nil:
+						err = serr
+					case served != nil:
+						reportBackgroundSeries(reqCtx, input, served)
+						stub, ok = served, true
+					default:
+						offSeries = miss
+					}
+				}
+				if !ok && err == nil && proven {
 					// A set-aside test's recording the call is exactly, left
 					// unanswered in the staging, also for a call one more
 					// than the test recorded: served, unchecked, named on the
@@ -418,7 +446,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			if !ok {
 				// Build mismatch report for the user (surfaced in the mismatch
 				// table, the report yaml and `keploy report`).
-				if lmiss == nil && provenswitch.On() {
+				if lmiss == nil && provenswitch.On() && offSeries == nil {
 					// A call that came with an array in another order is
 					// unstable_order in every round, not only the full one.
 					lmiss = h.orderMiss(reqCtx, input, db, h.newLearnNoise(opts, bodyNoise, urlNoise))
@@ -438,6 +466,14 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					diag = h.answeredDiag(reqCtx, input, db, diag, headerNoise, bodyNoise, urlNoise)
 				}
 				report := h.buildHTTPMismatchReport(request, input.body, db, nil, headerNoise, bodyNoise, diag)
+				if offSeries != nil {
+					// A marked series' call: named as its newest recording,
+					// never one more than a test recorded nor a recording made
+					// elsewhere, and no learn reason explains it (its reads of
+					// the clock are checked, never noise).
+					n = 0
+					offSeries.Mark(report)
+				}
 				if n > 0 {
 					// Named as the recording it repeats, never another in
 					// view (integrations.MarkExtraCall).
@@ -456,12 +492,12 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// under the request, which the miss then says.
 				var elsewhere *models.Mock
 				restaged := false
-				if n == 0 && report != nil && provenswitch.On() {
+				if n == 0 && report != nil && provenswitch.On() && offSeries == nil {
 					elsewhere, restaged = notOwnedRecording(reqCtx, input, db, h.newStrictNoise(headerNoise, bodyNoise, urlNoise), call)
 				}
 				if elsewhere != nil {
 					markNotOwned(report, elsewhere)
-				} else if lmiss != nil {
+				} else if lmiss != nil && offSeries == nil {
 					lmiss.explain(report)
 				}
 				if restaged {
@@ -483,7 +519,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// record a test in between refilled the cache with the same
 				// call, which this replay, inside the cache's span there,
 				// never made, so its recording is what the call matches.
-				if n == 0 && report != nil && (elsewhere != nil || lmiss == nil || lmiss.res.Reason == models.MissUnmockedCall) {
+				if n == 0 && report != nil && offSeries == nil && (elsewhere != nil || lmiss == nil || lmiss.res.Reason == models.MissUnmockedCall) {
 					if a, ok := repeatNoteOf(reqCtx, input, db, h.newStrictNoise(headerNoise, bodyNoise, urlNoise), n); ok {
 						markRepeat(report, a)
 					}
