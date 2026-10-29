@@ -143,8 +143,13 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 		}
 
 		if req.Header.Get("Content-Encoding") != "" {
-			reqBody, err = pkg.Decompress(logger, req.Header.Get("Content-Encoding"), reqBody, MaxTestCaseSize)
+			reqBody, err = pkg.DecompressReserving(logger, req.Header.Get("Content-Encoding"), reqBody, MaxTestCaseSize, DecodeReserve(ctx))
 			if err != nil {
+				if errors.Is(err, pkg.ErrDecodeRefused) {
+					// The caller's DecodeReserveFunc refused room for the
+					// decoded body: it counts what it leaves out.
+					return
+				}
 				if errors.Is(err, pkg.ErrDecompressedTooLarge) {
 					// Oversized, not corrupt: same condition as the post-
 					// decompression MaxTestCaseSize check further down, hit
@@ -200,8 +205,11 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 	}
 
 	if resp.Header.Get("Content-Encoding") != "" {
-		respBody, err = pkg.Decompress(logger, resp.Header.Get("Content-Encoding"), respBody, MaxTestCaseSize)
+		respBody, err = pkg.DecompressReserving(logger, resp.Header.Get("Content-Encoding"), respBody, MaxTestCaseSize, DecodeReserve(ctx))
 		if err != nil {
+			if errors.Is(err, pkg.ErrDecodeRefused) {
+				return // the caller that refused counts it, as above
+			}
 			if errors.Is(err, pkg.ErrDecompressedTooLarge) {
 				logger.Error("HTTP test case data exceeds 5MB limit, skipping capture",
 					zap.String("url", req.URL.String()),
