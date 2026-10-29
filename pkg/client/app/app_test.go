@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -646,5 +647,44 @@ func TestModifyDockerRunRefusesAStart(t *testing.T) {
 	}
 	if a.cmd != "docker start -a app" {
 		t.Fatalf("the command was changed: %q", a.cmd)
+	}
+}
+
+// noDaemon is a docker client every call to panics on: its interface is nil.
+type noDaemon struct{ docker.Client }
+
+// On keploy's own in-process compose stack, recentAppLogs reads the app
+// service's tail as keploy took it from the attach stream, and never asks the
+// daemon: no `docker logs`, which needs a log driver that stores the app's
+// output on the docker host's disk. It answers after the container is gone.
+//
+// It takes the library path in every build, -tags composelib or not, so the
+// row runs in OSS CI, which builds without the tag.
+func TestRecentAppLogsReadsTheAttachTailOnTheLibraryPath(t *testing.T) {
+	was := composeLibrarySupported
+	composeLibrarySupported = true
+	t.Cleanup(func() { composeLibrarySupported = was })
+	docker.ForgetAppOutput()
+	t.Cleanup(docker.ForgetAppOutput)
+	docker.RecordAppOutput("db-1", "db", "db line")
+	docker.RecordAppOutput("app-1", "app", "listening on :8080")
+	docker.RecordAppOutput("app-1", "app", "panic: DB_PASSWORD=***")
+
+	a := &App{
+		logger:         zap.NewNop(),
+		kind:           utils.DockerCompose,
+		composeContent: []byte("services: {app: {image: app}}"),
+		composeService: "app",
+		container:      "app",
+		docker:         noDaemon{},
+	}
+	if got, want := a.recentAppLogs(context.Background()), "listening on :8080\npanic: DB_PASSWORD=***"; got != want {
+		t.Fatalf("recentAppLogs = %q, want %q", got, want)
+	}
+
+	a.composeService = ""
+	a.container = "app-1"
+	if got, want := a.RecentLogs(context.Background()), "listening on :8080\npanic: DB_PASSWORD=***"; got != want {
+		t.Fatalf("with no compose service: recentAppLogs = %q, want the tail of the named container, %q", got, want)
 	}
 }

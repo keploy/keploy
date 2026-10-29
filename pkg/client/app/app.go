@@ -558,6 +558,10 @@ func (a *App) recentAppLogs(ctx context.Context) string {
 		ctx = context.Background()
 	}
 
+	if a.useComposeLibrary() {
+		return a.recentAppOutput()
+	}
+
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
@@ -602,6 +606,21 @@ func (a *App) recentAppLogs(ctx context.Context) string {
 	}
 
 	return trimRecentAppLogs(combined, 20)
+}
+
+// recentAppOutput is recentAppLogs for keploy's own in-process compose stack:
+// the app container's tail as keploy took it from the attach stream
+// (docker.ServiceOutputTail), cut, and never `docker logs`. So the stack's
+// containers need no log driver that stores what they print on the docker
+// host's disk, and the answer comes after compose has removed the container.
+func (a *App) recentAppOutput() string {
+	var tail []byte
+	if a.composeService != "" {
+		tail = docker.ServiceOutputTail(a.composeService)
+	} else if a.container != "" {
+		tail = docker.AppOutputTail(a.container)
+	}
+	return trimRecentAppLogs(string(tail), 20)
 }
 
 func (a *App) logTargetContainer(ctx context.Context) string {
@@ -1555,8 +1574,14 @@ func (a *App) composeAgentContainerIDs(ctx context.Context) []string {
 // shell-out, which is what keploy did before the library existed and is always
 // available on a laptop.
 func (a *App) useComposeLibrary() bool {
-	return len(a.composeContent) > 0 && docker.ComposeLibrarySupported
+	return len(a.composeContent) > 0 && composeLibrarySupported
 }
+
+// composeLibrarySupported is docker.ComposeLibrarySupported. It is a variable
+// only so a row can take the library path's decisions (recentAppLogs reading
+// the attach tail) in a build without -tags composelib, which is how OSS CI
+// builds; production never sets it.
+var composeLibrarySupported = docker.ComposeLibrarySupported
 
 // parseComposePSIDs extracts the container ids from `docker compose ps -aq`
 // output: one id per line, ignoring blank lines and surrounding whitespace.

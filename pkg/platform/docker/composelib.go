@@ -53,23 +53,38 @@ func (r *ComposeRunner) service() (api.Compose, error) {
 // shell-out path handed to the child process.
 //
 // The CLI prefixes each line with the service name; reproduce that, because
-// both the sample-app CI scripts and recentAppLogs read this output, and a
-// silent reformat would look like a behaviour change in the app itself.
+// the sample-app CI scripts read this output, and a silent reformat would
+// look like a behaviour change in the app itself.
 //
 // Each message is one line a container printed, and is cut of the values the
 // log redactor holds (log.RedactChildOutput), as a child process's output is
-// on the shell-out path (utils.ChildConsole).
+// on the shell-out path (utils.ChildConsole). The cut line, and only the cut
+// line, also goes to the container's tail (RecordAppOutput), which is what
+// keploy reads for the app's recent output instead of `docker logs`.
 type composeLogConsumer struct {
 	out io.Writer
 	err io.Writer
+	// serviceOf is the compose service of the container compose names name
+	// in its output; nil when not known.
+	serviceOf func(name string) string
 }
 
 func (c composeLogConsumer) Log(containerName, message string) {
-	_, _ = fmt.Fprintf(c.out, "%s  | %s\n", containerName, keployLog.RedactChildOutput(message))
+	c.line(c.out, containerName, message)
 }
 
 func (c composeLogConsumer) Err(containerName, message string) {
-	_, _ = fmt.Fprintf(c.err, "%s  | %s\n", containerName, keployLog.RedactChildOutput(message))
+	c.line(c.err, containerName, message)
+}
+
+func (c composeLogConsumer) line(w io.Writer, containerName, message string) {
+	cut := keployLog.RedactChildOutput(message)
+	service := ""
+	if c.serviceOf != nil {
+		service = c.serviceOf(containerName)
+	}
+	RecordAppOutput(containerName, service, cut)
+	_, _ = fmt.Fprintf(w, "%s  | %s\n", containerName, cut)
 }
 
 func (c composeLogConsumer) Status(container, msg string) {
@@ -428,12 +443,35 @@ func (r *ComposeRunner) Up(ctx context.Context, opts ComposeUpOptions, out, errW
 		},
 		Start: api.StartOptions{
 			Project:      r.project,
-			Attach:       composeLogConsumer{out: out, err: errW},
+			Attach:       composeLogConsumer{out: out, err: errW, serviceOf: r.serviceOf},
 			AttachTo:     r.attachTo(),
 			OnExit:       opts.OnExit,
 			ExitCodeFrom: strings.TrimSpace(opts.ExitCodeFrom),
 		},
 	})
+}
+
+// serviceOf is the service of the container compose names name in its
+// attached output: the service that declares name as its container_name,
+// else the one name is <service>-<number> of. It is compose's naming rule
+// (getContainerNameWithoutProject) read backwards, from the project alone, so
+// it needs no daemon.
+func (r *ComposeRunner) serviceOf(name string) string {
+	for svcName, svc := range r.project.Services {
+		if svc.ContainerName != "" && svc.ContainerName == name {
+			return svcName
+		}
+	}
+	for svcName, svc := range r.project.Services {
+		if svc.ContainerName != "" {
+			continue
+		}
+		number, ok := strings.CutPrefix(name, svcName+api.Separator)
+		if ok && number != "" && strings.Trim(number, "0123456789") == "" {
+			return svcName
+		}
+	}
+	return ""
 }
 
 // Pull fetches every image the project references, resolving registry
