@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"sync"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/matcher/learn"
@@ -516,6 +517,79 @@ func MarkedSeriesOf(ctx context.Context, db MockMemDb, kind models.Kind, known l
 		return r.MarkedSeries(ctx, kind, known)
 	}
 	return nil, nil
+}
+
+// SeriesAnswerer answers, for a parser keploy ships (HTTP), a call no
+// earlier step answered that may be of a series judging marked
+// (MarkedSeriesReader). live is the call as a recording holds its request
+// (Kind set; no answer), arrived when keploy had it whole, and known
+// keploy.yml's noise of its kind as the parser's learn step reads it. served
+// is the recording of a marked series that answers it, consuming none of a
+// test's; miss, why the marked series it is a call of answers it with none,
+// which makes it the set's background miss, never the open test's
+// (SeriesMiss.Mark); both nil when it is a call of no marked series, and it
+// goes on as before. A build that judges series registers one per kind,
+// with that kind's series reading (learn.RegisterSeriesShape): keploy
+// enterprise. keploy itself registers none.
+type SeriesAnswerer func(ctx context.Context, db MockMemDb, live *models.Mock, arrived time.Time, known learn.Known) (served *models.Mock, miss *SeriesMiss, err error)
+
+// SeriesMiss is why no recording of a marked series answered a call of it
+// (SeriesAnswerer): NextSteps says so for the report, and Newest is the
+// series' newest recording, which the miss names.
+type SeriesMiss struct {
+	NextSteps string
+	Newest    *models.Mock
+}
+
+// Mark marks report as a miss of the set's background work
+// (models.MockMismatchReport.Background): charged to no test, failing none.
+func (m *SeriesMiss) Mark(report *models.MockMismatchReport) {
+	if m == nil || report == nil {
+		return
+	}
+	report.Background = true
+	if m.Newest != nil {
+		report.ClosestMock = m.Newest.Name
+	}
+	report.NextSteps = m.NextSteps
+}
+
+var seriesAnswerers = struct {
+	sync.RWMutex
+	of map[models.Kind]SeriesAnswerer
+}{of: map[models.Kind]SeriesAnswerer{}}
+
+// RegisterSeriesAnswerer makes a the SeriesAnswerer of kind, in place of
+// any before it; unregister restores that one.
+func RegisterSeriesAnswerer(kind models.Kind, a SeriesAnswerer) (unregister func()) {
+	seriesAnswerers.Lock()
+	defer seriesAnswerers.Unlock()
+	prev, had := seriesAnswerers.of[kind]
+	seriesAnswerers.of[kind] = a
+	return func() {
+		seriesAnswerers.Lock()
+		defer seriesAnswerers.Unlock()
+		if had {
+			seriesAnswerers.of[kind] = prev
+			return
+		}
+		delete(seriesAnswerers.of, kind)
+	}
+}
+
+// AnswerSeries is live.Kind's SeriesAnswerer's answer to live: all nil when
+// none is registered.
+func AnswerSeries(ctx context.Context, db MockMemDb, live *models.Mock, arrived time.Time, known learn.Known) (*models.Mock, *SeriesMiss, error) {
+	if live == nil {
+		return nil, nil, nil
+	}
+	seriesAnswerers.RLock()
+	a := seriesAnswerers.of[live.Kind]
+	seriesAnswerers.RUnlock()
+	if a == nil {
+		return nil, nil, nil
+	}
+	return a(ctx, db, live, arrived, known)
 }
 
 // ExactServedReader is an optional MockMemDb extension of a store that
