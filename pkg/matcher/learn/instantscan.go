@@ -11,8 +11,8 @@ import (
 // call's own learn. It read them with clockLayouts' six patterns, each
 // compiled case-insensitive and run over the whole text in turn: six
 // regular-expression scans per text, which no literal prefix speeds up once
-// the patterns fold case. On api-server's real round (r3g) that was 77% of
-// the agent's CPU.
+// the patterns fold case. On api-server's real e2e round under keploy mock
+// record, that was 77% of the replay agent's CPU.
 //
 // scanInstants reads the text once. At each byte that can begin a layout's
 // match it tries that layout there, and it reads no further than one match
@@ -74,18 +74,23 @@ var layoutStarts = func() (t [256]uint8) {
 // span is a pattern's match: s[start:end].
 type span struct{ start, end int }
 
-// instantScanPasses counts the passes scanInstants made, and
-// instantScanBytes the bytes those passes stepped over. A pass over a text
-// steps over each of its bytes once. They exist for the rows, and nothing in
-// product code reads them: one add of each per text.
-var instantScanPasses, instantScanBytes atomic.Int64
+// The scan's work, counted where it is done, for the rows (nothing in
+// product code reads them; each is one add per text):
+//   - instantScanPasses: the texts scanInstants read, one pass each.
+//   - instantScanSteps: the bytes those passes stepped over, counted in the
+//     loop that steps.
+//   - instantScanTries: the matchers tried, each at a byte its layout's
+//     matches can begin with; each reads at most one match's bytes past it.
+var instantScanPasses, instantScanSteps, instantScanTries atomic.Int64
 
 // scanInstants is each layout's matches in s, in the order they stand, as
 // FindAllStringIndex of the layout's pattern, folded, gives them: matches[k]
 // for layout k. It reads s once.
 func scanInstants(s string) (matches [numLayouts][]span) {
 	var next [numLayouts]int
+	var steps, tries int64
 	for i := 0; i < len(s); i++ {
+		steps++
 		set := layoutStarts[s[i]]
 		for set != 0 {
 			k := bits.TrailingZeros8(set)
@@ -93,6 +98,7 @@ func scanInstants(s string) (matches [numLayouts][]span) {
 			if i < next[k] {
 				continue
 			}
+			tries++
 			if e := layoutAt[k](s, i); e > i {
 				matches[k] = append(matches[k], span{i, e})
 				next[k] = e
@@ -100,7 +106,8 @@ func scanInstants(s string) (matches [numLayouts][]span) {
 		}
 	}
 	instantScanPasses.Add(1)
-	instantScanBytes.Add(int64(len(s)))
+	instantScanSteps.Add(steps)
+	instantScanTries.Add(tries)
 	return matches
 }
 

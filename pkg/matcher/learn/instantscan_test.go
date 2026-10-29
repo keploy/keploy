@@ -2,6 +2,10 @@ package learn
 
 import (
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"math/bits"
 	"math/rand"
 	"reflect"
 	"regexp"
@@ -108,6 +112,7 @@ func instantCorpus() []string {
 		"", "1", "12:3", "12:34", "12:34:5", "12:34:56", "12:34:56.", "12:34:56.1234567891", "1:23:45", "123:45:67",
 		"Thu, 22 Oct 2026 11:14:16 GMT", "thu, 22 oct 2026 11:14:16 gmt", "THU, 22 OCT 2026 11:14:16 UTC",
 		"Thu, 22 Oct 2026 11:14:16 +0530", "Thu, 22 Oct 2026 11:14:16 -05", "Thu, 22 Oct 2026 11:14:16", "Thu, 22 Oct 2026 11:14:16 PST",
+		"Thu, 22 Oct 2026 11:14:16 -0500", "thu, 22 oct 2026 11:14:16 -0500",
 		"Thu,22 Oct 2026 11:14:16 GMT", "XThu, 22 Oct 2026 11:14:16 GMT", "Thu, 22 Oct 2026 11:14:16 GMTX",
 		"Thu, 31 Feb 2026 11:14:16 GMT", "Sat, 24 Oct 2026 11:14:16 GMT", "ſat, 24 Oct 2026 11:14:16 GMT",
 		"Sun, 25 ſep 2026 11:14:16 GMT", "ſUN, 25 ſEP 2026 11:14:16 GMT", "Sun, 27 Sep 2026 11:14:16 KMT",
@@ -120,6 +125,9 @@ func instantCorpus() []string {
 		"2026-10-22T11:14:16+", "2026-10-22T11:14:16 +05:30", "2026-10-22T11+05:30", "2026-10-22 11 ok", "2026-10-22T11a",
 		"2026-10-22T1", "2026-10-22T11:1", "2026-10-22 UTC", "2026-10-22UTC", "2026-10-22  UTC", "2026-13-45", "12026-10-22",
 		"2026-10-221", "2026-10-22T11:14:16ZZ", "2026-10-22T11:14:16 UT", "x2026-10-22", "2026-10-22x",
+		// A case-folded text holds its ISO instants with a lowercase t
+		// (and z): the form the learn step reads most.
+		"2026-10-22t11:14:16.473z", "2026-10-22t11:14z", "2026-10-22t11:14:16+05:30", "2026-10-22t11:14:16",
 		"20261022T111413Z", "20261022t111413z", "20261022T111413", "20261022T11141", "20261022T1114131", "x-amz-date=20261022t111413z&n=7",
 		"120261022T111413Z", "20261022T111413Za",
 		uuid7(at, "abc123456789abcdef"), strings.ToUpper(uuid7(at, "abc123456789abcdef")),
@@ -225,6 +233,39 @@ func instantPayload(n int) string {
 	return b.String()
 }
 
+// startsIn is the most matchers a pass over s can try: at each byte, one for
+// each layout whose matches can begin with it.
+func startsIn(s string) (n int64) {
+	for i := 0; i < len(s); i++ {
+		n += int64(bits.OnesCount8(layoutStarts[s[i]]))
+	}
+	return n
+}
+
+// readsOnce checks what instantSpans of s did, counted where the scan does
+// it: one pass, each byte stepped over once, and a matcher tried only at a
+// byte its layout's matches can begin with (at least one try when s holds an
+// instant). It returns the spans.
+func readsOnce(t *testing.T, what, s string) []instant {
+	t.Helper()
+	passes, steps, tries := instantScanPasses.Load(), instantScanSteps.Load(), instantScanTries.Load()
+	spans := instantSpans(s)
+	if got := instantScanPasses.Load() - passes; got != 1 {
+		t.Errorf("instantSpans of a %d-byte %s made %d passes over it; want 1", len(s), what, got)
+	}
+	if got := instantScanSteps.Load() - steps; got != int64(len(s)) {
+		t.Errorf("instantSpans of a %d-byte %s stepped over %d bytes; want %d", len(s), what, got, len(s))
+	}
+	got := instantScanTries.Load() - tries
+	if limit := startsIn(s); got > limit {
+		t.Errorf("instantSpans of a %d-byte %s tried %d matchers; at most %d can begin in it", len(s), what, got, limit)
+	}
+	if len(spans) > 0 && got == 0 {
+		t.Errorf("instantSpans of a %d-byte %s found %d instants and tried no matcher", len(s), what, len(spans))
+	}
+	return spans
+}
+
 // instantSpans reads each text once, for every layout: one pass, stepping
 // over each of its bytes once, where clockLayouts' patterns made six passes.
 // Counted, never timed: on a payload like api-server's (about 180 KB) and on
@@ -232,14 +273,7 @@ func instantPayload(n int) string {
 func TestInstantSpansReadsATextOnce(t *testing.T) {
 	texts := append(instantCorpus(), instantPayload(560))
 	for _, s := range texts {
-		passes, bytes := instantScanPasses.Load(), instantScanBytes.Load()
-		spans := instantSpans(s)
-		if got := instantScanPasses.Load() - passes; got != 1 {
-			t.Errorf("instantSpans of a %d-byte text made %d passes over it; want 1", len(s), got)
-		}
-		if got := instantScanBytes.Load() - bytes; got != int64(len(s)) {
-			t.Errorf("instantSpans of a %d-byte text stepped over %d bytes; want %d", len(s), got, len(s))
-		}
+		spans := readsOnce(t, "text", s)
 		var old int
 		if want := instantSpansByPatterns(s, &old); !reflect.DeepEqual(spans, want) {
 			t.Fatalf("instantSpans of a %d-byte text = %d instants; the patterns give %d", len(s), len(spans), len(want))
@@ -267,14 +301,7 @@ func longScript(n int) string {
 func TestALongScriptIsReadInOnePass(t *testing.T) {
 	script := longScript(2400)
 	s := script + `"at":"2026-10-28T07:16:21.123Z",` + script + `"t":1761635781,` + script + `"d":"Wed, 28 Oct 2026 07:16:21 GMT"`
-	passes, bytes := instantScanPasses.Load(), instantScanBytes.Load()
-	spans := instantSpans(s)
-	if got := instantScanPasses.Load() - passes; got != 1 {
-		t.Errorf("instantSpans of a %d-byte script made %d passes over it; want 1", len(s), got)
-	}
-	if got := instantScanBytes.Load() - bytes; got != int64(len(s)) {
-		t.Errorf("instantSpans of a %d-byte script stepped over %d bytes; want %d", len(s), got, len(s))
-	}
+	spans := readsOnce(t, "script", s)
 	var old int
 	if want := instantSpansByPatterns(s, &old); !reflect.DeepEqual(spans, want) {
 		t.Fatalf("instantSpans of the script = %v; the patterns give %v", spans, want)
@@ -321,4 +348,50 @@ func BenchmarkInstantSpansLongScript(b *testing.B) {
 			instantSpans(s)
 		}
 	})
+}
+
+// The one pass is the only read of a text for its instants: instants.go and
+// instantscan.go, where instantSpans and its scan live, use nothing of the
+// regexp package, neither by importing it nor by calling a pattern's Find or
+// Match method (clockLayouts' patterns stay in clock.go, for the layouts'
+// reads and for this package's rows). A pattern scan put back beside the one
+// pass keeps the pass count at one and the spans equal; this row fails on
+// it.
+func TestInstantSpansRunsNoPattern(t *testing.T) {
+	var methods []string
+	rt := reflect.TypeOf(&regexp.Regexp{})
+	for i := 0; i < rt.NumMethod(); i++ {
+		if n := rt.Method(i).Name; strings.HasPrefix(n, "Find") || strings.HasPrefix(n, "Match") || strings.HasPrefix(n, "ReplaceAll") {
+			methods = append(methods, n)
+		}
+	}
+	isPatternMethod := func(n string) bool {
+		for _, m := range methods {
+			if m == n {
+				return true
+			}
+		}
+		return false
+	}
+	fset := token.NewFileSet()
+	for _, name := range []string{"instants.go", "instantscan.go"} {
+		f, err := parser.ParseFile(fset, name, nil, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, im := range f.Imports {
+			if im.Path.Value == `"regexp"` || im.Path.Value == `"regexp/syntax"` {
+				t.Errorf("%s imports %s: instantSpans reads a text with the one pass alone", name, im.Path.Value)
+			}
+		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			if sel, ok := n.(*ast.SelectorExpr); ok && isPatternMethod(sel.Sel.Name) {
+				t.Errorf("%s: %s calls a pattern's %s: instantSpans reads a text with the one pass alone", name, fset.Position(sel.Pos()), sel.Sel.Name)
+			}
+			return true
+		})
+	}
+	if len(methods) < 10 {
+		t.Fatalf("found %d Find/Match methods on *regexp.Regexp: %v", len(methods), methods)
+	}
 }
