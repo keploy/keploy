@@ -144,6 +144,18 @@ jobs:
           KEPLOY_PROVEN=1 KEPLOY_LEARN_SET_EVERY_CACHE=1 go test -count=1 ./pkg/matcher/learn/
           KEPLOY_PROVEN=1 KEPLOY_LEARN_LAZY_EVERY_RAW=1 go test -count=1 ./pkg/matcher/learn/
 
+      # The learn step's tracker is told of serves and exchanges on the
+      # adapters' connection goroutines while other connections' calls read
+      # it (Placed, Order.ServedView, a late exchange's view), and one set's
+      # handlers read its caches at once (DriftCache, the set's derived data).
+      # A read outside the tracker's or the set's lock is a data race that a
+      # plain run passes. Race the rows of the tracker, of its Order and of
+      # the set's handlers, and the rows that wait on the tracker, not the
+      # whole package: under -race the package takes about 9 minutes on 12
+      # CPUs, these 27 rows about 25 seconds on 4 (the size of ubuntu-latest).
+      - name: Running Race Detector (learn tracker)
+        run: go test -race -count=1 -run '^Test(Tracker|Order)|DriftCache|Handlers|^TestACallInTheGapWaitsForTheRequest$|^TestAWindowClosedWithoutItsRequestIsSaid$' ./pkg/matcher/learn/
+
       # The hooks package's root tests skip in the run above, which is the
       # runner user's: TestTheHooksLoadOnThisKernel loads the agent's eBPF
       # objects against this kernel's BTF, as the agent does, and

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -238,6 +239,80 @@ func TestALateExchangeIsReadWithWhatItsAdapterToldOfTheServeAfterIt(t *testing.T
 			if x.AsRecorded() != c.recorded || x.Live() != c.live || x.viewUnstated() != (!c.recorded && !c.live) {
 				t.Errorf("%s, Raw %d: as recorded %v, a view %v, unstated %v; want as recorded %v, a view %v", c.name, i, x.AsRecorded(), x.Live(), x.viewUnstated(), c.recorded, c.live)
 			}
+		}
+	}
+}
+
+// Adapters tell of their serves on their connections' goroutines while other
+// connections' calls read what F served (Placed, Order.Of, Order.ServedView,
+// InServeOrder and a late exchange's lateOf, which reads the serve its
+// adapter told of after it): each read takes the tracker's lock, so the race
+// detector sees no data race (go-test.yaml races this row), and each read
+// gives what the statements made up to it gave: unstated while a serve it
+// saw is not told yet, served as recorded once every one is, never a view no
+// adapter gave. Once every adapter is done, the recording and each exchange
+// read as served as recorded.
+func TestTrackerToldOfServesWhileOtherCallsReadThemReadsEachUnderItsLock(t *testing.T) {
+	m := jobsMock(chanceSrcRec, "5")
+	dc := noSet(clockedDrifts())
+	e := Earlier{Mock: m.Name, At: m.Spec.ReqTimestampMock, Payload: RawOf(m, true),
+		Seen: []Seen{{Side: Response, Leaf: Leaf{Path: "row.0.n", Type: String, Value: "5"}, Live: "5"}}}
+	tr := NewTracker()
+	tr.Begin()
+	read := func() []Raw {
+		p := tr.Placed()
+		first, last := p.Order.Of(m)
+		out := []Raw{p.Order.ServedView(m, dc.LazyRawOf(m, true, nil).ServedIn(first, last))}
+		for _, x := range InServeOrder(p.Earlier, []*models.Mock{m}, p.Order) {
+			out = append(out, x.lateOf(false)...)
+		}
+		return out
+	}
+	const adapters, serves, readers = 4, 64, 4
+	var told, reading sync.WaitGroup
+	done := make(chan struct{})
+	var once sync.Once
+	for i := 0; i < adapters; i++ {
+		told.Add(1)
+		go func() {
+			defer told.Done()
+			for j := 0; j < serves; j++ {
+				tr.ServedMock(m)
+				tr.Served(tr.Epoch(), e)
+				tr.ServedMockAsRecorded(m)
+			}
+		}()
+	}
+	for i := 0; i < readers; i++ {
+		reading.Add(1)
+		go func() {
+			defer reading.Done()
+			for {
+				select {
+				case <-done:
+					return
+				default:
+				}
+				for k, x := range read() {
+					if x.Live() || x.AsRecorded() == x.viewUnstated() {
+						once.Do(func() {
+							t.Errorf("Raw %d read while adapters told of serves: as recorded %v, a view %v, unstated %v; want unstated or as recorded, never a view no adapter gave", k, x.AsRecorded(), x.Live(), x.viewUnstated())
+						})
+					}
+				}
+			}
+		}()
+	}
+	told.Wait()
+	close(done)
+	reading.Wait()
+	out := read()
+	if len(out) != 1+2*adapters*serves {
+		t.Fatalf("%d Raws read once every adapter was done; want the recording and two of each of the %d exchanges", len(out), adapters*serves)
+	}
+	for k, x := range out {
+		if !x.AsRecorded() || x.Live() || x.viewUnstated() {
+			t.Fatalf("Raw %d read once every serve was told as recorded: as recorded %v, a view %v, unstated %v; want served as recorded", k, x.AsRecorded(), x.Live(), x.viewUnstated())
 		}
 	}
 }
