@@ -79,16 +79,31 @@ type span struct{ start, end int }
 //   - instantScanPasses: the texts scanInstants read, one pass each.
 //   - instantScanSteps: the bytes those passes stepped over, counted in the
 //     loop that steps.
-//   - instantScanTries: the matchers tried, each at a byte its layout's
-//     matches can begin with; each reads at most one match's bytes past it.
+//   - instantScanTries: the matchers tried, counted inside each matcher
+//     (tried), so a matcher called anywhere counts, not only in the scan's
+//     loop; the loop tries each at a byte its layout's matches can begin
+//     with, and each reads at most one match's bytes past it. It counts
+//     only while a row sets countTries: in keploy itself a try costs one
+//     load of that flag, not an add to a counter every handler shares.
 var instantScanPasses, instantScanSteps, instantScanTries atomic.Int64
+
+// countTries, set by a row, has each matcher count its try
+// (instantScanTries).
+var countTries atomic.Bool
+
+// tried counts a matcher's try where a row asks (countTries).
+func tried() {
+	if countTries.Load() {
+		instantScanTries.Add(1)
+	}
+}
 
 // scanInstants is each layout's matches in s, in the order they stand, as
 // FindAllStringIndex of the layout's pattern, folded, gives them: matches[k]
 // for layout k. It reads s once.
 func scanInstants(s string) (matches [numLayouts][]span) {
 	var next [numLayouts]int
-	var steps, tries int64
+	var steps int64
 	for i := 0; i < len(s); i++ {
 		steps++
 		set := layoutStarts[s[i]]
@@ -98,7 +113,6 @@ func scanInstants(s string) (matches [numLayouts][]span) {
 			if i < next[k] {
 				continue
 			}
-			tries++
 			if e := layoutAt[k](s, i); e > i {
 				matches[k] = append(matches[k], span{i, e})
 				next[k] = e
@@ -107,7 +121,6 @@ func scanInstants(s string) (matches [numLayouts][]span) {
 	}
 	instantScanPasses.Add(1)
 	instantScanSteps.Add(steps)
-	instantScanTries.Add(tries)
 	return matches
 }
 
@@ -215,6 +228,7 @@ var (
 // rfc1123At is layout 0:
 // (?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d{2} (?:Jan|…|Dec) \d{4} \d{2}:\d{2}:\d{2} (?:GMT|UTC|[+-]\d{4})
 func rfc1123At(s string, i int) int {
+	tried()
 	j := foldAny(s, i, rfcDays)
 	if j < 0 || !byteIs(s, j, ",") || !byteIs(s, j+1, " ") || !digitsAt(s, j+2, 2) || !byteIs(s, j+4, " ") {
 		return -1
@@ -240,6 +254,7 @@ func rfc1123At(s string, i int) int {
 // isoAt is layout 1:
 // \d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:[.,]\d{1,9})?)?|T\d{2})?(?:Z|[+-]\d{2}(?::?\d{2})?| ?(?:UTC|GMT))?
 func isoAt(s string, i int) int {
+	tried()
 	if !digitsAt(s, i, 4) || !byteIs(s, i+4, "-") || !digitsAt(s, i+5, 2) || !byteIs(s, i+7, "-") || !digitsAt(s, i+8, 2) {
 		return -1
 	}
@@ -285,6 +300,7 @@ func isoAt(s string, i int) int {
 
 // compactAt is layout 2: \d{8}T\d{6}Z?
 func compactAt(s string, i int) int {
+	tried()
 	if !digitsAt(s, i, 8) || !byteIs(s, i+8, "Tt") || !digitsAt(s, i+9, 6) {
 		return -1
 	}
@@ -297,6 +313,7 @@ func compactAt(s string, i int) int {
 // uuidAt is layout 3:
 // [0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[17][0-9a-fA-F]{3}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}
 func uuidAt(s string, i int) int {
+	tried()
 	if !hexAt(s, i, 8) || !byteIs(s, i+8, "-") || !hexAt(s, i+9, 4) || !byteIs(s, i+13, "-") ||
 		!byteIs(s, i+14, "17") || !hexAt(s, i+15, 3) || !byteIs(s, i+18, "-") || !hexAt(s, i+19, 4) ||
 		!byteIs(s, i+23, "-") || !hexAt(s, i+24, 12) {
@@ -308,6 +325,7 @@ func uuidAt(s string, i int) int {
 // epochAt is layout 4: \d{10}\.\d{1,9}|\d{19}|\d{16}|\d{13}|\d{10}, its
 // alternatives tried in that order.
 func epochAt(s string, i int) int {
+	tried()
 	n := digitsFrom(s, i, 19)
 	switch {
 	case n < 10:
@@ -326,6 +344,7 @@ func epochAt(s string, i int) int {
 
 // timeOfDayAt is layout 5: \d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?
 func timeOfDayAt(s string, i int) int {
+	tried()
 	if !digitsAt(s, i, 2) || !byteIs(s, i+2, ":") || !digitsAt(s, i+3, 2) {
 		return -1
 	}

@@ -242,12 +242,15 @@ func startsIn(s string) (n int64) {
 	return n
 }
 
-// readsOnce checks what instantSpans of s did, counted where the scan does
-// it: one pass, each byte stepped over once, and a matcher tried only at a
-// byte its layout's matches can begin with (at least one try when s holds an
+// readsOnce checks what instantSpans of s did, counted where the work is
+// done: one pass, each byte stepped over once, and a matcher tried (counted
+// inside the matchers, wherever one is called) only at a byte its layout's
+// matches can begin with (at least one try when s holds an
 // instant). It returns the spans.
 func readsOnce(t *testing.T, what, s string) []instant {
 	t.Helper()
+	countTries.Store(true)
+	defer countTries.Store(false)
 	passes, steps, tries := instantScanPasses.Load(), instantScanSteps.Load(), instantScanTries.Load()
 	spans := instantSpans(s)
 	if got := instantScanPasses.Load() - passes; got != 1 {
