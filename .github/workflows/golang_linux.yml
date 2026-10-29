@@ -723,3 +723,71 @@ jobs:
           REPLAY_BIN: ${{ steps.replay.outputs.path }}
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/lifetime_tags/golang-linux.sh"
+
+  # Under the proven switch keploy test answers a call keploy's judging marked
+  # as the application's own background work (a "background:" line on that
+  # recording's entry in mappings.yaml) again when the application makes it
+  # once more than recorded, and never requires it. An app stamps a key's use
+  # twice while recording and 3, 1 and 0 times when replayed: marked, 3 and 1
+  # stamps pass (the third answered again, the marked copy left unmade listed
+  # as unused); unmarked, 3 stamps fail on an extra_call miss naming the copy
+  # recorded last and what it writes; marked, 0 stamps fail expecting the
+  # first copy, never the marked one. The app is in this repo
+  # (test_workflow_scripts/golang/background_calls). Not
+  # record_build_replay_latest: the released replay predates the marks.
+  background_calls:
+    timeout-minutes: 30
+    if: ${{ inputs.jobs_to_run == 'all' }}
+    runs-on: ${{ inputs.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - job: record_latest_replay_build
+            record_src: latest
+            replay_src: build
+          - job: record_build_replay_build
+            record_src: build
+            replay_src: build
+    name: background calls answered again (${{ matrix.config.job }})
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/keploy
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Ensure yq
+        run: |
+          # The script reads mocks and reports with yq, which the runner image
+          # ships; install it only if a future image drops it.
+          if command -v yq >/dev/null 2>&1; then
+            echo "using preinstalled $(yq --version)"
+            exit 0
+          fi
+          echo "yq not present on this image; installing"
+          curl -fsSL --retry 5 --retry-delay 2 --retry-connrefused \
+            https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -o yq
+          chmod +x yq
+          sudo mv yq /usr/bin/
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.record_src }}
+
+      - id: replay
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.replay_src }}
+
+      - name: Record, mark, replay
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.replay.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/background_calls/golang-linux.sh"
