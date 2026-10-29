@@ -613,12 +613,22 @@ func (a *App) recentAppLogs(ctx context.Context) string {
 // (docker.ServiceOutputTail), cut, and never `docker logs`. So the stack's
 // containers need no log driver that stores what they print on the docker
 // host's disk, and the answer comes after compose has removed the container.
+// The tail is of the stack's project and of its last Up alone (one test
+// set), as `docker logs` of that Up's container was; with no stack built,
+// nothing ran and there is none.
 func (a *App) recentAppOutput() string {
+	a.composeRunnerMu.Lock()
+	r := a.composeRunnerVal
+	a.composeRunnerMu.Unlock()
+	if r == nil {
+		return ""
+	}
+	project := r.ProjectName()
 	var tail []byte
 	if a.composeService != "" {
-		tail = docker.ServiceOutputTail(a.composeService)
+		tail = docker.ServiceOutputTail(project, a.composeService)
 	} else if a.container != "" {
-		tail = docker.AppOutputTail(a.container)
+		tail = docker.AppOutputTail(project, a.container)
 	}
 	return trimRecentAppLogs(string(tail), 20)
 }

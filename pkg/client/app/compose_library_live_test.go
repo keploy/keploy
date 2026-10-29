@@ -361,3 +361,59 @@ func TestLiveNetworkSweepRemovesTheProjectsNetworks(t *testing.T) {
 		t.Fatalf("the sweep touched another project's network: %v left", other)
 	}
 }
+
+// recentLogsHold waits, a bounded time, for recentAppLogs to answer with a
+// line with want in it: the attach stream may deliver the app's last line
+// just after the run returns.
+func recentLogsHold(t *testing.T, a *App, want string) string {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		got := a.recentAppLogs(context.Background())
+		if strings.Contains(got, want) || time.Now().After(deadline) {
+			return got
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// The whole production path of an app's recent output on keploy's own stack:
+// the stack's Up, its log consumer, the name-to-service mapping (here a
+// container_name), the tail, and recentAppLogs reading it after compose has
+// removed the container. Two runs on one App, with the teardown between them,
+// are two test sets: each reads its own app's output alone, never the run
+// before it, as `docker logs` of that run's container did.
+func TestLiveRecentAppLogsReadsEachRunsOwnOutput(t *testing.T) {
+	project := fmt.Sprintf("keployapplive%d", time.Now().UnixNano()%100000)
+	name := project + "-appc"
+	yaml := fmt.Sprintf(`
+services:
+  app:
+    image: busybox:1.36
+    container_name: %s
+    command: ["sh", "-c", "echo run-of-$(hostname); exit 3"]
+`, name)
+	docker.ForgetAppOutput()
+	t.Cleanup(docker.ForgetAppOutput)
+	a := liveApp(t, project, yaml, "--abort-on-container-exit --exit-code-from app", name)
+	a.composeService = "app"
+
+	var runs []string
+	for i := 1; i <= 2; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+		cmdErr := a.runComposeInProcess(ctx, a.ComposeDown)
+		cancel()
+		if cmdErr.Type != utils.Runtime {
+			t.Fatalf("run %d: type = %q, want Runtime for an app that exits 3; err=%v", i, cmdErr.Type, cmdErr.Err)
+		}
+		a.ComposeDown()
+		got := recentLogsHold(t, a, "run-of-")
+		if strings.Count(got, "run-of-") != 1 || strings.Contains(got, "\n") {
+			t.Fatalf("after run %d recentAppLogs = %q; want the one line this run's app printed", i, got)
+		}
+		runs = append(runs, got)
+	}
+	if runs[0] == runs[1] {
+		t.Fatalf("both runs read %q: the second run's app is a new container, and its output must be its own", runs[0])
+	}
+}

@@ -23,7 +23,6 @@ import (
 	cliflags "github.com/docker/cli/cli/flags"
 	"github.com/docker/compose/v5/pkg/api"
 	"github.com/moby/moby/client"
-	keployLog "go.keploy.io/server/v3/utils/log"
 )
 
 // composeProjectNameEnv is the variable compose itself consults when no
@@ -58,15 +57,21 @@ func (r *ComposeRunner) service() (api.Compose, error) {
 //
 // Each message is one line a container printed, and is cut of the values the
 // log redactor holds (log.RedactChildOutput), as a child process's output is
-// on the shell-out path (utils.ChildConsole). The cut line, and only the cut
-// line, also goes to the container's tail (RecordAppOutput), which is what
-// keploy reads for the app's recent output instead of `docker logs`.
+// on the shell-out path (utils.ChildConsole). Recording the line in the
+// container's tail is what cuts it (appTails.record), and the consumer prints
+// the line the tail holds: the tail is what keploy reads for the app's recent
+// output instead of `docker logs`.
 type composeLogConsumer struct {
 	out io.Writer
 	err io.Writer
 	// serviceOf is the compose service of the container compose names name
 	// in its output; nil when not known.
 	serviceOf func(name string) string
+	// project and run are the compose project and the run of its tails this
+	// consumer's Up started (appTails.startRun). A consumer of an earlier Up,
+	// or one built without them, prints but keeps nothing in the tails.
+	project string
+	run     uint64
 }
 
 func (c composeLogConsumer) Log(containerName, message string) {
@@ -78,12 +83,11 @@ func (c composeLogConsumer) Err(containerName, message string) {
 }
 
 func (c composeLogConsumer) line(w io.Writer, containerName, message string) {
-	cut := keployLog.RedactChildOutput(message)
 	service := ""
 	if c.serviceOf != nil {
 		service = c.serviceOf(containerName)
 	}
-	RecordAppOutput(containerName, service, cut)
+	cut := appOutput.record(c.project, c.run, containerName, service, message)
 	_, _ = fmt.Fprintf(w, "%s  | %s\n", containerName, cut)
 }
 
@@ -443,12 +447,25 @@ func (r *ComposeRunner) Up(ctx context.Context, opts ComposeUpOptions, out, errW
 		},
 		Start: api.StartOptions{
 			Project:      r.project,
-			Attach:       composeLogConsumer{out: out, err: errW, serviceOf: r.serviceOf},
+			Attach:       r.upConsumer(out, errW),
 			AttachTo:     r.attachTo(),
 			OnExit:       opts.OnExit,
 			ExitCodeFrom: strings.TrimSpace(opts.ExitCodeFrom),
 		},
 	})
+}
+
+// upConsumer is the consumer of one Up's attached output. It starts a new run
+// of the project's tails, so what they hold from here on is this Up's output
+// alone: one test set's Up never shows the previous set's lines.
+func (r *ComposeRunner) upConsumer(out, errW io.Writer) composeLogConsumer {
+	return composeLogConsumer{
+		out:       out,
+		err:       errW,
+		serviceOf: r.serviceOf,
+		project:   r.project.Name,
+		run:       appOutput.startRun(r.project.Name),
+	}
 }
 
 // serviceOf is the service of the container compose names name in its

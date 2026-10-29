@@ -3,7 +3,6 @@ package docker
 import (
 	"bytes"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -21,20 +20,34 @@ import (
 // containers run with `--log-driver none`, and keeps one copy of the output,
 // cut, in memory.
 //
-// What it holds is already cut: composeLogConsumer records the line it
-// printed, after log.RedactChildOutput, never the line as it came. A read
-// cuts it again, so a value registered after its line was recorded is cut
-// too.
+// What it holds is already cut: recording a line cuts it of the values the
+// log redactor holds (log.RedactChildOutput) and stores only the cut line,
+// whoever records it. A read cuts it again, so a value registered after its
+// line was recorded is cut too.
+//
+// Each ComposeRunner.Up of a project starts a new run of that project's
+// tails (keploy runs one Up per test set): the tails it held are dropped, and
+// a line that an earlier Up's attach stream still delivers is not recorded.
+// So a tail holds one run's output, as `docker logs` of that run's container
+// did: the app of one test set never shows the previous set's lines as its
+// own, and a set whose app printed nothing reads nothing. A tail stays after
+// compose removed its container, until the project's next Up.
 //
 // It is bounded by bytes, never by time, so a chatty app cannot grow it
-// without limit over a long run:
+// without limit over a long run. The bounds are on the memory the tails'
+// buffers take, not only on the text they hold:
 //
-//   - all containers together hold at most appTailBudget bytes of output;
-//   - each holds at most appTailShare(n) of them, n being how many it holds
-//     now: appTailMaxContainerBytes while few are held, an equal part of the
-//     budget once more are, and never less than appTailMinContainerBytes;
-//   - so it holds at most appTailBudget/appTailMinContainerBytes containers.
-//     Past that, the one that printed least recently goes, whole.
+//   - at most appTailMaxContainers containers are held; past that, the one
+//     that printed least recently goes, whole;
+//   - each of the n held takes at most appTailShare(n) bytes of buffer:
+//     appTailMaxContainerBytes while few are held, an equal part of
+//     appTailBudget once more are (so never less than appTailBudget /
+//     appTailMaxContainers, 64 KiB);
+//   - so all buffers together take at most appTailBudget bytes. A buffer is
+//     sized from the text it keeps (room to grow to twice it, never past its
+//     share), and one whose share shrank is reallocated to fit the new share.
+//     While one line is recorded, its container may briefly take one more
+//     buffer of at most twice its share.
 //
 // A container that crashed stops printing and so stays the longest, until
 // that many newer containers print: the crashed one is the one whose output
@@ -47,21 +60,29 @@ import (
 const (
 	appTailBudget            = 16 << 20
 	appTailMaxContainerBytes = 4 << 20
-	appTailMinContainerBytes = 64 << 10
-	appTailMaxContainers     = appTailBudget / appTailMinContainerBytes
+	appTailMaxContainers     = 256
+	// appTailMaxRuns bounds the runs remembered, one per compose project
+	// this process brought up. Past it, the run that started least recently
+	// among the projects that hold no tail is forgotten (see forgetRunLocked).
+	appTailMaxRuns = 4096
 )
 
-// AppOutput is one container's tail: Name as compose names the container in
-// its output (the container_name its service declares, else
+// AppOutput is one container's tail: Project the compose project it ran in,
+// Name as compose names the
+// container in its output (the container_name its service declares, else
 // <service>-<number>), Service its compose service when known, Text its last
 // lines, each ended by "\n", and Dropped the bytes of older output it no
 // longer holds.
 type AppOutput struct {
+	Project string
 	Name    string
 	Service string
 	Text    []byte
 	Dropped int64
 }
+
+// tailKey is one container of one compose project.
+type tailKey struct{ project, name string }
 
 type appTail struct {
 	service string
@@ -75,16 +96,30 @@ type appTail struct {
 	first time.Time
 }
 
-type appTails struct {
-	mu   sync.Mutex
-	m    map[string]*appTail
-	seq  uint64
+// tailRun is a compose project's current run: the Up its tails are of.
+type tailRun struct {
+	id uint64
+	// gone is how many of this run's tails were dropped whole to stay in
+	// budget.
 	gone int
 }
 
-var appOutput = &appTails{m: map[string]*appTail{}}
+type appTails struct {
+	mu   sync.Mutex
+	m    map[tailKey]*appTail
+	runs map[string]*tailRun
+	seq  uint64
+}
 
-// appTailShare is the most one container holds while n are held.
+var appOutput = newAppTails()
+
+func newAppTails() *appTails {
+	return &appTails{m: map[tailKey]*appTail{}, runs: map[string]*tailRun{}}
+}
+
+// appTailShare is the most buffer one container takes while n are held. With
+// n at most appTailMaxContainers, n shares together are at most
+// appTailBudget.
 func appTailShare(n int) int {
 	if n < 1 {
 		n = 1
@@ -93,29 +128,92 @@ func appTailShare(n int) int {
 	if share > appTailMaxContainerBytes {
 		share = appTailMaxContainerBytes
 	}
-	if share < appTailMinContainerBytes {
-		share = appTailMinContainerBytes
-	}
 	return share
 }
 
-// RecordAppOutput adds one line the container compose names name printed,
-// already cut, without its line end, to that container's tail. service is
-// its compose service, or "" when not known.
-func RecordAppOutput(name, service, line string) {
-	appOutput.record(name, service, line)
-}
-
-func (s *appTails) record(name, service, line string) {
+// startRun starts a new run of project's tails, for one Up: it drops the
+// tails the project holds, and returns the run's id, which the Up's consumer
+// records with. A line recorded with an earlier id is not kept.
+func (s *appTails) startRun(project string) uint64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	t := s.m[name]
+	for k := range s.m {
+		if k.project == project {
+			delete(s.m, k)
+		}
+	}
+	s.seq++
+	s.runs[project] = &tailRun{id: s.seq}
+	if len(s.runs) > appTailMaxRuns {
+		s.forgetRunLocked()
+	}
+	return s.seq
+}
+
+// forgetRunLocked forgets the run that started least recently among the
+// projects that hold no tail. One always exists: there are more runs than the
+// appTailMaxContainers tails can belong to. A line that the forgotten run's Up
+// still delivers is then not kept, which loses output, never mixes it.
+func (s *appTails) forgetRunLocked() {
+	holding := make(map[string]bool, len(s.m))
+	for k := range s.m {
+		holding[k.project] = true
+	}
+	oldest := ""
+	var oldestRun *tailRun
+	for project, r := range s.runs {
+		if !holding[project] && (oldestRun == nil || r.id < oldestRun.id) {
+			oldest, oldestRun = project, r
+		}
+	}
+	if oldestRun != nil {
+		delete(s.runs, oldest)
+	}
+}
+
+// RecordAppOutput adds one line that project's container compose names name
+// printed, without its line end, to that container's tail in the project's
+// current run, cut first of the values the log redactor holds: only the cut
+// line is held, whoever records it. service is its compose service, or ""
+// when not known. ComposeRunner.Up's consumer records what the stack prints;
+// this is for output that reaches keploy another way, and for tests.
+func RecordAppOutput(project, name, service, line string) {
+	cut := keployLog.RedactChildOutput(line)
+	s := appOutput
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.runs[project] == nil {
+		s.seq++
+		s.runs[project] = &tailRun{id: s.seq}
+		if len(s.runs) > appTailMaxRuns {
+			s.forgetRunLocked()
+		}
+	}
+	s.addLocked(tailKey{project: project, name: name}, service, cut)
+}
+
+// record cuts one line a container of project printed (without its line end)
+// of the values the log redactor holds, adds the cut line to the container's
+// tail when run is the project's current run, and returns the cut line, for
+// the consumer to print.
+func (s *appTails) record(project string, run uint64, name, service, line string) string {
+	cut := keployLog.RedactChildOutput(line)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if r := s.runs[project]; r != nil && r.id == run {
+		s.addLocked(tailKey{project: project, name: name}, service, cut)
+	}
+	return cut
+}
+
+func (s *appTails) addLocked(k tailKey, service, line string) {
+	t := s.m[k]
 	if t == nil {
 		if len(s.m) >= appTailMaxContainers {
 			s.evictOldestLocked()
 		}
 		t = &appTail{first: time.Now()}
-		s.m[name] = t
+		s.m[k] = t
 		// One more container: every tail gets a smaller share.
 		share := appTailShare(len(s.m))
 		for _, other := range s.m {
@@ -133,26 +231,51 @@ func (s *appTails) record(name, service, line string) {
 		t.dropped += int64(cut)
 		line = line[cut:]
 	}
-	t.buf = append(t.buf, line...)
-	t.buf = append(t.buf, '\n')
+	t.add(line, share)
 	t.trim(share)
 }
 
 func (s *appTails) evictOldestLocked() {
-	var oldest string
+	var oldest tailKey
 	var oldestTail *appTail
-	for name, t := range s.m {
+	for k, t := range s.m {
 		if oldestTail == nil || t.last < oldestTail.last {
-			oldest, oldestTail = name, t
+			oldest, oldestTail = k, t
 		}
 	}
 	delete(s.m, oldest)
-	s.gone++
+	if r := s.runs[oldest.project]; r != nil {
+		r.gone++
+	}
+}
+
+// add appends line and its "\n" to the tail. A buffer it has to grow grows to
+// twice its size, but not past limit unless the line needs it; trim then
+// brings it back within limit.
+func (t *appTail) add(line string, limit int) {
+	need := len(t.buf) + len(line) + 1
+	if need > cap(t.buf) {
+		c := 2 * cap(t.buf)
+		if c > limit {
+			c = limit
+		}
+		if c < need {
+			c = need
+		}
+		grown := make([]byte, len(t.buf), c)
+		copy(grown, t.buf)
+		t.buf = grown
+	}
+	t.buf = append(t.buf, line...)
+	t.buf = append(t.buf, '\n')
 }
 
 // trim drops the tail's oldest whole lines until it holds at most limit
-// bytes. It drops down to three quarters of limit, so the copy it makes is
-// paid once per quarter of limit appended, not once per line.
+// bytes, and leaves it a buffer of at most limit bytes. It drops down to
+// three quarters of limit, so the copy it makes is paid once per quarter of
+// limit appended, not once per line. A tail that already holds no more than
+// limit keeps its text, and is moved to a buffer that fits when its buffer is
+// larger than limit (its share shrank).
 //
 // The last line is never dropped for being long: the cut never moves past
 // its start. When it alone is longer than three quarters of limit it is kept
@@ -160,6 +283,9 @@ func (s *appTails) evictOldestLocked() {
 // end, where a stack trace ends), and the rest of it counts as dropped.
 func (t *appTail) trim(limit int) {
 	if len(t.buf) <= limit {
+		if cap(t.buf) > limit {
+			t.keepFrom(0, limit)
+		}
 		return
 	}
 	keep := limit * 3 / 4
@@ -178,40 +304,57 @@ func (t *appTail) trim(limit int) {
 		cut = len(t.buf) - limit
 	}
 	t.dropped += int64(cut)
-	kept := make([]byte, len(t.buf)-cut, limit)
-	copy(kept, t.buf[cut:])
+	t.keepFrom(cut, limit)
+}
+
+// keepFrom moves buf[from:] to a buffer of its own, sized from what it keeps:
+// room to grow to twice its length, never past limit (but always room for
+// the text).
+func (t *appTail) keepFrom(from, limit int) {
+	n := len(t.buf) - from
+	c := 2 * n
+	if c > limit {
+		c = limit
+	}
+	if c < n {
+		c = n
+	}
+	kept := make([]byte, n, c)
+	copy(kept, t.buf[from:])
 	t.buf = kept
 }
 
-// AppOutputTail is one container's tail, cut again of the values the log
-// redactor holds now, or nil when it holds none for name.
-func AppOutputTail(name string) []byte {
-	s := appOutput
-	s.mu.Lock()
-	return s.copyAndUnlock(s.m[name])
+// AppOutputTail is the tail of project's container compose names name, cut
+// again of the values the log redactor holds now, or nil when it holds none
+// for it in the project's current run.
+func AppOutputTail(project, name string) []byte {
+	return appOutput.newest(project, func(k tailKey, _ *appTail) bool { return k.name == name })
 }
 
-// ServiceOutputTail is the tail of the compose service's container that
-// printed last, cut again as AppOutputTail cuts it, or nil when it holds
-// none for service. It needs no daemon, so it answers after the container is
-// gone.
-func ServiceOutputTail(service string) []byte {
-	s := appOutput
+// ServiceOutputTail is the tail of the container of project's compose
+// service that printed last, cut again as AppOutputTail cuts it, or nil when
+// it holds none for service in the project's current run. It needs no
+// daemon, so it answers after the container is gone.
+func ServiceOutputTail(project, service string) []byte {
+	if service == "" {
+		return nil
+	}
+	return appOutput.newest(project, func(_ tailKey, t *appTail) bool { return t.service == service })
+}
+
+// newest is the text of project's tail that printed last of those match
+// accepts, cut again, or nil when none is held.
+func (s *appTails) newest(project string, match func(tailKey, *appTail) bool) []byte {
 	s.mu.Lock()
 	var newest *appTail
-	for _, t := range s.m {
-		if service != "" && t.service == service && (newest == nil || t.last > newest.last) {
+	for k, t := range s.m {
+		if k.project == project && match(k, t) && (newest == nil || t.last > newest.last) {
 			newest = t
 		}
 	}
-	return s.copyAndUnlock(newest)
-}
-
-// copyAndUnlock copies t's text, unlocks s, and cuts the copy again.
-func (s *appTails) copyAndUnlock(t *appTail) []byte {
 	var text []byte
-	if t != nil {
-		text = append([]byte(nil), t.buf...)
+	if newest != nil {
+		text = append([]byte(nil), newest.buf...)
 	}
 	s.mu.Unlock()
 	if text == nil {
@@ -222,7 +365,7 @@ func (s *appTails) copyAndUnlock(t *appTail) []byte {
 
 // AppOutputTails is every container's tail, cut again as AppOutputTail cuts
 // it, in the order the containers first printed, and how many containers'
-// tails were dropped whole to stay in budget.
+// tails of the projects' current runs were dropped whole to stay in budget.
 func AppOutputTails() ([]AppOutput, int) {
 	s := appOutput
 	s.mu.Lock()
@@ -231,20 +374,27 @@ func AppOutputTails() ([]AppOutput, int) {
 		first time.Time
 	}
 	all := make([]held, 0, len(s.m))
-	for name, t := range s.m {
+	for k, t := range s.m {
 		all = append(all, held{
-			out:   AppOutput{Name: name, Service: t.service, Text: append([]byte(nil), t.buf...), Dropped: t.dropped},
+			out:   AppOutput{Project: k.project, Name: k.name, Service: t.service, Text: append([]byte(nil), t.buf...), Dropped: t.dropped},
 			first: t.first,
 		})
 	}
-	gone := s.gone
+	gone := 0
+	for _, r := range s.runs {
+		gone += r.gone
+	}
 	s.mu.Unlock()
 
 	sort.SliceStable(all, func(i, j int) bool {
-		if all[i].first.Equal(all[j].first) {
-			return all[i].out.Name < all[j].out.Name
+		a, b := all[i], all[j]
+		if !a.first.Equal(b.first) {
+			return a.first.Before(b.first)
 		}
-		return all[i].first.Before(all[j].first)
+		if a.out.Project != b.out.Project {
+			return a.out.Project < b.out.Project
+		}
+		return a.out.Name < b.out.Name
 	})
 	outs := make([]AppOutput, len(all))
 	for i, h := range all {
@@ -254,30 +404,33 @@ func AppOutputTails() ([]AppOutput, int) {
 	return outs, gone
 }
 
-// cutAgain cuts each line of text of the values the log redactor holds now.
+// cutAgain cuts each line of text, a copy the caller owns, of the values the
+// log redactor holds now.
 func cutAgain(text []byte) []byte {
 	if !keployLog.CutsChildOutput() {
 		return text
 	}
-	lines := strings.SplitAfter(string(text), "\n")
-	var b strings.Builder
+	var b bytes.Buffer
 	b.Grow(len(text))
-	for _, l := range lines {
-		body, ended := strings.CutSuffix(l, "\n")
-		b.WriteString(keployLog.RedactChildOutput(body))
+	for rest := text; len(rest) > 0; {
+		body, after, ended := bytes.Cut(rest, []byte{'\n'})
+		b.WriteString(keployLog.RedactChildOutput(string(body)))
 		if ended {
 			b.WriteByte('\n')
 		}
+		rest = after
 	}
-	return []byte(b.String())
+	return b.Bytes()
 }
 
-// ForgetAppOutput drops every container's tail. For tests, and for a process
-// that runs more than one replay and wants each one's tails alone.
+// ForgetAppOutput drops every container's tail and every count of tails
+// dropped. For tests. A run in progress keeps recording into fresh tails.
 func ForgetAppOutput() {
 	s := appOutput
 	s.mu.Lock()
-	s.m = map[string]*appTail{}
-	s.gone = 0
+	s.m = map[tailKey]*appTail{}
+	for _, r := range s.runs {
+		r.gone = 0
+	}
 	s.mu.Unlock()
 }
