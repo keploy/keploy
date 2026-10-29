@@ -64,7 +64,7 @@ func TestGetAlias_LinuxNamesTheToken(t *testing.T) {
 		AgentPort:       16790,
 		AgentURI:        agentURI,
 		Mode:            models.MODE_RECORD,
-	}, false)
+	}, &config.Config{})
 	require.NoError(t, err)
 
 	client := linuxDockerClient(os.Geteuid() == 0, true)

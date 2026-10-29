@@ -5,11 +5,14 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml/mapdb"
@@ -163,4 +166,82 @@ func TestAJudgedRecordKeepsItsCleanTestsOverAPIDMapRefusal(t *testing.T) {
 	raw, rerr := os.ReadFile(filepath.Join(setDir, "mocks.yaml"))
 	require.NoError(t, rerr, "the recording was not kept")
 	require.Contains(t, string(raw), "mock-0")
+}
+
+// gapRunner is a record's runner whose agent counts what the kernel dropped
+// at its proxy listener after the run's last test (drops) only once a read
+// closes the drops' window no test holds -- its read of what no test was
+// charged with (the agent's closeDropsGap) -- as the agent does: until
+// then its count of the losses has none of it. tls is a TLS handshake
+// abandoned at the same moment, which the agent counts as it happens.
+type gapRunner struct {
+	*runnerInstr
+	mu         sync.Mutex
+	reads      int
+	closed     bool
+	drops, tls models.CaptureLosses
+}
+
+func (g *gapRunner) GetCaptureLosses(context.Context) (models.CaptureLosses, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.reads++
+	if g.reads == 1 {
+		return nil, nil // the base, as the test command starts
+	}
+	out := append(models.CaptureLosses(nil), g.tls...)
+	if g.closed {
+		out = append(out, g.drops...)
+	}
+	return out, nil
+}
+
+func (g *gapRunner) GetUnchargedCaptureLosses(context.Context) (models.CaptureLosses, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.closed = true
+	return append(append(models.CaptureLosses(nil), g.drops...), g.tls...), nil
+}
+
+// A connection attempt the kernel dropped at keploy's proxy listener after
+// a judged record's last test is the run's, where a TLS handshake abandoned
+// at the same moment is: the record's warning says it, and its per-test
+// file's CannotCapture carries it for judging, which leaves the recording
+// not judged on it as on the handshake; no test is charged with it. Before,
+// the record read the run's losses before the only read that counts such a
+// drop, which kept only the judged part of what it read: the drop was in
+// nothing the record wrote.
+func TestADropAfterAMockRecordsLastTestIsInWhatItCannotCapture(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	judgedBuild(t)
+	drop := models.CaptureLoss{Kind: models.CaptureLossListenerDropped, Count: 1}
+	tls := models.CaptureLoss{Kind: models.CaptureLossTLSAbandoned, Count: 1, What: "to 10.0.0.1:443"}
+	dir := t.TempDir()
+	w := mark("orders::TestA", 0, 10*time.Millisecond)
+	w.Outcome, w.Dir = models.ScopeOutcomePassed, "orders"
+	runner := &runnerInstr{composeInstr: newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped}),
+		windows: []models.ScopeWindow{w}}
+	runner.mocks = []*models.Mock{mockAt("mock-0", runnerT0.Add(5*time.Millisecond))}
+	instr := &gapRunner{runnerInstr: runner, drops: models.CaptureLosses{drop}, tls: models.CaptureLosses{tls}}
+	cfg := instrConfig(runner.composeInstr, utils.Native, "go test -p 1 -json ./...")
+	cfg.Path = dir
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = 0 })
+	core, logs := observer.New(zapcore.DebugLevel)
+	svc := New(zap.New(core), instr, mockdb.New(zap.NewNop(), dir, ""), mapdb.New(zap.NewNop(), dir, ""), nil, nil, cfg)
+	require.NoError(t, svc.Record(context.Background()))
+	require.Zero(t, utils.ErrCode)
+	set := (&mockService{config: cfg}).setName()
+	r, err := ReadRecordTestsReceipt(dir, set)
+	require.NoError(t, err)
+	require.NotNil(t, r, "no per-test file")
+	require.ElementsMatch(t, models.CaptureLosses{drop, tls}, r.CannotCapture, "the drop is the run's, as the handshake is")
+	require.Empty(t, r.CaptureLosses, "neither is a judged loss")
+	a := receiptTest(r, "orders::TestA")
+	require.NotNil(t, a)
+	require.Nil(t, a.Evidence, "no test is charged with either")
+	out := logged(logs)
+	require.Contains(t, out, "the recording is kept, but")
+	require.Contains(t, out, "the kernel dropped 1 connection attempt(s) at keploy's proxy listener")
+	require.Contains(t, out, "a client hung up on 1 TLS handshake(s)")
 }

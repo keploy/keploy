@@ -25,7 +25,7 @@ func TestGetAlias_LinuxCarriesTheProvenSwitch(t *testing.T) {
 	flag := " --" + provenswitch.AgentFlag
 
 	t.Setenv(provenswitch.Env, "")
-	off, err := getAlias(context.Background(), zap.NewNop(), opts, false)
+	off, err := getAlias(context.Background(), zap.NewNop(), opts, &config.Config{})
 	if err != nil {
 		t.Fatalf("getAlias: %v", err)
 	}
@@ -34,7 +34,7 @@ func TestGetAlias_LinuxCarriesTheProvenSwitch(t *testing.T) {
 	}
 
 	t.Setenv(provenswitch.Env, "1")
-	on, err := getAlias(context.Background(), zap.NewNop(), opts, false)
+	on, err := getAlias(context.Background(), zap.NewNop(), opts, &config.Config{})
 	if err != nil {
 		t.Fatalf("getAlias: %v", err)
 	}

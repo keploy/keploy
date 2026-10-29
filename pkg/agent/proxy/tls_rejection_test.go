@@ -188,7 +188,7 @@ func TestARecordUpgradersHandshakeIsChargedAndItsErrorIsItsOwn(t *testing.T) {
 	}()
 	p := &Proxy{logger: zap.NewNop()}
 	p.BeginTestErrorCapture() // a test is running: an abandon is charged within it
-	_, _, err := p.clientTLSHandler("10.0.0.5:3306")(context.Background(), zap.NewNop(), src, time.Time{})
+	_, _, err := p.clientTLSHandler("10.0.0.5:3306", 0)(context.Background(), zap.NewNop(), src, time.Time{})
 	if err != io.EOF {
 		t.Fatalf("the upgrader's handshake returned %v (%T), want io.EOF itself", err, err)
 	}
@@ -209,7 +209,7 @@ func TestARecordUpgradersClientSilentSinceItsHandshakeAbandonedIt(t *testing.T) 
 	}()
 	p := &Proxy{logger: zap.NewNop()}
 	p.BeginTestErrorCapture() // a test is running: an abandon is charged within it
-	conn, _, err := p.clientTLSHandler("10.0.0.5:5432")(context.Background(), zap.NewNop(), src, time.Time{})
+	conn, _, err := p.clientTLSHandler("10.0.0.5:5432", 0)(context.Background(), zap.NewNop(), src, time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -277,7 +277,7 @@ func TestAFailedClientTLSUpgradeIsChargedAsAnyClientHandshake(t *testing.T) {
 			}, src, connseq.NewUpstream(dst))
 			// As recordViaSupervisor runs it: what the relay's client-side
 			// handshakes lose is charged to the destination.
-			ctx, cancel := context.WithCancel(p.withClientTLS(context.Background(), remoteOf(dst)))
+			ctx, cancel := context.WithCancel(p.withClientTLS(context.Background(), remoteOf(dst), 0))
 			ran := make(chan struct{})
 			go func() { defer close(ran); _ = r.Run(ctx) }()
 			t.Cleanup(func() { cancel(); _ = app.Close(); _ = upstream.Close(); <-ran })

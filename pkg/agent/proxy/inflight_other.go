@@ -12,3 +12,6 @@ func socketReceived(syscall.RawConn) (received uint64, state uint8, ok bool) { r
 
 // finReceived is never asked off Linux (socketReceived).
 func finReceived(uint8, bool) bool { return false }
+
+// clientGone: the kernel's TCP state is not read on this platform.
+func clientGone(uint8) bool { return false }

@@ -55,3 +55,16 @@ func finReceived(state uint8, eof bool) bool {
 	}
 	return false
 }
+
+// clientGone reports whether a socket in TCP state state, which its handler
+// has not closed, has received its client's FIN or a reset: CLOSE_WAIT,
+// LAST_ACK and CLOSING are reached only by a FIN, and TCP_CLOSE, for a
+// socket still open, by a reset, or by a FIN once keploy's own half-close
+// was answered (FIN_WAIT2 ended). Either way the client has gone.
+func clientGone(state uint8) bool {
+	switch state {
+	case tcpCloseWait, tcpLastAck, tcpClosing, tcpClose:
+		return true
+	}
+	return false
+}

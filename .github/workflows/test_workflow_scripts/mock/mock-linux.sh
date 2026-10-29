@@ -7,12 +7,14 @@
 #
 # Both ways. Steps 1-5 run without the proven switch: the record and replay
 # today's users run, on their default (the flip deletes them with the switch,
-# as this build refuses every replay under it). Steps 6-7 run under
+# as this build refuses every replay under it). Steps 6-8 run under
 # KEPLOY_PROVEN=1, which the flip makes the default: the record keeps each
 # test's mocks and begin under the test's ID, and this build, which does not
 # judge each test (keploy enterprise does), refuses the replay before it runs
-# the test command. The suite's harness speaks scope protocol v1 both ways
-# (keploy_v1.py, conftest_v1.py); without the switch it sends the worker's
+# the test command; a TLS client's hang-ups are charged only for a process
+# that sends no call through keploy's certificate in the same test. The
+# suite's harness speaks scope protocol v1 both ways (keploy_v1.py,
+# conftest_v1.py); without the switch it sends the worker's
 # pid, as today's workers do, and the record and the gated replay run again
 # with no pid (KEPLOY_E2E_NO_PID), the optional single shared pool.
 # MOCK_LANE_SWITCH (lane_switch.sh) picks the half a run runs; CI runs each in
@@ -440,6 +442,150 @@ grep -qx 'exitCode: 1' "$R" || { echo "FAIL: the refused replay's receipt does n
 grep -qx 'failedBy: setup' "$R" || { echo "FAIL: the refused replay's receipt does not blame its setup"; FAIL=1; }
 grep -qx 'isolationNote: the test command never ran' "$R" || { echo "FAIL: the refused replay's receipt does not say the test command never ran"; FAIL=1; }
 grep -qx 'isolated: false' "$R" || { echo "FAIL: the refused replay's receipt claims isolation"; FAIL=1; }
+
+echo "== 8. under the proven switch, a TLS hang-up of a process that calls through keploy's certificate in the same test is a cancel =="
+# A client that hangs up on keploy's TLS server once keploy's certificate is
+# in, without a word, may have rejected it (Node.js, curl and libcurl reject
+# so), and its test is not judged (tls_handshake_abandoned). A browser hangs
+# up so all the time while it trusts keploy's CA: it opens connections ahead
+# of a page's calls and drops the ones it does not use, the first of the run
+# among them. Under the switch a process that sends a call through keploy's
+# certificate trusts keploy's CA, so its hang-ups in the same test, before
+# that call or after it, are cancels; a process that sends none is charged.
+# tls_client.py is the test command's TLS client, on a TLS dependency on
+# loopback (tlsdep.py, its own self-signed certificate; keploy does not
+# verify upstreams by default):
+#   call    a GET through keploy's certificate, which keploy decrypts
+#   spare   a handshake the client finishes, trusting keploy's certificate
+#           (the default store, which keploy puts its CA in for the run),
+#           then drops without a word, its Finished never sent: a browser's
+#           unused connection
+#   reject  a handshake against a store with only the dependency's own
+#           certificate: the client rejects keploy's and hangs up without a
+#           word, its alert never sent, as Node.js does
+# test_tls.py: test_spare_first (the process's first TLS event of the run is
+# a spare, then its call: held, then a cancel), test_spare_after (its call,
+# then a spare: a cancel), test_reject (another process rejects, then this
+# process, trusted, calls: charged). Only test_reject's hang-up is charged;
+# a build without the trust charges each spare too ("on 3").
+TLS_PORT=18998
+openssl req -x509 -newkey rsa:2048 -nodes -keyout tlsdep.key -out tlsdep.pem -days 2 \
+  -subj /CN=localhost -addext subjectAltName=DNS:localhost >/dev/null 2>&1 ||
+  { echo "FAIL: could not make the TLS dependency's certificate"; FAIL=1; }
+cat > tlsdep.py <<'PY'
+import http.server, json, socketserver, ssl, sys
+PORT = int(sys.argv[1])
+ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+ctx.load_cert_chain("tlsdep.pem", "tlsdep.key")
+class H(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    def do_GET(self):
+        body = json.dumps({"path": self.path}).encode()
+        self.send_response(200); self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body))); self.send_header("Connection", "close")
+        self.end_headers(); self.wfile.write(body)
+    def log_message(self, *a): pass
+class S(socketserver.ThreadingTCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+    def finish_request(self, request, client_address):
+        # The handshake in the connection's own thread: one that never
+        # finishes holds up no other.
+        try:
+            request = ctx.wrap_socket(request, server_side=True)
+        except (ssl.SSLError, OSError):
+            return
+        self.RequestHandlerClass(request, client_address, self)
+with S(("127.0.0.1", PORT), H) as s:
+    print("ready", flush=True)
+    s.serve_forever()
+PY
+cat > tls_client.py <<PY
+import socket, ssl, sys
+PORT, HOST, NAME = $TLS_PORT, "127.0.0.1", "localhost"
+
+def trusting():
+    # The default store, which keploy puts its CA in for the run.
+    return ssl.create_default_context()
+
+def rejecting():
+    # Only the dependency's own certificate: keploy's is not trusted.
+    return ssl.create_default_context(cafile="tlsdep.pem")
+
+def call(path):
+    with socket.create_connection((HOST, PORT)) as raw:
+        with trusting().wrap_socket(raw, server_hostname=NAME) as s:
+            s.sendall(("GET %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n" % (path, NAME)).encode())
+            data = b""
+            while True:
+                b = s.recv(65536)
+                if not b:
+                    break
+                data += b
+    head, _, body = data.partition(b"\r\n\r\n")
+    assert head.startswith(b"HTTP/1.1 200"), head
+    return body
+
+def hang_up(ctx):
+    # A handshake with ctx, ended without a word once the client is done
+    # with keploy's certificate: "done" (accepted; its Finished never sent)
+    # or "rejected" (its alert never sent). Only the ClientHello is sent.
+    raw = socket.create_connection((HOST, PORT))
+    inc, out = ssl.MemoryBIO(), ssl.MemoryBIO()
+    tls = ctx.wrap_bio(inc, out, server_hostname=NAME)
+    hello_sent = False
+    try:
+        while True:
+            try:
+                tls.do_handshake()
+                return "done"
+            except ssl.SSLWantReadError:
+                if not hello_sent:
+                    raw.sendall(out.read())
+                    hello_sent = True
+                b = raw.recv(65536)
+                if not b:
+                    return "closed by keploy"
+                inc.write(b)
+            except ssl.SSLCertVerificationError:
+                return "rejected"
+    finally:
+        raw.close()
+
+if __name__ == "__main__":
+    print(hang_up(rejecting() if sys.argv[1] == "reject" else trusting()))
+PY
+cat > test_tls.py <<'PY'
+import subprocess, sys
+from tls_client import call, hang_up, trusting
+def test_spare_first():
+    assert hang_up(trusting()) == "done"
+    assert b'"/tls/first"' in call("/tls/first")
+def test_spare_after():
+    assert b'"/tls/after"' in call("/tls/after")
+    assert hang_up(trusting()) == "done"
+def test_reject():
+    r = subprocess.run([sys.executable, "tls_client.py", "reject"], capture_output=True, text=True)
+    assert r.stdout.strip() == "rejected", r.stdout + r.stderr
+    assert b'"/tls/reject"' in call("/tls/reject")
+PY
+: > tlsdep.log
+python3 tlsdep.py "$TLS_PORT" >tlsdep.log 2>&1 &
+DEP_PID=$!
+until grep -qx ready tlsdep.log 2>/dev/null; do
+  kill -0 "$DEP_PID" 2>/dev/null || { echo "FAIL: the TLS dependency exited before it listened"; cat tlsdep.log; exit 1; }
+  sleep 0.1
+done
+sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$RECORD_BIN" mock record -c "python3 -m pytest -q -p no:cacheprovider test_tls.py" --name e2e-tls --disable-tele 2>&1 | tee rec-tls.log
+RC=${PIPESTATUS[0]}
+stop_dep
+[ "$RC" -eq 0 ] && grep -q "3 passed" rec-tls.log || { echo "FAIL: the TLS record should pass (exit 0, 3 passed), got $RC"; FAIL=1; }
+# keploy decrypted each call: what makes its process trusted.
+MOCKS=$(grep -c '^kind: Http' keploy/e2e-tls/mocks.yaml 2>/dev/null)
+[ "${MOCKS:-0}" -eq 3 ] || { echo "FAIL: want the 3 TLS calls recorded, decrypted, got ${MOCKS:-0} Http mocks"; FAIL=1; }
+HUNG=$(grep -o 'a client hung up on [0-9]* TLS handshake(s)' rec-tls.log | sort -u)
+[ "$HUNG" = "a client hung up on 1 TLS handshake(s)" ] ||
+  { echo "FAIL: want only the rejecting process's hang-up charged (a client hung up on 1 TLS handshake(s)), got: ${HUNG:-none}"; FAIL=1; }
 fi
 
 if [ "$FAIL" -eq 0 ]; then echo "MOCK E2E: PASSED"; else echo "MOCK E2E: FAILED"; fi

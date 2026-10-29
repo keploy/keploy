@@ -11,7 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -550,8 +550,8 @@ func TestTheMarkedListenersDropsAreItsOwn(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer ln.Close()
-	if n, err := p.ListenDrops(); err != nil || n != 0 {
-		t.Fatalf("a fresh marked listener's drops: %d, %v; want 0", n, err)
+	if n, err := p.ListenDrops(); err != nil || n.Listener != 0 {
+		t.Fatalf("a fresh marked listener's drops: %+v, %v; want 0", n, err)
 	}
 	rc, err := ln.(*net.TCPListener).SyscallConn()
 	if err != nil {
@@ -576,8 +576,83 @@ func TestTheMarkedListenersDropsAreItsOwn(t *testing.T) {
 			time.Sleep(time.Millisecond)
 		}
 	}
-	if n, err := p.ListenDrops(); err != nil || n < raw {
-		t.Fatalf("the marked listener's drops: %d, %v; want at least the kernel's %d", n, err, raw)
+	if n, err := p.ListenDrops(); err != nil || n.Listener < raw {
+		t.Fatalf("the marked listener's drops: %+v, %v; want at least the kernel's %d", n, err, raw)
+	}
+}
+
+// A namespace count keploy cannot read is said, never read as 0: ListenDrops
+// gives it as unread, with why, so every drop at the listener counts (the
+// agent's chargeDrops). A 0 there would charge every real drop min(own, 0),
+// nothing.
+func TestANamespaceCountNotReadIsUnreadNeverNone(t *testing.T) {
+	p := New(zap.NewNop(), plainDestInfo{}, config.New())
+	p.SetListenerCounter(&fakeCounter{})
+	ln, err := p.listen(context.Background(), ":0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	// Without CAP_NET_ADMIN the listener's namespace cannot be told
+	// (SIOCGSKNS) either: unread too, with that why. A process that holds
+	// it (root, as CI's listener-drops job runs this row) must be told, so
+	// that the netstat half below is checked where CI can fail it.
+	d, err := p.ListenDrops()
+	if err != nil || d.NetKnown != (d.NetUnread == "") {
+		t.Fatalf("the namespace's count: %+v, %v; want it read, or unread with why", d, err)
+	}
+	told := d.NetKnown || !strings.Contains(d.NetUnread, "SIOCGSKNS")
+	if !told && holdsNetAdmin(t) {
+		t.Fatalf("the namespace's count with CAP_NET_ADMIN held: %+v; want the listener's namespace told (SIOCGSKNS), so its netstat missing is checked", d)
+	}
+	was := netstatPath
+	t.Cleanup(func() { netstatPath = was })
+	netstatPath = filepath.Join(t.TempDir(), "no-netstat")
+	d, err = p.ListenDrops()
+	if err != nil {
+		t.Fatalf("the listener's own count is read whatever the namespace's: %v", err)
+	}
+	if d.NetKnown || d.Net != 0 || d.NetUnread == "" {
+		t.Fatalf("the namespace's count, unreadable: %+v; want it unread, with why", d)
+	}
+	if told && !strings.Contains(d.NetUnread, "read the network namespace's TCP counters") {
+		t.Fatalf("the namespace's count, its netstat missing: %+v; want that why", d)
+	}
+}
+
+// holdsNetAdmin says whether this process holds CAP_NET_ADMIN in its
+// effective set: with it, the kernel tells a socket's network namespace
+// (SIOCGSKNS) in the process's own.
+func holdsNetAdmin(t *testing.T) bool {
+	hdr := unix.CapUserHeader{Version: unix.LINUX_CAPABILITY_VERSION_3}
+	var data [2]unix.CapUserData
+	if err := unix.Capget(&hdr, &data[0]); err != nil {
+		t.Fatalf("read this process's capabilities: %v", err)
+	}
+	return data[unix.CAP_NET_ADMIN/32].Effective&(1<<(unix.CAP_NET_ADMIN%32)) != 0
+}
+
+// parseListenDrops reads TcpExtListenDrops out of /proc/net/netstat's text,
+// by its name, never by a position a kernel may move; text without it, or
+// whose values do not match the names, is no count.
+func TestParseListenDropsReadsTheNamespacesCount(t *testing.T) {
+	const netstat = "TcpExt: SyncookiesSent EmbryonicRsts ListenOverflows ListenDrops TCPBacklogDrop\n" +
+		"TcpExt: 0 5 2 3 0\n" +
+		"IpExt: InNoRoutes ListenDrops\n" +
+		"IpExt: 0 99\n"
+	if n, err := parseListenDrops([]byte(netstat)); err != nil || n != 3 {
+		t.Fatalf("parseListenDrops = %d, %v; want 3", n, err)
+	}
+	for name, text := range map[string]string{
+		"no ListenDrops":           "TcpExt: SyncookiesSent EmbryonicRsts\nTcpExt: 0 5\n",
+		"no values":                "TcpExt: SyncookiesSent ListenDrops\n",
+		"values that do not fit":   "TcpExt: SyncookiesSent ListenDrops\nTcpExt: 0\n",
+		"a value that is no count": "TcpExt: SyncookiesSent ListenDrops\nTcpExt: 0 x\n",
+		"no TcpExt":                "IpExt: InNoRoutes ListenDrops\nIpExt: 0 99\n",
+	} {
+		if n, err := parseListenDrops([]byte(text)); err == nil {
+			t.Errorf("%s: parseListenDrops = %d, want an error", name, n)
+		}
 	}
 }
 

@@ -200,7 +200,7 @@ func TestTheRelaysUpgradesAreChargedAsEveryClientHandshake(t *testing.T) {
 			}
 			var buf bytes.Buffer
 			_ = printer.Fprint(&buf, fset, call)
-			if buf.String() == "p.withClientTLS(ctx, remoteOf(dstConn))" {
+			if buf.String() == "p.withClientTLS(ctx, remoteOf(dstConn), opts.SrcPid)" {
 				found = true
 			}
 			return true
@@ -208,7 +208,7 @@ func TestTheRelaysUpgradesAreChargedAsEveryClientHandshake(t *testing.T) {
 		return false
 	})
 	if !found {
-		t.Fatal("recordViaSupervisor's relay does not run under p.withClientTLS(ctx, remoteOf(dstConn)): a client-side upgrade's handshake would be charged nothing")
+		t.Fatal("recordViaSupervisor's relay does not run under p.withClientTLS(ctx, remoteOf(dstConn), opts.SrcPid): a client-side upgrade's handshake would be charged nothing")
 	}
 }
 
@@ -244,8 +244,8 @@ func TestEveryRecordUpgraderChargesItsClientsHandshake(t *testing.T) {
 		t.Fatalf("%d NewConnTLSUpgrader calls in proxy.go, want the two record paths' (MySQL's probe branch, the parsers'): %v", len(handlers), handlers)
 	}
 	for _, h := range handlers {
-		if h != "p.clientTLSHandler(dstAddr)" {
-			t.Fatalf("a record upgrader terminates its client's TLS with %q, want p.clientTLSHandler(dstAddr)", h)
+		if h != "p.clientTLSHandler(dstAddr, outgoingOpts.SrcPid)" {
+			t.Fatalf("a record upgrader terminates its client's TLS with %q, want p.clientTLSHandler(dstAddr, outgoingOpts.SrcPid)", h)
 		}
 	}
 }
