@@ -1336,7 +1336,7 @@ func lossNextStep(why lossReason) string {
 	case reasonTaken:
 		return "another mapping entry naming the same mock took it first (a mock is mapped to one entry), so this test is recorded without it; re-record the test set"
 	case reasonUntrackedDrop:
-		return fmt.Sprintf("the recorder failed to save this mock while more than %d dropped mocks were tracked, so its test is recorded without it instead of revoked; re-record the test set", maxLiveDroppedMockIDs)
+		return fmt.Sprintf("the recorder failed to save this mock while %d dropped mocks were already tracked, so its test is recorded without it instead of revoked; re-record the test set", maxLiveDroppedMockIDs)
 	case reasonCapFull:
 		return fmt.Sprintf("%d mapping entries were already waiting for their mocks, so this one was not held; re-record the test set", maxHeldMappingEntries)
 	case reasonAbandoned:

@@ -2,6 +2,7 @@ package record
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -297,6 +298,34 @@ func TestMappingWaits_LossReasonsAreDistinct(t *testing.T) {
 		"m1: " + lossNextStep(reasonTaken):         true,
 		"u1: " + lossNextStep(reasonUntrackedDrop): true,
 	}, reasons)
+}
+
+// TestLossNextStep_EachReasonSaysItsOwnCause: a "Failed to correlate" line's
+// next_step is lossNextStep(why), and the rows compare a line against
+// lossNextStep(want), which holds however lossNextStep maps the reasons. So
+// this row pins the texts themselves: each reason a loss line can give names
+// its own cause, and no two say the same thing. (reasonRevoked never reaches
+// a loss line: it is a Debug line.)
+func TestLossNextStep_EachReasonSaysItsOwnCause(t *testing.T) {
+	cause := map[lossReason]string{
+		reasonEnded:           "the mock stream ended with no mock left for it",
+		reasonTaken:           "another mapping entry naming the same mock took it first",
+		reasonUntrackedDrop:   "failed to save this mock",
+		reasonCapFull:         "mapping entries were already waiting",
+		reasonAbandoned:       "gave the mock loop up",
+		reasonConsumerGivenUp: "gave the mapping consumer up",
+	}
+	said := map[string]lossReason{}
+	for why, want := range cause {
+		got := lossNextStep(why)
+		if !strings.Contains(got, want) {
+			t.Errorf("reason %d: next_step %q does not say %q", why, got, want)
+		}
+		if other, dup := said[got]; dup {
+			t.Errorf("reasons %d and %d say the same next_step %q", other, why, got)
+		}
+		said[got] = why
+	}
 }
 
 // TestMappingWaits_AsyncMarkerSetWhileHeld: the mock loop marks a mock async
@@ -736,21 +765,28 @@ func revokeFrame(name string, tests string) *models.Mock {
 // stream ended without never-2. test-3 (revoked while its entry was held) and
 // test-4 (revoked after its mock-4 was handed back) are deleted: their entries
 // say so in a Debug line, not as a loss, though their mocks were saved.
+// test-5's mock-5 (a hook skips it) and test-6's mock-6 (the store cannot
+// encode it) are handed back while the consumer is wedged: the skip is no
+// loss, so mock-5 has no line and test-5 is not counted short; the drop would
+// have revoked test-6, but the consumer never applied it, so test-6 ships
+// without mock-6, counted short, and its line says the consumer was given up.
 func TestStart_WedgedConsumersReadyEntriesAreCounted(t *testing.T) {
 	wedge := make(chan struct{})
 	t.Cleanup(func() { close(wedge) })
 	core, logs := observer.New(zap.DebugLevel)
 	clk := &armedClock{armed: make(chan struct{}, 1)}
 	gdb := &gatedBatchMapDB{gate: wedge, entered: make(chan struct{}, 1)}
-	run := startRecording(t, &recMockDB{unencodable: map[string]bool{}},
-		BaseRecordHooks{}, zap.New(core), func(r *Recorder) {
+	skipNow := make(chan struct{})
+	close(skipNow)
+	run := startRecording(t, &recMockDB{unencodable: map[string]bool{"mock-6": true}},
+		gatedSkipHooks{gate: map[string]chan struct{}{"mock-5": skipNow}}, zap.New(core), func(r *Recorder) {
 			r.drainClock = clk
 			gdb.recMappingDB = r.mappingDb.(*recMappingDB)
 			r.mappingDb = gdb
 		})
 	run.mock(t, "mock-0")
 	run.mock(t, "mock-2")
-	for _, tn := range []string{"test-0", "test-1", "test-2", "test-3", "test-4"} {
+	for _, tn := range []string{"test-0", "test-1", "test-2", "test-3", "test-4", "test-5", "test-6"} {
 		run.test(t, tn)
 	}
 	run.mapping(t, "test-0", "mock-0")
@@ -762,23 +798,29 @@ func TestStart_WedgedConsumersReadyEntriesAreCounted(t *testing.T) {
 	run.mapping(t, "test-1", "mock-1")
 	run.mapping(t, "test-3", "mock-3")
 	run.mapping(t, "test-4", "mock-4")
-	run.until(t, "the entries of test-1, test-3 and test-4 held", heldIs(3))
+	run.mapping(t, "test-5", "mock-5")
+	run.mapping(t, "test-6", "mock-6")
+	run.until(t, "the entries of test-1, test-3, test-4, test-5 and test-6 held", heldIs(5))
 	// never-2 held proves the consumer took test-2's mapping (the mapping
 	// stream has a forwarder, so the send alone does not): it is now applying
 	// test-2's mock-2, which blocks on the flush lock.
 	run.mapping(t, "test-2", "mock-2", "never-2")
-	run.until(t, "test-2's entry held", heldIs(4))
+	run.until(t, "test-2's entry held", heldIs(6))
 
 	// The mock loop takes its frames in order, so each step below is done
 	// when the next one's entry moves.
 	run.frame(t, revokeFrame("revoke-3", "test-3")) // test-3's held entry is handed back as revoked
-	run.until(t, "the revoke handed test-3's entry back", heldIs(3))
+	run.until(t, "the revoke handed test-3's entry back", heldIs(5))
 	run.mock(t, "mock-3") // saved, for a revoked test
 	run.mock(t, "mock-4") // saved: test-4's entry is handed back, never applied
-	run.until(t, "mock-4 handed back", heldIs(2))
+	run.until(t, "mock-4 handed back", heldIs(4))
 	run.frame(t, revokeFrame("revoke-4", "test-4")) // test-4's entry is already handed back
 	run.mock(t, "mock-1")                           // saved: test-1's entry is handed back, never applied
-	run.until(t, "mock-1 handed back", heldIs(1))
+	run.until(t, "mock-1 handed back", heldIs(3))
+	run.mock(t, "mock-5") // skipped by the hook: test-5's entry is handed back, never applied
+	run.until(t, "mock-5 handed back", heldIs(2))
+	run.mock(t, "mock-6") // its save fails: test-6's entry is handed back as dropped, never applied
+	run.until(t, "mock-6 handed back", heldIs(1))
 
 	// The mock stream's end hands never-2 back too, before any drain can give
 	// anything up (the drain clock moves only in stopGivenUp).
@@ -787,12 +829,15 @@ func TestStart_WedgedConsumersReadyEntriesAreCounted(t *testing.T) {
 	suite := run.stopGivenUp(t, clk)
 	require.True(t, gaveUp(logs, "record")(), "the record drain did not give the wedged consumer up")
 	assert.Subset(t, run.deleted(), []string{"test-3", "test-4"})
-	assert.EqualValues(t, 2, suite["tests-short-pool"], "test-1 (mock-1 saved, never applied) and test-2 (never-2) must both count short: %v", suite)
-	assert.EqualValues(t, 2, suite["mocks-uncorrelated"])
+	assert.NotContains(t, run.deleted(), "test-5")
+	assert.NotContains(t, run.deleted(), "test-6", "the consumer that would have revoked test-6 was given up")
+	assert.EqualValues(t, 3, suite["tests-short-pool"], "test-1 (mock-1 saved, never applied), test-2 (never-2) and test-6 (mock-6 dropped, never applied) must count short, the skipped mock's test-5 not: %v", suite)
+	assert.EqualValues(t, 3, suite["mocks-uncorrelated"])
 	assert.Len(t, logs.FilterMessageSnippet("INCOMPLETE").All(), 1)
 	assert.Equal(t, map[string]string{
 		"mock-1":  lossNextStep(reasonConsumerGivenUp),
 		"never-2": lossNextStep(reasonEnded),
+		"mock-6":  lossNextStep(reasonConsumerGivenUp),
 	}, lossLines(t, logs))
 	for _, id := range []string{"mock-3", "mock-4"} {
 		assert.Len(t, logs.FilterMessageSnippet("not waiting for a revoked test's mock").
