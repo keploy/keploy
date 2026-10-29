@@ -24,12 +24,13 @@ import (
 // stageReaders readers at once, half the CPUs Go runs on (GOMAXPROCS), so
 // the set is read before its first heavy test opens while the replay keeps
 // the other half: one reader alone was still reading api-server's set when
-// TestSeeded opened (r3f: about 270 CPU-seconds of the set's reads, its
-// first test about 100 s in). It stops at the set's NewSet (the set
+// its first heavy test opened (about 270 CPU-seconds of the set's reads,
+// that test about 100 s in). It stops at the set's NewSet (the set
 // keeps nothing more) or where the set's budget is spent (setBudget: the
 // set reads the rest once per test, as before), whichever comes first, and
 // the channel it returns gives then what the set it staged read and kept
-// (SetUse), and is closed. A nil src reads nothing.
+// (SetUse), with src's error where src failed, and is closed. A nil src
+// reads nothing.
 func (t *Tracker) WarmSet(src func(visit func(*models.Mock) bool) error) <-chan SetUse {
 	done := make(chan SetUse, 1)
 	if t == nil || src == nil {
@@ -45,9 +46,9 @@ func (t *Tracker) WarmSet(src func(visit func(*models.Mock) bool) error) <-chan 
 	readers := stageReaders()
 	go func() {
 		defer close(done)
-		_ = dc.warmSet(src, readers)
+		err := dc.warmSet(src, readers)
 		u := dc.set.use()
-		u.Readers = readers
+		u.Readers, u.Err = readers, err
 		done <- u
 	}()
 	return done
@@ -145,11 +146,13 @@ func withAnswer(m *models.Mock) func() (*models.Mock, error) {
 // with (stageReaders; 0 where no staging read), the bytes each tier keeps,
 // the set's budget (setBudget), and whether the tiers that let none go
 // (held, forms) were full, past which the set's payloads are read once per
-// test.
+// test. Err is why the staging stopped short of the set where src failed
+// (the on-disk store, mid-read): its calls then read the rest themselves.
 type SetUse struct {
 	Staged, Called, Readers    int
 	Held, Words, Forms, Budget int64
 	HeldFull, FormsFull        bool
+	Err                        error
 }
 
 func (s *setDerived) use() SetUse {

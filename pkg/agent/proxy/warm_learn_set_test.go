@@ -65,8 +65,7 @@ func newWarmRow(t *testing.T, logger *zap.Logger) *warmRow {
 	return r
 }
 
-// (mongo-stuck-handler, the learn step's cost per call.) The agent reads a
-// staged set's recordings for the learn step (WarmLearnSet) in record's full
+// The agent reads a staged set's recordings for the learn step (WarmLearnSet) in record's full
 // round alone, while the set's learn step is on, and there it reads every
 // recording of the set: those the manager stages and those of later tests
 // the on-disk store keeps. Any other session reads none of them, not one
@@ -153,6 +152,45 @@ func TestAStagedSetIsReadForTheLearnStepInRecordsFullRoundAlone(t *testing.T) {
 		f := lines[0].ContextMap()
 		if f["read_at_staging"] != int64(warmStaged+warmLater) || f["read_by_calls"] != int64(0) || f["set_budget_bytes"].(int64) <= 0 {
 			t.Fatalf("the set's staging logged %v: want %d read at staging, none by calls, and the set's budget", f, warmStaged+warmLater)
+		}
+	})
+
+	// A store that fails mid-read stops the staging short: the line says
+	// so, at Warn, with the store's error and what was read before it (the
+	// staged recordings, then the store's first), so a round whose calls
+	// read the set on their answer path says why.
+	t.Run("a store that fails mid-read", func(t *testing.T) {
+		t.Setenv(provenswitch.Env, "1")
+		core, logs := observer.New(zapcore.InfoLevel)
+		r := newWarmRow(t, zap.New(core))
+		r.mm.SetPairing(true)
+		const read = 5
+		broken := errors.New("read mock-w5: input/output error")
+		r.mm.SetRecordedBefore(func(_ time.Time, visit func(*models.Mock) bool) error {
+			for i := 0; i < read; i++ {
+				m := r3Mock(fmt.Sprintf("mock-x%d", i), time.Now(), "POST", "/log", fmt.Sprintf(`{"n":%d}`, i), `{"ok":true}`)
+				m.DeriveLifetime()
+				if !visit(m) {
+					return nil
+				}
+			}
+			return broken
+		})
+		done, err := r.p.warmLearnSet()
+		if err != nil || done == nil {
+			t.Fatalf("the set's staging did not start: %v", err)
+		}
+		r.p.logSetUse(done)
+		if n := logs.FilterMessageSnippet("the learn step read the test set's recordings as it was staged").Len(); n != 0 {
+			t.Fatalf("a staging the store stopped short logged %d lines saying it read the set", n)
+		}
+		lines := logs.FilterMessageSnippet("the learn step stopped reading the test set's recordings").All()
+		if len(lines) != 1 || lines[0].Level != zapcore.WarnLevel {
+			t.Fatalf("a staging the store stopped short logged %v: want one line, at Warn", lines)
+		}
+		f := lines[0].ContextMap()
+		if f["read_at_staging"] != int64(warmStaged+read) || f["error"] != broken.Error() {
+			t.Fatalf("a staging the store stopped short logged %v: want %d read at staging (%d staged, %d from the store) and the store's error %q", f, warmStaged+read, warmStaged, read, broken)
 		}
 	})
 

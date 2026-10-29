@@ -4978,17 +4978,26 @@ func (p *Proxy) WarmLearnSet() error {
 
 // logSetUse logs, once the set's staging ends, what it read and what the
 // set's tiers keep (learn.SetUse): the line a round reads to see whether the
-// set fit its budget. A channel closed with no use (no tracker) read
-// nothing and logs nothing.
+// set fit its budget. A staging that stopped short because the set's
+// recordings could not be read (learn.SetUse.Err) is logged at Warn with
+// that error: its calls read the rest on their answer path. A channel
+// closed with no use (no tracker) read nothing and logs nothing.
 func (p *Proxy) logSetUse(done <-chan learn.SetUse) {
 	u, ok := <-done
 	if !ok {
 		return
 	}
-	p.logger.Info("the learn step read the test set's recordings as it was staged, before its calls read them",
+	fields := []zap.Field{
 		zap.Int("read_at_staging", u.Staged), zap.Int("read_by_calls", u.Called), zap.Int("staging_readers", u.Readers),
 		zap.Int64("kept_held_bytes", u.Held), zap.Int64("kept_words_bytes", u.Words), zap.Int64("kept_forms_bytes", u.Forms),
-		zap.Int64("set_budget_bytes", u.Budget), zap.Bool("held_full", u.HeldFull), zap.Bool("forms_full", u.FormsFull))
+		zap.Int64("set_budget_bytes", u.Budget), zap.Bool("held_full", u.HeldFull), zap.Bool("forms_full", u.FormsFull),
+	}
+	if u.Err != nil {
+		p.logger.Warn("the learn step stopped reading the test set's recordings as it was staged: they could not be read, so its calls read the rest themselves, on their answer path",
+			append(fields, zap.Error(u.Err))...)
+		return
+	}
+	p.logger.Info("the learn step read the test set's recordings as it was staged, before its calls read them", fields...)
 }
 
 // warmLearnSet is WarmLearnSet's gate and its read: the staging's channel

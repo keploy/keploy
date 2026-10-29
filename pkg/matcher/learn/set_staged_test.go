@@ -211,3 +211,30 @@ func TestASetsStagingStopsAtTheNextSet(t *testing.T) {
 		t.Errorf("a set that is over keeps %d bytes its staging read: want none", b)
 	}
 }
+
+// A staging whose source fails mid-read (the on-disk store) ends with the
+// recordings it read before and the source's error (SetUse.Err): the agent
+// logs why the set's calls read the rest themselves. A source that reads
+// the whole set gives no error.
+func TestASetsStagingSaysWhyItStoppedShort(t *testing.T) {
+	const n, read = 12, 5
+	row := newHeldRow(n, 4)
+	broken := fmt.Errorf("read the set's recording %d: input/output error", read)
+	tr := NewTracker()
+	tr.NewSet()
+	use := <-tr.WarmSet(func(visit func(*models.Mock) bool) error {
+		for _, m := range row.mocks[:read] {
+			if !visit(m) {
+				return nil
+			}
+		}
+		return broken
+	})
+	if use.Err != broken || use.Staged != read {
+		t.Fatalf("a staging whose source failed after %d of %d recordings reported %+v: want %d read and the source's error", read, n, use, read)
+	}
+	tr.NewSet()
+	if use := <-tr.WarmSet(srcOf(row.mocks)); use.Err != nil || use.Staged != n {
+		t.Fatalf("a staging that read the whole set reported %+v: want %d read and no error", use, n)
+	}
+}
