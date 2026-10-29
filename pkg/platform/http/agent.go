@@ -4750,17 +4750,21 @@ func (a *AgentClient) PushSetTable(ctx context.Context, root string, sets map[st
 // table and each key's pool slice (models.ScopeTableReq.Pool) in one
 // request. Every answer but 200 is an error: a replay judged per test must
 // not run on an agent that serves its tests and pool otherwise.
-func (a *AgentClient) PushProvenTable(ctx context.Context, table, pool map[string][]string) (retErr error) {
+//
+// windows are the recorded window of every test of the set
+// (models.ScopeTableReq.Windows), sent with them: the agent installs them
+// before it serves the pool.
+func (a *AgentClient) PushProvenTable(ctx context.Context, table, pool map[string][]string, windows []models.TestWindow) (retErr error) {
 	if pool == nil {
 		pool = map[string][]string{}
 	}
 	defer func() {
 		if retErr == nil && a.session().recording() {
-			t, p := maps.Clone(table), maps.Clone(pool)
-			a.session().record(stepScopeTable, func(c context.Context) error { return a.PushProvenTable(c, t, p) })
+			t, p, w := maps.Clone(table), maps.Clone(pool), slices.Clone(windows)
+			a.session().record(stepScopeTable, func(c context.Context) error { return a.PushProvenTable(c, t, p, w) })
 		}
 	}()
-	body, err := json.Marshal(models.ScopeTableReq{Mappings: table, Pool: pool})
+	body, err := json.Marshal(models.ScopeTableReq{Mappings: table, Pool: pool, Windows: windows})
 	if err != nil {
 		return fmt.Errorf("failed to marshal scope table: %w", err)
 	}

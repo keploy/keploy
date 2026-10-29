@@ -804,30 +804,31 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	//     can read it.
 	finished = true
 	writeReceipt(m.logger, m.config.Path, Receipt{
-		Set:            name,
-		At:             started.UTC().Truncate(time.Second),
-		Command:        m.userCommand,
-		OnMiss:         string(policy),
-		Strict:         m.config.Mock.Strict,
-		ExitCode:       utils.ErrCode,
-		RunnerExitCode: runnerExit,
-		FailedBy:       failedBy,
-		Error:          keployErr,
-		Loaded:         loaded,
-		Consumed:       counts.consumed,
-		Missed:         counts.missed,
-		MissedData:     provenCount(counts.missedData),
-		Tests:          tests,
-		Bypass:         bypass,
-		Isolated:       isolated,
-		IsolationNote:  isolationNote,
-		MocksDigest:    digest,
-		Coverage:       cov,
-		CoverageNote:   covNote,
-		MinCoverage:    m.config.Mock.MinCoverage,
-		Version:        utils.Version,
-		Refusals:       m.refusals,
-		CannotCapture:  lostNotJudged,
+		Set:             name,
+		At:              started.UTC().Truncate(time.Second),
+		Command:         m.userCommand,
+		OnMiss:          string(policy),
+		Strict:          m.config.Mock.Strict,
+		ExitCode:        utils.ErrCode,
+		RunnerExitCode:  runnerExit,
+		FailedBy:        failedBy,
+		Error:           keployErr,
+		Loaded:          loaded,
+		Consumed:        counts.consumed,
+		Missed:          counts.missed,
+		MissedData:      provenCount(counts.missedData),
+		Tests:           tests,
+		Bypass:          bypass,
+		Isolated:        isolated,
+		IsolationNote:   isolationNote,
+		MocksDigest:     digest,
+		Coverage:        cov,
+		CoverageNote:    covNote,
+		MinCoverage:     m.config.Mock.MinCoverage,
+		Version:         utils.Version,
+		Refusals:        m.refusals,
+		CannotCapture:   lostNotJudged,
+		UnchargedMisses: counts.uncharged,
 	})
 	writeTestsReceipt(m.logger, m.config.Path, TestsReceipt{
 		Set:           name,
@@ -1158,17 +1159,20 @@ func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded, 
 	if unknown = append(unknown, unknownBesideTests(mp, decoded, unknown)...); len(unknown) > 0 {
 		return m.refuseUnknownMocks(ctx, name, mp, unknown)
 	}
+	// Every test's recorded window, of every recording its mapping lists,
+	// the ones the agent never holds included: they were made in it.
+	windows := recordedTestWindows(mp, table, decoded)
 	table = heldOnly(table, loaded)
 	if !ownsTestMocks(table, loaded) {
 		m.logger.Warn("under KEPLOY_PROVEN no test of this mock set owns a recorded call: it has no mappings.yaml, or its mapping lists no data-plane mock the agent holds, so every call a test makes to a dependency misses",
 			zap.String("mock-set", name),
 			zap.String("next_step", "record the set again with this keploy: keploy mock record writes mappings.yaml"))
 	}
-	if err := pp.PushProvenTable(ctx, table, pool); err != nil {
+	if err := pp.PushProvenTable(ctx, table, pool, windows); err != nil {
 		return refuse("its agent refused the per-test table: " + err.Error())
 	}
 	m.mockOwners = models.MockOwners(table)
-	m.logger.Info("per-test scoping enabled", zap.Int("tests", len(table)), zap.Int("pool slices", len(pool)), zap.String("mock-set", name))
+	m.logger.Info("per-test scoping enabled", zap.Int("tests", len(table)), zap.Int("pool slices", len(pool)), zap.Int("recorded test windows", len(windows)), zap.String("mock-set", name))
 	return nil
 }
 
@@ -1853,6 +1857,10 @@ type replayCounts struct {
 	// learnErr is why what the learn step learned could not be written: the
 	// round did not complete.
 	learnErr error
+	// uncharged are, under the proven switch, the misses missedData counts
+	// that no test was charged with (Receipt.UnchargedMisses); nil when the
+	// misses were not read.
+	uncharged []UnchargedMiss
 }
 
 // reportOutcome logs which mocks were consumed and which outgoing calls matched
@@ -2022,6 +2030,8 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 	if missesErr != nil {
 		counts.missed, counts.missedData = -1, -1
 		counts.missesUnread = models.UnreadCause(missesErr)
+	} else if provenswitch.On() {
+		counts.uncharged = unchargedMisses(misses)
 	}
 	counts.tests = withRealListed(withReal(withEvidence(testReceipts(flows, consumedErr == nil, missesErr == nil), detail.windows), detail.windows), m.realListed)
 	// Under the proven switch a miss whose closest recording another test
@@ -2032,6 +2042,12 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 			zap.String("mock-set", m.setName()),
 			zap.Strings("calls", named[:min(len(named), 20)]),
 			zap.String("next_step", "record the set again with keploy mock record so each test opens the connections it uses, or keep the application's connection reuse as it was when recording"))
+	}
+	if provenswitch.On() {
+		// When each test began serves the proven flow's reading of a cut
+		// round (the last test begun): without the switch the receipt stays
+		// as it was.
+		counts.tests = withBegan(counts.tests, detail.windows)
 	}
 	for i := range counts.tests {
 		counts.tests[i].Learned = learned[counts.tests[i].Name]
@@ -2056,11 +2072,17 @@ func logMiss(logger *zap.Logger, miss models.UnmatchedCall) {
 	if miss.MatchPhase == models.MatchPhaseNoRequest {
 		msg = "a connection ended with nothing sent: if its client was waiting for its server to speak first, no recorded mock answered it"
 	}
-	logger.Warn(msg,
+	fields := []zap.Field{
 		zap.String("protocol", miss.Protocol),
 		zap.String("call", miss.ActualSummary),
 		zap.String("destination", miss.Destination),
-		zap.String("next_step", next))
+	}
+	if miss.Reason != "" {
+		// Why it missed, in judging's words (record's full round): the
+		// next step then is the learn step's own reason.
+		fields = append(fields, zap.String("reason", miss.Reason))
+	}
+	logger.Warn(msg, append(fields, zap.String("next_step", next))...)
 }
 
 // provenCount is n under the proven switch, and nothing with it off, so a
@@ -2168,6 +2190,29 @@ func withRecordedIn(tests []TestReceipt, owners map[string][]string) []string {
 		}
 	}
 	return named
+}
+
+// withBegan puts on each test's line when its latest run began: its latest
+// window's start, a test still open when the run ended included (the agent
+// closes it as failed, from its begin). A cut round names its last test begun
+// by it. windows are the run's test windows (testWindows): an app a test
+// started is not among them.
+func withBegan(tests []TestReceipt, windows []models.ScopeWindow) []TestReceipt {
+	began := make(map[string]time.Time, len(windows))
+	for _, w := range windows {
+		if w.Name == "" {
+			continue
+		}
+		if prev, seen := began[w.Name]; !seen || w.Start.After(prev) {
+			began[w.Name] = w.Start
+		}
+	}
+	for i := range tests {
+		if b, ok := began[tests[i].Name]; ok && !b.IsZero() {
+			tests[i].Began = b.UTC()
+		}
+	}
+	return tests
 }
 
 // testReceipts is each test's line in the receipt: its verdict and what it

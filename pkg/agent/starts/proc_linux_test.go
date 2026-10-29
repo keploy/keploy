@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/containerkey"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -127,16 +128,24 @@ func TestAKernelPidIsReadOnlyWhereItIsKeploysOwn(t *testing.T) {
 		}
 	})
 	t.Run("keploy's own", func(t *testing.T) {
-		root := fakeProcRoot(t, hostPIDNS, kernelPid, "sqs", "./sqs", "--queue", "orders")
+		root := fakeProcRoot(t, hostPIDNS, kernelPid, "sqs", "./sqs", "--queue", "orders", "--password", "hunter2")
 		r := New(sysProc{root: root}, 0)
 		r.NoteOrigin("7", kernelPid)
 		m := &models.Mock{Name: "mock-6", ConnectionID: "7", Origin: &models.Origin{Clock: "proxy:run-1"}}
 		r.StampOrigin(m)
 		if m.Origin == nil || *m.Origin != (models.Origin{Clock: "proxy:run-1", Comm: "sqs", Exe: "./sqs"}) {
-			t.Fatalf("origin %+v; want sqs, ./sqs", m.Origin)
+			t.Fatalf("origin %+v; want sqs, ./sqs: a mock carries no pid and no command line", m.Origin)
 		}
-		if src := r.SourceOf(kernelPid); src == nil || *src != (models.Origin{Comm: "sqs", Exe: "./sqs"}) {
-			t.Fatalf("SourceOf = %+v; want sqs, ./sqs", src)
+		// A call's source carries, only to travel to keploy mock's receipt,
+		// the pid and the whole command line, its secret redacted; a file
+		// holds neither.
+		want := models.Origin{Comm: "sqs", Exe: "./sqs", PID: kernelPid, Cmdline: "./sqs --queue orders --password " + containerkey.RedactedText}
+		src := r.SourceOf(kernelPid)
+		if src == nil || *src != want {
+			t.Fatalf("SourceOf = %+v; want %+v", src, want)
+		}
+		if p := src.Persisted(); p == nil || *p != (models.Origin{Comm: "sqs", Exe: "./sqs"}) {
+			t.Fatalf("persisted source %+v; want sqs, ./sqs alone", p)
 		}
 	})
 	t.Run("no namespace entry", func(t *testing.T) {
