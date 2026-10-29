@@ -1,11 +1,15 @@
 package log
 
 import (
+	"bufio"
 	"bytes"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -990,10 +994,10 @@ func TestRedactText(t *testing.T) {
 	}
 }
 
-// cappedRunLog makes a file of the test's this run's log, held to capBytes and
-// looked at every statEvery bytes written (logFileRoom), with the console in
-// another file of the test's, and gives back both and a logger writing them.
-func cappedRunLog(t *testing.T, capBytes, statEvery int64) (logger *zap.Logger, runLog, console *os.File) {
+// cappedRunLog makes a file of the test's this run's log, held to capBytes
+// (logFileRoom), with the console in another file of the test's, and gives
+// back both and a logger writing them.
+func cappedRunLog(t *testing.T, capBytes int64) (logger *zap.Logger, runLog, console *os.File) {
 	t.Helper()
 	dir := t.TempDir()
 	console, err := os.Create(filepath.Join(dir, "console"))
@@ -1004,13 +1008,13 @@ func cappedRunLog(t *testing.T, capBytes, statEvery int64) (logger *zap.Logger, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	prevCap, prevEvery := logFileCap, logFileStatEvery
-	logFileCap, logFileStatEvery = capBytes, statEvery
+	prevCap := logFileCap
+	logFileCap = capBytes
 	setPrimarySink(console)
 	logFileSink.Store(runLog)
 	t.Cleanup(func() {
 		logFileSink.Store(nil)
-		logFileCap, logFileStatEvery = prevCap, prevEvery
+		logFileCap = prevCap
 		TestOnlyResetSink()
 		_ = runLog.Close()
 		_ = console.Close()
@@ -1038,7 +1042,7 @@ func readAll(t *testing.T, f *os.File) string {
 // every line.
 func TestTheRunsLogStopsAtItsCapWithOneNote(t *testing.T) {
 	const capBytes = 4096
-	logger, runLog, console := cappedRunLog(t, capBytes, 1024)
+	logger, runLog, console := cappedRunLog(t, capBytes)
 	pad := strings.Repeat("x", 60)
 	for i := 0; i < 200; i++ {
 		logger.Info(fmt.Sprintf("line %03d %s", i, pad))
@@ -1073,8 +1077,7 @@ func TestTheRunsLogStopsAtItsCapWithOneNote(t *testing.T) {
 // The native agent appends to the CLI's log (ClientLogFileFlag), so the cap is
 // the file's, not one process's: lines the other process wrote count. A log
 // that is full when this process first writes it gets the note alone, and one
-// the other process grows between this one's looks at its size goes past the
-// cap by no more than what this process writes between two looks.
+// the other process grows while this one is quiet holds no more than its cap.
 func TestTheRunsLogCapCountsTheOtherProcesssLines(t *testing.T) {
 	other := func(t *testing.T, runLog *os.File, n int) {
 		t.Helper()
@@ -1089,16 +1092,16 @@ func TestTheRunsLogCapCountsTheOtherProcesssLines(t *testing.T) {
 	}
 	t.Run("full before this process writes", func(t *testing.T) {
 		const capBytes = 4096
-		logger, runLog, _ := cappedRunLog(t, capBytes, 1024)
+		logger, runLog, _ := cappedRunLog(t, capBytes)
 		other(t, runLog, capBytes-50)
 		logger.Info("a CLI line")
 		if got, want := readAll(t, runLog), strings.Repeat("a", capBytes-51)+"\n"+logFileCapNote; got != want {
 			t.Errorf("the log holds:\n%s\nwant the other process's lines and the note alone", got)
 		}
 	})
-	t.Run("grown between looks", func(t *testing.T) {
-		const capBytes, statEvery = 8192, 1024
-		logger, runLog, _ := cappedRunLog(t, capBytes, statEvery)
+	t.Run("grown while this process is quiet", func(t *testing.T) {
+		const capBytes = 8192
+		logger, runLog, _ := cappedRunLog(t, capBytes)
 		pad := strings.Repeat("x", 60)
 		for i := 0; i < 5; i++ {
 			logger.Info(fmt.Sprintf("line %03d %s", i, pad))
@@ -1108,11 +1111,197 @@ func TestTheRunsLogCapCountsTheOtherProcesssLines(t *testing.T) {
 			logger.Info(fmt.Sprintf("line %03d %s", i, pad))
 		}
 		got := readAll(t, runLog)
-		if len(got) > capBytes+statEvery {
-			t.Errorf("the log holds %d bytes, past its cap of %d by more than %d", len(got), capBytes, statEvery)
+		if len(got) > capBytes {
+			t.Errorf("the log holds %d bytes, past its cap of %d", len(got), capBytes)
 		}
 		if !strings.HasSuffix(got, logFileCapNote) || strings.Count(got, logFileCapNote) != 1 {
 			t.Errorf("the log does not end with the closing note, once; it ends:\n%s", got[max(0, len(got)-300):])
 		}
 	})
+}
+
+// otherWriterEnv names the log TestLogFileWriterHelperProcess appends to, as
+// the native agent appends to the CLI's, and otherWriterCapEnv its cap.
+const (
+	otherWriterEnv    = "KEPLOY_LOG_TEST_OTHER_WRITER"
+	otherWriterCapEnv = "KEPLOY_LOG_TEST_OTHER_CAP"
+)
+
+// TestLogFileWriterHelperProcess is the other process of the rows below, a
+// no-op in a plain test run. Started by startOtherProcess, it opens the log
+// named by otherWriterEnv as the native agent opens the CLI's at its start
+// (write-only, appending) and says "ready". Then, for each "LINES LAST" it
+// reads, it writes LINES lines of 80 bytes there through a logFileWriter of
+// its own, held to otherWriterCapEnv, then one of LAST bytes if LAST is not
+// 0, and says "done".
+func TestLogFileWriterHelperProcess(t *testing.T) {
+	path := os.Getenv(otherWriterEnv)
+	if path == "" {
+		return
+	}
+	capBytes, err := strconv.ParseInt(os.Getenv(otherWriterCapEnv), 10, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	logFileCap = capBytes
+	logFileSink.Store(f)
+	defer logFileSink.Store(nil)
+	w := logFileWriter{}
+	fmt.Println("ready")
+	in := bufio.NewScanner(os.Stdin)
+	n := 0
+	for in.Scan() {
+		var lines, last int
+		if _, err := fmt.Sscan(in.Text(), &lines, &last); err != nil {
+			t.Fatal(err)
+		}
+		for i := 0; i < lines; i, n = i+1, n+1 {
+			if _, err := w.Write([]byte(fmt.Sprintf("other %04d %s\n", n, strings.Repeat("o", 68)))); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if last > 0 {
+			if _, err := w.Write([]byte(strings.Repeat("O", last-1) + "\n")); err != nil {
+				t.Fatal(err)
+			}
+		}
+		fmt.Println("done")
+	}
+}
+
+// otherProcess is a TestLogFileWriterHelperProcess, appending to a log as the
+// native agent appends to its CLI's.
+type otherProcess struct {
+	in  io.WriteCloser
+	out *bufio.Scanner
+}
+
+// startOtherProcess starts an otherProcess appending to runLog, with capBytes
+// for the cap, and waits for it to have opened runLog. It ends with the test.
+func startOtherProcess(t *testing.T, runLog *os.File, capBytes int64) *otherProcess {
+	t.Helper()
+	cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestLogFileWriterHelperProcess$", "-test.count=1")
+	cmd.Env = append(os.Environ(),
+		otherWriterEnv+"="+runLog.Name(),
+		otherWriterCapEnv+"="+strconv.FormatInt(capBytes, 10))
+	in, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = in.Close()
+		_ = cmd.Wait()
+	})
+	p := &otherProcess{in: in, out: bufio.NewScanner(out)}
+	p.await(t, "ready")
+	return p
+}
+
+// write has the other process write lines lines of 80 bytes, then one of last
+// bytes if last is not 0, and waits for it to have.
+func (p *otherProcess) write(t *testing.T, lines, last int) {
+	t.Helper()
+	if _, err := fmt.Fprintf(p.in, "%d %d\n", lines, last); err != nil {
+		t.Fatal(err)
+	}
+	p.await(t, "done")
+}
+
+func (p *otherProcess) await(t *testing.T, word string) {
+	t.Helper()
+	var said []string
+	for p.out.Scan() {
+		if p.out.Text() == word {
+			return
+		}
+		said = append(said, p.out.Text())
+	}
+	t.Fatalf("the other process ended before it said %q; it said:\n%s", word, strings.Join(said, "\n"))
+}
+
+// The CLI and its native agent write one log (ClientLogFileFlag), two
+// processes each with a logFileWriter of its own, and either can fill it:
+// while the other is quiet, with a last line too long to fit that leaves room
+// for shorter ones, or in turns with the other. Whichever fills it, the log
+// ends with the closing note, once, within its cap, sealed (its owner can
+// read it and keploy writes it no more), and no line of either process
+// follows the note.
+func TestTheRunsLogEndsWithOneNoteWhicheverProcessFillsIt(t *testing.T) {
+	const capBytes = 8192
+	pad := strings.Repeat("x", 60)
+	lines := func(logger *zap.Logger, from, to int) {
+		for i := from; i < to; i++ {
+			logger.Info(fmt.Sprintf("line %03d %s", i, pad))
+		}
+	}
+	for _, c := range []struct {
+		name string
+		run  func(t *testing.T, logger *zap.Logger, other *otherProcess)
+	}{
+		{"the other process fills it while this one is quiet", func(t *testing.T, logger *zap.Logger, other *otherProcess) {
+			lines(logger, 0, 3)
+			other.write(t, 200, 0)
+			lines(logger, 3, 50)
+		}},
+		{"the other process's last line is too long to fit", func(t *testing.T, logger *zap.Logger, other *otherProcess) {
+			lines(logger, 0, 3)
+			other.write(t, 10, capBytes)
+			lines(logger, 3, 50)
+			other.write(t, 10, 0)
+		}},
+		{"this process fills it, then the other writes", func(t *testing.T, logger *zap.Logger, other *otherProcess) {
+			other.write(t, 1, 0)
+			lines(logger, 0, 200)
+			other.write(t, 50, 0)
+		}},
+		{"this process's last line is too long to fit, then the other writes", func(t *testing.T, logger *zap.Logger, other *otherProcess) {
+			other.write(t, 1, 0)
+			lines(logger, 0, 10)
+			logger.Info(strings.Repeat("y", capBytes))
+			other.write(t, 50, 0)
+			lines(logger, 10, 20)
+		}},
+		{"both write past it, in turns", func(t *testing.T, logger *zap.Logger, other *otherProcess) {
+			for round := 0; round < 5; round++ {
+				lines(logger, round*30, round*30+30)
+				other.write(t, 30, 0)
+			}
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			logger, runLog, _ := cappedRunLog(t, capBytes)
+			c.run(t, logger, startOtherProcess(t, runLog, capBytes))
+			got := readAll(t, runLog)
+			if len(got) > capBytes {
+				t.Errorf("the log holds %d bytes, past its cap of %d", len(got), capBytes)
+			}
+			if !strings.HasSuffix(got, logFileCapNote) || strings.Count(got, logFileCapNote) != 1 {
+				t.Errorf("the log does not end with the closing note, once (%d notes); it ends:\n%s",
+					strings.Count(got, logFileCapNote), got[max(0, len(got)-400):])
+			}
+			if !strings.Contains(got, "line 000") || !strings.Contains(got, "other 0000") {
+				t.Errorf("the log is missing the first line of one of its two processes:\n%s", got[:min(len(got), 400)])
+			}
+			fi, err := os.Stat(runLog.Name())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if fi.Mode().Perm() != logFileSealedMode {
+				t.Errorf("the full log's mode is %v, want %v", fi.Mode().Perm(), logFileSealedMode)
+			}
+		})
+	}
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -383,5 +384,73 @@ func TestFlagErrorFollowsTheLoggerSink(t *testing.T) {
 	if !strings.Contains(onStderr, flagErr) {
 		t.Errorf("the flag error never reached the logger's sink, so it went to a stdout this "+
 			"process had already declared machine-readable:\n%q", onStderr)
+	}
+}
+
+// A run whose stdout is a document keeps no log file. PrintLogo, which names
+// the log on its `logs:` line, has no room beside the document, and a log
+// nobody is told about is one a killed run leaves in the temp directory for
+// nobody to find. A text run keeps its log, and names it.
+func TestMachineOutputKeepsNoLogFile(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		args      []string
+		cfgFormat string
+		keeps     bool
+	}{
+		{name: "report --format json", args: []string{"--format", "json"}},
+		{name: "report --format junit", args: []string{"--format", "junit"}},
+		{name: "report.format json from keploy.yml", cfgFormat: "json"},
+		{name: "report --format text", args: []string{"--format", "text"}, keeps: true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			t.Setenv("TMPDIR", tmp)
+			t.Cleanup(log.TestOnlyResetSink)
+			_, f, err := log.New()
+			if err != nil || f == nil {
+				t.Fatalf("log.New = %v, %v; want a log file", f, err)
+			}
+			prev := utils.LogFile
+			utils.LogFile = f
+			t.Cleanup(func() {
+				_ = log.CloseLogFile(f)
+				utils.LogFile = prev
+			})
+
+			cfg := config.New()
+			cfg.Report.Format = c.cfgFormat
+			cc := NewCmdConfigurator(zap.New(nil), cfg)
+			cmd := &cobra.Command{Use: "report"}
+			if err := cc.AddFlags(cmd); err != nil {
+				t.Fatalf("AddFlags: %v", err)
+			}
+			cmd.Flags().Bool("disable-ansi", false, "")
+			if err := cmd.ParseFlags(c.args); err != nil {
+				t.Fatalf("ParseFlags: %v", err)
+			}
+			out := captureStdout(t, func() {
+				if err := cc.ValidateFlags(t.Context(), cmd); err != nil {
+					t.Errorf("ValidateFlags: %v", err)
+				}
+			})
+
+			logs, err := filepath.Glob(filepath.Join(tmp, log.LogFilePattern))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.keeps {
+				if len(logs) != 1 || utils.LogFile != f || !strings.Contains(out, "logs: "+f.Name()) {
+					t.Errorf("a text run kept %v (LogFile %v) and printed:\n%s\nwant its log %s, named on the logs: line", logs, utils.LogFile, out, f.Name())
+				}
+				return
+			}
+			if len(logs) != 0 || utils.LogFile != nil {
+				t.Errorf("a run with machine-readable output kept %v (LogFile %v); want no log file", logs, utils.LogFile)
+			}
+			if strings.Contains(out, "logs:") {
+				t.Errorf("a run with machine-readable output named a log on stdout:\n%s", out)
+			}
+		})
 	}
 }

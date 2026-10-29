@@ -1,6 +1,7 @@
 package log
 
 import (
+	"bytes"
 	"errors"
 	"io"
 	"math/rand/v2"
@@ -100,34 +101,86 @@ func clientLogFileArg(args []string) (string, bool) {
 	return path, path != ""
 }
 
+// logFileInfix is the part of a log's name that LogFilePattern's "*" stands
+// for, a new random one at each call, as os.CreateTemp picks; a test swaps in
+// one that gives names it has put something at.
+var logFileInfix = func() string { return strconv.FormatUint(uint64(rand.Uint32()), 10) }
+
 // createLogFile creates a fresh log in the OS temp directory, as os.CreateTemp
-// does (O_EXCL at a random name, 0600), but open for appending: the native
+// does (O_EXCL at a random name: a file, a link or a pipe already at a name is
+// left alone and another name tried), but open for appending: the native
 // agent appends to it too, and a write at this run's own offset would
-// overwrite the agent's lines. Under sudo it hands the file to the user sudo
-// ran keploy for (giveLogToSudoUser), so that user can read the log the run
-// names, and the agent, which takes only that user's file, appends to it.
-// notHanded is why it could not, if it could not; the run keeps the file.
+// overwrite the agent's lines. Its mode is logFileMode whatever the umask, so
+// that only a full log is ever sealed (logFileRoom). Under sudo it hands the
+// file to the user sudo ran keploy for (giveLogToSudoUser), so that user can
+// read the log the run names, and the agent, which takes only that user's
+// file, appends to it. notHanded is why it could not, if it could not; the
+// run keeps the file.
 func createLogFile() (f *os.File, notHanded, err error) {
 	prefix, suffix, _ := strings.Cut(LogFilePattern, "*")
 	dir := os.TempDir()
 	for try := 0; ; try++ {
-		name := filepath.Join(dir, prefix+strconv.FormatUint(uint64(rand.Uint32()), 10)+suffix)
-		f, err := os.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_EXCL|os.O_APPEND, 0o600)
+		name := filepath.Join(dir, prefix+logFileInfix()+suffix)
+		f, err := os.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_EXCL|os.O_APPEND, logFileMode)
 		if errors.Is(err, os.ErrExist) && try < 10000 {
 			continue
 		}
 		if err != nil {
 			return nil, nil, err
 		}
+		if err := f.Chmod(logFileMode); err != nil {
+			_ = f.Close()
+			_ = os.Remove(name)
+			return nil, nil, err
+		}
 		return f, giveLogToSudoUser(f), nil
 	}
 }
 
-// ReadLogFile returns what f, the log this run created, holds. It reads it
-// through f's name, without following a symlink there, and only while that
-// name is still f: a crash report must not read whatever the name points at
-// now.
+// ReadLogFile returns what f, the log this run created, holds (openOwnLog).
 func ReadLogFile(f *os.File) ([]byte, error) {
+	r, err := openOwnLog(f)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = r.Close() }()
+	return io.ReadAll(r)
+}
+
+// ReadLogFileTail returns the last limit bytes f, the log this run created,
+// holds (openOwnLog), from the start of a line where it cuts the log and a
+// line starts within them: a crash
+// report sends what the log ends with, which a log of up to FileCapBytes
+// cannot all fit in, and it is read into memory no bigger than limit.
+func ReadLogFileTail(f *os.File, limit int64) ([]byte, error) {
+	r, err := openOwnLog(f)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = r.Close() }()
+	fi, err := r.Stat()
+	if err != nil {
+		return nil, err
+	}
+	from := max(fi.Size()-limit, 0)
+	b := make([]byte, fi.Size()-from)
+	n, err := r.ReadAt(b, from)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return nil, err
+	}
+	b = b[:n]
+	if from > 0 {
+		if i := bytes.IndexByte(b, '\n'); i >= 0 && i < len(b)-1 {
+			b = b[i+1:]
+		}
+	}
+	return b, nil
+}
+
+// openOwnLog opens f, the log this run created, to read, through f's name,
+// without following a symlink there, and only while that name is still f: a
+// crash report must not read whatever the name points at now.
+func openOwnLog(f *os.File) (*os.File, error) {
 	if f == nil {
 		return nil, errors.New("this run keeps no log file")
 	}
@@ -139,20 +192,21 @@ func ReadLogFile(f *os.File) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = r.Close() }()
 	cur, err := r.Stat()
+	if err == nil && !os.SameFile(own, cur) {
+		err = errors.New(f.Name() + " is no longer the log this run created")
+	}
 	if err != nil {
+		_ = r.Close()
 		return nil, err
 	}
-	if !os.SameFile(own, cur) {
-		return nil, errors.New(f.Name() + " is no longer the log this run created")
-	}
-	return io.ReadAll(r)
+	return r, nil
 }
 
 // CloseLogFile closes f, this run's log, and removes it (RemoveLogFile). A nil
-// f, a run that keeps no log, is a no-op. The CLI's log an agent appends to
-// (ClientLogFileFlag) is only closed: it is the CLI's to remove.
+// f, a run that keeps no log, and an f already closed are no-ops. The CLI's
+// log an agent appends to (ClientLogFileFlag) is only closed: it is the CLI's
+// to remove.
 func CloseLogFile(f *os.File) error {
 	if f == nil {
 		return nil
@@ -162,6 +216,9 @@ func CloseLogFile(f *os.File) error {
 		return f.Close()
 	}
 	own, statErr := f.Stat()
+	if errors.Is(statErr, os.ErrClosed) {
+		return nil
+	}
 	closeErr := f.Close()
 	if statErr != nil {
 		return errors.Join(closeErr, statErr)

@@ -3,6 +3,7 @@
 package log
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -601,6 +602,7 @@ func TestClientLogFileArg(t *testing.T) {
 		{[]string{"keploy", "agent", flag + "=/a"}, "/a"},
 		{[]string{"keploy", "agent", flag, "/a"}, "/a"},
 		{[]string{"keploy", "agent", flag + "=/a", flag, "/b"}, "/b"},
+		{[]string{"keploy", "agent", flag, "/a", flag + "=/b"}, "/b"},
 		{[]string{"keploy", "agent", flag}, ""},
 		{[]string{"keploy", "agent", flag + "="}, ""},
 		{[]string{"keploy", "agent", "--", flag + "=/a"}, ""},
@@ -727,5 +729,184 @@ func TestNew_UnderSudoTheAgentAppendsToTheSudoUsersLog(t *testing.T) {
 	}
 	if err := CloseLogFile(f); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// createLogFile opens each name it tries with O_EXCL: a file, a symlink or a
+// named pipe already at a name, which any user of a shared /tmp can put there,
+// is left as it is, and the next name is used.
+func TestCreateLogFile_LeavesWhatIsAtANameAloneAndTriesTheNext(t *testing.T) {
+	kept := func(t *testing.T, path string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte("kept\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, c := range []struct {
+		name  string
+		plant func(t *testing.T, path, target string)
+	}{
+		{"a regular file", func(t *testing.T, path, _ string) { kept(t, path) }},
+		{"a symlink", func(t *testing.T, path, target string) {
+			kept(t, target)
+			if err := os.Symlink(target, path); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"a named pipe", func(t *testing.T, path, _ string) {
+			if err := syscall.Mkfifo(path, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			tmp, _ := inRun(t)
+			calls := 0
+			prev := logFileInfix
+			logFileInfix = func() string { calls++; return strconv.Itoa(calls) }
+			t.Cleanup(func() { logFileInfix = prev })
+			first := filepath.Join(tmp, "keploy-logs-1.txt")
+			target := filepath.Join(t.TempDir(), "target")
+			c.plant(t, first, target)
+			planted, err := os.Lstat(first)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			f, _, err := createLogFile()
+			if err != nil {
+				t.Fatalf("createLogFile: %v", err)
+			}
+			t.Cleanup(func() { _ = CloseLogFile(f) })
+			if want := filepath.Join(tmp, "keploy-logs-2.txt"); f.Name() != want {
+				t.Errorf("the log is %s, want %s, the next name", f.Name(), want)
+			}
+			now, err := os.Lstat(first)
+			if err != nil || !os.SameFile(planted, now) || now.Mode() != planted.Mode() {
+				t.Errorf("what was at %s changed: %v (%v), was %v", first, now, err, planted)
+			}
+			for _, path := range []string{first, target} {
+				if fi, err := os.Lstat(path); err == nil && fi.Mode().IsRegular() {
+					if b := mustRead(t, path); b != "kept\n" {
+						t.Errorf("%s holds %q, want what was put there", path, b)
+					}
+				}
+			}
+		})
+	}
+}
+
+// A log is created 0600 whatever the umask. A log whose owner's write bit is
+// gone is one keploy sealed when it was full (logFileRoom), so under a umask
+// that takes that bit away the run's log would look full from its first line
+// and hold nothing.
+func TestNew_TheLogIsWrittenWhateverTheUmask(t *testing.T) {
+	inRun(t)
+	prev := syscall.Umask(0o277)
+	t.Cleanup(func() { syscall.Umask(prev) })
+	logger, f := newLog(t)
+	logger.Info("a line under a strict umask")
+	fi, err := os.Stat(f.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != logFileMode {
+		t.Errorf("the log's mode is %v under umask 0277, want %v", fi.Mode().Perm(), logFileMode)
+	}
+	if got := mustRead(t, f.Name()); !strings.Contains(got, "a line under a strict umask") {
+		t.Errorf("the log holds %q, want its line", got)
+	}
+}
+
+// A name the agent found a regular file can be a named pipe with no reader by
+// the time it opens it. The agent's open does not wait for a reader that
+// never comes (O_NONBLOCK): it refuses the pipe and keeps a log of its own.
+func TestNew_AgentDoesNotWaitOnANamedPipeWithNoReader(t *testing.T) {
+	console := consoleTo(t)
+	tmp, _ := inRun(t)
+	t.Setenv("SUDO_UID", "")
+	path := filepath.Join(t.TempDir(), "cli.log")
+	if err := os.WriteFile(path, []byte("kept\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var swapErr error
+	prev := openFile
+	openFile = func(name string, flag int, perm os.FileMode) (*os.File, error) {
+		if name == path {
+			if swapErr = os.Remove(path); swapErr == nil {
+				swapErr = syscall.Mkfifo(path, 0o600)
+			}
+		}
+		return prev(name, flag, perm)
+	}
+	t.Cleanup(func() { openFile = prev })
+	asAgentOf(t, path)
+
+	type made struct {
+		f   *os.File
+		err error
+	}
+	done := make(chan made, 1)
+	go func() { _, f, err := New(); done <- made{f, err} }()
+	var m made
+	select {
+	case m = <-done:
+	case <-time.After(30 * time.Second):
+		// Give the waiting open the reader it waits for, so the test ends.
+		if r, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0); err == nil {
+			t.Cleanup(func() { _ = r.Close() })
+		}
+		m = <-done
+		t.Errorf("the agent's open of %s waited on a named pipe with no reader", path)
+	}
+	if swapErr != nil {
+		t.Fatal(swapErr)
+	}
+	if m.err != nil || m.f == nil {
+		t.Fatalf("New = %v, %v; want a log of the agent's own", m.f, m.err)
+	}
+	t.Cleanup(func() { _ = CloseLogFile(m.f) })
+	if m.f.Name() == path || filepath.Dir(m.f.Name()) != tmp {
+		t.Errorf("the agent took %s; want a log of its own in %s", m.f.Name(), tmp)
+	}
+	if fi, err := os.Lstat(path); err != nil || fi.Mode()&os.ModeNamedPipe == 0 {
+		t.Errorf("the named pipe at %s changed: %v, %v", path, fi, err)
+	}
+	if said := mustRead(t, console.Name()); !strings.Contains(said, "this agent keeps a log of its own") {
+		t.Errorf("the agent did not say it keeps a log of its own:\n%s", said)
+	}
+}
+
+// A crash report carries the end of the log (ReadLogFileTail): no more than
+// the bytes asked for, from the start of a line, or the whole log where it is
+// shorter; read through its name only while that is still this run's log.
+func TestReadLogFileTail(t *testing.T) {
+	inRun(t)
+	logger, f := newLog(t)
+	for i := 0; i < 100; i++ {
+		logger.Info(fmt.Sprintf("line %03d of the run", i))
+	}
+	whole := mustRead(t, f.Name())
+	if b, err := ReadLogFileTail(f, int64(len(whole))+10); err != nil || string(b) != whole {
+		t.Errorf("the tail of a log shorter than asked for = %q, %v; want the whole log", b, err)
+	}
+	b, err := ReadLogFileTail(f, 500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(b) == 0 || len(b) > 500 || !strings.HasSuffix(whole, string(b)) || whole[len(whole)-len(b)-1] != '\n' {
+		t.Errorf("the last 500 bytes of the log = %q; want the log's end, from the start of a line, within 500 bytes", b)
+	}
+	if err := os.Remove(f.Name()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f.Name(), []byte("not the log\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := ReadLogFileTail(f, 500); err == nil {
+		t.Errorf("ReadLogFileTail read %q, a file put at the log's name", b)
+	}
+	if _, err := ReadLogFileTail(nil, 500); err == nil {
+		t.Error("ReadLogFileTail(nil) read a log")
 	}
 }

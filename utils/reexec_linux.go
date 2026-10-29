@@ -14,6 +14,11 @@ import (
 	"go.uber.org/zap"
 )
 
+// execProcess is syscall.Exec, which ReexecWithSudo replaces this process
+// with sudo through; a test swaps in one that looks at what the process leaves
+// behind at that moment.
+var execProcess = syscall.Exec
+
 // ReexecWithSudo re-executes the current keploy command with sudo.
 // This is used when a Docker/Docker Compose command is detected and keploy is not running as root.
 // Uses syscall.Exec to replace the current process entirely - no parent process remains.
@@ -62,7 +67,7 @@ func ReexecWithSudo(logger *zap.Logger) {
 	}
 	// Use syscall.Exec to replace the current process
 	// This means no parent process remains - clean handoff
-	err = syscall.Exec(sudoPath, args, os.Environ())
+	err = execProcess(sudoPath, args, os.Environ())
 	if err != nil {
 		// syscall.Exec only returns on error
 		logger.Error("failed to re-execute with sudo", zap.Error(err))

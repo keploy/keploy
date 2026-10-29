@@ -4,7 +4,11 @@ package utils
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
+
+	keployLog "go.keploy.io/server/v3/utils/log"
+	"go.uber.org/zap"
 )
 
 func TestIsCloudReplayCmd(t *testing.T) {
@@ -171,5 +175,48 @@ func TestShouldReexecWithSudo_NotForDockerStart(t *testing.T) {
 	os.Args = []string{"keploy", "record", "-c", "docker run --name app img"}
 	if !ShouldReexecWithSudo() {
 		t.Error("ShouldReexecWithSudo() = false for docker run")
+	}
+}
+
+// The run goes on in the process the sudo exec starts, which keeps a log of
+// its own. This process's log, a temp file, is gone by the exec: nothing would
+// be left to remove it, one log left in the temp directory per Docker or cloud
+// replay run that re-executes itself with sudo.
+func TestReexecWithSudo_RemovesThisProcesssLogBeforeTheExec(t *testing.T) {
+	bin := t.TempDir()
+	sudo := filepath.Join(bin, "sudo")
+	if err := os.WriteFile(sudo, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	t.Setenv("TMPDIR", t.TempDir())
+	_, f, err := keployLog.New()
+	if err != nil || f == nil {
+		t.Fatalf("log.New = %v, %v; want a log file", f, err)
+	}
+	t.Cleanup(func() {
+		_ = keployLog.CloseLogFile(f)
+		keployLog.TestOnlyResetSink()
+	})
+	prevLog := LogFile
+	LogFile = f
+	t.Cleanup(func() { LogFile = prevLog })
+
+	execed, leftBehind := "", true
+	prev := execProcess
+	execProcess = func(path string, _ []string, _ []string) error {
+		execed = path
+		_, err := os.Lstat(f.Name())
+		leftBehind = !os.IsNotExist(err)
+		return nil
+	}
+	t.Cleanup(func() { execProcess = prev })
+
+	ReexecWithSudo(zap.NewNop())
+	if execed != sudo {
+		t.Fatalf("ReexecWithSudo exec'd %q, want %s", execed, sudo)
+	}
+	if leftBehind {
+		t.Errorf("this process's log %s was still there at the exec", f.Name())
 	}
 }

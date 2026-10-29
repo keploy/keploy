@@ -125,29 +125,34 @@ const FileCapBytes = 100 << 20
 // logFileCap is FileCapBytes, which a test lowers.
 var logFileCap int64 = FileCapBytes
 
-// logFileStatEvery is how much this process writes to the log between two
-// looks at the file's size (a test lowers it): the native agent appends to the
-// CLI's log (ClientLogFileFlag), so the file holds the other process's lines
-// too, which count toward the cap, and only the file's size tells how many.
-var logFileStatEvery int64 = 64 << 10
-
 // logFileCapNote is the log's last line, once it is full.
 var logFileCapNote = fmt.Sprintf("keploy stopped writing to this log at its %d MiB cap; the console still has every line.\n", FileCapBytes>>20)
 
-// logFileRoom keeps this run's log within logFileCap. When a line has no room
-// left beside logFileCapNote, the log gets that note and nothing more from
-// this process; the console still gets every line. A line is written whole
-// or not at all, so the note is a line of its own. The file's size is looked
-// at every logFileStatEvery bytes this process writes, and counted from those
-// writes between looks. So with two processes writing it (the CLI and its
-// native agent), each takes it past the cap by no more than what it writes
-// between two of its looks, and each that fills it writes the note once.
+// logFileMode is the mode of this run's log while keploy writes it, and
+// logFileSealedMode its mode once it is full (logFileRoom): its owner can
+// still read it, and no keploy process writes it again.
+const (
+	logFileMode       os.FileMode = 0o600
+	logFileSealedMode os.FileMode = 0o400
+)
+
+// logFileRoom keeps this run's log within logFileCap. The native agent appends
+// to the CLI's log (ClientLogFileFlag), so the file holds the other process's
+// lines too, which count toward the cap, and only the file tells how many: the
+// writer looks at it (one fstat) before every line, so a process that has
+// been quiet while the other filled the file knows it is full. When a line
+// has no room left beside logFileCapNote, the writer seals the file (it takes
+// away the owner's write bit, logFileSealedMode), writes the note, and writes
+// nothing more. A process that finds the file sealed writes nothing more
+// either, note included: a full log ends with the note, once, whichever
+// process filled it, even where its last line was too long to fit and left
+// room for shorter ones. Only two processes that fill it at the same instant
+// (each looked before the other sealed) can both write a note. A line is
+// written whole or not at all. The console still gets every line.
 var logFileRoom struct {
 	sync.Mutex
-	f      *os.File // the log the counts below are of
-	size   int64    // its size at the last look, and what this process wrote to it since
-	unseen int64    // what this process wrote to it since the last look
-	full   bool     // the note is written: nothing more is
+	f    *os.File // the log the state below is of
+	full bool     // the note is written, or the file is sealed: nothing more is
 }
 
 // logFileWriter writes to logFileSink's file as it is at each write, so a
@@ -164,30 +169,33 @@ func (logFileWriter) Write(p []byte) (int, error) {
 	r.Lock()
 	defer r.Unlock()
 	if r.f != f {
-		r.f, r.size, r.unseen, r.full = f, 0, logFileStatEvery, false
+		r.f, r.full = f, false
 	}
 	if r.full {
 		return len(p), nil
 	}
-	if r.unseen >= logFileStatEvery {
-		if fi, err := f.Stat(); err == nil {
-			r.size = fi.Size()
+	fi, err := f.Stat()
+	if err != nil {
+		if errors.Is(err, os.ErrClosed) {
+			return len(p), nil
 		}
-		r.unseen = 0
+		return 0, err
 	}
-	if r.size+int64(len(p))+int64(len(logFileCapNote)) > logFileCap {
+	if fi.Mode().Perm()&0o200 == 0 {
 		r.full = true
-		n, err := f.WriteString(logFileCapNote)
-		r.size += int64(n)
-		if err != nil && !errors.Is(err, os.ErrClosed) {
+		return len(p), nil
+	}
+	if fi.Size()+int64(len(p))+int64(len(logFileCapNote)) > logFileCap {
+		r.full = true
+		// Sealed first, so that the other process, which looks before each
+		// line, stops at once. A file that cannot be sealed still gets the note.
+		_ = f.Chmod(logFileSealedMode)
+		if _, err := f.WriteString(logFileCapNote); err != nil && !errors.Is(err, os.ErrClosed) {
 			return 0, err
 		}
 		return len(p), nil
 	}
-	n, err := f.Write(p)
-	r.size += int64(n)
-	r.unseen += int64(n)
-	if err != nil && !errors.Is(err, os.ErrClosed) {
+	if _, err := f.Write(p); err != nil && !errors.Is(err, os.ErrClosed) {
 		return 0, err
 	}
 	return len(p), nil

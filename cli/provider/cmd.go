@@ -1349,6 +1349,15 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		if err == nil {
 			*c.logger = *logger
 		}
+		// Nor does such a run keep a log file: the `logs:` line that names it
+		// is PrintLogo's, which a document on stdout has no room for, and a
+		// file nobody is told about is one a killed run leaves in the temp
+		// directory for nobody to find. The lines logged so far are on the
+		// console (stderr), as every later one is.
+		if err := log.CloseLogFile(utils.LogFile); err != nil {
+			c.logger.Debug("failed to remove the log file of a run with machine-readable output", zap.Error(err))
+		}
+		utils.LogFile = nil
 	}
 
 	// A KEPLOY_PROVEN keploy cannot read would otherwise mean "off" without a
