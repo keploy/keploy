@@ -1575,3 +1575,89 @@ func TestAReadPlusAnOffsetIsRefusedNearAWallTimeShownTwiceAtAnyCut(t *testing.T)
 		}
 	}
 }
+
+// The learn step's refusal below an hour's cut, by its outcome: with both
+// of its runs in the hour Berlin shows twice as its clocks go back
+// (2026-10-25), an application that resolves the wall time to its first
+// showing writes, of clock + 2h, a value an hour early in each run, so the
+// runs agree on clock + 1h. Cut to the second or the minute, or not cut,
+// whatever the learn step takes there, a replay on another day, in the
+// process's zone or with no zone known, never passes a time to live an
+// hour shorter: without the refusal it learns clock + 1h, and that replay
+// passes it at every read. Learned the day after, the same replay passes
+// the right value at every read and the shorter one at none. (An hour's
+// cut learns there, clock + 2h or none: its own row above.)
+func TestAnOffsetLearnedInAWallTimeShownTwicePassesNoShorterTimeToLiveElsewhere(t *testing.T) {
+	ber, err := time.LoadLocation("Europe/Berlin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const p = "body.expiresAt"
+	hour, ms := time.Hour, time.Millisecond
+	turn := time.Date(2026, 10, 25, 1, 0, 0, 0, time.UTC)
+	day := time.Date(2026, 11, 5, 0, 0, 0, 0, time.UTC)
+	for _, row := range []struct {
+		name, shape string
+		cut         time.Duration
+	}{
+		{"cut to the second", "cut, then add", time.Second},
+		{"cut to the second", "add, then cut", time.Second},
+		{"cut to the minute", "cut, then add", time.Minute},
+		{"cut to the minute", "add, then cut", time.Minute},
+		{"not cut (LocalDateTime then atZone)", "cut, then add", ms},
+	} {
+		val := func(read time.Time, ttl time.Duration) time.Time {
+			if row.shape == "cut, then add" {
+				return firstShowingIn(read, row.cut, ber).Add(ttl)
+			}
+			return firstShowingIn(read.Add(ttl), row.cut, ber)
+		}
+		// replay counts the reads on day, in Berlin as the process's zone
+		// and with no zone read, that pass o's value of a time to live ttl.
+		replay := func(o models.ClockOffset, ttl time.Duration) (passed, reads int) {
+			for from := day; from.Before(day.Add(24 * hour)); from = from.Add(17 * time.Minute) {
+				read := from.Add(500 * ms)
+				for _, s := range []Span{{From: from, To: from.Add(time.Second), Zone: ber, Own: true}, {From: from, To: from.Add(time.Second), Zone: time.UTC}} {
+					reads++
+					if ok, _ := CheckClockRead(p, o, InstantLeaf(p, p, val(read, ttl), ms), s, true); ok {
+						passed++
+					}
+				}
+			}
+			return passed, reads
+		}
+		for _, z := range []struct {
+			name string
+			loc  *time.Location
+		}{{"Europe/Berlin", ber}, {"no zone", nil}} {
+			learn := func(call time.Time) Learned {
+				dc := clockedDrifts()
+				dc.zone = z.loc
+				fcall := call.Add(FullRoundLead)
+				w := (&Window{Rec: Span{From: call.Add(-100 * ms), To: call}, F: Span{From: fcall.Add(-100 * ms), To: fcall}}).ComparesOffsets()
+				shape := func(at time.Time) Shape { return Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, at, ms)}} }
+				return ClassifyIn(dc, []string{p}, shape(val(fcall.Add(-30*ms), 2*hour)), shape(val(call.Add(-30*ms), 2*hour)), call, nil, nil, nil, w)[0]
+			}
+			after := time.Date(2026, 10, 26, 10, 0, 7, 300e6, time.UTC)
+			ln := learn(after)
+			if ln.Offset == nil {
+				t.Fatalf("FALSE RED: %s, %s, learned with %s at %s: %s (%s); want clock + 2h", row.name, row.shape, z.name, after, ln.Kind, ln.Why)
+			}
+			if right, reads := replay(*ln.Offset, 2*hour); right != reads {
+				t.Errorf("FALSE RED: %s, %s, learned with %s at %s: %+v; a replay on %s passed the right value at %d of %d reads", row.name, row.shape, z.name, after, ln.Offset, day.Format("2006-01-02"), right, reads)
+			}
+			if short, reads := replay(*ln.Offset, hour); short != 0 {
+				t.Errorf("FALSE GREEN: %s, %s, learned with %s at %s: %+v; a replay on %s passed a time to live an hour shorter at %d of %d reads", row.name, row.shape, z.name, after, ln.Offset, day.Format("2006-01-02"), short, reads)
+			}
+			for _, call := range []time.Time{turn.Add(10*time.Minute + 7300*ms), turn.Add(40*time.Minute + 7300*ms)} {
+				ln := learn(call)
+				if ln.Offset == nil {
+					continue
+				}
+				if short, reads := replay(*ln.Offset, hour); short != 0 {
+					t.Errorf("FALSE GREEN: %s, %s, learned with %s at %s, both runs in the second showing: %s %+v; a replay on %s passed a time to live an hour shorter at %d of %d reads", row.name, row.shape, z.name, call, ln.Kind, ln.Offset, day.Format("2006-01-02"), short, reads)
+				}
+			}
+		}
+	}
+}
