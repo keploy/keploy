@@ -1,6 +1,7 @@
 package models
 
 import (
+	"encoding/json"
 	"net"
 	"net/url"
 	"regexp"
@@ -24,7 +25,14 @@ import (
 // variable miss names, one the closest mock or a mock on the call's route
 // declares, or one holding a value the test's variables have). The miss says
 // a value the app sent is there, whatever its look.
+//
+// A MongoDB miss's shape also names, from the request the matcher rendered
+// (ReceivedReq), the database the command ran in and its filter's keys
+// (mongoMissShape).
 func MissShape(m UnmatchedCall) string {
+	if isMongoCall(m.Protocol) {
+		return mongoMissShape(m)
+	}
 	shape := CallShape(m.Protocol, m.ActualSummary)
 	if !IsPathProtocol(m.Protocol) || (len(m.FieldDiffs) == 0 && len(m.VariablePlaces) == 0) {
 		return shape
@@ -38,16 +46,20 @@ func MissShape(m UnmatchedCall) string {
 
 // CallShape is a miss's summary in its shape: for HTTP and gRPC the method
 // and the target's shape ("GET /users/{}/orders", "/pkg.v1.Service/Method"),
-// for SQL the statement with its literals written "?" (SQLShape), and "" for
-// any other protocol, whose summary may hold the values it sent (a cache key,
-// a document) and which keploy has no shape for. An HTTP or gRPC shape is its
-// own shape; a SQL statement cut at its bound may shape again shorter.
+// for SQL the statement with its literals written "?" (SQLShape), for
+// MongoDB the command and the namespace it runs on, each name by KeyShape
+// (mongoShape: "find on app_config_audits"), and "" for any other protocol,
+// whose summary may hold the values it sent (a cache key, a document) and
+// which keploy has no shape for. An HTTP, gRPC or MongoDB shape is its own
+// shape; a SQL statement cut at its bound may shape again shorter.
 func CallShape(protocol, summary string) string {
 	switch {
 	case IsPathProtocol(protocol):
 		return methodTargetShape(summary)
 	case isSQLCall(protocol):
 		return SQLShape(summary)
+	case isMongoCall(protocol):
+		return mongoShape(summary)
 	}
 	return ""
 }
@@ -203,6 +215,127 @@ func KeyShape(k string) string {
 func isSQLCall(protocol string) bool {
 	p := strings.ToLower(protocol)
 	return strings.Contains(p, "sql") || strings.Contains(p, "postgres")
+}
+
+// isMongoCall reports whether a miss's protocol is MongoDB's, whose summary
+// is its command and the collection it names: "find on users".
+func isMongoCall(protocol string) bool {
+	return strings.EqualFold(protocol, "MongoDB") || strings.EqualFold(protocol, "Mongo")
+}
+
+// mongoMaxKeys bounds the filter keys a MongoDB shape names; past it the
+// shape says "…".
+const mongoMaxKeys = 8
+
+// mongoShape is a MongoDB miss's summary in its shape: "<command>", or
+// "<command> on <namespace>", then "filter <key>,<key>" when the summary
+// names its filter's keys, as a shape of one does (mongoMissShape). The
+// command, each dot-separated part of the namespace ("api.app_config_audits"
+// or a collection alone) and of each key is kept when it reads as a name
+// (KeyShape), else {}: a tenant's database or collection named by a value
+// (tenant_42), an ID used as a key. The legacy command pseudo-collection
+// $cmd is a name. Anything else the summary holds is left out, so what the
+// shape names is only ever a name.
+func mongoShape(summary string) string {
+	f := strings.Fields(summary)
+	if len(f) == 0 {
+		return ""
+	}
+	out := KeyShape(f[0])
+	i := 1
+	if i+1 < len(f) && f[i] == "on" {
+		out += " on " + mongoNameShape(f[i+1])
+		i += 2
+	}
+	if i+1 < len(f) && f[i] == "filter" {
+		out += " filter " + strings.Join(mongoKeysShape(strings.Split(f[i+1], ",")), ",")
+	}
+	return out
+}
+
+// mongoMissShape is a MongoDB miss's shape (mongoShape) naming, when the
+// request the matcher rendered for it (ReceivedReq, its OP_MSG command as
+// "cmd") holds them, the database the command ran in ("$db": the namespace
+// "<db>.<collection>") and the keys of its filter ("filter", or "query" for
+// count, distinct and findAndModify), in their order by name: "find on
+// api.app_config_audits filter appId,name". A miss with no rendered request
+// (no closest mock), or one that does not read as a command, is shaped by
+// its summary alone; so are a write's per-statement filters (delete's and
+// update's q) and an aggregate's $match, which name no "filter".
+func mongoMissShape(m UnmatchedCall) string {
+	shape := mongoShape(m.ActualSummary)
+	var body struct {
+		Cmd map[string]json.RawMessage `json:"cmd"`
+	}
+	if m.ReceivedReq == "" || json.Unmarshal([]byte(m.ReceivedReq), &body) != nil || body.Cmd == nil {
+		return shape
+	}
+	f := strings.Fields(m.ActualSummary)
+	if len(f) == 0 {
+		return shape
+	}
+	var command, coll, db string
+	command = f[0]
+	if json.Unmarshal(body.Cmd[command], &coll) != nil || coll == "" {
+		return shape
+	}
+	_ = json.Unmarshal(body.Cmd["$db"], &db)
+	ns := coll
+	if db != "" {
+		ns = db + "." + coll
+	}
+	out := KeyShape(command) + " on " + mongoNameShape(ns)
+	var filter map[string]json.RawMessage
+	for _, k := range []string{"filter", "query"} {
+		if json.Unmarshal(body.Cmd[k], &filter) == nil && len(filter) > 0 {
+			break
+		}
+		filter = nil
+	}
+	if len(filter) > 0 {
+		keys := make([]string, 0, len(filter))
+		for k := range filter {
+			keys = append(keys, k)
+		}
+		slices.Sort(keys)
+		if len(keys) > mongoMaxKeys {
+			keys = append(keys[:mongoMaxKeys], "…")
+		}
+		out += " filter " + strings.Join(mongoKeysShape(keys), ",")
+	}
+	return out
+}
+
+// mongoNameShape is a MongoDB name (a namespace, a collection, a dotted
+// key) with each dot-separated part kept when it reads as a name (KeyShape),
+// else {}, and $cmd kept.
+func mongoNameShape(s string) string {
+	parts := strings.Split(s, ".")
+	for i, p := range parts {
+		if p != "$cmd" {
+			parts[i] = KeyShape(p)
+		}
+	}
+	return strings.Join(parts, ".")
+}
+
+// mongoKeysShape are filter keys each in its shape (mongoNameShape), once,
+// in their order, with a last "…" (keys left out) kept and an empty key {}.
+func mongoKeysShape(keys []string) []string {
+	out := make([]string, 0, len(keys))
+	for i, k := range keys {
+		shape := mongoNameShape(k)
+		switch {
+		case k == "…" && i == len(keys)-1:
+			shape = k
+		case k == "":
+			shape = pathHole
+		}
+		if !slices.Contains(out, shape) {
+			out = append(out, shape)
+		}
+	}
+	return out
 }
 
 // PathShape is a URL path as the proven model's evidence keeps it (design v14
