@@ -391,6 +391,17 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 						stub, ok = again, true
 					}
 				}
+				if !ok && err == nil && proven {
+					// A set-aside test's recording the call is exactly, when
+					// it is not one call more than the test recorded: served,
+					// unchecked, named on the test's evidence.
+					aside, aerr := h.setAsideAnswer(reqCtx, input, db, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableMockCorrelation)
+					if aerr != nil {
+						err = aerr
+					} else if aside != nil {
+						stub, ok = aside, true
+					}
+				}
 			}
 			if err != nil {
 				utils.LogError(h.Logger, err, "error while matching http mocks", zap.Any("metadata", utils.GetReqMeta(request)))
