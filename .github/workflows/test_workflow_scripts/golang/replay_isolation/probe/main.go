@@ -120,6 +120,12 @@ func app(args []string) {
 		// resolver knows, says that resolver still answers the network's
 		// own names.
 		if *peer != "" {
+			// Its name's other types (TXT, SRV, and what CNAME asks), which
+			// docker's resolver does not hold and recurses to its upstream:
+			// the sink counts each as dns-owned.
+			_, _ = net.DefaultResolver.LookupTXT(context.Background(), *peer)
+			_, _, _ = net.DefaultResolver.LookupSRV(context.Background(), "", "", *peer)
+			_, _ = net.DefaultResolver.LookupCNAME(context.Background(), *peer)
 			addrs, err := net.DefaultResolver.LookupHost(context.Background(), *peer)
 			if err != nil {
 				outcome("dns-peer", err)
@@ -265,9 +271,19 @@ func sink(args []string) {
 					// other name REFUSED, so no lookup waits on a timeout, and a
 					// resolver that lists the sink before the runner's own (the
 					// docker phases) moves on to it for the runner's lookups.
+					// A peer name's lookup of a type other than A, AAAA
+					// and MX counts as dns-owned, each with its type in
+					// dns-owned-types.txt.
 					name := qname(buf[:n])
 					rcode := byte(3) // NXDOMAIN
+					qtype := 0
+					if off := 12 + len(name) + 2; name != "" && off+2 <= n {
+						qtype = int(buf[off])<<8 | int(buf[off+1])
+					}
 					switch {
+					case strings.HasPrefix(name, "riso-peer") && qtype != 1 && qtype != 28 && qtype != 15:
+						p = "dns-owned"
+						appendLine(filepath.Join(*dir, "dns-owned-types.txt"), name+" "+strconv.Itoa(qtype))
 					case !strings.Contains(name, "replay-isolation"):
 						p = "dns-other"
 						rcode = 5 // REFUSED

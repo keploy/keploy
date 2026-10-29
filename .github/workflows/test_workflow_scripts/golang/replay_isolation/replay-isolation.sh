@@ -59,7 +59,7 @@ MODES=("$@"); [ ${#MODES[@]} -gt 0 ] || MODES=(native docker)
 SINKPID=""
 DOCKER_RESOLV=""
 FAILED=0
-PATHS="tcp bypass-tcp fork-tcp tfo imds-tcp udp-connected udp-sendto udp-quic icmp-raw icmp-dgram dns-udp dns-bare dns-other dns-tcp tcp6 udp6"
+PATHS="tcp bypass-tcp fork-tcp tfo imds-tcp udp-connected udp-sendto udp-quic icmp-raw icmp-dgram dns-udp dns-bare dns-other dns-tcp tcp6 udp6 dns-owned"
 APPARGS="app -sink 198.18.0.10 -sink6 fd00::10 -imds 198.18.0.11 -peer riso-peer"
 # Native runs: as root, in a mount namespace of their own whose resolv.conf
 # names the sink and whose nsswitch.conf asks files then DNS (a runner's image
@@ -453,19 +453,25 @@ for mode in "${MODES[@]}"; do
 		# ... and every name it does hold still goes to it: the peer resolves
 		# to its own address, which keploy could not have made up.
 		peer_row replay-docker
+		# The peer's TXT, SRV and CNAME lookups, which docker's resolver
+		# recurses: keploy answers each itself, so none reaches its upstream.
+		rows_zero replay-docker dns-owned
 		row_log "replay-docker reports the DNS name it answered itself" "$W/out/replay-docker/keploy.log" "${KEPT}DNS leak-probe\.invalid-replay-isolation\.test"
 		row_nolog "replay-docker opens no DNS egress" "$W/out/replay-docker/keploy.log" "$EGRESS_DNS"
 		row_log "replay-docker names the port-only bypass rule" "$W/out/replay-docker/keploy.log" 'real egress opened by bypassRules.*7002'
 		row_log "replay-docker reports the IMDS call it kept inside" "$W/out/replay-docker/keploy.log" "${KEPT}HTTP 198\.18\.0\.11"
 		row "replay-docker-dns passes" "$([ "$(cat "$W/out/replay-docker-dns/exit" 2>/dev/null)" = 0 ] && echo 1)" "exit $(cat "$W/out/replay-docker-dns/exit" 2>/dev/null)"
 		row_log "replay-docker-dns: the agent gets the opt-in" "$W/out/replay-docker-dns/keploy.log" "$EGRESS_DNS"
-		# The opt-in sends the miss on, through 127.0.0.11 to its upstream.
-		rows_reach replay-docker-dns dns-udp
+		# The opt-in sends the miss on, through 127.0.0.11 to its upstream,
+		# and the peer's other types with it (the probe's dns-owned works).
+		rows_reach replay-docker-dns dns-udp dns-owned
 		;;
 	compose)
 		# dns-udp at the baseline: the project network's 127.0.0.11 forwards
 		# the unrecorded outside name to its upstream, the sink.
 		rows_reach base-compose tcp fork-tcp tfo imds-tcp dns-udp dns-bare
+		# dns-owned: it recurses the peer service's TXT, SRV and CNAME lookups.
+		rows_reach base-compose dns-owned
 		row_log "base-compose resolves the peer service" "$W/out/base-compose/app.log" 'probe dns-peer: [0-9]'
 		row "replay-compose passes" "$([ "$(cat "$W/out/replay-compose/exit" 2>/dev/null)" = 0 ] && echo 1)" "exit $(cat "$W/out/replay-compose/exit" 2>/dev/null)"
 		# keploy answers that name itself, so it never reaches 127.0.0.11's upstream.
@@ -473,6 +479,8 @@ for mode in "${MODES[@]}"; do
 		# The peer service resolves to its address on the project network,
 		# as docker's resolver answers it, not to keploy's own answer.
 		peer_row replay-compose
+		# keploy answers the peer's other types itself.
+		rows_zero replay-compose dns-owned
 		row_log "replay-compose reports the DNS name it answered itself" "$W/out/replay-compose/keploy.log" "${KEPT}DNS leak-probe\.invalid-replay-isolation\.test"
 		row_nolog "replay-compose opens no DNS egress" "$W/out/replay-compose/keploy.log" "$EGRESS_DNS"
 		row_log "replay-compose names the port-only bypass rule" "$W/out/replay-compose/keploy.log" 'real egress opened by bypassRules.*7002'
