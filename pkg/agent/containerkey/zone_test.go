@@ -28,13 +28,14 @@ type zoneFile struct {
 }
 
 // fakeZoneAPI is Docker's API over one container's files (files, by path),
-// environment and command; gone says the container was removed.
+// environment, entrypoint and command; gone says the container was removed.
 type fakeZoneAPI struct {
-	t     *testing.T
-	env   []string
-	cmd   []string
-	files map[string]zoneFile
-	gone  bool
+	t          *testing.T
+	env        []string
+	entrypoint []string
+	cmd        []string
+	files      map[string]zoneFile
+	gone       bool
 	// vanish removes the container once it has been inspected; vanishAt,
 	// once its file at that path has been statted twice.
 	vanish   bool
@@ -57,7 +58,7 @@ func (f *fakeZoneAPI) ContainerInspect(context.Context, string) (container.Inspe
 	if f.inspects++; f.vanish {
 		f.gone = true
 	}
-	return container.InspectResponse{Config: &container.Config{Env: f.env, Cmd: f.cmd}}, nil
+	return container.InspectResponse{Config: &container.Config{Env: f.env, Entrypoint: f.entrypoint, Cmd: f.cmd}}, nil
 }
 
 // file is the file at p, a directory where p holds others.
@@ -164,18 +165,19 @@ func TestAContainersZoneIsReadFromItsEnvironmentAndFilesThroughDocker(t *testing
 	}
 	at := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 	rows := []struct {
-		name     string
-		env      []string
-		cmd      []string
-		files    map[string]zoneFile
-		gone     bool
-		vanish   bool
-		vanishAt string
-		swapped  map[string]zoneFile
-		failAt   string
-		want     string // the zone's name; "" with offset set for an unnamed one
-		offset   int    // seconds east of UTC at `at`
-		err      string // a part of the error, where the zone is unknown
+		name       string
+		env        []string
+		entrypoint []string
+		cmd        []string
+		files      map[string]zoneFile
+		gone       bool
+		vanish     bool
+		vanishAt   string
+		swapped    map[string]zoneFile
+		failAt     string
+		want       string // the zone's name; "" with offset set for an unnamed one
+		offset     int    // seconds east of UTC at `at`
+		err        string // a part of the error, where the zone is unknown
 	}{
 		{name: "TZ in the environment wins over /etc/localtime", env: []string{"PATH=/bin", "TZ=Asia/Kolkata"}, files: both(map[string]zoneFile{"/etc/localtime": {link: zi + "Europe/Berlin"}}), want: "Asia/Kolkata", offset: 19800},
 		{name: "the first TZ, as getenv reads it", env: []string{"TZ=Europe/Berlin", "TZ=Asia/Kolkata"}, files: both(nil), want: "Europe/Berlin", offset: 7200},
@@ -195,8 +197,10 @@ func TestAContainersZoneIsReadFromItsEnvironmentAndFilesThroughDocker(t *testing
 		{name: "IBM_JAVA_OPTIONS setting user.timezone is unknown", env: []string{"IBM_JAVA_OPTIONS=-Duser.timezone=Europe/Berlin"}, files: both(nil), err: "the container's IBM_JAVA_OPTIONS holds"},
 		{name: "JAVA_OPTS, which a script hands java, setting user.timezone is unknown", env: []string{"TZ=Asia/Kolkata", "JAVA_OPTS=-Xmx512m -Duser.timezone=Europe/Berlin"}, cmd: []string{"sh", "-c", "exec java $JAVA_OPTS -jar /app.jar"}, files: both(nil), err: "the container's JAVA_OPTS holds"},
 		{name: "CATALINA_OPTS setting user.timezone is unknown", env: []string{"CATALINA_OPTS=-Duser.timezone=Europe/Berlin"}, files: both(nil), err: "the container's CATALINA_OPTS holds"},
+		{name: "a variable of any name holding user.timezone (JVM_ARGS) is unknown", env: []string{"TZ=Asia/Kolkata", "JVM_ARGS=-Xmx1g -Duser.timezone=Europe/Berlin"}, files: both(nil), err: "the container's JVM_ARGS holds"},
 		{name: "a variable holding no user.timezone option is not a JVM's zone", env: []string{"TZ=Asia/Kolkata", "JAVA_OPTS=-Xmx512m -Duser.language=en"}, files: both(nil), want: "Asia/Kolkata", offset: 19800},
 		{name: "a java command line setting user.timezone is unknown", cmd: []string{"java", "-Duser.timezone=Asia/Kolkata", "-jar", "app.jar"}, files: both(nil), err: "command"},
+		{name: "an ENTRYPOINT java command line setting user.timezone is unknown", entrypoint: []string{"java", "-Duser.timezone=Asia/Kolkata", "-jar", "/app.jar"}, cmd: []string{"--server.port=8080"}, files: both(nil), err: "the container's command"},
 		{name: "an /etc/timezone naming a zone other than /etc/localtime's is unknown", files: both(map[string]zoneFile{"/etc/localtime": {link: zi + "Europe/Berlin"}, "/etc/timezone": {data: []byte("Asia/Kolkata\n")}}), err: "/etc/timezone"},
 		{name: "an /etc/timezone naming /etc/localtime's zone", files: both(map[string]zoneFile{"/etc/localtime": {link: zi + "Europe/Berlin"}, "/etc/timezone": {data: []byte("Europe/Berlin\n")}}), want: "Europe/Berlin", offset: 7200},
 		{name: "an /etc/timezone of Etc/UTC with no /etc/localtime is UTC", files: both(map[string]zoneFile{"/etc/timezone": {data: []byte("Etc/UTC\n")}}), want: "UTC"},
@@ -205,6 +209,7 @@ func TestAContainersZoneIsReadFromItsEnvironmentAndFilesThroughDocker(t *testing
 		{name: "an empty TZ with no /etc/localtime is UTC", env: []string{"TZ="}, files: both(nil), want: "UTC"},
 		{name: "an empty TZ over a copied UTC /etc/localtime of no name (busybox) is UTC", env: []string{"TZ="}, files: both(map[string]zoneFile{"/etc/localtime": {data: zoneData(t, "UTC")}}), want: "UTC"},
 		{name: "an empty TZ over a copied /etc/localtime of no name, not UTC's, is unknown", env: []string{"TZ="}, files: both(map[string]zoneFile{"/etc/localtime": {data: berlin}}), err: "TZ is empty"},
+		{name: "an empty TZ whose /etc/localtime the daemon fails to read is unknown, never UTC", env: []string{"TZ="}, files: both(map[string]zoneFile{"/etc/localtime": {link: zi + "Europe/Berlin"}}), failAt: "/etc/localtime", err: "whose read failed (keploy cannot read /etc/localtime in the container: the daemon is busy)"},
 		{name: "an empty TZ over a copied zone of no name, at UTC only now (Africa/Abidjan's), is unknown", env: []string{"TZ="}, files: both(map[string]zoneFile{"/etc/localtime": {data: zoneData(t, "Africa/Abidjan")}}), err: "TZ is empty"},
 		{name: "a daemon that fails only the read of /etc/localtime leaves the zone unknown, never UTC", files: both(nil), failAt: "/etc/localtime", err: "the daemon is busy"},
 		{name: "a daemon that fails only the read of a linked /etc/localtime leaves the zone unknown", files: both(map[string]zoneFile{"/etc/localtime": {link: zi + "Europe/Berlin"}}), failAt: "/etc/localtime", err: "the daemon is busy"},
@@ -215,7 +220,7 @@ func TestAContainersZoneIsReadFromItsEnvironmentAndFilesThroughDocker(t *testing
 	}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
-			api := &fakeZoneAPI{t: t, env: r.env, cmd: r.cmd, files: r.files, gone: r.gone, vanish: r.vanish, vanishAt: r.vanishAt, swapped: r.swapped, failAt: r.failAt}
+			api := &fakeZoneAPI{t: t, env: r.env, entrypoint: r.entrypoint, cmd: r.cmd, files: r.files, gone: r.gone, vanish: r.vanish, vanishAt: r.vanishAt, swapped: r.swapped, failAt: r.failAt}
 			z, err := zoneOfApp(t, api)
 			if r.err != "" {
 				if err == nil {

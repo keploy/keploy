@@ -85,8 +85,15 @@ func containerZone(ctx context.Context, api zoneAPI, id string, cfg *container.C
 	if set {
 		// An empty TZ: the C library reads UTC, a JVM the zone of its
 		// files.
-		if fz, _, ferr := learn.ReadZoneOf(f, "", false); ferr != nil || !sameZoneName(fz.Loc.String(), "UTC") && !utcRules(fz.Loc) {
-			return learn.ProcZone{}, nil, errors.New("the container's TZ is empty, which the C library reads as UTC, and a JVM as the zone of its /etc/localtime or /etc/timezone, which is not UTC or keploy cannot read it; keploy cannot tell from the container's configuration whether its process is a JVM")
+		const empty = "the container's TZ is empty, which the C library reads as UTC, and a JVM as the zone of its /etc/localtime or /etc/timezone"
+		const which = "; keploy cannot tell from the container's configuration whether its process is a JVM"
+		fz, _, ferr := learn.ReadZoneOf(f, "", false)
+		if ferr != nil {
+			// A failed read is no zone, never UTC (a nil Loc prints UTC).
+			return learn.ProcZone{}, nil, fmt.Errorf("%s, whose read failed (%w)%s", empty, ferr, which)
+		}
+		if !sameZoneName(fz.Loc.String(), "UTC") && !utcRules(fz.Loc) {
+			return learn.ProcZone{}, nil, errors.New(empty + ", which is not UTC" + which)
 		}
 	}
 	tzfile, ok, err := learn.TimezoneFileOf(f)
