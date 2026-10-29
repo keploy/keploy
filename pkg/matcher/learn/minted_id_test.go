@@ -63,9 +63,13 @@ func TestAMintedIdIsNotFollowedFromAPartOfItInsideAnotherIdOfAnUnservedRecording
 			dc   func() *DriftCache
 		}{{"client test", clientTestCache}, {"keploy test", clockedDrifts}} {
 			base := c(mode.dc(), nil, rec, live)
-			got := c(mode.dc(), jobEvent(other, false), rec, live)
-			if got.Kind != base.Kind || got.Bindable != base.Bindable || strings.Contains(got.Why, "mock-1786") {
-				t.Errorf("%s, %s: the id's word inside another id of an unserved recording: %s bindable=%v (%q); want as with no such recording: %s bindable=%v", name, mode.name, got.Kind, got.Bindable, got.Why, base.Kind, base.Bindable)
+			// The second: the word glued inside a longer word ("zz905c")
+			// beside a word of the id is no place of it at all.
+			for _, held := range []string{other, other + `","tag":"zz905c-4631`} {
+				got := c(mode.dc(), jobEvent(held, false), rec, live)
+				if got.Kind != base.Kind || got.Bindable != base.Bindable || strings.Contains(got.Why, "mock-1786") {
+					t.Errorf("%s, %s: the id's word inside another id of an unserved recording (%s): %s bindable=%v (%q); want as with no such recording: %s bindable=%v", name, mode.name, held, got.Kind, got.Bindable, got.Why, base.Kind, base.Bindable)
+				}
 			}
 			// Still candidate sources: the word as an id of its own there,
 			// the whole id there, and a word of an id that kept another.
@@ -78,6 +82,7 @@ func TestAMintedIdIsNotFollowedFromAPartOfItInsideAnotherIdOfAnUnservedRecording
 				{"the whole id", jobEvent(rec, false), rec, live},
 				{"an id that kept a word", jobEvent(other, false), rec, "ed35a78f-7e6d-4b8a-9e21-5c6d7e8f9a0b"},
 				{"the id inside a longer id of the value", jobEvent(rec, false), rec + "-1", live + "-2"},
+				{"the word also alone in the value", jobEvent(other, false), rec + " 905c", "3f0c9a12-1111-4b8a-9e21-5c6d7e8f9a0b 2222"},
 				{"a part of the id beside another of its words", jobEvent("ffff0000-905c-4631-aaaa-bbbbccccdddd", false), rec, live},
 			} {
 				got := c(mode.dc(), g.raw, g.rec, g.live)
