@@ -100,6 +100,9 @@ type setDerived struct {
 	// staged and called are the payloads read for the set (warmOne) by its
 	// staging (WarmSet) and by its calls, for the rows.
 	staged, called int
+	// reads are the parts of the set's recordings read (derive), by tier
+	// and part, for the rows.
+	reads map[readTally]int
 	// bodies are the set's lazy Raws' payloads, loaded within a fixed
 	// budget (bodyStore), made at the first lazy Raw.
 	bodies *bodyStore
@@ -324,6 +327,12 @@ const (
 	tierForms
 )
 
+// readTally is a tier's part, as reads counts its reads.
+type readTally struct {
+	tier tierOf
+	part part
+}
+
 type readingKey struct {
 	id   string
 	part part
@@ -347,6 +356,7 @@ func derive[P, V any](s *setDerived, t *tier[P], in tierOf, id string, p part, g
 		}
 		room := t.room()
 		if !room || waited {
+			s.reads[readTally{in, p}]++
 			s.mu.Unlock()
 			return read(room)
 		}
@@ -358,6 +368,7 @@ func derive[P, V any](s *setDerived, t *tier[P], in tierOf, id string, p part, g
 		}
 		ch := make(chan struct{})
 		s.reading[k] = ch
+		s.reads[readTally{in, p}]++
 		s.mu.Unlock()
 		return readOnce(s, t, k, ch, get, read, put, size)
 	}
@@ -452,7 +463,7 @@ func wordsBytes(words map[string]bool) int64 {
 
 func newSetDerived() *setDerived {
 	b := &budget{limit: setBudget()}
-	s := &setDerived{budget: b, held: newTier[heldParts](heldBudget, b, false), words: newTier[wordParts](derivedBudget, b, true), forms: newTier[formParts](formsBudget, b, false), reading: map[readingKey]chan struct{}{}, warming: map[string]chan struct{}{}, offsets: newOffsetIndex(offsetBudget)}
+	s := &setDerived{budget: b, held: newTier[heldParts](heldBudget, b, false), words: newTier[wordParts](derivedBudget, b, true), forms: newTier[formParts](formsBudget, b, false), reading: map[readingKey]chan struct{}{}, reads: map[readTally]int{}, warming: map[string]chan struct{}{}, offsets: newOffsetIndex(offsetBudget)}
 	b.letGo = s.words.letGo
 	return s
 }
@@ -1117,7 +1128,15 @@ func (s *setDerived) take(x Raw) (ch chan struct{}, mine bool) {
 // decoded forms and instants (payloadMoments), its words' filter
 // (searchWords) and its searched instants (searchedKeys), then lets the
 // handlers waiting for it go, whatever the reads do. staged says the set's
-// staging read it (WarmSet), not a call.
+// staging read it (WarmSet), not a call. The staging also reads what a
+// set's first drifted call reads of every recording before it, whatever
+// its drift: its keyed places (setPlaces, the offset rule's), its answer's
+// stamps (stampTexts), and its fields' instants as the echo reads them
+// (fieldMoments, fieldForms), so no call reads a part of every recording
+// on its answer path (api-server's round: 15 589 recordings, read by the
+// set's first drifted call while its client waited). A call's own warm
+// reads only the three the rules read of every payload of every call; it
+// reads the rest where its rules reach them, as with no staging.
 func (dc *DriftCache) warmOne(s *setDerived, x Raw, ch chan struct{}, staged bool) {
 	defer func() {
 		s.mu.Lock()
@@ -1133,4 +1152,10 @@ func (dc *DriftCache) warmOne(s *setDerived, x Raw, ch chan struct{}, staged boo
 	dc.payloadMoments(x)
 	dc.searchWords(x, false)
 	dc.searchedKeys(x)
+	if staged {
+		dc.setPlaces(x)
+		dc.stampTexts(x)
+		dc.fieldMoments(x)
+		dc.fieldForms(x)
+	}
 }
