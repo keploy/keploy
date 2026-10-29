@@ -16,7 +16,7 @@ import (
 // it. The decoder hands it to the learn step as an Instant leaf
 // (InstantLeaf), and ClassifyIn compares it as one instant
 // (classifyInstant), never word by word: a minute of it is no word an
-// unrelated recording can hold (a Mongo reply's requestId of 40, a version
+// unrelated recording can hold (a count of 40 in a Mongo reply, a version
 // in an SDK's User-Agent, SQS's API version 2012-11-05). Only a decoder's
 // type makes a leaf an instant. A string that reads as a date stays a
 // String, read word by word: no text's shape decides anything. Where the
