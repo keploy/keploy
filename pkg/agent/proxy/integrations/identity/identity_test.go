@@ -157,8 +157,46 @@ func TestLiveReadsTheDownwardAPIEnv(t *testing.T) {
 		t.Fatal("the hostname comes from the UTS namespace")
 	}
 	t.Setenv(PodNameEnv, "")
-	if got := Live(); got.Name != got.Hostname || got.Name == "" {
-		t.Fatalf("without the env the hostname stands in for the name: %+v", got)
+	t.Setenv(PresentedPodNameEnv, "")
+	if got := Live(); got.Name != "" || got.Hostname != "" {
+		t.Fatalf("without the pod's name in the env no name and no hostname is aliased: %+v", got)
+	}
+	// A cloud replay's compose presents the recorded pod to its app: the app
+	// container stands in for that pod, so its hostname is aliased (an app
+	// that names itself by HOSTNAME), its name still not.
+	t.Setenv(PresentedPodNameEnv, "api-55f5fd9659-fzsfr")
+	if got := Live(); got.Name != "" || got.Hostname == "" {
+		t.Fatalf("a replay that presents a pod aliases the hostname only: %+v", got)
+	}
+}
+
+// Outside a pod (docker run, compose) the hostname may be a plain word the
+// app's calls carry: with no pod env nothing is aliased, so a recorded pod's
+// set replayed there leaves /api/v1/users as it is.
+func TestOutsideAPodNothingIsAliased(t *testing.T) {
+	for _, env := range []string{PodNameEnv, PodUIDEnv, PodIPEnv, NodeEnv, HostIPEnv, PresentedPodNameEnv} {
+		t.Setenv(env, "")
+	}
+	if r := New([]models.PodIdentity{recorded}, Live()); r != nil {
+		t.Fatalf("a rewriter outside a pod: GET /api/v1/users -> %q", r.String("GET /api/v1/users"))
+	}
+	// The same plain-word hostname, as the live name: the hazard the env guard keeps out.
+	r := New([]models.PodIdentity{recorded}, models.PodIdentity{Name: "api", Hostname: "api"})
+	if got := r.String("GET /api/v1/users"); got == "GET /api/v1/users" {
+		t.Fatal("the probe must show what aliasing a plain-word hostname does")
+	}
+}
+
+// A presented identity that names only some fields (here only the name): the
+// app reads the others from the live pod, so a response gets the live values
+// back for them, not the recorded ones.
+func TestReverseFillsThePresentedIdentitysEmptyFieldsFromLive(t *testing.T) {
+	presented := models.PodIdentity{Name: "api-55f5fd9659-qq1aa"}
+	rev := New([]models.PodIdentity{recorded}, live, presented).Reverse()
+	in := `{"name":"api-55f5fd9659-fzsfr","uid":"` + recorded.UID + `","podIP":"` + recorded.IP + `","hostIP":"` + recorded.HostIP + `","node":"` + recorded.Node + `"}`
+	want := `{"name":"api-55f5fd9659-qq1aa","uid":"` + live.UID + `","podIP":"` + live.IP + `","hostIP":"` + live.HostIP + `","node":"` + live.Node + `"}`
+	if got := rev.String(in); got != want {
+		t.Fatalf("got  %s\nwant %s", got, want)
 	}
 }
 

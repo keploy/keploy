@@ -1,8 +1,10 @@
 package http
 
 import (
+	"mime"
 	"net/http"
 	"strings"
+	"unicode/utf8"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/identity"
 )
@@ -57,8 +59,9 @@ func aliasHeader(rw *identity.Rewriter, h http.Header) http.Header {
 
 // aliasResponse puts the replay pod's own identity back into a recorded
 // response that is about to be served: its header values, and its body when
-// the body is text (JSON, XML, YAML, form, plain, JavaScript). A binary body
-// (protobuf, an image, an archive) is served as recorded: a length-prefixed
+// the body is text (JSON, XML, YAML, form, plain, JavaScript) in valid UTF-8.
+// A binary body (protobuf, an image, an archive, an Office document, a body
+// that names no Content-Type) is served as recorded: a length-prefixed
 // format would not survive a rewrite that changes lengths. Content-Length is
 // recomputed by the caller over the bytes it sends.
 func aliasResponse(reverse *identity.Rewriter, header map[string][]string, body string) (string, map[string][]string) {
@@ -86,33 +89,43 @@ func aliasResponse(reverse *identity.Rewriter, header map[string][]string, body 
 			header = out
 		}
 	}
-	if body != "" && textualContentType(header) {
+	if body != "" && textualContentType(header) && utf8.ValidString(body) {
 		body = reverse.String(body)
 	}
 	return body, header
 }
 
 // textualContentType reports a response whose body is text the reverse
-// rewrite may edit. No Content-Type is taken as text: the kube API and most
-// JSON services name one, and a body that names none is seldom binary.
+// rewrite may edit: a text/* type, a textual application type, or a +json,
+// +xml or +yaml one. The type is matched whole: an Office document's type
+// (application/vnd.openxmlformats-officedocument...) names xml but is a ZIP.
+// No Content-Type is not taken as text: the kube API and most JSON services
+// name one, and a body that names none may be anything.
 func textualContentType(header map[string][]string) bool {
 	var ct string
 	for k, vs := range header {
 		if strings.EqualFold(k, "Content-Type") && len(vs) > 0 {
-			ct = strings.ToLower(vs[0])
+			ct = vs[0]
 			break
 		}
 	}
-	if ct == "" {
+	mt, _, err := mime.ParseMediaType(ct)
+	if err != nil {
+		return false
+	}
+	typ, sub, _ := strings.Cut(mt, "/")
+	if typ == "text" {
 		return true
 	}
-	if strings.HasPrefix(ct, "text/") {
+	if typ != "application" {
+		return false
+	}
+	if strings.HasSuffix(sub, "+json") || strings.HasSuffix(sub, "+xml") || strings.HasSuffix(sub, "+yaml") {
 		return true
 	}
-	for _, t := range []string{"json", "xml", "yaml", "javascript", "x-www-form-urlencoded", "x-ndjson", "graphql"} {
-		if strings.Contains(ct, t) {
-			return true
-		}
+	switch sub {
+	case "json", "xml", "yaml", "x-yaml", "javascript", "x-javascript", "x-www-form-urlencoded", "x-ndjson", "graphql":
+		return true
 	}
 	return false
 }

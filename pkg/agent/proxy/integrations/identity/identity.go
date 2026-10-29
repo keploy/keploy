@@ -103,7 +103,14 @@ func Presented() models.PodIdentity {
 }
 
 // Live is the identity of the pod this process runs in, from the downward-API
-// env, with os.Hostname for the name and hostname when the env has none.
+// env, with os.Hostname for the hostname. The hostname is taken only where it
+// stands for a pod: with the pod's name in the env, or in a replay that
+// presents a pod to its app (Presented: a cloud replay's compose, whose app
+// container replays the recorded pod and may name itself by its hostname).
+// Anywhere else (docker run, compose, a local keploy) the hostname is a
+// machine's or a container's, often a plain word (api, orders) that a call
+// also carries as a path segment or a value, so no name and no hostname is
+// aliased.
 func Live() models.PodIdentity {
 	p := models.PodIdentity{
 		Name:   os.Getenv(PodNameEnv),
@@ -112,11 +119,11 @@ func Live() models.PodIdentity {
 		Node:   os.Getenv(NodeEnv),
 		HostIP: os.Getenv(HostIPEnv),
 	}
+	if p.Name == "" && Presented().IsZero() {
+		return p
+	}
 	if host, err := os.Hostname(); err == nil {
 		p.Hostname = host
-		if p.Name == "" {
-			p.Name = host
-		}
 	}
 	return p
 }
@@ -285,7 +292,9 @@ func New(recorded []models.PodIdentity, live models.PodIdentity, presented ...mo
 		forward(p)
 		primary = p
 	}
-	backward(primary)
+	// A field the presented identity leaves empty is one the app still reads
+	// from the live pod: a response puts the live value back for it.
+	backward(withLive(primary, live))
 	fwd, back = dedupe(fwd), dedupe(back)
 	if len(fwd) == 0 {
 		return nil
@@ -293,6 +302,19 @@ func New(recorded []models.PodIdentity, live models.PodIdentity, presented ...mo
 	r := &Rewriter{rules: fwd}
 	r.reverse = &Rewriter{rules: back, reverse: r}
 	return r
+}
+
+// withLive is p with each empty field taken from live.
+func withLive(p, live models.PodIdentity) models.PodIdentity {
+	for _, f := range [...][2]*string{
+		{&p.Name, &live.Name}, {&p.Hostname, &live.Hostname}, {&p.Node, &live.Node},
+		{&p.UID, &live.UID}, {&p.IP, &live.IP}, {&p.HostIP, &live.HostIP},
+	} {
+		if strings.TrimSpace(*f[0]) == "" {
+			*f[0] = *f[1]
+		}
+	}
+	return p
 }
 
 // kindOf is the kind a value of an identity field is aliased as: "n" a name

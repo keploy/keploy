@@ -101,14 +101,39 @@ func TestAliasResponsePutsTheLiveIdentityBackIntoText(t *testing.T) {
 	if b != body || h["X-Served-By"][0] != "api-55f5fd9659-fzsfr" {
 		t.Fatal("a nil rewriter changed the response")
 	}
+
+	// An Office document names xml in its type but is a ZIP: a stored entry
+	// holding the name keeps its length, so the archive stays readable.
+	xlsx := map[string][]string{"Content-Type": {"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}}
+	zipBody := "PK\x03\x04\x0a\x00\x00\x00\x00\x00<c>api-55f5fd9659-fzsfr</c>"
+	if got, _ := aliasResponse(rev, xlsx, zipBody); got != zipBody {
+		t.Fatalf("an xlsx body was rewritten: %q", got)
+	}
+	// A body that names no Content-Type may be anything: served as recorded,
+	// its headers still put back.
+	none := map[string][]string{"X-Served-By": {"api-55f5fd9659-fzsfr"}}
+	gotBody, gotHeader = aliasResponse(rev, none, "api-55f5fd9659-fzsfr")
+	if gotBody != "api-55f5fd9659-fzsfr" || gotHeader["X-Served-By"][0] != "api-rpl-1a2b3c" {
+		t.Fatalf("no Content-Type: body %q, header %v", gotBody, gotHeader)
+	}
+	// A textual type over bytes that are not UTF-8 (a mislabelled or still
+	// compressed body) is served as recorded.
+	notUTF8 := "\xff\xfe" + `{"name":"api-55f5fd9659-fzsfr"}`
+	if got, _ := aliasResponse(rev, header, notUTF8); got != notUTF8 {
+		t.Fatalf("a body that is not UTF-8 was rewritten: %q", got)
+	}
 }
 
 func TestTextualContentType(t *testing.T) {
 	for ct, want := range map[string]bool{
-		"": true, "application/json": true, "application/json; charset=utf-8": true, "text/plain": true,
+		"": false, "application/json": true, "application/json; charset=utf-8": true, "text/plain": true,
 		"application/vnd.kubernetes.protobuf": false, "application/x-protobuf": false, "image/png": false,
 		"application/octet-stream": false, "application/xml": true, "application/x-www-form-urlencoded": true,
-		"application/x-ndjson": true, "application/gzip": false,
+		"application/x-ndjson": true, "application/gzip": false, "Application/JSON": true,
+		"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":       false,
+		"application/vnd.openxmlformats-officedocument.wordprocessingml.document": false,
+		"application/zip": false, "application/vnd.api+json": true, "application/problem+xml": true,
+		"application/yaml": true, "text/html; charset=utf-8": true, "json": false, "not a type": false,
 	} {
 		h := map[string][]string{}
 		if ct != "" {
