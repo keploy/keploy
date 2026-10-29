@@ -137,16 +137,9 @@ func (m *MockManager) ExactTestServedAside() (test string, served []string, ok b
 	if m.exactView() == nil {
 		return "", nil, false
 	}
-	v := m.exact.last.Load()
-	if v == nil {
+	o := m.latestOutcome()
+	if o == nil {
 		return "", nil, true
 	}
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	for _, i := range v.order {
-		if from := v.asideOf(i); from != "" {
-			served = append(served, models.ServedAsideLine(v.owned[i].Name, from))
-		}
-	}
-	return v.test, served, true
+	return o.test, append([]string(nil), o.servedAside...), true
 }

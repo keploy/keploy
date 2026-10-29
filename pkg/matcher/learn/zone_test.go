@@ -574,7 +574,7 @@ func TestADateOfNoZoneCheckedInTheStoredZoneHoldsOnlyWhereItHoldsInUTCToo(t *tes
 			t.Errorf("replayed at %s, the application's zone unread: 2026-10-%d: %v %q; want %v %q", from, row.d, ok, why, row.pass, row.why)
 		}
 	}
-	if ok, why := CheckClockRead(tp, o, day(time.Date(2026, 10, 27, 0, 0, 0, 0, time.UTC)), s, true); ok || !strings.Contains(why, "read in America/New_York, the application's zone the learn step read it in") || !strings.Contains(why, "A value cut to 1d") || !strings.Contains(why, "--pid=host") || !strings.Contains(why, "TZ=UTC") || strings.Contains(why, "This replay runs in") {
+	if ok, why := CheckClockRead(tp, o, day(time.Date(2026, 10, 27, 0, 0, 0, 0, time.UTC)), s, true); ok || !strings.Contains(why, "read in America/New_York, the application's zone the learn step read it in") || !strings.Contains(why, "A value cut to 1d") || unreadZoneUnclear(why, "record and replay the application in UTC (TZ=UTC)") != "" || strings.Contains(why, "This replay runs in") {
 		t.Errorf("FALSE GREEN or unclear: a date two days stale, the application's zone unread: %v %q; want refused, naming the stored zone, the cut and what to do in docker too", ok, why)
 	}
 	own := s
@@ -2009,5 +2009,55 @@ func TestAReplayKnowingNoZoneRefusesAValueInTrollsSecondHourShownTwice(t *testin
 	far := time.Date(2026, 11, 24, 10, 0, 0, 0, time.UTC)
 	if ok, why := CheckClockRead(p, o, InstantLeaf(p, p, val(far.Add(500*ms), 2*hour), ms), Span{From: far, To: far.Add(time.Second), Zone: time.UTC}, true); !ok {
 		t.Errorf("FALSE RED: no zone known, read on %s: the right value refused: %s", far, why)
+	}
+}
+
+// unreadZoneUnclear is what a refusal for want of the zone of the process
+// that made the call (zoneUnread) leaves out of what it must say, "" where
+// it says it all: where keploy reads the application's zone, natively and
+// in keploy's own docker and compose modes, the agent's debug line that
+// says why it could not (ZoneUnreadLog, the line the proxy writes), each
+// cause keploy's docker and compose modes still read no zone for, a JVM's
+// remedy that lifts its cause (TZ alone does not while -Duser.timezone=
+// stays), and else, what to do. It must not say docker and compose modes
+// read no zone: keploy's CLI reads each app container's.
+func unreadZoneUnclear(why, otherwise string) string {
+	for _, want := range []string{
+		"--pid=host or hostPID",
+		"in keploy's own docker and compose modes, whose CLI reads the zone of the app container that made the call through Docker",
+		`The agent's debug line "` + ZoneUnreadLog + `" (run keploy with --debug) says why it could not`,
+		"whose configuration sets a JVM's user.timezone",
+		"drop -Duser.timezone= from the container's configuration and set the zone with TZ",
+		"its /etc/timezone names a zone other than its /etc/localtime",
+		"whose TZ is empty and its files hold no UTC",
+		"whose TZ or zone files keploy cannot resolve",
+		"whose read failed or stalled",
+		"on a host of cgroup v1 alone",
+		"it may not on a host of both versions",
+		"Else " + otherwise,
+		"or declare the field noise in keploy.yml",
+	} {
+		if !strings.Contains(why, want) {
+			return "it does not say: " + want
+		}
+	}
+	if strings.Contains(why, "Where it cannot (keploy's own docker and compose modes)") {
+		return "it says keploy's docker and compose modes cannot read the application's zone"
+	}
+	return ""
+}
+
+// TestAZoneHandedWithNoZoneFileIsUTCByNameAlone: the keploy CLI hands a
+// container's zone as its name and its zone file's bytes, none for UTC
+// alone (ZoneOfFile). A zone of another name, or of none, with no bytes is
+// an error, never UTC.
+func TestAZoneHandedWithNoZoneFileIsUTCByNameAlone(t *testing.T) {
+	if z, err := ZoneOfFile("UTC", nil); err != nil || z.Loc != time.UTC || z.Name != "UTC" {
+		t.Fatalf("UTC with no bytes: %+v, %v; want UTC", z, err)
+	}
+	for _, name := range []string{"Asia/Kolkata", "", "Etc/UTC"} {
+		if z, err := ZoneOfFile(name, nil); err == nil || z.Loc != nil {
+			t.Errorf("the zone %q handed with no zone file read as %v, %v; want an error, never UTC", name, z.Loc, err)
+		}
 	}
 }

@@ -283,6 +283,15 @@ type ScopeTableReq struct {
 	// omitzero: an empty pool ({}) is sent, and means "serve no pool mock
 	// between tests"; only a nil one is left out (with the switch off).
 	Pool map[string][]string `json:"pool,omitzero"`
+	// Windows is, under the proven switch, the recorded window of every test
+	// of the set, the gated ones included: what keploy test's staging sends
+	// as MockFilterParams.RecordedWindows. keploy mock replay derives each
+	// from the set's mappings (the test's recorded begin and its own
+	// recordings), so the learn step tells a test's own recordings from
+	// another test's (integrations.TestWindows). Absent from an older CLI
+	// and from a set with no test: the agent then knows none.
+	Windows []TestWindow `json:"windows,omitempty"`
+	// Background is, under the proven switch, the recordings of the set's
 	// Background is, under the proven switch, per test, the recordings of its
 	// own list that judging marked as the application's own background work
 	// (MockEntry.Background), each with why: the test is served one in its
@@ -452,6 +461,11 @@ type MockFilterParams struct {
 	// in: an enabling value forces strict; an explicit disabling value
 	// ("0") forces strict off regardless of the per-call flag.
 	StrictMockWindow bool `json:"strictMockWindow,omitempty"`
+	// ExactStaging marks the agent's own staging of keploy mock replay, which
+	// asks for the strict window's staging load (StrictMockWindow) but is no
+	// user's strict window: the strict window's notice, about keploy test's
+	// per-test windows, is not printed for it. Never on the wire.
+	ExactStaging bool `json:"-"`
 
 	// Variables are the test variables the test's own request carries (its
 	// test case's template values), under the proven switch: a mock filter

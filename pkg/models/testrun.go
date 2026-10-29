@@ -45,11 +45,13 @@ type TestReport struct {
 	// a destination the recordings list that the run never reached, or
 	// that never answered. JUnit fails a case of its own with it.
 	RealFailure string `json:"realFailure,omitempty" yaml:"real_failure,omitempty"`
-	// UnclaimedCalls are the calls the set's application made outside every
-	// test that no mock answered (proven switch): after its last test, a pool
-	// miss no later test takes, and before its first, as it started
-	// (UnmatchedCall.BeforeSet). They fail the set; JUnit fails a case of its
-	// own with them.
+	// UnclaimedCalls are the calls the set's application made that no mock
+	// answered and that keploy could not place outside every test's window
+	// (proven switch): read at the set's end, after its last test, but made
+	// before that test's misses were read (filed late), or at a time keploy
+	// cannot read. They fail the set; JUnit fails a case of its own with
+	// them. A call made outside every window is background work instead
+	// (BackgroundCalls).
 	UnclaimedCalls []UnmatchedCall `json:"unclaimedCalls,omitempty" yaml:"unclaimed_calls,omitempty"`
 	// AppNotStopped, under the proven switch, says why keploy read the set's
 	// end with its application still running (a stack kept across test-sets,
@@ -69,11 +71,13 @@ type TestReport struct {
 	// the set, nor land in UnclaimedCalls. Absent when there is none.
 	SetAnswers []UnmatchedCall `json:"setAnswers,omitempty" yaml:"set_answers,omitempty"`
 	// BackgroundCalls are, under the proven switch, the calls the set's
-	// application made outside every test's window, between two tests, that
-	// no mock answered (UnmatchedCall.Background): its background work, a
-	// timer's or a start-up job's call. They are charged to no test and
-	// never fail the set (founder D1); each says what was called, when (At),
-	// and why nothing answered it. Absent when there is none.
+	// application made outside every test's window that no mock answered
+	// (UnmatchedCall.Background): before its first test or between two
+	// tests (unless the call's recorded answer reaches the test read next:
+	// UnmatchedCall.ReachesTest), or after its last. They are its background work, a timer's, a start-up job's or a
+	// late write's call: charged to no test and never failing the set
+	// (founder D1). Each says what was called, when (At), where
+	// (BackgroundWhy) and why nothing answered it. Absent when there is none.
 	BackgroundCalls []UnmatchedCall `json:"backgroundCalls,omitempty" yaml:"background_calls,omitempty"`
 }
 
@@ -573,23 +577,54 @@ type UnmatchedCall struct {
 	Write    string `json:"write,omitempty" yaml:"write,omitempty"`
 	// BeforeSet says, under the proven switch, that the call was made before
 	// its test set's first test began, with no test's window open: the
-	// application's startup. Its Kind is MissOutsideTest. It is the set's,
-	// no test's: the replay fails the set with it, naming the call, and
-	// charges no test (the read of the set's first test carries it).
+	// application's startup. Its Kind is MissOutsideTest; the read of the
+	// set's first test carries it. One no mock answered is background work
+	// (Background, BackgroundWhy), unless its recorded answer reaches that
+	// test (the dataflow guard): then it is that test's miss, and
+	// ReachesTest names the word that reached it.
 	BeforeSet bool `json:"before_set,omitempty" yaml:"before_set,omitempty"`
+	// ChargedTo names, under the proven switch, the test whose end charged
+	// the call to it: the call counts against that test (CountsAgainstTest)
+	// and that test's evidence lists it. Empty for a call no test was
+	// charged with: one made before the test process claimed the run, one
+	// outside every test that no test's end read (after the last test's,
+	// say), and every call without the switch. keploy mock's receipt lists
+	// those of them that count against a test (Receipt.UnchargedMisses).
+	ChargedTo string `json:"charged_to,omitempty" yaml:"charged_to,omitempty"`
 	// Background says, under the proven switch, that keploy found the call
 	// made outside every test's window: keploy mock's agent, after the test
 	// before it stopped being served (or before the set's first test) and
 	// before the test whose read took it began being served; keploy test's,
 	// after the test before it was read and before the next test's window
-	// opened (a set's first test's window carries BeforeSet instead). Such
-	// a call is the application's background work (a timer, a start-up
-	// job): no test made it, so it is charged to none and fails none, and
-	// the run reports it once, at the set's level, with when it was made
-	// and why nothing answered it (keploy test: TestReport.BackgroundCalls).
-	// A call made in an earlier test's window and filed late is no
-	// background call: it is still charged to the test whose read took it.
+	// opened, or after the set's last test was read. keploy test's replay
+	// also marks one made before the set's first test (BeforeSet) whose
+	// recorded answer reaches no test, and clears the mark of one made
+	// between two tests whose recorded answer reaches the next
+	// (ReachesTest): that test's miss. Such a call is the application's
+	// background work (a timer, a start-up job, a write it starts once its
+	// last answer has left): no test made it, so it is charged to none and
+	// fails none, and the run reports it once, at the set's level, with
+	// when it was made, where (BackgroundWhy) and why nothing answered it
+	// (keploy test: TestReport.BackgroundCalls). A call made in a test's
+	// window and filed late is no background call: it is still charged to
+	// the test whose read took it, or, after the set's last test, to the set
+	// (TestReport.UnclaimedCalls).
 	Background bool `json:"background,omitempty" yaml:"background,omitempty"`
+	// ReachesTest says, under the proven switch, for a call made before its
+	// set's first test (BeforeSet) or between two tests that no mock
+	// answered, why it is the next test's miss and no background work: by
+	// the word rule keploy learn reads a value's source by, a word of what
+	// changed in that test this run (its response, or a request it sent that
+	// no mock answered) may have come from the call's closest recording
+	// (ClosestMock), and the test's request and its own recordings' answers
+	// lack it (the dataflow guard). The word and the place are named; empty
+	// for every other call. A call made after the set's last test reaches
+	// no test.
+	ReachesTest string `json:"reaches_test,omitempty" yaml:"reaches_test,omitempty"`
+	// BackgroundWhy says, for a Background call, where it was made outside
+	// every test's window, in plain words: before the set's first test,
+	// between two tests (naming them), or after the set's last test.
+	BackgroundWhy string `json:"background_why,omitempty" yaml:"background_why,omitempty"`
 	// Differs mirrors MockMismatchReport.Differs: the names of the fields in
 	// which the call differs from its closest recording, without values.
 	Differs []string `json:"differs,omitempty" yaml:"differs,omitempty"`

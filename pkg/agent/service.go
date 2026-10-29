@@ -635,6 +635,17 @@ type RecordedOfKindSetter interface {
 	SetRecordedOfKind(src func(kind models.Kind, visit func(name string, load func() (*models.Mock, error)) bool) error) error
 }
 
+// RecordingTimesSetter is implemented by a proxy whose teardown bound under
+// keploy mock replay (the calls a test process makes after its own last test)
+// reads, beside what is staged, the times of the set's recordings the agent
+// keeps on disk: a test's own are staged only as it opens, and the bound is
+// the latest of them. SetRecordingTimes sets where (src visits every on-disk
+// mock with its name, request and answer times and whether it is
+// protocol-phase, decoding none; nil for none).
+type RecordingTimesSetter interface {
+	SetRecordingTimes(src func(visit func(name string, req, res time.Time, protocolPhase bool) bool) error) error
+}
+
 // RecordingSourceSetter is implemented by a proxy whose miss diagnosis under
 // exact serving (a call that is a recording made elsewhere) can read, beside
 // what is staged, the set's recordings the agent keeps on disk: a test's own

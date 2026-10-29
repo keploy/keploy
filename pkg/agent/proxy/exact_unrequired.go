@@ -57,25 +57,11 @@ func (m *MockManager) ExactTestUnusedBackground() (test string, unused []string,
 	if m.exactView() == nil {
 		return "", nil, false
 	}
-	v := m.exact.last.Load()
-	if v == nil {
+	o := m.latestOutcome()
+	if o == nil {
 		return "", nil, true
 	}
-	unrequired := m.unrequiredOf(v.test)
-	if len(unrequired) == 0 {
-		return v.test, nil, true
-	}
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	for i, done := range v.consumed {
-		if done || v.notOwn(i) {
-			continue
-		}
-		if _, bg := unrequired[v.owned[i].Name]; bg {
-			unused = append(unused, v.owned[i].Name)
-		}
-	}
-	return v.test, unused, true
+	return o.test, append([]string(nil), o.unusedBackground...), true
 }
 
 // AnsweredBackground implements integrations.AnsweredBackgroundReader: the
