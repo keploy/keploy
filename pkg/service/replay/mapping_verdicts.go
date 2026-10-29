@@ -1,6 +1,8 @@
 package replay
 
 import (
+	"sort"
+
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -236,8 +238,9 @@ func markWrittenByKeployTest(doc *models.Mapping) {
 // only "no verdict". A local replay serves an empty entry as it serves no
 // entry (models.MergeStartupMockNames hands it no names: its recorded window).
 //
-// It changes what a write holds, not whether one happens: the holds that keep
-// a run from creating a file that maps no mock decide on mapsAMock.
+// The holds that keep a run from creating a file that maps no mock decide on
+// mapsAMock, and an empty entry maps none. A new file is created only when
+// every passing test has an entry (passingWithNoEntry), an empty one counting.
 func addConsumedNothingEntries(doc *models.Mapping, results []models.TestResult, passing map[string]bool, none map[string]struct{}) {
 	if doc == nil || len(none) == 0 {
 		return
@@ -254,6 +257,33 @@ func addConsumedNothingEntries(doc *models.Mapping, results []models.TestResult,
 		has[id] = true
 		doc.TestCases = append(doc.TestCases, models.MappedTestCase{ID: id})
 	}
+}
+
+// passingWithNoEntry names, once each and sorted, the passing tests doc holds
+// no entry for: tests the run could not tell what they
+// consumed (each mock they consumed fell in no test's window or in another
+// test's, or the run read no consumption). A file created from doc would leave
+// such a test with no entry, which a replay that skips a test with no entry
+// reads as "no verdict" and skips, though it passed: RunTestSet creates no
+// file then.
+func passingWithNoEntry(doc *models.Mapping, results []models.TestResult, passing map[string]bool) []string {
+	seen := make(map[string]bool, len(results))
+	if doc != nil {
+		for _, tc := range doc.TestCases {
+			seen[tc.ID] = true
+		}
+	}
+	var out []string
+	for _, r := range results {
+		id := r.TestCaseID
+		if !passing[id] || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // mapsAMock reports whether doc maps at least one mock to a test.

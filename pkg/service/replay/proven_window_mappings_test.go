@@ -14,9 +14,10 @@ import (
 
 // Under the proven switch a replay never writes mappings.yaml, whatever its
 // tests consumed: only record writes it (design v14 §5.2, U4). Each case
-// also runs with the switch off, where the run creates the file it always
-// has: for a test that did not consume its recorded call, that file leaves
-// it out, and under the proven model it would then own none of its calls.
+// also runs with the switch off, where the run creates the file it creates
+// without the switch: for a test that did not consume its recorded call, that
+// file leaves it out, and under the proven model it would then own none of its
+// calls.
 
 // mongoMockAt is a recorded per-test Mongo mock whose request went ms
 // milliseconds after attr0 (pinWindows: test-i's window is [i s, i s + 100 ms]).
@@ -72,6 +73,9 @@ func TestRunTestSetUnderTheProvenSwitchCreatesNoMappings(t *testing.T) {
 		// wantOff is the file the run creates with the switch off (with it
 		// on no file is created).
 		wantOff map[string][]string
+		// offHeldFor is the passing tests with no entry that the switch-off
+		// run's warning names, for not creating the file; empty: no warning.
+		offHeldFor string
 	}{
 		{
 			name: "every test consumed the mocks of its window: the control",
@@ -83,13 +87,16 @@ func TestRunTestSetUnderTheProvenSwitchCreatesNoMappings(t *testing.T) {
 		},
 		{
 			// test-2's identical call was answered by test-1's mock, which a
-			// replay without mappings may serve it.
+			// replay without mappings may serve it. With the switch off,
+			// keploy cannot tell what test-2 consumed (a mock of test-1's
+			// window), so a new file would give it, passing, no entry: none is
+			// created (TestRunTestSetCreatesNoFileThatLeavesAPassingTestWithNoEntry).
 			name: "test-2's call was answered by test-1's mock",
 			consumed: map[string][]models.MockState{
 				"test-1": {mongoAt("mock-1", 1010)},
 				"test-2": {mongoAt("mock-1", 1010)},
 			},
-			wantOff: map[string][]string{"test-1": {"mock-1"}},
+			offHeldFor: "[test-2]",
 		},
 		{
 			name: "test-2 no longer makes its call",
@@ -142,8 +149,8 @@ func TestRunTestSetUnderTheProvenSwitchCreatesNoMappings(t *testing.T) {
 				"test-1": {mongoAt("mock-1", 1010)},
 				"test-2": {mongoAt("mock-1", 1010)},
 			},
-			update:  true,
-			wantOff: map[string][]string{"test-1": {"mock-1"}},
+			update:     true,
+			offHeldFor: "[test-2]",
 		},
 	} {
 		for _, on := range []bool{false, true} {
@@ -181,8 +188,20 @@ func TestRunTestSetUnderTheProvenSwitchCreatesNoMappings(t *testing.T) {
 					t.Fatalf("mappings.yaml maps %v; want %v (nil: no file)", got, want)
 				}
 				// Not writing it is the switch's rule, not a hold: no warning.
-				if held := logs.FilterMessage("not writing mappings.yaml").All(); len(held) != 0 {
-					t.Fatalf("want no warning, got %+v", held)
+				// With the switch off, a hold for a passing test that would
+				// have no entry warns, naming it.
+				held := logs.FilterMessage("not writing mappings.yaml").All()
+				if on || tc.offHeldFor == "" {
+					if len(held) != 0 {
+						t.Fatalf("want no warning, got %+v", held)
+					}
+					return
+				}
+				if len(held) != 1 {
+					t.Fatalf("want one \"not writing mappings.yaml\" warning, got %+v", held)
+				}
+				if got := fmt.Sprint(held[0].ContextMap()["passingTestsWithNoEntry"]); got != tc.offHeldFor {
+					t.Fatalf("the warning names passing tests with no entry %s; want %s", got, tc.offHeldFor)
 				}
 			})
 		}

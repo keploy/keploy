@@ -1138,17 +1138,40 @@ func entriesOnDisk(t *testing.T, db *mapdb.MappingDb) map[string][]string {
 // unmapped for good. A failed test, a test whose consumed mocks all went to
 // other windows, and every test of a run that read no consumption (not
 // instrumented) get no new entry.
+//
+// --update-test-mapping (auto-replay) creates the file for those entries
+// though a test not counted as passing consumed mocks and no passing test
+// consumed one: the set then has a mapping, and the test not counted as
+// passing has no entry (a replay that skips a test with no entry reports it
+// "skipped: no mapping entry"). The default flag still creates no file that
+// maps no mock: it would stop every later default run from creating one.
 func TestRunTestSetGivesAPassingTestThatConsumedNothingAnEmptyEntry(t *testing.T) {
 	for _, tc := range []struct {
 		name            string
+		tests           int // 2 when 0
 		updateMapping   bool
 		fileExists      bool
 		notInstrumented bool
 		wrongBody       map[string]bool
+		test1None       bool // test-1 consumed nothing; else mock-a
 		test2Consumed   []models.MockState
 		// want is each test's entry after the run; nil: no file.
 		want map[string][]string
 	}{
+		{
+			name: "--update-test-mapping, no file, test-1 failed after consuming a mock", tests: 3, updateMapping: true,
+			wrongBody: map[string]bool{"test-1": true},
+			want:      map[string][]string{"test-2": {}, "test-3": {}},
+		},
+		{
+			name: "--update-test-mapping, no file, test-1 failed consuming nothing", updateMapping: true,
+			wrongBody: map[string]bool{"test-1": true}, test1None: true,
+			want: map[string][]string{"test-2": {}},
+		},
+		{
+			name:      "default flag, no file, test-1 failed after consuming a mock: no file",
+			wrongBody: map[string]bool{"test-1": true},
+		},
 		{
 			name: "--update-test-mapping, file exists", updateMapping: true, fileExists: true,
 			want: map[string][]string{"test-1": {"mock-a"}, "test-2": {}},
@@ -1178,7 +1201,11 @@ func TestRunTestSetGivesAPassingTestThatConsumedNothingAnEmptyEntry(t *testing.T
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			h := newPartialRunHarness(t, 2, 0)
+			n := tc.tests
+			if n == 0 {
+				n = 2
+			}
+			h := newPartialRunHarness(t, n, 0)
 			pinWindows(h)
 			h.replayer.config.Test.UpdateTestMapping = tc.updateMapping
 			h.replayer.instrument = !tc.notInstrumented
@@ -1194,17 +1221,193 @@ func TestRunTestSetGivesAPassingTestThatConsumedNothingAnEmptyEntry(t *testing.T
 					t.Fatal(err)
 				}
 			}
+			test1 := []models.MockState{mongoAt("mock-a", 1010)}
+			if tc.test1None {
+				test1 = nil
+			}
 			consumed := map[string][]models.MockState{
-				"test-1": {mongoAt("mock-a", 1010)},
+				"test-1": test1,
 				"test-2": tc.test2Consumed,
 			}
 			h.replayer.hookImpl = prHooks{wrongBody: tc.wrongBody, consumedFor: consumedByWindow(h, consumed)}
 			_ = h.run(t)
 
+			for test, failed := range tc.wrongBody {
+				if want := models.TestStatusFailed; failed && statusOf(t, h, test) != want {
+					t.Fatalf("precondition: %s is %s, want %s", test, statusOf(t, h, test), want)
+				}
+			}
 			if got := entriesOnDisk(t, db); !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("mappings.yaml holds %v; want %v (nil: no file)", got, tc.want)
 			}
 		})
+	}
+}
+
+// A new mappings.yaml gives every passing test an entry, or is not created:
+// a passing test with no entry in it is "no verdict" to a replay that skips a
+// test with no entry, which would skip a test that passed, run after run. A
+// passing test gets no entry when keploy could not tell what it consumed: each
+// mock it consumed fell in no test's window, or in another test's, or the run
+// read no consumption. With no file the set keeps its whole recording. Under
+// either flag; the default flag's own hold, where a new file would map no mock,
+// comes first, with its reason as before. (A file that exists is written as
+// before: TestRunTestSetGivesAPassingTestThatConsumedNothingAnEmptyEntry.)
+func TestRunTestSetCreatesNoFileThatLeavesAPassingTestWithNoEntry(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		tests           int // 2 when 0
+		updateMapping   bool
+		notInstrumented bool
+		wrongBody       map[string]bool
+		consumed        map[string][]models.MockState
+		// wantFile is each test's entry after the run; nil: no file.
+		wantFile map[string][]string
+		// wantNamed is the warning's passing tests with no entry; empty: the
+		// warning does not name any.
+		wantNamed  string
+		wantReason string
+	}{
+		{
+			name: "--update-test-mapping, test-1 failed after consuming a mock, test-2 passed consuming only a mock of no window", updateMapping: true,
+			wrongBody: map[string]bool{"test-1": true},
+			consumed:  map[string][]models.MockState{"test-1": {mongoAt("mock-a", 1010)}, "test-2": {mongoAt("mock-x", 1500)}},
+			wantNamed: "[test-2]", wantReason: "could not tell what a passing test consumed",
+		},
+		{
+			name: "--update-test-mapping, test-1 failed after consuming a mock, test-2 passed consuming only a mock of test-1's window", updateMapping: true,
+			wrongBody: map[string]bool{"test-1": true},
+			consumed:  map[string][]models.MockState{"test-1": {mongoAt("mock-a", 1010)}, "test-2": {mongoAt("mock-y", 1050)}},
+			wantNamed: "[test-2]", wantReason: "could not tell what a passing test consumed",
+		},
+		{
+			name: "--update-test-mapping, test-1 failed after consuming a mock, test-2 consumed nothing, test-3 only a mock of no window", tests: 3, updateMapping: true,
+			wrongBody: map[string]bool{"test-1": true},
+			consumed:  map[string][]models.MockState{"test-1": {mongoAt("mock-a", 1010)}, "test-3": {mongoAt("mock-x", 2500)}},
+			wantNamed: "[test-3]", wantReason: "could not tell what a passing test consumed",
+		},
+		{
+			name: "--update-test-mapping, every test passed, each consuming only a mock of no window", updateMapping: true,
+			consumed:  map[string][]models.MockState{"test-1": {mongoAt("mock-x", 1500)}, "test-2": {mongoAt("mock-z", 2500)}},
+			wantNamed: "[test-1 test-2]", wantReason: "could not tell what a passing test consumed",
+		},
+		{
+			name: "--update-test-mapping, not instrumented: no consumption read", updateMapping: true, notInstrumented: true,
+			consumed:  map[string][]models.MockState{"test-1": {mongoAt("mock-a", 1010)}},
+			wantNamed: "[test-1 test-2]", wantReason: "could not tell what a passing test consumed",
+		},
+		{
+			name: "default flag, both passed, test-2 consumed only a mock of no window", consumed: map[string][]models.MockState{
+				"test-1": {mongoAt("mock-a", 1010)}, "test-2": {mongoAt("mock-x", 1500)},
+			},
+			wantNamed: "[test-2]", wantReason: "could not tell what a passing test consumed",
+		},
+		{
+			// The default flag's hold for a new file that would map no mock
+			// comes first, with its reason, as before.
+			name:       "default flag, test-1 failed after consuming a mock, test-2 passed consuming only a mock of no window",
+			wrongBody:  map[string]bool{"test-1": true},
+			consumed:   map[string][]models.MockState{"test-1": {mongoAt("mock-a", 1010)}, "test-2": {mongoAt("mock-x", 1500)}},
+			wantReason: "no test that consumed a mock counts as passing",
+		},
+		{
+			name: "control: --update-test-mapping, test-1 failed after consuming a mock, test-2 consumed nothing", updateMapping: true,
+			wrongBody: map[string]bool{"test-1": true},
+			consumed:  map[string][]models.MockState{"test-1": {mongoAt("mock-a", 1010)}},
+			wantFile:  map[string][]string{"test-2": {}},
+		},
+		{
+			name: "control: default flag, both passed in their own windows", consumed: map[string][]models.MockState{
+				"test-1": {mongoAt("mock-a", 1010)}, "test-2": {mongoAt("mock-c", 2010)},
+			},
+			wantFile: map[string][]string{"test-1": {"mock-a"}, "test-2": {"mock-c"}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			n := tc.tests
+			if n == 0 {
+				n = 2
+			}
+			core, logs := observer.New(zap.WarnLevel)
+			h := newPartialRunHarness(t, n, 0)
+			pinWindows(h)
+			h.replayer.logger = zap.New(core)
+			h.replayer.config.Test.UpdateTestMapping = tc.updateMapping
+			h.replayer.instrument = !tc.notInstrumented
+			db := mappingFile(t, h, nil)
+			h.replayer.hookImpl = prHooks{wrongBody: tc.wrongBody, consumedFor: consumedByWindow(h, tc.consumed)}
+			_ = h.run(t)
+
+			for i := 1; i <= n; i++ {
+				id := fmt.Sprintf("test-%d", i)
+				want := models.TestStatusPassed
+				if tc.wrongBody[id] {
+					want = models.TestStatusFailed
+				}
+				if got := statusOf(t, h, id); got != want {
+					t.Fatalf("precondition: %s is %s, want %s", id, got, want)
+				}
+			}
+			if got := entriesOnDisk(t, db); !reflect.DeepEqual(got, tc.wantFile) {
+				t.Fatalf("mappings.yaml: %s; want %s", fileState(got), fileState(tc.wantFile))
+			}
+			held := logs.FilterMessage("not writing mappings.yaml").All()
+			if tc.wantReason == "" {
+				if len(held) != 0 {
+					t.Fatalf("want no \"not writing mappings.yaml\" warning, got %+v", held)
+				}
+				return
+			}
+			if len(held) != 1 {
+				t.Fatalf("want one \"not writing mappings.yaml\" warning, got %+v", held)
+			}
+			ctx := held[0].ContextMap()
+			if reason := fmt.Sprint(ctx["reason"]); !strings.Contains(reason, tc.wantReason) {
+				t.Fatalf("the warning's reason is %q; want it to say %q", reason, tc.wantReason)
+			}
+			named, ok := ctx["passingTestsWithNoEntry"]
+			if tc.wantNamed == "" {
+				if ok {
+					t.Fatalf("the warning names passing tests with no entry %v; want none named", named)
+				}
+				return
+			}
+			if got := fmt.Sprint(named); got != tc.wantNamed {
+				t.Fatalf("the warning names passing tests with no entry %s; want %s", got, tc.wantNamed)
+			}
+		})
+	}
+}
+
+// fileState is entriesOnDisk's result as a failure message says it.
+func fileState(m map[string][]string) string {
+	if m == nil {
+		return "no file"
+	}
+	return fmt.Sprintf("a file holding %v", m)
+}
+
+func TestPassingWithNoEntry(t *testing.T) {
+	results := []models.TestResult{
+		{TestCaseID: "c", Status: models.TestStatusPassed},
+		{TestCaseID: "a", Status: models.TestStatusPassed},
+		{TestCaseID: "b", Status: models.TestStatusPassed},
+		{TestCaseID: "a", Status: models.TestStatusPassed},
+		{TestCaseID: "d", Status: models.TestStatusFailed},
+		{TestCaseID: "e", Status: models.TestStatusPassed},
+	}
+	passing := map[string]bool{"a": true, "b": true, "c": true, "e": true}
+	// b has an entry with a mock, e an empty one; d did not pass; a is named
+	// once, though it has two rows.
+	doc := &models.Mapping{TestCases: []models.MappedTestCase{{ID: "b", Mocks: mongoEntries("m1")}, {ID: "e"}}}
+	if got := passingWithNoEntry(doc, results, passing); !reflect.DeepEqual(got, []string{"a", "c"}) {
+		t.Fatalf("passingWithNoEntry = %v, want [a c]", got)
+	}
+	if got := passingWithNoEntry(nil, results, passing); !reflect.DeepEqual(got, []string{"a", "b", "c", "e"}) {
+		t.Fatalf("no document: %v, want [a b c e]", got)
+	}
+	if got := passingWithNoEntry(doc, results, nil); got != nil {
+		t.Fatalf("no passing test: %v, want none", got)
 	}
 }
 
