@@ -469,3 +469,129 @@ func TestARecordingAnOlderTestServedIsReadWithWhatItsAdaptersStated(t *testing.T
 		}
 	}
 }
+
+// dataMock is a Postgres v3 data recording of the jobs table, one row of id
+// and n, made where jobsMock is: a kind whose spec holds no answer apart
+// from its request (answerApart), so all of its text is what F gave the
+// application (holdsAnswer).
+func dataMock(id, n string) *models.Mock {
+	m := jobsMock(id, n)
+	m.Spec.PostgresV3 = &models.PostgresV3Spec{Type: models.PostgresV3TypeData, Data: &models.PostgresV3DataSpec{
+		Schema: "public", Table: "jobs", Columns: []string{"id", "n"}, Rows: []models.PostgresV3Cells{{{Value: id}, {Value: n}}}}}
+	return m
+}
+
+// A recording F served in an older test is read on the set's path
+// (Order.GivenPlaces) and as a Raw (Order.ServedView of another test's
+// recording, as Earlier.lateOf reads one) with what the statements of every
+// serve of it the read saw say. Served twice, one serve told as recorded
+// and the other told of nothing (a session-lifetime Postgres recording
+// served once through the engine and once through a path that does not
+// state its serve; an HTTP reusable recording served once whole and once
+// templated), F's view of it at the serve no adapter told of is one keploy
+// cannot see: a word a value holds now that may stand there is refused,
+// never learned because the other serve was told as recorded (FALSE GREEN
+// were it read as served as recorded: statedWords' "every serve told").
+// Every serve told as recorded, it learns. So of a kind that holds its
+// answer apart from its request (a Postgres v3 query) and of one whose
+// whole text is its answer (a Postgres v3 data recording: no answer apart,
+// every word of it is what F gave there, holdsAnswer), whose views are read
+// as wholly as the recording is.
+func TestARecordingAnOlderTestServedIsReadAsRecordedOnlyWhereEveryServeOfItWasToldSo(t *testing.T) {
+	const path = "bind.$8"
+	rec := Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: "82"}}}
+	live := Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: "6c7d"}}}
+	const (
+		learns   = ""
+		unstated = "where its adapter did not say what it gave the application there"
+		gave     = "appears in mock-6 as record's full round gave it, where the recording did not give the application that word"
+		inTwo    = "in one of 2 serves that gave the application different views of it, where the recording did not give the application that word"
+		// whose: every refusal names the recording (mock-6) as another test's.
+		whose = "a recording record's full round gave the application before the call that is another test's"
+	)
+	for _, kind := range []struct {
+		name string
+		mock func(id, n string) *models.Mock
+	}{{"a query recording", jobsMock}, {"a data recording, its whole text its answer", dataMock}} {
+		m := kind.mock(chanceSrcRec, "5")
+		view := func(id string) func() (*models.Mock, error) {
+			return func() (*models.Mock, error) { return kind.mock(id, "9"), nil }
+		}
+		for _, c := range []struct {
+			name string
+			tell func(tr *Tracker) // after F's first serve of m
+			want string
+		}{
+			{"served once, told of nothing", func(*Tracker) {}, unstated},
+			{"served once, told as recorded", func(tr *Tracker) { tr.ServedMockAsRecorded(m) }, learns},
+			{"served twice, the first told as recorded, the second told of nothing", func(tr *Tracker) {
+				tr.ServedMockAsRecorded(m)
+				tr.ServedMock(m)
+			}, unstated},
+			{"served twice, told as recorded once after both", func(tr *Tracker) {
+				tr.ServedMock(m)
+				tr.ServedMockAsRecorded(m)
+			}, unstated},
+			{"served twice, each told as recorded", func(tr *Tracker) {
+				tr.ServedMockAsRecorded(m)
+				tr.ServedMock(m)
+				tr.ServedMockAsRecorded(m)
+			}, learns},
+			{"served once, told with a view that holds the value's word", func(tr *Tracker) { tr.ServedMockLive(m, "a", view("6c7d")) }, gave},
+			{"served once, told with a view that holds no word of the value", func(tr *Tracker) { tr.ServedMockLive(m, "a", view(chanceSrcRec)) }, learns},
+			{"served twice, once as recorded and once with a view that holds the value's word", func(tr *Tracker) {
+				tr.ServedMockAsRecorded(m)
+				tr.ServedMock(m)
+				tr.ServedMockLive(m, "a", view("6c7d"))
+			}, inTwo},
+		} {
+			tr := NewTracker()
+			tr.Begin()
+			tr.ServedMock(m)
+			c.tell(tr)
+			tr.End()
+			tr.Begin()
+			tr.End()
+			tr.Begin()
+			o := tr.Placed().Order
+			for _, read := range []struct {
+				name string
+				run  func(classify func(dc *DriftCache, raw []Raw, given GivenEarlier) []Learned) Learned
+			}{
+				{"the set's path", func(classify func(*DriftCache, []Raw, GivenEarlier) []Learned) Learned {
+					return classify(clockedDrifts(), eStartup(), func() ([]GivenPlaces, error) {
+						g, err := o.GivenPlaces(m)
+						return []GivenPlaces{g}, err
+					})[0]
+				}},
+				{"as another test's Raw", func(classify func(*DriftCache, []Raw, GivenEarlier) []Learned) Learned {
+					dc := noSet(clockedDrifts())
+					first, last := o.Of(m)
+					x := o.ServedView(m, dc.LazyRawOf(m, true, nil).ServedIn(first, last).OfAnotherTest())
+					return classify(dc, append(eStartup(), x), nil)[0]
+				}},
+			} {
+				for _, cl := range []struct {
+					name     string
+					classify func(dc *DriftCache, raw []Raw, given GivenEarlier) []Learned
+				}{
+					{"ClassifyGiven", func(dc *DriftCache, raw []Raw, given GivenEarlier) []Learned {
+						return ClassifyGiven(dc, []string{path}, live, rec, eRecAt, nil, raw, nil, nil, given)
+					}},
+					{"ClassifyFollowing", func(dc *DriftCache, raw []Raw, given GivenEarlier) []Learned {
+						return ClassifyFollowing(dc, []string{path}, live, rec, eRecAt, nil, raw, nil, nil, given)
+					}},
+				} {
+					got := read.run(cl.classify)
+					at := kind.name + ", " + c.name + ", " + read.name + ", " + cl.name
+					switch {
+					case c.want == learns && got.Kind == KindUnaccounted:
+						t.Errorf("%s: refused (%q); want learned: no word of the value stands in what F gave there", at, got.Why)
+					case c.want != learns && (got.Kind != KindUnaccounted || !strings.Contains(got.Why, c.want) || !strings.Contains(got.Why, "mock-6") || !strings.Contains(got.Why, whose)):
+						t.Errorf("FALSE GREEN? %s: %s (%q); want refused naming mock-6 as %q: %q", at, got.Kind, got.Why, whose, c.want)
+					}
+				}
+			}
+		}
+	}
+}
