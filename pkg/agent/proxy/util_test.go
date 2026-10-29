@@ -325,6 +325,38 @@ func TestGlobalPassThroughForwardsEachSidesEnd(t *testing.T) {
 	}
 }
 
+// Each wrapper the proxy puts around a connection answers a half-close for the
+// conn it wraps: nil, with the FIN sent, over TCP, and
+// pUtil.ErrCannotHalfClose over a conn that has no CloseWrite, never a nil
+// for a FIN it did not send. Red with any of them back to that nil.
+func TestEachWrapperOfAConnectionSaysWhenItCannotHalfClose(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		wrap func(net.Conn) net.Conn
+	}{
+		{"trackedConn", func(c net.Conn) net.Conn { return &trackedConn{Conn: c} }},
+		{"liveReader", func(c net.Conn) net.Conn { return &liveReader{Conn: c} }},
+		{"treeRealConn", func(c net.Conn) net.Conn { return &treeRealConn{Conn: c} }},
+		{"pUtil.Conn", func(c net.Conn) net.Conn { return &pUtil.Conn{Conn: c, Reader: c} }},
+		{"SafeConn", func(c net.Conn) net.Conn { return pUtil.NewSafeConn(c, zap.NewNop()) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pipe, other := net.Pipe()
+			t.Cleanup(func() { _ = pipe.Close(); _ = other.Close() })
+			if err := tc.wrap(noCloseWriteConn{pipe}).(interface{ CloseWrite() error }).CloseWrite(); !errors.Is(err, pUtil.ErrCannotHalfClose) {
+				t.Errorf("CloseWrite over a conn with no CloseWrite = %v, want pUtil.ErrCannotHalfClose", err)
+			}
+			c, peer := loopbackPair(t)
+			if err := tc.wrap(c).(interface{ CloseWrite() error }).CloseWrite(); err != nil {
+				t.Fatalf("CloseWrite over TCP = %v, want nil", err)
+			}
+			if got := awaitEvent(t, readAll(peer), "the peer reading the FIN"); len(got) != 0 {
+				t.Fatalf("the peer read %q, want only the FIN", got)
+			}
+		})
+	}
+}
+
 // noCloseWriteConn is a conn that cannot half-close: no CloseWrite, and
 // nothing beneath it to look through to.
 type noCloseWriteConn struct{ net.Conn }
