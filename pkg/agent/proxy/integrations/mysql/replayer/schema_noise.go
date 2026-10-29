@@ -769,20 +769,30 @@ func unquoteSQLString(s, quote string) string {
 // ones a statement reads (names, attributesRead), keyed by name
 // (body.attributes.<name>.value, the name in lower case). MySQL looks a
 // name up in the connection's collation, and the first attribute sent with
-// it wins: on 8.4 a statement reading 'tenant' reads one sent as 'Tenant'
-// or 'TENANT', and under utf8mb4 one sent as 'ténant'. So for each name it
-// reads, the first one sent whose name is the same but for case, or, when
-// none is, a NULL (mysql_query_attribute_string reads NULL then); and,
-// under its own name, each one sent whose name a collation may fold onto
-// another though its case does not (foldableAttributeName). Compared with
-// those, an attribute the statement does not read can make a call miss,
-// never another tenant's rows answer it. The others are left out: a client
-// sends ones that differ on every call (Connector/J 8.1+, the caller's
-// OpenTelemetry traceparent), and compared, a statement that reads only
-// 'tenant' never matched its recording. Keyed by name, the order the client
-// sends them in moves no field, and noise written on the layout older
-// versions compared (body.parameters.N: every attribute sent, by position,
-// a traceparent sent first at 0) unchecks none of them.
+// it wins. Under its default collations (utf8mb4_0900_ai_ci,
+// latin1_swedish_ci; checked on 8.4) that is case-insensitive: a statement
+// reading 'tenant' reads one sent as 'Tenant' or 'TENANT', and under
+// utf8mb4 one sent as 'ténant'. So for each name it reads, the first one
+// sent whose name is the same but for case, or, when none is, a NULL
+// (mysql_query_attribute_string reads NULL then); and, under its own name,
+// each one sent whose name keploy compares whatever the statement reads
+// (foldableAttributeName). Compared with those, an attribute the statement
+// does not read can make a call miss, never another tenant's rows answer
+// it. The others are left out: a client sends ones that differ on every
+// call (Connector/J 8.1+, the caller's OpenTelemetry traceparent), and
+// compared, a statement that reads only 'tenant' never matched its
+// recording. Keyed by name, the order the client sends them in moves no
+// field, and noise written on the layout older versions compared
+// (body.parameters.N: every attribute sent, by position, a traceparent sent
+// first at 0) unchecks none of them.
+//
+// A stated limit: under a case-sensitive connection collation (_bin, _cs)
+// MySQL reads only the attribute sent with the exact name, while this
+// takes the first one sent whose name is the same but for case. So a call
+// that sends two case-variants of a read name (Tenant=a, tenant=b), or
+// spells it in another case than its recording did, can be answered with
+// another value's rows. When every call sends the name once, spelled the
+// same, keploy is only stricter than MySQL.
 func readAttributes(attrs []mysql.Parameter, names []string) map[string]mysql.Parameter {
 	out := make(map[string]mysql.Parameter, len(names))
 	for _, name := range names {
@@ -812,11 +822,14 @@ func readAttributes(attrs []mysql.Parameter, names []string) map[string]mysql.Pa
 	return out
 }
 
-// foldableAttributeName reports whether a collation may make name equal to
-// a name it differs from in more than case: one with a byte outside
-// printable ASCII (an accent, which utf8mb4_0900_ai_ci ignores; a control
-// character, which the Unicode collations ignore) or that ends in a space
-// (which PAD SPACE collations, latin1's default, ignore).
+// foldableAttributeName reports whether keploy compares an attribute sent
+// as name whatever names the statement reads: one with a byte outside
+// printable ASCII, which a collation may make equal to a name it differs
+// from in more than case (an accent, which utf8mb4_0900_ai_ci ignores; a
+// control character, which the Unicode collations ignore), or one that
+// ends in a space. MySQL 8.4's lookup does not ignore a trailing space
+// (checked under latin1_swedish_ci); such a name is compared only to be
+// safe, since comparing an attribute can only make a call miss.
 func foldableAttributeName(name string) bool {
 	if strings.HasSuffix(name, " ") {
 		return true

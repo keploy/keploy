@@ -359,14 +359,15 @@ func TestAQueryReadingItsAttributeWithAnotherValueIsAMiss(t *testing.T) {
 }
 
 // MySQL looks a query attribute up by name in the connection's collation,
-// the first one sent with that name winning: on 8.4 a statement reading
-// 'tenant' reads one sent as 'Tenant' or 'TENANT', and under utf8mb4 one
-// sent as 'ténant'. Compared by exact name, two calls sending 'Tenant' were
-// both read as a NULL tenant, and tenant b's read got tenant a's rows. And
-// the body keys the ones it reads by name (body.attributes.<name>): noise
-// written on the positional layout older versions compared
-// (body.parameters.N, every attribute sent, in the order sent: a
-// traceparent sent first at 0) must not uncheck the tenant.
+// the first one sent with that name winning. Under its default collations
+// (utf8mb4_0900_ai_ci, latin1_swedish_ci; checked on 8.4) a statement
+// reading 'tenant' reads one sent as 'Tenant' or 'TENANT', and under
+// utf8mb4 one sent as 'ténant'. Compared by exact name, two calls sending
+// 'Tenant' were both read as a NULL tenant, and tenant b's read got tenant
+// a's rows. And the body keys the ones it reads by name
+// (body.attributes.<name>): noise written on the positional layout older
+// versions compared (body.parameters.N, every attribute sent, in the order
+// sent: a traceparent sent first at 0) must not uncheck the tenant.
 func TestAQueryReadingAnAttributeReadsItAsMySQLDoes(t *testing.T) {
 	const readsAttr = "SELECT mysql_query_attribute_string('tenant') AS t, name FROM small WHERE id = 7"
 	ts := diffBase.Add(time.Millisecond)
@@ -379,7 +380,9 @@ func TestAQueryReadingAnAttributeReadsItAsMySQLDoes(t *testing.T) {
 		{name: "sent as Tenant after the same value as tenant", req: withAttributes(queryReq(readsAttr), "Tenant", "b", "tenant", "a"), notExact: "query-read-attr-case", nearest: "query-read-attr-case"},
 	})
 	// A name a collation may fold onto the read one though its case does
-	// not (an accent, a control character, a trailing space) is compared.
+	// not (an accent, a control character) is compared, and so, to be
+	// safe, is one that ends in a space (MySQL 8.4's lookup does not
+	// ignore it).
 	accent := diffMock("query-read-attr-accent", "c1", []mysql.Request{withAttributes(queryReq(readsAttr), "ténant", "a")}, ts, models.LifetimePerTest, "mocks")
 	runOtherStatementCases(t, []*models.Mock{accent}, []*models.Mock{accent}, []otherStatementCase{
 		{name: "sent as ténant, another value", req: withAttributes(queryReq(readsAttr), "ténant", "b"), notExact: "query-read-attr-accent", nearest: "query-read-attr-accent"},

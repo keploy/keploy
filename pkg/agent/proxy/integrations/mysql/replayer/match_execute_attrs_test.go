@@ -282,7 +282,7 @@ func TestMatchCommand_StrictComparesOnlyTheAttributesAnExecuteReadsByName(t *tes
 		{name: "another tenant after the same traceparent", attrs: []mysql.Parameter{traceparentAttr(recordedTraceparent), tenant("b")}, drift: "body.attributes.tenant.value"},
 		{name: "no tenant", attrs: []mysql.Parameter{traceparentAttr(recordedTraceparent)}, drift: "body.attributes.tenant.value"},
 		// MySQL looks the name up in the connection's collation:
-		// case-insensitive.
+		// case-insensitive under its default ones.
 		{name: "the same tenant sent as Tenant", attrs: []mysql.Parameter{traceparentAttr(replayTraceparent), {Type: uint16(mysql.FieldTypeString), Name: "Tenant", Value: "a"}}, served: true},
 		{name: "another tenant sent as TENANT", attrs: []mysql.Parameter{{Type: uint16(mysql.FieldTypeString), Name: "TENANT", Value: "b"}, traceparentAttr(recordedTraceparent)}, drift: "body.attributes.tenant.value"},
 	}
@@ -316,6 +316,52 @@ func TestMatchCommand_StrictComparesOnlyTheAttributesAnExecuteReadsByName(t *tes
 			}
 			if !named {
 				t.Errorf("the miss %+v does not name the read attribute's drift (%s)", miss, c.drift)
+			}
+		})
+	}
+}
+
+// An EXECUTE whose statement names its attribute with a variable
+// (mysql_query_attribute_string(@n)): which one it reads is not known, so
+// strict compares every parameter sent, attributes included, by position
+// (body.parameters.N, as before). Another tenant misses.
+func TestMatchCommand_StrictComparesEveryAttributeOfAnExecuteReadingOneByVariable(t *testing.T) {
+	const reads = "SELECT ? AS k, mysql_query_attribute_string(@n) AS t"
+	tenant := func(v string) mysql.Parameter {
+		return mysql.Parameter{Type: uint16(mysql.FieldTypeString), Name: "tenant", Value: v}
+	}
+	for _, c := range []struct {
+		name   string
+		live   string
+		served bool
+	}{
+		{name: "the same tenant", live: "a", served: true},
+		{name: "another tenant", live: "b", served: false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			at := stmtT0.Add(time.Second)
+			m := executedMock("mock-reads-var", 1, at, "row", reads, "k1")
+			withAttrs(m.Spec.MySQLRequests[0].Message.(*mysql.StmtExecutePacket), tenant("a"))
+			db := &fakeMockDb{session: []*models.Mock{m}, winStart: at.Add(-time.Second), winEnd: at.Add(time.Second)}
+			req := liveExecute("k1")
+			withAttrs(req.Message.(*mysql.StmtExecutePacket), tenant(c.live))
+			dctx := newDecodeCtx()
+			dctx.StmtIDToQuery[33] = reads
+			dctx.PreparedStatements[33] = &mysql.StmtPrepareOkPacket{StatementID: 33, NumParams: 1}
+			ctx := context.WithValue(context.Background(), models.ClientConnectionIDKey, "0")
+			resp, ok, miss, err := matchCommand(ctx, zap.NewNop(), req, db, dctx, mocknoise.New(mysqlNoiseAdapter{}, false, true), nil)
+			if err != nil || ok != c.served {
+				t.Fatalf("served=%v (%v, %v, miss %+v); want served=%v", ok, resp, err, miss, c.served)
+			}
+			if c.served {
+				return
+			}
+			named := false
+			for _, d := range miss.fieldDiffs {
+				named = named || d.Path == "body.parameters.1.value"
+			}
+			if !named {
+				t.Errorf("the miss %+v does not name the attribute sent after k by position (body.parameters.1.value)", miss)
 			}
 		})
 	}
