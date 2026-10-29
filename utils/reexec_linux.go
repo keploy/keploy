@@ -22,8 +22,11 @@ var execProcess = syscall.Exec
 // ReexecWithSudo re-executes the current keploy command with sudo.
 // This is used when a Docker/Docker Compose command is detected and keploy is not running as root.
 // Uses syscall.Exec to replace the current process entirely - no parent process remains.
-// This function never returns on success.
-func ReexecWithSudo(logger *zap.Logger) {
+// This function never returns on success. On a failure it says why and returns
+// the error, for the caller to end the run with exit code 1 through its own
+// return: an os.Exit here skipped every deferred call of the run, the removal
+// of its temp log among them.
+func ReexecWithSudo(logger *zap.Logger) error {
 	// Get the current PATH to preserve it
 	currentPath := os.Getenv("PATH")
 
@@ -32,14 +35,14 @@ func ReexecWithSudo(logger *zap.Logger) {
 	if err != nil {
 		logger.Error("sudo not found in PATH, cannot re-execute with elevated privileges", zap.Error(err))
 		fmt.Println("Error: sudo is required to run Docker commands. Please install sudo or run as root.")
-		os.Exit(1)
+		return fmt.Errorf("find sudo: %w", err)
 	}
 
 	// Find keploy binary - use the current executable
 	keployPath, err := os.Executable()
 	if err != nil {
 		logger.Error("failed to get current executable path", zap.Error(err))
-		os.Exit(1)
+		return fmt.Errorf("find this executable: %w", err)
 	}
 
 	// Build the command: sudo -E env PATH="$PATH" keploy <original-args>
@@ -72,8 +75,9 @@ func ReexecWithSudo(logger *zap.Logger) {
 		// syscall.Exec only returns on error
 		logger.Error("failed to re-execute with sudo", zap.Error(err))
 		fmt.Printf("Error: failed to re-execute with sudo: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("re-execute with sudo: %w", err)
 	}
+	return nil
 }
 
 // ShouldReexecWithSudo checks if keploy should re-execute itself with sudo.

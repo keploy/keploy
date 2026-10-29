@@ -528,3 +528,26 @@ func TestWantsMachineOutput(t *testing.T) {
 		})
 	}
 }
+
+// failingWriter fails every write, as a console that is gone does.
+type failingWriter struct{ writes int }
+
+func (w *failingWriter) Write([]byte) (int, error) {
+	w.writes++
+	return 0, errors.New("the console is gone")
+}
+
+// A console that cannot be written to ends nothing: PrintLogo returns, as
+// every other console line's failed write does. It used to log.Fatalf, an
+// exit from inside a command past every deferred call of the run, the
+// removal of its temp log among them; here that exit would end this test
+// binary.
+func TestPrintLogoToAConsoleThatFailsReturns(t *testing.T) {
+	for _, disableANSI := range []bool{true, false} {
+		w := &failingWriter{}
+		PrintLogo(w, disableANSI)
+		if w.writes == 0 {
+			t.Errorf("PrintLogo(disableANSI=%v) wrote nothing: the row did not reach a failing write", disableANSI)
+		}
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -35,7 +36,7 @@ func TestMain(m *testing.M) {
 		// and fail where there is no sudo. The result would depend on the
 		// machine's sudo, not on keploy, so a case that would do it is
 		// refused, the same way everywhere: give it a native -c.
-		if utils.ShouldReexecWithSudo() {
+		if utils.ShouldReexecWithSudo() && os.Getenv(reexecWithNoSudoEnv) != "1" {
 			fmt.Fprintf(os.Stderr, "refused: keploy %s would re-execute this test binary through sudo; give the case a native -c\n", strings.Join(os.Args[1:], " "))
 			os.Exit(childWouldSudo)
 		}
@@ -48,6 +49,12 @@ func TestMain(m *testing.M) {
 	}
 	os.Exit(m.Run())
 }
+
+// reexecWithNoSudoEnv lets a re-executed CLI that would re-execute itself
+// through sudo go on to that re-exec. Only a row whose PATH has no sudo on it
+// sets it, so the re-exec fails where it looks for sudo, and nothing runs as
+// root.
+const reexecWithNoSudoEnv = "KEPLOY_TEST_REEXEC_WITH_NO_SUDO"
 
 // holdAfterLoggerEnv names a named pipe at which a re-executed CLI is held
 // right after start() built its logger (newLogger, the real one), before
@@ -226,6 +233,109 @@ func TestCLICleansUpLogFileOnUnknownCommand(t *testing.T) {
 		}
 		for _, e := range entries {
 			t.Errorf("a failed command left %s behind in %s", e.Name(), d)
+		}
+	}
+}
+
+// `keploy test` with no keploy folder, a new user's first mistake, fails with
+// exit code 1 and names its log, and the log is gone at the end, from the
+// temp directory as from the working directory. ValidateFlags used to
+// os.Exit(1) there, past start()'s deferred calls: each such run left one
+// more keploy-logs-*.txt in the temp directory. It now returns
+// provider.ErrNoTestSets, which main exits 1 for, and which nothing says a
+// second time as "failed to validate flags".
+func TestCLITestWithNoKeployFolderExitsOneAndLeavesNoLog(t *testing.T) {
+	if code := runCLI(t, "--help"); code != 0 {
+		t.Skipf("keploy --help exited %d; CLI startup is unusable in this environment", code)
+	}
+
+	dir, tmp := t.TempDir(), t.TempDir()
+	cmd := exec.Command(os.Args[0])
+	cmd.Args = []string{"keploy", "test", "-c", "true"}
+	cmd.Env = append(os.Environ(), subprocessEnv+"=1", "TMPDIR="+tmp)
+	cmd.Dir = dir
+	var out bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &out
+	code := 0
+	if err := cmd.Run(); err != nil {
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) {
+			t.Fatalf("running keploy test: %v", err)
+		}
+		code = exitErr.ExitCode()
+	}
+
+	if code != utils.ExitKeployError {
+		t.Errorf("exit code = %d, want %d", code, utils.ExitKeployError)
+	}
+	said := out.String()
+	if !strings.Contains(said, "No test-sets found") {
+		t.Errorf("the run did not say it found no test-sets:\n%s", said)
+	}
+	if !strings.Contains(said, "logs: "+filepath.Join(tmp, "keploy-logs-")) {
+		t.Errorf("the run did not name its log in %s:\n%s", tmp, said)
+	}
+	if strings.Contains(said, "failed to validate flags") {
+		t.Errorf("the refusal was said a second time, as a validation failure:\n%s", said)
+	}
+	for _, d := range []string{dir, tmp} {
+		entries, err := os.ReadDir(d)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range entries {
+			t.Errorf("keploy test with no keploy folder left %s behind in %s", e.Name(), d)
+		}
+	}
+}
+
+// A docker run that keploy cannot re-execute through sudo, for there is no
+// sudo, fails with exit code 1 and leaves no log: ReexecWithSudo returns its
+// error to start(), whose deferred calls remove the log. It used to os.Exit(1)
+// inside ReexecWithSudo, before the log's name went at the exec.
+func TestCLIReexecWithNoSudoExitsOneAndLeavesNoLog(t *testing.T) {
+	if runtime.GOOS != "linux" || os.Geteuid() == 0 {
+		t.Skip("start() re-executes through sudo only on Linux, for a user who is not root")
+	}
+	if code := runCLI(t, "--help"); code != 0 {
+		t.Skipf("keploy --help exited %d; CLI startup is unusable in this environment", code)
+	}
+
+	dir, tmp, bin := t.TempDir(), t.TempDir(), t.TempDir()
+	cmd := exec.Command(os.Args[0])
+	cmd.Args = []string{"keploy", "record", "-c", "docker run --name app img"}
+	env := []string{subprocessEnv + "=1", reexecWithNoSudoEnv + "=1", "TMPDIR=" + tmp, "PATH=" + bin}
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, "PATH=") && !strings.HasPrefix(kv, "TMPDIR=") {
+			env = append(env, kv)
+		}
+	}
+	cmd.Env = env
+	cmd.Dir = dir
+	var out bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &out
+	code := 0
+	if err := cmd.Run(); err != nil {
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) {
+			t.Fatalf("running keploy record: %v", err)
+		}
+		code = exitErr.ExitCode()
+	}
+
+	if code != utils.ExitKeployError {
+		t.Errorf("exit code = %d, want %d:\n%s", code, utils.ExitKeployError, out.String())
+	}
+	if !strings.Contains(out.String(), "sudo is required") {
+		t.Errorf("the run did not say it needs sudo:\n%s", out.String())
+	}
+	for _, d := range []string{dir, tmp} {
+		entries, err := os.ReadDir(d)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range entries {
+			t.Errorf("a re-exec with no sudo left %s behind in %s", e.Name(), d)
 		}
 	}
 }

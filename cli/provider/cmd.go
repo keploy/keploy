@@ -782,6 +782,11 @@ func (c *CmdConfigurator) validate(ctx context.Context, cmd *cobra.Command) erro
 		c.logger.Info(LogExample(example))
 		return err
 	}
+	if errors.Is(err, ErrNoTestSets) {
+		// Said by ValidateFlags, with the command that records test-sets,
+		// and not again as "failed to validate flags".
+		return err
+	}
 	if err != nil {
 		c.logger.Error("failed to validate flags", zap.Error(err))
 		return err
@@ -1965,7 +1970,9 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				recordCmd := models.HighlightGrayString("keploy record")
 				c.logger.Info(fmt.Sprintf("No test-sets found. Please record testcases using %s command", recordCmd))
 				c.logger.Info("Example: " + RecordExample(utils.CmdType(c.cfg.CommandType)))
-				os.Exit(1)
+				// Returned, not os.Exit(1): the run ends through main, whose
+				// deferred calls remove its temp log (ErrNoTestSets).
+				return ErrNoTestSets
 			}
 
 			testSets, err := cmd.Flags().GetStringSlice("testsets")

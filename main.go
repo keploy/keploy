@@ -83,6 +83,21 @@ func start(ctx context.Context) {
 		return
 	}
 	utils.LogFile = logFile
+	// The first deferred call, so the last to run: every return of start()
+	// from here on, the early ones included (a failed sudo re-exec), ends the
+	// log, and what the other deferred calls log reaches it first.
+	defer func() {
+		if os.Getenv("KEPLOY_INDOCKER") != "true" {
+			// This run's own temp log (log.LogFilePattern), closed and
+			// removed; whatever else is at its name is not this run's. A
+			// native agent's log is its CLI's (log.ClientLogFileFlag), which
+			// it only closes: the CLI removes it.
+			if err := log.CloseLogFile(utils.LogFile); err != nil {
+				utils.LogError(logger, err, "Failed to close and remove Keploy Logs")
+			}
+			utils.LogFile = nil
+		}
+	}()
 
 	// If KEPLOY_DEBUG_FILE is set, tee debug-level log records into that
 	// file in addition to whatever sinks log.New configured. Used by
@@ -159,9 +174,12 @@ func start(ctx context.Context) {
 	// Early check: If Docker command detected and not running as root, re-exec with sudo
 	// This must happen before any other initialization to ensure clean process handoff
 	if utils.ShouldReexecWithSudo() {
-		utils.ReexecWithSudo(logger)
-		// ReexecWithSudo calls syscall.Exec which replaces the process, so this line
-		// is only reached if there's an error (which is handled inside ReexecWithSudo)
+		// ReexecWithSudo calls syscall.Exec which replaces the process, so this
+		// line is only reached if there's an error, which it has said. The run
+		// ends here, through start()'s deferred calls, which remove its log.
+		if err := utils.ReexecWithSudo(logger); err != nil {
+			utils.ErrCode = utils.ExitKeployError
+		}
 		return
 	}
 
@@ -212,16 +230,7 @@ func start(ctx context.Context) {
 	}
 
 	defer func() {
-		inDocker := os.Getenv("KEPLOY_INDOCKER")
-		if inDocker != "true" {
-			// This run's own temp log (log.LogFilePattern), closed and
-			// removed; whatever else is at its name is not this run's. A
-			// native agent's log is its CLI's (log.ClientLogFileFlag), which
-			// it only closes: the CLI removes it.
-			if err := log.CloseLogFile(utils.LogFile); err != nil {
-				utils.LogError(logger, err, "Failed to close and remove Keploy Logs")
-			}
-			utils.LogFile = nil
+		if os.Getenv("KEPLOY_INDOCKER") != "true" {
 			if err := utils.DeleteFileIfExists(logger, "docker-compose-tmp.yaml"); err != nil {
 				return
 			}
@@ -254,7 +263,10 @@ func start(ctx context.Context) {
 	if err != nil {
 		errMsg := "failed to get installation id"
 		utils.LogError(logger, err, errMsg)
-		os.Exit(1)
+		// Returned, not os.Exit(1): the run ends through its deferred calls,
+		// which remove its temp log.
+		utils.ErrCode = utils.ExitKeployError
+		return
 	}
 
 	svcProvider := provider.NewServiceProvider(logger, conf)
