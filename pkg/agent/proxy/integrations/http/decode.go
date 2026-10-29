@@ -17,6 +17,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/identity"
 	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -158,14 +159,6 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				arrived: arrived,
 			}
 
-			// Under the proven switch the request's destination is read once,
-			// as it comes: a use of its connection's container in the scope
-			// open now (containerkey), which every match of it then reads.
-			reqCtx := ctx
-			if provenswitch.On() {
-				reqCtx = withLiveDestination(ctx, liveDestination(ctx, input))
-			}
-
 			if input.header.Get("Content-Encoding") != "" {
 				input.encoded = input.body
 				input.body, err = pkg.Decompress(h.Logger, input.header.Get("Content-Encoding"), input.body, pkg.MaxDecompressedSize)
@@ -174,6 +167,30 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					errCh <- err
 					return
 				}
+			}
+
+			// The replay pod's own identity becomes the recorded pod's, in the
+			// URL, the headers (the Host among them, so the destination read
+			// below sees it) and the body, before any pass compares the call
+			// (identity package). The served response gets the live identity
+			// back only when the replay asked for it (IdentityAliasing.Responses).
+			// The identity is the test set's armed when this request is read
+			// (identity.Current), not the one opts copied when the connection
+			// was accepted: a client keeps a connection open across test sets.
+			id := identity.Current(ctx, opts.Identity)
+			alias := identity.ForAliasing(id)
+			aliasIdentity(alias, input)
+			var aliasBack *identity.Rewriter
+			if id.ReverseResponses() {
+				aliasBack = alias.Reverse()
+			}
+
+			// Under the proven switch the request's destination is read once,
+			// as it comes: a use of its connection's container in the scope
+			// open now (containerkey), which every match of it then reads.
+			reqCtx := ctx
+			if provenswitch.On() {
+				reqCtx = withLiveDestination(ctx, liveDestination(ctx, input))
 			}
 
 			// The request is customer content: its credentials, cookies,
@@ -555,7 +572,18 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			// Serialize the matched mock's response to wire bytes (hydrates a
 			// spilled body, recomputes Content-Length, compresses per
 			// Content-Encoding). Shared with the async serving branch above.
-			respBytes, err := h.buildMockResponseBytes(stub)
+			// The replay pod's own identity is put back into it when the replay
+			// asked for that (aliasResponse), as buildAnswer's rewrite: a
+			// rewritten serve never reads or fills the kept answers
+			// (keptAnswers), so one serve's identity never reaches another's.
+			var rewrite answerRewrite
+			if aliasBack != nil {
+				rewrite = func(header http.Header, body string) (http.Header, string) {
+					body, header = aliasResponse(aliasBack, header, body)
+					return header, body
+				}
+			}
+			respBytes, err := h.buildAnswer(stub, rewrite)
 			if err != nil {
 				utils.LogError(h.Logger, err, "failed to serialize matched mock response", zap.Any("metadata", utils.GetReqMeta(request)))
 				errCh <- err

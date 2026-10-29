@@ -41,6 +41,10 @@ type req struct {
 	// encoded is the body as the client sent it, before its Content-Encoding
 	// was undone into body; nil when it had none.
 	encoded []byte
+	// sent is the body as the client sent it, kept when the identity rewrite
+	// (aliasIdentity) changed body: what a hash of the payload it sent
+	// (x-amz-content-sha256) is a hash of is the bytes before the rewrite.
+	sent []byte
 	// arrived is when keploy had read the whole request (zero: unknown):
 	// the app sent it, and read whatever clock it carries, no later.
 	arrived time.Time
@@ -49,6 +53,9 @@ type req struct {
 // sentBody is the body as the client sent it: what a hash of the payload
 // it sent (x-amz-content-sha256) is a hash of.
 func (r *req) sentBody() []byte {
+	if r.sent != nil {
+		return r.sent
+	}
 	if r.encoded != nil {
 		return r.encoded
 	}
