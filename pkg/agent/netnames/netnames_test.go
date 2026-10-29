@@ -241,3 +241,81 @@ func TestServeAfterAReplacedAgent(t *testing.T) {
 	}
 	s.Apply(List{Answers: 1})
 }
+
+// changedAfter returns the Store's changed channel as it is once f, run
+// under s.mu, has run: it closes at the Store's next change after f.
+func changedAfter(s *Store, f func()) <-chan struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	f()
+	return s.changed
+}
+
+// closed reports whether ch is closed.
+func closed(ch <-chan struct{}) bool {
+	select {
+	case <-ch:
+		return true
+	default:
+		return false
+	}
+}
+
+// A waiter reads the Store under its lock, then waits on changed for the next
+// change. A Refresh's return is a change (one fewer waiting): it closes
+// changed, or a waiter that read the Store just before the return waits for a
+// change that already came. TestRefreshWaitsForTheAnsweringList's wait for 2
+// waiting hung so on a loaded runner, when the answered Refresh returned only
+// after the test had read 3 waiting. Both ways a Refresh returns are checked:
+// its ask answered, and its ctx ended.
+func TestARefreshsReturnWakesTheStoresWaiters(t *testing.T) {
+	s := New()
+	asks := stream(t, s, context.Background(), 0)
+	answered := make(chan struct{})
+	go func() { defer close(answered); s.Refresh(context.Background()) }()
+	a := <-asks
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cancelled := make(chan struct{})
+	go func() { defer close(cancelled); s.Refresh(ctx) }()
+	b := <-asks // ask b taken: no change is to come but the Refreshes' returns
+	waitFor(s, func() bool { return s.waiting == 2 })
+
+	// Answer ask a, and read changed in the same hold of the lock: the
+	// answered Refresh cannot have returned before the read.
+	ch := changedAfter(s, func() {
+		s.settled = a.Asked
+		s.signal()
+	})
+	<-answered
+	if !closed(ch) {
+		t.Fatal("a Refresh whose ask was answered returned with changed still open")
+	}
+
+	ch = changedAfter(s, func() {})
+	cancel()
+	<-cancelled
+	if !closed(ch) {
+		t.Fatal("a Refresh whose ctx ended returned with changed still open")
+	}
+	s.Apply(List{Answers: b.Asked})
+}
+
+// Handing an ask to the CLI is a change (taken): it closes changed, so a
+// waiter for the ask's being taken sees it.
+func TestHandingOutAnAskWakesTheStoresWaiters(t *testing.T) {
+	s := New()
+	asks := stream(t, s, context.Background(), 0)
+	// Make ask 1 as Refresh does, without waiting for it, and read changed
+	// in the same hold of the lock: the stream cannot have taken it yet.
+	ch := changedAfter(s, func() {
+		s.asked++
+		s.signal()
+	})
+	if a := <-asks; a.Asked != 1 {
+		t.Fatalf("handed ask %d, want 1", a.Asked)
+	}
+	if !closed(ch) {
+		t.Fatal("the stream took ask 1 with changed still open")
+	}
+}

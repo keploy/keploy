@@ -61,8 +61,11 @@ type Store struct {
 	// soon as none is, so it waits on the CLI's list or its going away,
 	// never on a clock.
 	streams int
-	waiting int           // Refresh calls waiting for a list now
-	changed chan struct{} // closed, and replaced, on every change
+	waiting int // Refresh calls waiting for a list now
+	// changed is closed, and replaced, on every change of the fields above,
+	// a Refresh's return included: a waiter that read the Store and then
+	// waits on changed sees each change that follows its read.
+	changed chan struct{}
 }
 
 // New is an empty Store.
@@ -152,6 +155,7 @@ func (s *Store) Refresh(ctx context.Context) {
 	s.signal()
 	defer func() {
 		s.waiting--
+		s.signal()
 		s.mu.Unlock()
 	}()
 	for s.settled < want && s.streams > 0 {
@@ -207,6 +211,7 @@ func (s *Store) Serve(ctx context.Context, after uint64, send func(Ask) error) {
 		ask := Ask{Asked: s.asked}
 		if ask.Asked > s.taken {
 			s.taken = ask.Asked
+			s.signal()
 		}
 		s.mu.Unlock()
 		err := send(ask)
