@@ -1234,6 +1234,18 @@ func TestASessionStartEndsWithItsCaller(t *testing.T) {
 	require.ErrorIs(t, <-done, context.Canceled)
 }
 
+// A miss the proxy read as its closest recording with the clock moved keeps
+// that word through the evidence, whose field diff (values) it drops:
+// judging reads it to set the test aside on the application's clock.
+func TestSanitizedMissKeepsTheClockWord(t *testing.T) {
+	m := sanitizedMiss(models.UnmatchedCall{Protocol: "MongoDB", ActualSummary: "findAndModify ptw_endpoints", ClosestMock: "mock-12",
+		Clock: true, FieldDiffs: []models.MockFieldDiff{{Path: "body.filter.dirtyAt.$lte.$date.$numberLong", Kind: models.DiffKindValueChanged,
+			Expected: "1798456789123", Actual: "1798456851977"}}})
+	require.True(t, m.Clock)
+	require.Empty(t, m.FieldDiffs, "no value of the diff is kept")
+	require.False(t, sanitizedMiss(models.UnmatchedCall{Protocol: "MongoDB", ClosestMock: "mock-12"}).Clock)
+}
+
 // Evidence keeps a miss's shape and the matcher's advice, never a value:
 // an HTTP path's IDs and query, a SQL statement's literals.
 func TestSanitizedMissKeepsTheShapeAndTheAdvice(t *testing.T) {

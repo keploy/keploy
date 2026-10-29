@@ -50,8 +50,9 @@ const (
 // large payload can't bloat the report yaml or the CLI table.
 const maxFieldDiffValueLen = 256
 
-// maxFieldDiffs bounds how many per-field diffs a single report carries.
-const maxFieldDiffs = 25
+// MaxFieldDiffs bounds how many per-field diffs a single report carries: a
+// report with this many may have been cut, so what else differed is not known.
+const MaxFieldDiffs = 25
 
 // Builder assembles a models.MockMismatchReport with consistent rendering.
 type Builder struct {
@@ -164,8 +165,8 @@ func (b *Builder) WithPhase(phase string, candidateCount int) *Builder {
 // WithClosest attaches the nearest candidate and its field-level diffs.
 func (b *Builder) WithClosest(mockName string, diffs []models.MockFieldDiff) *Builder {
 	b.report.ClosestMock = mockName
-	if len(diffs) > maxFieldDiffs {
-		diffs = diffs[:maxFieldDiffs]
+	if len(diffs) > MaxFieldDiffs {
+		diffs = diffs[:MaxFieldDiffs]
 	}
 	b.report.FieldDiffs = diffs
 	return b
