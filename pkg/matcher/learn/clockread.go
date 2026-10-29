@@ -993,7 +993,13 @@ func checkReadIn(o models.ClockOffset, live Leaf, s Span, learned, read, hint st
 		// application in IST cuts to UTC's hour (Truncate counts from UTC),
 		// one in Java to IST's. A value that shows the cut in none (a time
 		// to live of no whole number of cuts) is read in the application's
-		// zone. Its verdict never turns on when in the hour the replay ran.
+		// zone. A value the window plus the learned range writes holds
+		// wherever in the cut the replay ran, and one more than a cut past
+		// either side never does, but a time to live changed by less than
+		// the window, the learned range and three cuts together may hold,
+		// by where in the cut the replay's read falls (the learned range,
+		// about a full round's lead wide, can straddle a cut's start:
+		// models.ClockOffset.Within, Checkable).
 		// CheckClockRead has refused a zone it cannot tell; this fails
 		// closed all the same.
 		in := ""
@@ -1015,6 +1021,9 @@ func checkReadIn(o models.ClockOffset, live Leaf, s Span, learned, read, hint st
 		}
 		if holdsAny(o, ats, res, s.From, s.To) {
 			return true, o.CheckedAt(res), ""
+		}
+		if !o.Checkable(res, s.From, s.To) && o.DayCut() && o.CheckedAt(res) == o.Res {
+			return false, o.CheckedAt(res), learned + ", which a replay checks at the day it is cut to against its call's window, but this call's window (" + models.ShortDuration(s.To.Sub(s.From)) + ") with the offset's range is no narrower than the day, so keploy could not tell " + offsetNamed(o) + " changed by days and refuses the value rather than pass it unchecked" + hint
 		}
 		if !o.Checkable(res, s.From, s.To) {
 			return false, o.CheckedAt(res), learned + ", which a replay checks against its call's window, but this call's window (" + models.ShortDuration(s.To.Sub(s.From)) + ") with the offset's range and three of its cut is no narrower than the " + unitWord(o.Unit()) + " the offset reads in, so keploy could not tell " + offsetNamed(o) + " changed by " + aUnit(o.Unit()) + " and refuses the value rather than pass it unchecked" + hint

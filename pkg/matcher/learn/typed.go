@@ -578,10 +578,14 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 		if offset && !dc.clientTests && off.Min > 0 {
 			return tried
 		}
-		// An offset the values' cut leaves ambiguous is refused in keploy
-		// test naming both cuts (offsetReading).
-		if cutWhy != "" && !dc.clientTests {
+		// An offset the values' cut leaves ambiguous is refused naming both
+		// cuts (offsetReading), in a client test with its own correction
+		// added (clientCutAmbiguousWhy).
+		if cutWhy != "" {
 			ln.Kind, ln.Why = KindUnaccounted, cutWhy
+			if dc.clientTests {
+				ln.Why = clientCutAmbiguousWhy(cutWhy)
+			}
 			return ln
 		}
 		why := instantNotClock
@@ -731,7 +735,9 @@ func clockOffsetOf(r, l typedInstant, w *Window, zone *time.Location) (models.Cl
 // offset's bounds read no zone (offsetBounds: a value stands for the cut
 // it starts, whatever zone that cut is of), and clockOffset refuses one
 // whose range and three cuts are no narrower than its unit (an hour's cut
-// learns an offset of a day or more; a day's none) as it does at any cut.
+// learns an offset of a day or more) as it does at any cut, but a day's
+// cut, which no unit holds three of, only where its range is no narrower
+// than the day (models.ClockOffset.Narrow): a replay checks it at the day.
 // ok only where one offset
 // does both: a constant offset from the clock, which a value built on a
 // served instant or a constant shows in neither run's window. The offset is
@@ -920,7 +926,9 @@ func offsetBounds(v time.Time, res time.Duration, s Span) (lo, hi time.Duration,
 // second, and off and three of its resolution (off.Res, the cut its values
 // show: a replay checks a value within one cut of its span on either side)
 // are narrower than that unit (off.Within: off holds one multiple of it,
-// and a replay can tell a time to live changed by one), for a caller whose
+// and a replay can tell a time to live changed by one), or, cut to a day,
+// off alone is narrower than the day (off.Narrow: a replay checks it at the
+// day, admitting a time to live changed by one day), for a caller whose
 // replay compares it (Window.ComparesOffsets), where the echo could read
 // the test case's own request (unread: why not) and the call's recorded
 // answer does not hold it (rec, its recorded moment, in resp: an answer
@@ -935,7 +943,7 @@ func (dc *DriftCache) clockOffset(ln Learned, off models.ClockOffset, enc time.D
 	switch {
 	case off.Unit() <= time.Second:
 		ln.Kind, ln.Why = KindUnaccounted, clockOffsetFineWhy(path, off)
-	case !off.Within(off.Max-off.Min, off.Res, off.Res, off.Res):
+	case !off.Narrow():
 		ln.Kind, ln.Why = KindUnaccounted, clockOffsetWideWhy(path, off, enc)
 	case !w.offsets:
 		ln.Kind, ln.Why = KindUnaccounted, clockOffsetUncomparedWhy(path, off)
@@ -957,7 +965,7 @@ func (dc *DriftCache) clockOffset(ln Learned, off models.ClockOffset, enc time.D
 // made before its call's window: classifyRead): where each is one instant
 // whole that names its moment (readClockTextWall: an epoch's digits, a time
 // with its zone), both written in one layout, and w holds the two as a read of
-// each run's clock plus one constant offset (clockOffsetOf), that offset,
+// each run's clock plus one constant offset (offsetReading), that offset,
 // learned as classifyInstant learns a typed one (clockOffset: only for a
 // caller whose replay compares it, in a unit coarser than a second, and the
 // rest of its checks), in the text's layout, which a replay reads its value
@@ -966,30 +974,42 @@ func (dc *DriftCache) clockOffset(ln Learned, off models.ClockOffset, enc time.D
 // as much as by one the application adds; the two runs wrote two layouts; w
 // shows no one offset; or clockOffset refuses it), and the client test's
 // refusal, or the plain read, stands, as the typed reading's does
-// (classifyInstant).
-func (dc *DriftCache) textClockOffset(r, l Leaf, v *valueDrift, w *Window, resp []Leaf) (Learned, bool) {
+// (classifyInstant); cutWhy, where the cut the two values show leaves the
+// offset ambiguous (offsetReading's cutAmbiguousWhy, naming both cuts),
+// which a client test's refusal names instead (clientCutAmbiguousWhy).
+func (dc *DriftCache) textClockOffset(r, l Leaf, v *valueDrift, w *Window, resp []Leaf) (got Learned, cutWhy string, ok bool) {
 	rat, rres, rwall, okR := readClockTextWall(r.Value)
 	lat, lres, lwall, okL := readClockTextWall(l.Value)
 	if !okR || !okL || rwall || lwall {
-		return Learned{}, false
+		return Learned{}, "", false
 	}
 	lay := models.ClockOffset{Layout: clockTextLayout(r.Value)}.MeetLayout(clockTextLayout(l.Value))
 	if lay == "" || lay == models.LayoutApart {
-		return Learned{}, false
+		return Learned{}, "", false
 	}
-	off, ok := clockOffsetOf(typedInstant{at: rat, res: rres, names: namesMoment}, typedInstant{at: lat, res: lres, names: namesMoment}, w, dc.zone)
+	off, cutWhy, ok := offsetReading(fieldName(r), typedInstant{at: rat, res: rres, names: namesMoment}, typedInstant{at: lat, res: lres, names: namesMoment}, w, dc.zone)
 	if !ok {
-		return Learned{}, false
+		return Learned{}, cutWhy, false
 	}
 	// The recorded moment the echo check reads the call's answer for.
 	for _, p := range v.instants {
 		if p.rec.key.at == rat.UnixNano() {
 			off.Layout = lay
 			got := dc.clockOffset(Learned{Kind: KindNoise, Recorded: r, Live: l}, off, max(rres, lres), w, "", p.rec, resp)
-			return got, got.Kind == KindClockOffset
+			return got, "", got.Kind == KindClockOffset
 		}
 	}
-	return Learned{}, false
+	return Learned{}, "", false
+}
+
+// clientCutAmbiguousWhy is a client test's refusal of a changed instant
+// whose two values offsetReading reads as a read of the application's clock
+// plus an offset at two cuts (cutWhy, cutAmbiguousWhy's, which names both
+// and how to correct it): it names the ambiguity, never only that no clock
+// read matched it (learning legible), and adds the client test's own
+// correction, for a value the test's harness supplies.
+func clientCutAmbiguousWhy(cutWhy string) string {
+	return cutWhy + ". If your test supplies this value, have it supply the same value in every run, and keploy keeps comparing it"
 }
 
 // fieldName is the leaf's name as keploy.yml's noise writes it (Leaf.Noise:
@@ -1023,8 +1043,13 @@ func clockOffsetSeen(path string, off models.ClockOffset) string {
 }
 
 // clockOffsetEvidence is a KindClockOffset's Why: what was seen, and how the
-// replay compares it.
+// replay compares it. Of an offset cut to a day (models.ClockOffset.DayCut),
+// what a replay checking it at the day admits: a time to live changed by one
+// day, as a date cut to a day admits yesterday.
 func clockOffsetEvidence(path string, off models.ClockOffset) string {
+	if off.DayCut() {
+		return clockOffsetSeen(path, off) + ", cut to a day. A replay checks the offset at the day, the application's calendar day, as standing for its whole day, within one day of its call's window plus the offset on either side, as a date cut to a day passes from yesterday: " + offsetNamed(off) + " changed by one day passes there, one changed by two days fails unless the replay's read falls within its call's window and the offset's range (" + models.ShortDuration(off.Max-off.Min) + ") of the day's turn, and one changed by three days or more always fails; if the field is a time the application reads from its own clock with no rule, declare it noise in keploy.yml, and keploy stops comparing it"
+	}
 	return clockOffsetSeen(path, off) + ". A replay compares the offset: " + offsetNamed(off) + " changed by " + aUnit(off.Unit()) + " or more still fails; if the field is a time the application reads from its own clock with no rule, declare it noise in keploy.yml, and keploy stops comparing it"
 }
 
@@ -1043,6 +1068,9 @@ func clockOffsetFineWhy(path string, off models.ClockOffset) string {
 // offset too loosely for a replay to tell a time to live changed by that
 // unit.
 func clockOffsetWideWhy(path string, off models.ClockOffset, enc time.Duration) string {
+	if off.DayCut() {
+		return path + " = " + off.Range() + " at a resolution of " + resolutionOf(off.Res, enc) + ": in the recording and in record's full round alike, it is a read of the application's clock in its call's window plus an offset in that range, but the range is not narrower than the day the value is cut to, so a replay checking it at the day could not tell " + offsetNamed(off) + " changed by days from it, and keploy refuses it. If the field is a time the application reads from its own clock with no rule, declare it noise in keploy.yml, and keploy stops comparing it"
+	}
 	return path + " = " + off.Range() + " at a resolution of " + resolutionOf(off.Res, enc) + ": in the recording and in record's full round alike, it is a read of the application's clock in its call's window plus an offset in that range, but the range and three of its resolution (a replay checks the value within one of it of its window plus the offset, on either side) are not narrower than the " + unitWord(off.Unit()) + " the offset reads in, so a replay could not tell " + offsetNamed(off) + " changed by " + aUnit(off.Unit()) + " from it, and keploy refuses it. If the field is a time the application reads from its own clock with no rule, declare it noise in keploy.yml, and keploy stops comparing it"
 }
 

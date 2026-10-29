@@ -1277,8 +1277,12 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 				// go at (follows.followed, which orders noise) is needed:
 				// a replay passes it only as the clock plus that offset.
 				if why != "" {
-					if off, ok := dc.textClockOffset(r, l, v, w, resp); ok {
+					off, cutWhy, ok := dc.textClockOffset(r, l, v, w, resp)
+					if ok {
 						return off
+					}
+					if cutWhy != "" {
+						why = clientCutAmbiguousWhy(cutWhy)
 					}
 				}
 			}
@@ -1344,7 +1348,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// every replay in its call's span; only otherwise the plain read,
 		// as before. A value its window holds shows no offset.
 		if v := dc.ofIn(r.Value, l.Value, w, at); ln.Kind == KindNoise && v.clock.whole {
-			if off, ok := dc.textClockOffset(r, l, v, w, resp); ok {
+			if off, _, ok := dc.textClockOffset(r, l, v, w, resp); ok {
 				return off
 			}
 			ln.Read = textClockReadIn(r.Value, l.Value, dc.zone)

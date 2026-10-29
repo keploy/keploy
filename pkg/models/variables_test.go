@@ -308,6 +308,76 @@ func TestAClockOffsetHoldsOnlyWhereItsWindowIsNarrowerThanItsUnit(t *testing.T) 
 	}
 }
 
+// An offset cut to a day (founder decision, 2026-10-27: a cut is checked at
+// the cut; ruled for a day's cut 2026-10-29) is learned where its width is
+// narrower than the day (Narrow), though no unit holds three days, and a
+// replay checks it at the day where its window and the offset's width are
+// narrower than the day (Checkable), within one day of the window plus the
+// offset on either side: thirty days, at every read in the widest such
+// window, holds the read plus thirty days and the value one day stale or
+// ahead (as yesterday's date passes a date cut to a day), never three days
+// off; a window a nanosecond wider holds nothing. Cut to an hour, the sums
+// still count three cuts against the unit: a day cut to the hour is learned,
+// two hours cut to the hour is not.
+func TestAClockOffsetCutToADayIsCheckedAtTheDay(t *testing.T) {
+	ms, day := time.Millisecond, 24*time.Hour
+	o := ClockOffset{Min: 30*day - 31*time.Second, Max: 30*day + 30*time.Second, Res: day}
+	if !o.DayCut() || !o.Narrow() || o.Unit() != day {
+		t.Fatalf("thirty days at the day: DayCut %v, Narrow %v, Unit %s; want a day's cut, learned, reading in days", o.DayCut(), o.Narrow(), o.Unit())
+	}
+	from := time.Date(2026, 11, 2, 6, 0, 0, 0, time.UTC)
+	widest := day - (o.Max - o.Min) - 1
+	to := from.Add(widest)
+	if !o.Checkable(ms, from, to) || o.Checkable(ms, from, to.Add(1)) {
+		t.Errorf("Checkable: want the widest window with the offset's width within the day, a nanosecond more not")
+	}
+	for _, read := range []time.Time{from, from.Add(widest / 2), to} {
+		v := read.Add(30 * day).Truncate(day)
+		for _, row := range []struct {
+			name string
+			at   time.Time
+			want bool
+		}{
+			{"the read plus thirty days, cut to the day", v, true},
+			{"one day stale", v.Add(-day), true},
+			{"one day ahead", v.Add(day), true},
+			{"three days stale", v.Add(-3 * day), false},
+			{"three days ahead", v.Add(3 * day), false},
+		} {
+			if got := o.Holds(row.at, ms, from, to); got != row.want {
+				t.Errorf("a read at %s, %s: held %v, want %v", read.Sub(from), row.name, got, row.want)
+			}
+		}
+	}
+	if o.Holds(from.Add(30*day).Truncate(day), ms, from, to.Add(1)) {
+		t.Errorf("a window a nanosecond wider, with the offset's width the day: held, want nothing held")
+	}
+	for _, c := range []struct {
+		name string
+		o    ClockOffset
+		want bool
+	}{
+		{"thirty days at the day, its width a day", ClockOffset{Min: 30 * day, Max: 31 * day, Res: day}, false},
+		{"thirty days at the day, its width just under a day", ClockOffset{Min: 30 * day, Max: 31*day - 1, Res: day}, true},
+		{"a day at the hour", ClockOffset{Min: day - 31*time.Second, Max: day + 30*time.Second, Res: time.Hour}, true},
+		{"two hours at the hour", ClockOffset{Min: 2*time.Hour - 31*time.Second, Max: 2*time.Hour + 30*time.Second, Res: time.Hour}, false},
+	} {
+		if got := c.o.Narrow(); got != c.want {
+			t.Errorf("Narrow of %s: %v, want %v", c.name, got, c.want)
+		}
+	}
+	// A Res of no step (96 hours, a hand-edited mock's) is no day's cut: a
+	// replay checks the value at its own millisecond, where three of Res
+	// count against the unit, so nothing holds, not a value two days off.
+	hand := ClockOffset{Min: 28 * day, Max: 31*day + 23*time.Hour, Res: 96 * time.Hour}
+	if hand.DayCut() || hand.Checkable(ms, from, from.Add(time.Minute)) || hand.Holds(from.Add(32*day), ms, from, from.Add(time.Minute)) || hand.Holds(from.Add(30*day), ms, from, from.Add(time.Minute)) {
+		t.Errorf("FALSE GREEN: a hand-edited offset at a Res of 96 hours: DayCut %v, Checkable %v; want no day's cut, and nothing held", hand.DayCut(), hand.Checkable(ms, from, from.Add(time.Minute)))
+	}
+	if (ClockOffset{Res: day}).DayCut() {
+		t.Errorf("DayCut of a plain read cut to a day: true, want false (a plain read's cut is no offset's)")
+	}
+}
+
 // B1 of the offset rule's second and third reviews: Holds counts three of
 // the coarser of the resolution it checks the value at and the one the
 // learn step read it at (Res) in its sum. With Res half a second (no step:

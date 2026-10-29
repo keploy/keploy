@@ -16,23 +16,6 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// A zone file that is no regular file (a FIFO, which would hold a read
-// until something writes it) is an error, never read: the agent reads a
-// process's zone on its connection's path.
-func TestAZoneFileThatIsNoRegularFileIsNotRead(t *testing.T) {
-	proc := t.TempDir()
-	fakeProc(t, proc, "700", "500", nil, map[string][]byte{"etc/hostname": []byte("app\n")}, nil)
-	if err := syscall.Mkfifo(filepath.Join(proc, "700", "root", "etc", "localtime"), 0o644); err != nil {
-		t.Skipf("no FIFO: %v", err)
-	}
-	if z, err := ReadProcZone(proc, 700); err == nil || z.Loc != nil || !isLasting(err) {
-		t.Fatalf("a FIFO /etc/localtime: %v %v (lasting %v); want an error and no zone, kept for the process's life", z.Loc, err, isLasting(err))
-	}
-	if _, err := os.Stat(filepath.Join(proc, "700", "root", "etc", "localtime")); err != nil {
-		t.Fatal(err)
-	}
-}
-
 // heldFlags is the open flags of keploy's own descriptor fd
 // (/proc/self/fdinfo).
 func heldFlags(t *testing.T, fd int) int {
@@ -68,12 +51,13 @@ func sameFile(t *testing.T, fd int, p string) bool {
 	return a.Dev == b.Dev && a.Ino == b.Ino
 }
 
-// An application's TZ naming a device or a FIFO is refused without keploy,
-// which runs as root, ever opening it for reading: a device's driver's
-// open would run (a watchdog arms, a tape rewinds at its close), a FIFO
-// would gain a reader. keploy holds such a file by an O_PATH descriptor
-// alone while it reads its type, so a writer's open of the FIFO, which
-// needs a reader, finds none (ENXIO).
+// An application's TZ naming a device or a FIFO, or an /etc/localtime that
+// is a FIFO, is refused without keploy, which runs as root, ever opening it
+// for reading: a device's driver's open would run (a watchdog arms, a tape
+// rewinds at its close), a FIFO would gain a reader (and an open of it for
+// reading would wait for a writer, on the agent's connection path). keploy
+// holds such a file by an O_PATH descriptor alone while it reads its type,
+// so a writer's open of the FIFO, which needs a reader, finds none (ENXIO).
 func TestAZoneFileThatIsNoRegularFileIsNeverOpenedForReading(t *testing.T) {
 	proc := t.TempDir()
 	fakeProc(t, proc, "701", "500", []string{"TZ=/run/zone"}, map[string][]byte{"etc/hostname": []byte("app\n")}, nil)
@@ -84,6 +68,13 @@ func TestAZoneFileThatIsNoRegularFileIsNeverOpenedForReading(t *testing.T) {
 	if err := syscall.Mkfifo(fifo, 0o644); err != nil {
 		t.Skipf("no FIFO: %v", err)
 	}
+	// No TZ, and an /etc/localtime that is a FIFO.
+	fakeProc(t, proc, "700", "500", nil, map[string][]byte{"etc/hostname": []byte("app\n")}, nil)
+	localtime := filepath.Join(proc, "700", "root", "etc", "localtime")
+	if err := syscall.Mkfifo(localtime, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fifos := []string{fifo, localtime}
 	// The process's root is the host's, so TZ=/dev/null names the host's
 	// own character device.
 	fakeProc(t, proc, "702", "500", []string{"TZ=/dev/null"}, nil, nil)
@@ -92,7 +83,7 @@ func TestAZoneFileThatIsNoRegularFileIsNeverOpenedForReading(t *testing.T) {
 	}
 	held := map[string]int{}
 	heldZoneFile = func(fd int) {
-		for _, p := range []string{fifo, "/dev/null"} {
+		for _, p := range append([]string{"/dev/null"}, fifos...) {
 			if !sameFile(t, fd, p) {
 				continue
 			}
@@ -100,15 +91,15 @@ func TestAZoneFileThatIsNoRegularFileIsNeverOpenedForReading(t *testing.T) {
 			if fl := heldFlags(t, fd); fl&unix.O_PATH == 0 {
 				t.Errorf("keploy held %s by a descriptor of flags %o; want O_PATH", p, fl)
 			}
-			if p != fifo {
+			if p == "/dev/null" {
 				continue
 			}
-			w, err := syscall.Open(fifo, syscall.O_WRONLY|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
+			w, err := syscall.Open(p, syscall.O_WRONLY|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
 			if err == nil {
 				_ = syscall.Close(w)
 			}
 			if !errors.Is(err, syscall.ENXIO) {
-				t.Errorf("a writer's open of the FIFO TZ names, while keploy held it: %v; want ENXIO, no reader", err)
+				t.Errorf("a writer's open of the FIFO %s, while keploy held it: %v; want ENXIO, no reader", p, err)
 			}
 		}
 	}
@@ -127,11 +118,13 @@ func TestAZoneFileThatIsNoRegularFileIsNeverOpenedForReading(t *testing.T) {
 	// the row's own reader, opened once ReadProcZone returned, lets the
 	// writer go, and a cleanup's reader does where the row stops before.
 	t.Cleanup(func() {
-		if r, err := syscall.Open(fifo, syscall.O_RDONLY|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0); err == nil {
-			_ = syscall.Close(r)
+		for _, f := range fifos {
+			if r, err := syscall.Open(f, syscall.O_RDONLY|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0); err == nil {
+				_ = syscall.Close(r)
+			}
 		}
 	})
-	readFIFO := func(pid uint32) (ProcZone, error) {
+	readFIFO := func(fifo string, pid uint32) (ProcZone, error) {
 		var returned atomic.Bool
 		type result struct {
 			z   ProcZone
@@ -164,7 +157,7 @@ func TestAZoneFileThatIsNoRegularFileIsNeverOpenedForReading(t *testing.T) {
 			return r.z, r.err
 		}
 		if <-byKeploy {
-			t.Errorf("keploy opened the FIFO TZ names for reading; want it refused by its type, never opened")
+			t.Errorf("keploy opened the FIFO %s for reading; want it refused by its type, never opened", fifo)
 		}
 		_ = syscall.Close(own)
 		return r.z, r.err
@@ -173,18 +166,21 @@ func TestAZoneFileThatIsNoRegularFileIsNeverOpenedForReading(t *testing.T) {
 		pid  uint32
 		p    string
 		mode fs.FileMode
-	}{{701, fifo, fs.ModeNamedPipe}, {702, "/dev/null", fs.ModeDevice | fs.ModeCharDevice}} {
+	}{{701, fifo, fs.ModeNamedPipe}, {700, localtime, fs.ModeNamedPipe}, {702, "/dev/null", fs.ModeDevice | fs.ModeCharDevice}} {
 		readZone := ReadProcZone
-		if row.p == fifo {
-			readZone = func(_ string, pid uint32) (ProcZone, error) { return readFIFO(pid) }
+		if row.mode == fs.ModeNamedPipe {
+			readZone = func(_ string, pid uint32) (ProcZone, error) { return readFIFO(row.p, pid) }
 		}
 		z, err := readZone(proc, row.pid)
 		var nr errNotRegular
 		if err == nil || z.Loc != nil || !isLasting(err) || !errors.As(err, &nr) || nr.mode.Type() != row.mode {
-			t.Errorf("TZ naming %s: %v %v (lasting %v); want refused as no regular file (%v), kept for the process's life", row.p, z.Loc, err, isLasting(err), row.mode)
+			t.Errorf("a zone file %s: %v %v (lasting %v); want refused as no regular file (%v), kept for the process's life", row.p, z.Loc, err, isLasting(err), row.mode)
 		}
 		if held[row.p] != 1 {
-			t.Errorf("TZ naming %s: keploy held it %d times; want once", row.p, held[row.p])
+			t.Errorf("a zone file %s: keploy held it %d times; want once", row.p, held[row.p])
+		}
+		if _, err := os.Stat(row.p); err != nil {
+			t.Errorf("a zone file %s: %v; want it left in place", row.p, err)
 		}
 	}
 }

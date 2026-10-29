@@ -4,6 +4,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -428,7 +429,9 @@ func TestADateOfNoZoneCheckedInTheStoredZoneHoldsOnlyWhereItHoldsInUTCToo(t *tes
 	// and the one before pass, one an hour ahead is refused by the reading
 	// in UTC, a time of day alike, and one two hours stale is refused.
 	// Learned in the Azores (UTC-01:00): its own hour and the one after
-	// pass, one an hour stale is refused by the reading in UTC.
+	// pass, one an hour stale is refused by the reading in UTC. Learned in
+	// New York (UTC-05:00), as far west of UTC as Kolkata is east: refused
+	// whatever it is, the hour after too, naming the zone's offset.
 	const wp = "body.seenAt"
 	wall := func(loc *time.Location, at time.Time) Leaf {
 		l := at.In(loc)
@@ -466,6 +469,8 @@ func TestADateOfNoZoneCheckedInTheStoredZoneHoldsOnlyWhereItHoldsInUTCToo(t *tes
 		{"Atlantic/Azores", now, 0, wall, "", true, "", ""},
 		{"Atlantic/Azores", now, -time.Hour, wall, "", true, "", ""},
 		{"Atlantic/Azores", now, time.Hour, wall, "", false, notUTC + "Atlantic/Azores but not in UTC", ""},
+		{"America/New_York", now, 0, wall, "", false, "only where the zone stands within an hour of UTC: America/New_York stood at UTC-05:00 at this call, " + whatever, ""},
+		{"America/New_York", now, -time.Hour, wall, "", false, "America/New_York stood at UTC-05:00 at this call, " + whatever, ""},
 	} {
 		layout := "iso-second-space"
 		if row.layout != "" {
@@ -477,6 +482,23 @@ func TestADateOfNoZoneCheckedInTheStoredZoneHoldsOnlyWhereItHoldsInUTCToo(t *tes
 		ok, why := CheckClockRead(wp, h, v, s, true)
 		if ok != row.pass || !strings.Contains(why, row.why) || row.avoid != "" && strings.Contains(why, row.avoid) {
 			t.Errorf("an hour of no zone (%s) learned in %s, replayed at %s, the application's zone unread: %q, read at the call less %v: %v %q; want %v %q", layout, row.zone, row.at, v.Value, row.ago, ok, why, row.pass, row.why)
+		}
+	}
+
+	// Learned in New York, checked in the stored zone over a call's window
+	// six hours long (06:00 to 12:00 in New York, at UTC-04:00): each
+	// reading admits the span's hours and one on either side (05:00 to 13:00
+	// read in New York, 09:00 to 17:00 read in UTC), so New York's hour at
+	// the call and the three before it (12:00 to 09:00) lie in both, stale
+	// or not; keploy refuses each, and the one four hours before, naming New
+	// York's offset, rather than pass a stale one.
+	nyFrom := time.Date(2026, 10, 29, 10, 0, 0, 0, time.UTC)
+	nyLong := Span{From: nyFrom, To: nyFrom.Add(6 * time.Hour), Zone: time.UTC}
+	nyHour := models.ClockOffset{Res: time.Hour, Zone: models.ZoneApp, Layout: "iso-second-space", AppZone: "America/New_York"}
+	for back := 0; back <= 4; back++ {
+		v := wall(ny, nyLong.To.Add(-time.Duration(back)*time.Hour))
+		if ok, why := CheckClockRead(wp, nyHour, v, nyLong, true); ok || !strings.Contains(why, "America/New_York stood at UTC-04:00 at this call, "+whatever) {
+			t.Errorf("an hour of no zone learned in New York, a six-hour span, the application's zone unread: %q, %d hours before the call: %v %q; want refused whatever it is, naming UTC-04:00", v.Value, back, ok, why)
 		}
 	}
 
@@ -539,10 +561,8 @@ func TestADateOfNoZoneCheckedInTheStoredZoneHoldsOnlyWhereItHoldsInUTCToo(t *tes
 // only where its cut starts, within the one cut the check admits).
 // Learned where keploy could not read the application's zone, the gap's
 // hour is learned with no zone named, and a replay that cannot read it
-// either refuses it, saying so; one that reads IST checks it there. Cut to
-// a day, thirty days on is refused as too wide, as any offset cut to a day
-// is: no unit coarser than a day holds three of it, so a time to live
-// changed by a day could hold.
+// either refuses it, saying so; one that reads IST checks it there. (Cut to
+// a day: TestAnOffsetCutToADayIsLearnedAndCheckedAtTheDay.)
 func TestAnOffsetCutToAnHourInTheApplicationsZoneIsLearnedAndCheckedThere(t *testing.T) {
 	ist, err := time.LoadLocation("Asia/Kolkata")
 	if err != nil {
@@ -582,6 +602,20 @@ func TestAnOffsetCutToAnHourInTheApplicationsZoneIsLearnedAndCheckedThere(t *tes
 	}
 	if slow := learn(nil, call, time.Hour, day, 70*time.Minute); slow.Kind != KindUnaccounted || !strings.Contains(slow.Why, "a whole number of 1h") {
 		t.Errorf("a day on, cut to the IST hour, a slow call's windows, the zone unread: %s %+v (%s); want refused as ambiguous, naming the hour", slow.Kind, slow.Offset, slow.Why)
+	}
+	// So is a client test's (keploy mock), naming the two cuts and how to
+	// correct it, with the client test's own correction added, never only
+	// that no clock read matched it.
+	{
+		dc := clockedDrifts()
+		dc.clientTests = true
+		fcall := call.Add(FullRoundLead)
+		w := (&Window{Rec: Span{From: call.Add(-70 * time.Minute), To: call}, F: Span{From: fcall.Add(-70 * time.Minute), To: fcall}}).ComparesOffsets()
+		shape := func(at time.Time) Shape { return Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, at, ms)}} }
+		c := ClassifyIn(dc, []string{p}, shape(cutIn(ist, fcall, time.Hour).Add(day)), shape(cutIn(ist, call, time.Hour).Add(day)), call, nil, nil, nil, w)[0]
+		if c.Kind != KindUnaccounted || c.Offset != nil || !strings.Contains(c.Why, "a whole number of 1h") || !strings.HasSuffix(c.Why, ". If your test supplies this value, have it supply the same value in every run, and keploy keeps comparing it") || strings.Contains(c.Why, "no clock read by the app matched it") {
+			t.Errorf("a client test's value a day on, cut to the IST hour, a slow call's windows, the zone unread: %s %+v (%s); want refused as ambiguous, naming the hour and how to correct it", c.Kind, c.Offset, c.Why)
+		}
 	}
 	verdict := map[bool]string{true: "FALSE RED", false: "FALSE GREEN"}
 	rng := rand.New(rand.NewSource(11))
@@ -658,9 +692,135 @@ func TestAnOffsetCutToAnHourInTheApplicationsZoneIsLearnedAndCheckedThere(t *tes
 	if ok, why := CheckClockRead(p, *o, InstantLeaf(p, p, cutIn(ist, base, time.Hour).Add(2*day), ms), Span{From: base, To: base.Add(time.Minute), Zone: ist, Own: true}, true); ok || !strings.Contains(why, "the learn step read it cut to, read here in Asia/Kolkata") {
 		t.Errorf("clock + 1d at the IST hour, two days on: %v (%s); want refused, naming the cut and its zone", ok, why)
 	}
-	d := learn(ist, time.Date(2026, 10, 26, 18, 29, 59, 50e6, time.UTC), day, 30*day, 100*ms)
-	if d.Kind != KindUnaccounted || d.Offset != nil || !strings.Contains(d.Why, p+" = clock plus an offset from 719h58m59.405s to 720h0m1.05s at a resolution of 1d (") || !strings.Contains(d.Why, "changed by a day") {
-		t.Errorf("thirty days on, cut to the IST day: %s %+v (%s); want refused as too wide, naming the day's cut", d.Kind, d.Offset, d.Why)
+}
+
+// An offset cut to a day (founder decision, 2026-10-27: a cut is checked at
+// the cut, never refused; ruled for a day's cut 2026-10-29): thirty days on,
+// cut to the IST day, where record's full round crosses IST's midnight, is
+// learned at the day naming +05:30, never refused as too wide, though no
+// unit holds three days. A replay checks it at the IST day, within one day
+// of its window plus the offset on either side, in its process's zone and
+// in the stored one: the read plus thirty days passes, and so do the
+// widened span's edges and the value one day stale or one day ahead (as
+// yesterday's date passes a date cut to a day, a time to live changed by
+// one day is not caught); a millisecond past either edge never does, nor
+// does a value three days off; one two days off passes only where the
+// replay's read falls within its window and the offset's range of the IST
+// day's turn, and is refused, naming the day's cut and its zone, at a read
+// away from it. A call whose windows, with the offset's range, are no
+// narrower than the day is refused, at learn and at replay, saying so.
+func TestAnOffsetCutToADayIsLearnedAndCheckedAtTheDay(t *testing.T) {
+	ist, err := time.LoadLocation("Asia/Kolkata")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const p = "body.expiresAt"
+	const day = 24 * time.Hour
+	ms := time.Millisecond
+	cutIn := func(at time.Time) time.Time { return models.ReadCut(at, day, ist).UTC() }
+	learn := func(zone *time.Location, call time.Time, ttl, open time.Duration) Learned {
+		t.Helper()
+		dc := clockedDrifts()
+		dc.zone = zone
+		fcall := call.Add(FullRoundLead)
+		w := (&Window{Rec: Span{From: call.Add(-open), To: call}, F: Span{From: fcall.Add(-open), To: fcall}}).ComparesOffsets()
+		shape := func(at time.Time) Shape { return Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, at, ms)}} }
+		return ClassifyIn(dc, []string{p}, shape(cutIn(fcall).Add(ttl)), shape(cutIn(call).Add(ttl)), call, nil, nil, nil, w)[0]
+	}
+	call := time.Date(2026, 10, 26, 18, 29, 59, 50e6, time.UTC)
+	ln := learn(ist, call, 30*day, 100*ms)
+	o := ln.Offset
+	if ln.Kind != KindClockOffset || o == nil || o.Res != day || o.AppZone != "+05:30" || o.Min > 30*day || o.Max <= 30*day || !strings.HasPrefix(ln.Why, p+" = clock + 30d (") || !strings.Contains(ln.Why, "cut to a day. A replay checks the offset at the day") || !strings.Contains(ln.Why, "a time to live changed by one day passes there") {
+		t.Fatalf("FALSE RED: thirty days on, cut to the IST day, learned in IST: %s %+v (%s); want clock + 30d at the day, naming +05:30, never refused as too wide", ln.Kind, o, ln.Why)
+	}
+	if w := learn(ist, call, 30*day, 25*time.Hour); w.Kind != KindUnaccounted || w.Offset != nil || !strings.Contains(w.Why, "the range is not narrower than the day the value is cut to") {
+		t.Errorf("thirty days on, cut to the IST day, a call's windows 25 hours open: %s %+v (%s); want refused, its range no narrower than the day", w.Kind, w.Offset, w.Why)
+	}
+	// Thirty days and six hours on the IST day's start (06:00 IST, 00:30Z)
+	// shows no whole day in any zone: learned at the day (the gap's), and a
+	// replay reads its day in the application's zone, IST, never in UTC.
+	sixLn := learn(ist, call, 30*day+6*time.Hour, 100*ms)
+	if sixLn.Kind != KindClockOffset || sixLn.Offset == nil || sixLn.Offset.Res != day || sixLn.Offset.AppZone != "+05:30" || !strings.HasPrefix(sixLn.Why, p+" = clock + 726h (") {
+		t.Fatalf("FALSE RED: thirty days and six hours on the IST day's start, learned in IST: %s %+v (%s); want clock + 726h at the day, naming +05:30", sixLn.Kind, sixLn.Offset, sixLn.Why)
+	}
+	verdict := map[bool]string{true: "FALSE RED", false: "FALSE GREEN"}
+	rng := rand.New(rand.NewSource(13))
+	base := time.Date(2026, 11, 2, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < 2000; i++ {
+		o, ttl := o, 30*day
+		if i%2 == 1 {
+			o, ttl = sixLn.Offset, 30*day+6*time.Hour
+		}
+		from := base.Add(time.Duration(rng.Int63n(int64(10 * day)))).Truncate(ms)
+		to := from.Add(time.Duration(rng.Int63n(int64(10 * time.Minute)))).Truncate(ms)
+		read := from.Add(time.Duration(rng.Int63n(int64(to.Sub(from)) + 1))).Truncate(ms)
+		lo, hi := cutIn(from.Add(o.Min)).Add(-day), to.Add(o.Max).Add(day).Truncate(ms)
+		v := cutIn(read).Add(ttl)
+		type row struct {
+			name string
+			at   time.Time
+			want bool
+		}
+		rows := []row{
+			{"the read plus thirty days, cut to the IST day", v, true},
+			{"the widened span's start", lo, true},
+			{"a millisecond before it", lo.Add(-ms), false},
+			{"the widened span's end", hi, true},
+			{"a millisecond after it", hi.Add(ms), false},
+			{"one day stale", v.Add(-day), true},
+			{"one day ahead", v.Add(day), true},
+			{"two days stale", v.Add(-2 * day), !v.Add(-2 * day).Before(lo)},
+			{"two days ahead", v.Add(2 * day), !v.Add(2 * day).After(hi)},
+			{"three days stale", v.Add(-3 * day), false},
+			{"three days ahead", v.Add(3 * day), false},
+		}
+		if ttl != 30*day {
+			// Cut, then six hours added: the value is the read plus the
+			// offset only to within the day it was cut by, and each value
+			// of its shape holds where it lies within the widened span read
+			// in IST (its day's start, less a day, up to its end plus a day).
+			rows = []row{{"the read cut to the IST day, plus thirty days and six hours", v, true}}
+			for k := -3; k <= 3; k++ {
+				if at := v.Add(time.Duration(k) * day); k != 0 {
+					rows = append(rows, row{strconv.Itoa(k) + " days", at, !at.Before(lo) && !at.After(hi)})
+				}
+			}
+		}
+		for _, sp := range []struct {
+			name string
+			s    Span
+		}{
+			{"its process's zone, IST", Span{From: from, To: to, Zone: ist, Own: true}},
+			{"the stored IST (the process's zone unread, the agent's UTC)", Span{From: from, To: to, Zone: time.UTC}},
+		} {
+			for _, row := range rows {
+				if got, why := CheckClockRead(p, *o, InstantLeaf(p, p, row.at, ms), sp.s, true); got != row.want {
+					t.Fatalf("%s: clock + %s at the IST day, read in %s, span %s to %s, %s (%s): holds %v (%s), want %v", verdict[row.want], models.ShortDuration(ttl), sp.name, from, to, row.name, row.at, got, why, row.want)
+				}
+			}
+		}
+	}
+	// At a replay read away from the IST day's turn (11:30 IST), one day
+	// stale passes and two days off either way are refused, naming the cut.
+	at := base.Add(6 * time.Hour)
+	s := Span{From: at, To: at.Add(time.Second), Zone: ist, Own: true}
+	v := cutIn(at).Add(30 * day)
+	if ok, why := CheckClockRead(p, *o, InstantLeaf(p, p, v.Add(-day), ms), s, true); !ok {
+		t.Errorf("FALSE RED: clock + 30d at the IST day, one day stale, read at 11:30 IST: refused (%s)", why)
+	}
+	for _, off := range []time.Duration{-2 * day, 2 * day} {
+		if ok, why := CheckClockRead(p, *o, InstantLeaf(p, p, v.Add(off), ms), s, true); ok || !strings.Contains(why, "the learn step read it cut to, read here in Asia/Kolkata") {
+			t.Errorf("FALSE GREEN: clock + 30d at the IST day, %s off, read at 11:30 IST: %v (%s); want refused, naming the day's cut and its zone", models.ShortDuration(off), ok, why)
+		}
+	}
+	// A replay window that, with the offset's range, is no narrower than the
+	// day holds nothing, saying why; one a nanosecond narrower is checked.
+	widest := day - (o.Max - o.Min) - 1
+	if ok, why := CheckClockRead(p, *o, InstantLeaf(p, p, v, ms), Span{From: at, To: at.Add(widest), Zone: ist, Own: true}, true); !ok {
+		t.Errorf("FALSE RED: clock + 30d at the IST day, a window just narrower than the day with the offset's range: refused (%s)", why)
+	}
+	if ok, why := CheckClockRead(p, *o, InstantLeaf(p, p, v, ms), Span{From: at, To: at.Add(widest + 1), Zone: ist, Own: true}, true); ok || !strings.Contains(why, "with the offset's range is no narrower than the day, so keploy could not tell a time to live changed by days") {
+		t.Errorf("clock + 30d at the IST day, a window that with the offset's range is the day: %v (%s); want refused, saying the window is too wide", ok, why)
 	}
 }
 
@@ -678,8 +838,9 @@ func TestAnOffsetCutToAnHourInTheApplicationsZoneIsLearnedAndCheckedThere(t *tes
 // textClockOffset reads the cut in the application's zone: a slow call's
 // windows (70 minutes) show the UTC text's hour only read in IST (read in
 // UTC alone it shows a minute, at which one offset holds both runs too,
-// its gap a whole hour), so with the zone unread no offset is learned and
-// the client test's refusal stands. A quick call's gap is the hour (one
+// its gap a whole hour), so with the zone unread no offset is learned: the
+// client test's refusal names the two cuts and how to correct it, never
+// only that no clock read matched it. A quick call's gap is the hour (one
 // offset holds both runs at no finer cut), learned naming no zone, as is
 // the "+05:30" text, which shows its hour whole in the offset it writes,
 // at either speed. A replay that cannot read the application's zone
@@ -769,8 +930,8 @@ func TestAClientTestsTextOffsetCutToAnHourIsLearnedInTheApplicationsZone(t *test
 	if slow := learn(ist, inUTC, 70*time.Minute); slow.Kind != KindClockOffset || slow.Offset == nil || slow.Offset.Res != time.Hour || slow.Offset.AppZone != "+05:30" {
 		t.Fatalf("FALSE RED: a client test's text written in UTC, a slow call's windows, learned in IST: %s %+v (%s); want clock + 1d at the IST hour, naming +05:30", slow.Kind, slow.Offset, slow.Why)
 	}
-	if slow := learn(nil, inUTC, 70*time.Minute); slow.Kind != KindUnaccounted || slow.Offset != nil || !strings.Contains(slow.Why, "no clock read by the app matched it") {
-		t.Errorf("FALSE GREEN: a client test's text written in UTC, a slow call's windows, the zone unread: %s %+v (%s); want no offset learned, the client test's refusal standing", slow.Kind, slow.Offset, slow.Why)
+	if slow := learn(nil, inUTC, 70*time.Minute); slow.Kind != KindUnaccounted || slow.Offset != nil || !strings.HasPrefix(slow.Why, p+" = clock + 1d") || !strings.Contains(slow.Why, "stand 1h apart, a whole number of 1h") || !strings.Contains(slow.Why, "keploy cannot tell at which cut a replay must check it, so it refuses it. Record the test again") || !strings.HasSuffix(slow.Why, ". If your test supplies this value, have it supply the same value in every run, and keploy keeps comparing it") || strings.Contains(slow.Why, "no clock read by the app matched it") {
+		t.Errorf("FALSE GREEN: a client test's text written in UTC, a slow call's windows, the zone unread: %s %+v (%s); want no offset learned, refused naming the two cuts and how to correct it", slow.Kind, slow.Offset, slow.Why)
 	}
 	for _, row := range []struct {
 		name string
