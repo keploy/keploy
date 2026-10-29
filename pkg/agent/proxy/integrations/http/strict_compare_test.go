@@ -934,6 +934,75 @@ func TestStrictChecksAClockReadLearnedInTheAppsZone(t *testing.T) {
 	}
 }
 
+// A date the learn step learned as a read of the clock in the application's
+// zone (models.ZoneApp, cut to a day) that a replay's call carries equal to
+// its recording, days after the recording was made, is still checked
+// against the call's window: being the recorded value excuses nothing, at a
+// day's cut as at a second's. Checked in the zone keploy's CLI handed the
+// agent for the app's container (docker and compose modes: the connection's
+// ctx carries it, learn.WithProcZone) and, where none is handed, in the zone
+// the learn step stored and in UTC: the recorded date nine days stale, and
+// two days stale, is refused naming body.day; the call's own date passes.
+func TestStrictChecksARecordedDateManyDaysStaleInItsCallsWindow(t *testing.T) {
+	hnl := time.FixedZone("HST", -10*3600)
+	// 12:10 in Honolulu, 19:10 in Sao Paulo (the stored zone) and 22:10 in
+	// UTC: one date in all three, so no row turns on the hour it runs at.
+	base := time.Date(2026, 10, 29, 22, 10, 0, 0, time.UTC)
+	day := models.ClockOffset{Res: 24 * time.Hour, Zone: models.ZoneApp, Layout: "iso-date", AppZone: "-03:00"}
+	mock := func(recDay string) *models.Mock {
+		m := recorded("charge", "/charge", map[string]string{"Content-Type": "application/json"}, `{"amount":100,"day":"`+recDay+`"}`)
+		m.Spec.Clocks = map[string]models.ClockOffset{"body.day": day}
+		return m
+	}
+	conn := func(handed *time.Location) context.Context {
+		tr := learn.NewTracker()
+		tr.SetAppClock(func(r time.Time) (time.Time, bool) { return r, true })
+		tr.ServedMockAt(httpMock("earlier", "GET", "/v1/account"), base)
+		tr.SetLearnEnded(true)
+		ctx := learn.WithTracker(context.Background(), tr)
+		if handed != nil {
+			ctx = learn.WithProcZone(ctx, learn.ProcZone{Loc: handed, Name: "Pacific/Honolulu"})
+		}
+		return ctx
+	}
+	call := func(liveDay string) *req {
+		r := sent("/charge", map[string]string{"Content-Type": "application/json"}, `{"amount":100,"day":"`+liveDay+`"}`)
+		r.arrived = base.Add(2 * time.Second)
+		return r
+	}
+	for _, c := range []struct {
+		name            string
+		handed          *time.Location
+		recDay, liveDay string
+		refused         bool
+	}{
+		{"handed zone: the call's own date", hnl, "2026-10-20", "2026-10-29", false},
+		{"handed zone: the recorded date, nine days stale", hnl, "2026-10-20", "2026-10-20", true},
+		{"handed zone: the recorded date, two days stale", hnl, "2026-10-27", "2026-10-27", true},
+		{"stored zone: the call's own date", nil, "2026-10-20", "2026-10-29", false},
+		{"stored zone: the recorded date, nine days stale", nil, "2026-10-20", "2026-10-20", true},
+		{"stored zone: the recorded date, two days stale", nil, "2026-10-27", "2026-10-27", true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got, diag := strictMatchIn(t, conn(c.handed), call(c.liveDay), nil, nil, nil, mock(c.recDay))
+			if !c.refused {
+				if got == nil {
+					t.Fatalf("refused (%v); want it answered", differs(diag))
+				}
+				return
+			}
+			if got != nil || !hasField(differs(diag), "body.day") {
+				t.Fatalf("answered %v, differs %v; want refused naming body.day", got != nil, differs(diag))
+			}
+			for _, f := range diag.differs {
+				if f.shape == "body.day" && !strings.Contains(f.why, "made in this call's window") {
+					t.Fatalf("the refusal of body.day says %q; want it to say the value is no read made in this call's window", f.why)
+				}
+			}
+		})
+	}
+}
+
 // A refused read of the application's clock names its field and why in the
 // miss report (MockMismatchReport.FieldReasons), not only in the agent's
 // log: the field as Differs names it, and the check's why, which names it

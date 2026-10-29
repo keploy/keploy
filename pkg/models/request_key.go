@@ -57,3 +57,12 @@ func RequestKeys(m *Mock) []string {
 	}
 	return keys(m)
 }
+
+// HasRequestKeys reports whether kind's parser declared request keys
+// (RegisterRequestKeys). A store narrows a lookup by a call's keys only for
+// such a kind: a kind with none files no recording under any key.
+func HasRequestKeys(kind Kind) bool {
+	requestKeys.mu.RLock()
+	defer requestKeys.mu.RUnlock()
+	return requestKeys.byKind[kind] != nil
+}

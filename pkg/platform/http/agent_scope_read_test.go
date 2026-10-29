@@ -5,7 +5,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
@@ -78,21 +80,27 @@ func TestAgentClient_PushProvenTable(t *testing.T) {
 	defer srv.Close()
 	a := &AgentClient{logger: zap.NewNop(), client: http.Client{}, conf: &config.Config{Agent: config.Agent{AgentURI: srv.URL}}}
 	ctx := context.Background()
-	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {"mock-3"}}, map[string][]string{"o": {"mock-1"}}, nil); err != nil {
+	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {"mock-3"}}, map[string][]string{"o": {"mock-1"}}, nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {}}, nil, nil); err != nil {
+	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {}}, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {"mock-3"}}, nil, models.BackgroundMarks{"o::TestA": {"mock-3": "a timer"}}); err != nil {
+	// The recorded test windows go with them, in the same request.
+	t0 := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {}}, nil, []models.TestWindow{{TestCase: "o::TestA", Start: t0, End: t0.Add(time.Second)}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {"mock-3"}}, nil, nil, models.BackgroundMarks{"o::TestA": {"mock-3": "a timer"}}); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{
 		`{"mappings":{"o::TestA":["mock-3"]},"pool":{"o":["mock-1"]}}`,
 		`{"mappings":{"o::TestA":[]},"pool":{}}`,
+		`{"mappings":{"o::TestA":[]},"pool":{},"windows":[{"testCase":"o::TestA","start":"2026-01-02T03:04:05Z","end":"2026-01-02T03:04:06Z"}]}`,
 		`{"mappings":{"o::TestA":["mock-3"]},"pool":{},"background_by_test":{"o::TestA":{"mock-3":"a timer"}}}`,
 	}
-	if len(bodies) != len(want) {
+	if !slices.Equal(bodies, want) {
 		t.Fatalf("posted %q, want %q", bodies, want)
 	}
 	for i := range want {
@@ -102,8 +110,42 @@ func TestAgentClient_PushProvenTable(t *testing.T) {
 	}
 	for _, s := range []int{http.StatusNotFound, http.StatusNotImplemented, http.StatusInternalServerError} {
 		status = s
-		if err := a.PushProvenTable(ctx, nil, nil, nil); err == nil {
+		if err := a.PushProvenTable(ctx, nil, nil, nil, nil); err == nil {
 			t.Fatalf("status %d: want an error", s)
 		}
+	}
+}
+
+// A restarted agent is handed the table again (the session's scope-table
+// step), the recorded test windows with it, as they were pushed: without
+// them its learn step would read every earlier recording of the set as the
+// paired one's place again, and nothing would say so.
+func TestAgentClient_PushProvenTableIsReappliedWithItsWindows(t *testing.T) {
+	var bodies []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/scope/table" {
+			http.NotFound(w, r)
+			return
+		}
+		b, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(b))
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { sessions.Delete(srv.URL) })
+	a := &AgentClient{logger: zap.NewNop(), client: http.Client{}, conf: &config.Config{Agent: config.Agent{AgentURI: srv.URL}}}
+	a.session().configure(true)
+	t0 := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	windows := []models.TestWindow{{TestCase: "o::TestA", Start: t0, End: t0.Add(time.Second)}}
+	if err := a.PushProvenTable(context.Background(), map[string][]string{"o::TestA": {"mock-3"}}, map[string][]string{"o": {"mock-1"}}, windows, nil); err != nil {
+		t.Fatal(err)
+	}
+	windows[0].TestCase = "o::Changed" // the caller's slice is its own
+	if err := a.session().reapply(context.Background(), zap.NewNop()); err != nil {
+		t.Fatal(err)
+	}
+	want := `{"mappings":{"o::TestA":["mock-3"]},"pool":{"o":["mock-1"]},"windows":[{"testCase":"o::TestA","start":"2026-01-02T03:04:05Z","end":"2026-01-02T03:04:06Z"}]}`
+	if !slices.Equal(bodies, []string{want, want}) {
+		t.Fatalf("posted %q, want the table and its windows twice: %q", bodies, want)
 	}
 }

@@ -879,8 +879,8 @@ func TestTheReplayApplicationsOwnZoneWinsOverTheOneLearned(t *testing.T) {
 	if ok, why := CheckClockRead(wp, eHour, wall(time.UTC, hourIn(time.UTC, now.Add(-3*time.Hour))), inIST, true); ok || !strings.Contains(why, "it changed") {
 		t.Errorf("either zone, an hour's cut learned in two zones, neither zone known: a UTC hour three hours stale %v %q; want refused as changed", ok, why)
 	}
-	if ok, why := CheckClockRead(wp, apart, istHour, agent, true); ok || !strings.Contains(why, "docker and compose modes") {
-		t.Errorf("learned in two zones, the application's zone unread: %v %q; want the refusal to say what works in docker and compose modes", ok, why)
+	if ok, why := CheckClockRead(wp, apart, istHour, agent, true); ok || unreadZoneUnclear(why, "record the test set again where every learning reads one zone") != "" {
+		t.Errorf("learned in two zones, the application's zone unread: %v %q; want the refusal to say what works in docker and compose modes: %s", ok, why, unreadZoneUnclear(why, "record the test set again where every learning reads one zone"))
 	}
 
 	// ClockSpanFrom carries the process's zone where the agent read it.

@@ -57,7 +57,8 @@ type roundState struct {
 	log roundLog
 	// learn is what the learn tracker's boundaries (LearnBoundary) last
 	// said; bound the test view bound to the tracker's current test number
-	// (nil: none since the number last moved). One view per number: a
+	// while that test is open (nil: none since the number last moved, or
+	// the tracker ended the test). One view per number: a
 	// test's view installed while the tracker's open test is another
 	// view's is not that test's (the previous test's end never reached the
 	// tracker), and the tracker's next begin binds it.
@@ -382,6 +383,12 @@ func (m *MockManager) stagedRecording(mk *models.Mock) *models.Mock {
 func (m *MockManager) bumpStagingEpoch() {
 	m.lockRound()
 	m.stagingEpoch.Add(1)
+	// The outside answers of the staging before (prepareOutside) hold every
+	// recording it staged, and no read takes them now (each checks the
+	// epoch): let them go with that staging's trees, not at the next call
+	// outside every test, which may come only well into this staging, or
+	// never.
+	m.exact.outside.cur.Store(nil)
 	m.beginMarkedSeries()
 	// The set the tracker began last is staged now, whichever it is: the
 	// tracker's own (SetTrackerSetAt), as its set may have begun before any
@@ -512,6 +519,11 @@ func (m *MockManager) LearnBoundary(t *learn.Tracker, step func(*learn.Tracker))
 	}
 	r.learn = learnBinding{routed: true, number: n, open: open, set: t.SetAt()}
 	if !open {
+		// The bound view is read only while its test is open
+		// (endedLocked), and a number the tracker ended never opens
+		// again (each begin moves it): let the ended test's view, and
+		// the recordings it holds, go now, not at the next begin.
+		r.bound = nil
 		r.boundary("the learn tracker ended its test")
 		return
 	}
@@ -545,8 +557,8 @@ func (r *roundState) bindLocked(v *exactView) {
 // (integrations.RoundSnapshot.Ended). nil otherwise. It is the view last
 // bound to that number (roundState.bound): an older test's view where a view
 // was opened and ended without its test's begin reaching the tracker, and
-// one that survives a staging of the set again until the tracker's next
-// number. Held as a call's own, it fails closed either way.
+// one that survives a staging of the set again until the tracker ends that
+// test. Held as a call's own, it fails closed either way.
 func (r *roundState) endedLocked(v *exactView, number uint64, open bool) *exactView {
 	if b := r.bound; open && b != nil && !v.learnBound && b.learnNumber == number {
 		return b
@@ -643,7 +655,9 @@ func (m *MockManager) RoundSnapshot(q integrations.RoundQuery) (integrations.Rou
 	m.treesMu.RLock()
 	filtered, unfiltered, startup := m.filtered, m.unfiltered, m.startup
 	m.treesMu.RUnlock()
-	filteredVals, unfilteredVals, startupVals := m.treeValues(filtered, ""), m.treeValues(unfiltered, ""), m.treeValues(startup, "")
+	// What the view shows of each tier (shownOf): perTest and reusable keep
+	// only those, so the snapshot never walks every test's recordings.
+	filteredVals, unfilteredVals, startupVals := v.shownOf(filtered, ""), v.shownOf(unfiltered, ""), v.shownOf(startup, "")
 	var teardown []*models.Mock
 	if v.afterTests(s.Fired) {
 		teardown = m.teardown(v.poolKey, startupVals)
@@ -915,6 +929,9 @@ func (m *MockManager) HoldToRound(call integrations.CallRound) (integrations.Moc
 var (
 	_ integrations.RoundHolder = (*MockManager)(nil)
 	_ integrations.ServeTeller = (*heldScope)(nil)
+	// A parser's per-generation index serves only a store that tells whose
+	// a recording is (the HTTP strict index).
+	_ integrations.TestOwner = (*heldScope)(nil)
 )
 
 // heldScope is the manager held to one call's staging (HoldToRound): its
@@ -964,6 +981,41 @@ func (h *heldScope) moved() bool {
 	return true
 }
 
+// StagingGeneration, StagingGenerationByKind, Revision and RevisionByKind are
+// the manager's while the staging is still h's call's after they were
+// sampled, and integrations.RestagedGeneration once it moved
+// (integrations.StagingGenerations): h reads nothing then, so the generation
+// it reports must not be the one of the set staged after the call, or a
+// parser that keyed what it read on it would keep that nothing for the next
+// set and miss each later call of it. Each is sampled before the check, as a
+// read is made before held's: a staging moves its epoch before it changes the
+// trees or a generation, so a sample the staging is still the call's after
+// is of the call's set.
+func (h *heldScope) StagingGeneration() uint64 {
+	return h.generation(h.MockManager.StagingGeneration())
+}
+
+func (h *heldScope) StagingGenerationByKind(kind models.Kind) uint64 {
+	return h.generation(h.MockManager.StagingGenerationByKind(kind))
+}
+
+func (h *heldScope) Revision() uint64 { return h.generation(h.MockManager.Revision()) }
+
+func (h *heldScope) RevisionByKind(kind models.Kind) uint64 {
+	return h.generation(h.MockManager.RevisionByKind(kind))
+}
+
+// generation is g, sampled before the call, while the staging is still h's
+// call's; integrations.RestagedGeneration once it moved.
+func (h *heldScope) generation(g uint64) uint64 {
+	if h.moved() {
+		return integrations.RestagedGeneration
+	}
+	return g
+}
+
+var _ integrations.StagingGenerations = (*heldScope)(nil)
+
 // held is mocks when the staging is still h's call's after they were read;
 // none once it moved.
 func (h *heldScope) held(mocks []*models.Mock, err error) ([]*models.Mock, error) {
@@ -1001,6 +1053,18 @@ func (h *heldScope) GetUnFilteredMocks() ([]*models.Mock, error) {
 
 func (h *heldScope) GetPerTestMocksInWindow() ([]*models.Mock, error) {
 	return h.held(h.MockManager.GetPerTestMocksInWindow())
+}
+
+// RangePerTestMocksInWindow is the manager's per-test walk
+// (integrations.PerTestRanger), each mock checked after it is read: the walk
+// stops once the staging moved.
+func (h *heldScope) RangePerTestMocksInWindow(fn func(*models.Mock) bool) error {
+	if h.moved() {
+		return nil
+	}
+	return h.MockManager.RangePerTestMocksInWindow(func(mk *models.Mock) bool {
+		return !h.moved() && fn(mk)
+	})
 }
 
 func (h *heldScope) GetSessionMocks() ([]*models.Mock, error) {

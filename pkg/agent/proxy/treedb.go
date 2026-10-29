@@ -6,6 +6,7 @@ package proxy
 import (
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/emirpasic/gods/trees/redblacktree"
@@ -41,6 +42,12 @@ type TreeDb struct {
 	// keyed holds a keyIndex per integrations.MockIndex a lookup has used.
 	// Built, read and dropped under mu.
 	keyed map[*integrations.MockIndex]*keyIndex
+	// gen is the tree's generation, moved by every change that stores a
+	// value under a key (storedLocked); parts is, at gen, the split of each
+	// key index's lists an exact view's keyed walk reads (keyParts). Both
+	// under mu.
+	gen   uint64
+	parts map[*integrations.MockIndex]*keyParts
 	// bootBuilt marks a startup tier a staging built before the set's first
 	// test fired: what it serves is consumed as the app starts
 	// (MockManager.carryTaken). Set before the tree is published, read-only
@@ -59,6 +66,7 @@ func (db *TreeDb) insert(key interface{}, obj interface{}) {
 	db.mu.Lock()
 	db.win = nil   // an entry the window index does not know
 	db.keyed = nil // nor do the key indexes
+	db.storedLocked()
 	db.rbt.Put(key, obj)
 	// Update ID index
 	if info, ok := key.(models.TestModeInfo); ok {
@@ -173,6 +181,7 @@ func (db *TreeDb) swapValue(key models.TestModeInfo, old, newObj *models.Mock) b
 			delete(db.keyed, ix)
 		}
 	}
+	db.storedLocked()
 	db.rbt.Put(key, newObj)
 	return true
 }
@@ -217,6 +226,7 @@ func (db *TreeDb) updateReplacing(oldKey interface{}, newKey interface{}, newObj
 	if found {
 		db.dropWindowUnlessFiled(oldInfo.ID, newInfo.ID, newObj)
 		db.followKeyedLocked(oldKey, newKey, cur, newObj)
+		db.storedLocked()
 		db.rbt.Remove(oldKey)
 		db.rbt.Put(newKey, newObj)
 		// Update ID index
@@ -259,6 +269,7 @@ func (db *TreeDb) updateReplacing(oldKey interface{}, newKey interface{}, newObj
 	// Found by ID, update it
 	db.dropWindowUnlessFiled(currentKey.ID, newInfo.ID, newObj)
 	db.followKeyedLocked(currentKey, newKey, cur, newObj)
+	db.storedLocked()
 	db.rbt.Remove(currentKey)
 	db.rbt.Put(newKey, newObj)
 	delete(db.idIndex, oldInfo.ID)
@@ -275,6 +286,7 @@ func (db *TreeDb) deleteAll() {
 	db.idIndex = make(map[int]models.TestModeInfo) // Reset ID index
 	db.win = nil
 	db.keyed = nil
+	db.storedLocked()
 	db.mu.Unlock()
 }
 
@@ -287,6 +299,9 @@ func (db *TreeDb) size() int {
 
 // rangeValues iterates without allocating a []interface{} snapshot.
 func (db *TreeDb) rangeValues(fn func(v interface{}) bool) {
+	if w := rangeValuesWatch.Load(); w != nil {
+		(*w)(db)
+	}
 	db.mu.RLock()
 	it := db.rbt.Iterator()
 	for it.Next() {
@@ -296,6 +311,10 @@ func (db *TreeDb) rangeValues(fn func(v interface{}) bool) {
 	}
 	db.mu.RUnlock()
 }
+
+// rangeValuesWatch, set only by this package's rows, is told of each walk of
+// a tree's values (rangeValues): what a row counts the walks of one tree by.
+var rangeValuesWatch atomic.Pointer[func(*TreeDb)]
 
 // dropWindowUnlessFiled drops the window index unless it stays right once
 // newObj is stored under newID in place of the entry under oldID: the ID does

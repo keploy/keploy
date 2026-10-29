@@ -131,6 +131,28 @@ func (c UnmatchedCall) CountsAgainstTest() bool {
 	return !c.Background && c.Answer == "" && !strings.EqualFold(c.Protocol, "DNS") && c.MatchPhase != MatchPhaseNoRequest
 }
 
+// MadeInTest reports whether the proxy found the call made while a test's
+// window was open (Kind MissInTest or MissExtraCall), by its parser's mark or
+// by the view serving. A Background call made so is a call of a series
+// judging marked as the application's background work, which its answerer
+// found no recording of (keploy enterprise): background wherever it was
+// made, and said as made inside that test's window, never outside every
+// test.
+func (c UnmatchedCall) MadeInTest() bool {
+	return c.Kind == MissInTest || c.Kind == MissExtraCall
+}
+
+// BackgroundLine is the line that says a Background call had no recorded
+// answer, worded from where it was made: inside a test's window, as a call of
+// a marked background series (MadeInTest), or outside every test. keploy test
+// and keploy mock say it once per call, at WARN.
+func (c UnmatchedCall) BackgroundLine() string {
+	if c.MadeInTest() {
+		return "a call of a marked background series, made inside a test's window, had no recorded answer: the application's background work, charged to no test"
+	}
+	return "a call the application made outside every test had no recorded answer: its background work, charged to no test"
+}
+
 // UnansweredWhy is why nothing answered the call, as its matcher said it:
 // where the match stopped, and the closest recording. A background miss's
 // line says it (Background), since no test's diff does.

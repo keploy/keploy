@@ -120,10 +120,20 @@ type MockManager struct {
 
 	// global revision (legacy)
 	rev uint64
+	// staged is rev less the moves a consume under exact serving makes
+	// (StagingGeneration).
+	staged uint64
+	// stored is staged less the moves an exact view's install makes: it
+	// moves on a staging, a store into a tree or a delete (SharedGeneration).
+	stored uint64
 
-	// NEW: per-kind revisions
-	revMu     sync.RWMutex
-	revByKind map[models.Kind]*uint64
+	// NEW: per-kind revisions; stagedByKind is revByKind less the moves a
+	// consume under exact serving makes (StagingGenerationByKind), and
+	// storedByKind stagedByKind less the moves an exact view's install makes.
+	revMu        sync.RWMutex
+	revByKind    map[models.Kind]*uint64
+	stagedByKind map[models.Kind]*uint64
+	storedByKind map[models.Kind]*uint64
 
 	// NEW: per-kind trees (guarded by treesMu)
 	treesMu          sync.RWMutex
@@ -443,6 +453,13 @@ type MockManager struct {
 	closeOnce   sync.Once
 	closed      atomic.Bool
 
+	// restaged holds, by slot, what the parsers asked to run once the
+	// manager lets go of the recordings its reads handed out
+	// (integrations.Restaged): run and emptied at each move of every kind's
+	// stored generation (bumpRevisionAll) and at Close.
+	restagedMu sync.Mutex
+	restaged   map[any]func()
+
 	// noConnMocks is a negative cache for GetConnectionMocks's
 	// fallback scan. A connID that returned zero connection-scoped
 	// mocks on a full scan gets memoised here so subsequent matches
@@ -529,6 +546,7 @@ func NewMockManager(filtered, unfiltered *TreeDb, logger *zap.Logger) *MockManag
 		statelessFiltered:   make(map[models.Kind]map[string][]*models.Mock),
 		statelessUnfiltered: make(map[models.Kind]map[string][]*models.Mock),
 		revByKind:           make(map[models.Kind]*uint64),
+		stagedByKind:        make(map[models.Kind]*uint64),
 		consumedIndex:       make(map[string]int),
 		consumedPersistent:  make(map[string]models.MockState),
 		servedCount:         make(map[string]uint64),
@@ -583,6 +601,8 @@ func (m *MockManager) Close() {
 		// stop. The replacement channel stays open, so a waiter that does not
 		// check IsClosed blocks again instead of spinning.
 		m.signalWindowChange()
+		// A parser's data built from this manager's reads goes with it.
+		m.letDerivedGo()
 	})
 }
 
@@ -661,6 +681,7 @@ func (m *MockManager) ResetForReplaySession() {
 	m.lockRound()
 	m.exact.fired.Store(false)
 	m.exact.last.Store(nil)
+	m.exact.ended.Store(nil)
 	m.exact.round.bound = nil
 	m.exact.round.mu.Unlock()
 	// Nor any of its worker scope (models.Mapping.Worker), or its recording
@@ -850,6 +871,14 @@ func (m *MockManager) Revision() uint64 {
 }
 
 func (m *MockManager) bumpRevisionAll() {
+	atomic.AddUint64(&m.stored, 1)
+	m.bumpViewAll()
+}
+
+// bumpViewAll is bumpRevisionAll for an exact view's install: the stored
+// generation does not move, since what the trees hold did not change.
+func (m *MockManager) bumpViewAll() {
+	atomic.AddUint64(&m.staged, 1)
 	atomic.AddUint64(&m.rev, 1)
 }
 
@@ -864,16 +893,102 @@ func (m *MockManager) RevisionByKind(kind models.Kind) uint64 {
 }
 
 func (m *MockManager) bumpRevisionKind(kind models.Kind) {
+	_, _, stored := m.kindRevisions(kind)
+	atomic.AddUint64(stored, 1)
+	m.bumpViewKind(kind)
+}
+
+// bumpViewKind is bumpRevisionKind for an exact view's install (bumpViewAll).
+func (m *MockManager) bumpViewKind(kind models.Kind) {
+	rev, staged, _ := m.kindRevisions(kind)
+	atomic.AddUint64(staged, 1)
+	atomic.AddUint64(rev, 1)
+}
+
+// kindRevisions returns kind's revision, staging generation and stored
+// generation counters, made on first use. The pointers stay valid after the
+// lock is let go: the counters move by atomics.
+func (m *MockManager) kindRevisions(kind models.Kind) (rev, staged, stored *uint64) {
 	m.revMu.Lock()
-	ptr := m.revByKind[kind]
-	if ptr == nil {
-		var v uint64
-		// Store pointer in map; safe to use after unlocking as we mutate via atomics.
-		ptr = &v
-		m.revByKind[kind] = ptr
+	defer m.revMu.Unlock()
+	if m.revByKind == nil {
+		m.revByKind = make(map[models.Kind]*uint64)
 	}
-	m.revMu.Unlock()
-	atomic.AddUint64(ptr, 1)
+	if m.stagedByKind == nil {
+		m.stagedByKind = make(map[models.Kind]*uint64)
+	}
+	if m.storedByKind == nil {
+		m.storedByKind = make(map[models.Kind]*uint64)
+	}
+	rev, staged, stored = m.revByKind[kind], m.stagedByKind[kind], m.storedByKind[kind]
+	if rev == nil {
+		rev = new(uint64)
+		m.revByKind[kind] = rev
+	}
+	if staged == nil {
+		staged = new(uint64)
+		m.stagedByKind[kind] = staged
+	}
+	if stored == nil {
+		stored = new(uint64)
+		m.storedByKind[kind] = stored
+	}
+	return rev, staged, stored
+}
+
+// bumpConsumed moves the revisions for a consume or a spend under exact
+// serving of a mock of kind: Revision and RevisionByKind move, so a parser
+// that keys what it read on them reads again, as before; the staging
+// generations do not, since what every read gives changes then only by the
+// mock MockSpent now reports.
+func (m *MockManager) bumpConsumed(kind models.Kind) {
+	rev, _, _ := m.kindRevisions(kind)
+	atomic.AddUint64(rev, 1)
+	atomic.AddUint64(&m.rev, 1)
+}
+
+// StagingGeneration is Revision less the moves a consume under exact serving
+// makes. It moves when the staged set changes (a staging, a store into a
+// tree, a delete; outside exact serving a consume deletes the mock from its
+// tree, so it moves then too) and when exact serving installs a view (a test
+// opens or ends, a key restarts), never when a parser consumes or spends a
+// mock the view in force shows. So what a read gives (GetPerTestMocksInWindow,
+// GetSessionMocks, GetUnFilteredMocks, GetStartupMocks, ...) while one
+// generation holds is what it gave when the generation began, less the mocks
+// MockSpent reports: a parser can build its index once per generation and
+// skip at lookup what MockSpent reports, rather than build it again on each
+// consume as Revision has it do (integrations.StagingGenerations).
+func (m *MockManager) StagingGeneration() uint64 {
+	return atomic.LoadUint64(&m.staged)
+}
+
+// StagingGenerationByKind is StagingGeneration for the reads of kind's mocks:
+// RevisionByKind less the moves a consume under exact serving makes.
+func (m *MockManager) StagingGenerationByKind(kind models.Kind) uint64 {
+	m.revMu.RLock()
+	ptr := m.stagedByKind[kind]
+	m.revMu.RUnlock()
+	if ptr == nil {
+		return 0
+	}
+	return atomic.LoadUint64(ptr)
+}
+
+// MockSpent reports whether the staged mock named name has answered in a way
+// that drops it from the reads while the view in force holds: under exact
+// serving, an open test's own recording (or a pool view's ahead) consumed, or
+// another test took (a shared recording), a staged mock spent through a
+// delete door in the view, a data-plane recording consumed outside every test
+// in the staging. Those are the only changes a consume or a spend makes to
+// what the reads give, and none of them moves StagingGeneration. False with
+// no view in force: outside exact serving a consume deletes the mock from its
+// tree, which moves the staging generations.
+func (m *MockManager) MockSpent(name string) bool {
+	v := m.exactView()
+	if v == nil {
+		return false
+	}
+	return v.spentNow(name)
 }
 
 // ensureKindTrees returns per-kind trees, creating them if missing.
@@ -908,6 +1023,9 @@ func (m *MockManager) GetFilteredMocks() ([]*models.Mock, error) {
 	m.treesMu.RLock()
 	tree := m.filtered
 	m.treesMu.RUnlock()
+	if v := m.exactView(); v != nil {
+		return m.exactPerTest(v, "", v.shownOf(tree, "")), nil
+	}
 	results := make([]*models.Mock, 0, 64)
 	tree.rangeValues(func(v interface{}) bool {
 		if mock, ok := v.(*models.Mock); ok && mock != nil {
@@ -915,9 +1033,6 @@ func (m *MockManager) GetFilteredMocks() ([]*models.Mock, error) {
 		}
 		return true
 	})
-	if v := m.exactView(); v != nil {
-		return m.exactPerTest(v, "", results), nil
-	}
 	return results, nil
 }
 
@@ -1081,6 +1196,11 @@ func (m *MockManager) GetFilteredMocksInWindow() ([]*models.Mock, error) {
 	m.windowMu.RUnlock()
 	m.swapMu.RUnlock()
 
+	// Under exact serving the test's mapping decides, not a recorded time,
+	// over what the view shows of the tier (shownOf).
+	if v := m.exactView(); v != nil {
+		return m.exactPerTest(v, "", v.shownOf(tree, "")), nil
+	}
 	all := make([]*models.Mock, 0, 64)
 	tree.rangeValues(func(v interface{}) bool {
 		if mock, ok := v.(*models.Mock); ok && mock != nil {
@@ -1088,11 +1208,6 @@ func (m *MockManager) GetFilteredMocksInWindow() ([]*models.Mock, error) {
 		}
 		return true
 	})
-
-	// Under exact serving the test's mapping decides, not a recorded time.
-	if v := m.exactView(); v != nil {
-		return m.exactPerTest(v, "", all), nil
-	}
 	if start.IsZero() || end.IsZero() {
 		return all, nil
 	}
@@ -1837,6 +1952,12 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 		m.bumpRevisionKind(k)
 	}
 	m.bumpRevisionAll()
+	// What the parsers built of the trees this staging replaced goes with
+	// them (WhenRestaged), once every generation moved. A store into the
+	// trees or a delete from them lets nothing go: it moves every kind's
+	// stored generation, but the parsers' indexes of a kind it did not touch
+	// still hold, and what an index of a touched kind keeps is of this set.
+	m.letDerivedGo()
 	// Index the staged names for counting so MarkMockAsUsed takes the
 	// O(1) fast path; a set boundary starts the counts afresh.
 	// The startup tier is included: without it a startup-only mock never enters
@@ -1906,6 +2027,11 @@ func (m *MockManager) GetUnFilteredMocks() ([]*models.Mock, error) {
 	m.treesMu.RLock()
 	tree := m.unfiltered
 	m.treesMu.RUnlock()
+	// Under exact serving only what the view shows of each tier is read
+	// (shownOf): reusable narrows it as it narrowed the tier's values.
+	if v := m.exactView(); v != nil {
+		return v.reusable("", v.shownOf(tree, ""), v.shownOf(m.startupTree(), "")), nil
+	}
 	results := make([]*models.Mock, 0, 128)
 	tree.rangeValues(func(v interface{}) bool {
 		if mock, ok := v.(*models.Mock); ok && mock != nil {
@@ -1913,9 +2039,6 @@ func (m *MockManager) GetUnFilteredMocks() ([]*models.Mock, error) {
 		}
 		return true
 	})
-	if v := m.exactView(); v != nil {
-		return v.reusable("", results, m.treeValues(m.startupTree(), "")), nil
-	}
 	return results, nil
 }
 
@@ -2501,6 +2624,9 @@ func (m *MockManager) GetStartupMocks() ([]*models.Mock, error) {
 	if tree == nil {
 		return nil, nil
 	}
+	if v := m.exactView(); v != nil {
+		return v.reusable("", v.shownOf(tree, ""), v.shownOf(m.unfilteredTree(), "")), nil
+	}
 	results := make([]*models.Mock, 0, 32)
 	tree.rangeValues(func(v interface{}) bool {
 		if mock, ok := v.(*models.Mock); ok && mock != nil {
@@ -2508,9 +2634,6 @@ func (m *MockManager) GetStartupMocks() ([]*models.Mock, error) {
 		}
 		return true
 	})
-	if v := m.exactView(); v != nil {
-		return v.reusable("", results, m.treeValues(m.unfilteredTree(), "")), nil
-	}
 	return results, nil
 }
 
@@ -2534,6 +2657,9 @@ func (m *MockManager) GetStartupMocksByKind(kind models.Kind) ([]*models.Mock, e
 	if tree == nil {
 		return nil, nil
 	}
+	if v := m.exactView(); v != nil {
+		return v.reusable(kind, v.shownOf(tree, kind), v.shownOf(m.unfilteredTree(), kind)), nil
+	}
 	results := make([]*models.Mock, 0, 16)
 	tree.rangeValues(func(v interface{}) bool {
 		if mock, ok := v.(*models.Mock); ok && mock != nil && mock.Kind == kind {
@@ -2541,9 +2667,6 @@ func (m *MockManager) GetStartupMocksByKind(kind models.Kind) ([]*models.Mock, e
 		}
 		return true
 	})
-	if v := m.exactView(); v != nil {
-		return v.reusable(kind, results, m.treeValues(m.unfilteredTree(), kind)), nil
-	}
 	return results, nil
 }
 
@@ -2707,6 +2830,32 @@ func (m *MockManager) CurrentTestWindow() (time.Time, time.Time) {
 // overhead at all.
 func (m *MockManager) GetPerTestMocksInWindow() ([]*models.Mock, error) {
 	return m.GetFilteredMocksInWindow()
+}
+
+// RangePerTestMocksInWindow is GetPerTestMocksInWindow handed to fn one mock
+// at a time (integrations.PerTestRanger). Under exact serving the open test's
+// unanswered mocks are read a few at a time and the tier only once fn has
+// not stopped at them (rangeExactPerTest); otherwise the read is walked.
+func (m *MockManager) RangePerTestMocksInWindow(fn func(*models.Mock) bool) error {
+	m.swapMu.RLock()
+	m.treesMu.RLock()
+	tree := m.filtered
+	m.treesMu.RUnlock()
+	m.swapMu.RUnlock()
+	if v := m.exactView(); v != nil {
+		m.rangeExactPerTest(v, "", tree, fn)
+		return nil
+	}
+	mocks, err := m.GetPerTestMocksInWindow()
+	if err != nil {
+		return err
+	}
+	for _, mk := range mocks {
+		if !fn(mk) {
+			break
+		}
+	}
+	return nil
 }
 
 // StatesLifetimes reports whether the recording of the set being replayed
@@ -3102,6 +3251,9 @@ func (m *MockManager) GetFilteredMocksByKind(kind models.Kind) ([]*models.Mock, 
 		flt, _ = m.ensureKindTrees(kind)
 	}
 
+	if v := m.exactView(); v != nil {
+		return m.exactPerTest(v, kind, v.shownOf(flt, "")), nil
+	}
 	results := make([]*models.Mock, 0, 64)
 	flt.rangeValues(func(v interface{}) bool {
 		if mock, ok := v.(*models.Mock); ok && mock != nil {
@@ -3109,9 +3261,6 @@ func (m *MockManager) GetFilteredMocksByKind(kind models.Kind) ([]*models.Mock, 
 		}
 		return true
 	})
-	if v := m.exactView(); v != nil {
-		return m.exactPerTest(v, kind, results), nil
-	}
 	return results, nil
 }
 
@@ -3123,6 +3272,9 @@ func (m *MockManager) GetUnFilteredMocksByKind(kind models.Kind) ([]*models.Mock
 		_, unf = m.ensureKindTrees(kind)
 	}
 
+	if v := m.exactView(); v != nil {
+		return v.reusable(kind, v.shownOf(unf, ""), v.shownOf(m.startupTree(), kind)), nil
+	}
 	results := make([]*models.Mock, 0, 128)
 	unf.rangeValues(func(v interface{}) bool {
 		if mock, ok := v.(*models.Mock); ok && mock != nil {
@@ -3130,9 +3282,6 @@ func (m *MockManager) GetUnFilteredMocksByKind(kind models.Kind) ([]*models.Mock
 		}
 		return true
 	})
-	if v := m.exactView(); v != nil {
-		return v.reusable(kind, results, m.treeValues(m.startupTree(), kind)), nil
-	}
 	return results, nil
 }
 

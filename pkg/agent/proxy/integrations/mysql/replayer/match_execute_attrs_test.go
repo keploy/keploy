@@ -728,3 +728,68 @@ func TestMatchCommand_StrictComparesTheAttributesTheRecordedStatementReads(t *te
 		}
 	}
 }
+
+// An app that comments its statements (sqlcommenter, a database monitor's
+// trace comment) prepares the statement with a comment its recording may
+// lack, or with a new trace id in it on every request. Both sides are
+// compared by the statement's identity, which leaves the comment out: the
+// recording is the same statement's, and its parameters decide. That holds
+// for a client that also names its statement's own parameter and sends a
+// per-call traceparent attribute the statement does not read: the recording
+// is split off by its statement, so the attribute is not compared.
+func TestMatchStmtExecute_ATraceCommentOnTheLiveStatementKeepsItTheRecordedStatement(t *testing.T) {
+	const plain = "SELECT v FROM kv WHERE id = ?"
+	traced := func(traceID string) string {
+		return "/* traceparent='00-" + traceID + "-b7ad6b7169203331-01' */ " + plain
+	}
+	const traceA, traceB = "0af7651916cd43dd8448eb211c80319c", "1bf7651916cd43dd8448eb211c80319c"
+	key := func(v string) []mysql.Parameter {
+		return []mysql.Parameter{{Type: uint16(mysql.FieldTypeString), Value: v}}
+	}
+	namedKey := func(v, tp string) []mysql.Parameter {
+		return []mysql.Parameter{{Type: uint16(mysql.FieldTypeString), Name: "id", Value: v}, traceparentAttr(tp)}
+	}
+	for name, tc := range map[string]struct {
+		recordedSQL, liveSQL string
+		recorded, live       []mysql.Parameter
+		definitive, sameSQL  bool
+	}{
+		"a comment the recording lacks, the recorded value": {plain, traced(traceA), key("k1"), key("k1"), true, true},
+		"a comment the recording lacks, another value":      {plain, traced(traceA), key("k1"), key("k2"), false, true},
+		"both commented with other trace ids":               {traced(traceA), traced(traceB), key("k1"), key("k1"), true, true},
+		"both commented, another value":                     {traced(traceA), traced(traceB), key("k1"), key("k2"), false, true},
+		"a named own parameter and a per-call traceparent":  {plain, traced(traceA), namedKey("k1", "tp-a"), namedKey("k1", "tp-b"), true, true},
+		"a named own parameter with another value":          {plain, traced(traceA), namedKey("k1", "tp-a"), namedKey("k2", "tp-b"), false, true},
+	} {
+		def, _, same := matchStmtExecutePacketQueryAware(zap.NewNop(), executeOf(executePacket(1, tc.recorded...)), executeOf(executePacket(1, tc.live...)),
+			tc.recordedSQL, tc.liveSQL, 1, "m", util.NewNoiseChecker(nil))
+		if def != tc.definitive || same != tc.sameSQL {
+			t.Errorf("%s: definitive %v and the same statement %v, want %v and %v", name, def, same, tc.definitive, tc.sameSQL)
+		}
+	}
+}
+
+// A recording that lost its statement (its PREPARE was pruned) is matched on
+// its parameters alone. When the live statement reads a query attribute, the
+// attribute is part of the answer, so it is compared too: a recording made for
+// another tenant is not a match on the parameters alone.
+func TestMatchStmtExecute_AnAttributeTheLiveStatementReadsCountsWhenTheRecordingLostItsStatement(t *testing.T) {
+	const reads = "SELECT ? AS k, mysql_query_attribute_string('tenant') AS t"
+	tenant := func(v string) mysql.Parameter {
+		return mysql.Parameter{Type: uint16(mysql.FieldTypeString), Name: "tenant", Value: v}
+	}
+	key := mysql.Parameter{Type: uint16(mysql.FieldTypeString), Value: "k1"}
+	for name, tc := range map[string]struct {
+		recorded, live string
+		want           bool
+	}{
+		"another tenant":  {"a", "b", false},
+		"the same tenant": {"a", "a", true},
+	} {
+		def, _, _ := matchStmtExecutePacketQueryAware(zap.NewNop(), executeOf(withAttrs(executePacket(1, key), tenant(tc.recorded))),
+			executeOf(withAttrs(executePacket(1, key), tenant(tc.live))), "", reads, 1, "m", util.NewNoiseChecker(nil))
+		if def != tc.want {
+			t.Errorf("%s: definitive %v, want %v", name, def, tc.want)
+		}
+	}
+}

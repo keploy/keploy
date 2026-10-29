@@ -1,8 +1,7 @@
 package replay
 
 import (
-	"slices"
-	"sync"
+	"context"
 	"testing"
 	"time"
 
@@ -24,21 +23,6 @@ func betweenTests(summary string) models.UnmatchedCall {
 	return models.UnmatchedCall{Protocol: "MongoDB", ActualSummary: summary, Destination: "mongo:27017",
 		At: time.Date(2026, 10, 29, 9, 0, 0, 0, time.UTC), Kind: models.MissOutsideTest, Background: true,
 		MatchPhase: "no_mock_for_destination", ClosestMock: "mock-12"}
-}
-
-// setBackgroundRecorder is the run's hooks with SetBackgroundHook.
-type setBackgroundRecorder struct {
-	TestHooks
-	mu   sync.Mutex
-	sets []string
-	got  [][]models.UnmatchedCall
-}
-
-func (h *setBackgroundRecorder) SetBackground(testSetID string, calls []models.UnmatchedCall) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.sets = append(h.sets, testSetID)
-	h.got = append(h.got, slices.Clone(calls))
 }
 
 // TestNonExistentApp's shape: the test before it was set aside, and the
@@ -116,43 +100,64 @@ func TestBackgroundCallsAreTheSetsListingOnly(t *testing.T) {
 	before, _ := beforeFirst()
 	own := models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "GET /own"}
 	bg := betweenTests("find vault_pats")
-	rest := s.take(append(before, bg, own))
+	rest := s.take(context.Background(), append(before, bg, own), "test-2", nil)
 	if len(rest) != 1 || rest[0].ActualSummary != "GET /own" {
 		t.Fatalf("the test keeps %+v; want only its own call", rest)
 	}
-	if got := s.failing(); len(got) != 1 || !got[0].BeforeSet {
-		t.Fatalf("the set fails with %+v; want only the call made before it", got)
+	if got := s.backgroundCalls(); len(got) != 2 || !got[0].BeforeSet || got[1].ActualSummary != bg.ActualSummary {
+		t.Fatalf("the set lists %+v; want the call made before it, then the background call", got)
 	}
-	if got := s.backgroundCalls(); len(got) != 1 || got[0].ActualSummary != bg.ActualSummary {
-		t.Fatalf("the set lists %+v; want the background call", got)
-	}
-	s.reset()
+	s.reset(nil)
 	if got := s.backgroundCalls(); len(got) != 0 {
 		t.Fatalf("after the reset the set lists %+v; want nothing", got)
 	}
 }
 
-// The set's background calls reach SetBackgroundHook as the set's end is told,
-// under the switch only, and not for an end its report does not say.
-func TestBackgroundCallsAreToldToTheHooks(t *testing.T) {
+// inTestSeries is a call of a series judging marked as the application's
+// background work, made inside a test's window, that no recording of the
+// series answered: its parser marks it (keploy enterprise's series answerer).
+func inTestSeries(summary string) models.UnmatchedCall {
+	c := betweenTests(summary)
+	c.Kind = models.MissInTest
+	return c
+}
+
+// A marked background series' call is background work wherever it was made,
+// and the set's line says where: made inside test-1's window it is no call
+// made outside every test (background-poll-series s21, where keploy said
+// "outside every test" of a series' miss inside a GET's window), and one the
+// set end's read takes was made inside the last test's window.
+func TestRunTestSet_AMarkedSeriesCallIsSaidAsMadeInsideItsTestsWindow(t *testing.T) {
 	provenOn(t, true)
 	h := newPartialRunHarness(t, 2, 0)
-	rec := &setBackgroundRecorder{TestHooks: h.replayer.GetTestHooks()}
-	h.replayer.SetTestHooks(rec)
-	h.instr.mockErrorsFor = misses(nil, reads(betweenTests("find vault_pats")))
+	core, logs := observer.New(zap.WarnLevel)
+	h.replayer.logger = zap.New(core)
+	inFirst, late := inTestSeries("findAndModify on jobs"), inTestSeries("update jobs")
+	h.instr.mockErrorsFor = misses(reads(inFirst), nil, reads(late))
 
-	status := h.run(t)
-	h.replayer.tellSetEnd("test-set-0", status, nil)
-	if len(rec.sets) != 1 || rec.sets[0] != "test-set-0" || len(rec.got[0]) != 1 || rec.got[0][0].ClosestMock != "mock-12" {
-		t.Fatalf("SetBackgroundHook was told %v %+v; want test-set-0's background call, once", rec.sets, rec.got)
+	if status := h.run(t); status != models.TestSetStatusPassed {
+		t.Fatalf("status %s (reason %q); a marked series' call fails no set", status, h.report.report.FailureReason)
 	}
-	h.replayer.tellSetEnd("test-set-0", models.TestSetStatusInternalErr, nil)
-	if len(rec.got) != 2 || rec.got[1] != nil {
-		t.Fatalf("an end its report does not say told %+v; want none", rec.got)
+	rep := h.report.report
+	for _, r := range rep.Tests {
+		if r.Status != models.TestStatusPassed || len(r.FailureInfo.UnmatchedCalls) != 0 {
+			t.Fatalf("test %s is %s with %+v; a marked series' call is no test's", r.TestCaseID, r.Status, r.FailureInfo.UnmatchedCalls)
+		}
 	}
-	provenOn(t, false)
-	h.replayer.tellSetEnd("test-set-0", status, nil)
-	if len(rec.sets) != 2 {
-		t.Fatalf("SetBackgroundHook was told %d times; without the switch it is not told", len(rec.sets))
+	want := []string{madeInside("test-1") + ", and its recorded answer reaches no test", madeInside("test-2")}
+	if len(rep.BackgroundCalls) != 2 || rep.BackgroundCalls[0].BackgroundWhy != want[0] || rep.BackgroundCalls[1].BackgroundWhy != want[1] {
+		t.Fatalf("background calls %+v; want each said as made inside its test's window: %q", rep.BackgroundCalls, want)
+	}
+	if out := logs.FilterMessageSnippet("outside every test").All(); len(out) != 0 {
+		t.Fatalf("%d line(s) say a call made inside a test's window was made outside every test: %+v", len(out), out)
+	}
+	said := logs.FilterMessageSnippet("a call of a marked background series, made inside a test's window, had no recorded answer").All()
+	if len(said) != 2 {
+		t.Fatalf("%d WARN line(s) for the marked series' calls, want one each: %+v", len(said), logs.All())
+	}
+	for i, l := range said {
+		if l.ContextMap()["where"] != want[i] {
+			t.Fatalf("line %d says where %q; want %q", i, l.ContextMap()["where"], want[i])
+		}
 	}
 }

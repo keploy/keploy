@@ -28,7 +28,7 @@ import (
 // a learning that depends on it names it (models.ClockOffset.AppZone,
 // models.ZoneNameOf): TZ from its environment (tz, where set), else the
 // zone file at /etc/localtime under root ("/" for keploy's own), read from
-// root's files, never keploy's (zoneFile). root is a directory in keploy's
+// root's files, never keploy's (zoneFileIn). root is a directory in keploy's
 // own view, its files read through keploy's own mounts (a process's root,
 // read through its own, is ReadProcZone's). A TZ of ""
 // or "UTC" is UTC where the file the C library may read for it is absent
@@ -53,33 +53,43 @@ func ReadZone(root, tz string, set bool) (*time.Location, error) {
 // reads UTC there, or a copy of the zone built into it, and keploy cannot
 // tell which.
 func readZone(root string, mounts zoneMounts, tz string, set, own bool) (*time.Location, error) {
+	loc, _, err := readZoneIn(dirFiles{root: root, mounts: mounts}, tz, set, own)
+	return loc, err
+}
+
+// readZoneIn is readZone of the root whose files f gives, with the bytes of
+// the zone file it read the zone from: none for UTC, or a zone read from
+// keploy's own zone files.
+func readZoneIn(f ZoneFiles, tz string, set, own bool) (*time.Location, []byte, error) {
 	if !set {
-		loc, err := zoneFile(root, mounts, "/etc/localtime")
-		if err != nil && localtimeAbsent(root) {
+		loc, data, err := zoneFileIn(f, "/etc/localtime")
+		if err != nil && localtimeAbsentIn(f) {
 			// No /etc/localtime at all (an Alpine or distroless image):
 			// the C library, Go, Python and Node read UTC.
-			return time.UTC, nil
+			return time.UTC, nil, nil
 		}
-		return loc, err
+		return loc, data, err
 	}
 	tz = strings.TrimPrefix(tz, ":")
 	switch {
 	case tz == "" || tz == "UTC":
-		return utcZone(root, mounts, tz)
+		loc, err := utcZone(f, tz)
+		return loc, nil, err
 	case strings.HasPrefix(tz, "/"):
-		return zoneFile(root, mounts, tz)
+		return zoneFileIn(f, tz)
 	}
-	_, rerr := resolveUnder(root, "/usr/share/zoneinfo/"+tz)
+	_, rerr := resolveIn(f, "/usr/share/zoneinfo/"+tz)
 	if rerr == nil && !strings.Contains(tz, "..") {
-		return zoneFile(root, mounts, "/usr/share/zoneinfo/"+tz)
+		return zoneFileIn(f, "/usr/share/zoneinfo/"+tz)
 	}
 	if !own {
 		if rerr != nil && !absent(rerr) && !isLasting(rerr) {
-			return nil, fmt.Errorf("keploy cannot read the zone file TZ=%s names under the process's root: %w", tz, rerr)
+			return nil, nil, fmt.Errorf("keploy cannot read the zone file TZ=%s names under the process's root: %w", tz, rerr)
 		}
-		return nil, lasting(fmt.Errorf("TZ=%s names no zone file under the process's root", tz))
+		return nil, nil, lasting(fmt.Errorf("TZ=%s names no zone file under the process's root", tz))
 	}
-	return time.LoadLocation(tz)
+	loc, err := time.LoadLocation(tz)
+	return loc, nil, err
 }
 
 // ProcZone is the zone one process writes a wall clock of no zone in, as
@@ -904,7 +914,8 @@ const procZoneCap = 4096
 // PID namespace of its own (utils.KernelPidsLocalIn: a container without
 // --pid=host, keploy's own docker and compose modes), where a kernel pid
 // names another process or none: every zone is then unknown, never another
-// process's.
+// process's (keploy's docker-mode agent reads the zone of the app container
+// that made a connection instead: containerkey.ConnZone).
 type ProcZones struct {
 	root  string
 	local bool
@@ -924,9 +935,10 @@ func NewProcZones(procRoot string) *ProcZones {
 	return &ProcZones{root: procRoot, local: utils.KernelPidsLocalIn(procRoot), read: ReadProcZone, m: map[uint32]procZone{}}
 }
 
-// errPIDNamespace is ProcZones.Of's error where keploy runs in a PID
-// namespace of its own.
-var errPIDNamespace = errors.New("keploy runs in a PID namespace of its own, where the kernel's process numbers name other processes or none, so it reads no process's zone by one; run keploy in the host PID namespace (--pid=host, or hostPID in Kubernetes) to have it read")
+// ErrPIDNamespace is ProcZones.Of's error where keploy runs in a PID
+// namespace of its own (where keploy's docker-mode agent reads the zone of
+// the app container that made a connection: containerkey.ConnZone).
+var ErrPIDNamespace = errors.New("keploy runs in a PID namespace of its own, where the kernel's process numbers name other processes or none, so it reads no process's zone by one; run keploy in the host PID namespace (--pid=host, or hostPID in Kubernetes) to have it read")
 
 // Of is the zone pid writes its wall clock in (ReadProcZone); unknown, with
 // an error, on a nil c.
@@ -935,7 +947,7 @@ func (c *ProcZones) Of(pid uint32) (ProcZone, error) {
 		return ProcZone{}, errors.New("no process zones are read")
 	}
 	if !c.local {
-		return ProcZone{}, errPIDNamespace
+		return ProcZone{}, ErrPIDNamespace
 	}
 	id, _, ok := procIdent(c.root, pid)
 	if !ok {
@@ -962,7 +974,7 @@ func (c *ProcZones) Of(pid uint32) (ProcZone, error) {
 		// It lets go of its files as it exits, so an error keploy read may
 		// be their absence: never kept. A zone it read is its own (an
 		// absence read as a zone, no /etc/localtime, is read in a root
-		// keploy could still read after it: localtimeAbsent,
+		// keploy could still read after it: localtimeAbsentIn,
 		// javaPlatformID), so it is this call's, never kept either: the
 		// pid is soon another's.
 		return z, err
@@ -1065,42 +1077,50 @@ func procZoneFrom(ctx context.Context) (ProcZone, bool) {
 	return z, ok
 }
 
-// zoneFile is ReadZone of the zone file at name, a path in the process's
-// own view, under root: its bytes, read through its links under root
-// (readZoneFile), named by the zoneinfo path its last link names, else by
+// zoneFileIn is ReadZone of the zone file at name, a path in the process's
+// own view, in f's root: its bytes, read through its links there
+// (readZoneFileIn), named by the zoneinfo path its last link names, else by
 // name's own, else by /etc/timezone where the bytes are that zone's file
 // under root's /usr/share/zoneinfo; with no name otherwise. A file that is
 // not there (a link to nothing) is an error, as Go and the C library read
 // UTC there, never the zone its link names. So is a file that names its
-// zone by its path but is mounted from another zone's (mountedZone).
-func zoneFile(root string, mounts zoneMounts, name string) (*time.Location, error) {
-	data, final, err := readZoneFile(root, name)
+// zone by its path but is mounted from another zone's (mountedZone). With
+// the zone, the zone file's bytes.
+func zoneFileIn(f ZoneFiles, name string) (*time.Location, []byte, error) {
+	data, final, err := readZoneFileIn(f, name)
 	if absent(err) {
 		// A link to nothing: lasting (lastingError).
-		return nil, lasting(err)
+		return nil, nil, lasting(err)
 	} else if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+	zn := ""
 	for _, p := range []string{final, name} {
-		if zn := models.ZoneinfoName(p); zn != "" {
-			if err := mountedZone(mounts, root, final, zn); err != nil {
-				return nil, err
+		if zn = models.ZoneinfoName(p); zn != "" {
+			if err := mountedZone(f, final, zn); err != nil {
+				return nil, nil, err
 			}
-			return loadZone(zn, data)
+			break
 		}
 	}
-	if b, err := readUnder(root, "/etc/timezone"); err == nil {
-		zn := strings.TrimSpace(string(b))
-		if zn != "" && !strings.Contains(zn, "..") {
-			if same, at, err := readZoneFile(root, "/usr/share/zoneinfo/"+zn); err == nil && bytes.Equal(same, data) {
-				if err := mountedZone(mounts, root, at, zn); err != nil {
-					return nil, err
+	if zn == "" {
+		if b, err := readUnderIn(f, "/etc/timezone"); err == nil {
+			tzn := strings.TrimSpace(string(b))
+			if tzn != "" && !strings.Contains(tzn, "..") {
+				if same, at, err := readZoneFileIn(f, "/usr/share/zoneinfo/"+tzn); err == nil && bytes.Equal(same, data) {
+					if err := mountedZone(f, at, tzn); err != nil {
+						return nil, nil, err
+					}
+					zn = tzn
 				}
-				return loadZone(zn, data)
 			}
 		}
 	}
-	return loadZone("", data)
+	loc, err := loadZone(zn, data)
+	if err != nil {
+		return nil, nil, err
+	}
+	return loc, data, nil
 }
 
 // utcZone is the zone of a TZ of "UTC" or "" (tz, its ":" cut), which Go,
@@ -1119,15 +1139,15 @@ func zoneFile(root string, mounts zoneMounts, name string) (*time.Location, erro
 // error otherwise, naming the file: keploy cannot tell which C library the
 // application's is, so its zone is unknown; a C library that reads UTC
 // there is refused too, saying why (a stated limit).
-func utcZone(root string, mounts zoneMounts, tz string) (*time.Location, error) {
+func utcZone(files ZoneFiles, tz string) (*time.Location, error) {
 	f := "/usr/share/zoneinfo/UTC"
 	if tz == "" {
 		f = "/usr/share/zoneinfo/Universal"
 	}
 	who := fmt.Sprintf("TZ=%s is UTC to Go, Node and a JVM, and to a C library that reads no file for it (Ubuntu 24.04's glibc, musl), but Debian's glibc, and Python on it, read the zone file %s", tz, f)
-	data, final, err := readZoneFile(root, f)
+	data, final, err := readZoneFileIn(files, f)
 	if absent(err) {
-		if _, serr := os.Stat(root); serr != nil {
+		if serr := files.Readable(); serr != nil {
 			return nil, fmt.Errorf("keploy cannot read the process's root (%v), so it cannot tell whether it holds %s, which the C library may read for TZ=%s", serr, f, tz)
 		}
 		return time.UTC, nil
@@ -1135,7 +1155,7 @@ func utcZone(root string, mounts zoneMounts, tz string) (*time.Location, error) 
 		return nil, fmt.Errorf("keploy cannot read the zone file %s, which the C library may read for TZ=%s: %w", f, tz, err)
 	}
 	zn := models.ZoneinfoName(final)
-	m, err := zoneMountOf(mounts, root, final, zn)
+	m, err := files.ZoneMount(final, zn)
 	if err != nil {
 		return nil, err
 	}
@@ -1163,8 +1183,9 @@ func utcZone(root string, mounts zoneMounts, tz string) (*time.Location, error) 
 }
 
 // mountedZone is nil where the zone file at p (a path in the process's own
-// view, its links resolved, under root) is, as far as the mounts it is
-// read through tell (zoneMountOf), the file of the zone zn its path names.
+// view, its links resolved, in f's root) is, as far as the mounts it is
+// read through tell (ZoneFiles.ZoneMount), the file of the zone zn its path
+// names.
 // A lasting error naming both where the file is read from another zone's,
 // or one whose path names no zone (a host's /etc/localtime that is a
 // copy): Node and a JVM read the zone by zn, the C library, Go and Python
@@ -1175,8 +1196,8 @@ func utcZone(root string, mounts zoneMounts, tz string) (*time.Location, error) 
 // keploy's own zone data cannot see it where the process shares keploy's
 // root (native mode, and keploy's own zone): keploy reads the very file
 // there. zoneMountOf's error, not lasting, where keploy cannot tell.
-func mountedZone(mounts zoneMounts, root, p, zn string) error {
-	m, err := zoneMountOf(mounts, root, p, zn)
+func mountedZone(f ZoneFiles, p, zn string) error {
+	m, err := f.ZoneMount(p, zn)
 	if err != nil || m == nil {
 		return err
 	}
@@ -1246,7 +1267,7 @@ func (m zoneMounts) point(root, p string) (string, error) {
 // zoneLocCap bounds zoneLocs: a cache holding it starts again.
 const zoneLocCap = 256
 
-// zoneLocs are the zones zoneFile loaded, by their name and their file's
+// zoneLocs are the zones zoneFileIn loaded, by their name and their file's
 // bytes, so the processes that share a zone file (every process of one
 // image, or of one host) share one *time.Location (ProcZones holds up to
 // procZoneCap processes), never one parsed each. Bytes and name alike give
@@ -1274,7 +1295,7 @@ type zoneLocKey struct {
 // data than keploy's, for a zone whose rules changed between the two (a
 // stated limit: a right value of such a zone is refused, saying why). A
 // reference that is the very file read (keploy's own zone files, where the
-// process shares keploy's root) finds no difference: zoneFile reads the
+// process shares keploy's root) finds no difference: zoneFileIn reads the
 // bind mount itself there (mountedZone). A name keploy's zone
 // data does not hold (nor "Local", which names keploy's own zone) is
 // dropped: the file's rules with no name, as keploy cannot tell whether
@@ -1369,26 +1390,39 @@ func utcOffset(off int) string {
 }
 
 // under is p, a path in the process's own view, as keploy reaches it under
-// root: never above root, whatever ".." p holds.
+// root: never above root, whatever ".." p holds. p is cleaned as a path of
+// this host (filepath, not path), the separators the kernel reads it by:
+// path.Clean reads a "\" as part of a name, so on Windows "a\..\..\x"
+// would pass it whole and climb above root once filepath.Join reads it.
 func under(root, p string) string {
-	return filepath.Join(root, path.Clean("/"+p))
+	return filepath.Join(root, filepath.Clean("/"+p))
 }
 
 // readZoneFile reads the zone file at p, a path in the process's own view,
 // under root, each link on it resolved in that view (resolveUnder): its
 // bytes and the path, in that view, of the file they were read from.
 func readZoneFile(root, p string) ([]byte, string, error) {
-	real, err := resolveUnder(root, p)
+	return readZoneFileIn(dirFiles{root: root}, p)
+}
+
+// readZoneFileIn is readZoneFile of the root whose files f gives.
+func readZoneFileIn(f ZoneFiles, p string) ([]byte, string, error) {
+	real, err := resolveIn(f, p)
 	if err != nil {
 		return nil, "", err
 	}
-	data, err := readRegular(root, real)
+	data, err := readRegularIn(f, real)
 	return data, real, err
 }
 
 // zoneFileCap bounds the bytes readRegular reads: a zone file holds a few
 // KiB.
 const zoneFileCap = 1 << 20
+
+// ZoneFileCap is zoneFileCap, for a ZoneFiles that reads a file whole
+// before OpenRegular gives it (containerkey's, from Docker's archive of the
+// file), and refuses a longer one unread.
+const ZoneFileCap = zoneFileCap
 
 // errNotRegular is readRegular's error of a file that is no regular one.
 type errNotRegular struct{ mode fs.FileMode }
@@ -1403,12 +1437,17 @@ func (e errNotRegular) Error() string {
 // read, a device, whose driver's open would run, a directory), never
 // opened for reading (openRegular), or of a longer one.
 func readRegular(root, p string) ([]byte, error) {
-	f, err := openRegular(root, p)
+	return readRegularIn(dirFiles{root: root}, p)
+}
+
+// readRegularIn is readRegular of the root whose files f gives.
+func readRegularIn(f ZoneFiles, p string) ([]byte, error) {
+	r, err := f.OpenRegular(p)
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = f.Close() }()
-	data, err := io.ReadAll(io.LimitReader(f, zoneFileCap+1))
+	defer func() { _ = r.Close() }()
+	data, err := io.ReadAll(io.LimitReader(r, zoneFileCap+1))
 	if err == nil && len(data) > zoneFileCap {
 		err = lasting(fmt.Errorf("more than %d bytes, more than keploy reads of a zone file, an /etc/timezone or an argfile", zoneFileCap))
 	}
@@ -1418,26 +1457,30 @@ func readRegular(root, p string) ([]byte, error) {
 // readUnder reads the file at p, a path in the process's own view, under
 // root (readZoneFile).
 func readUnder(root, p string) ([]byte, error) {
-	data, _, err := readZoneFile(root, p)
+	return readUnderIn(dirFiles{root: root}, p)
+}
+
+// readUnderIn is readUnder of the root whose files f gives.
+func readUnderIn(f ZoneFiles, p string) ([]byte, error) {
+	data, _, err := readZoneFileIn(f, p)
 	return data, err
 }
 
-// localtimeAbsent reports whether root holds no /etc/localtime at all (not
-// a link to nothing, which the C library reads as UTC too, but keploy
-// refuses as a zone it cannot tell).
-func localtimeAbsent(root string) bool {
-	etc, err := resolveUnder(root, "/etc")
+// localtimeAbsentIn reports whether the root whose files f gives holds no
+// /etc/localtime at all (not a link to nothing, which the C library reads
+// as UTC too, but keploy refuses as a zone it cannot tell).
+func localtimeAbsentIn(f ZoneFiles) bool {
+	etc, err := resolveIn(f, "/etc")
 	if err != nil {
 		return false
 	}
-	_, err = os.Lstat(under(root, path.Join(etc, "localtime")))
+	_, err = f.Lstat(path.Join(etc, "localtime"))
 	if !errors.Is(err, fs.ErrNotExist) {
 		return false
 	}
 	// An absence read in a root keploy can still read: an exited
 	// process's root reads as absent everywhere.
-	_, err = os.Stat(root)
-	return err == nil
+	return f.Readable() == nil
 }
 
 // resolveUnder is p, a path in the process's own view, with each link on
@@ -1448,6 +1491,11 @@ func localtimeAbsent(root string) bool {
 // way from keploy's own /. An error where a link names nothing, or there
 // are too many.
 func resolveUnder(root, p string) (string, error) {
+	return resolveIn(dirFiles{root: root}, p)
+}
+
+// resolveIn is resolveUnder of the root whose files f gives.
+func resolveIn(f ZoneFiles, p string) (string, error) {
 	rest := strings.Split(path.Clean("/"+p), "/")
 	cur, links := "/", 0
 	for len(rest) > 0 {
@@ -1461,18 +1509,18 @@ func resolveUnder(root, p string) (string, error) {
 			continue
 		}
 		next := path.Join(cur, c)
-		fi, err := os.Lstat(under(root, next))
+		mode, err := f.Lstat(next)
 		if err != nil {
 			return "", err
 		}
-		if fi.Mode()&os.ModeSymlink == 0 {
+		if mode&fs.ModeSymlink == 0 {
 			cur = next
 			continue
 		}
 		if links++; links > 40 {
 			return "", lasting(errors.New("too many links on the path " + p))
 		}
-		target, err := os.Readlink(under(root, next))
+		target, err := f.Readlink(next)
 		if err != nil {
 			return "", err
 		}

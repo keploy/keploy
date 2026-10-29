@@ -67,8 +67,31 @@ func TestAgentArgs(t *testing.T) {
 		t.Fatalf("switch off: AgentArgs() = %q, want nil so the agent argv is byte-identical to before", got)
 	}
 	t.Setenv(Env, "1")
+	t.Setenv(VerifyEnv, "")
 	if got, want := AgentArgs(), []string{"--proven"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("switch on: AgentArgs() = %q, want %q", got, want)
+	}
+}
+
+// CI's lanes under the switch run the agent's exact view in verify mode: the
+// launcher's KEPLOY_EXACT_VIEW_VERIFY=1 reaches the agent as a flag, since the
+// agent inherits no environment. Without the switch the agent serves no exact
+// view, and its argv stays byte-identical to before.
+func TestAgentArgsCarryTheExactViewVerifyMode(t *testing.T) {
+	unpin(t)
+	t.Setenv(VerifyEnv, "1")
+	t.Setenv(Env, "1")
+	if got, want := AgentArgs(), []string{"--proven", "--exact-view-verify"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("switch on, %s=1: AgentArgs() = %q, want %q", VerifyEnv, got, want)
+	}
+	t.Setenv(Env, "")
+	if got := AgentArgs(); got != nil {
+		t.Fatalf("switch off, %s=1: AgentArgs() = %q, want nil", VerifyEnv, got)
+	}
+	t.Setenv(Env, "1")
+	t.Setenv(VerifyEnv, "true")
+	if got, want := AgentArgs(), []string{"--proven"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("switch on, %s=true: AgentArgs() = %q, want %q (the agent's own reading takes 1 alone)", VerifyEnv, got, want)
 	}
 }
 

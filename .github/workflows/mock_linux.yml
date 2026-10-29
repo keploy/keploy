@@ -88,6 +88,14 @@ on:
         required: false
         default: 'all'
 
+env:
+  # Every run under the proven switch (KEPLOY_PROVEN=1) runs the agent's exact
+  # view in verify mode: each read the view keeps materialised is recomputed,
+  # and any difference fails that read (pkg/agent/proxy exact_view_verify.go).
+  # The client passes it to the agent as --exact-view-verify under the switch
+  # only (provenswitch.AgentArgs); a run without the switch is unchanged.
+  KEPLOY_EXACT_VIEW_VERIFY: '1'
+
 jobs:
   mock_linux:
     if: ${{ inputs.jobs_to_run == 'all' }}

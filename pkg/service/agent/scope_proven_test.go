@@ -24,6 +24,7 @@ import (
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // The tests' agent is this test process, which also claims as the test
@@ -68,9 +69,40 @@ type wireProxy struct {
 	failPools int
 	// staged counts the stagings (SetMocks).
 	staged int
+	// seeded are the recorded test windows last seeded
+	// (SeedRecordedWindows), and seededAt the stagings made before.
+	seeded   []models.TestWindow
+	seededAt int
 	// appClock is the app clock the agent last handed the proxy
 	// (SetAppClock), nil until it did.
 	appClock func(time.Time) (time.Time, bool)
+	// learnEnded is what the agent last said of the learn step
+	// (SetLearnEnded), learnErr fails saying it, and sessions are the
+	// sessions started (Mock).
+	learnEnded bool
+	learnErr   error
+	sessions   []models.OutgoingOptions
+}
+
+// Mock starts a mock-serving session.
+func (p *wireProxy) Mock(_ context.Context, opts models.OutgoingOptions) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.sessions = append(p.sessions, opts)
+	p.learnEnded = false
+	return nil
+}
+
+// SetLearnEnded takes whether the session's learn step has ended.
+func (p *wireProxy) SetLearnEnded(ended bool) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.learnErr != nil {
+		return p.learnErr
+	}
+	p.learnEnded = ended
+	p.order = append(p.order, fmt.Sprintf("learn ended %v", ended))
+	return nil
 }
 
 func (p *wireProxy) SetAppClock(f func(time.Time) (time.Time, bool)) {
@@ -102,6 +134,13 @@ func (p *wireProxy) WithdrawTestErrorCapture() {
 	defer p.mu.Unlock()
 	p.withdraws++
 	p.order = append(p.order, "withdraw")
+}
+
+// SeedRecordedWindows takes the set's recorded test windows.
+func (p *wireProxy) SeedRecordedWindows(ws []models.TestWindow) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.seeded, p.seededAt = ws, p.staged
 }
 
 // SetMocks takes a staging of the replay's mocks.
@@ -759,6 +798,189 @@ func TestABeginServesItsTestExactlyItsTestMocks(t *testing.T) {
 	p.mu.Unlock()
 }
 
+// keploy mock replay's recorded test windows (the scope table's) reach the
+// proxy before the pool's serving stages the set, so the staging installs
+// them with it (MockManager.SeedRecordedWindows parks them at a set
+// boundary): the learn step knows each test's window from the first call.
+func TestTheRecordedWindowsAreSeededBeforeThePoolStagesTheSet(t *testing.T) {
+	a, p := wireAgent(t, models.MODE_TEST)
+	storeMocks(a, httpMock("mock-1", "GET", "http://h/a"), httpMock("mock-4", "GET", "http://h/pool"))
+	a.scopeTable = map[string][]string{"o::TestA": {"mock-1"}}
+	ctx := context.Background()
+	t0 := time.Date(2026, 10, 1, 10, 0, 0, 0, time.UTC)
+	ws := []models.TestWindow{{TestCase: "o::TestA", Start: t0, End: t0.Add(time.Second)}}
+	require.NoError(t, a.SetRecordedWindows(ctx, ws))
+	require.NoError(t, a.SetScopePool(ctx, map[string][]string{"o": {"mock-4"}}))
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	require.Equal(t, ws, p.seeded)
+	require.Equal(t, 0, p.seededAt, "seeded before the set was staged")
+	require.Equal(t, 1, p.staged, "the pool's serving staged the set")
+}
+
+// In record's full round (a session with the learn step), a test begun out
+// of the order the set's tests were recorded in ends the learn step for the
+// rest of the round, before its window opens, and says so once, naming the
+// test and the one begun before it. A late call of the test that ran first,
+// landing in it, would otherwise be paired with its own recording and what
+// it differs in learned as noise (the proxy's row:
+// TestAnOutOfOrderBeginEndsLearningSoALaterRecordedTestsLateCallMisses, a
+// merged window's test included). The order is when each test began in its
+// recording (SetTestBegins, which keploy mock replay sends whenever it
+// learns), which names the tests of a merged window too, else its own
+// window's start. In
+// recorded order the learn step stays on, and so it does for a test the
+// recording has no place for (not recorded), in a session with no learn
+// step (keploy mock test), and with neither windows nor begins (an older
+// CLI).
+func TestATestBegunOutOfItsRecordedOrderEndsTheRoundsLearnStep(t *testing.T) {
+	t0 := time.Date(2026, 10, 1, 10, 0, 0, 0, time.UTC)
+	recorded := []models.TestWindow{
+		{TestCase: "o::TestA", Start: t0, End: t0.Add(time.Second)},
+		{TestCase: "o::TestB", Start: t0.Add(2 * time.Second), End: t0.Add(3 * time.Second)},
+		{TestCase: "o::TestC", Start: t0.Add(4 * time.Second), End: t0.Add(5 * time.Second)},
+		// TestU and TestV ran at once in the recording, or touched: one
+		// window no test names.
+		{Start: t0.Add(6 * time.Second), End: t0.Add(9 * time.Second)},
+	}
+	// When each test began in its recording, as keploy mock replay sends it
+	// beside the windows (pushTestBegins): the merged window's tests too.
+	began := map[string]time.Time{
+		"o::TestA": t0, "o::TestB": t0.Add(2 * time.Second), "o::TestC": t0.Add(4 * time.Second),
+		"o::TestU": t0.Add(6 * time.Second), "o::TestV": t0.Add(7 * time.Second),
+	}
+	for _, c := range []struct {
+		name    string
+		learn   bool
+		windows []models.TestWindow
+		began   map[string]time.Time
+		begins  []string
+		// endsAt is the begin, by its index, that ends the learn step; -1
+		// for none. after is the test the WARN names as begun before.
+		endsAt int
+		after  string
+	}{
+		{"begun again: A, B, then A again (go test -count=2, --rerun-fails)", true, recorded, began, []string{"TestA", "TestB", "TestA"}, 2, "o::TestB"},
+		{"the same test twice: A, A", true, recorded, began, []string{"TestA", "TestA"}, 1, "o::TestA"},
+		{"shuffled: B, then A", true, recorded, began, []string{"TestB", "TestA", "TestC"}, 1, "o::TestB"},
+		{"a merged window's test recorded later runs first: U, then A", true, recorded, began, []string{"TestU", "TestA"}, 1, "o::TestU"},
+		{"within a merged window: V, then U", true, recorded, began, []string{"TestV", "TestU"}, 1, "o::TestV"},
+		{"a merged window's test begun again: U, V, then U again", true, recorded, began, []string{"TestU", "TestV", "TestU"}, 2, "o::TestV"},
+		{"out of order after the last begun, not the first: A, C, then B", true, recorded, began, []string{"TestA", "TestC", "TestB"}, 2, "o::TestC"},
+		{"two begins out of order, said once: C, A, then B", true, recorded, began, []string{"TestC", "TestA", "TestB"}, 1, "o::TestC"},
+		{"recorded order: A, B, C, U, V", true, recorded, began, []string{"TestA", "TestB", "TestC", "TestU", "TestV"}, -1, ""},
+		{"a test the recording has no place for does not move the order: C, D (not recorded), D", true, recorded, began, []string{"TestC", "TestD", "TestD"}, -1, ""},
+		{"skipping a test keeps the order: A, C", true, recorded, began, []string{"TestA", "TestC"}, -1, ""},
+		{"keploy mock test runs no learn step: B, A", false, recorded, began, []string{"TestB", "TestA"}, -1, ""},
+		{"windows and no begins: the windows order it: B, then A", true, recorded, nil, []string{"TestB", "TestA"}, 1, "o::TestB"},
+		{"windows and no begins: a merged window's test has no place: U, A", true, recorded, nil, []string{"TestU", "TestA"}, -1, ""},
+		{"an older CLI sends neither: B, A", true, nil, nil, []string{"TestB", "TestA"}, -1, ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			a, p := wireAgent(t, models.MODE_TEST)
+			core, logs := observer.New(zap.WarnLevel)
+			a.logger = zap.New(core)
+			ctx := context.Background()
+			require.NoError(t, a.MockOutgoing(ctx, models.OutgoingOptions{Learn: c.learn}))
+			require.NoError(t, a.SetRecordedWindows(ctx, c.windows))
+			require.NoError(t, a.SetTestBegins(ctx, c.began, nil))
+			claimSelf(t, a)
+			for i, name := range c.begins {
+				p.mu.Lock()
+				p.order = nil
+				p.mu.Unlock()
+				_, serr := a.ProvenBegin(ctx, begin(name))
+				require.Nil(t, serr)
+				p.mu.Lock()
+				order, ended := p.order, p.learnEnded
+				p.mu.Unlock()
+				switch {
+				case i == c.endsAt:
+					require.True(t, ended, "begin %d (%s) ends the learn step", i, name)
+					require.Equal(t, "learn ended true", order[0], "ended before the test's window opens: %v", order)
+					require.Contains(t, order, "continue")
+				case c.endsAt < 0 || i < c.endsAt:
+					require.False(t, ended, "begin %d (%s) keeps the learn step", i, name)
+					require.NotContains(t, order, "learn ended true")
+				default:
+					require.True(t, ended, "ended for the rest of the round")
+					require.NotContains(t, order, "learn ended true", "said once")
+				}
+				_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: name, Outcome: "passed"})
+				require.Nil(t, serr)
+			}
+			warns := logs.FilterMessageSnippet("stopped record's full round from learning").All()
+			if c.endsAt < 0 {
+				require.Empty(t, warns)
+				return
+			}
+			require.Len(t, warns, 1, "said once")
+			fields := warns[0].ContextMap()
+			require.Equal(t, "o::"+c.begins[c.endsAt], fields["test"])
+			require.Equal(t, c.after, fields["after"])
+			require.Contains(t, fields["next_step"], "--rerun-fails")
+		})
+	}
+
+	// The next session (another set, or the next round) learns again, in
+	// its own order, and ends its learn step again at a begin out of it:
+	// the order and its end are the session's (resetSession).
+	t.Run("a new session learns again, and ends again out of order", func(t *testing.T) {
+		a, p := wireAgent(t, models.MODE_TEST)
+		ctx := context.Background()
+		session := func() {
+			require.NoError(t, a.MockOutgoing(ctx, models.OutgoingOptions{Learn: true}))
+			require.NoError(t, a.SetRecordedWindows(ctx, recorded))
+			require.NoError(t, a.SetTestBegins(ctx, began, nil))
+			claimSelf(t, a)
+		}
+		run := func(name string) {
+			_, serr := a.ProvenBegin(ctx, begin(name))
+			require.Nil(t, serr)
+			_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: name, Outcome: "passed"})
+			require.Nil(t, serr)
+		}
+		session()
+		run("TestB")
+		run("TestA")
+		require.True(t, p.learnEnded)
+		session()
+		require.False(t, p.learnEnded, "the session's start takes it back up (Proxy.Mock)")
+		run("TestB")
+		require.False(t, p.learnEnded, "the new session's first test is in its order")
+		run("TestA")
+		require.True(t, p.learnEnded, "the new session's own out-of-order begin ends its learn step again")
+	})
+
+	// A proxy that cannot end the learn step refuses the begin, which opens
+	// nothing; the next begin out of order asks again.
+	t.Run("a proxy that cannot end it refuses the begin", func(t *testing.T) {
+		a, p := wireAgent(t, models.MODE_TEST)
+		ctx := context.Background()
+		require.NoError(t, a.MockOutgoing(ctx, models.OutgoingOptions{Learn: true}))
+		require.NoError(t, a.SetRecordedWindows(ctx, recorded))
+		claimSelf(t, a)
+		_, serr := a.ProvenBegin(ctx, begin("TestB"))
+		require.Nil(t, serr)
+		_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestB", Outcome: "passed"})
+		require.Nil(t, serr)
+		p.mu.Lock()
+		p.learnErr, p.order = errors.New("no mock manager"), nil
+		p.mu.Unlock()
+		_, serr = a.ProvenBegin(ctx, begin("TestA"))
+		require.NotNil(t, serr)
+		require.Equal(t, models.ScopeErrInternal, serr.Code)
+		require.Contains(t, serr.Message, "no mock manager")
+		p.mu.Lock()
+		require.NotContains(t, p.order, "continue", "nothing opened")
+		p.learnErr = nil
+		p.mu.Unlock()
+		_, serr = a.ProvenBegin(ctx, begin("TestA"))
+		require.Nil(t, serr)
+		require.True(t, p.learnEnded)
+	})
+}
+
 // A test that skipped itself is not failed for the recorded calls it then
 // never made; a miss still fails it.
 func TestASelfSkippedTestIsNotFailedForCallsItNeverMade(t *testing.T) {
@@ -976,11 +1198,11 @@ func TestSanitizedMissKeepsTheShapeAndTheAdvice(t *testing.T) {
 	require.Equal(t, "HTTP POST", extra.Write)
 
 	// The matcher's next step names the fields that differed; a map's keys
-	// can be values, so a path keeps its shape.
+	// can be values, so a path keeps its shape, and the advice stays.
 	drift := sanitizedMiss(models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "POST /x",
 		NextSteps:  "Only values drifted (body.users.alice@example.com.score, body.items[3].sku_7c01d2e9). Re-record.",
 		FieldDiffs: []models.MockFieldDiff{{Path: "body.users.alice@example.com.score"}, {Path: "body.items[3].sku_7c01d2e9"}}})
-	require.Equal(t, "2 field(s) of the call differ from the recording; if the change is expected, re-record the mock set with 'keploy mock record'", drift.NextSteps)
+	require.Equal(t, "Only values drifted (body.users.{}.com.score, body.items[3].{}). Re-record.", drift.NextSteps)
 	fixed := sanitizedMiss(models.UnmatchedCall{Protocol: "MySQL", NextSteps: "Re-record mocks if the SQL query has changed."})
 	require.Equal(t, "Re-record mocks if the SQL query has changed.", fixed.NextSteps, "fixed advice is kept")
 	pg := sanitizedMiss(models.UnmatchedCall{Protocol: "PostgresV2", ActualSummary: "SELECT 1"})
@@ -995,6 +1217,118 @@ func TestSanitizedMissKeepsTheShapeAndTheAdvice(t *testing.T) {
 	require.NotNil(t, rep.Repeat, "the repeat note was dropped")
 	require.Equal(t, *note, *rep.Repeat)
 	require.NotSame(t, note, rep.Repeat, "the note is the miss's own: written on a copy")
+}
+
+// A miss of record's full round keeps the learn step's reason: its code and
+// its words, with every field path they name in its shape, so a test's
+// reason, the round's log and its evidence say why the call missed. (The
+// words were once replaced whole by a count of the differing fields
+// whenever they named one, which every learn step's reason does.)
+func TestAMissKeepsTheLearnStepsReason(t *testing.T) {
+	why := "The record round's replay of the same build saw this request differ from its recording in a way keploy does not learn as noise: " +
+		"body.docs.msgs.0.appId carries a value a recording of the test set holds earlier (in mock-1006), which keploy cannot follow into a Mongo request yet; " +
+		"body.docs.msgs.0.prefs.bob@example.org.on was recorded with it too. If the field is a time the application reads from its own clock, declare it noise in keploy.yml."
+	m := sanitizedMiss(models.UnmatchedCall{Protocol: "Mongo", Destination: "mongo:27017", MatchPhase: "body_mismatch", Reason: models.MissRequestChanged,
+		NextSteps: why, FieldDiffs: []models.MockFieldDiff{{Path: "body.docs.msgs.0.appId", Expected: "x-48d1", Actual: "x-6c7d"}}})
+	require.Equal(t, models.MissRequestChanged, m.Reason)
+	require.Equal(t, "The record round's replay of the same build saw this request differ from its recording in a way keploy does not learn as noise: "+
+		"body.docs.msgs.{}.appId carries a value a recording of the test set holds earlier (in mock-1006), which keploy cannot follow into a Mongo request yet; "+
+		"body.docs.msgs.{}.prefs.{}.org.on was recorded with it too. If the field is a time the application reads from its own clock, declare it noise in keploy.yml.", m.NextSteps,
+		"the reason stays, each body path in its shape, a path the diff does not list included")
+	require.NotContains(t, m.NextSteps, "bob", "a key that may be a value is {}")
+
+	// A path named without its "body." (as a learn step may name one) is
+	// shaped as the diff's path is; a header keeps its name.
+	short := sanitizedMiss(models.UnmatchedCall{Protocol: "HTTP", NextSteps: "keploy's learn step: users.alice@example.com.score moved; header.X-Trace changed.",
+		FieldDiffs: []models.MockFieldDiff{{Path: "body.users.alice@example.com.score"}, {Path: "header.X-Trace"}}})
+	require.Equal(t, "keploy's learn step: users.{}.com.score moved; header.X-Trace changed.", short.NextSteps)
+	require.Equal(t, short.NextSteps, nextStepOf(short), "a shaped next step is its own shape")
+}
+
+// A test failed in record's full round says, in its reason (what keploy's
+// test harness integrations print as the test's error), why each of its
+// calls missed in the learn step's words; a test whose misses have no
+// reason reads as before, and a miss made before the test began is not
+// explained as one of its calls.
+func TestAFailedTestsReasonSaysWhyEachCallMissed(t *testing.T) {
+	learned := sanitizedMiss(models.UnmatchedCall{Protocol: "Mongo", Destination: "mongo:27017", Reason: models.MissRequestChanged, Differs: []string{"body.docs.msgs.0.appId"},
+		NextSteps: "The record round's replay saw body.docs.msgs.0.appId differ: it carries a value keploy cannot follow yet.", FieldDiffs: []models.MockFieldDiff{{Path: "body.docs.msgs.0.appId"}}})
+	r := evidenceReason("api::TestSlowStep", &models.ScopeEvidence{Misses: []models.UnmatchedCall{learned, learned}}, nil, time.Time{})
+	require.Equal(t, "keploy: a Mongo call to mongo:27017 had no recorded answer (body.docs.msgs.{}.appId differs); a Mongo call to mongo:27017 had no recorded answer (body.docs.msgs.{}.appId differs).\n"+
+		"a Mongo call to mongo:27017 missed (request_changed): The record round's replay saw body.docs.msgs.{}.appId differ: it carries a value keploy cannot follow yet.\n"+
+		"If this is an intended change, re-record it: keploy mock record -c \"<your command, selecting api::TestSlowStep>\".\n"+
+		"If it is flaky, not broken: keploy mock quarantine api::TestSlowStep --reason \"<why>\".", r, "one line per reason, said once")
+
+	plain := evidenceReason("t", &models.ScopeEvidence{Misses: []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "GET /x", NextSteps: "Re-record."}}}, nil, time.Time{})
+	require.Equal(t, "keploy: GET /x had no recorded answer. If this is an intended change, re-record it: keploy mock record -c \"<your command, selecting t>\".\n"+
+		"If it is flaky, not broken: keploy mock quarantine t --reason \"<why>\".", plain, "a miss without the learn step's reason reads as it did")
+
+	began := time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)
+	early := learned
+	early.At = began.Add(-time.Second)
+	r = evidenceReason("t", &models.ScopeEvidence{Misses: []models.UnmatchedCall{early}}, nil, began)
+	require.NotContains(t, r, "missed (request_changed)", "a call made before the test began is not explained as the test's")
+
+	var many []models.UnmatchedCall
+	for i := 0; i < 7; i++ {
+		c := learned
+		c.Destination = fmt.Sprintf("mongo-%d:27017", i)
+		many = append(many, c)
+	}
+	r = evidenceReason("t", &models.ScopeEvidence{Misses: many}, nil, time.Time{})
+	require.Equal(t, 5, strings.Count(r, "missed (request_changed)"))
+	require.Contains(t, r, "and 2 more call(s) missed for a reason the learn step gave")
+}
+
+// End to end on the agent: the test's end answers fail with the learn
+// step's reason, and the run's miss list (the CLI's round log) keeps it.
+// The run's miss list says which test each miss was charged to: a call that
+// counts against a test and that a test's end read is that test's (its
+// evidence lists it); a call made before the test process claimed the run, a
+// DNS lookup a test's end read, and a call after the last test's end are
+// charged to no test, so keploy mock's receipt can name them.
+func TestTheRunsMissesSayWhichTestEachWasChargedTo(t *testing.T) {
+	a, p := wireAgent(t, models.MODE_TEST)
+	ctx := context.Background()
+	p.misses = []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "GET /startup", Destination: "startup:80", Kind: models.MissOutsideTest}}
+	claimSelf(t, a)
+	_, serr := a.ProvenBegin(ctx, begin("TestA"))
+	require.Nil(t, serr)
+	p.misses = []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "GET /in-test", Destination: "in-test:80", Kind: models.MissInTest},
+		{Protocol: "DNS", ActualSummary: "A dep", Destination: "dns:53"}}
+	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", Outcome: "passed"})
+	require.Nil(t, serr)
+	p.misses = []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "POST /teardown", Destination: "teardown:80", Kind: models.MissOutsideTest}}
+	all, err := a.GetMockErrors(ctx)
+	require.NoError(t, err)
+	charged := map[string]string{}
+	for _, m := range all {
+		charged[m.Destination] = m.ChargedTo
+	}
+	require.Equal(t, map[string]string{"startup:80": "", "in-test:80": "o::TestA", "dns:53": "", "teardown:80": ""}, charged)
+	ev := windowOf(t, a, "o::TestA").Evidence
+	require.Len(t, ev.Misses, 1, "the test's evidence lists the data miss charged to it")
+	require.Equal(t, "in-test:80", ev.Misses[0].Destination)
+}
+
+func TestATestsEndAndTheRunsMissesCarryTheLearnStepsReason(t *testing.T) {
+	a, p := wireAgent(t, models.MODE_TEST)
+	ctx := context.Background()
+	claimSelf(t, a)
+	_, serr := a.ProvenBegin(ctx, begin("TestA"))
+	require.Nil(t, serr)
+	p.misses = []models.UnmatchedCall{{Protocol: "Mongo", Destination: "mongo:27017", Kind: models.MissInTest, Reason: models.MissRequestChanged,
+		NextSteps: "body.cmd.filter.appId changed, and keploy cannot follow it yet.", FieldDiffs: []models.MockFieldDiff{{Path: "body.cmd.filter.appId", Expected: "a", Actual: "b"}}}}
+	e, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", Outcome: "passed"})
+	require.Nil(t, serr)
+	require.Equal(t, models.ScopeActionFail, e.Action)
+	require.Contains(t, e.Reason, "a Mongo call to mongo:27017 missed (request_changed): body.cmd.filter.appId changed, and keploy cannot follow it yet.")
+	all, err := a.GetMockErrors(ctx)
+	require.NoError(t, err)
+	require.Len(t, all, 1)
+	require.Equal(t, models.MissRequestChanged, all[0].Reason)
+	require.Equal(t, "body.cmd.filter.appId changed, and keploy cannot follow it yet.", all[0].NextSteps)
+	require.Empty(t, all[0].FieldDiffs, "no value: evidence keeps no field diff")
 }
 
 // A miss, its reason text and a recorded mock's name keep an HTTP call's
@@ -1591,15 +1925,16 @@ func TestAMissSaysWhyAFieldWasRefused(t *testing.T) {
 	require.Contains(t, plain, "GET /x had no recorded answer (body.q differs).")
 
 	// The run's summary shows a miss's next step as evidence keeps it
-	// (nextStepOf): a next step that names a field the call differs in is
-	// replaced by fixed advice, and the why still reaches the summary, with
-	// no value; the matcher's own advice keeps it too, once.
-	advice := "2 field(s) of the call differ from the recording; if the change is expected, re-record the mock set with 'keploy mock record'"
+	// (nextStepOf): a next step that names a field the call differs in keeps
+	// its words with each path in its shape, and the why still reaches the
+	// summary, with no value; the matcher's own advice keeps it too, once.
+	advice := "fields differ: body.since, body.users.{}.since"
 	mongo := sanitizedMiss(models.UnmatchedCall{Protocol: "MongoDB", Destination: "127.0.0.1:27017", MatchPhase: "body_mismatch", ClosestMock: "mock-12",
 		NextSteps:    "fields differ: body.since, body.users.kqzx9w.since",
 		FieldDiffs:   []models.MockFieldDiff{{Path: "body.since"}, {Path: "body.users.kqzx9w.since"}},
 		FieldReasons: []models.FieldReason{{Field: "body.since", Why: since}, {Field: "body.users.kqzx9w.since", Why: "kqzx9w"}}})
 	require.Equal(t, advice+" ("+since+")", mongo.NextSteps)
+	require.NotContains(t, mongo.NextSteps, "kqzx9w")
 	own := sanitizedMiss(models.UnmatchedCall{Protocol: "HTTP", NextSteps: "re-record the test",
 		FieldReasons: []models.FieldReason{{Field: "body.since", Why: since}, {Field: "body.expires", Why: ttl}}})
 	require.Equal(t, "re-record the test ("+since+"; "+ttl+")", own.NextSteps)

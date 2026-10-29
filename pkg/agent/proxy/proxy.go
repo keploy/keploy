@@ -2814,11 +2814,17 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		parserCtx = learn.WithTracker(parserCtx, p.learnTracker)
 		// The zone of the process that made the connection, by its origin
 		// PID: its calls' clock reads are learned and checked in it, never
-		// in the agent's (a zero zone where keploy cannot read it).
+		// in the agent's (a zero zone where keploy cannot read it). A
+		// docker-mode agent, in a PID namespace of its own, reads none by
+		// a PID: it takes the zone keploy's CLI read of the app container
+		// that made the connection.
 		if p.procZones != nil {
 			z, zerr := p.procZones.Of(destInfo.KernelPid)
+			if errors.Is(zerr, learn.ErrPIDNamespace) && containerkey.TakesPushed() {
+				z, zerr = connZoneOf(ctx, appConn)
+			}
 			if zerr != nil {
-				p.logger.Debug("keploy cannot read the zone of the process that made the connection; its calls are learned in the agent's zone, naming no zone, and a replay here checks a learned clock read in the zone its learn step named (one learned in the application's zone alone and checked at an hour or coarser must hold read in UTC too, and an hour is refused where that zone stands more than an hour from UTC), else in the agent's, refusing one cut to an hour or coarser that it learned in the application's zone alone (one learned in either zone is checked in UTC and the agent's)", zap.Uint32("pid", destInfo.KernelPid), zap.Error(zerr))
+				p.logger.Debug(learn.ZoneUnreadLog+"; its calls are learned in the agent's zone, naming no zone, and a replay here checks a learned clock read in the zone its learn step named (one learned in the application's zone alone and checked at an hour or coarser must hold read in UTC too, and an hour is refused where that zone stands more than an hour from UTC), else in the agent's, refusing one cut to an hour or coarser that it learned in the application's zone alone (one learned in either zone is checked in UTC and the agent's)", zap.Uint32("pid", destInfo.KernelPid), zap.Error(zerr))
 			}
 			parserCtx = learn.WithProcZone(parserCtx, z)
 		}
@@ -4974,6 +4980,18 @@ func (p *Proxy) SetRecordedOfKind(src func(kind models.Kind, visit func(name str
 
 var _ agent.RecordedOfKindSetter = (*Proxy)(nil)
 
+// SetRecordingTimes implements agent.RecordingTimesSetter (exact.go).
+func (p *Proxy) SetRecordingTimes(src func(visit func(name string, req, res time.Time, protocolPhase bool) bool) error) error {
+	m := p.getMockManager()
+	if m == nil {
+		return errNoMockManager
+	}
+	m.SetRecordingTimes(src)
+	return nil
+}
+
+var _ agent.RecordingTimesSetter = (*Proxy)(nil)
+
 // SetRecordedBefore implements agent.RecordedBeforeSetter (exact.go).
 func (p *Proxy) SetRecordedBefore(src func(t time.Time, visit func(*models.Mock) bool) error) error {
 	m := p.getMockManager()
@@ -5568,7 +5586,9 @@ func (p *Proxy) openTestErrorCapture(carry, awaits bool) {
 		for _, err := range between {
 			// Made after the previous test was read: outside every test's
 			// window, the application's background work (betweenTestsMiss).
-			if _, before := err.(beforeSetMiss); !before && provenswitch.On() && madeBetweenTests(err, readAt) {
+			// These are raw misses: a beforeSetMiss is only made into a new
+			// window's accumulator, and the read of that window drains it.
+			if provenswitch.On() && madeBetweenTests(err, readAt) {
 				err = betweenTestsMiss{err}
 			}
 			if !acc.addBounded(err, maxPendingMockErrors) {
@@ -5756,6 +5776,19 @@ func (p *Proxy) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 	// startup traffic). Oldest first. A read that takes them is short of any
 	// that were dropped for room.
 	rawErrs := p.pendingMockErrors.drain()
+	if provenswitch.On() && p.activeTestErrors.Load() == nil {
+		// No test's window is open: a miss made since the last test's
+		// misses were read is outside every test's window, as one the next
+		// window carries in (betweenTestsMiss). The read of a set's end
+		// takes these: what the application did after its last test.
+		// pendingMockErrors holds only raw misses (a beforeSetMiss is only
+		// ever in a window's accumulator), so the time alone decides.
+		for i, err := range rawErrs {
+			if madeBetweenTests(err, p.windowReadAt) {
+				rawErrs[i] = betweenTestsMiss{err}
+			}
+		}
+	}
 	if p.pendingLost {
 		p.pendingLost = false
 		if unreadCause == "" {
@@ -6110,9 +6143,10 @@ func (p *Proxy) sendMockNotFoundErrorFrom(err error, pid uint32, dst *models.Con
 		proxyErr.MismatchReport = &stamped
 	}
 	// The process that made the call (proven switch): its comm and argv[0],
-	// no more of its command line; where keploy runs in a PID namespace of
-	// its own, no name, why, and its kernel pid (starts.Registry.SourceOf).
-	// A copy, as above.
+	// and, only to travel to keploy's receipt, its pid and whole command
+	// line, redacted; where keploy runs in a PID namespace of its own, no
+	// name, why, and its kernel pid (starts.Registry.SourceOf). A copy, as
+	// above.
 	if r := proxyErr.MismatchReport; r != nil && r.Source == nil && pid != 0 && provenswitch.On() {
 		if src := starts.Default.SourceOf(pid); src != nil {
 			stamped := *r

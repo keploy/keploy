@@ -73,7 +73,7 @@ func TestRunTestSet_ACallAfterTheLastTestThatNoMockAnsweredFailsTheSet(t *testin
 			if len(rep.UnclaimedCalls) != 1 || rep.UnclaimedCalls[0].ActualSummary != "POST /publish" {
 				t.Fatalf("unclaimed calls %+v; want the publish", rep.UnclaimedCalls)
 			}
-			if reason := rep.FailureReason; !strings.Contains(reason, "after the set's last test") || !strings.Contains(reason, "POST /publish to broker:9099") {
+			if reason := rep.FailureReason; !strings.Contains(reason, "in the set's last test") || !strings.Contains(reason, "read only at the set's end") || !strings.Contains(reason, "POST /publish to broker:9099") {
 				t.Fatalf("failure reason %q does not name the call", reason)
 			}
 			if h.replayer.notJudged("test-set-0") {

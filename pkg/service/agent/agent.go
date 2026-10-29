@@ -728,6 +728,11 @@ func (a *Agent) MockOutgoing(ctx context.Context, opts models.OutgoingOptions) e
 	if err := a.resetSession(ctx); err != nil {
 		return err
 	}
+	// Whether the session runs the learn step, which its tests' begins keep
+	// to their recorded order (keepRecordedOrder).
+	a.provenMu.Lock()
+	a.proven.order.learn = opts.Learn
+	a.provenMu.Unlock()
 
 	err := a.Proxy.Mock(ctx, opts)
 	if err != nil {
@@ -1266,8 +1271,14 @@ func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHe
 	// promotes out-of-window mocks, needing the whole per-test set every test, so
 	// windowing to disk would only add reload cost. Best-effort — fall back to
 	// full-resident if the store can't be created.
+	//
+	// keploy mock replay under the proven switch keeps the on-disk store
+	// whatever the window mode (stagesMockReplay): its staging reads, of the
+	// store, only what no test owns, and each test reads its own as it opens.
+	// That bounds the agent's memory, which the opt-out of the strict window,
+	// a matching choice, must not undo.
 	var disk *proxyPkg.DiskMocks
-	if pkg.IsStrictMockWindow(a.config != nil && a.config.Test.StrictMockWindow) {
+	if pkg.IsStrictMockWindow(a.config != nil && a.config.Test.StrictMockWindow) || a.stagesMockReplay() {
 		d, diskErr := proxyPkg.NewDiskMocks(a.logger)
 		if diskErr != nil {
 			a.logger.Warn("on-disk mock store unavailable; keeping per-test mocks resident", zap.Error(diskErr))
@@ -1350,10 +1361,14 @@ func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHe
 			return failStream(fmt.Errorf("storemocks stream: read the statement catalog from the on-disk store: %w", err))
 		}
 		storage.statements = statements
+		// diskBytes are the store's records in its file, residentBytes those
+		// it keeps in memory (up to its resident budget): together, every
+		// per-test mock the store holds, as encoded.
 		a.logger.Info("agent mock residency: per-test mocks parked on disk (windowed)",
 			zap.Int("onDisk", disk.Len()),
 			zap.Int("spilledResponses", disk.SpilledResponses()),
 			zap.Int64("diskBytes", disk.DiskBytes()),
+			zap.Int64("residentBytes", disk.ResidentBytes()),
 			zap.Int("residentPerTest", len(storage.filtered)),
 			zap.Int("residentConfig", len(storage.unfiltered)))
 	}
@@ -1751,15 +1766,27 @@ const (
 // the residency decision and the filtering decision have to come from one
 // source. IsStrictMockWindow folds in the env override, so
 // KEPLOY_STRICT_MOCK_WINDOW still opts out either way.
+//
+// keploy mock replay's own staging (params.ExactStaging) is the one call the
+// opt-out does not reach: it is no user's window. Its load is the strict
+// window's staging load (the band before the set's first test, the pool by
+// name), so the opt-out cannot make it read the whole on-disk store.
 func perTestLoadMode(params models.MockFilterParams) string {
 	switch {
 	case params.UseMappingBased && (len(params.MockMapping) > 0 || params.ExactMapping):
 		// An exact empty mapping names no per-test mock: nothing is read.
 		return loadModeMapping
-	case pkg.IsStrictMockWindow(params.StrictMockWindow) && !params.AfterTime.IsZero() && !params.BeforeTime.IsZero():
+	case (params.ExactStaging || pkg.IsStrictMockWindow(params.StrictMockWindow)) && !params.AfterTime.IsZero() && !params.BeforeTime.IsZero():
 		return loadModeStrictWindow
 	}
 	return loadModeLaxAll
+}
+
+// stagesMockReplay reports whether this agent serves keploy mock replay
+// under the proven switch, whose staging reads the on-disk store by what no
+// test owns (stageForExactServing), whatever the strict window says.
+func (a *Agent) stagesMockReplay() bool {
+	return provenswitch.On() && a.config != nil && a.config.Agent.MockMode && a.config.Agent.Mode == models.MODE_TEST
 }
 
 // loadCarryOverLookahead loads the carry-over mocks (models.IsCarryOver: a
@@ -2090,7 +2117,11 @@ func (a *Agent) mocksForParams(ctx context.Context, params models.MockFilterPara
 	// agent logs for "strict mock window enabled" find hits regardless of
 	// which route they used — previously the log fired only on the per-call
 	// flag, making env-only opt-ins invisible.
-	if strictEnabled := pkg.IsStrictMockWindow(params.StrictMockWindow); strictEnabled {
+	//
+	// keploy mock replay's own staging (params.ExactStaging) is no user's
+	// strict window: the notice, about keploy test's per-test windows, is
+	// not printed for it.
+	if strictEnabled := pkg.IsStrictMockWindow(params.StrictMockWindow); strictEnabled && !params.ExactStaging {
 		// Fire the activation message at most once per agent process
 		// (sync.Once). Info (project logging policy disallows Warn for
 		// expected-default state); the escape-hatch names are embedded

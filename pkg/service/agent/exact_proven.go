@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"sort"
 	"time"
 
@@ -83,10 +85,20 @@ func (a *Agent) servePoolExactly(ctx context.Context) error {
 	return es.ServeExactPool(key, append([]string(nil), slice[key]...))
 }
 
-// stageForExactServing stages every mock of the replay on the proxy, once:
-// exact serving decides what each read shows. A new session's stateful
-// cursors start afresh (two rounds never share one). It reports whether it
-// staged: with no recording stored yet there is nothing to stage.
+// stageForExactServing stages the replay's mocks on the proxy, as keploy
+// test stages a set: exact serving decides what each read shows. A new
+// session's stateful cursors start afresh (two rounds never share one). It
+// reports whether it staged: with no recording stored yet there is nothing
+// to stage.
+//
+// Of the on-disk store it reads what was recorded before the set's earliest
+// recorded test (stagingStartupCutoff) and every key's pool slice by name:
+// what no test owns. Each test reads its own as it opens (serveTestExactly),
+// and lets them go as it closes, so the agent never holds every test's
+// recordings at once (a replay of a long recording held them all for its
+// whole session). With no recorded window (a CLI that sends none) the
+// staging reads the whole window, as before. The reads of the recordings
+// the trees then do not hold go to the on-disk store (readUnstagedFromDisk).
 func (a *Agent) stageForExactServing(ctx context.Context) (bool, error) {
 	if _, stored := a.clientMocks.Load(uint64(0)); !stored {
 		// Nothing to stage yet: the CLI stores the recording before it
@@ -96,10 +108,104 @@ func (a *Agent) stageForExactServing(ctx context.Context) (bool, error) {
 	if r, ok := a.Proxy.(coreAgent.StatefulCursorResetter); ok {
 		r.ResetStatefulCursors()
 	}
-	if err := a.UpdateMockParams(ctx, models.MockFilterParams{AfterTime: models.BaseTime, BeforeTime: time.Now()}); err != nil {
+	a.provenMu.Lock()
+	first, pool := a.proven.firstRecorded, a.proven.pool
+	a.provenMu.Unlock()
+	names := poolNames(pool)
+	params := models.MockFilterParams{
+		AfterTime:              models.BaseTime,
+		BeforeTime:             time.Now(),
+		StrictMockWindow:       true,
+		ExactStaging:           true,
+		FirstRecordedTestStart: first,
+	}
+	if err := a.stageMocks(ctx, params, names, nil); err != nil {
 		return false, fmt.Errorf("stage the recording's mocks: %w", err)
 	}
+	if err := a.readUnstagedFromDisk(); err != nil {
+		return false, err
+	}
+	staged := make(map[string]bool, len(names))
+	for _, n := range names {
+		staged[n] = true
+	}
+	a.provenMu.Lock()
+	a.proven.stagedPool = staged
+	a.provenMu.Unlock()
 	return true, nil
+}
+
+// poolNames is every name of pool's slices, once each, in a fixed order.
+func poolNames(pool map[string][]string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, key := range slices.Sorted(maps.Keys(pool)) {
+		for _, n := range pool[key] {
+			if !seen[n] {
+				seen[n] = true
+				out = append(out, n)
+			}
+		}
+	}
+	return out
+}
+
+// covers reports whether staged holds every name of pool's slices.
+func covers(staged map[string]bool, pool map[string][]string) bool {
+	for _, names := range pool {
+		for _, n := range names {
+			if !staged[n] {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// readUnstagedFromDisk points the proxy's reads of the staged set's
+// recordings its trees do not hold (a test's own are staged only as it
+// opens) at the on-disk store: a miss on a call that is the recording of a
+// test not begun yet (a worker's call made early) is told from it; the learn
+// step's earlier places of a pool recording are every recording made before
+// it, a test's own on disk too; record's full round pairs with the
+// recordings of tests not begun yet; and under keploy mock replay a test
+// process's teardown (the calls after its own last test) is bounded by its
+// tests' recordings, which no staging reads. A set kept all resident sets
+// none: its trees hold every recording.
+func (a *Agent) readUnstagedFromDisk() error {
+	if rs, ok := a.Proxy.(coreAgent.RecordingSourceSetter); ok {
+		if err := rs.SetRecordingSource(a.diskRecordingSource()); err != nil {
+			return fmt.Errorf("set the test set's recording source: %w", err)
+		}
+	}
+	if rb, ok := a.Proxy.(coreAgent.RecordedBeforeSetter); ok {
+		if err := rb.SetRecordedBefore(a.diskRecordedBefore()); err != nil {
+			return fmt.Errorf("set the test set's recordings before an instant: %w", err)
+		}
+	}
+	if rk, ok := a.Proxy.(coreAgent.RecordedOfKindSetter); ok {
+		if err := rk.SetRecordedOfKind(a.diskRecordedOfKind()); err != nil {
+			return fmt.Errorf("set the test set's recordings of a kind: %w", err)
+		}
+	}
+	if rt, ok := a.Proxy.(coreAgent.RecordingTimesSetter); ok {
+		if err := rt.SetRecordingTimes(a.diskRecordingTimes()); err != nil {
+			return fmt.Errorf("set the test set's recording times: %w", err)
+		}
+	}
+	return nil
+}
+
+// diskRecordingTimes visits, of the set staged, every on-disk mock's name,
+// request and answer times and protocol phase (DiskMocks.RangeTimes), nil
+// when the set's mocks are all resident, and so all staged in the proxy's
+// trees.
+func (a *Agent) diskRecordingTimes() func(visit func(name string, req, res time.Time, protocolPhase bool) bool) error {
+	disk := a.stagedDisk()
+	if disk == nil {
+		return nil
+	}
+	return disk.RangeTimes
 }
 
 // restartKey starts key's calls outside every test afresh on the proxy
@@ -330,27 +436,10 @@ func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFi
 				return fmt.Errorf("set the test set's background recordings: %w", err)
 			}
 		}
-		// A miss on a call that is the recording of a test not begun yet
-		// (a worker's call made early) is told from the on-disk store: a
-		// test's own are staged only as it opens.
-		if rs, ok := a.Proxy.(coreAgent.RecordingSourceSetter); ok {
-			if err := rs.SetRecordingSource(a.diskRecordingSource()); err != nil {
-				return fmt.Errorf("set the test set's recording source: %w", err)
-			}
-		}
-		// The learn step's earlier places of a pool recording are every
-		// recording made before it, a test's own on disk too.
-		if rb, ok := a.Proxy.(coreAgent.RecordedBeforeSetter); ok {
-			if err := rb.SetRecordedBefore(a.diskRecordedBefore()); err != nil {
-				return fmt.Errorf("set the test set's recordings before an instant: %w", err)
-			}
-		}
-		// Record's full round pairs with the recordings of tests not begun
-		// yet too, which the on-disk store keeps.
-		if rk, ok := a.Proxy.(coreAgent.RecordedOfKindSetter); ok {
-			if err := rk.SetRecordedOfKind(a.diskRecordedOfKind()); err != nil {
-				return fmt.Errorf("set the test set's recordings of a kind: %w", err)
-			}
+		// A test's own are staged only as it opens: what reads them before
+		// reads the on-disk store.
+		if err := a.readUnstagedFromDisk(); err != nil {
+			return err
 		}
 		bg := a.settleBackground(ex)
 		if _, can := es.(coreAgent.ExactBackgroundServer); bg != nil && !can {
