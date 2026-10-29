@@ -11,6 +11,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/recorder"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/replayer"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/vitesslog"
 	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
@@ -29,6 +30,9 @@ type MySQL struct {
 }
 
 func New(logger *zap.Logger) integrations.Integrations {
+	// The vitess parser's log lines are withheld (they hold statements):
+	// note them on this logger, at debug level, without their text.
+	vitesslog.SetLogger(logger)
 	return &MySQL{
 		logger: logger,
 	}
