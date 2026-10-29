@@ -1135,6 +1135,9 @@ func TestOpenFilesLetGoOfADescriptorClosedAsTheyAreRead(t *testing.T) {
 		// A counted descriptor that starts to churn as the files are
 		// checked: set aside, its duplicate holds and counts its file.
 		{"a counted descriptor churning from the check of the files, its duplicate holding its file", map[int]int{0: 1, 3: 3, 4: 3}, nil, 3, 2, 2, true},
+		// The same, its share spent at a comparison with the one before it
+		// (its search for its place took two): set aside there too.
+		{"a counted descriptor whose share runs out as it is compared with the one before it", map[int]int{0: 1, 1: 5, 3: 3, 4: 3}, nil, 3, 3, 3, true},
 	} {
 		files := map[int]int{}
 		var names []string
