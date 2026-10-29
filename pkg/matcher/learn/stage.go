@@ -23,11 +23,11 @@ import (
 // end. Of a recording a call took first, which the call read only what
 // every call's rules read of it, the staging reads the rest (stageRest),
 // so no later call reads a part of it on its answer path. It reads with
-// stageReaders readers at once, half the CPUs Go runs on (GOMAXPROCS), so
-// the set is read before its first heavy test opens while the replay keeps
-// the other half: one reader alone was still reading api-server's set when
-// its first heavy test opened (about 270 CPU-seconds of the set's reads,
-// that test about 100 s in). It stops at the set's NewSet (the set
+// stageReaders readers at once (readersFor the CPUs Go runs on), so the set
+// is read before its heavy tests open while the replay keeps CPU for its
+// calls: one reader alone was still reading api-server's set when its
+// first heavy test opened (about 270 CPU-seconds of the set's reads, that
+// test about 100 s in). It stops at the set's NewSet (the set
 // keeps nothing more) or where the set's budget is spent (setBudget: the
 // set reads the rest once per test, as before), whichever comes first, and
 // the channel it returns gives then what the set it staged read and kept
@@ -57,17 +57,37 @@ func (t *Tracker) WarmSet(src func(visit func(*models.Mock) bool) error) <-chan 
 }
 
 // stageReaders is how many readers a set's staging reads its recordings
-// with (WarmSet): half the CPUs Go runs on (GOMAXPROCS, which follows the
-// CPU quota of the agent's own cgroup, as a container's limit sets it, and
-// not a parent's: memoryLimit says why memory differs), at least one. A var
-// for the rows that hold one reader's read.
-var stageReaders = halfTheCPUs
+// with (WarmSet): readersFor the CPUs Go runs on (GOMAXPROCS, which follows
+// the CPU quota of the agent's own cgroup, as a container's limit sets it,
+// and not a parent's: memoryLimit says why memory differs). A var for the
+// rows that hold one reader's read.
+var stageReaders = func() int { return readersFor(runtime.GOMAXPROCS(0)) }
 
-func halfTheCPUs() int {
-	if n := runtime.GOMAXPROCS(0) / 2; n > 1 {
+// readersFor is how many readers a set's staging reads with on procs CPUs:
+// half of them, so the replay keeps the other half for its calls, and at
+// least two on two CPUs or more (two on two and three CPUs, where half
+// gives one); one on one CPU.
+//
+// Two, not one, on a small agent, because a recording the staging has not
+// begun is read by the first call that reads it, on that call's answer
+// path: a second reader moves reads off the calls, it adds none. On two
+// CPUs (the agent's own cgroup quota, GOMAXPROCS 2), api-server's real
+// round (15,600 recordings) measured:
+//   - one reader: the calls read 7,936 of the recordings themselves, the
+//     staging ended 24 s after the round's heaviest test opened, and that
+//     test took 27 s, against its client's 30 s timeout per request;
+//   - two readers: the calls read 1,606, the staging ended 9 s after the
+//     test opened, and the test took 15 s;
+//   - the same CPU per call answered (0.19 s and 0.20 s) and the same peak
+//     memory (4.87 GB and 4.85 GB).
+func readersFor(procs int) int {
+	if procs < 2 {
+		return 1
+	}
+	if n := procs / 2; n > 2 {
 		return n
 	}
-	return 1
+	return 2
 }
 
 // warmSet is WarmSet's read, on dc's set (setOf), by readers readers at

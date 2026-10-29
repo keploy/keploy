@@ -210,10 +210,10 @@ func TestAStagedSetIsReadForTheLearnStepInRecordsFullRoundAlone(t *testing.T) {
 }
 
 // A set's staging reads its recordings in recorded order across the
-// manager's trees and the disk, so with one reader (an agent of one or two
-// CPUs) the first test's recordings are all read before any of a later
-// test's, whichever store holds them, and a test's own are read before the
-// tests after it open. The set here is three tests an hour apart, each with
+// manager's trees and the disk, so with one reader (an agent on one CPU)
+// the first test's recordings are all read before any of a later test's,
+// whichever store holds them, and a test's own are read before the tests
+// after it open. The set here is three tests an hour apart, each with
 // session recordings the manager's tree holds (made through all three
 // tests) and its own on disk, each answer parked so that the staging's read
 // of it is seen as it happens. Visited trees first, the third test's

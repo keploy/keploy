@@ -28,31 +28,61 @@ func heldAtOnce(t *testing.T, raw []Raw, want int64, release <-chan struct{}) (c
 	return counts, all
 }
 
-// A set's staging (WarmSet) reads with half the
-// CPUs Go runs on (stageReaders: GOMAXPROCS/2, at least one) at once, so a
-// large set is read before its first heavy test opens and the replay keeps
-// the other half: with one reader, api-server's set (about 270 CPU-seconds
-// of reads) was still being read when TestSeeded opened about 100 s in.
-// Each payload is still read once, by the staging, and none by a call; the
-// set's line says how many read it (SetUse.Readers). At the set's NewSet the
-// readers take nothing more: those reading end their read, and the set
-// keeps none of it. Counted, not timed: each reader is held in its payload's
-// decode until the row's count of readers is held at once; a staging that
-// read with fewer would never get there, and ends at go test's timeout with
-// its readers parked in the hold.
-func TestASetsStagingReadsWithHalfTheCPUsAtOnce(t *testing.T) {
-	for _, c := range []struct{ procs, want int }{{1, 1}, {2, 1}, {3, 1}, {8, 4}, {16, 8}} {
-		was := runtime.GOMAXPROCS(c.procs)
-		got := halfTheCPUs()
-		runtime.GOMAXPROCS(was)
-		if got != c.want {
-			t.Errorf("with GOMAXPROCS %d the staging reads with %d readers: want %d", c.procs, got, c.want)
+// A set's staging (WarmSet) reads with readersFor the CPUs Go runs on
+// (stageReaders) at once: half of them, and at least two on two CPUs or
+// more, so a large set is read before its heavy tests open and the replay
+// keeps CPU for its calls: with one reader, api-server's set (about 270
+// CPU-seconds of reads) was still being read when TestSeeded opened about
+// 100 s in, and on two CPUs one reader left the calls 7,936 of its 15,600
+// recordings to read on their answer path, two readers 1,606, at the same
+// CPU per call answered (readersFor's doc has the numbers). Each payload is
+// still read once, by the staging, and none by a call; the set's line says
+// how many read it (SetUse.Readers). At the set's NewSet the readers take
+// nothing more: those reading end their read, and the set keeps none of it.
+// Counted, not timed: each reader is held in its payload's decode until the
+// row's count of readers is held at once; a staging that read with fewer
+// would never get there, so each held subtest first checks the count it
+// waits for.
+func TestASetsStagingReadsWithHalfTheCPUsAndAtLeastTwo(t *testing.T) {
+	for _, c := range []struct{ procs, want int }{{1, 1}, {2, 2}, {3, 2}, {4, 2}, {5, 2}, {6, 3}, {8, 4}, {16, 8}} {
+		if got := readersFor(c.procs); got != c.want {
+			t.Errorf("on %d CPUs the staging reads with %d readers: want %d", c.procs, got, c.want)
 		}
 	}
 	was := stageReaders
-	if got, want := was(), halfTheCPUs(); got != want {
-		t.Errorf("the staging reads with %d readers: want half the CPUs Go runs on (%d)", got, want)
+	for _, procs := range []int{1, 2, 8} {
+		prev := runtime.GOMAXPROCS(procs)
+		got, want := was(), readersFor(procs)
+		runtime.GOMAXPROCS(prev)
+		if got != want {
+			t.Errorf("with GOMAXPROCS %d the staging reads with %d readers: want readersFor the CPUs Go runs on (%d)", procs, got, want)
+		}
 	}
+
+	t.Run("two readers at once on two CPUs", func(t *testing.T) {
+		prev := runtime.GOMAXPROCS(2)
+		t.Cleanup(func() { runtime.GOMAXPROCS(prev) })
+		if got := stageReaders(); got != 2 {
+			t.Fatalf("on two CPUs the staging reads with %d readers: want 2", got)
+		}
+		row := newHeldRow(8, 4)
+		raw := row.raw()
+		release := make(chan struct{})
+		counts, all := heldAtOnce(t, raw, 2, release)
+		tr := NewTracker()
+		tr.NewSet()
+		done := tr.WarmSet(srcOf(row.mocks))
+		<-all
+		close(release)
+		use := <-done
+		if use.Readers != 2 || use.Staged != 8 || use.Called != 0 {
+			t.Fatalf("the set's staging on two CPUs reported %+v: want 2 readers, all 8 payloads read by it, none by a call", use)
+		}
+		if payloads, decodes := decodesOf(counts); payloads != 8 || decodes != 8 {
+			t.Fatalf("2 readers decoded %d of the set's 8 payloads, %d times in all: want each once", payloads, decodes)
+		}
+	})
+
 	const n, readers = 32, 4
 	stageReaders = func() int { return readers }
 	t.Cleanup(func() { stageReaders = was })

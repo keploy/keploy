@@ -47,12 +47,12 @@ func cpuQuota(t *testing.T) (float64, bool) {
 	return q / per, true
 }
 
-// A set's staging reads with half the CPUs the agent may use, where its
-// cgroup sets a CPU quota (cpu.max): Go's GOMAXPROCS, which stageReaders
-// halves, follows that quota (go 1.25 and later, as go.mod says), rounded up
+// A set's staging reads with readersFor the CPUs the agent may use, where
+// its cgroup sets a CPU quota (cpu.max): Go's GOMAXPROCS, which stageReaders
+// reads, follows that quota (go 1.25 and later, as go.mod says), rounded up
 // and at least 2, and the CPUs the agent's affinity allows, so the staging
 // needs no reading of cpu.max of its own. A container with no CPU quota
-// lets the agent use every CPU of its host, and half of them is what it
+// lets the agent use every CPU of its host, and readersFor those is what it
 // reads with.
 //
 // Its limits, stated once here:
@@ -62,8 +62,8 @@ func cpuQuota(t *testing.T) (float64, bool) {
 //     job scope sets one.
 //   - It reads the process's own cpu.max alone, as Go does. A quota on a
 //     parent alone (a systemd slice, a pod's limit over its containers) is
-//     not seen: the staging then reads with half the host's CPUs, inside
-//     the parent's quota. The agent's memory limit (memoryLimit) walks the
+//     not seen: the staging then reads with readersFor the host's CPUs,
+//     inside the parent's quota. The agent's memory limit (memoryLimit) walks the
 //     ancestors instead, because the two fail differently: an ancestor's
 //     memory.max passed OOM-kills the agent, so the set's budget must sit
 //     under the lowest one; an ancestor's CPU quota only throttles, so
@@ -71,29 +71,26 @@ func cpuQuota(t *testing.T) (float64, bool) {
 //   - It re-derives Go's own formula from cpu.max, so it guards against a
 //     stray runtime.GOMAXPROCS call or GOMAXPROCS setting that would undo
 //     the quota, not against a different rule.
-//   - A fractional quota reads with what Go rounds up to, not half the
-//     quota rounded down: 3.5 CPUs give GOMAXPROCS 4 and 2 readers, where
-//     cpu.max / period / 2 would give 1. The quota's CPU time still bounds
-//     the readers together, so the second reader shares that time, never
-//     more of it.
-func TestTheStagingsReadersAreHalfTheAgentsCPUQuota(t *testing.T) {
+//   - A fractional quota reads with what Go rounds up to, not the quota
+//     rounded down: 7.5 CPUs give GOMAXPROCS 8 and 4 readers, where half
+//     of cpu.max / period rounded down would give 3. The quota's CPU time
+//     still bounds the readers together, so the fourth reader shares that
+//     time, never more of it.
+func TestTheStagingsReadersFollowTheAgentsCPUQuota(t *testing.T) {
 	if v := os.Getenv("GOMAXPROCS"); v != "" {
 		t.Skipf("GOMAXPROCS=%s is set by hand: Go follows no quota", v)
 	}
 	q, ok := cpuQuota(t)
 	if !ok {
-		t.Skipf("no CPU quota in this process's cgroups: the staging reads with half of the %d CPUs (%d)", runtime.NumCPU(), halfTheCPUs())
+		t.Skipf("no CPU quota in this process's cgroups: the staging reads with %d readers on the %d CPUs", stageReaders(), runtime.NumCPU())
 	}
 	n := runtime.NumCPU()
 	if c := int(math.Max(2, math.Ceil(q))); c < n {
 		n = c
 	}
-	want := n / 2
-	if want < 1 {
-		want = 1
-	}
-	if got := halfTheCPUs(); got != want {
+	want := readersFor(n)
+	if got := stageReaders(); got != want {
 		t.Errorf("under a CPU quota of %.2f CPUs (%d CPUs on the host), the staging reads with %d readers; want %d", q, runtime.NumCPU(), got, want)
 	}
-	t.Logf("CPU quota %.2f CPUs, host %d CPUs, GOMAXPROCS %d: %d staging readers", q, runtime.NumCPU(), runtime.GOMAXPROCS(0), halfTheCPUs())
+	t.Logf("CPU quota %.2f CPUs, host %d CPUs, GOMAXPROCS %d: %d staging readers", q, runtime.NumCPU(), runtime.GOMAXPROCS(0), stageReaders())
 }
