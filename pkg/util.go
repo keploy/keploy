@@ -1082,8 +1082,11 @@ func IsAppConnectionError(err error) bool {
 // context.Canceled), or the connection closed part-way through the answer
 // (isAnswerCutShort). grpc-go turns the end of a call's
 // context into a status and keeps no cause, so a gRPC call's is its code
-// (isGRPCNoAnswer). This is replay's no-answer mark, which holds off the mocks
-// prune and a new mappings.yaml, and replay asks only this to set it.
+// (isGRPCNoAnswer). This is replay's no-answer mark, and replay asks only this
+// to set it. It holds off a new mappings.yaml. The mocks prune runs past it,
+// keeping each marked test's own mocks, unless a cancel ended the request
+// (IsNoAnswerCanceled) or those mocks could not be read: then it holds the
+// whole set.
 //
 // It is not APP_CONNECTION_ERROR: a stop's cancel is not the app being down.
 // An answer that came back whole but does not decode (answerDoesNotDecode) is
@@ -1097,6 +1100,18 @@ func IsAppNoAnswer(err error) bool {
 		isAnswerCutShort(err) ||
 		isGRPCNoAnswer(err) ||
 		errors.Is(err, ErrAnswerStalled)
+}
+
+// IsNoAnswerCanceled reports whether err is a no-answer (IsAppNoAnswer) that a
+// cancel ended: context.Canceled, or a gRPC call's Canceled code. That is a
+// stop's, the user's or the run's, and says nothing of the test whose request
+// it ended, so replay's mock prune holds the whole set for it, where it holds
+// only each test's own mocks for a test that got no answer of its own.
+func IsNoAnswerCanceled(err error) bool {
+	if err == nil {
+		return false
+	}
+	return errors.Is(err, context.Canceled) || isGRPCCanceled(err)
 }
 
 // IsTransportConnReset reports whether err is a transport-level connection
@@ -3417,6 +3432,17 @@ type TestSetMockIndexReader interface {
 	IndexTestSetMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) (models.TestSetMocks, error)
 }
 
+// TestSetMockWalker is an optional extension of the mock store: every mock of a
+// test set's mock file, before the mapping prune and the window filter (what
+// TestSetMocks.AllPerTest and AllSession hold), handed to visit one at a time
+// as it is decoded, with the pools it is in (both, for the gob store's
+// PostgresV2 mocks of session or connection lifetime). A reader that keeps a
+// few fields of each mock then holds one decoded mock at a time, never the
+// set. visit must not keep m.
+type TestSetMockWalker interface {
+	WalkTestSetMocks(ctx context.Context, testSetID string, visit func(m *models.Mock, perTest, session bool)) error
+}
+
 // ConsumedScopeReader is an optional extension of the instrumentation a replay
 // or a runner talks to the agent through: whether the agent has said it reads
 // the consumed-mock history only for the per-test mocks it stages
@@ -3489,6 +3515,17 @@ type TestCaseFilterSender interface {
 // today's rules.
 type BackgroundRulesReader interface {
 	AgentServesBackground() string
+}
+
+// MockWindowReader is an optional extension of the instrumentation a replay
+// talks to the agent through: what the agent's answers to /updatemockparams,
+// since the set's mocks were stored, said of how it served their windows
+// (models.MockWindowHeader): its strict mock window mode, with the agent's own
+// KEPLOY_STRICT_MOCK_WINDOW folded in, and whether its per-test load ran the
+// carry-over lookahead. ok is false when it has not said, as an agent older
+// than the header does. Without it, or not ok, the agent has not said.
+type MockWindowReader interface {
+	AgentMockWindow() (said models.MockWindowsSaid, ok bool)
 }
 
 // PerTestRegion is the set of names of the per-test mocks a test set hands the
@@ -3947,6 +3984,7 @@ func filterByTimeStampInFlightAware(_ context.Context, logger *zap.Logger, m []*
 	}
 
 	strict := strictWindowEnabled(strictPerCall)
+	w := ServeWindow{Start: afterTime, End: beforeTime, FirstStart: firstWindowStart, InFlightFrom: inFlightFrom, StrictPerCall: strictPerCall, StrictWindow: strictWindow}
 	isNonKeploy := false
 	var droppedOutOfWindow, droppedInvalidOrder, preservedStartup, droppedWindowBound int
 
@@ -3960,190 +3998,101 @@ func filterByTimeStampInFlightAware(_ context.Context, logger *zap.Logger, m []*
 		if p.Version != "api.keploy.io/v1beta1" && p.Version != "api.keploy.io/v1beta2" {
 			isNonKeploy = true
 		}
-		// A window-bound mock (a connection failure) is served from its own
-		// window or the startup band and nowhere else, in both modes — see
-		// placeWindowBound. Routed before every rule below, each of which can
-		// otherwise hand it to every test: the untimed branch, the session
-		// short-circuit, the config/connection tag fallback, lax promotion.
-		if models.WindowBound(p.Kind) {
-			if placeWindowBound(p, afterTime, beforeTime, firstWindowStart) == windowBoundDropped {
-				droppedWindowBound++
-				continue
-			}
+		// Each mock is routed by the rule ServeInWindow names (serveRuleOf),
+		// the one decision the replayer's mock prune asks too. The rules, in
+		// the order they apply:
+		//
+		//   - A window-bound mock (a connection failure) is served from its own
+		//     window or the startup band and nowhere else, in both modes — see
+		//     placeWindowBound. Routed before every rule below, each of which can
+		//     otherwise hand it to every test: the untimed branch, the session
+		//     short-circuit, the config/connection tag fallback, lax promotion.
+		//   - A mock missing a timestamp is kept in the per-test slice.
+		//   - Lifetime-first routing (mockdb/filter-layer authoritative
+		//     attribution design): Session- and Connection-lifetime mocks
+		//     belong in the session/unfiltered pool REGARDLESS of whether their
+		//     request-timestamp falls inside the current test window. They are
+		//     cross-test reusable by contract — a BEGIN / SET / SHOW / handshake
+		//     probe captured during test-N's window is still a session-lifetime
+		//     probe; routing it into test-N's per-test pool would make it
+		//     invisible to every subsequent test. The metadata.scope field is
+		//     NOT read for pool routing anywhere in the filter/mockmanager
+		//     layer; scope and lifetime may legitimately disagree on the wire.
+		//   - BELOW that short-circuit, deliberately: a mock whose response is
+		//     stamped before its request is left out (LeaveOutAnsweredBeforeAsked).
+		//     Only per-test mocks are window-routed, so a skewed pair cannot
+		//     mis-route a session or config mock; running it above the
+		//     short-circuit dropped clock-skewed session mocks (an auth or
+		//     handshake recording) out of EVERY pool.
+		//   - Defensive fallback: DeriveLifetime may not have run on mocks built
+		//     inline by tests or legacy ingest paths, so the raw
+		//     Metadata["type"] config/connection tag routes to the session pool
+		//     when no lifetime is stated. metadata.scope is NOT consulted.
+		//   - In-window = placed inside [afterTime, beforeTime] (models.PlaceOf):
+		//     its request time, or its answer's for a mock placed at its answer.
+		//     The response may straggle past beforeTime; the cross-test bleed
+		//     strict mode protects against is out-of-window REQUESTS.
+		//   - Startup-init (placed before firstWindowStart) is preserved in the
+		//     filtered slice, in BOTH modes, so MockManager.SetMocksWithWindow's
+		//     startup-tier partition routes it into the startup tree, where the
+		//     tier-aware dispatcher reaches it via GetStartupMocks. It used to sit
+		//     inside the strict branch, and agentStrict is permanently false on a
+		//     WindowedProxy, so the startup tier was EMPTY for the whole run and a
+		//     bootstrap query issued while a window was open missed with
+		//     candidates:0. A zero firstWindowStart means "no cutoff yet".
+		//   - In flight when the window began: sent in the gap before it and
+		//     answered at or after its start (a consumer's long poll). The
+		//     window's test's, in the user's strict window mode, and for a stated
+		//     mock in lax mode too.
+		//   - A per-test mock whose recorder stated its lifetime is the data of
+		//     the test it was recorded in, and is served to no other test
+		//     whatever the window mode: lax promotion exists for recordings whose
+		//     recorders could not tell data from shared traffic. Nor does
+		//     KEPLOY_STRICT_MOCK_WINDOW=0 serve it to another test: an HTTP call
+		//     every test may make is declared in keploy.yaml
+		//     (models.SessionCallRule). Under strict, an out-of-window per-test
+		//     mock is dropped — the strictMockWindow guarantee.
+		//   - Legacy (lax, unstated): anything out-of-window goes to the
+		//     unfiltered pool, where parsers may still pick it up as a fallback.
+		switch serveRuleOf(logger, p, w) {
+		case ruleWindowBoundDropped:
+			droppedWindowBound++
+		case ruleWindowBoundInWindow, ruleWindowBoundStartup:
 			p.TestModeInfo.Lifetime = models.LifetimePerTest
 			p.TestModeInfo.IsFiltered = true
 			filteredMocks = append(filteredMocks, p)
-			continue
-		}
-		if p.Spec.ReqTimestampMock.Equal(time.Time{}) || p.Spec.ResTimestampMock.Equal(time.Time{}) {
+		case ruleUntimed:
 			logger.Debug("request or response timestamp of mock is missing",
 				zap.String("mock", p.Name), zap.Bool("strict", strict))
 			p.TestModeInfo.IsFiltered = true
 			filteredMocks = append(filteredMocks, p)
-			continue
-		}
-
-		// Lifetime-first routing (mockdb/filter-layer authoritative
-		// attribution design): Session- and Connection-lifetime mocks
-		// belong in the session/unfiltered pool REGARDLESS of whether
-		// their request-timestamp happens to fall inside the current
-		// test window. Semantics: these are cross-test reusable by
-		// contract — a BEGIN / SET / SHOW / handshake probe that was
-		// captured during test-N's window is still a session-lifetime
-		// probe; routing it into test-N's per-test pool would make it
-		// invisible to every subsequent test (per-test pools are
-		// single-test-scoped). This is load-bearing for the user's
-		// "route by lifetime + reqTimestampMock, ignore metadata.scope"
-		// design — a perTest-lifetime mock stamped scope=session by the
-		// recorder (scope is informational-only on the wire) but whose
-		// req-timestamp sits inside test-N's window still falls through
-		// to the timestamp-based in-window check below and lands in
-		// test-N's per-test pool. The metadata.scope field is NOT read
-		// for pool routing anywhere in the filter/mockmanager layer;
-		// scope and lifetime may legitimately disagree on the wire when
-		// the recorder's context-probe captured a session-scope fire
-		// inside a live test window.
-		if p.TestModeInfo.Lifetime == models.LifetimeSession ||
-			p.TestModeInfo.Lifetime == models.LifetimeConnection {
-			p.TestModeInfo.IsFiltered = false
-			unfilteredMocks = append(unfilteredMocks, p)
-			continue
-		}
-		// NOTE: this runs BELOW the session/connection short-circuit above,
-		// deliberately. It is a window-ordering sanity check, and only per-test
-		// mocks are window-routed — a session or config mock is never compared
-		// against a test window, so a skewed pair cannot mis-route it. Running
-		// it above the short-circuit dropped clock-skewed session mocks (an
-		// auth or handshake recording) out of EVERY pool, which is a hard miss
-		// on traffic that had a perfectly good mock. mockmanager's own
-		// equivalent check is per-test-scoped for the same reason.
-		// Defensive sanity check: if the response-timestamp is BEFORE the
-		// request-timestamp the recording is inconsistent (clock skew,
-		// serialisation bug, or file corruption). Skip it — keeping such
-		// a mock in either pool risks confusing downstream scoring.
-		if LeaveOutAnsweredBeforeAsked(logger, p) {
+		case ruleAnsweredBeforeAsked:
 			droppedInvalidOrder++
-			continue
-		}
-		// Defensive fallback: DeriveLifetime may not have run on mocks
-		// constructed inline by tests or produced by legacy ingest
-		// paths. Fall back to the raw Metadata["type"] tag so a
-		// config/connection-tagged mock still routes to the session
-		// pool even when the cached Lifetime field is the zero value
-		// (LifetimePerTest). metadata.scope is deliberately NOT
-		// consulted here.
-		if p.Spec.Metadata != nil && !p.StatesLifetime() &&
-			(p.Spec.Metadata["type"] == "config" || p.Spec.Metadata["type"] == "connection") {
-			if p.Spec.Metadata["type"] == "config" {
-				p.TestModeInfo.Lifetime = models.LifetimeSession
-			} else {
+		case ruleTaggedConfig, ruleTaggedConnection:
+			p.TestModeInfo.Lifetime = models.LifetimeSession
+			if p.Spec.Metadata["type"] == "connection" {
 				p.TestModeInfo.Lifetime = models.LifetimeConnection
 			}
 			p.TestModeInfo.IsFiltered = false
 			unfilteredMocks = append(unfilteredMocks, p)
-			continue
-		}
-
-		// In-window = placed inside [afterTime, beforeTime] (models.PlaceOf).
-		// The response may straggle past beforeTime — DB/HTTP downstream
-		// responses routinely complete a few micro-to-milliseconds after
-		// the outer test response is captured. The cross-test bleed bug
-		// strict mode protects against is caused by out-of-window REQUESTS
-		// (a different test's data mock getting reused here), not by
-		// in-flight responses landing late. Checking req is sufficient
-		// in both modes — the strict-vs-lax difference is solely in the
-		// out-of-window handling below (strict drops, lax promotes to
-		// the cross-test config pool).
-		//
-		// Only per-test-lifetime mocks reach this predicate — session/
-		// connection-lifetime mocks short-circuited above to the session
-		// pool. A perTest-lifetime mock placed inside
-		// [afterTime, beforeTime] lands in the per-test pool; outside
-		// the window it falls through to the strict/lax out-of-window
-		// handling below.
-		// A mock is in the window its place is in (models.PlaceOf): its
-		// request time, or its answer's for a mock placed at its answer.
-		place := models.PlaceOf(p)
-		inWindow := !place.Before(afterTime) && !place.After(beforeTime)
-		if inWindow {
+		case ruleSessionLifetime, ruleLaxPromoted:
+			p.TestModeInfo.IsFiltered = false
+			unfilteredMocks = append(unfilteredMocks, p)
+		case ruleInWindow, ruleInFlight:
 			p.TestModeInfo.IsFiltered = true
 			filteredMocks = append(filteredMocks, p)
-			continue
-		}
-
-		// Out-of-window handling for per-test-lifetime mocks only.
-		// Session/connection-lifetime mocks were already routed into
-		// the unfiltered pool by the lifetime-first short-circuit
-		// above, so the strict/lax divergence here applies exclusively
-		// to the perTest class that actually needs window containment.
-		// Startup-init (req < firstWindowStart) is preserved in the filtered
-		// slice so MockManager.SetMocksWithWindow's startup-tier partition
-		// routes it into the startup tree, where the tier-aware dispatcher
-		// reaches it via GetStartupMocks.
-		//
-		// This runs in BOTH modes, deliberately. It used to sit inside the
-		// strict branch below, and `agentStrict` is permanently false on a
-		// WindowedProxy (agent.go: `params.StrictMockWindow && !isWindowedProxy`),
-		// so on every windowed replay the lax branch diverted these mocks into
-		// the session/unfiltered pool instead — a pool the mongo tier-aware
-		// path never consults for bootstrap traffic (it reads GetFilteredMocks
-		// and GetStartupMocks only). The startup tier was therefore EMPTY for
-		// the whole run, and a bootstrap query issued while a window was open
-		// missed with candidates:0 even though its mock was on disk.
-		//
-		// It is not a widening of what may be served: these mocks predate the
-		// first test window, so they can only be bootstrap traffic, and routing
-		// them to the tier built for exactly that is what both modes intend.
-		// A zero firstWindowStart still means "no cutoff yet" and falls through
-		// to the legacy behaviour below, unchanged.
-		if !firstWindowStart.IsZero() && place.Before(firstWindowStart) {
+		case ruleStartup:
 			p.TestModeInfo.IsFiltered = true
 			filteredMocks = append(filteredMocks, p)
 			preservedStartup++
-			continue
-		}
-
-		// A per-test mock whose recorder stated its lifetime is the data of
-		// the test it was recorded in, and is served to no other test whatever
-		// the window mode: lax promotion exists for recordings whose recorders
-		// could not tell data from shared traffic, which this one did. Nor does
-		// KEPLOY_STRICT_MOCK_WINDOW=0, that promotion's escape hatch, serve it
-		// to another test: an HTTP call every test may make is declared in
-		// keploy.yaml (models.SessionCallRule).
-		// In flight when the window began: sent in the gap before it and
-		// answered at or after its start (a consumer's long poll). The
-		// window's test's, as the mock manager holds it, in the user's
-		// strict window mode, and for a stated mock in lax mode too, where
-		// it would otherwise be dropped. Lax mode promotes an unstated one
-		// to the session pool below, as every unstated per-test mock out of
-		// the window.
-		if !inFlightFrom.IsZero() && (strictWindowEnabled(strictWindow) || p.StatesLifetime()) && models.InFlightEligible(p) &&
-			models.SentInGapAnsweredBy(p.Spec.ReqTimestampMock, p.Spec.ResTimestampMock, inFlightFrom, afterTime) {
-			p.TestModeInfo.IsFiltered = true
-			filteredMocks = append(filteredMocks, p)
-			continue
-		}
-
-		if strict || p.StatesLifetime() {
-			// Per-test, out-of-window. Genuine stale cross-test bleed
-			// (firstWindowStart <= req < afterTime, or req > beforeTime) is
-			// dropped — the strictMockWindow guarantee. The startup-init band
-			// was already preserved above, in both modes.
-			// Per-mock diagnostic: emit the hash + window + actual ts
-			// at Debug for the strict-drop path so a CI log can
-			// pinpoint which postgres / http / mongo mock the per-test
-			// cohort lost. Without this, "candidates: 0" downstream is
-			// the only visible signal and operators have no way to
-			// confirm whether the mock was on disk at all vs filtered
-			// out. Aggregate count is preserved below for parity.
+		default: // ruleOutOfWindow; ruleReleased needs w.Recorded, which is nil here
+			// Per-mock diagnostic: the hash + window + actual ts, so a CI log
+			// can pinpoint which mock the per-test cohort lost. Info-level
+			// (not Debug) under strict so it surfaces in default CI runs;
+			// tagged "diag/". A stated mock dropped outside strict mode is at
+			// Debug: every test's staging leaves out every other test's mocks,
+			// which is the design, not a regression.
 			if logger != nil {
-				// Info-level (not Debug) so this surfaces in default CI
-				// runs without --debug. Tagged with "diag/" so it is
-				// obviously diagnostic. Will be demoted/removed once the
-				// strict-window regression on listmonk + pgtype-tour is
-				// root-caused. A stated mock dropped outside strict mode is
-				// at Debug: every test's staging leaves out every other
-				// test's mocks, which is the design, not a regression.
 				log := logger.Info
 				if !strict {
 					log = logger.Debug
@@ -4161,11 +4110,6 @@ func filterByTimeStampInFlightAware(_ context.Context, logger *zap.Logger, m []*
 				)
 			}
 			droppedOutOfWindow++
-		} else {
-			// Legacy: anything out-of-window goes to the unfiltered pool
-			// (where parsers may still pick it up as a fallback).
-			p.TestModeInfo.IsFiltered = false
-			unfilteredMocks = append(unfilteredMocks, p)
 		}
 	}
 	if (strict && droppedOutOfWindow > 0) || droppedInvalidOrder > 0 || preservedStartup > 0 || droppedWindowBound > 0 {
