@@ -5,6 +5,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -257,6 +258,86 @@ func TestAZoneFileWhoseRulesAreNotItsNamesIsUnknown(t *testing.T) {
 		if _, off := at.In(loc).Zone(); loc.String() != row.name || off != row.off {
 			t.Errorf("%s: %q at %d; want %q at %d", row.what, loc.String(), off, row.name, row.off)
 		}
+	}
+}
+
+// Where keploy's own file of a zone is another zone's, mounted over it
+// (native mode in an application's container run with the host's
+// /etc/localtime bind-mounted, which lands on the file the image's link
+// names), keploy cannot read that zone by its name: Go would read the
+// mounted zone's rules for it, which a JVM or Node reading the name in
+// their own zone data do not. So each place below that reads a zone by
+// its name refuses it, naming the mount, rather than read it in the
+// mounted zone's rules: a JVM's user.timezone (javaZone) and a zone file
+// named by TZ, the /etc/localtime link or /etc/timezone (loadZone), each
+// an error lasting the process's life, whatever the file's bytes; and a
+// replay's stored zone where keploy cannot read the application's own
+// (CheckClockRead), which refuses the value, though the application wrote
+// it in that zone. With nothing mounted, the same reads name the zone and
+// the value passes. A directory and a mount table of the row's own stand
+// in for keploy's zone files and /proc/self/mountinfo
+// (models.SetOwnZoneFilesForTest).
+func TestAZoneWhoseFileInKeploysOwnIsAnotherZonesIsRefusedByName(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("no mount table off Linux")
+	}
+	berlin, err := time.LoadLocation("Europe/Berlin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmp, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(tmp, "usr/share/zoneinfo")
+	if err := os.MkdirAll(filepath.Join(dir, "Europe"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "Europe/Berlin"), []byte("TZif"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	table := filepath.Join(t.TempDir(), "mountinfo")
+	const root = "1 0 0:1 / / rw - overlay overlay rw\n"
+	mount := func(mounts string) {
+		if err := os.WriteFile(table, []byte(mounts), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		// Forgets the zones models.ZoneLocation read through the last table.
+		t.Cleanup(models.SetOwnZoneFilesForTest(table, []string{dir + "/"}))
+	}
+	t.Setenv("ZONEINFO", "")
+	// The bytes of a zone file named Europe/Berlin: refused before they are
+	// read, so a host with no zone files gives the same refusal.
+	data, _ := os.ReadFile("/usr/share/zoneinfo/Europe/Berlin")
+	const wp = "body.seenAt"
+	o := models.ClockOffset{Res: time.Second, Zone: models.ZoneApp, Layout: "iso-second-space", AppZone: "Europe/Berlin"}
+	call := time.Date(2026, 10, 29, 9, 30, 0, 0, time.UTC)
+	s := Span{From: call.Add(-10 * time.Millisecond), To: call, Zone: time.UTC}
+	v := Leaf{Path: wp, Noise: wp, Type: String, Value: call.In(berlin).Format("2006-01-02 15:04:05")}
+
+	mount(root + "2 1 8:1 /usr/share/zoneinfo/Asia/Kolkata " + dir + "/Europe/Berlin ro - xfs /dev/sda1 rw\n")
+	const mounted = "which is a file mounted from /usr/share/zoneinfo/Asia/Kolkata, the zone file of \"Asia/Kolkata\""
+	if loc, err := javaZone("Europe/Berlin"); loc != nil || !isLasting(err) || !strings.Contains(err.Error(), mounted) {
+		t.Errorf("a JVM's user.timezone Europe/Berlin, keploy's own file of it Kolkata's: %v %v; want a lasting error naming the mount", loc, err)
+	}
+	if loc, err := loadZone("Europe/Berlin", data); loc != nil || !isLasting(err) || !strings.Contains(err.Error(), `cannot be checked against "Europe/Berlin"'s rules`) || !strings.Contains(err.Error(), mounted) {
+		t.Errorf("a zone file named Europe/Berlin, keploy's own file of it Kolkata's: %v %v; want a lasting error naming the mount", loc, err)
+	}
+	if ok, why := CheckClockRead(wp, o, v, s, true); ok || !strings.Contains(why, "the application's zone the learn step read it in, but keploy's own file of that zone is another zone's here") || !strings.Contains(why, mounted) {
+		t.Errorf("a wall clock learned in Europe/Berlin, %q, checked in the stored zone, keploy's own file of it Kolkata's: %v %q; want refused, naming the mount", v.Value, ok, why)
+	}
+
+	mount(root)
+	if loc, err := javaZone("Europe/Berlin"); err != nil || loc.String() != "Europe/Berlin" {
+		t.Errorf("a JVM's user.timezone Europe/Berlin, nothing mounted: %v %v; want Europe/Berlin", loc, err)
+	}
+	if data != nil {
+		if loc, err := loadZone("Europe/Berlin", data); err != nil || loc.String() != "Europe/Berlin" {
+			t.Errorf("a zone file named Europe/Berlin holding its rules, nothing mounted: %v %v; want Europe/Berlin", loc, err)
+		}
+	}
+	if ok, why := CheckClockRead(wp, o, v, s, true); !ok {
+		t.Errorf("a wall clock learned in Europe/Berlin, %q, checked in the stored zone, nothing mounted: %v %q; want passed", v.Value, ok, why)
 	}
 }
 

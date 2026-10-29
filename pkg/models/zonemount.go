@@ -234,6 +234,27 @@ var errOwnZoneMount = errors.New("keploy's own zone file is mounted from another
 // same way.
 func IsOwnZoneMount(err error) bool { return errors.Is(err, errOwnZoneMount) }
 
+// SetOwnZoneFilesForTest makes ZoneLocation's mount check (and only it)
+// look for keploy's own file of a zone under dirs, each ending in "/", in
+// place of Go's zone directories (goZoneDirs; a $ZONEINFO directory is
+// still looked in first), and read the mount table at table in place of
+// /proc/self/mountinfo, forgetting the zones ZoneLocation has read; the
+// returned func puts both back and forgets them again. time.LoadLocation
+// still reads the zone itself from Go's own directories or time/tzdata, so
+// the files under dirs need hold no zone. For rows of other packages, which
+// cannot set these variables: never called outside a test, and never from a
+// parallel test, as it writes them unguarded (the t.Setenv of $ZONEINFO a
+// row needs anyway refuses a parallel test).
+func SetOwnZoneFilesForTest(table string, dirs []string) (restore func()) {
+	oldDirs, oldTable := goZoneDirs, ownZoneMounts
+	goZoneDirs, ownZoneMounts = dirs, table
+	zoneLocations.Clear()
+	return func() {
+		goZoneDirs, ownZoneMounts = oldDirs, oldTable
+		zoneLocations.Clear()
+	}
+}
+
 // ownZoneFileMounted is nil where the file time.LoadLocation reads name
 // from (goZoneFile), if any, is name's own as far as keploy's own mounts
 // tell (ZoneFileMount); an error naming both where it is mounted from

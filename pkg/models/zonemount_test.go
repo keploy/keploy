@@ -146,12 +146,9 @@ func TestZoneLocationRefusesItsOwnFileMountedFromAnotherZones(t *testing.T) {
 	if err := os.Symlink("Kolkata", filepath.Join(dir, "Asia/Calcutta")); err != nil {
 		t.Fatal(err)
 	}
-	oldDirs, oldTable := goZoneDirs, ownZoneMounts
-	t.Cleanup(func() { goZoneDirs, ownZoneMounts = oldDirs, oldTable; zoneLocations.Clear() })
 	t.Setenv("ZONEINFO", "")
-	goZoneDirs = []string{dir + "/"}
 	table := filepath.Join(t.TempDir(), "mountinfo")
-	ownZoneMounts = table
+	t.Cleanup(SetOwnZoneFilesForTest(table, []string{dir + "/"}))
 	const root = "1 0 0:1 / / rw - overlay overlay rw\n"
 	for _, row := range []struct {
 		what, mounts, name string
