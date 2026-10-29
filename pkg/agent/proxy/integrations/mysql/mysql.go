@@ -9,6 +9,7 @@ import (
 	"net"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/recorder"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/replayer"
 	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
@@ -33,6 +34,11 @@ func New(logger *zap.Logger) integrations.Integrations {
 		logger: logger,
 	}
 }
+
+// MockNoise returns MySQL's field-level request-body mock-noise adapter
+// (mysqlNoiseAdapter, exposed via replayer.NoiseAdapter), wiring the parser into
+// the shared mocknoise engine. Satisfies integrations.Integrations.
+func (m *MySQL) MockNoise() mocknoise.Adapter { return replayer.NoiseAdapter() }
 
 func (m *MySQL) MatchType(_ context.Context, buf []byte) bool {
 	// The default proxy path routes MySQL by destination port (3306), so

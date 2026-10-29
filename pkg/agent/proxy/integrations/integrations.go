@@ -7,6 +7,7 @@ import (
 	"net"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/variables"
 	"go.uber.org/zap"
@@ -102,6 +103,15 @@ type Integrations interface {
 	MatchType(ctx context.Context, reqBuf []byte) bool
 	RecordOutgoing(ctx context.Context, session *RecordSession) error
 	MockOutgoing(ctx context.Context, src net.Conn, dstCfg *models.ConditionalDstCfg, mockDb MockMemDb, opts models.OutgoingOptions) error
+
+	// MockNoise returns this parser's mock-noise adapter — the shared engine's
+	// hook for learning drifting request-body fields (req_body_noise) during
+	// auto-replay. A field-level parser returns its real adapter; a
+	// blob/canonical parser (Redis, Generic, …) that cannot do field-level
+	// noise returns nil as an explicit opt-out. Being on the Integrations
+	// interface, the compiler forces every parser — current and future — to
+	// make this choice consciously; it cannot be silently forgotten.
+	MockNoise() mocknoise.Adapter
 }
 
 // IntegrationsV2 is the optional capability interface implemented by
