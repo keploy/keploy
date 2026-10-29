@@ -529,13 +529,16 @@ func TestABrotliDecodeReservesTheTablesItsDecoderRegrows(t *testing.T) {
 // TestADecodeAsksForEachGrownBufferWholeBeforeItGivesTheOldOneBack pins the
 // copy as the output grows: while it copies the buffer it outgrew into the
 // new one it holds both, so it asks for the new buffer's whole capacity, not
-// the growth, and gives the old one back only once the new one is made and
-// the old one copied into it. A decode that asked for the growth alone would
-// end with the same books (its output's capacity) and hold half as much
-// again as it had reserved while it copied. One that gave the old buffer
-// back before it made the new one would make the same calls, and hold both
-// with the old one's room given back while it made and filled the new one:
-// at each give-back the heap must already hold the new buffer whole.
+// the growth, and gives the old one back only once the new one is made. A
+// decode that asked for the growth alone would end with the same books (its
+// output's capacity) and hold half as much again as it had reserved while it
+// copied. One that gave the old buffer back before it made the new one would
+// make the same calls, and hold both with the old one's room given back
+// while it made and filled the new one: at each give-back the heap must
+// already hold the new buffer whole. That is all the row sees. It reads the
+// heap at the give-back, so it cannot tell a give-back after the copy, which
+// is what the code does, from one between the make and the copy: that one
+// also holds the new buffer whole there, and it is a stated limit of the row.
 func TestADecodeAsksForEachGrownBufferWholeBeforeItGivesTheOldOneBack(t *testing.T) {
 	body := textBody(600<<10, 11) // grows 64 KiB to 1 MiB, and ends short of it
 	for _, c := range []encoded{
