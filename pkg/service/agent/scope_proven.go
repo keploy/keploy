@@ -1468,6 +1468,7 @@ func (a *Agent) abandonWindow(id string) {
 	k := scopeKey{pid: 0, name: id}
 	delete(a.workerOpen, k)
 	delete(a.scopeMeta, k)
+	a.abandonScopeLocked(k)
 	a.scopeMu.Unlock()
 }
 
