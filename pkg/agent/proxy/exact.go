@@ -2909,6 +2909,7 @@ func (m *MockManager) noteExactServed(owned, served *models.Mock) {
 		Binds:            bindsOf(served.Spec),
 		Concurrent:       owned.TestModeInfo.Concurrent,
 		LearnedAfterEnd:  m.learnedAfterEnd(m.servedAs(owned), served),
+		SetAsideFrom:     owned.TestModeInfo.SetAsideFrom,
 	}, 0); err != nil && m.logger != nil {
 		m.logger.Error("failed to flag mock as used", zap.Error(err))
 	}
