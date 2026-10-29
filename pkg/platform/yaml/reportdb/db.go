@@ -159,6 +159,7 @@ func sanitizeReportForYAML(report models.TestReport) models.TestReport {
 	// never written, so the report is the same, whatever pid the process had.
 	report.UnclaimedCalls, _ = models.PersistedCalls(report.UnclaimedCalls)
 	report.SetAnswers, _ = models.PersistedCalls(report.SetAnswers)
+	report.BackgroundCalls, _ = models.PersistedCalls(report.BackgroundCalls)
 	copied := false
 	for i := range report.Tests {
 		answers, a := models.PersistedCalls(report.Tests[i].Answers)
