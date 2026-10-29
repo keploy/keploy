@@ -23,8 +23,10 @@ import (
 // commit as a symlink for a root run to write through. A fresh temp file is
 // none of those: createLogFile opens its name with O_EXCL, as os.CreateTemp
 // does, so a file, a symlink or a named pipe already there is refused and
-// another name tried, and it creates the file 0600, its owner's alone. Under sudo, which drops
-// TMPDIR, it is in /tmp and belongs to the run, root.
+// another name tried, and it creates the file 0600, its owner's alone. Under
+// sudo, which drops TMPDIR, it is in /tmp, and its owner is the user sudo ran
+// keploy for, to whom the run hands it by its descriptor at once
+// (giveLogToSudoUser).
 //
 // The run says where it is beside its version line (the `logs:` line of
 // cli/provider's PrintLogo), so a user who wants it can find it while the
@@ -57,20 +59,21 @@ var borrowedLog atomic.Pointer[os.File]
 // openLogFile opens this run's log: the CLI's, for a native agent it names it
 // to (ClientLogFileFlag) when the file passes openClientLogFile's checks, a
 // fresh one (createLogFile) otherwise. refused is why a log the command line
-// named was not taken. A temp directory the run cannot create its own log in
-// is an error, which New turns into a console-only run: the run loses the
-// file, not the command.
-func openLogFile() (f *os.File, refused, err error) {
+// named was not taken, and notHanded why a log this run created under sudo was
+// not handed to the user sudo ran keploy for (createLogFile). A temp
+// directory the run cannot create its own log in is an error, which New turns
+// into a console-only run: the run loses the file, not the command.
+func openLogFile() (f *os.File, refused, notHanded, err error) {
 	if path, ok := clientLogFileArg(commandLine()); ok {
 		f, err := openClientLogFile(path)
 		if err == nil {
 			borrowedLog.Store(f)
-			return f, nil, nil
+			return f, nil, nil, nil
 		}
 		refused = err
 	}
-	f, err = createLogFile()
-	return f, refused, err
+	f, notHanded, err = createLogFile()
+	return f, refused, notHanded, err
 }
 
 // clientLogFileArg is the path args, a command line, gives ClientLogFileFlag:
@@ -100,8 +103,11 @@ func clientLogFileArg(args []string) (string, bool) {
 // createLogFile creates a fresh log in the OS temp directory, as os.CreateTemp
 // does (O_EXCL at a random name, 0600), but open for appending: the native
 // agent appends to it too, and a write at this run's own offset would
-// overwrite the agent's lines.
-func createLogFile() (*os.File, error) {
+// overwrite the agent's lines. Under sudo it hands the file to the user sudo
+// ran keploy for (giveLogToSudoUser), so that user can read the log the run
+// names, and the agent, which takes only that user's file, appends to it.
+// notHanded is why it could not, if it could not; the run keeps the file.
+func createLogFile() (f *os.File, notHanded, err error) {
 	prefix, suffix, _ := strings.Cut(LogFilePattern, "*")
 	dir := os.TempDir()
 	for try := 0; ; try++ {
@@ -110,7 +116,10 @@ func createLogFile() (*os.File, error) {
 		if errors.Is(err, os.ErrExist) && try < 10000 {
 			continue
 		}
-		return f, err
+		if err != nil {
+			return nil, nil, err
+		}
+		return f, giveLogToSudoUser(f), nil
 	}
 }
 

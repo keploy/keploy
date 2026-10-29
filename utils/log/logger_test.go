@@ -989,3 +989,130 @@ func TestRedactText(t *testing.T) {
 		t.Fatalf("with a redactor: %q", got)
 	}
 }
+
+// cappedRunLog makes a file of the test's this run's log, held to capBytes and
+// looked at every statEvery bytes written (logFileRoom), with the console in
+// another file of the test's, and gives back both and a logger writing them.
+func cappedRunLog(t *testing.T, capBytes, statEvery int64) (logger *zap.Logger, runLog, console *os.File) {
+	t.Helper()
+	dir := t.TempDir()
+	console, err := os.Create(filepath.Join(dir, "console"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runLog, err = os.OpenFile(filepath.Join(dir, "run.log"), os.O_RDWR|os.O_CREATE|os.O_EXCL|os.O_APPEND, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prevCap, prevEvery := logFileCap, logFileStatEvery
+	logFileCap, logFileStatEvery = capBytes, statEvery
+	setPrimarySink(console)
+	logFileSink.Store(runLog)
+	t.Cleanup(func() {
+		logFileSink.Store(nil)
+		logFileCap, logFileStatEvery = prevCap, prevEvery
+		TestOnlyResetSink()
+		_ = runLog.Close()
+		_ = console.Close()
+	})
+	logger, err = ChangeLogLevel(zapcore.InfoLevel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return logger, runLog, console
+}
+
+func readAll(t *testing.T, f *os.File) string {
+	t.Helper()
+	b, err := os.ReadFile(f.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// The run's log is often in memory (a tmpfs /tmp), and a --debug run logs
+// without end, so the log holds at most its cap, as KEPLOY_DEBUG_FILE does:
+// whole lines, the same the console got, for as long as one fits beside the
+// closing note, then the note, once, and nothing more. The console still gets
+// every line.
+func TestTheRunsLogStopsAtItsCapWithOneNote(t *testing.T) {
+	const capBytes = 4096
+	logger, runLog, console := cappedRunLog(t, capBytes, 1024)
+	pad := strings.Repeat("x", 60)
+	for i := 0; i < 200; i++ {
+		logger.Info(fmt.Sprintf("line %03d %s", i, pad))
+	}
+	got := readAll(t, runLog)
+	said := readAll(t, console)
+	if len(got) > capBytes {
+		t.Errorf("the log holds %d bytes, past its cap of %d", len(got), capBytes)
+	}
+	if !strings.HasSuffix(got, logFileCapNote) || strings.Count(got, logFileCapNote) != 1 {
+		t.Fatalf("the log does not end with the closing note, once; it holds:\n%s", got)
+	}
+	body := strings.TrimSuffix(got, logFileCapNote)
+	if body == "" || !strings.HasSuffix(body, "\n") || !strings.HasPrefix(said, body) {
+		t.Fatalf("the log before its note is not whole lines the console got first; it holds:\n%s", body)
+	}
+	next, _, _ := strings.Cut(said[len(body):], "\n")
+	if len(body)+len(next)+1+len(logFileCapNote) <= capBytes {
+		t.Errorf("the log stopped at %d bytes with room for the next line (%d bytes) and its note", len(body), len(next)+1)
+	}
+	for i := 0; i < 200; i++ {
+		if !strings.Contains(said, fmt.Sprintf("line %03d %s\n", i, pad)) {
+			t.Errorf("the console is missing line %03d", i)
+		}
+	}
+	logger.Info("a line after the cap")
+	if again := readAll(t, runLog); again != got {
+		t.Errorf("a line after the cap changed the log:\n%s", again[len(got):])
+	}
+}
+
+// The native agent appends to the CLI's log (ClientLogFileFlag), so the cap is
+// the file's, not one process's: lines the other process wrote count. A log
+// that is full when this process first writes it gets the note alone, and one
+// the other process grows between this one's looks at its size goes past the
+// cap by no more than what this process writes between two looks.
+func TestTheRunsLogCapCountsTheOtherProcesssLines(t *testing.T) {
+	other := func(t *testing.T, runLog *os.File, n int) {
+		t.Helper()
+		f, err := os.OpenFile(runLog.Name(), os.O_WRONLY|os.O_APPEND, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = f.Close() }()
+		if _, err := f.WriteString(strings.Repeat("a", n-1) + "\n"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Run("full before this process writes", func(t *testing.T) {
+		const capBytes = 4096
+		logger, runLog, _ := cappedRunLog(t, capBytes, 1024)
+		other(t, runLog, capBytes-50)
+		logger.Info("a CLI line")
+		if got, want := readAll(t, runLog), strings.Repeat("a", capBytes-51)+"\n"+logFileCapNote; got != want {
+			t.Errorf("the log holds:\n%s\nwant the other process's lines and the note alone", got)
+		}
+	})
+	t.Run("grown between looks", func(t *testing.T) {
+		const capBytes, statEvery = 8192, 1024
+		logger, runLog, _ := cappedRunLog(t, capBytes, statEvery)
+		pad := strings.Repeat("x", 60)
+		for i := 0; i < 5; i++ {
+			logger.Info(fmt.Sprintf("line %03d %s", i, pad))
+		}
+		other(t, runLog, 6000)
+		for i := 5; i < 300; i++ {
+			logger.Info(fmt.Sprintf("line %03d %s", i, pad))
+		}
+		got := readAll(t, runLog)
+		if len(got) > capBytes+statEvery {
+			t.Errorf("the log holds %d bytes, past its cap of %d by more than %d", len(got), capBytes, statEvery)
+		}
+		if !strings.HasSuffix(got, logFileCapNote) || strings.Count(got, logFileCapNote) != 1 {
+			t.Errorf("the log does not end with the closing note, once; it ends:\n%s", got[max(0, len(got)-300):])
+		}
+	})
+}

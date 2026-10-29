@@ -40,3 +40,7 @@ func openClientLogFile(path string) (*os.File, error) {
 	}
 	return f, nil
 }
+
+// giveLogToSudoUser does nothing: there is no sudo, and the log is the
+// user's own.
+func giveLogToSudoUser(*os.File) error { return nil }

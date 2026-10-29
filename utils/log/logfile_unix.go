@@ -74,3 +74,33 @@ func invokingUID() (uint32, error) {
 	}
 	return uint32(uid), nil
 }
+
+// chownFile is (*os.File).Chown, fchown(2) on the descriptor; a test swaps in
+// one that records the call.
+var chownFile = (*os.File).Chown
+
+// giveLogToSudoUser hands f, a log this run has just created, to the user sudo
+// ran keploy for (SUDO_UID, and SUDO_GID's group where it is set), so the log
+// the run names is that user's to read, and the native agent, which appends
+// only to that user's file (openClientLogFile), appends to it: one run, one
+// file. It changes the descriptor's file, never a name, which a link swapped
+// in could send elsewhere; mode 0600 stays. Without SUDO_UID the file is
+// already the user's, and nothing is changed.
+func giveLogToSudoUser(f *os.File) error {
+	s := os.Getenv("SUDO_UID")
+	if s == "" {
+		return nil
+	}
+	uid, err := strconv.ParseUint(s, 10, 32)
+	if err != nil {
+		return fmt.Errorf("SUDO_UID %q is not a uid: %w", s, err)
+	}
+	gid := -1
+	if g, err := strconv.ParseUint(os.Getenv("SUDO_GID"), 10, 32); err == nil {
+		gid = int(g)
+	}
+	if err := chownFile(f, int(uid), gid); err != nil {
+		return fmt.Errorf("giving %s to uid %d: %w", f.Name(), uid, err)
+	}
+	return nil
+}

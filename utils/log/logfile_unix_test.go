@@ -394,9 +394,9 @@ func TestNew_AgentAppendsToTheCLIsLogAndLeavesItThere(t *testing.T) {
 			console := consoleTo(t)
 			tmp, _ := inRun(t)
 			t.Setenv("SUDO_UID", c.sudoUID)
-			cli, err := createLogFile()
-			if err != nil {
-				t.Fatal(err)
+			cli, notHanded, err := createLogFile()
+			if err != nil || notHanded != nil {
+				t.Fatal(err, notHanded)
 			}
 			t.Cleanup(func() { _ = CloseLogFile(cli) })
 			mustWrite(t, cli, "cli line 1\n")
@@ -609,5 +609,123 @@ func TestClientLogFileArg(t *testing.T) {
 		if got != c.want || ok != (c.want != "") {
 			t.Errorf("clientLogFileArg(%q) = %q, %v; want %q", c.args, got, ok, c.want)
 		}
+	}
+}
+
+// chownCall is one call of chownFile: the file it changed and to whom.
+type chownCall struct {
+	f        *os.File
+	uid, gid int
+}
+
+// recordChown swaps chownFile, for the rest of the test, for one that records
+// each call and returns ret, and gives back the calls.
+func recordChown(t *testing.T, ret error) *[]chownCall {
+	t.Helper()
+	calls := &[]chownCall{}
+	prev := chownFile
+	chownFile = func(f *os.File, uid, gid int) error {
+		*calls = append(*calls, chownCall{f, uid, gid})
+		return ret
+	}
+	t.Cleanup(func() { chownFile = prev })
+	return calls
+}
+
+// Under sudo the log a run creates is handed, at once and by its descriptor,
+// to the user sudo ran keploy for (SUDO_UID, with SUDO_GID's group where it is
+// set), and stays 0600: that user can read the log the run names, and the
+// agent, which appends only to that user's file, appends to it. Without
+// SUDO_UID nothing is changed. A hand-over that fails keeps the log, and says
+// why (New says it at debug).
+func TestCreateLogFile_UnderSudoHandsTheLogToTheSudoUser(t *testing.T) {
+	for _, c := range []struct {
+		name, uid, gid string
+		want           *chownCall
+		fail           bool
+	}{
+		{name: "under sudo", uid: "4242", gid: "4343", want: &chownCall{uid: 4242, gid: 4343}},
+		{name: "under sudo, no SUDO_GID", uid: "4242", want: &chownCall{uid: 4242, gid: -1}},
+		{name: "without sudo"},
+		{name: "a hand-over that fails", uid: "4242", gid: "4343", want: &chownCall{uid: 4242, gid: 4343}, fail: true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			inRun(t)
+			t.Setenv("SUDO_UID", c.uid)
+			t.Setenv("SUDO_GID", c.gid)
+			var ret error
+			if c.fail {
+				ret = syscall.EPERM
+			}
+			calls := recordChown(t, ret)
+			f, notHanded, err := createLogFile()
+			if err != nil || f == nil {
+				t.Fatalf("createLogFile = %v, %v; want a log", f, err)
+			}
+			t.Cleanup(func() { _ = CloseLogFile(f) })
+			switch {
+			case c.want == nil && len(*calls) != 0:
+				t.Errorf("a run without SUDO_UID changed its log's owner: %+v", *calls)
+			case c.want != nil && (len(*calls) != 1 || (*calls)[0].f != f || (*calls)[0].uid != c.want.uid || (*calls)[0].gid != c.want.gid):
+				t.Errorf("the log %s was handed over by %+v; want once, by its descriptor, to uid %d gid %d", f.Name(), *calls, c.want.uid, c.want.gid)
+			}
+			if (notHanded != nil) != c.fail {
+				t.Errorf("createLogFile says %v of the hand-over; want an error: %v", notHanded, c.fail)
+			}
+			fi, err := f.Stat()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if fi.Mode().Perm() != 0o600 {
+				t.Errorf("the log is %v; want 0600", fi.Mode().Perm())
+			}
+		})
+	}
+}
+
+// As root under sudo for another user, the run's log is that user's, 0600, and
+// the agent sudo starts for that user appends to it: one run, one file.
+// Before, the log was root's, which the user could not read and the agent's
+// owner check refused.
+func TestNew_UnderSudoTheAgentAppendsToTheSudoUsersLog(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("handing a file to another user needs root")
+	}
+	const user = 65534
+	console := consoleTo(t)
+	tmp, _ := inRun(t)
+	t.Setenv("SUDO_UID", strconv.Itoa(user))
+	t.Setenv("SUDO_GID", strconv.Itoa(user))
+	cli, notHanded, err := createLogFile()
+	if err != nil || notHanded != nil {
+		t.Fatal(err, notHanded)
+	}
+	t.Cleanup(func() { _ = CloseLogFile(cli) })
+	fi, err := cli.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st := fi.Sys().(*syscall.Stat_t); st.Uid != user || st.Gid != user || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("the log is uid %d gid %d %v; want uid %d gid %d 0600", st.Uid, st.Gid, fi.Mode().Perm(), user, user)
+	}
+	mustWrite(t, cli, "cli line\n")
+
+	asAgentOf(t, cli.Name())
+	logger, f, err := New()
+	if err != nil || f == nil || f.Name() != cli.Name() {
+		t.Fatalf("New = %v, %v; want the CLI's log %s", f, err, cli.Name())
+	}
+	logger.Info("agent line")
+	if got := mustRead(t, cli.Name()); !strings.Contains(got, "cli line\n") || !strings.Contains(got, "agent line") {
+		t.Errorf("the log holds %q; want the CLI's line and the agent's", got)
+	}
+	if logs, _ := filepath.Glob(filepath.Join(tmp, LogFilePattern)); len(logs) != 1 {
+		t.Errorf("one run keeps %d logs, want the CLI's alone: %v", len(logs), logs)
+	}
+	if said := mustRead(t, console.Name()); strings.Contains(said, "a log of its own") {
+		t.Errorf("the agent keeps a log of its own:\n%s", said)
+	}
+	if err := CloseLogFile(f); err != nil {
+		t.Fatal(err)
 	}
 }

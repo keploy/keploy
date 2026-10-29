@@ -116,9 +116,43 @@ func primarySyncer() zapcore.WriteSyncer {
 // CloseLogFile has closed it.
 var logFileSink atomic.Pointer[os.File]
 
+// FileCapBytes is how much a log file of keploy's may hold: the debug file
+// (KEPLOY_DEBUG_FILE, AddDebugFileSink) and this run's log alike. The run's log
+// is in the temp directory, which is often memory (a tmpfs /tmp), and a --debug
+// run logs without end.
+const FileCapBytes = 100 << 20
+
+// logFileCap is FileCapBytes, which a test lowers.
+var logFileCap int64 = FileCapBytes
+
+// logFileStatEvery is how much this process writes to the log between two
+// looks at the file's size (a test lowers it): the native agent appends to the
+// CLI's log (ClientLogFileFlag), so the file holds the other process's lines
+// too, which count toward the cap, and only the file's size tells how many.
+var logFileStatEvery int64 = 64 << 10
+
+// logFileCapNote is the log's last line, once it is full.
+var logFileCapNote = fmt.Sprintf("keploy stopped writing to this log at its %d MiB cap; the console still has every line.\n", FileCapBytes>>20)
+
+// logFileRoom keeps this run's log within logFileCap. When a line has no room
+// left beside logFileCapNote, the log gets that note and nothing more from
+// this process; the console still gets every line. A line is written whole
+// or not at all, so the note is a line of its own. The file's size is looked
+// at every logFileStatEvery bytes this process writes, and counted from those
+// writes between looks. So with two processes writing it (the CLI and its
+// native agent), each takes it past the cap by no more than what it writes
+// between two of its looks, and each that fills it writes the note once.
+var logFileRoom struct {
+	sync.Mutex
+	f      *os.File // the log the counts below are of
+	size   int64    // its size at the last look, and what this process wrote to it since
+	unseen int64    // what this process wrote to it since the last look
+	full   bool     // the note is written: nothing more is
+}
+
 // logFileWriter writes to logFileSink's file as it is at each write, so a
 // logger built before the log was closed writes nothing more to it, never an
-// error about a closed file.
+// error about a closed file. It keeps the file within its cap (logFileRoom).
 type logFileWriter struct{}
 
 func (logFileWriter) Write(p []byte) (int, error) {
@@ -126,7 +160,34 @@ func (logFileWriter) Write(p []byte) (int, error) {
 	if f == nil {
 		return len(p), nil
 	}
-	if _, err := f.Write(p); err != nil && !errors.Is(err, os.ErrClosed) {
+	r := &logFileRoom
+	r.Lock()
+	defer r.Unlock()
+	if r.f != f {
+		r.f, r.size, r.unseen, r.full = f, 0, logFileStatEvery, false
+	}
+	if r.full {
+		return len(p), nil
+	}
+	if r.unseen >= logFileStatEvery {
+		if fi, err := f.Stat(); err == nil {
+			r.size = fi.Size()
+		}
+		r.unseen = 0
+	}
+	if r.size+int64(len(p))+int64(len(logFileCapNote)) > logFileCap {
+		r.full = true
+		n, err := f.WriteString(logFileCapNote)
+		r.size += int64(n)
+		if err != nil && !errors.Is(err, os.ErrClosed) {
+			return 0, err
+		}
+		return len(p), nil
+	}
+	n, err := f.Write(p)
+	r.size += int64(n)
+	r.unseen += int64(n)
+	if err != nil && !errors.Is(err, os.ErrClosed) {
 		return 0, err
 	}
 	return len(p), nil
@@ -414,10 +475,13 @@ func New() (*zap.Logger, *os.File, error) {
 	// not the command: it logs to the console only, and says so once at debug
 	// (ChangeLogLevel). An agent that does not take the CLI's says where its
 	// own is, and why at debug.
-	logFile, refused, err := openLogFile()
+	logFile, refused, notHanded, err := openLogFile()
 	var notes []logFileNote
 	if refused != nil {
 		notes = append(notes, logFileNote{"not appending to the CLI's log", refused.Error()})
+	}
+	if notHanded != nil {
+		notes = append(notes, logFileNote{"not handing this run's log to the user sudo ran keploy for", notHanded.Error()})
 	}
 	if err != nil {
 		notes = append(notes, logFileNote{"keeping no log file; logging to the console only", err.Error()})
@@ -725,7 +789,7 @@ func AddDebugFileSink(logger *zap.Logger, file *os.File, capBytes int64) (*zap.L
 		return logger, nil
 	}
 	if capBytes <= 0 {
-		capBytes = 100 << 20 // 100 MiB default
+		capBytes = FileCapBytes
 	}
 	capped := newCappedWriteSyncer(zapcore.AddSync(file), capBytes)
 	// FlushInterval defaults to 30s in zap, which is too coarse: a

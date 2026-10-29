@@ -325,7 +325,7 @@ func maybeAttachDebugFileSink(logger *zap.Logger) (*os.File, *log.DebugFileSink)
 			zap.String("path", path), zap.Error(err))
 		return nil, nil
 	}
-	wrapped, sink := log.AddDebugFileSink(logger, f, 100<<20)
+	wrapped, sink := log.AddDebugFileSink(logger, f, log.FileCapBytes)
 	if wrapped == nil || sink == nil {
 		_ = f.Close()
 		return nil, nil
