@@ -134,11 +134,12 @@ jobs:
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/compose-container-keys-linux.sh"
 
       # A learned read of the application's clock of no zone, a date and an
-      # hour, recorded with the app's container in Pacific/Honolulu and
-      # replayed with it in Asia/Kolkata, is checked in the zone keploy's CLI
-      # read of the app's own container (TZ over its /etc/localtime link; in
-      # compose, never a second service's): it passes, and a date two days
-      # stale fails naming the field.
+      # hour, recorded with the app's container in America/Sao_Paulo and
+      # replayed with it in Pacific/Honolulu, is checked in the zone keploy's
+      # CLI read of the app's own container (TZ over its /etc/localtime link;
+      # in compose, the --container-name service's, the one keploy puts in
+      # its agent's PID namespace): it passes, and a date two days stale
+      # fails naming the field.
       - name: Run proven clock-zone e2e, docker and compose legs (a clock read checked in the app container's zone)
         if: ${{ !cancelled() }}
         env:

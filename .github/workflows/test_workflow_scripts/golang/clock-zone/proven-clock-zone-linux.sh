@@ -95,9 +95,15 @@
 #           2. The image whose /etc/localtime links Honolulu, no TZ: passes.
 #           3. As 2, SKEW_HOURS=-49: fails naming body.day.
 #   compose 1. The app's service, of the image linking Honolulu, beside a
-#              second service of the image linking Sao Paulo: passes, each
-#              container read in its own zone, never another's.
+#              second service of the image linking Sao Paulo, which makes no
+#              call: passes, the app's container read in its own zone.
 #           2. As 1, SKEW_HOURS=-49: fails naming body.day.
+#   keploy's compose rewrite puts only the --container-name service in the
+#   agent's PID namespace, and its CLI reads the zone of those alone, so the
+#   second service's zone is never read and this lane cannot show one
+#   container's call taking another's zone: two app containers held in two
+#   zones are proven at unit level only (containerkey's
+#   TestEachAppContainersConnectionsTakeItsOwnZone).
 #   No data race in any log.
 #
 # Readiness is the app's listening port while recording natively, the app's
@@ -447,7 +453,9 @@ docker_leg() {
 }
 # compose_file <app image> <skew>: the project, in the working directory:
 # the app's service, recorded by its container name, and a second service of
-# the image linking DREC_ZONE, which runs beside it and makes no call.
+# the image linking DREC_ZONE, which runs beside it, makes no call and is not
+# in the agent's PID namespace (keploy's rewrite gives that to the app's
+# service alone).
 compose_file() {
     cat >docker-compose.yml <<YML
 services:
@@ -515,5 +523,5 @@ if want docker || want compose; then
     legs=""
     want docker && legs=docker
     want compose && legs="${legs:+$legs and }compose"
-    echo "PASS ($legs): under KEPLOY_PROVEN=1 a learned read of the application's clock of no zone, cut to a day and to an hour, is checked in the zone keploy's CLI read of the app's own container (its TZ over its /etc/localtime link; in compose, never a second service's), not the zone the learn step named, and a date two days stale fails naming the field"
+    echo "PASS ($legs): under KEPLOY_PROVEN=1 a learned read of the application's clock of no zone, cut to a day and to an hour, is checked in the zone keploy's CLI read of the app's own container (its TZ over its /etc/localtime link; in compose, the --container-name service's), not the zone the learn step named, and a date two days stale fails naming the field"
 fi
