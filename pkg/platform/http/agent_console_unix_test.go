@@ -39,7 +39,7 @@ func TestStartWithConsoleCutsTheAgentsLines(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer r.Close()
+			defer func() { _ = r.Close() }()
 			target := &os.Stdout
 			redirect := ""
 			if stream == "stderr" {
