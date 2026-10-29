@@ -5848,6 +5848,17 @@ func (p *Proxy) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 	// startup traffic). Oldest first. A read that takes them is short of any
 	// that were dropped for room.
 	rawErrs := p.pendingMockErrors.drain()
+	if provenswitch.On() && p.activeTestErrors.Load() == nil {
+		// No test's window is open: a miss made since the last test's
+		// misses were read is outside every test's window, as one the next
+		// window carries in (betweenTestsMiss). The read of a set's end
+		// takes these: what the application did after its last test.
+		for i, err := range rawErrs {
+			if _, before := err.(beforeSetMiss); !before && madeBetweenTests(err, p.windowReadAt) {
+				rawErrs[i] = betweenTestsMiss{err}
+			}
+		}
+	}
 	if p.pendingLost {
 		p.pendingLost = false
 		if unreadCause == "" {
