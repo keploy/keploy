@@ -12,6 +12,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -36,7 +37,8 @@ import (
 // has one). An error where keploy cannot read the zone: a TZ of a POSIX rule
 // ("IST-5:30"), which keploy does not read (Go reads UTC there, and the C
 // library the rule), no zone file (a link to nothing), or a file whose rules
-// are not those of the zone its name gives (loadZone).
+// are not those of the zone its name gives (loadZone), or that is mounted
+// from another zone's file (mountedZone).
 func ReadZone(root, tz string, set bool) (*time.Location, error) {
 	return readZone(root, tz, set, true)
 }
@@ -1065,7 +1067,8 @@ func procZoneFrom(ctx context.Context) (ProcZone, bool) {
 // name's own, else by /etc/timezone where the bytes are that zone's file
 // under root's /usr/share/zoneinfo; with no name otherwise. A file that is
 // not there (a link to nothing) is an error, as Go and the C library read
-// UTC there, never the zone its link names.
+// UTC there, never the zone its link names. So is a file that names its
+// zone by its path but is mounted from another zone's (mountedZone).
 func zoneFile(root, name string) (*time.Location, error) {
 	data, final, err := readZoneFile(root, name)
 	if absent(err) {
@@ -1076,18 +1079,99 @@ func zoneFile(root, name string) (*time.Location, error) {
 	}
 	for _, p := range []string{final, name} {
 		if zn := zoneinfoName(p); zn != "" {
+			if err := mountedZone(root, final, zn); err != nil {
+				return nil, err
+			}
 			return loadZone(zn, data)
 		}
 	}
 	if b, err := readUnder(root, "/etc/timezone"); err == nil {
 		zn := strings.TrimSpace(string(b))
 		if zn != "" && !strings.Contains(zn, "..") {
-			if same, err := readUnder(root, "/usr/share/zoneinfo/"+zn); err == nil && bytes.Equal(same, data) {
+			if same, at, err := readZoneFile(root, "/usr/share/zoneinfo/"+zn); err == nil && bytes.Equal(same, data) {
+				if err := mountedZone(root, at, zn); err != nil {
+					return nil, err
+				}
 				return loadZone(zn, data)
 			}
 		}
 	}
 	return loadZone("", data)
+}
+
+// mountedZone is nil where the zone file at p (a path in the process's own
+// view, its links resolved, under root) is, as far as root's mounts tell,
+// the file of the zone zn its path names: no file is mounted at p, or the
+// one mounted there is, by its path in the filesystem it comes from (its
+// mount's root: models.MountAt), a zoneinfo file of zn, or of another of
+// IANA's names of UTC where zn is one (utcNames). A lasting error naming
+// both where the file mounted at p is another zone's, or one whose path
+// names no zone (a host's /etc/localtime that is a copy): Node and a JVM
+// read the zone by zn, the C library, Go and Python by the mounted file's
+// rules, so the zone is unknown. A host's /etc/localtime bind-mounted over
+// an image's link to its zone (`-v /etc/localtime:/etc/localtime:ro`, which
+// lands on the file the link names) gives that shape. loadZone's check of
+// the file's rules against keploy's own zone data cannot see it where the
+// process shares keploy's root (native mode, and keploy's own zone): keploy
+// reads the very file there. A mounted file since replaced on the host (a
+// host's tzdata upgrade renames its files over: the mount's root then ends
+// in "//deleted") still holds the rules it held, and is read by its path.
+// An error, not lasting, where keploy cannot read the mounts
+// (zoneMountTable): a process's zone is read again at its next call
+// (ProcZones), keploy's own, read once at its start, stays unnamed for the
+// run. Off Linux no mount table is read: macOS's zone files are no
+// container's.
+func mountedZone(root, p, zn string) error {
+	if runtime.GOOS != "linux" {
+		return nil
+	}
+	table, at := zoneMountTable(root, p)
+	src, ok, err := models.MountAt(table, at)
+	if err != nil {
+		return fmt.Errorf("keploy cannot read the mounts of the process's root (%s), so it cannot tell whether the zone file %s, which names %q, is a file mounted from another zone's: %w", table, p, zn, err)
+	}
+	if !ok {
+		return nil
+	}
+	src, replaced := strings.CutSuffix(src, "//deleted")
+	sn := zoneinfoName(src)
+	if sn == zn || utcNames[sn] && utcNames[zn] {
+		return nil
+	}
+	what, remedy := fmt.Sprintf("the zone file of %q", sn), fmt.Sprintf("TZ=%s for the mounted file's zone", sn)
+	if sn == "" {
+		what, remedy = "a file whose path names no zone (a copy)", "TZ=<IANA name>"
+	}
+	if replaced {
+		what += ", since replaced on the host"
+	}
+	return lasting(fmt.Errorf("the zone file %s, which names %q by its path, is a file mounted from %s, %s. Node and a JVM read the zone by the name %q, the C library, Go and Python by the mounted file's rules, so keploy reads the application's zone as unknown. A host's /etc/localtime bind-mounted over an image's link to its zone (-v /etc/localtime:/etc/localtime:ro lands on the file the link names) gives this: set TZ to the zone the application runs in (%s), or drop the mount",
+		p, zn, src, what, zn, remedy))
+}
+
+// zoneMountTable is the mount table (a mountinfo file: models.MountAt) of
+// the mounts the files under root are read through, and where p, a path in
+// the process's own view under root, sits in it: a process's own root
+// (<procRoot>/<pid>/root, as ReadProcZone reads it) its own
+// (<pid>/mountinfo, whose mount points are in that process's view, p
+// there); any other directory (keploy's own "/" included) keploy's
+// (/proc/self/mountinfo, p under root).
+func zoneMountTable(root, p string) (table, at string) {
+	if filepath.Base(root) == "root" && isDigitsOnly(filepath.Base(filepath.Dir(root))) {
+		return filepath.Join(filepath.Dir(root), "mountinfo"), path.Clean("/" + p)
+	}
+	return "/proc/self/mountinfo", under(root, p)
+}
+
+// utcNames are IANA's names of UTC: each reads UTC+00:00 with no change
+// of offset in every release of its data (the backward file links them
+// to Etc/UTC or Etc/GMT), so a file of one mounted over another's holds
+// that zone's rules (Fedora's /usr/share/zoneinfo/UTC over an image's
+// Etc/UTC).
+var utcNames = map[string]bool{
+	"UTC": true, "Etc/UTC": true, "UCT": true, "Etc/UCT": true, "Universal": true, "Etc/Universal": true,
+	"Zulu": true, "Etc/Zulu": true, "GMT": true, "Etc/GMT": true, "GMT0": true, "Etc/GMT0": true,
+	"GMT+0": true, "Etc/GMT+0": true, "GMT-0": true, "Etc/GMT-0": true, "Greenwich": true, "Etc/Greenwich": true,
 }
 
 // zoneLocCap bounds zoneLocs: a cache holding it starts again.
@@ -1121,7 +1205,8 @@ type zoneLocKey struct {
 // data than keploy's, for a zone whose rules changed between the two (a
 // stated limit: a right value of such a zone is refused, saying why). A
 // reference that is the very file read (keploy's own zone files, where the
-// process shares keploy's root) finds no difference. A name keploy's zone
+// process shares keploy's root) finds no difference: zoneFile reads the
+// bind mount itself there (mountedZone). A name keploy's zone
 // data does not hold (nor "Local", which names keploy's own zone) is
 // dropped: the file's rules with no name, as keploy cannot tell whether
 // they are the name's.

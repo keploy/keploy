@@ -100,6 +100,7 @@ func TestAConnectionsCallsAreLearnedInTheZoneOfTheProcessThatMadeIt(t *testing.T
 	write(filepath.Join(proc, "4242", "environ"), []byte("PATH=/bin\x00TZ=Asia/Kolkata\x00"))
 	write(filepath.Join(proc, "4242", "cmdline"), []byte("/app/server\x00"))
 	write(filepath.Join(proc, "4242", "maps"), []byte("5600-5610 r-xp 00000000 08:01 7 /app/server\n"))
+	write(filepath.Join(proc, "4242", "mountinfo"), []byte("600 500 0:52 / / rw,relatime - overlay overlay rw\n"))
 	write(filepath.Join(proc, "4242", "stat"), []byte("4242 (app) S 1 1 1 0 -1 4194560 100 0 0 0 1 2 0 0 20 0 4 0 500 1000 100 18446744073709551615 4194304 4227072 140737488350000 0 0 0 0 0 0 0 0 0 17 1 0 0 0 0 0 4239360 4239600 4243456 140737488351000 140737488351100 140737488351100 140737488352000 0"))
 	write(filepath.Join(proc, "4242", "root", "usr", "share", "zoneinfo", "Asia", "Kolkata"), kolkata)
 

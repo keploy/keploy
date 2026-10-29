@@ -14,8 +14,8 @@ import (
 
 // fakeProc writes a process's /proc entry under root: its environ, its
 // command line (a program of no options), its maps (no JVM's), its stat
-// (with a name of spaces and parentheses, which hold no field) and the files
-// of its own root.
+// (with a name of spaces and parentheses, which hold no field), its mount
+// table (one mount, of its root) and the files of its own root.
 func fakeProc(t *testing.T, root string, pid, start string, env []string, files map[string][]byte, links map[string]string) {
 	t.Helper()
 	dir := filepath.Join(root, pid)
@@ -31,6 +31,7 @@ func fakeProc(t *testing.T, root string, pid, start string, env []string, files 
 	write(filepath.Join(dir, "cmdline"), []byte("/app/server\x00"))
 	write(filepath.Join(dir, "maps"), []byte("5600-5610 r-xp 00000000 08:01 7 /app/server\n"))
 	write(filepath.Join(dir, "stat"), []byte(statLine(pid, "my app) (x", "S", "4194560", start, statMem)))
+	write(filepath.Join(dir, "mountinfo"), []byte(rootMount))
 	for name, data := range files {
 		write(filepath.Join(dir, "root", name), data)
 	}
@@ -44,6 +45,9 @@ func fakeProc(t *testing.T, root string, pid, start string, env []string, files 
 		}
 	}
 }
+
+// rootMount is a mount table's line of a container's root.
+const rootMount = "600 500 0:52 / / rw,relatime - overlay overlay rw,lowerdir=/l,upperdir=/u,workdir=/w\n"
 
 // statMem is the addresses of a process's arguments and environment in its
 // memory (stat fields 48-51: arg_start, arg_end, env_start, env_end).
@@ -926,6 +930,102 @@ func TestOneTestsCacheReadsEachCallsClockInItsOwnZoneWhicheverRanFirst(t *testin
 		_ = view(tr, zones[order[0]]).ofIn(rec, live, nil, callAt)
 		if got := len(view(tr, zones[order[1]]).ofIn(rec, live, nil, callAt).clock.rec); got != fresh[order[1]] {
 			t.Errorf("%s after %s on one test's cache: %d clock words; a fresh cache in %s reads %d", zones[order[1]].Name, zones[order[0]].Name, got, zones[order[1]].Name, fresh[order[1]])
+		}
+	}
+}
+
+// A zone file a file of another zone is mounted over is unknown, read from
+// the process's own mounts (models.MountAt), where its rules agree with
+// keploy's own zone data of its name: where the process shares keploy's root
+// (native mode, keploy's own zone) keploy's zone data is the very file, so
+// the rules alone never differ there. A host's /etc/localtime bind-mounted
+// over an image's link to Etc/UTC (-v /etc/localtime:/etc/localtime:ro,
+// which lands on the file the link names) is named by the link while the C
+// library, Go and Python read the host's zone. Each row's Etc/UTC file holds
+// UTC's rules, as keploy's own zone data gives them, so only the mount
+// tells. A mount of the same zone's file, of another of IANA's names of UTC,
+// or of a directory above the file is the zone the path names; mounts the
+// process cannot have kept (hidden by a later one) are not read; a mount
+// table keploy cannot read is an error read again.
+func TestAZoneFileMountedFromAnotherZonesIsUnknown(t *testing.T) {
+	read := func(name string) []byte {
+		b, err := os.ReadFile("/usr/share/zoneinfo/" + name)
+		if err != nil {
+			t.Skipf("no host zone files: %v", err)
+		}
+		return b
+	}
+	utc := read("Etc/UTC")
+	zi := "usr/share/zoneinfo/"
+	toUTC := map[string]string{"etc/localtime": "/" + zi + "Etc/UTC"}
+	files := map[string][]byte{zi + "Etc/UTC": utc}
+	const at = " /usr/share/zoneinfo/Etc/UTC ro,relatime - xfs /dev/sda1 rw\n"
+	fromKolkata := rootMount + "700 600 252:0 /usr/share/zoneinfo/Asia/Kolkata" + at
+	proc := t.TempDir()
+	for _, row := range []struct {
+		what   string
+		pid    string
+		env    []string
+		files  map[string][]byte
+		links  map[string]string
+		mounts string // the mount table; "-" none
+		want   string // the zone's name (its Location's), "!!" a lasting error, "!" one read again
+		why    string // a text the error holds
+	}{
+		{"a link to Etc/UTC whose file is mounted from Kolkata's (the host's /etc/localtime)", "901", nil, files, toUTC, fromKolkata,
+			"!!", `the zone file /usr/share/zoneinfo/Etc/UTC, which names "Etc/UTC" by its path, is a file mounted from /usr/share/zoneinfo/Asia/Kolkata, the zone file of "Asia/Kolkata". Node and a JVM read the zone by the name "Etc/UTC", the C library, Go and Python by the mounted file's rules, so keploy reads the application's zone as unknown`},
+		{"the remedy names the mounted file's zone", "912", nil, files, toUTC, fromKolkata, "!!", "set TZ to the zone the application runs in (TZ=Asia/Kolkata for the mounted file's zone), or drop the mount"},
+		{"mounted from a host's copy, whose path names no zone", "902", nil, files, toUTC, rootMount + "700 600 252:0 /etc/localtime" + at,
+			"!!", `is a file mounted from /etc/localtime, a file whose path names no zone (a copy)`},
+		{"mounted from the same zone's file in a host's subvolume", "903", nil, files, toUTC, rootMount + "700 600 0:40 /root/usr/share/zoneinfo/Etc/UTC" + at, "Etc/UTC", ""},
+		{"mounted from another of IANA's names of UTC (a Fedora host's UTC)", "904", nil, files, toUTC, rootMount + "700 600 252:0 /usr/share/zoneinfo/UTC" + at, "Etc/UTC", ""},
+		{"a host's zoneinfo directory mounted above the file", "905", nil, files, toUTC, rootMount + "700 600 252:0 /usr/share/zoneinfo /usr/share/zoneinfo ro - xfs /dev/sda1 rw\n", "Etc/UTC", ""},
+		{"Kolkata's file mounted, then a directory mounted above it, which hides it", "906", nil, files, toUTC, fromKolkata + "701 600 252:0 /usr/share/zoneinfo /usr/share/zoneinfo ro - xfs /dev/sda1 rw\n", "Etc/UTC", ""},
+		{"the same zone's file mounted, then Kolkata's over it", "907", nil, files, toUTC, rootMount + "699 600 252:0 /usr/share/zoneinfo/Etc/UTC" + at + "700 699 252:0 /usr/share/zoneinfo/Asia/Kolkata" + at,
+			"!!", `mounted from /usr/share/zoneinfo/Asia/Kolkata`},
+		{"TZ=Etc/UTC, whose file is mounted from Kolkata's", "908", []string{"TZ=Etc/UTC"}, files, nil, fromKolkata, "!!", `mounted from /usr/share/zoneinfo/Asia/Kolkata`},
+		{"a copied /etc/localtime that /etc/timezone names Etc/UTC by, whose file is mounted from Kolkata's", "909", nil,
+			map[string][]byte{"etc/localtime": utc, "etc/timezone": []byte("Etc/UTC\n"), zi + "Etc/UTC": utc}, nil, fromKolkata, "!!", `mounted from /usr/share/zoneinfo/Asia/Kolkata`},
+		{"a copied /etc/localtime that /etc/timezone names Etc/UTC by, nothing mounted", "910", nil,
+			map[string][]byte{"etc/localtime": utc, "etc/timezone": []byte("Etc/UTC\n"), zi + "Etc/UTC": utc}, nil, rootMount, "Etc/UTC", ""},
+		{"mounted from the same zone's file, since replaced on the host", "913", nil, files, toUTC, rootMount + "700 600 252:0 /usr/share/zoneinfo/Etc/UTC//deleted" + at, "Etc/UTC", ""},
+		{"mounted from Kolkata's file, since replaced on the host", "914", nil, files, toUTC, rootMount + "700 600 252:0 /usr/share/zoneinfo/Asia/Kolkata//deleted" + at,
+			"!!", `is a file mounted from /usr/share/zoneinfo/Asia/Kolkata, the zone file of "Asia/Kolkata", since replaced on the host. Node and a JVM`},
+		{"its remedy names the zone", "915", nil, files, toUTC, rootMount + "700 600 252:0 /usr/share/zoneinfo/Asia/Kolkata//deleted" + at, "!!", "(TZ=Asia/Kolkata for the mounted file's zone)"},
+		{"a mount table keploy cannot read", "911", nil, files, toUTC, "-", "!", "keploy cannot read the mounts of the process's root"},
+	} {
+		fakeProc(t, proc, row.pid, "500", row.env, row.files, row.links)
+		mi := filepath.Join(proc, row.pid, "mountinfo")
+		if row.mounts == "-" {
+			if err := os.Remove(mi); err != nil {
+				t.Fatal(err)
+			}
+		} else if err := os.WriteFile(mi, []byte(row.mounts), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		pid, _ := strconv.ParseUint(row.pid, 10, 32)
+		z, err := ReadProcZone(proc, uint32(pid))
+		got := ""
+		switch {
+		case err != nil && isLasting(err):
+			got = "!!"
+		case err != nil:
+			got = "!"
+		default:
+			got = z.Loc.String()
+		}
+		if got != row.want || row.why != "" && (err == nil || !strings.Contains(err.Error(), row.why)) {
+			t.Errorf("%s: %q, %v; want %q holding %q", row.what, got, err, row.want, row.why)
+		}
+	}
+	// keploy's own zone reads keploy's own mounts; a process's root its own.
+	for _, c := range [][4]string{
+		{"/", "/usr/share/zoneinfo/Etc/UTC", "/proc/self/mountinfo", "/usr/share/zoneinfo/Etc/UTC"},
+		{"/proc/42/root", "/usr/share/zoneinfo/Etc/UTC", "/proc/42/mountinfo", "/usr/share/zoneinfo/Etc/UTC"},
+		{"/var/tmp/image", "/etc/localtime", "/proc/self/mountinfo", "/var/tmp/image/etc/localtime"},
+	} {
+		if table, p := zoneMountTable(c[0], c[1]); table != c[2] || p != c[3] {
+			t.Errorf("the mounts of %s at %s: %s at %s; want %s at %s", c[0], c[1], table, p, c[2], c[3])
 		}
 	}
 }
