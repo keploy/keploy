@@ -493,6 +493,13 @@ func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFi
 		}
 		a.testBegun[ex.Test] = true
 		a.scopeMu.Unlock()
+		// The tests the replay set aside before this one: their recordings
+		// answer the calls of this test's window and the later ones', as
+		// keploy mock's skipped begin hands them (serveAside), before its
+		// view is installed.
+		for _, s := range ex.Aside {
+			a.serveRecordingsAside(s.Test, s.Owned)
+		}
 		if err := a.serveWorkerExactly(es); err != nil {
 			return err
 		}

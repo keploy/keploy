@@ -3088,6 +3088,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// case that runs ahead of it (testCases are in recorded order), so the
 	// deferred streaming pass does not run in the recorded order.
 	streamingOutOfOrder := false
+	// setAside: the test cases skipped for a reason (quarantined, under the
+	// proven switch): their recordings answer the later test cases' calls
+	// that are them exactly (exact_aside.go).
+	var setAside map[string]bool
 	for _, testCase := range testCases {
 		if _, ok := selectedTests[testCase.Name]; !ok && len(selectedTests) != 0 {
 			continue
@@ -3102,6 +3106,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				TestCasePath: filepath.Join(r.config.Path, testSetID),
 				MockPath:     filepath.Join(r.config.Path, testSetID, "mocks.yaml"),
 				SkipReason:   r.skipReasonFor(testSetID, testCase.Name),
+			}
+			if testCaseResult.SkipReason != "" {
+				if setAside == nil {
+					setAside = map[string]bool{}
+				}
+				setAside[testCase.Name] = true
 			}
 			loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 			if loopErr != nil {
@@ -3126,6 +3136,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		activeTestCases = append(activeTestCases, testCase)
 	}
 
+	r.exact.noteSetAside(testCases, setAside)
 	testsToRun := activeTestCases
 	// Each pass's template values: a RetryPassing cycle that skips a test
 	// case still gives later ones the value a whole pass gives them.
@@ -3580,6 +3591,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// fetch is treated the same as a failed non-instrument fetch
 			// (skip MockMismatches / MatchedCalls rather than emit stale data).
 			var instrumentConsumedFetchErr error
+			// servedAside: what set-aside test cases' recordings answered
+			// in its window (exact_aside.go), named on its result.
+			var servedAside []string
 			if r.instrument {
 				consumedMocks, err = r.hookImpl.GetConsumedMocks(runTestSetCtx)
 				if err == nil && exactEndErr != nil {
@@ -3620,6 +3634,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				for _, m := range consumedMocks {
 					totalConsumedMocks.Set(m)
 				}
+				// What a set-aside test case's recording answered is no
+				// consume of this one's: named on its result, unchecked.
+				consumedMocks, servedAside = splitServedAside(consumedMocks)
 				noteConsumers(consumers, testCase.Name, consumedMocks)
 				noteLearnedAfterEnd(learnedLate, testCase.Name, consumedMocks)
 				r.exact.noteShares(testCase.Name, consumedMocks, instrumentConsumedFetchErr)
@@ -4189,7 +4206,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					perTestConsumedKnown := r.instrument && instrumentConsumedFetchErr == nil
 					if !r.instrument && !r.noAgent {
 						if fetched, fetchErr := r.hookImpl.GetConsumedMocks(runTestSetCtx); fetchErr == nil {
-							perTestConsumed = fetched
+							var aside []string
+							perTestConsumed, aside = splitServedAside(fetched)
+							servedAside = append(servedAside, aside...)
 							perTestConsumedKnown = true
 						} else {
 							// Mirror the instrument-mode skip: leaves
@@ -4303,6 +4322,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					// matching / serving is untouched.
 					depAssert := buildDepResults(expectedMocks, perTestConsumed, depAssertionValid && perTestConsumedKnown, reusableMockNames, mockKindByName, mockLookup)
 					missingDepNames, depLevel := attachDepResults(testCaseResult, testStatus, depAssert, r.assertTestMocks())
+					testCaseResult.FailureInfo.ServedAside = r.namedServedAside(testCase.Name, servedAside)
 					recordUnexercised(depMissingTests, testCase.Name, testStatus, depLevel)
 					switch depLevel {
 					case depLogError:
@@ -4731,6 +4751,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// streamConsumedErr is the first failure to read what this test
 			// consumed, before or after its stream was read.
 			var streamConsumedErr error
+			// streamAside: what set-aside test cases' recordings answered in
+			// its window, before or after its stream was read.
+			var streamAside []string
 			if r.instrument {
 				consumedMocks, err = r.hookImpl.GetConsumedMocks(runTestSetCtx)
 				if err == nil && gapReadErr != nil {
@@ -4746,6 +4769,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				} else {
 					for _, m := range consumedMocks {
 						totalConsumedMocks.Set(m)
+					}
+					// What a set-aside test case's recording answered is no
+					// consume of this one's (exact_aside.go).
+					var aside []string
+					consumedMocks, aside = splitServedAside(consumedMocks)
+					streamAside = append(streamAside, aside...)
+					for _, m := range consumedMocks {
 						mockNames = append(mockNames, m.Name)
 					}
 					noteConsumers(consumers, tc.Name, consumedMocks)
@@ -4968,6 +4998,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				}
 				for _, m := range additionalMocks {
 					totalConsumedMocks.Set(m)
+				}
+				var aside []string
+				additionalMocks, aside = splitServedAside(additionalMocks)
+				streamAside = append(streamAside, aside...)
+				for _, m := range additionalMocks {
 					mockNames = append(mockNames, m.Name)
 				}
 				noteConsumers(consumers, tc.Name, additionalMocks)
@@ -5266,6 +5301,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				// are the ones that verdict read.
 				testCaseResult.FailureInfo.TestMocksUnread = streamTestMocksUnread
 				testCaseResult.FailureInfo.StreamHeldOpen = streamHeldOpen
+				testCaseResult.FailureInfo.ServedAside = r.namedServedAside(tc.Name, streamAside)
 				if testStatus == models.TestStatusObsolete {
 					testCaseResult.FailureInfo.MappingStale = mappingStaleReason
 				}
