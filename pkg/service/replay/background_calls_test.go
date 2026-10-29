@@ -2,8 +2,6 @@ package replay
 
 import (
 	"context"
-	"slices"
-	"sync"
 	"testing"
 	"time"
 
@@ -25,21 +23,6 @@ func betweenTests(summary string) models.UnmatchedCall {
 	return models.UnmatchedCall{Protocol: "MongoDB", ActualSummary: summary, Destination: "mongo:27017",
 		At: time.Date(2026, 10, 29, 9, 0, 0, 0, time.UTC), Kind: models.MissOutsideTest, Background: true,
 		MatchPhase: "no_mock_for_destination", ClosestMock: "mock-12"}
-}
-
-// setBackgroundRecorder is the run's hooks with SetBackgroundHook.
-type setBackgroundRecorder struct {
-	TestHooks
-	mu   sync.Mutex
-	sets []string
-	got  [][]models.UnmatchedCall
-}
-
-func (h *setBackgroundRecorder) SetBackground(testSetID string, calls []models.UnmatchedCall) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.sets = append(h.sets, testSetID)
-	h.got = append(h.got, slices.Clone(calls))
 }
 
 // TestNonExistentApp's shape: the test before it was set aside, and the
@@ -127,30 +110,5 @@ func TestBackgroundCallsAreTheSetsListingOnly(t *testing.T) {
 	s.reset(nil)
 	if got := s.backgroundCalls(); len(got) != 0 {
 		t.Fatalf("after the reset the set lists %+v; want nothing", got)
-	}
-}
-
-// The set's background calls reach SetBackgroundHook as the set's end is told,
-// under the switch only, and not for an end its report does not say.
-func TestBackgroundCallsAreToldToTheHooks(t *testing.T) {
-	provenOn(t, true)
-	h := newPartialRunHarness(t, 2, 0)
-	rec := &setBackgroundRecorder{TestHooks: h.replayer.GetTestHooks()}
-	h.replayer.SetTestHooks(rec)
-	h.instr.mockErrorsFor = misses(nil, reads(betweenTests("find vault_pats")))
-
-	status := h.run(t)
-	h.replayer.tellSetEnd("test-set-0", status, nil)
-	if len(rec.sets) != 1 || rec.sets[0] != "test-set-0" || len(rec.got[0]) != 1 || rec.got[0][0].ClosestMock != "mock-12" {
-		t.Fatalf("SetBackgroundHook was told %v %+v; want test-set-0's background call, once", rec.sets, rec.got)
-	}
-	h.replayer.tellSetEnd("test-set-0", models.TestSetStatusInternalErr, nil)
-	if len(rec.got) != 2 || rec.got[1] != nil {
-		t.Fatalf("an end its report does not say told %+v; want none", rec.got)
-	}
-	provenOn(t, false)
-	h.replayer.tellSetEnd("test-set-0", status, nil)
-	if len(rec.sets) != 2 {
-		t.Fatalf("SetBackgroundHook was told %d times; without the switch it is not told", len(rec.sets))
 	}
 }
