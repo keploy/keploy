@@ -190,8 +190,12 @@ func TestTheCountsProofRefusesWhatAMovedLayoutReads(t *testing.T) {
 // whose tcp_info cannot be read: the byte count the settle once read
 // (TCP_CONNECTION_INFO's tcpi_rxbytes, which counts such a segment twice)
 // could come back with no row going red. Read from the sources that build for
-// darwin/arm64, so it runs on Linux too. (A level or option spelt as a bare
-// number is not seen.)
+// darwin/arm64, so it runs on Linux too. Three spellings get past it, and no
+// code here uses them: a level or option spelt as a bare number; the raw
+// getsockopt taken as a value and called through it (rd := getsockopt;
+// rd(...)), since only a call naming getsockopt itself is flagged; and a
+// second raw reader declared in readTCPOpt's own var ( ... ) group, since the
+// row skips that whole declaration.
 func TestTheMacOSProxyReadsTCPOptionsOnlyThroughReadTCPOpt(t *testing.T) {
 	ctx := build.Default
 	ctx.GOOS, ctx.GOARCH, ctx.CgoEnabled = "darwin", "arm64", false
