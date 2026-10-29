@@ -90,71 +90,133 @@ type SetSeries struct {
 // check no read of its, so it is in no series, and judging and the agent
 // treat it as they did. known excuses leaves as SeriesOf's.
 func SeriesOfSet(recorded []*models.Mock, known Known) SetSeries {
-	prev := previousCalls(recorded)
-	type read struct {
-		m *models.Mock
-		r SeriesRead
-	}
-	var reads []read
-	for _, m := range recorded {
-		if m == nil || m.IsProtocolPhase() {
-			continue
+	out, _ := SeriesOfRange(func(visit func(*models.Mock) bool) error {
+		for _, m := range recorded {
+			if !visit(m) {
+				break
+			}
 		}
-		from := prev(m) // zero for a call of no request time
-		if from.IsZero() {
-			continue
-		}
-		shape, ok := SeriesShapeOf(m)
-		if !ok {
-			continue
-		}
-		reads = append(reads, read{m: m, r: SeriesRead{Shape: shape, Span: Span{From: from, To: m.Spec.ReqTimestampMock}}})
-	}
-	sort.SliceStable(reads, func(i, j int) bool {
-		return reads[i].r.Span.To.Before(reads[j].r.Span.To)
-	})
-	out := SetSeries{Mocks: make([]*models.Mock, len(reads))}
-	rs := make([]SeriesRead, len(reads))
-	for i, r := range reads {
-		out.Mocks[i], rs[i] = r.m, r.r
-	}
-	out.Series = SeriesOf(rs, known)
+		return nil
+	}, func(*models.Mock) bool { return true }, known)
 	return out
 }
 
+// SeriesOfRange is SeriesOfSet over the recordings rng visits (each once, in
+// any order; rng's error is returned, with no series), for a reader that
+// never holds a set's recordings at once (keploy's agent, whose store keeps
+// them on disk and decodes one per visit): each recording is read into its
+// shape and its call's times as it is visited, and kept only when keep says
+// so. SetSeries.Mocks holds a kept recording as visited, and any other as a
+// stand-in that carries only its name, kind and times: never one to answer a
+// call with. The series are SeriesOfSet's, whatever keep says.
+func SeriesOfRange(rng func(visit func(*models.Mock) bool) error, keep func(*models.Mock) bool, known Known) (SetSeries, error) {
+	type read struct {
+		m     *models.Mock
+		shape Shape
+	}
+	var calls []callTimes
+	var reads []read
+	err := rng(func(m *models.Mock) bool {
+		if m == nil || m.IsProtocolPhase() {
+			return true
+		}
+		calls = append(calls, callTimes{req: m.Spec.ReqTimestampMock, res: m.Spec.ResTimestampMock})
+		if m.Spec.ReqTimestampMock.IsZero() {
+			return true
+		}
+		shape, ok := SeriesShapeOf(m)
+		if !ok {
+			return true
+		}
+		if !keep(m) {
+			m = standIn(m)
+		}
+		reads = append(reads, read{m: m, shape: shape})
+		return true
+	})
+	if err != nil {
+		return SetSeries{}, err
+	}
+	prev := previousOf(calls)
+	type spanned struct {
+		m *models.Mock
+		r SeriesRead
+	}
+	var rs []spanned
+	for _, r := range reads {
+		from := prev(r.m.Spec.ReqTimestampMock)
+		if from.IsZero() {
+			continue
+		}
+		rs = append(rs, spanned{m: r.m, r: SeriesRead{Shape: r.shape, Span: Span{From: from, To: r.m.Spec.ReqTimestampMock}}})
+	}
+	sort.SliceStable(rs, func(i, j int) bool {
+		return rs[i].r.Span.To.Before(rs[j].r.Span.To)
+	})
+	out := SetSeries{Mocks: make([]*models.Mock, len(rs))}
+	srs := make([]SeriesRead, len(rs))
+	for i, r := range rs {
+		out.Mocks[i], srs[i] = r.m, r.r
+	}
+	out.Series = SeriesOf(srs, known)
+	return out, nil
+}
+
+// standIn is m as SeriesOfRange keeps a recording it was not asked to keep:
+// its name, kind and call times alone.
+func standIn(m *models.Mock) *models.Mock {
+	s := &models.Mock{Name: m.Name, Kind: m.Kind}
+	s.Spec.ReqTimestampMock, s.Spec.ResTimestampMock = m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock
+	return s
+}
+
+// callTimes is a data-plane call's request and answer times, all
+// previousOf reads of a recording.
+type callTimes struct{ req, res time.Time }
+
 // previousCalls is PreviousCall for every recording of recorded at once:
 // the request time of a recording's previous data-plane call among
-// recorded, zero when it has none. The recordings are ordered by request
-// time once, and each search walks back from its own call to the first
-// sent before it that is no protocol phase and was answered by the time it
-// was sent: the latest such call by request time, PreviousCall's.
+// recorded, zero when it has none (previousOf).
 func previousCalls(recorded []*models.Mock) func(*models.Mock) time.Time {
-	byAt := make([]*models.Mock, 0, len(recorded))
+	var calls []callTimes
 	for _, m := range recorded {
 		if m != nil && !m.IsProtocolPhase() {
-			byAt = append(byAt, m) // one of no request time sorts first, as none
+			calls = append(calls, callTimes{req: m.Spec.ReqTimestampMock, res: m.Spec.ResTimestampMock})
 		}
 	}
-	sort.SliceStable(byAt, func(i, j int) bool {
-		return byAt[i].Spec.ReqTimestampMock.Before(byAt[j].Spec.ReqTimestampMock)
-	})
+	prev := previousOf(calls)
 	return func(paired *models.Mock) time.Time {
 		if paired == nil {
 			return time.Time{}
 		}
-		// Sent strictly before paired: never paired itself (MockID holds
-		// its request time), and nothing for one of no request time.
-		to := paired.Spec.ReqTimestampMock
-		i := sort.Search(len(byAt), func(i int) bool { return !byAt[i].Spec.ReqTimestampMock.Before(to) })
+		return prev(paired.Spec.ReqTimestampMock)
+	}
+}
+
+// previousOf is, for a call sent at to, the request time of its previous
+// call among calls (each a data-plane call's times), zero when it has none.
+// The calls are ordered by request time once, and each search walks back
+// from to to the first call sent before it that was answered by the time it
+// was sent: the latest such call by request time, PreviousCall's.
+func previousOf(calls []callTimes) func(to time.Time) time.Time {
+	byAt := append([]callTimes(nil), calls...) // one of no request time sorts first, as none
+	sort.SliceStable(byAt, func(i, j int) bool { return byAt[i].req.Before(byAt[j].req) })
+	return func(to time.Time) time.Time {
+		// Sent strictly before to: never the call itself (MockID holds its
+		// request time), and nothing for one of no request time.
+		if to.IsZero() {
+			return time.Time{}
+		}
+		i := sort.Search(len(byAt), func(i int) bool { return !byAt[i].req.Before(to) })
 		for i--; i >= 0; i-- {
-			m := byAt[i]
-			// Answered after paired was sent: pending across its send,
+			c := byAt[i]
+			// Answered after the call was sent: pending across its send,
 			// another flow's call. One whose answer time is not known
 			// (zero) still counts, as PreviousCall's.
-			if m.Spec.ResTimestampMock.After(to) {
+			if c.res.After(to) {
 				continue
 			}
-			return m.Spec.ReqTimestampMock
+			return c.req
 		}
 		return time.Time{}
 	}
