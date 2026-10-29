@@ -50,6 +50,18 @@ func MatchWithEngineForTest(ctx context.Context, logger *zap.Logger, req mysql.R
 	return resp, ok, missText, err
 }
 
+// MatchWithNoiseConfigForTest is MatchForTest with the user's noise
+// configuration (test.globalNoise), its requestBody bucket read as the
+// command phase reads it (requestBodyNoise).
+func MatchWithNoiseConfigForTest(ctx context.Context, logger *zap.Logger, req mysql.Request, db integrations.MockMemDb, dctx *wire.DecodeContext, cfg map[string]map[string][]string) (*mysql.Response, bool, string, error) {
+	resp, ok, miss, err := matchCommand(ctx, logger, req, db, dctx, nil, requestBodyNoise(cfg))
+	missText := ""
+	if miss != nil {
+		missText = fmt.Sprintf("%+v", *miss)
+	}
+	return resp, ok, missText, err
+}
+
 // StrictEngineForTest is the schema-noise engine matchCommand runs with under
 // strict enforcement.
 func StrictEngineForTest() *schemanoise.Engine {
