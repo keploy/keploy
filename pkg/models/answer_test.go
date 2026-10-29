@@ -63,3 +63,16 @@ func TestReportAnswerTravelsAsErrAnswered(t *testing.T) {
 	mustPanic(t, "without an Answer", func() { ReportAnswer(ctx, &MockMismatchReport{Protocol: "MongoDB"}) })
 	mustPanic(t, "without an Answer", func() { ReportAnswer(ctx, nil) })
 }
+
+// A call made outside every test's window counts against no test: it is the
+// application's background work (UnmatchedCall.Background).
+func TestABackgroundMissCountsAgainstNoTest(t *testing.T) {
+	m := UnmatchedCall{Protocol: "MongoDB", ActualSummary: "findAndModify ptw_endpoints"}
+	if !m.CountsAgainstTest() {
+		t.Fatal("a MongoDB miss counts against its test")
+	}
+	m.Background = true
+	if m.CountsAgainstTest() {
+		t.Fatal("a background miss counts against no test")
+	}
+}
