@@ -33,8 +33,11 @@ const (
 // network namespace whose own address is local and whose peer is remote: the
 // cgroup of the process that made it, as the kernel's sock_diag gives it
 // (INET_DIAG_CGROUP_ID). An error where the kernel finds no such socket (it
-// is gone) or gives no cgroup.
-func socketCgroup(local, remote netip.AddrPort) (uint64, error) {
+// is gone) or gives no cgroup, and where the query's socket cannot be
+// closed: its descriptor was closed already (EBADF, a bug), so the number
+// may have been another file's while keploy asked, and the answer is not
+// taken.
+func socketCgroup(local, remote netip.AddrPort) (cg uint64, err error) {
 	local = netip.AddrPortFrom(local.Addr().Unmap(), local.Port())
 	remote = netip.AddrPortFrom(remote.Addr().Unmap(), remote.Port())
 	if local.Addr().Is4() != remote.Addr().Is4() {
@@ -48,7 +51,11 @@ func socketCgroup(local, remote netip.AddrPort) (uint64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("the kernel's socket queries (sock_diag) cannot be opened: %w", err)
 	}
-	defer unix.Close(fd)
+	defer func() {
+		if cerr := unix.Close(fd); cerr != nil {
+			cg, err = 0, errors.Join(err, fmt.Errorf("the kernel's socket query (sock_diag) socket cannot be closed: %w", cerr))
+		}
+	}()
 
 	req := make([]byte, netlinkHeaderSize+inetDiagReqV2Len)
 	ne := binary.NativeEndian
@@ -144,13 +151,16 @@ type cgroup2Mount struct{ at, root string }
 
 // cgroup2Mounts is every cgroup2 mount mountinfo (/proc/self/mountinfo)
 // lists.
-func cgroup2Mounts(mountinfo string) ([]cgroup2Mount, error) {
+func cgroup2Mounts(mountinfo string) (ms []cgroup2Mount, err error) {
 	f, err := os.Open(mountinfo)
 	if err != nil {
 		return nil, fmt.Errorf("keploy cannot read its mounts: %w", err)
 	}
-	defer f.Close()
-	var ms []cgroup2Mount
+	defer func() {
+		if cerr := f.Close(); cerr != nil {
+			ms, err = nil, errors.Join(err, fmt.Errorf("keploy cannot close its mount table %s: %w", mountinfo, cerr))
+		}
+	}()
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for sc.Scan() {

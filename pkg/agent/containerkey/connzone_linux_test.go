@@ -4,6 +4,7 @@ package containerkey
 
 import (
 	"bufio"
+	"io"
 	"net"
 	"net/netip"
 	"os"
@@ -14,6 +15,16 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// closeAtEnd closes c when the test ends, failing it where the close fails.
+func closeAtEnd(t *testing.T, what string, c io.Closer) {
+	t.Helper()
+	t.Cleanup(func() {
+		if err := c.Close(); err != nil {
+			t.Errorf("close %s: %v", what, err)
+		}
+	})
+}
+
 // ownCgroup is this process's cgroup v2 path (/proc/self/cgroup's "0::"
 // line); the test is skipped on a host of cgroup v1 alone.
 func ownCgroup(t *testing.T) string {
@@ -22,7 +33,7 @@ func ownCgroup(t *testing.T) string {
 	if err != nil {
 		t.Skipf("no /proc/self/cgroup: %v", err)
 	}
-	defer f.Close()
+	closeAtEnd(t, "/proc/self/cgroup", f)
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
 		if p, ok := strings.CutPrefix(sc.Text(), "0::"); ok {
@@ -53,7 +64,7 @@ func TestTheKernelGivesTheCgroupOfTheAppsEndOfAConnection(t *testing.T) {
 			}
 			t.Fatal(err)
 		}
-		defer ln.Close()
+		closeAtEnd(t, "the listener", ln)
 		accepted := make(chan net.Conn, 1)
 		go func() {
 			c, _ := ln.Accept()
@@ -67,12 +78,12 @@ func TestTheKernelGivesTheCgroupOfTheAppsEndOfAConnection(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer app.Close()
+		closeAtEnd(t, "the app's end", app)
 		proxySide := <-accepted
 		if proxySide == nil {
 			t.Fatal("no connection accepted")
 		}
-		defer proxySide.Close()
+		closeAtEnd(t, "the proxy's end", proxySide)
 		// The proxy asks by its accepted end: the remote is the app's.
 		appEnd := proxySide.RemoteAddr().(*net.TCPAddr).AddrPort()
 		proxyEnd := proxySide.LocalAddr().(*net.TCPAddr).AddrPort()

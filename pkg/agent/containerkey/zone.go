@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/errdefs"
 	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 )
@@ -198,7 +198,7 @@ type containerFiles struct {
 // pathError is err, wrapping fs.ErrNotExist where Docker says the path, or
 // the container, is not there (Readable tells which).
 func pathError(p string, err error) error {
-	if errdefs.IsNotFound(err) {
+	if cerrdefs.IsNotFound(err) {
 		return fmt.Errorf("%s: %w (%v)", p, fs.ErrNotExist, err)
 	}
 	return fmt.Errorf("keploy cannot read %s in the container: %w", p, err)
