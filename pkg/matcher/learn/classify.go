@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf16"
 	"unicode/utf8"
@@ -2438,11 +2439,21 @@ func ReadRaw(m *models.Mock, served bool) (Raw, error) {
 	return RawOf(full, served), nil
 }
 
-// RawOf is RawOf(m, served), m's text read once for the test (a nil cache
-// reads it now).
+// RawOf is RawOf(m, served), m's text read once for the set where a
+// tracker's set keeps payloads (keepsPayloads: a lazy Raw, LazyRawOf, whose
+// payload the set's store keeps by recording), and once for the test
+// otherwise (a nil cache reads it now). Each test reads the payloads of
+// every recording before its calls, and reading one is a JSON encode and
+// decode of the whole recording: read once per test, a set's tests read its
+// recordings once each (api-server's suite: about half of the agent's CPU).
+// A recording whose answer the agent parked on disk is read as it is, once
+// per test: ReadRaw is what reads it back.
 func (dc *DriftCache) RawOf(m *models.Mock, served bool) Raw {
 	if dc == nil {
 		return RawOf(m, served)
+	}
+	if dc.set != nil && !m.HasSpilledResponse() && dc.set.keepsPayloads() {
+		return dc.LazyRawOf(m, served, withAnswer(m))
 	}
 	dc.mu.Lock()
 	r, ok := dc.mockText[m]
@@ -3425,8 +3436,14 @@ func RawOf(m *models.Mock, served bool) Raw {
 	return rawOfNow(m, served)
 }
 
+// payloadDecodes counts the payloads rawOfNow read (a JSON encode and
+// decode of the whole recording each), for the rows: one atomic add next to
+// that read. Nothing in keploy reads it.
+var payloadDecodes atomic.Int64
+
 // rawOfNow is RawOf: m's payload read now.
 func rawOfNow(m *models.Mock, served bool) Raw {
+	payloadDecodes.Add(1)
 	r := Raw{mock: m.Name, at: m.Spec.ReqTimestampMock, answered: m.Spec.ResTimestampMock, served: served, call: callOf(m)}
 	b, err := json.Marshal(payloadSpec(m.Spec))
 	if err != nil {

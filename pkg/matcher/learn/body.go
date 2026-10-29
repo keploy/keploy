@@ -1,7 +1,6 @@
 package learn
 
 import (
-	"container/list"
 	"errors"
 	"sync"
 	"time"
@@ -108,41 +107,62 @@ func (x Raw) unreadWhy() string {
 // rows fail. nil in keploy itself.
 var everyRawLazy func(m *models.Mock, served bool) Raw
 
-// bodyBudget is the bytes of payloads the set's store keeps loaded (about,
-// by rawBody.size). Payloads past it are let go, least recently read
-// first, and loaded again where a rule next reads them: memory stays within
-// it whatever the set's size, at the cost of reading one again.
-var bodyBudget int64 = 64 << 20
+// bodyBudget, where a row sets it (0 or more), caps the bytes of payloads
+// the set's store keeps (about, by rawBody.size) within the set's budget
+// (setBudget); noCap, no cap of its own, in keploy itself. Payloads past it
+// are let go, least recently read first, and loaded again where a rule next
+// reads them: memory stays within it whatever the set's size, at the cost
+// of reading one again.
+var bodyBudget int64 = noCap
 
-// bodyStore keeps the payloads of the set's lazy Raws (LazyRawOf) loaded,
-// by recording (MockID), within bodyBudget bytes, the least recently read
-// let go first. A second read of a payload being loaded waits for that
+// partBody is the one part the store's tier keeps of a recording: its
+// payload.
+const partBody part = 1
+
+// bodyStore keeps the payloads of the set's lazy Raws (LazyRawOf, and
+// DriftCache.RawOf of a recording whose answer is in memory) loaded, by
+// recording (MockID), as one more tier on the set's one budget (setBudget):
+// the least recently read let go first, and only after the words tier has
+// let go of all it keeps (newSetDerived), so a payload is decoded once for
+// the set while the set's derived data leaves room for it, and again only
+// past the budget. A second read of a payload being loaded waits for that
 // load; a payload larger than the whole budget is handed to its reader and
 // kept by none. Whether each was read at all (its read bit) is kept past
 // its payload, a bool by recording, so that a rule asking only that loads
 // nothing again. The tracker makes one per set (setDerived), so what it
 // holds goes with the set.
 type bodyStore struct {
-	mu     sync.Mutex
-	budget int64
-	used   int64
-	order  *list.List // of *bodyEntry, the most recently read first
-	by     map[string]*bodyEntry
-	read   map[string]bool
+	// mu is the set's lock (setDerived.mu): the store's tier draws on the
+	// set's budget, which every tier counts under it. A store no set made
+	// (newBodyStore) has a lock and a budget of its own.
+	mu      *sync.Mutex
+	kept    tier[rawBody]
+	loading map[string]*bodyLoad
+	read    map[string]bool
+	// over: the store's set is over (setDerived.drop), and it keeps no
+	// more.
+	over bool
 	// loads counts the payloads loaded, for the rows.
 	loads int
 }
 
-type bodyEntry struct {
-	id    string
+// bodyLoad is a payload being loaded (bodyStore.get): ready is closed once
+// body is read.
+type bodyLoad struct {
 	ready chan struct{}
 	body  rawBody
-	size  int64
-	at    *list.Element
 }
 
-func newBodyStore(budget int64) *bodyStore {
-	return &bodyStore{budget: budget, order: list.New(), by: map[string]*bodyEntry{}, read: map[string]bool{}}
+// newBodyStore is a store no set made, within limit bytes of a budget of
+// its own (the package's rows).
+func newBodyStore(limit int64) *bodyStore {
+	return newSetBodyStore(&sync.Mutex{}, &budget{limit: limit}, limit)
+}
+
+// newSetBodyStore is a store whose tier draws on b under mu, within limit
+// bytes of its own (noCap: b's).
+func newSetBodyStore(mu *sync.Mutex, b *budget, limit int64) *bodyStore {
+	return &bodyStore{mu: mu, kept: newTier[rawBody](limit, b, true), loading: map[string]*bodyLoad{}, read: map[string]bool{}}
 }
 
 // readOf is whether the recording id names was read, where the store has
@@ -154,47 +174,41 @@ func (s *bodyStore) readOf(id string) (read, ok bool) {
 	return read, ok
 }
 
+// isOver reports whether the store's set is over (setDerived.drop).
+func (s *bodyStore) isOver() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.over
+}
+
 // get is the payload of the recording id (named name) names: kept, being
 // loaded (waited for), or loaded now through load.
 func (s *bodyStore) get(id, name string, load func() (*models.Mock, error)) rawBody {
 	s.mu.Lock()
-	if e, ok := s.by[id]; ok {
-		if e.at != nil {
-			s.order.MoveToFront(e.at)
-		}
+	if sl := s.kept.find(id, partBody); sl != nil {
+		b := sl.p
 		s.mu.Unlock()
-		<-e.ready
-		return e.body
+		return b
 	}
-	e := &bodyEntry{id: id, ready: make(chan struct{})}
-	s.by[id] = e
+	if l, ok := s.loading[id]; ok {
+		s.mu.Unlock()
+		<-l.ready
+		return l.body
+	}
+	l := &bodyLoad{ready: make(chan struct{})}
+	s.loading[id] = l
 	s.loads++
 	s.mu.Unlock()
 
-	e.body = loadBody(name, load)
-	e.size = e.body.size()
+	l.body = loadBody(name, load)
 
 	s.mu.Lock()
-	s.read[id] = e.body.read
-	if e.size > s.budget {
-		delete(s.by, id)
-	} else {
-		e.at = s.order.PushFront(e)
-		s.used += e.size
-		for s.used > s.budget {
-			last := s.order.Back()
-			if last == nil || last == e.at {
-				break
-			}
-			old := last.Value.(*bodyEntry)
-			s.order.Remove(last)
-			delete(s.by, old.id)
-			s.used -= old.size
-		}
-	}
+	s.read[id] = l.body.read
+	s.kept.keep(id, partBody, l.body.size(), func(p *rawBody) { *p = l.body })
+	delete(s.loading, id)
 	s.mu.Unlock()
-	close(e.ready)
-	return e.body
+	close(l.ready)
+	return l.body
 }
 
 // loadBody reads the payload load gives of the recording named name; one
@@ -220,7 +234,7 @@ func loadBody(name string, load func() (*models.Mock, error)) rawBody {
 // read, and each read again after it was let go): the rows read it to show
 // a lazy Raw is loaded only where a rule reads it.
 func (dc *DriftCache) Loads() int {
-	if dc == nil || dc.set == nil || dc.set.bodies == nil {
+	if dc == nil || dc.set == nil {
 		return 0
 	}
 	s := dc.set.bodies
@@ -231,13 +245,15 @@ func (dc *DriftCache) Loads() int {
 
 // LazyRawOf is m as RawOf reads it, served as served, but with its payload
 // read only where a rule first reads it, and then kept in the tracker's
-// store of the set's payloads, within a fixed budget (bodyStore): what a
+// store of the set's payloads, within the set's budget (bodyStore): what a
 // call holds of the recordings before it no longer grows with them. load
 // gives m with its answer (one the agent parked on disk read back); nil is m
 // itself. Its identity is MockID(m), whatever m's answer, since what load
 // gives is the whole recording: what is read of its payload is kept by it
 // for the set (setDerived). A cache no tracker made keeps no store, and its
-// Raw is read now, as RawOf (or, its answer parked, as load gives it).
+// Raw is read now, as RawOf (or, its answer parked, as load gives it); so
+// is one of a set that is over (setDerived.drop), whose store keeps no
+// more: read lazily, it would be loaded again at each read.
 //
 // A recording load cannot give is an unread place, naming why: a rule that
 // reads it refuses (rawUnread), never learns from it.
@@ -247,7 +263,7 @@ func (dc *DriftCache) LazyRawOf(m *models.Mock, served bool, load func() (*model
 	}
 	r := Raw{mock: m.Name, at: m.Spec.ReqTimestampMock, answered: m.Spec.ResTimestampMock, served: served, call: callOf(m),
 		startUp: isStartUp(m), id: MockID(m)}
-	if dc == nil || dc.set == nil {
+	if dc == nil || dc.set == nil || dc.set.bodies.isOver() {
 		b := loadBody(m.Name, load)
 		r.rText, r.rClock, r.rFields, r.rStamps, r.rRead, r.unread = b.text, b.answerClock, b.fields, b.stamps, b.read, b.unread
 		if !b.read {
@@ -255,12 +271,6 @@ func (dc *DriftCache) LazyRawOf(m *models.Mock, served bool, load func() (*model
 		}
 		return r
 	}
-	dc.set.mu.Lock()
-	if dc.set.bodies == nil {
-		dc.set.bodies = newBodyStore(bodyBudget)
-	}
-	store := dc.set.bodies
-	dc.set.mu.Unlock()
-	r.src = &rawSource{id: r.id, name: m.Name, load: load, store: store}
+	r.src = &rawSource{id: r.id, name: m.Name, load: load, store: dc.set.bodies}
 	return r
 }
