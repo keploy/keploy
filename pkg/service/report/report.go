@@ -302,9 +302,10 @@ func (r *Report) printSummary(reports map[string]*models.TestReport) error {
 	if obsolete > 0 {
 		fmt.Fprintf(r.out, "\tTotal test obsolete: %d\n", obsolete)
 	}
-	// Tests keploy quarantined, with their reasons. Only a run under the
-	// proven switch writes a reason (TestResult.SkipReason), so a report
-	// without one prints exactly what it printed before.
+	// Tests keploy quarantined, with their reasons. Only a run whose caller
+	// skipped a test for a reason writes one (TestResult.SkipReason: the
+	// proven switch's gate, or a cloud replay skipping a test with no mapping
+	// entry), so a report without one prints exactly what it printed before.
 	quarantined := quarantinedTests(reports)
 	if len(quarantined) > 0 {
 		fmt.Fprintf(r.out, "\tTotal test quarantined: %d\n", len(quarantined))
