@@ -57,6 +57,9 @@ var builtinYAMLKinds = map[models.Kind]struct{}{
 // and logs a warning. Two packages claiming the same kind is almost
 // always a bug; surfacing it at startup rather than at first load
 // makes the failure mode obvious.
+//
+// A registration starts a new models.MockRulesGeneration, so no mock-file
+// index kept before it answers a later read.
 func RegisterMockYAMLMapper(kind models.Kind, mapper MockYAMLMapper) {
 	if kind == "" || mapper.Encode == nil || mapper.Decode == nil {
 		return
@@ -69,6 +72,9 @@ func RegisterMockYAMLMapper(kind models.Kind, mapper MockYAMLMapper) {
 		log.Printf("mockdb: replacing previously-registered YAML mapper for kind %q; check for duplicate init() registrations", kind)
 		mockYAMLMappers.Store(kind, mapper)
 	}
+	// A document of this kind now decodes otherwise: an index of a mock file
+	// kept before (indexCache) no longer answers a read.
+	models.MockRulesChanged()
 }
 
 func encodeWithMapper(mock *models.Mock, doc *yaml.NetworkTrafficDoc) (bool, error) {

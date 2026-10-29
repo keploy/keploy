@@ -88,6 +88,7 @@ var sessionCalls atomic.Pointer[[]SessionCallRule]
 func SetSessionCalls(rules []SessionCallRule) {
 	cp := append([]SessionCallRule(nil), rules...)
 	sessionCalls.Store(&cp)
+	mockRulesChanged()
 }
 
 // declaredSessionCall reports whether m is an HTTP or HTTP/2 call a declared
