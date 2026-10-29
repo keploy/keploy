@@ -2,6 +2,7 @@ package http
 
 import (
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
@@ -64,5 +65,84 @@ func TestACallBeyondTheTestsCountIsServedAnExactSetAsideCopy(t *testing.T) {
 	status, body, _ = exchangeOf(t, store(copyOf), addr, raw)
 	if status != 502 || body == "set" {
 		t.Fatalf("with the switch off a call was served %d %q; want the miss main makes, nothing served aside", status, body)
+	}
+}
+
+// asideMemDb is a store that shows aside as the set-aside recordings
+// (integrations.SetAsideReader) beside mockMemDb's reads.
+type asideMemDb struct {
+	*mockMemDb
+	aside []*models.Mock
+}
+
+func (d *asideMemDb) SetAsideMocks(kind models.Kind) []*models.Mock {
+	var out []*models.Mock
+	for _, m := range d.aside {
+		if kind == "" || m.Kind == kind {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// A set-aside test's recording whose request holds a read of the
+// application's clock the learn step learned (MockSpec.Clocks) answers a
+// later test's call only when the call carries a read of the clock made in
+// that call's own window (since the previous serve on its connection), the
+// check its own test's call gets (clockDiffs), never unchecked. A value
+// moved thirty days, the epoch, the recorded value itself, a read made
+// before the later call's window, and every value where keploy cannot tell
+// the application's clock are not that recording: the call stays a miss.
+func TestASetAsideRecordingsClockReadIsCheckedInTheLaterCallsWindow(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "1")
+	base := time.Date(2026, 10, 26, 15, 50, 35, 0, time.UTC)
+	recAt := time.Date(2026, 9, 1, 9, 0, 0, 0, time.UTC)
+	stamp := func(at time.Time) string { return at.Format(time.RFC3339) }
+	now := base.Add(time.Second)
+	aside := func() *models.Mock {
+		m := recorded("pat-fill", "/v1/pat", map[string]string{"Content-Type": "application/json"}, `{"q":"x","since":"`+stamp(recAt)+`"}`)
+		m.Spec.Clocks = map[string]models.ClockOffset{"body.since": {Res: time.Second}}
+		return m
+	}
+	call := func(since string) *req {
+		r := sent("/v1/pat", map[string]string{"Content-Type": "application/json"}, `{"q":"x","since":"`+since+`"}`)
+		r.arrived = base.Add(2 * time.Second)
+		return r
+	}
+	for _, c := range []struct {
+		name     string
+		since    string
+		appClock bool
+		served   bool
+	}{
+		{"a read of the clock in the later call's window", stamp(now), true, true},
+		{"moved thirty days", stamp(now.AddDate(0, 0, -30)), true, false},
+		{"the epoch", "1970-01-01T00:00:00Z", true, false},
+		{"the recorded value", stamp(recAt), true, false},
+		{"a read made before the later call's window", stamp(base.Add(-10 * time.Second)), true, false},
+		{"keploy cannot tell the app's clock", stamp(now), false, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			db := &asideMemDb{mockMemDb: &mockMemDb{updateUnFilteredReturn: true}, aside: []*models.Mock{aside()}}
+			got, err := newHTTP().setAsideAnswer(clockConn(c.appClock, base), call(c.since), db, models.ProvenFlakyHeaderNoise(), nil, nil, true, false)
+			if err != nil {
+				t.Fatalf("setAsideAnswer: %v", err)
+			}
+			if c.served {
+				if got == nil || got.Name != "pat-fill" {
+					t.Fatalf("served %v; want the set-aside recording, its clock read made in the call's window", got)
+				}
+				if db.updateUnFilteredMockOld == nil || db.updateUnFilteredMockOld.Name != "pat-fill" {
+					t.Fatal("served without its claim through the store's consume door")
+				}
+				return
+			}
+			if got != nil {
+				t.Fatalf("served %s; want the call left a miss: its clock read is checked as in its own test", got.Name)
+			}
+			if db.updateUnFilteredMockOld != nil {
+				t.Fatalf("claimed %s for a call it does not answer", db.updateUnFilteredMockOld.Name)
+			}
+		})
 	}
 }

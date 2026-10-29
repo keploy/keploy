@@ -18,7 +18,13 @@ import (
 // most once in the staging, and named on that test's evidence ("<mock>
 // served from <test> (set aside)", models.ScopeEvidence.ServedAside). A
 // recording that places or binds variables is not served aside: its values
-// flow from or into its own test's other calls, which were never made.
+// flow from or into its own test's other calls, which were never made. A
+// recording whose request holds a read of the application's clock the learn
+// step learned (MockSpec.Clocks) is served aside, checked: that value comes
+// from the clock at the call, not from another call, so the parser checks it
+// against the later call's own window, as in its own test (HTTP's
+// clockDiffs; Mongo's sameMongoRequest), and a call whose read is not one
+// made in its window is not that recording.
 //
 // The set-aside recordings are in none of the view's reads: a parser asks
 // for them (integrations.SetAsideReader) only for a call that no recording
@@ -73,7 +79,8 @@ func (m *MockManager) setAsideRecordings() []asideRecording {
 // already holds (exactView.aside), each copy marked with its test
 // (models.TestModeInfo.SetAsideFrom). One v already holds (the open test's
 // own, or a shared one) stays as it is, and so does none that places or
-// binds variables.
+// binds variables. One with a learned clock read is filed: the parser checks
+// the read in the call it answers.
 func (v *exactView) addAside(recs []asideRecording) {
 	for _, r := range recs {
 		if _, dup := v.index[r.mock.Name]; dup {
