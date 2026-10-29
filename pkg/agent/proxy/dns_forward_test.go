@@ -931,6 +931,15 @@ func TestDNSForwardLinesSayMockMissOnlyOnAMiss(t *testing.T) {
 		{name: "search-expansion-servfail", handler: reply(dns.RcodeServerFailure, false), timeout: 5 * time.Second, q: searchExpansion,
 			on:  "DNS upstream returned negative answer for a query keploy does not report as a miss; falling back to synthetic DNS response",
 			off: negativeOff},
+		{name: "search-expansion-answered", handler: reply(dns.RcodeSuccess, true), timeout: 5 * time.Second, q: searchExpansion,
+			on:  "DNS upstream forward answered a query keploy does not report as a miss; relaying upstream answer",
+			off: "DNS query resolved via upstream forward; mocking disabled"},
+		{name: "search-expansion-unanswered", handler: unanswered, timeout: 200 * time.Millisecond, q: searchExpansion,
+			on:  "DNS upstream forward failed for a query keploy does not report as a miss; falling back to synthetic response",
+			off: failedOff},
+		{name: "grpc-probe-servfail", handler: reply(dns.RcodeServerFailure, false), timeout: 5 * time.Second, q: grpcProbe,
+			on:  "DNS upstream returned negative answer for a query keploy does not report as a miss; falling back to synthetic DNS response",
+			off: negativeOff},
 	}
 	for _, tc := range cases {
 		for _, mocking := range []bool{true, false} {
