@@ -697,15 +697,18 @@ func TestAnOffsetCutToAnHourInTheApplicationsZoneIsLearnedAndCheckedThere(t *tes
 // An offset cut to a day (founder decision, 2026-10-27: a cut is checked at
 // the cut, never refused; ruled for a day's cut 2026-10-29): thirty days on,
 // cut to the IST day, where record's full round crosses IST's midnight, is
-// learned at the day naming +05:30, never refused as too wide, though no
-// unit holds three days. A replay checks it at the IST day, within one day
+// learned at the day naming +05:30, not refused for the three days no unit
+// holds. A replay checks it at the IST day, within one day
 // of its window plus the offset on either side, in its process's zone and
 // in the stored one: the read plus thirty days passes, and so do the
 // widened span's edges and the value one day stale or one day ahead (as
-// yesterday's date passes a date cut to a day, a time to live changed by
-// one day is not caught); a millisecond past either edge never does, nor
-// does a value three days off; one two days off passes only where the
-// replay's read falls within its window and the offset's range of the IST
+// yesterday's date passes a date cut to a day, a time to live of the read
+// plus thirty days, cut down to the day, changed by one day is not caught;
+// cut and then six hours added, one day stale is refused at a read after
+// 18:00 IST, as the rows of its shape decide); a millisecond past either edge
+// never does, nor does a value three days off; one two days off passes only
+// where the replay's read falls within its window and the offset's range of
+// the IST
 // day's turn, and is refused, naming the day's cut and its zone, at a read
 // away from it. A call whose windows, with the offset's range, are no
 // narrower than the day is refused, at learn and at replay, saying so.
@@ -730,8 +733,8 @@ func TestAnOffsetCutToADayIsLearnedAndCheckedAtTheDay(t *testing.T) {
 	call := time.Date(2026, 10, 26, 18, 29, 59, 50e6, time.UTC)
 	ln := learn(ist, call, 30*day, 100*ms)
 	o := ln.Offset
-	if ln.Kind != KindClockOffset || o == nil || o.Res != day || o.AppZone != "+05:30" || o.Min > 30*day || o.Max <= 30*day || !strings.HasPrefix(ln.Why, p+" = clock + 30d (") || !strings.Contains(ln.Why, "cut to a day. A replay checks the offset at the day") || !strings.Contains(ln.Why, "a time to live changed by one day passes there") {
-		t.Fatalf("FALSE RED: thirty days on, cut to the IST day, learned in IST: %s %+v (%s); want clock + 30d at the day, naming +05:30, never refused as too wide", ln.Kind, o, ln.Why)
+	if ln.Kind != KindClockOffset || o == nil || o.Res != day || o.AppZone != "+05:30" || o.Min > 30*day || o.Max <= 30*day || !strings.HasPrefix(ln.Why, p+" = clock + 30d (") || !strings.Contains(ln.Why, "cut to a day. A replay checks the offset at the day, read in the zone the value shows a whole day in, else the application's,") || !strings.Contains(ln.Why, "a time to live changed by less than two days can pass there, by where the replay's read falls in its day,") || !strings.Contains(ln.Why, "within its call's window and the offset's range ("+models.ShortDuration(o.Max-o.Min)+") of the day's turn") {
+		t.Fatalf("FALSE RED: thirty days on, cut to the IST day, learned in IST: %s %+v (%s); want clock + 30d at the day, naming +05:30, not refused for the three days no unit holds", ln.Kind, o, ln.Why)
 	}
 	if w := learn(ist, call, 30*day, 25*time.Hour); w.Kind != KindUnaccounted || w.Offset != nil || !strings.Contains(w.Why, "the range is not narrower than the day the value is cut to") {
 		t.Errorf("thirty days on, cut to the IST day, a call's windows 25 hours open: %s %+v (%s); want refused, its range no narrower than the day", w.Kind, w.Offset, w.Why)

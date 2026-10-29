@@ -373,6 +373,13 @@ func TestAClockOffsetCutToADayIsCheckedAtTheDay(t *testing.T) {
 	if hand.DayCut() || hand.Checkable(ms, from, from.Add(time.Minute)) || hand.Holds(from.Add(32*day), ms, from, from.Add(time.Minute)) || hand.Holds(from.Add(30*day), ms, from, from.Add(time.Minute)) {
 		t.Errorf("FALSE GREEN: a hand-edited offset at a Res of 96 hours: DayCut %v, Checkable %v; want no day's cut, and nothing held", hand.DayCut(), hand.Checkable(ms, from, from.Add(time.Minute)))
 	}
+	// A value written coarser than a day (two days: no encoding keploy
+	// reads writes one) is no day's check: it is read at its own
+	// resolution, where three of it count against the day the offset reads
+	// in, so nothing holds, not the read plus thirty days.
+	if o.DayChecked(2*day) || o.Checkable(2*day, from, from.Add(time.Minute)) || o.Holds(from.Add(30*day).Truncate(day), 2*day, from, from.Add(time.Minute)) || !o.DayChecked(day) || !o.DayChecked(ms) {
+		t.Errorf("thirty days at the day, a value written at two days: DayChecked %v, Checkable %v; want checked at the day only for a value written at a day or finer, and nothing held at two days", o.DayChecked(2*day), o.Checkable(2*day, from, from.Add(time.Minute)))
+	}
 	if (ClockOffset{Res: day}).DayCut() {
 		t.Errorf("DayCut of a plain read cut to a day: true, want false (a plain read's cut is no offset's)")
 	}

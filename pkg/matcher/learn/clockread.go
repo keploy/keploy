@@ -1022,7 +1022,7 @@ func checkReadIn(o models.ClockOffset, live Leaf, s Span, learned, read, hint st
 		if holdsAny(o, ats, res, s.From, s.To) {
 			return true, o.CheckedAt(res), ""
 		}
-		if !o.Checkable(res, s.From, s.To) && o.DayCut() && o.CheckedAt(res) == o.Res {
+		if !o.Checkable(res, s.From, s.To) && o.DayChecked(res) {
 			return false, o.CheckedAt(res), learned + ", which a replay checks at the day it is cut to against its call's window, but this call's window (" + models.ShortDuration(s.To.Sub(s.From)) + ") with the offset's range is no narrower than the day, so keploy could not tell " + offsetNamed(o) + " changed by days and refuses the value rather than pass it unchecked" + hint
 		}
 		if !o.Checkable(res, s.From, s.To) {

@@ -928,7 +928,8 @@ func offsetBounds(v time.Time, res time.Duration, s Span) (lo, hi time.Duration,
 // are narrower than that unit (off.Within: off holds one multiple of it,
 // and a replay can tell a time to live changed by one), or, cut to a day,
 // off alone is narrower than the day (off.Narrow: a replay checks it at the
-// day, admitting a time to live changed by one day), for a caller whose
+// day, admitting a time to live changed by less than two days at some
+// reads, as a date cut to a day admits yesterday), for a caller whose
 // replay compares it (Window.ComparesOffsets), where the echo could read
 // the test case's own request (unread: why not) and the call's recorded
 // answer does not hold it (rec, its recorded moment, in resp: an answer
@@ -1044,11 +1045,16 @@ func clockOffsetSeen(path string, off models.ClockOffset) string {
 
 // clockOffsetEvidence is a KindClockOffset's Why: what was seen, and how the
 // replay compares it. Of an offset cut to a day (models.ClockOffset.DayCut),
-// what a replay checking it at the day admits: a time to live changed by one
-// day, as a date cut to a day admits yesterday.
+// what a replay checking it at the day admits (models.ClockOffset.Checkable):
+// as a date cut to a day admits yesterday, a time to live changed by less
+// than two days can pass, by where the replay's read falls in its day (one
+// changed by one day passes at every read where the application cuts the
+// value down to the day, Go's Truncate; where it cuts and then adds hours,
+// only at some), one changed by two only near the day's turn, and one
+// changed by three or more never on a day of 24 hours.
 func clockOffsetEvidence(path string, off models.ClockOffset) string {
 	if off.DayCut() {
-		return clockOffsetSeen(path, off) + ", cut to a day. A replay checks the offset at the day, the application's calendar day, as standing for its whole day, within one day of its call's window plus the offset on either side, as a date cut to a day passes from yesterday: " + offsetNamed(off) + " changed by one day passes there, one changed by two days fails unless the replay's read falls within its call's window and the offset's range (" + models.ShortDuration(off.Max-off.Min) + ") of the day's turn, and one changed by three days or more always fails; if the field is a time the application reads from its own clock with no rule, declare it noise in keploy.yml, and keploy stops comparing it"
+		return clockOffsetSeen(path, off) + ", cut to a day. A replay checks the offset at the day, read in the zone the value shows a whole day in, else the application's, as standing for its whole day, within one day of its call's window plus the offset on either side, as a date cut to a day passes from yesterday: " + offsetNamed(off) + " changed by less than two days can pass there, by where the replay's read falls in its day, one changed by two days fails unless the replay's read falls within its call's window and the offset's range (" + models.ShortDuration(off.Max-off.Min) + ") of the day's turn, and one changed by three days or more fails on a day of 24 hours; if the field is a time the application reads from its own clock with no rule, declare it noise in keploy.yml, and keploy stops comparing it"
 	}
 	return clockOffsetSeen(path, off) + ". A replay compares the offset: " + offsetNamed(off) + " changed by " + aUnit(off.Unit()) + " or more still fails; if the field is a time the application reads from its own clock with no rule, declare it noise in keploy.yml, and keploy stops comparing it"
 }
@@ -1062,11 +1068,12 @@ func clockOffsetFineWhy(path string, off models.ClockOffset) string {
 }
 
 // clockOffsetWideWhy is why an instant at the clock plus an offset in off is
-// refused where off and three of its resolution (off.Res) are no narrower
-// than the unit the offset reads in (off.Within), read after "<field>
-// changed, and ": its call's windows, or the cut its values show, bound the
-// offset too loosely for a replay to tell a time to live changed by that
-// unit.
+// refused where the learn step cannot learn off (off.Narrow), read after
+// "<field> changed, and ": off and three of its resolution (off.Res) are no
+// narrower than the unit the offset reads in (off.Within), or, of an off cut
+// to a day (off.DayCut), its range alone is no narrower than the day: its
+// call's windows, or the cut its values show, bound the offset too loosely
+// for a replay to tell a time to live changed by that unit, or by days.
 func clockOffsetWideWhy(path string, off models.ClockOffset, enc time.Duration) string {
 	if off.DayCut() {
 		return path + " = " + off.Range() + " at a resolution of " + resolutionOf(off.Res, enc) + ": in the recording and in record's full round alike, it is a read of the application's clock in its call's window plus an offset in that range, but the range is not narrower than the day the value is cut to, so a replay checking it at the day could not tell " + offsetNamed(off) + " changed by days from it, and keploy refuses it. If the field is a time the application reads from its own clock with no rule, declare it noise in keploy.yml, and keploy stops comparing it"
