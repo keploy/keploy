@@ -81,7 +81,7 @@ func (m *MockManager) AnsweredBackground() []*models.Mock {
 	defer v.mu.Unlock()
 	var out []*models.Mock
 	for _, i := range v.order {
-		if v.isCand(i) {
+		if v.notOwn(i) {
 			continue
 		}
 		if _, bg := unrequired[v.owned[i].Name]; bg {
