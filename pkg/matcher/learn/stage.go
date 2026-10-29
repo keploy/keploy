@@ -58,8 +58,9 @@ func (t *Tracker) WarmSet(src func(visit func(*models.Mock) bool) error) <-chan 
 
 // stageReaders is how many readers a set's staging reads its recordings
 // with (WarmSet): half the CPUs Go runs on (GOMAXPROCS, which follows the
-// agent's CPU limit), at least one. A var for the rows that hold one
-// reader's read.
+// CPU quota of the agent's own cgroup, as a container's limit sets it, and
+// not a parent's: memoryLimit says why memory differs), at least one. A var
+// for the rows that hold one reader's read.
 var stageReaders = halfTheCPUs
 
 func halfTheCPUs() int {
