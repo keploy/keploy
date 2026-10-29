@@ -60,13 +60,13 @@ func TestBuilder_StructuralChangeNextSteps(t *testing.T) {
 }
 
 func TestBuilder_FieldDiffCap(t *testing.T) {
-	diffs := make([]models.MockFieldDiff, maxFieldDiffs+10)
+	diffs := make([]models.MockFieldDiff, MaxFieldDiffs+10)
 	for i := range diffs {
 		diffs[i] = models.MockFieldDiff{Path: "body.x", Kind: models.DiffKindValueChanged}
 	}
 	report := NewReport(ProtocolHTTP, "GET /a").WithClosest("m", diffs).Build()
-	if len(report.FieldDiffs) != maxFieldDiffs {
-		t.Errorf("expected diff cap %d, got %d", maxFieldDiffs, len(report.FieldDiffs))
+	if len(report.FieldDiffs) != MaxFieldDiffs {
+		t.Errorf("expected diff cap %d, got %d", MaxFieldDiffs, len(report.FieldDiffs))
 	}
 }
 
