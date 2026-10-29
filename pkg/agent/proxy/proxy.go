@@ -4988,7 +4988,7 @@ func (p *Proxy) logSetUse(done <-chan learn.SetUse) {
 		return
 	}
 	fields := []zap.Field{
-		zap.Int("read_at_staging", u.Staged), zap.Int("read_by_calls", u.Called), zap.Int("staging_readers", u.Readers),
+		zap.Int("read_at_staging", u.Staged), zap.Int("read_by_calls", u.Called), zap.Int("finished_at_staging", u.Finished), zap.Int("staging_readers", u.Readers),
 		zap.Int("payloads_decoded", u.Decoded), zap.Int64("kept_held_bytes", u.Held), zap.Int64("kept_words_bytes", u.Words),
 		zap.Int64("kept_forms_bytes", u.Forms), zap.Int64("kept_payload_bytes", u.Bodies), zap.Int64("set_budget_bytes", u.Budget), zap.Bool("held_full", u.HeldFull), zap.Bool("forms_full", u.FormsFull),
 	}

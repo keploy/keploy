@@ -20,7 +20,9 @@ import (
 // each recording neither it nor the staging has taken it reads itself, and
 // it waits only for those of its own recordings another is reading (each
 // of the staging's readers reads one at a time), never for the staging to
-// end. The staging takes no recording a call took. It reads with
+// end. Of a recording a call took first, which the call read only what
+// every call's rules read of it, the staging reads the rest (stageRest),
+// so no later call reads a part of it on its answer path. It reads with
 // stageReaders readers at once, half the CPUs Go runs on (GOMAXPROCS), so
 // the set is read before its first heavy test opens while the replay keeps
 // the other half: one reader alone was still reading api-server's set when
@@ -74,7 +76,9 @@ func halfTheCPUs() int {
 // time, in recorded order, and each is taken (take) only once a reader is
 // free to read it, so none is taken ahead of the readers: a call reads
 // itself every recording no reader has begun, and a set over (take: past
-// its budget, or after its NewSet) is visited no further. What is derived
+// its budget, or after its NewSet) is visited no further. A recording a
+// call took first is read too, for the parts the call's read leaves
+// (stageRest), whether or not the call has ended it. What is derived
 // of a payload depends on its text alone, the recording's, however a test
 // was served it (setDerived), so the calls' reads of a recording, served
 // or not, find the staging's; the readers share dc as one test's handlers
@@ -90,6 +94,9 @@ func (dc *DriftCache) warmSet(src func(visit func(*models.Mock) bool) error, rea
 	type read struct {
 		x  Raw
 		ch chan struct{}
+		// rest: a call took x first, and the reader reads only what the
+		// call's read of it leaves (stageRest).
+		rest bool
 	}
 	// free holds a token for each reader not reading; next never holds
 	// more than the readers' count, so a hand-off never waits.
@@ -101,7 +108,11 @@ func (dc *DriftCache) warmSet(src func(visit func(*models.Mock) bool) error, rea
 		go func() {
 			defer wg.Done()
 			for r := range next {
-				dc.warmOne(s, r.x, r.ch, true)
+				if r.rest {
+					dc.stageRest(s, r.x)
+				} else {
+					dc.warmOne(s, r.x, r.ch, true)
+				}
 				free <- struct{}{}
 			}
 		}()
@@ -113,11 +124,11 @@ func (dc *DriftCache) warmSet(src func(visit func(*models.Mock) bool) error, rea
 		<-free
 		x := dc.LazyRawOf(m, false, withAnswer(m))
 		ch, mine := s.take(x)
-		if !mine {
+		if ch == nil {
 			free <- struct{}{}
-			return ch != nil
+			return false
 		}
-		next <- read{x, ch}
+		next <- read{x: x, ch: ch, rest: !mine}
 		return true
 	})
 	close(next)
@@ -142,19 +153,20 @@ func withAnswer(m *models.Mock) func() (*models.Mock, error) {
 
 // SetUse is what the running set's learn step has read and kept of its
 // payloads (setDerived), for the agent's log: how many its staging read
-// (WarmSet) and its calls read for the set, the readers the staging read
-// with (stageReaders; 0 where no staging read), the bytes each tier keeps
-// (Bodies: the payloads, bodyStore), how many payloads were decoded for the
-// set (Decoded: each first read, and each read again after it was let go),
-// the set's budget (setBudget), and whether the tiers that let none go
-// (held, forms) were full, past which the set's payloads are read once per
-// test. Err is why the staging stopped short of the set where src failed
+// (WarmSet) and its calls read for the set, of those its calls read how
+// many the staging read the rest of (Finished: stageRest), the readers the
+// staging read with (stageReaders; 0 where no staging read), the bytes each
+// tier keeps (Bodies: the payloads, bodyStore), how many payloads were
+// decoded for the set (Decoded: each first read, and each read again after
+// it was let go), the set's budget (setBudget), and whether the tiers that
+// let none go (held, forms) were full, past which the set's payloads are
+// read once per test. Err is why the staging stopped short of the set where src failed
 // (the on-disk store, mid-read): its calls then read the rest themselves.
 type SetUse struct {
-	Staged, Called, Readers, Decoded   int
-	Held, Words, Forms, Bodies, Budget int64
-	HeldFull, FormsFull                bool
-	Err                                error
+	Staged, Called, Finished, Readers, Decoded int
+	Held, Words, Forms, Bodies, Budget         int64
+	HeldFull, FormsFull                        bool
+	Err                                        error
 }
 
 func (s *setDerived) use() SetUse {
@@ -163,6 +175,6 @@ func (s *setDerived) use() SetUse {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return SetUse{Staged: s.staged, Called: s.called, Decoded: s.bodies.loads, Held: s.held.used, Words: s.words.used, Forms: s.forms.used,
+	return SetUse{Staged: s.staged, Called: s.called, Finished: s.finished, Decoded: s.bodies.loads, Held: s.held.used, Words: s.words.used, Forms: s.forms.used,
 		Bodies: s.bodies.kept.used, Budget: s.budget.limit, HeldFull: s.held.full, FormsFull: s.forms.full}
 }

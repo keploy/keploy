@@ -98,8 +98,10 @@ type setDerived struct {
 	// rows.
 	waits int
 	// staged and called are the payloads read for the set (warmOne) by its
-	// staging (WarmSet) and by its calls, for the rows.
-	staged, called int
+	// staging (WarmSet) and by its calls, and finished those of its calls'
+	// the staging read the rest of (stageRest), for the rows and the
+	// agent's log (SetUse).
+	staged, called, finished int
 	// reads are the parts of the set's recordings read (derive), by tier
 	// and part, for the rows.
 	reads map[readTally]int
@@ -1169,7 +1171,9 @@ func (s *setDerived) take(x Raw) (ch chan struct{}, mine bool) {
 // on its answer path (api-server's round: 15 589 recordings, read by the
 // set's first drifted call while its client waited). A call's own warm
 // reads only the three the rules read of every payload of every call; it
-// reads the rest where its rules reach them, as with no staging.
+// reads the rest where its rules reach them, as with no staging, and the
+// staging reads them where it comes to a recording a call took first
+// (stageRest).
 func (dc *DriftCache) warmOne(s *setDerived, x Raw, ch chan struct{}, staged bool) {
 	defer func() {
 		s.mu.Lock()
@@ -1186,9 +1190,31 @@ func (dc *DriftCache) warmOne(s *setDerived, x Raw, ch chan struct{}, staged boo
 	dc.searchWords(x, false)
 	dc.searchedKeys(x)
 	if staged {
-		dc.setPlaces(x)
-		dc.stampTexts(x)
-		dc.fieldMoments(x)
-		dc.fieldForms(x)
+		dc.stagedParts(x)
 	}
+}
+
+// stagedParts reads the parts of x's payload the staging reads beyond a
+// call's warm (warmOne): its keyed places, its answer's stamps and its
+// fields' instants as the echo reads them.
+func (dc *DriftCache) stagedParts(x Raw) {
+	dc.setPlaces(x)
+	dc.stampTexts(x)
+	dc.fieldMoments(x)
+	dc.fieldForms(x)
+}
+
+// stageRest is the staging's read (WarmSet) of a recording a call took
+// first (warm): the call read only the three parts every call's rules read
+// of it, and the staging reads the rest (stagedParts), so no later call
+// reads one of them on its answer path. Before, the staging passed over
+// such a recording, and the set's next drifted call read those four parts
+// of it while its client waited. It does not wait for the call's read to
+// end: a part the call, or any other, is reading it waits for, and takes
+// what that read keeps (derive), so each part is read once.
+func (dc *DriftCache) stageRest(s *setDerived, x Raw) {
+	dc.stagedParts(x)
+	s.mu.Lock()
+	s.finished++
+	s.mu.Unlock()
 }
