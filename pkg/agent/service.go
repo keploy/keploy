@@ -186,6 +186,15 @@ type ShimReporter interface {
 	// code runs, so a process that has begun a test has announced itself or
 	// never will.
 	ShimArmed(pid int, timeFile string) (bool, string)
+	// ShimClaimedBy tells the hooks that process pid claimed the run: a
+	// program the shim is not in is charged to the run's tests, or to the run
+	// outside them, only when this test process or one of its descendants
+	// started it, never when another process of the run did (the compiler or
+	// git the test command's toolchain runs alongside the test process). The
+	// agent tells it before it reads the counts the claim's first test is
+	// counted from, while pid is alive and waits for its claim's answer. It
+	// never waits.
+	ShimClaimedBy(pid int)
 }
 
 // ListenerCountTaker is the optional extension implemented by proxies that can

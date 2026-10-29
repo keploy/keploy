@@ -367,6 +367,14 @@ func (a *Agent) ClaimInstance(ctx context.Context, req models.InstanceReq, calle
 		}
 	}
 	if prev != me {
+		// The hooks that intercept through a library each process loads
+		// (macOS's shim) charge a program it is not in only when this
+		// process or one of its descendants started it: told before the
+		// read below, so a program this process started before its claim,
+		// still running, is in the counts its first test is counted from.
+		if h, ok := a.Hooks.(coreAgent.ShimReporter); ok {
+			h.ShimClaimedBy(caller)
+		}
 		// A failed TLS handshake before this claim is the run's -- charged
 		// to no test (UnchargedCaptureLosses), and in the run's own verdict,
 		// which counts every loss while the command ran -- as its misses
