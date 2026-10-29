@@ -2148,8 +2148,15 @@ type valueDrift struct {
 	// held in another order, or once more, is one.
 	movedRec, movedLive []map[string]bool
 	pieces              []run
-	decRec, decLive     string
-	decoded             bool
+	// idParts are the words of the finer readings (isWord, wordByte) the
+	// value holds, recorded [0] and live [1], only inside ids (idByte
+	// words) that changed whole: an id the other side does not hold, of
+	// more than one word, none of which the other side holds in any
+	// reading. Such an id was made or copied as one (insideAnotherID).
+	// Each word maps to the other words of its ids.
+	idParts         [2]map[string]map[string]bool
+	decRec, decLive string
+	decoded         bool
 	// forms are the value in the declared forms: raw where it has escapes,
 	// and formsOf.
 	forms [][2]string
@@ -2546,6 +2553,7 @@ func (dc *DriftCache) ofIn(rec, live string, w *Window, call time.Time) *valueDr
 		}
 		d.movedRec, d.movedLive = append(d.movedRec, movedRec), append(d.movedLive, movedLive)
 	}
+	d.readIDParts(forms)
 	// Pieces of the value in every form.
 	for _, f := range forms {
 		d.pieces = append(d.pieces, pieces(f[0], f[1])...)
@@ -2897,7 +2905,7 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 			}
 		}
 		for _, w := range searched {
-			if ContainsToken(texts[0], w) || ContainsToken(texts[1], w) {
+			if (ContainsToken(texts[0], w) || ContainsToken(texts[1], w)) && !insideAnotherID(v, x, texts, w, true) {
 				field, given := dc.fieldOf(x, texts, w)
 				p := Place{Mock: x.mock, Field: field, Held: w, AtCall: atCall, noTime: x.noTime, unserved: !x.served, givenWhole: given && w == recorded}
 				p.startUp = x.swapHolds(texts[0], raw, func(own string) bool { return holdsToken(own, w) })
@@ -3915,4 +3923,123 @@ func Named(e Earlier, vars models.MockVariables) Earlier {
 		}
 	}
 	return e
+}
+
+// readIDParts sets d.idParts from the value's declared forms (recorded,
+// live), after its tokens (recTok, liveTok) are read.
+func (d *valueDrift) readIDParts(forms [][2]string) {
+	for side := 0; side < 2; side++ {
+		otherTok := d.liveTok
+		if side == 1 {
+			otherTok = d.recTok
+		}
+		heldByOther := func(t string) bool {
+			for _, tok := range otherTok {
+				if tok[t] {
+					return true
+				}
+			}
+			return false
+		}
+		inside, outside := map[string]map[string]bool{}, map[string]bool{}
+		for _, f := range forms {
+			for _, id := range wordsBy(f[side], idByte) {
+				fine := map[string]bool{}
+				for _, word := range []func(byte) bool{isWord, wordByte} {
+					for _, w := range wordsBy(id, word) {
+						fine[w] = true
+					}
+				}
+				whole := len(fine) > 1 && !heldByOther(id)
+				for w := range fine {
+					if heldByOther(w) {
+						whole = false
+					}
+				}
+				for w := range fine {
+					if !whole || w == id {
+						outside[w] = true
+						continue
+					}
+					if inside[w] == nil {
+						inside[w] = map[string]bool{}
+					}
+					for o := range fine {
+						if o != w {
+							inside[w][o] = true
+						}
+					}
+				}
+			}
+		}
+		for w, others := range inside {
+			if !outside[w] {
+				if d.idParts[side] == nil {
+					d.idParts[side] = map[string]map[string]bool{}
+				}
+				d.idParts[side][w] = others
+			}
+		}
+	}
+}
+
+// insideAnotherID reports whether t, a word of value v (recorded, or as it
+// stands now) found in x, an earlier recording record's full round never
+// served, is no source of v there: t stands in v only inside ids that
+// changed whole (idParts), and x's searched texts hold it only inside other
+// ids (heldAsID): ids that hold no other word of v's id around it. An id
+// that changed in every word was made or copied as one; F gave no view of x
+// to show the word was copied from there (a served one's view decides it:
+// follows), and a word inside an id that shares no other word with v's is
+// not v's id. Where x holds the word as an id of its own, or inside an id
+// that holds another word of v's id (v's id whole, or a part of it), or
+// v's id kept a word, x stays a candidate source.
+func insideAnotherID(v *valueDrift, x Raw, texts [2]string, t string, recorded bool) bool {
+	side := 1
+	if recorded {
+		side = 0
+	}
+	others, ok := v.idParts[side][t]
+	if x.served || !ok {
+		return false
+	}
+	return !heldAsID(texts[0], t, others) && !heldAsID(texts[1], t, others)
+}
+
+// heldAsID reports whether s holds the word t as an id of its own, or
+// inside an id (a run of idByte) that holds one of others, other words of
+// the id t stands in, as a word too.
+func heldAsID(s, t string, others map[string]bool) bool {
+	if t == "" {
+		return false
+	}
+	for i := 0; i <= len(s)-len(t); {
+		j := strings.Index(s[i:], t)
+		if j < 0 {
+			return false
+		}
+		at := i + j
+		i = at + 1
+		if at > 0 && isWord(s[at-1]) || at+len(t) < len(s) && isWord(s[at+len(t)]) {
+			continue // inside a longer word: not the word t
+		}
+		from, to := at, at+len(t)
+		for from > 0 && idByte(s[from-1]) {
+			from--
+		}
+		for to < len(s) && idByte(s[to]) {
+			to++
+		}
+		if from == at && to == at+len(t) {
+			return true
+		}
+		for _, word := range []func(byte) bool{isWord, wordByte} {
+			for _, w := range wordsBy(s[from:to], word) {
+				if w != t && others[w] {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }

@@ -884,7 +884,7 @@ func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, 
 			}
 			// A protocol-phase answer's own clock reads blanked
 			// (instants.go, rule 2).
-			if held.of(j).raw[changedWord{i, t}] {
+			if held.of(j).raw[changedWord{i, t}] && !insideAnotherID(v, x, dc.searched(x, keep), t, recorded) {
 				note := x.atNote(at)
 				place := x.mock + "'s payload"
 				if f, _ := dc.fieldOf(x, dc.searched(x, keep), t); f != "" {

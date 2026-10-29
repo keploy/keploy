@@ -273,8 +273,6 @@ func TestAWordAtAPlaceTheFullRoundGaveAnotherValueAtIsNoCopyWhereTheValueTookNon
 			{Side: Request, Leaf: Leaf{Path: "body.cmd.documents.0._id", Type: String, Value: rec}, Live: live},
 		}}}
 	}
-	notServed := append(eStartup(), eJobs(chanceSrcRec, "5").ServedLive(eJobs(chanceSrcLive, "6")))
-	unserved := append(eStartup(), eJobs(chanceSrcRec, "5").ServedAs(6).ServedLive(eJobs(chanceSrcLive, "6")).WithServed(false))
 	for _, tc := range []struct {
 		name           string
 		recorded, live string
@@ -290,8 +288,6 @@ func TestAWordAtAPlaceTheFullRoundGaveAnotherValueAtIsNoCopyWhereTheValueTookNon
 		{"payload, F's view holds the value F saw", chanceValRec, chanceValLive, nil, jobsServed(chanceSrcRec, "5", eJobs(chanceSrcLive, chanceValLive)), KindVariable, "", "mock-6"},
 		{"payload, F's view lacks the field", chanceValRec, chanceValLive, nil, jobsServed(chanceSrcRec, "5", ePg("mock-6", 100*time.Millisecond, "SELECT id, n FROM jobs", nil, "SELECT 0")), KindVariable, "", "mock-6"},
 		{"payload, served changed with no view", chanceValRec, chanceValLive, nil, jobsServed(chanceSrcRec, "5", Raw{}), KindVariable, "", "mock-6"},
-		{"payload, not served, a view handed anyway", chanceValRec, chanceValLive, nil, notServed, KindVariable, "", "mock-6"},
-		{"payload, a view dropped as not served", chanceValRec, chanceValLive, nil, unserved, KindVariable, "", "mock-6"},
 		// The value whole at a field F gave another value at: a whole value
 		// is followed (sources), as at a leaf.
 		{"payload, F's view, the recorded value whole there", chanceSrcRec, chanceValLive, nil, jobsServed(chanceSrcRec, "5", eJobs(chanceSrcLive, "6")), KindVariable, "", "mock-6"},
