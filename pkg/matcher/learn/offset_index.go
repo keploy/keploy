@@ -89,10 +89,6 @@ type offsetView struct {
 	first, last              int32
 }
 
-// offsetViewBytes is the bytes of an offsetView: what a call keeps of the
-// index for each of its recordings.
-const offsetViewBytes = 12
-
 // offsetSource is a recording a call's offset rule reads (offsetPlacesOf),
 // as one of its readings hands it: a payload (x: one F served before the call
 // or recorded before it, or an exchange's served leaf by leaf) or one F gave
