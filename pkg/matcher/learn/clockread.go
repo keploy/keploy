@@ -1025,8 +1025,9 @@ func checkReadIn(o models.ClockOffset, live Leaf, s Span, learned, read, hint st
 		if holdsAny(o, ats, res, s.From, s.To) {
 			return true, o.CheckedAt(res), ""
 		}
-		if !o.Checkable(res, s.From, s.To) && o.DayChecked(res) {
-			return false, o.CheckedAt(res), learned + ", which a replay checks at the day it is cut to against its call's window, but this call's window (" + models.ShortDuration(s.To.Sub(s.From)) + ") with the offset's range is no narrower than the day, so keploy could not tell " + offsetNamed(o) + " changed by days and refuses the value rather than pass it unchecked" + hint
+		if !o.Checkable(res, s.From, s.To) && o.CoarseChecked(res) {
+			w := unitWord(o.Res)
+			return false, o.CheckedAt(res), learned + ", which a replay checks at the " + w + " it is cut to against its call's window, but this call's window (" + models.ShortDuration(s.To.Sub(s.From)) + ") with the offset's range is no narrower than the " + w + ", so keploy could not tell " + offsetNamed(o) + " changed by " + w + "s and refuses the value rather than pass it unchecked" + hint
 		}
 		if !o.Checkable(res, s.From, s.To) {
 			return false, o.CheckedAt(res), learned + ", which a replay checks against its call's window, but this call's window (" + models.ShortDuration(s.To.Sub(s.From)) + ") with the offset's range and three of its cut is no narrower than the " + unitWord(o.Unit()) + " the offset reads in, so keploy could not tell " + offsetNamed(o) + " changed by " + aUnit(o.Unit()) + " and refuses the value rather than pass it unchecked" + hint

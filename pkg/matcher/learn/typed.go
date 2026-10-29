@@ -734,10 +734,12 @@ func clockOffsetOf(r, l typedInstant, w *Window, zone *time.Location) (models.Cl
 // is cut to in the application's zone, learn's CheckClockRead). The
 // offset's bounds read no zone (offsetBounds: a value stands for the cut
 // it starts, whatever zone that cut is of), and clockOffset refuses one
-// whose range and three cuts are no narrower than its unit (an hour's cut
-// learns an offset of a day or more) as it does at any cut, but a day's
-// cut, which no unit holds three of, only where its range is no narrower
-// than the day (models.ClockOffset.Narrow): a replay checks it at the day.
+// whose range and three cuts are no narrower than its unit as it does at
+// any cut (an hour's cut on an offset of a day or more is decided so), but
+// a day's cut, and an hour's that reads in hours or minutes (clock + 2h, a
+// cut hour plus 90 minutes), which no unit holds three of
+// (models.ClockOffset.CoarseCut), only where its range is no narrower than
+// the cut (models.ClockOffset.Narrow): a replay checks it at the cut.
 // ok only where one offset
 // does both: a constant offset from the clock, which a value built on a
 // served instant or a constant shows in neither run's window. The offset is
@@ -926,10 +928,11 @@ func offsetBounds(v time.Time, res time.Duration, s Span) (lo, hi time.Duration,
 // second, and off and three of its resolution (off.Res, the cut its values
 // show: a replay checks a value within one cut of its span on either side)
 // are narrower than that unit (off.Within: off holds one multiple of it,
-// and a replay can tell a time to live changed by one), or, cut to a day,
-// off alone is narrower than the day (off.Narrow: a replay checks it at the
-// day, admitting a time to live changed by less than two days at some
-// reads, as a date cut to a day admits yesterday), for a caller whose
+// and a replay can tell a time to live changed by one), or, cut to a day or
+// to an hour that no unit holds three of (off.CoarseCut: clock + 2h at the
+// hour), off alone is narrower than the cut (off.Narrow: a replay checks it
+// at the cut, admitting a time to live changed by less than two cuts at
+// some reads, as a date cut to a day admits yesterday), for a caller whose
 // replay compares it (Window.ComparesOffsets), where the echo could read
 // the test case's own request (unread: why not) and the call's recorded
 // answer does not hold it (rec, its recorded moment, in resp: an answer
@@ -1044,17 +1047,22 @@ func clockOffsetSeen(path string, off models.ClockOffset) string {
 }
 
 // clockOffsetEvidence is a KindClockOffset's Why: what was seen, and how the
-// replay compares it. Of an offset cut to a day (models.ClockOffset.DayCut),
-// what a replay checking it at the day admits (models.ClockOffset.Checkable):
-// as a date cut to a day admits yesterday, a time to live changed by less
-// than two days can pass, by where the replay's read falls in its day (one
-// changed by one day passes at every read where the application cuts the
-// value down to the day, Go's Truncate; where it cuts and then adds hours,
-// only at some), one changed by two only near the day's turn, and one
-// changed by three or more never on a day of 24 hours.
+// replay compares it. Of an offset cut to an hour or a day that no unit
+// holds three of (models.ClockOffset.CoarseCut: a day's cut, or an hour's
+// that reads in hours or minutes, clock + 2h), what a replay checking it at
+// the cut admits (models.ClockOffset.Checkable): as a date cut to a day
+// admits yesterday, a time to live changed by less than two cuts can pass,
+// by where the replay's read falls in its cut (one changed by one cut
+// passes at every read where the application cuts the value down to the
+// cut, Go's Truncate; where it cuts and then adds time, only at some), one
+// changed by two only near the cut's turn, and one changed by three or more
+// never, on a day of 24 hours, and outside the hour the clocks go back
+// (cutExceptions).
 func clockOffsetEvidence(path string, off models.ClockOffset) string {
-	if off.DayCut() {
-		return clockOffsetSeen(path, off) + ", cut to a day. A replay checks the offset at the day, read in the zone the value shows a whole day in, else the application's, as standing for its whole day, within one day of its call's window plus the offset on either side, as a date cut to a day passes from yesterday: " + offsetNamed(off) + " changed by less than two days can pass there, by where the replay's read falls in its day, one changed by two days fails unless the replay's read falls within its call's window and the offset's range (" + models.ShortDuration(off.Max-off.Min) + ") of the day's turn, and one changed by three days or more fails on a day of 24 hours; if the field is a time the application reads from its own clock with no rule, declare it noise in keploy.yml, and keploy stops comparing it"
+	if off.CoarseCut() {
+		w := unitWord(off.Res)
+		outside, on := cutExceptions(off.Res)
+		return clockOffsetSeen(path, off) + ", cut to " + aUnit(off.Res) + ". A replay checks the offset at the " + w + ", read in the zone the value shows a whole " + w + " in, else the application's, as standing for its whole " + w + ", within one " + w + " of its call's window plus the offset on either side, as a date cut to a day passes from yesterday: " + offsetNamed(off) + " changed by less than two " + w + "s can pass there, by where the replay's read falls in its " + w + ", " + outside + "one changed by two " + w + "s fails unless the replay's read falls within its call's window and the offset's range (" + models.ShortDuration(off.Max-off.Min) + ") of the " + w + "'s turn, and one changed by three " + w + "s or more fails" + on + "; if the field is a time the application reads from its own clock with no rule, declare it noise in keploy.yml, and keploy stops comparing it"
 	}
 	return clockOffsetSeen(path, off) + ". A replay compares the offset: " + offsetNamed(off) + " changed by " + aUnit(off.Unit()) + " or more still fails; if the field is a time the application reads from its own clock with no rule, declare it noise in keploy.yml, and keploy stops comparing it"
 }
@@ -1071,12 +1079,14 @@ func clockOffsetFineWhy(path string, off models.ClockOffset) string {
 // refused where the learn step cannot learn off (off.Narrow), read after
 // "<field> changed, and ": off and three of its resolution (off.Res) are no
 // narrower than the unit the offset reads in (off.Within), or, of an off cut
-// to a day (off.DayCut), its range alone is no narrower than the day: its
-// call's windows, or the cut its values show, bound the offset too loosely
-// for a replay to tell a time to live changed by that unit, or by days.
+// to an hour or a day that no unit holds three of (off.CoarseCut), its range
+// alone is no narrower than the cut: its call's windows, or the cut its
+// values show, bound the offset too loosely for a replay to tell a time to
+// live changed by that unit, or by hours or days.
 func clockOffsetWideWhy(path string, off models.ClockOffset, enc time.Duration) string {
-	if off.DayCut() {
-		return path + " = " + off.Range() + " at a resolution of " + resolutionOf(off.Res, enc) + ": in the recording and in record's full round alike, it is a read of the application's clock in its call's window plus an offset in that range, but the range is not narrower than the day the value is cut to, so a replay checking it at the day could not tell " + offsetNamed(off) + " changed by days from it, and keploy refuses it. If the field is a time the application reads from its own clock with no rule, declare it noise in keploy.yml, and keploy stops comparing it"
+	if off.CoarseCut() {
+		w := unitWord(off.Res)
+		return path + " = " + off.Range() + " at a resolution of " + resolutionOf(off.Res, enc) + ": in the recording and in record's full round alike, it is a read of the application's clock in its call's window plus an offset in that range, but the range is not narrower than the " + w + " the value is cut to, so a replay checking it at the " + w + " could not tell " + offsetNamed(off) + " changed by " + w + "s from it, and keploy refuses it. If the field is a time the application reads from its own clock with no rule, declare it noise in keploy.yml, and keploy stops comparing it"
 	}
 	return path + " = " + off.Range() + " at a resolution of " + resolutionOf(off.Res, enc) + ": in the recording and in record's full round alike, it is a read of the application's clock in its call's window plus an offset in that range, but the range and three of its resolution (a replay checks the value within one of it of its window plus the offset, on either side) are not narrower than the " + unitWord(off.Unit()) + " the offset reads in, so a replay could not tell " + offsetNamed(off) + " changed by " + aUnit(off.Unit()) + " from it, and keploy refuses it. If the field is a time the application reads from its own clock with no rule, declare it noise in keploy.yml, and keploy stops comparing it"
 }
@@ -1089,6 +1099,21 @@ func resolutionOf(res, enc time.Duration) string {
 		return models.ShortDuration(res) + " (the cut both runs' values show, coarser than the " + models.ShortDuration(enc) + " their encoding writes)"
 	}
 	return models.ShortDuration(res) + " (the one its encoding writes)"
+}
+
+// cutExceptions are where a reason's claims on a time to live changed by
+// two or three of the cut c, an hour or a day, do not hold
+// (models.ClockOffset.Checkable): outside goes before both claims, on after
+// the last. A daylight-saving turn makes a day 23 or 25 hours long, and in
+// the hour the clocks go back an application that cuts to the hour's first
+// showing (JavaScript; java.time's LocalDateTime then atZone) writes a value
+// up to two hours before the instant it cuts, so there a time to live two
+// hours longer can pass at any read and three near the hour's turn.
+func cutExceptions(c time.Duration) (outside, on string) {
+	if c == time.Hour {
+		return "outside the hour the clocks go back (where an application that cuts to that hour's first showing writes a value up to two hours before the instant it cuts, so a time to live two or three hours longer can pass), ", ""
+	}
+	return "", " on a day of 24 hours"
 }
 
 // aUnit is a models.ClockOffset.Unit with its article: "a minute", "an
