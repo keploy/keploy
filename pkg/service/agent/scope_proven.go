@@ -836,11 +836,6 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 	return models.ScopeBeginResp{V: models.ScopeProtocolVersion, Status: "ok"}, nil
 }
 
-// oldWireFields refuses a begin or an end that carries the old wire's
-// fields (release1-cut §2.1: no pid on the wire). The claim names the test
-// process, and the agent stamps each test's begin and end with its own
-// clock, so a pid, a runner's clock, a folder or a suite scope would decide
-// nothing, and a harness that sends them predates the protocol.
 // shimRefusal refuses test id's begin when the hooks intercept through a
 // library each process loads (coreAgent.ShimReporter: macOS's shim) and the
 // test process pid that claimed the run does not carry it: its calls are not
@@ -867,6 +862,11 @@ func (a *Agent) shimRefusal(id string, pid int) *models.ScopeError {
 		"run the tests through keploy mock record or keploy mock replay with a test binary that loads keploy's shim (not hardened-runtime or restricted)")
 }
 
+// oldWireFields refuses a begin or an end that carries the old wire's
+// fields (release1-cut §2.1: no pid on the wire). The claim names the test
+// process, and the agent stamps each test's begin and end with its own
+// clock, so a pid, a runner's clock, a folder or a suite scope would decide
+// nothing, and a harness that sends them predates the protocol.
 func oldWireFields(req models.ScopeReq) *models.ScopeError {
 	var sent []string
 	if req.Pid != 0 {
