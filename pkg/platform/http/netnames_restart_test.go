@@ -69,16 +69,18 @@ func stackNames(ids ...string) fakeNameInspector {
 // the agent's are over netnames.Default (routes/netnames.go). restart is the
 // agent's process replaced: the new one holds no list and no CLI's stream of
 // asks, and the old one's streams end with it.
+// opened has each stream of asks' after, as the CLI opens the stream.
 type nameAgent struct {
-	mu    sync.Mutex
-	store *netnames.Store
-	gone  context.Context
-	kill  context.CancelFunc
+	mu     sync.Mutex
+	store  *netnames.Store
+	gone   context.Context
+	kill   context.CancelFunc
+	opened chan uint64
 }
 
 func newNameAgent(t *testing.T) (*nameAgent, string) {
 	t.Helper()
-	ag := &nameAgent{}
+	ag := &nameAgent{opened: make(chan uint64, 64)}
 	ag.restart()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		store, gone := ag.current()
@@ -97,6 +99,10 @@ func newNameAgent(t *testing.T) (*nameAgent, string) {
 			w.WriteHeader(http.StatusNoContent)
 		case strings.HasSuffix(r.URL.Path, models.NetworkNamesAskPath):
 			after, _ := strconv.ParseUint(r.URL.Query().Get("after"), 10, 64)
+			select {
+			case ag.opened <- after:
+			default:
+			}
 			ctx, cancel := context.WithCancel(r.Context())
 			defer cancel()
 			go func() {
