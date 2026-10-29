@@ -1135,6 +1135,13 @@ type MockState struct {
 	// reason. An agent that predates it reports none; the agent and the CLI
 	// are one keploy.
 	LearnedAfterEnd bool `json:"learnedAfterEnd,omitempty"`
+	// SetAsideFrom is, under exact serving (KEPLOY_PROVEN), the test case the
+	// replay set aside whose recording this is, when it answered a call of a
+	// later test case's window (ExactServing.Aside, Mock.TestModeInfo.
+	// SetAsideFrom): unchecked, never that test case's own consume, and
+	// named on its result (FailureInfo.ServedAside). "" for every other
+	// consume. An agent that predates it reports none, and serves none.
+	SetAsideFrom string `json:"setAsideFrom,omitempty"`
 }
 
 // ShallowCopy returns a new, unpooled Mock with m's fields: the same Spec
