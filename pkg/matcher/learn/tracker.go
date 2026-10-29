@@ -1183,46 +1183,88 @@ func (t *Tracker) CallWindowFrom(prevRec time.Time, paired *models.Mock, arrival
 	if t == nil || paired == nil || paired.Spec.ReqTimestampMock.IsZero() {
 		return nil
 	}
-	t.mu.Lock()
-	clock := t.appClock
-	i := sort.Search(len(t.servedAt), func(i int) bool { return !t.servedAt[i].Before(arrival) })
-	var prev time.Time
-	if i > 0 {
-		prev = t.servedAt[i-1]
-	}
-	client, began, recBegan := t.clientTests, t.beganAt, t.recBegan
-	t.mu.Unlock()
+	r := t.runBefore(arrival)
 	recFrom := prevRec
-	if client && recBegan.After(recFrom) {
-		recFrom = recBegan
+	if r.client && r.recBegan.After(recFrom) {
+		recFrom = r.recBegan
 	}
-	if recFrom.IsZero() || !recFrom.Before(paired.Spec.ReqTimestampMock) || clock == nil {
+	if recFrom.IsZero() || !recFrom.Before(paired.Spec.ReqTimestampMock) || r.clock == nil {
 		return nil
 	}
-	// span is F's span from the real instant from to the arrival, ok where
+	f, ok := r.span(arrival)
+	if !ok {
+		return nil
+	}
+	return &Window{Rec: Span{From: recFrom, To: paired.Spec.ReqTimestampMock}, F: f}
+}
+
+// CallSpan is the span on the app's clock in which the call that reached
+// keploy at the real instant arrival made its reads of the clock in this
+// run: CallWindowFrom's F, for a call no recording is paired with yet. A call
+// of a series judging marked as the application's background work is
+// answered from a recording of the series only where its reads of the clock
+// hold on this span (learn.Series.Holds). ok is false where CallWindowFrom
+// would give no window for F's sake: no app clock, no call served before
+// arrival (outside a client test's begin), or an app clock that did not run
+// as one from the span's start to arrival.
+func (t *Tracker) CallSpan(arrival time.Time) (Span, bool) {
+	if t == nil {
+		return Span{}, false
+	}
+	r := t.runBefore(arrival)
+	if r.clock == nil {
+		return Span{}, false
+	}
+	return r.span(arrival)
+}
+
+// runBefore is what the tracker knows of this run before the real instant
+// arrival, read under its lock: the app's clock, the latest serve before
+// arrival (zero: none), and the client test's begins (SetClientTests).
+type runBefore struct {
+	clock           func(time.Time) (time.Time, bool)
+	prev            time.Time
+	client          bool
+	began, recBegan time.Time
+}
+
+func (t *Tracker) runBefore(arrival time.Time) runBefore {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	r := runBefore{clock: t.appClock, client: t.clientTests, began: t.beganAt, recBegan: t.recBegan}
+	i := sort.Search(len(t.servedAt), func(i int) bool { return !t.servedAt[i].Before(arrival) })
+	if i > 0 {
+		r.prev = t.servedAt[i-1]
+	}
+	return r
+}
+
+// span is F's span of a call that arrived at the real instant arrival: from
+// the previous serve, or, in a client test, from the running test's begin
+// where the app's clock did not run as one from the previous serve or none
+// was served, to arrival (CallWindowFrom). r.clock is not nil.
+func (r runBefore) span(arrival time.Time) (Span, bool) {
+	// from is F's span from the real instant from to the arrival, ok where
 	// the app's clock ran as one between them.
-	span := func(from time.Time) (Span, bool) {
+	from := func(from time.Time) (Span, bool) {
 		if from.IsZero() || from.After(arrival) {
 			return Span{}, false
 		}
-		fFrom, ok := clock(from)
+		fFrom, ok := r.clock(from)
 		if !ok {
 			return Span{}, false
 		}
-		fTo, ok := clock(arrival)
+		fTo, ok := r.clock(arrival)
 		if !ok || fTo.Sub(fFrom) != arrival.Sub(from) {
 			return Span{}, false
 		}
 		return Span{From: fFrom, To: fTo}, true
 	}
-	f, ok := span(prev)
-	if !ok && client && began.After(prev) {
-		f, ok = span(began)
+	f, ok := from(r.prev)
+	if !ok && r.client && r.began.After(r.prev) {
+		f, ok = from(r.began)
 	}
-	if !ok {
-		return nil
-	}
-	return &Window{Rec: Span{From: recFrom, To: paired.Spec.ReqTimestampMock}, F: f}
+	return f, ok
 }
 
 type trackerKey struct{}
