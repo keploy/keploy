@@ -290,7 +290,7 @@ func redirectedSocket(t *testing.T, h *Hooks) int {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := h.objects.OrigDstByCookie.Update(cookie, make([]byte, 32), ebpf.UpdateAny); err != nil {
+	if err := h.objects.OrigDstByCookie.Update(cookie, structs.DestInfo{}, ebpf.UpdateAny); err != nil {
 		t.Fatal(err)
 	}
 	return fd

@@ -275,15 +275,16 @@ func TestServeTreeListenerSaysTheFirstAndCountsTheRest(t *testing.T) {
 }
 
 // Under the proven switch, serveTreeListener tells OnProcess the owner of a
-// listener of the run's own tree a connection is addressed to.
+// listener of the run's own tree a connection is addressed to, by its number
+// in the agent's /proc (where it found it), with no kernel PID.
 func TestServeTreeListenerTellsTheBuildTheOwner(t *testing.T) {
 	recorded.forget()
 	t.Cleanup(recorded.forget)
 	prev := OnProcess
 	t.Cleanup(func() { OnProcess = prev })
 	t.Setenv("KEPLOY_PROVEN", "1")
-	seen := make(chan uint32, 4)
-	OnProcess = func(pid uint32) { seen <- pid }
+	seen := make(chan Process, 4)
+	OnProcess = func(p Process) { seen <- p }
 
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -308,8 +309,8 @@ func TestServeTreeListenerTellsTheBuildTheOwner(t *testing.T) {
 		_, _, _ = p.serveTreeListener(context.Background(), srv, dest, fmt.Sprintf("127.0.0.1:%d", port), "1")
 		close(done)
 	}()
-	if pid := awaitEvent(t, seen, "OnProcess being told the listener's owner"); pid != uint32(os.Getpid()) {
-		t.Fatalf("OnProcess was told %d, want the listener's owner %d", pid, os.Getpid())
+	if got, want := awaitEvent(t, seen, "OnProcess being told the listener's owner"), (Process{Pid: uint32(os.Getpid())}); got != want {
+		t.Fatalf("OnProcess was told %+v, want the listener's owner %+v", got, want)
 	}
 	_ = cli.Close()
 	<-done

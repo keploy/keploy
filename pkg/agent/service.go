@@ -911,6 +911,13 @@ type NetworkAddress struct {
 	// (per-PID scoping for parallel runners). 0 when unavailable (non-eBPF
 	// platforms / lookup miss) — callers must treat 0 as "unknown, no scope".
 	KernelPid uint32
+	// AgentNsPid is the same process's PID in the agent's own PID namespace,
+	// by which the agent finds it in its /proc (structs.DestInfo.AgentNsPid):
+	// KernelPid itself for an agent in the initial namespace, another number
+	// for one in a container. 0 when the eBPF redirect did not name it there:
+	// a process outside the agent's namespace (with KernelPid set), or none
+	// known (KernelPid 0 too).
+	AgentNsPid uint32
 }
 
 // Sessions provides a thread-safe store for Session objects, keyed by ID.

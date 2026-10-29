@@ -2695,7 +2695,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			return err
 		}
 	}
-	seeProcess(destInfo.KernelPid)
+	seeProcess(Process{Pid: destInfo.AgentNsPid, KernelPid: destInfo.KernelPid})
 
 	var dstAddr string
 
@@ -6352,7 +6352,7 @@ func (p *Proxy) serveTreeListener(ctx context.Context, srcConn net.Conn, dest *a
 		}
 		return false, outside, nil
 	}
-	seeProcess(pidToUint32(owner))
+	seeProcess(Process{Pid: pidToUint32(owner)})
 	if !proven && starts.Default.Dependency(pidToUint32(owner)) {
 		p.logger.Debug("the destination is a dependency the tests started; recording and serving it as mocks", zap.String("destination", dstAddr), zap.Int("owner", owner))
 		starts.Default.Child(conn)

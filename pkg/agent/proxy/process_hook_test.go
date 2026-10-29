@@ -9,58 +9,83 @@ import (
 	"go.uber.org/zap"
 )
 
-// Under the proven switch, seeProcess tells OnProcess about each real process,
-// and nothing about pid 0 (a connection the kernel could not attribute); with
-// no OnProcess set, or the switch off, it does nothing.
+// Under the proven switch, seeProcess tells OnProcess about each process,
+// one the agent cannot name too (Pid 0, KernelPid set: outside its PID
+// namespace), and nothing about one with no number at all (a connection the
+// kernel did not attribute); with no OnProcess set, or the switch off, it
+// does nothing.
 func TestSeeProcessTellsTheBuildEachProcess(t *testing.T) {
 	prev := OnProcess
 	t.Cleanup(func() { OnProcess = prev })
 	t.Setenv(provenswitch.Env, "1")
 
 	OnProcess = nil
-	seeProcess(7)
+	seeProcess(Process{Pid: 7, KernelPid: 7})
 
-	var seen []uint32
-	OnProcess = func(pid uint32) { seen = append(seen, pid) }
-	seeProcess(0)
-	seeProcess(42)
-	seeProcess(42)
-	if len(seen) != 2 || seen[0] != 42 || seen[1] != 42 {
-		t.Fatalf("OnProcess saw %v", seen)
+	var seen []Process
+	OnProcess = func(p Process) { seen = append(seen, p) }
+	seeProcess(Process{})
+	seeProcess(Process{Pid: 42, KernelPid: 42})
+	seeProcess(Process{Pid: 42, KernelPid: 42})
+	seeProcess(Process{Pid: 5})                 // a listener's owner, from the agent's /proc
+	seeProcess(Process{Pid: 0, KernelPid: 911}) // outside the agent's PID namespace
+	want := []Process{{Pid: 42, KernelPid: 42}, {Pid: 42, KernelPid: 42}, {Pid: 5}, {KernelPid: 911}}
+	if len(seen) != len(want) {
+		t.Fatalf("OnProcess saw %+v, want %+v", seen, want)
+	}
+	for i := range want {
+		if seen[i] != want[i] {
+			t.Fatalf("OnProcess saw %+v, want %+v", seen, want)
+		}
 	}
 
 	t.Setenv(provenswitch.Env, "")
-	seeProcess(43)
-	if len(seen) != 2 {
-		t.Fatalf("with the switch off OnProcess saw %v", seen)
+	seeProcess(Process{Pid: 43, KernelPid: 43})
+	if len(seen) != len(want) {
+		t.Fatalf("with the switch off OnProcess saw %+v", seen)
 	}
 }
 
-// Under the proven switch, handleConnection tells OnProcess the kernel PID of
-// each connection it accepts, before it serves it.
+// Under the proven switch, handleConnection tells OnProcess the process of
+// each connection it accepts, before it serves it: its number in the agent's
+// PID namespace (the redirect's AgentNsPid, by which the agent reads it in its
+// own /proc) beside the kernel's, or, for one the redirect could not name
+// there, the kernel's alone.
 func TestHandleConnectionTellsTheBuildTheCaller(t *testing.T) {
-	prev := OnProcess
-	t.Cleanup(func() { OnProcess = prev })
-	t.Setenv(provenswitch.Env, "1")
-	seen := make(chan uint32, 1)
-	OnProcess = func(pid uint32) { seen <- pid }
+	for _, tc := range []struct {
+		name       string
+		agentNsPid uint32
+	}{
+		{"named in the agent's PID namespace", 17},
+		{"outside the agent's PID namespace", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			prev := OnProcess
+			t.Cleanup(func() { OnProcess = prev })
+			t.Setenv(provenswitch.Env, "1")
+			seen := make(chan Process, 1)
+			OnProcess = func(p Process) { seen <- p }
 
-	upstream, accepted, _ := echoUpstream(t)
-	app, src := acceptedConn(t)
-	dest := ipv4Dest(t, upstream)
-	dest.KernelPid = 4242
-	p := &Proxy{logger: zap.NewNop(), DestInfo: fakeDestInfo{dest: dest}, agentMode: models.MODE_RECORD}
-	predialedTo(t, p, src, upstream)
-	<-accepted
+			upstream, accepted, _ := echoUpstream(t)
+			app, src := acceptedConn(t)
+			dest := ipv4Dest(t, upstream)
+			dest.KernelPid = 4242
+			dest.AgentNsPid = tc.agentNsPid
+			p := &Proxy{logger: zap.NewNop(), DestInfo: fakeDestInfo{dest: dest}, agentMode: models.MODE_RECORD}
+			predialedTo(t, p, src, upstream)
+			<-accepted
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	done := make(chan error, 1)
-	go func() { done <- p.handleConnection(ctx, src) }()
-	if pid := awaitEvent(t, seen, "OnProcess being told the caller"); pid != 4242 {
-		t.Fatalf("OnProcess was told %d, want the connection's kernel PID 4242", pid)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan error, 1)
+			go func() { done <- p.handleConnection(ctx, src) }()
+			want := Process{Pid: tc.agentNsPid, KernelPid: 4242}
+			if got := awaitEvent(t, seen, "OnProcess being told the caller"); got != want {
+				t.Fatalf("OnProcess was told %+v, want %+v", got, want)
+			}
+			_ = app.Close()
+			cancel()
+			awaitEvent(t, done, "handleConnection returning")
+		})
 	}
-	_ = app.Close()
-	cancel()
-	awaitEvent(t, done, "handleConnection returning")
 }
