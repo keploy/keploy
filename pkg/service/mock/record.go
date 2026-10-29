@@ -327,8 +327,9 @@ func (m *mockService) Record(ctx context.Context) error {
 		return fmt.Errorf("%s: %w", stopReason, err)
 	}
 
-	// recorded remembers each captured mock's name + request timestamp so the
-	// scope-window correlation after the run can build mappings.yaml.
+	// recorded remembers each captured mock's name, kind and place
+	// (models.PlaceOf) so the scope-window correlation after the run can
+	// build mappings.yaml.
 	var recorded []capturedMock
 	mockCount := 0
 	// mocksSeen is bumped for every mock that arrives, whether or not it ends
@@ -370,11 +371,11 @@ func (m *mockService) Record(ctx context.Context) error {
 			m.logger.Debug("AfterMockInsert hook failed", zap.Error(err), zap.String("mock", mk.Name))
 		}
 		mockCount++
-		kind := mk.Spec.Metadata["type"]
+		typ := mk.Spec.Metadata["type"]
 		// Under the proven switch a protocol-phase mock is the pool's, never
 		// a test's (design v14 §5.2): the mapping lists data-plane mocks only.
 		protocol := provenswitch.On() && mk.IsProtocolPhase()
-		recorded = append(recorded, capturedMock{name: mk.Name, ts: models.PlaceOf(mk), pid: mk.SourcePID, boot: kind == "config" || kind == "connection", protocol: protocol, start: mk.Start, ref: mk.StartRef})
+		recorded = append(recorded, capturedMock{name: mk.Name, kind: string(mk.Kind), ts: models.PlaceOf(mk), pid: mk.SourcePID, boot: typ == "config" || typ == "connection", protocol: protocol, start: mk.Start, ref: mk.StartRef})
 	}
 	go func() {
 		defer utils.Recover(m.logger)
@@ -1057,10 +1058,16 @@ func (m *mockService) deleteMappings(ctx context.Context, name string) {
 	}
 }
 
-// capturedMock is one recorded mock's name + request timestamp + source worker
-// PID, used to correlate mocks into per-test scope windows.
+// capturedMock is one recorded mock's name, kind, place (models.PlaceOf)
+// and source worker PID, or one recorded request's name and request and
+// response times (record_requests.go), used to correlate them into
+// per-test scope windows and to write their mapping entries.
 type capturedMock struct {
 	name string
+	// kind is the mock's (models.Mock.Kind), which its mapping entry
+	// states, as every other mapping writer does: keploy record's, the
+	// window mappings', a pulled set's. Empty for a recorded request.
+	kind string
 	// ts is where the call sits (models.PlaceOf): its request timestamp, or
 	// its answer's for one a parser holds until its answer (a consumer's
 	// poll), which is the test's whose window holds its answer.
@@ -1135,7 +1142,7 @@ func correlateScopes(windows []models.ScopeWindow, mocks []capturedMock) map[str
 		if best == -1 {
 			continue
 		}
-		byTest[windows[best].Name] = append(byTest[windows[best].Name], models.MockEntry{Name: mk.name})
+		byTest[windows[best].Name] = append(byTest[windows[best].Name], models.MockEntry{Name: mk.name, Kind: mk.kind})
 	}
 	return byTest
 }
@@ -1252,7 +1259,7 @@ func startupMocks(windows []models.ScopeWindow, mocks []capturedMock, claims []m
 		if mk.boot || mk.protocol || containing(windows, mk.ts) == "" {
 			// Under the proven wire, the pool slice of the key it was made
 			// under (design v14 §5.2); claims are none without it.
-			out = append(out, models.MockEntry{Name: mk.name, Key: claimKeyAt(claims, mk.ts)})
+			out = append(out, models.MockEntry{Name: mk.name, Kind: mk.kind, Key: claimKeyAt(claims, mk.ts)})
 		}
 	}
 	return out
