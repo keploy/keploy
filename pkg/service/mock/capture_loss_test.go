@@ -318,3 +318,18 @@ func TestARecordsTestsFileCarriesWhatKeployCannotCapture(t *testing.T) {
 	require.NotNil(t, r, "no per-test file")
 	require.Equal(t, db, r.CannotCapture)
 }
+
+// A passed test whose window a set-aside test's recording answered keeps the
+// serve on its receipt line, each attempt's, named with that test; the line
+// stays passed: a serve is never a failure (ScopeEvidence.ServedAside is not
+// part of Empty).
+func TestAReceiptNamesWhatASetAsideTestServed(t *testing.T) {
+	got := withEvidence([]TestReceipt{{Name: "o::K", Outcome: "passed"}}, []models.ScopeWindow{
+		{Name: "o::K", Evidence: &models.ScopeEvidence{ServedAside: []string{models.ServedAsideLine("mock-194", "o::TestAppCRUD")}}},
+		{Name: "o::K", Evidence: &models.ScopeEvidence{ServedAside: []string{models.ServedAsideLine("mock-195", "o::TestAppCRUD")}}},
+	})
+	require.NotNil(t, got[0].Evidence)
+	require.Equal(t, []string{"mock-194 served from o::TestAppCRUD (set aside)", "mock-195 served from o::TestAppCRUD (set aside)"}, got[0].Evidence.ServedAside)
+	require.True(t, got[0].Evidence.Empty(), "a serve fails nothing")
+	require.Equal(t, "passed", got[0].Outcome)
+}
