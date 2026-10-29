@@ -2177,7 +2177,7 @@ func logMiss(logger *zap.Logger, miss models.UnmatchedCall) {
 			zap.String("call", miss.ActualSummary),
 			zap.String("destination", miss.Destination),
 			zap.Time("at", miss.At),
-			zap.String("why", backgroundWhy(miss)),
+			zap.String("why", miss.UnansweredWhy()),
 			zap.String("next_step", next))
 		return
 	}
@@ -2195,19 +2195,6 @@ func logMiss(logger *zap.Logger, miss models.UnmatchedCall) {
 		fields = append(fields, zap.String("reason", miss.Reason))
 	}
 	logger.Warn(msg, append(fields, zap.String("next_step", next))...)
-}
-
-// backgroundWhy is why nothing answered a background miss, as its matcher
-// said it: where the match stopped, and the closest recording.
-func backgroundWhy(miss models.UnmatchedCall) string {
-	why := "no recording of the set is this call"
-	if miss.MatchPhase != "" {
-		why = "the match stopped at " + miss.MatchPhase
-	}
-	if miss.ClosestMock != "" {
-		why += "; closest " + miss.ClosestMock
-	}
-	return why
 }
 
 // provenCount is n under the proven switch, and nothing with it off, so a
