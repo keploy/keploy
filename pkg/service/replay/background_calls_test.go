@@ -1,6 +1,7 @@
 package replay
 
 import (
+	"context"
 	"slices"
 	"sync"
 	"testing"
@@ -116,17 +117,14 @@ func TestBackgroundCallsAreTheSetsListingOnly(t *testing.T) {
 	before, _ := beforeFirst()
 	own := models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "GET /own"}
 	bg := betweenTests("find vault_pats")
-	rest := s.take(append(before, bg, own))
+	rest := s.take(context.Background(), append(before, bg, own), "test-2", nil)
 	if len(rest) != 1 || rest[0].ActualSummary != "GET /own" {
 		t.Fatalf("the test keeps %+v; want only its own call", rest)
 	}
-	if got := s.failing(); len(got) != 1 || !got[0].BeforeSet {
-		t.Fatalf("the set fails with %+v; want only the call made before it", got)
+	if got := s.backgroundCalls(); len(got) != 2 || !got[0].BeforeSet || got[1].ActualSummary != bg.ActualSummary {
+		t.Fatalf("the set lists %+v; want the call made before it, then the background call", got)
 	}
-	if got := s.backgroundCalls(); len(got) != 1 || got[0].ActualSummary != bg.ActualSummary {
-		t.Fatalf("the set lists %+v; want the background call", got)
-	}
-	s.reset()
+	s.reset(nil)
 	if got := s.backgroundCalls(); len(got) != 0 {
 		t.Fatalf("after the reset the set lists %+v; want nothing", got)
 	}
