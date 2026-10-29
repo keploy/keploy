@@ -1779,3 +1779,115 @@ func TestAnOffsetCutToAnHourIsRefusedNearATurnWhoseWallTimeShownTwiceHoldsAnHour
 		}
 	}
 }
+
+// A read plus an offset whose stored zone keploy cannot read (a name this
+// keploy's zone files lack), or learned as no one zone (AppZoneApart), cut
+// to the second: its replay, where keploy reads no zone of the
+// application's process, knows no zone of the application's, so it reads
+// every zone's turns (FallBackAnywhere). In the hour Europe/Berlin shows
+// twice (2026-10-25), an application there that resolves the wall time to
+// its first showing writes clock + 2h an hour early, so a time to live an
+// hour longer stands where the right one would: the replay refuses it
+// there, naming a turn and that keploy knows no zone. Kept as a known
+// zone, the stored name would leave the check in the agent's zone (UTC),
+// which never turns, and the longer one passes at every read. On another
+// day the right value passes.
+func TestAnOffsetWhoseStoredZoneIsUnreadIsCheckedAgainstEveryZonesTurns(t *testing.T) {
+	ber, err := time.LoadLocation("Europe/Berlin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const p = "body.expiresAt"
+	hour, ms := time.Hour, time.Millisecond
+	turn := time.Date(2026, 10, 25, 1, 0, 0, 0, time.UTC)
+	val := func(r time.Time, ttl time.Duration) time.Time { return firstShowingIn(r, time.Second, ber).Add(ttl) }
+	dc := clockedDrifts()
+	dc.zone = ber
+	call := time.Date(2026, 10, 26, 10, 0, 7, 300e6, time.UTC)
+	fcall := call.Add(FullRoundLead)
+	w := (&Window{Rec: Span{From: call.Add(-100 * ms), To: call}, F: Span{From: fcall.Add(-100 * ms), To: fcall}}).ComparesOffsets()
+	leaf := func(at time.Time) Shape { return Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, at, ms)}} }
+	ln := ClassifyIn(dc, []string{p}, leaf(val(fcall.Add(-30*ms), 2*hour)), leaf(val(call.Add(-30*ms), 2*hour)), call, nil, nil, nil, w)[0]
+	if ln.Kind != KindClockOffset || ln.Offset == nil || ln.Offset.AppZone != "Europe/Berlin" {
+		t.Fatalf("learned %s (%s) %+v; want clock + 2h at the second, naming Europe/Berlin", ln.Kind, ln.Why, ln.Offset)
+	}
+	for _, z := range []string{"Mars/Olympus_Mons", models.AppZoneApart} {
+		o := *ln.Offset
+		o.AppZone = z
+		longer, n := 0, 0
+		for from := turn; from.Before(turn.Add(hour)); from = from.Add(37 * time.Second) {
+			n++
+			s := Span{From: from, To: from.Add(time.Second), Zone: time.UTC}
+			ok, why := CheckClockRead(p, o, InstantLeaf(p, p, val(from.Add(500*ms), 3*hour), ms), s, true)
+			if ok {
+				longer++
+				continue
+			}
+			if !strings.Contains(why, "clocks go back") || !strings.Contains(why, "keploy knows no zone of the application's at this call") {
+				t.Errorf("stored zone %q, read at %s in the hour Berlin shows twice: refused %q; want it to name a turn and that keploy knows no zone", z, from, why)
+			}
+		}
+		if longer > 0 {
+			t.Errorf("FALSE GREEN: stored zone %q, the process's zone unread: in the hour Berlin shows twice, a time to live an hour longer passed at %d of %d reads; want none", z, longer, n)
+		}
+		far := time.Date(2026, 11, 5, 10, 0, 0, 0, time.UTC)
+		if ok, why := CheckClockRead(p, o, InstantLeaf(p, p, val(far.Add(500*ms), 2*hour), ms), Span{From: far, To: far.Add(time.Second), Zone: time.UTC}, true); !ok {
+			t.Errorf("FALSE RED: stored zone %q, read on %s: the right value refused: %s", z, far, why)
+		}
+	}
+}
+
+// With no zone known at learn or at replay, a read plus an offset cut to
+// the second, by an application in America/Santiago that adds two hours
+// and then resolves its wall time to its first showing: Santiago's clocks
+// go back at 03:00 UTC on 2026-04-05, a turn no other zone's window covers
+// the hours before. A replay there reads every zone's turns over the call's
+// window and over the values its check admits (the window plus the
+// offset): the values a time to live an hour longer writes in the hour
+// before the turn stand in the hour shown twice while the call's window
+// does not, so a check of the window alone passes it, from 00:00 to 01:00
+// UTC. The replay refuses it at every read.
+func TestTheUnionOfEveryZonesTurnsReadsTheValuesACheckAdmits(t *testing.T) {
+	scl, err := time.LoadLocation("America/Santiago")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const p = "body.expiresAt"
+	hour, ms := time.Hour, time.Millisecond
+	val := func(r time.Time, ttl time.Duration) time.Time { return firstShowingIn(r.Add(ttl), time.Second, scl) }
+	dc := clockedDrifts()
+	dc.zone = nil
+	call := time.Date(2026, 5, 6, 10, 0, 7, 300e6, time.UTC)
+	fcall := call.Add(FullRoundLead)
+	w := (&Window{Rec: Span{From: call.Add(-100 * ms), To: call}, F: Span{From: fcall.Add(-100 * ms), To: fcall}}).ComparesOffsets()
+	leaf := func(at time.Time) Shape { return Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, at, ms)}} }
+	ln := ClassifyIn(dc, []string{p}, leaf(val(fcall.Add(-30*ms), 2*hour)), leaf(val(call.Add(-30*ms), 2*hour)), call, nil, nil, nil, w)[0]
+	if ln.Kind != KindClockOffset || ln.Offset == nil || ln.Offset.AppZone != "" {
+		t.Fatalf("learned %s (%s) %+v; want clock + 2h at the second, naming no zone", ln.Kind, ln.Why, ln.Offset)
+	}
+	o := *ln.Offset
+	longer, n, before := 0, 0, 0
+	for from := time.Date(2026, 4, 4, 20, 0, 0, 0, time.UTC); from.Before(time.Date(2026, 4, 5, 6, 0, 0, 0, time.UTC)); from = from.Add(37 * time.Second) {
+		n++
+		if !from.Before(time.Date(2026, 4, 5, 0, 0, 0, 0, time.UTC)) && from.Before(time.Date(2026, 4, 5, 1, 0, 0, 0, time.UTC)) {
+			before++
+		}
+		s := Span{From: from, To: from.Add(time.Second), Zone: time.UTC}
+		if ok, _ := CheckClockRead(p, o, InstantLeaf(p, p, val(from.Add(500*ms), 3*hour), ms), s, true); ok {
+			longer++
+			if longer <= 3 {
+				t.Errorf("FALSE GREEN: no zone known, read at %s near America/Santiago's turn: a time to live an hour longer passed", from)
+			}
+		}
+	}
+	if before < 90 {
+		t.Fatalf("%d reads from 00:00 to 01:00 UTC; want 90 or more", before)
+	}
+	if longer > 0 {
+		t.Errorf("FALSE GREEN: a time to live an hour longer passed at %d of %d reads; want none", longer, n)
+	}
+	h := time.Date(2026, 4, 5, 0, 30, 0, 0, time.UTC)
+	if ok, why := CheckClockRead(p, o, InstantLeaf(p, p, val(h.Add(500*ms), 3*hour), ms), Span{From: h, To: h.Add(time.Second), Zone: time.UTC}, true); ok || !strings.Contains(why, "keploy knows no zone of the application's at this call") || !strings.Contains(why, "clocks go back") {
+		t.Errorf("no zone known, read at %s: passed %v (%s); want refused, naming a turn and that keploy knows no zone", h, ok, why)
+	}
+}
