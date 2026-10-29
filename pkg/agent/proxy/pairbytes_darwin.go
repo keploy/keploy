@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net"
 	"sync"
-	"unsafe"
 
 	"golang.org/x/sys/unix"
 
@@ -257,33 +256,14 @@ func readUnread(conn *net.TCPConn) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	var n int32
+	var n int
 	var gerr error
 	if err := rc.Control(func(fd uintptr) {
-		len := uint32(4)
-		gerr = getsockopt(int(fd), unix.SOL_SOCKET, unix.SO_NREAD,
-			unsafe.Pointer(&n), &len)
+		n, gerr = unix.GetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_NREAD)
 	}); err != nil {
 		return 0, err
 	}
-	return int(n), gerr
-}
-
-// getsockopt is a thin wrapper for the getsockopt syscall.
-func getsockopt(fd, level, name int, val unsafe.Pointer, vallen *uint32) error {
-	_, _, errno := unix.Syscall6(
-		unix.SYS_GETSOCKOPT,
-		uintptr(fd),
-		uintptr(level),
-		uintptr(name),
-		uintptr(val),
-		uintptr(unsafe.Pointer(vallen)),
-		0,
-	)
-	if errno != 0 {
-		return errno
-	}
-	return nil
+	return n, gerr
 }
 
 // readProxySide reads the proxy's side of a paired connection: the next

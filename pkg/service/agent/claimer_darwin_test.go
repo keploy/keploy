@@ -49,16 +49,30 @@ func TestProcAliveReturnsFalseForWrongStartTime(t *testing.T) {
 	}
 }
 
-// procDescends confirms a child process is a descendant of this process.
-func TestProcDescendsForChild(t *testing.T) {
-	cmd := exec.Command("sleep", "10")
+// startInOwnGroup starts cmd as the leader of a process group of its own
+// and, in t.Cleanup, kills that whole group and reaps cmd, so a test that
+// stops early leaves no child of it running. A cmd the test already reaped
+// (its ProcessState is set) is left alone: its pid, and so its group id, may
+// belong to another process by then.
+func startInOwnGroup(t *testing.T, cmd *exec.Cmd) {
+	t.Helper()
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start child: %v", err)
 	}
-	defer func() {
-		_ = cmd.Process.Kill()
+	t.Cleanup(func() {
+		if cmd.ProcessState != nil {
+			return
+		}
+		_ = unix.Kill(-cmd.Process.Pid, unix.SIGKILL)
 		_ = cmd.Wait()
-	}()
+	})
+}
+
+// procDescends confirms a child process is a descendant of this process.
+func TestProcDescendsForChild(t *testing.T) {
+	cmd := exec.Command("sleep", "10")
+	startInOwnGroup(t, cmd)
 
 	if !procDescends(cmd.Process.Pid, os.Getpid()) {
 		t.Fatalf("procDescends(%d, %d) = false, want true", cmd.Process.Pid, os.Getpid())
@@ -110,16 +124,7 @@ func TestAZombieIsNotAlive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stdin pipe: %v", err)
 	}
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start child: %v", err)
-	}
-	reaped := false
-	t.Cleanup(func() {
-		if !reaped {
-			_ = cmd.Process.Kill()
-			_ = cmd.Wait()
-		}
-	})
+	startInOwnGroup(t, cmd)
 	pid := cmd.Process.Pid
 	start, ok := procStart(pid)
 	if !ok || !procAlive(pid, start) {
@@ -143,7 +148,6 @@ func TestAZombieIsNotAlive(t *testing.T) {
 		t.Fatalf("procDescends(zombie %d, %d) = false, want true", pid, os.Getpid())
 	}
 
-	reaped = true
 	if err := cmd.Wait(); err != nil {
 		t.Fatalf("reap: %v", err)
 	}
