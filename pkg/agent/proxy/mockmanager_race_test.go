@@ -162,6 +162,7 @@ func TestTierKeyKeepsEveryFieldButTheID(t *testing.T) {
 			ServedIn:        3,
 			StagedSet:       5,
 			Concurrent:      true,
+			SetAsideFrom:    "o::TestQ",
 		},
 	}
 	v := reflect.ValueOf(src.TestModeInfo)
