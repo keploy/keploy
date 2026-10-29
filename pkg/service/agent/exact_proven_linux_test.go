@@ -373,7 +373,9 @@ func TestAnotherTestsMockNeverAnswers(t *testing.T) {
 }
 
 // Between tests the key's pool slice answers, as often as asked; no test's
-// mock answers there, and inside a test no data-plane pool mock answers.
+// mock answers there, and inside a test no data-plane pool mock answers. The
+// miss between tests is the application's background work: charged to no
+// test, the next one included (founder D1).
 func TestThePoolAnswersOnlyBetweenTests(t *testing.T) {
 	a, p := exactAgent(t,
 		[]*models.Mock{pingMock("mock-1", "/health", "ok", t0), pingMock("mock-2", "/a", "a", t0.Add(time.Second))},
@@ -394,7 +396,11 @@ func TestThePoolAnswersOnlyBetweenTests(t *testing.T) {
 	for _, m := range ev.Misses {
 		kinds = append(kinds, m.Kind)
 	}
-	require.ElementsMatch(t, []string{models.MissOutsideTest, models.MissInTest}, kinds, "the miss between tests is charged to the next test")
+	require.Equal(t, []string{models.MissInTest}, kinds, "the miss between tests is charged to no test")
+	bg := backgroundCharged(a)
+	require.Len(t, bg, 1)
+	require.Equal(t, models.MissOutsideTest, bg[0].Kind)
+	require.Contains(t, bg[0].ActualSummary, "/a")
 }
 
 // sqsEmpty is the answer enterprise SQS's parser writes for a ReceiveMessage
@@ -931,8 +937,9 @@ func (p *inFlightProxy) ServeExactPool(key string, names []string) error {
 
 // A test's call that lands as its end stops serving it misses, fails the
 // test, and is said to be made as the test ended, not before it began; a
-// call made between tests is still said to precede the next test (round-3
-// review).
+// call made between tests is the application's background work: it fails
+// no test, the next one included, and the run's misses carry it as
+// background (founder D1).
 func TestACallLandingAsTheTestEndsIsSaidToBeMadeThen(t *testing.T) {
 	a, rp := exactAgent(t,
 		[]*models.Mock{pingMock("mock-1", "/a", "a", t0), pingMock("mock-2", "/b", "b", t0.Add(time.Second)), pingMock("mock-3", "/c", "c", t0.Add(2*time.Second))},
@@ -955,8 +962,73 @@ func TestACallLandingAsTheTestEndsIsSaidToBeMadeThen(t *testing.T) {
 	require.Equal(t, 502, code)
 	got, e := runTest(t, a, p.servingProxy, "TestB", "/c")
 	require.Equal(t, []string{"200 c"}, got)
-	require.Equal(t, models.ScopeActionFail, e.Action)
-	require.Contains(t, e.Reason, "GET /zzz to 127.0.0.1:18093, made before this one began, had no recorded answer")
+	require.Empty(t, e.Action, e.Reason)
+	bg := backgroundCharged(a)
+	require.Len(t, bg, 1)
+	require.Contains(t, bg[0].ActualSummary, "/zzz")
+	require.False(t, bg[0].CountsAgainstTest())
+}
+
+// backgroundCharged is the misses the tests' ends drained that were made
+// outside every test's window (models.UnmatchedCall.Background).
+func backgroundCharged(a *Agent) []models.UnmatchedCall {
+	a.provenMu.Lock()
+	defer a.provenMu.Unlock()
+	var out []models.UnmatchedCall
+	for _, m := range a.proven.charged {
+		if m.Background {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// TestNonExistentApp's shape in api-server's acceptance run 3: the tests
+// before a kept test are quarantined, so they open no window, and the
+// application's timers and the call a quarantined test recorded are made
+// before the kept test begins. Nothing answers them (the quarantined test's
+// recording is served to no one), and the kept test still passes: a call
+// made outside every test's window is charged to no test (founder D1). The
+// run's misses carry both, as background, for the set's report; a call the
+// kept test makes that nothing answers still fails it.
+func TestCallsBeforeAKeptTestAfterAQuarantinedOneFailNoTest(t *testing.T) {
+	for _, own := range []bool{false, true} {
+		t.Run(map[bool]string{false: "kept test passes", true: "its own miss still fails it"}[own], func(t *testing.T) {
+			a, rp := exactAgent(t,
+				[]*models.Mock{pingMock("mock-1", "/pat", "pat", t0), pingMock("mock-2", "/k", "k", t0.Add(time.Second))},
+				map[string][]string{"o::TestQ": {"mock-1"}, "o::TestK": {"mock-2"}}, map[string][]string{})
+			ctx := context.Background()
+			require.NoError(t, a.SetScopeSkips(ctx, map[string]string{"o::TestQ": "flaky/request_changed"}))
+			b, serr := a.ProvenBegin(ctx, begin("TestQ"))
+			require.Nil(t, serr)
+			require.Equal(t, models.ScopeActionSkip, b.Action)
+			for _, path := range []string{"/tick", "/pat"} { // a timer's call; the quarantined test's recorded call
+				code, _ := rp.call(t, path)
+				require.Equal(t, 502, code)
+			}
+			paths := []string{"/k"}
+			if own {
+				paths = append(paths, "/own")
+			}
+			got, e := runTest(t, a, rp, "TestK", paths...)
+			require.Equal(t, "200 k", got[0])
+			if own {
+				require.Equal(t, models.ScopeActionFail, e.Action)
+				require.Contains(t, e.Reason, "GET /own to 127.0.0.1:18093 had no recorded answer")
+				require.NotContains(t, e.Reason, "/tick")
+				require.NotContains(t, e.Reason, "/pat")
+				require.NotContains(t, e.Reason, "before this one began")
+			} else {
+				require.Empty(t, e.Action, e.Reason)
+			}
+			bg := backgroundCharged(a)
+			require.Len(t, bg, 2)
+			for i, path := range []string{"/tick", "/pat"} {
+				require.Contains(t, bg[i].ActualSummary, path)
+				require.False(t, bg[i].At.IsZero(), "a background miss says when it was made")
+			}
+		})
+	}
 }
 
 // lateProxy holds a miss between its report being built and its filing

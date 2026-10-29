@@ -29,7 +29,7 @@ func (m UnmatchedCall) Sanitized() UnmatchedCall {
 		// An answered call stays one (UnmatchedCall.Answer): how it was
 		// answered and by which process, no value.
 		Answer: m.Answer, Drift: m.Drift, Reused: m.Reused, WriteKind: m.WriteKind, Source: m.Source, RecordedIn: m.RecordedIn, ChargedTo: m.ChargedTo,
-		Repeat: m.Repeat.Clone()}
+		Repeat: m.Repeat.Clone(), Background: m.Background}
 	// A variable's path places name segments, not values: kept, so a shape
 	// of this miss (MissShape) still writes them {}. Any other place
 	// can name a JSON key that is a value.
