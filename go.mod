@@ -7,7 +7,7 @@ require (
 	facette.io/natsort v0.0.0-20181210072756-2cd4dd1e2dcb
 	github.com/7sDream/geko v0.1.1
 	github.com/agnivade/levenshtein v1.1.1
-	github.com/andybalholm/brotli v1.2.0
+	github.com/andybalholm/brotli v1.2.3
 	github.com/bufbuild/protocompile v0.14.1
 	github.com/cespare/xxhash/v2 v2.3.0
 	github.com/cilium/ebpf v0.22.0

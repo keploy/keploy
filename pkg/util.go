@@ -4556,35 +4556,165 @@ func (c *cappedReadCloser) Close() error { return c.closer.Close() }
 // the returned slice retains no doubling slack (io.ReadAll can retain ~2x
 // the limit near the cap).
 func readAllCapped(r io.Reader, limit int64) ([]byte, error) {
+	return readAllReserved(r, limit, nil)
+}
+
+// ErrDecodeRefused reports that a DecompressReserving caller's reserve func
+// refused room for memory the decode was about to hold: the decode stopped
+// there and holds nothing. The caller that refused counts and reports it.
+var ErrDecodeRefused = errors.New("decode refused: no room for the decoded body")
+
+// gzipDecoderStateBytes is what a gzip decoder holds while it decodes, beside
+// its output: compress/flate's 32 KiB history window and its Huffman tables,
+// and gzip.Reader's header state. TestDecoderStateIsReservedAsItIsHeld pins
+// it against what the decoder allocates.
+const gzipDecoderStateBytes = 64 << 10
+
+// brotliReaderBytes is what a brotli decoder holds beside its ring buffer and
+// its prefix-code tables (brotliTableBytes, brotliTableRegrowBytes): its
+// 32 KiB input buffer, its state, its block-type trees, and one metablock's
+// context maps and tree headers, with one group's headers again while it
+// regrows them, at the format's limits (92,952 bytes in
+// github.com/andybalholm/brotli v1.2.3).
+// TestBrotliDecoderStateIsReservedAtTheFormatsLimits pins it against the
+// decoder.
+const brotliReaderBytes = 96 << 10
+
+// The format's limits on a brotli decoder's prefix-code tables. Each
+// metablock has three groups of prefix codes, one per alphabet, each of at
+// most 256 trees (RFC 7932 §9.2: NTREESL, NBLTYPESI, NTREESD), and
+// github.com/andybalholm/brotli allocates every tree of a group at the most
+// its alphabet's table can take (kMaxHuffmanTableSize: root table bits 8,
+// codes up to 15 bits), as soon as it has read the group's count and before
+// it reads a tree. So the tables a stream makes the decoder hold are the
+// count its header declares, never what its trees need, and a few bytes can
+// declare the most.
+const (
+	brotliMaxTreesPerGroup     = 256
+	brotliTableEntryBytes      = 4    // one entry: its bits and its symbol
+	brotliLiteralTableEntries  = 630  // a tree of the 256 literals
+	brotliCommandTableEntries  = 1080 // of the 704 insert-and-copy codes
+	brotliDistanceTableEntries = 920  // of the most distance codes a stream may declare: 520 (NPOSTFIX 3, NDIRECT 120)
+)
+
+// brotliTableBytes is the most a brotli decoder keeps of its prefix-code
+// tables: three groups, each at the format's limit (2,693,120 bytes).
+// github.com/andybalholm/brotli v1.2.3 keeps each group's table buffer from
+// one metablock to the next and reuses it (makeCodesBuffer), so what it keeps
+// is never more than the largest each group has needed, and that is at most
+// the format's limit.
+const brotliTableBytes = brotliMaxTreesPerGroup * brotliTableEntryBytes *
+	(brotliLiteralTableEntries + brotliCommandTableEntries + brotliDistanceTableEntries)
+
+// brotliTableRegrowBytes is what a brotli decoder holds of its prefix-code
+// tables beside brotliTableBytes, at the most, while it regrows one group's:
+// when a metablock declares more trees than the group's kept buffer holds
+// (or, for the distance group, a larger alphabet), the decoder allocates the
+// larger buffer while it still holds the smaller one, and drops that only
+// once the new one is in place. The smaller one is less than the group's
+// limit, and the groups are regrown one at a time, so this is the largest
+// group's limit: insert-and-copy's, 256 trees of 1,080 entries (1,105,920
+// bytes). TestABrotliDecodeReservesTheTablesItsDecoderRegrows pins it.
+const brotliTableRegrowBytes = brotliMaxTreesPerGroup * brotliTableEntryBytes * brotliCommandTableEntries
+
+// brotliRingBytes is the most a brotli decoder holds of its ring buffer for
+// a stream that declares a window of 2^wbits bytes (RFC 7932 §9.1): the
+// window, with the decoder's write-ahead slack, and, while it grows the ring
+// to fit the output, the ring it replaces (half the new one), so 1.5 times
+// the window. github.com/andybalholm/brotli sizes the ring to the output and
+// the metablock it decodes (calculateRingBufferSize), never past the window,
+// and allocates it before it writes a byte of the metablock, so the decode
+// reserves the whole bound before it starts.
+func brotliRingBytes(wbits uint) int64 {
+	w := int64(1) << wbits
+	return w + w/2 + 1024
+}
+
+// brotliWindowBits reads the window size a brotli stream declares in its
+// first bits (RFC 7932 §9.1, WBITS), and reports false for a stream too short
+// to say, or one that asks for a large window (which the decoder refuses).
+func brotliWindowBits(data []byte) (uint, bool) {
+	if len(data) == 0 {
+		return 0, false
+	}
+	b := data[0]
+	if b&1 == 0 {
+		return 16, true
+	}
+	if n := (b >> 1) & 7; n != 0 {
+		return 17 + uint(n), true
+	}
+	switch n := (b >> 4) & 7; n {
+	case 0:
+		return 17, true
+	case 1:
+		return 0, false // the large-window marker
+	default:
+		return 8 + uint(n), true
+	}
+}
+
+// reserveFor asks reserve for n bytes before the decode holds them; a nil
+// reserve lets the decode hold anything (Decompress).
+func reserveFor(reserve func(int64) bool, n int64) bool {
+	return reserve == nil || n <= 0 || reserve(n)
+}
+
+// giveBack tells reserve the decode holds n bytes less.
+func giveBack(reserve func(int64) bool, n int64) {
+	if reserve != nil && n > 0 {
+		reserve(-n)
+	}
+}
+
+// readAllReserved is readAllCapped, asking reserve for each buffer before it
+// allocates it, and giving the buffer it outgrew back once it has copied it
+// to the new one: what it holds of r's output is never more than reserve let
+// it hold. On success what stays reserved is the returned slice's capacity;
+// on any error (reserve refused, ErrDecodeRefused; the stream was too large,
+// or failed) nothing does: it gives back the buffer it drops.
+func readAllReserved(r io.Reader, limit int64, reserve func(int64) bool) ([]byte, error) {
 	errTooLarge := fmt.Errorf("%w of %d bytes (possible decompression bomb)", ErrDecompressedTooLarge, limit)
 	startCap := int64(64 * 1024)
 	if startCap > limit+1 {
 		startCap = limit + 1
 	}
+	if !reserveFor(reserve, startCap) {
+		return nil, ErrDecodeRefused
+	}
 	data := make([]byte, 0, startCap)
+	fail := func(err error) ([]byte, error) {
+		giveBack(reserve, int64(cap(data)))
+		return nil, err
+	}
 	for {
 		if len(data) == cap(data) {
 			if int64(len(data)) > limit {
-				return nil, errTooLarge
+				return fail(errTooLarge)
 			}
 			newCap := int64(cap(data)) * 2
 			if newCap > limit+1 {
 				newCap = limit + 1
 			}
+			if !reserveFor(reserve, newCap) {
+				return fail(ErrDecodeRefused)
+			}
 			grown := make([]byte, len(data), newCap)
 			copy(grown, data)
+			outgrown := int64(cap(data))
 			data = grown
+			giveBack(reserve, outgrown)
 		}
 		n, err := r.Read(data[len(data):cap(data)])
 		data = data[:len(data)+n]
 		if err == io.EOF {
 			if int64(len(data)) > limit {
-				return nil, errTooLarge
+				return fail(errTooLarge)
 			}
 			return data, nil
 		}
 		if err != nil {
-			return nil, err
+			return fail(err)
 		}
 	}
 }
@@ -4596,16 +4726,46 @@ func readAllCapped(r io.Reader, limit int64) ([]byte, error) {
 // Compress uses the same matching, so a recorded body round-trips at replay.
 // An unsupported encoding (e.g. zstd, deflate) is returned undecompressed.
 func Decompress(logger *zap.Logger, encoding string, data []byte, limit int64) ([]byte, error) {
+	return DecompressReserving(logger, encoding, data, limit, nil)
+}
+
+// DecompressReserving is Decompress for a caller that bounds what its
+// decodes hold (the enterprise agent's capture bound): the decode asks
+// reserve(n), n > 0, before it holds n more bytes (its output buffer as it
+// grows it, and the decoder's own state: gzip's window and tables, brotli's
+// ring buffer as large as the stream's window allows and its prefix-code
+// tables as large as the format allows, with one group's again while it
+// regrows them), and tells it
+// reserve(-n) once it holds n bytes less (the buffer it outgrew, the decoder
+// it closed). A refusal stops the decode at once: it returns
+// ErrDecodeRefused, holding nothing. On success what stays reserved is the
+// returned slice's capacity; on any error, nothing. An encoding it does not
+// decode reserves nothing: data is returned as it is. A nil reserve is
+// Decompress.
+func DecompressReserving(logger *zap.Logger, encoding string, data []byte, limit int64, reserve func(n int64) bool) ([]byte, error) {
 	switch strings.ToLower(strings.TrimSpace(encoding)) {
 	case "br":
 		logger.Debug("decompressing brotli compressed data")
+		var state int64
+		if reserve != nil {
+			wbits, ok := brotliWindowBits(data)
+			if !ok {
+				wbits = 24 // the largest window a stream may declare without the large-window flag
+			}
+			state = brotliReaderBytes + brotliTableBytes + brotliTableRegrowBytes + brotliRingBytes(wbits)
+			if !reserveFor(reserve, state) {
+				return nil, ErrDecodeRefused
+			}
+		}
 		reader := brotli.NewReader(bytes.NewReader(data))
-		decodedData, err := readAllCapped(reader, limit)
+		decodedData, err := readAllReserved(reader, limit, reserve)
+		giveBack(reserve, state) // the reader, and its ring buffer, are dropped here
 		if err != nil {
 			// Over-limit is reported by the caller (e.g. Capture logs it as
 			// the regular size-limit drop) — logging it here too would
-			// double-report every oversized body as a decode failure.
-			if !errors.Is(err, ErrDecompressedTooLarge) {
+			// double-report every oversized body as a decode failure. So is
+			// a refusal: the caller that refused counts it.
+			if !errors.Is(err, ErrDecompressedTooLarge) && !errors.Is(err, ErrDecodeRefused) {
 				utils.LogError(logger, err, "failed to read the brotli compressed data")
 			}
 			return nil, err
@@ -4613,16 +4773,25 @@ func Decompress(logger *zap.Logger, encoding string, data []byte, limit int64) (
 		return decodedData, nil
 	case "gzip":
 		logger.Debug("decoding gzip compressed data")
+		var state int64
+		if reserve != nil {
+			state = gzipDecoderStateBytes
+			if !reserveFor(reserve, state) {
+				return nil, ErrDecodeRefused
+			}
+		}
+		defer giveBack(reserve, state)
 		reader, err := gzip.NewReader(bytes.NewReader(data))
 		if err != nil {
 			utils.LogError(logger, err, "failed to create gzip reader")
 			return nil, err
 		}
 		defer reader.Close()
-		decodedData, err := readAllCapped(reader, limit)
+		decodedData, err := readAllReserved(reader, limit, reserve)
 		if err != nil {
-			// See the brotli branch: over-limit is the caller's to report.
-			if !errors.Is(err, ErrDecompressedTooLarge) {
+			// See the brotli branch: over-limit and a refusal are the
+			// caller's to report.
+			if !errors.Is(err, ErrDecompressedTooLarge) && !errors.Is(err, ErrDecodeRefused) {
 				utils.LogError(logger, err, "failed to read the gzip compressed data")
 			}
 			return nil, err
