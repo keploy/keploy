@@ -1683,3 +1683,77 @@ func TestABeginWhoseClockCannotMoveOpensNoWindow(t *testing.T) {
 	defer p.mu.Unlock()
 	require.Empty(t, p.order, "no window opened, none taken back, nothing served")
 }
+
+// A miss names its destination as the recording does (the mocks' destAddr):
+// the app reached [::1]:27017 where the recording has 127.0.0.1:27017, the
+// same loopback port, so the evidence says 127.0.0.1:27017 and adds the live
+// address, labelled. A destination the recording names as reached, one that
+// is not loopback, another address of 127.0.0.0/8 (another listener's), one
+// named by its host's name (localhost: the name the app gave, which an HTTP
+// recording keeps in its Host header), or a loopback port the recording
+// names two ways, is kept as it was. Only the evidence a test is charged
+// with renames it: the run's misses (GetMockErrors) report the address the
+// app dialled.
+func TestAMissNamesItsDestinationAsTheRecordingDoes(t *testing.T) {
+	a, _ := wireAgent(t, models.MODE_TEST)
+	mongo := &models.Mock{Name: "mock-1", Kind: models.Mongo, Spec: models.MockSpec{Metadata: map[string]string{"destAddr": "127.0.0.1:27017"}}}
+	bao := &models.Mock{Name: "mock-2", Kind: models.HTTP, Spec: models.MockSpec{Metadata: map[string]string{"destAddr": "127.0.0.1:8200"}}}
+	pg4 := &models.Mock{Name: "mock-3", Kind: models.Postgres, Spec: models.MockSpec{Metadata: map[string]string{"destAddr": "127.0.0.1:5432"}}}
+	pg6 := &models.Mock{Name: "mock-4", Kind: models.Postgres, Spec: models.MockSpec{Metadata: map[string]string{"destAddr": "[::1]:5432"}}}
+	storeMocks(a, mongo, bao, pg4, pg6)
+	for _, c := range []struct{ live, dest, liveLabel string }{
+		{"[::1]:27017", "127.0.0.1:27017", "[::1]:27017"},
+		{"localhost:8200", "localhost:8200", ""},
+		{"127.0.0.1:27017", "127.0.0.1:27017", ""},
+		{"10.0.0.7:27017", "10.0.0.7:27017", ""},
+		{"127.0.0.2:5432", "127.0.0.2:5432", ""},
+		{"127.0.0.2:27017", "127.0.0.2:27017", ""},
+		{"api.internal", "api.internal", ""},
+	} {
+		got := sanitizedMiss(a.asRecorded(models.UnmatchedCall{Protocol: "MongoDB", Destination: c.live}))
+		require.Equal(t, c.dest, got.Destination, c.live)
+		require.Equal(t, c.liveLabel, got.LiveDestination, c.live)
+	}
+	m := sanitizedMiss(a.asRecorded(models.UnmatchedCall{Protocol: "MongoDB", Destination: "[::1]:27017"}))
+	require.Equal(t, "a MongoDB call to 127.0.0.1:27017 (live [::1]:27017)", missText(m))
+
+	// The run's misses report the address the app dialled, unrenamed.
+	p := a.Proxy.(*wireProxy)
+	p.misses = []models.UnmatchedCall{{Protocol: "MongoDB", Destination: "[::1]:27017"}}
+	all, err := a.GetMockErrors(context.Background())
+	require.NoError(t, err)
+	require.Len(t, all, 1)
+	require.Equal(t, "[::1]:27017", all[0].Destination)
+	require.Empty(t, all[0].LiveDestination)
+}
+
+// Only the proven paths read the recording's destinations, so storing a set
+// notes them only under the switch, through either path and from both pools
+// (a destination only an unfiltered mock names is noted too): with it off, a
+// stored set notes none.
+func TestStoringASetNotesItsDestinationsOnlyUnderTheSwitch(t *testing.T) {
+	for _, on := range []string{"0", "1"} {
+		for _, path := range []string{"StoreMocks", "StoreMocksStream"} {
+			t.Run(path+"/KEPLOY_PROVEN="+on, func(t *testing.T) {
+				t.Setenv(provenswitch.Env, on)
+				m := &models.Mock{Name: "mock-1", Kind: models.HTTP, Spec: models.MockSpec{Metadata: map[string]string{"destAddr": "127.0.0.1:27017"}}}
+				u := &models.Mock{Name: "mock-2", Kind: models.HTTP, Spec: models.MockSpec{Metadata: map[string]string{"destAddr": "127.0.0.1:5432"}}}
+				a := newTestAgent()
+				if path == "StoreMocks" {
+					require.NoError(t, a.StoreMocks(context.Background(), []*models.Mock{m}, []*models.Mock{u}))
+				} else {
+					header, dec := readHeaderAndDecoder(t, encodeStreamBody(t, []*models.Mock{m}, []*models.Mock{u}))
+					require.NoError(t, a.StoreMocksStream(context.Background(), header, dec))
+				}
+				v, _ := a.clientMocks.Load(uint64(0))
+				s, _ := v.(*ClientMockStorage)
+				require.NotNil(t, s)
+				if on == "0" {
+					require.Nil(t, s.dests, "with the switch off, storing a set noted destinations")
+					return
+				}
+				require.Equal(t, recordedDests{"27017": {"127.0.0.1:27017"}, "5432": {"127.0.0.1:5432"}}, s.dests)
+			})
+		}
+	}
+}

@@ -29,7 +29,8 @@ import (
 // persisted anywhere else, with it.
 //
 // Both now stream: each mock is read, decoded, judged and (if it stays)
-// written to a sibling temp file before the next one is read, so a rewrite
+// written to a sibling temp file before the next one is read (a document the
+// rewrite does not re-encode is copied as read: fileDoc.verbatim), so a rewrite
 // holds one mock at a time whatever the file's size. The temp file replaces
 // the original only once every mock is written, so a rewrite that fails, is
 // cancelled or dies part way leaves the original as it was.
@@ -49,6 +50,18 @@ type fileDoc struct {
 	// the decoders skipped, they say what was skipped.
 	name string
 	kind models.Kind
+	// doc is a YAML document as parsed (of an incomplete one, its whole
+	// lines); nil for NDJSON, or when it does not parse.
+	doc *yaml.NetworkTrafficDoc
+	// separator says raw is no document: only the start of the separator
+	// the file ends in (see nextDoc).
+	separator bool
+	// parseErr is, when the document before that separator does not parse,
+	// the parse's error, which nextDoc's readErr does not carry.
+	parseErr error
+	// cutErr is, of an incomplete NDJSON line whose JSON parses, why its
+	// spec does not decode.
+	cutErr error
 	// verbatim says a rewrite copies raw rather than re-encoding mocks:
 	//   - the decoders skipped the document (an enterprise-only kind with no
 	//     mapper registered, a kind, a connection-failure field or value this
@@ -61,6 +74,8 @@ type fileDoc struct {
 	//     learned for it), and the copy keeps it as the keploy that recorded
 	//     it wrote it;
 	//   - it is the file's incomplete last document (see nextDoc).
+	// (Under the proven switch the noise write-back also copies, as read, a
+	// document it changes nothing of: persistLearned.)
 	verbatim bool
 	// unterminated says raw is the file's last document and ends part-way
 	// through a line.
@@ -101,7 +116,10 @@ func nextDoc(reader *yaml.MockReader, logger *zap.Logger, rewrite bool) (d fileD
 		}
 		d.raw, d.unterminated = raw, reader.Unterminated()
 		d.off, d.n = reader.DocOffset(), len(raw)
-		if d.unterminated && (err != nil || !jsonDocDecodes(doc)) {
+		if d.unterminated && err == nil {
+			d.cutErr = jsonDocDecodeErr(doc)
+		}
+		if d.unterminated && (err != nil || d.cutErr != nil) {
 			d.verbatim, d.incomplete = true, true
 			if err == nil {
 				d.name, d.kind = doc.Name, doc.Kind
@@ -127,20 +145,21 @@ func nextDoc(reader *yaml.MockReader, logger *zap.Logger, rewrite bool) (d fileD
 				d.verbatim, d.incomplete = true, true
 				// Named from its whole lines only: the unfinished one may be
 				// the name, cut short.
-				if whole, ok := parseYAMLDoc(raw[:lastLine]); ok {
-					d.name, d.kind = whole.Name, whole.Kind
+				if whole, err := parseYAMLDoc(raw[:lastLine]); err == nil {
+					d.name, d.kind, d.doc = whole.Name, whole.Kind, whole
 				}
 				reportIncompleteTail(logger, rewrite, yaml.FormatYAML, d.name)
 				return d, nil, nil
 			}
 			// The document before the unfinished separator is complete.
-			whole, ok := parseYAMLDoc(raw[:lastLine])
-			if !ok {
-				if len(bytes.TrimSpace(raw[:lastLine])) == 0 {
-					// Nothing but the start of a separator: no document.
-					d.verbatim = true
-					return d, nil, nil
-				}
+			if len(bytes.TrimSpace(raw[:lastLine])) == 0 {
+				// Nothing but the start of a separator: no document.
+				d.verbatim, d.separator = true, true
+				return d, nil, nil
+			}
+			whole, perr := parseYAMLDoc(raw[:lastLine])
+			if perr != nil {
+				d.parseErr = perr
 				return d, errors.New("failed to decode the mock document before the unfinished separator at the end of the file"), nil
 			}
 			doc, err, d.n = whole, nil, lastLine
@@ -148,11 +167,13 @@ func nextDoc(reader *yaml.MockReader, logger *zap.Logger, rewrite bool) (d fileD
 		if err != nil {
 			return d, err, nil
 		}
-		d.name, d.kind = doc.Name, doc.Kind
+		d.name, d.kind, d.doc = doc.Name, doc.Kind, doc
 		d.mocks, decodeErr = decodeMocks([]*yaml.NetworkTrafficDoc{doc}, logger, rewrite)
 	}
 	if decodeErr != nil {
-		return fileDoc{}, nil, decodeErr
+		// Named, for MockFileReader; every other caller fails on decodeErr.
+		d.mocks = nil
+		return d, nil, decodeErr
 	}
 	d.verbatim = len(d.mocks) == 0 || copiedVerbatim(d.mocks)
 	return d, nil, nil
@@ -165,24 +186,25 @@ func separatorPrefix(line []byte) bool {
 	return len(line) > 0 && len(line) < 3 && bytes.HasPrefix([]byte("---"), line)
 }
 
-// parseYAMLDoc parses one YAML mock document; ok is false when it does not
-// parse or is empty.
-func parseYAMLDoc(data []byte) (*yaml.NetworkTrafficDoc, bool) {
+// parseYAMLDoc parses one YAML mock document; the error is the parse's, or
+// says it is empty.
+func parseYAMLDoc(data []byte) (*yaml.NetworkTrafficDoc, error) {
 	if len(bytes.TrimSpace(data)) == 0 {
-		return nil, false
+		return nil, errors.New("the document is empty")
 	}
 	var doc yaml.NetworkTrafficDoc
-	if yamlLib.Unmarshal(data, &doc) != nil {
-		return nil, false
+	if err := yamlLib.Unmarshal(data, &doc); err != nil {
+		return nil, err
 	}
-	return &doc, true
+	return &doc, nil
 }
 
-// jsonDocDecodes reports, without logging, whether the decoders take an NDJSON
-// document (skipping it counts: that is not an error).
-func jsonDocDecodes(doc *yaml.NetworkTrafficDocJSON) bool {
+// jsonDocDecodeErr is, without logging, the error the decoders return for an
+// NDJSON document: nil when they take it (skipping it counts: that is not an
+// error).
+func jsonDocDecodeErr(doc *yaml.NetworkTrafficDocJSON) error {
 	_, err := decodeMocksJSON([]*yaml.NetworkTrafficDocJSON{doc}, zap.NewNop(), true)
-	return err == nil
+	return err
 }
 
 // reportIncompleteTail says that the mock file's last mock does not end with
@@ -252,8 +274,10 @@ func pruneKeeps(mock *models.Mock, mockNames map[string]models.MockState, pruneB
 }
 
 // mockFileRewriter writes the replacement of a yaml/json mock file one mock
-// at a time, encoded exactly as the recorder-side rewrite always encoded it,
-// into a temp file beside it. Nothing touches the original until commit.
+// at a time, into a temp file beside it: each mock it writes (write) encoded
+// exactly as the recorder-side rewrite always encoded it, and each document
+// it copies (copyDoc) as the file held it. Nothing touches the original until
+// commit.
 type mockFileRewriter struct {
 	logger     *zap.Logger
 	dir        string
@@ -307,9 +331,10 @@ func (rw *mockFileRewriter) open() error {
 }
 
 // copyDoc puts a document nextDoc read, and the rewrite does not re-encode
-// (fileDoc.verbatim), in the replacement as it was read, ending with a
-// newline, so the replacement always ends with one and a later append starts
-// on a line of its own. Two documents at the end of a file that does not end
+// (fileDoc.verbatim, or, under the proven switch, one the noise write-back
+// changes nothing of: persistLearned), in the replacement as it was read,
+// ending with a newline, so the replacement always ends with one and a later
+// append starts on a line of its own. Two documents at the end of a file that does not end
 // with a newline are not copied:
 //   - the last document the read skipped (fileDoc.incomplete) is held back,
 //     and commit moves it aside;

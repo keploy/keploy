@@ -67,6 +67,11 @@ type mockService struct {
 	// as a replay pushes the tests' clocks: the replay's receipt carries
 	// them, for the verdict's rule 4 and UNFROZEN rows.
 	realListed map[string][]string
+	// mockOwners is, under the proven switch, the tests that own each mock
+	// of the per-test table the replay pushed (models.MockOwners), set by
+	// pushProvenTable: the receipt names, on a test's miss that is another
+	// test's recording, that test (withRecordedIn).
+	mockOwners map[string][]string
 }
 
 // New constructs the mock record/replay service. mappingDB and hooks may be nil
