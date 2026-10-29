@@ -117,9 +117,13 @@ const kcmpFile = 0
 // they are read takes none of the others' files with it (fileTally). A read
 // that did not settle (a descriptor that kept closing and opening again as it
 // was compared, or the kernel refusing to compare part way through) counts
-// the files it settled, and is no evidence (ExitMark.FilesUnsettled). Where
-// the kernel cannot compare them at all (no kcmp, or keploy may not ask: a
-// seccomp filter, a process it may not trace), each descriptor counts.
+// the files it settled, and is no evidence (ExitMark.FilesUnsettled). kcmp
+// compares two descriptors at a time, never all at one instant, so a read
+// that settled can still, rarely, count a descriptor that closed and opened
+// again between its comparisons beside the one that took its file over
+// (fileTally.settle). Where the kernel cannot compare them at all (no kcmp,
+// or keploy may not ask: a seccomp filter, a process it may not trace), each
+// descriptor counts.
 func openFiles(task int, fds []os.DirEntry) (int, bool) {
 	if cmp := filesCompared.Load(); cmp != nil {
 		return openFilesBy(*cmp, task, fds)
@@ -161,12 +165,13 @@ func openFilesBy(kcmp func(task, a, b int) (int, error), task int, fds []os.DirE
 // is let go where it reads closed, never where the other compared with it
 // may be the one closed (it may have opened again since); and one held that
 // closed and opened again on another file can stand out of the files' order,
-// so the files are counted only once each reads before the next. Each
-// descriptor makes its own share of the comparisons: the search for its
-// file's place, and the check of its place after the one before it. One that
-// spent its share (it kept closing and opening again as it was compared) is
-// set aside, not counted, and the read did not settle; the others are read
-// on their own shares, so a stable duplicate after it is still found.
+// so the files are counted only once each reads before the next (two that
+// do not are both read again). Each descriptor makes its own share of the
+// comparisons: the search for its file's place, and the checks of its place
+// after the one before it. One that spent its share (it kept closing and
+// opening again as it was compared) is set aside, not counted, and the read
+// did not settle; the others are read on their own shares, so a stable
+// duplicate after it is still found.
 type fileTally struct {
 	kcmp      func(task, a, b int) (int, error)
 	task      int
@@ -191,10 +196,18 @@ var errShareSpent = errors.New("the descriptor kept changing as its file was rea
 
 // settle reads the descriptors left, then checks that each file held reads
 // before the next in kcmp's order; one that does not is read again. One that
-// spent its share is set aside (fileTally.unsettled).
+// spent its share is set aside (fileTally.unsettled). The files are counted
+// once two checks in a row find each in order, with nothing read again
+// between them: one check compares two at a time, never all at one instant,
+// so a descriptor can pass its check and close, and fd 3, opened again on
+// the next cycle's file, pass its own after it (one file counted twice); the
+// next check finds the first closed, or out of order on the file it names
+// by then.
 func (t *fileTally) settle() error {
+	clean := 0
 	for {
 		for len(t.todo) > 0 {
+			clean = 0
 			fd := t.todo[0]
 			t.todo = t.todo[1:]
 			if err := t.hold(fd); errors.Is(err, errShareSpent) {
@@ -203,8 +216,16 @@ func (t *fileTally) settle() error {
 				return err
 			}
 		}
-		if done, err := t.ordered(); err != nil || done {
+		done, err := t.ordered()
+		switch {
+		case err != nil:
 			return err
+		case !done:
+			clean = 0
+		case clean == 1:
+			return nil
+		default:
+			clean = 1
 		}
 	}
 }
@@ -247,20 +268,22 @@ func (t *fileTally) hold(fd int) error {
 
 // ordered reports whether each file held reads before the next in kcmp's
 // order, so that no two of them are one file; the comparison of two is the
-// next one's. Where one does not (one compared with it closed and opened
-// again since it was held: it names another file, or the next one's), the
-// next is read again, with its duplicates; where one of two is closed, each
-// is asked of itself, on its own share, and one closed is let go.
+// next one's. Where one does not (one of the two closed and opened again
+// since it was held: it names another file, or the other's), both are read
+// again, with their duplicates, as either may be the one that changed: one
+// held that names another file now is so placed again, on its file then, and
+// checked beside the others in one pass; where one of two is closed, each is
+// asked of itself, on its own share, and one closed is let go.
 func (t *fileTally) ordered() (bool, error) {
 	for i := 0; i+1 < len(t.held); i++ {
-		cur, next := t.held[i].fd, t.held[i+1]
-		order, err := t.cmp(cur, next.fd, next.fd)
+		cur, next := t.held[i], t.held[i+1]
+		order, err := t.cmp(cur.fd, next.fd, next.fd)
 		switch {
 		case errors.Is(err, unix.EBADF):
 			if err := t.spentBy(next.fd, t.drop(i+1, next.fd)); err != nil {
 				return false, err
 			}
-			return false, t.spentBy(cur, t.drop(i, cur))
+			return false, t.spentBy(cur.fd, t.drop(i, cur.fd))
 		case err != nil:
 			return false, t.spentBy(next.fd, err)
 		case order == 1:
@@ -268,8 +291,8 @@ func (t *fileTally) ordered() (bool, error) {
 		case order != 0 && order != 2:
 			return false, fmt.Errorf("kcmp gave no order of two files (%d)", order)
 		}
-		t.held = slices.Delete(t.held, i+1, i+2)
-		t.todo = append(append(t.todo, next.fd), next.dups...)
+		t.held = slices.Delete(t.held, i, i+2)
+		t.todo = append(append(append(append(t.todo, cur.fd), cur.dups...), next.fd), next.dups...)
 		return false, nil
 	}
 	return true, nil
