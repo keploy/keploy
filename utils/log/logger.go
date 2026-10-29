@@ -101,9 +101,46 @@ func TestOnlyResetSink() {
 	LogCfg = defaultLogCfg()
 }
 
-// primarySyncer is the WriteSyncer form of PrimarySink, for the core builders.
+// primarySyncer is what every core builder writes to: the console
+// (PrimarySink) and this run's log file (logFileWriter). A rebuild (--debug's
+// ChangeLogLevel, the agent's AddMode, --disable-ansi's ChangeColorEncoding,
+// --json's RedirectToStderr) used to build it on the console alone, which
+// left the log with only the lines logged before the flags were read: an
+// agent's, none.
 func primarySyncer() zapcore.WriteSyncer {
-	return zapcore.AddSync(PrimarySink())
+	return zapcore.NewMultiWriteSyncer(zapcore.AddSync(PrimarySink()), logFileWriter{})
+}
+
+// logFileSink is this run's log file, the one New opened, which every logger
+// writes beside the console; nil while the run keeps none, and once
+// CloseLogFile has closed it.
+var logFileSink atomic.Pointer[os.File]
+
+// logFileWriter writes to logFileSink's file as it is at each write, so a
+// logger built before the log was closed writes nothing more to it, never an
+// error about a closed file.
+type logFileWriter struct{}
+
+func (logFileWriter) Write(p []byte) (int, error) {
+	f := logFileSink.Load()
+	if f == nil {
+		return len(p), nil
+	}
+	if _, err := f.Write(p); err != nil && !errors.Is(err, os.ErrClosed) {
+		return 0, err
+	}
+	return len(p), nil
+}
+
+func (logFileWriter) Sync() error {
+	f := logFileSink.Load()
+	if f == nil {
+		return nil
+	}
+	if err := f.Sync(); err != nil && !errors.Is(err, os.ErrClosed) {
+		return err
+	}
+	return nil
 }
 
 var LogCfg zap.Config
@@ -371,27 +408,32 @@ func New() (*zap.Logger, *os.File, error) {
 		return NewANSIConsoleEncoder(config), nil
 	})
 
-	// The log file is a fresh temp file (LogFilePattern). A run that cannot
-	// create it (a temp directory it may not write, one that is missing)
-	// loses the file, not the command: it logs to the console only, and says
-	// so once at debug (ChangeLogLevel).
-	logFile, err := openLogFile()
-	note := ""
-	if err != nil {
-		note = err.Error()
+	// The log file is a fresh temp file (LogFilePattern), or, for a native
+	// agent, the CLI's (ClientLogFileFlag). A run that cannot create it (a
+	// temp directory it may not write, one that is missing) loses the file,
+	// not the command: it logs to the console only, and says so once at debug
+	// (ChangeLogLevel). An agent that does not take the CLI's says where its
+	// own is, and why at debug.
+	logFile, refused, err := openLogFile()
+	var notes []logFileNote
+	if refused != nil {
+		notes = append(notes, logFileNote{"not appending to the CLI's log", refused.Error()})
 	}
-	setLogFileNote(note)
+	if err != nil {
+		notes = append(notes, logFileNote{"keeping no log file; logging to the console only", err.Error()})
+	}
+	setLogFileNotes(notes)
+	logFileSink.Store(logFile)
 
 	LogCfg = defaultLogCfg()
 
 	// Build the core with our custom encoder
-	sink := primarySyncer()
-	if logFile != nil {
-		sink = zapcore.NewMultiWriteSyncer(sink, zapcore.AddSync(logFile))
-	}
-	core := consoleCore(LogCfg, sink, LogCfg.Level)
+	core := consoleCore(LogCfg, primarySyncer(), LogCfg.Level)
 
 	logger := zap.New(newRedactingCore(core))
+	if refused != nil && logFile != nil {
+		logger.Info("this agent keeps a log of its own", zap.String("logs", logFile.Name()))
+	}
 	return logger, logFile, nil
 }
 
@@ -435,34 +477,37 @@ func ChangeLogLevel(level zapcore.Level) (*zap.Logger, error) {
 
 	logger := reattachDebugFileSink(zap.New(newRedactingCore(core)))
 	if level == zap.DebugLevel {
-		if note := takeLogFileNote(); note != "" {
-			logger.Debug("keeping no log file; logging to the console only", zap.String("reason", note))
+		for _, n := range takeLogFileNotes() {
+			logger.Debug(n.msg, zap.String("reason", n.reason))
 		}
 	}
 	return logger, nil
 }
 
-// logFileNote is why New could not create its log file, kept for the first
-// debug-level logger (ChangeLogLevel) to say, once: New runs at info level,
-// before --debug is read, so a debug line of its own would never show.
+// logFileNote is one thing New could not do with the log file -- take the
+// CLI's, create its own -- and why, kept for the first debug-level logger
+// (ChangeLogLevel) to say, once: New runs at info level, before --debug is
+// read, so a debug line of its own would never show.
+type logFileNote struct{ msg, reason string }
+
 var (
-	logFileNoteMu sync.Mutex
-	logFileNote   string
+	logFileNotesMu sync.Mutex
+	logFileNotes   []logFileNote
 )
 
-func setLogFileNote(note string) {
-	logFileNoteMu.Lock()
-	defer logFileNoteMu.Unlock()
-	logFileNote = note
+func setLogFileNotes(notes []logFileNote) {
+	logFileNotesMu.Lock()
+	defer logFileNotesMu.Unlock()
+	logFileNotes = notes
 }
 
-// takeLogFileNote returns the note and clears it, so it is said only once.
-func takeLogFileNote() string {
-	logFileNoteMu.Lock()
-	defer logFileNoteMu.Unlock()
-	note := logFileNote
-	logFileNote = ""
-	return note
+// takeLogFileNotes returns the notes and clears them, so each is said once.
+func takeLogFileNotes() []logFileNote {
+	logFileNotesMu.Lock()
+	defer logFileNotesMu.Unlock()
+	notes := logFileNotes
+	logFileNotes = nil
+	return notes
 }
 
 // RedirectToStderr re-creates the logger writing to stderr instead of stdout,

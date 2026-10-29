@@ -431,6 +431,12 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		if err := cmd.Flags().MarkHidden("client-pid-ns"); err != nil {
 			c.logger.Debug("failed to hide the client-pid-ns flag", zap.Error(err))
 		}
+		// Read before the command line is parsed, by log.New, which opens the
+		// log; registered so that parsing accepts it.
+		cmd.Flags().String(log.ClientLogFileFlag, "", "The keploy client's log, which the agent appends its lines to (set by keploy itself)")
+		if err := cmd.Flags().MarkHidden(log.ClientLogFileFlag); err != nil {
+			c.logger.Debug("failed to hide the "+log.ClientLogFileFlag+" flag", zap.Error(err))
+		}
 		// Only the PATH travels here. The token itself stays in a 0600 file,
 		// because argv is world-readable through /proc/<pid>/cmdline and `ps`,
 		// and the local users that would read it there are the ones this token

@@ -5,6 +5,7 @@ package log
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -297,5 +298,316 @@ func TestNew_LogsToTheConsoleWhereItCannotCreateTheLog(t *testing.T) {
 				t.Errorf("the note does not say why (the create's error, naming %s):\n%s", tmp, out)
 			}
 		})
+	}
+}
+
+// Every logger a run rebuilds keeps writing the run's log: --debug
+// (ChangeLogLevel), the agent's and --enable-testing's mode prefix (AddMode),
+// --disable-ansi (ChangeColorEncoding) and --json (RedirectToStderr) each
+// build a new core, and one built on the console alone left the log with
+// only the lines logged before the flags were read: an agent's, none.
+func TestRebuiltLoggersKeepWritingTheLog(t *testing.T) {
+	t.Cleanup(TestOnlyResetSink)
+	inRun(t)
+	_, f := newLog(t)
+	rebuilds := []struct {
+		name  string
+		build func() (*zap.Logger, error)
+	}{
+		{"ChangeLogLevel", func() (*zap.Logger, error) { return ChangeLogLevel(zap.DebugLevel) }},
+		{"AddMode", func() (*zap.Logger, error) { return AddMode("agent") }},
+		{"ChangeColorEncoding", ChangeColorEncoding},
+		{"RedirectToStderr", RedirectToStderr},
+	}
+	for _, r := range rebuilds {
+		logger, err := r.build()
+		if err != nil {
+			t.Fatalf("%s: %v", r.name, err)
+		}
+		logger.Info("a line after " + r.name)
+	}
+	b, err := os.ReadFile(f.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range rebuilds {
+		if !strings.Contains(string(b), "a line after "+r.name) {
+			t.Errorf("a logger %s rebuilt does not write the run's log; it holds:\n%s", r.name, b)
+		}
+	}
+}
+
+// asAgentOf makes this test's New the native agent's of a CLI whose log is
+// path (ClientLogFileFlag), and gives back the package state New sets.
+func asAgentOf(t *testing.T, path string) {
+	t.Helper()
+	prev := commandLine
+	commandLine = func() []string {
+		return []string{"keploy", "agent", "--" + ClientLogFileFlag + "=" + path, "--port", "1"}
+	}
+	t.Cleanup(func() {
+		commandLine = prev
+		borrowedLog.Store(nil)
+		logFileSink.Store(nil)
+	})
+}
+
+// consoleTo points the logger's console at a file of the test's, which it
+// returns, until the test ends.
+func consoleTo(t *testing.T) *os.File {
+	t.Helper()
+	console, err := os.CreateTemp(t.TempDir(), "console")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(TestOnlyResetSink)
+	setPrimarySink(console)
+	return console
+}
+
+func mustWrite(t *testing.T, f *os.File, s string) {
+	t.Helper()
+	if _, err := f.WriteString(s); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func mustRead(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// One native run is one file: the agent the CLI starts appends its lines to
+// the CLI's log, which the CLI goes on appending to too, so neither writes
+// over the other's lines, and the agent creates no log of its own and leaves
+// the CLI's in place at its end: the CLI removes it at its own.
+func TestNew_AgentAppendsToTheCLIsLogAndLeavesItThere(t *testing.T) {
+	for _, c := range []struct{ name, sudoUID string }{
+		{"started by the CLI's own user", ""},
+		{"started by sudo for the CLI's user", strconv.Itoa(os.Getuid())},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			console := consoleTo(t)
+			tmp, _ := inRun(t)
+			t.Setenv("SUDO_UID", c.sudoUID)
+			cli, err := createLogFile()
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = CloseLogFile(cli) })
+			mustWrite(t, cli, "cli line 1\n")
+
+			asAgentOf(t, cli.Name())
+			logger, f, err := New()
+			if err != nil || f == nil || f.Name() != cli.Name() {
+				t.Fatalf("New = %v, %v; want the CLI's log %s", f, err, cli.Name())
+			}
+			logger.Info("agent line 1")
+			mustWrite(t, cli, "cli line 2\n")
+			logger.Info("agent line 2")
+
+			got := mustRead(t, cli.Name())
+			at := -1
+			for _, line := range []string{"cli line 1", "agent line 1", "cli line 2", "agent line 2"} {
+				i := strings.Index(got, line)
+				if i <= at {
+					t.Fatalf("the CLI's log does not hold %q after the lines before it, so one writer wrote over the other; it holds:\n%s", line, got)
+				}
+				at = i
+			}
+			if logs, _ := filepath.Glob(filepath.Join(tmp, LogFilePattern)); len(logs) != 1 {
+				t.Errorf("one run keeps %d logs, want the CLI's alone: %v", len(logs), logs)
+			}
+			if said := mustRead(t, console.Name()); strings.Contains(said, "a log of its own") {
+				t.Errorf("an agent that took the CLI's log says it keeps one of its own:\n%s", said)
+			}
+
+			if err := RemoveLogFile(f); err != nil {
+				t.Fatal(err)
+			}
+			if err := CloseLogFile(f); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Lstat(cli.Name()); err != nil {
+				t.Fatalf("the agent's end removed the CLI's log: %v", err)
+			}
+			if err := CloseLogFile(cli); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Lstat(cli.Name()); !os.IsNotExist(err) {
+				t.Errorf("the CLI's end left its log (lstat: %v)", err)
+			}
+		})
+	}
+}
+
+// A name the agent must not write is refused, and the agent keeps a log of
+// its own, says where, once, and why at debug. A root agent writes the CLI's
+// log, so the name must already be a regular file -- a link, a pipe or a
+// device is not even opened -- opened without following a link, and the file
+// opened must be a regular file of the user that started the agent. A name
+// can change between those checks; each case that changes it does so just
+// before the open (openFile).
+func TestNew_AgentRefusesALogItMayNotWrite(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("the owner rows need a uid that is not root's")
+	}
+	other := strconv.Itoa(os.Getuid() + 1)
+	type paths struct{ name, target string }
+	regular := func(t *testing.T, path string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte("kept\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// fifo makes a named pipe at path with a reader on it, so a writer's
+	// open would succeed.
+	fifo := func(t *testing.T, path string) {
+		t.Helper()
+		if err := syscall.Mkfifo(path, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		r, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = r.Close() })
+	}
+	cases := []struct {
+		name     string
+		sudoUID  string
+		setup    func(t *testing.T, p paths)
+		beforeOp func(t *testing.T, p paths) // just before the open, if one is made
+		opened   bool                        // whether the name is opened at all
+	}{
+		{name: "a link to the CLI's log", setup: func(t *testing.T, p paths) {
+			regular(t, p.target)
+			if err := os.Symlink(p.target, p.name); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "a named pipe", setup: func(t *testing.T, p paths) { fifo(t, p.name) }},
+		{name: "a name that is not there", setup: func(*testing.T, paths) {}},
+		{name: "a file of another user", sudoUID: other, opened: true, setup: func(t *testing.T, p paths) { regular(t, p.name) }},
+		{name: "a SUDO_UID that is no uid", sudoUID: "nobody", setup: func(t *testing.T, p paths) { regular(t, p.name) }},
+		{name: "a name removed before it is opened", opened: true,
+			setup: func(t *testing.T, p paths) { regular(t, p.name) },
+			beforeOp: func(t *testing.T, p paths) {
+				if err := os.Remove(p.name); err != nil {
+					t.Fatal(err)
+				}
+			}},
+		{name: "a name that turns into a link before it is opened", opened: true,
+			setup: func(t *testing.T, p paths) { regular(t, p.name); regular(t, p.target) },
+			beforeOp: func(t *testing.T, p paths) {
+				if err := os.Remove(p.name); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(p.target, p.name); err != nil {
+					t.Fatal(err)
+				}
+			}},
+		{name: "a name that turns into a named pipe before it is opened", opened: true,
+			setup: func(t *testing.T, p paths) { regular(t, p.name) },
+			beforeOp: func(t *testing.T, p paths) {
+				if err := os.Remove(p.name); err != nil {
+					t.Fatal(err)
+				}
+				fifo(t, p.name)
+			}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			console := consoleTo(t)
+			tmp, _ := inRun(t)
+			t.Setenv("SUDO_UID", c.sudoUID)
+			dir := t.TempDir()
+			p := paths{name: filepath.Join(dir, "cli.log"), target: filepath.Join(dir, "target")}
+			c.setup(t, p)
+			opens := 0
+			prev := openFile
+			openFile = func(name string, flag int, perm os.FileMode) (*os.File, error) {
+				if name == p.name {
+					opens++
+					if c.beforeOp != nil {
+						c.beforeOp(t, p)
+					}
+				}
+				return prev(name, flag, perm)
+			}
+			t.Cleanup(func() { openFile = prev })
+
+			asAgentOf(t, p.name)
+			logger, f, err := New()
+			if err != nil || f == nil {
+				t.Fatalf("New = %v, %v; want a log of the agent's own", f, err)
+			}
+			t.Cleanup(func() { _ = CloseLogFile(f) })
+			if f.Name() == p.name || filepath.Dir(f.Name()) != tmp {
+				t.Fatalf("the agent took %s; want a log of its own in %s", f.Name(), tmp)
+			}
+			if got := opens > 0; got != c.opened {
+				t.Errorf("the agent opened %s: %v, want %v", p.name, got, c.opened)
+			}
+			logger.Info("an agent line")
+			if got := mustRead(t, f.Name()); !strings.Contains(got, "an agent line") {
+				t.Errorf("the agent's own log holds %q, want its line", got)
+			}
+			for _, path := range []string{p.name, p.target} {
+				// Only a regular file is read: a pipe's open would wait.
+				if fi, err := os.Lstat(path); err != nil || !fi.Mode().IsRegular() {
+					continue
+				}
+				if b := mustRead(t, path); b != "kept\n" {
+					t.Errorf("the agent wrote %s: it holds %q", path, b)
+				}
+			}
+			if _, err := os.Lstat(p.name); c.name == "a name that is not there" || c.name == "a name removed before it is opened" {
+				if !os.IsNotExist(err) {
+					t.Errorf("the agent created %s (lstat: %v)", p.name, err)
+				}
+			}
+
+			said := mustRead(t, console.Name())
+			if n := strings.Count(said, "this agent keeps a log of its own"); n != 1 || !strings.Contains(said, f.Name()) {
+				t.Errorf("the agent said %d times that it keeps a log of its own, want once, naming %s:\n%s", n, f.Name(), said)
+			}
+			if _, err := ChangeLogLevel(zap.DebugLevel); err != nil {
+				t.Fatal(err)
+			}
+			said = mustRead(t, console.Name())
+			if !strings.Contains(said, "not appending to the CLI's log") || !strings.Contains(said, "reason") {
+				t.Errorf("the first debug logger did not say why the CLI's log was refused:\n%s", said)
+			}
+		})
+	}
+}
+
+// Only `keploy agent` reads ClientLogFileFlag from its command line, in
+// either form, the last one before a "--".
+func TestClientLogFileArg(t *testing.T) {
+	flag := "--" + ClientLogFileFlag
+	for _, c := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"keploy", "record", flag + "=/a"}, ""},
+		{[]string{"keploy"}, ""},
+		{[]string{"keploy", "agent", "--port", "1"}, ""},
+		{[]string{"keploy", "agent", flag + "=/a"}, "/a"},
+		{[]string{"keploy", "agent", flag, "/a"}, "/a"},
+		{[]string{"keploy", "agent", flag + "=/a", flag, "/b"}, "/b"},
+		{[]string{"keploy", "agent", flag}, ""},
+		{[]string{"keploy", "agent", flag + "="}, ""},
+		{[]string{"keploy", "agent", "--", flag + "=/a"}, ""},
+	} {
+		got, ok := clientLogFileArg(c.args)
+		if got != c.want || ok != (c.want != "") {
+			t.Errorf("clientLogFileArg(%q) = %q, %v; want %q", c.args, got, ok, c.want)
+		}
 	}
 }

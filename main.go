@@ -203,7 +203,9 @@ func start(ctx context.Context) {
 		inDocker := os.Getenv("KEPLOY_INDOCKER")
 		if inDocker != "true" {
 			// This run's own temp log (log.LogFilePattern), closed and
-			// removed; whatever else is at its name is not this run's.
+			// removed; whatever else is at its name is not this run's. A
+			// native agent's log is its CLI's (log.ClientLogFileFlag), which
+			// it only closes: the CLI removes it.
 			if err := log.CloseLogFile(utils.LogFile); err != nil {
 				utils.LogError(logger, err, "Failed to close and remove Keploy Logs")
 			}

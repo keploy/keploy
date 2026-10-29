@@ -50,6 +50,7 @@ import (
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/service/agent"
 	"go.keploy.io/server/v3/utils"
+	keployLog "go.keploy.io/server/v3/utils/log"
 	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -2288,6 +2289,14 @@ func (a *AgentClient) nativeAgentArgs(opts models.SetupOptions) []string {
 	// only where it names this process (utils.ClientPIDHere).
 	if ns := utils.OwnPIDNamespace(); ns != "" {
 		args = append(args, "--client-pid-ns", ns)
+	}
+	// This run's log, for the agent to append its lines to: one run, one file,
+	// which this process removes at its end (keployLog.ClientLogFileFlag).
+	// Absolute, as a relative TMPDIR would make it.
+	if utils.LogFile != nil {
+		if p, err := filepath.Abs(utils.LogFile.Name()); err == nil {
+			args = append(args, "--"+keployLog.ClientLogFileFlag+"="+p)
+		}
 	}
 
 	extraArgs := opts.ExtraArgs

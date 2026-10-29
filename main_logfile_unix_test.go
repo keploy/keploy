@@ -18,9 +18,10 @@ import (
 
 // heldRun starts `keploy --help` in a scratch working directory with a temp
 // directory of its own, held in start() after its log exists: its
-// KEPLOY_DEBUG_FILE is a named pipe, whose open waits for a reader. It returns
-// the run, its stdout, the directories, the pipe and the log the run created.
-func heldRun(t *testing.T) (cmd *exec.Cmd, out *bytes.Buffer, dir, tmp, fifo, logPath string) {
+// KEPLOY_DEBUG_FILE is a named pipe, whose open waits for a reader. env is
+// added to its environment. It returns the run, its stdout, the directories,
+// the pipe and the log the run created.
+func heldRun(t *testing.T, env ...string) (cmd *exec.Cmd, out *bytes.Buffer, dir, tmp, fifo, logPath string) {
 	t.Helper()
 	if code := runCLI(t, "--help"); code != 0 {
 		t.Skipf("keploy --help exited %d; CLI startup is unusable in this environment", code)
@@ -32,7 +33,7 @@ func heldRun(t *testing.T) (cmd *exec.Cmd, out *bytes.Buffer, dir, tmp, fifo, lo
 	}
 	cmd = exec.Command(os.Args[0])
 	cmd.Args = []string{"keploy", "--help"}
-	cmd.Env = append(os.Environ(), subprocessEnv+"=1", "TMPDIR="+tmp, "KEPLOY_DEBUG_FILE="+fifo)
+	cmd.Env = append(append(os.Environ(), subprocessEnv+"=1", "TMPDIR="+tmp, "KEPLOY_DEBUG_FILE="+fifo), env...)
 	cmd.Dir = dir
 	out = &bytes.Buffer{}
 	cmd.Stdout, cmd.Stderr = out, out
@@ -108,4 +109,70 @@ func TestRunNamesItsLogAndRemovesItAtTheEnd(t *testing.T) {
 	}
 	requireEmpty(t, dir, "a run")
 	requireEmpty(t, tmp, "a run")
+}
+
+// release lets a held run (heldRun) go on: it opens the named pipe its
+// debug file waits on and reads it to the end.
+func release(fifo string) {
+	go func() {
+		if r, err := os.Open(fifo); err == nil {
+			_, _ = io.Copy(io.Discard, r)
+			_ = r.Close()
+		}
+	}()
+}
+
+// One native run is one file. The agent the CLI starts (`keploy agent
+// --client-log-file=<the CLI's log>`) appends its lines to the CLI's log,
+// creates none of its own, and leaves the CLI's in place at its end; the CLI
+// goes on appending after the agent's lines, not over them, and removes the
+// file at its own end.
+func TestNativeAgentAppendsToItsCLIsLog(t *testing.T) {
+	// A GOMEMLIMIT_MB that is no number: the CLI logs that once the hold lets
+	// it go, after the agent's line.
+	cli, cliOut, dir, tmp, fifo, logPath := heldRun(t, "GOMEMLIMIT_MB=not-a-number", "SUDO_UID=")
+	held, err := os.Open(logPath) // the file, to read once the CLI has removed its name
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+
+	// The agent logs a warning: its KEPLOY_DEBUG_FILE cannot be opened.
+	agentTmp := t.TempDir()
+	agent := exec.Command(os.Args[0])
+	agent.Args = []string{"keploy", "agent", "--" + log.ClientLogFileFlag + "=" + logPath, "--help"}
+	agent.Env = append(os.Environ(), subprocessEnv+"=1", "TMPDIR="+agentTmp, "SUDO_UID=",
+		"KEPLOY_DEBUG_FILE="+filepath.Join(t.TempDir(), "missing", "debug.log"))
+	agent.Dir = dir
+	agentOut, err := agent.CombinedOutput()
+	if err != nil {
+		t.Fatalf("keploy agent --help: %v\n%s", err, agentOut)
+	}
+	if strings.Contains(string(agentOut), "a log of its own") {
+		t.Errorf("the agent did not take its CLI's log:\n%s", agentOut)
+	}
+	requireEmpty(t, agentTmp, "an agent given its CLI's log")
+	if _, err := os.Lstat(logPath); err != nil {
+		t.Fatalf("the agent's end removed its CLI's log: %v", err)
+	}
+
+	release(fifo)
+	if err := cli.Wait(); err != nil {
+		t.Fatalf("keploy --help: %v\n%s", err, cliOut)
+	}
+	b, err := io.ReadAll(held)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(b)
+	agentAt := strings.Index(got, "KEPLOY_DEBUG_FILE set but could not be opened")
+	cliAt := strings.Index(got, "invalid GOMEMLIMIT_MB value")
+	if agentAt < 0 || cliAt < agentAt {
+		t.Errorf("the run's one log does not hold the agent's line and then the CLI's (at %d, %d); it holds:\n%s", agentAt, cliAt, got)
+	}
+	if _, err := os.Lstat(logPath); !os.IsNotExist(err) {
+		t.Errorf("the CLI's end left its log (lstat: %v)", err)
+	}
+	requireEmpty(t, tmp, "a run")
+	requireEmpty(t, dir, "a run")
 }
