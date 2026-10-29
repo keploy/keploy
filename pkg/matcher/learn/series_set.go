@@ -3,6 +3,7 @@ package learn
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -101,41 +102,103 @@ func SeriesOfSet(recorded []*models.Mock, known Known) SetSeries {
 	return out
 }
 
-// SeriesOfRange is SeriesOfSet over the recordings rng visits (each once, in
-// any order; rng's error is returned, with no series), for a reader that
-// never holds a set's recordings at once (keploy's agent, whose store keeps
-// them on disk and decodes one per visit): each recording is read into its
-// shape and its call's times as it is visited, and kept only when keep says
-// so. SetSeries.Mocks holds a kept recording as visited, and any other as a
-// stand-in that carries only its name, kind and times: never one to answer a
-// call with. The series are SeriesOfSet's, whatever keep says.
+// SeriesOfRange is SeriesOfSet over the recordings rng visits, for a reader
+// that never holds a set's recordings at once (keploy's agent, whose store
+// keeps them on disk and decodes one per visit), keeping only what keep
+// keeps: ReadSetRange's reads, read into series with known. The series that
+// hold a kept recording are SeriesOfSet's, whatever keep says; no other is
+// read. rng's error is returned, with no series.
 func SeriesOfRange(rng func(visit func(*models.Mock) bool) error, keep func(*models.Mock) bool, known Known) (SetSeries, error) {
+	r, err := ReadSetRange(rng, keep)
+	if err != nil {
+		return SetSeries{}, err
+	}
+	return r.Series(known), nil
+}
+
+// SetReads is a set's recordings read for series (ReadSetRange), before any
+// noise excuses a leaf: Reads, in the order of their calls (the newest last),
+// each of the recording Mocks holds at its index.
+type SetReads struct {
+	Reads []SeriesRead
+	Mocks []*models.Mock
+}
+
+// Series reads r into series (SeriesOf) with known.
+func (r SetReads) Series(known Known) SetSeries {
+	return SetSeries{Series: SeriesOf(r.Reads, known), Mocks: r.Mocks}
+}
+
+// OfKind is r's reads of kind alone, in their order.
+func (r SetReads) OfKind(kind models.Kind) SetReads {
+	var out SetReads
+	for i, rd := range r.Reads {
+		if rd.Kind == kind {
+			out.Reads = append(out.Reads, rd)
+			out.Mocks = append(out.Mocks, r.Mocks[i])
+		}
+	}
+	return out
+}
+
+// ReadSetRange reads the recordings rng visits as SeriesOfSet reads a set's,
+// holding in memory only the requests of the operations a recording keep
+// keeps has (its kind, key and fixed parts: SeriesOf parts recordings by
+// them first, so no other recording changes a kept one's series), so a
+// set's other calls, however many and however large, are never in memory
+// together (founder rule: no component OOMs). rng is called once or twice,
+// and visits the same recordings each time, each once, in any order; keep
+// says the same of a recording each time. The first pass reads every call's
+// times and the requests keep keeps; the second, only when a recording it
+// does not keep has a kind with a reading, the requests of the others of a
+// kept one's operation. Mocks holds a kept recording as visited, and any
+// other read as a stand-in that carries only its name, kind and times: never
+// one to answer a call with. rng's error is returned, with no reads.
+func ReadSetRange(rng func(visit func(*models.Mock) bool) error, keep func(*models.Mock) bool) (SetReads, error) {
 	type read struct {
 		m     *models.Mock
 		shape Shape
 	}
 	var calls []callTimes
 	var reads []read
+	ops := map[string]bool{}
+	others := false
 	err := rng(func(m *models.Mock) bool {
 		if m == nil || m.IsProtocolPhase() {
 			return true
 		}
 		calls = append(calls, callTimes{req: m.Spec.ReqTimestampMock, res: m.Spec.ResTimestampMock})
-		if m.Spec.ReqTimestampMock.IsZero() {
+		if m.Spec.ReqTimestampMock.IsZero() || !hasSeriesShape(m.Kind) {
+			return true
+		}
+		if !keep(m) {
+			others = true
 			return true
 		}
 		shape, ok := SeriesShapeOf(m)
 		if !ok {
 			return true
 		}
-		if !keep(m) {
-			m = standIn(m)
-		}
+		ops[operationOf(m.Kind, shape)] = true
 		reads = append(reads, read{m: m, shape: shape})
 		return true
 	})
 	if err != nil {
-		return SetSeries{}, err
+		return SetReads{}, err
+	}
+	if others && len(ops) > 0 {
+		err = rng(func(m *models.Mock) bool {
+			if m == nil || m.IsProtocolPhase() || m.Spec.ReqTimestampMock.IsZero() || !hasSeriesShape(m.Kind) || keep(m) {
+				return true
+			}
+			if shape, ok := SeriesShapeOf(m); ok && ops[operationOf(m.Kind, shape)] {
+				reads = append(reads, read{m: standIn(m), shape: shape})
+			}
+			return true
+		})
+		if err != nil {
+			return SetReads{}, err
+		}
 	}
 	prev := previousOf(calls)
 	type spanned struct {
@@ -148,18 +211,44 @@ func SeriesOfRange(rng func(visit func(*models.Mock) bool) error, keep func(*mod
 		if from.IsZero() {
 			continue
 		}
-		rs = append(rs, spanned{m: r.m, r: SeriesRead{Shape: r.shape, Span: Span{From: from, To: r.m.Spec.ReqTimestampMock}}})
+		rs = append(rs, spanned{m: r.m, r: SeriesRead{Kind: r.m.Kind, Shape: r.shape, Span: Span{From: from, To: r.m.Spec.ReqTimestampMock}}})
 	}
+	// In the order of their calls; two sent at one instant by kind and
+	// name, so the order is the set's, whichever pass or order read them.
 	sort.SliceStable(rs, func(i, j int) bool {
-		return rs[i].r.Span.To.Before(rs[j].r.Span.To)
+		a, b := rs[i], rs[j]
+		if !a.r.Span.To.Equal(b.r.Span.To) {
+			return a.r.Span.To.Before(b.r.Span.To)
+		}
+		if a.m.Kind != b.m.Kind {
+			return a.m.Kind < b.m.Kind
+		}
+		return a.m.Name < b.m.Name
 	})
-	out := SetSeries{Mocks: make([]*models.Mock, len(rs))}
-	srs := make([]SeriesRead, len(rs))
+	out := SetReads{Reads: make([]SeriesRead, len(rs)), Mocks: make([]*models.Mock, len(rs))}
 	for i, r := range rs {
-		out.Mocks[i], srs[i] = r.m, r.r
+		out.Mocks[i], out.Reads[i] = r.m, r.r
 	}
-	out.Series = SeriesOf(srs, known)
 	return out, nil
+}
+
+// hasSeriesShape reports whether kind's parser registered a reading.
+func hasSeriesShape(kind models.Kind) bool {
+	seriesShapes.mu.RLock()
+	defer seriesShapes.mu.RUnlock()
+	_, ok := seriesShapes.byKind[kind]
+	return ok
+}
+
+// operationOf is what recordings of one operation share whatever noise
+// excuses (SeriesOf parts by it first): kind, key and fixed parts.
+func operationOf(kind models.Kind, s Shape) string {
+	parts := make([]string, 0, len(s.Fixed))
+	for n, v := range s.Fixed {
+		parts = append(parts, n+"\x00"+v)
+	}
+	sort.Strings(parts)
+	return string(kind) + "\x02" + s.Key + "\x01" + strings.Join(parts, "\x01")
 }
 
 // standIn is m as SeriesOfRange keeps a recording it was not asked to keep:
