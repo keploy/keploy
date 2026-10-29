@@ -95,17 +95,27 @@ jobs:
   # daemon's containers. `keploy record` of a compose app and of a docker run
   # app must record the calls to their dependency as
   # container:<repository>:<port>@<fingerprint>, and record no keys without
-  # the switch.
+  # the switch. With that list the CLI hands the agent each app container's
+  # zone (its TZ, else its /etc/localtime), in which the agent checks a
+  # learned read of the application's clock: the clock-zone lane's docker and
+  # compose legs.
   compose_container_keys_linux:
     if: ${{ inputs.jobs_to_run == 'all' }}
     runs-on: ${{ inputs.runner }}
     name: container keys (docker_compose, docker run)
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           repository: keploy/keploy
+
+      # The clock-zone lane builds its app and learn's clocks writer from the
+      # keploy module.
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
 
       - id: image
         uses: ./.github/actions/download-image
@@ -122,6 +132,22 @@ jobs:
           RECORD_BIN: ${{ steps.record.outputs.path }}
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/compose-container-keys-linux.sh"
+
+      # A learned read of the application's clock of no zone, a date and an
+      # hour, recorded with the app's container in America/Sao_Paulo and
+      # replayed with it in Pacific/Honolulu, is checked in the zone keploy's
+      # CLI read of the app's own container (TZ over its /etc/localtime link;
+      # in compose, the --container-name service's, the one keploy puts in
+      # its agent's PID namespace): it passes, and a date two days stale
+      # fails naming the field.
+      - name: Run proven clock-zone e2e, docker and compose legs (a clock read checked in the app container's zone)
+        if: ${{ !cancelled() }}
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+          CLOCK_ZONE_LEGS: docker compose
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/clock-zone/proven-clock-zone-linux.sh"
 
   # A compose app that exits on its own during `keploy record`: compose stops
   # the project, keploy's agent with it (--abort-on-container-exit). The agent
