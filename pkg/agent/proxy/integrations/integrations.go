@@ -430,11 +430,12 @@ type ExactConsumedReader interface {
 // before the open test (models.TestModeInfo.SetAsideFrom names each one's),
 // of kind ("" for every kind), that have not answered. They are in none of
 // the store's reads. A parser asks for them only for a call that no
-// recording it read answered and that is not one call more than the open
-// test recorded; it matches the call exactly against them alone, binding
+// recording it read answered, one more than the open test recorded
+// included; it matches the call exactly against them alone, binding
 // nothing, and serves the one it matched only when the store's consume door
-// takes it (each answers at most once in the staging). None while no test is
-// open.
+// takes it (each answers at most once in the staging, so the calls of one
+// shape across the set never exceed what the set recorded). None while no
+// test is open.
 type SetAsideReader interface {
 	SetAsideMocks(kind models.Kind) []*models.Mock
 }

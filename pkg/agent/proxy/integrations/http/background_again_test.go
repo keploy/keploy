@@ -35,6 +35,17 @@ func (d againDb) HoldToRound(integrations.CallRound) (integrations.MockMemDb, fu
 // parser made of the call: a miss's, or an answered call's.
 func answerOf(t *testing.T, db integrations.MockMemDb, addr, raw string) (int, string, *models.MockMismatchReport) {
 	t.Helper()
+	status, body, r := exchangeOf(t, db, addr, raw)
+	if r == nil {
+		t.Fatalf("the call got %d %q, with no report", status, body)
+	}
+	return status, body, r
+}
+
+// exchangeOf is answerOf for a call the parser may answer without a report
+// (nil then).
+func exchangeOf(t *testing.T, db integrations.MockMemDb, addr, raw string) (int, string, *models.MockMismatchReport) {
+	t.Helper()
 	var reported error
 	ctx := models.WithMockMismatchReporter(context.Background(), func(err error) { reported = err })
 	app, prox := net.Pipe()
@@ -64,6 +75,9 @@ func answerOf(t *testing.T, db integrations.MockMemDb, addr, raw string) (int, s
 	}
 	var withReport interface {
 		MismatchReport() *models.MockMismatchReport
+	}
+	if reported == nil {
+		return resp.StatusCode, string(body), nil
 	}
 	if !errors.As(reported, &withReport) || withReport.MismatchReport() == nil {
 		t.Fatalf("the call was reported as %v, with no report", reported)
