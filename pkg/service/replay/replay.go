@@ -2162,6 +2162,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// returns those, so every count of what the agent holds (the compose
 	// guard's among them) agrees with what was sent. The compose and the
 	// native path both load through it.
+	// flows is the dataflow guard of the set's calls made before its first
+	// test (flowGuard), over the mocks loadMocksForAgent loaded; nil when it
+	// loaded none.
+	var flows *flowGuard
 	loadMocksForAgent := func() (filtered, unfiltered []*models.Mock, err error) {
 		if _, ok := r.hookImpl.(wholeSetMockMutator); ok {
 			return nil, nil, errWholeSetMockMutator
@@ -2309,6 +2313,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// set, or one keploy does not start, booted before this set.
 			r.exact.bootSeen = r.instrument && !serveTest && (strings.TrimSpace(conf.AppCommand) != "" || strings.TrimSpace(r.config.Command) != "")
 			r.noteOwnsNothing(testSetID)
+		}
+		if provenswitch.On() {
+			flows = newFlowGuard(testCases, expectedTestMockMappings, filtered, unfiltered)
 		}
 		return filtered, unfiltered, nil
 	}
@@ -2850,7 +2857,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	var captureOpened bool
 	// What the previous set's application missed before its first test is
 	// not this set's, nor are the tests whose request its agent did not read.
-	r.setCalls.reset()
+	r.setCalls.reset(flows)
 	r.requestsUnread.reset()
 	// var to store the error in the loop
 	var loopErr error
@@ -3790,7 +3797,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// whose mock set diverged from being demoted to OBSOLETE (missed):
 			// it got no answer to a call, which is no sign its recording is out
 			// of date, and the demotion would turn its failure into a green run.
-			read := r.readMockErrors(runTestSetCtx)
+			read := r.readMockErrors(runTestSetCtx, testCase.Name, resp)
 			missed := dataPlaneMisses(read.calls)
 			earlyMissed := 0
 			if provenswitch.On() {
@@ -5065,7 +5072,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// proven switch a miss fails the test (streamMissed); with it off a
 			// miss keeps a test whose mock set diverged from being demoted to
 			// OBSOLETE (streamCallsMissed), as in the request-response path.
-			streamRead := r.readMockErrors(runTestSetCtx)
+			streamRead := r.readMockErrors(runTestSetCtx, tc.Name, nil)
 			streamCallsMissed := dataPlaneMisses(streamRead.calls)
 			streamMissed := 0
 			if provenswitch.On() {
@@ -5750,17 +5757,6 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					testSetStatus = models.TestSetStatusFailed
 				}
 			}
-			if own := r.setCalls.failing(); len(own) > 0 {
-				unclaimed = append(unclaimed, own...)
-				if unclaimedReason != "" {
-					unclaimedReason += "; "
-				}
-				unclaimedReason += setCallsWhy(own) + r.exact.returnedWhy(own)
-				r.logSetCalls(testSetID, own)
-				if testSetStatus == models.TestSetStatusPassed {
-					testSetStatus = models.TestSetStatusFailed
-				}
-			}
 			if len(calls) > 0 {
 				unclaimed = append(unclaimed, calls...)
 				if unclaimedReason != "" {
@@ -5768,13 +5764,19 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				}
 				unclaimedReason += unclaimedWhy(calls) + r.exact.returnedWhy(calls)
 				r.logUnclaimed(testSetID, calls)
+				// Made in the last test's window and read only now: no
+				// test is left to charge, so the set fails with it. What
+				// the application did after that read is background work
+				// (setCalls.take), judged, whether or not the recording's
+				// stop had to kill it.
 				switch {
 				case conf.RecordStopKilled != "":
 					// The recording's stop killed the app: what it did as
-					// it stopped is not in the recording, so such a call
-					// may be one the recording lacks (P101-b-k).
+					// it stopped is not in the recording, so a call filed
+					// late in the last test's window may be one the
+					// recording lacks (P101-b-k): no verdict.
 					notJudged = alsoNotJudged(notJudged, "not judged: "+unclaimedReason+"; the recording's stop had to kill the application ("+conf.RecordStopKilled+"), so what it did as it stopped is not in the recording")
-					r.logger.Error("test-set is not judged: its application made calls after the set's last test that no mock answered, and its recording lacks what the application did as it stopped (the recording's stop had to kill it); the run goes on to the next test-set ("+provenswitch.Env+"=1)",
+					r.logger.Error("test-set is not judged: its application made calls in its last test, read only at the set's end, that no mock answered, and its recording lacks what the application did as it stopped (the recording's stop had to kill it); the run goes on to the next test-set ("+provenswitch.Env+"=1)",
 						zap.String("test-set", testSetID), zap.String("recording", conf.RecordStopKilled),
 						zap.String("next_step", "make the application exit promptly on SIGINT, then record the test-set again"))
 					testSetStatus = models.TestSetStatusInternalErr
@@ -8930,7 +8932,7 @@ func (r *Replayer) beginTestErrorCapture(ctx context.Context) error {
 // simulation-error / invalid-response returns — so the window is finalized for
 // THIS test and a miss is never carried forward to the next test or lost.
 func (r *Replayer) attachMockErrors(ctx context.Context, testSetID, testCaseName string, result *models.TestResult) {
-	r.attachReadMockErrors(r.readMockErrors(ctx), testSetID, testCaseName, result)
+	r.attachReadMockErrors(r.readMockErrors(ctx, testCaseName, nil), testSetID, testCaseName, result)
 }
 
 // testMisses is one read of a test's misses (readMockErrors): the calls no
@@ -9003,18 +9005,19 @@ func (r *Replayer) sayUnattributed() {
 }
 
 // readMockErrors reads, once, the calls of the test just run that no mock
-// answered. Under the proven switch the main loop reads them before its
+// answered; live is the response it got (nil for none), which the dataflow
+// guard reads what changed in (before_set_calls.go). Under the proven switch the main loop reads them before its
 // verdict, which they are part of, and attaches that read afterwards.
-func (r *Replayer) readMockErrors(ctx context.Context) testMisses {
+func (r *Replayer) readMockErrors(ctx context.Context, test string, live any) testMisses {
 	// A miss is the agent's to report. A base path has none, and no mocks.
 	if r.noAgent {
 		return testMisses{}
 	}
 	calls, err := r.instrumentation.GetMockErrors(ctx)
 	r.keptInside.add(calls)
-	// What was missed before the set's first test is the set's, not this
-	// test's (before_set_calls.go).
-	calls = r.setCalls.take(calls)
+	// What was missed outside every test's window is the set's, not this
+	// test's, unless its recorded answer reached it (before_set_calls.go).
+	calls = r.setCalls.take(ctx, calls, test, live)
 	// An answered call is no miss: it is the test's answer (TestResult.Answers).
 	calls, answers := splitAnswers(calls)
 	read := testMisses{calls: calls, answers: answers, err: err, asked: true}
