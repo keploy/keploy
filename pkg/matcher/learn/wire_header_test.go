@@ -151,7 +151,7 @@ func containsToken(text, word string) bool {
 			return false
 		}
 		s, e := i+j, i+j+len(word)
-		if (s == 0 || !isDigitByte(text[s-1])) && (e == len(text) || !isDigitByte(text[e])) {
+		if (s == 0 || !isDigit(text[s-1])) && (e == len(text) || !isDigit(text[e])) {
 			return true
 		}
 		i = s + 1
