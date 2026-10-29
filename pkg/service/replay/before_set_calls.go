@@ -17,12 +17,15 @@ import (
 // test's read marked as the set's (models.UnmatchedCall.BeforeSet). A call
 // made between two tests, after the agent read the earlier one's misses and
 // before the next test's window opened, or after the set's last test was
-// read, the agent marks (models.UnmatchedCall.Background). Each is the
-// application's background work (a timer, a start-up job, a write it starts
-// once its last answer has left): the replay keeps it out of every test's
-// verdict, fails nothing with it, and lists it once for the set, saying
-// where it was made (TestReport.BackgroundCalls), as keploy mock does
-// (founder D1).
+// read, the agent marks (models.UnmatchedCall.Background). A call made inside
+// a test's window is marked so only by its parser, as a call of a series
+// judging marked as the application's background work that no recording of
+// the series answered (models.UnmatchedCall.MadeInTest, keploy enterprise).
+// Each is the application's background work (a timer, a start-up job, a
+// write it starts once its last answer has left): the replay keeps it out of
+// every test's verdict, fails nothing with it, and lists it once for the
+// set, saying where it was made (TestReport.BackgroundCalls), as keploy mock
+// does (founder D1).
 //
 // The dataflow guard: a call made before the set's first test, or between two
 // tests, whose recorded answer reaches the test read next (flowGuard: by the
@@ -73,6 +76,15 @@ const (
 	madeAfterLast   = "made after the set's last test was read, with no test left to run"
 )
 
+// madeInside is where a call of a marked background series made inside
+// test's window was ("" for a test the read does not name).
+func madeInside(test string) string {
+	if test == "" {
+		return "made inside a test's window, as a call of a marked background series"
+	}
+	return "made inside " + test + "'s window, as a call of a marked background series"
+}
+
 // madeBetween is where a call made between test before and test after was.
 func madeBetween(before, after string) string {
 	switch {
@@ -91,8 +103,11 @@ func madeBetween(before, after string) string {
 // the set's first test, or between the previous test and test, that no mock
 // answered is test's own only when the word rule says what changed in test
 // this run may have come from its recorded answer (flowGuard.reaches); it is
-// then charged to test, with the word and its place named. Each one kept as
-// background work says where it was made (BackgroundWhy).
+// then charged to test, with the word and its place named. A call of a
+// marked background series made inside a test's window (MadeInTest) is
+// guarded the same way, against that test. Each one kept as background work
+// says where it was made (BackgroundWhy): a marked series' call, inside
+// test's window, or, for the set end's read, the last test's.
 func (s *setCalls) take(ctx context.Context, read []models.UnmatchedCall, test string, live any) []models.UnmatchedCall {
 	var own []models.UnmatchedCall
 	for _, c := range read {
@@ -127,9 +142,15 @@ func (s *setCalls) take(ctx context.Context, read []models.UnmatchedCall, test s
 			s.calls = append(s.calls, c)
 		case c.Background && test == "":
 			c.BackgroundWhy = madeAfterLast
+			if c.MadeInTest() {
+				c.BackgroundWhy = madeInside(s.last)
+			}
 			s.background = append(s.background, c)
 		case c.Background:
 			where := madeBetween(s.last, test)
+			if c.MadeInTest() {
+				where = madeInside(test)
+			}
 			if why := s.guard.reaches(ctx, c, test, where, driftsOf()); why != "" {
 				c.Background, c.ReachesTest = false, why
 				rest = append(rest, c)
@@ -173,16 +194,18 @@ func (s *setCalls) backgroundCalls() []models.UnmatchedCall {
 }
 
 // logBackgroundCalls says, at WARN, once for the set, each call the
-// application made outside every test's window that no mock answered: its
+// application made outside every test's window, or inside one as a call of a
+// marked background series (MadeInTest), that no mock answered: its
 // background work (a timer, a start-up job, a late write), which may fail
-// inside the application but fails no test and not the set (founder D1).
+// inside the application but fails no test and not the set (founder D1). The
+// line says which of the two it was, and where names the place.
 func (r *Replayer) logBackgroundCalls(testSetID string, calls []models.UnmatchedCall) {
 	for _, c := range calls {
 		next := c.NextSteps
 		if next == "" {
 			next = "nothing fails for it; if a test reads what this call does, re-record the test set"
 		}
-		r.logger.Warn("a call the application made outside every test had no recorded answer: its background work, charged to no test ("+provenswitch.Env+"=1)",
+		r.logger.Warn(c.BackgroundLine()+" ("+provenswitch.Env+"=1)",
 			zap.String("test-set", testSetID),
 			zap.String("protocol", c.Protocol),
 			zap.String("call", c.ActualSummary),
