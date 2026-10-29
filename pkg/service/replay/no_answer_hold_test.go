@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -361,7 +364,7 @@ func TestHoldNoAnswerMocksFailsClosedForATestWithNoWindow(t *testing.T) {
 	keep := map[string]models.MockState{"mock-kept": {Name: "mock-kept"}}
 	tc := &models.TestCase{Name: "test-1", Kind: models.HTTP}
 	held, err := r.holdNoAnswerMocks(context.Background(), "test-set-0", []string{"test-1"}, []*models.TestCase{tc},
-		newCarryOverAttribution([]*models.TestCase{tc}), map[string][]models.MockEntry{"test-1": {{Name: "mock-mapped"}}}, nil, nil, keep)
+		newCarryOverAttribution([]*models.TestCase{tc}), map[string][]models.MockEntry{"test-1": {{Name: "mock-mapped"}}}, nil, keep)
 	if err == nil {
 		t.Fatalf("a test with no recorded window was held: %v", held)
 	}
@@ -602,7 +605,7 @@ func TestHoldNoAnswerMocksHoldsWhatTheAgentServesTheTest(t *testing.T) {
 			r.config.Test.StrictMockWindow = tc.strict
 			keep := map[string]models.MockState{}
 			held, err := r.holdNoAnswerMocks(context.Background(), "test-set-0", []string{"test-7"}, cases,
-				newCarryOverAttribution(cases), nil, nil, nil, keep)
+				newCarryOverAttribution(cases), nil, nil, keep)
 			if err != nil {
 				t.Fatalf("hold: %v", err)
 			}
@@ -638,6 +641,140 @@ func TestRunTestSetHoldsAServerPushReleasedAtTheUnansweredTestsWindow(t *testing
 			}
 			if !left[push.Name] {
 				t.Errorf("the push released at test-7's window (%s) was pruned; keeps %v", push.Name, sortedNames(left))
+			}
+		})
+	}
+}
+
+// heapSampling is the YAML mock store keploy replays with, sampling the heap
+// wherever a read hands the reader mocks: in a walk's visitor, before each
+// mock reaches the reader's, and as every other read returns its mocks, while
+// they are held. peak is the most the heap grew over base; seen counts the
+// mocks a walk visited.
+type heapSampling struct {
+	*mockdb.MockYaml
+	base uint64
+	peak *uint64
+	seen *int
+}
+
+func (h heapSampling) sample() {
+	runtime.GC()
+	var st runtime.MemStats
+	runtime.ReadMemStats(&st)
+	if st.HeapAlloc > h.base && st.HeapAlloc-h.base > *h.peak {
+		*h.peak = st.HeapAlloc - h.base
+	}
+}
+
+func (h heapSampling) WalkTestSetMocks(ctx context.Context, set string, visit func(m *models.Mock, perTest, session bool)) error {
+	return h.MockYaml.WalkTestSetMocks(ctx, set, func(m *models.Mock, perTest, session bool) {
+		*h.seen++
+		h.sample()
+		visit(m, perTest, session)
+	})
+}
+
+func (h heapSampling) IndexTestSetMocks(ctx context.Context, set string, after, before time.Time, have, need map[string]bool) (models.TestSetMocks, error) {
+	out, err := h.MockYaml.IndexTestSetMocks(ctx, set, after, before, have, need)
+	h.sample()
+	return out, err
+}
+
+func (h heapSampling) GetTestSetMocks(ctx context.Context, set string, after, before time.Time, have, need map[string]bool) (models.TestSetMocks, error) {
+	out, err := h.MockYaml.GetTestSetMocks(ctx, set, after, before, have, need)
+	h.sample()
+	return out, err
+}
+
+func (h heapSampling) GetFilteredMocks(ctx context.Context, set string, after, before time.Time, have, need map[string]bool) ([]*models.Mock, error) {
+	out, err := h.MockYaml.GetFilteredMocks(ctx, set, after, before, have, need)
+	h.sample()
+	return out, err
+}
+
+func (h heapSampling) GetUnFilteredMocks(ctx context.Context, set string, after, before time.Time, have, need map[string]bool) ([]*models.Mock, error) {
+	out, err := h.MockYaml.GetUnFilteredMocks(ctx, set, after, before, have, need)
+	h.sample()
+	return out, err
+}
+
+// The hold reads the set's mock file one mock at a time and keeps only the
+// names of those it holds, so that a mock file of gigabytes cannot run the
+// replayer out of memory: over a set of 1 MB mocks many times larger than
+// the bound, on both formats, the heap grows by no more than a fixed bound of
+// a few mocks' worth while the hold reads, however large the set.
+// KEPLOY_TEST_HOLD_HEAP_SET_MB sets each format's set size in MB (64 by
+// default; the no-OOM row runs it at 1024 on a test box, where the heap grew
+// about 2.3 MB on both formats, as at 64).
+func TestHoldNoAnswerMocksHoldsOneMockAtATime(t *testing.T) {
+	const size = 1 << 20
+	const bound = 8 * size
+	n := 64
+	if v := os.Getenv("KEPLOY_TEST_HOLD_HEAP_SET_MB"); v != "" {
+		mb, err := strconv.Atoi(v)
+		if err != nil || mb < 32 {
+			t.Fatalf("KEPLOY_TEST_HOLD_HEAP_SET_MB=%q: want a whole number of MB, at least 32", v)
+		}
+		n = mb
+	}
+	base := time.Now().Add(-time.Hour).Truncate(time.Second)
+	at := func(s float64) time.Time { return base.Add(time.Duration(s * float64(time.Second))) }
+	var cases []*models.TestCase
+	for i := 1; i <= 2; i++ {
+		tc := &models.TestCase{Name: fmt.Sprintf("test-%d", i), Kind: models.HTTP}
+		tc.HTTPReq.Timestamp, tc.HTTPResp.Timestamp = at(float64(10*i)), at(float64(10*i+2))
+		cases = append(cases, tc)
+	}
+	for _, format := range []string{"yaml", "gob"} {
+		t.Run(format, func(t *testing.T) {
+			if format == "gob" {
+				t.Setenv("KEPLOY_MOCK_FORMAT", "gob")
+			} else {
+				t.Setenv("KEPLOY_MOCK_FORMAT", "")
+			}
+			dir := t.TempDir()
+			ys := mockdb.New(zap.NewNop(), dir, "mocks")
+			// Every other mock is recorded in test-2's window, which the hold
+			// keeps by name; the rest in the gap before it, which it does not.
+			for i := 0; i < n; i++ {
+				s := 14 + 4*float64(i)/float64(n)
+				if i%2 == 0 {
+					s = 20 + 2*float64(i)/float64(n)
+				}
+				m := noAnswerHoldMock(models.HTTP, fmt.Sprintf("big-%d", i), at(s))
+				m.Spec.HTTPResp.Body = strings.Repeat(string(rune('a'+i%26)), size)
+				if err := ys.InsertMock(context.Background(), m, "set-0"); err != nil {
+					t.Fatalf("InsertMock: %v", err)
+				}
+			}
+			// The gob writer is asynchronous; Close drains it to the file.
+			if err := ys.Close(); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+			var peak uint64
+			seen := 0
+			keep := map[string]models.MockState{}
+			runtime.GC()
+			var st runtime.MemStats
+			runtime.ReadMemStats(&st)
+			store := heapSampling{MockYaml: mockdb.New(zap.NewNop(), dir, "mocks"), base: st.HeapAlloc, peak: &peak, seen: &seen}
+			r := &Replayer{logger: zap.NewNop(), mockDB: store, config: &config.Config{}}
+			r.config.Test.StrictMockWindow = true
+			held, err := r.holdNoAnswerMocks(context.Background(), "set-0", []string{"test-2"}, cases,
+				newCarryOverAttribution(cases), nil, nil, keep)
+			if err != nil {
+				t.Fatalf("hold: %v", err)
+			}
+			t.Logf("%s: %d mocks of %d bytes, the heap grew at most %d bytes while the hold read them", format, n, size, peak)
+			if peak > bound {
+				t.Fatalf("the heap grew %d bytes while the hold read a set of %d mocks of %d bytes: it holds more than a few mocks at a time (bound %d)", peak, n, size, bound)
+			}
+			if seen < n {
+				t.Fatalf("the hold's walk visited %d of the set's %d mocks", seen, n)
+			}
+			if len(held) != 1 || held[0].kept != n/2 || len(keep) != n/2 {
+				t.Fatalf("precondition: test-2 holds %+v, keep %d mocks; want the %d recorded in its window", held, len(keep), n/2)
 			}
 		})
 	}

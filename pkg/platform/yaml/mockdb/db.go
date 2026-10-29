@@ -1728,8 +1728,9 @@ func (ys *MockYaml) readMockPools(ctx context.Context, testSetID string, afterTi
 
 // readMockPoolsVisiting is readMockPools that, given visit, hands it each mock
 // as it is decoded (mockRouter.visit) and builds no pool: what it returns then
-// lists only the documents the decoders skipped. A visiting read logs nothing
-// the replay's own read of the file logs already (WalkTestSetMocks).
+// lists only the documents the decoders skipped. A visiting read logs
+// nothing: what the replay's own read of the file logs is not logged again
+// (WalkTestSetMocks), and a read or decode error is returned to its caller.
 func (ys *MockYaml) readMockPoolsVisiting(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool, want mockPools, visit func(m *models.Mock, perTest, session bool)) (models.TestSetMocks, error) {
 	var out models.TestSetMocks
 	r := &mockRouter{
@@ -1840,6 +1841,9 @@ func (ys *MockYaml) readMockPoolsVisiting(ctx context.Context, testSetID string,
 			out.AllPerTest = r.allPerTest
 			return out, nil
 		}
+		if visit != nil {
+			return models.TestSetMocks{}, err
+		}
 		msg := "failed to read the mocks from config file"
 		if want&poolPerTest != 0 {
 			msg = "failed to read the mocks from file"
@@ -1940,7 +1944,9 @@ func (ys *MockYaml) decodeMockDocs(reader *yaml.MockReader, logger *zap.Logger, 
 			if readerIsJSON {
 				msg = "failed to decode the config mocks from json doc"
 			}
-			utils.LogError(ys.Logger, decodeErr, msg, zap.String("session", filepath.Base(path)))
+			// logger, not ys.Logger: a visiting read's is a Nop one, its
+			// error returned to its caller (readMockPoolsVisiting).
+			utils.LogError(logger, decodeErr, msg, zap.String("session", filepath.Base(path)))
 			return nil, false, 0, fmt.Errorf("failed to decode the mocks in %s: %w", reader.Path(), decodeErr)
 		}
 		var skipped *skippedEntry

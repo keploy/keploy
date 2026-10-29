@@ -29,10 +29,10 @@ type noAnswerHold struct {
 //     session-pool mocks recorded in it are held too: replay serves those to
 //     every test, and a recording whose recorder stated no lifetime has its
 //     HTTP, Postgres and MySQL calls there;
-//   - what it consumed before the error: its own entry in consumed, the
-//     mapping this run builds, and the mocks consumers names it for (a
+//   - what it consumed before the error: the mocks consumers names it for (a
 //     streaming test's pre-stream drain records them before its body read
-//     can fail).
+//     can fail). This run's mapping has no entry of its own for it: every
+//     no-answer path files its row before the mapping step.
 //
 // Not held: a per-test mock recorded outside every window and stating no
 // lifetime, which lax mode (KEPLOY_STRICT_MOCK_WINDOW=0) promotes to the
@@ -50,7 +50,7 @@ type noAnswerHold struct {
 //
 // carry is the run's carryOverAttribution, over testCases' recorded windows:
 // its schedule places the calls in flight and the carry-over mocks.
-func (r *Replayer) holdNoAnswerMocks(ctx context.Context, testSetID string, unanswered []string, testCases []*models.TestCase, carry *carryOverAttribution, mapped map[string][]models.MockEntry, consumed *models.Mapping, consumers map[string][]string, keep map[string]models.MockState) ([]noAnswerHold, error) {
+func (r *Replayer) holdNoAnswerMocks(ctx context.Context, testSetID string, unanswered []string, testCases []*models.TestCase, carry *carryOverAttribution, mapped map[string][]models.MockEntry, consumers map[string][]string, keep map[string]models.MockState) ([]noAnswerHold, error) {
 	if carry == nil {
 		return nil, fmt.Errorf("no recorded windows to hold the unanswered tests' mocks by")
 	}
@@ -119,20 +119,10 @@ func (r *Replayer) holdNoAnswerMocks(ctx context.Context, testSetID string, unan
 			consumedBy[test] = append(consumedBy[test], mock)
 		}
 	}
-	var consumedEntries map[string][]models.MockEntry
-	if consumed != nil {
-		consumedEntries = make(map[string][]models.MockEntry, len(consumed.TestCases))
-		for _, tc := range consumed.TestCases {
-			consumedEntries[tc.ID] = append(consumedEntries[tc.ID], tc.Mocks...)
-		}
-	}
 
 	held := make([]noAnswerHold, 0, len(windows))
 	for i, w := range windows {
 		for _, e := range mapped[w.TestCase] {
-			hold(i, e.Name, models.Kind(e.Kind))
-		}
-		for _, e := range consumedEntries[w.TestCase] {
 			hold(i, e.Name, models.Kind(e.Kind))
 		}
 		for _, name := range consumedBy[w.TestCase] {

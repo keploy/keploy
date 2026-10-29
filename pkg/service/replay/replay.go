@@ -6406,7 +6406,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	var noAnswerHeld []noAnswerHold
 	var noAnswerHoldErr error
 	if prune && len(noAnswerTests) > 0 {
-		noAnswerHeld, noAnswerHoldErr = r.holdNoAnswerMocks(runTestSetCtx, testSetID, noAnswerTests, testCases, carryAttr, expectedTestMockMappings, actualTestMockMappings, consumers, passingTotalConsumedMocks)
+		noAnswerHeld, noAnswerHoldErr = r.holdNoAnswerMocks(runTestSetCtx, testSetID, noAnswerTests, testCases, carryAttr, expectedTestMockMappings, consumers, passingTotalConsumedMocks)
 		if noAnswerHoldErr != nil {
 			pruneIn.noAnswerUnheld = true
 			prune, pruneRefusal = shouldPrune(r.removeUnusedMocks(), r.instrument, pruneIn)
