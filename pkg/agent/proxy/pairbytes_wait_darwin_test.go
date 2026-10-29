@@ -224,10 +224,11 @@ func onMovedLayout(t *testing.T) {
 // A macOS whose counts the proof does not find in the layout keploy reads
 // leaves the bytes wait unknown, never settled: the proof refuses the moved
 // table, PairedBytesErr says the counts cannot be read, and a wait whose
-// bytes had all arrived ends unknown, without reading the counts. The proof the agent ships with is proven once per process,
-// most likely already by an earlier row, so this row proves it again in a
-// once of its own; TestTheShippedProofRefusesAMovedLayoutOnDarwin is the
-// shipped once.
+// bytes had all arrived ends unknown, without reading the counts.
+//
+// The proof the agent ships with is proven once per process, most likely
+// already by an earlier row, so this row proves it again in a once of its
+// own; TestTheShippedProofRefusesAMovedLayoutOnDarwin is the shipped once.
 func TestAMovedLayoutLeavesTheBytesWaitUnknownOnDarwin(t *testing.T) {
 	onMovedLayout(t)
 	if err := proveXNUCounts(); err == nil {
