@@ -13,6 +13,11 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// readXNUTable is how keploy reads macOS's TCP connection table: the bytes
+// wait and the counts' proof (proveXNUCounts) read it through here, and its
+// rows hand them a table read in a moved layout.
+var readXNUTable = readXNUPCBs
+
 // readXNUPCBs reads macOS's TCP connection table (pcbtable_xnu.go). The
 // kernel sizes its estimate with room for sockets opened between the two
 // sysctl calls; a table that outgrew even that (ENOMEM) is read again, as
@@ -91,11 +96,7 @@ func getsockopt(fd, level, name int, val unsafe.Pointer, vallen *uint32) error {
 // macOS gives the counts the waits read in the layout keploy reads them
 // (checkXNUCounts says what is checked). A layout that moved would read other
 // numbers, and leaves every wait unknown.
-func proveXNUCounts() error { return proveXNUCountsFrom(readXNUPCBs) }
-
-// proveXNUCountsFrom is proveXNUCounts reading macOS's TCP table through
-// readTable: its rows hand it a table read in a moved layout.
-func proveXNUCountsFrom(readTable func() ([]xnuPCB, error)) error {
+func proveXNUCounts() error {
 	ln, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
 		return fmt.Errorf("listen for the counts' proof: %w", err)
@@ -125,7 +126,7 @@ func proveXNUCountsFrom(readTable func() ([]xnuPCB, error)) error {
 	if !ok1 || !ok2 {
 		return errors.New("the counts' proof's addresses are not TCP")
 	}
-	table, err := readTable()
+	table, err := readXNUTable()
 	if err != nil {
 		return err
 	}
