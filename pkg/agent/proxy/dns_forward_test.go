@@ -1,9 +1,11 @@
 package proxy
 
 import (
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +13,8 @@ import (
 	"github.com/miekg/dns"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // startFakeUpstream spins up a miekg/dns UDP server on a
@@ -831,5 +835,104 @@ func TestForwardDNSUpstream_NoUpstreamConfigured(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "no upstream") {
 		t.Errorf("err = %v; want message containing 'no upstream'", err)
+	}
+}
+
+// TestDNSForwardLinesSayMockMissOnlyOnAMiss holds the forward path's log
+// lines to what users grep keploy's output for: "mock miss" only when mocking
+// is on, no DNS mock answered and keploy counts it as a miss. With mocking off
+// no mock is asked; a name upstream says does not exist (NXDOMAIN) could have
+// no mock; and keploy never reports the gRPC service-config probe or a
+// redundant search-list expansion. Those lines say what happened without the
+// phrase. The miss lines keep it word for word.
+func TestDNSForwardLinesSayMockMissOnlyOnAMiss(t *testing.T) {
+	reply := func(rcode int, answer bool) dns.HandlerFunc {
+		return func(w dns.ResponseWriter, r *dns.Msg) {
+			m := new(dns.Msg)
+			m.SetRcode(r, rcode)
+			if answer {
+				rr, _ := dns.NewRR(r.Question[0].Name + " 30 IN A 10.0.0.7")
+				m.Answer = []dns.RR{rr}
+			}
+			_ = w.WriteMsg(m)
+		}
+	}
+	const negativeOff = "DNS upstream returned negative answer; mocking disabled, returning upstream response"
+	// It answers only startFakeUpstream's probe, so a forward fails on its
+	// timeout; nothing here measures time.
+	unanswered := func(w dns.ResponseWriter, r *dns.Msg) {
+		if len(r.Question) > 0 && strings.HasPrefix(r.Question[0].Name, "probe.test") {
+			m := new(dns.Msg)
+			m.SetReply(r)
+			_ = w.WriteMsg(m)
+		}
+	}
+	const failedOff = "DNS upstream forward failed; mocking disabled, falling back to synthetic response"
+	orders := dns.Question{Name: "orders.shop.svc.cluster.local.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	cases := []struct {
+		name    string
+		handler dns.HandlerFunc
+		timeout time.Duration
+		on, off string // the line logged with mocking on, and off
+		onMiss  bool   // whether the mocking-on run is a miss
+		q       dns.Question
+	}{
+		{"answered", reply(dns.RcodeSuccess, true), 5 * time.Second,
+			"DNS mock miss resolved via upstream forward",
+			"DNS query resolved via upstream forward; mocking disabled", true, orders},
+		{"nodata", reply(dns.RcodeSuccess, false), 5 * time.Second,
+			"DNS mock miss: upstream NODATA (empty NOERROR), relaying as valid negative answer (a genuinely unrecorded record of this type would also relay empty here)",
+			"DNS NODATA (empty NOERROR); mocking disabled, relaying real upstream answer", true, orders},
+		{"servfail", reply(dns.RcodeServerFailure, false), 5 * time.Second,
+			"DNS mock miss: upstream returned negative answer; falling back to synthetic DNS response",
+			negativeOff, true, orders},
+		{"nxdomain", reply(dns.RcodeNameError, false), 5 * time.Second,
+			"DNS name does not exist upstream (NXDOMAIN), so no mock could answer it; falling back to synthetic DNS response",
+			negativeOff, false, orders},
+		{"unanswered", unanswered, 200 * time.Millisecond,
+			"DNS mock miss + upstream forward failed; falling back to synthetic response",
+			failedOff, true, orders},
+		{"grpc-probe-unanswered", unanswered, 200 * time.Millisecond,
+			"DNS upstream forward failed for a query keploy does not report as a miss; falling back to synthetic response",
+			failedOff, false,
+			dns.Question{Name: "_grpc_config.orders.shop.svc.cluster.local.", Qtype: dns.TypeTXT, Qclass: dns.ClassINET}},
+		// With the search list below, this is orders.svc.cluster.local expanded
+		// once more: unrecordable, never reported.
+		{"search-expansion-servfail", reply(dns.RcodeServerFailure, false), 5 * time.Second,
+			"DNS upstream returned negative answer for a query keploy does not report as a miss; falling back to synthetic DNS response",
+			negativeOff, false,
+			dns.Question{Name: "orders.svc.cluster.local.svc.cluster.local.", Qtype: dns.TypeA, Qclass: dns.ClassINET}},
+	}
+	for _, tc := range cases {
+		for _, mocking := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/mocking=%v", tc.name, mocking), func(t *testing.T) {
+				addr, stop := startFakeUpstream(t, tc.handler)
+				defer stop()
+				p := newProxyWithUpstream(t, addr, tc.timeout)
+				core, logs := observer.New(zapcore.DebugLevel)
+				p.logger = zap.New(core)
+				mgr := NewMockManager(nil, nil, zap.NewNop())
+				t.Cleanup(mgr.Close)
+				p.mockManager = mgr
+				p.dnsSearch = []string{"svc.cluster.local"}
+
+				p.resolveUncachedDNSResponse(tc.q, models.MODE_TEST, mocking, time.Now(), nil)
+
+				want, miss := tc.off, false
+				if mocking {
+					want, miss = tc.on, tc.onMiss
+				}
+				var said []string
+				for _, e := range logs.All() {
+					said = append(said, e.Message)
+					if !miss && strings.Contains(strings.ToLower(e.Message), "mock miss") {
+						t.Errorf("not a miss, yet logged %q", e.Message)
+					}
+				}
+				if !slices.Contains(said, want) {
+					t.Errorf("want the line %q, logged %q", want, said)
+				}
+			})
+		}
 	}
 }

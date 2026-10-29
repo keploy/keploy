@@ -600,7 +600,7 @@ const (
 // pipeline surfaces it all the way up and aborts record/replay,
 // which is the right behaviour because a null payload silently
 // corrupts replay.
-var errPostgresV3NilPayload = errors.New("postgres_v3 mock missing typed payload")
+var errPostgresV3NilPayload = errors.New("postgres_v3 mock has no typed payload")
 
 // errPacketWithoutHeader is a MySQL or Mongo packet whose document has no
 // header. The recorders write one for every packet, and the header types the

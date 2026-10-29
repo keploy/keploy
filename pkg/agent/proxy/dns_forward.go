@@ -76,7 +76,7 @@ func (p *Proxy) captureDNSUpstream() {
 	}
 	config, err := dns.ClientConfigFromFile(resolvConfPath)
 	if err != nil {
-		p.logger.Info("could not read resolv.conf for upstream forwarding; DNS mock misses will fall back to synthetic responses",
+		p.logger.Info("could not read resolv.conf for upstream forwarding; a DNS query no mock answers gets a synthetic response",
 			zap.String("path", resolvConfPath),
 			zap.Error(err))
 		return
@@ -347,7 +347,7 @@ func (p *Proxy) logReplayDNSForwarding() {
 		knob = "--global-passthrough"
 	}
 	if knob != "" {
-		agent.LogRealEgress(p.logger, knob, "a DNS mock miss is forwarded to the resolvers in resolv.conf",
+		agent.LogRealEgress(p.logger, knob, "a DNS query no mock answers is forwarded to the resolvers in resolv.conf",
 			zap.Strings("resolvers", p.dnsUpstreamServers))
 		return
 	}
@@ -357,7 +357,7 @@ func (p *Proxy) logReplayDNSForwarding() {
 			notAsked = append(notAsked, s)
 		}
 	}
-	p.logger.Info("a DNS mock miss in this replay is forwarded only to a resolver inside the replay's own network, and only for a name that network owns (one docker's resolver holds for the replay's networks, as the keploy CLI lists them, or one under the cluster domain); keploy answers every other name itself, and the host's and public resolvers are not asked",
+	p.logger.Info("in this replay, a DNS query no mock answers is forwarded only to a resolver inside the replay's own network, and only for a name that network owns (one docker's resolver holds for the replay's networks, as the keploy CLI lists them, or one under the cluster domain); keploy answers every other name itself, and the host's and public resolvers are not asked",
 		zap.Strings("in_network_resolvers", p.dnsInNetworkServers),
 		zap.String("cluster_domain", p.dnsClusterDomain),
 		zap.Strings("not_asked", notAsked),
