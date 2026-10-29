@@ -26,6 +26,14 @@ import (
 // What it consumes is told to the learn step as served in this connection's
 // request (integrations.ServingIn), so a request aloft on another connection
 // that reads no recording leaves this one's serve in its order.
+//
+// Under exact serving (the proven switch) a recording answers only the
+// exchange it recorded: one whose every request buffer is the recorded one,
+// byte for byte, less the recording's learned noise. The closest recording
+// is never served for an exchange that changed, at either similarity: that
+// is a miss, which the replay reports as keploy/unmocked_call. Exact serving
+// is read at each attempt, as it begins and ends with tests. Without it the
+// match is as before.
 func fuzzyMatch(ctx context.Context, logger *zap.Logger, reqBuff [][]byte, mockDb integrations.MockMemDb) (bool, []models.Payload, error) {
 	serving := integrations.ServingIn(ctx, mockDb)
 	for {
@@ -60,9 +68,10 @@ func fuzzyMatch(ctx context.Context, logger *zap.Logger, reqBuff [][]byte, mockD
 				logger.Debug("Unfiltered Mocks", zap.String(fmt.Sprintf("Mock[%d]", i), mock.Name), zap.Int64("sortOrder", mock.TestModeInfo.SortOrder))
 			}
 
+			exact := integrations.ExactServing(mockDb)
 			index := findExactMatch(filteredMocks, reqBuff)
 
-			if index == -1 {
+			if index == -1 && !exact {
 				index = findBinaryMatch(filteredMocks, reqBuff, 0.9)
 			}
 
@@ -87,7 +96,7 @@ func fuzzyMatch(ctx context.Context, logger *zap.Logger, reqBuff [][]byte, mockD
 
 			index = findExactMatch(unfilteredMocks, reqBuff)
 
-			if index == -1 {
+			if index == -1 && !exact {
 				index = findBinaryMatch(unfilteredMocks, reqBuff, 0.4)
 			}
 			if index != -1 {
@@ -110,18 +119,17 @@ func fuzzyMatch(ctx context.Context, logger *zap.Logger, reqBuff [][]byte, mockD
 
 // extraCall tells, for an exchange no mock answered under exact serving (the
 // proven switch), whether it is one exchange more than the open test
-// recorded: one its own mocks already answered, matched as the per-test pool
-// is (exactly, or at the per-test similarity). It returns how many times the
-// test recorded that exchange, 0 when it is not one or exact serving is off.
+// recorded: one its own mocks already answered, matched as exact serving
+// matches the pool (fuzzyMatch): exactly. An exchange merely like one the
+// test answered is a changed exchange, not one more. It returns how many
+// times the test recorded that exchange, 0 when it is not one or exact
+// serving is off.
 func extraCall(reqBuffs [][]byte, mockDb integrations.MockMemDb) int {
 	answered := answeredExchanges(mockDb)
 	if len(answered) == 0 {
 		return 0
 	}
 	idx := findExactMatch(answered, reqBuffs)
-	if idx == -1 {
-		idx = findBinaryMatch(answered, reqBuffs, 0.9)
-	}
 	if idx == -1 {
 		return 0
 	}
@@ -245,8 +253,14 @@ func buildGenericMismatchReport(ctx context.Context, reqBuffs [][]byte, mockDb i
 	b := mismatch.NewReport(mismatch.ProtocolGeneric, summary).
 		WithPhase(models.MatchPhaseExhausted, len(genericMocks))
 	if bestIdx >= 0 {
+		// Under exact serving no similarity serves (fuzzyMatch): the
+		// thresholds would tell a near-miss it should have been answered.
+		served := "thresholds: 0.9 per-test, 0.4 session"
+		if integrations.ExactServing(mockDb) {
+			served = "exact serving answers only an identical exchange"
+		}
 		b = b.WithClosest(genericMocks[bestIdx].Name, nil).
-			WithDiff(fmt.Sprintf("closest recorded exchange %q has Jaccard similarity %.2f (thresholds: 0.9 per-test, 0.4 session)", genericMocks[bestIdx].Name, bestSim))
+			WithDiff(fmt.Sprintf("closest recorded exchange %q has Jaccard similarity %.2f (%s)", genericMocks[bestIdx].Name, bestSim, served))
 	} else {
 		b = b.WithDiff("no recorded exchange has the same number of request buffers")
 	}
