@@ -1869,23 +1869,64 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// that bails has still recorded the verdicts it got, and the consumer of
 	// this hook (k8s-proxy's in-Pod driver) settles and retires cases from it.
 	settledVerdicts := make(map[string]settledVerdict)
+	reported := make(map[string]bool)
+	// reportVerdict hands one case's verdict to the reporter and remembers it
+	// was sent, so the drain below does not send it twice.
+	//
+	// ctx is a parameter because the two callers need different ones: a verdict
+	// reported AS IT SETTLES gets the live run context, while the drain runs
+	// from a defer, AFTER the teardown defer registered below has already
+	// called runTestSetCtxCancel -- defers run last-in-first-out -- so it has
+	// to strip the cancellation or every late verdict arrives on a dead
+	// context. Harmless for today's two implementations, which ignore ctx, and
+	// a trap for the next one.
+	reportVerdict := func(ctx context.Context, tc *models.TestCase, res *models.TestResult) {
+		reporter, ok := r.hookImpl.(TestCaseReporter)
+		if !ok {
+			return
+		}
+		reported[tc.Name] = true
+		if err := reporter.AfterTestCaseRun(ctx, testSetID, tc, res); err != nil {
+			utils.LogError(r.logger, err, "AfterTestCaseRun hook failed; the result stands and the replay continues",
+				zap.String("testcase", tc.Name),
+				zap.String("next_step", "check the AfterTestCaseRun implementation and anything it writes to (e.g. a progress file on a full disk)"))
+		}
+	}
 	recordVerdict := func(tc *models.TestCase, res *models.TestResult) {
 		if tc == nil || res == nil || tc.Name == "" {
 			return
 		}
 		settledVerdicts[tc.Name] = settledVerdict{tc: tc, result: res}
+		// REPORTED AS IT SETTLES, in test order, on a live context.
+		//
+		// Collecting every verdict and draining them from the defer meant the
+		// hook fired for the whole set at once, after RunTestSet returned, in
+		// MAP order. Anything following it live -- enterprise's progress file,
+		// k8s-proxy's per-case stream to the UI -- showed nothing for the
+		// length of the set and then everything in a burst, in an order that
+		// was not the run's.
+		//
+		// Except under RetryPassing, which re-runs passing cases: there the
+		// last verdict is the one that counts, and reporting each cycle as it
+		// happened would report a case as many times as it ran. Those are left
+		// to the drain, which sends one verdict per case.
+		if !r.config.RetryPassing {
+			reportVerdict(runTestSetCtx, tc, res)
+		}
 	}
 	defer func() {
-		reporter, ok := r.hookImpl.(TestCaseReporter)
-		if !ok {
-			return
-		}
+		// WHAT THE RUN DID NOT ALREADY REPORT. Under RetryPassing that is every
+		// case, once; otherwise it is whatever settled after the last report --
+		// a run that bails still records the verdicts it got, and the consumer
+		// of this hook settles and retires cases from them.
+		//
+		// WithoutCancel because this defer runs after runTestSetCtxCancel.
+		drainCtx := context.WithoutCancel(runTestSetCtx)
 		for _, v := range settledVerdicts {
-			if err := reporter.AfterTestCaseRun(runTestSetCtx, testSetID, v.tc, v.result); err != nil {
-				utils.LogError(r.logger, err, "AfterTestCaseRun hook failed; the result stands and the replay continues",
-					zap.String("testcase", v.tc.Name),
-					zap.String("next_step", "check the AfterTestCaseRun implementation and anything it writes to (e.g. a progress file on a full disk)"))
+			if reported[v.tc.Name] {
+				continue
 			}
+			reportVerdict(drainCtx, v.tc, v.result)
 		}
 	}()
 
