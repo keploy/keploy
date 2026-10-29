@@ -924,12 +924,14 @@ func TestMarkExitCountsOpenFilesNotDescriptors(t *testing.T) {
 	cmd := exec.Command("/bin/sh", "-c", `trap 'exec 5<&-; touch "$2"' USR1; trap 'exec 3<&-; touch "$3"' USR2; touch "$1"; while :; do sleep 1; done`, "sh", ready, closedDup, closedLast)
 	// stdout and stderr one file; fds 3 and 5 one file, 4 another open of it.
 	cmd.Stdin, cmd.Stdout, cmd.Stderr, cmd.ExtraFiles = in, out, out, []*os.File{f, g, f}
+	// A group of its own, killed whole: its sleep ends with it.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
 	reaped := make(chan struct{})
 	go func() { _ = cmd.Wait(); close(reaped) }()
-	t.Cleanup(func() { _ = cmd.Process.Kill(); <-reaped })
+	t.Cleanup(func() { _ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); <-reaped })
 	awaitFile(t, ready, reaped)
 	st, ok := ReadProcStat(cmd.Process.Pid)
 	if !ok {
@@ -988,6 +990,7 @@ func TestOpenFilesLetGoOfADescriptorClosedAsTheyAreRead(t *testing.T) {
 		want    int
 	}{
 		{"one file over two descriptors", map[int]int{0: 1, 1: 2, 2: 2, 3: 3, 10: 3}, -1, -1, 3},
+		{"a duplicate of a file read before the last", map[int]int{0: 2, 1: 1, 5: 2}, -1, -1, 2},
 		{"a listed descriptor closed before it is compared", map[int]int{0: 1, 1: 2, 2: 2, 3: 3}, 3, 3, 2},
 		{"a counted descriptor closed, its duplicate read after", map[int]int{0: 1, 1: 2, 3: 3, 10: 3}, 10, 3, 3},
 		{"a counted descriptor closed, its duplicate and another file read after", map[int]int{0: 1, 3: 3, 10: 3, 11: 5}, 10, 3, 3},
