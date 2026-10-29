@@ -1086,12 +1086,13 @@ func TestHandleConnectionNeverListsADestinationABypassRulePassesThroughMocked(t 
 // to read: the relay's write to a client that reads nothing more waited
 // for it to read, and kept handleConnection, which waits for the relay, from
 // returning, and the connection's goroutines and its port with it.
-func TestHandleConnectionEndsAPassThroughOnCancelAndOnTheClientsClose(t *testing.T) {
+func TestHandleConnectionEndsAPassThroughOnCancelAndOnEitherSidesClose(t *testing.T) {
 	type end int
 	const (
 		cancelled    end = iota // the context ends as the client reads on
 		clientStalls            // the context ends as the client reads nothing more
 		clientCloses            // the client closes; the context lasts
+		serverCloses            // the server closes with the client's bytes unread; the context lasts
 	)
 	for _, tc := range []struct {
 		name string
@@ -1100,6 +1101,7 @@ func TestHandleConnectionEndsAPassThroughOnCancelAndOnTheClientsClose(t *testing
 		{"the context ends as the client reads on", cancelled},
 		{"the context ends as the client reads nothing more", clientStalls},
 		{"the client closes", clientCloses},
+		{"the server closes with the client's bytes unread", serverCloses},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ln, err := net.Listen("tcp4", "127.0.0.1:0")
@@ -1126,6 +1128,15 @@ func TestHandleConnectionEndsAPassThroughOnCancelAndOnTheClientsClose(t *testing
 					return
 				}
 				served <- conn
+				if tc.end == serverCloses {
+					// It greets, reads 64 KiB of the client's and closes
+					// with the rest unread.
+					defer func() { _ = conn.Close() }()
+					if _, err := conn.Write([]byte("hello\n")); err == nil {
+						_, _ = io.CopyN(io.Discard, conn, 64<<10)
+					}
+					return
+				}
 				if _, err := conn.Write(append([]byte("hello\n"), bytes.Repeat([]byte("s"), 64<<10)...)); err != nil {
 					return
 				}
@@ -1144,6 +1155,20 @@ func TestHandleConnectionEndsAPassThroughOnCancelAndOnTheClientsClose(t *testing
 			done := make(chan error, 1)
 			go func() { done <- p.handleConnection(ctx, conn) }()
 
+			if tc.end == serverCloses {
+				if got := <-readN(app, len("hello\n")); got != "hello\n" {
+					t.Fatalf("the client got %q, want the server's greeting", got)
+				}
+				// Twice what the server reads, a multiple of 1 KiB (a relay
+				// reader used to hold such bytes for more, so the server
+				// never read its 64 KiB), and the client holds the
+				// connection open.
+				if _, err := app.Write(bytes.Repeat([]byte("c"), 128<<10)); err != nil {
+					t.Fatal(err)
+				}
+				_ = awaitEvent(t, done, "handleConnection returning")
+				return
+			}
 			// The client reads on, so the proxy's writes to it never wait
 			// for room, until it closes.
 			relayed := make(chan struct{})
