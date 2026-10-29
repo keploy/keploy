@@ -48,16 +48,26 @@ func cpuQuota(t *testing.T) (float64, bool) {
 	return limit, found
 }
 
-// (mongo-stuck-handler, r3g.) A set's staging reads with half the CPUs the
-// agent may use, where its cgroup sets a CPU quota (cpu.max): Go's
-// GOMAXPROCS, which stageReaders halves, follows that quota (go 1.25 and
-// later, as go.mod says), rounded up and at least 2, so the staging needs
-// no reading of cpu.max of its own. A remote-run job's scope sets one (its
-// CPUs); a lane's container sets none (lane-container.sh runs docker with
-// --memory alone), so there the agent may use every CPU of the box, and
-// half of them is what it reads with. The row reads the quota itself and
-// compares; with no quota, or with GOMAXPROCS set by hand, it says so and
-// stops.
+// A set's staging reads with half the CPUs the agent may use, where its
+// cgroup sets a CPU quota (cpu.max): Go's GOMAXPROCS, which stageReaders
+// halves, follows that quota (go 1.25 and later, as go.mod says), rounded up
+// and at least 2, and the CPUs the agent's affinity allows, so the staging
+// needs no reading of cpu.max of its own. A container with no CPU quota
+// lets the agent use every CPU of its host, and half of them is what it
+// reads with.
+//
+// Its limits, stated:
+//   - It skips with no cgroup CPU quota, or with GOMAXPROCS set by hand. A
+//     GitHub runner and an e2e lane's container set no quota, so it does not
+//     run in CI: it runs on a test box whose job scope sets one.
+//   - It re-derives Go's own formula from cpu.max, so it guards against a
+//     stray runtime.GOMAXPROCS call or GOMAXPROCS setting that would undo
+//     the quota, not against a different rule.
+//   - A fractional quota reads with what Go rounds up to, not half the
+//     quota rounded down: 3.5 CPUs give GOMAXPROCS 4 and 2 readers, where
+//     cpu.max / period / 2 would give 1. The quota's CPU time still bounds
+//     the readers together, so the second reader shares that time, never
+//     more of it.
 func TestTheStagingsReadersAreHalfTheAgentsCPUQuota(t *testing.T) {
 	if v := os.Getenv("GOMAXPROCS"); v != "" {
 		t.Skipf("GOMAXPROCS=%s is set by hand: Go follows no quota", v)

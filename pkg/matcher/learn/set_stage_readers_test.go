@@ -28,7 +28,7 @@ func heldAtOnce(t *testing.T, raw []Raw, want int64, release <-chan struct{}) (c
 	return counts, all
 }
 
-// (mongo-stuck-handler, r3f.) A set's staging (WarmSet) reads with half the
+// A set's staging (WarmSet) reads with half the
 // CPUs Go runs on (stageReaders: GOMAXPROCS/2, at least one) at once, so a
 // large set is read before its first heavy test opens and the replay keeps
 // the other half: with one reader, api-server's set (about 270 CPU-seconds
