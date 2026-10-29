@@ -177,9 +177,9 @@ func TestHandlersOfOneSetReadAPayloadOnce(t *testing.T) {
 // Mongo recordings) keeps every recording's instants and word filters, read
 // once for the set, within a bound proportional to its recordings: about a
 // recording's slot, 64 bytes an instant, and its filters of a fixed size,
-// far under heldBudget. The heap the learn step keeps after a call that read
-// every one of them is that, the words' and texts' budget, and the test's
-// cache of texts.
+// far under the set's budget. The heap the learn step keeps after a call
+// that read every one of them is that, the words the set keeps, and the
+// test's cache of texts.
 func TestASetOfApiServersSizeHoldsItsInstantsWithinItsBound(t *testing.T) {
 	if testing.Short() {
 		t.Skip("reads 14 813 recordings")
@@ -206,11 +206,11 @@ func TestASetOfApiServersSizeHoldsItsInstantsWithinItsBound(t *testing.T) {
 	runtime.KeepAlive(dc)
 	held := tr.derived.heldBytes()
 	t.Logf("%d recordings: the set holds %d KiB of instants and filters (%d B each); the heap grew %d MiB", n, held>>10, held/n, kept>>20)
-	if held > n*perRecording || held > heldBudget {
-		t.Errorf("the set holds %d bytes of %d recordings' instants and filters, past %d (%d each) or its budget %d", held, n, n*perRecording, perRecording, heldBudget)
+	if limit := tr.derived.budget.limit; held > n*perRecording || held > limit {
+		t.Errorf("the set holds %d bytes of %d recordings' instants and filters, past %d (%d each) or its budget %d", held, n, n*perRecording, perRecording, limit)
 	}
-	if bound := 2*held + derivedBudget + textBudget + 16<<20; kept > bound {
-		t.Errorf("the heap grew %d MiB over a call reading %d recordings, past %d MiB (twice what the set holds, the words' budget, the test's texts' and 16 MiB)", kept>>20, n, bound>>20)
+	if bound := 2*held + 2*tr.derived.keptBytes() + textBudget + 16<<20; kept > bound {
+		t.Errorf("the heap grew %d MiB over a call reading %d recordings, past %d MiB (twice what the set holds and the words it keeps, the test's texts' and 16 MiB)", kept>>20, n, bound>>20)
 	}
 	read.Store(0)
 	row.classify(dc)

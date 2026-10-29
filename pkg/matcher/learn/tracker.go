@@ -207,6 +207,9 @@ func (t *Tracker) NewSet() {
 	t.mocks, t.kept, t.before = nil, nil, nil
 	t.set, t.serves, t.seq, t.asRecorded, t.lives = nil, nil, 0, nil, nil
 	t.flights, t.lifts, t.handshakes = nil, nil, nil
+	// The earlier set's derived data is let go now, not when its last
+	// handler is done with it, so the agent holds one set's budget at a time.
+	t.derived.drop()
 	t.places, t.derived = newSetPlaces(), newSetDerived()
 	t.outside, t.outsideKept = nil, nil
 	t.run, t.runNames, t.runTaken, t.setTaken = nil, nil, nil, nil
