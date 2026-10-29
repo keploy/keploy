@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1255,12 +1256,18 @@ func TestRunTestSetGivesAPassingTestThatConsumedNothingAnEmptyEntry(t *testing.T
 // before: TestRunTestSetGivesAPassingTestThatConsumedNothingAnEmptyEntry.)
 //
 // A passing test whose drain caught only startup traffic (mock-boot, asked
-// for before the set's first test) consumed nothing but what the same file's
-// startup section lists, and gets an empty entry: the section serves it. A
-// test that consumed a mock of another test's window still holds the file.
-// Under the default flag a run where no test consumed a mock creates no file
-// (its passing tests' empty entries map none), quietly, as before the empty
-// entries; and with no setup-drain traffic there is nothing to backfill.
+// for before the set's first test, or mock-fboot, a flagged mock released
+// before it) consumed nothing but what the same file's startup section lists,
+// and gets an empty entry: the section serves it. A test that consumed a mock
+// of another test's window still holds the file.
+//
+// Under the default flag a run that mapped no mock creates no file (its
+// passing tests' empty entries map none). With nothing mapped at all (no
+// startup traffic either) it says nothing, as before the empty entries,
+// whatever else the run held for: a test that got no answer, a subset run.
+// With only startup traffic mapped, the hold for a new file that would map no
+// mock is logged at Debug, as before. A hold that names the tests not counted
+// as passing names them whenever no mock is mapped, an empty entry or not.
 func TestRunTestSetCreatesNoFileThatLeavesAPassingTestWithNoEntry(t *testing.T) {
 	for _, tc := range []struct {
 		name            string
@@ -1270,7 +1277,11 @@ func TestRunTestSetCreatesNoFileThatLeavesAPassingTestWithNoEntry(t *testing.T) 
 		// existsFails: the store cannot tell whether the file exists.
 		existsFails bool
 		wrongBody   map[string]bool
-		consumed    map[string][]models.MockState
+		// noAnswer: these tests' requests get no answer.
+		noAnswer []string
+		// selected: only these tests run (a subset run); all when empty.
+		selected []string
+		consumed map[string][]models.MockState
 		// wantFile is each test's entry after the run; nil: no file.
 		wantFile map[string][]string
 		// wantStartup is the startup section of the file written.
@@ -1279,6 +1290,9 @@ func TestRunTestSetCreatesNoFileThatLeavesAPassingTestWithNoEntry(t *testing.T) 
 		// warning does not name any.
 		wantNamed  string
 		wantReason string
+		// wantNotCounted is the warning's tests not counted as passing; empty:
+		// the warning does not name any.
+		wantNotCounted string
 		// wantQuiet is the reason of a hold logged at Debug, with no warning.
 		wantQuiet string
 	}{
@@ -1286,18 +1300,31 @@ func TestRunTestSetCreatesNoFileThatLeavesAPassingTestWithNoEntry(t *testing.T) 
 			name: "--update-test-mapping, test-1 failed after consuming a mock, test-2 passed consuming only a mock of no window", updateMapping: true,
 			wrongBody: map[string]bool{"test-1": true},
 			consumed:  map[string][]models.MockState{"test-1": {mongoAt("mock-a", 1010)}, "test-2": {mongoAt("mock-x", 1500)}},
-			wantNamed: "[test-2]", wantReason: "could not tell what a passing test consumed",
+			wantNamed: "[test-2]", wantReason: "could not tell what a passing test consumed", wantNotCounted: "[test-1]",
 		},
 		{
 			name: "--update-test-mapping, test-1 failed after consuming a mock, test-2 passed consuming only a mock of test-1's window", updateMapping: true,
 			wrongBody: map[string]bool{"test-1": true},
 			consumed:  map[string][]models.MockState{"test-1": {mongoAt("mock-a", 1010)}, "test-2": {mongoAt("mock-y", 1050)}},
-			wantNamed: "[test-2]", wantReason: "could not tell what a passing test consumed",
+			wantNamed: "[test-2]", wantReason: "could not tell what a passing test consumed", wantNotCounted: "[test-1]",
 		},
 		{
+			// test-2's empty entry maps no mock: test-1 is named as not
+			// counted as passing, as with no entry at all.
 			name: "--update-test-mapping, test-1 failed after consuming a mock, test-2 consumed nothing, test-3 only a mock of no window", tests: 3, updateMapping: true,
 			wrongBody: map[string]bool{"test-1": true},
 			consumed:  map[string][]models.MockState{"test-1": {mongoAt("mock-a", 1010)}, "test-3": {mongoAt("mock-x", 2500)}},
+			wantNamed: "[test-3]", wantReason: "could not tell what a passing test consumed", wantNotCounted: "[test-1]",
+		},
+		{
+			// test-2's entry maps mock-c, so the warning does not name test-1
+			// as not counted as passing: it names those only while no mock is
+			// mapped.
+			name: "--update-test-mapping, test-1 failed after consuming a mock, test-2 passed consuming mock-c, test-3 only a mock of no window", tests: 3, updateMapping: true,
+			wrongBody: map[string]bool{"test-1": true},
+			consumed: map[string][]models.MockState{
+				"test-1": {mongoAt("mock-a", 1010)}, "test-2": {mongoAt("mock-c", 2010)}, "test-3": {mongoAt("mock-x", 2500)},
+			},
 			wantNamed: "[test-3]", wantReason: "could not tell what a passing test consumed",
 		},
 		{
@@ -1322,7 +1349,15 @@ func TestRunTestSetCreatesNoFileThatLeavesAPassingTestWithNoEntry(t *testing.T) 
 			name:       "default flag, test-1 failed after consuming a mock, test-2 passed consuming only a mock of no window",
 			wrongBody:  map[string]bool{"test-1": true},
 			consumed:   map[string][]models.MockState{"test-1": {mongoAt("mock-a", 1010)}, "test-2": {mongoAt("mock-x", 1500)}},
-			wantReason: "no test that consumed a mock counts as passing",
+			wantReason: "no test that consumed a mock counts as passing", wantNotCounted: "[test-1]",
+		},
+		{
+			// test-2's empty entry maps no mock: the same hold, and it still
+			// names test-1, whose consumption the file would leave out.
+			name:       "default flag, test-1 failed after consuming a mock, test-2 passed consuming nothing",
+			wrongBody:  map[string]bool{"test-1": true},
+			consumed:   map[string][]models.MockState{"test-1": {mongoAt("mock-a", 1010)}},
+			wantReason: "no test that consumed a mock counts as passing", wantNotCounted: "[test-1]",
 		},
 		{
 			name: "--update-test-mapping, both passed, test-1 consumed mock-a, test-2 consumed only a mock of test-1's window", updateMapping: true,
@@ -1336,19 +1371,32 @@ func TestRunTestSetCreatesNoFileThatLeavesAPassingTestWithNoEntry(t *testing.T) 
 			existsFails: true,
 			wrongBody:   map[string]bool{"test-1": true},
 			consumed:    map[string][]models.MockState{"test-1": {mongoAt("mock-a", 1010)}, "test-2": {mongoAt("mock-x", 1500)}},
-			wantNamed:   "[test-2]", wantReason: "could not tell what a passing test consumed",
+			wantNamed:   "[test-2]", wantReason: "could not tell what a passing test consumed", wantNotCounted: "[test-1]",
+		},
+		// The default flag, nothing mapped: no file, and no hold logged.
+		{
+			name:     "default flag, both passed, test-1 consumed nothing, test-2 consumed only a mock of no window",
+			consumed: map[string][]models.MockState{"test-2": {mongoAt("mock-x", 1500)}},
 		},
 		{
-			name:      "default flag, both passed, test-1 consumed nothing, test-2 consumed only a mock of no window",
-			consumed:  map[string][]models.MockState{"test-2": {mongoAt("mock-x", 1500)}},
-			wantQuiet: "no test consumed a mock",
-		},
-		{
-			name: "default flag, both passed, neither consumed a mock", wantQuiet: "no test consumed a mock",
+			name: "default flag, both passed, neither consumed a mock",
 		},
 		{
 			name:      "default flag, test-1 failed consuming nothing, test-2 passed consuming nothing",
 			wrongBody: map[string]bool{"test-1": true},
+		},
+		{
+			name:     "default flag, test-1 got no answer, test-2 passed consuming nothing",
+			noAnswer: []string{"test-1"},
+		},
+		{
+			name:     "default flag, a subset run of test-1 alone, which passed consuming nothing",
+			selected: []string{"test-1"},
+		},
+		{
+			// Only startup traffic mapped: the hold, at Debug, as before.
+			name:      "default flag, both passed, each test's drain caught only startup traffic",
+			consumed:  map[string][]models.MockState{"test-1": {mongoAt("mock-boot", 500)}, "test-2": {mongoAt("mock-boot2", 600)}},
 			wantQuiet: "no test consumed a mock",
 		},
 		{
@@ -1363,6 +1411,21 @@ func TestRunTestSetCreatesNoFileThatLeavesAPassingTestWithNoEntry(t *testing.T) 
 			consumed:    map[string][]models.MockState{"test-1": {mongoAt("mock-a", 1010)}, "test-2": {mongoAt("mock-boot", 500)}},
 			wantFile:    map[string][]string{"test-1": {"mock-a"}, "test-2": {}},
 			wantStartup: []string{"mock-boot"},
+		},
+		{
+			// A flagged mock released before the first test is the startup
+			// section's, whichever drain caught it.
+			name: "--update-test-mapping, test-1 failed after consuming a mock, test-2 passed, its drain caught only a flagged mock released before the first test", updateMapping: true,
+			wrongBody:   map[string]bool{"test-1": true},
+			consumed:    map[string][]models.MockState{"test-1": {mongoAt("mock-a", 1010)}, "test-2": {carriedAt("mock-fboot", 500)}},
+			wantFile:    map[string][]string{"test-2": {}},
+			wantStartup: []string{"mock-fboot"},
+		},
+		{
+			name:        "default flag, both passed, test-1 consumed mock-a, test-2's drain caught only a flagged mock released before the first test",
+			consumed:    map[string][]models.MockState{"test-1": {mongoAt("mock-a", 1010)}, "test-2": {carriedAt("mock-fboot", 500)}},
+			wantFile:    map[string][]string{"test-1": {"mock-a"}, "test-2": {}},
+			wantStartup: []string{"mock-fboot"},
 		},
 		{
 			name: "control: --update-test-mapping, test-1 failed after consuming a mock, test-2 consumed nothing", updateMapping: true,
@@ -1388,17 +1451,36 @@ func TestRunTestSetCreatesNoFileThatLeavesAPassingTestWithNoEntry(t *testing.T) 
 			h.replayer.logger = zap.New(core)
 			h.replayer.config.Test.UpdateTestMapping = tc.updateMapping
 			h.replayer.instrument = !tc.notInstrumented
+			if len(tc.selected) > 0 {
+				h.replayer.config.Test.SelectedTests = map[string][]string{"test-set-0": tc.selected}
+			}
 			db := mappingFile(t, h, nil)
 			if tc.existsFails {
 				h.replayer.mappingDB = existsFailsDB{db}
 			}
-			h.replayer.hookImpl = prHooks{wrongBody: tc.wrongBody, consumedFor: consumedByWindow(h, tc.consumed)}
+			hooks := prHooks{wrongBody: tc.wrongBody, consumedFor: consumedByWindow(h, tc.consumed)}
+			if len(tc.noAnswer) > 0 {
+				timeout := prClientTimeoutErr(t)
+				hooks.simErr = map[string]error{}
+				for _, id := range tc.noAnswer {
+					hooks.simErr[id] = timeout
+				}
+			}
+			h.replayer.hookImpl = hooks
 			_ = h.run(t)
 
 			for i := 1; i <= n; i++ {
 				id := fmt.Sprintf("test-%d", i)
+				if len(tc.selected) > 0 && !slices.Contains(tc.selected, id) {
+					for _, r := range h.report.results {
+						if r.TestCaseID == id {
+							t.Fatalf("precondition: %s, not selected, has a result row (%s)", id, r.Status)
+						}
+					}
+					continue
+				}
 				want := models.TestStatusPassed
-				if tc.wrongBody[id] {
+				if tc.wrongBody[id] || slices.Contains(tc.noAnswer, id) {
 					want = models.TestStatusFailed
 				}
 				if got := statusOf(t, h, id); got != want {
@@ -1456,6 +1538,13 @@ func TestRunTestSetCreatesNoFileThatLeavesAPassingTestWithNoEntry(t *testing.T) 
 			ctx := held[0].ContextMap()
 			if reason := fmt.Sprint(ctx["reason"]); !strings.Contains(reason, tc.wantReason) {
 				t.Fatalf("the warning's reason is %q; want it to say %q", reason, tc.wantReason)
+			}
+			notCounted, ok := ctx["testsNotCountedAsPassing"]
+			switch {
+			case tc.wantNotCounted == "" && ok:
+				t.Fatalf("the warning names tests not counted as passing %v; want none named", notCounted)
+			case tc.wantNotCounted != "" && fmt.Sprint(notCounted) != tc.wantNotCounted:
+				t.Fatalf("the warning names tests not counted as passing %v; want %s", notCounted, tc.wantNotCounted)
 			}
 			named, ok := ctx["passingTestsWithNoEntry"]
 			if tc.wantNamed == "" {

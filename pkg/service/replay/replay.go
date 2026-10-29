@@ -6493,13 +6493,14 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// a separate side-effect that records consumption. We don't gate
 	// the write on the filter strategy.
 	//
-	// The non-emptiness guard on the create-if-not-present branch
+	// The non-emptiness guard on the create-if-not-present branch (a
+	// mock mapped to a test: mapsAMock; an empty entry maps none)
 	// matters because mappingDoc is built from actualTestMockMappings,
 	// which is populated by
 	// upsertActualTestMockMapping calls that depend on consumedMocks,
 	// which is fetched from r.hookImpl.GetConsumedMocks INSIDE
-	// `if r.instrument` blocks (lines 1453, 1884). In non-instrument
-	// modes (e.g. k8s-proxy autoreplay) consumedMocks stays empty,
+	// `if r.instrument` blocks. In non-instrument modes (e.g.
+	// k8s-proxy autoreplay) consumedMocks stays empty,
 	// so without this guard the first run would create an empty
 	// mappings.yaml and every subsequent run would skip the create
 	// branch (file exists), leaving autoreplay permanently without
@@ -6571,15 +6572,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// heldForNoEntry: the hold is for a passing test a new file would give no
 	// entry (unentered), whom the warning names.
 	heldForNoEntry := false
-	// Whether the run has anything to write at all, what the holds below are
-	// about: what it mapped before the verdicts took their part, or an empty
-	// entry it gave a passing test. A run where no test consumed a mock but
-	// some passed has only those; under the default flag the hold for a new
-	// file that would map no mock keeps it from creating one, as before the
-	// empty entries.
+	// Whether the run had anything to write at all, before the verdicts took
+	// their part: what the holds below are about. The empty entries the
+	// passing tests got do not count: a default-flag run that mapped no mock
+	// and no startup traffic has nothing to create (the create below needs a
+	// mock mapped to a test), and says nothing, as before the empty entries.
 	wouldWrite := r.mappingDB != nil && (r.config.Test.UpdateTestMapping ||
-		len(actualTestMockMappings.TestCases) > 0 || len(actualTestMockMappings.Startup) > 0 ||
-		len(mappingDoc.TestCases) > 0)
+		len(actualTestMockMappings.TestCases) > 0 || len(actualTestMockMappings.Startup) > 0)
 	switch {
 	case !wouldWrite:
 	case provenswitch.On():
@@ -6655,7 +6654,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 	shouldWriteMappings := r.config.Test.UpdateTestMapping && holdMappings == ""
-	if !r.config.Test.UpdateTestMapping && holdMappings == "" && r.mappingDB != nil && len(mappingDoc.TestCases) > 0 {
+	// The default flag creates a file only when it maps a mock to a test: one
+	// of empty entries alone would stop every later default run from creating
+	// the one that does.
+	if !r.config.Test.UpdateTestMapping && holdMappings == "" && r.mappingDB != nil && mapsAMock(mappingDoc) {
 		exists, existsErr := mappingExists()
 		if existsErr != nil {
 			r.logger.Debug("Skipping create-if-not-present mappings.yaml write — file-existence check failed; treating as 'exists' to avoid clobbering",
@@ -6682,7 +6684,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 		}
 		fields := []zap.Field{zap.String("testSetID", testSetID), zap.String("reason", holdMappings)}
-		if n := len(keptRecorded); n > 0 && len(mappingDoc.TestCases) == 0 {
+		if n := len(keptRecorded); n > 0 && !mapsAMock(mappingDoc) {
 			fields = append(fields, zap.Int("count", n), zap.Strings("testsNotCountedAsPassing", keptRecorded[:min(n, 20)]))
 		}
 		if n := len(unentered); heldForNoEntry {

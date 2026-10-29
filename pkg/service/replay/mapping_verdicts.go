@@ -239,9 +239,10 @@ func markWrittenByKeployTest(doc *models.Mapping) {
 // only "no verdict". A local replay serves an empty entry as it serves no
 // entry (models.MergeStartupMockNames hands it no names: its recorded window).
 //
-// The holds that keep a run from creating a file that maps no mock decide on
-// mapsAMock, and an empty entry maps none. A new file is created only when
-// every passing test has an entry (passingWithNoEntry), an empty one counting.
+// The holds that keep a run from creating a file that maps no mock, and the
+// default flag's create, decide on mapsAMock, and an empty entry maps none. A
+// new file is created only when every passing test has an entry
+// (passingWithNoEntry), an empty one counting.
 func addConsumedNothingEntries(doc *models.Mapping, results []models.TestResult, passing map[string]bool, none map[string]struct{}) {
 	if doc == nil || len(none) == 0 {
 		return
