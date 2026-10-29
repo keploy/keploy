@@ -139,6 +139,13 @@ type ScopeEvidence struct {
 	// it did not call while it was open. Never a failure, and never in
 	// Unconsumed: it tells judging which ones a replay did not use.
 	Background []string `json:"background,omitempty" yaml:"background,omitempty"`
+	// ServedAside lists, in the order they answered, the calls of this test's
+	// window that a set-aside test's recording answered (ServedAside): a test
+	// the replay skipped made no call, so what its recordings answer (a cache
+	// fill another test then makes) is served to the calls after it, by exact
+	// match only, unchecked and never required. Each reads "<mock> served
+	// from <test> (set aside)". Never a failure, and never part of Empty.
+	ServedAside []string `json:"servedAside,omitempty" yaml:"servedAside,omitempty"`
 	// CaptureIncomplete is what the agent could not capture since the run
 	// began, when the test ended (design v14 §3.2): it taints the test open
 	// when it happened and every later one, which therefore fail in a replay.
@@ -164,6 +171,12 @@ type ScopeEvidence struct {
 	// or the mocks it consumed), so the test has no verdict of its own;
 	// keploy's verdict on the run is "not judged", never the test's fault.
 	Unread bool `json:"unread,omitempty" yaml:"unread,omitempty"`
+}
+
+// ServedAsideLine is how ScopeEvidence.ServedAside names one call a
+// set-aside test's recording answered: the recording and its test.
+func ServedAsideLine(mock, from string) string {
+	return mock + " served from " + from + " (set aside)"
 }
 
 // escapeTestName escapes a test's name for its ID (TestID), so that the ID
