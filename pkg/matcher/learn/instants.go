@@ -125,17 +125,6 @@ import (
 // The word-level learning build (train/feat/word-level-learn) rewrites
 // ClassifyIn with instant slots: it keeps these rules.
 
-// instantRes are clockLayouts' patterns in either case: a case-folded form of
-// a text holds its instants folded. Each reads a text only in the windows of
-// it that can hold a match (layoutRe).
-var instantRes = func() []*layoutRe {
-	out := make([]*layoutRe, len(clockLayouts))
-	for i, lay := range clockLayouts {
-		out[i] = newLayoutRe(lay)
-	}
-	return out
-}()
-
 // instantKey is the moment an instant names, compared as one unit: at, in
 // UnixNano (of a time of day, the nanoseconds into its day, day). Two
 // instants are one only with equal keys: an epoch second and that second's
@@ -273,57 +262,80 @@ func isEpochText(s string) bool {
 }
 
 // instantSpans are the instants s holds: each a match of a layout of
-// clockLayouts, in either case, at ASCII word boundaries, that its layout
-// reads as an instant, no two overlapping (an earlier layout's first, as
-// clockIn takes them), in the order they stand. A time-ordered UUID's span is
-// its time groups, unkeyed.
+// clockLayouts, in either case (a case-folded form of a text holds its
+// instants folded), at ASCII word boundaries, that its layout reads as an
+// instant, no two overlapping (an earlier layout's first, as clockIn takes
+// them), in the order they stand. A time-ordered UUID's span is its time
+// groups, unkeyed. It reads s once (scanInstants), for every layout.
 var instantSpans = func(s string) []instant {
+	matches := scanInstants(s)
 	var out []instant
-	var taken []bool
-	for k, re := range instantRes {
+	// taken are the whole matches kept so far, a UUID's other groups too, in
+	// the order they stand: no later layout reads an instant inside one.
+	var taken []span
+	for k := range matches {
+		if len(matches[k]) == 0 {
+			continue
+		}
 		lay := clockLayouts[k]
-		for _, m := range re.FindAllStringIndex(s) {
-			if m[0] > 0 && isWord(s[m[0]-1]) && isWord(s[m[0]]) || m[1] < len(s) && isWord(s[m[1]-1]) && isWord(s[m[1]]) {
+		var kept []span
+		t := 0
+		for _, m := range matches[k] {
+			if m.start > 0 && isWord(s[m.start-1]) && isWord(s[m.start]) || m.end < len(s) && isWord(s[m.end-1]) && isWord(s[m.end]) {
 				continue
 			}
-			if taken != nil {
-				free := true
-				for i := m[0]; i < m[1]; i++ {
-					if taken[i] {
-						free = false
-						break
-					}
-				}
-				if !free {
-					continue
-				}
+			// A layout's matches stand in order and never overlap, so
+			// the kept matches before this one end before the next.
+			for t < len(taken) && taken[t].end <= m.start {
+				t++
 			}
-			sp := instant{start: m[0], end: m[1], layout: k}
+			if t < len(taken) && taken[t].start < m.end {
+				continue
+			}
+			sp := instant{start: m.start, end: m.end, layout: k}
 			if lay.timeWord != nil {
-				if _, _, ok := lay.read(s[m[0]:m[1]]); !ok {
+				if _, _, ok := lay.read(s[m.start:m.end]); !ok {
 					continue
 				}
-				sp.end = m[0] + uuidTimeEnd(s[m[0]:m[1]])
+				sp.end = m.start + uuidTimeEnd(s[m.start:m.end])
 			} else {
-				mo, res, ok := instantKeyOf(k, s[m[0]:m[1]])
+				mo, res, ok := instantKeyOf(k, s[m.start:m.end])
 				if !ok {
 					continue
 				}
 				sp.key, sp.wall, sp.res, sp.zone, sp.zoned, sp.keyed = mo.key, mo.wall, res, mo.zone, mo.zoned, true
 			}
-			if taken == nil {
-				taken = make([]bool, len(s))
-			}
-			// The whole match is taken, a UUID's other groups too: no
-			// later layout reads an instant inside it.
-			for i := m[0]; i < m[1]; i++ {
-				taken[i] = true
-			}
+			kept = append(kept, m)
 			out = append(out, sp)
 		}
+		taken = mergeSpans(taken, kept)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].start < out[j].start })
 	return out
+}
+
+// mergeSpans is a and b, each in order and none overlapping another, as one
+// list in order.
+func mergeSpans(a, b []span) []span {
+	if len(b) == 0 {
+		return a
+	}
+	if len(a) == 0 {
+		return b
+	}
+	out := make([]span, 0, len(a)+len(b))
+	i, j := 0, 0
+	for i < len(a) && j < len(b) {
+		if a[i].start < b[j].start {
+			out = append(out, a[i])
+			i++
+		} else {
+			out = append(out, b[j])
+			j++
+		}
+	}
+	out = append(out, a[i:]...)
+	return append(out, b[j:]...)
 }
 
 // uuidTimeEnd is where the time groups of s, a time-ordered UUID, end
