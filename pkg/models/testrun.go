@@ -616,8 +616,11 @@ type UnmatchedCall struct {
 	// AnswerByKind: a background write answered by its kind, unchecked;
 	// Reused says the kind's recordings were used up. AnswerBackgroundAgain:
 	// a background call made again in its test's window, answered again with
-	// ClosestMock, the marked recording it repeated, unchecked. An answer
-	// never counts against a test and never lands in a miss list.
+	// ClosestMock, the marked recording it repeated, unchecked.
+	// AnswerBackgroundSeries: a call of a marked background series answered
+	// with ClosestMock, a recording of the series, its clock reads checked on
+	// the run's clock. An answer never counts against a test and never lands
+	// in a miss list.
 	Answer    string `json:"answer,omitempty" yaml:"answer,omitempty"`
 	Drift     bool   `json:"drift,omitempty" yaml:"drift,omitempty"`
 	Reused    bool   `json:"reused,omitempty" yaml:"reused,omitempty"`
@@ -778,6 +781,13 @@ const (
 	// (MockEntry.Background), made again after that recording answered in
 	// the test's window, answered again with it (ClosestMock), unchecked.
 	AnswerBackgroundAgain = "background_again"
+	// AnswerBackgroundSeries: a call of a series judging marked as the
+	// application's background work set-wide (a call shape whose count
+	// varied between recording and replay with only clock reads differing),
+	// its clock reads holding on the run's clock, answered with the series'
+	// newest recording the open test's unmade writes admit (ClosestMock),
+	// consuming none, unchecked otherwise. Every copy of it is answered so.
+	AnswerBackgroundSeries = "background_series"
 )
 
 // The reasons a miss of record's full round carries (UnmatchedCall.Reason),
