@@ -58,3 +58,22 @@ func TestRunTestSet_ACallAfterTheLastTestOfARecordingItsStopCutIsNotJudged(t *te
 		t.Fatalf("no call after the last test: status %s, not judged %v; want PASSED, judged", status, h.replayer.notJudged("test-set-0"))
 	}
 }
+
+// Item (b): a call the agent saw made after it read the last test's misses
+// (marked Background) is background work, made as the application stopped:
+// the set is judged and passes, the call listed with where it was made,
+// whether or not the recording's stop had to kill the application. Only a
+// call filed late in the last test's window leaves such a set not judged.
+func TestRunTestSet_ACallMadeAfterTheLastReadOfARecordingItsStopCutIsBackground(t *testing.T) {
+	provenOn(t, true)
+	h := newPartialRunHarness(t, 2, 0)
+	h.replayer.testSetConf = cutRecordingConf{why: recordingKill}
+	h.instr.mockErrorsFor = misses(nil, nil, afterLastBackground)
+
+	if status := h.run(t); status != models.TestSetStatusPassed || h.replayer.notJudged("test-set-0") {
+		t.Fatalf("status %s (reason %q), not judged %v; want PASSED, judged", status, h.report.report.FailureReason, h.replayer.notJudged("test-set-0"))
+	}
+	if got := h.report.report.BackgroundCalls; len(got) != 1 || got[0].BackgroundWhy != madeAfterLast {
+		t.Fatalf("background calls %+v; want the publish, made after the last test", got)
+	}
+}
