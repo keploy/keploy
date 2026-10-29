@@ -792,9 +792,48 @@ func TestAnEarlierTestsCallIsAPlaceOfTheRun(t *testing.T) {
 	}
 }
 
+// A test's own call whose serve is told after the next test began is a place
+// of the run's as well: dropping it would refuse the next test's call that
+// sends the value the earlier test made, though the earlier test made it. A
+// start-up call told late (nobody's, as told in time) leaves none, nor does
+// a call of a test of the previous set told in the next set.
+func TestAnEarlierTestsCallToldAfterTheNextBeganIsAPlaceOfTheRun(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	tr := NewTracker()
+	t0 := time.Unix(1_792_000_000, 0)
+	start, _, _, _ := tr.Test()
+	tr.Begin()
+	a, _, _, _ := tr.Test()
+	tr.End()
+	tr.Begin()
+	b, _, _, _ := tr.Test()
+	tr.Served(start, ranCall("mock-start", t0, "s-1", "s-9"))
+	tr.Served(a, ranCall("mock-a", t0, "o-1", "o-9"))
+	_, earlier, _, _ := tr.Test()
+	want := ranCall("mock-a", t0, "o-1", "o-9")
+	want.Own, want.Run = false, true
+	if !reflect.DeepEqual(earlier, []Earlier{want}) {
+		t.Fatalf("test B's earlier places are %+v, want test A's own call told after B began, as the run's", earlier)
+	}
+	p, ok := appeared(clockedDrifts(), "o-1", "o-9", t0.Add(time.Minute), earlier, nil)
+	if !ok || !p.Run || p.Mock != "mock-a" {
+		t.Fatalf("test B's value comes from %+v (%v), want test A's call told late, as the run's", p, ok)
+	}
+	if name, ok := tr.PlaceName(b, p, nil); !ok || name != runPrefix+"order" {
+		t.Fatalf("test B names test A's value %q (%v), want the run's name", name, ok)
+	}
+	tr.End()
+	tr.NewSet()
+	tr.Begin()
+	tr.Served(b, ranCall("mock-old", t0, "o-2", "o-8"))
+	if _, earlier, _, _ := tr.Test(); len(earlier) != 0 {
+		t.Fatalf("a new set reads a call of the previous set's test told in it: %+v", earlier)
+	}
+}
+
 // Without the proven switch nothing learns variables, and what a test's
 // calls sent is forgotten as the next test begins, as it was before the run
-// kept them.
+// kept them; one told after the next began is dropped.
 func TestWithoutTheSwitchATestsCallsAreNoPlaceOfTheNext(t *testing.T) {
 	t.Setenv(provenswitch.Env, "0")
 	tr := NewTracker()
@@ -804,6 +843,7 @@ func TestWithoutTheSwitchATestsCallsAreNoPlaceOfTheNext(t *testing.T) {
 	tr.Served(a, ranCall("mock-a", t0, "o-1", "o-9"))
 	tr.End()
 	tr.Begin()
+	tr.Served(a, ranCall("mock-late", t0, "o-2", "o-8"))
 	if _, earlier, _, _ := tr.Test(); len(earlier) != 0 {
 		t.Fatalf("with the switch off test B reads test A's calls: %+v", earlier)
 	}

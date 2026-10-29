@@ -1192,7 +1192,8 @@ func (t *Tracker) Unanswer(n uint64, name string) {
 // begins: a request of that test answered after it ended, or between it and
 // the next, lands there too, and the next Begin forgets it, but for the
 // test's own calls that carried a value the run made, which it keeps as the
-// run's under the proven switch (ranCalls). Served before the
+// run's under the proven switch (ranCalls), one told after the next test
+// began among them. Served before the
 // set's first test began (the start-up's), it is the run's when it carried a
 // value the run made (Earlier.Run): an earlier place of every test of the
 // set. Either way it is the start-up's (Earlier.StartUp). A set has no
@@ -1220,6 +1221,12 @@ func (t *Tracker) Served(n uint64, e Earlier) {
 	e.StartUp = !t.open && !t.began
 	switch {
 	case t.epoch != n:
+		// An earlier test's call of the set told after the next began is
+		// the run's as one told in time is (ranCalls); the start-up's and a
+		// previous set's are nobody's.
+		if n > t.setEpoch && provenswitch.On() {
+			t.run = append(t.run, ranCalls([]Earlier{e})...)
+		}
 	case e.StartUp && e.Own:
 	case e.StartUp && drifted(e):
 		e.Run = true
