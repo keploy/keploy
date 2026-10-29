@@ -252,7 +252,9 @@ func clusterDomain(search []string) string {
 //     container's name, its compose service name and network aliases, its
 //     short ID, each also qualified by the network's name. A miss for a name
 //     the list may hold but does not (netnames.Store.MayOwn) asks the CLI once
-//     for a fresh list, waiting no longer than a forward would.
+//     for a fresh list and waits for it, or for the CLI to say it could not
+//     list the names or to go away: never on a clock, so a loaded machine
+//     whose CLI lists slowly still finds a container started since.
 //
 // Every other name is answered as a native replay answers it: record it, or
 // name "dns" in test.allowEgress.
@@ -274,9 +276,7 @@ func (p *Proxy) networkOwnsName(name string) bool {
 	if !names.MayOwn(q) {
 		return false
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), p.dnsForwardTimeout)
-	defer cancel()
-	names.Refresh(ctx)
+	names.Refresh(context.Background())
 	return names.Owns(q)
 }
 

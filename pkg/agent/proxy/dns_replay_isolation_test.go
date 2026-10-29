@@ -494,31 +494,12 @@ func TestReplayDNSMiss_ContainerNameListRefreshedOnceOnAMiss(t *testing.T) {
 	p.netNames.Apply(netnames.List{Networks: []string{"keploy-network"}, Names: []string{"db"}})
 
 	// The keploy CLI: each ask is answered with the network's names now.
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	var lists atomic.Int32
-	go func() {
-		var after uint64
-		for {
-			ask, ok := p.netNames.AwaitAsk(ctx, after)
-			if !ok {
-				return
-			}
-			lists.Add(1)
-			p.netNames.Apply(netnames.List{Answers: ask.Asked, Networks: []string{"keploy-network"},
-				Names: []string{"db", "late-svc", "late-svc.keploy-network"}})
-			after = ask.Asked
-		}
-	}()
-	for {
-		present, changed := p.netNames.Present()
-		if present {
-			break
-		}
-		<-changed
-	}
-	// The wait for a list ends on the list; the forward's deadline only
-	// bounds a CLI that never sends one, so a loaded box cannot cut it.
+	serveNames(t, p.netNames, func(ask netnames.Ask) {
+		lists.Add(1)
+		p.netNames.Apply(netnames.List{Answers: ask.Asked, Networks: []string{"keploy-network"},
+			Names: []string{"db", "late-svc", "late-svc.keploy-network"}})
+	})
 	p.dnsForwardTimeout = time.Minute
 
 	resolve := func(name string) dnsCacheEntry {
@@ -543,5 +524,54 @@ func TestReplayDNSMiss_ContainerNameListRefreshedOnceOnAMiss(t *testing.T) {
 	}
 	if n := lists.Load(); n != 2 {
 		t.Fatalf("a dotted outside name asked for a list (%d lists); want none", n)
+	}
+}
+
+// serveNames holds a keploy CLI's stream of asks on names until the test
+// ends, calling answer for each ask, and returns once the store counts it.
+func serveNames(t *testing.T, names *netnames.Store, answer func(netnames.Ask)) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	t.Cleanup(func() { cancel(); <-done })
+	go func() {
+		defer close(done)
+		names.Serve(ctx, 0, func(ask netnames.Ask) error {
+			answer(ask)
+			return nil
+		})
+	}()
+	for {
+		present, changed := names.Present()
+		if present {
+			return
+		}
+		<-changed
+	}
+}
+
+// A miss for a name the last list does not hold waits for the CLI's fresh
+// list however long the CLI takes to list the names: a loaded machine whose
+// CLI answers after the DNS forward's own deadline still finds a container
+// started since, rather than handing the app keploy's answer for it.
+func TestReplayDNSMiss_ContainerNameListWaitsForASlowCLI(t *testing.T) {
+	p := hostResolverProxy(t, "127.0.0.1:1")
+	p.IsDocker = true
+	p.dnsClusterDomain = ""
+	p.netNames = netnames.New()
+	p.netNames.Apply(netnames.List{Networks: []string{"keploy-network"}, Names: []string{"db"}})
+	p.dnsForwardTimeout = time.Millisecond
+	serveNames(t, p.netNames, func(ask netnames.Ask) {
+		// The CLI's 1 + N docker inspects on a loaded runner: far past the
+		// forward's deadline.
+		time.Sleep(100 * p.dnsForwardTimeout)
+		p.netNames.Apply(netnames.List{Answers: ask.Asked, Networks: []string{"keploy-network"},
+			Names: []string{"db", "late-svc"}})
+	})
+	if !p.networkOwnsName("late-svc.") {
+		t.Fatal("late-svc, which the CLI's slow list holds, is not the network's own: the miss did not wait for the list")
+	}
+	if p.networkOwnsName("riso-unrecorded.") {
+		t.Fatal("riso-unrecorded, which no list holds, is the network's own")
 	}
 }

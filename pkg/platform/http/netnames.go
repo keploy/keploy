@@ -1,6 +1,7 @@
 package http
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -90,25 +91,77 @@ func (a *AgentClient) pushNetworkNames(ctx context.Context) {
 	go a.answerNameAsks(actx, uri, agentContainer, np)
 }
 
-// answerNameAsks holds the agent's ask for a fresh list open and answers each
-// ask with one, until ctx ends or the agent stops taking asks.
+// answerNameAsks holds the agent's stream of asks for a fresh list open and
+// answers each ask with one, until ctx ends or the agent stops taking asks. A
+// list it could not give ends the stream, and the next stream it holds tells
+// the agent it is done with that ask, so a DNS miss waiting for its list is
+// answered by keploy at once rather than waiting on a clock.
 func (a *AgentClient) answerNameAsks(ctx context.Context, uri, agentContainer string, np *namePusher) {
 	defer namePushers.CompareAndDelete(uri, np)
 	var after uint64
 	for ctx.Err() == nil {
-		ask, err := a.awaitNameAsk(ctx, uri, after)
-		if err != nil {
+		last, err := a.answerNameAskStream(ctx, uri, agentContainer, after)
+		after = last
+		var listErr *nameListError
+		if errors.As(err, &listErr) {
 			if ctx.Err() == nil {
-				a.logger.Debug("keploy stopped answering its agent's asks for the replay's network names", zap.Error(err))
+				a.logger.Warn("keploy could not give its agent a fresh list of the names the replay's docker networks answer: a DNS mock miss for a container started since is answered by keploy",
+					zap.Error(listErr.err))
 			}
-			return
+			continue
 		}
-		if err := a.postNetworkNames(ctx, uri, agentContainer, ask.Asked); err != nil && ctx.Err() == nil {
-			a.logger.Warn("keploy could not give its agent a fresh list of the names the replay's docker networks answer: a DNS mock miss for a container started since is answered by keploy",
-				zap.Error(err))
+		if ctx.Err() == nil {
+			a.logger.Debug("keploy stopped answering its agent's asks for the replay's network names", zap.Error(err))
+		}
+		return
+	}
+}
+
+// nameListError is a list answerNameAskStream could not give for an ask.
+type nameListError struct{ err error }
+
+func (e *nameListError) Error() string { return e.err.Error() }
+
+// maxNameAskLine bounds one ask on the agent's stream, a few dozen bytes.
+const maxNameAskLine = 4096
+
+// answerNameAskStream holds one stream of the agent's asks after after open
+// and answers each with a list. It returns the last ask it is done with, and
+// why the stream ended: a *nameListError for a list it could not give, so the
+// next stream settles that ask, or the stream's own end.
+func (a *AgentClient) answerNameAskStream(ctx context.Context, uri, agentContainer string, after uint64) (uint64, error) {
+	sctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	q := url.Values{"after": {strconv.FormatUint(after, 10)}}
+	req, err := http.NewRequestWithContext(sctx, http.MethodGet, uri+models.NetworkNamesAskPath+"?"+q.Encode(), nil)
+	if err != nil {
+		return after, err
+	}
+	res, err := a.client.Do(req)
+	if err != nil {
+		return after, err
+	}
+	defer func() { _ = res.Body.Close() }()
+	if res.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, 4096))
+		return after, fmt.Errorf("the agent answered %s", res.Status)
+	}
+	lines := bufio.NewScanner(res.Body)
+	lines.Buffer(make([]byte, 0, 256), maxNameAskLine)
+	for lines.Scan() {
+		var ask netnames.Ask
+		if err := json.Unmarshal(lines.Bytes(), &ask); err != nil {
+			return after, fmt.Errorf("an ask for a name list: %w", err)
+		}
+		if err := a.postNetworkNames(ctx, uri, agentContainer, ask.Asked); err != nil {
+			return ask.Asked, &nameListError{err: err}
 		}
 		after = ask.Asked
 	}
+	if err := lines.Err(); err != nil {
+		return after, err
+	}
+	return after, io.EOF
 }
 
 // postNetworkNames lists the names and gives them to the agent at uri, as the
@@ -141,29 +194,6 @@ func (a *AgentClient) postNetworkNames(ctx context.Context, uri, agentContainer 
 	}
 	msg, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
 	return fmt.Errorf("the agent took no name list: %s: %s", res.Status, bytes.TrimSpace(msg))
-}
-
-// awaitNameAsk holds the agent's next ask after after open until it comes.
-func (a *AgentClient) awaitNameAsk(ctx context.Context, uri string, after uint64) (netnames.Ask, error) {
-	q := url.Values{"after": {strconv.FormatUint(after, 10)}}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, uri+models.NetworkNamesAskPath+"?"+q.Encode(), nil)
-	if err != nil {
-		return netnames.Ask{}, err
-	}
-	res, err := a.client.Do(req)
-	if err != nil {
-		return netnames.Ask{}, err
-	}
-	defer func() { _ = res.Body.Close() }()
-	if res.StatusCode != http.StatusOK {
-		_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, 4096))
-		return netnames.Ask{}, fmt.Errorf("the agent answered %s", res.Status)
-	}
-	var ask netnames.Ask
-	if err := json.NewDecoder(io.LimitReader(res.Body, 4096)).Decode(&ask); err != nil {
-		return netnames.Ask{}, err
-	}
-	return ask, nil
 }
 
 // namelessNetworks are the networks docker's resolver holds no names on.

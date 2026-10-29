@@ -12,8 +12,10 @@
 // keploy's agent container has no Docker socket, so the keploy CLI, which
 // drives Docker for the run, lists the names (List) and gives them to the
 // agent (Store.Apply). A miss for a name that is not on the list asks the CLI,
-// once, for a fresh list (Store.Refresh): a container started after the last
-// list is found, and a name no container holds is answered by keploy itself.
+// once, for a fresh list (Store.Refresh) over the stream of asks the CLI holds
+// open (Store.Serve), and waits for that list or the CLI's going away: a
+// container started after the last list is found, and a name no container
+// holds is answered by keploy itself.
 package netnames
 
 import (
@@ -44,14 +46,15 @@ type Store struct {
 	names    map[string]struct{}
 	networks map[string]struct{}
 	given    bool   // a List was applied
-	answered uint64 // the highest ask a List answered
 	asked    uint64 // asks made
-	// serving counts the CLI's held asks (AwaitAsk) open now. present is
-	// whether a CLI answers asks: set when one holds an ask, kept while it
-	// lists the names for one it took, cleared when its last held ask ends
-	// with the CLI gone. A Refresh waits only while one is present.
-	serving int
-	present bool
+	// settled is the highest ask the CLI is done with: a List answered it,
+	// or the CLI said it could not list the names for it (Serve's after).
+	settled uint64
+	// streams counts the CLI's held streams of asks (Serve) open now: a CLI
+	// answers asks while one is. A Refresh waits only then, and returns as
+	// soon as none is, so it waits on the CLI's list or its going away,
+	// never on a clock.
+	streams int
 	waiting int           // Refresh calls waiting for a list now
 	changed chan struct{} // closed, and replaced, on every change
 }
@@ -89,8 +92,8 @@ func (s *Store) Apply(l List) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.names, s.networks, s.given = names, networks, true
-	if l.Answers > s.answered {
-		s.answered = l.Answers
+	if l.Answers > s.settled {
+		s.settled = l.Answers
 	}
 	s.signal()
 }
@@ -123,20 +126,20 @@ func (s *Store) MayOwn(name string) bool {
 	return ok
 }
 
-// Refresh asks the CLI for a fresh List, joining an ask not answered yet, and
-// waits until a List answers it, no CLI holds an ask that could, or ctx ends.
-// With no CLI holding an ask it returns at once: nothing would answer.
+// Refresh asks the CLI for a fresh List, joining an ask it is not done with
+// yet, and waits until the CLI is done with that ask (a List answers it, or
+// the CLI could not list the names), no CLI holds a stream of asks, or ctx
+// ends. With no CLI holding one it returns at once: nothing would answer.
 func (s *Store) Refresh(ctx context.Context) {
 	s.mu.Lock()
-	if !s.present {
+	if s.streams == 0 {
 		s.mu.Unlock()
 		return
 	}
 	want := s.asked
-	if want <= s.answered {
+	if want <= s.settled {
 		s.asked++
 		want = s.asked
-		s.signal()
 	}
 	s.waiting++
 	s.signal()
@@ -144,7 +147,7 @@ func (s *Store) Refresh(ctx context.Context) {
 		s.waiting--
 		s.mu.Unlock()
 	}()
-	for s.answered < want && s.present {
+	for s.settled < want && s.streams > 0 {
 		ch := s.changed
 		s.mu.Unlock()
 		select {
@@ -157,47 +160,60 @@ func (s *Store) Refresh(ctx context.Context) {
 	}
 }
 
-// AwaitAsk is the CLI's held ask: it returns the agent's next ask after
-// after, once there is one, and false when ctx ends first (the CLI went away).
-func (s *Store) AwaitAsk(ctx context.Context, after uint64) (Ask, bool) {
+// Serve is the CLI's held stream of asks: it hands send each of the agent's
+// asks after after, in order, until ctx ends (the CLI went away) or send
+// fails. A CLI holding one is present from Serve's start to its end, the
+// time it lists the names for an ask included, so a Refresh made meanwhile
+// waits for its List. The CLI opens a stream with after set to the last ask
+// it is done with: one it could not list the names for ends its stream, and
+// the next stream it opens settles that ask, so a Refresh waiting for it
+// returns.
+func (s *Store) Serve(ctx context.Context, after uint64, send func(Ask) error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.serving++
-	s.present = true
-	s.signal()
 	if after > s.asked {
 		// The CLI counted the asks of an agent process this one replaced.
 		after = s.asked
 	}
-	for s.asked <= after {
-		ch := s.changed
-		s.mu.Unlock()
-		select {
-		case <-ch:
-		case <-ctx.Done():
-			s.mu.Lock()
-			s.serving--
-			if s.serving == 0 {
-				s.present = false
-			}
-			s.signal()
-			return Ask{}, false
-		}
-		s.mu.Lock()
+	if after > s.settled {
+		s.settled = after
 	}
-	// The CLI lists the names for this ask and holds the next one: it stays
-	// present meanwhile, so a Refresh made now waits for its list.
-	s.serving--
-	return Ask{Asked: s.asked}, true
+	s.streams++
+	s.signal()
+	defer func() {
+		s.streams--
+		s.signal()
+		s.mu.Unlock()
+	}()
+	for {
+		for s.asked <= after {
+			ch := s.changed
+			s.mu.Unlock()
+			select {
+			case <-ch:
+			case <-ctx.Done():
+				s.mu.Lock()
+				return
+			}
+			s.mu.Lock()
+		}
+		ask := Ask{Asked: s.asked}
+		s.mu.Unlock()
+		err := send(ask)
+		s.mu.Lock()
+		if err != nil || ctx.Err() != nil {
+			return
+		}
+		after = ask.Asked
+	}
 }
 
-// Present reports whether a CLI answers asks for a fresh List, and the
-// channel it returns is closed at the Store's next change: together they let a caller wait for
-// one to be.
+// Present reports whether a CLI holds a stream of asks for a fresh List,
+// and the channel it returns is closed at the Store's next change: together
+// they let a caller wait for one to be.
 func (s *Store) Present() (bool, <-chan struct{}) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.present, s.changed
+	return s.streams > 0, s.changed
 }
 
 // Given reports whether a List was applied.

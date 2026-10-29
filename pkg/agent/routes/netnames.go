@@ -26,20 +26,32 @@ func (a *Agent) HandleNetworkNames(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// HandleNetworkNamesAsk is the keploy CLI's ask, held open, for the agent's
-// next ask for a fresh name list after the one named by after: a DNS mock miss
-// for a name the last list does not hold (netnames.Store.Refresh). It answers
-// with the ask once there is one, and says nothing when the CLI goes away.
+// HandleNetworkNamesAsk is the keploy CLI's stream of the agent's asks for a
+// fresh name list, held open: a DNS mock miss for a name the last list does
+// not hold asks for one (netnames.Store.Refresh). It writes each ask after
+// the one named by after as a line of JSON as it comes, until the CLI goes
+// away. The CLI is done with the ask named by after, so a miss waiting for
+// that one's list is answered at once.
 func (a *Agent) HandleNetworkNamesAsk(w http.ResponseWriter, r *http.Request) {
 	after, err := strconv.ParseUint(r.URL.Query().Get("after"), 10, 64)
 	if err != nil && r.URL.Query().Get("after") != "" {
 		http.Error(w, fmt.Sprintf("invalid after: %v", err), http.StatusBadRequest)
 		return
 	}
-	ask, ok := netnames.Default().AwaitAsk(r.Context(), after)
+	flusher, ok := w.(http.Flusher)
 	if !ok {
-		return // the CLI went away
+		http.Error(w, "the agent cannot stream its asks for a name list", http.StatusInternalServerError)
+		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(ask)
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+	enc := json.NewEncoder(w)
+	netnames.Default().Serve(r.Context(), after, func(ask netnames.Ask) error {
+		if err := enc.Encode(ask); err != nil {
+			return err
+		}
+		flusher.Flush()
+		return nil
+	})
 }
