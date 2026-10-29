@@ -534,7 +534,8 @@ func TestATestThatNeedsAnotherRunsOnlyAfterItBegan(t *testing.T) {
 	b := run("TestOfGated")
 	require.Equal(t, models.ScopeActionSkip, b.Action)
 	require.Equal(t, "gated", b.Reason, "a test the gate skipped never began, and the first need not met is the one named")
-	require.Equal(t, models.ScopeOutcomeGated, windowOf(t, a, "o::TestOfGated").Outcome)
+	require.Equal(t, models.ScopeOutcomeUnmet, windowOf(t, a, "o::TestOfGated").Outcome, "a need not met is not the list's skip")
+	require.Equal(t, models.ScopeOutcomeGated, windowOf(t, a, "o::TestGated").Outcome, "the list's skip")
 
 	r, _ := wireAgent(t, models.MODE_RECORD)
 	claimSelf(t, r)

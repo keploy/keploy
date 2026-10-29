@@ -734,17 +734,18 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 			"run them one at a time: start parallel tests with keploytest.Parallel and subtests with keploytest.Run (keploy mock codemod go writes them); parallel test workers arrive in a later keploy release")
 	}
 	reason, gated := a.proven.skip[id]
+	outcome := models.ScopeOutcomeGated
 	// A test whose call holds a value an earlier test's call sends runs
 	// only after that test began in this replay.
 	for _, n := range a.proven.needs[id] {
 		if !gated && !a.proven.began[n.Test] {
-			reason, gated = n.Reason, true
+			reason, gated, outcome = n.Reason, true, models.ScopeOutcomeUnmet
 		}
 	}
 	dir := a.proven.dir
 	a.provenMu.Unlock()
 	if a.replaying() && gated {
-		a.NoteScopeGated(id, 0, at)
+		a.noteScopeNotRun(id, 0, at, outcome)
 		return models.ScopeBeginResp{V: models.ScopeProtocolVersion, Status: "ok", Action: models.ScopeActionSkip, Reason: reason}, nil
 	}
 
