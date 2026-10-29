@@ -56,16 +56,32 @@ func againRecording() (preps, owned []*models.Mock) {
 // T's mapping is its own recordings, with T's marks) or as keploy test does.
 func stageAgain(t *testing.T, exact bool) *proxy.MockManager {
 	t.Helper()
+	if exact {
+		return stageAgainWith(t, nil, nil)
+	}
 	preps, owned := againRecording()
 	mm := proxy.NewMockManager(nil, nil, zap.NewNop())
 	t.Cleanup(mm.Close)
-	all := append(append([]*models.Mock{}, preps...), owned...)
-	if !exact {
-		start, end := diffWindow(0)
-		mm.SetMocksWithWindow(nil, all, start, end.Add(time.Hour))
-		return mm
-	}
+	start, end := diffWindow(0)
+	mm.SetMocksWithWindow(nil, append(append([]*models.Mock{}, preps...), owned...), start, end.Add(time.Hour))
+	return mm
+}
+
+// stageAgainWith serves againRecording as the proven switch does, test T's
+// mapping its own recordings and ownedToo, with T's marks (none of
+// ownedToo), and recordings no test owns, the worker scope's, in the view
+// beside them.
+func stageAgainWith(t *testing.T, ownedToo, worker []*models.Mock) *proxy.MockManager {
+	t.Helper()
+	preps, owned := againRecording()
+	owned = append(owned, ownedToo...)
+	mm := proxy.NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	all := append(append(append([]*models.Mock{}, preps...), worker...), owned...)
 	mm.SetMocksWithWindow(nil, all, models.BaseTime, time.Now().Add(time.Hour))
+	if len(worker) > 0 {
+		mm.ServeExactWorker(mockNamesOf(worker))
+	}
 	mm.ServeExactTest("T", owned)
 	mm.SetUnrequired(models.BackgroundMarks{"T": {"bg-sweep": "a timer's call", "bg-exec": "a timer's call", "bg-noquery": "a timer's call"}})
 	return mm
@@ -240,5 +256,73 @@ func TestACommandTheReplayRestagedUnderIsNotAnsweredAgain(t *testing.T) {
 	run := newAgainRun(t, restagingStore{mm})
 	if got, reports, miss := run.command(queryReq(sweepQuery)); got != "" || len(reports) != 0 || !strings.Contains(miss, "restaged:true") {
 		t.Fatalf("restaged: answered %q, reports %+v, miss %s; want the restage's miss", got, reports, miss)
+	}
+}
+
+// A command a recording matches exactly is answered with that recording,
+// never again with a marked one it repeats, as before the marks: the
+// test's own second recording of the timer's COM_QUERY (own-sweep-copy,
+// not marked) answers the sweep run a second time, and stays required; an
+// EXECUTE that a recording no test owns (the worker scope's, worker-exec-7)
+// matches with its statement and every parameter is answered with that one.
+// Answered again with the marked recording instead, the first would leave
+// the test's own recording unmade, and judging would read it as the
+// application's background work.
+func TestACommandARecordingMatchesExactlyIsNeverAnsweredAgain(t *testing.T) {
+	ts := diffBase.Add(time.Millisecond)
+	copySweep := diffMock("own-sweep-copy", "c1", []mysql.Request{queryReq(sweepQuery)}, ts.Add(7*time.Millisecond), models.LifetimePerTest, "mocks")
+	workerExec := diffMock("worker-exec-7", "c1", []mysql.Request{executeReq(1, "7")}, ts.Add(8*time.Millisecond), models.LifetimePerTest, "mocks")
+	workerExec.Spec.MySQLRequests[0].SetStoredQuery(poolQuery)
+	run := newAgainRun(t, stageAgainWith(t, []*models.Mock{copySweep}, []*models.Mock{workerExec}))
+	for _, c := range []struct {
+		name          string
+		req           mysql.Request
+		first, second string
+	}{
+		{"COM_QUERY", queryReq(sweepQuery), "bg-sweep", "own-sweep-copy"},
+		{"COM_STMT_EXECUTE", executeReq(1, "7"), "bg-exec", "worker-exec-7"},
+	} {
+		if got, reports, _ := run.command(c.req); got != c.first || len(reports) != 0 {
+			t.Fatalf("%s first: answered %q, reports %+v; want %s, unreported", c.name, got, reports, c.first)
+		}
+		if got, reports, _ := run.command(c.req); got != c.second || len(reports) != 0 {
+			t.Fatalf("%s again: answered %q, reports %+v; want %s, unreported, never %s again", c.name, got, reports, c.second, c.first)
+		}
+	}
+}
+
+// unheldViewStore is a store whose hold of a command is a view that tells
+// it could not hold the command to its round (integrations.UnheldTeller)
+// while it still reads the store, the open test's marked recordings that
+// answered included: a view over the fail-closed store that forwards more
+// than that store offers.
+type unheldViewStore struct{ *proxy.MockManager }
+
+func (s unheldViewStore) HoldToRound(call integrations.CallRound) (integrations.MockMemDb, func() bool) {
+	return unheldView(s), func() bool { return false }
+}
+
+// unheldView is unheldViewStore's hold.
+type unheldView struct{ *proxy.MockManager }
+
+func (unheldView) Unheld() string { return integrations.UnheldNote }
+
+// A command a store could not hold to its round is answered nothing again,
+// though the view it read still lists the marked recording the command
+// repeats: under exact serving a command is answered only from a store
+// held to its round, so it misses saying why.
+func TestACommandTheStoreCouldNotHoldIsNotAnsweredAgain(t *testing.T) {
+	mm := stageAgain(t, true)
+	first := newAgainRun(t, mm)
+	// own-sweep too, which the matcher would answer the sweep with by kind
+	// from the view the stub's hold reads.
+	for _, q := range []string{sweepQuery, ownSweep} {
+		if got, _, _ := first.command(queryReq(q)); got == "" {
+			t.Fatalf("%s first: a miss", q)
+		}
+	}
+	run := newAgainRun(t, unheldViewStore{mm})
+	if got, reports, miss := run.command(queryReq(sweepQuery)); got != "" || len(reports) != 0 || !strings.Contains(miss, "restaged:true") {
+		t.Fatalf("unheld: answered %q, reports %+v, miss %s; want the unheld store's miss", got, reports, miss)
 	}
 }
