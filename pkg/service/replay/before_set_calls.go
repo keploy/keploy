@@ -149,6 +149,12 @@ func (s *setCalls) take(ctx context.Context, read []models.UnmatchedCall, test s
 		case c.Background:
 			where := madeBetween(s.last, test)
 			if c.MadeInTest() {
+				// Guarded too, on purpose: the series' mark says its
+				// answers reach no test, so on a real series the guard
+				// never fires. When it fires, test's response holds a
+				// word of the series' recorded answer, and a call whose
+				// answer reaches a test is that test's (the dataflow
+				// rule): charged to test, failing closed.
 				where = madeInside(test)
 			}
 			if why := s.guard.reaches(ctx, c, test, where, driftsOf()); why != "" {
