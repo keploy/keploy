@@ -184,8 +184,9 @@ func TestTheCountsProofRefusesWhatAMovedLayoutReads(t *testing.T) {
 
 // Every TCP-level socket option keploy's macOS proxy reads goes through one
 // seam, readTCPOpt (pcbtable_darwin.go). A read of its own (x/sys's
-// GetsockoptTCPConnectionInfo, or a getsockopt at IPPROTO_TCP) is out of reach
-// of the rows that hand the counts a socket that received a segment twice, or
+// GetsockoptTCPConnectionInfo, a getsockopt at IPPROTO_TCP, or a call to the
+// package's raw getsockopt, which only readTCPOpt may call) is out of reach of
+// the rows that hand the counts a socket that received a segment twice, or
 // whose tcp_info cannot be read: the byte count the settle once read
 // (TCP_CONNECTION_INFO's tcpi_rxbytes, which counts such a segment twice)
 // could come back with no row going red. Read from the sources that build for
@@ -236,7 +237,16 @@ func TestTheMacOSProxyReadsTCPOptionsOnlyThroughReadTCPOpt(t *testing.T) {
 					}
 				}
 				call, ok := n.(*ast.CallExpr)
-				if !ok || len(call.Args) < 2 {
+				if !ok {
+					return true
+				}
+				// The raw getsockopt reads any level and option into a
+				// buffer: called from anywhere but readTCPOpt, it reads
+				// around the seam, whatever its arguments.
+				if fn, ok := call.Fun.(*ast.Ident); ok && fn.Name == "getsockopt" {
+					t.Errorf("%s: getsockopt called outside readTCPOpt: read TCP options through readTCPOpt", fset.Position(call.Pos()))
+				}
+				if len(call.Args) < 2 {
 					return true
 				}
 				if fn, ok := call.Fun.(*ast.SelectorExpr); ok && isSysPkg(fn.X) && strings.HasPrefix(fn.Sel.Name, "Getsockopt") {
