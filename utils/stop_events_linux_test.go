@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1183,6 +1184,16 @@ func TestOpenFilesLetGoOfADescriptorClosedAsTheyAreRead(t *testing.T) {
 		// checked, and fd 7 closed: fd 4 holds fd 3's first file yet.
 		{"a counted descriptor opened again on a file ordering first, its duplicate holding its file yet", map[int]int{0: 10, 3: 30, 4: 30, 7: 40},
 			map[int][]map[int]int{3: {nil, nil, nil, {3: 5, 7: closed}}}, -1, 0, 3, false},
+		// fd 0 opened again on a file that orders after fd 3 as the files
+		// are checked: fd 0 is the one of the pair that changed, and fd 1
+		// holds its first file yet.
+		{"a counted descriptor opened again on a file ordering after the next, its duplicate holding its file yet", map[int]int{0: 10, 1: 10, 3: 30, 7: 40},
+			map[int][]map[int]int{0: {nil, nil, {0: 35}}}, -1, 0, 4, false},
+		// fd 4 made a duplicate of fd 3 as the files are checked (`exec
+		// 4>&3`): one file over two held descriptors is read again, and
+		// counted once.
+		{"a counted descriptor opened again on the file of the one before it as the files are checked", map[int]int{0: 1, 3: 3, 4: 4},
+			map[int][]map[int]int{4: {nil, {4: 3}}}, -1, 0, 2, false},
 		// Never holding still: set aside, the stable files counted.
 		{"a descriptor that never holds still as it is read", map[int]int{0: 1, 1: 2, 2: 2, 3: 3}, nil, 3, 0, 2, true},
 		// dash's saved descriptor fd 10 lists before fd 2, the duplicate of
@@ -1249,6 +1260,104 @@ func TestOpenFilesLetGoOfADescriptorClosedAsTheyAreRead(t *testing.T) {
 		if n, settled := openFilesBy(kcmp, 1, listed); n != tc.want || settled == tc.unsettled {
 			t.Errorf("%s (listed %v): %d open files, settled %v; want %d, settled %v", tc.name, names, n, settled, tc.want, !tc.unsettled)
 		}
+	}
+}
+
+// A read of files that hold still ends with two checks of their order, each
+// n-1 comparisons of the n files held, one after the other: it counts once
+// two checks in a row are clean, not after one (which a churn can fool) nor
+// after more (each costs n-1 comparisons, at each look of a stop). A check
+// that lets go of a descriptor closed since the last is not clean: two clean
+// checks of the files left follow it.
+func TestAReadOfFilesThatHoldStillChecksTheirOrderTwice(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// closeAt closes fd 3 as it is compared for that time (0: never).
+		closeAt int
+		want    int
+		check   [][2]int
+	}{
+		// Listed by name, the files in that order: each check compares 0
+		// and 1, 1 and 2, then 2 and 3. The holds compare a descriptor
+		// listed later first, so no comparison of theirs reads as one of a
+		// check.
+		{"4 files that held still", 0, 4, [][2]int{{0, 1}, {1, 2}, {2, 3}}},
+		// fd 3 is compared twice as it is held, then in the first check,
+		// and closes as the second compares it.
+		{"4 files, one closed after a clean check", 4, 3, [][2]int{{0, 1}, {1, 2}}},
+	} {
+		files := map[int]int{0: 1, 1: 2, 2: 3, 3: 4}
+		var pairs [][2]int
+		looks := 0
+		kcmp := func(_, a, b int) (int, error) {
+			pairs = append(pairs, [2]int{a, b})
+			if a == 3 || b == 3 {
+				if looks++; looks == tc.closeAt {
+					delete(files, 3)
+				}
+			}
+			fa, okA := files[a]
+			fb, okB := files[b]
+			switch {
+			case !okA || !okB:
+				return 0, syscall.EBADF
+			case fa < fb:
+				return 1, nil
+			case fa > fb:
+				return 2, nil
+			}
+			return 0, nil
+		}
+		listed := []os.DirEntry{fdEntry("0"), fdEntry("1"), fdEntry("2"), fdEntry("3")}
+		if n, settled := openFilesBy(kcmp, 1, listed); n != tc.want || !settled {
+			t.Errorf("%s: read as %d, settled %v; want %d, settled", tc.name, n, settled, tc.want)
+			continue
+		}
+		checks := 0
+		for len(pairs) >= len(tc.check) && slices.Equal(pairs[len(pairs)-len(tc.check):], tc.check) {
+			pairs = pairs[:len(pairs)-len(tc.check)]
+			checks++
+		}
+		if checks != 2 {
+			t.Errorf("%s: the read ended with %d checks of the order of the files left; want 2", tc.name, checks)
+		}
+	}
+}
+
+// A pair of held files found out of order is let go before both are read
+// again: neither is compared with its own place, which names a file it may
+// not hold now, and spends its share on that look (the sooner unsettled).
+func TestAPairOutOfOrderIsLetGoBeforeItIsReadAgain(t *testing.T) {
+	// As "a counted descriptor opened again on a file ordering after the
+	// next, its duplicate holding its file yet": fd 0, held with fd 1 its
+	// duplicate, is opened again on a file ordering after fd 3 as the
+	// first check compares it (its third comparison).
+	files := map[int]int{0: 10, 1: 10, 3: 30, 7: 40}
+	looks := 0
+	var self [][2]int
+	kcmp := func(_, a, b int) (int, error) {
+		if a == 0 || b == 0 {
+			if looks++; looks == 3 {
+				files[0] = 35
+			}
+		}
+		if a == b {
+			self = append(self, [2]int{a, b})
+		}
+		switch fa, fb := files[a], files[b]; {
+		case fa < fb:
+			return 1, nil
+		case fa > fb:
+			return 2, nil
+		}
+		return 0, nil
+	}
+	listed := []os.DirEntry{fdEntry("0"), fdEntry("1"), fdEntry("3"), fdEntry("7")}
+	if n, settled := openFilesBy(kcmp, 1, listed); n != 4 || !settled {
+		t.Errorf("read as %d, settled %v; want 4, settled", n, settled)
+	}
+	if len(self) > 0 {
+		t.Errorf("with no descriptor closed, the read compared %v, each a descriptor with itself", self)
 	}
 }
 
