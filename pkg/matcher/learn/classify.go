@@ -1271,6 +1271,9 @@ func boundAt(ln Learned) string {
 func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time, earlier []Earlier, raw []Raw, resp []Leaf, w *Window, given GivenEarlier, follow bool) []Learned {
 	served := append([]Earlier(nil), earlier...)
 	sort.SliceStable(served, func(i, j int) bool { return served[i].At.Before(served[j].At) })
+	if len(drift) > 0 {
+		dc.warm(raw)
+	}
 	unreadRaw := rawUnread(raw)
 	unreadReq := requestUnread(served)
 	// The moved places the offset rule reads (offset.go), read once for the

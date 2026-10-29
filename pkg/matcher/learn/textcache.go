@@ -43,6 +43,7 @@ const (
 	textTokens
 	textBlanked
 	textBlankTok
+	textDecoded
 )
 
 type textKey struct {

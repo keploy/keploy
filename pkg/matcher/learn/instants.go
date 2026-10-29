@@ -1471,14 +1471,25 @@ func (dc *DriftCache) searched(x Raw, keep bool) [2]string {
 // text.
 func blankedPair(text string, stamps []rawField, keys map[instantKey]bool) [2]string {
 	t := blankStamps(text, stamps)
+	return blankedPairOf(t, extraOf(t), keys)
+}
+
+// blankedPairOf is blankedPair of t, a payload's text with its stamps
+// blanked, whose other forms are extra (extraOf(t)).
+func blankedPairOf(t, extra string, keys map[instantKey]bool) [2]string {
 	blank := func(sp instant) bool { return sp.keyed && keys[sp.key] }
-	return [2]string{strings.Clone(blankSpans(t, blank)), strings.Clone(blankSpans(extraOf(t), blank))}
+	return [2]string{strings.Clone(blankSpans(t, blank)), strings.Clone(blankSpans(extra, blank))}
 }
 
 // blankedForms are text's declared forms (textForms) with stamps blanked
 // before they are read, and the clock reads keys holds blanked in each.
 func blankedForms(text string, stamps []rawField, keys map[instantKey]bool) []string {
-	forms := textForms(blankStamps(text, stamps))
+	return blankedFormsOf(textForms(blankStamps(text, stamps)), keys)
+}
+
+// blankedFormsOf are forms, a payload's forms with its stamps blanked, with
+// the clock reads keys holds blanked in each.
+func blankedFormsOf(forms []string, keys map[instantKey]bool) []string {
 	for i := range forms {
 		forms[i] = blankSpans(forms[i], func(sp instant) bool { return sp.keyed && keys[sp.key] })
 	}
@@ -1499,15 +1510,26 @@ func (dc *DriftCache) searchedTokens(x Raw, keep bool) []map[string]bool {
 // tokensIn reads searchedTokens(x, keep) from x's text now; each word may
 // be a part of x's text.
 func tokensIn(x Raw, keep bool) []map[string]bool {
+	return tokensWith(x, keep, func(y Raw) (string, decoded) {
+		yb := y.payload()
+		t := blankStamps(yb.text, yb.stamps)
+		return t, decodeForms(t)
+	})
+}
+
+// tokensWith is tokensIn(x, keep), each of x's forms read from what
+// decodedOf decodes of it (the text its searches decode, and its decoded
+// forms).
+func tokensWith(x Raw, keep bool, decodedOf func(Raw) (string, decoded)) []map[string]bool {
 	if keep {
 		x = x.withoutStamps()
 	}
 	keys := clockKeys(x)
-	xb := x.payload()
-	if len(keys) == 0 && len(xb.stamps) == 0 {
-		return tokensOfForms(textForms(xb.text))
+	t, d := decodedOf(x)
+	if len(keys) == 0 {
+		return tokensOfForms(d.formsOf(t))
 	}
-	return tokensOfForms(blankedForms(xb.text, xb.stamps, keys))
+	return tokensOfForms(blankedFormsOf(d.formsOf(t), keys))
 }
 
 // readTokens is searchedTokens(x, keep) of an x whose set keeps none of it:

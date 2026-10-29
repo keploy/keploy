@@ -715,28 +715,70 @@ func allIn(ws, set map[string]bool) bool {
 
 // textForms are the declared forms of one text (a payload): as recorded,
 // decoded, case-folded, and its base64 runs' text.
-func textForms(text string) []string {
-	out := []string{text}
+func textForms(text string) []string { return decodeForms(text).formsOf(text) }
+
+// decoded are what textForms decodes of a text, each a scan of its own
+// (unescaped, qpForm, b64Text: the learn step's dearest reads of a
+// payload): its escapes read (dec, where they change it: hasDec), its
+// quoted-printable form (q, where it is not dec: hasQ) and its encoded
+// runs' text (b). Its other forms are their case-foldings, a pass over each
+// that reads no pattern (formsOf). A set keeps a payload's (decodedOf), so
+// each is decoded once for the set, not once per call.
+type decoded struct {
+	dec, q, b    string
+	hasDec, hasQ bool
+}
+
+// decodeForms decodes text's forms (decoded).
+var decodeForms = func(text string) decoded {
+	var d decoded
 	dec := unescaped(text)
 	if dec != text {
+		d.dec, d.hasDec = dec, true
+	}
+	if q := qpForm(text); q != dec {
+		d.q, d.hasQ = q, true
+	}
+	d.b = b64Text(dec, nil)
+	return d
+}
+
+// formsOf are textForms(text) of the text d decodes.
+func (d decoded) formsOf(text string) []string {
+	out := []string{text}
+	dec := text
+	if d.hasDec {
+		dec = d.dec
 		out = append(out, dec)
 	}
 	if low := strings.ToLower(dec); low != dec {
 		out = append(out, low)
 	}
-	if q := qpForm(text); q != dec {
-		out = append(out, q)
-		if low := strings.ToLower(q); low != q {
+	if d.hasQ {
+		out = append(out, d.q)
+		if low := strings.ToLower(d.q); low != d.q {
 			out = append(out, low)
 		}
 	}
-	if b := b64Text(dec, nil); b != "" {
-		out = append(out, b)
-		if low := strings.ToLower(b); low != b {
+	if d.b != "" {
+		out = append(out, d.b)
+		if low := strings.ToLower(d.b); low != d.b {
 			out = append(out, low)
 		}
 	}
 	return out
+}
+
+// extraOf is extraOf of the text d decodes.
+func (d decoded) extraOf(text string) string { return strings.Join(d.formsOf(text)[1:], "\n") }
+
+// size is about the bytes d holds.
+func (d decoded) size() int64 { return headerBytes + int64(len(d.dec)+len(d.q)+len(d.b)) }
+
+// clone is d, each text a copy, holding no part of the text it decodes.
+func (d decoded) clone() decoded {
+	d.dec, d.q, d.b = strings.Clone(d.dec), strings.Clone(d.q), strings.Clone(d.b)
+	return d
 }
 
 // nonASCIIRuns are the stretches of s beyond ASCII, in order: text of a
