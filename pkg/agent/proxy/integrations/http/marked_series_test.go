@@ -1,7 +1,13 @@
 package http
 
 import (
+	"bufio"
 	"context"
+	"errors"
+	"io"
+	"net"
+	"net/http"
+	"strconv"
 	"testing"
 	"time"
 
@@ -117,5 +123,154 @@ func TestACallWithNoSeriesAnswererMissesAsBefore(t *testing.T) {
 	status, _, r := answerOf(t, store, addr, raw)
 	if status != 502 || r.Background || r.MissKind != models.MissExtraCall {
 		t.Fatalf("with no series answerer the call got %d, reported %+v; want the extra-call miss", status, r)
+	}
+}
+
+// viewDb is againDb whose open view shows own, the open test's recordings,
+// none of them consumed, read in the round the call first read.
+type viewDb struct {
+	againDb
+	own []*models.Mock
+}
+
+func (d viewDb) GetPerTestMocksInWindow() ([]*models.Mock, error)  { return d.own, nil }
+func (d viewDb) GetFilteredMocksInWindow() ([]*models.Mock, error) { return d.own, nil }
+func (d viewDb) HoldToRound(integrations.CallRound) (integrations.MockMemDb, func() bool) {
+	return d, func() bool { return false }
+}
+
+// A marked series' call none of its recordings answered is the set's
+// background miss and nothing else, whatever else the call is: a recording
+// made elsewhere (another test's, which judging would move to the worker
+// scope), a call an earlier test made whose recording already answered (a
+// repeat note), or one whose array came in another order than a recording
+// of the open test's (unstable_order). Each of those explains a test's own
+// miss; the series' miss is charged to no test, names the series' newest
+// recording and says why the series answered none. Each case first shows,
+// with the call of no marked series, that the store does explain the call
+// so, so the row reads what the series' miss leaves out.
+func TestAMarkedSeriesMissIsTheSetsBackgroundMissAndNothingElse(t *testing.T) {
+	const addr, host, path = "127.0.0.1:8099", "localhost:8099", "/internal/claims/next"
+	const why = "its reads of the clock do not hold on this run's clock"
+	get := "GET " + path + "?since=1793000470 HTTP/1.1\r\nHost: " + host + "\r\nAccept: application/json\r\n\r\n"
+	copyOfGet := func(name string) *models.Mock {
+		m := onHost(name, path, host)
+		m.Spec.HTTPReq.URL = path + "?since=1793000470"
+		m.Spec.HTTPResp = &models.HTTPResp{StatusCode: 200, Body: "none-claimed", Header: map[string]string{"Content-Length": "12"}}
+		return m
+	}
+	postBody := `{"ids":[3,1,2]}`
+	post := "POST " + path + " HTTP/1.1\r\nHost: " + host + "\r\nAccept: application/json\r\nContent-Type: application/json\r\nContent-Length: " + strconv.Itoa(len(postBody)) + "\r\n\r\n" + postBody
+	inOrder := onHost("mock-own-post", path, host)
+	inOrder.Spec.HTTPReq.Method = "POST"
+	inOrder.Spec.HTTPReq.Header["Content-Type"] = "application/json"
+	inOrder.Spec.HTTPReq.Body = `{"ids":[1,2,3]}`
+	inOrder.Spec.HTTPResp = &models.HTTPResp{StatusCode: 200, Body: "{}", Header: map[string]string{"Content-Length": "2"}}
+	newest := onHost("mock-poll-12", path, host)
+	t.Setenv(provenswitch.Env, "1")
+
+	for _, tc := range []struct {
+		name    string
+		store   integrations.MockMemDb
+		raw     string
+		explain func(*models.MockMismatchReport) bool
+	}{
+		{
+			"a recording made elsewhere",
+			againDb{gateDb: gateDb{earlierDb: earlierDb{mockMemDb: &mockMemDb{}}, staged: []*models.Mock{copyOfGet("mock-other-test")}}},
+			get,
+			func(r *models.MockMismatchReport) bool { return r.NotOwned && r.ClosestMock == "mock-other-test" },
+		},
+		{
+			"an earlier test's answered call it repeats",
+			againDb{gateDb: gateDb{earlierDb: earlierDb{mockMemDb: &mockMemDb{}, answered: []integrations.AnsweredCall{{Mock: copyOfGet("mock-earlier"), AnsweredAt: time.Now().Add(-time.Minute)}}}}},
+			get,
+			func(r *models.MockMismatchReport) bool { return r.Repeat != nil && r.ClosestMock == "mock-earlier" },
+		},
+		{
+			"an array in another order than the open test's recording",
+			viewDb{againDb: againDb{gateDb: gateDb{earlierDb: earlierDb{mockMemDb: &mockMemDb{}}}}, own: []*models.Mock{inOrder}},
+			post,
+			func(r *models.MockMismatchReport) bool { return r.Reason == models.MissUnstableOrder },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			registerSeries(t, func(*models.Mock) (*models.Mock, *integrations.SeriesMiss) { return nil, nil })
+			if status, _, r := answerOf(t, tc.store, addr, tc.raw); status != 502 || r.Background || !tc.explain(r) {
+				t.Fatalf("a call of no marked series got %d, reported %+v; want the miss the store explains", status, r)
+			}
+			registerSeries(t, func(*models.Mock) (*models.Mock, *integrations.SeriesMiss) {
+				return nil, &integrations.SeriesMiss{NextSteps: why, Newest: newest}
+			})
+			status, _, r := answerOf(t, tc.store, addr, tc.raw)
+			if status != 502 || !r.Background || r.ClosestMock != "mock-poll-12" || r.NextSteps != why || r.NotOwned || r.Repeat != nil || r.Reason != "" || r.MissKind == models.MissExtraCall {
+				t.Fatalf("a marked series' call nothing answered got %d, reported %+v; want the set's background miss naming mock-poll-12 and saying %q, and nothing else", status, r, why)
+			}
+			// What the report shows beside the name is of the recording it
+			// names, never of another the open view held (the replay prints
+			// ClosestMockReq against the call, under ClosestMock's name).
+			if r.ClosestMockReq != "" || r.Diff != "" || len(r.FieldDiffs) != 0 || len(r.Differs) != 0 || len(r.FieldReasons) != 0 {
+				t.Fatalf("the series' miss names mock-poll-12 but shows another recording's request %q, diff %q, fields %v %v %v", r.ClosestMockReq, r.Diff, r.FieldDiffs, r.Differs, r.FieldReasons)
+			}
+		})
+	}
+}
+
+// A SeriesAnswerer that fails (its read of the store did) fails the call as
+// a matcher's error does: the parser returns that error, the app gets no
+// answer, and nothing is reported. The call goes on to no later step, so it
+// is neither answered with a set-aside copy nor charged to the open test as
+// its miss, which a background call keploy could not read never is.
+func TestASeriesAnswerersErrorIsTheCallsError(t *testing.T) {
+	const addr, host, path = "127.0.0.1:8099", "localhost:8099", "/internal/claims/next"
+	raw := "GET " + path + "?since=1793000470 HTTP/1.1\r\nHost: " + host + "\r\nAccept: application/json\r\n\r\n"
+	store := againDb{gateDb: gateDb{earlierDb: earlierDb{mockMemDb: &mockMemDb{}}}}
+	t.Setenv(provenswitch.Env, "1")
+	failed := errors.New("the store's read of the set's series failed")
+	t.Cleanup(integrations.RegisterSeriesAnswerer(models.HTTP, func(context.Context, integrations.MockMemDb, *models.Mock, time.Time, learn.Known) (*models.Mock, *integrations.SeriesMiss, error) {
+		return nil, nil, failed
+	}))
+
+	var reported error
+	ctx := models.WithMockMismatchReporter(context.Background(), func(err error) { reported = err })
+	app, prox := net.Pipe()
+	defer func() { _ = app.Close() }()
+	_ = app.SetDeadline(time.Now().Add(10 * time.Second))
+	done := make(chan error, 1)
+	go func() {
+		done <- newHTTP().MockOutgoing(ctx, prox, &models.ConditionalDstCfg{Addr: addr}, store, models.OutgoingOptions{})
+	}()
+	if _, err := io.WriteString(app, raw); err != nil {
+		t.Fatal(err)
+	}
+	// The app's read and the parser's end are awaited together: an answer
+	// the parser writes is read at once (the pipe holds none), and once the
+	// parser returned its connection ends, which ends the app's read.
+	answered := make(chan int, 1)
+	go func() {
+		resp, err := http.ReadResponse(bufio.NewReader(app), nil)
+		if err != nil {
+			answered <- 0
+			return
+		}
+		_ = resp.Body.Close()
+		answered <- resp.StatusCode
+	}()
+	select {
+	case status := <-answered:
+		t.Fatalf("the app's read ended (status %d) before the parser returned; want no answer and the answerer's error", status)
+	case err := <-done:
+		if !errors.Is(err, failed) {
+			t.Fatalf("the parser returned %v; want the answerer's error", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the parser did not return")
+	}
+	_ = prox.Close()
+	if status := <-answered; status != 0 {
+		t.Fatalf("the app got %d for a call whose series answerer failed; want no answer", status)
+	}
+	if reported != nil {
+		t.Fatalf("the call was reported as %v; want nothing reported", reported)
 	}
 }
