@@ -49,11 +49,11 @@ type noAnswerHold struct {
 // the caller then holds the whole set, as before.
 //
 // carry is the run's carryOverAttribution, over testCases' recorded windows:
-// its schedule places the calls in flight and the carry-over mocks. byMapping
-// says the run loads each test's per-test mocks by its mapping
-// (useMappingBased), which runs the agent's carry-over lookahead whatever the
-// window mode (serveWindowOf).
-func (r *Replayer) holdNoAnswerMocks(ctx context.Context, testSetID string, unanswered []string, testCases []*models.TestCase, carry *carryOverAttribution, byMapping bool, mapped map[string][]models.MockEntry, consumers map[string][]string, keep map[string]models.MockState) ([]noAnswerHold, error) {
+// its schedule places the calls in flight and the carry-over mocks. agent is
+// how the agent said it served the set's windows (agentMockWindow): its
+// strict mock window mode and whether its load ran the carry-over lookahead
+// (serveWindowOf).
+func (r *Replayer) holdNoAnswerMocks(ctx context.Context, testSetID string, unanswered []string, testCases []*models.TestCase, carry *carryOverAttribution, agent models.MockWindowsSaid, mapped map[string][]models.MockEntry, consumers map[string][]string, keep map[string]models.MockState) ([]noAnswerHold, error) {
 	if carry == nil {
 		return nil, fmt.Errorf("no recorded windows to hold the unanswered tests' mocks by")
 	}
@@ -103,7 +103,7 @@ func (r *Replayer) holdNoAnswerMocks(ctx context.Context, testSetID string, unan
 
 	serve := make([]pkg.ServeWindow, len(windows))
 	for i, w := range windows {
-		serve[i] = serveWindowOf(carry.sched, w, r.strictMockWindow(), byMapping)
+		serve[i] = serveWindowOf(carry.sched, w, agent)
 	}
 	err := r.eachSetMock(ctx, testSetID, true, func(m *models.Mock, session bool) {
 		for i := range serve {
@@ -168,18 +168,21 @@ func heldFor(m *models.Mock, session bool, w pkg.ServeWindow) bool {
 // (pkg.FilterPerTestAndLaxPromotedInFlightAware's arguments on a windowed
 // proxy): the first recorded window starts the startup band, the gap before
 // w's start says which calls were in flight, and the filter is not strict
-// per call, the mock manager filtering what it is handed. The agent's load
-// runs the carry-over lookahead (pkg.ServeWindow.Lookahead) in the strict
-// window mode and for a load by the test's mapping (byMapping), as long as
-// its on-disk store holds the per-test mocks. Whether it does the replayer
-// cannot tell (the agent keeps them resident when it cannot make the store),
-// so the hold asks for the disk's: it holds the carry-over mocks the tier
-// reaches first at w, where the resident filter would promote them to the
-// session pool, which every window is served and the hold keeps only when
-// recorded in w. Holding one more mock is safe; deleting one the agent
-// serves is not.
-func serveWindowOf(sched *models.WindowSchedule, w models.TestWindow, strictWindow, byMapping bool) pkg.ServeWindow {
-	sw := pkg.ServeWindow{Start: w.Start, End: w.End, StrictWindow: strictWindow, Recorded: sched, Lookahead: pkg.IsStrictMockWindow(strictWindow) || byMapping}
+// per call, the mock manager filtering what it is handed.
+//
+// The window mode is the agent's, as it said it (agent, agentMockWindow),
+// with its own KEPLOY_STRICT_MOCK_WINDOW folded in (pkg.ServeWindow.Resolved),
+// never this process's env, which the agent's need not share. Its load runs
+// the carry-over lookahead (pkg.ServeWindow.Lookahead) when it said a load by
+// the test's mapping or by the strict window, as long as its on-disk store
+// holds the per-test mocks. Whether it does the replayer cannot tell (the
+// agent keeps them resident when it cannot make the store), so the hold asks
+// for the disk's: it holds the carry-over mocks the tier reaches first at w,
+// where the resident filter would promote them to the session pool, which
+// every window is served and the hold keeps only when recorded in w. Holding
+// one more mock is safe; deleting one the agent serves is not.
+func serveWindowOf(sched *models.WindowSchedule, w models.TestWindow, agent models.MockWindowsSaid) pkg.ServeWindow {
+	sw := pkg.ServeWindow{Start: w.Start, End: w.End, StrictWindow: agent.Strict, Resolved: true, Recorded: sched, Lookahead: agent.Lookahead}
 	if sched.Len() > 0 {
 		sw.FirstStart = sched.Window(0).Start
 	}
@@ -187,6 +190,23 @@ func serveWindowOf(sched *models.WindowSchedule, w models.TestWindow, strictWind
 		sw.InFlightFrom = from
 	}
 	return sw
+}
+
+// agentMockWindow is how the agent said it served the set's windows
+// (pkg.MockWindowReader, models.MockWindowHeader): its strict mock window mode,
+// its own KEPLOY_STRICT_MOCK_WINDOW folded in, and whether its per-test load
+// ran the carry-over lookahead. Where it has not said, as an agent older than
+// the header, or an instrumentation that cannot ask, the mode that holds the
+// most: strict, with the lookahead. Never this process's env: sudo drops it on
+// the way to a native agent, a docker agent's container is not given it, and a
+// k8s-proxy agent runs in its own pod.
+func (r *Replayer) agentMockWindow() models.MockWindowsSaid {
+	if mr, ok := r.instrumentation.(pkg.MockWindowReader); ok {
+		if said, ok := mr.AgentMockWindow(); ok {
+			return said
+		}
+	}
+	return models.MockWindowsSaid{Strict: true, Lookahead: true}
 }
 
 // eachSetMock hands visit every mock of the set's mock file before the mapping

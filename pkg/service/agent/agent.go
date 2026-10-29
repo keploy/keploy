@@ -1750,10 +1750,21 @@ func stagingStartupCutoff(params models.MockFilterParams) (time.Time, bool) {
 }
 
 const (
-	loadModeMapping      = "mapping"
-	loadModeStrictWindow = "strict-window"
-	loadModeLaxAll       = "lax-all"
+	loadModeMapping      = models.MockLoadMapping
+	loadModeStrictWindow = models.MockLoadStrictWindow
+	loadModeLaxAll       = models.MockLoadLaxAll
 )
+
+// MockWindowOf is how the agent serves params' window, which its answer to
+// /updatemockparams says (models.MockWindowHeader): its strict mock window
+// mode, this process's KEPLOY_STRICT_MOCK_WINDOW folded in as the window
+// filter folds it, and the per-test load mode its on-disk store reads by
+// (perTestLoadMode). The replay's mock prune holds what the agent serves a
+// test that got no answer by them, not by its own process's env, which the
+// agent's may not share.
+func (a *Agent) MockWindowOf(params models.MockFilterParams) models.MockWindowMode {
+	return models.MockWindowMode{Strict: pkg.IsStrictMockWindow(params.StrictMockWindow), Load: perTestLoadMode(params)}
+}
 
 // perTestLoadMode is which per-test mocks loadPerTestMocks reads from disk for
 // this call: mapping -> named mocks; strict -> window + startup band; lax -> all.

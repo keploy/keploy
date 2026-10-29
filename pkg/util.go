@@ -3517,6 +3517,17 @@ type BackgroundRulesReader interface {
 	AgentServesBackground() string
 }
 
+// MockWindowReader is an optional extension of the instrumentation a replay
+// talks to the agent through: what the agent's answers to /updatemockparams,
+// since the set's mocks were stored, said of how it served their windows
+// (models.MockWindowHeader): its strict mock window mode, with the agent's own
+// KEPLOY_STRICT_MOCK_WINDOW folded in, and whether its per-test load ran the
+// carry-over lookahead. ok is false when it has not said, as an agent older
+// than the header does. Without it, or not ok, the agent has not said.
+type MockWindowReader interface {
+	AgentMockWindow() (said models.MockWindowsSaid, ok bool)
+}
+
 // PerTestRegion is the set of names of the per-test mocks a test set hands the
 // agent: the filtered half of its StoreMocks.
 func PerTestRegion(filtered []*models.Mock) map[string]struct{} {

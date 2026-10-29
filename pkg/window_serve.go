@@ -75,6 +75,13 @@ type ServeWindow struct {
 	// placed outside the window to the session pool in lax mode. Asked only
 	// with Recorded.
 	Lookahead bool
+	// Resolved says StrictPerCall and StrictWindow are the agent's own,
+	// with its KEPLOY_STRICT_MOCK_WINDOW folded in already, as it said them
+	// (models.MockWindowHeader): they are taken as they are. Else, as in the
+	// agent's own calls, this process's env is folded in (strictWindowEnabled).
+	// The replay's mock prune sets it: the replay's process need not share the
+	// agent's env.
+	Resolved bool
 	// split says m is of a per-test slice a window filter has split by
 	// lifetime already, the mock manager's (StageInWindow): the rules that
 	// route a mock to the session pool by what it is, not where it is placed
@@ -204,7 +211,7 @@ func serveRuleOf(logger *zap.Logger, p *models.Mock, w ServeWindow) serveRule {
 	if !w.FirstStart.IsZero() && models.PlaceOf(p).Before(w.FirstStart) {
 		return ruleStartup
 	}
-	if !w.InFlightFrom.IsZero() && (strictWindowEnabled(w.StrictWindow) || p.StatesLifetime()) && models.InFlightEligible(p) &&
+	if !w.InFlightFrom.IsZero() && (w.enabled(w.StrictWindow) || p.StatesLifetime()) && models.InFlightEligible(p) &&
 		models.SentInGapAnsweredBy(req, res, w.InFlightFrom, w.Start) {
 		return ruleInFlight
 	}
@@ -224,7 +231,7 @@ func serveRuleOf(logger *zap.Logger, p *models.Mock, w ServeWindow) serveRule {
 	// the filter is lax and handed it (lax mode, the resident store), it
 	// promotes it to the session pool instead, which the hold's caller asks
 	// apart (Lookahead false).
-	carry := strictWindowEnabled(w.StrictPerCall) || p.StatesLifetime()
+	carry := w.enabled(w.StrictPerCall) || p.StatesLifetime()
 	if w.Recorded != nil && (carry || w.Lookahead) && models.IsCarryOver(p) && w.Recorded.CarryOverReachedFirstAt(req, w.Start) {
 		return ruleReleased
 	}
@@ -232,6 +239,16 @@ func serveRuleOf(logger *zap.Logger, p *models.Mock, w ServeWindow) serveRule {
 		return ruleOutOfWindow
 	}
 	return ruleLaxPromoted
+}
+
+// enabled is strict, one of w's strict flags, as the agent applies it: as it
+// is when w.Resolved, else with this process's KEPLOY_STRICT_MOCK_WINDOW
+// folded in.
+func (w ServeWindow) enabled(strict bool) bool {
+	if w.Resolved {
+		return strict
+	}
+	return strictWindowEnabled(strict)
 }
 
 // untimedMock reports whether p has no recorded request or response time,

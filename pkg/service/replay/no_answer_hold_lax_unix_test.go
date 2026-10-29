@@ -83,6 +83,43 @@ func TestHoldNoAnswerMocksFollowsTheAgentWithTheStrictWindowSwitchedOff(t *testi
 		{"a server push in the gap after the window", grpc(noAnswerPushOp, 73), perTest, strictMode, pkg.ServedReleased, pkg.ServedReleased, pkg.ServedReleased, true},
 		{"a session-pool mock in the window", http("Shared", 71), session, strictMode, pkg.ServedSession, pkg.ServedSession, pkg.ServedSession, true},
 	} {
-		t.Run(tc.name, func(t *testing.T) { checkHoldRow(t, cases, tc) })
+		t.Run(tc.name, func(t *testing.T) { checkHoldRow(t, cases, tc, byWindow) })
+	}
+}
+
+// KEPLOY_STRICT_MOCK_WINDOW=0 is set for the replay's process only: sudo drops
+// it on the way to a native agent, a docker agent's container is not given
+// it, and a k8s-proxy agent runs in its own pod. The agent runs the strict
+// window and says so (models.MockWindowHeader): the hold keeps what that
+// agent serves the unanswered test-7, the unstated carry-over call its
+// lookahead releases first at test-7's window and the unstated call in flight
+// when the window began, and not what the replay's own env would say. An agent
+// that has not said is taken for the mode that holds the most.
+func TestRunTestSetHoldsByTheAgentsWindowModeNotTheReplaysEnv(t *testing.T) {
+	if !withStrictWindowOff(t) {
+		return
+	}
+	if pkg.IsStrictMockWindow(true) {
+		t.Fatal("precondition: KEPLOY_STRICT_MOCK_WINDOW=0 switches the strict window off in this process")
+	}
+	for _, row := range []struct {
+		name string
+		said models.MockWindowsSaid
+		ok   bool
+	}{
+		{"the agent says it ran the strict window", models.MockWindowsSaid{Strict: true, Lookahead: true}, true},
+		{"the agent has not said", models.MockWindowsSaid{}, false},
+	} {
+		for _, format := range []string{"yaml", "gob"} {
+			t.Run(row.name+"/"+format, func(t *testing.T) {
+				left, set, carry := holdByWhatTheAgentSaid(t, format, true, row.said, row.ok)
+				if !left[carry.Name] {
+					t.Errorf("the unstated carry-over call the agent's lookahead releases at test-7's window (%s) was pruned; keeps %v", carry.Name, sortedNames(left))
+				}
+				if !left[set.inFlight.Name] {
+					t.Errorf("the unstated call in flight when test-7's window began (%s), which the strict agent serves it, was pruned; keeps %v", set.inFlight.Name, sortedNames(left))
+				}
+			})
+		}
 	}
 }

@@ -369,7 +369,7 @@ func TestHoldNoAnswerMocksFailsClosedForATestWithNoWindow(t *testing.T) {
 	keep := map[string]models.MockState{"mock-kept": {Name: "mock-kept"}}
 	tc := &models.TestCase{Name: "test-1", Kind: models.HTTP}
 	held, err := r.holdNoAnswerMocks(context.Background(), "test-set-0", []string{"test-1"}, []*models.TestCase{tc},
-		newCarryOverAttribution([]*models.TestCase{tc}), false, map[string][]models.MockEntry{"test-1": {{Name: "mock-mapped"}}}, nil, keep)
+		newCarryOverAttribution([]*models.TestCase{tc}), models.MockWindowsSaid{Strict: true, Lookahead: true}, map[string][]models.MockEntry{"test-1": {{Name: "mock-mapped"}}}, nil, keep)
 	if err == nil {
 		t.Fatalf("a test with no recorded window was held: %v", held)
 	}
@@ -487,18 +487,33 @@ const (
 	resident = false
 )
 
+// The replayer's per-test loads (MockFilterParams), by which the agent loads
+// each test's per-test mocks (its perTestLoadMode).
+const (
+	// byWindow: no mapping, each window's mocks by the window mode.
+	byWindow = false
+	// byMapping: by the test's mapping (useMappingBased), as
+	// SendMockFilterParamsToAgent sends it: every window call names the
+	// test's mapped mocks (one other than the mock under test), the set's
+	// staging none.
+	byMapping = true
+)
+
 // agentServes is how the agent itself serves m, of the per-test pool or the
 // session pool, in the window of ws[test]: a real agent (agentsvc.New) holding
 // the set's one mock as StoreMocksStream stores the stream the replayer sends,
 // on disk or resident, its mock manager staged by the agent's own
-// UpdateMockParams with the replayer's parameters: the set's staging, then
-// every window in order up to ws[test]'s. The answer is the tier that holds m
+// UpdateMockParams with the replayer's parameters (by window or by mapping):
+// the set's staging, then every window in order up to ws[test]'s. said is what
+// the agent's answers to those calls say of how it served them
+// (Agent.MockWindowOf, models.MockWindowHeader), folded as the replayer's
+// client folds them. The answer is the tier that holds m
 // once that window is staged: the per-test tree, the startup tree, a release
 // first at the window (the carry-over tier, which did not hold it at the
 // window before; or a server push the staging handed the manager, which the
 // push hub delivers from its release window on,
 // models.WindowSchedule.Released), the session tree, else none.
-func agentServes(t *testing.T, m *models.Mock, session, strict, disk bool, ws []models.TestWindow, test int) pkg.WindowServe {
+func agentServes(t *testing.T, m *models.Mock, session, strict, disk, mapping bool, ws []models.TestWindow, test int) (served pkg.WindowServe, said models.MockWindowsSaid) {
 	t.Helper()
 	ctx, nop := context.Background(), zap.NewNop()
 	mm := proxyPkg.NewMockManager(nil, nil, nop)
@@ -533,13 +548,16 @@ func agentServes(t *testing.T, m *models.Mock, session, strict, disk bool, ws []
 	})
 	stage := func(after, before time.Time, staging bool) {
 		t.Helper()
-		p := models.MockFilterParams{AfterTime: after, BeforeTime: before, StrictMockWindow: strict}
+		p := models.MockFilterParams{AfterTime: after, BeforeTime: before, StrictMockWindow: strict, UseMappingBased: mapping}
 		if staging {
 			p.FirstRecordedTestStart, p.RecordedWindows = ws[0].Start, ws
+		} else if mapping {
+			p.MockMapping = []string{"a-mapped-mock-of-this-test"}
 		}
 		if err := a.UpdateMockParams(ctx, p); err != nil {
 			t.Fatalf("UpdateMockParams: %v", err)
 		}
+		said.Add(a.MockWindowOf(p))
 	}
 	holds := func(reads ...func() ([]*models.Mock, error)) bool {
 		t.Helper()
@@ -565,7 +583,7 @@ func agentServes(t *testing.T, m *models.Mock, session, strict, disk bool, ws []
 	stage(ws[test].Start, ws[test].End, false)
 	sched, req := models.NewWindowSchedule(ws), m.Spec.ReqTimestampMock
 	pushed := staged && models.IsStagedAtStaging(m) && sched.Released(req, ws[test].Start) && (test == 0 || !sched.Released(req, ws[test-1].Start))
-	served := pkg.NotServed
+	served = pkg.NotServed
 	switch {
 	case holds(mm.GetFilteredMocks):
 		served = pkg.ServedPerTest
@@ -577,7 +595,7 @@ func agentServes(t *testing.T, m *models.Mock, session, strict, disk bool, ws []
 		served = pkg.ServedSession
 	}
 	reChecksOnlyNarrow(t, mm, m, holds)
-	return served
+	return served, said
 }
 
 // reChecksOnlyNarrow requires the mock manager's re-checks of the open window
@@ -714,11 +732,16 @@ func holdTableSet() (cases []*models.TestCase, at func(s float64) time.Time) {
 	return cases, at
 }
 
-// checkHoldRow runs tc's mock through the real agent on both residencies, the
-// shared predicate, the mock manager handed it past the filter, and the hold
-// for test-7, and requires each to serve or hold it as tc says, and the hold
-// to equal the union of what the agent serves test-7's window as its own.
-func checkHoldRow(t *testing.T, cases []*models.TestCase, tc holdRow) {
+// checkHoldRow runs tc's mock through the real agent on both residencies,
+// loaded by window or by mapping (load), the shared predicate, the mock
+// manager handed it past the filter, and the hold for test-7 by what the
+// agent said of how it served the windows, and requires each to serve or hold
+// it as tc says. The hold must equal the union of what the agent serves
+// test-7's window as its own when loaded by window. By mapping it must hold
+// at least that union: the agent's mapping load reads only the mapped mocks,
+// the answer-placed ones and the lookahead, so the window's own the hold keeps
+// beside them are held over (the hold keeps the mapping entry's names apart).
+func checkHoldRow(t *testing.T, cases []*models.TestCase, tc holdRow, load bool) {
 	t.Helper()
 	tc.mock.Name = "mock-under-test"
 	tc.mock.DeriveLifetime()
@@ -729,19 +752,24 @@ func checkHoldRow(t *testing.T, cases []*models.TestCase, tc holdRow) {
 	if w.TestCase != "test-7" {
 		t.Fatalf("precondition: window %d is %s's, not test-7's", test, w.TestCase)
 	}
-	disk := agentServes(t, tc.mock.DeepCopy(), tc.session, tc.strict, onDisk, ws, test)
-	res := agentServes(t, tc.mock.DeepCopy(), tc.session, tc.strict, resident, ws, test)
+	disk, said := agentServes(t, tc.mock.DeepCopy(), tc.session, tc.strict, onDisk, load, ws, test)
+	res, saidResident := agentServes(t, tc.mock.DeepCopy(), tc.session, tc.strict, resident, load, ws, test)
 	if disk != tc.disk || res != tc.resident {
 		t.Errorf("the agent serves the mock in test-7's window as %d on disk and %d resident, want %d and %d", disk, res, tc.disk, tc.resident)
 	}
-	sw := serveWindowOf(sched, w, tc.strict, false)
+	if said != saidResident {
+		t.Fatalf("the agent says it served the windows as %+v on disk and %+v resident: the same calls, said apart", said, saidResident)
+	}
+	sw := serveWindowOf(sched, w, said)
 	if got := pkg.ServeInWindow(tc.mock, tc.session, sw); got != tc.want {
 		t.Errorf("pkg.ServeInWindow on the hold's window: %d, want %d", got, tc.want)
 	}
 	if !tc.session {
-		strict, strictPrev := sw, serveWindowOf(sched, ws[test-1], tc.strict, false)
-		strict.StrictPerCall, strict.StrictWindow = true, true
-		strictPrev.StrictPerCall, strictPrev.StrictWindow = true, true
+		strict, strictPrev := sw, serveWindowOf(sched, ws[test-1], said)
+		// As the mock manager's own call asks it: both strict flags set,
+		// this process's env folded in (not Resolved).
+		strict.StrictPerCall, strict.StrictWindow, strict.Resolved = true, true, false
+		strictPrev.StrictPerCall, strictPrev.StrictWindow, strictPrev.Resolved = true, true, false
 		want, _ := pkg.StageInWindow(zap.NewNop(), tc.mock, strict)
 		if got := stagedPastTheFilter(t, tc.mock, sched, strict, strictPrev); got != want {
 			t.Errorf("the mock manager, handed the mock past the filter, serves it as %d; pkg.StageInWindow, strict: %d", got, want)
@@ -757,7 +785,7 @@ func checkHoldRow(t *testing.T, cases []*models.TestCase, tc holdRow) {
 	r.config.Test.StrictMockWindow = tc.strict
 	keep := map[string]models.MockState{}
 	held, err := r.holdNoAnswerMocks(context.Background(), "test-set-0", []string{"test-7"}, cases,
-		newCarryOverAttribution(cases), false, nil, nil, keep)
+		newCarryOverAttribution(cases), said, nil, nil, keep)
 	if err != nil {
 		t.Fatalf("hold: %v", err)
 	}
@@ -765,7 +793,11 @@ func checkHoldRow(t *testing.T, cases []*models.TestCase, tc holdRow) {
 	if kept != tc.held {
 		t.Errorf("the hold for test-7 keeps the mock: %v, want %v (held %+v)", kept, tc.held, held)
 	}
-	if union := heldByTheAgent(tc.mock, w.Start, w.End, disk, res); kept != union {
+	union := heldByTheAgent(tc.mock, w.Start, w.End, disk, res)
+	if load == byMapping && union && !kept {
+		t.Errorf("the hold for test-7 deletes the mock the agent serves it by mapping on disk (%d) or resident (%d)", disk, res)
+	}
+	if load == byWindow && kept != union {
 		t.Errorf("the hold for test-7 keeps the mock: %v; what the agent serves it on disk (%d) and resident (%d) says %v", kept, disk, res, union)
 	}
 }
@@ -860,7 +892,7 @@ func TestHoldNoAnswerMocksHoldsWhatTheAgentServesTheTest(t *testing.T) {
 		{"a session-pool mock with a response time outside the window and no request time", stamped(http("Shared", 0), time.Time{}, at(65)), session, strictMode, pkg.ServedSession, pkg.ServedSession, pkg.ServedSession, true},
 		{"a session-lifetime mock answered before asked (the session short-circuit comes first)", stamped(http("Shared", 0), at(71), at(70.9)), session, strictMode, pkg.ServedSession, pkg.ServedSession, pkg.ServedSession, true},
 	} {
-		t.Run(tc.name, func(t *testing.T) { checkHoldRow(t, cases, tc) })
+		t.Run(tc.name, func(t *testing.T) { checkHoldRow(t, cases, tc, byWindow) })
 	}
 }
 
@@ -928,6 +960,208 @@ func TestRunTestSetHoldsAnUnstatedCarryOverReleasedAtTheUnansweredTestsWindow(t 
 				t.Errorf("the unstated carry-over call test-7's window releases (%s) was pruned; keeps %v", carry.Name, sortedNames(left))
 			}
 		})
+	}
+}
+
+// The hold table's rows with the run loading each test's per-test mocks by
+// its mapping (byMapping), as a run with a mappings.yaml does: the agent's
+// mapping load runs the carry-over lookahead whatever the window mode, and
+// says so (models.MockLoadMapping), so the hold keeps the carry-over mocks
+// its tier releases first at the unanswered test's window although the
+// config switches the strict window off. The hold must keep at least what the
+// agent serves (checkHoldRow): the mapping load reads only the mapped mocks,
+// the answer-placed ones and the lookahead, and the hold keeps the window's
+// own beside them.
+func TestHoldNoAnswerMocksHoldsWhatTheAgentServesTheTestByMapping(t *testing.T) {
+	registerNoAnswerCarryOver(t)
+	cases, at := holdTableSet()
+	grpc := func(op string, s float64) *models.Mock { return noAnswerHoldMock(models.GRPC_EXPORT, op, at(s)) }
+	const (
+		strictMode = true
+		laxMode    = false
+		perTest    = false
+	)
+	for _, tc := range []holdRow{
+		{"an unstated carry-over call in the gap after the window, lax mode", grpc(noAnswerCarryOverOp, 73), perTest, laxMode, pkg.ServedReleased, pkg.ServedReleased, pkg.NotServed, true},
+		{"an unstated carry-over call the next window holds, reached a lookahead before it, lax mode", grpc(noAnswerCarryOverOp, 80.5), perTest, laxMode, pkg.ServedReleased, pkg.ServedReleased, pkg.NotServed, true},
+		{"an unstated carry-over call in the gap before the window, released at an earlier window, lax mode", grpc(noAnswerCarryOverOp, 65), perTest, laxMode, pkg.ServedSession, pkg.NotServed, pkg.NotServed, false},
+		{"placed in the window", grpc("Window", 71), perTest, strictMode, pkg.ServedPerTest, pkg.NotServed, pkg.NotServed, true},
+		{"an unstated carry-over call in the gap after the window", grpc(noAnswerCarryOverOp, 73), perTest, strictMode, pkg.ServedReleased, pkg.ServedReleased, pkg.NotServed, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) { checkHoldRow(t, cases, tc, byMapping) })
+	}
+}
+
+// The user's config switches the strict window off, the run loads each test
+// by its mapping, and the agent keeps its own default config (the on-disk
+// store), as one started apart from the replayer does. The real agent then
+// serves an unstated carry-over call recorded in the gap after test-7 from its
+// carry-over tier at test-7's window, not before, and says its load ran by
+// mapping (Agent.MockWindowOf). The hold, by what the agent said, keeps it; by
+// the replayer's own window mode (strict off, no lookahead) it would delete
+// it.
+func TestHoldNoAnswerMocksKeepsAnUnstatedCarryOverTheMappingLoadServesUnderALaxConfig(t *testing.T) {
+	registerNoAnswerCarryOver(t)
+	cases, at := holdTableSet()
+	ws := recordedTestWindows(cases)
+	m := noAnswerHoldMock(models.GRPC_EXPORT, noAnswerCarryOverOp, at(73))
+	m.Name = "mock-under-test"
+	m.DeriveLifetime()
+	if m.StatesLifetime() {
+		t.Fatal("precondition: unstated")
+	}
+	ctx, nop := context.Background(), zap.NewNop()
+	mm := proxyPkg.NewMockManager(nil, nil, nop)
+	t.Cleanup(mm.Close)
+	mm.ResetForReplaySession()
+	cfg := &config.Config{}
+	cfg.Test.StrictMockWindow = true // the agent's own default config
+	prevIncoming := coreAgent.ActiveIncomingProxy
+	t.Cleanup(func() {
+		coreAgent.RegisterIncomingProxy(prevIncoming)
+		proxyPkg.SetConnectionIdleRetention(0)
+	})
+	a := agentsvc.New(nop, nil, plannedProxy{&managerProxy{mm: mm}}, nil, nil, cfg)
+	var stream bytes.Buffer
+	if err := gob.NewEncoder(&stream).Encode(m.DeepCopy()); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.StoreMocksStream(ctx, models.MockStreamHeader{FilteredCount: 1}, gob.NewDecoder(&stream)); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		cfg.Test.StrictMockWindow = false
+		_ = a.StoreMocks(ctx, nil, nil)
+	})
+	var said models.MockWindowsSaid
+	stage := func(after, before time.Time, staging bool) {
+		t.Helper()
+		// The replayer's parameters: the config's strict window off, a load
+		// by mapping.
+		p := models.MockFilterParams{AfterTime: after, BeforeTime: before, StrictMockWindow: false, UseMappingBased: true}
+		if staging {
+			p.FirstRecordedTestStart, p.RecordedWindows = ws[0].Start, ws
+		} else {
+			p.MockMapping = []string{"a-mapped-mock-of-this-test"}
+		}
+		if err := a.UpdateMockParams(ctx, p); err != nil {
+			t.Fatalf("UpdateMockParams: %v", err)
+		}
+		said.Add(a.MockWindowOf(p))
+	}
+	carried := func() bool {
+		got, err := mm.GetCarryOverMocks()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, mk := range got {
+			if mk != nil && mk.Name == m.Name {
+				return true
+			}
+		}
+		return false
+	}
+	stage(models.BaseTime, time.Now(), true)
+	for i := 0; i < 6; i++ {
+		stage(ws[i].Start, ws[i].End, false)
+	}
+	before := carried()
+	stage(ws[6].Start, ws[6].End, false)
+	if before || !carried() {
+		t.Fatalf("precondition: the agent's carry-over tier releases the mock first at test-7 (at test-6: %v)", before)
+	}
+	if want := (models.MockWindowsSaid{Strict: false, Lookahead: true}); said != want {
+		t.Fatalf("the agent says it served the windows as %+v, want %+v", said, want)
+	}
+	hold := func(by models.MockWindowsSaid) bool {
+		store := walkedSet{prMockDB: &prMockDB{}, perTest: []*models.Mock{m}}
+		r := &Replayer{logger: zap.NewNop(), mockDB: store, config: &config.Config{}}
+		r.config.Test.StrictMockWindow = false
+		keep := map[string]models.MockState{}
+		if _, err := r.holdNoAnswerMocks(ctx, "test-set-0", []string{"test-7"}, cases, newCarryOverAttribution(cases), by, nil, nil, keep); err != nil {
+			t.Fatal(err)
+		}
+		_, kept := keep[m.Name]
+		return kept
+	}
+	if !hold(said) {
+		t.Errorf("the agent's carry-over tier serves the unstated carry-over call to test-7; the hold, by what the agent said (%+v), deletes it", said)
+	}
+	if own := pkg.IsStrictMockWindow(false); hold(models.MockWindowsSaid{Strict: own, Lookahead: own}) {
+		t.Fatal("precondition: by the replayer's own window mode the hold deletes it")
+	}
+}
+
+// sayingInstr is the run harness's instrumentation, with what the agent said
+// of how it served the set's windows (pkg.MockWindowReader): said, or nothing
+// when !ok.
+type sayingInstr struct {
+	*prInstr
+	said models.MockWindowsSaid
+	ok   bool
+}
+
+func (s sayingInstr) AgentMockWindow() (models.MockWindowsSaid, bool) { return s.said, s.ok }
+
+// holdByWhatTheAgentSaid runs noAnswerHoldRun's set with an unstated
+// carry-over call recorded in the gap after test-7, which the agent's
+// lookahead releases first at test-7's window, test-7 timing out, its config
+// strict or not, and an agent that said said (or nothing, !ok): it returns
+// the set the prune left, the set, and the carry-over call.
+func holdByWhatTheAgentSaid(t *testing.T, format string, configStrict bool, said models.MockWindowsSaid, ok bool) (map[string]bool, noAnswerSet, *models.Mock) {
+	t.Helper()
+	timeout := prClientTimeoutErr(t)
+	h, set, extras, _ := noAnswerHoldRun(t, format, func(at noAnswerAt) *models.Mock {
+		return noAnswerHoldMock(models.GRPC_EXPORT, noAnswerCarryOverOp, at(73.2))
+	})
+	carry := extras[0]
+	if carry.StatesLifetime() {
+		t.Fatal("precondition: the carry-over call states a lifetime")
+	}
+	h.replayer.instrumentation = sayingInstr{prInstr: h.instr, said: said, ok: ok}
+	h.replayer.config.Test.StrictMockWindow = configStrict
+	hooks := h.replayer.hookImpl.(prHooks)
+	hooks.simErr = map[string]error{"test-7": timeout}
+	h.replayer.hookImpl = hooks
+	_ = h.run(t)
+	left := storedMockNames(t, h)
+	if left[set.orphan.Name] {
+		t.Fatalf("precondition: not pruned, keeps %v", sortedNames(left))
+	}
+	if !left[set.carriedOver.Name] {
+		t.Fatalf("precondition: the stated carry-over call in the same gap was pruned, keeps %v", sortedNames(left))
+	}
+	return left, set, carry
+}
+
+// The hold keeps what the agent serves the unanswered test by the window mode
+// the agent said it ran (pkg.MockWindowReader), not by the replayer's config:
+// a strict agent's lookahead, or a lax agent's load by mapping, serves the
+// unstated carry-over call test-7's window releases first, which survives; a
+// lax agent's filter promotes it to the session pool, which the hold keeps
+// only when recorded in the window (the stated limit), so it is pruned; and
+// for an agent that has not said, the hold takes the mode that holds the most.
+func TestRunTestSetHoldsByTheWindowModeTheAgentSaid(t *testing.T) {
+	for _, row := range []struct {
+		name         string
+		configStrict bool
+		said         models.MockWindowsSaid
+		ok           bool
+		kept         bool
+	}{
+		{"a strict agent, the config lax", false, models.MockWindowsSaid{Strict: true, Lookahead: true}, true, true},
+		{"a lax agent loading by mapping", false, models.MockWindowsSaid{Lookahead: true}, true, true},
+		{"a lax agent, the config strict", true, models.MockWindowsSaid{}, true, false},
+		{"an agent that has not said, the config lax", false, models.MockWindowsSaid{}, false, true},
+	} {
+		for _, format := range []string{"yaml", "gob"} {
+			t.Run(row.name+"/"+format, func(t *testing.T) {
+				left, _, carry := holdByWhatTheAgentSaid(t, format, row.configStrict, row.said, row.ok)
+				if left[carry.Name] != row.kept {
+					t.Errorf("the unstated carry-over call test-7's window releases (%s) kept: %v, want %v; keeps %v", carry.Name, left[carry.Name], row.kept, sortedNames(left))
+				}
+			})
+		}
 	}
 }
 
@@ -1047,7 +1281,7 @@ func TestHoldNoAnswerMocksHoldsOneMockAtATime(t *testing.T) {
 			r := &Replayer{logger: zap.NewNop(), mockDB: store, config: &config.Config{}}
 			r.config.Test.StrictMockWindow = true
 			held, err := r.holdNoAnswerMocks(context.Background(), "set-0", []string{"test-2"}, cases,
-				newCarryOverAttribution(cases), false, nil, nil, keep)
+				newCarryOverAttribution(cases), models.MockWindowsSaid{Strict: true, Lookahead: true}, nil, nil, keep)
 			if err != nil {
 				t.Fatalf("hold: %v", err)
 			}
