@@ -49,9 +49,43 @@ import (
 // Telling the two apart takes where the value came from, not its shape.
 const maxDecodeLevels = 4
 
-// b64Run is a run of the base64 alphabets, standard or URL-safe, with its
-// padding (base32's too: up to six '=').
-var b64Run = regexp.MustCompile(`[A-Za-z0-9+/_-]+={0,6}`)
+// nextB64Run is the first run of the base64 alphabets in s at or after
+// from, standard or URL-safe, with its padding (base32's too: up to six
+// '='), as s[start:end]; ok is false where s has none there. It reads each
+// byte it passes once, and the runs it gives one after another, each from
+// the last one's end, are what the pattern [A-Za-z0-9+/_-]+={0,6} finds in
+// s, leftmost first and none overlapping: a staging reads every payload's
+// runs, and a regexp scan of them was about a sixth of its CPU.
+func nextB64Run(s string, from int) (start, end int, ok bool) {
+	i := from
+	for i < len(s) && !isB64Byte(s[i]) {
+		i++
+	}
+	if i >= len(s) {
+		return 0, 0, false
+	}
+	start = i
+	for i < len(s) && isB64Byte(s[i]) {
+		i++
+	}
+	for pad := 0; pad < 6 && i < len(s) && s[i] == '='; pad++ {
+		i++
+	}
+	return start, i, true
+}
+
+// isB64Run says whether s is one run of the base64 alphabets whole, with
+// its padding (nextB64Run).
+func isB64Run(s string) bool {
+	start, end, ok := nextB64Run(s, 0)
+	return ok && start == 0 && end == len(s)
+}
+
+// isB64Byte says whether c is of the base64 alphabets, standard or
+// URL-safe.
+func isB64Byte(c byte) bool {
+	return c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '+' || c == '/' || c == '_' || c == '-'
+}
 
 // b64Text is the text the encoded runs of s decode to, each on a line of
 // its own, decoded again while that finds more, up to maxDecodeLevels
@@ -127,7 +161,8 @@ func b64Text(s string, clock map[string]bool) string {
 				texts = append(texts, j)
 			}
 			for ti, tx := range texts {
-				for _, ix := range b64Run.FindAllStringIndex(tx, -1) {
+				for st, en, ok := nextB64Run(tx, 0); ok; st, en, ok = nextB64Run(tx, en) {
+					ix := [2]int{st, en}
 					if tryRun(tx[ix[0]:ix[1]]) || ti == 0 {
 						continue
 					}
@@ -156,7 +191,7 @@ func b64Text(s string, clock map[string]bool) string {
 					}
 				}
 				for _, part := range strings.FieldsFunc(tx, func(r rune) bool { return r == '.' }) {
-					if b64Run.FindString(part) == part {
+					if isB64Run(part) {
 						try(part)
 					}
 				}
@@ -658,8 +693,8 @@ func unparsed(rec, live string, clock clockSet) string {
 // b64Runs are the runs of the base64 alphabets in s, with their padding.
 func b64Runs(s string) map[string]bool {
 	out := map[string]bool{}
-	for _, r := range b64Run.FindAllString(s, -1) {
-		out[r] = true
+	for st, en, ok := nextB64Run(s, 0); ok; st, en, ok = nextB64Run(s, en) {
+		out[s[st:en]] = true
 	}
 	return out
 }
