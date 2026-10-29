@@ -34,10 +34,16 @@ import (
 // Linux (pairbytes_linux.go says what each outcome means); writes made after
 // it began cannot hold it back. It has no deadline of its own. It ends with
 // ctx's error, or one wrapping models.ErrProxyConnsUnsupported when it cannot
-// tell: the table or a socket cannot be read, or the proxy closed its side of
+// tell: the counts' layout is not the one keploy reads (xnuTableReadable),
+// the table or a socket cannot be read, or the proxy closed its side of
 // a connection whose application end went after the close without its FIN
 // reaching the proxy's orphaned socket.
 func (p *Proxy) WaitPairedBytes(ctx context.Context, n uint64) error {
+	// Counts in a layout the proof did not find are not read: whatever
+	// they say, the wait is unknown.
+	if err := xnuTableReadable(); err != nil {
+		return err
+	}
 	pending, err := p.pairTargets(n)
 	if err != nil {
 		return err
@@ -225,20 +231,28 @@ func (p *Proxy) PairedBytesErr() error {
 }
 
 // xnuTableReadable proves the counts once (proveXNUCounts): a macOS whose
-// table or tcp_info keploy cannot read leaves every wait on a paired
-// connection unknown from the start, as Linux's canary does
-// (checkPairedBytes).
-var xnuTableReadable = sync.OnceValue(func() error {
-	if err := proveXNUCounts(); err != nil {
-		return fmt.Errorf("%w: %v", models.ErrProxyConnsUnsupported, err)
-	}
-	return nil
-})
+// table or tcp_info keploy cannot read in the layout it reads leaves every
+// wait on a paired connection, and every count of what a kept connection
+// received (inflight_darwin.go), unknown from the start, as Linux's canary
+// does (checkPairedBytes).
+var xnuTableReadable = xnuCountsProven(proveXNUCounts)
+
+// xnuCountsProven runs proof once, its failure an ErrProxyConnsUnsupported:
+// xnuTableReadable, and its rows' proof of a moved layout.
+func xnuCountsProven(proof func() error) func() error {
+	return sync.OnceValue(func() error {
+		if err := proof(); err != nil {
+			return fmt.Errorf("%w: %v", models.ErrProxyConnsUnsupported, err)
+		}
+		return nil
+	})
+}
 
 // checkPairedBytes on Linux proves, on the canary's connection, that
 // sock_diag gives the byte counts the wait reads. On darwin sock_diag does
-// not exist, so there is nothing to prove; the canary is skipped too
-// (accepts.go).
+// not exist: the counts the waits read are proven once, on a loopback
+// connection of keploy's own (xnuTableReadable), before the proxy says it is
+// ready (decideCounted). The canary itself runs as on Linux (accepts.go).
 func (p *Proxy) checkPairedBytes(net.Conn, net.Conn) {}
 
 // proveAppVisible on Linux uses sock_diag to confirm the app's sockets are
