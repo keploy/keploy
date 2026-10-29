@@ -916,11 +916,17 @@ func storedWhere(name string) string {
 
 const storedRun = zoneUnread + " Else record and replay the application in UTC (TZ=UTC), where the two readings agree, or declare the field noise in keploy.yml"
 
+// ZoneUnreadLog begins the agent's debug line for a connection whose
+// process's zone keploy cannot read (the proxy logs it with the read's
+// error), and zoneUnread quotes it: the refusal names a line the agent
+// writes.
+const ZoneUnreadLog = "keploy cannot read the zone of the process that made the connection"
+
 // zoneUnread is what a refusal for want of the zone of the process that
 // made the call says to do: where keploy reads that zone, and, in keploy's
 // own docker and compose modes, where its CLI reads an app container's
 // (containerkey.ConnZone) and where it reads none.
-const zoneUnread = " Run keploy where it reads the application's zone: in the host PID namespace (--pid=host or hostPID), the application's process and its files readable, or in keploy's own docker and compose modes, whose CLI reads the zone of the app container that made the call through Docker. The agent's debug line \"keploy cannot read the zone of the process that made the connection\" says why it could not. In docker and compose modes keploy reads no zone of a container whose configuration sets a JVM's user.timezone (keploy reads a JVM's zone only from its process: set the zone with TZ), of one whose TZ names no zone while its /etc/timezone names a zone other than its /etc/localtime, or whose TZ is empty and its files hold no UTC (set TZ to the zone), of one whose read failed or stalled, or of any on a host of cgroup v1 alone (and it may not on a host of both versions), where the agent cannot tell which container made the call."
+const zoneUnread = " Run keploy where it reads the application's zone: in the host PID namespace (--pid=host or hostPID), the application's process and its files readable, or in keploy's own docker and compose modes, whose CLI reads the zone of the app container that made the call through Docker. The agent's debug line \"" + ZoneUnreadLog + "\" (run keploy with --debug) says why it could not. In docker and compose modes keploy reads no zone of a container whose configuration sets a JVM's user.timezone (keploy reads a JVM's zone only from its process: drop -Duser.timezone= from the container's configuration and set the zone with TZ), of one whose TZ names no zone while its /etc/timezone names a zone other than its /etc/localtime, or whose TZ is empty and its files hold no UTC (set TZ to the zone), of one whose TZ or zone files keploy cannot resolve (a TZ of a POSIX rule or of a zone with no file in the container, an /etc/localtime linking to nothing), of one whose read failed or stalled, or of any on a host of cgroup v1 alone (and it may not on a host of both versions), where the agent cannot tell which container made the call."
 
 // hourFarWhy is what a refusal of a wall clock of no zone (models.ZoneApp)
 // checked at an hour in name, the zone the learn step stored, adds where

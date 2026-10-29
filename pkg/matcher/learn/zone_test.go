@@ -2016,19 +2016,24 @@ func TestAReplayKnowingNoZoneRefusesAValueInTrollsSecondHourShownTwice(t *testin
 // that made the call (zoneUnread) leaves out of what it must say, "" where
 // it says it all: where keploy reads the application's zone, natively and
 // in keploy's own docker and compose modes, the agent's debug line that
-// says why it could not, each cause keploy's docker and compose modes still
-// read no zone for, and else, what to do. It must not say docker and
-// compose modes read no zone: keploy's CLI reads each app container's.
+// says why it could not (ZoneUnreadLog, the line the proxy writes), each
+// cause keploy's docker and compose modes still read no zone for, a JVM's
+// remedy that lifts its cause (TZ alone does not while -Duser.timezone=
+// stays), and else, what to do. It must not say docker and compose modes
+// read no zone: keploy's CLI reads each app container's.
 func unreadZoneUnclear(why, otherwise string) string {
 	for _, want := range []string{
 		"--pid=host or hostPID",
 		"in keploy's own docker and compose modes, whose CLI reads the zone of the app container that made the call through Docker",
-		`The agent's debug line "keploy cannot read the zone of the process that made the connection" says why it could not`,
+		`The agent's debug line "` + ZoneUnreadLog + `" (run keploy with --debug) says why it could not`,
 		"whose configuration sets a JVM's user.timezone",
+		"drop -Duser.timezone= from the container's configuration and set the zone with TZ",
 		"its /etc/timezone names a zone other than its /etc/localtime",
 		"whose TZ is empty and its files hold no UTC",
+		"whose TZ or zone files keploy cannot resolve",
 		"whose read failed or stalled",
 		"on a host of cgroup v1 alone",
+		"it may not on a host of both versions",
 		"Else " + otherwise,
 		"or declare the field noise in keploy.yml",
 	} {
