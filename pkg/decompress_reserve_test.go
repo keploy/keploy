@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"errors"
 	"fmt"
+	"io"
 	"math/bits"
 	"math/rand"
 	"reflect"
@@ -307,44 +308,62 @@ func (w *brotliBits) oneSymbolCode(size, sym int) {
 // whole stream is about 1.3 KB, and its one command inserts the n literals.
 // It makes a decoder hold the most tables a stream can.
 func mostTablesBrotli(n int) []byte {
+	return tablesBrotli(n, 256)
+}
+
+// tablesBrotli is a valid brotli stream of one metablock per entry of
+// commandTrees, each of n bytes of 'a' (22,594 <= n < 2^24), each shaped as
+// mostTablesBrotli's but with that many insert-and-copy block types (1 to
+// 256), so as many of their trees.
+func tablesBrotli(n int, commandTrees ...int) []byte {
 	var w brotliBits
 	w.bits(1, 0) // WBITS: a 64 KiB window
-	w.bits(1, 1) // ISLAST
-	w.bits(1, 0) // ISLASTEMPTY
-	mlen := uint64(n - 1)
-	nibbles := (bits.Len64(mlen) + 3) / 4
-	if nibbles < 4 {
-		nibbles = 4
+	for i, trees := range commandTrees {
+		last := i == len(commandTrees)-1
+		w.bits(1, map[bool]uint64{true: 1}[last]) // ISLAST
+		if last {
+			w.bits(1, 0) // ISLASTEMPTY
+		}
+		mlen := uint64(n - 1)
+		nibbles := (bits.Len64(mlen) + 3) / 4
+		if nibbles < 4 {
+			nibbles = 4
+		}
+		w.bits(2, uint64(nibbles-4)) // MNIBBLES
+		w.bits(uint(4*nibbles), mlen)
+		if !last {
+			w.bits(1, 0) // ISUNCOMPRESSED
+		}
+		w.count(1)     // literal block types
+		w.count(trees) // insert-and-copy block types
+		if trees > 1 {
+			w.oneSymbolCode(trees+2, 0) // their block-type code
+			w.oneSymbolCode(26, 0)      // their block-count code: count code 0,
+			w.bits(2, 0)                // and its extra bits: a first block of 1
+		}
+		w.count(1)    // distance block types
+		w.bits(2, 3)  // NPOSTFIX
+		w.bits(4, 15) // NDIRECT >> NPOSTFIX
+		w.bits(2, 0)  // the literal block type's context mode
+		for range 2 { // the literal context map, then the distance one
+			w.count(256)            // trees
+			w.bits(1, 0)            // no run-length codes
+			w.oneSymbolCode(256, 0) // every context uses tree 0
+			w.bits(1, 0)            // no move-to-front
+		}
+		for i := range 256 {
+			w.oneSymbolCode(256, map[bool]int{true: 'a'}[i == 0])
+		}
+		for i := range trees {
+			// Tree 0's symbol, 504, is insert code 23 (22,594 and 24 extra
+			// bits) and copy code 0.
+			w.oneSymbolCode(704, map[bool]int{true: 504}[i == 0])
+		}
+		for range 256 {
+			w.oneSymbolCode(520, 0)
+		}
+		w.bits(24, uint64(n-22594)) // the one command's insert length; its literals take no bits
 	}
-	w.bits(2, uint64(nibbles-4)) // MNIBBLES
-	w.bits(uint(4*nibbles), mlen)
-	w.count(1)                // literal block types
-	w.count(256)              // insert-and-copy block types
-	w.oneSymbolCode(256+2, 0) // their block-type code
-	w.oneSymbolCode(26, 0)    // their block-count code: count code 0,
-	w.bits(2, 0)              // and its extra bits: a first block of 1
-	w.count(1)                // distance block types
-	w.bits(2, 3)              // NPOSTFIX
-	w.bits(4, 15)             // NDIRECT >> NPOSTFIX
-	w.bits(2, 0)              // the literal block type's context mode
-	for range 2 {             // the literal context map, then the distance one
-		w.count(256)            // trees
-		w.bits(1, 0)            // no run-length codes
-		w.oneSymbolCode(256, 0) // every context uses tree 0
-		w.bits(1, 0)            // no move-to-front
-	}
-	for i := range 256 {
-		w.oneSymbolCode(256, map[bool]int{true: 'a'}[i == 0])
-	}
-	for i := range 256 {
-		// Tree 0's symbol, 504, is insert code 23 (22,594 and 24 extra
-		// bits) and copy code 0.
-		w.oneSymbolCode(704, map[bool]int{true: 504}[i == 0])
-	}
-	for range 256 {
-		w.oneSymbolCode(520, 0)
-	}
-	w.bits(24, uint64(n-22594)) // the one command's insert length; its literals take no bits
 	return w.buf
 }
 
@@ -392,17 +411,19 @@ func TestBrotliDecoderStateIsReservedAtTheFormatsLimits(t *testing.T) {
 	}
 	// The rest: its state, its input buffer, its block-type trees, and one
 	// metablock's context maps (64 literal and 4 distance contexts per block
-	// type, and a mode per literal block type) and tree headers.
+	// type, and a mode per literal block type) and tree headers, with one
+	// group's headers again for while it regrows them (makeTreesBuffer
+	// allocates the larger while it holds the smaller, as it does the tables).
 	header := int64(field(lit, "htrees").Type().Elem().Size())
 	rest := int64(v.Type().Size()) +
 		int64(field(v, "buf").Len()) +
 		int64(field(v, "block_type_trees").Len())*brotliTableEntryBytes +
 		maxBlockTypes<<6 + maxBlockTypes<<2 + maxBlockTypes +
-		3*brotliMaxTreesPerGroup*header
+		4*brotliMaxTreesPerGroup*header
 	if rest > brotliReaderBytes {
 		t.Errorf("the decoder's state, buffer, block-type trees, context maps and tree headers are %d bytes, past brotliReaderBytes %d", rest, brotliReaderBytes)
 	}
-	reserved := brotliReaderBytes + brotliTableBytes + brotliRingBytes(16)
+	reserved := brotliReaderBytes + brotliTableBytes + brotliTableRegrowBytes + brotliRingBytes(16)
 	if held < brotliTableBytes || held > reserved {
 		t.Errorf("the decoder held %d bytes once it had begun; want its tables (%d) and no more than a decode reserves for it (%d)", held, brotliTableBytes, reserved)
 	}
@@ -410,13 +431,111 @@ func TestBrotliDecoderStateIsReservedAtTheFormatsLimits(t *testing.T) {
 	t.Logf("a %d-byte stream: the decoder held %d bytes once it had begun (reserved %d); its tables %d, the rest %d (brotliReaderBytes %d)", len(wire), held, reserved, brotliTableBytes, rest, brotliReaderBytes)
 }
 
+// TestABrotliDecodeReservesTheTablesItsDecoderRegrows pins
+// brotliTableRegrowBytes against github.com/andybalholm/brotli's own: a
+// stream whose first metablock declares 255 insert-and-copy trees and whose
+// second declares 256 makes the decoder regrow that group's tables, and it
+// allocates the larger buffer while it still holds the smaller one. Read a
+// few KiB at a time, the decoder's three groups are read after each read
+// (each metablock is 200,000 bytes and the window 64 KiB, so the decoder
+// cannot run ahead into the second before most of the first is read): when
+// a group's buffer is replaced by a larger one, the tables it held as it
+// allocated it were the other groups', the new buffer and the one it
+// replaced. That is within brotliTableBytes and brotliTableRegrowBytes, and
+// past brotliTableBytes alone, so a decode that reserved one set of tables
+// would hold more than it had reserved. A decoder version that regrows no
+// table on this stream fails the row, and the constant must be recomputed
+// from it. The decode itself, through DecompressReserving, is the body, and
+// gives back all but its output's capacity.
+func TestABrotliDecodeReservesTheTablesItsDecoderRegrows(t *testing.T) {
+	const n = 200_000
+	wire := tablesBrotli(n, 255, 256)
+	body := bytes.Repeat([]byte{'a'}, 2*n)
+	var l reserveLedger
+	out, err := DecompressReserving(zap.NewNop(), "br", wire, 5<<20, l.reserve)
+	if err != nil || !bytes.Equal(out, body) {
+		t.Fatalf("%d bytes, err %v; want the %d-byte body", len(out), err, len(body))
+	}
+	if l.held != int64(cap(out)) || l.badGiveBack {
+		t.Fatalf("%d bytes reserved after the decode (bad give-back %v), want its output's capacity %d", l.held, l.badGiveBack, cap(out))
+	}
+	state := l.log[0] // what the decode reserved for its decoder, as it started
+
+	rd := brotli.NewReader(bytes.NewReader(wire))
+	v := reflect.ValueOf(rd).Elem()
+	var groups [3]reflect.Value
+	for i, name := range []string{"literal_hgroup", "insert_copy_hgroup", "distance_hgroup"} {
+		g := v.FieldByName(name)
+		if !g.IsValid() || !g.FieldByName("codes").IsValid() {
+			t.Fatalf("brotli.Reader has no %s.codes: recompute brotliTableBytes and brotliTableRegrowBytes from this version of the decoder", name)
+		}
+		groups[i] = g.FieldByName("codes")
+	}
+	type buffer struct {
+		at    uintptr
+		bytes int64
+	}
+	read := func() (b [3]buffer) {
+		for i, c := range groups {
+			b[i] = buffer{c.Pointer(), int64(c.Cap()) * brotliTableEntryBytes}
+		}
+		return b
+	}
+	var prev [3]buffer
+	var regrown int
+	var most int64
+	p := make([]byte, 4<<10)
+	for got := 0; ; {
+		k, err := rd.Read(p)
+		got += k
+		if err == io.EOF {
+			if got != len(body) {
+				t.Fatalf("the decoder ended after %d bytes, want %d", got, len(body))
+			}
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		cur := read()
+		var held int64
+		for i := range cur {
+			held += cur[i].bytes
+		}
+		for i := range cur {
+			if prev[i].bytes > 0 && cur[i].at != prev[i].at && cur[i].bytes > prev[i].bytes {
+				regrown++
+				held += prev[i].bytes // it held the one it replaced while it allocated this one
+			}
+		}
+		most = max(most, held)
+		prev = cur
+	}
+	if regrown != 1 {
+		t.Fatalf("the decoder regrew a table %d times on this stream, want once: recompute brotliTableRegrowBytes from this version of the decoder", regrown)
+	}
+	if most <= brotliTableBytes {
+		t.Errorf("the decoder held %d bytes of tables at most, no more than brotliTableBytes %d: this stream no longer regrows past one set", most, brotliTableBytes)
+	}
+	if most > brotliTableBytes+brotliTableRegrowBytes {
+		t.Errorf("the decoder held %d bytes of tables as it regrew them, past brotliTableBytes %d and brotliTableRegrowBytes %d", most, brotliTableBytes, brotliTableRegrowBytes)
+	}
+	if ring := brotliRingBytes(16); state < most+ring {
+		t.Errorf("the decode reserved %d bytes for its decoder, less than the %d of tables it held as it regrew them and the %d of its ring", state, most, ring)
+	}
+	t.Logf("a %d-byte stream of two metablocks: the decoder held %d bytes of tables as it regrew them; the decode reserved %d for its decoder", len(wire), most, state)
+}
+
 // TestADecodeAsksForEachGrownBufferWholeBeforeItGivesTheOldOneBack pins the
 // copy as the output grows: while it copies the buffer it outgrew into the
 // new one it holds both, so it asks for the new buffer's whole capacity, not
-// the growth, and gives the old one back only once it has copied it. A
-// decode that asked for the growth alone would end with the same books (its
-// output's capacity) and hold half as much again as it had reserved while
-// it copied.
+// the growth, and gives the old one back only once the new one is made and
+// the old one copied into it. A decode that asked for the growth alone would
+// end with the same books (its output's capacity) and hold half as much
+// again as it had reserved while it copied. One that gave the old buffer
+// back before it made the new one would make the same calls, and hold both
+// with the old one's room given back while it made and filled the new one:
+// at each give-back the heap must already hold the new buffer whole.
 func TestADecodeAsksForEachGrownBufferWholeBeforeItGivesTheOldOneBack(t *testing.T) {
 	body := textBody(600<<10, 11) // grows 64 KiB to 1 MiB, and ends short of it
 	for _, c := range []encoded{
@@ -424,9 +543,24 @@ func TestADecodeAsksForEachGrownBufferWholeBeforeItGivesTheOldOneBack(t *testing
 		{"br", "br", brotliOf(t, body, 5, 18), body},
 	} {
 		var l reserveLedger
-		out, err := DecompressReserving(zap.NewNop(), c.enc, c.wire, 5<<20, l.reserve)
+		var early []string
+		base := settledHeap()
+		probe := func(n int64) bool {
+			// A give-back of the buffer just outgrown: the call before it
+			// asked for the new one, twice its size.
+			if k := len(l.log); n < 0 && k > 0 && l.log[k-1] == -2*n {
+				if held := liveHeap() - base; held < -2*n {
+					early = append(early, fmt.Sprintf("gave the %d-byte buffer back holding %d bytes, short of the %d-byte one it grew into", -n, held, -2*n))
+				}
+			}
+			return l.reserve(n)
+		}
+		out, err := DecompressReserving(zap.NewNop(), c.enc, c.wire, 5<<20, probe)
 		if err != nil || !bytes.Equal(out, c.body) {
 			t.Fatalf("%s: %d bytes, err %v; want the body", c.name, len(out), err)
+		}
+		for _, e := range early {
+			t.Errorf("%s: %s", c.name, e)
 		}
 		if len(l.log) == 0 || l.log[0] <= 0 {
 			t.Fatalf("%s: calls %v; want the decoder's state asked for first", c.name, l.log)

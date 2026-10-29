@@ -4627,10 +4627,11 @@ var ErrDecodeRefused = errors.New("decode refused: no room for the decoded body"
 const gzipDecoderStateBytes = 64 << 10
 
 // brotliReaderBytes is what a brotli decoder holds beside its ring buffer and
-// its prefix-code tables (brotliTableBytes): its 32 KiB input buffer, its
-// state, its block-type trees, and one metablock's context maps and tree
-// headers, at the format's limits (86,808 bytes in
-// github.com/andybalholm/brotli v1.2.0).
+// its prefix-code tables (brotliTableBytes, brotliTableRegrowBytes): its
+// 32 KiB input buffer, its state, its block-type trees, and one metablock's
+// context maps and tree headers, with one group's headers again while it
+// regrows them, at the format's limits (92,952 bytes in
+// github.com/andybalholm/brotli v1.2.3).
 // TestBrotliDecoderStateIsReservedAtTheFormatsLimits pins it against the
 // decoder.
 const brotliReaderBytes = 96 << 10
@@ -4652,13 +4653,25 @@ const (
 	brotliDistanceTableEntries = 920  // of the most distance codes a stream may declare: 520 (NPOSTFIX 3, NDIRECT 120)
 )
 
-// brotliTableBytes is the most a brotli decoder holds of its prefix-code
-// tables: one metablock's three groups, each at the format's limit
-// (2,693,120 bytes). It drops a metablock's tables as the next metablock
-// begins (decoderStateMetablockBegin), before it allocates that one's, so it
-// holds one metablock's at a time.
+// brotliTableBytes is the most a brotli decoder keeps of its prefix-code
+// tables: three groups, each at the format's limit (2,693,120 bytes).
+// github.com/andybalholm/brotli v1.2.3 keeps each group's table buffer from
+// one metablock to the next and reuses it (makeCodesBuffer), so what it keeps
+// is never more than the largest each group has needed, and that is at most
+// the format's limit.
 const brotliTableBytes = brotliMaxTreesPerGroup * brotliTableEntryBytes *
 	(brotliLiteralTableEntries + brotliCommandTableEntries + brotliDistanceTableEntries)
+
+// brotliTableRegrowBytes is what a brotli decoder holds of its prefix-code
+// tables beside brotliTableBytes, at the most, while it regrows one group's:
+// when a metablock declares more trees than the group's kept buffer holds
+// (or, for the distance group, a larger alphabet), the decoder allocates the
+// larger buffer while it still holds the smaller one, and drops that only
+// once the new one is in place. The smaller one is less than the group's
+// limit, and the groups are regrown one at a time, so this is the largest
+// group's limit: insert-and-copy's, 256 trees of 1,080 entries (1,105,920
+// bytes). TestABrotliDecodeReservesTheTablesItsDecoderRegrows pins it.
+const brotliTableRegrowBytes = brotliMaxTreesPerGroup * brotliTableEntryBytes * brotliCommandTableEntries
 
 // brotliRingBytes is the most a brotli decoder holds of its ring buffer for
 // a stream that declares a window of 2^wbits bytes (RFC 7932 §9.1): the
@@ -4777,7 +4790,8 @@ func Decompress(logger *zap.Logger, encoding string, data []byte, limit int64) (
 // reserve(n), n > 0, before it holds n more bytes (its output buffer as it
 // grows it, and the decoder's own state: gzip's window and tables, brotli's
 // ring buffer as large as the stream's window allows and its prefix-code
-// tables as large as the format allows), and tells it
+// tables as large as the format allows, with one group's again while it
+// regrows them), and tells it
 // reserve(-n) once it holds n bytes less (the buffer it outgrew, the decoder
 // it closed). A refusal stops the decode at once: it returns
 // ErrDecodeRefused, holding nothing. On success what stays reserved is the
@@ -4794,7 +4808,7 @@ func DecompressReserving(logger *zap.Logger, encoding string, data []byte, limit
 			if !ok {
 				wbits = 24 // the largest window a stream may declare without the large-window flag
 			}
-			state = brotliReaderBytes + brotliTableBytes + brotliRingBytes(wbits)
+			state = brotliReaderBytes + brotliTableBytes + brotliTableRegrowBytes + brotliRingBytes(wbits)
 			if !reserveFor(reserve, state) {
 				return nil, ErrDecodeRefused
 			}
