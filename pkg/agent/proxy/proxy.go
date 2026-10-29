@@ -4965,26 +4965,47 @@ var lastRecorded = time.Unix(0, math.MaxInt64)
 // calls then find its payloads read, off their answer path, and each waits
 // only for a recording of its own the staging is reading. Any other session
 // reads nothing: no learn step reads the recordings. With no mock manager
-// there is no set (errNoMockManager).
+// there is no set (errNoMockManager). Once the staging ends, the agent logs
+// what it read and what the set's tiers keep (logSetUse).
 func (p *Proxy) WarmLearnSet() error {
+	done, err := p.warmLearnSet()
+	if err != nil || done == nil {
+		return err
+	}
+	go p.logSetUse(done)
+	return nil
+}
+
+// logSetUse logs, once the set's staging ends, what it read and what the
+// set's tiers keep (learn.SetUse): the line a round reads to see whether the
+// set fit its budget. A channel closed with no use (no tracker) read
+// nothing and logs nothing.
+func (p *Proxy) logSetUse(done <-chan learn.SetUse) {
+	u, ok := <-done
+	if !ok {
+		return
+	}
+	p.logger.Info("the learn step read the test set's recordings as it was staged, before its calls read them",
+		zap.Int("read_at_staging", u.Staged), zap.Int("read_by_calls", u.Called),
+		zap.Int64("kept_held_bytes", u.Held), zap.Int64("kept_words_bytes", u.Words), zap.Int64("kept_forms_bytes", u.Forms),
+		zap.Int64("set_budget_bytes", u.Budget), zap.Bool("held_full", u.HeldFull), zap.Bool("forms_full", u.FormsFull))
+}
+
+// warmLearnSet is WarmLearnSet's gate and its read: the staging's channel
+// (learn.Tracker.WarmSet), or nil where the session reads nothing (the
+// proven switch off, not record's full round, or the set's learn step
+// ended), decided before anything is read.
+func (p *Proxy) warmLearnSet() (<-chan learn.SetUse, error) {
 	m := p.getMockManager()
 	if m == nil {
-		return errNoMockManager
+		return nil, errNoMockManager
 	}
 	if !provenswitch.On() || !m.learns() {
-		return nil
+		return nil, nil
 	}
-	done := p.learnTracker.WarmSet(func(visit func(*models.Mock) bool) error {
+	return p.learnTracker.WarmSet(func(visit func(*models.Mock) bool) error {
 		return m.RangeRecordedBefore(lastRecorded, visit)
-	})
-	go func() {
-		u := <-done
-		p.logger.Info("the learn step read the test set's recordings as it was staged, before its calls read them",
-			zap.Int("read_at_staging", u.Staged), zap.Int("read_by_calls", u.Called),
-			zap.Int64("kept_held_bytes", u.Held), zap.Int64("kept_words_bytes", u.Words), zap.Int64("kept_forms_bytes", u.Forms),
-			zap.Int64("set_budget_bytes", u.Budget), zap.Bool("held_full", u.HeldFull), zap.Bool("forms_full", u.FormsFull))
-	}()
-	return nil
+	}), nil
 }
 
 var _ agent.LearnSetWarmer = (*Proxy)(nil)
