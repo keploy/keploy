@@ -624,9 +624,9 @@ type Replayer struct {
 	// ends it, once it has one (noteSetEnd): the status it says, and why
 	// (tellSetEnd); setEndCalls, the calls it charged to the set
 	// (SetCallsHook); setEndAnswers, the answered calls it charged to the
-	// set (SetAnswersHook); setEndBackground, the calls made between two
-	// tests that no mock answered (SetBackgroundHook). Reset before each run
-	// of a set.
+	// set (SetAnswersHook); setEndBackground, the calls made outside every
+	// test's window that no mock answered and that reach no test
+	// (SetBackgroundHook). Reset before each run of a set.
 	setEnd           *models.SetEnd
 	setEndCalls      []models.UnmatchedCall
 	setEndAnswers    []models.UnmatchedCall
@@ -6340,9 +6340,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			appLogs = r.instrumentation.GetRecentAppLogs(logCtx)
 		}
 	}
-	// The calls the application made between two tests that no mock
-	// answered (proven switch): its background work, charged to no test and
-	// failing nothing, said once and listed for the set, whatever its end.
+	// The calls the application made outside every test's window that no
+	// mock answered and that reach no test (proven switch, setCalls.take):
+	// its background work, charged to no test and failing nothing, said once
+	// and listed for the set, whatever its end.
 	backgroundCalls := r.setCalls.backgroundCalls()
 	r.logBackgroundCalls(testSetID, backgroundCalls)
 	testReport = &models.TestReport{
