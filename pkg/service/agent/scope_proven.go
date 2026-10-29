@@ -1404,14 +1404,19 @@ func (a *Agent) testEvidence(ctx context.Context, id string, unmade bool, beganA
 // evidence of the test it lands in (founder D1: serve, don't require). A
 // proxy that cannot serves them to no one, as before.
 func (a *Agent) serveAside(id string) {
-	as, ok := a.Proxy.(coreAgent.ExactAsideServer)
-	if !ok {
-		return
-	}
 	a.scopeMu.Lock()
 	names := append([]string(nil), a.scopeTable[id]...)
 	a.scopeMu.Unlock()
-	if len(names) == 0 {
+	a.serveRecordingsAside(id, names)
+}
+
+// serveRecordingsAside hands the proxy names, the recordings of test id,
+// which the replay set aside, to serve the calls made after it, as serveAside
+// says: keploy mock's skipped begin, and keploy test's opening of the test
+// after it (models.ExactServing.Aside).
+func (a *Agent) serveRecordingsAside(id string, names []string) {
+	as, ok := a.Proxy.(coreAgent.ExactAsideServer)
+	if !ok || id == "" || len(names) == 0 {
 		return
 	}
 	mocks, err := a.mocksByName(names)
