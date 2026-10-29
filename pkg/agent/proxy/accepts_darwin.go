@@ -8,12 +8,20 @@ import (
 	"syscall"
 )
 
-// listenerDrops returns 0 on darwin: macOS does not expose SO_MEMINFO, so the
-// kernel's listener-queue drops cannot be read. The count is always 0 rather
-// than an error so the proven settlement flow proceeds. Consequence: if the
-// kernel drops connections at the proxy's listener (accept queue full), macOS
-// cannot detect it — the proven verdict treats the drop count as verified zero.
-// On Linux, a non-zero drop count is charged as a capture loss to the open test.
+// listenerDrops is 0 on darwin, and 0 is what a drop at the listener costs
+// there. macOS has no SO_MEMINFO to count the drops by, but a drop at its
+// listener loses no connection a test could miss: with the accept queue full
+// it drops the client's SYN silently, so the client's connect stays in
+// progress until the listener takes the connection, or fails it. A connect
+// that never completes is abandoned, and the shim never numbers it
+// (enterprise's TestAnAbandonedConnectIsNeverNumbered,
+// pkg/agent/hooks/darwin/proxyconns_test.go); one that fails is the
+// application's own error. Probed on macOS 26.7: 200 concurrent loopback
+// connects to a listener of backlog 1, four times; one connected, the rest
+// timed out, and none completed at the client without reaching accept. The
+// system's "listen queue overflow" count (netstat -s -p tcp) stayed 0
+// throughout, so it is no count to read instead. On Linux, a rise of the
+// listener's count is charged as a capture loss to the open test.
 func listenerDrops(syscall.RawConn) (uint64, error) { return 0, nil }
 
 // netListenDrops is not read on darwin: macOS has no network namespace, and
