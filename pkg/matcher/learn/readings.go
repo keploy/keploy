@@ -1052,8 +1052,11 @@ func givenWhy(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, raw
 		if recorded {
 			return ""
 		}
+		if !kept && len(op.words) > 0 {
+			keep, kept = dc.stampsEchoed(v, served, raw), true
+		}
 		for _, g := range op.words {
-			if why := g.servedWhy(i, t, v.wordOf(t, recorded), givenWhose(g.at, at, g.late, g.noTime), g.holds(i, t, keep)); why != "" {
+			if why := g.servedWhy(i, t, v.wordOf(t, recorded), givenWhose(g.at, at, g.late, g.noTime), keep); why != "" {
 				return why + "; " + notClock(v) + ". " + correction(g.mock, false)
 			}
 		}

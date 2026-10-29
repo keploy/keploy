@@ -669,17 +669,54 @@ func echoedPair(echoed []echoMatch, p driftedInstant) bool {
 	return false
 }
 
+// answerLists are the words of an answer where the word rule reads them
+// (answerWords), by reading, each reading's distinct words sorted: words,
+// its stamps blanked, and apart those its stamps alone hold (stamped), and
+// none of its text. A word is searched among stamped only where the call's
+// own places say stamps are searched as any text (keep: stampsEchoed), as
+// a place of the call's own test is searched (wordsHeld): holds.
+type answerLists struct{ words, stamped [][]string }
+
+// answerListsOf is x's answer's answerLists, every word a copy, with its
+// words read with its stamps blanked (plain: answerWords(x, false)).
+func (dc *DriftCache) answerListsOf(x Raw) (l answerLists, plain []map[string]bool) {
+	plain = dc.answerWords(x, false)
+	kept := plain
+	if len(dc.stampTexts(x)) > 0 {
+		kept = dc.answerWords(x, true)
+	}
+	for i := range plain {
+		l.words = append(l.words, sortedWords(plain[i], nil))
+		l.stamped = append(l.stamped, sortedWords(kept[i], plain[i]))
+	}
+	return l, plain
+}
+
+// holds reports whether l holds t in reading i, a word of its stamps too
+// where keep says they are searched as any text (stampsEchoed).
+func (l answerLists) holds(i int, t string, keep bool) bool {
+	for _, list := range [][][]string{l.words, l.stamped} {
+		if i < len(list) {
+			if k := sort.SearchStrings(list[i], t); k < len(list[i]) && list[i][k] == t {
+				return true
+			}
+		}
+		if !keep {
+			break
+		}
+	}
+	return false
+}
+
 // givenWords are the words of a recording's answer where the word rule
-// reads them (answerWords), of a recording F gave the application before
+// reads them (answerLists), of a recording F gave the application before
 // the call that no earlier place of the call's own test is (another recorded
 // test's, or one F gave earlier in the running set: Raw.OfAnotherTest,
-// GivenEarlier): each reading's distinct words, sorted, and apart those its
-// answer's stamps alone hold (stamped), and none of its text. at is when its
-// request was recorded.
+// GivenEarlier). at is when its request was recorded.
 type givenWords struct {
-	mock           string
-	at             time.Time
-	words, stamped [][]string
+	mock string
+	at   time.Time
+	answerLists
 	// late is Raw.late: the reason says the recording is read both ways;
 	// noTime, Raw.noTime: that keploy cannot read when it was recorded.
 	late, noTime bool
@@ -694,8 +731,10 @@ type givenWords struct {
 	// as recorded, F gave words and stamped). Where the value that lacks a
 	// word both runs gave holds a word of the payload, or of any other place
 	// the word rule reads, as either run gave it (inAnswer), the word shows
-	// nothing (follows.tookElsewhere).
+	// nothing (follows.tookElsewhere). view is that view's answerLists,
+	// which servedWhy searches as the call's own places say (keep).
 	gave [][]string
+	view answerLists
 	// answered, conn and pos are the recording's (Raw), first and last F's
 	// serves of it: where the rule lets a word of it go, they place it in
 	// the order the recording and F gave the application the value's
@@ -710,26 +749,19 @@ type givenWords struct {
 	// unstated: F served it and no adapter said what it gave the
 	// application there (Raw.viewUnstated); unread: F served it changed with
 	// a view keploy could not read (Raw.ServedChanged with none); views:
-	// the words of its answer, in each reading, as each view F's serves of it
-	// gave where they differ (Raw.ServedChanged), stamps read as any text.
-	// A word a value holds now that may stand in what F gave there is
-	// refused (servedWhy), as of a place of the call's own test (unseenWhy).
+	// the answerLists of each view F's serves of it gave where they differ
+	// (Raw.ServedChanged). A word a value holds now that may stand in what
+	// F gave there is refused (servedWhy), as of a place of the call's own
+	// test (unseenWhy).
 	unstated, unread bool
-	views            [][][]string
+	views            []answerLists
 }
 
 // wordsOf is x's givenWords, every word a copy.
 func (dc *DriftCache) wordsOf(x Raw) givenWords {
 	g := givenWords{mock: strings.Clone(x.mock), at: x.at, late: x.late, noTime: x.noTime, answered: x.answered, conn: strings.Clone(x.conn), pos: x.pos, first: x.first, last: x.last}
-	plain := dc.answerWords(x, false)
-	kept := plain
-	if len(dc.stampTexts(x)) > 0 {
-		kept = dc.answerWords(x, true)
-	}
-	for i := range plain {
-		g.words = append(g.words, sortedWords(plain[i], nil))
-		g.stamped = append(g.stamped, sortedWords(kept[i], plain[i]))
-	}
+	lists, plain := dc.answerListsOf(x)
+	g.answerLists = lists
 	// Served unchanged, every word is one both gave: the same lists.
 	if x.AsRecorded() {
 		g.same = g.words
@@ -742,19 +774,15 @@ func (dc *DriftCache) wordsOf(x Raw) givenWords {
 		g.unstated, g.unread = x.viewUnstated(), x.unseen && len(x.views) == 0
 	}
 	for _, view := range x.views {
-		var words [][]string
-		for _, w := range dc.answerWords(*view, true) {
-			words = append(words, sortedWords(w, nil))
-		}
-		g.views = append(g.views, words)
+		lists, _ := dc.answerListsOf(*view)
+		g.views = append(g.views, lists)
 	}
 	for _, same := range dc.sameWords(x, plain) {
 		g.same = append(g.same, sortedWords(same, nil))
 	}
 	if x.Live() {
-		for _, gave := range dc.answerWords(*x.live, true) {
-			g.gave = append(g.gave, sortedWords(gave, nil))
-		}
+		lv := dc.viewListsOf(*x.live)
+		g.gave, g.view = lv.gave, lv.answerLists
 	}
 	return g
 }
@@ -859,26 +887,10 @@ func sortedWords(set, minus map[string]bool) []string {
 	return out
 }
 
-// holds reports whether g's answer holds t in reading i, a word of its
-// stamps too where keep says they are searched as any text (stampsEchoed).
-func (g givenWords) holds(i int, t string, keep bool) bool {
-	for _, list := range [][][]string{g.words, g.stamped} {
-		if i < len(list) {
-			if k := sort.SearchStrings(list[i], t); k < len(list[i]) && list[i][k] == t {
-				return true
-			}
-		}
-		if !keep {
-			break
-		}
-	}
-	return false
-}
-
 // servedWhy says why named, a word t a value holds now in reading i, may
 // have come from what F gave the application in g, a recording no earlier
 // place of the call's own test is (whose: givenWhose), "" where it may not:
-// where F's view of it holds t (gave: Raw.ServedLive), where one of the
+// where F's view of it holds t (view: Raw.ServedLive), where one of the
 // views its serves gave holds t (views: Raw.ServedChanged), and wherever
 // keploy cannot tell what F gave there (unstated, unread). The recording's
 // own words are holds'; these are what F gave the application there and the
@@ -886,29 +898,25 @@ func (g givenWords) holds(i int, t string, keep bool) bool {
 // (unaccounted, unseenWhy): keploy follows no value of another test's, nor
 // can it tell a copy of what F gave there from a value of the call's own,
 // so it refuses rather than learn the word as noise (fail closed). A word
-// the recording holds (held) is no word only F gave: the views are not
-// searched for it (givenWhy read it with the recording's words).
-func (g givenWords) servedWhy(i int, t, named, whose string, held bool) string {
-	in := func(list [][]string) bool {
-		if i >= len(list) {
-			return false
-		}
-		k := sort.SearchStrings(list[i], t)
-		return k < len(list[i]) && list[i][k] == t
-	}
+// the recording holds is no word only F gave: the views are not searched
+// for it (givenWhy read it with the recording's words). Each is searched as
+// the call's own places say stamps are (keep: stampsEchoed), as a place of
+// the call's own test is (wordsHeld): a word the view's stamps alone hold
+// is no word F gave there where they are not searched as any text.
+func (g givenWords) servedWhy(i int, t, named, whose string, keep bool) string {
 	of := ", a recording record's full round gave the application before the call that " + whose
 	switch {
 	case g.unstated:
 		return named + " may stand in " + g.mock + of + ", where its adapter did not say what it gave the application there: keploy cannot tell whether it came from there"
 	case g.unread:
 		return named + " may stand in " + g.mock + of + ", served changed, where keploy could not read what it gave the application: keploy cannot tell whether it came from there"
-	case held:
+	case g.holds(i, t, keep):
 		return ""
-	case in(g.gave):
+	case g.view.holds(i, t, keep):
 		return named + " appears in " + g.mock + " as record's full round gave it, where the recording did not give the application that word" + of + ": keploy cannot tell whether it came from there"
 	}
 	for _, view := range g.views {
-		if in(view) {
+		if view.holds(i, t, keep) {
 			return named + " appears in " + g.mock + " as record's full round gave it in one of " + strconv.Itoa(len(g.views)) + " serves that gave the application different views of it, where the recording did not give the application that word" + of + ": keploy cannot tell which of them the application read, nor whether it came from there"
 		}
 	}
@@ -1041,11 +1049,34 @@ func placesUnread(set []GivenPlaces) string {
 type setPlaces struct {
 	mu    sync.Mutex
 	of    map[string]GivenPlaces
-	views map[string][][]string
+	views map[string]viewLists
+}
+
+// viewLists are the words of a view F's serves of a recording gave the
+// application (Raw.ServedLive's live, setPlaces.views): its answerLists,
+// and gave, its words with stamps read as any text (givenWords.gave).
+type viewLists struct {
+	answerLists
+	gave [][]string
+}
+
+// viewListsOf is the viewLists of lv, a view F gave of a recording, every
+// word a copy.
+func (dc *DriftCache) viewListsOf(lv Raw) viewLists {
+	lists, _ := dc.answerListsOf(lv)
+	// With no stamps its words read the same either way: one list.
+	v := viewLists{answerLists: lists, gave: lists.words}
+	if len(dc.stampTexts(lv)) > 0 {
+		v.gave = nil
+		for _, w := range dc.answerWords(lv, true) {
+			v.gave = append(v.gave, sortedWords(w, nil))
+		}
+	}
+	return v
 }
 
 func newSetPlaces() *setPlaces {
-	return &setPlaces{of: map[string]GivenPlaces{}, views: map[string][][]string{}}
+	return &setPlaces{of: map[string]GivenPlaces{}, views: map[string]viewLists{}}
 }
 
 // GivenPlaces is m as the offset rule reads it among the recordings F gave
@@ -1088,38 +1119,38 @@ func (o Order) statedWords(m *models.Mock, w givenWords, answers bool) givenWord
 	o.t.mu.Lock()
 	recorded, keys, loads, unread, ok := o.viewsLocked(id)
 	o.t.mu.Unlock()
-	w.unstated, w.unread, w.gave, w.views = !ok, ok && unread, nil, nil
+	w.unstated, w.unread, w.gave, w.view, w.views = !ok, ok && unread, nil, answerLists{}, nil
 	if !ok || unread || len(loads) == 0 {
 		return w
 	}
-	views := make([][][]string, 0, len(loads))
+	views := make([]answerLists, 0, len(loads))
 	for k, load := range loads {
 		words, read := o.places.viewWords(m, id, keys[k], load)
 		if !read {
 			w.unread = true
 			return w
 		}
-		views = append(views, words)
-	}
-	if !recorded && len(views) == 1 {
-		w.gave = views[0]
-		return w
+		if !recorded && len(loads) == 1 {
+			w.gave, w.view = words.gave, words.answerLists
+			return w
+		}
+		views = append(views, words.answerLists)
 	}
 	// A serve told as recorded gave the recording itself: one of the views,
 	// which holds no word the recorded text does not (Order.ServedView).
 	if recorded {
-		views = append(views, w.words)
+		views = append(views, w.answerLists)
 	}
 	w.views = views
 	return w
 }
 
 // viewWords is the words of the answer of the view load gives of m, which F
-// served (viewRaw), in each reading, stamps read as any text, as wordsOf
-// reads a view: kept by c, a set's, by m's identity (id) and the view's
-// place among those the set keeps of it (k). false where the view cannot be
-// read; nothing is kept of it then.
-func (c *setPlaces) viewWords(m *models.Mock, id string, k int, load func() (*models.Mock, error)) ([][]string, bool) {
+// served (viewRaw), in each reading, as wordsOf reads a view (viewLists):
+// kept by c, a set's, by m's identity (id) and the view's place among those
+// the set keeps of it (k). false where the view cannot be read; nothing is
+// kept of it then.
+func (c *setPlaces) viewWords(m *models.Mock, id string, k int, load func() (*models.Mock, error)) (viewLists, bool) {
 	key := id + "\x00" + strconv.Itoa(k)
 	if c != nil {
 		c.mu.Lock()
@@ -1132,12 +1163,9 @@ func (c *setPlaces) viewWords(m *models.Mock, id string, k int, load func() (*mo
 	r := Raw{mock: m.Name, call: callOf(m), served: true}
 	lv, ok := r.viewOf(viewRaw(m, load))
 	if !ok {
-		return nil, false
+		return viewLists{}, false
 	}
-	var words [][]string
-	for _, w := range NewDriftCache().answerWords(*lv, true) {
-		words = append(words, sortedWords(w, nil))
-	}
+	words := NewDriftCache().viewListsOf(*lv)
 	if c != nil {
 		c.mu.Lock()
 		c.views[key] = words

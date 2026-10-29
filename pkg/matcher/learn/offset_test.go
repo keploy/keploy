@@ -866,17 +866,8 @@ func TestAWordOfAnotherTestsAnswerIsRefusedNamingIt(t *testing.T) {
 // row of TestAWordOfAnotherTestsAnswerIsRefusedNamingIt).
 func TestAnotherTestsAnswerStampIsSearchedWhereTheValueEchoesAStamp(t *testing.T) {
 	const p = "body.slot"
-	date := func(v string) Seen {
-		return Seen{Side: Response, Leaf: Leaf{Path: "header.date", Noise: "header.date", Type: String, Value: v}, Live: v, Stamp: true}
-	}
-	own := []Earlier{
-		{Mock: "mock-1", At: r1Insert.Add(-3 * time.Second), Payload: payloadOf("mock-1", r1Insert.Add(-3*time.Second)), Own: true, Seen: []Seen{date("Wed, 21 Oct 2026 08:14:44 GMT")}},
-		{Mock: "mock-2", At: r1Insert.Add(-2 * time.Second), Payload: payloadOf("mock-2", r1Insert.Add(-2*time.Second)), Own: true, Seen: []Seen{date("Wed, 21 Oct 2026 08:15:44 GMT")}},
-	}
-	// The value's instant moves by the lead, so its minute and second are
-	// clock words the word rules skip; only "03" -> "54" changed besides.
-	rec := "slot-03 " + r1Insert.Format(time.RFC3339)
-	live := "slot-54 " + r1Insert.Add(FullRoundLead).Format(time.RFC3339)
+	own := stampEcho()
+	rec, live := stampEchoValues()
 	for _, stampHolds := range []bool{false, true} {
 		// Another test's answer, its Date header its own clock stamp (its
 		// span holds it): 10:54:17 holds the word 54, 10:53:17 does not.
@@ -902,6 +893,133 @@ func TestAnotherTestsAnswerStampIsSearchedWhereTheValueEchoesAStamp(t *testing.T
 			}
 			if ln.Kind != KindNoise {
 				t.Errorf("another test's stamp holds 54 %v, the value echoes a stamp %v: %s (%s); want noise", stampHolds, echoed, ln.Kind, ln.Why)
+			}
+		}
+	}
+}
+
+// stampEcho are two exchanges of the call's own test whose Date headers,
+// stamps F served, moved apart by a minute, as the minute of the value of
+// stampEchoValues moves: the value echoes a stamp (stampsEchoed), and stamps
+// are searched as any text.
+func stampEcho() []Earlier {
+	date := func(v string) Seen {
+		return Seen{Side: Response, Leaf: Leaf{Path: "header.date", Noise: "header.date", Type: String, Value: v}, Live: v, Stamp: true}
+	}
+	return []Earlier{
+		{Mock: "mock-1", At: r1Insert.Add(-3 * time.Second), Payload: payloadOf("mock-1", r1Insert.Add(-3*time.Second)), Own: true, Seen: []Seen{date("Wed, 21 Oct 2026 08:14:44 GMT")}},
+		{Mock: "mock-2", At: r1Insert.Add(-2 * time.Second), Payload: payloadOf("mock-2", r1Insert.Add(-2*time.Second)), Own: true, Seen: []Seen{date("Wed, 21 Oct 2026 08:15:44 GMT")}},
+	}
+}
+
+// stampEchoValues are a value as recorded and as it stands now whose
+// instant moves by the lead, so its minute and second are clock words the
+// word rules skip; only "03" -> "54" changed besides.
+func stampEchoValues() (rec, live string) {
+	return "slot-03 " + r1Insert.Format(time.RFC3339), "slot-54 " + r1Insert.Add(FullRoundLead).Format(time.RFC3339)
+}
+
+// F's view of a recording no earlier place of the call's own test is
+// (another test's, or one F served in an older test of the set) is searched
+// as the call's own places say stamps are (stampsEchoed), as the
+// recording's own words are and as a place of the call's own test is
+// (wordsHeld): a word of the value that the Date header of the view F gave
+// alone holds is noise where the value echoes no stamp, as it is where the
+// recording is of the call's own test, and refused, naming the recording,
+// where it echoes one. Each view's words were read with their stamps as any
+// text whatever the echo said, so the word was refused with a false reason
+// ("where the recording did not give the application that word") where a
+// place of the call's own test learned it (FALSE RED).
+func TestAStampOfFsViewOfAnotherTestsAnswerIsSearchedAsTheCallsOwnPlacesSay(t *testing.T) {
+	const p = "body.slot"
+	rec, live := stampEchoValues()
+	// The recording's Date (10:53:17) holds no word 54; that of the view F
+	// gave (10:54:17) does, and the view's body differs too.
+	recAt, viewAt := r1Insert.Add(-21*time.Minute), r1Insert.Add(-20*time.Minute)
+	m := receiveOf("mock-21", "aaaaaaaa-1111-4222-8333-bbbbbbbbbbbb", recAt)
+	m.Spec.HTTPResp.Header["Date"] = recAt.Format(http.TimeFormat)
+	viewOf := func(at time.Time, body string) *models.Mock {
+		v := receiveOf("mock-21", "aaaaaaaa-1111-4222-8333-bbbbbbbbbbbb", at)
+		v.Spec.HTTPResp.Header["Date"] = at.Format(http.TimeFormat)
+		v.Spec.HTTPResp.Body = strings.Replace(v.Spec.HTTPResp.Body, `"Body": "S12 message"`, `"Body": "`+body+`"`, 1)
+		return v
+	}
+	view, other := viewOf(viewAt, "S13 message"), viewOf(recAt, "S14 message")
+	if !strings.Contains(view.Spec.HTTPResp.Header["Date"], ":54:") || strings.Contains(m.Spec.HTTPResp.Header["Date"], "54") || view.Spec.HTTPResp.Body == m.Spec.HTTPResp.Body || other.Spec.HTTPResp.Body == m.Spec.HTTPResp.Body {
+		t.Fatalf("the fixture: recorded %q, view %q", m.Spec.HTTPResp.Header["Date"], view.Spec.HTTPResp.Header["Date"])
+	}
+	const (
+		inView = "a word of what record's full round saw in it (its characters 6 to 7) appears in mock-21 as record's full round gave it, where the recording did not give the application that word"
+		inTwo  = "a word of what record's full round saw in it (its characters 6 to 7) appears in mock-21 as record's full round gave it in one of 2 serves that gave the application different views of it, where the recording did not give the application that word"
+	)
+	served := func(dc *DriftCache) Raw { return dc.RawOf(m, true).ServedAs(3) }
+	// order is the set's Order after tell said what F's serve of m in its
+	// first test gave the application, read in its third.
+	order := func(tell func(tr *Tracker)) Order {
+		tr := NewTracker()
+		tr.Begin()
+		tr.ServedMock(m)
+		tell(tr)
+		tr.End()
+		tr.Begin()
+		tr.End()
+		tr.Begin()
+		return tr.Placed().Order
+	}
+	loader := func(v *models.Mock) func() (*models.Mock, error) {
+		return func() (*models.Mock, error) { return v, nil }
+	}
+	for _, row := range []struct {
+		name string
+		want string // refused where the value echoes a stamp
+		run  func(dc *DriftCache, own []Earlier) Learned
+	}{
+		{"another test's, served with a view", inView, func(dc *DriftCache, own []Earlier) Learned {
+			x := served(dc).ServedLive(dc.RawOf(view, true)).OfAnotherTest()
+			return ClassifyIn(dc, []string{p}, strLeaf(p, live), strLeaf(p, rec), r1Insert, own, []Raw{x}, nil, nil)[0]
+		}},
+		{"another test's, served with two views", inTwo, func(dc *DriftCache, own []Earlier) Learned {
+			x := served(dc).ServedChanged(dc.RawOf(other, true), dc.RawOf(view, true)).OfAnotherTest()
+			return ClassifyIn(dc, []string{p}, strLeaf(p, live), strLeaf(p, rec), r1Insert, own, []Raw{x}, nil, nil)[0]
+		}},
+		{"earlier in the set, served with a view", inView, func(dc *DriftCache, own []Earlier) Learned {
+			x := served(dc).ServedLive(dc.RawOf(view, true))
+			return ClassifyGiven(dc, []string{p}, strLeaf(p, live), strLeaf(p, rec), r1Insert, own, nil, nil, nil, func() ([]GivenPlaces, error) { return []GivenPlaces{PlacesOf(x)}, nil })[0]
+		}},
+		{"in an older test of the set, told with a view", inView, func(dc *DriftCache, own []Earlier) Learned {
+			o := order(func(tr *Tracker) { tr.ServedMockLive(m, "a", loader(view)) })
+			return ClassifyGiven(dc, []string{p}, strLeaf(p, live), strLeaf(p, rec), r1Insert, own, nil, nil, nil, func() ([]GivenPlaces, error) {
+				g, err := o.GivenPlaces(m)
+				return []GivenPlaces{g}, err
+			})[0]
+		}},
+		{"in an older test of the set, told as recorded and with a view", inTwo, func(dc *DriftCache, own []Earlier) Learned {
+			o := order(func(tr *Tracker) {
+				tr.ServedMockAsRecorded(m)
+				tr.ServedMock(m)
+				tr.ServedMockLive(m, "a", loader(view))
+			})
+			return ClassifyGiven(dc, []string{p}, strLeaf(p, live), strLeaf(p, rec), r1Insert, own, nil, nil, nil, func() ([]GivenPlaces, error) {
+				g, err := o.GivenPlaces(m)
+				return []GivenPlaces{g}, err
+			})[0]
+		}},
+		{"the call's own test's, served with a view", "a word of what record's full round saw in it (its characters 6 to 7) appears in an earlier recording, in mock-21 at spec.resp.header.Date, as record's full round gave it", func(dc *DriftCache, own []Earlier) Learned {
+			x := served(dc).ServedLive(dc.RawOf(view, true))
+			return ClassifyIn(dc, []string{p}, strLeaf(p, live), strLeaf(p, rec), r1Insert, own, []Raw{x}, nil, nil)[0]
+		}},
+	} {
+		for _, echoed := range []bool{false, true} {
+			var own []Earlier
+			if echoed {
+				own = stampEcho()
+			}
+			ln := row.run(clockedDrifts(), own)
+			switch {
+			case !echoed && ln.Kind != KindNoise:
+				t.Errorf("FALSE RED: %s, the value echoes no stamp: %s (%s); want noise: only the Date of the view F gave holds 54", row.name, ln.Kind, ln.Why)
+			case echoed && (ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, row.want)):
+				t.Errorf("FALSE GREEN? %s, the value echoes a stamp: %s (%s); want refused: %s", row.name, ln.Kind, ln.Why, row.want)
 			}
 		}
 	}
