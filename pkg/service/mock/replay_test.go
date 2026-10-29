@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 func TestSetTableCarriesTheFirstSuiteStart(t *testing.T) {
@@ -125,5 +127,31 @@ func TestAReplayTriesAStalledStartAgain(t *testing.T) {
 				t.Fatalf("error %v, want %v kept", err, tc.want)
 			}
 		})
+	}
+}
+
+// keploy mock says each background call once, worded from where it was made:
+// a call made outside every test's window as such, and a call of a marked
+// background series made inside a test's window (its parser marks it,
+// models.UnmatchedCall.MadeInTest) as made inside one, never outside every
+// test (background-poll-series s21).
+func TestLogMissSaysWhereABackgroundCallWasMade(t *testing.T) {
+	for _, c := range []struct {
+		kind, line string
+	}{
+		{models.MissOutsideTest, "a call the application made outside every test had no recorded answer"},
+		{models.MissInTest, "a call of a marked background series, made inside a test's window, had no recorded answer"},
+		{models.MissExtraCall, "a call of a marked background series, made inside a test's window, had no recorded answer"},
+	} {
+		core, logs := observer.New(zap.WarnLevel)
+		logMiss(zap.New(core), models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "GET /jobs", Destination: "jobs:80",
+			Kind: c.kind, Background: true, ClosestMock: "mock-12"})
+		said := logs.All()
+		if len(said) != 1 || said[0].Level != zap.WarnLevel || !strings.HasPrefix(said[0].Message, c.line) {
+			t.Fatalf("kind %q: said %+v; want one WARN line beginning %q", c.kind, said, c.line)
+		}
+		if f := said[0].ContextMap(); f["call"] != "GET /jobs" || f["why"] != "no recording of the set is this call; closest mock-12" {
+			t.Fatalf("kind %q: the line does not say what was called and why: %+v", c.kind, f)
+		}
 	}
 }
