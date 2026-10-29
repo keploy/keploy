@@ -448,8 +448,82 @@ func TestMachineOutputKeepsNoLogFile(t *testing.T) {
 			if len(logs) != 0 || utils.LogFile != nil {
 				t.Errorf("a run with machine-readable output kept %v (LogFile %v); want no log file", logs, utils.LogFile)
 			}
+			// Closed, not only unlinked: a line logged from here on reaches no
+			// file. An open sink would go on filling the unlinked file, up to
+			// its 100 MiB cap of temp space nobody can see or remove.
+			cc.logger.Info("a line logged once the flags showed a document")
+			if _, err := f.Write(nil); !errors.Is(err, os.ErrClosed) {
+				size := int64(-1)
+				if fi, err := f.Stat(); err == nil {
+					size = fi.Size()
+				}
+				t.Errorf("the log of a run with machine-readable output is still open (write: %v; it holds %d bytes): its lines go on to a file nobody is told about", err, size)
+			}
 			if strings.Contains(out, "logs:") {
 				t.Errorf("a run with machine-readable output named a log on stdout:\n%s", out)
+			}
+		})
+	}
+}
+
+// WantsMachineOutput reads the command line, and the config file, as
+// ValidateFlags will decide it, before cobra parses anything: main builds a
+// logger that keeps no log file for a run it says yes to.
+func TestWantsMachineOutput(t *testing.T) {
+	dir := t.TempDir()
+	project := filepath.Join(dir, "project")
+	other := filepath.Join(dir, "other")
+	for _, d := range []string{project, other} {
+		if err := os.Mkdir(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write := func(path, body string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(filepath.Join(other, "keploy.yml"), "report:\n  format: junit\n")
+	t.Chdir(project)
+
+	for _, c := range []struct {
+		name      string
+		args      []string
+		keployYml string // in the working directory
+		override  string // project.keploy.yml, in the working directory
+		want      bool
+	}{
+		{name: "--json", args: []string{"record", "--json"}, want: true},
+		{name: "--json=true ahead of the command", args: []string{"--json=true", "report"}, want: true},
+		{name: "--json=false", args: []string{"report", "--json=false"}},
+		{name: "the last --json wins", args: []string{"report", "--json", "--json=false"}},
+		{name: "report --format json", args: []string{"report", "--format", "json"}, want: true},
+		{name: "report --format=JUNIT", args: []string{"report", "--format=JUNIT"}, want: true},
+		{name: "report --format text", args: []string{"report", "--format", "text"}},
+		{name: "the last --format wins", args: []string{"report", "--format", "json", "--format", "text"}},
+		{name: "report", args: []string{"report"}},
+		{name: "--format of another command", args: []string{"test", "--format", "json"}},
+		{name: "a root flag's value is not the command", args: []string{"--storage-format", "report", "test", "--format", "json"}},
+		{name: "past --", args: []string{"record", "-c", "app", "--", "--json"}},
+		{name: "report.format json in keploy.yml", args: []string{"report"}, keployYml: "report:\n  format: json\n", want: true},
+		{name: "the flag wins over keploy.yml", args: []string{"report", "--format", "text"}, keployYml: "report:\n  format: json\n"},
+		{name: "keploy.yml of another command", args: []string{"test"}, keployYml: "report:\n  format: json\n"},
+		{name: "the override file", args: []string{"report"}, keployYml: "report:\n  format: text\n", override: "report:\n  format: json\n", want: true},
+		{name: "keploy.yml in --config-path", args: []string{"report", "--config-path", other}, want: true},
+		{name: "keploy.yml in --configPath=", args: []string{"report", "--configPath=" + other}, want: true},
+		{name: "a keploy.yml that is no YAML", args: []string{"report"}, keployYml: "report: [\n"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			for name, body := range map[string]string{"keploy.yml": c.keployYml, "project.keploy.yml": c.override} {
+				path := filepath.Join(project, name)
+				_ = os.Remove(path)
+				if body != "" {
+					write(path, body)
+				}
+			}
+			if got := WantsMachineOutput(append([]string{"keploy"}, c.args...)); got != c.want {
+				t.Errorf("WantsMachineOutput(keploy %s) = %v, want %v", strings.Join(c.args, " "), got, c.want)
 			}
 		})
 	}

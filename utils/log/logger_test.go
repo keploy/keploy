@@ -1299,8 +1299,11 @@ func TestTheRunsLogEndsWithOneNoteWhicheverProcessFillsIt(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if fi.Mode().Perm() != logFileSealedMode {
-				t.Errorf("the full log's mode is %v, want %v", fi.Mode().Perm(), logFileSealedMode)
+			// Sealed: its owner can read it and no keploy process writes it.
+			// Bits, not the whole mode: Windows reports a read-only file as
+			// 0444, where Unix has logFileSealedMode.
+			if perm := fi.Mode().Perm(); perm&0o200 != 0 || perm&0o400 == 0 {
+				t.Errorf("the full log's mode is %v, want its owner's write bit gone and read bit kept", perm)
 			}
 		})
 	}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"runtime"
@@ -11,6 +12,7 @@ import (
 	"testing"
 
 	"go.keploy.io/server/v3/utils"
+	"go.uber.org/zap"
 )
 
 // subprocessEnv makes TestMain run the real CLI instead of the test suite, so
@@ -37,11 +39,36 @@ func TestMain(m *testing.M) {
 			fmt.Fprintf(os.Stderr, "refused: keploy %s would re-execute this test binary through sudo; give the case a native -c\n", strings.Join(os.Args[1:], " "))
 			os.Exit(childWouldSudo)
 		}
+		if hold := os.Getenv(holdAfterLoggerEnv); hold != "" {
+			holdAfterLogger(hold)
+		}
 		setVersion()
 		start(utils.NewCtx())
 		os.Exit(utils.ErrCode)
 	}
 	os.Exit(m.Run())
+}
+
+// holdAfterLoggerEnv names a named pipe at which a re-executed CLI is held
+// right after start() built its logger (newLogger, the real one), before
+// cobra parses anything: holdAfterLogger.
+const holdAfterLoggerEnv = "KEPLOY_TEST_HOLD_AFTER_LOGGER"
+
+// holdAfterLogger holds the CLI right after its logger is built: it opens the
+// named pipe fifo to read, which waits for the test to open it to write, and
+// reads it until the test closes it. When the test's open returns, the run
+// has its logger, and its log file if it keeps one, and does nothing more
+// until the test lets it go.
+func holdAfterLogger(fifo string) {
+	inner := newLogger
+	newLogger = func() (*zap.Logger, *os.File, error) {
+		logger, f, err := inner()
+		if r, openErr := os.Open(fifo); openErr == nil {
+			_, _ = io.Copy(io.Discard, r)
+			_ = r.Close()
+		}
+		return logger, f, err
+	}
 }
 
 // runCLI re-executes this test binary as the keploy CLI with the given

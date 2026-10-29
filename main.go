@@ -59,9 +59,21 @@ func setVersion() {
 	utils.VersionIdentifier = "version"
 }
 
-// newLogger is log.New; a test swaps in one that fails. log.New itself does
+// newLogger is runLogger; a test swaps in one that fails. log.New itself does
 // not fail where it cannot create its temp log file: it logs to the console.
-var newLogger = log.New
+var newLogger = runLogger
+
+// runLogger is log.New, less the log file for a run whose stdout is a document
+// (provider.WantsMachineOutput: --json, `report --format json`): such a run
+// names no log, so it creates none, and one killed before its flags are
+// checked leaves nothing in the temp directory.
+func runLogger() (*zap.Logger, *os.File, error) {
+	if provider.WantsMachineOutput(os.Args) {
+		logger, err := log.NewWithoutFile()
+		return logger, nil, err
+	}
+	return log.New()
+}
 
 func start(ctx context.Context) {
 	logger, logFile, err := newLogger()

@@ -176,3 +176,95 @@ func TestNativeAgentAppendsToItsCLIsLog(t *testing.T) {
 	requireEmpty(t, tmp, "a run")
 	requireEmpty(t, dir, "a run")
 }
+
+// A run whose stdout is a document -- --json, `report --format json|junit`,
+// or report.format json in keploy.yml -- creates no log file at all, not one
+// it removes once its flags are checked: held right after its logger is
+// built, before cobra parses anything, it has none, so a kill there leaves
+// nothing in the temp directory. A text run held at the same point has its
+// log, which shows the hold is past the point the log is created.
+func TestMachineOutputRunCreatesNoLogEvenBeforeItsFlagsAreChecked(t *testing.T) {
+	if code := runCLI(t, "--help"); code != 0 {
+		t.Skipf("keploy --help exited %d; CLI startup is unusable in this environment", code)
+	}
+	for _, c := range []struct {
+		name      string
+		args      []string
+		keployYml string
+		keeps     bool
+	}{
+		{name: "report --format json", args: []string{"report", "--format", "json"}},
+		{name: "report --format=junit", args: []string{"report", "--format=junit"}},
+		{name: "--json", args: []string{"--json", "report"}},
+		{name: "report.format json in keploy.yml", args: []string{"report"}, keployYml: "report:\n  format: \"json\"\n"},
+		{name: "report --format text", args: []string{"report", "--format", "text"}, keployYml: "report:\n  format: \"json\"\n", keeps: true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dir, tmp := t.TempDir(), t.TempDir()
+			if c.keployYml != "" {
+				if err := os.WriteFile(filepath.Join(dir, "keploy.yml"), []byte(c.keployYml), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			fifo := filepath.Join(t.TempDir(), "hold.fifo")
+			if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+				t.Skipf("cannot make a named pipe here: %v", err)
+			}
+			cmd := exec.Command(os.Args[0])
+			cmd.Args = append([]string{"keploy"}, c.args...)
+			cmd.Env = append(os.Environ(), subprocessEnv+"=1", "TMPDIR="+tmp, holdAfterLoggerEnv+"="+fifo)
+			cmd.Dir = dir
+			out := &bytes.Buffer{}
+			cmd.Stdout, cmd.Stderr = out, out
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			var waitErr error
+			exited := make(chan struct{})
+			go func() { waitErr = cmd.Wait(); close(exited) }()
+			t.Cleanup(func() {
+				_ = cmd.Process.Kill()
+				<-exited
+			})
+
+			// The open returns once the run is at its hold.
+			opened := make(chan *os.File, 1)
+			go func() {
+				w, err := os.OpenFile(fifo, os.O_WRONLY, 0)
+				if err != nil {
+					w = nil
+				}
+				opened <- w
+			}()
+			var w *os.File
+			select {
+			case w = <-opened:
+			case <-exited:
+				// Lets the open above return, so its goroutine ends.
+				if r, e := os.OpenFile(fifo, os.O_RDONLY|syscall.O_NONBLOCK, 0); e == nil {
+					_ = r.Close()
+				}
+				t.Fatalf("keploy %s ended (%v) before its hold:\n%s", strings.Join(c.args, " "), waitErr, out)
+			case <-time.After(60 * time.Second):
+				t.Fatalf("keploy %s never reached its hold", strings.Join(c.args, " "))
+			}
+			if w == nil {
+				t.Fatal("cannot open the hold's pipe")
+			}
+			held, _ := filepath.Glob(filepath.Join(tmp, log.LogFilePattern))
+			if c.keeps && len(held) != 1 {
+				t.Errorf("a text run held after its logger has %d logs %v, want its one", len(held), held)
+			}
+			if !c.keeps && len(held) != 0 {
+				t.Errorf("a run with machine-readable output, held before its flags are checked, has created %v; want no log file", held)
+			}
+			_ = w.Close()
+			select {
+			case <-exited:
+			case <-time.After(120 * time.Second):
+				t.Fatalf("keploy %s did not end once let go:\n%s", strings.Join(c.args, " "), out)
+			}
+			requireEmpty(t, tmp, "keploy "+strings.Join(c.args, " "))
+		})
+	}
+}

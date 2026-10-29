@@ -471,7 +471,22 @@ func ensureLogCfg() {
 	}
 }
 
+// New builds the run's logger: the console, and beside it the run's log file,
+// which it returns.
 func New() (*zap.Logger, *os.File, error) {
+	return newLogger(true)
+}
+
+// NewWithoutFile is New for a run that keeps no log file: one whose stdout is
+// a document (--json, `report --format json`), which has no room for the
+// `logs:` line that would name it. Nothing is created anywhere, so a run that
+// is killed leaves nothing behind.
+func NewWithoutFile() (*zap.Logger, error) {
+	logger, _, err := newLogger(false)
+	return logger, err
+}
+
+func newLogger(withFile bool) (*zap.Logger, *os.File, error) {
 	// Register the ANSI-friendly encoder
 	_ = zap.RegisterEncoder("ansiConsole", func(config zapcore.EncoderConfig) (zapcore.Encoder, error) {
 		return NewANSIConsoleEncoder(config), nil
@@ -483,7 +498,11 @@ func New() (*zap.Logger, *os.File, error) {
 	// not the command: it logs to the console only, and says so once at debug
 	// (ChangeLogLevel). An agent that does not take the CLI's says where its
 	// own is, and why at debug.
-	logFile, refused, notHanded, err := openLogFile()
+	var logFile *os.File
+	var refused, notHanded, err error
+	if withFile {
+		logFile, refused, notHanded, err = openLogFile()
+	}
 	var notes []logFileNote
 	if refused != nil {
 		notes = append(notes, logFileNote{"not appending to the CLI's log", refused.Error()})

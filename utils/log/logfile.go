@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 )
 
@@ -56,6 +57,13 @@ var openFile = os.OpenFile
 // which CloseLogFile closes without removing it; nil when the run's log is its
 // own.
 var borrowedLog atomic.Pointer[os.File]
+
+// ownLogs holds each log this process created (createLogFile) and has not
+// closed, with what it was when created: CloseLogFile closes and removes only
+// a log it holds, and takes it out first, so a second close of the same log
+// is a no-op on every platform. Nothing is asked of a closed file: on
+// Windows, a closed file's Stat is an error of its own, not os.ErrClosed.
+var ownLogs sync.Map // *os.File -> os.FileInfo
 
 // openLogFile opens this run's log: the CLI's, for a native agent it names it
 // to (ClientLogFileFlag) when the file passes openClientLogFile's checks, a
@@ -133,6 +141,13 @@ func createLogFile() (f *os.File, notHanded, err error) {
 			_ = os.Remove(name)
 			return nil, nil, err
 		}
+		own, err := f.Stat()
+		if err != nil {
+			_ = f.Close()
+			_ = os.Remove(name)
+			return nil, nil, err
+		}
+		ownLogs.Store(f, own)
 		return f, giveLogToSudoUser(f), nil
 	}
 }
@@ -204,9 +219,10 @@ func openOwnLog(f *os.File) (*os.File, error) {
 }
 
 // CloseLogFile closes f, this run's log, and removes it (RemoveLogFile). A nil
-// f, a run that keeps no log, and an f already closed are no-ops. The CLI's
-// log an agent appends to (ClientLogFileFlag) is only closed: it is the CLI's
-// to remove.
+// f (a run that keeps no log), an f CloseLogFile already closed, and a file
+// this process did not open as its log are no-ops: it tracks which logs it
+// opened (ownLogs, borrowedLog) rather than ask f. The CLI's log an agent
+// appends to (ClientLogFileFlag) is only closed: it is the CLI's to remove.
 func CloseLogFile(f *os.File) error {
 	if f == nil {
 		return nil
@@ -215,31 +231,29 @@ func CloseLogFile(f *os.File) error {
 	if borrowedLog.CompareAndSwap(f, nil) {
 		return f.Close()
 	}
-	own, statErr := f.Stat()
-	if errors.Is(statErr, os.ErrClosed) {
+	own, ok := ownLogs.LoadAndDelete(f)
+	if !ok {
 		return nil
 	}
-	closeErr := f.Close()
-	if statErr != nil {
-		return errors.Join(closeErr, statErr)
-	}
-	return errors.Join(closeErr, removeIfStill(f.Name(), own))
+	return errors.Join(f.Close(), removeIfStill(f.Name(), own.(os.FileInfo)))
 }
 
 // RemoveLogFile removes f, this run's log, by its name, and only while that
 // name is still the file this run created, so a run never removes a file
 // another put there. f stays open: what is still written to it goes nowhere
 // once f is closed, as a process that is about to exec into another does.
-// The CLI's log an agent appends to is the CLI's to remove, never the agent's.
+// The CLI's log an agent appends to is the CLI's to remove, never the agent's,
+// and a file this process did not create as its log (ownLogs) is not its to
+// remove either.
 func RemoveLogFile(f *os.File) error {
 	if f == nil || borrowedLog.Load() == f {
 		return nil
 	}
-	own, err := f.Stat()
-	if err != nil {
-		return err
+	own, ok := ownLogs.Load(f)
+	if !ok {
+		return nil
 	}
-	return removeIfStill(f.Name(), own)
+	return removeIfStill(f.Name(), own.(os.FileInfo))
 }
 
 // removeIfStill removes name while it is still own.

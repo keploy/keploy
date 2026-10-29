@@ -1352,8 +1352,11 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		// Nor does such a run keep a log file: the `logs:` line that names it
 		// is PrintLogo's, which a document on stdout has no room for, and a
 		// file nobody is told about is one a killed run leaves in the temp
-		// directory for nobody to find. The lines logged so far are on the
-		// console (stderr), as every later one is.
+		// directory for nobody to find. main created none where its early
+		// read of the command line saw this (WantsMachineOutput); a log a
+		// spelling that read missed is closed here, so no later line reaches
+		// it, and removed. The lines logged so far are on the console
+		// (stderr), as every later one is.
 		if err := log.CloseLogFile(utils.LogFile); err != nil {
 			c.logger.Debug("failed to remove the log file of a run with machine-readable output", zap.Error(err))
 		}

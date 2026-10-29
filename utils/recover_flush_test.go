@@ -67,7 +67,8 @@ func TestHandleRecoveryAttachesABoundedTailOfTheLog(t *testing.T) {
 		sentry.CurrentHub().BindClient(prev)
 	})
 
-	// A 100 MiB log, sparse but for the lines it ends with.
+	// A 100 MiB log, sparse but for the lines it ends with: 2 MiB of them, more
+	// than a crash report may carry.
 	f, err := os.CreateTemp(t.TempDir(), "keploy-logs-*.txt")
 	if err != nil {
 		t.Fatal(err)
@@ -80,7 +81,7 @@ func TestHandleRecoveryAttachesABoundedTailOfTheLog(t *testing.T) {
 		t.Fatal(err)
 	}
 	const last = "the line the run logged last\n"
-	if _, err := f.WriteString(strings.Repeat("a line of the run\n", 1000) + last); err != nil {
+	if _, err := f.WriteString(strings.Repeat("a line of the run\n", (2<<20)/18) + last); err != nil {
 		t.Fatal(err)
 	}
 	prevLog := LogFile
@@ -101,9 +102,13 @@ func TestHandleRecoveryAttachesABoundedTailOfTheLog(t *testing.T) {
 	if len(tr.events) != 1 {
 		t.Fatalf("Sentry was sent %d events, want the crash", len(tr.events))
 	}
+	// Sentry drops an event past 1 MB (1,000,000 bytes), so the tail leaves
+	// room for the rest of the event: a literal, not crashReportLogTail, so a
+	// bigger crashReportLogTail fails here.
+	const tailLimit = 900_000
 	got, _ := tr.events[0].Extra["logfile"].(string)
-	if len(got) == 0 || len(got) > crashReportLogTail || !strings.HasSuffix(got, last) {
-		t.Errorf("the crash report carries %d bytes of the log ending %q; want its end, at most %d bytes",
-			len(got), got[max(0, len(got)-40):], crashReportLogTail)
+	if len(got) == 0 || len(got) > tailLimit || len(got) > crashReportLogTail || !strings.HasSuffix(got, last) {
+		t.Errorf("the crash report carries %d bytes of the log ending %q; want its end, at most %d bytes (under Sentry's 1 MB event limit)",
+			len(got), got[max(0, len(got)-40):], min(tailLimit, crashReportLogTail))
 	}
 }
