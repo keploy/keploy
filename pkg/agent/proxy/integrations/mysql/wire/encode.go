@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"math"
 	"net"
 	"sync/atomic"
 
@@ -180,13 +181,19 @@ func EncodeToBinary(ctx context.Context, logger *zap.Logger, packet *mysql.Packe
 	// Encode the header for the packet. data may be a result set's cached
 	// payload, shared by every serve of that answer: it is only read here,
 	// into a new slice that holds the header and then the payload.
-	header := make([]byte, 4, 4+len(data))
+	// Bound the payload before sizing the slice, so 4+n cannot overflow.
+	// No recorded MySQL answer comes near 2 GiB.
+	n := len(data)
+	if n > math.MaxInt32 {
+		return nil, fmt.Errorf("encoded %T is %d bytes, more than the 2 GiB limit for one answer", packet.Message, n)
+	}
+	header := make([]byte, 4, 4+n)
 	// IMPORTANT:
 	// For composite (multi-packet) messages, `data` contains multiple packets where
 	// only the FIRST sub-packet lacks its 4-byte header. The recorded header's
 	// PayloadLength corresponds to that first payload only (e.g., column-count = 1).
 	// For single-packet messages, we can safely use len(data).
-	payloadLen := len(data)
+	payloadLen := n
 	if isCompositeMessage(packet.Message) && packet.Header.Header != nil {
 		payloadLen = int(packet.Header.Header.PayloadLength)
 	}
