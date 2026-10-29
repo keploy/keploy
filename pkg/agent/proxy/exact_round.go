@@ -1080,6 +1080,17 @@ func (h *heldScope) AnsweredBackground() []*models.Mock {
 	return h.heldOf(h.MockManager.AnsweredBackground())
 }
 
+// MarkedSeries is the manager's (integrations.MarkedSeriesReader) while the
+// staging is still h's call's: the series and their recordings are the
+// staged set's, and recordings' names restart in each set.
+func (h *heldScope) MarkedSeries(kind models.Kind, known learn.Known) ([]integrations.MarkedSeries, error) {
+	s, err := h.MockManager.MarkedSeries(kind, known)
+	if h.moved() {
+		return nil, nil
+	}
+	return s, err
+}
+
 // FindAnsweredEarlier is the manager's (integrations.AnsweredFinder) while
 // the staging is still h's call's after the lookup: the answered log is the
 // staged set's, and recordings' names restart in each set, so a call of one
