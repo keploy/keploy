@@ -286,14 +286,26 @@ func TestGlobalPassThroughForwardsEachSidesEnd(t *testing.T) {
 	})
 
 	// A wrapper with no CloseWrite of its own is half-closed through the conn
-	// it wraps (NetConn, Unwrap). Red with that look-through gone: the relay
-	// ends on the server's end, and the server never hears the client again.
+	// it wraps (NetConn, Unwrap), bare or inside the pUtil.Conn that
+	// handleConnection puts on top of it, whose CloseWrite is the one the
+	// relay finds. In keploy test the HTTP/2 preface's ackFilter is such a
+	// wrapper, under a bypass rule's pass-through. Red with that look-through
+	// gone: the relay ends on the server's end and the client is closed, so
+	// the server never hears the client again.
+	inConn := func(w net.Conn) net.Conn { return &pUtil.Conn{Conn: w, Reader: w, Logger: zap.NewNop()} }
 	for _, tc := range []struct {
 		name string
 		wrap func(net.Conn) net.Conn
 	}{
 		{"NetConn", func(c net.Conn) net.Conn { return netConnOnly{c} }},
 		{"Unwrap", func(c net.Conn) net.Conn { return unwrapOnly{c} }},
+		{"NetConn, in a pUtil.Conn", func(c net.Conn) net.Conn { return inConn(netConnOnly{c}) }},
+		{"Unwrap, in a pUtil.Conn", func(c net.Conn) net.Conn { return inConn(unwrapOnly{c}) }},
+		{"the HTTP/2 preface's ackFilter, in a pUtil.Conn", func(c net.Conn) net.Conn {
+			f := newAckFilter(c, nil, false)
+			f.done = true // it has taken keploy's SETTINGS ACK out: every byte passes
+			return inConn(f)
+		}},
 	} {
 		t.Run("a wrapper with no CloseWrite is half-closed through the conn it wraps: "+tc.name, func(t *testing.T) {
 			app, client := loopbackPair(t)
@@ -714,7 +726,8 @@ func TestGlobalPassThroughEndsAReaderHoldingItsSidesLastBytes(t *testing.T) {
 		endWithLast: true, rest: make(chan struct{})}
 	dest := &heldWriteConn{Conn: dp, writes: make(chan int, 1), release: make(chan struct{}),
 		err: errors.New("the destination reset the connection")}
-	_, ended := passThrough(t, client, dest)
+	// Limited to its two readers: a slot comes free only once one returns.
+	_, ended, g := passThroughLimited(t, client, dest, 2)
 
 	// The client's reads after its first wait for rest, so that first one is
 	// written alone, and the write holds the relay.
@@ -724,8 +737,16 @@ func TestGlobalPassThroughEndsAReaderHoldingItsSidesLastBytes(t *testing.T) {
 		awaitEvent(t, client.sizes, "a read of the client")
 	}
 	// Its last read began after the one before it was queued; once the
-	// reader parks, it holds that read's bytes, with the queue full.
+	// reader parks, it holds that read's bytes, with the queue full. A reader
+	// that returns instead dropped them: the relay, held in its write, took
+	// none, and the destination's reader reads on, so a free slot in the
+	// group is the client's reader gone. Red, by name, with those bytes
+	// dropped where the queue is full, not a loop until the test's timeout.
 	for !parkedInAHandOff() {
+		if g.TryGo(func() error { return nil }) {
+			close(dest.release)
+			t.Fatal("the client's reader returned without holding its last bytes: the bytes read with its EOF were dropped, not handed on")
+		}
 		runtime.Gosched()
 	}
 	close(dest.release)
