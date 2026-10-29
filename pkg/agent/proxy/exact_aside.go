@@ -22,12 +22,16 @@ import (
 //
 // The set-aside recordings are in none of the view's reads: a parser asks
 // for them (integrations.SetAsideReader) only for a call that no recording
-// it reads answered and that is not one call more than the open test
-// recorded (its extra call, which stays a miss: a test that makes its own
-// call again is never answered by another test's recording of it, keploy
-// #4745's F20), matches the call exactly against them alone, and consumes the
-// one it matched through the store's door. A parser that does not ask serves
-// none, as before.
+// it reads answered, matches the call exactly against them alone, and
+// consumes the one it matched through the store's door. That includes a call
+// one more than the open test recorded: a set-aside test's per-process
+// first-use refresh (a read, the same read again, a write) lands in the
+// window of the next test that uses it, beside that test's own copy of the
+// read. Each set-aside recording answers once in the staging, so the calls of
+// one shape across the set never exceed what the set recorded; past every
+// exact copy left the call stays an extra call (keploy #4745's F20: never a
+// recording served again, nor one the call is not). A parser that does not
+// ask serves none, as before.
 
 // asideRecording is one recording of a set-aside test: the test, and the
 // recording as the replay staged it.
