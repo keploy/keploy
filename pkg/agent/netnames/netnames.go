@@ -15,7 +15,9 @@
 // once, for a fresh list (Store.Refresh) over the stream of asks the CLI holds
 // open (Store.Serve), and waits for that list or the CLI's going away: a
 // container started after the last list is found, and a name no container
-// holds is answered by keploy itself.
+// holds is answered by keploy itself. A miss joins only an ask the CLI has
+// not taken yet: the CLI reads the networks after it takes an ask, so a list
+// for an ask it took before the miss can predate the miss's container.
 package netnames
 
 import (
@@ -47,6 +49,10 @@ type Store struct {
 	networks map[string]struct{}
 	given    bool   // a List was applied
 	asked    uint64 // asks made
+	// taken is the highest ask handed to a CLI (Serve). The CLI reads the
+	// networks after it takes an ask, so a list for a taken ask may predate
+	// a container that joined since: a miss joins no taken ask.
+	taken uint64
 	// settled is the highest ask the CLI is done with: a List answered it,
 	// or the CLI said it could not list the names for it (Serve's after).
 	settled uint64
@@ -126,10 +132,11 @@ func (s *Store) MayOwn(name string) bool {
 	return ok
 }
 
-// Refresh asks the CLI for a fresh List, joining an ask it is not done with
-// yet, and waits until the CLI is done with that ask (a List answers it, or
-// the CLI could not list the names), no CLI holds a stream of asks, or ctx
-// ends. With no CLI holding one it returns at once: nothing would answer.
+// Refresh asks the CLI for a fresh List, joining an ask the CLI has not
+// taken yet (concurrent misses, such as glibc's A and AAAA, share one), and
+// waits until the CLI is done with that ask (a List answers it, or the CLI
+// could not list the names), no CLI holds a stream of asks, or ctx ends.
+// With no CLI holding one it returns at once: nothing would answer.
 func (s *Store) Refresh(ctx context.Context) {
 	s.mu.Lock()
 	if s.streams == 0 {
@@ -137,7 +144,7 @@ func (s *Store) Refresh(ctx context.Context) {
 		return
 	}
 	want := s.asked
-	if want <= s.settled {
+	if want <= s.settled || want <= s.taken {
 		s.asked++
 		want = s.asked
 	}
@@ -164,7 +171,8 @@ func (s *Store) Refresh(ctx context.Context) {
 // asks after after, in order, until ctx ends (the CLI went away) or send
 // fails. A CLI holding one is present from Serve's start to its end, the
 // time it lists the names for an ask included, so a Refresh made meanwhile
-// waits for its List. The CLI opens a stream with after set to the last ask
+// waits for a List: that of a fresh ask, handed on once the CLI is done with
+// the one it holds. The CLI opens a stream with after set to the last ask
 // it is done with: one it could not list the names for ends its stream, and
 // the next stream it opens settles that ask, so a Refresh waiting for it
 // returns.
@@ -197,6 +205,9 @@ func (s *Store) Serve(ctx context.Context, after uint64, send func(Ask) error) {
 			s.mu.Lock()
 		}
 		ask := Ask{Asked: s.asked}
+		if ask.Asked > s.taken {
+			s.taken = ask.Asked
+		}
 		s.mu.Unlock()
 		err := send(ask)
 		s.mu.Lock()

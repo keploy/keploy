@@ -74,13 +74,40 @@ func TestRefreshWithNoCLIReturns(t *testing.T) {
 	}
 }
 
-// A miss asks once and waits for the list that answers it; concurrent misses
-// (glibc's A and AAAA) join the one ask, as does a miss while the CLI lists
-// the names for it.
+// heldStream is a CLI's stream of asks whose CLI lists the names for each
+// ask it takes until the test lets it go on: each ask is handed to the
+// returned channel, and the stream takes no next ask until a value is sent on
+// next. It returns once the store counts the stream.
+func heldStream(t *testing.T, s *Store) (<-chan Ask, chan<- struct{}) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	out, next := make(chan Ask), make(chan struct{})
+	go s.Serve(ctx, 0, func(a Ask) error {
+		select {
+		case out <- a:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		select {
+		case <-next:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	})
+	waitFor(s, func() bool { return s.streams > 0 })
+	return out, next
+}
+
+// A miss asks once and waits for the list that answers it. Concurrent misses
+// (glibc's A and AAAA) join one ask the CLI has not taken yet; a miss made
+// while the CLI lists the names for an ask it took asks afresh, and the CLI
+// is handed that ask once it is done with the one it holds.
 func TestRefreshWaitsForTheAnsweringList(t *testing.T) {
 	s := New()
 	s.Apply(List{Networks: []string{"net"}, Names: []string{"db"}})
-	asks := stream(t, s, context.Background(), 0)
+	asks, next := heldStream(t, s)
 
 	var wg sync.WaitGroup
 	refresh := func() {
@@ -88,29 +115,73 @@ func TestRefreshWaitsForTheAnsweringList(t *testing.T) {
 		go func() { defer wg.Done(); s.Refresh(context.Background()) }()
 	}
 	refresh()
-	refresh()
-	a := <-asks
-	if a.Asked != 1 {
+	if a := <-asks; a.Asked != 1 {
 		t.Fatalf("the CLI was handed ask %d, want 1", a.Asked)
 	}
-	waitFor(s, func() bool { return s.waiting == 2 })
+	// The CLI holds ask 1 and lists the names for it: two misses now.
+	refresh()
 	refresh()
 	waitFor(s, func() bool { return s.waiting == 3 })
-	s.Apply(List{Answers: 1, Networks: []string{"net"}, Names: []string{"db", "late-svc"}})
+	if s.asked != 2 {
+		t.Fatalf("asked = %d, want 2: the misses made while the CLI held ask 1 share one fresh ask", s.asked)
+	}
+	s.Apply(List{Answers: 1, Networks: []string{"net"}, Names: []string{"db"}})
+	next <- struct{}{}
+	if a := <-asks; a.Asked != 2 {
+		t.Fatalf("the CLI was handed ask %d after ask 1, want 2", a.Asked)
+	}
+	waitFor(s, func() bool { return s.waiting == 2 })
+	s.Apply(List{Answers: 2, Networks: []string{"net"}, Names: []string{"db", "late-svc"}})
 	wg.Wait()
-	if s.asked != 1 {
-		t.Fatalf("asked = %d, want the 1 ask every concurrent miss joined", s.asked)
+	if s.asked != 2 {
+		t.Fatalf("asked = %d, want 2", s.asked)
 	}
 	if !s.Owns("late-svc") {
 		t.Fatal("the answering list's late-svc is not owned")
 	}
-	// The stream hands the next miss's ask on the same stream.
-	refresh()
-	if a := <-asks; a.Asked != 2 {
-		t.Fatalf("the next miss handed ask %d, want 2", a.Asked)
+	next <- struct{}{}
+}
+
+// A container that joins the network while the CLI lists the names for an
+// ask it took is not on that list. The app's miss for it, made meanwhile,
+// waits for the list of a fresh ask, not the one the CLI is giving: otherwise
+// keploy answers a name docker holds, and an app that resolves once at boot
+// keeps that answer (a false red under load, when listing is slow).
+func TestAMissWhileTheCLIListsWaitsForAFreshList(t *testing.T) {
+	s := New()
+	s.Apply(List{Networks: []string{"stack_default"}, Names: []string{"db"}})
+	asks, next := heldStream(t, s)
+	onNet := []string{"db", "early"}
+
+	early := make(chan struct{})
+	go func() { defer close(early); s.Refresh(context.Background()) }()
+	a := <-asks
+	snap := append([]string(nil), onNet...) // the CLI's docker network inspect
+	onNet = append(onNet, "cache-x")        // cache-x joins after it
+	late := make(chan struct{})
+	go func() { defer close(late); s.Refresh(context.Background()) }()
+	waitFor(s, func() bool { return s.waiting == 2 })
+	if s.asked != a.Asked+1 {
+		t.Fatalf("asked = %d, want %d: the miss for cache-x joined ask %d, which the CLI had taken", s.asked, a.Asked+1, a.Asked)
 	}
-	s.Apply(List{Answers: 2, Networks: []string{"net"}, Names: []string{"db"}})
-	wg.Wait()
+	s.Apply(List{Answers: a.Asked, Networks: []string{"stack_default"}, Names: snap})
+	next <- struct{}{}
+	<-early
+	b := <-asks
+	if b.Asked <= a.Asked {
+		t.Fatalf("handed ask %d after ask %d, want a fresh one", b.Asked, a.Asked)
+	}
+	select {
+	case <-late:
+		t.Fatal("the miss for cache-x returned on the list the CLI read before cache-x joined")
+	default:
+	}
+	s.Apply(List{Answers: b.Asked, Networks: []string{"stack_default"}, Names: onNet})
+	<-late
+	if !s.Owns("cache-x") {
+		t.Fatal("cache-x is not owned after the fresh list")
+	}
+	next <- struct{}{}
 }
 
 // A CLI that goes away after it took an ask answers nothing: the Refresh
