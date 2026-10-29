@@ -314,7 +314,11 @@ func (o ClockOffset) AppZoneMatters() bool {
 // ZoneLocation is the zone name names (ClockOffset.AppZone): "UTC", a fixed
 // offset ("+05:30", "-03:00") or an IANA name ("Asia/Kolkata"), read from
 // the host's zone files, else from the ones built into keploy (time/tzdata),
-// so a replay reads it on any machine. An error for any other name.
+// so a replay reads it on any machine; IANA's names of UTC (Etc/UTC,
+// Universal: utcNames) UTC with no file. An error for any other name, and
+// for an IANA name whose file in keploy's own zone files is mounted from
+// another zone's (ownZoneFileMounted: IsOwnZoneMount), as Go would read
+// that file's rules for name, which a JVM or Node reading name do not.
 func ZoneLocation(name string) (*time.Location, error) {
 	if name == "UTC" {
 		return time.UTC, nil
@@ -334,20 +338,40 @@ func ZoneLocation(name string) (*time.Location, error) {
 	if name == "" || name == "Local" {
 		return nil, fmt.Errorf("%q names no zone", name)
 	}
-	if loc, ok := zoneLocations.Load(name); ok {
-		return loc.(*time.Location), nil
+	if utcNames[name] {
+		// UTC in every release of every runtime's zone data (Java's tzdb,
+		// ICU, IANA's), whatever file keploy's own zone files hold for it.
+		return time.UTC, nil
+	}
+	if z, ok := zoneLocations.Load(name); ok {
+		return z.(zoneLoad).loc, z.(zoneLoad).err
 	}
 	loc, err := time.LoadLocation(name)
 	if err != nil {
 		return nil, err
 	}
-	zoneLocations.Store(name, loc)
+	if err := ownZoneFileMounted(name); err != nil {
+		if IsOwnZoneMount(err) {
+			zoneLocations.Store(name, zoneLoad{err: err})
+		}
+		return nil, err
+	}
+	zoneLocations.Store(name, zoneLoad{loc: loc})
 	return loc, nil
 }
 
-// zoneLocations are the IANA zones ZoneLocation has read, by name: a
-// replay checks a place's AppZone at every call, and reads its file once.
+// zoneLocations are the IANA zones ZoneLocation has read, by name, and
+// those it refused for their file's mount (IsOwnZoneMount; an error where
+// keploy could not tell is read again): a replay checks a place's AppZone
+// at every call, and reads its file and keploy's mounts once. Only names
+// Go reads a zone of are kept.
 var zoneLocations sync.Map
+
+// zoneLoad is ZoneLocation's answer for one IANA name.
+type zoneLoad struct {
+	loc *time.Location
+	err error
+}
 
 // sameZoneAt reports whether a and b write at with one offset and next
 // change it at one instant (time.Time.ZoneBounds; none in either).

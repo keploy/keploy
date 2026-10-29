@@ -809,6 +809,9 @@ func CheckClockRead(path string, o models.ClockOffset, live Leaf, s Span, known 
 		// application's own in this run.
 		loc, err := models.ZoneLocation(o.AppZone)
 		hint = appZoneHint(o.AppZone, loc, s)
+		if err != nil && models.IsOwnZoneMount(err) {
+			return false, learned + ", which a replay reads in " + o.AppZone + ", the application's zone the learn step read it in, but keploy's own file of that zone is another zone's here (" + err.Error() + "), so it refuses the value rather than read it in that zone's rules"
+		}
 		if err != nil {
 			return false, learned + ", which a replay reads in " + o.AppZone + ", the application's zone the learn step read it in, but this keploy cannot read that zone (" + err.Error() + "), so it refuses the value rather than read it in another zone. Record the test again with this keploy"
 		}

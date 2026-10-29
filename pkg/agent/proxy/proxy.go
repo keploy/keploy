@@ -1138,8 +1138,11 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 	// (learn.Tracker.SetAppZone), read with its name where the agent's TZ or
 	// /etc/localtime gives one, so a learning that depends on it names it
 	// (models.ClockOffset.AppZone). Where keploy cannot read it (a TZ of a
-	// POSIX rule, which Go reads as UTC; a link to no zone file), Go's own
-	// reading, and no learning names it (SetAppZoneUnnamed), as before.
+	// POSIX rule, which Go reads as UTC; a link to no zone file; a zone file
+	// whose name and rules disagree, as where the host's /etc/localtime is
+	// bind-mounted over the link to the zone, or keploy cannot read its
+	// mounts: learn.ReadZone), Go's own reading, and no learning names it
+	// (SetAppZoneUnnamed), as before.
 	tz, tzSet := os.LookupEnv("TZ")
 	if loc, err := learn.ReadZone("/", tz, tzSet); err == nil {
 		proxy.learnTracker.SetAppZone(loc)
