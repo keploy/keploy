@@ -1,6 +1,8 @@
 package learn
 
 import (
+	"errors"
+	"reflect"
 	"strconv"
 	"testing"
 	"time"
@@ -225,5 +227,59 @@ func TestSeriesHasShapeIsHoldsButForTheClock(t *testing.T) {
 		if s.HasShape(live, nil) || s.Holds(live, span, nil) {
 			t.Errorf("%s: want it of no shape of the series", name)
 		}
+	}
+}
+
+// A reader that never holds a set's recordings at once (keploy's agent)
+// reads them with SeriesOfRange, one visit at a time and in any order: it
+// gets SeriesOfSet's series, the recordings keep keeps as visited, and every
+// other as a stand-in holding only its name, kind and times, never one to
+// answer with. A reader's error comes back with no series.
+func TestSeriesOfRangeIsSeriesOfSetKeepingOnlyWhatItIsAskedTo(t *testing.T) {
+	defer RegisterSeriesShape(seriesKind, readSeriesRow)()
+	base := time.Date(2026, 10, 29, 10, 0, 0, 0, time.UTC)
+	var recorded []*models.Mock
+	for i := 0; i <= 6; i++ {
+		at := base.Add(time.Duration(2*i)*time.Second + 500*time.Millisecond)
+		recorded = append(recorded,
+			rowMock("http-"+strconv.Itoa(i), models.HTTP, at.Add(-700*time.Millisecond), at.Add(-600*time.Millisecond), nil),
+			rowMock("claim-"+strconv.Itoa(i), seriesKind, at, at.Add(3*time.Millisecond),
+				map[string]string{"op": "claim", "at": strconv.FormatInt(at.Add(-time.Millisecond).Unix(), 10)}))
+	}
+	want := SeriesOfSet(recorded, nil)
+	if len(want.Series) != 1 || len(want.Mocks) != 7 {
+		t.Fatalf("the fixture's set reads %d series of %d recording(s); want one of 7", len(want.Series), len(want.Mocks))
+	}
+	kept := map[string]bool{"claim-2": true, "claim-6": true}
+	got, err := SeriesOfRange(func(visit func(*models.Mock) bool) error {
+		for i := len(recorded) - 1; i >= 0; i-- { // newest first: any order
+			if !visit(recorded[i]) {
+				break
+			}
+		}
+		return nil
+	}, func(m *models.Mock) bool { return kept[m.Name] }, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Series) != 1 || !reflect.DeepEqual(got.Series[0], want.Series[0]) {
+		t.Fatalf("SeriesOfRange read %+v; want SeriesOfSet's %+v", got.Series, want.Series)
+	}
+	for i, m := range got.Mocks {
+		w := want.Mocks[i]
+		if m.Name != w.Name || m.Kind != w.Kind || !m.Spec.ReqTimestampMock.Equal(w.Spec.ReqTimestampMock) || !m.Spec.ResTimestampMock.Equal(w.Spec.ResTimestampMock) {
+			t.Fatalf("recording %d is %q at %v; want %q at %v", i, m.Name, m.Spec.ReqTimestampMock, w.Name, w.Spec.ReqTimestampMock)
+		}
+		if kept[m.Name] != (m == w) {
+			t.Errorf("recording %q kept as visited: %v; want %v", m.Name, m == w, kept[m.Name])
+		}
+		if !kept[m.Name] && m.Spec.Metadata != nil {
+			t.Errorf("stand-in %q carries the recording's request (%v)", m.Name, m.Spec.Metadata)
+		}
+	}
+	boom := errors.New("store closed")
+	if got, err := SeriesOfRange(func(func(*models.Mock) bool) error { return boom },
+		func(*models.Mock) bool { return true }, nil); !errors.Is(err, boom) || got.Series != nil || got.Mocks != nil {
+		t.Fatalf("a failed read returned %+v, %v; want no series and its error", got, err)
 	}
 }
