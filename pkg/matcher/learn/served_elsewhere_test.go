@@ -279,9 +279,12 @@ func TestALateExchangeIsReadWithTheViewItsAdapterGave(t *testing.T) {
 // GivenEarlier: the place an HTTP or Mongo call reads it at), is read with
 // what its adapters stated of the serves of it the read saw, as a Raw is
 // (Order.ServedView): told as recorded, a fresh value learns; told with a
-// view that holds the value's word, or with two views one of which does,
-// it is refused naming the recording; told with a view that cannot be read,
-// or told of nothing, every word is refused. The set read every recording
+// view that holds the value's word, or with two views one of which does
+// (the recording's own among them where a serve was told as recorded), it
+// is refused naming the recording and how many views F's serves gave; told
+// with a view that cannot be read, or told of nothing, every word is
+// refused. Each view's words are read once for the set, by its place among
+// the recording's views (setPlaces.views), however many calls read it. The set read every recording
 // as its recorded answer alone, so a value the application copied from what
 // F gave it two tests back (a template value, a variable F rendered), or
 // one F may have given there, was learned as noise (FALSE GREEN).
@@ -290,35 +293,47 @@ func TestARecordingAnOlderTestServedIsReadWithWhatItsAdaptersStated(t *testing.T
 	rec := Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: "82"}}}
 	live := Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: "6c7d"}}}
 	m := jobsMock(chanceSrcRec, "5")
+	// loads counts the reads of each view's loader: the set reads a view's
+	// words once (setPlaces.views), however many calls read the recording.
+	loads := map[string]int{}
 	view := func(id string) func() (*models.Mock, error) {
-		return func() (*models.Mock, error) { return jobsMock(id, "9"), nil }
+		return func() (*models.Mock, error) { loads[id]++; return jobsMock(id, "9"), nil }
 	}
 	const (
 		learns   = ""
 		unstated = "may stand in mock-6, a recording record's full round gave the application before the call that is another test's"
 		unread   = "served changed, where keploy could not read what it gave the application"
 		gave     = "appears in mock-6 as record's full round gave it, where the recording did not give the application that word"
-		inAView  = "serves that gave the application different views of it, where the recording did not give the application that word"
+		inTwo    = "in one of 2 serves that gave the application different views of it, where the recording did not give the application that word"
 	)
 	for _, c := range []struct {
-		name string
-		tell func(tr *Tracker)
-		want string
+		name  string
+		tell  func(tr *Tracker)
+		want  string
+		views int // different views read, each once for the set
 	}{
-		{"told of nothing", func(*Tracker) {}, unstated},
-		{"told as recorded", func(tr *Tracker) { tr.ServedMockAsRecorded(m) }, learns},
-		{"told with a view that holds the value's word", func(tr *Tracker) { tr.ServedMockLive(m, "a", view("6c7d")) }, gave},
-		{"told with a view that holds no word of the value", func(tr *Tracker) { tr.ServedMockLive(m, "a", view(chanceSrcRec)) }, learns},
+		{"told of nothing", func(*Tracker) {}, unstated, 0},
+		{"told as recorded", func(tr *Tracker) { tr.ServedMockAsRecorded(m) }, learns, 0},
+		{"told with a view that holds the value's word", func(tr *Tracker) { tr.ServedMockLive(m, "a", view("6c7d")) }, gave, 1},
+		{"told with a view that holds no word of the value", func(tr *Tracker) { tr.ServedMockLive(m, "a", view(chanceSrcRec)) }, learns, 1},
 		{"told with a view that cannot be read", func(tr *Tracker) {
 			tr.ServedMockLive(m, "a", func() (*models.Mock, error) { return nil, errors.New("gone") })
-		}, unread},
-		{"told with a view that cannot be kept", func(tr *Tracker) { tr.ServedMockLive(m, "", nil) }, unread},
+		}, unread, 0},
+		{"told with a view that cannot be kept", func(tr *Tracker) { tr.ServedMockLive(m, "", nil) }, unread, 0},
 		{"told as recorded, then with a view that holds the value's word", func(tr *Tracker) {
 			tr.ServedMockAsRecorded(m)
 			tr.ServedMock(m)
 			tr.ServedMockLive(m, "a", view("6c7d"))
-		}, inAView},
+		}, inTwo, 1},
+		// Each view is the set's by its place among the recording's views:
+		// the second's words are its own, never the first's.
+		{"told with two views, the second holding the value's word", func(tr *Tracker) {
+			tr.ServedMockLive(m, "a", view(chanceSrcRec))
+			tr.ServedMock(m)
+			tr.ServedMockLive(m, "b", view("6c7d"))
+		}, inTwo, 2},
 	} {
+		clear(loads)
 		tr := NewTracker()
 		tr.Begin()
 		tr.ServedMock(m)
@@ -354,6 +369,16 @@ func TestARecordingAnOlderTestServedIsReadWithWhatItsAdaptersStated(t *testing.T
 					t.Errorf("FALSE GREEN? %s: %s (%q); want refused: %q", at, got.Kind, got.Why, c.want)
 				}
 			}
+		}
+		read := 0
+		for id, n := range loads {
+			read++
+			if n != 1 {
+				t.Errorf("%s: the view of %s was read %d times over four reads of one set; want once", c.name, id, n)
+			}
+		}
+		if read != c.views {
+			t.Errorf("%s: %d views read; want %d", c.name, read, c.views)
 		}
 	}
 }

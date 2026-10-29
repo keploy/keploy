@@ -885,8 +885,10 @@ func (g givenWords) holds(i int, t string, keep bool) bool {
 // recording did not, read as of a place of the call's own test
 // (unaccounted, unseenWhy): keploy follows no value of another test's, nor
 // can it tell a copy of what F gave there from a value of the call's own,
-// so it refuses rather than learn the word as noise (fail closed).
-func (g givenWords) servedWhy(i int, t, named, whose string) string {
+// so it refuses rather than learn the word as noise (fail closed). A word
+// the recording holds (held) is no word only F gave: the views are not
+// searched for it (givenWhy read it with the recording's words).
+func (g givenWords) servedWhy(i int, t, named, whose string, held bool) string {
 	in := func(list [][]string) bool {
 		if i >= len(list) {
 			return false
@@ -900,6 +902,8 @@ func (g givenWords) servedWhy(i int, t, named, whose string) string {
 		return named + " may stand in " + g.mock + of + ", where its adapter did not say what it gave the application there: keploy cannot tell whether it came from there"
 	case g.unread:
 		return named + " may stand in " + g.mock + of + ", served changed, where keploy could not read what it gave the application: keploy cannot tell whether it came from there"
+	case held:
+		return ""
 	case in(g.gave):
 		return named + " appears in " + g.mock + " as record's full round gave it, where the recording did not give the application that word" + of + ": keploy cannot tell whether it came from there"
 	}
@@ -1100,6 +1104,11 @@ func (o Order) statedWords(m *models.Mock, w givenWords, answers bool) givenWord
 	if !recorded && len(views) == 1 {
 		w.gave = views[0]
 		return w
+	}
+	// A serve told as recorded gave the recording itself: one of the views,
+	// which holds no word the recorded text does not (Order.ServedView).
+	if recorded {
+		views = append(views, w.words)
 	}
 	w.views = views
 	return w
