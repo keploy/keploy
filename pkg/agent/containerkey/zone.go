@@ -8,6 +8,7 @@ import (
 	"io"
 	"io/fs"
 	"strings"
+	"time"
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/errdefs"
@@ -22,10 +23,6 @@ type zoneAPI interface {
 	ContainerStatPath(ctx context.Context, containerID, path string) (container.PathStat, error)
 	CopyFromContainer(ctx context.Context, containerID, srcPath string) (io.ReadCloser, container.PathStat, error)
 }
-
-// javaOptionEnvs are the environment variables a JVM reads options from
-// (learn.javaZoneID reads them of a process).
-var javaOptionEnvs = []string{"JAVA_TOOL_OPTIONS", "JDK_JAVA_OPTIONS", "_JAVA_OPTIONS", "OPENJ9_JAVA_OPTIONS", "IBM_JAVA_OPTIONS"}
 
 // Zone is the zone an app container's processes write a wall clock of no
 // zone in, as the keploy CLI read it through Docker's API (containerZone)
@@ -74,7 +71,7 @@ func containerZone(ctx context.Context, api zoneAPI, id string, cfg *container.C
 	}
 	tz, set := envValue(cfg.Env, "TZ")
 	if src, ok := javaZoneOption(cfg); ok {
-		return learn.ProcZone{}, nil, fmt.Errorf("%s sets a JVM's user.timezone, which a JVM reads over TZ and /etc/localtime; keploy reads a JVM's zone only from its process, and cannot tell from the container's configuration whether its process is a JVM", src)
+		return learn.ProcZone{}, nil, fmt.Errorf("%s holds -Duser.timezone=, which sets the zone of a JVM given it, over TZ and /etc/localtime; keploy reads a JVM's zone only from its process, and cannot tell from the container's configuration whether its process is a JVM given it", src)
 	}
 	f := containerFiles{ctx: ctx, api: api, id: id}
 	z, data, err := learn.ReadZoneOf(f, tz, set)
@@ -88,7 +85,7 @@ func containerZone(ctx context.Context, api zoneAPI, id string, cfg *container.C
 	if set {
 		// An empty TZ: the C library reads UTC, a JVM the zone of its
 		// files.
-		if fz, _, ferr := learn.ReadZoneOf(f, "", false); ferr != nil || !sameZoneName(fz.Loc.String(), "UTC") {
+		if fz, _, ferr := learn.ReadZoneOf(f, "", false); ferr != nil || !sameZoneName(fz.Loc.String(), "UTC") && !utcRules(fz.Loc) {
 			return learn.ProcZone{}, nil, errors.New("the container's TZ is empty, which the C library reads as UTC, and a JVM as the zone of its /etc/localtime or /etc/timezone, which is not UTC or keploy cannot read it; keploy cannot tell from the container's configuration whether its process is a JVM")
 		}
 	}
@@ -114,6 +111,40 @@ func sameZoneName(a, b string) bool {
 	return a == b || utcNames[a] && utcNames[b]
 }
 
+// utcRules reports whether loc reads every instant as UTC does: one offset
+// of zero at every time (a copied UTC file of no name, as busybox ships
+// /etc/localtime), whatever it is named.
+func utcRules(loc *time.Location) bool {
+	if loc == nil {
+		return false
+	}
+	// Walk loc's offsets from the epoch back to its first and on to its
+	// last, at most zoneWalkCap of them each way: a zone whose offsets
+	// change for good (a rule of summer time) has one not zero long before.
+	for _, back := range []bool{true, false} {
+		t := time.Unix(0, 0)
+		for n := 0; ; n++ {
+			lt := t.In(loc)
+			if _, off := lt.Zone(); off != 0 || n == zoneWalkCap {
+				return false
+			}
+			start, end := lt.ZoneBounds()
+			if back && start.IsZero() || !back && end.IsZero() {
+				break
+			}
+			if back {
+				t = start.Add(-time.Nanosecond)
+			} else {
+				t = end
+			}
+		}
+	}
+	return true
+}
+
+// zoneWalkCap bounds utcRules' walk of a zone's offsets each way.
+const zoneWalkCap = 4096
+
 // envValue is the value of name in env, the first, as getenv reads it, and
 // whether env sets it.
 func envValue(env []string, name string) (string, bool) {
@@ -126,11 +157,16 @@ func envValue(env []string, name string) (string, bool) {
 }
 
 // javaZoneOption names where the container's configuration sets a JVM's
-// user.timezone, if it does: a JVM option variable of its environment, or
-// its command (a java command line, or a shell's that runs one).
+// user.timezone, if it does: a variable of its environment (one a JVM
+// reads options from, JAVA_TOOL_OPTIONS and the like, or one a script
+// hands a java command line, JAVA_OPTS, CATALINA_OPTS and the like), or its
+// command (a java command line, or a shell's that runs one). keploy reads
+// the container's configuration, not its process, so it cannot tell which
+// variable a script hands java: any that holds the option leaves the zone
+// unknown.
 func javaZoneOption(c *container.Config) (string, bool) {
-	for _, name := range javaOptionEnvs {
-		if v, ok := envValue(c.Env, name); ok && strings.Contains(v, "-Duser.timezone=") {
+	for _, kv := range c.Env {
+		if name, v, ok := strings.Cut(kv, "="); ok && strings.Contains(v, "-Duser.timezone=") {
 			return "the container's " + name, true
 		}
 	}

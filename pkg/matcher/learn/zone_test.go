@@ -2041,3 +2041,18 @@ func unreadZoneUnclear(why, otherwise string) string {
 	}
 	return ""
 }
+
+// TestAZoneHandedWithNoZoneFileIsUTCByNameAlone: the keploy CLI hands a
+// container's zone as its name and its zone file's bytes, none for UTC
+// alone (ZoneOfFile). A zone of another name, or of none, with no bytes is
+// an error, never UTC.
+func TestAZoneHandedWithNoZoneFileIsUTCByNameAlone(t *testing.T) {
+	if z, err := ZoneOfFile("UTC", nil); err != nil || z.Loc != time.UTC || z.Name != "UTC" {
+		t.Fatalf("UTC with no bytes: %+v, %v; want UTC", z, err)
+	}
+	for _, name := range []string{"Asia/Kolkata", "", "Etc/UTC"} {
+		if z, err := ZoneOfFile(name, nil); err == nil || z.Loc != nil {
+			t.Errorf("the zone %q handed with no zone file read as %v, %v; want an error, never UTC", name, z.Loc, err)
+		}
+	}
+}

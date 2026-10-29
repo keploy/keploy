@@ -139,6 +139,40 @@ func TestACgroupsDirectoryIsFoundByItsID(t *testing.T) {
 	}
 }
 
+// TestACgroupTreeKeployCannotWhollyReadFindsNoneAsAnError: where a
+// directory of the tree cannot be read and the cgroup is not in the rest,
+// it may be in that directory: an error, which is not kept, never "none",
+// which is.
+func TestACgroupTreeKeployCannotWhollyReadFindsNoneAsAnError(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a directory of mode 000; this row needs a user that cannot")
+	}
+	at := t.TempDir()
+	hidden := filepath.Join(at, "system.slice", "hidden")
+	app := filepath.Join(hidden, "docker-"+cid("web")+".scope")
+	if err := os.MkdirAll(app, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var st unix.Stat_t
+	if err := unix.Stat(app, &st); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(hidden, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(hidden, 0o755) })
+	got, found, err := findCgroupDirIn([]cgroup2Mount{{at: at, root: "/"}}, st.Ino)
+	if found || err == nil || !strings.Contains(err.Error(), "keploy cannot read the cgroup directory") {
+		t.Fatalf("a cgroup in a directory keploy cannot read: %q, %v, %v; want an error saying so, never none", got, found, err)
+	}
+	if err := os.Chmod(hidden, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got, found, err := findCgroupDirIn([]cgroup2Mount{{at: at, root: "/"}}, st.Ino); !found || err != nil {
+		t.Fatalf("the same tree, readable: %q, %v, %v; want it found", got, found, err)
+	}
+}
+
 // TestCgroup2MountsAreReadFromMountinfo: the cgroup2 mounts of a
 // mountinfo, with their roots, their octal escapes undone; other file
 // systems are none.
