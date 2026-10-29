@@ -87,7 +87,9 @@ func TestAWordOfAValueIsNeverFollowedFromAFramesHeader(t *testing.T) {
 				}
 				// Still a candidate source: the word in the frame's message.
 				got := c(mode.dc(), atgFind(7, `,"run":"2486"`, false), v.rec, v.live)
-				if (got.Kind != KindVariable || got.From.Mock != "mock-2124") && !(got.Kind == KindUnaccounted && !got.Bindable && strings.Contains(got.Why, "mock-2124")) {
+				variable := got.Kind == KindVariable && got.From.Mock == "mock-2124"
+				refused := got.Kind == KindUnaccounted && !got.Bindable && strings.Contains(got.Why, "mock-2124")
+				if !variable && !refused {
 					t.Errorf("FALSE GREEN? %s, %s, %s, the word in the frame's message: %s from %q bindable=%v (%q); want a variable of mock-2124 or refused naming it", name, mode.name, v.what, got.Kind, got.From.Mock, got.Bindable, got.Why)
 				}
 			}

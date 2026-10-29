@@ -86,7 +86,9 @@ func TestAMintedIdIsNotFollowedFromAPartOfItInsideAnotherIdOfAnUnservedRecording
 				{"a part of the id beside another of its words", jobEvent("ffff0000-905c-4631-aaaa-bbbbccccdddd", false), rec, live},
 			} {
 				got := c(mode.dc(), g.raw, g.rec, g.live)
-				if (got.Kind != KindVariable || got.From.Mock != "mock-1786") && !(got.Kind == KindUnaccounted && !got.Bindable && strings.Contains(got.Why, "mock-1786")) {
+				variable := got.Kind == KindVariable && got.From.Mock == "mock-1786"
+				refused := got.Kind == KindUnaccounted && !got.Bindable && strings.Contains(got.Why, "mock-1786")
+				if !variable && !refused {
 					t.Errorf("FALSE GREEN? %s, %s, %s at an unserved recording: %s from %q bindable=%v (%q); want a variable of mock-1786 or refused naming it", name, mode.name, g.what, got.Kind, got.From.Mock, got.Bindable, got.Why)
 				}
 			}
