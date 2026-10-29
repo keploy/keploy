@@ -144,6 +144,9 @@ func withoutUnreadLearning(consumed map[string]models.MockState, consumers map[s
 		for field := range st.ReqBodyNoise {
 			mock = append(mock, name+" "+field+" (noise)")
 		}
+		for field, o := range st.Clocks {
+			mock = append(mock, name+" "+field+" ("+o.String()+")")
+		}
 		for v, mv := range st.Variables {
 			kind := "variable"
 			if mv.Echo {
@@ -175,7 +178,7 @@ func withoutUnreadLearning(consumed map[string]models.MockState, consumers map[s
 				}
 			}
 		}
-		st.ReqBodyNoise, st.Variables, st.Binds = nil, nil, nil
+		st.ReqBodyNoise, st.Variables, st.Binds, st.Clocks = nil, nil, nil, nil
 		out[name] = st
 	}
 	sort.Strings(dropped)

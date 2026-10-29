@@ -415,17 +415,54 @@ func (a *Agent) SetScopePool(ctx context.Context, pool map[string][]string) erro
 	a.provenMu.Unlock()
 	// Whose a mock is, for the learn steps: keploy mock replay sends no
 	// recorded test windows, and the table's pool slices are what says a
-	// mock was recorded while no test was open.
+	// mock was recorded while no test was open. Whose tests list each, by
+	// key, bounds each test process's teardown.
 	if ps, ok := a.Proxy.(coreAgent.PoolNamesSetter); ok {
 		var names []string
 		for _, slice := range cp {
 			names = append(names, slice...)
 		}
-		if err := ps.SetPoolNames(names); err != nil {
+		a.scopeMu.Lock()
+		owners := teardownOwners(a.scopeTable, cp)
+		a.scopeMu.Unlock()
+		if err := ps.SetPoolNames(names, owners); err != nil {
 			return err
 		}
 	}
 	return a.applyPool(ctx)
+}
+
+// teardownOwners is, of a replay's scope table (test ID -> the mocks it
+// lists) and its pool slices (key -> names), the key of the test process
+// whose tests list each mock: a test's key is its ID's path
+// (models.TestIDPath) where that path is a pool slice's key, which it is for
+// a test whose harness names no test file (the agent builds the ID from the
+// claim's key then). A mock that a test of no such key lists (its ID names
+// its test file, or its process recorded no pool call), or that tests of two
+// keys list, is "": it bounds every process's teardown, failing closed. A
+// file path is never a key, which names a directory.
+func teardownOwners(table, pool map[string][]string) map[string]string {
+	keys := make(map[string]bool, len(pool))
+	for k := range pool {
+		if k != "" && k != models.PoolKeyNone {
+			keys[k] = true
+		}
+	}
+	out := map[string]string{}
+	for id, names := range table {
+		key := models.TestIDPath(id)
+		if !keys[key] {
+			key = ""
+		}
+		for _, n := range names {
+			if prev, ok := out[n]; ok && prev != key {
+				out[n] = ""
+				continue
+			}
+			out[n] = key
+		}
+	}
+	return out
 }
 
 // SetScopeBackground installs, for a replay, per test, the recordings of its
@@ -625,7 +662,9 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 			// reads its window on the app's clock from the tracker's begin
 			// (learn.Tracker.CallWindowFrom), and a begin stamped before the
 			// move would give the test's first call a span the clock did not
-			// run as one, so no window. It opens before the test's view is
+			// run as one, so no window (unless the hooks tell where the
+			// clock's run began, AppClockRunReader: then it starts at the
+			// move). It opens before the test's view is
 			// installed, as keploy test's loops open it: a tracker that
 			// began after the view was installed would file what the view
 			// served before it as the previous test's, so the store's
@@ -1430,7 +1469,7 @@ func (a *Agent) reapOpenTest(ctx context.Context) error {
 // (nextStepOf).
 func sanitizedMiss(m models.UnmatchedCall) models.UnmatchedCall {
 	out := models.UnmatchedCall{Protocol: m.Protocol, Destination: m.Destination, LiveDestination: m.LiveDestination, MatchPhase: m.MatchPhase,
-		ClosestMock: m.ClosestMock, NextSteps: nextStepOf(m), At: m.At, ActualSummary: models.MissShape(m), Differs: models.FieldShapes(m.Differs),
+		ClosestMock: m.ClosestMock, NextSteps: nextStepOf(m), At: m.At, ActualSummary: models.MissShape(m), Differs: models.FieldShapes(m.Differs), FieldReasons: models.FieldReasonShapes(m.FieldReasons),
 		Kind: m.Kind, Recorded: m.Recorded, Write: m.Write, NotOwned: m.NotOwned, Reason: m.Reason, Concurrent: m.Concurrent.Clone(),
 		// An answered call stays one (models.UnmatchedCall.Answer): how it was
 		// answered and by which process, no value.
@@ -1465,17 +1504,35 @@ func sanitizedMiss(m models.UnmatchedCall) models.UnmatchedCall {
 // nextStepOf is a miss's next step as evidence keeps it. Every matcher
 // writes fixed advice, but one lists the fields that differed, and a map's
 // keys can be values (an email, a user ID): a next step that names any of
-// the miss's field paths is replaced by fixed advice that counts them.
+// the miss's field paths is replaced by fixed advice that counts them. Why
+// a replay refused a field for a reason of its own (a learned read of the
+// application's clock the call does not carry: models.UnmatchedCall.FieldReasons)
+// is added to it, as the miss's reason says it (missDiffersText), so the
+// run's summary, which shows the next step, says it too.
 func nextStepOf(m models.UnmatchedCall) string {
+	next := m.NextSteps
 	for _, d := range m.FieldDiffs {
 		if d.Path == "" {
 			continue
 		}
 		if strings.Contains(m.NextSteps, d.Path) || strings.Contains(m.NextSteps, strings.TrimPrefix(d.Path, "body.")) {
-			return fmt.Sprintf("%d field(s) of the call differ from the recording; if the change is expected, re-record the mock set with 'keploy mock record'", len(m.FieldDiffs))
+			next = fmt.Sprintf("%d field(s) of the call differ from the recording; if the change is expected, re-record the mock set with 'keploy mock record'", len(m.FieldDiffs))
+			break
 		}
 	}
-	return m.NextSteps
+	var whys []string
+	for _, r := range models.FieldReasonShapes(m.FieldReasons) {
+		if !strings.Contains(next, r.Why) {
+			whys = append(whys, r.Why)
+		}
+	}
+	switch {
+	case len(whys) == 0:
+		return next
+	case next == "":
+		return strings.Join(whys, "; ")
+	}
+	return next + " (" + strings.Join(whys, "; ") + ")"
 }
 
 // charge keeps misses drained from the proxy for the CLI's end-of-run read,
@@ -1546,7 +1603,7 @@ func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*model
 		if before(m) {
 			// Where it was made is not known: a miss is filed by the view
 			// served when it is filed, which may be after its own test.
-			what = append(what, missText(m)+", made before this one began, had no recorded answer"+differsText(models.FieldShapes(m.Differs)))
+			what = append(what, missText(m)+", made before this one began, had no recorded answer"+missDiffersText(m))
 			continue
 		}
 		switch m.Kind {
@@ -1558,12 +1615,12 @@ func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*model
 			}
 		case models.MissOutsideTest:
 			if !beganAt.IsZero() && !m.At.IsZero() {
-				what = append(what, missText(m)+", made as this test ended, had no recorded answer"+differsText(models.FieldShapes(m.Differs)))
+				what = append(what, missText(m)+", made as this test ended, had no recorded answer"+missDiffersText(m))
 				continue
 			}
-			what = append(what, missText(m)+", made outside every test before this one began, had no recorded answer"+differsText(models.FieldShapes(m.Differs)))
+			what = append(what, missText(m)+", made outside every test before this one began, had no recorded answer"+missDiffersText(m))
 		default:
-			what = append(what, missText(m)+" had no recorded answer"+differsText(models.FieldShapes(m.Differs)))
+			what = append(what, missText(m)+" had no recorded answer"+missDiffersText(m))
 		}
 	}
 	unmade := append([]string(nil), ev.Unconsumed...)
@@ -1630,6 +1687,26 @@ func missText(m models.UnmatchedCall) string {
 		}
 	}
 	return s
+}
+
+// missDiffersText is what a reason says of the fields m differs in
+// (differsText), with why a replay refused each it refused for a reason of
+// its own (models.UnmatchedCall.FieldReasons: a learned read of the
+// application's clock the call does not carry): " (body.since differs:
+// body.since was learned as ...)". Neither names a value.
+func missDiffersText(m models.UnmatchedCall) string {
+	t := differsText(models.FieldShapes(m.Differs))
+	var whys []string
+	for _, r := range models.FieldReasonShapes(m.FieldReasons) {
+		whys = append(whys, r.Why)
+	}
+	switch {
+	case len(whys) == 0:
+		return t
+	case t == "":
+		return " (" + strings.Join(whys, "; ") + ")"
+	}
+	return strings.TrimSuffix(t, ")") + ": " + strings.Join(whys, "; ") + ")"
 }
 
 // extraKey is one call made more often than recorded (models.MissExtraCall),

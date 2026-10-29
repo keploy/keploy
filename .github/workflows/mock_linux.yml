@@ -64,6 +64,10 @@ name: Mock Mode Regression (Linux)
 # own test: never in the next one, never not at all. The same job replays a
 # publish the app makes after it answered a test (P101), and asserts it is
 # judged in the test it was made in, failing the set and keploy test.
+# Another replays an app whose dependency call carries its clock read as a
+# date and an hour of no zone, under the proven switch, and asserts the read
+# is checked at its cut in the app's own zone, failing the set when it is
+# more than one cut off.
 # Another replays an app that passes keploy's own plain-text "no matching mock"
 # on with its 200 where JSON was recorded, and asserts the test fails on its
 # body, with the switch on and off.
@@ -473,6 +477,8 @@ jobs:
   # SigV4-signed calls (founder decision 25): the Authorization header is
   # compared by its parts, its signature not at all, so the set replays under
   # the switch, and fails naming the part when the region or key id differs.
+  # Then a learned clock read of no zone, checked at its cut in the app's own
+  # zone.
   proven_strict_http_linux:
     if: ${{ inputs.jobs_to_run == 'all' }}
     runs-on: ${{ inputs.runner }}
@@ -553,6 +559,20 @@ jobs:
           REPLAY_BIN: ${{ steps.record.outputs.path }}
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/aws-sigv4/proven-aws-sigv4-linux.sh"
+
+      # A learned read of the application's clock of no zone, cut to a day
+      # and to an hour, is checked at its cut under the proven switch in the
+      # zone the app's own process runs in (its TZ), which wins over the zone
+      # its learn step named: in the set's first test it passes, in another
+      # zone too, and a value more than one cut off fails naming the field.
+      # Without the switch it passes, as on main.
+      - name: Run proven clock-zone e2e (a clock read checked in the app's zone)
+        if: ${{ !cancelled() }}
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/clock-zone/proven-clock-zone-linux.sh"
 
       # A response body of another kind than the recorded one fails its test,
       # with the switch on or off (O-K): an app that answers keploy's own

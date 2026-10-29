@@ -293,12 +293,25 @@ func TestLearnMatchNamesAVariableAboveADollarKey(t *testing.T) {
 	}
 }
 
+// clockedTracker is a tracker that knows the application reads the real
+// clock (Tracker.SetAppClock), as the agent's own hooks tell it: with no app
+// clock a test's own clock read, in a call with no window, is refused at
+// learn (TestLearnMatchRefusesAClockReadWhereKeployCannotTellTheAppsClock).
+func clockedTracker() *learn.Tracker {
+	tr := learn.NewTracker()
+	tr.SetAppClock(func(r time.Time) (time.Time, bool) { return r, true })
+	return tr
+}
+
 // A variable whose value F saw drift only with its clock where it is bound (a
 // clock read moved by the lead: learn.ClockOf) is marked so at its bind with
 // the read its recording holds, the instant and resolution it says
 // (MockVariable.Clock, learn.ClockReads); one that drifted otherwise is not.
 func TestLearnMatchMarksAClockReadAtItsBind(t *testing.T) {
-	rec := learnAt.Add(-time.Hour).Truncate(time.Second)
+	// A whole second, no whole minute: a writer of seconds whose two values
+	// both fall on a whole minute shows a cut, which the learn step would
+	// learn at the minute.
+	rec := learnAt.Add(-time.Hour + 17*time.Second)
 	for _, c := range []struct {
 		name  string
 		live  string
@@ -308,7 +321,7 @@ func TestLearnMatchMarksAClockReadAtItsBind(t *testing.T) {
 		{"moved by another amount", rec.Add(5 * time.Minute).Format(time.RFC3339), nil},
 	} {
 		h, n, opts := learnOn(t)
-		tr := learn.NewTracker()
+		tr := clockedTracker()
 		tr.Begin()
 		recorded := rec.Format(time.RFC3339)
 		db := &learnDb{perTest: []*models.Mock{
@@ -572,7 +585,7 @@ func (d *umDb) UpdateUnFilteredMock(old, new *models.Mock) bool {
 func TestLearnMatchWithNoWindowsTheScopeTableSaysWhatIsThePools(t *testing.T) {
 	h, n, opts := learnOn(t)
 	opts.LearnPool = true
-	ctx := learn.WithTracker(context.Background(), learn.NewTracker()) // the start-up: no test begun
+	ctx := learn.WithTracker(context.Background(), clockedTracker()) // the start-up: no test begun
 	for _, tc := range []struct {
 		what     string
 		pool     map[string]bool
@@ -594,8 +607,10 @@ func TestLearnMatchWithNoWindowsTheScopeTableSaysWhatIsThePools(t *testing.T) {
 			if (served != nil) != tc.paired {
 				t.Fatalf("served %v miss %+v; want paired=%v", served, miss, tc.paired)
 			}
-			if tc.paired && (len(db.pooled) != 1 || !reflect.DeepEqual(db.pooled[0].Spec.ReqBodyNoise, map[string][]string{"body.at": {}})) {
-				t.Fatalf("the start-up recording carries %+v; want body.at learned", db.pooled)
+			// With no window, the stamp, one instant whole, is a read of the
+			// clock a replay checks in its call's own span, never noise.
+			if tc.paired && (len(db.pooled) != 1 || !learnedClockRead(db.pooled[0].Spec, "body.at")) {
+				t.Fatalf("the start-up recording carries %+v; want body.at learned as a read of the clock", db.pooled)
 			}
 		})
 	}
@@ -858,8 +873,8 @@ func TestLearnMatchAnEarlierPlaceThatDidNotDriftIsNoSource(t *testing.T) {
 	if served == nil || miss != nil {
 		t.Fatalf("a drifting timestamp was refused: %+v", miss)
 	}
-	if !reflect.DeepEqual(db.consumed[1].Spec.ReqBodyNoise, map[string][]string{"body.at": {}}) {
-		t.Fatalf("noise %v", db.consumed[1].Spec.ReqBodyNoise)
+	if !learnedClockRead(db.consumed[1].Spec, "body.at") {
+		t.Fatalf("noise %v clocks %v; want body.at learned as a read of the clock", db.consumed[1].Spec.ReqBodyNoise, db.consumed[1].Spec.Clocks)
 	}
 }
 
@@ -969,7 +984,7 @@ func learnedOnto(recs []*models.Mock, consumed []models.Mock) []*models.Mock {
 	var out []*models.Mock
 	for _, r := range recs {
 		cp := *r
-		cp.Spec.Variables, cp.Spec.ReqBodyNoise = nil, nil
+		cp.Spec.Variables, cp.Spec.ReqBodyNoise, cp.Spec.Clocks = nil, nil, nil
 		byName[cp.Name] = &cp
 		out = append(out, &cp)
 	}
@@ -982,6 +997,7 @@ func learnedOnto(recs []*models.Mock, consumed []models.Mock) []*models.Mock {
 	for _, c := range consumed {
 		m := byName[c.Name]
 		m.Spec.ReqBodyNoise = mergeReqBodyNoise(m.Spec.ReqBodyNoise, c.Spec.ReqBodyNoise)
+		m.Spec.Clocks = models.MergeClocks(m.Spec.Clocks, c.Spec.Clocks)
 		for n, v := range c.Spec.Learned() {
 			vars(m)[n] = v
 		}
@@ -1036,10 +1052,16 @@ func fullRound(t *testing.T, recs []*models.Mock, calls []*req) []models.Mock {
 // answered.
 func inCI(t *testing.T, mocks []*models.Mock, calls []*req) {
 	t.Helper()
+	inCIIn(t, context.Background(), mocks, calls)
+}
+
+// inCIIn is inCI on a connection whose context is ctx.
+func inCIIn(t *testing.T, ctx context.Context, mocks []*models.Mock, calls []*req) {
+	t.Helper()
 	h := newHTTP()
 	db := &varDb{perTest: append([]*models.Mock(nil), mocks...)}
 	for i, c := range calls {
-		if ok, _, diag := matchVar(t, h, db, c); !ok {
+		if ok, _, diag := matchVarIn(t, ctx, h, db, c); !ok {
 			t.Fatalf("CI call %d is a miss after F learned it: %+v", i, diag)
 		}
 	}
@@ -1166,6 +1188,35 @@ func TestLearnMatchACredentialTokenFromASQLTextIsNotNoise(t *testing.T) {
 	}
 }
 
+// Through the HTTP integration, a test's own call (no window) whose epoch
+// second F read 93 s after its recording (no lead moves it) is learned as a
+// read of the clock, checked at replay, where keploy knows which clock the
+// application reads; where it cannot tell (no app clock), no replay could
+// check that read, and the call is refused at learn, its reason saying so,
+// never served with the value noise.
+func TestLearnMatchRefusesAClockReadWhereKeployCannotTellTheAppsClock(t *testing.T) {
+	for _, clocked := range []bool{true, false} {
+		h, n, opts := learnOn(t)
+		tr := learn.NewTracker()
+		if clocked {
+			tr = clockedTracker()
+		}
+		tr.Begin()
+		ctx := learn.WithTracker(context.Background(), tr)
+		db := &learnDb{perTest: []*models.Mock{learnRecorded("mock-1", time.Second, "POST", "/v1/ping", `{"at":1760436000}`, nil, `{}`)}}
+		served, miss, err := h.learnMatch(ctx, live("POST", "/v1/ping", `{"at":1760436093}`, nil), db, n, opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if clocked && (served == nil || len(db.consumed) != 1 || !learnedClockRead(db.consumed[0].Spec, "body.at")) {
+			t.Fatalf("an app clock: served %v miss %+v; want body.at learned as a read of the clock", served != nil, miss)
+		}
+		if !clocked && (served != nil || miss == nil || !strings.Contains(miss.res.Why, "body.at changed, and nothing shows it is a read of the application's clock: keploy cannot tell which clock the application reads")) {
+			t.Fatalf("no app clock: served %v miss %+v; want refused, the reason naming body.at and the clock keploy cannot tell", served != nil, miss)
+		}
+	}
+}
+
 // (Round-4 review repro.) the previous test inserted a row stamped with the second it ran in;
 // this test's own call carries its own clock read, the same second when
 // recorded. Nothing flowed, so in F the drifted value is noise; with the
@@ -1173,7 +1224,7 @@ func TestLearnMatchACredentialTokenFromASQLTextIsNotNoise(t *testing.T) {
 // is quarantined as flaky.
 func TestLearnMatchAPreviousTestsSameSecondIsNoSource(t *testing.T) {
 	h, n, opts := learnOn(t)
-	tr := learn.NewTracker()
+	tr := clockedTracker()
 	tr.Begin() // test 1
 	tr.ServedMock(&models.Mock{Name: "pg-0", Kind: models.GENERIC, Spec: models.MockSpec{ReqTimestampMock: learnAt,
 		GenericRequests: []models.Payload{{Origin: models.FromClient, Message: []models.OutputBinary{{Type: "utf-8",
@@ -2706,8 +2757,8 @@ func TestLearnMatchReadsTheOrderFServedTheTestsMocksIn(t *testing.T) {
 				}
 				return
 			}
-			if got == nil || miss != nil || len(db.consumed) != 1 || !reflect.DeepEqual(db.consumed[0].Spec.ReqBodyNoise, map[string][]string{"body.visible_after": {}}) {
-				t.Fatalf("served %v miss %+v; want body.visible_after learned as noise", got, miss)
+			if got == nil || miss != nil || len(db.consumed) != 1 || !learnedClockRead(db.consumed[0].Spec, "body.visible_after") {
+				t.Fatalf("served %v miss %+v; want body.visible_after learned as a read of the clock, still compared", got, miss)
 			}
 		})
 	}
@@ -2783,8 +2834,8 @@ func TestLearnMatchRefusesAnOffsetOnServesInParallelRequests(t *testing.T) {
 				t.Logf("refused: %s", miss.res.Why)
 				return
 			}
-			if got == nil || miss != nil || len(db.consumed) != 1 || !reflect.DeepEqual(db.consumed[0].Spec.ReqBodyNoise, map[string][]string{"body.visible_after": {}}) {
-				t.Fatalf("served %v miss %+v; want body.visible_after learned as noise", got, miss)
+			if got == nil || miss != nil || len(db.consumed) != 1 || !learnedClockRead(db.consumed[0].Spec, "body.visible_after") {
+				t.Fatalf("served %v miss %+v; want body.visible_after learned as a read of the clock, still compared", got, miss)
 			}
 		})
 	}
@@ -2886,8 +2937,8 @@ func TestLearnMatchReadsWhatFServedBeforeTheTestAsGiven(t *testing.T) {
 					}
 					return
 				}
-				if got == nil || miss != nil || len(db.consumed) != 1 || !reflect.DeepEqual(db.consumed[0].Spec.ReqBodyNoise, map[string][]string{"body.visible_after": {}}) {
-					t.Fatalf("served %v miss %+v; want body.visible_after learned as noise", got, miss)
+				if got == nil || miss != nil || len(db.consumed) != 1 || !learnedClockRead(db.consumed[0].Spec, "body.visible_after") {
+					t.Fatalf("served %v miss %+v; want body.visible_after learned as a read of the clock, still compared", got, miss)
 				}
 			})
 		}
@@ -2940,8 +2991,8 @@ func TestLearnMatchReadsThePairedRecordingFServedBeforeTheCall(t *testing.T) {
 				}
 				return
 			}
-			if got == nil || miss != nil || len(db.consumed) != 1 || !reflect.DeepEqual(db.consumed[0].Spec.ReqBodyNoise, map[string][]string{"body.visible_after": {}}) {
-				t.Fatalf("served %v miss %+v; want body.visible_after learned as noise", got, miss)
+			if got == nil || miss != nil || len(db.consumed) != 1 || !learnedClockRead(db.consumed[0].Spec, "body.visible_after") {
+				t.Fatalf("served %v miss %+v; want body.visible_after learned as a read of the clock, still compared", got, miss)
 			}
 		})
 	}
@@ -3266,18 +3317,24 @@ func TestLearnMatchAStartUpClockReadIsReadInItsCallsWindow(t *testing.T) {
 					}
 					return
 				}
-				var noise []map[string][]string
+				var learned []models.Mock
 				for _, m := range db.pooled {
-					noise = append(noise, m.Spec.ReqBodyNoise)
+					learned = append(learned, *m)
 				}
 				if tc.own {
-					noise = nil
-					for _, m := range db.consumed {
-						noise = append(noise, m.Spec.ReqBodyNoise)
-					}
+					learned = db.consumed
 				}
-				if got == nil || miss != nil || len(noise) != 1 || !reflect.DeepEqual(noise[0], map[string][]string{"body.processed_at": {}}) {
-					t.Fatalf("served %v miss %+v learned %+v; want body.processed_at learned as noise", got, miss, noise)
+				// A read of the clock inside a longer value stays noise; one
+				// that is an instant whole is still compared, in its call's
+				// window at every replay (MockSpec.Clocks).
+				ok := len(learned) == 1
+				if ok && form.name == "one instant whole" {
+					ok = learnedClockRead(learned[0].Spec, "body.processed_at")
+				} else if ok {
+					ok = reflect.DeepEqual(learned[0].Spec.ReqBodyNoise, map[string][]string{"body.processed_at": {}}) && len(learned[0].Spec.Clocks) == 0
+				}
+				if got == nil || miss != nil || !ok {
+					t.Fatalf("served %v miss %+v learned %+v; want body.processed_at learned (%s)", got, miss, learned, form.name)
 				}
 			})
 		}
@@ -3292,8 +3349,10 @@ func TestLearnMatchAStartUpClockReadIsReadInItsCallsWindow(t *testing.T) {
 // in both runs: noise, and the replay after it answers the call with a
 // third stamp. A slot the harness gave the app that moved a minute on, by
 // about the lead, lies in neither span: refused, saying no clock read by the
-// app matched it; in keploy test, which reads a test's own call by the lead,
-// it is noise. With no app clock (no clock hooks) nothing shows the stamp is
+// app matched it; in keploy test, where a test's own call has no window, it
+// is one instant whole, learned as a read of the clock, which the replay
+// after it (record's confirming round) refuses, naming the field: it is no
+// read of the clock, and record filters it there. With no app clock (no clock hooks) nothing shows the stamp is
 // a read either: refused, saying keploy saw no read of the app's clock for
 // the call. Where the recording has no call before the test's (its first
 // data-plane call), the call's window in the recording runs from the test's
@@ -3371,15 +3430,39 @@ func TestLearnMatchAClientTestLearnsTheAppsStampInItsWindowOnly(t *testing.T) {
 				}
 				return
 			}
-			if got == nil || miss != nil || len(db.consumed) != 1 || !reflect.DeepEqual(db.consumed[0].Spec.ReqBodyNoise, map[string][]string{field: {}}) {
-				t.Fatalf("served %v miss %+v consumed %+v; want %s learned as noise", got, miss, db.consumed, field)
+			// The app's stamp, an instant whole, is a read of the clock, still
+			// compared; so is the slot in keploy test, one instant whole in a
+			// test's own call, which has no window: never noise.
+			if got == nil || miss != nil || len(db.consumed) != 1 || !learnedClockRead(db.consumed[0].Spec, field) {
+				t.Fatalf("served %v miss %+v consumed %+v; want %s learned as a read of the clock", got, miss, db.consumed, field)
 			}
-			// The replay after record's full round: a third value is answered.
-			third := `"at":"` + iso(read.Add(after+90*time.Second)) + `"`
+			// The replay after record's full round: a third value is
+			// answered, a stamp read in its own call's window.
+			at := read.Add(after + 90*time.Second)
+			third := `"at":"` + iso(at) + `"`
 			if field == "body.slot" {
 				third = `"slot":"2026-10-14T10:09Z"`
 			}
-			inCI(t, learnedOnto([]*models.Mock{signup}, db.consumed), []*req{live("POST", "/v1/events", `{"event":"signup",`+third+`}`, nil)})
+			call := live("POST", "/v1/events", `{"event":"signup",`+third+`}`, nil)
+			call.arrived = at.Add(time.Millisecond)
+			if field == "body.slot" {
+				// The slot is no read of the clock: the next replay, record's
+				// confirming round's first, refuses it, naming the field and
+				// why, so record filters the test there.
+				db := &varDb{perTest: learnedOnto([]*models.Mock{signup}, db.consumed)}
+				ok, _, diag := matchVarIn(t, clockConn(true, at.Add(-time.Second)), newHTTP(), db, call)
+				why := ""
+				for _, f := range diag.differs {
+					if f.shape == field {
+						why = f.why
+					}
+				}
+				if ok || !strings.HasPrefix(why, field+" was learned as ") || !strings.Contains(why, "it changed") {
+					t.Fatalf("the replay of the slot: answered %v, differs %v (%q); want it refused, naming %s and why", ok, differs(diag), why, field)
+				}
+				return
+			}
+			inCIIn(t, clockConn(true, at.Add(-time.Second)), learnedOnto([]*models.Mock{signup}, db.consumed), []*req{call})
 		})
 	}
 }
@@ -3389,6 +3472,42 @@ func TestLearnMatchAClientTestLearnsTheAppsStampInItsWindowOnly(t *testing.T) {
 // none, and an instant a served recorded answer carries (another receive's
 // Date header, echoed into the event) is refused as with one offset, not
 // read as a clock read in a span minutes wide.
+// A clock read the learn step learns onto a recording that already carries
+// one at another place (an earlier round's, kept on the recording) is added
+// to it: the consumed state carries both, so neither place goes back to
+// being compared as recorded, or unchecked, in the confirm round.
+func TestLearnMatchAClockReadIsAddedToTheRecordingsOwn(t *testing.T) {
+	iso := func(t time.Time) string { return t.Format("2006-01-02T15:04:05.000Z07:00") }
+	h, n, opts := learnOn(t)
+	opts.LearnPool = true
+	receive := learnRecorded("mock-0", 0, "POST", "/queue/receive", `{"MaxNumberOfMessages":10}`, nil, `{"Messages":[{"MessageId":"135dcb85","Body":"m-1"}]}`)
+	receive.Spec.HTTPResp.Header = map[string]string{"Date": learnAt.Format(http.TimeFormat)}
+	event := learnRecorded("mock-1", 4*time.Millisecond, "POST", "/v1/events", `{"event":"m-1","processed_at":"`+iso(learnAt.Add(3*time.Millisecond))+`"}`, nil, `{}`)
+	event.TestModeInfo.Lifetime = models.LifetimeSession
+	own := models.ClockOffset{Min: 30 * time.Minute, Max: 30*time.Minute + time.Millisecond, Res: time.Millisecond}
+	event.Spec.Clocks = map[string]models.ClockOffset{"body.seen_at": own}
+	db := &learnDb{mockMemDb: mockMemDb{mocks: []*models.Mock{event}}, staged: []*models.Mock{receive}, pool: map[time.Time]bool{receive.Spec.ReqTimestampMock: true}}
+	tr := learn.NewTracker()
+	offset := learn.FullRoundLead + 2*time.Second - 40*time.Second
+	tr.SetAppClock(func(real time.Time) (time.Time, bool) { return real.Add(offset), true })
+	served := learnAt.Add(40 * time.Second)
+	tr.ServedMockAt(receive, served)
+	in := live("POST", "/v1/events", `{"event":"m-1","processed_at":"`+iso(served.Add(offset+time.Millisecond))+`"}`, nil)
+	in.arrived = served.Add(2 * time.Millisecond)
+	got, miss, err := h.learnMatch(learn.WithTracker(context.Background(), tr), in, db, n, opts)
+	if err != nil || got == nil || miss != nil || len(db.pooled) != 1 {
+		t.Fatalf("served %v miss %+v err %v pooled %d; want served, body.processed_at learned", got, miss, err, len(db.pooled))
+	}
+	for _, m := range db.pooled {
+		if !learnedClockRead(m.Spec, "body.processed_at") || m.Spec.Clocks["body.seen_at"] != own {
+			t.Fatalf("the consumed copy carries clock reads %+v; want body.processed_at learned and the recording's body.seen_at (%s) kept", m.Spec.Clocks, own)
+		}
+	}
+	if event.Spec.Clocks["body.processed_at"] != (models.ClockOffset{}) {
+		t.Fatal("the learn step wrote onto the pooled recording itself")
+	}
+}
+
 func TestLearnMatchAWindowIsOneRunOfTheAppsClock(t *testing.T) {
 	iso := func(t time.Time) string { return t.UTC().Format(time.RFC3339) }
 	for _, jump := range []time.Duration{0, 300 * time.Second} {
@@ -3723,7 +3842,8 @@ func TestLearnMatchReadsAServedDateHeaderAsItsAnswersStamp(t *testing.T) {
 // recorded in, is its server's clock read as it answered the call: a word
 // of the call's drifted value that it holds by coincidence (the second of a
 // sent_at that no lead or window shows a clock read) is no echo, and the
-// value is learned as noise. A Date header outside that span is read as any
+// value, one instant whole in a call with no window, is learned as a read of
+// the clock, which a replay checks in its call's own span. A Date header outside that span is read as any
 // leaf of the answer, and refuses it.
 func TestLearnMatchReadsItsOwnAnswersDateAsItsStamp(t *testing.T) {
 	for _, tc := range []struct {
@@ -3736,7 +3856,7 @@ func TestLearnMatchReadsItsOwnAnswersDateAsItsStamp(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h, n, opts := learnOn(t)
-			tr := learn.NewTracker()
+			tr := clockedTracker()
 			tr.Begin()
 			ctx := learn.WithTracker(context.Background(), tr)
 			send := learnRecorded("mock-0", time.Second, "POST", "/v1/send", `{"sent_at":"2026-10-14T10:00:01Z"}`, nil, `{"ok":true}`)
@@ -3747,8 +3867,8 @@ func TestLearnMatchReadsItsOwnAnswersDateAsItsStamp(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if tc.served && (served == nil || !reflect.DeepEqual(db.consumed[len(db.consumed)-1].Spec.ReqBodyNoise, map[string][]string{"body.sent_at": {}})) {
-				t.Fatalf("served %v, miss %+v; want body.sent_at learned as noise", served != nil, miss)
+			if tc.served && (served == nil || !learnedClockRead(db.consumed[len(db.consumed)-1].Spec, "body.sent_at")) {
+				t.Fatalf("served %v, miss %+v; want body.sent_at learned as a read of the clock", served != nil, miss)
 			}
 			if !tc.served && (served != nil || !strings.Contains(miss.res.Why, "comes back in the answer at header.date")) {
 				t.Fatalf("served %v, miss %+v; want it refused, the answer's header.date holding a word of it", served != nil, miss)
@@ -4547,5 +4667,46 @@ func TestLearnMatchAnExchangeServedLeafByLeafIsReadByWhenItWasRecorded(t *testin
 		if got, why := verdict(call - time.Second); got != "served true" {
 			t.Errorf("%s, recorded a second before the call: %s (%s); want noise, an earlier place both runs were given showing no copy", tc.name, got, why)
 		}
+	}
+}
+
+// learnedClockRead reports whether spec carries path as a read of the
+// application's clock the learn step learned (MockSpec.Clocks), still
+// compared, and no noise.
+func learnedClockRead(spec models.MockSpec, path string) bool {
+	_, clock := spec.Clocks[path]
+	return clock && len(spec.ReqBodyNoise) == 0
+}
+
+// A read of the clock the learn step hands back (learn.KindClockRead) is
+// carried as a read a replay checks, never as noise; a kind the plan does
+// not carry (a read with no read beside it, an offset with no offset, one
+// it does not know) refuses the call with the learn step's reason, never
+// leaves the field out of the noise to be compared by luck.
+func TestALearnedReadOfTheClockIsCarriedAndAKindThePlanCannotCarryIsRefused(t *testing.T) {
+	m := &models.Mock{Name: "mock-1"}
+	leaf := learn.Leaf{Path: "body.at", Value: "2026-10-27T10:00:00Z", Type: learn.String}
+	read := models.ClockOffset{Res: time.Second, Zone: models.ZoneUTC}
+	p, why := learnPlan(learn.NewTracker(), 1, m, learn.Shape{}, true, []learn.Learned{{Kind: learn.KindClockRead, Recorded: leaf, Live: leaf, Read: &read, Why: "unchecked"}}, nil, nil)
+	if why != "" {
+		t.Fatalf("a read of the clock refused: %s", why)
+	}
+	if got, ok := p.clocks["body.at"]; !ok || got != read {
+		t.Fatalf("clocks = %v, want body.at carried as %v", p.clocks, read)
+	}
+	if _, ok := p.noise["body.at"]; ok {
+		t.Fatalf("a read of the clock learned as noise too: %v", p.noise)
+	}
+	for _, k := range []learn.Kind{learn.KindClockRead, learn.KindClockOffset, "a kind of tomorrow"} {
+		p, why := learnPlan(learn.NewTracker(), 1, m, learn.Shape{}, true, []learn.Learned{{Kind: k, Recorded: leaf, Live: leaf, Why: "it is what it is"}}, nil, nil)
+		if want := "body.at changed, and it is what it is"; why != want {
+			t.Errorf("%s with nothing beside it: why %q, want %q", k, why, want)
+		}
+		if len(p.noise) != 0 || len(p.clocks) != 0 {
+			t.Errorf("%s with nothing beside it: noise %v, clocks %v, want neither", k, p.noise, p.clocks)
+		}
+	}
+	if _, why := learnPlan(learn.NewTracker(), 1, m, learn.Shape{}, true, []learn.Learned{{Kind: learn.KindClockRead, Recorded: leaf, Live: leaf}}, nil, nil); why != "body.at changed, and keploy learned it as clock-read, which this replay cannot check" {
+		t.Errorf("a read with no read beside it and no reason: why %q, want the kind named", why)
 	}
 }

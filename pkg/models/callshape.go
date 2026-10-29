@@ -161,9 +161,14 @@ func FieldShapes(fields []string) []string {
 // API version (v1) is kept. A header's name is kept whole: it names the
 // field (header.Authorization). A raw dotted key is shaped part by part
 // (alice.smith@example.com keeps "alice"), so a producer shapes its keys
-// first (KeyShape), as the strict comparison does.
+// first (KeyShape), as the strict comparison does. An SQL call's place name
+// is kept whole too (sqlPlace: bind.$1, literal.3): a position keploy counts
+// in the statement, not a value the app sent.
 func FieldShape(f string) string {
 	if name, ok := strings.CutPrefix(f, "header."); ok && name != "" && !strings.Contains(name, ".") {
+		return f
+	}
+	if sqlPlace.MatchString(f) {
 		return f
 	}
 	parts := strings.Split(f, ".")
@@ -179,6 +184,12 @@ func FieldShape(f string) string {
 
 // fieldIndexes are a field part's array indexes: [], [0], [3][].
 var fieldIndexes = regexp.MustCompile(`^(\[[0-9]{0,4}\])+$`)
+
+// sqlPlace is a whole field that is an SQL call's place name, as the
+// Postgres parser names a statement's places: bind.$N, its Nth bound
+// parameter, and literal.N, the Nth constant of its text, each counted from
+// 1, up to five digits (a statement binds at most 65535 parameters).
+var sqlPlace = regexp.MustCompile(`^(bind\.\$|literal\.)[1-9][0-9]{0,4}$`)
 
 // KeyShape is an object key, a form key or a query name as a field's name
 // holds it: itself when it reads as a name (PathShape's segment rule), {}

@@ -2,6 +2,7 @@ package models
 
 import (
 	"encoding/gob"
+	"maps"
 	"net/url"
 	"strings"
 	"time"
@@ -443,6 +444,19 @@ type MockSpec struct {
 	// a top-level `variables:` block like noise; nil for a call that holds
 	// none. Additive / omitempty: an older keploy ignores it.
 	Variables MockVariables `json:"Variables,omitempty" yaml:"variables,omitempty" bson:"variables,omitempty"`
+
+	// Clocks names the request places of this call the learn step learned
+	// as a read of the application's clock: a plain read (a zero offset,
+	// ClockOffset.Plain) or a read plus a constant offset (an expiry thirty
+	// minutes after now), by the field paths ReqBodyNoise uses. They are
+	// compared, never noise: a replay checks the value its call carries
+	// there is a read made in its own call's window on the application's
+	// clock plus that offset (ClockOffset.Holds), and refuses it otherwise,
+	// or where it cannot tell the application's clock. Kind-agnostic,
+	// carried on the doc envelope as a top-level `clocks:` block like
+	// variables; nil for a call that holds none. Additive / omitempty: a
+	// recording without it loads as before, and an older keploy ignores it.
+	Clocks map[string]ClockOffset `json:"Clocks,omitempty" yaml:"clocks,omitempty" bson:"clocks,omitempty"`
 
 	// learned and learnedBinds are, on a mock the learn step of record's
 	// full round just paired (agent side, in memory), the variables it
@@ -1095,6 +1109,13 @@ type MockState struct {
 	// noise: those the learn step of record's full round learned on it are
 	// written onto the recording.
 	Variables MockVariables `json:"variables,omitempty"`
+	// Clocks carries the places of the mock's call the learn step learned as
+	// reads of the application's clock (MockSpec.Clocks) back from the agent
+	// under the proven switch, as Variables does: record's full round writes
+	// them onto the recording, where a replay compares them through
+	// ClockOffset.Holds. An agent that predates it learns such a place as
+	// noise, as it did.
+	Clocks map[string]ClockOffset `json:"clocks,omitempty"`
 	// Binds are the variables the learn step learned, while answering this
 	// mock, that are bound at an earlier mock of the same test (MockSpec.LearnedBinds),
 	// by that mock's name: the replay writes them onto that mock.
@@ -1205,6 +1226,7 @@ func (m *Mock) DeepCopy() *Mock {
 	}
 
 	c.Spec.Variables = m.Spec.Variables.Clone()
+	c.Spec.Clocks = maps.Clone(m.Spec.Clocks)
 
 	// 3. Deep copy all slices by creating new slices and copying the elements.
 	// This gives each copy its own separate backing array.

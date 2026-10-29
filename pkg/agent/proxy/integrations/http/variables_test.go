@@ -146,7 +146,13 @@ func createAndReadBack(recorded string) []*models.Mock {
 
 func matchVar(t *testing.T, h *HTTP, db *varDb, r *req) (bool, *models.Mock, *matchDiag) {
 	t.Helper()
-	ok, stub, diag, err := h.match(context.Background(), r, db, nil, nil, nil, true, false, false, true, true)
+	return matchVarIn(t, context.Background(), h, db, r)
+}
+
+// matchVarIn is matchVar on a connection whose context is ctx.
+func matchVarIn(t *testing.T, ctx context.Context, h *HTTP, db *varDb, r *req) (bool, *models.Mock, *matchDiag) {
+	t.Helper()
+	ok, stub, diag, err := h.match(ctx, r, db, nil, nil, nil, true, false, false, true, true)
 	if err != nil {
 		t.Fatalf("match: %v", err)
 	}
@@ -2105,4 +2111,63 @@ func TestVariables_ADigestHeaderAVariableSetsIsNotRecomputed(t *testing.T) {
 	if !strings.Contains(string(raw), "Etag: "+liveTag+"\r\n") && !strings.Contains(string(raw), "ETag: "+liveTag+"\r\n") {
 		t.Fatalf("the served ETag is not the variable's value %s:\n%s", liveTag, raw)
 	}
+}
+
+// A read of the clock on a mock with variables is checked in its own call's
+// window, with learned noise beside it as without (the recorded value is
+// never put back there); one on the place a variable holds is refused, the
+// two learnings named.
+func TestVariables_AClockReadBesideAVariableIsCheckedInItsCallsWindow(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	base := time.Date(2026, 10, 26, 15, 50, 35, 0, time.UTC)
+	recAt := time.Date(2026, 9, 1, 9, 0, 0, 0, time.UTC).Format(time.RFC3339)
+	now := base.Add(time.Second).Format(time.RFC3339)
+	plain := models.ClockOffset{Res: time.Second}
+	for _, c := range []struct {
+		name   string
+		clocks map[string]models.ClockOffset
+		noise  bool
+		why    string
+	}{
+		{"a read in the query", map[string]models.ClockOffset{"url.query.since": plain}, false, ""},
+		{"with learned noise beside it", map[string]models.ClockOffset{"url.query.since": plain}, true, ""},
+		{"a read where the variable sits", map[string]models.ClockOffset{"url.path.1": plain}, false, "learned both as variable orderId"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			mocks := createAndReadBack("ord-rec-1")
+			mocks[1].Spec.HTTPReq.URL += "?since=" + recAt
+			mocks[1].Spec.Clocks = c.clocks
+			if c.noise {
+				mocks[1].Spec.ReqBodyNoise = map[string][]string{"url.query.since": {}}
+			}
+			db := &varDb{perTest: mocks}
+			h := newHTTP()
+			ctx := clockConn(true, base)
+			r := liveReq("POST", "/orders", `{"id":"ord-live-9","item":"pen"}`)
+			r.arrived = base.Add(time.Second)
+			if ok, _, diag := matchVarIn(t, ctx, h, db, r); !ok {
+				t.Fatalf("the create was refused: %+v", diag)
+			}
+			r = liveReq("GET", "/orders/ord-live-9?since="+now, "")
+			r.arrived = base.Add(2 * time.Second)
+			ok, _, diag := matchVarIn(t, ctx, h, db, r)
+			if c.why != "" {
+				wantProblem(t, ok, diag, c.why)
+				return
+			}
+			if !ok {
+				t.Fatalf("this call's own read of the clock refused: %+v", diag)
+			}
+		})
+	}
+	// A JSON body's place a variable holds and a clock read was learned at
+	// is refused the same way, the place read in the variables' grammar.
+	t.Run("a read where a body variable sits", func(t *testing.T) {
+		m := varMock("mock-1", "POST", "http://store/orders", `{"at":"`+recAt+`"}`, 201, `{}`, models.MockVariables{"first": clockV(t, recAt, "body.at", false)})
+		m.Spec.Clocks = map[string]models.ClockOffset{"body.at": plain}
+		r := liveReq("POST", "/orders", `{"at":"`+now+`"}`)
+		r.arrived = base.Add(2 * time.Second)
+		ok, _, diag := matchVarIn(t, clockConn(true, base), newHTTP(), &varDb{perTest: []*models.Mock{at(m, 1)}}, r)
+		wantProblem(t, ok, diag, "learned both as variable first")
+	})
 }

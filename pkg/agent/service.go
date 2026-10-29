@@ -709,13 +709,24 @@ type AppClockSetter interface {
 	SetAppClock(f func(real time.Time) (time.Time, bool))
 }
 
+// AppClockRunSetter is an optional proxy capability, beside AppClockSetter:
+// SetAppClockRun makes the learn step read, through f, the real instant
+// from which the app's clock has run as one to a real instant, as the
+// agent's hooks moved it (learn.Tracker.SetAppClockRun); nil for none.
+type AppClockRunSetter interface {
+	SetAppClockRun(f func(real time.Time) (time.Time, bool))
+}
+
 // PoolNamesSetter is an optional ExactServer capability: SetPoolNames hands the
 // proxy the names the replay's scope table puts in a pool slice, of every key,
 // so that the parsers' learn steps can tell the pool's mocks from a test's
 // where the replay sends no recorded test windows (keploy mock replay):
-// integrations.PoolMembership.
+// integrations.PoolMembership. owners is, of the same table, the key of the
+// test process whose tests list each mock ("" where no one key is known),
+// which bounds each process's teardown, the calls it makes after its own last
+// test.
 type PoolNamesSetter interface {
-	SetPoolNames(names []string) error
+	SetPoolNames(names []string, owners map[string]string) error
 }
 
 // UnrequiredSetter is an optional ExactServer capability: SetUnrequired hands

@@ -791,11 +791,11 @@ func (r *Replayer) serveFirstCycleLearned(ctx context.Context, plan *exactPlan, 
 }
 
 // carriesLearning is, in name order, every state of states that carries
-// learned noise, variables or binds.
+// learned noise, variables, binds or clock reads.
 func carriesLearning(states map[string]models.MockState) []models.MockState {
 	var out []models.MockState
 	for _, st := range states {
-		if len(st.ReqBodyNoise) > 0 || len(st.Variables) > 0 || len(st.Binds) > 0 {
+		if len(st.ReqBodyNoise) > 0 || len(st.Variables) > 0 || len(st.Binds) > 0 || len(st.Clocks) > 0 {
 			out = append(out, st)
 		}
 	}

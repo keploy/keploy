@@ -333,7 +333,7 @@ func TestAPendingCallIsNoPreviousCall(t *testing.T) {
 		t.Fatalf("the insert's window %+v does not hold its read (recorded %s, live %s)", w, rec.Format(time.RFC3339Nano), live.Format(time.RFC3339Nano))
 	}
 	for _, typed := range []bool{false, true} {
-		if ln := classifyProcessedAt(rec, live, typed, insert.Spec.ReqTimestampMock, w, receive, hello5, count, hello7, pending); ln.Kind != KindNoise {
+		if ln := classifyProcessedAt(rec, live, typed, insert.Spec.ReqTimestampMock, w, receive, hello5, count, hello7, pending); !noiseOrRead(ln) {
 			t.Errorf("typed %v: %s (from %q, %s); want noise, a read in its call's window", typed, ln.Kind, ln.From.Mock, ln.Why)
 		}
 	}
@@ -466,6 +466,12 @@ func TestTrackerCallWindowStartsAtABeginThatMovedTheClock(t *testing.T) {
 				return
 			}
 			want := &Window{Rec: Span{From: rec, To: paired.Spec.ReqTimestampMock}, F: Span{From: tc.from.Add(after), To: arrival.Add(after)}}
+			// A client test's span carries its test's begin on the app's
+			// clock (Span.Began), which the clock ran as one from to the
+			// arrival; the recording's carries none, none given.
+			if tc.client {
+				want.F.Began = tc.began.Add(after)
+			}
 			if !reflect.DeepEqual(w, want) {
 				t.Fatalf("window %+v; want %+v", w, want)
 			}
@@ -535,6 +541,11 @@ func TestTrackerCallWindowStartsAtATestsRecordedBegin(t *testing.T) {
 				f = Span{From: tc.serve.Add(after), To: arrival.Add(after)}
 			}
 			want := &Window{Rec: Span{From: tc.from, To: paired.Spec.ReqTimestampMock}, F: f}
+			// A client test's spans carry each run's test begin (Span.Began):
+			// the recorded begin, and the begin on the app's clock.
+			if tc.client {
+				want.Rec.Began, want.F.Began = tc.recBegin, began.Add(after)
+			}
 			if !reflect.DeepEqual(w, want) {
 				t.Fatalf("window %+v; want %+v", w, want)
 			}
