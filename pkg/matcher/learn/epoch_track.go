@@ -61,23 +61,44 @@ type EpochOffset struct {
 // draws (a phone number, a counter, a random id) meets none of that across
 // calls made at different moments.
 func EpochTrack(reads []EpochRead) (EpochOffset, bool) {
-	var e EpochOffset
-	seen := map[time.Time]bool{}
+	rs := make([]clockReading, len(reads))
 	for i, r := range reads {
 		v, res, ok := readEpoch(r.Value)
+		if !ok {
+			return EpochOffset{}, false
+		}
+		rs[i] = clockReading{at: v, res: res, span: r.Span}
+	}
+	return trackOffset(rs)
+}
+
+// clockReading is one recording's read of the clock as its leaf reads (a
+// bare epoch number's instant, readEpoch, or a typed instant's, InstantOf):
+// at, at resolution res, made in span (EpochRead.Span).
+type clockReading struct {
+	at   time.Time
+	res  time.Duration
+	span Span
+}
+
+// trackOffset is EpochTrack of readings already read.
+func trackOffset(rs []clockReading) (EpochOffset, bool) {
+	var e EpochOffset
+	seen := map[time.Time]bool{}
+	for i, r := range rs {
 		// A span with no start (no call before this one) is no span: the
 		// read can have been made at any earlier moment. One with no end
 		// places the read before every instant, which no offset meets.
-		if !ok || r.Span.From.IsZero() || i > 0 && res != e.Res {
+		if r.span.From.IsZero() || i > 0 && r.res != e.Res {
 			return EpochOffset{}, false
 		}
-		lo, hi := v.Sub(r.Span.To.Truncate(res)), v.Sub(r.Span.From.Truncate(res))
+		lo, hi := r.at.Sub(r.span.To.Truncate(r.res)), r.at.Sub(r.span.From.Truncate(r.res))
 		if i == 0 {
-			e = EpochOffset{Lo: lo, Hi: hi, Res: res}
+			e = EpochOffset{Lo: lo, Hi: hi, Res: r.res}
 		} else {
 			e.Lo, e.Hi = max(e.Lo, lo), min(e.Hi, hi)
 		}
-		seen[v] = true
+		seen[r.at] = true
 	}
 	if len(seen) < MinEpochReads || e.Lo > e.Hi {
 		return EpochOffset{}, false
@@ -95,7 +116,12 @@ func EpochTrack(reads []EpochRead) (EpochOffset, bool) {
 // value an hour off) does not hold.
 func (e EpochOffset) Holds(live string, s Span) bool {
 	v, res, ok := readEpoch(live)
-	if !ok || res != e.Res || s.From.IsZero() {
+	return ok && e.holds(v, res, s)
+}
+
+// holds is Holds of a live read already read: v at resolution res.
+func (e EpochOffset) holds(v time.Time, res time.Duration, s Span) bool {
+	if res != e.Res || s.From.IsZero() {
 		return false // a span with no end meets no offset (EpochTrack)
 	}
 	return v.Sub(s.To.Truncate(res)) <= e.Hi && e.Lo <= v.Sub(s.From.Truncate(res))
