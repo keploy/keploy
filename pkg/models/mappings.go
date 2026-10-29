@@ -105,6 +105,18 @@ type BackgroundMarks map[string]map[string]string
 // Of is the marks of test's own list; nil when it has none.
 func (b BackgroundMarks) Of(test string) map[string]string { return b[test] }
 
+// BackgroundSeriesPrefix begins the why of a mark judging wrote for a series
+// (a timer's call recorded again and again with only its reads of the clock
+// changed, learn.SeriesOf), on every list that holds a recording of it. A
+// call of a series so marked is answered again, as often as it comes,
+// whichever test's window it lands in; a recording marked with any other why
+// is a one-off, answered at most once beyond its own test's window.
+const BackgroundSeriesPrefix = "series_of: "
+
+// IsBackgroundSeries reports whether why is a series' mark
+// (BackgroundSeriesPrefix).
+func IsBackgroundSeries(why string) bool { return strings.HasPrefix(why, BackgroundSeriesPrefix) }
+
 // Add marks name on test's list with why.
 func (b BackgroundMarks) Add(test, name, why string) {
 	if b[test] == nil {
