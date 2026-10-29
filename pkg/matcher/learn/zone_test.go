@@ -1,6 +1,7 @@
 package learn
 
 import (
+	"bytes"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -70,9 +71,10 @@ func TestReadZoneNamesTheZoneAProcessWritesItsWallClockIn(t *testing.T) {
 		{"a copied file /etc/timezone names", map[string][]byte{"etc/localtime": berlin, "etc/timezone": []byte("Europe/Berlin\n"), zi + "Europe/Berlin": berlin}, nil, "", false, "Europe/Berlin", 3600},
 		{"a copied file /etc/timezone misnames", map[string][]byte{"etc/localtime": berlin, "etc/timezone": []byte("Asia/Kolkata\n"), zi + "Asia/Kolkata": kolkata}, nil, "", false, "", 3600},
 		{"a link to a link into zoneinfo", map[string][]byte{zi + "Europe/Berlin": berlin}, map[string]string{"etc/localtime": "/etc/alt/localtime", "etc/alt/localtime": "/" + zi + "Europe/Berlin"}, "", false, "Europe/Berlin", 3600},
-		// Under root, the file the link names holds Berlin's rules: they are
-		// read, never keploy's own Asia/Kolkata.
-		{"a link into zoneinfo, its file under root another zone's", map[string][]byte{zi + "Asia/Kolkata": berlin}, map[string]string{"etc/localtime": "/" + zi + "Asia/Kolkata"}, "", false, "Asia/Kolkata", 3600},
+		// Under root, the file the link names holds Berlin's rules: not
+		// Asia/Kolkata's, so unknown, never keploy's own Asia/Kolkata nor
+		// Berlin under Kolkata's name (TestAZoneFileWhoseRulesAreNotItsNamesIsUnknown).
+		{"a link into zoneinfo, its file under root another zone's", map[string][]byte{zi + "Asia/Kolkata": berlin}, map[string]string{"etc/localtime": "/" + zi + "Asia/Kolkata"}, "", false, "!", 0},
 		{"a link to no file", nil, map[string]string{"etc/localtime": "/" + zi + "Asia/Kolkata"}, "", false, "!", 0},
 		{"a link climbing above root", map[string][]byte{zi + "Europe/Berlin": berlin}, map[string]string{"etc/localtime": "../../../../../../" + zi + "Europe/Berlin"}, "", false, "Europe/Berlin", 3600},
 		{"a copied file of no name, a fixed offset", map[string][]byte{"etc/localtime": kolkata}, nil, "", false, "+05:30", 19800},
@@ -114,6 +116,147 @@ func TestReadZoneNamesTheZoneAProcessWritesItsWallClockIn(t *testing.T) {
 		t.Errorf("an absolute link to a file of no zoneinfo path: %v", err)
 	} else if _, off := at.In(loc).Zone(); off != 3600 {
 		t.Errorf("an absolute link read under root: offset %d; want Berlin's 3600", off)
+	}
+}
+
+// tzif is a zone file (version 1) of the offsets offs, in seconds east of
+// UTC: offs[0] before at[0], offs[i] from at[i-1] on.
+func tzif(offs []int, at []time.Time) []byte {
+	var b []byte
+	put := func(v int32) { b = append(b, byte(v>>24), byte(v>>16), byte(v>>8), byte(v)) }
+	b = append(b, "TZif"...)
+	b = append(b, make([]byte, 16)...)
+	for _, n := range []int{0, 0, 0, len(at), len(offs), 2} {
+		put(int32(n))
+	}
+	for _, t := range at {
+		put(int32(t.Unix()))
+	}
+	for i := range at {
+		b = append(b, byte(i+1))
+	}
+	for _, off := range offs {
+		put(int32(off))
+		b = append(b, 0, 0)
+	}
+	return append(b, "Z\x00"...)
+}
+
+// tzifRules is the zone file data's rules from 1901 to 2038 hold, written
+// as a version 1 file (tzif): other bytes of the same rules there.
+func tzifRules(t *testing.T, data []byte) []byte {
+	t.Helper()
+	loc, err := time.LoadLocationFromTZData("", data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	from, to := time.Unix(-1<<31, 0), time.Unix(1<<31-1, 0)
+	_, off := from.In(loc).Zone()
+	offs, at := []int{off}, []time.Time(nil)
+	for tt := from; ; {
+		_, end := tt.In(loc).ZoneBounds()
+		if end.IsZero() || !end.Before(to) {
+			break
+		}
+		_, off := end.In(loc).Zone()
+		offs, at, tt = append(offs, off), append(at, end), end
+	}
+	b := tzif(offs, at)
+	if bytes.Equal(b, data) {
+		t.Fatal("tzifRules wrote the bytes it read")
+	}
+	return b
+}
+
+// A zone file whose rules are not those of the zone its link or its
+// /etc/timezone names is unknown, a lasting error that names both
+// (coordinator's ruling, 2026-10-29 12:13): Node and a JVM read the zone
+// by the name, the C library, Go and Python by the file's rules. A host's
+// /etc/localtime bind-mounted over a Debian image's link to Etc/UTC gives
+// that shape. A file that holds the name's rules from 1970 to 2038 is
+// named, whatever it holds outside them; a change of offset either makes
+// is read, so the first instant they differ at is the one named. A JVM
+// reads the link's name (TestAJVMWithNoZoneOptionReadsItsZoneAsTheJDKDoes).
+func TestAZoneFileWhoseRulesAreNotItsNamesIsUnknown(t *testing.T) {
+	read := func(name string) []byte {
+		b, err := os.ReadFile("/usr/share/zoneinfo/" + name)
+		if err != nil {
+			t.Skipf("no host zone files: %v", err)
+		}
+		return b
+	}
+	kolkata, utc, phoenix := read("Asia/Kolkata"), read("Etc/UTC"), read("America/Phoenix")
+	at := time.Date(2026, 10, 28, 7, 30, 0, 0, time.UTC)
+	day := func(y int, m time.Month, d int) time.Time { return time.Date(y, m, d, 0, 0, 0, 0, time.UTC) }
+	zi := "usr/share/zoneinfo/"
+	toUTC := map[string]string{"etc/localtime": "/" + zi + "Etc/UTC"}
+	for _, row := range []struct {
+		what  string
+		files map[string][]byte
+		links map[string]string
+		why   string // a text the error holds; "" none
+		name  string // the zone's name (loc.String()) where it is read
+		off   int    // its offset at at
+	}{
+		{"a link to Etc/UTC whose file holds Kolkata's rules (a host's /etc/localtime bound over the image's link)", map[string][]byte{zi + "Etc/UTC": kolkata}, toUTC,
+			`named "Etc/UTC" (by TZ, the /etc/localtime link or /etc/timezone) does not hold "Etc/UTC"'s rules: their offsets first differ on 1970-01-01T00:00:00Z, where it reads UTC+05:30 and "Etc/UTC" UTC+00:00. Node and a JVM read the zone by its name, the C library, Go and Python by the file's rules`, "", 0},
+		{"a link to Etc/UTC whose file holds its rules", map[string][]byte{zi + "Etc/UTC": utc}, toUTC, "", "Etc/UTC", 0},
+		{"a link to Asia/Kolkata whose file holds its rules", map[string][]byte{zi + "Asia/Kolkata": kolkata}, map[string]string{"etc/localtime": "/" + zi + "Asia/Kolkata"}, "", "Asia/Kolkata", 19800},
+		{"/etc/timezone names Etc/UTC, whose file under root is the copy's Kolkata rules", map[string][]byte{"etc/localtime": kolkata, "etc/timezone": []byte("Etc/UTC\n"), zi + "Etc/UTC": kolkata}, nil,
+			`named "Etc/UTC" (by TZ, the /etc/localtime link or /etc/timezone) does not hold "Etc/UTC"'s rules: their offsets first differ on 1970-01-01T00:00:00Z, where it reads UTC+05:30`, "", 0},
+		{"/etc/timezone names Etc/UTC over a copied file of Kolkata's rules, its Etc/UTC UTC's: no name", map[string][]byte{"etc/localtime": kolkata, "etc/timezone": []byte("Etc/UTC\n"), zi + "Etc/UTC": utc}, nil, "", "", 19800},
+		{"a link to America/Denver whose file holds Phoenix's rules, which Denver's first change of offset parts", map[string][]byte{zi + "America/Denver": phoenix}, map[string]string{"etc/localtime": "/" + zi + "America/Denver"},
+			`first differ on 1970-04-26T09:00:00Z, where it reads UTC-07:00 and "America/Denver" UTC-06:00`, "", 0},
+		{"a link to Etc/UTC whose file changes offset in 2026", map[string][]byte{zi + "Etc/UTC": tzif([]int{0, 3600}, []time.Time{day(2026, 3, 1)})}, toUTC,
+			`first differ on 2026-03-01T00:00:00Z, where it reads UTC+01:00 and "Etc/UTC" UTC+00:00`, "", 0},
+		{"a link to Etc/UTC whose file differs before 1970 alone", map[string][]byte{zi + "Etc/UTC": tzif([]int{19800, 0}, []time.Time{day(1969, 12, 31)})}, toUTC, "", "Etc/UTC", 0},
+		{"a link to Etc/UTC whose file differs from 2038 alone", map[string][]byte{zi + "Etc/UTC": tzif([]int{0, 3600}, []time.Time{day(2038, 1, 1)})}, toUTC, "", "Etc/UTC", 0},
+		{"a link to Etc/UTC whose file holds an offset of seconds", map[string][]byte{zi + "Etc/UTC": tzif([]int{-2670}, nil)}, toUTC,
+			`first differ on 1970-01-01T00:00:00Z, where it reads UTC-00:44:30 and "Etc/UTC" UTC+00:00`, "", 0},
+		// A name keploy's zone data does not hold, or "Local" (keploy's own
+		// zone): the file's rules, with no name.
+		{"a link to a zone keploy's zone data does not hold", map[string][]byte{zi + "Mars/Olympus": kolkata}, map[string]string{"etc/localtime": "/" + zi + "Mars/Olympus"}, "", "", 19800},
+		{"a link to a file named Local", map[string][]byte{zi + "Local": kolkata}, map[string]string{"etc/localtime": "/" + zi + "Local"}, "", "", 19800},
+	} {
+		r := t.TempDir()
+		for name, data := range row.files {
+			p := filepath.Join(r, name)
+			if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(p, data, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for name, target := range row.links {
+			p := filepath.Join(r, name)
+			if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, p); err != nil {
+				t.Fatal(err)
+			}
+		}
+		loc, err := ReadZone(r, "", false)
+		if row.why != "" {
+			// Read twice: the second, of the same name and bytes, is unknown too.
+			for i := 0; i < 2; i++ {
+				if err == nil || loc != nil {
+					t.Errorf("%s (read %d): %v %v; want unknown", row.what, i+1, loc, err)
+				} else if !isLasting(err) || !strings.Contains(err.Error(), row.why) {
+					t.Errorf("%s (read %d): lasting %v, %q; want lasting, holding %q", row.what, i+1, isLasting(err), err, row.why)
+				}
+				loc, err = ReadZone(r, "", false)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("%s: %v", row.what, err)
+			continue
+		}
+		if _, off := at.In(loc).Zone(); loc.String() != row.name || off != row.off {
+			t.Errorf("%s: %q at %d; want %q at %d", row.what, loc.String(), off, row.name, row.off)
+		}
 	}
 }
 

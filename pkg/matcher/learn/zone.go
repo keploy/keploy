@@ -35,7 +35,8 @@ import (
 // rules with no name (ZoneNameOf then names it by its fixed offset, where it
 // has one). An error where keploy cannot read the zone: a TZ of a POSIX rule
 // ("IST-5:30"), which keploy does not read (Go reads UTC there, and the C
-// library the rule), or no zone file (a link to nothing).
+// library the rule), no zone file (a link to nothing), or a file whose rules
+// are not those of the zone its name gives (loadZone).
 func ReadZone(root, tz string, set bool) (*time.Location, error) {
 	return readZone(root, tz, set, true)
 }
@@ -661,6 +662,10 @@ func javaTimezoneLine(root string) (string, bool, error) {
 
 // javaLocaltimeID is the zone id a JVM reads from root's /etc/localtime
 // (javaPlatformZone), and where it read it; from "" where Java reads GMT.
+// Of a link, it is the zone the link names, whatever rules the file there
+// holds (a host's /etc/localtime bind-mounted on it, which the C library
+// reads and loadZone refuses): a JVM reads that name in its own zone data,
+// and writes its wall clock in that zone.
 func javaLocaltimeID(root string) (id, from string, err error) {
 	etc, err := resolveUnder(root, "/etc")
 	if errors.Is(err, fs.ErrNotExist) {
@@ -1105,8 +1110,29 @@ type zoneLocKey struct {
 }
 
 // loadZone is time.LoadLocationFromTZData(name, data), the one zoneLocs
-// holds where it holds one of that name and bytes.
+// holds where it holds one of that name and bytes. A name whose rules in
+// keploy's own zone data (models.ZoneLocation) are not data's is a lasting
+// error that names both (zoneRulesDiffer): the zone is unknown, as runtimes
+// disagree on it. Node (ICU) and a JVM read the zone by the name, in their
+// own zone data; the C library, Go and Python read the file's rules. A
+// host's /etc/localtime bind-mounted over an image's link to its zone
+// (`-v /etc/localtime:/etc/localtime:ro`) lands on the file the link
+// names, and gives that shape; so does a file of another release of IANA's
+// data than keploy's, for a zone whose rules changed between the two (a
+// stated limit: a right value of such a zone is refused, saying why). A
+// reference that is the very file read (keploy's own zone files, where the
+// process shares keploy's root) finds no difference. A name keploy's zone
+// data does not hold (nor "Local", which names keploy's own zone) is
+// dropped: the file's rules with no name, as keploy cannot tell whether
+// they are the name's.
 func loadZone(name string, data []byte) (*time.Location, error) {
+	var own *time.Location
+	if name != "" {
+		var err error
+		if own, err = models.ZoneLocation(name); err != nil {
+			name = ""
+		}
+	}
 	k := zoneLocKey{name: name, sum: sha256.Sum256(data)}
 	zoneLocs.mu.Lock()
 	loc, ok := zoneLocs.m[k]
@@ -1119,6 +1145,14 @@ func loadZone(name string, data []byte) (*time.Location, error) {
 		// Bytes that are no zone file's: lasting (lastingError).
 		return nil, lasting(err)
 	}
+	if own != nil {
+		if at, ok := zoneRulesDiffer(loc, own); ok {
+			_, off := at.In(loc).Zone()
+			_, ownOff := at.In(own).Zone()
+			return nil, lasting(fmt.Errorf("the zone file named %q (by TZ, the /etc/localtime link or /etc/timezone) does not hold %q's rules: their offsets first differ on %s, where it reads UTC%s and %q UTC%s. Node and a JVM read the zone by its name, the C library, Go and Python by the file's rules, so keploy reads the application's zone as unknown. A host's /etc/localtime bind-mounted over an image's link to its zone (-v /etc/localtime:/etc/localtime:ro lands on the file the link names) gives this: set TZ to the zone the application runs in. So does zone data (tzdata) of another release than keploy's, for a zone whose rules changed between them: update the image's tzdata",
+				name, name, at.UTC().Format(time.RFC3339), utcOffset(off), name, utcOffset(ownOff)))
+		}
+	}
 	zoneLocs.mu.Lock()
 	if len(zoneLocs.m) >= zoneLocCap {
 		zoneLocs.m = map[zoneLocKey]*time.Location{}
@@ -1126,6 +1160,54 @@ func loadZone(name string, data []byte) (*time.Location, error) {
 	zoneLocs.m[k] = loc
 	zoneLocs.mu.Unlock()
 	return loc, nil
+}
+
+// zoneRulesFrom and zoneRulesTo bound the instants zoneRulesDiffer reads:
+// from 1970, as builds of one release of IANA's data differ only before it
+// (built with backzone or without, which drops the history of zones merged
+// for agreeing since 1970), to 2038, as a version 1 or "fat" zone file
+// lists no change of offset after 2037, where a version 2 file's footer
+// rule goes on.
+var (
+	zoneRulesFrom = time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC)
+	zoneRulesTo   = time.Date(2038, 1, 1, 0, 0, 0, 0, time.UTC)
+)
+
+// zoneRulesDiffer is the first instant from zoneRulesFrom to zoneRulesTo at
+// which a and b read different offsets from UTC, and whether there is one:
+// each is read at every change of offset either makes
+// (time.Time.ZoneBounds), so no change of either between two reads is
+// missed.
+func zoneRulesDiffer(a, b *time.Location) (time.Time, bool) {
+	for t := zoneRulesFrom; t.Before(zoneRulesTo); {
+		ta, tb := t.In(a), t.In(b)
+		_, oa := ta.Zone()
+		_, ob := tb.Zone()
+		if oa != ob {
+			return t, true
+		}
+		next := zoneRulesTo
+		for _, tt := range []time.Time{ta, tb} {
+			if _, end := tt.ZoneBounds(); !end.IsZero() && end.Before(next) {
+				next = end
+			}
+		}
+		t = next.UTC()
+	}
+	return time.Time{}, false
+}
+
+// utcOffset is off, in seconds east of UTC, as "+05:30" (seconds where it
+// holds some).
+func utcOffset(off int) string {
+	sign := '+'
+	if off < 0 {
+		sign, off = '-', -off
+	}
+	if off%60 != 0 {
+		return fmt.Sprintf("%c%02d:%02d:%02d", sign, off/3600, off%3600/60, off%60)
+	}
+	return fmt.Sprintf("%c%02d:%02d", sign, off/3600, off%3600/60)
 }
 
 // under is p, a path in the process's own view, as keploy reaches it under

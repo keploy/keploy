@@ -202,10 +202,14 @@ func TestReadProcZoneReadsTheZoneOfTheProcessThatMadeTheCall(t *testing.T) {
 	}
 	// Processes that share a zone file share one parsed zone, whatever
 	// pid reads it; a file of the same name another image ships with other
-	// bytes is its own zone.
+	// bytes is its own zone (here Berlin's rules written as a version 1
+	// file); one of that name whose bytes hold another zone's rules is
+	// unknown (loadZone).
 	fakeProc(t, proc, "110", "500", []string{"PATH=/bin"}, map[string][]byte{zi + "Europe/Berlin": berlin}, map[string]string{"etc/localtime": "/" + zi + "Europe/Berlin"})
 	fakeProc(t, proc, "112", "500", []string{"PATH=/bin"}, map[string][]byte{zi + "Europe/Berlin": berlin}, map[string]string{"etc/localtime": "/" + zi + "Europe/Berlin"})
-	fakeProc(t, proc, "111", "500", []string{"PATH=/bin"}, map[string][]byte{zi + "Europe/Berlin": kolkata}, map[string]string{"etc/localtime": "/" + zi + "Europe/Berlin"})
+	berlinV1 := tzifRules(t, berlin)
+	fakeProc(t, proc, "111", "500", []string{"PATH=/bin"}, map[string][]byte{zi + "Europe/Berlin": berlinV1}, map[string]string{"etc/localtime": "/" + zi + "Europe/Berlin"})
+	fakeProc(t, proc, "118", "500", []string{"PATH=/bin"}, map[string][]byte{zi + "Europe/Berlin": kolkata}, map[string]string{"etc/localtime": "/" + zi + "Europe/Berlin"})
 	shared := NewProcZones(proc)
 	z110, err110 := shared.Of(110)
 	z112, err112 := shared.Of(112)
@@ -219,8 +223,11 @@ func TestReadProcZoneReadsTheZoneOfTheProcessThatMadeTheCall(t *testing.T) {
 	if z110.Loc == z111.Loc {
 		t.Errorf("two zone files of one name and different bytes: one parsed zone; want each its own")
 	}
-	if _, off := at.In(z111.Loc).Zone(); off != 19800 {
-		t.Errorf("a Berlin-named file holding Kolkata's bytes: offset %d; want its own bytes' 19800", off)
+	if z111.Name != "Europe/Berlin" {
+		t.Errorf("a Berlin-named file holding Berlin's rules in other bytes: named %q; want Europe/Berlin", z111.Name)
+	}
+	if z, err := shared.Of(118); err == nil || z.Loc != nil || !isLasting(err) {
+		t.Errorf("a Berlin-named file holding Kolkata's rules: %v %v; want unknown, lasting", z.Loc, err)
 	}
 	if id, exiting, ok := procIdent(proc, 101); !ok || exiting || id.start != "500" || id.mem != statMem {
 		t.Errorf("the start and memory of a process whose name holds spaces and parentheses: %+v %v %v; want 500 and %s", id, exiting, ok, statMem)
@@ -646,6 +653,10 @@ func TestAJVMWithNoZoneOptionReadsItsZoneAsTheJDKDoes(t *testing.T) {
 		{"an /etc/timezone directory (docker's bind of a missing file): /etc/localtime", true, nil, nil, with(zi("Asia/Kolkata"), "etc/timezone/x", nil), toKolkata, "+05:30", 19800},
 		{"the /etc/localtime link's name, to a file the image lacks", true, nil, nil, nil, toKolkata, "+05:30", 19800},
 		{"another program's /etc/localtime link to nothing: unknown, as before", false, nil, nil, nil, toKolkata, "!!", 0},
+		// A host's /etc/localtime bound over the image's link to Etc/UTC: a
+		// JVM reads the link's name, the C library the file's rules.
+		{"a link to Etc/UTC whose file holds Kolkata's rules: the zone the link names", true, nil, nil, map[string][]byte{"usr/share/zoneinfo/Etc/UTC": kolkata}, map[string]string{"etc/localtime": "/usr/share/zoneinfo/Etc/UTC"}, "UTC", 0},
+		{"another program's link to Etc/UTC whose file holds Kolkata's rules: unknown", false, nil, nil, map[string][]byte{"usr/share/zoneinfo/Etc/UTC": kolkata}, map[string]string{"etc/localtime": "/usr/share/zoneinfo/Etc/UTC"}, "!!", 0},
 		{"a relative /etc/localtime link", true, nil, nil, nil, map[string]string{"etc/localtime": "../usr/share/zoneinfo/Europe/Berlin"}, "Europe/Berlin", 3600},
 		{"a link newer JDKs clean and older do not: unknown", true, nil, nil, nil, map[string]string{"etc/localtime": "../usr/share//zoneinfo/./Europe/Berlin"}, "!!", 0},
 		{"a link's name after its first zoneinfo/", true, nil, nil, nil, map[string]string{"etc/localtime": "/opt/zoneinfo/usr/share/zoneinfo/Europe/Berlin"}, "!!", 0},
