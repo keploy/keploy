@@ -258,6 +258,21 @@ func clockReadingOf(l Leaf) (time.Time, time.Duration, bool) {
 // live call with no span reads no clock: it holds only where s has no read
 // of the clock.
 func (s Series) Holds(live Shape, span Span, known Known) bool {
+	return s.holds(live, known, func(c ClockLeaf, at time.Time, res time.Duration) bool {
+		return c.Offset.holds(at, res, span)
+	})
+}
+
+// HasShape reports whether live is a call of s's shape: Holds but for when
+// its reads of the clock were made, each still of its leaf's type and read
+// as the clock. A call that has s's shape but does not hold it on the run's
+// clock is a call of s that s cannot answer, never another call.
+func (s Series) HasShape(live Shape, known Known) bool {
+	return s.holds(live, known, func(ClockLeaf, time.Time, time.Duration) bool { return true })
+}
+
+// holds is Holds with onClock deciding each read of the clock live holds.
+func (s Series) holds(live Shape, known Known, onClock func(c ClockLeaf, at time.Time, res time.Duration) bool) bool {
 	if known == nil {
 		known = None
 	}
@@ -293,7 +308,7 @@ func (s Series) Holds(live Shape, span Span, known Known) bool {
 			return false
 		case inClock:
 			at, res, ok := clockReadingOf(l)
-			if !ok || !clock.Offset.holds(at, res, span) {
+			if !ok || !onClock(clock, at, res) {
 				return false
 			}
 		}

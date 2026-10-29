@@ -339,6 +339,13 @@ type MockMismatchReport struct {
 	// similarity): likely one another test recorded, which the replay names
 	// (UnmatchedCall.RecordedIn).
 	NotOwned bool
+	// Background says, under the proven switch, that the call is of a
+	// series judging marked as the application's background work (a timer's
+	// call, learn.Series.HasShape) and no recording of the series answers it
+	// on the run's clock: the miss is the application's background work
+	// wherever it was made, charged to no test and failing none
+	// (UnmatchedCall.Background), never the open test's.
+	Background bool
 	// Reason is why the call missed, when the learn step decided it
 	// (UnmatchedCall.Reason): only in record's full round.
 	Reason string
