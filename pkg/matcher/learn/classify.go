@@ -2884,6 +2884,22 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 		}
 		texts := dc.searched(x, keep)
 		if v.clock.whole {
+			// A whole clock read standing whole in what the application
+			// sent at x (its request, every field of x holding it: sentOnly)
+			// follows the rule a copy follows its source (follows.refute),
+			// as a word does below under it, in every step: where F gave
+			// the application x as recorded, or its view shows F's
+			// application sent another value there than the one this call
+			// sent, the value moved and x's did not move with it, so it is
+			// no copy of x (two reads of the clock in one second of the
+			// recording, the later one's call's window holding it). The
+			// search goes on to x's other words. A view holding the value
+			// F saw, or none, keeps x the value's source: a copy of an
+			// instant read earlier and a read of the clock in that second
+			// are then one value. An instant x's answer gave the
+			// application is followed as the same value whole, as before,
+			// whatever F gave there (a founder decision: a data-plane
+			// answer's instant is a variable, which every replay checks).
 			for _, text := range texts {
 				// A whole copy of a stamp x's answer gave the application is
 				// marked so (Place.givenWhole) only where the full round does
@@ -2893,16 +2909,33 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 				// escape, which no clock layout reads, so the copy rule's
 				// second classification never learns that value as a read,
 				// and a mark there would never be read.
-				if containsWholeClock(text, recorded) {
-					swap := x.swapHolds(text, raw, func(own string) bool { return containsWholeClock(own, recorded) })
-					field, given := dc.wholeFieldOf(x, texts, recorded, v.live)
-					return Place{Mock: x.mock, Field: field, Held: recorded, AtCall: atCall, noTime: x.noTime, unserved: !x.served, startUp: swap, givenWhole: given}, true
+				held, whole := recorded, true
+				if !containsWholeClock(text, recorded) {
+					if !v.decoded || !containsWholeClock(text, v.decRec) {
+						continue
+					}
+					held, whole = v.decRec, false
 				}
-				if v.decoded && containsWholeClock(text, v.decRec) {
-					swap := x.swapHolds(text, raw, func(own string) bool { return containsWholeClock(own, v.decRec) })
-					field, _ := dc.fieldOf(x, texts, v.decRec)
-					return Place{Mock: x.mock, Field: field, Held: v.decRec, AtCall: atCall, noTime: x.noTime, unserved: !x.served, startUp: swap}, true
+				swap := x.swapHolds(text, raw, func(own string) bool { return containsWholeClock(own, held) })
+				var field string
+				var given bool
+				if whole {
+					field, given = dc.wholeFieldOf(x, texts, recorded, v.live)
+				} else {
+					field, _ = dc.fieldOf(x, texts, held)
 				}
+				p := Place{Mock: x.mock, Field: field, Held: held, AtCall: atCall, noTime: x.noTime, unserved: !x.served, startUp: swap, givenWhole: given}
+				rf := fol
+				if rf == nil {
+					// A step that reads no word under the rule (ClassifyGiven)
+					// reads a whole clock read under it all the same: it
+					// needs only x and what F gave there.
+					rf = &follows{dc: dc, rec: v.rec, live: v.live, at: at}
+				}
+				if !swap && sentOnly(x, texts, held) && rf.refute(x, texts, keep, v, p) {
+					break
+				}
+				return p, true
 			}
 		}
 		for _, w := range searched {
@@ -3648,6 +3681,37 @@ func (dc *DriftCache) copiedInBoth(x Raw, f rawField, in func(own string) bool) 
 		}
 	}
 	return false
+}
+
+// sentOnly reports whether every field of x's text as searched (texts[0])
+// that holds the whole clock read held, in its own text or in a declared
+// form of it, stands in x's request (requestPath), and one does: an instant
+// the application sent at x, which it made itself. False where one stands
+// in x's answer, which the application was given, or where none holds it
+// alone (it stands across two fields).
+func sentOnly(x Raw, texts [2]string, held string) bool {
+	found := false
+	for _, f := range x.payload().fields {
+		if f.end > len(texts[0]) {
+			break
+		}
+		own := texts[0][f.start:f.end]
+		holds := containsWholeClock(own, held)
+		for _, form := range textForms(own)[1:] {
+			if holds {
+				break
+			}
+			holds = containsWholeClock(form, held)
+		}
+		if !holds {
+			continue
+		}
+		if !requestPath(f.path) {
+			return false
+		}
+		found = true
+	}
+	return found
 }
 
 // holdsToken reports whether a field's text own holds word w as a token, in
