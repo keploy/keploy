@@ -5,17 +5,19 @@ import (
 	"strings"
 )
 
-// againPart is UncheckedLine's part for the test's background calls answered
-// again (AnswerBackgroundAgain): how many, and the marked recordings each
-// repeated, in the order they first did; "" when answers holds none.
+// namedPart is UncheckedLine's part for the test's calls answered with
+// answer: how many, and the recording each was answered with, in the order
+// they first were, said as what says it ("%d background %s answered again,
+// unchecked (%s)": the count, call or calls, the recordings); "" when
+// answers holds none.
 //
 //	3 background calls answered again, unchecked (mock-7 x2, mock-3)
-func againPart(answers []UnmatchedCall) string {
+func namedPart(answers []UnmatchedCall, answer, what string) string {
 	n := 0
 	var names []string
 	count := map[string]int{}
 	for _, a := range answers {
-		if a.Answer != AnswerBackgroundAgain {
+		if a.Answer != answer {
 			continue
 		}
 		n++
@@ -36,14 +38,16 @@ func againPart(answers []UnmatchedCall) string {
 	if n == 1 {
 		noun = "call"
 	}
-	return fmt.Sprintf("%d background %s answered again, unchecked (%s)", n, noun, strings.Join(names, ", "))
+	return fmt.Sprintf(what, n, noun, strings.Join(names, ", "))
 }
 
 // UncheckedLine is the report's line for test's background writes answered by
 // their kind (AnswerByKind): how many, where (inside its window,
 // or in the gap before it), and of which write kinds, in the order they were
-// first answered; then its background calls answered again (againPart); ""
-// when answers holds neither. keploy test prints it as each
+// first answered; then its background calls answered again
+// (AnswerBackgroundAgain), then its calls of a background series answered
+// from the series (AnswerBackgroundSeries), each naming the recordings that
+// answered (namedPart); "" when answers holds none of these. keploy test prints it as each
 // set ends, and keploy report under the test's status, from the test's
 // TestResult.Answers.
 //
@@ -94,8 +98,13 @@ func UncheckedLine(test string, answers []UnmatchedCall) string {
 		}
 		parts = append(parts, fmt.Sprintf("%d background %s answered %s, unchecked (%s)", w.n, noun, w.place, strings.Join(kinds, ", ")))
 	}
-	if again := againPart(answers); again != "" {
-		parts = append(parts, again)
+	for _, named := range []struct{ answer, what string }{
+		{AnswerBackgroundAgain, "%d background %s answered again, unchecked (%s)"},
+		{AnswerBackgroundSeries, "%d background series %s answered on the run's clock, unchecked (%s)"},
+	} {
+		if part := namedPart(answers, named.answer, named.what); part != "" {
+			parts = append(parts, part)
+		}
 	}
 	if len(parts) == 0 {
 		return ""
