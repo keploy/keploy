@@ -59,9 +59,11 @@ type setSeriesRead struct {
 	reads   learn.SetReads
 	err     error
 	marked  map[string]bool
+	series  map[string]bool // marked as a series' recording on some list (models.IsBackgroundSeries)
 
 	mu     sync.Mutex
 	byKind map[models.Kind][]integrations.MarkedSeries // the first call's known, per kind
+	once   map[string]bool                             // one-offs that answered set-wide (MarkedSeries.Once)
 }
 
 // forget drops the series read so far: the set's recordings changed
@@ -112,10 +114,14 @@ func (m *MockManager) seriesReadLocked() *setSeriesRead {
 	if c.read != nil {
 		c.read.stop.Store(true)
 	}
-	r := &setSeriesRead{key: key, done: make(chan struct{}), marked: map[string]bool{}, byKind: map[models.Kind][]integrations.MarkedSeries{}}
+	r := &setSeriesRead{key: key, done: make(chan struct{}), marked: map[string]bool{}, series: map[string]bool{},
+		byKind: map[models.Kind][]integrations.MarkedSeries{}, once: map[string]bool{}}
 	for _, byName := range *marks {
-		for name := range byName {
+		for name, why := range byName {
 			r.marked[name] = true
+			if models.IsBackgroundSeries(why) {
+				r.series[name] = true
+			}
 		}
 	}
 	c.read = r
@@ -203,7 +209,7 @@ func (r *setSeriesRead) seriesOf(kind models.Kind, known learn.Known) []integrat
 	var out []integrations.MarkedSeries
 	for _, s := range set.Series {
 		recs := make([]*models.Mock, 0, len(s.Members))
-		anyMarked := false
+		anyMarked, again := false, false
 		for _, i := range s.Members {
 			mk := set.Mocks[i]
 			if !r.background(mk) {
@@ -211,14 +217,30 @@ func (r *setSeriesRead) seriesOf(kind models.Kind, known learn.Known) []integrat
 				break
 			}
 			anyMarked = anyMarked || r.marked[mk.Name]
+			again = again || r.series[mk.Name]
 			recs = append(recs, mk)
 		}
 		if len(recs) > 0 && anyMarked {
-			out = append(out, integrations.MarkedSeries{Series: s, Recordings: recs})
+			out = append(out, integrations.MarkedSeries{Series: s, Recordings: recs, Again: again, Once: r.answerOnce})
 		}
 	}
 	r.byKind[kind] = out
 	return out
+}
+
+// answerOnce is MarkedSeries.Once for r's one-offs: whether name had not
+// answered a call set-wide in r's staging, recording that it now has. It
+// takes nothing from a test's own recordings. A read that another takes the
+// place of (a new staging, new marks, the store's recordings changed) starts
+// with none answered.
+func (r *setSeriesRead) answerOnce(name string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.once[name] {
+		return false
+	}
+	r.once[name] = true
+	return true
 }
 
 var _ integrations.MarkedSeriesReader = (*MockManager)(nil)

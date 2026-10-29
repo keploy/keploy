@@ -476,7 +476,9 @@ type AnsweredBackgroundReader interface {
 // (the call's: its error is then ctx's).
 // The parser answers a call of a marked series (Series.HasShape) whose reads
 // of the clock hold on the run's clock (Series.Holds on the call's span) with
-// one of its recordings, unchecked, consuming none, as often as it comes; and
+// one of its recordings, unchecked, consuming none of a test's: as often as
+// it comes for a series (MarkedSeries.Again), each recording at most once
+// for one-offs (MarkedSeries.Once); and
 // a call of one that does not hold is a miss of the set's background
 // (models.MockMismatchReport.Background), never the open test's. err is why
 // the store could not read the set's recordings: then no series is marked.
@@ -489,9 +491,22 @@ type MarkedSeriesReader interface {
 // MarkedSeries is one series judging marked (MarkedSeriesReader): what was
 // learned of it, and its recordings (Series.Members), in the order of their
 // calls, the newest last. The recordings are the store's; read-only.
+//
+// Again says a call of it is answered again, as often as it comes: judging
+// marked it as a series (models.IsBackgroundSeries, on any list that holds a
+// recording of it). Otherwise its recordings are one-offs judging marked (a
+// call made once more than recorded, outside every window, a delayed write):
+// set-wide, each answers at most once (Once), whichever test's window the
+// call lands in, and a copy beyond them is a miss of the set's background,
+// never the open test's. Once records that the recording named answered a
+// call so and reports whether it had not before in the staging; it takes
+// nothing from a test's own recordings (its own window still answers it as
+// recorded). nil Once spends nothing: a one-off then answers none.
 type MarkedSeries struct {
 	Series     learn.Series
 	Recordings []*models.Mock
+	Again      bool
+	Once       func(name string) bool
 }
 
 // MarkedSeriesOf is db's MarkedSeriesReader.MarkedSeries: none when db does

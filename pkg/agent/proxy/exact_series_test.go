@@ -198,6 +198,77 @@ func TestMarkedSeriesIsReadAgainWhenTheMarksOrTheRecordingsChange(t *testing.T) 
 	}
 }
 
+// A series judging marked as one (models.BackgroundSeriesPrefix on any list
+// that holds a recording of it) is answered again; one marked with any other
+// why is the set's one-offs: set-wide, each of its recordings answers at most
+// once in a staging (Once), whichever test's window the call lands in, and a
+// new read (new marks, a new staging) starts with none answered. Once takes
+// nothing from the test's own recordings.
+func TestMarkedSeriesSaysASeriesIsAnsweredAgainAndAOneOffOnce(t *testing.T) {
+	series := "series_of: a timer's call"
+	for _, c := range []struct {
+		name  string
+		marks models.BackgroundMarks
+		again bool
+	}{
+		{"marked as a series", models.BackgroundMarks{
+			"T1": {"claim-3": series, "claim-4": series}, "T2": {"claim-5": series, "claim-6": series}}, true},
+		{"one list marks it as a series", models.BackgroundMarks{
+			"T1": {"claim-3": "a timer's call", "claim-4": "a timer's call"}, "T2": {"claim-5": series, "claim-6": "w"}}, true},
+		{"one-offs", models.BackgroundMarks{
+			"T1": {"claim-3": "a timer's call", "claim-4": "a timer's call"}, "T2": {"claim-5": "w", "claim-6": "w"}}, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			mm := timerSet(t)
+			mm.SetUnrequired(c.marks)
+			mm.ServeExactTest("T1", nil)
+			got, err := mm.MarkedSeries(context.Background(), seriesRowKind, nil)
+			if err != nil || len(got) != 1 {
+				t.Fatalf("MarkedSeries = %d series, %v; want the claims' one", len(got), err)
+			}
+			if got[0].Again != c.again {
+				t.Fatalf("Again = %v; want %v", got[0].Again, c.again)
+			}
+			if got[0].Once == nil {
+				t.Fatal("Once is nil: a one-off could answer no call")
+			}
+		})
+	}
+
+	mm := timerSet(t)
+	marks := models.BackgroundMarks{"T1": {"claim-3": "w", "claim-4": "w"}, "T2": {"claim-5": "w", "claim-6": "w"}}
+	mm.SetUnrequired(marks)
+	mm.ServeExactTest("T1", nil)
+	got, _ := mm.MarkedSeries(context.Background(), seriesRowKind, nil)
+	if len(got) != 1 || got[0].Once == nil {
+		t.Fatalf("MarkedSeries = %+v; want the claims' one with Once", got)
+	}
+	once := got[0].Once
+	if !once("claim-5") || once("claim-5") {
+		t.Fatal("claim-5 answered set-wide twice, or not once")
+	}
+	if !once("claim-6") {
+		t.Fatal("claim-6 was spent by claim-5's answer")
+	}
+	var t2 []*models.Mock // T2's own list
+	for _, r := range got[0].Recordings {
+		if r.Name == "claim-5" || r.Name == "claim-6" {
+			t2 = append(t2, r)
+		}
+	}
+	mm.ServeExactTest("T2", t2) // another test's window: the same staging
+	if again, _ := mm.MarkedSeries(context.Background(), seriesRowKind, nil); len(again) != 1 || again[0].Once("claim-5") {
+		t.Fatal("in the next test's window claim-5 answered set-wide again in one staging")
+	}
+	if test, unused, ok := mm.ExactTestUnusedBackground(); !ok || test != "T2" || len(unused) != 2 {
+		t.Fatalf("T2's unused marked recordings = %s %v (%v); want claim-5 and claim-6: a set-wide answer is none of the test's own", test, unused, ok)
+	}
+	mm.SetUnrequired(marks.Clone()) // a new read
+	if again, _ := mm.MarkedSeries(context.Background(), seriesRowKind, nil); len(again) != 1 || !again[0].Once("claim-5") {
+		t.Fatal("a new read of the set's series kept the last read's one-off answers")
+	}
+}
+
 // A view made before exact serving began, and a call's held round, hand the
 // parser the store's marked series: the held round only while the staging is
 // still its call's (recordings' names restart in each set).
