@@ -372,6 +372,9 @@ type exactState struct {
 	// answered calls with them in the current staging.
 	setAside    atomic.Pointer[[]asideRecording]
 	asideClaims exactClaims
+	// series is the staged set's marked series, read once per staging
+	// (MarkedSeries, exact_series.go).
+	series markedSeriesCache
 	// round is what exact serving's round changes holding its one lock
 	// (exact_round.go): the generation, the take log, the learn tracker's
 	// boundaries.
@@ -1029,6 +1032,7 @@ func (m *MockManager) SetRecordedBefore(src func(t time.Time, visit func(*models
 	m.exact.before.mu.Lock()
 	defer m.exact.before.mu.Unlock()
 	m.exact.before.src = src
+	m.exact.series.forget()
 }
 
 // RangeRecordedBefore visits every recording of the staged set made before
