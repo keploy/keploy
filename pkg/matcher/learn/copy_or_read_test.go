@@ -472,9 +472,11 @@ func TestAClientTestLearnsAnOffsetOfAGivenInstantThatIsItsOwnClockPlusAnOffsetAs
 	value := func(x copyOrReadRun) time.Time { return x.at(x.audited).Add(month) }
 	learn := func(fm fm, r, f copyOrReadRun, began, following bool) Learned {
 		dc := clientTestCache()
+		// Each served as recorded, as its adapter says (Raw.ServedAsRecorded):
+		// a serve no adapter stated refuses the value's new words.
 		raw := []Raw{
-			dc.RawOf(stamp("mock-3", value(r).Add(-gap), r.began.Add(-6*time.Minute)), true),
-			dc.RawOf(stamp("mock-11", value(f).Add(-gap), r.began.Add(-5*time.Minute)), true),
+			dc.RawOf(stamp("mock-3", value(r).Add(-gap), r.began.Add(-6*time.Minute)), true).ServedAsRecorded(),
+			dc.RawOf(stamp("mock-11", value(f).Add(-gap), r.began.Add(-5*time.Minute)), true).ServedAsRecorded(),
 		}
 		w := (&Window{Rec: r.window(began), F: f.window(began)}).ComparesOffsets()
 		classify := ClassifyGiven
@@ -664,7 +666,9 @@ func TestAClientTestLearnsAnExpiryALoginsCookieHoldsAWordOfAsTheClockPlusItsOffs
 		f := run{began: time.Date(2026, 10, 27, 17, 1, 19, 300_000_000, time.UTC)}
 		other := login("mock-1", rec.began.Add(900*time.Millisecond))
 		other.Spec.HTTPResp.Header["Set-Cookie"] = "refresh_token_staging=abc; Path=/; Expires=Tue, 01 Dec 2026 08:07:06 GMT; HttpOnly"
-		raw := []Raw{dc.RawOf(other, true), dc.RawOf(login("mock-9", f.began.Add(900*time.Millisecond)), true)}
+		// Each served as recorded, as its adapter says (Raw.ServedAsRecorded):
+		// a serve no adapter stated refuses the value's new words.
+		raw := []Raw{dc.RawOf(other, true).ServedAsRecorded(), dc.RawOf(login("mock-9", f.began.Add(900*time.Millisecond)), true).ServedAsRecorded()}
 		w := (&Window{Rec: span(rec, true), F: span(f, true)}).ComparesOffsets()
 		classify := ClassifyGiven
 		if following {

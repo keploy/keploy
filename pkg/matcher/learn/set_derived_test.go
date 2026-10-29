@@ -260,7 +260,8 @@ func TestASetsSecondTestReadsNoEarlierFieldsInstantsAgain(t *testing.T) {
 	got := sent.Add(2*time.Minute + 311*time.Millisecond)
 	attrs := func(at time.Time) string { return `{"SentTimestamp": "` + strconv.FormatInt(at.UnixMilli(), 10) + `"}` }
 	// The receive holds the moment in a field (its SentTimestamp), or only
-	// in its payload's other forms (a note's base64 text).
+	// in a field's other forms (a note's base64 text), which names that
+	// field too: echoRaw reads each field in every form.
 	encoded := func(at time.Time) string {
 		return `{"Note": "` + base64.StdEncoding.EncodeToString([]byte("sent at "+strconv.FormatInt(at.UnixMilli(), 10)+" by the producer")) + `"}`
 	}
@@ -299,7 +300,11 @@ func echoesAcrossTests(t *testing.T, inField bool, mocks []*models.Mock, sent, g
 		return ClassifyIn(dc, []string{p}, processedAt(got, false), processedAt(sent, false), r1Insert, nil, raw, nil, nil)[0]
 	}
 	want := classify(noSet(NewDriftCache()))
-	if want.Kind != KindVariable || want.From.Mock != "mock-4" || !want.From.Echo || (want.From.Field != "") != inField {
+	field := want.From.Field != ""
+	if !inField {
+		field = want.From.Field == "spec.resp.body"
+	}
+	if want.Kind != KindVariable || want.From.Mock != "mock-4" || !want.From.Echo || !field {
 		t.Fatalf("in a field %v: learned %s from %q at %q (echo %v) with a cache of no tracker, want the echo of mock-4: the row reads no field of the fillers", inField, want.Kind, want.From.Mock, want.From.Field, want.From.Echo)
 	}
 	spans := instantSpans
