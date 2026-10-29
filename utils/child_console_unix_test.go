@@ -134,6 +134,24 @@ func captureConsoles(t *testing.T) (outW, errW *os.File, out, errOut *console) {
 
 func noCancel(_ *exec.Cmd) func() error { return func() error { return nil } }
 
+// killGroupOnCleanup is noCancel that also kills the command's whole process
+// group when the test ends. ExecuteCommand starts a native command as the
+// leader of its own group, so whatever the script started in the background
+// is in that group too. A background process is gone when the test ends,
+// even a test that fails early, instead of living on to the test binary's
+// exit or past it.
+func killGroupOnCleanup(t *testing.T) func(cmd *exec.Cmd) func() error {
+	t.Helper()
+	return func(cmd *exec.Cmd) func() error {
+		t.Cleanup(func() {
+			if cmd.Process != nil {
+				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			}
+		})
+		return func() error { return nil }
+	}
+}
+
 func TestChildConsoleIsKeploysOwnFileWhenNothingIsCut(t *testing.T) {
 	keployLog.SetRedactor(nil)
 	cmd := exec.Command("true")
@@ -305,8 +323,10 @@ func TestExecuteCommandDoesNotWaitOnAProcessTheChildLeftRunning(t *testing.T) {
 	script := `exec 3<'` + fifo + `'; (read x <&3; printf '\nbg %s\n' '` + plantedConsoleValue + `') & exec 3<&-; printf 'fg %s\n%s' '` + plantedConsoleValue + `' '` + heldTail + `'`
 	// Were Wait waiting on the pipe the background process holds, it would
 	// return ErrWaitDelay once the delay is up. Waiting on the process alone,
-	// it never starts the delay: no time is measured here.
-	cmdErr := ExecuteCommand(context.Background(), zap.NewNop(), script, Native, noCancel, time.Second, nil, nil)
+	// it never starts the delay: no time is measured here. The background
+	// process is killed with the script's group when the test ends, before
+	// the fifo is let go.
+	cmdErr := ExecuteCommand(context.Background(), zap.NewNop(), script, Native, killGroupOnCleanup(t), time.Second, nil, nil)
 	if cmdErr.Err != nil {
 		t.Fatalf("ExecuteCommand: %v", cmdErr.Err)
 	}
