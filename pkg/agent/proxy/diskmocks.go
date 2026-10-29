@@ -48,8 +48,9 @@ type DiskMocks struct {
 	placed []diskEntry
 
 	// destinations is, for each recorded destination a mock on disk reached
-	// (destinationKey), the entry of the first one recorded
-	// (LoadDestinations). One entry per destination, resident.
+	// (destinationKey) and, under the proven switch, each port one reached
+	// (reachedPortKey), the entry of the first one recorded
+	// (LoadDestinations). One entry per destination and port, resident.
 	destinations map[string]diskEntry
 
 	// statements is the statement catalog: for each statement a mock on disk
@@ -281,7 +282,18 @@ func (d *DiskMocks) Add(m *models.Mock) error {
 	if models.IsAnswerPlaced(m) {
 		d.placed = append(d.placed, e)
 	}
-	if k := destinationKey(m); k != "" {
+	// Under the proven switch the store also keeps the first mock of each
+	// port the recording reached (reachedPortKey), for the loopback rules
+	// keploy mock replay reads (recordedPorts.seed): its staging reads only
+	// what was recorded before the set's first test.
+	keys := []string{destinationKey(m)}
+	if provenswitch.On() {
+		keys = append(keys, reachedPortKey(m))
+	}
+	for _, k := range keys {
+		if k == "" {
+			continue
+		}
 		if first, ok := d.destinations[k]; !ok || e.reqTsNano < first.reqTsNano {
 			if d.destinations == nil {
 				d.destinations = make(map[string]diskEntry)
@@ -665,9 +677,11 @@ func (d *DiskMocks) LoadStatements() ([]*models.Mock, error) {
 }
 
 // LoadDestinations returns, in recorded order, the first mock on disk of
-// each recorded destination (destinationKey): what the recording says of its
-// destinations, bounded by how many it reached, for the proxy's destination
-// rules to read before any of them is staged (Proxy.SeedRecordedDestinations).
+// each recorded destination (destinationKey) and, under the proven switch, of
+// each port the recording reached (reachedPortKey), each mock once: what the
+// recording says of its destinations, bounded by how many it reached, for the
+// proxy's destination rules to read before any of them is staged
+// (Proxy.SeedRecordedDestinations).
 func (d *DiskMocks) LoadDestinations() ([]*models.Mock, error) {
 	d.mu.Lock()
 	if d.closed {
@@ -675,8 +689,13 @@ func (d *DiskMocks) LoadDestinations() ([]*models.Mock, error) {
 		return nil, fmt.Errorf("disk mocks: store closed")
 	}
 	sel := make([]diskEntry, 0, len(d.destinations))
+	seen := make(map[int64]bool, len(d.destinations))
 	for _, e := range d.destinations {
-		sel = append(sel, e)
+		// One mock may be the first of a destination and of a port.
+		if !seen[e.off] {
+			seen[e.off] = true
+			sel = append(sel, e)
+		}
 	}
 	d.mu.Unlock()
 	sort.Slice(sel, func(i, j int) bool {
