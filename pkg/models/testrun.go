@@ -608,7 +608,11 @@ type UnmatchedCall struct {
 	// (keploy test: TestReport.BackgroundCalls). A call made in a test's
 	// window and filed late is no background call: it is still charged to
 	// the test whose read took it, or, after the set's last test, to the set
-	// (TestReport.UnclaimedCalls).
+	// (TestReport.UnclaimedCalls). The one call made in a test's window that
+	// is background is one its parser marked so (MadeInTest): a call of a
+	// series judging marked as the application's background work that no
+	// recording of the series answered, charged to no test, and said as made
+	// inside that test's window (BackgroundWhy).
 	Background bool `json:"background,omitempty" yaml:"background,omitempty"`
 	// ReachesTest says, under the proven switch, for a call made before its
 	// set's first test (BeforeSet) or between two tests that no mock
@@ -621,9 +625,11 @@ type UnmatchedCall struct {
 	// for every other call. A call made after the set's last test reaches
 	// no test.
 	ReachesTest string `json:"reaches_test,omitempty" yaml:"reaches_test,omitempty"`
-	// BackgroundWhy says, for a Background call, where it was made outside
-	// every test's window, in plain words: before the set's first test,
-	// between two tests (naming them), or after the set's last test.
+	// BackgroundWhy says, for a Background call, where it was made, in plain
+	// words: outside every test's window, before the set's first test,
+	// between two tests (naming them), or after the set's last test; or, for
+	// a call of a marked background series (MadeInTest), inside the window of
+	// the test it names.
 	BackgroundWhy string `json:"background_why,omitempty" yaml:"background_why,omitempty"`
 	// Differs mirrors MockMismatchReport.Differs: the names of the fields in
 	// which the call differs from its closest recording, without values.
