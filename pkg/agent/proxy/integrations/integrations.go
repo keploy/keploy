@@ -471,6 +471,9 @@ type AnsweredBackgroundReader interface {
 // unmarked recording is in is a call that test must make, and is none. known
 // excuses leaves as SeriesOf's: keploy.yml's noise of kind, one reading for
 // the staging (the series are read once per staging, with the first call's).
+// The set's recordings are read as it is staged, before any call: a call
+// that comes while they are still being read waits for them, or for ctx
+// (the call's: its error is then ctx's).
 // The parser answers a call of a marked series (Series.HasShape) whose reads
 // of the clock hold on the run's clock (Series.Holds on the call's span) with
 // one of its recordings, unchecked, consuming none, as often as it comes; and
@@ -480,7 +483,7 @@ type AnsweredBackgroundReader interface {
 // The agent's MockManager implements it, and every MockMemDb wrapper must
 // forward it.
 type MarkedSeriesReader interface {
-	MarkedSeries(kind models.Kind, known learn.Known) ([]MarkedSeries, error)
+	MarkedSeries(ctx context.Context, kind models.Kind, known learn.Known) ([]MarkedSeries, error)
 }
 
 // MarkedSeries is one series judging marked (MarkedSeriesReader): what was
@@ -493,9 +496,9 @@ type MarkedSeries struct {
 
 // MarkedSeriesOf is db's MarkedSeriesReader.MarkedSeries: none when db does
 // not implement it.
-func MarkedSeriesOf(db MockMemDb, kind models.Kind, known learn.Known) ([]MarkedSeries, error) {
+func MarkedSeriesOf(ctx context.Context, db MockMemDb, kind models.Kind, known learn.Known) ([]MarkedSeries, error) {
 	if r, ok := db.(MarkedSeriesReader); ok {
-		return r.MarkedSeries(kind, known)
+		return r.MarkedSeries(ctx, kind, known)
 	}
 	return nil, nil
 }

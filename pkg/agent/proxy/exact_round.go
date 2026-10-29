@@ -382,6 +382,7 @@ func (m *MockManager) stagedRecording(mk *models.Mock) *models.Mock {
 func (m *MockManager) bumpStagingEpoch() {
 	m.lockRound()
 	m.stagingEpoch.Add(1)
+	m.beginMarkedSeries()
 	// The set the tracker began last is staged now, whichever it is: the
 	// tracker's own (SetTrackerSetAt), as its set may have begun before any
 	// of its boundaries reached this manager.
@@ -1083,8 +1084,8 @@ func (h *heldScope) AnsweredBackground() []*models.Mock {
 // MarkedSeries is the manager's (integrations.MarkedSeriesReader) while the
 // staging is still h's call's: the series and their recordings are the
 // staged set's, and recordings' names restart in each set.
-func (h *heldScope) MarkedSeries(kind models.Kind, known learn.Known) ([]integrations.MarkedSeries, error) {
-	s, err := h.MockManager.MarkedSeries(kind, known)
+func (h *heldScope) MarkedSeries(ctx context.Context, kind models.Kind, known learn.Known) ([]integrations.MarkedSeries, error) {
+	s, err := h.MockManager.MarkedSeries(ctx, kind, known)
 	if h.moved() {
 		return nil, nil
 	}
