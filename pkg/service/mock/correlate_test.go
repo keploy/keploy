@@ -1,11 +1,14 @@
 package mock
 
 import (
+	"context"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/yaml/mapdb"
+	"go.uber.org/zap"
 )
 
 func ts(sec int) time.Time { return time.Unix(int64(sec), 0) }
@@ -125,4 +128,69 @@ func names(entries []models.MockEntry) []string {
 		out = append(out, e.Name)
 	}
 	return out
+}
+
+// Every mapping entry keploy mock record writes states its mock's kind, as
+// keploy record's and a pulled set's entries do: a test's (correlateScopes),
+// a start-up start's and a test's under the boot plan (classify), and the
+// pool's (startupMocks). Before, they all wrote `kind: ""`. Under the
+// proven switch keploy test reports an unconsumed entry with the entry's
+// own kind (unconsumed_mocks), so each came out with none. The dependency
+// row's type (depTypeFor), the mismatch report and the runner's MockRef
+// fall back to the loaded mock of that name, so they had none for a mock
+// no pool loaded. DNS and connection-failure mocks stay out of the check
+// by name while the set's mock file holds them; an entry whose mock the
+// file no longer holds is left out only by its own kind. Each writer gets
+// two kinds, so a writer that hard-codes one fails too. Mutation: drop
+// Kind from any one of the three writers, or the kind from Record's
+// capture (record.go, caught by TestMockRecordWritesTheKindItCaptured).
+func TestMockRecordMappingEntriesStateTheirKind(t *testing.T) {
+	windows := []models.ScopeWindow{{Name: "t1", Start: ts(10), End: ts(20)}}
+	mocks := []capturedMock{
+		{name: "mock-0", kind: string(models.HTTP), ts: ts(15)},
+		{name: "mock-1", kind: string(models.Postgres), ts: ts(5)},
+		{name: "mock-4", kind: string(models.Mongo), ts: ts(16)},
+		{name: "mock-5", kind: string(models.HTTP), ts: ts(25)},
+	}
+	byTest := correlateScopes(windows, mocks)
+	require.Equal(t, []models.MockEntry{{Name: "mock-0", Kind: string(models.HTTP)}, {Name: "mock-4", Kind: string(models.Mongo)}}, byTest["t1"])
+	require.Equal(t, []models.MockEntry{{Name: "mock-1", Kind: string(models.Postgres)}, {Name: "mock-5", Kind: string(models.HTTP)}}, startupMocks(windows, mocks, nil))
+
+	starts := []models.ScopeWindow{{App: true, Ref: "s1", Name: "app#1", Dir: "/r", Program: "app", N: 1, Ready: ts(8)}}
+	boot := []capturedMock{
+		{name: "mock-2", kind: string(models.Mongo), ts: ts(6), ref: "s1", boot: true},
+		{name: "mock-3", kind: string(models.HTTP), ts: ts(15), ref: "s1"},
+	}
+	plan := classify(windows, starts, []models.SuiteSpan{{Dir: "/r", Start: ts(0), End: ts(30)}}, boot)
+	kinds := map[string]string{}
+	for _, b := range plan.boots {
+		for _, e := range b.Mocks {
+			kinds[e.Name] = e.Kind
+		}
+	}
+	for _, es := range plan.tests {
+		for _, e := range es {
+			kinds[e.Name] = e.Kind
+		}
+	}
+	require.Equal(t, map[string]string{"mock-2": string(models.Mongo), "mock-3": string(models.HTTP)}, kinds)
+}
+
+// The kind each entry states is the one Record captured from its own
+// recorded mock (the capturedMock it builds per mock), through to
+// mappings.yaml: a test's entries and the start-up pool's. Mutation: drop
+// kind from that capture and both read back `kind: ""`.
+func TestMockRecordWritesTheKindItCaptured(t *testing.T) {
+	instr := newRunnerInstr(t, mark("orders/e2e.TestA", 0, 10*time.Millisecond))
+	pool := mockAt("mock-1", runnerT0.Add(20*time.Millisecond))
+	pool.Kind = models.Postgres
+	instr.mocks = []*models.Mock{mockAt("mock-0", runnerT0.Add(5*time.Millisecond)), pool}
+	mapDB := mapdb.New(zap.NewNop(), t.TempDir(), "")
+	require.NoError(t, recordSet(t, instr, mapDB, nil))
+	got, _, err := mapDB.Get(context.Background(), "set")
+	require.NoError(t, err)
+	require.Equal(t, map[string][]models.MockEntry{"orders/e2e.TestA": {{Name: "mock-0", Kind: string(models.HTTP)}}}, got)
+	startup, err := mapDB.GetStartup(context.Background(), "set")
+	require.NoError(t, err)
+	require.Equal(t, []models.MockEntry{{Name: "mock-1", Kind: string(models.Postgres)}}, startup)
 }

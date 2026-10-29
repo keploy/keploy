@@ -389,20 +389,33 @@ func TestInsideAWindowAnEarlierRecordingWithTheCallsParametersIsNotItsAnswer(t *
 }
 
 // Under exact serving the open test's own recordings are its mapping's (no
-// window is open while a test runs): its own recording of the statement,
-// made with other parameters, still outranks a recording with the call's
-// parameters that no test owns (a worker-scope one), as inside a window.
-func TestUnderExactServingTheOpenTestsOwnRecordingStillOutranksOneNoTestOwns(t *testing.T) {
+// window is open while a test runs). Its own recording of the statement made
+// with other parameters does not answer the call: that is another call's
+// rows (sameStatementOnly). A recording with the call's parameters that no
+// test owns (a worker-scope one) does. With the call's parameters, the
+// test's own outranks it, as inside a window.
+func TestUnderExactServingTheOpenTestsOwnRecordingWithOtherParametersDoesNotAnswer(t *testing.T) {
 	prep, worker, own := betweenTestsRecording()
-	mm := proxy.NewMockManager(nil, nil, zap.NewNop())
-	defer mm.Close()
-	mm.SetMocksWithWindow(nil, []*models.Mock{prep, worker, own}, models.BaseTime, time.Now().Add(time.Hour))
-	mm.ServeExactWorker([]string{worker.Name})
-	mm.ServeExactTest("T1", []*models.Mock{own})
-	ctx, dctx := betweenTestsConn()
-
-	if got := matchPayload(t, ctx, executeReq(7, "2"), mm, dctx); got != "t1-exec-1" {
-		t.Fatalf("test T1's EXECUTE id=2 was answered with %s; want its own t1-exec-1", got)
+	ownOfTheCall := diffMock("t1-exec-2", "c1", []mysql.Request{executeReq(7, "2")}, own.Spec.ReqTimestampMock.Add(time.Millisecond), models.LifetimePerTest, "mocks")
+	for _, c := range []struct {
+		name string
+		own  *models.Mock
+		want string
+	}{
+		{"its own with other parameters", own, "between-exec-2"},
+		{"its own with the call's", ownOfTheCall, "t1-exec-2"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			mm := proxy.NewMockManager(nil, nil, zap.NewNop())
+			defer mm.Close()
+			mm.SetMocksWithWindow(nil, []*models.Mock{prep, worker, c.own}, models.BaseTime, time.Now().Add(time.Hour))
+			mm.ServeExactWorker([]string{worker.Name})
+			mm.ServeExactTest("T1", []*models.Mock{c.own})
+			ctx, dctx := betweenTestsConn()
+			if got := matchPayload(t, ctx, executeReq(7, "2"), mm, dctx); got != c.want {
+				t.Fatalf("test T1's EXECUTE id=2 was answered with %s; want %s", got, c.want)
+			}
+		})
 	}
 }
 
