@@ -29,7 +29,8 @@ import (
 // persisted anywhere else, with it.
 //
 // Both now stream: each mock is read, decoded, judged and (if it stays)
-// written to a sibling temp file before the next one is read, so a rewrite
+// written to a sibling temp file before the next one is read (a document the
+// rewrite does not re-encode is copied as read: fileDoc.verbatim), so a rewrite
 // holds one mock at a time whatever the file's size. The temp file replaces
 // the original only once every mock is written, so a rewrite that fails, is
 // cancelled or dies part way leaves the original as it was.
@@ -73,6 +74,8 @@ type fileDoc struct {
 	//     learned for it), and the copy keeps it as the keploy that recorded
 	//     it wrote it;
 	//   - it is the file's incomplete last document (see nextDoc).
+	// (Under the proven switch the noise write-back also copies, as read, a
+	// document it changes nothing of: persistLearned.)
 	verbatim bool
 	// unterminated says raw is the file's last document and ends part-way
 	// through a line.
@@ -271,8 +274,10 @@ func pruneKeeps(mock *models.Mock, mockNames map[string]models.MockState, pruneB
 }
 
 // mockFileRewriter writes the replacement of a yaml/json mock file one mock
-// at a time, encoded exactly as the recorder-side rewrite always encoded it,
-// into a temp file beside it. Nothing touches the original until commit.
+// at a time, into a temp file beside it: each mock it writes (write) encoded
+// exactly as the recorder-side rewrite always encoded it, and each document
+// it copies (copyDoc) as the file held it. Nothing touches the original until
+// commit.
 type mockFileRewriter struct {
 	logger     *zap.Logger
 	dir        string
@@ -326,9 +331,10 @@ func (rw *mockFileRewriter) open() error {
 }
 
 // copyDoc puts a document nextDoc read, and the rewrite does not re-encode
-// (fileDoc.verbatim), in the replacement as it was read, ending with a
-// newline, so the replacement always ends with one and a later append starts
-// on a line of its own. Two documents at the end of a file that does not end
+// (fileDoc.verbatim, or, under the proven switch, one the noise write-back
+// changes nothing of: persistLearned), in the replacement as it was read,
+// ending with a newline, so the replacement always ends with one and a later
+// append starts on a line of its own. Two documents at the end of a file that does not end
 // with a newline are not copied:
 //   - the last document the read skipped (fileDoc.incomplete) is held back,
 //     and commit moves it aside;

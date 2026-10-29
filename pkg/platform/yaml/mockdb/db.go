@@ -13,6 +13,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -582,6 +583,24 @@ func (ys *MockYaml) PersistLearned(ctx context.Context, testSetID string, mockSt
 	return ys.persistLearned(ctx, testSetID, mockStates)
 }
 
+// mergedOnto merges st onto mock (mergeLearned) and returns what it added
+// and whether it changed the mock. Under the proven switch a merge can change
+// a mock and add nothing: an answer place on a variable the mock has, an echo
+// or a clock read that no longer holds, noise at a variable's place dropped;
+// the merge changes only the mock's variables and its request noise, which
+// are compared. Without the switch what it adds decides, as before (noise
+// only merges, and only a new place changes it).
+func mergedOnto(mock *models.Mock, st models.MockState, binds models.MockVariables) ([]string, bool) {
+	if !provenswitch.On() {
+		a := mergeLearned(mock, st, binds)
+		return a, len(a) > 0
+	}
+	vars, noise := mock.Spec.Variables.Clone(), learn.MergeReqBodyNoise(nil, mock.Spec.ReqBodyNoise)
+	a := mergeLearned(mock, st, binds)
+	return a, len(a) > 0 || !reflect.DeepEqual(vars, mock.Spec.Variables.Clone()) ||
+		!reflect.DeepEqual(noise, learn.MergeReqBodyNoise(nil, mock.Spec.ReqBodyNoise))
+}
+
 func (ys *MockYaml) persistLearned(ctx context.Context, testSetID string, mockStates map[string]models.MockState) (map[string][]string, error) {
 	// Only mocks that carry learned noise or variables matter, and the
 	// earlier mocks other mocks' variables are bound at (Binds).
@@ -611,17 +630,20 @@ func (ys *MockYaml) persistLearned(ctx context.Context, testSetID string, mockSt
 		if !ok {
 			return false
 		}
-		return len(mergeLearned(mock, st, binds[mock.Name])) > 0
+		_, changed := mergedOnto(mock, st, binds[mock.Name])
+		return changed
 	}
 	// record is merge for the pass that writes: it keeps what it added.
-	record := func(mock *models.Mock) {
+	record := func(mock *models.Mock) bool {
 		st, ok := withNoise[mock.Name]
 		if !ok {
-			return
+			return false
 		}
-		if a := mergeLearned(mock, st, binds[mock.Name]); len(a) > 0 {
+		a, changed := mergedOnto(mock, st, binds[mock.Name])
+		if len(a) > 0 {
 			added[mock.Name] = a
 		}
+		return changed
 	}
 
 	logPersisted := func(total int) {
@@ -694,10 +716,9 @@ func (ys *MockYaml) persistLearned(ctx context.Context, testSetID string, mockSt
 		return nil, nil
 	}
 
-	// eachMock streams the file's mocks to fn, and the documents a rewrite
-	// does not re-encode (see fileDoc.verbatim) to onRaw when that is set,
-	// closing the file before it returns.
-	eachMock := func(fn func(*models.Mock) error, onRaw func(doc fileDoc) error) error {
+	// eachDoc streams the file's documents to fn, closing the file before
+	// it returns.
+	eachDoc := func(fn func(doc fileDoc) error) error {
 		reader, err := yaml.NewMockReaderF(ctx, ys.Logger, path, mockFileName, detectedFormat)
 		if err != nil {
 			return err
@@ -715,30 +736,25 @@ func (ys *MockYaml) persistLearned(ctx context.Context, testSetID string, mockSt
 			if decodeErr != nil {
 				return fmt.Errorf("failed to decode the mocks in %s for noise persistence: %w", reader.Path(), decodeErr)
 			}
-			if doc.verbatim {
-				if onRaw != nil {
-					if err := onRaw(doc); err != nil {
-						return err
-					}
-				}
-				continue
-			}
-			for _, mock := range doc.mocks {
-				if err := fn(mock); err != nil {
-					return err
-				}
+			if err := fn(doc); err != nil {
+				return err
 			}
 		}
 	}
 
 	changes := false
-	err = eachMock(func(mock *models.Mock) error {
-		if merge(mock) {
-			changes = true
-			return errStopScan
+	err = eachDoc(func(doc fileDoc) error {
+		if doc.verbatim {
+			return nil
+		}
+		for _, mock := range doc.mocks {
+			if merge(mock) {
+				changes = true
+				return errStopScan
+			}
 		}
 		return nil
-	}, nil)
+	})
 	if err != nil && !errors.Is(err, errStopScan) {
 		return nil, err
 	}
@@ -749,11 +765,35 @@ func (ys *MockYaml) persistLearned(ctx context.Context, testSetID string, mockSt
 	rw := newMockFileRewriter(ys.Logger, path, mockFileName, detectedFormat)
 	defer rw.discard()
 	total := 0
-	if err := eachMock(func(mock *models.Mock) error {
-		total++
-		record(mock)
-		return rw.write(mock)
-	}, rw.copyDoc); err != nil {
+	if err := eachDoc(func(doc fileDoc) error {
+		if doc.verbatim {
+			// Copied as read (see fileDoc.verbatim).
+			return rw.copyDoc(doc)
+		}
+		changed := false
+		for _, mock := range doc.mocks {
+			total++
+			changed = record(mock) || changed
+		}
+		if !changed && provenswitch.On() {
+			// Under the proven switch a document the learn step changes
+			// nothing of is copied as the file holds it, so a hand edit
+			// inside it (a note, a changed value, its own layout) stays as
+			// the hand made it: keploy mock record keeps the hand edits of
+			// what it does not record anew, and the learn step of its full
+			// round must not undo them. (The comment lines a file starts
+			// with are its header, which every write of the file writes
+			// anew.) With the switch off every mock is written anew, as
+			// before.
+			return rw.copyDoc(doc)
+		}
+		for _, mock := range doc.mocks {
+			if err := rw.write(mock); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
 		return nil, err
 	}
 	if err := rw.commit(); err != nil {
