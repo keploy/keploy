@@ -149,14 +149,21 @@ func (w *composeChildStream) take(b []byte) {
 		}
 		b = b[room:]
 	}
-	need := len(w.text) + len(b)
-	if need <= cap(w.text) {
+	// b is one write, of any length. It is compared with the room the line
+	// has left before any sum is made, so every size below is plainly made of
+	// values composeLineBuf bounds (CodeQL's allocation-size check needs to
+	// see that; the text staying within composeLineBuf is not enough for it).
+	if len(b) <= cap(w.text)-len(w.text) {
 		w.text = append(w.text, b...)
 		return
 	}
-	if need <= composeLineBuf {
-		// Grown by hand, to twice its size but never past composeLineBuf, so
-		// append's own growth never takes more.
+	if room := composeLineBuf - len(w.text); len(b) <= room {
+		// The line with b fits within the bound. need is its length,
+		// len(w.text)+len(b), worked out from the room so that no sum is
+		// made. The buffer is grown by hand, to twice its size held to
+		// composeLineBuf, or to need when that is more, so append's own
+		// growth never takes more.
+		need := composeLineBuf - (room - len(b))
 		c := 2 * cap(w.text)
 		if c > composeLineBuf {
 			c = composeLineBuf
@@ -173,14 +180,18 @@ func (w *composeChildStream) take(b []byte) {
 	// of composeLineBuf, and let the start go. The quarter left free is what
 	// the next pieces fill before the start is let go again, so the copy is
 	// paid once per quarter of the bound, not once per write.
-	over := need - composeLineMax
-	w.lost += int64(over)
 	kept := make([]byte, 0, composeLineBuf)
-	if over < len(w.text) {
+	if len(b) >= composeLineMax {
+		// b alone holds the line's last composeLineMax bytes.
+		w.lost += int64(len(w.text)) + int64(len(b)-composeLineMax)
+		kept = append(kept, b[len(b)-composeLineMax:]...)
+	} else {
+		// b and the text's last composeLineMax-len(b) bytes before it. The
+		// text holds more than that, since the line is past the bound.
+		over := len(w.text) - (composeLineMax - len(b))
+		w.lost += int64(over)
 		kept = append(kept, w.text[over:]...)
 		kept = append(kept, b...)
-	} else {
-		kept = append(kept, b[over-len(w.text):]...)
 	}
 	w.text = kept
 }

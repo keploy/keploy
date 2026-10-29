@@ -210,6 +210,69 @@ func TestComposeChildOutputBoundsALongLine(t *testing.T) {
 	}
 }
 
+// Each write is weighed against the room the line has left, at each edge of
+// the three ways a piece is taken: into the buffer's free room, into a buffer
+// grown to fit (twice its size, or what the line needs, never past
+// composeLineBuf), or past the bound, where only the line's last
+// composeLineMax bytes are kept, from the text and b or from b alone, and the
+// rest is counted dropped. The bytes held are always the line's last ones.
+// Each case starts from a state a stream reaches; in one, a buffer of
+// composeLineBuf always holds more than half of it.
+func TestComposeChildOutputTakeWeighsEachWriteAgainstTheRoomLeft(t *testing.T) {
+	const bound, most = composeLineBuf, composeLineMax
+	pattern := func(from, n int) []byte {
+		p := make([]byte, n)
+		for i := range p {
+			p[i] = byte((from + i) % 251)
+		}
+		return p
+	}
+	for _, c := range []struct {
+		name              string
+		held, capacity, n int
+		wantLen, wantCap  int
+		wantLost          int64
+	}{
+		{"an empty write", 0, 0, 0, 0, 0, 0},
+		{"a write that fills the free room", 10, 16, 6, 16, 16, 0},
+		{"one byte past the free room doubles the buffer", 10, 16, 7, 17, 32, 0},
+		{"a write the doubled buffer cannot hold grows it to just what the line needs", 1000, 1024, 40000, 41000, 41000, 0},
+		{"a write one short of the most kept grows a small buffer to just what the line needs", 10, 16, most - 1, most + 9, most + 9, 0},
+		{"one byte past the free room of a buffer over half the bound grows it to the bound", most, most, 1, most + 1, bound, 0},
+		{"a write that fills the bound grows the buffer to it, not past", bound - 100, bound - 100, 100, bound, bound, 0},
+		{"a write that fills the bound from the buffer's free room", bound - 100, bound, 100, bound, bound, 0},
+		{"a write that fills the bound after a line of the most kept", most, most, bound - most, bound, bound, 0},
+		{"a first write as large as the bound", 0, 0, bound, bound, bound, 0},
+		{"b one short of the most kept fills the bound", bound - most + 1, bound - most + 1, most - 1, bound, bound, 0},
+		{"one byte past the bound keeps the text's end and b", bound - 100, bound - 100, 101, most, bound, int64(bound + 1 - most)},
+		{"one byte to a full buffer", bound, bound, 1, most, bound, int64(bound + 1 - most)},
+		{"past the bound, b one short of the most kept keeps one byte of the text", bound - most + 2, bound - most + 2, most - 1, most, bound, int64(bound - most + 1)},
+		{"past the bound, b of the most kept is kept alone", bound - most + 1, bound - most + 1, most, most, bound, int64(bound - most + 1)},
+		{"past the bound, b over the most kept keeps its own end", bound - most + 1, bound - most + 1, most + 1, most, bound, int64(bound - most + 2)},
+		{"a first write past the bound keeps its own end", 0, 0, bound + 1, most, bound, int64(bound + 1 - most)},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			text := make([]byte, c.held, c.capacity)
+			copy(text, pattern(0, c.held))
+			w := &composeChildStream{name: "app-1", text: text}
+			w.take(pattern(c.held, c.n))
+			if len(w.text) != c.wantLen || cap(w.text) != c.wantCap || w.lost != c.wantLost {
+				t.Fatalf("holds %d bytes in a %d-byte buffer, %d dropped; want %d in %d, %d dropped", len(w.text), cap(w.text), w.lost, c.wantLen, c.wantCap, c.wantLost)
+			}
+			if cap(w.text) > bound {
+				t.Fatalf("a %d-byte buffer is past the bound %d", cap(w.text), bound)
+			}
+			total := c.held + c.n
+			if int64(len(w.text))+w.lost != int64(total) {
+				t.Fatalf("held %d + dropped %d is not the line's %d bytes", len(w.text), w.lost, total)
+			}
+			if want := pattern(total-len(w.text), len(w.text)); !bytes.Equal(w.text, want) {
+				t.Fatalf("the %d bytes held are not the line's last ones", len(w.text))
+			}
+		})
+	}
+}
+
 const plantedChildValue = "planted-child-s3cr3t"
 
 type childCutter struct{ cut string }
