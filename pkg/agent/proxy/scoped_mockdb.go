@@ -494,6 +494,15 @@ func (s *scopedMockDb) AnsweredBackground() []*models.Mock {
 
 var _ integrations.AnsweredBackgroundReader = (*scopedMockDb)(nil)
 
+// MarkedSeries forwards the store's marked series (integrations.
+// MarkedSeriesReader), none when it reads none, so a parser on a view made
+// before exact serving began still answers a timer's call judging marked.
+func (s *scopedMockDb) MarkedSeries(kind models.Kind, known learn.Known) ([]integrations.MarkedSeries, error) {
+	return integrations.MarkedSeriesOf(s.MockMemDb, kind, known)
+}
+
+var _ integrations.MarkedSeriesReader = (*scopedMockDb)(nil)
+
 // ServedInOpenTest forwards the store's stamp of its open test and account of
 // what it was served (integrations.ExactServedReader), 0 and none when it
 // keeps none, so a learn step on a scoped view reads the store's account as
