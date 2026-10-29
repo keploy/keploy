@@ -25,6 +25,7 @@ type warmRow struct {
 	p    *Proxy
 	mm   *MockManager
 	disk atomic.Int64
+	all  []*models.Mock // the whole set, in recorded order
 }
 
 const warmStaged, warmLater = 12, 8
@@ -51,6 +52,7 @@ func newWarmRow(t *testing.T, logger *zap.Logger) *warmRow {
 			staged = append(staged, m)
 		}
 	}
+	r.all = all
 	r.mm.SetMocksWithWindow(staged, nil, now, now.Add(time.Second))
 	r.mm.SetRecordedBefore(func(before time.Time, visit func(*models.Mock) bool) error {
 		r.disk.Add(1)
@@ -157,6 +159,39 @@ func TestAStagedSetIsReadForTheLearnStepInRecordsFullRoundAlone(t *testing.T) {
 		}
 	})
 
+	// A set the agent keeps nothing of on disk (no on-disk store: the lax
+	// mock window, or a store that could not be made) has every recording
+	// in the manager's trees and no store to read (SetRecordedBefore nil);
+	// here one window takes in all of its tests. The staging reads every
+	// one of them from the trees, so the set's calls read none on their
+	// answer path.
+	t.Run("a set with no on-disk store", func(t *testing.T) {
+		t.Setenv(provenswitch.Env, "1")
+		r := newWarmRow(t, zap.NewNop())
+		start := r.all[0].Spec.ReqTimestampMock
+		r.mm.SetMocksWithWindow(r.all, nil, start, start.Add(2*time.Hour))
+		r.mm.SetRecordedBefore(nil)
+		r.mm.SetPairing(true)
+		if n := len(r.mm.StagedMocks()); n != len(r.all) {
+			t.Fatalf("the manager's trees hold %d recordings: want the set's %d", n, len(r.all))
+		}
+		done, err := r.p.warmLearnSet()
+		if err != nil || done == nil {
+			t.Fatalf("the set's staging did not start: %v", err)
+		}
+		u, ok := <-done
+		if !ok {
+			t.Fatal("the set's staging ended with nothing read")
+		}
+		if u.Staged != len(r.all) || u.Called != 0 || u.Err != nil {
+			t.Fatalf("with no on-disk store the set's staging read %d recordings and its calls %d (%v): want all %d from the trees, none by a call",
+				u.Staged, u.Called, u.Err, len(r.all))
+		}
+		if n := r.disk.Load(); n != 0 {
+			t.Fatalf("with no on-disk store the staging read the replaced store %d times", n)
+		}
+	})
+
 	// A store that fails mid-read stops the staging short: the line says
 	// so, at Warn, with the store's error and what was read before it (the
 	// staged recordings, then the store's first), so a round whose calls
@@ -217,12 +252,17 @@ func TestAStagedSetIsReadForTheLearnStepInRecordsFullRoundAlone(t *testing.T) {
 // session recordings the manager's tree holds (made through all three
 // tests) and its own on disk, each answer parked so that the staging's read
 // of it is seen as it happens. Visited trees first, the third test's
-// session recordings were read before the first test's own on disk.
+// session recordings were read before the first test's own on disk. The
+// set's start-up recordings, made before its first test, are its earliest:
+// the trees list them last (StagedMocks: per-test, session, start-up), so
+// they are read first only because the trees' recordings are sorted by
+// request time before they are merged with the disk's.
 func TestASetsStagingReadsTheFirstTestsRecordingsFirst(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	prev := runtime.GOMAXPROCS(1)
 	t.Cleanup(func() { runtime.GOMAXPROCS(prev) })
-	const tests, each = 3, 4
+	const tests, each, boot = 3, 4, 3
+	const startUp = -1 // the test a start-up recording is read for: before the first
 	p := startedDrainProxy(t, 10)
 	p.learnTracker = learn.NewTracker()
 	mm := NewMockManager(nil, nil, zap.NewNop())
@@ -253,9 +293,21 @@ func TestASetsStagingReadsTheFirstTestsRecordingsFirst(t *testing.T) {
 			disk = append(disk, parked(fmt.Sprintf("test-%d-%d", k, i), k, at.Add(time.Millisecond)))
 		}
 	}
-	mm.SetMocksWithWindow(nil, session, start, start.Add(time.Second))
-	if n := len(mm.StagedMocks()); n != len(session) {
-		t.Fatalf("the manager's trees hold %d recordings: want the %d session recordings", n, len(session))
+	var startup []*models.Mock
+	for i := 0; i < boot; i++ {
+		b := parked(fmt.Sprintf("boot-%d", i), startUp, start.Add(-time.Minute+time.Duration(i)*time.Millisecond))
+		b.TestModeInfo.Lifetime = models.LifetimeConnection
+		startup = append(startup, b)
+	}
+	mm.SetMocksWithWindowThreeTier(nil, session, startup, start, start.Add(time.Second))
+	staged := mm.StagedMocks()
+	if len(staged) != len(session)+boot {
+		t.Fatalf("the manager's trees hold %d recordings: want the %d session and %d start-up recordings", len(staged), len(session), boot)
+	}
+	for i, m := range staged[len(session):] {
+		if m.Name != startup[i].Name {
+			t.Fatalf("the trees list %q at %d: want the start-up recordings listed after the session ones, made before them", m.Name, len(session)+i)
+		}
 	}
 	mm.SetRecordedBefore(func(before time.Time, visit func(*models.Mock) bool) error {
 		for _, m := range disk {
@@ -271,13 +323,19 @@ func TestASetsStagingReadsTheFirstTestsRecordingsFirst(t *testing.T) {
 		t.Fatalf("the set's staging did not start: %v", err)
 	}
 	u := <-done
-	if u.Readers != 1 || u.Staged != tests*each*2 {
-		t.Fatalf("the staging read %d recordings with %d readers: want all %d, with one reader", u.Staged, u.Readers, tests*each*2)
+	all := tests*each*2 + boot
+	if u.Readers != 1 || u.Staged != all {
+		t.Fatalf("the staging read %d recordings with %d readers: want all %d, with one reader", u.Staged, u.Readers, all)
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if len(read) != tests*each*2 {
-		t.Fatalf("the staging read %d answers: want each of the %d recordings' once", len(read), tests*each*2)
+	if len(read) != all {
+		t.Fatalf("the staging read %d answers: want each of the %d recordings' once", len(read), all)
+	}
+	for i := 0; i < boot; i++ {
+		if read[i] != startUp {
+			t.Fatalf("the staging read the tests' recordings in the order %v: want the %d start-up recordings, the set's earliest, first", read, boot)
+		}
 	}
 	for i := 1; i < len(read); i++ {
 		if read[i] < read[i-1] {
