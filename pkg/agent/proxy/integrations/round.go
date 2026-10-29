@@ -104,6 +104,10 @@ const (
 	// OwnerAhead: one of a pool view's ahead, the next test's calls in
 	// flight when it began.
 	OwnerAhead
+	// OwnerSetAside: a recording of a test the replay set aside, served to
+	// the open test's call that is it exactly (models.Mock.TestModeInfo.
+	// SetAsideFrom): never the open test's own, and never learned against.
+	OwnerSetAside
 )
 
 // TakeHow is what a take log entry records.
