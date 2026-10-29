@@ -214,6 +214,20 @@ type ScopeGateReq struct {
 	// deny list: every test it does not name runs. Read under the proven
 	// switch, where it replaces Run.
 	Skip map[string]string `json:"skip,omitempty"`
+	// Needs, read with Skip, holds a test to tests that must run before it:
+	// at its begin, the first ScopeNeed whose Test has not begun earlier in
+	// this replay skips it with that need's Reason. Its call holds a value
+	// their calls send in the same run (a run's variable), so it cannot run
+	// without them.
+	Needs map[string][]ScopeNeed `json:"needs,omitempty"`
+}
+
+// ScopeNeed is one test a replayed test needs to have begun before it
+// (ScopeGateReq.Needs), and the reason its harness skips it with when that
+// test has not.
+type ScopeNeed struct {
+	Test   string `json:"test"`
+	Reason string `json:"reason"`
 }
 
 // ScopeWindow is one recorded per-test scope: the agent-clock interval during

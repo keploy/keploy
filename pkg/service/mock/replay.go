@@ -1595,12 +1595,14 @@ func RegisterScopeGateSource(fn ScopeGateSource) {
 }
 
 // ScopeSkipSource is the proven model's gate (design v14 §6.1): the tests a
-// replay skips, by ID, each with the reason its harness skips it with. It is
-// a deny list: every test it does not name runs. A wrapping build
+// replay skips, by ID, each with the reason its harness skips it with, and
+// the tests each test needs to have begun before it
+// (models.ScopeGateReq.Needs). It is a deny list: every test it does not
+// name runs. A wrapping build
 // (enterprise) installs one that reads the set's verdicts.yaml. An error
 // refuses the replay: running a test the list quarantines, or skipping one
 // it does not, would make the run something other than CI's.
-type ScopeSkipSource func(ctx context.Context, req ScopeGateRequest) (map[string]string, error)
+type ScopeSkipSource func(ctx context.Context, req ScopeGateRequest) (skip map[string]string, needs map[string][]models.ScopeNeed, err error)
 
 var scopeSkipSource ScopeSkipSource
 
@@ -1613,7 +1615,7 @@ func RegisterScopeSkipSource(fn ScopeSkipSource) {
 // ScopeSkipPusher is an optional Instrumentation extension: under the proven
 // switch, Replay hands the agent the tests to skip with it.
 type ScopeSkipPusher interface {
-	PushScopeSkips(ctx context.Context, skip map[string]string) error
+	PushScopeSkips(ctx context.Context, skip map[string]string, needs map[string][]models.ScopeNeed) error
 }
 
 // pushScopeSkips hands the agent the proven gate, under the proven switch and
@@ -1622,13 +1624,13 @@ func (m *mockService) pushScopeSkips(ctx context.Context, name, digest string) e
 	if !provenswitch.On() || scopeSkipSource == nil {
 		return nil
 	}
-	skip, err := scopeSkipSource(ctx, ScopeGateRequest{Set: name, MocksDigest: digest, Path: m.config.Path})
+	skip, needs, err := scopeSkipSource(ctx, ScopeGateRequest{Set: name, MocksDigest: digest, Path: m.config.Path})
 	if err != nil {
 		return fmt.Errorf("could not read which tests this replay skips: %w", err)
 	}
 	pusher, ok := m.instrumentation.(ScopeSkipPusher)
 	if !ok {
-		if len(skip) == 0 {
+		if len(skip) == 0 && len(needs) == 0 {
 			return nil
 		}
 		return errors.New("this keploy cannot tell its agent which tests to skip")
@@ -1636,11 +1638,14 @@ func (m *mockService) pushScopeSkips(ctx context.Context, name, digest string) e
 	if skip == nil {
 		skip = map[string]string{}
 	}
-	if err := pusher.PushScopeSkips(ctx, skip); err != nil {
+	if err := pusher.PushScopeSkips(ctx, skip, needs); err != nil {
 		return fmt.Errorf("could not tell the agent which tests to skip: %w", err)
 	}
 	if len(skip) > 0 {
 		m.logger.Info("tests keploy skips this replay, each with its reason", zap.Int("tests", len(skip)), zap.String("mock-set", name))
+	}
+	if len(needs) > 0 {
+		m.logger.Info("tests that use a value an earlier test sends: each runs only after that test, else its harness skips it naming both calls", zap.Int("tests", len(needs)), zap.String("mock-set", name))
 	}
 	return nil
 }
