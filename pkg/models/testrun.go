@@ -589,6 +589,10 @@ type UnmatchedCall struct {
 	// and why nothing answered it (keploy test: TestReport.BackgroundCalls).
 	// A call made in an earlier test's window and filed late is no
 	// background call: it is still charged to the test whose read took it.
+	// A call of a series judging marked as background work that no
+	// recording of the series answered (MockMismatchReport.Background) is
+	// one wherever it was made, in a test's window or before the set's
+	// first test (never BeforeSet): a timer's call, no test's.
 	Background bool `json:"background,omitempty" yaml:"background,omitempty"`
 	// Differs mirrors MockMismatchReport.Differs: the names of the fields in
 	// which the call differs from its closest recording, without values.
