@@ -11,6 +11,7 @@ import (
 	"strings"
 	"syscall"
 
+	keployutils "go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -42,29 +43,39 @@ func StartCommand(cmd *exec.Cmd) error {
 
 // PTYHandle represents a PTY session (stub for Windows)
 type PTYHandle struct {
-	cmd    *exec.Cmd
-	logger *zap.Logger
+	cmd     *exec.Cmd
+	console *keployutils.ChildConsole
+	logger  *zap.Logger
 }
 
 // StartCommandWithPTY on Windows falls back to regular command execution since PTY is not supported.
 func StartCommandWithPTY(cmd *exec.Cmd, logger *zap.Logger) (*PTYHandle, error) {
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	// Its output reaches keploy's console cut of the values the log redactor
+	// holds, when it holds any (ChildConsole).
+	console, err := keployutils.SetChildConsole(cmd)
+	if err != nil {
+		return nil, err
+	}
 	cmd.Stdin = os.Stdin
 
-	if err := cmd.Start(); err != nil {
+	err = cmd.Start()
+	console.Started()
+	if err != nil {
 		return nil, err
 	}
 
 	return &PTYHandle{
-		cmd:    cmd,
-		logger: logger,
+		cmd:     cmd,
+		console: console,
+		logger:  logger,
 	}, nil
 }
 
-// Wait waits for the command to finish.
+// Wait waits for the command to finish, and writes out all it printed.
 func (h *PTYHandle) Wait() error {
-	return h.cmd.Wait()
+	err := h.cmd.Wait()
+	h.console.Exited()
+	return err
 }
 
 // GetProcess returns the underlying process for signal handling
