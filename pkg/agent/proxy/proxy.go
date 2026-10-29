@@ -248,6 +248,13 @@ type Proxy struct {
 	// where they are the set's (beforeSetMiss) and its read is incomplete
 	// (missLoss); the next test's carries them, so its read is incomplete.
 	pendingLost bool
+	// windowReadAt is when the latest read of a test's misses
+	// (GetMockErrors, EndTestErrorCapture) took the window it read, under
+	// captureMu; zero from a set's first test's opening until that test is
+	// read. Under the proven switch a miss the next test's window carries
+	// that was made at or after it was made outside every test's window
+	// (betweenTestsMiss).
+	windowReadAt time.Time
 	// missCutPending is set, under the proven switch, by a test set's Mock,
 	// and taken by its first staging (SetMocksWithWindow from
 	// models.BaseTime), which cuts what was missed until then
@@ -5212,6 +5219,47 @@ type beforeSetMiss struct{ error }
 // Unwrap is the miss itself, for errors.As.
 func (b beforeSetMiss) Unwrap() error { return b.error }
 
+// betweenTestsMiss is a miss a test's window carries (ContinueTestErrorCapture)
+// that was made, under the proven switch, outside every test's window: at or
+// after the previous test's misses were read (windowReadAt), before this
+// window opened. No test made it: it is the application's background work (a
+// timer, a start-up job that outlived the readiness probe), and a background
+// call keploy cannot answer is no test's failure (founder D1). The read
+// returns it marked (models.UnmatchedCall.Background), charged to no test, for
+// the replay to list once for the set. A miss of a call its parser found made
+// in a test (MissInTest, MissExtraCall) stays the miss of the test that reads
+// it, as does one made before that read and filed after it, and one of
+// unknown time.
+type betweenTestsMiss struct{ error }
+
+// Unwrap is the miss itself, for errors.As.
+func (b betweenTestsMiss) Unwrap() error { return b.error }
+
+// missMadeAt is when the miss err was made: its report's time, else the time
+// it reached the proxy; zero when it says none.
+func missMadeAt(err error) time.Time {
+	var pe models.ParserError
+	if !errors.As(err, &pe) {
+		return time.Time{}
+	}
+	if r := pe.MismatchReport; r != nil && !r.At.IsZero() {
+		return r.At
+	}
+	return pe.At
+}
+
+// madeBetweenTests reports whether the miss err, carried into a test's window,
+// was made at or after readAt, when the previous test's misses were read. A
+// zero readAt (no test of the set was read yet) or a miss of unknown time is
+// never one.
+func madeBetweenTests(err error, readAt time.Time) bool {
+	if readAt.IsZero() {
+		return false
+	}
+	at := missMadeAt(err)
+	return !at.IsZero() && !at.Before(readAt)
+}
+
 // noteMissLost records that a miss was lost, and why: the next read is then
 // incomplete, naming the first cause, rather than silently short. With the
 // proven switch off too: a read short of a miss is one whose test a miss may
@@ -5425,7 +5473,9 @@ func (p *Proxy) BeginTestErrorCapture() { p.openTestErrorCapture(false, false) }
 // reported, as a miss that lands in a later test's window is that test's.
 // Discarding it would drop a real miss silently: a SEND the app publishes in
 // reaction to something the replay did between two tests is reported against
-// no test at all.
+// no test at all. Under the proven switch the read marks such a miss made
+// after the previous test was read as made outside every test's window
+// (betweenTestsMiss): carried and read in order still, but charged to no test.
 func (p *Proxy) ContinueTestErrorCapture() { p.openTestErrorCapture(true, false) }
 
 // openTestErrorCapture opens the next test's capture window (carry: as
@@ -5466,12 +5516,22 @@ func (p *Proxy) openTestErrorCapture(carry, awaits bool) {
 	between = append(between, p.pendingMockErrors.drain()...)
 	pendingLost := p.pendingLost
 	p.pendingLost = false
+	readAt := p.windowReadAt
+	if !carry {
+		// A set begins: no earlier read bounds its tests' windows.
+		p.windowReadAt = time.Time{}
+	}
 	// Under the proven switch a set's first test carries what was missed
 	// before it as the set's (beforeSetMiss): nothing is dropped.
 	beforeSet := !carry && provenswitch.On()
 	switch {
 	case carry:
 		for _, err := range between {
+			// Made after the previous test was read: outside every test's
+			// window, the application's background work (betweenTestsMiss).
+			if _, before := err.(beforeSetMiss); !before && provenswitch.On() && madeBetweenTests(err, readAt) {
+				err = betweenTestsMiss{err}
+			}
 			if !acc.addBounded(err, maxPendingMockErrors) {
 				p.missDroppedForRoom(err)
 			}
@@ -5590,8 +5650,13 @@ func (p *Proxy) EndTestErrorCapture() []error {
 	if provenswitch.On() {
 		p.learnBoundary(func(t *learn.Tracker) { t.End() })
 	}
+	p.captureMu.Lock()
 	acc := p.activeTestErrors.Swap(nil)
 	p.testWindows.Add(1)
+	if acc != nil {
+		p.windowReadAt = time.Now()
+	}
+	p.captureMu.Unlock()
 	if acc != nil {
 		return acc.drain()
 	}
@@ -5689,6 +5754,9 @@ func (p *Proxy) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 		// stay installed and grow for the rest of the process.
 		if acc := p.activeTestErrors.Swap(nil); acc != nil {
 			rawErrs = append(rawErrs, acc.drain()...)
+			// A miss made from here until the next window opens was made
+			// outside every test's window (betweenTestsMiss).
+			p.windowReadAt = time.Now()
 		}
 		p.testWindows.Add(1)
 		if provenswitch.On() {
@@ -5707,6 +5775,7 @@ func (p *Proxy) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 		if acc := p.activeTestErrors.Load(); acc != nil {
 			rawErrs = append(rawErrs, acc.drain()...)
 			acc.read = true
+			p.windowReadAt = time.Now()
 		}
 		p.testWindows.Add(1)
 	}
@@ -5715,10 +5784,15 @@ func (p *Proxy) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 	var errs []models.UnmatchedCall
 	for _, err := range rawErrs {
 		// A miss made before the set's first test (beforeSetMiss) is read
-		// as the set's, an outside_test miss.
+		// as the set's, an outside_test miss; one made between two tests
+		// (betweenTestsMiss), as the application's background work.
 		before, isBefore := err.(beforeSetMiss)
 		if isBefore {
 			err = before.error
+		}
+		between, isBetween := err.(betweenTestsMiss)
+		if isBetween {
+			err = between.error
 		}
 		first := len(errs)
 		if parserErr, ok := err.(models.ParserError); ok && parserErr.ParserErrorType == models.ErrMockNotFound {
@@ -5786,6 +5860,16 @@ func (p *Proxy) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 			for i := first; i < len(errs); i++ {
 				errs[i].BeforeSet = true
 				errs[i].Kind = models.MissOutsideTest
+			}
+		}
+		if isBetween {
+			for i := first; i < len(errs); i++ {
+				// A call its parser found made in a test stays that test's
+				// miss, however late it was made; only a miss that counts
+				// against a test needs the mark.
+				if errs[i].CountsAgainstTest() && errs[i].Kind != models.MissInTest && errs[i].Kind != models.MissExtraCall {
+					errs[i].Background = true
+				}
 			}
 		}
 	}
