@@ -68,6 +68,13 @@ type TestReport struct {
 	// before its first test or after its last. They never fail
 	// the set, nor land in UnclaimedCalls. Absent when there is none.
 	SetAnswers []UnmatchedCall `json:"setAnswers,omitempty" yaml:"set_answers,omitempty"`
+	// BackgroundCalls are, under the proven switch, the calls the set's
+	// application made outside every test's window, between two tests, that
+	// no mock answered (UnmatchedCall.Background): its background work, a
+	// timer's or a start-up job's call. They are charged to no test and
+	// never fail the set (founder D1); each says what was called, when (At),
+	// and why nothing answered it. Absent when there is none.
+	BackgroundCalls []UnmatchedCall `json:"backgroundCalls,omitempty" yaml:"background_calls,omitempty"`
 }
 
 // CaptureVerificationStatus is the outcome of checking that the agent tracked
@@ -570,16 +577,18 @@ type UnmatchedCall struct {
 	// say), and every call without the switch. keploy mock's receipt lists
 	// those of them that count against a test (Receipt.UnchargedMisses).
 	ChargedTo string `json:"charged_to,omitempty" yaml:"charged_to,omitempty"`
-	// Background says, under the proven switch, that keploy mock's agent
-	// found the call made outside every test's window: after the test before
-	// it stopped being served (or before the set's first test) and before
-	// the test whose read took it began being served. Such a call is the
-	// application's background work (a timer, a start-up job): no test made
-	// it, so it is charged to none and fails none, and the run reports it
-	// once, at the set's level, with when it was made and why nothing
-	// answered it. A call made in an earlier test's window and filed late is
-	// no background call: it is still charged to the test whose read took
-	// it.
+	// Background says, under the proven switch, that keploy found the call
+	// made outside every test's window: keploy mock's agent, after the test
+	// before it stopped being served (or before the set's first test) and
+	// before the test whose read took it began being served; keploy test's,
+	// after the test before it was read and before the next test's window
+	// opened (a set's first test's window carries BeforeSet instead). Such
+	// a call is the application's background work (a timer, a start-up
+	// job): no test made it, so it is charged to none and fails none, and
+	// the run reports it once, at the set's level, with when it was made
+	// and why nothing answered it (keploy test: TestReport.BackgroundCalls).
+	// A call made in an earlier test's window and filed late is no
+	// background call: it is still charged to the test whose read took it.
 	Background bool `json:"background,omitempty" yaml:"background,omitempty"`
 	// Differs mirrors MockMismatchReport.Differs: the names of the fields in
 	// which the call differs from its closest recording, without values.

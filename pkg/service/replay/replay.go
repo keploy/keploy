@@ -624,13 +624,17 @@ type Replayer struct {
 	// ends it, once it has one (noteSetEnd): the status it says, and why
 	// (tellSetEnd); setEndCalls, the calls it charged to the set
 	// (SetCallsHook); setEndAnswers, the answered calls it charged to the
-	// set (SetAnswersHook). Reset before each run of a set.
-	setEnd        *models.SetEnd
-	setEndCalls   []models.UnmatchedCall
-	setEndAnswers []models.UnmatchedCall
+	// set (SetAnswersHook); setEndBackground, the calls made between two
+	// tests that no mock answered (SetBackgroundHook). Reset before each run
+	// of a set.
+	setEnd           *models.SetEnd
+	setEndCalls      []models.UnmatchedCall
+	setEndAnswers    []models.UnmatchedCall
+	setEndBackground []models.UnmatchedCall
 	// setCalls are the calls of the set RunTestSet is running that no mock
 	// answered and that are the set's, no test's (proven switch): those made
-	// before its first test (before_set_calls.go).
+	// before its first test, and those made between two tests
+	// (before_set_calls.go).
 	setCalls setCalls
 	// keptInside is each destination the app called that no mock answered,
 	// over the whole run, for the run's report of them (kept_inside.go).
@@ -1177,7 +1181,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 			// the app entirely unstarted. With this gate the
 			// historical per-test-set restart behaviour is preserved
 			// whenever the one-shot spawn didn't fire.
-			r.setEnd, r.setEndCalls, r.setEndAnswers = nil, nil, nil
+			r.setEnd, r.setEndCalls, r.setEndAnswers, r.setEndBackground = nil, nil, nil, nil
 			// The set's exact plan is this run's: a run that ends before it
 			// makes one tells its end hooks no earlier set's shares.
 			r.exact = nil
@@ -6351,6 +6355,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			appLogs = r.instrumentation.GetRecentAppLogs(logCtx)
 		}
 	}
+	// The calls the application made between two tests that no mock
+	// answered (proven switch): its background work, charged to no test and
+	// failing nothing, said once and listed for the set, whatever its end.
+	backgroundCalls := r.setCalls.backgroundCalls()
+	r.logBackgroundCalls(testSetID, backgroundCalls)
 	testReport = &models.TestReport{
 		Version:       models.GetVersion(),
 		TestSet:       testSetID,
@@ -6377,6 +6386,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		AppNotStopped:       appNotStopped,
 		Proven:              provenswitch.On(),
 		SetAnswers:          setAnswers,
+		BackgroundCalls:     backgroundCalls,
 	}
 	r.noteSetEnd(testReport)
 
