@@ -46,10 +46,13 @@ type carryOverAttribution struct {
 	// consumedSome holds the tests mapConsumed was given at least one
 	// consumed mock for that is their own: not the startup section's, and not
 	// a flagged mock another test owns by the release rule. In any call (a
-	// RetryPassing cycle calls it again): a test once in it stays. A mapped
-	// test outside it consumed nothing of its own, if anything
-	// (consumedNothing).
+	// RetryPassing cycle calls it again): a test once in it stays.
 	consumedSome map[string]struct{}
+	// caughtOthers holds the tests mapConsumed was given a flagged mock for
+	// that another test owns by the release rule (a carry-over the running
+	// test's drain caught), in any call. A mapped test in neither set
+	// consumed nothing but startup traffic, if anything (consumedNothing).
+	caughtOthers map[string]struct{}
 	// early holds, by owning test, the flagged mocks consumed while that test
 	// was not mapped yet: a carry-over SEND the app published before its own
 	// test ran (the lookahead lets it land up to a few windows early). They
@@ -72,28 +75,46 @@ func newCarryOverAttribution(testCases []*models.TestCase) *carryOverAttribution
 		sched:        models.NewWindowSchedule(recordedTestWindows(testCases)),
 		mapped:       make(map[string]struct{}),
 		consumedSome: make(map[string]struct{}),
+		caughtOthers: make(map[string]struct{}),
 		early:        make(map[string][]models.MockState),
 		bootEnd:      firstRecordedTestStart(testCases),
 	}
 }
 
 // consumedNothing names the tests whose consumption mapConsumed was given and
-// that consumed no mock of their own: nothing at all, or only mocks of the
-// startup section and flagged mocks other tests own. Only these may get an
+// that consumed nothing, or only the startup section's mocks: no mock of
+// their own, and no flagged mock another test owns. Only these may get an
 // entry with no mock (addConsumedNothingEntries). A test whose drain caught
 // only startup traffic (a boot consumer still fetching, a flagged mock
 // released before the first test) is one: the section, in the same file,
 // lists those mocks, and a replay that loads by name serves them to every
-// test. So is a test whose drain caught only another test's flagged mock (a
-// carry-over: a pushed message, a send the app published early or late): the
-// release rule makes it that test's, whose entry lists it when this run maps
-// that test, as before, and whose recorded entry is kept when it does not. A
-// test that consumed an unflagged mock its window filter dropped (one
+// test. A test that consumed an unflagged mock its window filter dropped (one
 // recorded in another test's window, or in none) keeps what record gave it,
-// as before.
+// as before; so does one that caught another test's flagged mock
+// (caughtOnlyOthers).
 func (a *carryOverAttribution) consumedNothing() map[string]struct{} {
 	out := make(map[string]struct{}, len(a.mapped))
 	for id := range a.mapped {
+		_, some := a.consumedSome[id]
+		_, others := a.caughtOthers[id]
+		if !some && !others {
+			out[id] = struct{}{}
+		}
+	}
+	return out
+}
+
+// caughtOnlyOthers names the mapped tests whose every consumed mock was the
+// startup section's or a flagged mock another test owns, at least one of them
+// the latter: a carry-over (a pushed message, a send the app published early
+// or late) the test's drain caught, which the release rule gives to the test
+// whose window recorded it. Its owner's entry lists it, as it always has. The
+// run did not establish what the catching test itself needs, so it gets no
+// entry: a file that exists keeps its recorded one, and a new file is created
+// without one, as before (RunTestSet does not hold the file for it).
+func (a *carryOverAttribution) caughtOnlyOthers() map[string]struct{} {
+	out := make(map[string]struct{}, len(a.caughtOthers))
+	for id := range a.caughtOthers {
 		if _, some := a.consumedSome[id]; !some {
 			out[id] = struct{}{}
 		}
@@ -316,6 +337,9 @@ func (a *carryOverAttribution) mapConsumed(mapping *models.Mapping, running stri
 	// outside both is the running test's own (consumedNothing).
 	if len(consumed) > len(startup)+othersFlagged {
 		a.consumedSome[running] = struct{}{}
+	}
+	if othersFlagged > 0 {
+		a.caughtOthers[running] = struct{}{}
 	}
 	upsertActualTestMockMapping(mapping, running, own, tcReq, tcResp)
 	// A call in flight when the running test began (sent in the gap before

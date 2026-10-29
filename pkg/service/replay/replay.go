@@ -6506,20 +6506,27 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// branch (file exists), leaving autoreplay permanently without
 	// the mappings the feature relies on. UpdateTestMapping=true
 	// still creates a file that maps no mock when some test passed and
-	// each passing test consumed nothing of its own in a run that served
-	// mocks (each gets an empty entry);
-	// it creates none from a run where no test passed. It maps no
+	// each passing test consumed nothing but startup traffic in a run
+	// that served mocks (each gets an empty entry); it creates none with
+	// no entry at all, and none from a run where no test passed. It maps no
 	// mock, so each test is served its recorded window as with no
 	// file, and every later flag run merges into it; only a later
 	// default run's create is skipped, as for any file that exists.
 	//
-	// A new file gives every passing test an entry, or is not created.
-	// A passing test with no entry in it (its consumption fell in no
-	// test's window or in another test's, or was not read) is "no
-	// verdict" to a replay that skips a test with no entry, which would
-	// skip a test that passed, run after run: no default run writes into
-	// a file that exists. With no file the set keeps its whole recording.
-	// (A file that exists is written as before.)
+	// A new file gives every passing test an entry, or is not created,
+	// with one exception. A passing test with no entry in it (its
+	// consumption fell in no test's window or in another test's, or was
+	// not read) is "no verdict" to a replay that skips a test with no
+	// entry, which would skip a test that passed, run after run: no
+	// default run writes into a file that exists. With no file the set
+	// keeps its whole recording. (A file that exists is written as
+	// before.) The exception: a passing test whose drain caught only other
+	// tests' flagged mocks (caughtOnlyOthers) gets no entry and does not
+	// hold the file, as before the empty entries. Its consumption is its
+	// owners', whose entries list it, and the run did not establish what
+	// the test itself needs, so it gets no empty entry; a new file is
+	// created without it, as main creates it, and a replay that skips a
+	// test with no entry skips it, as with main's file.
 	//
 	// No write may leave a loaded test out of the file for good because the
 	// run lost it, as no default run adds to a file that exists. A run that did
@@ -6549,12 +6556,17 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// agent was never asked what a test consumed, or (--mocking=false, a
 	// global passthrough) every call went to the real dependency and nothing
 	// was served to consume, and an empty list would claim what nobody read.
-	var consumedNothing map[string]struct{}
+	var consumedNothing, caughtOnlyOthers map[string]struct{}
 	if r.instrument && r.mocksDependencies() {
 		consumedNothing = carryAttr.consumedNothing()
+		caughtOnlyOthers = carryAttr.caughtOnlyOthers()
 	}
 	addConsumedNothingEntries(mappingDoc, testCaseResults, passing, consumedNothing)
-	unentered := passingWithNoEntry(mappingDoc, testCaseResults, passing)
+	// A passing test whose drain caught only other tests' flagged mocks gets
+	// no entry from this run, and a new file is created without one, as
+	// before the empty entries: its consumption is its owners' (their
+	// entries list it), not a mock keploy could not place.
+	unentered := withoutTests(passingWithNoEntry(mappingDoc, testCaseResults, passing), caughtOnlyOthers)
 	markWrittenByKeployTest(mappingDoc)
 	// Whether a boot consumer's fetch was caught by the set's setup drain or
 	// by a test's drain is timing: a startup section holding the app's
@@ -6619,7 +6631,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if exists, existsErr := mappingExists(); existsErr != nil || !exists {
 			holdMappings = "a test got no answer, was refused or lost its result, and a new file would lack it for good"
 		}
-	case !mapsAMock(mappingDoc) && (len(passing) == 0 || !r.config.Test.UpdateTestMapping):
+	case !mapsAMock(mappingDoc) && (len(passing) == 0 || !r.config.Test.UpdateTestMapping || (len(mappingDoc.TestCases) == 0 && len(unentered) == 0)):
 		// A new file would map no mock to any test (its entries, if any, are
 		// passing tests that consumed nothing), and, existing, would stop
 		// every later default run from creating the one that does. Into a
@@ -6631,7 +6643,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// A flag run where tests passed creates the file for their empty
 		// entries, though a test not counted as passing consumed mocks
 		// (the case below holds it when a passing test would have no
-		// entry). The set then has a mapping, by which a replay that loads
+		// entry), but never a file with no entry at all, which it would be
+		// when every passing test caught only other tests' flagged mocks
+		// (caughtOnlyOthers: no entry, and no hold below). The set then has a mapping, by which a replay that loads
 		// only the mapped mocks uses the set's cut. The test not counted as
 		// passing gets no entry: a local replay serves it its recorded
 		// window, and a replay that skips a test with no entry reports it
@@ -6644,6 +6658,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				holdMappings = "no test that consumed a mock counts as passing, so a new file would map no test; a later run in which one passes creates it"
 			case len(passing) == 0:
 				holdMappings = "no test passed, so a new file would map no test; a later run in which a test that consumes a mock passes creates it"
+			case len(mappingDoc.TestCases) == 0 && len(unentered) == 0:
+				// Tests passed, none has an entry and none is held for: every
+				// one caught only flagged mocks of tests this run maps no entry
+				// for (an ignored one, say; caughtOnlyOthers). Quiet only where
+				// nothing asked for a write.
+				holdMappings = "every test that passed consumed only flagged mocks other tests own (carried over), so a new file would map no test; a later run in which a test that consumes a mock of its own passes creates it"
+				holdQuietly = !r.config.Test.UpdateTestMapping
 			default:
 				holdMappings = "no test consumed a mock, so a new file would map no test"
 				holdQuietly = true
@@ -6651,8 +6672,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	case len(unentered) > 0:
 		// A new file gives every passing test an entry, or is not created
-		// (see above): the set keeps its whole recording until a run that
-		// can give each passing test one.
+		// (see above, and its exception, not in unentered): the set keeps
+		// its whole recording until a run that can give each passing test
+		// one.
 		if exists, existsErr := mappingExists(); existsErr != nil || !exists {
 			holdMappings, holdNextStep = noEntryHold(r.instrument, r.mocksDependencies())
 			heldForNoEntry = true

@@ -66,9 +66,11 @@ import (
 // file that exists as it is; only a run that creates the file can leave such a
 // test without an entry.
 //
-// A passing test that consumed no mock of its own gets an entry with none
-// (addConsumedNothingEntries), so a test with no entry is one the run gave no
-// verdict on.
+// A passing test that consumed nothing, or only the startup section's mocks,
+// gets an entry with none (addConsumedNothingEntries), so a test with no entry
+// is one the run gave no verdict on, with one exception: a passing test whose
+// drain caught only other tests' flagged mocks gets no entry from the run
+// (carryOverAttribution.caughtOnlyOthers), as before.
 //
 //   - PASSED: passing. A pass that left a recorded mock unconsumed is a pass
 //     when its answer matched (it stays PASSED only while --assert-dependencies
@@ -223,14 +225,14 @@ func markWrittenByKeployTest(doc *models.Mapping) {
 }
 
 // addConsumedNothingEntries gives every passing test that has no entry in doc
-// an entry with no mock: it passed, and consumed no mock of its own (only, if
-// anything, the startup section's or a flagged mock another test owns, which
-// the same file lists). none names the tests whose consumption the run read
-// and found empty of any of their own (carryOverAttribution.consumedNothing);
-// a test outside it gets nothing, and none does when the run read no test's
-// consumption (none nil: not instrumented, so the agent was never asked, or
-// the run served no mock to consume). The entries are added in the order of
-// results; the write sorts them by test (mapdb).
+// an entry with no mock: it passed, and consumed nothing but, if anything, the
+// startup section's mocks, which the same file lists. none names the tests
+// whose consumption the run read and found empty of any other
+// (carryOverAttribution.consumedNothing; a test that caught another test's
+// flagged mock is not one); a test outside it gets nothing, and none does
+// when the run read no test's consumption (none nil: not instrumented, so the
+// agent was never asked, or the run served no mock to consume). The entries
+// are added in the order of results; the write sorts them by test (mapdb).
 //
 // Without this "no entry" meant two things: the test needs no mock, or the run
 // gave no verdict on it (it failed, was held, or got none). A replay that
@@ -243,7 +245,8 @@ func markWrittenByKeployTest(doc *models.Mapping) {
 // The holds that keep a run from creating a file that maps no mock, and the
 // default flag's create, decide on mapsAMock, and an empty entry maps none. A
 // new file is created only when every passing test has an entry
-// (passingWithNoEntry), an empty one counting.
+// (passingWithNoEntry), an empty one counting, but for a test that caught
+// only other tests' flagged mocks, which a new file leaves out, as before.
 func addConsumedNothingEntries(doc *models.Mapping, results []models.TestResult, passing map[string]bool, none map[string]struct{}) {
 	if doc == nil || len(none) == 0 {
 		return
@@ -308,6 +311,20 @@ func noEntryHold(instrumented, servedMocks bool) (reason, nextStep string) {
 		return "what a passing test consumed fell, by its recorded time, in no test's window or in another test's, so a new file would leave it with no entry, as if the run had given it no verdict",
 			"nothing to do: with no mappings.yaml each test is served the mocks of its recorded window, as before. A call the application makes after it answers, or between tests, is recorded outside the test's window, and a later run creates the file once it can place what each passing test consumes in that test's window"
 	}
+}
+
+// withoutTests is ids less the tests in drop, in order.
+func withoutTests(ids []string, drop map[string]struct{}) []string {
+	if len(drop) == 0 {
+		return ids
+	}
+	var out []string
+	for _, id := range ids {
+		if _, ok := drop[id]; !ok {
+			out = append(out, id)
+		}
+	}
+	return out
 }
 
 // mapsAMock reports whether doc maps at least one mock to a test.
