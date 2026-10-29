@@ -575,8 +575,10 @@ func ReadBytesUntilEOF(ctx context.Context, logger *zap.Logger, reader io.Reader
 
 // ReadChunkSize is the most one ReadBytes or ReadBytesUntilEOF returns. It is
 // the size the relay that records a connection reads with
-// (relay.DefaultForwardBuf), so a replay that matches a request piece by piece
-// (the generic parser) reads it in the pieces its recording read.
+// (relay.DefaultForwardBuf), so a replay reads a request in the pieces its
+// recording read: the generic parser's similarity compares a request with a
+// recording piece by piece (its exact match compares the bytes wherever the
+// pieces end).
 const ReadChunkSize = 32 << 10
 
 // WaitReadSize is the most one ReadBytesWaiting returns, and the most a relay
