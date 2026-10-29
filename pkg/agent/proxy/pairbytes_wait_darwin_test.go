@@ -3,10 +3,14 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net"
+	"os"
+	"os/exec"
 	"slices"
+	"syscall"
 	"testing"
 	"time"
 
@@ -208,18 +212,78 @@ func movedLayout() ([]xnuPCB, error) {
 	return table, err
 }
 
+// onMovedLayout makes every read of macOS's TCP table, until the row ends,
+// read it in a moved layout (movedLayout).
+func onMovedLayout(t *testing.T) {
+	t.Helper()
+	read := readXNUTable
+	readXNUTable = movedLayout
+	t.Cleanup(func() { readXNUTable = read })
+}
+
 // A macOS whose counts the proof does not find in the layout keploy reads
 // leaves the bytes wait unknown, never settled: the proof refuses the moved
 // table, PairedBytesErr says the counts cannot be read, and a wait whose
-// bytes had all arrived (one that read the counts would settle at once)
-// ends unknown.
+// bytes had all arrived ends unknown, without reading the counts. The proof the agent ships with is proven once per process,
+// most likely already by an earlier row, so this row proves it again in a
+// once of its own; TestTheShippedProofRefusesAMovedLayoutOnDarwin is the
+// shipped once.
 func TestAMovedLayoutLeavesTheBytesWaitUnknownOnDarwin(t *testing.T) {
-	if err := proveXNUCountsFrom(movedLayout); err == nil {
+	onMovedLayout(t)
+	if err := proveXNUCounts(); err == nil {
 		t.Fatal("the counts' proof passes macOS's TCP table read in a moved layout")
 	}
 	readable := xnuTableReadable
-	xnuTableReadable = xnuCountsProven(func() error { return proveXNUCountsFrom(movedLayout) })
+	xnuTableReadable = xnuCountsProven(proveXNUCounts)
 	t.Cleanup(func() { xnuTableReadable = readable })
+	movedLayoutIsUnknown(t)
+}
+
+// movedLayoutEnv names, in the test binary run again, the row it runs with
+// macOS's TCP table read in a moved layout from the process's start.
+const movedLayoutEnv = "KEPLOY_XNU_MOVED_LAYOUT_ROW"
+
+// The proof the agent ships with (xnuTableReadable, proven once, on its first
+// use) refuses a moved layout: the row runs again, alone, in a test binary
+// where macOS's TCP table is read in a moved layout before anything proved
+// the counts, and there the bytes wait, PairedBytesErr and the settle are all
+// unknown.
+func TestTheShippedProofRefusesAMovedLayoutOnDarwin(t *testing.T) {
+	if os.Getenv(movedLayoutEnv) != t.Name() {
+		runAlone(t, movedLayoutEnv)
+		return
+	}
+	onMovedLayout(t)
+	movedLayoutIsUnknown(t)
+}
+
+// runAlone runs the calling row again, alone, in a new test binary whose
+// env sets env to the row's name, and fails the row unless it passed there.
+// The binary's whole process group dies with the row.
+func runAlone(t *testing.T, env string) {
+	t.Helper()
+	var out bytes.Buffer
+	cmd := exec.Command(os.Args[0], "-test.run=^"+t.Name()+"$", "-test.v", "-test.count=1")
+	cmd.Env = append(os.Environ(), env+"="+t.Name())
+	cmd.Stdout, cmd.Stderr = &out, &out
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("run the row again: %v", err)
+	}
+	t.Cleanup(func() { _ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) })
+	err := cmd.Wait()
+	t.Logf("run again with %s:\n%s", env, out.String())
+	// A run that matched no row passes too: it must have run this one.
+	if err != nil || !bytes.Contains(out.Bytes(), []byte("--- PASS: "+t.Name()+" ")) {
+		t.Fatalf("the row did not pass when run again with %s: %v", env, err)
+	}
+}
+
+// movedLayoutIsUnknown checks, with the counts' proof failed, that the
+// paired connections' bytes cannot be counted, and that neither the bytes
+// wait nor the settle reads them.
+func movedLayoutIsUnknown(t *testing.T) {
+	t.Helper()
 	p, app, proxySide, reader := darwinPair(t)
 	if err := p.PairedBytesErr(); !errors.Is(err, models.ErrProxyConnsUnsupported) {
 		t.Fatalf("PairedBytesErr = %v with the counts' proof failed, want one wrapping ErrProxyConnsUnsupported", err)
@@ -228,7 +292,12 @@ func TestAMovedLayoutLeavesTheBytesWaitUnknownOnDarwin(t *testing.T) {
 		t.Fatal(err)
 	}
 	untilUnread(t, proxySide, 3)
-	if err := p.WaitPairedBytes(context.Background(), 1); !errors.Is(err, models.ErrProxyConnsUnsupported) {
+	// A wait that read the moved counts would wait for bytes they invent:
+	// its context is done already, so such a wait ends at once with the
+	// context's error rather than hanging the row. Unknown comes first.
+	done, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := p.WaitPairedBytes(done, 1); !errors.Is(err, models.ErrProxyConnsUnsupported) {
 		t.Fatalf("WaitPairedBytes = %v with the counts' proof failed, want unknown (ErrProxyConnsUnsupported)", err)
 	}
 	// The settle does not read them either: the connection's requests are

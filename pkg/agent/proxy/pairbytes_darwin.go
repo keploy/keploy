@@ -59,7 +59,7 @@ func (p *Proxy) pairTargets(n uint64) ([]*pairTarget, error) {
 	if err != nil || len(pcs) == 0 {
 		return nil, err
 	}
-	table, err := readXNUPCBs()
+	table, err := readXNUTable()
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", models.ErrProxyConnsUnsupported, err)
 	}
@@ -169,7 +169,7 @@ var errNoXNUPCB = errors.New("macOS's TCP table lists no such socket")
 // its side (the one that began from isn): it took the application's FIN in
 // sequence when it is in TIME_WAIT, CLOSING or LAST_ACK (pairbytes_linux.go).
 func orphanTookFIN(pc *pairedConn, isn uint32) (xnuPCB, bool, error) {
-	table, err := readXNUPCBs()
+	table, err := readXNUTable()
 	if err != nil {
 		return xnuPCB{}, false, err
 	}
@@ -191,7 +191,7 @@ func (p *Proxy) pairEnded(t *pairTarget, ps proxySide, closed bool) (bool, error
 	case ps.state == xnuTCPClosed:
 		return true, nil
 	case closed:
-		if d, err := readXNUPCBs(); err == nil {
+		if d, err := readXNUTable(); err == nil {
 			if o, ok := findXNUPCB(d, pc.proxy, pc.app); ok && (o.state == xnuTCPTimeWait || o.state == xnuTCPClosing || o.state == xnuTCPLastAck) {
 				return true, nil
 			}
