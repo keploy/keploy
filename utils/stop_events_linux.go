@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -47,8 +48,9 @@ var StopStallBudget = stall.HangBudget
 func StopStallSaid() string { return StopStallBudget.String() + " of keploy's runnable time" }
 
 // ExitMark is how far processes are on their way out: how many still run,
-// with how many threads and open files, how much storage they have read and
-// written, and whether one waits on storage (an uninterruptible sleep, D).
+// with how many threads and open files (files, not descriptors: openFiles),
+// how much storage they have read and written, and whether one waits on
+// storage (an uninterruptible sleep, D).
 type ExitMark struct {
 	Running, Threads, Fds int
 	IO                    uint64
@@ -68,7 +70,7 @@ func MarkExit(procs []Reached) ExitMark {
 			continue
 		}
 		dir := "/proc/" + strconv.Itoa(p.PID)
-		fdDir := dir + "/fd"
+		fdDir, task := dir+"/fd", p.PID
 		if st.State == 'Z' {
 			// A read of its threads that fails leaves it running, as in
 			// Exited: what keploy cannot tell has ended is not taken for so.
@@ -77,7 +79,7 @@ func MarkExit(procs []Reached) ExitMark {
 				continue
 			}
 			if runs {
-				fdDir = dir + "/task/" + strconv.Itoa(tid) + "/fd"
+				fdDir, task = dir+"/task/"+strconv.Itoa(tid)+"/fd", tid
 			}
 		}
 		m.Running++
@@ -86,11 +88,90 @@ func MarkExit(procs []Reached) ExitMark {
 		}
 		m.Threads += processThreads(p.PID)
 		if fds, err := os.ReadDir(fdDir); err == nil {
-			m.Fds += len(fds)
+			m.Fds += openFiles(task, fds)
 		}
 		m.IO += readStorageIO(dir + "/io")
 	}
 	return m
+}
+
+// kcmpFile is kcmp(2)'s KCMP_FILE: whether two descriptors name one open file.
+const kcmpFile = 0
+
+// openFiles is how many open files a process holds through the descriptors
+// its fd directory listed (fds, read through task, the process or a thread of
+// it that runs): a descriptor naming the file another of them names (a
+// duplicate: dup, dup2, stdout and stderr made one, a shell saving a
+// descriptor as it redirects it) counts once with it. Closing a duplicate
+// releases nothing: a process that copies a descriptor and closes the copy
+// over and over (dash runs `exec 3<&-` so: fd 3 saved to fd 10, then both
+// closed) holds no fewer files as it does, and read by its descriptors its
+// churn would look one step deeper than it is (ExitRatchet). Two descriptors
+// name one file where kcmp(2) says so; one closed since the listing is not
+// held, and not counted. Where the kernel cannot compare them (no kcmp, or
+// keploy may not ask: a seccomp filter, a process it may not trace), each
+// descriptor counts.
+func openFiles(task int, fds []os.DirEntry) int { return openFilesBy(kcmpFiles, task, fds) }
+
+// openFilesBy is openFiles with the kernel's comparison of two descriptors'
+// files (kcmpFiles; the tests' own).
+func openFilesBy(kcmp func(task, a, b int) (int, error), task int, fds []os.DirEntry) int {
+	held := make([]int, 0, len(fds))
+	for _, e := range fds {
+		fd, err := strconv.Atoi(e.Name())
+		if err != nil {
+			continue
+		}
+		if held, err = holdFile(kcmp, task, fd, held); err != nil {
+			return len(fds)
+		}
+	}
+	return len(held)
+}
+
+// holdFile adds descriptor fd of task to held, one descriptor of each file
+// the process holds, in kcmp's order of the files, unless one there names its
+// file already, or it was closed since the listing; one there closed since is
+// let go. Its error is kcmp's where it cannot compare them.
+func holdFile(kcmp func(task, a, b int) (int, error), task, fd int, held []int) ([]int, error) {
+	lo, hi := 0, len(held)
+	for lo < hi {
+		mid := int(uint(lo+hi) >> 1)
+		order, err := kcmp(task, fd, held[mid])
+		switch {
+		case errors.Is(err, unix.EBADF):
+			// One of the two was closed since the listing.
+			if _, err := kcmp(task, fd, fd); errors.Is(err, unix.EBADF) {
+				return held, nil
+			} else if err != nil {
+				return held, err
+			}
+			held = slices.Delete(held, mid, mid+1)
+			lo, hi = 0, len(held)
+		case err != nil:
+			return held, err
+		case order == 0:
+			return held, nil
+		case order == 1:
+			hi = mid
+		case order == 2:
+			lo = mid + 1
+		default:
+			return held, fmt.Errorf("kcmp gave no order of two files (%d)", order)
+		}
+	}
+	return slices.Insert(held, lo, fd), nil
+}
+
+// kcmpFiles is kcmp(2) of descriptors a and b of process (or thread) task:
+// 0 where they name one file, else 1 or 2 as the first's file orders before
+// or after the second's.
+func kcmpFiles(task, a, b int) (int, error) {
+	r, _, errno := unix.Syscall6(unix.SYS_KCMP, uintptr(task), uintptr(task), kcmpFile, uintptr(a), uintptr(b), 0)
+	if errno != 0 {
+		return 0, errno
+	}
+	return int(r), nil
 }
 
 // processThreads is how many threads process pid has not yet released, as

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
+	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -892,6 +893,140 @@ func TestTheExitRatchetTakesOnlyProgress(t *testing.T) {
 		t.Fatalf("a pid beyond pid_max counts %d threads; want 0", n)
 	}
 }
+
+// A process's open files are its files, not its descriptors: a duplicate
+// counts once with what it duplicates, and closing it is no step of its way
+// out (dash's `exec 3<&-` saves fd 3 to fd 10 and closes both: a churn of one
+// file read by descriptors looks two steps deep). Closing the last descriptor
+// of a file is one, and two opens of one file are two files.
+func TestMarkExitCountsOpenFilesNotDescriptors(t *testing.T) {
+	if _, err := kcmpFiles(os.Getpid(), 0, 0); err != nil {
+		t.Skipf("the kernel compares no files here (kcmp: %v): each descriptor counts", err)
+	}
+	dir := t.TempDir()
+	open := func(name string) *os.File {
+		f, err := os.OpenFile(filepath.Join(dir, name), os.O_RDWR|os.O_CREATE, 0o600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = f.Close() })
+		return f
+	}
+	in, out, f := open("in"), open("out"), open("f")
+	g, err := os.Open(f.Name()) // f's file opened again: another open file
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = g.Close() })
+	ready, closedDup, closedLast := filepath.Join(dir, "ready"), filepath.Join(dir, "dup"), filepath.Join(dir, "last")
+	cmd := exec.Command("/bin/sh", "-c", `trap 'exec 5<&-; touch "$2"' USR1; trap 'exec 3<&-; touch "$3"' USR2; touch "$1"; while :; do sleep 1; done`, "sh", ready, closedDup, closedLast)
+	// stdout and stderr one file; fds 3 and 5 one file, 4 another open of it.
+	cmd.Stdin, cmd.Stdout, cmd.Stderr, cmd.ExtraFiles = in, out, out, []*os.File{f, g, f}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	reaped := make(chan struct{})
+	go func() { _ = cmd.Wait(); close(reaped) }()
+	t.Cleanup(func() { _ = cmd.Process.Kill(); <-reaped })
+	awaitFile(t, ready, reaped)
+	st, ok := ReadProcStat(cmd.Process.Pid)
+	if !ok {
+		t.Fatal("premise: its stat could not be read")
+	}
+	procs := []Reached{{PID: cmd.Process.Pid, Start: st.StartTime}}
+	var r ExitRatchet
+	m := MarkExit(procs)
+	if m.Fds != 4 {
+		t.Fatalf("a process holding stdin, one file as stdout and stderr, and two opens of one file over three descriptors reads %d open files; want 4", m.Fds)
+	}
+	r.Advance(m)
+	_ = cmd.Process.Signal(syscall.SIGUSR1)
+	awaitFile(t, closedDup, reaped)
+	if m := MarkExit(procs); m.Fds != 4 || r.Advance(m) {
+		t.Fatalf("closing a duplicate read as %d open files (progress %v); want 4, and no progress", m.Fds, r.Advance(m))
+	}
+	_ = cmd.Process.Signal(syscall.SIGUSR2)
+	awaitFile(t, closedLast, reaped)
+	if m := MarkExit(procs); m.Fds != 3 || !r.Advance(m) {
+		t.Fatalf("closing a file's last descriptor read as %d open files; want 3, and progress", m.Fds)
+	}
+}
+
+// A kernel that cannot compare files (no kcmp, or keploy may not ask) leaves
+// each descriptor counted.
+func TestOpenFilesAreDescriptorsWhereTheKernelCannotCompareThem(t *testing.T) {
+	ents, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, no := range []error{syscall.ENOSYS, syscall.EPERM} {
+		cannot := func(int, int, int) (int, error) { return 0, no }
+		if n := openFilesBy(cannot, os.Getpid(), ents); n != len(ents) {
+			t.Fatalf("kcmp failing with %v: %d open files of %d descriptors; want each counted", no, n, len(ents))
+		}
+	}
+}
+
+// A descriptor closed while its process's files are read is not held: one
+// listed and closed before it is compared is not counted, and one counted
+// already and closed since gives way to the descriptor compared with it.
+func TestOpenFilesLetGoOfADescriptorClosedAsTheyAreRead(t *testing.T) {
+	ents := func(fds ...int) []os.DirEntry {
+		var es []os.DirEntry
+		for _, fd := range fds {
+			es = append(es, fdEntry(strconv.Itoa(fd)))
+		}
+		return es
+	}
+	for _, tc := range []struct {
+		name    string
+		files   map[int]int // descriptor to file, as the read begins
+		closeAt int         // a comparison with it closes descriptor close
+		close   int
+		want    int
+	}{
+		{"one file over two descriptors", map[int]int{0: 1, 1: 2, 2: 2, 3: 3, 10: 3}, -1, -1, 3},
+		{"a listed descriptor closed before it is compared", map[int]int{0: 1, 1: 2, 2: 2, 3: 3}, 3, 3, 2},
+		{"a counted descriptor closed, its duplicate read after", map[int]int{0: 1, 1: 2, 3: 3, 10: 3}, 10, 3, 3},
+		{"a counted descriptor closed, its duplicate and another file read after", map[int]int{0: 1, 3: 3, 10: 3, 11: 5}, 10, 3, 3},
+		{"a counted descriptor closed, another file read after", map[int]int{0: 1, 3: 3, 10: 4}, 10, 3, 2},
+	} {
+		files := map[int]int{}
+		var fds []int
+		for fd, file := range tc.files {
+			files[fd] = file
+			fds = append(fds, fd)
+		}
+		sort.Ints(fds)
+		kcmp := func(_, a, b int) (int, error) {
+			if a == tc.closeAt || b == tc.closeAt {
+				delete(files, tc.close)
+			}
+			fa, okA := files[a]
+			fb, okB := files[b]
+			switch {
+			case !okA || !okB:
+				return 0, syscall.EBADF
+			case fa < fb:
+				return 1, nil
+			case fa > fb:
+				return 2, nil
+			}
+			return 0, nil
+		}
+		if n := openFilesBy(kcmp, 1, ents(fds...)); n != tc.want {
+			t.Fatalf("%s: %d open files; want %d", tc.name, n, tc.want)
+		}
+	}
+}
+
+// fdEntry is a listed descriptor, as os.ReadDir lists /proc/<pid>/fd.
+type fdEntry string
+
+func (e fdEntry) Name() string               { return string(e) }
+func (e fdEntry) IsDir() bool                { return false }
+func (e fdEntry) Type() os.FileMode          { return os.ModeSymlink }
+func (e fdEntry) Info() (os.FileInfo, error) { return nil, os.ErrNotExist }
 
 // A group's leader is waited for as its signal reached it: one not among
 // what the signal reached (gone, or a zombie, by then), or whose pid now
