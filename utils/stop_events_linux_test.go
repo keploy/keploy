@@ -969,6 +969,24 @@ func TestOpenFilesAreDescriptorsWhereTheKernelCannotCompareThem(t *testing.T) {
 			t.Fatalf("kcmp failing with %v: %d open files of %d descriptors; want each counted", no, n, len(ents))
 		}
 	}
+	// One refused part way through a read (as the files are checked, each
+	// against the next: the process's credentials changed) counts each too.
+	files := map[int]int{0: 1, 1: 2, 2: 2, 3: 3}
+	refused := func(_, a, b int) (int, error) {
+		switch {
+		case a < b:
+			return 0, syscall.EPERM
+		case files[a] < files[b]:
+			return 1, nil
+		case files[a] > files[b]:
+			return 2, nil
+		}
+		return 0, nil
+	}
+	listed := []os.DirEntry{fdEntry("0"), fdEntry("1"), fdEntry("2"), fdEntry("3")}
+	if n := openFilesBy(refused, 1, listed); n != len(listed) {
+		t.Fatalf("kcmp refused part way through: %d open files of %d descriptors; want each counted", n, len(listed))
+	}
 }
 
 // A descriptor closed while its process's files are read is not held: one
@@ -1018,6 +1036,12 @@ func TestOpenFilesLetGoOfADescriptorClosedAsTheyAreRead(t *testing.T) {
 			map[int][]map[int]int{10: {{3: 25, 10: 25}}}, -1, 3},
 		{"a counted file whose duplicate is opened again on another file", map[int]int{0: 10, 3: 5, 10: 5, 11: 30},
 			map[int][]map[int]int{11: {{3: closed, 10: 25}}}, -1, 3},
+		{"a counted descriptor closed as the files are checked", map[int]int{0: 1, 1: 2, 3: 3},
+			map[int][]map[int]int{3: {nil, {3: closed}}}, -1, 2},
+		// fd 3 opened again on a file that orders first as the files are
+		// checked, and fd 7 closed: fd 4 holds fd 3's first file yet.
+		{"a counted descriptor opened again on a file ordering first, its duplicate holding its file yet", map[int]int{0: 10, 3: 30, 4: 30, 7: 40},
+			map[int][]map[int]int{3: {nil, nil, nil, {3: 5, 7: closed}}}, -1, 3},
 		{"a descriptor that never holds still as it is read", map[int]int{0: 1, 1: 2, 2: 2, 3: 3}, nil, 3, 3},
 	} {
 		files := map[int]int{}
