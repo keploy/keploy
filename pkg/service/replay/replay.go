@@ -6537,10 +6537,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// under the default flag; that is not the loss the rule above guards
 	// against. It is what the test is owed: the mocks of its recorded window
 	// (a replay that skips a test with no entry reports it "skipped: no
-	// mapping entry" instead of running it). Holding the create instead would leave every test of a set with one
-	// failure with no mapping at all, where a set recorded without a
-	// mappings.yaml gets one from its first replay (enterprise's auto-replay,
-	// for one).
+	// mapping entry" instead of running it). Holding the create instead would
+	// leave every test of a set with one failure with no mapping at all, where
+	// a set recorded without a mappings.yaml gets one from its first replay
+	// (enterprise's auto-replay, for one).
 	passing := passingTests(testCaseResults, consumptionUnread, obsoleteShaped, passedMissShaped(testCaseResults, leftRecordedUnconsumed))
 	mappingDoc, keptRecorded := passingEntriesOf(actualTestMockMappings, passing)
 	// Read only when instrumented: otherwise the agent was never asked what a
@@ -6571,10 +6571,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// heldForNoEntry: the hold is for a passing test a new file would give no
 	// entry (unentered), whom the warning names.
 	heldForNoEntry := false
-	// Whether the run had anything to write at all, before the verdicts took
-	// their part: what the holds below are about.
+	// Whether the run has anything to write at all, what the holds below are
+	// about: what it mapped before the verdicts took their part, or an empty
+	// entry it gave a passing test. A run where no test consumed a mock but
+	// some passed has only those; under the default flag the hold for a new
+	// file that would map no mock keeps it from creating one, as before the
+	// empty entries.
 	wouldWrite := r.mappingDB != nil && (r.config.Test.UpdateTestMapping ||
-		len(actualTestMockMappings.TestCases) > 0 || len(actualTestMockMappings.Startup) > 0)
+		len(actualTestMockMappings.TestCases) > 0 || len(actualTestMockMappings.Startup) > 0 ||
+		len(mappingDoc.TestCases) > 0)
 	switch {
 	case !wouldWrite:
 	case provenswitch.On():

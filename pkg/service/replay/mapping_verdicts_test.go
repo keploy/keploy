@@ -1253,20 +1253,34 @@ func TestRunTestSetGivesAPassingTestThatConsumedNothingAnEmptyEntry(t *testing.T
 // either flag; the default flag's own hold, where a new file would map no mock,
 // comes first, with its reason as before. (A file that exists is written as
 // before: TestRunTestSetGivesAPassingTestThatConsumedNothingAnEmptyEntry.)
+//
+// A passing test whose drain caught only startup traffic (mock-boot, asked
+// for before the set's first test) consumed nothing but what the same file's
+// startup section lists, and gets an empty entry: the section serves it. A
+// test that consumed a mock of another test's window still holds the file.
+// Under the default flag a run where no test consumed a mock creates no file
+// (its passing tests' empty entries map none), quietly, as before the empty
+// entries; and with no setup-drain traffic there is nothing to backfill.
 func TestRunTestSetCreatesNoFileThatLeavesAPassingTestWithNoEntry(t *testing.T) {
 	for _, tc := range []struct {
 		name            string
 		tests           int // 2 when 0
 		updateMapping   bool
 		notInstrumented bool
-		wrongBody       map[string]bool
-		consumed        map[string][]models.MockState
+		// existsFails: the store cannot tell whether the file exists.
+		existsFails bool
+		wrongBody   map[string]bool
+		consumed    map[string][]models.MockState
 		// wantFile is each test's entry after the run; nil: no file.
 		wantFile map[string][]string
+		// wantStartup is the startup section of the file written.
+		wantStartup []string
 		// wantNamed is the warning's passing tests with no entry; empty: the
 		// warning does not name any.
 		wantNamed  string
 		wantReason string
+		// wantQuiet is the reason of a hold logged at Debug, with no warning.
+		wantQuiet string
 	}{
 		{
 			name: "--update-test-mapping, test-1 failed after consuming a mock, test-2 passed consuming only a mock of no window", updateMapping: true,
@@ -1311,6 +1325,46 @@ func TestRunTestSetCreatesNoFileThatLeavesAPassingTestWithNoEntry(t *testing.T) 
 			wantReason: "no test that consumed a mock counts as passing",
 		},
 		{
+			name: "--update-test-mapping, both passed, test-1 consumed mock-a, test-2 consumed only a mock of test-1's window", updateMapping: true,
+			consumed:  map[string][]models.MockState{"test-1": {mongoAt("mock-a", 1010)}, "test-2": {mongoAt("mock-y", 1050)}},
+			wantNamed: "[test-2]", wantReason: "could not tell what a passing test consumed",
+		},
+		{
+			// Whether a file exists cannot be read: it is taken as absent, and
+			// no file is written over one that may be there.
+			name: "--update-test-mapping, the store cannot tell whether the file exists, test-1 failed after consuming a mock, test-2 passed consuming only a mock of no window", updateMapping: true,
+			existsFails: true,
+			wrongBody:   map[string]bool{"test-1": true},
+			consumed:    map[string][]models.MockState{"test-1": {mongoAt("mock-a", 1010)}, "test-2": {mongoAt("mock-x", 1500)}},
+			wantNamed:   "[test-2]", wantReason: "could not tell what a passing test consumed",
+		},
+		{
+			name:      "default flag, both passed, test-1 consumed nothing, test-2 consumed only a mock of no window",
+			consumed:  map[string][]models.MockState{"test-2": {mongoAt("mock-x", 1500)}},
+			wantQuiet: "no test consumed a mock",
+		},
+		{
+			name: "default flag, both passed, neither consumed a mock", wantQuiet: "no test consumed a mock",
+		},
+		{
+			name:      "default flag, test-1 failed consuming nothing, test-2 passed consuming nothing",
+			wrongBody: map[string]bool{"test-1": true},
+			wantQuiet: "no test consumed a mock",
+		},
+		{
+			name: "--update-test-mapping, test-1 failed after consuming a mock, test-2 passed, its drain caught only startup traffic", updateMapping: true,
+			wrongBody:   map[string]bool{"test-1": true},
+			consumed:    map[string][]models.MockState{"test-1": {mongoAt("mock-a", 1010)}, "test-2": {mongoAt("mock-boot", 500)}},
+			wantFile:    map[string][]string{"test-2": {}},
+			wantStartup: []string{"mock-boot"},
+		},
+		{
+			name:        "default flag, both passed, test-1 consumed mock-a, test-2's drain caught only startup traffic",
+			consumed:    map[string][]models.MockState{"test-1": {mongoAt("mock-a", 1010)}, "test-2": {mongoAt("mock-boot", 500)}},
+			wantFile:    map[string][]string{"test-1": {"mock-a"}, "test-2": {}},
+			wantStartup: []string{"mock-boot"},
+		},
+		{
 			name: "control: --update-test-mapping, test-1 failed after consuming a mock, test-2 consumed nothing", updateMapping: true,
 			wrongBody: map[string]bool{"test-1": true},
 			consumed:  map[string][]models.MockState{"test-1": {mongoAt("mock-a", 1010)}},
@@ -1328,13 +1382,16 @@ func TestRunTestSetCreatesNoFileThatLeavesAPassingTestWithNoEntry(t *testing.T) 
 			if n == 0 {
 				n = 2
 			}
-			core, logs := observer.New(zap.WarnLevel)
+			core, logs := observer.New(zap.DebugLevel)
 			h := newPartialRunHarness(t, n, 0)
 			pinWindows(h)
 			h.replayer.logger = zap.New(core)
 			h.replayer.config.Test.UpdateTestMapping = tc.updateMapping
 			h.replayer.instrument = !tc.notInstrumented
 			db := mappingFile(t, h, nil)
+			if tc.existsFails {
+				h.replayer.mappingDB = existsFailsDB{db}
+			}
 			h.replayer.hookImpl = prHooks{wrongBody: tc.wrongBody, consumedFor: consumedByWindow(h, tc.consumed)}
 			_ = h.run(t)
 
@@ -1351,7 +1408,42 @@ func TestRunTestSetCreatesNoFileThatLeavesAPassingTestWithNoEntry(t *testing.T) 
 			if got := entriesOnDisk(t, db); !reflect.DeepEqual(got, tc.wantFile) {
 				t.Fatalf("mappings.yaml: %s; want %s", fileState(got), fileState(tc.wantFile))
 			}
-			held := logs.FilterMessage("not writing mappings.yaml").All()
+			if tc.wantFile != nil {
+				startup, err := db.GetStartup(context.Background(), "test-set-0")
+				if err != nil {
+					t.Fatalf("reading the startup section back: %v", err)
+				}
+				got := []string{}
+				for _, e := range startup {
+					got = append(got, e.Name)
+				}
+				want := tc.wantStartup
+				if want == nil {
+					want = []string{}
+				}
+				if !reflect.DeepEqual(got, want) {
+					t.Fatalf("the startup section lists %v; want %v", got, want)
+				}
+			}
+			var held, quiet []observer.LoggedEntry
+			for _, e := range logs.FilterMessage("not writing mappings.yaml").All() {
+				if e.Level >= zap.WarnLevel {
+					held = append(held, e)
+				} else {
+					quiet = append(quiet, e)
+				}
+			}
+			if tc.wantQuiet == "" && len(quiet) != 0 {
+				t.Fatalf("want no hold logged at Debug, got %+v", quiet)
+			}
+			if tc.wantQuiet != "" {
+				if len(quiet) != 1 {
+					t.Fatalf("want one hold logged at Debug, saying %q, got %+v", tc.wantQuiet, quiet)
+				}
+				if reason := fmt.Sprint(quiet[0].ContextMap()["reason"]); !strings.Contains(reason, tc.wantQuiet) {
+					t.Fatalf("the quiet hold's reason is %q; want it to say %q", reason, tc.wantQuiet)
+				}
+			}
 			if tc.wantReason == "" {
 				if len(held) != 0 {
 					t.Fatalf("want no \"not writing mappings.yaml\" warning, got %+v", held)
@@ -1377,6 +1469,13 @@ func TestRunTestSetCreatesNoFileThatLeavesAPassingTestWithNoEntry(t *testing.T) 
 			}
 		})
 	}
+}
+
+// existsFailsDB is a mapping store that cannot tell whether a file exists.
+type existsFailsDB struct{ *mapdb.MappingDb }
+
+func (existsFailsDB) Exists(context.Context, string) (bool, error) {
+	return false, errors.New("stat mappings.yaml: input/output error")
 }
 
 // fileState is entriesOnDisk's result as a failure message says it.

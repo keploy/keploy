@@ -223,8 +223,9 @@ func markWrittenByKeployTest(doc *models.Mapping) {
 }
 
 // addConsumedNothingEntries gives every passing test that has no entry in doc
-// an entry with no mock: it passed, and consumed no mock at all. none names the
-// tests whose consumption the run read and found empty
+// an entry with no mock: it passed, and consumed no mock but the startup
+// section's, which the same file lists. none names the tests whose consumption
+// the run read and found empty of any other
 // (carryOverAttribution.consumedNothing); a test outside it gets nothing, and
 // none does when the run read no test's consumption (none nil: not
 // instrumented, so the agent was never asked). The entries are added in the
