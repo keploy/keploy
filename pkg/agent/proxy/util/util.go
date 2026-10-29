@@ -44,10 +44,9 @@ var Emoji = "\U0001F430" + " Keploy:"
 // behind a dual-stack name: that looks exactly like a dependency that has not
 // started yet. So name the address family as a possibility, conditionally, and
 // leave the timing advice as the other possibility rather than the answer.
-// The counterpart retry is SUPPRESSED for a Fabricated target, and PassThrough
-// (the two sites below) is the only site attaching this hint where a fabricated
-// address can arrive — so the wording must not promise a retry those callers
-// never get.
+// The counterpart retry is SUPPRESSED for a Fabricated target, so the wording
+// must not promise a retry: a caller that dials a fabricated address never gets
+// one.
 // Kept as a const so all sites update together.
 const NextStepDialDestination = "check which address FAMILY the dependency binds — a container published port is IPv4-only by default, and a loopback destination may be retried on the other family (not when the capture layer had to fabricate the address), so check both — and confirm the dependency is up before traffic starts (sequence its start, raise --delay, or add a readiness probe)"
 
@@ -785,99 +784,6 @@ func ReadFromPeer(ctx context.Context, logger *zap.Logger, conn net.Conn, buffCh
 	})
 
 	return nil
-}
-
-// PassThrough function is used to pass the network traffic to the destination connection.
-// It also closes the destination connection if the function returns an error.
-func PassThrough(ctx context.Context, logger *zap.Logger, clientConn net.Conn, dstCfg *models.ConditionalDstCfg, requestBuffer [][]byte) ([]byte, error) {
-	logger.Debug("passing through the network traffic to the destination server", zap.Any("Destination Addr", dstCfg.Addr))
-	// making destConn
-	var destConn net.Conn
-	var err error
-	if dstCfg.TLSCfg != nil {
-		logger.Debug("trying to establish a TLS connection with the destination server", zap.Any("Destination Addr", dstCfg.Addr))
-
-		destConn, err = DialDestinationTLS(ctx, logger, "tcp",
-			DialTarget{Addr: dstCfg.Addr, Fabricated: dstCfg.AddrFabricated}, dstCfg.TLSCfg)
-		if err != nil {
-			utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Any("server address", dstCfg.Addr), zap.String("next_step", NextStepDialDestination))
-			return nil, err
-		}
-		logger.Debug("TLS connection established with the destination server", zap.Any("Destination Addr", destConn.RemoteAddr().String()))
-	} else {
-		logger.Debug("trying to establish a connection with the destination server", zap.Any("Destination Addr", dstCfg.Addr))
-		destConn, err = DialDestination(ctx, logger, "tcp",
-			DialTarget{Addr: dstCfg.Addr, Fabricated: dstCfg.AddrFabricated})
-		if err != nil {
-			utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Any("server address", dstCfg.Addr), zap.String("next_step", NextStepDialDestination))
-			return nil, err
-		}
-		logger.Debug("connection established with the destination server", zap.Any("Destination Addr", destConn.RemoteAddr().String()))
-	}
-
-	logger.Debug("trying to forward requests to target", zap.Any("Destination Addr", destConn.RemoteAddr().String()))
-	for _, v := range requestBuffer {
-		_, err := destConn.Write(v)
-		if err != nil {
-			utils.LogError(logger, err, "failed to write request message to the destination server", zap.Any("Destination Addr", destConn.RemoteAddr().String()))
-			return nil, err
-		}
-	}
-
-	destBufferChannel := make(chan []byte)
-	clientBufferChannel := make(chan []byte)
-	errChannel := make(chan error, 2)
-	passthroughContext, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	go func() {
-		defer Recover(logger, clientConn, nil)
-		defer close(destBufferChannel)
-		defer func(destConn net.Conn) {
-			LogCloseErr(logger, destConn.Close(), "failed to close the destination connection")
-		}(destConn)
-
-		ReadBuffConn(passthroughContext, logger, destConn, destBufferChannel, errChannel, false)
-	}()
-
-	go func() {
-		defer Recover(logger, clientConn, nil)
-		defer close(clientBufferChannel)
-		ReadBuffConn(passthroughContext, logger, clientConn, clientBufferChannel, errChannel, false)
-	}()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-
-		case buffer := <-clientBufferChannel:
-			_, err := destConn.Write(buffer)
-			if err != nil {
-				utils.LogError(logger, err, "failed to write subsequent request to destination")
-				return nil, err
-			}
-
-		case buffer := <-destBufferChannel:
-			_, err := clientConn.Write(buffer)
-			if err != nil {
-				if ctx.Err() != nil {
-					return nil, ctx.Err()
-				}
-				utils.LogError(logger, err, "failed to write response to the client")
-				return nil, err
-			}
-
-		case err := <-errChannel:
-			// nolint:staticcheck
-			if netErr, ok := err.(net.Error); !(ok && netErr.Timeout()) && err != nil {
-				if err == io.EOF {
-					return nil, nil
-				}
-				return nil, err
-			}
-		}
-	}
 }
 
 // ToIP4AddressStr converts the integer IP4 Address to the octet format

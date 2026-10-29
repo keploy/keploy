@@ -3762,10 +3762,11 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 	if looked {
 		// Nothing below dials with it in keploy test: a call a bypassRule
-		// passes through dials its own (util.PassThrough). So the server
-		// lookUndecidedReplay reached for this connection is let go now, not
-		// held open, unused, while the connection lasts, where it would keep
-		// a server that serves one connection at a time from serving it.
+		// passes through dials its own (the HTTP parser's
+		// passOneCallThrough). So the server lookUndecidedReplay reached for
+		// this connection is let go now, not held open, unused, while the
+		// connection lasts, where it would keep a server that serves one
+		// connection at a time from serving it.
 		predialed.CloseIfUnused()
 	}
 	// From here the connection is recorded, or answered from mocks: under
