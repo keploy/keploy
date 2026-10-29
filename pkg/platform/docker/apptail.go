@@ -254,22 +254,46 @@ func (s *appTails) evictOldestLocked() {
 // add appends line and its "\n" to the tail. A buffer it has to grow grows to
 // twice its size, but not past limit unless the line needs it; trim then
 // brings it back within limit.
+//
+// line is weighed against the buffer's free room, and then both lengths
+// against limit, before any sum is made, so every size below is plainly made
+// of values limit bounds (CodeQL's allocation-size check needs to see that;
+// the caller keeping them within limit is not enough for it).
 func (t *appTail) add(line string, limit int) {
-	need := len(t.buf) + len(line) + 1
-	if need > cap(t.buf) {
-		c := 2 * cap(t.buf)
-		if c > limit {
-			c = limit
-		}
+	buf := t.buf
+	switch {
+	case len(line) < cap(buf)-len(buf):
+		// line and its "\n" fit in the free room.
+	case len(buf) <= limit && len(line) < limit:
+		// The buffer is grown by hand, to twice its size held to limit, or
+		// to need when that is more, so append's own growth never takes
+		// more. need is at most twice limit.
+		need := len(buf) + len(line) + 1
+		c := twiceHeldTo(cap(buf), limit)
 		if c < need {
 			c = need
 		}
-		grown := make([]byte, len(t.buf), c)
-		copy(grown, t.buf)
-		t.buf = grown
+		grown := make([]byte, len(buf), c)
+		copy(grown, buf)
+		buf = grown
+	default:
+		// Not reached: addLocked cuts the line to under limit, and trim
+		// keeps the buffer within limit. Were it reached, append would
+		// grow the buffer itself, and trim would bring it back.
 	}
-	t.buf = append(t.buf, line...)
-	t.buf = append(t.buf, '\n')
+	buf = append(buf, line...)
+	t.buf = append(buf, '\n')
+}
+
+// twiceHeldTo is twice x, or limit when that is less, for x and limit >= 0.
+// It is worked out from the room x leaves under limit, with no product or
+// sum, so it cannot overflow for any such x (2*x can).
+func twiceHeldTo(x, limit int) int {
+	if room := limit - x; x < room {
+		// 2x is under limit: limit-(room-x) is x+x.
+		return limit - (room - x)
+	}
+	return limit
 }
 
 // trim drops the tail's oldest whole lines until it holds at most limit
@@ -314,10 +338,7 @@ func (t *appTail) trim(limit int) {
 // the text).
 func (t *appTail) keepFrom(from, limit int) {
 	n := len(t.buf) - from
-	c := 2 * n
-	if c > limit {
-		c = limit
-	}
+	c := twiceHeldTo(n, limit)
 	if c < n {
 		c = n
 	}
