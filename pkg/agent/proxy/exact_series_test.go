@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -285,11 +286,110 @@ func TestMarkedSeriesIsForwardedByTheStoresWrappers(t *testing.T) {
 		t.Fatalf("a call's held round forwarded %d series, %v; want the store's one", len(got), err)
 	}
 	mm.bumpStagingEpoch()
-	if got, _ := integrations.MarkedSeriesOf(context.Background(), held, seriesRowKind, nil); len(got) != 0 || !restaged() {
-		t.Fatalf("once another set was staged the held call is handed %d series (restaged %v); want none, restaged", len(got), restaged())
+	if got, _ := integrations.MarkedSeriesOf(context.Background(), held, seriesRowKind, nil); len(got) != 1 || !got[0].Restaged || !restaged() {
+		t.Fatalf("once another set was staged the held call is handed %d series (restaged %v); want its own staging's one, restaged", len(got), restaged())
 	}
 	if got, _ := integrations.MarkedSeriesOf(context.Background(), nil, seriesRowKind, nil); got != nil {
 		t.Fatalf("a store without the capability handed out %d series", len(got))
+	}
+}
+
+// claimSetB is a second set staged under timerSet's: its own timer's claims
+// (b-claim-N, N = 1..4, the same call), b-claim-1 the pool's, the rest U1's,
+// marked; its test U1 is open.
+func claimSetB(t *testing.T, mm *MockManager) {
+	t.Helper()
+	var recs []*models.Mock
+	for i := 1; i <= 4; i++ {
+		at := time.Duration(2*i)*time.Second + 500*time.Millisecond
+		claim := exactMock("b-claim-"+strconv.Itoa(i), at, models.LifetimeSession)
+		claim.Kind = seriesRowKind
+		claim.Spec.Metadata = map[string]string{"op": "claim", "at": strconv.FormatInt(exactT0.Add(at).Unix(), 10)}
+		recs = append(recs, claim)
+	}
+	mm.SetMocksWithWindow(nil, recs, models.BaseTime, time.Now())
+	mm.ServeExactBackground(models.RecordedWithS12Routing, []string{"b-claim-1"}, nil)
+	mm.SetUnrequired(models.BackgroundMarks{"U1": {"b-claim-2": "w", "b-claim-3": "w", "b-claim-4": "w"}})
+	mm.ServeExactTest("U1", nil)
+}
+
+// A call is handed the series of the staging it was marked in, never the
+// next one's: once the replay staged a test set under it (the next set,
+// whose own timer's series is marked too), it is handed its own staging's
+// series as restaged, answering no call (Again false, Once nil), whether it
+// asked before the staging or not; a call marked in the next staging is
+// handed that staging's series. A call whose staging's read had not ended
+// when the next staging took its place is handed none: its staging's series
+// were never read whole, and the next staging's are no series of its set.
+func TestAHeldCallIsHandedItsOwnStagingsSeriesNeverTheNexts(t *testing.T) {
+	mm := timerSet(t)
+	series := models.BackgroundSeriesPrefix + "a timer's call"
+	mm.SetUnrequired(models.BackgroundMarks{"T1": {"claim-3": series, "claim-4": series}, "T2": {"claim-5": series, "claim-6": series}})
+	mm.ServeExactTest("T1", nil)
+	const own = "claim-1,claim-2,claim-3,claim-4,claim-5,claim-6"
+	unasked, _ := mm.HoldToRound(mm.MarkCallRound())
+	asked, askedRestaged := mm.HoldToRound(mm.MarkCallRound())
+	if got, err := integrations.MarkedSeriesOf(context.Background(), asked, seriesRowKind, nil); err != nil || len(got) != 1 || got[0].Restaged || !got[0].Again || seriesNames(got[0]) != own {
+		t.Fatalf("a call in its own staging was handed %d series, %v; want the set's claims' one, answered again, not restaged", len(got), err)
+	}
+
+	claimSetB(t, mm)
+	for name, held := range map[string]integrations.MockMemDb{"asked before": asked, "never asked before": unasked} {
+		got, err := integrations.MarkedSeriesOf(context.Background(), held, seriesRowKind, nil)
+		if err != nil || len(got) != 1 {
+			t.Fatalf("%s the next set's staging, a call of the first was handed %d series, %v; want its own staging's one", name, len(got), err)
+		}
+		if s := got[0]; seriesNames(s) != own || !s.Restaged || s.Again || s.Once != nil {
+			t.Fatalf("%s the next set's staging, a call of the first was handed %s (restaged %v, again %v, once %v); want its own staging's claims, restaged, answering none",
+				name, seriesNames(s), s.Restaged, s.Again, s.Once != nil)
+		}
+	}
+	if !askedRestaged() {
+		t.Fatal("the held call that was handed a restaged series does not say the staging moved")
+	}
+	next, _ := mm.HoldToRound(mm.MarkCallRound())
+	got, _ := integrations.MarkedSeriesOf(context.Background(), next, seriesRowKind, nil)
+	if len(got) != 1 || got[0].Restaged || !strings.HasPrefix(seriesNames(got[0]), "b-claim-") || strings.Contains(","+seriesNames(got[0]), ",claim-") {
+		t.Fatalf("a call of the next set was handed %d series; want that set's claims' one alone, not restaged", len(got))
+	}
+
+	// A read still under way when the next staging takes its place.
+	mm = timerSet(t)
+	entered, gate := make(chan struct{}, 1), make(chan struct{})
+	var reads atomic.Int32
+	mm.SetRecordedBefore(func(_ time.Time, visit func(*models.Mock) bool) error {
+		if reads.Add(1) == 1 {
+			entered <- struct{}{}
+			<-gate
+			visit(exactMock("late", time.Second, models.LifetimeSession))
+		}
+		return nil
+	})
+	mm.SetUnrequired(models.BackgroundMarks{"T1": {"claim-3": "w", "claim-4": "w"}, "T2": {"claim-5": "w", "claim-6": "w"}})
+	mm.ServeExactTest("T1", nil)
+	<-entered
+	pendingHeld, restaged := mm.HoldToRound(mm.MarkCallRound())
+	mm.bumpStagingEpoch()
+	close(gate)
+	if got, err := integrations.MarkedSeriesOf(context.Background(), pendingHeld, seriesRowKind, nil); err != nil || len(got) != 0 || !restaged() {
+		t.Fatalf("a call whose staging's read never ended was handed %d series, %v (restaged %v); want none, restaged", len(got), err, restaged())
+	}
+	if got, _ := mm.MarkedSeries(context.Background(), seriesRowKind, nil); len(got) != 1 {
+		t.Fatalf("the staging that took its place marks %d series; want the claims' one (the row's premise)", len(got))
+	}
+
+	// Within its own staging a call follows what is marked, as the store
+	// does: once the marks are cleared, none.
+	mm = timerSet(t)
+	mm.SetUnrequired(models.BackgroundMarks{"T1": {"claim-3": "w", "claim-4": "w"}, "T2": {"claim-5": "w", "claim-6": "w"}})
+	mm.ServeExactTest("T1", nil)
+	held, _ := mm.HoldToRound(mm.MarkCallRound())
+	if got, _ := integrations.MarkedSeriesOf(context.Background(), held, seriesRowKind, nil); len(got) != 1 {
+		t.Fatalf("a call in its own staging was handed %d series; want the claims' one", len(got))
+	}
+	mm.SetUnrequired(models.BackgroundMarks{})
+	if got, _ := integrations.MarkedSeriesOf(context.Background(), held, seriesRowKind, nil); len(got) != 0 {
+		t.Fatalf("with the marks cleared in its own staging a call was handed %d series; want none, as the store hands", len(got))
 	}
 }
 
