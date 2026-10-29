@@ -407,8 +407,11 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					// the later steps only a set-aside copy that is exactly the
 					// call may still answer it. Record's full round (the learn
 					// step's, above) replays the build just recorded, which
-					// judging has marked nothing of yet.
-					served, miss, serr := integrations.AnswerSeries(reqCtx, mockDb, seriesCall(input), input.arrived, httpKnown{n: h.newLearnNoise(opts, bodyNoise, urlNoise)})
+					// judging has marked nothing of yet. Asked of the store
+					// held to the call's first read (db): a call made in one
+					// staging is never answered from the series of a set the
+					// replay staged after it (MarkedSeries.Restaged).
+					served, miss, serr := integrations.AnswerSeries(reqCtx, db, seriesCall(input), input.arrived, httpKnown{n: h.newLearnNoise(opts, bodyNoise, urlNoise)})
 					switch {
 					case serr != nil:
 						err = serr
