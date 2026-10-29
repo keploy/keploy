@@ -274,3 +274,43 @@ func TestASeriesAnswerersErrorIsTheCallsError(t *testing.T) {
 		t.Fatalf("the call was reported as %v; want nothing reported", reported)
 	}
 }
+
+// heldMarkDb is the store a call of holdingDb is held to (HoldToRound):
+// another store than the parser's, whose reads are the call's.
+type heldMarkDb struct{ againDb }
+
+// holdingDb is againDb that holds each call to its round as held.
+type holdingDb struct {
+	againDb
+	held *heldMarkDb
+}
+
+func (d holdingDb) HoldToRound(integrations.CallRound) (integrations.MockMemDb, func() bool) {
+	return d.held, func() bool { return false }
+}
+
+// The answerer of a marked series' call is handed the store held to the
+// call's first read (integrations.HoldToRound), never the parser's own: the
+// held store hands the series of the staging the call was made in, so a
+// call is never answered from the series of a set the replay staged after
+// it (integrations.MarkedSeries.Restaged).
+func TestASeriesAnswererIsHandedTheStoreHeldToTheCall(t *testing.T) {
+	const addr, host, path = "127.0.0.1:8099", "localhost:8099", "/internal/claims/next"
+	raw := "GET " + path + "?since=1793000470 HTTP/1.1\r\nHost: " + host + "\r\nAccept: application/json\r\n\r\n"
+	poll := onHost("mock-poll-9", path, host)
+	poll.Spec.HTTPResp = &models.HTTPResp{StatusCode: 200, Body: "none-claimed", Header: map[string]string{"Content-Length": "12"}}
+	base := againDb{gateDb: gateDb{earlierDb: earlierDb{mockMemDb: &mockMemDb{}}}}
+	store := holdingDb{againDb: base, held: &heldMarkDb{againDb: base}}
+	t.Setenv(provenswitch.Env, "1")
+	var handed []integrations.MockMemDb
+	t.Cleanup(integrations.RegisterSeriesAnswerer(models.HTTP, func(_ context.Context, db integrations.MockMemDb, _ *models.Mock, _ time.Time, _ learn.Known) (*models.Mock, *integrations.SeriesMiss, error) {
+		handed = append(handed, db)
+		return poll, nil, nil
+	}))
+	if status, _, r := answerOf(t, store, addr, raw); status != 200 || r.Answer != models.AnswerBackgroundSeries {
+		t.Fatalf("a marked series' call got %d, reported %+v; want the series' answer", status, r)
+	}
+	if len(handed) != 1 || handed[0] != integrations.MockMemDb(store.held) {
+		t.Fatalf("the answerer was handed %d stores (%T); want the one store held to the call's first read", len(handed), handed)
+	}
+}
