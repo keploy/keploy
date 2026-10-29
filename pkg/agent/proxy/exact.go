@@ -951,9 +951,7 @@ func (m *MockManager) SetRecordedBefore(src func(t time.Time, visit func(*models
 // time: the manager keeps none of them, only which it visited.
 func (m *MockManager) RangeRecordedBefore(t time.Time, visit func(*models.Mock) bool) error {
 	seen := map[string]bool{}
-	id := func(mk *models.Mock) string {
-		return mk.Name + "\x00" + string(mk.Kind) + "\x00" + strconv.FormatInt(mk.Spec.ReqTimestampMock.UnixNano(), 10)
-	}
+	id := recordingID
 	for _, mk := range m.StagedMocks() {
 		if mk == nil || mk.Spec.ReqTimestampMock.After(t) || seen[id(mk)] {
 			continue
@@ -978,6 +976,84 @@ func (m *MockManager) RangeRecordedBefore(t time.Time, visit func(*models.Mock) 
 }
 
 var _ integrations.RecordedBeforeReader = (*MockManager)(nil)
+
+// recordingID names a recording across the manager's trees and the disk:
+// a tree's copy of one the disk keeps (the open test's own, loaded from
+// disk) has the disk's name, kind and request time.
+func recordingID(mk *models.Mock) string {
+	return mk.Name + "\x00" + string(mk.Kind) + "\x00" + strconv.FormatInt(mk.Spec.ReqTimestampMock.UnixNano(), 10)
+}
+
+// rangeRecordedInOrder visits what RangeRecordedBefore visits, each once,
+// in recorded order across the trees and the disk: the trees' recordings
+// (StagedMocks: the open test's own, and the set's session and startup
+// recordings, made through all of its tests) sorted by request time and
+// merged into the disk's, which its source visits by request time. A
+// recording of an earlier test is visited before any of a later test's,
+// whichever store holds it. For the learn step's calls, which read every
+// recording before them before they decide, the order is no matter, and
+// RangeRecordedBefore visits the trees' first. For the set's staging
+// (warmLearnSet), whose readers take recordings as they are visited, it
+// is: visited trees first, the last test's session recordings were read
+// before the first test's own on disk, so with few readers (an agent of
+// two CPUs) a test could open before the recordings its calls read were.
+func (m *MockManager) rangeRecordedInOrder(t time.Time, visit func(*models.Mock) bool) error {
+	seen := map[string]bool{}
+	var trees []*models.Mock
+	for _, mk := range m.StagedMocks() {
+		if mk == nil || mk.Spec.ReqTimestampMock.After(t) || seen[recordingID(mk)] {
+			continue
+		}
+		seen[recordingID(mk)] = true
+		trees = append(trees, mk)
+	}
+	sort.SliceStable(trees, func(i, j int) bool {
+		return trees[i].Spec.ReqTimestampMock.Before(trees[j].Spec.ReqTimestampMock)
+	})
+	next, stopped := 0, false
+	// upTo visits the trees' recordings made at or before at (every one
+	// left, where all), until visit returns false.
+	upTo := func(at time.Time, all bool) bool {
+		for ; next < len(trees) && (all || !trees[next].Spec.ReqTimestampMock.After(at)); next++ {
+			if !visit(trees[next]) {
+				next++
+				stopped = true
+				return false
+			}
+		}
+		return true
+	}
+	m.exact.before.mu.Lock()
+	src := m.exact.before.src
+	m.exact.before.mu.Unlock()
+	if src != nil {
+		err := src(t, func(mk *models.Mock) bool {
+			if mk == nil || mk.Spec.ReqTimestampMock.After(t) {
+				return true
+			}
+			if !upTo(mk.Spec.ReqTimestampMock, false) {
+				return false
+			}
+			if seen[recordingID(mk)] {
+				return true
+			}
+			if !visit(mk) {
+				stopped = true
+				return false
+			}
+			return true
+		})
+		if stopped {
+			return err
+		}
+		// A disk that fails mid-read leaves the trees' recordings readable:
+		// they are visited still, and the disk's error returned.
+		upTo(time.Time{}, true)
+		return err
+	}
+	upTo(time.Time{}, true)
+	return nil
+}
 
 // StagedMocks is every mock staged in the manager's trees (per-test, session,
 // startup, in that order), whatever the open view shows: exact serving spends
