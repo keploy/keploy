@@ -830,7 +830,7 @@ func TestAWordOfAnotherTestsAnswerIsRefusedNamingIt(t *testing.T) {
 	} {
 		for _, viaSet := range []bool{false, true} {
 			dc := clockedDrifts()
-			x := dc.RawOf(row.m, true).ServedAs(3)
+			x := dc.RawOf(row.m, true).ServedAs(3).ServedAsRecorded()
 			var ln Learned
 			if viaSet {
 				reads := 0
@@ -892,7 +892,7 @@ func TestAnotherTestsAnswerStampIsSearchedWhereTheValueEchoesAStamp(t *testing.T
 				earlier = own
 			}
 			dc := clockedDrifts()
-			x := dc.RawOf(other, true).ServedAs(3).OfAnotherTest()
+			x := dc.RawOf(other, true).ServedAs(3).ServedAsRecorded().OfAnotherTest()
 			ln := ClassifyIn(dc, []string{p}, strLeaf(p, live), strLeaf(p, rec), r1Insert, earlier, []Raw{x}, nil, nil)[0]
 			if stampHolds && echoed {
 				if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "a word of what record's full round saw in it (its characters 6 to 7) appears in mock-21, a recording record's full round gave the application before the call that is another test's") {
@@ -1364,7 +1364,7 @@ func TestAServedRecordingAtTheCallsOwnInstantIsReadAsOneAMomentBefore(t *testing
 	for _, viaSet := range []bool{false, true} {
 		verdict := func(when time.Time) Learned {
 			dc := clockedDrifts()
-			x := dc.RawOf(receiveOf("mock-50", recID, when), true).ServedAs(1)
+			x := dc.RawOf(receiveOf("mock-50", recID, when), true).ServedAs(1).ServedAsRecorded()
 			if viaSet {
 				return ClassifyGiven(dc, []string{p}, strLeaf(p, liveID), strLeaf(p, recID), at, nil, nil, nil, nil, func() ([]GivenPlaces, error) {
 					return []GivenPlaces{PlacesOf(x)}, nil

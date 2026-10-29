@@ -3086,10 +3086,11 @@ func TestLearnMatchAnOwnCallRefusesAValueCopiedFromAMockRecordedAfterItThatFServ
 
 // A word the call's value was recorded with that only a mock recorded after
 // the call holds is no earlier place of the call, wherever F served that
-// mock before the call, earlier in the test included: the recording made
-// the call before it, so its answer is never read as "the test's recording
-// holds earlier". The control, the same mock recorded before the call and
-// served earlier in the test, is an earlier place the value was copied from.
+// mock before the call (as recorded: its adapter said so), earlier in the
+// test included: the recording made the call before it, so its answer is
+// never read as "the test's recording holds earlier". The control, the same
+// mock recorded before the call and served earlier in the test, is an
+// earlier place the value was copied from.
 func TestLearnMatchAWordOnlyAMockRecordedAfterTheCallHoldsIsNoEarlierPlace(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -3110,6 +3111,7 @@ func TestLearnMatchAWordOnlyAMockRecordedAfterTheCallHoldsIsNoEarlierPlace(t *te
 					tr.Begin()
 				}
 				tr.ServedMock(late)
+				tr.ServedMockAsRecorded(late)
 				if where != "earlier in the test" {
 					tr.Begin()
 				}

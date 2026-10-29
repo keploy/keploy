@@ -1041,6 +1041,18 @@ func givenWhy(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, raw
 				return why
 			}
 		}
+		// A word the value holds now that F may have given the application
+		// at one of them and the recording did not (servedWhy): no rule
+		// lets it go. Read after every recording's own words, so that a
+		// word found where the recording gave it is named there.
+		if recorded {
+			return ""
+		}
+		for _, g := range op.words {
+			if why := g.servedWhy(i, t, v.wordOf(t, recorded), givenWhose(g.at, at, g.late, g.noTime)); why != "" {
+				return why + "; " + notClock(v) + ". " + correction(g.mock, false)
+			}
+		}
 		return ""
 	})
 }

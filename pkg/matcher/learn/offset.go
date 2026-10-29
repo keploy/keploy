@@ -2,6 +2,7 @@ package learn
 
 import (
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -475,6 +476,9 @@ type GivenPlaces struct {
 	places      []keyedPlace
 	words       givenWords
 	answer      []givenMoment
+	// answers: its recording holds an answer the word rule reads
+	// (holdsAnswer), where F may have given the application a word.
+	answers bool
 }
 
 // PlacesOf is x as the offset rule and the word rule read it among the
@@ -493,7 +497,7 @@ func PlacesOf(x Raw) GivenPlaces {
 		a := &answer[i]
 		a.mock, a.where = strings.Clone(a.mock), strings.Clone(a.where)
 	}
-	return GivenPlaces{mock: strings.Clone(x.mock), call: x.call, at: x.at, read: x.isRead(), first: x.first, last: x.last, places: places, words: dc.wordsOf(x), answer: answer}
+	return GivenPlaces{mock: strings.Clone(x.mock), call: x.call, at: x.at, read: x.isRead(), first: x.first, last: x.last, places: places, words: dc.wordsOf(x), answer: answer, answers: holdsAnswer(x.payload().fields)}
 }
 
 // givenMoment is an instant the answer of a recording F gave the application
@@ -703,6 +707,15 @@ type givenWords struct {
 	pos         uint64
 	first, last int
 	set         bool
+	// unstated: F served it and no adapter said what it gave the
+	// application there (Raw.viewUnstated); unread: F served it changed with
+	// a view keploy could not read (Raw.ServedChanged with none); views:
+	// the words of its answer, in each reading, as each view F's serves of it
+	// gave where they differ (Raw.ServedChanged), stamps read as any text.
+	// A word a value holds now that may stand in what F gave there is
+	// refused (servedWhy), as of a place of the call's own test (unseenWhy).
+	unstated, unread bool
+	views            [][][]string
 }
 
 // wordsOf is x's givenWords, every word a copy.
@@ -721,6 +734,19 @@ func (dc *DriftCache) wordsOf(x Raw) givenWords {
 	if x.AsRecorded() {
 		g.same = g.words
 		return g
+	}
+	// A recording of a kind that holds its answer apart from its request
+	// that holds no answer gave the application nothing (answerApart),
+	// whatever view F's serve of it had.
+	if (x.viewUnstated() || x.unseen && len(x.views) == 0) && holdsAnswer(x.payload().fields) {
+		g.unstated, g.unread = x.viewUnstated(), x.unseen && len(x.views) == 0
+	}
+	for _, view := range x.views {
+		var words [][]string
+		for _, w := range dc.answerWords(*view, true) {
+			words = append(words, sortedWords(w, nil))
+		}
+		g.views = append(g.views, words)
 	}
 	for _, same := range dc.sameWords(x, plain) {
 		g.same = append(g.same, sortedWords(same, nil))
@@ -849,6 +875,42 @@ func (g givenWords) holds(i int, t string, keep bool) bool {
 	return false
 }
 
+// servedWhy says why named, a word t a value holds now in reading i, may
+// have come from what F gave the application in g, a recording no earlier
+// place of the call's own test is (whose: givenWhose), "" where it may not:
+// where F's view of it holds t (gave: Raw.ServedLive), where one of the
+// views its serves gave holds t (views: Raw.ServedChanged), and wherever
+// keploy cannot tell what F gave there (unstated, unread). The recording's
+// own words are holds'; these are what F gave the application there and the
+// recording did not, read as of a place of the call's own test
+// (unaccounted, unseenWhy): keploy follows no value of another test's, nor
+// can it tell a copy of what F gave there from a value of the call's own,
+// so it refuses rather than learn the word as noise (fail closed).
+func (g givenWords) servedWhy(i int, t, named, whose string) string {
+	in := func(list [][]string) bool {
+		if i >= len(list) {
+			return false
+		}
+		k := sort.SearchStrings(list[i], t)
+		return k < len(list[i]) && list[i][k] == t
+	}
+	of := ", a recording record's full round gave the application before the call that " + whose
+	switch {
+	case g.unstated:
+		return named + " may stand in " + g.mock + of + ", where its adapter did not say what it gave the application there: keploy cannot tell whether it came from there"
+	case g.unread:
+		return named + " may stand in " + g.mock + of + ", served changed, where keploy could not read what it gave the application: keploy cannot tell whether it came from there"
+	case in(g.gave):
+		return named + " appears in " + g.mock + " as record's full round gave it, where the recording did not give the application that word" + of + ": keploy cannot tell whether it came from there"
+	}
+	for _, view := range g.views {
+		if in(view) {
+			return named + " appears in " + g.mock + " as record's full round gave it in one of " + strconv.Itoa(len(g.views)) + " serves that gave the application different views of it, where the recording did not give the application that word" + of + ": keploy cannot tell which of them the application read, nor whether it came from there"
+		}
+	}
+	return ""
+}
+
 // inAnswer says how t stands in g's answer in reading i, "" where it does
 // not: as the recording gave it (its words and the words only its stamps
 // hold), or as record's full round gave it (its view's words, stamps too).
@@ -898,6 +960,22 @@ func (dc *DriftCache) readAnswerWords(x Raw, keep bool) []map[string]bool {
 		}
 	}
 	return tokensOfForms(forms)
+}
+
+// holdsAnswer reports whether a recording whose fields are fields holds an
+// answer the word rule reads (readAnswerWords): all of it where its kind
+// does not hold its answer apart from its request, else a field of its
+// answer (answerPath).
+func holdsAnswer(fields []rawField) bool {
+	if !answerApart(fields) {
+		return true
+	}
+	for _, f := range fields {
+		if answerPath(f.path) {
+			return true
+		}
+	}
+	return false
 }
 
 // Mock is the name of g's mock.
@@ -950,20 +1028,118 @@ func placesUnread(set []GivenPlaces) string {
 // setPlaces are the places (GivenPlaces) of each recording F served in one
 // set, each read from its recording once for the set, by its identity
 // (mockID): Order.GivenPlaces.
+//
+// views keeps, by the recording's identity and the view's place among those
+// the set keeps of it (Order.viewsLocked's keys), the words of each view F's
+// serves gave the application that a read of the set read (statedWords): a
+// view the tracker keeps of a recording stays the same for the rest of the
+// set, and it keeps at most maxLiveViews of one.
 type setPlaces struct {
-	mu sync.Mutex
-	of map[string]GivenPlaces
+	mu    sync.Mutex
+	of    map[string]GivenPlaces
+	views map[string][][]string
 }
 
-func newSetPlaces() *setPlaces { return &setPlaces{of: map[string]GivenPlaces{}} }
+func newSetPlaces() *setPlaces {
+	return &setPlaces{of: map[string]GivenPlaces{}, views: map[string][][]string{}}
+}
 
 // GivenPlaces is m as the offset rule reads it among the recordings F gave
 // the application earlier in the set (GivenPlaces), served where the read saw
 // F serve it (Of): read from its recording, its answer read back where the
 // agent parked it on disk (ReadRaw), once for the set the read was of, and
 // only its places kept. err names an answer that cannot be read back;
-// nothing is kept of it, nor of a recording that could not be read.
+// nothing is kept of it, nor of a recording that could not be read. What F
+// gave the application there is read as the statements its adapters made of
+// the serves of it the read saw say (statedWords), as Order.ServedView reads
+// a Raw: a word a value holds now that may stand in what F gave there and
+// the recording did not is refused (givenWords.servedWhy), never learned as
+// noise.
 func (o Order) GivenPlaces(m *models.Mock) (GivenPlaces, error) {
+	g, err := o.givenPlaces(m)
+	if err != nil {
+		return GivenPlaces{}, err
+	}
+	g.words = o.statedWords(m, g.words, g.answers)
+	return g, nil
+}
+
+// statedWords is w, the words of m's recording as the set reads it
+// (givenPlaces: served, with no view stated), with what the statements of
+// F's serves of m the read saw say F gave the application there, as
+// Order.ServedView reads them for a Raw: nothing more where every serve was
+// told as recorded; each view's words where they were told with views (gave:
+// one view; views: more than one, or one and the recording); every word
+// where a view could not be kept or read (unread); and every word where a
+// serve was told of nothing, or keploy cannot tell (unstated). Words only
+// where m's recording holds an answer (answers): one of a kind that holds
+// its answer apart from its request and holds none gave the application
+// nothing. What both gave (same) stays as read with no view stated, none:
+// it lets no word go, the fail-closed side.
+func (o Order) statedWords(m *models.Mock, w givenWords, answers bool) givenWords {
+	if o.t == nil || !answers {
+		return w
+	}
+	id := MockID(m)
+	o.t.mu.Lock()
+	recorded, keys, loads, unread, ok := o.viewsLocked(id)
+	o.t.mu.Unlock()
+	w.unstated, w.unread, w.gave, w.views = !ok, ok && unread, nil, nil
+	if !ok || unread || len(loads) == 0 {
+		return w
+	}
+	views := make([][][]string, 0, len(loads))
+	for k, load := range loads {
+		words, read := o.places.viewWords(m, id, keys[k], load)
+		if !read {
+			w.unread = true
+			return w
+		}
+		views = append(views, words)
+	}
+	if !recorded && len(views) == 1 {
+		w.gave = views[0]
+		return w
+	}
+	w.views = views
+	return w
+}
+
+// viewWords is the words of the answer of the view load gives of m, which F
+// served (viewRaw), in each reading, stamps read as any text, as wordsOf
+// reads a view: kept by c, a set's, by m's identity (id) and the view's
+// place among those the set keeps of it (k). false where the view cannot be
+// read; nothing is kept of it then.
+func (c *setPlaces) viewWords(m *models.Mock, id string, k int, load func() (*models.Mock, error)) ([][]string, bool) {
+	key := id + "\x00" + strconv.Itoa(k)
+	if c != nil {
+		c.mu.Lock()
+		words, ok := c.views[key]
+		c.mu.Unlock()
+		if ok {
+			return words, true
+		}
+	}
+	r := Raw{mock: m.Name, call: callOf(m), served: true}
+	lv, ok := r.viewOf(viewRaw(m, load))
+	if !ok {
+		return nil, false
+	}
+	var words [][]string
+	for _, w := range NewDriftCache().answerWords(*lv, true) {
+		words = append(words, sortedWords(w, nil))
+	}
+	if c != nil {
+		c.mu.Lock()
+		c.views[key] = words
+		c.mu.Unlock()
+	}
+	return words, true
+}
+
+// givenPlaces is GivenPlaces with no statement read: m's recording served
+// where the read saw F serve it, with no view stated.
+func (o Order) givenPlaces(m *models.Mock) (GivenPlaces, error) {
 	first, last := o.Of(m)
 	id := MockID(m)
 	if c := o.places; c != nil {
