@@ -87,7 +87,7 @@ func (c composeLogConsumer) line(w io.Writer, containerName, message string) {
 	if c.serviceOf != nil {
 		service = c.serviceOf(containerName)
 	}
-	cut := appOutput.record(c.project, c.run, containerName, service, message)
+	cut := appOutput.record(c.project, c.run, containerName, service, message, 0)
 	_, _ = fmt.Fprintf(w, "%s  | %s\n", containerName, cut)
 }
 
@@ -181,18 +181,9 @@ func NewComposeRunner(ctx context.Context, apiClient client.APIClient, opts Comp
 	if len(opts.Content) == 0 {
 		return nil, fmt.Errorf("compose content is empty")
 	}
-
-	workingDir := strings.TrimSpace(opts.WorkingDir)
-	if workingDir == "" {
-		wd, err := os.Getwd()
-		if err != nil {
-			return nil, fmt.Errorf("resolve compose working directory: %w", err)
-		}
-		workingDir = wd
-	}
-	absWorkingDir, err := filepath.Abs(workingDir)
+	absWorkingDir, err := composeWorkingDir(opts.WorkingDir)
 	if err != nil {
-		return nil, fmt.Errorf("resolve compose working directory: %w", err)
+		return nil, err
 	}
 
 	dockerCli, err := newComposeCLI(apiClient, opts.Progress)
@@ -200,15 +191,53 @@ func NewComposeRunner(ctx context.Context, apiClient client.APIClient, opts Comp
 		return nil, err
 	}
 
+	project, err := loadComposeProject(ctx, opts.Content, opts.ProjectName, absWorkingDir)
+	if err != nil {
+		return nil, err
+	}
+
+	// Built here once only to fail here, where a build without the library
+	// says so; each operation builds its own (service).
+	if _, err := newComposeBackend(dockerCli, opts.Progress != nil); err != nil {
+		return nil, err
+	}
+	return &ComposeRunner{cli: dockerCli, project: project, progressGiven: opts.Progress != nil}, nil
+}
+
+// composeWorkingDir is the absolute project directory: workingDir, else the
+// current directory, as `docker compose` takes it.
+func composeWorkingDir(workingDir string) (string, error) {
+	workingDir = strings.TrimSpace(workingDir)
+	if workingDir == "" {
+		wd, err := os.Getwd()
+		if err != nil {
+			return "", fmt.Errorf("resolve compose working directory: %w", err)
+		}
+		workingDir = wd
+	}
+	absWorkingDir, err := filepath.Abs(workingDir)
+	if err != nil {
+		return "", fmt.Errorf("resolve compose working directory: %w", err)
+	}
+	return absWorkingDir, nil
+}
+
+// loadComposeProject loads the in-memory document content as `docker compose`
+// would, from absWorkingDir, under projectName or compose's own precedence
+// (projectNameOption), and shapes it as the CLI does before it runs it. It
+// reads no daemon. NewComposeRunner runs the project it loads; the shell-out
+// path (StartComposeChildOutput) loads the same project only to know its name
+// and services, so both name a container's output alike.
+func loadComposeProject(ctx context.Context, content []byte, projectName, absWorkingDir string) (*composetypes.Project, error) {
 	details := composetypes.ConfigDetails{
 		WorkingDir: absWorkingDir,
 		// Filename is required for error messages and for relative-path
 		// resolution; Content being set is what stops the loader reading disk.
-		ConfigFiles: []composetypes.ConfigFile{{Filename: syntheticComposeFilename, Content: opts.Content}},
+		ConfigFiles: []composetypes.ConfigFile{{Filename: syntheticComposeFilename, Content: content}},
 		Environment: environmentMap(),
 	}
 
-	project, err := loader.LoadWithContext(ctx, details, projectNameOption(opts.ProjectName, absWorkingDir))
+	project, err := loader.LoadWithContext(ctx, details, projectNameOption(projectName, absWorkingDir))
 	if err != nil {
 		return nil, fmt.Errorf("load compose project: %w", err)
 	}
@@ -221,13 +250,7 @@ func NewComposeRunner(ctx context.Context, apiClient client.APIClient, opts Comp
 	if err != nil {
 		return nil, fmt.Errorf("prepare compose project: %w", err)
 	}
-
-	// Built here once only to fail here, where a build without the library
-	// says so; each operation builds its own (service).
-	if _, err := newComposeBackend(dockerCli, opts.Progress != nil); err != nil {
-		return nil, err
-	}
-	return &ComposeRunner{cli: dockerCli, project: project, progressGiven: opts.Progress != nil}, nil
+	return project, nil
 }
 
 // syntheticComposeFilename names the in-memory document. It is never read from
@@ -469,17 +492,26 @@ func (r *ComposeRunner) upConsumer(out, errW io.Writer) composeLogConsumer {
 }
 
 // serviceOf is the service of the container compose names name in its
-// attached output: the service that declares name as its container_name,
-// else the one name is <service>-<number> of. It is compose's naming rule
-// (getContainerNameWithoutProject) read backwards, from the project alone, so
-// it needs no daemon.
+// attached output (serviceOfContainer).
 func (r *ComposeRunner) serviceOf(name string) string {
-	for svcName, svc := range r.project.Services {
+	return serviceOfContainer(r.project, name)
+}
+
+// serviceOfContainer is the service of project's container compose names name
+// in its attached output: the service that declares name as its
+// container_name, else the one name is <service>-<number> of, else "". It is
+// compose's naming rule (getContainerNameWithoutProject) read backwards, from
+// the project alone, so it needs no daemon.
+func serviceOfContainer(project *composetypes.Project, name string) string {
+	if project == nil {
+		return ""
+	}
+	for svcName, svc := range project.Services {
 		if svc.ContainerName != "" && svc.ContainerName == name {
 			return svcName
 		}
 	}
-	for svcName, svc := range r.project.Services {
+	for svcName, svc := range project.Services {
 		if svc.ContainerName != "" {
 			continue
 		}

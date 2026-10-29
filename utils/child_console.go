@@ -37,13 +37,26 @@ import (
 type ChildConsole struct {
 	parentEnds []*os.File
 	copies     []*ChildOutputCopy
+	// tee, when set, is a writer for each pipe the child gets: SetChildConsoleTee.
+	tee func() io.Writer
 }
 
 // SetChildConsole sets cmd's Stdout and Stderr to keploy's own, through a
 // ChildConsole. Call Started once cmd.Start has returned, whatever it
 // returned, and Exited once cmd.Wait has.
 func SetChildConsole(cmd *exec.Cmd) (*ChildConsole, error) {
-	c := &ChildConsole{}
+	return SetChildConsoleTee(cmd, nil)
+}
+
+// SetChildConsoleTee is SetChildConsole that also copies what the child
+// prints, cut as keploy's console gets it, to a writer of its own for each
+// pipe the child gets, from tee: one for its stdout and stderr when they are
+// one file, else one each. With tee set the child always gets pipes, even
+// when the redactor cuts nothing (so it does not see keploy's terminal). A
+// tee's writes are not waited on for errors: a failing one drops what it was
+// given, as keploy's console does. A nil tee is SetChildConsole.
+func SetChildConsoleTee(cmd *exec.Cmd, tee func() io.Writer) (*ChildConsole, error) {
+	c := &ChildConsole{tee: tee}
 	out, err := c.file(os.Stdout)
 	if err != nil {
 		return nil, err
@@ -63,7 +76,7 @@ func SetChildConsole(cmd *exec.Cmd) (*ChildConsole, error) {
 
 // file is what the child gets for dst: dst itself, or a pipe copied to it cut.
 func (c *ChildConsole) file(dst *os.File) (*os.File, error) {
-	if !keployLog.CutsChildOutput() {
+	if c.tee == nil && !keployLog.CutsChildOutput() {
 		return dst, nil
 	}
 	r, w, err := os.Pipe()
@@ -71,7 +84,7 @@ func (c *ChildConsole) file(dst *os.File) (*os.File, error) {
 		return nil, fmt.Errorf("make the pipe the child's output is cut through: %w", err)
 	}
 	c.parentEnds = append(c.parentEnds, w)
-	cp := StartChildOutputCopy(dst, r, true)
+	cp := StartChildOutputCopy(teeTo(dst, c.tee), r, true)
 	c.copies = append(c.copies, cp)
 	go func() {
 		<-cp.Done()
@@ -210,6 +223,27 @@ func (c *ChildOutputCopy) run() {
 		c.flush()
 		return
 	}
+}
+
+// teeTo is dst, and also a writer from tee when tee is set: each write goes to
+// both, and a failing one is dropped without keeping it from the other.
+func teeTo(dst io.Writer, tee func() io.Writer) io.Writer {
+	if tee == nil {
+		return dst
+	}
+	t := tee()
+	if t == nil {
+		return dst
+	}
+	return teeWriter{dst: dst, tee: t}
+}
+
+type teeWriter struct{ dst, tee io.Writer }
+
+func (w teeWriter) Write(p []byte) (int, error) {
+	_, _ = w.dst.Write(p)
+	_, _ = w.tee.Write(p)
+	return len(p), nil
 }
 
 // dropErrors writes to w and reports every write whole.

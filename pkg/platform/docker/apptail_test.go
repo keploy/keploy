@@ -469,7 +469,7 @@ func TestTheTailsBuffersTogetherStayWithinTheBudget(t *testing.T) {
 func TestTheRunsRememberedAreBounded(t *testing.T) {
 	s := newAppTails()
 	keep := s.startRun("keep")
-	s.record("keep", keep, "app-1", "app", "held")
+	s.record("keep", keep, "app-1", "app", "held", 0)
 	for i := 0; i < appTailMaxRuns+100; i++ {
 		s.startRun(fmt.Sprintf("p%d", i))
 	}
@@ -479,7 +479,7 @@ func TestTheRunsRememberedAreBounded(t *testing.T) {
 	if s.runs["p0"] != nil {
 		t.Fatalf("the oldest run of a project that holds no tail is still remembered")
 	}
-	s.record("keep", keep, "app-1", "app", "still kept")
+	s.record("keep", keep, "app-1", "app", "still kept", 0)
 	if got := string(s.m[tailKey{"keep", "app-1"}].buf); got != "held\nstill kept\n" {
 		t.Fatalf("the project that holds a tail lost its run: tail %q", got)
 	}

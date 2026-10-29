@@ -189,24 +189,25 @@ func RecordAppOutput(project, name, service, line string) {
 			s.forgetRunLocked()
 		}
 	}
-	s.addLocked(tailKey{project: project, name: name}, service, cut)
+	s.addLocked(tailKey{project: project, name: name}, service, cut, 0)
 }
 
 // record cuts one line a container of project printed (without its line end)
 // of the values the log redactor holds, adds the cut line to the container's
 // tail when run is the project's current run, and returns the cut line, for
-// the consumer to print.
-func (s *appTails) record(project string, run uint64, name, service, line string) string {
+// the consumer to print. lost is how many bytes of the line's start the
+// caller did not keep (a line longer than it holds); they count as dropped.
+func (s *appTails) record(project string, run uint64, name, service, line string, lost int64) string {
 	cut := keployLog.RedactChildOutput(line)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if r := s.runs[project]; r != nil && r.id == run {
-		s.addLocked(tailKey{project: project, name: name}, service, cut)
+		s.addLocked(tailKey{project: project, name: name}, service, cut, lost)
 	}
 	return cut
 }
 
-func (s *appTails) addLocked(k tailKey, service, line string) {
+func (s *appTails) addLocked(k tailKey, service, line string, lost int64) {
 	t := s.m[k]
 	if t == nil {
 		if len(s.m) >= appTailMaxContainers {
@@ -225,6 +226,7 @@ func (s *appTails) addLocked(k tailKey, service, line string) {
 	}
 	s.seq++
 	t.last = s.seq
+	t.dropped += lost
 	share := appTailShare(len(s.m))
 	if len(line)+1 > share {
 		cut := len(line) + 1 - share
