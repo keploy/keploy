@@ -371,12 +371,11 @@ func New() (*zap.Logger, *os.File, error) {
 		return NewANSIConsoleEncoder(config), nil
 	})
 
-	// The log file is this run's only when it is safely so (LogFileName); a
-	// run that refuses the file there logs to the console, and says why.
-	// A run that cannot open it at all (a read-only mount, a directory it may
-	// not write, one removed under it) loses the file, not the command: it
-	// logs to the console only, and says so once at debug (ChangeLogLevel).
-	logFile, refused, err := openLogFile()
+	// The log file is a fresh temp file (LogFilePattern). A run that cannot
+	// create it (a temp directory it may not write, one that is missing)
+	// loses the file, not the command: it logs to the console only, and says
+	// so once at debug (ChangeLogLevel).
+	logFile, err := openLogFile()
 	note := ""
 	if err != nil {
 		note = err.Error()
@@ -393,9 +392,6 @@ func New() (*zap.Logger, *os.File, error) {
 	core := consoleCore(LogCfg, sink, LogCfg.Level)
 
 	logger := zap.New(newRedactingCore(core))
-	if refused != "" {
-		logger.Warn("not writing "+LogFileName+" in this directory; logging to the console only", zap.String("reason", refused))
-	}
 	return logger, logFile, nil
 }
 
@@ -440,13 +436,13 @@ func ChangeLogLevel(level zapcore.Level) (*zap.Logger, error) {
 	logger := reattachDebugFileSink(zap.New(newRedactingCore(core)))
 	if level == zap.DebugLevel {
 		if note := takeLogFileNote(); note != "" {
-			logger.Debug("not writing "+LogFileName+" in this directory; logging to the console only", zap.String("reason", note))
+			logger.Debug("keeping no log file; logging to the console only", zap.String("reason", note))
 		}
 	}
 	return logger, nil
 }
 
-// logFileNote is why New could not open LogFileName, kept for the first
+// logFileNote is why New could not create its log file, kept for the first
 // debug-level logger (ChangeLogLevel) to say, once: New runs at info level,
 // before --debug is read, so a debug line of its own would never show.
 var (

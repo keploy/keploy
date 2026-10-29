@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	"go.keploy.io/server/v3/pkg/platform/engine"
+	keployLog "go.keploy.io/server/v3/utils/log"
 	"go.uber.org/zap"
 )
 
@@ -52,6 +53,13 @@ func ReexecWithSudo(logger *zap.Logger) {
 	logger.Info("Re-executing with sudo for elevated privileges as Linux Docker/cloud replay path needs root-level eBPF privileges.")
 	logger.Debug("Re-exec command", zap.Strings("args", args))
 
+	// The run goes on in the process the exec starts, which creates a log of
+	// its own; this one's, a temp file, would be left with no run to remove
+	// it. Its name goes now; the file itself, open close-on-exec as Go opens
+	// every file, goes at the exec, or with this process if the exec fails.
+	if err := keployLog.RemoveLogFile(LogFile); err != nil {
+		logger.Debug("failed to remove this process's log before re-executing", zap.Error(err))
+	}
 	// Use syscall.Exec to replace the current process
 	// This means no parent process remains - clean handoff
 	err = syscall.Exec(sudoPath, args, os.Environ())

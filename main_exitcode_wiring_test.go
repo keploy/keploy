@@ -177,21 +177,28 @@ func TestCLIChildThatWouldReexecThroughSudoIsRefused(t *testing.T) {
 
 // TestCLICleansUpLogFileOnUnknownCommand pins the other half of routing errors
 // through utils.ErrCode rather than os.Exit(1): the deferred cleanup in start()
-// now actually runs, so a failed invocation no longer strands a keploy-logs.txt
-// in the user's working directory.
+// now actually runs, so a failed invocation leaves no log behind -- not in the
+// temp directory, where the log is, and nothing in the working directory,
+// where keploy-logs.txt used to be.
 func TestCLICleansUpLogFileOnUnknownCommand(t *testing.T) {
 	if code := runCLI(t, "--help"); code != 0 {
 		t.Skipf("keploy --help exited %d; CLI startup is unusable in this environment", code)
 	}
 
-	dir := t.TempDir()
+	dir, tmp := t.TempDir(), t.TempDir()
 	cmd := exec.Command(os.Args[0])
 	cmd.Args = []string{"keploy", "bogus-cmd"}
-	cmd.Env = append(os.Environ(), subprocessEnv+"=1")
+	cmd.Env = append(os.Environ(), subprocessEnv+"=1", "TMPDIR="+tmp)
 	cmd.Dir = dir
 	_ = cmd.Run()
 
-	if _, err := os.Stat(dir + "/keploy-logs.txt"); !os.IsNotExist(err) {
-		t.Errorf("keploy-logs.txt left behind after a failed command (stat err: %v)", err)
+	for _, d := range []string{dir, tmp} {
+		entries, err := os.ReadDir(d)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range entries {
+			t.Errorf("a failed command left %s behind in %s", e.Name(), d)
+		}
 	}
 }

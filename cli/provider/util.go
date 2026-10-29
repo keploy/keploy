@@ -40,10 +40,17 @@ func PrintLogo(wr io.Writer, disableANSI bool) {
 	if os.Getenv("BINARY_TO_DOCKER") != "true" {
 		printKeployLogo(wr, disableANSI, Logo)
 		// print version to the same writer
-		_, err := fmt.Fprintf(wr, "%s: %v\n\n", utils.VersionIdentifier, utils.Version)
+		_, err := fmt.Fprintf(wr, "%s: %v\n", utils.VersionIdentifier, utils.Version)
 		if err != nil {
 			log.Fatalf("Error printing version: %v", err)
 		}
+		// Where this run's log is, beside its version: a temp file at a name
+		// the run picked (keploy log.LogFilePattern), which a user can find
+		// only by being told.
+		if utils.LogFile != nil {
+			_, _ = fmt.Fprintf(wr, "logs: %s\n", utils.LogFile.Name())
+		}
+		_, _ = fmt.Fprintln(wr)
 	}
 }
 

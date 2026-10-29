@@ -13,208 +13,203 @@ import (
 	"go.uber.org/zap"
 )
 
-// inDir runs the test in a fresh directory holding target, a file that stands
-// for one the run must never touch (/etc/passwd), and returns target's path.
-func inDir(t *testing.T) string {
+// inRun gives a test the two directories a run sees: a temp directory (TMPDIR)
+// and a working directory, the user's project. It returns both.
+func inRun(t *testing.T) (tmp, project string) {
 	t.Helper()
 	dir := t.TempDir()
-	target := filepath.Join(dir, "target")
+	tmp = filepath.Join(dir, "tmp")
+	project = filepath.Join(dir, "project")
+	for _, d := range []string{tmp, project} {
+		if err := os.Mkdir(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("TMPDIR", tmp)
+	t.Chdir(project)
+	return tmp, project
+}
+
+// newLog is New with a log file, which the test closes.
+func newLog(t *testing.T) (*zap.Logger, *os.File) {
+	t.Helper()
+	logger, f, err := New()
+	if err != nil || f == nil {
+		t.Fatalf("New = %v, %v; want a log file", f, err)
+	}
+	t.Cleanup(func() { _ = f.Close() })
+	return logger, f
+}
+
+// The log is a fresh file in the temp directory, the run's owner's alone, and
+// nothing is created in the directory the run works in: a killed run used to
+// leave keploy-logs.txt there for git to commit.
+func TestNew_CreatesAFreshTempLogAndNothingInTheWorkingDirectory(t *testing.T) {
+	tmp, project := inRun(t)
+	logger, f := newLog(t)
+	logger.Info("a line the run logs")
+
+	if got := filepath.Dir(f.Name()); got != tmp {
+		t.Errorf("the log is in %s, want the temp directory %s", got, tmp)
+	}
+	if ok, _ := filepath.Match(LogFilePattern, filepath.Base(f.Name())); !ok {
+		t.Errorf("the log is named %s, want %s", filepath.Base(f.Name()), LogFilePattern)
+	}
+	fi, err := os.Lstat(f.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fi.Mode().IsRegular() || fi.Mode().Perm() != 0o600 {
+		t.Errorf("the log is %v, want a regular file -rw-------", fi.Mode())
+	}
+	if b, _ := os.ReadFile(f.Name()); !strings.Contains(string(b), "a line the run logs") {
+		t.Errorf("the log holds %q, want the run's line", b)
+	}
+	entries, err := os.ReadDir(project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		t.Errorf("the run created %s in its working directory", e.Name())
+	}
+}
+
+// Two runs never share a log, so neither can remove the other's: a status
+// command beside a recording used to take the recording's keploy-logs.txt.
+func TestNew_TwoRunsKeepTwoLogs(t *testing.T) {
+	inRun(t)
+	_, a := newLog(t)
+	_, b := newLog(t)
+	if a.Name() == b.Name() {
+		t.Fatalf("two runs share the log %s", a.Name())
+	}
+	if err := CloseLogFile(b); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(a.Name()); err != nil {
+		t.Errorf("one run's end removed the other's log: %v", err)
+	}
+}
+
+// A keploy-logs.txt a repository carries -- a symlink to a file of the
+// user's, as a checkout can commit -- is no longer the log's name: a run
+// neither writes through it nor removes it.
+func TestNew_LeavesAKeployLogsTxtInTheWorkingDirectoryAlone(t *testing.T) {
+	_, project := inRun(t)
+	target := filepath.Join(t.TempDir(), "target")
 	if err := os.WriteFile(target, []byte("original\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	project := filepath.Join(dir, "project")
-	if err := os.Mkdir(project, 0o755); err != nil {
+	if err := os.Symlink(target, filepath.Join(project, "keploy-logs.txt")); err != nil {
 		t.Fatal(err)
 	}
-	t.Chdir(project)
-	return target
-}
-
-// requireUntouched fails unless target still has its mode and contents.
-func requireUntouched(t *testing.T, target string) {
-	t.Helper()
-	fi, err := os.Stat(target)
-	if err != nil {
+	logger, f := newLog(t)
+	logger.Info("a line the run logs")
+	if err := CloseLogFile(f); err != nil {
 		t.Fatal(err)
-	}
-	if fi.Mode().Perm() != 0o644 {
-		t.Errorf("target mode is %v, want -rw-r--r--: the log's open changed it", fi.Mode().Perm())
 	}
 	if b, _ := os.ReadFile(target); string(b) != "original\n" {
-		t.Errorf("target holds %q: the log was written to it", b)
+		t.Errorf("the file keploy-logs.txt links to holds %q: the run wrote to it", b)
+	}
+	if fi, err := os.Lstat(filepath.Join(project, "keploy-logs.txt")); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("the run removed or replaced the keploy-logs.txt link (lstat: %v)", err)
 	}
 }
 
-// A keploy-logs.txt that is a symlink -- one a cloned repository can carry --
-// is not followed: its target keeps its mode and contents, and the run logs
-// to the console only.
-func TestNew_DoesNotFollowASymlinkedLogFile(t *testing.T) {
-	target := inDir(t)
-	if err := os.Symlink(target, LogFileName); err != nil {
-		t.Fatal(err)
-	}
-	logger, f, err := New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	logger.Info("a line the run logs")
-	if f != nil {
-		_ = f.Close()
-		t.Fatal("New opened the symlinked log file")
-	}
-	requireUntouched(t, target)
-	if fi, err := os.Lstat(LogFileName); err != nil || fi.Mode()&os.ModeSymlink == 0 {
-		t.Errorf("the symlink was replaced or removed: %v, %v", fi, err)
-	}
-}
-
-// A keploy-logs.txt that is a hard link to another file is that file: it is
-// refused too.
-func TestNew_RefusesAHardLinkedLogFile(t *testing.T) {
-	target := inDir(t)
-	if err := os.Link(target, LogFileName); err != nil {
-		t.Skipf("cannot make a hard link here: %v", err)
-	}
-	logger, f, err := New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	logger.Info("a line the run logs")
-	if f != nil {
-		_ = f.Close()
-		t.Fatal("New opened a hard link to another file")
-	}
-	requireUntouched(t, target)
-}
-
-// A named pipe planted at the name does not hang the run waiting for a reader.
-func TestNew_DoesNotWaitOnANamedPipe(t *testing.T) {
-	inDir(t)
-	if err := syscall.Mkfifo(LogFileName, 0o644); err != nil {
-		t.Skipf("cannot make a named pipe here: %v", err)
-	}
-	done := make(chan *os.File, 1)
-	go func() {
-		_, f, _ := New()
-		done <- f
-	}()
-	select {
-	case f := <-done:
-		if f != nil {
-			_ = f.Close()
-			t.Fatal("New opened a named pipe as its log")
+// A normal end closes the log and removes it; what another put at its name
+// is not the run's to remove.
+func TestCloseLogFile(t *testing.T) {
+	t.Run("removes this run's log", func(t *testing.T) {
+		inRun(t)
+		_, f := newLog(t)
+		if err := CloseLogFile(f); err != nil {
+			t.Fatal(err)
 		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("New is waiting on the named pipe")
-	}
+		if _, err := os.Lstat(f.Name()); !os.IsNotExist(err) {
+			t.Errorf("the run's log outlived it (lstat: %v)", err)
+		}
+		if _, err := f.Write([]byte("x")); err == nil {
+			t.Error("the run's log was left open")
+		}
+	})
+	t.Run("leaves a file that replaced it", func(t *testing.T) {
+		inRun(t)
+		_, f := newLog(t)
+		if err := os.Remove(f.Name()); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(f.Name(), []byte("another's\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := CloseLogFile(f); err != nil {
+			t.Fatal(err)
+		}
+		if b, err := os.ReadFile(f.Name()); err != nil || string(b) != "another's\n" {
+			t.Errorf("the run removed or changed a file that replaced its log: %q, %v", b, err)
+		}
+	})
+	t.Run("a run with no log", func(t *testing.T) {
+		if err := CloseLogFile(nil); err != nil {
+			t.Errorf("CloseLogFile(nil) = %v", err)
+		}
+		if err := RemoveLogFile(nil); err != nil {
+			t.Errorf("RemoveLogFile(nil) = %v", err)
+		}
+	})
 }
 
-// A new log is created owner-writable, readable by others, never 0777.
-func TestNew_CreatesTheLogFileNotWorldWritable(t *testing.T) {
-	inDir(t)
-	old := syscall.Umask(0)
-	t.Cleanup(func() { syscall.Umask(old) })
-	_, f, err := New()
-	if err != nil || f == nil {
-		t.Fatalf("New = %v, %v; want a log file", f, err)
-	}
-	defer func() { _ = f.Close() }()
-	fi, err := os.Stat(LogFileName)
-	if err != nil {
+// A process about to exec into another (the sudo re-exec) removes its log's
+// name and keeps writing to the open file, which goes with it.
+func TestRemoveLogFile_KeepsTheFileOpen(t *testing.T) {
+	inRun(t)
+	logger, f := newLog(t)
+	if err := RemoveLogFile(f); err != nil {
 		t.Fatal(err)
 	}
-	if fi.Mode().Perm() != logFileMode {
-		t.Errorf("new log mode %v, want %v", fi.Mode().Perm(), os.FileMode(logFileMode))
+	if _, err := os.Lstat(f.Name()); !os.IsNotExist(err) {
+		t.Errorf("the log's name is still there (lstat: %v)", err)
+	}
+	logger.Info("a line after the name went")
+	if _, err := f.Write([]byte("x\n")); err != nil {
+		t.Errorf("the log was closed: %v", err)
 	}
 }
 
-// A log an older keploy left world-writable is narrowed; a stricter one is
-// left as it is.
-func TestNew_NarrowsAnOldWorldWritableLog(t *testing.T) {
-	for _, c := range []struct{ was, want os.FileMode }{{0o777, 0o644}, {0o666, 0o644}, {0o600, 0o600}} {
-		t.Run(c.was.String(), func(t *testing.T) {
-			inDir(t)
-			if err := os.WriteFile(LogFileName, nil, 0o600); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Chmod(LogFileName, c.was); err != nil {
-				t.Fatal(err)
-			}
-			_, f, err := New()
-			if err != nil || f == nil {
-				t.Fatalf("New = %v, %v; want the log file", f, err)
-			}
-			_ = f.Close()
-			fi, _ := os.Stat(LogFileName)
-			if fi.Mode().Perm() != c.want {
-				t.Errorf("log mode %v, want %v", fi.Mode().Perm(), c.want)
-			}
-		})
-	}
-}
-
-// A log owned by someone other than this user, the user who ran sudo and the
-// directory's owner is not this run's to write.
-func TestMayKeepLog(t *testing.T) {
-	inDir(t)
-	t.Setenv("SUDO_UID", "")
-	if !mayKeepLog(uint32(os.Geteuid())) {
-		t.Error("this user's own log refused")
-	}
-	other := uint32(os.Geteuid()) + 4242
-	if mayKeepLog(other) {
-		t.Errorf("a log owned by uid %d, neither this user nor the directory's owner, was kept", other)
-	}
-}
-
-// The crash report reads the log only while its name is still this run's log:
-// a symlink put there afterwards is not followed.
 func TestReadLogFile_ReadsOnlyThisRunsLog(t *testing.T) {
-	target := inDir(t)
-	logger, f, err := New()
-	if err != nil || f == nil {
-		t.Fatalf("New = %v, %v; want a log file", f, err)
-	}
-	defer func() { _ = f.Close() }()
+	inRun(t)
+	logger, f := newLog(t)
 	logger.Info("a line the run logs")
-	if b, err := ReadLogFile(f); err != nil || len(b) == 0 {
+	if b, err := ReadLogFile(f); err != nil || !strings.Contains(string(b), "a line the run logs") {
 		t.Fatalf("ReadLogFile of this run's log = %q, %v", b, err)
 	}
-	own, _ := f.Stat()
-	if !IsLogFile(own) {
-		t.Fatal("IsLogFile does not know this run's own log")
-	}
 
-	if err := os.Remove(LogFileName); err != nil {
+	target := filepath.Join(t.TempDir(), "target")
+	if err := os.WriteFile(target, []byte("not the log\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(target, LogFileName); err != nil {
+	if err := os.Remove(f.Name()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, f.Name()); err != nil {
 		t.Fatal(err)
 	}
 	if b, err := ReadLogFile(f); err == nil {
 		t.Errorf("ReadLogFile read %q through a symlink put at the log's name", b)
 	}
-	if IsLogFile(own) {
-		t.Error("IsLogFile takes a symlink put at the log's name for this run's log")
-	}
-	if IsLogFile(nil) {
-		t.Error("IsLogFile(nil) is true")
+	if _, err := ReadLogFile(nil); err == nil {
+		t.Error("ReadLogFile(nil) read a log")
 	}
 }
 
 // A named pipe put at the log's name does not hang the crash report reading
 // the log: it is told it is no longer this run's log.
 func TestReadLogFile_DoesNotWaitOnANamedPipe(t *testing.T) {
-	inDir(t)
-	_, f, err := New()
-	if err != nil || f == nil {
-		t.Fatalf("New = %v, %v; want a log file", f, err)
-	}
-	defer func() { _ = f.Close() }()
-	if err := os.Remove(LogFileName); err != nil {
+	inRun(t)
+	_, f := newLog(t)
+	if err := os.Remove(f.Name()); err != nil {
 		t.Fatal(err)
 	}
-	if err := syscall.Mkfifo(LogFileName, 0o644); err != nil {
+	if err := syscall.Mkfifo(f.Name(), 0o644); err != nil {
 		t.Skipf("cannot make a named pipe here: %v", err)
 	}
 	done := make(chan error, 1)
@@ -229,139 +224,27 @@ func TestReadLogFile_DoesNotWaitOnANamedPipe(t *testing.T) {
 	}
 }
 
-// The name is this run's log only while it IS the log, not a symlink to it:
-// a link someone put there is not this run's to remove.
-func TestIsLogFile_ALinkToTheLogIsNotTheLog(t *testing.T) {
-	inDir(t)
-	_, f, err := New()
-	if err != nil || f == nil {
-		t.Fatalf("New = %v, %v; want a log file", f, err)
-	}
-	defer func() { _ = f.Close() }()
-	own, _ := f.Stat()
-	moved := filepath.Join(t.TempDir(), "moved-log")
-	if err := os.Rename(LogFileName, moved); err != nil {
-		t.Skipf("cannot move the log across directories here: %v", err)
-	}
-	if err := os.Symlink(moved, LogFileName); err != nil {
-		t.Fatal(err)
-	}
-	if IsLogFile(own) {
-		t.Error("IsLogFile takes a symlink to this run's log for the log")
-	}
-}
-
-// requireRoot skips unless the test runs as root, as the agent does: only root
-// can put a file owned by another user in front of New.
-func requireRoot(t *testing.T) {
-	t.Helper()
-	if os.Geteuid() != 0 {
-		t.Skip("needs root, as the agent runs")
-	}
-}
-
-// As root, a log another user left in a directory that is not theirs is not
-// written: not appended to, not narrowed, not taken over.
-func TestNew_AsRootRefusesAnotherUsersLog(t *testing.T) {
-	requireRoot(t)
-	inDir(t)
-	t.Setenv("SUDO_UID", "")
-	t.Setenv("SUDO_GID", "")
-	if err := os.WriteFile(LogFileName, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(LogFileName, 0o666); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chown(LogFileName, 65534, 65534); err != nil {
-		t.Fatal(err)
-	}
-	logger, f, err := New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	logger.Info("a line the run logs")
-	if f != nil {
-		_ = f.Close()
-		t.Fatal("root opened another user's log")
-	}
-	fi, _ := os.Stat(LogFileName)
-	st := fi.Sys().(*syscall.Stat_t)
-	if fi.Mode().Perm() != 0o666 || st.Uid != 65534 || fi.Size() != 0 {
-		t.Errorf("another user's log became %v uid %d size %d; want it untouched", fi.Mode().Perm(), st.Uid, fi.Size())
-	}
-}
-
-// As root under sudo, the log of the user who ran sudo is kept, and a log root
-// creates is theirs, so their next run without sudo can write it.
-func TestNew_AsRootUnderSudoTheLogIsTheInvokingUsers(t *testing.T) {
-	requireRoot(t)
-	t.Setenv("SUDO_UID", "65534")
-	t.Setenv("SUDO_GID", "65534")
-
-	t.Run("a new log", func(t *testing.T) {
-		inDir(t)
-		_, f, err := New()
-		if err != nil || f == nil {
-			t.Fatalf("New = %v, %v; want a log file", f, err)
-		}
-		_ = f.Close()
-		fi, _ := os.Stat(LogFileName)
-		if st := fi.Sys().(*syscall.Stat_t); st.Uid != 65534 || st.Gid != 65534 {
-			t.Errorf("root's new log belongs to %d:%d, want the sudo user 65534:65534", st.Uid, st.Gid)
-		}
-	})
-	t.Run("the invoking user's log", func(t *testing.T) {
-		inDir(t)
-		if err := os.WriteFile(LogFileName, nil, 0o644); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Chown(LogFileName, 65534, 65534); err != nil {
-			t.Fatal(err)
-		}
-		_, f, err := New()
-		if err != nil || f == nil {
-			t.Fatalf("New = %v, %v; want the sudo user's log kept", f, err)
-		}
-		_ = f.Close()
-	})
-}
-
-// A run that cannot open its log at all loses the file, never the command
-// (`keploy --version` in a read-only directory exited 1): New logs to the
-// console only, and the first debug-level logger says why, once. A run that
-// keeps its log says nothing about it.
-func TestNew_LogsToTheConsoleWhereItCannotOpenTheLog(t *testing.T) {
+// A run that cannot create its log loses the file, never the command: New
+// logs to the console only, and the first debug-level logger says why, once.
+// A run that keeps its log says nothing about it.
+func TestNew_LogsToTheConsoleWhereItCannotCreateTheLog(t *testing.T) {
 	cases := []struct {
 		name     string
-		setup    func(t *testing.T)
+		setup    func(t *testing.T, tmp string)
 		wantFile bool
 	}{
-		{name: "a directory it may write", setup: func(*testing.T) {}, wantFile: true},
-		{name: "a directory it may not write", setup: func(t *testing.T) {
+		{name: "a temp directory it may write", setup: func(*testing.T, string) {}, wantFile: true},
+		{name: "a temp directory it may not write", setup: func(t *testing.T, tmp string) {
 			if os.Geteuid() == 0 {
 				t.Skip("root writes a directory whatever its mode")
 			}
-			wd, err := os.Getwd()
-			if err != nil {
+			if err := os.Chmod(tmp, 0o555); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.Chmod(wd, 0o555); err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(func() { _ = os.Chmod(wd, 0o755) })
+			t.Cleanup(func() { _ = os.Chmod(tmp, 0o755) })
 		}},
-		{name: "a directory removed under it", setup: func(t *testing.T) {
-			wd, err := os.Getwd()
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Remove(wd); err != nil {
-				t.Fatal(err)
-			}
-		}},
-		{name: "a directory at the log's name", setup: func(t *testing.T) {
-			if err := os.Mkdir(LogFileName, 0o755); err != nil {
+		{name: "a temp directory that is missing", setup: func(t *testing.T, tmp string) {
+			if err := os.Remove(tmp); err != nil {
 				t.Fatal(err)
 			}
 		}},
@@ -374,15 +257,15 @@ func TestNew_LogsToTheConsoleWhereItCannotOpenTheLog(t *testing.T) {
 			}
 			t.Cleanup(TestOnlyResetSink)
 			setPrimarySink(console)
-			inDir(t)
-			c.setup(t)
+			tmp, _ := inRun(t)
+			c.setup(t, tmp)
 
 			logger, f, err := New()
 			if err != nil {
 				t.Fatalf("New failed, so the command would: %v", err)
 			}
 			if f != nil {
-				_ = f.Close()
+				_ = CloseLogFile(f)
 			}
 			if (f != nil) != c.wantFile {
 				t.Fatalf("New kept a log file: %v, want %v", f != nil, c.wantFile)
@@ -407,11 +290,11 @@ func TestNew_LogsToTheConsoleWhereItCannotOpenTheLog(t *testing.T) {
 			if c.wantFile {
 				want = 0
 			}
-			if n := strings.Count(string(out), "not writing "+LogFileName); n != want {
-				t.Errorf("the console says %d times that the log is not written, want %d:\n%s", n, want, out)
+			if n := strings.Count(string(out), "keeping no log file"); n != want {
+				t.Errorf("the console says %d times that no log is kept, want %d:\n%s", n, want, out)
 			}
-			if !c.wantFile && !strings.Contains(string(out), LogFileName+":") {
-				t.Errorf("the note does not say why (the open's error):\n%s", out)
+			if !c.wantFile && !strings.Contains(string(out), tmp) {
+				t.Errorf("the note does not say why (the create's error, naming %s):\n%s", tmp, out)
 			}
 		})
 	}

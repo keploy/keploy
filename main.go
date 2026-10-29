@@ -59,8 +59,8 @@ func setVersion() {
 	utils.VersionIdentifier = "version"
 }
 
-// newLogger is log.New; a test swaps in one that fails. log.New itself no
-// longer fails where it cannot open keploy-logs.txt: it logs to the console.
+// newLogger is log.New; a test swaps in one that fails. log.New itself does
+// not fail where it cannot create its temp log file: it logs to the console.
 var newLogger = log.New
 
 func start(ctx context.Context) {
@@ -202,21 +202,12 @@ func start(ctx context.Context) {
 	defer func() {
 		inDocker := os.Getenv("KEPLOY_INDOCKER")
 		if inDocker != "true" {
-			var ownLog os.FileInfo
-			if utils.LogFile != nil {
-				ownLog, _ = utils.LogFile.Stat()
-				err := utils.LogFile.Close()
-				if err != nil {
-					utils.LogError(logger, err, "Failed to close Keploy Logs")
-				}
+			// This run's own temp log (log.LogFilePattern), closed and
+			// removed; whatever else is at its name is not this run's.
+			if err := log.CloseLogFile(utils.LogFile); err != nil {
+				utils.LogError(logger, err, "Failed to close and remove Keploy Logs")
 			}
-			// Only the log this run kept: a keploy-logs.txt it refused (a
-			// link, another user's file) is not this run's to delete.
-			if log.IsLogFile(ownLog) {
-				if err := utils.DeleteFileIfExists(logger, log.LogFileName); err != nil {
-					return
-				}
-			}
+			utils.LogFile = nil
 			if err := utils.DeleteFileIfExists(logger, "docker-compose-tmp.yaml"); err != nil {
 				return
 			}

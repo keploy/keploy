@@ -159,9 +159,9 @@ func TestIsMachineReadableOutput(t *testing.T) {
 // The test drives the real ValidateFlags, captures the real os.Stdout, writes
 // the document the report service would write, and decodes every line.
 func TestMachineFormatsKeepStdoutParseable(t *testing.T) {
-	// Deliberately NOT calling log.New() (it would create keploy-logs.txt in
-	// the working directory): the rebuild helpers must work from an untouched
-	// LogCfg, which is what log.ensureLogCfg guarantees.
+	// Deliberately NOT calling log.New() (it would create a log file): the
+	// rebuild helpers must work from an untouched LogCfg, which is what
+	// log.ensureLogCfg guarantees.
 
 	cases := []struct {
 		name      string
