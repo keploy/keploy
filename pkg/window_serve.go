@@ -65,12 +65,19 @@ type ServeWindow struct {
 	// as in the window filter's own call; the carry-over tier and the push
 	// hub serve those mocks apart from it.
 	Recorded *models.WindowSchedule
+	// split says m is of a per-test slice a window filter has split by
+	// lifetime already, the mock manager's (StageInWindow): the rules that
+	// route a mock to the session pool by what it is, not where it is placed
+	// (a session or connection lifetime, a config or connection tag), are
+	// not asked again.
+	split bool
 }
 
 // ServeInWindow is how the agent serves m, a mock of the set's per-test pool
 // (session false) or its session pool (session true), while w is open. It is
 // the agent's own decision: the window filter routes each mock by it
-// (filterByTimeStampInFlightAware, for both pools), and the replayer's mock
+// (filterByTimeStampInFlightAware, for both pools), the mock manager stages
+// what the filter hands it by it (StageInWindow), and the replayer's mock
 // prune asks it which mocks a test that got no answer is served.
 //
 // The session pool's mocks all go to the session pool, unless the filter
@@ -90,6 +97,28 @@ func ServeInWindow(m *models.Mock, session bool, w ServeWindow) WindowServe {
 		return ServedSession
 	}
 	return serveRuleOf(nil, m, w).serve()
+}
+
+// StageInWindow is how the mock manager stages m, a mock of the per-test slice
+// it is handed, as window w opens (MockManager.SetMocksWithWindow): the pool
+// ServeInWindow names, by the same rule (serveRuleOf), so that the manager
+// and the replayer's mock prune cannot drift apart. The manager filters
+// strictly what the agent's window filter hands it (w.StrictPerCall set):
+// that filter has applied the user's window mode, and on a windowed proxy it
+// is never strict. The filter has split its slices by lifetime too, so the
+// lifetime and tag rules are not asked again: the manager places what it is
+// handed as per-test by its recorded time, whatever its lifetime (a
+// session-lifetime mock placed before the first window is startup traffic).
+// logger says when m's response is stamped before its request, as the
+// filter's does; answeredBeforeAsked reports that rule, which the manager
+// counts apart from the out-of-window drops.
+func StageInWindow(logger *zap.Logger, m *models.Mock, w ServeWindow) (serve WindowServe, answeredBeforeAsked bool) {
+	if m == nil {
+		return NotServed, false
+	}
+	w.split = true
+	r := serveRuleOf(logger, m, w)
+	return r.serve(), r == ruleAnsweredBeforeAsked
 }
 
 // serveRule is the rule of the window filter that routes a mock.
@@ -145,13 +174,13 @@ func serveRuleOf(logger *zap.Logger, p *models.Mock, w ServeWindow) serveRule {
 	if req.IsZero() || res.IsZero() {
 		return ruleUntimed
 	}
-	if p.TestModeInfo.Lifetime == models.LifetimeSession || p.TestModeInfo.Lifetime == models.LifetimeConnection {
+	if !w.split && (p.TestModeInfo.Lifetime == models.LifetimeSession || p.TestModeInfo.Lifetime == models.LifetimeConnection) {
 		return ruleSessionLifetime
 	}
 	if LeaveOutAnsweredBeforeAsked(logger, p) {
 		return ruleAnsweredBeforeAsked
 	}
-	if p.Spec.Metadata != nil && !p.StatesLifetime() {
+	if !w.split && p.Spec.Metadata != nil && !p.StatesLifetime() {
 		switch p.Spec.Metadata["type"] {
 		case "config":
 			return ruleTaggedConfig

@@ -15,6 +15,7 @@ import (
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
+	proxyPkg "go.keploy.io/server/v3/pkg/agent/proxy"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml/mockdb"
 	"go.uber.org/zap"
@@ -482,7 +483,7 @@ func agentServes(m *models.Mock, session bool, sw pkg.ServeWindow, prev time.Tim
 		return pkg.ServedStartup
 	case len(perTest) == 1:
 		return pkg.ServedPerTest
-	case models.IsStagedAtStaging(m) && sw.Recorded.Released(req, sw.Start) && !sw.Recorded.Released(req, prev):
+	case pushReleased(m, sw.Recorded, sw.Start, prev):
 		return pkg.ServedReleased
 	case len(promoted) == 1:
 		return pkg.ServedSession
@@ -492,12 +493,96 @@ func agentServes(m *models.Mock, session bool, sw pkg.ServeWindow, prev time.Tim
 	return pkg.NotServed
 }
 
+// pushReleased reports whether the push hub delivers m, a server push the
+// set's staging files (models.IsStagedAtStaging), first in the window that
+// starts at start: released there (models.WindowSchedule.Released) and not in
+// the window before it, which starts at prev.
+func pushReleased(m *models.Mock, sched *models.WindowSchedule, start, prev time.Time) bool {
+	req := m.Spec.ReqTimestampMock
+	return models.IsStagedAtStaging(m) && sched.Released(req, start) && !sched.Released(req, prev)
+}
+
+// managerServes is how the agent's mock manager serves m, of the per-test pool
+// or the session pool, while sw is open, read off a real proxy.MockManager
+// staged over the set's recorded windows (sched) as a windowed proxy stages
+// it: the set's staging, then the window before sw (prev), then sw. Each
+// staging hands the manager what the agent hands it: the window filter's
+// slices for that window (as agentServes runs it, what the filter promotes
+// going to the session pool) and, in the strict window mode, a carry-over
+// mock the filter leaves out, which the agent's lookahead appends past it
+// (appendCarryOver). direct hands m to the manager as a per-test mock past the
+// filter, as the lookahead does. The answer is the tier that holds m once sw
+// is staged: the per-test tree, the startup tree, the push hub's release of a
+// staged push (pushReleased), the session tree, or the carry-over tier, which
+// did not hold it at prev.
+func managerServes(t *testing.T, m *models.Mock, session, direct bool, sched *models.WindowSchedule, sw, prev pkg.ServeWindow) pkg.WindowServe {
+	t.Helper()
+	ctx, nop := context.Background(), zap.NewNop()
+	mm := proxyPkg.NewMockManager(nil, nil, nop)
+	mm.ResetForReplaySession()
+	mm.SeedStartupCutoff(sw.FirstStart)
+	var windows []models.TestWindow
+	for i := 0; i < sched.Len(); i++ {
+		windows = append(windows, sched.Window(i))
+	}
+	mm.SeedRecordedWindows(windows)
+	mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now())
+	stage := func(w pkg.ServeWindow) {
+		var filtered, unfiltered []*models.Mock
+		switch {
+		case session:
+			unfiltered = pkg.FilterConfigMocksTierAware(ctx, nop, []*models.Mock{m}, w.Start, w.End, false, w.FirstStart)
+		case direct:
+			filtered = []*models.Mock{m.DeepCopy()}
+		default:
+			filtered, unfiltered = pkg.FilterPerTestAndLaxPromotedInFlightAware(ctx, nop, []*models.Mock{m}, w.Start, w.End, false, w.FirstStart, w.InFlightFrom, w.StrictWindow)
+			if len(filtered) == 0 && w.StrictWindow && models.IsCarryOver(m) {
+				filtered = []*models.Mock{m.DeepCopy()}
+			}
+		}
+		mm.SetMocksWithWindow(filtered, unfiltered, w.Start, w.End)
+	}
+	holds := func(read func() ([]*models.Mock, error)) bool {
+		got, err := read()
+		if err != nil {
+			t.Fatalf("read the mock manager's tier: %v", err)
+		}
+		for _, mk := range got {
+			if mk != nil && mk.Name == m.Name {
+				return true
+			}
+		}
+		return false
+	}
+	stage(prev)
+	carriedAtPrev := holds(mm.GetCarryOverMocks)
+	stage(sw)
+	switch {
+	case holds(mm.GetFilteredMocks):
+		return pkg.ServedPerTest
+	case holds(mm.GetStartupMocks):
+		return pkg.ServedStartup
+	case !session && pushReleased(m, sched, sw.Start, prev.Start):
+		return pkg.ServedReleased
+	case holds(mm.GetUnFilteredMocks):
+		return pkg.ServedSession
+	case holds(mm.GetCarryOverMocks) && !carriedAtPrev:
+		return pkg.ServedReleased
+	}
+	return pkg.NotServed
+}
+
 // The hold asks the agent's own decision (pkg.ServeInWindow) for every class
 // of mock, and holds what it serves the unanswered test's window as that
 // window's own: its per-test pool, what it releases first, and of what every
 // window is served, what was recorded in it or at no time. Each row runs one
-// mock through the agent's code paths (agentServes), the shared predicate and
-// the hold (holdNoAnswerMocks), and requires the same answer of all three.
+// mock through the agent's code paths (agentServes), its mock manager on a
+// windowed proxy (managerServes), the shared predicate and the hold
+// (holdNoAnswerMocks), and requires the same answer of all four. The mock
+// manager handed the mock past the filter, as the carry-over lookahead hands
+// it, must stage it as the shared predicate says for it (pkg.StageInWindow,
+// both strict flags set, placed whatever its lifetime): the manager keeps no
+// rule of its own.
 func TestHoldNoAnswerMocksHoldsWhatTheAgentServesTheTest(t *testing.T) {
 	registerNoAnswerCarryOver(t)
 	base := time.Now().Add(-time.Hour).Truncate(time.Second)
@@ -575,6 +660,8 @@ func TestHoldNoAnswerMocksHoldsWhatTheAgentServesTheTest(t *testing.T) {
 		{"a connection failure in the window", failure(71), perTest, strictMode, pkg.ServedPerTest, true},
 		{"a connection failure in the gap after the window", failure(75), perTest, strictMode, pkg.NotServed, false},
 		{"a connection failure before the first window", failure(5), perTest, strictMode, pkg.ServedStartup, false},
+		{"a connection failure with no recorded time", stamped(failure(0), time.Time{}, time.Time{}), perTest, strictMode, pkg.NotServed, false},
+		{"a session-lifetime mock before the first window", sessionLifetime(http("SessionBoot", 5)), perTest, strictMode, pkg.ServedSession, false},
 		{"a session-pool mock in the window", http("Shared", 71), session, strictMode, pkg.ServedSession, true},
 		{"a session-pool mock in the gap after the window", http("Shared", 75), session, strictMode, pkg.ServedSession, false},
 		{"a session-pool mock with no recorded time", stamped(http("Shared", 0), time.Time{}, time.Time{}), session, strictMode, pkg.ServedSession, true},
@@ -594,6 +681,23 @@ func TestHoldNoAnswerMocksHoldsWhatTheAgentServesTheTest(t *testing.T) {
 			}
 			if got := pkg.ServeInWindow(tc.mock, tc.session, sw); got != tc.want {
 				t.Errorf("pkg.ServeInWindow: %d, the agent: %d", got, tc.want)
+			}
+			prevW, ok := sched.Of("test-6")
+			if !ok {
+				t.Fatal("precondition: test-6 has no recorded window")
+			}
+			prev := serveWindowOf(sched, prevW, tc.strict)
+			if got := managerServes(t, tc.mock, tc.session, false, sched, sw, prev); got != tc.want {
+				t.Errorf("the mock manager serves the mock in test-7's window as %d, the agent: %d", got, tc.want)
+			}
+			if !tc.session {
+				strict, strictPrev := sw, prev
+				strict.StrictPerCall, strict.StrictWindow = true, true
+				strictPrev.StrictPerCall, strictPrev.StrictWindow = true, true
+				want, _ := pkg.StageInWindow(zap.NewNop(), tc.mock, strict)
+				if got := managerServes(t, tc.mock, false, true, sched, strict, strictPrev); got != want {
+					t.Errorf("the mock manager, handed the mock past the filter, serves it as %d; pkg.StageInWindow, strict: %d", got, want)
+				}
 			}
 			store := walkedSet{prMockDB: &prMockDB{}}
 			if tc.session {
