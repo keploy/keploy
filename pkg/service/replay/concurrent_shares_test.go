@@ -1285,3 +1285,28 @@ func sharePlanOf(conc *setConcurrency, worker []models.MockEntry, stored ...[]*m
 	}
 	return sp
 }
+
+// A clock read the learn step learned on a consumed recording is learning a
+// share was paired by, like noise: it is excused in the request keys of its
+// component (learnedAt), names the place a candidate answered only through
+// it differs at (learnedOn, learnedPlaces: never pinned), and is stripped
+// from a share the settlement did not pin (stripUnresolved).
+func TestAClockReadIsLearningASharedRecordingIsPairedBy(t *testing.T) {
+	st := models.MockState{Name: "shared-1", Clocks: map[string]models.ClockOffset{"body.createdAt": {Res: time.Millisecond}}}
+	if !learnedOn(st) {
+		t.Fatal("learnedOn: a clock read is no learning")
+	}
+	if got := learnedPlaces(st); !reflect.DeepEqual(got, []string{"body.createdAt"}) {
+		t.Fatalf("learnedPlaces = %v", got)
+	}
+	if got := learnedAt(st); !reflect.DeepEqual(got, []string{"body.createdAt"}) {
+		t.Fatalf("learnedAt = %v", got)
+	}
+	p := &exactPlan{share: &sharePlan{sharing: true, candOf: map[string][]string{"shared-1": {"test-1", "test-2"}}}}
+	if got := p.stripUnresolved(map[string]models.MockState{"shared-1": st}); got["shared-1"].Clocks != nil {
+		t.Fatalf("stripUnresolved kept %+v of an unpinned share", got["shared-1"].Clocks)
+	}
+	if len(st.Clocks) != 1 {
+		t.Fatal("stripUnresolved changed the consumed state")
+	}
+}

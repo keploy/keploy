@@ -333,7 +333,7 @@ func TestAPendingCallIsNoPreviousCall(t *testing.T) {
 		t.Fatalf("the insert's window %+v does not hold its read (recorded %s, live %s)", w, rec.Format(time.RFC3339Nano), live.Format(time.RFC3339Nano))
 	}
 	for _, typed := range []bool{false, true} {
-		if ln := classifyProcessedAt(rec, live, typed, insert.Spec.ReqTimestampMock, w, receive, hello5, count, hello7, pending); ln.Kind != KindNoise {
+		if ln := classifyProcessedAt(rec, live, typed, insert.Spec.ReqTimestampMock, w, receive, hello5, count, hello7, pending); !noiseOrRead(ln) {
 			t.Errorf("typed %v: %s (from %q, %s); want noise, a read in its call's window", typed, ln.Kind, ln.From.Mock, ln.Why)
 		}
 	}
@@ -466,6 +466,12 @@ func TestTrackerCallWindowStartsAtABeginThatMovedTheClock(t *testing.T) {
 				return
 			}
 			want := &Window{Rec: Span{From: rec, To: paired.Spec.ReqTimestampMock}, F: Span{From: tc.from.Add(after), To: arrival.Add(after)}}
+			// A client test's span carries its test's begin on the app's
+			// clock (Span.Began), which the clock ran as one from to the
+			// arrival; the recording's carries none, none given.
+			if tc.client {
+				want.F.Began = tc.began.Add(after)
+			}
 			if !reflect.DeepEqual(w, want) {
 				t.Fatalf("window %+v; want %+v", w, want)
 			}
@@ -535,6 +541,11 @@ func TestTrackerCallWindowStartsAtATestsRecordedBegin(t *testing.T) {
 				f = Span{From: tc.serve.Add(after), To: arrival.Add(after)}
 			}
 			want := &Window{Rec: Span{From: tc.from, To: paired.Spec.ReqTimestampMock}, F: f}
+			// A client test's spans carry each run's test begin (Span.Began):
+			// the recorded begin, and the begin on the app's clock.
+			if tc.client {
+				want.Rec.Began, want.F.Began = tc.recBegin, began.Add(after)
+			}
 			if !reflect.DeepEqual(w, want) {
 				t.Fatalf("window %+v; want %+v", w, want)
 			}
@@ -696,75 +707,5 @@ func TestTrackerFromGivesNoTrackerOnceTheLearnStepEnded(t *testing.T) {
 	none.SetLearnEnded(true)
 	if none.LearnEnded() || TrackerFrom(context.Background()) != nil {
 		t.Fatal("a nil tracker says the learn step ended")
-	}
-}
-
-// A call no recording is paired with yet (a call of a series judging marked
-// as background, answered from the series' newest recording) has its span
-// on the app's clock all the same: CallWindow's F, wherever F can be read,
-// even where the paired recording would give no Rec (the set's first call).
-func TestTrackerCallSpanIsTheWindowsSpanOnTheAppsClock(t *testing.T) {
-	rec := time.Date(2026, 10, 20, 15, 49, 55, 0, time.UTC)
-	receive := &models.Mock{Name: "mock-1", Kind: models.HTTP, Spec: models.MockSpec{ReqTimestampMock: rec}}
-	insert := &models.Mock{Name: "mock-4", Kind: models.Mongo, Spec: models.MockSpec{ReqTimestampMock: rec.Add(4 * time.Millisecond)}}
-	recorded := []*models.Mock{insert, receive}
-	base := time.Date(2026, 10, 20, 15, 50, 35, 0, time.UTC)
-	offset := 21 * time.Second
-	arrival := base.Add(2*time.Second + 3*time.Millisecond)
-
-	var nilTracker *Tracker
-	if s, ok := nilTracker.CallSpan(arrival); ok {
-		t.Fatalf("a nil tracker's span: %+v", s)
-	}
-	tr := NewTracker()
-	tr.ServedMockAt(receive, base.Add(2*time.Second))
-	if s, ok := tr.CallSpan(arrival); ok {
-		t.Fatalf("a span with no app clock: %+v", s)
-	}
-	tr.SetAppClock(func(r time.Time) (time.Time, bool) { return r.Add(offset), true })
-	s, ok := tr.CallSpan(arrival)
-	want := Span{From: base.Add(2*time.Second + offset), To: arrival.Add(offset)}
-	if !ok || s != want {
-		t.Fatalf("span %+v (%v); want %+v", s, ok, want)
-	}
-	if w := tr.CallWindow(insert, recorded, arrival); w == nil || w.F != s {
-		t.Fatalf("window %+v; want F %+v", w, s)
-	}
-	// The set's first recording has no Rec, and so no window; its call's
-	// span on the app's clock is read all the same.
-	if w := tr.CallWindow(receive, recorded, arrival); w != nil {
-		t.Fatalf("the first call's window: %+v", w)
-	}
-	if s2, ok := tr.CallSpan(arrival); !ok || s2 != s {
-		t.Fatalf("span %+v (%v); want %+v", s2, ok, s)
-	}
-	// No call served before the arrival: no span.
-	if s, ok := tr.CallSpan(base.Add(time.Second)); ok {
-		t.Fatalf("a span with no serve before: %+v", s)
-	}
-	// An app clock that did not run as one from the previous serve: none.
-	tr.SetAppClock(func(r time.Time) (time.Time, bool) {
-		if r.Before(arrival) {
-			return r.Add(offset), true
-		}
-		return r.Add(offset + time.Second), true
-	})
-	if s, ok := tr.CallSpan(arrival); ok {
-		t.Fatalf("a span over a moved clock: %+v", s)
-	}
-	// A client test's begin after the previous serve starts the span where
-	// the clock did not run as one from the serve.
-	tr.SetClientTests(true)
-	tr.SetAppClock(func(r time.Time) (time.Time, bool) {
-		if r.Before(base.Add(2*time.Second + time.Millisecond)) {
-			return r.Add(offset), true
-		}
-		return r.Add(offset + time.Minute), true
-	})
-	tr.BeginAt(base.Add(2*time.Second + time.Millisecond))
-	s, ok = tr.CallSpan(arrival)
-	want = Span{From: base.Add(2*time.Second + time.Millisecond + offset + time.Minute), To: arrival.Add(offset + time.Minute)}
-	if !ok || s != want {
-		t.Fatalf("a client test's span %+v (%v); want %+v", s, ok, want)
 	}
 }

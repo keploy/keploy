@@ -2,6 +2,7 @@ package models
 
 import (
 	"errors"
+	"slices"
 	"strings"
 	"time"
 )
@@ -496,6 +497,28 @@ type MatchedCall struct {
 	Summary  string `json:"summary,omitempty" yaml:"summary,omitempty"`   // e.g. "GET /posts?id=1", "DNS dep-service", "MongoDB find"
 }
 
+// FieldReason is a field a replay refused a call in, as a reason names it
+// (no part that may be a value: FieldShape), and why it refused it, which
+// names no value either (MockMismatchReport.FieldReasons).
+type FieldReason struct {
+	Field string `json:"field" yaml:"field"`
+	Why   string `json:"why" yaml:"why"`
+}
+
+// FieldReasonShapes are rs whose field is its own shape (FieldShape), once
+// each, for a reason that names them: a reason of a field that may name a
+// value is left out, as its why may quote that field.
+func FieldReasonShapes(rs []FieldReason) []FieldReason {
+	var out []FieldReason
+	for _, r := range rs {
+		if r.Field == "" || r.Why == "" || FieldShape(r.Field) != r.Field || slices.Contains(out, r) {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
 // UnmatchedCall represents an outgoing call during replay that had no matching mock.
 type UnmatchedCall struct {
 	Protocol      string `json:"protocol" yaml:"protocol"`
@@ -574,6 +597,10 @@ type UnmatchedCall struct {
 	// Differs mirrors MockMismatchReport.Differs: the names of the fields in
 	// which the call differs from its closest recording, without values.
 	Differs []string `json:"differs,omitempty" yaml:"differs,omitempty"`
+	// FieldReasons mirrors MockMismatchReport.FieldReasons: of the fields
+	// in Differs, those a replay refused for a reason of its own, and why,
+	// without values.
+	FieldReasons []FieldReason `json:"field_reasons,omitempty" yaml:"field_reasons,omitempty"`
 	// Clock says, under the proven switch, that the call differs from its
 	// closest recording (ClosestMock) only in reads of the application's
 	// clock, by the parser's field diff of the two (learn.ClockOnly: every

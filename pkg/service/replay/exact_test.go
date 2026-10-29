@@ -493,10 +493,13 @@ func TestTheSetsEndWaitsForTheWorkerScopeWhileItProgresses(t *testing.T) {
 // The set's retry cycles, and a streaming pass run out of recorded order,
 // are sent every kept state that carries learning, in name order: learned
 // noise, learned variables, or only binds, the variables other mocks bind at
-// it, whose uses would lose their bind without it (a false red). A state that
+// it, whose uses would lose their bind without it (a false red), or only a
+// clock read, which the retry cycle checks against its call's window (sent
+// none, it would answer the call with the clock read unchecked). A state that
 // carries none is not sent.
 func TestTheLearningServedAfterTheLearnStepEndedIsEveryStateThatCarriesSome(t *testing.T) {
 	states := map[string]models.MockState{
+		"e-clock": {Name: "e-clock", Clocks: map[string]models.ClockOffset{"body.at": {Res: time.Millisecond}}},
 		"d-none":  {Name: "d-none"},
 		"c-binds": {Name: "c-binds", Binds: map[string]models.MockVariables{"mock-0": {"id_1": {Recorded: "u-1", Bind: "body.id"}}}},
 		"b-vars":  {Name: "b-vars", Variables: models.MockVariables{"v": {Recorded: "x"}}},
@@ -506,7 +509,7 @@ func TestTheLearningServedAfterTheLearnStepEndedIsEveryStateThatCarriesSome(t *t
 	for _, st := range carriesLearning(states) {
 		got = append(got, st.Name)
 	}
-	if want := []string{"a-noise", "b-vars", "c-binds"}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("the states sent with the learn step ended are %v; want %v (a binds-only state among them)", got, want)
+	if want := []string{"a-noise", "b-vars", "c-binds", "e-clock"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("the states sent with the learn step ended are %v; want %v (a binds-only and a clock-only state among them)", got, want)
 	}
 }

@@ -130,6 +130,10 @@ type Proxy struct {
 	// whenever its error capture window opens (openTestErrorCapture). Under
 	// the proven switch the parsers find it on their connection's context.
 	learnTracker *learn.Tracker
+	// procZones reads the zone each application process writes a wall
+	// clock of no zone in, from /proc, by the connection's origin PID
+	// (learn.WithProcZone): its calls are learned and checked in it.
+	procZones *learn.ProcZones
 
 	// recordedH2 is the stored set's recorded HTTP/2 destinations, seeded
 	// from the whole recording (SeedRecordedDestinations), for the ALPN a
@@ -1139,8 +1143,22 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 	proxy.learnTracker.SetClientTests(opts.Agent.MockMode)
 	// The application runs beside the agent, and writes a wall clock of no
 	// zone in its local zone, the agent's own, or in UTC
-	// (learn.Tracker.SetAppZone).
-	proxy.learnTracker.SetAppZone(time.Local)
+	// (learn.Tracker.SetAppZone), read with its name where the agent's TZ or
+	// /etc/localtime gives one, so a learning that depends on it names it
+	// (models.ClockOffset.AppZone). Where keploy cannot read it (a TZ of a
+	// POSIX rule, which Go reads as UTC; a link to no zone file; a zone file
+	// whose name and rules disagree, as where the host's /etc/localtime is
+	// bind-mounted over the link to the zone, or keploy cannot read its
+	// mounts: learn.ReadZone), Go's own reading, and no learning names it
+	// (SetAppZoneUnnamed), as before.
+	tz, tzSet := os.LookupEnv("TZ")
+	if loc, err := learn.ReadZone("/", tz, tzSet); err == nil {
+		proxy.learnTracker.SetAppZone(loc)
+	} else {
+		logger.Debug("keploy cannot read the agent's zone; a learning that depends on the application's zone names no zone, and a replay reads its own", zap.Error(err))
+		proxy.learnTracker.SetAppZoneUnnamed(time.Local)
+	}
+	proxy.procZones = learn.NewProcZones("/proc")
 	proxy.sayLearnWaits()
 
 	// Upstream TLS verification (record.upstreamTls). Only the PRECEDENCE is
@@ -2794,6 +2812,16 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	if proven {
 		parserCtx = containerkey.WithConn(parserCtx, containerkey.Default, fmt.Sprint(clientConnID))
 		parserCtx = learn.WithTracker(parserCtx, p.learnTracker)
+		// The zone of the process that made the connection, by its origin
+		// PID: its calls' clock reads are learned and checked in it, never
+		// in the agent's (a zero zone where keploy cannot read it).
+		if p.procZones != nil {
+			z, zerr := p.procZones.Of(destInfo.KernelPid)
+			if zerr != nil {
+				p.logger.Debug("keploy cannot read the zone of the process that made the connection; its calls are learned in the agent's zone, naming no zone, and a replay here checks a learned clock read in the zone its learn step named (one learned in the application's zone alone and checked at an hour or coarser must hold read in UTC too, and an hour is refused where that zone stands more than an hour from UTC), else in the agent's, refusing one cut to an hour or coarser that it learned in the application's zone alone (one learned in either zone is checked in UTC and the agent's)", zap.Uint32("pid", destInfo.KernelPid), zap.Error(zerr))
+			}
+			parserCtx = learn.WithProcZone(parserCtx, z)
+		}
 	}
 	// A handshake made under parserCtx (a parser's STARTTLS upgrade, MySQL
 	// or Postgres; opportunistic TLS) names its leaf for the IP the client
@@ -4742,12 +4770,14 @@ func (p *Proxy) openExact(open func(*MockManager)) error {
 }
 
 // SetPoolNames implements agent.PoolNamesSetter: the mock manager's pool
-// membership (MockManager.SetPoolNames).
-func (p *Proxy) SetPoolNames(names []string) error {
+// membership (MockManager.SetPoolNames) and the key of the test process
+// whose tests list each mock (MockManager.SetPoolOwners), the owners first.
+func (p *Proxy) SetPoolNames(names []string, owners map[string]string) error {
 	m := p.getMockManager()
 	if m == nil {
 		return errNoMockManager
 	}
+	m.SetPoolOwners(owners)
 	m.SetPoolNames(names)
 	return nil
 }
@@ -4854,6 +4884,14 @@ func (p *Proxy) SetAppClock(f func(real time.Time) (time.Time, bool)) {
 }
 
 var _ agent.AppClockSetter = (*Proxy)(nil)
+
+// SetAppClockRun makes the learn step read, through f, where the app's
+// clock's run to a real instant began (agent.AppClockRunSetter).
+func (p *Proxy) SetAppClockRun(f func(real time.Time) (time.Time, bool)) {
+	p.learnTracker.SetAppClockRun(f)
+}
+
+var _ agent.AppClockRunSetter = (*Proxy)(nil)
 
 // ServeExactTestConcurrent implements agent.ExactConcurrentServer (exact.go).
 func (p *Proxy) ServeExactTestConcurrent(test string, owned, cands []*models.Mock) error {
@@ -5823,6 +5861,7 @@ func (p *Proxy) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 					Recorded:         parserErr.Recorded,
 					Write:            parserErr.Write,
 					Differs:          parserErr.MismatchReport.Differs,
+					FieldReasons:     parserErr.MismatchReport.FieldReasons,
 					VariablePlaces:   parserErr.MismatchReport.VariablePlaces,
 					NotOwned:         parserErr.MismatchReport.NotOwned,
 					// A call of a marked series nothing answered: the

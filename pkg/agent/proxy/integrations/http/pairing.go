@@ -130,7 +130,7 @@ func (h *HTTP) pairExactlyIn(ctx context.Context, input *req, n strictNoise, can
 			if m == nil || m.Kind != models.HTTP || m.Spec.HTTPReq == nil || m.IsProtocolPhase() || m.IsAsync() || hasVariables(m) {
 				continue
 			}
-			if len(strictDiff(input, live, m, n)) == 0 {
+			if len(strictDiff(ctx, input, live, m, n)) == 0 {
 				out = append(out, m)
 			}
 		}

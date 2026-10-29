@@ -297,6 +297,13 @@ type MockMismatchReport struct {
 	// value: the reason keploy gives for a failed test names them (proven
 	// switch, design v14 §5.3). Set by the strict HTTP matcher (row S1).
 	Differs []string
+	// FieldReasons are, under the proven switch, the fields of Differs a
+	// replay refused for a reason of their own, each with that reason: a
+	// place the learn step learned as a read of the application's clock at
+	// which the call carries no such read made in its window
+	// (learn.CheckClockRead). Each names its field as Differs does, and no
+	// value. Set by the strict HTTP matcher.
+	FieldReasons []FieldReason
 	// VariablePlaces are, under the proven switch only, the URL path places
 	// (url.path[<n>]) of a test variable on this call: those declared by the
 	// closest mock or by a mock on the call's route (DeclaredPathPlaces), the

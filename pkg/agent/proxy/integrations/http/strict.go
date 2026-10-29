@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/netip"
+	"slices"
 	"sort"
 	"strings"
 
@@ -11,6 +12,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mismatch"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap"
 )
 
 // Strict HTTP matching under the proven switch (design v14 row S1; §9's
@@ -222,6 +224,13 @@ func (h *HTTP) strictServe(ctx context.Context, input *req, pool, comparedPool [
 		if !routeMatched {
 			phase = models.MatchPhaseSchema
 		}
+		for _, f := range closestDiffs {
+			if f.why != "" {
+				// A read of the application's clock the closest recording
+				// learned that this call does not hold: why, legibly.
+				h.Logger.Warn("a learned read of the application's clock does not hold", zap.String("mock", closest.Name), zap.String("field", f.shape), zap.String("reason", f.why))
+			}
+		}
 		diag = &matchDiag{phase: phase, candidates: len(comparedPool), pool: comparedPool, live: &live, closest: closest, differs: closestDiffs}
 		if closest != nil && routeMatched {
 			diag.schemaMatched = []*models.Mock{closest}
@@ -231,7 +240,7 @@ func (h *HTTP) strictServe(ctx context.Context, input *req, pool, comparedPool [
 	// A stateful walk is fixed by every recording the store stages that is
 	// this very call, those spent included (servedWalk).
 	member := func(m *models.Mock) bool {
-		return !hasVariables(m) && string(m.Spec.HTTPReq.Method) == input.method && len(strictDiff(input, live, m, n)) == 0
+		return !hasVariables(m) && string(m.Spec.HTTPReq.Method) == input.method && len(strictDiff(ctx, input, live, m, n)) == 0
 	}
 	picked, commit, answered := h.strictCursorPick(fits, ownedBy(ctx), mockDb, statefulMocks, member)
 	if answered != nil {
@@ -276,7 +285,7 @@ func strictCompare(ctx context.Context, input *req, live destination, pool []*mo
 		if ctx.Err() != nil {
 			return nil, nearest{}, ctx.Err()
 		}
-		d := strictDiff(input, live, m, n)
+		d := strictDiff(ctx, input, live, m, n)
 		if len(d) == 0 {
 			fits = append(fits, m)
 			continue
@@ -463,8 +472,22 @@ func strictMismatchReport(request *http.Request, liveBody []byte, dest, actualKe
 		).Build()
 	if r != nil {
 		r.Differs = differs
+		r.FieldReasons = reasonsOf(diag.differs)
 	}
 	return r
+}
+
+// reasonsOf are, of fields, those refused for a reason of their own (a
+// learned read of the application's clock the call does not carry:
+// clockDiffs), each named by its shape, with that reason, once.
+func reasonsOf(fields []strictField) []models.FieldReason {
+	var out []models.FieldReason
+	for _, f := range fields {
+		if r := (models.FieldReason{Field: f.shape, Why: f.why}); f.shape != "" && f.why != "" && !slices.Contains(out, r) {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // differsOf is the names of the fields that differ, as a reason names them
