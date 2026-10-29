@@ -1728,7 +1728,8 @@ func TestAMissNamesItsDestinationAsTheRecordingDoes(t *testing.T) {
 }
 
 // Only the proven paths read the recording's destinations, so storing a set
-// notes them only under the switch, through either path: with it off, a
+// notes them only under the switch, through either path and from both pools
+// (a destination only an unfiltered mock names is noted too): with it off, a
 // stored set notes none.
 func TestStoringASetNotesItsDestinationsOnlyUnderTheSwitch(t *testing.T) {
 	for _, on := range []string{"0", "1"} {
@@ -1736,11 +1737,12 @@ func TestStoringASetNotesItsDestinationsOnlyUnderTheSwitch(t *testing.T) {
 			t.Run(path+"/KEPLOY_PROVEN="+on, func(t *testing.T) {
 				t.Setenv(provenswitch.Env, on)
 				m := &models.Mock{Name: "mock-1", Kind: models.HTTP, Spec: models.MockSpec{Metadata: map[string]string{"destAddr": "127.0.0.1:27017"}}}
+				u := &models.Mock{Name: "mock-2", Kind: models.HTTP, Spec: models.MockSpec{Metadata: map[string]string{"destAddr": "127.0.0.1:5432"}}}
 				a := newTestAgent()
 				if path == "StoreMocks" {
-					require.NoError(t, a.StoreMocks(context.Background(), []*models.Mock{m}, nil))
+					require.NoError(t, a.StoreMocks(context.Background(), []*models.Mock{m}, []*models.Mock{u}))
 				} else {
-					header, dec := readHeaderAndDecoder(t, encodeStreamBody(t, []*models.Mock{m}, nil))
+					header, dec := readHeaderAndDecoder(t, encodeStreamBody(t, []*models.Mock{m}, []*models.Mock{u}))
 					require.NoError(t, a.StoreMocksStream(context.Background(), header, dec))
 				}
 				v, _ := a.clientMocks.Load(uint64(0))
@@ -1750,7 +1752,7 @@ func TestStoringASetNotesItsDestinationsOnlyUnderTheSwitch(t *testing.T) {
 					require.Nil(t, s.dests, "with the switch off, storing a set noted destinations")
 					return
 				}
-				require.Equal(t, recordedDests{"27017": {"127.0.0.1:27017"}}, s.dests)
+				require.Equal(t, recordedDests{"27017": {"127.0.0.1:27017"}, "5432": {"127.0.0.1:5432"}}, s.dests)
 			})
 		}
 	}
