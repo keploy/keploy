@@ -75,6 +75,23 @@ func buildUpstreamTLSFlags(opts models.SetupOptions) (string, error) {
 	return flags + " --upstream-tls-ca-cert=" + shellQuote(opts.UpstreamTLSCACert), nil
 }
 
+// allowEgressFlags renders --allow-egress for the containerised agent. The
+// host's keploy.yml is not visible inside the agent container, so argv is the
+// only way test.allowEgress reaches it. Only the normalized list is emitted
+// (models.NormalizeAllowEgress): each entry is keploy's own spelling of one it
+// knows, so nothing in it needs quoting on any shell the alias runs under.
+func allowEgressFlags(opts models.SetupOptions) (string, error) {
+	entries, err := models.NormalizeAllowEgress(opts.AllowEgress)
+	if err != nil {
+		return "", err
+	}
+	var flags strings.Builder
+	for _, e := range entries {
+		flags.WriteString(" --allow-egress=" + e)
+	}
+	return flags.String(), nil
+}
+
 // windowsCmdOperators are the characters cmd.exe acts on in the windows
 // docker alias, which the windows runner (util_windows.go) splits on spaces
 // and runs through cmd.exe with no quoting layer any escaping would survive:
@@ -340,6 +357,11 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		utils.LogError(logger, err, "failed to build the keploy agent docker alias")
 		return "", err
 	}
+	egressFlags, err := allowEgressFlags(opts)
+	if err != nil {
+		utils.LogError(logger, err, "failed to build the keploy agent docker alias")
+		return "", err
+	}
 
 	Volumes := ""
 	for i, volume := range DockerConfig.VolumeMounts {
@@ -411,6 +433,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		if opts.GlobalPassthrough {
 			alias += " --global-passthrough"
 		}
+		alias += egressFlags
 		if opts.DisableHandshakeHold {
 			alias += " --disable-handshake-hold"
 		}
@@ -482,6 +505,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			if opts.GlobalPassthrough {
 				alias += " --global-passthrough"
 			}
+			alias += egressFlags
 			if opts.DisableHandshakeHold {
 				alias += " --disable-handshake-hold"
 			}
@@ -538,6 +562,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		if opts.GlobalPassthrough {
 			alias += " --global-passthrough"
 		}
+		alias += egressFlags
 		if opts.DisableHandshakeHold {
 			alias += " --disable-handshake-hold"
 		}
@@ -609,6 +634,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			if opts.GlobalPassthrough {
 				alias += " --global-passthrough"
 			}
+			alias += egressFlags
 			if opts.DisableHandshakeHold {
 				alias += " --disable-handshake-hold"
 			}
@@ -664,6 +690,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		if opts.GlobalPassthrough {
 			alias += " --global-passthrough"
 		}
+		alias += egressFlags
 		if opts.DisableHandshakeHold {
 			alias += " --disable-handshake-hold"
 		}

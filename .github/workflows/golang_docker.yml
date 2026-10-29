@@ -210,3 +210,58 @@ jobs:
           RECORD_BIN: ${{ steps.record.outputs.path }}
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/docker_dns/docker-dns-linux.sh"
+
+  # Replay network isolation. A probe app tries every way out of a replay
+  # (TCP, a port-only bypass port, a double-forked child, TCP fast open, an
+  # IMDS stand-in, UDP, ICMP, DNS, IPv6) at a sink in a netns of its own that
+  # counts what arrives, natively, under docker run and under docker compose.
+  # Each mode's baseline (no keploy) must reach the sink, so a zero in replay
+  # is keploy's doing. In replay the probe's TCP, fast-open and IMDS calls must
+  # not reach the sink; an unrecorded outside name is answered by keploy and
+  # never reaches the host's resolver natively, nor docker's 127.0.0.11 (which
+  # gets only the network's own names) and its upstream, the sink, under docker
+  # and compose; --allow-egress dns opens them and says so; an entry keploy
+  # does not act on is refused; a
+  # port-only bypass rule is named at start; and the run names each
+  # destination it kept inside. Non-DNS UDP, ICMP, raw sockets and a native
+  # double-forked child still leave: they print as KNOWN GAP lines, not rows,
+  # until a kernel-level deny lands. Only the PR's binary and image.
+  replay_isolation:
+    # A healthy run takes a few minutes; this bounds a hung step.
+    timeout-minutes: 30
+    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    runs-on: ubuntu-latest
+    name: replay network isolation (image_build)
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: .github/workflows/test_workflow_scripts/golang/replay_isolation/probe/go.mod
+          cache: false
+
+      - id: image
+        uses: ./.github/actions/download-image
+        with:
+          artifact_name: docker-image-linux-amd64
+
+      - id: replay
+        uses: ./.github/actions/download-binary
+        with:
+          src: build
+
+      - name: Probe every way out of a replay
+        env:
+          KEPLOY_BIN: ${{ steps.replay.outputs.path }}
+          RISO_WORK: ${{ runner.temp }}/riso
+        run: bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/replay_isolation/replay-isolation.sh" native docker compose
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: replay-isolation-logs
+          path: ${{ runner.temp }}/riso/out/
+          if-no-files-found: warn
+          retention-days: 7

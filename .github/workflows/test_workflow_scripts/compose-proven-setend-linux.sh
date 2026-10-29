@@ -285,14 +285,23 @@ record() {
       curl -fsS -o /dev/null "http://127.0.0.1:$PORT/bulk/$BULK" || fail "record $n: GET /bulk/$BULK failed"
       want=$((want + 1))
     fi
-    wait_tests "$want" "$pid" || fail "record $n: keploy record wrote $(test_files) test cases, want $want"
+    # A call that failed writes no test case, so its count is never reached:
+    # wait only when every call was made.
+    if [ "$FAIL" -eq "$before" ]; then
+      wait_tests "$want" "$pid" || fail "record $n: keploy record wrote $(test_files) test cases, want $want"
+    fi
   else
     fail "record $n: keploy exited before the app listened"
   fi
   signal_keploy "$pid" INT
   wait "$pid"
   grep -q "APP SHUTDOWN PUBLISHED bye" "$log" || fail "record $n: the app did not publish as keploy record stopped it"
-  [ "$FAIL" -eq "$before" ] || tail -60 "$log"
+  [ "$FAIL" -eq "$before" ] || {
+    tail -60 "$log"
+    # A call reset as the app came up: did keploy's ingress forwarder hold
+    # the app's port yet? (It starts on the app's bind, after the app does.)
+    grep -n "APP LISTENING\|Intercepted application bind event\|Started ingress forwarding" "$log"
+  }
   no_orphans "record $n"
 }
 

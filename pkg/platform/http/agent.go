@@ -947,6 +947,7 @@ func (a *AgentClient) MockOutgoing(ctx context.Context, opts models.OutgoingOpti
 		}
 	}()
 	a.pushContainers(ctx)
+	a.pushNetworkNames(ctx)
 	// Only a successful answer that says so (models.ClientTestsReadHeader)
 	// sets it again below.
 	a.clientTestsRead.Store(false)
@@ -2222,6 +2223,9 @@ func (a *AgentClient) nativeAgentArgs(opts models.SetupOptions) []string {
 	if opts.GlobalPassthrough {
 		args = append(args, "--global-passthrough")
 	}
+	for _, e := range opts.AllowEgress {
+		args = append(args, "--allow-egress="+e)
+	}
 	if opts.DisableHandshakeHold {
 		args = append(args, "--disable-handshake-hold")
 	}
@@ -3268,6 +3272,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	a.conf.DNSPort = dnsPort
 	a.conf.Agent.AgentURI = opts.AgentURI
 	forgetContainers(opts.AgentURI)
+	forgetNetworkNames(opts.AgentURI)
 
 	a.logger.Debug("Using available ports",
 		zap.Uint32("agent-port", agentPort),
@@ -4423,6 +4428,13 @@ func (a *AgentClient) MakeAgentReadyForDockerCompose(ctx context.Context) (retEr
 			resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
 				a.logger.Debug("Successfully marked agent as ready")
+				// A docker-mode agent is given the names its replay's
+				// networks answer once it takes its release, not only at a
+				// test set's start (MockOutgoing): a launcher that never
+				// calls MockOutgoing, as enterprise's in-Pod replay stack
+				// (whose agent k8s-proxy drives), would otherwise leave it
+				// answering its own network's names itself.
+				a.pushNetworkNames(parent)
 				return nil
 			}
 			// A CA setup failure is latched in the agent (pTls.MarkCAFailed):

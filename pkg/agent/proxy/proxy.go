@@ -28,6 +28,7 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/containerkey"
+	"go.keploy.io/server/v3/pkg/agent/netnames"
 	"golang.org/x/sync/errgroup"
 
 	"go.keploy.io/server/v3/pkg/agent/acceptcount"
@@ -485,6 +486,28 @@ type Proxy struct {
 	// dnsUpstreamPort is the port read alongside dnsUpstreamServers.
 	// Defaults to "53" when resolv.conf does not specify one.
 	dnsUpstreamPort string
+	// dnsInNetworkServers are the dnsUpstreamServers inside the replay's own
+	// network (inNetworkResolvers), the only ones a replay's DNS mock miss is
+	// forwarded to without an opt-in. Captured with dnsUpstreamServers.
+	dnsInNetworkServers []string
+	// dnsClusterDomain is an in-cluster agent's cluster DNS domain
+	// (clusterDomain, e.g. cluster.local), empty elsewhere: names under it
+	// are the replay network's own (networkOwnsName). Captured with
+	// dnsUpstreamServers.
+	dnsClusterDomain string
+	// netNames holds the names a docker-mode replay's networks answer
+	// themselves (networkOwnsName); nil is the agent process's own
+	// (netnames.Default), which its routes fill.
+	netNames *netnames.Store
+	// allowEgressDNS is test.allowEgress naming models.AllowEgressDNS: a
+	// replay's DNS mock miss may then be forwarded to every dnsUpstreamServers
+	// entry, the host's and public resolvers included.
+	allowEgressDNS bool
+	// lastSessionEgress is what the last replay session's options opened
+	// (sessionEgressKnobs), so a session that opens the same is not logged
+	// again. Guarded by egressKnobsMu.
+	lastSessionEgress []egressKnob
+	egressKnobsMu     sync.Mutex
 	// dnsSearch is the resolv.conf search list, kept so a query can be
 	// recognised as a redundant search expansion without asking upstream.
 	// A resolver probes name.S for each search domain S — before the name
@@ -1052,6 +1075,7 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		clientClose:               make(chan bool, 1),
 		Integrations:              make(map[integrations.IntegrationType]integrations.Integrations),
 		GlobalPassthrough:         opts.Agent.GlobalPassthrough,
+		allowEgressDNS:            models.AllowsEgress(opts.Agent.AllowEgress, models.AllowEgressDNS),
 		DisableHandshakeHold:      opts.Agent.DisableHandshakeHold,
 		OpportunisticTLSIntercept: opts.Agent.OpportunisticTLSIntercept,
 		errChannel:                make(chan error, 100), // buffered channel to prevent blocking
@@ -2095,6 +2119,7 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 	// non-fatal: on failure the forwarder simply falls back to the
 	// legacy default response.
 	p.captureDNSUpstream()
+	p.logAgentEgressKnobs()
 
 	// Wait for the proxy server to be ready or fail
 	if err := <-readyChan; err != nil {
@@ -4415,9 +4440,7 @@ func (p *Proxy) Mock(ctx context.Context, opts models.OutgoingOptions) error {
 	}
 	p.ensureHandshakeHold(rule) // the listener may have opened in between
 
-	if !opts.Mocking {
-		p.logger.Info("🔀 Mocking is disabled, the response will be fetched from the actual service")
-	}
+	p.logSessionEgressKnobs(opts)
 
 	p.nsSwitchMutex.Lock()
 	defer p.nsSwitchMutex.Unlock()

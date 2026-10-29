@@ -686,6 +686,7 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	if err := h.registerClient(clientInfo, setupOpts); err != nil {
 		return fmt.Errorf("failed to register the client's pass-through ports with the kernel: %w", err)
 	}
+	logKernelPassThroughEgress(ctx, h.logger, setupOpts, opts.Rules)
 	proxyInfo, err := h.resolveProxyInfo(ctx, setupOpts, opts)
 	if err != nil {
 		return err
@@ -896,9 +897,29 @@ func clientInfoFor(ctx context.Context, opts config.Agent, rules []models.Bypass
 		clientInfo.Mode = uint32(0)
 	}
 
-	var own []uint
+	own, user := passThroughSources(ctx, opts, rules)
+	var ownPorts []uint
+	for _, s := range own {
+		ownPorts = append(ownPorts, s.Ports...)
+	}
+	list, err := kernelPassThroughList(ownPorts, user.Ports)
+	if err != nil {
+		return structs.ClientInfo{}, err
+	}
+	clientInfo.PassThroughPorts = list
+	clientInfo.ClientNSPID = opts.ClientNSPID
+	return clientInfo, nil
+}
+
+// passThroughSources is each knob that puts ports in the kernel's pass-through
+// list, with its ports: keploy's own (own), then the user's port-only
+// bypassRules (user).
+func passThroughSources(ctx context.Context, opts config.Agent, rules []models.BypassRule) (own []agent.PassThroughSource, user agent.PassThroughSource) {
 	if agent.ExtraPassThroughPortsHook != nil {
-		own = append(own, agent.ExtraPassThroughPortsHook()...)
+		own = append(own, agent.PassThroughSource{
+			Knob:  "a pass-through port this build registers (RegisterExtraPassThroughPortsHook)",
+			Ports: agent.ExtraPassThroughPortsHook(),
+		})
 	}
 
 	// Mock mode: the wrapped test runner calls the agent's own HTTP server
@@ -907,16 +928,33 @@ func clientInfoFor(ctx context.Context, opts config.Agent, rules []models.Bypass
 	// scope calls would be redirected into the proxy instead of reaching the
 	// agent. Kernel-level bypass the agent's own control port.
 	if opts.MockMode && opts.AgentPort != 0 {
-		own = append(own, uint(opts.AgentPort))
+		own = append(own, agent.PassThroughSource{
+			Knob:  "keploy mock's agent API port",
+			Ports: []uint{uint(opts.AgentPort)},
+		})
 	}
 
-	list, err := kernelPassThroughList(own, agent.GetPortToSendToKernel(ctx, rules))
-	if err != nil {
-		return structs.ClientInfo{}, err
+	return own, agent.PassThroughSource{
+		Knob:  "bypassRules naming only a port",
+		Ports: agent.GetPortToSendToKernel(ctx, rules),
 	}
-	clientInfo.PassThroughPorts = list
-	clientInfo.ClientNSPID = opts.ClientNSPID
-	return clientInfo, nil
+}
+
+// logKernelPassThroughEgress names, in a replay, each knob whose ports the
+// kernel hands to their real destination: keploy neither serves nor reports a
+// connection to one, so each is real egress. The list holds every port or the
+// run was refused (kernelPassThroughList), so no knob is named for a port the
+// kernel does not leave alone.
+func logKernelPassThroughEgress(ctx context.Context, logger *zap.Logger, opts config.Agent, rules []models.BypassRule) {
+	if opts.Mode != models.MODE_TEST {
+		return
+	}
+	own, user := passThroughSources(ctx, opts, rules)
+	for _, s := range append(own, user) {
+		if len(s.Ports) > 0 {
+			agent.LogRealEgress(logger, s.Knob, agent.KernelPassThroughDest, zap.Uints("ports", s.Ports))
+		}
+	}
 }
 
 func (h *Hooks) GetProxyInfo(ctx context.Context, opts config.Agent, cfg agent.HookCfg) (structs.ProxyInfo, error) {
