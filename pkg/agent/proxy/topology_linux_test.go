@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -1220,8 +1221,27 @@ func TestHandleConnectionEndsAPassThroughOnCancelAndOnEitherSidesClose(t *testin
 
 // A relay reader holding the server's last bytes when the relay ends returns
 // with it: here the relay waits on a write to a client that reads nothing
-// more, the reader has read what the server sent after, and the context ends.
+// more, its queue of the server's reads is full (passThroughQueue of them),
+// the reader has read what the server sent after and holds it for the queue,
+// and the context ends. The reader's hand-off waits for its taker only while
+// the context lasts; one that waited for the full queue regardless kept
+// handleConnection, which waits for its readers, from ever returning.
+//
+// That hand-off is the reader's last step after its read, and nothing it does
+// can be seen there: a cancel that lands before the reader passes its own
+// context check ends the reader there, the hand-off untried. The scenario is
+// therefore run several rounds (a count), and the first round that fails ends
+// the row.
 func TestHandleConnectionEndsAPassThroughWhoseReaderHoldsTheServersLastBytes(t *testing.T) {
+	const rounds = 8
+	for round := 0; round < rounds; round++ {
+		if !t.Run(fmt.Sprintf("round %d", round), passThroughReaderHoldingAReadAtAFullQueue) {
+			break
+		}
+	}
+}
+
+func passThroughReaderHoldingAReadAtAFullQueue(t *testing.T) {
 	ln, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -1274,9 +1294,21 @@ func TestHandleConnectionEndsAPassThroughWhoseReaderHoldsTheServersLastBytes(t *
 	}
 	conn.stall()
 	lines <- "held\n"
+	// What the reader read so far (the greeting too) ends with the line.
+	for got := ""; !strings.HasSuffix(got, "held\n"); {
+		got += awaitEvent(t, server.read, "the relay reading the server's held line")
+	}
 	_ = awaitEvent(t, conn.stalled, "the relay's write of the server's line waiting for room")
-	lines <- "last\n"
-	for awaitEvent(t, server.read, "the relay reading the server's last line") != "last\n" {
+	// The relay writes nothing more, so each read the reader makes now goes
+	// to its queue: passThroughQueue of them fill it, and the reader holds
+	// the next. A line is sent once all of the one before is read, so the
+	// reads are counted, whatever pieces a line comes in.
+	for reads := 0; reads <= passThroughQueue; {
+		line := fmt.Sprintf("line %02d\n", reads)
+		lines <- line
+		for got := 0; got < len(line) && reads <= passThroughQueue; reads++ {
+			got += len(awaitEvent(t, server.read, "the relay reading the server's next line"))
+		}
 	}
 	cancel()
 	_ = awaitEvent(t, done, "handleConnection returning")

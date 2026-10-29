@@ -47,13 +47,21 @@ func writeNsswitchConfig(logger *zap.Logger, nsSwitchConfig string, data []byte,
 // returns. No clock bounds a half-open relay: it lasts while its open side
 // does, or until ctx ends.
 func (p *Proxy) globalPassThrough(ctx context.Context, client, dest net.Conn) error {
+	ctx, endReaders := context.WithCancel(ctx)
+	defer endReaders()
+	// The interrupt hangs off the relay's own context, not the caller's: it
+	// then runs only once this context reads as ended, so the relay and its
+	// readers, which judge an interrupted write or read by this context, see
+	// the end that caused it and return quietly. Off the caller's context it
+	// was a sibling of this one, and could put the deadlines in the past
+	// before this one ended: an interrupted write was then logged as a
+	// failure. stopInterrupting runs first at return, so endReaders does not
+	// set the deadlines.
 	stopInterrupting := context.AfterFunc(ctx, func() {
 		_ = client.SetDeadline(time.Unix(1, 0))
 		_ = dest.SetDeadline(time.Unix(1, 0))
 	})
 	defer stopInterrupting()
-	ctx, endReaders := context.WithCancel(ctx)
-	defer endReaders()
 
 	logger := p.logger.With(
 		zap.String("Client ConnectionID", ctx.Value(models.ClientConnectionIDKey).(string)),
