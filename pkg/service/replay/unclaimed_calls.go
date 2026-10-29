@@ -38,6 +38,7 @@ func (r *Replayer) unclaimedCalls(ctx context.Context) (calls, answered []models
 		return nil, nil, nil
 	}
 	read, err := r.instrumentation.GetMockErrors(ctx)
+	r.keptInside.add(read)
 	// A set whose first test's read did not take what was missed before it
 	// (the read was cut short) hands it over here: still the set's.
 	calls, answered = splitAnswers(r.setCalls.take(read))

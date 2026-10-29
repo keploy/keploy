@@ -1133,7 +1133,7 @@ func (a *Agent) testEvidence(ctx context.Context, id string, unmade bool, beganA
 		if !m.CountsAgainstTest() {
 			continue
 		}
-		ev.Misses = append(ev.Misses, sanitizedMiss(m))
+		ev.Misses = append(ev.Misses, sanitizedMiss(a.asRecorded(m)))
 	}
 	if err != nil {
 		return ev, fmt.Errorf("reading its misses: %w", err)
@@ -1260,7 +1260,7 @@ func (a *Agent) mocksByName(names []string) (map[string]*models.Mock, error) {
 	}
 	if len(missing) > 0 {
 		sort.Strings(missing)
-		return nil, fmt.Errorf("its mapping names mocks the loaded recording does not have: %s; record the set again", strings.Join(missing, ", "))
+		return nil, fmt.Errorf("its mappings file (mappings.yaml, or mappings.json) names mocks the loaded recording does not have: %s; if you edited it, correct those names, otherwise record the set again", strings.Join(missing, ", "))
 	}
 	return out, nil
 }
@@ -1429,7 +1429,7 @@ func (a *Agent) reapOpenTest(ctx context.Context) error {
 // value the test bound). The next step is the matcher's own fixed advice
 // (nextStepOf).
 func sanitizedMiss(m models.UnmatchedCall) models.UnmatchedCall {
-	out := models.UnmatchedCall{Protocol: m.Protocol, Destination: m.Destination, MatchPhase: m.MatchPhase,
+	out := models.UnmatchedCall{Protocol: m.Protocol, Destination: m.Destination, LiveDestination: m.LiveDestination, MatchPhase: m.MatchPhase,
 		ClosestMock: m.ClosestMock, NextSteps: nextStepOf(m), At: m.At, ActualSummary: models.MissShape(m), Differs: models.FieldShapes(m.Differs),
 		Kind: m.Kind, Recorded: m.Recorded, Write: m.Write, NotOwned: m.NotOwned, Reason: m.Reason, Concurrent: m.Concurrent.Clone(),
 		// An answered call stays one (models.UnmatchedCall.Answer): how it was
@@ -1487,7 +1487,7 @@ func (a *Agent) charge(misses []models.UnmatchedCall) {
 	}
 	kept := make([]models.UnmatchedCall, len(misses))
 	for i, m := range misses {
-		kept[i] = sanitizedMiss(m)
+		kept[i] = sanitizedMiss(a.asRecorded(m))
 	}
 	a.provenMu.Lock()
 	a.proven.charged = append(a.proven.charged, kept...)
@@ -1625,6 +1625,9 @@ func missText(m models.UnmatchedCall) string {
 	}
 	if m.Destination != "" {
 		s += " to " + m.Destination
+		if m.LiveDestination != "" {
+			s += " (live " + m.LiveDestination + ")"
+		}
 	}
 	return s
 }

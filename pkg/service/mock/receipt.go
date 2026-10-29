@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -267,6 +269,8 @@ type TestReceipt struct {
 	// its misses, the recorded calls of its mapping it never made, and the
 	// connections keploy could not capture; or what left it not judged
 	// (CannotCapture: a call keploy cannot capture at all, a Unix socket).
+	// A miss that is a recording another test owns names that test
+	// (recorded_in, withRecordedIn).
 	Evidence *models.ScopeEvidence `yaml:"evidence,omitempty" json:"evidence,omitempty"`
 	// Real is, under the proven wire, the mock.real destinations the test
 	// used while it was open: its REAL rows (design v14 §4).
@@ -312,13 +316,14 @@ func isolation(runnerExit int, policy models.MissPolicy, counts replayCounts, by
 	return true, ""
 }
 
-// bypassList renders the bypass rules as destinations.
+// bypassList renders the bypass rules as destinations, an IPv6 host in
+// brackets ([::1]:27017) as the set's other files write one.
 func bypassList(rules []models.BypassRule) []string {
 	var out []string
 	for _, r := range rules {
 		d := r.Host
 		if r.Port != 0 {
-			d += fmt.Sprintf(":%d", r.Port)
+			d = net.JoinHostPort(strings.Trim(r.Host, "[]"), strconv.FormatUint(uint64(r.Port), 10))
 		}
 		d += r.Path
 		if d != "" {

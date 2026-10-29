@@ -586,7 +586,10 @@ func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{},
 		if !ok {
 			return out, errors.New("type not matched")
 		}
-		if e == a || ancestorNoisy || noisyForValue(ni, key, a) {
+		// SamePresignedSigV4: a presigned URL is compared but for its
+		// signature and session token, which a replay's stand-in AWS
+		// secret changes (presigned.go).
+		if e == a || ancestorNoisy || noisyForValue(ni, key, a) || SamePresignedSigV4(e, a) {
 			out.matches, out.isExact = true, true
 		}
 		return out, nil
@@ -640,6 +643,11 @@ func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{},
 		}
 		prefixLower := strings.ToLower(prefix)
 
+		// The fields of a presigned POST on both sides: its signature and
+		// session token are not compared, its policy is compared decoded
+		// (presigned.go).
+		presignedPost := presignedPostFields(e) != nil && presignedPostFields(a) != nil
+
 		// 1) All expected keys must be present & match.
 		for k, v := range e {
 			val, ok := a[k]
@@ -670,6 +678,10 @@ func matchJSONWithNoiseHandlingIndexed(key string, expected, actual interface{},
 			// pattern reaches the scalars, and so that a scalar replaced by an
 			// object or array is still reported.
 			if regs, noisy := ni.match(childKeyLower); noisy && len(regs) == 0 {
+				continue
+			}
+
+			if presignedPost && samePresignedPostField(k, v, val) {
 				continue
 			}
 
@@ -1890,7 +1902,7 @@ func CompareHeaders(h1 http.Header, h2 http.Header, res *[]models.HeaderResult, 
 				continue
 			}
 			for i, e := range v {
-				if val[i] != e {
+				if val[i] != e && !SamePresignedSigV4(e, val[i]) {
 					if checkKey(res, k) {
 						*res = append(*res, models.HeaderResult{
 							Normal: false,

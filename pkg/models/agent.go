@@ -1031,6 +1031,15 @@ const DrainsOnAgentStopHeader = "Keploy-Drains-On-Agent-Stop"
 // drain its streams. 404 from an agent that predates it.
 const StopNoticePath = "/record/stopping"
 
+// NetworkNamesPath is the agent route, under its prefix, the keploy CLI gives
+// a docker-mode agent the names the replay's docker networks answer
+// themselves on (netnames.List), and NetworkNamesAskPath the one it holds open
+// for the agent's ask for a fresh list.
+const (
+	NetworkNamesPath    = "/dns/names"
+	NetworkNamesAskPath = "/dns/names/ask"
+)
+
 type agentStopNoticeKey struct{}
 
 // WithAgentStopNotice marks the agent frame streams opened on ctx as ones

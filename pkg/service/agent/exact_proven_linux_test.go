@@ -578,23 +578,84 @@ func TestAMappedProtocolPhaseMockStaysInThePool(t *testing.T) {
 	require.Empty(t, e.Action, "a protocol-phase mock is no test mock: %s", e.Reason)
 }
 
-// A skipped test's recording never shifts to the next test (keploy #4745's
-// F20 scenarios): the next test making the same call is answered by its own
-// recording, and one call more than that is an extra call, never the
-// skipped test's mock.
-func TestASkippedTestsRecordingNeverShiftsToTheNextTest(t *testing.T) {
-	a, p := exactAgent(t,
-		[]*models.Mock{pingMock("mock-1", "/n", "skipped", t0), pingMock("mock-2", "/n", "next", t0.Add(time.Second))},
-		map[string][]string{"o::TestSkipped": {"mock-1"}, "o::TestNext": {"mock-2"}}, map[string][]string{})
-	require.NoError(t, a.SetScopeSkips(context.Background(), map[string]string{"o::TestSkipped": "flaky: replay_only"}))
-	b, serr := a.ProvenBegin(context.Background(), begin("TestSkipped"))
-	require.Nil(t, serr)
-	require.Equal(t, models.ScopeActionSkip, b.Action)
-	got, e := runTest(t, a, p, "TestNext", "/n", "/n")
-	require.Equal(t, "200 next", got[0])
-	require.True(t, strings.HasPrefix(got[1], "502"), "the skipped test's recording answered the next test: %s", got[1])
-	require.Equal(t, models.ScopeActionFail, e.Action)
-	require.Contains(t, e.Reason, "was called 2 times, recorded 1")
+// A skipped test's recording answers the next test's call beyond its own
+// count only when it is exactly that call and no call took it yet: the set
+// recorded the call once more, so the calls of that shape across the set
+// never exceed what it recorded. Past the copies left, the call is an extra
+// call (keploy #4745's F20), and a recording of another call answers none.
+//
+// The shape is api-server's per-process first-use refresh of a vault PAT,
+// which a set-aside test recorded at record (read the key, read its id, read
+// the key again, stamp it used): at replay it runs in the window of the next
+// test that uses the PAT, which recorded one read of the key itself (acceptance
+// run 6: "called 2 times, recorded 1" where the set-aside test held the copy).
+func TestASetAsideCopyAnswersACallBeyondTheTestsOwnCount(t *testing.T) {
+	refresh := func(key string) []*models.Mock {
+		return []*models.Mock{
+			pingMock("aside-key", key, "key", t0),
+			pingMock("aside-id", "/pat/id", "id", t0.Add(time.Second)),
+			pingMock("aside-key-again", key, "key-again", t0.Add(2*time.Second)),
+			pingMock("aside-used", "/pat/used", "used", t0.Add(3*time.Second)),
+		}
+	}
+	for _, tc := range []struct {
+		name, asideKey string
+		calls, want    []string
+		served         []string
+		miss           string
+	}{
+		{
+			name: "the refresh is served beside the test's own read", asideKey: "/pat/key",
+			calls:  []string{"/k", "/pat/key", "/pat/id", "/pat/key", "/pat/used"},
+			want:   []string{"200 k", "200 own-key", "200 id", "200 key", "200 used"},
+			served: []string{"aside-id served from o::TestQ (set aside)", "aside-key served from o::TestQ (set aside)", "aside-used served from o::TestQ (set aside)"},
+		},
+		{
+			name: "past every copy left the call is an extra call", asideKey: "/pat/key",
+			calls:  []string{"/k", "/pat/key", "/pat/key", "/pat/key", "/pat/key"},
+			want:   []string{"200 k", "200 own-key", "200 key", "200 key-again", "502"},
+			served: []string{"aside-key served from o::TestQ (set aside)", "aside-key-again served from o::TestQ (set aside)"},
+			miss:   "was called 4 times, recorded 3",
+		},
+		{
+			name: "a copy that is not exactly the call answers none", asideKey: "/pat/key?v=2",
+			calls: []string{"/k", "/pat/key", "/pat/key"},
+			want:  []string{"200 k", "200 own-key", "502"},
+			miss:  "was called 2 times, recorded 1",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mocks := append(refresh(tc.asideKey), pingMock("own-key", "/pat/key", "own-key", t0.Add(5*time.Second)), pingMock("mock-k", "/k", "k", t0.Add(6*time.Second)))
+			a, rp := exactAgent(t, mocks,
+				map[string][]string{"o::TestQ": {"aside-key", "aside-id", "aside-key-again", "aside-used"}, "o::TestK": {"own-key", "mock-k"}},
+				map[string][]string{})
+			ctx := context.Background()
+			require.NoError(t, a.SetScopeSkips(ctx, map[string]string{"o::TestQ": "flaky/request_changed"}))
+			b, serr := a.ProvenBegin(ctx, begin("TestQ"))
+			require.Nil(t, serr)
+			require.Equal(t, models.ScopeActionSkip, b.Action)
+			got, e := runTest(t, a, rp, "TestK", tc.calls...)
+			for i := range got {
+				if tc.want[i] == "502" {
+					require.True(t, strings.HasPrefix(got[i], "502"), "call %d (%s) was answered %s", i, tc.calls[i], got[i])
+					continue
+				}
+				require.Equal(t, tc.want[i], got[i], "call %d (%s)", i, tc.calls[i])
+			}
+			ev := evidenceOf(t, a, "o::TestK")
+			require.Equal(t, tc.served, ev.ServedAside)
+			require.Empty(t, ev.Unconsumed, "the test made its own calls; a set-aside recording is never its to make")
+			if tc.miss == "" {
+				require.Empty(t, e.Action, e.Reason)
+				require.Empty(t, ev.Misses)
+				return
+			}
+			require.Equal(t, models.ScopeActionFail, e.Action)
+			require.Contains(t, e.Reason, tc.miss)
+			require.Len(t, ev.Misses, 1)
+			require.Equal(t, models.MissExtraCall, ev.Misses[0].Kind)
+		})
+	}
 }
 
 // keploy #4745's F20 scenarios under ConsumeExact. Tests whose recorded

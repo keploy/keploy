@@ -488,12 +488,26 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 		// "mock not found" path: same error, same log line, same
 		// NXDOMAIN / synthetic fallback. Forwarding is strictly
 		// additive.
+		//
+		// A replay is isolated from the real network by default, so the
+		// miss goes only to a resolver inside the replay's own network
+		// (replayMissServers: the cluster's DNS, docker's embedded
+		// resolver), only for a name that network owns (networkOwnsName),
+		// and only for a query type its resolver answers for such a name
+		// itself (inNetworkAnswersItself): those resolvers recurse to the
+		// host's and public resolvers for any other name, and docker's
+		// for every type but A, AAAA and MX of its own names. The host's and public
+		// resolvers are asked only when a named knob opens real egress:
+		// test.allowEgress "dns", --global-passthrough, or mocking off. A
+		// native replay has no in-network resolver, so its misses take the
+		// fallback below, as does every name a container or cluster
+		// network does not own.
 		// Set when upstream answers authoritatively that the name does not
 		// exist. Such a name has no mock and never could: the record side
 		// deliberately skips non-Success rcodes, so its absence is correct
 		// rather than a recording gap. See the mock-miss report below.
 		upstreamSaysNameDoesNotExist := false
-		if fwdResp, fwdErr := p.forwardDNSUpstream(question); fwdErr == nil && fwdResp != nil {
+		if fwdResp, fwdErr := p.forwardDNS(question, p.replayMissServers(mockingEnabled, question.Name, question.Qtype)); fwdErr == nil && fwdResp != nil {
 			// A RcodeSuccess response splits into two cases by answer count:
 			// resolved (>=1 RR) vs NODATA (0 RRs). Both are relayed as-is; only
 			// a non-success rcode falls through to the #2006 steering below.

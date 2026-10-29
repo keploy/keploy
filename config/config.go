@@ -609,6 +609,11 @@ type Test struct {
 	// replayer writes it into the IGNORED result's SkipReason under the proven
 	// switch.
 	SkipReasons map[string]map[string]string `json:"-" yaml:"-" mapstructure:"-"`
+	// AllowEgress names what a replay may reach on the real network, by the
+	// entries models.NormalizeAllowEgress accepts (models.AllowEgressDNS). What a
+	// replay does not answer from its mocks otherwise stays inside the replay;
+	// an entry keploy does not act on is refused at start.
+	AllowEgress []string `json:"allowEgress" yaml:"allowEgress" mapstructure:"allowEgress"`
 }
 
 // Report output formats for `keploy report --format`.

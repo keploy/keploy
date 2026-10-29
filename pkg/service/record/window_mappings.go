@@ -467,7 +467,7 @@ func routedReasons(logger *zap.Logger, testSetID string, worker []models.MockEnt
 		if strings.HasPrefix(test, lostTestPrefix) {
 			test = "a test the recording failed to persist"
 		}
-		worker[i].Reason = routedReason(r.Mock, test, isKept)
+		worker[i].Reason = routedReason(r.Mock, test, isKept, worker[i])
 		logger.Info("routed a write to the test set's worker scope: it was sent before the test it was in flight into began, so that test did not make it ("+provenswitch.Env+"=1)",
 			zap.String("testSetID", testSetID),
 			zap.String("mock", r.Mock.Name),
@@ -477,18 +477,37 @@ func routedReasons(logger *zap.Logger, testSetID string, worker []models.MockEnt
 	}
 }
 
-// routedReason is the line a routed write's entry carries: what
-// it is, the process that sent it, why it is no test's, and its undo. A test
-// the recording did not keep (kept false) owns nothing in mappings.yaml, so
-// the undo is to delete the entry: the call is then no test's, as that test's
-// own calls are.
-func routedReason(m models.WindowedMock, test string, kept bool) string {
+// routedReason is the line a routed write's entry (e, in the worker scope)
+// carries: what it is, the process that sent it, why it is no test's, and its
+// undo. The undo names the key a test's entries are written under
+// (mock_entries) and the worker-only fields e carries, which a test's entry
+// does not take. A test the recording did not keep (kept false) owns nothing
+// in mappings.yaml, so the undo is to delete the entry: the call is then no
+// test's, as that test's own calls are.
+func routedReason(m models.WindowedMock, test string, kept bool, e models.MockEntry) string {
 	why := fmt.Sprintf("%s (%s) routed to background at record: %s sent it before %s began, and it was answered once %s had begun, both stamped on %s, so %s did not make it.",
 		m.Name, m.WriteKind, processOf(m, false), test, test, clockName(m.Clock), test)
 	if !kept {
 		return why + fmt.Sprintf(" Undo: delete this entry: %s is not in this set (the recording did not keep it), so without the routing the call is no test's, as its own calls are", test)
 	}
-	return why + fmt.Sprintf(" Undo: move this entry under tests[%s].mocks and delete this reason: %s then owns it, as it would without the routing", test, test)
+	return why + fmt.Sprintf(" Undo: move this entry back under `tests[%s].mock_entries`, without its %s: %s then owns it, as it would without the routing", test, workerOnlyFields(e), test)
+}
+
+// workerOnlyFields names, for an undo, the fields of worker-scope entry e that
+// a test's entry does not take: its reason, and its place and atStop when it
+// has them.
+func workerOnlyFields(e models.MockEntry) string {
+	fields := []string{"`reason`"}
+	if e.Place != "" {
+		fields = append(fields, "`place`")
+	}
+	if e.AtStop {
+		fields = append(fields, "`atStop`")
+	}
+	if len(fields) == 1 {
+		return fields[0]
+	}
+	return strings.Join(fields[:len(fields)-1], ", ") + " and " + fields[len(fields)-1]
 }
 
 // processOf names the process that made m's call: "`sqs` (`./sqs`)"; one

@@ -50,6 +50,8 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 	var existingGroups []models.ConcurrencyGroup
 	var existingSource string
 	var existingRecordedWith []string
+	var existingConfig models.Mapping
+	var old []byte
 
 	// Detect whether a mappings file already exists in either format,
 	// and remember which one so we write back in the same format.
@@ -67,8 +69,8 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 			utils.LogError(db.logger, err, "failed to read existing mapping file", zap.String("path", mappingPath))
 			return err
 		}
+		old = data
 
-		var existingConfig models.Mapping
 		if err := yaml.UnmarshalGeneric(effFormat, data, &existingConfig); err != nil {
 			utils.LogError(db.logger, err, "failed to unmarshal existing mappings", zap.String("path", mappingPath))
 			return err
@@ -149,14 +151,34 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 	if len(mapping.RecordedWith) > 0 {
 		newMapping.RecordedWith = mapping.RecordedWith
 	}
+	// Under the proven switch the rebuild loses nothing it does not write:
+	// each test entry keeps what it holds beside its mocks (its cases, dir,
+	// starts...), and the app starts, suites and runner sections are kept,
+	// replace-or-keep as the startup section. Without the switch the file is
+	// written as before (TestEachWriterWritesAsBeforeWithoutTheSwitch).
+	if provenswitch.On() {
+		keepEntries(newMapping, existingConfig.TestCases, mapping.TestCases)
+		if len(mapping.Suites) == 0 {
+			newMapping.Suites = existingConfig.Suites
+		} else {
+			newMapping.Suites = mapping.Suites
+		}
+		if len(mapping.Boots) == 0 {
+			newMapping.Boots = existingConfig.Boots
+		} else {
+			newMapping.Boots = mapping.Boots
+		}
+		if len(mapping.Runner) == 0 {
+			newMapping.Runner = existingConfig.Runner
+		} else {
+			newMapping.Runner = mapping.Runner
+		}
+	}
 
-	encodedData, err := EncodeMappingF(newMapping, db.logger, effFormat)
+	encodedData, err := db.encodeOver(newMapping, effFormat, old, headerAlways, testSetID)
 	if err != nil {
 		utils.LogError(db.logger, err, "failed to encode mapping", zap.String("testSetID", testSetID))
 		return err
-	}
-	if effFormat == yaml.FormatYAML {
-		encodedData = append([]byte(utils.GetVersionAsComment()), encodedData...)
 	}
 	err = yaml.WriteFileF(ctx, db.logger, mappingPath, fileName, encodedData, false, effFormat)
 	if err != nil {
@@ -169,6 +191,63 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 		zap.Int("totalTests", len(finalMappings)))
 
 	return nil
+}
+
+// keepEntries gives each test entry Insert rebuilt from the tests' mocks
+// alone the rest of its entry (models.MappedTestCase): what the caller wrote
+// for it, else what the file held for it, so a write of a test's mocks keeps
+// its cases, dir, starts, at and real. The mocks stay the rebuild's.
+func keepEntries(rebuilt *models.Mapping, onDisk, written []models.MappedTestCase) {
+	before := make(map[string]models.MappedTestCase, len(onDisk))
+	for _, e := range onDisk {
+		before[e.ID] = e
+	}
+	now := make(map[string]models.MappedTestCase, len(written))
+	for _, e := range written {
+		now[e.ID] = e
+	}
+	for i := range rebuilt.TestCases {
+		e := &rebuilt.TestCases[i]
+		mocks := e.Mocks
+		o, wasThere := before[e.ID]
+		w, isWritten := now[e.ID]
+		switch {
+		case isWritten && wasThere:
+			*e = entryOver(o, w)
+		case isWritten:
+			*e = w
+		case wasThere:
+			*e = o
+		}
+		e.Mocks = mocks
+	}
+}
+
+// entryOver is the test entry w written over o: each field w sets, else
+// o's.
+func entryOver(o, w models.MappedTestCase) models.MappedTestCase {
+	if len(w.Cases) > 0 {
+		o.Cases = w.Cases
+	}
+	if len(w.CaseMocks) > 0 {
+		o.CaseMocks = w.CaseMocks
+	}
+	if len(w.CaseSteps) > 0 {
+		o.CaseSteps = w.CaseSteps
+	}
+	if w.Dir != "" {
+		o.Dir = w.Dir
+	}
+	if w.Starts != 0 {
+		o.Starts = w.Starts
+	}
+	if !w.At.IsZero() {
+		o.At = w.At
+	}
+	if len(w.Real) > 0 {
+		o.Real = w.Real
+	}
+	return o
 }
 
 // Upsert writes a single test's mock entries, creating the file if absent. It is a one-entry UpsertBatch —
@@ -237,6 +316,7 @@ func mergeMockEntries(existing, incoming []models.MockEntry) []models.MockEntry 
 // "no_mocks" for the affected tests. Batching keeps the cost linear so the
 // stream is never the bottleneck.
 func (db *MappingDb) UpsertBatch(ctx context.Context, testSetID string, byTest map[string][]models.MockEntry) error {
+	var fileData []byte
 	if len(byTest) == 0 {
 		return nil
 	}
@@ -260,7 +340,7 @@ func (db *MappingDb) UpsertBatch(ctx context.Context, testSetID string, byTest m
 	effFormat := db.Format
 	if exists {
 		effFormat = detected
-		fileData, err := yaml.ReadFileF(ctx, db.logger, mappingPath, fileName, effFormat)
+		fileData, err = yaml.ReadFileF(ctx, db.logger, mappingPath, fileName, effFormat)
 		if err != nil {
 			utils.LogError(db.logger, err, "failed to read mapping file for upsert",
 				zap.String("testSetID", testSetID))
@@ -310,15 +390,11 @@ func (db *MappingDb) UpsertBatch(ctx context.Context, testSetID string, byTest m
 		})
 	}
 
-	encodedData, err := EncodeMappingF(mapping, db.logger, effFormat)
+	encodedData, err := db.encodeOver(mapping, effFormat, fileData, headerOnNew, testSetID)
 	if err != nil {
 		utils.LogError(db.logger, err, "failed to encode mapping during upsert",
 			zap.String("testSetID", testSetID))
 		return err
-	}
-
-	if !exists && effFormat == yaml.FormatYAML {
-		encodedData = append([]byte(utils.GetVersionAsComment()), encodedData...)
 	}
 
 	err = yaml.WriteFileF(ctx, db.logger, mappingPath, fileName, encodedData, false, effFormat)
@@ -340,6 +416,7 @@ func (db *MappingDb) UpsertBatch(ctx context.Context, testSetID string, byTest m
 // recording derives the scope whole from its test windows (D2), so what is
 // written replaces what was there. An empty scope clears it.
 func (db *MappingDb) UpsertWorker(ctx context.Context, testSetID string, worker []models.MockEntry) error {
+	var fileData []byte
 	mappingPath := filepath.Join(db.path, testSetID)
 	fileName := db.MapFileName
 	if fileName == "" {
@@ -354,7 +431,7 @@ func (db *MappingDb) UpsertWorker(ctx context.Context, testSetID string, worker 
 	}
 	mapping := &models.Mapping{Version: string(models.V1Beta1), Kind: models.MappingKind, TestSetID: testSetID, TestCases: []models.MappedTestCase{}}
 	if exists {
-		fileData, err := yaml.ReadFileF(ctx, db.logger, mappingPath, fileName, effFormat)
+		fileData, err = yaml.ReadFileF(ctx, db.logger, mappingPath, fileName, effFormat)
 		if err != nil {
 			return err
 		}
@@ -363,12 +440,9 @@ func (db *MappingDb) UpsertWorker(ctx context.Context, testSetID string, worker 
 		}
 	}
 	mapping.Worker = worker
-	encodedData, err := EncodeMappingF(mapping, db.logger, effFormat)
+	encodedData, err := db.encodeOver(mapping, effFormat, fileData, headerOnNew, testSetID)
 	if err != nil {
 		return err
-	}
-	if !exists && effFormat == yaml.FormatYAML {
-		encodedData = append([]byte(utils.GetVersionAsComment()), encodedData...)
 	}
 	return yaml.WriteFileF(ctx, db.logger, mappingPath, fileName, encodedData, false, effFormat)
 }
@@ -427,7 +501,7 @@ func (db *MappingDb) MoveToWorker(ctx context.Context, testSetID string, moves [
 	sort.SliceStable(mapping.Worker, func(i, j int) bool {
 		return workerAt(mapping.Worker[i]).Before(workerAt(mapping.Worker[j]))
 	})
-	encodedData, err := EncodeMappingF(mapping, db.logger, effFormat)
+	encodedData, err := db.encodeOver(mapping, effFormat, fileData, headerNever, testSetID)
 	if err != nil {
 		return nil, err
 	}
@@ -521,7 +595,7 @@ func (db *MappingDb) MarkRecordedWith(ctx context.Context, testSetID, feature st
 		return nil
 	}
 	mapping.RecordedWith = append(mapping.RecordedWith, feature)
-	encodedData, err := EncodeMappingF(mapping, db.logger, effFormat)
+	encodedData, err := db.encodeOver(mapping, effFormat, fileData, headerNever, testSetID)
 	if err != nil {
 		return err
 	}
@@ -660,6 +734,7 @@ func (db *MappingDb) RemoveBackground(ctx context.Context, testSetID string, byT
 func workerAt(e models.MockEntry) time.Time { return e.RecordedAt() }
 
 func (db *MappingDb) UpsertBoots(ctx context.Context, testSetID string, boots []models.BootSpec) error {
+	var fileData []byte
 	mappingPath := filepath.Join(db.path, testSetID)
 	fileName := db.MapFileName
 	if fileName == "" {
@@ -671,7 +746,7 @@ func (db *MappingDb) UpsertBoots(ctx context.Context, testSetID string, boots []
 	}
 	mapping := &models.Mapping{Version: string(models.V1Beta1), Kind: models.MappingKind, TestSetID: testSetID, TestCases: []models.MappedTestCase{}}
 	if exists {
-		fileData, err := yaml.ReadFileF(ctx, db.logger, mappingPath, fileName, effFormat)
+		fileData, err = yaml.ReadFileF(ctx, db.logger, mappingPath, fileName, effFormat)
 		if err != nil {
 			return err
 		}
@@ -681,7 +756,7 @@ func (db *MappingDb) UpsertBoots(ctx context.Context, testSetID string, boots []
 	}
 	mapping.Boots = boots
 	mapping.Startup = nil
-	encodedData, err := EncodeMappingF(mapping, db.logger, effFormat)
+	encodedData, err := db.encodeOver(mapping, effFormat, fileData, headerNever, testSetID)
 	if err != nil {
 		return err
 	}
@@ -690,6 +765,7 @@ func (db *MappingDb) UpsertBoots(ctx context.Context, testSetID string, boots []
 
 // UpsertCases records which test cases each test produced, adding an entry for a test that has no mocks yet.
 func (db *MappingDb) UpsertCases(ctx context.Context, testSetID string, byTest map[string]models.MappedTestCase, startup []models.MockEntry, suites []models.SuiteSpan) error {
+	var fileData []byte
 	if len(byTest) == 0 && len(startup) == 0 && len(suites) == 0 {
 		return nil
 	}
@@ -704,7 +780,7 @@ func (db *MappingDb) UpsertCases(ctx context.Context, testSetID string, byTest m
 	}
 	mapping := &models.Mapping{Version: string(models.V1Beta1), Kind: models.MappingKind, TestSetID: testSetID, TestCases: []models.MappedTestCase{}}
 	if exists {
-		fileData, err := yaml.ReadFileF(ctx, db.logger, mappingPath, fileName, effFormat)
+		fileData, err = yaml.ReadFileF(ctx, db.logger, mappingPath, fileName, effFormat)
 		if err != nil {
 			return err
 		}
@@ -753,12 +829,9 @@ func (db *MappingDb) UpsertCases(ctx context.Context, testSetID string, byTest m
 	if len(startup) > 0 {
 		mapping.Startup = startup
 	}
-	encodedData, err := EncodeMappingF(mapping, db.logger, effFormat)
+	encodedData, err := db.encodeOver(mapping, effFormat, fileData, headerOnNew, testSetID)
 	if err != nil {
 		return err
-	}
-	if !exists && effFormat == yaml.FormatYAML {
-		encodedData = append([]byte(utils.GetVersionAsComment()), encodedData...)
 	}
 	return yaml.WriteFileF(ctx, db.logger, mappingPath, fileName, encodedData, false, effFormat)
 }
@@ -1010,6 +1083,7 @@ func (db *MappingDb) ApplyShares(ctx context.Context, testSetID string, s models
 // created (as an empty mapping) when create; otherwise it is an error when
 // mustExist, and left missing when not.
 func (db *MappingDb) rewrite(ctx context.Context, testSetID string, create, mustExist bool, change func(*models.Mapping) bool) error {
+	var fileData []byte
 	mappingPath := filepath.Join(db.path, testSetID)
 	fileName := db.MapFileName
 	if fileName == "" {
@@ -1030,7 +1104,7 @@ func (db *MappingDb) rewrite(ctx context.Context, testSetID string, create, must
 	}
 	mapping := &models.Mapping{Version: string(models.V1Beta1), Kind: models.MappingKind, TestSetID: testSetID, TestCases: []models.MappedTestCase{}}
 	if exists {
-		fileData, err := yaml.ReadFileF(ctx, db.logger, mappingPath, fileName, effFormat)
+		fileData, err = yaml.ReadFileF(ctx, db.logger, mappingPath, fileName, effFormat)
 		if err != nil {
 			return err
 		}
@@ -1041,12 +1115,9 @@ func (db *MappingDb) rewrite(ctx context.Context, testSetID string, create, must
 	if !change(mapping) {
 		return nil
 	}
-	encodedData, err := EncodeMappingF(mapping, db.logger, effFormat)
+	encodedData, err := db.encodeOver(mapping, effFormat, fileData, headerOnNew, testSetID)
 	if err != nil {
 		return err
-	}
-	if !exists && effFormat == yaml.FormatYAML {
-		encodedData = append([]byte(utils.GetVersionAsComment()), encodedData...)
 	}
 	return yaml.WriteFileF(ctx, db.logger, mappingPath, fileName, encodedData, false, effFormat)
 }

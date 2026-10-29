@@ -1073,3 +1073,19 @@ func TestARunWithRowsAndNoTestLeavesNoPerTestFile(t *testing.T) {
 	require.NotNil(t, gotRec, "a record keploy refused leaves its file")
 	require.Equal(t, withRefusal.Live, gotRec.Live, "the rows ride with the refusal")
 }
+
+// last-replay.yaml writes a bypassed destination as every other file of the
+// set writes one: an IPv6 host in brackets, so ::1 on 27017 is [::1]:27017,
+// not ::1:27017, which no reader can split into host and port.
+func TestBypassListWritesAnIPv6HostInBrackets(t *testing.T) {
+	got := bypassList([]models.BypassRule{
+		{Host: "::1", Port: 27017},
+		{Host: "[::1]", Port: 5432},
+		{Host: "localhost", Port: 8200},
+		{Port: 6379},
+		{Host: "api.internal", Path: "/v1"},
+		{Host: "10.0.0.1"},
+		{Path: "/health"},
+	})
+	require.Equal(t, []string{"[::1]:27017", "[::1]:5432", "localhost:8200", ":6379", "api.internal/v1", "10.0.0.1", "/health"}, got)
+}

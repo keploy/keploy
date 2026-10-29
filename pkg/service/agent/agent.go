@@ -57,6 +57,11 @@ type ClientMockStorage struct {
 	// when it is built (DiskMocks.LoadStatements) and seeded on the proxy when
 	// the store is published (seedStatementCatalog); nil with no on-disk store.
 	statements []*models.Mock
+	// dests is the recording's destinations as its mocks spell them
+	// (recordedDests), noted as the mocks are read, before any is parked on
+	// disk, and only under the proven switch (its only readers are proven
+	// paths); nil until noted.
+	dests recordedDests
 }
 
 type Agent struct {
@@ -1105,14 +1110,18 @@ func (a *Agent) StoreMocks(ctx context.Context, filtered []*models.Mock, unfilte
 	copy(storage.filtered, filtered)
 	copy(storage.unfiltered, unfiltered)
 	if provenswitch.On() {
-		// Which recorded container keys are ambiguous is read from the whole
-		// set, before any mock is refused or consumed.
+		// Which recorded container keys are ambiguous, and the destinations
+		// the recording names (read only by the proven paths), are read from
+		// the whole set, before any mock is refused or consumed.
 		var tally containerkey.RecordedTally
+		storage.dests = recordedDests{}
 		for _, m := range storage.filtered {
 			tally.Add(m)
+			storage.dests.add(m)
 		}
 		for _, m := range storage.unfiltered {
 			tally.Add(m)
+			storage.dests.add(m)
 		}
 		containerkey.Default.SetRecorded(&tally)
 		storage.filtered = a.refuseUnfollowable(storage.filtered, storage)
@@ -1247,10 +1256,14 @@ func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHe
 	var asyncMocks []*models.Mock
 	wantAsync := a.wantsAsyncMocks() // skip the per-mock async check when unused
 	// Under the proven switch, which recorded container keys are ambiguous
-	// is read from the whole set (containerkey.RecordedTally), every mock
+	// is read from the whole set (containerkey.RecordedTally), and the
+	// destinations the recording names are noted (recordedDests), every mock
 	// counted as it is decoded, before any is refused or parked on disk.
 	proven := provenswitch.On()
 	var tally containerkey.RecordedTally
+	if proven {
+		storage.dests = recordedDests{}
+	}
 
 	for i := 0; i < total; i++ {
 		if i%1024 == 0 {
@@ -1267,6 +1280,7 @@ func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHe
 		mocknoise.MaterializeCorrelations(mock)
 		if proven {
 			tally.Add(mock)
+			storage.dests.add(mock)
 		}
 		if proven && !a.followable(mock) {
 			storage.noteRefused(mock)
