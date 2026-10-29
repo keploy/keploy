@@ -133,6 +133,21 @@ type Earlier struct {
 	// reads the recording with (Order.ServedView). nil says nothing.
 	View    func() (*models.Mock, error)
 	ViewKey string
+	// told, of an exchange its adapter did not say F served as recorded
+	// (AsRecorded), is what the read's statements say of the serves of its
+	// recording (InServeOrder), which an adapter may tell after the serve
+	// (Tracker.ServedMockAsRecorded, Tracker.ServedMockLive: Mongo's does
+	// once the answer is encoded): what the exchange is read with as a
+	// recording F gave the application before the call (lateOf), as any
+	// recording F served is read (Order.ServedView). nil says nothing.
+	told *toldOf
+}
+
+// toldOf is a read's Order and the recording of an exchange (Earlier.told):
+// Order.ServedView of that recording.
+type toldOf struct {
+	order Order
+	mock  *models.Mock
 }
 
 // servedAsRecorded reports whether e's adapter said F served it as recorded
@@ -1116,10 +1131,12 @@ func leafedAtCall(earlier []Earlier, at time.Time) (kept []Earlier, late []Raw) 
 // strength of its absence. Where its adapter said F served it as recorded
 // (Earlier.servedAsRecorded), both are read so (Raw.ServedAsRecorded): what
 // F served at its leaves is then its recording's own text. Otherwise F's
-// view of the payload is one no adapter stated (Raw.viewUnstated), and so is
-// that of what F served at its answer's leaves, which says nothing of the
-// parts of the answer that are no leaf: a word a value holds now that may
-// stand there is refused (fail closed).
+// view of the payload is the one its adapter stated of the recording's serves
+// after them (Earlier.told: Order.ServedView, the view of every serve of it
+// the read saw, where each was told), or else one no adapter stated
+// (Raw.viewUnstated), and so is that of what F served at its answer's
+// leaves, which says nothing of the parts of the answer that are no leaf: a
+// word a value holds now that may stand there is refused (fail closed).
 func (e Earlier) lateOf(late bool) []Raw {
 	x := e.Payload
 	if !x.isRead() {
@@ -1134,8 +1151,11 @@ func (e Earlier) lateOf(late bool) []Raw {
 	for i := range out {
 		out[i] = out[i].OfAnotherTest()
 		out[i].late = late
-		if asRecorded {
+		switch {
+		case asRecorded:
 			out[i] = out[i].ServedAsRecorded()
+		case e.told != nil:
+			out[i] = e.told.order.ServedView(e.told.mock, out[i])
 		}
 	}
 	return out

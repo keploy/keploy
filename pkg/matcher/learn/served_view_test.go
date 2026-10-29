@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
 )
@@ -162,6 +163,80 @@ func TestALateExchangeIsReadAsRecordedOnlyWhereItsAdapterSaidSo(t *testing.T) {
 		for i, x := range out {
 			if x.AsRecorded() != c.want || x.viewUnstated() == c.want {
 				t.Errorf("%s, Raw %d: as recorded %v, unstated %v; want as recorded %v", c.name, i, x.AsRecorded(), x.viewUnstated(), c.want)
+			}
+		}
+	}
+}
+
+// An exchange F served leaf by leaf whose adapter did not say there how F
+// served it (Mongo's learn step: it tells the serve of the recording once
+// the answer is encoded, after it reported the exchange, by
+// Tracker.ServedMockAsRecorded or Tracker.ServedMockLive) is read, as a
+// recording F gave the application before the call (lateOf), with what its
+// adapter told of the recording's serves the read saw (InServeOrder,
+// Order.ServedView): as recorded, or with the view F gave, never as one
+// whose view no adapter stated, which refuses every word a value holds now
+// that may stand there (a false red on every Mongo call that reads a
+// recording made after it). A serve of it told of nothing, a statement of
+// another recording of its name and request time, or an exchange said as
+// recorded that a leaf shows F served otherwise, leaves it unstated (fail
+// closed).
+func TestALateExchangeIsReadWithWhatItsAdapterToldOfTheServeAfterIt(t *testing.T) {
+	m := jobsMock(chanceSrcRec, "5")
+	view := jobsMock(chanceSrcRec, "6")
+	other := jobsMock(chanceSrcRec, "5")
+	other.Spec.ResTimestampMock = other.Spec.ResTimestampMock.Add(time.Millisecond)
+	exchange := func(asRecorded bool, served string) Earlier {
+		return Earlier{Mock: m.Name, At: m.Spec.ReqTimestampMock, AsRecorded: asRecorded, Payload: RawOf(m, true),
+			Seen: []Seen{{Side: Response, Leaf: Leaf{Path: "row.0.n", Type: String, Value: "5"}, Live: served}}}
+	}
+	for _, c := range []struct {
+		name           string
+		e              Earlier
+		mocks          []*models.Mock
+		before         func(tr *Tracker) // serves before the exchange's
+		after          func(tr *Tracker) // statements after it
+		recorded, live bool
+	}{
+		{name: "told as recorded", e: exchange(false, "5"), after: func(tr *Tracker) { tr.ServedMockAsRecorded(m) }, recorded: true},
+		{name: "told with a view", e: exchange(false, "5"), after: func(tr *Tracker) {
+			tr.ServedMockLive(m, "v6", func() (*models.Mock, error) { return view, nil })
+		}, live: true},
+		{name: "told of nothing", e: exchange(false, "5"), after: func(*Tracker) {}},
+		{name: "served again, the second serve told of nothing", e: exchange(false, "5"), after: func(tr *Tracker) {
+			tr.ServedMockAsRecorded(m)
+			tr.ServedMock(m)
+		}},
+		{name: "another recording of its name and request time told", e: exchange(false, "5"), mocks: []*models.Mock{other, m},
+			before: func(tr *Tracker) { tr.ServedMock(other); tr.ServedMockAsRecorded(other) }, after: func(*Tracker) {}},
+		{name: "said as recorded, a leaf shows another value, told as recorded after", e: exchange(true, "6"), after: func(tr *Tracker) {
+			tr.ServedMockAsRecorded(m)
+		}},
+	} {
+		tr := NewTracker()
+		tr.Begin()
+		if c.before != nil {
+			c.before(tr)
+		}
+		tr.ServedMock(m)
+		tr.Served(tr.Epoch(), c.e)
+		c.after(tr)
+		mocks := c.mocks
+		if mocks == nil {
+			mocks = []*models.Mock{m}
+		}
+		p := tr.Placed()
+		earlier := InServeOrder(p.Earlier, mocks, p.Order)
+		if len(earlier) != 1 {
+			t.Fatalf("%s: %d exchanges; want the one served", c.name, len(earlier))
+		}
+		out := earlier[0].lateOf(false)
+		if len(out) != 2 {
+			t.Fatalf("%s: %d Raws; want the payload and what F served at its answer's leaves", c.name, len(out))
+		}
+		for i, x := range out {
+			if x.AsRecorded() != c.recorded || x.Live() != c.live || x.viewUnstated() != (!c.recorded && !c.live) {
+				t.Errorf("%s, Raw %d: as recorded %v, a view %v, unstated %v; want as recorded %v, a view %v", c.name, i, x.AsRecorded(), x.Live(), x.viewUnstated(), c.recorded, c.live)
 			}
 		}
 	}

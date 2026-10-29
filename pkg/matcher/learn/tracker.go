@@ -1817,9 +1817,17 @@ func (t *Tracker) State() (number uint64, open, began bool) {
 // served in the test or before it, as the learn step reads them as earlier
 // places) holds its recording; one they do not hold, or order does not
 // number, keeps an order keploy cannot tell, which the offset rule fails
-// closed on. A copy: earlier is the round's. Nothing is numbered where no
-// payload was read. Every learn step numbers them by it, so a payload reads
-// the same in each.
+// closed on. Of an exchange its adapter did not say F served as recorded
+// (Earlier.AsRecorded), what the read's statements say of the serves of
+// that recording comes with it (Earlier.told): an adapter that tells it
+// after the serve (Tracker.ServedMockAsRecorded, Tracker.ServedMockLive)
+// tells it of the recording, not of the exchange, and a later call reads
+// the exchange as a recording F gave the application with what was told
+// (lateOf), never as one whose view no adapter stated. One said as recorded
+// that its leaves do not bear out stays one whose view no adapter stated
+// (fail closed). A copy: earlier is the round's. Nothing is numbered where
+// no payload was read. Every learn step numbers them by it, so a payload
+// reads the same in each.
 func InServeOrder(earlier []Earlier, mocks []*models.Mock, order Order) []Earlier {
 	read := false
 	for _, e := range earlier {
@@ -1850,8 +1858,15 @@ func InServeOrder(earlier []Earlier, mocks []*models.Mock, order Order) []Earlie
 		if !e.Payload.Read() {
 			continue
 		}
-		if m, ok := byID[e.Payload.Mock()+"\x00"+e.Payload.At().String()]; ok && span[m][0] > 0 {
+		m, ok := byID[e.Payload.Mock()+"\x00"+e.Payload.At().String()]
+		if !ok {
+			continue
+		}
+		if span[m][0] > 0 {
 			out[i].Payload = e.Payload.ServedIn(span[m][0], span[m][1])
+		}
+		if !e.AsRecorded && MockID(m) == e.Payload.id {
+			out[i].told = &toldOf{order: order, mock: m}
 		}
 	}
 	return out
