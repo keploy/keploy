@@ -1726,3 +1726,32 @@ func TestAMissNamesItsDestinationAsTheRecordingDoes(t *testing.T) {
 	require.Equal(t, "[::1]:27017", all[0].Destination)
 	require.Empty(t, all[0].LiveDestination)
 }
+
+// Only the proven paths read the recording's destinations, so storing a set
+// notes them only under the switch, through either path: with it off, a
+// stored set notes none.
+func TestStoringASetNotesItsDestinationsOnlyUnderTheSwitch(t *testing.T) {
+	for _, on := range []string{"0", "1"} {
+		for _, path := range []string{"StoreMocks", "StoreMocksStream"} {
+			t.Run(path+"/KEPLOY_PROVEN="+on, func(t *testing.T) {
+				t.Setenv(provenswitch.Env, on)
+				m := &models.Mock{Name: "mock-1", Kind: models.HTTP, Spec: models.MockSpec{Metadata: map[string]string{"destAddr": "127.0.0.1:27017"}}}
+				a := newTestAgent()
+				if path == "StoreMocks" {
+					require.NoError(t, a.StoreMocks(context.Background(), []*models.Mock{m}, nil))
+				} else {
+					header, dec := readHeaderAndDecoder(t, encodeStreamBody(t, []*models.Mock{m}, nil))
+					require.NoError(t, a.StoreMocksStream(context.Background(), header, dec))
+				}
+				v, _ := a.clientMocks.Load(uint64(0))
+				s, _ := v.(*ClientMockStorage)
+				require.NotNil(t, s)
+				if on == "0" {
+					require.Nil(t, s.dests, "with the switch off, storing a set noted destinations")
+					return
+				}
+				require.Equal(t, recordedDests{"27017": {"127.0.0.1:27017"}}, s.dests)
+			})
+		}
+	}
+}

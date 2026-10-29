@@ -62,8 +62,9 @@ func loopback(host string) bool {
 }
 
 // recordedDests is the loaded recording's destinations (StoreMocks and
-// StoreMocksStream note them as they read the mocks, before any is parked on
-// disk); a store built another way has them read from its resident mocks.
+// StoreMocksStream note them under the proven switch as they read the mocks,
+// before any is parked on disk); a store built another way has them read
+// from its resident mocks.
 func (s *ClientMockStorage) recordedDests() recordedDests {
 	s.mu.Lock()
 	defer s.mu.Unlock()

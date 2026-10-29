@@ -253,6 +253,29 @@ func TestACommentAfterABootsEmptyListStaysOnItsBoot(t *testing.T) {
 	}
 }
 
+// A comment after a key whose value keploy writes as a block map
+// (case_steps:, case_mocks:) stays after that key, on its own test, never
+// on the next test's entry. (This pins the block-map half of where
+// keepPairComments puts the comment after a pair.)
+func TestACommentAfterABlockMapsKeyStaysOnItsTest(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	dir := writeSet(t, "version: api.keploy.io/v1beta1\nkind: TestMocksMapping\ntest_set_id: s\ntests:\n    - id: o::TestA\n      mock_entries:\n        - name: mock-0\n      case_steps: # the step names\n        test-1: login\n      case_mocks: # the calls of each case\n        test-1:\n            - mock-0\n    - id: o::TestZ\n      mock_entries:\n        - name: mock-9\n")
+	core, logs := observer.New(zapcore.WarnLevel)
+	must(t, NewWithFormat(zap.New(core), dir, "mappings", yaml.FormatYAML).UpsertBatch(context.Background(), "s", map[string][]models.MockEntry{"o::TestB": {{Name: "mock-1"}}}))
+	got := readSet(t, dir)
+	for _, want := range []string{"      case_steps: # the step names\n        test-1: login\n", "      case_mocks: # the calls of each case\n        test-1:\n"} {
+		if strings.Count(got, want) != 1 {
+			t.Errorf("the rewrite did not keep %q once:\n%s", want, got)
+		}
+	}
+	if strings.Count(got, "# the step names") != 1 || strings.Count(got, "# the calls of each case") != 1 || strings.Contains(got, "- # ") {
+		t.Errorf("a comment moved off its key:\n%s", got)
+	}
+	if n := len(logs.All()); n != 0 {
+		t.Errorf("keploy kept every comment, yet logged %v", logs.All())
+	}
+}
+
 // A test the rewrite removes, which lists a mock twice with a note on
 // each listing, reports each note dropped by its own listing.
 func TestARemovedTestsTwoListingsAreReportedApart(t *testing.T) {
