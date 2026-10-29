@@ -1415,9 +1415,13 @@ func (a *AgentClient) storeMocksStream(ctx context.Context, filtered []*models.M
 		if encoding == models.MockStreamEncodingZstd {
 			var err error
 			// One encoder goroutine: the link, not the CPU, bounds a remote
-			// upload, and a local one is fast either way.
+			// upload, and a local one is fast either way. SpeedFastest, not
+			// SpeedDefault: a k8s-proxy pod's replayer is held to one CPU,
+			// and there SpeedFastest cut zstd's CPU by 0.6 to 2.5 seconds
+			// per 0.52 GB of gob (six interleaved runs), for 2.4% more bytes
+			// on the wire (191.05 MB against 186.56 MB).
 			zw, err = zstd.NewWriter(out,
-				zstd.WithEncoderLevel(zstd.SpeedDefault),
+				zstd.WithEncoderLevel(zstd.SpeedFastest),
 				zstd.WithWindowSize(models.MockStreamZstdWindow),
 				zstd.WithEncoderConcurrency(1))
 			if err != nil {
@@ -2345,14 +2349,13 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	// If credentials are cached, this will use sudo -n (non-interactive)
 	cmd := newNativeAgentCommand(keployBin, args, sudoCached)
 
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
 	a.mu.Lock()
 	a.agentCmd = cmd // this has been set for proper stopping of the native agent
 	a.mu.Unlock()
-	// Start (OS-specific tweaks happen inside utils.StartCommand)
-	if err := agentUtils.StartCommand(cmd); err != nil {
+	// Start (OS-specific tweaks happen inside utils.StartCommand), its lines
+	// reaching keploy's console cut (startWithConsole)
+	console, err := startWithConsole(cmd, agentUtils.StartCommand)
+	if err != nil {
 		removeProgress()
 		utils.LogError(a.logger, err, "failed to start keploy agent")
 		return err
@@ -2369,6 +2372,7 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	go func() {
 		defer utils.Recover(a.logger)
 		err := cmd.Wait()
+		console.Exited()
 		run.exited()
 		removeProgress()
 		// Reported BEFORE the group goroutine below can return it: returning
@@ -3706,12 +3710,18 @@ func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opt
 		return a.startInDockerWithPTY(ctx, logger, cmd)
 	}
 
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	if err := cmd.Run(); err != nil {
+	// As the native agent's (startWithConsole).
+	console, err := startWithConsole(cmd, (*exec.Cmd).Start)
+	if err == nil {
+		err = cmd.Wait()
+		console.Exited()
+	}
+	if err != nil {
 		if ctx.Err() == context.Canceled {
-			cmd.Process.Kill()
+			// A start a cancelled context refused left no process.
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
+			}
 			logger.Info("Keploy agent in docker stopped gracefully.")
 			return nil
 		}
@@ -5609,4 +5619,21 @@ func (a *AgentClient) TestVariables(ctx context.Context) ([]models.VariableBindi
 		return nil, err
 	}
 	return out.Variables, nil
+}
+
+// startWithConsole starts an agent's cmd through start, its output going to
+// keploy's console through a utils.ChildConsole: so the agent's lines are cut
+// of the values the log redactor holds, when it holds any. Call the console's
+// Exited once cmd.Wait has returned.
+func startWithConsole(cmd *exec.Cmd, start func(*exec.Cmd) error) (*utils.ChildConsole, error) {
+	console, err := utils.SetChildConsole(cmd)
+	if err != nil {
+		return nil, err
+	}
+	err = start(cmd)
+	console.Started()
+	if err != nil {
+		return nil, err
+	}
+	return console, nil
 }

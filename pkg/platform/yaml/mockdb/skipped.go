@@ -70,11 +70,18 @@ func skippedWindowed(raw []byte, isJSON, incomplete bool, name string, kind mode
 	return w, true
 }
 
-// addSkippedDoc lists a document the decoders skipped in out.Skipped and,
-// when its request time can be read, in out.SkippedWindowed.
-func addSkippedDoc(out *models.TestSetMocks, raw []byte, isJSON, incomplete bool, name string, kind models.Kind) {
-	addSkipped(out, name, kind)
-	if w, ok := skippedWindowed(raw, isJSON, incomplete, name, kind); ok {
-		out.SkippedWindowed = append(out.SkippedWindowed, w)
+// skippedDocOf is what a read lists of a document the decoders skipped.
+func skippedDocOf(raw []byte, isJSON, incomplete bool, name string, kind models.Kind) *skippedEntry {
+	d := &skippedEntry{name: name, kind: kind}
+	d.windowed, d.inWindow = skippedWindowed(raw, isJSON, incomplete, name, kind)
+	return d
+}
+
+// addTo lists the document in out.Skipped and, when its request time could
+// be read, in out.SkippedWindowed.
+func (d *skippedEntry) addTo(out *models.TestSetMocks) {
+	addSkipped(out, d.name, d.kind)
+	if d.inWindow {
+		out.SkippedWindowed = append(out.SkippedWindowed, d.windowed)
 	}
 }

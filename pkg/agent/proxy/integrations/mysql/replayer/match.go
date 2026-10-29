@@ -126,6 +126,38 @@ func getQueryStructureCached(sql string) (string, error) {
 	return sig, err
 }
 
+// exactDriftNextSteps is what a miss says when, under exact serving,
+// recordings of the command's statement were turned away because a parameter
+// drifted outside known noise (strictGate.allowsDrift). It names the two ways
+// to mark a field that work under exact serving, the field written as
+// listed. First configured noise in keploy.yml
+// (test.globalNoise.global.requestBody, requestBodyNoise): it covers every
+// recording of the statement and survives a re-record. A shipped keploy
+// (built with -tags=viper_bind_struct, as goreleaser, the Dockerfile and
+// the release script build it) loads a dotted key there whole. Then the
+// recording's own noise (the noise.req list of its document in mocks.yaml,
+// MockSpec.ReqBodyNoise): one recording, which a re-record discards. Nothing
+// learns MySQL noise there: the drifted recording is never served, so
+// detect-on-serve never sees it, and the proven switch's learn round does
+// not cover MySQL.
+const exactDriftNextSteps = "Each recording of this statement was made with other parameters (the listed fields), which are not noise: keploy does not answer a call with another call's rows. If the application sends a value that changes on every run, mark the listed field as noise, written as listed, in keploy.yml, under test.globalNoise.global.requestBody: {\"body.parameters.0.value\": []}. Or, for one recording, add it to the noise.req list of the recording's document in mocks.yaml. Otherwise the call changed since it was recorded: re-record the test."
+
+// exactLiteralNextSteps is the same, for a COM_QUERY whose inline literals,
+// or the query attributes its statement reads, drifted
+// (strictGate.allowsLiterals).
+const exactLiteralNextSteps = "Each recording of this statement was made with other inline literals or query attributes (the listed fields; literals by position), which are not noise: keploy does not answer a call with another call's rows. If the application sends a value that changes on every run, mark the listed field as noise, written as listed, in keploy.yml, under test.globalNoise.global.requestBody: {\"body.query.literals.0\": []}. Or, for one recording, add it to the noise.req list of the recording's document in mocks.yaml. Otherwise the call changed since it was recorded: re-record the test."
+
+// sameQueryStructure reports whether two statements parse to the same tree
+// shape (getQueryStructure: identifier-blind). Neither parsing is no.
+func sameQueryStructure(a, b string) bool {
+	sigA, errA := getQueryStructureCached(a)
+	if errA != nil {
+		return false
+	}
+	sigB, errB := getQueryStructureCached(b)
+	return errB == nil && sigA == sigB
+}
+
 func matchHeader(expected, actual mysql.Header) bool {
 
 	// Match the payloadlength
@@ -454,6 +486,40 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 	// connections running it at once all picked the same recording, so all
 	// but one were refused.
 	exactServing := integrations.ExactServing(mockDb)
+	// sameStatementOnly is the rule of a fallback under exact serving: a
+	// recording that is not a match on the command's statement and every
+	// parameter answers it only when it ran the command's own statement.
+	// For a COM_QUERY or COM_STMT_PREPARE that is the same text once inline
+	// literals are masked (maskSQLLiterals: a COM_QUERY's literals are its
+	// parameters), and a COM_QUERY's recording answers only when every
+	// literal that differs, by position, and every query attribute the
+	// statement reads, by name (readAttributes: the others it is sent with
+	// are not compared), is configured or learned noise, comments aside
+	// (strictGate.allowsLiterals): with another literal it is the rows of
+	// another call. That holds for a recording of the same text too when
+	// the statement reads its query attributes (liveReadsAttributes): the
+	// text does not hold them, and with another value of one it is another
+	// call's rows (another tenant's). A PREPARE's recording answers with
+	// another literal: its answer is the statement's metadata, and each
+	// EXECUTE of the statement is matched on the live text. For a
+	// COM_STMT_EXECUTE it is the same prepared statement
+	// (queryExact: sqlStatementIdentity, case-insensitive), which the FIFO
+	// candidate is, so no EXECUTE is answered by score; and the FIFO
+	// candidate answers only when every parameter that differs is
+	// configured or learned noise (strictGate.allowsDrift): with another
+	// parameter it is the rows of another call. A recording of another
+	// statement of the same shape (getQueryStructure is identifier-blind:
+	// another table, other columns), or, for an EXECUTE, of a statement
+	// unknown on either side, never answers there: it was served by score,
+	// and the app read rows its statement never returned. An EXECUTE
+	// recorded without its statement answers with every parameter equal
+	// (paramsOnlyMock) only when the command's statement is unknown too:
+	// against a known one it may be another statement's rows. Without
+	// exact serving those still answer, as before: keploy test's lenient
+	// tier. A recording of another statement of another shape never
+	// scores, in either mode (matchStmtExecutePacketQueryAware,
+	// matchQueryLive).
+	sameStatementOnly := exactServing
 	testsOwn := func(mk *models.Mock) bool {
 		if exactServing {
 			return integrations.OwnedByOpenTest(mockDb, mk)
@@ -677,12 +743,22 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 	// comment — the same identity matchQueryLive compares on. It is the
 	// yardstick for nearestMock below, and a live PREPARE's key in
 	// preparedIndex.
-	liveStatement := ""
+	// liveReadsAttributes is whether a live COM_QUERY's statement reads its
+	// query attributes (readsQueryAttributes): then a recording of its very
+	// text answers under exact serving only when they are equal, or noise
+	// (sameStatementOnly).
+	liveStatement, liveReadsAttributes := "", false
 	switch m := req.Message.(type) {
 	case *mysql.QueryPacket:
 		liveStatement = sqlStatementIdentity(m.Query)
+		liveReadsAttributes = readsQueryAttributes(m.Query)
 	case *mysql.StmtPreparePacket:
 		liveStatement = sqlStatementIdentity(m.Query)
+	case *mysql.StmtExecutePacket:
+		// Its prepared statement, for nearestMock only.
+		if decodeCtx != nil {
+			liveStatement = sqlStatementIdentity(decodeCtx.StmtIDToQuery[m.StatementID])
+		}
 	}
 
 	// First pass. A scan can stop at a candidate it may serve without looking
@@ -996,24 +1072,21 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 	// liveStatementParams is how many of a live COM_STMT_EXECUTE's
 	// parameters are its statement's own (its PREPARE_OK's num_params), the
 	// rest being query attributes (executeAttributesFrom); -1 when not known.
-	// liveBodyParams is how many of them its strict body holds: all of
-	// them when its statement reads its attributes (readsQueryAttributes).
-	liveStatementParams, liveBodyParams, liveStmtQuery := -1, -1, ""
+	// Its strict body holds its own and, when its statement (liveStmtQuery)
+	// reads its attributes, the ones it reads, by name
+	// (executeBodyParameters).
+	liveStatementParams, liveStmtQuery := -1, ""
 	if act, _ := req.Message.(*mysql.StmtExecutePacket); act != nil && decodeCtx != nil {
 		if prep := decodeCtx.PreparedStatements[act.StatementID]; prep != nil {
 			liveStatementParams = int(prep.NumParams)
 		}
 		liveStmtQuery = strings.TrimSpace(decodeCtx.StmtIDToQuery[act.StatementID])
-		liveBodyParams = liveStatementParams
-		if readsQueryAttributes(liveStmtQuery) {
-			liveBodyParams = len(act.Parameters)
-		}
 	}
 
 	// Canonical JSON body of the live request for the schema-noise engine.
 	// liveBodyOK is false for packets with no drift-capable body (utility
 	// commands, CLOSE/RESET) — the engine no-ops for those.
-	liveBody, liveBodyOK := mysqlRequestBody(&req.PacketBundle, liveBodyParams)
+	liveBody, liveBodyOK := mysqlRequestBody(&req.PacketBundle, liveStatementParams, liveStmtQuery)
 
 	// Strict-enforcement gate (see strictGate in schema_noise.go): consulted
 	// before a mock may become a match candidate, and accumulates the
@@ -1209,6 +1282,9 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 			}
 		}
 		ok, c, id := matchQueryLive(logger, recorded, req.PacketBundle, lq, getQuery)
+		if sameStatementOnly && !ok && c > 0 && maskSQLLiterals(id) != lq.maskedLiterals() {
+			c = 0
+		}
 		if evaluated != nil {
 			evaluated[key] = evalResult{ok: ok, score: c, recorded: id}
 		}
@@ -1284,8 +1360,20 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 						//
 						// Even an exact-text match is strict-gated: the query
 						// attributes (CLIENT_QUERY_ATTRIBUTES) live outside the
-						// text and may still drift.
-						if !gate.allows(mock) {
+						// text and may still drift. Under exact serving, with
+						// or without strict, a statement that reads them is
+						// answered only by a recording made with the same
+						// values of the ones it reads, by name (the others
+						// are not in its body: readAttributes), or whose
+						// differing ones are noise
+						// (sameStatementOnly, allowsLiterals; the literals of
+						// the same text are equal, its comments left out): it
+						// read tenant a's rows for tenant b. One that does not
+						// read them answers whatever they are (its rows do not
+						// depend on them), so it is not compared: a statement
+						// vitess cannot parse is compared whole, and a changed
+						// leading comment would refuse it.
+						if !gate.allows(mock) || (sameStatementOnly && liveReadsAttributes && !gate.allowsLiterals(mock)) {
 							// A strict-rejected exact-text candidate is still the
 							// closest mock for the mismatch report (parity with
 							// the EXECUTE branch) — without this the miss diff
@@ -1317,6 +1405,13 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 							bestPartialMock = mock
 							if qp, qok := mockReq.PacketBundle.Message.(*mysql.QueryPacket); qok {
 								bestPartialQuery = qp.Query
+							}
+							// Under exact serving a recording of the statement
+							// made with other inline literals answers only when
+							// every literal that differs is noise
+							// (sameStatementOnly, allowsLiterals).
+							if sameStatementOnly && !gate.allowsLiterals(mock) {
+								continue
 							}
 							// Structure-matched-but-text-drifted candidate: under
 							// strict it may only be served when the drift (body.query
@@ -1399,6 +1494,9 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 						logger.Debug("queries comparison", zap.String("expected_query", expectedQuery), zap.String("actual_query", actualQuery), zap.Uint32("mock_statement_id", expMsg.StatementID), zap.Uint32("actual_statment_id", actMsg.StatementID), zap.Any("connID", mock.Spec.Metadata["connID"]), zap.String("mock_name", mock.Name))
 
 						ev.ok, ev.score, ev.queryExact = matchStmtExecutePacketQueryAware(logger, mockReq.PacketBundle, req.PacketBundle, expectedQuery, actualQuery, liveStatementParams, mock.Name, util.NewNoiseChecker(mock.Noise))
+						if sameStatementOnly && !ev.ok {
+							ev.score = 0
+						}
 						ev.recorded = expectedQuery
 						if evaluated != nil {
 							evaluated[key] = ev
@@ -1451,6 +1549,16 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 						}
 						inWindow := testsOwn(mock)
 						switch {
+						case expectedQuery == "" && sameStatementOnly && liveStmtQuery != "":
+							// Under exact serving a recording whose
+							// statement is lost does not answer a command
+							// whose statement is known: equal parameters
+							// do not make it the same statement
+							// (sameStatementOnly). It is the nearest for
+							// the miss report.
+							if bestPartialMock == nil {
+								bestPartialMock, bestPartialQuery = mock, ""
+							}
 						case expectedQuery == "" && inWindow:
 							if paramsOnlyMockWindow == nil {
 								paramsOnlyRespWindow, paramsOnlyMockWindow = &mock.Spec.MySQLResponses[0], mock
@@ -1490,12 +1598,20 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 						} else if bestPartialMock == nil && c > 0 {
 							bestPartialMock, bestPartialQuery = mock, expectedQuery
 						}
+						// Reporting only: a recording of another statement
+						// scores nothing, but may be the nearest recorded.
+						if !queryExact {
+							trackNearest(mock, expectedQuery, "")
+						}
 						// Strict gate: a query-exact candidate with drifted bound
 						// parameters may only become a FIFO/score candidate when
 						// the drifting params (body.parameters.N.value) are
 						// covered by learned/user noise. One gate call covers both
 						// the FIFO and score branches below.
 						if (queryExact || c > maxMatchedCount) && !gate.allows(mock) {
+							continue
+						}
+						if queryExact && sameStatementOnly && !gate.allowsDrift(mock) {
 							continue
 						}
 						if queryExact {
@@ -1508,7 +1624,9 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 							}
 						}
 						if c > maxMatchedCount {
-							// fallback score-based candidate (used when no stmt info was available)
+							// fallback score-based candidate: a recording of the
+							// statement's shape, or one whose statement is
+							// unknown, without exact serving (sameStatementOnly)
 							maxMatchedCount, matchedResp, matchedMock = c, &mock.Spec.MySQLResponses[0], mock
 						}
 					}
@@ -1922,14 +2040,27 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 				newStmtID := decodeCtx.NextStmtID
 				decodeCtx.NextStmtID++
 
+				seq := byte(1)
+				if req.Header != nil && req.Header.Header != nil {
+					seq = req.Header.Header.SequenceID + 1
+				}
 				var paramDefs []*mysql.ColumnDefinition41
+				// eofAfterParams ends the parameter definitions for a
+				// connection that did not negotiate CLIENT_DEPRECATE_EOF:
+				// such a client (go-sql-driver) reads them up to an EOF
+				// packet. Without one it waited for the rest of the
+				// PREPARE_OK forever, so the app hung in PREPARE and never
+				// sent the EXECUTE that is the miss to report. A connection
+				// that negotiated it reads no EOF there (its next packet is
+				// the answer to its next command).
+				eofAfterParams := []byte{}
 				if numParams > 0 {
 					paramDefs = make([]*mysql.ColumnDefinition41, 0, numParams)
 					for i := uint16(0); i < numParams; i++ {
 						paramDefs = append(paramDefs, &mysql.ColumnDefinition41{
 							Header: mysql.Header{
 								PayloadLength: 22,
-								SequenceID:    byte(2 + i),
+								SequenceID:    seq + 1 + byte(i),
 							},
 							Catalog:      "def",
 							FixedLength:  0x0c,
@@ -1940,6 +2071,10 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 							Decimals:     0,
 							Filler:       []byte{0x00, 0x00},
 						})
+					}
+					if !decodeCtx.DeprecateEOF() {
+						// EOF: 0xfe, no warnings, SERVER_STATUS_AUTOCOMMIT.
+						eofAfterParams = []byte{5, 0, 0, seq + 1 + byte(numParams), mysql.EOF, 0x00, 0x00, 0x02, 0x00}
 					}
 				}
 
@@ -1952,15 +2087,11 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 					WarningAvailable:   true,
 					WarningCount:       0,
 					ParamDefs:          paramDefs,
-					EOFAfterParamDefs:  []byte{},
+					EOFAfterParamDefs:  eofAfterParams,
 					ColumnDefs:         nil,
 					EOFAfterColumnDefs: []byte{},
 				}
 
-				seq := byte(1)
-				if req.PacketBundle.Header != nil && req.PacketBundle.Header.Header != nil {
-					seq = req.PacketBundle.Header.Header.SequenceID + 1
-				}
 				synthetic := &mysql.Response{
 					PacketBundle: mysql.PacketBundle{
 						Header: &mysql.PacketInfo{
@@ -2045,6 +2176,12 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 			miss.why = unknown.why
 			if miss.strictRejected == 0 {
 				miss.nextSteps = unknown.nextSteps
+			}
+		}
+		if miss.nextSteps == "" && gate.exactRejected > 0 {
+			miss.nextSteps = exactDriftNextSteps
+			if req.Header.Type == sCOM_QUERY {
+				miss.nextSteps = exactLiteralNextSteps
 			}
 		}
 		return nil, false, miss, nil
@@ -2658,9 +2795,14 @@ func sameParameterShape(expected, actual *mysql.StmtExecutePacket, liveStatement
 // query-aware EXEC scoring.
 //   - Keep the existing header/flags/params scoring.
 //   - Do NOT reward raw StatementID equality.
-//   - If both expectedQuery and actualQuery are present, require them to match (exact).
-//     If they don't match, return (false, 0) immediately.
+//   - If both expectedQuery and actualQuery are present, require them to be
+//     the same statement (definitive with every parameter equal) or of the
+//     same shape (sameQueryStructure: scores, never definitive). Otherwise
+//     return (false, 0, false): the recording ran another statement.
 //   - If either query is missing, fall back to best-effort scoring (returns (false, score)).
+//
+// Under exact serving the caller serves by score only a recording of the
+// same statement (see sameStatementOnly in matchCommandWith).
 //
 // Returns (definitive, score, queryExactMatched). queryExactMatched is true
 // when the recorded prepared-statement query text equals the live query text
@@ -2789,17 +2931,24 @@ func matchStmtExecutePacketQueryAware(logger *zap.Logger, expected, actual mysql
 	// If both queries are present, require them to match (exact or structural) for a definitive match.
 	if eq != "" && aq != "" {
 		// If both queries are available, require an exact or structural match to treat this as a definitive match.
-		if strings.EqualFold(eq, aq) {
+		switch {
+		case strings.EqualFold(eq, aq):
 			matchCount += 10
 			queryMatched = true
 			queryExactMatched = true
 			logger.Debug("query matched exactly", zap.String("related stmt-exec mock-name", mockName))
-		} else if sigE, errE := getQueryStructureCached(eq); errE == nil {
-			if sigA, errA := getQueryStructureCached(aq); errA == nil && sigE == sigA {
-				matchCount += 6
-				queryMatched = false
-				logger.Debug("query structure matched", zap.String("related stmt-exec mock-name", mockName))
-			}
+		case sameQueryStructure(eq, aq):
+			matchCount += 6
+			logger.Debug("query structure matched", zap.String("related stmt-exec mock-name", mockName))
+		default:
+			// The recording ran another statement, of another shape. It
+			// never answers this one, in any mode. Scored on the header,
+			// status, flags and parameters alone, it did: any recorded
+			// EXECUTE answered an EXECUTE of a statement the recording
+			// never ran ("SELECT code FROM other WHERE ref = ? AND live =
+			// 1" with 5 got the rows of "SELECT id, name FROM small WHERE
+			// id = ?" with 7).
+			return false, 0, false
 		}
 	}
 

@@ -66,6 +66,37 @@
 #      answers 500, naming the call, for a row of another id or a call that
 #      failed, so a recording served to the wrong call fails the test.
 #  10. No data race in any log.
+#  12. Under the proven switch, the recording of step 9 replayed by an app
+#      whose GET /pool prepares another statement in place of the one it
+#      recorded (SHOP_ITEM_QUERY): one of the same shape (another table),
+#      then one of another (a condition more). No recording ran it: its
+#      PREPARE gets the PREPARE_OK keploy makes, framed as the connection
+#      negotiated (go-sql-driver reads an EOF after the parameter
+#      definitions; without it the app hung in PREPARE), and each EXECUTE
+#      of it is a miss, which the report names as test-5's unmatched call.
+#      test-5 fails, keploy test exiting non-zero; the other tests pass. A
+#      replayer that answered an EXECUTE with another statement's recording
+#      (scored on the packet's header and parameters, or on the statement's
+#      shape) served each call the row recorded for its id, and test-5
+#      passed: a false green. Then the same recording replayed by an app
+#      whose GET /pool binds another id to its own statement in its
+#      sequential read (SHOP_ITEM_ID_SHIFT), while it still wants the row
+#      of the id it recorded: each of those EXECUTEs is a miss too, and
+#      test-5 fails. A replayer that answered them with the recording of
+#      the statement made with another parameter (its next one, in recorded
+#      order) served the rows the app wants, and test-5 passed. Then the
+#      same recording replayed by an app whose tax rate read, a COM_QUERY
+#      with the key inlined, inlines another key (SHOP_RATE_KEY): no
+#      recording of the statement was made with that literal, and it is not
+#      noise, so the read is a miss: post-orders-1 (test-1), which reads the
+#      rate first, fails, the report naming the read as its unmatched call,
+#      and so does get-quote-1 (test-3), which reads it again (a failed read
+#      is not cached). A replayer that answered the read with the recording
+#      made with the other key served the rate recorded, and both passed.
+#      Last, the miss's advice followed: the same replay with the listed
+#      literal (body.query.literals.0, then root-relative) configured as
+#      noise in keploy.yml (test.globalNoise.global.requestBody). The read
+#      is then answered by its recording, and every test passes.
 #  11. A prepared read the app makes before any test, or between two tests,
 #      is answered with a recording of its own request, and a test's with its
 #      own: recorded with SHOP_SETTINGS_BY_KEY=1, the app reads two settings
@@ -285,7 +316,9 @@ between_read() {
 # recording, with MySQL and the auth service down. fresh replays it as
 # recorded, its first replay (no mappings.yaml); mapped keeps the mappings an
 # earlier replay wrote. only runs one test; declare declares the token call in
-# keploy.yaml. RC is its exit code.
+# keploy.yaml; NOISE_KEY, when set, marks that request-body field as
+# configured noise there (test.globalNoise.global.requestBody). RC is its
+# exit code.
 replay() {
     local name="$1" mapping="$2" only="${3:-}" declare="${4:-}" before
     local switch=()
@@ -293,8 +326,14 @@ replay() {
     [ "$mapping" = fresh ] && rm -f keploy/test-set-0/mappings.yaml
     rm -f keploy.yml
     {
+        if [ -n "$only" ] || [ -n "${NOISE_KEY:-}" ]; then
+            printf 'test:\n'
+        fi
         if [ -n "$only" ]; then
-            printf 'test:\n    selectedTests:\n        test-set-0: ["%s"]\n' "$only"
+            printf '    selectedTests:\n        test-set-0: ["%s"]\n' "$only"
+        fi
+        if [ -n "${NOISE_KEY:-}" ]; then
+            printf '    globalNoise:\n        global:\n            requestBody:\n                "%s": []\n' "$NOISE_KEY"
         fi
         if [ -n "$declare" ]; then
             printf 'sessionCalls:\n    - host: "127.0.0.1:%s"\n      method: POST\n      pathPrefix: /oauth/token\n' "$UP"
@@ -471,6 +510,63 @@ if is_build "$RECORD_BIN" && [ "$judged" = true ]; then
     fi
     refused=$(grep -ac 'failed to update matched mock' proven-all.log)
     [ "$refused" -eq 0 ] || fail "under the proven switch the MySQL matcher failed $refused command(s) with a consume the store refused (failed to update matched mock)"
+
+    # 12. The pool's prepared read changed since it was recorded. Each replay
+    #     starts from the mappings step 9 replayed with. changed_read NAME
+    #     WHAT CALL TEST... replays as NAME, with the app's change (WHAT) in
+    #     the environment, and checks each TEST failed, the first on an
+    #     unmatched call whose summary holds CALL, while the other tests
+    #     passed.
+    cp keploy/test-set-0/mappings.yaml mappings.step9
+    changed_read() {
+        local name="$1" what="$2" call="$3" first="$4" t
+        shift 3
+        local failing=" $* "
+        cp mappings.step9 keploy/test-set-0/mappings.yaml
+        PROVEN_REPLAY=1 replay "$name" mapped
+        [ "$RC" -ne 0 ] || fail "under the proven switch, $what: keploy test exited 0"
+        for t in test-1 test-2 test-3 test-4 test-5; do
+            case "$failing" in
+                *" $t "*)
+                    [ "$(test_status "$t")" = FAILED ] ||
+                        fail "under the proven switch, $what: $t must be FAILED (exit $RC, status $(test_status "$t"))" ;;
+                *)
+                    [ "$(test_status "$t")" = PASSED ] ||
+                        fail "under the proven switch, $what: $t must still pass (status $(test_status "$t"))" ;;
+            esac
+        done
+        # Under the proven switch a miss is logged at debug only: the report
+        # names it, as the test's unmatched call.
+        T="$first" S="$call" yq -e '[.tests[] | select(.test_case_id == strenv(T)) | .failure_info.unmatched_calls[]?.actual_summary] | any_c(contains(strenv(S)))' "$(REPORT)" >/dev/null ||
+            fail "under the proven switch, $what: the report names no unmatched call of $first '$call' ($(T="$first" yq -N -o=json -I=0 '[.tests[] | select(.test_case_id == strenv(T)) | .failure_info.unmatched_calls[]?.actual_summary]' "$(REPORT)" 2>/dev/null))"
+    }
+    n=0
+    for changed in 'SELECT id, name, price FROM items_v2 WHERE id = ?' \
+        'SELECT id, name, price FROM items WHERE id = ? AND price > 0'; do
+        n=$((n + 1))
+        export SHOP_ITEM_QUERY="$changed"
+        changed_read "proven-changed-$n" "GET /pool running '$changed'" "COM_STMT_EXECUTE $changed" test-5
+        unset SHOP_ITEM_QUERY
+    done
+    export SHOP_ITEM_ID_SHIFT=100
+    changed_read proven-changed-param "GET /pool binding another id to its statement" 'COM_STMT_EXECUTE SELECT id, name, price FROM items WHERE id = ?' test-5
+    unset SHOP_ITEM_ID_SHIFT
+    export SHOP_RATE_KEY=tax_rate_v2
+    changed_read proven-changed-literal "the tax rate's read inlining another key" "COM_QUERY SELECT v FROM settings WHERE k = '$SHOP_RATE_KEY'" test-1 test-3
+    # The miss's advice, followed: the listed field as configured noise in
+    # keploy.yml, written as listed or root-relative. The inlined key is
+    # then noise, so the recording of the read answers and every test
+    # passes.
+    for key in body.query.literals.0 query.literals.0; do
+        cp mappings.step9 keploy/test-set-0/mappings.yaml
+        PROVEN_REPLAY=1 NOISE_KEY="$key" replay "proven-changed-literal-noise-$key" mapped
+        [ "$RC" -eq 0 ] || fail "under the proven switch, the tax rate's read inlining another key, with '$key' configured as noise: keploy test exited $RC"
+        for t in test-1 test-2 test-3 test-4 test-5; do
+            [ "$(test_status "$t")" = PASSED ] ||
+                fail "under the proven switch, the tax rate's read inlining another key, with '$key' configured as noise: $t must pass (status $(test_status "$t"))"
+        done
+    done
+    unset SHOP_RATE_KEY
     cd "$WORK" || exit 1
 fi
 
