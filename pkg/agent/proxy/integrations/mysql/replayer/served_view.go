@@ -25,14 +25,28 @@ import (
 // the consume, which numbered the serve, and only under the proven switch:
 // with the switch off nothing is stated, and the serve is as it was.
 func stateServed(ctx context.Context, m *models.Mock, live, written *mysql.PacketBundle) {
-	if m == nil || live == nil || !provenswitch.On() {
+	if m == nil || live == nil {
+		return
+	}
+	tellServed(ctx, m, func() (func() (*models.Mock, error), string, bool) {
+		return servedView(m, live, written)
+	})
+}
+
+// tellServed tells the learn step's tracker what F's serve of m just
+// consumed gave the application, as see says it: as recorded where see's
+// asRecorded is true, else the view it gives, under its key (nil, "": a view
+// keploy cannot read). Only under the proven switch: with it off nothing is
+// told, and see is not run.
+func tellServed(ctx context.Context, m *models.Mock, see func() (view func() (*models.Mock, error), key string, asRecorded bool)) {
+	if !provenswitch.On() {
 		return
 	}
 	t := learn.TrackerFrom(ctx)
 	if t == nil {
 		return
 	}
-	view, key, asRecorded := servedView(m, live, written)
+	view, key, asRecorded := see()
 	if asRecorded {
 		t.ServedMockAsRecorded(m)
 		return
