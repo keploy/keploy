@@ -756,10 +756,16 @@ func (a *App) stopComposeApp(ctx context.Context) (killed string, err error) {
 			return
 		}
 	}()
-	end, bound := utils.WaitExitByEvents(a.logger, stopped, w.procs, a.teardown.Load())
+	// One offer to end the stop at the user's Ctrl+C stands across its two
+	// waits, for the container's stop and then for the daemon's record of it
+	// (awaitComposeStopRecorded): a press the first wait's offer took, even
+	// in the look that found the app's processes gone, ends the second.
+	notice := utils.NewStopNowNotice(utils.StopOffer)
+	defer notice.Withdraw()
+	end, bound := utils.WaitExitOffered(a.logger, stopped, w.procs, a.teardown.Load(), notice, utils.OfferKillNow)
 	switch end {
 	case utils.StopExited:
-		return "", a.awaitComposeStopRecorded(recorded)
+		return "", a.awaitComposeStopRecorded(recorded, notice)
 	case utils.StopPressed:
 		killed = "keploy killed its container at the press of Ctrl+C, before it had stopped"
 	default:
@@ -769,6 +775,9 @@ func (a *App) stopComposeApp(ctx context.Context) (killed string, err error) {
 			killed = fmt.Sprintf("keploy could not read its container's processes, and the docker daemon did not say it had stopped, for %s after keploy interrupted it, so keploy killed it", utils.StopStallSaid())
 		}
 	}
+	// The kill's waits make their own offer: a press the first offer took
+	// was its answer (the kill).
+	notice.Withdraw()
 	a.logger.Warn("keploy is killing the app it stopped: "+killed, zap.String("container", a.container))
 	if err := a.signalComposeApp(wctx, id, "SIGKILL"); err != nil {
 		if errdefs.IsConflict(err) || errdefs.IsNotFound(err) {
@@ -780,10 +789,12 @@ func (a *App) stopComposeApp(ctx context.Context) (killed string, err error) {
 	// The kill ends it but in the kernel: wait for that at the same rule;
 	// a container still there after it is an error the next set's start
 	// would meet.
-	if end, _ := utils.WaitExitByEvents(a.logger, stopped, w.procs, a.teardown.Load()); end != utils.StopExited {
+	killedNotice := utils.NewStopNowNotice(utils.StopOffer)
+	defer killedNotice.Withdraw()
+	if end, _ := utils.WaitExitOffered(a.logger, stopped, w.procs, a.teardown.Load(), killedNotice, utils.OfferKillNow); end != utils.StopExited {
 		return killed, fmt.Errorf("the application's container %q had not stopped after keploy killed it", a.container)
 	}
-	return killed, a.awaitComposeStopRecorded(recorded)
+	return killed, a.awaitComposeStopRecorded(recorded, killedNotice)
 }
 
 // KEPLOY'S STOP OF A COMPOSE APP IS THROUGH ONCE THE DAEMON HAS RECORDED IT.
@@ -806,13 +817,26 @@ func (a *App) stopComposeApp(ctx context.Context) (killed string, err error) {
 // reading of the stop's die) reads the daemon's own record of it, whenever
 // the die reaches the watch. The wait is for an event, the daemon's: no news
 // at all ends it only after utils.StopStallBudget of keploy's runnable time
-// (utils.WaitExitByEvents with no processes to read), or at the user's
+// (utils.WaitExitOffered with no processes to read), or at the user's
 // Ctrl+C, and the stop then says so.
+
+// The wait for the record takes the offer of the wait before it (notice):
+// one offer to end the stop at the user's Ctrl+C stands for the whole stop.
+// With a notice of its own, a press the first wait's offer took in the look
+// that found the app's processes gone, or any press in the StopOffer after
+// they went, ended nothing: the stop waited on for the daemon until a second
+// offer and press, or the stall bound. Once the processes are gone, the offer
+// says what a press does then: keploy stops waiting, as nothing is left to
+// kill.
+
+// composeOfferStopWaiting is the stop's offer once the app's container has
+// stopped and keploy waits for the daemon's record of it.
+const composeOfferStopWaiting = "the application's container has stopped, and keploy waits for the docker daemon to record its stop; press Ctrl+C again to stop waiting"
 
 // awaitComposeStopRecorded waits for recorded, closed once the daemon has
 // recorded keploy's stop of the app's container (or has no more to say of
-// it).
-func (a *App) awaitComposeStopRecorded(recorded <-chan struct{}) error {
+// it), with the stop's offer to end at the user's Ctrl+C (notice).
+func (a *App) awaitComposeStopRecorded(recorded <-chan struct{}, notice *utils.StopNowNotice) error {
 	select {
 	case <-recorded:
 		return nil
@@ -820,7 +844,7 @@ func (a *App) awaitComposeStopRecorded(recorded <-chan struct{}) error {
 	}
 	a.logger.Debug("the application's container has stopped; keploy waits for the docker daemon to record its stop before it starts or stops the container again",
 		zap.String("container", a.container))
-	switch end, _ := utils.WaitExitByEvents(a.logger, recorded, nil, a.teardown.Load()); end {
+	switch end, _ := utils.WaitExitOffered(a.logger, recorded, nil, a.teardown.Load(), notice, composeOfferStopWaiting); end {
 	case utils.StopExited:
 		return nil
 	case utils.StopPressed:

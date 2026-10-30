@@ -570,10 +570,25 @@ func TreeOf(pid int) []Reached {
 // whose app it stops (nil: none). bound is how a kill names the stall bound,
 // as it was measured (ExitClock.Said).
 func WaitExitByEvents(logger *zap.Logger, exited <-chan struct{}, procs []Reached, moved *TeardownScope) (end StopEnd, bound string) {
-	clock, meter, stop := NewExitMeter(procs, StopStallBudget)
-	defer stop()
 	notice := NewStopNowNotice(StopOffer)
 	defer notice.Withdraw()
+	return WaitExitOffered(logger, exited, procs, moved, notice, OfferKillNow)
+}
+
+// WaitExitOffered is WaitExitByEvents with its offer to end at the user's
+// Ctrl+C made by notice, which the caller made (NewStopNowNotice) and
+// withdraws once its stop no longer waits; offer is what the offer says a
+// press does now, logged at the wait's first look at which an offer stands.
+// A stop that waits more than once (for its processes, then for word that it
+// is through) gives each wait the one notice, so one offer stands across
+// them: a press taken at an earlier wait's offer, even in the look that
+// ended that wait, ends the next at once, and so does a press between them.
+// With a notice each, the next wait offered only StopOffer after it began,
+// and a press before that ended nothing: the stop waited on, for a second
+// offer and press or its stall bound.
+func WaitExitOffered(logger *zap.Logger, exited <-chan struct{}, procs []Reached, moved *TeardownScope, notice *StopNowNotice, offer string) (end StopEnd, bound string) {
+	clock, meter, stop := NewExitMeter(procs, StopStallBudget)
+	defer stop()
 	offering := false
 	var uncompared FilesUncomparedNote
 	first := MarkExit(procs)
@@ -592,7 +607,7 @@ func WaitExitByEvents(logger *zap.Logger, exited <-chan struct{}, procs []Reache
 		}
 		if !offering && notice.Next() {
 			offering = true
-			logger.Info("keploy waits for the application to stop, as long as it makes progress on its way out; press Ctrl+C again to kill it now")
+			logger.Info(offer)
 		}
 		m := MarkExit(procs)
 		if len(procs) > 0 && m.Running == 0 {

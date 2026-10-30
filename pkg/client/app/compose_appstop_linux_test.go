@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -12,6 +14,7 @@ import (
 	"github.com/docker/docker/errdefs"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
 )
 
@@ -417,5 +420,150 @@ func TestAComposeStopTheDaemonNeverRecordsIsAnError(t *testing.T) {
 	_, signals, _ := d.state()
 	if err == nil || !strings.Contains(err.Error(), "the docker daemon had not recorded its stop") || killed != "" || strings.Join(signals, ",") != "SIGINT" {
 		t.Fatalf("said %q (err %v) after %v; want the stop in error, the daemon had not recorded it, no kill", killed, err, signals)
+	}
+}
+
+// A Ctrl+C at keploy's offer to end its stop of a compose app ends the stop
+// while keploy waits for the docker daemon to record it, the app's processes
+// gone. The stop waits twice, for the container's stop and then for the
+// daemon's record of it, and one offer stands across both waits. With an
+// offer each, a press the first wait's offer took in the look that found the
+// processes gone, or a press after they went and before the second wait's
+// own offer (StopOffer after it began: 5 s), ended nothing: the stop waited
+// on for the daemon. Once the processes are gone, the offer says a press
+// stops the wait, as nothing is left to kill. The stall bound is an hour, so
+// a press that ends nothing fails the row at its 20 s bound.
+func TestACtrlCAtTheComposeStopsOfferEndsItsWaitForTheDaemonsRecord(t *testing.T) {
+	const pressed = "keploy stopped waiting for the docker daemon to record its stop at the press of Ctrl+C"
+	t.Run("a press taken at the offer in the look that finds the app gone", func(t *testing.T) {
+		var taken atomic.Bool
+		var once sync.Once
+		r, offers := stopWithAPress(t, nil, func(msg string, pid int) {
+			if strings.Contains(msg, "press Ctrl+C again") {
+				once.Do(func() {
+					// The user's press, taken by the standing offer; the
+					// app's own shutdown ends at the same moment.
+					taken.Store(utils.MarkInterruptedAgain())
+					killAndAwait(pid)
+				})
+			}
+		})
+		if !taken.Load() || r.killed != "" || r.err == nil || !strings.Contains(r.err.Error(), pressed) {
+			t.Fatalf("said %q, err %v, the press taken %v; want the stop ended at the press, with no kill", r.killed, r.err, taken.Load())
+		}
+		if offers[0] != utils.OfferKillNow {
+			t.Fatalf("offers %q; want the first to offer the kill", offers)
+		}
+		for _, o := range offers[1:] {
+			if o != composeOfferStopWaiting {
+				t.Fatalf("offers %q; want every offer once the app's processes are gone to say a press stops the wait", offers)
+			}
+		}
+	})
+	t.Run("a press after the app has gone, before the wait for the record offers", func(t *testing.T) {
+		var once sync.Once
+		var press atomic.Bool
+		r, _ := stopWithAPress(t, nil, func(msg string, pid int) {
+			switch {
+			case strings.Contains(msg, "press Ctrl+C again"):
+				once.Do(func() {
+					// The first wait's offer stands; the app's shutdown
+					// ends now, with no press yet. A wait that made its own
+					// offer would make it an hour from its start.
+					utils.StopOffer = time.Hour
+					killAndAwait(pid)
+				})
+			case strings.Contains(msg, awaitsRecord):
+				// The user presses Ctrl+C as keploy waits for the daemon.
+				press.Store(true)
+				utils.MarkInterruptedAgain()
+			}
+		})
+		if !press.Load() || r.killed != "" || r.err == nil || !strings.Contains(r.err.Error(), pressed) {
+			t.Fatalf("said %q, err %v, pressed %v; want the stop ended at the press, with no kill", r.killed, r.err, press.Load())
+		}
+	})
+	t.Run("the offer once the app has exited says a press stops the wait", func(t *testing.T) {
+		var once sync.Once
+		r, offers := stopWithAPress(t, func(signal string, pid int) {
+			if signal == "SIGINT" {
+				// The app exits at keploy's interrupt; the daemon has not
+				// recorded it.
+				killAndAwait(pid)
+			}
+		}, func(msg string, _ int) {
+			if msg == composeOfferStopWaiting {
+				once.Do(func() { utils.MarkInterruptedAgain() })
+			}
+		})
+		if r.killed != "" || r.err == nil || !strings.Contains(r.err.Error(), pressed) {
+			t.Fatalf("said %q, err %v (offers %q); want the stop ended at the press of the offer to stop waiting, with no kill", r.killed, r.err, offers)
+		}
+	})
+}
+
+// stopWithAPress runs keploy's stop of a compose app whose main process (a
+// real one) ignores the interrupt, which is not sent on to it, and whose
+// daemon records the stop only at a SIGKILL (or the test's end). The run is
+// interrupted, StopOffer is 0 and the stall bound an hour: only a press ends
+// a stop that waits. onKill (nil: none) sees each signal keploy sends the
+// container, as the daemon takes it; hook sees each message keploy logs, on
+// the stop's own goroutine. It returns the stop's end and the offers it made
+// to end at a press, and fails t when the stop does not end in 20 s.
+func stopWithAPress(t *testing.T, onKill func(signal string, pid int), hook func(msg string, pid int)) (composeStopEnd, []string) {
+	t.Helper()
+	stallBudget(t, time.Hour)
+	offer := utils.StopOffer
+	utils.StopOffer = 0
+	t.Cleanup(func() { utils.StopOffer = offer; utils.ClearInterrupted(); utils.ResetInterruptedAgain() })
+	utils.MarkInterrupted()
+	main := started(t, "sleep", "600")
+	pid := main.Process.Pid
+	d := newComposeDocker(true, false)
+	d.pid, d.id = pid, cgroupOf(t, pid)
+	if onKill != nil {
+		d.onKill = func(signal string) { onKill(signal, pid) }
+	}
+	// Runs before started's cleanup: the daemon records the stop, so a stop
+	// still waiting ends.
+	t.Cleanup(func() { d.mu.Lock(); d.stop(); d.mu.Unlock() })
+	var mu sync.Mutex
+	var offers []string
+	core, _ := observer.New(zap.DebugLevel)
+	a := composeApp(d)
+	a.logger = zap.New(zapcore.RegisterHooks(core, func(e zapcore.Entry) error {
+		if strings.Contains(e.Message, "press Ctrl+C again") {
+			mu.Lock()
+			offers = append(offers, e.Message)
+			mu.Unlock()
+		}
+		hook(e.Message, pid)
+		return nil
+	}))
+	var r composeStopEnd
+	select {
+	case r = <-stopInTheBackground(a):
+	case <-time.After(20 * time.Second):
+		mu.Lock()
+		defer mu.Unlock()
+		t.Fatalf("the user's Ctrl+C did not end keploy's stop in 20 s: it waits on for the daemon's record (offers made: %q)", offers)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(offers) == 0 {
+		t.Fatalf("the stop ended (said %q, err %v) with no offer made", r.killed, r.err)
+	}
+	return r, append([]string(nil), offers...)
+}
+
+// killAndAwait kills process pid and waits, for up to 5 s, until it is gone
+// (reaped, or a zombie).
+func killAndAwait(pid int) {
+	_ = syscall.Kill(pid, syscall.SIGKILL)
+	for i := 0; i < 5000; i++ {
+		if _, ok := utils.ProcOf(pid); !ok {
+			return
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
