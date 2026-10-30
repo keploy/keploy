@@ -251,7 +251,7 @@ func (a *App) watchComposeApp(ctx context.Context, end func()) (stop func()) {
 			select {
 			case <-wctx.Done():
 				return
-			case <-time.After(200 * time.Millisecond):
+			case <-time.After(composeDaemonAskPace):
 			}
 		}
 	}()
@@ -260,6 +260,11 @@ func (a *App) watchComposeApp(ctx context.Context, end func()) (stop func()) {
 		<-done
 	}
 }
+
+// composeDaemonAskPace is the pace at which keploy asks the daemon again for
+// a stream or a wait that it failed at once: a walking pace, not a spin. It
+// bounds nothing: what keploy waits for is the daemon's answer.
+const composeDaemonAskPace = 200 * time.Millisecond
 
 // composeAppDieFilter is what the watch asks the daemon for: the die events
 // of the containers of the app's service, or, with no service known, of the
@@ -304,21 +309,64 @@ func (a *App) composeAppDied(ctx context.Context, m events.Message) bool {
 	ictx, icancel := context.WithTimeout(ctx, dockerInspectBudget)
 	info, err := a.docker.ContainerInspect(ictx, ref)
 	icancel()
-	if err == nil && info.ContainerJSONBase != nil && info.State != nil && info.State.Running {
+	read := err == nil && info.ContainerJSONBase != nil && info.State != nil
+	if read && info.State.Running {
+		return false
+	}
+	// A die sent before the container's current run began is an earlier
+	// run's (composeDieOfAnEarlierRun): the current run's own die is still
+	// to come, and decides.
+	if read && composeDieOfAnEarlierRun(m, info.State) {
 		return false
 	}
 	// Read after the inspect: a stop keploy began meanwhile is its own.
 	if a.composeApp.stopping.Load() {
 		return false
 	}
-	code, err := strconv.Atoi(m.Actor.Attributes["exitCode"])
-	if err != nil {
-		code = -1
+	// The halt's exit code is the run's that is down now, as the daemon
+	// records it; the event's only when the container cannot be read.
+	code := -1
+	if read {
+		code = info.State.ExitCode
+	} else if c, err := strconv.Atoi(m.Actor.Attributes["exitCode"]); err == nil {
+		code = c
 	}
 	a.composeApp.halted.Store(&composeHalt{exitCode: code})
 	a.logger.Info("the application's container exited, and keploy had not stopped it: ending the run",
 		zap.String("container", a.container), zap.String("id", m.Actor.ID), zap.Int("exitCode", code))
 	return true
+}
+
+// A DIE OF AN EARLIER RUN IS NOT THE CURRENT RUN'S END.
+//
+// The die of keploy's own stop can reach the watch after keploy has started
+// the container again (the daemon records the stop, which keploy's stop waits
+// for, before it sends the die, and the stream is late to deliver it). When
+// the new run has exited too by the time the watch reads that die, the
+// inspect reads a container down with no stop of keploy's in progress, and
+// the die was taken for the new run's halt, with the exit code of keploy's
+// interrupt (0 or 130) for an app that had crashed: the report misled the
+// user's debugging, and the new run's own die was never read. The daemon
+// sends a container's die while it holds the container, before any start of
+// it can begin the next run (moby's handleContainerExit logs it before it
+// lets the container go), so a die sent before the current run began (its
+// StartedAt) is an earlier run's, and is dropped; the current run's own die
+// comes after it on the stream, and decides. And the halt's exit code is the
+// one the inspect reads, of the run that is down now, not the event's.
+
+// composeDieOfAnEarlierRun reports whether m, a die of the container state
+// reads, was sent before the container's current run began: an earlier
+// run's. A die or a run whose time the daemon does not give is not.
+func composeDieOfAnEarlierRun(m events.Message, state *container.State) bool {
+	sent := m.TimeNano
+	if sent == 0 {
+		sent = m.Time * int64(time.Second)
+	}
+	began, err := time.Parse(time.RFC3339Nano, state.StartedAt)
+	if sent == 0 || err != nil || began.IsZero() {
+		return false
+	}
+	return time.Unix(0, sent).Before(began)
 }
 
 // composeHaltEnd is the run's end on a halt of the app: halt is closed, the
@@ -566,29 +614,44 @@ func (a *App) stopComposeApp(ctx context.Context) (killed string, err error) {
 	// stopped: the container has stopped, on the daemon's word or on its
 	// main process's exit, which a starved daemon is slow to report.
 	// recorded: the daemon has recorded the stop (its word), or has no more
-	// to say of it (the container was removed, or its wait failed).
+	// to say of it (the container was removed).
 	stopped, recorded := make(chan struct{}), make(chan struct{})
 	go func() {
 		defer close(recorded)
 		mainGone := w.mainGone
+		reasked := false
 		for {
 			select {
 			case <-daemonSaid:
 			case err := <-waitErr:
 				if !errdefs.IsNotFound(err) {
-					// No news of the container (removed, once seen, is
-					// stopped): its main process's exit stands.
-					a.logger.Debug("the daemon's wait for the app's container failed; waiting for its main process", zap.Error(err))
-					daemonSaid, waitErr = nil, nil
-					if mainGone != nil {
-						continue
+					if wctx.Err() != nil {
+						return
 					}
+					// The wait failed (its connection broke, or the daemon
+					// refused it), which says nothing of the stop: the main
+					// process's exit is not the daemon's record of it, so
+					// the daemon is asked again. A wait asked once the stop
+					// is recorded answers at once; one that fails again is
+					// asked again at a walking pace, not in a spin. The stop
+					// holds stopMu all the while, and bounds the wait for
+					// the answer (awaitComposeStopRecorded).
+					a.logger.Debug("the daemon's wait for the app's container failed; keploy asks the daemon again", zap.Error(err))
+					if reasked {
+						select {
+						case <-wctx.Done():
+							return
+						case <-time.After(composeDaemonAskPace):
+						}
+					}
+					reasked = true
+					daemonSaid, waitErr = a.docker.ContainerWait(wctx, id, container.WaitConditionNotRunning)
+					continue
 				}
+				// Removed, once seen: stopped, and the daemon has no more
+				// to say of it.
 			case <-mainGone:
 				close(stopped)
-				if daemonSaid == nil {
-					return
-				}
 				mainGone = nil
 				continue
 			case <-wctx.Done():

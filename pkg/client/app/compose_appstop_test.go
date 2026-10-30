@@ -25,8 +25,8 @@ import (
 )
 
 // composeDocker is a docker daemon holding one app container: a kill with
-// SIGINT stops it when exitsOnInt, a SIGKILL always does; a start runs it;
-// events go out on the stream each Events call opens.
+// SIGINT stops it when exitsOnInt, a SIGKILL does unless holdsKill; a start
+// runs it; events go out on the stream each Events call opens.
 type composeDocker struct {
 	docker.Client
 	mu         sync.Mutex
@@ -54,10 +54,19 @@ type composeDocker struct {
 	// not at once (an app whose shutdown takes a while).
 	intDelay time.Duration
 	// onKill, set, is called with each signal a kill sends (the Linux
-	// tests send it on to the container's real process); waited, set, gets
-	// one value for each wait asked for.
+	// tests send it on to the container's real process).
 	onKill func(signal string)
-	waited chan struct{}
+	// holdsKill: a SIGKILL does not stop the container; the daemon records
+	// the stop only when the test says (stop), as a loaded one is late to.
+	holdsKill bool
+	// waitFails, set, is the next wait's end: it fails with the error the
+	// test sends on it, and never answers otherwise (a wait whose
+	// connection broke); waits counts the waits asked for.
+	waitFails chan error
+	waits     int
+	// startedAt is when the container's current run began (a start that
+	// started it), as its inspect gives it; zero: not said.
+	startedAt time.Time
 }
 
 func (d *composeDocker) ContainerList(_ context.Context, opts container.ListOptions) ([]container.Summary, error) {
@@ -118,7 +127,7 @@ func (d *composeDocker) ContainerKill(_ context.Context, _ string, signal string
 			d.stop()
 			d.mu.Unlock()
 		}()
-	case signal == "SIGKILL" || (signal == "SIGINT" && d.exitsOnInt):
+	case (signal == "SIGKILL" && !d.holdsKill) || (signal == "SIGINT" && d.exitsOnInt):
 		d.stop()
 	}
 	return nil
@@ -128,11 +137,22 @@ func (d *composeDocker) ContainerWait(ctx context.Context, _ string, _ container
 	d.mu.Lock()
 	exited := d.exitedCh
 	running := d.running
-	if d.waited != nil {
-		d.waited <- struct{}{}
-	}
+	fails := d.waitFails
+	d.waitFails = nil
+	d.waits++
 	d.mu.Unlock()
 	out, errs := make(chan container.WaitResponse, 1), make(chan error, 1)
+	if fails != nil {
+		go func() {
+			select {
+			case err := <-fails:
+				errs <- err
+			case <-ctx.Done():
+				errs <- ctx.Err()
+			}
+		}()
+		return out, errs
+	}
 	if !running {
 		out <- container.WaitResponse{}
 		return out, errs
@@ -155,6 +175,7 @@ func (d *composeDocker) ContainerStart(context.Context, string, container.StartO
 	if !d.running {
 		d.running = true
 		d.exitedCh = make(chan struct{})
+		d.startedAt = time.Now()
 	}
 	return nil
 }
@@ -162,10 +183,14 @@ func (d *composeDocker) ContainerStart(context.Context, string, container.StartO
 func (d *composeDocker) ContainerInspect(context.Context, string) (container.InspectResponse, error) {
 	d.mu.Lock()
 	running, project, pid, id, code := d.running, d.project, d.pid, d.id, d.exitCode
+	var startedAt string
+	if !d.startedAt.IsZero() {
+		startedAt = d.startedAt.UTC().Format(time.RFC3339Nano)
+	}
 	d.mu.Unlock()
 	defer func() { d.inspected <- struct{}{} }()
 	return container.InspectResponse{
-		ContainerJSONBase: &container.ContainerJSONBase{ID: id, State: &container.State{Running: running, Pid: pid, ExitCode: code}},
+		ContainerJSONBase: &container.ContainerJSONBase{ID: id, State: &container.State{Running: running, Pid: pid, ExitCode: code, StartedAt: startedAt}},
 		Config:            &container.Config{Labels: map[string]string{"com.docker.compose.project": project}},
 	}, nil
 }
@@ -339,6 +364,7 @@ func TestTheComposeAppsWatchEndsTheRunOnAnExitKeployDidNotAskFor(t *testing.T) {
 	}
 
 	d.mu.Lock()
+	d.exitCode = 3
 	d.stop()
 	d.mu.Unlock()
 	stream <- die("3")
@@ -349,6 +375,77 @@ func TestTheComposeAppsWatchEndsTheRunOnAnExitKeployDidNotAskFor(t *testing.T) {
 	}
 	if h := a.composeAppHalt(); h == nil || h.exitCode != 3 || ends.Load() != 1 {
 		t.Fatalf("halt %+v after %d ends; want exit code 3, once", h, ends.Load())
+	}
+}
+
+// The die of keploy's own stop can reach the watch after keploy has started
+// the container again, and after that new run has exited on its own: it was
+// taken for the new run's halt, with keploy's interrupt's exit code (130) for
+// an app that had crashed (3), and the new run's own die was never read. A
+// die sent before the container's current run began is an earlier run's: it
+// is dropped, and the current run's own die ends the run, with its exit code.
+// One the watch cannot place (the daemon gives it no time) still ends it
+// with the exit code of the run that is down now, as the daemon records it.
+func TestALateDieOfKeploysStopIsNotTheHaltOfTheRunAfterIt(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// placed: the late die has the time the daemon sent it.
+		placed bool
+	}{
+		{"a die sent before the run began is dropped", true},
+		{"a die the watch cannot place says the run's own exit code", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			d := newComposeDocker(true, true)
+			a := composeApp(d)
+			ended := make(chan struct{}, 2)
+			stop := a.watchComposeApp(ctx, func() { ended <- struct{}{} })
+			defer stop()
+			stream := <-d.streams
+			<-d.errStreams
+
+			// keploy's stop, which the daemon has recorded; its die has
+			// not reached the watch yet.
+			if _, err := a.StopComposeApp(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if anew, err := a.StartComposeApp(ctx); err != nil || !anew {
+				t.Fatalf("the next start: anew %v, err %v; want the app started anew", anew, err)
+			}
+			// The die was sent before the start began the new run.
+			d.mu.Lock()
+			late := die("130")
+			late.TimeNano = d.startedAt.Add(-time.Millisecond).UnixNano()
+			if !tc.placed {
+				late.TimeNano = 0
+			}
+			// The new run exits on its own, with 3.
+			d.exitCode = 3
+			d.stop()
+			d.mu.Unlock()
+			for len(d.inspected) > 0 {
+				<-d.inspected
+			}
+			stream <- late
+			<-d.inspected // the watch has read the late die
+			if tc.placed {
+				select {
+				case <-ended:
+					t.Fatalf("the late die of keploy's own stop ended the run (halt %+v); want it dropped, as an earlier run's", a.composeAppHalt())
+				default:
+				}
+				stream <- die("3")
+			}
+			select {
+			case <-ended:
+			case <-time.After(time.Minute):
+				t.Fatal("the new run's own exit did not end the run")
+			}
+			if h := a.composeAppHalt(); h == nil || h.exitCode != 3 {
+				t.Fatalf("halt %+v; want the new run's own exit code, 3, not keploy's interrupt's (130)", h)
+			}
+		})
 	}
 }
 
