@@ -274,7 +274,12 @@ func TestRecord_InterruptStillDrainsWhatTheAgentHas(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Mock.Name = "interrupt-test"
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // the user interrupted; the runner has already exited
+	defer cancel()
+	// The user interrupts as the test command runs, once the recording is
+	// set up. A stop before Record raced the setup gate (NewSetupGate's
+	// AfterFunc against its Up), and a Ctrl+C during setup rightly ends the
+	// run before anything is captured: the row failed 2 runs in 300.
+	inst.onRun = cancel
 	_ = New(zap.NewNop(), inst, db, nil, FileStore{}, nil, cfg).Record(ctx)
 	inst.wg.Wait()
 	if got := db.inserted(); len(got) != 2 {
