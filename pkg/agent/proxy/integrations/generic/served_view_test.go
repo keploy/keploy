@@ -318,16 +318,26 @@ func (r *refuseFirst) UpdateUnFilteredMock(old, new *models.Mock) bool {
 	return r.MockManager.UpdateUnFilteredMock(old, new)
 }
 
+// GetSessionMocks is the store's startup and session mocks (no test is
+// open, so no exact view leads them), each once (a mock staged before the
+// first test is in both), less the refused one.
 func (r *refuseFirst) GetSessionMocks() ([]*models.Mock, error) {
-	ms, err := r.MockManager.GetSessionMocks()
-	if r.refused == nil || err != nil {
-		return ms, err
+	startup, err := r.GetStartupMocks()
+	if err != nil {
+		return nil, err
 	}
-	out := make([]*models.Mock, 0, len(ms))
-	for _, m := range ms {
-		if m.Name != r.refused.Name {
-			out = append(out, m)
+	session, err := r.GetSessionScopedMocks()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*models.Mock, 0, len(startup)+len(session))
+	seen := make(map[*models.Mock]bool, len(startup)+len(session))
+	for _, m := range append(startup, session...) {
+		if seen[m] || (r.refused != nil && m.Name == r.refused.Name) {
+			continue
 		}
+		seen[m] = true
+		out = append(out, m)
 	}
 	return out, nil
 }
