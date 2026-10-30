@@ -7,12 +7,14 @@
 #
 # Both ways. Steps 1-5 run without the proven switch: the record and replay
 # today's users run, on their default (the flip deletes them with the switch,
-# as this build refuses every replay under it). Steps 6-8 run under
+# as this build refuses every replay under it). Steps 6-9 run under
 # KEPLOY_PROVEN=1, which the flip makes the default: the record keeps each
 # test's mocks and begin under the test's ID, and this build, which does not
 # judge each test (keploy enterprise does), refuses the replay before it runs
 # the test command; a TLS client's hang-ups are charged only for a process
-# that sends no call through keploy's certificate in the same test. The
+# that sends no call through keploy's certificate in the same test; a client
+# that hangs up on a quiet streaming answer from an app the test command
+# started ends its call, and its test's end does not wait on it. The
 # suite's harness speaks scope protocol v1 both ways (keploy_v1.py,
 # conftest_v1.py); without the switch it sends the worker's
 # pid, as today's workers do, and the record and the gated replay run again
@@ -633,6 +635,127 @@ MOCKS=$(grep -c '^kind: Http' keploy/e2e-tls/mocks.yaml 2>/dev/null)
 HUNG=$(grep -o 'a client hung up on [0-9]* TLS handshake(s)' rec-tls.log | sort -u)
 [ "$HUNG" = "a client hung up on 1 TLS handshake(s)" ] ||
   { echo "FAIL: want only the rejecting process's hang-up charged (a client hung up on 1 TLS handshake(s)), got: ${HUNG:-none}"; FAIL=1; }
+
+echo "== 9. under the proven switch, a client that hangs up on a quiet streaming answer ends its call, and its test's end does not wait on it =="
+# A test's client follows a stream of a job's events, or a long poll, from an
+# app the test command started, and hangs up while the app sends nothing (no
+# heartbeat). keploy relays the call to the app live. Without keploy the app
+# would see its client go; keploy must tell it, and the test's end must not
+# wait on an exchange its client left. Before, keploy read only the app while
+# it relayed the answer: the app never learned its client went, the call's
+# connection held the test's end, and keploy's agent gave up on it ("made no
+# progress settling the test's calls"), so the test was not judged.
+# streamapp.py, a child of pytest (so its calls are live, not mocked):
+#   /events  one NDJSON event, then nothing; it watches its socket for its
+#            client's going, as a Go server's request context does, and logs
+#            "gone /events" when it sees it
+#   /poll    the answer's headers, then nothing; deaf: it never looks at its
+#            client again, until it is stopped
+# test_stream.py: test_events_hang_up and test_poll_hang_up each read what the
+# app sent and hang up. test_app_stops then stops the app, which ends the deaf
+# app's call. Each test's end must pass: the attentive app is told (its log),
+# the deaf app's call holds no test's end once keploy told it on, and each
+# exchange is told at Info as not recorded.
+STREAM_PORT=18996
+cat > streamapp.py <<'PY'
+import http.server, json, os, select, socketserver, sys, threading
+PORT, LOG = int(sys.argv[1]), sys.argv[2]
+def say(line):
+    with open(LOG, "a") as f:
+        f.write(line + "\n")
+class H(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-ndjson")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        if self.path == "/events":
+            line = json.dumps({"seq": 1, "event": "started"}).encode() + b"\n"
+            self.wfile.write(b"%x\r\n%s\r\n" % (len(line), line))
+            self.wfile.flush()
+            say("streaming /events")
+            # No heartbeat: only the socket tells this app its client went.
+            while True:
+                select.select([self.connection], [], [])
+                try:
+                    b = self.connection.recv(1)
+                except OSError:
+                    b = b""
+                if not b:
+                    break
+            say("gone /events")
+            self.close_connection = True
+            return
+        self.wfile.flush()
+        say("polling " + self.path)
+        threading.Event().wait()
+    def log_message(self, *a): pass
+class S(socketserver.ThreadingTCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+with S(("127.0.0.1", PORT), H) as s:
+    with open("streamapp.pid", "w") as f:
+        f.write(str(os.getpid()))
+    print("ready", flush=True)
+    s.serve_forever()
+PY
+cat > test_stream.py <<PY
+import socket, subprocess, sys
+import pytest
+PORT = $STREAM_PORT
+
+@pytest.fixture(scope="module")
+def app():
+    p = subprocess.Popen([sys.executable, "streamapp.py", str(PORT), "streamapp.log"],
+                         stdout=subprocess.PIPE, text=True)
+    try:
+        assert p.stdout.readline().strip() == "ready"
+        yield p
+    finally:
+        p.terminate()
+        p.wait()
+
+def hang_up(path, until):
+    # Reads the answer until it ends with until, then hangs up on it.
+    s = socket.create_connection(("127.0.0.1", PORT))
+    s.sendall(("GET %s HTTP/1.1\r\nHost: localhost\r\n\r\n" % path).encode())
+    data = b""
+    while not data.endswith(until):
+        b = s.recv(65536)
+        assert b, data
+        data += b
+    s.close()
+    return data
+
+def test_events_hang_up(app):
+    data = hang_up("/events", b'"started"}\n\r\n')
+    assert data.startswith(b"HTTP/1.1 200"), data
+
+def test_poll_hang_up(app):
+    data = hang_up("/poll", b"\r\n\r\n")
+    assert data.startswith(b"HTTP/1.1 200"), data
+
+def test_app_stops(app):
+    app.terminate()
+    assert app.wait() is not None
+PY
+: > streamapp.log
+rm -f streamapp.pid
+sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$RECORD_BIN" mock record -c "python3 -m pytest -q -p no:cacheprovider test_stream.py" --name e2e-stream --disable-tele 2>&1 | tee rec-stream.log
+RC=${PIPESTATUS[0]}
+# The app is pytest's, which stopped it; stop it here too if pytest did not.
+[ -s streamapp.pid ] && sudo kill "$(cat streamapp.pid)" 2>/dev/null
+[ "$RC" -eq 0 ] && grep -q "3 passed" rec-stream.log ||
+  { echo "FAIL: a client's hang-up on a quiet streaming answer should leave its test judged (exit 0, 3 passed), got $RC"; FAIL=1; }
+GAVE=$(grep -c "made no progress settling" rec-stream.log)
+[ "$GAVE" -eq 0 ] || { echo "FAIL: keploy's agent gave up settling a test's calls ($GAVE line(s)): the client's hang-up held the test's end"; FAIL=1; }
+grep -qx "gone /events" streamapp.log ||
+  { echo "FAIL: the app was never told its /events client went: keploy did not pass on the client's hang-up"; cat streamapp.log; FAIL=1; }
+for P in /events /poll; do
+  grep -q "Not recording this request as a test case: its client closed.*\"url\": \"$P\"" rec-stream.log ||
+    { echo "FAIL: keploy did not say it left $P's exchange unrecorded because its client closed"; FAIL=1; }
+done
 fi
 
 if [ "$FAIL" -eq 0 ]; then echo "MOCK E2E: PASSED"; else echo "MOCK E2E: FAILED"; fi
