@@ -6,10 +6,9 @@ import (
 	"encoding/json"
 	"strconv"
 
-	"go.keploy.io/server/v3/pkg/matcher/learn"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
-	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 // stateServed says what F's serve of m, a command's recording the command
@@ -28,30 +27,9 @@ func stateServed(ctx context.Context, m *models.Mock, live, written *mysql.Packe
 	if m == nil || live == nil {
 		return
 	}
-	tellServed(ctx, m, func() (func() (*models.Mock, error), string, bool) {
+	integrations.TellServed(ctx, m, func() (func() (*models.Mock, error), string, bool) {
 		return servedView(m, live, written)
 	})
-}
-
-// tellServed tells the learn step's tracker what F's serve of m just
-// consumed gave the application, as see says it: as recorded where see's
-// asRecorded is true, else the view it gives, under its key (nil, "": a view
-// keploy cannot read). Only under the proven switch: with it off nothing is
-// told, and see is not run.
-func tellServed(ctx context.Context, m *models.Mock, see func() (view func() (*models.Mock, error), key string, asRecorded bool)) {
-	if !provenswitch.On() {
-		return
-	}
-	t := learn.TrackerFrom(ctx)
-	if t == nil {
-		return
-	}
-	view, key, asRecorded := see()
-	if asRecorded {
-		t.ServedMockAsRecorded(m)
-		return
-	}
-	t.ServedMockLive(m, key, view)
 }
 
 // servedView is F's view of m, which F served to the command live with the

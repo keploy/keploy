@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"slices"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	mysqlUtils "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/utils"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
@@ -67,7 +68,7 @@ func stateHandshake(ctx context.Context, s *servedHandshake) {
 	if s == nil || s.mock == nil {
 		return
 	}
-	tellServed(ctx, s.mock, s.view)
+	integrations.TellServed(ctx, s.mock, s.view)
 }
 
 // view is F's view of s.mock (stateHandshake): the recording with each
