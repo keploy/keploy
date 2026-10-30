@@ -67,7 +67,7 @@ func probeDefaults() {
 		defaultsWhy = fmt.Sprintf("a probe listener failed: %v", err)
 		return
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 	tl, ok := ln.(*net.TCPListener)
 	if !ok {
 		defaultsWhy = fmt.Sprintf("a probe listener is a %T", ln)
