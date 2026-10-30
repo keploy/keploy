@@ -2930,9 +2930,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	// this line without the defer above firing.
 	consumersStarted = true
 
-	// Not once the recording is stopping: an app started now would only be
-	// stopped again.
-	if r.config.CommandType != string(utils.DockerCompose) && ctx.Err() == nil {
+	startApp := func() {
 		runAppErrGrp.Go(func() error {
 			runAppError = r.instrumentation.Run(runAppCtx, models.RunOptions{})
 			noteStopKilled(&stopKilled, runAppError)
@@ -2943,6 +2941,23 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 			return nil
 		})
 	}
+	// Not once the recording is stopping: an app started now would only be
+	// stopped again.
+	if r.config.CommandType != string(utils.DockerCompose) && ctx.Err() == nil {
+		startApp()
+	}
+
+	// Watch mode: keploy owns the application's lifecycle. When the app exits
+	// on its own, keploy runs the command again (after a backoff) and keeps
+	// recording into the same test set. It never waits for someone else to
+	// bring the app back, so the app is never started twice. Compose is left
+	// out: its app runner also brings up the agent's project.
+	watch := r.config.Record.Watch
+	if watch && r.config.CommandType == string(utils.DockerCompose) {
+		r.logger.Warn("watch mode is not supported for docker compose recording; the recording will stop when the application exits")
+		watch = false
+	}
+	var restarts watchBackoff
 
 	// setting a timer for recording
 	if r.config.Record.RecordTimer != 0 && ctx.Err() == nil {
@@ -2965,6 +2980,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	}
 
 	// Waiting for the error to occur in any of the go routines
+waitForStop:
 	select {
 	case appErr := <-appErrChan:
 		// Under compose the agent is a service in the project: when it
@@ -2983,6 +2999,20 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 			stopReason = "the user application was stopped (SIGTERM or SIGINT), hence stopping keploy"
 			r.logger.Info(stopReason, zap.Int("app_exit_code", appErr.ExitCode))
 			return nil
+		}
+		if watch && (appErr.AppErrorType == models.ErrAppStopped || appErr.AppErrorType == models.ErrUnExpected) {
+			delay := restarts.next(time.Now())
+			r.logger.Info("application exited; watch mode is on, restarting it",
+				zap.String("reason", string(appErr.AppErrorType)),
+				zap.Int("app_exit_code", appErr.ExitCode),
+				zap.Duration("restart_in", delay))
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-time.After(delay):
+			}
+			startApp()
+			goto waitForStop
 		}
 		switch appErr.AppErrorType {
 		case models.ErrCommandError:
@@ -3014,6 +3044,31 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	}
 	utils.LogError(r.logger, err, stopReason)
 	return fmt.Errorf("%s: %w", stopReason, err)
+}
+
+// watchBackoff spaces out watch-mode restarts so an application that keeps
+// crashing on start does not spin: a restart that follows the previous one
+// within watchBackoffStable doubles the delay, up to watchBackoffMax, and an
+// application that ran longer than that starts again after watchBackoffMin.
+type watchBackoff struct {
+	delay time.Duration
+	last  time.Time
+}
+
+const (
+	watchBackoffMin    = time.Second
+	watchBackoffMax    = 30 * time.Second
+	watchBackoffStable = 10 * time.Second
+)
+
+func (b *watchBackoff) next(now time.Time) time.Duration {
+	if b.delay == 0 || now.Sub(b.last) >= b.delay+watchBackoffStable {
+		b.delay = watchBackoffMin
+	} else {
+		b.delay = min(2*b.delay, watchBackoffMax)
+	}
+	b.last = now
+	return b.delay
 }
 
 func (r *Recorder) GetTestAndMockChans(ctx context.Context) (FrameChan, error) {
