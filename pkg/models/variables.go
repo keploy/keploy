@@ -298,6 +298,38 @@ type ClockOffset struct {
 	// running test began on the application's clock refuses such a read, and
 	// one of a Since this keploy does not read holds nothing (SinceKnown).
 	Since string `json:"since,omitempty" yaml:"since,omitempty" bson:"since,omitempty"`
+	// Word, of a read that is one word of a longer text (keploy mock's
+	// client test naming an app "[E2E] stop-<UnixNano>" by its own clock
+	// read since the test began), is the text around that word as
+	// recorded (ClockWord): a replay checks the value is Before, then one
+	// such read, then After, so only the word is read as the clock and the
+	// rest is still compared. nil for a read that is its value whole, as
+	// every learning before Word was: an old file reads the same. A keploy
+	// that does not read Word checks the whole value as one read, which a
+	// text around the word is not, so it refuses it.
+	Word *ClockWord `json:"word,omitempty" yaml:"word,omitempty" bson:"word,omitempty"`
+}
+
+// ClockWord is where a read of the clock stands in a longer text
+// (ClockOffset.Word): the text before it and after it, as recorded.
+type ClockWord struct {
+	Before string `json:"before" yaml:"before" bson:"before"`
+	After  string `json:"after" yaml:"after" bson:"after"`
+}
+
+// meetWord is the Word two learnings of one place read it at, a and b, and
+// whether they share one: both whole (nil), or both the same word of the
+// same text. A read whole and one inside a text, or two at different places
+// of a text, are two forms of the value: their Meet is LayoutApart (Empty).
+func meetWord(a, b *ClockWord) (*ClockWord, bool) {
+	switch {
+	case a == nil && b == nil:
+		return nil, true
+	case a == nil || b == nil || *a != *b:
+		return nil, false
+	}
+	w := *a
+	return &w, true
 }
 
 // AppZoneMatters reports whether what the learn step learned of o depends
@@ -1134,7 +1166,8 @@ func (o ClockOffset) signed() bool {
 // (a Plain and one with an offset, or two offsets apart), that read it in
 // zones no one zone holds (UTC and the application's: ZoneApart,
 // meetZones), or that saw it written in different layouts (LayoutApart,
-// meetLayouts) meet as an Empty one, which holds nothing; ZoneEither meets
+// meetLayouts), whole at one and a word of a text at another, or at two
+// places of a text (meetWord), meet as an Empty one, which holds nothing; ZoneEither meets
 // UTC or the application's zone as that one, the zone both hold, and a
 // Layout of "" (learned before Layout was) meets another as that one. Two
 // that read the application's zone as two zones (AppZoneApart: two named
@@ -1147,6 +1180,13 @@ func (o ClockOffset) signed() bool {
 // pairings came in.
 func (o ClockOffset) Meet(p ClockOffset) ClockOffset {
 	m := ClockOffset{Min: max(o.Min, p.Min), Max: min(o.Max, p.Max), Res: max(o.Res, p.Res), Zone: meetZones(o.Zone, p.Zone), Layout: meetLayouts(o.Layout, p.Layout), Since: meetSince(o.Since, p.Since)}
+	// One read whole and one inside a text, or at two places of a text
+	// (meetWord), were written in two forms: no one layout holds both.
+	if word, ok := meetWord(o.Word, p.Word); ok {
+		m.Word = word
+	} else {
+		m.Layout = LayoutApart
+	}
 	// A learning whose value a replay reads in no zone of the application's
 	// (CutInAppZone: one cut to the minute or finer), that names none, says
 	// nothing of the zone a meet read in it holds: the other's reading says
@@ -1393,6 +1433,10 @@ func (o ClockOffset) String() string {
 		return "clock read from a start this keploy does not read (" + strconv.Quote(o.Since) + ")"
 	}
 	s := o.offsetString() + o.zoneString() + o.layoutString()
+	if o.Word != nil {
+		// Where the word stands, never what the text holds.
+		s += ", as the word after the text's first " + strconv.Itoa(len(o.Word.Before)) + " bytes and before its last " + strconv.Itoa(len(o.Word.After))
+	}
 	if o.Since == SinceTestBegin {
 		s += ", read after its test began and before its call"
 	}

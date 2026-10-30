@@ -1191,7 +1191,7 @@ func (v *valueDrift) eachChanged(find func(i int, t string, recorded bool) strin
 			recorded, moved bool
 		}{{v.lost[i], true, false}, {v.gained[i], false, false}, {v.movedRec[i], true, true}, {v.movedLive[i], false, true}} {
 			for _, t := range v.inOrder(set.words, set.recorded) {
-				if set.moved && allClock(t, set.recorded, v.clock) || !set.moved && clockWord(t, set.recorded, v, v.clock) {
+				if v.clockChanged(i, t, set.recorded, set.moved) {
 					continue
 				}
 				if why := find(i, t, set.recorded); why != "" {
@@ -1224,6 +1224,66 @@ func gluedIn(ed *valueDrift, t string, recorded bool) bool {
 // place holds, is refused (unaccounted).
 func pickUnaccounted(where string) string {
 	return "the moment record's full round saw in it stands " + where + ", while no earlier place holds the moment it was recorded with: it may be a pick from what the application was given, by its clock, and keploy cannot tell it is a read of the clock. If the field is a time the application reads from its own clock, declare it noise in keploy.yml, and keploy stops comparing it"
+}
+
+// clockChanged reports whether t, a word of what v changed in reading i
+// (eachChanged; moved: one of its runs' words, movedWords), recorded or
+// live, changed only with the clock, so the word rule searches no place for
+// it. A word lost or gained is one every ASCII word of which the other side
+// lacks is a clock word (clockWord). A word of its runs is one every ASCII
+// word of which is a clock word (allClock), since its words may all stand on
+// the other side in another grouping ("abc-def", then "abc_def"), or one the
+// other side does not hold that is a word the other side holds in that
+// reading with one clock read of it changed for another and every other
+// byte kept (clockSwapped): the id "stop-<UnixNano>" of a coarse reading
+// (idByte), a test's own name read on the clock, is no word F may have given
+// the application where the finer readings' "<UnixNano>" is none. So the
+// clock evidence comes before the word rule's search of what F gave there
+// (unseenWhy, servedWhy) for a word inside a text, as it does for a value
+// that is one read whole.
+func (v *valueDrift) clockChanged(i int, t string, recorded, moved bool) bool {
+	if !moved {
+		return clockWord(t, recorded, v, v.clock)
+	}
+	if allClock(t, recorded, v.clock) {
+		return true
+	}
+	other := v.liveTok[i]
+	if !recorded {
+		other = v.recTok[i]
+	}
+	return !other[t] && v.clockSwapped(t, recorded, other)
+}
+
+// clockSwapped reports whether t, a word of v recorded or live, is a word
+// the other side holds (other) with one clock word of it (a word of v's
+// clock reads on t's side, standing in t at ASCII word boundaries) changed
+// for a clock word of the other side, every other byte of it kept.
+func (v *valueDrift) clockSwapped(t string, recorded bool, other map[string]bool) bool {
+	mine, theirs := v.clock.rec, v.clock.live
+	if !recorded {
+		mine, theirs = theirs, mine
+	}
+	for c := range mine {
+		for from := 0; from < len(t); {
+			k := strings.Index(t[from:], c)
+			if k < 0 {
+				break
+			}
+			k += from
+			from = k + 1
+			end := k + len(c)
+			if k > 0 && isWord(t[k-1]) || end < len(t) && isWord(t[end]) {
+				continue
+			}
+			for c2 := range theirs {
+				if other[t[:k]+c2+t[end:]] {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // allClock reports whether every ASCII word of t is a clock word of c, on

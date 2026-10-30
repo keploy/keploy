@@ -1717,10 +1717,21 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// variable, an echo, a read plus an offset) is not, and the refusal
 		// stands: the wider window turns a refusal into a checked read,
 		// never into noise.
+		//
+		// So does a text whose one changed word is such a read (sinceWord:
+		// keploy mock's harness naming an app "[E2E] stop-<UnixNano>" by its
+		// own clock, which keploy's launcher puts on the run's clock as it
+		// does the application's), where the window from each run's test
+		// begin learns the text as noise of that word alone: that word is
+		// learned as a read since its test began (models.ClockOffset.Word),
+		// checked at every replay, and the rest of the text is still
+		// compared.
 		if wb := w.sinceBegin(); ln.Kind == KindUnaccounted && wb != nil {
 			if early := leaf(r, l, wb, 0); early.Kind == KindClockRead && early.Read != nil {
 				early.Read.Since = models.SinceTestBegin
 				ln = early
+			} else if word, ok := sinceWord(early, wb, leaf); ok {
+				ln = word
 			}
 		}
 		// A copy of an earlier read of the clock that is a read in its own
@@ -1809,6 +1820,43 @@ func sinceTestBegin(ln Learned) (Learned, bool) {
 	return ln, true
 }
 
+// sinceWord is early, a text its call's window from each run's test begin
+// (wb) learns as noise (no read of it whole: Read nil), learned instead as a
+// read of the clock since its test began of the one word of it that
+// changed (clockWordIn): the word, read alone in wb by leaf as a value of
+// its own (every rule of a value: its sources, its echo, a read plus an
+// offset, the form and zone it is read in), is a plain read of the clock
+// (KindClockRead), and the text around it is the same in both runs. The
+// read carries that text (models.ClockOffset.Word), so a replay reads the
+// word alone as the clock and compares the rest, checked from its test's
+// begin (models.SinceTestBegin). ok is false for anything else (a text two
+// words of which changed, one whose changed word is no read in wb, or one
+// leaf learns otherwise), which stays as the call's own window learned it:
+// the wider window turns a refusal into a checked read, never into noise.
+func sinceWord(early Learned, wb *Window, leaf func(r, l Leaf, w *Window, skip skipRule) Learned) (Learned, bool) {
+	if early.Kind != KindNoise || early.Read != nil {
+		return early, false
+	}
+	r, l := early.Recorded, early.Live
+	before, rw, lw, after, ok := clockWordIn(r.Value, l.Value, wb)
+	if !ok || before == "" && after == "" {
+		return early, false
+	}
+	wr, wl := r, l
+	wr.Value, wl.Value = rw, lw
+	own := leaf(wr, wl, wb, 0)
+	if own.Kind != KindClockRead || own.Read == nil {
+		return early, false
+	}
+	own.Recorded, own.Live = r, l
+	own.Read.Since = models.SinceTestBegin
+	own.Read.Word = &models.ClockWord{Before: before, After: after}
+	if own.Refuted == "" {
+		own.Refuted = early.Refuted
+	}
+	return own, true
+}
+
 // rawUnread says why the classifier refuses raw: one of them was not read
 // from its mock (Raw.Read: the zero Raw, or one built otherwise than by
 // RawOf), so what it held cannot be told; "" when every one was.
@@ -1845,7 +1893,7 @@ func echoedPart(dc *DriftCache, v *valueDrift, resp []Leaf) string {
 			}
 		}
 		for t := range v.movedRec[i] {
-			if !allClock(t, true, v.clock) {
+			if !v.clockChanged(i, t, true, true) {
 				words[t] = true
 			}
 		}

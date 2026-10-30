@@ -237,6 +237,47 @@ func (w *Window) sinceBegin() *Window {
 	return &Window{Rec: rec, F: f, offsets: w.offsets}
 }
 
+// clockWordIn finds the one instant that changed in a text, recorded as rec
+// and seen in record's full round as live, read in w in both runs: the word
+// rw of rec and lw of live, found as clockAt finds them (the first layout
+// of clockLayouts that matches them, at ASCII word boundaries), each a read
+// of its run's clock in w (Window.holds), with the text around it the same
+// in both runs, before it and after it. ok is false where no instant
+// changed, where more than one did, where the one that did is no read in w,
+// or where the text around it changed too: then no one word of the text is
+// the read, and the text is no read of the clock plus a text that stayed.
+func clockWordIn(rec, live string, w *Window) (before, rw, lw, after string, ok bool) {
+	if w == nil {
+		return "", "", "", "", false
+	}
+	takenR, takenL := make([]bool, len(rec)), make([]bool, len(live))
+	for _, lay := range clockLayouts {
+		rm, lm := clockMatches(lay, rec, takenR), clockMatches(lay, live, takenL)
+		for j := 0; j < len(rm) && j < len(lm); j++ {
+			rs, ls := rec[rm[j][0]:rm[j][1]], live[lm[j][0]:lm[j][1]]
+			if rs == ls {
+				continue
+			}
+			for i := rm[j][0]; i < rm[j][1]; i++ {
+				takenR[i] = true
+			}
+			for i := lm[j][0]; i < lm[j][1]; i++ {
+				takenL[i] = true
+			}
+			if ok {
+				// A second instant that changed.
+				return "", "", "", "", false
+			}
+			before, rw, lw, after = rec[:rm[j][0]], rs, ls, rec[rm[j][1]:]
+			if live[:lm[j][0]] != before || live[lm[j][1]:] != after || !w.holds(lay, rs, ls) {
+				return "", "", "", "", false
+			}
+			ok = true
+		}
+	}
+	return before, rw, lw, after, ok
+}
+
 // holds reports whether t, an instant read at resolution res, is a read of
 // the clock within s: t stands for the unit [t, t+res) its read was made in
 // (a value in seconds is the second its read was made in), and some instant
