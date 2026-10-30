@@ -793,6 +793,21 @@ type Learned struct {
 	// its call's span. nil for any other leaf: a clock read that is only a
 	// part of a longer value stays noise.
 	Read *models.ClockOffset
+	// ReadToo, of a KindVariable, is the plain read of the application's
+	// clock its value is too, in its own call's window (what the leaf learns
+	// as without a source search: KindClockRead's Read), nil where it is no
+	// such read. Two reads of the clock in one second written in seconds are
+	// one value, so a later read stands whole in an earlier call's request
+	// (a start-up's two sweeps, each filtering by now in epoch seconds), and
+	// the source search finds a copy. A caller that cannot follow the
+	// variable (no test's own call carries it, its source was never served
+	// before the call) learns it as that read instead (Unfollowed): the
+	// value moved in the full round as its call's clock did, so a replay
+	// still checks it is a read made in the call's own span. A whole copy of
+	// what an answer gave the application (Place.givenWhole) carries none: a
+	// replay serves that answer as recorded, so the copy then holds the
+	// recorded stamp, which no read in the call's span gives.
+	ReadToo *models.ClockOffset
 	// Why, of an unaccounted drift, is why it cannot be noise; of noise
 	// record's full round learned past a source it served unchanged that
 	// the value moved away from (ClassifyFollowing), that source and why it
@@ -1807,6 +1822,18 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		if wb := w.sinceBegin(); follow && ln.Kind == KindUnaccounted && wb != nil {
 			if own, ok := sinceTestBegin(leaf(r, l, w, skipOffset)); ok {
 				ln = own
+			}
+		}
+		// A variable whose value is a plain read of the clock in its own
+		// call's window too (ReadToo), read without the source search and
+		// the offset rule: what a caller that cannot follow it learns. Only
+		// a value the lead or its window shows wholly as reads of the clock
+		// is read again (v.clock), so no other variable pays for it.
+		if ln.Kind == KindVariable && !ln.From.givenWhole {
+			if v := dc.ofIn(r.Value, l.Value, w, at); v.clock.whole && len(v.clock.reads) > 0 {
+				if alt := leaf(r, l, w, skipBoth); alt.Kind == KindClockRead && alt.Read != nil {
+					ln.ReadToo = alt.Read
+				}
 			}
 		}
 		out = append(out, ln)

@@ -261,3 +261,71 @@ func TestAReasonSaysTheFullRoundNeverServedTheValuesSource(t *testing.T) {
 		}
 	}
 }
+
+// api-server's start-up, outside every test: two sweeps each filter by now
+// in epoch seconds (a branch cleanup's expires_at, a notification
+// catch-up's createdAt). Both reads fell in one second in the recording and
+// in record's full round, so the second sweep's value stands whole in the
+// first's request and the source search finds a copy (a variable, as
+// before). It is also a plain read of the clock in its own call's window
+// (ReadToo), which a caller that cannot follow the variable (no test's own
+// call carries a start-up's variable) learns instead (Unfollowed): a replay
+// on another machine, whose start-up reads the two a second apart, still
+// checks each is a read made in its call's span. A value no read in its
+// call's window gives (an hour past it) carries no read, and a copy of what
+// an answer gave the application carries none either: the caller refuses
+// both as before.
+func TestAStartUpSweepsReadInAnEarlierSweepsSecondIsLearnedAsAReadWhereItsCopyCannotBeFollowed(t *testing.T) {
+	const p = "body.cmd.query.createdAt.$lt.$numberLong"
+	secs := func(t time.Time) string { return strconv.FormatInt(t.Unix(), 10) }
+	r0 := time.Date(2026, 10, 30, 22, 8, 44, 543_000_000, time.UTC)
+	f0 := r0.Add(FullRoundLead)
+	rec, fv := secs(r0), secs(f0.Add(300*time.Millisecond))
+	w := &Window{
+		Rec: Span{From: r0.Add(1 * time.Millisecond), To: r0.Add(2 * time.Millisecond)},
+		F:   Span{From: f0.Add(150 * time.Millisecond), To: f0.Add(400 * time.Millisecond)},
+	}
+	num := func(v string) Shape {
+		return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: Number, Value: v}}}
+	}
+	at := r0.Add(2 * time.Millisecond)
+	sweep := func(side Side, live string) []Earlier {
+		m := RawOf(&models.Mock{Name: "mock-16", Spec: models.MockSpec{ReqTimestampMock: r0, ResTimestampMock: r0.Add(500 * time.Microsecond)}}, true)
+		return []Earlier{{Mock: "mock-16", At: r0, Payload: m.ServedAs(1), Seen: []Seen{
+			{Side: side, Leaf: Leaf{Path: "body.cmd.filter.expires_at.$lte.$numberLong", Type: Number, Value: rec}, Live: live},
+		}}}
+	}
+	for _, tc := range []struct {
+		name    string
+		earlier []Earlier
+		live    string
+		read    bool
+	}{
+		{"the second sweep's read, in the first sweep's second in both runs", sweep(Request, fv), fv, true},
+		{"an hour past its call's window", sweep(Request, secs(f0.Add(time.Hour))), secs(f0.Add(time.Hour)), false},
+		{"a copy of what an answer gave the application", sweep(Response, fv), fv, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ln := ClassifyFollowing(clientTestCache(), []string{p}, num(tc.live), num(rec), at, tc.earlier, nil, nil, w, nil)[0]
+			if ln.Kind != KindVariable || ln.From.Mock != "mock-16" {
+				t.Fatalf("%s recorded, %s in F: %s from %+v (%s); want a variable of mock-16, as before", rec, tc.live, ln.Kind, ln.From, ln.Why)
+			}
+			got, ok := ln.Unfollowed("only a test's own calls carry its variables")
+			if ok != tc.read || (ln.ReadToo != nil) != tc.read {
+				t.Fatalf("ReadToo=%+v, Unfollowed ok=%v; want a read: %v", ln.ReadToo, ok, tc.read)
+			}
+			if !tc.read {
+				if got.Kind != KindVariable {
+					t.Fatalf("Unfollowed of a variable with no read: %s; want it unchanged", got.Kind)
+				}
+				return
+			}
+			if o, ok := got.Clock(); got.Kind != KindClockRead || !ok || !o.Plain() || o.Since != "" {
+				t.Fatalf("Unfollowed: %s Read=%+v (%s); want a plain read of the clock checked in its call's own span", got.Kind, got.Read, got.Why)
+			}
+			if !strings.Contains(got.Why, "mock-16") || !strings.Contains(got.Why, "only a test's own calls carry its variables") {
+				t.Fatalf("Unfollowed's Why %q names neither the place it stands in nor why it is not followed", got.Why)
+			}
+		})
+	}
+}
