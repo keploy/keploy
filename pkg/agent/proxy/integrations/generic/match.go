@@ -25,7 +25,8 @@ import (
 //
 // What it consumes is told to the learn step as served in this connection's
 // request (integrations.ServingIn), so a request aloft on another connection
-// that reads no recording leaves this one's serve in its order.
+// that reads no recording leaves this one's serve in its order, and with
+// what the serve gave the application (stateServed).
 func fuzzyMatch(ctx context.Context, logger *zap.Logger, reqBuff [][]byte, mockDb integrations.MockMemDb) (bool, []models.Payload, error) {
 	serving := integrations.ServingIn(ctx, mockDb)
 	for {
@@ -81,6 +82,7 @@ func fuzzyMatch(ctx context.Context, logger *zap.Logger, reqBuff [][]byte, mockD
 				if !isUpdated {
 					continue
 				}
+				stateServed(ctx, filteredMocks[index], reqBuff)
 				logger.Debug("Filtered mock found for generic request", zap.String("Mock", updatedMock.Name), zap.Int64("sortOrder", updatedMock.TestModeInfo.SortOrder))
 				return true, responseMock, nil
 			}
@@ -100,6 +102,7 @@ func fuzzyMatch(ctx context.Context, logger *zap.Logger, reqBuff [][]byte, mockD
 				if !isUpdated {
 					continue
 				}
+				stateServed(ctx, unfilteredMocks[index], reqBuff)
 				logger.Debug("Unfiltered mock found for generic request", zap.String("Mock", updatedMock.Name), zap.Int64("sortOrder", updatedMock.TestModeInfo.SortOrder))
 				return true, responseMock, nil
 			}
@@ -316,16 +319,23 @@ func fuzzyCheck(encoded, reqBuf []byte) float64 {
 func findExactMatch(tcsMocks []*models.Mock, reqBuffs [][]byte) int {
 	req := newSentRequest(reqBuffs)
 	for idx, mock := range tcsMocks {
-		recorded := mock.Spec.GenericRequests
-		nc := util.NewNoiseChecker(mock.Noise)
-		if len(recorded) == len(reqBuffs) && sameAsRecorded(recorded, reqBuffs, nc) {
-			return idx
-		}
-		if pieces := req.cutLikeRecorded(recorded); pieces != nil && sameAsRecorded(recorded, pieces, nc) {
+		if req.isRecorded(mock.Spec.GenericRequests, util.NewNoiseChecker(mock.Noise)) {
 			return idx
 		}
 	}
 	return -1
+}
+
+// isRecorded reports whether the request is recorded's bytes, in its own
+// pieces or cut where recorded's end (cutLikeRecorded), a noisy
+// (obfuscated) recorded piece not compared where nc names it (nil: every
+// piece compared, the request byte for byte the recording).
+func (r *sentRequest) isRecorded(recorded []models.Payload, nc *util.NoiseChecker) bool {
+	if len(recorded) == len(r.pieces) && sameAsRecorded(recorded, r.pieces, nc) {
+		return true
+	}
+	pieces := r.cutLikeRecorded(recorded)
+	return pieces != nil && sameAsRecorded(recorded, pieces, nc)
 }
 
 // sameAsRecorded reports whether each piece is the recorded piece at its
