@@ -1772,9 +1772,14 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// call sent, which held it in both runs) that, read as a value no
 		// earlier place is the source of and no moved place builds by an
 		// offset, is a read of the clock, or of the clock plus one constant
-		// offset, its call's window holds in both runs (sinceTestBegin), is
-		// learned as that read since its test began (models.SinceTestBegin),
-		// never as the variable. Both explanations hold in the rounds, and
+		// offset, that its call's window holds in one run and the window
+		// since its test began holds in the other (Window.oneRunSinceBegin,
+		// sinceTestBegin), is learned as that read since its test began
+		// (models.SinceTestBegin), never as the variable. One run's own
+		// window is enough: a full round that ran slower than the recording
+		// (or faster) opens the call's window after a read the application
+		// made several calls before, and the learning must not hang on how
+		// fast the full round ran. Both explanations hold in the rounds, and
 		// that read holds under both: the earlier place's read was made
 		// after the test began too, and the application makes it again at
 		// replay. Learned as a variable, a full round that made the two reads in one second
@@ -1785,7 +1790,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// also an offset of a start-up stamp the application was given (the
 		// rule below) holds as that read under all three explanations, and
 		// read with the rule, it would stay the variable by the same
-		// timing. A copy its own window does not hold stays the variable
+		// timing. A copy neither run's own window holds stays the variable
 		// (the copy alone explains it), and so does anything else learned
 		// as a value with no source (noise, an echo, a refusal). So does a whole copy of what an earlier
 		// answer gave the application (Place.givenWhole: a dependency's
@@ -1795,9 +1800,12 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// since the test began refuses. A part of an answer held by chance
 		// (a word of a login's cookie) and a copy of what the application
 		// sent are no such place.
-		if wb := w.sinceBegin(); follow && ln.Kind == KindVariable && wb != nil && !ln.From.givenWhole {
-			if own, ok := sinceTestBegin(leaf(r, l, w, skipBoth)); ok {
-				ln = own
+		if follow && ln.Kind == KindVariable && !ln.From.givenWhole {
+			for _, ow := range w.oneRunSinceBegin() {
+				if own, ok := sinceTestBegin(leaf(r, l, ow, skipBoth)); ok {
+					ln = own
+					break
+				}
 			}
 		}
 		// The run's variable (Place.Run: a value the set's start-up or an
@@ -1805,23 +1813,36 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// source of and no moved place builds by an offset, is a plain read
 		// of the clock its own call's window holds in both runs, is learned
 		// as that read, checked in that window at every replay, never as the
-		// variable (founder, 2026-10-30): the earlier call held the same
+		// variable (founder, 2026-10-30). Where that window does not hold it,
+		// one that holds it in one run's own window and since its test began
+		// in the other (Window.oneRunSinceBegin, the copy rule's windows
+		// above: a full round slower than the recording) learns it as that
+		// read since its test began. The earlier call held the same
 		// value in both runs, so it is a read of the clock in the same
 		// second as well, and two calls that read one clock in one second
 		// are a coincidence, not dataflow. As the variable, a replay whose
 		// clock crosses a second between the two calls would fail the
 		// later one, and the earlier call's place would carry a variable
 		// and a clock read at once, which the HTTP replay refuses for every
-		// test, the earlier one's included. A copy its own
-		// call's window does not hold (sent a minute later) stays the
+		// test, the earlier one's included. A copy neither run's own
+		// call's window holds (sent a minute later) stays the
 		// variable, and so does one the re-read learns as anything but that
 		// read: an id minted that second with a random word in it is refused
 		// read without its source (the word drifted alike in both calls,
 		// which only dataflow explains), and one the call's answer echoes is
 		// an echo. Only the whole value read as the clock is the clock's.
-		if ln.Kind == KindVariable && ln.From.Run && dc.windowHolds(dc.ofIn(r.Value, l.Value, w, at), w) {
-			if own := leaf(r, l, w, skipBoth); own.Kind == KindClockRead {
-				ln = own
+		if ln.Kind == KindVariable && ln.From.Run {
+			for i, ow := range append([]*Window{w}, w.oneRunSinceBegin()...) {
+				if !dc.windowHolds(dc.ofIn(r.Value, l.Value, ow, at), ow) {
+					continue
+				}
+				if own := leaf(r, l, ow, skipBoth); own.Kind == KindClockRead {
+					if i > 0 {
+						own, _ = sinceTestBegin(own)
+					}
+					ln = own
+					break
+				}
 			}
 		}
 		// A value built by an offset on what the application was given that
