@@ -308,7 +308,7 @@ func (a *App) composeAppDied(ctx context.Context, m events.Message) bool {
 	if a.composeService != "" && m.Actor.ID != "" {
 		ref = m.Actor.ID
 	}
-	info, read := a.composeDiedContainer(ctx, ref)
+	info, read := a.readComposeContainer(ctx, ref, "keploy decides the die on the event")
 	// A watch that has ended decides nothing: its die is read by keploy's
 	// next stop of the container, which finds it down.
 	if ctx.Err() != nil {
@@ -353,16 +353,21 @@ func (a *App) composeAppDied(ctx context.Context, m events.Message) bool {
 // daemon fails says nothing of the container, so the watch asks again; what
 // bounds the wait for the daemon's answer is keploy's runnable time
 // (utils.StopStallBudget of it, stall.Meter), the bound on no news at all of
-// keploy's stop, and the watch's own end, never a number of seconds.
+// keploy's stop, and the watch's own end, never a number of seconds. The
+// start of the next set's run reads the container the same way: with the
+// 2 s budget, a start of a container whose stop the daemon had recorded,
+// read too slowly, was told not anew, and the set was charged the earlier
+// sets' capture losses, as by an app keploy's stop had not ended.
 
-// composeDiedContainer is the container ref, a die names, as the daemon has
-// it now; read reports whether the daemon said. A read the daemon fails (its
-// connection broke, or a loaded daemon was slow and the read gave up) is
-// asked again, at once and then at a walking pace (composeDaemonAskPace),
-// until the daemon answers, says it has no such container (removed: it has
-// no more to say of it), utils.StopStallBudget of keploy's runnable time
-// passes with no answer, or ctx (the watch's) ends.
-func (a *App) composeDiedContainer(ctx context.Context, ref string) (info container.InspectResponse, read bool) {
+// readComposeContainer is the container ref as the daemon has it now; read
+// reports whether the daemon said. A read the daemon fails (its connection
+// broke, or a loaded daemon was slow and the read gave up) is asked again,
+// at once and then at a walking pace (composeDaemonAskPace), until the
+// daemon answers, says it has no such container (removed: it has no more to
+// say of it), utils.StopStallBudget of keploy's runnable time passes with no
+// answer, or ctx ends. unread says, in the log, what keploy does when the
+// daemon never says.
+func (a *App) readComposeContainer(ctx context.Context, ref, unread string) (info container.InspectResponse, read bool) {
 	meter := stall.NewMeter(nil, utils.StopStallBudget)
 	defer meter.Stop()
 	type answer struct {
@@ -392,7 +397,7 @@ func (a *App) composeDiedContainer(ctx context.Context, ref string) (info contai
 			case <-meter.Wait():
 				if meter.Expired() {
 					cancel()
-					a.logger.Debug("the docker daemon did not describe the application's container a die names; keploy decides the die on the event",
+					a.logger.Debug("the docker daemon did not describe the application's container; "+unread,
 						zap.String("container", ref), zap.String("bound", utils.StopStallSaid()))
 					return container.InspectResponse{}, false
 				}
@@ -412,11 +417,11 @@ func (a *App) composeDiedContainer(ctx context.Context, ref string) (info contai
 			return container.InspectResponse{}, false
 		}
 		if meter.Expired() {
-			a.logger.Debug("the docker daemon did not describe the application's container a die names; keploy decides the die on the event",
+			a.logger.Debug("the docker daemon did not describe the application's container; "+unread,
 				zap.String("container", ref), zap.String("bound", utils.StopStallSaid()), zap.Error(r.err))
 			return container.InspectResponse{}, false
 		}
-		a.logger.Debug("the docker daemon's read of the application's container a die names failed; keploy asks the daemon again",
+		a.logger.Debug("the docker daemon's read of the application's container failed; keploy asks the daemon again",
 			zap.String("container", ref), zap.Error(r.err))
 	}
 }
@@ -873,10 +878,11 @@ func (a *App) StartComposeApp(ctx context.Context) (anew bool, err error) {
 	if err != nil {
 		return false, fmt.Errorf("keploy could not tell which container is the application's, to start it again: %w", err)
 	}
-	ictx, icancel := context.WithTimeout(ctx, dockerInspectBudget)
-	info, ierr := a.docker.ContainerInspect(ictx, id)
-	icancel()
-	stopped := ierr == nil && info.ContainerJSONBase != nil && info.State != nil && !info.State.Running
+	// The stop's record, read as the watch reads a die's container
+	// (readComposeContainer): a daemon slow to describe a container it has
+	// stopped is asked again, never taken to say it runs on.
+	info, read := a.readComposeContainer(ctx, id, "keploy starts it, not as a new app")
+	stopped := read && !info.State.Running
 	// Bounded only as a hang guard (utils.StopStallBudget), as the stop's
 	// calls are: a wedged daemon cannot hold the set for good.
 	sctx, cancel := context.WithTimeout(ctx, utils.StopStallBudget)

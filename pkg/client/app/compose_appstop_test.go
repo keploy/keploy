@@ -652,8 +652,10 @@ func TestTheComposeAppsWatchAsksAgainWhenTheDaemonFailsToDescribeADiesContainer(
 	})
 	t.Run("a watch that ends while it waits for the read", func(t *testing.T) {
 		// It decides nothing: keploy's next stop of the container reads
-		// the die.
-		stallBudget(t, time.Minute)
+		// the die. Its end ends the read: the stall bound is an hour, so a
+		// read that went on past the watch's end would hold the watch's
+		// stop (and stopMu) until that bound.
+		stallBudget(t, time.Hour)
 		d := newComposeDocker(false, true)
 		reading := make(chan struct{}, 1)
 		d.inspectFails = func(ctx context.Context) error {
@@ -668,7 +670,13 @@ func TestTheComposeAppsWatchAsksAgainWhenTheDaemonFailsToDescribeADiesContainer(
 		<-d.errStreams
 		stream <- die("3")
 		<-reading
-		stop()
+		stopped := make(chan struct{})
+		go func() { stop(); close(stopped) }()
+		select {
+		case <-stopped:
+		case <-time.After(time.Minute):
+			t.Fatal("the watch's stop did not end its read of the die's container: the read waits for the stall bound")
+		}
 		select {
 		case <-ended:
 			t.Fatalf("a watch that had ended took the die it was reading for a halt (%+v)", a.composeAppHalt())
@@ -1517,6 +1525,60 @@ func TestAStartWhoseInspectFailsIsNoStartAnew(t *testing.T) {
 	if anew, err := a.StartComposeApp(context.Background()); err == nil && anew {
 		t.Fatal("the inspect could not tell, the container runs on, and the start says anew")
 	}
+}
+
+// A start reads the stop's record as the daemon has it, however slow the
+// daemon is to give it: a stopped container the daemon takes longer than a
+// few seconds to describe (a loaded host) is started anew. With a 2 s
+// wall-clock budget on that read, the start was told not anew, and the
+// replay charged the set the earlier sets' capture losses, as of an app
+// keploy's stop had not ended.
+func TestAStartReadsTheStopsRecordHoweverSlowTheDaemonIs(t *testing.T) {
+	stallBudget(t, time.Hour)
+	start := func(t *testing.T, inspect func(ctx context.Context, read int32) error) {
+		t.Helper()
+		d := newComposeDocker(false, true)
+		a := composeApp(d)
+		var reads atomic.Int32
+		d.inspectFails = func(ctx context.Context) error { return inspect(ctx, reads.Add(1)) }
+		type result struct {
+			anew bool
+			err  error
+		}
+		done := make(chan result, 1)
+		go func() {
+			anew, err := a.StartComposeApp(context.Background())
+			done <- result{anew, err}
+		}()
+		var r result
+		select {
+		case r = <-done:
+		case <-time.After(time.Minute):
+			t.Fatalf("the start did not end after %d read(s) of the container", reads.Load())
+		}
+		running, _, starts := d.state()
+		if r.err != nil || !r.anew || !running || starts != 1 {
+			t.Fatalf("anew %v (err %v), running %v after %d start(s), %d read(s); want anew, running after 1 start", r.anew, r.err, running, starts, reads.Load())
+		}
+	}
+	t.Run("a daemon that takes 2.5 s to describe the container", func(t *testing.T) {
+		start(t, func(ctx context.Context, _ int32) error {
+			select {
+			case <-time.After(2500 * time.Millisecond):
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		})
+	})
+	t.Run("a read the daemon fails is asked again", func(t *testing.T) {
+		start(t, func(_ context.Context, read int32) error {
+			if read == 1 {
+				return errors.New("the daemon's connection broke")
+			}
+			return nil
+		})
+	})
 }
 
 // appStack is a daemon holding compose project "proj": keploy's agent
