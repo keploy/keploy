@@ -140,6 +140,13 @@ type AgentClient struct {
 	// run is the agent's current start (startAgent); guarded by mu. A stop
 	// reads how to end the agent from the run it stops, never from a later one.
 	run *agentRun
+	// runExited is the current start's agent exit channel (startAgent): one
+	// value, sent when the agent process exits (nil for a clean exit),
+	// guarded by mu. Setup's readiness wait is its first reader and stops
+	// reading once the agent is up; a recording watches it from then on
+	// (AgentExit), so an agent that dies after it became ready fails the run
+	// instead of leaving it capturing nothing (#4790).
+	runExited chan error
 }
 
 // agentRun is one start of the agent.
@@ -2271,6 +2278,9 @@ func (a *AgentClient) startAgent(ctx context.Context, isDockerCmd bool, opts mod
 	}
 	// Buffered: the exit is reported whether or not anyone is still waiting.
 	exited := make(chan error, 1)
+	a.mu.Lock()
+	a.runExited = exited
+	a.mu.Unlock()
 
 	agentCtx, cancel, run, err := a.beginRun(ctx)
 	if err != nil {
@@ -2598,6 +2608,19 @@ func teardownProgressPath(logger *zap.Logger) (string, func()) {
 // it holds its frame streams open for this client's drain. Not under docker
 // compose, nor for an agent another process started (a k8s sidecar).
 func (a *AgentClient) StartedAgent() bool { return a.startedAgent.Load() }
+
+// AgentExit returns the channel the current agent run's exit is reported on
+// -- the agent process's own exit, nil for a clean one -- or nil when this
+// client has not started an agent (docker compose starts its own). Setup's
+// readiness wait reads the same value while the agent is coming up; a
+// recording watches it from the moment the agent is up (record's
+// AgentExitReader), so an agent that dies after that fails the run instead
+// of leaving it capturing nothing (#4790).
+func (a *AgentClient) AgentExit() <-chan error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.runExited
+}
 
 // agentStoppingGrace bounds how long the CLI waits for an agent that is
 // already going away (agentGoingAway) to exit before it sends it SIGTERM
