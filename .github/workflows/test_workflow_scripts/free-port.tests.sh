@@ -21,16 +21,19 @@
 #   range and a new network namespace's, which starts at 32768 whatever the
 #   host's: '40000 60999' gives picks of at most 32767, '30000 60999' of at
 #   most 29999. At the cut itself, over the cut's port and the next one, the
-#   cut's port is picked every time: a cut off by one either way picks the
-#   next one about half the time.
+#   cut's port is picked every time: a cut one too high (32768, or the host
+#   range's first port) picks the next one about half the time, and one too
+#   low finds no port at all.
 # docker-dns: the collision free_port exists for, on the real thing. A
 #   container on a user-defined network has Docker's DNS server listening on
 #   127.0.0.11 at a TCP port the kernel picked in the container's own network
 #   namespace. That port lies in the ephemeral range, and a bind of 0.0.0.0
 #   on it fails with EADDRINUSE there (the control: an app given that port
 #   cannot start, as in job 124142018005); a port free_port picked binds.
-# A pin that needs a port this host has in use says that it skips, never
-# skipping silently.
+# A pin at a cut (ephemeral's and host-range's) runs in full only when
+# free_port could take both the cut's port and the next one on this host, by
+# its own check (pickable); when it cannot, it says what it skips or leaves
+# unchecked, never skipping silently.
 set -uo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -58,6 +61,51 @@ try:
     s.bind((sys.argv[2], int(sys.argv[1])))
 except OSError:
     sys.exit(1)' "$1" "${2:-0.0.0.0}"
+}
+
+# pickable PORT: whether free_port would take PORT now, by the check it
+# makes: a listener binds 0.0.0.0:PORT, and [::]:PORT alone (IPV6_V6ONLY),
+# where a host with no IPv6 counts as free. The guards use it, so that a
+# port held on [::] alone, which bindable lets through, does not turn a pin
+# into a false FAIL or a silent pass.
+pickable() {
+  python3 -c 'import socket, sys
+def bindable(family, addr, port):
+    try:
+        s = socket.socket(family, socket.SOCK_STREAM)
+    except OSError:
+        return family == socket.AF_INET6
+    try:
+        if family == socket.AF_INET6:
+            s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+        s.bind((addr, port))
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
+port = int(sys.argv[1])
+sys.exit(0 if bindable(socket.AF_INET, "0.0.0.0", port) and bindable(socket.AF_INET6, "::", port) else 1)' "$1"
+}
+
+# cut_guard CASE CUT: whether CASE's pin at the cut CUT (20 picks over CUT
+# and CUT+1, each of which must be CUT) can run on this host now. It needs
+# free_port able to take both ports. With CUT in use the right cut finds no
+# port, so the pin would fail: it skips (returns 1). With only CUT+1 in use a
+# cut one too high picks CUT every time too, while one too low still finds
+# no port: the pin runs, and says that the direction one too high goes
+# unchecked. Either way it says so, never skipping silently.
+cut_guard() {
+  local case=$1 cut=$2 next=$(($2 + 1))
+  if ! pickable "$cut"; then
+    local busy="$cut is"
+    pickable "$next" || busy="both are"
+    echo "$case: skipped the pin at the cut $cut, which needs both $cut and $next free (on 0.0.0.0 and [::]): $busy in use on this host"
+    return 1
+  fi
+  pickable "$next" ||
+    echo "$case: the pin at the cut $cut runs, but a cut one too high goes unchecked: $next, which such a cut would also pick, is in use on this host"
+  return 0
 }
 
 # hold ADDR PORT...: a process listens on each PORT at ADDR (an IPv4
@@ -111,8 +159,8 @@ done
 lo=$(free_port) || { echo "no free port to test with"; exit 2; }
 [ "$lo" -lt "$top" ] || lo=$((lo - 1))
 hi=$((lo + 1))
-if ! bindable "$lo" || ! bindable "$hi"; then
-  echo "ports $lo-$hi are not both free"
+if ! pickable "$lo" || ! pickable "$hi"; then
+  echo "ports $lo-$hi are not both free (on 0.0.0.0 and [::])"
   exit 2
 fi
 
@@ -175,13 +223,11 @@ for _ in $(seq 1 20); do
 done
 
 echo "== ephemeral =="
-if bindable "$top"; then
+if cut_guard ephemeral "$top"; then
   for _ in $(seq 1 20); do
     p=$(FREE_PORT_LO=$top FREE_PORT_HI=40000 free_port)
     [ "$p" = "$top" ] || fail "ephemeral: picked '$p' in $top-40000, want $top, the window's only port below the ephemeral ranges"
   done
-else
-  echo "ephemeral: skipped the pin at the cut: $top, the cut, is in use on this host"
 fi
 if p=$(FREE_PORT_LO=32768 FREE_PORT_HI=40000 free_port 2>"$TMP/err"); then
   fail "ephemeral: picked $p from a window wholly in the ephemeral range"
@@ -208,12 +254,13 @@ host_range "40000 60999" 28000 39999 32767
 # A host range below 32768 is the cut.
 host_range "30000 60999" 28000 32767 29999
 # host_range_cut RANGE CUT: at the cut itself, 20 picks from CUT-(CUT+1) are
-# each CUT, on a host whose ephemeral range is RANGE.
+# each CUT, on a host whose ephemeral range is RANGE. It runs in full only
+# when CUT and CUT+1 are both pickable (cut_guard): with CUT in use the right
+# cut has no port and the pin would fail, so it skips; with CUT+1 in use a cut
+# one too high would pass, so it says that direction goes unchecked.
 host_range_cut() {
-  if bindable "$2"; then
+  if cut_guard "host-range (range '$1')" "$2"; then
     host_range "$1" "$2" $(($2 + 1)) "$2"
-  else
-    echo "host-range: skipped the pin at the cut for range '$1': $2, the cut, is in use on this host"
   fi
 }
 host_range_cut "40000 60999" 32767
