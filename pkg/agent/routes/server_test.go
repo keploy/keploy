@@ -17,6 +17,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/plaintcp/plaintcptest"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 )
@@ -51,6 +52,17 @@ func TestListenWithRetry_RecoversWhenPortFrees(t *testing.T) {
 		t.Fatalf("expected bind to recover after the port freed, got: %v", err)
 	}
 	_ = ln.Close()
+}
+
+// In docker the agent's HTTP listener is on every interface of its container,
+// so it is plain TCP, never Go's default MPTCP.
+func TestListenWithRetry_ListensPlainTCP(t *testing.T) {
+	ln, err := listenWithRetry(context.Background(), zap.NewNop(), agentBindAddr(0, true), time.Second, 50*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	plaintcptest.RequirePlainTCP(t, ln)
 }
 
 // TestListenWithRetry_GivesUpAfterBudget ensures the retry is bounded: a port

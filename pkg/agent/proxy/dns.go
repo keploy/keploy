@@ -17,6 +17,7 @@ import (
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/plaintcp"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
@@ -103,11 +104,31 @@ func (s *dnsServer) serve() (err error) {
 		s.settleAs(false, err)
 	}()
 	s.logger.Info(fmt.Sprintf("starting %s DNS server at addr %v", s.name(), s.srv.Addr))
-	err = s.srv.ListenAndServe()
+	err = s.listenAndServe()
 	if err != nil {
 		utils.LogError(s.logger, err, fmt.Sprintf("the %s DNS server failed to bind or stopped serving", s.name()), zap.String("addr", s.srv.Addr))
 	}
 	return err
+}
+
+// listenAndServe binds s's socket and serves on it. The TCP server's socket
+// is bound here, as miekg/dns would bind it (SO_REUSEPORT where it sets that)
+// but plain TCP: miekg/dns binds TCP with a zero net.ListenConfig, which Go
+// makes MPTCP, on every interface. UDP has no MPTCP; miekg/dns binds it.
+func (s *dnsServer) listenAndServe() error {
+	if s.srv.Net != "tcp" {
+		return s.srv.ListenAndServe()
+	}
+	lc := plaintcp.Config(dnsReusePort)
+	ln, err := lc.Listen(context.Background(), "tcp", s.srv.Addr)
+	if err != nil {
+		return err
+	}
+	// Closed by the server as it stops serving; this closes it if the server
+	// never started to.
+	defer func() { _ = ln.Close() }()
+	s.srv.Listener = ln
+	return s.srv.ActivateAndServe()
 }
 
 // stop shuts s down. It is the one rule for that, followed by both of s's
