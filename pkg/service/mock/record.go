@@ -548,6 +548,7 @@ func (m *mockService) Record(ctx context.Context) error {
 		// the deferred discard of the staging set, which does not wait for a
 		// store the user gave up on either.
 		giveUpStore()
+		armGivenUp()
 		return errors.New("the recording was not saved: keploy was stopped before it had written every mock and test case the agent handed over")
 	}
 	// 8'''. Every mock is now handed to the mock store: a store that writes
@@ -573,6 +574,7 @@ func (m *mockService) Record(ctx context.Context) error {
 		next := "check the disk the recording writes to (space, speed, permissions), then re-record; the existing mock set is kept"
 		if gaveUp {
 			giveUpStore()
+			armGivenUp()
 			next = recordDrainWords.nextStep
 		} else {
 			utils.SetExitCodeOnce(utils.ExitKeployError)
@@ -653,6 +655,7 @@ func (m *mockService) Record(ctx context.Context) error {
 		m.logger.Error(stopReason+"; the mocks it recorded were not saved over the existing set",
 			zap.Int("mocks", mockCount), zap.String("mock-set", name), zap.Error(err),
 			zap.String("next_step", "re-record the mock set"))
+		armGivenUp() // a drain the agent ended has armed keploy's 1 already
 		return err
 	}
 	// 8b'. The test command called what keploy cannot capture at all: the
@@ -1540,6 +1543,23 @@ var replayDrainWords = drainWords{
 func (m *mockService) stoppedNow(words drainWords) (lost bool) {
 	m.logger.Warn(words.gaveUp, zap.String("next_step", words.nextStep))
 	return true
+}
+
+// armGivenUp arms the exit code of a recording that is not saved because the
+// user gave up what it still waited for (the drain, the consumers, the mock
+// store's close): 128+N for the signal that stopped the run
+// (utils.InterruptExitCode), as keploy mock replay exits for a run the user
+// stopped before it finished, or keploy's 1 where no signal's number is known
+// (a build with its own handler). keploy mock record's command returns no
+// error for a run the user stopped (an interrupt is not a failure), so the
+// process exits with this code: before, it exited 0, a pass, for a recording
+// that was not saved. A code already armed is kept (SetExitCodeOnce).
+func armGivenUp() {
+	code := utils.InterruptExitCode()
+	if code == 0 {
+		code = utils.ExitKeployError
+	}
+	utils.SetExitCodeOnce(code)
 }
 
 // runFailure is why a run the user did not stop ended: the agent's container

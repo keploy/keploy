@@ -106,7 +106,8 @@ func TestRecord_AStuckMockFileEndsAtTheUsersInterruptAsARecordingNotSaved(t *tes
 			utils.ClearInterrupted()
 			utils.ErrCode = 0
 			t.Cleanup(func() { utils.ResetInterruptedAgain(); utils.ClearInterrupted(); utils.ErrCode = 0 })
-			utils.MarkInterrupted() // the stop
+			t.Cleanup(utils.SetInterruptSignalForTest(2)) // the stop: the user's Ctrl+C, SIGINT
+			utils.MarkInterrupted()
 			dir := t.TempDir()
 			const name, n = "orders", 20
 			existing := filepath.Join(dir, name, "mocks.yaml")
@@ -149,6 +150,9 @@ func TestRecord_AStuckMockFileEndsAtTheUsersInterruptAsARecordingNotSaved(t *tes
 			fields := failed[0].ContextMap()
 			require.Contains(t, fields["error"], fmt.Sprintf("of the %d mocks handed to the gob mock writer were not written", n))
 			require.Equal(t, recordDrainWords.nextStep, fields["next_step"])
+			// keploy mock record's command returns no error for a run the
+			// user stopped: the exit code is all that says it was not saved.
+			require.Equal(t, 130, utils.ErrCode, "a recording the user gave up, not saved, did not exit as one the user stopped")
 			got, rerr := os.ReadFile(existing)
 			require.NoError(t, rerr)
 			require.Equal(t, "# the existing recording\n", string(got), "the existing set was not kept")
@@ -171,8 +175,10 @@ func TestRecord_AStuckMockFileWithAFullQueueEndsAtTheUsersInterrupt(t *testing.T
 	t.Setenv("KEPLOY_MOCK_FORMAT", "gob")
 	utils.ResetInterruptedAgain()
 	utils.ClearInterrupted()
-	t.Cleanup(func() { utils.ResetInterruptedAgain(); utils.ClearInterrupted() })
-	utils.MarkInterrupted() // the stop
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ResetInterruptedAgain(); utils.ClearInterrupted(); utils.ErrCode = 0 })
+	t.Cleanup(utils.SetInterruptSignalForTest(2)) // the stop: the user's Ctrl+C, SIGINT
+	utils.MarkInterrupted()
 	dir := t.TempDir()
 	const name = "orders"
 	existing := filepath.Join(dir, name, "mocks.yaml")
@@ -212,6 +218,7 @@ func TestRecord_AStuckMockFileWithAFullQueueEndsAtTheUsersInterrupt(t *testing.T
 	}
 	require.Error(t, err, "a recording short of mocks it was handed ended as a success")
 	require.NotZero(t, logs.FilterLevelExact(zapcore.ErrorLevel).Len(), "the mocks not written were not said: %v", logs.All())
+	require.Equal(t, 130, utils.ErrCode, "a recording the user gave up, not saved, did not exit as one the user stopped")
 	got, rerr := os.ReadFile(existing)
 	require.NoError(t, rerr)
 	require.Equal(t, "# the existing recording\n", string(got), "the existing set was not kept")

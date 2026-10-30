@@ -179,8 +179,10 @@ func TestRecord_AStuckWriteEndsAtTheUsersInterruptAsARecordingNotSaved(t *testin
 	mockDrainNotice = 20 * time.Millisecond
 	utils.ResetInterruptedAgain()
 	utils.ClearInterrupted()
-	t.Cleanup(func() { utils.ResetInterruptedAgain(); utils.ClearInterrupted() })
-	utils.MarkInterrupted() // the stop
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ResetInterruptedAgain(); utils.ClearInterrupted(); utils.ErrCode = 0 })
+	t.Cleanup(utils.SetInterruptSignalForTest(2)) // the stop: the user's Ctrl+C, SIGINT
+	utils.MarkInterrupted()
 	inst := &afterExitInstrumentation{trickleInstrumentation: trickleInstrumentation{out: make(chan *models.Mock, 4)}}
 	db := newHeldWriteDB(t, "late", 0)
 	cfg := &config.Config{}
@@ -198,6 +200,9 @@ func TestRecord_AStuckWriteEndsAtTheUsersInterruptAsARecordingNotSaved(t *testin
 	}
 	require.Error(t, returnedWithin(t, returned), "a recording short of a mock it was handed ended as a success")
 	require.False(t, db.promoted.Load(), "a recording short of a mock it was handed was saved over the set")
+	// keploy mock record's command returns no error for a run the user
+	// stopped: the exit code is all that says it was not saved.
+	require.Equal(t, 130, utils.ErrCode, "a recording the user gave up, not saved, did not exit as one the user stopped")
 	select {
 	case <-db.wrote:
 	case <-time.After(time.Minute): // only turns a hang into a failure
