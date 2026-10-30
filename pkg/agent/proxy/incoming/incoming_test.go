@@ -17,6 +17,7 @@ import (
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils/plaintcp/plaintcptest"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
@@ -147,7 +148,7 @@ func freeTCPPort(t *testing.T) uint16 {
 
 // startIngressAtFreePort starts hook's forwarder at a free port and returns
 // the port. Nothing holds the port between freeTCPPort and the forwarder's
-// bind: the forwarder binds it with net.Listen, and no hold can sit beside
+// bind: the forwarder binds it itself, and no hold can sit beside
 // that. So when another socket took the port meanwhile, it tries another.
 // On Windows the bind's error there is WSAEADDRINUSE, which errors.Is does
 // not match to EADDRINUSE, so it fails at once, as the test did before.
@@ -352,6 +353,16 @@ func TestStartIngressReleasesPortOnStop(t *testing.T) {
 	if err := bindAgain(t, port); err != nil {
 		t.Fatalf("port %d should be free after StopIngress, but bind failed: %v", port, err)
 	}
+}
+
+// The forwarder listens at the application's own port, on every interface, so
+// it is plain TCP: Go's default would make that port MPTCP, which the
+// application never chose.
+func TestStartIngressListensPlainTCP(t *testing.T) {
+	hook := newTestIngressHook()
+	port := startIngressAtFreePort(t, context.Background(), hook)
+	t.Cleanup(func() { _ = hook.StopIngress(port) })
+	plaintcptest.RequirePlainTCP(t, forwarderOf(t, hook, port).listener)
 }
 
 // The teardown guard in StartIngressProxy must be SILENT: a bind event drained

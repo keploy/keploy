@@ -13,6 +13,7 @@ import (
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/plaintcp"
 
 	"go.keploy.io/server/v3/pkg/agent"
 	grpc "go.keploy.io/server/v3/pkg/agent/proxy/incoming/gRPC"
@@ -349,7 +350,9 @@ func (h *goTCPIngressHook) StartIngress(ctx context.Context, origPort, newPort u
 		return ctxErr
 	}
 
-	listener, err := net.Listen("tcp4", origAppAddr)
+	// Plain TCP, never Go's default MPTCP: this is the application's own port
+	// on every interface, and the application never chose MPTCP for it.
+	listener, err := plaintcp.Listen(context.Background(), "tcp4", origAppAddr)
 	if err != nil {
 		return fmt.Errorf("ingress proxy failed to listen on %s: %w", origAppAddr, err)
 	}
