@@ -70,14 +70,17 @@ type TestReport struct {
 	// before its first test or after its last. They never fail
 	// the set, nor land in UnclaimedCalls. Absent when there is none.
 	SetAnswers []UnmatchedCall `json:"setAnswers,omitempty" yaml:"set_answers,omitempty"`
-	// BackgroundCalls are, under the proven switch, the calls the set's
-	// application made outside every test's window that no mock answered
-	// (UnmatchedCall.Background): before its first test or between two
-	// tests (unless the call's recorded answer reaches the test read next:
-	// UnmatchedCall.ReachesTest), or after its last. They are its background work, a timer's, a start-up job's or a
-	// late write's call: charged to no test and never failing the set
-	// (served, never required). Each says what was called, when (At), where
-	// (BackgroundWhy) and why nothing answered it. Absent when there is none.
+	// BackgroundCalls are, under the proven switch, the calls of the set's
+	// application's background work that no mock answered
+	// (UnmatchedCall.Background): made outside every test's window, before
+	// its first test or between two tests (unless the call's recorded
+	// answer reaches the test read next: UnmatchedCall.ReachesTest), or
+	// after its last, a timer's, a start-up job's or a late write's call;
+	// or made inside a test's window as a call of a marked background series
+	// (UnmatchedCall.MadeInTest). They are charged to no test and never fail
+	// the set (served, never required). Each says what was called, when
+	// (At), where (BackgroundWhy) and why nothing answered it. Absent when
+	// there is none.
 	BackgroundCalls []UnmatchedCall `json:"backgroundCalls,omitempty" yaml:"background_calls,omitempty"`
 }
 
