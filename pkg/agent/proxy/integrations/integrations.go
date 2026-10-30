@@ -4,7 +4,11 @@ package integrations
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
+	"slices"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -547,6 +551,87 @@ func OwnedBy(s []MarkedSeries, test string) []MarkedSeries {
 		}
 	}
 	return out
+}
+
+// OwnCall is live, a call asked in the window of m's owner (m a test's own
+// series: Owner), with each id that test's window bound this run given back
+// its recorded value, as m's series compares a call (learn.Series.HasShape,
+// Holds): a job the test started beats on the id its window made this run,
+// never on the recorded one. Each leaf every recording of m holds one value
+// at (learn.Series.Values) that is the recorded value of a variable bound in
+// force (inForce: the store's variable table, variables.Table.Snapshot) must
+// hold that binding's live value in live; asked holds the recorded value
+// there, and moved lists (sorted, once each) the recorded values so given
+// back that this run bound to another value: the caller answers with a
+// recording that carries none of them, or with none. A leaf that no binding
+// in force was recorded as is compared as recorded: an id the run bound no
+// variable of replays only as it was recorded. Only the leaves are given
+// back; asked.Body is live's.
+//
+// off is why live is a call of m's on another id: at such a leaf it holds
+// another value than the binding's (the recorded id while the run bound
+// another, or a third value), or two bindings in force of one recorded value
+// hold two values this run (keploy cannot tell which one the job is). asked
+// then holds the recorded value at that leaf all the same, so the caller can
+// tell the call is of m's series (HasShape) and charge it to the owner as its
+// own miss, saying off; no recording of m answers it. live, nil and "" for a
+// series marked set-wide (Owner ""): it reads no variable.
+func (m MarkedSeries) OwnCall(live learn.Shape, inForce []variables.Binding) (asked learn.Shape, moved []string, off string) {
+	if m.Owner == "" || len(inForce) == 0 || len(m.Series.Values) == 0 {
+		return live, nil, ""
+	}
+	bound := map[string][]string{} // a recorded value -> its live values in force
+	for _, b := range inForce {
+		if b.Recorded != "" && !slices.Contains(bound[b.Recorded], b.Value) {
+			bound[b.Recorded] = append(bound[b.Recorded], b.Value)
+		}
+	}
+	paths := make([]string, 0, len(m.Series.Values))
+	for p := range m.Series.Values {
+		paths = append(paths, p)
+	}
+	sort.Strings(paths)
+	var leaves map[string]learn.Leaf
+	for _, p := range paths {
+		rec := m.Series.Values[p].Value
+		values := bound[rec]
+		l, ok := live.Leaves[p]
+		if len(values) == 0 || !ok {
+			continue
+		}
+		why := ""
+		switch {
+		case len(values) > 1:
+			why = fmt.Sprintf("two variables recorded as %s are bound to two values this run (%s), so keploy cannot tell which one %s's job is", rec, strings.Join(values, ", "), m.Owner)
+		case l.Value == values[0]:
+			if l.Value != rec && !slices.Contains(moved, rec) {
+				moved = append(moved, rec)
+			}
+		case l.Value == rec:
+			why = fmt.Sprintf("it carries the recorded id %s at %s, but %s's window bound that id to %s this run", rec, p, m.Owner, values[0])
+		default:
+			why = fmt.Sprintf("it carries %s at %s, where %s's window bound the id recorded as %s to %s this run", l.Value, p, m.Owner, rec, values[0])
+		}
+		if off == "" {
+			off = why
+		}
+		if l.Value == rec {
+			continue
+		}
+		if leaves == nil {
+			leaves = make(map[string]learn.Leaf, len(live.Leaves))
+			for k, v := range live.Leaves {
+				leaves[k] = v
+			}
+		}
+		l.Value = rec
+		leaves[p] = l
+	}
+	sort.Strings(moved)
+	if leaves == nil {
+		return live, moved, off
+	}
+	return learn.Shape{Key: live.Key, Fixed: live.Fixed, Leaves: leaves, Body: live.Body}, moved, off
 }
 
 // SeriesRestagedNote is what the miss of a call of a restaged series says

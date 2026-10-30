@@ -5,7 +5,9 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/variables"
 )
 
 // A call's mark is moved, at a later read of the round, by another staging
@@ -154,5 +156,65 @@ func TestOwnedByLeavesOutOtherTestsOwnSeries(t *testing.T) {
 	}
 	if got := OwnedBy(all[:1], "T1"); &got[0] != &all[0] {
 		t.Fatalf("OwnedBy copied a list it leaves nothing out of")
+	}
+}
+
+// A test's own series is compared on the ids its window bound this run: the
+// job's beat on this run's id is the series' call, given back the recorded
+// id; a beat on the recorded id, on a third id, or on an id two variables
+// bound to two values is the owner's miss, said why; a series marked
+// set-wide, and an id no variable was recorded as, are compared as recorded.
+func TestOwnCallGivesBackTheIDsTheOwnersWindowBound(t *testing.T) {
+	leaf := func(p, v string) learn.Leaf { return learn.Leaf{Path: p, Type: learn.String, Value: v} }
+	series := learn.Series{Key: "update jobs", Values: map[string]learn.Leaf{
+		"body.q._id": leaf("body.q._id", "job-rec"),
+		"body.u.by":  leaf("body.u.by", "job-rec"),
+		"body.u.st":  leaf("body.u.st", "RUNNING"),
+	}}
+	call := func(id, by, st string) learn.Shape {
+		return learn.Shape{Key: "update jobs", Leaves: map[string]learn.Leaf{
+			"body.q._id": leaf("body.q._id", id), "body.u.by": leaf("body.u.by", by), "body.u.st": leaf("body.u.st", st)}}
+	}
+	bind := func(name, rec, live string) variables.Binding {
+		return variables.Binding{Name: name, Recorded: rec, Value: live}
+	}
+	own := MarkedSeries{Series: series, Owner: "T1"}
+	for _, c := range []struct {
+		name    string
+		m       MarkedSeries
+		live    learn.Shape
+		inForce []variables.Binding
+		shape   bool   // the series' shape holds asked
+		moved   string // joined
+		off     string // a part of it; "" for none
+	}{
+		{"this run's id is given back", own, call("job-live", "job-live", "RUNNING"), []variables.Binding{bind("v1", "job-rec", "job-live")}, true, "job-rec", ""},
+		{"a set-wide series reads no variable", MarkedSeries{Series: series}, call("job-live", "job-live", "RUNNING"), []variables.Binding{bind("v1", "job-rec", "job-live")}, false, "", ""},
+		{"no binding: compared as recorded", own, call("job-live", "job-live", "RUNNING"), nil, false, "", ""},
+		{"no binding of that id: compared as recorded", own, call("job-live", "job-live", "RUNNING"), []variables.Binding{bind("v1", "other-rec", "job-live")}, false, "", ""},
+		{"the recorded id while the run bound another", own, call("job-rec", "job-rec", "RUNNING"), []variables.Binding{bind("v1", "job-rec", "job-live")}, true, "", "it carries the recorded id job-rec at body.q._id, but T1's window bound that id to job-live"},
+		{"a third id", own, call("job-3rd", "job-3rd", "RUNNING"), []variables.Binding{bind("v1", "job-rec", "job-live")}, true, "", "it carries job-3rd at body.q._id, where T1's window bound the id recorded as job-rec to job-live"},
+		{"one place on the id, one beside it", own, call("job-live", "job-3rd", "RUNNING"), []variables.Binding{bind("v1", "job-rec", "job-live")}, true, "job-rec", "it carries job-3rd at body.u.by"},
+		{"two bindings, two values", own, call("job-live", "job-live", "RUNNING"), []variables.Binding{bind("v1", "job-rec", "job-live"), bind("v2", "job-rec", "job-2nd")}, true, "", "two variables recorded as job-rec are bound to two values this run (job-live, job-2nd)"},
+		{"two bindings, one value", own, call("job-live", "job-live", "RUNNING"), []variables.Binding{bind("v1", "job-rec", "job-live"), bind("v2", "job-rec", "job-live")}, true, "job-rec", ""},
+		{"an id that replays the same", own, call("job-rec", "job-rec", "RUNNING"), []variables.Binding{bind("v1", "job-rec", "job-rec")}, true, "", ""},
+		{"another value beside the id still differs", own, call("job-live", "job-live", "STOPPED"), []variables.Binding{bind("v1", "job-rec", "job-live")}, false, "job-rec", ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			before := c.live.Leaves["body.q._id"].Value
+			asked, moved, off := c.m.OwnCall(c.live, c.inForce)
+			if got := series.HasShape(asked, learn.None); got != c.shape {
+				t.Errorf("HasShape(asked) = %v; want %v (asked %v)", got, c.shape, asked.Leaves)
+			}
+			if got := strings.Join(moved, ","); got != c.moved {
+				t.Errorf("moved = %q; want %q", got, c.moved)
+			}
+			if c.off == "" && off != "" || c.off != "" && !strings.Contains(off, c.off) {
+				t.Errorf("off = %q; want it to say %q", off, c.off)
+			}
+			if c.live.Leaves["body.q._id"].Value != before {
+				t.Errorf("OwnCall wrote into live's leaves")
+			}
+		})
 	}
 }
