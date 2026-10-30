@@ -162,6 +162,11 @@ func (g *flowGuard) reaches(ctx context.Context, c models.UnmatchedCall, test, w
 	dc := g.cache(test)
 	for _, d := range drifts {
 		w, err := dc.WordFrom(d.recorded, d.live, whole, given...)
+		// WordFrom fails only on an answer the agent parked on disk
+		// (HasSpilledResponse). The agent sets that on mocks it decodes
+		// for itself, never on the set's stored recordings that whole is
+		// read from, so this branch does not run today. It stays so that
+		// such an answer is told as unreadable, not as reaching no test.
 		if err != nil {
 			return "", "its closest recording " + closest.Name + "'s answer could not be read back"
 		}
