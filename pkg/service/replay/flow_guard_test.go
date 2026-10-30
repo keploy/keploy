@@ -471,17 +471,43 @@ func TestFlowGuard_AStartUpWordTheBodyLostChargesTheTestWhateverTheStampHolds(t 
 // An instant the start-up answer gave, which the first test's body carried
 // and lost this run, charges the test however near the test's span it was
 // made, at the nanosecond or at the second: the response's own stamp, at its
-// own place, takes none of its words.
+// own place, takes none of its words. So does one that this run's body holds
+// the application's own clock in, in the test's span, at its place: the
+// recorded instant is no read of the clock in the test's span when it was
+// made before the second (or written unit) the test's request was sent in,
+// however near. One whose written unit overlaps the span (made in the
+// request's own second, or in its tenth where trailing zeros are dropped) is
+// taken as a read of the clock there, and the call stays background: the
+// stated limit, pinned.
 func TestFlowGuard_AStartUpInstantTheBodyLostChargesTheTestNearItsSpan(t *testing.T) {
 	recAt := time.Date(2026, 10, 30, 15, 21, 46, 310000000, time.UTC)
 	runAt := time.Date(2026, 10, 31, 9, 2, 3, 120000000, time.UTC)
+	layouts := []string{time.RFC3339Nano, time.RFC1123, time.RFC3339}
 	for _, off := range []time.Duration{-30 * time.Second, -5 * time.Second, -1500 * time.Millisecond, -900 * time.Millisecond,
 		-300 * time.Millisecond, -10 * time.Millisecond, 0, time.Millisecond} {
-		for _, layout := range []string{time.RFC3339Nano, time.RFC1123} {
+		for _, layout := range layouts {
 			stamp := recAt.Add(off).UTC().Format(layout)
 			s := quick(recAt, runAt, `{"price":42,"since":"`+stamp+`"}`, `{"price":42,"since":""}`)
 			if rest := s.charged(t, `{"booted":"`+stamp+`"}`); len(rest) != 1 {
 				t.Errorf("a start-up instant %s (%v from the request) lost from the body: the test keeps %+v; want the start-up call", stamp, off, rest)
+			}
+		}
+	}
+	for _, c := range []struct {
+		off     time.Duration
+		charged bool
+	}{{-30 * time.Second, true}, {-5 * time.Second, true}, {-1500 * time.Millisecond, true}, {-900 * time.Millisecond, true},
+		{-10 * time.Millisecond, false}, {0, false}} {
+		for _, layout := range layouts {
+			stamp := recAt.Add(c.off).UTC().Format(layout)
+			own := runAt.Add(time.Millisecond).UTC().Format(layout)
+			s := quick(recAt, runAt, `{"price":42,"since":"`+stamp+`"}`, `{"price":42,"since":"`+own+`"}`)
+			rest := s.charged(t, `{"booted":"`+stamp+`"}`)
+			switch {
+			case c.charged && len(rest) != 1:
+				t.Errorf("a start-up instant %s (%v from the request), the app's own clock %s at its place this run: the test keeps %+v; want the start-up call", stamp, c.off, own, rest)
+			case !c.charged && len(rest) != 0:
+				t.Errorf("a start-up instant %s (%v from the request, its written unit in the span), the app's own clock %s at its place this run: the test keeps %+v; want it read as the clock (the stated limit)", stamp, c.off, own, rest)
 			}
 		}
 	}
@@ -586,8 +612,40 @@ func TestFlowGuard_TheSpanOfATestsAnswerAtItsEdges(t *testing.T) {
 	})
 }
 
+// Two instants of one layout in each run, the answer's Date stamp and a body
+// stamp (RFC1123 both), are each read against the recorded one at its own
+// place: the k-th of the layout in each. A slow answer stamped as it ends
+// (recorded 15:21:48, this run 09:02:05), its body stamped at the request
+// (15:21:46, 09:02:03), all in their spans: a start-up answer holding the
+// second of either recorded instant reaches nothing. A body instant whose
+// recorded side is in its span and this run's is not (made five seconds
+// before this run's request) is no read of the clock in the span, and its
+// lost second charges the test.
+func TestFlowGuard_EachInstantOfALayoutIsReadAtItsOwnPlace(t *testing.T) {
+	recAt := time.Date(2026, 10, 30, 15, 21, 46, 310000000, time.UTC)
+	runAt := time.Date(2026, 10, 31, 9, 2, 3, 120000000, time.UTC)
+	slow := func(runBody time.Time) stamped {
+		return stamped{
+			recFrom: recAt, recTo: recAt.Add(2590 * time.Millisecond), recStamp: recAt.Add(2590 * time.Millisecond),
+			runFrom: runAt, runTo: runAt.Add(2780 * time.Millisecond), runStamp: runAt.Add(2779 * time.Millisecond),
+			recBody: `{"price":42,"at":"` + recAt.Format(time.RFC1123) + `"}`,
+			runBody: `{"price":42,"at":"` + runBody.Format(time.RFC1123) + `"}`,
+		}
+	}
+	for _, boot := range []string{`{"length":"48"}`, `{"length":"46"}`} {
+		if rest := slow(runAt).charged(t, boot); len(rest) != 0 {
+			t.Errorf("start-up answer %s: the test keeps %+v; each stamp, in its span in each run at its own place, came from no start-up call", boot, rest)
+		}
+	}
+	if rest := slow(runAt.Add(-5*time.Second)).charged(t, `{"length":"46"}`); len(rest) != 1 || !strings.Contains(rest[0].ReachesTest, "46") {
+		t.Errorf("the test keeps %+v; want the start-up call, the body's recorded 46 lost to an instant before this run's span", rest)
+	}
+}
+
 // A gRPC answer's clock stamp (a date header) is read in its span as an
 // HTTP answer's is; a start-up word its body lost still charges the test.
+// keploy's own read time of the answer (its Timestamp, set this run) is no
+// word of it.
 func TestFlowGuard_AGRPCAnswersStampIsReadInItsSpan(t *testing.T) {
 	recAt := time.Date(2026, 10, 30, 15, 21, 46, 310000000, time.UTC)
 	runAt := time.Date(2026, 10, 31, 9, 2, 3, 120000000, time.UTC)
@@ -604,6 +662,7 @@ func TestFlowGuard_AGRPCAnswersStampIsReadInItsSpan(t *testing.T) {
 			GrpcResp: answer(recAt, rec)}
 		tc.GrpcResp.Timestamp = recAt.Add(2 * time.Millisecond)
 		now := answer(runAt.Add(time.Millisecond), got)
+		now.Timestamp = runAt.Add(3 * time.Millisecond)
 		var calls setCalls
 		calls.reset(newFlowGuard([]*models.TestCase{tc}, nil, []*models.Mock{guardMock(boot)}))
 		return calls.take(context.Background(), []models.UnmatchedCall{startUpCall()}, "get-price-r1a-1",
@@ -611,6 +670,13 @@ func TestFlowGuard_AGRPCAnswersStampIsReadInItsSpan(t *testing.T) {
 	}
 	if rest := run(t, "price:42", "price:42", `{"length":"46"}`); len(rest) != 0 {
 		t.Fatalf("the test keeps %+v; its answer's date stamp, in its span in each run, came from no start-up call", rest)
+	}
+	// keploy read this run's answer at 2026-10-31T09:02:03.123Z: a start-up
+	// answer holding its year, day, minute or millisecond reaches nothing.
+	for _, boot := range []string{`{"n":2026}`, `{"n":31}`, `{"n":2}`, `{"n":123}`} {
+		if rest := run(t, "price:42", "price:42", boot); len(rest) != 0 {
+			t.Fatalf("start-up answer %s: the test keeps %+v; keploy's read time of the answer is no word of it", boot, rest)
+		}
 	}
 	if rest := run(t, "price:42 shard:46", "price:42 shard:0", `{"shard":46}`); len(rest) != 1 {
 		t.Fatalf("the test keeps %+v; want the start-up call, its answer's 46 lost from the body", rest)
