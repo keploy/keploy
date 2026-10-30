@@ -1232,15 +1232,23 @@ func pickUnaccounted(where string) string {
 // it. A word lost or gained is one every ASCII word of which the other side
 // lacks is a clock word (clockWord). A word of its runs is one every ASCII
 // word of which is a clock word (allClock), since its words may all stand on
-// the other side in another grouping ("abc-def", then "abc_def"), or one the
-// other side does not hold that is a word the other side holds in that
-// reading with one clock read of it changed for another and every other
-// byte kept (clockSwapped): the id "stop-<UnixNano>" of a coarse reading
-// (idByte), a test's own name read on the clock, is no word F may have given
-// the application where the finer readings' "<UnixNano>" is none. So the
-// clock evidence comes before the word rule's search of what F gave there
-// (unseenWhy, servedWhy) for a word inside a text, as it does for a value
-// that is one read whole.
+// the other side in another grouping ("abc-def", then "abc_def").
+//
+// In the reading from each run's test begin alone (Window.begun), it is
+// also a word of its runs the other side does not hold that holds a clock
+// word of its side (holdsClockWord): the id "stop-<UnixNano>" of a coarse
+// reading (idByte), a test's own name read on the clock, is no word F may
+// have given the application where the finer readings' "<UnixNano>" is
+// none. There the clock evidence comes before the word rule's search of
+// what F gave there (unseenWhy, servedWhy) for a word inside a text, as it
+// does for a value that is one read whole. That reading's noise is taken
+// only by sinceWord, as a checked read of one word, and only where exactly
+// one instant of the text changed and every other byte of it is the same in
+// both runs (clockWordIn), the word read alone with every rule of a value:
+// a word whose other bytes changed too, or that holds two changed reads, is
+// refused there as in the call's window. In a call's own window the word
+// rule searches for such a word as it does for any other, so one F served
+// unstated may hold there is refused, never learned as noise.
 func (v *valueDrift) clockChanged(i int, t string, recorded, moved bool) bool {
 	if !moved {
 		return clockWord(t, recorded, v, v.clock)
@@ -1248,42 +1256,45 @@ func (v *valueDrift) clockChanged(i int, t string, recorded, moved bool) bool {
 	if allClock(t, recorded, v.clock) {
 		return true
 	}
-	other := v.liveTok[i]
-	if !recorded {
-		other = v.recTok[i]
+	if !v.begun {
+		return false
 	}
-	return !other[t] && v.clockSwapped(t, recorded, other)
+	other, mine := v.liveTok[i], v.clock.rec
+	if !recorded {
+		other, mine = v.recTok[i], v.clock.live
+	}
+	return !other[t] && holdsClockWord(t, mine)
 }
 
-// clockSwapped reports whether t, a word of v recorded or live, is a word
-// the other side holds (other) with one clock word of it (a word of v's
-// clock reads on t's side, standing in t at ASCII word boundaries) changed
-// for a clock word of the other side, every other byte of it kept.
-func (v *valueDrift) clockSwapped(t string, recorded bool, other map[string]bool) bool {
-	mine, theirs := v.clock.rec, v.clock.live
-	if !recorded {
-		mine, theirs = theirs, mine
-	}
-	for c := range mine {
-		for from := 0; from < len(t); {
-			k := strings.Index(t[from:], c)
-			if k < 0 {
-				break
-			}
-			k += from
-			from = k + 1
-			end := k + len(c)
-			if k > 0 && isWord(t[k-1]) || end < len(t) && isWord(t[end]) {
-				continue
-			}
-			for c2 := range theirs {
-				if other[t[:k]+c2+t[end:]] {
-					return true
-				}
-			}
+// holdsClockWord reports whether one ASCII word of t (eachASCIIWord) is a
+// word of clock, one side's clock words (clockSet), in one pass over t.
+func holdsClockWord(t string, clock map[string]bool) bool {
+	found := false
+	eachASCIIWord(t, func(k, e int) bool {
+		found = clock[t[k:e]]
+		return !found
+	})
+	return found
+}
+
+// eachASCIIWord calls f with the bounds of each ASCII word of s (a longest
+// run of isWord bytes), start and end, in the order they stand, until f
+// returns false.
+func eachASCIIWord(s string, f func(start, end int) bool) {
+	for i := 0; i < len(s); {
+		if !isWord(s[i]) {
+			i++
+			continue
 		}
+		j := i + 1
+		for j < len(s) && isWord(s[j]) {
+			j++
+		}
+		if !f(i, j) {
+			return
+		}
+		i = j
 	}
-	return false
 }
 
 // allClock reports whether every ASCII word of t is a clock word of c, on

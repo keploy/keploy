@@ -1895,7 +1895,7 @@ func echoedPart(dc *DriftCache, v *valueDrift, resp []Leaf) string {
 			}
 		}
 		for t := range v.movedRec[i] {
-			if !v.clockChanged(i, t, true, true) {
+			if !allClock(t, true, v.clock) {
 				words[t] = true
 			}
 		}
@@ -2284,6 +2284,10 @@ type valueDrift struct {
 	// recTok and liveTok are every word of the value, recorded and live,
 	// in every form, by reading.
 	recTok, liveTok []map[string]bool
+	// begun: the value was read in a call's window from each run's test
+	// begin (Window.begun), where the word rule lets a word of its runs go
+	// that holds a clock word (clockChanged).
+	begun bool
 	// encodedRec is the text the recorded value's encoded runs decode to
 	// (b64Text), "" when none.
 	encodedRec string
@@ -2549,7 +2553,7 @@ func (dc *DriftCache) rawExtra(text string) string {
 // (Window.key) and the call's recorded instant (UnixNano, 0 for none).
 type driftKey struct {
 	run
-	w    [4]int64
+	w    [5]int64
 	call int64
 	// zone is the zone the clock reads were read in (DriftCache.zone): a
 	// test's caches share what they keep across the zones of its calls'
@@ -2579,7 +2583,7 @@ func (dc *DriftCache) ofIn(rec, live string, w *Window, call time.Time) *valueDr
 		return d
 	}
 	lead := !dc.clientTests
-	d = &valueDrift{rec: rec, live: live, clock: clockAt(rec, live, w, lead, call, dc.zone)}
+	d = &valueDrift{rec: rec, live: live, clock: clockAt(rec, live, w, lead, call, dc.zone), begun: w != nil && w.begun}
 	d.decRec, d.decLive = unescaped(rec), unescaped(live)
 	d.decoded = d.decRec != rec || d.decLive != live
 	// A value with escapes is read raw and decoded: a '%' or '\' may be

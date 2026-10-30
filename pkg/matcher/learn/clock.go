@@ -158,6 +158,12 @@ type Window struct {
 	// offsets: the caller's replay compares a read of the clock plus a
 	// constant offset (ComparesOffsets).
 	offsets bool
+	// begun: w is a call's window read from each run's test begin
+	// (sinceBegin), the reading in which the word rule lets go a word of a
+	// text's runs that holds a clock word (valueDrift.clockChanged), since
+	// only sinceWord takes what it learns there as noise, and only as a
+	// checked read of one word.
+	begun bool
 }
 
 // ComparesOffsets is w for a caller whose replay compares a value the learn
@@ -234,7 +240,7 @@ func (w *Window) sinceBegin() *Window {
 	if !ok {
 		return nil
 	}
-	return &Window{Rec: rec, F: f, offsets: w.offsets}
+	return &Window{Rec: rec, F: f, offsets: w.offsets, begun: true}
 }
 
 // clockWordIn finds the one instant that changed in a text, recorded as rec
@@ -320,12 +326,19 @@ func (w *Window) Holds(rec, live time.Time, res time.Duration) bool {
 	return w != nil && w.Rec.holds(rec, res) && w.F.holds(live, res)
 }
 
-// key is w as a map key, the zero key for none.
-func (w *Window) key() [4]int64 {
+// key is w as a map key, the zero key for none: its spans' bounds, and 1
+// last for a reading from each run's test begin (begun), which reads a
+// value's words otherwise than its call's own window does even where the
+// two windows' bounds are the same.
+func (w *Window) key() [5]int64 {
 	if w == nil {
-		return [4]int64{}
+		return [5]int64{}
 	}
-	return [4]int64{w.Rec.From.UnixNano(), w.Rec.To.UnixNano(), w.F.From.UnixNano(), w.F.To.UnixNano()}
+	var begun int64
+	if w.begun {
+		begun = 1
+	}
+	return [5]int64{w.Rec.From.UnixNano(), w.Rec.To.UnixNano(), w.F.From.UnixNano(), w.F.To.UnixNano(), begun}
 }
 
 // clockOf is clockIn with no call's window: the clock reads that moved by

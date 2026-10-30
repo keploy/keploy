@@ -74,8 +74,8 @@ func untoldServe(at time.Time) []Raw {
 // word stands is kept, with the length and SHA-256 of the text on each side
 // of it (never the text), so that a replay compares the rest. A word read before
 // the test began, a text whose words around the read changed too, or one
-// with two changed reads, stay refused; and a word read in its call's own
-// window stays the word noise it was, served unstated or not.
+// with two changed reads, stay refused. A word read in its call's own
+// window is TestAWordReadInItsCallsWindowIsNeverNoiseWhereAnUntoldServeMayHoldIt's.
 func TestAClientTestLearnsAWordOfATextReadSinceItsTestBegan(t *testing.T) {
 	const p = "body.cmd.query.app.name"
 	name := func(prefix string) func(time.Time) string {
@@ -85,7 +85,6 @@ func TestAClientTestLearnsAWordOfATextReadSinceItsTestBegan(t *testing.T) {
 		return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: v}}}
 	}
 	w := earlierReadWindow(wordRec, wordF)
-	inWindow := &Window{Rec: Span{From: wordRec.read.Add(-100 * time.Millisecond), To: wordRec.call, Began: wordRec.began}, F: Span{From: wordF.read.Add(-100 * time.Millisecond), To: wordF.call, Began: wordF.began}}
 	// A read cut to the second, made 3 s before the previous call: a
 	// window of the call alone does not hold it within its cut.
 	secs := func(r earlierReadRun) Span {
@@ -96,7 +95,6 @@ func TestAClientTestLearnsAWordOfATextReadSinceItsTestBegan(t *testing.T) {
 	type want int
 	const (
 		read want = iota
-		noise
 		refused
 	)
 	for _, tc := range []struct {
@@ -111,7 +109,6 @@ func TestAClientTestLearnsAWordOfATextReadSinceItsTestBegan(t *testing.T) {
 		{"a word with text after it", "job " + nanosText(wordRec.read) + " queued", "job " + nanosText(wordF.read) + " queued", w, read, sides{"job ", " queued"}, time.Nanosecond},
 		{"epoch seconds at their cut", "batch-" + secsText(wordRec.read), "batch-" + secsText(wordF.read), wSecs, read, sides{"batch-", ""}, time.Second},
 		{"an ISO time", "at " + wordRec.read.Format(time.RFC3339Nano), "at " + wordF.read.Format(time.RFC3339Nano), w, read, sides{"at ", ""}, time.Nanosecond},
-		{"read in its call's window", name("[E2E] generate-stop-")(wordRec.read), name("[E2E] generate-stop-")(wordF.read), inWindow, noise, sides{}, 0},
 		{"read before the recording's test began", name("[E2E] generate-stop-")(wordRec.read), name("[E2E] generate-stop-")(wordF.read), lateBegin, refused, sides{}, 0},
 		{"the text before the word changed too", name("[E2E] generate-stop-")(wordRec.read), name("[E2E] generate-halt-")(wordF.read), w, refused, sides{}, 0},
 		{"a separator changed too", name("[E2E] generate-stop-")(wordRec.read), name("[E2E] generate_stop-")(wordF.read), w, refused, sides{}, 0},
@@ -138,16 +135,117 @@ func TestAClientTestLearnsAWordOfATextReadSinceItsTestBegan(t *testing.T) {
 					if s := o.String(); strings.Contains(s, "generate") || strings.Contains(s, "queued") || !strings.Contains(s, at) {
 						t.Fatalf("String() = %q; want where the word stands, and no text of the value", s)
 					}
-				case noise:
-					if ln.Kind != KindNoise || ln.Read != nil {
-						t.Fatalf("%q -> %q: %s Read=%+v (%s); want the word noise a read in its call's window is", tc.rec, tc.live, ln.Kind, ln.Read, ln.Why)
-					}
 				case refused:
 					if ln.Kind != KindUnaccounted || ok {
 						t.Fatalf("%q -> %q: %s Read=%+v (%s); want it refused", tc.rec, tc.live, ln.Kind, ln.Read, ln.Why)
 					}
 				}
 			})
+		}
+	}
+}
+
+// clientWordAt classifies a client test's text at body.cmd.query.app.name,
+// recorded as rec and seen in record's full round as live (each a format of
+// one %d, its run's UnixNano read of run 7: wordRec, wordF), its call's
+// window opening prev after that read (negative: the read is inside it) and
+// closing 250 ms after it, its test begun 2 s before it, with mock-4565
+// served unstated before the call where untold, the call's recorded
+// answer resp, and its other earlier places, raw.
+func clientWordAt(t *testing.T, rec, live string, prev time.Duration, untold bool, resp []Leaf, raw ...Raw) (Learned, string) {
+	t.Helper()
+	const p = "body.cmd.query.app.name"
+	if untold {
+		raw = append(untoldServe(wordRec.read.Add(-time.Second)), raw...)
+	}
+	span := func(read time.Time) Span {
+		return Span{From: read.Add(prev), To: read.Add(250 * time.Millisecond), Began: read.Add(-2 * time.Second)}
+	}
+	w := &Window{Rec: span(wordRec.read), F: span(wordF.read)}
+	str := func(v string) Shape {
+		return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: v}}}
+	}
+	r, l := fmt.Sprintf(rec, wordRec.read.UnixNano()), fmt.Sprintf(live, wordF.read.UnixNano())
+	return ClassifyFollowing(clientTestCache(), []string{p}, str(l), str(r), wordRec.read.Add(250*time.Millisecond), nil, raw, resp, w, nil)[0], r
+}
+
+// A text whose one changed word is a client test's clock read made inside
+// its call's own window is the word noise the call's window learns where
+// nothing F served before the call may hold the word: only that word goes
+// unchecked, and the rest of the text is still compared. Where another
+// test's recording F served unstated may hold it (mock-4565 of run 7), the
+// word rule refuses it in the call's window, and that refusal is never
+// turned into noise: read again from each run's test begin, the word is
+// learned as a read of the clock since its test began
+// (models.ClockOffset.Word), checked at every replay. The word rule lets a
+// word that holds a clock word go in the reading from the begin alone
+// (valueDrift.clockChanged); let go in every window, the untold serve's
+// refusal would become noise no replay checks.
+func TestAWordReadInItsCallsWindowIsNeverNoiseWhereAnUntoldServeMayHoldIt(t *testing.T) {
+	const name = "[E2E] generate-stop-%d"
+	ln, rec := clientWordAt(t, name, name, -100*time.Millisecond, false, nil)
+	if ln.Kind != KindNoise || ln.Read != nil {
+		t.Fatalf("nothing served unstated: %s Read=%+v (%s); want the word noise the call's window learns", ln.Kind, ln.Read, ln.Why)
+	}
+	// The test's first call opens its window at the test's begin: the two
+	// readings' windows have the same bounds, and the reading from the
+	// begin is still its own (Window.key).
+	for _, prev := range []time.Duration{-100 * time.Millisecond, -2 * time.Second} {
+		ln, rec = clientWordAt(t, name, name, prev, true, nil)
+		o, ok := ln.Clock()
+		if ln.Kind != KindClockRead || !ok || !o.Plain() || o.Since != models.SinceTestBegin || o.Res != time.Nanosecond || o.Word != (sides{"[E2E] generate-stop-", ""}).at(t, rec) {
+			t.Fatalf("served unstated, the window opening %v after the read: %s Read=%+v Word=%+v (%s); want a checked read of the word since its test began, never noise", prev, ln.Kind, ln.Read, o.Word, ln.Why)
+		}
+	}
+}
+
+// A word read alone has every rule of a value: where its digits stand in
+// what an earlier place of the test gave the application, in the recording
+// and as F's stated view of that place (a variable of it), the word is no
+// plain read of the clock, though the window holds it as one in both runs,
+// and a refusal of the text in its call's window stands. So does a text
+// that comes back in the call's own recorded answer (echoedPart), whole or
+// inside a longer text: a replay serves that answer as recorded, which no
+// read of this run's clock answers with this run's value. So does a text
+// whose words after its clock read changed too, by length or in place
+// ("queued", then "waiting" or "queuex"): no one word of it is the read,
+// the rest of the text is no text that stayed, and it is refused, served
+// unstated or not, never learned as a read with the recorded text's hash.
+func TestAWordReadIsNoReadWhereItHasASourceOrTheTextAfterItChanged(t *testing.T) {
+	at := wordRec.read.Add(50 * time.Millisecond)
+	stamp := func(r earlierReadRun) *models.Mock {
+		return &models.Mock{Name: "mock-77", Kind: models.HTTP, Spec: models.MockSpec{
+			Metadata:         map[string]string{"type": "HTTP_CLIENT"},
+			HTTPReq:          &models.HTTPReq{Method: "GET", URL: "http://localhost:9000/stamp", Header: map[string]string{}},
+			HTTPResp:         &models.HTTPResp{StatusCode: 200, Header: map[string]string{}, Body: fmt.Sprintf(`{"stamp":%d}`, r.read.UnixNano())},
+			ReqTimestampMock: at, ResTimestampMock: at.Add(time.Millisecond),
+		}}
+	}
+	given := RawOf(stamp(wordRec), true).ServedIn(1, 1).ServedLive(RawOf(stamp(wordF), true))
+	if ln, _ := clientWordAt(t, "[E2E] generate-stop-%d", "[E2E] generate-stop-%d", -100*time.Millisecond, true, nil, given); ln.Kind != KindUnaccounted || ln.Read != nil {
+		o, _ := ln.Clock()
+		t.Fatalf("a word an earlier answer gave: %s %s (%s); want it refused", ln.Kind, o.String(), ln.Why)
+	}
+	const name = "[E2E] generate-stop-%d"
+	for _, echo := range []string{"%s", `{"name":"%s"}`} {
+		for _, untold := range []bool{false, true} {
+			ln, rec := clientWordAt(t, name, name, 100*time.Millisecond, untold, []Leaf{{Path: "body.app", Type: String, Value: fmt.Sprintf(echo, fmt.Sprintf(name, wordRec.read.UnixNano()))}})
+			if ln.Kind != KindUnaccounted || ln.Read != nil {
+				o, _ := ln.Clock()
+				t.Errorf("%q back in the answer as %q, served unstated %v: %s %s (%s); want it refused", rec, echo, untold, ln.Kind, o.String(), ln.Why)
+			}
+		}
+	}
+	for _, c := range [][2]string{
+		{"job %d queued", "job %d waiting"},
+		{"job %d queued", "job %d queuex"},
+		{"[E2E] a-%d-x", "[E2E] a-%d-y"},
+	} {
+		for _, untold := range []bool{false, true} {
+			if ln, _ := clientWordAt(t, c[0], c[1], 100*time.Millisecond, untold, nil); ln.Kind != KindUnaccounted || ln.Read != nil {
+				o, _ := ln.Clock()
+				t.Errorf("%q -> %q, served unstated %v: %s %s (%s); want it refused", c[0], c[1], untold, ln.Kind, o.String(), ln.Why)
+			}
 		}
 	}
 }
