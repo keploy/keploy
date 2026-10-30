@@ -27,6 +27,10 @@ import (
 // When os.Stdout and os.Stderr are one file (a terminal, one CI log), the
 // child gets one pipe for both, so its lines keep their order there.
 //
+// A keploy agent's console (SetAgentConsole) is piped while a run log is open
+// too (keployLog.RunLogWriter, keploy mock replay's): each of its lines,
+// cut, goes to the run log or to keploy's file by its level.
+//
 // The choice is made when it is set: a value registered after the child
 // started is not cut from its output. A child writing to a pipe may buffer
 // its output in blocks and drop its colour, as it does under any pipe. Once
@@ -37,6 +41,9 @@ import (
 type ChildConsole struct {
 	parentEnds []*os.File
 	copies     []*ChildOutputCopy
+	// runLogs are the run log's writers the copies write to: each holds a
+	// last line with no line break until Exited flushes it.
+	runLogs []io.Writer
 	// tee, when set, is a writer for each pipe the child gets: SetChildConsoleTee.
 	tee func() io.Writer
 }
@@ -45,7 +52,7 @@ type ChildConsole struct {
 // ChildConsole. Call Started once cmd.Start has returned, whatever it
 // returned, and Exited once cmd.Wait has.
 func SetChildConsole(cmd *exec.Cmd) (*ChildConsole, error) {
-	return SetChildConsoleTee(cmd, nil)
+	return setChildConsole(cmd, nil, false)
 }
 
 // SetChildConsoleTee is SetChildConsole that also copies what the child
@@ -56,8 +63,19 @@ func SetChildConsole(cmd *exec.Cmd) (*ChildConsole, error) {
 // tee's writes are not waited on for errors: a failing one drops what it was
 // given, as keploy's console does. A nil tee is SetChildConsole.
 func SetChildConsoleTee(cmd *exec.Cmd, tee func() io.Writer) (*ChildConsole, error) {
+	return setChildConsole(cmd, tee, false)
+}
+
+// SetAgentConsole is SetChildConsole for a keploy agent, whose lines go, while
+// a run log is open, to the run log or to keploy's own by their level
+// (keployLog.RunLogWriter).
+func SetAgentConsole(cmd *exec.Cmd) (*ChildConsole, error) {
+	return setChildConsole(cmd, nil, true)
+}
+
+func setChildConsole(cmd *exec.Cmd, tee func() io.Writer, runLog bool) (*ChildConsole, error) {
 	c := &ChildConsole{tee: tee}
-	out, err := c.file(os.Stdout)
+	out, err := c.file(os.Stdout, runLog)
 	if err != nil {
 		return nil, err
 	}
@@ -65,7 +83,7 @@ func SetChildConsoleTee(cmd *exec.Cmd, tee func() io.Writer) (*ChildConsole, err
 		cmd.Stdout, cmd.Stderr = out, out
 		return c, nil
 	}
-	errOut, err := c.file(os.Stderr)
+	errOut, err := c.file(os.Stderr, runLog)
 	if err != nil {
 		c.Started()
 		return nil, err
@@ -74,9 +92,15 @@ func SetChildConsoleTee(cmd *exec.Cmd, tee func() io.Writer) (*ChildConsole, err
 	return c, nil
 }
 
-// file is what the child gets for dst: dst itself, or a pipe copied to it cut.
-func (c *ChildConsole) file(dst *os.File) (*os.File, error) {
-	if c.tee == nil && !keployLog.CutsChildOutput() {
+// file is what the child gets for dst: dst itself, or a pipe copied to it cut,
+// through the run log's writer where runLog is set and a run log is open.
+func (c *ChildConsole) file(dst *os.File, runLog bool) (*os.File, error) {
+	var to io.Writer = dst
+	if runLog {
+		to = keployLog.RunLogWriter(dst)
+	}
+	split := to != io.Writer(dst)
+	if c.tee == nil && !keployLog.CutsChildOutput() && !split {
 		return dst, nil
 	}
 	r, w, err := os.Pipe()
@@ -84,7 +108,10 @@ func (c *ChildConsole) file(dst *os.File) (*os.File, error) {
 		return nil, fmt.Errorf("make the pipe the child's output is cut through: %w", err)
 	}
 	c.parentEnds = append(c.parentEnds, w)
-	cp := StartChildOutputCopy(teeTo(dst, c.tee), r, true)
+	if split {
+		c.runLogs = append(c.runLogs, to)
+	}
+	cp := StartChildOutputCopy(teeTo(to, c.tee), r, true)
 	c.copies = append(c.copies, cp)
 	go func() {
 		<-cp.Done()
@@ -126,6 +153,9 @@ func (c *ChildConsole) Exited() {
 	}
 	for _, cp := range c.copies {
 		cp.Drain()
+	}
+	for _, w := range c.runLogs {
+		_ = keployLog.FlushRunLogWriter(w)
 	}
 }
 

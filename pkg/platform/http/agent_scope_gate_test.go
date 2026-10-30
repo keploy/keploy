@@ -84,14 +84,14 @@ func TestAgentClient_PushScopeSkips(t *testing.T) {
 	a := &AgentClient{logger: zap.NewNop(), client: http.Client{}, conf: &config.Config{Agent: config.Agent{AgentURI: srv.URL}}}
 	ctx := context.Background()
 
-	if err := a.PushScopeSkips(ctx, map[string]string{"orders::TestToken": "flaky: replay_only"}); err != nil {
+	if err := a.PushScopeSkips(ctx, map[string]string{"orders::TestToken": "flaky: replay_only"}, ""); err != nil {
 		t.Fatalf("skips: %v", err)
 	}
 	answer = `{"v":1,"status":"ok","skips":0}`
-	if err := a.PushScopeSkips(ctx, map[string]string{}); err != nil {
+	if err := a.PushScopeSkips(ctx, map[string]string{}, ""); err != nil {
 		t.Fatalf("no skips: %v", err)
 	}
-	if err := a.PushScopeSkips(ctx, map[string]string{"a": "b"}); err == nil {
+	if err := a.PushScopeSkips(ctx, map[string]string{"a": "b"}, ""); err == nil {
 		t.Fatal("an agent that applies fewer entries than were sent did not acknowledge the list")
 	}
 	bodies = bodies[:2]
@@ -99,14 +99,22 @@ func TestAgentClient_PushScopeSkips(t *testing.T) {
 	if len(bodies) != 2 || bodies[0] != want[0] || bodies[1] != want[1] {
 		t.Fatalf("posted %v, want %v", bodies, want)
 	}
+	// The file the replay writes its report to goes with the list.
+	bodies, answer = nil, `{"v":1,"status":"ok","skips":0}`
+	if err := a.PushScopeSkips(ctx, map[string]string{}, "keploy/reports/r1/replay.yaml"); err != nil {
+		t.Fatalf("report: %v", err)
+	}
+	if want := `{"run":null,"report":"keploy/reports/r1/replay.yaml"}`; len(bodies) != 1 || bodies[0] != want {
+		t.Fatalf("posted %v, want %v", bodies, want)
+	}
 	answer = `{"status":"ok"}`
-	if err := a.PushScopeSkips(ctx, map[string]string{"a": "b"}); err == nil {
+	if err := a.PushScopeSkips(ctx, map[string]string{"a": "b"}, ""); err == nil {
 		t.Fatal("an agent that answers without the wire's version did not acknowledge the list")
 	}
 	answer = `{"v":1,"status":"ok","skips":1}`
 	for _, s := range []int{http.StatusNotFound, http.StatusNotImplemented, http.StatusUnprocessableEntity, http.StatusInternalServerError} {
 		status = s
-		if err := a.PushScopeSkips(ctx, map[string]string{"a": "b"}); err == nil {
+		if err := a.PushScopeSkips(ctx, map[string]string{"a": "b"}, ""); err == nil {
 			t.Fatalf("status %d: a refused list must be an error", s)
 		}
 	}

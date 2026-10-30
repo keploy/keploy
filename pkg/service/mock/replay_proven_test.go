@@ -28,11 +28,12 @@ type skipPusher struct {
 	Instrumentation
 	pushed bool
 	skip   map[string]string
+	report string
 	err    error
 }
 
-func (s *skipPusher) PushScopeSkips(_ context.Context, skip map[string]string) error {
-	s.pushed, s.skip = true, skip
+func (s *skipPusher) PushScopeSkips(_ context.Context, skip map[string]string, report string) error {
+	s.pushed, s.skip, s.report = true, skip, report
 	return s.err
 }
 
@@ -69,6 +70,13 @@ func TestPushScopeSkips(t *testing.T) {
 	require.NoError(t, m.pushScopeSkips(context.Background(), "t2-go", "d1"))
 	require.NotNil(t, p.skip, "an empty list is pushed, not left out")
 	require.Empty(t, p.skip)
+	require.Empty(t, p.report, "no report named: none pushed")
+
+	// The file the replay writes its report to goes with the list.
+	ReportReplayTo("keploy/reports/r1/replay.yaml")
+	t.Cleanup(func() { ReportReplayTo("") })
+	require.NoError(t, m.pushScopeSkips(context.Background(), "t2-go", "d1"))
+	require.Equal(t, "keploy/reports/r1/replay.yaml", p.report)
 }
 
 // A list that cannot be read, or an agent that refuses it, refuses the replay.
@@ -182,7 +190,7 @@ func TestTheReceiptCountsDataMissesUnderTheSwitchOnly(t *testing.T) {
 	require.Nil(t, mustReceipt(t, dir).UnchargedMisses, "absent with the switch off")
 	raw, err := os.ReadFile(filepath.Join(dir, "set", ReceiptFile))
 	require.NoError(t, err)
-	require.NotContains(t, string(raw), "missedData")
+	require.NotContains(t, strings.TrimPrefix(string(raw), receiptHeader), "missedData", "the header says what it means; the fields hold none")
 
 	provenOn(t)
 	dir, _, _ = replayIn(t, replayCase{mockErrs: misses, mapped: true})

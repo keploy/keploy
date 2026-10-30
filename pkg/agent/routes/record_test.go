@@ -186,3 +186,21 @@ func TestHandleIncoming_ChecksAGRPCTestCaseByItsOwnWindow(t *testing.T) {
 		t.Fatalf("streamed %v, want only [clean]", got)
 	}
 }
+
+type replayingSvc bool
+
+func (r replayingSvc) Replaying() bool { return bool(r) }
+
+// The end of the agent's stream of incoming calls says what it was: during a
+// replay, "agent: recording complete" read as if the replay had recorded.
+func TestTheStreamsEndSaysReplayInAReplay(t *testing.T) {
+	if got := streamCompleteMessage(replayingSvc(true)); got != "agent: replay complete" {
+		t.Fatalf("a replay's stream ended with %q", got)
+	}
+	if got := streamCompleteMessage(replayingSvc(false)); got != "agent: recording complete" {
+		t.Fatalf("a recording's stream ended with %q", got)
+	}
+	if got := streamCompleteMessage(nil); got != "agent: recording complete" {
+		t.Fatalf("a service that does not say ended with %q", got)
+	}
+}

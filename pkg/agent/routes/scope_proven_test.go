@@ -26,6 +26,7 @@ type wireSvc struct {
 	begun       []models.ScopeReq
 	ended       []models.ScopeReq
 	skips       map[string]string
+	report      string
 	beginResp   models.ScopeBeginResp
 	beginErr    *models.ScopeError
 	endResp     models.ScopeEndResp
@@ -48,8 +49,8 @@ func (s *wireSvc) ProvenEnd(_ context.Context, req models.ScopeReq) (models.Scop
 	return s.endResp, s.endErr
 }
 
-func (s *wireSvc) SetScopeSkips(_ context.Context, skip map[string]string) error {
-	s.skips = skip
+func (s *wireSvc) SetScopeSkips(_ context.Context, skip map[string]string, report string) error {
+	s.skips, s.report = skip, report
 	return nil
 }
 
@@ -148,6 +149,11 @@ func TestTheGateTakesTheSkipMapAndAcknowledgesIt(t *testing.T) {
 	rec = call(t, a.HandleScopeGate, `{"run":null}`)
 	if rec.Code != http.StatusOK || svc.skips != nil {
 		t.Fatalf("empty gate: %d %s, skips %v", rec.Code, rec.Body.String(), svc.skips)
+	}
+	// The file the replay writes its report to reaches the agent with it.
+	rec = call(t, a.HandleScopeGate, `{"run":null,"report":"keploy/reports/r1/replay.yaml"}`)
+	if rec.Code != http.StatusOK || svc.report != "keploy/reports/r1/replay.yaml" {
+		t.Fatalf("report: %d %s, report %q", rec.Code, rec.Body.String(), svc.report)
 	}
 }
 
