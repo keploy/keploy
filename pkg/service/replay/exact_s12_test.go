@@ -556,6 +556,60 @@ func TestUnderTheSwitchARefusedBootCallEndsTheWaitForItAtOnce(t *testing.T) {
 	}
 }
 
+// A worker call placed after a test that the application made and keploy
+// refused: no mock answered it, and its closest recording is the worker
+// scope's mock placed after test-1. Such a call may come again, so the set's
+// end still waits for that recording, and says nothing of skipping a boot
+// call's wait; once the wait ends with it unanswered the set fails, its
+// reason naming the call keploy refused and the recording it was closest to.
+// Before, the reason said the recording was never made, though the
+// application made its call (proven-after-answer scenarios 7 and 9).
+func TestUnderTheSwitchARefusedWorkerCallPlacedAfterATestIsWaitedForThenNamed(t *testing.T) {
+	setSwitch(t, true)
+	prevLimit, prevWake := workerStallLimit, workerWake
+	t.Cleanup(func() { workerStallLimit, workerWake = prevLimit, prevWake })
+	workerStallLimit = 1
+	var waits atomic.Int32
+	workerWake = func(context.Context) (<-chan time.Time, func()) {
+		waits.Add(1)
+		wake := make(chan time.Time, 1)
+		wake <- time.Time{}
+		return wake, func() {}
+	}
+	h := composeHarnessOf(t, &composeInstr{}, 2)
+	pinWindows(h)
+	h.replayer.config.Command = "docker compose up"
+	core, logs := observer.New(zap.InfoLevel)
+	h.replayer.logger = zap.New(core)
+	h.mocks.filtered = []*models.Mock{httpAt("mock-a", 1010), httpAt("mock-tick", 1500), httpAt("mock-b", 2010)}
+	mappingFile(t, h, nil)
+	// test-2's read hands over the tick, made between the two tests and
+	// refused, as the switch-on agent sends it: background, closest to the
+	// worker scope's mock placed after test-1.
+	h.instr.mockErrorsFor = misses(nil, reads(models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "POST /tick", Destination: "dep:9411",
+		Kind: models.MissOutsideTest, Background: true, ClosestMock: "mock-tick"}))
+	h.replayer.hookImpl = prHooks{consumedFor: consumedByWindow(h, map[string][]models.MockState{
+		"test-1": {mongoAt("mock-a", 1010)}, "test-2": {mongoAt("mock-b", 2010)}})}
+	if got := h.runServing(t); got != models.TestSetStatusFailed {
+		t.Fatalf("set %s (reason %q), want FAILED: the worker scope's recording placed after test-1 was never answered", got, h.report.report.FailureReason)
+	}
+	if n := waits.Load(); n == 0 {
+		t.Fatal("the set's end did not wait for the worker recording placed after a test: such a call may come again")
+	}
+	if n := logs.FilterMessageSnippet("not waiting for the worker scope's boot calls").Len(); n != 0 {
+		t.Fatalf("keploy said %d time(s) that it skipped the wait for a refused boot call; the refused call is closest to a recording placed after a test", n)
+	}
+	why := h.report.report.FailureReason
+	for _, want := range []string{"made 1 of the calls the test set's worker scope recorded", "differently, and keploy refused each: HTTP POST /tick to dep:9411 (closest to mock-tick)"} {
+		if !strings.Contains(why, want) {
+			t.Fatalf("the set's reason %q does not say %q: it must name the refused call and the recording it was closest to", why, want)
+		}
+	}
+	if strings.Contains(why, "never made") || workerNamed(logs) != 1 {
+		t.Fatalf("the set's reason %q (named %d time(s)): the application made the call, so it must not say it never did, and name it once", why, workerNamed(logs))
+	}
+}
+
 // A call the application makes as keploy stops it (a deregistration, a
 // flush on its way out) is read with what the app consumed as it stopped, and
 // the worker scope is judged with it. One the recording made as keploy record
