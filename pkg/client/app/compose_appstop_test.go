@@ -2032,3 +2032,38 @@ func TestAComposeStartSaysWhetherItStartedTheAppAnew(t *testing.T) {
 		t.Fatalf("a start that failed: anew %v (%v), want false with an error", anew, err)
 	}
 }
+
+// A loaded daemon fails the reads of the run's end before it answers them:
+// the app that exited on its own (code 3) is still the run's halt, and the
+// halt stops the project as compose's abort did, keploy's agent with it. The
+// reads had 2 s budgets, and a failed one was taken for an answer: the app
+// for one that had not exited (the run ended as on a clean stop, its down
+// taking the agent down mid-drain, the halt's exit code lost), the project
+// for one keploy could not list (taken down whole instead).
+func TestTheRunsEndReadsTheDaemonsAnswerHoweverSlowItIs(t *testing.T) {
+	t.Run("the app's exit", func(t *testing.T) {
+		inner := &inspectRecorder{inspects: map[string]container.InspectResponse{"app": {ContainerJSONBase: &container.ContainerJSONBase{State: &container.State{Status: "exited", ExitCode: 3}}}}}
+		d := &slowDaemon{Client: inner, failInspects: 5}
+		a := &App{logger: zap.NewNop(), container: "app", docker: d}
+		ended := 0
+		if got := a.composeAwaitTeardown(context.Background(), nil, func() { ended++ }); got != composeHaltCame || ended != 1 {
+			t.Fatalf("composeAwaitTeardown = %d, ending the run %d times; want the halt (%d), once", got, ended, composeHaltCame)
+		}
+		if h := a.composeAppHalt(); h == nil || h.exitCode != 3 {
+			t.Fatalf("the halt kept is %+v; want the app's exit, code 3", h)
+		}
+	})
+	t.Run("the project's containers", func(t *testing.T) {
+		inner := newComposeDocker(false, true)
+		inner.project, inner.others = "proj", []string{"keploy-agent", "dep"}
+		d := &slowDaemon{Client: inner, failInspects: 5, failLists: 5}
+		a := composeApp(inner)
+		a.docker = d
+		if !a.stopComposeProject(context.Background()) {
+			t.Fatal("the project was taken down whole, not stopped")
+		}
+		if len(inner.stopped) != 2 {
+			t.Fatalf("stopped %v; want the agent and the dependency", inner.stopped)
+		}
+	})
+}

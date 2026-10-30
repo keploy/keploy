@@ -9,7 +9,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/api/types/filters"
@@ -17,7 +16,6 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
-	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 )
 
@@ -344,7 +342,7 @@ func (a *App) composeAppDied(ctx context.Context, m events.Message) bool {
 // A DIE IS DECIDED ON THE DAEMON'S ANSWER, HOWEVER SLOW IT IS TO GIVE IT.
 //
 // The watch's read of the container a die names had a wall-clock budget of
-// 2 s (dockerInspectBudget). On a loaded host the daemon's answer took
+// 2 s. On a loaded host the daemon's answer took
 // longer, the read failed, and a die the watch could not place was taken for
 // a halt whenever no stop of keploy's was in progress: the late die of
 // keploy's own stop, read after keploy had started the container again for
@@ -360,70 +358,14 @@ func (a *App) composeAppDied(ctx context.Context, m events.Message) bool {
 // sets' capture losses, as by an app keploy's stop had not ended.
 
 // readComposeContainer is the container ref as the daemon has it now; read
-// reports whether the daemon said. A read the daemon fails (its connection
-// broke, or a loaded daemon was slow and the read gave up) is asked again,
-// at once and then at a walking pace (composeDaemonAskPace), until the
-// daemon answers, says it has no such container (removed: it has no more to
-// say of it), utils.StopStallBudget of keploy's runnable time passes with no
-// answer, or ctx ends. unread says, in the log, what keploy does when the
-// daemon never says.
+// reports whether the daemon said. It asks as askDaemon does (inspectContainer):
+// until the daemon answers, says it has no such container (removed: it has no
+// more to say of it), utils.StopStallBudget of keploy's runnable time passes
+// with no answer, or ctx ends. unread says, in the log, what keploy does when
+// the daemon never says.
 func (a *App) readComposeContainer(ctx context.Context, ref, unread string) (info container.InspectResponse, read bool) {
-	meter := stall.NewMeter(nil, utils.StopStallBudget)
-	defer meter.Stop()
-	type answer struct {
-		info container.InspectResponse
-		err  error
-	}
-	for asked := 0; ; asked++ {
-		if asked > 1 {
-			select {
-			case <-ctx.Done():
-				return container.InspectResponse{}, false
-			case <-time.After(composeDaemonAskPace):
-			}
-		}
-		ictx, cancel := context.WithCancel(ctx)
-		answered := make(chan answer, 1)
-		go func() {
-			info, err := a.docker.ContainerInspect(ictx, ref)
-			answered <- answer{info, err}
-		}()
-		var r answer
-	wait:
-		for {
-			select {
-			case r = <-answered:
-				break wait
-			case <-meter.Wait():
-				if meter.Expired() {
-					cancel()
-					a.logger.Debug("the docker daemon did not describe the application's container; "+unread,
-						zap.String("container", ref), zap.String("bound", utils.StopStallSaid()))
-					return container.InspectResponse{}, false
-				}
-			case <-ctx.Done():
-				cancel()
-				return container.InspectResponse{}, false
-			}
-		}
-		cancel()
-		if r.err == nil && r.info.ContainerJSONBase != nil && r.info.State != nil {
-			return r.info, true
-		}
-		if r.err != nil && cerrdefs.IsNotFound(r.err) {
-			return container.InspectResponse{}, false
-		}
-		if ctx.Err() != nil {
-			return container.InspectResponse{}, false
-		}
-		if meter.Expired() {
-			a.logger.Debug("the docker daemon did not describe the application's container; "+unread,
-				zap.String("container", ref), zap.String("bound", utils.StopStallSaid()), zap.Error(r.err))
-			return container.InspectResponse{}, false
-		}
-		a.logger.Debug("the docker daemon's read of the application's container failed; keploy asks the daemon again",
-			zap.String("container", ref), zap.Error(r.err))
-	}
+	info, read, _ = a.inspectContainer(ctx, ref, fmt.Sprintf("the application's container %q (with no answer, %s)", ref, unread))
+	return info, read
 }
 
 // A DIE OF AN EARLIER RUN IS NOT THE CURRENT RUN'S END.
@@ -557,16 +499,18 @@ func (a *App) composeAwaitTeardown(ctx context.Context, halt <-chan struct{}, en
 
 // composeAppExited is the app's container's exit, when it has exited: not
 // one compose only created (an up that failed leaves it so), nor one that
-// runs, nor one that cannot be read.
+// runs, nor one the daemon never describes. The read asks the daemon again
+// when it fails (readComposeContainer): with a 2 s budget, the read of an app
+// that had exited on its own, slow on a loaded daemon, was taken for no exit,
+// and the run ended as on a clean stop, its down taking keploy's agent down
+// mid-drain and the halt's exit code lost.
 func (a *App) composeAppExited(ctx context.Context) (composeHalt, bool) {
 	id, err := a.composeAppContainer(ctx)
 	if err != nil {
 		return composeHalt{}, false
 	}
-	ictx, cancel := context.WithTimeout(ctx, dockerInspectBudget)
-	defer cancel()
-	info, err := a.docker.ContainerInspect(ictx, id)
-	if err != nil || info.ContainerJSONBase == nil || info.State == nil || info.State.Running {
+	info, read := a.readComposeContainer(ctx, id, "keploy takes the up's end for a clean one")
+	if !read || info.State.Running {
 		return composeHalt{}, false
 	}
 	if st := info.State.Status; st != "exited" && st != "dead" {
@@ -589,16 +533,20 @@ func (a *App) composeAppExited(ctx context.Context) (composeHalt, bool) {
 func (a *App) stopComposeProject(ctx context.Context) bool {
 	project := a.composeAppProject(ctx)
 	if project == "" && a.composeService == "" {
-		project = a.composeProjectLabel(ctx)
+		project = a.composeProjectLabelAnswered(ctx, a.container)
 	}
 	if project == "" {
 		a.logger.Warn("keploy could not tell the application's compose project; taking it down instead",
 			zap.String("container", a.container))
 		return false
 	}
-	lctx, cancel := context.WithTimeout(ctx, dockerInspectBudget)
-	running, err := a.docker.ContainerList(lctx, container.ListOptions{Filters: filters.NewArgs(filters.Arg("label", "com.docker.compose.project="+project))})
-	cancel()
+	// The list asks the daemon again when it fails (askDaemon): with a 2 s
+	// budget, a loaded daemon's slow list took the project down whole
+	// instead, keploy's agent with it, mid-drain.
+	running, err := askDaemon(ctx, a.logger, fmt.Sprintf("the running containers of compose project %q (with no answer, keploy takes the project down)", project),
+		func(ctx context.Context) ([]container.Summary, error) {
+			return a.docker.ContainerList(ctx, container.ListOptions{Filters: filters.NewArgs(filters.Arg("label", "com.docker.compose.project="+project))})
+		})
 	if err != nil {
 		a.logger.Warn("keploy could not list the application's compose project to stop it; taking it down instead", zap.String("project", project), zap.Error(err))
 		return false
