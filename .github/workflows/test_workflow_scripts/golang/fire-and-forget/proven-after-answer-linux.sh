@@ -36,9 +36,13 @@
 #      no mock, is the application's background work (item (b)): the report
 #      lists it among the set's background calls, made after the set's last
 #      test, and not among its unclaimed calls. The set fails because the
-#      recorded publish, a call of the set's worker scope, was never made.
-#      (Before item (b) the changed call itself failed the set, as an
-#      unclaimed call.)
+#      recorded publish, a call of the set's worker scope, was made
+#      differently and keploy refused it: its reason names the refused call
+#      and the recording it was closest to, and does not say the publish was
+#      never made. That recording is placed after a test, not at the set's
+#      start, so keploy does not say it skipped a wait for it. (Before, the
+#      reason said the publish was never made; before item (b) the changed
+#      call itself failed the set, as an unclaimed call.)
 #
 #   8. An app that ignores SIGINT: keploy's stop at the set's end waits for
 #      its exit, and kills it once it has made no progress on its way out for
@@ -55,7 +59,8 @@
 #      at once, and keploy waits for the app, a member of the shell's process
 #      group that acts on the interrupt, without signalling it again. The
 #      recorded shutdown publish passes, as in 6; a changed one fails the
-#      set and is listed among its background calls, as in 7.
+#      set, is listed among its background calls and is named as refused,
+#      as in 7.
 #  10. That app, started so, never ending once it is stopping (HANG_ON_STOP):
 #      keploy kills it once it has made no progress on its way out, and the
 #      set is not judged: keploy test exits non-zero, and the report names
@@ -319,26 +324,23 @@ background_named() {
         fail "$1: the publish is among the set's unclaimed calls; it is background work, charged to no test: $(grep -n -A6 'unclaimed_calls' "$(REPORT)" | head -12)"
     fi
 }
-# unmade_named <step>: the set's reason says the recorded publish, a call of
-# its worker scope, was never made.
-unmade_named() {
-    yq -r '.failure_reason // ""' "$(REPORT)" 2>/dev/null | grep -q "never made 1 of the calls the test set's worker scope recorded" ||
-        fail "$1: the reason does not say the recorded publish was never made: $(yq -r '.failure_reason // ""' "$(REPORT)" 2>/dev/null)"
-}
-# refused_named <step> <log>: the set's reason names the publish the app made
-# differently, which keploy refused, as a call of its worker scope, with the
-# recording it was closest to, and does not say it was never made; and
-# keploy test's log <log> says once that the set's end does not wait for it.
+# refused_named <step> <log> <boot|after>: the set's reason names the publish
+# the app made differently, which keploy refused, as a call of its worker
+# scope, with the recording it was closest to, and does not say it was never
+# made. For a recording placed at the set's start (boot) keploy test's log
+# <log> says once that the set's end does not wait for it; for one placed
+# after a test (after) it never says so: that skip is for boot calls only.
 refused_named() {
-    local why
+    local why want=1
+    [ "$3" = after ] && want=0
     why="$(yq -r '.failure_reason // ""' "$(REPORT)" 2>/dev/null)"
     printf '%s' "$why" | grep -q "the application made 1 of the calls the test set's worker scope recorded (the calls no test owns) differently, and keploy refused each: HTTP POST /publish to .* (closest to mock-[0-9]*)" ||
         fail "$1: the reason does not name the refused publish as the worker scope's call made differently: $why"
     if printf '%s' "$why" | grep -q "never made"; then
         fail "$1: the reason says a worker call was never made; the app made it, and keploy refused it: $why"
     fi
-    [ "$(grep -c "not waiting for the worker scope's boot calls the application made and keploy refused" "$2")" -eq 1 ] ||
-        fail "$1: keploy test did not say once that the set's end does not wait for the refused boot call ($(grep -c "not waiting for the worker scope" "$2") line(s) in $2)"
+    [ "$(grep -c "not waiting for the worker scope's boot calls the application made and keploy refused" "$2")" -eq "$want" ] ||
+        fail "$1: keploy test said $(grep -c "not waiting for the worker scope" "$2") time(s) in $2 that the set's end does not wait for a refused boot call; want $want ($3)"
 }
 
 echo "== recordings =="
@@ -372,7 +374,7 @@ if [ "$RC" -eq 0 ] || [ "$(set_status)" != FAILED ]; then
     fail "7 (HTTP, changed shutdown publish): the set must fail, keploy test non-zero (exit $RC, status $(set_status))"
 fi
 background_named "7 (HTTP, changed shutdown publish)" "made after the set.*last test was read"
-unmade_named "7 (HTTP, changed shutdown publish)"
+refused_named "7 (HTTP, changed shutdown publish)" "$WORK/shutdown/changed.log" after
 [ "$(test_status get-c-ping-1)" = PASSED ] ||
     fail "7 (HTTP, changed shutdown publish): c-ping, whose answer the call followed, did not pass ($(test_status get-c-ping-1))"
 
@@ -386,7 +388,7 @@ if [ "$RC" -eq 0 ] || [ "$(set_status)" != FAILED ]; then
     fail "9 (in the background, a changed shutdown publish): the set must fail, keploy test non-zero (exit $RC, status $(set_status))"
 fi
 background_named "9 (in the background, a changed shutdown publish)" "made after the set.*last test was read"
-unmade_named "9 (in the background, a changed shutdown publish)"
+refused_named "9 (in the background, a changed shutdown publish)" "$WORK/shutdown/bg-changed.log" after
 echo "== 10. that app never ending once it is stopping =="
 APP_ENV="SHUTDOWN_PUBLISH=1 HANG_ON_STOP=1"
 replay shutdown bg-hangs http
@@ -468,7 +470,7 @@ fi
 background_named "13 (HTTP, changed startup publish)" "made before the set.*first test began"
 yq -r '.background_calls[]? | select(.before_set == true) | .actual_summary // ""' "$(REPORT)" 2>/dev/null | grep -q '/publish' ||
     fail "13 (HTTP, changed startup publish): the publish listed is not marked made before the set (before_set)"
-refused_named "13 (HTTP, changed startup publish)" "$WORK/startup/changed.log"
+refused_named "13 (HTTP, changed startup publish)" "$WORK/startup/changed.log" boot
 [ "$(test_status get-c-ping-1)" = PASSED ] ||
     fail "13 (HTTP, changed startup publish): c-ping did not pass ($(test_status get-c-ping-1))"
 

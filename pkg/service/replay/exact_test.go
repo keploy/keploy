@@ -565,12 +565,13 @@ func TestTheLearningServedAfterTheLearnStepEndedIsEveryStateThatCarriesSome(t *t
 }
 
 // The set's end names each recorded call of its worker scope it did not see
-// answered: one the application never made by its recording's name, a boot
-// call it made differently by the call keploy refused (an unanswered call
-// whose closest recording is it) with that recording. An answered call is no
-// refusal, and a worker call placed after a test, which the end waited for,
-// is still said never made.
-func TestTheWorkerScopesReasonNamesARefusedBootCallWithItsRecording(t *testing.T) {
+// answered: one the application never made by its recording's name, one it
+// made differently by the call keploy refused (an unanswered call whose
+// closest recording is it) with that recording. That holds for a boot call
+// and for a worker call placed after a test, which the end waited for: the
+// application made it, so it is not said never made. An answered call is no
+// refusal.
+func TestTheWorkerScopesReasonNamesARefusedCallWithItsRecording(t *testing.T) {
 	p := newExactPlan(nil, []models.MockEntry{{Name: "w-boot"}, {Name: "w-tick"}, {Name: "w-later", Place: "test-1"}},
 		[]*models.Mock{{Name: "w-boot"}, {Name: "w-tick"}, {Name: "w-later"}})
 	why := p.workerWhy([]string{"w-boot", "w-tick", "w-later"}, []models.UnmatchedCall{
@@ -579,8 +580,8 @@ func TestTheWorkerScopesReasonNamesARefusedBootCallWithItsRecording(t *testing.T
 		{Protocol: "HTTP", ActualSummary: "POST /boot", Destination: "dep:9411", ClosestMock: "w-boot"},
 		{Protocol: "HTTP", ActualSummary: "POST /later", ClosestMock: "w-later"},
 	})
-	want := "the application never made 2 of the calls the test set's worker scope recorded (the calls no test owns: w-tick, w-later); " +
-		"the application made 1 of the calls the test set's worker scope recorded (the calls no test owns) differently, and keploy refused each: HTTP POST /boot to dep:9411 (closest to w-boot)"
+	want := "the application never made 1 of the calls the test set's worker scope recorded (the calls no test owns: w-tick); " +
+		"the application made 2 of the calls the test set's worker scope recorded (the calls no test owns) differently, and keploy refused each: HTTP POST /boot to dep:9411 (closest to w-boot); HTTP POST /later (closest to w-later)"
 	if why != want {
 		t.Fatalf("reason\n%q\nwant\n%q", why, want)
 	}
