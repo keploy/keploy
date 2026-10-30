@@ -5824,7 +5824,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					// The recording's stop killed the app: what it did as
 					// it stopped is not in the recording, so a call filed
 					// late in the last test's window may be one the
-					// recording lacks (P101-b-k): no verdict.
+					// recording lacks: no verdict.
 					notJudged = alsoNotJudged(notJudged, "not judged: "+unclaimedReason+"; the recording's stop had to kill the application ("+conf.RecordStopKilled+"), so what it did as it stopped is not in the recording")
 					r.logger.Error("test-set is not judged: its application made calls in its last test, read only at the set's end, that no mock answered, and its recording lacks what the application did as it stopped (the recording's stop had to kill it); the run goes on to the next test-set ("+provenswitch.Env+"=1)",
 						zap.String("test-set", testSetID), zap.String("recording", conf.RecordStopKilled),
