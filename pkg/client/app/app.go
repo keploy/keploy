@@ -2417,7 +2417,13 @@ func (a *App) run(ctx context.Context) models.AppError {
 		if a.useComposeLibrary() {
 			return a.runComposeInProcess(ctx, composeDown)
 		}
-		return a.executeCommand(ctx, runCmd, runEnv, cmdCancel)
+		// A compose up that aborted before the app started can wait for
+		// the app's container forever (compose_abort.go): keploy watches
+		// for that end while the up runs, and ends the up itself on it.
+		upCtx, stopAbortWatch := a.watchComposeAbort(ctx)
+		defer stopAbortWatch()
+		cmdErr := a.executeCommand(upCtx, runCmd, runEnv, endsAbortedComposeUp(upCtx, a.logger, cmdCancel))
+		return composeAbortCmdError(upCtx, cmdErr)
 	}
 
 	var err error
