@@ -660,7 +660,9 @@ func TestAClockWordWindowIsCutWhereNoInstantRunsAcross(t *testing.T) {
 // A read of each run's clock in the window is written as recorded at its
 // own place, and only there: the same words elsewhere in the text stay as
 // they were, as does an instant outside either span, and a UUID's time (its
-// other words are no read of the clock).
+// other words are no read of the clock). Two reads of one layout in each run
+// pair the k-th with the k-th; an instant in its span in one run only is no
+// read of the clock, whichever run it is.
 func TestWindowInPlaceWritesAReadAsRecordedAtItsOwnPlaceOnly(t *testing.T) {
 	recAt := time.Date(2026, 10, 30, 15, 21, 46, 310000000, time.UTC)
 	runAt := time.Date(2026, 10, 31, 9, 2, 3, 120000000, time.UTC)
@@ -671,19 +673,42 @@ func TestWindowInPlaceWritesAReadAsRecordedAtItsOwnPlaceOnly(t *testing.T) {
 		ms := at.Add(time.Millisecond).UnixMilli()
 		return fmt.Sprintf("%08x-%04x-%s", ms>>16, ms&0xffff, rest)
 	}
-	for _, c := range []struct{ name, rec, live, want string }{
-		{"the stamp alone", `{"Date":"` + recDate + `"}`, `{"Date":"` + runDate + `"}`, `{"Date":"` + recDate + `"}`},
-		{"the stamp, and its second lost elsewhere", `{"Date":"` + recDate + `","shard":46}`, `{"Date":"` + runDate + `","shard":0}`,
-			`{"Date":"` + recDate + `","shard":0}`},
-		{"two reads, an ISO one before a Date", `{"at":"` + recAt.Add(time.Millisecond).Format(time.RFC3339Nano) + `","Date":"` + recDate + `"}`,
-			`{"at":"` + runAt.Add(time.Millisecond).Format(time.RFC3339Nano) + `","Date":"` + runDate + `"}`,
-			`{"at":"` + recAt.Add(time.Millisecond).Format(time.RFC3339Nano) + `","Date":"` + recDate + `"}`},
-		{"an instant an hour past either span", `{"exp":"` + recAt.Add(time.Hour).Format(time.RFC3339) + `"}`,
-			`{"exp":"` + runAt.Add(time.Hour).Format(time.RFC3339) + `"}`, `{"exp":"` + runAt.Add(time.Hour).Format(time.RFC3339) + `"}`},
-		{"a UUID made in each span", `{"id":"` + v7(recAt, "7cc1-9f0e-31c1e1d0a6b2") + `"}`, `{"id":"` + v7(runAt, "7d2a-8a4b-5c6d7e8f9a0b") + `"}`,
-			`{"id":"` + v7(runAt, "7d2a-8a4b-5c6d7e8f9a0b") + `"}`},
+	// slow is the span of a slow answer, stamped as it ends: recorded
+	// 15:21:46.31 to 15:21:48.9, this run 09:02:03.12 to 09:02:05.9.
+	slow := &Window{Rec: Span{From: recAt, To: recAt.Add(2590 * time.Millisecond)}, F: Span{From: runAt, To: runAt.Add(2780 * time.Millisecond)}}
+	recEnd, runEnd := recAt.Add(2590*time.Millisecond).Format(http.TimeFormat), runAt.Add(2779*time.Millisecond).Format(http.TimeFormat)
+	runEarly := runAt.Add(-5 * time.Second).Format(http.TimeFormat)
+	recEarly := recAt.Add(-5 * time.Second).Format(http.TimeFormat)
+	for _, c := range []struct {
+		name, rec, live, want string
+		w                     *Window
+	}{
+		{name: "two reads of one layout, the k-th with the k-th", w: slow,
+			rec: `{"Date":"` + recEnd + `","at":"` + recDate + `"}`, live: `{"Date":"` + runEnd + `","at":"` + runDate + `"}`,
+			want: `{"Date":"` + recEnd + `","at":"` + recDate + `"}`},
+		{name: "two reads of one layout, the other way round", w: slow,
+			rec: `{"at":"` + recDate + `","Date":"` + recEnd + `"}`, live: `{"at":"` + runDate + `","Date":"` + runEnd + `"}`,
+			want: `{"at":"` + recDate + `","Date":"` + recEnd + `"}`},
+		{name: "the recorded read in its span, this run's not", rec: `{"Date":"` + recDate + `","at":"` + recDate + `"}`,
+			live: `{"Date":"` + runDate + `","at":"` + runEarly + `"}`, want: `{"Date":"` + recDate + `","at":"` + runEarly + `"}`},
+		{name: "this run's read in its span, the recorded not", rec: `{"Date":"` + recDate + `","at":"` + recEarly + `"}`,
+			live: `{"Date":"` + runDate + `","at":"` + runDate + `"}`, want: `{"Date":"` + recDate + `","at":"` + runDate + `"}`},
+		{name: "the stamp alone", rec: `{"Date":"` + recDate + `"}`, live: `{"Date":"` + runDate + `"}`, want: `{"Date":"` + recDate + `"}`},
+		{name: "the stamp, and its second lost elsewhere", rec: `{"Date":"` + recDate + `","shard":46}`, live: `{"Date":"` + runDate + `","shard":0}`,
+			want: `{"Date":"` + recDate + `","shard":0}`},
+		{name: "two reads, an ISO one before a Date", rec: `{"at":"` + recAt.Add(time.Millisecond).Format(time.RFC3339Nano) + `","Date":"` + recDate + `"}`,
+			live: `{"at":"` + runAt.Add(time.Millisecond).Format(time.RFC3339Nano) + `","Date":"` + runDate + `"}`,
+			want: `{"at":"` + recAt.Add(time.Millisecond).Format(time.RFC3339Nano) + `","Date":"` + recDate + `"}`},
+		{name: "an instant an hour past either span", rec: `{"exp":"` + recAt.Add(time.Hour).Format(time.RFC3339) + `"}`,
+			live: `{"exp":"` + runAt.Add(time.Hour).Format(time.RFC3339) + `"}`, want: `{"exp":"` + runAt.Add(time.Hour).Format(time.RFC3339) + `"}`},
+		{name: "a UUID made in each span", rec: `{"id":"` + v7(recAt, "7cc1-9f0e-31c1e1d0a6b2") + `"}`, live: `{"id":"` + v7(runAt, "7d2a-8a4b-5c6d7e8f9a0b") + `"}`,
+			want: `{"id":"` + v7(runAt, "7d2a-8a4b-5c6d7e8f9a0b") + `"}`},
 	} {
-		if got := w.inPlace(c.rec, c.live); got != c.want {
+		cw := w
+		if c.w != nil {
+			cw = c.w
+		}
+		if got := cw.inPlace(c.rec, c.live); got != c.want {
 			t.Errorf("%s: %s; want %s", c.name, got, c.want)
 		}
 	}
