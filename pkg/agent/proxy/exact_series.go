@@ -10,6 +10,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 // A TIMER'S CALL JUDGING MARKED SET-WIDE: ITS SERIES, AS THE PARSERS ASK.
@@ -93,14 +94,24 @@ func (m *MockManager) beginMarkedSeries() {
 }
 
 // seriesReadLocked is the read of the staged set's series for what is named
-// now, begun here when the last one read something else; nil while the set
-// is served by today's rules or its background is not named yet (settling),
-// and when nothing is marked: then no read is pending. Holds c.mu.
+// now, begun here when the last one read something else; nil while the set's
+// mocks are being staged (StageExactBackground until ServeExactBackground:
+// the trees may still hold the previous set's recordings, whose names may be
+// this set's), with the switch off, and when nothing is marked: then no read
+// is pending. Holds c.mu.
+//
+// A set served by today's rules is read too: judging marks a series in any
+// set it judges (keploy mock record's sets carry no routing mark, so they
+// are all served by today's rules), and answering a call of it from its
+// newest recording reads none of the background rules. Its background is
+// then the marks alone: today's rules name no pool or worker scope, so a
+// series one of whose recordings is on no test's list is no marked series
+// there (background), and its calls go on as before.
 func (m *MockManager) seriesReadLocked() *setSeriesRead {
 	c := &m.exact.series
 	bg := m.exact.bg.Load()
 	marks := m.exact.unrequired.Load()
-	if bg == nil || bg.settling || marks == nil || marks.Len() == 0 {
+	if !provenswitch.On() || m.exact.staging.Load() || bg != nil && bg.settling || marks == nil || marks.Len() == 0 {
 		if c.read != nil {
 			c.read.stop.Store(true)
 			c.read = nil
@@ -130,7 +141,8 @@ func (m *MockManager) seriesReadLocked() *setSeriesRead {
 }
 
 // background reports whether mk is the set's background in r's read: a
-// test's mark (SetUnrequired) or the worker scope's or the pool's.
+// test's mark (SetUnrequired) or, under the background rules, the worker
+// scope's or the pool's (today's rules name neither).
 func (r *setSeriesRead) background(mk *models.Mock) bool {
 	return r.marked[mk.Name] || r.key.bg.has(mk.Name)
 }
@@ -152,10 +164,11 @@ func (m *MockManager) readSetSeries(r *setSeriesRead) {
 
 // MarkedSeries implements integrations.MarkedSeriesReader: the staged set's
 // series of kind whose every recording is background (a test's mark,
-// SetUnrequired, or the worker scope or the pool, ServeExactBackground) and
-// at least one marked, each with its recordings in the order of their calls.
-// None with exact serving off, for a set served by today's rules or whose
-// background is not named yet, and when nothing is marked. The set's
+// SetUnrequired, or, under the background rules, the worker scope or the
+// pool, ServeExactBackground) and at least one marked, each with its
+// recordings in the order of their calls, whichever rules serve the set.
+// None with exact serving or the switch off, while the set's mocks are being
+// staged, and when nothing is marked. The set's
 // recordings were read as it was staged (beginMarkedSeries); a call that
 // comes while they are still being read waits for them, or for ctx. known is
 // the first call's of kind in a staging (MarkedSeriesReader).
