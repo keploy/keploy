@@ -15,7 +15,8 @@ import (
 // an earlier place: ids, clock reads the lead moved (of a zone and of none,
 // one across New York's spring forward, a read the lead moved there and
 // not in UTC), escaped and encoded text, a JWT, a UUID
-// v7, an id inside text of another script, and two values whose sides,
+// v7, an id inside text of another script, an epoch inside an id (a piece
+// with a word that did not change), and two values whose sides,
 // joined, are one text.
 var setDriftValues = [][2]string{
 	{"o-1", "o-1-9"},
@@ -31,6 +32,8 @@ var setDriftValues = [][2]string{
 	{"eyJhbGciOiJIUzI1NiJ9.eyJpYXQiOjE3OTIwMDAwMDB9.x", "eyJhbGciOiJIUzI1NiJ9.eyJpYXQiOjE3OTIwMDAwNjF9.y"},
 	{"01890a5d-ac96-774b-bcce-b302099a8057", "01890a5e-9a43-7f1c-8e2d-1c2b3a4d5e6f"},
 	{"Bearer tok_A7K29Q", "Bearer tok_Z1X88M"},
+	{"tok_1792000000", "tok_1792000061"},
+	{"sent at 2026-10-30T10:00:00Z", "sent at 2026-10-30T10:01:01Z"},
 	{"订单A7K29Q已发货", "订单Z1X88M已发货"},
 }
 
