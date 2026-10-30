@@ -4958,6 +4958,74 @@ func (p *Proxy) SetRecordedBefore(src func(t time.Time, visit func(*models.Mock)
 
 var _ agent.RecordedBeforeSetter = (*Proxy)(nil)
 
+// lastRecorded is the latest instant a recording's request can be read at
+// (time.Time.UnixNano's last): every recording is recorded before it.
+var lastRecorded = time.Unix(0, math.MaxInt64)
+
+// WarmLearnSet implements agent.LearnSetWarmer: in record's full round,
+// while the set's learn step is on (MockManager.learns), the learn tracker
+// reads, in the background, what the learn step reads of each recording of
+// the staged set (learn.Tracker.WarmSet): every one the manager stages and
+// the agent keeps on disk, in recorded order across the two
+// (rangeRecordedInOrder), so the recordings of the set's earlier tests are
+// read first, before the later tests that read them open. The set's
+// calls then find its payloads read, off their answer path, and each waits
+// only for a recording of its own the staging is reading. Any other session
+// reads nothing: no learn step reads the recordings. With no mock manager
+// there is no set (errNoMockManager). Once the staging ends, the agent logs
+// what it read and what the set's tiers keep (logSetUse).
+func (p *Proxy) WarmLearnSet() error {
+	done, err := p.warmLearnSet()
+	if err != nil || done == nil {
+		return err
+	}
+	go p.logSetUse(done)
+	return nil
+}
+
+// logSetUse logs, once the set's staging ends, what it read and what the
+// set's tiers keep (learn.SetUse): the line a round reads to see whether the
+// set fit its budget. A staging that stopped short because the set's
+// recordings could not be read (learn.SetUse.Err) is logged at Warn with
+// that error: its calls read the rest on their answer path. A channel
+// closed with no use (no tracker) read nothing and logs nothing.
+func (p *Proxy) logSetUse(done <-chan learn.SetUse) {
+	u, ok := <-done
+	if !ok {
+		return
+	}
+	fields := []zap.Field{
+		zap.Int("read_at_staging", u.Staged), zap.Int("read_by_calls", u.Called), zap.Int("finished_at_staging", u.Finished), zap.Int("staging_readers", u.Readers),
+		zap.Int("payloads_decoded", u.Decoded), zap.Int64("kept_held_bytes", u.Held), zap.Int64("kept_words_bytes", u.Words),
+		zap.Int64("kept_forms_bytes", u.Forms), zap.Int64("kept_payload_bytes", u.Bodies), zap.Int64("set_budget_bytes", u.Budget), zap.Bool("held_full", u.HeldFull), zap.Bool("forms_full", u.FormsFull),
+	}
+	if u.Err != nil {
+		p.logger.Warn("the learn step stopped reading the test set's recordings as it was staged: they could not be read, so its calls read the rest themselves, on their answer path",
+			append(fields, zap.Error(u.Err))...)
+		return
+	}
+	p.logger.Info("the learn step read the test set's recordings as it was staged, before its calls read them", fields...)
+}
+
+// warmLearnSet is WarmLearnSet's gate and its read: the staging's channel
+// (learn.Tracker.WarmSet), or nil where the session reads nothing (the
+// proven switch off, not record's full round, or the set's learn step
+// ended), decided before anything is read.
+func (p *Proxy) warmLearnSet() (<-chan learn.SetUse, error) {
+	m := p.getMockManager()
+	if m == nil {
+		return nil, errNoMockManager
+	}
+	if !provenswitch.On() || !m.learns() {
+		return nil, nil
+	}
+	return p.learnTracker.WarmSet(func(visit func(*models.Mock) bool) error {
+		return m.rangeRecordedInOrder(lastRecorded, visit)
+	}), nil
+}
+
+var _ agent.LearnSetWarmer = (*Proxy)(nil)
+
 // SetLearnEnded implements agent.LearnEndSetter: the mock store says it
 // (MockManager.SetLearnEnded, integrations.LearnEnded), and so does the learn
 // tracker the parsers find on their connection's context

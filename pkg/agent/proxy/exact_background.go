@@ -397,6 +397,13 @@ func (m *MockManager) backgroundCursorKey(key string) string {
 
 var _ integrations.BackgroundCursor = (*MockManager)(nil)
 
+// learns reports whether the running set's learn step is on: the session is
+// record's full round (SetPairing) and the set's learn step has not ended
+// (SetLearnEnded).
+func (m *MockManager) learns() bool {
+	return m.exact.pairs.Load() && !m.exact.learnEnded.Load()
+}
+
 // pairing is the view to pair in, and the staging's epoch: a view of a set
 // served by the background rules, its background named (not settling), while
 // the session pairs and the set's learn step has not ended (SetLearnEnded);

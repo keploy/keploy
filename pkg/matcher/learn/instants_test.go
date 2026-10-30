@@ -152,7 +152,7 @@ func classifyProcessedAt(rec, live time.Time, typed bool, insert time.Time, w *W
 	dc := clockedDrifts()
 	var raw []Raw
 	for _, m := range mocks {
-		raw = append(raw, dc.RawOf(m, true))
+		raw = append(raw, dc.RawOf(m, true).ServedAsRecorded())
 	}
 	return ClassifyIn(dc, []string{p}, processedAt(live, typed), processedAt(rec, typed), insert, nil, raw, nil, w)[0]
 }
@@ -808,7 +808,7 @@ func TestAWordIsNeverFoundInAProtocolPhaseAnswersClockRead(t *testing.T) {
 	l := Shape{Leaves: map[string]Leaf{"body.batch": {Path: "body.batch", Noise: "body.batch", Type: String, Value: "batch-15"}}}
 	classify := func(receive *models.Mock, resp []Leaf) Learned {
 		dc := clockedDrifts()
-		return ClassifyIn(dc, []string{"body.batch"}, l, r, r1Insert, nil, []Raw{dc.RawOf(receive, true)}, resp, nil)[0]
+		return ClassifyIn(dc, []string{"body.batch"}, l, r, r1Insert, nil, []Raw{dc.RawOf(receive, true).ServedAsRecorded()}, resp, nil)[0]
 	}
 	if ln := classify(configReceive(""), nil); ln.Kind != KindNoise {
 		t.Fatalf("beside a config call's Date header: %s (from %q, %s); want noise", ln.Kind, ln.From.Mock, ln.Why)
@@ -845,18 +845,18 @@ func TestAWordIsNeverFoundInAProtocolPhaseAnswersClockRead(t *testing.T) {
 	late.Spec.HTTPResp.Header["Date"] = "Thu, 22 Oct 2026 11:15:16 GMT"
 	late.Spec.ResTimestampMock = time.Date(2026, 10, 22, 11, 15, 16, 900e6, time.UTC)
 	dc := clockedDrifts()
-	if ln := ClassifyIn(dc, []string{"body.batch"}, l, r13, r1Insert.Add(time.Minute), nil, []Raw{dc.RawOf(late, true)}, nil, nil)[0]; ln.Kind != KindNoise {
+	if ln := ClassifyIn(dc, []string{"body.batch"}, l, r13, r1Insert.Add(time.Minute), nil, []Raw{dc.RawOf(late, true).ServedAsRecorded()}, nil, nil)[0]; ln.Kind != KindNoise {
 		t.Fatalf("15, a word of a config call's Date: %s (%s); want noise", ln.Kind, ln.Why)
 	}
 	late.Spec.Metadata["type"] = "HTTP_CLIENT"
 	dc = clockedDrifts()
-	if ln := ClassifyIn(dc, []string{"body.batch"}, l, r13, r1Insert.Add(time.Minute), nil, []Raw{dc.RawOf(late, true)}, nil, nil)[0]; ln.Kind != KindNoise {
+	if ln := ClassifyIn(dc, []string{"body.batch"}, l, r13, r1Insert.Add(time.Minute), nil, []Raw{dc.RawOf(late, true).ServedAsRecorded()}, nil, nil)[0]; ln.Kind != KindNoise {
 		t.Fatalf("15, a word of a data-plane receive's Date, its stamp: %s (%s); want noise", ln.Kind, ln.Why)
 	}
 	// Answered before its Date header (its server's clock ahead): no stamp.
 	late.Spec.ResTimestampMock = time.Date(2026, 10, 22, 11, 15, 15, 900e6, time.UTC)
 	dc = clockedDrifts()
-	if ln := ClassifyIn(dc, []string{"body.batch"}, l, r13, r1Insert.Add(time.Minute), nil, []Raw{dc.RawOf(late, true)}, nil, nil)[0]; ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "in mock-4 at spec.resp.header.Date") || !strings.Contains(ln.Why, "declare it noise in keploy.yml") {
+	if ln := ClassifyIn(dc, []string{"body.batch"}, l, r13, r1Insert.Add(time.Minute), nil, []Raw{dc.RawOf(late, true).ServedAsRecorded()}, nil, nil)[0]; ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "in mock-4 at spec.resp.header.Date") || !strings.Contains(ln.Why, "declare it noise in keploy.yml") {
 		t.Fatalf("15, a word of a Date header after its answer: %s (%s); want refused, naming mock-4's spec.resp.header.Date and the fix", ln.Kind, ln.Why)
 	}
 }
@@ -1433,8 +1433,8 @@ func TestAnHTTPDateIsItsAnswersStampWithinItsSpan(t *testing.T) {
 	stamps := func(m *models.Mock) []string {
 		var out []string
 		r := RawOf(m, true)
-		for _, f := range r.stamps {
-			out = append(out, f.path+"="+r.text[f.start:f.end])
+		for _, f := range r.payload().stamps {
+			out = append(out, f.path+"="+r.payload().text[f.start:f.end])
 		}
 		return out
 	}
@@ -1477,20 +1477,20 @@ func TestARawsFieldsIndexItsText(t *testing.T) {
 		var sb strings.Builder
 		textOf(dropKeys(v, 0), &sb)
 		r := RawOf(m, true)
-		if r.text != sb.String() {
+		if r.payload().text != sb.String() {
 			t.Fatalf("%s: RawOf's text differs from textOf's", m.Name)
 		}
-		for _, f := range r.fields {
-			if f.start > f.end || f.end > len(r.text) || f.end < len(r.text) && r.text[f.end] != '\n' {
+		for _, f := range r.payload().fields {
+			if f.start > f.end || f.end > len(r.payload().text) || f.end < len(r.payload().text) && r.payload().text[f.end] != '\n' {
 				t.Fatalf("%s: field %s spans [%d, %d), no line of the text", m.Name, f.path, f.start, f.end)
 			}
 		}
 	}
 	r := RawOf(r1Receive(""), true)
 	var dates []string
-	for _, f := range r.fields {
+	for _, f := range r.payload().fields {
 		if strings.HasSuffix(f.path, ".Date") {
-			dates = append(dates, fmt.Sprintf("%s %v %s", f.path, f.key, r.text[f.start:f.end]))
+			dates = append(dates, fmt.Sprintf("%s %v %s", f.path, f.key, r.payload().text[f.start:f.end]))
 		}
 	}
 	if !reflect.DeepEqual(dates, []string{"Res.header.Date true Date", "Res.header.Date false Thu, 22 Oct 2026 11:14:16 GMT"}) {
@@ -1615,12 +1615,12 @@ func TestACoarserCopyOfAServedInstantIsTheEchos(t *testing.T) {
 		rec := Shape{Leaves: map[string]Leaf{p: tc.leaf(tc.cut(sent))}}
 		live := Shape{Leaves: map[string]Leaf{p: tc.leaf(tc.cut(got))}}
 		dc := clockedDrifts()
-		ln := ClassifyIn(dc, []string{p}, live, rec, r1Insert, nil, []Raw{dc.RawOf(receive, true), dc.RawOf(delivered, true)}, nil, nil)[0]
+		ln := ClassifyIn(dc, []string{p}, live, rec, r1Insert, nil, []Raw{dc.RawOf(receive, true).ServedAsRecorded(), dc.RawOf(delivered, true).ServedAsRecorded()}, nil, nil)[0]
 		if ln.Kind != KindVariable || ln.From.Mock != "mock-4" || !ln.From.Echo {
 			t.Errorf("%s (%q -> %q): %s from %+v (%s); want an echo's variable from mock-4", tc.name, rec.Leaves[p].Value, live.Leaves[p].Value, ln.Kind, ln.From, ln.Why)
 		}
 		dc = clockedDrifts()
-		ln = ClassifyIn(dc, []string{p}, live, rec, r1Insert, nil, []Raw{dc.RawOf(alone, true)}, nil, nil)[0]
+		ln = ClassifyIn(dc, []string{p}, live, rec, r1Insert, nil, []Raw{dc.RawOf(alone, true).ServedAsRecorded()}, nil, nil)[0]
 		if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "mock-11") {
 			t.Errorf("%s, mock-11 alone: %s (%s); want it refused, naming mock-11", tc.name, ln.Kind, ln.Why)
 		}
@@ -1638,7 +1638,7 @@ func TestACoarserCopyOfAServedInstantIsTheEchos(t *testing.T) {
 		return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: strconv.FormatInt(at.UnixMilli(), 10)}}}
 	}
 	dc := clockedDrifts()
-	if ln := ClassifyIn(dc, []string{p}, ms(got), ms(sent), r1Insert, nil, []Raw{dc.RawOf(coarse, true), dc.RawOf(coarser, true)}, nil, nil)[0]; !noiseIn(ln, nil) {
+	if ln := ClassifyIn(dc, []string{p}, ms(got), ms(sent), r1Insert, nil, []Raw{dc.RawOf(coarse, true).ServedAsRecorded(), dc.RawOf(coarser, true).ServedAsRecorded()}, nil, nil)[0]; !noiseIn(ln, nil) {
 		t.Errorf("milliseconds beside served seconds: %s from %+v (%s); want noise", ln.Kind, ln.From, ln.Why)
 	}
 	// An exact copy a formatter wrote dropping its fraction's trailing
@@ -1671,7 +1671,7 @@ func TestACoarserCopyOfAServedInstantIsTheEchos(t *testing.T) {
 			m.Spec.HTTPResp.Body = `{"Messages": [{"Body": "S12 message", "Attributes": ` + attrs(at) + `}]}`
 		}
 		dc = clockedDrifts()
-		if ln := ClassifyIn(dc, []string{p}, tc.shape(tc.got), tc.shape(rec), r1Insert, nil, []Raw{dc.RawOf(whole, true), dc.RawOf(other, true)}, nil, nil)[0]; ln.Kind != KindVariable || ln.From.Mock != "mock-4" || !ln.From.Echo {
+		if ln := ClassifyIn(dc, []string{p}, tc.shape(tc.got), tc.shape(rec), r1Insert, nil, []Raw{dc.RawOf(whole, true).ServedAsRecorded(), dc.RawOf(other, true).ServedAsRecorded()}, nil, nil)[0]; ln.Kind != KindVariable || ln.From.Mock != "mock-4" || !ln.From.Echo {
 			t.Errorf("an exact copy dropping trailing zeros, %s (%q -> %q): %s from %+v (%s); want an echo's variable from mock-4", tc.name, tc.shape(rec).Leaves[p].Value, tc.shape(tc.got).Leaves[p].Value, ln.Kind, ln.From, ln.Why)
 		}
 	}
@@ -1681,7 +1681,7 @@ func TestACoarserCopyOfAServedInstantIsTheEchos(t *testing.T) {
 		return Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, at, time.Millisecond)}}
 	}
 	dc = clockedDrifts()
-	if ln := ClassifyIn(dc, []string{p}, typedMs(got), typedMs(sent), r1Insert, nil, []Raw{dc.RawOf(coarse, true), dc.RawOf(coarser, true)}, nil, nil)[0]; !plainRead(ln) {
+	if ln := ClassifyIn(dc, []string{p}, typedMs(got), typedMs(sent), r1Insert, nil, []Raw{dc.RawOf(coarse, true).ServedAsRecorded(), dc.RawOf(coarser, true).ServedAsRecorded()}, nil, nil)[0]; !plainRead(ln) {
 		t.Errorf("typed milliseconds beside served seconds: %s from %+v (%s); want no copy: a plain read of the clock, with no call window, checked at replay", ln.Kind, ln.From, ln.Why)
 	}
 }
@@ -1884,7 +1884,7 @@ func TestACoarserCopyInTheApplicationsOwnZoneIsTheEchos(t *testing.T) {
 			return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: at.In(loc).Truncate(time.Second).Format("2006-01-02 15:04:05")}}}
 		}
 		dc := clockedDrifts()
-		ln := ClassifyIn(dc, []string{p}, dt(got), dt(sent), r1Insert, nil, []Raw{dc.RawOf(receive, true), dc.RawOf(delivered, true)}, nil, nil)[0]
+		ln := ClassifyIn(dc, []string{p}, dt(got), dt(sent), r1Insert, nil, []Raw{dc.RawOf(receive, true).ServedAsRecorded(), dc.RawOf(delivered, true).ServedAsRecorded()}, nil, nil)[0]
 		if ln.Kind != KindVariable || ln.From.Mock != "mock-4" || !ln.From.Echo {
 			t.Errorf("%s: %s from %+v (%s); want an echo's variable from mock-4", zone, ln.Kind, ln.From, ln.Why)
 		}
@@ -1892,7 +1892,7 @@ func TestACoarserCopyInTheApplicationsOwnZoneIsTheEchos(t *testing.T) {
 		// receives: no zone makes both moments theirs.
 		now := r1Insert.Add(-40 * time.Millisecond)
 		dc = clockedDrifts()
-		ln = ClassifyIn(dc, []string{p}, dt(now.Add(FullRoundLead)), dt(now), r1Insert, nil, []Raw{dc.RawOf(receive, true), dc.RawOf(delivered, true)}, nil, nil)[0]
+		ln = ClassifyIn(dc, []string{p}, dt(now.Add(FullRoundLead)), dt(now), r1Insert, nil, []Raw{dc.RawOf(receive, true).ServedAsRecorded(), dc.RawOf(delivered, true).ServedAsRecorded()}, nil, nil)[0]
 		if !noiseIn(ln, nil) {
 			t.Errorf("%s, a read of the clock: %s from %+v (%s); want noise", zone, ln.Kind, ln.From, ln.Why)
 		}
@@ -1908,7 +1908,7 @@ func TestACoarserCopyInTheApplicationsOwnZoneIsTheEchos(t *testing.T) {
 			return Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, time.Date(wall.Year(), wall.Month(), wall.Day(), wall.Hour(), wall.Minute(), wall.Second(), 0, time.UTC), time.Second)}}
 		}
 		dc = clockedDrifts()
-		ln = ClassifyIn(dc, []string{p}, typed(got), typed(sent), r1Insert, nil, []Raw{dc.RawOf(receive, false), dc.RawOf(delivered, true)}, nil, nil)[0]
+		ln = ClassifyIn(dc, []string{p}, typed(got), typed(sent), r1Insert, nil, []Raw{dc.RawOf(receive, false), dc.RawOf(delivered, true).ServedAsRecorded()}, nil, nil)[0]
 		_, off := sent.In(loc).Zone()
 		rel := (time.Duration(off) * time.Second).String() + " after"
 		if off < 0 {

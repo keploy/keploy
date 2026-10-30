@@ -1125,6 +1125,13 @@ func TestSanitizedMissKeepsTheShapeAndTheAdvice(t *testing.T) {
 	require.Equal(t, "SELECT ?", pg.ActualSummary)
 	redis := sanitizedMiss(models.UnmatchedCall{Protocol: "Redis", ActualSummary: "GET session:abc"})
 	require.Empty(t, redis.ActualSummary, "a protocol keploy has no shape for keeps no call text")
+	// A MongoDB miss keeps its command, the namespace and its filter's keys,
+	// from the request the matcher rendered, which evidence does not keep:
+	// the call keploy's miss line names.
+	mongo := sanitizedMiss(models.UnmatchedCall{Protocol: "MongoDB", ActualSummary: "find on app_config_audits",
+		ReceivedReq: `{"cmd":{"$db":"api","find":"app_config_audits","filter":{"appId":"6720b1c2e4b0a1b2c3d4e5f6"}}}`})
+	require.Equal(t, "find on api.app_config_audits filter appId", mongo.ActualSummary)
+	require.Empty(t, mongo.ReceivedReq)
 
 	// A repeat note names recordings, a test and times, never a value the app
 	// sent: it is kept, on a copy, so judging can name the earlier test.

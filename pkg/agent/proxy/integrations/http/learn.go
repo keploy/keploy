@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"mime"
 	"mime/multipart"
 	"net/url"
+	"reflect"
 	"regexp"
 	"slices"
 	"sort"
@@ -1170,10 +1172,14 @@ func stagedOf(mockDb integrations.MockMemDb) []*models.Mock {
 // value built on it, or copied word for word from what it answered, is
 // refused naming it, never learned as noise. The paired mock has a
 // recorded time here: the learn step learns nothing from one with none, as
-// without it every mock F served would read as recorded after the call. dc keeps each mock's text for the test, read with its
-// answer (DriftCache.ReadRaw). err names one whose answer the agent parked
-// on disk and that cannot be read back, and why; no mock is then returned,
-// since what it held cannot be told.
+// without it every mock F served would read as recorded after the call.
+// Each is a lazy Raw (lazyRaw): its payload, with its answer, is read only
+// where a rule reads it and kept in the set's bounded store, so what a call
+// holds of the recordings before it does not grow with them. One whose
+// answer cannot be read back is an unread place naming it, refused where a
+// rule reads it. err is the store's failure to hand over the recordings
+// before the call (recordedUnread): no mock is then returned, since what
+// they held cannot be told.
 func earlierRaw(dc *learn.DriftCache, paired *models.Mock, served, given, visible []*models.Mock, order learn.Order, recorded func(visit func(*models.Mock) bool) error, earlier []learn.Earlier, prev *learn.PreviousCall) (out []learn.Raw, err error) {
 	at := paired.Spec.ReqTimestampMock
 	// A mock recorded at the call's own instant (a fixture's whole second:
@@ -1199,16 +1205,16 @@ func earlierRaw(dc *learn.DriftCache, paired *models.Mock, served, given, visibl
 		read[id] = true
 		return true
 	}
-	add := func(m *models.Mock, servedByF bool, span [2]int) error {
-		r, err := dc.ReadRaw(m, servedByF)
-		if err != nil {
-			return fmt.Errorf("read back the recorded answer of %q: %w", m.Name, err)
-		}
+	// A mock F served is read with the view its adapters stated of its
+	// serves (learn.Order.ServedView): as recorded where every serve of it
+	// was told so; otherwise a view no adapter stated, refused where it may
+	// have given a word (fail closed).
+	add := func(m *models.Mock, servedByF bool, span [2]int) {
+		r := lazyRaw(dc, m, servedByF)
 		if servedByF {
-			r = r.ServedIn(span[0], span[1])
+			r = order.ServedView(m, r.ServedIn(span[0], span[1]))
 		}
 		out = append(out, r)
-		return nil
 	}
 	for _, m := range served {
 		prev.See(m)
@@ -1229,43 +1235,44 @@ func earlierRaw(dc *learn.DriftCache, paired *models.Mock, served, given, visibl
 			if m == nil || leafed[m.Name] || !recordedByCall(m) || !once(m) {
 				continue
 			}
-			if err := add(m, true, spans[k]); err != nil {
-				return nil, err
-			}
+			add(m, true, spans[k])
 		}
 	}
 	for _, m := range visible {
 		if m != nil && !leafed[m.Name] && recordedByCall(m) && once(m) {
-			if err := add(m, false, [2]int{}); err != nil {
-				return nil, err
-			}
+			add(m, false, [2]int{})
 		}
 	}
 	if recorded == nil {
 		return out, nil
 	}
-	// Streamed, one at a time, and read without the cache (which keys by
-	// the mock and would keep every one): only its text stays.
-	var readErr error
+	// Streamed, one at a time: each lazy Raw keeps the recording the store
+	// decoded for the visit, its answer left parked, until the call ends.
 	if err := recorded(func(m *models.Mock) bool {
 		prev.See(m)
 		if m == nil || leafed[m.Name] || !recordedByCall(m) || !once(m) {
 			return true
 		}
-		r, err := learn.ReadRaw(m, false)
-		if err != nil {
-			readErr = fmt.Errorf("read back the recorded answer of %q: %w", m.Name, err)
-			return false
-		}
-		out = append(out, r)
+		out = append(out, lazyRaw(dc, m, false))
 		return true
 	}); err != nil {
 		return nil, recordedUnread{err}
 	}
-	if readErr != nil {
-		return nil, readErr
-	}
 	return out, nil
+}
+
+// lazyRaw is m as Classify reads it, served as served, with its answer: a
+// lazy Raw (learn's DriftCache.LazyRawOf) whose payload is built, its answer
+// the agent parked on disk read back first (withResponse), only where a rule
+// first reads it, and kept in the set's bounded store of payloads by the
+// recording. A set's later tests read it again from there, and the set's
+// payloads are never all in memory at once. It holds m, whose answer stays
+// parked, until the call ends: a recording's request is the part that still
+// grows with the count of recordings read before the call (a stated limit).
+// One whose answer cannot be read back is an unread place naming it and why,
+// which a rule that reads it refuses (never learns from).
+func lazyRaw(dc *learn.DriftCache, m *models.Mock, served bool) learn.Raw {
+	return dc.LazyRawOf(m, served, func() (*models.Mock, error) { return withResponse(m) })
 }
 
 // rawID is a recording's identity as earlierRaw reads each once.
@@ -1572,7 +1579,7 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 				continue
 			}
 			commit()
-			if e, ok := n.servedExchange(picked, nil, rec, recordedParts(picked), liveShape, live, out, own); ok {
+			if e, ok := n.servedExchange(tracker.Drifts(), picked, nil, rec, recordedParts(picked), liveShape, input, live, out, own); ok {
 				tracker.Served(test, e)
 			}
 			return out, nil, nil
@@ -1650,17 +1657,10 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 			}
 			given := ofPairedTest(before, m, windows, own)
 			raw, err := earlierRaw(tracker.DriftsOf(ctx), m, served, given, append(ofPairedTest(sc.visible, m, windows, own), ofPairedTest(staged, m, windows, own)...), order, recordedBeforeOf(mockDb, m, windows, own), earlier, prev)
-			var unread recordedUnread
-			if errors.As(err, &unread) {
+			if err != nil {
 				h.Logger.Warn("the learn step cannot read the recordings made before a pool call; learning nothing from this call",
 					zap.String("mock", m.Name), zap.Error(err))
 				res.Outcome, res.Reason, res.Why = learn.Miss, "", "keploy cannot read the recordings of the test set made before "+m.Name+", so it cannot tell whether what changed came from there"
-				return nil, &learnMiss{res: res, closest: m, pool: sc.http}, nil
-			}
-			if err != nil {
-				h.Logger.Warn("the learn step cannot read back an earlier recorded answer the agent parked on disk; learning nothing from this call",
-					zap.String("mock", m.Name), zap.Error(err))
-				res.Outcome, res.Reason, res.Why = learn.Miss, "", "keploy cannot read back the recorded answer of a recording made or served before this call, so it cannot tell whether what changed came from there"
 				return nil, &learnMiss{res: res, closest: m, pool: sc.http}, nil
 			}
 			// The exchanges served leaf by leaf, each as the n-th mock F
@@ -1715,7 +1715,7 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 				h.Logger.Info("learned a field that changed between record and replay",
 					zap.String("mock", m.Name), zap.String("field", l.Recorded.Path), zap.String("as", string(l.Kind)))
 			}
-			if e, ok := n.servedExchange(m, answered, c.Shape, recordedParts(m), liveShape, live, out, own); ok {
+			if e, ok := n.servedExchange(tracker.Drifts(), m, answered, c.Shape, recordedParts(m), liveShape, input, live, out, own); ok {
 				tracker.Served(test, e)
 			}
 			return out, nil, nil
@@ -2386,8 +2386,16 @@ func leafPaths(ls []learn.Leaf) []string {
 // be no earlier place of the test. ok is false when it cannot be read back:
 // the exchange is then not kept leaf by leaf, and a later request reads m as
 // a raw mock (earlierRaw), which learns nothing when it cannot read it
-// either.
-func (n learnNoise) servedExchange(m, recorded *models.Mock, rec learn.Shape, rp httpParts, liveShape learn.Shape, live httpParts, served *models.Mock, own bool) (learn.Earlier, bool) {
+// either. Its payload is m's lazy Raw in dc (earlierOf).
+//
+// Where F gave the application m's recorded answer whole (answerAsRecorded),
+// keploy knows F's view of the exchange: m as the application sent in and F
+// answered it (servedLiveView, learn.Earlier.View), the view a later call of the
+// set reads m with where the request was not the recorded one
+// (learn.Order.ServedView). An answer F gave otherwise (a template value, a
+// variable rendered into it) states no view: a later call refuses a word a
+// value holds now that may stand there (fail closed). A nil in states none.
+func (n learnNoise) servedExchange(dc *learn.DriftCache, m, recorded *models.Mock, rec learn.Shape, rp httpParts, liveShape learn.Shape, in *req, live httpParts, served *models.Mock, own bool) (learn.Earlier, bool) {
 	if recorded == nil {
 		var err error
 		if recorded, err = withResponse(m); err != nil {
@@ -2399,7 +2407,11 @@ func (n learnNoise) servedExchange(m, recorded *models.Mock, rec learn.Shape, rp
 		unmasked.url = nil
 		rec, liveShape = unmasked.shape(rp, destOf(live, rp)), unmasked.shape(live, sameDest)
 	}
-	return withExcused(earlierOf(recorded, rec, liveShape, served, own), n, live, rp), true
+	e := withExcused(earlierOf(dc, m, recorded, rec, liveShape, served, own), n, live, rp)
+	if in != nil && served != nil && answerAsRecorded(recorded.Spec.HTTPResp, served.Spec.HTTPResp) {
+		e.View, e.ViewKey = servedLiveView(m, in)
+	}
+	return e, true
 }
 
 // earlierOf is the exchange F just served from m (own: one of the test's own
@@ -2407,9 +2419,14 @@ func (n learnNoise) servedExchange(m, recorded *models.Mock, rec learn.Shape, rp
 // request with the live value, and each recorded leaf of its answer with the
 // value served, each with its variable place; and m's payload
 // (learn.Earlier.Payload), whose answer's places the learn step's offset rule
-// reads against another recording's of the call.
-func earlierOf(m *models.Mock, rec, live learn.Shape, served *models.Mock, own bool) learn.Earlier {
-	e := learn.Earlier{Mock: m.Name, At: m.Spec.ReqTimestampMock, Own: own, Payload: learn.RawOf(m, true)}
+// reads against another recording's of the call. m is the recording as the
+// store keeps it, recorded the same with its answer read back (m itself when
+// the agent parked none): the payload is m's lazy Raw in dc (lazyRaw), read
+// back where a rule reads it and kept in the set's bounded store, so the
+// exchanges a test and its start-up keep do not hold every answer's text.
+func earlierOf(dc *learn.DriftCache, m, recorded *models.Mock, rec, live learn.Shape, served *models.Mock, own bool) learn.Earlier {
+	e := learn.Earlier{Mock: m.Name, At: m.Spec.ReqTimestampMock, Own: own, Payload: lazyRaw(dc, m, true)}
+	m = recorded
 	jsonReq := rec.Fixed["body"] == "json"
 	for p, r := range rec.Leaves {
 		place, _ := learn.VarPlace(r, jsonReq)
@@ -2455,7 +2472,45 @@ func earlierOf(m *models.Mock, rec, live learn.Shape, served *models.Mock, own b
 		}
 		return e.Seen[i].Leaf.Path < e.Seen[j].Leaf.Path
 	})
+	// F served it as recorded where the application sent the recorded
+	// request, every part the learn step reads of it (requestAsRecorded; the
+	// headers the comparison excuses are Seen too: withExcused), and F gave
+	// it the recorded answer whole (answerAsRecorded): the view a later call of
+	// the set reads the recording with (learn.Earlier.AsRecorded,
+	// learn.Order.ServedView). Anything else is a view keploy does not
+	// state, and fails closed there.
+	e.AsRecorded = served != nil && requestAsRecorded(rec, live) && answerAsRecorded(m.Spec.HTTPResp, served.Spec.HTTPResp)
 	return e
+}
+
+// requestAsRecorded reports whether a request read as live is the one
+// recorded as rec, every part its shape reads: its operation key, the parts
+// compared whole and each leaf, by path, type and value.
+func requestAsRecorded(rec, live learn.Shape) bool {
+	if rec.Key != live.Key || !maps.Equal(rec.Fixed, live.Fixed) || len(rec.Leaves) != len(live.Leaves) {
+		return false
+	}
+	for p, r := range rec.Leaves {
+		l, ok := live.Leaves[p]
+		if !ok || l.Type != r.Type || l.Value != r.Value {
+			return false
+		}
+	}
+	return true
+}
+
+// answerAsRecorded reports whether the answer F served is the recorded one,
+// byte for byte where the application reads it: its status, protocol,
+// headers and body, streamed or not. false where either is missing.
+func answerAsRecorded(rec, served *models.HTTPResp) bool {
+	if rec == nil || served == nil {
+		return false
+	}
+	return rec.StatusCode == served.StatusCode && rec.StatusMessage == served.StatusMessage &&
+		rec.ProtoMajor == served.ProtoMajor && rec.ProtoMinor == served.ProtoMinor &&
+		maps.Equal(rec.Header, served.Header) && rec.Body == served.Body && rec.Binary == served.Binary &&
+		rec.BodySkipped == served.BodySkipped && rec.BodySize == served.BodySize &&
+		reflect.DeepEqual(rec.StreamBody, served.StreamBody)
 }
 
 // paramNames are the names of a request's parameters, as its shape reads

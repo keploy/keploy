@@ -217,7 +217,7 @@ func TestAChanceWordStaysRefusedWhereTheRecordedValueTookAWordOfThePayloadsStamp
 	for _, m := range []*models.Mock{src, view} {
 		m.Spec.HTTPResp.Header["Date"] = m.Spec.ResTimestampMock.Format(http.TimeFormat)
 	}
-	if x := RawOf(src, true); len(x.stamps) != 1 || !strings.HasPrefix(src.Spec.HTTPResp.Header["Date"], "Thu, ") || strings.Contains(src.Spec.HTTPResp.Body, "Thu") {
+	if x := RawOf(src, true); len(x.payload().stamps) != 1 || !strings.HasPrefix(src.Spec.HTTPResp.Header["Date"], "Thu, ") || strings.Contains(src.Spec.HTTPResp.Body, "Thu") {
 		t.Fatalf("the answer's Date header %q is not its one stamp, or not the only text holding Thu", src.Spec.HTTPResp.Header["Date"])
 	}
 	for _, row := range []struct {
