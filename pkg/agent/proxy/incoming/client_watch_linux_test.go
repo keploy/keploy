@@ -159,6 +159,7 @@ func TestAClientThatCannotBeWatchedIsToldOnce(t *testing.T) {
 	logger := zap.New(core)
 	_, proxied := tcpPairForWatch(t)
 	c := unwatchable{proxied}
+	unwatched.Delete(fmt.Sprintf("%T", c)) // a run before this one (-count) told it
 	for i := 0; i < 2; i++ {
 		stop := watchClient(logger, c, bufio.NewReader(c), func() net.Conn { return nil })
 		if stop() {
