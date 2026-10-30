@@ -485,11 +485,13 @@ func TestACtrlCAtTheComposeStopsOfferEndsItsWaitForTheDaemonsRecord(t *testing.T
 	})
 	t.Run("the offer once the app has exited says a press stops the wait", func(t *testing.T) {
 		var once sync.Once
-		r, offers := stopWithAPress(t, func(signal string, pid int) {
-			if signal == "SIGINT" {
-				// The app exits at keploy's interrupt; the daemon has not
-				// recorded it.
-				killAndAwait(pid)
+		r, offers := stopWithAPress(t, func(d *composeDocker, pid int) {
+			d.onKill = func(signal string) {
+				if signal == "SIGINT" {
+					// The app exits at keploy's interrupt; the daemon has
+					// not recorded it.
+					killAndAwait(pid)
+				}
 			}
 		}, func(msg string, _ int) {
 			if msg == composeOfferStopWaiting {
@@ -500,17 +502,108 @@ func TestACtrlCAtTheComposeStopsOfferEndsItsWaitForTheDaemonsRecord(t *testing.T
 			t.Fatalf("said %q, err %v (offers %q); want the stop ended at the press of the offer to stop waiting, with no kill", r.killed, r.err, offers)
 		}
 	})
+	t.Run("the offer after an offer to kill it now, the app gone with no press, says a press stops the wait", func(t *testing.T) {
+		// The first wait offered the kill; the app's processes then go
+		// with no press, and the stop waits for the daemon's record. Left
+		// to say "kill it now", the offer named nothing left to kill.
+		var gone, press sync.Once
+		r, offers := stopWithAPress(t, nil, func(msg string, pid int) {
+			switch msg {
+			case utils.OfferKillNow:
+				gone.Do(func() { killAndAwait(pid) })
+			case composeOfferStopWaiting:
+				press.Do(func() { utils.MarkInterruptedAgain() })
+			}
+		})
+		if len(offers) != 2 || offers[0] != utils.OfferKillNow || offers[1] != composeOfferStopWaiting {
+			t.Fatalf("offers %q; want the kill offered, then a press offered to stop the wait", offers)
+		}
+		if r.killed != "" || r.err == nil || !strings.Contains(r.err.Error(), pressed) {
+			t.Fatalf("said %q, err %v; want the stop ended at the press, with no kill", r.killed, r.err)
+		}
+	})
+	t.Run("a press at the kill's offer, the daemon holding the kill", func(t *testing.T) {
+		// The kill path's two waits (the kill's, then the record's) share
+		// one offer of their own. A press at the first offer has keploy kill
+		// the app, the daemon not recording the kill; the app's process
+		// ends in the kill's wait's look that takes the second press. That
+		// press ends the wait for the record too. StopOffer is an hour from
+		// that press, so a record's wait with an offer of its own never
+		// offers, and the row fails at its 20 s bound.
+		var mu sync.Mutex
+		n := 0
+		r, offers := stopWithAPress(t, func(d *composeDocker, _ int) {
+			d.holdsKill = true
+		}, func(msg string, pid int) {
+			if !strings.Contains(msg, "press Ctrl+C again") {
+				return
+			}
+			mu.Lock()
+			n++
+			k := n
+			mu.Unlock()
+			switch k {
+			case 1:
+				// The press has keploy kill the app.
+				utils.MarkInterruptedAgain()
+			case 2:
+				utils.StopOffer = time.Hour
+				utils.MarkInterruptedAgain()
+				killAndAwait(pid)
+			}
+		})
+		if r.killed == "" || r.err == nil || !strings.Contains(r.err.Error(), pressed) {
+			t.Fatalf("said %q, err %v (offers %q); want the kill said and the stop ended at the press", r.killed, r.err, offers)
+		}
+	})
+}
+
+// A stop through on the daemon's record withdraws its offer to end at a
+// press: a later Ctrl+C is no press at an offer (MarkInterruptedAgain false).
+// Left standing, the offer stayed counted, and every later repeated Ctrl+C
+// closed utils.StopNow, which recording's and the mocks' drains select on,
+// so those drains ended though no stop offered.
+func TestAComposeStopThroughOnTheDaemonsRecordWithdrawsItsOffer(t *testing.T) {
+	stallBudget(t, time.Hour)
+	offer := utils.StopOffer
+	utils.StopOffer = 0
+	t.Cleanup(func() { utils.StopOffer = offer; utils.ClearInterrupted(); utils.ResetInterruptedAgain() })
+	utils.MarkInterrupted()
+	d := interruptedApp(t)
+	t.Cleanup(func() { d.mu.Lock(); d.stop(); d.mu.Unlock() })
+	var once sync.Once
+	core, _ := observer.New(zap.DebugLevel)
+	a := composeApp(d)
+	a.logger = zap.New(zapcore.RegisterHooks(core, func(e zapcore.Entry) error {
+		if strings.Contains(e.Message, "press Ctrl+C again") {
+			// The offer is made; the daemon then records the stop.
+			once.Do(func() { d.mu.Lock(); d.stop(); d.mu.Unlock() })
+		}
+		return nil
+	}))
+	var r composeStopEnd
+	select {
+	case r = <-stopInTheBackground(a):
+	case <-time.After(20 * time.Second):
+		t.Fatal("the stop did not end on the daemon's record in 20 s")
+	}
+	if r.err != nil {
+		t.Fatalf("the stop: %v; want it through on the daemon's record", r.err)
+	}
+	if utils.MarkInterruptedAgain() {
+		t.Fatal("a Ctrl+C after the stop returned was taken at its offer: the offer was left standing")
+	}
 }
 
 // stopWithAPress runs keploy's stop of a compose app whose main process (a
 // real one) ignores the interrupt, which is not sent on to it, and whose
 // daemon records the stop only at a SIGKILL (or the test's end). The run is
 // interrupted, StopOffer is 0 and the stall bound an hour: only a press ends
-// a stop that waits. onKill (nil: none) sees each signal keploy sends the
-// container, as the daemon takes it; hook sees each message keploy logs, on
+// a stop that waits. setup (nil: none) sets the daemon up before the stop,
+// pid being the app's main process; hook sees each message keploy logs, on
 // the stop's own goroutine. It returns the stop's end and the offers it made
 // to end at a press, and fails t when the stop does not end in 20 s.
-func stopWithAPress(t *testing.T, onKill func(signal string, pid int), hook func(msg string, pid int)) (composeStopEnd, []string) {
+func stopWithAPress(t *testing.T, setup func(d *composeDocker, pid int), hook func(msg string, pid int)) (composeStopEnd, []string) {
 	t.Helper()
 	stallBudget(t, time.Hour)
 	offer := utils.StopOffer
@@ -521,8 +614,8 @@ func stopWithAPress(t *testing.T, onKill func(signal string, pid int), hook func
 	pid := main.Process.Pid
 	d := newComposeDocker(true, false)
 	d.pid, d.id = pid, cgroupOf(t, pid)
-	if onKill != nil {
-		d.onKill = func(signal string) { onKill(signal, pid) }
+	if setup != nil {
+		setup(d, pid)
 	}
 	// Runs before started's cleanup: the daemon records the stop, so a stop
 	// still waiting ends.
