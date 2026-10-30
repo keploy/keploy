@@ -980,7 +980,7 @@ func TestAPauseCutIsCountedAsItsExchangeEndsOnAKeptAliveConnection(t *testing.T)
 		fmt.Fprintln(w, `{"status":"DONE"}`)
 	})
 	mgr := syncMock.New(zap.NewNop())
-	_, client, _, _ := serveWatchedIn(t, syncMock.NewContext(context.Background(), mgr), false, appLn, nil)
+	pm, client, served, _ := serveWatchedIn(t, syncMock.NewContext(context.Background(), mgr), false, appLn, nil)
 	br := bufio.NewReader(client)
 	if _, err := client.Write([]byte("GET /events HTTP/1.1\r\nHost: api\r\n\r\n")); err != nil {
 		t.Fatal(err)
@@ -1015,4 +1015,14 @@ func TestAPauseCutIsCountedAsItsExchangeEndsOnAKeptAliveConnection(t *testing.T)
 	if got := mgr.NotRecordedUnderPressure(); got.Total != 1 {
 		t.Fatalf("the exchange the pause cut was counted %d time(s) by its next exchange's end, want 1", got.Total)
 	}
+	// The next exchange is captured: its handler, and its capture, end
+	// before the test does, so neither reads a hook or a pause the next
+	// test swaps.
+	_ = client.Close()
+	select {
+	case <-served:
+	case <-never(t):
+		t.Fatal("never: the handler ended")
+	}
+	pm.captures.Wait()
 }
