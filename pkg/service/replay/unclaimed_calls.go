@@ -11,7 +11,7 @@ import (
 )
 
 // The calls a test set's application made after its last test that no mock
-// answered (P101, under the proven switch). The set's end reads the misses
+// answered (under the proven switch). The set's end reads the misses
 // once more, as the agent settles it (a call already made is in the proxy's
 // hands and answered, or missed, before the read). One made after the last
 // test's misses were read was made outside every test's window: the agent
