@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"slices"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -45,10 +46,13 @@ func (s TestSpan) Changed() <-chan struct{} { return s.changed }
 // t any more.
 //
 // A span is noted for a window whose request became a test case before it
-// left the open ones (ResolveKept with --sync, Window.Tested without); a
-// window given up, left out, or never answered owns nothing here, nor does a
-// test with no window (gRPC). The spans of the last maxRecentWindows test
-// cases are kept: a mock asked about after that many later ones finds none.
+// left the open ones (ResolveKept with --sync, Window.Tested without), and for
+// a test scope that ended (TestScope.End: keploy mock record's tests, which
+// open no window); a window given up, left out, or never answered owns nothing
+// here, nor does a scope abandoned, nor a test with no window and no scope
+// (gRPC). A test scope still open is waited on as an open window is. The spans
+// of the last maxRecentWindows test cases are kept: a mock asked about after
+// that many later ones finds none.
 func (m *SyncMockManager) TestSpanAt(t time.Time) (TestSpan, bool) {
 	if m == nil || t.IsZero() {
 		return TestSpan{}, false
@@ -62,6 +66,17 @@ func (m *SyncMockManager) TestSpanAt(t time.Time) (TestSpan, bool) {
 			open = w
 		}
 	}
+	// An open test scope is waited on as an open window is; of a window and
+	// a scope opened at the same instant, the window.
+	var scope *TestScope
+	for _, s := range m.scopes {
+		if !s.start.After(t) && (scope == nil || s.start.Before(scope.start)) {
+			scope = s
+		}
+	}
+	if scope != nil && open != nil && !scope.start.Before(open.start) {
+		scope = nil
+	}
 	var tested testSpan
 	found := false
 	for _, s := range m.testSpans {
@@ -73,6 +88,12 @@ func (m *SyncMockManager) TestSpanAt(t time.Time) (TestSpan, bool) {
 		if !found || s.start < tested.start || (s.start == tested.start && s.end > tested.end) {
 			tested, found = s, true
 		}
+	}
+	if scope != nil && (!found || scope.start.UnixNano() <= tested.start) {
+		if scope.changed == nil {
+			scope.changed = make(chan struct{})
+		}
+		return TestSpan{Start: scope.start, changed: scope.changed}, true
 	}
 	if open != nil && (!found || open.start.UnixNano() <= tested.start) {
 		ch, ok := m.spanWatch[open]
@@ -135,5 +156,67 @@ func (m *SyncMockManager) windowLeftLocked(w *Window) {
 	if ch, ok := m.spanWatch[w]; ok {
 		close(ch)
 		delete(m.spanWatch, w)
+	}
+}
+
+// TestScope is, under the proven switch, a test the run's test harness said
+// began (the scope API: keploy mock record), in a recording whose agent opens
+// no window for it, as the test answers no request of keploy's: its calls are
+// all it makes. Until it ends, a mock requested at or after its begin may be
+// its, and TestSpanAt waits on it as on an open window; ended, its span [its
+// begin, its end] is a test case's, as a window's noted test case is.
+type TestScope struct {
+	m     *SyncMockManager
+	start time.Time
+	// changed is the channel TestSpanAt handed out for the scope, closed as it
+	// leaves the open ones; nil until a wait asks for it. ended: it left
+	// them. Guarded by m.mu.
+	changed chan struct{}
+	ended   bool
+}
+
+// BeginTestScope opens, under the proven switch, the scope of a test that
+// began at start (TestScope). nil with the switch off, a zero start, or a nil
+// manager: nothing waits on it, and its End notes nothing.
+func (m *SyncMockManager) BeginTestScope(start time.Time) *TestScope {
+	if m == nil || start.IsZero() || !provenswitch.On() {
+		return nil
+	}
+	s := &TestScope{m: m, start: start}
+	m.mu.Lock()
+	m.scopes = append(m.scopes, s)
+	m.mu.Unlock()
+	return s
+}
+
+// End notes that the scope's test ended at end: its span [begin, end] is a
+// test case's (noteTestSpanLocked), and the scope leaves the open ones, which
+// tells its waiters. Once, and nil-safe: an End after End or Abandon does
+// nothing.
+func (s *TestScope) End(end time.Time) { s.leave(end, true) }
+
+// Abandon takes the scope out of the open ones with no span noted: its test
+// is no test case (its begin failed, or the recording it was opened in was
+// reset). Its waiters are told, and find no test of its. Once, and nil-safe.
+func (s *TestScope) Abandon() { s.leave(time.Time{}, false) }
+
+func (s *TestScope) leave(end time.Time, tested bool) {
+	if s == nil {
+		return
+	}
+	m := s.m
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if s.ended {
+		return
+	}
+	s.ended = true
+	// Noted before it leaves the open ones, so a waiter told finds it.
+	if tested {
+		m.noteTestSpanLocked(s.start, end)
+	}
+	m.scopes = slices.DeleteFunc(m.scopes, func(o *TestScope) bool { return o == s })
+	if s.changed != nil {
+		close(s.changed)
 	}
 }
