@@ -36,6 +36,9 @@ jobs:
       # it is given, so this step fails such a change. Both targets run before
       # it fails, so one red round lists the errors of both. Cross-compiling
       # turns cgo off, which drops no file: none in this module imports "C".
+      # Limit: files behind any build tag other than GOOS/GOARCH (for example
+      # composelib, race, dockerlive, e2e) and the darwin/amd64 and
+      # windows/arm64 targets are not typechecked here.
       - name: Vet darwin/arm64 and windows/amd64 (typechecks test files)
         run: |
           rc=0

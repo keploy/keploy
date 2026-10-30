@@ -21,12 +21,17 @@ linters:
     rules: []
 
 # Every issue is listed, so one red round shows them all: by default
-# golangci-lint prints only the first 3 issues of the same text and the first
-# 50 of each linter, and a hidden one only shows up after the shown ones are
-# fixed (keploy #5002's served_view.go:98:28).
+# golangci-lint prints only the first 3 issues of the same text, the first 50
+# of each linter and one issue per line, and a hidden one only shows up after
+# the shown ones are fixed (keploy #5002's served_view.go:98:28). The cost: a
+# mistake can show more than once, when two linters or two staticcheck codes
+# flag it, or as SA2002's "related information" line once per goroutine.
+# gofmt and goimports still report one issue per file; formatting the file
+# fixes all of them.
 issues:
   max-same-issues: 0
   max-issues-per-linter: 0
+  uniq-by-line: false
 
 formatters:
   enable:
