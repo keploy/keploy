@@ -11,6 +11,13 @@ name: Linux CI scripts
 # Also here: free-port.sh, the port the compose lanes publish their app on,
 # whose window keeps clear of the port Docker's DNS server holds in every
 # container on a user-defined network. Its tests check that on Docker itself.
+#
+# And compose-proven-setend-linux.tests.sh: the lane "proven set-end stop
+# (docker_compose)"'s record() against a fake keploy record. A recording that
+# lacks a test case, as a failed request or keploy dropping one leaves it, has
+# to end with its log printed, not hold the lane until its job is cancelled;
+# and one that has them all has to pass, its test cases written as the
+# requests are answered or as keploy record stops.
 
 on:
   push:
@@ -21,6 +28,8 @@ on:
       - '.github/workflows/test_workflow_scripts/apt-install.tests.sh'
       - '.github/workflows/test_workflow_scripts/free-port.sh'
       - '.github/workflows/test_workflow_scripts/free-port.tests.sh'
+      - '.github/workflows/test_workflow_scripts/compose-proven-setend-linux.sh'
+      - '.github/workflows/test_workflow_scripts/compose-proven-setend-linux.tests.sh'
       - '.github/workflows/linux-ci-scripts.yml'
   pull_request:
     paths:
@@ -28,6 +37,8 @@ on:
       - '.github/workflows/test_workflow_scripts/apt-install.tests.sh'
       - '.github/workflows/test_workflow_scripts/free-port.sh'
       - '.github/workflows/test_workflow_scripts/free-port.tests.sh'
+      - '.github/workflows/test_workflow_scripts/compose-proven-setend-linux.sh'
+      - '.github/workflows/test_workflow_scripts/compose-proven-setend-linux.tests.sh'
       - '.github/workflows/linux-ci-scripts.yml'
 
 permissions:
@@ -130,3 +141,13 @@ jobs:
 
       - name: Test free-port.sh (its window and order, busy and skipped ports, host ranges, Docker's DNS port)
         run: bash .github/workflows/test_workflow_scripts/free-port.tests.sh
+
+  compose-proven-setend:
+    # Four cases, a few seconds; each bounds the hang it tests for at 60 s.
+    timeout-minutes: 5
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test compose-proven-setend-linux.sh (a recording's test cases counted once keploy record has stopped)
+        run: bash .github/workflows/test_workflow_scripts/compose-proven-setend-linux.tests.sh
