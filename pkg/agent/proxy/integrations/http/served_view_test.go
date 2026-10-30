@@ -176,14 +176,20 @@ func TestAServedExchangesViewIsTheRequestTheApplicationSentWithTheRecordedAnswer
 // the recording with that view: a changed value that holds no word of it is
 // learned, one that holds a word only F's answer there holds is refused,
 // naming the recording as record's full round gave it, and one that holds a
-// word of the recording is refused as before. Before, neither
+// word of the recording is refused as before. A templated answer gives back
+// a word the application sent in that call, a value the run made: the later
+// call's value is refused as one an earlier test's call sent (a place of the
+// run's, learn.Tracker's ranCalls), naming the recording all the same; the
+// paired call's noise header, which no place of the run's holds, reaches the
+// view's own wording. Before, neither
 // stated a view, and the later call refused every changed value of the set
 // that may stand there ("its adapter did not say what it gave the
 // application there"): run 7's 30 set-asides on one served recording.
 func TestEveryHTTPServeStatesTheViewItGave(t *testing.T) {
 	const (
-		unstated   = "where its adapter did not say what it gave the application there"
-		givenThere = "as record's full round gave it"
+		unstated    = "where its adapter did not say what it gave the application there"
+		givenThere  = "as record's full round gave it"
+		earlierTest = "appears in an earlier test of the set, in mock-2 at body.key, which did not drift with it"
 	)
 	for _, tc := range []struct {
 		name  string
@@ -192,7 +198,7 @@ func TestEveryHTTPServeStatesTheViewItGave(t *testing.T) {
 		why   string // "" learns; else a part of the refusal
 	}{
 		{"a templated answer, a value it holds no word of", "template", "42", ""},
-		{"a templated answer, a value that holds the word it answered", "template", "zq58", givenThere},
+		{"a templated answer, a value that holds the word it answered", "template", "zq58", earlierTest},
 		{"an exact pairing, a value it holds no word of", "pairing", "42", ""},
 		{"an exact pairing, a value that holds a word of the recording", "pairing", "u-61", "appears in an earlier recording, in mock-2"},
 		// A pairing excuses a value noise covers (pairExactly: noise
