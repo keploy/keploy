@@ -544,26 +544,33 @@ func TestTheComposeAppsWatchAsksAgainWhenTheDaemonFailsToDescribeADiesContainer(
 			<-d.inspected
 		}
 		// The daemon is slow to answer the watch's first read, which then
-		// fails, as a read that gave up does; it answers the next.
+		// fails, as a read that gave up does; it fails the next four too,
+		// and answers the sixth.
+		const failed = 5
 		var reads atomic.Int32
 		d.mu.Lock()
 		d.inspectFails = func(ctx context.Context) error {
-			if reads.Add(1) > 1 {
+			read := reads.Add(1)
+			if read > failed {
 				return nil
 			}
-			select {
-			case <-time.After(300 * time.Millisecond):
-			case <-ctx.Done():
+			if read == 1 {
+				select {
+				case <-time.After(300 * time.Millisecond):
+				case <-ctx.Done():
+				}
 			}
 			return context.DeadlineExceeded
 		}
 		d.mu.Unlock()
 		stream <- die("0")
-		<-d.inspected // the read that failed
-		select {
-		case <-d.inspected:
-		case <-ended:
-			t.Fatalf("the die of keploy's own stop ended the run (halt %+v) once the daemon had failed the watch's read of its container; want the daemon asked again", a.composeAppHalt())
+		// The reads that fail, then the one the daemon answers.
+		for i := 0; i <= failed; i++ {
+			select {
+			case <-d.inspected:
+			case <-ended:
+				t.Fatalf("the die of keploy's own stop ended the run (halt %+v) after the daemon had failed %d read(s) of its container; want the daemon asked again until it answers", a.composeAppHalt(), reads.Load())
+			}
 		}
 		// Deciding the late die, the watch reads the next one: the run's
 		// own exit, which ends the run with its code.
@@ -1571,13 +1578,58 @@ func TestAStartReadsTheStopsRecordHoweverSlowTheDaemonIs(t *testing.T) {
 			}
 		})
 	})
-	t.Run("a read the daemon fails is asked again", func(t *testing.T) {
+	t.Run("reads the daemon fails are asked again", func(t *testing.T) {
+		// Five in a row: a read given up after one or two failed asks
+		// passes a row that fails only the first.
+		var asked atomic.Int32
 		start(t, func(_ context.Context, read int32) error {
-			if read == 1 {
+			asked.Store(read)
+			if read <= 5 {
 				return errors.New("the daemon's connection broke")
 			}
 			return nil
 		})
+		if n := asked.Load(); n != 6 {
+			t.Fatalf("the start read the container %d times; want the five failed reads asked again, and the sixth answered", n)
+		}
+	})
+	t.Run("a start whose ctx ends while the daemon holds its read", func(t *testing.T) {
+		// It returns at its ctx's end, and not anew: the read never said
+		// the container had stopped. The stall bound is an hour, so a read
+		// that went on past the ctx would hold the start, and stopMu (the
+		// teardown's stop), until that bound.
+		d := newComposeDocker(false, true)
+		a := composeApp(d)
+		reading := make(chan struct{}, 1)
+		d.inspectFails = func(ctx context.Context) error {
+			select {
+			case reading <- struct{}{}:
+			default:
+			}
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		type result struct {
+			anew bool
+			err  error
+		}
+		done := make(chan result, 1)
+		go func() {
+			anew, err := a.StartComposeApp(ctx)
+			done <- result{anew, err}
+		}()
+		<-reading
+		cancel()
+		select {
+		case r := <-done:
+			if r.anew {
+				t.Fatalf("a start whose read ended at its ctx's end said anew (err %v); want not anew", r.err)
+			}
+		case <-time.After(30 * time.Second):
+			t.Fatal("a start whose ctx had ended did not return: its read of the container waits on for the stall bound")
+		}
 	})
 }
 
