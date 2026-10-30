@@ -29,10 +29,6 @@ func recordedPlainDep(port uint32) *models.Mock {
 	}
 }
 
-func selfCallProxy() *Proxy {
-	return &Proxy{mockMode: true, appPID: uint32(os.Getpid()), logger: zap.NewNop()}
-}
-
 // A port the recording called as an outside dependency stays on the mock path
 // even when a process in the run's own tree now listens on it — otherwise the
 // test set's recorded mock for that dependency would be skipped for whatever is
