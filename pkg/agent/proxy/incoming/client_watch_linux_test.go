@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -23,8 +24,14 @@ import (
 // started, is over once captures is waited on, so the check is not a race
 // with it.
 func TestAnExchangeItsClientLeftIsNotRecorded(t *testing.T) {
-	for _, synchronous := range []bool{false, true} {
-		t.Run(fmt.Sprintf("synchronous %v", synchronous), func(t *testing.T) {
+	for _, tc := range []struct {
+		synchronous bool
+		// halfClose: the client half-closes and reads the whole answer,
+		// which the app ends once told; else it closes.
+		halfClose bool
+	}{{false, false}, {true, false}, {false, true}, {true, true}} {
+		synchronous := tc.synchronous
+		t.Run(fmt.Sprintf("synchronous %v, half-closed %v", tc.synchronous, tc.halfClose), func(t *testing.T) {
 			t.Parallel()
 			gone := make(chan struct{})
 			srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -34,6 +41,7 @@ func TestAnExchangeItsClientLeftIsNotRecorded(t *testing.T) {
 				w.(http.Flusher).Flush()
 				<-r.Context().Done()
 				close(gone)
+				fmt.Fprintln(w, `{"status":"CLIENT GONE"}`)
 			})}
 			appLn, err := net.Listen("tcp", "127.0.0.1:0")
 			if err != nil {
@@ -68,7 +76,15 @@ func TestAnExchangeItsClientLeftIsNotRecorded(t *testing.T) {
 					break
 				}
 			}
-			_ = client.Close()
+			if tc.halfClose {
+				_ = client.(*net.TCPConn).CloseWrite()
+				rest, err := io.ReadAll(br)
+				if err != nil || !strings.Contains(string(rest), "CLIENT GONE") {
+					t.Fatalf("the half-closed client got %q, %v", rest, err)
+				}
+			} else {
+				_ = client.Close()
+			}
 
 			// A hang fails at the test binary's deadline, not at a budget
 			// of its own.
