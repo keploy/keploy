@@ -1128,6 +1128,70 @@ func TestMarkExitSaysWhyItCountedDescriptors(t *testing.T) {
 	}
 }
 
+// A stop whose first look compared the files of the process it waits for,
+// and whose later looks could not (the app ran a program its user may not
+// read, or changed its credentials), says that it counts descriptors at the
+// first of those later looks, naming the process, and not again at the next.
+func TestAStopSaysItCountsDescriptorsFromTheLookThatDid(t *testing.T) {
+	st, ok := ReadProcStat(os.Getpid())
+	if !ok {
+		t.Fatal("premise: this process's stat could not be read")
+	}
+	procs := []Reached{{PID: os.Getpid(), Start: st.StartTime}}
+	// Each descriptor is a file of its own, until the kernel refuses.
+	compared := func(_, a, b int) (int, error) {
+		switch {
+		case a < b:
+			return 1, nil
+		case a > b:
+			return 2, nil
+		}
+		return 0, nil
+	}
+	refused := func(int, int, int) (int, error) { return 0, syscall.EPERM }
+	filesCompared.Store(&compared)
+	t.Cleanup(func() { filesCompared.Store(nil) })
+	if m := MarkExit(procs); m.Running != 1 || m.FilesUnsettled || m.FilesUncompared != nil {
+		t.Fatalf("premise: this process, its files compared, read as %+v; want running, settled, compared", m)
+	}
+	core, logs := observer.New(zap.InfoLevel)
+	said := func() int64 { return int64(logs.FilterMessageSnippet("as their descriptors").Len()) }
+	// The stop's first look compares; the kernel refuses from the loop's
+	// first look on, and the app exits at the loop's second. Each count is
+	// taken as the loop is about to look again: what the looks before said.
+	exited := make(chan struct{})
+	var looks atomic.Int32
+	var atFirst, atSecond atomic.Int64
+	looked := func() {
+		switch looks.Add(1) {
+		case 1:
+			atFirst.Store(said())
+			filesCompared.Store(&refused)
+		case 2:
+			atSecond.Store(said())
+			close(exited)
+		}
+	}
+	exitLooked.Store(&looked)
+	t.Cleanup(func() { exitLooked.Store(nil) })
+	if end, _ := WaitExitByEvents(zap.New(core), exited, procs, nil); end != StopExited {
+		t.Fatalf("a stop of an app that exited ended %v", end)
+	}
+	if n := looks.Load(); n < 2 {
+		t.Fatalf("the stop looked %d times after its first look; want 2", n)
+	}
+	if n := atFirst.Load(); n != 0 {
+		t.Fatalf("a stop whose first look compared the files said %d times that it counts descriptors; want never", n)
+	}
+	if n := atSecond.Load(); n != 1 {
+		t.Fatalf("a stop whose look counted descriptors had said so %d times by its next look; want once, at that look", n)
+	}
+	if all := logs.FilterMessageSnippet("as their descriptors").All(); len(all) != 1 ||
+		!strings.Contains(fmt.Sprint(all[0].ContextMap()["error"]), "process "+strconv.Itoa(os.Getpid())+"'s descriptors: operation not permitted") {
+		t.Fatalf("a stop whose two later looks counted descriptors said so %d times (%v); want once, naming the process and why", len(all), all)
+	}
+}
+
 // A reading of several processes (a stop of the daemons an app left, or of a
 // group) did not settle where the read of one of them did not, whichever is
 // read last: its Fds are no evidence.
