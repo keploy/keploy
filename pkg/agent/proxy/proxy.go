@@ -1463,16 +1463,16 @@ func mysqlSessionForRelay(srcConn, dstConn net.Conn, logger *zap.Logger) *integr
 // the whole file: proxy.go also dials in MODE_TEST when !rule.Mocking,
 // and in any mode under GlobalPassthrough — both return before dispatch.)
 //
-// WHY util.RelayRawPassthrough AND NOT globalPassThrough. globalPassThrough
-// never calls CloseWrite on either side and returns on io.EOF, so a
-// client that does shutdown(SHUT_WR) — the end-of-request signal for
-// every EOF-delimited exchange — ends the connection instead of getting
-// its reply. Relaying through it would re-break, one round trip later,
-// the exact thing this function exists to stop breaking. That is also why
-// recordViaSupervisor refuses it (proxy_v2.go: "Critically we do NOT call
-// globalPassThrough here"). RelayRawPassthrough forwards the FIN on a
-// clean EOF and lets a surviving direction finish, which is what a
-// pass-through has to mean.
+// WHY util.RelayRawPassthrough. A client that does shutdown(SHUT_WR) — the
+// end-of-request signal for every EOF-delimited exchange — must get its
+// reply, so the relay forwards the FIN on a clean EOF and lets the surviving
+// direction finish, which is what a pass-through has to mean.
+// RelayRawPassthrough does. globalPassThrough did not when this was written:
+// it returned on io.EOF, and the caller's close tore both sockets down, one
+// round trip later than the bug this function exists to stop. It forwards the
+// FIN now as well, so the choice here no longer turns on the half-close.
+// (recordViaSupervisor refuses globalPassThrough for a reason of its own:
+// proxy_v2.go.)
 //
 // WHY NO ORPHAN WINDOW. Nothing is captured on this connection from here
 // on, so the test cases recorded over the same window will fail at replay
@@ -3762,10 +3762,11 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 	if looked {
 		// Nothing below dials with it in keploy test: a call a bypassRule
-		// passes through dials its own (util.PassThrough). So the server
-		// lookUndecidedReplay reached for this connection is let go now, not
-		// held open, unused, while the connection lasts, where it would keep
-		// a server that serves one connection at a time from serving it.
+		// passes through dials its own (the HTTP parser's
+		// passOneCallThrough). So the server lookUndecidedReplay reached for
+		// this connection is let go now, not held open, unused, while the
+		// connection lasts, where it would keep a server that serves one
+		// connection at a time from serving it.
 		predialed.CloseIfUnused()
 	}
 	// From here the connection is recorded, or answered from mocks: under
