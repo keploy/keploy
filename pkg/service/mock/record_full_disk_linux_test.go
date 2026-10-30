@@ -4,6 +4,7 @@ package mock
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -109,4 +110,98 @@ func TestRecord_AMockFileOnAFullDiskEndsAsARecordingNotSaved(t *testing.T) {
 			require.Contains(t, fields["next_step"], "check the disk")
 		})
 	}
+}
+
+// failedRunnerOnAFullDisk is fullDiskInstrumentation whose test command
+// failed with exit code 3 (a failing test suite).
+type failedRunnerOnAFullDisk struct{ fullDiskInstrumentation }
+
+func (f *failedRunnerOnAFullDisk) Run(ctx context.Context, o models.RunOptions) models.AppError {
+	f.fullDiskInstrumentation.Run(ctx, o)
+	return models.AppError{AppErrorType: models.ErrCommandError, ExitCode: 3, Err: errors.New("exit status 3")}
+}
+
+// keploy mock propagates the test command's exit code (main.go's
+// finalExitCode): a test command that failed with 3, recorded on a disk that
+// failed the store's writes, still exits 3, the recording not saved and the
+// existing set kept. keploy's own 1 is for a test command that passed, or
+// that the user stopped.
+func TestRecord_AFailedTestCommandsExitCodeIsKeptWhenTheStoreFailed(t *testing.T) {
+	for _, tc := range []struct{ format, file string }{{"gob", "mocks.gob"}, {"yaml", "mocks.yaml"}} {
+		t.Run(tc.format, func(t *testing.T) {
+			t.Setenv("KEPLOY_MOCK_FORMAT", tc.format)
+			utils.ResetInterruptedAgain()
+			utils.ClearInterrupted()
+			utils.ErrCode = 0
+			t.Cleanup(func() { utils.ResetInterruptedAgain(); utils.ClearInterrupted(); utils.ErrCode = 0 })
+			dir := t.TempDir()
+			const name, n = "orders", 5
+			existing := filepath.Join(dir, name, "mocks.yaml")
+			require.NoError(t, os.MkdirAll(filepath.Dir(existing), 0o755))
+			require.NoError(t, os.WriteFile(existing, []byte("# the existing recording\n"), 0o644))
+			inst := &failedRunnerOnAFullDisk{fullDiskInstrumentation{stuckFileInstrumentation{
+				trickleInstrumentation: trickleInstrumentation{out: make(chan *models.Mock, n)},
+				t:                      t, n: n,
+				fifo: filepath.Join(dir, name+yaml.MockStagingSuffix, tc.file),
+			}}}
+			cfg := &config.Config{}
+			cfg.Mock.Name = name
+			cfg.Path = dir
+			core, _ := observer.New(zapcore.InfoLevel)
+			db := mockdb.New(zap.New(core), dir, "mocks")
+			returned := make(chan error, 1)
+			go func() {
+				returned <- New(zap.New(core), inst, db, nil, FileStore{}, nil, cfg).Record(context.Background())
+			}()
+			err := returnedWithin(t, returned)
+			inst.wg.Wait()
+			require.ErrorIs(t, err, models.ErrMocksNotWritten, "the recording short of mocks ended as %v", err)
+			got, rerr := os.ReadFile(existing)
+			require.NoError(t, rerr)
+			require.Equal(t, "# the existing recording\n", string(got), "the existing set was not kept")
+			require.Equal(t, 3, utils.ErrCode, "the failed test command's exit code 3 was not propagated")
+		})
+	}
+}
+
+// A recording the user stopped with a real Ctrl+C (the signal's number is
+// known), whose yaml store refused mocks, exits keploy's 1, not 128+N: a
+// refused write is the disk's failure, not a give-up of the user's.
+func TestRecord_AStoppedRecordingWhoseStoreRefusedMocksExits1WithTheSignalKnown(t *testing.T) {
+	t.Setenv("KEPLOY_MOCK_FORMAT", "yaml")
+	utils.ResetInterruptedAgain()
+	utils.ClearInterrupted()
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ResetInterruptedAgain(); utils.ClearInterrupted(); utils.ErrCode = 0 })
+	t.Cleanup(utils.SetInterruptSignalForTest(2))
+	utils.MarkInterrupted()
+	dir := t.TempDir()
+	const name, n = "orders", 5
+	existing := filepath.Join(dir, name, "mocks.yaml")
+	require.NoError(t, os.MkdirAll(filepath.Dir(existing), 0o755))
+	require.NoError(t, os.WriteFile(existing, []byte("# the existing recording\n"), 0o644))
+	inst := &fullDiskInstrumentation{stuckFileInstrumentation{
+		trickleInstrumentation: trickleInstrumentation{out: make(chan *models.Mock, n)},
+		t:                      t, n: n,
+		fifo: filepath.Join(dir, name+yaml.MockStagingSuffix, "mocks.yaml"),
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	inst.stopped = cancel
+	cfg := &config.Config{}
+	cfg.Mock.Name = name
+	cfg.Path = dir
+	core, _ := observer.New(zapcore.InfoLevel)
+	db := mockdb.New(zap.New(core), dir, "mocks")
+	returned := make(chan error, 1)
+	go func() {
+		returned <- New(zap.New(core), inst, db, nil, FileStore{}, nil, cfg).Record(ctx)
+	}()
+	err := returnedWithin(t, returned)
+	inst.wg.Wait()
+	require.ErrorIs(t, err, models.ErrMocksNotWritten)
+	require.Equal(t, utils.ExitKeployError, utils.ErrCode, "a refused write armed the give-up code")
+	got, rerr := os.ReadFile(existing)
+	require.NoError(t, rerr)
+	require.Equal(t, "# the existing recording\n", string(got), "the existing set was not kept")
 }

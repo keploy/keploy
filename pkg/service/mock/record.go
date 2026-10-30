@@ -570,6 +570,15 @@ func (m *mockService) Record(ctx context.Context) error {
 			storeErr = fmt.Errorf("%w; and %w", storeErr, refused)
 		}
 	}
+	// A run that could not write its recording fails: the test command's own
+	// code first, keploy's 1 when it passed or the user stopped it (as 8a
+	// below). keploy mock propagates the test command's exit code.
+	failRun := func() {
+		if parent.Err() == nil {
+			m.propagateExit(appErr, "record")
+		}
+		utils.SetExitCodeOnce(utils.ExitKeployError)
+	}
 	if storeErr != nil {
 		next := "check the disk the recording writes to (space, speed, permissions), then re-record; the existing mock set is kept"
 		if gaveUp {
@@ -577,7 +586,7 @@ func (m *mockService) Record(ctx context.Context) error {
 			armGivenUp()
 			next = recordDrainWords.nextStep
 		} else {
-			utils.SetExitCodeOnce(utils.ExitKeployError)
+			failRun()
 		}
 		m.logger.Error(recordDrainWords.storeNotWritten, zap.String("mock-set", name), zap.Error(storeErr), zap.String("next_step", next))
 		return fmt.Errorf("the recording was not saved: %w", storeErr)
