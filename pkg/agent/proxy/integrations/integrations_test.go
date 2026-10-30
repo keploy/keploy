@@ -230,3 +230,29 @@ func TestOwnCallGivesBackTheIDsTheOwnersWindowBound(t *testing.T) {
 		})
 	}
 }
+
+// An own series gives nothing back where its mark names no place, even when
+// the series holds a value at the empty path, and nothing for an id recorded
+// empty, even when a variable recorded empty is bound this run: an empty
+// place or value is never read as the job's id.
+func TestOwnCallGivesNothingBackForAnEmptyPlaceOrID(t *testing.T) {
+	leaf := func(p, v string) learn.Leaf { return learn.Leaf{Path: p, Type: learn.String, Value: v} }
+	for _, c := range []struct {
+		name    string
+		path    string // the place the mark names
+		rec     string // the series' value there
+		inForce []variables.Binding
+	}{
+		{"a mark that names no place, with a value at the empty path", "", "job-rec", []variables.Binding{{Name: "v1", Recorded: "job-rec", Value: "job-live"}}},
+		{"an id recorded empty, with a variable recorded empty bound", "body.q._id", "", []variables.Binding{{Name: "v1", Recorded: "", Value: "job-live"}}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			m := MarkedSeries{Owner: "T1", OwnID: c.path, Series: learn.Series{Key: "update jobs", Values: map[string]learn.Leaf{c.path: leaf(c.path, c.rec)}}}
+			live := learn.Shape{Key: "update jobs", Leaves: map[string]learn.Leaf{c.path: leaf(c.path, "job-live")}}
+			asked, moved, off := m.OwnCall(live, c.inForce)
+			if got := asked.Leaves[c.path].Value; got != "job-live" || len(moved) != 0 || off != "" {
+				t.Fatalf("OwnCall gave %q back at %q (moved %v, off %q); want the call as it came, nothing given back", got, c.path, moved, off)
+			}
+		})
+	}
+}

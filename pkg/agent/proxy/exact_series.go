@@ -143,13 +143,13 @@ func (m *MockManager) seriesReadLocked() *setSeriesRead {
 			switch {
 			case models.IsBackgroundOwnSeries(why):
 				id, _ := models.BackgroundOwnSeriesID(why)
-				if owner, seen := r.own[name]; seen && owner != test {
+				// A test marks a recording once (marks is test -> name), so a
+				// second sight of name is another test's: no test's own.
+				if _, seen := r.own[name]; seen {
 					r.own[name] = ""
-				} else if !seen {
+				} else {
 					r.own[name] = test
 					r.ownID[name] = id
-				} else if r.ownID[name] != id {
-					r.ownID[name] = ""
 				}
 			case models.IsBackgroundSeries(why):
 				r.series[name] = true
