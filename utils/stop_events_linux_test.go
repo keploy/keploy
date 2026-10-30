@@ -934,13 +934,18 @@ func TestTheExitRatchetTakesOnlyProgress(t *testing.T) {
 // counts once with what it duplicates, and closing it is no step of its way
 // out (dash's `exec 3<&-` saves fd 3 to fd 10 and closes both: a churn of one
 // file read by descriptors looks two steps deep). Closing the last descriptor
-// of a file is one, and two opens of one file are two files. Where the kernel
-// refuses to compare the child's files (kcmp(2) of another process needs
+// of a file is one, and two opens of one file are two files. The child holds
+// the descriptors the row gives it and no others (TestMain: a CI runner's
+// step hands the test binary descriptors open on exec, which the child would
+// hold too, each a file more). Where the kernel refuses to compare the
+// child's files (kcmp(2) of another process needs
 // PTRACE_MODE_READ_REALCREDS), each of its descriptors counts, and the
 // reading says why: closing a duplicate is then a step out, which the
-// ratchet bounds (ExitRatchet). The row says why it was refused and holds
-// keploy to that. KEPLOY_TEST_KCMP_REQUIRED=1 (go-test.yaml's run of it as
-// root) fails it there instead, so the comparison itself runs in CI.
+// ratchet bounds (ExitRatchet). Which of the two it is, is MarkExit's own
+// answer (ExitMark.FilesUncompared): the row logs why the kernel refused and
+// holds keploy to that.
+// KEPLOY_TEST_KCMP_REQUIRED=1 (go-test.yaml's run of it as root) fails it
+// there instead, so the comparison itself runs in CI.
 func TestMarkExitCountsOpenFilesNotDescriptors(t *testing.T) {
 	dir := t.TempDir()
 	open := func(name string) *os.File {
@@ -980,48 +985,72 @@ func TestMarkExitCountsOpenFilesNotDescriptors(t *testing.T) {
 		t.Fatal("premise: its stat could not be read")
 	}
 	procs := []Reached{{PID: cmd.Process.Pid, Start: st.StartTime}}
+	fdDir := "/proc/" + strconv.Itoa(cmd.Process.Pid) + "/fd"
+	list := func() []os.DirEntry {
+		fds, err := os.ReadDir(fdDir)
+		if err != nil {
+			t.Fatalf("premise: the child's descriptors could not be listed: %v", err)
+		}
+		return fds
+	}
+	fds := list()
+	var names []string
+	for _, e := range fds {
+		names = append(names, e.Name())
+	}
+	if slices.Sort(names); !slices.Equal(names, []string{"0", "1", "2", "3", "4", "5"}) {
+		t.Fatalf("premise: the child holds descriptors %s; want 0 to 5 alone, those the row gave it (TestMain's keeping of the binary's own: %v)", descriptorsOf(fdDir, fds), errDescriptorsKept)
+	}
 	var r ExitRatchet
-	// The child's fd 0 asked of itself: what the kernel says of comparing
-	// another process's files.
-	if _, refused := kcmpFiles(cmd.Process.Pid, 0, 0); refused != nil {
+	m := MarkExit(procs)
+	if m.FilesUncompared != nil {
+		var errno syscall.Errno
+		// A refusal (no kcmp, or keploy may not ask), not a slip of the read.
+		if !errors.As(m.FilesUncompared, &errno) || (errno != syscall.EPERM && errno != syscall.EACCES && errno != syscall.ENOSYS) ||
+			!strings.Contains(m.FilesUncompared.Error(), "process "+strconv.Itoa(cmd.Process.Pid)+"'s") {
+			t.Fatalf("a reading of files the kernel would not compare says %q; want the child's pid and the kernel's refusal (EPERM, EACCES or ENOSYS)", m.FilesUncompared)
+		}
 		why := kcmpRefusal(cmd.Process.Pid)
 		if os.Getenv("KEPLOY_TEST_KCMP_REQUIRED") == "1" {
-			t.Fatalf("KEPLOY_TEST_KCMP_REQUIRED=1, but the kernel refuses to compare a child's files (kcmp: %v): %s", refused, why)
+			t.Fatalf("KEPLOY_TEST_KCMP_REQUIRED=1, but the kernel refuses to compare a child's files (%v): %s", m.FilesUncompared, why)
 		}
-		t.Logf("the kernel refuses to compare a child's files (kcmp: %v): %s", refused, why)
-		fdDir := "/proc/" + strconv.Itoa(cmd.Process.Pid) + "/fd"
+		t.Logf("the kernel refuses to compare a child's files (%v, errno %d): %s", m.FilesUncompared, int(errno), why)
+		core, logs := observer.New(zap.InfoLevel)
+		var note FilesUncomparedNote
 		for i, step := range []func(){
-			func() {},
+			nil,
 			func() { _ = cmd.Process.Signal(syscall.SIGUSR1); awaitFile(t, closedDup, reaped) },
 			func() { _ = cmd.Process.Signal(syscall.SIGUSR2); awaitFile(t, closedLast, reaped) },
 		} {
-			step()
-			fds, err := os.ReadDir(fdDir)
-			if err != nil {
-				t.Fatalf("premise: the child's descriptors could not be listed: %v", err)
+			if step != nil {
+				step()
+				fds, m = list(), MarkExit(procs)
 			}
+			note.Say(zap.New(core), m)
 			// Each read closed a descriptor: one fewer is a step out.
-			m := MarkExit(procs)
-			if m.Running != 1 || m.Fds != len(fds) || m.FilesUnsettled || !errors.Is(m.FilesUncompared, refused) || r.Advance(m) != (i > 0) {
-				t.Fatalf("read %d of a process whose %d descriptors the kernel will not compare: %+v; want running, each descriptor counted, settled, uncompared for %v, and progress %v", i, len(fds), m, refused, i > 0)
+			if m.Running != 1 || m.Fds != len(fds) || m.FilesUnsettled || !errors.Is(m.FilesUncompared, errno) || r.Advance(m) != (i > 0) {
+				t.Fatalf("read %d of a process whose descriptors %s the kernel will not compare: %+v; want running, each descriptor counted, settled, uncompared for %v, and progress %v", i, descriptorsOf(fdDir, fds), m, errno, i > 0)
 			}
+		}
+		said := logs.FilterMessageSnippet("as their descriptors").All()
+		if len(said) != 1 || logs.Len() != 1 || !strings.Contains(fmt.Sprint(said[0].ContextMap()["error"]), "process "+strconv.Itoa(cmd.Process.Pid)+"'s") {
+			t.Fatalf("the stop said %d times (of %d lines) that it counts the child's descriptors, and why; want once, naming the child", len(said), logs.Len())
 		}
 		return
 	}
-	m := MarkExit(procs)
 	if m.Fds != 4 || m.FilesUnsettled {
-		t.Fatalf("a process holding stdin, one file as stdout and stderr, and two opens of one file over three descriptors reads %d open files (unsettled %v); want 4, settled", m.Fds, m.FilesUnsettled)
+		t.Fatalf("a process holding stdin, one file as stdout and stderr, and two opens of one file over three descriptors (%s) reads %+v; want 4 open files, settled", descriptorsOf(fdDir, fds), m)
 	}
 	r.Advance(m)
 	_ = cmd.Process.Signal(syscall.SIGUSR1)
 	awaitFile(t, closedDup, reaped)
-	if m := MarkExit(procs); m.Fds != 4 || m.FilesUnsettled || r.Advance(m) {
-		t.Fatalf("closing a duplicate read as %d open files (unsettled %v, progress %v); want 4, settled, and no progress", m.Fds, m.FilesUnsettled, r.Advance(m))
+	if m := MarkExit(procs); m.Fds != 4 || m.FilesUnsettled || m.FilesUncompared != nil || r.Advance(m) {
+		t.Fatalf("closing a duplicate read as %+v (progress %v); want 4 open files, settled, compared, and no progress", m, r.Advance(m))
 	}
 	_ = cmd.Process.Signal(syscall.SIGUSR2)
 	awaitFile(t, closedLast, reaped)
-	if m := MarkExit(procs); m.Fds != 3 || m.FilesUnsettled || !r.Advance(m) {
-		t.Fatalf("closing a file's last descriptor read as %d open files (unsettled %v); want 3, settled, and progress", m.Fds, m.FilesUnsettled)
+	if m := MarkExit(procs); m.Fds != 3 || m.FilesUnsettled || m.FilesUncompared != nil || !r.Advance(m) {
+		t.Fatalf("closing a file's last descriptor read as %+v; want 3 open files, settled, compared, and progress", m)
 	}
 }
 
@@ -1041,7 +1070,7 @@ func kcmpRefusal(pid int) string {
 	creds := func(proc string) string {
 		var kept []string
 		for _, line := range strings.Split(read(proc+"/status"), "\n") {
-			for _, key := range []string{"Uid:", "Gid:", "CapEff:", "NoNewPrivs:", "Seccomp:"} {
+			for _, key := range []string{"Uid:", "Gid:", "CapPrm:", "CapEff:", "NoNewPrivs:", "Seccomp:"} {
 				if strings.HasPrefix(line, key) {
 					kept = append(kept, strings.Join(strings.Fields(line), " "))
 				}

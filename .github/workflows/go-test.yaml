@@ -188,28 +188,32 @@ jobs:
       # why, and logs why the kernel refused: run here with -v so that reason
       # is in the log, even where the unit run above failed. Run again as
       # root with KEPLOY_TEST_KCMP_REQUIRED=1, which fails it where the kernel
-      # refuses, so the comparison itself runs on every PR. Each PASS line
-      # grepped, so a row that vanishes fails.
+      # refuses, so the comparison itself runs on every PR. Each leg runs
+      # whether or not the one before it passed or built (a leg's failure is
+      # in its output, not the shell's -e and pipefail), so one run says both
+      # answers; each PASS line is grepped at the end, so a row that fails,
+      # does not build or vanishes fails the step.
       - name: Open-file rows as the runner user and as root
         if: success() || failure()
         shell: bash
         run: |
-          go test -c -o /tmp/utils.test ./utils/
+          rm -f /tmp/utils.test /tmp/http.test
+          failed=0
+          go test -c -o /tmp/utils.test ./utils/ || failed=1
+          go test -c -o /tmp/http.test ./pkg/platform/http/ || failed=1
           cd utils
-          /tmp/utils.test -test.count=1 -test.v -test.run '^TestMarkExitCountsOpenFilesNotDescriptors$' | tee /tmp/utils-runner.out
-          sudo env KEPLOY_TEST_KCMP_REQUIRED=1 /tmp/utils.test -test.count=1 -test.v -test.run '^TestMarkExitCountsOpenFilesNotDescriptors$' | tee /tmp/utils-root.out
-          for out in /tmp/utils-runner.out /tmp/utils-root.out; do
-            grep -q -- "--- PASS: TestMarkExitCountsOpenFilesNotDescriptors " "$out" || { echo "TestMarkExitCountsOpenFilesNotDescriptors did not pass in $out"; exit 1; }
-          done
+          /tmp/utils.test -test.count=1 -test.v -test.run '^TestMarkExitCountsOpenFilesNotDescriptors$' | tee /tmp/utils-runner.out || true
+          sudo env KEPLOY_TEST_KCMP_REQUIRED=1 /tmp/utils.test -test.count=1 -test.v -test.run '^TestMarkExitCountsOpenFilesNotDescriptors$' | tee /tmp/utils-root.out || true
           # The churning daemon's stop, which reads its files the same way.
-          cd ..
-          go test -c -o /tmp/http.test ./pkg/platform/http/
-          cd pkg/platform/http
-          /tmp/http.test -test.count=1 -test.v -test.run '^TestADaemonThatOnlyChurnsMovesNoTeardown$' | tee /tmp/http-runner.out
-          sudo env KEPLOY_TEST_KCMP_REQUIRED=1 /tmp/http.test -test.count=1 -test.v -test.run '^TestADaemonThatOnlyChurnsMovesNoTeardown$' | tee /tmp/http-root.out
-          for out in /tmp/http-runner.out /tmp/http-root.out; do
-            grep -q -- "--- PASS: TestADaemonThatOnlyChurnsMovesNoTeardown " "$out" || { echo "TestADaemonThatOnlyChurnsMovesNoTeardown did not pass in $out"; exit 1; }
+          cd ../pkg/platform/http
+          /tmp/http.test -test.count=1 -test.v -test.run '^TestADaemonThatOnlyChurnsMovesNoTeardown$' | tee /tmp/http-runner.out || true
+          sudo env KEPLOY_TEST_KCMP_REQUIRED=1 /tmp/http.test -test.count=1 -test.v -test.run '^TestADaemonThatOnlyChurnsMovesNoTeardown$' | tee /tmp/http-root.out || true
+          for leg in utils-runner:TestMarkExitCountsOpenFilesNotDescriptors utils-root:TestMarkExitCountsOpenFilesNotDescriptors \
+            http-runner:TestADaemonThatOnlyChurnsMovesNoTeardown http-root:TestADaemonThatOnlyChurnsMovesNoTeardown; do
+            out=/tmp/${leg%%:*}.out
+            grep -q -- "^--- PASS: ${leg#*:} " "$out" || { echo "${leg#*:} did not pass in $out"; failed=1; }
           done
+          exit "$failed"
 
       # The hooks package's root tests skip in the run above, which is the
       # runner user's: TestTheHooksLoadOnThisKernel loads the agent's eBPF
