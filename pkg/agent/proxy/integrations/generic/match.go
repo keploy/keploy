@@ -378,7 +378,7 @@ func (r *sentRequest) isRecorded(recorded []models.Payload, nc *util.NoiseChecke
 func sameAsRecorded(recorded []models.Payload, pieces [][]byte, nc *util.NoiseChecker, exact bool) bool {
 	for i, piece := range pieces {
 		if exact {
-			if !isRecordedBytes(recorded[i].Message[0], piece) {
+			if !isRecordedBytes(recorded[i], piece) {
 				return false
 			}
 			continue
@@ -400,15 +400,23 @@ func sameAsRecorded(recorded []models.Payload, pieces [][]byte, nc *util.NoiseCh
 	return true
 }
 
-// isRecordedBytes reports whether piece is the bytes msg recorded: its Data
-// for a piece the recorder kept as text (models.String), what its Data
-// decodes from base64 to for one it kept as binary (encodePayload). The text
-// is not compared with the piece's own encoding: a live binary piece whose
-// base64 is a recorded text piece, or a live text piece that is a recorded
-// binary piece's base64, is other bytes (a client that stops base64-wrapping
-// what it sent, or starts). A piece of any other type, or binary data that
-// is not base64, holds no bytes keploy can compare, so it differs.
-func isRecordedBytes(msg models.OutputBinary, piece []byte) bool {
+// isRecordedBytes reports whether piece is the bytes the recorded piece p
+// holds: its message's Data for a piece the recorder kept as text
+// (models.String), what that Data decodes from base64 to for one it kept as
+// binary (encodePayload). The text is not compared with the piece's own
+// encoding: a live binary piece whose base64 is a recorded text piece, or a
+// live text piece that is a recorded binary piece's base64, is other bytes (a
+// client that stops base64-wrapping what it sent, or starts). A piece of any
+// other type, or binary data that is not base64, holds no bytes keploy can
+// compare, so it differs. So does a recorded piece that holds no message, or
+// more than one: encodePayload writes exactly one, and comparing only the
+// first of several would answer a live piece that sent part of what was
+// recorded (a hand-edited or imported mock).
+func isRecordedBytes(p models.Payload, piece []byte) bool {
+	if len(p.Message) != 1 {
+		return false
+	}
+	msg := p.Message[0]
 	switch msg.Type {
 	case models.String:
 		return msg.Data == string(piece)
@@ -486,7 +494,10 @@ func (r *sentRequest) cutLikeRecorded(recorded []models.Payload) [][]byte {
 // data's length for a piece kept as text (models.String), the length its
 // base64 decodes to for any other (encodePayload; the replay decodes a
 // response piece the same way). -1 when that data is not base64 of a whole
-// number of bytes, or the piece holds no message.
+// number of bytes, or the piece holds no message. A piece holding more than
+// one message is cut at its first's length, as before: under exact serving
+// the piece cut there is then refused (isRecordedBytes), and with the switch
+// off it is compared with that first message, so switch-off is unchanged.
 func recordedPieceLen(p models.Payload) int {
 	if len(p.Message) == 0 {
 		return -1

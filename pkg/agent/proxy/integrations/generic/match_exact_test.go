@@ -342,6 +342,17 @@ func TestUnderExactServingBytesAreComparedNotTheirEncoding(t *testing.T) {
 	if got := findExactMatch([]*models.Mock{cut}, live, false); got != 0 {
 		t.Errorf("an unknown type cut like the recording, switch off: findExactMatch = %d, want 0, as before", got)
 	}
+	// Nor by the bytes binary data that is not base64 decodes to before it
+	// fails: "PING!" decodes as far as 3c 83 46, and a live 3c 83 46 differs.
+	bad := &models.Mock{Name: "mock-x", Kind: models.GENERIC}
+	bad.Spec.GenericRequests = []models.Payload{typed(binaryPayload, "PING!")}
+	prefix := [][]byte{{0x3c, 0x83, 0x46}}
+	if got := findExactMatch([]*models.Mock{bad}, prefix, true); got != -1 {
+		t.Errorf("binary PING!, live 3c 83 46: findExactMatch = %d under exact serving, want -1", got)
+	}
+	if got := findExactMatch([]*models.Mock{bad}, prefix, false); got != -1 {
+		t.Errorf("binary PING!, live 3c 83 46, switch off: findExactMatch = %d, want -1, as before", got)
+	}
 	// The recorded bytes themselves are served under exact serving, whichever
 	// way they were stored, read whole or in other pieces.
 	for _, req := range [][]byte{frame, b64, []byte("PING"), {0x3c, 0x83, 0x46}} {
@@ -355,5 +366,119 @@ func TestUnderExactServingBytesAreComparedNotTheirEncoding(t *testing.T) {
 		if n := extraCall([][]byte{req}, answered{mocks: []*models.Mock{m}}); n != 1 {
 			t.Errorf("%q: the answered exchange again is an extra call recorded %d times, want once", req, n)
 		}
+	}
+}
+
+// Under exact serving every piece of an exchange is compared as bytes, not
+// only its first: a two-piece exchange whose second piece is the other's
+// encoding (recorded binary 3c 83 46, live the text PING that is its base64,
+// or the reverse) is another request, in both pools, and is no extra call.
+// The recorded bytes are still served. Without exact serving each is served,
+// as before. (Read in one piece, such an exchange is never cut like the
+// recording: a buffer and its base64 differ in length.)
+func TestUnderExactServingEveryPieceIsComparedAsBytes(t *testing.T) {
+	ctx, logger := context.Background(), zap.NewNop()
+	for _, c := range []struct {
+		name string
+		rec  [][]byte
+		live [][]byte
+	}{
+		{"2nd piece recorded binary 3c 83 46, live sends the text PING", [][]byte{[]byte("HELLO"), {0x3c, 0x83, 0x46}}, [][]byte{[]byte("HELLO"), []byte("PING")}},
+		{"2nd piece recorded text PING, live sends 3c 83 46", [][]byte{[]byte("HELLO"), []byte("PING")}, [][]byte{[]byte("HELLO"), {0x3c, 0x83, 0x46}}},
+	} {
+		for _, filtered := range []bool{true, false} {
+			name := fmt.Sprintf("filtered=%v, %s", filtered, c.name)
+			m := &models.Mock{Name: "mock-x", Kind: models.GENERIC}
+			for _, p := range c.rec {
+				m.Spec.GenericRequests = append(m.Spec.GenericRequests, encodePayload(p, models.FromClient))
+			}
+			m.Spec.GenericResponses = []models.Payload{{Message: []models.OutputBinary{{Type: models.String, Data: "OK"}}}}
+			m.TestModeInfo.IsFiltered = filtered
+			on := true
+			var consumed []string
+			db := switchedStore{servedStore{mocks: []*models.Mock{m}, consumed: &consumed}, &on}
+			ok, resp, err := fuzzyMatch(ctx, logger, c.live, db)
+			if err != nil || ok || resp != nil || len(consumed) != 0 {
+				t.Errorf("%s: served under exact serving: ok %v, %v, %v, consumed %v; want a miss", name, ok, resp, err, consumed)
+			}
+			if n := extraCall(c.live, answered{mocks: []*models.Mock{m}}); n != 0 {
+				t.Errorf("%s: an extra call recorded %d times, want none", name, n)
+			}
+			if got := findExactMatch([]*models.Mock{m}, c.live, true); got != -1 {
+				t.Errorf("%s: findExactMatch = %d under exact serving, want -1", name, got)
+			}
+			if got := findExactMatch([]*models.Mock{m}, c.live, false); got != 0 {
+				t.Errorf("%s, switch off: findExactMatch = %d, want 0, as before", name, got)
+			}
+			consumed = nil
+			if ok, _, err := fuzzyMatch(ctx, logger, c.rec, db); err != nil || !ok || len(consumed) != 1 {
+				t.Errorf("%s: the recorded bytes under exact serving: ok %v, %v, consumed %v; want served", name, ok, err, consumed)
+			}
+		}
+	}
+}
+
+// Under exact serving a recorded request piece that holds more than one
+// message, or none, differs from every live piece: encodePayload writes
+// exactly one, and comparing only the first would answer a live piece that
+// sent part of what was recorded. Before, a recorded piece holding "PI" then
+// "NG" (a hand-edited or imported mock) answered a live "PI", and missed a
+// live "PING". Without exact serving it is compared as before, by its first
+// message only.
+func TestUnderExactServingARecordedPieceOfSeveralMessagesDiffers(t *testing.T) {
+	ctx, logger := context.Background(), zap.NewNop()
+	text := func(data ...string) models.Payload {
+		p := models.Payload{Message: []models.OutputBinary{}}
+		for _, d := range data {
+			p.Message = append(p.Message, models.OutputBinary{Type: models.String, Data: d})
+		}
+		return p
+	}
+	for _, live := range []string{"PI", "PING", "NG"} {
+		for _, filtered := range []bool{true, false} {
+			name := fmt.Sprintf("filtered=%v, recorded [PI, NG], live %q", filtered, live)
+			m := &models.Mock{Name: "mock-x", Kind: models.GENERIC}
+			m.Spec.GenericRequests = []models.Payload{text("PI", "NG")}
+			m.Spec.GenericResponses = []models.Payload{{Message: []models.OutputBinary{{Type: models.String, Data: "OK"}}}}
+			m.TestModeInfo.IsFiltered = filtered
+			on := true
+			var consumed []string
+			db := switchedStore{servedStore{mocks: []*models.Mock{m}, consumed: &consumed}, &on}
+			reqs := [][]byte{[]byte(live)}
+			ok, resp, err := fuzzyMatch(ctx, logger, reqs, db)
+			if err != nil || ok || resp != nil || len(consumed) != 0 {
+				t.Errorf("%s: served under exact serving: ok %v, %v, %v, consumed %v; want a miss", name, ok, resp, err, consumed)
+			}
+			if n := extraCall(reqs, answered{mocks: []*models.Mock{m}}); n != 0 {
+				t.Errorf("%s: an extra call recorded %d times, want none", name, n)
+			}
+			// Switch off: the first message alone is compared, as before.
+			want := -1
+			if live == "PI" {
+				want = 0
+			}
+			if got := findExactMatch([]*models.Mock{m}, reqs, false); got != want {
+				t.Errorf("%s, switch off: findExactMatch = %d, want %d, as before", name, got, want)
+			}
+		}
+	}
+	// Nor through the pieces the recording holds: a two-piece recording whose
+	// second piece holds two messages is cut at its first's length, and the
+	// live piece cut there still differs.
+	m := &models.Mock{Name: "mock-x", Kind: models.GENERIC}
+	m.Spec.GenericRequests = []models.Payload{text("HELLO"), text("PI", "NG")}
+	for _, reqs := range [][][]byte{{[]byte("HELLO"), []byte("PI")}, {[]byte("HELLOPI")}} {
+		if got := findExactMatch([]*models.Mock{m}, reqs, true); got != -1 {
+			t.Errorf("recorded [HELLO, [PI, NG]], live %q: findExactMatch = %d under exact serving, want -1", reqs, got)
+		}
+		if got := findExactMatch([]*models.Mock{m}, reqs, false); got != 0 {
+			t.Errorf("recorded [HELLO, [PI, NG]], live %q, switch off: findExactMatch = %d, want 0, as before", reqs, got)
+		}
+	}
+	// A recorded piece that holds no message differs under exact serving,
+	// and the compare does not index into it.
+	m.Spec.GenericRequests = []models.Payload{text()}
+	if got := findExactMatch([]*models.Mock{m}, [][]byte{[]byte("PI")}, true); got != -1 {
+		t.Errorf("a recorded piece with no message: findExactMatch = %d under exact serving, want -1", got)
 	}
 }
