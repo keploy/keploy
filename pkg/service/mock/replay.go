@@ -20,6 +20,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/coverage/report"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/pkg/service/record"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -512,8 +513,9 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 
 	// 9. Under --on-miss record, append any calls served live-from-upstream to
 	//    the set so the next replay serves them from the mock (VCR new_episodes).
+	var notAppended error
 	if policy.RecordsOnMiss() {
-		m.persistCaptured(context.WithoutCancel(ctx), name)
+		notAppended = m.persistCaptured(context.WithoutCancel(ctx), name)
 	}
 
 	// 10. Summarise what was served and missed.
@@ -589,6 +591,19 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	requestsOnly := requestsShort != "" && failedBy != FailedByKeploy
 	if requestsOnly {
 		failedBy = FailedByKeploy
+	}
+	// Calls captured on miss that --on-miss record did not add to the set
+	// (refused, as for a set with two mock files, or not written): keploy did
+	// not complete the run, whatever the test command did (its exit is kept,
+	// and a passing one becomes 1), so a CI job that runs it to grow the set
+	// does not go green while the set does not grow. A keploy failure already
+	// decided keeps its name; this one is said at ERROR all the same.
+	appendOnly := notAppended != nil && failedBy != FailedByKeploy
+	if appendOnly {
+		failedBy = FailedByKeploy
+	}
+	if notAppended != nil && utils.ErrCode == 0 {
+		utils.ErrCode = utils.ExitKeployError
 	}
 	// A process the agent could not track -- the kernel refused it a place in
 	// its PID map -- made calls the agent never saw: not mocked, not
@@ -785,6 +800,9 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	if failedBy == FailedByKeploy && requestsOnly {
 		isolated, isolationNote = false, "keploy did not complete the run: "+requestsShort
 		keployFailure, keployErr = errors.New(isolationNote), requestsShort
+	} else if failedBy == FailedByKeploy && appendOnly {
+		isolated, isolationNote = false, "keploy did not complete the run: --on-miss record did not add every call it captured to the mock set"
+		keployFailure, keployErr = fmt.Errorf("keploy did not complete the run: %w", notAppended), notAppended.Error()
 	} else if failedBy == FailedByKeploy {
 		isolated, isolationNote = false, "keploy did not complete the run: "+string(appErr.AppErrorType)
 		keployFailure = errors.New(isolationNote)
@@ -926,10 +944,15 @@ func (m *mockService) enforceMinCoverage(cov *report.Summary, note string) bool 
 
 // persistCaptured appends any calls the proxy captured on miss (served live from
 // the real dependency under --on-miss record) to the set, then republishes it.
-func (m *mockService) persistCaptured(ctx context.Context, name string) {
+// It returns why calls it was handed were not all added to the set (each is
+// also said at ERROR where it was found), and nil when every one was: the run
+// then fails as keploy's, as keploy record fails a recording whose mocks were
+// not written. It used to only log it, and a CI job that ran --on-miss record
+// to grow the set went green while the set did not grow.
+func (m *mockService) persistCaptured(ctx context.Context, name string) error {
 	drainer, ok := m.instrumentation.(MissCapturer)
 	if !ok {
-		return
+		return nil
 	}
 	// An epilogue read: no deadline under the proven switch (epilogueRead),
 	// should --on-miss record ever run under it (it is refused there today).
@@ -943,11 +966,16 @@ func (m *mockService) persistCaptured(ctx context.Context, name string) {
 			return err
 		})
 	if err != nil {
-		m.logger.Debug("failed to drain captured-on-miss mocks", zap.Error(err))
-		return
+		// What the agent captured on miss is not in keploy's hands, so not
+		// in the set: a run that grows the set did not. A Ctrl+C that cut
+		// the read short ends the run unjudged before its verdict (Replay).
+		utils.LogError(m.logger, err, "the calls captured on miss could not be read from keploy's agent, so none was added to the mock set",
+			zap.String("mock-set", name),
+			zap.String("next_step", "check the agent logs for why, then run again with --on-miss record to capture them"))
+		return fmt.Errorf("the calls captured on miss could not be read from keploy's agent, so none was added to the mock set %s: %w", name, err)
 	}
 	if len(captured) == 0 {
-		return
+		return nil
 	}
 	// Seed the name counter to the set's highest existing mock-N so appended
 	// mocks get fresh names (InsertMock always renames to mock-<counter+1>);
@@ -963,10 +991,11 @@ func (m *mockService) persistCaptured(ctx context.Context, name string) {
 		utils.LogError(m.logger, err, "the calls captured on miss were not added to the mock set: it could not be read to number them, and numbering from the start would reuse the names of mocks already in it",
 			zap.String("mock-set", name), zap.Int("captured", len(captured)),
 			zap.String("next_step", "fix the mock set so it loads (the error says why), then run again with --on-miss record to capture these calls"))
-		return
+		return fmt.Errorf("the %d call(s) captured on miss were not added to the mock set %s: it could not be read to number them: %w", len(captured), name, err)
 	}
 	m.mockDB.SetCounterID(highest)
-	appended := 0
+	appended, refused := 0, 0
+	var refusedErr error
 	for _, mk := range captured {
 		if mk == nil {
 			continue
@@ -975,18 +1004,39 @@ func (m *mockService) persistCaptured(ctx context.Context, name string) {
 			utils.LogError(m.logger, err, "failed to add a call captured on miss to the mock set; it is not saved",
 				zap.String("mock-set", name),
 				zap.String("next_step", "run again with --on-miss record to capture it"))
+			if refused++; refusedErr == nil {
+				refusedErr = err
+			}
 			continue
 		}
 		appended++
 	}
-	if appended > 0 {
-		m.logger.Info("appended new dependency calls to the mock set (--on-miss record)",
-			zap.Int("new", appended), zap.String("mock-set", name),
-			zap.String("next_step", "review the added mocks and commit them; the next replay serves them without the real dependency"))
-		if err := m.store.Push(ctx, name); err != nil {
-			m.logger.Warn("failed to publish the refreshed mock set", zap.Error(err))
-		}
+	var notAdded error
+	if refused > 0 {
+		notAdded = fmt.Errorf("%d of the %d call(s) captured on miss were not added to the mock set %s: %w", refused, refused+appended, name, refusedErr)
 	}
+	if appended == 0 {
+		return notAdded
+	}
+	// The mock store may write in the background (the gob format): what it
+	// was handed is in the set only once it is closed. It used to be left
+	// open, and keploy exited with the captured calls still in the writer's
+	// queue, after saying they were appended.
+	if err := record.CloseMockStore(m.logger, m.mockDB, mockDrainNotice,
+		"Still writing the calls captured on miss to the mock set",
+		"press Ctrl+C again to stop now: the ones not written yet are then not added to it", nil); err != nil {
+		utils.LogError(m.logger, err, "the calls captured on miss were not all added to the mock set",
+			zap.String("mock-set", name), zap.Int("captured", appended),
+			zap.String("next_step", "check the disk the mock set is on (space, permissions), then run again with --on-miss record to capture them"))
+		return errors.Join(notAdded, fmt.Errorf("the %d call(s) captured on miss that the mock set %s was handed were not all written to it: %w", appended, name, err))
+	}
+	m.logger.Info("appended new dependency calls to the mock set (--on-miss record)",
+		zap.Int("new", appended), zap.String("mock-set", name),
+		zap.String("next_step", "review the added mocks and commit them; the next replay serves them without the real dependency"))
+	if err := m.store.Push(ctx, name); err != nil {
+		m.logger.Warn("failed to publish the refreshed mock set", zap.Error(err))
+	}
+	return notAdded
 }
 
 // statefulMocksDisabled is test.disableStatefulMocks, ignored under the proven
