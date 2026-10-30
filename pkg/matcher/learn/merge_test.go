@@ -197,17 +197,23 @@ func TestAPlaceIsAVariableOrAClockReadNeverBoth(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	read := models.ClockOffset{Res: time.Second, Layout: "epoch-s"}
 	ev := []models.ClockRead{{At: time.Unix(1793336932, 0), Res: time.Second}}
-	bind := models.MockVariables{"run-lastUsedAt": {Recorded: "1793336932", Bind: "body.data.lastUsedAt", Clock: ev}}
-	both := map[string]models.ClockOffset{"body.data.lastUsedAt": read, "body.data.updatedAt": read}
+	// Fresh maps per row: MergeLearned edits the mock it merges into, so a
+	// row that puts these on disk must not change what a later row sees.
+	bind := func() models.MockVariables {
+		return models.MockVariables{"run-lastUsedAt": {Recorded: "1793336932", Bind: "body.data.lastUsedAt", Clock: ev}}
+	}
+	both := func() map[string]models.ClockOffset {
+		return map[string]models.ClockOffset{"body.data.lastUsedAt": read, "body.data.updatedAt": read}
+	}
 	for name, row := range map[string]struct {
 		disk  models.MockSpec
 		st    models.MockState
 		binds models.MockVariables
 	}{
-		"both in one record":        {st: models.MockState{Clocks: both}, binds: bind},
-		"the clock read on disk":    {disk: models.MockSpec{Clocks: both}, binds: bind},
-		"the variable on disk":      {disk: models.MockSpec{Variables: bind}, st: models.MockState{Clocks: both}},
-		"a use, the clock in state": {st: models.MockState{Clocks: both, Variables: models.MockVariables{"order": {Recorded: "1793336932", Use: []string{"body.data.lastUsedAt"}}}}},
+		"both in one record":        {st: models.MockState{Clocks: both()}, binds: bind()},
+		"the clock read on disk":    {disk: models.MockSpec{Clocks: both()}, binds: bind()},
+		"the variable on disk":      {disk: models.MockSpec{Variables: bind()}, st: models.MockState{Clocks: both()}},
+		"a use, the clock in state": {st: models.MockState{Clocks: both(), Variables: models.MockVariables{"order": {Recorded: "1793336932", Use: []string{"body.data.lastUsedAt"}}}}},
 	} {
 		m := &models.Mock{Name: "mock-195", Spec: row.disk}
 		for _, a := range MergeLearned(m, row.st, row.binds) {
