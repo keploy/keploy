@@ -575,6 +575,26 @@ func TestReplaceTokens(t *testing.T) {
 	}
 }
 
+// A place that uses the run's variable (Seen.Name) is no place its value
+// came from, whatever its call: the run's place that binds it is, and a
+// later call uses that variable. With only such a place earlier, the value
+// came from none, so nothing binds a second variable at a use.
+func TestAPlaceThatUsesTheRunsVariableIsNoPlaceItCameFrom(t *testing.T) {
+	t0 := time.Unix(1_792_000_000, 0)
+	seen := func(path, name string) []Seen {
+		return []Seen{{Side: Request, Leaf: Leaf{Path: path, Type: String, Value: "rec-id-aaaaaa"}, Live: "live-id-bbbbbb", Place: path, Name: name}}
+	}
+	use := Earlier{Mock: "mock-5", At: t0.Add(time.Minute), Own: true, Seen: seen("url.path[2]", "run-body.id")}
+	if p, ok := appeared(clockedDrifts(), "rec-id-aaaaaa", "live-id-bbbbbb", t0.Add(2*time.Minute), []Earlier{use}, nil); ok {
+		t.Fatalf("the value comes from %+v, a place that uses the run's variable", p)
+	}
+	bind := Earlier{Mock: "mock-0", At: t0, Run: true, Seen: seen("body.id", "")}
+	p, ok := appeared(clockedDrifts(), "rec-id-aaaaaa", "live-id-bbbbbb", t0.Add(2*time.Minute), []Earlier{bind, use}, nil)
+	if !ok || !p.Run || p.Mock != "mock-0" {
+		t.Fatalf("the value comes from %+v (%v), want the run's place that binds it over the test's own use", p, ok)
+	}
+}
+
 // Among the places that hold a value, one that sent it whole comes before
 // one that sent it inside a longer value, whoever's call it was; within one
 // kind, the earliest.

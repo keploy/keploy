@@ -545,6 +545,31 @@ func TestATestThatNeedsAnotherRunsOnlyAfterItBegan(t *testing.T) {
 	require.Empty(t, b.Action, "a record never skips")
 }
 
+// A new session forgets which tests began in the last: a test that needs one
+// only the last session ran is set aside again until it begins in this one.
+func TestANewSessionForgetsWhichTestsBegan(t *testing.T) {
+	a, _ := wireAgent(t, models.MODE_TEST)
+	ctx := context.Background()
+	why := "keploy: set aside: o::TestUse uses a value o::TestMake sends (run-body.id, 24 characters)"
+	session := func() {
+		t.Helper()
+		claimSelf(t, a)
+		require.NoError(t, a.SetScopeSkips(ctx, nil, map[string][]models.ScopeNeed{"o::TestUse": {{Test: "o::TestMake", Reason: why}}}))
+	}
+	session()
+	b, serr := a.ProvenBegin(ctx, begin("TestMake"))
+	require.Nil(t, serr)
+	require.Empty(t, b.Action)
+	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestMake", Outcome: "passed"})
+	require.Nil(t, serr)
+
+	require.NoError(t, a.resetSession(ctx))
+	session()
+	b, serr = a.ProvenBegin(ctx, begin("TestUse"))
+	require.Nil(t, serr)
+	require.Equal(t, models.ScopeBeginResp{V: 1, Status: "ok", Action: models.ScopeActionSkip, Reason: why}, b, "TestMake began in the last session, not this one")
+}
+
 func TestARecordNeverSkips(t *testing.T) {
 	a, _ := wireAgent(t, models.MODE_RECORD)
 	ctx := context.Background()

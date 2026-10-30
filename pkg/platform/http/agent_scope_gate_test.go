@@ -125,3 +125,29 @@ func TestAgentClient_PushScopeSkips(t *testing.T) {
 		}
 	}
 }
+
+// A restarted agent is handed the gate again, its needs with it: one handed
+// the skips alone would run a test selected without the test it needs, and
+// that test would fail on the value it misses.
+func TestAgentClient_PushScopeSkipsAgainToARestartedAgent(t *testing.T) {
+	var bodies []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(b))
+		_, _ = w.Write([]byte(`{"v":1,"status":"ok","skips":1,"needs":1}`))
+	}))
+	defer srv.Close()
+	a := &AgentClient{logger: zap.NewNop(), client: http.Client{}, conf: &config.Config{Agent: config.Agent{AgentURI: srv.URL}}}
+	s := storeSession(t, srv.URL, true)
+	needs := map[string][]models.ScopeNeed{"o::TestUse": {{Test: "o::TestMake", Reason: "r"}}}
+	if err := a.PushScopeSkips(context.Background(), map[string]string{"o::TestGated": "listed"}, needs); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.reapply(context.Background(), zap.NewNop()); err != nil {
+		t.Fatal(err)
+	}
+	want := `{"run":null,"skip":{"o::TestGated":"listed"},"needs":{"o::TestUse":[{"test":"o::TestMake","reason":"r"}]}}`
+	if len(bodies) != 2 || bodies[0] != want || bodies[1] != want {
+		t.Fatalf("pushed %v, want %s to the agent and again to the restarted one", bodies, want)
+	}
+}
