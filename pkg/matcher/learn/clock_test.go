@@ -656,3 +656,39 @@ func TestAClockWordWindowIsCutWhereNoInstantRunsAcross(t *testing.T) {
 		t.Fatalf("%d of 3000 text pairs were read in part; the row reads too few", parted)
 	}
 }
+
+// A read of each run's clock in the window is written as recorded at its
+// own place, and only there: the same words elsewhere in the text stay as
+// they were, as does an instant outside either span, and a UUID's time (its
+// other words are no read of the clock).
+func TestWindowInPlaceWritesAReadAsRecordedAtItsOwnPlaceOnly(t *testing.T) {
+	recAt := time.Date(2026, 10, 30, 15, 21, 46, 310000000, time.UTC)
+	runAt := time.Date(2026, 10, 31, 9, 2, 3, 120000000, time.UTC)
+	w := &Window{Rec: Span{From: recAt, To: recAt.Add(2 * time.Millisecond)}, F: Span{From: runAt, To: runAt.Add(4 * time.Millisecond)}}
+	recDate, runDate := recAt.Format(http.TimeFormat), runAt.Format(http.TimeFormat)
+	// v7 is a UUIDv7 made a millisecond after at, its random part rest.
+	v7 := func(at time.Time, rest string) string {
+		ms := at.Add(time.Millisecond).UnixMilli()
+		return fmt.Sprintf("%08x-%04x-%s", ms>>16, ms&0xffff, rest)
+	}
+	for _, c := range []struct{ name, rec, live, want string }{
+		{"the stamp alone", `{"Date":"` + recDate + `"}`, `{"Date":"` + runDate + `"}`, `{"Date":"` + recDate + `"}`},
+		{"the stamp, and its second lost elsewhere", `{"Date":"` + recDate + `","shard":46}`, `{"Date":"` + runDate + `","shard":0}`,
+			`{"Date":"` + recDate + `","shard":0}`},
+		{"two reads, an ISO one before a Date", `{"at":"` + recAt.Add(time.Millisecond).Format(time.RFC3339Nano) + `","Date":"` + recDate + `"}`,
+			`{"at":"` + runAt.Add(time.Millisecond).Format(time.RFC3339Nano) + `","Date":"` + runDate + `"}`,
+			`{"at":"` + recAt.Add(time.Millisecond).Format(time.RFC3339Nano) + `","Date":"` + recDate + `"}`},
+		{"an instant an hour past either span", `{"exp":"` + recAt.Add(time.Hour).Format(time.RFC3339) + `"}`,
+			`{"exp":"` + runAt.Add(time.Hour).Format(time.RFC3339) + `"}`, `{"exp":"` + runAt.Add(time.Hour).Format(time.RFC3339) + `"}`},
+		{"a UUID made in each span", `{"id":"` + v7(recAt, "7cc1-9f0e-31c1e1d0a6b2") + `"}`, `{"id":"` + v7(runAt, "7d2a-8a4b-5c6d7e8f9a0b") + `"}`,
+			`{"id":"` + v7(runAt, "7d2a-8a4b-5c6d7e8f9a0b") + `"}`},
+	} {
+		if got := w.inPlace(c.rec, c.live); got != c.want {
+			t.Errorf("%s: %s; want %s", c.name, got, c.want)
+		}
+	}
+	var none *Window
+	if got := none.inPlace(`{"Date":"`+recDate+`"}`, `{"Date":"`+runDate+`"}`); got != `{"Date":"`+runDate+`"}` {
+		t.Errorf("with no window: %s; want live as it was", got)
+	}
+}

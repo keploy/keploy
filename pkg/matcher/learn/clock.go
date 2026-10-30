@@ -577,6 +577,62 @@ func (w *Window) holds(lay clockLayout, recorded, live string) bool {
 	return w.Rec.holds(rt, rres) && w.F.holds(lt, lres)
 }
 
+// inPlace is live with each instant that is a read of each run's clock in w
+// written as recorded, at its own place: the k-th instant of a layout in
+// live, read against the k-th in recorded as clockAt pairs them, where both
+// are reads in w (holds). Such a read is then no change at its place, and
+// its words still count wherever else the value holds them: a number lost
+// from a response's body that equals the minute of the response's own Date
+// stamp is still a word of what changed. A UUID's time is left as it is
+// (its other words are no read of the clock), as is a time of day (no span
+// holds one): their words are read by the lead alone. live itself where w
+// is nil or holds none of its instants.
+func (w *Window) inPlace(recorded, live string) string {
+	if w == nil || recorded == live {
+		return live
+	}
+	type swap struct {
+		from, to int
+		with     string
+	}
+	var swaps []swap
+	takenR, takenL := make([]bool, len(recorded)), make([]bool, len(live))
+	for _, lay := range clockLayouts {
+		rm, lm := clockMatches(lay, recorded, 0, len(recorded), takenR), clockMatches(lay, live, 0, len(live), takenL)
+		for j := 0; j < len(rm) && j < len(lm); j++ {
+			rs, ls := recorded[rm[j][0]:rm[j][1]], live[lm[j][0]:lm[j][1]]
+			if rs == ls {
+				continue
+			}
+			// Taken as clockAt takes them: an instant that changed is read
+			// once, in the first layout that finds it.
+			for i := rm[j][0]; i < rm[j][1]; i++ {
+				takenR[i] = true
+			}
+			for i := lm[j][0]; i < lm[j][1]; i++ {
+				takenL[i] = true
+			}
+			if lay.timeWord != nil || !w.holds(lay, rs, ls) {
+				continue
+			}
+			swaps = append(swaps, swap{lm[j][0], lm[j][1], rs})
+		}
+	}
+	if len(swaps) == 0 {
+		return live
+	}
+	sort.Slice(swaps, func(a, b int) bool { return swaps[a].from < swaps[b].from })
+	var b strings.Builder
+	at := 0
+	for _, s := range swaps {
+		b.WriteString(live[at:s.from])
+		b.WriteString(s.with)
+		at = s.to
+	}
+	b.WriteString(live[at:])
+	return b.String()
+}
+
 // Holds reports whether rec and live, instants a value carried in the
 // recording and in this run, read at resolution res, are reads of their
 // runs' clocks within w (nil: none is).
