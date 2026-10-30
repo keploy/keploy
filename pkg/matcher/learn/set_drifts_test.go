@@ -96,6 +96,29 @@ func TestADriftBoundedByNoCallIsTheSameInEveryZone(t *testing.T) {
 	}
 }
 
+// What the set counts of its drifts is what they take (no-OOM: the budget
+// bounds the heap): the heap 5000 kept drifts hold is under twice the bytes
+// the set counts for them, and at least half of it.
+func TestTheSetCountsWhatItsDriftsHold(t *testing.T) {
+	s := newSetDerived()
+	ds := make([]*valueDrift, 0, 5000)
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	for i := 0; i < cap(ds); i++ {
+		n := strconv.Itoa(i)
+		ds = append(ds, s.driftOf("order "+n+" at 2026-10-30T10:00:00Z", "order "+n+"-9 at 2026-10-30T10:01:01Z", true))
+	}
+	runtime.GC()
+	runtime.ReadMemStats(&after)
+	held, counted := int64(after.HeapAlloc)-int64(before.HeapAlloc), s.drifts.used
+	t.Logf("5000 drifts hold %d bytes; the set counts %d", held, counted)
+	if held > 2*counted || held < counted/2 {
+		t.Fatalf("5000 drifts hold %d bytes of heap, the set counts %d for them: want within twice", held, counted)
+	}
+	runtime.KeepAlive(ds)
+}
+
 // The set's tests share the drifts of its places: a later test reads the
 // drift an earlier test built, not one of its own, and so does the next set
 // for none of them (Tracker.NewSet lets them go), nor a cache no tracker made,
