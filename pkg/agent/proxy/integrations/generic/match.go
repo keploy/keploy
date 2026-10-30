@@ -342,6 +342,8 @@ func fuzzyCheck(encoded, reqBuf []byte) float64 {
 // exchange whose token piece changed would be served the recorded answer.
 // keploy has no way to redact a live piece as the recording was, so under
 // exact serving such a recording fails closed: the same token misses too.
+// Under exact serving the pieces are compared as bytes (isRecordedBytes),
+// never as the text the recording stores them in.
 func findExactMatch(tcsMocks []*models.Mock, reqBuffs [][]byte, exact bool) int {
 	req := newSentRequest(reqBuffs)
 	for idx, mock := range tcsMocks {
@@ -349,7 +351,7 @@ func findExactMatch(tcsMocks []*models.Mock, reqBuffs [][]byte, exact bool) int 
 		if !exact {
 			nc = util.NewNoiseChecker(mock.Noise)
 		}
-		if req.isRecorded(mock.Spec.GenericRequests, nc) {
+		if req.isRecorded(mock.Spec.GenericRequests, nc, exact) {
 			return idx
 		}
 	}
@@ -359,20 +361,28 @@ func findExactMatch(tcsMocks []*models.Mock, reqBuffs [][]byte, exact bool) int 
 // isRecorded reports whether the request is recorded's bytes, in its own
 // pieces or cut where recorded's end (cutLikeRecorded), a noisy
 // (obfuscated) recorded piece not compared where nc names it (nil: every
-// piece compared, the request byte for byte the recording).
-func (r *sentRequest) isRecorded(recorded []models.Payload, nc *util.NoiseChecker) bool {
-	if len(recorded) == len(r.pieces) && sameAsRecorded(recorded, r.pieces, nc) {
+// piece compared). With exact, each piece is compared as bytes
+// (sameAsRecorded).
+func (r *sentRequest) isRecorded(recorded []models.Payload, nc *util.NoiseChecker, exact bool) bool {
+	if len(recorded) == len(r.pieces) && sameAsRecorded(recorded, r.pieces, nc, exact) {
 		return true
 	}
 	pieces := r.cutLikeRecorded(recorded)
-	return pieces != nil && sameAsRecorded(recorded, pieces, nc)
+	return pieces != nil && sameAsRecorded(recorded, pieces, nc, exact)
 }
 
 // sameAsRecorded reports whether each piece is the recorded piece at its
 // index. With nc set (no exact serving), a noisy (obfuscated) recorded piece
-// is not compared.
-func sameAsRecorded(recorded []models.Payload, pieces [][]byte, nc *util.NoiseChecker) bool {
+// is not compared. Under exact serving each piece must be the recorded
+// piece's bytes (isRecordedBytes).
+func sameAsRecorded(recorded []models.Payload, pieces [][]byte, nc *util.NoiseChecker, exact bool) bool {
 	for i, piece := range pieces {
+		if exact {
+			if !isRecordedBytes(recorded[i].Message[0], piece) {
+				return false
+			}
+			continue
+		}
 		mockData := recorded[i].Message[0].Data
 		if nc != nil && nc.IsNoisy(mockData) {
 			continue
@@ -388,6 +398,25 @@ func sameAsRecorded(recorded []models.Payload, pieces [][]byte, nc *util.NoiseCh
 		}
 	}
 	return true
+}
+
+// isRecordedBytes reports whether piece is the bytes msg recorded: its Data
+// for a piece the recorder kept as text (models.String), what its Data
+// decodes from base64 to for one it kept as binary (encodePayload). The text
+// is not compared with the piece's own encoding: a live binary piece whose
+// base64 is a recorded text piece, or a live text piece that is a recorded
+// binary piece's base64, is other bytes (a client that stops base64-wrapping
+// what it sent, or starts). A piece of any other type, or binary data that
+// is not base64, holds no bytes keploy can compare, so it differs.
+func isRecordedBytes(msg models.OutputBinary, piece []byte) bool {
+	switch msg.Type {
+	case models.String:
+		return msg.Data == string(piece)
+	case binaryPayload:
+		b, err := util.DecodeBase64(msg.Data)
+		return err == nil && bytes.Equal(b, piece)
+	}
+	return false
 }
 
 // sentRequest is what a connection sent for one exchange, in the pieces its

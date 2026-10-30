@@ -26,7 +26,7 @@ import (
 // under the proven switch (integrations.TellServed).
 func stateServed(ctx context.Context, m *models.Mock, sent [][]byte) {
 	integrations.TellServed(ctx, m, func() (func() (*models.Mock, error), string, bool) {
-		if newSentRequest(sent).isRecorded(m.Spec.GenericRequests, nil) {
+		if newSentRequest(sent).isRecorded(m.Spec.GenericRequests, nil, false) {
 			return nil, "", true
 		}
 		view, key := servedView(m, sent)

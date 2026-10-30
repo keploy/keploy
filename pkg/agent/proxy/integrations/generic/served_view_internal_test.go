@@ -86,7 +86,7 @@ func TestOnlyARequestEveryPieceOfWhichIsRecordedIsAsRecorded(t *testing.T) {
 		{"other bytes", [][]byte{[]byte("GET k "), []byte("id=2\r\n")}, false},
 		{"longer", [][]byte{[]byte("GET k id=1\r\n"), []byte("x")}, false},
 	} {
-		if got := newSentRequest(tc.sent).isRecorded(rec.Spec.GenericRequests, nil); got != tc.want {
+		if got := newSentRequest(tc.sent).isRecorded(rec.Spec.GenericRequests, nil, false); got != tc.want {
 			t.Errorf("%s: as recorded %v; want %v", tc.name, got, tc.want)
 		}
 	}
