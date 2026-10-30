@@ -86,6 +86,38 @@ func newFlowGuard(cases []*models.TestCase, owned map[string][]models.MockEntry,
 type drift struct {
 	place          string
 	recorded, live string
+	// w is the span the value's clock reads can have been made in, as
+	// recorded and this run (nil: none known, read by the lead alone).
+	w *learn.Window
+}
+
+// ranLive is the response a test got this run (resp: *models.HTTPResp or
+// *models.GrpcResp, as the guard reads live) with the span it ran in: from
+// when keploy sent its request (from) to when it read the test's misses,
+// after the answer came (to). The guard reads the response's clock reads in
+// it (responseWindow): the application stamps its answer with its clock (an
+// HTTP Date header) in each run, and this run's stamp is no word a recording
+// made earlier gave the test.
+type ranLive struct {
+	resp     any
+	from, to time.Time
+}
+
+// responseWindow is the span tc's response's clock reads can have been made
+// in, in each run: from its request to its answer, as recorded (tc's
+// stamps) and this run (ran); nil where a stamp is missing or out of order.
+func responseWindow(tc *models.TestCase, ran ranLive) *learn.Window {
+	var from, to time.Time
+	switch ran.resp.(type) {
+	case *models.HTTPResp:
+		from, to = tc.HTTPReq.Timestamp, tc.HTTPResp.Timestamp
+	case *models.GrpcResp:
+		from, to = tc.GrpcReq.Timestamp, tc.GrpcResp.Timestamp
+	}
+	if from.IsZero() || to.Before(from) || ran.from.IsZero() || ran.to.Before(ran.from) {
+		return nil
+	}
+	return &learn.Window{Rec: learn.Span{From: from, To: to}, F: learn.Span{From: ran.from, To: ran.to}}
 }
 
 // drifts are the values of test that changed this run: its response (live,
@@ -98,13 +130,17 @@ func (g *flowGuard) drifts(test string, live any, own []models.UnmatchedCall) []
 	}
 	var out []drift
 	if tc := g.cases[test]; tc != nil {
-		if rec, now, ok := responseTexts(tc, live); ok && rec != now {
-			out = append(out, drift{"this test's response", rec, now})
+		resp, w := live, (*learn.Window)(nil)
+		if ran, ok := live.(ranLive); ok {
+			resp, w = ran.resp, responseWindow(tc, ran)
+		}
+		if rec, now, ok := responseTexts(tc, resp); ok && rec != now {
+			out = append(out, drift{"this test's response", rec, now, w})
 		}
 	}
 	for _, c := range own {
 		if c.ClosestMockReq != "" && c.ReceivedReq != "" && c.ClosestMockReq != c.ReceivedReq {
-			out = append(out, drift{"the request this test sent that " + c.ClosestMock + " recorded", c.ClosestMockReq, c.ReceivedReq})
+			out = append(out, drift{"the request this test sent that " + c.ClosestMock + " recorded", c.ClosestMockReq, c.ReceivedReq, nil})
 		}
 	}
 	return out
@@ -161,7 +197,7 @@ func (g *flowGuard) reaches(ctx context.Context, c models.UnmatchedCall, test, w
 	}
 	dc := g.cache(test)
 	for _, d := range drifts {
-		w, err := dc.WordFrom(d.recorded, d.live, whole, given...)
+		w, err := dc.WordFromIn(d.recorded, d.live, d.w, whole, given...)
 		// WordFrom fails only on an answer the agent parked on disk
 		// (HasSpilledResponse). The agent sets that on mocks it decodes
 		// for itself, never on the set's stored recordings that whole is
@@ -193,7 +229,9 @@ func responseTexts(tc *models.TestCase, live any) (recorded, now string, ok bool
 		if x == nil {
 			return "", "", false
 		}
-		return jsonText(tc.GrpcResp), jsonText(*x), true
+		rec, got := tc.GrpcResp, *x
+		rec.Timestamp, got.Timestamp = time.Time{}, time.Time{}
+		return jsonText(rec), jsonText(got), true
 	}
 	return "", "", false
 }
