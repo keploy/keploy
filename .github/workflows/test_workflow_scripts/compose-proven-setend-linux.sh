@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# e2e, under the proven switch, of keploy's own stop of a docker compose app
-# (P101-c). keploy runs its agent as a service of the app's stack, the app in
+# e2e, under the proven switch, of keploy's own stop of a docker compose app.
+# keploy runs its agent as a service of the app's stack, the app in
 # the agent's network and pid namespaces. Under the switch compose runs
 # without --abort-on-container-exit: keploy stops the app's container itself
 # at each test set's end (SIGINT, its exit within the grace, then a kill it
@@ -25,14 +25,14 @@
 #   2. A changed shutdown publish (SHUTDOWN_MSG=changed): both sets fail, and
 #      each report lists the publish among the set's background calls, made
 #      after the set's last test was read: answered by no mock, it is the
-#      application's background work (item (b)), charged to no test and not
+#      application's background work, charged to no test and not
 #      among the unclaimed calls; the set fails because the recorded
 #      publish, a call of its worker scope, was made differently and keploy
 #      refused it: the reason names the refused call and the recording it
 #      was closest to, and does not say the publish was never made. Read with
 #      the app running, the publish came after the read and passed. (Before,
-#      the reason said the publish was never made; before item (b) the
-#      changed call itself failed each set, as an unclaimed call.)
+#      the reason said the publish was never made; before keploy took such
+#      calls for background work, the changed call itself failed each set, as an unclaimed call.)
 #   3. The app exits on its own after its first answer (HALT_AFTER=1): the
 #      first set is APP_HALTED, as compose's abort made it, though keploy ran
 #      compose without it.
@@ -40,14 +40,14 @@
 #      container and no network of the project behind.
 #   5. keploy is given the app by its service's key (--container-name app),
 #      the service setting no container_name, so compose names its container
-#      <project>-app-1 (P101-b-n). keploy record's stop and each set's end
+#      <project>-app-1. keploy record's stop and each set's end
 #      stop are of the container compose made for the service: the
 #      recording holds the shutdown publish, the set as recorded passes, and
 #      a changed publish fails it, listed as in 2. Read by the name, the stop found no
 #      container and took that for an app it had stopped: the recording
 #      lacked the publish, and the replay of a changed one passed, exit 0.
-#   6. The app's service has restart: always and stop_signal: SIGTERM
-#      (P101-c-A2 SF-3(b)). Its first act is a startup call (POST /boot, a
+#   6. The app's service has restart: always and stop_signal: SIGTERM.
+#      Its first act is a startup call (POST /boot, a
 #      fast boot, as a Go app's), the two recordings' differ (BOOT_MSG a,
 #      then b), and the second recording is big (one 16 MB answer), so
 #      staging it takes keploy a while. keploy interrupts the app with its
@@ -57,15 +57,15 @@
 #      passes, and the second fails: its recorded startup call (b), a call
 #      of its worker scope, was never answered. The startup call keploy's
 #      start made once the set was staged (a), answered by no mock before the
-#      set's first test, is the application's background work (item (b)):
+#      set's first test, is the application's background work:
 #      the report lists it among the set's background calls, made before its
 #      first test, not among its unclaimed calls. Its closest recording is
 #      b, so the set's reason names it as b's call made differently, which
 #      keploy refused, and the set's end does not wait for b: the refusal
 #      is the event. (Before, the end waited out its worker scope, 600 of
 #      keploy's wake-ups, about ten minutes, then said b was never made.)
-#      (Before item (b) that call
-#      itself failed the set. With item (b), until keploy took each set's
+#      (Before keploy took such calls for
+#      background work, that call itself failed the set. Then, until keploy took each set's
 #      start of a kept stack's app for that set's boot, a recorded startup
 #      call never made was not required of a compose set, and the second set
 #      passed, keploy test exit 0.) Interrupted with SIGINT, the daemon
@@ -351,8 +351,8 @@ for s in test-set-0 test-set-1; do
 done
 
 # shutdown_named STEP SET: SET's report lists the publish among its background
-# calls, made after its last test was read, and not among its unclaimed calls
-# (item (b)), and its reason names the publish keploy refused, a call of its
+# calls, made after its last test was read, and not among its unclaimed calls,
+# and its reason names the publish keploy refused, a call of its
 # worker scope made differently, with the recording it was closest to, and
 # does not say it was never made.
 shutdown_named() {
