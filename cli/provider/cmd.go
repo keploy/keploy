@@ -551,6 +551,7 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().Int("enable-sampling", c.cfg.Record.EnableSampling, "Enable sampling of testcases")
 		cmd.Flags().Lookup("enable-sampling").NoOptDefVal = "5"
 		cmd.Flags().Uint64("memory-limit", c.cfg.Record.MemoryLimit, "Memory limit for the keploy-agent container in MB")
+		cmd.Flags().Bool("detect-pii", c.cfg.Record.DetectPII, "Detect potential PII in captured request/response data during recording")
 		cmd.Flags().String("metadata", c.cfg.Record.Metadata, "Metadata to be stored in config.yaml as key-value pairs (e.g., \"key1=value1,key2=value2\")")
 		cmd.Flags().String("tls-private-key-path", c.cfg.Record.TLSPrivateKeyPath, "Path to the private key for TLS connection")
 		// Upstream (destination-side) TLS verification. Off by default:
@@ -704,6 +705,7 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		"keployContainer":           "keploy-container",
 		"keployNetwork":             "keploy-network",
 		"recordTimer":               "record-timer",
+		"detectPII":                 "detect-pii",
 		"healthUrl":                 "health-url",
 		"healthPath":                "health-path",
 		"healthScheme":              "health-scheme",
@@ -1917,6 +1919,14 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 					c.cfg.Record.MemoryLimit = 0
 				}
 			}
+
+			detectPII, err := cmd.Flags().GetBool("detect-pii")
+			if err != nil {
+				errMsg := "failed to get the detect-pii flag"
+				utils.LogError(c.logger, err, errMsg)
+				return errors.New(errMsg)
+			}
+			c.cfg.Record.DetectPII = detectPII
 
 			enableSampling, err := cmd.Flags().GetInt("enable-sampling")
 			if err != nil {
