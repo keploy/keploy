@@ -62,6 +62,7 @@ func TestAChanceWordOfAnotherTestsAnswerIsLearnedAsVarying(t *testing.T) {
 		{"the recorded id's group, served as recorded", okSrc, asRecorded, chance, other, ""},
 		{"the id's group F saw, served as recorded", okSrc, asRecorded, other, chance, ""},
 		{"served changed, its view giving the word at the same field", okSrc, viewOf(bodyMoved), chance, other, ""},
+		{"the id's group F saw, served changed, its view giving the word at the same field", okSrc, viewOf(bodyMoved), other, chance, ""},
 		{"two groups of the id in one answer, served as recorded", src("bb7ed9ee-1f2d-48d1-982f-b54b2b73982f", before, before.Add(time.Second)), asRecorded, chance, other, ""},
 		{"served changed with no view", okSrc, noView, chance, other, "record's full round did not give the application that word there before the call"},
 		{"served changed, its view giving the word at another field too (a header the recording's lacks it at)", okSrc, viewOf(elsewhere), chance, other, "record's full round did not give the application that word there before the call"},
@@ -179,10 +180,10 @@ func TestAChanceWordStaysRefusedWhereTheValueLackingItHoldsAnotherWordOfThatPayl
 	if !strings.HasPrefix(recStamp.Spec.HTTPResp.Header["Date"], "Thu, ") || !strings.HasPrefix(viewStamp.Spec.HTTPResp.Header["Date"], "Fri, ") {
 		t.Fatalf("the stamps %q and %q are not a Thursday's and a Friday's", recStamp.Spec.HTTPResp.Header["Date"], viewStamp.Spec.HTTPResp.Header["Date"])
 	}
-	if x := RawOf(recStamp, true); len(x.stamps) != 1 {
+	if x := RawOf(recStamp, true); len(x.payload().stamps) != 1 {
 		t.Fatalf("the recording's Date header is not its one stamp")
 	}
-	if x := RawOf(viewStamp, true); len(x.stamps) != 1 {
+	if x := RawOf(viewStamp, true); len(x.payload().stamps) != 1 {
 		t.Fatalf("the view's Date header is not its one stamp")
 	}
 	asRecorded := func(dc *DriftCache, m *models.Mock) Raw { return dc.RawOf(m, true).ServedAs(3).ServedAsRecorded() }

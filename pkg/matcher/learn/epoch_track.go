@@ -129,7 +129,7 @@ func (e EpochOffset) Holds(live string, s Span) bool {
 // holds is Holds of a live read already read: v at resolution res.
 func (e EpochOffset) holds(v time.Time, res time.Duration, s Span) bool {
 	if res != e.Res || s.From.IsZero() {
-		return false // a span with no end meets no offset (EpochTrack)
+		return false // a span with no start meets no offset (EpochTrack)
 	}
 	return v.Sub(s.To.Truncate(res)) <= e.Hi && e.Lo <= v.Sub(s.From.Truncate(res))
 }

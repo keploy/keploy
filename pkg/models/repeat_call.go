@@ -216,10 +216,11 @@ func (n *RepeatNote) Explain(recordCmd string) string {
 // the application asked again here. Neither replaces the other: the
 // recording made elsewhere is the reason the call missed, and the repeat a
 // possible cause, which Explain judges by its gaps and claims only when
-// they support it. keploy record's judging treats it as any call made
-// elsewhere: it moves the recording to the test set's worker scope, and its
-// confirming round still compares the test's response. The repeat is named
-// for information only; it changes neither.
+// they support it. In keploy record's full round, judging treats it as any
+// call made elsewhere: it moves the recording to the test set's worker
+// scope, and its confirming round still compares the test's response; in any
+// other replay the miss stands. The repeat is named for information only; it
+// changes neither.
 func (n *RepeatNote) ExplainMiss(notOwned bool, closest, recordedIn, recordCmd string) string {
 	if n == nil {
 		return ""
@@ -231,7 +232,7 @@ func (n *RepeatNote) ExplainMiss(notOwned bool, closest, recordedIn, recordCmd s
 	if recordedIn != "" {
 		where = "a recording keploy made in test " + recordedIn + "'s window"
 	}
-	return fmt.Sprintf("This request is %s, %s, where this replay did not make it: exact serving answers a test only with its own recordings. %s keploy record's judging treats this miss as any call made elsewhere: it moves %s to the test set's worker scope (mappings.yaml worker:), and its confirming round still compares this test's response. The repeat is named here for information only.", closest, where, n.Explain(recordCmd), closest)
+	return fmt.Sprintf("This request is %s, %s, where this replay did not make it: exact serving answers a test only with its own recordings. %s In keploy record's full round, judging treats this miss as any call made elsewhere: it moves %s to the test set's worker scope (mappings.yaml worker:), and its confirming round still compares this test's response; in any other replay the miss stands. The repeat is named here for information only.", closest, where, n.Explain(recordCmd), closest)
 }
 
 // recordedLastPhrase names, in a sentence, the recording the record gap runs

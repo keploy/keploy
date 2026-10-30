@@ -1312,7 +1312,7 @@ func TestAnInstantIsRefusedAtLearnWhereKeployCannotTellTheAppsClock(t *testing.T
 		}}
 		for name, leaf := range forms {
 			classify := func(dc *DriftCache, l time.Time) Learned {
-				raw := []Raw{dc.RawOf(receive, true)}
+				raw := []Raw{dc.RawOf(receive, true).ServedAsRecorded()}
 				shape := func(at time.Time) Shape { return Shape{Leaves: map[string]Leaf{p: leaf(at)}} }
 				return ClassifyIn(dc, []string{p}, shape(l), shape(read), call, nil, raw, nil, nil)[0]
 			}
