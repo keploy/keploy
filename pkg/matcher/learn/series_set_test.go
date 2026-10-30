@@ -527,6 +527,14 @@ func TestCallShapeOfIsTheCallsShapeValuesAside(t *testing.T) {
 			t.Errorf("%s: shape %q, want one of its own (the call's is %q)", what, got, of)
 		}
 	}
+	// The kind is part of the shape: one reading registered for two kinds
+	// gives each kind's calls a shape of their own, so a call of one kind is
+	// never taken for a copy of the other kind's series.
+	const otherKind models.Kind = "SeriesRowOtherKind"
+	defer RegisterSeriesShape(otherKind, read)()
+	if got := CallShapeOf(rowMock("c", otherKind, time.Time{}, time.Time{}, map[string]string{"op": "claim", "at": "1793336500", "v": "a"})); got == of || got == "" {
+		t.Errorf("another kind: shape %q, want one of its own (the call's is %q)", got, of)
+	}
 	if strings.Contains(of, "1793336500") || strings.Contains(of, "claim") {
 		t.Errorf("the shape %q holds a value of the call", of)
 	}
