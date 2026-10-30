@@ -12,7 +12,7 @@ import (
 // record is empty at replay, and the next test that reads the cache makes the
 // set-aside test's call in its own window, where no recording of its own
 // answers it. Under exact serving such a call is served the set-aside test's
-// recording (founder D1: serve, don't require; S12: a data-plane call is
+// recording (served, never required; a data-plane call is
 // answered by the recording it is, wherever the replay's timing puts it): by
 // exact match only, unchecked and never required of the test it lands in, at
 // most once in the staging, and named on that test's evidence ("<mock>
@@ -35,7 +35,7 @@ import (
 // window of the next test that uses it, beside that test's own copy of the
 // read. Each set-aside recording answers once in the staging, so the calls of
 // one shape across the set never exceed what the set recorded; past every
-// exact copy left the call stays an extra call (keploy #4745's F20: never a
+// exact copy left the call stays an extra call (never a
 // recording served again, nor one the call is not). A parser that does not
 // ask serves none, as before.
 
