@@ -665,8 +665,14 @@ func (m *mockService) Record(ctx context.Context) error {
 		}
 		keep = true
 		if err := m.saveMocks(storeCtx, staging, name, mockCount); err != nil {
+			// A recording that was not saved fails the run, as it does when
+			// the run ended on its own. The command does not fail a run the
+			// user stopped for its error (an interrupt is not a failure), so
+			// the exit code says it: before, it was 0.
+			keep = false
 			utils.LogError(m.logger, err, "recording stopped, but saving the captured mocks failed", zap.Int("mocks", mockCount), zap.String("mock-set", name))
-			return nil
+			utils.SetExitCodeOnce(utils.ExitKeployError)
+			return fmt.Errorf("the recording was not saved: %w", err)
 		}
 		m.logger.Info("recording stopped; captured mocks saved", zap.Int("mocks", mockCount), zap.String("mock-set", name))
 		sayUnconfirmed()
