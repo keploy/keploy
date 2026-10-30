@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"errors"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -658,34 +659,47 @@ func TestATestsOwnSeriesIsHandedOnlyInItsOwnersWindow(t *testing.T) {
 	}
 }
 
-// A test's own series is handed the path of the id its marks name
-// (MarkedSeries.OwnID), read back from every recording's mark; when one mark
-// names none (a line someone edited) or two name two paths, it is handed
-// none, and no id of it is given back.
-func TestATestsOwnSeriesIsHandedTheIDPathItsMarksName(t *testing.T) {
-	named := func(path string, names ...string) models.BackgroundMarks {
+// A test's own series is handed every path of the id its marks name
+// (MarkedSeries.OwnIDs), read back from every recording's mark (a URL and a
+// body path both); when one mark names none (a line someone edited), or two
+// name two sets of paths (one path more or less, or another path), it is
+// handed none, and no id of it is given back.
+func TestATestsOwnSeriesIsHandedTheIDPathsItsMarksName(t *testing.T) {
+	named := func(paths []string, names ...string) models.BackgroundMarks {
 		m := models.BackgroundMarks{}
 		for _, n := range names {
-			m.Add("T1", n, models.BackgroundOwnSeriesWhy(path, "claim, every 2s, in T1's window alone"))
+			m.Add("T1", n, models.BackgroundOwnSeriesWhy(paths, "claim, every 2s, in T1's window alone"))
 		}
 		return m
 	}
+	both := []string{"url.path.2", "body.job"}
 	for _, c := range []struct {
 		name  string
 		marks models.BackgroundMarks
-		want  string
+		want  []string
 	}{
-		{"every mark names it", named("body.job", allClaims...), "body.job"},
-		{"no mark names one", ownMarks(nil, "T1", allClaims...), ""},
+		{"every mark names it", named([]string{"body.job"}, allClaims...), []string{"body.job"}},
+		{"every mark names both places", named(both, allClaims...), []string{"body.job", "url.path.2"}},
+		{"no mark names one", ownMarks(nil, "T1", allClaims...), nil},
 		{"one mark names none", func() models.BackgroundMarks {
-			m := named("body.job", allClaims[:5]...)
+			m := named([]string{"body.job"}, allClaims[:5]...)
 			return ownMarks(m, "T1", "claim-6")
-		}(), ""},
+		}(), nil},
 		{"two marks name two paths", func() models.BackgroundMarks {
-			m := named("body.job", allClaims[:5]...)
-			m.Add("T1", "claim-6", models.BackgroundOwnSeriesWhy("body.other", "claim"))
+			m := named([]string{"body.job"}, allClaims[:5]...)
+			m.Add("T1", "claim-6", models.BackgroundOwnSeriesWhy([]string{"body.other"}, "claim"))
 			return m
-		}(), ""},
+		}(), nil},
+		{"one mark names a place fewer", func() models.BackgroundMarks {
+			m := named(both, allClaims[:5]...)
+			m.Add("T1", "claim-6", models.BackgroundOwnSeriesWhy([]string{"body.job"}, "claim"))
+			return m
+		}(), nil},
+		{"the first mark names a place more", func() models.BackgroundMarks {
+			m := named([]string{"body.job"}, allClaims[1:]...)
+			m.Add("T1", allClaims[0], models.BackgroundOwnSeriesWhy(both, "claim"))
+			return m
+		}(), nil},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			mm := timerSet(t)
@@ -695,8 +709,8 @@ func TestATestsOwnSeriesIsHandedTheIDPathItsMarksName(t *testing.T) {
 			if err != nil || len(got) != 1 || got[0].Owner != "T1" {
 				t.Fatalf("in T1's window MarkedSeries = %v, %v; want T1's own one", got, err)
 			}
-			if got[0].OwnID != c.want {
-				t.Fatalf("OwnID = %q; want %q", got[0].OwnID, c.want)
+			if !slices.Equal(got[0].OwnIDs, c.want) {
+				t.Fatalf("OwnIDs = %q; want %q", got[0].OwnIDs, c.want)
 			}
 		})
 	}

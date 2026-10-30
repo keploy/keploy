@@ -46,8 +46,10 @@ func namedPart(answers []UnmatchedCall, answer, what string) string {
 // or in the gap before it), and of which write kinds, in the order they were
 // first answered; then its background calls answered again
 // (AnswerBackgroundAgain), then its calls of a background series answered
-// from the series (AnswerBackgroundSeries), each naming the recordings that
-// answered (namedPart); "" when answers holds none of these. keploy test prints it as each
+// from the series (AnswerBackgroundSeries), then its calls of its own series
+// answered at any count (AnswerOwnSeries: their clock reads and id checked,
+// their count not), each naming the recordings that answered (namedPart); ""
+// when answers holds none of these. keploy test prints it as each
 // set ends, and keploy report under the test's status, from the test's
 // TestResult.Answers.
 //
@@ -101,6 +103,7 @@ func UncheckedLine(test string, answers []UnmatchedCall) string {
 	for _, named := range []struct{ answer, what string }{
 		{AnswerBackgroundAgain, "%d background %s answered again, unchecked (%s)"},
 		{AnswerBackgroundSeries, "%d background series %s answered on the run's clock, unchecked (%s)"},
+		{AnswerOwnSeries, "%d %s of its own series answered at any count, on the run's clock and its own id (%s)"},
 	} {
 		if part := namedPart(answers, named.answer, named.what); part != "" {
 			parts = append(parts, part)

@@ -3,6 +3,7 @@ package models
 import (
 	"encoding/json"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -307,19 +308,35 @@ func TestMappedTestCaseWithNoMockRoundTrips(t *testing.T) {
 	check("json", fromJSON)
 }
 
-// An own series' mark names its id's path so the agent reads it back, a path
-// of any spelling round-trips, and a line that names none (no own series'
-// mark, a mark someone edited, an empty path) names no path, so the agent
-// gives no id back.
-func TestBackgroundOwnSeriesIDReadsBackThePathItsMarkNames(t *testing.T) {
-	for _, p := range []string{"body.q._id", `url.path[2]`, `body."odd; key"`, "body.a b"} {
-		why := BackgroundOwnSeriesWhy(p, "judging's words")
+// An own series' mark names every path of its id so the agent reads them
+// back (sorted, each once), a path of any spelling round-trips, and a line
+// that names none, or names one it cannot read (no own series' mark, a mark
+// someone edited, an empty path), names no path, so the agent gives no id
+// back.
+func TestBackgroundOwnSeriesIDsReadsBackEveryPathItsMarkNames(t *testing.T) {
+	for _, c := range []struct {
+		paths, want []string
+	}{
+		{[]string{"body.q._id"}, []string{"body.q._id"}},
+		{[]string{`url.path[2]`}, []string{`url.path[2]`}},
+		{[]string{`body."odd; key"`}, []string{`body."odd; key"`}},
+		{[]string{"body.a b"}, []string{"body.a b"}},
+		{[]string{"url.path.2", "body.job", "url.path.2"}, []string{"body.job", "url.path.2"}},
+		{[]string{`body."a", "b"`, "body.c"}, []string{`body."a", "b"`, "body.c"}},
+	} {
+		why := BackgroundOwnSeriesWhy(c.paths, "judging's words")
 		if !IsBackgroundOwnSeries(why) || IsBackgroundSeries(why) {
 			t.Fatalf("%q is not an own series' mark alone", why)
 		}
-		if got, ok := BackgroundOwnSeriesID(why); !ok || got != p {
-			t.Errorf("BackgroundOwnSeriesID(%q) = %q, %v; want %q, true", why, got, ok, p)
+		if got, ok := BackgroundOwnSeriesIDs(why); !ok || !slices.Equal(got, c.want) {
+			t.Errorf("BackgroundOwnSeriesIDs(%q) = %q, %v; want %q, true", why, got, ok, c.want)
 		}
+	}
+	if got, want := BackgroundOwnSeriesWhy([]string{"url.path.2", "body.job", "url.path.2"}, "w"), BackgroundOwnSeriesPrefix+`the id at "body.job", "url.path.2"; w`; got != want {
+		t.Errorf("BackgroundOwnSeriesWhy wrote %q; want %q: its paths sorted, each once, so a mark's line is the same each round", got, want)
+	}
+	if got, ok := BackgroundOwnSeriesIDs(BackgroundOwnSeriesPrefix + `the id at "url.path.2", "body.job"; words`); !ok || !slices.Equal(got, []string{"body.job", "url.path.2"}) {
+		t.Errorf("a mark naming its paths unsorted reads back %q, %v; want them sorted", got, ok)
 	}
 	for _, why := range []string{
 		"",
@@ -329,9 +346,15 @@ func TestBackgroundOwnSeriesIDReadsBackThePathItsMarkNames(t *testing.T) {
 		BackgroundOwnSeriesPrefix + `the id at "body.q._id" words`,
 		BackgroundOwnSeriesPrefix + `the id at ""; words`,
 		BackgroundOwnSeriesPrefix + `the id at "body.q._id`,
+		BackgroundOwnSeriesPrefix + `the id at "body.q._id", ; words`,
+		BackgroundOwnSeriesPrefix + `the id at "body.q._id", ""; words`,
+		BackgroundOwnSeriesPrefix + `the id at "body.q._id" "url.path.2"; words`,
+		BackgroundOwnSeriesPrefix + `the id at "body.q._id",; words`,
+		BackgroundOwnSeriesPrefix + `the id at ; words`,
+		BackgroundOwnSeriesPrefix + `the id at "body.q._id""url.path.2"; words`,
 	} {
-		if got, ok := BackgroundOwnSeriesID(why); ok {
-			t.Errorf("BackgroundOwnSeriesID(%q) = %q, true; want no path", why, got)
+		if got, ok := BackgroundOwnSeriesIDs(why); ok {
+			t.Errorf("BackgroundOwnSeriesIDs(%q) = %q, true; want no path", why, got)
 		}
 	}
 }

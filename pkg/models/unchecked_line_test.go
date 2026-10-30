@@ -33,6 +33,12 @@ func TestUncheckedLineCountsWritesAnsweredByKind(t *testing.T) {
 			"post-url-1: 1 background series call answered on the run's clock, unchecked (mock-12)"},
 		{[]UnmatchedCall{{Answer: AnswerBackgroundSeries, ClosestMock: "mock-12"}, {Answer: AnswerBackgroundAgain, ClosestMock: "mock-7"}, {Answer: AnswerBackgroundSeries, ClosestMock: "mock-12"}, {Answer: AnswerBackgroundSeries, ClosestMock: "mock-9"}},
 			"post-url-1: 1 background call answered again, unchecked (mock-7); 3 background series calls answered on the run's clock, unchecked (mock-12 x2, mock-9)"},
+		// Calls of the test's own series are named apart from a background
+		// series, last, with what was checked of them: never "unchecked".
+		{[]UnmatchedCall{{Answer: AnswerOwnSeries, ClosestMock: "beat-6", Kind: MissInTest}},
+			"post-url-1: 1 call of its own series answered at any count, on the run's clock and its own id (beat-6)"},
+		{[]UnmatchedCall{{Answer: AnswerOwnSeries, ClosestMock: "beat-6"}, {Answer: AnswerBackgroundSeries, ClosestMock: "mock-12"}, {Answer: AnswerOwnSeries, ClosestMock: "beat-6"}, {Answer: AnswerOwnSeries, ClosestMock: "beat-5"}},
+			"post-url-1: 1 background series call answered on the run's clock, unchecked (mock-12); 3 calls of its own series answered at any count, on the run's clock and its own id (beat-6 x2, beat-5)"},
 	} {
 		if got := UncheckedLine("post-url-1", tc.answers); got != tc.want {
 			t.Errorf("UncheckedLine(%+v) =\n %q\nwant\n %q", tc.answers, got, tc.want)

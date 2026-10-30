@@ -26,14 +26,15 @@ type seriesAsked struct {
 }
 
 // registerSeries makes answer the HTTP SeriesAnswerer for t, recording what
-// each call hands it, and returns those asks.
+// each call hands it, and returns those asks. It serves from a series marked
+// set-wide (no owner).
 func registerSeries(t *testing.T, answer func(live *models.Mock) (*models.Mock, *integrations.SeriesMiss)) *[]seriesAsked {
 	t.Helper()
 	var asked []seriesAsked
-	t.Cleanup(integrations.RegisterSeriesAnswerer(models.HTTP, func(_ context.Context, _ integrations.MockMemDb, live *models.Mock, arrived time.Time, known learn.Known) (*models.Mock, *integrations.SeriesMiss, error) {
+	t.Cleanup(integrations.RegisterSeriesAnswerer(models.HTTP, func(_ context.Context, _ integrations.MockMemDb, live *models.Mock, arrived time.Time, known learn.Known) (*models.Mock, string, *integrations.SeriesMiss, error) {
 		asked = append(asked, seriesAsked{live: live, arrived: arrived, known: known})
 		served, miss := answer(live)
-		return served, miss, nil
+		return served, "", miss, nil
 	}))
 	return &asked
 }
@@ -108,6 +109,35 @@ func TestAMarkedSeriesCallIsAnsweredOrMissedAsTheBuildRegisters(t *testing.T) {
 	}
 }
 
+// A beat of a test's own series (a job the test started, on the id its
+// window made) answered from the series is reported as the owner's own
+// series' answer naming the recording, never as the set's background, and
+// counts against no test; the same answer from a series marked set-wide
+// stays the background series' answer.
+func TestAnOwnSeriesCallIsReportedAsItsOwnersOwnSeries(t *testing.T) {
+	const addr, host, path = "127.0.0.1:8099", "localhost:8099", "/jobs/job-1/heartbeat"
+	raw := "POST " + path + " HTTP/1.1\r\nHost: " + host + "\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}"
+	beat := onHost("beat-6", path, host)
+	beat.Spec.HTTPReq.Method = "POST"
+	beat.Spec.HTTPResp = &models.HTTPResp{StatusCode: 200, Body: "alive", Header: map[string]string{"Content-Length": "5"}}
+	store := againDb{gateDb: gateDb{earlierDb: earlierDb{mockMemDb: &mockMemDb{}}}}
+	t.Setenv(provenswitch.Env, "1")
+	for _, c := range []struct {
+		owner, want string
+	}{
+		{"post-job", models.AnswerOwnSeries},
+		{"", models.AnswerBackgroundSeries},
+	} {
+		t.Cleanup(integrations.RegisterSeriesAnswerer(models.HTTP, func(context.Context, integrations.MockMemDb, *models.Mock, time.Time, learn.Known) (*models.Mock, string, *integrations.SeriesMiss, error) {
+			return beat, c.owner, nil, nil
+		}))
+		status, body, r := answerOf(t, store, addr, raw)
+		if status != 200 || body != "alive" || r.Answer != c.want || r.ClosestMock != "beat-6" || r.Background || r.CountsAgainstTest() {
+			t.Fatalf("a marked series' beat (owner %q) got %d %q, reported %+v; want beat-6's answer, reported as %q naming it, counting against no test", c.owner, status, body, r, c.want)
+		}
+	}
+}
+
 // With no SeriesAnswerer registered for HTTP (keploy itself registers none)
 // a call goes on exactly as before: one call more than the test recorded.
 func TestACallWithNoSeriesAnswererMissesAsBefore(t *testing.T) {
@@ -117,8 +147,8 @@ func TestACallWithNoSeriesAnswererMissesAsBefore(t *testing.T) {
 	poll.Spec.HTTPResp = &models.HTTPResp{StatusCode: 200, Body: "none-claimed", Header: map[string]string{"Content-Length": "12"}}
 	store := againDb{gateDb: gateDb{earlierDb: earlierDb{mockMemDb: &mockMemDb{}}, consumed: []*models.Mock{poll}}}
 	t.Setenv(provenswitch.Env, "1")
-	if served, miss, err := integrations.AnswerSeries(context.Background(), store, seriesCall(&req{method: "GET"}), time.Now(), nil); served != nil || miss != nil || err != nil {
-		t.Fatalf("AnswerSeries with none registered = %v, %v, %v; want all nil", served, miss, err)
+	if served, owner, miss, err := integrations.AnswerSeries(context.Background(), store, seriesCall(&req{method: "GET"}), time.Now(), nil); served != nil || owner != "" || miss != nil || err != nil {
+		t.Fatalf("AnswerSeries with none registered = %v, %q, %v, %v; want all nil and no owner", served, owner, miss, err)
 	}
 	status, _, r := answerOf(t, store, addr, raw)
 	if status != 502 || r.Background || r.MissKind != models.MissExtraCall {
@@ -227,8 +257,8 @@ func TestASeriesAnswerersErrorIsTheCallsError(t *testing.T) {
 	store := againDb{gateDb: gateDb{earlierDb: earlierDb{mockMemDb: &mockMemDb{}}}}
 	t.Setenv(provenswitch.Env, "1")
 	failed := errors.New("the store's read of the set's series failed")
-	t.Cleanup(integrations.RegisterSeriesAnswerer(models.HTTP, func(context.Context, integrations.MockMemDb, *models.Mock, time.Time, learn.Known) (*models.Mock, *integrations.SeriesMiss, error) {
-		return nil, nil, failed
+	t.Cleanup(integrations.RegisterSeriesAnswerer(models.HTTP, func(context.Context, integrations.MockMemDb, *models.Mock, time.Time, learn.Known) (*models.Mock, string, *integrations.SeriesMiss, error) {
+		return nil, "", nil, failed
 	}))
 
 	var reported error
@@ -303,9 +333,9 @@ func TestASeriesAnswererIsHandedTheStoreHeldToTheCall(t *testing.T) {
 	store := holdingDb{againDb: base, held: &heldMarkDb{againDb: base}}
 	t.Setenv(provenswitch.Env, "1")
 	var handed []integrations.MockMemDb
-	t.Cleanup(integrations.RegisterSeriesAnswerer(models.HTTP, func(_ context.Context, db integrations.MockMemDb, _ *models.Mock, _ time.Time, _ learn.Known) (*models.Mock, *integrations.SeriesMiss, error) {
+	t.Cleanup(integrations.RegisterSeriesAnswerer(models.HTTP, func(_ context.Context, db integrations.MockMemDb, _ *models.Mock, _ time.Time, _ learn.Known) (*models.Mock, string, *integrations.SeriesMiss, error) {
 		handed = append(handed, db)
-		return poll, nil, nil
+		return poll, "", nil, nil
 	}))
 	if status, _, r := answerOf(t, store, addr, raw); status != 200 || r.Answer != models.AnswerBackgroundSeries {
 		t.Fatalf("a marked series' call got %d, reported %+v; want the series' answer", status, r)

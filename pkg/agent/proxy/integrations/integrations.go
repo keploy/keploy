@@ -522,11 +522,12 @@ type MarkedSeriesReader interface {
 // call of it that no recording answers is the owner's own miss, never the
 // set's background (SeriesMiss.Owner). "" for a series marked set-wide.
 //
-// OwnID is, for a test's own series, the path of the id every call of it
+// OwnIDs is, for a test's own series, every path of the id each call of it
 // carries that its owner's window first held, as the mark of every recording
-// of it names it (models.BackgroundOwnSeriesID): OwnCall gives a call of it
-// its recorded id back there alone. "" when a mark names none, or two of
-// them name two paths: no id of it is given back.
+// of it names them (models.BackgroundOwnSeriesIDs; a beat with the job's id
+// in its URL and in its body names both): OwnCall gives a call of it its
+// recorded id back at those places alone. nil when a mark names none, or two
+// of them name two sets of paths: no id of it is given back.
 type MarkedSeries struct {
 	Series     learn.Series
 	Recordings []*models.Mock
@@ -534,7 +535,7 @@ type MarkedSeries struct {
 	Once       func(name string) bool
 	Restaged   bool
 	Owner      string
-	OwnID      string
+	OwnIDs     []string
 }
 
 // OwnedBy is s without the own series of a test other than test
@@ -561,70 +562,85 @@ func OwnedBy(s []MarkedSeries, test string) []MarkedSeries {
 
 // OwnCall is live, a call asked in the window of m's owner (m a test's own
 // series: Owner), with the id that test's window bound this run given back
-// its recorded value at the place m's mark names (OwnID), as m's series
+// its recorded value at each place m's mark names (OwnIDs), as m's series
 // compares a call (learn.Series.HasShape, Holds): a job the test started
 // beats on the id its window made this run, never on the recorded one. When
-// every recording of m holds one value at OwnID (learn.Series.Values) and a
-// variable bound in force (inForce: the store's variable table,
-// variables.Table.Snapshot) was recorded as that value, live must hold that
-// binding's live value there; asked holds the recorded value there, and moved
-// is that recorded value when the run bound it to another value: the caller
-// answers with a recording that does not carry it, or with none. Only that
-// leaf is given back: a value at any other place of live is compared as
-// recorded, even one that equals a binding's live value, so a coincidence (a
-// short or common value) never turns another call into a call of m. An id
-// the run bound no variable of replays only as it was recorded. asked.Body is
-// live's.
+// every recording of m holds one value at every named place, that one value
+// at them all (learn.Series.Values), and a variable bound in force (inForce:
+// the store's variable table, variables.Table.Snapshot) was recorded as that
+// value, live must hold that binding's live value at each of them; asked
+// holds the recorded value there, and moved is that recorded value when the
+// run bound it to another value: the caller answers with a recording that
+// does not carry it, or with none. Only those leaves are given back: a value
+// at any other place of live is compared as recorded, even one that equals a
+// binding's live value, so a coincidence (a short or common value) never
+// turns another call into a call of m. An id the run bound no variable of
+// replays only as it was recorded, and so does a call of m when its named
+// places held two recorded values, or live lacks one of them (its shape is
+// then no call of m's). asked.Body is live's.
 //
-// off is why live is a call of m's on another id: at OwnID it holds another
-// value than the binding's (the recorded id while the run bound another, or
-// a third value), or two bindings in force of the recorded id hold two values
-// this run (keploy cannot tell which one the job is). asked then holds the
-// recorded value at OwnID all the same, so the caller can tell the call is of
-// m's series (HasShape) and charge it to the owner as its own miss, saying
-// off; no recording of m answers it. live, nil and "" for a series marked
-// set-wide (Owner ""), and for one whose mark names no id (OwnID ""): it reads
-// no variable.
+// off is why live is a call of m's on another id: at a named place it holds
+// another value than the binding's (the recorded id while the run bound
+// another, or a third value), or two bindings in force of the recorded id
+// hold two values this run (keploy cannot tell which one the job is). asked
+// then holds the recorded value at every named place all the same, so the
+// caller can tell the call is of m's series (HasShape) and charge it to the
+// owner as its own miss, saying off; no recording of m answers it. live, nil
+// and "" for a series marked set-wide (Owner ""), and for one whose mark names
+// no id (OwnIDs nil): it reads no variable.
 func (m MarkedSeries) OwnCall(live learn.Shape, inForce []variables.Binding) (asked learn.Shape, moved []string, off string) {
-	if m.Owner == "" || m.OwnID == "" || len(inForce) == 0 {
+	if m.Owner == "" || len(m.OwnIDs) == 0 || len(inForce) == 0 {
 		return live, nil, ""
 	}
-	p := m.OwnID
-	recorded, ok := m.Series.Values[p]
-	l, held := live.Leaves[p]
-	if !ok || !held || recorded.Value == "" {
-		return live, nil, ""
+	rec := ""
+	for _, p := range m.OwnIDs {
+		recorded, ok := m.Series.Values[p]
+		_, held := live.Leaves[p]
+		if p == "" || !ok || !held || recorded.Value == "" || (rec != "" && recorded.Value != rec) {
+			return live, nil, ""
+		}
+		rec = recorded.Value
 	}
-	rec := recorded.Value
 	var values []string // the live values in force of the variables recorded as rec
 	for _, b := range inForce {
 		if b.Recorded == rec && !slices.Contains(values, b.Value) {
 			values = append(values, b.Value)
 		}
 	}
-	switch {
-	case len(values) == 0:
+	if len(values) == 0 {
 		return live, nil, ""
-	case len(values) > 1:
-		off = fmt.Sprintf("two variables recorded as %s are bound to two values this run (%s), so keploy cannot tell which one %s's job is", rec, strings.Join(values, ", "), m.Owner)
-	case l.Value == values[0]:
-		if l.Value != rec {
-			moved = []string{rec}
-		}
-	case l.Value == rec:
-		off = fmt.Sprintf("it carries the recorded id %s at %s, but %s's window bound that id to %s this run", rec, p, m.Owner, values[0])
-	default:
-		off = fmt.Sprintf("it carries %s at %s, where %s's window bound the id recorded as %s to %s this run", l.Value, p, m.Owner, rec, values[0])
 	}
-	if l.Value == rec {
+	if len(values) > 1 {
+		off = fmt.Sprintf("two variables recorded as %s are bound to two values this run (%s), so keploy cannot tell which one %s's job is", rec, strings.Join(values, ", "), m.Owner)
+	}
+	given := false
+	for _, p := range m.OwnIDs {
+		l := live.Leaves[p]
+		switch {
+		case off != "":
+		case l.Value == values[0]:
+		case l.Value == rec:
+			off = fmt.Sprintf("it carries the recorded id %s at %s, but %s's window bound that id to %s this run", rec, p, m.Owner, values[0])
+		default:
+			off = fmt.Sprintf("it carries %s at %s, where %s's window bound the id recorded as %s to %s this run", l.Value, p, m.Owner, rec, values[0])
+		}
+		given = given || l.Value != rec
+	}
+	if off == "" && values[0] != rec {
+		moved = []string{rec}
+	}
+	if !given {
 		return live, moved, off
 	}
 	leaves := make(map[string]learn.Leaf, len(live.Leaves))
 	for k, v := range live.Leaves {
 		leaves[k] = v
 	}
-	l.Value = rec
-	leaves[p] = l
+	for _, p := range m.OwnIDs {
+		l := leaves[p]
+		l.Value = rec
+		leaves[p] = l
+	}
 	return learn.Shape{Key: live.Key, Fixed: live.Fixed, Leaves: leaves, Body: live.Body}, moved, off
 }
 
@@ -647,13 +663,17 @@ func MarkedSeriesOf(ctx context.Context, db MockMemDb, kind models.Kind, known l
 // (Kind set; no answer), arrived when keploy had it whole, and known
 // keploy.yml's noise of its kind as the parser's learn step reads it. served
 // is the recording of a marked series that answers it, consuming none of a
-// test's; miss, why the marked series it is a call of answers it with none,
-// which makes it the set's background miss, never the open test's
-// (SeriesMiss.Mark); both nil when it is a call of no marked series, and it
-// goes on as before. A build that judges series registers one per kind,
-// with that kind's series reading (learn.RegisterSeriesShape): keploy
+// test's, and owner, when that series is a test's own (MarkedSeries.Owner),
+// that test, whose window the call came in ("" for a series marked
+// set-wide): the parser then reports the call as its own series' answer
+// (models.AnswerOwnSeries), not the background's. miss is why the marked
+// series it is a call of answers it with none, which makes it the set's
+// background miss, never the open test's, or its owner's own miss
+// (SeriesMiss.Mark); all nil and "" when it is a call of no marked series,
+// and it goes on as before. A build that judges series registers one per
+// kind, with that kind's series reading (learn.RegisterSeriesShape): keploy
 // enterprise. keploy itself registers none.
-type SeriesAnswerer func(ctx context.Context, db MockMemDb, live *models.Mock, arrived time.Time, known learn.Known) (served *models.Mock, miss *SeriesMiss, err error)
+type SeriesAnswerer func(ctx context.Context, db MockMemDb, live *models.Mock, arrived time.Time, known learn.Known) (served *models.Mock, owner string, miss *SeriesMiss, err error)
 
 // SeriesMiss is why no recording of a marked series answered a call of it
 // (SeriesAnswerer): NextSteps says so for the report, and Newest is the
@@ -710,17 +730,17 @@ func RegisterSeriesAnswerer(kind models.Kind, a SeriesAnswerer) (unregister func
 	}
 }
 
-// AnswerSeries is live.Kind's SeriesAnswerer's answer to live: all nil when
-// none is registered.
-func AnswerSeries(ctx context.Context, db MockMemDb, live *models.Mock, arrived time.Time, known learn.Known) (*models.Mock, *SeriesMiss, error) {
+// AnswerSeries is live.Kind's SeriesAnswerer's answer to live: all nil and
+// "" when none is registered.
+func AnswerSeries(ctx context.Context, db MockMemDb, live *models.Mock, arrived time.Time, known learn.Known) (*models.Mock, string, *SeriesMiss, error) {
 	if live == nil {
-		return nil, nil, nil
+		return nil, "", nil, nil
 	}
 	seriesAnswerers.RLock()
 	a := seriesAnswerers.of[live.Kind]
 	seriesAnswerers.RUnlock()
 	if a == nil {
-		return nil, nil, nil
+		return nil, "", nil, nil
 	}
 	return a(ctx, db, live, arrived, known)
 }

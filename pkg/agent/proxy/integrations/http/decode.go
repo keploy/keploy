@@ -411,12 +411,12 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					// held to the call's first read (db): a call made in one
 					// staging is never answered from the series of a set the
 					// replay staged after it (MarkedSeries.Restaged).
-					served, miss, serr := integrations.AnswerSeries(reqCtx, db, seriesCall(input), input.arrived, httpKnown{n: h.newLearnNoise(opts, bodyNoise, urlNoise)})
+					served, owner, miss, serr := integrations.AnswerSeries(reqCtx, db, seriesCall(input), input.arrived, httpKnown{n: h.newLearnNoise(opts, bodyNoise, urlNoise)})
 					switch {
 					case serr != nil:
 						err = serr
 					case served != nil:
-						reportBackgroundSeries(reqCtx, input, served)
+						reportMarkedSeries(reqCtx, input, served, owner)
 						stub, ok = served, true
 					default:
 						offSeries = miss

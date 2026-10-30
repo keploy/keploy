@@ -372,8 +372,10 @@ type MockMismatchReport struct {
 	// ClosestMock, the marked recording it repeated, unchecked.
 	// AnswerBackgroundSeries: a call of a marked background series answered
 	// with ClosestMock, a recording of the series, its clock reads checked on
-	// the run's clock. An answer never counts against a test and never lands
-	// in a miss list. The proxy's sink copies
+	// the run's clock. AnswerOwnSeries: a call of the open test's own series
+	// answered with ClosestMock, a recording of the series, its clock reads
+	// and its id checked, at any count. An answer never counts against a
+	// test and never lands in a miss list. The proxy's sink copies
 	// these to the UnmatchedCall it makes of the report, as it copies the
 	// miss fields.
 	Answer    string `json:"answer,omitempty" yaml:"answer,omitempty"`
