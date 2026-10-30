@@ -151,7 +151,7 @@ func TestOwnProcessLeftoverHelper(t *testing.T) {
 	// The app and its child ignore SIGHUP, as a daemon does: the hangup the
 	// kernel sends a process group orphaned with members stopped does not end
 	// them, so only a kill does.
-	client := newRunClient(fmt.Sprintf("trap '' HUP; sleep 600 & echo $! > %s; echo $$ > %s; while :; do sleep 0.01; done",
+	client := newRunClient(fmt.Sprintf("trap '' HUP; sleep 600 & echo $! > %s; echo $$ > %s; while kill -0 \"$DAEMON_OWNER\"; do sleep 0.01; done",
 		filepath.Join(dir, "child.pid"), filepath.Join(dir, "app.pid")))
 	ran := make(chan struct{})
 	go func() {
@@ -386,7 +386,7 @@ func TestTheSweepSignalsNoProcessOtherThanTheOneItFound(t *testing.T) {
 // exits at once, as pg_ctl start does, and returns its pid once that child
 // has exited: the daemon is orphaned, and reparented by then. The daemon is
 // killed when the test ends, if it is still there. A daemon that loops loops
-// only while the process that started it runs (daemonOwnerEnv).
+// only while the process that started it runs (ownerEnv).
 func daemonize(t *testing.T, command string, args ...string) int {
 	t.Helper()
 	pid, err := startDaemon(command, args...)
@@ -397,19 +397,29 @@ func daemonize(t *testing.T, command string, args ...string) int {
 	return pid
 }
 
-// daemonOwnerEnv names, in a daemon's environment, the pid of the process
-// that started it (startDaemon). A daemon that loops forever loops `while
-// kill -0 "$DAEMON_OWNER"`: one whose process was killed, its cleanups never
-// run (a test's own process ends on its parent-death SIGKILL, whatever ended
-// the test binary), ends with it, not spinning on with no one to kill it. The
-// check is a builtin's kill(2): it opens no file and starts no process, so a
-// daemon's descriptors and processes are as the test has them.
-const daemonOwnerEnv = "DAEMON_OWNER"
+// ownerEnv names, in the environment of every process these tests start, the
+// pid of the test process that started it: set in this process's own
+// environment as it starts (init), it is inherited by each daemon a test
+// starts (startDaemon), each application keploy runs for a test, and each
+// script those start. A test's own process (inOwnProcess) runs init again, so
+// there the owner is that process. Every one of them that loops with no end
+// of its own loops `while kill -0 "$DAEMON_OWNER"`, in its TERM trap too: one
+// whose test process was killed, its cleanups never run (a test's own
+// process ends on its parent-death SIGKILL, whatever ended the test binary),
+// ends with it, not looping on with no one to kill it. The check is a
+// builtin's kill(2): it opens no file and starts no process, so a process's
+// descriptors and children are as the test has them.
+const ownerEnv = "DAEMON_OWNER"
+
+func init() {
+	if err := os.Setenv(ownerEnv, strconv.Itoa(os.Getpid())); err != nil {
+		panic(err)
+	}
+}
 
 // startDaemon is daemonize's work, safe off the test's goroutine.
 func startDaemon(command string, args ...string) (int, error) {
 	cmd := exec.Command("/bin/sh", append([]string{"-c", `setsid /bin/sh -c "$0" sh "$@" >/dev/null 2>&1 </dev/null & echo $!`, command}, args...)...)
-	cmd.Env = append(os.Environ(), daemonOwnerEnv+"="+strconv.Itoa(os.Getpid()))
 	out, err := cmd.Output()
 	if err != nil {
 		return 0, fmt.Errorf("the daemonizer: %w", err)
@@ -596,7 +606,7 @@ func TestAdoptedDaemonsEndWithTheApplication(t *testing.T) {
 	churn := daemonize(t, `trap '' TERM; : > "$1"; while kill -0 "$DAEMON_OWNER"; do exec 3</dev/null; sleep 0.05; exec 3<&-; sleep 0.05; done`, ready("churn"))
 	slow := daemonize(t, `exec 3</dev/null 4</dev/null 5</dev/null 6</dev/null 7</dev/null 8</dev/null 9</dev/null
 trap 'for fd in 3 4 5 6 7 8 9; do eval "exec $fd<&-"; sleep 0.3; done; echo done > "$2"; exit 0' TERM
-: > "$1"; while :; do sleep 0.01; done`, ready("slow"), done)
+: > "$1"; while kill -0 "$DAEMON_OWNER"; do sleep 0.01; done`, ready("slow"), done)
 	for _, name := range []string{"polite", "deaf", "busy", "churn", "slow"} {
 		await(t, name+" ready", func() bool { _, err := os.Stat(ready(name)); return err == nil })
 	}
@@ -732,7 +742,7 @@ func TestARunSaysTheSetEndKilledWhatTheAppLeftStopping(t *testing.T) {
 		cfg.Agent.AgentURI = "http://127.0.0.1:1/agent"
 		client := New(zap.NewNop(), nil, cfg)
 		client.apps.Store(uint64(0), app.NewApp(zap.NewNop(),
-			`sh -c 'trap "while :; do sleep 1; done" TERM; touch `+ready+`; while :; do sleep 1; done' & wait`, nil,
+			deafApp(ready), nil,
 			models.SetupOptions{CommandType: string(utils.Native)}))
 		ctx, cancel := context.WithCancelCause(context.Background())
 		done := make(chan models.AppError, 1)
@@ -795,10 +805,18 @@ func TestADaemonThatOnlyChurnsMovesNoTeardown(t *testing.T) {
 	}
 }
 
+// deafApp is an application that does not stop when asked: a shell that
+// waits on the one it started in the background, which catches a TERM and
+// loops on, until it is killed or until the test process that started it is
+// gone (ownerEnv). It writes its pid to file ready once it runs.
+func deafApp(ready string) string {
+	return `sh -c 'trap : TERM; echo $$ > ` + ready + `; while kill -0 "$DAEMON_OWNER"; do sleep 1; done' & wait`
+}
+
 // churningDaemon is the daemon TestADaemonThatOnlyChurnsMovesNoTeardown
 // stops: it ignores the request to stop and opens and closes a file over and
 // over, with no pause, until it is killed, or until the process that started
-// it is gone (daemonOwnerEnv); it creates file $1 once it runs. No child of
+// it is gone (ownerEnv); it creates file $1 once it runs. No child of
 // its own: one that ended would be a step (a process of it gone).
 const churningDaemon = `trap '' TERM; : > "$1"; while kill -0 "$DAEMON_OWNER"; do exec 3</dev/null; exec 3<&-; done`
 
@@ -808,8 +826,9 @@ const killedDirEnv = "KEPLOY_TEST_KILLED_DIR"
 // TestOwnProcessKilledHelper is not a test: with killedDirEnv set it is a
 // test's own process (inOwnProcess) that adopts as keploy does, starts the
 // churning daemon (churningDaemon) as TestADaemonThatOnlyChurnsMovesNoTeardown
-// does, writes its pid and start time once it runs, and then waits on its
-// input, to be killed.
+// does, runs an application that does not stop when asked (deafApp) as keploy
+// does, writes the pid and start time of the daemon and of the app's looping
+// shell once they run, and then waits on its input, to be killed.
 func TestOwnProcessKilledHelper(t *testing.T) {
 	dir := os.Getenv(killedDirEnv)
 	if dir == "" {
@@ -830,9 +849,35 @@ func TestOwnProcessKilledHelper(t *testing.T) {
 	if !ok {
 		t.Fatalf("the daemon (%d) was gone once it ran", pid)
 	}
+	appReady := filepath.Join(dir, "app")
+	client := newRunClient(deafApp(appReady))
+	ran := make(chan struct{})
+	go func() {
+		defer close(ran)
+		_ = client.Run(context.Background(), models.RunOptions{})
+	}()
+	var b []byte
+	for {
+		if b, err = os.ReadFile(appReady); err == nil && bytes.HasSuffix(b, []byte("\n")) {
+			break
+		}
+		select {
+		case <-ran:
+			t.Fatal("the run ended before its app wrote its pid")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	appPid, err := strconv.Atoi(string(bytes.TrimSpace(b)))
+	if err != nil {
+		t.Fatalf("the app wrote %q, not its pid", b)
+	}
+	a, ok := utils.ProcOf(appPid)
+	if !ok {
+		t.Fatalf("the app (%d) was gone once it ran", appPid)
+	}
 	// Written whole, then named: the test reads none half written.
 	said := filepath.Join(dir, "daemon")
-	if err := os.WriteFile(said+".tmp", fmt.Appendf(nil, "%d %d\n", p.PID, p.Start), 0o644); err != nil {
+	if err := os.WriteFile(said+".tmp", fmt.Appendf(nil, "%d %d %d %d\n", p.PID, p.Start, a.PID, a.Start), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Rename(said+".tmp", said); err != nil {
@@ -843,13 +888,15 @@ func TestOwnProcessKilledHelper(t *testing.T) {
 	_, _ = io.Copy(io.Discard, os.Stdin)
 }
 
-// A daemon a test starts ends with the process that started it, however that
-// process ends. A test's own process (inOwnProcess) ends on a SIGKILL, its
-// parent-death signal, as the test binary ends, whatever ended it: a TERM
-// from a box's stop of the job, which the binary does not wait out, or its
-// timeout. So killed, it runs none of its cleanups (daemonize's kill of the
-// daemon), and the churning daemon, which ignores a TERM and loops with no
-// pause, was left spinning a CPU of the box, until it was killed by hand.
+// A daemon a test starts, and an application keploy runs for it, end with the
+// test process that started them, however that process ends. A test's own
+// process (inOwnProcess) ends on a SIGKILL, its parent-death signal, as the
+// test binary ends, whatever ended it: a TERM from a job's stop on a CI or
+// test machine, which the binary does not wait out, or its timeout. So
+// killed, it runs none of its cleanups (daemonize's kill of the daemon, the
+// kill of what it still runs), and the churning daemon, which ignores a TERM
+// and loops with no pause, was left spinning a CPU, until it was killed by
+// hand; an app that does not stop when asked was left looping too.
 func TestADaemonEndsWithTheProcessThatStartedIt(t *testing.T) {
 	if err := goUsesPidfds(); err != nil {
 		t.Skipf("keploy adopts nothing here: %v", err)
@@ -894,23 +941,30 @@ func TestADaemonEndsWithTheProcessThatStartedIt(t *testing.T) {
 		case <-time.After(time.Millisecond):
 		}
 	}
-	var p utils.Reached
-	if _, err := fmt.Sscanf(string(b), "%d %d", &p.PID, &p.Start); err != nil {
-		t.Fatalf("the helper said %q, not a pid and start", b)
+	var p, a utils.Reached
+	if _, err := fmt.Sscanf(string(b), "%d %d %d %d", &p.PID, &p.Start, &a.PID, &a.Start); err != nil {
+		t.Fatalf("the helper said %q, not two pids and starts", b)
 	}
-	t.Cleanup(func() {
-		if now, ok := utils.ProcOf(p.PID); ok && now == p {
-			_ = syscall.Kill(p.PID, syscall.SIGKILL)
-		}
-	})
+	for _, q := range []utils.Reached{p, a} {
+		t.Cleanup(func() {
+			if now, ok := utils.ProcOf(q.PID); ok && now == q {
+				_ = syscall.Kill(q.PID, syscall.SIGKILL)
+			}
+		})
+	}
 	if err := cmd.Process.Signal(syscall.SIGKILL); err != nil {
 		t.Fatal(err)
 	}
 	<-ended
-	await(t, "the end of the churning daemon, the process that started it killed", func() bool {
-		now, ok := utils.ProcOf(p.PID)
-		return !ok || now != p
-	})
+	for _, q := range []struct {
+		what string
+		p    utils.Reached
+	}{{"the churning daemon", p}, {"the app that does not stop when asked", a}} {
+		await(t, "the end of "+q.what+", the process that started it killed", func() bool {
+			now, ok := utils.ProcOf(q.p.PID)
+			return !ok || now != q.p
+		})
+	}
 }
 
 // The stall a stop of the daemons kills on is stopStallChecks checks of
@@ -1044,7 +1098,7 @@ func TestAChildADaemonForksOnItsWayOutIsSaidLeftRunning(t *testing.T) {
 	script := filepath.Join(dir, "d.sh")
 	if err := os.WriteFile(script, []byte(`trap 'sh -c "echo \$\$ > $1; exec sleep 300" & sleep 0.3; exit 0' TERM
 : > "$1.ready"
-while :; do sleep 0.05; done
+while kill -0 "$DAEMON_OWNER"; do sleep 0.05; done
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}

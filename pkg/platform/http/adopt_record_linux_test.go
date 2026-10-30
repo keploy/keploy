@@ -46,7 +46,7 @@ func TestARecordingsStopSaysItKilledWhatTheAppLeftStopping(t *testing.T) {
 		cfg.Agent.AgentURI = "http://127.0.0.1:1/agent"
 		client := New(zap.NewNop(), nil, cfg)
 		client.apps.Store(uint64(0), app.NewApp(zap.NewNop(),
-			`sh -c 'trap "while :; do sleep 1; done" TERM; touch `+ready+`; while :; do sleep 1; done' & wait`, nil,
+			deafApp(ready), nil,
 			models.SetupOptions{CommandType: string(utils.Native), Mode: tc.mode}))
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan models.AppError, 1)
