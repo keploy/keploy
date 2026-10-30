@@ -676,6 +676,11 @@ func TestOnMissRecordSaysWhenTheCapturedCallsWereNotWritten(t *testing.T) {
 	require.ErrorIs(t, err, models.ErrMocksNotWritten)
 	require.Contains(t, err.Error(), "1 of the 2 call(s) captured on miss were not added to the mock set set-0: disk full")
 	require.Contains(t, err.Error(), "the 1 call(s) captured on miss that the mock set set-0 was handed were not all written to it")
+	require.Equal(t, 0, logs.FilterMessageSnippet("appended new dependency calls").Len())
+	errs = logs.FilterLevelExact(zapcore.ErrorLevel).All()
+	require.Len(t, errs, 2)
+	require.Contains(t, errs[0].Message, "failed to add a call captured on miss to the mock set")
+	require.Contains(t, errs[1].Message, "were not all added to the mock set")
 	require.Zero(t, s.pushes)
 }
 
