@@ -5355,7 +5355,7 @@ func (b beforeSetMiss) Unwrap() error { return b.error }
 // after the previous test's misses were read (windowReadAt), before this
 // window opened. No test made it: it is the application's background work (a
 // timer, a start-up job that outlived the readiness probe), and a background
-// call keploy cannot answer is no test's failure (founder D1). The read
+// call keploy cannot answer is no test's failure. The read
 // returns it marked (models.UnmatchedCall.Background), charged to no test, for
 // the replay to list once for the set. A miss of a call its parser found made
 // in a test (MissInTest, MissExtraCall) stays the miss of the test that reads
@@ -5857,6 +5857,11 @@ func (p *Proxy) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 		// takes these: what the application did after its last test.
 		// pendingMockErrors holds only raw misses (a beforeSetMiss is only
 		// ever in a window's accumulator), so the time alone decides.
+		// With a window open pendingMockErrors is empty here: it is added
+		// to only under captureMu with no window open (the drain's route),
+		// and every window that opens drains it under the same lock
+		// (openTestErrorCapture), so the window test only says which reads
+		// this is.
 		for i, err := range rawErrs {
 			if madeBetweenTests(err, p.windowReadAt) {
 				rawErrs[i] = betweenTestsMiss{err}
