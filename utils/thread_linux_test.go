@@ -110,7 +110,8 @@ func TestRunningThreadTellsAProcessWhoseMainThreadExitedFromAZombie(t *testing.T
 }
 
 // RunningThread reads each thread's stat for its state and start time: a
-// thread being released (Z or X, its parent and group gone) is none that
+// thread being released (its parent and group gone, in any state: Z or X, or
+// R or S where it was released between the kernel's reads) is none that
 // runs, and one listed whose stat is gone exited meanwhile. A listing in which
 // none runs stands only where the process's count of its threads holds no
 // thread but those it found exited, still there and the same: else one that
@@ -147,6 +148,18 @@ func TestRunningThreadSaysWhatItCouldNotRead(t *testing.T) {
 	process(7, 3)
 	if tid, runs, err := RunningThread(root, 7); err != nil || runs {
 		t.Fatalf("RunningThread = %d, %v, %v; want none running, every thread exited or released", tid, runs, err)
+	}
+	// Threads released between the kernel's read of their state and of
+	// their parent: R and S, their parent and group gone (ReleasedTask).
+	thread(7, 13, "13 (worker) R 0 -1 -1 0 -1 4227404 100 0 0 0 0 0 0 0 20 0 1 0 6060367 0 0\n")
+	thread(7, 14, "14 (worker) S 0 -1 -1 0 -1 4227404 100 0 0 0 0 0 0 0 20 0 1 0 6060368 0 0\n")
+	if tid, runs, err := RunningThread(root, 7); err != nil || runs {
+		t.Fatalf("RunningThread = %d, %v, %v; want none running, threads 13 and 14 released as they were read", tid, runs, err)
+	}
+	for _, tid := range []string{"13", "14"} {
+		if err := os.RemoveAll(filepath.Join(root, "7", "task", tid)); err != nil {
+			t.Fatal(err)
+		}
 	}
 	// What a process's threads come to between RunningThread's reads: a
 	// stat that is a FIFO whose writer, as RunningThread opens it, moves the

@@ -486,7 +486,7 @@ jobs:
 
       # A real client's caching_sha2_password full authentication over TLS
       # sends its password in clear inside the TLS: the recording holds its
-      # length and not the password (recorder/auth_redact.go).
+      # length and not the password (utils/auth_redact.go).
       - name: A TLS full authentication records no password
         env:
           KEPLOY_E2E_MYSQL_RUN: TestE2E_MySQLTLSFullAuth_
@@ -497,14 +497,14 @@ jobs:
           KEPLOY_E2E_MYSQL_RUN: TestE2E_MySQLTLSFullAuth_
         run: |
           set -uo pipefail
-          f=pkg/agent/proxy/integrations/mysql/recorder/auth_redact.go
+          f=pkg/agent/proxy/integrations/mysql/utils/auth_redact.go
           cp "$f" /tmp/auth-mutant.orig
           perl -0pi -e 's/intgUtils\.EncodeBase64\(make\(\[\]byte, len\(pkt\.Payload\)\)\)/intgUtils.EncodeBase64(pkt.Payload)/' "$f"
           if cmp -s "$f" /tmp/auth-mutant.orig; then
             echo "::error::the mutant did not apply to $f; update it with the code it mutates"
             exit 1
           fi
-          if ! go vet ./pkg/agent/proxy/integrations/mysql/recorder/ >/tmp/auth-mutant-build.log 2>&1; then
+          if ! go vet ./pkg/agent/proxy/integrations/mysql/utils/ ./pkg/agent/proxy/integrations/mysql/recorder/ >/tmp/auth-mutant-build.log 2>&1; then
             cat /tmp/auth-mutant-build.log
             echo "::error::the mutant does not compile, so a failure would score a FALSE kill"
             cp /tmp/auth-mutant.orig "$f"; exit 1

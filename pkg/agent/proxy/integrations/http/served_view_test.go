@@ -6,8 +6,10 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/variables"
 )
 
 // keploy's HTTP adapter states F's view of an exchange its learn step served
@@ -117,7 +119,7 @@ func TestAnExchangeIsSaidServedAsRecordedOnlyWhereRequestAndAnswerAreTheRecordin
 		// A view is stated wherever F gave the recorded answer whole,
 		// whatever the request (servedExchange); never of an answer F
 		// gave otherwise.
-		x, ok := n.servedExchange(learn.NewTracker().Drifts(), m, m, n.shape(rp, destOf(lp, rp)), rp, n.shape(lp, sameDest), in, lp, &served, true)
+		x, ok := n.servedExchange(learn.NewTracker().Drifts(), m, m, n.shape(rp, destOf(lp, rp)), rp, n.shape(lp, sameDest), in, lp, &served, true, answerView{})
 		whole := served.Spec.HTTPResp != nil && answerAsRecorded(m.Spec.HTTPResp, served.Spec.HTTPResp)
 		if !ok || (x.View != nil) != whole || (x.View != nil) != (x.ViewKey != "") {
 			t.Errorf("%s: view stated %v (key %q); want %v: F gave the recorded answer whole %v", c.name, x.View != nil, x.ViewKey, whole, whole)
@@ -162,5 +164,111 @@ func TestAServedExchangesViewIsTheRequestTheApplicationSentWithTheRecordedAnswer
 		if _, k := servedLiveView(m, other); k == key {
 			t.Errorf("%s: keyed as the first request's view", name)
 		}
+	}
+}
+
+// A serve HTTP gave with an answer other than the recorded one, but one it
+// knows whole, states its view all the same: a templated answer (an echo
+// variable the learn step learned, answered with this call's value) and an
+// exact pairing of another test's recording (record's full round answers it
+// with the recording's answer whole). A later call of the set then reads
+// the recording with that view: a changed value that holds no word of it is
+// learned, one that holds a word only F's answer there holds is refused,
+// naming the recording as record's full round gave it, and one that holds a
+// word of the recording is refused as before. Before, neither
+// stated a view, and the later call refused every changed value of the set
+// that may stand there ("its adapter did not say what it gave the
+// application there"): run 7's 30 set-asides on one served recording.
+func TestEveryHTTPServeStatesTheViewItGave(t *testing.T) {
+	const (
+		unstated   = "where its adapter did not say what it gave the application there"
+		givenThere = "as record's full round gave it"
+	)
+	for _, tc := range []struct {
+		name  string
+		serve string // "template": the learn step answered an echo; "pairing": an exact pairing
+		ref   string // test 2's call's body.ref in F (recorded "7")
+		why   string // "" learns; else a part of the refusal
+	}{
+		{"a templated answer, a value it holds no word of", "template", "42", ""},
+		{"a templated answer, a value that holds the word it answered", "template", "zq58", givenThere},
+		{"an exact pairing, a value it holds no word of", "pairing", "42", ""},
+		{"an exact pairing, a value that holds a word of the recording", "pairing", "u-61", "appears in an earlier recording, in mock-2"},
+		// A pairing excuses a value noise covers (pairExactly: noise
+		// declared or learned onto the recording), here a header sent
+		// other than recorded: F gave the recording with it as sent.
+		{"a paired call, a word only its noise header held", "pairing-noise", "nz77", givenThere},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, n, opts := learnOn(t)
+			call := learnRecorded("mock-1", 2*time.Second, "POST", "/v1/messages", `{"ref":"7"}`, nil, `{}`)
+			tr := learn.NewTracker()
+			ctx := learn.WithTracker(context.Background(), tr)
+			tr.Begin()
+			switch tc.serve {
+			case "template":
+				other := learnRecorded("mock-2", time.Second, "POST", "/v1/charges", `{"key":"k-1","amount":5}`, nil, `{"id":"ch_1","idempotency_key":"k-1"}`)
+				db := &learnDb{perTest: []*models.Mock{other}, observe: tr.ServedMock}
+				got, miss, err := h.learnMatch(ctx, live("POST", "/v1/charges", `{"key":"zq58","amount":5}`, nil), db, n, opts)
+				if err != nil || got == nil || got.Spec.HTTPResp.Body != `{"id":"ch_1","idempotency_key":"zq58"}` {
+					t.Fatalf("test 1's call not answered with this run's key: %v %+v %v", got, miss, err)
+				}
+			case "pairing":
+				other := learnRecorded("mock-2", time.Second, "GET", "/v1/users/u-61", "", nil, `{"name":"ann"}`)
+				reportPairing(ctx, live("GET", "/v1/users/u-61", "", nil), other, integrations.AnsweredCall{}, false)
+			case "pairing-noise":
+				other := learnRecorded("mock-2", time.Second, "GET", "/v1/users/u-61", "", map[string]string{"X-Trace": "t-1"}, `{"name":"ann"}`)
+				reportPairing(ctx, live("GET", "/v1/users/u-61", "", map[string]string{"X-Trace": "nz77"}), other, integrations.AnsweredCall{}, false)
+			}
+			tr.End()
+			tr.Begin()
+			got, miss, err := h.learnMatch(ctx, live("POST", "/v1/messages", `{"ref":"`+tc.ref+`"}`, nil), &learnDb{perTest: []*models.Mock{call}}, n, opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.why == "" {
+				if got == nil || miss != nil {
+					t.Fatalf("served %v miss %+v; want body.ref learned: no word of it stands in what F gave at mock-2", got, miss)
+				}
+				return
+			}
+			if got != nil || miss == nil || !strings.Contains(miss.res.Why, "mock-2") || !strings.Contains(miss.res.Why, tc.why) || strings.Contains(miss.res.Why, unstated) {
+				t.Fatalf("FALSE GREEN? served %v miss %+v; want body.ref refused, naming mock-2: %q", got, miss, tc.why)
+			}
+		})
+	}
+}
+
+// The view of a templated serve is the recording as the application sent
+// its request and F answered it with the variable's value, rendered again
+// from the recording where a rule reads it; its key tells it from the
+// recorded answer's view of the same request and from another value's.
+func TestATemplatedServesViewIsTheAnswerFRendered(t *testing.T) {
+	h, _, _ := learnOn(t)
+	m := learnRecorded("mock-2", time.Second, "POST", "/v1/charges", `{"key":"k-1"}`, nil, `{"idempotency_key":"k-1"}`)
+	vars := models.MockVariables{"key": {Recorded: "k-1", Bind: "body.key", Answer: []string{"body.idempotency_key"}, Echo: true}}
+	p := func(v string) pairing {
+		return pairing{vars: vars, values: map[string]variables.Binding{"key": {Name: "key", Value: v, Recorded: "k-1"}}}
+	}
+	in := live("POST", "/v1/charges", `{"key":"k-29"}`, nil)
+	load, key := servedView(m, in, h.learnedView(m, p("k-29")))
+	v, err := load()
+	if err != nil || v.Spec.HTTPResp.Body != `{"idempotency_key":"k-29"}` || v.Spec.HTTPReq.Body != `{"key":"k-29"}` {
+		t.Fatalf("view %+v %v; want the live request and the answer rendered with k-29", v, err)
+	}
+	if m.Spec.HTTPResp.Body != `{"idempotency_key":"k-1"}` {
+		t.Fatalf("the view changed the recording: %s", m.Spec.HTTPResp.Body)
+	}
+	if _, k := servedLiveView(m, in); k == key {
+		t.Fatal("the templated view shares its key with the recorded answer's view of the same request")
+	}
+	if _, k := servedView(m, in, h.learnedView(m, p("k-30"))); k == key {
+		t.Fatal("two answers rendered with different values share a key")
+	}
+	if _, k := servedView(m, in, h.learnedView(m, p("k-29"))); k != key {
+		t.Fatal("the same values render the same view under another key")
+	}
+	if av := h.learnedView(m, pairing{}); av.render != nil {
+		t.Fatal("a pairing that learned no variable renders no view of its own")
 	}
 }

@@ -3832,7 +3832,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// whose mock set diverged from being demoted to OBSOLETE (missed):
 			// it got no answer to a call, which is no sign its recording is out
 			// of date, and the demotion would turn its failure into a green run.
-			read := r.readMockErrors(runTestSetCtx, testCase.Name, resp)
+			read := r.readMockErrors(runTestSetCtx, testCase.Name, ranLive{resp: resp, from: started, to: time.Now().UTC()})
 			missed := dataPlaneMisses(read.calls)
 			earlyMissed := 0
 			if provenswitch.On() {
@@ -9261,8 +9261,9 @@ func (r *Replayer) sayUnattributed() {
 }
 
 // readMockErrors reads, once, the calls of the test just run that no mock
-// answered; live is the response it got (nil for none), which the dataflow
-// guard reads what changed in (before_set_calls.go). Under the proven switch the main loop reads them before its
+// answered; live is the response it got (nil for none), or that response
+// with the span the test ran in (ranLive), which the dataflow guard reads
+// what changed in (before_set_calls.go, flow_guard.go). Under the proven switch the main loop reads them before its
 // verdict, which they are part of, and attaches that read afterwards.
 func (r *Replayer) readMockErrors(ctx context.Context, test string, live any) testMisses {
 	// A miss is the agent's to report. A base path has none, and no mocks.

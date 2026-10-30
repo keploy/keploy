@@ -275,6 +275,14 @@ func reportPairing(ctx context.Context, input *req, x *models.Mock, a integratio
 		} else {
 			t.ServedMockAtIn(x, input.arrived, in)
 		}
+		// F answered with x's recorded answer whole (pairExactlyIn): its
+		// view is x as the application sent its request and F answered it,
+		// stated after the serve, as the learn step states its own
+		// (servedExchange). Without it a later call of the set reads x as
+		// a serve no adapter stated, and refuses every changed value that
+		// may stand there.
+		view, key := servedLiveView(x, input)
+		t.ServedMockLive(x, key, view)
 	}
 }
 

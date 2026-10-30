@@ -3,10 +3,12 @@ package app
 import (
 	"context"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"go.keploy.io/server/v3/utils"
+	"go.uber.org/zap"
 )
 
 // keploy's stop of a compose app whose processes it reads waits for the
@@ -185,5 +187,67 @@ func TestAComposeStopIsThroughOnlyOnceTheDaemonHasTheAppStopped(t *testing.T) {
 	}
 	if h := a.composeAppHalt(); h == nil || h.exitCode != 3 {
 		t.Fatalf("the halt kept is %+v; want the app's own exit, code 3, not keploy's stop's die (code 0)", h)
+	}
+}
+
+// lagKillDocker is composeDocker whose SIGKILL ends the app's processes, as
+// the kernel does, while the daemon says the container stopped only when
+// sayStopped is called: a starved daemon that handles the kill's exit late.
+type lagKillDocker struct{ *composeDocker }
+
+func (d lagKillDocker) ContainerKill(ctx context.Context, id, signal string) error {
+	if signal != "SIGKILL" {
+		return d.composeDocker.ContainerKill(ctx, id, signal)
+	}
+	d.mu.Lock()
+	d.signals = append(d.signals, signal)
+	pid := d.pid
+	d.mu.Unlock()
+	return syscall.Kill(-pid, syscall.SIGKILL)
+}
+
+// keploy's kill of a compose app that made no progress on its way out is
+// through, as its interrupt is, only once the docker daemon has the container
+// stopped: the kill's exit is the kernel's first, the daemon's after, and the
+// next set's start of a container the daemon still calls running is its no-op
+// (304). A daemon that never says so is an error, with the kill said; one
+// that does ends the stop with the container stopped. Before, the kill was
+// through at its processes' exit.
+func TestAComposeKillIsThroughOnlyOnceTheDaemonHasTheAppStopped(t *testing.T) {
+	for _, says := range []bool{false, true} {
+		t.Run(map[bool]string{false: "the daemon never says so", true: "the daemon says so once the processes are gone"}[says], func(t *testing.T) {
+			stallBudget(t, 300*time.Millisecond)
+			main := started(t, "sleep", "600")
+			d := newComposeDocker(true, false)
+			d.pid, d.id = main.Process.Pid, cgroupOf(t, main.Process.Pid)
+			if says {
+				go func() {
+					for {
+						if _, alive := utils.ProcOf(main.Process.Pid); !alive {
+							break
+						}
+						time.Sleep(10 * time.Millisecond)
+					}
+					d.mu.Lock()
+					d.stop()
+					d.mu.Unlock()
+				}()
+			}
+			a := &App{logger: zap.NewNop(), docker: lagKillDocker{d}, container: "app-1", kind: "docker-compose"}
+			killed, err := a.StopComposeApp(context.Background())
+			running, signals, _ := d.state()
+			if !strings.Contains(killed, "made no progress on its way out") || strings.Join(signals, ",") != "SIGINT,SIGKILL" {
+				t.Fatalf("said %q (err %v) after %v; want the stall kill said", killed, err, signals)
+			}
+			if _, alive := utils.ProcOf(main.Process.Pid); alive {
+				t.Fatal("the app's main process outlived keploy's kill")
+			}
+			switch {
+			case !says && (err == nil || !strings.Contains(err.Error(), "the docker daemon had not said it had stopped")):
+				t.Fatalf("the stop ended with err %v, the daemon calling the container running %v; want the daemon's silence after the kill an error", err, running)
+			case says && (err != nil || running):
+				t.Fatalf("the stop ended with err %v, the daemon calling the container running %v; want it through once the daemon had it stopped", err, running)
+			}
+		})
 	}
 }

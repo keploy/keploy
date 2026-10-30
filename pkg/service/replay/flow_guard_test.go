@@ -277,6 +277,25 @@ func TestFlowGuard_WhenKeployCannotTellTheReasonSaysSo(t *testing.T) {
 	}
 }
 
+// A call made before the set's first test that no test's read took (the
+// first read was cut short, or no test of the set was read) reaches keploy
+// at the set's end, which reads it for no test (unclaimedCalls: take with
+// no test and no response). Whatever the guard holds, it cannot say whether
+// the call's recorded answer reaches a test, and the call's reason says so,
+// and why: never that its answer reaches no test.
+func TestFlowGuard_ACallReadOnlyAtTheSetsEndSaysKeployCouldNotTell(t *testing.T) {
+	var s setCalls
+	s.reset(newFlowGuard([]*models.TestCase{guardCase("test-1", `{"item":"pen"}`, `{"tenant":"tenantA7K29Q"}`)}, nil,
+		[]*models.Mock{guardMock(`{"tenant":"tenantA7K29Q"}`)}))
+	if rest := s.take(context.Background(), []models.UnmatchedCall{startUpCall()}, "", nil); len(rest) != 0 {
+		t.Fatalf("the set's end keeps %+v as unclaimed; want the call as background work", rest)
+	}
+	want := madeBeforeFirst + ", and keploy could not tell whether its recorded answer reaches a test: it reached keploy only at the set's end, after every test was read"
+	if got := s.backgroundCalls(); len(got) != 1 || got[0].BackgroundWhy != want {
+		t.Fatalf("the set lists %+v; want it saying %q", got, want)
+	}
+}
+
 // The guard holds one test's words at a time: what it read for a test is
 // dropped as it reads the next, so what it keeps does not grow with the
 // set (keploy's no-unbounded-memory rule). 64 tests, each with a 96 KiB
@@ -330,5 +349,57 @@ func TestFlowGuard_KeepsOneTestsWordsAtATime(t *testing.T) {
 	perTest := one - base
 	if all > base && all-base > 3*perTest+(1<<20) {
 		t.Fatalf("the guard keeps %d bytes after %d tests, %d after one: it grows with the set", all-base, n, perTest)
+	}
+}
+
+// The application stamps its answer with its clock (an HTTP Date header) in
+// each run, inside the span from the test's request to its answer: this
+// run's stamp is no word a start-up call's recording gave the test, however
+// its minute or second falls. Read by F's lead alone, the stamp's second (12)
+// was a word of what changed, the start-up answer held 12 by chance (here, in
+// its length), and the call, made before the set's first test, was charged to
+// it: the compose set-end lane's restart scenario, red one replay in eight. An
+// instant the start-up answer gave, which the response lost this run, made
+// outside the test's span, still charges it.
+func TestFlowGuard_TheClockStampOfTheTestsAnswerInItsSpanIsNoWordOfAStartUpCall(t *testing.T) {
+	date := func(at time.Time) map[string]string {
+		return map[string]string{"Date": at.UTC().Format(time.RFC1123), "Content-Type": "application/json"}
+	}
+	recAt := time.Date(2026, 10, 30, 15, 21, 46, 310000000, time.UTC)
+	runAt := time.Date(2026, 10, 30, 15, 24, 12, 792000000, time.UTC)
+	for _, c := range []struct {
+		name             string
+		recBody, runBody string
+		boot             string
+		charged          string
+	}{
+		{name: "the stamp alone changed", recBody: `{"price":42}`, runBody: `{"price":42}`,
+			boot: `{"published":{"msg":"b"},"length":"12"}`},
+		{name: "a start-up instant the response lost", recBody: `{"price":42,"booted":"Fri, 30 Oct 2026 15:21:40 GMT"}`, runBody: `{"price":42,"booted":""}`,
+			boot: `{"booted":"Fri, 30 Oct 2026 15:21:40 GMT"}`, charged: "this test's response"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			tc := guardCase("get-price-r1a-1", "", c.recBody)
+			tc.HTTPReq.Timestamp, tc.HTTPResp.Timestamp = recAt, recAt.Add(2*time.Millisecond)
+			tc.HTTPResp.Header = date(recAt)
+			got := live(c.runBody)
+			got.Header, got.Timestamp = date(runAt), runAt.Add(3*time.Millisecond)
+			var s setCalls
+			s.reset(newFlowGuard([]*models.TestCase{tc}, nil, []*models.Mock{guardMock(c.boot)}))
+			rest := s.take(context.Background(), []models.UnmatchedCall{startUpCall()}, "get-price-r1a-1",
+				ranLive{resp: got, from: runAt, to: runAt.Add(4 * time.Millisecond)})
+			if c.charged == "" {
+				if len(rest) != 0 {
+					t.Fatalf("the test keeps %+v; its answer's clock stamp, made in its span in each run, came from no start-up call", rest)
+				}
+				if bg := s.backgroundCalls(); len(bg) != 1 || !strings.Contains(bg[0].BackgroundWhy, madeBeforeFirst) {
+					t.Fatalf("the set lists %+v; want the start-up call among its background calls, made before its first test", bg)
+				}
+				return
+			}
+			if len(rest) != 1 || !strings.Contains(rest[0].ReachesTest, c.charged) {
+				t.Fatalf("the test keeps %+v; want the start-up call charged to it, through %s", rest, c.charged)
+			}
+		})
 	}
 }

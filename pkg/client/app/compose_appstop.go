@@ -9,10 +9,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/api/types/filters"
-	"github.com/docker/docker/errdefs"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
@@ -471,7 +471,7 @@ func (a *App) stopComposeProject(ctx context.Context) bool {
 			// keploy's agent, under keploy record, waits for keploy to drain
 			// what it captured, and goes by that event; its grace
 			// (stop_grace_period) only bounds an agent that never goes.
-			if err := a.docker.ContainerStop(ctx, id, container.StopOptions{}); err != nil && !errdefs.IsNotFound(err) {
+			if err := a.docker.ContainerStop(ctx, id, container.StopOptions{}); err != nil && !cerrdefs.IsNotFound(err) {
 				a.logger.Debug("could not stop a container of the application's compose project", zap.String("container", id), zap.Error(err))
 			}
 		}(c.ID)
@@ -558,7 +558,7 @@ func (a *App) stopComposeApp(ctx context.Context) (killed string, err error) {
 	// Asked for before the interrupt: an exit before it is still seen.
 	daemonStopped := a.awaitComposeAppStopped(wctx, id)
 	if err := a.signalComposeApp(wctx, id, composeInterrupt(w.stopSignal)); err != nil {
-		if errdefs.IsConflict(err) || errdefs.IsNotFound(err) {
+		if cerrdefs.IsConflict(err) || cerrdefs.IsNotFound(err) {
 			return "", nil
 		}
 		return "", fmt.Errorf("keploy could not interrupt the application's container %q: %w", a.container, err)
@@ -589,7 +589,7 @@ func (a *App) stopComposeApp(ctx context.Context) (killed string, err error) {
 	}
 	a.logger.Warn("keploy is killing the app it stopped: "+killed, zap.String("container", a.container))
 	if err := a.signalComposeApp(wctx, id, "SIGKILL"); err != nil {
-		if errdefs.IsConflict(err) || errdefs.IsNotFound(err) {
+		if cerrdefs.IsConflict(err) || cerrdefs.IsNotFound(err) {
 			// It had stopped, or was gone, by the kill: no kill reached it.
 			return "", nil
 		}
@@ -619,7 +619,7 @@ func (a *App) awaitComposeAppStopped(ctx context.Context, id string) <-chan stru
 				close(done)
 				return
 			case err := <-failed:
-				if errdefs.IsNotFound(err) {
+				if cerrdefs.IsNotFound(err) {
 					close(done)
 					return
 				}

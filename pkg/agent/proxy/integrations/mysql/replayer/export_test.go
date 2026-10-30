@@ -8,6 +8,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
+	mysqlUtils "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/utils"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
@@ -171,4 +172,44 @@ func CountUnnamedExecKeysForTest(f func()) int {
 	defer func() { unnamedExecIndex.Keys = keys }()
 	f()
 	return int(n.Load())
+}
+
+// HandshakeDstForTest is the server the recorded handshakes of this
+// package's tests were recorded for (their destAddr).
+const HandshakeDstForTest = testDBAddr
+
+// HandshakeMockForTest is a recorded native-password login that the server
+// let in (nativeHandshake), named mock-0: the greeting, the client's
+// HandshakeResponse41 and the OK.
+func HandshakeMockForTest() *models.Mock { return nativeHandshake() }
+
+// ClientHandshakeForTest is the client's HandshakeResponse41 the recorded
+// handshakes of this package's tests hold (clientHandshake), by user app.
+func ClientHandshakeForTest() *mysql.HandshakeResponse41Packet {
+	return clientHandshake("app", mysql.Native)
+}
+
+// SwitchedHandshakeForTest is a recorded native-password login that the
+// server let in after asking the client to switch (switchedHandshake), named
+// mock-0: the client's AuthSwitchResponse is recorded by its length, n bytes,
+// only (mysqlUtils.ClientAuthData), as the recorder holds it.
+func SwitchedHandshakeForTest(n int) *models.Mock {
+	m := switchedHandshake(okAnswer(4))
+	m.Spec.MySQLRequests[1] = authData(3, n, mysql.AuthSwithResponse)
+	return m
+}
+
+// FullAuthHandshakeForTest is a recorded caching_sha2_password login in full
+// without TLS that the server let in (fullAuthHandshake), named mock-0: the
+// client's encrypted password is recorded by its length, n bytes, only.
+func FullAuthHandshakeForTest(n int) *models.Mock {
+	m := fullAuthHandshake(okAnswer(6))
+	m.Spec.MySQLRequests[2] = authData(5, n, mysql.EncryptedPassword)
+	return m
+}
+
+// authData is a packet of n bytes of authentication data of type typ,
+// numbered seq, as a recording holds it (mysqlUtils.ClientAuthData).
+func authData(seq uint8, n int, typ string) mysql.Request {
+	return mysqlUtils.ClientAuthData(mysql.Packet{Header: mysql.Header{PayloadLength: uint32(n), SequenceID: seq}, Payload: make([]byte, n)}, typ)
 }
