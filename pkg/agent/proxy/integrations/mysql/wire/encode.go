@@ -214,7 +214,7 @@ func EncodeToBinary(ctx context.Context, logger *zap.Logger, packet *mysql.Packe
 	data = append(header, data...)
 
 	if ce := logger.Check(zap.DebugLevel, "Encoded Packet"); ce != nil {
-		ce.Write(zap.String("packet", packet.Header.Type), zap.ByteString("data", data))
+		ce.Write(zap.String("packet", packet.Header.Type), zap.Int("bytes", len(data)))
 	}
 
 	return data, nil

@@ -342,8 +342,9 @@ func TestTheRequestIsLoggedByItsShapeOnly(t *testing.T) {
 			t.Fatalf("decodeHTTP = %v", err)
 		}
 		pt := logs.FilterMessage("egress passthrough: serving without mock match").All()
-		if len(pt) != 1 || pt[0].ContextMap()["path"] != "/u" || !reflect.DeepEqual(metadataOf(pt[0]), reqMeta("/u")) {
-			t.Errorf("logged the passthrough as %v, want its path and the request's method, host, path and query keys", pt)
+		// The path is the metadata's, by its shape: no field writes it whole.
+		if len(pt) != 1 || pt[0].ContextMap()["path"] != nil || !reflect.DeepEqual(metadataOf(pt[0]), reqMeta("/u")) {
+			t.Errorf("logged the passthrough as %v, want the request's method, host, path shape and query keys", pt)
 		}
 		noValueLogged(t, logs, shapeValues("live"))
 	})

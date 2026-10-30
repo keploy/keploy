@@ -126,7 +126,6 @@ func EncodeBinaryResultSet(ctx context.Context, logger *zap.Logger, resultSet *m
 		if logger.Core().Enabled(zap.DebugLevel) {
 			logger.Debug("Writing final response packet for BinaryProtocolResultSet",
 				zap.Int("final_response_length", len(resultSet.FinalResponse.Data)),
-				zap.String("final_response_hex", fmt.Sprintf("%x", resultSet.FinalResponse.Data)),
 				zap.Bool("is_ok_replacing_eof", utils.IsOKReplacingEOF(resultSet.FinalResponse.Data)))
 		}
 		if _, err := buf.Write(resultSet.FinalResponse.Data); err != nil {

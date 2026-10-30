@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"go.keploy.io/server/v3/pkg/models"
 )
 
 // ReaderSize is the size of the buffered reader a connection's first bytes
@@ -228,7 +230,7 @@ func readRequestHead(br *bufio.Reader) (Name, error) {
 			case bytes.HasPrefix(first, []byte("PRI * HTTP/2.0")):
 				return Name{H2: true}, fmt.Errorf("%w: %w", ErrNoName, ErrH2C)
 			case looseRequestLine.Match(first):
-				return Name{}, unreadable("its request line is HTTP keploy does not read: %q", bytes.TrimRight(first, "\r\n"))
+				return Name{}, unreadable("its request line is HTTP keploy does not read: %q", requestLineShape(bytes.TrimRight(first, "\r\n")))
 			default:
 				return Name{}, fmt.Errorf("%w: it is neither TLS nor HTTP/1", ErrNoName)
 			}
@@ -241,7 +243,7 @@ func readRequestHead(br *bufio.Reader) (Name, error) {
 	}
 	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(head)))
 	if err != nil {
-		return Name{}, unreadable("its HTTP/1 request head does not parse: %v", err)
+		return Name{}, unreadable("%v", models.HTTPParseError("its HTTP/1 request head", len(head), err))
 	}
 	if req.Method == http.MethodConnect {
 		host, port, ok := splitTarget(req.RequestURI)
@@ -406,6 +408,35 @@ func isLetter(c byte) bool { return c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z'
 var (
 	requestLine      = regexp.MustCompile(`^[A-Z]{1,16} [^ \r\n]+ HTTP/1\.[01]\r?\n$`)
 	looseRequestLine = regexp.MustCompile("(?i)^[!#$%&'*+.^_`|~0-9a-z-]+ +[^ \\r\\n]+ +http/")
+)
+
+// requestLineShape is a request line keploy does not read, as its error
+// names it: the method kept when it is letters and '-' only, the target in
+// its shape (models.TargetShape: no path value, no query value), the version
+// kept when it reads as one, and the spaces between them as sent, so what
+// made the line unreadable (a lowercase method or version, a doubled or
+// trailing space, HTTP/3.0) still shows. Anything else in the line is {}.
+func requestLineShape(line []byte) string {
+	m := requestLineParts.FindSubmatch(line)
+	if m == nil {
+		return "{}"
+	}
+	method, version := string(m[1]), string(m[5])
+	if !methodWord.MatchString(method) {
+		method = "{}"
+	}
+	if !versionWord.MatchString(version) {
+		version = "{}"
+	}
+	return method + string(m[2]) + models.TargetShape(string(m[3])) + string(m[4]) + version
+}
+
+// requestLineParts splits a line looseRequestLine matched into its method,
+// the spaces after it, its target, the spaces after that, and the rest.
+var (
+	requestLineParts = regexp.MustCompile(`^([^ ]+)( +)([^ ]+)( +)(.*)$`)
+	methodWord       = regexp.MustCompile(`^[A-Za-z-]{1,16}$`)
+	versionWord      = regexp.MustCompile(`(?i)^http/[0-9]{1,2}(\.[0-9]{1,2})? *$`)
 )
 
 // isRequestLine reports whether line, a whole line, is an HTTP/1 request

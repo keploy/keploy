@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -16,16 +17,19 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/agent/logleak"
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/pkg/platform/yaml/testdb"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
 	yamlLib "gopkg.in/yaml.v3"
 )
@@ -628,5 +632,178 @@ func TestSkipGRPCUnderPressureDecidesByThePauseAsTheRequestWasRead(t *testing.T)
 	}
 	if got := mgr.NotRecordedUnderPressure(); got.Total != 3 || got.ByConn["10.0.0.1:5000 -> 127.0.0.1:50051"] != 3 {
 		t.Fatalf("not recorded under pressure: %+v, want the three calls left out, on their connection", got)
+	}
+}
+
+// failingBody yields data, then fails with err: a request body the client
+// stopped sending partway through.
+type failingBody struct {
+	data []byte
+	err  error
+}
+
+func (b *failingBody) Read(p []byte) (int, error) {
+	if len(b.data) == 0 {
+		return 0, b.err
+	}
+	n := copy(p, b.data)
+	b.data = b.data[n:]
+	return n, nil
+}
+
+func (b *failingBody) Close() error { return nil }
+
+// Capture's log lines name a request by its method, host, path and query
+// parameter names, and a body by its length and content type: no stretch of
+// a body or of a query value appears in the debug log in any encoding. A
+// body that failed partway through its read was logged whole, as base64, and
+// a request over a size limit by its URL whole, query values and all. The
+// log is rendered as production renders it, JSON and console.
+func TestCapture_LogsNoBodyAndNoQueryValue(t *testing.T) {
+	const token, email = "sk_live_9fQ2xLp7Rw", "ada.lovelace@example.com"
+	target := "http://localhost:8080/pay?token=" + token + "&email=" + url.QueryEscape(email)
+	// The request body ends in bytes no text holds. They are not looked for
+	// themselves (logleak.Unplantable: their hex.Dump text is dots, as any
+	// log's dotted text is); the body's base64 and hex, from any alignment,
+	// start with its printable stretch's, which is.
+	printable := []byte("card=4111111111111111&cvv=737&holder=Ada+Lovelace")
+	reqBody := append(append([]byte(nil), printable...), 0x00, 0xff, 0x10, 0x80, 0xfe, 0x7f, 0xc3, 0x28, 0x1b, 0x9d)
+	respUnit := []byte(`{"balance":"98765.43","iban":"DE89370400440532013000"}`)
+	planted := map[string][]byte{"the token": []byte(token), "the e-mail": []byte(email), "the request body": printable, "the response body": respUnit}
+
+	for _, c := range []struct {
+		name, msg string
+		req       func() io.ReadCloser
+		resp      []byte
+		level     zapcore.Level
+	}{
+		{"a body that fails partway", "failed to read the http request body",
+			func() io.ReadCloser {
+				return &failingBody{data: append([]byte(nil), reqBody...), err: errors.New("client reset the connection")}
+			}, respUnit, zapcore.DebugLevel},
+		{"a response over 1 MB", "response body exceeds 1MB during recording, storing only body size",
+			func() io.ReadCloser { return io.NopCloser(bytes.NewReader(reqBody)) },
+			bytes.Repeat(respUnit, LargeBodyThreshold/len(respUnit)+1), zapcore.DebugLevel},
+		{"a test case over 5 MB", "HTTP test case data exceeds 5MB limit, skipping capture",
+			func() io.ReadCloser { return io.NopCloser(bytes.NewReader(reqBody)) },
+			bytes.Repeat(respUnit, MaxTestCaseSize/len(respUnit)+1), zapcore.ErrorLevel},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			obs, logs := observer.New(zapcore.DebugLevel)
+			logger, out := logleak.Logger(obs)
+			req, err := http.NewRequest(http.MethodPost, target, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Body = c.req()
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(bytes.NewReader(c.resp))}
+			Capture(context.Background(), logger, make(chan *models.TestCase, 1), req, resp, time.Now(), time.Now(), models.IncomingOptions{}, true, false, 8080)
+
+			lines := logs.FilterMessage(c.msg).All()
+			if len(lines) != 1 || lines[0].Level != c.level {
+				t.Fatalf("want the line %q once at %v, got %d: %v", c.msg, c.level, len(lines), logs.All())
+			}
+			fields := lines[0].ContextMap()
+			meta, _ := fields["metadata"].(map[string]string)
+			if meta["method"] != http.MethodPost || meta["path"] != "/pay" || meta["query keys"] != "email,token" {
+				t.Errorf("the line names the request by its method, path and query parameter names; got %v", fields)
+			}
+			if c.msg == "failed to read the http request body" {
+				if fields["bytesRead"] != int64(len(reqBody)) || fields["contentType"] != "application/x-www-form-urlencoded" {
+					t.Errorf("the line gives how much of the body was read and its content type; got %v", fields)
+				}
+			}
+			log := out.String()
+			if !strings.Contains(log, c.msg) {
+				t.Fatalf("the rendered log is not the one checked: %s", log)
+			}
+			for what, content := range planted {
+				if found := logleak.Find(t, log, content); len(found) > 0 {
+					t.Errorf("the log holds %s: %v", what, found)
+				}
+			}
+		})
+	}
+}
+
+// errorLinesPast is a core that closes the returned channel once more than n
+// lines at Error or above were written through it: the event a test waits
+// on, with no clock, for a loop that logs on every turn.
+func errorLinesPast(core zapcore.Core, n int64) (zapcore.Core, <-chan struct{}) {
+	past := make(chan struct{})
+	var seen atomic.Int64
+	return zapcore.RegisterHooks(core, func(e zapcore.Entry) error {
+		if e.Level >= zapcore.ErrorLevel && seen.Add(1) == n+1 {
+			close(past)
+		}
+		return nil
+	}), past
+}
+
+// mime/multipart's error for a part of a multipart/form-data request body
+// it cannot read quotes a line of the body (a part header line without its
+// colon). ExtractFormData logs it at Error by the body's length, with no
+// byte of the body, and stops on it, so the line after (which the reader
+// would quote as a stray line) is never read.
+func TestExtractFormDataLogsAPartThatDoesNotParseByNoByteOfTheBody(t *testing.T) {
+	const secret = "Zq7FORMsecret41"
+	ct := "multipart/form-data; boundary=XYZ"
+	for _, c := range []struct{ name, body string }{
+		{"part header line without its colon", "--XYZ\r\npassword " + secret + "\r\n\r\nv\r\n--XYZ--\r\n"},
+		{"a value after a header line that does not parse", "--XYZ\r\nX-Bad-Header-Line\r\n\r\n" + secret + " value\r\n--XYZ--\r\n"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			obs, logs := observer.New(zapcore.DebugLevel)
+			core, spins := errorLinesPast(obs, 1)
+			logger, out := logleak.Logger(core)
+			done := make(chan []models.FormData)
+			go func() { done <- ExtractFormData(logger, []byte(c.body), ct) }()
+			select {
+			case <-done:
+			case <-spins:
+				t.Fatalf("ExtractFormData logged more than one Error line on one part that does not parse:\n%s", out.String())
+			}
+			lines := logs.FilterMessage("Error reading part").All()
+			if len(lines) != 1 {
+				t.Fatalf("precondition: want one %q line, got %d:\n%s", "Error reading part", len(lines), out.String())
+			}
+			want := fmt.Sprintf("the multipart/form-data body (%d bytes) has a part that does not parse", len(c.body))
+			if !strings.Contains(out.String(), want) {
+				t.Errorf("the Error line does not name the part by the body's length (%q):\n%s", want, out.String())
+			}
+			if found := logleak.Find(t, out.String(), []byte(secret)); len(found) > 0 {
+				t.Errorf("the capture log holds a byte of the request body: %v\n%s", found, out.String())
+			}
+		})
+	}
+}
+
+// A multipart/form-data body cut before its closing boundary (a client that
+// aborted its upload; the capture keeps a body that fails partway) makes
+// multipart.Reader return "NextPart: EOF", io.EOF wrapped, on every call.
+// ExtractFormData returns on it with the parts read whole kept; it once
+// compared err == io.EOF and logged at Error on every turn, forever.
+func TestExtractFormDataReturnsOnABodyCutBeforeItsClosingBoundary(t *testing.T) {
+	ct := "multipart/form-data; boundary=XYZ"
+	body := "--XYZ\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\nfirst\r\n" +
+		"--XYZ\r\nContent-Disposition: form-data; name=\"b\"\r\n\r\nvalue with no closing boundary"
+	obs, logs := observer.New(zapcore.DebugLevel)
+	core, spins := errorLinesPast(obs, 2)
+	logger, _ := logleak.Logger(core)
+	done := make(chan []models.FormData)
+	go func() { done <- ExtractFormData(logger, []byte(body), ct) }()
+	var got []models.FormData
+	select {
+	case got = <-done:
+	case <-spins:
+		t.Fatalf("ExtractFormData loops on a body cut before its closing boundary: %d Error lines and counting", logs.FilterLevelExact(zapcore.ErrorLevel).Len())
+	}
+	if len(got) != 1 || got[0].Key != "a" || !reflect.DeepEqual(got[0].Values, []string{"first"}) {
+		t.Errorf("ExtractFormData = %+v, want the whole part a=first kept", got)
+	}
+	// The cut is the end of the parts, not a part that does not parse.
+	if n := logs.FilterMessage("Error reading part").Len(); n != 0 {
+		t.Errorf("a body cut before its closing boundary logged %d %q lines, want none", n, "Error reading part")
 	}
 }

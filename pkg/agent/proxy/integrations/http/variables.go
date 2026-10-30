@@ -844,8 +844,8 @@ func (h *HTTP) serveVariablesBy(hit *varHit, consume func(*models.Mock) bool) (s
 		return nil, nil, true, nil
 	}
 	for _, b := range hit.binds {
-		h.Logger.Debug("variable bound", zap.String("variable", b.Name), zap.String("value", b.Value),
-			zap.String("recorded", b.Recorded), zap.String("mock", b.Mock), zap.String("place", b.Place))
+		h.Logger.Debug("variable bound", zap.String("variable", b.Name), zap.Int("value bytes", len(b.Value)),
+			zap.Int("recorded bytes", len(b.Recorded)), zap.String("mock", b.Mock), zap.String("place", models.FieldShape(b.Place)))
 	}
 	if !consume(hit.mock) {
 		return nil, nil, true, nil
@@ -870,7 +870,11 @@ func (hit *varHit) read(b variables.Binding) bool {
 
 // renderAnswers returns a copy of served (its response loaded) whose answer
 // places hold their variables' values, with digest headers of the recorded
-// body computed again over the new one.
+// body computed again over the new one. A problem's why names no value: the
+// learn step serves its pairings through here (claimLearned), and its why
+// becomes the miss's next step, which the agent logs at WARN and a proven
+// run's evidence keeps. The problem's expected and actual keep the values
+// for the report file.
 func (h *HTTP) renderAnswers(served *models.Mock, hit *varHit, table *variables.Table) (*models.Mock, *varProblem) {
 	var answers int
 	for _, d := range hit.decls {
@@ -919,7 +923,7 @@ func (h *HTTP) renderAnswers(served *models.Mock, hit *varHit, table *variables.
 				key, ok := headerKey(header, vp.place.Name)
 				if !ok || header[key] != d.recorded || len(resp.HeaderLineLengths[key]) > 1 {
 					return nil, &varProblem{mock: served.Name, name: d.name, place: vp.raw, expected: d.recorded,
-						why: fmt.Sprintf("its recorded response does not hold variable %s's recorded value %q as the one value of %s", d.name, d.recorded, vp.raw), next: "re-record the test"}
+						why: fmt.Sprintf("its recorded response does not hold variable %s's recorded value (%d bytes) as the one value of %s", d.name, len(d.recorded), vp.raw), next: "re-record the test"}
 				}
 				header[key] = b.Value
 				changed[strings.ToLower(key)] = true
@@ -948,7 +952,7 @@ func (h *HTTP) renderAnswers(served *models.Mock, hit *varHit, table *variables.
 				continue
 			}
 			h.Logger.Warn("a variable changed the body of a recorded answer, and keploy serves this header as recorded: it cannot tell how the value was computed",
-				zap.String("mock", served.Name), zap.String("header", k))
+				zap.String("mock", served.Name), zap.String("header name", k))
 		}
 	}
 	out := served.ShallowCopy()

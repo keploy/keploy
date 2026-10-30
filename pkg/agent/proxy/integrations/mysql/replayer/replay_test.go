@@ -3,6 +3,7 @@ package replayer
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/logleak"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
@@ -156,6 +158,56 @@ func TestACommandMissNamesItsDestination(t *testing.T) {
 	}
 	if rep := r.MismatchReport(); rep.Destination != testDBAddr || rep.ActualSummary != "COM_QUERY SELECT 1" {
 		t.Fatalf("report %+v; want the miss of COM_QUERY SELECT 1 at %s", *rep, testDBAddr)
+	}
+}
+
+// exactDb is fakeMockDb serving exactly (integrations.ExactServing): a
+// recording answers a call only with the call's own values.
+type exactDb struct{ *fakeMockDb }
+
+func (exactDb) ExactServing() bool { return true }
+
+// The line a command's miss closes its connection on names what to do next
+// as the miss report says it (mismatch.LogNextStep): a recording turned away
+// for another inline literal advises marking the literal as noise, written as
+// the user marks it ({"body.query.literals.0": []}, a position keploy
+// counts, kept whole), and no stretch of either side's literal appears in the
+// log in any encoding. Shaped as a key, the position was written {} in the
+// advice to write it as listed.
+func TestACommandMissClosesItsConnectionWithTheAdviceAsTheUserWritesIt(t *testing.T) {
+	const recTok, liveTok = "sk_rec_Mm3Pq8Zt", "sk_live_Q7wZr9Kf"
+	tokenQuery := func(tok string) string { return "SELECT id FROM sessions WHERE token = '" + tok + "'" }
+	obs, logs := observer.New(zapcore.DebugLevel)
+	logger, out := logleak.Logger(obs)
+	db := exactDb{&fakeMockDb{session: []*models.Mock{nativeHandshake(), readbackMock("q1", tokenQuery(recTok), "row=1", zeroTime())}}}
+	client, done := replayLogged(t, db, logger)
+	client.greetAndAnswer("app", mysql.Native)
+	if ok := client.read(); len(ok) == 0 || ok[0] != mysql.OK {
+		t.Fatalf("the client read %x after its handshake; want the recorded OK", ok)
+	}
+	client.send(0, append([]byte{mysql.COM_QUERY}, tokenQuery(liveTok)...))
+	if got, err := io.ReadAll(client.c); len(got) != 0 || err != nil {
+		t.Fatalf("the client read %q, %v after its query; want its connection closed unanswered", got, err)
+	}
+	if err := <-done; !errors.Is(err, models.ErrNoMockMatched) {
+		t.Fatalf("Replay returned %v; want the query's miss", err)
+	}
+	const line = "Connection closing due to no matching mock found."
+	lines := logs.FilterMessage(line).All()
+	if len(lines) == 0 {
+		t.Fatalf("the line %q was not logged; got %v", line, logs.All())
+	}
+	if next := fmt.Sprint(lines[0].ContextMap()["next_step"]); !strings.Contains(next, `{"body.query.literals.0": []}`) {
+		t.Errorf("next_step does not advise the literal's noise key as the user writes it: %s", next)
+	}
+	log := out.String()
+	if !strings.Contains(log, line) {
+		t.Fatalf("the rendered log is not the one checked: %s", log)
+	}
+	for what, content := range map[string]string{"the recorded literal": recTok, "the live literal": liveTok} {
+		if found := logleak.Find(t, log, []byte(content)); len(found) > 0 {
+			t.Errorf("the log holds %s: %v", what, found)
+		}
 	}
 }
 

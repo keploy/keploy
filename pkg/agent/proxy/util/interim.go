@@ -27,15 +27,19 @@ func IsInterimStatus(code int) bool {
 //
 // onInterim, if not nil, is given each interim response in the order they
 // come, before the next is read; an error from it ends the read, and is
-// returned as it is. A 101 is returned as the final response. Interim
-// responses past maxInterimHeaderBytes end the read with
-// errTooManyInterimResponses.
+// returned as it is. An error of net/http's for a response it cannot parse
+// is named without its text (models.HTTPParseError). A 101 is returned as
+// the final response. Interim responses past maxInterimHeaderBytes end the
+// read with errTooManyInterimResponses.
 func ReadFinalResponse(r *bufio.Reader, req *http.Request, onInterim func(*http.Response) error) (*http.Response, error) {
 	interimBytes := 0
 	for {
 		resp, err := http.ReadResponse(r, req)
-		if err != nil || !IsInterimStatus(resp.StatusCode) {
-			return resp, err
+		if err != nil {
+			return nil, models.HTTPParseError("the HTTP response", -1, err)
+		}
+		if !IsInterimStatus(resp.StatusCode) {
+			return resp, nil
 		}
 		if interimBytes += headerSize(resp); interimBytes > maxInterimHeaderBytes {
 			return nil, errTooManyInterimResponses

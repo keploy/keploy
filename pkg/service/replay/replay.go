@@ -1770,7 +1770,7 @@ func (r *Replayer) applyBasePath(testCase *models.TestCase) error {
 		return fmt.Errorf("cannot send the test to the base path %q: %w", r.config.Test.BasePath, err)
 	}
 	testCase.HTTPReq.URL = newURL
-	r.logger.Debug("test case request origin", zap.String("testcase", testCase.Name), zap.String("TestCaseURL", testCase.HTTPReq.URL), zap.String("basePath", r.config.Test.BasePath))
+	r.logger.Debug("test case request origin", zap.String("testcase", testCase.Name), zap.Any("metadata", utils.URLMeta(testCase.HTTPReq.URL)), zap.String("basePath", r.config.Test.BasePath))
 	return nil
 }
 
@@ -8132,20 +8132,20 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 				return
 			}
 
-			header := "\n\tTest Suite Name\t\tTotal Test\tPassed\t\tFailed"
+			columns := "\n\tTest Suite Name\t\tTotal Test\tPassed\t\tFailed"
 			if totalTestObsoleteSnapshot > 0 {
-				header += "\t\tObsolete"
+				columns += "\t\tObsolete"
 			}
 			if totalTestIgnoredSnapshot > 0 {
-				header += "\t\tIgnored"
+				columns += "\t\tIgnored"
 			}
-			header += "\t\tTime Taken"
+			columns += "\t\tTime Taken"
 			if totalTestFailedSnapshot > 0 {
-				header += "\tFailed Testcases"
+				columns += "\tFailed Testcases"
 			}
-			header += "\t\n"
+			columns += "\t\n"
 
-			_, err := pp.Printf(header)
+			_, err := pp.Printf(columns)
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to print test suite summary header")
 				return
@@ -8210,20 +8210,20 @@ func (r *Replayer) printSummary(_ context.Context, _ bool) {
 			}
 			fmt.Printf("\tTotal time taken: %s\n", totalTestTimeTakenStr)
 
-			header := "\n\tTest Suite Name\t\tTotal Test\tPassed\t\tFailed"
+			columns := "\n\tTest Suite Name\t\tTotal Test\tPassed\t\tFailed"
 			if totalTestObsoleteSnapshot > 0 {
-				header += "\t\tObsolete"
+				columns += "\t\tObsolete"
 			}
 			if totalTestIgnoredSnapshot > 0 {
-				header += "\t\tIgnored"
+				columns += "\t\tIgnored"
 			}
-			header += "\t\tTime Taken"
+			columns += "\t\tTime Taken"
 			if totalTestFailedSnapshot > 0 {
-				header += "\tFailed Testcases"
+				columns += "\tFailed Testcases"
 			}
-			header += "\t\n"
+			columns += "\t\n"
 
-			fmt.Print(header)
+			fmt.Print(columns)
 
 			for _, testSuiteName := range testSuiteNames {
 				report := reportSnapshot[testSuiteName]
@@ -8626,7 +8626,7 @@ func (r *Replayer) replaceHostInTestCase(testCase *models.TestCase, newHost, log
 			utils.LogError(r.logger, err, fmt.Sprintf("failed to replace host to %s", logContext))
 			return err
 		}
-		r.logger.Debug("", zap.String(fmt.Sprintf("replaced %s", logContext), testCase.HTTPReq.URL))
+		r.logger.Debug("", zap.Any(fmt.Sprintf("replaced %s", logContext), utils.URLMeta(testCase.HTTPReq.URL)))
 
 	case models.GRPC_EXPORT:
 		testCase.GrpcReq.Headers.PseudoHeaders[":authority"], err = utils.ReplaceGrpcHost(testCase.GrpcReq.Headers.PseudoHeaders[":authority"], newHost)
@@ -8634,7 +8634,10 @@ func (r *Replayer) replaceHostInTestCase(testCase *models.TestCase, newHost, log
 			utils.LogError(r.logger, err, fmt.Sprintf("failed to replace host to %s", logContext))
 			return err
 		}
-		r.logger.Debug("", zap.String(fmt.Sprintf("replaced %s", logContext), testCase.GrpcReq.Headers.PseudoHeaders[":authority"]))
+		// The authority is the host and port the test is sent to, no path
+		// and no value.
+		authority := testCase.GrpcReq.Headers.PseudoHeaders[":authority"]
+		r.logger.Debug("", zap.String(fmt.Sprintf("replaced %s", logContext), authority))
 	}
 	return nil
 }

@@ -4,6 +4,7 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -12,7 +13,8 @@ import (
 // the matcher's next step, when it happened, why it missed (the learn step's
 // reason, in record's full round), how an answered call was answered and the
 // process that made the call (UnmatchedCall.Answer, Source: names,
-// no value), and the call's shape
+// no value), the parser's log summary (LogSummary: a shape written from no
+// value, by its parser's promise), and the call's shape
 // (MissShape): for HTTP and gRPC the method and the target's shape,
 // for SQL the statement with its literals written "?", for MongoDB the
 // command, its namespace and its filter's keys. No body, no bound
@@ -25,7 +27,7 @@ import (
 // (SanitizedNextStep). ChargedTo stays: it names a test, no value.
 func (m UnmatchedCall) Sanitized() UnmatchedCall {
 	out := UnmatchedCall{Protocol: m.Protocol, Destination: m.Destination, LiveDestination: m.LiveDestination, MatchPhase: m.MatchPhase,
-		ClosestMock: m.ClosestMock, NextSteps: m.SanitizedNextStep(), At: m.At, ActualSummary: MissShape(m), Differs: FieldShapes(m.Differs), FieldReasons: FieldReasonShapes(m.FieldReasons),
+		ClosestMock: m.ClosestMock, NextSteps: m.SanitizedNextStep(), At: m.At, ActualSummary: MissShape(m), LogSummary: m.LogSummary, Differs: FieldShapes(m.Differs), FieldReasons: FieldReasonShapes(m.FieldReasons),
 		Kind: m.Kind, Recorded: m.Recorded, NotOwned: m.NotOwned, Reason: m.Reason, Concurrent: m.Concurrent.Clone(),
 		// An answered call stays one (UnmatchedCall.Answer): how it was
 		// answered and by which process, no value.
@@ -90,11 +92,33 @@ func (m UnmatchedCall) SanitizedNextStep() string {
 }
 
 // shapedNextStep is m's own next step with every field path it names in its
-// shape (SanitizedNextStep).
+// shape (SanitizedNextStep), and every sessionCalls path prefix it advises
+// (pathPrefix: "/users/42/orders", the call's own path) in the shape
+// MissShape writes the call's path in: a segment that looks like a value, or
+// that a test variable's place or a field diff names, is {}.
 func (m UnmatchedCall) shapedNextStep() string {
 	text := m.NextSteps
 	if text == "" {
 		return ""
+	}
+	places := append([]string(nil), m.VariablePlaces...)
+	for _, d := range m.FieldDiffs {
+		places = append(places, d.Path)
+	}
+	shapedPrefix := false
+	text = pathPrefixRule.ReplaceAllStringFunc(text, func(rule string) string {
+		shaped := pathHole
+		if p, err := strconv.Unquote(strings.TrimPrefix(rule, pathPrefixLead)); err == nil {
+			shaped = holePathPlaces(PathShape(p), places)
+		}
+		out := pathPrefixLead + strconv.Quote(shaped)
+		shapedPrefix = shapedPrefix || out != rule
+		return out
+	})
+	if shapedPrefix {
+		// The shape is no rule a user can declare as it reads (a rule's
+		// prefix is compared as written): say so, so the {} is not pasted.
+		text += " " + PathPrefixShapedNote
 	}
 	var paths []string
 	for _, d := range m.FieldDiffs {
@@ -121,6 +145,18 @@ func (m UnmatchedCall) shapedNextStep() string {
 		return FieldShape(trimmed) + p[len(trimmed):]
 	})
 }
+
+// pathPrefixRule is a sessionCalls rule's path prefix as a next step quotes
+// it (Go-quoted): the HTTP matcher advises the call's own path.
+var pathPrefixRule = regexp.MustCompile(pathPrefixLead + `"(?:[^"\\]|\\.)*"`)
+
+// pathPrefixLead is what a next step writes before a rule's quoted prefix.
+const pathPrefixLead = "pathPrefix: "
+
+// PathPrefixShapedNote is what a next step whose advised sessionCalls prefix
+// a log or evidence writes in its shape says of it: each {} is a segment of
+// the call's own path, kept out of logs and evidence.
+const PathPrefixShapedNote = "(That pathPrefix is written in the call's shape, each {} a segment of the call's own path kept out of logs and evidence: declare it with those segments written as the call sends them.)"
 
 // bodyPlace is a body field path as a matcher's or a learn step's text names
 // one (body.cmd.filter.appId, body.docs.msgs.0.q.entity_id, body[0].id): the

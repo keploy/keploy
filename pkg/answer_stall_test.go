@@ -273,7 +273,7 @@ func stallApp(t *testing.T) string {
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.(http.Flusher).Flush()
 			<-hold
-		case "/sse-keepalive-none":
+		case "/sse-keepalive-none", "/sse-keepalive-none/u_8812345Zq":
 			w.Header().Set("Content-Type", "text/event-stream")
 			_, _ = w.Write([]byte(": ping\n\n"))
 			w.(http.Flusher).Flush()
@@ -399,6 +399,20 @@ func TestEveryAnswerThatNeverEndedEndsOnTheStallRule(t *testing.T) {
 		ok, err := readStream(t, stream("/sse-past", "text/event-stream", frames("data", "a", "b")))
 		if !ok || !errors.Is(err, ErrStreamHeldOpen) || !strings.Contains(fmtErr(err), "every recorded frame came, and the stream did not end") || !strings.Contains(fmtErr(err), "GET /sse-past") {
 			t.Fatalf("%v, %v; want judged on what came, not judged: past the recording", ok, err)
+		}
+	})
+	// A stream's verdict, logged and saved, names its request by its shape
+	// (the stream's Target): no query value and no path segment that holds
+	// a value.
+	t.Run("a stream's target names no value of its request", func(t *testing.T) {
+		ok, err := readStream(t, stream("/sse-keepalive-none/u_8812345Zq?token=tok_SeCrEt99x", "text/event-stream", nil))
+		if want := "the app sent its answer's headers and nothing of its body but keepalives, for GET /sse-keepalive-none/{}"; ok || !errors.Is(err, ErrAnswerStalled) || fmtErr(err) != want {
+			t.Fatalf("%v, %v; want it failing closed, saying %q", ok, err, want)
+		}
+		for _, v := range []string{"u_8812345Zq", "tok_SeCrEt99x", "token"} {
+			if strings.Contains(fmtErr(err), v) {
+				t.Fatalf("%q names %q of the request", fmtErr(err), v)
+			}
 		}
 	})
 	t.Run("R2 NDJSON short of its recording", func(t *testing.T) {

@@ -14,6 +14,7 @@ import (
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
 	"golang.org/x/sync/errgroup"
 )
@@ -354,6 +355,12 @@ func TestReadResponseV2ReadsPastAHundredContinueInItsOwnRead(t *testing.T) {
 // makes. The mocks it records are forwarded to the returned channel.
 func encodeHarness(t *testing.T, first string, upstream func(net.Conn)) (app net.Conn, done <-chan error, mocks <-chan *models.Mock) {
 	t.Helper()
+	return encodeHarnessLogged(t, zaptest.NewLogger(t), first, upstream)
+}
+
+// encodeHarnessLogged is encodeHarness with encodeHTTP logging to logger.
+func encodeHarnessLogged(t *testing.T, logger *zap.Logger, first string, upstream func(net.Conn)) (app net.Conn, done <-chan error, mocks <-chan *models.Mock) {
+	t.Helper()
 	out := make(chan *models.Mock, 4)
 	if mgr := syncMock.Get(); mgr != nil {
 		mgr.SetOutputChannel(out)
@@ -367,7 +374,7 @@ func encodeHarness(t *testing.T, first string, upstream func(net.Conn)) (app net
 	g, gctx := errgroup.WithContext(ctx)
 	gctx = context.WithValue(gctx, models.ErrGroupKey, g)
 	gctx = context.WithValue(gctx, models.ClientConnectionIDKey, "test-conn")
-	h := &HTTP{Logger: zaptest.NewLogger(t)}
+	h := &HTTP{Logger: logger}
 	d := make(chan error, 1)
 	returned := make(chan struct{})
 	go func() {

@@ -1,11 +1,17 @@
 package models
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"net"
 	"net/url"
+	"os"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -96,6 +102,17 @@ func IsPathProtocol(protocol string) bool {
 // its look. "" for a mock with no HTTP request; {} for a URL that does not
 // parse.
 func MockURLShape(m *Mock) string {
+	return mockURLShape(m, true)
+}
+
+// MockPathShape is MockURLShape of m's path alone: no host, no query.
+func MockPathShape(m *Mock) string {
+	return mockURLShape(m, false)
+}
+
+// mockURLShape is MockURLShape, or MockPathShape without the URL's host and
+// query.
+func mockURLShape(m *Mock, whole bool) string {
 	if m == nil || m.Spec.HTTPReq == nil {
 		return ""
 	}
@@ -110,12 +127,15 @@ func MockURLShape(m *Mock) string {
 	if relative {
 		p = "/" + p
 	}
-	if u.RawQuery != "" {
+	if whole && u.RawQuery != "" {
 		p += "?" + u.RawQuery
 	}
 	shape := holePathPlaces(PathShape(p), DeclaredPathPlaces(m))
 	if relative {
 		shape = strings.TrimPrefix(shape, "/")
+	}
+	if !whole {
+		return shape
 	}
 	return u.Host + shape
 }
@@ -174,13 +194,16 @@ func FieldShapes(fields []string) []string {
 // field (header.Authorization). A raw dotted key is shaped part by part
 // (alice.smith@example.com keeps "alice"), so a producer shapes its keys
 // first (KeyShape), as the strict comparison does. An SQL call's place name
-// is kept whole too (sqlPlace: bind.$1, literal.3): a position keploy counts
-// in the statement, not a value the app sent.
+// is kept whole too (sqlPlace: bind.$1, literal.3), as is a MySQL command's
+// (mysqlPlace: body.parameters.0.value, body.query.literals.2): a position
+// keploy counts in the statement, not a value the app sent. So is an HTTP
+// call's path segment place (httpPathPlace: url.path.1): the segment's index,
+// never the segment.
 func FieldShape(f string) string {
 	if name, ok := strings.CutPrefix(f, "header."); ok && name != "" && !strings.Contains(name, ".") {
 		return f
 	}
-	if sqlPlace.MatchString(f) {
+	if sqlPlace.MatchString(f) || mysqlPlace.MatchString(f) || httpPathPlace.MatchString(f) {
 		return f
 	}
 	parts := strings.Split(f, ".")
@@ -194,6 +217,19 @@ func FieldShape(f string) string {
 	return strings.Join(parts, ".")
 }
 
+// LearnedFieldShape is a field the learn step learned, as its result names
+// it ("body.lastSeen (noise)", "body.token (variable t: bind)"): the field's
+// path in its shape (FieldShape), so a map key that may be a value the app
+// sent (an e-mail address, a user ID) is {}, and keploy's own note after it
+// kept.
+func LearnedFieldShape(entry string) string {
+	path, note := entry, ""
+	if i := strings.LastIndex(entry, " ("); i >= 0 && strings.HasSuffix(entry, ")") {
+		path, note = entry[:i], entry[i:]
+	}
+	return FieldShape(path) + note
+}
+
 // fieldIndexes are a field part's array indexes: [], [0], [3][].
 var fieldIndexes = regexp.MustCompile(`^(\[[0-9]{0,4}\])+$`)
 
@@ -202,6 +238,24 @@ var fieldIndexes = regexp.MustCompile(`^(\[[0-9]{0,4}\])+$`)
 // parameter, and literal.N, the Nth constant of its text, each counted from
 // 1, up to five digits (a statement binds at most 65535 parameters).
 var sqlPlace = regexp.MustCompile(`^(bind\.\$|literal\.)[1-9][0-9]{0,4}$`)
+
+// mysqlPlace is a whole field that is a MySQL command's place as the MySQL
+// parser's compared body names it: the command's Nth bound parameter
+// (parameters.N, or one of its fields: parameters.N.value) and its
+// statement's Nth inline literal (query.literals.N), each counted from 0, up
+// to five digits (a statement binds at most 65535 parameters), with or
+// without the body root (a user's noise key is written without it). Kept
+// whole, the field reads as the user marks it as noise; the same names under
+// any other root (body.data.parameters.42, an SLD chunk's JSON) are shaped as
+// every key is.
+var mysqlPlace = regexp.MustCompile(`^(body\.)?(parameters\.(0|[1-9][0-9]{0,4})(\.(type|unsigned|name|value))?|query\.literals\.(0|[1-9][0-9]{0,4}))$`)
+
+// httpPathPlace is a whole field that is an HTTP call's path segment place as
+// the HTTP parser learns and compares it (url.path.<i>, its ith segment
+// counted from 0, up to four digits as FieldShape keeps an index): keploy's
+// count of the segment, so a learned line names which segment the user marks
+// as noise. The segment itself is never in the field.
+var httpPathPlace = regexp.MustCompile(`^url\.path\.(0|[1-9][0-9]{0,3})$`)
 
 // KeyShape is an object key, a form key or a query name as a field's name
 // holds it: itself when it reads as a name (PathShape's segment rule), {}
@@ -540,6 +594,67 @@ func targetShape(t string) string {
 	return PathShape(t)
 }
 
+// TargetShape is an HTTP request target as a log names it (targetShape): a
+// path in its shape with its query's names. An absolute URL is named by its
+// path alone, its host dropped (http://api.example.com/pay?token=x is
+// /pay?token={}); a target that starts with a host keploy reads as one
+// (hostPort: db:5432/x) keeps that host. Never a path value or a query value.
+func TargetShape(t string) string { return targetShape(t) }
+
+// HTTPParseError is err, net/http's error for an HTTP/1 message it could not
+// parse, as keploy logs and returns it: what did not parse and its length in
+// bytes, never err's text, which quotes the request line or a header line
+// (a query value, an Authorization line without its colon). n < 0 is a
+// message read off a connection, whose length is not known; its error names
+// no length. A short read keeps its sentinel (io.ErrUnexpectedEOF, io.EOF),
+// whose text is fixed, so errors.Is still tells one, and a bare io.EOF (a
+// message that never began) is returned as it is, so err == io.EOF still
+// tells a clean close. The connection's own error, which net/http returns
+// as the reader gave it (connReadError), is returned as it is: its text
+// names addresses and the system's words, never a byte of the message.
+func HTTPParseError(what string, n int, err error) error {
+	return unparsedError(what, n, "does not parse", err)
+}
+
+// MultipartPartError is err, mime/multipart's error for a part of a
+// multipart body it could not read (NextPart's, or a part's read), as
+// keploy logs and returns it: what held the part and its length in bytes,
+// never err's text, which quotes a line of the body (a part's header line
+// without its colon, a stray line), with HTTPParseError's sentinels and
+// connection errors kept. n < 0 names no length.
+func MultipartPartError(what string, n int, err error) error {
+	return unparsedError(what, n, "has a part that does not parse", err)
+}
+
+// unparsedError is HTTPParseError's and MultipartPartError's: "<what> (<n>
+// bytes) <says>", with a short read's sentinel wrapped.
+func unparsedError(what string, n int, says string, err error) error {
+	if err == io.EOF || connReadError(err) {
+		return err
+	}
+	size := ""
+	if n >= 0 {
+		size = fmt.Sprintf(" (%d bytes)", n)
+	}
+	for _, short := range []error{io.ErrUnexpectedEOF, io.EOF} {
+		if errors.Is(err, short) {
+			return fmt.Errorf("%s%s %s: %w", what, size, says, short)
+		}
+	}
+	return fmt.Errorf("%s%s %s", what, size, says)
+}
+
+// connReadError reports whether err is a connection's read error, as a
+// net.Conn returns it: a *net.OpError (a reset, a timeout, a TLS alert),
+// net.ErrClosed, os.ErrDeadlineExceeded, io.ErrClosedPipe or a context's
+// end. net/http makes none of these from a message's bytes; each it makes
+// (a *url.Error, which is a net.Error too, among them) is not one.
+func connReadError(err error) bool {
+	var op *net.OpError
+	return errors.As(err, &op) || errors.Is(err, net.ErrClosed) || errors.Is(err, os.ErrDeadlineExceeded) ||
+		errors.Is(err, io.ErrClosedPipe) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
+
 // hostPort reports whether h reads as a host, with an optional port from 1 to
 // 65535: an IPv4 address, a bracketed IPv6 address, or a name that is dotted
 // or has a port (pay.internal, db:5432), whose every label holds a letter and
@@ -649,7 +764,8 @@ func isMethodWord(s string) bool {
 
 // holePathPlaces is a call's shape with every URL path segment one of places
 // names (url.path[<n>], counted from 0 after the leading slash, as a test
-// variable's place is) written {}: the call says a value the app sent is
+// variable's place is, or the learn step's url.path.<n>: segmentPlaceIndex)
+// written {}: the call says a value the app sent is
 // there, whatever its look. Every other place is no path segment. A place
 // counts the segments of the escaped path, so the shape must be of the
 // escaped path too, as a miss at a variable's place names it: decoded, a %2F
@@ -666,7 +782,7 @@ func holePathPlaces(shape string, places []string) string {
 	segs := strings.Split(shape[start+1:end], "/")
 	holed := false
 	for _, p := range places {
-		n, ok := pathPlaceIndex(p)
+		n, ok := segmentPlaceIndex(p)
 		if ok && n < len(segs) && segs[n] != pathHole {
 			segs[n], holed = pathHole, true
 		}
@@ -675,6 +791,17 @@ func holePathPlaces(shape string, places []string) string {
 		return shape
 	}
 	return shape[:start+1] + strings.Join(segs, "/") + shape[end:]
+}
+
+// segmentPlaceIndex is the segment a place names in either dialect a miss
+// may carry: a test variable's (url.path[<n>], pathPlaceIndex) and the learn
+// step's (url.path.<n>, httpPathPlace), each counted from 0 as the other is.
+func segmentPlaceIndex(place string) (int, bool) {
+	if httpPathPlace.MatchString(place) {
+		n, err := strconv.Atoi(strings.TrimPrefix(place, "url.path."))
+		return n, err == nil
+	}
+	return pathPlaceIndex(place)
 }
 
 // pathPlaceIndex is the segment a place "url.path[<n>]" names, read as a
@@ -710,6 +837,11 @@ func isPathNameSeparator(c byte) bool {
 // maxSQLText bounds a statement's shape.
 const maxSQLText = 160
 
+// maxSQLScan bounds how much of a statement SQLShape reads. A shape is at most
+// maxSQLText long, and a statement may run to megabytes (a bulk INSERT, a
+// blob literal) on an Error line written whatever the log level.
+const maxSQLScan = 4096
+
 // SQLShape is a SQL statement with every quoted string and number written
 // "?". It fails closed: what it cannot read for certain is withheld, the rest
 // of the statement written "…": a literal holding a backslash (MySQL reads
@@ -719,8 +851,19 @@ const maxSQLText = 160
 // to a prepared statement's summary) are dropped whole, and a backtick
 // identifier is kept only when it holds no quote. A quoted identifier
 // (Postgres "table") is written "?" too: hiding a name beats keeping a value.
+// A statement is read to maxSQLScan bytes; what lies past them could leave a
+// quote unpaired, so one longer is withheld from its first literal on, as a
+// statement with a literal never closed is.
 func SQLShape(q string) string {
 	if i := strings.Index(q, "params=["); i >= 0 {
+		q = q[:i]
+	}
+	cut := len(q) > maxSQLScan
+	if cut {
+		i := maxSQLScan
+		for i > 0 && !utf8.RuneStart(q[i]) {
+			i--
+		}
 		q = q[:i]
 	}
 	var b strings.Builder
@@ -792,6 +935,15 @@ scan:
 			b.WriteByte(c)
 			i++
 		}
+	}
+	if cut {
+		if firstLiteral >= 0 {
+			s := b.String()[:firstLiteral]
+			b.Reset()
+			b.WriteString(s)
+			b.WriteString("?")
+		}
+		withheld = true
 	}
 	out := strings.TrimSpace(sqlSpace.ReplaceAllString(b.String(), " "))
 	if withheld {

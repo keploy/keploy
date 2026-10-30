@@ -2,10 +2,12 @@ package templates
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.keploy.io/server/v3/pkg/agent/logleak"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -132,6 +134,30 @@ func TestRequest_ANonNumberForAnIntPlaceholderStaysAsWritten(t *testing.T) {
 	r := newRun(t, map[string]interface{}{"n": "abc"})
 	req := r.Request(models.HTTPReq{Body: `{"n":"{{int .n}}"}`})
 	assert.Equal(t, `{"n":"{{int .n}}"}`, req.Body)
+}
+
+// The warning that a value is not a number of its placeholder's type names
+// the placeholder and the value's length, never the value: a template's
+// value is the app's content (a token a response gave).
+func TestRequest_ANonNumberIsWarnedOfByItsLengthAlone(t *testing.T) {
+	const value = "tok-1f9a-NOT-A-NUMBER"
+	// A placeholder in the URL, and one that is a JSON body's bare leaf: each
+	// warned of on a run of its own (a run warns of a placeholder once).
+	for _, req := range []models.HTTPReq{
+		{Body: `{"n":"{{int .n}}"}`, URL: "http://h/{{int .n}}"},
+		{Body: `{"n":{{int .n}}}`, URL: "http://h/x"},
+	} {
+		logger, out := logleak.Logger(nil)
+		r := NewRun(logger, map[string]interface{}{"n": value}, nil)
+		r.Request(req)
+		got := out.String()
+		if !strings.Contains(got, "not a number of its type") || !strings.Contains(got, `"value_bytes":21`) {
+			t.Fatalf("%s: no warning names the value by its length:\n%s", req.Body, got)
+		}
+		if found := logleak.Find(t, got, []byte(value)); len(found) > 0 {
+			t.Errorf("%s: the warning holds the value: %v\n%s", req.Body, found, got)
+		}
+	}
 }
 
 // What makes a re-send safe: the request is a copy. The test case is left

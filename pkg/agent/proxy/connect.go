@@ -11,6 +11,7 @@ import (
 
 	proxytls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
+	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
 
@@ -64,7 +65,7 @@ func handleConnectTunnel(
 	reader := bufio.NewReader(srcConn)
 	req, err := http.ReadRequest(reader)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse CONNECT request: %w", err)
+		return nil, fmt.Errorf("failed to parse CONNECT request: %w", models.HTTPParseError("the CONNECT request", -1, err))
 	}
 	defer req.Body.Close()
 

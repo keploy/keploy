@@ -1132,6 +1132,12 @@ func TestSanitizedMissKeepsTheShapeAndTheAdvice(t *testing.T) {
 		ReceivedReq: `{"cmd":{"$db":"api","find":"app_config_audits","filter":{"appId":"6720b1c2e4b0a1b2c3d4e5f6"}}}`})
 	require.Equal(t, "find on api.app_config_audits filter appId", mongo.ActualSummary)
 	require.Empty(t, mongo.ReceivedReq)
+	// A parser's stated log summary is a shape of no value, by its promise
+	// (models.MockMismatchReport.LogSummary): evidence keeps it, so a line
+	// that names the call from the evidence names it as the agent's does.
+	stated := sanitizedMiss(models.UnmatchedCall{Protocol: "HBase", ActualSummary: "get users row=a@b.c", LogSummary: "get users"})
+	require.Empty(t, stated.ActualSummary, "a protocol keploy has no shape for keeps no call text")
+	require.Equal(t, "get users", models.LoggedCallName(stated), "evidence dropped the parser's stated log summary")
 
 	// A repeat note names recordings, a test and times, never a value the app
 	// sent: it is kept, on a copy, so judging can name the earlier test.
@@ -1265,6 +1271,11 @@ func TestEvidenceKeepsAnHTTPCallsShape(t *testing.T) {
 	require.Equal(t, "DELETE pay.internal:8443/carts/{}?force={} (mock-3)", mockText("mock-3", mock))
 	grpc := models.UnmatchedCall{Protocol: "gRPC", ActualSummary: "/orders.v1.OrderService/PlaceOrder", Destination: "orders:9090"}
 	require.Equal(t, "/orders.v1.OrderService/PlaceOrder to orders:9090", missText(sanitizedMiss(grpc)), "a gRPC miss names its RPC")
+	// A parser's stated log summary names the call in a reason, as the CLI's
+	// lines name it (models.LoggedCallName): never its summary.
+	stated := models.UnmatchedCall{Protocol: "MongoDB", ActualSummary: `find orders {"owner":"alice@example.com"}`, LogSummary: "find orders", Destination: "db:27017"}
+	require.Equal(t, "find orders to db:27017", missText(sanitizedMiss(stated)))
+	require.Equal(t, models.LoggedCallName(stated)+" to db:27017", missText(stated))
 	// A test variable's place names a path segment that holds the app's
 	// value: it is {}, whatever its look.
 	variable := sanitizedMiss(models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "GET /orders/kqzxwv", MatchPhase: models.MatchPhaseVariable, ClosestMock: "mock-1",

@@ -165,12 +165,15 @@ func ReplacePort(currentURL string, port string) (string, error) {
 	return parsedURL.String(), nil
 }
 
-// GetReqMeta is what a log says about req: its method, its host, its path
-// and the names of its query parameters. Never a query value, a header or
-// the body: those are the application's content (tokens, credentials), and
-// logs get pasted into issues. A query part with no "=" is not named either,
-// since it may be a bare token; a bare token that holds "=" (padded base64,
-// ?dG9rZW4=) is named by what comes before its first "=" (dG9rZW4).
+// GetReqMeta is what a log says about req: its method, its host, its path's
+// shape (models.PathShape: a segment that may hold a value, an ID or an
+// e-mail address, written {}) and the names of its query parameters, each
+// by its shape (models.KeyShape). Never a query value, a header or the body:
+// those are the application's content (tokens, credentials), and logs get
+// pasted into issues. A query part with no "=" is not named either, since it
+// may be a bare token; a bare token that holds "=" (padded base64,
+// ?dG9rZW4=) is named by what comes before its first "=", which by its look
+// may be a value ({}).
 func GetReqMeta(req *http.Request) map[string]string {
 	reqMeta := map[string]string{}
 	if req == nil {
@@ -179,17 +182,37 @@ func GetReqMeta(req *http.Request) map[string]string {
 	reqMeta["method"] = req.Method
 	reqMeta["host"] = req.Host
 	if req.URL != nil {
-		reqMeta["path"] = req.URL.Path
-		if keys := queryKeys(req.URL.RawQuery); len(keys) > 0 {
-			reqMeta["query keys"] = strings.Join(keys, ",")
-		}
+		addURLMeta(reqMeta, req.URL)
 	}
 	return reqMeta
 }
 
+// URLMeta is what a log says about the URL raw, as GetReqMeta says it of a
+// request's: its host, its path's shape and the names of its query
+// parameters, by their shapes. Never a query value, a user's credentials or
+// a fragment. A URL that does not parse is said to be one, and nothing of
+// it is (url.Parse's error quotes it).
+func URLMeta(raw string) map[string]string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return map[string]string{"url": "unparseable"}
+	}
+	meta := map[string]string{"host": u.Host}
+	addURLMeta(meta, u)
+	return meta
+}
+
+// addURLMeta adds u's path shape and its query parameters' names to meta.
+func addURLMeta(meta map[string]string, u *url.URL) {
+	meta["path"] = models.PathShape(u.EscapedPath())
+	if keys := queryKeys(u.RawQuery); len(keys) > 0 {
+		meta["query keys"] = strings.Join(keys, ",")
+	}
+}
+
 // queryKeys are the names of rawQuery's name=value parameters, unescaped,
-// sorted and each once. A name ends at its part's first "=": a value may
-// hold "=" too (base64 padding).
+// each by its shape (models.KeyShape), sorted and each once. A name ends at
+// its part's first "=": a value may hold "=" too (base64 padding).
 func queryKeys(rawQuery string) []string {
 	var keys []string
 	for _, part := range strings.Split(rawQuery, "&") {
@@ -200,7 +223,7 @@ func queryKeys(rawQuery string) []string {
 		if u, err := url.QueryUnescape(k); err == nil {
 			k = u
 		}
-		keys = append(keys, k)
+		keys = append(keys, models.KeyShape(k))
 	}
 	slices.Sort(keys)
 	return slices.Compact(keys)

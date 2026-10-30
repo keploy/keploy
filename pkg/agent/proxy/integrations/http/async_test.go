@@ -1,12 +1,15 @@
 package http
 
 import (
+	"context"
 	"net/http"
 	"net/url"
 	"reflect"
 	"strings"
 	"testing"
 
+	"go.keploy.io/server/v3/pkg/agent/logleak"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/async"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -234,5 +237,43 @@ func TestMatchRequestShapeStrictUnderTheSwitch(t *testing.T) {
 	}
 	if ok, detail := h.MatchRequestShape(same, recorded, laneNotify()); !ok {
 		t.Fatalf("under the switch the volatile cursor flagged: %s", detail)
+	}
+}
+
+// TestAsyncDriftLineLogsNoPathOrQueryValue: the engine logs each shape drift
+// at Info. The line names both calls by method, host, path shape and query
+// names, and holds no byte of the live call's path value or of either call's
+// query values, in any encoding. A live URL that does not parse is said to be
+// one, and nothing of it is: url.Parse's error quotes it.
+func TestAsyncDriftLineLogsNoPathOrQueryValue(t *testing.T) {
+	const token, email = "sk_live_9fQ2xLp7Rw", "ada.lovelace@example.com"
+	h := newHTTP()
+	lane := models.AsyncLane{Name: "notifications", Type: "http", Match: map[string]string{"host": "notify.internal.svc", "path": "/v1/*"}}
+	rec := httpMock("rec", "GET", "http://notify.internal.svc/v1/poll?cursor=1&token="+token)
+	rec.Spec.Async = &models.AsyncMeta{Lane: "notifications", Seq: 1, AnchorPos: 0}
+	rec.Spec.HTTPResp = &models.HTTPResp{StatusCode: 200, Body: "V0"}
+	live := httpMock("live", "GET", "http://notify.internal.svc/v1/users/"+email+"?cursor=1&token="+token)
+	logger, out := logleak.Logger(nil)
+	e := async.NewEngine(logger, []models.AsyncLane{lane}, map[string]async.AsyncParser{"http": h})
+	e.Load([]*models.Mock{rec})
+	if _, _, err := e.Decide(context.Background(), lane, live); err != nil {
+		t.Fatal(err)
+	}
+	e.LogReport(logger)
+	log := out.String()
+	const want = "request shape drift: GET notify.internal.svc/v1/users/{}?cursor={}&token={} vs GET notify.internal.svc/v1/poll?cursor={}&token={}"
+	if !strings.Contains(log, "async egress shape drift") || !strings.Contains(log, want) {
+		t.Fatalf("the drift line does not name both calls by their shapes (%q): %s", want, log)
+	}
+	for what, v := range map[string]string{"the token": token, "the e-mail": email} {
+		if found := logleak.Find(t, log, []byte(v)); len(found) > 0 {
+			t.Errorf("the Info drift line holds %s: %v\n%s", what, found, log)
+		}
+	}
+
+	bad := httpMock("bad", "GET", "http://notify.internal.svc/v1/poll?token="+token+"\x01")
+	ok, detail := h.MatchRequestShape(bad, rec, lane)
+	if ok || detail != "unparseable live request URL" {
+		t.Fatalf("an unparseable live URL gave (%v, %q), want (false, the fixed text)", ok, detail)
 	}
 }

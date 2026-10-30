@@ -33,7 +33,7 @@ func MatchSchema(tc *models.TestCase, actualResponse *models.HTTPResp, logger *z
 		// Log actual response body as debug before clearing
 		logger.Debug("actual response body (skipped during recording)",
 			zap.String("testcase", tc.Name),
-			zap.String("body", actualResponse.Body))
+			zap.Int("body_bytes", len(actualResponse.Body)))
 
 		bodySizeResult = models.IntResult{
 			Normal:   bodySizeMatch,

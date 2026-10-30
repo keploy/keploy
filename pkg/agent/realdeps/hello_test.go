@@ -4,12 +4,14 @@ import (
 	"bufio"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"go.keploy.io/server/v3/pkg/agent/logleak"
 )
 
 // clientHello starts a TLS client on one end of a pipe and returns the other
@@ -346,4 +348,43 @@ func TestReadNameDecidesARequestLineAsWholeHoweverItArrives(t *testing.T) {
 func TestReadNameOfALongMethodIsUnreadable(t *testing.T) {
 	_, err := ReadName(holds(t, strings.Repeat("G", 40)+" / HTTP/1.1\r\nHost: evil.example.com\r\n\r\n"))
 	require.ErrorIs(t, err, ErrUnreadable)
+}
+
+// A request line keploy does not read is named in its error, which the proxy
+// logs at Warn and charges to the test as capture_incomplete, by its shape
+// (requestLineShape): the method, the spaces and the version as sent, so the
+// reason still shows, and the target with no path value and no query value.
+// The error quoted the line whole.
+func TestReadNameNamesAnUnreadRequestLineByItsShape(t *testing.T) {
+	const token, email = "sk_live_9fQ2xLp7Rw", "ada.lovelace@example.com"
+	for _, c := range []struct{ line, want string }{
+		{"GET /pay?token=" + token + " HTTP/2.0", `"GET /pay?token={} HTTP/2.0"`},
+		{"get /users/" + email + "  HTTP/1.1", `"get /users/{}  HTTP/1.1"`},
+		{"GET http://api.example.com/pay?token=" + token + " http/1.1 ", `"GET /pay?token={} http/1.1 "`},
+		{"GET /pay?token=" + token + " HTTP/1.1 " + email, `"GET /pay?token={} {}"`},
+		{token + " /pay HTTP/1.1", `"{} /pay HTTP/1.1"`},
+	} {
+		_, err := ReadName(holds(t, c.line+"\r\nHost: api.example.com\r\n\r\n"))
+		require.ErrorIs(t, err, ErrUnreadable, "%q", c.line)
+		require.Contains(t, err.Error(), "its request line is HTTP keploy does not read: "+c.want, "%q", c.line)
+		for what, v := range map[string]string{"the token": token, "the e-mail": email} {
+			if found := logleak.Find(t, err.Error(), []byte(v)); len(found) > 0 {
+				t.Errorf("the error for %q holds %s: %v (%s)", c.line, what, found, err)
+			}
+		}
+	}
+}
+
+// A request head net/http cannot parse is named by its length: net/http's
+// error quotes the request line or a header line, so it is left out. The
+// error quoted an Authorization line written without its colon whole.
+func TestReadNameNamesAnUnparsedHeadByItsLength(t *testing.T) {
+	const token = "sk_live_9fQ2xLp7Rw"
+	head := "GET /pay?token=" + token + " HTTP/1.1\r\nHost: api.example.com\r\nAuthorization Bearer " + token + "\r\n\r\n"
+	_, err := ReadName(holds(t, head))
+	require.ErrorIs(t, err, ErrUnreadable)
+	require.Contains(t, err.Error(), fmt.Sprintf("its HTTP/1 request head (%d bytes) does not parse", len(head)))
+	if found := logleak.Find(t, err.Error(), []byte(token)); len(found) > 0 {
+		t.Errorf("the error holds the token: %v (%s)", found, err)
+	}
 }

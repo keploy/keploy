@@ -164,7 +164,8 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 			return resp, err
 		}
 
-		h.logger.Debug("Simulating HTTP request", zap.Any("Test case", tc))
+		h.logger.Debug("Simulating HTTP request", zap.String("testcase", tc.Name),
+			zap.String("method", string(tc.HTTPReq.Method)), zap.Any("target", utils.URLMeta(tc.HTTPReq.URL)))
 		resp, err := pkg.SimulateHTTP(ctx, tc, testSetID, h.logger, cfg)
 
 		if err := h.instrumentation.AfterSimulate(ctx, tc.Name, testSetID); err != nil {
@@ -178,7 +179,8 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 			return nil, err
 		}
 
-		h.logger.Debug("Simulating gRPC request", zap.Any("Test case", tc))
+		h.logger.Debug("Simulating gRPC request", zap.String("testcase", tc.Name),
+			zap.String("method", models.PathShape(tc.GrpcReq.Headers.PseudoHeaders[":path"])))
 		hostToUse := h.cfg.Test.Host
 		if hostToUse == "" {
 			hostToUse = "localhost"

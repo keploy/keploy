@@ -19,6 +19,7 @@ import (
 	"mime/multipart"
 	"net"
 	"net/http"
+	"net/textproto"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -592,6 +593,23 @@ type preparedHTTPRequest struct {
 	AppPort uint16
 }
 
+// requestShape names req for what keploy test says of a request that
+// stalled or a stream held open (AnswerStallError's Target, StreamConfig's
+// Target), which keploy test logs as well as saves: its method and its path's
+// shape (models.PathShape), never its query, whose values are the test's
+// content, nor a path segment that holds a value (an ID, an e-mail address).
+// The test case's name says which call it is. A CONNECT's target is an authority, a host and a port (ConnectsToAuthority
+// puts it in the URL's opaque part), and is named whole.
+func requestShape(req *http.Request) string {
+	if req.URL == nil {
+		return req.Method
+	}
+	if req.Method == http.MethodConnect && req.URL.Opaque != "" {
+		return req.Method + " " + req.URL.Opaque
+	}
+	return req.Method + " " + models.PathShape(req.URL.EscapedPath())
+}
+
 // HostHeaderOf is the Host header a client sends for u: its host, and its port
 // unless that is the one its scheme has anyway. A front that routes by name
 // matches the header as written, and need not know "staging:443" for the
@@ -659,12 +677,12 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 					if readErr != nil {
 						utils.LogError(logger, readErr, "failed to read form value from asset file",
 							zap.String("path", formPath),
-							zap.String("key", form.Key))
+							zap.String("key", models.KeyShape(form.Key)))
 						return nil, readErr
 					}
 					tc.HTTPReq.Form[i].Values[j] = string(valData)
 					logger.Debug("loaded form value from asset file",
-						zap.String("key", form.Key),
+						zap.String("key", models.KeyShape(form.Key)),
 						zap.String("path", formPath),
 						zap.Int("size", len(valData)))
 				}
@@ -686,7 +704,7 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 		)
 		for _, field := range tc.HTTPReq.Form {
 			logger.Debug("multipart field",
-				zap.String("key", field.Key),
+				zap.String("key", models.KeyShape(field.Key)),
 				zap.Int("values", len(field.Values)),
 				zap.Int("paths", len(field.Paths)),
 			)
@@ -696,7 +714,7 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 				if cfg.KeployPath != "" && !filepath.IsAbs(path) {
 					resolvedPath = filepath.Join(cfg.KeployPath, path)
 				}
-				logger.Debug("multipart file path", zap.String("path", resolvedPath), zap.String("field", field.Key))
+				logger.Debug("multipart file path", zap.String("path", resolvedPath), zap.String("field", models.KeyShape(field.Key)))
 				file, ferr := os.Open(resolvedPath)
 				if ferr != nil {
 					utils.LogError(logger, ferr, "failed to open multipart file", zap.String("path", resolvedPath))
@@ -705,12 +723,12 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 				part, perr := writer.CreateFormFile(field.Key, filepath.Base(resolvedPath))
 				if perr != nil {
 					file.Close()
-					utils.LogError(logger, perr, "failed to create multipart file part", zap.String("field", field.Key))
+					utils.LogError(logger, perr, "failed to create multipart file part", zap.String("field", models.KeyShape(field.Key)))
 					return nil, perr
 				}
 				if _, cerr := io.Copy(part, file); cerr != nil {
 					file.Close()
-					utils.LogError(logger, cerr, "failed to write multipart file part", zap.String("field", field.Key))
+					utils.LogError(logger, cerr, "failed to write multipart file part", zap.String("field", models.KeyShape(field.Key)))
 					return nil, cerr
 				}
 				if cerr := file.Close(); cerr != nil {
@@ -720,7 +738,7 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 			}
 			for valueIndex, value := range field.Values {
 				logger.Debug("multipart field value",
-					zap.String("field", field.Key),
+					zap.String("field", models.KeyShape(field.Key)),
 					zap.Int("value_len", len(value)),
 					zap.Bool("looks_binary", looksBinary(value)),
 				)
@@ -745,17 +763,17 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 					}
 					part, perr := writer.CreateFormFile(field.Key, fileName)
 					if perr != nil {
-						utils.LogError(logger, perr, "failed to create multipart file part", zap.String("field", field.Key))
+						utils.LogError(logger, perr, "failed to create multipart file part", zap.String("field", models.KeyShape(field.Key)))
 						return nil, perr
 					}
 					if _, werr := part.Write([]byte(value)); werr != nil {
-						utils.LogError(logger, werr, "failed to write multipart file content", zap.String("field", field.Key))
+						utils.LogError(logger, werr, "failed to write multipart file content", zap.String("field", models.KeyShape(field.Key)))
 						return nil, werr
 					}
 					continue
 				}
 				if werr := writer.WriteField(field.Key, value); werr != nil {
-					utils.LogError(logger, werr, "failed to write multipart field", zap.String("field", field.Key))
+					utils.LogError(logger, werr, "failed to write multipart field", zap.String("field", models.KeyShape(field.Key)))
 					return nil, werr
 				}
 			}
@@ -808,15 +826,15 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 	}
 
 	// override host header if present in the request
-	hostHeader := tc.HTTPReq.Header["Host"]
+	recordedHost := tc.HTTPReq.Header["Host"]
 	if cfg.TargetFromURL {
 		// Not left to the URL as it stands: ResolveTestTarget has written the
 		// scheme's own port into it, and "staging:443" is not the name a
 		// client of https://staging asks for.
 		req.Host = HostHeaderOf(req.URL)
-	} else if hostHeader != "" {
-		logger.Debug("overriding host header", zap.String("host", hostHeader))
-		req.Host = hostHeader
+	} else if recordedHost != "" {
+		logger.Debug("overriding host header", zap.String("host", recordedHost))
+		req.Host = recordedHost
 	}
 	// A CONNECT in authority form (ConnectsToAuthority) names the host and
 	// port it asks to reach as its request target and as its Host (RFC 9110
@@ -827,7 +845,7 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 	// part, it sends the target, and the answer's label (describe) names it.
 	// A recording with no Host asks for the host it is sent to.
 	if ConnectsToAuthority(req.Method, req.URL) {
-		target := hostHeader
+		target := recordedHost
 		if target == "" {
 			target = req.URL.Host
 		}
@@ -839,7 +857,7 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 		if asked == "" {
 			asked = req.URL.Host
 		}
-		cfg.SentTo(req.URL, asked, hostHeader)
+		cfg.SentTo(req.URL, asked, recordedHost)
 	}
 
 	// Creating the client and disabling redirects
@@ -1153,7 +1171,9 @@ func IsTransportConnReset(err error) bool {
 // the bounded retries, and a mid-response reset is never retried. A refusal,
 // reset or drop at an address reach says the app's server on appPort (the port
 // the test was recorded on, 0 when not known) can never be reached at fails at
-// once, saying why, as an *UnreachableAppPortError.
+// once, saying why, as an *UnreachableAppPortError. Every error it logs or
+// returns is the client's as clientError names it: no byte of the test
+// case's URL past its shape, and none of the app's answer.
 func doRequestWithConnRefusedRetry(ctx context.Context, logger *zap.Logger, client *http.Client, req *http.Request, reach AppPortReachability, appPort uint16) (*http.Response, error) {
 	asked := false
 	for attempt := 0; ; attempt++ {
@@ -1161,6 +1181,7 @@ func doRequestWithConnRefusedRetry(ctx context.Context, logger *zap.Logger, clie
 		if err == nil {
 			return resp, nil
 		}
+		err = clientError(err)
 		refused := isPreResponseConnRefused(err)
 		// A reset or drop is asked about too: at a published port where the
 		// app listens only on 127.0.0.1 in its container, docker accepts the
@@ -1262,10 +1283,10 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	if err != nil {
 		return nil, err
 	}
-	cfg.answer.describe(prepared.Request.Method+" "+prepared.Request.URL.RequestURI(), prepared.Request.ContentLength)
+	cfg.answer.describe(requestShape(prepared.Request), prepared.Request.ContentLength)
 	cfg.answer.countRequestBody(prepared.Request)
 
-	logger.Debug(fmt.Sprintf("Sending request to user app:%v", prepared.Request))
+	logger.Debug("Sending request to user app", zap.Any("metadata", utils.GetReqMeta(prepared.Request)))
 
 	// Execute the request (re-sending only on a pre-response connection-refused)
 	httpResp, errHTTPReq := doRequestWithConnRefusedRetry(ctx, logger, prepared.Client, prepared.Request, cfg.AppPortReachability, prepared.AppPort)
@@ -1373,10 +1394,10 @@ func SimulateHTTPStreaming(ctx context.Context, tc *models.TestCase, testSet str
 	if err != nil {
 		return nil, err
 	}
-	cfg.answer.describe(prepared.Request.Method+" "+prepared.Request.URL.RequestURI(), prepared.Request.ContentLength)
+	cfg.answer.describe(requestShape(prepared.Request), prepared.Request.ContentLength)
 	cfg.answer.countRequestBody(prepared.Request)
 
-	logger.Debug(fmt.Sprintf("Sending streaming request to user app:%v", prepared.Request))
+	logger.Debug("Sending streaming request to user app", zap.Any("metadata", utils.GetReqMeta(prepared.Request)))
 
 	// Execute the request (re-sending only on a pre-response connection-refused)
 	httpResp, errHTTPReq := doRequestWithConnRefusedRetry(ctx, logger, prepared.Client, prepared.Request, cfg.AppPortReachability, prepared.AppPort)
@@ -1398,7 +1419,7 @@ func SimulateHTTPStreaming(ctx context.Context, tc *models.TestCase, testSet str
 	statusMessage := http.StatusText(httpResp.StatusCode)
 	streamCfg := DetectHTTPStreamConfig(tc, httpResp)
 	if provenswitch.On() {
-		streamCfg.Target = prepared.Request.Method + " " + prepared.Request.URL.RequestURI()
+		streamCfg.Target = requestShape(prepared.Request)
 	}
 
 	logger.Debug("detected HTTP streaming response",
@@ -1876,8 +1897,8 @@ func compareSSEStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoiseK
 			logger.Debug("SSE frame mismatch",
 				zap.Int("frame_index", nextExpected),
 				zap.String("reason", reason),
-				zap.String("expected_frame", expectedFrame.raw),
-				zap.String("actual_frame", frame))
+				zap.Int("expected_frame_bytes", len(expectedFrame.raw)),
+				zap.Int("actual_frame_bytes", len(frame)))
 			mismatchInfo := &StreamMismatchInfo{
 				FrameIndex:    nextExpected,
 				ExpectedFrame: expectedFrame.raw,
@@ -1990,8 +2011,8 @@ func compareNDJSONStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoi
 			logger.Debug("NDJSON stream mismatch",
 				zap.Int("frame_index", nextExpected),
 				zap.String("reason", reason),
-				zap.String("expected_frame", expected),
-				zap.String("actual_frame", line))
+				zap.Int("expected_frame_bytes", len(expected)),
+				zap.Int("actual_frame_bytes", len(line)))
 			mismatchInfo := &StreamMismatchInfo{
 				FrameIndex:    nextExpected,
 				ExpectedFrame: expected,
@@ -2066,8 +2087,8 @@ func comparePlainTextStream(expectedResp models.HTTPResp, stream io.Reader, logg
 		if line != expected {
 			logger.Debug("plain-text stream mismatch",
 				zap.Int("frame_index", nextExpected),
-				zap.String("expected", expected),
-				zap.String("actual", line))
+				zap.Int("expected_bytes", len(expected)),
+				zap.Int("actual_bytes", len(line)))
 			mismatchInfo := &StreamMismatchInfo{
 				FrameIndex:    nextExpected,
 				ExpectedFrame: expected,
@@ -2597,7 +2618,7 @@ func compareMultipartStream(expectedResp models.HTTPResp, stream io.Reader, boun
 	}
 	expectedQueue, err := parseMultipartQueue(strings.NewReader(expectedBody), expectedBoundary)
 	if err != nil {
-		return false, "", nil, fmt.Errorf("failed to read the recorded multipart body by its boundary %q: %w", expectedBoundary, err)
+		return false, "", nil, fmt.Errorf("failed to read the recording's parts: %w", err)
 	}
 	if len(expectedQueue) == 0 {
 		// No part: an empty stream's, or a body of none.
@@ -2624,13 +2645,13 @@ func compareMultipartStream(expectedResp models.HTTPResp, stream io.Reader, boun
 			break
 		}
 		if partErr != nil {
-			return false, strings.Join(actualQueue, "\n\n--PART--\n\n"), nil, streamCut(partErr, nextExpected, len(expectedQueue), "part")
+			return false, strings.Join(actualQueue, "\n\n--PART--\n\n"), nil, multipartStreamCut(partErr, nextExpected, len(expectedQueue))
 		}
 
 		actualPart, partReadErr := readMultipartPart(part)
 		_ = part.Close()
 		if partReadErr != nil {
-			return false, strings.Join(actualQueue, "\n\n--PART--\n\n"), nil, streamCut(partReadErr, nextExpected, len(expectedQueue), "part")
+			return false, strings.Join(actualQueue, "\n\n--PART--\n\n"), nil, multipartStreamCut(partReadErr, nextExpected, len(expectedQueue))
 		}
 
 		if nextExpected >= len(expectedQueue) {
@@ -2685,6 +2706,19 @@ func compareMultipartStream(expectedResp models.HTTPResp, stream io.Reader, boun
 	return true, strings.Join(actualQueue, "\n\n--PART--\n\n"), nil, nil
 }
 
+// multipartStreamCut is err, a read of the app's multipart stream that
+// failed, as compareMultipartStream returns it (and replay logs it): the
+// stall rule's cut as its stall (streamCut), any other error as
+// models.MultipartPartError's, since mime/multipart's text quotes a line of
+// the answer (a part's header line without its colon, a stray line).
+func multipartStreamCut(err error, came, recorded int) error {
+	var st *AnswerStallError
+	if errors.As(err, &st) {
+		return streamCut(err, came, recorded, "part")
+	}
+	return models.MultipartPartError("the app's multipart answer", -1, err)
+}
+
 // byteCount counts the bytes read through it.
 type byteCount struct {
 	r io.Reader
@@ -2720,6 +2754,8 @@ func parseMultipartQueue(reader io.Reader, boundary string) ([]multipartPartPayl
 	if parseErr == nil {
 		return queue, nil
 	}
+	// mime/multipart's text quotes a line of the recorded body.
+	parseErr = models.MultipartPartError("the recorded multipart body", len(data), parseErr)
 
 	closingBoundary := []byte("--" + boundary + "--")
 	if !bytes.Contains(data, closingBoundary) {
@@ -2956,7 +2992,7 @@ func ParseHTTPRequest(requestBytes []byte) (*http.Request, error) {
 	// Parse the request using the http.ReadRequest function
 	request, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(requestBytes)))
 	if err != nil {
-		return nil, err
+		return nil, models.HTTPParseError("the HTTP request", len(requestBytes), err)
 	}
 	request.Header.Set("Host", request.Host)
 
@@ -2968,7 +3004,7 @@ func ParseHTTPResponse(data []byte, request *http.Request) (*http.Response, erro
 	reader := bufio.NewReader(buffer)
 	response, err := http.ReadResponse(reader, request)
 	if err != nil {
-		return nil, err
+		return nil, models.HTTPParseError("the HTTP response", len(data), err)
 	}
 	return response, nil
 }
@@ -3381,7 +3417,7 @@ func agentHealthTicker(ctx context.Context, logger *zap.Logger, agentURI string,
 // other than 200, whose headers say nothing about the agent.
 func agentHealthAnswer(ctx context.Context, logger *zap.Logger, client *http.Client, agentURI string) http.Header {
 	healthURL := fmt.Sprintf("%s/health", agentURI)
-	logger.Debug("Checking agent health", zap.String("url", healthURL))
+	logger.Debug("Checking agent health", zap.String("agent", agentURI))
 
 	req, err := http.NewRequestWithContext(ctx, "GET", healthURL, nil)
 	if err != nil {
@@ -3400,7 +3436,7 @@ func agentHealthAnswer(ctx context.Context, logger *zap.Logger, client *http.Cli
 		logger.Debug("Failed to read agent health response body", zap.Error(err))
 		return nil
 	}
-	logger.Debug("Agent health check response", zap.Int("status_code", resp.StatusCode), zap.String("body", string(body)))
+	logger.Debug("Agent health check response", zap.Int("status_code", resp.StatusCode), zap.Int("body_bytes", len(body)))
 
 	if resp.StatusCode != http.StatusOK {
 		return nil
@@ -4887,6 +4923,141 @@ func hasExplicitPort(hostStr string) bool {
 	return false
 }
 
+// targetMeta is what a log says of a test's target as ResolveTestTarget
+// resolves it: a bare authority (a gRPC target, "localhost:8080",
+// "127.0.0.1:8080", "[::1]:50051", or a host alone) whole, as it holds no
+// path, query or credential; any other target by utils.URLMeta (its host,
+// its path's shape, its query's names). URLMeta reads "localhost:8080" as a
+// scheme and an opaque part (no host, no path), and refuses an IP's as a
+// path whose first segment holds a colon.
+func targetMeta(target string) any {
+	if strings.ContainsAny(target, "/?#@ ") || target == "" {
+		return utils.URLMeta(target)
+	}
+	if !strings.Contains(target, ":") {
+		return map[string]string{"host": target}
+	}
+	if _, port, err := net.SplitHostPort(target); err == nil && port != "" && strings.Trim(port, "0123456789") == "" {
+		return map[string]string{"host": target}
+	}
+	return utils.URLMeta(target)
+}
+
+// clientError is err, the Go client's error for a test's request to the app,
+// as keploy logs and returns it. The *url.Error client.Do returns quotes the
+// request's URL whole, the test case's query values and its path's segments
+// with it: the URL is named by its shape instead (models.TargetShape:
+// /pay?token={}), and its cause is AnswerCause's. Any other error is err.
+func clientError(err error) error {
+	ue, ok := err.(*url.Error)
+	if !ok {
+		return err
+	}
+	return &url.Error{Op: ue.Op, URL: models.TargetShape(ue.URL), Err: AnswerCause(ue.Err)}
+}
+
+// AnswerCause is cause, the cause of the Go client's error for a request
+// keploy sent the app (a test's, the readiness probe's), as keploy logs and
+// returns it. It stays as it came, so errors.Is and errors.As still tell a
+// refusal, a drop, a short answer or a timeout, unless it quotes the app's
+// answer:
+//   - net/http's error for an answer whose head it could not parse
+//     (answerParseError), which quotes the status line or a header line, is
+//     models.HTTPParseError's, which names no byte of it;
+//   - its error for a redirect's Location header that url.Parse refused
+//     ("failed to parse Location header %q: ..."), which net/http reads
+//     before CheckRedirect can stop it and which quotes the header whole, is
+//     named by the header's length alone (locationParseError).
+func AnswerCause(cause error) error {
+	if answerParseError(cause) {
+		return models.HTTPParseError("the app's answer", -1, cause)
+	}
+	if n, ok := locationParseError(cause); ok {
+		if n < 0 {
+			return errors.New("the app's Location header does not parse")
+		}
+		return fmt.Errorf("the app's Location header (%d bytes) does not parse", n)
+	}
+	return cause
+}
+
+// netHTTPLocationParsePhrase begins net/http's error (client.go) for a
+// redirect whose Location header url.Parse refused, followed by the header
+// quoted whole.
+const netHTTPLocationParsePhrase = "failed to parse Location header "
+
+// locationParseError reports whether err, or an error it wraps, is net/http's
+// for a Location header that does not parse, with the header's length in
+// bytes, read from the quote that follows the phrase (-1 when it does not
+// unquote). TestAnswerCauseNamesAnUnparsedLocationByItsLength provokes it
+// from a real answer, and fails if its text changes.
+func locationParseError(err error) (int, bool) {
+	n, found := -1, false
+	inErrorTree(err, func(e error) bool {
+		text := e.Error()
+		if !strings.HasPrefix(text, netHTTPLocationParsePhrase) {
+			return false
+		}
+		found = true
+		if q, qerr := strconv.QuotedPrefix(text[len(netHTTPLocationParsePhrase):]); qerr == nil {
+			if loc, uerr := strconv.Unquote(q); uerr == nil {
+				n = len(loc)
+			}
+		}
+		return true
+	})
+	return n, found
+}
+
+// netHTTPAnswerParsePhrases begin net/http's errors for an answer whose head
+// it could not parse (net/http/response.go's ReadResponse and transfer.go's
+// readTransfer), each followed by a quote of the bytes that did not parse.
+// net/http exports none of them, so their text is all there is to know them
+// by. TestClientErrorNamesAnUnparsedAnswerByNoByteOfIt provokes each from a
+// real answer, and fails if a text changes.
+var netHTTPAnswerParsePhrases = []string{
+	"malformed HTTP response ",
+	"malformed HTTP status code ",
+	"malformed HTTP version ",
+	"bad Content-Length ",
+	"invalid empty Content-Length ",
+	"too many transfer encodings: ",
+	"unsupported transfer encoding: ",
+	"http: message cannot contain multiple Content-Length headers; got ",
+}
+
+// answerParseError reports whether err, or an error it wraps, is net/http's
+// for an answer whose head did not parse: a textproto.ProtocolError (a
+// header line: "malformed MIME header line: ..."), or one whose text begins
+// with one of netHTTPAnswerParsePhrases.
+func answerParseError(err error) bool {
+	var pe textproto.ProtocolError
+	if errors.As(err, &pe) {
+		return true
+	}
+	return inErrorTree(err, func(e error) bool {
+		for _, p := range netHTTPAnswerParsePhrases {
+			if strings.HasPrefix(e.Error(), p) {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+// unquotedURLError is err without the URL a *url.Error quotes: url.Parse's
+// error writes the URL whole, its query's values and its path's segments
+// with it, and its cause may quote a stretch of it (an escape, a port).
+// What did not parse is the test case's URL, which the test case holds. Any
+// other error is err.
+func unquotedURLError(err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		return fmt.Errorf("the test case's URL does not parse (%s)", ue.Op)
+	}
+	return err
+}
+
 // urlReplacement is the replaceWith URL entry that applies to target: of those
 // whose substring target contains, the one with the longest substring (the
 // most specific), then the lowest. One entry, chosen the same way wherever it
@@ -4928,7 +5099,7 @@ func ResolveTestTarget(originalTarget string, urlReplacements map[string]string,
 		logger.Debug("Applied replaceWith substitution",
 			zap.String("find", substr),
 			zap.String("replace", replacement),
-			zap.String("result_target", finalTarget),
+			zap.Any("result_target", targetMeta(finalTarget)),
 			zap.Bool("replacement_has_port", replacementHasPort))
 	}
 
@@ -4946,10 +5117,11 @@ func ResolveTestTarget(originalTarget string, urlReplacements map[string]string,
 			finalTarget, err = utils.ReplaceGrpcHost(finalTarget, configHost)
 		}
 		if err != nil {
+			err = unquotedURLError(err)
 			utils.LogError(logger, err, "failed to replace host with config host")
 			return "", err
 		}
-		logger.Debug("Replaced host with config host", zap.String("host", configHost), zap.String("target", finalTarget))
+		logger.Debug("Replaced host with config host", zap.String("host", configHost), zap.Any("target", targetMeta(finalTarget)))
 	}
 
 	// Parse host and port from finalTarget
@@ -4960,6 +5132,7 @@ func ResolveTestTarget(originalTarget string, urlReplacements map[string]string,
 	if isHTTP {
 		parsedURL, parseErr := url.Parse(finalTarget)
 		if parseErr != nil {
+			parseErr = unquotedURLError(parseErr)
 			utils.LogError(logger, parseErr, "failed to parse test case URL")
 			return "", parseErr
 		}
@@ -4973,7 +5146,7 @@ func ResolveTestTarget(originalTarget string, urlReplacements map[string]string,
 				port = "80"
 			}
 			logger.Debug("URL has no explicit port, using scheme default",
-				zap.String("target", finalTarget), zap.String("default_port", port))
+				zap.Any("target", targetMeta(finalTarget)), zap.String("default_port", port))
 		}
 	} else {
 		host = finalTarget
@@ -4986,7 +5159,7 @@ func ResolveTestTarget(originalTarget string, urlReplacements map[string]string,
 		}
 		if port == "" {
 			logger.Debug("Authority has no explicit port, using gRPC default",
-				zap.String("target", finalTarget), zap.String("default_port", "443"))
+				zap.Any("target", targetMeta(finalTarget)), zap.String("default_port", "443"))
 			port = "443"
 		}
 	}
@@ -5031,7 +5204,7 @@ func ResolveTestTarget(originalTarget string, urlReplacements map[string]string,
 		finalTarget = net.JoinHostPort(host, port)
 	}
 
-	logger.Debug("Final resolved target", zap.String("target", finalTarget))
+	logger.Debug("Final resolved target", zap.Any("target", targetMeta(finalTarget)))
 	return finalTarget, nil
 }
 

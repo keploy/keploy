@@ -1811,7 +1811,7 @@ func TestRunTestSet_ACreatesLocationIsAssertedAsTheCapturedID(t *testing.T) {
 				t.Errorf("the noise entry over the Location's use was named %d times; want %d", named, want)
 			}
 			if c.want == models.TestStatusFailed {
-				if !strings.Contains(fmt.Sprint(r.TemplateFailures), "header Location") || !hasCategory(r, models.TemplateVariable) {
+				if !strings.Contains(fmt.Sprint(r.TemplateFailures), "header Location") || !strings.Contains(fmt.Sprint(r.TemplateFailures), "id's value") || !hasCategory(r, models.TemplateVariable) {
 					t.Errorf("the failure does not name the Location and its category: %+v %+v", r.TemplateFailures, r.FailureInfo)
 				}
 				// HIGH: an auto-replay learns noise from a failure below it,
@@ -1824,7 +1824,7 @@ func TestRunTestSet_ACreatesLocationIsAssertedAsTheCapturedID(t *testing.T) {
 					m := e.ContextMap()
 					next := fmt.Sprint(m["next_step"])
 					if m["testcase"] == "test-1" && m["where"] == "header Location" && m["placeholder"] == "{{string .id}}" &&
-						strings.Contains(fmt.Sprint(m["why"]), "id's value") &&
+						strings.HasSuffix(fmt.Sprint(m["why"]), " bytes, in the report's template_failures") &&
 						strings.Contains(next, "this run's value of id is what test-1/response body.id captured from this same answer") &&
 						strings.Contains(next, "re-record") && !strings.Contains(next, "normalize") {
 						warned++
@@ -2458,8 +2458,13 @@ func TestRunTestSet_AnOlderSetsProducerIsNamedWithItsEdit(t *testing.T) {
 		next = fmt.Sprint(warned[0].ContextMap()["next_step"])
 	}
 	if !strings.Contains(next, "if the app issues this value anew each run: change {{string .id}} at test-1/response body.id to {{capture string .id}}") ||
-		!strings.Contains(next, `if it is a constant or what the request sent: write its recorded value "usr_1" in place of every placeholder of id`) {
+		!strings.Contains(next, "if it is a constant or what the request sent: write the value config.yaml's template holds for id in place of every placeholder of id") {
 		t.Errorf("the uncaptured key was named %d times: %+v; want once, with both edits at test-1's body.id", len(warned), warned)
+	}
+	// The line names where config.yaml holds the value, never the value:
+	// the log is no place for a recorded value (it quoted "usr_1").
+	if strings.Contains(fmt.Sprint(warned), "usr_1") {
+		t.Errorf("the line quotes config.yaml's recorded value: %+v", warned)
 	}
 }
 
@@ -2705,10 +2710,14 @@ func TestRunTestSet_EveryTemplateFailureIsSavedWithItsNextStep(t *testing.T) {
 			// Its request did not send the id: the place may issue a value
 			// of its own, and the capture edit is offered (P7), under a key
 			// of its own, and the same key's capture only for a place that
-			// replaces the value from then on.
-			if !strings.Contains(next, `change {{string .id}} at test-3/response body.newest to {{capture string .id2}}, give id2 its recorded value "usr_REC0001"`) ||
+			// replaces the value from then on. The step names where the
+			// value was recorded, never the value: it is logged too.
+			if !strings.Contains(next, "change {{string .id}} at test-3/response body.newest to {{capture string .id2}}, give id2 in config.yaml's template the value test-3/response body.newest recorded") ||
 				!strings.Contains(next, "change {{string .id}} there to {{capture string .id}} instead, which points every later use of id at this answer") {
 				t.Errorf("test-3's next step %q does not offer both capture edits", next)
+			}
+			if strings.Contains(next, "usr_REC0001") {
+				t.Errorf("test-3's next step %q holds the recorded value", next)
 			}
 		}
 	}

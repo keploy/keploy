@@ -1687,17 +1687,20 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-// missText names a miss: an HTTP or gRPC call by its method and target
-// shape (models.MissShape); any other protocol by itself and its destination
-// only, as one line of the reason (a SQL statement's shape is in the
-// evidence).
+// missText names a miss: by the log summary its parser stated
+// (models.UnmatchedCall.LogSummary), as the CLI's lines name it; else an
+// HTTP or gRPC call by its method and target shape (models.MissShape); any
+// other protocol by itself and its destination only, as one line of the
+// reason (a SQL statement's shape is in the evidence).
 func missText(m models.UnmatchedCall) string {
 	proto := strings.TrimSpace(m.Protocol)
 	s := "a call"
 	if proto != "" {
 		s = "a " + proto + " call"
 	}
-	if models.IsPathProtocol(proto) {
+	if m.LogSummary != "" {
+		s = m.LogSummary
+	} else if models.IsPathProtocol(proto) {
 		if shape := models.MissShape(m); shape != "" {
 			s = shape
 		}

@@ -450,7 +450,7 @@ func (g *strictGate) compare(engine *mocknoise.Engine, verdicts *map[*models.Moc
 		}
 		ce.Write(zap.String("mock", mock.Name),
 			zap.String("request_type", g.requestType),
-			zap.Strings("drifted_fields", paths))
+			zap.Strings("drifted_fields", models.FieldShapes(paths)))
 	}
 	return false
 }

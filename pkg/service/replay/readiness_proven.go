@@ -772,7 +772,8 @@ func (p provenReadiness) listeningOn(st models.AppReadiness) string {
 func answers(ctx context.Context, target string, anyAnswer bool) (bool, string) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
-		return false, err.Error()
+		// url.Parse's error quotes the URL whole.
+		return false, "the probed URL does not parse"
 	}
 	client := &http.Client{
 		Transport: &http.Transport{DisableKeepAlives: true, Proxy: nil, TLSClientConfig: &tls.Config{}},
@@ -788,12 +789,15 @@ func answers(ctx context.Context, target string, anyAnswer bool) (bool, string) 
 			return true, sanitizeHealthURL(target) + " answered (a certificate keploy does not trust)"
 		}
 		// Its cause only: the URL, which may carry a secret, is said
-		// sanitized where the reason is written.
+		// sanitized where the reason is written. The cause is named as
+		// keploy test's sender names it (pkg.AnswerCause): a health
+		// answer net/http could not parse, or a Location it could not
+		// follow, by no byte of it.
 		var ue *url.Error
 		if errors.As(err, &ue) {
 			err = ue.Err
 		}
-		return false, "last: " + err.Error()
+		return false, "last: " + pkg.AnswerCause(err).Error()
 	}
 	_, _ = io.Copy(io.Discard, resp.Body)
 	_ = resp.Body.Close()

@@ -468,7 +468,7 @@ func ReadHTTPHeadersUntilEnd(ctx context.Context, logger *zap.Logger, conn net.C
 
 	// Check if the initial buffer already contains complete headers
 	if HasCompleteHTTPHeaders(initialBuf) {
-		logger.Debug("received complete HTTP headers in initial buffer", zap.Any("size", len(initialBuf)), zap.Any("headers", string(initialBuf)))
+		logger.Debug("received complete HTTP headers in initial buffer", zap.Int("size", len(initialBuf)))
 		return initialBuf, nil
 	}
 
@@ -502,7 +502,7 @@ func ReadHTTPHeadersUntilEnd(ctx context.Context, logger *zap.Logger, conn net.C
 
 			// Check if we reached the end of headers
 			if HasCompleteHTTPHeaders(buffer) {
-				logger.Debug("received complete HTTP headers", zap.Any("size", len(buffer)), zap.Any("headers", string(buffer)))
+				logger.Debug("received complete HTTP headers", zap.Int("size", len(buffer)))
 				return buffer, nil
 			}
 		}

@@ -124,10 +124,10 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 				zap.Bool("size_match", bodySizeMatch))
 		}
 
-		// Log actual response body as debug before clearing
+		// Log the actual response body's length as debug before clearing: never the body
 		logger.Debug("actual response body (skipped during recording)",
 			zap.String("testcase", tc.Name),
-			zap.String("body", actualResponse.Body))
+			zap.Int("body_bytes", len(actualResponse.Body)))
 
 		bodySizeResult = models.IntResult{
 			Normal:   bodySizeMatch,
@@ -236,9 +236,6 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 			pass = false
 		}
 
-		// debug log for cleanExp and cleanAct
-		logger.Debug("cleanExp", zap.Any("cleanExp", cleanExp))
-		logger.Debug("cleanAct", zap.Any("cleanAct", cleanAct))
 	} else {
 		// Skip the comparison of a non-JSON body of the recorded kind, with
 		// the switch off and no --compare-all (compareNonJSON above).
@@ -313,7 +310,7 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 				}
 				if models.IsVolatileResponseHeader(name) {
 					logger.Debug("ignoring value drift on a per-request-volatile response header",
-						zap.String("header", name))
+						zap.String("header name", name))
 					hr.Normal = true
 				}
 			}
@@ -399,7 +396,7 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 				}
 				if isBodyDigestHeader(strings.ToLower(name)) {
 					logger.Debug("ignoring a body-digest header whose body passed only via noise",
-						zap.String("header", name))
+						zap.String("header name", name))
 					hr.Normal = true
 				}
 			}
@@ -727,6 +724,12 @@ func AssertionsUntieBody(tc *models.TestCase) string {
 
 // AssertionMatch checks the assertions in the test case against the actual response, if all of the assertions pass, it returns true, it doesn't care about other parameters of the response,
 // and make the test case pass.
+//
+// Its failure lines follow one rule: a value the user wrote in an assertion
+// is the user's own test config and is shown (header_equal's expected value,
+// a json_contains subset, header_matches' pattern, an assertion's value that
+// cannot be read); a value keploy recorded or the app answered is its length
+// (the answer's header, json_equal's recorded and live bodies).
 
 // Assignable global variables for system and utility functions
 var fmtSprintf234 = fmt.Sprintf
@@ -811,14 +814,16 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 				logUnreadableAssertion(logger, assertionName, value, "a map of header names to values")
 				continue
 			}
-			for header, exp := range hm {
-				act, ok := actualResponse.Header[header]
+			for name, exp := range hm {
+				act, ok := actualResponse.Header[name]
 				if !ok || act != exp {
 					pass = false
+					// The expected value is the user's own assertion, so it
+					// is shown; the answer's value is its length.
 					logger.Error("header_equal assertion failed",
-						zap.String("header", header),
+						zap.String("header name", name),
 						zap.String("expected", exp),
-						zap.String("actual", act),
+						zap.Int("actual_bytes", len(act)),
 					)
 				}
 			}
@@ -830,14 +835,14 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 				logUnreadableAssertion(logger, assertionName, value, "a map of header names to substrings")
 				continue
 			}
-			for header, exp := range hm {
-				act, ok := actualResponse.Header[header]
+			for name, exp := range hm {
+				act, ok := actualResponse.Header[name]
 				if !ok || !strings.Contains(act, exp) {
 					pass = false
 					logger.Error("header_contains assertion failed",
-						zap.String("header", header),
+						zap.String("header name", name),
 						zap.String("expected_substr", exp),
-						zap.String("actual", act),
+						zap.Int("actual_bytes", len(act)),
 					)
 				}
 			}
@@ -851,7 +856,7 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 					hdr := fmtSprint234(item)
 					if _, ok := actualResponse.Header[hdr]; !ok {
 						pass = false
-						logger.Error("header_exists assertion failed", zap.String("header", hdr))
+						logger.Error("header_exists assertion failed", zap.String("header name", hdr))
 					}
 				}
 
@@ -860,7 +865,7 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 				for hdr := range v {
 					if _, ok := actualResponse.Header[hdr]; !ok {
 						pass = false
-						logger.Error("header_exists assertion failed", zap.String("header", hdr))
+						logger.Error("header_exists assertion failed", zap.String("header name", hdr))
 					}
 				}
 
@@ -869,7 +874,7 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 					hdr := string(kt)
 					if _, ok := actualResponse.Header[hdr]; !ok {
 						pass = false
-						logger.Error("header_exists assertion failed", zap.String("header", hdr))
+						logger.Error("header_exists assertion failed", zap.String("header name", hdr))
 					}
 				}
 
@@ -886,19 +891,19 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 				logUnreadableAssertion(logger, assertionName, value, "a map of header names to patterns")
 				continue
 			}
-			for header, pattern := range hm {
-				act, ok := actualResponse.Header[header]
+			for name, pattern := range hm {
+				act, ok := actualResponse.Header[name]
 				if !ok {
 					pass = false
-					logger.Error("header_matches: header not found", zap.String("header", header))
+					logger.Error("header_matches: header not found", zap.String("header name", name))
 					continue
 				}
 				if matched, err := regexp.MatchString(pattern, act); err != nil || !matched {
 					pass = false
 					logger.Error("header_matches assertion failed",
-						zap.String("header", header),
+						zap.String("header name", name),
 						zap.String("pattern", pattern),
-						zap.String("actual", act),
+						zap.Int("actual_bytes", len(act)),
 						zap.Error(err),
 					)
 				}
@@ -917,7 +922,7 @@ func AssertionMatch(tc *models.TestCase, actualResponse *models.HTTPResp, logger
 			actJSON := actualResponse.Body
 			if expJSON != actJSON {
 				pass = false
-				logger.Error("json_equal assertion failed", zap.String("expected", expJSON), zap.String("actual", actJSON))
+				logger.Error("json_equal assertion failed", zap.Int("expected_bytes", len(expJSON)), zap.Int("actual_bytes", len(actJSON)))
 			}
 
 		case models.JsonContains:
@@ -1023,6 +1028,6 @@ func assertRenderedDigests(res *models.Result, recordedBody, answerBody string, 
 		want := form(answerBody)
 		hr.Normal = strings.Join(hr.Actual.Value, ",") == want
 		logger.Debug("a digest header of a templated body is asserted over the answer's body",
-			zap.String("header", name), zap.String("want", want), zap.Bool("normal", hr.Normal))
+			zap.String("header name", name), zap.Bool("normal", hr.Normal))
 	}
 }

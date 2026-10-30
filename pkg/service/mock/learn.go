@@ -86,10 +86,10 @@ func (m *mockService) learnedOnto(consumed []models.MockState, expected map[stri
 			continue
 		}
 		for field := range st.ReqBodyNoise {
-			out = append(out, st.Name+" "+field+" (noise)")
+			out = append(out, st.Name+" "+models.FieldShape(field)+" (noise)")
 		}
 		for field, o := range st.Clocks {
-			out = append(out, st.Name+" "+field+" ("+o.String()+")")
+			out = append(out, st.Name+" "+models.FieldShape(field)+" ("+o.String()+")")
 		}
 		for v, mv := range st.Variables {
 			kind := "variable"
@@ -169,13 +169,17 @@ func (m *mockService) persistLearned(ctx context.Context, set string, consumed [
 	if err != nil {
 		return nil, nil, fmt.Errorf("writing what the learn step learned onto keploy/%s: %w", set, err)
 	}
+	// The receipt keeps each field whole (TestReceipt.Learned: what was
+	// learned is the user's to read and correct); the log names it by its
+	// shape (models.LearnedFieldShape), as a key may be a value the app sent.
 	byTest := map[string][]string{}
 	seen := map[string]bool{}
 	for _, f := range flows {
-		var fields []string
+		var fields, logged []string
 		for _, st := range f.Consumed {
 			for _, a := range added[st.Name] {
 				fields = append(fields, st.Name+" "+a)
+				logged = append(logged, st.Name+" "+models.LearnedFieldShape(a))
 			}
 			if len(added[st.Name]) > 0 {
 				seen[st.Name] = true
@@ -183,21 +187,23 @@ func (m *mockService) persistLearned(ctx context.Context, set string, consumed [
 		}
 		if len(fields) > 0 {
 			byTest[f.Flow] = fields
-			m.logger.Info("learned fields that changed between record and replay", zap.String("test", f.Flow), zap.Strings("fields", fields))
+			m.logger.Info("learned fields that changed between record and replay", zap.String("test", f.Flow), zap.Strings("fields", logged))
 		}
 	}
-	var rest []string
+	var rest, restLogged []string
 	for name, as := range added {
 		if seen[name] {
 			continue
 		}
 		for _, a := range as {
 			rest = append(rest, name+" "+a)
+			restLogged = append(restLogged, name+" "+models.LearnedFieldShape(a))
 		}
 	}
 	if len(rest) > 0 {
 		sort.Strings(rest)
-		m.logger.Info("learned fields that changed between record and replay, on mocks no test consumed", zap.Strings("fields", rest))
+		sort.Strings(restLogged)
+		m.logger.Info("learned fields that changed between record and replay, on mocks no test consumed", zap.Strings("fields", restLogged))
 	}
 	return byTest, rest, nil
 }

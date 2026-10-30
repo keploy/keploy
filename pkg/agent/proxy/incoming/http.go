@@ -22,6 +22,7 @@ import (
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/neterr"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -316,6 +317,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		req, err := http.ReadRequest(clientReader)
 		if err != nil {
 			if !errors.Is(err, io.EOF) {
+				err = models.HTTPParseError("the client's HTTP request", -1, err)
 				logger.Debug("Failed to read client request; ignoring this connection. Verify the client is sending valid HTTP if this persists.", zap.Error(err))
 			}
 			return
@@ -660,8 +662,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 				zap.Int64("response_bytes_seen", respCapture.Total()),
 				zap.Bool("streaming_exchange", streamingExchange),
 				zap.Bool("chunked_transfer", chunkedTransfer),
-				zap.String("url", req.URL.String()),
-				zap.String("method", req.Method),
+				zap.Any("metadata", utils.GetReqMeta(req)),
 				zap.Int("status_code", resp.StatusCode),
 				zap.String("response_content_type", resp.Header.Get("Content-Type")),
 			)
@@ -730,8 +731,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 					zap.Int("captured_exchange_bytes", exchangeCaptureSize),
 					zap.Int64("request_bytes_seen", reqBytesTotal),
 					zap.Int64("response_bytes_seen", respBytesTotal),
-					zap.String("url", capturedReq.URL.String()),
-					zap.String("method", capturedReq.Method),
+					zap.Any("metadata", utils.GetReqMeta(capturedReq)),
 					zap.Int("status_code", capturedResp.StatusCode),
 				)
 				return
@@ -1060,6 +1060,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 				// reset and misattribute it to upstream. EOF is the
 				// normal end-of-keep-alive close path; no response
 				// needed there.
+				err = models.HTTPParseError("the client's HTTP request", -1, err)
 				logger.Debug("Failed to parse downstream HTTP request", zap.Error(err))
 				writeBadRequest(clientConn)
 			}

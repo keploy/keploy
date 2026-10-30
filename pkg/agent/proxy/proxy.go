@@ -36,6 +36,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/cbshim"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/async"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mismatch"
 	"go.keploy.io/server/v3/pkg/agent/proxy/relay"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
@@ -48,6 +49,7 @@ import (
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 type ParserPriority struct {
@@ -5632,7 +5634,11 @@ func (p *Proxy) sayLearnWaits() {
 	})
 }
 
-// missSummaries names, for a log line, the calls of up to the first 10 misses.
+// missSummaries names, for a log line, the calls of up to the first 10
+// misses, as a log names a call (mismatch.LogCall): a call by the log
+// summary its parser stated or by its shape, or by its protocol where it has
+// neither (its summary could hold a key or a document). A miss with
+// no report is named by its kind: its error's text may quote the call.
 func missSummaries(errs []error) []string {
 	out := make([]string, 0, min(len(errs), 10))
 	for _, err := range errs {
@@ -5640,11 +5646,15 @@ func missSummaries(errs []error) []string {
 			break
 		}
 		var pe models.ParserError
-		if errors.As(err, &pe) && pe.MismatchReport != nil && pe.MismatchReport.ActualSummary != "" {
-			out = append(out, pe.MismatchReport.ActualSummary)
-			continue
+		isParser := errors.As(err, &pe)
+		switch {
+		case isParser && pe.MismatchReport != nil:
+			out = append(out, mismatch.LogCallName(pe.MismatchReport))
+		case isParser && pe.ParserErrorType != "":
+			out = append(out, "a miss with no report ("+string(pe.ParserErrorType)+")")
+		default:
+			out = append(out, "a miss with no report")
 		}
-		out = append(out, err.Error())
 	}
 	return out
 }
@@ -5814,6 +5824,7 @@ func (p *Proxy) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 					At:            parserErr.MismatchReport.At,
 					Protocol:      parserErr.MismatchReport.Protocol,
 					ActualSummary: parserErr.MismatchReport.ActualSummary,
+					LogSummary:    parserErr.MismatchReport.LogSummary,
 					Destination:   parserErr.MismatchReport.Destination,
 					ClosestMock:   parserErr.MismatchReport.ClosestMock,
 					Diff:          parserErr.MismatchReport.Diff,
@@ -5859,12 +5870,13 @@ func (p *Proxy) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 				// around models.ErrNoMockMatched are infrastructure/decode
 				// failures mislabeled by sendMockNotFoundError; reporting
 				// them as unmatched calls would misdirect the user, so they
-				// stay out of the report (they are already logged).
+				// stay out of the report (the agent's log names their cause,
+				// missCause, never their text, which may quote the call).
 				errs = append(errs, models.UnmatchedCall{
 					At:            parserErr.At,
 					Protocol:      "unknown",
 					ActualSummary: parserErr.Err.Error(),
-					NextSteps:     withStagingNote(parserErr, "This protocol's matcher does not emit structured mismatch reports yet; check the agent logs around this test for the mock-miss details."),
+					NextSteps:     withStagingNote(parserErr, "This protocol's matcher does not emit structured mismatch reports yet; this entry's summary is its parser's error text, which the agent's log leaves out (it names only the cause)."),
 					Kind:          parserErr.MissKind,
 				})
 			}
@@ -6002,21 +6014,51 @@ func (p *Proxy) mockFailedFrom(logger *zap.Logger, err error, pid uint32, dst *m
 	return err
 }
 
-// mismatchLog is how the mock-mismatch line is logged: Warn, so a replay
-// shows each miss as it happens, except under the proven switch, whose
-// verdict names each miss once with its test at the end (Debug there, or the
-// miss would be printed twice).
-func (p *Proxy) mismatchLog() func(string, ...zap.Field) {
+// mismatchLevel is the level the mock-mismatch line is logged at: Warn, so a
+// replay shows each miss as it happens, except under the proven switch,
+// whose verdict names each miss once with its test at the end (Debug there,
+// or the miss would be printed twice). The line is built only when its level
+// is enabled (logger.Check): its call and next step are shaped from the
+// report, which costs a parse a miss at a disabled Debug need not pay.
+func (p *Proxy) mismatchLevel() zapcore.Level {
 	if provenswitch.On() {
-		return p.logger.Debug
+		return zapcore.DebugLevel
 	}
-	return p.logger.Warn
+	return zapcore.WarnLevel
 }
 
 // sendMockNotFoundError builds a ParserError from a mock-miss error,
 // extracting the MismatchReport if the error carries one.
 func (p *Proxy) sendMockNotFoundError(err error) {
 	p.sendMockNotFoundErrorFrom(err, 0, nil)
+}
+
+// missCause names, without its text, what a miss with no report wraps: "no
+// mock matched" for a genuine miss (models.ErrNoMockMatched; the test's report
+// keeps its text as the call's summary), else the standard error it ends on,
+// which tells keploy's own failures apart (a decode cut short, a connection
+// that closed, reset or timed out), or "other" for one that wraps none of
+// them. The text itself is not logged: a parser's may quote the call.
+func missCause(err error) string {
+	switch {
+	case errors.Is(err, models.ErrNoMockMatched):
+		return "no mock matched"
+	case errors.Is(err, io.ErrUnexpectedEOF):
+		return "unexpected EOF"
+	case errors.Is(err, io.EOF):
+		return "EOF"
+	case errors.Is(err, net.ErrClosed), errors.Is(err, io.ErrClosedPipe):
+		return "closed connection"
+	case errors.Is(err, syscall.ECONNRESET):
+		return "connection reset"
+	case errors.Is(err, syscall.EPIPE):
+		return "broken pipe"
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, os.ErrDeadlineExceeded):
+		return "timeout"
+	}
+	return "other"
 }
 
 // sendMockNotFoundErrorFrom is sendMockNotFoundError for a call from process
@@ -6114,37 +6156,63 @@ func (p *Proxy) sendMockNotFoundErrorFrom(err error, pid uint32, dst *models.Con
 			zap.Bool("drift", r.Drift),
 			zap.Bool("reused", r.Reused))
 	} else if r != nil {
-		fields := []zap.Field{
-			zap.String("protocol", r.Protocol),
-			zap.String("destination", r.Destination),
-			zap.String("actual", r.ActualSummary),
-			zap.String("match_phase", r.MatchPhase),
-			zap.Int("candidates", r.CandidateCount),
-			zap.String("closest", r.ClosestMock),
-			zap.String("next_step", r.NextSteps),
+		if ce := p.logger.Check(p.mismatchLevel(), "mock mismatch: no matching mock for outgoing call"); ce != nil {
+			fields := []zap.Field{
+				zap.String("protocol", r.Protocol),
+				zap.String("destination", r.Destination),
+			}
+			// The call as a log names it (mismatch.LogCall): a URL's or a
+			// statement's values are the app's content, and this line is logged
+			// at WARN. The report file keeps the full summary. A call with no
+			// stated log summary and no shape keploy writes is left out, not
+			// logged empty.
+			if call := mismatch.LogCall(r); call != "" {
+				fields = append(fields, zap.String("actual", call))
+			}
+			fields = append(fields,
+				zap.String("match_phase", r.MatchPhase),
+				zap.Int("candidates", r.CandidateCount),
+				zap.String("closest", r.ClosestMock),
+				zap.String("next_step", mismatch.LogNextStep(r)),
+			)
+			// destination_scope is greppable in a node-wide agent log:
+			// "not_in_compared_set" is the one value that says "nothing this miss
+			// was compared against even targets that upstream" — in Kubernetes
+			// most often a sibling container's egress (replay intercepts the whole
+			// pod while record armed only the container the user named), and in
+			// any mode endpoint drift or a per-test mock window that excluded the
+			// mock. models.OutOfScopeDestinationCauses carries the user-facing
+			// wording; the log field is the machine-greppable half.
+			//
+			// A string, and emitted ONLY when the question was actually answered.
+			// The mechanism is protocol-agnostic, but HTTP is the only protocol
+			// that supplies destination evidence today (nothing else records an
+			// upstream authority in its mocks), so an unconditional boolean
+			// printed a negative on every mongo/mysql/generic miss — an unchecked
+			// negative that reads as "we checked, and it was fine". Absent means
+			// "not established", which is the truth.
+			if r.DestinationScope != models.DestinationScopeUnknown {
+				fields = append(fields, zap.String("destination_scope", r.DestinationScope))
+			}
+			ce.Write(fields...)
 		}
-		// destination_scope is greppable in a node-wide agent log:
-		// "not_in_compared_set" is the one value that says "nothing this miss
-		// was compared against even targets that upstream" — in Kubernetes
-		// most often a sibling container's egress (replay intercepts the whole
-		// pod while record armed only the container the user named), and in
-		// any mode endpoint drift or a per-test mock window that excluded the
-		// mock. models.OutOfScopeDestinationCauses carries the user-facing
-		// wording; the log field is the machine-greppable half.
-		//
-		// A string, and emitted ONLY when the question was actually answered.
-		// The mechanism is protocol-agnostic, but HTTP is the only protocol
-		// that supplies destination evidence today (nothing else records an
-		// upstream authority in its mocks), so an unconditional boolean
-		// printed a negative on every mongo/mysql/generic miss — an unchecked
-		// negative that reads as "we checked, and it was fine". Absent means
-		// "not established", which is the truth.
-		if r.DestinationScope != models.DestinationScopeUnknown {
-			fields = append(fields, zap.String("destination_scope", r.DestinationScope))
-		}
-		p.mismatchLog()("mock mismatch: no matching mock for outgoing call", fields...)
 	} else {
-		p.mismatchLog()("mock mismatch: no matching mock for outgoing call (no structured report)", zap.Error(err))
+		// No report to shape: the parser's own error text may quote the
+		// call (a statement, a key, a document), as missSummaries says, so
+		// it is logged by its cause (missCause) and its length, with the
+		// destination it went to; a fabricated address names no server, as
+		// a report's destination leaves it out above.
+		// The fields are built only when the line is written.
+		if ce := p.logger.Check(p.mismatchLevel(), "mock mismatch: no matching mock for outgoing call (no structured report)"); ce != nil {
+			fields := []zap.Field{zap.String("error_type", string(proxyErr.ParserErrorType))}
+			if err != nil {
+				fields = append(fields, zap.String("cause", missCause(err)), zap.Int("error_bytes", len(err.Error())))
+			}
+			if dst != nil && dst.Addr != "" && !dst.AddrFabricated {
+				fields = append(fields, zap.String("destination", dst.Addr))
+			}
+			ce.Write(fields...)
+		}
 	}
 	p.SendError(proxyErr)
 }

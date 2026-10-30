@@ -3,6 +3,7 @@ package mock
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -77,6 +78,47 @@ func TestPersistLearnedSaysEveryField(t *testing.T) {
 	bound := []models.MockState{{Name: "mock-1", Binds: map[string]models.MockVariables{"mock-old": {"id": {Recorded: "1", Bind: "body.id"}}}}}
 	if _, _, err := m.persistLearned(context.Background(), "s", bound, flows, map[string][]models.MockEntry{"o::A": {{Name: "mock-1"}}, "o::B": {{Name: "mock-old"}}}); err == nil {
 		t.Fatal("a bind onto a recording the record did not make was written")
+	}
+}
+
+// valueKeyStore is a mock store whose PersistLearned says it added noise
+// under a key that is a user's ID on each mock it is handed.
+type valueKeyStore struct {
+	MockDB
+	field string
+}
+
+func (s valueKeyStore) PersistLearned(_ context.Context, _ string, states map[string]models.MockState) (map[string][]string, error) {
+	out := map[string][]string{}
+	for name := range states {
+		out[name] = []string{s.field + " (noise)"}
+	}
+	return out, nil
+}
+
+// The receipt keeps each field the learn step learned whole
+// (TestReceipt.Learned: what was learned is the user's to read and correct),
+// and the Info lines name it by its shape (models.LearnedFieldShape): a body
+// keyed by a user's ID learned noise under it. The receipt held the shape.
+func TestPersistLearnedKeepsAFieldWholeOnTheReceiptAndLogsItsShape(t *testing.T) {
+	const id = "u_7Hq2Lw9Zx"
+	core, logs := observer.New(zap.DebugLevel)
+	m := &mockService{config: &config.Config{}, mockDB: valueKeyStore{field: "body.users." + id + ".seen"}, logger: zap.New(core)}
+	consumed := []models.MockState{{Name: "mock-1"}, {Name: "startup-0"}}
+	flows := []FlowMocks{{Flow: "o::A", Consumed: []models.MockState{{Name: "mock-1"}}}}
+	byTest, pool, err := m.persistLearned(context.Background(), "s", consumed, flows, map[string][]models.MockEntry{"o::A": {{Name: "mock-1"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(byTest, map[string][]string{"o::A": {"mock-1 body.users." + id + ".seen (noise)"}}) || !reflect.DeepEqual(pool, []string{"startup-0 body.users." + id + ".seen (noise)"}) {
+		t.Fatalf("the receipt's fields: by test %v, pool %v", byTest, pool)
+	}
+	var lines []string
+	for _, e := range logs.All() {
+		lines = append(lines, fmt.Sprint(e.ContextMap()["fields"]))
+	}
+	if got := strings.Join(lines, " | "); strings.Contains(got, id) || !strings.Contains(got, "mock-1 body.users.{}.seen (noise)") || !strings.Contains(got, "startup-0 body.users.{}.seen (noise)") {
+		t.Fatalf("the lines do not name each field by its shape alone: %s", got)
 	}
 }
 

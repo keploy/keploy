@@ -113,7 +113,8 @@ func (r *Replayer) noteOpening(params models.MockFilterParams, read bool) {
 // consumers: the tests that consumed each mock): its noise (ReqBodyNoise),
 // its variables (an echo, a use, a bind) and the variables it bound at an
 // earlier mock (Binds), and what it took out, as "<mock> <what> (<kind>)",
-// sorted, by every test that consumed a mock it took something off (byTest:
+// sorted (dropped, which is logged, names a field by its shape:
+// models.FieldShape), by every test that consumed a mock it took something off (byTest:
 // a test whose request was read that consumed the same mock leaned on it as
 // well, served it as the pool's recording a matcher filed a copy of over the
 // one the staging put there: from names, by each such test, the tests whose
@@ -140,12 +141,17 @@ func withoutUnreadLearning(consumed map[string]models.MockState, consumers map[s
 			out[name] = st
 			continue
 		}
-		var mock []string
+		// The report keeps each field whole (FailureInfo.LearningNotKept,
+		// by byTest); dropped, logged, names a field by its shape, as a key
+		// may be a value the app sent.
+		var mock, logged []string
 		for field := range st.ReqBodyNoise {
 			mock = append(mock, name+" "+field+" (noise)")
+			logged = append(logged, name+" "+models.FieldShape(field)+" (noise)")
 		}
 		for field, o := range st.Clocks {
 			mock = append(mock, name+" "+field+" ("+o.String()+")")
+			logged = append(logged, name+" "+models.FieldShape(field)+" ("+o.String()+")")
 		}
 		for v, mv := range st.Variables {
 			kind := "variable"
@@ -153,14 +159,16 @@ func withoutUnreadLearning(consumed map[string]models.MockState, consumers map[s
 				kind = "echo"
 			}
 			mock = append(mock, name+" "+v+" ("+kind+")")
+			logged = append(logged, name+" "+v+" ("+kind+")")
 		}
 		for at, vars := range st.Binds {
 			for v := range vars {
 				mock = append(mock, name+" "+v+" (bound at "+at+")")
+				logged = append(logged, name+" "+v+" (bound at "+at+")")
 			}
 		}
 		if len(mock) > 0 {
-			dropped = append(dropped, mock...)
+			dropped = append(dropped, logged...)
 			if byTest == nil {
 				byTest = map[string][]string{}
 			}

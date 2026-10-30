@@ -1,8 +1,18 @@
 package models
 
 import (
+	"bufio"
+	"context"
+	"errors"
 	"fmt"
+	"io"
+	"mime/multipart"
+	"net"
+	"net/http"
+	"net/url"
+	"os"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -150,6 +160,11 @@ func TestHolePathPlaces(t *testing.T) {
 		{"a place past the path", "GET /orders", []string{"url.path[5]"}, "GET /orders"},
 		{"places that are no segment", "GET /orders/kqzxwv", []string{"body.id", "url.query.id", "header.X-Id", "url.path[x]", "url.path[]", "url.path[01]"}, "GET /orders/kqzxwv"},
 		{"no path", "GET", []string{"url.path[0]"}, "GET"},
+		// The learn step names a segment url.path.<n> (a learn reason, a
+		// field diff a parser names in that dialect): the same segment.
+		{"the learn step's place", "GET /orders/kqzxwv/items", []string{"url.path.1"}, "GET /orders/{}/items"},
+		{"the learn step's first segment", "GET /kqzxwv", []string{"url.path.0"}, "GET /{}"},
+		{"learn places that are no segment", "GET /orders/kqzxwv", []string{"url.path.", "url.path.01", "url.path.x", "url.path.1.2", "url.path.10000"}, "GET /orders/kqzxwv"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -211,6 +226,11 @@ func TestMissShape(t *testing.T) {
 	// The places the closest mock declares are holed too, with no diff.
 	declared := UnmatchedCall{Protocol: "HTTP", ActualSummary: "GET /orders/kqzxwv/lines/abcd", VariablePlaces: []string{"url.path[1]", "url.path[3]", "body.id"}}
 	require.Equal(t, "GET /orders/{}/lines/{}", MissShape(declared))
+	// A field diff in the learn step's dialect (url.path.<n>) names the
+	// same segment: LoggedCall, which logs the call, writes it {} too.
+	learned := UnmatchedCall{Protocol: "HTTP", ActualSummary: "GET /orders/kqzxwv/items", FieldDiffs: []MockFieldDiff{{Path: "url.path.1"}}}
+	require.Equal(t, "GET /orders/{}/items", MissShape(learned))
+	require.NotContains(t, LoggedCall(learned), "kqzxwv")
 }
 
 // A MongoDB miss's shape names the database its command ran in and its
@@ -364,6 +384,35 @@ func TestFieldShape(t *testing.T) {
 		{"body.bind.$1", "body.bind.{}"},
 		{"body.literal.7", "body.literal.{}"},
 		{"header.bind.$1", "header.bind.{}"},
+		// A MySQL command's places (its Nth bound parameter, its statement's
+		// Nth inline literal) are positions keploy counts: kept whole, with
+		// or without the body root, so a log or a next step names the field
+		// as the user marks it as noise. Anything else of their look is
+		// shaped as every key is.
+		{"body.parameters.0.value", "body.parameters.0.value"},
+		{"parameters.0.value", "parameters.0.value"},
+		{"body.parameters.12.type", "body.parameters.12.type"},
+		{"body.parameters.65535", "body.parameters.65535"},
+		{"body.query.literals.0", "body.query.literals.0"},
+		{"query.literals.2", "query.literals.2"},
+		{"body.parameters.01.value", "body.parameters.{}.value"},
+		{"body.parameters.123456.value", "body.parameters.{}.value"},
+		{"body.parameters.0.amount", "body.parameters.{}.amount"},
+		{"body.parameters.0.value.id", "body.parameters.{}.value.id"},
+		{"body.data.parameters.42", "body.data.parameters.{}"},
+		{"body.query.literals.7.x", "body.query.literals.{}.x"},
+		{"header.parameters.0", "header.parameters.{}"},
+		// An HTTP call's path segment place (url.path.<i>) is the segment's
+		// index keploy counts, kept whole; the same look under another root
+		// or past four digits is shaped as every key is.
+		{"url.path.0", "url.path.0"},
+		{"url.path.1", "url.path.1"},
+		{"url.path.9999", "url.path.9999"},
+		{"url.path.01", "url.path.{}"},
+		{"url.path.12345", "url.path.{}"},
+		{"url.path.1.x", "url.path.{}.x"},
+		{"body.url.path.1", "body.url.path.{}"},
+		{"url.query.1", "url.query.{}"},
 	}
 	for _, c := range cases {
 		require.Equal(t, c.want, FieldShape(c.in), c.in)
@@ -427,9 +476,157 @@ func TestSQLShapeKeepsNoLiteral(t *testing.T) {
 	}
 }
 
+// A statement is read to its bound (maxSQLScan), and one longer is withheld
+// from its first literal on: what lies past the bound could leave a quote
+// unpaired. It was read, and its shape built, whole.
+func TestSQLShapeReadsAStatementToItsBound(t *testing.T) {
+	long := "SELECT a FROM t WHERE x = 'v' AND y IN (" + strings.Repeat("1, ", maxSQLScan) + "2)"
+	require.Equal(t, "SELECT a FROM t WHERE x = ? …", SQLShape(long))
+	require.Equal(t, SQLShape(long), SQLShape(long+" AND z = 'never closed"), "a quote past the bound changes nothing")
+	names := "SELECT " + strings.Repeat("col, ", maxSQLScan) + "x FROM t"
+	got := SQLShape(names)
+	require.True(t, strings.HasSuffix(got, "…") && len(got) <= maxSQLText+len("…"), "a statement with no literal is read to its bound and cut: %q", got)
+	require.True(t, strings.HasPrefix(got, "SELECT col, col,"), got)
+	// The bound falls between the two bytes of é.
+	wide := "SELECT" + strings.Repeat(" ", maxSQLScan-len("SELECT")-1) + "é FROM t"
+	require.Equal(t, "SELECT …", SQLShape(wide))
+}
+
 // Digits inside a kept backtick span are written "?", in case the span was
 // misread (a Postgres operator, a multi-byte character set's trail byte).
 func TestSQLShapeMasksDigitsInNames(t *testing.T) {
 	require.Equal(t, "SELECT a `~ ? AND b ~` c", SQLShape("SELECT a `~ 999 AND b ~` c"))
 	require.Equal(t, "SELECT `t?` FROM x", SQLShape("SELECT `t1` FROM x"))
+}
+
+// A learned field is named by its path's shape with keploy's note kept: a
+// map key that may be a value the app sent is {}, the learn step's own words
+// stay, and a field with no note is shaped whole.
+func TestLearnedFieldShapeShapesThePathAndKeepsTheNote(t *testing.T) {
+	for in, want := range map[string]string{
+		"body.users.u_7Hq2Lw9Zx.lastSeen (noise)": "body.users.{}.lastSeen (noise)",
+		"body.token (variable t: bind)":           "body.token (variable t: bind)",
+		"url.path[2] (variable id: use)":          "url.path[2] (variable id: use)",
+		"url.path.1 (noise)":                      "url.path.1 (noise)",
+		"body.accounts.acct_9Lq2Zx7WbN4":          "body.accounts.{}",
+		"header.Authorization (noise)":            "header.Authorization (noise)",
+		"body.notes.(draft) x7Qz9Wk2Lp (noise)":   "body.notes.{} (noise)",
+	} {
+		if got := LearnedFieldShape(in); got != want {
+			t.Errorf("LearnedFieldShape(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// net/http's error for a request it cannot parse quotes its request line or
+// a header line; HTTPParseError keeps what did not parse and its length, no
+// byte of that text, and a short read's sentinel, so errors.Is still tells
+// one.
+func TestHTTPParseErrorKeepsNoTextAndKeepsAShortRead(t *testing.T) {
+	const token = "sk_live_9fQ2xLp7Rw"
+	for _, raw := range []string{
+		"GET /pay?token=" + token + "\x01 HTTP/1.1\r\nHost: a\r\n\r\n",
+		"GET b/pay?token=" + token + " HTTP/1.1\r\nHost: a\r\n\r\n",
+		"GET / HTTP/1.1\r\nHost: a\r\nAuthorization Bearer " + token + "\r\n\r\n",
+	} {
+		_, perr := http.ReadRequest(bufio.NewReader(strings.NewReader(raw)))
+		require.Error(t, perr, "%q", raw)
+		require.Contains(t, perr.Error(), token, "precondition: net/http's error quotes the line")
+		err := HTTPParseError("the HTTP request", len(raw), perr)
+		require.Equal(t, fmt.Sprintf("the HTTP request (%d bytes) does not parse", len(raw)), err.Error())
+	}
+	_, perr := http.ReadRequest(bufio.NewReader(strings.NewReader("GET / HTTP/1.1\r\nHost: a\r\n")))
+	require.ErrorIs(t, HTTPParseError("the HTTP request", 27, perr), io.ErrUnexpectedEOF)
+	require.ErrorIs(t, HTTPParseError("the HTTP request", 0, io.EOF), io.EOF)
+	require.False(t, errors.Is(HTTPParseError("the HTTP request", 0, errors.New("x")), io.EOF))
+}
+
+// A message read off a connection (n < 0) is named without a length. The
+// connection's own error, which net/http returns as the reader gave it, is
+// kept whole, so a reset or a deadline is still told; a *url.Error, net/http's
+// verdict on a request target and a net.Error too, is not one, and is named
+// without its text.
+func TestHTTPParseErrorOffAConnection(t *testing.T) {
+	const token = "sk_live_9fQ2xLp7Rw"
+	_, perr := http.ReadRequest(bufio.NewReader(strings.NewReader("GET / HTTP/1.1\r\nAuthorization Bearer " + token + "\r\n\r\n")))
+	require.Equal(t, "the CONNECT request does not parse", HTTPParseError("the CONNECT request", -1, perr).Error())
+	require.EqualError(t, HTTPParseError("its HTTP response", -1, io.ErrUnexpectedEOF), "its HTTP response does not parse: unexpected EOF")
+	_, uerr := http.ReadRequest(bufio.NewReader(strings.NewReader("GET /pay?token=" + token + "\x01 HTTP/1.1\r\nHost: a\r\n\r\n")))
+	var ue *url.Error
+	require.ErrorAs(t, uerr, &ue, "precondition: net/http returns url's error for a target that does not parse")
+	require.Equal(t, "the HTTP request does not parse", HTTPParseError("the HTTP request", -1, uerr).Error())
+	for _, conn := range []error{
+		&net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET},
+		net.ErrClosed, os.ErrDeadlineExceeded, io.ErrClosedPipe, context.Canceled,
+		fmt.Errorf("wrapped: %w", context.DeadlineExceeded),
+	} {
+		require.True(t, HTTPParseError("its HTTP response", -1, conn) == conn, "%v is not kept as it is", conn)
+	}
+}
+
+// A message that never began is net/http's bare io.EOF, whose text is fixed:
+// it is returned as it is, so a caller's err == io.EOF (a clean close) still
+// tells it. An EOF wrapped with text is named and keeps the sentinel.
+func TestHTTPParseErrorKeepsABareEOFAsItIs(t *testing.T) {
+	_, perr := http.ReadRequest(bufio.NewReader(strings.NewReader("")))
+	require.True(t, perr == io.EOF, "precondition: net/http returns a bare io.EOF for no byte, got %v", perr)
+	require.True(t, HTTPParseError("the HTTP request", -1, perr) == io.EOF)
+	require.True(t, MultipartPartError("the multipart body", 3, io.EOF) == io.EOF)
+	wrapped := HTTPParseError("its HTTP response", -1, fmt.Errorf("read Zq7EOFsecret11: %w", io.EOF))
+	require.EqualError(t, wrapped, "its HTTP response does not parse: EOF")
+	require.ErrorIs(t, wrapped, io.EOF)
+}
+
+// mime/multipart's errors for a part it cannot read quote a line of the
+// body: a part header line without its colon, the line after one ("expecting
+// a new Part; got line").
+// MultipartPartError names what held the part and its length, no byte of
+// that text, and keeps a short read's sentinel and a connection's error.
+func TestMultipartPartErrorKeepsNoText(t *testing.T) {
+	const secret = "Zq7PARTsecret21"
+	for _, c := range []struct{ name, body, phrase, quote string }{
+		{"header line", "--XYZ\r\npassword " + secret + "\r\n\r\nv\r\n--XYZ--\r\n", "malformed MIME header", secret},
+		{"the line after", "--XYZ\r\nX-Bad-Header-Line\r\n\r\n" + secret + " value\r\n--XYZ--\r\n", "expecting a new Part; got line ", secret},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			// Each error the reader gives, as a caller that reads on past
+			// one would see it, up to its end.
+			mr := multipart.NewReader(strings.NewReader(c.body), "XYZ")
+			quoted := false
+			for i := 0; i < 5; i++ {
+				part, raw := mr.NextPart()
+				if raw == nil {
+					_, raw = io.ReadAll(part)
+				}
+				if raw == io.EOF || errors.Is(raw, io.EOF) {
+					break
+				}
+				if raw == nil {
+					continue
+				}
+				if strings.Contains(raw.Error(), c.phrase) && strings.Contains(raw.Error(), c.quote) {
+					quoted = true
+				}
+				err := MultipartPartError("the multipart body", len(c.body), raw)
+				require.Equal(t, fmt.Sprintf("the multipart body (%d bytes) has a part that does not parse", len(c.body)), err.Error())
+			}
+			require.True(t, quoted, "precondition: mime/multipart's error says %q and quotes the body", c.phrase)
+		})
+	}
+	trunc := MultipartPartError("the multipart body", -1, fmt.Errorf("multipart: NextPart: %w", io.EOF))
+	require.EqualError(t, trunc, "the multipart body has a part that does not parse: EOF")
+	require.ErrorIs(t, trunc, io.EOF)
+	reset := &net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET}
+	require.True(t, MultipartPartError("the multipart body", -1, reset) == reset)
+}
+
+// An HTTP request target is named by its shape: no path value, no query
+// value, an absolute URL by its path.
+func TestTargetShapeKeepsNoValue(t *testing.T) {
+	for in, want := range map[string]string{
+		"/users/ada.lovelace@example.com?token=sk_live_9fQ2xLp7Rw": "/users/{}?token={}",
+		"http://api.example.com/pay?token=sk_live_9fQ2xLp7Rw":      "/pay?token={}",
+	} {
+		require.Equal(t, want, TargetShape(in), "%q", in)
+	}
 }

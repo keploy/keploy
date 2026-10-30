@@ -624,7 +624,7 @@ func markRecordedIn(results []models.TestResult, owners map[string][]string) []s
 		for j := range r.FailureInfo.UnmatchedCalls {
 			c := &r.FailureInfo.UnmatchedCalls[j]
 			if c.NameRecordedIn(r.TestCaseID, owners) {
-				named = append(named, fmt.Sprintf("%s: %s (%s, recorded in %s)", r.TestCaseID, c.ActualSummary, c.ClosestMock, c.RecordedIn))
+				named = append(named, fmt.Sprintf("%s: %s (%s, recorded in %s)", r.TestCaseID, models.LoggedCallName(*c), c.ClosestMock, c.RecordedIn))
 			}
 		}
 	}

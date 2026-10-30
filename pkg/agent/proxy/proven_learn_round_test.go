@@ -2338,7 +2338,9 @@ func TestACallOfARecordingWhoseVariablePlaceKeployCannotReadLearnsNothing(t *tes
 				return []*models.Mock{r3Mock("mock-pool", pool.Spec.ReqTimestampMock, "POST", "/orders/xyz", `{"item":"pear"}`, `{"order":0}`), own1}
 			}, func(own2 *models.Mock) RecordingSource {
 				v2 := r3Mock("mock-v2", own2.Spec.ReqTimestampMock, "POST", "/orders/abc", `{"item":"kiwi"}`, `{"order":9}`)
-				v2.Spec.Variables = models.MockVariables{"v": models.MockVariable{Recorded: "kiwi", Bind: "bogus.item"}}
+				// The place's key reads as a value (the agent's miss line
+				// logs the next step): the reason names it by its shape.
+				v2.Spec.Variables = models.MockVariables{"v": models.MockVariable{Recorded: "kiwi", Bind: "bogus.u_7Hq2Lw9Zx"}}
 				return elsewhereDisk(t, v2).RangeKeys
 			})
 			elsewhereBetween(t, p, mm, "mock-own1")
@@ -2360,12 +2362,12 @@ func TestACallOfARecordingWhoseVariablePlaceKeployCannotReadLearnsNothing(t *tes
 			if err != nil {
 				t.Fatal(err)
 			}
-			const why = `keploy cannot read where the recording mock-v2 declares its variable v ("bogus.item"), so it cannot tell whether this request is exactly mock-v2 rather than a changed call of mock-pool`
+			const why = `keploy cannot read where the recording mock-v2 declares its variable v ("bogus.{}"), so it cannot tell whether this request is exactly mock-v2 rather than a changed call of mock-pool`
 			if len(misses) != 2 {
 				t.Fatalf("misses %+v; want two", misses)
 			}
 			for _, m := range misses {
-				if !strings.Contains(m.NextSteps, why) || !strings.Contains(m.NextSteps, "This is a recording keploy cannot read") || strings.Contains(m.NextSteps, "every recording") {
+				if !strings.Contains(m.NextSteps, why) || !strings.Contains(m.NextSteps, "This is a recording keploy cannot read") || strings.Contains(m.NextSteps, "every recording") || strings.Contains(m.NextSteps, "u_7Hq2Lw9Zx") {
 					t.Fatalf("the miss reads %+v; want one saying %q, naming the recording keploy cannot read", m, why)
 				}
 			}

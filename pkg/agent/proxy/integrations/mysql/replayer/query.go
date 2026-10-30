@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mismatch"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	mysqlUtils "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/utils"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
@@ -149,7 +150,7 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 				// rendered bound parameters appended below: those are arbitrary
 				// user data, and a value containing "#" or "-- " would have the
 				// rest of the parameter list silently deleted from the report.
-				actualQuery := ""
+				actualQuery, streamed := "", ""
 				switch msg := req.Message.(type) {
 				case *mysql.QueryPacket:
 					actualQuery = sqlStatementIdentity(msg.Query)
@@ -168,8 +169,18 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 					}
 				case *mysql.StmtSendLongDataPacket:
 					if msg != nil {
-						actualQuery = fmt.Sprintf("(param %d, %d streamed bytes)", msg.ParameterID, len(msg.Data))
+						streamed = fmt.Sprintf("(param %d, %d streamed bytes)", msg.ParameterID, len(msg.Data))
+						actualQuery = streamed
 					}
+				}
+				// The command as the REPLAY-ORPHAN line writes it: a statement
+				// in its shape (sqlShape), its literals and bound values left
+				// out; a long-data packet by its parameter's id and its byte
+				// count, which are no content and no statement (a shape would
+				// write them "?").
+				orphanSQL := zap.Stringer("sql_query", sqlShape(actualQuery))
+				if streamed != "" {
+					orphanSQL = zap.String("sql_query", streamed)
 				}
 				closestQuery := sqlStatementIdentity(miss.closestQuery)
 				diff := ""
@@ -223,7 +234,7 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 					// (restaged): its matcher, held to its first read, read
 					// nothing, and the miss says so.
 					logger.Error("REPLAY-ORPHAN: TC failing — no data mock available for this query, so it was never recorded or was dropped at record time",
-						zap.String("sql_query", truncate(actualQuery, 300)),
+						orphanSQL,
 						zap.String("request_type", req.Header.Type),
 						zap.Int("commands_processed", commandCount),
 						zap.String("hint", "check mappings.yaml: this test set has no MySQL data mock for the command phase — either the query was never recorded, or its mock was dropped at record time (teardown lag or memory pressure)"),
@@ -239,13 +250,13 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 					zap.Int("candidates", miss.candidateCount),
 					zap.String("match_phase", miss.matchPhase),
 					zap.Int("strict_rejected_candidates", miss.strictRejected),
-					zap.String("next_step", nextSteps))
+					zap.String("next_step", mismatch.LogNextStep(report)))
 				baseErr := fmt.Errorf("error while simulating the command phase: %w", models.ErrNoMockMatched)
 				return models.NewMockMismatchError(baseErr, report)
 			}
 
 			if ce := logger.Check(zap.DebugLevel, "Matched the command with the mock"); ce != nil {
-				ce.Write(zap.Any("mock", resp))
+				ce.Write(zap.String("command", commandPkt.Header.Type), zap.String("answer", packetType(&resp.PacketBundle)))
 			}
 
 			// Handle prepared statement cleanup for COM_STMT_CLOSE
@@ -266,7 +277,7 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 			if wire.IsNoResponseCommand(commandPkt.Header.Type) {
 				// No response for COM_STMT_CLOSE and COM_STMT_SEND_LONG_DATA
 				if ce := logger.Check(zap.DebugLevel, "No response for the command"); ce != nil {
-					ce.Write(zap.Any("command", command))
+					ce.Write(zap.String("command", commandPkt.Header.Type), zap.Int("commandBytes", len(command)))
 				}
 				continue
 			}
@@ -274,7 +285,7 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 			//Encode the matched resp
 			buf, err := wire.EncodeToBinary(ctx, logger, &resp.PacketBundle, clientConn, decodeCtx)
 			if err != nil {
-				utils.LogError(logger, err, "failed to encode the response", zap.Any("response", resp))
+				utils.LogError(logger, err, "failed to encode the response", zap.String("command", commandPkt.Header.Type), zap.String("answer", packetType(&resp.PacketBundle)))
 				return err
 			}
 

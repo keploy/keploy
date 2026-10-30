@@ -394,7 +394,7 @@ func TestReturnStaleMovesGivesBackOnlyARunningOwnersDriftMoves(t *testing.T) {
 // (returnedMissed); nothing for any other miss, or a plan that gave none back.
 func TestAMissOfAReturnedRecordingNamesItsOwner(t *testing.T) {
 	p := &exactPlan{returned: map[string]string{"mock-6": "post-url-1"}}
-	calls := []models.UnmatchedCall{{ClosestMock: "mock-6", ActualSummary: "insert keploy.events"}, {ClosestMock: "mock-9"}, {ClosestMock: "mock-6"}}
+	calls := []models.UnmatchedCall{{ClosestMock: "mock-6", Protocol: "Redis", ActualSummary: "SET events:ada.lovelace@example.com 1"}, {ClosestMock: "mock-9"}, {ClosestMock: "mock-6"}}
 	why := p.returnedWhy(calls)
 	for _, want := range []string{"mock-6 is post-url-1's own again", "post-url-1's quarantine (keploy/unseparable_write)", "record the test set again"} {
 		if !strings.Contains(why, want) {
@@ -408,12 +408,12 @@ func TestAMissOfAReturnedRecordingNamesItsOwner(t *testing.T) {
 		{TestCaseID: "P", FailureInfo: models.FailureInfo{UnmatchedCalls: calls[:2]}},
 		{TestCaseID: "post-url-1", FailureInfo: models.FailureInfo{UnmatchedCalls: calls[:1]}},
 	}
-	if got := p.returnedMissed(results); !reflect.DeepEqual(got, []string{"P: insert keploy.events (mock-6, given back to post-url-1)"}) {
+	if got := p.returnedMissed(results); !reflect.DeepEqual(got, []string{"P: a Redis call (mock-6, given back to post-url-1)"}) {
 		t.Fatalf("returnedMissed = %v", got)
 	}
 	// A test with a row per cycle is named once, from its last row.
 	cycles := append([]models.TestResult{{TestCaseID: "P", FailureInfo: models.FailureInfo{UnmatchedCalls: calls[:1]}}}, results...)
-	if got := p.returnedMissed(cycles); !reflect.DeepEqual(got, []string{"P: insert keploy.events (mock-6, given back to post-url-1)"}) {
+	if got := p.returnedMissed(cycles); !reflect.DeepEqual(got, []string{"P: a Redis call (mock-6, given back to post-url-1)"}) {
 		t.Fatalf("returnedMissed over two cycles = %v; want P named once", got)
 	}
 	var none *exactPlan

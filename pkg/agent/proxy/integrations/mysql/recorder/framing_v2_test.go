@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/logleak"
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	connphase "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire/phase/conn"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire/phase/query"
@@ -182,6 +183,8 @@ type recording struct {
 	// to it.
 	returned bool
 	logs     *observer.ObservedLogs
+	// rendered is the log as production renders it, JSON and console.
+	rendered *logleak.Buffer
 	// leftOut are the exchanges RecordV2 framed but did not record, as the
 	// windows it left out (Session.RecordOrphanWindow).
 	leftOut *orphanSpans
@@ -331,7 +334,7 @@ func recordChunks(t *testing.T, client, server []fakeconn.Chunk, closeAtEnd bool
 		}
 	}
 	core, logs := observer.New(zapcore.DebugLevel)
-	logger := zap.New(core)
+	logger, rendered := logleak.Logger(core)
 	h := newV2Harness(t)
 	h.logger = logger
 	h.sess.Logger = logger
@@ -412,7 +415,7 @@ func recordChunks(t *testing.T, client, server []fakeconn.Chunk, closeAtEnd bool
 		close(pushed)
 	}()
 
-	rec := recording{logs: logs, leftOut: leftOut, mgr: mgr}
+	rec := recording{logs: logs, rendered: rendered, leftOut: leftOut, mgr: mgr}
 	timer := time.NewTimer(deadline)
 	defer timer.Stop()
 	select {
@@ -1527,6 +1530,44 @@ func TestRecordV2_TheServersOwnErrorEndsTheRecording(t *testing.T) {
 	}
 }
 
+// The line that says the server ended the connection with an ERR of its own
+// names it by its error code and SQL state: its message quotes what the
+// statement held ("Duplicate entry 'ada@example.com' for key 'email'"), and
+// no stretch of it appears in the debug log in any encoding. It logged the
+// packet whole.
+func TestRecordV2_TheServersOwnErrorIsLoggedByItsCodeAndState(t *testing.T) {
+	t.Parallel()
+	resetWarnLimiters()
+	const email, token = "grace.vault@example.net", "sk_live_Q7wZr9Kf"
+	message := "Duplicate entry '" + email + "-" + token + "' for key 'users.email_token'"
+	xs := kitTraffic(t, []int{3}, false)
+	s := layOut(xs)
+	ownErr := wrapPacket(append([]byte{0xff, 0xbf, 0x0f, '#'}, "HY000"+message...), 0)
+	client := append(append([]byte{}, s.client...), wrapPacket([]byte{0x0e}, 0)...)
+	server := append(append([]byte{}, s.server...), ownErr...)
+	rec := recordConn(t, chunked(client, 64), chunked(server, 64), false, time.Minute) // the bound only turns a hang into a failure
+	if !rec.returned || rec.err != nil {
+		t.Fatalf("RecordV2 returned=%v err=%v: the server's own ERR ends the connection", rec.returned, rec.err)
+	}
+	const line = "V2: the server dropped the connection with an error of its own; its recording ends here"
+	lines := rec.logs.FilterMessage(line).All()
+	if len(lines) != 1 {
+		t.Fatalf("want the line %q once, got %d: %v", line, len(lines), rec.logs.All())
+	}
+	if f := lines[0].ContextMap(); f["errCode"] != uint16(4031) || f["sqlState"] != "HY000" {
+		t.Errorf("the line names the ERR by its code 4031 and SQL state HY000; got %v", f)
+	}
+	log := rec.rendered.String()
+	if !strings.Contains(log, line) {
+		t.Fatalf("the rendered log is not the one checked: %s", log)
+	}
+	for what, content := range map[string]string{"the e-mail": email, "the token": token} {
+		if found := logleak.Find(t, log, []byte(content)); len(found) > 0 {
+			t.Errorf("the log holds %s the ERR's message quotes: %v", what, found)
+		}
+	}
+}
+
 // A packet at sequence id 0 that starts with 0xFF but has no ERR's shape (a
 // '#' and a SQL state of five digits or capital letters after the code) is not
 // the server's own ERR: row bytes a hole put the reader on can start that way
@@ -2188,5 +2229,33 @@ func TestEachRecorderWarningIsLimitedByItsOwnMessage(t *testing.T) {
 	}
 	if held, ok := w[0].ContextMap()["sameWarningsHeldBack"]; ok {
 		t.Fatalf("the out-of-sequence WARN says %v of the same warning were held back: it counts the framing loss held back before it", held)
+	}
+}
+
+// serversOwnErrID names only a server's own ERR, by its code and SQL state;
+// any other packet it is given it names by nothing. A row the reader was put
+// on at sequence id 0, or an ERR of the old protocol (no '#' and no state),
+// would otherwise put five bytes of what it holds in the log as a "state",
+// and a packet shorter than an ERR's head would panic the recorder.
+func TestServersOwnErrIDNamesOnlyAnERR(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		name  string
+		buf   []byte
+		code  uint16
+		state string
+	}{
+		{"the server's own ERR", wrapPacket(append([]byte{0xff, 0xbf, 0x0f, '#'}, "HY000The client was disconnected"...), 0), 4031, "HY000"},
+		{"a text row at sequence id 0", wrapPacket(append([]byte{0x0f}, "ada@mail.test#ZQXJ"...), 0), 0, ""},
+		{"an ERR's 0xFF with row bytes after it", wrapPacket(append([]byte{0xff, 0x01, 0x02, '#'}, "ada@mail.test"...), 0), 0, ""},
+		{"an ERR of the old protocol", wrapPacket(append([]byte{0xff, 0x26, 0x04}, "Duplicate entry 'ada@mail.test'"...), 0), 0, ""},
+		{"an ERR at another sequence id", wrapPacket(append([]byte{0xff, 0xbf, 0x0f, '#'}, "HY000gone"...), 1), 0, ""},
+		{"a packet shorter than an ERR's head", wrapPacket([]byte{0xff, 0xbf, 0x0f, '#', 'H'}, 0), 0, ""},
+		{"no packet", nil, 0, ""},
+	} {
+		code, state := serversOwnErrID(c.buf)
+		if code != c.code || state != c.state {
+			t.Errorf("%s: serversOwnErrID = %d %q, want %d %q", c.name, code, state, c.code, c.state)
+		}
 	}
 }

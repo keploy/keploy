@@ -97,7 +97,7 @@ func learnedByTest(added map[string][]string, mapping *models.Mapping, consumerO
 					continue
 				}
 				for _, f := range added[e.Name] {
-					fields = append(fields, e.Name+" "+f)
+					fields = append(fields, e.Name+" "+models.LearnedFieldShape(f))
 				}
 				if len(added[e.Name]) > 0 {
 					seen[e.Name] = true
@@ -119,7 +119,7 @@ func learnedByTest(added map[string][]string, mapping *models.Mapping, consumerO
 	for _, name := range pinned {
 		var fields []string
 		for _, f := range added[name] {
-			fields = append(fields, name+" "+f)
+			fields = append(fields, name+" "+models.LearnedFieldShape(f))
 		}
 		seen[name] = true
 		addLine(by[name], fields)
@@ -128,7 +128,7 @@ func learnedByTest(added map[string][]string, mapping *models.Mapping, consumerO
 	for name := range added {
 		if !seen[name] {
 			for _, f := range added[name] {
-				rest = append(rest, name+" "+f)
+				rest = append(rest, name+" "+models.LearnedFieldShape(f))
 			}
 		}
 	}

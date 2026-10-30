@@ -259,11 +259,11 @@ func TestCheck_NamesTheEditThatMakesAnOlderProducerCapture(t *testing.T) {
 	for _, u := range got.Uncaptured {
 		fixes[u.Key] = u.Fix
 	}
-	const constant = "; if it is a constant or what the request sent: write its recorded value "
+	const constant = "; if it is a constant or what the request sent: write the value config.yaml's template holds for "
 	assert.Equal(t, map[string]string{
-		"id":  "if the app issues this value anew each run: change {{string .id}} at test-1/response body.id to {{capture string .id}}" + constant + `"usr_1" in place of every placeholder of id`,
-		"n":   `if the app issues this value anew each run: change {{int .n}} at test-1/response body.n to "{{capture int .n}}"` + constant + `"7" in place of every placeholder of n`,
-		"sid": "if the app issues this value anew each run: change {{string .sid}} at test-1/response header Set-Cookie.sid to {{capture string .sid}}" + constant + `"S0" in place of every placeholder of sid`,
+		"id":  "if the app issues this value anew each run: change {{string .id}} at test-1/response body.id to {{capture string .id}}" + constant + `id in place of every placeholder of id`,
+		"n":   `if the app issues this value anew each run: change {{int .n}} at test-1/response body.n to "{{capture int .n}}"` + constant + `n in place of every placeholder of n`,
+		"sid": "if the app issues this value anew each run: change {{string .sid}} at test-1/response header Set-Cookie.sid to {{capture string .sid}}" + constant + `sid in place of every placeholder of sid`,
 	}, fixes)
 }
 
@@ -399,13 +399,13 @@ func TestCheckResult_NextStepNamesBothCases(t *testing.T) {
 			[]string{`change {{int .n}} at test-1/response body.n to "{{capture int .n}}"`, changed + "test-1/response body.n"}},
 		{"a use of a key an earlier case captured", "test-3", Failure{Where: "body.tok", Placeholder: "{{string .tok}}"}, true,
 			[]string{"this run's value of tok is what test-2/response body.tok captured",
-				"capture it under a key of its own: change {{string .tok}} at test-3/response body.tok to {{capture string .tok2}}, give tok2 its recorded value",
+				"capture it under a key of its own: change {{string .tok}} at test-3/response body.tok to {{capture string .tok2}}, give tok2 in config.yaml's template the value test-3/response body.tok recorded",
 				"if this place replaces tok from then on (a refreshed session cookie), change {{string .tok}} there to {{capture string .tok}} instead, which points every later use of tok at this answer",
 				changed + "test-3/response body.tok"}},
 		{"a use in a case that cannot capture", "test-3", Failure{Where: "body.tok", Placeholder: "{{string .tok}}"}, false,
 			[]string{"this run's value of tok is what test-2/response body.tok captured", changed}},
 		{"a use of a key its own response captures", "test-2", Failure{Where: "body.id2", Placeholder: "{{string .tok}}"}, true,
-			[]string{"this run's value of tok is what test-2/response body.tok captured from this same answer", changed + "test-2/response body.id2"}},
+			[]string{"this run's value of tok is what test-2/response body.tok captured from this same answer", changed + "test-2/response body.{}"}},
 		{"a capture that found nothing", "test-2", Failure{Where: "body.tok", Placeholder: "{{capture string .tok}}"}, true,
 			[]string{"the answer has no value of the capture's type there", changed + "test-2/response body.tok"}},
 	} {
@@ -554,7 +554,8 @@ func TestCheck_AdvisesNoCaptureWhereACaptureWouldBeRefused(t *testing.T) {
 	}
 	require.Contains(t, fixes, "location")
 	assert.NotContains(t, fixes["location"], "{{capture", "the capture would be refused")
-	assert.Contains(t, fixes["location"], `write its recorded value "/jobs/j_REC1" in place of every placeholder of location`)
+	assert.Contains(t, fixes["location"], `write the value config.yaml's template holds for location in place of every placeholder of location`)
+	assert.NotContains(t, fixes["location"], "j_REC1", "the advice feeds a log line: it never quotes the recorded value")
 	assert.Contains(t, fixes["location"], "if a response also gives the value whole (a JSON value), capture it there")
 	assert.Contains(t, fixes["id"], "change {{string .id}} at create/response header Content-Location to {{capture string .id}}", "a part with no delimiter can capture")
 
@@ -565,7 +566,8 @@ func TestCheck_AdvisesNoCaptureWhereACaptureWouldBeRefused(t *testing.T) {
 	next := res.NextStep("create", Failure{Where: "header Location", Placeholder: "{{string .location}}"}, true)
 	assert.NotContains(t, next, "{{capture")
 	assert.Contains(t, next, "if a response also gives the value whole (a JSON value), capture it there")
-	assert.Contains(t, next, `"/jobs/j_REC1" holds a delimiter of its part`)
+	assert.Contains(t, next, `the value recorded there (12 bytes) holds a delimiter of its part`)
+	assert.NotContains(t, next, "j_REC1", "the next step feeds a log line: it never quotes the recorded value")
 }
 
 // AN UNTYPED BARE PRODUCER an older templatize wrote ({"n":{{.n}}}, a number)
@@ -705,13 +707,14 @@ func TestCheckResult_NextStepCapturesAValueOfItsOwnUnderANewKey(t *testing.T) {
 	r := newRun(t, map[string]interface{}{"id": "u_REC1", "id2": "taken"})
 	res := r.Check([]*models.TestCase{create, stats(`{"last":"{{string .id}}"}`), read}, CheckOptions{})
 	next := res.NextStep("stats", Failure{Where: "body.last", Placeholder: "{{string .id}}"}, true)
-	assert.Contains(t, next, `capture it under a key of its own: change {{string .id}} at stats/response body.last to {{capture string .id3}}, give id3 its recorded value "u_REC1" in config.yaml's template, and write {{string .id3}} where later requests send this place's value`, "id2 is taken")
+	assert.Contains(t, next, `capture it under a key of its own: change {{string .id}} at stats/response body.last to {{capture string .id3}}, give id3 in config.yaml's template the value stats/response body.last recorded, and write {{string .id3}} where later requests send this place's value`, "id2 is taken")
+	assert.NotContains(t, next, "u_REC1", "the next step feeds a log line: it names where the recorded value is, never the value")
 	// A key config.yaml defines with a map or a list value is taken too
 	// (TR9-11): the new key is never one config.yaml holds.
 	mapped := newRun(t, map[string]interface{}{"id": "u_REC1", "id2": map[string]interface{}{"a": 1}})
 	res = mapped.Check([]*models.TestCase{create, stats(`{"last":"{{string .id}}"}`), read}, CheckOptions{})
 	next = res.NextStep("stats", Failure{Where: "body.last", Placeholder: "{{string .id}}"}, true)
-	assert.Contains(t, next, `to {{capture string .id3}}, give id3 its recorded value "u_REC1"`, "id2 is defined, as a map")
+	assert.Contains(t, next, `to {{capture string .id3}}, give id3 in config.yaml's template the value stats/response body.last recorded`, "id2 is defined, as a map")
 	assert.Contains(t, next, "if this place replaces id from then on (a refreshed session cookie), change {{string .id}} there to {{capture string .id}} instead, which points every later use of id at this answer")
 
 	sendsRead := func(capture string) string {
@@ -791,7 +794,7 @@ func TestCheck_TheAdviceNamesTheProducerTemplatizeWould(t *testing.T) {
 		httpCase("hop", models.HTTPReq{}, models.HTTPResp{StatusCode: 302, Header: map[string]string{"Location": "/home?sid={{string .sid}}", "Set-Cookie": "sid={{string .sid}}; Path=/"}}),
 	}, CheckOptions{})
 	next = res.NextStep("hop", Failure{Where: "header Location", Placeholder: "{{string .sid}}"}, true)
-	assert.Contains(t, next, "change {{string .sid}} at hop/response header Location to {{capture string .sid2}} (a capture in that header checks only that a value stands there, so any target passes there, a regression included), give sid2 its recorded value")
+	assert.Contains(t, next, "change {{string .sid}} at hop/response header Location to {{capture string .sid2}} (a capture in that header checks only that a value stands there, so any target passes there, a regression included), give sid2 in config.yaml's template the value hop/response header Location recorded")
 	next = res.NextStep("hop", Failure{Where: "header Set-Cookie.sid", Placeholder: "{{string .sid}}"}, true)
 	assert.NotContains(t, next, "any target passes", "a cookie is no target")
 
@@ -967,7 +970,7 @@ func TestCheck_TheAdviceForAnUncapturedKey(t *testing.T) {
 	fix := fixOf(t, res, "id")
 	assert.NotContains(t, fix, "{{capture")
 	assert.Contains(t, fix, "a capture cannot stand at create/response body.items[0].id (it is inside an array and test.ignoreOrdering is on")
-	assert.Contains(t, fix, `write its recorded value "u_REC1" in place of every placeholder of id`)
+	assert.Contains(t, fix, `write the value config.yaml's template holds for id in place of every placeholder of id`)
 
 	// T20b: the one capture of the key is refused.
 	res = r.Check([]*models.TestCase{
@@ -978,14 +981,15 @@ func TestCheck_TheAdviceForAnUncapturedKey(t *testing.T) {
 	fix = fixOf(t, res, "location")
 	assert.NotContains(t, fix, "mark that place {{capture", "the capture it would advise is the one refused")
 	assert.Contains(t, fix, "the capture {{capture string .location}} at create/response header Location is refused when the set loads")
-	assert.Contains(t, fix, `write its recorded value "/jobs/j_REC1" in place of every placeholder of location`)
+	assert.Contains(t, fix, `write the value config.yaml's template holds for location in place of every placeholder of location`)
 
 	// R7s: no earlier response holds the key (the client chose it): the
 	// literal edit is offered beside the capture.
 	res = r.Check([]*models.TestCase{httpCase("read", models.HTTPReq{URL: "http://h/users/{{string .id}}"}, models.HTTPResp{})}, CheckOptions{})
 	fix = fixOf(t, res, "id")
 	assert.Contains(t, fix, "mark that place {{capture string .id}}")
-	assert.Contains(t, fix, `if it is a constant or what the request sent, write its recorded value "u_REC1" in place of every placeholder of id`)
+	assert.Contains(t, fix, `if it is a constant or what the request sent, write the value config.yaml's template holds for id in place of every placeholder of id`)
+	assert.NotContains(t, fix, "u_REC1", "the advice feeds a log line: it never quotes the recorded value")
 
 	// R7q: one header value holds two uses; it holds one capture, so the
 	// advice says at most one of them becomes one.

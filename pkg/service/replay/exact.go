@@ -485,7 +485,7 @@ func (p *exactPlan) returnedMissed(results []models.TestResult) []string {
 	for _, r := range lastResultOfEachTest(results) {
 		for _, c := range r.FailureInfo.UnmatchedCalls {
 			if owner, ok := p.returned[c.ClosestMock]; ok && owner != r.TestCaseID {
-				out = append(out, fmt.Sprintf("%s: %s (%s, given back to %s)", r.TestCaseID, c.ActualSummary, c.ClosestMock, owner))
+				out = append(out, fmt.Sprintf("%s: %s (%s, given back to %s)", r.TestCaseID, models.LoggedCallName(c), c.ClosestMock, owner))
 			}
 		}
 	}

@@ -336,7 +336,7 @@ func repeatLine(test string, c *models.UnmatchedCall) string {
 	if n.ReplayGapFromStart {
 		when = "before this test began"
 	}
-	line := fmt.Sprintf("%s: %s repeats %s, answered for %s %.2fs %s at replay", test, c.ActualSummary, n.Mock, by, n.ReplayGapSeconds, when)
+	line := fmt.Sprintf("%s: %s repeats %s, answered for %s %.2fs %s at replay", test, models.LoggedCallName(*c), n.Mock, by, n.ReplayGapSeconds, when)
 	if n.RecordGapKnown {
 		line += fmt.Sprintf(", %.2fs after %s at record", n.RecordGapSeconds, n.RecordedLast)
 	}

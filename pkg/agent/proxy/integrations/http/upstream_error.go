@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"go.keploy.io/server/v3/pkg/neterr"
+	"go.keploy.io/server/v3/utils"
 )
 
 // UpstreamErrorMarker is a response header the recorder adds when it
@@ -128,30 +129,26 @@ func upstreamErrorClass(err error) string {
 	return "other"
 }
 
-// upstreamRequestURL extracts a best-effort URL string from a raw HTTP
-// request buffer. Falls back to the dest-socket address if the request
-// cannot be parsed (e.g. truncated / non-HTTP bytes). The returned string
-// is log-only; callers must not depend on its format.
-func upstreamRequestURL(rawReq []byte, destAddr net.Addr) string {
+// upstreamRequestMeta says, best effort, which call a raw HTTP request
+// buffer is: utils.GetReqMeta's method, host, path shape and query parameter
+// names, never a query value. The host falls back to the dest socket's
+// address, and a buffer that does not parse (truncated, not HTTP) is named
+// by that host alone. It is log-only; callers must not depend on its shape.
+func upstreamRequestMeta(rawReq []byte, destAddr net.Addr) map[string]string {
 	if len(rawReq) > 0 {
 		req, err := nhttp.ReadRequest(bufio.NewReader(bytes.NewReader(rawReq)))
 		if err == nil && req != nil {
-			host := req.Host
-			if host == "" && destAddr != nil {
-				host = destAddr.String()
+			meta := utils.GetReqMeta(req)
+			if meta["host"] == "" && destAddr != nil {
+				meta["host"] = destAddr.String()
 			}
-			path := "/"
-			if req.URL != nil && req.URL.RequestURI() != "" {
-				path = req.URL.RequestURI()
-			}
-			scheme := "http"
-			return fmt.Sprintf("%s://%s%s", scheme, host, path)
+			return meta
 		}
 	}
 	if destAddr != nil {
-		return destAddr.String()
+		return map[string]string{"host": destAddr.String()}
 	}
-	return "unknown"
+	return map[string]string{"host": "unknown"}
 }
 
 // parseRequestMethodAndURL extracts (method, request-uri) from a raw HTTP/1.x

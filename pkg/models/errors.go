@@ -248,6 +248,16 @@ type MockMismatchReport struct {
 	Diff          string    // Human-readable diff (protocol-specific)
 	NextSteps     string    // Actionable suggestion for the user
 	MatchPhase    string    // how far the match cascade got (MatchPhase* constants)
+	// LogSummary is the call as a log line names it, when the parser states
+	// it: a shape it writes from no value the call sent or a recording
+	// holds (a command and a collection, never a key or a document), which
+	// tells two misses of the protocol apart where ActualSummary may hold
+	// content. mismatch.LogCall logs it as written, in preference to its own
+	// shaping, so a parser that sets it promises it holds no value. The
+	// agent carries it to the call's UnmatchedCall.LogSummary, which
+	// models.LoggedCall prefers the same way, so keploy test and keploy
+	// mock name the call by it too. Empty for every OSS parser.
+	LogSummary string
 	// DestinationScope is the verdict on whether any mock the matcher
 	// compared against targeted this call's upstream (DestinationScope*
 	// constants; empty means the question was never answered). It is a

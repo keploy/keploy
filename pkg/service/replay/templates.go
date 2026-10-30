@@ -68,10 +68,7 @@ type resolvedCase struct {
 func (r *Replayer) resolveExpected(run *templates.Run, check *templates.CheckResult, sent *models.TestCase, answer *models.HTTPResp, testSetID string) resolvedCase {
 	res := run.Expected(sent.HTTPResp, *answer, templates.ExpectOptions{IgnoreOrdering: r.responseIgnoreOrdering()})
 	r.logTemplateFailures(sent.Name, testSetID, res.Failures, check, true)
-	for _, c := range res.Captures {
-		r.logger.Debug("captured a template value from the app's answer",
-			zap.String("testcase", sent.Name), zap.String("key", c.Key), zap.String("value", c.Value), zap.String("where", c.Where))
-	}
+	r.logCaptures(sent.Name, res.Captures)
 	exp := *sent
 	exp.HTTPResp = res.Resp
 	var opts []httpMatcher.MatchOption
@@ -108,6 +105,16 @@ func (r *Replayer) streamTemplateFailures(run *templates.Run, check *templates.C
 	return fs
 }
 
+// logCaptures says, for each value a test case's answer gave a capture, its
+// key, where it was and how long it is: never the value, which is what the
+// app issued (a session token, an ID). The report's captures keep it.
+func (r *Replayer) logCaptures(testCase string, caps []templates.Capture) {
+	for _, c := range caps {
+		r.logger.Debug("captured a template value from the app's answer",
+			zap.String("testcase", testCase), zap.String("key", c.Key), zap.Int("value_bytes", len(c.Value)), zap.String("where", templates.PlaceShape(c.Where)))
+	}
+}
+
 // logTemplateFailures says, for each variable place a test case failed on,
 // where, why, and the next step for both things it can mean
 // (templates.CheckResult.NextStep). A capture that misses leaves its key at
@@ -120,9 +127,18 @@ func (r *Replayer) logTemplateFailures(testCase, testSetID string, fs []template
 		}
 		r.logger.Warn("a template variable's place does not hold what it must, so the test case fails",
 			zap.String("testcase", testCase), zap.String("testset", testSetID),
-			zap.String("where", f.Where), zap.String("placeholder", f.Placeholder), zap.String("why", f.Why),
+			zap.String("where", templates.PlaceShape(f.Where)), zap.String("placeholder", f.Placeholder),
+			zap.String("why", whyInReport(f.Why)),
 			zap.String("next_step", next))
 	}
+}
+
+// whyInReport is a template failure's or refusal's why as a log line names
+// it: by its length. The why quotes what the answer or the recording held
+// there (a header's value, a cookie's, a body's span, a recorded value), and
+// the report's template_failures keep it whole.
+func whyInReport(why string) string {
+	return fmt.Sprintf("%d bytes, in the report's template_failures", len(why))
 }
 
 // markTemplateFailures says on a result that failed on template variable
@@ -348,34 +364,34 @@ func (r *Replayer) logTemplateCheck(testSetID string, check templates.CheckResul
 		for _, f := range check.Refused[name] {
 			utils.LogError(r.logger, nil, "a test case's placeholder is refused; the test case fails without being sent",
 				zap.String("testset", testSetID), zap.String("testcase", f.TestCase), zap.String("placeholder", f.Placeholder),
-				zap.String("where", f.Where), zap.String("why", f.Why),
-				zap.String("next_step", "edit the test case as the reason says, then run keploy test again"))
+				zap.String("where", templates.PlaceShape(f.Where)), zap.String("why", whyInReport(f.Why)),
+				zap.String("next_step", "edit the test case as the report's template_failures say, then run keploy test again"))
 		}
 	}
 	for _, u := range check.Undefined {
 		if u.Expression {
 			r.logger.Warn("template text is an expression (a pipe, a function call, a bare dot), which keploy test does not render: it is sent and compared as the literal text",
 				zap.String("testset", testSetID), zap.String("testcase", u.TestCase), zap.String("placeholder", u.Placeholder),
-				zap.String("where", u.Where),
+				zap.String("where", templates.PlaceShape(u.Where)),
 				zap.String("next_step", "an older keploy rendered some of these ({{ .id | print }}): write the value the expression stood for in its place, or a placeholder keploy reads ({{string .k}}, {{int .k}}, {{float .k}}), or leave the text as it is"))
 			continue
 		}
 		if u.OutsideGrammar {
 			r.logger.Warn("a placeholder names a key that is not a template key (one name of letters, digits and _, starting with a letter or _): it is sent and compared as the literal text",
 				zap.String("testset", testSetID), zap.String("testcase", u.TestCase), zap.String("placeholder", u.Placeholder),
-				zap.String("where", u.Where),
+				zap.String("where", templates.PlaceShape(u.Where)),
 				zap.String("next_step", "a template key is one name ({{string .userId}}): rename the key in config.yaml's template and in the test cases, or leave the text as it is"))
 			continue
 		}
 		r.logger.Warn("a placeholder names a key the test set's config.yaml does not define: it is sent and compared as the literal text",
 			zap.String("testset", testSetID), zap.String("testcase", u.TestCase), zap.String("placeholder", u.Placeholder),
-			zap.String("where", u.Where),
+			zap.String("where", templates.PlaceShape(u.Where)),
 			zap.String("next_step", "add the key to config.yaml's template (its value as recorded), or fix the key's name in the test case"))
 	}
 	for _, u := range check.Uncaptured {
 		r.logger.Warn("a request sends a template key that no earlier test case captures: every run sends config.yaml's recorded value there",
 			zap.String("testset", testSetID), zap.String("testcase", u.TestCase), zap.String("placeholder", u.Placeholder),
-			zap.String("where", u.Where),
+			zap.String("where", templates.PlaceShape(u.Where)),
 			zap.String("next_step", u.UncapturedNextStep()))
 	}
 	r.warnNoiseOverVariables(testSetID, check.Places, cases, check.Refused)
@@ -411,6 +427,8 @@ func (r *Replayer) warnNoiseOverVariables(testSetID string, places []templates.P
 		if tc == nil || len(refused[p.TestCase]) > 0 {
 			continue
 		}
+		// The entry covers the place, so its keys are the place's: it is
+		// named by its shape, as the place is (a key may be a user's ID).
 		entry := r.noiseCovering(p, tc, global)
 		if entry == "" || warned[p.TestCase+"\x00"+p.Where+"\x00"+entry] {
 			continue
@@ -421,8 +439,8 @@ func (r *Replayer) warnNoiseOverVariables(testSetID string, places []templates.P
 			next = nextStepNoiseOverCapture
 		}
 		r.logger.Warn("a noise entry covers a template variable's place: the variable is asserted there anyway, and the noise still applies to the rest",
-			zap.String("testset", testSetID), zap.String("testcase", p.TestCase), zap.String("noise", entry),
-			zap.String("variable", p.Placeholder.Text), zap.String("where", p.Where),
+			zap.String("testset", testSetID), zap.String("testcase", p.TestCase), zap.String("noise", models.LearnedFieldShape(entry)),
+			zap.String("variable", p.Placeholder.Text), zap.String("where", templates.PlaceShape(p.Where)),
 			zap.String("next_step", next))
 	}
 }
@@ -534,11 +552,13 @@ func bestKey(header string, noise map[string][]string) string {
 // loaded.
 const nextStepRefused = "edit the test case's placeholder as the reason says, then run keploy test again"
 
-// refusalError is why a refused test case fails, as its log line says it.
+// refusalError is why a refused test case fails, as its log line says it:
+// each refusal's placeholder, its place by its shape and its why by its
+// length (whyInReport); the report's template_failures keep them whole.
 func refusalError(fs []templates.Refusal) error {
 	msgs := make([]string, 0, len(fs))
 	for _, f := range fs {
-		msgs = append(msgs, f.Error())
+		msgs = append(msgs, f.Placeholder+" at "+templates.PlaceShape(f.Where)+": "+whyInReport(f.Why))
 	}
 	return errors.New("refused when the test set loaded: " + strings.Join(msgs, "; "))
 }
@@ -972,7 +992,7 @@ func (r *Replayer) testVariables(ctx context.Context, run *templates.Run, tc *mo
 		why := fmt.Sprintf("the app answered %q here, but sent %q as %s to its dependency (%s %s) in this test",
 			c.Value, b.Value, c.Key, b.Mock, b.Place)
 		r.logger.Warn("a value this test case captured is not the one the application sent its dependency",
-			zap.String("testcase", tc.Name), zap.String("where", c.Where), zap.String("why", why),
+			zap.String("testcase", tc.Name), zap.String("where", templates.PlaceShape(c.Where)), zap.String("why", whyInReport(why)),
 			zap.String("next_step", "the application answers another value than the one it stored: fix the application, or re-record the test if that is intended"))
 		fails = append(fails, models.TemplateFailure{Where: c.Where, Placeholder: templates.Format(true, "", c.Key), Why: why})
 	}

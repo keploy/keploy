@@ -28,10 +28,10 @@ func TestMarkRepeatOfNamesTheEarlierTest(t *testing.T) {
 	}
 	results := []models.TestResult{
 		{TestCaseID: "test-9", FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{
-			{ActualSummary: "GET /count", ClosestMock: "mock-7", Repeat: note("mock-7")},
-			{ActualSummary: "GET /alone", ClosestMock: "mock-8", Repeat: note("mock-8")},
-			{ActualSummary: "GET /other", NextSteps: "as it was"},
-			{ActualSummary: "GET /named", ClosestMock: "mock-6", Repeat: named("mock-6", "test-4")},
+			{Protocol: "HTTP", ActualSummary: "GET /count", ClosestMock: "mock-7", Repeat: note("mock-7")},
+			{Protocol: "HTTP", ActualSummary: "GET /alone", ClosestMock: "mock-8", Repeat: note("mock-8")},
+			{Protocol: "HTTP", ActualSummary: "GET /other", NextSteps: "as it was"},
+			{Protocol: "HTTP", ActualSummary: "GET /named", ClosestMock: "mock-6", Repeat: named("mock-6", "test-4")},
 		}}},
 	}
 	consumers := map[string][]string{"mock-7": {"test-9", "test-3", "test-5"}, "mock-8": {"test-9"}, "mock-6": {"test-2", "test-4"}}
@@ -42,7 +42,7 @@ func TestMarkRepeatOfNamesTheEarlierTest(t *testing.T) {
 	// Another set's row of a test of the same name, repeating the same
 	// recording name: another set's recordings, which this set's end does
 	// not name.
-	store.AddUnmatchedCallForTest("set-1", "test-9", models.UnmatchedCall{ActualSummary: "GET /count", ClosestMock: "mock-7", Repeat: note("mock-7"), NextSteps: "set-1's"})
+	store.AddUnmatchedCallForTest("set-1", "test-9", models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "GET /count", ClosestMock: "mock-7", Repeat: note("mock-7"), NextSteps: "set-1's"})
 	keep := results[0].FailureInfo.UnmatchedCalls[0].Repeat
 
 	lines, likely, answered := markRepeatOf(results, consumers, nil, nil, nil)
@@ -109,8 +109,8 @@ func TestMarkRepeatOfNamesTheRepeatAPairingAnswered(t *testing.T) {
 	// after mock-1 answered.
 	agent := models.NewRepeatNote("mock-1", replay, rec, replay.Add(9100*time.Millisecond))
 	results := []models.TestResult{{TestCaseID: "get-cachedrate-7", Status: models.TestStatusPassed, Answers: []models.UnmatchedCall{
-		{ActualSummary: "GET /rates", ClosestMock: "mock-3", NotOwned: true, Answer: models.AnswerProvisional, Repeat: agent},
-		{ActualSummary: "GET /tick", ClosestMock: "mock-6", NotOwned: true, Answer: models.AnswerProvisional, NextSteps: "as it was"},
+		{Protocol: "HTTP", ActualSummary: "GET /rates", ClosestMock: "mock-3", NotOwned: true, Answer: models.AnswerProvisional, Repeat: agent},
+		{Protocol: "HTTP", ActualSummary: "GET /tick", ClosestMock: "mock-6", NotOwned: true, Answer: models.AnswerProvisional, NextSteps: "as it was"},
 	}}}
 	tcs := []*models.TestCase{{Name: "get-cachedrate-7", HTTPReq: models.HTTPReq{Timestamp: rec.Add(20020 * time.Millisecond)}}}
 	named, likely, answered := markRepeatOf(results, map[string][]string{"mock-1": {"get-cachedrate-2"}}, tcs, lookup, map[string]time.Time{"get-cachedrate-7": replay.Add(9 * time.Second)})
@@ -140,7 +140,7 @@ func TestMarkRepeatOfKeepsANotOwnedCallsReason(t *testing.T) {
 	rec := time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)
 	results := []models.TestResult{
 		{TestCaseID: "test-9", FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{
-			{ActualSummary: "GET /count", ClosestMock: "mock-w", NotOwned: true, RecordedIn: "test-5", Repeat: anchoredNote("mock-7", rec, rec, rec.Add(6*time.Second), rec.Add(2*time.Second))},
+			{Protocol: "HTTP", ActualSummary: "GET /count", ClosestMock: "mock-w", NotOwned: true, RecordedIn: "test-5", Repeat: anchoredNote("mock-7", rec, rec, rec.Add(6*time.Second), rec.Add(2*time.Second))},
 		}}},
 	}
 	store := NewTestFailureStore()
@@ -175,10 +175,10 @@ func TestMarkRepeatOfMeasuresTheRecordGapFromTheTest(t *testing.T) {
 	unknown := models.NewRepeatNote("mock-7", rec, rec, rec.Add(70*time.Second))
 	results := []models.TestResult{
 		{TestCaseID: "test-9", FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{
-			{ActualSummary: "GET /count", ClosestMock: "mock-7", Repeat: unknown},
+			{Protocol: "HTTP", ActualSummary: "GET /count", ClosestMock: "mock-7", Repeat: unknown},
 		}}},
 		{TestCaseID: "test-12", FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{
-			{ActualSummary: "GET /count", ClosestMock: "mock-7", Repeat: anchoredNote("mock-7", rec, rec, rec.Add(80*time.Second), rec.Add(3*time.Second))},
+			{Protocol: "HTTP", ActualSummary: "GET /count", ClosestMock: "mock-7", Repeat: anchoredNote("mock-7", rec, rec, rec.Add(80*time.Second), rec.Add(3*time.Second))},
 		}}},
 	}
 	store := NewTestFailureStore()
@@ -249,7 +249,7 @@ func TestMarkRepeatOfAnchorsOnTheNewestIdenticalRecording(t *testing.T) {
 			delete(l, d)
 		}
 		results := []models.TestResult{{TestCaseID: "test-9", FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{
-			{ActualSummary: "GET /count", ClosestMock: "mock-7", Repeat: models.NewRepeatNote("mock-7", replay, rec, replay.Add(7*time.Second))},
+			{Protocol: "HTTP", ActualSummary: "GET /count", ClosestMock: "mock-7", Repeat: models.NewRepeatNote("mock-7", replay, rec, replay.Add(7*time.Second))},
 		}}}}
 		tcs := []*models.TestCase{{Name: "test-9", HTTPReq: models.HTTPReq{Timestamp: rec.Add(9 * time.Second)}}}
 		markRepeatOf(results, map[string][]string{"mock-7": {"test-3"}}, tcs, l, map[string]time.Time{"test-9": replay.Add(6500 * time.Millisecond)})
@@ -291,7 +291,7 @@ func TestMarkRepeatOfAnchorsOnlyOnARecordingMadeBeforeTheTest(t *testing.T) {
 	start := rec.Add(9 * time.Second)
 	mark := func(lookup map[string]mockDisplayInfo, note *models.RepeatNote) (models.UnmatchedCall, []string) {
 		results := []models.TestResult{{TestCaseID: "test-9", FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{
-			{ActualSummary: "GET /count", ClosestMock: "mock-7", NextSteps: "the agent's", Repeat: note},
+			{Protocol: "HTTP", ActualSummary: "GET /count", ClosestMock: "mock-7", NextSteps: "the agent's", Repeat: note},
 		}}}}
 		tcs := []*models.TestCase{{Name: "test-9", HTTPReq: models.HTTPReq{Timestamp: start}}}
 		named, _, _ := markRepeatOf(results, map[string][]string{"mock-7": {"test-3"}}, tcs, lookup, map[string]time.Time{"test-9": replay.Add(20 * time.Second)})
@@ -348,8 +348,8 @@ func TestMarkRepeatOfCountsNoNoteWithUnknownGapsAsLikely(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			results := []models.TestResult{{TestCaseID: "test-9", FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{
-				{ActualSummary: "GET /rates", ClosestMock: "mock-7", Repeat: models.NewRepeatNote("mock-7", replay.Add(time.Second), c.recordedAt, replay.Add(70*time.Second))},
-				{ActualSummary: "GET /rates", ClosestMock: "mock-7", Repeat: models.NewRepeatNote("mock-7", replay.Add(time.Second), c.recordedAt, replay.Add(80*time.Second))},
+				{Protocol: "HTTP", ActualSummary: "GET /rates", ClosestMock: "mock-7", Repeat: models.NewRepeatNote("mock-7", replay.Add(time.Second), c.recordedAt, replay.Add(70*time.Second))},
+				{Protocol: "HTTP", ActualSummary: "GET /rates", ClosestMock: "mock-7", Repeat: models.NewRepeatNote("mock-7", replay.Add(time.Second), c.recordedAt, replay.Add(80*time.Second))},
 			}}}}
 			named, likely, _ := markRepeatOf(results, consumers, c.testCases, nil, c.replayStarts)
 			if len(named) != 2 {
@@ -493,8 +493,8 @@ func TestRepeatCauseClaimsLikelyOnlyWhenEveryNoteDoes(t *testing.T) {
 	refill := anchoredNote("mock-7", rec, rec, rec.Add(6*time.Second), rec.Add(2*time.Second))
 	poller := anchoredNote("mock-8", rec, rec, rec.Add(20*time.Millisecond), rec.Add(10*time.Millisecond))
 	results := []models.TestResult{{TestCaseID: "test-9", FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{
-		{ActualSummary: "GET /rates", ClosestMock: "mock-7", Repeat: refill},
-		{ActualSummary: "GET /tick", ClosestMock: "mock-w", NotOwned: true, RecordedIn: "test-5", Repeat: poller},
+		{Protocol: "HTTP", ActualSummary: "GET /rates", ClosestMock: "mock-7", Repeat: refill},
+		{Protocol: "HTTP", ActualSummary: "GET /tick", ClosestMock: "mock-w", NotOwned: true, RecordedIn: "test-5", Repeat: poller},
 	}}}}
 	named, likely, _ := markRepeatOf(results, map[string][]string{"mock-7": {"test-3"}, "mock-8": {"test-3"}}, nil, nil, nil)
 	if len(named) != 2 || likely != 1 {
@@ -754,5 +754,19 @@ func TestRunTestSetWiresTheRepeatNotes(t *testing.T) {
 	sort.Strings(writes)
 	if want := []string{"replayStarts[tc.Name] = started", "replayStarts[testCase.Name] = started"}; strings.Join(writes, "; ") != strings.Join(want, "; ") {
 		t.Fatalf("RunTestSet notes the tests' starts as %v, want %v: without a start a note's replay gap runs to the call, and its cause is not judged", writes, want)
+	}
+}
+
+// A repeat's WARN line names the call by its shape (models.LoggedCallName):
+// a statement with its literals written "?", never the value it sent. The
+// line wrote the call's whole summary.
+func TestRepeatLine_NamesTheCallByItsShape(t *testing.T) {
+	const email = "ada.lovelace@example.com"
+	now := time.Now()
+	c := models.UnmatchedCall{Protocol: "MySQL", ActualSummary: "SELECT * FROM users WHERE email = '" + email + "'", ClosestMock: "mock-7",
+		Repeat: models.NewRepeatNote("mock-7", now.Add(time.Second), now, now.Add(70*time.Second))}
+	line := repeatLine("test-9", &c)
+	if !strings.Contains(line, "test-9: SELECT * FROM users WHERE email = ? repeats mock-7") || strings.Contains(line, email) {
+		t.Errorf("the repeat's line is %q; want the statement's shape, without the e-mail", line)
 	}
 }

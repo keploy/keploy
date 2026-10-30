@@ -3,6 +3,7 @@ package variables
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"math/big"
 	"regexp"
@@ -90,20 +91,38 @@ type Edit struct {
 // AnswerEdit is the edit that makes the scalar of body at path hold value,
 // written as that scalar's JSON type is written. The scalar must hold recorded
 // (the variable's recorded value); otherwise, or when value cannot stand
-// there, it says why.
+// there, it says why: by the place's JSON type and how many bytes each value
+// holds, never by a value. The reason becomes a miss's next step, which the
+// agent logs at WARN and a proven run's evidence keeps, and the values are
+// the recorded response's and the application's.
 func AnswerEdit(body string, path []templates.PathSeg, recorded, value string) (Edit, string) {
 	l, ok := JSONLeafAt(body, path)
 	if !ok {
 		return Edit{}, "the recorded response holds no scalar there"
 	}
 	if !SameValue(recorded, l.Value(body), IsNumberLeaf(l)) {
-		return Edit{}, "the recorded response holds " + l.Raw(body) + " there, not the variable's recorded value " + quote(recorded)
+		return Edit{}, fmt.Sprintf("the recorded response holds another %s there (%d bytes), not the variable's recorded value (%d bytes)", leafKindName(l.Kind), len(l.Value(body)), len(recorded))
 	}
 	raw, ok := scalarText(l.Kind, value)
 	if !ok {
-		return Edit{}, "the value " + quote(value) + " cannot stand at a place the recording holds " + l.Raw(body)
+		return Edit{}, fmt.Sprintf("the value (%d bytes) cannot stand at a place the recording holds a %s", len(value), leafKindName(l.Kind))
 	}
 	return Edit{Start: l.Start, End: l.End, Raw: raw}, ""
+}
+
+// leafKindName is a JSON leaf's type as a reason names it.
+func leafKindName(k templates.LeafKind) string {
+	switch k {
+	case templates.LeafString:
+		return "string"
+	case templates.LeafNumber:
+		return "number"
+	case templates.LeafBool:
+		return "boolean"
+	case templates.LeafNull:
+		return "null"
+	}
+	return "template placeholder"
 }
 
 // ApplyEdits applies edits to body; false when two of them overlap.
@@ -122,11 +141,6 @@ func ApplyEdits(body string, edits []Edit) (string, bool) {
 		body = body[:e.Start] + e.Raw + body[e.End:]
 	}
 	return body, true
-}
-
-func quote(s string) string {
-	b, _ := json.Marshal(s)
-	return string(b)
 }
 
 // Noise is the known noise of a request body, as the variable pass reads it.

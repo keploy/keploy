@@ -1,6 +1,7 @@
 package replay
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -21,6 +22,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/agent/logleak"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml/reportdb"
 	"go.uber.org/zap"
@@ -2108,4 +2110,61 @@ func TestUnderTheSwitchDockersAnswerAReadsAndAWakeUpAtOnce(t *testing.T) {
 			t.Fatalf("round %d: wait = %+v, want ready on :3000 with docker's answer in", i, r)
 		}
 	}
+}
+
+// keploy test's readiness probe gives the Go client's cause as its "last:"
+// reason, which sayStillWaiting logs at Info (lastProbe) and stalled() puts
+// in the set's not-ready reason. For a health answer net/http cannot parse
+// (a header line without its colon) or a redirect whose Location url.Parse
+// refuses, that cause quotes the answer's bytes: the probe names it as keploy
+// test's sender does (pkg.AnswerCause), with no byte of it. A URL that does
+// not parse is named with no byte of it either.
+func TestReadinessProbeReasonHoldsNoByteOfTheHealthAnswer(t *testing.T) {
+	const cookie = "Zq7HEALTHsecret52"
+	location := "/health/100%off?session=" + cookie
+	for _, c := range []struct{ name, answer, want string }{
+		{"header line", "HTTP/1.1 503 Service Unavailable\r\nSet-Cookie session=" + cookie + "\r\n\r\n", "last: the app's answer does not parse"},
+		{"location", "HTTP/1.1 302 Found\r\nLocation: " + location + "\r\nContent-Length: 0\r\n\r\n",
+			fmt.Sprintf("last: the app's Location header (%d bytes) does not parse", len(location))},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			ln, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = ln.Close() })
+			go func() {
+				for {
+					conn, err := ln.Accept()
+					if err != nil {
+						return
+					}
+					go func(conn net.Conn) {
+						defer conn.Close()
+						if _, err := http.ReadRequest(bufio.NewReader(conn)); err != nil {
+							return
+						}
+						_, _ = conn.Write([]byte(c.answer))
+					}(conn)
+				}
+			}()
+			ok, what := answers(context.Background(), "http://"+ln.Addr().String()+"/health", false)
+			if ok {
+				t.Fatalf("precondition: the probe took an answer net/http cannot parse")
+			}
+			if what != c.want {
+				t.Errorf("the readiness probe's reason = %q, want %q", what, c.want)
+			}
+			if found := logleak.Find(t, what, []byte(cookie)); len(found) > 0 {
+				t.Errorf("the readiness probe's reason (logged at Info as lastProbe) holds the health answer's bytes: %v\n%q", found, what)
+			}
+		})
+	}
+	t.Run("a URL that does not parse", func(t *testing.T) {
+		const key = "Zq7PROBEURLsecret53"
+		ok, what := answers(context.Background(), "http://127.0.0.1:1/health/"+key+"%zz", false)
+		if ok || what != "the probed URL does not parse" {
+			t.Errorf("answers on a URL that does not parse = %v, %q", ok, what)
+		}
+	})
 }

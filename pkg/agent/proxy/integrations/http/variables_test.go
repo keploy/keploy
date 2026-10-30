@@ -13,9 +13,12 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/logleak"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/variables"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // varDb is the mock store of a replay under the proven switch: per-test mocks
@@ -194,6 +197,83 @@ func TestVariables_BindThenUseAndAnswer(t *testing.T) {
 	}
 	if len(db.perTest) != 0 {
 		t.Fatalf("both mocks should be consumed, left %d", len(db.perTest))
+	}
+}
+
+// A variable's bind place is a field path of the app's request, and a map key
+// on it may be a value the app sent (an account): the line that says the
+// variable bound names the place by its shape. It logged the place whole.
+func TestVariables_TheBoundLineNamesThePlaceByItsShape(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	const account, recorded, live = "acct_q8zt3wnv2k", "tok-rec-Zq7Wk2Lp", "tok-live-Xm4Rt8Nv"
+	obs, logs := observer.New(zapcore.DebugLevel)
+	h := newHTTP()
+	var out *logleak.Buffer
+	h.Logger, out = logleak.Logger(obs)
+	body := func(v string) string { return `{"accounts":{"` + account + `":{"token":"` + v + `"}}}` }
+	create := at(varMock("mock-1", "POST", "http://store/sessions", body(recorded), 201, `{"ok":true}`,
+		models.MockVariables{"tok": bindV(recorded, "body.accounts."+account+".token")}), 1)
+	db := &varDb{perTest: []*models.Mock{create}}
+	if ok, _, _ := matchVar(t, h, db, liveReq("POST", "/sessions", body(live))); !ok {
+		t.Fatal("the create should be answered")
+	}
+	bound := logs.FilterMessage("variable bound").All()
+	if len(bound) != 1 {
+		t.Fatalf("want the line %q once, got %d: %v", "variable bound", len(bound), logs.All())
+	}
+	if f := bound[0].ContextMap(); f["variable"] != "tok" || f["place"] != "body.accounts.{}.token" {
+		t.Errorf("the line names the variable and the place by its shape; got %v", f)
+	}
+	if found := logleak.Find(t, out.String(), []byte(account)); len(found) > 0 {
+		t.Errorf("the log holds the place's account: %v", found)
+	}
+}
+
+// A variable's values are the app's and the recording's content: the line
+// that says a variable bound names it, the mock and the place, and gives its
+// values' lengths. No stretch of the live or the recorded value appears in the
+// debug log in any encoding, through the bind, the use in a path and a
+// header, and the answers written with it. It logged both values whole.
+func TestVariables_TheDebugLogHoldsNoBoundValue(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	const recorded, live = "ord-rec-Zq7Wk2Lp", "ord-live-Xm4Rt8Nv"
+	obs, logs := observer.New(zapcore.DebugLevel)
+	h := newHTTP()
+	var out *logleak.Buffer
+	h.Logger, out = logleak.Logger(obs)
+	create := at(varMock("mock-1", "POST", "http://store/orders", `{"id":"`+recorded+`","item":"pen"}`, 201, `{"id":"`+recorded+`"}`,
+		models.MockVariables{"orderId": bindV(recorded, "body.id", "body.id", "header.X-Order")}), 1)
+	create.Spec.HTTPResp.Header["X-Order"] = recorded
+	readBack := at(varMock("mock-2", "GET", "http://store/orders/"+recorded, "", 200, `{"id":"`+recorded+`"}`,
+		models.MockVariables{"orderId": useV(recorded, []string{"url.path[1]", "header.X-Order"}, "body.id")}), 2)
+	readBack.Spec.HTTPReq.Header["X-Order"] = recorded
+	db := &varDb{perTest: []*models.Mock{create, readBack}}
+
+	ok, stub, _ := matchVar(t, h, db, liveReq("POST", "/orders", `{"id":"`+live+`","item":"pen"}`))
+	if !ok || stub.Spec.HTTPResp.Body != `{"id":"`+live+`"}` || stub.Spec.HTTPResp.Header["X-Order"] != live {
+		t.Fatalf("the create should be answered with this run's id: ok=%v stub=%+v", ok, stub)
+	}
+	r := liveReq("GET", "/orders/"+live, "")
+	r.header.Set("X-Order", live)
+	if ok, stub, _ = matchVar(t, h, db, r); !ok || stub.Spec.HTTPResp.Body != `{"id":"`+live+`"}` {
+		t.Fatalf("the read-back should be answered with this run's id: ok=%v stub=%+v", ok, stub)
+	}
+	bound := logs.FilterMessage("variable bound").All()
+	if len(bound) != 1 {
+		t.Fatalf("want the line %q once, got %d: %v", "variable bound", len(bound), logs.All())
+	}
+	if f := bound[0].ContextMap(); f["variable"] != "orderId" || f["mock"] != "mock-1" || f["place"] != "body.id" ||
+		f["value bytes"] != int64(len(live)) || f["recorded bytes"] != int64(len(recorded)) {
+		t.Errorf("the line names the variable, the mock and the place, and gives the values' lengths; got %v", f)
+	}
+	log := out.String()
+	if !strings.Contains(log, "variable bound") {
+		t.Fatalf("the rendered log is not the one checked: %s", log)
+	}
+	for what, content := range map[string]string{"the live value": live, "the recorded value": recorded} {
+		if found := logleak.Find(t, log, []byte(content)); len(found) > 0 {
+			t.Errorf("the log holds %s: %v", what, found)
+		}
 	}
 }
 
@@ -2170,4 +2250,46 @@ func TestVariables_AClockReadBesideAVariableIsCheckedInItsCallsWindow(t *testing
 		ok, _, diag := matchVarIn(t, clockConn(true, base), newHTTP(), &varDb{perTest: []*models.Mock{at(m, 1)}}, r)
 		wantProblem(t, ok, diag, "learned both as variable first")
 	})
+}
+
+// An answer place the recorded response cannot fit says why by the place's
+// JSON type and its values' lengths, never by a value: the learn step serves
+// its pairings through renderAnswers (claimLearned), and the why becomes the
+// miss's next step, which the agent logs at WARN and a proven run's evidence
+// keeps. The problem's expected and actual keep the values for the report
+// file. It quoted the variable's recorded value, the recorded response's
+// scalar and the value the call bound.
+func TestRenderAnswers_AProblemSaysWhyWithNoValue(t *testing.T) {
+	const recorded, live, held = "sk_rec_Mm3Pq8Zt", "sk_live_Q7wZr9Kf", "resp_Zr8Kq2Pw_held"
+	for _, c := range []struct {
+		name, place, recorded, body, why string
+		header                           map[string]string
+	}{
+		{"a header that does not hold the recorded value", "header.X-Token", recorded, `{}`, "(15 bytes)", map[string]string{"X-Token": held}},
+		{"a body scalar that does not hold the recorded value", "body.token", recorded, `{"token":"` + held + `"}`, "another string there (18 bytes), not the variable's recorded value (15 bytes)", nil},
+		{"a value that cannot stand at a number", "body.n", "7", `{"n":7}`, "the value (16 bytes) cannot stand at a place the recording holds a number", nil},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			served := &models.Mock{Name: "mock-1", Spec: models.MockSpec{HTTPResp: &models.HTTPResp{Body: c.body, Header: c.header}}}
+			decls, problem := readDecls(&models.Mock{Name: "mock-1", Spec: models.MockSpec{Variables: models.MockVariables{"tok": {Recorded: c.recorded, Answer: []string{c.place}}}}})
+			if problem != "" {
+				t.Fatalf("the declaration does not read: %s", problem)
+			}
+			_, vp := newHTTP().renderAnswers(served, &varHit{mock: served, decls: decls, local: map[string]variables.Binding{"tok": {Name: "tok", Value: live}}}, &variables.Table{})
+			if vp == nil {
+				t.Fatal("the answer place fits: the path that said why did not run")
+			}
+			if !strings.Contains(vp.why, c.why) {
+				t.Errorf("the why does not say %q: %q", c.why, vp.why)
+			}
+			for what, v := range map[string]string{"the recorded value": recorded, "the live value": live, "the response's scalar": held} {
+				if found := logleak.Find(t, vp.why, []byte(v)); len(found) > 0 {
+					t.Errorf("the why holds %s: %v in %q", what, found, vp.why)
+				}
+			}
+			if vp.expected != c.recorded {
+				t.Errorf("the problem's expected is %q, want the recorded value %q: the report file keeps it", vp.expected, c.recorded)
+			}
+		})
+	}
 }

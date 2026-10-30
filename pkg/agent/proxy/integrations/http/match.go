@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"mime"
 	"net/http"
 	"net/url"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -897,7 +899,11 @@ func (h *HTTP) MatchURLPath(mockURL, reqPath string, urlNoise []string, autoDyna
 		return false
 	}
 	if ce := h.Logger.Check(zap.DebugLevel, "parsed URL"); ce != nil {
-		ce.Write(zap.Any("parsed URL", mockPath), zap.Any("req path", reqPath))
+		// The recorded URL by its shape, as a variable's place reads it
+		// (models.MockPathShape: the escaped path, so a %2F stays inside its
+		// segment and a value's parts do not read as names). The live path
+		// is the caller's to log, escaped: reqPath is decoded.
+		ce.Write(zap.String("parsed URL", models.MockPathShape(&models.Mock{Spec: models.MockSpec{HTTPReq: &models.HTTPReq{URL: mockURL}}})))
 	}
 	if mockPath == reqPath {
 		return true
@@ -1306,7 +1312,7 @@ func (h *HTTP) QueryParamsMatch(mockParams map[string]string, reqQuery url.Value
 				// The param's name and the class only: its values are
 				// the application's content (a rotating token, most often).
 				if ce := h.Logger.Check(zap.DebugLevel, "http query: value treated as auto-detected dynamic"); ce != nil {
-					ce.Write(zap.String("param", key), zap.String("type class", c))
+					ce.Write(zap.String("param", models.KeyShape(key)), zap.String("type class", c))
 				}
 				continue
 			}
@@ -1362,8 +1368,9 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 		// URL path match
 		if !h.MatchURLPath(mock.Spec.HTTPReq.URL, input.url.Path, urlNoise, autoDynamic) {
 			if ce := h.Logger.Check(zap.DebugLevel, "The url path of mock and request aren't the same"); ce != nil {
-				mockPath, _ := recordedURLPath(mock.Spec.HTTPReq.URL)
-				ce.Write(zap.String("mock name", mock.Name), zap.String("input path", input.url.Path), zap.String("mock path", mockPath))
+				// Each path by its shape, escaped (a %2F stays inside its
+				// segment): a segment may hold a value.
+				ce.Write(zap.String("mock name", mock.Name), zap.String("input path", models.PathShape(input.url.EscapedPath())), zap.String("mock path", models.MockPathShape(mock)))
 			}
 			continue
 		}
@@ -1553,12 +1560,12 @@ func (h *HTTP) bodyMatch(mockBody, reqBody []byte) (bool, error) {
 	var reqData map[string]any
 	err := json.Unmarshal(mockBody, &mockData)
 	if err != nil {
-		utils.LogError(h.Logger, err, "failed to unmarshal the mock request body", zap.String("Req", string(mockBody)))
+		utils.LogError(h.Logger, err, "failed to unmarshal the mock request body", zap.Int("mock body bytes", len(mockBody)))
 		return false, err
 	}
 	err = json.Unmarshal(reqBody, &reqData)
 	if err != nil {
-		utils.LogError(h.Logger, err, "failed to unmarshal the request body", zap.String("Req", string(reqBody)))
+		utils.LogError(h.Logger, err, "failed to unmarshal the request body", zap.Int("request body bytes", len(reqBody)))
 		return false, err
 	}
 
@@ -2061,7 +2068,9 @@ func (h *HTTP) filterStrictNoiseMatches(eng *schemanoise.Engine, candidates []*m
 			continue
 		}
 		if ce := h.Logger.Check(zap.DebugLevel, "strict req-body match rejected mock: non-noise field drift"); ce != nil {
-			ce.Write(zap.String("mock name", m.Name), zap.Any("drift", drift))
+			// The fields by their shapes (models.FieldShape): a key may be
+			// a value the app sent (an ID, an e-mail address).
+			ce.Write(zap.String("mock name", m.Name), zap.Strings("drift", models.FieldShapes(slices.Sorted(maps.Keys(drift)))))
 		}
 	}
 	return kept
@@ -2214,7 +2223,11 @@ func (h *HTTP) buildHTTPMismatchReport(request *http.Request, liveBody []byte, m
 
 // sessionCallHint tells how to serve a call to every test, for a recording
 // that serves each test its own HTTP calls only: a test that never recorded
-// a call misses it though another test recorded it.
+// a call misses it though another test recorded it. It advises a rule whose
+// path prefix is the call's own path, and none for a call to "/": a prefix
+// that covers other paths (no prefix, "/", or one cut before a segment)
+// serves those calls to every test too, and a test that should miss one
+// would pass.
 func sessionCallHint(request *http.Request) string {
 	host := request.Host
 	if host == "" && request.URL != nil {
@@ -2224,6 +2237,26 @@ func sessionCallHint(request *http.Request) string {
 	if request.URL != nil && request.URL.Path != "" {
 		path = request.URL.Path
 	}
+	if path == "/" {
+		// A prefix of "/" covers every path: the rule would serve every
+		// call of this method to this host to every test, and a test that
+		// should miss would pass.
+		return fmt.Sprintf("Each test is served the HTTP calls it recorded. If another test recorded this call, record again with '%s' so this test records it. This call's path is \"/\", and a sessionCalls rule with pathPrefix \"/\" in keploy.yaml would serve every %s call to %s to every test.",
+			mismatch.RecordCommand(), request.Method, host)
+	}
+	if escaped := request.URL.EscapedPath(); strings.Count(escaped, "/") != strings.Count(path, "/") || strings.ContainsAny(path, "?#") {
+		// A segment holds an escaped "/", "?" or "#" (%2F, %3F, %23), so the
+		// decoded path a rule is compared with splits it in two, or ends
+		// it. A test variable's place counts the escaped path's segments
+		// (variables.go): a log line that writes such a prefix in its
+		// shape (mismatch.LogNextStep) would write the wrong segment {},
+		// and the value in the clear.
+		return fmt.Sprintf("Each test is served the HTTP calls it recorded. If another test recorded this call, record again with '%s' so this test records it. This call's path holds an escaped '/', '?' or '#' inside a segment, and a sessionCalls pathPrefix in keploy.yaml is compared with the decoded path, where that segment does not read as one, so keploy advises no rule for it.",
+			mismatch.RecordCommand())
+	}
+	// The call's own path, which the report keeps: a prefix cut at a value
+	// would serve other calls (another tenant's) too. A log line writes it
+	// in the call's shape (mismatch.LogNextStep).
 	return fmt.Sprintf("Each test is served the HTTP calls it recorded. If another test recorded this call and every test may make it (a token, a shared configuration read), declare it in keploy.yaml to serve it to every test (sessionCalls: [{host: %q, method: %q, pathPrefix: %q}]), or record again with '%s' so this test records it.",
 		host, request.Method, path, mismatch.RecordCommand())
 }

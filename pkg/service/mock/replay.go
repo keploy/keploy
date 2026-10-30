@@ -1904,7 +1904,7 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 				misses, missesErr = m.instrumentation.GetMockErrors(outcomeCtx)
 				if reader, ok := m.instrumentation.(idPairReader); ok {
 					if pairs, err := reader.GetIDPairs(outcomeCtx); err == nil {
-						m.logger.Debug("ids this run made in place of recorded ones", zap.Any("pairs", pairs))
+						m.logger.Debug("ids this run made in place of recorded ones", zap.Int("pairs", len(pairs)))
 						m.ids = ids.New(pairs)
 					} else {
 						m.logger.Debug("failed to read the ids this run made", zap.Error(err))
@@ -2063,8 +2063,12 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 // connection whose client sent nothing made no call: it is said as such, and
 // as what it was if its client waited for its server to speak first (a TCP
 // health check closes the same way).
+//
+// The call and its next step as a log line names them: the call's shape
+// (models.LoggedCall), and the next step with each field path and advised
+// path prefix in its shape (SanitizedNextStep). The receipt keeps the call.
 func logMiss(logger *zap.Logger, miss models.UnmatchedCall) {
-	next := miss.NextSteps
+	next := miss.SanitizedNextStep()
 	if next == "" {
 		next = "record this call with --on-miss record, or re-record the set"
 	}
@@ -2074,7 +2078,7 @@ func logMiss(logger *zap.Logger, miss models.UnmatchedCall) {
 	}
 	fields := []zap.Field{
 		zap.String("protocol", miss.Protocol),
-		zap.String("call", miss.ActualSummary),
+		zap.String("call", models.LoggedCall(miss)),
 		zap.String("destination", miss.Destination),
 	}
 	if miss.Reason != "" {
@@ -2185,7 +2189,7 @@ func withRecordedIn(tests []TestReceipt, owners map[string][]string) []string {
 		for j := range ev.Misses {
 			c := &ev.Misses[j]
 			if c.NameRecordedIn(tests[i].Name, owners) {
-				named = append(named, fmt.Sprintf("%s: %s (%s, recorded in %s)", tests[i].Name, c.ActualSummary, c.ClosestMock, c.RecordedIn))
+				named = append(named, fmt.Sprintf("%s: %s (%s, recorded in %s)", tests[i].Name, models.LoggedCallName(*c), c.ClosestMock, c.RecordedIn))
 			}
 		}
 	}

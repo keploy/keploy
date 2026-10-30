@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mismatch"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
@@ -109,10 +110,6 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 			}
 
 			if !matched {
-				preview := genericRequests[0]
-				if len(preview) > 64 {
-					preview = preview[:64]
-				}
 				// Build the universal mismatch report so generic misses show
 				// up in the mismatch table / report yaml like HTTP and MySQL
 				// misses do, instead of vanishing as a bare error.
@@ -146,14 +143,15 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 				// Per-call generic detail at Debug; the canonical mock-mismatch
 				// WARN is emitted once in proxy.sendMockNotFoundError (covers
 				// every parser), so this stays Debug to avoid double-logging.
-				logger.Debug("no matching generic mock found for outgoing call",
-					zap.String("protocol", report.Protocol),
-					zap.Int("requestCount", len(genericRequests)),
-					zap.Int("firstRequestBytes", len(genericRequests[0])),
-					zap.String("closest", report.ClosestMock),
-					zap.String("diff", report.Diff),
-					zap.String("next_step", report.NextSteps),
-					zap.Binary("preview", preview))
+				// Shaped only when Debug is on: a replay may miss often.
+				if ce := logger.Check(zap.DebugLevel, "no matching generic mock found for outgoing call"); ce != nil {
+					ce.Write(zap.String("protocol", report.Protocol),
+						zap.Int("requestCount", len(genericRequests)),
+						zap.Int("firstRequestBytes", len(genericRequests[0])), // its size, never its bytes: the payload is the app's content
+						zap.String("closest", report.ClosestMock),
+						zap.String("diff", mismatch.LogDiff(report)),
+						zap.String("next_step", mismatch.LogNextStep(report)))
+				}
 				errCh <- models.NewMockMismatchError(fmt.Errorf("generic: %w", models.ErrNoMockMatched), report)
 				return
 			}

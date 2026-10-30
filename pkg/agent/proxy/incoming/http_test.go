@@ -18,6 +18,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg"
 	hooksUtils "go.keploy.io/server/v3/pkg/agent/hooks/conn"
+	"go.keploy.io/server/v3/pkg/agent/logleak"
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
@@ -1343,5 +1344,56 @@ func TestBothIngressLoopsCountAnExchangeAPauseCutMidBody(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// A client's request net/http cannot parse (a header line without its
+// colon) is logged at Debug by both HTTP/1 loops, and net/http's error
+// quotes the line: each names it as not parsing, with no byte of it.
+func TestAClientRequestThatDoesNotParseIsLoggedByNoByteOfIt(t *testing.T) {
+	const secret = "Zq7INGRESSsecret81"
+	bad := "GET / HTTP/1.1\r\nHost: app\r\nAuthorization Bearer " + secret + "\r\n\r\n"
+	stubCaptureHook(t, func(ctx context.Context, logger *zap.Logger, tc chan *models.TestCase,
+		req *http.Request, resp *http.Response, reqTS, respTS time.Time,
+		opts models.IncomingOptions, sync bool, mapping bool, appPort uint16) {
+	})
+	for _, c := range []struct {
+		name, line string
+		serve      func(t *testing.T, ctx context.Context, pm *IngressProxyManager) (net.Conn, chan struct{})
+	}{
+		{"the sync loop", "Failed to read client request", func(t *testing.T, ctx context.Context, pm *IngressProxyManager) (net.Conn, chan struct{}) {
+			upstream := httptest.NewServer(http.NotFoundHandler())
+			t.Cleanup(upstream.Close)
+			pm.synchronous = true // else it hands the connection to the zero-copy loop
+			return ingressPipe(t, ctx, pm, strings.TrimPrefix(upstream.URL, "http://"))
+		}},
+		{"the zero-copy loop", "Failed to parse downstream HTTP request", func(t *testing.T, ctx context.Context, pm *IngressProxyManager) (net.Conn, chan struct{}) {
+			_, upConn := tcpPair(t)
+			server, client := tcpPair(t)
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				defer server.Close()
+				pm.handleHttp1ZeroCopy(ctx, server, upConn, pm.logger, pm.tcChan, 8080, false, func() {})
+			}()
+			return client, done
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			logger, out := logleak.Logger(nil)
+			pm := &IngressProxyManager{logger: logger, tcChan: make(chan *models.TestCase, 4), samplingSem: make(chan struct{}, 1)}
+			ctx := syncMock.NewContext(context.Background(), syncMock.New(zap.NewNop()))
+			client, done := c.serve(t, ctx, pm)
+			if _, err := io.WriteString(client, bad); err != nil {
+				t.Fatal(err)
+			}
+			<-done // the handler gives up on the connection; go test's -timeout is the hang guard
+			if !strings.Contains(out.String(), c.line) || !strings.Contains(out.String(), "the client's HTTP request does not parse") {
+				t.Fatalf("precondition: no %q line naming the request as not parsing:\n%s", c.line, out.String())
+			}
+			if found := logleak.Find(t, out.String(), []byte(secret)); len(found) > 0 {
+				t.Errorf("the ingress log holds a byte of the client's request: %v\n%s", found, out.String())
+			}
+		})
 	}
 }

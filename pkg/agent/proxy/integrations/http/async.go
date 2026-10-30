@@ -94,7 +94,8 @@ func (h *HTTP) MatchRequestShape(live, recorded *models.Mock, lane models.AsyncL
 	vol := volatileSet(lane.VolatileParams)
 	liveReq, err := mockToReq(stripVolatile(live, vol))
 	if err != nil {
-		return false, "unparseable live request: " + err.Error()
+		// url.Parse's error quotes the URL, query values and all.
+		return false, "unparseable live request URL"
 	}
 	rec := stripVolatile(recorded, vol)
 	// SchemaMatch does field-by-field request-shape comparison; a non-empty
@@ -111,8 +112,12 @@ func (h *HTTP) MatchRequestShape(live, recorded *models.Mock, lane models.AsyncL
 		return false, "schema match error: " + err.Error()
 	}
 	if len(matched) == 0 {
-		return false, fmt.Sprintf("request shape drift: %s %s vs %s",
-			liveReq.method, liveReq.url.Path, recorded.Spec.HTTPReq.URL)
+		// The engine logs this at Info: each side is named by its method,
+		// host, path shape and query names (models.MockURLShape), never a
+		// path value or a query value.
+		return false, fmt.Sprintf("request shape drift: %s %s vs %s %s",
+			liveReq.method, models.MockURLShape(live),
+			recorded.Spec.HTTPReq.Method, models.MockURLShape(recorded))
 	}
 	return true, ""
 }

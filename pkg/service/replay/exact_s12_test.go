@@ -321,7 +321,7 @@ func TestUnderTheSwitchATestIsJudgedForItsGenericExchanges(t *testing.T) {
 // test owns, and one the parser only found near (not NotOwned), are not.
 func TestMarkRecordedInNamesTheTestThatOwnsTheRecording(t *testing.T) {
 	results := []models.TestResult{{TestCaseID: "test-2", FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{
-		{ActualSummary: "auth", ClosestMock: "mock-auth", NotOwned: true},
+		{Protocol: "HTTP", ActualSummary: "GET /auth/ada.lovelace@example.com", ClosestMock: "mock-auth", NotOwned: true},
 		{ActualSummary: "get", ClosestMock: "mock-get", NotOwned: true},
 		{ActualSummary: "boot", ClosestMock: "mock-boot", NotOwned: true},
 		{ActualSummary: "near", ClosestMock: "mock-auth"},
@@ -331,6 +331,11 @@ func TestMarkRecordedInNamesTheTestThatOwnsTheRecording(t *testing.T) {
 	calls := results[0].FailureInfo.UnmatchedCalls
 	if calls[0].RecordedIn != "test-1" || calls[1].RecordedIn != "" || calls[2].RecordedIn != "" || calls[3].RecordedIn != "" || len(named) != 1 {
 		t.Fatalf("recorded_in %q %q %q %q, named %v", calls[0].RecordedIn, calls[1].RecordedIn, calls[2].RecordedIn, calls[3].RecordedIn, named)
+	}
+	// The WARN line names the call by its shape (models.LoggedCallName),
+	// never the e-mail its path held; the report keeps the summary.
+	if !strings.Contains(named[0], ": GET /auth/{} (mock-auth, recorded in test-1)") || strings.Contains(named[0], "ada.lovelace") {
+		t.Errorf("named %q; want the call's shape, without the e-mail", named[0])
 	}
 }
 

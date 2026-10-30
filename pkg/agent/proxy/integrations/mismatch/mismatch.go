@@ -74,6 +74,15 @@ func NewReport(protocol, actualSummary string) *Builder {
 	}}
 }
 
+// WithLogSummary sets the call as a log line names it
+// (models.MockMismatchReport.LogSummary): a shape written from no value the
+// call sent or a recording holds, such as a command and a collection. LogCall
+// logs it as written, so it must hold no key, document or literal.
+func (b *Builder) WithLogSummary(summary string) *Builder {
+	b.report.LogSummary = summary
+	return b
+}
+
 // WithDestination records the outgoing call's destination/domain (e.g. the
 // HTTP Host authority, or a "host:port") so the report and its log line say
 // WHICH upstream missed — method+path alone collide across hosts when an app

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 
@@ -345,5 +346,25 @@ func TestHandleConnectTunnel_EmptyHost(t *testing.T) {
 				t.Fatalf("a host-less CONNECT target was accepted (TargetHost=%q, TargetAddr=%q)", res.TargetHost, res.TargetAddr)
 			}
 		})
+	}
+}
+
+// A CONNECT request net/http cannot parse (a Proxy-Authorization line without
+// its colon) ends the tunnel with an error the proxy logs at Error: it names
+// what did not parse, never net/http's text, which quotes the line.
+func TestHandleConnectTunnel_AnUnparsedRequestIsNamedWithoutItsText(t *testing.T) {
+	const token = "sk_live_9fQ2xLp7Rw"
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+	go func() {
+		_, _ = client.Write([]byte("CONNECT api.example.com:443 HTTP/1.1\r\nHost: api.example.com:443\r\nProxy-Authorization Basic " + token + "\r\n\r\n"))
+	}()
+	_, err := handleConnectTunnel(testLogger(), server, nil, true)
+	if err == nil {
+		t.Fatal("precondition: a CONNECT request net/http cannot parse was taken")
+	}
+	if strings.Contains(err.Error(), token) || !strings.Contains(err.Error(), "the CONNECT request does not parse") {
+		t.Errorf("handleConnectTunnel = %v, want the request named without its text", err)
 	}
 }

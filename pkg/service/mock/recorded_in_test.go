@@ -38,7 +38,7 @@ func TestTheTestsReceiptNamesTheTestThatRecordedAMiss(t *testing.T) {
 			instr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
 			instr.consumedMocks = []models.MockState{{Name: "mock-0"}, {Name: "mock-1"}}
 			misses := []models.UnmatchedCall{
-				{Protocol: "HTTP", ActualSummary: "GET /a", Destination: "api:80", NotOwned: true, ClosestMock: "mock-0"},
+				{Protocol: "HTTP", ActualSummary: "GET /a/ada.lovelace@example.com", Destination: "api:80", NotOwned: true, ClosestMock: "mock-0"},
 				{Protocol: "HTTP", ActualSummary: "GET /pool", Destination: "api:80", NotOwned: true, ClosestMock: "mock-2"},
 				{Protocol: "HTTP", ActualSummary: "GET /own", Destination: "api:80", NotOwned: true, ClosestMock: "mock-1"},
 				{Protocol: "HTTP", ActualSummary: "GET /changed", Destination: "api:80", ClosestMock: "mock-0"},
@@ -75,13 +75,13 @@ func TestTheTestsReceiptNamesTheTestThatRecordedAMiss(t *testing.T) {
 				return
 			}
 			require.Equal(t, []string{
-				"o::TestB GET /a -> o::TestA",
+				"o::TestB GET /a/ada.lovelace@example.com -> o::TestA",
 				"o::TestB GET /pool -> ",
 				"o::TestB GET /own -> ",
 				"o::TestB GET /changed -> ",
 			}, got, "only the miss that is another test's recording names that test")
 			require.Equal(t, 1, said.Len(), "the replay says once which calls another test recorded")
-			require.Equal(t, []any{"o::TestB: GET /a (mock-0, recorded in o::TestA)"}, said.All()[0].ContextMap()["calls"])
+			require.Equal(t, []any{"o::TestB: GET /a/{} (mock-0, recorded in o::TestA)"}, said.All()[0].ContextMap()["calls"])
 			// The agent's windows are read, never written: the name is on the
 			// receipt's own copy.
 			require.Empty(t, instr.windows[1].Evidence.Misses[0].RecordedIn)

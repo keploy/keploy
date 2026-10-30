@@ -1,13 +1,17 @@
 package http
 
 import (
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
 	"testing"
 
+	"go.keploy.io/server/v3/pkg/agent/logleak"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/schemanoise"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // httpMockWithReq builds an HTTP mock with full request details for
@@ -148,6 +152,37 @@ func TestDetectReqBodyNoise_UserNoiseExcluded(t *testing.T) {
 	}
 	if _, ok := got["body.real"]; !ok {
 		t.Errorf("drifting non-noise field should be detected: %+v", got)
+	}
+}
+
+// The strict body filter's debug line names each drifted field by its shape
+// (models.FieldShape): a JSON key can be a value the app sent (a user ID).
+// It logged the drift map whole.
+func TestFilterStrictNoiseMatches_LogsTheDriftByItsShape(t *testing.T) {
+	const key, recVal, liveVal = "usr_9Lq2Zx7WbN4", "rq_Zr8Kq2Pw_one", "rq_Mm3Pq8Zt_two"
+	h := newHTTP()
+	obs, logs := observer.New(zapcore.DebugLevel)
+	logger, out := logleak.Logger(obs)
+	h.Logger = logger
+	mock := httpMockWithReq("mock-1", "POST", "http://x/y",
+		`{"request_id":"r-1","users":{"`+key+`":{"rid":"`+recVal+`"}}}`, map[string]string{"Content-Type": "application/json"},
+		map[string][]string{"body.request_id": {}})
+	eng := schemanoise.New(httpNoiseAdapter{}, false, true)
+	live := []byte(`{"request_id":"r-9","users":{"` + key + `":{"rid":"` + liveVal + `"}}}`)
+	if kept := h.filterStrictNoiseMatches(eng, []*models.Mock{mock}, live, nil); len(kept) != 0 {
+		t.Fatalf("expected strict rejection, kept %d", len(kept))
+	}
+	lines := logs.FilterMessage("strict req-body match rejected mock: non-noise field drift").All()
+	if len(lines) != 1 {
+		t.Fatalf("the rejection was not logged once: %v", logs.All())
+	}
+	if got := fmt.Sprint(lines[0].ContextMap()["drift"]); !strings.Contains(got, "users.{}.rid") {
+		t.Errorf("the line names the drift %s, want users.{}.rid in it", got)
+	}
+	for what, v := range map[string]string{"the key": key, "the recorded value": recVal, "the live value": liveVal} {
+		if found := logleak.Find(t, out.String(), []byte(v)); len(found) > 0 {
+			t.Errorf("the log holds %s: %v", what, found)
+		}
 	}
 }
 

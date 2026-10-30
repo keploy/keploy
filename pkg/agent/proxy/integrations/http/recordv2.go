@@ -607,7 +607,7 @@ func parseFinalResponse(m *FinalHTTP, req *http.Request) (resp *http.Response, c
 		return nil, false, fmt.Errorf("parse response: the final response after a %d never arrived whole: %w",
 			interim, io.ErrUnexpectedEOF)
 	}
-	return nil, false, fmt.Errorf("parse response: %w", err)
+	return nil, false, fmt.Errorf("parse response: %w", models.HTTPParseError("the HTTP response", len(m.Resp), err))
 }
 
 // decompressReadInPart is pkg.Decompress for a body its client read only in
@@ -668,7 +668,7 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 	}
 	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(m.Req)))
 	if err != nil {
-		return nil, fmt.Errorf("parse request: %w", err)
+		return nil, fmt.Errorf("parse request: %w", models.HTTPParseError("the HTTP request", len(m.Req), err))
 	}
 	req.Header.Set("Host", req.Host)
 
@@ -759,7 +759,10 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 		}
 		if rule, matched := passThroughRecordDecision(opts, ptHost, uint32(destPort), req.Method, req.URL, req.Header); matched {
 			if rule.Mode == models.PassThroughSkip {
-				h.Logger.Debug("egress passthrough: skip mode, not recording", zap.Any("metadata", utils.GetReqMeta(req)))
+				// Built only when the line is written: a per-call path.
+				if ce := h.Logger.Check(zap.DebugLevel, "egress passthrough: skip mode, not recording"); ce != nil {
+					ce.Write(zap.Any("metadata", utils.GetReqMeta(req)))
+				}
 				return nil, nil
 			}
 			// recordOne: defer the dedup decision to emit time (below) so a later
@@ -833,7 +836,10 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 	}
 	// recordOne dedup, committed only now that a mock is actually being emitted.
 	if ptRecordOne && h.ptRecorder != nil && !h.ptRecorder.shouldRecord(ptKey, respParsed.StatusCode) {
-		h.Logger.Debug("egress passthrough: recordOne, dropping duplicate telemetry mock", zap.Any("metadata", utils.GetReqMeta(req)))
+		// Built only when the line is written: a per-call path.
+		if ce := h.Logger.Check(zap.DebugLevel, "egress passthrough: recordOne, dropping duplicate telemetry mock"); ce != nil {
+			ce.Write(zap.Any("metadata", utils.GetReqMeta(req)))
+		}
 		return nil, nil
 	}
 	return mock, nil

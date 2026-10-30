@@ -21,12 +21,15 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/containerkey"
+	"go.keploy.io/server/v3/pkg/agent/logleak"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/variables"
+	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // learnDb is a mock store with a test's own mocks (consumed when served) and
@@ -156,6 +159,32 @@ func TestLearnMatchLearnsADriftedBodyValueAsNoise(t *testing.T) {
 	}
 	if len(db.consumed) != 1 || !reflect.DeepEqual(db.consumed[0].Spec.ReqBodyNoise, map[string][]string{"body.request_id": {}}) {
 		t.Fatalf("the consumed mock carries %v, want body.request_id learned as noise", db.consumed)
+	}
+}
+
+// The learn step's INFO line names a learned field by its shape
+// (models.FieldShape): a JSON key can be a value the app sent (a user ID, an
+// e-mail address). It named the field's path whole.
+func TestLearnMatchLogsALearnedFieldByItsShape(t *testing.T) {
+	const key = "usr_9Lq2Zx7WbN4"
+	h, n, opts := learnOn(t)
+	obs, logs := observer.New(zapcore.DebugLevel)
+	logger, out := logleak.Logger(obs)
+	h.Logger = logger
+	db := &learnDb{perTest: []*models.Mock{learnRecorded("mock-0", 0, "POST", "/v1/scores", `{"users":{"`+key+`":{"rid":"r-1"}}}`, nil, `{"ok":true}`)}}
+	served, miss, err := h.learnMatch(context.Background(), live("POST", "/v1/scores", `{"users":{"`+key+`":{"rid":"r-2"}}}`, nil), db, n, opts)
+	if err != nil || miss != nil || served == nil {
+		t.Fatalf("served %v miss %+v err %v", served, miss, err)
+	}
+	lines := logs.FilterMessage("learned a field that changed between record and replay").All()
+	if len(lines) == 0 {
+		t.Fatalf("no field was learned: the path that logged it did not run; got %v", logs.All())
+	}
+	if f := lines[0].ContextMap(); f["field"] != "body.users.{}.rid" {
+		t.Errorf("the line names the field %v, want its shape body.users.{}.rid", f["field"])
+	}
+	if found := logleak.Find(t, out.String(), []byte(key)); len(found) > 0 {
+		t.Errorf("the log holds the key, a value the app sent: %v", found)
 	}
 }
 

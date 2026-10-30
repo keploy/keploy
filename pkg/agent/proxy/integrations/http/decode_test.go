@@ -6,10 +6,12 @@ import (
 	"compress/gzip"
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -17,6 +19,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/agent/logleak"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/async"
 	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
@@ -438,5 +441,194 @@ func TestANoBodyResponseKeepsItsContentLength(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A replayed call no mock answers is logged by its method, its path's shape,
+// its destination and how its fields differ, never by a value: not the body
+// the app sent or the one recorded, not a query value either side holds, and
+// not the account its path names. The miss's report keeps them (the mismatch
+// table and the report file show them), and so does the recorded mock, but a
+// --debug log or one shipped to a collector does not, nor does the error the
+// replay logs for the miss at ERROR. The noise the call is matched under is
+// logged by its fields' shapes: not a key of a noise field that is a value
+// (an account), nor a header noise pattern.
+func TestDecodeHTTP_AMissLogsNoBodyNoQueryValueAndNoPathValue(t *testing.T) {
+	const (
+		account    = "acct_7Q2xLp9Zr4mW"
+		liveCard   = "qzvkxjwplmtr"
+		recCard    = "brgnhfdyc"
+		liveMail   = "grace.qzvk@mail.test"
+		recMail    = "ada.brgnhf@mail.test"
+		noiseAcct  = "acct_zt8wq3nvkm" // lower case, as body noise keys are kept
+		noiseTrace = "trc_Vb7Lq2Wx9P"
+	)
+	planted := map[string][]byte{
+		"the app's body value": []byte(liveCard), "the recorded body value": []byte(recCard),
+		"the app's query value": []byte(liveMail), "the recorded query value": []byte(recMail),
+		"the path's account":           []byte(account),
+		"a body noise field's account": []byte(noiseAcct), "a header noise pattern": []byte(noiseTrace),
+	}
+	opts := models.OutgoingOptions{NoiseConfig: map[string]map[string][]string{
+		"requestbody": {"users." + noiseAcct + ".card": {"^x$"}},
+		"header":      {"X-Trace": {noiseTrace}},
+	}}
+	path := "/accounts/" + account + "/pay"
+	rec := recorded("pay", path+"?email="+recMail, map[string]string{"Content-Type": "application/json"}, `{"card":"`+recCard+`"}`)
+	rec.Spec.HTTPReq.ProtoMajor, rec.Spec.HTTPReq.ProtoMinor = 1, 1
+	body := `{"card":"` + liveCard + `"}`
+	reqBuf := []byte("POST " + path + "?email=" + liveMail + " HTTP/1.1\r\nHost: api.example\r\nContent-Type: application/json\r\nContent-Length: " +
+		strconv.Itoa(len(body)) + "\r\n\r\n" + body)
+
+	app, proxy := tcpPair(t)
+	obs, logs := observer.New(zapcore.DebugLevel)
+	logger, out := logleak.Logger(obs)
+	h := &HTTP{Logger: logger}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	returned := make(chan error, 1)
+	go func() {
+		returned <- h.decodeHTTP(ctx, reqBuf, proxy, nil, &mockMemDb{mocks: []*models.Mock{rec}, updateUnFilteredReturn: true}, opts)
+	}()
+	// The bound only turns a hang into a failure.
+	if got := readUntil(app, "\r\n\r\n", time.Minute); !strings.HasPrefix(got, "HTTP/1.1 502") {
+		t.Fatalf("the request was answered %q, want the 502 of a miss", got)
+	}
+	var err error
+	select {
+	case err = <-returned:
+	case <-time.After(time.Minute):
+		t.Fatal("decodeHTTP did not return after the miss")
+	}
+	var mm interface {
+		MismatchReport() *models.MockMismatchReport
+	}
+	if !errors.As(err, &mm) || mm.MismatchReport() == nil {
+		t.Fatalf("decodeHTTP = %v, want the miss with its report", err)
+	}
+	report := mm.MismatchReport()
+	if !strings.Contains(report.ReceivedReq+report.Diff+report.ActualSummary, liveCard) {
+		t.Fatalf("the report holds no value of the call (%+v): the miss this row is for did not happen", report)
+	}
+	lines := logs.FilterMessage("no matching http mock found for outgoing request").All()
+	if len(lines) != 1 {
+		t.Fatalf("the miss was logged %d times at Debug, want once; got %v", len(lines), logs.All())
+	}
+	if f := lines[0].ContextMap(); f["actual"] != "POST /accounts/{}/pay" || f["diff"] == "" {
+		t.Errorf("the line names the call by its method and path shape and says how it differs; got %v", f)
+	}
+	if want := "POST /accounts/{}/pay"; !strings.HasSuffix(err.Error(), want) {
+		t.Errorf("the miss's error is %q, want it to name the call as %q", err.Error(), want)
+	}
+	for msg, want := range map[string]string{"body noise": "users.{}.card", "header noise": "x-trace"} {
+		if l := logs.FilterMessage(msg).All(); len(l) != 1 || !strings.Contains(fmt.Sprint(l[0].ContextMap()[msg]), want) {
+			t.Errorf("the %s line names %s by its shape once; got %v", msg, want, l)
+		}
+	}
+	log := out.String() + err.Error()
+	if !strings.Contains(log, lines[0].Message) {
+		t.Fatalf("the rendered log is not the one checked: %s", log)
+	}
+	for what, content := range planted {
+		if found := logleak.Find(t, log, content); len(found) > 0 {
+			t.Errorf("the log holds %s: %v", what, found)
+		}
+	}
+}
+
+// A request net/http cannot parse is logged at Error, and returned, by its
+// length (models.HTTPParseError): net/http's error quotes the request line
+// or a header line, here an Authorization line written without its colon.
+func TestDecodeHTTP_AnUnparsedRequestIsLoggedByItsLength(t *testing.T) {
+	const token = "sk_live_9fQ2xLp7Rw"
+	reqBuf := []byte("GET /pay?token=" + token + " HTTP/1.1\r\nHost: api.example\r\nAuthorization Bearer " + token + "\r\n\r\n")
+	_, proxy := tcpPair(t)
+	obs, logs := observer.New(zapcore.DebugLevel)
+	logger, out := logleak.Logger(obs)
+	h := &HTTP{Logger: logger}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	returned := make(chan error, 1)
+	go func() {
+		returned <- h.decodeHTTP(ctx, reqBuf, proxy, nil, &mockMemDb{}, models.OutgoingOptions{})
+	}()
+	var err error
+	select {
+	case err = <-returned:
+	case <-time.After(time.Minute): // The bound only turns a hang into a failure.
+		t.Fatal("decodeHTTP did not return after a request that does not parse")
+	}
+	want := fmt.Sprintf("the HTTP request (%d bytes) does not parse", len(reqBuf))
+	if err == nil || err.Error() != want {
+		t.Fatalf("decodeHTTP = %v, want %q", err, want)
+	}
+	if l := logs.FilterMessage("failed to parse the http request message").All(); len(l) != 1 || !strings.Contains(out.String(), want) {
+		t.Fatalf("the parse failure was not logged once with its length: %v", logs.All())
+	}
+	if found := logleak.Find(t, out.String()+err.Error(), []byte(token)); len(found) > 0 {
+		t.Errorf("the log holds the token: %v\n%s", found, out.String())
+	}
+}
+
+// Under the proven switch, a miss's error names the call as its Debug line
+// does (mismatch.LogCall): a segment a test variable's place names is {},
+// though it reads as a name. The error named the path by its look alone
+// (models.PathShape), so "/users/gracevault/orders" was logged whole.
+func TestDecodeHTTP_AMissErrorWritesAVariablesSegmentAsAValue(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	const user = "gracevault"
+	rec := recorded("orders", "/users/adalovelace/orders?limit=10", nil, "")
+	rec.Spec.HTTPReq.Method = "GET"
+	rec.Spec.HTTPReq.ProtoMajor, rec.Spec.HTTPReq.ProtoMinor = 1, 1
+	rec.Spec.Variables = models.MockVariables{"user": bindV("adalovelace", "url.path[1]")}
+	reqBuf := []byte("GET /users/" + user + "/orders?limit=20 HTTP/1.1\r\nHost: api.example\r\n\r\n")
+
+	app, proxy := tcpPair(t)
+	obs, logs := observer.New(zapcore.DebugLevel)
+	logger, out := logleak.Logger(obs)
+	h := &HTTP{Logger: logger}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	returned := make(chan error, 1)
+	go func() {
+		returned <- h.decodeHTTP(ctx, reqBuf, proxy, nil, &mockMemDb{mocks: []*models.Mock{rec}, updateUnFilteredReturn: true}, models.OutgoingOptions{})
+	}()
+	// The bound only turns a hang into a failure.
+	if got := readUntil(app, "\r\n\r\n", time.Minute); !strings.HasPrefix(got, "HTTP/1.1 502") {
+		t.Fatalf("the request was answered %q, want the 502 of a miss", got)
+	}
+	var err error
+	select {
+	case err = <-returned:
+	case <-time.After(time.Minute):
+		t.Fatal("decodeHTTP did not return after the miss")
+	}
+	var mm interface {
+		MismatchReport() *models.MockMismatchReport
+	}
+	if !errors.As(err, &mm) || mm.MismatchReport() == nil || !slices.Contains(mm.MismatchReport().VariablePlaces, "url.path[1]") {
+		t.Fatalf("decodeHTTP = %v, want the miss with url.path[1] as a variable's place: the miss this row is for did not happen", err)
+	}
+	lines := logs.FilterMessage("no matching http mock found for outgoing request").All()
+	if len(lines) != 1 || lines[0].ContextMap()["actual"] != "GET /users/{}/orders" {
+		t.Fatalf("the miss's Debug line does not name the call GET /users/{}/orders: %v", logs.All())
+	}
+	if want := "GET /users/{}/orders"; !strings.HasSuffix(err.Error(), want) {
+		t.Errorf("the miss's error is %q, want it to name the call as %q", err.Error(), want)
+	}
+	// The miss's lines only: a line before the match (the request's own,
+	// by models.PathShape) cannot know the variables' places, and a segment
+	// that reads as a name is kept there (a stated limit of PathShape).
+	var miss strings.Builder
+	for _, l := range strings.Split(out.String(), "\n") {
+		if strings.Contains(l, lines[0].Message) {
+			miss.WriteString(l)
+		}
+	}
+	if miss.Len() == 0 {
+		t.Fatalf("the rendered log has no miss line: %s", out.String())
+	}
+	if found := logleak.Find(t, miss.String()+err.Error(), []byte(user)); len(found) > 0 {
+		t.Errorf("the miss's line or its error holds the variable's value: %v", found)
 	}
 }

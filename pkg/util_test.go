@@ -2708,3 +2708,20 @@ func TestAReplacementWithItsSchemeKeepsItsPort(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "http://127.0.0.1:9090/x", got)
 }
+
+// The incoming proxy logs a captured request or response that does not parse
+// at Error: ParseHTTPRequest and ParseHTTPResponse name it by its length,
+// never by net/http's text, which quotes the line.
+func TestParseHTTPNamesAnUnparsedMessageByItsLength(t *testing.T) {
+	const token = "sk_live_9fQ2xLp7Rw"
+	rawReq := "GET /pay HTTP/1.1\r\nHost: a\r\nAuthorization Bearer " + token + "\r\n\r\n"
+	_, err := ParseHTTPRequest([]byte(rawReq))
+	if err == nil || err.Error() != fmt.Sprintf("the HTTP request (%d bytes) does not parse", len(rawReq)) {
+		t.Errorf("ParseHTTPRequest = %v, want the request named by its length", err)
+	}
+	rawResp := "HTTP/1.1 200 OK\r\nSet-Cookie session=" + token + "\r\n\r\n"
+	_, err = ParseHTTPResponse([]byte(rawResp), nil)
+	if err == nil || err.Error() != fmt.Sprintf("the HTTP response (%d bytes) does not parse", len(rawResp)) {
+		t.Errorf("ParseHTTPResponse = %v, want the response named by its length", err)
+	}
+}

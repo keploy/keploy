@@ -367,7 +367,10 @@ func TestUnderTheSwitchATestTheAppNeverAnswersIsNotJudged(t *testing.T) {
 	if r.Status != models.TestStatusFailed {
 		t.Fatalf("the row is %s; a reader of the status alone must see no pass", r.Status)
 	}
-	want := "the app never answered; waited 300ms of keploy's runnable time for GET /test-2"
+	// The request is named by its shape (models.PathShape writes the segment
+	// test-2, which holds a digit, as a value); the row's test case names the
+	// call.
+	want := "the app never answered; waited 300ms of keploy's runnable time for GET /{}"
 	if r.FailureInfo.AnswerStalled != want {
 		t.Fatalf("AnswerStalled %q, want %q", r.FailureInfo.AnswerStalled, want)
 	}
@@ -434,7 +437,7 @@ func TestUnderTheSwitchAnAnswerThatBeganIsJudgedOnItsStart(t *testing.T) {
 		stalled string
 	}{
 		{"a start that differs", 500, true, models.TestSetStatusFailed, ""},
-		{"a start that matches", 200, false, models.TestSetStatusInternalErr, "the app's answer stopped part-way, after 5 bytes of its body; waited 300ms of keploy's runnable time for GET /test-2"},
+		{"a start that matches", 200, false, models.TestSetStatusInternalErr, "the app's answer stopped part-way, after 5 bytes of its body; waited 300ms of keploy's runnable time for GET /{}"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			status.Store(c.status)
@@ -449,7 +452,7 @@ func TestUnderTheSwitchAnAnswerThatBeganIsJudgedOnItsStart(t *testing.T) {
 			if c.judged && r.Result.StatusCode.Normal {
 				t.Fatalf("test-2's status compared normal: %+v; want the 500 judged against the recorded 200", r.Result.StatusCode)
 			}
-			if said := run.said(zapcore.ErrorLevel, "failed on its answer's start, which differs from the recording; nothing whole of its body came: the app's answer stopped part-way, after 5 bytes of its body; waited 300ms of keploy's runnable time for GET /test-2"); (len(said) == 1) != c.judged {
+			if said := run.said(zapcore.ErrorLevel, "failed on its answer's start, which differs from the recording; nothing whole of its body came: the app's answer stopped part-way, after 5 bytes of its body; waited 300ms of keploy's runnable time for GET /{}"); (len(said) == 1) != c.judged {
 				t.Fatalf("the console said %d time(s) that test-2 failed on its start", len(said))
 			}
 			if rep := run.report.report; rep == nil || rep.Status != string(c.set) {

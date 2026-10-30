@@ -324,6 +324,23 @@ func sortedNoVerdicts(r *Replayer) map[string][]string {
 	return out
 }
 
+// The report keeps a field the learn step learned whole
+// (FailureInfo.LearningNotKept, by byTest: what was learned is the user's to
+// read and correct), and only the logged list (dropped) names it by its
+// shape: a body keyed by a user's ID learned noise under it. Both were
+// shaped.
+func TestWithoutUnreadLearningKeepsAFieldWholeForTheReportOnly(t *testing.T) {
+	const id = "u_7Hq2Lw9Zx"
+	consumed := map[string]models.MockState{"mock-1": {Name: "mock-1", ReqBodyNoise: map[string][]string{"body.users." + id + ".seen": {}}, Clocks: map[string]models.ClockOffset{"body.at." + id: {Res: time.Millisecond}}}}
+	_, dropped, byTest, _ := withoutUnreadLearning(consumed, map[string][]string{"mock-1": {"test-1"}}, map[string]bool{"test-1": true})
+	if want := "mock-1 body.at." + id + " (clock),mock-1 body.users." + id + ".seen (noise)"; strings.Join(byTest["test-1"], ",") != want {
+		t.Errorf("the report's fields %v; want %s", byTest["test-1"], want)
+	}
+	if want := "mock-1 body.at.{} (clock),mock-1 body.users.{}.seen (noise)"; strings.Join(dropped, ",") != want {
+		t.Errorf("the logged fields %v; want %s", dropped, want)
+	}
+}
+
 // withoutUnreadLearning takes everything learned off the mocks a test whose
 // request was not read consumed, and nothing off the others, and says what
 // it took, sorted, as one text for one input.

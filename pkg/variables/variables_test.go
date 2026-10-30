@@ -3,6 +3,7 @@ package variables
 import (
 	"errors"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -188,6 +189,31 @@ func TestAnswerEditAndApplyEdits(t *testing.T) {
 	}
 	if _, ok := ApplyEdits(body, []Edit{{Start: 1, End: 5}, {Start: 3, End: 8}}); ok {
 		t.Fatal("overlapping edits were applied")
+	}
+}
+
+// A place that holds another value is said by each value's length, the
+// recording's decoded as the variable's is: two values of one length read as
+// one length, and neither value is written. The recording's length was its
+// raw JSON span's, quotes and escapes counted, and an equal length read as a
+// changed one.
+func TestAnswerEdit_AnotherValueIsSaidByDecodedLengths(t *testing.T) {
+	body := `{"id":"vw\"yz","n":12345}`
+	for _, tc := range []struct {
+		key, recorded, want string
+	}{
+		{"id", "abcde", "another string there (5 bytes), not the variable's recorded value (5 bytes)"},
+		{"n", "54321", "another number there (5 bytes), not the variable's recorded value (5 bytes)"},
+	} {
+		_, why := AnswerEdit(body, []templates.PathSeg{{Key: tc.key}}, tc.recorded, "x")
+		if !strings.Contains(why, tc.want) {
+			t.Errorf("%s: why = %q, want it to say %q", tc.key, why, tc.want)
+		}
+		for _, v := range []string{"vw", "yz", "12345", tc.recorded} {
+			if strings.Contains(why, v) {
+				t.Errorf("%s: why = %q writes the value %q", tc.key, why, v)
+			}
+		}
 	}
 }
 

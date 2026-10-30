@@ -5,10 +5,13 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
+	"testing/iotest"
 )
 
 // A response is read up to the final one, past every interim (1xx) response
@@ -141,4 +144,20 @@ func TestIsInterimStatus(t *testing.T) {
 func peekAll(r *bufio.Reader) string {
 	b, _ := r.Peek(r.Buffered())
 	return string(b)
+}
+
+// A response net/http cannot parse is named without its text, which quotes
+// the line; the connection's own error is returned as the reader gave it.
+func TestReadFinalResponseNamesAnUnparsedResponseWithoutItsText(t *testing.T) {
+	const token = "sk_live_9fQ2xLp7Rw"
+	req, _ := http.NewRequest(http.MethodGet, "http://a/", nil)
+	_, err := ReadFinalResponse(bufio.NewReader(strings.NewReader("HTTP/1.1 200 OK\r\nSet-Cookie session="+token+"\r\n\r\n")), req, nil)
+	if err == nil || strings.Contains(err.Error(), token) || !strings.Contains(err.Error(), "does not parse") {
+		t.Fatalf("ReadFinalResponse = %v, want the response named without its text", err)
+	}
+	reset := &net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET}
+	_, err = ReadFinalResponse(bufio.NewReader(io.MultiReader(strings.NewReader("HTTP/1.1 200 OK\r\n"), iotest.ErrReader(reset))), req, nil)
+	if err != error(reset) {
+		t.Errorf("ReadFinalResponse on a reset connection = %v, want the reset as the reader gave it", err)
+	}
 }

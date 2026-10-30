@@ -499,6 +499,10 @@ type UnmatchedCall struct {
 	Protocol      string `json:"protocol" yaml:"protocol"`
 	ActualSummary string `json:"actual_summary,omitempty" yaml:"actual_summary,omitempty"` // e.g. "POST /comments"
 	Destination   string `json:"destination,omitempty" yaml:"destination,omitempty"`       // outgoing call's destination/domain (HTTP Host, or host:port) — which upstream missed
+	// LogSummary mirrors MockMismatchReport.LogSummary: the call as a log
+	// line names it, when its parser states it (a shape written from no
+	// value), which LoggedCall prefers. Empty for every OSS parser.
+	LogSummary string `json:"log_summary,omitempty" yaml:"log_summary,omitempty"`
 	// LiveDestination is, under the proven switch, the address the call was
 	// made to when Destination names it as the recording does instead (the
 	// mocks' destAddr: 127.0.0.1:27017 where the app reached [::1]:27017,

@@ -3,7 +3,6 @@ package http
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"net"
 	"os"
@@ -94,7 +93,7 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 		return ctx.Err()
 	}
 
-	h.Logger.Debug("This is the initial request: " + string(reqBuf))
+	h.Logger.Debug("read the initial request", zap.Int("bytes", len(reqBuf)))
 	var finalReq []byte
 	errCh := make(chan error, 1)
 
@@ -182,7 +181,7 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 					return nil
 				}
 
-				h.Logger.Debug("This is the response from the server after the expect header" + string(resp))
+				h.Logger.Debug("read the server's answer to the expect header", zap.Int("bytes", len(resp)))
 
 				if string(resp) != "HTTP/1.1 100 Continue\r\n\r\n" {
 					utils.LogError(h.Logger, nil, "failed to get the 100 continue response from the user client")
@@ -208,7 +207,7 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 				return nil
 			}
 
-			h.Logger.Debug(fmt.Sprintf("This is the complete request:\n%v", string(finalReq)))
+			h.Logger.Debug("read the complete request", zap.Int("bytes", len(finalReq)))
 
 			// Read the response from the actual server.
 			probeHTTP(ctx, h.Logger, "encode-read-resp-start")
@@ -283,7 +282,7 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 				if len(resp) == 0 {
 					resTimestampMock = reqTimestampMock
 					h.Logger.Info("upstream call errored before any response bytes; synthesized mock persisted so replay stays deterministic",
-						zap.String("upstream_url", upstreamRequestURL(finalReq, destConn.RemoteAddr())),
+						zap.Any("upstream", upstreamRequestMeta(finalReq, destConn.RemoteAddr())),
 						zap.String("error_class", upstreamErrorClass(err)),
 						zap.Error(err))
 					// Write the synthesized response back to the client so
@@ -312,7 +311,7 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 					// the synthesized error mock instead.
 					h.Logger.Error("upstream errored AFTER partial response bytes were received; discarding truncated bytes and persisting synthesized error mock",
 						zap.Int("partial_resp_len", len(resp)),
-						zap.String("upstream_url", upstreamRequestURL(finalReq, destConn.RemoteAddr())),
+						zap.Any("upstream", upstreamRequestMeta(finalReq, destConn.RemoteAddr())),
 						zap.String("error_class", upstreamErrorClass(err)),
 						zap.Error(err),
 						zap.String("next_step", "investigate upstream stability (check connection resets, timeouts, keep-alive settings); recorded synthesized 5xx mock in place of the truncated response"))
@@ -336,7 +335,7 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 			}
 			var finalResp []byte
 			finalResp = append(finalResp, resp...)
-			h.Logger.Debug("This is the initial response: " + string(resp))
+			h.Logger.Debug("read the initial response", zap.Int("bytes", len(resp)))
 
 			chunkedRespStart := time.Now()
 			err = h.handleChunkedResponses(ctx, &finalResp, clientConn, destConn, resp, requestMethod(finalReq))
@@ -376,7 +375,7 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 				return nil
 			}
 
-			h.Logger.Debug("This is the final response: " + string(finalResp))
+			h.Logger.Debug("read the final response", zap.Int("bytes", len(finalResp)))
 
 			// Offload mock creation to async recorder.
 			enqueueMock(finalReq, finalResp, reqTimestampMock, resTimestampMock)
@@ -397,7 +396,7 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 			if err != nil {
 				if err != io.EOF {
 					h.Logger.Debug("failed to read the request message from the user client", zap.Error(err))
-					h.Logger.Debug("This was the last response from the server: " + string(resp))
+					h.Logger.Debug("read the last response from the server", zap.Int("bytes", len(resp)))
 					errCh <- nil
 					return nil
 				}

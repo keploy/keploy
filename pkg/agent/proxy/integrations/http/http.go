@@ -215,6 +215,7 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 	// converts the request message buffer to http request
 	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(mock.Req)))
 	if err != nil {
+		err = models.HTTPParseError("the HTTP request", len(mock.Req), err)
 		utils.LogError(h.Logger, err, "failed to parse the http request message")
 		return err
 	}
@@ -279,7 +280,7 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 			}
 		}
 
-		h.Logger.Debug("This is the response body: " + string(respBody))
+		h.Logger.Debug("read the response body", zap.Int("bytes", len(respBody)))
 		//Set the content length to the headers, except on a response with no
 		//body by rule (to a HEAD, a 1xx, 204 or 304), which keeps its own (as
 		//buildHTTPMock does).
@@ -297,7 +298,10 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 	}
 	// Check if the request is a passThrough request
 	if utils.IsPassThrough(h.Logger, req, destPort, opts) {
-		h.Logger.Debug("The request is a passThrough request", zap.Any("metadata", utils.GetReqMeta(req)))
+		// Built only when the line is written: a per-call path.
+		if ce := h.Logger.Check(zap.DebugLevel, "The request is a passThrough request"); ce != nil {
+			ce.Write(zap.Any("metadata", utils.GetReqMeta(req)))
+		}
 		return nil
 	}
 
@@ -316,7 +320,10 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 		}
 		if rule, matched := passThroughRecordDecision(opts, ptHost, uint32(destPort), req.Method, req.URL, req.Header); matched {
 			if rule.Mode == models.PassThroughSkip {
-				h.Logger.Debug("egress passthrough: skip mode, not recording", zap.Any("metadata", utils.GetReqMeta(req)))
+				// Built only when the line is written: a per-call path.
+				if ce := h.Logger.Check(zap.DebugLevel, "egress passthrough: skip mode, not recording"); ce != nil {
+					ce.Write(zap.Any("metadata", utils.GetReqMeta(req)))
+				}
 				return nil
 			}
 			// recordOne: defer the dedup decision to emit time (below). Marking here
@@ -401,7 +408,10 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 	// recordOne dedup, committed only now that a mock is actually being emitted:
 	// keep the first 2xx per (scope,method,host,port,path,queryKeys), drop the rest.
 	if ptRecordOne && h.ptRecorder != nil && !h.ptRecorder.shouldRecord(ptKey, respParsed.StatusCode) {
-		h.Logger.Debug("egress passthrough: recordOne, dropping duplicate telemetry mock", zap.Any("metadata", utils.GetReqMeta(req)))
+		// Built only when the line is written: a per-call path.
+		if ce := h.Logger.Check(zap.DebugLevel, "egress passthrough: recordOne, dropping duplicate telemetry mock"); ce != nil {
+			ce.Write(zap.Any("metadata", utils.GetReqMeta(req)))
+		}
 		return nil
 	}
 

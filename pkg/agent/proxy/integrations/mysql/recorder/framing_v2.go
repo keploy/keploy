@@ -425,8 +425,9 @@ func firstResponsePacket(ctx context.Context, logger *zap.Logger, sess *supervis
 		if !isServersOwnErr(buf) {
 			return nil, framingLostAt(logger, sess, "the first packet of the %s response has sequence id 0 and is not an ERR", seq.what)
 		}
+		code, state := serversOwnErrID(buf)
 		logger.Debug("V2: the server dropped the connection with an error of its own; its recording ends here",
-			zap.String("connID", sess.ClientConnID), zap.ByteString("err", buf[4:]))
+			zap.String("connID", sess.ClientConnID), zap.Uint16("errCode", code), zap.String("sqlState", state))
 		return nil, errServerDropped
 	}
 	return buf, nil
@@ -463,6 +464,17 @@ func isServersOwnErr(buf []byte) bool {
 		}
 	}
 	return true
+}
+
+// serversOwnErrID names a server's own ERR packet by its error code and SQL
+// state, and a packet isServersOwnErr does not accept by nothing (0, ""). Its
+// message is left out of a log: it quotes the statement's values ("Duplicate
+// entry 'ada@example.com' for key 'email'").
+func serversOwnErrID(buf []byte) (code uint16, sqlState string) {
+	if !isServersOwnErr(buf) {
+		return 0, ""
+	}
+	return binary.LittleEndian.Uint16(buf[4+1 : 4+3]), string(buf[4+4 : 4+errSQLStateEnd])
 }
 
 // errSQLStateEnd is where an ERR payload's SQL state ends: after 0xFF (1), the
@@ -846,8 +858,9 @@ func (h *heldPrepare) settle(ctx context.Context, logger *zap.Logger, sess *supe
 		return buf, nil
 	case buf[3] == 0 && isServersOwnErr(buf):
 		h.release(decodeCtx, nil, time.Time{})
+		code, state := serversOwnErrID(buf)
 		logger.Debug("V2: the server dropped the connection with an error of its own; its recording ends here",
-			zap.String("connID", sess.ClientConnID), zap.ByteString("err", buf[4:]))
+			zap.String("connID", sess.ClientConnID), zap.Uint16("errCode", code), zap.String("sqlState", state))
 		return nil, errServerDropped
 	default:
 		err := framingLostAt(logger, sess, "the packet after the definitions of the %s response has sequence id %d and is neither its EOF, the next answer nor an ERR of the server's own", h.what, buf[3])

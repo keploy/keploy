@@ -3,6 +3,7 @@ package replay
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -138,6 +139,16 @@ func TestRunTestSet_ACaptureHoldsTheValueTheAppSentItsDependency(t *testing.T) {
 				t.Fatalf("the mismatch was logged %d time(s)", len(said))
 			} else if len(said) == 1 && said[0].ContextMap()["next_step"] == nil {
 				t.Fatalf("the log gives no next step: %+v", said[0].ContextMap())
+			} else if len(said) == 1 {
+				// The line names its why by its length: the why quotes the
+				// value the app answered and the one it sent, and the
+				// report's template_failures keep it (below).
+				line := fmt.Sprintf("%v", said[0].ContextMap())
+				for _, v := range []string{"u_live_0002", "u_other_0003"} {
+					if strings.Contains(line, v) {
+						t.Fatalf("the line holds the value %s: %s", v, line)
+					}
+				}
 			}
 			if r.Status != tc.want {
 				t.Fatalf("the create: %s, want %s (%+v)", r.Status, tc.want, r.TemplateFailures)
