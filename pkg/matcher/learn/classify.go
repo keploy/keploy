@@ -1131,10 +1131,12 @@ func leafedAtCall(earlier []Earlier, at time.Time) (kept []Earlier, late []Raw) 
 // refused with payloadUnread's reason (rawUnread), never learned on the
 // strength of its absence. Where its adapter said F served it as recorded
 // (Earlier.servedAsRecorded), both are read so (Raw.ServedAsRecorded): what
-// F served at its leaves is then its recording's own text. Otherwise F's
-// view of the payload is the one its adapter stated of the recording's serves
-// after them (Earlier.told: Order.ServedView, the view of every serve of it
-// the read saw, where each was told), or else one no adapter stated
+// F served at its leaves is then its recording's own text. Where it gave F's
+// view of the exchange instead (Earlier.View), both are read with that view
+// (Raw.ServedLive: one that cannot be read refuses every word). Otherwise
+// F's view of the payload is the one its adapter stated of the recording's
+// serves after them (Earlier.told: Order.ServedView, the view of every serve
+// of it the read saw, where each was told), or else one no adapter stated
 // (Raw.viewUnstated), and so is that of what F served at its answer's
 // leaves, which says nothing of the parts of the answer that are no leaf: a
 // word a value holds now that may stand there is refused (fail closed).
@@ -1149,12 +1151,16 @@ func (e Earlier) lateOf(late bool) []Raw {
 		out = append(out, a)
 	}
 	asRecorded := e.servedAsRecorded()
+	viewed := !asRecorded && e.View != nil && !e.Given
+	view := Raw{mock: e.Mock, at: e.At, answered: e.Payload.answered, served: true, call: e.Payload.call, src: &rawSource{name: e.Mock, load: e.View}}
 	for i := range out {
 		out[i] = out[i].OfAnotherTest()
 		out[i].late = late
 		switch {
 		case asRecorded:
 			out[i] = out[i].ServedAsRecorded()
+		case viewed:
+			out[i] = out[i].ServedLive(view)
 		case e.told != nil:
 			out[i] = e.told.order.ServedView(e.told.mock, out[i])
 		}

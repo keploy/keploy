@@ -1041,6 +1041,23 @@ func givenWhy(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, raw
 				return why
 			}
 		}
+		// A word the value holds now that F may have given the application
+		// at one of them and the recording did not (servedWhy): no rule
+		// lets it go. Read after every recording's own words, so that a
+		// word found where the recording gave it is named there; one that
+		// reached here past a recording holding it was let go there by the
+		// rule a copy follows its source, which reads F's view of it too
+		// (follows.excusedGiven), as a place of the call's own test lets it
+		// go past that view (unaccounted). The first loop read keep for
+		// every word the value holds now, wherever there is a recording.
+		if recorded {
+			return ""
+		}
+		for _, g := range op.words {
+			if why := g.servedWhy(i, t, v.wordOf(t, recorded), givenWhose(g.at, at, g.late, g.noTime), keep); why != "" {
+				return why + "; " + notClock(v) + ". " + correction(g.mock, false)
+			}
+		}
 		return ""
 	})
 }

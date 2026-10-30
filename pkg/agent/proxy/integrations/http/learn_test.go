@@ -3086,10 +3086,11 @@ func TestLearnMatchAnOwnCallRefusesAValueCopiedFromAMockRecordedAfterItThatFServ
 
 // A word the call's value was recorded with that only a mock recorded after
 // the call holds is no earlier place of the call, wherever F served that
-// mock before the call, earlier in the test included: the recording made
-// the call before it, so its answer is never read as "the test's recording
-// holds earlier". The control, the same mock recorded before the call and
-// served earlier in the test, is an earlier place the value was copied from.
+// mock before the call (as recorded: its adapter said so), earlier in the
+// test included: the recording made the call before it, so its answer is
+// never read as "the test's recording holds earlier". The control, the same
+// mock recorded before the call and served earlier in the test, is an
+// earlier place the value was copied from.
 func TestLearnMatchAWordOnlyAMockRecordedAfterTheCallHoldsIsNoEarlierPlace(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -3110,6 +3111,7 @@ func TestLearnMatchAWordOnlyAMockRecordedAfterTheCallHoldsIsNoEarlierPlace(t *te
 					tr.Begin()
 				}
 				tr.ServedMock(late)
+				tr.ServedMockAsRecorded(late)
 				if where != "earlier in the test" {
 					tr.Begin()
 				}
@@ -4734,5 +4736,72 @@ func TestALearnedReadOfTheClockIsCarriedAndAKindThePlanCannotCarryIsRefused(t *t
 	}
 	if _, why := learnPlan(learn.NewTracker(), 1, m, learn.Shape{}, true, []learn.Learned{{Kind: learn.KindClockRead, Recorded: leaf, Live: leaf}}, nil, nil); why != "body.at changed, and keploy learned it as clock-read, which this replay cannot check" {
 		t.Errorf("a read with no read beside it and no reason: why %q, want the kind named", why)
+	}
+}
+
+// A token the application read in another recorded test's answer, and sends
+// again in a later test's call, is a value F may have given it there: the
+// replay served that answer (mock-2) in the older test, and only its adapter
+// can say what the application got from that serve (a variable's value, a
+// template, a view). Told nothing, keploy cannot tell, and the call's fresh
+// token is refused, saying so; told with a view whose answer holds the token,
+// it is refused, naming mock-2 as the full round gave it. Told as recorded,
+// the recording's own words are what the application got, none is the
+// token's, and the token is learned as noise (the control). keploy read
+// another test's recording by its recorded words alone, so the token was
+// learned as noise whatever the serve gave the application (FALSE GREEN).
+func TestLearnMatchATokenAnotherTestsServeMayHaveGivenIsRefusedUnlessItsAdapterSaidWhatItGave(t *testing.T) {
+	const (
+		unstated = "where its adapter did not say what it gave the application there"
+		gave     = "appears in mock-2 as record's full round gave it"
+	)
+	for _, tc := range []struct {
+		name string
+		tell func(tr *learn.Tracker, m *models.Mock)
+		why  string // "" learns noise
+	}{
+		{"told nothing", func(*learn.Tracker, *models.Mock) {}, unstated},
+		{"told with a view whose answer holds the token", func(tr *learn.Tracker, m *models.Mock) {
+			tr.ServedMockLive(m, "v1", func() (*models.Mock, error) {
+				v := m.ShallowCopy()
+				resp := *m.Spec.HTTPResp
+				resp.Body = `{"token":"tok-9c4d"}`
+				v.Spec.HTTPResp = &resp
+				return v, nil
+			})
+		}, gave},
+		{"told as recorded", func(tr *learn.Tracker, m *models.Mock) { tr.ServedMockAsRecorded(m) }, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, n, opts := learnOn(t)
+			other := learnRecorded("mock-2", time.Millisecond, "GET", "/session", "", nil, `{"token":"tok-0b7e"}`)
+			call := learnRecorded("mock-1", 5*time.Millisecond, "POST", "/v1/messages", `{"ref":"tok-5a21"}`, nil, `{}`)
+			db := &learnDb{perTest: []*models.Mock{call}, otherTest: map[time.Time]bool{other.Spec.ReqTimestampMock: true}}
+			tr := learn.NewTracker()
+			tr.Begin() // the older test, which the replay served mock-2 in
+			tr.ServedMock(other)
+			tc.tell(tr, other)
+			tr.Begin() // the call's test
+			got, miss, err := h.learnMatch(learn.WithTracker(context.Background(), tr), live("POST", "/v1/messages", `{"ref":"tok-9c4d"}`, nil), db, n, opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			served := "nothing"
+			if got != nil {
+				served = got.Name
+			}
+			if tc.why == "" {
+				if got == nil || miss != nil || len(db.consumed) != 1 {
+					t.Fatalf("FALSE RED: served %s miss %+v consumed %d; want the call served, body.ref learned as noise: mock-2 gave the application its recorded answer, which holds no word of the token", served, miss, len(db.consumed))
+				}
+				return
+			}
+			if got != nil || miss == nil || len(db.consumed) != 0 {
+				t.Fatalf("FALSE GREEN: served %s miss %+v consumed %d; want body.ref refused: F may have given the application the token in mock-2", served, miss, len(db.consumed))
+			}
+			if miss.res.Reason != models.MissRequestChanged || !strings.Contains(miss.res.Why, tc.why) {
+				t.Fatalf("FALSE REASON: refused %s (%q); want request_changed saying %q", miss.res.Reason, miss.res.Why, tc.why)
+			}
+		})
 	}
 }

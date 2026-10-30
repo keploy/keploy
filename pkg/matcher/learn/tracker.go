@@ -950,7 +950,7 @@ func (o Order) ServedView(m *models.Mock, r Raw) Raw {
 	o.t.mu.Lock()
 	older := o.olderTestLocked(id)
 	if unstated {
-		recorded, loads, unread, ok = o.viewsLocked(id)
+		recorded, _, loads, unread, ok = o.viewsLocked(id)
 	}
 	o.t.mu.Unlock()
 	if older {
@@ -986,12 +986,14 @@ func (o Order) ServedView(m *models.Mock, r Raw) Raw {
 // so one numbered up to upTo is of a serve the read saw); recorded where one
 // was told as recorded; the loader of each different view told
 // (ServedMockLive), in the order first told; unread where one was told with
-// a view that could not be kept. o.t.mu held.
-func (o Order) viewsLocked(id string) (recorded bool, loads []func() (*models.Mock, error), unread, ok bool) {
+// a view that could not be kept; and where each loader's view stands among
+// the recording's views the set keeps (keys: liveViews.views), which names
+// it for the set (Order.GivenPlaces). o.t.mu held.
+func (o Order) viewsLocked(id string) (recorded bool, keys []int, loads []func() (*models.Mock, error), unread, ok bool) {
 	n := o.serves[id]
 	k := sort.SearchInts(n, o.upTo+1)
 	if k == 0 {
-		return false, nil, false, false
+		return false, nil, nil, false, false
 	}
 	told := sort.SearchInts(o.asRecorded[id], o.upTo+1)
 	recorded = told > 0
@@ -1010,11 +1012,12 @@ func (o Order) viewsLocked(id string) (recorded bool, loads []func() (*models.Mo
 					seen = map[int]bool{}
 				}
 				seen[s.view] = true
+				keys = append(keys, s.view)
 				loads = append(loads, lv.views[s.view].load)
 			}
 		}
 	}
-	return recorded, loads, unread, told == k
+	return recorded, keys, loads, unread, told == k
 }
 
 // viewRaw is the view load gives of m, which F served (Tracker.ServedMockLive),

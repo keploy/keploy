@@ -62,6 +62,7 @@ func TestAChanceWordOfAnotherTestsAnswerIsLearnedAsVarying(t *testing.T) {
 		{"the recorded id's group, served as recorded", okSrc, asRecorded, chance, other, ""},
 		{"the id's group F saw, served as recorded", okSrc, asRecorded, other, chance, ""},
 		{"served changed, its view giving the word at the same field", okSrc, viewOf(bodyMoved), chance, other, ""},
+		{"the id's group F saw, served changed, its view giving the word at the same field", okSrc, viewOf(bodyMoved), other, chance, ""},
 		{"two groups of the id in one answer, served as recorded", src("bb7ed9ee-1f2d-48d1-982f-b54b2b73982f", before, before.Add(time.Second)), asRecorded, chance, other, ""},
 		{"served changed with no view", okSrc, noView, chance, other, "record's full round did not give the application that word there before the call"},
 		{"served changed, its view giving the word at another field too (a header the recording's lacks it at)", okSrc, viewOf(elsewhere), chance, other, "record's full round did not give the application that word there before the call"},
