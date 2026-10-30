@@ -5791,7 +5791,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				testSetStatus = models.TestSetStatusInternalErr
 				r.markNotJudged(testSetID)
 			} else if len(workerMissing) > 0 {
-				// A boot call the application made differently is named
+				// A worker call the application made differently is named
 				// with the call keploy refused: of the set's calls no mock
 				// answered, its background ones (the set end's read just
 				// above included) and those filed late in its last test.

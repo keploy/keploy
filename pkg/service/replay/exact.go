@@ -1167,13 +1167,14 @@ func (p *exactPlan) awaitedWorker(missing []string, refused []models.UnmatchedCa
 }
 
 // workerWhy says what a set's end found of its worker scope: the calls its
-// recording made that the application never did, and the boot calls it made
-// differently, which keploy refused and the end did not wait for
-// (bootRefused over refused, the set's calls no mock answered), each named
-// with the call refused. A worker call placed after a test that a refused
-// call is closest to is still said never made: the end waited for it.
+// recording made that the application never did, and those it made
+// differently, which keploy refused (refusedWorker over refused, the set's
+// calls no mock answered), each named with the call refused. That holds for
+// every worker-scope mock: one placed at the set's start, which the end did
+// not wait for (bootRefused), and one placed after a test, which it waited
+// for and which no later call answered.
 func (p *exactPlan) workerWhy(missing []string, refused []models.UnmatchedCall) string {
-	by := refusedWorker(p.bootRefused(missing, refused), refused)
+	by := refusedWorker(missing, refused)
 	var never, differently []string
 	for _, m := range missing {
 		if c, ok := by[m]; ok {
