@@ -214,14 +214,38 @@ func (h *preambleHold) settle(ctx context.Context) {
 }
 
 // release returns the held exchanges in recorded order, the first stated
-// per-test when the connection lay wholly inside its test, else session.
+// per-test when the connection lay wholly inside its test, else session. A
+// first exchange stated session while a test's window held its request is
+// marked (models.MetadataLifetimeUndecidedKey) with why and that test: it may
+// be the test's own call, and keploy record's judging does not judge a test
+// that owns no call and held one.
 func (h *preambleHold) release(wholly bool) []*models.Mock {
 	if wholly {
 		h.first.Spec.Metadata[models.MetadataLifetimeKey] = models.MetadataLifetimePerTest
 	} else {
 		h.first.Spec.Metadata[models.MetadataLifetimeKey] = models.MetadataLifetimeSession
+		if why := h.undecided(); why != "" {
+			h.first.Spec.Metadata[models.MetadataLifetimeUndecidedKey] = models.MockLifetimeUndecided{Why: why, TestStart: h.span.Start}.String()
+		}
 	}
 	return append([]*models.Mock{h.first}, h.pending...)
+}
+
+// undecided is why a connection whose first request a test's window held is
+// not known to lie wholly inside that test (a models.LifetimeUndecided*
+// reason), or "" when no test's window holds its first request any more.
+func (h *preambleHold) undecided() string {
+	switch {
+	case !h.ok:
+		return ""
+	case h.exchanges > maxHeldExchanges:
+		return models.LifetimeUndecidedManyExchanges
+	case !h.span.Final():
+		return models.LifetimeUndecidedStoppedFirst
+	case h.last.After(h.span.End):
+		return models.LifetimeUndecidedReadAfterAnswer
+	}
+	return ""
 }
 
 // handOn emits the held exchanges in recorded order (release), then tells the

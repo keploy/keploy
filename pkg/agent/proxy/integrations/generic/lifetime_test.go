@@ -711,6 +711,11 @@ func TestV2WithTheSwitchOffTheFirstExchangeIsEmittedAtOnce(t *testing.T) {
 		if m.Spec.Metadata[models.MetadataLifetimeKey] != models.MetadataLifetimeSession {
 			t.Errorf("stated %q, want session", m.Spec.Metadata[models.MetadataLifetimeKey])
 		}
+		// An open window holds its request, and still it is not marked:
+		// with the switch off the metadata is as it was.
+		if v, ok := m.Spec.Metadata[models.MetadataLifetimeUndecidedKey]; ok {
+			t.Errorf("marked %q with the switch off", v)
+		}
 		close(clientCh)
 		close(destCh)
 	}()
@@ -779,5 +784,293 @@ func TestLegacyAConnectionWhollyInsideATestIsThatTestsWhole(t *testing.T) {
 		if got["publish 1"] != want || got["publish 2"] != models.MetadataLifetimePerTest {
 			t.Fatalf("in a window %v: stated %v, want the first %s and the second per-test", inWindow, got, want)
 		}
+	}
+}
+
+// markOf is m's lifetimeUndecided mark: its reason and test start, or "" when
+// it has none.
+func markOf(t *testing.T, m *models.Mock) string {
+	t.Helper()
+	v, has := m.Spec.Metadata[models.MetadataLifetimeUndecidedKey]
+	u, ok := m.LifetimeUndecided()
+	if has != ok {
+		t.Fatalf("the mark %q does not read back", v)
+	}
+	if !ok {
+		return ""
+	}
+	return u.Why + "@" + u.TestStart.UTC().Format(time.RFC3339Nano)
+}
+
+// A connection's first exchange that the recorder puts in the session pool
+// only because it could not tell that the connection lay wholly inside the
+// test whose window held its request is marked, with why and that test (its
+// window's start): it may be that test's own call, and a test that owns no
+// call and held one is not to be judged on its outcome (keploy record's
+// judging reads the mark). Two paths go by recorded times: the client wrote
+// on after the test's answer (a trailing write the relay read late, or any
+// write after the answer), and a later test reused the connection. A
+// connection wholly inside its test, or whose first request no test's window
+// holds, carries no mark.
+func TestV2APreambleStatedForWantOfADecisionNamesItsTest(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	t0 := time.Unix(7000, 0)
+	ms := func(f float64) time.Time { return t0.Add(time.Duration(f * float64(time.Millisecond))) }
+	marked := models.LifetimeUndecidedReadAfterAnswer + "@" + t0.UTC().Format(time.RFC3339Nano)
+	type chunk struct {
+		fromClient bool
+		data       string
+		readAt     time.Time
+	}
+	for _, tc := range []struct {
+		name string
+		// windowAt is when the test's window (or scope) opens; tested says
+		// whether it ends a test case answered at ms(20.8).
+		windowAt time.Time
+		tested   bool
+		// more are the chunks after the first exchange's.
+		more []chunk
+		want []string // each exchange's stated lifetime, then its mark
+	}{
+		{"the client writes on after the test's answer", t0, true,
+			[]chunk{{true, "BYE", ms(21.5)}},
+			[]string{models.MetadataLifetimeSession, marked}},
+		{"a later test reuses the connection", t0, true,
+			[]chunk{{true, "QUOTE item=pen", ms(22)}, {false, "CENTS 80", ms(22.2)}},
+			[]string{models.MetadataLifetimeSession, marked, models.MetadataLifetimePerTest, ""}},
+		{"wholly inside its test", t0, true,
+			nil,
+			[]string{models.MetadataLifetimePerTest, ""}},
+		{"its test's window ends no test case", t0, false,
+			[]chunk{{true, "BYE", ms(21.5)}},
+			[]string{models.MetadataLifetimeSession, ""}},
+		{"no test's window holds its request", ms(19.5), true,
+			[]chunk{{true, "BYE", ms(21.5)}},
+			[]string{models.MetadataLifetimeSession, ""}},
+	} {
+		for _, scope := range []bool{false, true} {
+			for _, endsFirst := range []bool{true, false} {
+				name := tc.name
+				if scope {
+					name = "a test scope: " + name
+				}
+				if endsFirst {
+					name += ", the test ends before the recorder reads the connection"
+				}
+				t.Run(name, func(t *testing.T) {
+					mgr := syncMock.New(zap.NewNop())
+					var sc *syncMock.TestScope
+					var w *syncMock.Window
+					if scope {
+						sc = mgr.BeginTestScope(tc.windowAt)
+					} else {
+						w = mgr.OpenWindow(tc.windowAt, nil)
+					}
+					end := func() {
+						switch {
+						case sc != nil && tc.tested:
+							sc.End(ms(20.8))
+						case sc != nil:
+							sc.Abandon()
+						default:
+							if tc.tested {
+								w.Yield(ms(20.8))
+								w.Tested(tc.windowAt, ms(20.8))
+							}
+							w.Close()
+						}
+						// The next test begins.
+						if scope {
+							mgr.BeginTestScope(ms(21))
+						} else {
+							mgr.OpenWindow(ms(21), nil)
+						}
+					}
+					clientCh := make(chan fakeconn.Chunk, 4)
+					destCh := make(chan fakeconn.Chunk, 4)
+					clientCh <- fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: []byte("QUOTE item=book"), ConnSeq: 1, ReadAt: ms(19)}
+					destCh <- fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: []byte("CENTS 1250"), ConnSeq: 2, ReadAt: ms(19.2)}
+					for i, c := range tc.more {
+						if c.fromClient {
+							clientCh <- fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: []byte(c.data), ConnSeq: uint32(i + 3), ReadAt: c.readAt}
+						} else {
+							destCh <- fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: []byte(c.data), ConnSeq: uint32(i + 3), ReadAt: c.readAt}
+						}
+					}
+					close(clientCh)
+					close(destCh)
+					if endsFirst {
+						end()
+					}
+					sess, mocks := newV2Session(t, clientCh, destCh)
+					sess.Ctx = syncMock.NewContext(context.Background(), mgr)
+					done := make(chan error, 1)
+					go func() { done <- dispatch(t, sess) }()
+					if !endsFirst {
+						end()
+					}
+					if err := <-done; err != nil {
+						t.Fatal(err)
+					}
+					close(mocks)
+					var got []string
+					for _, m := range drainMocks(mocks) {
+						got = append(got, m.Spec.Metadata[models.MetadataLifetimeKey], markOf(t, m))
+					}
+					if !equal(got, tc.want) {
+						t.Fatalf("the exchanges are stated and marked %q, want %q", got, tc.want)
+					}
+				})
+			}
+		}
+	}
+}
+
+// A connection whose first request an open test's window holds, and whose
+// test has not been answered when the recording's stop begins, is handed on
+// as the session preamble, marked as stated for want of a decision, with
+// that test's window start; one whose test was answered first is the test's,
+// unmarked.
+func TestV2APreambleUndecidedAtTheStopNamesItsTest(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	t0 := time.Unix(5000, 0)
+	stop := t0.Add(10 * time.Second)
+	for _, tc := range []struct {
+		name     string
+		scope    bool
+		answered bool
+		want     []string
+	}{
+		{"its window still open", false, false, []string{models.MetadataLifetimeSession, models.LifetimeUndecidedStoppedFirst + "@" + t0.UTC().Format(time.RFC3339Nano)}},
+		{"its test scope still open", true, false, []string{models.MetadataLifetimeSession, models.LifetimeUndecidedStoppedFirst + "@" + t0.UTC().Format(time.RFC3339Nano)}},
+		{"its test answered first", false, true, []string{models.MetadataLifetimePerTest, ""}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr := syncMock.New(zap.NewNop())
+			mgr.SetWatermark(neverBehind{})
+			if tc.scope {
+				sc := mgr.BeginTestScope(t0)
+				defer sc.Abandon()
+			} else {
+				w := mgr.OpenWindow(t0, nil)
+				if tc.answered {
+					w.Yield(t0.Add(3 * time.Second))
+					w.Tested(t0, t0.Add(3*time.Second))
+					w.Close()
+				}
+				defer w.Close()
+			}
+			clientCh := make(chan fakeconn.Chunk, 2)
+			destCh := make(chan fakeconn.Chunk, 2)
+			clientCh <- fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: []byte("publish"), ReadAt: t0.Add(time.Second)}
+			destCh <- fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: []byte("ok"), ReadAt: t0.Add(time.Second + time.Millisecond)}
+			sess, _ := newV2Session(t, clientCh, destCh)
+			sess.Ctx = syncMock.NewContext(context.Background(), mgr)
+			mocks := make(chan *models.Mock)
+			sess.Mocks = mocks
+			held := make(chan struct{}, 4)
+			sess.OnPendingCleared = func() { held <- struct{}{} }
+			done := make(chan error, 1)
+			go func() { done <- dispatch(t, sess) }()
+			select {
+			case <-held:
+			case <-time.After(30 * time.Second):
+				t.Fatal("the exchange was not held")
+			}
+			mgr.BacklogBefore(stop) // the stop begins
+			select {
+			case m := <-mocks:
+				if got := []string{m.Spec.Metadata[models.MetadataLifetimeKey], markOf(t, m)}; !equal(got, tc.want) {
+					t.Fatalf("handed on at the stop stated and marked %q, want %q", got, tc.want)
+				}
+			case <-time.After(30 * time.Second):
+				t.Fatal("the held exchange was not handed on as the stop began")
+			}
+			close(clientCh)
+			close(destCh)
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+// A connection with more exchanges than the recorder holds is the preamble
+// whatever its times, marked as stated for want of a decision; exchanges a
+// recorder that leaves holding hands on as left out are not marked when
+// nothing showed the connection outliving its test.
+func TestAPreambleHoldMarksOnlyAnUndecidedPreamble(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	t0 := time.Unix(5000, 0)
+	sec := func(f float64) time.Time { return t0.Add(time.Duration(f * float64(time.Second))) }
+	first := func() *models.Mock {
+		return &models.Mock{Name: "first", Spec: models.MockSpec{ReqTimestampMock: sec(1), Metadata: map[string]string{}}}
+	}
+	t.Run("more exchanges than the recorder holds", func(t *testing.T) {
+		mgr := syncMock.New(zap.NewNop())
+		w := mgr.OpenWindow(t0, nil)
+		defer w.Close()
+		h := holdPreamble(syncMock.NewContext(context.Background(), mgr), first(), sec(1), sec(1))
+		for i := 0; i < maxHeldExchanges; i++ {
+			h.add(&models.Mock{})
+		}
+		got := h.release(false)[0]
+		want := models.LifetimeUndecidedManyExchanges + "@" + t0.UTC().Format(time.RFC3339Nano)
+		if m := markOf(t, got); m != want {
+			t.Fatalf("marked %q, want %q", m, want)
+		}
+	})
+	t.Run("its window, open as it held, ends no test case", func(t *testing.T) {
+		mgr := syncMock.New(zap.NewNop())
+		w := mgr.OpenWindow(t0, nil)
+		h := holdPreamble(syncMock.NewContext(context.Background(), mgr), first(), sec(1), sec(2))
+		if h == nil {
+			t.Fatal("a connection opened inside an open window is not held")
+		}
+		w.Close()
+		<-h.changes()
+		h.refresh()
+		if !h.outlived() {
+			t.Fatal("a connection whose window ended no test case is not the preamble")
+		}
+		got := h.release(false)[0]
+		if l := got.Spec.Metadata[models.MetadataLifetimeKey]; l != models.MetadataLifetimeSession {
+			t.Fatalf("stated %q, want session", l)
+		}
+		if m := markOf(t, got); m != "" {
+			t.Fatalf("a preamble no test's window holds any more is marked %q", m)
+		}
+	})
+	t.Run("released wholly inside its answered test", func(t *testing.T) {
+		mgr := syncMock.New(zap.NewNop())
+		w := mgr.OpenWindow(t0, nil)
+		w.Yield(sec(3))
+		w.Tested(t0, sec(3))
+		w.Close()
+		h := holdPreamble(syncMock.NewContext(context.Background(), mgr), first(), sec(1), sec(2))
+		if m := markOf(t, h.release(false)[0]); m != "" {
+			t.Fatalf("a connection nothing showed outliving its answered test is marked %q", m)
+		}
+	})
+}
+
+// The mark reads back as written, to the nanosecond, and a value that is not
+// one reads as none.
+func TestTheLifetimeUndecidedMarkReadsBack(t *testing.T) {
+	at := time.Date(2026, 10, 30, 0, 6, 11, 123456789, time.FixedZone("IST", 19800))
+	m := &models.Mock{Spec: models.MockSpec{Metadata: map[string]string{
+		models.MetadataLifetimeUndecidedKey: models.MockLifetimeUndecided{Why: models.LifetimeUndecidedStoppedFirst, TestStart: at}.String(),
+	}}}
+	if u, ok := m.LifetimeUndecided(); !ok || u.Why != models.LifetimeUndecidedStoppedFirst || !u.TestStart.Equal(at) {
+		t.Fatalf("read back %+v (ok %v), want %s at %v", u, ok, models.LifetimeUndecidedStoppedFirst, at)
+	}
+	for _, v := range []string{"", "stoppedFirst", " 2026-10-30T00:06:11Z", "stoppedFirst yesterday"} {
+		m.Spec.Metadata[models.MetadataLifetimeUndecidedKey] = v
+		if u, ok := m.LifetimeUndecided(); ok {
+			t.Fatalf("%q read as a mark: %+v", v, u)
+		}
+	}
+	if _, ok := (&models.Mock{}).LifetimeUndecided(); ok {
+		t.Fatal("a mock with no metadata read as marked")
 	}
 }

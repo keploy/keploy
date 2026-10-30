@@ -5,6 +5,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // Lifetime classifies how long a mock's usefulness extends and how the
@@ -597,6 +598,70 @@ const (
 	// on (Spec.Metadata["connID"]), as a prepared statement is.
 	MetadataLifetimeConnection = "connection"
 )
+
+// MetadataLifetimeUndecidedKey is the Spec.Metadata key in which, under the
+// proven switch, the Generic recorder marks a connection's first exchange it
+// put in the session pool (MetadataLifetimeSession) only because it could not
+// tell that the connection lay wholly inside the test whose window held the
+// exchange's request: the exchange may be that test's own call, which the
+// test then does not own. Only the recorder knows why it stated session, so it
+// says so here, and keploy record's judging reads it: a test that owns no call
+// and whose window held such an exchange is not judged on its outcome. A
+// session exchange whose request no test's window held carries no mark. The
+// value is MockLifetimeUndecided's String: why, and when that test began.
+const MetadataLifetimeUndecidedKey = "lifetimeUndecided"
+
+// The reasons a MetadataLifetimeUndecidedKey mark gives.
+const (
+	// LifetimeUndecidedReadAfterAnswer: a chunk of the connection was read
+	// after the test's answer. A later test used the connection, or the
+	// client wrote on after the answer, or the relay read its last write
+	// late: the recorder cannot tell which.
+	LifetimeUndecidedReadAfterAnswer = "readAfterAnswer"
+	// LifetimeUndecidedStoppedFirst: the recording stopped, or the recorder
+	// ended, before the test's answer was known.
+	LifetimeUndecidedStoppedFirst = "stoppedFirst"
+	// LifetimeUndecidedManyExchanges: the connection had more exchanges than
+	// the recorder holds while it waits to decide.
+	LifetimeUndecidedManyExchanges = "manyExchanges"
+)
+
+// MockLifetimeUndecided is what a MetadataLifetimeUndecidedKey mark says.
+type MockLifetimeUndecided struct {
+	// Why is one of the LifetimeUndecided* reasons.
+	Why string
+	// TestStart is when the test whose window held the exchange's request
+	// began: its test case's request time, or its window's or test scope's
+	// start while it was still open.
+	TestStart time.Time
+}
+
+// String is the mark's value: the reason, a space, and TestStart in UTC as
+// RFC 3339 with nanoseconds.
+func (u MockLifetimeUndecided) String() string {
+	return u.Why + " " + u.TestStart.UTC().Format(time.RFC3339Nano)
+}
+
+// LifetimeUndecided reads m's MetadataLifetimeUndecidedKey mark; ok is false
+// when m has none, or one that does not read as String writes it.
+func (m *Mock) LifetimeUndecided() (MockLifetimeUndecided, bool) {
+	if m == nil {
+		return MockLifetimeUndecided{}, false
+	}
+	v, ok := m.Spec.Metadata[MetadataLifetimeUndecidedKey]
+	if !ok {
+		return MockLifetimeUndecided{}, false
+	}
+	why, at, ok := strings.Cut(v, " ")
+	if !ok || why == "" {
+		return MockLifetimeUndecided{}, false
+	}
+	start, err := time.Parse(time.RFC3339Nano, at)
+	if err != nil {
+		return MockLifetimeUndecided{}, false
+	}
+	return MockLifetimeUndecided{Why: why, TestStart: start}, true
+}
 
 // MetadataBodyDigestsKey is the Spec.Metadata key under which the HTTP
 // recorder notes which of a response's digest headers (an ETag, Content-MD5,
