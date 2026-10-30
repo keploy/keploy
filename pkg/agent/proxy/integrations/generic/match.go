@@ -29,11 +29,11 @@ import (
 //
 // Under exact serving (the proven switch) a recording answers only the
 // exchange it recorded: one whose every request buffer is the recorded one,
-// byte for byte, less the recording's learned noise. The closest recording
-// is never served for an exchange that changed, at either similarity: that
-// is a miss, which the replay reports as keploy/unmocked_call. Exact serving
-// is read at each attempt, as it begins and ends with tests. Without it the
-// match is as before.
+// byte for byte, a buffer the obfuscator redacted included (findExactMatch).
+// The closest recording is never served for an exchange that changed, at
+// either similarity: that is a miss, which the replay reports as
+// keploy/unmocked_call. Exact serving is read at each attempt, as it begins
+// and ends with tests. Without it the match is as before.
 func fuzzyMatch(ctx context.Context, logger *zap.Logger, reqBuff [][]byte, mockDb integrations.MockMemDb) (bool, []models.Payload, error) {
 	serving := integrations.ServingIn(ctx, mockDb)
 	for {
@@ -69,7 +69,7 @@ func fuzzyMatch(ctx context.Context, logger *zap.Logger, reqBuff [][]byte, mockD
 			}
 
 			exact := integrations.ExactServing(mockDb)
-			index := findExactMatch(filteredMocks, reqBuff)
+			index := findExactMatch(filteredMocks, reqBuff, exact)
 
 			if index == -1 && !exact {
 				index = findBinaryMatch(filteredMocks, reqBuff, 0.9)
@@ -94,7 +94,7 @@ func fuzzyMatch(ctx context.Context, logger *zap.Logger, reqBuff [][]byte, mockD
 				return true, responseMock, nil
 			}
 
-			index = findExactMatch(unfilteredMocks, reqBuff)
+			index = findExactMatch(unfilteredMocks, reqBuff, exact)
 
 			if index == -1 && !exact {
 				index = findBinaryMatch(unfilteredMocks, reqBuff, 0.4)
@@ -129,7 +129,7 @@ func extraCall(reqBuffs [][]byte, mockDb integrations.MockMemDb) int {
 	if len(answered) == 0 {
 		return 0
 	}
-	idx := findExactMatch(answered, reqBuffs)
+	idx := findExactMatch(answered, reqBuffs, true)
 	if idx == -1 {
 		return 0
 	}
@@ -327,11 +327,26 @@ func fuzzyCheck(encoded, reqBuf []byte) float64 {
 // into one piece (a 40 KiB request recorded whole is read here as 32 KiB and
 // 8 KiB). So a mock whose pieces are not reqBuffs' is compared with
 // reqBuffs' bytes cut where its own pieces end (cutLikeRecorded).
-func findExactMatch(tcsMocks []*models.Mock, reqBuffs [][]byte) int {
+//
+// Without exact serving a recorded piece that matches the mock's Noise is
+// skipped, so any live piece matches it. For Generic, Noise lists the
+// obfuscator's redactions (keploy writes none): a piece recorded wholly as a
+// redaction is one whose secret was taken out. Under exact serving (exact,
+// the proven switch) that is no excuse: the piece is compared as recorded,
+// as every other one is, so a request that does not send those bytes misses
+// (keploy/unmocked_call). Otherwise a one-piece recording of a redacted
+// token would answer any one-piece request to its destination, and an
+// exchange whose token piece changed would be served the recorded answer.
+// keploy has no way to redact a live piece as the recording was, so under
+// exact serving such a recording fails closed: the same token misses too.
+func findExactMatch(tcsMocks []*models.Mock, reqBuffs [][]byte, exact bool) int {
 	req := newSentRequest(reqBuffs)
 	for idx, mock := range tcsMocks {
 		recorded := mock.Spec.GenericRequests
-		nc := util.NewNoiseChecker(mock.Noise)
+		var nc *util.NoiseChecker
+		if !exact {
+			nc = util.NewNoiseChecker(mock.Noise)
+		}
 		if len(recorded) == len(reqBuffs) && sameAsRecorded(recorded, reqBuffs, nc) {
 			return idx
 		}
@@ -343,7 +358,8 @@ func findExactMatch(tcsMocks []*models.Mock, reqBuffs [][]byte) int {
 }
 
 // sameAsRecorded reports whether each piece is the recorded piece at its
-// index. A noisy (obfuscated) recorded piece is not compared.
+// index. With nc set (no exact serving), a noisy (obfuscated) recorded piece
+// is not compared.
 func sameAsRecorded(recorded []models.Payload, pieces [][]byte, nc *util.NoiseChecker) bool {
 	for i, piece := range pieces {
 		mockData := recorded[i].Message[0].Data

@@ -192,6 +192,20 @@ func TestAMissOnAnExchangeTheTestDoesNotOwnIsNamed(t *testing.T) {
 			t.Errorf("%q: %q, want %q", req, got, want)
 		}
 	}
+	// An exchange whose token buffer the obfuscator redacted is named only
+	// for its recorded bytes, as the pool matches it: not even the token the
+	// recording redacted is named (fail-closed), so neither is another.
+	tok := staged("mock-token", "", models.MetadataLifetimePerTest)
+	tok.Spec.GenericRequests[0].Message[0].Data = redactedToken
+	tok.Noise = []string{"^" + redactedToken + "$"}
+	withTok := store
+	withTok.staged = []*models.Mock{tok}
+	if got, _ := notOwnedExchange([][]byte{[]byte(recordedToken)}, withTok, withTok.MarkCallRound()); got != "" {
+		t.Errorf("the token the recording redacted, not its recorded bytes, is named %q", got)
+	}
+	if got, _ := notOwnedExchange([][]byte{[]byte(redactedToken)}, withTok, withTok.MarkCallRound()); got != "mock-token" {
+		t.Errorf("the redacted exchange's own bytes: %q, want mock-token", got)
+	}
 	store.exact = false
 	if got, _ := notOwnedExchange([][]byte{[]byte("AUTH step2")}, store, store.MarkCallRound()); got != "" {
 		t.Fatalf("without exact serving: %q", got)
