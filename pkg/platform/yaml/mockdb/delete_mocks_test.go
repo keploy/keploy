@@ -124,7 +124,7 @@ func writeMocksUntil(t *testing.T, dir, format string, size int64) (string, int)
 	return path, n
 }
 
-// DeleteMocks streams the mock file as UpdateMocks does (the founder's rule:
+// DeleteMocks streams the mock file as UpdateMocks does (keploy's rule:
 // memory must not grow with a recording's size): taking every tenth mock out
 // of a file of any size holds, at every point it checks its context, under
 // pruneHeapBudget above its caller's heap, in each format. With gibRowsEnv

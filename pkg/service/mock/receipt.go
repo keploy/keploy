@@ -294,7 +294,7 @@ type TestsReceipt struct {
 	// the application made outside every test's window that no recording
 	// answered (models.UnmatchedCall.Background): its background work, a
 	// timer's or a start-up job's call. They are charged to no test and fail
-	// none (founder D1); each says what was called, when (At), and why
+	// none; each says what was called, when (At), and why
 	// nothing answered it (MatchPhase, ClosestMock, Differs, NextSteps).
 	Background []models.UnmatchedCall `yaml:"background,omitempty" json:"background,omitempty"`
 }

@@ -382,7 +382,7 @@ func TestAnotherTestsMockNeverAnswers(t *testing.T) {
 // Between tests the key's pool slice answers, as often as asked; no test's
 // mock answers there, and inside a test no data-plane pool mock answers. The
 // miss between tests is the application's background work: charged to no
-// test, the next one included (founder D1).
+// test, the next one included.
 func TestThePoolAnswersOnlyBetweenTests(t *testing.T) {
 	a, p := exactAgent(t,
 		[]*models.Mock{pingMock("mock-1", "/health", "ok", t0), pingMock("mock-2", "/a", "a", t0.Add(time.Second))},
@@ -583,7 +583,7 @@ func TestAMappedProtocolPhaseMockStaysInThePool(t *testing.T) {
 // count only when it is exactly that call and no call took it yet: the set
 // recorded the call once more, so the calls of that shape across the set
 // never exceed what it recorded. Past the copies left, the call is an extra
-// call (keploy #4745's F20), and a recording of another call answers none.
+// call (never a recording served again), and a recording of another call answers none.
 //
 // The shape is api-server's per-process first-use refresh of a vault PAT,
 // which a set-aside test recorded at record (read the key, read its id, read
@@ -1007,7 +1007,7 @@ func (p *inFlightProxy) ServeExactPool(key string, names []string) error {
 // test, and is said to be made as the test ended, not before it began; a
 // call made between tests is the application's background work: it fails
 // no test, the next one included, and the run's misses carry it as
-// background (founder D1).
+// background.
 func TestACallLandingAsTheTestEndsIsSaidToBeMadeThen(t *testing.T) {
 	a, rp := exactAgent(t,
 		[]*models.Mock{pingMock("mock-1", "/a", "a", t0), pingMock("mock-2", "/b", "b", t0.Add(time.Second)), pingMock("mock-3", "/c", "c", t0.Add(2*time.Second))},
@@ -1056,7 +1056,7 @@ func backgroundCharged(a *Agent) []models.UnmatchedCall {
 // application's timers and the call a quarantined test recorded are made
 // before the kept test begins. Nothing answers them (the quarantined test's
 // recording is served to no one), and the kept test still passes: a call
-// made outside every test's window is charged to no test (founder D1). The
+// made outside every test's window is charged to no test. The
 // run's misses carry both, as background, for the set's report; a call the
 // kept test makes that nothing answers still fails it.
 func TestCallsBeforeAKeptTestAfterAQuarantinedOneFailNoTest(t *testing.T) {
@@ -1104,7 +1104,7 @@ func TestCallsBeforeAKeptTestAfterAQuarantinedOneFailNoTest(t *testing.T) {
 // read), so at replay, with it set aside, the kept test makes that call in
 // its own window. The set-aside test's recording answers it, unchecked: the
 // kept test passes, its evidence names the serve, and nothing requires the
-// call of it (founder D1, S12 v2: a data-plane call is answered by the
+// call of it (served, never required: a data-plane call is answered by the
 // recording it is, wherever the replay's timing puts it). The recording
 // answers once: a later test that makes the call again misses. A call that is
 // not exactly the recording still misses, and fails the test it is made in.
