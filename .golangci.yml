@@ -20,6 +20,14 @@ linters:
     generated: strict
     rules: []
 
+# Every issue is listed, so one red round shows them all: by default
+# golangci-lint prints only the first 3 issues of the same text and the first
+# 50 of each linter, and a hidden one only shows up after the shown ones are
+# fixed (keploy #5002's served_view.go:98:28).
+issues:
+  max-same-issues: 0
+  max-issues-per-linter: 0
+
 formatters:
   enable:
     - gofmt

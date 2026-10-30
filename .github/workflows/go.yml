@@ -27,6 +27,22 @@ jobs:
       - name: Build arm
         run: GOOS=linux GOARCH=arm64 go build -v ./...
 
+      # `go build` compiles no _test.go file, and the macOS and Windows jobs
+      # run only a few packages' tests, so a test file that builds only on
+      # Linux passed every job: one used a helper defined in a _linux_test.go
+      # file (#4994), one used syscall.Kill and SysProcAttr.Setpgid (#4958),
+      # and `go test` of those two packages could not build on macOS or
+      # Windows. `go vet` typechecks every package's test files for the target
+      # it is given, so this step fails such a change. Both targets run before
+      # it fails, so one red round lists the errors of both. Cross-compiling
+      # turns cgo off, which drops no file: none in this module imports "C".
+      - name: Vet darwin/arm64 and windows/amd64 (typechecks test files)
+        run: |
+          rc=0
+          GOOS=darwin GOARCH=arm64 go vet ./... || rc=1
+          GOOS=windows GOARCH=amd64 go vet ./... || rc=1
+          exit $rc
+
       # SECURITY: codfish/semantic-release-action was compromised on
       # 2026-06-24 15:39 UTC — the attacker force-pushed malicious commit
       # 5792aba (full: 6b9501e1889cc45c91726729610cf69c2442b8c5) and repointed
