@@ -57,7 +57,7 @@ type Seen struct {
 	// Clock: the learn step learned the leaf, a request's, as a plain read
 	// of the application's clock (a zero offset, models.ClockOffset.Plain,
 	// as MockSpec.Clocks holds it: Named). A later test's call that carries
-	// its value where no window of that call holds a read of the clock is
+	// its value but does not hold it as its own read of the clock is
 	// refused, never followed (classifyRead, clockSourceWhy).
 	Clock bool
 	// Undeclared: the leaf is a test case's request body, or a leaf of it,
@@ -723,6 +723,9 @@ type Place struct {
 	// Clock: the learn step learned the leaf as a plain read of the
 	// application's clock (Seen.Clock).
 	Clock bool
+	// InStartUp: the mock was served in the test set's start-up, before its
+	// first test began (Earlier.StartUp). Only the wording reads it.
+	InStartUp bool
 	// Field, of a place found in a raw mock's payload, is the field of its
 	// spec that holds what was found, as the mock file names it
 	// (rawField.describe; "" when it stands across two); Held is what was
@@ -1833,29 +1836,30 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// clock crosses a second between the two calls would fail the
 		// later one, and the earlier call's place would carry a variable
 		// and a clock read at once, which the HTTP replay refuses for every
-		// test, the earlier one's included. A copy neither run's own
-		// call's window holds (sent a minute later) stays the
-		// variable, and so does one the re-read learns as anything but that
-		// read: an id minted that second with a random word in it is refused
-		// read without its source (the word drifted alike in both calls,
-		// which only dataflow explains), and one the call's answer echoes is
-		// an echo. Only the whole value read as the clock is the clock's.
+		// test, the earlier one's included. Of an earlier place no clock
+		// read was learned at, a copy neither run's own call's window holds
+		// (sent a minute later) stays the variable, and so does one the
+		// re-read learns as anything but that read: an id minted that second
+		// with a random word in it is refused read without its source (the
+		// word drifted alike in both calls, which only dataflow explains).
+		// Only the whole value read as the clock is the clock's.
 		//
-		// A copy no window of its call holds whose earlier place is itself a
-		// plain read of the clock (Place.Clock: the earlier call's learn step
-		// learned it so) is refused (clockSourceWhy), never followed: keploy
-		// cannot tell a copy of that read from a read of the clock made in
-		// the same second where keploy does not see it (a token the test's
-		// client holds, minted at that second), and followed, a replay whose
-		// two reads cross a second fails the later test, and the earlier
-		// place carries a variable and a clock read at once.
+		// Whose earlier place is itself a plain read of the clock (Place.Clock:
+		// the earlier call's learn step learned it so), a copy the re-read
+		// does not learn as this call's read is refused (clockSourceWhy),
+		// never followed, wherever its call stands: keploy cannot tell a copy
+		// of that read from a read of the clock made in the same second where
+		// keploy does not see it (a token the test's client holds, minted at
+		// that second; a value this call made the same second, which its
+		// answer echoes), and followed, the earlier place would carry a
+		// variable and a clock read at once, which the HTTP replay refuses
+		// for every test, the earlier one's included, and a replay whose two
+		// reads cross a second would fail the later test.
 		if ln.Kind == KindVariable && ln.From.Run {
-			held := false
 			for i, ow := range append([]*Window{w}, w.oneRunSinceBegin()...) {
 				if !dc.windowHolds(dc.ofIn(r.Value, l.Value, ow, at), ow) {
 					continue
 				}
-				held = true
 				if own := leaf(r, l, ow, skipBoth); own.Kind == KindClockRead {
 					if i > 0 {
 						own, _ = sinceTestBegin(own)
@@ -1864,7 +1868,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 					break
 				}
 			}
-			if !held && ln.From.Clock {
+			if ln.Kind == KindVariable && ln.From.Clock {
 				ln.Kind, ln.From, ln.Why = KindUnaccounted, Place{}, clockSourceWhy(ln.From)
 			}
 		}
@@ -1897,13 +1901,18 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 	return out
 }
 
-// clockSourceWhy is why a value an earlier test's call sent at from (the
-// run's place, Place.Run), which that call's learn step learned as a plain
-// read of the application's clock (Place.Clock), is refused in a later call
-// no window of which holds it as a read of the clock. It names the earlier
-// call and the place, never the value.
+// clockSourceWhy is why a value an earlier call of the run sent at from (the
+// run's place, Place.Run: the test set's start-up's call, or an earlier
+// test's), which that call's learn step learned as a plain read of the
+// application's clock (Place.Clock), is refused in a later call that does not
+// hold it as its own read of the clock. It names the earlier call and the
+// place, never the value.
 func clockSourceWhy(from Place) string {
-	return "its recorded value was sent in " + placeAt(from) + ", an earlier test's call, where keploy learned it as a read of the application's clock, and no window of this call holds it as a read of the clock. keploy cannot tell a copy of that read from a read of the clock made in the same second where keploy does not see it (a token the test's client holds, minted at that second), so it follows neither. If the field is a time the application reads from its own clock, declare it noise in keploy.yml, and keploy stops comparing it"
+	whose := "an earlier test's call"
+	if from.InStartUp {
+		whose = "the test set's start-up's call"
+	}
+	return "its recorded value was sent in " + placeAt(from) + ", " + whose + ", where keploy learned it as a read of the application's clock, and this call does not hold it as its own read of the clock. keploy cannot tell a copy of that read from a read of the clock made in the same second where keploy does not see it (a token the test's client holds, minted at that second, or a value this call made that second, which its answer echoes), so it follows neither. If the field is a time the application reads from its own clock, declare it noise in keploy.yml, and keploy stops comparing it"
 }
 
 // sinceTestBegin is ln, a value its own call's window holds as a read of the
@@ -3499,7 +3508,7 @@ func placeRank(e Earlier, s Seen, whole bool) int {
 func seenPlace(e Earlier, s Seen, whole bool) Place {
 	return Place{Mock: e.Mock, Side: s.Side, Path: s.Leaf.Path, Noise: s.Leaf.Noise,
 		Var: s.Place, Live: s.Live, Whole: whole, Own: e.Own, Run: e.Run, Given: e.Given, Name: s.Name, Clock: s.Clock,
-		givenWhole: s.Side == Response && whole}
+		InStartUp: e.StartUp, givenWhole: s.Side == Response && whole}
 }
 
 // echoedIn are v's changed instants the echo takes for a copy of what the

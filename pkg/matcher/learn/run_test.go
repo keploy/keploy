@@ -1091,10 +1091,12 @@ func TestARunsPlaceKeepsTheWordRulesClockExclusions(t *testing.T) {
 // from another read of the clock in the same second that keploy does not see
 // (a session token's auth time, minted by the test's client's login). The
 // reason names the earlier call and its place, never the value. The same
-// value a window of the later call holds is that call's read still; one an
-// earlier test sent at a place no clock read was learned at stays the run's
-// variable; and a copy of the test's own call's clock read is no earlier
-// test's.
+// value a window of the later call holds is that call's read still, and one
+// its answer echoes the same second is refused as well: followed, test A's
+// place would carry the run's variable and a clock read at once, which the
+// HTTP replay refuses for test A too. One an earlier test sent at a place no
+// clock read was learned at stays the run's variable, and a copy of the
+// test's own call's clock read is no earlier test's.
 func TestAnEarlierTestsClockReadIsNoRunsVariableWhereNoWindowOfTheUseHoldsIt(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	rec := time.Date(2026, 10, 30, 12, 26, 2, 0, time.UTC)
@@ -1107,7 +1109,7 @@ func TestAnEarlierTestsClockReadIsNoRunsVariableWhereNoWindowOfTheUseHoldsIt(t *
 	}{
 		"a clock read, nine seconds later":              {clock: true, after: 9 * time.Second, want: KindUnaccounted},
 		"a clock read, the same second":                 {clock: true, after: 250 * time.Millisecond, want: KindClockRead},
-		"a clock read, the same second, echoed":         {clock: true, echoed: true, after: 250 * time.Millisecond, want: KindVariable},
+		"a clock read, the same second, echoed":         {clock: true, echoed: true, after: 250 * time.Millisecond, want: KindUnaccounted},
 		"no clock read, nine seconds later":             {after: 9 * time.Second, want: KindVariable},
 		"the test's own clock read, nine seconds later": {clock: true, own: true, after: 9 * time.Second, want: KindVariable},
 	} {
@@ -1136,6 +1138,37 @@ func TestAnEarlierTestsClockReadIsNoRunsVariableWhereNoWindowOfTheUseHoldsIt(t *
 			t.Fatalf("%s: the refusal names %q from %+v; want the earlier call and its place, never the value, and no place to bind at", name, ln.Why, ln.From)
 		case row.want == KindVariable && ln.From.Mock != "mock-a":
 			t.Fatalf("%s: test B's copy follows %+v; want mock-a's value", name, ln.From)
+		}
+	}
+}
+
+// A value the test set's start-up sent at a place its learn step learned as
+// a plain read of the clock (a registration's registeredAt), which a test's
+// call sends again, is refused as an earlier test's clock read is, whether
+// the test's call is in the start-up's second (a value its answer echoes)
+// or a minute later. The reason names the start-up's call as the start-up's,
+// never as an earlier test's, and never the value. A stated limit: such a
+// per-process clock value sets the tests that send it aside.
+func TestAStartUpsClockReadATestSendsAgainIsRefusedNamingTheStartUp(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	rec := time.Date(2026, 10, 30, 12, 26, 2, 0, time.UTC)
+	epoch := func(at time.Time) string { return strconv.FormatInt(at.Unix(), 10) }
+	boot := rec.Add(50 * time.Millisecond)
+	for name, after := range map[string]time.Duration{"the start-up's second, echoed": 250 * time.Millisecond, "a minute later": time.Minute} {
+		tr := NewTracker()
+		tr.Served(0, Earlier{Mock: "mock-s", At: boot, Seen: []Seen{{Side: Request, Leaf: Leaf{Path: "body.registeredAt", Type: String, Value: epoch(boot)}, Live: epoch(boot.Add(FullRoundLead)), Place: "body.registeredAt", Clock: true}}})
+		tr.Begin()
+		_, earlier, _, _ := tr.Test()
+		call := boot.Add(after)
+		fCall := call.Add(FullRoundLead)
+		w := &Window{Rec: Span{From: call.Add(-5 * time.Millisecond), To: call}, F: Span{From: fCall.Add(-5 * time.Millisecond), To: fCall.Add(time.Millisecond)}}
+		resp := []Leaf{{Path: "body.registeredAt", Type: String, Value: epoch(boot)}}
+		ln := ClassifyIn(clockedDrifts(), []string{"body.registeredAt"}, strLeaf("body.registeredAt", epoch(boot.Add(FullRoundLead))), strLeaf("body.registeredAt", epoch(boot)), call, earlier, nil, resp, w)[0]
+		if ln.Kind != KindUnaccounted || ln.From != (Place{}) {
+			t.Fatalf("%s: test 1's value is %s from %+v (%s); want refused, with no place to bind at", name, ln.Kind, ln.From, ln.Why)
+		}
+		if !strings.Contains(ln.Why, "mock-s at body.registeredAt, the test set's start-up's call,") || strings.Contains(ln.Why, "an earlier test's call") || strings.Contains(ln.Why, epoch(boot)) || strings.Contains(ln.Why, epoch(boot.Add(FullRoundLead))) {
+			t.Fatalf("%s: the refusal names %q; want the start-up's call and its place, never an earlier test's, never the value", name, ln.Why)
 		}
 	}
 }
