@@ -12,9 +12,8 @@ import (
 )
 
 // The dataflow guard for a call made outside every test's window that no
-// mock answered: before the set's first test, or between two tests (DESIGN
-// §3 SF3, read for an unanswered call; founder D4: an answer that reaches a
-// test is that test's, the sequential mark). The application got no answer
+// mock answered: before the set's first test, or between two tests. An
+// answer that reaches a test is that test's: the application got no answer
 // this run, so what could reach the next test is the answer the recording
 // gave it: the call's closest recording (UnmatchedCall.ClosestMock). It
 // reaches the test when the word rule keploy learn reads a value's source by
@@ -31,11 +30,17 @@ import (
 // Limits, as stated: a test that read the answer only through the
 // application's state (a cache it filled at start-up) and returned and sent
 // what it recorded shows no change, and the call stays background work; a
-// recording whose payload cannot be read back reaches nothing.
+// stream test's response is not read, only the requests of its own misses;
+// the response is compared raw, so a change in a field the user marked noise
+// counts as changed; a changed word that a start-up answer also holds charges
+// the test. When keploy cannot tell (no closest recording, one not in the
+// set's store, or one whose payload cannot be read back) the call stays
+// background work and its reason says keploy could not tell
+// (backgroundWhy).
 
 // flowGuard reads, for a set, whether a call made outside every test's
 // window reached the test read next (reaches). The zero of it, and nil,
-// reads none as reaching.
+// reads none as reaching, and says it could not tell.
 type flowGuard struct {
 	// mocks are the set's stored recordings, by name.
 	mocks map[string]*models.Mock
@@ -43,14 +48,17 @@ type flowGuard struct {
 	owned map[string][]string
 	// cases are the set's test cases, by name.
 	cases map[string]*models.TestCase
-	// dc reads words as keploy learn does, once per text.
-	dc *learn.DriftCache
+	// dc reads words as keploy learn does, once per text, for one test:
+	// dcTest's. It is dropped as the guard reads the next test (cache), so
+	// it holds what one test's reads hold, never a whole set's.
+	dc     *learn.DriftCache
+	dcTest string
 }
 
 // newFlowGuard is the guard for a set of test cases cases, whose tests own
 // the recordings owned lists, and whose stored recordings are stored.
 func newFlowGuard(cases []*models.TestCase, owned map[string][]models.MockEntry, stored ...[]*models.Mock) *flowGuard {
-	g := &flowGuard{mocks: map[string]*models.Mock{}, owned: map[string][]string{}, cases: map[string]*models.TestCase{}, dc: learn.NewDriftCache()}
+	g := &flowGuard{mocks: map[string]*models.Mock{}, owned: map[string][]string{}, cases: map[string]*models.TestCase{}}
 	for _, list := range stored {
 		for _, m := range list {
 			if m != nil && m.Name != "" {
@@ -102,22 +110,45 @@ func (g *flowGuard) drifts(test string, live any, own []models.UnmatchedCall) []
 	return out
 }
 
+// cache is the word cache of test's reads: the one the guard holds when it
+// is test's, a new one otherwise, dropping the previous test's.
+func (g *flowGuard) cache(test string) *learn.DriftCache {
+	if g.dc == nil || g.dcTest != test {
+		g.dc, g.dcTest = learn.NewDriftCache(), test
+	}
+	return g.dc
+}
+
 // reaches says why c, a call made outside every test's window (where says
 // where) that no mock answered, is test's miss: a word of what changed in
 // test this run (drifts) that the word rule says may have come from c's
-// closest recording, and where it stands. Empty when none did, or when
-// keploy cannot tell (no test, no closest recording, or one it cannot read).
-func (g *flowGuard) reaches(ctx context.Context, c models.UnmatchedCall, test, where string, drifts []drift) string {
-	if g == nil || test == "" || c.ClosestMock == "" || len(drifts) == 0 {
-		return ""
+// closest recording, and where it stands. Both are empty when none did.
+// unknown, when why is empty, says why keploy cannot tell: no guard ran, no
+// recording is closest to c, or its closest recording is not in the set's
+// store or cannot be read back.
+func (g *flowGuard) reaches(ctx context.Context, c models.UnmatchedCall, test, where string, drifts []drift) (why, unknown string) {
+	switch {
+	case g == nil:
+		return "", "the dataflow guard did not run for this set"
+	case c.ClosestMock == "":
+		return "", "no recording is closest to it"
+	case test == "":
+		return "", "it reached keploy only at the set's end, after every test was read"
 	}
 	closest, tc := g.mocks[c.ClosestMock], g.cases[test]
-	if closest == nil || tc == nil {
-		return ""
+	switch {
+	case closest == nil:
+		return "", "its closest recording " + c.ClosestMock + " is not in the set's stored recordings"
+	case tc == nil:
+		return "", "the test read after it, " + test + ", is not in the set"
+	case len(drifts) == 0:
+		// The test returned and sent what it recorded: it is judged by its
+		// own answers alone.
+		return "", ""
 	}
 	whole, err := closest.WithPayload(ctx)
 	if err != nil || whole == nil {
-		return ""
+		return "", "its closest recording " + closest.Name + " could not be read back"
 	}
 	// What the test was given otherwise did not come from this call.
 	given := []string{jsonText(testSide(tc, false))}
@@ -128,16 +159,17 @@ func (g *flowGuard) reaches(ctx context.Context, c models.UnmatchedCall, test, w
 			}
 		}
 	}
+	dc := g.cache(test)
 	for _, d := range drifts {
-		w, err := g.dc.WordFrom(d.recorded, d.live, whole, given...)
+		w, err := dc.WordFrom(d.recorded, d.live, whole, given...)
 		if err != nil {
-			return ""
+			return "", "its closest recording " + closest.Name + "'s answer could not be read back"
 		}
 		if w != "" {
-			return fmt.Sprintf("%s; its closest recording %s holds %q, which %s changed this run and nothing else gave the test", where, closest.Name, w, d.place)
+			return fmt.Sprintf("%s; its closest recording %s holds %q, which %s changed this run and nothing else gave the test", where, closest.Name, w, d.place), ""
 		}
 	}
-	return ""
+	return "", ""
 }
 
 // responseTexts are tc's recorded response and live, the one it got this

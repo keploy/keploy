@@ -2,8 +2,11 @@ package replay
 
 import (
 	"context"
+	"fmt"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
@@ -95,7 +98,7 @@ func TestFlowGuard_AStartUpCreateIndexesReachesATestOnlyThroughAChangedWord(t *t
 		if got := len(rest) == 1; got != c.charged {
 			t.Fatalf("live %s: charged %v (kept %+v, listed %+v); want %v", c.live, got, rest, s.backgroundCalls(), c.charged)
 		}
-		if !c.charged && (len(s.backgroundCalls()) != 1 || s.backgroundCalls()[0].BackgroundWhy != madeBeforeFirst) {
+		if !c.charged && (len(s.backgroundCalls()) != 1 || s.backgroundCalls()[0].BackgroundWhy != madeBeforeFirst+", and its recorded answer reaches no test") {
 			t.Fatalf("live %s: listed %+v; want the call as background work", c.live, s.backgroundCalls())
 		}
 	}
@@ -176,5 +179,156 @@ func TestFlowGuard_AMarkedSeriesCallInsideATestsWindowIsTheTestsWhenItsAnswerRea
 		if len(rest) != 0 || len(s.backgroundCalls()) != 1 || s.backgroundCalls()[0].BackgroundWhy != madeInside("test-1")+", and its recorded answer reaches no test" {
 			t.Fatalf("kept %+v, listed %+v; want the series' call as background work made inside test-1's window", rest, s.backgroundCalls())
 		}
+	}
+}
+
+// A word one of the test's own recordings gave it did not come from the
+// call, though the call's closest recording holds it too.
+func TestFlowGuard_AWordTheTestsOwnRecordingGaveReachesNothing(t *testing.T) {
+	own := guardMock(`{"tenant":"tenantA7K29Q"}`)
+	own.Name = "mock-30"
+	var s setCalls
+	s.reset(newFlowGuard([]*models.TestCase{guardCase("test-1", `{"item":"pen"}`, `{"tenant":"tenantA7K29Q"}`)},
+		map[string][]models.MockEntry{"test-1": {{Name: "mock-30"}}}, []*models.Mock{guardMock(`{"tenant":"tenantA7K29Q"}`), own}))
+	if rest := s.take(context.Background(), []models.UnmatchedCall{startUpCall()}, "test-1", live(`{"tenant":""}`)); len(rest) != 0 {
+		t.Fatalf("the test keeps %+v; a word its own recording mock-30 gave it is not the start-up call's", rest)
+	}
+	if got := s.backgroundCalls(); len(got) != 1 || got[0].BackgroundWhy != madeBeforeFirst+", and its recorded answer reaches no test" {
+		t.Fatalf("the set lists %+v; want the start-up call as background work", got)
+	}
+}
+
+// The call's closest recording is no word the test was given, even when the
+// test owns it: a test whose recording the application took before the test
+// began lost that recording's word to the call, so the call is the test's.
+func TestFlowGuard_TheCallsClosestRecordingGivesTheTestNothingThoughItOwnsIt(t *testing.T) {
+	var s setCalls
+	s.reset(newFlowGuard([]*models.TestCase{guardCase("test-1", `{"item":"pen"}`, `{"tenant":"tenantA7K29Q"}`)},
+		map[string][]models.MockEntry{"test-1": {{Name: "mock-12"}}}, []*models.Mock{guardMock(`{"tenant":"tenantA7K29Q"}`)}))
+	rest := s.take(context.Background(), []models.UnmatchedCall{startUpCall()}, "test-1", live(`{"tenant":""}`))
+	if len(rest) != 1 || !strings.Contains(rest[0].ReachesTest, `mock-12 holds "tenantA7K29Q"`) {
+		t.Fatalf("the test keeps %+v; want the start-up call charged: its closest recording mock-12 is the answer the test lost", rest)
+	}
+}
+
+// A gRPC test's response is read as an HTTP test's is.
+func TestFlowGuard_AGrpcTestsResponseIsRead(t *testing.T) {
+	tc := &models.TestCase{Name: "test-1", Kind: models.GRPC_EXPORT,
+		GrpcReq:  models.GrpcReq{Body: models.GrpcLengthPrefixedMessage{DecodedData: `{"item":"pen"}`}},
+		GrpcResp: models.GrpcResp{Body: models.GrpcLengthPrefixedMessage{DecodedData: `{"tenant":"tenantA7K29Q"}`}}}
+	for _, c := range []struct {
+		live    string
+		charged bool
+	}{{`{"tenant":""}`, true}, {`{"tenant":"tenantA7K29Q"}`, false}} {
+		var s setCalls
+		s.reset(newFlowGuard([]*models.TestCase{tc}, nil, []*models.Mock{guardMock(`{"tenant":"tenantA7K29Q"}`)}))
+		got := &models.GrpcResp{Body: models.GrpcLengthPrefixedMessage{DecodedData: c.live}}
+		rest := s.take(context.Background(), []models.UnmatchedCall{startUpCall()}, "test-1", got)
+		if charged := len(rest) == 1 && strings.Contains(rest[0].ReachesTest, "this test's response"); charged != c.charged {
+			t.Fatalf("live %s: kept %+v; want charged %v", c.live, rest, c.charged)
+		}
+	}
+}
+
+// The instant a test's response was taken at is no value of it: a response
+// whose body is as recorded, taken at another instant, changed nothing, though
+// the call's recording holds the numbers of that instant.
+func TestFlowGuard_TheInstantAResponseWasTakenAtIsNoChange(t *testing.T) {
+	tc := guardCase("test-1", `{"item":"pen"}`, `{"ok":true}`)
+	tc.HTTPResp.Timestamp = time.Date(2026, 10, 29, 9, 0, 0, 17, time.UTC)
+	got := live(`{"ok":true}`)
+	got.Timestamp = time.Date(2026, 10, 30, 11, 42, 37, 500000000, time.UTC)
+	var s setCalls
+	s.reset(newFlowGuard([]*models.TestCase{tc}, nil, []*models.Mock{guardMock(`{"a":"11","b":"42","c":"37","d":"30","e":"5","f":"500000000","g":"2026-10-30T11:42:37.5Z"}`)}))
+	if rest := s.take(context.Background(), []models.UnmatchedCall{startUpCall()}, "test-1", got); len(rest) != 0 {
+		t.Fatalf("the test keeps %+v; a response taken at another instant changed nothing", rest)
+	}
+}
+
+// Where keploy cannot tell whether the call's recorded answer reaches the
+// test, the call is background work and its reason says keploy could not
+// tell, and why: never that its answer reaches no test.
+func TestFlowGuard_WhenKeployCannotTellTheReasonSaysSo(t *testing.T) {
+	cases := []*models.TestCase{guardCase("test-1", `{"item":"pen"}`, `{"tenant":"tenantA7K29Q"}`)}
+	parked := guardMock(`{"tenant":"tenantA7K29Q"}`)
+	parked.LeavePayloadOnDisk(noPayloads{}, models.PayloadAt{Name: "mock-12"})
+	noClosest := startUpCall()
+	noClosest.ClosestMock = ""
+	for _, c := range []struct {
+		name  string
+		guard *flowGuard
+		call  models.UnmatchedCall
+		want  string
+	}{
+		{"no guard", nil, startUpCall(), "the dataflow guard did not run for this set"},
+		{"no closest recording", newFlowGuard(cases, nil, []*models.Mock{guardMock(`{"tenant":"tenantA7K29Q"}`)}), noClosest, "no recording is closest to it"},
+		{"not stored", newFlowGuard(cases, nil), startUpCall(), "its closest recording mock-12 is not in the set's stored recordings"},
+		{"unreadable", newFlowGuard(cases, nil, []*models.Mock{parked}), startUpCall(), "its closest recording mock-12 could not be read back"},
+	} {
+		var s setCalls
+		s.reset(c.guard)
+		if rest := s.take(context.Background(), []models.UnmatchedCall{c.call}, "test-1", live(`{"tenant":""}`)); len(rest) != 0 {
+			t.Fatalf("%s: the test keeps %+v; want the call as background work", c.name, rest)
+		}
+		want := madeBeforeFirst + ", and keploy could not tell whether its recorded answer reaches a test: " + c.want
+		if got := s.backgroundCalls(); len(got) != 1 || got[0].BackgroundWhy != want || strings.Contains(got[0].BackgroundWhy, "reaches no test") {
+			t.Fatalf("%s: the set lists %+v; want it saying %q", c.name, got, want)
+		}
+	}
+}
+
+// The guard holds one test's words at a time: what it read for a test is
+// dropped as it reads the next, so what it keeps does not grow with the
+// set (keploy's no-unbounded-memory rule). 64 tests, each with a 96 KiB
+// response of its own words, one of which changed this run, keep about what
+// one does.
+func TestFlowGuard_KeepsOneTestsWordsAtATime(t *testing.T) {
+	const n, words = 64, 8000
+	body := func(prefix string, i int) string {
+		var b strings.Builder
+		b.WriteString(`{"words":"`)
+		for w := 0; w < words; w++ {
+			fmt.Fprintf(&b, "%s%02dx%05d ", prefix, i, w)
+		}
+		b.WriteString(`"}`)
+		return b.String()
+	}
+	cases := make([]*models.TestCase, n)
+	for i := range cases {
+		cases[i] = guardCase(fmt.Sprintf("test-%d", i+1), `{"item":"pen"}`, body("rec", i))
+	}
+	var s setCalls
+	g := newFlowGuard(cases, nil, []*models.Mock{guardMock(`{"tenant":"tenantA7K29Q"}`)})
+	s.reset(g)
+	heap := func() uint64 {
+		runtime.GC()
+		runtime.GC()
+		var ms runtime.MemStats
+		runtime.ReadMemStats(&ms)
+		return ms.HeapAlloc
+	}
+	guard := func(i int) {
+		test := fmt.Sprintf("test-%d", i+1)
+		got := strings.Replace(body("rec", i), "rec", "got", 1)
+		if rest := s.take(context.Background(), []models.UnmatchedCall{startUpCall()}, test, live(got)); len(rest) != 0 {
+			t.Fatalf("%s keeps %+v; the start-up call's answer holds none of its words", test, rest)
+		}
+		if g.dcTest != test {
+			t.Fatalf("the guard's words are %q's after reading %s", g.dcTest, test)
+		}
+	}
+	base := heap()
+	guard(0)
+	one := heap()
+	for i := 1; i < n; i++ {
+		guard(i)
+	}
+	all := heap()
+	if one <= base {
+		t.Fatalf("the row's premise: one test's words take room on the heap (%d -> %d)", base, one)
+	}
+	perTest := one - base
+	if all > base && all-base > 3*perTest+(1<<20) {
+		t.Fatalf("the guard keeps %d bytes after %d tests, %d after one: it grows with the set", all-base, n, perTest)
 	}
 }
