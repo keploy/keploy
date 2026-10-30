@@ -561,10 +561,31 @@ func TestUnderTheSwitchARefusedBootCallEndsTheWaitForItAtOnce(t *testing.T) {
 // scope's mock placed after test-1. Such a call may come again, so the set's
 // end still waits for that recording, and says nothing of skipping a boot
 // call's wait; once the wait ends with it unanswered the set fails, its
-// reason naming the call keploy refused and the recording it was closest to.
+// reason naming the call keploy refused and the recording it was closest to,
+// whether the call was made between two tests (a background call) or filed
+// late in the set's last test, read at the set's end (an unclaimed call).
 // Before, the reason said the recording was never made, though the
 // application made its call (proven-after-answer scenarios 7 and 9).
 func TestUnderTheSwitchARefusedWorkerCallPlacedAfterATestIsWaitedForThenNamed(t *testing.T) {
+	tick := models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "POST /tick", Destination: "dep:9411", ClosestMock: "mock-tick"}
+	between, late := tick, tick
+	// As the switch-on agent sends each: made between the two tests,
+	// background; filed late in test-2, the last, one its parser found made
+	// in it, which the set's end reads.
+	between.Kind, between.Background = models.MissOutsideTest, true
+	late.Kind = models.MissInTest
+	for _, tc := range []struct {
+		name  string
+		reads func() ([]models.UnmatchedCall, error)
+	}{
+		{"made between two tests", misses(nil, reads(between))},
+		{"filed late in the last test", misses(nil, nil, reads(late))},
+	} {
+		t.Run(tc.name, func(t *testing.T) { refusedWorkerCallPlacedAfterATest(t, tc.reads) })
+	}
+}
+
+func refusedWorkerCallPlacedAfterATest(t *testing.T, read func() ([]models.UnmatchedCall, error)) {
 	setSwitch(t, true)
 	prevLimit, prevWake := workerStallLimit, workerWake
 	t.Cleanup(func() { workerStallLimit, workerWake = prevLimit, prevWake })
@@ -583,11 +604,9 @@ func TestUnderTheSwitchARefusedWorkerCallPlacedAfterATestIsWaitedForThenNamed(t 
 	h.replayer.logger = zap.New(core)
 	h.mocks.filtered = []*models.Mock{httpAt("mock-a", 1010), httpAt("mock-tick", 1500), httpAt("mock-b", 2010)}
 	mappingFile(t, h, nil)
-	// test-2's read hands over the tick, made between the two tests and
-	// refused, as the switch-on agent sends it: background, closest to the
-	// worker scope's mock placed after test-1.
-	h.instr.mockErrorsFor = misses(nil, reads(models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "POST /tick", Destination: "dep:9411",
-		Kind: models.MissOutsideTest, Background: true, ClosestMock: "mock-tick"}))
+	// A read hands over the tick, refused, closest to the worker scope's
+	// mock placed after test-1.
+	h.instr.mockErrorsFor = read
 	h.replayer.hookImpl = prHooks{consumedFor: consumedByWindow(h, map[string][]models.MockState{
 		"test-1": {mongoAt("mock-a", 1010)}, "test-2": {mongoAt("mock-b", 2010)}})}
 	if got := h.runServing(t); got != models.TestSetStatusFailed {
