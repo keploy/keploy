@@ -62,17 +62,21 @@ type Series struct {
 // SeriesOf parts reads, the recordings of a set (in the order of their
 // calls), into series: recordings of one kind (never two parsers') and one
 // operation key, with the same fixed parts and the same leaves (by path and
-// type), are one series when each leaf either holds one value in all of them or, written as a bare epoch
-// number or a typed instant, tracks every recording's call by one offset
-// (EpochTrack: MinEpochReads values at least, every read inside its own
-// span). A leaf that varies but tracks no offset (a phone number, a counter,
-// an id the application draws, two reads only) is a value: the recordings
-// part by it, and each part is learned again, so a call that only looks
-// like a read of the clock is never answered as one. A recording no other
-// recording shares a shape with is a series of its own, all its leaves
-// values. known excuses leaves (keploy.yml's noise, by the recorded leaf):
-// an excused leaf is no value of a series, and only its type is kept where
-// known says so (typed). Every read is in exactly one series.
+// type), are one series when each leaf either holds one value in all of
+// them or, written as a bare epoch number or a typed instant, tracks every
+// recording's call by one offset (EpochTrack: MinEpochReads values at
+// least, every read inside its own span). The set's first call, whose span
+// has no start, is no evidence of the clock: its read need only come no
+// later than its call, and one whose read the others' offset places after
+// its call is a series of its own. A leaf that varies but tracks no offset
+// (a phone number, a counter, an id the application draws, two reads only)
+// is a value: the recordings part by it, and each part is learned again, so
+// a call that only looks like a read of the clock is never answered as one.
+// A recording no other recording shares a shape with is a series of its
+// own, all its leaves values. known excuses leaves (keploy.yml's noise, by
+// the recorded leaf): an excused leaf is no value of a series, and only its
+// type is kept where known says so (typed). Every read is in exactly one
+// series.
 func SeriesOf(reads []SeriesRead, known Known) []Series {
 	if known == nil {
 		known = None
@@ -170,6 +174,17 @@ func (b seriesBuilder) split(members []int, cands map[string]bool) []Series {
 			out = append(out, s)
 			continue
 		}
+		// A recording no call before bounds (the set's first: Span.From is
+		// zero) is no evidence of the clock (EpochTrack): one whose read the
+		// others' offset places after its own call is another call, which
+		// never unlearns theirs. It is read again on its own.
+		if bounded, open := b.byStart(parts[k]); len(open) > 0 && len(bounded) > 0 {
+			if s, _, ok := b.learn(bounded, cands); ok {
+				out = append(out, s)
+				out = append(out, b.split(open, cands)...)
+				continue
+			}
+		}
 		fewer := make(map[string]bool, len(cands)-1)
 		for p := range cands {
 			if p != demote {
@@ -179,6 +194,19 @@ func (b seriesBuilder) split(members []int, cands map[string]bool) []Series {
 		out = append(out, b.split(parts[k], fewer)...)
 	}
 	return out
+}
+
+// byStart parts part's recordings into those whose span starts and those
+// whose span does not (open: no call before them), each in part's order.
+func (b seriesBuilder) byStart(part []int) (bounded, open []int) {
+	for _, i := range part {
+		if b.reads[i].Span.From.IsZero() {
+			open = append(open, i)
+		} else {
+			bounded = append(bounded, i)
+		}
+	}
+	return bounded, open
 }
 
 // valuesKey is s's compared values, but for the candidates' (cands).
