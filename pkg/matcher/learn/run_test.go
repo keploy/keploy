@@ -902,6 +902,58 @@ func TestTheRunsPlacesHoldTheValuesNotTheCalls(t *testing.T) {
 	runtime.KeepAlive(earlier)
 }
 
+// One call's read of the run's places as the last test of a set of n tests
+// learns its one changed value: the tracker's read (a copy of every place),
+// the learn step's sorted copy, and the source search over every place
+// (appearedIn: each place's drift and its words, read again per read), with
+// a fresh drift cache, as a test's first call reads them (first-read), and
+// with the test's drift cache warm, as its later calls do (later-read).
+// "followed" is a value the set's first test made, "unexplained" one no test
+// sent. Each is linear in n, in time and in what one read allocates; most of
+// it is the source search's words, not the copies.
+func BenchmarkOneReadOfTheRunsPlaces(b *testing.B) {
+	b.Setenv(provenswitch.Env, "1")
+	t0 := time.Unix(1_792_000_000, 0)
+	for _, n := range []int{2000, 20000} {
+		tr := NewTracker()
+		for i := 0; i < n; i++ {
+			tr.Begin()
+			k, _, _ := tr.State()
+			tr.Served(k, ranCall("mock-"+strconv.Itoa(i), t0.Add(time.Duration(i)*time.Millisecond), "o-"+strconv.Itoa(i), "o-"+strconv.Itoa(i)+"-9"))
+			tr.End()
+		}
+		tr.Begin()
+		call := t0.Add(time.Hour)
+		for _, c := range []struct{ name, rec, live string }{{"followed", "o-0", "o-0-9"}, {"unexplained", "o-x", "o-x-9"}} {
+			for _, warm := range []bool{false, true} {
+				name := strconv.Itoa(n) + "/" + c.name + "/first-read"
+				if warm {
+					name = strconv.Itoa(n) + "/" + c.name + "/later-read"
+				}
+				b.Run(name, func(b *testing.B) {
+					dc := clockedDrifts()
+					read := func() {
+						if !warm {
+							dc = clockedDrifts()
+						}
+						_, earlier, _, _ := tr.Test()
+						ln := ClassifyIn(dc, []string{"body.order"}, strLeaf("body.order", c.live), strLeaf("body.order", c.rec), call, earlier, nil, nil, nil)
+						if c.name == "followed" && ln[0].Kind != KindVariable {
+							b.Fatalf("the last test's value is %s (%s), want the first test's, the run's variable", ln[0].Kind, ln[0].Why)
+						}
+					}
+					read()
+					b.ReportAllocs()
+					b.ResetTimer()
+					for i := 0; i < b.N; i++ {
+						read()
+					}
+				})
+			}
+		}
+	}
+}
+
 // A test's own call whose serve is told after the next test began is a place
 // of the run's as well: dropping it would refuse the next test's call that
 // sends the value the earlier test made, though the earlier test made it. A
