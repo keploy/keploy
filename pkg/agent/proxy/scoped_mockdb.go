@@ -1291,16 +1291,7 @@ func (p *Proxy) WorkerViewForTest(pid uint32, mgr integrations.MockMemDb) integr
 // per connection, outside any lock. Bounded so a reparent race or an
 // unexpected /proc shape can never spin.
 func ancestorChain(pid uint32) []uint32 {
-	chain := make([]uint32, 0, 8)
-	for i := 0; i < 32 && pid > 1; i++ {
-		chain = append(chain, pid)
-		ppid, ok := ppidFromStat(pid)
-		if !ok {
-			break
-		}
-		pid = ppid
-	}
-	return chain
+	return utils.ProcAncestors(pid)
 }
 
 // workerViewFor is what a call from a process with the given ancestor chain

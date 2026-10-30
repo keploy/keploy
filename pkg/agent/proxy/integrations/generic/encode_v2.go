@@ -274,7 +274,7 @@ func pairChunkEvents(events <-chan chunkEvent, sess *supervisor.Session, logger 
 			reset()
 			return "", false
 		case n == 0:
-			if hold = holdPreamble(ctx, mock, mock.Spec.ReqTimestampMock, lastAt); hold != nil {
+			if hold = holdPreamble(ctx, mock, mock.Spec.ReqTimestampMock, lastAt, sess.Opts.SrcPid); hold != nil {
 				sess.MockHeld()
 				if hold.outlived() {
 					release(false)
@@ -572,7 +572,12 @@ drain:
 	// The connection has ended: the first exchange held until now is the
 	// test's when the connection's whole lay inside it (preambleHold), known
 	// once the test's answer is.
+	// The parser has consumed the connection's input: what it holds waits
+	// only on the test's answer, which no input brings, so the session's
+	// pending work (a last request no answer followed) is cleared, and the
+	// wait is not read as a hung parser.
 	if hold != nil {
+		sess.MockHeld()
 		hold.settle(ctx)
 		release(hold.wholly())
 	}

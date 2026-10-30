@@ -9,6 +9,7 @@ import (
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils"
 )
 
 // exchangeLifetime is the lifetime the Generic recorder states
@@ -88,10 +89,14 @@ const maxHeldExchanges = 64
 // out in recorded order. It is decided by recorded times, never by when the
 // recorder's goroutines run:
 //
-//   - the test that owns the connection's first request is the one keploy
-//     record maps it to (syncMock.SyncMockManager.TestSpanAt): of the test
-//     cases whose [request, answer] holds it, the one whose request came
-//     first;
+//   - the test that owns the connection's first request is the one test
+//     case whose [request, answer] holds it (syncMock.SyncMockManager.TestSpanAt),
+//     or, of several, the one test scope whose worker the connection's process
+//     is or descends from. When several tests' windows hold it and the
+//     process names none of them alone (parallel workers, nested scopes,
+//     concurrent requests), no test owns it: no time tells which made the
+//     call, so the first exchange is the preamble, marked with every one of
+//     them;
 //   - the connection is wholly that test's when none of its chunks is
 //     recorded after the test's answer, and it has no more than
 //     maxHeldExchanges exchanges. A chunk is recorded when the relay read
@@ -119,6 +124,9 @@ type preambleHold struct {
 	mgr    *syncMock.SyncMockManager
 	opened time.Time
 	last   time.Time
+	// chain is the connection's process and its ancestors, nil when the
+	// process is not known: the worker it names may own the request.
+	chain []uint32
 	// span is the owner's, while ok: a test may own the first request.
 	span syncMock.TestSpan
 	ok   bool
@@ -135,20 +143,25 @@ type preambleHold struct {
 // holdPreamble decides at a connection's first exchange whether the recorder
 // holds it: under the proven switch, while a test may own its request
 // (opened, the connection's first). last is the connection's latest chunk
-// time so far. nil means emit it now, as the session preamble: with the
-// switch off, and for a connection opened outside every test (a boot-time
-// pool, a call made after a test was answered), which no test can wholly
-// contain.
-func holdPreamble(ctx context.Context, first *models.Mock, opened, last time.Time) *preambleHold {
+// time so far; src is the kernel pid of the process that opened the
+// connection (models.OutgoingOptions.SrcPid), 0 when not known. nil means
+// emit it now, as the session preamble: with the switch off, and for a
+// connection opened outside every test (a boot-time pool, a call made after a
+// test was answered), which no test can wholly contain.
+func holdPreamble(ctx context.Context, first *models.Mock, opened, last time.Time, src uint32) *preambleHold {
 	if !provenswitch.On() {
 		return nil
 	}
 	mgr := syncMock.FromContextOrGlobal(ctx)
-	span, ok := mgr.TestSpanAt(opened)
+	var chain []uint32
+	if src != 0 {
+		chain = utils.ProcAncestors(src)
+	}
+	span, ok := mgr.TestSpanAt(opened, chain)
 	if !ok {
 		return nil
 	}
-	h := &preambleHold{mgr: mgr, opened: opened, last: last, span: span, ok: true, exchanges: 1, first: first}
+	h := &preambleHold{mgr: mgr, opened: opened, last: last, chain: chain, span: span, ok: true, exchanges: 1, first: first}
 	h.stopping, h.handedOn = mgr.HoldExchanges(opened)
 	return h
 }
@@ -162,7 +175,7 @@ func (h *preambleHold) changes() <-chan struct{} {
 // refresh asks again which test owns the connection's first request, once the
 // window it waited on has left the open ones.
 func (h *preambleHold) refresh() {
-	h.span, h.ok = h.mgr.TestSpanAt(h.opened)
+	h.span, h.ok = h.mgr.TestSpanAt(h.opened, h.chain)
 }
 
 // saw records a chunk of the connection at at.
@@ -179,9 +192,10 @@ func (h *preambleHold) add(m *models.Mock) {
 }
 
 // outlived reports whether the connection is known not to be wholly its
-// test's: no test owns its first request, a chunk was recorded after the
-// test's answer, or it has more exchanges than a test may wholly own. The
-// first exchange is then the preamble, released at once.
+// test's: no test owns its first request (none, or more than one may: a
+// Shared span has no answer, so every chunk is after it), a chunk was
+// recorded after the test's answer, or it has more exchanges than a test may
+// wholly own. The first exchange is then the preamble, released at once.
 func (h *preambleHold) outlived() bool {
 	return !h.ok || h.exchanges > maxHeldExchanges || (h.span.Final() && h.last.After(h.span.End))
 }
@@ -216,23 +230,24 @@ func (h *preambleHold) settle(ctx context.Context) {
 // release returns the held exchanges in recorded order, the first stated
 // per-test when the connection lay wholly inside its test, else session. A
 // first exchange stated session while a test's window held its request is
-// marked (models.MetadataLifetimeUndecidedKey) with why and that test: it may
-// be the test's own call, and keploy record's judging does not judge a test
-// that owns no call and held one.
+// marked (models.MetadataLifetimeUndecidedKey) with why and every test that
+// may own it: it may be one's own call, and keploy mock record's judging does
+// not judge a test that owns no call and held one (keploy record's judging
+// does not read the mark).
 func (h *preambleHold) release(wholly bool) []*models.Mock {
 	if wholly {
 		h.first.Spec.Metadata[models.MetadataLifetimeKey] = models.MetadataLifetimePerTest
 	} else {
 		h.first.Spec.Metadata[models.MetadataLifetimeKey] = models.MetadataLifetimeSession
 		if why := h.undecided(); why != "" {
-			h.first.Spec.Metadata[models.MetadataLifetimeUndecidedKey] = models.MockLifetimeUndecided{Why: why, TestStart: h.span.Start}.String()
+			h.first.Spec.Metadata[models.MetadataLifetimeUndecidedKey] = models.MockLifetimeUndecided{Why: why, TestStarts: h.span.Starts()}.String()
 		}
 	}
 	return append([]*models.Mock{h.first}, h.pending...)
 }
 
 // undecided is why a connection whose first request a test's window held is
-// not known to lie wholly inside that test (a models.LifetimeUndecided*
+// not known to lie wholly inside one test (a models.LifetimeUndecided*
 // reason), or "" when no test's window holds its first request any more.
 func (h *preambleHold) undecided() string {
 	switch {
@@ -242,6 +257,8 @@ func (h *preambleHold) undecided() string {
 		return models.LifetimeUndecidedManyExchanges
 	case !h.span.Final():
 		return models.LifetimeUndecidedStoppedFirst
+	case h.span.Shared():
+		return models.LifetimeUndecidedManyTests
 	case h.last.After(h.span.End):
 		return models.LifetimeUndecidedReadAfterAnswer
 	}

@@ -117,3 +117,20 @@ func ParseProcStat(line []byte) (ProcStat, bool) {
 	}
 	return ProcStat{State: fields[0][0], PPID: int(ppid), PGRP: int(pgrp), StartTime: start}, true
 }
+
+// ProcAncestors is pid and its ancestors, nearest first, read from /proc once,
+// outside any lock: the chain a connection's process is matched against a
+// test worker's reported pid by. Bounded so a reparent race or an unexpected
+// /proc shape can never spin. Empty for pid 0 or 1.
+func ProcAncestors(pid uint32) []uint32 {
+	chain := make([]uint32, 0, 8)
+	for i := 0; i < 32 && pid > 1; i++ {
+		chain = append(chain, pid)
+		st, ok := ReadProcStat(int(pid))
+		if !ok {
+			break
+		}
+		pid = uint32(st.PPID)
+	}
+	return chain
+}

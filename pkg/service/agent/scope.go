@@ -290,7 +290,7 @@ func (a *Agent) recordScopeLocked(k scopeKey, start time.Time) {
 	if mgr == nil {
 		mgr = syncMock.Get()
 	}
-	s := mgr.BeginTestScope(start)
+	s := mgr.BeginTestScope(start, k.pid)
 	if s == nil {
 		return
 	}

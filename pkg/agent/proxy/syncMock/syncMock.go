@@ -4518,7 +4518,7 @@ func (m *SyncMockManager) resolveRange(start, end time.Time, testName string, ke
 		// before its window leaves the open ones (TestSpanAt).
 		if w != nil && w.m == m {
 			if w.idx >= 0 {
-				m.noteTestSpanLocked(start, end)
+				m.noteTestSpanLocked(start, end, 0)
 			}
 			m.endWindowLocked(w, &tally, false)
 		}

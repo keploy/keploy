@@ -315,7 +315,9 @@ func createGenericMocksAsync(ctx context.Context, logger *zap.Logger, clientCh, 
 				release(false)
 			}
 		case n == 0:
-			if hold = holdPreamble(ctx, mock, mock.Spec.ReqTimestampMock, lastAt); hold == nil {
+			// No process is known here (nor is this recorder reached:
+			// Generic.IsV2), so tests that overlap at the request fail closed.
+			if hold = holdPreamble(ctx, mock, mock.Spec.ReqTimestampMock, lastAt, 0); hold == nil {
 				emit(mock)
 			} else if hold.outlived() {
 				release(false)

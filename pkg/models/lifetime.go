@@ -604,11 +604,15 @@ const (
 // put in the session pool (MetadataLifetimeSession) only because it could not
 // tell that the connection lay wholly inside the test whose window held the
 // exchange's request: the exchange may be that test's own call, which the
-// test then does not own. Only the recorder knows why it stated session, so it
-// says so here, and keploy record's judging reads it: a test that owns no call
-// and whose window held such an exchange is not judged on its outcome. A
-// session exchange whose request no test's window held carries no mark. The
-// value is MockLifetimeUndecided's String: why, and when that test began.
+// test then does not own. When more than one test's window held the request
+// (overlapping tests: parallel workers, nested scopes) and the connection's
+// process does not name one of them, the mark names every one of them, as any
+// may own it. Only the recorder knows why it stated session, so it says so
+// here. keploy mock record's judging reads it: a test that owns no call and
+// whose window held such an exchange is not judged on its outcome. keploy
+// record's judging does not read it. A session exchange whose request no
+// test's window held carries no mark. The value is MockLifetimeUndecided's
+// String: why, and when each of those tests began.
 const MetadataLifetimeUndecidedKey = "lifetimeUndecided"
 
 // The reasons a MetadataLifetimeUndecidedKey mark gives.
@@ -624,26 +628,39 @@ const (
 	// LifetimeUndecidedManyExchanges: the connection had more exchanges than
 	// the recorder holds while it waits to decide.
 	LifetimeUndecidedManyExchanges = "manyExchanges"
+	// LifetimeUndecidedManyTests: more than one test's window held the
+	// request, and the connection's process is not the worker of exactly one
+	// of them: the recorder cannot tell whose call it is.
+	LifetimeUndecidedManyTests = "manyTests"
 )
 
 // MockLifetimeUndecided is what a MetadataLifetimeUndecidedKey mark says.
 type MockLifetimeUndecided struct {
 	// Why is one of the LifetimeUndecided* reasons.
 	Why string
-	// TestStart is when the test whose window held the exchange's request
-	// began: its test case's request time, or its window's or test scope's
-	// start while it was still open.
-	TestStart time.Time
+	// TestStarts is when each test whose window held the exchange's request
+	// began, earliest first: its test case's request time, or its window's
+	// or test scope's start while it was still open. One test, unless Why is
+	// LifetimeUndecidedManyTests or more than one test's window was still
+	// open when the recorder had to state it.
+	TestStarts []time.Time
 }
 
-// String is the mark's value: the reason, a space, and TestStart in UTC as
-// RFC 3339 with nanoseconds.
+// String is the mark's value: the reason, then each of TestStarts in UTC as
+// RFC 3339 with nanoseconds, each after a space.
 func (u MockLifetimeUndecided) String() string {
-	return u.Why + " " + u.TestStart.UTC().Format(time.RFC3339Nano)
+	var b strings.Builder
+	b.WriteString(u.Why)
+	for _, s := range u.TestStarts {
+		b.WriteByte(' ')
+		b.WriteString(s.UTC().Format(time.RFC3339Nano))
+	}
+	return b.String()
 }
 
 // LifetimeUndecided reads m's MetadataLifetimeUndecidedKey mark; ok is false
-// when m has none, or one that does not read as String writes it.
+// when m has none, or one that does not read as String writes it (a reason
+// and at least one start).
 func (m *Mock) LifetimeUndecided() (MockLifetimeUndecided, bool) {
 	if m == nil {
 		return MockLifetimeUndecided{}, false
@@ -652,15 +669,19 @@ func (m *Mock) LifetimeUndecided() (MockLifetimeUndecided, bool) {
 	if !ok {
 		return MockLifetimeUndecided{}, false
 	}
-	why, at, ok := strings.Cut(v, " ")
+	why, rest, ok := strings.Cut(v, " ")
 	if !ok || why == "" {
 		return MockLifetimeUndecided{}, false
 	}
-	start, err := time.Parse(time.RFC3339Nano, at)
-	if err != nil {
-		return MockLifetimeUndecided{}, false
+	u := MockLifetimeUndecided{Why: why}
+	for _, at := range strings.Split(rest, " ") {
+		start, err := time.Parse(time.RFC3339Nano, at)
+		if err != nil {
+			return MockLifetimeUndecided{}, false
+		}
+		u.TestStarts = append(u.TestStarts, start)
 	}
-	return MockLifetimeUndecided{Why: why, TestStart: start}, true
+	return u, true
 }
 
 // MetadataBodyDigestsKey is the Spec.Metadata key under which the HTTP
