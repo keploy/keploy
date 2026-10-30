@@ -1149,6 +1149,61 @@ func TestASetAsideTestsRecordingAnswersTheCallAfterIt(t *testing.T) {
 	}
 }
 
+// api-server's first-use PAT read under a run that does not select the
+// skipped test that recorded it (keploy mock replay --lock -- -run with a
+// skip line on TestAppCRUD): that test never begins, yet the test recorded
+// after it makes its call in its own window. The skipped test's recording
+// answers it, as at the skipped test's own begin: unchecked, never required,
+// named on the evidence. A skipped test recorded after the open one serves
+// it nothing (what it answers may be what that test caused): the call
+// misses and fails the test.
+func TestASkippedTestNoBeginServesTheTestsRecordedAfterIt(t *testing.T) {
+	for _, tc := range []struct {
+		name, skipped string
+		served        bool
+	}{
+		{"skipped and recorded before: served", "o::TestQ", true},
+		{"skipped and recorded after: not served", "o::TestZ", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, rp := exactAgent(t,
+				[]*models.Mock{pingMock("mock-1", "/pat", "pat", t0), pingMock("mock-2", "/k", "k", t0.Add(time.Second)), pingMock("mock-3", "/pat", "pat", t0.Add(3*time.Second))},
+				map[string][]string{"o::TestQ": {"mock-1"}, "o::TestK": {"mock-2"}, "o::TestZ": {"mock-3"}}, map[string][]string{})
+			ctx := context.Background()
+			require.NoError(t, a.SetRecordedWindows(ctx, []models.TestWindow{
+				{TestCase: "o::TestQ", Start: t0, End: t0.Add(500 * time.Millisecond)},
+				{TestCase: "o::TestK", Start: t0.Add(time.Second), End: t0.Add(1500 * time.Millisecond)},
+				{TestCase: "o::TestZ", Start: t0.Add(3 * time.Second), End: t0.Add(3500 * time.Millisecond)},
+			}))
+			require.NoError(t, a.SetScopeSkips(ctx, map[string]string{tc.skipped: "manual/the first use's owner"}, nil))
+			// The skipped test is never begun: the run does not select it.
+			got, e := runTest(t, a, rp, "TestK", "/k", "/pat")
+			ev := evidenceOf(t, a, "o::TestK")
+			require.NotNil(t, ev)
+			if !tc.served {
+				require.Equal(t, "200 k", got[0])
+				require.NotEqual(t, 200, mustCode(got[1]), "a test recorded after the open one serves it nothing")
+				require.Equal(t, models.ScopeActionFail, e.Action)
+				require.Contains(t, e.Reason, "GET /pat to 127.0.0.1:18093 had no recorded answer")
+				require.Empty(t, ev.ServedAside)
+				return
+			}
+			require.Equal(t, []string{"200 k", "200 pat"}, got)
+			require.Empty(t, e.Action, e.Reason)
+			require.Equal(t, []string{"mock-1 served from o::TestQ (set aside)"}, ev.ServedAside)
+			require.Empty(t, ev.Unconsumed, "a set-aside recording is never the test's to make")
+			// Its begin arriving later hands nothing again: answered once.
+			b, serr := a.ProvenBegin(ctx, begin("TestQ"))
+			require.Nil(t, serr)
+			require.Equal(t, models.ScopeActionSkip, b.Action)
+			got, e = runTest(t, a, rp, "TestZ", "/pat", "/pat")
+			require.Equal(t, "200 pat", got[0], "TestZ's own recording")
+			require.NotEqual(t, 200, mustCode(got[1]), "the skipped test's recording answered once, in TestK")
+			require.Equal(t, models.ScopeActionFail, e.Action)
+		})
+	}
+}
+
 // mustCode is the status code of a runTest answer ("<code> <body>").
 func mustCode(answer string) int {
 	var code int
