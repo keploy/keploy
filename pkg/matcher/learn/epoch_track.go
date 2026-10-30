@@ -1,6 +1,7 @@
 package learn
 
 import (
+	"math"
 	"time"
 )
 
@@ -54,10 +55,12 @@ type EpochOffset struct {
 // (its values and spans), are reads of the application's clock moved by one
 // offset, and the offsets they allow. Every value must be a bare epoch number
 // whole (no other text: "id-1761700000" is not one), all at one resolution,
-// each with a known span; at least MinEpochReads of them must differ (a value
+// each with a span that ends; at least MinEpochReads of them, each in a span
+// that also starts, must differ (a value
 // that never moved is a constant, however near now it sits); and one offset
 // must place every recording's read in its own span (the offsets each read
-// allows, value less span, must meet). A value the application keeps or
+// allows, value less span, must meet), a span with no start (the set's first
+// call) holding the read no later than its end. A value the application keeps or
 // draws (a phone number, a counter, a random id) meets none of that across
 // calls made at different moments.
 func EpochTrack(reads []EpochRead) (EpochOffset, bool) {
@@ -83,21 +86,25 @@ type clockReading struct {
 
 // trackOffset is EpochTrack of readings already read.
 func trackOffset(rs []clockReading) (EpochOffset, bool) {
-	var e EpochOffset
+	e := EpochOffset{Lo: math.MinInt64, Hi: math.MaxInt64}
 	seen := map[time.Time]bool{}
 	for i, r := range rs {
-		// A span with no start (no call before this one) is no span: the
-		// read can have been made at any earlier moment. One with no end
-		// places the read before every instant, which no offset meets.
-		if r.span.From.IsZero() || i > 0 && r.res != e.Res {
+		if i > 0 && r.res != e.Res {
 			return EpochOffset{}, false
 		}
-		lo, hi := r.at.Sub(r.span.To.Truncate(r.res)), r.at.Sub(r.span.From.Truncate(r.res))
-		if i == 0 {
-			e = EpochOffset{Lo: lo, Hi: hi, Res: r.res}
-		} else {
-			e.Lo, e.Hi = max(e.Lo, lo), min(e.Hi, hi)
+		e.Res = r.res
+		// A span with no end places the read before every instant, which
+		// no offset meets.
+		e.Lo = max(e.Lo, r.at.Sub(r.span.To.Truncate(r.res)))
+		// A span with no start (no call before this one: the set's first)
+		// bounds the read only at its end: the application read its clock
+		// for the call no later than it sent it. It narrows the offsets'
+		// low end alone, and is no evidence that the leaf moves with the
+		// clock: the read can have been made at any earlier moment.
+		if r.span.From.IsZero() {
+			continue
 		}
+		e.Hi = min(e.Hi, r.at.Sub(r.span.From.Truncate(r.res)))
 		seen[r.at] = true
 	}
 	if len(seen) < MinEpochReads || e.Lo > e.Hi {

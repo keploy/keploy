@@ -84,12 +84,16 @@ type SetSeries struct {
 // when its kind's reading reads it (SeriesShapeOf) and its call has a span
 // on the recording's clock: from its previous data-plane call (PreviousCall,
 // over every recording of recorded) to its own request time, as the learn
-// step's window for the call (Window.Rec). Not read: a protocol-phase
+// step's window for the call (Window.Rec); the set's first call, which no
+// previous call bounds, in a span with no start, which bounds its reads of
+// the clock at its end alone (EpochTrack): it is a recording of its call's
+// series like any other, so a test whose miss is closest to it varied in the
+// series as one closest to a later copy does. Not read: a protocol-phase
 // recording (a handshake, a driver's heartbeat: no call of the
-// application's), and one with no request time or no previous call, whose
-// reads of the clock no span bounds (the set's first call): a series can
-// check no read of its, so it is in no series, and judging and the agent
-// treat it as they did. known excuses leaves as SeriesOf's.
+// application's), and one with no request time, whose reads of the clock no
+// span bounds: a series can check no read of its, so it is in no series, and
+// judging and the agent treat it as they did. known excuses leaves as
+// SeriesOf's.
 func SeriesOfSet(recorded []*models.Mock, known Known) SetSeries {
 	out, _ := SeriesOfRange(func(visit func(*models.Mock) bool) error {
 		for _, m := range recorded {
@@ -207,10 +211,9 @@ func ReadSetRange(rng func(visit func(*models.Mock) bool) error, keep func(*mode
 	}
 	var rs []spanned
 	for _, r := range reads {
+		// No previous call (the set's first): a span with no start, which
+		// bounds the read at its end alone (EpochTrack).
 		from := prev(r.m.Spec.ReqTimestampMock)
-		if from.IsZero() {
-			continue
-		}
 		rs = append(rs, spanned{m: r.m, r: SeriesRead{Kind: r.m.Kind, Shape: r.shape, Span: Span{From: from, To: r.m.Spec.ReqTimestampMock}}})
 	}
 	// In the order of their calls; two sent at one instant by kind and
