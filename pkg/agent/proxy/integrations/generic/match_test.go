@@ -65,7 +65,7 @@ func missReport(t *testing.T, store integrations.MockMemDb, req string) *models.
 	defer app.Close()
 	go func() {
 		if _, err := app.Read(make([]byte, 1)); err == nil {
-			app.Close()
+			_ = app.Close()
 		}
 	}()
 	err := decodeGeneric(context.Background(), zap.NewNop(), []byte(req), proxySide, nil, store, models.OutgoingOptions{})

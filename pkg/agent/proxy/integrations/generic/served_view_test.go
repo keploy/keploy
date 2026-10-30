@@ -513,6 +513,7 @@ func (h *refusingIn) UpdateUnFilteredMock(old, new *models.Mock) bool {
 // GetSessionMocks is what the store shows the parser, less the refused
 // recording (a reusable one stays shown after its consume).
 func (h *refusingIn) GetSessionMocks() ([]*models.Mock, error) {
+	//nolint:staticcheck // SA1019: the generic parser reads its pool through GetSessionMocks, so the wrapper forwards the store's own.
 	mocks, err := h.MockMemDb.GetSessionMocks()
 	if err != nil || h.r.refused == nil {
 		return mocks, err
