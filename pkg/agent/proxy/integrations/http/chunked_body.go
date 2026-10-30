@@ -133,8 +133,9 @@ func (c *chunkedBody) feed(body []byte) (bool, error) {
 		}
 		if size > math.MaxInt-2-next {
 			// Reachable only on a 32-bit build, where the chunk's data and
-			// its CRLF could take the offset past the largest int.
-			return false, fmt.Errorf("%w: chunk size %d is larger than any body this reader can hold", errMalformedChunkedBody, size)
+			// its CRLF could take the offset past the largest int. The size
+			// is not named: it is the app's bytes (parseChunkSize).
+			return false, fmt.Errorf("%w: a chunk size larger than any body this reader can hold", errMalformedChunkedBody)
 		}
 		dataEnd := next + size
 		if len(body) < dataEnd+2 {
@@ -167,6 +168,15 @@ func chunkedLine(body []byte, off int) (line []byte, next int, ok bool, err erro
 // parseChunkSize parses a chunk-size line: hex digits, then optional
 // whitespace and chunk extensions (";name=value"), which are ignored. A size
 // above maxChunkSize is malformed.
+//
+// Its errors name the line by its length, never by its bytes or the number
+// they spell: the line is the app's bytes, up to maxChunkedLineLen of them. A
+// mis-framed chunk — a client sends a sized chunk, then the next chunk's data
+// with no size line — makes that data the chunk-size line, and a size too
+// large spells up to 16 of the app's hex digits back as a decimal. The error
+// reaches the agent's log at Warn and Error (chunkedRequest, chunkedResponse)
+// and, through readRequestV2 and readResponseV2, a recording's stopped-on
+// reason (recordV2).
 func parseChunkSize(line []byte) (int, error) {
 	if i := bytes.IndexByte(line, ';'); i >= 0 {
 		line = line[:i]
@@ -177,12 +187,30 @@ func parseChunkSize(line []byte) (int, error) {
 	}
 	size, err := strconv.ParseUint(string(line), 16, 64)
 	if err != nil {
-		return 0, fmt.Errorf("%w: chunk-size %q", errMalformedChunkedBody, line)
+		return 0, fmt.Errorf("%w: a %d-byte chunk-size line that is not a hex size", errMalformedChunkedBody, len(line))
 	}
 	if size > maxChunkSize {
-		return 0, fmt.Errorf("%w: chunk size %d is larger than %d", errMalformedChunkedBody, size, maxChunkSize)
+		return 0, fmt.Errorf("%w: a %d-digit chunk size larger than %d", errMalformedChunkedBody, len(line), maxChunkSize)
 	}
 	return int(size), nil
+}
+
+// errBadContentLength is returned for a Content-Length field value that does
+// not parse as a length: not a decimal number, or one too large for an int.
+var errBadContentLength = errors.New("the Content-Length field value does not parse as a decimal length")
+
+// contentLengthValue parses a Content-Length field value. Its error names the
+// value by its length only, as parseChunkSize's do: strconv's error quotes the
+// value, which is the app's bytes (a client can send anything there), and it
+// reached the agent's log at Error (HandleChunkedRequests,
+// handleChunkedResponses) and the stopped-on reason of a recording
+// (readRequestV2, readResponseV2).
+func contentLengthValue(v string) (int, error) {
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return 0, fmt.Errorf("%w (a %d-byte value)", errBadContentLength, len(v))
+	}
+	return n, nil
 }
 
 // messageHead finds the header section that governs msg's body: the request's
