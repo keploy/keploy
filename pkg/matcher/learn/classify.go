@@ -841,6 +841,11 @@ type Learned struct {
 	// refusal of a caller whose replay checks no read), so a caller that
 	// learns the read names them from here where it says what it learned.
 	Refuted string
+	// byOffset: the offset rule refused it (offsetWhy: built by an offset on
+	// what the application was given, before any lead or window excused
+	// it), which the rule's rescue in keploy mock's client tests reads
+	// again without it (classifyRead).
+	byOffset bool
 	// Bindable, of a KindUnaccounted leaf of keploy mock's client test
 	// (DriftCache.ClientTests), says the value is one its test gave the
 	// application, first sent at this call: keploy found no source of it
@@ -1497,7 +1502,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// echo is answered, never asserted against a source.
 		if ln.Kind == KindNoise || ln.Kind == KindEcho {
 			v := dc.ofIn(r.Value, l.Value, w, at)
-			why, sourced := "", false
+			why, sourced, offWhy := "", false, ""
 			if unreadReq != "" {
 				why = unreadReq
 			} else if where, asRecorded := dc.requestHolds(lostMoments(v), v.liveMoments, served); where != "" {
@@ -1506,6 +1511,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 				// An instant of it built on a moved place by an offset, before
 				// any lead or window excuses its words (offset.go).
 				why = offsetWhy(m)
+				offWhy = why
 			} else if why = unaccounted(dc, v, at, served, raw, fol); why != "" {
 				sourced = true
 				if fol != nil && fol.refused != "" {
@@ -1583,6 +1589,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 			if why != "" {
 				ln.Kind, ln.Why, ln.Echo = KindUnaccounted, why, nil
 				ln.Bindable = bindable
+				ln.byOffset = why == offWhy
 			}
 		}
 		// Noise only where no word of what changed comes back in the
@@ -1920,12 +1927,27 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// that read holds under both: a replay passes the value only inside
 		// its test's span on the application's clock, whichever it was built
 		// on. Refused, the test would be set aside for a place a replay can
-		// check. A value its own window does not hold stays refused (the
-		// offset alone explains it), and so does anything else the value
-		// reads as without the rule (noise, another refusal).
+		// check. Where the rule refused it (Learned.byOffset), the windows
+		// the copy rule reads hold it too (Window.oneRunSinceBegin: one
+		// run's own window, the other run's since its test began): a full
+		// round slower than the recording opens the call's window after a
+		// read the application made at the start of its handler, so the
+		// learning does not hang on how fast the full round ran (api-
+		// server's app.createdAt, read half a second and a second boundary
+		// before its audit in record's full round). A value neither run's
+		// own window holds stays refused (the offset alone explains it),
+		// and so does anything else the value reads as without the rule
+		// (noise, another refusal).
 		if wb := w.sinceBegin(); follow && ln.Kind == KindUnaccounted && wb != nil {
 			if own, ok := sinceTestBegin(leaf(r, l, w, skipOffset)); ok {
 				ln = own
+			} else if ln.byOffset {
+				for _, ow := range w.oneRunSinceBegin() {
+					if own, ok := sinceTestBegin(leaf(r, l, ow, skipOffset)); ok {
+						ln = own
+						break
+					}
+				}
 			}
 		}
 		out = append(out, ln)
