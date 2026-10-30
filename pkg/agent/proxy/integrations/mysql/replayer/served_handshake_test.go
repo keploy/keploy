@@ -323,7 +323,9 @@ func recordedTLSLogin(t *testing.T, hr41 *mysql.HandshakeResponse41Packet) *mode
 // HandshakeResponse41 it sent over TLS, read after the MITM upgrade, and the
 // view is as recorded only where both are the recording's own. A recording
 // made without TLS serves such a client too (no recorded SSLRequest), and its
-// serve is a view of the packets the client sent. Before this row no
+// serve is a view of the packets the client sent; so is the serve of a
+// recording whose SSLRequest alone differs from the one the client sent (its
+// max packet size), every later packet as recorded. Before this row no
 // connection of the package's rows asked for TLS, so the HandshakeResponse41
 // read after the upgrade could go unnoted, and a pid only the live client
 // sent there would be learned (a false green), or the view stated without it.
@@ -338,21 +340,29 @@ func TestAMySQLHandshakeOverTLSStatesTheViewItGave(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		plaintext  bool   // the recording was made without TLS
+		otherSSL   bool   // the recorded SSLRequest gives another max packet size
 		pid        string // the live client's pid
 		value      string // the later call's changed value
 		asRecorded bool
 		why        string // "" learns; else a part of the refusal
 	}{
-		{"a TLS handshake sent as recorded, a fresh value", false, "6801", fresh, true, ""},
-		{"a TLS handshake from another process, a fresh value", false, "4242", fresh, false, ""},
-		{"a TLS handshake from another process, the pid only it sent over TLS", false, "4242", "4242", false, "as record's full round gave it"},
-		{"a TLS client served from a recording without TLS, a fresh value", true, "6801", fresh, false, ""},
-		{"a TLS client served from a recording without TLS, the pid only it sent", true, "4242", "4242", false, "as record's full round gave it"},
+		{"a TLS handshake sent as recorded, a fresh value", false, false, "6801", fresh, true, ""},
+		{"a TLS handshake from another process, a fresh value", false, false, "4242", fresh, false, ""},
+		{"a TLS handshake from another process, the pid only it sent over TLS", false, false, "4242", "4242", false, "as record's full round gave it"},
+		{"a TLS client served from a recording without TLS, a fresh value", true, false, "6801", fresh, false, ""},
+		{"a TLS client served from a recording without TLS, the pid only it sent", true, false, "4242", "4242", false, "as record's full round gave it"},
+		{"a TLS handshake whose SSLRequest alone is not the recording's, a fresh value", false, true, "6801", fresh, false, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			served := recordedTLSLogin(t, tlsClient("6801"))
 			if tc.plaintext {
 				served = recordedLogin(t, replayer.HandshakeMockForTest(), withPid("6801"))
+			}
+			if tc.otherSSL {
+				other := tlsClient("6801")
+				other.MaxPacketSize /= 2
+				greeting := served.Spec.MySQLResponses[0].Message.(*mysql.HandshakeV10Packet)
+				served.Spec.MySQLRequests[0].PacketBundle = recordedPacket(t, greeting, mysql.HandshakeV10, 1, sslRequestPayload(other))
 			}
 			r := handshakeServedOver(t, learn.NewTracker(), []*models.Mock{served}, served, tlsClient(tc.pid), nil, true)
 			rec := learn.Shape{Leaves: map[string]learn.Leaf{path: {Path: path, Type: learn.String, Value: recorded}}}
