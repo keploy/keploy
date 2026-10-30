@@ -1589,6 +1589,24 @@ func (ys *MockYaml) IndexTestSetMocks(ctx context.Context, testSetID string, aft
 
 var _ pkg.TestSetMockIndexReader = (*MockYaml)(nil)
 
+// WalkTestSetMocks hands visit every mock of the test set's mock file, one at a
+// time as it is decoded, with the pools IndexTestSetMocks returns it in
+// (AllPerTest, AllSession): a mocks.gob mock by mock, a yaml or json file
+// document by document. Nothing keeps a mock once visit returns, so a reader
+// that keeps a few fields of each holds one decoded mock at a time, never the
+// set. visit must not keep m. The documents the decoders skip are not visited,
+// and the warnings a read of the file logs (a cut file, a skipped document,
+// requirements no mock meets) are left to the replay's own read of it.
+func (ys *MockYaml) WalkTestSetMocks(ctx context.Context, testSetID string, visit func(m *models.Mock, perTest, session bool)) error {
+	if visit == nil {
+		return nil
+	}
+	_, err := ys.readMockPoolsVisiting(ctx, testSetID, time.Time{}, time.Time{}, nil, nil, poolAllPerTest|poolAllSession, visit)
+	return err
+}
+
+var _ pkg.TestSetMockWalker = (*MockYaml)(nil)
+
 // mockPools selects the pools readMockPools builds.
 type mockPools uint8
 
@@ -1623,6 +1641,10 @@ type mockRouter struct {
 	// allPerTest is every per-test candidate, pruned or not, in file order,
 	// when poolAllPerTest is wanted.
 	allPerTest []*models.Mock
+	// visit, when set, is handed each mock as it is routed, with the pools
+	// AllPerTest and AllSession would hold it in, instead of any list keeping
+	// it (WalkTestSetMocks).
+	visit func(m *models.Mock, perTest, session bool)
 }
 
 // pruned reports whether the mapping prune drops the mock: it is mapped to a
@@ -1675,6 +1697,10 @@ func (r *mockRouter) route(mock *models.Mock, fromGob bool) {
 	// lifetime, so one of session or connection lifetime is a candidate for
 	// both pools there. The YAML reader does not.
 	inPerTest := lifetime == models.LifetimePerTest || (fromGob && mock.Kind == models.PostgresV2)
+	if r.visit != nil {
+		r.visit(mock, inPerTest, inSession)
+		return
+	}
 	toPerTest := inPerTest && !pruned && r.want&poolPerTest != 0
 	toSession := inSession && (r.want&poolAllSession != 0 || (!pruned && r.want&poolSession != 0))
 	if inPerTest && r.want&poolAllPerTest != 0 {
@@ -1778,6 +1804,15 @@ func (r *mockRouter) sessionPools(ctx context.Context, logger *zap.Logger, after
 // The mapping prune drops a mock that is mapped to a specific test this run
 // does not need; Filtered and Unfiltered apply it.
 func (ys *MockYaml) readMockPools(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool, want mockPools) (models.TestSetMocks, error) {
+	return ys.readMockPoolsVisiting(ctx, testSetID, afterTime, beforeTime, mocksThatHaveMappings, mocksWeNeed, want, nil)
+}
+
+// readMockPoolsVisiting is readMockPools that, given visit, hands it each mock
+// as it is decoded (mockRouter.visit) and builds no pool: what it returns then
+// lists only the documents the decoders skipped. A visiting read logs
+// nothing: what the replay's own read of the file logs is not logged again
+// (WalkTestSetMocks), and a read or decode error is returned to its caller.
+func (ys *MockYaml) readMockPoolsVisiting(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool, want mockPools, visit func(m *models.Mock, perTest, session bool)) (models.TestSetMocks, error) {
 	var out models.TestSetMocks
 	r := &mockRouter{
 		want:                  want,
@@ -1785,6 +1820,10 @@ func (ys *MockYaml) readMockPools(ctx context.Context, testSetID string, afterTi
 		mocksWeNeed:           mocksWeNeed,
 		perTest:               make([]*models.Mock, 0),
 		session:               make([]*models.Mock, 0),
+		visit:                 visit,
+	}
+	if visit != nil {
+		want &^= payloadsOnDisk
 	}
 
 	mockFileName := "mocks"
@@ -1802,33 +1841,42 @@ func (ys *MockYaml) readMockPools(ctx context.Context, testSetID string, afterTi
 	// short-circuit and return before the auto-detect reader runs.
 	gobPath := filepath.Join(path, mockFileName+".gob")
 	if _, err := os.Stat(gobPath); err == nil {
-		mocks, cut, err := readGobMocksCut(gobPath)
-		if err != nil {
-			return models.TestSetMocks{}, err
-		}
 		logger := ys.Logger.With(zap.String("mock_file", gobPath))
-		if cut {
-			logger.Warn("the mock file ends part-way through its last mock, probably because a write was interrupted (the recorder stopped, or the disk filled), and that mock was not read",
-				zap.String("next_step", "re-record the test set"))
+		if visit != nil {
+			logger = zap.NewNop()
 		}
 		connFailures := 0
 		var deps models.MockDepsCheck
-		for _, mock := range mocks {
+		// One mock at a time: a visiting read keeps none of them.
+		cut, err := forEachGobMockCut(gobPath, func(mock *models.Mock) error {
 			if mock.Kind == models.ConnectionFailure {
 				// gob has no per-kind decoder: a connection failure is
 				// validated here, as DecodeMocks and DecodeMocksJSON validate
 				// theirs.
 				if !connFailureSupported(mock, logger, false) {
 					addSkipped(&out, mock.Name, mock.Kind)
-					continue
+					return nil
 				}
 				connFailures++
 			}
 			r.route(mock, true)
-			// After routing, which derives the mock's lifetime unless the
-			// mapping prune drops it first: its links are then read without
-			// deriving it again on a copy.
-			deps.Add(mock)
+			if visit == nil {
+				// After routing, which derives the mock's lifetime unless the
+				// mapping prune drops it first: its links are then read
+				// without deriving it again on a copy.
+				deps.Add(mock)
+			}
+			return nil
+		})
+		if err != nil {
+			return models.TestSetMocks{}, err
+		}
+		if visit != nil {
+			return out, nil
+		}
+		if cut {
+			logger.Warn("the mock file ends part-way through its last mock, probably because a write was interrupted (the recorder stopped, or the disk filled), and that mock was not read",
+				zap.String("next_step", "re-record the test set"))
 		}
 		warnConnFailuresNotReplayed(logger, testSetID, connFailures)
 		warnUnmetRequirements(logger, testSetID, gobPath, deps.Unmet())
@@ -1861,6 +1909,9 @@ func (ys *MockYaml) readMockPools(ctx context.Context, testSetID string, afterTi
 	reader, err := yaml.NewMockReaderAny(ctx, ys.Logger, path, mockFileName, ys.Format)
 	if err != nil {
 		if os.IsNotExist(err) || errors.Is(err, os.ErrNotExist) {
+			if visit != nil {
+				return out, nil
+			}
 			// No mocks file in either format — nothing to replay. Use the
 			// lax (strict=false) filter to mirror the gob branch above and
 			// the agent-level filter; strictness is decided downstream.
@@ -1870,6 +1921,9 @@ func (ys *MockYaml) readMockPools(ctx context.Context, testSetID string, afterTi
 			r.sessionPools(ctx, ys.Logger, afterTime, beforeTime, &out)
 			out.AllPerTest = r.allPerTest
 			return out, nil
+		}
+		if visit != nil {
+			return models.TestSetMocks{}, err
 		}
 		msg := "failed to read the mocks from config file"
 		if want&poolPerTest != 0 {
@@ -1883,6 +1937,11 @@ func (ys *MockYaml) readMockPools(ctx context.Context, testSetID string, afterTi
 	// The decoders' skip ERRORs name the mock, and mock names repeat in every
 	// test set, so they say which file.
 	logger := ys.Logger.With(zap.String("mock_file", reader.Path()))
+	if visit != nil {
+		// One document at a time, payload and all, kept by no one: no
+		// payload source, no index (src stays nil).
+		logger = zap.NewNop()
+	}
 	var src *payloadSource
 	if want&payloadsOnDisk != 0 {
 		if src, err = newPayloadSource(reader); err != nil {
@@ -1927,6 +1986,9 @@ func (ys *MockYaml) readMockPools(ctx context.Context, testSetID string, afterTi
 			builder.finish(probe, hasContent, connFailures, unmet)
 		}
 	}
+	if visit != nil {
+		return out, nil
+	}
 	warnConnFailuresNotReplayed(logger, testSetID, connFailures)
 	warnUnmetRequirements(logger, testSetID, reader.Path(), unmet)
 	return ys.finishMockPools(ctx, r, want, hasContent, path, afterTime, beforeTime, out)
@@ -1963,7 +2025,9 @@ func (ys *MockYaml) decodeMockDocs(reader *yaml.MockReader, logger *zap.Logger, 
 			if readerIsJSON {
 				msg = "failed to decode the config mocks from json doc"
 			}
-			utils.LogError(ys.Logger, decodeErr, msg, zap.String("session", filepath.Base(path)))
+			// logger, not ys.Logger: a visiting read's is a Nop one, its
+			// error returned to its caller (readMockPoolsVisiting).
+			utils.LogError(logger, decodeErr, msg, zap.String("session", filepath.Base(path)))
 			return nil, false, 0, fmt.Errorf("failed to decode the mocks in %s: %w", reader.Path(), decodeErr)
 		}
 		var skipped *skippedEntry
@@ -1976,7 +2040,9 @@ func (ys *MockYaml) decodeMockDocs(reader *yaml.MockReader, logger *zap.Logger, 
 				connFailures++
 			}
 			r.route(mock, false)
-			deps.Add(mock) // after routing, as the gob reader
+			if r.visit == nil {
+				deps.Add(mock) // after routing, as the gob reader
+			}
 			if src != nil {
 				// Last: routing and the links read the payload.
 				mock.LeavePayloadOnDisk(src, models.PayloadAt{Offset: doc.off, Length: doc.n, Name: mock.Name})

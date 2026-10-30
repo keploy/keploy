@@ -36,6 +36,11 @@ type mockDisplayInfo struct {
 	// carry a whole recorded command, are worked out when a report names it
 	// rather than held for every mock of the set.
 	onDisk *models.Mock
+	// carryOver: a carry-over mock (models.IsCarryOver), the application's
+	// asynchronous output, placed at place (models.PlaceOf), which the release
+	// rule gives to the test whose window or gap after it holds it.
+	carryOver bool
+	place     time.Time
 }
 
 // summaryOf is the mock's summary (models.MockSummaryFromSpec).

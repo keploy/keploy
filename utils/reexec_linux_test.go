@@ -3,8 +3,14 @@
 package utils
 
 import (
+	"errors"
 	"os"
+	"path/filepath"
+	"syscall"
 	"testing"
+
+	keployLog "go.keploy.io/server/v3/utils/log"
+	"go.uber.org/zap"
 )
 
 func TestIsCloudReplayCmd(t *testing.T) {
@@ -172,4 +178,100 @@ func TestShouldReexecWithSudo_NotForDockerStart(t *testing.T) {
 	if !ShouldReexecWithSudo() {
 		t.Error("ShouldReexecWithSudo() = false for docker run")
 	}
+}
+
+// The run goes on in the process the sudo exec starts, which keeps a log of
+// its own. This process's log, a temp file, is gone by the exec: nothing would
+// be left to remove it, one log left in the temp directory per Docker or cloud
+// replay run that re-executes itself with sudo.
+func TestReexecWithSudo_RemovesThisProcesssLogBeforeTheExec(t *testing.T) {
+	bin := t.TempDir()
+	sudo := filepath.Join(bin, "sudo")
+	if err := os.WriteFile(sudo, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	t.Setenv("TMPDIR", t.TempDir())
+	_, f, err := keployLog.New()
+	if err != nil || f == nil {
+		t.Fatalf("log.New = %v, %v; want a log file", f, err)
+	}
+	t.Cleanup(func() {
+		_ = keployLog.CloseLogFile(f)
+		keployLog.TestOnlyResetSink()
+	})
+	prevLog := LogFile
+	LogFile = f
+	t.Cleanup(func() { LogFile = prevLog })
+
+	execed, leftBehind := "", true
+	prev := execProcess
+	execProcess = func(path string, _ []string, _ []string) error {
+		execed = path
+		_, err := os.Lstat(f.Name())
+		leftBehind = !os.IsNotExist(err)
+		return nil
+	}
+	t.Cleanup(func() { execProcess = prev })
+
+	if err := ReexecWithSudo(zap.NewNop()); err != nil {
+		t.Fatalf("ReexecWithSudo = %v, want nil where its exec succeeds", err)
+	}
+	if execed != sudo {
+		t.Fatalf("ReexecWithSudo exec'd %q, want %s", execed, sudo)
+	}
+	if leftBehind {
+		t.Errorf("this process's log %s was still there at the exec", f.Name())
+	}
+}
+
+// A re-exec that cannot happen ends the run through its caller, with an
+// error, not inside ReexecWithSudo: an os.Exit there skipped every deferred
+// call of the run, the removal of its temp log among them (here it would end
+// this test binary). Where the exec itself fails, the log's name is gone
+// already, and closing the log after it is no error.
+func TestReexecWithSudo_AFailureReturnsToItsCaller(t *testing.T) {
+	t.Run("no sudo on PATH", func(t *testing.T) {
+		t.Setenv("PATH", t.TempDir())
+		execed := false
+		prev := execProcess
+		execProcess = func(string, []string, []string) error { execed = true; return nil }
+		t.Cleanup(func() { execProcess = prev })
+		if err := ReexecWithSudo(zap.NewNop()); err == nil {
+			t.Error("ReexecWithSudo = nil with no sudo on PATH, want an error")
+		}
+		if execed {
+			t.Error("ReexecWithSudo exec'd with no sudo on PATH")
+		}
+	})
+	t.Run("the exec fails", func(t *testing.T) {
+		bin := t.TempDir()
+		sudo := filepath.Join(bin, "sudo")
+		if err := os.WriteFile(sudo, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("PATH", bin)
+		t.Setenv("TMPDIR", t.TempDir())
+		_, f, err := keployLog.New()
+		if err != nil || f == nil {
+			t.Fatalf("log.New = %v, %v; want a log file", f, err)
+		}
+		t.Cleanup(keployLog.TestOnlyResetSink)
+		prevLog := LogFile
+		LogFile = f
+		t.Cleanup(func() { LogFile = prevLog })
+		prev := execProcess
+		execProcess = func(string, []string, []string) error { return syscall.EACCES }
+		t.Cleanup(func() { execProcess = prev })
+
+		if err := ReexecWithSudo(zap.NewNop()); !errors.Is(err, syscall.EACCES) {
+			t.Errorf("ReexecWithSudo = %v, want the exec's own error", err)
+		}
+		if _, err := os.Lstat(f.Name()); !os.IsNotExist(err) {
+			t.Errorf("this process's log %s is still there after a failed exec (lstat: %v)", f.Name(), err)
+		}
+		if err := keployLog.CloseLogFile(f); err != nil {
+			t.Errorf("CloseLogFile after a failed exec = %v, want nil", err)
+		}
+	})
 }

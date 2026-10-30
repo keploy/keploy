@@ -17,7 +17,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/compose-spec/compose-go/v2/cli"
 	"github.com/compose-spec/compose-go/v2/loader"
+	composepaths "github.com/compose-spec/compose-go/v2/paths"
 	composetypes "github.com/compose-spec/compose-go/v2/types"
 	"github.com/docker/cli/cli/command"
 	cliflags "github.com/docker/cli/cli/flags"
@@ -29,6 +31,10 @@ import (
 // -p/--project-name is given. Named here rather than imported from
 // compose-go/internal/consts, which is not importable.
 const composeProjectNameEnv = "COMPOSE_PROJECT_NAME"
+
+// composeEnvFilesEnv is the variable `docker compose` takes its env files
+// from when the command gives no --env-file (comma-separated).
+const composeEnvFilesEnv = "COMPOSE_ENV_FILES"
 
 // ComposeRunner drives one compose project through the compose library.
 type ComposeRunner struct {
@@ -87,7 +93,7 @@ func (c composeLogConsumer) line(w io.Writer, containerName, message string) {
 	if c.serviceOf != nil {
 		service = c.serviceOf(containerName)
 	}
-	cut := appOutput.record(c.project, c.run, containerName, service, message)
+	cut := appOutput.record(c.project, c.run, containerName, service, message, 0)
 	_, _ = fmt.Fprintf(w, "%s  | %s\n", containerName, cut)
 }
 
@@ -158,6 +164,9 @@ type ComposeRunnerOptions struct {
 	ProjectName string
 	// WorkingDir is --project-directory, or the process cwd when not given.
 	WorkingDir string
+	// EnvFiles are the values of --env-file, in order, empty when not given
+	// (composeEnvironment).
+	EnvFiles []string
 	// Progress is where compose reports what it does to the project's
 	// containers, networks and images. When nil: os.Stderr, or os.Stdout under
 	// COMPOSE_STATUS_STDOUT (see composeProgress). compose writes it from
@@ -181,18 +190,9 @@ func NewComposeRunner(ctx context.Context, apiClient client.APIClient, opts Comp
 	if len(opts.Content) == 0 {
 		return nil, fmt.Errorf("compose content is empty")
 	}
-
-	workingDir := strings.TrimSpace(opts.WorkingDir)
-	if workingDir == "" {
-		wd, err := os.Getwd()
-		if err != nil {
-			return nil, fmt.Errorf("resolve compose working directory: %w", err)
-		}
-		workingDir = wd
-	}
-	absWorkingDir, err := filepath.Abs(workingDir)
+	absWorkingDir, err := composeWorkingDir(opts.WorkingDir)
 	if err != nil {
-		return nil, fmt.Errorf("resolve compose working directory: %w", err)
+		return nil, err
 	}
 
 	dockerCli, err := newComposeCLI(apiClient, opts.Progress)
@@ -200,15 +200,59 @@ func NewComposeRunner(ctx context.Context, apiClient client.APIClient, opts Comp
 		return nil, err
 	}
 
+	project, err := loadComposeProject(ctx, opts.Content, opts.ProjectName, absWorkingDir, opts.EnvFiles)
+	if err != nil {
+		return nil, err
+	}
+
+	// Built here once only to fail here, where a build without the library
+	// says so; each operation builds its own (service).
+	if _, err := newComposeBackend(dockerCli, opts.Progress != nil); err != nil {
+		return nil, err
+	}
+	return &ComposeRunner{cli: dockerCli, project: project, progressGiven: opts.Progress != nil}, nil
+}
+
+// composeWorkingDir is the absolute project directory: workingDir, else the
+// current directory, as `docker compose` takes it.
+func composeWorkingDir(workingDir string) (string, error) {
+	workingDir = strings.TrimSpace(workingDir)
+	if workingDir == "" {
+		wd, err := os.Getwd()
+		if err != nil {
+			return "", fmt.Errorf("resolve compose working directory: %w", err)
+		}
+		workingDir = wd
+	}
+	absWorkingDir, err := filepath.Abs(workingDir)
+	if err != nil {
+		return "", fmt.Errorf("resolve compose working directory: %w", err)
+	}
+	return absWorkingDir, nil
+}
+
+// loadComposeProject loads the in-memory document content as `docker compose`
+// would, from absWorkingDir, against the environment compose resolves it
+// against (composeEnvironment, with envFiles, the command's --env-file), under
+// projectName or compose's own precedence (projectNameOption), and shapes it
+// as the CLI does before it runs it. It reads no daemon. NewComposeRunner runs
+// the project it loads; the shell-out path (StartComposeChildOutput) loads the
+// same project only to know its name and services, so both name a
+// container's output alike, and a document compose runs loads on both.
+func loadComposeProject(ctx context.Context, content []byte, projectName, absWorkingDir string, envFiles []string) (*composetypes.Project, error) {
+	env, err := composeEnvironment(absWorkingDir, envFiles)
+	if err != nil {
+		return nil, err
+	}
 	details := composetypes.ConfigDetails{
 		WorkingDir: absWorkingDir,
 		// Filename is required for error messages and for relative-path
 		// resolution; Content being set is what stops the loader reading disk.
-		ConfigFiles: []composetypes.ConfigFile{{Filename: syntheticComposeFilename, Content: opts.Content}},
-		Environment: environmentMap(),
+		ConfigFiles: []composetypes.ConfigFile{{Filename: syntheticComposeFilename, Content: content}},
+		Environment: env,
 	}
 
-	project, err := loader.LoadWithContext(ctx, details, projectNameOption(opts.ProjectName, absWorkingDir))
+	project, err := loader.LoadWithContext(ctx, details, projectNameOption(projectName, env, absWorkingDir))
 	if err != nil {
 		return nil, fmt.Errorf("load compose project: %w", err)
 	}
@@ -221,13 +265,7 @@ func NewComposeRunner(ctx context.Context, apiClient client.APIClient, opts Comp
 	if err != nil {
 		return nil, fmt.Errorf("prepare compose project: %w", err)
 	}
-
-	// Built here once only to fail here, where a build without the library
-	// says so; each operation builds its own (service).
-	if _, err := newComposeBackend(dockerCli, opts.Progress != nil); err != nil {
-		return nil, err
-	}
-	return &ComposeRunner{cli: dockerCli, project: project, progressGiven: opts.Progress != nil}, nil
+	return project, nil
 }
 
 // syntheticComposeFilename names the in-memory document. It is never read from
@@ -273,21 +311,22 @@ func asComposeCLIWouldShapeIt(project *composetypes.Project) (*composetypes.Proj
 }
 
 // projectNameOption reproduces compose's own project-name precedence:
-// -p/--project-name, then $COMPOSE_PROJECT_NAME, then a `name:` in the YAML,
-// then the normalized base name of the working directory.
+// -p/--project-name, then COMPOSE_PROJECT_NAME in env (the environment the
+// document resolves against, so keploy's own, else an env file's), then a
+// `name:` in the YAML, then the normalized base name of the working directory.
 //
 // The first two are set imperatively; the directory-derived fallback is not,
 // which is precisely what lets a `name:` in the document win over it (see
 // loader.projectName). Getting this wrong does not fail loudly — it silently
 // addresses a DIFFERENT project, so `down` would leave this stack running and
 // `ps` would report nothing.
-func projectNameOption(projectName, absWorkingDir string) func(*loader.Options) {
+func projectNameOption(projectName string, env composetypes.Mapping, absWorkingDir string) func(*loader.Options) {
 	return func(o *loader.Options) {
 		if name := strings.TrimSpace(projectName); name != "" {
 			o.SetProjectName(name, true)
 			return
 		}
-		if name := strings.TrimSpace(os.Getenv(composeProjectNameEnv)); name != "" {
+		if name := strings.TrimSpace(env[composeProjectNameEnv]); name != "" {
 			o.SetProjectName(name, true)
 			return
 		}
@@ -295,8 +334,54 @@ func projectNameOption(projectName, absWorkingDir string) func(*loader.Options) 
 	}
 }
 
-// environmentMap is the environment the loader resolves the document against,
-// so ${VAR} interpolation and bare `environment: [NAME]` entries behave exactly
+// composeEnvironment is the environment `docker compose` resolves the
+// document against (its toProjectOptions), so the loader takes a document as
+// compose runs it: keploy's own (environmentMap), which always wins, as the
+// OS environment does for compose; PWD when that has none; then what the env
+// files set that keploy's environment does not. The env files are envFiles,
+// the command's --env-file values in order (each taken from the current
+// directory, with a leading ~ expanded as the shell expands it), else
+// COMPOSE_ENV_FILES, else
+// absWorkingDir's .env when there is one and COMPOSE_DISABLE_ENV_FILE is not
+// set; a ${VAR} in a file reads keploy's environment first. So a document
+// with ${DB_PASS:?} and DB_PASS only in the project's .env loads here as it
+// runs under compose, and a .env's COMPOSE_PROJECT_NAME names the project
+// (projectNameOption). A named env file that cannot be read fails, as it
+// fails compose.
+func composeEnvironment(absWorkingDir string, envFiles []string) (composetypes.Mapping, error) {
+	if len(envFiles) == 0 {
+		envFiles = strings.FieldsFunc(os.Getenv(composeEnvFilesEnv), func(c rune) bool { return c == ',' })
+	}
+	files := make([]string, 0, len(envFiles))
+	for _, f := range envFiles {
+		abs, err := filepath.Abs(composepaths.ExpandUser(f))
+		if err != nil {
+			return nil, fmt.Errorf("resolve compose env file %q: %w", f, err)
+		}
+		files = append(files, abs)
+	}
+	env := environmentMap()
+	if _, ok := env["PWD"]; !ok {
+		pwd, err := os.Getwd()
+		if err != nil {
+			return nil, fmt.Errorf("resolve compose working directory: %w", err)
+		}
+		env["PWD"] = pwd
+	}
+	o, err := cli.NewProjectOptions(nil,
+		cli.WithWorkingDirectory(absWorkingDir),
+		func(o *cli.ProjectOptions) error { o.Environment = env; return nil },
+		cli.WithEnvFiles(files...),
+		cli.WithDotEnv,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("read compose env files: %w", err)
+	}
+	return o.Environment, nil
+}
+
+// environmentMap is keploy's own environment for the loader (the base of
+// composeEnvironment), so ${VAR} interpolation and bare `environment: [NAME]` entries behave exactly
 // as they did for the child process that used to run compose.
 //
 // The process environment is not sufficient on its own. The injected agent
@@ -469,17 +554,26 @@ func (r *ComposeRunner) upConsumer(out, errW io.Writer) composeLogConsumer {
 }
 
 // serviceOf is the service of the container compose names name in its
-// attached output: the service that declares name as its container_name,
-// else the one name is <service>-<number> of. It is compose's naming rule
-// (getContainerNameWithoutProject) read backwards, from the project alone, so
-// it needs no daemon.
+// attached output (serviceOfContainer).
 func (r *ComposeRunner) serviceOf(name string) string {
-	for svcName, svc := range r.project.Services {
+	return serviceOfContainer(r.project, name)
+}
+
+// serviceOfContainer is the service of project's container compose names name
+// in its attached output: the service that declares name as its
+// container_name, else the one name is <service>-<number> of, else "". It is
+// compose's naming rule (getContainerNameWithoutProject) read backwards, from
+// the project alone, so it needs no daemon.
+func serviceOfContainer(project *composetypes.Project, name string) string {
+	if project == nil {
+		return ""
+	}
+	for svcName, svc := range project.Services {
 		if svc.ContainerName != "" && svc.ContainerName == name {
 			return svcName
 		}
 	}
-	for svcName, svc := range r.project.Services {
+	for svcName, svc := range project.Services {
 		if svc.ContainerName != "" {
 			continue
 		}

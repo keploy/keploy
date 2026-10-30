@@ -126,7 +126,12 @@ jobs:
       - name: Allow unprivileged user namespaces
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
+      # KEPLOY_TEST_REAL_DOCKER lets the rows that start containers on the
+      # runner's daemon run (a real `docker compose` child's output kept in
+      # the attach tail); a plain `go test` anywhere else skips them.
       - name: Running Unit Tests
+        env:
+          KEPLOY_TEST_REAL_DOCKER: "1"
         run: go test ./...
 
       # The hooks package's root tests skip in the run above, which is the

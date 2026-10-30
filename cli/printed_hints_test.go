@@ -4,13 +4,10 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -180,11 +177,11 @@ func TestWhatValidateRefusesIsSaidWithoutTheUsageText(t *testing.T) {
 
 // `keploy test` with nothing recorded tells the user to record, with a
 // `keploy record` line for the application the test was to start: a compose
-// user was shown `keploy record -c "docker run ..." --delay 6`. It says so and
-// exits the process (status 1), so each run is a process of its own: this
-// test binary, run again for that one case.
+// user was shown `keploy record -c "docker run ..." --delay 6`. It says so
+// once and fails with provider.ErrNoTestSets, which the binary's main exits 1
+// for. (It used to os.Exit(1) inside ValidateFlags, past every deferred call
+// of the run, so each case was a process of its own.)
 func TestTheNoTestSetsHintRecordsTheKindOfApplicationTheTestStarts(t *testing.T) {
-	const childEnv = "KEPLOY_TEST_NO_TEST_SETS_CASE"
 	cases := map[string]hintCase{
 		"native":     {args: []string{"-c", nativeRunApp}, kind: utils.Native},
 		"docker run": {args: []string{"-c", dockerRunApp}, kind: utils.DockerRun},
@@ -192,50 +189,23 @@ func TestTheNoTestSetsHintRecordsTheKindOfApplicationTheTestStarts(t *testing.T)
 	}
 	for name, tc := range cases {
 		tc.name, tc.command, tc.reason = name, "test", "No test-sets found"
-		cases[name] = tc
-	}
-
-	if name, ok := os.LookupEnv(childEnv); ok {
-		// The child: the run, its log on stderr as it is said (os.Exit
-		// leaves nothing to flush).
-		tc, known := cases[name]
-		if !known {
-			t.Fatalf("no case %q", name)
-		}
-		enc := zap.NewProductionEncoderConfig()
-		enc.TimeKey, enc.LevelKey, enc.NameKey, enc.CallerKey, enc.FunctionKey, enc.StacktraceKey = "", "", "", "", "", ""
-		stderr := zapcore.NewCore(zapcore.NewConsoleEncoder(enc), zapcore.Lock(os.Stderr), zapcore.InfoLevel)
-		_, _, err := runUpToTheRun(t, stderr, t.TempDir(), tc)
-		// Not t.Fatal, whose status (1) is the one asked for.
-		fmt.Fprintf(os.Stderr, "the run went on past the missing test sets (%v)\n", err)
-		os.Exit(3)
-	}
-
-	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			args := []string{"-test.run=^" + t.Name()[:strings.IndexByte(t.Name(), '/')] + "$", "-test.count=1"}
-			// The child is stopped with this test (CommandContext), and
-			// stops itself by this run's -timeout if it has to.
-			if deadline, ok := t.Deadline(); ok {
-				args = append(args, "-test.timeout="+time.Until(deadline).String())
+			var printed bytes.Buffer
+			enc := zap.NewProductionEncoderConfig()
+			enc.TimeKey, enc.LevelKey, enc.NameKey, enc.CallerKey, enc.FunctionKey, enc.StacktraceKey = "", "", "", "", "", ""
+			core := zapcore.NewCore(zapcore.NewConsoleEncoder(enc), zapcore.AddSync(&printed), zapcore.InfoLevel)
+			_, cobraSaid, err := runUpToTheRun(t, core, t.TempDir(), tc)
+			if !errors.Is(err, provider.ErrNoTestSets) {
+				t.Fatalf("`keploy test %s` with no test sets = %v, want provider.ErrNoTestSets", strings.Join(tc.args, " "), err)
 			}
-			child := exec.CommandContext(t.Context(), os.Args[0], args...)
-			// The child's t.TempDir()s are made under a dir of this test's,
-			// removed with it: the child's own cleanup never runs, the
-			// process exits from inside the run. t.TempDir makes its dir in
-			// GOTMPDIR when that is set, else in os.TempDir() (TMPDIR; TMP
-			// or TEMP on Windows).
-			tmp := t.TempDir()
-			child.Env = append(os.Environ(), childEnv+"="+name,
-				"GOTMPDIR="+tmp, "TMPDIR="+tmp, "TMP="+tmp, "TEMP="+tmp)
-			var out bytes.Buffer
-			child.Stdout, child.Stderr = &out, &out
-			err := child.Run()
-			var exit *exec.ExitError
-			if !errors.As(err, &exit) || exit.ExitCode() != 1 {
-				t.Fatalf("`keploy test %s` with no test sets: %v, want exit status 1; it said:\n%s", strings.Join(tc.args, " "), err, out.String())
+			said := printed.String() + cobraSaid
+			if n := strings.Count(said, tc.reason); n != 1 {
+				t.Errorf("%q said %d time(s), want once:\n%s", tc.reason, n, said)
 			}
-			line := hintUnder(t, strings.Split(out.String(), "\n"), tc.reason, "Example: ")
+			if strings.Contains(said, "failed to validate flags") || strings.Contains(cobraSaid, "Usage:") {
+				t.Errorf("the refusal was said again, as a validation failure or with the usage text:\n%s", said)
+			}
+			line := hintUnder(t, strings.Split(said, "\n"), tc.reason, "Example: ")
 			tc.command = "record"
 			checkHint(t, tc, line)
 		})

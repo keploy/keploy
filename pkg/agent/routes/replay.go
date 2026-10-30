@@ -331,7 +331,19 @@ func (a *Agent) UpdateMockParams(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	// How the agent served the call's window (models.MockWindowHeader): the
+	// replay's mock prune holds what it serves a test that got no answer by
+	// it.
+	if s, ok := a.svc.(mockWindowSayer); ok {
+		w.Header().Set(models.MockWindowHeader, s.MockWindowOf(updateParamsReq.FilterParams).String())
+	}
 	respondAgent(w, r, http.StatusOK, nil)
+}
+
+// mockWindowSayer says how the agent serves a call's window
+// (models.MockWindowHeader).
+type mockWindowSayer interface {
+	MockWindowOf(params models.MockFilterParams) models.MockWindowMode
 }
 
 // errConsumedResync answers a send that builds on a consumed history the

@@ -39,7 +39,8 @@ func SendSignal(logger *zap.Logger, pid int, sig syscall.Signal) error {
 //		return CmdError{Type: Init, Err: errors.New("not implemented")}
 //	}
 
-func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, kind CmdType, cancel func(cmd *exec.Cmd) func() error, waitDelay time.Duration, stdin []byte, extraEnv []string) CmdError {
+func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, kind CmdType, cancel func(cmd *exec.Cmd) func() error, waitDelay time.Duration, stdin []byte, extraEnv []string, opts ...ExecOption) CmdError {
+	o := execOptionsOf(opts)
 	// On Windows, commands are typically executed via 'cmd /C' or 'powershell -Command'
 	// to handle complex shell-like logic in 'userCmd'. 'cmd /C' is the most robust default.
 	cmd := exec.CommandContext(ctx, "cmd", "/C", userCmd)
@@ -73,7 +74,7 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, kin
 
 	// Set the output of the command, cut of the values the redactor holds
 	// when it holds any (ChildConsole).
-	console, err := SetChildConsole(cmd)
+	console, err := SetChildConsoleTee(cmd, o.outputTee)
 	if err != nil {
 		return CmdError{Type: Init, Err: err}
 	}

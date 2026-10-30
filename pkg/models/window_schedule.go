@@ -253,6 +253,20 @@ func (s *WindowSchedule) Released(t, currentStart time.Time) bool {
 	return s.ReleaseIndex(t) <= s.CurrentIndex(currentStart)
 }
 
+// ReleasedFirstAt reports whether the window that starts at start is the
+// first at which traffic recorded at t is released: Released(t, start) holds,
+// and held at no window that starts earlier. A window is known by its start,
+// as the agent's current window is, so two windows that start together both
+// release it. False for startup traffic, which no window releases first, and
+// with no schedule.
+func (s *WindowSchedule) ReleasedFirstAt(t, start time.Time) bool {
+	if s.Len() == 0 {
+		return false
+	}
+	i := s.ReleaseIndex(t)
+	return i >= 0 && s.windows[i].Start.Equal(start)
+}
+
 // ReleaseHorizon returns the latest recorded moment that is released once the
 // current window starts at currentStart: Released(t, currentStart) holds
 // exactly for t <= horizon. ok is false when the horizon is unbounded (the

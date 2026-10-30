@@ -1328,7 +1328,7 @@ func (a *Agent) testEvidence(ctx context.Context, id string, unmade bool, beganA
 	ev := &models.ScopeEvidence{}
 	misses, err := a.Proxy.GetMockErrors(ctx)
 	// A miss made outside every test's window is the application's
-	// background work (founder D1): charged to no test, this one included;
+	// background work: charged to no test, this one included;
 	// the run's read reports it once, at the set's level (Background).
 	for i := range misses {
 		if misses[i].CountsAgainstTest() && backgroundMiss(misses[i], beganAt, last) {
@@ -1386,7 +1386,7 @@ func (a *Agent) testEvidence(ctx context.Context, id string, unmade bool, beganA
 // what they did (a cache fill) is missing for the tests after it, and one of
 // them may make the call in its own window. Each is served, by exact match
 // only, unchecked and never required, at most once, and named on the
-// evidence of the test it lands in (founder D1: serve, don't require). A
+// evidence of the test it lands in (served, never required). A
 // proxy that cannot serves them to no one, as before.
 func (a *Agent) serveAside(id string) {
 	a.scopeMu.Lock()

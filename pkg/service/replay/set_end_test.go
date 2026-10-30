@@ -498,7 +498,7 @@ func TestTheCallsChargedToTheSetAreToldToTheHooks(t *testing.T) {
 	h.replayer.tellSetEnd("test-set-0", status, nil)
 	got := rec.last()
 	// The delete made before the set, which reached no test, is background
-	// work (item b): listed for the set, not charged to it.
+	// work: listed for the set, not charged to it.
 	if len(got) != 1 || got[0].ActualSummary != "POST /publish" {
 		t.Fatalf("told %+v; want the publish read at the set's end alone", got)
 	}
