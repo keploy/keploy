@@ -906,7 +906,7 @@ func TestADaemonEndsWithTheProcessThatStartedIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer out.Close()
+	t.Cleanup(func() { _ = out.Close() })
 	cmd := exec.Command(os.Args[0], "-test.run=^TestOwnProcessKilledHelper$", "-test.v", "-test.count=1")
 	cmd.Env = append(os.Environ(), adoptHelperEnv+"=TestOwnProcessKilledHelper", killedDirEnv+"="+dir)
 	cmd.Stdout, cmd.Stderr = out, out
