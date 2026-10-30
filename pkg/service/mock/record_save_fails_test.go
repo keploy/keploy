@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -157,4 +158,51 @@ func TestRecord_AStoreThatRefusedAMockAndFailedItsCloseSaysBoth(t *testing.T) {
 	require.Equal(t, "# the existing recording\n", string(got), "the existing set was not kept")
 	_, serr := os.Stat(filepath.Join(dir, name+yaml.MockStagingSuffix))
 	require.True(t, os.IsNotExist(serr), "the staging set was left behind: %v", serr)
+}
+
+// encodeRefusesDB is the real yaml store, which cannot encode mock-1 (a
+// payload fault: models.ErrMockEncode).
+type encodeRefusesDB struct{ *mockdb.MockYaml }
+
+func (d encodeRefusesDB) InsertMock(ctx context.Context, m *models.Mock, set string) error {
+	if m.Name == "mock-1" {
+		return fmt.Errorf("%w (yaml): a value yaml cannot marshal", models.ErrMockEncode)
+	}
+	return d.MockYaml.InsertMock(ctx, m, set)
+}
+
+// A mock the store cannot encode (a payload yaml cannot marshal) is not one
+// the disk refused: it is dropped with a WARN, as before, and the rest of
+// the recording is saved, exit 0. Counted as refused, one such mock would
+// have every recording that holds one end as not saved.
+func TestRecord_AnUnencodableMockIsDroppedAndTheRestSaved(t *testing.T) {
+	t.Setenv("KEPLOY_MOCK_FORMAT", "yaml")
+	utils.ResetInterruptedAgain()
+	utils.ClearInterrupted()
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ResetInterruptedAgain(); utils.ClearInterrupted(); utils.ErrCode = 0 })
+	dir := t.TempDir()
+	const name, n = "orders", 3
+	existing := filepath.Join(dir, name, "mocks.yaml")
+	require.NoError(t, os.MkdirAll(filepath.Dir(existing), 0o755))
+	require.NoError(t, os.WriteFile(existing, []byte("# the existing recording\n"), 0o644))
+	inst := &stoppedRunner{trickleInstrumentation: trickleInstrumentation{out: make(chan *models.Mock, n)}, n: n, stop: func() {}}
+	cfg := &config.Config{}
+	cfg.Mock.Name = name
+	cfg.Path = dir
+	core, logs := observer.New(zapcore.InfoLevel)
+	db := encodeRefusesDB{mockdb.New(zap.New(core), dir, "mocks")}
+	returned := make(chan error, 1)
+	go func() {
+		returned <- New(zap.New(core), inst, db, nil, FileStore{}, nil, cfg).Record(context.Background())
+	}()
+	err := returnedWithin(t, returned)
+	inst.wg.Wait()
+	require.NoError(t, err, "a recording with one unencodable mock failed: %v", logs.All())
+	require.Equal(t, 0, utils.ErrCode)
+	got, rerr := os.ReadFile(existing)
+	require.NoError(t, rerr)
+	require.NotEqual(t, "# the existing recording\n", string(got), "the recording was not saved")
+	require.Equal(t, 2, strings.Count(string(got), "kind: Http"), "the saved set: %s", got)
+	require.Equal(t, 1, logs.FilterLevelExact(zapcore.WarnLevel).FilterMessageSnippet("unencodable").Len(), "the dropped mock was not said at WARN")
 }

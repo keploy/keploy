@@ -626,3 +626,43 @@ func TestCloseUnless_AStoreWithNothingToWriteReturnsNilAtAStopAlreadyGiven(t *te
 		}
 	}
 }
+
+// A retry of CloseUnless after a give-up (a stuck disk, its stop closed),
+// once the disk took the rest and the writer ended: with a stop that is
+// already closed (Record's deferred discard runs with its ctx cancelled at
+// the give-up), what it waits for (the writer's end, gobDone) wins over the
+// stop. The row above ends its writer with a full Close, which tests the
+// lifecycle lock only. Repeated on fresh stores so that a coin flip cannot
+// pass.
+func TestCloseUnless_ARetryAfterTheWriterEndedReturnsNilAtAStopAlreadyGiven(t *testing.T) {
+	t.Setenv("KEPLOY_MOCK_FORMAT", "gob")
+	stop := make(chan struct{})
+	close(stop)
+	for i := 0; i < 60; i++ {
+		dir := t.TempDir()
+		disk := useStuckDisk(t, 40<<10, nil)
+		ys := New(zap.NewNop(), dir, "mocks")
+		const n = 6
+		insertGobMocks(t, ys, n)
+		gaveUp := make(chan struct{})
+		closed := make(chan error, 1)
+		go func() {
+			s := make(chan struct{})
+			go func() { <-disk.blocked; close(s); close(gaveUp) }()
+			closed <- ys.CloseUnless(s)
+		}()
+		<-gaveUp
+		if err := <-closed; err == nil {
+			t.Fatalf("iteration %d: setup: the first CloseUnless did not give up", i)
+		}
+		disk.free()
+		<-ys.gobDone // the writer took the rest, and ended
+		if err := ys.CloseUnless(stop); err != nil {
+			t.Fatalf("iteration %d: a retried CloseUnless on a writer that has ended returned %v at a stop already given", i, err)
+		}
+		got, err := readGobMocks(filepath.Join(dir, "set-0", "mocks.gob"))
+		if err != nil || len(got) != n {
+			t.Fatalf("iteration %d: the file holds %d mocks (%v), want %d", i, len(got), err, n)
+		}
+	}
+}
