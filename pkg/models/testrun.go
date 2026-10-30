@@ -76,7 +76,7 @@ type TestReport struct {
 	// tests (unless the call's recorded answer reaches the test read next:
 	// UnmatchedCall.ReachesTest), or after its last. They are its background work, a timer's, a start-up job's or a
 	// late write's call: charged to no test and never failing the set
-	// (founder D1). Each says what was called, when (At), where
+	// (served, never required). Each says what was called, when (At), where
 	// (BackgroundWhy) and why nothing answered it. Absent when there is none.
 	BackgroundCalls []UnmatchedCall `json:"backgroundCalls,omitempty" yaml:"background_calls,omitempty"`
 }
