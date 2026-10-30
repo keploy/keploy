@@ -1170,7 +1170,9 @@ func startsOf(starts []time.Time) string {
 // asks too): a connection whose process is, or descends from, the worker of
 // one of them is that test's alone, of one worker's nested tests the
 // innermost, and judged as any other; one that descends from two of their
-// workers, or from none, is every one's. The probe: test A (another worker's) begins at t0 and ends at 19.1
+// workers is every one's, and one that descends from none is every one's
+// unless they are all one worker's nested tests, whose innermost it is then
+// (a subtest's call from an app the worker did not start). The probe: test A (another worker's) begins at t0 and ends at 19.1
 // ms; test B begins at 1 ms, makes the call at 19 ms, its answer is read at
 // 19.2 ms, and ends at 30 ms. Picking the earliest test would mark A alone
 // and leave B, which owns no call, judged: a pass with its call skipped.
@@ -1197,7 +1199,9 @@ func TestV2AConnectionInOverlappingTestsIsMarkedWithEveryOne(t *testing.T) {
 		{"two workers' tests, the process known to neither", false, other, other + 1, self, false, models.MetadataLifetimeSession, both, nil},
 		{"two workers' tests, no process known", false, other, other + 1, 0, false, models.MetadataLifetimeSession, both, nil},
 		{"two tests reported with no worker", false, 0, 0, self, false, models.MetadataLifetimeSession, both, nil},
-		{"one worker's nested tests, the process not of it", false, other, other, self, false, models.MetadataLifetimeSession, both, nil},
+		{"one worker's nested tests, the process not of it: the innermost, B", false, other, other, self, false, models.MetadataLifetimePerTest, "", nil},
+		{"one worker's nested tests, no process known: the innermost, B", false, other, other, 0, false, models.MetadataLifetimePerTest, "", nil},
+		{"one worker's nested tests begun at one instant, the process not of it", false, other, other, self, true, models.MetadataLifetimeSession, models.LifetimeUndecidedManyTests + "@" + startsOf([]time.Time{t0}), nil},
 		{"two windows", true, 0, 0, self, false, models.MetadataLifetimeSession, both, nil},
 		{"the process is B's worker", false, other, self, self, false, models.MetadataLifetimePerTest, "", nil},
 		{"the process is a child of B's worker", false, other, parent, self, false, models.MetadataLifetimePerTest, "", nil},

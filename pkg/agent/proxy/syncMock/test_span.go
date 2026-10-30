@@ -70,7 +70,8 @@ func (s TestSpan) Starts() []time.Time { return slices.Clone(s.starts) }
 // rule keploy mock record's mapping asks too, tells the owner among them:
 // when it names one, that test alone is the candidate (a worker's test, or of
 // one worker's nested tests the innermost, for a call from the worker or a
-// process it started). That is the only tie-break: while any candidate is
+// process it started; of one worker's nested tests the innermost, too, for a
+// call from a process of no candidate's worker). That is the only tie-break: while any candidate is
 // still open the span is not final, and Changed fires when the one it waits
 // on leaves the open ones; once every candidate is a test case, one is the
 // owner, and more than one are Shared, as their windows overlap at t and

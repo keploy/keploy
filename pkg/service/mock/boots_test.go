@@ -131,7 +131,10 @@ func TestTestAtNamesTheTestTheGenericRecorderStates(t *testing.T) {
 		{"no process known", []test{{"A", other, 0, 19.1}, {"B", 100, 1, 30}}, nil, ""},
 		{"two tests with no worker", []test{{"A", 0, 0, 19.1}, {"B", 0, 1, 30}}, []uint32{300, 1}, ""},
 		{"one worker's nested tests: the innermost", []test{{"A", 100, 0, 30}, {"B", 100, 1, 25}}, []uint32{101, 100, 1}, "B"},
-		{"one worker's nested tests, the process not of it", []test{{"A", 100, 0, 30}, {"B", 100, 1, 25}}, []uint32{300, 1}, ""},
+		{"one worker's nested tests, the process not of it", []test{{"A", 100, 0, 30}, {"B", 100, 1, 25}}, []uint32{300, 1}, "B"},
+		{"one worker's nested tests, no process known", []test{{"A", 100, 0, 30}, {"B", 100, 1, 25}}, nil, "B"},
+		{"one worker's nested tests begun at one instant, the process not of it", []test{{"A", 100, 1, 30}, {"B", 100, 1, 25}}, []uint32{300, 1}, ""},
+		{"two workers' tests, the process of neither", []test{{"A", 100, 0, 30}, {"B", 100, 1, 25}, {"C", 200, 2, 30}}, []uint32{300, 1}, ""},
 		{"two workers both on the chain", []test{{"A", 100, 0, 30}, {"B", 101, 1, 25}}, []uint32{102, 101, 100, 1}, ""},
 		{"two workers' tests begun at one instant, the process known to neither", []test{{"A", 100, 1, 19.1}, {"B", 200, 1, 30}}, []uint32{300, 1}, ""},
 		{"two workers' tests begun at one instant, a child of B's worker", []test{{"A", 100, 1, 19.1}, {"B", 200, 1, 30}}, []uint32{201, 200, 1}, "B"},
@@ -214,5 +217,82 @@ func TestTestAtWithTheSwitchOffMatchesThePIDExactly(t *testing.T) {
 	nested := []models.ScopeWindow{{Name: "A", Start: t0, End: ms(30), PID: 100}, {Name: "B", Start: ms(1), End: ms(25), PID: 100}}
 	if got := testAt(nested, 300, []uint32{300, 1}, ms(19)); got != "B" {
 		t.Fatalf("one worker's nested tests, the process not of it: %q, want the innermost, B", got)
+	}
+}
+
+// ownerOf is the test classify gives the mock name to, "" when none.
+func ownerOf(plan bootPlan, name string) string {
+	for test, entries := range plan.tests {
+		for _, e := range entries {
+			if e.Name == name {
+				return test
+			}
+		}
+	}
+	return ""
+}
+
+// Under the proven switch a call made while one worker's parent test and its
+// subtest are both open, from a process that is not of that worker (an app
+// started outside it) or one keploy could not read, is the subtest's, the
+// innermost, for every parser, as the Generic recorder states it
+// (models.CallOwner): no parser but Generic marks a pooled call, so a call
+// the mapping gave to no test would leave the subtest judged with its call
+// served from the pool. Two such tests begun at one instant give it to none.
+func TestClassifyGivesOneWorkersSubtestACallFromOutsideTheWorker(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	t0 := time.Unix(7000, 0)
+	ms := func(f float64) time.Time { return t0.Add(time.Duration(f * float64(time.Millisecond))) }
+	for _, tc := range []struct {
+		name  string
+		pid   uint32
+		chain []uint32
+	}{
+		{"a process not of the worker", 300, []uint32{300, 1}},
+		{"its chain not read", 300, nil},
+		{"no pid known", 0, nil},
+	} {
+		for _, kind := range []string{"Http", "Postgres", "Generic"} {
+			for _, atOnce := range []bool{false, true} {
+				sub := ms(1)
+				want := "TestA/b"
+				if atOnce {
+					sub, want = t0, ""
+				}
+				nested := []models.ScopeWindow{{Name: "TestA", Start: t0, End: ms(30), PID: 100}, {Name: "TestA/b", Start: sub, End: ms(25), PID: 100}}
+				plan := classify(nested, nil, nil, []capturedMock{{name: "mock-0", kind: kind, ts: ms(19), pid: tc.pid, chain: tc.chain}})
+				if got := ownerOf(plan, "mock-0"); got != want {
+					t.Errorf("%s, %s, begun at one instant %v: the call is %q's, want %q (boots %v)", tc.name, kind, atOnce, got, want, plan.boots)
+				}
+			}
+		}
+	}
+}
+
+// Under the proven switch the call of an app a worker started (a start the
+// registry saw under that worker) is told by that worker too: when the chain
+// read at a later accept no longer shows it (the app was reparented), or no
+// chain was read, the start's worker still names its test while another
+// worker's test is open beside it.
+func TestClassifyTellsAStartsCallByItsWorker(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	t0 := time.Unix(7000, 0)
+	ms := func(f float64) time.Time { return t0.Add(time.Duration(f * float64(time.Millisecond))) }
+	tests := []models.ScopeWindow{{Name: "TestA", Start: t0, End: ms(30), PID: 100}, {Name: "TestB", Start: ms(1), End: ms(30), PID: 200}}
+	starts := []models.ScopeWindow{{Name: "app#1", Ref: "s1", Worker: 100}}
+	for _, tc := range []struct {
+		name  string
+		pid   uint32
+		chain []uint32
+	}{
+		{"reparented: the chain no longer shows the worker", 300, []uint32{300, 1}},
+		{"no chain read", 300, nil},
+		{"no pid known", 0, nil},
+		{"the chain under the worker", 300, []uint32{300, 100, 1}},
+	} {
+		plan := classify(tests, starts, nil, []capturedMock{{name: "mock-0", kind: "Http", ts: ms(19), pid: tc.pid, chain: tc.chain, ref: "s1"}})
+		if got := ownerOf(plan, "mock-0"); got != "TestA" {
+			t.Errorf("%s: the start's call is %q's, want its worker's TestA (boots %v)", tc.name, got, plan.boots)
+		}
 	}
 }

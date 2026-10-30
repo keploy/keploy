@@ -1,6 +1,7 @@
 package mock
 
 import (
+	"slices"
 	"sort"
 	"time"
 
@@ -69,7 +70,10 @@ func classify(tests, starts []models.ScopeWindow, suites []models.SuiteSpan, moc
 // recorder's held first exchange asks (syncMock.SyncMockManager.TestSpanAt),
 // with the same chain: a call the recorder states as one test's, unmarked,
 // is that test's here, and one it could not place (marked manyTests) is no
-// test's here either. With no chain read, the chain is the worker alone.
+// test's here either. The worker is on the chain: with no chain read, the
+// chain is the worker alone, and a start's worker the chain read at a later
+// accept no longer shows (its app was reparented) is put on it, since the
+// start registry saw the app under that worker.
 // Without the switch, a window whose PID is the worker's exactly owns it,
 // the latest begun of several; with none, the latest begun of the windows
 // holding at, when they are all one worker's.
@@ -108,8 +112,8 @@ func testAt(tests []models.ScopeWindow, worker uint32, chain []uint32, at time.T
 // ownerAt is testAt under the proven switch: models.CallOwner of the windows
 // holding at.
 func ownerAt(tests []models.ScopeWindow, worker uint32, chain []uint32, at time.Time) string {
-	if len(chain) == 0 && worker != 0 {
-		chain = []uint32{worker}
+	if worker != 0 && !slices.Contains(chain, worker) {
+		chain = append(slices.Clip(chain), worker)
 	}
 	var holding []models.ScopeWindow
 	var cands []models.OwnerCandidate

@@ -6,7 +6,8 @@ import (
 )
 
 // CallOwner names a call's owner only by the process tree: a worker on the
-// chain, then the innermost of that one worker's tests; else the only test.
+// chain, then the innermost of that one worker's tests; else the only test,
+// or the innermost of one worker's nested tests.
 func TestCallOwnerTellsTheOwnerOnlyByTheProcessTree(t *testing.T) {
 	t0 := time.Unix(7000, 0)
 	at := func(s int) time.Time { return t0.Add(time.Duration(s) * time.Second) }
@@ -25,7 +26,13 @@ func TestCallOwnerTellsTheOwnerOnlyByTheProcessTree(t *testing.T) {
 		{"no chain, two tests", []OwnerCandidate{{100, at(0)}, {200, at(1)}}, nil, -1},
 		{"tests with no worker", []OwnerCandidate{{0, at(0)}, {0, at(1)}}, []uint32{0, 300}, -1},
 		{"one worker's nested tests: the latest begun", []OwnerCandidate{{100, at(2)}, {100, at(0)}, {100, at(1)}}, []uint32{100}, 0},
-		{"one worker's nested tests, the process not of it", []OwnerCandidate{{100, at(0)}, {100, at(1)}}, []uint32{300}, -1},
+		{"one worker's nested tests, the process not of it", []OwnerCandidate{{100, at(0)}, {100, at(1)}}, []uint32{300}, 1},
+		{"one worker's nested tests, no chain, listed innermost first", []OwnerCandidate{{100, at(2)}, {100, at(0)}, {100, at(1)}}, nil, 0},
+		{"one worker's nested tests, the process not of it, the innermost two begun at one instant", []OwnerCandidate{{100, at(0)}, {100, at(1)}, {100, at(1)}}, []uint32{300}, -1},
+		{"one worker's nested tests, the process not of it, an earlier tie under a later innermost", []OwnerCandidate{{100, at(0)}, {100, at(0)}, {100, at(1)}}, nil, 2},
+		{"two workers' tests, the process of neither", []OwnerCandidate{{100, at(0)}, {100, at(1)}, {200, at(2)}}, []uint32{300}, -1},
+		{"one worker's test beside a window, the process of neither", []OwnerCandidate{{100, at(0)}, {0, at(1)}}, []uint32{300}, -1},
+		{"a window beside one worker's tests, listed first", []OwnerCandidate{{0, at(0)}, {100, at(1)}, {100, at(2)}}, nil, -1},
 		{"one worker's innermost two begun at one instant", []OwnerCandidate{{100, at(0)}, {100, at(1)}, {100, at(1)}}, []uint32{100}, -1},
 		{"an earlier tie under a later innermost", []OwnerCandidate{{100, at(0)}, {100, at(0)}, {100, at(1)}}, []uint32{100}, 2},
 		{"two workers both on the chain", []OwnerCandidate{{100, at(0)}, {200, at(1)}}, []uint32{201, 200, 100, 1}, -1},

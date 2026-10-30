@@ -26,40 +26,57 @@ type OwnerCandidate struct {
 //     innermost of them, the latest begun, owns it (a subtest inside its
 //     parent). When they are more than one worker's, or the innermost two
 //     began at one instant, no owner can be told.
-//   - With no candidate's worker on the chain, the only candidate owns it;
-//     of more than one, none can be told.
+//   - With no candidate's worker on the chain (a process the worker did not
+//     start, or one keploy could not read), the only candidate owns it. Of
+//     more than one, when they are all one worker's (a nonzero pid: a parent
+//     test and its subtests), the innermost of them, the latest begun, owns
+//     it, as above; of tests of more than one worker, or with no worker (a
+//     window's 0, which cannot be told apart), or whose innermost two began
+//     at one instant, none can be told.
 //
 // No time decides between candidates beyond that nesting: two tests whose
 // spans overlap at the call, with nothing in the process tree to tell them
 // apart, are never split by which began first.
 func CallOwner(cands []OwnerCandidate, chain []uint32) int {
-	owner, worker := -1, uint32(0)
-	tied := false
+	var mine []int
 	for i, c := range cands {
-		if c.PID == 0 || !onChain(chain, c.PID) {
-			continue
+		if c.PID != 0 && onChain(chain, c.PID) {
+			mine = append(mine, i)
 		}
+	}
+	switch {
+	case len(mine) > 0:
+		return innermost(cands, mine)
+	case len(cands) == 1:
+		return 0
+	}
+	all := make([]int, len(cands))
+	for i := range all {
+		all[i] = i
+	}
+	return innermost(cands, all)
+}
+
+// innermost is the index of the latest begun of the candidates of, when they
+// are all one nonzero worker's; -1 when they are not, when there are none,
+// or when the latest two began at one instant.
+func innermost(cands []OwnerCandidate, of []int) int {
+	owner, tied := -1, false
+	for _, i := range of {
+		c := cands[i]
 		switch {
-		case owner < 0:
-			owner, worker = i, c.PID
-		case c.PID != worker:
+		case c.PID == 0 || c.PID != cands[of[0]].PID:
 			return -1
-		case c.Start.After(cands[owner].Start):
+		case owner < 0 || c.Start.After(cands[owner].Start):
 			owner, tied = i, false
 		case c.Start.Equal(cands[owner].Start):
 			tied = true
 		}
 	}
-	if owner >= 0 {
-		if tied {
-			return -1
-		}
-		return owner
+	if tied {
+		return -1
 	}
-	if len(cands) == 1 {
-		return 0
-	}
-	return -1
+	return owner
 }
 
 func onChain(chain []uint32, pid uint32) bool {
