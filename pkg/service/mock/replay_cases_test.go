@@ -666,6 +666,17 @@ func TestOnMissRecordSaysWhenTheCapturedCallsWereNotWritten(t *testing.T) {
 	require.Len(t, errs, 1)
 	require.Contains(t, errs[0].Message, "were not all added to the mock set")
 	require.Zero(t, s.pushes, "a set whose captured calls were not written was published")
+
+	// Some refused and the rest not written: the error counts both.
+	core, logs = observer.New(zapcore.InfoLevel)
+	s = &closeFailStore{appendStore: appendStore{insertErr: errors.New("disk full"), failInserts: 1}}
+	m = &mockService{logger: zap.New(core), instrumentation: capturingInstr{captured: []*models.Mock{{Kind: models.HTTP}, {Kind: models.HTTP}}},
+		mockDB: s, store: countingPush{pushes: &s.pushes}}
+	err = m.persistCaptured(context.Background(), "set-0")
+	require.ErrorIs(t, err, models.ErrMocksNotWritten)
+	require.Contains(t, err.Error(), "1 of the 2 call(s) captured on miss were not added to the mock set set-0: disk full")
+	require.Contains(t, err.Error(), "the 1 call(s) captured on miss that the mock set set-0 was handed were not all written to it")
+	require.Zero(t, s.pushes)
 }
 
 // A replay under --on-miss record whose captured calls the mock set refused
@@ -688,6 +699,39 @@ func TestOnMissRecordThatAddsNothingFailsTheRun(t *testing.T) {
 	// The same run whose captured calls were added passes.
 	_, code, _ = replayIn(t, replayCase{onMiss: string(models.MissRecord), captured: []*models.Mock{httpTo("http://dep/new")}})
 	require.Zero(t, code)
+}
+
+// A test command that failed keeps its exit code when --on-miss record also
+// did not add its captured calls, as keploy mirrors the runner's exit
+// everywhere else: exit 3 stays 3, not 1. The run is still keploy's failure,
+// named in the error and the receipt, and Replay returns it.
+func TestOnMissRecordThatAddsNothingKeepsTheTestCommandsExit(t *testing.T) {
+	refused := fmt.Errorf("%w: /keploy/set/mocks.gob and /keploy/set/mocks.yaml: %w", mockdb.ErrMixedMockFiles, models.ErrMocksNotWritten)
+	keployDir, code, _ := replayIn(t, replayCase{onMiss: string(models.MissRecord), keployFails: true,
+		runExit:  models.AppError{AppErrorType: models.ErrCommandError, ExitCode: 3},
+		captured: []*models.Mock{httpTo("http://dep/new")}, insertErr: refused})
+	require.Equal(t, 3, code)
+	r := mustReceipt(t, keployDir)
+	require.Equal(t, 3, r.ExitCode)
+	require.Equal(t, 3, r.RunnerExitCode)
+	require.Equal(t, FailedByKeploy, r.FailedBy)
+	require.Contains(t, r.Error, "mocks.gob and /keploy/set/mocks.yaml")
+}
+
+// A keploy failure decided before --on-miss record's append failed keeps its
+// name in the receipt: the root cause, not the append, is what triage reads.
+// The append failure is still said, at ERROR.
+func TestOnMissRecordThatAddsNothingKeepsAnEarlierKeployFailuresName(t *testing.T) {
+	refused := fmt.Errorf("%w: /keploy/set/mocks.gob and /keploy/set/mocks.yaml: %w", mockdb.ErrMixedMockFiles, models.ErrMocksNotWritten)
+	keployDir, code, logs := replayIn(t, replayCase{onMiss: string(models.MissRecord), keployFails: true,
+		runExit:  models.AppError{AppErrorType: models.ErrInternal, Err: errors.New("the app runner panicked")},
+		captured: []*models.Mock{httpTo("http://dep/new")}, insertErr: refused})
+	require.NotZero(t, code)
+	r := mustReceipt(t, keployDir)
+	require.Equal(t, FailedByKeploy, r.FailedBy)
+	require.Equal(t, "the app runner panicked", r.Error)
+	refusals := logs.FilterMessageSnippet("failed to add a call captured on miss").FilterLevelExact(zapcore.ErrorLevel)
+	require.Equal(t, 1, refusals.Len(), "the append failure was not said at ERROR")
 }
 
 // Calls the agent captured on miss that it could not hand over are not in
