@@ -232,6 +232,19 @@ func ownerOf(plan bootPlan, name string) string {
 	return ""
 }
 
+// bootOf is the key of the boot classify puts the mock name in, and whether
+// one holds it.
+func bootOf(plan bootPlan, name string) (string, bool) {
+	for _, b := range plan.boots {
+		for _, e := range b.Mocks {
+			if e.Name == name {
+				return b.Key, true
+			}
+		}
+	}
+	return "", false
+}
+
 // Under the proven switch a call made while one worker's parent test and its
 // subtest are both open, from a process that is not of that worker (an app
 // started outside it) or one keploy could not read, is the subtest's, the
@@ -293,6 +306,48 @@ func TestClassifyTellsAStartsCallByItsWorker(t *testing.T) {
 		plan := classify(tests, starts, nil, []capturedMock{{name: "mock-0", kind: "Http", ts: ms(19), pid: tc.pid, chain: tc.chain, ref: "s1"}})
 		if got := ownerOf(plan, "mock-0"); got != "TestA" {
 			t.Errorf("%s: the start's call is %q's, want its worker's TestA (boots %v)", tc.name, got, plan.boots)
+		}
+	}
+}
+
+// Under the proven switch a protocol-phase mock (models.Mock.IsProtocolPhase:
+// the Generic recorder's session exchange, marked or not) is the pool's,
+// never a test's, in the mapping classify writes as in correlateScopes: a
+// test that listed it would own a call replay does not assert of it. From
+// the worker it goes to the set's pool; from an app the test started, to
+// that app's boot. A data-plane mock beside it is still the test's.
+func TestClassifyKeepsProtocolPhaseMocksOutOfTestMappings(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	t0 := time.Unix(7000, 0)
+	ms := func(f float64) time.Time { return t0.Add(time.Duration(f * float64(time.Millisecond))) }
+	tests := []models.ScopeWindow{{Name: "p::TestA", Start: t0, End: ms(10), PID: 100}, {Name: "p::TestB", Start: ms(11), End: ms(30), PID: 100}}
+	starts := []models.ScopeWindow{{Name: "cli#1@p::TestB", Ref: "s1", Worker: 100, Place: "p::TestB", Ready: ms(12)}}
+	mocks := []capturedMock{
+		{name: "worker-session", kind: "Generic", ts: ms(19), pid: 100, chain: []uint32{100, 1}, boot: true, protocol: true},
+		{name: "worker-startup", kind: "Postgres", ts: ms(19), pid: 100, chain: []uint32{100, 1}, protocol: true},
+		{name: "cli-session", kind: "Generic", ts: ms(20), pid: 101, chain: []uint32{101, 100, 1}, boot: true, protocol: true, ref: "s1", start: "cli#1@p::TestB"},
+		{name: "cli-startup", kind: "Postgres", ts: ms(20), pid: 101, chain: []uint32{101, 100, 1}, protocol: true, ref: "s1", start: "cli#1@p::TestB"},
+		{name: "worker-query", kind: "Postgres", ts: ms(21), pid: 100, chain: []uint32{100, 1}},
+		{name: "cli-query", kind: "Postgres", ts: ms(22), pid: 101, chain: []uint32{101, 100, 1}, ref: "s1", start: "cli#1@p::TestB"},
+	}
+	plan := classify(tests, starts, nil, mocks)
+	for _, tc := range []struct{ mock, test, boot string }{
+		{"worker-session", "", ""},
+		{"worker-startup", "", ""},
+		{"cli-session", "", "cli#1@p::TestB"},
+		{"cli-startup", "", "cli#1@p::TestB"},
+		{"worker-query", "p::TestB", "-"},
+		{"cli-query", "p::TestB", "-"},
+	} {
+		test := ownerOf(plan, tc.mock)
+		boot, inBoot := bootOf(plan, tc.mock)
+		if test != tc.test || (tc.boot == "-") == inBoot || (inBoot && boot != tc.boot) {
+			t.Errorf("%s: in test %q, boot %q (%v); want test %q, boot %q", tc.mock, test, boot, inBoot, tc.test, tc.boot)
+		}
+	}
+	for _, mk := range plan.perTest {
+		if mk.protocol {
+			t.Errorf("a protocol-phase mock %s is a test's call (perTest)", mk.name)
 		}
 	}
 }

@@ -28,7 +28,7 @@ func classify(tests, starts []models.ScopeWindow, suites []models.SuiteSpan, moc
 		entry := models.MockEntry{Name: mk.name, Kind: mk.kind}
 		if i, ok := byRef[mk.ref]; ok && mk.ref != "" {
 			s := starts[i]
-			if mk.boot || (!s.Ready.IsZero() && mk.ts.Before(s.Ready)) {
+			if mk.boot || mk.protocol || (!s.Ready.IsZero() && mk.ts.Before(s.Ready)) {
 				boots[i].Mocks = append(boots[i].Mocks, entry)
 				continue
 			}
@@ -42,7 +42,10 @@ func classify(tests, starts []models.ScopeWindow, suites []models.SuiteSpan, moc
 			out.perTest = append(out.perTest, mk)
 			continue
 		}
-		if test := testAt(tests, mk.pid, mk.chain, mk.ts); test != "" {
+		// A protocol-phase mock (under the proven switch) is the pool's,
+		// never a test's: the mapping lists data-plane mocks only, as
+		// correlateScopes does (dataPlane).
+		if test := testAt(tests, mk.pid, mk.chain, mk.ts); test != "" && !mk.protocol {
 			out.tests[test] = append(out.tests[test], entry)
 			out.perTest = append(out.perTest, mk)
 			continue
