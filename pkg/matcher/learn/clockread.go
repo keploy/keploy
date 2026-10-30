@@ -33,6 +33,25 @@ func (ln Learned) Clock() (models.ClockOffset, bool) {
 	return models.ClockOffset{}, false
 }
 
+// Unfollowed is ln, a variable a caller cannot follow (why: the caller's
+// refusal of it), as the plain read of the application's clock its value is
+// too (ReadToo): a KindClockRead whose Why names the variable it is not
+// followed as and why. ok is false for any other ln, and for a variable
+// whose value is no such read: the caller refuses it as before.
+func (ln Learned) Unfollowed(why string) (Learned, bool) {
+	if ln.Kind != KindVariable || ln.ReadToo == nil {
+		return ln, false
+	}
+	read := *ln.ReadToo
+	return Learned{
+		Kind:     KindClockRead,
+		Recorded: ln.Recorded,
+		Live:     ln.Live,
+		Read:     &read,
+		Why:      "it moved in record's full round as its call's clock did, and it stands whole where " + placeAt(ln.From) + " holds it too, as a read of the clock in the same unit does, but keploy cannot follow it from there (" + why + "): keploy learns it as a read of the application's clock, which a replay checks is made in its call's own span",
+	}, true
+}
+
 // clockReadUncheckedWhy is a KindClockRead's Why (read after "<field>
 // changed, and "): what a caller whose replay checks no read of the clock
 // refuses it with, where keploy learned it as noise before it learned a read
