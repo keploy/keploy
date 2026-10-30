@@ -1800,6 +1800,25 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 				ln = own
 			}
 		}
+		// The run's variable (Place.Run: a value the set's start-up or an
+		// earlier test sent) that, read as a value no earlier place is the
+		// source of and no moved place builds by an offset, is a plain read
+		// of the clock its own call's window holds in both runs, is learned
+		// as that read, checked in that window at every replay, never as the
+		// variable (founder, 2026-10-30): the earlier call held the same
+		// value in both runs, so it is a read of the clock in the same
+		// second as well, and two calls that read one clock in one second
+		// are a coincidence, not dataflow. As the variable, a replay whose
+		// clock crosses a second between the two calls would fail the
+		// later one, and the earlier call's place would carry a variable
+		// and a clock read at once (MergeLearned keeps one). A copy its own
+		// call's window does not hold (sent a minute later) stays the
+		// variable.
+		if ln.Kind == KindVariable && ln.From.Run && dc.windowHolds(dc.ofIn(r.Value, l.Value, w, at), w) {
+			if own := leaf(r, l, w, skipBoth); own.Kind == KindClockRead {
+				ln = own
+			}
+		}
 		// A value built by an offset on what the application was given that
 		// is a read in its own call's window too: under the rule a copy
 		// follows its source (follow), in keploy mock's client tests (the

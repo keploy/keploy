@@ -2,10 +2,12 @@ package learn
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 // What a set's first cycle learned is put on a copy of each recording it was
@@ -181,5 +183,49 @@ func TestTheRunsVariableTakesTheEarlierTestsOwnPlace(t *testing.T) {
 	delete(owner, "mock-0")
 	if _, taken := RunTakesPlaces(states, testOf); taken != nil {
 		t.Fatalf("a state of no test: taken %+v; want none (the start-up's carry no test's variable)", taken)
+	}
+}
+
+// One learning per place (founder, 2026-10-30): a place that binds or uses
+// a variable is never a clock read too, whichever arrived first, on disk or
+// in the state. The variable wins: a later call carried the value where its
+// own clock did not explain it (a copy the same second, which its own clock
+// does explain, is learned as that read and binds nothing), and its bind
+// keeps the clock evidence (models.MockVariable.Clock). A clock read at a
+// place no variable holds stays.
+func TestAPlaceIsAVariableOrAClockReadNeverBoth(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	read := models.ClockOffset{Res: time.Second, Layout: "epoch-s"}
+	ev := []models.ClockRead{{At: time.Unix(1793336932, 0), Res: time.Second}}
+	bind := models.MockVariables{"run-lastUsedAt": {Recorded: "1793336932", Bind: "body.data.lastUsedAt", Clock: ev}}
+	both := map[string]models.ClockOffset{"body.data.lastUsedAt": read, "body.data.updatedAt": read}
+	for name, row := range map[string]struct {
+		disk  models.MockSpec
+		st    models.MockState
+		binds models.MockVariables
+	}{
+		"both in one record":        {st: models.MockState{Clocks: both}, binds: bind},
+		"the clock read on disk":    {disk: models.MockSpec{Clocks: both}, binds: bind},
+		"the variable on disk":      {disk: models.MockSpec{Variables: bind}, st: models.MockState{Clocks: both}},
+		"a use, the clock in state": {st: models.MockState{Clocks: both, Variables: models.MockVariables{"order": {Recorded: "1793336932", Use: []string{"body.data.lastUsedAt"}}}}},
+	} {
+		m := &models.Mock{Name: "mock-195", Spec: row.disk}
+		for _, a := range MergeLearned(m, row.st, row.binds) {
+			if strings.HasPrefix(a, "body.data.lastUsedAt (clock") {
+				t.Errorf("%s: the merge says it added %q, a clock read at a variable's place", name, a)
+			}
+		}
+		if _, clock := m.Spec.Clocks["body.data.lastUsedAt"]; clock {
+			t.Errorf("%s: body.data.lastUsedAt holds a variable and a clock read %+v; want the variable alone", name, m.Spec.Clocks)
+		}
+		if _, clock := m.Spec.Clocks["body.data.updatedAt"]; !clock {
+			t.Errorf("%s: the clock read at body.data.updatedAt, which no variable holds, is gone: %+v", name, m.Spec.Clocks)
+		}
+		if len(m.Spec.Variables) != 1 {
+			t.Errorf("%s: variables %+v; want the one variable kept", name, m.Spec.Variables)
+		}
+		if v, ok := m.Spec.Variables["run-lastUsedAt"]; ok && !reflect.DeepEqual(v.Clock, ev) {
+			t.Errorf("%s: the bind's clock evidence is %+v; want %+v", name, v.Clock, ev)
+		}
 	}
 }

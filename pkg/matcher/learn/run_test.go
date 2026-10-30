@@ -993,3 +993,41 @@ func TestARunsPlaceKeepsTheWordRulesClockExclusions(t *testing.T) {
 		}
 	}
 }
+
+// A value an earlier test's call sent that a later test's call holds as a
+// read of its own clock too, in the same second in both runs, is that read:
+// two calls read one clock in one second, a coincidence, not dataflow
+// (founder, 2026-10-30). It is checked as a read in its own call's window at
+// every replay, so a replay whose clock crosses a second between the two
+// calls still passes, and nothing binds the run's variable at the earlier
+// call, which keeps its own clock read alone. A copy a minute later, which
+// its own call's clock does not explain, is the run's variable still.
+func TestAnEarlierTestsClockReadOfTheSameSecondIsNoRunsVariable(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	rec := time.Date(2026, 10, 30, 5, 8, 52, 0, time.UTC)
+	epoch := func(at time.Time) string { return strconv.FormatInt(at.Unix(), 10) }
+	aRead := rec.Add(50 * time.Millisecond)
+	for name, row := range map[string]struct {
+		after time.Duration
+		clock bool
+	}{"the same second": {250 * time.Millisecond, true}, "a minute later": {time.Minute, false}} {
+		tr := NewTracker()
+		tr.Begin()
+		a, _, _, _ := tr.Test()
+		tr.Served(a, Earlier{Mock: "mock-a", At: aRead, Own: true, Seen: []Seen{{Side: Request, Leaf: Leaf{Path: "body.data.lastUsedAt", Type: String, Value: epoch(aRead)}, Live: epoch(aRead.Add(FullRoundLead)), Place: "body.data.lastUsedAt"}}})
+		tr.End()
+		tr.Begin()
+		_, earlier, _, _ := tr.Test()
+		call := aRead.Add(row.after)
+		fCall := call.Add(FullRoundLead)
+		w := &Window{Rec: Span{From: call.Add(-5 * time.Millisecond), To: call}, F: Span{From: fCall.Add(-5 * time.Millisecond), To: fCall.Add(time.Millisecond)}}
+		ln := ClassifyIn(clockedDrifts(), []string{"body.createdAt"}, strLeaf("body.createdAt", epoch(aRead.Add(FullRoundLead))), strLeaf("body.createdAt", epoch(aRead)), call, earlier, nil, nil, w)[0]
+		_, isClock := ln.Clock()
+		switch {
+		case row.clock && (!isClock || ln.Kind == KindVariable):
+			t.Fatalf("%s: test B's clock read is %s from %+v (%s); want a read of its own call's clock, no run's variable", name, ln.Kind, ln.From, ln.Why)
+		case !row.clock && (ln.Kind != KindVariable || ln.From.Mock != "mock-a"):
+			t.Fatalf("%s: test B's copy is %s from %+v (%s); want test A's value, the run's variable", name, ln.Kind, ln.From, ln.Why)
+		}
+	}
+}

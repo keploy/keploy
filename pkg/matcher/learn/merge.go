@@ -49,8 +49,13 @@ func MergeReqBodyNoise(existing, detected map[string][]string) map[string][]stri
 // noise), is dropped too: the place stays compared. A clock read learned at
 // a place that holds one meets it (models.ClockOffset.Meet), so it holds
 // only the offsets both do, and is added when that changed it; one that
-// shares no offset with it is Empty and refuses every value there. A clock
-// read at a variable's place stays: the replay checks both.
+// shares no offset with it is Empty and refuses every value there. One
+// learning per place (founder, 2026-10-30): a variable's place holds no
+// clock read either, learned or on disk. The variable wins there: a later
+// call carried the value where its own call's clock did not explain it (a
+// copy its own clock does explain is learned as that read, classifyRead),
+// and the bind keeps the clock evidence (models.MockVariable.Clock); the
+// value is then checked by the calls that use it, not against the clock.
 func MergeLearned(mock *models.Mock, st models.MockState, binds models.MockVariables) []string {
 	var added []string
 	if !provenswitch.On() {
@@ -135,6 +140,9 @@ func MergeLearned(mock *models.Mock, st models.MockState, binds models.MockVaria
 			clocks = make(map[string]models.ClockOffset, len(st.Clocks))
 		}
 		for path, o := range st.Clocks {
+			if varPlaces[path] {
+				continue // a variable's place: no clock read is added there
+			}
 			cur, had := clocks[path]
 			next := o
 			if had {
@@ -151,6 +159,11 @@ func MergeLearned(mock *models.Mock, st models.MockState, binds models.MockVaria
 		_, clock := mock.Spec.Clocks[k]
 		if varPlaces[k] || clock {
 			delete(mock.Spec.ReqBodyNoise, k)
+		}
+	}
+	for k := range mock.Spec.Clocks {
+		if varPlaces[k] {
+			delete(mock.Spec.Clocks, k) // one on disk at a variable's place
 		}
 	}
 	sort.Strings(added)
