@@ -390,6 +390,11 @@ func readThread(proc fs.FS, id, pid int, buf []byte) (th taskStat, gone bool, er
 	if !parsed {
 		return taskStat{}, false, fmt.Errorf("thread %d of process %d: its stat line has no state: %q", id, pid, line)
 	}
+	if ReleasedTask(line) {
+		// Released between the kernel's read of its state and of its
+		// parent: dead, whatever state its line shows.
+		state = 'X'
+	}
 	start, parsed := statField(line, 22)
 	if !parsed {
 		return taskStat{}, false, fmt.Errorf("thread %d of process %d: its stat line has no start time: %q", id, pid, line)
@@ -455,8 +460,10 @@ var runningThread = func(pid int) (tid int, ok bool, err error) {
 
 // statState is the state letter of a stat line, the field after the command
 // name's last ')': all a thread's line is read for. A task being released
-// reads Z or X with its parent and group gone (0 and -1), which ParseProcStat
-// refuses; its state is still read.
+// reads with its parent and group gone (0 and -1), which ParseProcStat
+// refuses, in the state the kernel read before it found it released: Z or X,
+// or, released between the two reads, R, S or D (ReleasedTask, which
+// readThread reads as X).
 func statState(line []byte) (byte, bool) {
 	end := bytes.LastIndexByte(line, ')')
 	if end < 0 {

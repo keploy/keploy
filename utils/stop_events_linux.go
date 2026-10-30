@@ -53,12 +53,15 @@ func StopStallSaid() string { return StopStallBudget.String() + " of keploy's ru
 // how much storage they have read and written, and whether one waits on
 // storage (an uninterruptible sleep, D). FilesUnsettled is a read of their
 // open files that did not settle (openFiles), or of descriptors the kernel
-// would not list: its Fds are no evidence.
+// would not list: its Fds are no evidence. FilesUncompared, where it is not
+// nil, is why the kernel would not compare a process's files (kcmp(2)): its
+// Fds then count its descriptors, each once (openFiles).
 type ExitMark struct {
 	Running, Threads, Fds int
 	IO                    uint64
 	OnStorage             bool
 	FilesUnsettled        bool
+	FilesUncompared       error
 }
 
 // MarkExit reads how far procs are on their way out, each named by its pid
@@ -95,7 +98,11 @@ func MarkExit(procs []Reached) ExitMark {
 		// another user's credentials run now) are no evidence either.
 		n, settled := 0, false
 		if fds, err := os.ReadDir(fdDir); err == nil {
-			n, settled = openFiles(task, fds)
+			var uncompared error
+			n, settled, uncompared = openFiles(task, fds)
+			if uncompared != nil && m.FilesUncompared == nil {
+				m.FilesUncompared = fmt.Errorf("kcmp of process %d's descriptors: %w", p.PID, uncompared)
+			}
 		}
 		m.Fds += n
 		m.FilesUnsettled = m.FilesUnsettled || !settled
@@ -126,10 +133,14 @@ const kcmpFile = 0
 // that settled can still, rarely, count a descriptor that closed and opened
 // again between its comparisons beside the one that took its file over
 // (fileTally.settle). Where the kernel cannot compare them at all (no kcmp,
-// or keploy may not ask: a seccomp filter, a process it may not trace), the
-// read did not settle either: its descriptors are not counted for files, as
-// a count of them would take that churn for steps out again.
-func openFiles(task int, fds []os.DirEntry) (int, bool) {
+// or keploy may not ask: a seccomp filter, a process it may not trace), each
+// descriptor counts, and uncompared says why. A churn of descriptors then
+// reads as steps out again, but the ratchet takes only a new fewest
+// (ExitRatchet), so it moves a stop at most once for each descriptor of the
+// reading that set the mark: a longer wait, but a bounded one. Taken as no
+// evidence instead, the files an app closes as it drains would be no
+// progress, and keploy would kill it.
+func openFiles(task int, fds []os.DirEntry) (n int, settled bool, uncompared error) {
 	if cmp := filesCompared.Load(); cmp != nil {
 		return openFilesBy(*cmp, task, fds)
 	}
@@ -143,7 +154,7 @@ var filesCompared atomic.Pointer[func(task, a, b int) (int, error)]
 
 // openFilesBy is openFiles with the kernel's comparison of two descriptors'
 // files (kcmpFiles; the tests' own).
-func openFilesBy(kcmp func(task, a, b int) (int, error), task int, fds []os.DirEntry) (int, bool) {
+func openFilesBy(kcmp func(task, a, b int) (int, error), task int, fds []os.DirEntry) (n int, settled bool, uncompared error) {
 	t := fileTally{kcmp: kcmp, task: task, spent: map[int]int{}}
 	for _, e := range fds {
 		if fd, err := strconv.Atoi(e.Name()); err == nil {
@@ -151,12 +162,16 @@ func openFilesBy(kcmp func(task, a, b int) (int, error), task int, fds []os.DirE
 		}
 	}
 	t.share = 4 * (bits.Len(uint(len(t.todo))) + 2)
-	if err := t.settle(); err != nil {
-		// Refused, from the first comparison or part way through: the
-		// files held by then, no evidence.
-		return len(t.held), false
+	switch err := t.settle(); {
+	case err == nil:
+		return len(t.held), !t.unsettled, nil
+	case t.answered:
+		// Refused part way through: the files held by then, no evidence.
+		return len(t.held), false, nil
+	default:
+		// Refused from the first comparison: each descriptor counts.
+		return len(fds), true, err
 	}
-	return len(t.held), !t.unsettled
 }
 
 // fileTally is a read of the open files a process holds through its
@@ -182,6 +197,7 @@ type fileTally struct {
 	todo      []int
 	share     int         // comparisons each descriptor may make (errShareSpent)
 	spent     map[int]int // comparisons each has made
+	answered  bool        // kcmp has answered: a refusal now is part way through
 	unsettled bool        // a descriptor was set aside
 }
 
@@ -346,7 +362,11 @@ func (t *fileTally) cmp(a, b, by int) (int, error) {
 		return 0, errShareSpent
 	}
 	t.spent[by]++
-	return t.kcmp(t.task, a, b)
+	order, err := t.kcmp(t.task, a, b)
+	if err == nil || errors.Is(err, unix.EBADF) {
+		t.answered = true
+	}
+	return order, err
 }
 
 // kcmpFiles is kcmp(2) of descriptors a and b of process (or thread) task:
@@ -485,7 +505,10 @@ func WaitExitByEvents(logger *zap.Logger, exited <-chan struct{}, procs []Reache
 	notice := NewStopNowNotice(StopOffer)
 	defer notice.Withdraw()
 	offering := false
-	meter.Advance(MarkExit(procs))
+	var uncompared FilesUncomparedNote
+	first := MarkExit(procs)
+	uncompared.Say(logger, first)
+	meter.Advance(first)
 	for {
 		select {
 		case <-exited:
@@ -505,6 +528,7 @@ func WaitExitByEvents(logger *zap.Logger, exited <-chan struct{}, procs []Reache
 		if len(procs) > 0 && m.Running == 0 {
 			return StopExited, clock.Said(StopStallBudget)
 		}
+		uncompared.Say(logger, m)
 		if meter.Advance(m) {
 			moved.Note()
 			continue
@@ -513,6 +537,24 @@ func WaitExitByEvents(logger *zap.Logger, exited <-chan struct{}, procs []Reache
 			return StopStalled, clock.Said(StopStallBudget)
 		}
 	}
+}
+
+// FilesUncomparedNote is a stop's record that it said the open files of the
+// processes it waits for are counted as their descriptors on this host
+// (ExitMark.FilesUncompared): it says so once, at the first reading that
+// does.
+type FilesUncomparedNote struct{ said bool }
+
+// Say logs why reading m counted a process's open files as its descriptors,
+// if it did and the stop has not said so yet.
+func (n *FilesUncomparedNote) Say(logger *zap.Logger, m ExitMark) {
+	if n.said || m.FilesUncompared == nil {
+		return
+	}
+	n.said = true
+	logger.Info("keploy counts the open files of the processes it stops as their descriptors on this host, as the kernel will not compare them: one that copies a descriptor and closes the copy as it stops reads as a step out, so the stop may wait longer for it, bounded by its descriptors",
+		zap.Error(m.FilesUncompared),
+		zap.String("next_step", "nothing is needed; for the files to be compared, run keploy where the kernel has kcmp(2) and lets keploy's user read the application's processes (the same user, or root)"))
 }
 
 // exitLooked, where a test sets it, is called at each look of

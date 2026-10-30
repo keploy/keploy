@@ -4,6 +4,7 @@ package utils
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -24,6 +25,7 @@ import (
 	"go.keploy.io/server/v3/internal/starvetest"
 	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // shortStall sets StopStallBudget to d for the test.
@@ -934,10 +936,11 @@ func TestTheExitRatchetTakesOnlyProgress(t *testing.T) {
 // file read by descriptors looks two steps deep). Closing the last descriptor
 // of a file is one, and two opens of one file are two files. Where the kernel
 // refuses to compare the child's files (kcmp(2) of another process needs
-// PTRACE_MODE_READ_REALCREDS), no read of them settles, and none is a step
-// out: the row says why it was refused and holds keploy to that.
-// KEPLOY_TEST_KCMP_REQUIRED=1 (go-test.yaml's run of it as root) fails it
-// there instead, so the comparison itself runs in CI.
+// PTRACE_MODE_READ_REALCREDS), each of its descriptors counts, and the
+// reading says why: closing a duplicate is then a step out, which the
+// ratchet bounds (ExitRatchet). The row says why it was refused and holds
+// keploy to that. KEPLOY_TEST_KCMP_REQUIRED=1 (go-test.yaml's run of it as
+// root) fails it there instead, so the comparison itself runs in CI.
 func TestMarkExitCountsOpenFilesNotDescriptors(t *testing.T) {
 	dir := t.TempDir()
 	open := func(name string) *os.File {
@@ -980,20 +983,27 @@ func TestMarkExitCountsOpenFilesNotDescriptors(t *testing.T) {
 	var r ExitRatchet
 	// The child's fd 0 asked of itself: what the kernel says of comparing
 	// another process's files.
-	if _, err := kcmpFiles(cmd.Process.Pid, 0, 0); err != nil {
+	if _, refused := kcmpFiles(cmd.Process.Pid, 0, 0); refused != nil {
 		why := kcmpRefusal(cmd.Process.Pid)
 		if os.Getenv("KEPLOY_TEST_KCMP_REQUIRED") == "1" {
-			t.Fatalf("KEPLOY_TEST_KCMP_REQUIRED=1, but the kernel refuses to compare a child's files (kcmp: %v): %s", err, why)
+			t.Fatalf("KEPLOY_TEST_KCMP_REQUIRED=1, but the kernel refuses to compare a child's files (kcmp: %v): %s", refused, why)
 		}
-		t.Logf("the kernel refuses to compare a child's files (kcmp: %v): %s", err, why)
+		t.Logf("the kernel refuses to compare a child's files (kcmp: %v): %s", refused, why)
+		fdDir := "/proc/" + strconv.Itoa(cmd.Process.Pid) + "/fd"
 		for i, step := range []func(){
 			func() {},
 			func() { _ = cmd.Process.Signal(syscall.SIGUSR1); awaitFile(t, closedDup, reaped) },
 			func() { _ = cmd.Process.Signal(syscall.SIGUSR2); awaitFile(t, closedLast, reaped) },
 		} {
 			step()
-			if m := MarkExit(procs); m.Running != 1 || !m.FilesUnsettled || r.Advance(m) {
-				t.Fatalf("read %d of a process whose files the kernel will not compare: %+v; want running, its files unsettled, and no progress", i, m)
+			fds, err := os.ReadDir(fdDir)
+			if err != nil {
+				t.Fatalf("premise: the child's descriptors could not be listed: %v", err)
+			}
+			// Each read closed a descriptor: one fewer is a step out.
+			m := MarkExit(procs)
+			if m.Running != 1 || m.Fds != len(fds) || m.FilesUnsettled || !errors.Is(m.FilesUncompared, refused) || r.Advance(m) != (i > 0) {
+				t.Fatalf("read %d of a process whose %d descriptors the kernel will not compare: %+v; want running, each descriptor counted, settled, uncompared for %v, and progress %v", i, len(fds), m, refused, i > 0)
 			}
 		}
 		return
@@ -1074,6 +1084,47 @@ func TestMarkExitSaysWhereItsFilesDidNotSettle(t *testing.T) {
 	t.Cleanup(func() { filesCompared.Store(nil) })
 	if m := MarkExit([]Reached{{PID: os.Getpid(), Start: st.StartTime}}); m.Running != 1 || !m.FilesUnsettled {
 		t.Fatalf("this process, its descriptors never holding still, read as %+v; want running, its files unsettled", m)
+	}
+}
+
+// A reading of a process whose files the kernel will not compare counts its
+// descriptors, settled, and says why, naming the process; a stop says so
+// once (FilesUncomparedNote), at its first look, not at each.
+func TestMarkExitSaysWhyItCountedDescriptors(t *testing.T) {
+	st, ok := ReadProcStat(os.Getpid())
+	if !ok {
+		t.Fatal("premise: this process's stat could not be read")
+	}
+	refused := func(int, int, int) (int, error) { return 0, syscall.EPERM }
+	filesCompared.Store(&refused)
+	t.Cleanup(func() { filesCompared.Store(nil) })
+	procs := []Reached{{PID: os.Getpid(), Start: st.StartTime}}
+	m := MarkExit(procs)
+	if m.Running != 1 || m.Fds < 3 || m.FilesUnsettled || !errors.Is(m.FilesUncompared, syscall.EPERM) ||
+		!strings.Contains(m.FilesUncompared.Error(), "process "+strconv.Itoa(os.Getpid())+"'s") {
+		t.Fatalf("this process, its files the kernel will not compare, read as %+v; want running, its descriptors counted, settled, and uncompared for EPERM, naming it", m)
+	}
+	core, logs := observer.New(zap.InfoLevel)
+	var note FilesUncomparedNote
+	note.Say(zap.New(core), ExitMark{Running: 1, Fds: 3})
+	if logs.Len() != 0 {
+		t.Fatalf("a reading that compared its files was said: %v", logs.All())
+	}
+	for range 3 {
+		note.Say(zap.New(core), m)
+	}
+	if all := logs.All(); len(all) != 1 || !strings.Contains(fmt.Sprint(all[0].ContextMap()["error"]), "operation not permitted") {
+		t.Fatalf("three readings that counted descriptors were said %d times (%v); want once, with why", len(all), all)
+	}
+	// A stop says it at its first look: one whose app has exited already.
+	exited := make(chan struct{})
+	close(exited)
+	core, logs = observer.New(zap.InfoLevel)
+	if end, _ := WaitExitByEvents(zap.New(core), exited, procs, nil); end != StopExited {
+		t.Fatalf("a stop of an app that exited ended %v", end)
+	}
+	if n := logs.FilterMessageSnippet("as their descriptors").Len(); n != 1 {
+		t.Fatalf("a stop whose look counted descriptors said so %d times; want once", n)
 	}
 }
 
@@ -1171,18 +1222,28 @@ func TestMarkExitOfDescriptorsTheKernelWillNotListIsUnsettled(t *testing.T) {
 	reaped := make(chan struct{})
 	go func() { _ = cmd.Wait(); close(reaped) }()
 	t.Cleanup(func() { _ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); <-reaped })
-	// Until it runs the copy, it is this test's fork, its descriptors
+	// Start can return before the exec of the copy is done (once it closed
+	// this process's descriptors): the kernel sets the process not dumpable
+	// as it runs it, then names it sleep, so it is waited for by that name,
+	// not by its descriptors hidden. With fs.suid_dumpable=1 (a debugging
+	// setting) the kernel leaves such a process dumpable, its descriptors
 	// listed.
-	fdDir := "/proc/" + strconv.Itoa(cmd.Process.Pid) + "/fd"
+	proc := "/proc/" + strconv.Itoa(cmd.Process.Pid)
 	for {
-		if _, err := os.ReadDir(fdDir); errors.Is(err, fs.ErrPermission) {
+		if b, err := os.ReadFile(proc + "/stat"); err == nil && strings.Contains(string(b), " (sleep) ") {
 			break
 		}
 		select {
 		case <-reaped:
-			t.Fatal("the copy of sleep exited before its descriptors were hidden")
+			t.Fatal("the copy of sleep exited before it was named sleep")
 		case <-time.After(time.Millisecond):
 		}
+	}
+	if _, err := os.ReadDir(proc + "/fd"); !errors.Is(err, fs.ErrPermission) {
+		if b, _ := os.ReadFile("/proc/sys/fs/suid_dumpable"); strings.TrimSpace(string(b)) == "1" {
+			t.Skipf("fs.suid_dumpable=1 leaves a process that runs a program its user may not read dumpable: its descriptors are listed (%v)", err)
+		}
+		t.Fatalf("premise: a process running a program its user may not read had its descriptors listed (%v)", err)
 	}
 	st, ok := ReadProcStat(cmd.Process.Pid)
 	if !ok {
@@ -1194,34 +1255,44 @@ func TestMarkExitOfDescriptorsTheKernelWillNotListIsUnsettled(t *testing.T) {
 }
 
 // A kernel that cannot compare files (no kcmp, or keploy may not ask) leaves
-// a read unsettled, no evidence, as does one that stops comparing part way
-// through: counted by its descriptors, a churn of them would read as steps
-// out (ExitRatchet). A process of one descriptor needs no comparison.
-func TestOpenFilesAreNoEvidenceWhereTheKernelCannotCompareThem(t *testing.T) {
+// each descriptor counted, the read settled and saying why; one that stops
+// comparing part way through a read leaves it unsettled, no evidence. A
+// process of one descriptor needs no comparison. A churn of descriptors so
+// counted reads as steps out, but moves a stop at most once for each
+// descriptor of the reading that set the mark (ExitRatchet): a longer wait,
+// but a bounded one.
+func TestOpenFilesAreDescriptorsWhereTheKernelCannotCompareThem(t *testing.T) {
 	listed := []os.DirEntry{fdEntry("0"), fdEntry("1"), fdEntry("2"), fdEntry("3")}
 	for _, no := range []error{syscall.ENOSYS, syscall.EPERM} {
 		cannot := func(int, int, int) (int, error) { return 0, no }
-		if n, settled := openFilesBy(cannot, 1, listed); settled {
-			t.Fatalf("kcmp failing with %v: %d open files of %d descriptors, settled; want unsettled", no, n, len(listed))
+		if n, settled, why := openFilesBy(cannot, 1, listed); n != len(listed) || !settled || !errors.Is(why, no) {
+			t.Fatalf("kcmp failing with %v: %d open files of %d descriptors (settled %v, uncompared %v); want each counted, settled, uncompared for %v", no, n, len(listed), settled, why, no)
 		}
-		if n, settled := openFilesBy(cannot, 1, listed[:1]); n != 1 || !settled {
-			t.Fatalf("kcmp failing with %v: one descriptor read as %d open files (settled %v); want 1, settled", no, n, settled)
+		if n, settled, why := openFilesBy(cannot, 1, listed[:1]); n != 1 || !settled || why != nil {
+			t.Fatalf("kcmp failing with %v: one descriptor read as %d open files (settled %v, uncompared %v); want 1, settled, no comparison asked", no, n, settled, why)
 		}
 	}
-	// A churn of descriptors the kernel will not compare moves no stop: the
-	// test's churning shell (fd 3 saved to fd 10, then both closed) read at
-	// each of its steps, 4, 5, 3 and 4 descriptors, then 3 again.
+	// The test's churning shell (fd 3 saved to fd 10, then both closed),
+	// read at each of its steps over and over: 4, 5, 3 and 4 descriptors.
+	// It moves the stop once, from the 4 of the reading that set the mark to
+	// its fewest, 3, and never again.
 	var r ExitRatchet
 	cannot := func(int, int, int) (int, error) { return 0, syscall.EPERM }
-	for _, names := range [][]string{{"0", "1", "2", "3"}, {"0", "1", "10", "2", "3"}, {"0", "1", "2"}, {"0", "1", "10", "2"}, {"0", "1", "2"}} {
-		var fds []os.DirEntry
-		for _, name := range names {
-			fds = append(fds, fdEntry(name))
+	moves := 0
+	for range 100 {
+		for _, names := range [][]string{{"0", "1", "2", "3"}, {"0", "1", "10", "2", "3"}, {"0", "1", "2"}, {"0", "1", "10", "2"}} {
+			var fds []os.DirEntry
+			for _, name := range names {
+				fds = append(fds, fdEntry(name))
+			}
+			n, settled, why := openFilesBy(cannot, 1, fds)
+			if r.Advance(ExitMark{Running: 1, Threads: 1, Fds: n, FilesUnsettled: !settled, FilesUncompared: why}) {
+				moves++
+			}
 		}
-		n, settled := openFilesBy(cannot, 1, fds)
-		if m := (ExitMark{Running: 1, Threads: 1, Fds: n, FilesUnsettled: !settled}); r.Advance(m) {
-			t.Fatalf("a read of descriptors %v the kernel will not compare (%+v) moved the stop", names, m)
-		}
+	}
+	if moves != 1 {
+		t.Fatalf("400 reads of a churn of 3 to 5 descriptors the kernel will not compare, from 4, moved the stop %d times; want 1", moves)
 	}
 	// One refused part way through a read (as the files are checked, each
 	// against the next: the process's credentials changed) did not settle.
@@ -1237,8 +1308,8 @@ func TestOpenFilesAreNoEvidenceWhereTheKernelCannotCompareThem(t *testing.T) {
 		}
 		return 0, nil
 	}
-	if n, settled := openFilesBy(refused, 1, listed); settled || n > 3 {
-		t.Fatalf("kcmp refused part way through: %d open files of %d descriptors, settled %v; want at most the 3 files, unsettled", n, len(listed), settled)
+	if n, settled, why := openFilesBy(refused, 1, listed); settled || n > 3 || why != nil {
+		t.Fatalf("kcmp refused part way through: %d open files of %d descriptors, settled %v, uncompared %v; want at most the 3 files, unsettled, compared", n, len(listed), settled, why)
 	}
 	// One that reads closed as it is compared with another, then is
 	// refused as it is asked of itself, is not taken for open: the read did
@@ -1258,7 +1329,7 @@ func TestOpenFilesAreNoEvidenceWhereTheKernelCannotCompareThem(t *testing.T) {
 		}
 		return 0, nil
 	}
-	if n, settled := openFilesBy(selfRefused, 1, []os.DirEntry{fdEntry("0"), fdEntry("3")}); settled || n > 2 {
+	if n, settled, _ := openFilesBy(selfRefused, 1, []os.DirEntry{fdEntry("0"), fdEntry("3")}); settled || n > 2 {
 		t.Fatalf("kcmp refused asking a descriptor of itself: %d open files, settled %v; want at most 2, unsettled", n, settled)
 	}
 }
@@ -1398,7 +1469,7 @@ func TestOpenFilesLetGoOfADescriptorClosedAsTheyAreRead(t *testing.T) {
 		for _, n := range names {
 			listed = append(listed, fdEntry(n))
 		}
-		if n, settled := openFilesBy(kcmp, 1, listed); n != tc.want || settled == tc.unsettled {
+		if n, settled, _ := openFilesBy(kcmp, 1, listed); n != tc.want || settled == tc.unsettled {
 			t.Errorf("%s (listed %v): %d open files, settled %v; want %d, settled %v", tc.name, names, n, settled, tc.want, !tc.unsettled)
 		}
 	}
@@ -1450,7 +1521,7 @@ func TestAReadOfFilesThatHoldStillChecksTheirOrderTwice(t *testing.T) {
 			return 0, nil
 		}
 		listed := []os.DirEntry{fdEntry("0"), fdEntry("1"), fdEntry("2"), fdEntry("3")}
-		if n, settled := openFilesBy(kcmp, 1, listed); n != tc.want || !settled {
+		if n, settled, _ := openFilesBy(kcmp, 1, listed); n != tc.want || !settled {
 			t.Errorf("%s: read as %d, settled %v; want %d, settled", tc.name, n, settled, tc.want)
 			continue
 		}
@@ -1494,7 +1565,7 @@ func TestAPairOutOfOrderIsLetGoBeforeItIsReadAgain(t *testing.T) {
 		return 0, nil
 	}
 	listed := []os.DirEntry{fdEntry("0"), fdEntry("1"), fdEntry("3"), fdEntry("7")}
-	if n, settled := openFilesBy(kcmp, 1, listed); n != 4 || !settled {
+	if n, settled, _ := openFilesBy(kcmp, 1, listed); n != 4 || !settled {
 		t.Errorf("read as %d, settled %v; want 4, settled", n, settled)
 	}
 	if len(self) > 0 {
@@ -1580,7 +1651,7 @@ func TestOpenFilesOfAChurningShellMoveAStopOnceAtMost(t *testing.T) {
 		{"fd 10 checked and closed before fd 3 on the next file is checked", []int{1, 0, 0, 1, 1, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1}},
 	} {
 		kcmp, listed, peak := churnShell(tc.steps)
-		n, settled := openFilesBy(kcmp, 1, listed)
+		n, settled, _ := openFilesBy(kcmp, 1, listed)
 		if settled && n > *peak {
 			t.Errorf("%s: a shell that held at most %d open files read as %d, settled", tc.name, *peak, n)
 		}

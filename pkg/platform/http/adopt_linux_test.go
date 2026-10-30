@@ -764,7 +764,12 @@ func TestARunSaysTheSetEndKilledWhatTheAppLeftStopping(t *testing.T) {
 // and closes a file over and over, ignoring the request to stop, moves it at
 // most once (its first look below where the stop found it is a file fewer,
 // utils.ExitRatchet), not at each of the dozens of closes it makes, and is
-// killed on the stall bound.
+// killed on the stall bound. Where the kernel will not compare its files, the
+// stop counts its descriptors and says so, once: its churn of fd 3, and of
+// the fd 10 dash saves it to, then reads as up to two closes below the
+// reading that set the mark, and moves the teardown at most twice, bounded.
+// KEPLOY_TEST_KCMP_REQUIRED=1 (go-test.yaml's run of it as root) fails it
+// there instead, so the comparison runs in CI.
 func TestADaemonThatOnlyChurnsMovesNoTeardown(t *testing.T) {
 	if !inOwnProcess(t) {
 		return
@@ -778,18 +783,24 @@ func TestADaemonThatOnlyChurnsMovesNoTeardown(t *testing.T) {
 	ready := filepath.Join(t.TempDir(), "ready")
 	churn := daemonize(t, churningDaemon, ready)
 	await(t, "the daemon ready", func() bool { _, err := os.Stat(ready); return err == nil })
+	// Whether the kernel compares the daemon's files: its fd 0 asked of
+	// itself (kcmp's KCMP_FILE, 0).
+	_, _, refused := unix.Syscall6(unix.SYS_KCMP, uintptr(churn), uintptr(churn), 0, 0, 0, 0)
 	scope := &utils.TeardownScope{}
 	// Read as the stop decides to kill it, on the stop's own goroutine as it
 	// says so: what the kill does after (the kernel freeing what it held, the
 	// stop's next look finding the daemon gone, a move) is not the daemon's
 	// way out. Read later, once the test saw the kill in the log, the count
 	// can take that look in too: on a loaded box the stop gets to it first.
-	before := atomic.Int64{}
+	before, uncompared := atomic.Int64{}, atomic.Int64{}
 	before.Store(-1)
 	core, _ := observer.New(zapcore.InfoLevel)
 	logger := zap.New(core, zap.Hooks(func(e zapcore.Entry) error {
 		if strings.Contains(e.Message, "made no progress on its way out after it was asked to stop; killing it") {
 			before.CompareAndSwap(-1, int64(scope.Moves()))
+		}
+		if strings.Contains(e.Message, "counts the open files of the processes it stops as their descriptors") {
+			uncompared.Add(1)
 		}
 		return nil
 	}))
@@ -797,9 +808,19 @@ func TestADaemonThatOnlyChurnsMovesNoTeardown(t *testing.T) {
 	if parentIs(churn, os.Getpid()) {
 		t.Fatal("the churning daemon outlived its stop")
 	}
-	switch n := before.Load(); {
+	switch n, said := before.Load(), uncompared.Load(); {
 	case n < 0:
 		t.Fatal("the stop did not kill the churning daemon on its stall")
+	case said > 1:
+		t.Fatalf("the stop said %d times that it counts the daemon's descriptors; want once", said)
+	case (refused != 0) != (said == 1):
+		t.Fatalf("the kernel's answer to a comparison of the daemon's files was %v, and the stop said %d times that it counts its descriptors; want once where it refuses, else never", refused, said)
+	case said == 1 && os.Getenv("KEPLOY_TEST_KCMP_REQUIRED") == "1":
+		t.Fatal("KEPLOY_TEST_KCMP_REQUIRED=1, but the kernel would not compare the daemon's files: the stop counted its descriptors")
+	case said == 1 && n > 2:
+		t.Fatalf("a daemon that only churned, its descriptors counted, moved the run's teardown %d times before its kill; want at most 2", n)
+	case said == 1:
+		t.Logf("the kernel would not compare the daemon's files: the stop counted its descriptors, and moved the run's teardown %d times", n)
 	case n > 1:
 		t.Fatalf("a daemon that only churned moved the run's teardown %d times before its kill", n)
 	}
@@ -1383,6 +1404,8 @@ func TestTheScanOfProcSaysWhatItCouldNotRead(t *testing.T) {
 	stat(113, "113 (update-ca-certi) R 0 -1 -1 0 -1 4227404 3601 67036 0 0 0 6 52 11 20 0 0 0 7217377 2748416 196 0 1 1 0 0\n")
 	stat(114, "114 (sh) S 0 -1 -1 0 -1 4227404 100 0 0 0 0 0 0 0 20 0 1 0 7217378 0 0\n")
 	stat(115, "115 (sh) D 0 -1 -1 0 -1 4227404 100 0 0 0 0 0 0 0 20 0 1 0 7217379 0 0\n")
+	// The line keploy#4999's CI read, as the reap race row reaped a sleep.
+	stat(33119, "33119 (sleep) S 0 -1 -1 0 -1 4227084 87 0 0 0 0 0 0 0 20 0 0 0 51682 0 0 0 0 0 0 0 0 0 0 0 0 1 0 0 17 3 0 0 0 0 0 0 0 0 0 0 0 0 0\n")
 	if err := os.MkdirAll(filepath.Join(root, "104"), 0o755); err != nil { // gone: no stat
 		t.Fatal(err)
 	}

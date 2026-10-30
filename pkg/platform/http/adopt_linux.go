@@ -355,8 +355,9 @@ func procChildrenIn(root string, parent int) ([]child, error) {
 // procStat reads process pid's stat from the /proc at root
 // (utils.ParseProcStat); gone says it is not there: it exited and was reaped
 // before, or while, it was read (a task being reaped reads as state X, dead,
-// or its parent and group gone: 0 and -1, which no line of a process that is
-// there has, whatever state it read as: reaped).
+// or, in any state, as a task released: utils.ReleasedTask). A line that does
+// not parse for another reason (a read cut short, a parent of 0 with a group,
+// or no stat line at all) is no process gone, but one keploy could not read.
 func procStat(root string, pid int) (st utils.ProcStat, gone bool, err error) {
 	b, err := os.ReadFile(root + "/" + strconv.Itoa(pid) + "/stat")
 	if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ESRCH) {
@@ -371,33 +372,12 @@ func procStat(root string, pid int) (st utils.ProcStat, gone bool, err error) {
 	}
 	st, ok := utils.ParseProcStat(b)
 	if !ok {
-		if reaped(b) {
+		if utils.ReleasedTask(b) {
 			return utils.ProcStat{}, true, nil
 		}
 		return utils.ProcStat{}, false, fmt.Errorf("its stat line does not parse: %q", b)
 	}
 	return st, false, nil
-}
-
-// reaped reports whether a stat line is a task's being released: its parent
-// and group, the two fields after its state, gone (0 and -1). The kernel
-// prints those (and a session of -1) when it finds the task's signal
-// handlers already released, and it reads the state before it looks for
-// them: a task that exits and is released between the two reads as R, S or
-// D with them (one on a box: "(update-ca-certi) R 0 -1 -1", its PF_EXITING
-// set), so the state says nothing here. The group's -1 is the one field of
-// such a line utils.ParseProcStat refuses, and no line of a task that is
-// there has it; both fields are asked all the same, so a line that does not
-// parse for another reason (a read cut short, a parent of 0 included, or no
-// stat line at all) is no process gone, but one keploy could not read
-// (procStat's error).
-func reaped(line []byte) bool {
-	end := bytes.LastIndexByte(line, ')')
-	if end < 0 {
-		return false
-	}
-	f := bytes.Fields(line[end+1:])
-	return len(f) >= 3 && string(f[1]) == "0" && string(f[2]) == "-1"
 }
 
 // statState is the state letter of a stat line, the field after the command
@@ -872,7 +852,13 @@ func stopMembers(logger *zap.Logger, ms []member, acting func(member) bool, move
 	}
 	clock, meter, stopMeter := utils.NewExitMeter(procs, stopStall())
 	defer stopMeter()
-	meter.Advance(markExit(ms))
+	var uncompared utils.FilesUncomparedNote
+	look := func() utils.ExitMark {
+		m := markExit(ms)
+		uncompared.Say(logger, m)
+		return m
+	}
+	meter.Advance(look())
 	killed, offering := false, false
 	kill := func(why string) {
 		logger.Warn(why, zap.Ints("pids", running(ms)))
@@ -904,7 +890,7 @@ func stopMembers(logger *zap.Logger, ms []member, acting func(member) bool, move
 			logger.Info("keploy waits for the daemons the application left running to stop, as long as they make progress on their way out; press Ctrl+C again to kill them now",
 				zap.Ints("pids", left))
 		}
-		if meter.Advance(markExit(ms)) {
+		if meter.Advance(look()) {
 			moved.Note()
 			continue
 		}

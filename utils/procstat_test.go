@@ -53,6 +53,40 @@ func TestParseProcStat(t *testing.T) {
 	}
 }
 
+// A task being released reads its parent and group as 0 and -1, in the
+// state the kernel read before it found it released: Z or X, or R, S or D
+// where it was released between the two reads (the R line a test machine
+// read, and the S line of keploy#4999's CI, both PF_EXITING). ParseProcStat
+// refuses every such line (a group of -1 is no group), and ReleasedTask
+// tells them from a line cut short, one of a task that is there (kthreadd's
+// parent and group of 0 included), or no stat line.
+func TestReleasedTask(t *testing.T) {
+	for _, tc := range []struct {
+		line     string
+		released bool
+	}{
+		{"33119 (sleep) S 0 -1 -1 0 -1 4227084 87 0 0 0 0 0 0 0 20 0 0 0 51682 0 0 0 0 0 0 0 0 0 0 0 0 1 0 0 17 3 0 0 0 0 0 0 0 0 0 0 0 0 0\n", true},
+		{"113 (update-ca-certi) R 0 -1 -1 0 -1 4227404 3601 67036 0 0 0 6 52 11 20 0 0 0 7217377 2748416 196 0 1 1 0 0\n", true},
+		{"115 (sh) D 0 -1 -1 0 -1 4227404 100 0 0 0 0 0 0 0 20 0 1 0 7217379 0 0\n", true},
+		{"8 (worker) Z 0 -1 -1 0 -1 4227084 100 0 0 0 0 0 0 0 25 5 0 0 6060366 0 0\n", true},
+		{"9 (a) b) X 0 -1 -1 0 -1 4227084 100 0 0 0 0 0 0 0 25 5 0 0 6060366 0 0\n", true},
+		{"604 (node) S 603 600" + statTail, false},
+		{"2 (kthreadd) S 0 0" + statTail, false},
+		{"604 (node) Z 603 -1" + statTail, false},
+		{"112 (sh) Z 0 112", false},
+		{"112 (sh) Z 0", false},
+		{"604 (torn", false},
+		{"", false},
+	} {
+		if got := ReleasedTask([]byte(tc.line)); got != tc.released {
+			t.Errorf("ReleasedTask(%q) = %v; want %v", tc.line, got, tc.released)
+		}
+		if _, ok := ParseProcStat([]byte(tc.line)); ok && tc.released {
+			t.Errorf("ParseProcStat(%q) parsed a released task's line: a group of -1 is no group", tc.line)
+		}
+	}
+}
+
 // InterruptProcessTree parses every process's stat before its first signal,
 // so the parser allocates nothing.
 func TestParseProcStatAllocatesNothing(t *testing.T) {
