@@ -951,3 +951,68 @@ func (c *pauseAtFirstEvent) Read(p []byte) (int, error) {
 // CloseWrite half-closes the client conn, as the hangUps shape that reads on
 // does.
 func (c *pauseAtFirstEvent) CloseWrite() error { return c.Conn.(*net.TCPConn).CloseWrite() }
+
+// A pause that begins mid-answer and cuts the capture of the rest is counted
+// as its exchange ends, not as its connection does: on a kept-alive
+// connection the next exchange starts a count of its own, and a count left
+// to the connection's end would be lost, or come after the recording's
+// summary was read.
+func TestAPauseCutIsCountedAsItsExchangeEndsOnAKeptAliveConnection(t *testing.T) {
+	var paused atomic.Bool
+	stubIngressPaused(t, paused.Load)
+	appLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	step := make(chan struct{})
+	serveApp(t, appLn, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/next" {
+			fmt.Fprint(w, "next")
+			return
+		}
+		fmt.Fprintln(w, `{"status":"RUNNING"}`)
+		w.(http.Flusher).Flush()
+		select {
+		case <-step:
+		case <-r.Context().Done():
+			return
+		}
+		fmt.Fprintln(w, `{"status":"DONE"}`)
+	})
+	mgr := syncMock.New(zap.NewNop())
+	_, client, _, _ := serveWatchedIn(t, syncMock.NewContext(context.Background(), mgr), false, appLn, nil)
+	br := bufio.NewReader(client)
+	if _, err := client.Write([]byte("GET /events HTTP/1.1\r\nHost: api\r\n\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := bufio.NewReader(resp.Body)
+	if line, err := body.ReadString('\n'); err != nil || !strings.Contains(line, "RUNNING") {
+		t.Fatalf("the answer's first event: %q, %v", line, err)
+	}
+	paused.Store(true) // the first event is captured; the pause cuts the rest
+	close(step)
+	if rest, err := io.ReadAll(body); err != nil || !strings.Contains(string(rest), "DONE") {
+		t.Fatalf("the rest of the answer: %q, %v", rest, err)
+	}
+	_ = resp.Body.Close()
+	paused.Store(false)
+	// The next exchange is read only once the first has ended: its answer
+	// here means the first's count is in.
+	if _, err := client.Write([]byte("GET /next HTTP/1.1\r\nHost: api\r\n\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	next, err := http.ReadResponse(br, nil)
+	if err != nil {
+		t.Fatalf("the kept-alive connection's next exchange: %v", err)
+	}
+	if b, err := io.ReadAll(next.Body); err != nil || string(b) != "next" {
+		t.Fatalf("the next answer: %q, %v", b, err)
+	}
+	if got := mgr.NotRecordedUnderPressure(); got.Total != 1 {
+		t.Fatalf("the exchange the pause cut was counted %d time(s) by its next exchange's end, want 1", got.Total)
+	}
+}
