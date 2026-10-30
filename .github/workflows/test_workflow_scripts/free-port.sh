@@ -10,19 +10,21 @@
 # WHY THIS EXISTS
 #
 # A port the kernel picks (a bind to port 0, as the compose lanes took theirs)
-# comes from the ephemeral range, 32768-60999, and, as bind(0) prefers odd
-# ports there, it is an odd one. Docker's embedded DNS server listens in every
-# container on a user-defined network (every compose stack's) on 127.0.0.11,
-# TCP and UDP, on ports the kernel picks the same way, in that container's own
-# network namespace: odd ports of the same range. An app in that namespace
-# that listens on 0.0.0.0 at the port of that TCP listener cannot bind it:
-# "OSError: [Errno 98] Address already in use" (job 124142018005, the app of
-# a `keploy test` on a compose stack, which then ended the run). The lane had
-# found the port free, but on the host: the namespace the app collides in is
-# the container's, new with each container, its DNS port picked as the
-# container starts, so no check made beforehand can see it. A lane that
-# publishes the app on the port it listens on (PORT:PORT) meets this about
-# once in 14,000 container starts.
+# comes from the ephemeral range, 32768-60999, and, as a TCP bind(0) prefers
+# odd ports there, it is an odd one. Docker's embedded DNS server listens in
+# every container on a user-defined network (every compose stack's) on
+# 127.0.0.11, on a TCP port and a UDP port the kernel picks in that
+# container's own network namespace. The TCP one is picked the same way, so
+# it is an odd port of the same range too; the UDP one has no such parity,
+# and only the TCP one matters to an app that listens on TCP. An app in that
+# namespace that listens on 0.0.0.0 at the port of that TCP listener cannot
+# bind it: "OSError: [Errno 98] Address already in use" (job 124142018005,
+# the app of a `keploy test` on a compose stack, which then ended the run).
+# The lane had found the port free, but on the host: the namespace the app
+# collides in is the container's, new with each container, its DNS port
+# picked as the container starts, so no check made beforehand can see it. A
+# lane that publishes the app on the port it listens on (PORT:PORT) meets
+# this about once in 14,000 container starts.
 #
 # So free_port picks a port below the ephemeral range: the range of a new
 # network namespace is the kernel's default, 32768-60999, whatever the
@@ -45,15 +47,19 @@
 # the first when it picks the second (free_port "$PORT"), as neither is bound
 # until its container starts.
 #
-# FREE_PORT_LO and FREE_PORT_HI set another window (free-port.tests.sh uses
-# them); its top is still cut to below the ephemeral ranges.
+# FREE_PORT_LO and FREE_PORT_HI set another window, and FREE_PORT_RANGE_FILE
+# another file to read the host's ephemeral range from, in place of
+# /proc/sys/net/ipv4/ip_local_port_range (free-port.tests.sh uses them, the
+# last to stand for a host whose range is not the default). The window's top
+# is still cut to below both ephemeral ranges.
 free_port() {
-  python3 - "${FREE_PORT_LO:-28000}" "${FREE_PORT_HI:-32767}" "$@" <<'PY'
+  python3 - "${FREE_PORT_LO:-28000}" "${FREE_PORT_HI:-32767}" \
+    "${FREE_PORT_RANGE_FILE:-/proc/sys/net/ipv4/ip_local_port_range}" "$@" <<'PY'
 import random, socket, sys
 
-lo, hi = int(sys.argv[1]), int(sys.argv[2])
-taken = {int(p) for p in sys.argv[3:]}
-with open("/proc/sys/net/ipv4/ip_local_port_range") as f:
+lo, hi, range_file = int(sys.argv[1]), int(sys.argv[2]), sys.argv[3]
+taken = {int(p) for p in sys.argv[4:]}
+with open(range_file) as f:
     host_lo = int(f.read().split()[0])
 # 32768: the start of the ephemeral range of every new network namespace.
 top = min(hi, host_lo - 1, 32767)

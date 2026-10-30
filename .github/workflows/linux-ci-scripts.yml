@@ -128,5 +128,5 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Test free-port.sh (its window, busy and skipped ports, Docker's DNS port)
+      - name: Test free-port.sh (its window and order, busy and skipped ports, host ranges, Docker's DNS port)
         run: bash .github/workflows/test_workflow_scripts/free-port.tests.sh
