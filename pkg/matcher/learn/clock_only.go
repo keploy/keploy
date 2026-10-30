@@ -63,7 +63,7 @@ func clockDrift(recorded, live string, date bool) bool {
 		if lay.wraps || lay.epoch && !date {
 			continue
 		}
-		rm, lm := clockMatches(lay, recorded, takenR), clockMatches(lay, live, takenL)
+		rm, lm := clockMatches(lay, recorded, 0, len(recorded), takenR), clockMatches(lay, live, 0, len(live), takenL)
 		for j := 0; j < len(rm) && j < len(lm); j++ {
 			rs, ls := recorded[rm[j][0]:rm[j][1]], live[lm[j][0]:lm[j][1]]
 			if rs == ls {
