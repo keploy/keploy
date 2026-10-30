@@ -306,3 +306,32 @@ func TestMappedTestCaseWithNoMockRoundTrips(t *testing.T) {
 	}
 	check("json", fromJSON)
 }
+
+// An own series' mark names its id's path so the agent reads it back, a path
+// of any spelling round-trips, and a line that names none (no own series'
+// mark, a mark someone edited, an empty path) names no path, so the agent
+// gives no id back.
+func TestBackgroundOwnSeriesIDReadsBackThePathItsMarkNames(t *testing.T) {
+	for _, p := range []string{"body.q._id", `url.path[2]`, `body."odd; key"`, "body.a b"} {
+		why := BackgroundOwnSeriesWhy(p, "judging's words")
+		if !IsBackgroundOwnSeries(why) || IsBackgroundSeries(why) {
+			t.Fatalf("%q is not an own series' mark alone", why)
+		}
+		if got, ok := BackgroundOwnSeriesID(why); !ok || got != p {
+			t.Errorf("BackgroundOwnSeriesID(%q) = %q, %v; want %q, true", why, got, ok, p)
+		}
+	}
+	for _, why := range []string{
+		"",
+		BackgroundSeriesPrefix + `the id at "body.q._id"; words`,
+		BackgroundOwnSeriesPrefix + "replayed T1 and only the count varied",
+		BackgroundOwnSeriesPrefix + `the id at body.q._id; words`,
+		BackgroundOwnSeriesPrefix + `the id at "body.q._id" words`,
+		BackgroundOwnSeriesPrefix + `the id at ""; words`,
+		BackgroundOwnSeriesPrefix + `the id at "body.q._id`,
+	} {
+		if got, ok := BackgroundOwnSeriesID(why); ok {
+			t.Errorf("BackgroundOwnSeriesID(%q) = %q, true; want no path", why, got)
+		}
+	}
+}

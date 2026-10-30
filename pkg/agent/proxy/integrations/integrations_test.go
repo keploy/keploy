@@ -159,11 +159,15 @@ func TestOwnedByLeavesOutOtherTestsOwnSeries(t *testing.T) {
 	}
 }
 
-// A test's own series is compared on the ids its window bound this run: the
-// job's beat on this run's id is the series' call, given back the recorded
-// id; a beat on the recorded id, on a third id, or on an id two variables
-// bound to two values is the owner's miss, said why; a series marked
-// set-wide, and an id no variable was recorded as, are compared as recorded.
+// A test's own series is compared on the id its window bound this run, at
+// the place its mark names alone (OwnID): the job's beat on this run's id is
+// the series' call, given back the recorded id; a beat on the recorded id, on
+// a third id, or on an id two variables bound to two values is the owner's
+// miss, said why. A value at any other place is compared as recorded: one
+// that equals a bound variable's live value there is not given back (a miss),
+// and one that holds its recorded value there is no call on another id. A
+// series marked set-wide, one whose mark names no place, and an id no
+// variable was recorded as are compared as recorded.
 func TestOwnCallGivesBackTheIDsTheOwnersWindowBound(t *testing.T) {
 	leaf := func(p, v string) learn.Leaf { return learn.Leaf{Path: p, Type: learn.String, Value: v} }
 	series := learn.Series{Key: "update jobs", Values: map[string]learn.Leaf{
@@ -178,7 +182,8 @@ func TestOwnCallGivesBackTheIDsTheOwnersWindowBound(t *testing.T) {
 	bind := func(name, rec, live string) variables.Binding {
 		return variables.Binding{Name: name, Recorded: rec, Value: live}
 	}
-	own := MarkedSeries{Series: series, Owner: "T1"}
+	one := []variables.Binding{bind("v1", "job-rec", "job-live")}
+	own := MarkedSeries{Series: series, Owner: "T1", OwnID: "body.q._id"}
 	for _, c := range []struct {
 		name    string
 		m       MarkedSeries
@@ -188,17 +193,21 @@ func TestOwnCallGivesBackTheIDsTheOwnersWindowBound(t *testing.T) {
 		moved   string // joined
 		off     string // a part of it; "" for none
 	}{
-		{"this run's id is given back", own, call("job-live", "job-live", "RUNNING"), []variables.Binding{bind("v1", "job-rec", "job-live")}, true, "job-rec", ""},
-		{"a set-wide series reads no variable", MarkedSeries{Series: series}, call("job-live", "job-live", "RUNNING"), []variables.Binding{bind("v1", "job-rec", "job-live")}, false, "", ""},
-		{"no binding: compared as recorded", own, call("job-live", "job-live", "RUNNING"), nil, false, "", ""},
-		{"no binding of that id: compared as recorded", own, call("job-live", "job-live", "RUNNING"), []variables.Binding{bind("v1", "other-rec", "job-live")}, false, "", ""},
-		{"the recorded id while the run bound another", own, call("job-rec", "job-rec", "RUNNING"), []variables.Binding{bind("v1", "job-rec", "job-live")}, true, "", "it carries the recorded id job-rec at body.q._id, but T1's window bound that id to job-live"},
-		{"a third id", own, call("job-3rd", "job-3rd", "RUNNING"), []variables.Binding{bind("v1", "job-rec", "job-live")}, true, "", "it carries job-3rd at body.q._id, where T1's window bound the id recorded as job-rec to job-live"},
-		{"one place on the id, one beside it", own, call("job-live", "job-3rd", "RUNNING"), []variables.Binding{bind("v1", "job-rec", "job-live")}, true, "job-rec", "it carries job-3rd at body.u.by"},
-		{"two bindings, two values", own, call("job-live", "job-live", "RUNNING"), []variables.Binding{bind("v1", "job-rec", "job-live"), bind("v2", "job-rec", "job-2nd")}, true, "", "two variables recorded as job-rec are bound to two values this run (job-live, job-2nd)"},
-		{"two bindings, one value", own, call("job-live", "job-live", "RUNNING"), []variables.Binding{bind("v1", "job-rec", "job-live"), bind("v2", "job-rec", "job-live")}, true, "job-rec", ""},
+		{"this run's id is given back", own, call("job-live", "job-rec", "RUNNING"), one, true, "job-rec", ""},
+		{"a set-wide series reads no variable", MarkedSeries{Series: series, OwnID: "body.q._id"}, call("job-live", "job-rec", "RUNNING"), one, false, "", ""},
+		{"a mark that names no place gives nothing back", MarkedSeries{Series: series, Owner: "T1"}, call("job-live", "job-rec", "RUNNING"), one, false, "", ""},
+		{"a place the series holds no one value at gives nothing back", MarkedSeries{Series: series, Owner: "T1", OwnID: "body.q.other"}, call("job-live", "job-rec", "RUNNING"), one, false, "", ""},
+		{"no binding: compared as recorded", own, call("job-live", "job-rec", "RUNNING"), nil, false, "", ""},
+		{"no binding of that id: compared as recorded", own, call("job-live", "job-rec", "RUNNING"), []variables.Binding{bind("v1", "other-rec", "job-live")}, false, "", ""},
+		{"the recorded id while the run bound another", own, call("job-rec", "job-rec", "RUNNING"), one, true, "", "it carries the recorded id job-rec at body.q._id, but T1's window bound that id to job-live"},
+		{"a third id", own, call("job-3rd", "job-rec", "RUNNING"), one, true, "", "it carries job-3rd at body.q._id, where T1's window bound the id recorded as job-rec to job-live"},
+		{"the bound live value at another place is not given back", own, call("job-live", "job-live", "RUNNING"), one, false, "job-rec", ""},
+		{"the bound live value at another place alone is no call on the id", own, call("job-rec", "job-live", "RUNNING"), one, false, "", "it carries the recorded id job-rec at body.q._id"},
+		{"a third value at another place is compared as recorded", own, call("job-live", "job-3rd", "RUNNING"), one, false, "job-rec", ""},
+		{"two bindings, two values", own, call("job-live", "job-rec", "RUNNING"), []variables.Binding{bind("v1", "job-rec", "job-live"), bind("v2", "job-rec", "job-2nd")}, true, "", "two variables recorded as job-rec are bound to two values this run (job-live, job-2nd)"},
+		{"two bindings, one value", own, call("job-live", "job-rec", "RUNNING"), []variables.Binding{bind("v1", "job-rec", "job-live"), bind("v2", "job-rec", "job-live")}, true, "job-rec", ""},
 		{"an id that replays the same", own, call("job-rec", "job-rec", "RUNNING"), []variables.Binding{bind("v1", "job-rec", "job-rec")}, true, "", ""},
-		{"another value beside the id still differs", own, call("job-live", "job-live", "STOPPED"), []variables.Binding{bind("v1", "job-rec", "job-live")}, false, "job-rec", ""},
+		{"another value beside the id still differs", own, call("job-live", "job-rec", "STOPPED"), one, false, "job-rec", ""},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			before := c.live.Leaves["body.q._id"].Value
@@ -214,6 +223,9 @@ func TestOwnCallGivesBackTheIDsTheOwnersWindowBound(t *testing.T) {
 			}
 			if c.live.Leaves["body.q._id"].Value != before {
 				t.Errorf("OwnCall wrote into live's leaves")
+			}
+			if c.live.Leaves["body.u.by"].Value != asked.Leaves["body.u.by"].Value {
+				t.Errorf("OwnCall gave back %s at body.u.by, a place the mark does not name", asked.Leaves["body.u.by"].Value)
 			}
 		})
 	}

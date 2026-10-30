@@ -658,6 +658,50 @@ func TestATestsOwnSeriesIsHandedOnlyInItsOwnersWindow(t *testing.T) {
 	}
 }
 
+// A test's own series is handed the path of the id its marks name
+// (MarkedSeries.OwnID), read back from every recording's mark; when one mark
+// names none (a line someone edited) or two name two paths, it is handed
+// none, and no id of it is given back.
+func TestATestsOwnSeriesIsHandedTheIDPathItsMarksName(t *testing.T) {
+	named := func(path string, names ...string) models.BackgroundMarks {
+		m := models.BackgroundMarks{}
+		for _, n := range names {
+			m.Add("T1", n, models.BackgroundOwnSeriesWhy(path, "claim, every 2s, in T1's window alone"))
+		}
+		return m
+	}
+	for _, c := range []struct {
+		name  string
+		marks models.BackgroundMarks
+		want  string
+	}{
+		{"every mark names it", named("body.job", allClaims...), "body.job"},
+		{"no mark names one", ownMarks(nil, "T1", allClaims...), ""},
+		{"one mark names none", func() models.BackgroundMarks {
+			m := named("body.job", allClaims[:5]...)
+			return ownMarks(m, "T1", "claim-6")
+		}(), ""},
+		{"two marks name two paths", func() models.BackgroundMarks {
+			m := named("body.job", allClaims[:5]...)
+			m.Add("T1", "claim-6", models.BackgroundOwnSeriesWhy("body.other", "claim"))
+			return m
+		}(), ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			mm := timerSet(t)
+			mm.SetUnrequired(c.marks)
+			mm.ServeExactTest("T1", nil)
+			got, err := mm.MarkedSeries(context.Background(), seriesRowKind, nil)
+			if err != nil || len(got) != 1 || got[0].Owner != "T1" {
+				t.Fatalf("in T1's window MarkedSeries = %v, %v; want T1's own one", got, err)
+			}
+			if got[0].OwnID != c.want {
+				t.Fatalf("OwnID = %q; want %q", got[0].OwnID, c.want)
+			}
+		})
+	}
+}
+
 // A series only part of which is one test's own (another test owns, or
 // marks otherwise, one of its recordings; or one of them is the pool's,
 // unmarked) is handed in no window: keploy cannot tell whose it is, and
