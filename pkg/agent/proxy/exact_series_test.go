@@ -693,3 +693,27 @@ func TestASeriesPartlyATestsOwnIsHandedNowhere(t *testing.T) {
 		})
 	}
 }
+
+// A series of one recording that two tests' lists mark as their own is
+// handed in neither window, nor as a series marked set-wide: whose own it is
+// cannot be told.
+func TestALoneRecordingTwoTestsOwnIsHandedNowhere(t *testing.T) {
+	timerSet(t) // registers the rows' series reading
+	lone := exactMock("lone", 3*time.Second, models.LifetimeSession)
+	lone.Kind = seriesRowKind
+	lone.Spec.Metadata = map[string]string{"op": "beat", "at": strconv.FormatInt(exactT0.Add(3*time.Second).Unix(), 10)}
+	mm := stagedManager(t, nil, []*models.Mock{lone})
+	mm.ServeExactBackground(models.RecordedWithS12Routing, nil, nil)
+	mm.SetUnrequired(ownMarks(ownMarks(nil, "T1", "lone"), "T2", "lone"))
+	for _, test := range []string{"T1", "T2", "T3"} {
+		mm.ServeExactTest(test, nil)
+		if got, err := mm.MarkedSeries(context.Background(), seriesRowKind, nil); err != nil || len(got) != 0 {
+			t.Fatalf("in %s's window MarkedSeries = %d series, %v; want none", test, len(got), err)
+		}
+	}
+	mm.SetUnrequired(ownMarks(nil, "T1", "lone"))
+	mm.ServeExactTest("T1", nil)
+	if got, err := mm.MarkedSeries(context.Background(), seriesRowKind, nil); err != nil || len(got) != 1 || got[0].Owner != "T1" {
+		t.Fatalf("one test's own lone recording: MarkedSeries = %d series, %v; want T1's own one", len(got), err)
+	}
+}

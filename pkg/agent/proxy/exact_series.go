@@ -260,8 +260,11 @@ func (r *setSeriesRead) seriesOf(kind models.Kind, known learn.Known) []integrat
 			anyMarked = anyMarked || r.marked[mk.Name]
 			again = again || r.series[mk.Name]
 			if o, ok := r.own[mk.Name]; ok {
-				mixed = mixed || o == "" || owned > 0 && o != owner
-				owner, owned = o, owned+1
+				if owned == 0 {
+					owner = o
+				}
+				mixed = mixed || o != owner
+				owned++
 			}
 			recs = append(recs, mk)
 		}
@@ -269,7 +272,7 @@ func (r *setSeriesRead) seriesOf(kind models.Kind, known learn.Known) []integrat
 		case len(recs) == 0 || !anyMarked:
 		case owned == 0:
 			out = append(out, integrations.MarkedSeries{Series: s, Recordings: recs, Again: again, Once: r.answerOnce})
-		case owned == len(recs) && !mixed:
+		case owned == len(recs) && !mixed && owner != "":
 			// A test's own series: answered again in its window alone.
 			out = append(out, integrations.MarkedSeries{Series: s, Recordings: recs, Again: true, Owner: owner})
 		default:
