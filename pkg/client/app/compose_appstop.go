@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/api/types/filters"
@@ -16,6 +17,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 )
 
@@ -306,10 +308,12 @@ func (a *App) composeAppDied(ctx context.Context, m events.Message) bool {
 	if a.composeService != "" && m.Actor.ID != "" {
 		ref = m.Actor.ID
 	}
-	ictx, icancel := context.WithTimeout(ctx, dockerInspectBudget)
-	info, err := a.docker.ContainerInspect(ictx, ref)
-	icancel()
-	read := err == nil && info.ContainerJSONBase != nil && info.State != nil
+	info, read := a.composeDiedContainer(ctx, ref)
+	// A watch that has ended decides nothing: its die is read by keploy's
+	// next stop of the container, which finds it down.
+	if ctx.Err() != nil {
+		return false
+	}
 	if read && info.State.Running {
 		return false
 	}
@@ -337,6 +341,86 @@ func (a *App) composeAppDied(ctx context.Context, m events.Message) bool {
 	return true
 }
 
+// A DIE IS DECIDED ON THE DAEMON'S ANSWER, HOWEVER SLOW IT IS TO GIVE IT.
+//
+// The watch's read of the container a die names had a wall-clock budget of
+// 2 s (dockerInspectBudget). On a loaded host the daemon's answer took
+// longer, the read failed, and a die the watch could not place was taken for
+// a halt whenever no stop of keploy's was in progress: the late die of
+// keploy's own stop, read after keploy had started the container again for
+// the next set (which ends that stop), ended the run, and the set was lost,
+// as through the event timing composeDieOfAnEarlierRun closes. A read the
+// daemon fails says nothing of the container, so the watch asks again; what
+// bounds the wait for the daemon's answer is keploy's runnable time
+// (utils.StopStallBudget of it, stall.Meter), the bound on no news at all of
+// keploy's stop, and the watch's own end, never a number of seconds.
+
+// composeDiedContainer is the container ref, a die names, as the daemon has
+// it now; read reports whether the daemon said. A read the daemon fails (its
+// connection broke, or a loaded daemon was slow and the read gave up) is
+// asked again, at once and then at a walking pace (composeDaemonAskPace),
+// until the daemon answers, says it has no such container (removed: it has
+// no more to say of it), utils.StopStallBudget of keploy's runnable time
+// passes with no answer, or ctx (the watch's) ends.
+func (a *App) composeDiedContainer(ctx context.Context, ref string) (info container.InspectResponse, read bool) {
+	meter := stall.NewMeter(nil, utils.StopStallBudget)
+	defer meter.Stop()
+	type answer struct {
+		info container.InspectResponse
+		err  error
+	}
+	for asked := 0; ; asked++ {
+		if asked > 1 {
+			select {
+			case <-ctx.Done():
+				return container.InspectResponse{}, false
+			case <-time.After(composeDaemonAskPace):
+			}
+		}
+		ictx, cancel := context.WithCancel(ctx)
+		answered := make(chan answer, 1)
+		go func() {
+			info, err := a.docker.ContainerInspect(ictx, ref)
+			answered <- answer{info, err}
+		}()
+		var r answer
+	wait:
+		for {
+			select {
+			case r = <-answered:
+				break wait
+			case <-meter.Wait():
+				if meter.Expired() {
+					cancel()
+					a.logger.Debug("the docker daemon did not describe the application's container a die names; keploy decides the die on the event",
+						zap.String("container", ref), zap.String("bound", utils.StopStallSaid()))
+					return container.InspectResponse{}, false
+				}
+			case <-ctx.Done():
+				cancel()
+				return container.InspectResponse{}, false
+			}
+		}
+		cancel()
+		if r.err == nil && r.info.ContainerJSONBase != nil && r.info.State != nil {
+			return r.info, true
+		}
+		if r.err != nil && cerrdefs.IsNotFound(r.err) {
+			return container.InspectResponse{}, false
+		}
+		if ctx.Err() != nil {
+			return container.InspectResponse{}, false
+		}
+		if meter.Expired() {
+			a.logger.Debug("the docker daemon did not describe the application's container a die names; keploy decides the die on the event",
+				zap.String("container", ref), zap.String("bound", utils.StopStallSaid()), zap.Error(r.err))
+			return container.InspectResponse{}, false
+		}
+		a.logger.Debug("the docker daemon's read of the application's container a die names failed; keploy asks the daemon again",
+			zap.String("container", ref), zap.Error(r.err))
+	}
+}
+
 // A DIE OF AN EARLIER RUN IS NOT THE CURRENT RUN'S END.
 //
 // The die of keploy's own stop can reach the watch after keploy has started
@@ -356,17 +440,21 @@ func (a *App) composeAppDied(ctx context.Context, m events.Message) bool {
 
 // composeDieOfAnEarlierRun reports whether m, a die of the container state
 // reads, was sent before the container's current run began: an earlier
-// run's. A die or a run whose time the daemon does not give is not.
+// run's. A die or a run whose time the daemon does not give is not. A die
+// the daemon gives only to the second (no TimeNano) is compared to the
+// second: one sent in the second the run began may be the run's own.
 func composeDieOfAnEarlierRun(m events.Message, state *container.State) bool {
-	sent := m.TimeNano
-	if sent == 0 {
-		sent = m.Time * int64(time.Second)
-	}
 	began, err := time.Parse(time.RFC3339Nano, state.StartedAt)
-	if sent == 0 || err != nil || began.IsZero() {
+	if err != nil || began.IsZero() {
 		return false
 	}
-	return time.Unix(0, sent).Before(began)
+	switch {
+	case m.TimeNano != 0:
+		return time.Unix(0, m.TimeNano).Before(began)
+	case m.Time != 0:
+		return m.Time < began.Unix()
+	}
+	return false
 }
 
 // composeHaltEnd is the run's end on a halt of the app: halt is closed, the
