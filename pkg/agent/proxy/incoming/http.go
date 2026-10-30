@@ -227,6 +227,15 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 	// A capture takes it over; any other way out ends it here.
 	var win *syncMock.Window
 	defer func() { win.Close() }()
+	// countPause counts the exchange in flight as not recorded under the
+	// memory guard's pause (syncMock NoteNotRecordedUnderPressure), if the
+	// pause kept it from being recorded: once, however it ends. Its end runs
+	// it, and every way out before its end does too (deferred here): its
+	// client's going, an app that failed, a close under pressure. Counted
+	// only at the end it reached, a paused stream whose client hung up was
+	// missing from the count, and so from the recording's summary.
+	countPause := func() {}
+	defer func() { countPause() }()
 
 	// forceCloseMode: only sync mode needs the traditional HTTP parsing loop
 	// (strict one-at-a-time ordering with forced close). Sampling mode now
@@ -367,7 +376,8 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		pressureCloseMode := forceCloseMode || pausedAtRequest
 		captureEnabled := !pausedAtRequest
 		// lostToPause: a pause of the memory guard decided this exchange is
-		// not recorded, at any of the checks below; counted once, as it ends.
+		// not recorded, at any of the checks below; counted once, however it
+		// ends (countPause).
 		lostToPause := !captureEnabled
 		// pausedNow is every check below of a pause that began mid-exchange:
 		// when the memory guard has paused recording, the exchange is lost
@@ -379,6 +389,20 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			}
 			lostToPause = true
 			return true
+		}
+		// The exchange's count (countPause): a pause that one of the checks
+		// read, or one that cut a body's capture, which ended before any
+		// check read it.
+		var reqCapture, respCapture *captureBuffer
+		pauseCounted := false
+		countPause = func() {
+			if pauseCounted {
+				return
+			}
+			pauseCounted = true
+			if lostToPause || reqCapture.LostToPause() || respCapture.LostToPause() {
+				syncMock.FromContextOrGlobal(ctx).NoteNotRecordedUnderPressure(connName)
+			}
 		}
 		// The exchange may be captured: open its window before the request
 		// reaches the app, so no egress call it makes is ever older than it.
@@ -433,7 +457,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			req.Header.Set("Connection", "close")
 		}
 
-		reqCapture := newCaptureBuffer(maxHTTPBodyCaptureBytes)
+		reqCapture = newCaptureBuffer(maxHTTPBodyCaptureBytes)
 		if captureEligible && req.Body != nil && req.Body != http.NoBody {
 			req.Body = newTeeReadCloser(req.Body, reqCapture)
 		}
@@ -562,7 +586,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			resp.Header.Set("Connection", "close")
 		}
 
-		respCapture := newCaptureBuffer(maxHTTPBodyCaptureBytes)
+		respCapture = newCaptureBuffer(maxHTTPBodyCaptureBytes)
 		if captureEligible && resp.Body != nil && resp.Body != http.NoBody {
 			resp.Body = newTeeReadCloser(resp.Body, respCapture)
 		}
@@ -605,8 +629,11 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 				// told (watchClient): the write failed on the client's
 				// going, and the exchange is not one to record. That is
 				// its reason only if it could have been recorded, as
-				// warnNotRecorded's: not one the memory guard's pause
-				// kept from it (counted as lost to the pause).
+				// warnNotRecorded's: not one a check of the memory guard's
+				// pause had kept from it. What the pause cost the
+				// exchange, that or a body's capture it cut, is counted as
+				// the handler returns (countPause): a capture cut before
+				// the client went is told and counted, both true.
 				resp.Body.Close()
 				if captureEligible && captureEnabled {
 					tellClientLeft(logger, req)
@@ -632,7 +659,8 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			// The client went before the answer's end, and the app was
 			// told (watchClient): the exchange is not one to record, and
 			// the connection carries nothing after it. Told only for one
-			// that could have been recorded, as above.
+			// that could have been recorded, and what the pause cost it
+			// counted as the handler returns, as above.
 			if captureEligible && captureEnabled {
 				tellClientLeft(logger, req)
 			}
@@ -683,9 +711,9 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		}
 
 		// A pause that cut a body's capture and ended before the checks
-		// above read it: the exchange is lost to the pause, and counted.
+		// above read it: the exchange is lost to the pause, and counted
+		// (countPause reads the cut).
 		if shouldCapture && (reqCapture.LostToPause() || respCapture.LostToPause()) {
-			lostToPause = true
 			shouldCapture = false
 		}
 
@@ -718,9 +746,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		}
 
 		if !shouldCapture {
-			if lostToPause {
-				syncMock.FromContextOrGlobal(ctx).NoteNotRecordedUnderPressure(connName)
-			}
+			countPause()
 			win.Close()
 			win = nil
 			if forceCloseMode || pressureCloseMode {
@@ -1037,6 +1063,14 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 	notRecordedUnderPressure := func() {
 		syncMock.FromContextOrGlobal(ctx).NoteNotRecordedUnderPressure(connName)
 	}
+	// countCut counts the exchange in flight as not recorded under the
+	// pause if a pause that began after its request came cut a body's
+	// capture: once, however it ends. Its end runs it, and every way out
+	// before its end does too (deferred here): its client's going, an app
+	// that failed. One the pause cost as its request came is counted then,
+	// and has no capture to cut.
+	countCut := func() {}
+	defer func() { countCut() }()
 
 	// forceCloseActive mirrors the caller's forceClose intent but can be
 	// flipped to false mid-connection by demoteToBypass when the exchange
@@ -1333,7 +1367,17 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		// or the body is already pre-buffered or absent, we never
 		// touch reqCapture, so don't pay the per-request alloc.
 		captureEligible := captureEnabled
-		var reqCapture *captureBuffer
+		var reqCapture, respCapture *captureBuffer
+		cutCounted := false
+		countCut = func() {
+			if cutCounted {
+				return
+			}
+			cutCounted = true
+			if reqCapture.LostToPause() || respCapture.LostToPause() {
+				notRecordedUnderPressure()
+			}
+		}
 		if captureEligible && preBufferedReqBody == nil && req.Body != nil && req.Body != http.NoBody {
 			reqCapture = newCaptureBuffer(maxHTTPBodyCaptureBytes)
 			req.Body = newTeeReadCloser(req.Body, reqCapture)
@@ -1524,7 +1568,6 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		}
 
 		captureEligible = captureEnabled && requestWhole
-		var respCapture *captureBuffer
 		if captureEligible && resp.Body != nil && resp.Body != http.NoBody {
 			respCapture = newCaptureBuffer(maxHTTPBodyCaptureBytes)
 			resp.Body = newTeeReadCloser(resp.Body, respCapture)
@@ -1597,7 +1640,9 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 				// its reason only if it could have been recorded, as
 				// warnNotRecorded's: not on a sampling-bypass connection
 				// (never captured), nor one the memory guard's pause kept
-				// from it (counted as lost to the pause).
+				// from it as its request came (counted then). A pause that
+				// began later and cut a body's capture is counted as the
+				// handler returns (countCut): told and counted, both true.
 				if captureEnabled {
 					tellClientLeft(logger, req)
 				}
@@ -1613,7 +1658,8 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 			// The client went before the answer's end, and the app was
 			// told (watchClient): the exchange is not one to record, and
 			// the connection carries nothing after it. Told only for one
-			// that could have been recorded, as above.
+			// that could have been recorded, and a cut capture counted as
+			// the handler returns, as above.
 			if captureEnabled {
 				tellClientLeft(logger, req)
 			}
@@ -1642,11 +1688,10 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		respTeeTruncated := respCapture != nil && respCapture.Truncated()
 		// The pause is read once, as the request comes: one that starts
 		// later in the exchange cuts a body's capture instead, and the
-		// exchange it costs is counted here. Not twice: a body is captured
-		// only for an exchange the pause had not cost as its request came.
-		if reqCapture.LostToPause() || respCapture.LostToPause() {
-			notRecordedUnderPressure()
-		}
+		// exchange it costs is counted here (countCut), or at the way out it
+		// took before here. Not twice: a body is captured only for an
+		// exchange the pause had not cost as its request came.
+		countCut()
 		if captureEligible && !reqTeeTruncated && !respTeeTruncated {
 			releaseCaptureSlot, ok := takeCaptureSlot(ctx)
 			if !ok {

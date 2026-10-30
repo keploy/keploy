@@ -20,6 +20,7 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 
 	"go.keploy.io/server/v3/config"
+	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 )
 
 // An exchange whose client hung up before the answer's end is not recorded,
@@ -280,6 +281,13 @@ func (c *hangUpTeller) counts() (held, released, told int) {
 // once the handler ends; logs are its lines at Info and up.
 func serveWatched(t *testing.T, synchronous bool, appLn net.Listener, wrap func(net.Conn) net.Conn) (pm *IngressProxyManager, client net.Conn, served <-chan struct{}, logs *observer.ObservedLogs) {
 	t.Helper()
+	return serveWatchedIn(t, context.Background(), synchronous, appLn, wrap)
+}
+
+// serveWatchedIn is serveWatched with the handler's ctx: one that carries a
+// mock manager of the test's own counts what the pause costs there.
+func serveWatchedIn(t *testing.T, ctx context.Context, synchronous bool, appLn net.Listener, wrap func(net.Conn) net.Conn) (pm *IngressProxyManager, client net.Conn, served <-chan struct{}, logs *observer.ObservedLogs) {
+	t.Helper()
 	cfg := &config.Config{}
 	cfg.Agent.MockMode = true
 	cfg.Agent.RecordRequests = true
@@ -295,7 +303,7 @@ func serveWatched(t *testing.T, synchronous bool, appLn net.Listener, wrap func(
 	go func() {
 		defer close(done)
 		defer proxied.Close() // as the caller does once the handler returns
-		pm.ServeLive(context.Background(), handed, appLn.Addr().String(), 8083)
+		pm.ServeLive(ctx, handed, appLn.Addr().String(), 8083)
 	}()
 	return pm, client, done, logs
 }
@@ -728,7 +736,7 @@ var hangUps = []struct {
 					break
 				}
 			}
-			_ = client.(*net.TCPConn).CloseWrite()
+			_ = client.(interface{ CloseWrite() error }).CloseWrite()
 			if rest, err := io.ReadAll(br); err != nil || !strings.Contains(string(rest), "CLIENT GONE") {
 				t.Fatalf("the half-closed client got %q, %v", rest, err)
 			}
@@ -790,8 +798,10 @@ func TestABypassedExchangeIsNotToldAsNotRecorded(t *testing.T) {
 }
 
 // An exchange the memory guard's pause keeps from being recorded is counted
-// as lost to the pause, not told as not recorded for its client's going,
-// in either loop; its app is still told, and the client's going is no error.
+// as lost to the pause, once, not told as not recorded for its client's
+// going, in either loop; its app is still told, and the client's going is no
+// error. Counted only where the exchange's end is reached, the synchronous
+// loop's was neither told nor counted: missing with no trace.
 func TestAPausedExchangeIsNotToldAsNotRecorded(t *testing.T) {
 	stubIngressPaused(t, func() bool { return true })
 	for _, synchronous := range []bool{false, true} {
@@ -803,7 +813,8 @@ func TestAPausedExchangeIsNotToldAsNotRecorded(t *testing.T) {
 				}
 				told := make(chan struct{})
 				h.serve(t, appLn, told)
-				_, client, served, logs := serveWatched(t, synchronous, appLn, nil)
+				mgr := syncMock.New(zap.NewNop())
+				_, client, served, logs := serveWatchedIn(t, syncMock.NewContext(context.Background(), mgr), synchronous, appLn, nil)
 				if _, err := client.Write([]byte("GET /client/v1/jobs/j/events HTTP/1.1\r\nHost: api\r\n\r\n")); err != nil {
 					t.Fatal(err)
 				}
@@ -824,7 +835,119 @@ func TestAPausedExchangeIsNotToldAsNotRecorded(t *testing.T) {
 				if n := logs.FilterLevelExact(zapcore.ErrorLevel).Len(); n != 0 {
 					t.Fatalf("a client's going was logged as %d error(s): %v", n, logs.FilterLevelExact(zapcore.ErrorLevel).All())
 				}
+				if got := mgr.NotRecordedUnderPressure(); got.Total != 1 {
+					t.Fatalf("an exchange lost to the pause was counted %d time(s) as not recorded under pressure, want 1", got.Total)
+				}
 			})
 		}
 	}
 }
+
+// What the memory guard's pause costs an exchange is counted once, however
+// the exchange ends, in either loop: its end is not the only way out. A pause
+// as its request comes, with its client gone mid-answer (each hangUps shape)
+// or before the app answered; a pause that begins mid-answer, once the first
+// event has reached the client, and cuts the capture of what the app sends
+// after (Go's server, to a half-closed client): that exchange is counted, and
+// told as not recorded for its client's going too, both true. The control: a
+// pause that begins mid-answer while the app sends nothing more cuts no
+// capture, and costs nothing (told, not counted). The synchronous loop
+// counted none of the first three, the zero-copy loop not the cut one.
+func TestAnExchangeAPauseCostIsCountedOnceHoweverItEnds(t *testing.T) {
+	var paused atomic.Bool
+	stubIngressPaused(t, paused.Load)
+	beforeAnswer := hangUps[0]
+	beforeAnswer.name = "closes before the app answers"
+	beforeAnswer.serve = func(t *testing.T, ln net.Listener, told chan struct{}) {
+		rawApp(t, ln, func(_ int, c net.Conn, br *bufio.Reader) {
+			untilEnd(br)
+			close(told)
+		})
+	}
+	beforeAnswer.hangUp = func(t *testing.T, client net.Conn) { _ = client.Close() }
+	type end struct {
+		name      string
+		midAnswer bool // the pause begins once the first event reached the client
+		hangUp    int  // into ways
+		counted   uint64
+		told      int // "Not recording ... its client closed"
+	}
+	ways := append(append(hangUps[:0:0], hangUps...), beforeAnswer)
+	ends := []end{
+		{"paused as its request comes, " + ways[0].name, false, 0, 1, 0},
+		{"paused as its request comes, " + ways[1].name, false, 1, 1, 0},
+		{"paused as its request comes, " + ways[2].name, false, 2, 1, 0},
+		{"paused mid-answer, the rest's capture cut, " + ways[1].name, true, 1, 1, 1},
+		{"paused mid-answer, nothing more sent, " + ways[0].name, true, 0, 0, 1},
+	}
+	for _, synchronous := range []bool{false, true} {
+		for _, e := range ends {
+			t.Run(fmt.Sprintf("synchronous %v, %s", synchronous, e.name), func(t *testing.T) {
+				paused.Store(!e.midAnswer)
+				w := ways[e.hangUp]
+				appLn, err := net.Listen("tcp", "127.0.0.1:0")
+				if err != nil {
+					t.Fatal(err)
+				}
+				told := make(chan struct{})
+				w.serve(t, appLn, told)
+				mgr := syncMock.New(zap.NewNop())
+				_, client, served, logs := serveWatchedIn(t, syncMock.NewContext(context.Background(), mgr), synchronous, appLn, nil)
+				if _, err := client.Write([]byte("GET /client/v1/jobs/j/events HTTP/1.1\r\nHost: api\r\n\r\n")); err != nil {
+					t.Fatal(err)
+				}
+				hangUp := w.hangUp
+				if e.midAnswer {
+					// The first event is read whole before the pause begins: its
+					// capture is done, and the pause cuts only what comes after.
+					hangUp = func(t *testing.T, client net.Conn) {
+						w.hangUp(t, &pauseAtFirstEvent{Conn: client, paused: &paused})
+					}
+				}
+				hangUp(t, client)
+				select {
+				case <-told:
+				case <-never(t):
+					t.Fatal("never: the app was not told its client went")
+				}
+				select {
+				case <-served:
+				case <-never(t):
+					t.Fatal("never: the handler ended")
+				}
+				if got := mgr.NotRecordedUnderPressure(); got.Total != e.counted {
+					t.Fatalf("counted %d time(s) as not recorded under pressure, want %d: %v", got.Total, e.counted, logs.All())
+				}
+				if n := logs.FilterMessageSnippet("Not recording this request as a test case: its client closed").Len(); n != e.told {
+					t.Fatalf("told %d time(s) as not recorded for its client's going, want %d: %v", n, e.told, logs.All())
+				}
+				if n := logs.FilterLevelExact(zapcore.ErrorLevel).Len(); n != 0 {
+					t.Fatalf("a client's going was logged as %d error(s): %v", n, logs.FilterLevelExact(zapcore.ErrorLevel).All())
+				}
+			})
+		}
+	}
+}
+
+// pauseAtFirstEvent is a client conn that begins the pause once it has read
+// the answer's first event, before it reads on or hangs up.
+type pauseAtFirstEvent struct {
+	net.Conn
+	paused *atomic.Bool
+	seen   []byte
+}
+
+func (c *pauseAtFirstEvent) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	if !c.paused.Load() {
+		c.seen = append(c.seen, p[:n]...)
+		if strings.Contains(string(c.seen), "RUNNING") {
+			c.paused.Store(true)
+		}
+	}
+	return n, err
+}
+
+// CloseWrite half-closes the client conn, as the hangUps shape that reads on
+// does.
+func (c *pauseAtFirstEvent) CloseWrite() error { return c.Conn.(*net.TCPConn).CloseWrite() }
