@@ -2209,32 +2209,40 @@ func movedWords(rec, live []string) (movedRec, movedLive []string) {
 	return movedRec, movedLive
 }
 
-// isClock reports whether p (what a value held when recorded, and in F)
-// drifted only with F's clock: each ASCII word of it that changed (that the
-// other side does not hold) is a part of a clock read that moved by the
-// lead, in either value (cs), and one did.
-func isClock(p run, cs ...clockSet) bool {
-	r, l := tokensBy(p.rec, isWord), tokensBy(p.live, isWord)
-	changed := false
-	for w := range r {
-		if l[w] {
-			continue
+// isClock reports whether a piece whose changed words are changed
+// (changedWords) drifted only with F's clock: each of them is a part of a
+// clock read that moved by the lead, in either value (cs), and one changed.
+func isClock(changed [2][]string, cs ...clockSet) bool {
+	for side, words := range changed {
+		for _, w := range words {
+			if !clockSide(w, side == 0, cs) {
+				return false
+			}
 		}
-		changed = true
-		if !clockSide(w, true, cs) {
-			return false
+	}
+	return len(changed[0])+len(changed[1]) > 0
+}
+
+// changedWords are the ASCII words of p (what a value held when recorded,
+// and in F) that the other side does not hold, recorded [0] and live [1]:
+// what isClock reads of a piece, read once as its drift is built, never once
+// per place it is compared with.
+func changedWords(p run) (out [2][]string) {
+	r, l := tokensBy(p.rec, isWord), tokensBy(p.live, isWord)
+	for w := range r {
+		if !l[w] {
+			out[0] = append(out[0], w)
 		}
 	}
 	for w := range l {
-		if r[w] {
-			continue
-		}
-		changed = true
-		if !clockSide(w, false, cs) {
-			return false
+		if !r[w] {
+			out[1] = append(out[1], w)
 		}
 	}
-	return changed
+	// In order: the same piece's words are the same, read by any test.
+	sort.Strings(out[0])
+	sort.Strings(out[1])
+	return out
 }
 
 // clockSide reports whether word w is a clock word of one of cs, on its
@@ -2331,6 +2339,8 @@ type valueDrift struct {
 	// held in another order, or once more, is one.
 	movedRec, movedLive []map[string]bool
 	pieces              []run
+	// pieceWords are each piece's changed words (changedWords), by piece.
+	pieceWords [][2][]string
 	// idParts are the words of the finer readings (isWord, wordByte) the
 	// value holds, recorded [0] and live [1], only inside ids (idByte
 	// words) that changed whole: an id the other side does not hold, of
@@ -2645,7 +2655,26 @@ func (dc *DriftCache) ofIn(rec, live string, w *Window, call time.Time) *valueDr
 		return d
 	}
 	lead := !dc.clientTests
-	d = &valueDrift{rec: rec, live: live, clock: clockAt(rec, live, w, lead, call, dc.zone), begun: w != nil && w.begun}
+	if w == nil && at == 0 {
+		// Bounded by no call: the same for every test of the set, and in
+		// every zone (driftOf).
+		d = dc.set.driftOf(rec, live, lead)
+	} else {
+		d = newDrift(rec, live, w, lead, call, dc.zone)
+	}
+	dc.mu.Lock()
+	dc.m[k] = d
+	dc.mu.Unlock()
+	return d
+}
+
+// newDrift is what the drifted value (rec, live) changed (ofIn), read with
+// the lead where lead holds, in w (nil: by the lead alone), the call
+// recorded at call (zero: not known), in zone. It depends on these alone, and
+// nothing changes it once built: the set's tests share one bounded by no call
+// (driftOf).
+func newDrift(rec, live string, w *Window, lead bool, call time.Time, zone *time.Location) *valueDrift {
+	d := &valueDrift{rec: rec, live: live, clock: clockAt(rec, live, w, lead, call, zone), begun: w != nil && w.begun}
 	d.decRec, d.decLive = unescaped(rec), unescaped(live)
 	d.decoded = d.decRec != rec || d.decLive != live
 	// A value with escapes is read raw and decoded: a '%' or '\' may be
@@ -2661,7 +2690,7 @@ func (dc *DriftCache) ofIn(rec, live string, w *Window, call time.Time) *valueDr
 	}
 	var dclock clockSet
 	if d.decoded {
-		dclock = clockAt(d.decRec, d.decLive, w, lead, call, dc.zone)
+		dclock = clockAt(d.decRec, d.decLive, w, lead, call, zone)
 		merge(dclock)
 	}
 	forms, encoded := formsOf(rec, live, d.decRec, d.decLive, d.clock)
@@ -2669,7 +2698,7 @@ func (dc *DriftCache) ofIn(rec, live string, w *Window, call time.Time) *valueDr
 	// The clock reads of every other form (the first is the decoded value,
 	// read above).
 	for _, f := range forms[1:] {
-		merge(clockAt(f[0], f[1], w, lead, call, dc.zone))
+		merge(clockAt(f[0], f[1], w, lead, call, zone))
 	}
 	if d.decoded {
 		forms = append([][2]string{{rec, live}}, forms...)
@@ -2755,11 +2784,11 @@ func (dc *DriftCache) ofIn(rec, live string, w *Window, call time.Time) *valueDr
 	for _, f := range forms {
 		d.pieces = append(d.pieces, pieces(f[0], f[1])...)
 	}
+	for _, p := range d.pieces {
+		d.pieceWords = append(d.pieceWords, changedWords(p))
+	}
 	// Its instants (instants.go).
 	d.readInstants()
-	dc.mu.Lock()
-	dc.m[k] = d
-	dc.mu.Unlock()
 	return d
 }
 
@@ -2768,15 +2797,10 @@ func (dc *DriftCache) ofIn(rec, live string, w *Window, call time.Time) *valueDr
 // of d does not hold is a clock word of one of cs (a token whose words the
 // other side all holds is only regrouped: nothing new).
 func clockWord(t string, recorded bool, d *valueDrift, cs ...clockSet) bool {
-	other := map[string]bool{}
-	for _, f := range d.forms {
-		side := f[1]
-		if !recorded {
-			side = f[0]
-		}
-		for w := range tokensBy(side, isWord) {
-			other[w] = true
-		}
+	// The other side's ASCII words in every form (readings[0] is isWord).
+	other := d.liveTok[0]
+	if !recorded {
+		other = d.recTok[0]
 	}
 	ws := tokensBy(t, isWord)
 	if len(ws) == 0 {
@@ -2917,13 +2941,13 @@ func sources(e, v *valueDrift) (found, whole bool) {
 			return true, false
 		}
 	}
-	for _, p := range v.pieces {
-		if !isClock(p, v.clock, e.clock) && (drifted(p, e.rec, e.live) || e.decoded && drifted(p, e.decRec, e.decLive)) {
+	for i, p := range v.pieces {
+		if !isClock(v.pieceWords[i], v.clock, e.clock) && (drifted(p, e.rec, e.live) || e.decoded && drifted(p, e.decRec, e.decLive)) {
 			return true, false
 		}
 	}
-	for _, p := range e.pieces {
-		if !isClock(p, e.clock, v.clock) && (drifted(p, v.rec, v.live) || v.decoded && drifted(p, v.decRec, v.decLive)) {
+	for i, p := range e.pieces {
+		if !isClock(e.pieceWords[i], e.clock, v.clock) && (drifted(p, v.rec, v.live) || v.decoded && drifted(p, v.decRec, v.decLive)) {
 			return true, false
 		}
 	}
@@ -3038,8 +3062,8 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 			}
 		}
 	}
-	for _, p := range v.pieces {
-		if p.rec != recorded && !isClock(p, v.clock) {
+	for i, p := range v.pieces {
+		if p.rec != recorded && !isClock(v.pieceWords[i], v.clock) {
 			searched = append(searched, p.rec)
 		}
 	}

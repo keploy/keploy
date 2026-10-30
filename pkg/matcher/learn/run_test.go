@@ -905,12 +905,13 @@ func TestTheRunsPlacesHoldTheValuesNotTheCalls(t *testing.T) {
 // One call's read of the run's places as the last test of a set of n tests
 // learns its one changed value: the tracker's read (a copy of every place),
 // the learn step's sorted copy, and the source search over every place
-// (appearedIn: each place's drift and its words, read again per read), with
-// a fresh drift cache, as a test's first call reads them (first-read), and
-// with the test's drift cache warm, as its later calls do (later-read).
-// "followed" is a value the set's first test made, "unexplained" one no test
-// sent. Each is linear in n, in time and in what one read allocates; most of
-// it is the source search's words, not the copies.
+// (appearedIn: each place's drift, the set's, and a compare with it), with
+// a fresh drift cache of the set's, as a test's first call reads them
+// (first-read), and with the test's drift cache warm, as its later calls do
+// (later-read). "followed" is a value the set's first test made,
+// "unexplained" one no test sent. Each is linear in n, in time and in what
+// one read allocates: the copies, and a first read's entry for each place in
+// the test's own cache.
 func BenchmarkOneReadOfTheRunsPlaces(b *testing.B) {
 	b.Setenv(provenswitch.Env, "1")
 	t0 := time.Unix(1_792_000_000, 0)
@@ -931,10 +932,18 @@ func BenchmarkOneReadOfTheRunsPlaces(b *testing.B) {
 					name = strconv.Itoa(n) + "/" + c.name + "/later-read"
 				}
 				b.Run(name, func(b *testing.B) {
-					dc := clockedDrifts()
+					// A test's own cache, of the set's (its drifts).
+					fresh := func() *DriftCache {
+						tr.mu.Lock()
+						defer tr.mu.Unlock()
+						dc := tr.newDrifts()
+						dc.appClock = true
+						return dc
+					}
+					dc := fresh()
 					read := func() {
 						if !warm {
-							dc = clockedDrifts()
+							dc = fresh()
 						}
 						_, earlier, _, _ := tr.Test()
 						ln := ClassifyIn(dc, []string{"body.order"}, strLeaf("body.order", c.live), strLeaf("body.order", c.rec), call, earlier, nil, nil, nil)
