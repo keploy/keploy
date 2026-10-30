@@ -186,3 +186,15 @@ func TestEveryCanonicalProtocolNamesItsKinds(t *testing.T) {
 		t.Error("a protocol keploy does not name names a kind")
 	}
 }
+
+// A miss that names no recording carries the live call's shape, the only
+// evidence of which series it is a call of; one that names its closest
+// recording says what the call is by that name, and carries no shape.
+func TestWithShapeIsKeptOnlyOnAMissThatNamesNoRecording(t *testing.T) {
+	if got := NewReport(ProtocolMongo, "findAndModify on jobs").WithShape("s1").Build().Shape; got != "s1" {
+		t.Errorf("a miss naming no recording carries shape %q, want s1", got)
+	}
+	if got := NewReport(ProtocolMongo, "findAndModify on jobs").WithShape("s1").WithClosest("mock-3", nil).Build().Shape; got != "" {
+		t.Errorf("a miss naming mock-3 carries shape %q, want none", got)
+	}
+}

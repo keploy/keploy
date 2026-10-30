@@ -1703,15 +1703,19 @@ func (tfs *TestFailureStore) AddUnmatchedCallForTest(testSetID string, testCaseI
 			FieldReasons:     call.FieldReasons,
 			VariablePlaces:   call.VariablePlaces,
 			NotOwned:         call.NotOwned,
-			Reason:           call.Reason,
-			Concurrent:       call.Concurrent,
-			Answer:           call.Answer,
-			Drift:            call.Drift,
-			Reused:           call.Reused,
-			WriteKind:        call.WriteKind,
-			Source:           call.Source,
-			RecordedIn:       call.RecordedIn,
-			Repeat:           call.Repeat.Clone(),
+			Shape:            call.Shape,
+			// A marked series' call nothing answered stays the
+			// application's background work in the report too.
+			Background: call.Background,
+			Reason:     call.Reason,
+			Concurrent: call.Concurrent,
+			Answer:     call.Answer,
+			Drift:      call.Drift,
+			Reused:     call.Reused,
+			WriteKind:  call.WriteKind,
+			Source:     call.Source,
+			RecordedIn: call.RecordedIn,
+			Repeat:     call.Repeat.Clone(),
 		},
 	}
 	tfs.failures = append(tfs.failures, failure)

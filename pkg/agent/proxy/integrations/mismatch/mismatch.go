@@ -198,10 +198,22 @@ func (b *Builder) WithRenderedRequests(mockReq, receivedReq string) *Builder {
 	return b
 }
 
+// WithShape attaches, for a miss that names no recording, the live call's
+// shape (learn.CallShapeOf, under the proven switch): which series of the
+// set the call can be a call of. Build keeps it only while the report names
+// no closest recording (WithClosest), which then says what the call is.
+func (b *Builder) WithShape(shape string) *Builder {
+	b.report.Shape = shape
+	return b
+}
+
 // Build renders the Diff string from FieldDiffs (when not explicitly set)
 // and returns the finished report.
 func (b *Builder) Build() *models.MockMismatchReport {
 	r := b.report
+	if r.ClosestMock != "" {
+		r.Shape = ""
+	}
 	// Destination scope is decided BEFORE the next-steps default so the
 	// verdict and the guidance can never disagree.
 	//
