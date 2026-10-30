@@ -133,13 +133,15 @@ func TestAFailedTestRequestIsClassifiedByTheErrorNotItsText(t *testing.T) {
 		reset bool
 		// noAnswer is what IsAppNoAnswer says.
 		noAnswer bool
+		// canceled is what IsNoAnswerCanceled says: only a cancel's.
+		canceled bool
 	}{
 		{"refused", func(t *testing.T) error {
 			return post(t, context.Background(), 5*time.Second, "http://"+refusedAddr()+"/x")
-		}, true, false, false},
+		}, true, false, false, false},
 		{"dropped before the request was on the connection (errServerClosedIdle)", func(t *testing.T) error {
 			return postToAServerThatClosesFirst(t)
-		}, true, true, false},
+		}, true, true, false, false},
 		{"dropped after the request was read (io.EOF)", func(t *testing.T) error {
 			addr := serveEachConn(t, func(c net.Conn) { readTheRequest(c); _ = c.Close() })
 			err := post(t, context.Background(), 5*time.Second, "http://"+addr+"/x")
@@ -147,7 +149,7 @@ func TestAFailedTestRequestIsClassifiedByTheErrorNotItsText(t *testing.T) {
 				t.Fatalf("got %v; want the io.EOF this case provokes", err)
 			}
 			return err
-		}, true, true, false},
+		}, true, true, false, false},
 		{"reset after the request was read", func(t *testing.T) error {
 			addr := serveEachConn(t, func(c net.Conn) {
 				readTheRequest(c)
@@ -155,7 +157,7 @@ func TestAFailedTestRequestIsClassifiedByTheErrorNotItsText(t *testing.T) {
 				_ = c.Close()
 			})
 			return post(t, context.Background(), 5*time.Second, "http://"+addr+"/x")
-		}, true, true, false},
+		}, true, true, false, false},
 		{"host not found", func(t *testing.T) error {
 			transport := &http.Transport{DialContext: (&net.Dialer{Resolver: nxdomainResolver(t)}).DialContext}
 			t.Cleanup(transport.CloseIdleConnections)
@@ -169,7 +171,7 @@ func TestAFailedTestRequestIsClassifiedByTheErrorNotItsText(t *testing.T) {
 				t.Fatalf("got %v; want the not-found *net.DNSError this case provokes", err)
 			}
 			return err
-		}, true, false, false},
+		}, true, false, false, false},
 		{"gRPC call whose connection is dropped", func(t *testing.T) error {
 			addr := serveEachConn(t, func(c net.Conn) { _ = c.Close() })
 			_, err := SimulateGRPC(context.Background(), grpcTestCase(addr, []models.GrpcLengthPrefixedMessage{{}}),
@@ -178,7 +180,7 @@ func TestAFailedTestRequestIsClassifiedByTheErrorNotItsText(t *testing.T) {
 				t.Fatal("a gRPC call to a server that drops every connection succeeded")
 			}
 			return err
-		}, true, false, false},
+		}, true, false, false, false},
 		{"gRPC call at a port an HTTP/1 server answers on", func(t *testing.T) error {
 			srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 			t.Cleanup(srv.Close)
@@ -188,13 +190,13 @@ func TestAFailedTestRequestIsClassifiedByTheErrorNotItsText(t *testing.T) {
 				t.Fatal("a gRPC call to an HTTP/1 server succeeded")
 			}
 			return err
-		}, true, false, false},
+		}, true, false, false, false},
 		{"no answer in time", func(t *testing.T) error {
 			release := make(chan struct{})
 			t.Cleanup(func() { close(release) })
 			addr := serveEachConn(t, func(c net.Conn) { readTheRequest(c); <-release; _ = c.Close() })
 			return post(t, context.Background(), 50*time.Millisecond, "http://"+addr+"/x")
-		}, false, false, true},
+		}, false, false, true, false},
 		{"the body did not come in time", func(t *testing.T) error {
 			release := make(chan struct{})
 			t.Cleanup(func() { close(release) })
@@ -217,12 +219,12 @@ func TestAFailedTestRequestIsClassifiedByTheErrorNotItsText(t *testing.T) {
 				t.Fatal("a body that never came was read whole")
 			}
 			return err
-		}, false, false, true},
+		}, false, false, true, false},
 		{"cancelled", func(t *testing.T) error {
 			ctx, cancel := context.WithCancel(context.Background())
 			cancel()
 			return post(t, ctx, 5*time.Second, "http://"+refusedAddr()+"/x")
-		}, false, false, true},
+		}, false, false, true, true},
 		{"gRPC call with no answer in time", func(t *testing.T) error {
 			err := grpcCallToASilentServer(t, context.Background())
 			// grpc-go's status for its call context's deadline, with no cause:
@@ -231,7 +233,7 @@ func TestAFailedTestRequestIsClassifiedByTheErrorNotItsText(t *testing.T) {
 				t.Fatalf("got %v; want the DeadlineExceeded status this case provokes", err)
 			}
 			return err
-		}, false, false, true},
+		}, false, false, true, false},
 		{"gRPC call cancelled", func(t *testing.T) error {
 			ctx, cancel := context.WithCancel(context.Background())
 			cancel()
@@ -240,7 +242,7 @@ func TestAFailedTestRequestIsClassifiedByTheErrorNotItsText(t *testing.T) {
 				t.Fatalf("got %v; want the Canceled status this case provokes", err)
 			}
 			return err
-		}, false, false, true},
+		}, false, false, true, true},
 		{"closed part-way through the answer", func(t *testing.T) error {
 			addr := serveEachConn(t, func(c net.Conn) {
 				readTheRequest(c)
@@ -252,13 +254,13 @@ func TestAFailedTestRequestIsClassifiedByTheErrorNotItsText(t *testing.T) {
 				t.Fatalf("got %v; want the io.ErrUnexpectedEOF this case provokes", err)
 			}
 			return err
-		}, false, true, true},
+		}, false, true, true, false},
 		{"only the text of a refusal", func(*testing.T) error {
 			return errors.New(`Post "http://localhost:8080/x": dial tcp [::1]:8080: connect: connection refused`)
-		}, false, false, false},
+		}, false, false, false, false},
 		{"only the text of a timeout", func(*testing.T) error {
 			return errors.New(`Post "http://localhost:8080/x": context deadline exceeded (Client.Timeout exceeded while awaiting headers)`)
-		}, false, false, false},
+		}, false, false, false, false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			err := tt.err(t)
@@ -270,6 +272,9 @@ func TestAFailedTestRequestIsClassifiedByTheErrorNotItsText(t *testing.T) {
 			}
 			if got := IsAppNoAnswer(err); got != tt.noAnswer {
 				t.Errorf("IsAppNoAnswer(%v) = %v, want %v", err, got, tt.noAnswer)
+			}
+			if got := IsNoAnswerCanceled(err); got != tt.canceled {
+				t.Errorf("IsNoAnswerCanceled(%v) = %v, want %v", err, got, tt.canceled)
 			}
 		})
 	}

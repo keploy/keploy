@@ -114,6 +114,9 @@ type Tracker struct {
 	// appClock reads the app's clock at a real instant (SetAppClock), nil
 	// while none is set.
 	appClock func(time.Time) (time.Time, bool)
+	// appClockRun is the real instant from which the app's clock has run as
+	// one to a real instant (SetAppClockRun), nil where the hooks tell none.
+	appClockRun func(time.Time) (time.Time, bool)
 	// servedAt are the real instants the store served the running set's
 	// data-plane mocks at, in order (ServedMockAt): when the app's calls the
 	// replay answered reached keploy. NewSet forgets them.
@@ -148,6 +151,12 @@ type Tracker struct {
 	// the app's clock, a call's window on F's clock starts there
 	// (CallWindowFrom).
 	beganAt time.Time
+	// setBegan is the real instant the running set began at (NewSetAt),
+	// zero before the first: a server test's call the store served nothing
+	// before in the set has its span on the app's clock start there, or
+	// where the clock's run began after it, where the hooks tell the run
+	// (LiveSpan).
+	setBegan time.Time
 	// recBegan is the instant the running test began at in its recording
 	// (RecordedBegin, taken by BeginAt from nextRecBegan), zero where none
 	// was given: in a client test a call's window in the recording starts
@@ -175,7 +184,12 @@ func NewTracker() *Tracker {
 // start-up takes a test number no request of the previous set holds, so a
 // request of that set answered after the set changed is nobody's, and names
 // none of the new set's variables, its run's neither (Name, RunName).
-func (t *Tracker) NewSet() {
+func (t *Tracker) NewSet() { t.NewSetAt(time.Now()) }
+
+// NewSetAt is NewSet of a set that began at the real instant at: a server
+// test's call the store served nothing before in the set starts its span on
+// the app's clock no earlier than at (LiveSpan).
+func (t *Tracker) NewSetAt(at time.Time) {
 	if t == nil {
 		return
 	}
@@ -196,6 +210,7 @@ func (t *Tracker) NewSet() {
 	say := t.closeUnread()
 	t.open, t.began = false, false
 	t.beganAt, t.recBegan, t.nextRecBegan = time.Time{}, time.Time{}, time.Time{}
+	t.setBegan = at
 	t.mu.Unlock()
 	say()
 }
@@ -342,10 +357,13 @@ func (t *Tracker) AwaitRequest(ctx context.Context) error {
 }
 
 // newDrifts is an empty DriftCache of the tracker's tests: one of keploy
-// mock's client tests where the tracker's are (SetClientTests). t.mu is held.
+// mock's client tests where the tracker's are (SetClientTests), in the
+// application's zone (SetAppZone), with an app clock where the tracker has
+// one (SetAppClock). t.mu is held.
 func (t *Tracker) newDrifts() *DriftCache {
 	dc := NewDriftCache()
-	dc.clientTests, dc.zone = t.clientTests, t.appZone
+	dc.clientTests, dc.zone, dc.appClock = t.clientTests, t.appZone, t.appClock != nil
+	dc.zoneName, dc.zoneNoName = t.drifts.zoneName, t.drifts.zoneNoName
 	return dc
 }
 
@@ -402,14 +420,30 @@ func MockID(m *models.Mock) string {
 // such a value refused, a false red that fails closed. A wall clock of no
 // zone its protocol types (WallClockLeaf) is read in those two zones too
 // where the learn step looks for a read of the clock (instantClock), as a
-// text's is. The agent sets it once, before any test.
-func (t *Tracker) SetAppZone(loc *time.Location) {
+// text's is. The agent sets it once, before any test. A learning that
+// depends on it names it (models.ClockOffset.AppZone, models.ZoneNameOf).
+// It is the agent's own zone: a call whose process's zone the agent read
+// (WithProcZone) is learned and checked in that one instead (DriftsOf,
+// ClockSpanFrom).
+func (t *Tracker) SetAppZone(loc *time.Location) { t.setAppZone(loc, true) }
+
+// SetAppZoneUnnamed is SetAppZone of a zone keploy could not read by name
+// (Go's own reading of a TZ it cannot read, which Go reads as UTC): no
+// learning names it, so a replay reads the zone its own tracker knows, as
+// before the name was stored, never a name the application's zone is not.
+func (t *Tracker) SetAppZoneUnnamed(loc *time.Location) { t.setAppZone(loc, false) }
+
+func (t *Tracker) setAppZone(loc *time.Location, named bool) {
 	if t == nil {
 		return
 	}
+	name := ""
+	if named {
+		name = models.ZoneNameOf(loc, time.Now())
+	}
 	t.mu.Lock()
 	t.appZone = loc
-	t.drifts.zone = loc
+	t.drifts.zone, t.drifts.zoneName, t.drifts.zoneNoName = loc, name, !named
 	t.mu.Unlock()
 }
 
@@ -886,6 +920,18 @@ func (t *Tracker) Drifts() *DriftCache {
 	return t.drifts
 }
 
+// DriftsOf is Drifts read in the zone of the process that made the call ctx
+// serves (WithProcZone; DriftCache.InZone): the application's zone a call's
+// learning depends on is its own process's, never the agent's. Drifts
+// itself where ctx carries none.
+func (t *Tracker) DriftsOf(ctx context.Context) *DriftCache {
+	dc := t.Drifts()
+	if z, ok := procZoneFrom(ctx); ok {
+		return dc.InZone(z)
+	}
+	return dc
+}
+
 // Answered reports whether the running test's own mock name has answered a
 // request of the test: it answers no other. A nil tracker, which knows of no
 // test, answers false.
@@ -1082,13 +1128,40 @@ func (t *Tracker) free(base string, reserved, taken map[string]bool) string {
 // SetAppClock makes the tracker read the app's clock through f: the instant
 // the app's clock showed at a real one, false where f cannot tell (the
 // agent's time-freeze hooks, which move the app's clock; nil: none, and no
-// call's window is read).
+// call's window is read, and an instant only a window or a replay's check
+// could show a read of the clock is refused at learn: DriftCache.appClock).
 func (t *Tracker) SetAppClock(f func(real time.Time) (time.Time, bool)) {
 	if t == nil {
 		return
 	}
 	t.mu.Lock()
 	t.appClock = f
+	t.drifts.appClock = f != nil
+	t.mu.Unlock()
+}
+
+// SetAppClockRun makes the tracker read, through f, the real instant from
+// which the app's clock has run as one to a real instant: the end of the
+// last move the hooks wrote of it by then (the enterprise run clock, which
+// a server test's begin moves after the previous test's last serve), false
+// where they cannot tell (a move being written). A call's span then starts
+// no earlier than that instant (LiveSpan): the app reads its clock for a
+// call of a test after the test's request reached it, after the move. A
+// call that does not (a background poller that read the clock before the
+// move and reaches keploy after it) is checked against the moved clock's
+// span, as a read made before the previous serve is checked against that
+// serve's: refused where the move is larger than the read's cut, and
+// passing or not by when it read only where the move is within a cut or
+// two. A server test's call the store served nothing before in the set
+// starts its span at the later of the set's begin (NewSetAt) and that
+// instant. nil: none, and a span is read only where the clock ran as one
+// from its bound, at its two ends, as before; such a call has none.
+func (t *Tracker) SetAppClockRun(f func(real time.Time) (time.Time, bool)) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	t.appClockRun = f
 	t.mu.Unlock()
 }
 
@@ -1162,13 +1235,17 @@ func (t *Tracker) CallWindow(paired *models.Mock, recorded []*models.Mock, arriv
 // data-plane call (recorded at prevRec, PreviousCall: every recording of the
 // set seen, the ones the agent keeps on disk too) and no later than paired;
 // in this run, on the app's clock, after the previous data-plane call the
-// store served (ServedMockAt) and no later than arrival. nil when the
+// store served (ServedMockAt), or in a server test the set's begin where it
+// served none before it and the hooks tell the clock's run (LiveSpan), and
+// no later than arrival. nil when the
 // recording has no previous call (the app's start is not recorded), paired
 // has no recorded time, no app clock reads arrival and the previous serve,
 // or the app's clock did not run as one between them (a test's begin moved
 // it): the span F's clock reads from its start to the arrival must be the
 // real time between them, exactly, or what the window bounds is no run of
-// one clock.
+// one clock. Where the hooks tell where the clock's run began
+// (SetAppClockRun), this run's half starts no earlier than that: a test's
+// first call after its begin moved the clock has a window from the move.
 //
 // In a client test (SetClientTests), whose begin moves the app's clock, a
 // span also starts where the running test began, when that came after the
@@ -1178,51 +1255,184 @@ func (t *Tracker) CallWindow(paired *models.Mock, recorded []*models.Mock, arriv
 // begin (RecordedBegin), where it came after prevRec or none is recorded.
 // The app reads its clock for a call of the test after the test began, so
 // a later start only narrows a span, and a test's first call has a window
-// where no earlier call bounds it. keploy test's windows are as they were.
+// where no earlier call bounds it. keploy test's windows start at the
+// previous serve, or the set's begin where that came later (setBound), or
+// where the clock's run began after it where the hooks tell that
+// (SetAppClockRun).
 func (t *Tracker) CallWindowFrom(prevRec time.Time, paired *models.Mock, arrival time.Time) *Window {
 	if t == nil || paired == nil || paired.Spec.ReqTimestampMock.IsZero() {
 		return nil
 	}
-	t.mu.Lock()
-	clock := t.appClock
-	i := sort.Search(len(t.servedAt), func(i int) bool { return !t.servedAt[i].Before(arrival) })
-	var prev time.Time
-	if i > 0 {
-		prev = t.servedAt[i-1]
-	}
-	client, began, recBegan := t.clientTests, t.beganAt, t.recBegan
-	t.mu.Unlock()
+	lc, recBegan := t.liveClockAt(arrival)
 	recFrom := prevRec
-	if client && recBegan.After(recFrom) {
+	if lc.client && recBegan.After(recFrom) {
 		recFrom = recBegan
 	}
-	if recFrom.IsZero() || !recFrom.Before(paired.Spec.ReqTimestampMock) || clock == nil {
+	if recFrom.IsZero() || !recFrom.Before(paired.Spec.ReqTimestampMock) || lc.clock == nil {
 		return nil
 	}
-	// span is F's span from the real instant from to the arrival, ok where
-	// the app's clock ran as one between them.
-	span := func(from time.Time) (Span, bool) {
-		if from.IsZero() || from.After(arrival) {
-			return Span{}, false
-		}
-		fFrom, ok := clock(from)
-		if !ok {
-			return Span{}, false
-		}
-		fTo, ok := clock(arrival)
-		if !ok || fTo.Sub(fFrom) != arrival.Sub(from) {
-			return Span{}, false
-		}
-		return Span{From: fFrom, To: fTo}, true
-	}
-	f, ok := span(prev)
-	if !ok && client && began.After(prev) {
-		f, ok = span(began)
-	}
+	f, ok := lc.span(arrival)
 	if !ok {
 		return nil
 	}
-	return &Window{Rec: Span{From: recFrom, To: paired.Spec.ReqTimestampMock}, F: f}
+	rec := Span{From: recFrom, To: paired.Spec.ReqTimestampMock}
+	if lc.client {
+		rec.Began = recBegan
+	}
+	return &Window{Rec: rec, F: f}
+}
+
+// LiveSpan is the span on the app's clock in which the call that reached
+// keploy at the real instant arrival made its clock reads in this run, as
+// CallWindowFrom reads this run's half of a window: after the previous
+// data-plane call the store served (ServedMockAt) and no later than
+// arrival, and in a client test from the running test's begin where the
+// app's clock did not run as one from that serve, or the store served none
+// before it. It reads no recording, so a replay reads it for any call, in
+// any cycle (ClockSpanFrom). Where the hooks tell where the app's clock's
+// run to arrival began (SetAppClockRun), the span starts no earlier than
+// that, so a test's first call after its begin moved the clock has one;
+// and a server test's call the store served nothing before in the set
+// (the set's first test, where its app made no start-up call) starts at
+// the later of the set's begin (NewSetAt) and the run's; nor does a
+// server test's span start before the set's begin where a serve of a call
+// that reached keploy before it was filed after it. ok is false on a nil
+// tracker, where no app clock is set (SetAppClock: keploy cannot tell
+// which clock the application reads), where it cannot tell the app's clock
+// at either bound, where no bound is known (a server test's call with no
+// serve before it in the set, where the hooks tell no run), or where the
+// app's clock did not run as one between the bound and arrival: a replay
+// then cannot check a read of the clock, and refuses it (CheckClockRead).
+// The span carries the tracker's zone (SetAppZone, the agent's own;
+// Span.Zone), which ClockSpanFrom replaces by the zone of the call's own
+// process where the agent read it.
+func (t *Tracker) LiveSpan(arrival time.Time) (Span, bool) {
+	if t == nil {
+		return Span{}, false
+	}
+	lc, _ := t.liveClockAt(arrival)
+	s, ok := lc.span(arrival)
+	if ok {
+		s.Zone = lc.zone
+	}
+	return s, ok
+}
+
+// liveClock is what the tracker knows, at one moment, of this run's clock
+// before a call that reached keploy at a real instant: how to read the
+// app's clock, the previous data-plane serve before the call, the running
+// set's begin, and in a client test the running test's begin.
+type liveClock struct {
+	clock            func(time.Time) (time.Time, bool)
+	run              func(time.Time) (time.Time, bool)
+	prev, set, began time.Time
+	client           bool
+	zone             *time.Location
+}
+
+// liveClockAt is the tracker's liveClock before arrival, and the running
+// test's recorded begin (RecordedBegin), read under one lock.
+func (t *Tracker) liveClockAt(arrival time.Time) (liveClock, time.Time) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	lc := liveClock{clock: t.appClock, run: t.appClockRun, client: t.clientTests, set: t.setBegan, began: t.beganAt, zone: t.appZone}
+	i := sort.Search(len(t.servedAt), func(i int) bool { return !t.servedAt[i].Before(arrival) })
+	if i > 0 {
+		lc.prev = t.servedAt[i-1]
+	}
+	return lc, t.recBegan
+}
+
+// span is this run's span to arrival (LiveSpan): from the previous serve,
+// or where the app's clock's run to arrival began after it (runFrom); in a
+// server test with no serve before arrival in the set, from the set's
+// begin, or where the run began after it, where the hooks tell the run
+// (setBound); in a client test from the test's begin where that came after
+// that start and the span from it is none or the clock moved after the
+// serve. In a client test it carries the test's begin on the app's clock
+// (Span.Began), or where the app's clock's run to arrival began after it
+// (runFrom), where the app's clock ran as one from there to arrival.
+func (lc liveClock) span(arrival time.Time) (Span, bool) {
+	if lc.clock == nil {
+		return Span{}, false
+	}
+	start := lc.runFrom(lc.setBound(), arrival)
+	f, ok := lc.from(start, arrival)
+	if (!ok || !start.Equal(lc.prev)) && lc.client && lc.began.After(start) {
+		if g, gok := lc.from(lc.runFrom(lc.began, arrival), arrival); gok || !ok {
+			f, ok = g, gok
+		}
+	}
+	if ok && lc.client {
+		if b, bok := lc.from(lc.runFrom(lc.began, arrival), arrival); bok {
+			f.Began = b.From
+		}
+	}
+	return f, ok
+}
+
+// setBound is the bound a span to arrival starts from: the previous serve;
+// in a server test where the store served nothing before arrival in the
+// set, the set's begin, where the hooks tell where the app's clock's run
+// began (runFrom then starts the span at the later of the two). The app
+// reads its clock for a call of the set after the set began. Without the
+// run told, the clock may have moved between the set's begin and the call,
+// so no bound is known, as before. A serve before the set's begin (a call
+// of the set before, which reached keploy before the set began and was
+// served after: its serve is filed at its arrival) bounds a server test's
+// span at the set's begin instead, which only narrows it. A client test's
+// span starts at its own begin instead (span).
+func (lc liveClock) setBound() time.Time {
+	if lc.client || lc.set.IsZero() {
+		return lc.prev
+	}
+	if lc.prev.IsZero() {
+		if lc.run == nil {
+			return time.Time{}
+		}
+		return lc.set
+	}
+	if lc.set.After(lc.prev) {
+		return lc.set
+	}
+	return lc.prev
+}
+
+// runFrom is the start of a span to arrival bounded by bound: where the
+// hooks tell where the app's clock's run to arrival began (lc.run), the
+// later of the two, and zero (no span) where they cannot tell it; bound
+// itself where they tell no runs, or bound is zero (no bound is known).
+func (lc liveClock) runFrom(bound, arrival time.Time) time.Time {
+	if lc.run == nil || bound.IsZero() {
+		return bound
+	}
+	began, ok := lc.run(arrival)
+	if !ok {
+		return time.Time{}
+	}
+	if began.After(bound) {
+		return began
+	}
+	return bound
+}
+
+// from is the app's clock's span from the real instant from to arrival, ok
+// where the app's clock ran as one between them: the span its clock reads
+// must be the real time between them, exactly, or what it bounds is no run
+// of one clock.
+func (lc liveClock) from(from, arrival time.Time) (Span, bool) {
+	if from.IsZero() || from.After(arrival) {
+		return Span{}, false
+	}
+	fFrom, ok := lc.clock(from)
+	if !ok {
+		return Span{}, false
+	}
+	fTo, ok := lc.clock(arrival)
+	if !ok || fTo.Sub(fFrom) != arrival.Sub(from) {
+		return Span{}, false
+	}
+	return Span{From: fFrom, To: fTo}, true
 }
 
 type trackerKey struct{}

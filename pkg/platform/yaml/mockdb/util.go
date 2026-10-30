@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -51,6 +52,9 @@ func EncodeMockJSON(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTraffic
 		// The places of the call that hold a test variable's value, as a
 		// kind-agnostic top-level block (nil, so omitted, for most mocks).
 		Variables: mock.Spec.Variables.Clone(),
+		// The places the learn step learned as a read of the application's
+		// clock (models.MockSpec.Clocks), a kind-agnostic top-level block.
+		Clocks: maps.Clone(mock.Spec.Clocks),
 		// Where the call came from (models.Mock.Origin): written whenever
 		// the mock has one, whatever the switch, so a rewrite keeps what
 		// the decoders read (nil, so omitted, for a mock without one).
@@ -324,6 +328,9 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 		// The places of the call that hold a test variable's value, as a
 		// kind-agnostic top-level block (nil, so omitted, for most mocks).
 		Variables: mock.Spec.Variables.Clone(),
+		// The places the learn step learned as a read of the application's
+		// clock (models.MockSpec.Clocks), a kind-agnostic top-level block.
+		Clocks: maps.Clone(mock.Spec.Clocks),
 		// Where the call came from (models.Mock.Origin): written whenever
 		// the mock has one, whatever the switch, so a rewrite keeps what
 		// the decoders read (nil, so omitted, for a mock without one).
@@ -593,7 +600,7 @@ const (
 // pipeline surfaces it all the way up and aborts record/replay,
 // which is the right behaviour because a null payload silently
 // corrupts replay.
-var errPostgresV3NilPayload = errors.New("postgres_v3 mock missing typed payload")
+var errPostgresV3NilPayload = errors.New("postgres_v3 mock has no typed payload")
 
 // errPacketWithoutHeader is a MySQL or Mongo packet whose document has no
 // header. The recorders write one for every packet, and the header types the
@@ -703,6 +710,7 @@ func decodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger, rewrit
 			// mapped branch) — this guards a future mapper-registered AsyncParser.
 			mock.Spec.Async = m.Async
 			mock.Spec.Variables = m.Variables.Clone()
+			mock.Spec.Clocks = maps.Clone(m.Clocks)
 			mock.Origin = m.Origin // the mapper may have rebuilt the mock whole
 			mocks = append(mocks, &mock)
 			continue
@@ -890,6 +898,7 @@ func decodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger, rewrit
 		}
 		mock.Spec.Async = m.Async                 // kind-agnostic async block off the doc envelope
 		mock.Spec.Variables = m.Variables.Clone() // kind-agnostic, like async
+		mock.Spec.Clocks = maps.Clone(m.Clocks)   // kind-agnostic, like variables
 		mocks = append(mocks, &mock)
 	}
 
@@ -1937,6 +1946,7 @@ func decodeMocksJSON(docs []*yaml.NetworkTrafficDocJSON, logger *zap.Logger, rew
 		}
 		mock.Spec.Async = m.Async                 // kind-agnostic async block off the doc envelope
 		mock.Spec.Variables = m.Variables.Clone() // kind-agnostic, like async
+		mock.Spec.Clocks = maps.Clone(m.Clocks)   // kind-agnostic, like variables
 		mocks = append(mocks, &mock)
 	}
 	return mocks, nil

@@ -2,6 +2,7 @@ package models
 
 import (
 	"errors"
+	"slices"
 	"strings"
 	"time"
 )
@@ -471,14 +472,42 @@ type MatchedCall struct {
 	Summary  string `json:"summary,omitempty" yaml:"summary,omitempty"`   // e.g. "GET /posts?id=1", "DNS dep-service", "MongoDB find"
 }
 
+// FieldReason is a field a replay refused a call in, as a reason names it
+// (no part that may be a value: FieldShape), and why it refused it, which
+// names no value either (MockMismatchReport.FieldReasons).
+type FieldReason struct {
+	Field string `json:"field" yaml:"field"`
+	Why   string `json:"why" yaml:"why"`
+}
+
+// FieldReasonShapes are rs whose field is its own shape (FieldShape), once
+// each, for a reason that names them: a reason of a field that may name a
+// value is left out, as its why may quote that field.
+func FieldReasonShapes(rs []FieldReason) []FieldReason {
+	var out []FieldReason
+	for _, r := range rs {
+		if r.Field == "" || r.Why == "" || FieldShape(r.Field) != r.Field || slices.Contains(out, r) {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
 // UnmatchedCall represents an outgoing call during replay that had no matching mock.
 type UnmatchedCall struct {
 	Protocol      string `json:"protocol" yaml:"protocol"`
 	ActualSummary string `json:"actual_summary,omitempty" yaml:"actual_summary,omitempty"` // e.g. "POST /comments"
 	Destination   string `json:"destination,omitempty" yaml:"destination,omitempty"`       // outgoing call's destination/domain (HTTP Host, or host:port) — which upstream missed
-	ClosestMock   string `json:"closest_mock,omitempty" yaml:"closest_mock,omitempty"`     // internal mock reference for View Closest
-	Diff          string `json:"diff,omitempty" yaml:"diff,omitempty"`
-	NextSteps     string `json:"next_steps,omitempty" yaml:"next_steps,omitempty"` // actionable remediation guidance from the matcher
+	// LiveDestination is, under the proven switch, the address the call was
+	// made to when Destination names it as the recording does instead (the
+	// mocks' destAddr: 127.0.0.1:27017 where the app reached [::1]:27017,
+	// the same loopback port), so a reader who greps mocks.yaml for
+	// Destination finds the mocks; "" when the two are the same.
+	LiveDestination string `json:"live_destination,omitempty" yaml:"live_destination,omitempty"`
+	ClosestMock     string `json:"closest_mock,omitempty" yaml:"closest_mock,omitempty"` // internal mock reference for View Closest
+	Diff            string `json:"diff,omitempty" yaml:"diff,omitempty"`
+	NextSteps       string `json:"next_steps,omitempty" yaml:"next_steps,omitempty"` // actionable remediation guidance from the matcher
 	// MatchPhase, CandidateCount and FieldDiffs mirror MockMismatchReport so
 	// report consumers (CLI `keploy report`, report yaml, platform UI) can
 	// render structured field-level drift instead of an opaque string. Paths
@@ -515,9 +544,21 @@ type UnmatchedCall struct {
 	// no test's: the replay fails the set with it, naming the call, and
 	// charges no test (the read of the set's first test carries it).
 	BeforeSet bool `json:"before_set,omitempty" yaml:"before_set,omitempty"`
+	// ChargedTo names, under the proven switch, the test whose end charged
+	// the call to it: the call counts against that test (CountsAgainstTest)
+	// and that test's evidence lists it. Empty for a call no test was
+	// charged with: one made before the test process claimed the run, one
+	// outside every test that no test's end read (after the last test's,
+	// say), and every call without the switch. keploy mock's receipt lists
+	// those of them that count against a test (Receipt.UnchargedMisses).
+	ChargedTo string `json:"charged_to,omitempty" yaml:"charged_to,omitempty"`
 	// Differs mirrors MockMismatchReport.Differs: the names of the fields in
 	// which the call differs from its closest recording, without values.
 	Differs []string `json:"differs,omitempty" yaml:"differs,omitempty"`
+	// FieldReasons mirrors MockMismatchReport.FieldReasons: of the fields
+	// in Differs, those a replay refused for a reason of its own, and why,
+	// without values.
+	FieldReasons []FieldReason `json:"field_reasons,omitempty" yaml:"field_reasons,omitempty"`
 	// NotOwned mirrors MockMismatchReport.NotOwned: the call is ClosestMock,
 	// a recording the test does not own.
 	NotOwned bool `json:"not_owned,omitempty" yaml:"not_owned,omitempty"`

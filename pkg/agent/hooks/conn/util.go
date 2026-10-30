@@ -134,6 +134,13 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 		}
 	}()
 
+	// What the decodes below hold reserved with the caller's
+	// DecodeReserveFunc, their output buffers: given back once the test case
+	// is built from them, before it is handed on, or as the capture returns
+	// without one.
+	decodes := &decodeRoom{fn: DecodeReserve(ctx)}
+	defer decodes.giveBack()
+
 	var reqBody []byte
 	if req.Body != nil { // Read
 		var err error
@@ -143,8 +150,13 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 		}
 
 		if req.Header.Get("Content-Encoding") != "" {
-			reqBody, err = pkg.Decompress(logger, req.Header.Get("Content-Encoding"), reqBody, MaxTestCaseSize)
+			reqBody, err = pkg.DecompressReserving(logger, req.Header.Get("Content-Encoding"), reqBody, MaxTestCaseSize, decodes.reserve())
 			if err != nil {
+				if errors.Is(err, pkg.ErrDecodeRefused) {
+					// The caller's DecodeReserveFunc refused room for the
+					// decoded body: it counts what it leaves out.
+					return
+				}
 				if errors.Is(err, pkg.ErrDecompressedTooLarge) {
 					// Oversized, not corrupt: same condition as the post-
 					// decompression MaxTestCaseSize check further down, hit
@@ -170,6 +182,9 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 		logger.Debug("The request is a filtered request")
 		return
 	}
+	// The request body decoded, before it is taken apart below: what
+	// BodiesDecoded is told the test case holds of it, at most.
+	reqDecoded := len(reqBody)
 	var formData []models.FormData
 	sent := false // the test case was handed on t
 	if contentType := req.Header.Get("Content-Type"); strings.HasPrefix(contentType, "multipart/form-data") {
@@ -197,8 +212,11 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 	}
 
 	if resp.Header.Get("Content-Encoding") != "" {
-		respBody, err = pkg.Decompress(logger, resp.Header.Get("Content-Encoding"), respBody, MaxTestCaseSize)
+		respBody, err = pkg.DecompressReserving(logger, resp.Header.Get("Content-Encoding"), respBody, MaxTestCaseSize, decodes.reserve())
 		if err != nil {
+			if errors.Is(err, pkg.ErrDecodeRefused) {
+				return // the caller that refused counts it, as above
+			}
 			if errors.Is(err, pkg.ErrDecompressedTooLarge) {
 				logger.Error("HTTP test case data exceeds 5MB limit, skipping capture",
 					zap.String("url", req.URL.String()),
@@ -233,6 +251,13 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 			zap.String("url", req.URL.String()),
 			zap.String("method", req.Method))
 		respBody = []byte{} // clear the body — only size is stored
+	}
+
+	// The caller that carried a BodiesDecodedFunc weighs the test case by
+	// its bodies decoded here, and may leave it out; it counts what it
+	// leaves out.
+	if !BodiesDecoded(ctx, reqDecoded, len(respBody)) {
+		return
 	}
 
 	hasBinaryFile := false
@@ -281,6 +306,10 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 	}
 	// The clock its window start is on (proven switch).
 	StampOrigin(ctx, testCase)
+	// The test case holds its own copies of the bodies: the decoded buffers
+	// are the capture's no longer, and their room goes back before the test
+	// case waits to be handed on.
+	decodes.giveBack()
 
 	if synchronous {
 		// The request's open window (the ingress opened it at the request's

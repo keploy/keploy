@@ -1,5 +1,7 @@
 package models
 
+import "gopkg.in/yaml.v3"
+
 // Where a run's calls to local listeners went, under the proven switch
 // (design v14 §3.1; release 1 = one run's process tree, release1-cut §5.1
 // items 3 and 8). keploy relays a call to a listener the run's own process
@@ -43,8 +45,12 @@ type MockedRow struct {
 	// the name its recording carries: its image's repository, its own port,
 	// and its configuration's fingerprint; without @<fingerprint> while
 	// keploy has not read its configuration. Empty for any other
-	// destination.
-	Container string `json:"container,omitempty" yaml:"container,omitempty"`
+	// destination. A file writes it as containerKey, the name mocks.yaml
+	// gives it, so the same key reads the same in both files (never
+	// "container: container:..."); JSON, the agent's wire format, keeps
+	// container, so an agent and a CLI of different versions agree. A file
+	// an earlier keploy wrote reads under container too (UnmarshalYAML).
+	Container string `json:"container,omitempty" yaml:"containerKey,omitempty"`
 	// PID and Exe are a host listener's process and its program; zero and
 	// "" for a container, for a destination nothing listens at (a recorded
 	// dependency that is not running, as in CI), or when keploy could not
@@ -53,4 +59,22 @@ type MockedRow struct {
 	Exe string `json:"exe,omitempty" yaml:"exe,omitempty"`
 	// Port is the port the call was made to.
 	Port uint16 `json:"port" yaml:"port"`
+}
+
+// UnmarshalYAML reads a row, its container key under containerKey or, as an
+// earlier keploy wrote it, container.
+func (r *MockedRow) UnmarshalYAML(n *yaml.Node) error {
+	type plain MockedRow
+	var f struct {
+		plain `yaml:",inline"`
+		Old   string `yaml:"container,omitempty"`
+	}
+	if err := n.Decode(&f); err != nil {
+		return err
+	}
+	*r = MockedRow(f.plain)
+	if r.Container == "" {
+		r.Container = f.Old
+	}
+	return nil
 }

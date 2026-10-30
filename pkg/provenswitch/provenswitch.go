@@ -52,6 +52,14 @@ const (
 	// whether its switch is on (State). An agent that does not send it predates
 	// the switch.
 	HealthHeader = "X-Keploy-Proven"
+	// VerifyEnv turns on, for a keploy run under the switch, the agent's
+	// exact view verify mode (pkg/agent/proxy, exactViewVerify): every read
+	// the view keeps materialised is recomputed and a difference panics.
+	// CI's lanes under the switch set it to 1; a user's run leaves it unset.
+	VerifyEnv = "KEPLOY_EXACT_VIEW_VERIFY"
+	// VerifyFlag is the hidden `keploy agent` flag that carries VerifyEnv to
+	// the agent, which, like KEPLOY_PROVEN, the agent does not inherit.
+	VerifyFlag = "exact-view-verify"
 )
 
 // ErrAgentSwitch marks an agent this keploy must not run against: the proven
@@ -135,10 +143,14 @@ func State() string {
 // AgentArgs is what a launcher appends to the argv of the agent it starts: the
 // --proven flag when the switch is on in this process, nothing otherwise. With
 // the switch off the agent's argv is exactly what it was before the switch
-// existed.
+// existed. Under the switch, KEPLOY_EXACT_VIEW_VERIFY=1 (VerifyEnv) adds
+// --exact-view-verify, so the agent recomputes each read of its exact view.
 func AgentArgs() []string {
 	if !On() {
 		return nil
+	}
+	if os.Getenv(VerifyEnv) == "1" {
+		return []string{"--" + AgentFlag, "--" + VerifyFlag}
 	}
 	return []string{"--" + AgentFlag}
 }

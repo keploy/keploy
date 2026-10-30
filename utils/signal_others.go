@@ -34,7 +34,8 @@ func SendSignal(logger *zap.Logger, pid int, sig syscall.Signal) error {
 	return nil
 }
 
-func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, kind CmdType, cancel func(cmd *exec.Cmd) func() error, waitDelay time.Duration, stdin []byte, extraEnv []string) CmdError {
+func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, kind CmdType, cancel func(cmd *exec.Cmd) func() error, waitDelay time.Duration, stdin []byte, extraEnv []string, opts ...ExecOption) CmdError {
+	o := execOptionsOf(opts)
 	// Run the app as the user who invoked sudo
 
 	// Run through `sh -c` when a shell is available; fall back to a direct exec
@@ -90,7 +91,7 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, kin
 			Setsid: true,
 		}
 		logger.Debug("Output is a TTY (Docker Compose -> PTY)")
-		return executeWithPTY(ctx, logger, cmd)
+		return executeWithPTY(ctx, logger, cmd, o.outputTee)
 	}
 
 	// For non-PTY execution, use Setpgid for process group management
@@ -103,7 +104,7 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, kin
 	}
 	// Set the output of the command to stdout/stderr, cut of the values the
 	// redactor holds when it holds any (ChildConsole).
-	console, err := SetChildConsole(cmd)
+	console, err := SetChildConsoleTee(cmd, o.outputTee)
 	if err != nil {
 		return CmdError{Type: Init, Err: err}
 	}
@@ -128,7 +129,7 @@ func ExecuteCommand(ctx context.Context, logger *zap.Logger, userCmd string, kin
 // This is necessary for Docker Compose when Setpgid is true, as Docker Compose
 // tries to read terminal size for rendering progress bars. Without a PTY,
 // the OS would pause the background process with SIGTTOU/SIGTTIN.
-func executeWithPTY(_ context.Context, logger *zap.Logger, cmd *exec.Cmd) CmdError {
+func executeWithPTY(_ context.Context, logger *zap.Logger, cmd *exec.Cmd, tee func() io.Writer) CmdError {
 	// Start the command with a PTY
 	// pty.Start creates a PTY pair, assigns the slave PTY to cmd's stdin/stdout/stderr,
 	// and starts the command
@@ -160,8 +161,9 @@ func executeWithPTY(_ context.Context, logger *zap.Logger, cmd *exec.Cmd) CmdErr
 	// Trigger initial resize
 	resizeCh <- syscall.SIGWINCH
 
-	// Copy PTY output to real stdout, cut as ChildConsole's would be.
-	output := StartChildOutputCopy(os.Stdout, ptmx, false)
+	// Copy PTY output to real stdout, cut as ChildConsole's would be, and to
+	// the tee when one is set (WithOutputTee).
+	output := StartChildOutputCopy(teeTo(os.Stdout, tee), ptmx, false)
 
 	// Wait for the command to finish
 	cmdErr := cmd.Wait()

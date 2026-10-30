@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"strings"
 
@@ -18,6 +17,16 @@ import (
 // `err == c.noCommandError()` compared two different values, was never true,
 // and the hint under it was never printed.
 var errNoCommand = errors.New("missing required -c flag or appCmd in config file")
+
+// ErrNoTestSets is ValidateFlags' error for a `keploy test` with no keploy
+// folder to replay. ValidateFlags has said so already, with the command that
+// records one, so a caller returns it without saying it again; the binary's
+// main exits 1 (utils.ExitKeployError) for it, as for any error a command
+// returns. It used to be an os.Exit(1) inside ValidateFlags, which skipped
+// every deferred call of the run: main's removal of the run's temp log among
+// them, so each such run left one more keploy-logs-*.txt in the temp
+// directory.
+var ErrNoTestSets = errors.New("no test-sets found to replay")
 
 // alreadyRunning checks that during test mode, if user provides the basePath, then it implies that the application is already running somewhere.
 func alreadyRunning(cmd, basePath string) bool {
@@ -40,10 +49,19 @@ func PrintLogo(wr io.Writer, disableANSI bool) {
 	if os.Getenv("BINARY_TO_DOCKER") != "true" {
 		printKeployLogo(wr, disableANSI, Logo)
 		// print version to the same writer
-		_, err := fmt.Fprintf(wr, "%s: %v\n\n", utils.VersionIdentifier, utils.Version)
-		if err != nil {
-			log.Fatalf("Error printing version: %v", err)
+		// A console that cannot be written to does not end the run: the
+		// logo, the version and the `logs:` line are said to it as every
+		// other console line is, whose write errors end nothing either. A
+		// log.Fatalf here exited from inside a command, past every deferred
+		// call of the run, the removal of its temp log among them.
+		_, _ = fmt.Fprintf(wr, "%s: %v\n", utils.VersionIdentifier, utils.Version)
+		// Where this run's log is, beside its version: a temp file at a name
+		// the run picked (keploy log.LogFilePattern), which a user can find
+		// only by being told.
+		if utils.LogFile != nil {
+			_, _ = fmt.Fprintf(wr, "logs: %s\n", utils.LogFile.Name())
 		}
+		_, _ = fmt.Fprintln(wr)
 	}
 }
 
@@ -67,17 +85,14 @@ func printKeployLogo(wr io.Writer, disableANSI bool, logo string) {
 	}
 }
 
-// FprintWrapper prints all its args (like fmt.Fprint) and optionally a leading newline.
+// FprintWrapper prints all its args (like fmt.Fprint) and optionally a leading
+// newline. A write that fails ends nothing (PrintLogo).
 func FprintWrapper(newLine bool, wr io.Writer, a ...interface{}) {
 	if newLine {
-		if _, err := fmt.Fprintln(wr); err != nil {
-			log.Fatalf("Error printing newline: %v", err)
-		}
+		_, _ = fmt.Fprintln(wr)
 	}
 	if len(a) > 0 {
-		if _, err := fmt.Fprint(wr, a...); err != nil {
-			log.Fatalf("Error printing output: %v", err)
-		}
+		_, _ = fmt.Fprint(wr, a...)
 	}
 }
 

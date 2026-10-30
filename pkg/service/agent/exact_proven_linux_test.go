@@ -103,6 +103,7 @@ func (p *servingProxy) noteMiss(err error) {
 	if errors.As(err, &r) && r.MismatchReport() != nil {
 		rep := r.MismatchReport()
 		uc.ActualSummary, uc.Destination, uc.Differs = rep.ActualSummary, rep.Destination, rep.Differs
+		uc.ClosestMock = rep.ClosestMock
 		if !rep.At.IsZero() {
 			uc.At = rep.At
 		}

@@ -331,3 +331,28 @@ func TestKeyedWalkKeepsAMockTheTierHoldsTwice(t *testing.T) {
 		mm.Close()
 	}
 }
+
+// TestKeyIndexBuildAllocatesNothingPerUnfiledMock: a build files each entry
+// under the tree's own boxed key, so a mock its MockIndex files under no key
+// costs the build no allocation: a tree of 1,000 such mocks builds with the
+// allocations of a tree of 10. The MySQL parser keeps one index per kind of
+// command, and each one's build reads every staged mock; it boxed each
+// entry's key again, filed or not.
+func TestKeyIndexBuildAllocatesNothingPerUnfiledMock(t *testing.T) {
+	none := &integrations.MockIndex{Keys: func(*models.Mock) []string { return nil }}
+	allocs := func(n int) float64 {
+		db := NewTreeDb(customComparator)
+		for i := 1; i <= n; i++ {
+			mk := &models.Mock{Name: fmt.Sprintf("m%d", i), Kind: models.MySQL, TestModeInfo: models.TestModeInfo{ID: i, SortOrder: int64(i)}}
+			db.insert(mk.TestModeInfo, mk)
+		}
+		return testing.AllocsPerRun(5, func() {
+			db.mu.Lock()
+			db.buildKeyIndexLocked(none)
+			db.mu.Unlock()
+		})
+	}
+	if small, large := allocs(10), allocs(1000); large > small {
+		t.Errorf("a build over 1,000 mocks filed under no key made %v allocations, over 10 %v: it allocates per mock", large, small)
+	}
+}

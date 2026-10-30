@@ -292,6 +292,26 @@ func TestFieldShape(t *testing.T) {
 		{"body.x[y]", "body.{}"},
 		{"body.orders[4111111111111111].total", "body.{}.total"},
 		{"body.line1", "body.{}"},
+		// An SQL call's place names (a Postgres statement's bind.$N, the
+		// Nth constant of its text literal.N) are positions keploy counts,
+		// not values the app sent: kept whole. Anything else of their look
+		// is shaped as every key is.
+		{"bind.$1", "bind.$1"},
+		{"bind.$65535", "bind.$65535"},
+		{"literal.3", "literal.3"},
+		{"literal.12", "literal.12"},
+		{"bind.$0", "bind.{}"},
+		{"bind.$01", "bind.{}"},
+		{"bind.$123456", "bind.{}"},
+		{"bind.$1a", "bind.{}"},
+		{"bind.1", "bind.{}"},
+		{"literal.0", "literal.{}"},
+		{"literal.$1", "literal.{}"},
+		{"literal.123456", "literal.{}"},
+		{"bind.$1.total", "bind.{}.total"},
+		{"body.bind.$1", "body.bind.{}"},
+		{"body.literal.7", "body.literal.{}"},
+		{"header.bind.$1", "header.bind.{}"},
 	}
 	for _, c := range cases {
 		require.Equal(t, c.want, FieldShape(c.in), c.in)

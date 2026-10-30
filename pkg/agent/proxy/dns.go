@@ -507,18 +507,34 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 		// deliberately skips non-Success rcodes, so its absence is correct
 		// rather than a recording gap. See the mock-miss report below.
 		upstreamSaysNameDoesNotExist := false
+		// keploy never reports the gRPC service-config probe or a redundant
+		// search-list expansion as a miss (both below), so none of the
+		// forward's lines (answered, NODATA, negative, failed) calls them one.
+		redundantExpansion := mockingEnabled && p.isRedundantSearchExpansion(question.Name)
+		reportable := mockingEnabled && !redundantExpansion && !isGrpcServiceConfigProbe(question)
 		if fwdResp, fwdErr := p.forwardDNS(question, p.replayMissServers(mockingEnabled, question.Name, question.Qtype)); fwdErr == nil && fwdResp != nil {
 			// A RcodeSuccess response splits into two cases by answer count:
 			// resolved (>=1 RR) vs NODATA (0 RRs). Both are relayed as-is; only
 			// a non-success rcode falls through to the #2006 steering below.
 			if fwdResp.Rcode == dns.RcodeSuccess {
 				if len(fwdResp.Answer) > 0 {
-					// Resolved — relay the real answer.
-					p.logger.Debug("DNS mock miss resolved via upstream forward",
+					// Resolved — relay the real answer. With mocking off no
+					// mock was asked, and keploy does not report the queries
+					// reportable leaves out, so neither line calls it a miss.
+					fields := []zap.Field{
 						zap.String("query", question.Name),
 						zap.String("qtype", dns.TypeToString[question.Qtype]),
 						zap.Int("rcode", fwdResp.Rcode),
-						zap.Int("answers", len(fwdResp.Answer)))
+						zap.Int("answers", len(fwdResp.Answer)),
+					}
+					switch {
+					case reportable:
+						p.logger.Debug("DNS mock miss resolved via upstream forward", fields...)
+					case mockingEnabled:
+						p.logger.Debug("DNS upstream forward answered a query keploy does not report as a miss; relaying upstream answer", fields...)
+					default:
+						p.logger.Debug("DNS query resolved via upstream forward; mocking disabled", fields...)
+					}
 					return dnsCacheEntry{Msg: fwdResp, FromUpstream: true}
 				}
 				// NODATA — NOERROR + zero answer RRs: a *valid* negative answer
@@ -549,7 +565,11 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 				//   - mocking enabled: keep it discoverable (a genuinely unrecorded
 				//     record of this type also relays empty here) but dedupe to
 				//     once per (name,qtype) so the signal survives without the spam.
-				if mockingEnabled {
+				//   - mocking enabled for a query keploy does not report (the
+				//     gRPC service-config probe, whose empty answer is the normal
+				//     one; a redundant search-list expansion): not a miss, Debug.
+				switch {
+				case reportable:
 					if p.shouldLogNodataRelay(generateCacheKey(question.Name, question.Qtype)) {
 						p.logger.Info("DNS mock miss: upstream NODATA (empty NOERROR), relaying as valid negative answer (a genuinely unrecorded record of this type would also relay empty here)",
 							zap.String("query", question.Name),
@@ -559,7 +579,11 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 							zap.String("query", question.Name),
 							zap.String("qtype", dns.TypeToString[question.Qtype]))
 					}
-				} else {
+				case mockingEnabled:
+					p.logger.Debug("DNS NODATA (empty NOERROR) for a query keploy does not report as a miss; relaying upstream answer",
+						zap.String("query", question.Name),
+						zap.String("qtype", dns.TypeToString[question.Qtype]))
+				default:
 					p.logger.Debug("DNS NODATA (empty NOERROR); mocking disabled, relaying real upstream answer",
 						zap.String("query", question.Name),
 						zap.String("qtype", dns.TypeToString[question.Qtype]))
@@ -578,7 +602,7 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 			// (relaying NXDOMAIN crashes apps using bare service names
 			// like "localstack" or "postgres" — issue #2006).
 			if !mockingEnabled {
-				p.logger.Debug("DNS mock miss: upstream returned negative answer; mocking disabled, returning upstream response",
+				p.logger.Debug("DNS upstream returned negative answer; mocking disabled, returning upstream response",
 					zap.String("query", question.Name),
 					zap.String("qtype", dns.TypeToString[question.Qtype]),
 					zap.Int("rcode", fwdResp.Rcode))
@@ -588,18 +612,35 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 			// NOTIMP and FORMERR, which mean the resolver could not or would
 			// not answer -- they say nothing about whether the name exists,
 			// so they stay reportable like an unreachable upstream.
+			fields := []zap.Field{
+				zap.String("query", question.Name),
+				zap.String("qtype", dns.TypeToString[question.Qtype]),
+				zap.Int("rcode", fwdResp.Rcode),
+			}
 			if fwdResp.Rcode == dns.RcodeNameError {
 				upstreamSaysNameDoesNotExist = true
+				// Not a miss: no mock could exist for the name (see the
+				// report below), so the line does not call it one.
+				p.logger.Debug("DNS name does not exist upstream (NXDOMAIN), so no mock could answer it; falling back to synthetic DNS response", fields...)
+			} else if reportable {
+				p.logger.Debug("DNS mock miss: upstream returned negative answer; falling back to synthetic DNS response", fields...)
+			} else {
+				p.logger.Debug("DNS upstream returned negative answer for a query keploy does not report as a miss; falling back to synthetic DNS response", fields...)
 			}
-			p.logger.Debug("DNS mock miss: upstream returned negative answer; falling back to synthetic DNS response",
-				zap.String("query", question.Name),
-				zap.String("qtype", dns.TypeToString[question.Qtype]),
-				zap.Int("rcode", fwdResp.Rcode))
 		} else if fwdErr != nil {
-			p.logger.Debug("DNS mock miss + upstream forward failed; falling back to synthetic response",
+			fields := []zap.Field{
 				zap.String("query", question.Name),
 				zap.String("qtype", dns.TypeToString[question.Qtype]),
-				zap.Error(fwdErr))
+				zap.Error(fwdErr),
+			}
+			switch {
+			case reportable:
+				p.logger.Debug("DNS mock miss + upstream forward failed; falling back to synthetic response", fields...)
+			case mockingEnabled:
+				p.logger.Debug("DNS upstream forward failed for a query keploy does not report as a miss; falling back to synthetic response", fields...)
+			default:
+				p.logger.Debug("DNS upstream forward failed; mocking disabled, falling back to synthetic response", fields...)
+			}
 		}
 		// grpc-go probes _grpc_config.<target> for a service-config TXT record on
 		// EVERY target, and the absence of that record is the normal answer —
@@ -644,12 +685,11 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 		// A redundant search expansion is unrecordable by construction, so it
 		// is filtered here rather than on upstream's verdict — that keeps the
 		// report from depending on whether the resolver answered at all.
-		redundantExpansion := mockingEnabled && p.isRedundantSearchExpansion(question.Name)
 		if redundantExpansion {
 			// The only field-visible trace that the name-shape gate fired.
 			// Without it a suppressed report and a report that never reached
 			// the gate look identical in the agent log.
-			p.logger.Debug("DNS mock miss suppressed: redundant search-list expansion, unrecordable by construction",
+			p.logger.Debug("DNS query not reported as a miss: redundant search-list expansion, unrecordable by construction",
 				zap.String("query", question.Name),
 				zap.String("qtype", dns.TypeToString[question.Qtype]),
 				zap.Strings("search", p.dnsSearch))

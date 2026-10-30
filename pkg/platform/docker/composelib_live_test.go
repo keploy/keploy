@@ -651,3 +651,63 @@ func dirBase(p string) string {
 	parts := strings.Split(strings.TrimRight(p, string(os.PathSeparator)), string(os.PathSeparator))
 	return parts[len(parts)-1]
 }
+
+// tailHolds waits, a bounded time, for project's service tail to hold a line
+// with want in it: the attach stream may deliver a container's last line just
+// after Up returns.
+func tailHolds(t *testing.T, project, service, want string) string {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		tail := string(ServiceOutputTail(project, service))
+		if strings.Contains(tail, want) || time.Now().After(deadline) {
+			return tail
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// keploy runs one Up per test set on one runner, with a compose down between
+// them. Each Up's tail holds that Up's output alone, as `docker logs` of that
+// Up's container did: the second set's app tail is its own line, not the
+// first set's with it, though compose names both containers app-1 (the name
+// the tail is kept by). The name-to-service mapping the Up's consumer uses is
+// what finds the app's container (app-1, no container_name) by its service.
+func TestLiveEachUpsTailHoldsThatUpsOutputAlone(t *testing.T) {
+	apiClient := liveClient(t)
+	freshTails(t)
+	project := fmt.Sprintf("keploylive%d", time.Now().UnixNano()%100000)
+	yaml := fmt.Sprintf(`
+services:
+  app:
+    image: %s
+    command: ["sh", "-c", "echo run-of-$(hostname); exit 3"]
+`, busybox)
+	r := runnerFor(t, apiClient, project, yaml)
+	var runs []string
+	for i := 1; i <= 2; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+		var out, errW syncBuffer
+		err := r.Up(ctx, ComposeUpOptions{ExitCodeFrom: "app", OnExit: api.CascadeStop}, &out, &errW)
+		if err == nil {
+			cancel()
+			t.Fatalf("up %d: the app exits 3, but Up reported success", i)
+		}
+		tail := tailHolds(t, r.ProjectName(), "app", "run-of-")
+		if derr := r.Down(ctx, time.Second); derr != nil {
+			t.Logf("down %d: %v", i, derr)
+		}
+		cancel()
+		lines := strings.Split(strings.TrimSuffix(tail, "\n"), "\n")
+		if len(lines) != 1 || !strings.HasPrefix(lines[0], "run-of-") {
+			t.Fatalf("after up %d the app's tail is %q; want the one line this Up's app printed\nstdout:\n%s", i, tail, out.String())
+		}
+		runs = append(runs, lines[0])
+	}
+	if runs[0] == runs[1] {
+		t.Fatalf("both Ups' tails are %q: the second Up's app is a new container, and its tail must be its own line", runs[0])
+	}
+	if got := string(ServiceOutputTail(r.ProjectName(), "app")); got != runs[1]+"\n" {
+		t.Fatalf("after the stack is down, the app's tail is %q; want the last Up's line, %q", got, runs[1])
+	}
+}

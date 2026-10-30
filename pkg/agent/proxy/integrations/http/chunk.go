@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"strconv"
 	"strings"
 	"time"
 
@@ -65,10 +64,10 @@ func (h *HTTP) HandleChunkedRequests(ctx context.Context, finalReq *[]byte, clie
 
 	//Handle chunked requests
 	if contentLengthHeader != "" {
-		contentLength, err := strconv.Atoi(contentLengthHeader)
+		contentLength, err := contentLengthValue(contentLengthHeader)
 		if err != nil {
 			utils.LogError(h.Logger, err, "failed to get the content-length header")
-			return fmt.Errorf("failed to handle chunked request")
+			return fmt.Errorf("failed to handle chunked request: %w", err)
 		}
 		//Get the length of the body in the request.
 		contentLength -= len(*finalReq) - bodyStart
@@ -310,10 +309,10 @@ func (h *HTTP) handleChunkedResponses(ctx context.Context, finalResp *[]byte, cl
 	contentLengthHeader, transferEncodingHeader := parseHeaders(head)
 
 	if contentLengthHeader != "" {
-		contentLength, err := strconv.Atoi(contentLengthHeader)
+		contentLength, err := contentLengthValue(contentLengthHeader)
 		if err != nil {
 			utils.LogError(h.Logger, err, "failed to get the content-length header")
-			return fmt.Errorf("failed to handle chunked response")
+			return fmt.Errorf("failed to handle chunked response: %w", err)
 		}
 		contentLength -= len(resp) - bodyStart
 		if contentLength > 0 {

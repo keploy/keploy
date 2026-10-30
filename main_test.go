@@ -16,8 +16,8 @@ import (
 )
 
 // A logger that cannot start stops the CLI with exit code 1 (#4441). log.New
-// no longer fails where it cannot open keploy-logs.txt -- it logs to the
-// console only -- so the failure is injected.
+// does not fail where it cannot create its log file -- it logs to the console
+// only -- so the failure is injected.
 func TestStart_LoggerInitFailureSetsErrCode(t *testing.T) {
 	orig := newLogger
 	t.Cleanup(func() { newLogger = orig })

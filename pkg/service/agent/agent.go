@@ -57,6 +57,11 @@ type ClientMockStorage struct {
 	// when it is built (DiskMocks.LoadStatements) and seeded on the proxy when
 	// the store is published (seedStatementCatalog); nil with no on-disk store.
 	statements []*models.Mock
+	// dests is the recording's destinations as its mocks spell them
+	// (recordedDests), noted as the mocks are read, before any is parked on
+	// disk, and only under the proven switch (its only readers are proven
+	// paths); nil until noted.
+	dests recordedDests
 }
 
 type Agent struct {
@@ -723,6 +728,11 @@ func (a *Agent) MockOutgoing(ctx context.Context, opts models.OutgoingOptions) e
 	if err := a.resetSession(ctx); err != nil {
 		return err
 	}
+	// Whether the session runs the learn step, which its tests' begins keep
+	// to their recorded order (keepRecordedOrder).
+	a.provenMu.Lock()
+	a.proven.order.learn = opts.Learn
+	a.provenMu.Unlock()
 
 	err := a.Proxy.Mock(ctx, opts)
 	if err != nil {
@@ -1105,14 +1115,18 @@ func (a *Agent) StoreMocks(ctx context.Context, filtered []*models.Mock, unfilte
 	copy(storage.filtered, filtered)
 	copy(storage.unfiltered, unfiltered)
 	if provenswitch.On() {
-		// Which recorded container keys are ambiguous is read from the whole
-		// set, before any mock is refused or consumed.
+		// Which recorded container keys are ambiguous, and the destinations
+		// the recording names (read only by the proven paths), are read from
+		// the whole set, before any mock is refused or consumed.
 		var tally containerkey.RecordedTally
+		storage.dests = recordedDests{}
 		for _, m := range storage.filtered {
 			tally.Add(m)
+			storage.dests.add(m)
 		}
 		for _, m := range storage.unfiltered {
 			tally.Add(m)
+			storage.dests.add(m)
 		}
 		containerkey.Default.SetRecorded(&tally)
 		storage.filtered = a.refuseUnfollowable(storage.filtered, storage)
@@ -1187,17 +1201,51 @@ func (a *Agent) finalizeClientMocks(ctx context.Context, storage *ClientMockStor
 	a.wireAppClock()
 }
 
-// wireAppClock hands the proxy the hooks' reading of the app's clock, when
-// both have one (AppClockReader, coreAgent.AppClockSetter).
+// wireAppClock hands the proxy the clock keploy knows the app reads, when
+// the proxy takes one (coreAgent.AppClockSetter): the hooks' reading of it
+// (AppClockReader), with where its run to an instant began where the hooks
+// tell it (AppClockRunReader, coreAgent.AppClockRunSetter; none otherwise),
+// or, under the proven switch, the real clock where the
+// hooks are this build's own (AgentHook), which move no clock: with no time
+// hooks the app reads the real clock (realAppClock), whose run never began
+// anywhere keploy reads (realAppClockRun). Other hooks that report
+// no app clock may move it, so keploy cannot tell which clock the app reads,
+// and hands the proxy none: a replay then refuses every learned read of the
+// clock rather than check it against the wrong clock (learn.CheckClockRead).
 func (a *Agent) wireAppClock() {
-	r, ok := ActiveHooks.(AppClockReader)
+	s, ok := a.Proxy.(coreAgent.AppClockSetter)
 	if !ok {
 		return
 	}
-	if s, ok := a.Proxy.(coreAgent.AppClockSetter); ok {
+	r, reads := ActiveHooks.(AppClockReader)
+	_, own := ActiveHooks.(*AgentHook)
+	realClock := !reads && own && provenswitch.On()
+	if rs, ok := a.Proxy.(coreAgent.AppClockRunSetter); ok {
+		var run func(time.Time) (time.Time, bool)
+		if rr, tells := ActiveHooks.(AppClockRunReader); tells && reads {
+			run = rr.AppClockRunBegan
+		} else if realClock {
+			run = realAppClockRun
+		}
+		rs.SetAppClockRun(run)
+	}
+	if reads {
 		s.SetAppClock(r.AppClock)
+		return
+	}
+	if realClock {
+		s.SetAppClock(realAppClock)
 	}
 }
+
+// realAppClock is the app's clock where no hooks move it: the real clock.
+func realAppClock(real time.Time) (time.Time, bool) { return real, true }
+
+// realAppClockRun is where realAppClock's run to an instant began: nothing
+// moves the real clock, so it has run as one from before any instant keploy
+// reads (the zero instant), and a span starts at its own bound (a set's
+// first server test's call at the set's begin: learn.Tracker.LiveSpan).
+func realAppClockRun(time.Time) (time.Time, bool) { return time.Time{}, true }
 
 // StoreMocksStream decodes the mock corpus one frame at a time from dec (header
 // counts split it into filtered then unfiltered), runs DeriveLifetime per mock,
@@ -1223,8 +1271,14 @@ func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHe
 	// promotes out-of-window mocks, needing the whole per-test set every test, so
 	// windowing to disk would only add reload cost. Best-effort — fall back to
 	// full-resident if the store can't be created.
+	//
+	// keploy mock replay under the proven switch keeps the on-disk store
+	// whatever the window mode (stagesMockReplay): its staging reads, of the
+	// store, only what no test owns, and each test reads its own as it opens.
+	// That bounds the agent's memory, which the opt-out of the strict window,
+	// a matching choice, must not undo.
 	var disk *proxyPkg.DiskMocks
-	if pkg.IsStrictMockWindow(a.config != nil && a.config.Test.StrictMockWindow) {
+	if pkg.IsStrictMockWindow(a.config != nil && a.config.Test.StrictMockWindow) || a.stagesMockReplay() {
 		d, diskErr := proxyPkg.NewDiskMocks(a.logger)
 		if diskErr != nil {
 			a.logger.Warn("on-disk mock store unavailable; keeping per-test mocks resident", zap.Error(diskErr))
@@ -1247,10 +1301,14 @@ func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHe
 	var asyncMocks []*models.Mock
 	wantAsync := a.wantsAsyncMocks() // skip the per-mock async check when unused
 	// Under the proven switch, which recorded container keys are ambiguous
-	// is read from the whole set (containerkey.RecordedTally), every mock
+	// is read from the whole set (containerkey.RecordedTally), and the
+	// destinations the recording names are noted (recordedDests), every mock
 	// counted as it is decoded, before any is refused or parked on disk.
 	proven := provenswitch.On()
 	var tally containerkey.RecordedTally
+	if proven {
+		storage.dests = recordedDests{}
+	}
 
 	for i := 0; i < total; i++ {
 		if i%1024 == 0 {
@@ -1267,6 +1325,7 @@ func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHe
 		mocknoise.MaterializeCorrelations(mock)
 		if proven {
 			tally.Add(mock)
+			storage.dests.add(mock)
 		}
 		if proven && !a.followable(mock) {
 			storage.noteRefused(mock)
@@ -1302,10 +1361,14 @@ func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHe
 			return failStream(fmt.Errorf("storemocks stream: read the statement catalog from the on-disk store: %w", err))
 		}
 		storage.statements = statements
+		// diskBytes are the store's records in its file, residentBytes those
+		// it keeps in memory (up to its resident budget): together, every
+		// per-test mock the store holds, as encoded.
 		a.logger.Info("agent mock residency: per-test mocks parked on disk (windowed)",
 			zap.Int("onDisk", disk.Len()),
 			zap.Int("spilledResponses", disk.SpilledResponses()),
 			zap.Int64("diskBytes", disk.DiskBytes()),
+			zap.Int64("residentBytes", disk.ResidentBytes()),
 			zap.Int("residentPerTest", len(storage.filtered)),
 			zap.Int("residentConfig", len(storage.unfiltered)))
 	}
@@ -1687,10 +1750,21 @@ func stagingStartupCutoff(params models.MockFilterParams) (time.Time, bool) {
 }
 
 const (
-	loadModeMapping      = "mapping"
-	loadModeStrictWindow = "strict-window"
-	loadModeLaxAll       = "lax-all"
+	loadModeMapping      = models.MockLoadMapping
+	loadModeStrictWindow = models.MockLoadStrictWindow
+	loadModeLaxAll       = models.MockLoadLaxAll
 )
+
+// MockWindowOf is how the agent serves params' window, which its answer to
+// /updatemockparams says (models.MockWindowHeader): its strict mock window
+// mode, this process's KEPLOY_STRICT_MOCK_WINDOW folded in as the window
+// filter folds it, and the per-test load mode its on-disk store reads by
+// (perTestLoadMode). The replay's mock prune holds what the agent serves a
+// test that got no answer by them, not by its own process's env, which the
+// agent's may not share.
+func (a *Agent) MockWindowOf(params models.MockFilterParams) models.MockWindowMode {
+	return models.MockWindowMode{Strict: pkg.IsStrictMockWindow(params.StrictMockWindow), Load: perTestLoadMode(params)}
+}
 
 // perTestLoadMode is which per-test mocks loadPerTestMocks reads from disk for
 // this call: mapping -> named mocks; strict -> window + startup band; lax -> all.
@@ -1703,15 +1777,27 @@ const (
 // the residency decision and the filtering decision have to come from one
 // source. IsStrictMockWindow folds in the env override, so
 // KEPLOY_STRICT_MOCK_WINDOW still opts out either way.
+//
+// keploy mock replay's own staging (params.ExactStaging) is the one call the
+// opt-out does not reach: it is no user's window. Its load is the strict
+// window's staging load (the band before the set's first test, the pool by
+// name), so the opt-out cannot make it read the whole on-disk store.
 func perTestLoadMode(params models.MockFilterParams) string {
 	switch {
 	case params.UseMappingBased && (len(params.MockMapping) > 0 || params.ExactMapping):
 		// An exact empty mapping names no per-test mock: nothing is read.
 		return loadModeMapping
-	case pkg.IsStrictMockWindow(params.StrictMockWindow) && !params.AfterTime.IsZero() && !params.BeforeTime.IsZero():
+	case (params.ExactStaging || pkg.IsStrictMockWindow(params.StrictMockWindow)) && !params.AfterTime.IsZero() && !params.BeforeTime.IsZero():
 		return loadModeStrictWindow
 	}
 	return loadModeLaxAll
+}
+
+// stagesMockReplay reports whether this agent serves keploy mock replay
+// under the proven switch, whose staging reads the on-disk store by what no
+// test owns (stageForExactServing), whatever the strict window says.
+func (a *Agent) stagesMockReplay() bool {
+	return provenswitch.On() && a.config != nil && a.config.Agent.MockMode && a.config.Agent.Mode == models.MODE_TEST
 }
 
 // loadCarryOverLookahead loads the carry-over mocks (models.IsCarryOver: a
@@ -2042,7 +2128,11 @@ func (a *Agent) mocksForParams(ctx context.Context, params models.MockFilterPara
 	// agent logs for "strict mock window enabled" find hits regardless of
 	// which route they used — previously the log fired only on the per-call
 	// flag, making env-only opt-ins invisible.
-	if strictEnabled := pkg.IsStrictMockWindow(params.StrictMockWindow); strictEnabled {
+	//
+	// keploy mock replay's own staging (params.ExactStaging) is no user's
+	// strict window: the notice, about keploy test's per-test windows, is
+	// not printed for it.
+	if strictEnabled := pkg.IsStrictMockWindow(params.StrictMockWindow); strictEnabled && !params.ExactStaging {
 		// Fire the activation message at most once per agent process
 		// (sync.Once). Info (project logging policy disallows Warn for
 		// expected-default state); the escape-hatch names are embedded

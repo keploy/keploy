@@ -10,7 +10,10 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // recorded is a recorded POST to api.example, with headers and a body, as the
@@ -48,13 +51,19 @@ func sent(path string, header map[string]string, body string) *req {
 // the switched static list plus keploy.yml's header and body noise.
 func strictMatch(t *testing.T, input *req, headerNoise, bodyNoise map[string][]string, urlNoise []string, mocks ...*models.Mock) (*models.Mock, *matchDiag) {
 	t.Helper()
+	return strictMatchIn(t, context.Background(), input, headerNoise, bodyNoise, urlNoise, mocks...)
+}
+
+// strictMatchIn is strictMatch on a connection whose context is ctx.
+func strictMatchIn(t *testing.T, ctx context.Context, input *req, headerNoise, bodyNoise map[string][]string, urlNoise []string, mocks ...*models.Mock) (*models.Mock, *matchDiag) {
+	t.Helper()
 	t.Setenv("KEPLOY_PROVEN", "1")
 	hn := models.ProvenFlakyHeaderNoise()
 	for k, v := range headerNoise {
 		hn[k] = v
 	}
 	db := &mockMemDb{mocks: mocks, updateUnFilteredReturn: true}
-	ok, stub, diag, err := newHTTP().match(context.Background(), input, db, hn, bodyNoise, urlNoise, true, false, false, true, true)
+	ok, stub, diag, err := newHTTP().match(ctx, input, db, hn, bodyNoise, urlNoise, true, false, false, true, true)
 	if err != nil {
 		t.Fatalf("match: %v", err)
 	}
@@ -745,5 +754,469 @@ func TestStrictARecordingReplayedAsItIsTakesNoTurn(t *testing.T) {
 		if commit != nil || m.Name != "once" {
 			t.Fatalf("pick %d = %s (commit %v), want once with no turn", i+1, m.Name, commit != nil)
 		}
+	}
+}
+
+// clockConn is a connection's context whose learn tracker reads the
+// application's clock as the real one (none: keploy cannot tell it), with a
+// data-plane call served at served: a call that reaches keploy after it made
+// its clock reads after it.
+func clockConn(appClock bool, served time.Time) context.Context {
+	tr := learn.NewTracker()
+	if appClock {
+		tr.SetAppClock(func(r time.Time) (time.Time, bool) { return r, true })
+	}
+	tr.ServedMockAt(httpMock("earlier", "GET", "/v1/account"), served)
+	tr.SetLearnEnded(true)
+	return learn.WithTracker(context.Background(), tr)
+}
+
+// A place the learn step learned as a read of the application's clock
+// (MockSpec.Clocks) is still compared at a replay: the call must carry a read
+// of the clock made in its own window (since the previous serve), plus the
+// learned offset, at every kind of place (a body field, a query value, a
+// header). A value moved thirty days, the epoch, the recorded value itself,
+// a time to live changed by a minute, a value keploy cannot read, a missing
+// field, a place two learnings left Empty, and every value where keploy
+// cannot tell the application's clock are refused, the field named; learned
+// noise on the same place (a switch-off rewrite can put both on a file)
+// excuses none of them. keploy.yml's noise does: the user declared the field
+// not compared.
+func TestStrictChecksALearnedClockReadInItsCallsWindow(t *testing.T) {
+	base := time.Date(2026, 10, 26, 15, 50, 35, 0, time.UTC)
+	recAt := time.Date(2026, 9, 1, 9, 0, 0, 0, time.UTC)
+	stamp := func(at time.Time) string { return at.Format(time.RFC3339) }
+	now := base.Add(time.Second)
+	ttl := models.ClockOffset{Min: 30 * time.Minute, Max: 30*time.Minute + time.Second, Res: time.Second}
+	plain := models.ClockOffset{Res: time.Second}
+	mock := func(clocks map[string]models.ClockOffset) *models.Mock {
+		m := recorded("usage", "/v1/usage?since="+stamp(recAt), map[string]string{"Content-Type": "application/json", "X-Sent-At": stamp(recAt)},
+			`{"since":"`+stamp(recAt)+`","expires":"`+stamp(recAt.Add(30*time.Minute))+`","q":"x"}`)
+		m.Spec.Clocks = clocks
+		m.Spec.ReqBodyNoise = map[string][]string{}
+		for p := range clocks {
+			m.Spec.ReqBodyNoise[p] = []string{}
+		}
+		return m
+	}
+	call := func(since, expires, query, header string) *req {
+		body := `{"q":"x","since":"` + since + `","expires":"` + expires + `"}`
+		if since == "" {
+			body = `{"q":"x","expires":"` + expires + `"}`
+		}
+		r := sent("/v1/usage?since="+query, map[string]string{"Content-Type": "application/json", "X-Sent-At": header}, body)
+		r.arrived = base.Add(2 * time.Second)
+		return r
+	}
+	all := map[string]models.ClockOffset{"body.since": plain, "body.expires": ttl, "url.query.since": plain, "header.x-sent-at": plain}
+	own := call(stamp(now), stamp(now.Add(30*time.Minute)), stamp(now), stamp(now))
+	for _, c := range []struct {
+		name      string
+		clocks    map[string]models.ClockOffset
+		appClock  bool
+		in        *req
+		bodyNoise map[string][]string
+		differs   string
+	}{
+		{"its own call's now and now + 30m", all, true, own, nil, ""},
+		{"moved thirty days", all, true, call(stamp(now.AddDate(0, 0, -30)), stamp(now.Add(30*time.Minute)), stamp(now), stamp(now)), nil, "body.since"},
+		{"the epoch", all, true, call("1970-01-01T00:00:00Z", stamp(now.Add(30*time.Minute)), stamp(now), stamp(now)), nil, "body.since"},
+		{"the recorded value", all, true, call(stamp(recAt), stamp(now.Add(30*time.Minute)), stamp(now), stamp(now)), nil, "body.since"},
+		{"a time to live of 31m", all, true, call(stamp(now), stamp(now.Add(31*time.Minute)), stamp(now), stamp(now)), nil, "body.expires"},
+		{"no instant", all, true, call("soon", stamp(now.Add(30*time.Minute)), stamp(now), stamp(now)), nil, "body.since"},
+		{"the field gone", map[string]models.ClockOffset{"body.since": plain}, true, call("", stamp(recAt.Add(30*time.Minute)), stamp(recAt), stamp(recAt)), nil, "body.since"},
+		{"a query value moved", all, true, call(stamp(now), stamp(now.Add(30*time.Minute)), stamp(now.AddDate(0, 0, -30)), stamp(now)), nil, "query.since"},
+		{"a header moved", all, true, call(stamp(now), stamp(now.Add(30*time.Minute)), stamp(now), stamp(recAt)), nil, "header.x-sent-at"},
+		{"two learnings left no one offset", map[string]models.ClockOffset{"body.since": {Min: time.Hour, Max: time.Hour}}, true, own, nil, "body.since"},
+		{"keploy cannot tell the app's clock", all, false, own, nil, "body.since"},
+		{"keploy.yml's noise reaches it", map[string]models.ClockOffset{"body.since": plain}, false, call(stamp(now), stamp(recAt.Add(30*time.Minute)), stamp(recAt), stamp(recAt)), map[string][]string{"since": {}}, ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got, diag := strictMatchIn(t, clockConn(c.appClock, base), c.in, nil, c.bodyNoise, nil, mock(c.clocks))
+			if c.differs == "" {
+				if got == nil {
+					t.Fatalf("refused (%v); want it answered", differs(diag))
+				}
+				return
+			}
+			if got != nil || !hasField(differs(diag), c.differs) {
+				t.Fatalf("answered %v, differs %v; want refused naming %s", got != nil, differs(diag), c.differs)
+			}
+			why := ""
+			for _, f := range diag.differs {
+				if f.shape == c.differs {
+					why = f.why
+				}
+			}
+			if !strings.Contains(why, "learned") {
+				t.Fatalf("the refusal of %s gives no reason: %q", c.differs, why)
+			}
+			// The reason says what failed: a replay that cannot tell the
+			// application's clock says so, rather than that the value moved.
+			says := map[string]string{
+				"keploy cannot tell the app's clock": "keploy cannot tell the application's clock at this call",
+				"a time to live of 31m":              "is not a read of the application's clock plus that offset made in this call's window",
+				"no instant":                         "no instant keploy reads",
+				"two learnings left no one offset":   "no one read of the application's clock explains them all",
+				"moved thirty days":                  "is not a read of the application's clock made in this call's window",
+			}[c.name]
+			if !strings.Contains(why, says) {
+				t.Fatalf("the refusal of %s says %q; want it to say %q", c.differs, why, says)
+			}
+		})
+	}
+	// A read of the clock needs no noise beside it: the walk lets its value
+	// change, and the check decides it.
+	bare := mock(all)
+	bare.Spec.ReqBodyNoise = nil
+	if got, diag := strictMatchIn(t, clockConn(true, base), own, nil, nil, nil, bare); got == nil {
+		t.Fatalf("refused (%v) with no noise beside the reads of the clock; want it answered", differs(diag))
+	}
+}
+
+// A wall clock of no zone learned as a read of the clock in the
+// application's zone (models.ZoneApp) is checked at a replay end to end in
+// the zone the connection's tracker carries (Tracker.SetAppZone, through
+// learn.ClockSpanFrom's Span.Zone): the replay's now written in IST, the
+// application's zone, is answered; the same instant written in UTC, and one
+// written in IST an hour stale, are refused, naming the field; with no zone
+// told at the replay even the right value is refused, saying keploy cannot
+// tell the application's zone.
+func TestStrictChecksAClockReadLearnedInTheAppsZone(t *testing.T) {
+	ist := time.FixedZone("IST", 5*3600+1800)
+	base := time.Date(2026, 10, 26, 15, 50, 35, 0, time.UTC)
+	recAt := time.Date(2026, 9, 1, 9, 0, 0, 0, time.UTC)
+	wall := func(at time.Time, in *time.Location) string { return at.In(in).Format("2006-01-02T15:04:05") }
+	now := base.Add(time.Second)
+	m := recorded("seen", "/v1/seen", map[string]string{"Content-Type": "application/json"}, `{"q":"x","seenAt":"`+wall(recAt, ist)+`"}`)
+	m.Spec.Clocks = map[string]models.ClockOffset{"body.seenAt": {Res: time.Second, Zone: models.ZoneApp, Layout: "iso-second"}}
+	conn := func(zone *time.Location) context.Context {
+		tr := learn.NewTracker()
+		tr.SetAppClock(func(r time.Time) (time.Time, bool) { return r, true })
+		tr.SetAppZone(zone)
+		tr.ServedMockAt(httpMock("earlier", "GET", "/v1/account"), base)
+		tr.SetLearnEnded(true)
+		return learn.WithTracker(context.Background(), tr)
+	}
+	call := func(seenAt string) *req {
+		r := sent("/v1/seen", map[string]string{"Content-Type": "application/json"}, `{"q":"x","seenAt":"`+seenAt+`"}`)
+		r.arrived = base.Add(2 * time.Second)
+		return r
+	}
+	for _, c := range []struct {
+		name   string
+		zone   *time.Location
+		seenAt string
+		says   string
+	}{
+		{"the replay's now in the application's zone", ist, wall(now, ist), ""},
+		{"the replay's now written in UTC", ist, wall(now, time.UTC), "is not a read of the application's clock made in this call's window"},
+		{"an hour stale in the application's zone", ist, wall(now.Add(-time.Hour), ist), "is not a read of the application's clock made in this call's window"},
+		{"the application's zone not told", nil, wall(now, ist), "keploy cannot tell the application's zone at this call"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got, diag := strictMatchIn(t, conn(c.zone), call(c.seenAt), nil, nil, nil, m)
+			if c.says == "" {
+				if got != nil {
+					return
+				}
+				t.Fatalf("refused (%v); want it answered", differs(diag))
+			}
+			if got != nil || !hasField(differs(diag), "body.seenAt") {
+				t.Fatalf("answered %v, differs %v; want refused naming body.seenAt", got != nil, differs(diag))
+			}
+			for _, f := range diag.differs {
+				if f.shape == "body.seenAt" && !strings.Contains(f.why, c.says) {
+					t.Fatalf("the refusal says %q; want it to say %q", f.why, c.says)
+				}
+			}
+		})
+	}
+}
+
+// A date the learn step learned as a read of the clock in the application's
+// zone (models.ZoneApp, cut to a day) that a replay's call carries equal to
+// its recording, days after the recording was made, is still checked
+// against the call's window: being the recorded value excuses nothing, at a
+// day's cut as at a second's. Checked in the zone keploy's CLI handed the
+// agent for the app's container (docker and compose modes: the connection's
+// ctx carries it, learn.WithProcZone) and, where none is handed, in the zone
+// the learn step stored and in UTC: the recorded date nine days stale, and
+// two days stale, is refused naming body.day; the call's own date passes.
+func TestStrictChecksARecordedDateManyDaysStaleInItsCallsWindow(t *testing.T) {
+	hnl := time.FixedZone("HST", -10*3600)
+	// 12:10 in Honolulu, 19:10 in Sao Paulo (the stored zone) and 22:10 in
+	// UTC: one date in all three, so no row turns on the hour it runs at.
+	base := time.Date(2026, 10, 29, 22, 10, 0, 0, time.UTC)
+	day := models.ClockOffset{Res: 24 * time.Hour, Zone: models.ZoneApp, Layout: "iso-date", AppZone: "-03:00"}
+	mock := func(recDay string) *models.Mock {
+		m := recorded("charge", "/charge", map[string]string{"Content-Type": "application/json"}, `{"amount":100,"day":"`+recDay+`"}`)
+		m.Spec.Clocks = map[string]models.ClockOffset{"body.day": day}
+		return m
+	}
+	conn := func(handed *time.Location) context.Context {
+		tr := learn.NewTracker()
+		tr.SetAppClock(func(r time.Time) (time.Time, bool) { return r, true })
+		tr.ServedMockAt(httpMock("earlier", "GET", "/v1/account"), base)
+		tr.SetLearnEnded(true)
+		ctx := learn.WithTracker(context.Background(), tr)
+		if handed != nil {
+			ctx = learn.WithProcZone(ctx, learn.ProcZone{Loc: handed, Name: "Pacific/Honolulu"})
+		}
+		return ctx
+	}
+	call := func(liveDay string) *req {
+		r := sent("/charge", map[string]string{"Content-Type": "application/json"}, `{"amount":100,"day":"`+liveDay+`"}`)
+		r.arrived = base.Add(2 * time.Second)
+		return r
+	}
+	for _, c := range []struct {
+		name            string
+		handed          *time.Location
+		recDay, liveDay string
+		refused         bool
+	}{
+		{"handed zone: the call's own date", hnl, "2026-10-20", "2026-10-29", false},
+		{"handed zone: the recorded date, nine days stale", hnl, "2026-10-20", "2026-10-20", true},
+		{"handed zone: the recorded date, two days stale", hnl, "2026-10-27", "2026-10-27", true},
+		{"stored zone: the call's own date", nil, "2026-10-20", "2026-10-29", false},
+		{"stored zone: the recorded date, nine days stale", nil, "2026-10-20", "2026-10-20", true},
+		{"stored zone: the recorded date, two days stale", nil, "2026-10-27", "2026-10-27", true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got, diag := strictMatchIn(t, conn(c.handed), call(c.liveDay), nil, nil, nil, mock(c.recDay))
+			if !c.refused {
+				if got == nil {
+					t.Fatalf("refused (%v); want it answered", differs(diag))
+				}
+				return
+			}
+			if got != nil || !hasField(differs(diag), "body.day") {
+				t.Fatalf("answered %v, differs %v; want refused naming body.day", got != nil, differs(diag))
+			}
+			for _, f := range diag.differs {
+				if f.shape == "body.day" && !strings.Contains(f.why, "made in this call's window") {
+					t.Fatalf("the refusal of body.day says %q; want it to say the value is no read made in this call's window", f.why)
+				}
+			}
+		})
+	}
+}
+
+// A refused read of the application's clock names its field and why in the
+// miss report (MockMismatchReport.FieldReasons), not only in the agent's
+// log: the field as Differs names it, and the check's why, which names it
+// so and no value. An object key that may be a value the app sent is {} in
+// both, so two such keys refused for one reason give it once; a field that
+// differs for no reason of its own (a changed value) gives none.
+func TestARefusedClockReadNamesItsFieldAndWhyInTheMissReport(t *testing.T) {
+	base := time.Date(2026, 10, 26, 15, 50, 35, 0, time.UTC)
+	recAt := time.Date(2026, 9, 1, 9, 0, 0, 0, time.UTC)
+	stamp := func(at time.Time) string { return at.Format(time.RFC3339) }
+	moved := stamp(base.AddDate(0, 0, -30))
+	rec := recorded("usage", "/v1/usage", map[string]string{"Content-Type": "application/json"},
+		`{"since":"`+stamp(recAt)+`","users":{"kqzx9w":{"since":"`+stamp(recAt)+`"},"pq8r7s":{"since":"`+stamp(recAt)+`"}},"q":"x"}`)
+	plain := models.ClockOffset{Res: time.Second}
+	rec.Spec.Clocks = map[string]models.ClockOffset{"body.since": plain, "body.users.kqzx9w.since": plain, "body.users.pq8r7s.since": plain}
+	live := sent("/v1/usage", map[string]string{"Content-Type": "application/json"},
+		`{"q":"y","since":"`+moved+`","users":{"kqzx9w":{"since":"`+moved+`"},"pq8r7s":{"since":"`+moved+`"}}}`)
+	live.arrived = base.Add(2 * time.Second)
+	got, diag := strictMatchIn(t, clockConn(true, base), live, nil, nil, nil, rec)
+	if got != nil {
+		t.Fatal("served a call whose reads of the clock moved thirty days")
+	}
+	r := newHTTP().buildHTTPMismatchReport(&http.Request{Method: "POST", URL: &url.URL{Path: "/v1/usage"}, Host: "api.example", Header: live.header}, live.body, &mockMemDb{mocks: []*models.Mock{rec}}, nil, nil, nil, diag)
+	for _, f := range []string{"body.q", "body.since", "body.users.{}.since"} {
+		if !hasField(r.Differs, f) {
+			t.Fatalf("Differs = %v; want %s named", r.Differs, f)
+		}
+	}
+	whys := map[string]string{}
+	for _, fr := range r.FieldReasons {
+		if _, twice := whys[fr.Field]; twice {
+			t.Fatalf("%s is given a reason twice: %+v", fr.Field, r.FieldReasons)
+		}
+		whys[fr.Field] = fr.Why
+	}
+	if len(whys) != 2 {
+		t.Fatalf("FieldReasons = %+v; want body.since and body.users.{}.since, each once", r.FieldReasons)
+	}
+	for _, f := range []string{"body.since", "body.users.{}.since"} {
+		why := whys[f]
+		if !strings.HasPrefix(why, f+" was learned as ") || !strings.HasSuffix(why, "made in this call's window: it changed") {
+			t.Fatalf("the reason of %s is %q; want the check's why naming it", f, why)
+		}
+		for _, v := range []string{"kqzx9w", "pq8r7s", moved, stamp(recAt), "2026"} {
+			if strings.Contains(why, v) {
+				t.Fatalf("the reason of %s names %q: %q", f, v, why)
+			}
+		}
+	}
+}
+
+// A refused read of the clock is said in the agent's log too, for each
+// field: the closest mock, the field by its shape and why, with no value.
+func TestARefusedClockReadIsLoggedWithItsFieldAndWhy(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "1")
+	base := time.Date(2026, 10, 26, 15, 50, 35, 0, time.UTC)
+	recAt := time.Date(2026, 9, 1, 9, 0, 0, 0, time.UTC)
+	stamp := func(at time.Time) string { return at.Format(time.RFC3339) }
+	moved := stamp(base.AddDate(0, 0, -30))
+	rec := recorded("usage", "/v1/usage", map[string]string{"Content-Type": "application/json"},
+		`{"since":"`+stamp(recAt)+`","users":{"kqzx9w":{"since":"`+stamp(recAt)+`"}}}`)
+	plain := models.ClockOffset{Res: time.Second}
+	rec.Spec.Clocks = map[string]models.ClockOffset{"body.since": plain, "body.users.kqzx9w.since": plain}
+	in := sent("/v1/usage", map[string]string{"Content-Type": "application/json"}, `{"since":"`+moved+`","users":{"kqzx9w":{"since":"`+moved+`"}}}`)
+	in.arrived = base.Add(2 * time.Second)
+	core, logs := observer.New(zap.WarnLevel)
+	h := &HTTP{Logger: zap.New(core)}
+	ok, _, _, err := h.match(clockConn(true, base), in, &mockMemDb{mocks: []*models.Mock{rec}, updateUnFilteredReturn: true}, models.ProvenFlakyHeaderNoise(), nil, nil, true, false, false, true, true)
+	if err != nil || ok {
+		t.Fatalf("match ok=%v err=%v; want the moved reads of the clock refused", ok, err)
+	}
+	said := map[string]string{}
+	for _, e := range logs.FilterMessage("a learned read of the application's clock does not hold").All() {
+		c := e.ContextMap()
+		f, _ := c["field"].(string)
+		why, _ := c["reason"].(string)
+		if c["mock"] != "usage" || !strings.HasPrefix(why, f+" was learned as ") {
+			t.Fatalf("the log says %v; want the mock, the field and why naming it", c)
+		}
+		for _, v := range []string{"kqzx9w", moved, stamp(recAt)} {
+			if strings.Contains(f+why, v) {
+				t.Fatalf("the log names %q: %v", v, c)
+			}
+		}
+		said[f] = why
+	}
+	if len(said) != 2 || said["body.since"] == "" || said["body.users.{}.since"] == "" {
+		t.Fatalf("the log said %v; want body.since and body.users.{}.since", said)
+	}
+}
+
+// A refused read of the clock is named as the walk names its field, by its
+// shape: a query parameter's or a body key's name that may be a value the
+// app sent (a user's id) is {}, an array index is [], a path segment is the
+// path. Its reason quotes that name, so no value reaches the report.
+func TestARefusedClockReadsFieldIsNamedByItsShape(t *testing.T) {
+	for place, want := range map[string]string{
+		"url.query.since":         "query.since",
+		"url.query.kqzx9w":        "query.{}",
+		"url.path.2":              "path",
+		"body.since":              "body.since",
+		"body.users.kqzx9w.since": "body.users.{}.since",
+		"body.items[3].at":        "body.items[].at",
+		"header.x-sent-at":        "header.x-sent-at",
+	} {
+		if got := clockField(place).shape; got != want {
+			t.Errorf("the clock read at %s is named %q; want %q", place, got, want)
+		}
+	}
+}
+
+// Without the proven switch keploy reads no learned read of the clock, and
+// compares as before it.
+func TestNoClockIsReadWithTheSwitchOff(t *testing.T) {
+	m := httpMock("m", "GET", "/v1")
+	m.Spec.Clocks = map[string]models.ClockOffset{"body.since": {Res: time.Second}}
+	t.Setenv("KEPLOY_PROVEN", "")
+	if clocksOf(m) != nil {
+		t.Fatal("a clock read with the switch off")
+	}
+	t.Setenv("KEPLOY_PROVEN", "1")
+	if clocksOf(m) == nil {
+		t.Fatal("no clock read with the switch on")
+	}
+}
+
+// keploy.yml's noise skips a learned read of the clock wherever it reaches
+// the place: a header name, a url pattern, a body path with an array
+// position. Elsewhere a value that is not this call's read of the clock is
+// refused, the field named as the walk names it, the refusals in a stable
+// order; a read in a path segment files the recording under the learned
+// request key; learned noise on the place no longer excuses it in the learn
+// step, which reads the place again.
+func TestAClockReadsRefusalsAndKeployYmlNoise(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "1")
+	base := time.Date(2026, 10, 26, 15, 50, 35, 0, time.UTC)
+	plain := models.ClockOffset{Res: time.Second}
+	now, old := base.Add(time.Second).Format(time.RFC3339), time.Date(2026, 9, 1, 9, 0, 0, 0, time.UTC).Format(time.RFC3339)
+	mk := func(path, header, body string, clocks ...string) *models.Mock {
+		m := recorded("m", path, map[string]string{"Content-Type": "application/json", "X-Sent-At": header}, body)
+		m.Spec.Clocks = map[string]models.ClockOffset{}
+		for _, c := range clocks {
+			m.Spec.Clocks[c] = plain
+		}
+		return m
+	}
+	call := func(path, header, body string) *req {
+		r := sent(path, map[string]string{"Content-Type": "application/json", "X-Sent-At": header}, body)
+		r.arrived = base.Add(2 * time.Second)
+		return r
+	}
+	items := `{"items":[{"at":"` + old + `"}]}`
+	for _, c := range []struct {
+		name         string
+		m            *models.Mock
+		in           *req
+		header, body map[string][]string
+		url          []string
+		differs      string
+	}{
+		{"a header keploy.yml names", mk("/v1/u", old, `{}`, "header.x-sent-at"), call("/v1/u", old, `{}`), map[string][]string{"x-sent-at": {}}, nil, nil, ""},
+		{"a header", mk("/v1/u", old, `{}`, "header.x-sent-at"), call("/v1/u", old, `{}`), nil, nil, nil, "header.x-sent-at"},
+		{"a query value a url pattern masks", mk("/v1/u?since="+old, now, `{}`, "url.query.since"), call("/v1/u?since="+old, now, `{}`), nil, nil, []string{`\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z`}, ""},
+		{"a path segment", mk("/v1/u/"+old, now, `{}`, "url.path.2"), call("/v1/u/"+old, now, `{}`), nil, nil, nil, "path"},
+		{"an array position keploy.yml names", mk("/v1/u", now, items, "body.items[0].at"), call("/v1/u", now, items), nil, map[string][]string{"items[].at": {}}, nil, ""},
+		{"an array position", mk("/v1/u", now, items, "body.items[0].at"), call("/v1/u", now, items), nil, nil, nil, "body.items[].at"},
+		{"a whole JSON body", mk("/v1/u", now, `"`+old+`"`, "body"), call("/v1/u", now, `"`+old+`"`), nil, nil, nil, "body"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got, diag := strictMatchIn(t, clockConn(true, base), c.in, c.header, c.body, c.url, c.m)
+			if c.differs == "" {
+				if got == nil {
+					t.Fatalf("refused (%v); want it answered: keploy.yml's noise reaches the place", differs(diag))
+				}
+				return
+			}
+			if got != nil || !hasField(differs(diag), c.differs) {
+				t.Fatalf("answered %v, differs %v; want refused naming %s", got != nil, differs(diag), c.differs)
+			}
+		})
+	}
+	// The refusals of several places come in one order, run after run.
+	body, clocks := `{`, []string{}
+	for i, k := range []string{"f", "b", "e", "a", "d", "c"} {
+		if i > 0 {
+			body += ","
+		}
+		body += `"` + k + `":"` + old + `"`
+		clocks = append(clocks, "body."+k)
+	}
+	body += `}`
+	for run := 0; run < 20; run++ {
+		_, diag := strictMatchIn(t, clockConn(true, base), call("/v1/u", now, body), nil, nil, nil, mk("/v1/u", now, body, clocks...))
+		var order []string
+		for _, f := range diag.differs {
+			if f.why != "" {
+				order = append(order, f.shape)
+			}
+		}
+		if strings.Join(order, " ") != "body.a body.b body.c body.d body.e body.f" {
+			t.Fatalf("run %d: the refusals came as %v; want them sorted", run, order)
+		}
+	}
+	m := mk("/v1/u/"+old, now, `{"since":"`+old+`"}`, "url.path.2", "body.since")
+	if keys := recordedRequestKeys(m); len(keys) != 2 || keys[1] != requestKeyLearned("POST", 3) {
+		t.Fatalf("keys %v; want the learned key %s: the path segment is a read of the clock", keys, requestKeyLearned("POST", 3))
+	}
+	m.Spec.ReqBodyNoise = map[string][]string{"body.since": {}}
+	leaf := learn.Leaf{Path: "body.since", Noise: "body.since", Type: learn.String, Value: old}
+	if ex, _ := (learnNoise{}).known(m).Excused(leaf); ex {
+		t.Fatal("learned noise excused a place learned as a read of the clock")
+	}
+	m.Spec.Clocks = nil
+	if ex, _ := (learnNoise{}).known(m).Excused(leaf); !ex {
+		t.Fatal("learned noise no longer excuses its own place")
 	}
 }
