@@ -73,9 +73,19 @@ func seriesNames(s integrations.MarkedSeries) string {
 // of it (its "at" a read of the clock) and its recordings in the order of
 // their calls, the newest last. A series a test's unmarked recording is in is
 // a call that test must make, and is none; so is one only the pool holds
-// (judging marked nothing of it), and so is every series under today's rules.
+// (judging marked nothing of it). A set served by today's rules (every set
+// keploy mock record writes: it carries no routing mark) has its marked
+// series too, its background then the marks alone: a series one of whose
+// recordings is on no test's list is none there.
 func TestMarkedSeriesIsATimersCallMarkedWhereverItWasRecorded(t *testing.T) {
 	all := models.BackgroundMarks{
+		"T1": {"claim-3": "a timer's call", "claim-4": "a timer's call"},
+		"T2": {"claim-5": "a timer's call", "claim-6": "a timer's call"},
+	}
+	// every claim on a test's list, as keploy mock record's sets hold a
+	// timer's call: no recording of it is the pool's
+	listed := models.BackgroundMarks{
+		"T0": {"claim-1": "a timer's call", "claim-2": "a timer's call"},
 		"T1": {"claim-3": "a timer's call", "claim-4": "a timer's call"},
 		"T2": {"claim-5": "a timer's call", "claim-6": "a timer's call"},
 	}
@@ -145,10 +155,35 @@ func TestMarkedSeriesIsATimersCallMarkedWhereverItWasRecorded(t *testing.T) {
 	t.Run("today's rules", func(t *testing.T) {
 		mm := timerSet(t)
 		mm.ServeExactBackground("", nil, nil)
+		mm.SetUnrequired(listed)
+		mm.ServeExactTest("T1", nil)
+		got, err := mm.MarkedSeries(context.Background(), seriesRowKind, nil)
+		if err != nil || len(got) != 1 {
+			t.Fatalf("a set served by today's rules, its timer's call marked on every list, has %d marked series, %v; want the claims' one", len(got), err)
+		}
+		if n := seriesNames(got[0]); n != "claim-1,claim-2,claim-3,claim-4,claim-5,claim-6" {
+			t.Fatalf("its series is %s; want every claim in the order of its call", n)
+		}
+	})
+	t.Run("today's rules name no pool", func(t *testing.T) {
+		// claim-1 and claim-2 are on no test's list: the background rules'
+		// pool would name them, today's name nothing.
+		mm := timerSet(t)
+		mm.ServeExactBackground("", []string{"claim-1", "claim-2"}, nil)
 		mm.SetUnrequired(all)
 		mm.ServeExactTest("T1", nil)
 		if got, _ := mm.MarkedSeries(context.Background(), seriesRowKind, nil); len(got) != 0 {
-			t.Fatalf("a set served by today's rules has %d marked series", len(got))
+			t.Fatalf("a set served by today's rules has %d marked series with recordings on no test's list", len(got))
+		}
+	})
+	t.Run("today's rules, its mocks being staged", func(t *testing.T) {
+		mm := timerSet(t)
+		mm.ServeExactBackground("", nil, nil)
+		mm.SetUnrequired(listed)
+		mm.ServeExactTest("T1", nil)
+		mm.StageExactBackground("") // the next set's staging, by today's rules
+		if got, _ := mm.MarkedSeries(context.Background(), seriesRowKind, nil); len(got) != 0 {
+			t.Fatalf("a staging by today's rules whose mocks are not staged yet has %d marked series", len(got))
 		}
 	})
 	t.Run("switch off", func(t *testing.T) {
