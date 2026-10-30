@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.mongodb.org/mongo-driver/v2/x/mongo/driver/wiremessage"
 )
 
@@ -1651,6 +1652,11 @@ func TestASlowFullRoundLearnsASameSecondCopyAsAReadSinceItsTestBegan(t *testing.
 		{"an HTTP call in a later test, a fast full round", false, true, fast, ""},
 	} {
 		t.Run(c.name, func(t *testing.T) {
+			if !c.ownTest {
+				// An earlier test's call is a place of the run, read
+				// under the run's rule, only under the proven switch.
+				t.Setenv(provenswitch.Env, "1")
+			}
 			put := RawOf(&models.Mock{Name: "mock-198", Spec: models.MockSpec{ReqTimestampMock: rec.put, ResTimestampMock: rec.put.Add(time.Millisecond)}}, true)
 			earlier := []Earlier{{Mock: "mock-198", At: rec.put, Own: c.ownTest, Run: !c.ownTest, Payload: put.ServedAs(1), Seen: []Seen{
 				{Side: Request, Leaf: num(lastUsed, rec.put), Live: secs(c.f.put), Place: lastUsed},

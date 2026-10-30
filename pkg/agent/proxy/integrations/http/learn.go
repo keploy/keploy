@@ -24,6 +24,7 @@ import (
 	"go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/variables"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -2142,10 +2143,11 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 					why += "; " + l.Why
 				}
 				return p, why
-			case !own || !from.Own && !from.Run:
+			case !own || !from.Own && !(from.Run && provenswitch.On()):
 				// A value the run made, sent by the set's start-up or an
 				// earlier test's own call (from.Run), is the run's variable:
-				// bound there, used here.
+				// bound there, used here, under the proven switch; without
+				// it only a test's own calls carry its variables.
 				return p, r.Path + " carries a value " + from.Mock + " sent earlier, and only a test's own calls carry its variables"
 			}
 			use, ok := learn.VarPlace(r, jsonReq)

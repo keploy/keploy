@@ -16,6 +16,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 // Side is the half of an exchange a value is in.
@@ -1782,8 +1783,13 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 	// clock read at once, which the HTTP replay refuses for every test, the
 	// earlier one's included, and a replay whose two reads cross a second
 	// would fail the later test.
+	//
+	// Without the proven switch the run's rule is not applied: a value the
+	// set's start-up sent stays its variable, which every plan refuses at a
+	// test's call (only a test's own calls carry its variables), as before
+	// the run's variables (provenswitch).
 	ofRun := func(ln Learned, r, l Leaf, w *Window) Learned {
-		if ln.Kind != KindVariable || !ln.From.Run {
+		if ln.Kind != KindVariable || !ln.From.Run || !provenswitch.On() {
 			return ln
 		}
 		for i, ow := range append([]*Window{w}, w.oneRunSinceBegin()...) {

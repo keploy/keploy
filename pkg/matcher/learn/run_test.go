@@ -1,6 +1,7 @@
 package learn
 
 import (
+	"fmt"
 	"reflect"
 	"runtime"
 	"strconv"
@@ -1303,6 +1304,49 @@ func TestWithoutTheSwitchATestsCallsAreNoPlaceOfTheNext(t *testing.T) {
 	}
 }
 
+// Without the proven switch a value the set's start-up sent, which a test's
+// call sends again, is learned as it was before the run kept variables: the
+// start-up's variable (Place.Run), which every plan refuses at a test's call.
+// The run's rule (ofRun) does not make it the call's own read of the clock,
+// whatever its shape, its distance, its call's window, or what the start-up's
+// place learned.
+func TestWithoutTheSwitchAStartUpsValueStaysItsVariable(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0")
+	boot := time.Date(2026, 10, 30, 18, 40, 58, 579_000_000, time.UTC)
+	iso := func(at time.Time) string { return at.UTC().Format("2006-01-02T15:04:05Z") }
+	tod := func(at time.Time) string { return at.In(ist).Format("15:04:05") }
+	for _, shape := range []struct {
+		name string
+		text func(time.Time) string
+	}{{"instant", iso}, {"time of day", tod}} {
+		for _, clock := range []bool{false, true} {
+			for _, after := range []time.Duration{8 * time.Millisecond, 9 * time.Second} {
+				for _, win := range []bool{true, false} {
+					name := fmt.Sprintf("%s/start-up's place a clock read %v/%v later/window %v", shape.name, clock, after, win)
+					t.Run(name, func(t *testing.T) {
+						tr := NewTracker()
+						tr.Served(0, Earlier{Mock: "mock-s", At: boot, Seen: []Seen{{Side: Request, Leaf: Leaf{Path: "body.v", Type: String, Value: shape.text(boot)}, Live: shape.text(boot.Add(FullRoundLead)), Place: "body.v", Clock: clock}}})
+						tr.Begin()
+						_, earlier, _, _ := tr.Test()
+						call := boot.Add(after)
+						fCall := call.Add(FullRoundLead)
+						var w *Window
+						if win {
+							w = &Window{Rec: Span{From: call.Add(-5 * time.Millisecond), To: call}, F: Span{From: fCall.Add(-5 * time.Millisecond), To: fCall.Add(time.Millisecond)}}
+						}
+						dc := clockedDrifts()
+						dc.zone = ist
+						ln := ClassifyIn(dc, []string{"body.v"}, strLeaf("body.v", shape.text(boot.Add(FullRoundLead))), strLeaf("body.v", shape.text(boot)), call, earlier, nil, nil, w)[0]
+						if ln.Kind != KindVariable || ln.From.Mock != "mock-s" || !ln.From.Run || ln.Read != nil {
+							t.Fatalf("learned %s from %+v (read %v), want the start-up's variable", ln.Kind, ln.From, ln.Read != nil)
+						}
+					})
+				}
+			}
+		}
+	}
+}
+
 // A test's own variable is never named a run's name: a replay keeps a run's
 // binding for the whole set (models.RunVariable), and one a test's place
 // would have been named so is named apart from it.
@@ -1499,12 +1543,20 @@ func TestAnEarlierTestsClockReadOfTheSameSecondIsNoRunsVariable(t *testing.T) {
 // did not, as an instant is. So is one its recorded window holds but record's
 // full round's does not (the full round ran the two calls nine seconds
 // apart): a read is held in both runs, or it is no read of the call's own
-// clock. With the switch off, each is what its own call learns.
+// clock. In a call keploy knows no window of (each own call of a keploy
+// record server test), any whole instant or time of day an earlier test sent
+// again is that call's own read, whatever the earlier place learned and
+// however much later it is sent (nine seconds, three minutes): a true copy
+// is then checked as a read in the later test's span, which record's
+// confirming round already does (Tracker.LiveSpan), so it quarantines that
+// test, never passes it. With the switch off, each is what its own call
+// learns.
 func TestALaterTestsOwnSameSecondReadIsItsOwnByTheLeafsRules(t *testing.T) {
 	rec := time.Date(2026, 10, 30, 18, 40, 58, 579_000_000, time.UTC)
 	minute := func(at time.Time) string { return at.In(ist).Format("2006-01-02T15:04") }
 	tod := func(at time.Time) string { return at.In(ist).Format("15:04:05") }
-	same, later := 8*time.Millisecond, 9*time.Second
+	instant := func(at time.Time) string { return at.UTC().Format("2006-01-02T15:04:05Z") }
+	same, later, minutes := 8*time.Millisecond, 9*time.Second, 3*time.Minute
 	for _, row := range []struct {
 		name                   string
 		value                  func(time.Time) string
@@ -1521,6 +1573,9 @@ func TestALaterTestsOwnSameSecondReadIsItsOwnByTheLeafsRules(t *testing.T) {
 		{"a time of day, nine seconds later, a window", tod, later, later, true, true, false, KindUnaccounted},
 		{"an unmarked time of day, nine seconds later, a window", tod, later, later, true, false, false, KindVariable},
 		{"a time of day, nine seconds later, no window", tod, later, later, false, true, false, KindClockRead},
+		{"an unmarked time of day, nine seconds later, no window", tod, later, later, false, false, false, KindClockRead},
+		{"an unmarked instant, nine seconds later, no window", instant, later, later, false, false, false, KindClockRead},
+		{"an unmarked instant, three minutes later, no window", instant, minutes, minutes, false, false, false, KindClockRead},
 		{"a time of day, the same second, nine seconds later in the full round, a window", tod, same, later, true, true, false, KindUnaccounted},
 		{"an unmarked time of day, the same second, nine seconds later in the full round, a window", tod, same, later, true, false, false, KindVariable},
 		{"switch 0: a time of day, the same second, a window", tod, same, same, true, true, true, KindClockRead},
