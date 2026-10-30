@@ -22,7 +22,7 @@ import (
 // and each set-aside recording answers once in the staging, so the calls of
 // that shape across the set never exceed what the set recorded. Past every
 // exact copy, the test's own and the set-aside ones, the request stays an
-// extra call (keploy #4745's F20: never another recording of the call, nor
+// extra call (never another recording of the call, nor
 // one served again).
 //
 // The set-aside recordings are matched as the live pool's would be, on a view

@@ -10,7 +10,7 @@ import (
 	"go.uber.org/zap"
 )
 
-// keploy test's between-test rule (founder D1, D5: judged as keploy mock
+// keploy test's between-test rule (judged as keploy mock
 // judges): a miss made after one test's misses were read and before the next
 // test's window opened was made outside every test's window. The next test's
 // window still carries it, in order, but its read marks it Background: the
@@ -206,7 +206,7 @@ func TestEveryReadOfAWindowBoundsTheGapAfterIt(t *testing.T) {
 	}
 }
 
-// The set's end reads with no test's window open (item b): under the switch a
+// The set's end reads with no test's window open: under the switch a
 // miss made after the set's last test was read is the application's
 // background work (Background), and one made before that read and filed late
 // is still the set's to charge. With the switch off both read unmarked, as
