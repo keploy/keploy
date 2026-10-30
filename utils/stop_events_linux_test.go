@@ -3,6 +3,8 @@
 package utils
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -930,7 +932,12 @@ func TestTheExitRatchetTakesOnlyProgress(t *testing.T) {
 // counts once with what it duplicates, and closing it is no step of its way
 // out (dash's `exec 3<&-` saves fd 3 to fd 10 and closes both: a churn of one
 // file read by descriptors looks two steps deep). Closing the last descriptor
-// of a file is one, and two opens of one file are two files.
+// of a file is one, and two opens of one file are two files. Where the kernel
+// refuses to compare the child's files (kcmp(2) of another process needs
+// PTRACE_MODE_READ_REALCREDS), no read of them settles, and none is a step
+// out: the row says why it was refused and holds keploy to that.
+// KEPLOY_TEST_KCMP_REQUIRED=1 (go-test.yaml's run of it as root) fails it
+// there instead, so the comparison itself runs in CI.
 func TestMarkExitCountsOpenFilesNotDescriptors(t *testing.T) {
 	dir := t.TempDir()
 	open := func(name string) *os.File {
@@ -942,9 +949,6 @@ func TestMarkExitCountsOpenFilesNotDescriptors(t *testing.T) {
 		return f
 	}
 	in, out, f := open("in"), open("out"), open("f")
-	if _, err := kcmpFiles(os.Getpid(), int(in.Fd()), int(in.Fd())); err != nil {
-		t.Skipf("the kernel compares no files here (kcmp: %v): each descriptor counts", err)
-	}
 	g, err := os.Open(f.Name()) // f's file opened again: another open file
 	if err != nil {
 		t.Fatal(err)
@@ -974,6 +978,26 @@ func TestMarkExitCountsOpenFilesNotDescriptors(t *testing.T) {
 	}
 	procs := []Reached{{PID: cmd.Process.Pid, Start: st.StartTime}}
 	var r ExitRatchet
+	// The child's fd 0 asked of itself: what the kernel says of comparing
+	// another process's files.
+	if _, err := kcmpFiles(cmd.Process.Pid, 0, 0); err != nil {
+		why := kcmpRefusal(cmd.Process.Pid)
+		if os.Getenv("KEPLOY_TEST_KCMP_REQUIRED") == "1" {
+			t.Fatalf("KEPLOY_TEST_KCMP_REQUIRED=1, but the kernel refuses to compare a child's files (kcmp: %v): %s", err, why)
+		}
+		t.Logf("the kernel refuses to compare a child's files (kcmp: %v): %s", err, why)
+		for i, step := range []func(){
+			func() {},
+			func() { _ = cmd.Process.Signal(syscall.SIGUSR1); awaitFile(t, closedDup, reaped) },
+			func() { _ = cmd.Process.Signal(syscall.SIGUSR2); awaitFile(t, closedLast, reaped) },
+		} {
+			step()
+			if m := MarkExit(procs); m.Running != 1 || !m.FilesUnsettled || r.Advance(m) {
+				t.Fatalf("read %d of a process whose files the kernel will not compare: %+v; want running, its files unsettled, and no progress", i, m)
+			}
+		}
+		return
+	}
 	m := MarkExit(procs)
 	if m.Fds != 4 || m.FilesUnsettled {
 		t.Fatalf("a process holding stdin, one file as stdout and stderr, and two opens of one file over three descriptors reads %d open files (unsettled %v); want 4, settled", m.Fds, m.FilesUnsettled)
@@ -989,6 +1013,45 @@ func TestMarkExitCountsOpenFilesNotDescriptors(t *testing.T) {
 	if m := MarkExit(procs); m.Fds != 3 || m.FilesUnsettled || !r.Advance(m) {
 		t.Fatalf("closing a file's last descriptor read as %d open files (unsettled %v); want 3, settled, and progress", m.Fds, m.FilesUnsettled)
 	}
+}
+
+// kcmpRefusal is what ptrace_may_access reads of this process and of child
+// pid, which kcmp(2) of the child's files needs (PTRACE_MODE_READ_REALCREDS):
+// both one's credentials, the child's dumpable state (its /proc directory is
+// root's where it is not dumpable), the LSMs and their labels, and the
+// sysctls that bear on it.
+func kcmpRefusal(pid int) string {
+	read := func(path string) string {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return "(" + err.Error() + ")"
+		}
+		return strings.TrimSpace(strings.ReplaceAll(string(b), "\x00", " "))
+	}
+	creds := func(proc string) string {
+		var kept []string
+		for _, line := range strings.Split(read(proc+"/status"), "\n") {
+			for _, key := range []string{"Uid:", "Gid:", "CapEff:", "NoNewPrivs:", "Seccomp:"} {
+				if strings.HasPrefix(line, key) {
+					kept = append(kept, strings.Join(strings.Fields(line), " "))
+				}
+			}
+		}
+		return strings.Join(kept, ", ") + ", label " + read(proc+"/attr/current")
+	}
+	child := "/proc/" + strconv.Itoa(pid)
+	owner := "(unread)"
+	if fi, err := os.Stat(child); err == nil {
+		if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+			owner = strconv.Itoa(int(st.Uid))
+		}
+	}
+	return "kernel " + read("/proc/sys/kernel/osrelease") +
+		"; this process: " + creds("/proc/self") +
+		"; the child: " + creds(child) + ", its /proc directory uid " + owner +
+		"; fs.suid_dumpable " + read("/proc/sys/fs/suid_dumpable") +
+		", kernel.yama.ptrace_scope " + read("/proc/sys/kernel/yama/ptrace_scope") +
+		", LSMs " + read("/sys/kernel/security/lsm")
 }
 
 // A read of a process's open files that did not settle (its descriptors
@@ -1076,18 +1139,88 @@ func TestMarkExitOfSeveralSaysWhereOnesFilesDidNotSettle(t *testing.T) {
 	}
 }
 
-// A kernel that cannot compare files (no kcmp, or keploy may not ask) leaves
-// each descriptor counted; one that stops comparing part way through a read
-// leaves it unsettled, no evidence.
-func TestOpenFilesAreDescriptorsWhereTheKernelCannotCompareThem(t *testing.T) {
-	ents, err := os.ReadDir("/proc/self/fd")
+// Descriptors the kernel will not list are no evidence: a read of a process
+// that is not dumpable (it runs a program its user may not read, so its
+// /proc files are root's) did not settle.
+func TestMarkExitOfDescriptorsTheKernelWillNotListIsUnsettled(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root lists every process's descriptors")
+	}
+	src, err := exec.LookPath("sleep")
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Copied by cp, so that no descriptor of this process is open on it
+	// when it runs (a fork as it is written would hold one: ETXTBSY).
+	bin := filepath.Join(t.TempDir(), "sleep")
+	if out, err := exec.Command("cp", src, bin).CombinedOutput(); err != nil {
+		t.Fatalf("cp: %v: %s", err, out)
+	}
+	if err := os.Chmod(bin, 0o111); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(bin, "1000")
+	// A group of its own, killed whole; and by the kernel when the thread
+	// that started it ends (Pdeathsig): the test keeps to this thread.
+	runtime.LockOSThread()
+	t.Cleanup(runtime.UnlockOSThread)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	reaped := make(chan struct{})
+	go func() { _ = cmd.Wait(); close(reaped) }()
+	t.Cleanup(func() { _ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); <-reaped })
+	// Until it runs the copy, it is this test's fork, its descriptors
+	// listed.
+	fdDir := "/proc/" + strconv.Itoa(cmd.Process.Pid) + "/fd"
+	for {
+		if _, err := os.ReadDir(fdDir); errors.Is(err, fs.ErrPermission) {
+			break
+		}
+		select {
+		case <-reaped:
+			t.Fatal("the copy of sleep exited before its descriptors were hidden")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	st, ok := ReadProcStat(cmd.Process.Pid)
+	if !ok {
+		t.Fatal("premise: its stat could not be read")
+	}
+	if m := MarkExit([]Reached{{PID: cmd.Process.Pid, Start: st.StartTime}}); m.Running != 1 || !m.FilesUnsettled {
+		t.Fatalf("a process whose descriptors the kernel will not list read as %+v; want running, its files unsettled", m)
+	}
+}
+
+// A kernel that cannot compare files (no kcmp, or keploy may not ask) leaves
+// a read unsettled, no evidence, as does one that stops comparing part way
+// through: counted by its descriptors, a churn of them would read as steps
+// out (ExitRatchet). A process of one descriptor needs no comparison.
+func TestOpenFilesAreNoEvidenceWhereTheKernelCannotCompareThem(t *testing.T) {
+	listed := []os.DirEntry{fdEntry("0"), fdEntry("1"), fdEntry("2"), fdEntry("3")}
 	for _, no := range []error{syscall.ENOSYS, syscall.EPERM} {
 		cannot := func(int, int, int) (int, error) { return 0, no }
-		if n, settled := openFilesBy(cannot, os.Getpid(), ents); n != len(ents) || !settled {
-			t.Fatalf("kcmp failing with %v: %d open files of %d descriptors (settled %v); want each counted, settled", no, n, len(ents), settled)
+		if n, settled := openFilesBy(cannot, 1, listed); settled {
+			t.Fatalf("kcmp failing with %v: %d open files of %d descriptors, settled; want unsettled", no, n, len(listed))
+		}
+		if n, settled := openFilesBy(cannot, 1, listed[:1]); n != 1 || !settled {
+			t.Fatalf("kcmp failing with %v: one descriptor read as %d open files (settled %v); want 1, settled", no, n, settled)
+		}
+	}
+	// A churn of descriptors the kernel will not compare moves no stop: the
+	// test's churning shell (fd 3 saved to fd 10, then both closed) read at
+	// each of its steps, 4, 5, 3 and 4 descriptors, then 3 again.
+	var r ExitRatchet
+	cannot := func(int, int, int) (int, error) { return 0, syscall.EPERM }
+	for _, names := range [][]string{{"0", "1", "2", "3"}, {"0", "1", "10", "2", "3"}, {"0", "1", "2"}, {"0", "1", "10", "2"}, {"0", "1", "2"}} {
+		var fds []os.DirEntry
+		for _, name := range names {
+			fds = append(fds, fdEntry(name))
+		}
+		n, settled := openFilesBy(cannot, 1, fds)
+		if m := (ExitMark{Running: 1, Threads: 1, Fds: n, FilesUnsettled: !settled}); r.Advance(m) {
+			t.Fatalf("a read of descriptors %v the kernel will not compare (%+v) moved the stop", names, m)
 		}
 	}
 	// One refused part way through a read (as the files are checked, each
@@ -1104,7 +1237,6 @@ func TestOpenFilesAreDescriptorsWhereTheKernelCannotCompareThem(t *testing.T) {
 		}
 		return 0, nil
 	}
-	listed := []os.DirEntry{fdEntry("0"), fdEntry("1"), fdEntry("2"), fdEntry("3")}
 	if n, settled := openFilesBy(refused, 1, listed); settled || n > 3 {
 		t.Fatalf("kcmp refused part way through: %d open files of %d descriptors, settled %v; want at most the 3 files, unsettled", n, len(listed), settled)
 	}

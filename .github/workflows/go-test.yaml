@@ -181,6 +181,25 @@ jobs:
               { echo "the bound row's $leg leg did not pass"; exit 1; }
           done
 
+      # utils' TestMarkExitCountsOpenFilesNotDescriptors compares a child's
+      # descriptors with kcmp(2), which the kernel may refuse the runner user
+      # (another process's files need PTRACE_MODE_READ_REALCREDS). Where it
+      # refuses, the row holds keploy to taking no read of them as evidence,
+      # and says why the kernel refused: run here with -v so that reason is
+      # in the log. Run again as root with KEPLOY_TEST_KCMP_REQUIRED=1, which
+      # fails it where the kernel refuses, so the comparison itself runs on
+      # every PR. Each PASS line grepped, so a row that vanishes fails.
+      - name: Open-file rows as the runner user and as root
+        shell: bash
+        run: |
+          go test -c -o /tmp/utils.test ./utils/
+          cd utils
+          /tmp/utils.test -test.count=1 -test.v -test.run '^TestMarkExitCountsOpenFilesNotDescriptors$' | tee /tmp/utils-runner.out
+          sudo env KEPLOY_TEST_KCMP_REQUIRED=1 /tmp/utils.test -test.count=1 -test.v -test.run '^TestMarkExitCountsOpenFilesNotDescriptors$' | tee /tmp/utils-root.out
+          for out in /tmp/utils-runner.out /tmp/utils-root.out; do
+            grep -q -- "--- PASS: TestMarkExitCountsOpenFilesNotDescriptors " "$out" || { echo "TestMarkExitCountsOpenFilesNotDescriptors did not pass in $out"; exit 1; }
+          done
+
       # The hooks package's root tests skip in the run above, which is the
       # runner user's: TestTheHooksLoadOnThisKernel loads the agent's eBPF
       # objects against this kernel's BTF, as the agent does, and

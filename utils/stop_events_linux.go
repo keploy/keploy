@@ -52,7 +52,8 @@ func StopStallSaid() string { return StopStallBudget.String() + " of keploy's ru
 // with how many threads and open files (files, not descriptors: openFiles),
 // how much storage they have read and written, and whether one waits on
 // storage (an uninterruptible sleep, D). FilesUnsettled is a read of their
-// open files that did not settle (openFiles): its Fds are no evidence.
+// open files that did not settle (openFiles), or of descriptors the kernel
+// would not list: its Fds are no evidence.
 type ExitMark struct {
 	Running, Threads, Fds int
 	IO                    uint64
@@ -90,11 +91,14 @@ func MarkExit(procs []Reached) ExitMark {
 			m.OnStorage = true
 		}
 		m.Threads += processThreads(p.PID)
+		// Descriptors the kernel will not list (one not dumpable, or that
+		// another user's credentials run now) are no evidence either.
+		n, settled := 0, false
 		if fds, err := os.ReadDir(fdDir); err == nil {
-			n, settled := openFiles(task, fds)
-			m.Fds += n
-			m.FilesUnsettled = m.FilesUnsettled || !settled
+			n, settled = openFiles(task, fds)
 		}
+		m.Fds += n
+		m.FilesUnsettled = m.FilesUnsettled || !settled
 		m.IO += readStorageIO(dir + "/io")
 	}
 	return m
@@ -122,8 +126,9 @@ const kcmpFile = 0
 // that settled can still, rarely, count a descriptor that closed and opened
 // again between its comparisons beside the one that took its file over
 // (fileTally.settle). Where the kernel cannot compare them at all (no kcmp,
-// or keploy may not ask: a seccomp filter, a process it may not trace), each
-// descriptor counts.
+// or keploy may not ask: a seccomp filter, a process it may not trace), the
+// read did not settle either: its descriptors are not counted for files, as
+// a count of them would take that churn for steps out again.
 func openFiles(task int, fds []os.DirEntry) (int, bool) {
 	if cmp := filesCompared.Load(); cmp != nil {
 		return openFilesBy(*cmp, task, fds)
@@ -146,14 +151,12 @@ func openFilesBy(kcmp func(task, a, b int) (int, error), task int, fds []os.DirE
 		}
 	}
 	t.share = 4 * (bits.Len(uint(len(t.todo))) + 2)
-	switch err := t.settle(); {
-	case err == nil:
-		return len(t.held), !t.unsettled
-	case t.answered:
-		// Refused part way through: the files held by then, no evidence.
+	if err := t.settle(); err != nil {
+		// Refused, from the first comparison or part way through: the
+		// files held by then, no evidence.
 		return len(t.held), false
 	}
-	return len(fds), true
+	return len(t.held), !t.unsettled
 }
 
 // fileTally is a read of the open files a process holds through its
@@ -179,7 +182,6 @@ type fileTally struct {
 	todo      []int
 	share     int         // comparisons each descriptor may make (errShareSpent)
 	spent     map[int]int // comparisons each has made
-	answered  bool        // kcmp has answered: a refusal now is part way through
 	unsettled bool        // a descriptor was set aside
 }
 
@@ -344,11 +346,7 @@ func (t *fileTally) cmp(a, b, by int) (int, error) {
 		return 0, errShareSpent
 	}
 	t.spent[by]++
-	order, err := t.kcmp(t.task, a, b)
-	if err == nil || errors.Is(err, unix.EBADF) {
-		t.answered = true
-	}
-	return order, err
+	return t.kcmp(t.task, a, b)
 }
 
 // kcmpFiles is kcmp(2) of descriptors a and b of process (or thread) task:
