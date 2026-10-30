@@ -430,6 +430,10 @@ type SetupOptions struct {
 	// kernel's count before it listens. Forwarded as --settle-reads.
 	SettleReads       bool
 	GlobalPassthrough bool
+	// AllowEgress mirrors config.Test.AllowEgress: what a replay may reach for
+	// real, by the entries models.NormalizeAllowEgress accepts. Forwarded to the
+	// agent as --allow-egress; record ignores it.
+	AllowEgress []string
 	// DisableHandshakeHold turns off holding each redirected connection's
 	// handshake until its destination answers (pkg/agent/proxy/synhold), so
 	// the proxy accepts every connection at once as it used to. Forwarded to

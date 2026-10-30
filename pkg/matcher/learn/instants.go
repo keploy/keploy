@@ -125,17 +125,6 @@ import (
 // The word-level learning build (train/feat/word-level-learn) rewrites
 // ClassifyIn with instant slots: it keeps these rules.
 
-// instantRes are clockLayouts' patterns in either case: a case-folded form of
-// a text holds its instants folded. Each reads a text only in the windows of
-// it that can hold a match (layoutRe).
-var instantRes = func() []*layoutRe {
-	out := make([]*layoutRe, len(clockLayouts))
-	for i, lay := range clockLayouts {
-		out[i] = newLayoutRe(lay)
-	}
-	return out
-}()
-
 // instantKey is the moment an instant names, compared as one unit: at, in
 // UnixNano (of a time of day, the nanoseconds into its day, day). Two
 // instants are one only with equal keys: an epoch second and that second's
@@ -272,58 +261,89 @@ func isEpochText(s string) bool {
 	return dot
 }
 
+// InstantReads is how many texts the learn step has read for their instants
+// in this process (instantSpans: one pass of scanInstants each), the step's
+// costliest read of an earlier payload. A row at the agent's level reads it
+// around a call to tell what the call read of the set's payloads apart from
+// the set's size (proxy: a pooled connection keeps being answered after a
+// test boundary).
+func InstantReads() int64 { return instantScanPasses.Load() }
+
 // instantSpans are the instants s holds: each a match of a layout of
-// clockLayouts, in either case, at ASCII word boundaries, that its layout
-// reads as an instant, no two overlapping (an earlier layout's first, as
-// clockIn takes them), in the order they stand. A time-ordered UUID's span is
-// its time groups, unkeyed.
-func instantSpans(s string) []instant {
+// clockLayouts, in either case (a case-folded form of a text holds its
+// instants folded), at ASCII word boundaries, that its layout reads as an
+// instant, no two overlapping (an earlier layout's first, as clockIn takes
+// them), in the order they stand. A time-ordered UUID's span is its time
+// groups, unkeyed. It reads s once (scanInstants), for every layout.
+var instantSpans = func(s string) []instant {
+	matches := scanInstants(s)
 	var out []instant
-	var taken []bool
-	for k, re := range instantRes {
+	// taken are the whole matches kept so far, a UUID's other groups too, in
+	// the order they stand: no later layout reads an instant inside one.
+	var taken []span
+	for k := range matches {
+		if len(matches[k]) == 0 {
+			continue
+		}
 		lay := clockLayouts[k]
-		for _, m := range re.FindAllStringIndex(s) {
-			if m[0] > 0 && isWord(s[m[0]-1]) && isWord(s[m[0]]) || m[1] < len(s) && isWord(s[m[1]-1]) && isWord(s[m[1]]) {
+		var kept []span
+		t := 0
+		for _, m := range matches[k] {
+			if m.start > 0 && isWord(s[m.start-1]) && isWord(s[m.start]) || m.end < len(s) && isWord(s[m.end-1]) && isWord(s[m.end]) {
 				continue
 			}
-			if taken != nil {
-				free := true
-				for i := m[0]; i < m[1]; i++ {
-					if taken[i] {
-						free = false
-						break
-					}
-				}
-				if !free {
-					continue
-				}
+			// A layout's matches stand in order and never overlap, so
+			// the kept matches before this one end before the next.
+			for t < len(taken) && taken[t].end <= m.start {
+				t++
 			}
-			sp := instant{start: m[0], end: m[1], layout: k}
+			if t < len(taken) && taken[t].start < m.end {
+				continue
+			}
+			sp := instant{start: m.start, end: m.end, layout: k}
 			if lay.timeWord != nil {
-				if _, _, ok := lay.read(s[m[0]:m[1]]); !ok {
+				if _, _, ok := lay.read(s[m.start:m.end]); !ok {
 					continue
 				}
-				sp.end = m[0] + uuidTimeEnd(s[m[0]:m[1]])
+				sp.end = m.start + uuidTimeEnd(s[m.start:m.end])
 			} else {
-				mo, res, ok := instantKeyOf(k, s[m[0]:m[1]])
+				mo, res, ok := instantKeyOf(k, s[m.start:m.end])
 				if !ok {
 					continue
 				}
 				sp.key, sp.wall, sp.res, sp.zone, sp.zoned, sp.keyed = mo.key, mo.wall, res, mo.zone, mo.zoned, true
 			}
-			if taken == nil {
-				taken = make([]bool, len(s))
-			}
-			// The whole match is taken, a UUID's other groups too: no
-			// later layout reads an instant inside it.
-			for i := m[0]; i < m[1]; i++ {
-				taken[i] = true
-			}
+			kept = append(kept, m)
 			out = append(out, sp)
 		}
+		taken = mergeSpans(taken, kept)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].start < out[j].start })
 	return out
+}
+
+// mergeSpans is a and b, each in order and none overlapping another, as one
+// list in order.
+func mergeSpans(a, b []span) []span {
+	if len(b) == 0 {
+		return a
+	}
+	if len(a) == 0 {
+		return b
+	}
+	out := make([]span, 0, len(a)+len(b))
+	i, j := 0, 0
+	for i < len(a) && j < len(b) {
+		if a[i].start < b[j].start {
+			out = append(out, a[i])
+			i++
+		} else {
+			out = append(out, b[j])
+			j++
+		}
+	}
+	out = append(out, a[i:]...)
+	return append(out, b[j:]...)
 }
 
 // uuidTimeEnd is where the time groups of s, a time-ordered UUID, end
@@ -551,6 +571,32 @@ func (dc *DriftCache) holdsRecorded(text string, ms []echoMatch) bool {
 	return false
 }
 
+// holdsRecordedIn is holdsRecorded of a text whose keyed instants are held
+// (payloadMoments, fieldMoments).
+func holdsRecordedIn(held []moment, ms []echoMatch) bool {
+	for _, m := range ms {
+		for _, h := range held {
+			if namesMomentApart(h, m.rec, m.live, m.rules) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// holdsLiveIn is holdsLive of a text whose keyed instants are held
+// (payloadMoments, fieldForms).
+func holdsLiveIn(held []moment, ms []echoMatch) bool {
+	for _, m := range ms {
+		for _, h := range held {
+			if namesMomentApart(h, m.live, m.rec, m.rules) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // holdsLive reports whether text holds the moment F saw of one of ms, by one
 // of its rules (any, where it has none), by which it does not name the
 // recorded moment too.
@@ -613,6 +659,13 @@ func (h *heldMoments) add(spans []instant) {
 			continue
 		}
 		h.addMoment(sp.moment())
+	}
+}
+
+// addMoments files ms.
+func (h *heldMoments) addMoments(ms []moment) {
+	for _, m := range ms {
+		h.addMoment(m)
 	}
 }
 
@@ -1062,30 +1115,14 @@ func timeOfDay(at int64) int64 {
 	return (at%day + day) % day
 }
 
-// spansOf is instantSpans(text), read once per test (a nil cache reads it
-// now).
+// spansOf is instantSpans(text), read once for the test where dc keeps it
+// (textCache; a nil cache reads it now).
 func (dc *DriftCache) spansOf(text string) []instant {
-	if dc == nil {
-		return instantSpans(text)
-	}
-	dc.mu.Lock()
-	s, ok := dc.spans[text]
-	dc.mu.Unlock()
-	if ok {
-		return s
-	}
-	s = instantSpans(text)
-	dc.mu.Lock()
-	if dc.spans == nil {
-		dc.spans = map[string][]instant{}
-	}
-	dc.spans[text] = s
-	dc.mu.Unlock()
-	return s
+	return derivedOfText(dc, textSpans, text, instantSpans, spansBytes)
 }
 
 // tokensOfForms are the words of forms, by reading.
-func tokensOfForms(forms []string) []map[string]bool {
+var tokensOfForms = func(forms []string) []map[string]bool {
 	var t []map[string]bool
 	for _, word := range readings {
 		set := map[string]bool{}
@@ -1335,8 +1372,7 @@ func stamped(s Seen) bool { return s.Stamp && s.Live == s.Leaf.Value }
 func (dc *DriftCache) stampsEchoed(v *valueDrift, served []Earlier, raw []Raw) bool {
 	var given, all []string
 	for _, x := range raw {
-		for _, f := range x.stamps {
-			text := x.text[f.start:f.end]
+		for _, text := range dc.stampTexts(x) {
 			all = append(all, text)
 			if x.served {
 				given = append(given, text)
@@ -1396,11 +1432,12 @@ func blankStamps(text string, stamps []rawField) string {
 
 // clockKeys are x's answer's clock reads (Raw.AnswerClock) as moments.
 func clockKeys(x Raw) map[instantKey]bool {
-	if len(x.answerClock) == 0 {
+	xb := x.payload()
+	if len(xb.answerClock) == 0 {
 		return nil
 	}
-	out := make(map[instantKey]bool, len(x.answerClock))
-	for _, t := range x.answerClock {
+	out := make(map[instantKey]bool, len(xb.answerClock))
+	for _, t := range xb.answerClock {
 		out[instantKey{at: t.UnixNano()}] = true
 	}
 	return out
@@ -1409,16 +1446,17 @@ func clockKeys(x Raw) map[instantKey]bool {
 // rawKey is a payload's text with its answer's clock reads and stamps, as a
 // cache key.
 func rawKey(x Raw) string {
-	if len(x.answerClock) == 0 && len(x.stamps) == 0 {
-		return x.text
+	xb := x.payload()
+	if len(xb.answerClock) == 0 && len(xb.stamps) == 0 {
+		return xb.text
 	}
 	var sb strings.Builder
-	sb.WriteString(x.text)
-	for _, t := range x.answerClock {
+	sb.WriteString(xb.text)
+	for _, t := range xb.answerClock {
 		sb.WriteByte(0)
 		sb.WriteString(strconv.FormatInt(t.UnixNano(), 10))
 	}
-	for _, f := range x.stamps {
+	for _, f := range xb.stamps {
 		sb.WriteByte(1)
 		sb.WriteString(strconv.Itoa(f.start))
 		sb.WriteByte('-')
@@ -1431,62 +1469,92 @@ func rawKey(x Raw) string {
 // text and its other forms (rawExtra), with its answer's stamps blanked
 // before its forms are read (but where keep says the stamps are searched as
 // any text: stampsEchoed), and its answer's own clock reads blanked in every
-// form.
+// form. It is read once for the set where dc keeps x's (setSearched), once
+// per test otherwise.
 func (dc *DriftCache) searched(x Raw, keep bool) [2]string {
+	if s := dc.setOf(x); s != nil {
+		return dc.setSearched(s, x, keep)
+	}
 	if keep {
-		x.stamps = nil
+		x = x.withoutStamps()
 	}
 	keys := clockKeys(x)
-	if len(keys) == 0 && len(x.stamps) == 0 {
-		return [2]string{x.text, dc.rawExtra(x.text)}
+	xb := x.payload()
+	if len(keys) == 0 && len(xb.stamps) == 0 {
+		return [2]string{xb.text, dc.rawExtra(xb.text)}
 	}
-	k := rawKey(x)
-	dc.mu.Lock()
-	s, ok := dc.blanked[k]
-	dc.mu.Unlock()
-	if ok {
-		return s
-	}
-	text := blankStamps(x.text, x.stamps)
+	return derivedOfText(dc, textBlanked, rawKey(x), func(string) [2]string { return blankedPair(xb.text, xb.stamps, keys) }, pairBytes)
+}
+
+// blankedPair is searched's text and other forms of a payload's text whose
+// answer has stamps or clock reads keys: each a copy, holding no part of
+// text.
+func blankedPair(text string, stamps []rawField, keys map[instantKey]bool) [2]string {
+	t := blankStamps(text, stamps)
+	return blankedPairOf(t, extraOf(t), keys)
+}
+
+// blankedPairOf is blankedPair of t, a payload's text with its stamps
+// blanked, whose other forms are extra (extraOf(t)).
+func blankedPairOf(t, extra string, keys map[instantKey]bool) [2]string {
 	blank := func(sp instant) bool { return sp.keyed && keys[sp.key] }
-	s = [2]string{blankSpans(text, blank), blankSpans(dc.rawExtra(text), blank)}
-	dc.mu.Lock()
-	if dc.blanked == nil {
-		dc.blanked = map[string][2]string{}
+	return [2]string{strings.Clone(blankSpans(t, blank)), strings.Clone(blankSpans(extra, blank))}
+}
+
+// blankedForms are text's declared forms (textForms) with stamps blanked
+// before they are read, and the clock reads keys holds blanked in each.
+func blankedForms(text string, stamps []rawField, keys map[instantKey]bool) []string {
+	return blankedFormsOf(textForms(blankStamps(text, stamps)), keys)
+}
+
+// blankedFormsOf are forms, a payload's forms with its stamps blanked, with
+// the clock reads keys holds blanked in each.
+func blankedFormsOf(forms []string, keys map[instantKey]bool) []string {
+	for i := range forms {
+		forms[i] = blankSpans(forms[i], func(sp instant) bool { return sp.keyed && keys[sp.key] })
 	}
-	dc.blanked[k] = s
-	dc.mu.Unlock()
-	return s
+	return forms
 }
 
 // searchedTokens are the words of x's text in every declared form, by
 // reading, its answer's stamps (unless keep) and own clock reads blanked
-// (rules 2 and 3).
+// (rules 2 and 3). They are read once for the set where dc keeps x's
+// (setTokens).
 func (dc *DriftCache) searchedTokens(x Raw, keep bool) []map[string]bool {
+	if out, ok := dc.setTokens(x, keep); ok {
+		return out
+	}
+	return dc.readTokens(x, keep)
+}
+
+// tokensWith reads searchedTokens(x, keep), each of x's forms read from
+// what decodedOf decodes of it (the text its searches decode, and its decoded
+// forms); each word may be a part of x's text.
+func tokensWith(x Raw, keep bool, decodedOf func(Raw) (string, decoded)) []map[string]bool {
 	if keep {
-		x.stamps = nil
+		x = x.withoutStamps()
 	}
 	keys := clockKeys(x)
-	if len(keys) == 0 && len(x.stamps) == 0 {
-		return dc.rawTokens(x.text)
+	t, d := decodedOf(x)
+	if len(keys) == 0 {
+		return tokensOfForms(d.formsOf(t))
 	}
-	k := rawKey(x)
-	dc.mu.Lock()
-	t, ok := dc.blankTok[k]
-	dc.mu.Unlock()
-	if ok {
-		return t
+	return tokensOfForms(blankedFormsOf(d.formsOf(t), keys))
+}
+
+// readTokens is searchedTokens(x, keep) of an x whose set keeps none of it:
+// read once for the test (textCache).
+func (dc *DriftCache) readTokens(x Raw, keep bool) []map[string]bool {
+	if keep {
+		x = x.withoutStamps()
 	}
-	forms := textForms(blankStamps(x.text, x.stamps))
-	for i := range forms {
-		forms[i] = blankSpans(forms[i], func(sp instant) bool { return sp.keyed && keys[sp.key] })
+	keys := clockKeys(x)
+	xb := x.payload()
+	if len(keys) == 0 && len(xb.stamps) == 0 {
+		return dc.rawTokens(xb.text)
 	}
-	t = tokensOfForms(forms)
-	dc.mu.Lock()
-	if dc.blankTok == nil {
-		dc.blankTok = map[string][]map[string]bool{}
-	}
-	dc.blankTok[k] = t
-	dc.mu.Unlock()
-	return t
+	// Its words are parts of a copy of the text, read with them.
+	return derivedOfText(dc, textBlankTok, rawKey(x), func(string) []map[string]bool {
+		return tokensOfForms(blankedForms(strings.Clone(xb.text), xb.stamps, keys))
+	}, func(t []map[string]bool) int64 { return tokensBytes(t) + int64(len(xb.text)) })
 }

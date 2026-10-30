@@ -571,9 +571,9 @@ func TestResolveCommandType_ConfigWarningOnlyWhenItWouldDiffer(t *testing.T) {
 // usage text silenced under it, and cobra's error line silenced by AddFlags,
 // one returned unsaid would leave the command to exit 1 saying nothing. The
 // one it returned unsaid was appName's, the last directory of the working
-// directory, which cannot be read once that directory is gone. (The binary
-// opens keploy-logs.txt in the working directory before any command runs, and
-// stops there when it is gone, so this is driven in-process.)
+// directory, which cannot be read once that directory is gone. (This is
+// driven in-process, where the working directory can be removed under the
+// command.)
 func TestValidateSaysARefusalNothingElseSays(t *testing.T) {
 	original := NativeCommandSupported
 	t.Cleanup(func() { NativeCommandSupported = original })

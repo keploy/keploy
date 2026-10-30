@@ -3,18 +3,40 @@ package learn
 import (
 	"encoding/hex"
 	"regexp"
+	"regexp/syntax"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"go.keploy.io/server/v3/pkg/models"
 )
 
 // FullRoundLead is how far past each recorded instant record's full round F
 // runs every test (design v14 §3.4): second- and minute-resolution values the
-// app reads from its clock drift there, by this much, and are learned.
-const FullRoundLead = 61500 * time.Millisecond
+// app reads from its clock drift there, by this much, and are learned. It
+// moves a value's minute, second and millisecond, and it is a whole number of
+// no step a cut is read at above a millisecond (models.CutOf): 5 ms past a
+// whole 10 ms, 45 ms past a whole 100 ms, 545 ms past a whole second, 1.545 s
+// past a whole minute. Let r be the resolution a field's values carry: the
+// clock's or the writer's, the coarser. Two values of a writer that does not
+// cut both fall on a step only where F's read moved, against the
+// recording's and its call, by more than: 5 ms less r either way (a whole
+// 10 ms); 45 ms back or 55 ms on, less r (100 ms); 455 ms on or 545 ms back,
+// less r (a second: 355 ms on or 445 ms back for a writer of tenths);
+// 1.545 s back or 58.455 s on, less r (a minute: 545 ms back for a writer
+// of seconds). So the learn step, which learns a cut both values show
+// (readRes) and checks a replay value at it (CheckClockRead), never learns
+// the pair of a fast call at a cut by chance, which would loosen its check:
+// one whose read in F lies within 5 ms less r of the recording's (4 ms on a
+// clock of milliseconds, 4.99 ms for five fraction digits, 4.999 ms for six
+// or on a clock of microseconds; a writer of 10 ms or coarser has no step nearer
+// than 355 ms). A lead that is a whole number of a step (61.5 s, of 10 and
+// 100 ms) kept a millisecond clock's value on a whole 10 ms on one in F:
+// one recording in twelve with F's read within 0.3 ms of the recording's,
+// one in 80 within 4 ms.
+const FullRoundLead = 61545 * time.Millisecond
 
 // clockSet is what of a drifted value (recorded, live) is a clock read that
 // moved by FullRoundLead: the ASCII words of such reads, recorded (rec) and
@@ -53,6 +75,88 @@ var clockLayouts = []clockLayout{
 	{re: regexp.MustCompile(`\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?`), read: readTimeOfDay, wraps: true},
 }
 
+// clockWordMax is the most bytes an instant of any layout spans
+// (maxMatchLen), or -1 where one layout's has no bound; clockAnchored is
+// each layout's pattern matched at the start of a text alone.
+var (
+	clockWordMax  = clockLayoutsMax()
+	clockAnchored = func() []*regexp.Regexp {
+		out := make([]*regexp.Regexp, len(clockLayouts))
+		for k, lay := range clockLayouts {
+			out[k] = regexp.MustCompile(`^(?:` + lay.re.String() + `)`)
+		}
+		return out
+	}()
+)
+
+func clockLayoutsMax() int {
+	n := 0
+	for _, lay := range clockLayouts {
+		re, err := syntax.Parse(lay.re.String(), syntax.Perl)
+		if err != nil {
+			return -1
+		}
+		m, ok := maxMatchLen(re)
+		if !ok {
+			return -1
+		}
+		n = max(n, m)
+	}
+	return n
+}
+
+// maxMatchLen is the most bytes a text that re matches can span, at least
+// as many as it can; ok is false where they have no bound (a star or a
+// plus). A rune is one byte where it is ASCII and re folds no case, and
+// utf8.UTFMax otherwise.
+func maxMatchLen(re *syntax.Regexp) (n int, ok bool) {
+	runeLen := func(r rune) int {
+		if r < utf8.RuneSelf && re.Flags&syntax.FoldCase == 0 {
+			return 1
+		}
+		return utf8.UTFMax
+	}
+	switch re.Op {
+	case syntax.OpEmptyMatch, syntax.OpNoMatch, syntax.OpBeginLine, syntax.OpEndLine,
+		syntax.OpBeginText, syntax.OpEndText, syntax.OpWordBoundary, syntax.OpNoWordBoundary:
+		return 0, true
+	case syntax.OpLiteral:
+		for _, r := range re.Rune {
+			n += runeLen(r)
+		}
+		return n, true
+	case syntax.OpCharClass:
+		for _, r := range re.Rune {
+			n = max(n, runeLen(r))
+		}
+		return n, true
+	case syntax.OpAnyChar, syntax.OpAnyCharNotNL:
+		return utf8.UTFMax, true
+	case syntax.OpCapture, syntax.OpQuest:
+		return maxMatchLen(re.Sub[0])
+	case syntax.OpRepeat:
+		if re.Max < 0 {
+			return 0, false
+		}
+		n, ok = maxMatchLen(re.Sub[0])
+		return n * re.Max, ok
+	case syntax.OpConcat, syntax.OpAlternate:
+		for _, sub := range re.Sub {
+			m, ok := maxMatchLen(sub)
+			if !ok {
+				return 0, false
+			}
+			if re.Op == syntax.OpConcat {
+				n += m
+			} else {
+				n = max(n, m)
+			}
+		}
+		return n, true
+	}
+	return 0, false
+}
+
 // ClockOf reports whether a value drifted only with F's clock: every word
 // that changed between its recording (recorded) and record's full round
 // (live) is a part of a clock read that moved by FullRoundLead, and one did.
@@ -63,6 +167,37 @@ var clockLayouts = []clockLayout{
 // lead is no clock read.
 func ClockOf(recorded, live string) bool {
 	return clockOf(recorded, live).whole
+}
+
+// ClockWordsOf is that evidence word by word: the ASCII words that changed
+// between a value's recording (recorded) and record's full round (live) and
+// are parts of a clock read that moved by FullRoundLead, those it lost (of
+// the recorded value), then those it gained (of the live one), each in the
+// order it stands in its value, as often as it stands there; nil where none
+// did. A value that holds
+// such a read beside words that changed otherwise (an event id built on the
+// time and a random suffix, a UUID v7's random groups) has some, though
+// ClockOf is false for it; one whose changed words are no such read (a
+// counter, a value moved by another amount) has none. Its words need not
+// line up between the two values, and no count of them bounds the search. An
+// adapter that refuses a value holding a read of the clock, whole or beside
+// other words, asks it, and needs no clock search of its own. Like ClockOf,
+// it reads the lead alone, never a call's window.
+func ClockWordsOf(recorded, live string) []string {
+	c := clockOf(recorded, live)
+	r, l := tokensBy(recorded, isWord), tokensBy(live, isWord)
+	var out []string
+	for _, side := range []struct {
+		text         string
+		clock, other map[string]bool
+	}{{recorded, c.rec, l}, {live, c.live, r}} {
+		for _, w := range wordsBy(side.text, isWord) {
+			if side.clock[w] && !side.other[w] {
+				out = append(out, w)
+			}
+		}
+	}
+	return out
 }
 
 // ClockReads is that evidence as the learn step records it on a variable it
@@ -102,20 +237,323 @@ func ClockReads(recorded, live string) []models.ClockRead {
 // recorded moment, or refuses it, before any window or lead excuses it
 // (instants.go, echoedIn). A read made before the previous call falls in
 // neither. It is no tolerance: the spans are what each run's calls show.
-type Window struct{ Rec, F Span }
+type Window struct {
+	Rec, F Span
+	// offsets: the caller's replay compares a read of the clock plus a
+	// constant offset (ComparesOffsets).
+	offsets bool
+	// begun: w is a call's window read from each run's test begin
+	// (sinceBegin), the reading in which the word rule lets go every word
+	// of a text's runs (valueDrift.clockChanged), since only sinceWord
+	// takes what it learns there as noise, and only as a checked read of
+	// one word.
+	begun bool
+}
+
+// ComparesOffsets is w for a caller whose replay compares a value the learn
+// step reads as a read of the clock plus a constant offset
+// (KindClockOffset), as models.ClockOffset.Holds does, against the value's
+// own call's window: the learn step then learns such an instant, which it
+// otherwise refuses naming its offset. nil for a nil w (no window: no
+// offset is shown).
+func (w *Window) ComparesOffsets() *Window {
+	if w == nil {
+		return nil
+	}
+	c := *w
+	c.offsets = true
+	return &c
+}
 
 // Span is one run's part of a Window: From, when its previous data-plane
 // call reached keploy, and To, when the call itself did, on its app clock.
-type Span struct{ From, To time.Time }
+// Zone is the zone the application writes a wall clock of no zone in
+// (Tracker.SetAppZone), as a replay's span carries it (Tracker.LiveSpan),
+// which a replay reads a learned read of the clock in the application's
+// zone in (models.ZoneApp, and models.ZoneEither as one of its two
+// readings: CheckClockRead); nil where the tracker was told none: such a
+// read is then refused. A Window's spans carry none: the learn
+// step reads the zone of its DriftCache.
+//
+// Began is where the running test began on the run's clock, in a client
+// test (SetClientTests) where the app's clock ran as one from there to the
+// call (zero otherwise, and in keploy test). Where the hooks tell where the
+// app's clock's run to the call began (SetAppClockRun) after the test's
+// begin, Began is that instead: two reads of the clock at the begin and at
+// the call agree across a stretch it left and came back to, so only the
+// run tells the app's clock ran as one. A read made before the call's
+// window and after the test began is a read of the clock all the same (an
+// application that reads its clock once for a request and writes it at a
+// later call), which the learn step learns only where both runs' spans from
+// their test's begin hold it (Window.sinceBegin), and a replay checks from
+// its own test's begin (models.SinceTestBegin), never from an earlier start.
+type Span struct {
+	From, To time.Time
+	Zone     *time.Location
+	// Own: Zone was read from the process that made the call (ProcZone,
+	// ClockSpanFrom): the zone the application writes its clock in in this
+	// run, in which a replay checks a learned read whatever zone the learn
+	// step named (CheckClockRead). false where Zone is the agent's own.
+	Own   bool
+	Began time.Time
+}
+
+// sinceBegin is s from the running test's begin (Began) to its call: false
+// where s knows no begin. A begin is never after its call (the tracker sets
+// none there: CallWindowFrom, liveClock.span).
+func (s Span) sinceBegin() (Span, bool) {
+	if s.Began.IsZero() {
+		return Span{}, false
+	}
+	return Span{From: s.Began, To: s.To, Zone: s.Zone, Own: s.Own}, true
+}
+
+// sinceBegin is w, the window of a client test's call, from each run's test
+// begin to the call (Span.sinceBegin): the window in which the learn step
+// reads a read of the clock made before the call's window, earlier in the
+// test. nil where either run knows no begin (keploy test's calls: none).
+func (w *Window) sinceBegin() *Window {
+	if w == nil {
+		return nil
+	}
+	rec, ok := w.Rec.sinceBegin()
+	if !ok {
+		return nil
+	}
+	f, ok := w.F.sinceBegin()
+	if !ok {
+		return nil
+	}
+	return &Window{Rec: rec, F: f, offsets: w.offsets, begun: true}
+}
+
+// clockWordIn finds the one instant that changed in a text, recorded as rec
+// and seen in record's full round as live, read in w in both runs: the word
+// rw of rec and lw of live, found as clockAt finds them (the first layout
+// of clockLayouts that matches them, at ASCII word boundaries), each a read
+// of its run's clock in w (Window.holds), with the text around it the same
+// in both runs, before it and after it. ok is false where no instant
+// changed, where more than one did, where the one that did is no read in w,
+// or where the text around it changed too: then no one word of the text is
+// the read, and the text is no read of the clock plus a text that stayed.
+//
+// It reads the layouts over the bytes that differ and a bounded
+// neighbourhood of them, never over a whole text, and its outcome is the
+// one a reading of both whole texts gives (clockWordWindow): its cost is
+// that of finding where two texts differ, whatever their length.
+func clockWordIn(rec, live string, w *Window) (before, rw, lw, after string, ok bool) {
+	if w == nil || rec == live {
+		return "", "", "", "", false
+	}
+	q, er, el, near := clockWordWindow(rec, live)
+	if !near {
+		return "", "", "", "", false
+	}
+	takenR, takenL := make([]bool, er-q), make([]bool, el-q)
+	for _, lay := range clockLayouts {
+		rm, lm := clockMatches(lay, rec, q, er, takenR), clockMatches(lay, live, q, el, takenL)
+		for j := 0; j < len(rm) && j < len(lm); j++ {
+			rs, ls := rec[rm[j][0]:rm[j][1]], live[lm[j][0]:lm[j][1]]
+			if rs == ls {
+				continue
+			}
+			for i := rm[j][0]; i < rm[j][1]; i++ {
+				takenR[i-q] = true
+			}
+			for i := lm[j][0]; i < lm[j][1]; i++ {
+				takenL[i-q] = true
+			}
+			if ok {
+				// A second instant that changed.
+				return "", "", "", "", false
+			}
+			before, rw, lw, after = rec[:rm[j][0]], rs, ls, rec[rm[j][1]:]
+			if live[:lm[j][0]] != before || live[lm[j][1]:] != after || !w.holds(lay, rs, ls) {
+				return "", "", "", "", false
+			}
+			ok = true
+		}
+		// One text's window holds more of the layout's instants than the
+		// other's: a reading of the whole texts pairs its last ones with
+		// the instants after the window, the same in both texts, as it
+		// pairs those with each other. Any such pair that differs refuses
+		// the text (the text before its later instant can never be the
+		// other's), and pairs that are the same are passed over.
+		var extra [][]int
+		s := rec
+		if len(rm) > len(lm) {
+			extra = rm[len(lm):]
+		} else if len(lm) > len(rm) {
+			extra, s = lm[len(rm):], live
+		}
+		if len(extra) > 0 && !clockPairsAfter(lay, rec, er, s, extra) {
+			return "", "", "", "", false
+		}
+	}
+	return before, rw, lw, after, ok
+}
+
+// clockWordWindow is the part of rec and of live that clockWordIn reads,
+// rec[q:er] and live[q:el]: the bytes where the two texts differ, and on
+// each side of them a seam no layout's instant runs across, so a reading of
+// a text's part finds the instants a reading of the whole text finds there
+// (clockSeamBefore, clockSeamAfter), with the instants before q the same in
+// both texts, as are those from er in rec and el in live. ok is false where
+// a differing part spans more bytes than any layout's instant can
+// (clockWordMax): no one instant changed there. Where the layouts' instants
+// have no bound, where no seam lies near, or where the side is short
+// (clockSeamMin), the part is the whole text on that side.
+func clockWordWindow(rec, live string) (q, er, el int, ok bool) {
+	if clockWordMax < 0 {
+		return 0, len(rec), len(live), true
+	}
+	p, s := commonEnds(rec, live)
+	if len(rec)-p-s > clockWordMax || len(live)-p-s > clockWordMax {
+		return 0, 0, 0, false
+	}
+	// A seam's own reading reads up to clockWordMax bytes past each place
+	// before it: it is read where both texts are the same. A side shorter
+	// than clockSeamMin past that margin is read whole: its seam would
+	// cost more to find than the bytes it leaves out, and the whole side
+	// is what a reading of the whole texts reads.
+	q, er = 0, len(rec)
+	if p-clockWordMax >= clockSeamMin {
+		q = clockSeamBefore(rec, p-clockWordMax)
+	}
+	if s-clockWordMax >= clockSeamMin {
+		er = clockSeamAfter(rec, len(rec)-s+clockWordMax)
+	}
+	return q, er, er + len(live) - len(rec), true
+}
+
+// commonEnds is how many bytes a and b share at their start (p), and then
+// at their end (s), the two never overlapping in either.
+func commonEnds(a, b string) (p, s int) {
+	n := min(len(a), len(b))
+	for p+64 <= n && a[p:p+64] == b[p:p+64] {
+		p += 64
+	}
+	for p < n && a[p] == b[p] {
+		p++
+	}
+	n -= p
+	for s+64 <= n && a[len(a)-s-64:len(a)-s] == b[len(b)-s-64:len(b)-s] {
+		s += 64
+	}
+	for s < n && a[len(a)-s-1] == b[len(b)-s-1] {
+		s++
+	}
+	return p, s
+}
+
+// clockCutSearch is how far clockSeamBefore and clockSeamAfter look for a
+// seam before they take the text's own end as one; clockSeamMin is how
+// long a side of the two texts' differing part must be, past the margin a
+// seam is read in, for clockWordWindow to look for a seam on it at all.
+const (
+	clockCutSearch = 256
+	clockSeamMin   = 32
+)
+
+// clockSeamBefore is the last seam of s at or before hi, and at most
+// clockCutSearch before it: a place q no instant of any layout a reading of
+// s finds starts before and ends after (clockReach). 0, s's start, where
+// there is none. A reading of s from q then finds what one of the whole of
+// s finds from there: no layout anchors, so where a match starts, and where
+// it ends, are read from the bytes it can span alone.
+func clockSeamBefore(s string, hi int) int {
+	for q := hi; q > 0 && hi-q <= clockCutSearch; {
+		a := q - 1
+		for a >= 0 && a >= q-clockWordMax && clockReach(s, a) <= q {
+			a--
+		}
+		if a < 0 || a < q-clockWordMax {
+			return q
+		}
+		// An instant from a runs across q, and so across every place
+		// after a.
+		q = a
+	}
+	return 0
+}
+
+// clockSeamAfter is the first seam of s at or after lo, and at most
+// clockCutSearch after it (clockSeamBefore); len(s), s's end, where there
+// is none.
+func clockSeamAfter(s string, lo int) int {
+	if lo >= len(s) {
+		return len(s)
+	}
+	e := lo
+	for a := max(0, lo-clockWordMax); a < e; a++ {
+		if r := clockReach(s, a); r > e {
+			if r-lo > clockCutSearch {
+				return len(s)
+			}
+			e = r
+		}
+	}
+	return e
+}
+
+// clockReach is where the instant that a reading of s finds starting at a
+// ends, the farthest of every layout's; a where none starts there. A match
+// spans at most clockWordMax bytes, so it is read from those alone: a
+// match a regexp prefers there is one in them.
+func clockReach(s string, a int) int {
+	end := a
+	t := s[a:min(len(s), a+clockWordMax)]
+	for _, re := range clockAnchored {
+		if m := re.FindStringIndex(t); m != nil && a+m[1] > end {
+			end = a + m[1]
+		}
+	}
+	return end
+}
+
+// clockPairsAfter reports whether every pair a reading of the whole texts
+// makes after clockWordIn's window, of one layout, is of one instant: the
+// layout's instants of s's window left over (extra, of s, rec or live),
+// then those of rec from er, paired in order with those of rec from er (the
+// same as live's from its window's end).
+func clockPairsAfter(lay clockLayout, rec string, er int, s string, extra [][]int) bool {
+	waiting := make([]string, 0, len(extra))
+	for _, m := range extra {
+		waiting = append(waiting, s[m[0]:m[1]])
+	}
+	for at := er; at < len(rec); {
+		m := lay.re.FindStringIndex(rec[at:])
+		if m == nil {
+			return true
+		}
+		a, b := at+m[0], at+m[1]
+		at = b
+		if !atWordBounds(rec, a, b) {
+			continue
+		}
+		if waiting[0] != rec[a:b] {
+			return false
+		}
+		waiting = append(waiting[1:], rec[a:b])
+	}
+	return true
+}
 
 // holds reports whether t, an instant read at resolution res, is a read of
-// the clock within s: each bound is read at the instant's own resolution (a
-// value in seconds is the second its read was made in).
+// the clock within s: t stands for the unit [t, t+res) its read was made in
+// (a value in seconds is the second its read was made in), and some instant
+// of s lies in it. A unit that starts off UTC's grid of res (a wall clock of
+// no zone read in the application's zone: the day of a date in IST starts at
+// 18:30 UTC) is read so too, never by cutting s's bounds to that grid. A
+// res of none is a nanosecond's: t itself lies in s.
 func (s Span) holds(t time.Time, res time.Duration) bool {
 	if s.From.IsZero() || s.To.IsZero() {
 		return false
 	}
-	return !t.Before(s.From.Truncate(res)) && !t.After(s.To.Truncate(res))
+	if res <= 0 {
+		res = time.Nanosecond
+	}
+	return !t.After(s.To) && t.Add(res).After(s.From)
 }
 
 // holds reports whether recorded and live, an instant in layout lay each,
@@ -143,12 +581,19 @@ func (w *Window) Holds(rec, live time.Time, res time.Duration) bool {
 	return w != nil && w.Rec.holds(rec, res) && w.F.holds(live, res)
 }
 
-// key is w as a map key, the zero key for none.
-func (w *Window) key() [4]int64 {
+// key is w as a map key, the zero key for none: its spans' bounds, and 1
+// last for a reading from each run's test begin (begun), which reads a
+// value's words otherwise than its call's own window does even where the
+// two windows' bounds are the same.
+func (w *Window) key() [5]int64 {
 	if w == nil {
-		return [4]int64{}
+		return [5]int64{}
 	}
-	return [4]int64{w.Rec.From.UnixNano(), w.Rec.To.UnixNano(), w.F.From.UnixNano(), w.F.To.UnixNano()}
+	var begun int64
+	if w.begun {
+		begun = 1
+	}
+	return [5]int64{w.Rec.From.UnixNano(), w.Rec.To.UnixNano(), w.F.From.UnixNano(), w.F.To.UnixNano(), begun}
 }
 
 // clockOf is clockIn with no call's window: the clock reads that moved by
@@ -188,7 +633,7 @@ func clockAt(recorded, live string, w *Window, lead bool, call time.Time, zone *
 	takenR, takenL := make([]bool, len(recorded)), make([]bool, len(live))
 	var at []int
 	for k, lay := range clockLayouts {
-		rm, lm := clockMatches(lay, recorded, takenR), clockMatches(lay, live, takenL)
+		rm, lm := clockMatches(lay, recorded, 0, len(recorded), takenR), clockMatches(lay, live, 0, len(live), takenL)
 		for j := 0; j < len(rm) && j < len(lm); j++ {
 			rs, ls := recorded[rm[j][0]:rm[j][1]], live[lm[j][0]:lm[j][1]]
 			if rs == ls {
@@ -261,17 +706,21 @@ func (b byPlace) Swap(i, j int) {
 	b.reads[i], b.reads[j] = b.reads[j], b.reads[i]
 }
 
-// clockMatches are the places of s that hold an instant in layout lay, at
-// ASCII word boundaries, and that no earlier layout took (taken).
-func clockMatches(lay clockLayout, s string, taken []bool) [][]int {
+// clockMatches are the places of s from from to to that hold an instant in
+// layout lay, at ASCII word boundaries of s (atWordBounds), and that no
+// earlier layout took (taken, of those bytes alone). A reading of s[from:to]
+// finds what one of the whole of s does there only where no instant runs
+// across from or to (clockWordWindow).
+func clockMatches(lay clockLayout, s string, from, to int, taken []bool) [][]int {
 	var out [][]int
-	for _, m := range lay.re.FindAllStringIndex(s, -1) {
-		if m[0] > 0 && isWord(s[m[0]-1]) && isWord(s[m[0]]) || m[1] < len(s) && isWord(s[m[1]-1]) && isWord(s[m[1]]) {
+	for _, m := range lay.re.FindAllStringIndex(s[from:to], -1) {
+		m[0], m[1] = m[0]+from, m[1]+from
+		if !atWordBounds(s, m[0], m[1]) {
 			continue
 		}
 		free := true
 		for i := m[0]; i < m[1]; i++ {
-			if taken[i] {
+			if taken[i-from] {
 				free = false
 				break
 			}
@@ -281,6 +730,12 @@ func clockMatches(lay clockLayout, s string, taken []bool) [][]int {
 		}
 	}
 	return out
+}
+
+// atWordBounds reports whether s[a:b] stands at ASCII word boundaries of s:
+// no letter or digit of s runs into its first or its last byte.
+func atWordBounds(s string, a, b int) bool {
+	return (a <= 0 || !isWord(s[a-1]) || !isWord(s[a])) && (b >= len(s) || !isWord(s[b-1]) || !isWord(s[b]))
 }
 
 // moved reports whether the live text is the recorded one's instant moved by
@@ -450,12 +905,18 @@ func readEpoch(s string) (time.Time, time.Duration, bool) {
 	var res time.Duration
 	digits := s
 	if i := strings.IndexByte(s, '.'); i >= 0 {
+		// Its seconds and its fraction's digits read exactly, never through
+		// a float64, which holds a second's fraction near 2026 only to
+		// about 240 ns: a value the application cut to the millisecond
+		// must read as a whole millisecond (readRes tells the cut by it).
 		digits = s[:i]
-		f, err := strconv.ParseFloat(s, 64)
-		if err != nil {
+		n, err := strconv.ParseInt(digits, 10, 64)
+		frac := s[i+1:]
+		if err != nil || frac == "" || strings.Trim(frac, "0123456789") != "" {
 			return time.Time{}, 0, false
 		}
-		t, res = time.Unix(0, int64(f*1e9)).UTC(), fractionRes(len(s)-i-1)
+		ns, _ := strconv.ParseInt((frac + "00000000")[:9], 10, 64)
+		t, res = time.Unix(n, ns).UTC(), fractionRes(len(frac))
 	} else {
 		n, err := strconv.ParseInt(digits, 10, 64)
 		if err != nil {

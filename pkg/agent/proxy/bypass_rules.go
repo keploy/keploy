@@ -225,10 +225,10 @@ type replayLook struct {
 //     reached handed on (Predialed): a connection those bytes leave undecided
 //     is passed through on it, so its server sees one connection, and one
 //     they decide lets it go then (handleConnection), since what passes a
-//     call through dials its own (util.PassThrough). So is a client whose
-//     server's first bytes are what the server of a protocol whose client
-//     speaks without waiting sends at accept (clientFirstPreamble): it is
-//     waited for.
+//     call through dials its own (the HTTP parser's passOneCallThrough). So
+//     is a client whose server's first bytes are what the server of a
+//     protocol whose client speaks without waiting sends at accept
+//     (clientFirstPreamble): it is waited for.
 //
 // A connection whose client speaks before the mocks are stored, or to a port at
 // which the recording holds a mock, is dispatched on its bytes, and its server

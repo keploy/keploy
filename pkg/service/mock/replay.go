@@ -20,6 +20,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/coverage/report"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/pkg/service/record"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -208,6 +209,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		RecordRequests:   requests,
 		ConfigPath:       m.config.ConfigPath,
 		PassThroughPorts: config.GetByPassPorts(m.config),
+		AllowEgress:      m.config.Test.AllowEgress,
 
 		DisableHandshakeHold: m.config.Record.DisableHandshakeHold,
 	}
@@ -488,7 +490,16 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		}
 	}
 	stopWatch()
-	actual.wait(mockDrainStall)
+	// The watch has stopped: what the agent handed over is read, however
+	// long that takes (waitConsumers), and only then is the run judged on
+	// it. One the user gives up at a second interrupt ends unjudged, as a
+	// drain given up so does (below).
+	if actual != nil && !stoppedNow {
+		seen := func() uint64 { return uint64(actual.seen.Load()) }
+		if !m.waitConsumers(replayDrainWords, streamConsumer{what: "requests", done: actual.done, taken: seen, handled: seen}) {
+			stoppedNow = true
+		}
+	}
 	if stoppedNow {
 		// The user's Ctrl+C, at the drain's offer, gave up the requests the
 		// agent still held: what this run would judge is short of them, and
@@ -503,8 +514,9 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 
 	// 9. Under --on-miss record, append any calls served live-from-upstream to
 	//    the set so the next replay serves them from the mock (VCR new_episodes).
+	var notAppended error
 	if policy.RecordsOnMiss() {
-		m.persistCaptured(context.WithoutCancel(ctx), name)
+		notAppended = m.persistCaptured(context.WithoutCancel(ctx), name)
 	}
 
 	// 10. Summarise what was served and missed.
@@ -580,6 +592,19 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	requestsOnly := requestsShort != "" && failedBy != FailedByKeploy
 	if requestsOnly {
 		failedBy = FailedByKeploy
+	}
+	// Calls captured on miss that --on-miss record did not add to the set
+	// (refused, as for a set with two mock files, or not written): keploy did
+	// not complete the run, whatever the test command did (its exit is kept,
+	// and a passing one becomes 1), so a CI job that runs it to grow the set
+	// does not go green while the set does not grow. A keploy failure already
+	// decided keeps its name; this one is said at ERROR all the same.
+	appendOnly := notAppended != nil && failedBy != FailedByKeploy
+	if appendOnly {
+		failedBy = FailedByKeploy
+	}
+	if notAppended != nil && utils.ErrCode == 0 {
+		utils.ErrCode = utils.ExitKeployError
 	}
 	// A process the agent could not track -- the kernel refused it a place in
 	// its PID map -- made calls the agent never saw: not mocked, not
@@ -776,6 +801,9 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	if failedBy == FailedByKeploy && requestsOnly {
 		isolated, isolationNote = false, "keploy did not complete the run: "+requestsShort
 		keployFailure, keployErr = errors.New(isolationNote), requestsShort
+	} else if failedBy == FailedByKeploy && appendOnly {
+		isolated, isolationNote = false, "keploy did not complete the run: --on-miss record did not add every call it captured to the mock set"
+		keployFailure, keployErr = fmt.Errorf("keploy did not complete the run: %w", notAppended), notAppended.Error()
 	} else if failedBy == FailedByKeploy {
 		isolated, isolationNote = false, "keploy did not complete the run: "+string(appErr.AppErrorType)
 		keployFailure = errors.New(isolationNote)
@@ -806,31 +834,32 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	//     can read it.
 	finished = true
 	writeReceipt(m.logger, m.config.Path, Receipt{
-		Set:            name,
-		At:             started.UTC().Truncate(time.Second),
-		Command:        m.userCommand,
-		OnMiss:         string(policy),
-		Strict:         m.config.Mock.Strict,
-		ExitCode:       utils.ErrCode,
-		RunnerExitCode: runnerExit,
-		FailedBy:       failedBy,
-		Error:          keployErr,
-		Loaded:         loaded,
-		Consumed:       counts.consumed,
-		Missed:         counts.missed,
-		MissedData:     provenCount(counts.missedData),
-		Tests:          tests,
-		Bypass:         bypass,
-		Isolated:       isolated,
-		IsolationNote:  isolationNote,
-		MocksDigest:    digest,
-		Coverage:       cov,
-		CoverageNote:   covNote,
-		MinCoverage:    m.config.Mock.MinCoverage,
-		Version:        utils.Version,
-		Refusals:       m.refusals,
-		CannotCapture:  lostNotJudged,
-		Report:         replayReport,
+		Set:             name,
+		At:              started.UTC().Truncate(time.Second),
+		Command:         m.userCommand,
+		OnMiss:          string(policy),
+		Strict:          m.config.Mock.Strict,
+		ExitCode:        utils.ErrCode,
+		RunnerExitCode:  runnerExit,
+		FailedBy:        failedBy,
+		Error:           keployErr,
+		Loaded:          loaded,
+		Consumed:        counts.consumed,
+		Missed:          counts.missed,
+		MissedData:      provenCount(counts.missedData),
+		Tests:           tests,
+		Bypass:          bypass,
+		Isolated:        isolated,
+		IsolationNote:   isolationNote,
+		MocksDigest:     digest,
+		Coverage:        cov,
+		CoverageNote:    covNote,
+		MinCoverage:     m.config.Mock.MinCoverage,
+		Version:         utils.Version,
+		Refusals:        m.refusals,
+		CannotCapture:   lostNotJudged,
+		UnchargedMisses: counts.uncharged,
+		Report:          replayReport,
 	})
 	writeTestsReceipt(m.logger, m.config.Path, TestsReceipt{
 		Set:           name,
@@ -919,10 +948,15 @@ func (m *mockService) enforceMinCoverage(cov *report.Summary, note string) bool 
 
 // persistCaptured appends any calls the proxy captured on miss (served live from
 // the real dependency under --on-miss record) to the set, then republishes it.
-func (m *mockService) persistCaptured(ctx context.Context, name string) {
+// It returns why calls it was handed were not all added to the set (each is
+// also said at ERROR where it was found), and nil when every one was: the run
+// then fails as keploy's, as keploy record fails a recording whose mocks were
+// not written. It used to only log it, and a CI job that ran --on-miss record
+// to grow the set went green while the set did not grow.
+func (m *mockService) persistCaptured(ctx context.Context, name string) error {
 	drainer, ok := m.instrumentation.(MissCapturer)
 	if !ok {
-		return
+		return nil
 	}
 	// An epilogue read: no deadline under the proven switch (epilogueRead),
 	// should --on-miss record ever run under it (it is refused there today).
@@ -936,11 +970,16 @@ func (m *mockService) persistCaptured(ctx context.Context, name string) {
 			return err
 		})
 	if err != nil {
-		m.logger.Debug("failed to drain captured-on-miss mocks", zap.Error(err))
-		return
+		// What the agent captured on miss is not in keploy's hands, so not
+		// in the set: a run that grows the set did not. A Ctrl+C that cut
+		// the read short ends the run unjudged before its verdict (Replay).
+		utils.LogError(m.logger, err, "the calls captured on miss could not be read from keploy's agent, so none was added to the mock set",
+			zap.String("mock-set", name),
+			zap.String("next_step", "check the agent logs for why, then run again with --on-miss record to capture them"))
+		return fmt.Errorf("the calls captured on miss could not be read from keploy's agent, so none was added to the mock set %s: %w", name, err)
 	}
 	if len(captured) == 0 {
-		return
+		return nil
 	}
 	// Seed the name counter to the set's highest existing mock-N so appended
 	// mocks get fresh names (InsertMock always renames to mock-<counter+1>);
@@ -956,10 +995,11 @@ func (m *mockService) persistCaptured(ctx context.Context, name string) {
 		utils.LogError(m.logger, err, "the calls captured on miss were not added to the mock set: it could not be read to number them, and numbering from the start would reuse the names of mocks already in it",
 			zap.String("mock-set", name), zap.Int("captured", len(captured)),
 			zap.String("next_step", "fix the mock set so it loads (the error says why), then run again with --on-miss record to capture these calls"))
-		return
+		return fmt.Errorf("the %d call(s) captured on miss were not added to the mock set %s: it could not be read to number them: %w", len(captured), name, err)
 	}
 	m.mockDB.SetCounterID(highest)
-	appended := 0
+	appended, refused := 0, 0
+	var refusedErr error
 	for _, mk := range captured {
 		if mk == nil {
 			continue
@@ -968,18 +1008,39 @@ func (m *mockService) persistCaptured(ctx context.Context, name string) {
 			utils.LogError(m.logger, err, "failed to add a call captured on miss to the mock set; it is not saved",
 				zap.String("mock-set", name),
 				zap.String("next_step", "run again with --on-miss record to capture it"))
+			if refused++; refusedErr == nil {
+				refusedErr = err
+			}
 			continue
 		}
 		appended++
 	}
-	if appended > 0 {
-		m.logger.Info("appended new dependency calls to the mock set (--on-miss record)",
-			zap.Int("new", appended), zap.String("mock-set", name),
-			zap.String("next_step", "review the added mocks and commit them; the next replay serves them without the real dependency"))
-		if err := m.store.Push(ctx, name); err != nil {
-			m.logger.Warn("failed to publish the refreshed mock set", zap.Error(err))
-		}
+	var notAdded error
+	if refused > 0 {
+		notAdded = fmt.Errorf("%d of the %d call(s) captured on miss were not added to the mock set %s: %w", refused, refused+appended, name, refusedErr)
 	}
+	if appended == 0 {
+		return notAdded
+	}
+	// The mock store may write in the background (the gob format): what it
+	// was handed is in the set only once it is closed. It used to be left
+	// open, and keploy exited with the captured calls still in the writer's
+	// queue, after saying they were appended.
+	if err := record.CloseMockStore(m.logger, m.mockDB, mockDrainNotice,
+		"Still writing the calls captured on miss to the mock set",
+		"press Ctrl+C again to stop now: the ones not written yet are then not added to it", nil); err != nil {
+		utils.LogError(m.logger, err, "the calls captured on miss were not all added to the mock set",
+			zap.String("mock-set", name), zap.Int("captured", appended),
+			zap.String("next_step", "check the disk the mock set is on (space, permissions), then run again with --on-miss record to capture them"))
+		return errors.Join(notAdded, fmt.Errorf("the %d call(s) captured on miss that the mock set %s was handed were not all written to it: %w", appended, name, err))
+	}
+	m.logger.Info("appended new dependency calls to the mock set (--on-miss record)",
+		zap.Int("new", appended), zap.String("mock-set", name),
+		zap.String("next_step", "review the added mocks and commit them; the next replay serves them without the real dependency"))
+	if err := m.store.Push(ctx, name); err != nil {
+		m.logger.Warn("failed to publish the refreshed mock set", zap.Error(err))
+	}
+	return notAdded
 }
 
 // statefulMocksDisabled is test.disableStatefulMocks, ignored under the proven
@@ -1120,6 +1181,13 @@ func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded, 
 	refuse := func(why string) error {
 		return fmt.Errorf("keploy cannot judge each test of mock set %q: %s; record it again with keploy mock record", name, why)
 	}
+	// unreadable is refuse for a mappings file keploy cannot read, which a
+	// hand edit may have made so (a test entry with both mock lists): a
+	// record would replace the edit, so correcting it comes first. err is
+	// kept (models.BothMockListsError names the test).
+	unreadable := func(err error) error {
+		return fmt.Errorf("keploy cannot judge each test of mock set %q: its mappings cannot be read: %w; if you edited the set's mappings file, correct that edit (a record would replace it), otherwise record the set again with keploy mock record", name, err)
+	}
 	if m.mappingDB == nil {
 		return refuse("this keploy reads no per-test mappings")
 	}
@@ -1129,14 +1197,14 @@ func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded, 
 	}
 	mp, err := reader.GetMapping(ctx, name)
 	if err != nil {
-		return refuse("its mappings cannot be read: " + err.Error())
+		return unreadable(err)
 	}
 	if mp != nil && (len(mp.Boots) > 0 || len(mp.Suites) > 0) {
 		return refuse("its tests start apps of their own (boots), which this release does not judge test by test")
 	}
 	mappings, _, err := m.mappingDB.Get(ctx, name)
 	if err != nil {
-		return refuse("its mappings cannot be read: " + err.Error())
+		return unreadable(err)
 	}
 	pp, ok := m.instrumentation.(ProvenTablePusher)
 	if !ok {
@@ -1151,20 +1219,159 @@ func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded, 
 		table[testName] = names
 	}
 	pool, unknown := poolSlices(mp, table, loaded, decoded)
-	if len(unknown) > 0 {
-		return refuse("its mappings name mocks the recording does not have: " + strings.Join(unknown, ", "))
+	if unknown = append(unknown, unknownBesideTests(mp, decoded, unknown)...); len(unknown) > 0 {
+		return m.refuseUnknownMocks(ctx, name, mp, unknown)
 	}
+	// Every test's recorded window, of every recording its mapping lists,
+	// the ones the agent never holds included: they were made in it.
+	windows := recordedTestWindows(mp, table, decoded)
 	table = heldOnly(table, loaded)
 	if !ownsTestMocks(table, loaded) {
 		m.logger.Warn("under KEPLOY_PROVEN no test of this mock set owns a recorded call: it has no mappings.yaml, or its mapping lists no data-plane mock the agent holds, so every call a test makes to a dependency misses",
 			zap.String("mock-set", name),
 			zap.String("next_step", "record the set again with this keploy: keploy mock record writes mappings.yaml"))
 	}
-	if err := pp.PushProvenTable(ctx, table, pool); err != nil {
+	if err := pp.PushProvenTable(ctx, table, pool, windows); err != nil {
 		return refuse("its agent refused the per-test table: " + err.Error())
 	}
-	m.logger.Info("per-test scoping enabled", zap.Int("tests", len(table)), zap.Int("pool slices", len(pool)), zap.String("mock-set", name))
+	m.mockOwners = models.MockOwners(table)
+	m.logger.Info("per-test scoping enabled", zap.Int("tests", len(table)), zap.Int("pool slices", len(pool)), zap.Int("recorded test windows", len(windows)), zap.String("mock-set", name))
 	return nil
+}
+
+// unknownBesideTests is, sorted, each name mappings' worker:, shared: and
+// runner: give that no decoded mock has and that seen does not list: a name
+// none of them serves (they are the pool's whatever they say), but a hand edit
+// that names a mock the recording does not have, which is refused like one in
+// a test's list or startup: (poolSlices) rather than ignored.
+func unknownBesideTests(mp *models.Mapping, decoded []*models.Mock, seen []string) []string {
+	if mp == nil {
+		return nil
+	}
+	have := make(map[string]bool, len(decoded)+len(seen))
+	for _, mk := range decoded {
+		if mk != nil && mk.Name != "" {
+			have[mk.Name] = true
+		}
+	}
+	for _, n := range seen {
+		have[n] = true
+	}
+	var out []string
+	for _, entries := range [][]models.MockEntry{mp.Worker, mp.Shared, mp.Runner} {
+		for _, e := range entries {
+			if e.Name != "" && !have[e.Name] {
+				have[e.Name] = true
+				out = append(out, e.Name)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// refuseUnknownMocks is the refusal of a set whose mappings.yaml names mocks
+// (unknown) its recording does not have: each with where the file names it
+// (models.Mapping.MockPlaces), and what to do, for a hand edit and for a
+// recording that lost them alike.
+func (m *mockService) refuseUnknownMocks(ctx context.Context, name string, mp *models.Mapping, unknown []string) error {
+	places := mp.MockPlaces()
+	sort.Strings(unknown)
+	dir := filepath.Base(m.config.Path)
+	// The file the replay's read took the set's mocks from, and the named
+	// documents of it the read skipped, with the read's own reasons: such a
+	// name is not a wrong one, the edit to correct is in the mocks file. Nil
+	// when the file could not be read again: then no name is called absent.
+	var file string
+	var unread map[string]models.SkippedMock
+	if m.mockDB != nil {
+		file, unread = m.mockDB.SkippedMocks(ctx, name)
+	}
+	if file == "" {
+		file = MocksFile(m.config.Path, name)
+	}
+	mocks := "mocks.yaml"
+	if file != "" {
+		mocks = filepath.Base(file)
+	}
+	mappings := "mappings.yaml"
+	for _, f := range []string{"mappings.yaml", "mappings.json"} {
+		if info, err := os.Stat(filepath.Join(m.config.Path, name, f)); err == nil && info.Mode().IsRegular() {
+			mappings = f
+			break
+		}
+	}
+	var absent, unchecked, skipped []string
+	var cutShort, edited, newer, connFailure, yamlOnly bool
+	for _, n := range unknown {
+		where := ""
+		if w := places[n]; len(w) > 0 {
+			where = " (under " + strings.Join(w, ", ") + ")"
+		}
+		d, ok := unread[n]
+		switch {
+		case unread == nil:
+			unchecked = append(unchecked, n+where)
+		case !ok:
+			absent = append(absent, n+where)
+		case d.Why == models.MockSkipCutShort && d.Cause != "":
+			// An NDJSON line: whole JSON, with a spec that does not decode.
+			cutShort = true
+			skipped = append(skipped, fmt.Sprintf("%s%s, the file's last line, which has no newline and whose spec does not decode (%s): keploy reads it as a write cut short", n, where, d.Cause))
+		case d.Why == models.MockSkipCutShort:
+			cutShort = true
+			skipped = append(skipped, n+where+", the file's last document, whose last line has no newline: keploy reads it as a write cut short")
+		case d.Why == models.MockSkipNoKind:
+			edited = true
+			skipped = append(skipped, n+where+", which has no kind")
+		case d.Why == models.MockSkipConnFailure:
+			connFailure = true
+			skipped = append(skipped, n+where+", a connection failure this keploy cannot replay")
+		case d.Why == models.MockSkipYAMLOnlyKind:
+			yamlOnly = true
+			skipped = append(skipped, fmt.Sprintf("%s%s, of kind %q, which keploy reads only from a YAML mock file", n, where, d.Kind))
+		default:
+			edited, newer = true, true
+			skipped = append(skipped, fmt.Sprintf("%s%s, of kind %q, which this keploy cannot read", n, where, d.Kind))
+		}
+	}
+	var why, fix []string
+	if len(skipped) > 0 {
+		why = append(why, fmt.Sprintf("%s/%s/%s has mocks %s/%s/%s names that this keploy skips: %s",
+			dir, name, mocks, dir, name, mappings, strings.Join(skipped, "; ")))
+		if cutShort {
+			if filepath.Ext(mocks) == ".json" {
+				fix = append(fix, fmt.Sprintf("If you saved %s by hand, give its last line the spec keploy wrote and end the line with a newline", mocks))
+			} else {
+				fix = append(fix, fmt.Sprintf("If you saved %s by hand, end it with a newline once its last mock is whole", mocks))
+			}
+		}
+		if edited {
+			fix = append(fix, fmt.Sprintf("If you edited %s, give each mock this keploy cannot read back the kind and spec keploy wrote", mocks))
+		}
+		if newer {
+			fix = append(fix, "If a newer keploy or keploy enterprise recorded them, upgrade keploy or use keploy enterprise")
+		}
+		if connFailure {
+			fix = append(fix, fmt.Sprintf("If a newer keploy recorded a connection failure, upgrade keploy to replay it; if you edited one in %s, give it back the fields keploy wrote", mocks))
+		}
+		if yamlOnly {
+			fix = append(fix, fmt.Sprintf("Keploy reads a mock of such a kind only from a YAML mock file, and one with a \"-\" in its kind only with keploy enterprise: record the set again in YAML, not as %s", mocks))
+		}
+	}
+	if len(absent) > 0 {
+		why = append(why, fmt.Sprintf("%s/%s/%s names mocks %s/%s/%s does not have: %s",
+			dir, name, mappings, dir, name, mocks, strings.Join(absent, ", ")))
+		fix = append(fix, fmt.Sprintf("If you edited %s, correct those names", mappings))
+	}
+	if len(unchecked) > 0 {
+		// The file was not read again, so nothing says whether it has them.
+		why = append(why, fmt.Sprintf("%s/%s/%s names mocks the replay did not read from %s/%s/%s: %s",
+			dir, name, mappings, dir, name, mocks, strings.Join(unchecked, ", ")))
+		fix = append(fix, fmt.Sprintf("Check that %s has each of them, and that keploy can read it", mocks))
+	}
+	return fmt.Errorf("keploy cannot judge each test of mock set %q: %s. %s; otherwise record the set again with keploy mock record",
+		name, strings.Join(why, "; "), strings.Join(fix, ". "))
 }
 
 // ownsTestMocks reports whether a test of table owns a test mock: a
@@ -1727,6 +1934,10 @@ type replayCounts struct {
 	// learnErr is why what the learn step learned could not be written: the
 	// round did not complete.
 	learnErr error
+	// uncharged are, under the proven switch, the misses missedData counts
+	// that no test was charged with (Receipt.UnchargedMisses); nil when the
+	// misses were not read.
+	uncharged []UnchargedMiss
 }
 
 // reportOutcome logs which mocks were consumed and which outgoing calls matched
@@ -1796,7 +2007,7 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 		m.logger.Debug("failed to read consumed mocks", zap.Error(consumedErr))
 	}
 	if missesErr != nil {
-		m.logger.Debug("failed to read mock misses", zap.Error(missesErr))
+		m.logger.Debug("failed to read the misses the agent recorded", zap.Error(missesErr))
 	}
 
 	// The outcome is read after the runner exits, from an agent that may have
@@ -1896,8 +2107,25 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 	if missesErr != nil {
 		counts.missed, counts.missedData = -1, -1
 		counts.missesUnread = models.UnreadCause(missesErr)
+	} else if provenswitch.On() {
+		counts.uncharged = unchargedMisses(misses)
 	}
 	counts.tests = withRealListed(withReal(withEvidence(testReceipts(flows, consumedErr == nil, missesErr == nil), detail.windows), detail.windows), m.realListed)
+	// Under the proven switch a miss whose closest recording another test
+	// owns names that test, as keploy test's replay does (markRecordedIn):
+	// judging lists it as the root of the test's entry.
+	if named := withRecordedIn(counts.tests, m.mockOwners); len(named) > 0 {
+		m.logger.Warn("tests made a call that another test recorded: likely, at record time that test made it on a connection it opened, whose handshake was recorded there (KEPLOY_PROVEN=1); each is named under evidence.misses.recorded_in in "+TestsReceiptFile,
+			zap.String("mock-set", m.setName()),
+			zap.Strings("calls", named[:min(len(named), 20)]),
+			zap.String("next_step", "record the set again with keploy mock record so each test opens the connections it uses, or keep the application's connection reuse as it was when recording"))
+	}
+	if provenswitch.On() {
+		// When each test began serves the proven flow's reading of a cut
+		// round (the last test begun): without the switch the receipt stays
+		// as it was.
+		counts.tests = withBegan(counts.tests, detail.windows)
+	}
 	for i := range counts.tests {
 		counts.tests[i].Learned = learned[counts.tests[i].Name]
 	}
@@ -1926,18 +2154,29 @@ func logMiss(logger *zap.Logger, miss models.UnmatchedCall) {
 		if call := models.CallShape(miss.Protocol, miss.ActualSummary); call != "" {
 			fields = append(fields, zap.String("call", call))
 		}
-		logger.Warn(msg, append(fields, zap.String("destination", miss.Destination))...)
+		fields = append(fields, zap.String("destination", miss.Destination))
+		if miss.Reason != "" {
+			// Why it missed, in judging's words (record's full round).
+			fields = append(fields, zap.String("reason", miss.Reason))
+		}
+		logger.Warn(msg, fields...)
 		return
 	}
 	next := miss.NextSteps
 	if next == "" {
 		next = "record this call with --on-miss record, or re-record the set"
 	}
-	logger.Warn(msg,
+	fields := []zap.Field{
 		zap.String("protocol", miss.Protocol),
 		zap.String("call", miss.ActualSummary),
 		zap.String("destination", miss.Destination),
-		zap.String("next_step", next))
+	}
+	if miss.Reason != "" {
+		// Why it missed, in judging's words (record's full round): the
+		// next step then is the learn step's own reason.
+		fields = append(fields, zap.String("reason", miss.Reason))
+	}
+	logger.Warn(msg, append(fields, zap.String("next_step", next))...)
 }
 
 // provenCount is n under the proven switch, and nothing with it off, so a
@@ -2018,6 +2257,53 @@ func withEvidence(tests []TestReceipt, windows []models.ScopeWindow) []TestRecei
 	for i := range tests {
 		if ev := byName[tests[i].Name]; ev != nil {
 			tests[i].Evidence = ev
+		}
+	}
+	return tests
+}
+
+// withRecordedIn names, on each miss of tests' evidence that is a recording
+// its test does not own (NotOwned, ClosestMock), the other test that owns it
+// (owners: models.MockOwners of the table the replay pushed), as keploy
+// test's replay does (models.UnmatchedCall.NameRecordedIn). The evidence is
+// withEvidence's own copy, never the windows'. It returns
+// "test: call (closest mock, recorded in test)" for each it named. With the
+// switch off owners is nil and no miss is NotOwned: nothing changes.
+func withRecordedIn(tests []TestReceipt, owners map[string][]string) []string {
+	var named []string
+	for i := range tests {
+		ev := tests[i].Evidence
+		if ev == nil {
+			continue
+		}
+		for j := range ev.Misses {
+			c := &ev.Misses[j]
+			if c.NameRecordedIn(tests[i].Name, owners) {
+				named = append(named, fmt.Sprintf("%s: %s (%s, recorded in %s)", tests[i].Name, c.ActualSummary, c.ClosestMock, c.RecordedIn))
+			}
+		}
+	}
+	return named
+}
+
+// withBegan puts on each test's line when its latest run began: its latest
+// window's start, a test still open when the run ended included (the agent
+// closes it as failed, from its begin). A cut round names its last test begun
+// by it. windows are the run's test windows (testWindows): an app a test
+// started is not among them.
+func withBegan(tests []TestReceipt, windows []models.ScopeWindow) []TestReceipt {
+	began := make(map[string]time.Time, len(windows))
+	for _, w := range windows {
+		if w.Name == "" {
+			continue
+		}
+		if prev, seen := began[w.Name]; !seen || w.Start.After(prev) {
+			began[w.Name] = w.Start
+		}
+	}
+	for i := range tests {
+		if b, ok := began[tests[i].Name]; ok && !b.IsZero() {
+			tests[i].Began = b.UTC()
 		}
 	}
 	return tests

@@ -134,6 +134,24 @@ func captureConsoles(t *testing.T) (outW, errW *os.File, out, errOut *console) {
 
 func noCancel(_ *exec.Cmd) func() error { return func() error { return nil } }
 
+// killGroupOnCleanup is noCancel that also kills the command's whole process
+// group when the test ends. ExecuteCommand starts a native command as the
+// leader of its own group, so whatever the script started in the background
+// is in that group too. A background process is gone when the test ends,
+// even a test that fails early, instead of living on to the test binary's
+// exit or past it.
+func killGroupOnCleanup(t *testing.T) func(cmd *exec.Cmd) func() error {
+	t.Helper()
+	return func(cmd *exec.Cmd) func() error {
+		t.Cleanup(func() {
+			if cmd.Process != nil {
+				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			}
+		})
+		return func() error { return nil }
+	}
+}
+
 func TestChildConsoleIsKeploysOwnFileWhenNothingIsCut(t *testing.T) {
 	keployLog.SetRedactor(nil)
 	cmd := exec.Command("true")
@@ -227,7 +245,8 @@ func TestExecuteCommandsTerminalCopyIsCut(t *testing.T) {
 	_, _, read := captureConsole(t)
 	cmd := exec.Command("sh", "-c", `printf 'token=%s\n' '`+plantedConsoleValue+`'; printf 'tail %s' '`+plantedConsoleValue+`'`)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	cmdErr := executeWithPTY(context.Background(), zap.NewNop(), cmd)
+	var tee tees
+	cmdErr := executeWithPTY(context.Background(), zap.NewNop(), cmd, tee.next)
 	stdout, _ := read()
 	if cmdErr.Type == Init {
 		t.Skipf("no terminal to run the command in: %v", cmdErr.Err)
@@ -243,6 +262,10 @@ func TestExecuteCommandsTerminalCopyIsCut(t *testing.T) {
 	// command had exited before the kernel moved it there.
 	if want := "token=***\r\ntail ***"; stdout != want {
 		t.Fatalf("the terminal copy is %q, want %q", stdout, want)
+	}
+	// A tee (WithOutputTee) gets the same, cut.
+	if got := tee.got(); len(got) != 1 || got[0] != stdout {
+		t.Fatalf("the tee got %q, want the terminal copy %q", got, stdout)
 	}
 }
 
@@ -300,8 +323,10 @@ func TestExecuteCommandDoesNotWaitOnAProcessTheChildLeftRunning(t *testing.T) {
 	script := `exec 3<'` + fifo + `'; (read x <&3; printf '\nbg %s\n' '` + plantedConsoleValue + `') & exec 3<&-; printf 'fg %s\n%s' '` + plantedConsoleValue + `' '` + heldTail + `'`
 	// Were Wait waiting on the pipe the background process holds, it would
 	// return ErrWaitDelay once the delay is up. Waiting on the process alone,
-	// it never starts the delay: no time is measured here.
-	cmdErr := ExecuteCommand(context.Background(), zap.NewNop(), script, Native, noCancel, time.Second, nil, nil)
+	// it never starts the delay: no time is measured here. The background
+	// process is killed with the script's group when the test ends, before
+	// the fifo is let go.
+	cmdErr := ExecuteCommand(context.Background(), zap.NewNop(), script, Native, killGroupOnCleanup(t), time.Second, nil, nil)
 	if cmdErr.Err != nil {
 		t.Fatalf("ExecuteCommand: %v", cmdErr.Err)
 	}
@@ -568,5 +593,89 @@ func TestChildConsoleGivesOnePipeWhenStdoutIsStderr(t *testing.T) {
 	out.waitFor(t, mark)
 	if early, _, _ := strings.Cut(out.String(), mark); early != "one\ntwo\nthree ***\n" {
 		t.Fatalf("the console has %q, want the lines in the order the child wrote them", early)
+	}
+}
+
+// tees hands each stream ExecuteCommand's WithOutputTee asks for a buffer of
+// its own, and keeps them in the order asked.
+type tees struct {
+	mu   sync.Mutex
+	bufs []*syncBuffer
+}
+
+func (s *tees) next() io.Writer {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b := &syncBuffer{}
+	s.bufs = append(s.bufs, b)
+	return b
+}
+
+func (s *tees) got() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []string
+	for _, b := range s.bufs {
+		out = append(out, b.String())
+	}
+	return out
+}
+
+// WithOutputTee gives the command keploy's pipes even when nothing is cut
+// (it does not inherit keploy's stdout), and copies each of its streams, cut
+// as the console gets it, to a tee of its own: stdout's and stderr's apart
+// when they are two files, one for both when they are one. The console gets
+// the same.
+func TestExecuteCommandTeesEachStreamCut(t *testing.T) {
+	if _, err := os.Stat("/proc/self/fd/1"); err != nil {
+		t.Skip("no /proc to read the child's stdout from")
+	}
+	script := `printf 'out %s\n' '` + plantedConsoleValue + `'; printf 'err line\n' >&2; readlink /proc/self/fd/1`
+	for _, cut := range []bool{false, true} {
+		t.Run("cut="+strconv.FormatBool(cut), func(t *testing.T) {
+			keployLog.SetRedactor(nil)
+			value := plantedConsoleValue
+			if cut {
+				cutChildOutput(t)
+				value = "***"
+			}
+			outW, _, read := captureConsole(t)
+			keploys := pipeName(t, outW)
+			var tee tees
+			cmdErr := ExecuteCommand(context.Background(), zap.NewNop(), script, Native, noCancel, time.Second, nil, nil, WithOutputTee(tee.next))
+			stdout, stderr := read()
+			if cmdErr.Err != nil {
+				t.Fatalf("ExecuteCommand: %v", cmdErr.Err)
+			}
+			got := tee.got()
+			if len(got) != 2 {
+				t.Fatalf("%d tees asked for, want one per stream: %q", len(got), got)
+			}
+			outLine, childOut, _ := strings.Cut(got[0], "\n")
+			if outLine != "out "+value || strings.TrimSpace(childOut) == keploys || got[1] != "err line\n" {
+				t.Fatalf("tees got %q (keploy's stdout is %q); want stdout's lines cut, through a pipe of keploy's, and stderr's apart", got, keploys)
+			}
+			if stdout != got[0] || stderr != got[1] {
+				t.Fatalf("the console got %q / %q, the tees %q; want the same", stdout, stderr, got)
+			}
+		})
+	}
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = w.Close(); _ = r.Close() })
+	oldOut, oldErr := os.Stdout, os.Stderr
+	os.Stdout, os.Stderr = w, w
+	t.Cleanup(func() { os.Stdout, os.Stderr = oldOut, oldErr })
+	collect(r)
+	var tee tees
+	cmdErr := ExecuteCommand(context.Background(), zap.NewNop(), `printf 'one\n'; printf 'two\n' >&2; printf 'three\n'`, Native, noCancel, time.Second, nil, nil, WithOutputTee(tee.next))
+	if cmdErr.Err != nil {
+		t.Fatalf("ExecuteCommand: %v", cmdErr.Err)
+	}
+	if got := tee.got(); len(got) != 1 || got[0] != "one\ntwo\nthree\n" {
+		t.Fatalf("with stdout and stderr one file the tees got %q; want one tee with the lines in order", got)
 	}
 }

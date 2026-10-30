@@ -677,6 +677,12 @@ func (a *Agent) settledSince(ctx context.Context, answers bool, what string) err
 	a.proven.owned = owned
 	a.provenMu.Unlock()
 	if err != nil && !errors.Is(err, errHoldsUnknown) {
+		// Said in the agent's own log too, where the lines of the calls it
+		// gave up on are: the caller tells only the test's failing.
+		var g gaveUp
+		if errors.As(err, &g) {
+			a.logger.Warn("keploy's agent made no progress settling the test's calls at its end; it gave up on them, so the test is not judged", zap.String("test", what), zap.Strings("connections", g.held))
+		}
 		// Not read: the test's window goes on as the gap's, which the next
 		// begin, or the run's last read, closes. The test is not judged.
 		a.provenMu.Lock()

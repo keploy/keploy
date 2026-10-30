@@ -3,6 +3,8 @@ package app
 import (
 	"context"
 	"errors"
+	"os"
+	"reflect"
 	"testing"
 	"time"
 
@@ -111,12 +113,32 @@ func TestComposeProjectScopeReadsBothForms(t *testing.T) {
 		{"docker compose -p=orderflow -f - up", "orderflow", ""},
 		{"docker compose --project-directory /srv/app -f - up", "", "/srv/app"},
 		{"docker compose --project-directory=/srv/app -p flow -f - up", "flow", "/srv/app"},
+		{`docker compose -p "quoted" --project-directory '/srv/q' -f - up`, "quoted", "/srv/q"},
+		{`docker compose --project-name='quoted' --project-directory="/srv/q" -f - up`, "quoted", "/srv/q"},
 	}
 	for _, tt := range tests {
 		name, dir := composeProjectScope(tt.cmd)
 		if name != tt.wantName || dir != tt.wantDir {
 			t.Errorf("composeProjectScope(%q) = (%q, %q), want (%q, %q)",
 				tt.cmd, name, dir, tt.wantName, tt.wantDir)
+		}
+	}
+}
+
+// composeEnvFiles reads every --env-file the command gives, in order and in
+// both forms, without quotes; none when it gives none.
+func TestComposeEnvFilesReadsEveryEnvFile(t *testing.T) {
+	for _, tt := range []struct {
+		cmd  string
+		want []string
+	}{
+		{"docker compose -f - up", nil},
+		{"docker compose --env-file a.env -f - up", []string{"a.env"}},
+		{`docker compose --env-file=a.env --env-file "/srv/b.env" -f - up --env-file='c.env'`, []string{"a.env", "/srv/b.env", "c.env"}},
+		{"docker compose -f - up --env-file", nil},
+	} {
+		if got := composeEnvFiles(tt.cmd); !reflect.DeepEqual(got, tt.want) {
+			t.Errorf("composeEnvFiles(%q) = %q, want %q", tt.cmd, got, tt.want)
 		}
 	}
 }
@@ -280,5 +302,17 @@ func TestComposeRunnerIsRebuiltWhenTheDocumentChanges(t *testing.T) {
 	if built != 2 {
 		t.Fatalf("runner was not rebuilt after the compose document changed (built %d times); "+
 			"teardown would target the previous test-set's stack", built)
+	}
+}
+
+// unsetEnvVars unsets each of keys for one test, restored after it: to
+// compose an empty value is set, so an env file could not set it.
+func unsetEnvVars(t *testing.T, keys ...string) {
+	t.Helper()
+	for _, k := range keys {
+		t.Setenv(k, "")
+		if err := os.Unsetenv(k); err != nil {
+			t.Fatal(err)
+		}
 	}
 }

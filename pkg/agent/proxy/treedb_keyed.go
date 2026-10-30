@@ -3,6 +3,7 @@ package proxy
 import (
 	"slices"
 	"sort"
+	"sync/atomic"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
@@ -26,7 +27,8 @@ type keyIndex struct {
 }
 
 // keyedEntry is one mock filed under one key. key is the tree key it was filed
-// under, boxed once here rather than on every lookup.
+// under, as the tree holds it (boxed), so neither a build nor a lookup boxes
+// it again.
 type keyedEntry struct {
 	key interface{}
 	mk  *models.Mock
@@ -49,21 +51,28 @@ func distinctKeys(ix *integrations.MockIndex, mk *models.Mock) []string {
 	return ks
 }
 
+// keyIndexBuilds counts the key indexes trees built (buildKeyIndexLocked):
+// once per tree and MockIndex until a change drops it, never per lookup.
+// Read by the rows that pin it.
+var keyIndexBuilds atomic.Uint64
+
 // buildKeyIndexLocked files db's entries for ix. db.mu must be held for
 // writing.
 func (db *TreeDb) buildKeyIndexLocked(ix *integrations.MockIndex) *keyIndex {
+	keyIndexBuilds.Add(1)
 	ki := &keyIndex{lists: map[string][]keyedEntry{}}
 	it := db.rbt.Iterator()
 	for it.Next() {
-		key, ok := it.Key().(models.TestModeInfo)
-		if !ok {
+		// The tree's key, boxed as the tree holds it: a mock filed under no
+		// key costs the build no allocation.
+		boxed := it.Key()
+		if _, ok := boxed.(models.TestModeInfo); !ok {
 			continue
 		}
 		mk, ok := it.Value().(*models.Mock)
 		if !ok || mk == nil {
 			continue
 		}
-		var boxed interface{} = key
 		for _, k := range distinctKeys(ix, mk) {
 			ki.lists[k] = append(ki.lists[k], keyedEntry{boxed, mk})
 		}
@@ -224,6 +233,7 @@ func (db *TreeDb) rangeKeyed(ix *integrations.MockIndex, key string, fn func(*mo
 		if after != nil {
 			pos = sort.Search(len(list), func(j int) bool { return cmp(list[j].key, after) > 0 })
 		}
+		start := pos
 		for pos < len(list) && len(buf) < batch {
 			e := list[pos]
 			pos++
@@ -234,6 +244,7 @@ func (db *TreeDb) rangeKeyed(ix *integrations.MockIndex, key string, fn func(*mo
 		}
 		more := pos < len(list)
 		db.mu.RUnlock()
+		keyedExamined.Add(uint64(pos - start))
 		for _, mk := range buf {
 			if !fn(mk) {
 				return
@@ -243,4 +254,75 @@ func (db *TreeDb) rangeKeyed(ix *integrations.MockIndex, key string, fn func(*mo
 			return
 		}
 	}
+}
+
+// keyedValues returns the mocks of kind ("" for any) the tree holds that ix
+// files under any of keys, each once, in tree order: what a walk of the
+// tree's values of kind passes that ix files under one of keys, read from the
+// index's lists for keys without walking the rest of the tree. The first use
+// of ix builds the tree's index for it, as rangeKeyed does, which the tree
+// keeps until a change drops it. In the exact view's verify mode the same is
+// recomputed from the tree's values, under the same read lock, and a
+// difference panics (verifyExactRead).
+func (db *TreeDb) keyedValues(ix *integrations.MockIndex, keys []string, kind models.Kind) []*models.Mock {
+	db.mu.RLock()
+	for db.keyed[ix] == nil {
+		db.mu.RUnlock()
+		db.mu.Lock()
+		if db.keyed[ix] == nil {
+			if db.keyed == nil {
+				db.keyed = map[*integrations.MockIndex]*keyIndex{}
+			}
+			db.keyed[ix] = db.buildKeyIndexLocked(ix)
+		}
+		db.mu.Unlock()
+		db.mu.RLock()
+	}
+	defer db.mu.RUnlock()
+	lists := db.keyed[ix].lists
+	var hits []keyedEntry
+	for _, k := range keys {
+		for _, e := range lists[k] {
+			if (kind == "" || e.mk.Kind == kind) && db.liveLocked(e) {
+				hits = append(hits, e)
+			}
+		}
+	}
+	if len(keys) > 1 && len(hits) > 1 {
+		// Each list is in strict tree-key order and files an entry once, so
+		// once merged two entries under one tree key are one mock filed
+		// under two of keys (or a key asked twice).
+		cmp := db.rbt.Comparator
+		sort.SliceStable(hits, func(a, b int) bool { return cmp(hits[a].key, hits[b].key) < 0 })
+		w := 1
+		for _, e := range hits[1:] {
+			if cmp(hits[w-1].key, e.key) != 0 {
+				hits[w] = e
+				w++
+			}
+		}
+		hits = hits[:w]
+	}
+	out := make([]*models.Mock, len(hits))
+	for i, e := range hits {
+		out[i] = e.mk
+	}
+	if exactViewVerify.Load() {
+		var want []*models.Mock
+		it := db.rbt.Iterator()
+		for it.Next() {
+			mk, ok := it.Value().(*models.Mock)
+			if !ok || mk == nil || (kind != "" && mk.Kind != kind) {
+				continue
+			}
+			for _, k := range ix.Keys(mk) {
+				if slices.Contains(keys, k) {
+					want = append(want, mk)
+					break
+				}
+			}
+		}
+		verifyExactRead("a tree's mocks filed under a call's keys", want, out)
+	}
+	return out
 }

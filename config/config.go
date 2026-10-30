@@ -605,10 +605,15 @@ type Test struct {
 	CmdUsed                     string        `json:"-" yaml:"-" mapstructure:"-"`                                                                                                   // Full command used for the test run (set at runtime)
 	// SkipReasons is why a test the run skips is skipped: test set -> test case
 	// -> reason. Set at run time by whatever fills IgnoredTests with a reason
-	// (the proven model's verdicts gate), never read from keploy.yml. The
-	// replayer writes it into the IGNORED result's SkipReason under the proven
-	// switch.
+	// (the proven model's verdicts gate, or a cloud replay skipping a test with
+	// no mapping entry), never read from keploy.yml. The replayer writes it
+	// into the IGNORED result's SkipReason, with the proven switch on or off.
 	SkipReasons map[string]map[string]string `json:"-" yaml:"-" mapstructure:"-"`
+	// AllowEgress names what a replay may reach on the real network, by the
+	// entries models.NormalizeAllowEgress accepts (models.AllowEgressDNS). What a
+	// replay does not answer from its mocks otherwise stays inside the replay;
+	// an entry keploy does not act on is refused at start.
+	AllowEgress []string `json:"allowEgress" yaml:"allowEgress" mapstructure:"allowEgress"`
 }
 
 // Report output formats for `keploy report --format`.

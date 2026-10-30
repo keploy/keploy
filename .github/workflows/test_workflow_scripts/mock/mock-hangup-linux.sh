@@ -28,8 +28,9 @@
 #              starts its agent under sudo on a terminal of its own, and stops
 #              it by closing that terminal if asking it to stop fails
 # and then wants keploy to exit by itself within 60s, with SIGTERM's exit
-# code, leaving no keploy or test-command process behind and no
-# keploy-logs.txt.
+# code, leaving no keploy or test-command process behind, nothing named
+# keploy-logs.txt in its working directory, and no log of the CLI's left in
+# its temp directory (each case's own TMPDIR).
 #
 # Every case runs with HOME in the case's own directory, in a network
 # namespace of its own (unshare -n) with only loopback, as in
@@ -179,7 +180,7 @@ D="$WORK/$CASE"
 BASE=${CASE%-proven}
 PROVEN=""
 [ "$BASE" != "$CASE" ] && PROVEN=1
-mkdir -p "$D/home" "$D/app"
+mkdir -p "$D/home" "$D/app" "$D/tmp"
 export HOME="$D/home"
 ip link set lo up || exit 1
 mount -t tmpfs -o mode=0700 tmpfs /root || exit 1
@@ -201,7 +202,9 @@ if [ -n "$AS" ]; then
   # the user who ran it under sudo, and it was not run under sudo.
   set -- sudo -u "$AS" env -u SUDO_USER -u SUDO_UID -u SUDO_GID -u SUDO_COMMAND HOME="$HOME" PATH="$PATH"
 fi
-set -- "$@" env KEPLOY_PROVEN="$PROVEN"
+# The CLI's log is a temp file (keploy-logs-*.txt): in the case's own temp
+# directory, where run_case looks for one the CLI left.
+set -- "$@" env KEPLOY_PROVEN="$PROVEN" TMPDIR="$D/tmp"
 # shellcheck disable=SC2086 # EXTRA is flags, split on purpose
 "$@" python3 "$WORK/hangup.py" "$MODE" "$GAP" "$D/started" "$D/out" \
   "$WORK/bin/keploy" mock record -c "python3 $WORK/slowtest.py $D http://127.0.0.1:$PORT" \
@@ -234,7 +237,7 @@ kill_left() {
 # run_case <case> <hup|term> <gap> [user [flags]]: runs the case and checks
 # what it leaves; its exit code is left in EXIT_CODE.
 run_case() {
-  local name=$1 mode=$2 gap=$3 user=${4:-} extra=${5:-} left
+  local name=$1 mode=$2 gap=$3 user=${4:-} extra=${5:-} left logs
   echo "--- $name ---"
   sudo env PATH="$PATH" WORK="$WORK" PORT="$PORT" \
     unshare -n -m --propagation private "$WORK/inside.sh" "$name" "$mode" "$gap" "$user" "$extra" ||
@@ -262,7 +265,11 @@ run_case() {
     kill_left "$name"
   fi
   if [ -e "$WORK/$name/app/keploy-logs.txt" ]; then
-    fail "$name: keploy left its keploy-logs.txt behind"
+    fail "$name: keploy left a keploy-logs.txt in its working directory"
+  fi
+  logs=$(find "$WORK/$name/tmp" -maxdepth 1 -name 'keploy-logs-*.txt' 2>/dev/null)
+  if [ -n "$logs" ]; then
+    fail "$name: keploy left its log behind in its temp directory: $logs"
   fi
 }
 

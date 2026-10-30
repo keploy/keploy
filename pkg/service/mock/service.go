@@ -130,9 +130,10 @@ type SetPusher interface {
 
 // ProvenTablePusher is the Instrumentation extension a replay under the
 // proven switch needs: it hands the agent the per-test table and each key's
-// pool slice (models.ScopeTableReq.Pool) in one request.
+// pool slice (models.ScopeTableReq.Pool) in one request, with the recorded
+// window of every test of the set (models.ScopeTableReq.Windows).
 type ProvenTablePusher interface {
-	PushProvenTable(ctx context.Context, table, pool map[string][]string) error
+	PushProvenTable(ctx context.Context, table, pool map[string][]string, windows []models.TestWindow) error
 }
 
 type MappingReader interface {
@@ -162,6 +163,13 @@ type MockDB interface {
 	// SetCounterID seeds the mock-name counter so the next InsertMock names its
 	// mock "mock-<id+1>" — used to append without reusing existing names.
 	SetCounterID(id int64)
+	// SkippedMocks is the mock file a replay of the set testSetID reads ("" for
+	// none) and, by name, each named document of it the read skips, with why
+	// (the read's own reason): a refusal over a name mappings.yaml lists then
+	// names the edit to correct. Nil when the file cannot be read. A store
+	// that wraps another must forward it: the refusal cannot tell a skipped
+	// mock from one the file does not have without it.
+	SkippedMocks(ctx context.Context, testSetID string) (file string, skipped map[string]models.SkippedMock)
 }
 
 // MappingDB persists and reads the per-test mock mapping for a set. Optional:

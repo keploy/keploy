@@ -48,8 +48,9 @@ type DiskMocks struct {
 	placed []diskEntry
 
 	// destinations is, for each recorded destination a mock on disk reached
-	// (destinationKey), the entry of the first one recorded
-	// (LoadDestinations). One entry per destination, resident.
+	// (destinationKey) and, under the proven switch, each port one reached
+	// (reachedPortKey), the entry of the first one recorded
+	// (LoadDestinations). One entry per destination and port, resident.
 	destinations map[string]diskEntry
 
 	// statements is the statement catalog: for each statement a mock on disk
@@ -72,6 +73,11 @@ type DiskMocks struct {
 	// (kindOf); kept under the proven switch only.
 	byKind map[models.Kind][]string
 	kindOf map[string]models.Kind
+
+	// phase names the mocks on disk that are protocol-phase
+	// (models.Mock.IsProtocolPhase at Add): few, so only those are listed
+	// (RangeTimes); kept under the proven switch only. nil while none is.
+	phase map[string]bool
 
 	// budget is how many bytes of records the store keeps in memory
 	// (residentBudgetBytes); the first records up to it stay there, in mem by
@@ -249,6 +255,18 @@ func (d *DiskMocks) Add(m *models.Mock) error {
 			d.kindOf[m.Name] = m.Kind
 		}
 	}
+	// The teardown bound reads which are protocol-phase (RangeTimes), under
+	// the proven switch only.
+	if provenswitch.On() {
+		if m.IsProtocolPhase() {
+			if d.phase == nil {
+				d.phase = make(map[string]bool)
+			}
+			d.phase[m.Name] = true
+		} else {
+			delete(d.phase, m.Name)
+		}
+	}
 	for _, k := range models.RequestKeys(m) {
 		if d.byKey == nil {
 			d.byKey = make(map[string][]string)
@@ -264,7 +282,18 @@ func (d *DiskMocks) Add(m *models.Mock) error {
 	if models.IsAnswerPlaced(m) {
 		d.placed = append(d.placed, e)
 	}
-	if k := destinationKey(m); k != "" {
+	// Under the proven switch the store also keeps the first mock of each
+	// port the recording reached (reachedPortKey), for the loopback rules
+	// keploy mock replay reads (recordedPorts.seed): its staging reads only
+	// what was recorded before the set's first test.
+	keys := []string{destinationKey(m)}
+	if provenswitch.On() {
+		keys = append(keys, reachedPortKey(m))
+	}
+	for _, k := range keys {
+		if k == "" {
+			continue
+		}
 		if first, ok := d.destinations[k]; !ok || e.reqTsNano < first.reqTsNano {
 			if d.destinations == nil {
 				d.destinations = make(map[string]diskEntry)
@@ -648,9 +677,11 @@ func (d *DiskMocks) LoadStatements() ([]*models.Mock, error) {
 }
 
 // LoadDestinations returns, in recorded order, the first mock on disk of
-// each recorded destination (destinationKey): what the recording says of its
-// destinations, bounded by how many it reached, for the proxy's destination
-// rules to read before any of them is staged (Proxy.SeedRecordedDestinations).
+// each recorded destination (destinationKey) and, under the proven switch, of
+// each port the recording reached (reachedPortKey), each mock once: what the
+// recording says of its destinations, bounded by how many it reached, for the
+// proxy's destination rules to read before any of them is staged
+// (Proxy.SeedRecordedDestinations).
 func (d *DiskMocks) LoadDestinations() ([]*models.Mock, error) {
 	d.mu.Lock()
 	if d.closed {
@@ -658,8 +689,13 @@ func (d *DiskMocks) LoadDestinations() ([]*models.Mock, error) {
 		return nil, fmt.Errorf("disk mocks: store closed")
 	}
 	sel := make([]diskEntry, 0, len(d.destinations))
+	seen := make(map[int64]bool, len(d.destinations))
 	for _, e := range d.destinations {
-		sel = append(sel, e)
+		// One mock may be the first of a destination and of a port.
+		if !seen[e.off] {
+			seen[e.off] = true
+			sel = append(sel, e)
+		}
 	}
 	d.mu.Unlock()
 	sort.Slice(sel, func(i, j int) bool {
@@ -761,6 +797,29 @@ func (d *DiskMocks) RangeKind(kind models.Kind, visit func(name string, load fun
 	for _, c := range cs {
 		e := c.e
 		if !visit(c.name, func() (*models.Mock, error) { return d.readAt(e) }) {
+			return nil
+		}
+	}
+	return nil
+}
+
+// RangeTimes calls visit with every mock on disk, each once, in no order:
+// its name, its request and answer times, and whether it is protocol-phase
+// (models.Mock.IsProtocolPhase; told under the proven switch only, the only
+// one the teardown bound reads it under), until visit returns false. Nothing is
+// decoded: the times are the store's own, kept as each mock was added. It
+// is what bounds a set's teardown under keploy mock replay
+// (MockManager.SetRecordingTimes): the latest recording of the set's tests,
+// which the staging does not read. visit runs under the store's lock, so it
+// must not call the store.
+func (d *DiskMocks) RangeTimes(visit func(name string, req, res time.Time, protocolPhase bool) bool) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.closed {
+		return fmt.Errorf("disk mocks: store closed")
+	}
+	for name, e := range d.byName {
+		if !visit(name, time.Unix(0, e.reqTsNano), time.Unix(0, e.resTsNano), d.phase[name]) {
 			return nil
 		}
 	}

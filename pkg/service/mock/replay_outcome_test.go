@@ -485,6 +485,10 @@ func TestReplayTellsEachMissItsOwnNextStep(t *testing.T) {
 		{Protocol: "HTTP", ActualSummary: "GET /a", Destination: "dep:80", MatchPhase: models.MatchPhaseBody,
 			NextSteps: "Only values drifted (body.id)."},
 		{Protocol: "Generic", ActualSummary: "bytes", Destination: "dep:9000"},
+		// Record's full round: the learn step's reason, by its code and in
+		// its words.
+		{Protocol: "Mongo", ActualSummary: "find", Destination: "mongo:27017", MatchPhase: models.MatchPhaseBody,
+			Reason: models.MissRequestChanged, NextSteps: "body.cmd.filter.appId carries a value keploy cannot follow yet."},
 	}
 	core, logs := observer.New(zapcore.DebugLevel)
 	instr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
@@ -507,9 +511,15 @@ func TestReplayTellsEachMissItsOwnNextStep(t *testing.T) {
 	if len(told) != len(misses) {
 		t.Fatalf("%d misses were told, want %d: %v", len(told), len(misses), messages)
 	}
-	for i, want := range []string{listPort, "Only values drifted (body.id).", "record this call with --on-miss record, or re-record the set"} {
+	for i, want := range []string{listPort, "Only values drifted (body.id).", "record this call with --on-miss record, or re-record the set",
+		"body.cmd.filter.appId carries a value keploy cannot follow yet."} {
 		if got := told[i]["next_step"]; got != want {
 			t.Errorf("miss %d (%v): next step %q, want %q", i, told[i]["destination"], got, want)
+		}
+	}
+	for i, want := range []any{nil, nil, nil, models.MissRequestChanged} {
+		if got := told[i]["reason"]; got != want {
+			t.Errorf("miss %d (%v): reason %v, want %v", i, told[i]["destination"], got, want)
 		}
 	}
 	if !strings.Contains(messages[0], "nothing sent") || strings.Contains(messages[0], "outgoing call") {

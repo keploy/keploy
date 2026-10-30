@@ -20,6 +20,9 @@ type ProcStat struct {
 	// it was read from numbers it: the one kill(2) takes from there, for a
 	// process in a nested pid namespace too.
 	PGRP int
+	// Flags is field 9, the task's PF_* flags (include/linux/sched.h):
+	// PF_EXITING (0x4) is set from the moment it begins to exit (do_exit).
+	Flags uint32
 	// StartTime is field 22, when the process started, in clock ticks after
 	// the system booted.
 	StartTime uint64
@@ -75,6 +78,26 @@ func readStat(proc fs.FS, pid string, buf []byte) ([]byte, error) {
 	return nil, errors.New("stat does not fit its buffer")
 }
 
+// ReleasedTask reports whether a stat line is a task's being released: its
+// parent and group, the two fields after its state, read 0 and -1. The kernel
+// prints those (and a session of -1) where it finds the task's signal
+// handlers released already, and it reads the state before it looks for them
+// (do_task_stat, fs/proc/array.c): a task released between the two reads as
+// R, S or D with them, its PF_EXITING set, so its state says nothing here. No
+// line of a task that is there has a group of -1, the one field of such a
+// line ParseProcStat refuses; the parent's 0 is asked too, so a line cut
+// short or of another shape is not taken for one. ParseProcStat goes on
+// refusing it: taken for a group, a -1 would make a kill of the group
+// (kill(-pgid)) one of process 1.
+func ReleasedTask(line []byte) bool {
+	end := bytes.LastIndexByte(line, ')')
+	if end < 0 {
+		return false
+	}
+	f := bytes.Fields(line[end+1:])
+	return len(f) >= 3 && string(f[1]) == "0" && string(f[2]) == "-1"
+}
+
 // ParseProcStat parses a /proc/<pid>/stat line: "pid (comm) state ppid pgrp
 // session ...". The command name can itself hold spaces and parentheses, so
 // the fields are counted from the line's last ')'. A line parses only whole up
@@ -111,9 +134,13 @@ func ParseProcStat(line []byte) (ProcStat, bool) {
 	if err != nil || pgrp < 0 {
 		return ProcStat{}, false
 	}
+	flags, err := strconv.ParseUint(string(fields[6]), 10, 32)
+	if err != nil {
+		return ProcStat{}, false
+	}
 	start, err := strconv.ParseUint(string(fields[19]), 10, 64)
 	if err != nil {
 		return ProcStat{}, false
 	}
-	return ProcStat{State: fields[0][0], PPID: int(ppid), PGRP: int(pgrp), StartTime: start}, true
+	return ProcStat{State: fields[0][0], PPID: int(ppid), PGRP: int(pgrp), Flags: uint32(flags), StartTime: start}, true
 }

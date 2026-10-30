@@ -44,24 +44,37 @@ type ChildConsole struct {
 	// runLogs are the run log's writers the copies write to: each holds a
 	// last line with no line break until Exited flushes it.
 	runLogs []io.Writer
+	// tee, when set, is a writer for each pipe the child gets: SetChildConsoleTee.
+	tee func() io.Writer
 }
 
 // SetChildConsole sets cmd's Stdout and Stderr to keploy's own, through a
 // ChildConsole. Call Started once cmd.Start has returned, whatever it
 // returned, and Exited once cmd.Wait has.
 func SetChildConsole(cmd *exec.Cmd) (*ChildConsole, error) {
-	return setChildConsole(cmd, false)
+	return setChildConsole(cmd, nil, false)
+}
+
+// SetChildConsoleTee is SetChildConsole that also copies what the child
+// prints, cut as keploy's console gets it, to a writer of its own for each
+// pipe the child gets, from tee: one for its stdout and stderr when they are
+// one file, else one each. With tee set the child always gets pipes, even
+// when the redactor cuts nothing (so it does not see keploy's terminal). A
+// tee's writes are not waited on for errors: a failing one drops what it was
+// given, as keploy's console does. A nil tee is SetChildConsole.
+func SetChildConsoleTee(cmd *exec.Cmd, tee func() io.Writer) (*ChildConsole, error) {
+	return setChildConsole(cmd, tee, false)
 }
 
 // SetAgentConsole is SetChildConsole for a keploy agent, whose lines go, while
 // a run log is open, to the run log or to keploy's own by their level
 // (keployLog.RunLogWriter).
 func SetAgentConsole(cmd *exec.Cmd) (*ChildConsole, error) {
-	return setChildConsole(cmd, true)
+	return setChildConsole(cmd, nil, true)
 }
 
-func setChildConsole(cmd *exec.Cmd, runLog bool) (*ChildConsole, error) {
-	c := &ChildConsole{}
+func setChildConsole(cmd *exec.Cmd, tee func() io.Writer, runLog bool) (*ChildConsole, error) {
+	c := &ChildConsole{tee: tee}
 	out, err := c.file(os.Stdout, runLog)
 	if err != nil {
 		return nil, err
@@ -87,7 +100,7 @@ func (c *ChildConsole) file(dst *os.File, runLog bool) (*os.File, error) {
 		to = keployLog.RunLogWriter(dst)
 	}
 	split := to != io.Writer(dst)
-	if !keployLog.CutsChildOutput() && !split {
+	if c.tee == nil && !keployLog.CutsChildOutput() && !split {
 		return dst, nil
 	}
 	r, w, err := os.Pipe()
@@ -98,7 +111,7 @@ func (c *ChildConsole) file(dst *os.File, runLog bool) (*os.File, error) {
 	if split {
 		c.runLogs = append(c.runLogs, to)
 	}
-	cp := StartChildOutputCopy(to, r, true)
+	cp := StartChildOutputCopy(teeTo(to, c.tee), r, true)
 	c.copies = append(c.copies, cp)
 	go func() {
 		<-cp.Done()
@@ -240,6 +253,27 @@ func (c *ChildOutputCopy) run() {
 		c.flush()
 		return
 	}
+}
+
+// teeTo is dst, and also a writer from tee when tee is set: each write goes to
+// both, and a failing one is dropped without keeping it from the other.
+func teeTo(dst io.Writer, tee func() io.Writer) io.Writer {
+	if tee == nil {
+		return dst
+	}
+	t := tee()
+	if t == nil {
+		return dst
+	}
+	return teeWriter{dst: dst, tee: t}
+}
+
+type teeWriter struct{ dst, tee io.Writer }
+
+func (w teeWriter) Write(p []byte) (int, error) {
+	_, _ = w.dst.Write(p)
+	_, _ = w.tee.Write(p)
+	return len(p), nil
 }
 
 // dropErrors writes to w and reports every write whole.

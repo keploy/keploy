@@ -9,7 +9,9 @@
 #
 # The app listens on the same port inside its container as on the host
 # (PORT:PORT): keploy sends a test to the port the recording names, which is
-# the container's.
+# the container's. free_port picks it below the ephemeral range: one the
+# kernel picks can be the port Docker's DNS server holds in the app's network
+# namespace, and the app cannot bind it (free-port.sh).
 #
 # The app answers GET /price/<id> with its dependency's answer, and as it is
 # stopped publishes POST /shutdown {"msg": $SHUTDOWN_MSG} to the dependency
@@ -72,7 +74,8 @@ FAIL=0
 ID=$$
 PROJECT="cps$ID"
 APP="cps-app-$ID"
-PORT=$(python3 -c 'import socket; s = socket.socket(); s.bind(("", 0)); print(s.getsockname()[1])')
+source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/free-port.sh"
+PORT=$(free_port) || exit 1
 # KNAME is the name keploy is given the app by (--container-name).
 KNAME="$APP"
 fail() {
@@ -285,14 +288,23 @@ record() {
       curl -fsS -o /dev/null "http://127.0.0.1:$PORT/bulk/$BULK" || fail "record $n: GET /bulk/$BULK failed"
       want=$((want + 1))
     fi
-    wait_tests "$want" "$pid" || fail "record $n: keploy record wrote $(test_files) test cases, want $want"
+    # A call that failed writes no test case, so its count is never reached:
+    # wait only when every call was made.
+    if [ "$FAIL" -eq "$before" ]; then
+      wait_tests "$want" "$pid" || fail "record $n: keploy record wrote $(test_files) test cases, want $want"
+    fi
   else
     fail "record $n: keploy exited before the app listened"
   fi
   signal_keploy "$pid" INT
   wait "$pid"
   grep -q "APP SHUTDOWN PUBLISHED bye" "$log" || fail "record $n: the app did not publish as keploy record stopped it"
-  [ "$FAIL" -eq "$before" ] || tail -60 "$log"
+  [ "$FAIL" -eq "$before" ] || {
+    tail -60 "$log"
+    # A call reset as the app came up: did keploy's ingress forwarder hold
+    # the app's port yet? (It starts on the app's bind, after the app does.)
+    grep -n "APP LISTENING\|Intercepted application bind event\|Started ingress forwarding" "$log"
+  }
   no_orphans "record $n"
 }
 

@@ -14,6 +14,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 )
@@ -186,9 +187,13 @@ type trackedConn struct {
 	fmu      sync.Mutex
 	flight   *learn.Flight
 	grounded bool
-	// hangUps counts the holds on a client's hang-up on a TLS handshake
-	// keploy makes over it, not yet told (HoldHangUp).
+	// hangUps counts the holds on a client's hang-up not yet told
+	// (HoldHangUp): on a TLS handshake keploy makes over it, or while a
+	// watch tells its going on to the app its call is live to.
 	hangUps atomic.Int32
+	// hangUpTold: its handler has told its client's hang-up on to the app
+	// its call was live to (HangUpTold); under mu.
+	hangUpTold bool
 }
 
 // track keeps conn, and returns it wrapped so its reads are seen.
@@ -284,8 +289,12 @@ func (c *trackedConn) pending(answers bool) bool {
 }
 
 // busyAt is busy for c's counts at one instant (v), read before its socket
-// (untaken, hungUp).
+// (untaken, hungUp). One whose client's hang-up was told on (HangUpTold)
+// holds none.
 func (c *trackedConn) busyAt(v connView, answers bool) bool {
+	if v.hangUpTold {
+		return false
+	}
 	return busy(c.untaken(v), answers, v.reading, v.held, v.idle, c.closing.Load()) || c.hungUp(v)
 }
 
@@ -593,8 +602,10 @@ type connView struct {
 	// returned the end of the stream.
 	delivered uint64
 	eof       bool
-	// hangUps are its holds on a client's hang-up not yet told (HoldHangUp).
-	hangUps int32
+	// hangUps are its holds on a client's hang-up not yet told (HoldHangUp),
+	// and hangUpTold whether one was told on to the app (HangUpTold).
+	hangUps    int32
+	hangUpTold bool
 	// settled, settledMarks and hasSettled are its last note of holding
 	// no request (trackedConn.settled).
 	settled      uint64
@@ -614,15 +625,15 @@ func (c *trackedConn) view() connView {
 func (c *trackedConn) viewLocked() connView {
 	return connView{
 		reading: c.reading.Load(), held: c.held.Load(), marks: c.unknownFor.Load(), idle: c.idle.Load(),
-		delivered: c.delivered.Load(), eof: c.eof.Load(), hangUps: c.hangUps.Load(),
+		delivered: c.delivered.Load(), eof: c.eof.Load(), hangUps: c.hangUps.Load(), hangUpTold: c.hangUpTold,
 		settled: c.settled, settledMarks: c.settledMarks, hasSettled: c.hasSettled,
 	}
 }
 
-// HoldHangUp implements pTls.HangUpHolder: until release, c holds work
-// whenever its client is gone and the hang-up is not yet told (hungUp), in a
-// record as in a replay. A test's end waits for it by events: release, as
-// every change of c's, wakes whoever waits on Changed.
+// HoldHangUp implements pTls.HangUpHolder and util.HangUpTeller: until
+// release, c holds work whenever its client is gone and the hang-up is not
+// yet told (hungUp), in a record as in a replay. A test's end waits for it by
+// events: release, as every change of c's, wakes whoever waits on Changed.
 func (c *trackedConn) HoldHangUp() (release func()) {
 	c.count(&c.hangUps, 1)
 	c.t.changed()
@@ -633,6 +644,25 @@ func (c *trackedConn) HoldHangUp() (release func()) {
 			c.moved()
 		})
 	}
+}
+
+// HangUpTold implements util.HangUpTeller: c's handler has told its
+// client's hang-up on to the app its call was live to (the HTTP/1 ingress's
+// watch of a live call's client), once c's socket held nothing but the
+// client's end: every byte the client sent before it was read. What c holds
+// from then on, the client's end and the app's answer no one is there to
+// take, is no test's work: the exchange is not recorded and nothing asserts
+// its answer, so a test's end that waited on it would prove nothing, and an
+// app that ignores its client's going (a long poll quiet until its own
+// timeout, a handler deaf to its request's context) would hold that end for
+// good. c holds no work from then on (busyAt, scope.holds), in a record as in
+// a replay, as a record's settle, which reads only untaken bytes, already
+// held none for a client whose FIN its socket shows.
+func (c *trackedConn) HangUpTold() {
+	c.mu.Lock()
+	c.hangUpTold = true
+	c.mu.Unlock()
+	c.moved()
 }
 
 // hungUp reports whether c, holding a client's hang-up not yet told (v's
@@ -866,14 +896,11 @@ func (c *trackedConn) Close() error {
 func (c *trackedConn) HoldTLSLayer(l *tls.Conn) { c.tlsLayer.Store(l) }
 
 // CloseWrite forwards a half-close to the conn underneath: a request
-// still aloft is given no answer on c (endUntold).
+// still aloft is given no answer on c (endUntold). A conn underneath that
+// cannot half-close says so (util.ErrCannotHalfClose).
 func (c *trackedConn) CloseWrite() error {
 	c.endUntold(false)
-	type closeWriter interface{ CloseWrite() error }
-	if cw, ok := c.Conn.(closeWriter); ok {
-		return cw.CloseWrite()
-	}
-	return nil
+	return util.CloseWriteIfPossible(c.Conn)
 }
 
 // NetConn is the conn c reads and writes through (the *tls.Conn convention),
@@ -1133,6 +1160,11 @@ func heldWords(tc *trackedConn, v connView, cut uint64, answers bool) string {
 // unknown mark stood when it was found holding none. v is the view read.
 func (s *scope) holds(tc *trackedConn, cut uint64, answers bool, b *holdBound) (held, marked bool, v connView) {
 	v = tc.scopedView(b)
+	if v.hangUpTold {
+		// Its client's hang-up was told on: what it holds is no test's
+		// (HangUpTold).
+		return false, false, v
+	}
 	if v.delivered < cut || tc.hungUp(v) {
 		return true, false, v
 	}
@@ -1245,6 +1277,7 @@ var (
 	_ integrations.UnknownMarker = (*trackedConn)(nil)
 	_ integrations.IdleMarker    = (*trackedConn)(nil)
 	_ syscall.Conn               = (*trackedConn)(nil)
+	_ util.HangUpTeller          = (*trackedConn)(nil)
 )
 
 // keepsConnections reports whether the accept keeps each connection it hands

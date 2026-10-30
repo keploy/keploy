@@ -42,6 +42,14 @@ type Origin struct {
 	// why alone (FileProcessText).
 	Unnamed string `json:"unnamed,omitempty" yaml:"-" bson:"-"`
 	PID     uint32 `json:"pid,omitempty" yaml:"-" bson:"-"`
+	// Cmdline is, on a call only (UnmatchedCall.Source, never a mock), the
+	// whole command line of the process that made it, redacted as keploy's
+	// log of it is (containerkey.RedactArgs), and PID its kernel pid then
+	// too, so keploy mock's local receipt can name the process that made a
+	// call no test was charged with (Receipt.UnchargedMisses). Like Unnamed
+	// and PID, it only travels: no recording's file, test case's or
+	// report holds it (yaml and bson "-", and Persisted).
+	Cmdline string `json:"cmdline,omitempty" yaml:"-" bson:"-"`
 }
 
 // UnnamedPIDNamespace is Origin.Unnamed when keploy runs in a PID namespace
@@ -98,12 +106,12 @@ func (o *Origin) processText(withPID bool) string {
 	return "`" + o.Comm + "` (`" + o.Exe + "`)"
 }
 
-// Persisted is what of o a file holds: o without Unnamed and PID, which only
-// travel; nil when nothing is left, so a mock whose process keploy would not
-// name and whose clock is unset is written with no origin, as one recorded
-// without the switch is.
+// Persisted is what of o a file holds: o without Unnamed, PID and Cmdline,
+// which only travel; nil when nothing is left, so a mock whose process keploy
+// would not name and whose clock is unset is written with no origin, as one
+// recorded without the switch is.
 func (o *Origin) Persisted() *Origin {
-	if o == nil || o.Unnamed == "" && o.PID == 0 {
+	if o == nil || o.Unnamed == "" && o.PID == 0 && o.Cmdline == "" {
 		return o
 	}
 	p := Origin{Clock: o.Clock, Comm: o.Comm, Exe: o.Exe}

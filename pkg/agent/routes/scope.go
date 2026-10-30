@@ -268,6 +268,16 @@ func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "this keploy agent cannot serve a pool slice per key", http.StatusNotImplemented)
 			return
 		}
+		// The recorded window of every test of the set, before the pool is
+		// served: serving it may stage the set, which installs them with
+		// it. A table without them (an older CLI) leaves the set none, not
+		// a previous set's.
+		if ws, ok := a.svc.(recordedWindowsSetter); ok {
+			if err := ws.SetRecordedWindows(r.Context(), req.Windows); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
 		if err := s.SetScopePool(r.Context(), req.Pool); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -280,6 +290,13 @@ func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 // scopePoolSetter installs each key's pool slice (proven wire).
 type scopePoolSetter interface {
 	SetScopePool(ctx context.Context, pool map[string][]string) error
+}
+
+// recordedWindowsSetter installs the recorded window of every test of the
+// set a replay serves (models.ScopeTableReq.Windows), for the learn step
+// (proven wire).
+type recordedWindowsSetter interface {
+	SetRecordedWindows(ctx context.Context, ws []models.TestWindow) error
 }
 
 // HandleScopeGate installs the replay's gate: the only tests that should run

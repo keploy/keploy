@@ -76,6 +76,10 @@ type replayCase struct {
 	// losses: the agent counts what it could not capture (GET
 	// /agent/capturelosses).
 	losses *lossCounter
+	// captured: the calls the agent captured on miss (--on-miss record),
+	// which the mock store refuses with insertErr when it is set.
+	captured  []*models.Mock
+	insertErr error
 }
 
 // replayIn runs one replay against a real keploy/ directory in a temp repo
@@ -141,7 +145,13 @@ func replayIn(t *testing.T, c replayCase) (string, int, *observer.ObservedLogs) 
 	if c.losses != nil {
 		run = lossReplayInstr{instr, c.losses}
 	}
+	if c.captured != nil {
+		run = missCaptureInstr{instr, c.captured}
+	}
 	var store MockDB = stubMockDB{}
+	if c.insertErr != nil {
+		store = refusingMockDB{err: c.insertErr}
+	}
 	if c.mapped && provenswitch.On() {
 		// Under the switch the mapping must name mocks the recording has.
 		store = named("mock-0")
@@ -1108,4 +1118,20 @@ func TestTheReceiptExplainsItselfAndNamesTheReport(t *testing.T) {
 	if !strings.Contains(got, "\nreport: keploy/reports/r1/replay.yaml\n") {
 		t.Fatalf("last-replay.yaml does not name the report:\n%s", got)
 	}
+}
+
+// last-replay.yaml writes a bypassed destination as every other file of the
+// set writes one: an IPv6 host in brackets, so ::1 on 27017 is [::1]:27017,
+// not ::1:27017, which no reader can split into host and port.
+func TestBypassListWritesAnIPv6HostInBrackets(t *testing.T) {
+	got := bypassList([]models.BypassRule{
+		{Host: "::1", Port: 27017},
+		{Host: "[::1]", Port: 5432},
+		{Host: "localhost", Port: 8200},
+		{Port: 6379},
+		{Host: "api.internal", Path: "/v1"},
+		{Host: "10.0.0.1"},
+		{Path: "/health"},
+	})
+	require.Equal(t, []string{"[::1]:27017", "[::1]:5432", "localhost:8200", ":6379", "api.internal/v1", "10.0.0.1", "/health"}, got)
 }

@@ -67,6 +67,11 @@ type mockService struct {
 	// as a replay pushes the tests' clocks: the replay's receipt carries
 	// them, for the verdict's rule 4 and UNFROZEN rows.
 	realListed map[string][]string
+	// mockOwners is, under the proven switch, the tests that own each mock
+	// of the per-test table the replay pushed (models.MockOwners), set by
+	// pushProvenTable: the receipt names, on a test's miss that is another
+	// test's recording, that test (withRecordedIn).
+	mockOwners map[string][]string
 }
 
 // New constructs the mock record/replay service. mappingDB and hooks may be nil
@@ -153,8 +158,10 @@ func (m *mockService) setName() string {
 // back from the stopped container instead -- ComposeOutcomeReader.) The agent client
 // holds a zero-value http.Client with no timeout of its own
 // (pkg/platform/http/agent.go), and a SIGTERM'd server that still accepts but
-// never answers would hang the run: forever on the record side, whose reads sit
-// on a context.WithoutCancel that not even Ctrl+C reaches.
+// never answers would hang the run. (Its reads of capture losses alone carry a
+// bound of their own: an agent that made no answer while keploy had
+// stall.HangBudget of its own runnable time, or the interrupt that gives a
+// stop's waits up, ends them; AgentClient.GetCaptureLosses.)
 //
 // With the switch off these are all best-effort epilogue reads — losing one
 // costs a summary line or a mappings file, never a recorded mock — so a short

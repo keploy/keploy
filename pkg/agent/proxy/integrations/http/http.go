@@ -61,6 +61,12 @@ type HTTP struct {
 	// placeWarned holds the recordings (placeWarning) whose unreadable
 	// variable place the learn step warned of.
 	placeWarned sync.Map
+	// learnIx is the learn step's index of the last staging generation, or
+	// shared part of an open test's reads, a learned call read (learnIndex).
+	learnIx learnIndexes
+	// strictIx is the strict pass's index of the last staging generation, or
+	// shared part of an open test's reads, a strict call read (strictIndex).
+	strictIx strictIndexes
 }
 
 func New(logger *zap.Logger) integrations.Integrations {

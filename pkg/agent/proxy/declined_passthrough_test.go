@@ -387,17 +387,18 @@ func countNilParserDeclines(blk *ast.BlockStmt) int {
 	return n
 }
 
-// TestRelayDeclinedConn_ForwardsTheHalfClose is why the declined relay does
-// NOT go through globalPassThrough.
+// TestRelayDeclinedConn_ForwardsTheHalfClose is why the declined relay did
+// NOT go through globalPassThrough when it was written.
 //
-// globalPassThrough never calls CloseWrite on either side and returns on
-// io.EOF, so a client doing shutdown(SHUT_WR) — the end-of-request signal
-// for every EOF-delimited exchange — makes the relay return, and
-// handleConnection's deferred close then tears down BOTH sockets. The
-// upstream never learns the request ended, never replies, and the user's
-// connection dies one round trip later than before. That is the same bug
-// this whole change exists to remove, so relaying through a passthrough
-// that cannot carry a FIN would have shipped it again.
+// globalPassThrough then never called CloseWrite on either side and
+// returned on io.EOF, so a client doing shutdown(SHUT_WR) — the
+// end-of-request signal for every EOF-delimited exchange — made the relay
+// return, and handleConnection's deferred close then tore down BOTH sockets.
+// The upstream never learned the request ended, never replied, and the
+// user's connection died one round trip later than before. That is the same
+// bug this whole change exists to remove, so relaying through a passthrough
+// that cannot carry a FIN would have shipped it again. (globalPassThrough
+// forwards the FIN now too: TestGlobalPassThroughForwardsEachSidesEnd.)
 func TestRelayDeclinedConn_ForwardsTheHalfClose(t *testing.T) {
 	upstream, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

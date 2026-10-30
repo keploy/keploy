@@ -228,8 +228,9 @@ func approxMockBytes(m *models.Mock) int {
 }
 
 // carryReachable reports whether a registered mock recorded at req is
-// reachable once the current window starts at start: the release window of
-// req - CarryOverLookahead has started. With no schedule, everything is.
+// reachable once the current window starts at start
+// (models.WindowSchedule.CarryOverReachable, the rule the replayer's mock
+// prune holds a carry-over mock by too).
 func carryReachable(sched *models.WindowSchedule, req, start time.Time) bool {
-	return sched.Released(req.Add(-models.CarryOverLookahead), start)
+	return sched.CarryOverReachable(req, start)
 }
