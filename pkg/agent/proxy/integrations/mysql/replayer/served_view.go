@@ -95,15 +95,15 @@ func servedView(m *models.Mock, live, written *mysql.PacketBundle) (func() (*mod
 	return func() (*models.Mock, error) {
 		v := m.ShallowCopy()
 		req := reqs[0]
-		req.PacketBundle.Header, req.PacketBundle.Message = header, message
+		req.Header, req.Message = header, message
 		v.Spec.MySQLRequests = []mysql.Request{req}
 		v.Spec.MySQLResponses = nil
 		if written != nil {
 			resp := resps[0]
 			if renumbered {
-				ok := *resp.PacketBundle.Message.(*mysql.StmtPrepareOkPacket)
+				ok := *resp.Message.(*mysql.StmtPrepareOkPacket)
 				ok.StatementID = stmtID
-				resp.PacketBundle.Message = &ok
+				resp.Message = &ok
 			}
 			v.Spec.MySQLResponses = []mysql.Response{resp}
 		}
