@@ -1446,9 +1446,10 @@ func (dc *DriftCache) instantEchoFrom(r Leaf, echoed []echoMatch, at time.Time, 
 			continue
 		}
 		xb := x.payload()
-		for _, f := range xb.fields {
-			if !f.key && dc.holdsRecorded(xb.text[f.start:f.end], echoed) {
-				return Place{Mock: x.mock, Field: f.describe(), Echo: true, unserved: !x.served}, true
+		holds := func(f rawField) bool { return !f.key && dc.holdsRecorded(xb.text[f.start:f.end], echoed) }
+		for i, f := range xb.fields {
+			if holds(f) {
+				return Place{Mock: x.mock, Field: f.describe(), Echo: true, unserved: !x.served, sent: sentFrom(xb.fields[i:], holds)}, true
 			}
 		}
 		if dc.holdsRecorded(xb.text, echoed) || dc.holdsRecorded(dc.rawExtra(xb.text), echoed) {
@@ -1511,7 +1512,7 @@ func (dc *DriftCache) instantRawFrom(r Leaf, rec, live moment, at time.Time, raw
 		if !dc.holdsExact(texts[0], rec) && !dc.holdsExact(texts[1], rec) {
 			continue
 		}
-		field, given, found := "", false, false
+		field, given, found, sent := "", false, false, true
 		in := func(own string) bool { return dc.holdsExact(own, live) }
 		for _, f := range x.payload().fields {
 			if f.key || f.end > len(texts[0]) {
@@ -1528,6 +1529,9 @@ func (dc *DriftCache) instantRawFrom(r Leaf, rec, live moment, at time.Time, raw
 			// field. Else the first field that holds rec, unmarked (an
 			// upsert's createdAt, older in F's view, before its updatedAt,
 			// which held the value F saw: the copy is the updatedAt's).
+			// sent: every field that holds rec stands in x's request
+			// (Place.sent); a break below is at an answer's.
+			sent = sent && requestPath(f.path)
 			if !found {
 				field, found = f.describe(), true
 			}
@@ -1536,7 +1540,7 @@ func (dc *DriftCache) instantRawFrom(r Leaf, rec, live moment, at time.Time, raw
 				break
 			}
 		}
-		return Place{Mock: x.mock, Field: field, Held: r.Value, unserved: !x.served, givenWhole: given}, true
+		return Place{Mock: x.mock, Field: field, Held: r.Value, unserved: !x.served, givenWhole: given, sent: found && sent}, true
 	}
 	return Place{}, false
 }
