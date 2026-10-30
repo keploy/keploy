@@ -74,10 +74,12 @@ func TestRegisterSeriesShapeIsOneReadingPerKind(t *testing.T) {
 // A set's recordings, given in no order: a timer's claim every 2 s between
 // the application's other calls is read in its calls' spans, from each
 // one's previous data-plane call, into one series whose epoch leaf reads
-// the clock; its recordings come back in the order of their calls. Not
-// read: the set's first call (no previous call bounds its read), a
-// heartbeat (protocol phase), a recording with no request time, one its
-// reading cannot read, and a kind nobody registered.
+// the clock; its recordings come back in the order of their calls. The
+// set's first call is read too, in a span with no start (no call before it
+// bounds its read), and is the series' first: a test whose miss is closest
+// to it varied in the series as much as one closest to a later claim. Not
+// read: a heartbeat (protocol phase), a recording with no request time, one
+// its reading cannot read, and a kind nobody registered.
 func TestSeriesOfSetReadsAKindsRecordingsInTheirCallsSpans(t *testing.T) {
 	defer RegisterSeriesShape(seriesKind, readSeriesRow)()
 	base := time.Date(2026, 10, 29, 10, 0, 0, 0, time.UTC)
@@ -103,19 +105,32 @@ func TestSeriesOfSetReadsAKindsRecordingsInTheirCallsSpans(t *testing.T) {
 	recorded = append(recorded, heartbeat, untimed, unread, nil)
 
 	got := SeriesOfSet(recorded, nil)
+	claims = append([]*models.Mock{first}, claims...)
 	if len(got.Mocks) != len(claims) {
-		t.Fatalf("read %d recording(s), want the %d claims after the first", len(got.Mocks), len(claims))
+		t.Fatalf("read %d recording(s), want the %d claims, the first among them", len(got.Mocks), len(claims))
 	}
 	for i, m := range got.Mocks {
 		if m != claims[i] {
 			t.Fatalf("recording %d is %q, want %q: the claims in the order of their calls", i, m.Name, claims[i].Name)
 		}
 	}
+	rd, err := ReadSetRange(func(visit func(*models.Mock) bool) error {
+		for _, m := range recorded {
+			visit(m)
+		}
+		return nil
+	}, func(*models.Mock) bool { return true })
+	if err != nil || len(rd.Reads) != len(claims) {
+		t.Fatalf("ReadSetRange read %d recording(s) (%v), want the %d claims", len(rd.Reads), err, len(claims))
+	}
+	if sp := rd.Reads[0].Span; !sp.From.IsZero() || !sp.To.Equal(first.Spec.ReqTimestampMock) {
+		t.Fatalf("the set's first call is read in %+v; want a span with no start, ending at its request", sp)
+	}
 	if len(got.Series) != 1 {
 		t.Fatalf("got %d series, want the claims' one: %+v", len(got.Series), got.Series)
 	}
 	s := got.Series[0]
-	if _, ok := s.Clock["body.at"]; !ok || len(s.Members) != len(claims) || s.Members[len(s.Members)-1] != len(claims)-1 {
+	if _, ok := s.Clock["body.at"]; !ok || len(s.Members) != len(claims) || s.Members[0] != 0 || s.Members[len(s.Members)-1] != len(claims)-1 {
 		t.Fatalf("the claims' series is %+v; want body.at a read of the clock, every claim a member, the newest last", s)
 	}
 	// Each claim's span starts at the application's call just before it
@@ -391,5 +406,42 @@ func TestSeriesOfSetNeverReadsTwoKindsIntoOneSeries(t *testing.T) {
 	}
 	if len(got.Series) != 2 {
 		t.Fatalf("got %d series; want one of each kind's claims", len(got.Series))
+	}
+}
+
+// A set's first call whose epoch leaf the claims' offset would place after
+// the call itself is no claim of theirs: it is a series of its own, and the
+// claims after it still read their leaf as the clock, every one a member.
+// It never unlearns theirs.
+func TestSeriesOfSetSplitsOffAFirstCallThatIsNoReadOfTheirClock(t *testing.T) {
+	defer RegisterSeriesShape(seriesKind, readSeriesRow)()
+	base := time.Date(2026, 10, 29, 10, 0, 0, 0, time.UTC)
+	claim := func(name string, at time.Time, v time.Time) *models.Mock {
+		return rowMock(name, seriesKind, at, at.Add(3*time.Millisecond),
+			map[string]string{"op": "claim", "at": strconv.FormatInt(v.Unix(), 10)})
+	}
+	first := base.Add(500 * time.Millisecond)
+	recorded := []*models.Mock{claim("first", first, first.Add(time.Hour))}
+	for i := 1; i <= 5; i++ {
+		at := base.Add(time.Duration(2*i)*time.Second + 500*time.Millisecond)
+		recorded = append(recorded, claim("claim-"+strconv.Itoa(i), at, at.Add(-time.Millisecond)))
+	}
+	got := SeriesOfSet(recorded, nil)
+	if len(got.Mocks) != len(recorded) || len(got.Series) != 2 {
+		t.Fatalf("read %d recording(s) into %d series, want all %d into two: %+v", len(got.Mocks), len(got.Series), len(recorded), got.Series)
+	}
+	for _, s := range got.Series {
+		switch {
+		case len(s.Members) == 1 && got.Mocks[s.Members[0]].Name == "first":
+			if _, clock := s.Clock["body.at"]; clock {
+				t.Errorf("the first call alone reads its leaf as the clock: %+v", s)
+			}
+		case len(s.Members) == len(recorded)-1:
+			if _, clock := s.Clock["body.at"]; !clock || got.Mocks[s.Members[0]].Name != "claim-1" {
+				t.Errorf("the claims' series is %+v; want body.at a read of the clock, from claim-1", s)
+			}
+		default:
+			t.Errorf("a series of %d member(s) from %q: want the first call alone and the five claims", len(s.Members), got.Mocks[s.Members[0]].Name)
+		}
 	}
 }

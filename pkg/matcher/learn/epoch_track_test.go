@@ -126,13 +126,34 @@ func TestEpochTrack_NeedsThreeRecordingsThatMoved(t *testing.T) {
 	}
 }
 
-// A recording whose span keploy does not know (no call before it) cannot be
-// checked, so the leaf is not learned from a set that holds one.
-func TestEpochTrack_ARecordingWithNoSpanIsNotLearnedFrom(t *testing.T) {
-	reads := pollReads(epochBase, 5, -2*time.Second)
+// A recording no call before bounds (the set's first call: its span has no
+// start) is still checked at its span's end, since the application read its
+// clock for it no later than it sent it. It is learned with, never from: it
+// narrows only the offset's low end, it is none of the MinEpochReads values,
+// and a value the offset would place after its own call is no read of the
+// clock.
+func TestEpochTrack_ARecordingWithNoStartIsLearnedWithNotFrom(t *testing.T) {
+	const off = -2 * time.Second
+	reads := pollReads(epochBase, 5, off)
+	want, ok := EpochTrack(reads[1:])
+	if !ok {
+		t.Fatal("the bounded recordings are not learned")
+	}
 	reads[0].Span.From = time.Time{}
-	if e, ok := EpochTrack(reads); ok {
-		t.Fatalf("a set with a recording of no span is learned: %+v", e)
+	e, ok := EpochTrack(reads)
+	if !ok || e.Hi != want.Hi || e.Lo < want.Lo || e.Lo > off || e.Res != want.Res {
+		t.Fatalf("with the set's first call the leaf is %+v (%v); want the others' %+v, its low end no lower and %v held", e, ok, want, off)
+	}
+	few := pollReads(epochBase, MinEpochReads, off)
+	few[0].Span.From = time.Time{}
+	if e, ok := EpochTrack(few); ok {
+		t.Fatalf("%d bounded recordings and one of no start are learned: %+v", MinEpochReads-1, e)
+	}
+	after := pollReads(epochBase, 5, off)
+	after[0].Span.From = time.Time{}
+	after[0].Value = strconv.FormatInt(pollAt(epochBase, 0).Add(5*time.Second).Truncate(time.Second).Add(off).Unix(), 10)
+	if e, ok := EpochTrack(after); ok {
+		t.Fatalf("a first call whose read the offset places after the call itself is learned: %+v", e)
 	}
 }
 
