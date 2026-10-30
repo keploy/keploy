@@ -280,10 +280,13 @@ func (a *Agent) withdrawWindow(name string, pid int) {
 // preambleHold) is told none, and states a connection made wholly inside a
 // test its preamble, served to every test. A window k already had leaves
 // its scope abandoned: its begin was replaced. Nothing with the switch off,
-// or in a replay. Caller holds scopeMu.
+// or in a replay, or for a suite (NoteScope, before the begin): a suite is
+// no test that may own a call, as the mapping takes suites out of the tests
+// it gives calls to (splitSuites), so the recorder and the mapping weigh the
+// same tests (models.CallOwner). Caller holds scopeMu.
 func (a *Agent) recordScopeLocked(k scopeKey, start time.Time) {
 	a.abandonScopeLocked(k)
-	if !provenswitch.On() || (a.config != nil && a.config.Agent.Mode == models.MODE_TEST) {
+	if !provenswitch.On() || (a.config != nil && a.config.Agent.Mode == models.MODE_TEST) || a.scopeMeta[k].suite {
 		return
 	}
 	mgr := a.spanMgr

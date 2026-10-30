@@ -158,6 +158,41 @@ func TestARecordedTestsWindowIsATestSpanForTheRecorders(t *testing.T) {
 		require.True(t, ok && span.Final() && !span.Shared(), "span %+v", span)
 		require.True(t, span.Start.Equal(start.Add(time.Millisecond)) && span.End.Equal(end.Add(time.Millisecond)), "span %+v, want worker 200's", span)
 	})
+	t.Run("a suite is no test that may own a call", func(t *testing.T) {
+		// keploy mock record's mapping takes suites out of the tests it
+		// gives calls to (splitSuites), so the recorder weighs no suite
+		// either: one owner rule in both places. A call wholly inside the
+		// one test is that test's, final as the test ends, while the
+		// suite (here the runner's, an ancestor of the test's worker) is
+		// still open, whatever process made it.
+		t.Setenv(provenswitch.Env, "1")
+		a := newAgent(t)
+		a.NoteScope("suite", 50, "", true)
+		require.NoError(t, a.BeginScopeAt(ctx, "suite", 50, start))
+		require.NoError(t, a.BeginScopeAt(ctx, "t", 100, start.Add(time.Millisecond)))
+		require.NoError(t, a.EndScopeAt(ctx, "t", 100, end))
+		for _, chain := range [][]uint32{{101, 100, 50, 1}, {100, 50, 1}, {300, 1}, nil} {
+			span, ok := a.spanMgr.TestSpanAt(mid, chain)
+			require.True(t, ok && span.Final() && !span.Shared(), "chain %v: span %+v, want the test's alone while the suite is open", chain, span)
+			require.True(t, span.Start.Equal(start.Add(time.Millisecond)) && span.End.Equal(end), "chain %v: span %+v, want the test's", chain, span)
+		}
+		_, ok := a.spanMgr.TestSpanAt(start, nil)
+		require.False(t, ok, "a call in the suite, outside its tests, is a test's")
+		require.NoError(t, a.EndScopeAt(ctx, "suite", 50, end.Add(time.Second)))
+		ws, _ := a.GetScopeWindows(ctx)
+		require.Len(t, ws, 2)
+		tests, suites := ws[:0:0], 0
+		for _, w := range ws {
+			if w.Suite {
+				suites++
+				continue
+			}
+			tests = append(tests, w)
+		}
+		require.Equal(t, 1, suites, "the suite's window is not recorded as a suite: %+v", ws)
+		require.Len(t, tests, 1)
+		require.Equal(t, "t", tests[0].Name)
+	})
 	t.Run("withdrawn", func(t *testing.T) {
 		t.Setenv(provenswitch.Env, "1")
 		a := newAgent(t)
