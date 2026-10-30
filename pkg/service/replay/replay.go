@@ -2522,7 +2522,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// stopped, started again now: this set is staged on the agent and
 		// its pids are marked, so its startup is this set's.
 		if composeRestart != nil {
-			anew, err := composeRestart.StartComposeApp(ctx)
+			start, err := composeRestart.StartComposeApp(ctx)
 			if err != nil {
 				// The base stays: the daemon may have carried the start out.
 				utils.LogError(r.logger, err, "keploy could not start the application's container again for this test-set", zap.String("test-set", testSetID))
@@ -2531,12 +2531,16 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			r.composeAppStopped = false
 			// Only a start of a container that was not running is a new
 			// app; one that ran on (a stop that did not end it, a start told
-			// failed that the daemon carried out) keeps its base, and what
-			// its processes lost.
-			if anew {
+			// failed that the daemon carried out), or one the daemon never
+			// described, keeps its base, and what its processes lost. The
+			// reason says which: an unread container was not found running.
+			switch start {
+			case models.ComposeAppStartedAnew:
 				r.appStartsAnew()
-			} else {
+			case models.ComposeAppFoundRunning:
 				r.lossAppKept = "keploy found the application's container still running when it started it for this test-set (its stop at an earlier test-set's end did not end it, or a start keploy was told failed was carried out by the docker daemon)"
+			default:
+				r.lossAppKept = "keploy could not read the application's container from the docker daemon when it started it for this test-set (the daemon gave no answer for keploy's stall bound), so it cannot tell whether its stop at an earlier test-set's end ended the application"
 			}
 		}
 

@@ -114,7 +114,7 @@ func TestAComposeStopTheDaemonHasNotRecordedIsNoHaltOfTheNextSet(t *testing.T) {
 	if r := <-done; r.err != nil {
 		t.Fatal(r.err)
 	}
-	anew, err := a.StartComposeApp(context.Background())
+	anew, err := startAnew(a.StartComposeApp(context.Background()))
 	if early {
 		// The daemon records the stop after the next set's start.
 		record()
@@ -201,7 +201,7 @@ func awaitTheRecordOrTheEnd(t *testing.T, logs *observer.ObservedLogs, done chan
 // unless the start started the app anew and the die was no halt.
 func theNextSetStartsAnew(t *testing.T, a *App, d *composeDocker, stream chan events.Message, ended chan struct{}, stopWatch func(), code string) {
 	t.Helper()
-	anew, err := a.StartComposeApp(context.Background())
+	anew, err := startAnew(a.StartComposeApp(context.Background()))
 	for len(d.inspected) > 0 {
 		<-d.inspected
 	}

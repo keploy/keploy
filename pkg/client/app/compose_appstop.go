@@ -886,13 +886,16 @@ func (a *App) signalComposeApp(ctx context.Context, id, signal string) error {
 
 // StartComposeApp starts the app's container of a compose stack again, under
 // the proven switch, after StopComposeApp: its exits are watched as a halt
-// again from then on. anew says the start started a container that was not
-// running, as an inspect before it read: the app is a new one, and what an
-// earlier one's processes lost is not its. It is false where the container
-// runs already (a stop that did not end it, or a start told failed that the
-// daemon carried out: the start is the daemon's no-op), where the inspect
-// could not tell, and with an error: the app may be the one that ran before.
-func (a *App) StartComposeApp(ctx context.Context) (anew bool, err error) {
+// again from then on. start says what an inspect before it read of the
+// container: models.ComposeAppStartedAnew where it was not running (the app
+// is a new one, and what an earlier one's processes lost is not its);
+// models.ComposeAppFoundRunning where it runs already (a stop that did not
+// end it, or a start told failed that the daemon carried out: the start is
+// the daemon's no-op); models.ComposeAppUnread where the daemon gave no
+// answer of it for utils.StopStallBudget of keploy's runnable time, or the
+// start failed (err). Neither of the last two is a new app: it may be the one
+// that ran before.
+func (a *App) StartComposeApp(ctx context.Context) (start models.ComposeAppStart, err error) {
 	// Under stopMu, as keploy's stops are made and the watch decides
 	// (composeAppDied): a die the watch takes during the start is told
 	// apart by the container running once it is through.
@@ -900,20 +903,28 @@ func (a *App) StartComposeApp(ctx context.Context) (anew bool, err error) {
 	defer a.composeApp.stopMu.Unlock()
 	id, err := a.composeAppContainer(ctx)
 	if err != nil {
-		return false, fmt.Errorf("keploy could not tell which container is the application's, to start it again: %w", err)
+		return models.ComposeAppUnread, fmt.Errorf("keploy could not tell which container is the application's, to start it again: %w", err)
 	}
 	// The stop's record, read as the watch reads a die's container
 	// (readComposeContainer): a daemon slow to describe a container it has
-	// stopped is asked again, never taken to say it runs on.
-	info, read := a.readComposeContainer(ctx, id, "keploy starts it, not as a new app")
-	stopped := read && !info.State.Running
+	// stopped is asked again, never taken to say it runs on. A read the
+	// daemon never answered says nothing of the container: it is not told
+	// as one found running.
+	info, read := a.readComposeContainer(ctx, id, "keploy starts it, and cannot tell whether the app it starts is a new one")
+	start = models.ComposeAppUnread
+	if read {
+		start = models.ComposeAppFoundRunning
+		if !info.State.Running {
+			start = models.ComposeAppStartedAnew
+		}
+	}
 	// Bounded only as a hang guard (utils.StopStallBudget), as the stop's
 	// calls are: a wedged daemon cannot hold the set for good.
 	sctx, cancel := context.WithTimeout(ctx, utils.StopStallBudget)
 	defer cancel()
 	if err := a.docker.ContainerStart(sctx, id, container.StartOptions{}); err != nil {
-		return false, fmt.Errorf("keploy could not start the application's container %q again: %w", a.container, err)
+		return models.ComposeAppUnread, fmt.Errorf("keploy could not start the application's container %q again: %w", a.container, err)
 	}
 	a.composeApp.stopping.Store(false)
-	return stopped, nil
+	return start, nil
 }
