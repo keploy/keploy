@@ -52,11 +52,16 @@
 #      start it again: the replay booting a starts the app's container twice
 #      (compose's up, keploy's start for the second set), the first set
 #      passes, and the second fails: its recorded startup call (b), a call
-#      of its worker scope, was never made. The startup call keploy's start
-#      made once the set was staged (a), answered by no mock before the
+#      of its worker scope, was never answered. The startup call keploy's
+#      start made once the set was staged (a), answered by no mock before the
 #      set's first test, is the application's background work (item (b)):
 #      the report lists it among the set's background calls, made before its
-#      first test, not among its unclaimed calls. (Before item (b) that call
+#      first test, not among its unclaimed calls. Its closest recording is
+#      b, so the set's reason names it as b's call made differently, which
+#      keploy refused, and the set's end does not wait for b: the refusal
+#      is the event. (Before, the end waited out its worker scope, 600 of
+#      keploy's wake-ups, about ten minutes, then said b was never made.)
+#      (Before item (b) that call
 #      itself failed the set. With item (b), until keploy took each set's
 #      start of a kept stack's app for that set's boot, a recorded startup
 #      call never made was not required of a compose set, and the second set
@@ -435,9 +440,9 @@ YML
 # into FILE from now on, in the background (STARTS_PID); app_starts FILE ends
 # the stream and says how many there were. A stream, not a read of the past
 # once the replay is over: the daemon keeps only its last 256 events, and a
-# set's end that waits for its worker scope (scenario 6's second set, up to
-# 600 wake-ups) outlasts them under the agent's health checks (their exec
-# events), so a read after the replay found none of the starts.
+# replay that runs a while (a set's end that waits for its worker scope, up
+# to 600 wake-ups) outlasts them under the agent's health checks (their exec
+# events), so a read after the replay may find none of the starts.
 watch_starts() {
   sudo docker events --since "$(date +%s.%N)" --filter type=container --filter event=start \
     --filter "label=com.docker.compose.project=$PROJECT" --filter label=com.docker.compose.service=app \
@@ -478,8 +483,17 @@ starts=$(app_starts restart-starts.txt)
 [ "$(set_status test-set-1)" = FAILED ] || fail "6: test-set-1, recorded booting b, replayed booting a, is $(set_status test-set-1), want FAILED: its recorded startup call was never made"
 [ "$RC" -ne 0 ] || fail "6: keploy test exited 0, want non-zero"
 y="$(sudo cat "$(report test-set-1)" 2>/dev/null)"
-yq -r '.failure_reason // ""' <<<"$y" 2>/dev/null | grep -q "never made 1 of the calls the test set's worker scope recorded" ||
-  fail "6: test-set-1's reason does not say its recorded startup call was never made: $(yq -r '.failure_reason // ""' <<<"$y" 2>/dev/null)"
+# The reason names the startup call keploy refused (a), closest to the
+# recorded one (b): the application made it, differently.
+yq -r '.failure_reason // ""' <<<"$y" 2>/dev/null | grep -q "made 1 of the calls the test set's worker scope recorded (the calls no test owns) differently, and keploy refused each: HTTP POST /boot" ||
+  fail "6: test-set-1's reason does not name the startup call keploy refused, closest to its recorded one: $(yq -r '.failure_reason // ""' <<<"$y" 2>/dev/null)"
+if yq -r '.failure_reason // ""' <<<"$y" 2>/dev/null | grep -q "never made"; then
+  fail "6: test-set-1's reason says a call was never made, though the application made its startup call and keploy refused it: $(yq -r '.failure_reason // ""' <<<"$y" 2>/dev/null)"
+fi
+# The refusal is the event: the set's end did not wait for the recorded
+# startup call, and keploy's log says so.
+grep -q "not waiting for the worker scope's boot calls the application made and keploy refused" restart-boot-a.log ||
+  fail "6: keploy's log does not say test-set-1's end did not wait for its recorded startup call, which the application made and keploy refused"
 yq -r '.background_calls[]? | select(.actual_summary // "" | test("/boot")) | .background_why // ""' <<<"$y" 2>/dev/null |
   grep -q "made before the set's first test began" ||
   fail "6: test-set-1 does not list the startup call keploy's start made among its background calls, made before its first test: $(grep -A8 '^background_calls:' <<<"$y" | head -10)"
