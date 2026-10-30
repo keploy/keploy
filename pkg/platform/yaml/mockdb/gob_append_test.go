@@ -319,3 +319,97 @@ func TestInsertMock_ASetsFilesAreLookedAtAgainOnceTheyMayHaveChanged(t *testing.
 		})
 	}
 }
+
+// What a carry puts in mocks.gob's place already holds every mock the set
+// held, written to the disk before the replace: a kill, an OOM or a second
+// Ctrl+C right after it leaves the set whole. Put in place before the
+// writer's buffer is written out, it was an empty file until the next flush:
+// a stop in that window left the set as empty as the truncation did.
+func TestInsertMock_TheFilePutInTheSetsPlaceHoldsItsMocks(t *testing.T) {
+	t.Setenv("KEPLOY_MOCK_FORMAT", mockFormatGob)
+	dir := t.TempDir()
+	rec := New(zap.NewNop(), dir, "mocks")
+	insertURLs(t, rec, "set-0", "http://a", "http://b", "http://c")
+	closeOK(t, rec)
+
+	var atReplace []string
+	defer func(r func(*zap.Logger, string, string) error) { replaceFile = r }(replaceFile)
+	saved := replaceFile
+	replaceFile = func(l *zap.Logger, src, dst string) error {
+		ms, _, err := readGobMocksCut(src)
+		if err != nil {
+			t.Errorf("the file put in the set's place does not read: %v", err)
+		}
+		for _, m := range ms {
+			atReplace = append(atReplace, m.Spec.HTTPReq.URL)
+		}
+		return saved(l, src, dst)
+	}
+	add := New(zap.NewNop(), dir, "mocks")
+	add.SetCounterID(3)
+	insertURLs(t, add, "set-0", "http://d")
+	closeOK(t, add)
+	if want := []string{"http://a", "http://b", "http://c"}; !reflect.DeepEqual(atReplace, want) {
+		t.Fatalf("at the replace the file held %v, want the set's %v", atReplace, want)
+	}
+	wantURLs(t, dir, "set-0", "http://a", "http://b", "http://c", "http://d")
+}
+
+// A carry whose replace fails (on Windows, a mocks.gob another process holds
+// open) leaves the set as it was: its mocks.gob byte for byte, with no temp
+// file beside it, and Close says the new mock was not written. Had the
+// writer gone on into the old file, it would have written its own stream
+// after the old one, which a reader cannot read past.
+func TestInsertMock_AReplaceThatFailsLeavesTheSetAsItWas(t *testing.T) {
+	t.Setenv("KEPLOY_MOCK_FORMAT", mockFormatGob)
+	dir := t.TempDir()
+	rec := New(zap.NewNop(), dir, "mocks")
+	insertURLs(t, rec, "set-0", "http://a", "http://b", "http://c")
+	closeOK(t, rec)
+	path := filepath.Join(dir, "set-0", "mocks.gob")
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer func(r func(*zap.Logger, string, string) error) { replaceFile = r }(replaceFile)
+	replaceFile = func(*zap.Logger, string, string) error { return errors.New("the file is held open") }
+	add := New(zap.NewNop(), dir, "mocks")
+	add.SetCounterID(3)
+	insertURLs(t, add, "set-0", "http://d")
+	if err := add.Close(); !errors.Is(err, models.ErrMocksNotWritten) {
+		t.Fatalf("Close = %v, want ErrMocksNotWritten", err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatalf("mocks.gob changed (%d -> %d bytes)", len(before), len(after))
+	}
+	wantURLs(t, dir, "set-0", "http://a", "http://b", "http://c")
+	if got := setFiles(t, dir, "set-0"); !reflect.DeepEqual(got, []string{"mocks.gob"}) {
+		t.Fatalf("set-0 holds %v, want mocks.gob alone", got)
+	}
+}
+
+// An empty mocks.gob, which the truncating writer left in sets it was killed
+// in, holds no mock to keep: it takes new mocks, rather than refusing them as
+// a file it cannot read.
+func TestInsertMock_AnEmptyGobFileTakesNewMocks(t *testing.T) {
+	t.Setenv("KEPLOY_MOCK_FORMAT", mockFormatGob)
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "set-0"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "set-0", "mocks.gob"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	add := New(zap.NewNop(), dir, "mocks")
+	insertURLs(t, add, "set-0", "http://d")
+	closeOK(t, add)
+	wantURLs(t, dir, "set-0", "http://d")
+	if got := setFiles(t, dir, "set-0"); !reflect.DeepEqual(got, []string{"mocks.gob"}) {
+		t.Fatalf("set-0 holds %v, want mocks.gob alone", got)
+	}
+}
