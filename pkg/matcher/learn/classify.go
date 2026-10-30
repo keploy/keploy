@@ -3355,8 +3355,14 @@ func partOf(value, part string) string {
 // placeRank orders the places a value may have come from (appearedIn): the
 // request that sent it whole first, the test's own call before the run's,
 // the run's before another's; then the same inside a longer value; then an
-// answer, or the test case's own request, the earlier first.
+// answer, or the test case's own request, the earlier first. A place that
+// uses the run's variable (Seen.Name) is none (7): its value came from the
+// run's place that binds it, which a later call uses too, never a second
+// variable bound at the use.
 func placeRank(e Earlier, s Seen, whole bool) int {
+	if models.RunVariable(s.Name) {
+		return 7
+	}
 	// The test case's own request is what the application was given, as an
 	// answer is: a call that sent the value, where it can be bound, is
 	// named before it.
