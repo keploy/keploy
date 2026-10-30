@@ -11,7 +11,7 @@ import (
 )
 
 // A call the application makes between two tests, after the agent read the
-// earlier one's misses, is its background work (founder D1): the agent hands
+// earlier one's misses, is its background work: the agent hands
 // it to the next test's read marked Background, and keploy test charges it to
 // no test, fails nothing with it and lists it once for the set, as keploy
 // mock does. It was charged to the next test, so a test that followed a
@@ -124,7 +124,7 @@ func inTestSeries(summary string) models.UnmatchedCall {
 
 // A marked background series' call is background work wherever it was made,
 // and the set's line says where: made inside test-1's window it is no call
-// made outside every test (background-poll-series s21, where keploy said
+// made outside every test (where keploy once said
 // "outside every test" of a series' miss inside a GET's window), and one the
 // set end's read takes was made inside the last test's window.
 func TestRunTestSet_AMarkedSeriesCallIsSaidAsMadeInsideItsTestsWindow(t *testing.T) {
@@ -144,7 +144,9 @@ func TestRunTestSet_AMarkedSeriesCallIsSaidAsMadeInsideItsTestsWindow(t *testing
 			t.Fatalf("test %s is %s with %+v; a marked series' call is no test's", r.TestCaseID, r.Status, r.FailureInfo.UnmatchedCalls)
 		}
 	}
-	want := []string{madeInside("test-1") + ", and its recorded answer reaches no test", madeInside("test-2")}
+	// The set stores no mock-12: keploy cannot tell whether its answer
+	// reaches test-1, and says so.
+	want := []string{madeInside("test-1") + ", and keploy could not tell whether its recorded answer reaches a test: its closest recording mock-12 is not in the set's stored recordings", madeInside("test-2")}
 	if len(rep.BackgroundCalls) != 2 || rep.BackgroundCalls[0].BackgroundWhy != want[0] || rep.BackgroundCalls[1].BackgroundWhy != want[1] {
 		t.Fatalf("background calls %+v; want each said as made inside its test's window: %q", rep.BackgroundCalls, want)
 	}

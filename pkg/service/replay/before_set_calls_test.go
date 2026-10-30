@@ -9,14 +9,14 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 )
 
-// F2 and item (b): a call the application makes as it starts, before its
+// A call the application makes as it starts, before its
 // set's first test, that no mock answered is the set's, no test's. Under the
 // proven switch the agent hands it to the first test's read marked as made
 // before the set (BeforeSet); it is background work, failing nothing and
 // listed for the set with where it was made (BackgroundWhy), unless the word
 // rule says what changed in the first test may have come from its recorded
 // answer (flowGuard): then it is that test's miss (ReachesTest). It failed
-// the set until item (b) (founder 2026-10-29).
+// the set before keploy marked such calls background work.
 
 // beforeFirst is the first test's read: the write the application made as it
 // started, which no mock answered, handed over as the set's.
@@ -51,8 +51,66 @@ func TestRunTestSet_ACallBeforeTheFirstTestThatNoMockAnsweredIsBackground(t *tes
 	if len(rep.UnclaimedCalls) != 0 {
 		t.Fatalf("unclaimed calls %+v; want none", rep.UnclaimedCalls)
 	}
-	if len(rep.BackgroundCalls) != 1 || rep.BackgroundCalls[0].ActualSummary != "insert on events" || rep.BackgroundCalls[0].BackgroundWhy != madeBeforeFirst {
-		t.Fatalf("background calls %+v; want the insert, saying it was made before the first test", rep.BackgroundCalls)
+	// The agent named no recording closest to the insert: keploy cannot tell
+	// whether its answer reaches a test, and says so, never "reaches no
+	// test".
+	if want := madeBeforeFirst + ", and keploy could not tell whether its recorded answer reaches a test: no recording is closest to it"; len(rep.BackgroundCalls) != 1 ||
+		rep.BackgroundCalls[0].ActualSummary != "insert on events" || rep.BackgroundCalls[0].BackgroundWhy != want {
+		t.Fatalf("background calls %+v; want the insert, saying %q", rep.BackgroundCalls, want)
+	}
+}
+
+// The guard where keploy test applies it: a call made before the set's first
+// test that no mock answered, whose closest recording (stored for the set)
+// holds the word the first test's response lost this run, is that test's
+// miss and fails it, though the user marked the changed field noise, so the
+// response alone passes; the set fails. The same call whose recording does
+// not hold the word is background work, and the test passes.
+func TestRunTestSet_ACallBeforeTheFirstTestWhoseAnswerReachesItFailsThatTest(t *testing.T) {
+	for _, c := range []struct {
+		name, answer string
+		charged      bool
+	}{
+		{"its answer holds the word the test lost", `{"tenant":"tenantA7K29Q"}`, true},
+		{"its answer holds no word the test changed", `{"tenant":"tenantZ55Q1R"}`, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			provenOn(t, true)
+			h := newPartialRunHarness(t, 2, 0)
+			h.cases[0].HTTPResp.Body = `{"tenant":"tenantA7K29Q"}`
+			h.cases[0].Noise = map[string][]string{"body.tenant": {}}
+			h.mocks.filtered = []*models.Mock{guardMock(c.answer)}
+			h.replayer.hookImpl = prHooks{liveBody: map[string]string{"test-1": `{"tenant":"tenantB00000"}`}}
+			h.instr.mockErrorsFor = misses(reads(startUpCall()))
+
+			status := h.run(t)
+			rep := h.report.report
+			var first *models.TestResult
+			for i := range rep.Tests {
+				if rep.Tests[i].TestCaseID == "test-1" {
+					first = &rep.Tests[i]
+				}
+			}
+			if first == nil {
+				t.Fatalf("no result for test-1: %+v", rep.Tests)
+			}
+			if !c.charged {
+				if status != models.TestSetStatusPassed || first.Status != models.TestStatusPassed || len(rep.BackgroundCalls) != 1 {
+					t.Fatalf("status %s, test-1 %s, background %+v; want the call as background work and the noised field passing", status, first.Status, rep.BackgroundCalls)
+				}
+				return
+			}
+			if status != models.TestSetStatusFailed || first.Status != models.TestStatusFailed {
+				t.Fatalf("status %s, test-1 %s (%+v); the call whose answer reached test-1 fails it", status, first.Status, first.FailureInfo.UnmatchedCalls)
+			}
+			if got := first.FailureInfo.UnmatchedCalls; len(got) != 1 || got[0].ActualSummary != "GET /boot" || got[0].Background ||
+				!strings.Contains(got[0].ReachesTest, `holds "tenantA7K29Q"`) || !strings.Contains(got[0].ReachesTest, "this test's response") {
+				t.Fatalf("test-1's misses %+v; want the start-up call, charged, naming the word and its place", got)
+			}
+			if len(rep.BackgroundCalls) != 0 {
+				t.Fatalf("background calls %+v; a call charged to a test is no background work", rep.BackgroundCalls)
+			}
+		})
 	}
 }
 
@@ -132,7 +190,7 @@ func TestBeforeSetCallsAreTheSetsOwn(t *testing.T) {
 	if len(rest) != 1 || rest[0].ActualSummary != "GET /own" {
 		t.Fatalf("the test keeps %+v; want only its own call", rest)
 	}
-	if got := b.backgroundCalls(); len(got) != 1 || got[0].BackgroundWhy != madeBeforeFirst {
+	if got := b.backgroundCalls(); len(got) != 1 || got[0].BackgroundWhy != backgroundWhy(madeBeforeFirst, "the dataflow guard did not run for this set") {
 		t.Fatalf("the set lists %+v; want the insert", got)
 	}
 	b.reset(nil)
