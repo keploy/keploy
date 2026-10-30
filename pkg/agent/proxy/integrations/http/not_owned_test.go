@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -299,5 +300,31 @@ func TestALookupIsAskedOfTheRoundTheCallWasMadeIn(t *testing.T) {
 	db.refuse = true
 	if got, _ := notOwnedRecording(ctx, call, db, n, at); got != nil || len(db.accepted) != 1 {
 		t.Fatalf("a recording whose name the store refused was named: %v (accepted %v)", got, db.accepted)
+	}
+}
+
+// The next step of a call made elsewhere holds in every replay: only keploy
+// record's full round has judging move the recording to the worker scope; in
+// any other replay (its confirming round, keploy test in CI) the miss
+// stands, and a set-aside test's recording answers a later test only if the
+// call is exactly it and it holds no variable (the proxy's addAside,
+// TestWhatASetAsideTestDoesNotServe), a miss judging never keeps a test over.
+// Acceptance run 7 printed "moves mock-195 to the worker scope" on a
+// confirming round, whose mappings.yaml had no worker: entry.
+func TestTheNextStepOfACallMadeElsewhereSaysWhereJudgingMovesIt(t *testing.T) {
+	got := notOwnedNextSteps("mock-195")
+	for _, want := range []string{
+		"This request is mock-195, which keploy recorded where this replay did not make it",
+		"In keploy record's full round, judging reads this miss and moves mock-195 to the test set's worker scope (mappings.yaml worker:)",
+		"In any other replay the miss stands",
+		"when the test that recorded mock-195 is set aside, keploy answers a later test's call with it only if the call is exactly it and it holds no variable",
+		"keploy record's judging never keeps a test over a miss on a set-aside test's recording",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("the next step lacks %q:\n%s", want, got)
+		}
+	}
+	if i, j := strings.Index(got, "worker scope"), strings.Index(got, "In keploy record's full round"); i < j {
+		t.Fatalf("the next step names the worker scope before it says only the full round moves a recording there:\n%s", got)
 	}
 }
