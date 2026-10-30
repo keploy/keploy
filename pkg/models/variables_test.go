@@ -1,6 +1,8 @@
 package models
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"reflect"
@@ -1540,13 +1542,21 @@ func TestAWallTimeShownTwiceHoldingAnHoursStartIsReadAtAnHoursCut(t *testing.T) 
 
 // A read of the clock that is its value whole writes no Word in json, yaml
 // or bson, so a file learned before Word reads and writes the same; one
-// that is a word of a text keeps the text around it through each, and two
-// learnings of one word read compare equal (Word is a value, not a
-// pointer).
+// that is a word of a text keeps where the word stands through each (its
+// bytes, the bytes after it, and the SHA-256 of each side), never a byte of
+// the text, and two learnings of one word read compare equal (Word is a
+// value, not a pointer).
 func TestClockWordIsOmittedWholeAndKeptAsAWord(t *testing.T) {
+	const text = "[E2E] generate-stop-1793336961102639022"
 	whole := ClockOffset{Res: time.Nanosecond, Since: SinceTestBegin}
 	word := whole
-	word.Word = ClockWord{Before: "[E2E] generate-stop-"}
+	word.Word = ClockWordOf(text, 20, len(text))
+	if word.Word.Start != 20 || word.Word.End != 39 || word.Word.After != 0 {
+		t.Fatalf("ClockWordOf = %+v; want the word at bytes 20-39 with none after it", word.Word)
+	}
+	if word.Word.BeforeSHA256 != sha256Of("[E2E] generate-stop-") || word.Word.AfterSHA256 != sha256Of("") || !word.Word.Valid() {
+		t.Fatalf("ClockWordOf hashes %+v; want the SHA-256 of each side in lower-case hex", word.Word)
+	}
 	type enc struct {
 		name      string
 		marshal   func(any) ([]byte, error)
@@ -1568,6 +1578,9 @@ func TestClockWordIsOmittedWholeAndKeptAsAWord(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", e.name, err)
 		}
+		if strings.Contains(string(b), "generate") || strings.Contains(string(b), "E2E") {
+			t.Errorf("%s: a word read wrote the text around it: %q", e.name, b)
+		}
 		var back ClockOffset
 		if err := e.unmarshal(b, &back); err != nil {
 			t.Fatalf("%s: %v", e.name, err)
@@ -1577,8 +1590,32 @@ func TestClockWordIsOmittedWholeAndKeptAsAWord(t *testing.T) {
 		}
 	}
 	again := whole
-	again.Word = ClockWord{Before: "[E2E] generate-stop-"}
+	again.Word = ClockWordOf(text, 20, len(text))
 	if again != word || !whole.Word.IsZero() || word.Word.IsZero() {
 		t.Errorf("two learnings of one word read compare apart, or IsZero is wrong")
 	}
+}
+
+// WordOf takes a replay's word from between the recorded text's sides,
+// compared by length and SHA-256: a word of another length between them is
+// still the word (a time cut of its trailing zeros), and a side changed in
+// one byte, its length kept, is named.
+func TestClockWordOfComparesEachSideByLengthAndHash(t *testing.T) {
+	w := ClockWordOf("job 2026-10-30T12:00:00.5Z queued", 4, 26)
+	for _, tc := range []struct{ live, word, changed string }{
+		{"job 2026-10-30T12:00:01.25Z queued", "2026-10-30T12:00:01.25Z", ""},
+		{"jab 2026-10-30T12:00:01.25Z queued", "", "before"},
+		{"job 2026-10-30T12:00:01.25Z queuee", "", "after"},
+		{"job  queued", "", "short"},
+		{"job queued", "", "short"},
+	} {
+		if word, changed := w.WordOf(tc.live); word != tc.word || changed != tc.changed {
+			t.Errorf("WordOf(%q) = %q, %q; want %q, %q", tc.live, word, changed, tc.word, tc.changed)
+		}
+	}
+}
+
+func sha256Of(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
 }

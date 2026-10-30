@@ -195,14 +195,15 @@ func TestPersistLearnedWritesClockReadsAndDropsNoiseThere(t *testing.T) {
 
 // A read of the clock learned as one word of a text (models.ClockOffset.Word:
 // keploy mock's client test naming an app "[E2E] stop-<UnixNano>", read
-// since its test began) is written onto the recording with the text around
-// the word, read back the same in every storage format, and never added
-// twice: two learnings of the word compare equal. A later learning that
-// reads the same place as a read whole is another form of the value: their
-// meet is an Empty read, which refuses every value there.
+// since its test began) is written onto the recording with where the word
+// stands (no byte of the text), read back the same in every storage format,
+// and never added twice: two learnings of the word compare equal. A later
+// learning that reads the same place as a read whole is another form of the
+// value: their meet is an Empty read, which refuses every value there.
 func TestPersistLearnedKeepsAClockWordInEveryFormat(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
-	word := models.ClockOffset{Res: time.Nanosecond, Since: models.SinceTestBegin, Word: models.ClockWord{Before: "[E2E] stop-"}}
+	const name = "[E2E] stop-1793336961102639022"
+	word := models.ClockOffset{Res: time.Nanosecond, Since: models.SinceTestBegin, Word: models.ClockWordOf(name, len("[E2E] stop-"), len(name))}
 	whole := models.ClockOffset{Res: time.Nanosecond, Since: models.SinceTestBegin}
 	for _, f := range []string{string(yaml.FormatYAML), string(yaml.FormatJSON), mockFormatGob} {
 		t.Run(f, func(t *testing.T) {
@@ -210,7 +211,7 @@ func TestPersistLearnedKeepsAClockWordInEveryFormat(t *testing.T) {
 			ys := clockStore(dir, f)
 			ctx := context.Background()
 			set := "test-set-0"
-			m := noiseTestMock(`{"name":"[E2E] stop-1793336961102639022"}`)
+			m := noiseTestMock(`{"name":"` + name + `"}`)
 			m.Name = "mock-0"
 			if err := ys.InsertMock(ctx, m, set); err != nil {
 				t.Fatal(err)

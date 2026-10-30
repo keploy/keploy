@@ -1827,9 +1827,11 @@ func sinceTestBegin(ln Learned) (Learned, bool) {
 // its own (every rule of a value: its sources, its echo, a read plus an
 // offset, the form and zone it is read in), is a plain read of the clock
 // (KindClockRead), and the text around it is the same in both runs. The
-// read carries that text (models.ClockOffset.Word), so a replay reads the
-// word alone as the clock and compares the rest, checked from its test's
-// begin (models.SinceTestBegin). ok is false for anything else (a text two
+// read carries where the word stands in the recorded text, with the length
+// and SHA-256 of the text on each side of it, never the text
+// (models.ClockOffset.Word), so a replay reads the word alone as the clock
+// and compares the rest, checked from its test's begin
+// (models.SinceTestBegin). ok is false for anything else (a text two
 // words of which changed, one whose changed word is no read in wb, or one
 // leaf learns otherwise), which stays as the call's own window learned it:
 // the wider window turns a refusal into a checked read, never into noise.
@@ -1850,7 +1852,7 @@ func sinceWord(early Learned, wb *Window, leaf func(r, l Leaf, w *Window, skip s
 	}
 	own.Recorded, own.Live = r, l
 	own.Read.Since = models.SinceTestBegin
-	own.Read.Word = models.ClockWord{Before: before, After: after}
+	own.Read.Word = models.ClockWordOf(r.Value, len(before), len(r.Value)-len(after))
 	if own.Refuted == "" {
 		own.Refuted = early.Refuted
 	}

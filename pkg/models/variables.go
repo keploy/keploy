@@ -1,6 +1,8 @@
 package models
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"sort"
 	"strconv"
@@ -300,30 +302,99 @@ type ClockOffset struct {
 	Since string `json:"since,omitempty" yaml:"since,omitempty" bson:"since,omitempty"`
 	// Word, of a read that is one word of a longer text (keploy mock's
 	// client test naming an app "[E2E] stop-<UnixNano>" by its own clock
-	// read since the test began), is the text around that word as
-	// recorded (ClockWord): a replay checks the value is Before, then one
-	// such read, then After, so only the word is read as the clock and the
-	// rest is still compared. Zero (IsZero) for a read that is its value
-	// whole, as every learning before Word was, and then omitted: an old
-	// file reads the same. A value, not a pointer, so two learnings of one
-	// read compare equal (==). A keploy that does not read Word checks the
-	// whole value as one read, which a text around the word is not, so it
-	// refuses it.
+	// read since the test began), is where that word stands in the text as
+	// recorded (ClockWord): a replay checks the value holds the recorded
+	// text's bytes before the word and after it (by their length and
+	// SHA-256) with one such read between them, so only the word is read as
+	// the clock and every other byte is still compared. Zero (IsZero) for a
+	// read that is its value whole, as every learning before Word was, and
+	// then omitted: an old file reads the same. A value, not a pointer, so
+	// two learnings of one read compare equal (==). A keploy that does not
+	// read Word checks the whole value as one read, which a text around the
+	// word is not, so it refuses it.
 	Word ClockWord `json:"word,omitzero" yaml:"word,omitempty" bson:"word,omitempty"`
 }
 
 // ClockWord is where a read of the clock stands in a longer text
-// (ClockOffset.Word): the text before it and after it, as recorded. A
-// word read always has text on one side at least (the learn step learns a
-// read of a value whole otherwise), so the zero ClockWord is a read whole.
+// (ClockOffset.Word), as recorded: the word at bytes Start to End of the
+// text (End exclusive), After bytes of text after it, and the SHA-256, in
+// lower-case hex, of the text before it (its first Start bytes:
+// BeforeSHA256) and of the text after it (its last After bytes:
+// AfterSHA256). It holds no byte of the text, so what the learn step
+// writes is the same few bytes whatever the text's length, and nothing the
+// recording holds (which may be a secret) is copied into what was learned:
+// the recording holds the text, and "the word at bytes Start-End" names
+// where to read it there. A word read always has text on one side at
+// least (the learn step learns a read of a value whole otherwise), so the
+// zero ClockWord is a read whole. The word's own length may differ at a
+// replay (a time with a fraction cut of its trailing zeros), so a replay
+// reads its word between the first Start bytes and the last After bytes
+// of its value (WordOf); End only says where the recording's word ends.
 type ClockWord struct {
-	Before string `json:"before" yaml:"before" bson:"before"`
-	After  string `json:"after" yaml:"after" bson:"after"`
+	Start        int    `json:"start" yaml:"start" bson:"start"`
+	End          int    `json:"end" yaml:"end" bson:"end"`
+	After        int    `json:"after" yaml:"after" bson:"after"`
+	BeforeSHA256 string `json:"before_sha256" yaml:"before_sha256" bson:"before_sha256"`
+	AfterSHA256  string `json:"after_sha256" yaml:"after_sha256" bson:"after_sha256"`
+}
+
+// ClockWordOf is the ClockWord of the word at bytes start to end (end
+// exclusive) of text, a value as recorded, 0 <= start < end <= len(text).
+func ClockWordOf(text string, start, end int) ClockWord {
+	return ClockWord{Start: start, End: end, After: len(text) - end, BeforeSHA256: textSHA256(text[:start]), AfterSHA256: textSHA256(text[end:])}
 }
 
 // IsZero reports whether w is no word: the read is its value whole. The
 // json, yaml and bson encoders omit a zero Word by it.
 func (w ClockWord) IsZero() bool { return w == ClockWord{} }
+
+// Valid reports whether w is a word a replay can check: a word of one byte
+// or more (Start < End), at bytes of a text (none negative), with text on
+// one side of it at least, and both hashes a SHA-256 in lower-case hex.
+// What a file holds otherwise (a hand edit, a cut copy) is no place of a
+// text, and a replay refuses the value there whatever it is.
+func (w ClockWord) Valid() bool {
+	return w.Start >= 0 && w.End > w.Start && w.After >= 0 && (w.Start > 0 || w.After > 0) && isSHA256Hex(w.BeforeSHA256) && isSHA256Hex(w.AfterSHA256)
+}
+
+// WordOf is the word of live, a replay's text at a place learned as w (a
+// Valid one): live with its first w.Start bytes and its last w.After bytes
+// taken off, where those are the bytes the recorded text held before its
+// word and after it, compared by length and SHA-256, so every byte of
+// them is still compared. Otherwise changed says what is not as recorded:
+// "short" for a live too short to hold both apart (they would overlap, or
+// leave no word between them), else "before" or "after", the side of the
+// word whose bytes changed; changed is "" for a word.
+func (w ClockWord) WordOf(live string) (word, changed string) {
+	switch {
+	case len(live) <= w.Start+w.After:
+		return "", "short"
+	case textSHA256(live[:w.Start]) != w.BeforeSHA256:
+		return "", "before"
+	case textSHA256(live[len(live)-w.After:]) != w.AfterSHA256:
+		return "", "after"
+	}
+	return live[w.Start : len(live)-w.After], ""
+}
+
+// textSHA256 is the SHA-256 of s in lower-case hex.
+func textSHA256(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
+}
+
+// isSHA256Hex reports whether s is a SHA-256 in lower-case hex (textSHA256).
+func isSHA256Hex(s string) bool {
+	if len(s) != 2*sha256.Size {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
 
 // meetWord is the Word two learnings of one place read it at, a and b, and
 // whether they share one: both whole (zero), or both the same word of the
@@ -1436,7 +1507,7 @@ func (o ClockOffset) String() string {
 	s := o.offsetString() + o.zoneString() + o.layoutString()
 	if !o.Word.IsZero() {
 		// Where the word stands, never what the text holds.
-		s += ", as the word after the text's first " + strconv.Itoa(len(o.Word.Before)) + " bytes and before its last " + strconv.Itoa(len(o.Word.After))
+		s += ", as the word at bytes " + strconv.Itoa(o.Word.Start) + "-" + strconv.Itoa(o.Word.End) + " of the text as recorded, with " + strconv.Itoa(o.Word.After) + " bytes after it"
 	}
 	if o.Since == SinceTestBegin {
 		s += ", read after its test began and before its call"

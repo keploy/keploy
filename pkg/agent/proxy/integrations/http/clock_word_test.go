@@ -70,8 +70,9 @@ func TestLearnMatchAClientTestsOwnClockWordIsLearnedAndCheckedAsTheWordAlone(t *
 		t.Fatalf("served %v miss %q consumed %+v; want %s learned as a read of the clock", got, why, db.consumed, field)
 	}
 	o := db.consumed[0].Spec.Clocks[field]
-	if want := (models.ClockWord{Before: "[E2E] stop-"}); o.Word != want || o.Since != models.SinceTestBegin {
-		t.Fatalf("%s learned as %+v; want the word after %q, read since its test began", field, o, want.Before)
+	recName := "[E2E] stop-" + strconv.FormatInt(recRead.UnixNano(), 10)
+	if want := models.ClockWordOf(recName, len("[E2E] stop-"), len(recName)); o.Word != want || o.Since != models.SinceTestBegin {
+		t.Fatalf("%s learned as %+v; want the word at bytes %d-%d, read since its test began", field, o, want.Start, want.End)
 	}
 
 	// The replay 90 s later: its harness reads its clock again after that
