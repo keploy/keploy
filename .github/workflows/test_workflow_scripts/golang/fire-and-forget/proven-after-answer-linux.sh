@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # E2E: a call the app makes after it has answered a test (a fire-and-forget
 # publish its handler starts once the answer has left) is judged, under the
-# proven switch (P101): as the call of the test open when it is made, so a
+# proven switch: as the call of the test open when it is made, so a
 # changed call fails its set and keploy test exits non-zero.
 #
 # The app's /d-after answers "accepted <id>" and only then publishes
@@ -25,7 +25,7 @@
 #
 # A call made after the set's LAST test is judged by a read of the set's
 # misses at its end, which keploy makes once it has stopped the app it started
-# for the set and the app has exited (P101-b): a call the app makes only as it
+# for the set and the app has exited: a call the app makes only as it
 # is stopped is read with them. With SHUTDOWN_PUBLISH set the app publishes
 # "shutdown" as it is stopped, after its last answer; its recording is /c-ping:
 #
@@ -33,7 +33,7 @@
 #   7. HTTP, a changed shutdown publish: the set fails, keploy test exits
 #      non-zero, and c-ping, whose answer the call followed, passes. The
 #      changed call, made after the set's last test was read and answered by
-#      no mock, is the application's background work (item (b)): the report
+#      no mock, is the application's background work: the report
 #      lists it among the set's background calls, made after the set's last
 #      test, and not among its unclaimed calls. The set fails because the
 #      recorded publish, a call of the set's worker scope, was made
@@ -41,8 +41,9 @@
 #      and the recording it was closest to, and does not say the publish was
 #      never made. That recording is placed after a test, not at the set's
 #      start, so keploy does not say it skipped a wait for it. (Before, the
-#      reason said the publish was never made; before item (b) the changed
-#      call itself failed the set, as an unclaimed call.)
+#      reason said the publish was never made; before keploy took such calls
+#      for background work, the changed call itself failed the set, as an
+#      unclaimed call.)
 #
 #   8. An app that ignores SIGINT: keploy's stop at the set's end waits for
 #      its exit, and kills it once it has made no progress on its way out for
@@ -72,17 +73,18 @@
 #      says so in the test-set's config (recordStopKilled).
 #      A replay whose app publishes on its way out at once makes a call the
 #      recording lacks, after the set's last test was read: the
-#      application's background work (item (b)), which fails nothing. The set
+#      application's background work, which fails nothing. The set
 #      is judged and passes, keploy test exits 0, and the report lists the
 #      call among the set's background calls, made after the set's last test.
-#      It is not failed for a call that record's grace cut. (Before item (b)
-#      the set was not judged, naming the recording's kill (P101-b-k); a call
+#      It is not failed for a call that record's grace cut. (Before keploy took
+#      such calls for background work, the set was not judged, naming the
+#      recording's kill; a call
 #      filed late in the last test's window still leaves it so, which the
 #      replay package's rows pin.)
 #
 # A call made before the set's FIRST test, as the app starts, is no test's
 # either: the first test's read hands it over as the set's. One no mock
-# answers is the application's background work (item (b)) unless its
+# answers is the application's background work unless its
 # recorded answer reaches the first test (the dataflow guard). With
 # STARTUP_PUBLISH set the app publishes "startup" before it listens; its
 # recording is /c-ping:
@@ -99,9 +101,9 @@
 #      never made. The set's end does not wait for that recording, since the
 #      refusal already settles it: keploy says so once, and the set ends
 #      without the worker scope's wait. (Before, the reason said the publish
-#      was never made, after the wait ran its course; before item (b) the
-#      changed call itself failed the set (F2); before F2 it was dropped with
-#      a warning, and the set passed.)
+#      was never made, after the wait ran its course; before keploy took such
+#      calls for background work, the changed call itself failed the set;
+#      before that it was dropped with a warning, and the set passed.)
 #
 # A delayed publish the app starts on its own after its last answer, and
 # that lands before it is stopped, is the same read's; whether it lands
@@ -315,8 +317,8 @@ expect_after_fails() {
 
 # background_named <step> <where>: the report lists the publish among the
 # set's background calls, saying it was made <where>, and not among its
-# unclaimed calls (item (b): a call made outside every test's window that no
-# mock answered is the application's background work).
+# unclaimed calls (a call made outside every test's window that no mock
+# answered is the application's background work).
 background_named() {
     yq -r '.background_calls[]? | select(.actual_summary // "" | test("/publish")) | .background_why // ""' "$(REPORT)" 2>/dev/null | grep -q "$2" ||
         fail "$1: the report does not list the publish among the set's background calls, $2: $(grep -n -A8 'background_calls' "$(REPORT)" | head -16)"

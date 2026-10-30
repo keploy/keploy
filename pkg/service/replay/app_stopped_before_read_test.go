@@ -12,12 +12,12 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 )
 
-// P101-b: a call the application makes after its set's last answer, but only
+// A call the application makes after its set's last answer, but only
 // once keploy stops it (a publish its shutdown flushes, a batch it writes on
 // its way out), lands after a set-end read made while the app still runs, and
 // is judged by no one. Under the proven switch keploy stops the app keploy
 // started for the set, waits for its exit, and only then reads the set's end.
-// Since item (b) a call so made that no mock answers is the application's
+// Now a call so made that no mock answers is the application's
 // background work: the agent marks it made outside every test's window
 // (MissOutsideTest, Background), and the set's end lists it with where it was
 // made, failing nothing.
