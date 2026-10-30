@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -133,6 +134,43 @@ const BackgroundOwnSeriesPrefix = "own_series_of: "
 // (BackgroundOwnSeriesPrefix).
 func IsBackgroundOwnSeries(why string) bool {
 	return strings.HasPrefix(why, BackgroundOwnSeriesPrefix)
+}
+
+// backgroundOwnSeriesIDAt follows BackgroundOwnSeriesPrefix in the why of a
+// mark that names its own series' id (BackgroundOwnSeriesWhy).
+const backgroundOwnSeriesIDAt = "the id at "
+
+// BackgroundOwnSeriesWhy is the why of a mark judging writes for a test's own
+// series (BackgroundOwnSeriesPrefix) whose calls all carry the id the test's
+// window first held at idPath (a leaf's path, as keploy's learn step reads a
+// call): the prefix, the path quoted, then words, judging's account of the
+// mark. The agent reads the path back (BackgroundOwnSeriesID) and gives a call
+// of the series its recorded id back there alone: a value at any other place
+// of the call is compared as recorded, even one that equals an id the run
+// bound.
+func BackgroundOwnSeriesWhy(idPath, words string) string {
+	return BackgroundOwnSeriesPrefix + backgroundOwnSeriesIDAt + strconv.Quote(idPath) + "; " + words
+}
+
+// BackgroundOwnSeriesID is the path of the id why, an own series' mark,
+// names (BackgroundOwnSeriesWhy). ok is false when why is no own series'
+// mark, or names no path as BackgroundOwnSeriesWhy writes it (a line someone
+// edited): the agent then gives no id of the series back, and a call of it
+// on an id the run bound anew is its owner's miss, failing closed.
+func BackgroundOwnSeriesID(why string) (idPath string, ok bool) {
+	rest, ok := strings.CutPrefix(why, BackgroundOwnSeriesPrefix+backgroundOwnSeriesIDAt)
+	if !ok {
+		return "", false
+	}
+	q, err := strconv.QuotedPrefix(rest)
+	if err != nil || !strings.HasPrefix(rest[len(q):], "; ") {
+		return "", false
+	}
+	idPath, err = strconv.Unquote(q)
+	if err != nil || idPath == "" {
+		return "", false
+	}
+	return idPath, true
 }
 
 // Add marks name on test's list with why.
