@@ -271,10 +271,14 @@ func TestAReasonSaysTheFullRoundNeverServedTheValuesSource(t *testing.T) {
 // (ReadToo), which a caller that cannot follow the variable (no test's own
 // call carries a start-up's variable) learns instead (Unfollowed): a replay
 // on another machine, whose start-up reads the two a second apart, still
-// checks each is a read made in its call's span. A value no read in its
-// call's window gives (an hour past it) carries no read, and a copy of what
-// an answer gave the application carries none either: the caller refuses
-// both as before.
+// checks each is a read made in its call's span. The first sweep's request
+// found in a raw payload (no leaves: its protocol's adapter keeps the mock
+// whole) is the same place. A value no read in its call's window gives (an
+// hour past it) carries no read, and a copy of what an answer gave the
+// application carries none either, a leaf or a raw payload's field, even one
+// record's full round served as recorded while the value moved (no whole
+// copy in both runs: an SQS message's SentTimestamp the application
+// stored): the caller refuses each as before.
 func TestAStartUpSweepsReadInAnEarlierSweepsSecondIsLearnedAsAReadWhereItsCopyCannotBeFollowed(t *testing.T) {
 	const p = "body.cmd.query.createdAt.$lt.$numberLong"
 	secs := func(t time.Time) string { return strconv.FormatInt(t.Unix(), 10) }
@@ -295,18 +299,31 @@ func TestAStartUpSweepsReadInAnEarlierSweepsSecondIsLearnedAsAReadWhereItsCopyCa
 			{Side: side, Leaf: Leaf{Path: "body.cmd.filter.expires_at.$lte.$numberLong", Type: Number, Value: rec}, Live: live},
 		}}}
 	}
+	payload := func(req, resp string) Raw {
+		return RawOf(&models.Mock{Name: "mock-16", Kind: models.HTTP, Spec: models.MockSpec{
+			ReqTimestampMock: r0, ResTimestampMock: r0.Add(500 * time.Microsecond),
+			HTTPReq:  &models.HTTPReq{Method: "POST", URL: "http://deps.example/sweep", Body: req},
+			HTTPResp: &models.HTTPResp{StatusCode: 200, Body: resp},
+		}}, true).ServedAs(1)
+	}
+	// F's view of the first sweep's request holds the value F saw there.
+	sent := []Raw{payload(`{"before":`+rec+`}`, `{}`).ServedLive(payload(`{"before":`+fv+`}`, `{}`))}
+	given := []Raw{payload(`{}`, `{"SentTimestamp":"`+rec+`"}`).ServedAsRecorded()}
 	for _, tc := range []struct {
 		name    string
 		earlier []Earlier
+		raw     []Raw
 		live    string
 		read    bool
 	}{
-		{"the second sweep's read, in the first sweep's second in both runs", sweep(Request, fv), fv, true},
-		{"an hour past its call's window", sweep(Request, secs(f0.Add(time.Hour))), secs(f0.Add(time.Hour)), false},
-		{"a copy of what an answer gave the application", sweep(Response, fv), fv, false},
+		{"the second sweep's read, in the first sweep's second in both runs", sweep(Request, fv), nil, fv, true},
+		{"the first sweep's request a raw payload holds", nil, sent, fv, true},
+		{"an hour past its call's window", sweep(Request, secs(f0.Add(time.Hour))), nil, secs(f0.Add(time.Hour)), false},
+		{"a copy of what an answer gave the application", sweep(Response, fv), nil, fv, false},
+		{"a copy of what a raw payload's answer gave the application, served as recorded", nil, given, fv, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ln := ClassifyFollowing(clientTestCache(), []string{p}, num(tc.live), num(rec), at, tc.earlier, nil, nil, w, nil)[0]
+			ln := ClassifyFollowing(clientTestCache(), []string{p}, num(tc.live), num(rec), at, tc.earlier, tc.raw, nil, w, nil)[0]
 			if ln.Kind != KindVariable || ln.From.Mock != "mock-16" {
 				t.Fatalf("%s recorded, %s in F: %s from %+v (%s); want a variable of mock-16, as before", rec, tc.live, ln.Kind, ln.From, ln.Why)
 			}

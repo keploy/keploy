@@ -319,9 +319,9 @@ func TestClassify(t *testing.T) {
 		t.Fatalf("kinds %v, want %v", kinds, want)
 	}
 	// The place says what binding it needs: the variable place, the value F
-	// saw there, that the value was whole there, and that the mock is the
-	// test's own.
-	if from["body.order"] != (Place{Mock: "mock-1", Side: Request, Path: "body.id", Noise: "body.id", Var: "body.id", Live: "o-7", Whole: true, Own: true}) {
+	// saw there, that the value was whole there, that the mock is the
+	// test's own, and that the application sent it there.
+	if from["body.order"] != (Place{Mock: "mock-1", Side: Request, Path: "body.id", Noise: "body.id", Var: "body.id", Live: "o-7", Whole: true, Own: true, sent: true}) {
 		t.Fatalf("body.order from %+v", from["body.order"])
 	}
 	if f := from["body.tok"]; f.Whole || f.Path != "body.token" {
@@ -331,10 +331,12 @@ func TestClassify(t *testing.T) {
 		t.Fatalf("body.file from %+v: a part of a longer value, found where it drifted together", f)
 	}
 	// A raw mock's place has no leaf: it names the mock, and what was found
-	// in which field of its payload; neither mock was served before the
-	// call (a reason says so: correction).
+	// in which field of its payload, and whether that is one the
+	// application sent (redis-2's request; pg-3's word stands in no one
+	// field); neither mock was served before the call (a reason says so:
+	// correction).
 	leafless := func(p Place) Place { p.Field, p.Held = "", ""; return p }
-	if leafless(from["body.sess"]) != (Place{Mock: "redis-2", unserved: true}) || leafless(from["body.seq"]) != (Place{Mock: "pg-3", unserved: true}) {
+	if leafless(from["body.sess"]) != (Place{Mock: "redis-2", unserved: true, sent: true}) || leafless(from["body.seq"]) != (Place{Mock: "pg-3", unserved: true}) {
 		t.Fatalf("body.sess from %+v, body.seq from %+v", from["body.sess"], from["body.seq"])
 	}
 	if f := from["body.sess"]; f.Field != "spec.genericrequests[0].message[0].data" || f.Held != "71a" {
