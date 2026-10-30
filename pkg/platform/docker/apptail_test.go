@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"math"
 	"runtime"
 	"strings"
 	"testing"
@@ -469,7 +470,7 @@ func TestTheTailsBuffersTogetherStayWithinTheBudget(t *testing.T) {
 func TestTheRunsRememberedAreBounded(t *testing.T) {
 	s := newAppTails()
 	keep := s.startRun("keep")
-	s.record("keep", keep, "app-1", "app", "held")
+	s.record("keep", keep, "app-1", "app", "held", 0)
 	for i := 0; i < appTailMaxRuns+100; i++ {
 		s.startRun(fmt.Sprintf("p%d", i))
 	}
@@ -479,8 +480,116 @@ func TestTheRunsRememberedAreBounded(t *testing.T) {
 	if s.runs["p0"] != nil {
 		t.Fatalf("the oldest run of a project that holds no tail is still remembered")
 	}
-	s.record("keep", keep, "app-1", "app", "still kept")
+	s.record("keep", keep, "app-1", "app", "still kept", 0)
 	if got := string(s.m[tailKey{"keep", "app-1"}].buf); got != "held\nstill kept\n" {
 		t.Fatalf("the project that holds a tail lost its run: tail %q", got)
+	}
+}
+
+// tailPattern is n bytes that differ from their neighbours, from position
+// from of one stream, so a byte held out of place shows.
+func tailPattern(from, n int) []byte {
+	p := make([]byte, n)
+	for i := range p {
+		p[i] = byte((from + i) % 251)
+	}
+	return p
+}
+
+// add weighs a line against the room the buffer has left before it sums any
+// length, and sizes each buffer it grows by hand: twice the old one held to
+// the limit, or just what the text needs when that is more. Each case is at
+// an edge of one of those choices, from a state addLocked reaches (the line
+// under the limit, the buffer within it), with sizes past 256 so append's own
+// growth would show; the last is outside that and only keeps the text.
+func TestAppTailAddSizesEachBufferFromTheRoomLeft(t *testing.T) {
+	const limit = 4096
+	for _, c := range []struct {
+		name                 string
+		held, capacity, line int
+		wantCap              int // 0: any buffer that holds the text
+	}{
+		{"an empty line to an empty tail", 0, 0, 0, 1},
+		{"a line that fills the free room", 1000, 1024, 23, 1024},
+		{"one byte past the free room doubles the buffer", 1000, 1024, 24, 2048},
+		{"a doubled buffer past the limit is held to it", 3000, 3000, 100, limit},
+		{"a line the doubled buffer cannot hold grows it to just what the text needs", 300, 300, 1000, 1301},
+		{"a line the doubled buffer cannot hold, past free room", 300, 400, 1000, 1301},
+		{"a text of just the limit", 2000, 2000, 2095, limit},
+		{"a buffer twice which is one under the limit", 2047, 2047, 0, 4094},
+		{"a buffer twice which is the limit", 2048, 2048, 0, limit},
+		{"a buffer twice which is one past the limit", 2049, 2049, 0, limit},
+		{"a buffer of the limit grows past it to just what the text needs", limit, limit, 0, limit + 1},
+		{"the longest line to a full buffer", limit, limit, limit - 1, 2 * limit},
+		{"a line of the limit, which addLocked never passes", 0, 0, limit, 0},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			buf := make([]byte, c.held, c.capacity)
+			copy(buf, tailPattern(0, c.held))
+			tl := &appTail{buf: buf}
+			tl.add(string(tailPattern(c.held, c.line)), limit)
+			want := append(tailPattern(0, c.held+c.line), '\n')
+			if !bytes.Equal(tl.buf, want) {
+				t.Fatalf("holds %d bytes that are not the %d of the text and the line", len(tl.buf), len(want))
+			}
+			if c.wantCap != 0 && cap(tl.buf) != c.wantCap {
+				t.Fatalf("a %d-byte buffer holds the %d bytes; want %d", cap(tl.buf), len(tl.buf), c.wantCap)
+			}
+		})
+	}
+}
+
+// keepFrom sizes the buffer it moves the kept text to from that text alone:
+// room to grow to twice it, held to the limit, but never less than the text.
+func TestAppTailKeepFromSizesItsBufferFromWhatItKeeps(t *testing.T) {
+	const limit = 4096
+	for _, c := range []struct {
+		name       string
+		held, from int
+		wantCap    int
+	}{
+		{"nothing kept", 100, 100, 0},
+		{"room to twice the text", 1000, 0, 2000},
+		{"room to twice the text, from past its start", 3000, 1000, 4000},
+		{"twice the text one under the limit", 2047, 0, 4094},
+		{"twice the text the limit", 2048, 0, limit},
+		{"twice the text one past the limit", 2049, 0, limit},
+		{"a text of the limit", limit, 0, limit},
+		{"a text past the limit keeps room for itself", limit + 1, 0, limit + 1},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			tl := &appTail{buf: tailPattern(0, c.held)}
+			tl.keepFrom(c.from, limit)
+			if !bytes.Equal(tl.buf, tailPattern(c.from, c.held-c.from)) {
+				t.Fatalf("keeps %d bytes that are not the text's last %d", len(tl.buf), c.held-c.from)
+			}
+			if cap(tl.buf) != c.wantCap {
+				t.Fatalf("a %d-byte buffer keeps the %d bytes; want %d", cap(tl.buf), len(tl.buf), c.wantCap)
+			}
+		})
+	}
+}
+
+// twiceHeldTo is twice x held to the limit, for an even and an odd limit, at
+// each side of half of it, past it, and for the largest int, where 2*x would
+// overflow.
+func TestTwiceHeldToIsTwiceXHeldToTheLimit(t *testing.T) {
+	for _, c := range []struct{ x, limit, want int }{
+		{0, 0, 0},
+		{0, 4096, 0},
+		{1, 4096, 2},
+		{2047, 4096, 4094},
+		{2048, 4096, 4096},
+		{2049, 4096, 4096},
+		{2047, 4095, 4094},
+		{2048, 4095, 4095},
+		{4096, 4096, 4096},
+		{5000, 4096, 4096},
+		{math.MaxInt/2 + 1, 4096, 4096},
+		{math.MaxInt, 4096, 4096},
+	} {
+		if got := twiceHeldTo(c.x, c.limit); got != c.want {
+			t.Errorf("twiceHeldTo(%d, %d) = %d; want %d", c.x, c.limit, got, c.want)
+		}
 	}
 }
