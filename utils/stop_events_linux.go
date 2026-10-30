@@ -52,8 +52,9 @@ func StopStallSaid() string { return StopStallBudget.String() + " of keploy's ru
 // with how many threads and open files (files, not descriptors: openFiles),
 // how much storage they have read and written, and whether one waits on
 // storage (an uninterruptible sleep, D). FilesUnsettled is a read of their
-// open files that did not settle (openFiles), or of descriptors the kernel
-// would not list: its Fds are no evidence. FilesUncompared, where it is not
+// open files that did not settle (openFiles), of descriptors the kernel
+// would not list, or through a task that had begun to exit (taskExiting):
+// its Fds are no evidence. FilesUncompared, where it is not
 // nil, is why the kernel would not compare a process's files (kcmp(2)): its
 // Fds then count its descriptors, each once (openFiles).
 type ExitMark struct {
@@ -103,6 +104,10 @@ func MarkExit(procs []Reached) ExitMark {
 			if uncompared != nil && m.FilesUncompared == nil {
 				m.FilesUncompared = fmt.Errorf("kcmp of process %d's descriptors: %w", p.PID, uncompared)
 			}
+			// Read through a task that has begun to exit, its files are
+			// no evidence: it lets them go (exit_files) before it is
+			// released, while other threads of its process hold them.
+			settled = settled && !taskExiting(p.PID, task)
 		}
 		m.Fds += n
 		m.FilesUnsettled = m.FilesUnsettled || !settled
@@ -113,6 +118,36 @@ func MarkExit(procs []Reached) ExitMark {
 
 // kcmpFile is kcmp(2)'s KCMP_FILE: whether two descriptors name one open file.
 const kcmpFile = 0
+
+// pfExiting is the PF_EXITING task flag (include/linux/sched.h, ProcStat.Flags).
+const pfExiting = 0x4
+
+// taskExiting reports whether task, process pid or a thread of it (MarkExit
+// reads a process's files through it), had begun to exit by the time its
+// files were read: it is gone, dead or a zombie, or PF_EXITING is set. A
+// task sets PF_EXITING as it begins to exit (exit_signals in do_exit),
+// before it lets its files go (exit_files) and so before it is a zombie or
+// released, and never clears it; from exit_files on it lists no descriptors
+// and kcmp of its files is EBADF, so a read through it then counts none of
+// them, or only the first, which it holds uncompared (fileTally), while
+// another thread of its process may hold every one. Its state alone says
+// nothing of that window: it reads R, S or D until exit_notify. Read once
+// its files have been, the flag covers every read that saw them go: a
+// thread's own, as a zombie main thread shows the flag set for good.
+func taskExiting(pid, task int) bool {
+	root := "/proc"
+	if task != pid {
+		root += "/" + strconv.Itoa(pid) + "/task"
+	}
+	st, ok := ReadProcStatIn(root, task)
+	return !ok || exiting(st)
+}
+
+// exiting reports whether a task's stat says it has begun to exit: it is
+// dead (X) or a zombie (Z), or PF_EXITING is set (taskExiting).
+func exiting(st ProcStat) bool {
+	return st.State == 'Z' || st.State == 'X' || st.Flags&pfExiting != 0
+}
 
 // openFiles is how many open files a process holds through the descriptors
 // its fd directory listed (fds, read through task, the process or a thread of
@@ -134,11 +169,14 @@ const kcmpFile = 0
 // again between its comparisons beside the one that took its file over
 // (fileTally.settle). Where the kernel cannot compare them at all (no kcmp,
 // or keploy may not ask: a seccomp filter, a process it may not trace; its
-// first comparison is refused with ENOSYS, EPERM or EACCES), each
-// descriptor counts, and uncompared says why. A first comparison that fails
-// otherwise is no refusal: ESRCH is a process (or the thread read for it)
-// released after its descriptors were listed, a read that did not settle,
-// as the next look finds it gone (kcmpRefused). A churn of descriptors then
+// first comparison is refused: ENOSYS, EPERM, EACCES, or any errno a filter
+// gives), each descriptor counts, and uncompared says why. A first
+// comparison that fails in passing is no refusal (kcmpRefused): ESRCH is a
+// process (or the thread read for it) released after its descriptors were
+// listed, EINTR a comparison interrupted, a read that did not settle; EBADF
+// is a descriptor closed (fileTally), and where every one reads so because
+// the task let its files go as it exits, MarkExit takes its read for none
+// (taskExiting). A churn of descriptors then
 // reads as steps out again, but the ratchet takes only a new fewest
 // (ExitRatchet), so it moves a stop at most once for each descriptor of the
 // reading that set the mark: a longer wait, but a bounded one. Taken as no
@@ -182,21 +220,28 @@ func openFilesBy(kcmp func(task, a, b int) (int, error), task int, fds []os.DirE
 		// Refused from the first comparison: each descriptor counts.
 		return len(fds), true, err
 	default:
-		// Refused part way through, or a comparison that failed otherwise
-		// (ESRCH: the process or thread was released after its descriptors
-		// were listed): the files held by then, no evidence.
+		// Refused part way through, or a first comparison that failed in
+		// passing (ESRCH: the process or thread was released after its
+		// descriptors were listed; EINTR): the files held by then, no
+		// evidence.
 		return len(t.held), false, nil
 	}
 }
 
-// kcmpRefused reports whether err is the kernel refusing to compare a
-// process's files at all: kcmp(2) not built in, or a seccomp filter (ENOSYS,
-// EPERM or EACCES), or a ptrace rule that keeps keploy from reading the
-// process (EPERM). kcmp finds both tasks before it asks whether keploy may
-// read them, so one released since its descriptors were listed is ESRCH: a
-// read that did not settle, which says nothing of the host.
+// kcmpRefused reports whether err, the first comparison of a process's
+// files failing, is the kernel refusing to compare them at all: kcmp(2) not
+// built in (ENOSYS), a ptrace rule that keeps keploy from reading the
+// process (EPERM), or a seccomp filter, which may give any errno (EPERM,
+// ENOSYS and EACCES are the common ones). It is not where the failure is
+// one in passing: ESRCH, a task released since its descriptors were listed
+// (kcmp finds both tasks before it asks whether keploy may read them),
+// EINTR, or EBADF, a descriptor closed (fileTally reads that as an answer;
+// it never reaches here). Those say nothing of the host. Any other errno is
+// taken for a refusal, so on a host whose filter gives one keploy never
+// thought of, a stop counts descriptors (a bounded wait) rather than seeing
+// no file close as progress, ever.
 func kcmpRefused(err error) bool {
-	return errors.Is(err, unix.EPERM) || errors.Is(err, unix.EACCES) || errors.Is(err, unix.ENOSYS)
+	return !errors.Is(err, unix.ESRCH) && !errors.Is(err, unix.EINTR) && !errors.Is(err, unix.EBADF)
 }
 
 // fileTally is a read of the open files a process holds through its

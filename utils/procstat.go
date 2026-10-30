@@ -20,6 +20,9 @@ type ProcStat struct {
 	// it was read from numbers it: the one kill(2) takes from there, for a
 	// process in a nested pid namespace too.
 	PGRP int
+	// Flags is field 9, the task's PF_* flags (include/linux/sched.h):
+	// PF_EXITING (0x4) is set from the moment it begins to exit (do_exit).
+	Flags uint32
 	// StartTime is field 22, when the process started, in clock ticks after
 	// the system booted.
 	StartTime uint64
@@ -131,9 +134,13 @@ func ParseProcStat(line []byte) (ProcStat, bool) {
 	if err != nil || pgrp < 0 {
 		return ProcStat{}, false
 	}
+	flags, err := strconv.ParseUint(string(fields[6]), 10, 32)
+	if err != nil {
+		return ProcStat{}, false
+	}
 	start, err := strconv.ParseUint(string(fields[19]), 10, 64)
 	if err != nil {
 		return ProcStat{}, false
 	}
-	return ProcStat{State: fields[0][0], PPID: int(ppid), PGRP: int(pgrp), StartTime: start}, true
+	return ProcStat{State: fields[0][0], PPID: int(ppid), PGRP: int(pgrp), Flags: uint32(flags), StartTime: start}, true
 }

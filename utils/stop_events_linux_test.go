@@ -26,6 +26,7 @@ import (
 	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
+	"golang.org/x/sys/unix"
 )
 
 // shortStall sets StopStallBudget to d for the test.
@@ -1347,8 +1348,9 @@ func TestMarkExitOfDescriptorsTheKernelWillNotListIsUnsettled(t *testing.T) {
 	}
 }
 
-// A kernel that cannot compare files (no kcmp, or keploy may not ask) leaves
-// each descriptor counted, the read settled and saying why; one that stops
+// A kernel that cannot compare files (no kcmp, or keploy may not ask: a
+// filter may give any errno, the largest being 4095) leaves each descriptor
+// counted, the read settled and saying why; one that stops
 // comparing part way through a read leaves it unsettled, no evidence. A
 // process of one descriptor needs no comparison. A churn of descriptors so
 // counted reads as steps out, but moves a stop at most once for each
@@ -1356,7 +1358,7 @@ func TestMarkExitOfDescriptorsTheKernelWillNotListIsUnsettled(t *testing.T) {
 // but a bounded one.
 func TestOpenFilesAreDescriptorsWhereTheKernelCannotCompareThem(t *testing.T) {
 	listed := []os.DirEntry{fdEntry("0"), fdEntry("1"), fdEntry("2"), fdEntry("3")}
-	for _, no := range []error{syscall.ENOSYS, syscall.EPERM, syscall.EACCES} {
+	for _, no := range []error{syscall.ENOSYS, syscall.EPERM, syscall.EACCES, syscall.EINVAL, syscall.Errno(4095)} {
 		cannot := func(int, int, int) (int, error) { return 0, no }
 		if n, settled, why := openFilesBy(cannot, 1, listed); n != len(listed) || !settled || !errors.Is(why, no) {
 			t.Fatalf("kcmp failing with %v: %d open files of %d descriptors (settled %v, uncompared %v); want each counted, settled, uncompared for %v", no, n, len(listed), settled, why, no)
@@ -1427,38 +1429,39 @@ func TestOpenFilesAreDescriptorsWhereTheKernelCannotCompareThem(t *testing.T) {
 	}
 }
 
-// A first comparison that fails, but not as a refusal (ESRCH: the process,
-// or the thread read for it, was released after its descriptors were
-// listed, as kcmp finds both tasks before it asks whether keploy may read
-// them), is a read that did not settle: no evidence, and no word of the
-// host, whose kernel compares files. A stop that looks so says nothing of it.
-func TestAProcessGoneBeforeItsFilesAreComparedIsNoRefusal(t *testing.T) {
+// A first comparison that fails in passing, not as a refusal (ESRCH: the
+// process, or the thread read for it, was released after its descriptors
+// were listed, as kcmp finds both tasks before it asks whether keploy may
+// read them; EINTR: the comparison was interrupted), is a read that did not
+// settle: no evidence, and no word of the host, whose kernel compares files.
+// A stop that looks so says nothing of it.
+func TestAFirstComparisonThatFailsInPassingIsNoRefusal(t *testing.T) {
 	listed := []os.DirEntry{fdEntry("0"), fdEntry("1"), fdEntry("2"), fdEntry("3")}
-	gone := func(int, int, int) (int, error) { return 0, syscall.ESRCH }
-	if n, settled, why := openFilesBy(gone, 1, listed); settled || why != nil {
-		t.Fatalf("kcmp failing with ESRCH from the first comparison: %d open files, settled %v, uncompared %v; want unsettled, no refusal", n, settled, why)
-	}
 	st, ok := ReadProcStat(os.Getpid())
 	if !ok {
 		t.Fatal("premise: this process's stat could not be read")
 	}
-	filesCompared.Store(&gone)
-	t.Cleanup(func() { filesCompared.Store(nil) })
 	procs := []Reached{{PID: os.Getpid(), Start: st.StartTime}}
-	m := MarkExit(procs)
-	if m.Running != 1 || !m.FilesUnsettled || m.FilesUncompared != nil {
-		t.Fatalf("this process, its first comparison failing with ESRCH, read as %+v; want running, its files unsettled, no refusal", m)
-	}
-	core, logs := observer.New(zap.InfoLevel)
-	var note FilesUncomparedNote
-	note.Say(zap.New(core), m)
-	exited := make(chan struct{})
-	close(exited)
-	if end, _ := WaitExitByEvents(zap.New(core), exited, procs, nil); end != StopExited {
-		t.Fatalf("a stop of an app that exited ended %v", end)
-	}
-	if all := logs.FilterMessageSnippet("as their descriptors").All(); len(all) != 0 {
-		t.Fatalf("readings whose first comparison failed with ESRCH said the host's kernel will not compare files: %v", all)
+	t.Cleanup(func() { filesCompared.Store(nil) })
+	for _, no := range []error{syscall.ESRCH, syscall.EINTR} {
+		failing := func(int, int, int) (int, error) { return 0, no }
+		if n, settled, why := openFilesBy(failing, 1, listed); settled || why != nil {
+			t.Fatalf("kcmp failing with %v from the first comparison: %d open files, settled %v, uncompared %v; want unsettled, no refusal", no, n, settled, why)
+		}
+		filesCompared.Store(&failing)
+		m := MarkExit(procs)
+		if m.Running != 1 || !m.FilesUnsettled || m.FilesUncompared != nil {
+			t.Fatalf("this process, its first comparison failing with %v, read as %+v; want running, its files unsettled, no refusal", no, m)
+		}
+		core, logs := observer.New(zap.InfoLevel)
+		exited := make(chan struct{})
+		close(exited)
+		if end, _ := WaitExitByEvents(zap.New(core), exited, procs, nil); end != StopExited {
+			t.Fatalf("a stop of an app that exited ended %v", end)
+		}
+		if all := logs.FilterMessageSnippet("as their descriptors").All(); len(all) != 0 {
+			t.Fatalf("readings whose first comparison failed with %v said the host's kernel will not compare files: %v", no, all)
+		}
 	}
 }
 
@@ -1511,6 +1514,202 @@ func TestAChildReapedBeforeItsFilesAreComparedIsNoRefusal(t *testing.T) {
 	t.Logf("the kernel refuses to compare a child's files (%v: %s); reaped, its read is %d, settled %v, uncompared %v", before, refusal, n, settled, why)
 	if why != nil && !errors.Is(why, before) || why == nil && settled {
 		t.Fatalf("a child reaped after its files were refused (%v) read as %d open files, settled %v, uncompared %v; want the same refusal, or unsettled", before, n, settled, why)
+	}
+}
+
+// A task has begun to exit where its stat says it is a zombie or dead, or
+// has PF_EXITING (0x4) set, whatever its state: keploy#4999's CI read a
+// task with flags 4227084 (0x40800C) as S.
+func TestATaskThatBeganToExitReadsSo(t *testing.T) {
+	for _, tc := range []struct {
+		state byte
+		flags uint32
+		want  bool
+	}{
+		{'S', 4194560, false}, // 0x400100, a sleeping process's
+		{'R', 4194304, false},
+		{'D', 4194560, false},
+		{'S', 4227084, true},
+		{'R', 4227084, true},
+		{'D', pfExiting, true},
+		{'Z', 4194560, true},
+		{'X', 0, true},
+	} {
+		if got := exiting(ProcStat{State: tc.state, Flags: tc.flags}); got != tc.want {
+			t.Errorf("a task of state %c and flags %#x read as exiting %v; want %v", tc.state, tc.flags, got, tc.want)
+		}
+	}
+}
+
+// A read of a process's files through a task that began to exit as they were
+// read (a thread that let its files go, exit_files, before it is released:
+// its descriptors then list as none, and kcmp of every one is EBADF) is no
+// evidence, whatever the comparisons said: the files may be held still by
+// another thread of the process. Here a child is killed as its files are
+// read, and is a zombie, not reaped, when the read ends, its comparisons
+// failing each way a task on its way out makes them fail: ESRCH and EINTR,
+// and EBADF on every one, which alone would read as every descriptor but
+// the first closed.
+func TestAReadThroughATaskThatBeganToExitIsUnsettled(t *testing.T) {
+	// Killed by the kernel too when the thread that started it ends
+	// (Pdeathsig), so a test binary killed mid-test leaves no sleep behind:
+	// the test keeps to this thread until it ends.
+	runtime.LockOSThread()
+	t.Cleanup(runtime.UnlockOSThread)
+	t.Cleanup(func() { filesCompared.Store(nil) })
+	for _, no := range []error{syscall.ESRCH, syscall.EINTR, syscall.EBADF} {
+		ready := filepath.Join(t.TempDir(), "ready")
+		cmd := exec.Command("/bin/sh", "-c", `exec 3</dev/null 4</dev/null; : > "$1"; exec sleep 1000`, "sh", ready)
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		pid := cmd.Process.Pid
+		reaped := make(chan struct{})
+		// Reaped only once it has been read: until then it is a zombie.
+		reap := func() { _ = syscall.Kill(-pid, syscall.SIGKILL); _ = cmd.Wait(); close(reaped) }
+		t.Cleanup(func() {
+			select {
+			case <-reaped:
+			default:
+				reap()
+			}
+		})
+		for {
+			if _, err := os.Stat(ready); err == nil {
+				break
+			}
+			var info unix.Siginfo
+			if err := unix.Waitid(unix.P_PID, pid, &info, unix.WEXITED|unix.WNOHANG|unix.WNOWAIT, nil); err != nil || info.Signo != 0 {
+				t.Fatalf("premise: the child exited before it was ready (%v)", err)
+			}
+			runtime.Gosched()
+		}
+		st, ok := ReadProcStat(pid)
+		if !ok {
+			t.Fatal("premise: the child's stat could not be read")
+		}
+		calls := 0
+		dying := func(int, int, int) (int, error) {
+			if calls++; calls == 1 {
+				_ = syscall.Kill(pid, syscall.SIGKILL)
+				var info unix.Siginfo
+				if err := unix.Waitid(unix.P_PID, pid, &info, unix.WEXITED|unix.WNOWAIT, nil); err != nil {
+					t.Errorf("waiting for the child to be a zombie: %v", err)
+				}
+			}
+			return 0, no
+		}
+		filesCompared.Store(&dying)
+		m := MarkExit([]Reached{{PID: pid, Start: st.StartTime}})
+		filesCompared.Store(nil)
+		if calls == 0 || m.Running != 1 || !m.FilesUnsettled || m.FilesUncompared != nil {
+			t.Fatalf("a child killed as its files were read, its comparisons failing with %v, read as %+v after %d comparisons; want running as it was first read, its files unsettled, no refusal", no, m, calls)
+		}
+		reap()
+	}
+}
+
+// The same on the kernel: a process whose main thread exited holds its files
+// through its other threads, read through one of them (MarkExit), as they
+// exit one by one, 0.3 ms apart. No reading settles below the files the
+// process held while ten or more of its threads were left after it.
+func TestAReadThroughExitingThreadsNeverSettlesLow(t *testing.T) {
+	cc, err := exec.LookPath("cc")
+	if err != nil {
+		t.Skip("no C compiler (cc) to build the process of many threads")
+	}
+	dir := t.TempDir()
+	src := filepath.Join(dir, "threads.c")
+	// Its threads wait on fd 3, a pipe, until the test closes its end. It
+	// closes what it was left beside it, and opens /dev/null five times.
+	if err := os.WriteFile(src, []byte(`#include <pthread.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <fcntl.h>
+static void *run(void *a) {
+	char c;
+	while (read(3, &c, 1) > 0) {}
+	usleep((long)a * 300);
+	return 0;
+}
+int main(int argc, char **argv) {
+	long n = atol(argv[1]);
+	for (int fd = 4; fd < 4096; fd++) close(fd);
+	for (int i = 0; i < 5; i++) open("/dev/null", O_RDONLY);
+	pthread_t t;
+	for (long i = 0; i < n; i++)
+		if (pthread_create(&t, 0, run, (void *)i)) return 1;
+	pthread_exit(0);
+}
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(dir, "threads")
+	if out, err := exec.Command(cc, "-pthread", "-O1", "-o", bin, src).CombinedOutput(); err != nil {
+		t.Fatalf("building the process of many threads: %v: %s", err, out)
+	}
+	// Killed by the kernel too when the thread that started it ends
+	// (Pdeathsig), so a test binary killed mid-test leaves none behind.
+	runtime.LockOSThread()
+	t.Cleanup(runtime.UnlockOSThread)
+	const processes, threads = 20, 200
+	settledLooks, low := 0, map[int]int{}
+	for range processes {
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command(bin, strconv.Itoa(threads))
+		cmd.ExtraFiles = []*os.File{r}
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		_ = r.Close()
+		pid := cmd.Process.Pid
+		reaped := make(chan struct{})
+		go func() { _ = cmd.Wait(); close(reaped) }()
+		t.Cleanup(func() { _ = w.Close(); _ = syscall.Kill(-pid, syscall.SIGKILL); <-reaped })
+		// Its threads wait on the pipe, so it stays until it is let go.
+		var st ProcStat
+		for {
+			s, ok := ReadProcStat(pid)
+			if !ok {
+				t.Fatal("premise: the process of many threads ended before its main thread read as exited")
+			}
+			if s.State == 'Z' {
+				st = s
+				break
+			}
+			runtime.Gosched()
+		}
+		procs := []Reached{{PID: pid, Start: st.StartTime}}
+		held := MarkExit(procs)
+		if held.Running != 1 || held.FilesUnsettled || held.Fds < 6 {
+			t.Fatalf("premise: the process of many threads, its main thread exited and the others waiting, read as %+v; want running, at least its pipe and five /dev/null, settled", held)
+		}
+		_ = w.Close()
+		for {
+			m := MarkExit(procs)
+			if m.Running == 0 {
+				break
+			}
+			if m.FilesUnsettled {
+				continue
+			}
+			settledLooks++
+			if m.Fds < held.Fds && processThreads(pid) >= 10 {
+				low[m.Fds]++
+			}
+		}
+		<-reaped
+	}
+	if len(low) > 0 {
+		t.Fatalf("%d processes of %d threads exiting: settled readings below the files held, read while ten or more threads were left after, by count read: %v", processes, threads, low)
+	}
+	if settledLooks == 0 {
+		t.Fatalf("%d processes of %d threads exiting: no reading as they exited settled; the row read nothing", processes, threads)
 	}
 }
 
