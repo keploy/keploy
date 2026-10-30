@@ -145,58 +145,81 @@ func TestALiveCallsAnswerStillHoldsWorkWhileTheClientWaits(t *testing.T) {
 // bytes end the watch and stay for the next read, and the app is not told of
 // an end that came after a request it has not been sent.
 func TestALiveCallsPipelinedRequestIsStillServed(t *testing.T) {
-	t.Parallel()
-	release := make(chan struct{})
-	free := sync.OnceFunc(func() { close(release) })
-	t.Cleanup(free)
-	lc := serveLiveCall(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/fast" {
-			fmt.Fprint(w, "fast")
-			return
-		}
-		w.Header().Set("Content-Type", "application/x-ndjson")
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprintln(w, `{"status":"RUNNING"}`)
-		w.(http.Flusher).Flush()
-		select {
-		case <-release:
-			fmt.Fprintln(w, `{"status":"DONE"}`)
-		case <-r.Context().Done():
-			fmt.Fprintln(w, `{"status":"TOLD THE CLIENT WENT"}`)
-		}
-	}))
-	if _, err := lc.app.Write([]byte("GET /slow HTTP/1.1\r\nHost: api\r\n\r\n")); err != nil {
-		t.Fatal(err)
-	}
-	br := bufio.NewReader(lc.app)
-	slow, err := http.ReadResponse(br, nil)
-	if err != nil {
-		t.Fatalf("the first answer: %v (%s)", err, lc.state())
-	}
-	events := bufio.NewReader(slow.Body)
-	readUntil(t, events, "RUNNING")
-	if _, err := lc.app.Write([]byte("GET /fast HTTP/1.1\r\nHost: api\r\n\r\n")); err != nil {
-		t.Fatal(err)
-	}
-	if err := lc.app.(*net.TCPConn).CloseWrite(); err != nil {
-		t.Fatal(err)
-	}
-	// The next request's bytes and the client's end reach the proxy's
-	// socket before the answer goes on: a watch that took either for the
-	// client's going tells the app before the release.
-	lc.waitClientFIN(t)
-	free()
-	rest, err := io.ReadAll(events)
-	if err != nil || !strings.Contains(string(rest), "DONE") {
-		t.Fatalf("the first answer ended %q (%v): %s", rest, err, lc.state())
-	}
-	resp, err := http.ReadResponse(br, nil)
-	if err != nil {
-		t.Fatalf("the pipelined request's answer: %v (%s)", err, lc.state())
-	}
-	body, _ := io.ReadAll(resp.Body)
-	if string(body) != "fast" {
-		t.Fatalf("the pipelined request's answer is %q", body)
+	const slowReq, fastReq = "GET /slow HTTP/1.1\r\nHost: api\r\n\r\n", "GET /fast HTTP/1.1\r\nHost: api\r\n\r\n"
+	for _, tc := range []struct {
+		name string
+		// atOnce: both requests and the FIN come in one go, so the
+		// ingress has the next request buffered as it forwards the first's
+		// answer; else the next is sent once the first answer has begun.
+		atOnce bool
+	}{
+		{"sent once the first answer began", false},
+		{"sent at once", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			release, began := make(chan struct{}), make(chan struct{})
+			free := sync.OnceFunc(func() { close(release) })
+			t.Cleanup(free)
+			lc := serveLiveCall(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/fast" {
+					fmt.Fprint(w, "fast")
+					return
+				}
+				w.Header().Set("Content-Type", "application/x-ndjson")
+				w.WriteHeader(http.StatusOK)
+				fmt.Fprintln(w, `{"status":"RUNNING"}`)
+				w.(http.Flusher).Flush()
+				close(began)
+				select {
+				case <-release:
+					fmt.Fprintln(w, `{"status":"DONE"}`)
+				case <-r.Context().Done():
+					fmt.Fprintln(w, `{"status":"TOLD THE CLIENT WENT"}`)
+				}
+			}))
+			first := slowReq
+			if tc.atOnce {
+				first += fastReq
+			}
+			if _, err := lc.app.Write([]byte(first)); err != nil {
+				t.Fatal(err)
+			}
+			br := bufio.NewReader(lc.app)
+			slow, err := http.ReadResponse(br, nil)
+			if err != nil {
+				t.Fatalf("the first answer: %v (%s)", err, lc.state())
+			}
+			events := bufio.NewReader(slow.Body)
+			readUntil(t, events, "RUNNING")
+			if !tc.atOnce {
+				if _, err := lc.app.Write([]byte(fastReq)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := lc.app.(*net.TCPConn).CloseWrite(); err != nil {
+				t.Fatal(err)
+			}
+			// The next request's bytes and the client's end reach the
+			// proxy's socket before the answer goes on: a watch that took
+			// either for the client's going tells the app before the
+			// release.
+			<-began
+			lc.waitClientFIN(t)
+			free()
+			rest, err := io.ReadAll(events)
+			if err != nil || !strings.Contains(string(rest), "DONE") {
+				t.Fatalf("the first answer ended %q (%v): %s", rest, err, lc.state())
+			}
+			resp, err := http.ReadResponse(br, nil)
+			if err != nil {
+				t.Fatalf("the pipelined request's answer: %v (%s)", err, lc.state())
+			}
+			body, _ := io.ReadAll(resp.Body)
+			if string(body) != "fast" {
+				t.Fatalf("the pipelined request's answer is %q", body)
+			}
+		})
 	}
 }
 
