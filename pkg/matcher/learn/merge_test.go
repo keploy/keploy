@@ -112,3 +112,74 @@ func TestKeptLearningPutsAClockReadOnTheRecordingAndNoNoiseThere(t *testing.T) {
 }
 
 func hasKey(m map[string][]string, k string) bool { _, ok := m[k]; return ok }
+
+// A value test B both binds for itself (create, then read it back) and a
+// later test C reuses is one variable: the run's, which C binds at B's
+// create, takes the place, and B's own read reads it too. A recording place
+// so never carries two names (a replay refuses one that does). Test D's own
+// variable of the same name is D's and stays so; nothing is changed without
+// a run's bind, and the states handed in are left as they were.
+func TestTheRunsVariableTakesTheEarlierTestsOwnPlace(t *testing.T) {
+	v := func(bind string, use ...string) models.MockVariable {
+		return models.MockVariable{Recorded: "o-1", Bind: bind, Use: use}
+	}
+	states := map[string]models.MockState{
+		"mock-0": {Name: "mock-0"},
+		"mock-1": {Name: "mock-1", Variables: models.MockVariables{"order": v("", "path1")},
+			Binds: map[string]models.MockVariables{"mock-0": {"order": v("body.order")}}},
+		"mock-2": {Name: "mock-2", Variables: models.MockVariables{"run-order": v("", "path1")},
+			Binds: map[string]models.MockVariables{"mock-0": {"run-order": v("body.order")}}},
+		"mock-5": {Name: "mock-5", Variables: models.MockVariables{"order": {Recorded: "o-3", Bind: "body.order", Echo: true, Answer: []string{"body.id"}}}},
+		"mock-6": {Name: "mock-6", Variables: models.MockVariables{"order": {Recorded: "o-3", Use: []string{"path1"}}},
+			Binds: map[string]models.MockVariables{"mock-5": {"order": {Recorded: "o-3", Bind: "body.order"}}}},
+	}
+	owner := map[string]string{"mock-0": "TestB", "mock-1": "TestB", "mock-2": "TestC", "mock-5": "TestD", "mock-6": "TestD"}
+	testOf := func(m string) string { return owner[m] }
+	before := map[string]models.MockState{}
+	for k, st := range states {
+		before[k] = st
+	}
+	out, taken := RunTakesPlaces(states, testOf)
+	if want := []Taken{{Test: "TestB", Own: "order", Run: "run-order", Mock: "mock-0", Place: "body.order"}}; !reflect.DeepEqual(taken, want) {
+		t.Fatalf("taken %+v; want %+v", taken, want)
+	}
+	if got := out["mock-1"]; !reflect.DeepEqual(got.Variables, models.MockVariables{"run-order": v("", "path1")}) ||
+		!reflect.DeepEqual(got.Binds, map[string]models.MockVariables{"mock-0": {"run-order": v("body.order")}}) {
+		t.Fatalf("test B's read: %+v; want it to read the run's variable, bound at its create", got)
+	}
+	for _, m := range []string{"mock-0", "mock-2", "mock-5", "mock-6"} {
+		if !reflect.DeepEqual(out[m], states[m]) {
+			t.Fatalf("%s became %+v; want it as it was (%+v)", m, out[m], states[m])
+		}
+	}
+	if !reflect.DeepEqual(states, before) || states["mock-1"].Variables["order"].Use[0] != "path1" {
+		t.Fatalf("the states handed in changed: %+v", states)
+	}
+	if _, binds := FoldLearned(out); len(binds["mock-0"]) != 1 {
+		t.Fatalf("test B's create binds %+v; want one variable at its place", binds["mock-0"])
+	}
+
+	// A run's variable bound where test B's own one is used (its read's
+	// path) takes it too; the lesser run's name takes it where two are
+	// bound at its places, whatever the order the states are read in.
+	states["mock-3"] = models.MockState{Name: "mock-3", Variables: models.MockVariables{"run-a": v("", "path1")},
+		Binds: map[string]models.MockVariables{"mock-1": {"run-a": v("path1")}}}
+	owner["mock-3"] = "TestE"
+	for i := 0; i < 20; i++ {
+		_, taken = RunTakesPlaces(states, testOf)
+		if want := []Taken{{Test: "TestB", Own: "order", Run: "run-a", Mock: "mock-1", Place: "path1"}}; !reflect.DeepEqual(taken, want) {
+			t.Fatalf("taken %+v; want %+v", taken, want)
+		}
+	}
+
+	// With no run's bind, or no test's own name at its place, nothing.
+	alone := map[string]models.MockState{"mock-5": states["mock-5"], "mock-6": states["mock-6"]}
+	if out, taken := RunTakesPlaces(alone, testOf); taken != nil || !reflect.DeepEqual(out, alone) {
+		t.Fatalf("no run's variable: %+v %+v; want nothing taken", out, taken)
+	}
+	delete(owner, "mock-1")
+	delete(owner, "mock-0")
+	if _, taken := RunTakesPlaces(states, testOf); taken != nil {
+		t.Fatalf("a state of no test: taken %+v; want none (the start-up's carry no test's variable)", taken)
+	}
+}

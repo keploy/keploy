@@ -824,6 +824,69 @@ func TestLearnMatchAValueATestMadeIsFollowedInALaterTest(t *testing.T) {
 	wantProblem(t, ok, diag, "made by the test set's start-up or an earlier test, was not made before it")
 }
 
+// A value test B both binds for itself (it makes an order and reads it
+// back) and a later test C reads again is one variable at one place: the
+// run's, bound at B's create, which B's own read uses too
+// (learn.RunTakesPlaces). A full replay of B then C, with the application
+// behaving as recorded, serves all three calls, and C reading another order
+// misses.
+func TestLearnMatchATestsOwnVariableALaterTestReusesIsTheRunsAtOnePlace(t *testing.T) {
+	h, n, opts := learnOn(t)
+	tr := learn.NewTracker()
+	tr.NewSet()
+	ctx := learn.WithTracker(context.Background(), tr)
+	create := learnRecorded("mock-0", 0, "POST", "/v1/orders", `{"order":"o-1"}`, nil, `{}`)
+	read := learnRecorded("mock-1", time.Second, "GET", "/v1/orders/o-1", "", nil, `{"id":"o-1","state":"new"}`)
+	read2 := learnRecorded("mock-2", 2*time.Second, "GET", "/v1/orders/o-1", "", nil, `{"id":"o-1","state":"new"}`)
+	tr.Begin()
+	b := &learnDb{perTest: []*models.Mock{create, read}}
+	for _, r := range []*req{live("POST", "/v1/orders", `{"order":"o-9"}`, nil), live("GET", "/v1/orders/o-9", "", nil)} {
+		if served, miss, _ := h.learnMatch(ctx, r, b, n, opts); served == nil || miss != nil {
+			t.Fatalf("test B's %s: %+v", r.method, miss)
+		}
+	}
+	tr.End()
+	tr.Begin()
+	c := &learnDb{perTest: []*models.Mock{read2}}
+	if served, miss, _ := h.learnMatch(ctx, live("GET", "/v1/orders/o-9", "", nil), c, n, opts); served == nil || miss != nil {
+		t.Fatalf("test C's read of test B's order: %+v", miss)
+	}
+	tr.End()
+	owner := map[string]string{"mock-0": "TestB", "mock-1": "TestB", "mock-2": "TestC"}
+	recs := learnedOntoTaking([]*models.Mock{create, read, read2}, append(append([]models.Mock{}, b.consumed...), c.consumed...), owner)
+	name := models.RunVariablePrefix + "order"
+	if vs := recs[0].Spec.Variables; len(vs) != 1 || vs[name].Bind != "body.order" {
+		t.Fatalf("test B's create carries %+v; want only the run's %s, bound at body.order", vs, name)
+	}
+	for _, m := range recs[1:] {
+		if vs := m.Spec.Variables; len(vs) != 1 || len(vs[name].Use) != 1 || vs[name].Bind != "" {
+			t.Fatalf("%s carries %+v; want it to use the run's %s only", m.Name, vs, name)
+		}
+	}
+	replay := func(cRead string) (bool, *matchDiag) {
+		ci := &varDb{}
+		ci.table.KeepRun()
+		ci.table.Start(nil)
+		ci.perTest = []*models.Mock{recs[0], recs[1]}
+		if ok, _, diag := matchVar(t, h, ci, live("POST", "/v1/orders", `{"order":"o-55"}`, nil)); !ok {
+			t.Fatalf("a full replay: test B's create is a miss: %+v", diag)
+		}
+		if ok, _, diag := matchVar(t, h, ci, live("GET", "/v1/orders/o-55", "", nil)); !ok {
+			t.Fatalf("a full replay: test B's read is a miss: %+v", diag)
+		}
+		ci.table.Start(nil)
+		ci.perTest = []*models.Mock{recs[2]}
+		ok, _, diag := matchVar(t, h, ci, live("GET", cRead, "", nil))
+		return ok, diag
+	}
+	if ok, diag := replay("/v1/orders/o-55"); !ok {
+		t.Fatalf("a full replay: test C's read of the order B made is a miss: %+v", diag)
+	}
+	if ok, _ := replay("/v1/orders/o-56"); ok {
+		t.Fatal("a full replay: test C read another order than the one B made and was served")
+	}
+}
+
 // A later test's second call that sends again the value an earlier test
 // made uses the run's variable, as its first call does: the first call is
 // where the run's variable is used, not where a variable of the test's own
@@ -1146,6 +1209,23 @@ func learnedOnto(recs []*models.Mock, consumed []models.Mock) []*models.Mock {
 		}
 	}
 	return out
+}
+
+// learnedOntoTaking is learnedOnto after what the replay does first
+// (learn.RunTakesPlaces), each consumed mock read as learned in its test
+// (owner).
+func learnedOntoTaking(recs []*models.Mock, consumed []models.Mock, owner map[string]string) []*models.Mock {
+	states := map[string]models.MockState{}
+	for _, c := range consumed {
+		states[c.Name] = models.MockState{Name: c.Name, Variables: c.Spec.Learned(), Binds: c.Spec.LearnedBinds()}
+	}
+	states, _ = learn.RunTakesPlaces(states, func(m string) string { return owner[m] })
+	out := make([]models.Mock, len(consumed))
+	for i, c := range consumed {
+		c.Spec.SetLearned(states[c.Name].Variables, states[c.Name].Binds)
+		out[i] = c
+	}
+	return learnedOnto(recs, out)
 }
 
 // fullRound runs calls through the learn step against recs and returns the
