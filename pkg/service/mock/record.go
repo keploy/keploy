@@ -570,6 +570,14 @@ func (m *mockService) Record(ctx context.Context) error {
 			storeErr = fmt.Errorf("%w; and %w", storeErr, refused)
 		}
 	}
+	// With --record-requests, the test cases the test-case store refused
+	// (casesErr) are not in the recording either: the run is not saved, the
+	// same way, and the run says how many. Before, each was said at ERROR
+	// and left out, and the set was saved without it, exit 0.
+	casesErr := capture.notWritten()
+	if storeErr != nil && casesErr != nil {
+		storeErr = fmt.Errorf("%w; and %w", storeErr, casesErr)
+	}
 	// A run that could not write its recording fails: the test command's own
 	// code first, keploy's 1 when it passed or the user stopped it (as 8a
 	// below). keploy mock propagates the test command's exit code.
@@ -590,6 +598,12 @@ func (m *mockService) Record(ctx context.Context) error {
 		}
 		m.logger.Error(recordDrainWords.storeNotWritten, zap.String("mock-set", name), zap.Error(storeErr), zap.String("next_step", next))
 		return fmt.Errorf("the recording was not saved: %w", storeErr)
+	}
+	if casesErr != nil {
+		failRun()
+		m.logger.Error(recordDrainWords.casesNotWritten, zap.String("mock-set", name), zap.Error(casesErr),
+			zap.String("next_step", "check the disk the recording writes to (space, speed, permissions), then re-record; the existing mock set is kept"))
+		return fmt.Errorf("the recording was not saved: %w", casesErr)
 	}
 
 	// 8a. A process the agent could not track -- the kernel refused it a place
@@ -1494,6 +1508,9 @@ type drainWords struct {
 	// storeWriting is said every mockDrainNotice while it does, and
 	// storeNotWritten at ERROR when it did not write every mock.
 	storeWriting, storeNotWritten string
+	// casesNotWritten is said at ERROR when the test-case store did not
+	// write every test case (--record-requests).
+	casesNotWritten string
 }
 
 // recordDrainWords are keploy mock record's: a recording ended before it has
@@ -1516,6 +1533,7 @@ var recordDrainWords = drainWords{
 
 	storeWriting:    "Still writing the recording's mocks to the mock file",
 	storeNotWritten: "the recording was not saved: the mock file did not take every mock the recording captured",
+	casesNotWritten: "the recording was not saved: the test-case store did not take every test case the recording captured",
 }
 
 // composeTailUnconfirmed, with its next step, is said at WARN once keploy mock

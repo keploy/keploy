@@ -2,6 +2,7 @@ package mock
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -21,6 +22,11 @@ type caseCapture struct {
 	// or failed to be): the capture's progress, said while Record waits for
 	// it (waitConsumers).
 	handled atomic.Uint64
+	// refused counts the cases the test-case store did not write (a full
+	// disk, a permission), and firstErr is the first of its errors. Read only
+	// once done is closed (notWritten).
+	refused  int
+	firstErr error
 }
 
 func (m *mockService) requests() bool {
@@ -57,7 +63,12 @@ func (m *mockService) captureCases(captureCtx, persistCtx context.Context, name 
 				m.logger.Debug("BeforeTestCaseInsert hook failed", zap.Error(err), zap.String("case", tc.Name))
 			}
 			if err := m.testDB.InsertTestCase(persistCtx, tc, name, true); err != nil {
+				// Not in the recording: counted, and the run then ends as one
+				// that is not saved (Record, after closeStore).
 				utils.LogError(m.logger, err, "failed to persist test case", zap.String("case", tc.Name))
+				if c.refused++; c.firstErr == nil {
+					c.firstErr = err
+				}
 				c.handled.Add(1)
 				continue
 			}
@@ -69,6 +80,17 @@ func (m *mockService) captureCases(captureCtx, persistCtx context.Context, name 
 		}
 	}()
 	return c
+}
+
+// notWritten says how many of the cases handed to the test-case store it did
+// not write, with its first error; nil when it wrote every one, or requests
+// are off. Read only once done is closed.
+func (c *caseCapture) notWritten() error {
+	if c == nil || c.refused == 0 {
+		return nil
+	}
+	return fmt.Errorf("%d of the %d test cases handed to the test-case store were not written; the first write failed: %w",
+		c.refused, c.handled.Load(), c.firstErr)
 }
 
 func (c *caseCapture) add(tc *models.TestCase) {
