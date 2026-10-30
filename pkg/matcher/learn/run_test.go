@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unsafe"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -794,6 +795,30 @@ func TestAnEarlierTestsCallIsAPlaceOfTheRun(t *testing.T) {
 	}
 }
 
+// A place an earlier test left the run is earlier than every call of a
+// later test, whatever its recorded time says (alwaysEarlier): one keploy
+// cannot read the time of, one recorded at the later call's own instant (a
+// clock that ties) and one recorded after it each give test B's value the
+// run's variable, never a refusal for the payload such a place does not
+// keep (ranCalls).
+func TestARunPlaceIsEarlierWhateverItsRecordedTimeSays(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	call := time.Unix(1_792_000_060, 0)
+	for name, at := range map[string]time.Time{"no time": {}, "the call's instant": call, "after the call": call.Add(time.Second)} {
+		tr := NewTracker()
+		tr.Begin()
+		a, _, _, _ := tr.Test()
+		tr.Served(a, ranCall("mock-a", at, "o-1", "o-9"))
+		tr.End()
+		tr.Begin()
+		_, earlier, _, _ := tr.Test()
+		ln := ClassifyIn(clockedDrifts(), []string{"body.order"}, strLeaf("body.order", "o-9"), strLeaf("body.order", "o-1"), call, earlier, nil, nil, nil)[0]
+		if ln.Kind != KindVariable || ln.From.Mock != "mock-a" {
+			t.Fatalf("%s: test B's value is %s from %+v (%s), want test A's value, the run's variable", name, ln.Kind, ln.From, ln.Why)
+		}
+	}
+}
+
 // The run keeps of an earlier test's call only the request leaves that
 // drifted: no leaf the application sent as recorded, no answer, payload or
 // view. A word of a leaf that did not drift is then no earlier place of a
@@ -816,7 +841,9 @@ func TestTheRunKeepsOnlyTheDriftedRequestLeaves(t *testing.T) {
 // The run's places hold the values a set's tests made, not their calls: a
 // set of many tests, each of whose calls sends a large leaf as recorded
 // beside the value it made, keeps a heap that grows with those values alone
-// (no-OOM: the row pins the heap the set holds as its last test begins).
+// (no-OOM: the row pins the peak as its last test reads its places: the heap
+// the set holds, and the one copy of the places, not of their leaves, the
+// read makes).
 func TestTheRunsPlacesHoldTheValuesNotTheCalls(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	const tests, big = 2000, 32 << 10
@@ -837,12 +864,22 @@ func TestTheRunsPlacesHoldTheValuesNotTheCalls(t *testing.T) {
 	tr.Begin()
 	runtime.GC()
 	runtime.ReadMemStats(&after)
-	if _, earlier, _, _ := tr.Test(); len(earlier) != tests {
-		t.Fatalf("the last test reads %d of the run's places, want one of each earlier test", len(earlier))
-	}
 	if grew := int64(after.HeapAlloc) - int64(before.HeapAlloc); grew > tests*big/8 {
 		t.Fatalf("the set holds %d bytes for %d tests' places: their %d-byte calls, not the values they made", grew, tests, big)
 	}
+	// The peak, as the last test's call reads its places: the set's heap
+	// above and one read's copy, which holds each place as it is (an
+	// Earlier) and none of its leaves' values.
+	var read runtime.MemStats
+	_, earlier, _, _ := tr.Test()
+	runtime.ReadMemStats(&read)
+	if len(earlier) != tests {
+		t.Fatalf("the last test reads %d of the run's places, want one of each earlier test", len(earlier))
+	}
+	if copied, bound := read.TotalAlloc-after.TotalAlloc, uint64(tests+1)*uint64(unsafe.Sizeof(Earlier{}))+8192; copied > bound {
+		t.Fatalf("one read of %d tests' places allocates %d bytes, over %d: it copies their leaves, not the places", tests, copied, bound)
+	}
+	runtime.KeepAlive(earlier)
 }
 
 // A test's own call whose serve is told after the next test began is a place

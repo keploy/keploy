@@ -161,8 +161,8 @@ func (e Earlier) ofEarlierTest() bool { return e.Run && !e.StartUp }
 // alwaysEarlier: e is earlier than every call of the test it is read for,
 // whatever its recorded time says: the test case's own request (Given), or a
 // place an earlier test left the run (ofEarlierTest), which ended before this
-// test began. Its time splits no reading (timedEarlier, leafedAfterCall,
-// leafedAtCall).
+// test began. Its time splits no reading (leafedAfterCall, leafedAtCall),
+// nor does one keploy cannot read, the call's own instant (timedEarlier).
 func (e Earlier) alwaysEarlier() bool { return e.Given || e.ofEarlierTest() }
 
 // servedAsRecorded reports whether e's adapter said F served it as recorded
@@ -1062,7 +1062,7 @@ func leafedAfterCall(earlier []Earlier, raw []Raw, at time.Time) ([]Earlier, []R
 func timedEarlier(earlier []Earlier, at time.Time) []Earlier {
 	var out []Earlier
 	for i, e := range earlier {
-		if e.alwaysEarlier() || !e.At.IsZero() || at.IsZero() {
+		if e.Given || !e.At.IsZero() || at.IsZero() {
 			continue
 		}
 		if out == nil {
