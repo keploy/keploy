@@ -3,10 +3,12 @@ package learn
 import (
 	"encoding/hex"
 	"regexp"
+	"regexp/syntax"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"go.keploy.io/server/v3/pkg/models"
 )
@@ -74,6 +76,88 @@ var clockLayouts = []clockLayout{
 	{re: regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[17][0-9a-fA-F]{3}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`), read: readUUIDTime, timeWord: uuidTimeWord},
 	{re: regexp.MustCompile(`\d{10}\.\d{1,9}|\d{19}|\d{16}|\d{13}|\d{10}`), read: readEpoch, epoch: true},
 	{re: regexp.MustCompile(`\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?`), read: readTimeOfDay, wraps: true},
+}
+
+// clockWordMax is the most bytes an instant of any layout spans
+// (maxMatchLen), or -1 where one layout's has no bound; clockAnchored is
+// each layout's pattern matched at the start of a text alone.
+var (
+	clockWordMax  = clockLayoutsMax()
+	clockAnchored = func() []*regexp.Regexp {
+		out := make([]*regexp.Regexp, len(clockLayouts))
+		for k, lay := range clockLayouts {
+			out[k] = regexp.MustCompile(`^(?:` + lay.re.String() + `)`)
+		}
+		return out
+	}()
+)
+
+func clockLayoutsMax() int {
+	n := 0
+	for _, lay := range clockLayouts {
+		re, err := syntax.Parse(lay.re.String(), syntax.Perl)
+		if err != nil {
+			return -1
+		}
+		m, ok := maxMatchLen(re)
+		if !ok {
+			return -1
+		}
+		n = max(n, m)
+	}
+	return n
+}
+
+// maxMatchLen is the most bytes a text that re matches can span, at least
+// as many as it can; ok is false where they have no bound (a star or a
+// plus). A rune is one byte where it is ASCII and re folds no case, and
+// utf8.UTFMax otherwise.
+func maxMatchLen(re *syntax.Regexp) (n int, ok bool) {
+	runeLen := func(r rune) int {
+		if r < utf8.RuneSelf && re.Flags&syntax.FoldCase == 0 {
+			return 1
+		}
+		return utf8.UTFMax
+	}
+	switch re.Op {
+	case syntax.OpEmptyMatch, syntax.OpNoMatch, syntax.OpBeginLine, syntax.OpEndLine,
+		syntax.OpBeginText, syntax.OpEndText, syntax.OpWordBoundary, syntax.OpNoWordBoundary:
+		return 0, true
+	case syntax.OpLiteral:
+		for _, r := range re.Rune {
+			n += runeLen(r)
+		}
+		return n, true
+	case syntax.OpCharClass:
+		for _, r := range re.Rune {
+			n = max(n, runeLen(r))
+		}
+		return n, true
+	case syntax.OpAnyChar, syntax.OpAnyCharNotNL:
+		return utf8.UTFMax, true
+	case syntax.OpCapture, syntax.OpQuest:
+		return maxMatchLen(re.Sub[0])
+	case syntax.OpRepeat:
+		if re.Max < 0 {
+			return 0, false
+		}
+		n, ok = maxMatchLen(re.Sub[0])
+		return n * re.Max, ok
+	case syntax.OpConcat, syntax.OpAlternate:
+		for _, sub := range re.Sub {
+			m, ok := maxMatchLen(sub)
+			if !ok {
+				return 0, false
+			}
+			if re.Op == syntax.OpConcat {
+				n += m
+			} else {
+				n = max(n, m)
+			}
+		}
+		return n, true
+	}
+	return 0, false
 }
 
 // ClockOf reports whether a value drifted only with F's clock: every word
@@ -161,6 +245,12 @@ type Window struct {
 	// offsets: the caller's replay compares a read of the clock plus a
 	// constant offset (ComparesOffsets).
 	offsets bool
+	// begun: w is a call's window read from each run's test begin
+	// (sinceBegin), the reading in which the word rule lets go every word
+	// of a text's runs (valueDrift.clockChanged), since only sinceWord
+	// takes what it learns there as noise, and only as a checked read of
+	// one word.
+	begun bool
 }
 
 // ComparesOffsets is w for a caller whose replay compares a value the learn
@@ -237,7 +327,219 @@ func (w *Window) sinceBegin() *Window {
 	if !ok {
 		return nil
 	}
-	return &Window{Rec: rec, F: f, offsets: w.offsets}
+	return &Window{Rec: rec, F: f, offsets: w.offsets, begun: true}
+}
+
+// clockWordIn finds the one instant that changed in a text, recorded as rec
+// and seen in record's full round as live, read in w in both runs: the word
+// rw of rec and lw of live, found as clockAt finds them (the first layout
+// of clockLayouts that matches them, at ASCII word boundaries), each a read
+// of its run's clock in w (Window.holds), with the text around it the same
+// in both runs, before it and after it. ok is false where no instant
+// changed, where more than one did, where the one that did is no read in w,
+// or where the text around it changed too: then no one word of the text is
+// the read, and the text is no read of the clock plus a text that stayed.
+//
+// It reads the layouts over the bytes that differ and a bounded
+// neighbourhood of them, never over a whole text, and its outcome is the
+// one a reading of both whole texts gives (clockWordWindow): its cost is
+// that of finding where two texts differ, whatever their length.
+func clockWordIn(rec, live string, w *Window) (before, rw, lw, after string, ok bool) {
+	if w == nil || rec == live {
+		return "", "", "", "", false
+	}
+	q, er, el, near := clockWordWindow(rec, live)
+	if !near {
+		return "", "", "", "", false
+	}
+	takenR, takenL := make([]bool, er-q), make([]bool, el-q)
+	for _, lay := range clockLayouts {
+		rm, lm := clockMatches(lay, rec, q, er, takenR), clockMatches(lay, live, q, el, takenL)
+		for j := 0; j < len(rm) && j < len(lm); j++ {
+			rs, ls := rec[rm[j][0]:rm[j][1]], live[lm[j][0]:lm[j][1]]
+			if rs == ls {
+				continue
+			}
+			for i := rm[j][0]; i < rm[j][1]; i++ {
+				takenR[i-q] = true
+			}
+			for i := lm[j][0]; i < lm[j][1]; i++ {
+				takenL[i-q] = true
+			}
+			if ok {
+				// A second instant that changed.
+				return "", "", "", "", false
+			}
+			before, rw, lw, after = rec[:rm[j][0]], rs, ls, rec[rm[j][1]:]
+			if live[:lm[j][0]] != before || live[lm[j][1]:] != after || !w.holds(lay, rs, ls) {
+				return "", "", "", "", false
+			}
+			ok = true
+		}
+		// One text's window holds more of the layout's instants than the
+		// other's: a reading of the whole texts pairs its last ones with
+		// the instants after the window, the same in both texts, as it
+		// pairs those with each other. Any such pair that differs refuses
+		// the text (the text before its later instant can never be the
+		// other's), and pairs that are the same are passed over.
+		var extra [][]int
+		s := rec
+		if len(rm) > len(lm) {
+			extra = rm[len(lm):]
+		} else if len(lm) > len(rm) {
+			extra, s = lm[len(rm):], live
+		}
+		if len(extra) > 0 && !clockPairsAfter(lay, rec, er, s, extra) {
+			return "", "", "", "", false
+		}
+	}
+	return before, rw, lw, after, ok
+}
+
+// clockWordWindow is the part of rec and of live that clockWordIn reads,
+// rec[q:er] and live[q:el]: the bytes where the two texts differ, and on
+// each side of them a seam no layout's instant runs across, so a reading of
+// a text's part finds the instants a reading of the whole text finds there
+// (clockSeamBefore, clockSeamAfter), with the instants before q the same in
+// both texts, as are those from er in rec and el in live. ok is false where
+// a differing part spans more bytes than any layout's instant can
+// (clockWordMax): no one instant changed there. Where the layouts' instants
+// have no bound, where no seam lies near, or where the side is short
+// (clockSeamMin), the part is the whole text on that side.
+func clockWordWindow(rec, live string) (q, er, el int, ok bool) {
+	if clockWordMax < 0 {
+		return 0, len(rec), len(live), true
+	}
+	p, s := commonEnds(rec, live)
+	if len(rec)-p-s > clockWordMax || len(live)-p-s > clockWordMax {
+		return 0, 0, 0, false
+	}
+	// A seam's own reading reads up to clockWordMax bytes past each place
+	// before it: it is read where both texts are the same. A side shorter
+	// than clockSeamMin past that margin is read whole: its seam would
+	// cost more to find than the bytes it leaves out, and the whole side
+	// is what a reading of the whole texts reads.
+	q, er = 0, len(rec)
+	if p-clockWordMax >= clockSeamMin {
+		q = clockSeamBefore(rec, p-clockWordMax)
+	}
+	if s-clockWordMax >= clockSeamMin {
+		er = clockSeamAfter(rec, len(rec)-s+clockWordMax)
+	}
+	return q, er, er + len(live) - len(rec), true
+}
+
+// commonEnds is how many bytes a and b share at their start (p), and then
+// at their end (s), the two never overlapping in either.
+func commonEnds(a, b string) (p, s int) {
+	n := min(len(a), len(b))
+	for p+64 <= n && a[p:p+64] == b[p:p+64] {
+		p += 64
+	}
+	for p < n && a[p] == b[p] {
+		p++
+	}
+	n -= p
+	for s+64 <= n && a[len(a)-s-64:len(a)-s] == b[len(b)-s-64:len(b)-s] {
+		s += 64
+	}
+	for s < n && a[len(a)-s-1] == b[len(b)-s-1] {
+		s++
+	}
+	return p, s
+}
+
+// clockCutSearch is how far clockSeamBefore and clockSeamAfter look for a
+// seam before they take the text's own end as one; clockSeamMin is how
+// long a side of the two texts' differing part must be, past the margin a
+// seam is read in, for clockWordWindow to look for a seam on it at all.
+const (
+	clockCutSearch = 256
+	clockSeamMin   = 32
+)
+
+// clockSeamBefore is the last seam of s at or before hi, and at most
+// clockCutSearch before it: a place q no instant of any layout a reading of
+// s finds starts before and ends after (clockReach). 0, s's start, where
+// there is none. A reading of s from q then finds what one of the whole of
+// s finds from there: no layout anchors, so where a match starts, and where
+// it ends, are read from the bytes it can span alone.
+func clockSeamBefore(s string, hi int) int {
+	for q := hi; q > 0 && hi-q <= clockCutSearch; {
+		a := q - 1
+		for a >= 0 && a >= q-clockWordMax && clockReach(s, a) <= q {
+			a--
+		}
+		if a < 0 || a < q-clockWordMax {
+			return q
+		}
+		// An instant from a runs across q, and so across every place
+		// after a.
+		q = a
+	}
+	return 0
+}
+
+// clockSeamAfter is the first seam of s at or after lo, and at most
+// clockCutSearch after it (clockSeamBefore); len(s), s's end, where there
+// is none.
+func clockSeamAfter(s string, lo int) int {
+	if lo >= len(s) {
+		return len(s)
+	}
+	e := lo
+	for a := max(0, lo-clockWordMax); a < e; a++ {
+		if r := clockReach(s, a); r > e {
+			if r-lo > clockCutSearch {
+				return len(s)
+			}
+			e = r
+		}
+	}
+	return e
+}
+
+// clockReach is where the instant that a reading of s finds starting at a
+// ends, the farthest of every layout's; a where none starts there. A match
+// spans at most clockWordMax bytes, so it is read from those alone: a
+// match a regexp prefers there is one in them.
+func clockReach(s string, a int) int {
+	end := a
+	t := s[a:min(len(s), a+clockWordMax)]
+	for _, re := range clockAnchored {
+		if m := re.FindStringIndex(t); m != nil && a+m[1] > end {
+			end = a + m[1]
+		}
+	}
+	return end
+}
+
+// clockPairsAfter reports whether every pair a reading of the whole texts
+// makes after clockWordIn's window, of one layout, is of one instant: the
+// layout's instants of s's window left over (extra, of s, rec or live),
+// then those of rec from er, paired in order with those of rec from er (the
+// same as live's from its window's end).
+func clockPairsAfter(lay clockLayout, rec string, er int, s string, extra [][]int) bool {
+	waiting := make([]string, 0, len(extra))
+	for _, m := range extra {
+		waiting = append(waiting, s[m[0]:m[1]])
+	}
+	for at := er; at < len(rec); {
+		m := lay.re.FindStringIndex(rec[at:])
+		if m == nil {
+			return true
+		}
+		a, b := at+m[0], at+m[1]
+		at = b
+		if !atWordBounds(rec, a, b) {
+			continue
+		}
+		if waiting[0] != rec[a:b] {
+			return false
+		}
+		waiting = append(waiting[1:], rec[a:b])
+	}
+	return true
 }
 
 // holds reports whether t, an instant read at resolution res, is a read of
@@ -282,12 +584,19 @@ func (w *Window) Holds(rec, live time.Time, res time.Duration) bool {
 	return w != nil && w.Rec.holds(rec, res) && w.F.holds(live, res)
 }
 
-// key is w as a map key, the zero key for none.
-func (w *Window) key() [4]int64 {
+// key is w as a map key, the zero key for none: its spans' bounds, and 1
+// last for a reading from each run's test begin (begun), which reads a
+// value's words otherwise than its call's own window does even where the
+// two windows' bounds are the same.
+func (w *Window) key() [5]int64 {
 	if w == nil {
-		return [4]int64{}
+		return [5]int64{}
 	}
-	return [4]int64{w.Rec.From.UnixNano(), w.Rec.To.UnixNano(), w.F.From.UnixNano(), w.F.To.UnixNano()}
+	var begun int64
+	if w.begun {
+		begun = 1
+	}
+	return [5]int64{w.Rec.From.UnixNano(), w.Rec.To.UnixNano(), w.F.From.UnixNano(), w.F.To.UnixNano(), begun}
 }
 
 // clockOf is clockIn with no call's window: the clock reads that moved by
@@ -327,7 +636,7 @@ func clockAt(recorded, live string, w *Window, lead bool, call time.Time, zone *
 	takenR, takenL := make([]bool, len(recorded)), make([]bool, len(live))
 	var at []int
 	for k, lay := range clockLayouts {
-		rm, lm := clockMatches(lay, recorded, takenR), clockMatches(lay, live, takenL)
+		rm, lm := clockMatches(lay, recorded, 0, len(recorded), takenR), clockMatches(lay, live, 0, len(live), takenL)
 		for j := 0; j < len(rm) && j < len(lm); j++ {
 			rs, ls := recorded[rm[j][0]:rm[j][1]], live[lm[j][0]:lm[j][1]]
 			if rs == ls {
@@ -400,17 +709,21 @@ func (b byPlace) Swap(i, j int) {
 	b.reads[i], b.reads[j] = b.reads[j], b.reads[i]
 }
 
-// clockMatches are the places of s that hold an instant in layout lay, at
-// ASCII word boundaries, and that no earlier layout took (taken).
-func clockMatches(lay clockLayout, s string, taken []bool) [][]int {
+// clockMatches are the places of s from from to to that hold an instant in
+// layout lay, at ASCII word boundaries of s (atWordBounds), and that no
+// earlier layout took (taken, of those bytes alone). A reading of s[from:to]
+// finds what one of the whole of s does there only where no instant runs
+// across from or to (clockWordWindow).
+func clockMatches(lay clockLayout, s string, from, to int, taken []bool) [][]int {
 	var out [][]int
-	for _, m := range lay.re.FindAllStringIndex(s, -1) {
-		if m[0] > 0 && isWord(s[m[0]-1]) && isWord(s[m[0]]) || m[1] < len(s) && isWord(s[m[1]-1]) && isWord(s[m[1]]) {
+	for _, m := range lay.re.FindAllStringIndex(s[from:to], -1) {
+		m[0], m[1] = m[0]+from, m[1]+from
+		if !atWordBounds(s, m[0], m[1]) {
 			continue
 		}
 		free := true
 		for i := m[0]; i < m[1]; i++ {
-			if taken[i] {
+			if taken[i-from] {
 				free = false
 				break
 			}
@@ -420,6 +733,12 @@ func clockMatches(lay clockLayout, s string, taken []bool) [][]int {
 		}
 	}
 	return out
+}
+
+// atWordBounds reports whether s[a:b] stands at ASCII word boundaries of s:
+// no letter or digit of s runs into its first or its last byte.
+func atWordBounds(s string, a, b int) bool {
+	return (a <= 0 || !isWord(s[a-1]) || !isWord(s[a])) && (b >= len(s) || !isWord(s[b-1]) || !isWord(s[b]))
 }
 
 // moved reports whether the live text is the recorded one's instant moved by

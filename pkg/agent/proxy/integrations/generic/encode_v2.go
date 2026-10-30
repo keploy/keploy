@@ -348,11 +348,19 @@ drain:
 		}
 		// The connection's life, by its chunks' recorded times: a held
 		// first exchange is the preamble once a chunk comes after the
-		// answer of the test that owns it.
-		at := ev.writtenAt
-		if ev.dir == fakeconn.FromClient {
-			at = ev.readAt
-		}
+		// answer of the test that owns it. A chunk's time here is when the
+		// relay read it, in either direction, never when its write
+		// returned: the relay stamps a read before it writes the bytes on,
+		// so the other side cannot have had them earlier, while a write's
+		// return is stamped as late as the relay's goroutine runs. Under
+		// load a destination's answer was stamped written after the client
+		// had read it, ended its test and the next test had begun, so a
+		// connection wholly inside its test read as outliving it, its only
+		// exchange went to the session pool, and the test passed at replay
+		// with its call skipped. A chunk with no read time (none the relay
+		// stamped) does not count: no time it has shows the connection
+		// outlived its test.
+		at := ev.readAt
 		if at.After(lastAt) {
 			lastAt = at
 		}

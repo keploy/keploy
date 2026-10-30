@@ -420,12 +420,16 @@ func createGenericMocksAsync(ctx context.Context, logger *zap.Logger, clientCh, 
 	}
 }
 
+// binaryPayload is the Type of a payload whose Data is its bytes in base64
+// (encodePayload): any piece that is not wholly ASCII.
+const binaryPayload = "binary"
+
 func encodePayload(buf []byte, origin models.OriginType) models.Payload {
 	bufStr := string(buf)
 	dataType := models.String
 	if !util.IsASCII(string(buf)) {
 		bufStr = util.EncodeBase64(buf)
-		dataType = "binary"
+		dataType = binaryPayload
 	}
 	return models.Payload{
 		Origin: origin,

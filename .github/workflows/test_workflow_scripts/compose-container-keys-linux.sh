@@ -34,7 +34,8 @@ FAIL=0
 # Names of this run's own: two runs on one runner never share a container.
 ID=$$
 # The app's port on this host.
-PORT=$(python3 -c 'import socket; s = socket.socket(); s.bind(("", 0)); print(s.getsockname()[1])')
+source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/free-port.sh"
+PORT=$(free_port) || exit 1
 
 # Tear down only this run's project and containers, by name. Never a blanket
 # prune.

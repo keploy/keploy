@@ -2179,7 +2179,11 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 						detected, _ = noiseEngine.Detect(chosen, liveBody, userBodyNoise)
 					}
 				}
-				updateMock(ctx, logger, chosen, mockDb, detected)
+				// The server answers no SEND_LONG_DATA: F gave the
+				// application nothing back (stateServed).
+				if updateMock(ctx, logger, chosen, mockDb, detected) {
+					stateServed(ctx, chosen, &req.PacketBundle, nil)
+				}
 			}
 			logger.Debug("Accepting COM_STMT_SEND_LONG_DATA (no-response command)",
 				zap.Bool("consumed_recorded_mock", chosen != nil))
@@ -2458,6 +2462,17 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 			}
 		}
 	}
+
+	// Say what the serve gave the application: the command as it sent it,
+	// and the answer the command phase writes for it (none to a command the
+	// server does not answer: query.go). Without it a later call of the set
+	// reads matchedMock as a serve no adapter stated, and refuses every
+	// changed value that may stand there.
+	written := &responseCopy.PacketBundle
+	if wire.IsNoResponseCommand(req.Header.Type) {
+		written = nil
+	}
+	stateServed(ctx, matchedMock, &req.PacketBundle, written)
 
 	if debugOn {
 		logger.Debug("matched command with the mock", zap.String("mock", matchedMock.Name))

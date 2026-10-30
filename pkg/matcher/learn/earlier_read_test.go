@@ -57,8 +57,8 @@ func secsText(t time.Time) string  { return strconv.FormatInt(t.Unix(), 10) }
 // learned as one (KindClockRead), never as noise, and its read says a
 // replay checks it from its test's begin (models.SinceTestBegin). Read
 // before the test began in either run, or with no begin known, it is
-// refused as before; and a changed instant inside a longer value, which the
-// word rule would learn as noise, is never learned from the wider window.
+// refused as before. A changed instant inside a longer value is learned as
+// a read of that word alone (TestAClientTestLearnsAWordOfATextReadSinceItsTestBegan).
 func TestAClientTestLearnsAReadMadeBeforeItsCallsWindowAsAReadSinceItsTestBegan(t *testing.T) {
 	const p = "body.docs.msgs.{}.auditedAtNanos"
 	str := func(v string) Shape {
@@ -86,7 +86,6 @@ func TestAClientTestLearnsAReadMadeBeforeItsCallsWindowAsAReadSinceItsTestBegan(
 		{"no begin known in the recording, read in its call's window there", nanosText(earlierRec.prev.Add(100 * time.Millisecond)), nanosText(earlierF.read), &Window{Rec: noBegin.Rec, F: w.F}, false, "its characters 1 to 19"},
 		{"read before the recording's test began", nanosText(before(earlierRec).read), nanosText(earlierF.read), w, false, "its characters 1 to 19"},
 		{"read before full round's test began", nanosText(earlierRec.read), nanosText(before(earlierF).read), w, false, "its characters 1 to 19"},
-		{"inside a longer value", "audited " + nanosText(earlierRec.read), "audited " + nanosText(earlierF.read), w, false, "its characters 9 to 27"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ln := ClassifyIn(clientTestCache(), []string{p}, str(tc.live), str(tc.rec), earlierRec.call, nil, nil, nil, tc.w)[0]

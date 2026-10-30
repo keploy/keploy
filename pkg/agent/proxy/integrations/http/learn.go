@@ -1579,7 +1579,7 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 				continue
 			}
 			commit()
-			if e, ok := n.servedExchange(tracker.Drifts(), picked, nil, rec, recordedParts(picked), liveShape, input, live, out, own); ok {
+			if e, ok := n.servedExchange(tracker.Drifts(), picked, nil, rec, recordedParts(picked), liveShape, input, live, out, own, answerView{}); ok {
 				tracker.Served(test, e)
 			}
 			return out, nil, nil
@@ -1715,7 +1715,7 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 				h.Logger.Info("learned a field that changed between record and replay",
 					zap.String("mock", m.Name), zap.String("field", l.Recorded.Path), zap.String("as", string(l.Kind)))
 			}
-			if e, ok := n.servedExchange(tracker.Drifts(), m, answered, c.Shape, recordedParts(m), liveShape, input, live, out, own); ok {
+			if e, ok := n.servedExchange(tracker.Drifts(), m, answered, c.Shape, recordedParts(m), liveShape, input, live, out, own, h.learnedView(m, plan)); ok {
 				tracker.Served(test, e)
 			}
 			return out, nil, nil
@@ -2311,18 +2311,8 @@ func (h *HTTP) claimLearned(ctx context.Context, m *models.Mock, mockDb integrat
 	if err != nil {
 		return nil, false, "", err
 	}
-	if len(p.vars) > 0 {
-		decls, problem := readDecls(&models.Mock{Name: m.Name, Spec: models.MockSpec{Variables: p.vars}})
-		if problem != "" {
-			return nil, false, problem, nil
-		}
-		// local holds every variable this call answers; the empty table
-		// guards renderAnswers' table lookup all the same.
-		rendered, vp := h.renderAnswers(served, &varHit{mock: m, decls: decls, local: p.values}, &variables.Table{})
-		if vp != nil {
-			return nil, false, vp.why, nil
-		}
-		served = rendered
+	if served, why = h.renderLearned(served, m.Name, p); why != "" {
+		return nil, false, why, nil
 	}
 	claimed = h.consumeWith(context.WithValue(ctx, ownedKey{}, owner), m, mockDb, func(spec *models.MockSpec) {
 		if len(p.noise) > 0 {
@@ -2341,6 +2331,51 @@ func (h *HTTP) claimLearned(ctx context.Context, m *models.Mock, mockDb integrat
 		}
 	})
 	return served, claimed, "", nil
+}
+
+// renderLearned is rec, the recording named name with its answer read back,
+// with the answer F serves where the learn step paired it with p: each
+// variable p learned holds this call's value (renderAnswers); rec itself
+// where p learned none. why says why the answer cannot hold a value. The
+// same p renders the same answer from the same recording, so the view of
+// the serve (learnedView) is rendered again from them where a rule reads it,
+// and keeps none of the answer's text.
+func (h *HTTP) renderLearned(rec *models.Mock, name string, p pairing) (*models.Mock, string) {
+	if len(p.vars) == 0 {
+		return rec, ""
+	}
+	decls, problem := readDecls(&models.Mock{Name: name, Spec: models.MockSpec{Variables: p.vars}})
+	if problem != "" {
+		return nil, problem
+	}
+	// local holds every variable this call answers; the empty table
+	// guards renderAnswers' table lookup all the same.
+	rendered, vp := h.renderAnswers(rec, &varHit{mock: rec, decls: decls, local: p.values}, &variables.Table{})
+	if vp != nil {
+		return nil, vp.why
+	}
+	return rendered, ""
+}
+
+// learnedView is how F answered m where the learn step paired it with p
+// (renderLearned): the answer as rendered from m's recorded one, read back
+// where a rule reads it, and the values it rendered, which name it among
+// m's views (answerKey); nil, "" where p rendered none, whose serve gave
+// the recorded answer whole.
+func (h *HTTP) learnedView(m *models.Mock, p pairing) answerView {
+	if len(p.vars) == 0 {
+		return answerView{}
+	}
+	return answerView{
+		render: func(rec *models.Mock) (*models.Mock, error) {
+			out, why := h.renderLearned(rec, m.Name, p)
+			if why != "" {
+				return nil, fmt.Errorf("http: render the answer of mock %q as F served it: %s", m.Name, why)
+			}
+			return out, nil
+		},
+		key: valuesKey(p.values),
+	}
 }
 
 // inRecordedOrder is mocks in the order they were recorded.
@@ -2389,13 +2424,14 @@ func leafPaths(ls []learn.Leaf) []string {
 // either. Its payload is m's lazy Raw in dc (earlierOf).
 //
 // Where F gave the application m's recorded answer whole (answerAsRecorded),
-// keploy knows F's view of the exchange: m as the application sent in and F
-// answered it (servedLiveView, learn.Earlier.View), the view a later call of the
-// set reads m with where the request was not the recorded one
-// (learn.Order.ServedView). An answer F gave otherwise (a template value, a
-// variable rendered into it) states no view: a later call refuses a word a
+// or the answer av renders from it (a variable the learn step learned, with
+// this call's value: learnedView), keploy knows F's view of the exchange: m
+// as the application sent in and F answered it (servedView,
+// learn.Earlier.View), the view a later call of the set reads m with where
+// the request or the answer was not the recorded one (learn.Order.ServedView).
+// An answer F gave otherwise states no view: a later call refuses a word a
 // value holds now that may stand there (fail closed). A nil in states none.
-func (n learnNoise) servedExchange(dc *learn.DriftCache, m, recorded *models.Mock, rec learn.Shape, rp httpParts, liveShape learn.Shape, in *req, live httpParts, served *models.Mock, own bool) (learn.Earlier, bool) {
+func (n learnNoise) servedExchange(dc *learn.DriftCache, m, recorded *models.Mock, rec learn.Shape, rp httpParts, liveShape learn.Shape, in *req, live httpParts, served *models.Mock, own bool, av answerView) (learn.Earlier, bool) {
 	if recorded == nil {
 		var err error
 		if recorded, err = withResponse(m); err != nil {
@@ -2408,8 +2444,12 @@ func (n learnNoise) servedExchange(dc *learn.DriftCache, m, recorded *models.Moc
 		rec, liveShape = unmasked.shape(rp, destOf(live, rp)), unmasked.shape(live, sameDest)
 	}
 	e := withExcused(earlierOf(dc, m, recorded, rec, liveShape, served, own), n, live, rp)
-	if in != nil && served != nil && answerAsRecorded(recorded.Spec.HTTPResp, served.Spec.HTTPResp) {
+	switch {
+	case in == nil || served == nil:
+	case answerAsRecorded(recorded.Spec.HTTPResp, served.Spec.HTTPResp):
 		e.View, e.ViewKey = servedLiveView(m, in)
+	case av.render != nil:
+		e.View, e.ViewKey = servedView(m, in, av)
 	}
 	return e, true
 }

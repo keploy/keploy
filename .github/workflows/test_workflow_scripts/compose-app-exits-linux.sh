@@ -31,7 +31,8 @@ FAIL=0
 # Names of this run's own: two runs on one runner never share a container.
 ID=$$
 # The app's port on this host.
-PORT=$(python3 -c 'import socket; s = socket.socket(); s.bind(("", 0)); print(s.getsockname()[1])')
+source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/free-port.sh"
+PORT=$(free_port) || exit 1
 
 # The project leg 3 names with -p: a name that starts with "up", which keploy's
 # command rewrite once took for the `up` subcommand.

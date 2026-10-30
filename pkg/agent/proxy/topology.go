@@ -109,6 +109,11 @@ func (c *liveReader) CloseWrite() error {
 	return util.CloseWriteIfPossible(c.Conn)
 }
 
+// NetConn is the connection underneath: what looks for the socket under a
+// live call's conn (util.WatchPeerEnd, watching the caller for its hang-up)
+// looks through it.
+func (c *liveReader) NetConn() net.Conn { return c.Conn }
+
 // programOf is the program process pid runs: its executable, else its
 // command name; "" when neither can be read.
 func programOf(pid int) string {

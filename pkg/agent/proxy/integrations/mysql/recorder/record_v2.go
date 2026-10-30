@@ -389,7 +389,7 @@ func handleInitialHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 		if err != nil {
 			return res, fmt.Errorf("parse auth switch response: %w", err)
 		}
-		res.req = append(res.req, clientAuthData(switchPkt, mysql.AuthSwithResponse))
+		res.req = append(res.req, mysqlUtils.ClientAuthData(switchPkt, mysql.AuthSwithResponse))
 
 		authData, err = mysqlUtils.ReadPacketBuffer(ctx, logger, sess.DestStream)
 		if err != nil {
@@ -722,7 +722,7 @@ func handlePostTLSHandshakeV2(ctx context.Context, logger *zap.Logger, sess *sup
 		if pErr != nil {
 			return res, fmt.Errorf("post-TLS V2: parse auth switch response: %w", pErr)
 		}
-		res.req = append(res.req, clientAuthData(switchPkt, mysql.AuthSwithResponse))
+		res.req = append(res.req, mysqlUtils.ClientAuthData(switchPkt, mysql.AuthSwithResponse))
 
 		authData, err = mysqlUtils.ReadPacketBuffer(ctx, logger, sess.DestStream)
 		if err != nil {
@@ -899,7 +899,7 @@ func handleFullAuthV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 	if err != nil {
 		return res, fmt.Errorf("parse encrypted password: %w", err)
 	}
-	res.req = append(res.req, clientAuthData(encPass, mysql.EncryptedPassword))
+	res.req = append(res.req, mysqlUtils.ClientAuthData(encPass, mysql.EncryptedPassword))
 
 	// Final OK/ERR from server.
 	finalBuf, err := mysqlUtils.ReadPacketBuffer(ctx, logger, sess.DestStream)
@@ -928,8 +928,8 @@ func handlePlainPasswordV2(ctx context.Context, logger *zap.Logger, sess *superv
 	if err != nil {
 		return res, fmt.Errorf("parse plain password: %w", err)
 	}
-	// The password is recorded by its length only (clientAuthData).
-	res.req = append(res.req, clientAuthData(plainPkt, mysql.PlainPassword))
+	// The password is recorded by its length only (mysqlUtils.ClientAuthData).
+	res.req = append(res.req, mysqlUtils.ClientAuthData(plainPkt, mysql.PlainPassword))
 	finalBuf, err := mysqlUtils.ReadPacketBuffer(ctx, logger, sess.DestStream)
 	if err != nil {
 		return res, fmt.Errorf("read final auth response (plain): %w", err)
