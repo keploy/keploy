@@ -5976,6 +5976,7 @@ func (p *Proxy) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 					FieldReasons:     parserErr.MismatchReport.FieldReasons,
 					VariablePlaces:   parserErr.MismatchReport.VariablePlaces,
 					NotOwned:         parserErr.MismatchReport.NotOwned,
+					Shape:            parserErr.MismatchReport.Shape,
 					// A call of a marked series nothing answered: the
 					// application's background work, charged to no test.
 					Background: provenswitch.On() && parserErr.MismatchReport.Background,

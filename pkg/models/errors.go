@@ -339,6 +339,13 @@ type MockMismatchReport struct {
 	// similarity): likely one another test recorded, which the replay names
 	// (UnmatchedCall.RecordedIn).
 	NotOwned bool
+	// Shape is, under the proven switch, on a miss that names no recording
+	// (ClosestMock ""), the call's shape as its parser's series reading
+	// reads it, values aside and hashed (learn.CallShapeOf): which series of
+	// the set the call can be a call of, the evidence judging reads for a
+	// test that made a call of a series where it recorded none
+	// (UnmatchedCall.Shape). "" on every other miss.
+	Shape string
 	// Background says, under the proven switch, that the call is of a
 	// series judging marked as the application's background work (a timer's
 	// call, learn.Series.HasShape) and no recording of the series answers it
