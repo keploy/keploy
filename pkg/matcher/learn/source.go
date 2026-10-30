@@ -1,6 +1,10 @@
 package learn
 
-import "go.keploy.io/server/v3/pkg/models"
+import (
+	"time"
+
+	"go.keploy.io/server/v3/pkg/models"
+)
 
 // WordFrom is the word rule's reading (unaccounted) of whether a value of a
 // test that changed between its recording and this run (recorded, live: its
@@ -19,6 +23,21 @@ import "go.keploy.io/server/v3/pkg/models"
 // in a learn step and in keploy test. "" for none; err is why m's answer
 // cannot be read back.
 func (dc *DriftCache) WordFrom(recorded, live string, m *models.Mock, given ...string) (string, error) {
+	return dc.WordFromIn(recorded, live, nil, m, given...)
+}
+
+// WordFromIn is WordFrom of a value whose clock reads are read in w too,
+// the window of what carries it in each run (nil: by the lead alone, as
+// WordFrom): an instant that falls in its run's span in both runs is a read
+// of each run's clock (clockAt), so its words are clock words, left out of
+// what the value changed. keploy test's dataflow guard reads a test's
+// response so, in the span from the test's request to its answer, recorded
+// and this run: the application stamps its answer with its clock (an HTTP
+// Date header), and this run's stamp is no word an earlier recording gave.
+// Read by the lead alone, the stamp's minute or second was a word of what
+// changed, and a start-up answer that held the same number by chance (its
+// length, a version) was taken as reaching the test.
+func (dc *DriftCache) WordFromIn(recorded, live string, w *Window, m *models.Mock, given ...string) (string, error) {
 	if m == nil || recorded == live {
 		return "", nil
 	}
@@ -44,7 +63,7 @@ func (dc *DriftCache) WordFrom(recorded, live string, m *models.Mock, given ...s
 			}
 		}
 	}
-	return dc.of(recorded, live).eachChanged(func(i int, t string, _ bool) string {
+	return dc.ofIn(recorded, live, w, time.Time{}).eachChanged(func(i int, t string, _ bool) string {
 		if i < len(src) && src[i][t] && !held[i][t] {
 			return t
 		}
