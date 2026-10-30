@@ -598,3 +598,31 @@ func TestInsertMock_AnInsertWhoseCallerHasGivenUpIsCountedOnlyIfQueued(t *testin
 		t.Fatalf("set-0 holds %d mocks, want the %d queued", len(got), queued)
 	}
 }
+
+// A store whose gob writer is not running, or has ended, has nothing left to
+// write: CloseUnless with its stop already closed returns nil, every time.
+// What it waits for (the free lifecycle lock) wins over the stop that came
+// with it (whileWriting). Taken at random, the stop failed a prune, promote
+// or discard whose ctx was done, on a set nothing was writing, as "0 of the 0
+// mocks ... were not written". Repeated so that a coin flip cannot pass.
+func TestCloseUnless_AStoreWithNothingToWriteReturnsNilAtAStopAlreadyGiven(t *testing.T) {
+	t.Setenv("KEPLOY_MOCK_FORMAT", "gob")
+	stop := make(chan struct{})
+	close(stop)
+	idle := New(zap.NewNop(), t.TempDir(), "mocks") // no writer has run
+	ended := New(zap.NewNop(), t.TempDir(), "mocks")
+	insertGobMocks(t, ended, 3)
+	if err := ended.Close(); err != nil { // its writer wrote them, and ended
+		t.Fatal(err)
+	}
+	for _, s := range []struct {
+		writer string
+		ys     *MockYaml
+	}{{"not running", idle}, {"ended", ended}} {
+		for i := 0; i < 200; i++ {
+			if err := s.ys.CloseUnless(stop); err != nil {
+				t.Fatalf("a store whose writer is %s: CloseUnless %d, at a stop already given, returned %v", s.writer, i, err)
+			}
+		}
+	}
+}
