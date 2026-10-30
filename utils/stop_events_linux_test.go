@@ -1519,7 +1519,13 @@ func TestAChildReapedBeforeItsFilesAreComparedIsNoRefusal(t *testing.T) {
 
 // A task has begun to exit where its stat says it is a zombie or dead, or
 // has PF_EXITING (0x4) set, whatever its state: keploy#4999's CI read a
-// task with flags 4227084 (0x40800C) as S.
+// task with flags 4227084 (0x40800C) as S. The flag is the kernel's 0x4,
+// written so here, not as pfExiting, which a row would only test against
+// itself. 0x8 alone is no exit: from 5.16 it is PF_POSTCOREDUMP, which
+// do_exit sets just before PF_EXITING (so on the CI kernels the two mark
+// one window, and a real-kernel row cannot tell them apart), but 5.10,
+// the kernel floor, sets no 0x8 as a task exits, and a task with only
+// that bit still holds its files.
 func TestATaskThatBeganToExitReadsSo(t *testing.T) {
 	for _, tc := range []struct {
 		state byte
@@ -1529,9 +1535,10 @@ func TestATaskThatBeganToExitReadsSo(t *testing.T) {
 		{'S', 4194560, false}, // 0x400100, a sleeping process's
 		{'R', 4194304, false},
 		{'D', 4194560, false},
+		{'S', 0x400008, false}, // PF_POSTCOREDUMP alone: before exit_signals
 		{'S', 4227084, true},
 		{'R', 4227084, true},
-		{'D', pfExiting, true},
+		{'D', 0x4, true},
 		{'Z', 4194560, true},
 		{'X', 0, true},
 	} {
@@ -1546,10 +1553,16 @@ func TestATaskThatBeganToExitReadsSo(t *testing.T) {
 // its descriptors then list as none, and kcmp of every one is EBADF) is no
 // evidence, whatever the comparisons said: the files may be held still by
 // another thread of the process. Here a child is killed as its files are
-// read, and is a zombie, not reaped, when the read ends, its comparisons
-// failing each way a task on its way out makes them fail: ESRCH and EINTR,
-// and EBADF on every one, which alone would read as every descriptor but
-// the first closed.
+// read, and is a zombie, not reaped, when the read ends. Its comparisons
+// fail with EBADF on every one, as they do through a task that let its
+// files go, which alone would read as every descriptor but the first
+// closed; with ESRCH, as for a task released; with EINTR, which kcmp gives
+// where keploy's own thread takes a fatal signal as it waits on the task
+// (kcmp_lock), so not from the task, but which reads, as ESRCH does, as
+// no evidence (kcmpRefused); and with EPERM, a refusal, where each
+// descriptor counts: the read through the exiting task is no evidence
+// still, and its refusal is kept, so the stop says once why it counts
+// descriptors.
 func TestAReadThroughATaskThatBeganToExitIsUnsettled(t *testing.T) {
 	// Killed by the kernel too when the thread that started it ends
 	// (Pdeathsig), so a test binary killed mid-test leaves no sleep behind:
@@ -1557,7 +1570,7 @@ func TestAReadThroughATaskThatBeganToExitIsUnsettled(t *testing.T) {
 	runtime.LockOSThread()
 	t.Cleanup(runtime.UnlockOSThread)
 	t.Cleanup(func() { filesCompared.Store(nil) })
-	for _, no := range []error{syscall.ESRCH, syscall.EINTR, syscall.EBADF} {
+	for _, no := range []error{syscall.ESRCH, syscall.EINTR, syscall.EBADF, syscall.EPERM} {
 		ready := filepath.Join(t.TempDir(), "ready")
 		cmd := exec.Command("/bin/sh", "-c", `exec 3</dev/null 4</dev/null; : > "$1"; exec sleep 1000`, "sh", ready)
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
@@ -1603,8 +1616,13 @@ func TestAReadThroughATaskThatBeganToExitIsUnsettled(t *testing.T) {
 		filesCompared.Store(&dying)
 		m := MarkExit([]Reached{{PID: pid, Start: st.StartTime}})
 		filesCompared.Store(nil)
-		if calls == 0 || m.Running != 1 || !m.FilesUnsettled || m.FilesUncompared != nil {
-			t.Fatalf("a child killed as its files were read, its comparisons failing with %v, read as %+v after %d comparisons; want running as it was first read, its files unsettled, no refusal", no, m, calls)
+		refused := no == syscall.EPERM
+		if calls == 0 || m.Running != 1 || !m.FilesUnsettled || refused != (m.FilesUncompared != nil) || refused && !errors.Is(m.FilesUncompared, no) {
+			want := "no refusal"
+			if refused {
+				want = "the refusal kept"
+			}
+			t.Fatalf("a child killed as its files were read, its comparisons failing with %v, read as %+v after %d comparisons; want running as it was first read, its files unsettled, %s", no, m, calls, want)
 		}
 		reap()
 	}
