@@ -415,6 +415,7 @@ func TestTheSetsEndWaitsForTheWorkerScopeWhileItProgresses(t *testing.T) {
 		return p
 	}
 	var readErr error
+	var refused []models.UnmatchedCall
 	run := func(r *Replayer, ctx context.Context, p *exactPlan, consumed map[string]models.MockState) <-chan []string {
 		out := make(chan []string, 1)
 		go func() {
@@ -422,11 +423,14 @@ func TestTheSetsEndWaitsForTheWorkerScopeWhileItProgresses(t *testing.T) {
 				for _, m := range read {
 					consumed[m.Name] = m
 				}
-			})
+			}, refused)
 			readErr = err
 			out <- missing
 		}()
 		return out
+	}
+	refusedAs := func(mock string) models.UnmatchedCall {
+		return models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "POST /boot", Kind: models.MissOutsideTest, BeforeSet: true, ClosestMock: mock}
 	}
 
 	t.Run("every call made", func(t *testing.T) {
@@ -479,6 +483,52 @@ func TestTheSetsEndWaitsForTheWorkerScopeWhileItProgresses(t *testing.T) {
 			t.Fatalf("reported %v with every call made", missing)
 		}
 	})
+	// A boot call the application made and keploy refused (its closest
+	// recording is the boot mock) is not waited for: the refusal is the
+	// event. It is returned unanswered all the same, and the wait goes on
+	// for the others.
+	t.Run("a boot call refused, another still to come", func(t *testing.T) {
+		refused = []models.UnmatchedCall{refusedAs("w-1"), {Protocol: "HTTP", ActualSummary: "GET /answered", ClosestMock: "w-2", Answer: models.AnswerByKind}}
+		t.Cleanup(func() { refused = nil })
+		reads := make(chan []models.MockState, 4)
+		r := &Replayer{logger: zap.NewNop(), hookImpl: consumedReads{reads: reads}}
+		done := run(r, context.Background(), plan(), map[string]models.MockState{})
+		reads <- []models.MockState{{Name: "w-2"}}
+		wakes <- time.Time{} // w-2 answers: nothing else is awaited
+		if missing := <-done; !reflect.DeepEqual(missing, []string{"w-1"}) {
+			t.Fatalf("reported %v; want [w-1], the refused boot call's recording", missing)
+		}
+	})
+	t.Run("every boot call refused", func(t *testing.T) {
+		refused = []models.UnmatchedCall{refusedAs("w-2"), refusedAs("w-1")}
+		t.Cleanup(func() { refused = nil })
+		r := &Replayer{logger: zap.NewNop(), hookImpl: consumedReads{reads: make(chan []models.MockState)}}
+		done := run(r, context.Background(), plan(), map[string]models.MockState{})
+		select {
+		case missing := <-done:
+			if !reflect.DeepEqual(missing, []string{"w-1", "w-2"}) {
+				t.Fatalf("reported %v; want [w-1 w-2]", missing)
+			}
+		case wakes <- time.Time{}:
+			t.Fatal("the set's end waited for boot calls the application made and keploy refused")
+		}
+	})
+	// Only a boot call: a worker call placed after a test that began may
+	// come again, and is waited for as before.
+	t.Run("a refused call placed after a test is waited for", func(t *testing.T) {
+		refused = []models.UnmatchedCall{refusedAs("w-later")}
+		t.Cleanup(func() { refused = nil })
+		p := newExactPlan(nil, []models.MockEntry{{Name: "w-later", Place: "test-1"}}, []*models.Mock{{Name: "w-later"}})
+		p.begun = map[string]bool{"test-1": true}
+		reads := make(chan []models.MockState, 4)
+		r := &Replayer{logger: zap.NewNop(), hookImpl: consumedReads{reads: reads}}
+		done := run(r, context.Background(), p, map[string]models.MockState{})
+		reads <- []models.MockState{{Name: "w-later"}}
+		wakes <- time.Time{}
+		if missing := <-done; len(missing) != 0 {
+			t.Fatalf("reported %v; want none: the call came again and was answered", missing)
+		}
+	})
 	t.Run("a read fails", func(t *testing.T) {
 		r := &Replayer{logger: zap.NewNop(), hookImpl: consumedReads{reads: make(chan []models.MockState), err: errors.New("the agent did not answer")}}
 		done := run(r, context.Background(), plan(), map[string]models.MockState{})
@@ -511,5 +561,27 @@ func TestTheLearningServedAfterTheLearnStepEndedIsEveryStateThatCarriesSome(t *t
 	}
 	if want := []string{"a-noise", "b-vars", "c-binds", "e-clock"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("the states sent with the learn step ended are %v; want %v (a binds-only and a clock-only state among them)", got, want)
+	}
+}
+
+// The set's end names each recorded call of its worker scope it did not see
+// answered: one the application never made by its recording's name, a boot
+// call it made differently by the call keploy refused (an unanswered call
+// whose closest recording is it) with that recording. An answered call is no
+// refusal, and a worker call placed after a test, which the end waited for,
+// is still said never made.
+func TestTheWorkerScopesReasonNamesARefusedBootCallWithItsRecording(t *testing.T) {
+	p := newExactPlan(nil, []models.MockEntry{{Name: "w-boot"}, {Name: "w-tick"}, {Name: "w-later", Place: "test-1"}},
+		[]*models.Mock{{Name: "w-boot"}, {Name: "w-tick"}, {Name: "w-later"}})
+	why := p.workerWhy([]string{"w-boot", "w-tick", "w-later"}, []models.UnmatchedCall{
+		{Protocol: "HTTP", ActualSummary: "GET /tick", ClosestMock: "w-tick", Answer: models.AnswerByKind},
+		{Protocol: "HTTP", ActualSummary: "POST /boot", Destination: "dep:9411", ClosestMock: "w-boot"},
+		{Protocol: "HTTP", ActualSummary: "POST /boot", Destination: "dep:9411", ClosestMock: "w-boot"},
+		{Protocol: "HTTP", ActualSummary: "POST /later", ClosestMock: "w-later"},
+	})
+	want := "the application never made 2 of the calls the test set's worker scope recorded (the calls no test owns: w-tick, w-later); " +
+		"the application made 1 of the calls the test set's worker scope recorded (the calls no test owns) differently, and keploy refused each: HTTP POST /boot to dep:9411 (closest to w-boot)"
+	if why != want {
+		t.Fatalf("reason\n%q\nwant\n%q", why, want)
 	}
 }
