@@ -1183,8 +1183,14 @@ func TestAStopsReadNeverMissesADaemonWhileOthersAreReaped(t *testing.T) {
 	me := os.Getpid()
 	// Spawners whose children are orphaned to this process and exit soon
 	// after, reaped by its reaper.
+	var spawners []utils.Reached
 	for i := 0; i < 3; i++ {
-		daemonize(t, `while kill -0 "$DAEMON_OWNER"; do (sleep 0.02 &); (sleep 0.04 &); sleep 0.004; done`)
+		pid := daemonize(t, `while kill -0 "$DAEMON_OWNER"; do (sleep 0.02 &); (sleep 0.04 &); sleep 0.004; done`)
+		p, ok := utils.ProcOf(pid)
+		if !ok {
+			t.Fatalf("spawner %d ended as it started", pid)
+		}
+		spawners = append(spawners, p)
 	}
 	var live []int
 	t.Cleanup(func() {
@@ -1233,6 +1239,14 @@ func TestAStopsReadNeverMissesADaemonWhileOthersAreReaped(t *testing.T) {
 	}
 	if misses > 0 {
 		t.Fatalf("%d of %d reads missed a daemon that was keploy's child for the whole read (%d daemons in all): a stop that read its daemons then would neither stop it nor say it left it running", misses, reads, len(missed))
+	}
+	// Each spawner still running as this process's child (its pid not
+	// reused) ran for every read: none of the reads went without the reaps
+	// they race.
+	for _, p := range spawners {
+		if now, ok := utils.ProcOf(p.PID); !ok || now != p || !parentIs(p.PID, me) {
+			t.Fatalf("spawner %d ended before the reads did: the reads after it raced no reap of its orphans", p.PID)
+		}
 	}
 }
 

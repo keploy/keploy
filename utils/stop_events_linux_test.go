@@ -954,8 +954,13 @@ func TestMarkExitCountsOpenFilesNotDescriptors(t *testing.T) {
 	cmd := exec.Command("/bin/sh", "-c", `trap 'exec 5<&-; touch "$2"' USR1; trap 'exec 3<&-; touch "$3"' USR2; touch "$1"; while :; do sleep 1; done`, "sh", ready, closedDup, closedLast)
 	// stdout and stderr one file; fds 3 and 5 one file, 4 another open of it.
 	cmd.Stdin, cmd.Stdout, cmd.Stderr, cmd.ExtraFiles = in, out, out, []*os.File{f, g, f}
-	// A group of its own, killed whole: its sleep ends with it.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// A group of its own, killed whole: its sleep ends with it. Killed by
+	// the kernel too when the thread that started it ends (Pdeathsig), so a
+	// test binary killed mid-test, its cleanups never run, leaves no loop
+	// behind: the test keeps to this thread until it ends.
+	runtime.LockOSThread()
+	t.Cleanup(runtime.UnlockOSThread)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -1018,8 +1023,12 @@ func TestMarkExitOfSeveralSaysWhereOnesFilesDidNotSettle(t *testing.T) {
 		t.Fatal("premise: this process's stat could not be read")
 	}
 	cmd := exec.Command("sleep", "1000")
-	// A group of its own, killed whole.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// A group of its own, killed whole; and by the kernel when the thread
+	// that started it ends (Pdeathsig), so it does not outlive a test binary
+	// killed mid-test: the test keeps to this thread until it ends.
+	runtime.LockOSThread()
+	t.Cleanup(runtime.UnlockOSThread)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
