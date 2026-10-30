@@ -194,6 +194,10 @@ func TestEveryHTTPServeStatesTheViewItGave(t *testing.T) {
 		{"a templated answer, a value that holds the word it answered", "template", "zq58", givenThere},
 		{"an exact pairing, a value it holds no word of", "pairing", "42", ""},
 		{"an exact pairing, a value that holds a word of the recording", "pairing", "u-61", "appears in an earlier recording, in mock-2"},
+		// A pairing excuses a value noise covers (pairExactly: noise
+		// declared or learned onto the recording), here a header sent
+		// other than recorded: F gave the recording with it as sent.
+		{"a paired call, a word only its noise header held", "pairing-noise", "nz77", givenThere},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h, n, opts := learnOn(t)
@@ -212,6 +216,9 @@ func TestEveryHTTPServeStatesTheViewItGave(t *testing.T) {
 			case "pairing":
 				other := learnRecorded("mock-2", time.Second, "GET", "/v1/users/u-61", "", nil, `{"name":"ann"}`)
 				reportPairing(ctx, live("GET", "/v1/users/u-61", "", nil), other, integrations.AnsweredCall{}, false)
+			case "pairing-noise":
+				other := learnRecorded("mock-2", time.Second, "GET", "/v1/users/u-61", "", map[string]string{"X-Trace": "t-1"}, `{"name":"ann"}`)
+				reportPairing(ctx, live("GET", "/v1/users/u-61", "", map[string]string{"X-Trace": "nz77"}), other, integrations.AnsweredCall{}, false)
 			}
 			tr.End()
 			tr.Begin()
