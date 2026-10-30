@@ -33,7 +33,7 @@
 # tests (charged to no test, listed in the set's background_calls) and its
 # serving of a set-aside test's recordings to the tests after it. keploy test
 # sends each test as soon as the one before it is judged, with no wall-clock
-# wait (founder: no slow replays), so no application can place a call in the
+# wait (replay is never slowed down), so no application can place a call in the
 # gap between two tests on purpose; and a test is set aside only by
 # enterprise's verdicts gate (config.Test.SkipReasons is never read from
 # keploy.yml). Both are proven by unit rows (pkg/agent/proxy
