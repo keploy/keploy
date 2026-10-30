@@ -152,7 +152,7 @@ func TestABackgroundCallAnsweredAgainBindsNothingInTheTest(t *testing.T) {
 	db := &againVarDb{marked: []*models.Mock{tick}}
 	gen := db.table.Gen()
 
-	got := newHTTP().backgroundAgain(context.Background(), liveReq("POST", "/jobs/sweep", `{"runId":"run-live-7"}`), db, nil, nil, nil, true, false)
+	got := newHTTP().backgroundAgain(context.Background(), liveReq("POST", "/jobs/sweep", `{"runId":"run-live-7"}`), db, nil, nil, nil, true, false, nil)
 	if got == nil || got.Name != "mock-bg" {
 		t.Fatalf("the timer's call made again was answered by %v; want mock-bg", got)
 	}

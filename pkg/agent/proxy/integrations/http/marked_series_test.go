@@ -344,3 +344,72 @@ func TestASeriesAnswererIsHandedTheStoreHeldToTheCall(t *testing.T) {
 		t.Fatalf("the answerer was handed %d stores (%T); want the one store held to the call's first read", len(handed), handed)
 	}
 }
+
+// ownAgainDb is againDb whose marked recordings that answered are one
+// series, owner's own ("" for a series marked set-wide), as the store hands
+// it (integrations.MarkedSeriesReader). It holds each call to its round as
+// itself, so the background step and the series step read it.
+type ownAgainDb struct {
+	againDb
+	owner string
+}
+
+func (d ownAgainDb) MarkedSeries(context.Context, models.Kind, learn.Known) ([]integrations.MarkedSeries, error) {
+	return []integrations.MarkedSeries{{Recordings: d.marked, Again: true, Owner: d.owner}}, nil
+}
+
+func (d ownAgainDb) HoldToRound(integrations.CallRound) (integrations.MockMemDb, func() bool) {
+	return d, func() bool { return false }
+}
+
+// A job's beat of its test's own series, made again in the test's window as
+// the very request of a beat that answered there, is a call of that own
+// series: the series step answers it (reported as the owner's own series'
+// answer, the call's id checked), never the background step (answered
+// again, unchecked, as background work). A beat the series step refuses (on
+// another id than the one the window bound) is the owner's own miss, never
+// answered again. The beat of a series marked set-wide is still answered
+// again first, as background work.
+func TestAnOwnSeriesBeatMadeAgainIsAnsweredByTheSeriesStep(t *testing.T) {
+	const addr, host, path = "127.0.0.1:8099", "localhost:8099", "/jobs/job-rec/beat"
+	const why = "it carries the recorded id job-rec at url.path.1, but T1's window bound that id to job-live this run"
+	raw := "GET " + path + " HTTP/1.1\r\nHost: " + host + "\r\nAccept: application/json\r\n\r\n"
+	beat := onHost("beat-6", path, host)
+	beat.Spec.HTTPResp = &models.HTTPResp{StatusCode: 200, Body: "alive", Header: map[string]string{"Content-Length": "5"}}
+	t.Setenv(provenswitch.Env, "1")
+	for _, c := range []struct {
+		name, owner string
+		miss        bool
+		want        string // the call's answer; "" for a miss
+	}{
+		{"an own series' beat the series step answers", "T1", false, models.AnswerOwnSeries},
+		{"an own series' beat the series step refuses", "T1", true, ""},
+		{"a beat of a series marked set-wide", "", false, models.AnswerBackgroundAgain},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var asked int
+			t.Cleanup(integrations.RegisterSeriesAnswerer(models.HTTP, func(context.Context, integrations.MockMemDb, *models.Mock, time.Time, learn.Known) (*models.Mock, string, *integrations.SeriesMiss, error) {
+				asked++
+				if c.miss {
+					return nil, "", &integrations.SeriesMiss{NextSteps: why, Newest: beat, Owner: c.owner}, nil
+				}
+				return beat, c.owner, nil, nil
+			}))
+			store := ownAgainDb{againDb: againDb{gateDb: gateDb{earlierDb: earlierDb{mockMemDb: &mockMemDb{}}, consumed: []*models.Mock{beat}}, marked: []*models.Mock{beat}}, owner: c.owner}
+			status, body, r := answerOf(t, store, addr, raw)
+			if c.want == "" {
+				if status != 502 || r.Answer != "" || r.Background || r.ClosestMock != "beat-6" || r.NextSteps != why || asked != 1 {
+					t.Fatalf("got %d %q, reported %+v, the series step asked %d times; want T1's own miss naming beat-6 and saying %q, the series step asked once", status, body, r, asked, why)
+				}
+				return
+			}
+			wantAsked := 1
+			if c.want == models.AnswerBackgroundAgain {
+				wantAsked = 0
+			}
+			if status != 200 || body != "alive" || r.Answer != c.want || r.ClosestMock != "beat-6" || r.Background || r.CountsAgainstTest() || asked != wantAsked {
+				t.Fatalf("got %d %q, reported %+v, the series step asked %d times; want beat-6's answer reported as %q, the series step asked %d times", status, body, r, asked, c.want, wantAsked)
+			}
+		})
+	}
+}

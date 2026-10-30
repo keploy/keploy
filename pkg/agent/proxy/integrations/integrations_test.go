@@ -1,6 +1,8 @@
 package integrations
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -156,6 +158,55 @@ func TestOwnedByLeavesOutOtherTestsOwnSeries(t *testing.T) {
 	}
 	if got := OwnedBy(all[:1], "T1"); &got[0] != &all[0] {
 		t.Fatalf("OwnedBy copied a list it leaves nothing out of")
+	}
+}
+
+// seriesStore is a store that hands series (MarkedSeriesReader), or err.
+type seriesStore struct {
+	MockMemDb
+	series []MarkedSeries
+	err    error
+}
+
+func (s seriesStore) MarkedSeries(context.Context, models.Kind, learn.Known) ([]MarkedSeries, error) {
+	return s.series, s.err
+}
+
+// A call that repeats a recording of the open test's own series is left to
+// the series step (PassOverOwnSeries): that recording is passed over, so the
+// series step checks the call's id and names the own series. A recording of
+// a series marked set-wide, a plain mark's, and every recording when the
+// store hands no own series or cannot read its series stay in, in order.
+func TestPassOverOwnSeriesLeavesTheOwnSeriesToTheSeriesStep(t *testing.T) {
+	mk := func(name string) *models.Mock { return &models.Mock{Name: name} }
+	beat1, beat2, tick, plain := mk("beat-1"), mk("beat-2"), mk("tick-1"), mk("boot-1")
+	marked := []*models.Mock{tick, beat1, plain, beat2}
+	names := func(ms []*models.Mock) string {
+		out := []string{}
+		for _, m := range ms {
+			out = append(out, m.Name)
+		}
+		return strings.Join(out, ",")
+	}
+	// The series read hands its own copies of the recordings: names tell.
+	own := MarkedSeries{Owner: "T1", Recordings: []*models.Mock{mk("beat-1"), mk("beat-2")}}
+	setWide := MarkedSeries{Recordings: []*models.Mock{mk("tick-1")}}
+	for _, c := range []struct {
+		name  string
+		store MockMemDb
+		want  string
+	}{
+		{"an own series and one marked set-wide", seriesStore{series: []MarkedSeries{setWide, own}}, "tick-1,boot-1"},
+		{"no own series", seriesStore{series: []MarkedSeries{setWide}}, "tick-1,beat-1,boot-1,beat-2"},
+		{"series that cannot be read", seriesStore{series: []MarkedSeries{own}, err: errors.New("read failed")}, "tick-1,beat-1,boot-1,beat-2"},
+		{"a store that reads no series", struct{ MockMemDb }{}, "tick-1,beat-1,boot-1,beat-2"},
+	} {
+		if got := names(PassOverOwnSeries(context.Background(), c.store, models.Mongo, nil, marked)); got != c.want {
+			t.Fatalf("%s: PassOverOwnSeries kept %s; want %s", c.name, got, c.want)
+		}
+	}
+	if got := names(marked); got != "tick-1,beat-1,boot-1,beat-2" {
+		t.Fatalf("PassOverOwnSeries changed the list it was handed: %s", got)
 	}
 }
 
