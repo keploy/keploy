@@ -452,8 +452,8 @@ func TestInsertMock_AFullQueueGivesUpAtTheCallersCancel(t *testing.T) {
 // stuckDiskCallEndsAtCancel hands 20 mocks to a gob store at a disk whose
 // write never returns and, once the disk holds that write, runs call, which
 // closes the store, with a ctx that is then cancelled: call must end at the
-// cancel. It returns what call returned, with the store's dir.
-func stuckDiskCallEndsAtCancel(t *testing.T, call func(ys *MockYaml, ctx context.Context) error) (error, string) {
+// cancel. It returns the store's dir, with what call returned.
+func stuckDiskCallEndsAtCancel(t *testing.T, call func(ys *MockYaml, ctx context.Context) error) (string, error) {
 	t.Helper()
 	t.Setenv("KEPLOY_MOCK_FORMAT", "gob")
 	dir := t.TempDir()
@@ -471,12 +471,12 @@ func stuckDiskCallEndsAtCancel(t *testing.T, call func(ys *MockYaml, ctx context
 	cancel()
 	select {
 	case err := <-done:
-		return err, dir
+		return dir, err
 	case <-time.After(time.Minute): // only turns a hang into a failure
 		disk.free()
 		<-done
 		t.Fatal("it did not end at its caller's cancel, on a write that never returns")
-		return nil, dir
+		return dir, nil
 	}
 }
 
@@ -485,7 +485,7 @@ func stuckDiskCallEndsAtCancel(t *testing.T, call func(ys *MockYaml, ctx context
 // cancel with how many mocks were not written, and leaves the target as it
 // was. Its close had no stop: it hung.
 func TestPromoteStagedSet_OnAStuckDiskEndsAtItsCallersCancel(t *testing.T) {
-	err, dir := stuckDiskCallEndsAtCancel(t, func(ys *MockYaml, ctx context.Context) error {
+	dir, err := stuckDiskCallEndsAtCancel(t, func(ys *MockYaml, ctx context.Context) error {
 		if err := os.MkdirAll(filepath.Join(ys.MockPath, "set-target"), 0o755); err != nil {
 			return err
 		}
@@ -506,7 +506,7 @@ func TestPromoteStagedSet_OnAStuckDiskEndsAtItsCallersCancel(t *testing.T) {
 // failure, the user's give-up included) ends at its caller's cancel on a disk
 // that is stuck, and removes the staging set. Its close had no stop: it hung.
 func TestDiscardStagedSet_OnAStuckDiskEndsAtItsCallersCancel(t *testing.T) {
-	err, dir := stuckDiskCallEndsAtCancel(t, func(ys *MockYaml, ctx context.Context) error {
+	dir, err := stuckDiskCallEndsAtCancel(t, func(ys *MockYaml, ctx context.Context) error {
 		return ys.DiscardStagedSet(ctx, "set-0")
 	})
 	if err != nil {
@@ -521,7 +521,7 @@ func TestDiscardStagedSet_OnAStuckDiskEndsAtItsCallersCancel(t *testing.T) {
 // file: on a disk that is stuck, it ends at its caller's cancel with how many
 // mocks were not written. Its close had no stop: it hung.
 func TestUpdateMocks_OnAStuckDiskEndsAtItsCallersCancel(t *testing.T) {
-	err, _ := stuckDiskCallEndsAtCancel(t, func(ys *MockYaml, ctx context.Context) error {
+	_, err := stuckDiskCallEndsAtCancel(t, func(ys *MockYaml, ctx context.Context) error {
 		return ys.UpdateMocks(ctx, "set-0", map[string]models.MockState{}, time.Time{}, time.Time{})
 	})
 	if !errors.Is(err, models.ErrMocksNotWritten) || !strings.Contains(err.Error(), "of the 20 mocks handed to the gob mock writer were not written") {
@@ -532,7 +532,7 @@ func TestUpdateMocks_OnAStuckDiskEndsAtItsCallersCancel(t *testing.T) {
 // The write-back of learned noise (PersistMockNoise) quiesces the gob writer
 // as the prune does, and ends at its caller's cancel the same way.
 func TestPersistMockNoise_OnAStuckDiskEndsAtItsCallersCancel(t *testing.T) {
-	err, _ := stuckDiskCallEndsAtCancel(t, func(ys *MockYaml, ctx context.Context) error {
+	_, err := stuckDiskCallEndsAtCancel(t, func(ys *MockYaml, ctx context.Context) error {
 		return ys.PersistMockNoise(ctx, "set-0", map[string]models.MockState{"mock-0": {ReqBodyNoise: map[string][]string{"body.x": nil}}})
 	})
 	if !errors.Is(err, models.ErrMocksNotWritten) || !strings.Contains(err.Error(), "of the 20 mocks handed to the gob mock writer were not written") {

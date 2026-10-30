@@ -117,7 +117,7 @@ func TestRecord_AMockFileOnAFullDiskEndsAsARecordingNotSaved(t *testing.T) {
 type failedRunnerOnAFullDisk struct{ fullDiskInstrumentation }
 
 func (f *failedRunnerOnAFullDisk) Run(ctx context.Context, o models.RunOptions) models.AppError {
-	f.fullDiskInstrumentation.Run(ctx, o)
+	_ = f.fullDiskInstrumentation.Run(ctx, o)
 	return models.AppError{AppErrorType: models.ErrCommandError, ExitCode: 3, Err: errors.New("exit status 3")}
 }
 
@@ -214,7 +214,7 @@ func TestRecord_AStoppedRecordingWhoseStoreRefusedMocksExits1WithTheSignalKnown(
 type sigintRunnerInstrumentation struct{ fullDiskInstrumentation }
 
 func (f *sigintRunnerInstrumentation) Run(ctx context.Context, o models.RunOptions) models.AppError {
-	f.fullDiskInstrumentation.Run(ctx, o)
+	_ = f.fullDiskInstrumentation.Run(ctx, o)
 	return models.AppError{AppErrorType: models.ErrCommandError, ExitCode: 130, Err: errors.New("exit status 130")}
 }
 
