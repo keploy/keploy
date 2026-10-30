@@ -446,6 +446,116 @@ func TestUnderTheSwitchABootCallIsNotRequiredOfAnAppKeployDidNotStart(t *testing
 	}
 }
 
+// A docker compose app, its stack kept across sets, boots in each set's run
+// under the switch: compose holds the first set's app back until that set
+// has made keploy's agent ready (depends_on keploy-agent: service_healthy),
+// and keploy starts it again for each later set once the set is staged. Its
+// boot calls are the set's: one never made fails the set, naming it. A later
+// set whose start found the app's container still running (its stop at an
+// earlier set's end did not end it) did not boot it: its boot calls are not
+// required of it. Before, every set of a kept stack was taken for one whose
+// app booted before it, and a set whose recorded boot call was never made
+// passed (compose-proven-setend scenario 6, its second set).
+func TestUnderTheSwitchABootCallIsRequiredOfAComposeAppStartedForTheSet(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		later   bool // the last set's end stopped the app: keploy starts it again
+		ranOn   bool // that start found its container still running
+		made    bool
+		want    models.TestSetStatus
+		missing int // how many times the set's end names the boot call
+	}{
+		{"the first set, the boot made", false, false, true, models.TestSetStatusPassed, 0},
+		{"the first set, the boot never made", false, false, false, models.TestSetStatusFailed, 1},
+		{"a later set, the boot made", true, false, true, models.TestSetStatusPassed, 0},
+		{"a later set, the boot never made", true, false, false, models.TestSetStatusFailed, 1},
+		{"a later set whose app ran on, the boot never made", true, true, false, models.TestSetStatusPassed, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setSwitch(t, true)
+			fastWorkerWait(t)
+			c := &composeInstr{stopped: tc.later && !tc.ranOn}
+			h := composeHarnessOf(t, c, 1)
+			pinWindows(h)
+			h.replayer.config.Command = "docker compose up"
+			h.replayer.composeAppStopped = tc.later
+			core, logs := observer.New(zap.InfoLevel)
+			h.replayer.logger = zap.New(core)
+			h.mocks.filtered = []*models.Mock{httpAt("mock-boot", 500), httpAt("mock-a", 1010)}
+			mappingFile(t, h, nil)
+			made := []models.MockState{mongoAt("mock-a", 1010)}
+			if tc.made {
+				made = append(made, mongoAt("mock-boot", 500))
+			}
+			h.replayer.hookImpl = prHooks{consumedFor: consumedByWindow(h, map[string][]models.MockState{"test-1": made})}
+			if got := h.runServing(t); got != tc.want || workerNamed(logs) != tc.missing {
+				t.Fatalf("set %s, the boot call named %d time(s); want %s, named %d", got, workerNamed(logs), tc.want, tc.missing)
+			}
+			if want := map[bool]int{false: 0, true: 1}[tc.later]; c.starts != want {
+				t.Fatalf("%d starts of the app, want %d", c.starts, want)
+			}
+		})
+	}
+}
+
+// The application made its boot call and keploy refused it: no mock answered
+// it, and its closest recording is the boot call the worker scope placed at
+// the set's start. The refusal is the event: the set's end does not wait for
+// that recording, and the set fails, its reason naming the call made and the
+// recording it was closest to. Before, the end waited out workerStallLimit
+// wake-ups (600, about ten minutes) for a call the application had already
+// made, then said it was never made (compose-proven-setend scenario 6, its
+// second set).
+func TestUnderTheSwitchARefusedBootCallEndsTheWaitForItAtOnce(t *testing.T) {
+	for _, later := range []bool{false, true} {
+		t.Run(map[bool]string{false: "the first set", true: "a later set keploy started the app for"}[later], func(t *testing.T) {
+			setSwitch(t, true)
+			prevLimit, prevWake := workerStallLimit, workerWake
+			t.Cleanup(func() { workerStallLimit, workerWake = prevLimit, prevWake })
+			workerStallLimit = 1
+			var waits atomic.Int32
+			workerWake = func(context.Context) (<-chan time.Time, func()) {
+				waits.Add(1)
+				wake := make(chan time.Time, 1)
+				wake <- time.Time{}
+				return wake, func() {}
+			}
+			c := &composeInstr{stopped: later}
+			h := composeHarnessOf(t, c, 1)
+			pinWindows(h)
+			h.replayer.config.Command = "docker compose up"
+			h.replayer.composeAppStopped = later
+			core, logs := observer.New(zap.InfoLevel)
+			h.replayer.logger = zap.New(core)
+			h.mocks.filtered = []*models.Mock{httpAt("mock-boot", 500), httpAt("mock-a", 1010)}
+			mappingFile(t, h, nil)
+			// The first test's read hands over the boot call, made before it
+			// and refused, as the set's.
+			h.instr.mockErrorsFor = misses(reads(models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "POST /boot", Destination: "dep:9411",
+				Kind: models.MissOutsideTest, BeforeSet: true, ClosestMock: "mock-boot"}))
+			h.replayer.hookImpl = prHooks{consumedFor: consumedByWindow(h, map[string][]models.MockState{"test-1": {mongoAt("mock-a", 1010)}})}
+			if got := h.runServing(t); got != models.TestSetStatusFailed {
+				t.Fatalf("set %s, want FAILED: the recorded boot call was never answered", got)
+			}
+			if n := waits.Load(); n != 0 {
+				t.Fatalf("the set's end waited (%d time(s)) for the boot recording, though the application made its call and keploy refused it", n)
+			}
+			if n := logs.FilterMessageSnippet("not waiting for the worker scope's boot calls the application made and keploy refused").Len(); n != 1 {
+				t.Fatalf("keploy said %d time(s) that the set's end does not wait for the refused boot call; want once", n)
+			}
+			why := h.report.report.FailureReason
+			for _, want := range []string{"POST /boot to dep:9411", "mock-boot", "refused"} {
+				if !strings.Contains(why, want) {
+					t.Fatalf("the set's reason %q does not name %q: it must name the refused call and the recording it was closest to", why, want)
+				}
+			}
+			if strings.Contains(why, "never made") || workerNamed(logs) != 1 {
+				t.Fatalf("the set's reason %q (named %d time(s)): the application made the call, so it must not say it never did, and name it once", why, workerNamed(logs))
+			}
+		})
+	}
+}
+
 // A call the application makes as keploy stops it (a deregistration, a
 // flush on its way out) is read with what the app consumed as it stopped, and
 // the worker scope is judged with it. One the recording made as keploy record

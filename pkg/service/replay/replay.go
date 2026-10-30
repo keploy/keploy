@@ -2308,7 +2308,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			r.exact.returned = returnedMoves
 			// The set's start is reached only when keploy starts its
 			// application for it: an application kept alive from an earlier
-			// set, or one keploy does not start, booted before this set.
+			// set, or one keploy does not start, booted before this set. A
+			// docker compose set says it once its app is started
+			// (bootsHere): a reused stack's app is stopped at each set's end
+			// and started again for the next.
 			r.exact.bootSeen = r.instrument && !serveTest && (strings.TrimSpace(conf.AppCommand) != "" || strings.TrimSpace(r.config.Command) != "")
 			r.noteOwnsNothing(testSetID)
 		}
@@ -2507,6 +2510,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// here. Only for an agent this test set started; one reused across
 		// test sets carries the mark the last test set left, once a test set
 		// has taken one (pidMarked: the first test set can end before here).
+		// bootsHere: the app's boot is this set's (its start comes after the
+		// set is staged), so the worker scope's recordings placed at the
+		// set's start are due by its end (exactPlan.bootSeen). Compose holds
+		// the app of a stack this set started, and the first app of a
+		// reused one, behind keploy-agent's health (depends_on:
+		// service_healthy) until MakeAgentReadyForDockerCompose below; one
+		// started again below boots here only where its start says it was
+		// anew.
+		bootsHere := false
 		if !serveTest || !r.pidMarked {
 			r.markPIDMaps(ctx)
 			// A stack this set started, or one reused whose app starts for
@@ -2514,6 +2526,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// is anew only where its start says so.
 			if composeRestart == nil {
 				r.appStartsAnew()
+				bootsHere = true
 			}
 		}
 
@@ -2543,9 +2556,18 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// its processes lost.
 			if anew {
 				r.appStartsAnew()
+				bootsHere = true
 			} else {
 				r.lossAppKept = "keploy found the application's container still running when it started it for this test-set (its stop at an earlier test-set's end did not end it, or a start keploy was told failed was carried out by the docker daemon)"
 			}
+		}
+		// A reused stack (serveTest) is not an app kept alive from an
+		// earlier set here: under the switch each set's end stops its app,
+		// and the next set starts it again once staged. Read as one
+		// (loadMocksForAgent's rule), a set whose recorded boot call was
+		// never made passed.
+		if r.exact != nil {
+			r.exact.bootSeen = bootsHere
 		}
 
 		// Wait for the user application to become ready before firing the first test.
@@ -5607,6 +5629,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// nothing waits for it.
 		// Under the background rules the set's end requires none of it
 		// (exactPlan.background): nothing waits for it.
+		// A boot call the application made that keploy refused is not
+		// waited for: the set's calls read so far that no mock answered
+		// (its background calls) say so.
 		checkWorker := r.exact != nil && !r.exact.background && captureOpened && testSetStatus == models.TestSetStatusPassed
 		if checkWorker {
 			workerMissing, workerUnread = r.awaitWorkerScope(runTestSetCtx, r.exact, totalConsumedMocks.Map(), func(read []models.MockState) {
@@ -5614,7 +5639,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					totalConsumedMocks.Set(m)
 					allConsumedAcrossCycles[m.Name] = m
 				}
-			})
+			}, r.setCalls.backgroundCalls())
 		}
 		stopDrained := false
 		// The final attempt of a run's last set stops the app --keep-app-alive
@@ -5771,7 +5796,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				testSetStatus = models.TestSetStatusInternalErr
 				r.markNotJudged(testSetID)
 			} else if len(workerMissing) > 0 {
-				unclaimedReason = workerWhy(workerMissing)
+				// A boot call the application made differently is named
+				// with the call keploy refused: of the set's calls no mock
+				// answered, its background ones (the set end's read just
+				// above included) and those filed late in its last test.
+				unclaimedReason = r.exact.workerWhy(workerMissing, append(r.setCalls.backgroundCalls(), calls...))
 				r.logger.Error("test-set failed: "+unclaimedReason+" ("+provenswitch.Env+"=1)",
 					zap.String("test-set", testSetID), zap.Strings("mocks", workerMissing),
 					zap.String("next_step", "if the application no longer makes these calls on its own, record the test set again"))
