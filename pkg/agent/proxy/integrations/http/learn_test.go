@@ -2804,33 +2804,72 @@ func TestLearnMatchRefusesAWordAnEarlierTestHeld(t *testing.T) {
 
 // A value an earlier test's call sent where its learn step learned a plain
 // read of the clock (api-server's vault PUT's lastUsedAt), which a later
-// test's call carries where no window of that call holds it (a login code's
-// authTime, the session token's auth time the test's client minted in the
-// same second), is refused, naming the earlier call and its place: keploy
-// cannot tell a copy of the read from another read of the clock it does not
-// see. Followed, the PUT's place would carry the run's variable and a clock
-// read at once, and the PUT would be refused for every test.
+// test's call carries where its window does not hold it (a login code's
+// authTime nine seconds later, the session token's auth time the test's
+// client minted in the PUT's second), is refused, naming the earlier call
+// and its place: keploy cannot tell a copy of the read from another read of
+// the clock it does not see. Followed, the PUT's place would carry the run's
+// variable and a clock read at once, and the PUT would be refused for every
+// test. In a call keploy knows no window of (keploy record's calls under a
+// moved clock), the later call's value is its own read of the clock, as the
+// leaf learns one there with the switch off too, which every replay checks
+// in its call's span: an application that writes the second it read for
+// each call sends the earlier call's text again in that second.
 func TestLearnMatchRefusesAnEarlierTestsClockReadNoWindowOfTheCallHolds(t *testing.T) {
-	h, n, opts := learnOn(t)
-	tr := learn.NewTracker()
-	tr.NewSet()
-	ctx := learn.WithTracker(context.Background(), tr)
-	tr.Begin()
-	// F runs the test learn.FullRoundLead past its recording.
-	a := &learnDb{perTest: []*models.Mock{learnRecorded("mock-a", time.Second, "PUT", "/v1/secret/tokens", `{"data":{"lastUsedAt":1760436000}}`, nil, `{}`)}}
-	if served, miss, err := h.learnMatch(ctx, live("PUT", "/v1/secret/tokens", `{"data":{"lastUsedAt":1760436061}}`, nil), a, n, opts); err != nil || served == nil || miss != nil || !learnedClockRead(a.consumed[0].Spec, "body.data.lastUsedAt") {
-		t.Fatalf("test A's call: served %v miss %+v err %v; want lastUsedAt learned as a read of the clock", served, miss, err)
-	}
-	tr.End()
-	tr.Begin()
-	db := &learnDb{perTest: []*models.Mock{learnRecorded("mock-1", 10*time.Second, "POST", "/v1/codes", `{"authTime":1760436000}`, nil, `{}`)}}
-	served, miss, err := h.learnMatch(ctx, live("POST", "/v1/codes", `{"authTime":1760436061}`, nil), db, n, opts)
-	const why = "body.authTime changed, and its recorded value was sent in mock-a at body.data.lastUsedAt, an earlier test's call, where keploy learned it as a read of the application's clock"
-	if err != nil || served != nil || miss == nil || !strings.Contains(miss.res.Why, why) || strings.Contains(miss.res.Why, "1760436") {
-		t.Fatalf("served %v miss %+v err %v; want the call refused: %s, never the value", served, miss, err, why)
-	}
-	if v := a.consumed[0].Spec.Variables; len(v) != 0 {
-		t.Fatalf("test A's PUT binds %+v; want nothing bound at its clock read", v)
+	lead := learn.FullRoundLead
+	for _, window := range []bool{true, false} {
+		h, n, opts := learnOn(t)
+		tr := learn.NewTracker()
+		if window {
+			// keploy mock's client tests: each test's first call has a
+			// window from its begin, in the recording and in F.
+			tr.SetClientTests(true)
+			tr.SetAppClock(func(r time.Time) (time.Time, bool) { return r, true })
+		}
+		tr.NewSet()
+		ctx := learn.WithTracker(context.Background(), tr)
+		if window {
+			boot := learnRecorded("mock-0", 0, "GET", "/v1/health", "", nil, `{}`)
+			tr.ServedMockAt(boot, learnAt.Add(lead))
+			tr.ServedMockAsRecorded(boot)
+			tr.RecordedBegin(learnAt.Add(time.Second))
+			tr.BeginAt(learnAt.Add(lead + time.Second))
+		} else {
+			tr.Begin()
+		}
+		recA := learnRecorded("mock-a", 1100*time.Millisecond, "PUT", "/v1/secret/tokens", `{"data":{"lastUsedAt":1791972001}}`, nil, `{}`)
+		a := &learnDb{perTest: []*models.Mock{recA}}
+		in := live("PUT", "/v1/secret/tokens", `{"data":{"lastUsedAt":1791972062}}`, nil)
+		in.arrived = learnAt.Add(lead + 1100*time.Millisecond)
+		if served, miss, err := h.learnMatch(ctx, in, a, n, opts); err != nil || served == nil || miss != nil || !learnedClockRead(a.consumed[0].Spec, "body.data.lastUsedAt") {
+			t.Fatalf("window %v: test A's call: served %v miss %+v err %v; want lastUsedAt learned as a read of the clock", window, served, miss, err)
+		}
+		tr.End()
+		at := 10 * time.Second
+		if window {
+			tr.RecordedBegin(learnAt.Add(at))
+			tr.BeginAt(learnAt.Add(lead + at))
+		} else {
+			// The application read its clock for this call in the PUT's second.
+			at = 1400 * time.Millisecond
+			tr.Begin()
+		}
+		db := &learnDb{perTest: []*models.Mock{learnRecorded("mock-1", at+100*time.Millisecond, "POST", "/v1/codes", `{"authTime":1791972001}`, nil, `{}`)}}
+		in = live("POST", "/v1/codes", `{"authTime":1791972062}`, nil)
+		in.arrived = learnAt.Add(lead + at + 100*time.Millisecond)
+		served, miss, err := h.learnMatch(ctx, in, db, n, opts)
+		const why = "body.authTime changed, and its recorded value was sent in mock-a at body.data.lastUsedAt, an earlier test's call, where keploy learned it as a read of the application's clock"
+		switch {
+		case err != nil:
+			t.Fatalf("window %v: %v", window, err)
+		case window && (served != nil || miss == nil || !strings.Contains(miss.res.Why, why) || strings.Contains(miss.res.Why, "179197")):
+			t.Fatalf("window %v: served %v miss %+v; want the call refused: %s, never the value", window, served, miss, why)
+		case !window && (served == nil || miss != nil || !learnedClockRead(db.consumed[0].Spec, "body.authTime")):
+			t.Fatalf("window %v: served %v miss %+v; want authTime learned as the call's own read of the clock", window, served, miss)
+		}
+		if v := a.consumed[0].Spec.Variables; len(v) != 0 {
+			t.Fatalf("window %v: test A's PUT binds %+v; want nothing bound at its clock read", window, v)
+		}
 	}
 }
 

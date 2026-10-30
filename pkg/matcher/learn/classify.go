@@ -1731,19 +1731,12 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		}
 		return ln
 	}
-	// read is leaf under the run's rule (ofRun), the reading every word of a
-	// text read alone takes (wordRead, sinceWord), as the whole value takes
-	// it below: a word an earlier test's call sent is the later call's own
-	// read where a window of that call holds it so, and refused where none
-	// does and the earlier call's learn step read it from the clock, never
-	// left the noise of the text.
-	var read func(r, l Leaf, w *Window, skip skipRule) Learned
 	// clientWord is ln, a text w learns as noise, learned instead as the read
 	// of its one changed word in w, in keploy mock's client tests
-	// (wordRead), the word read by read.
-	clientWord := func(ln Learned, w *Window) Learned {
+	// (wordRead), the word read by rd.
+	clientWord := func(ln Learned, w *Window, rd func(r, l Leaf, w *Window, skip skipRule) Learned) Learned {
 		if dc.clientTests {
-			if word, ok := wordRead(ln, w, read); ok {
+			if word, ok := wordRead(ln, w, rd); ok {
 				return word
 			}
 		}
@@ -1754,8 +1747,12 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 	// test sent) that, read as a value no earlier place is the source of and
 	// no moved place builds by an offset, is a plain read of the clock its
 	// own call's window holds in both runs, the whole value or one word of it
-	// (clientWord), is learned as that read, checked in that window at every
-	// replay, never as the variable (founder, 2026-10-30). Where that window
+	// (clientWord, the word read by the leaf alone), is learned as that read,
+	// checked in that window at every replay, never as the variable (founder,
+	// 2026-10-30). Its own call holds it by the rules the leaf learns its own
+	// reads by (DriftCache.readsOwn): an instant its window holds, a time of
+	// day its window holds modulo a day, and any read in a call keploy knows
+	// no window of, which the leaf learns in its call's own span. Where that window
 	// does not hold it, one that holds it in one run's own window and since
 	// its test began in the other (Window.oneRunSinceBegin, the copy rule's
 	// windows below: a full round slower than the recording) learns it as
@@ -1790,10 +1787,10 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 			return ln
 		}
 		for i, ow := range append([]*Window{w}, w.oneRunSinceBegin()...) {
-			if !dc.windowHolds(dc.ofIn(r.Value, l.Value, ow, at), ow) {
+			if !dc.readsOwn(r, l, ow, at) {
 				continue
 			}
-			if own := clientWord(leaf(r, l, ow, skipBoth), ow); own.Kind == KindClockRead {
+			if own := clientWord(leaf(r, l, ow, skipBoth), ow, leaf); own.Kind == KindClockRead {
 				if i > 0 {
 					own, _ = sinceTestBegin(own)
 				}
@@ -1805,7 +1802,13 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		}
 		return ln
 	}
-	read = func(r, l Leaf, w *Window, skip skipRule) Learned { return ofRun(leaf(r, l, w, skip), r, l, w) }
+	// read is leaf under the run's rule (ofRun), the reading every word of a
+	// text read alone in the call's window takes (wordRead), as the whole
+	// value takes it below: a word an earlier test's call sent is the later
+	// call's own read where a window of that call holds it so, and refused
+	// where none does and the earlier call's learn step read it from the
+	// clock, never left the noise of the text.
+	read := func(r, l Leaf, w *Window, skip skipRule) Learned { return ofRun(leaf(r, l, w, skip), r, l, w) }
 	for _, p := range drift {
 		r, l := rec.Leaves[p], live.Leaves[p]
 		ln := leaf(r, l, w, 0)
@@ -1819,7 +1822,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// replay, and the rest of the text is still compared. A text whose
 		// changed word is no read of the clock in the window, or one more of
 		// whose bytes changed, stays the noise the window learned.
-		ln = clientWord(ln, w)
+		ln = clientWord(ln, w, read)
 		// A read made before its call's window: in keploy mock's client
 		// tests (the only calls whose window knows each run's test begin),
 		// a value refused in its call's window is classified again in the

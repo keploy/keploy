@@ -1482,6 +1482,87 @@ func TestAnEarlierTestsClockReadOfTheSameSecondIsNoRunsVariable(t *testing.T) {
 	}
 }
 
+// A later test's call that reads its own clock in the second an earlier
+// test's call read it, and so sends the same text in both runs (an
+// application that writes the minute, "2006-01-02T15:04" of no zone in its
+// own zone, and the time of day, "15:04:05", it read for each charge, two
+// charges 8 ms apart), is that call's own read, by the rules the leaf learns
+// its own reads by: a minute or an instant its window holds, a time of day
+// its window holds modulo a day, and any read in a call keploy knows no
+// window of, which the leaf learns in its call's own span. Never refused as
+// a copy of the earlier call's read of the clock (record quarantined the
+// later test), and never the run's variable where the earlier place was not
+// learned as a read (a replay whose clock crosses a second between the two
+// calls would fail the later test). A time of day its window does not hold
+// modulo a day, nine seconds later, is refused naming the earlier call where
+// that call read it from the clock, and stays the run's variable where it
+// did not, as an instant is. With the switch off, each is what its own call
+// learns.
+func TestALaterTestsOwnSameSecondReadIsItsOwnByTheLeafsRules(t *testing.T) {
+	rec := time.Date(2026, 10, 30, 18, 40, 58, 579_000_000, time.UTC)
+	minute := func(at time.Time) string { return at.In(ist).Format("2006-01-02T15:04") }
+	tod := func(at time.Time) string { return at.In(ist).Format("15:04:05") }
+	same, later := 8*time.Millisecond, 9*time.Second
+	for _, row := range []struct {
+		name                   string
+		value                  func(time.Time) string
+		after                  time.Duration
+		window, clock, switch0 bool
+		want                   Kind
+	}{
+		{"a time of day, the same second, a window", tod, same, true, true, false, KindClockRead},
+		{"a time of day, the same second, no window", tod, same, false, true, false, KindClockRead},
+		{"a minute, the same second, a window", minute, same, true, true, false, KindClockRead},
+		{"a minute, the same second, no window", minute, same, false, true, false, KindClockRead},
+		{"an unmarked time of day, the same second, a window", tod, same, true, false, false, KindClockRead},
+		{"an unmarked time of day, the same second, no window", tod, same, false, false, false, KindClockRead},
+		{"a time of day, nine seconds later, a window", tod, later, true, true, false, KindUnaccounted},
+		{"an unmarked time of day, nine seconds later, a window", tod, later, true, false, false, KindVariable},
+		{"a time of day, nine seconds later, no window", tod, later, false, true, false, KindClockRead},
+		{"switch 0: a time of day, the same second, a window", tod, same, true, true, true, KindClockRead},
+		{"switch 0: a minute, the same second, no window", minute, same, false, true, true, KindClockRead},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, map[bool]string{false: "1", true: "0"}[row.switch0])
+			dc := clockedDrifts()
+			dc.zone = ist
+			tr := NewTracker()
+			tr.Begin()
+			a, _, _, _ := tr.Test()
+			tr.Served(a, Earlier{Mock: "mock-a", At: rec, Own: true, Seen: []Seen{{Side: Request, Leaf: Leaf{Path: "body.minute", Type: String, Value: row.value(rec)}, Live: row.value(rec.Add(FullRoundLead)), Place: "body.minute", Clock: row.clock}}})
+			tr.End()
+			tr.Begin()
+			_, earlier, _, _ := tr.Test()
+			call := rec.Add(row.after)
+			fCall := call.Add(FullRoundLead)
+			var w *Window
+			if row.window {
+				w = &Window{Rec: Span{From: call.Add(-5 * time.Millisecond), To: call}, F: Span{From: fCall.Add(-5 * time.Millisecond), To: fCall.Add(time.Millisecond)}}
+			}
+			// Test B sends test A's text in each run: its own read where the
+			// two calls share a second, a copy where they do not.
+			ln := ClassifyIn(dc, []string{"body.minute"}, strLeaf("body.minute", row.value(rec.Add(FullRoundLead))), strLeaf("body.minute", row.value(rec)), call, earlier, nil, nil, w)[0]
+			if ln.Kind != row.want {
+				t.Fatalf("test B's value is %s from %+v (%s); want %s", ln.Kind, ln.From, ln.Why, row.want)
+			}
+			switch row.want {
+			case KindClockRead:
+				if ln.From != (Place{}) || ln.Read == nil || !ln.Read.Plain() {
+					t.Fatalf("test B's read is %+v from %+v; want a plain read of its own call's clock, no earlier place", ln.Read, ln.From)
+				}
+			case KindUnaccounted:
+				if !strings.Contains(ln.Why, "mock-a at body.minute") || strings.Contains(ln.Why, row.value(rec)) || ln.From != (Place{}) {
+					t.Fatalf("the refusal names %q from %+v; want test A's call and its place, never the value, and no place to bind at", ln.Why, ln.From)
+				}
+			case KindVariable:
+				if ln.From.Mock != "mock-a" || !ln.From.Run {
+					t.Fatalf("test B's copy follows %+v; want test A's value, the run's variable", ln.From)
+				}
+			}
+		})
+	}
+}
+
 // Where a client test's clock word (TestAClientTestLearnsAWordOfATextReadInItsCallsWindow)
 // meets the run's variable: an earlier test's call sent a text whose one
 // changed word is a read of the clock (its learn step learned the place so,
