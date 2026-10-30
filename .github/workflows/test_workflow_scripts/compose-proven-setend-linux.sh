@@ -21,9 +21,16 @@
 #      second set ran against the app keploy started again, and neither
 #      report says it was read with the app running (app_not_stopped).
 #   2. A changed shutdown publish (SHUTDOWN_MSG=changed): both sets fail, and
-#      each report names the publish among the calls made after the set's
-#      last test. Read with the app running, the publish came after the read
-#      and passed.
+#      each report lists the publish among the set's background calls, made
+#      after the set's last test was read: answered by no mock, it is the
+#      application's background work (item (b)), charged to no test and not
+#      among the unclaimed calls; the set fails because the recorded
+#      publish, a call of its worker scope, was made differently and keploy
+#      refused it: the reason names the refused call and the recording it
+#      was closest to, and does not say the publish was never made. Read with
+#      the app running, the publish came after the read and passed. (Before,
+#      the reason said the publish was never made; before item (b) the
+#      changed call itself failed each set, as an unclaimed call.)
 #   3. The app exits on its own after its first answer (HALT_AFTER=1): the
 #      first set is APP_HALTED, as compose's abort made it, though keploy ran
 #      compose without it.
@@ -34,7 +41,7 @@
 #      <project>-app-1 (P101-b-n). keploy record's stop and each set's end
 #      stop are of the container compose made for the service: the
 #      recording holds the shutdown publish, the set as recorded passes, and
-#      a changed publish fails it. Read by the name, the stop found no
+#      a changed publish fails it, listed as in 2. Read by the name, the stop found no
 #      container and took that for an app it had stopped: the recording
 #      lacked the publish, and the replay of a changed one passed, exit 0.
 #   6. The app's service has restart: always and stop_signal: SIGTERM
@@ -45,8 +52,21 @@
 #      own stop signal, which the daemon takes for a stop, so it does not
 #      start it again: the replay booting a starts the app's container twice
 #      (compose's up, keploy's start for the second set), the first set
-#      passes, and the second fails on its startup call, which keploy's start
-#      made once the set was staged. Interrupted with SIGINT, the daemon
+#      passes, and the second fails: its recorded startup call (b), a call
+#      of its worker scope, was never answered. The startup call keploy's
+#      start made once the set was staged (a), answered by no mock before the
+#      set's first test, is the application's background work (item (b)):
+#      the report lists it among the set's background calls, made before its
+#      first test, not among its unclaimed calls. Its closest recording is
+#      b, so the set's reason names it as b's call made differently, which
+#      keploy refused, and the set's end does not wait for b: the refusal
+#      is the event. (Before, the end waited out its worker scope, 600 of
+#      keploy's wake-ups, about ten minutes, then said b was never made.)
+#      (Before item (b) that call
+#      itself failed the set. With item (b), until keploy took each set's
+#      start of a kept stack's app for that set's boot, a recorded startup
+#      call never made was not required of a compose set, and the second set
+#      passed, keploy test exit 0.) Interrupted with SIGINT, the daemon
 #      started the app again 100 ms after each of keploy's stops; its startup
 #      call came while keploy staged the second set, which no set judged, and
 #      the second set passed, keploy test exit 0 (2 of 3 replays on
@@ -85,7 +105,9 @@ cleanup() {
   [ -f docker-compose.yml ] && sudo docker compose -p "$PROJECT" down --remove-orphans >/dev/null 2>&1
   return 0
 }
+STARTS_PID=
 finish() {
+  [ -z "$STARTS_PID" ] || sudo kill "$STARTS_PID" 2>/dev/null
   cleanup
   cd / && sudo rm -rf "$WORK"
 }
@@ -325,6 +347,28 @@ for s in test-set-0 test-set-1; do
   sudo grep -q '/shutdown' "keploy/$s/mocks.yaml" 2>/dev/null || fail "$s: the shutdown publish was not recorded"
 done
 
+# shutdown_named STEP SET: SET's report lists the publish among its background
+# calls, made after its last test was read, and not among its unclaimed calls
+# (item (b)), and its reason names the publish keploy refused, a call of its
+# worker scope made differently, with the recording it was closest to, and
+# does not say it was never made.
+shutdown_named() {
+  local step=$1 s=$2 y
+  y="$(sudo cat "$(report "$s")" 2>/dev/null)"
+  yq -r '.background_calls[]? | select(.actual_summary // "" | test("/shutdown")) | .background_why // ""' <<<"$y" 2>/dev/null |
+    grep -q "made after the set's last test was read" ||
+    fail "$step: $s does not list the publish among its background calls, made after its last test: $(grep -A8 '^background_calls:' <<<"$y" | head -10)"
+  if yq -r '.unclaimed_calls[]? | .actual_summary // ""' <<<"$y" 2>/dev/null | grep -q '/shutdown'; then
+    fail "$step: $s has the publish among its unclaimed calls; it is background work, charged to no test"
+  fi
+  yq -r '.failure_reason // ""' <<<"$y" 2>/dev/null |
+    grep -q "the application made 1 of the calls the test set's worker scope recorded (the calls no test owns) differently, and keploy refused each: HTTP POST /shutdown.* (closest to mock-[0-9]*)" ||
+    fail "$step: $s's reason does not name the refused publish as the worker scope's call made differently: $(yq -r '.failure_reason // ""' <<<"$y" 2>/dev/null)"
+  if yq -r '.failure_reason // ""' <<<"$y" 2>/dev/null | grep -q "never made"; then
+    fail "$step: $s's reason says a worker call was never made; the app made it, and keploy refused it: $(yq -r '.failure_reason // ""' <<<"$y" 2>/dev/null)"
+  fi
+}
+
 echo "== 1. both sets as recorded =="
 replay as-recorded
 [ "$RC" -eq 0 ] || fail "1: keploy test exited $RC, want 0"
@@ -337,13 +381,14 @@ done
 [ "$FAIL" -eq 0 ] || tail -80 as-recorded.log
 
 echo "== 2. a changed shutdown publish =="
+failed_before=$FAIL
 replay changed SHUTDOWN_MSG=changed
 [ "$RC" -ne 0 ] || fail "2: keploy test exited 0, want non-zero"
 for s in test-set-0 test-set-1; do
   [ "$(set_status $s)" = FAILED ] || fail "2: $s is $(set_status $s), want FAILED"
-  sudo grep -A6 '^unclaimed_calls:' "$(report $s)" 2>/dev/null | grep -q '/shutdown' ||
-    fail "2: $s does not name the publish among the calls made after its last test"
+  shutdown_named 2 "$s"
 done
+[ "$FAIL" -eq "$failed_before" ] || tail -80 changed.log
 
 echo "== 3. the app exits on its own =="
 replay halts HALT_AFTER=1
@@ -399,11 +444,24 @@ $keys
     command: python dep.py
 YML
 }
-# app_starts SINCE: how many times the daemon started the app's container
-# since SINCE (a time), as its events say.
+# watch_starts FILE: streams the daemon's start events of the app's container
+# into FILE from now on, in the background (STARTS_PID); app_starts FILE ends
+# the stream and says how many there were. A stream, not a read of the past
+# once the replay is over: the daemon keeps only its last 256 events, and a
+# replay that runs a while (a set's end that waits for its worker scope, up
+# to 600 wake-ups) outlasts them under the agent's health checks (their exec
+# events), so a read after the replay may find none of the starts.
+watch_starts() {
+  sudo docker events --since "$(date +%s.%N)" --filter type=container --filter event=start \
+    --filter "label=com.docker.compose.project=$PROJECT" --filter label=com.docker.compose.service=app \
+    --format '{{.Actor.ID}}' > "$1" 2>/dev/null &
+  STARTS_PID=$!
+}
 app_starts() {
-  sudo docker events --since "$1" --until "$(date +%s.%N)" --filter type=container --filter event=start \
-    --filter "label=com.docker.compose.project=$PROJECT" --filter label=com.docker.compose.service=app --format '{{.Actor.ID}}' | wc -l
+  sudo kill "$STARTS_PID" 2>/dev/null
+  wait "$STARTS_PID" 2>/dev/null
+  STARTS_PID=
+  wc -l < "$1"
 }
 
 echo "== 5. keploy given the app by its service's key =="
@@ -417,8 +475,7 @@ replay svckey-as-recorded
 replay svckey-changed SHUTDOWN_MSG=changed
 [ "$RC" -ne 0 ] || fail "5: a changed shutdown publish: keploy test exited 0, want non-zero: the set's end was read with the app running"
 [ "$(set_status test-set-0)" = FAILED ] || fail "5: a changed shutdown publish: test-set-0 is $(set_status test-set-0), want FAILED"
-sudo grep -A6 '^unclaimed_calls:' "$(report test-set-0)" 2>/dev/null | grep -q '/shutdown' ||
-  fail "5: test-set-0 does not name the publish among the calls made after its last test"
+shutdown_named 5 test-set-0
 [ "$FAIL" -eq 0 ] || tail -60 svckey-changed.log
 
 echo "== 6. the app's restart policy =="
@@ -426,13 +483,31 @@ variant restart "    restart: always
     stop_signal: SIGTERM"
 record 0 BOOT_MSG=a
 BULK=16000000 record 1 BOOT_MSG=b
-since=$(date +%s.%N)
+watch_starts restart-starts.txt
 replay restart-boot-a BOOT_MSG=a
-starts=$(app_starts "$since")
+starts=$(app_starts restart-starts.txt)
 [ "$starts" -eq 2 ] || fail "6: the app's container was started $starts times in the replay of two sets, want 2 (compose's up, keploy's start for the second set): the daemon started it again after keploy's stop"
 [ "$(set_status test-set-0)" = PASSED ] || fail "6: test-set-0, recorded booting a, replayed booting a, is $(set_status test-set-0), want PASSED"
-[ "$(set_status test-set-1)" = FAILED ] || fail "6: test-set-1, recorded booting b, replayed booting a, is $(set_status test-set-1), want FAILED: its startup call was judged by no set"
+[ "$(set_status test-set-1)" = FAILED ] || fail "6: test-set-1, recorded booting b, replayed booting a, is $(set_status test-set-1), want FAILED: its recorded startup call was never made"
 [ "$RC" -ne 0 ] || fail "6: keploy test exited 0, want non-zero"
+y="$(sudo cat "$(report test-set-1)" 2>/dev/null)"
+# The reason names the startup call keploy refused (a), closest to the
+# recorded one (b): the application made it, differently.
+yq -r '.failure_reason // ""' <<<"$y" 2>/dev/null | grep -q "made 1 of the calls the test set's worker scope recorded (the calls no test owns) differently, and keploy refused each: HTTP POST /boot" ||
+  fail "6: test-set-1's reason does not name the startup call keploy refused, closest to its recorded one: $(yq -r '.failure_reason // ""' <<<"$y" 2>/dev/null)"
+if yq -r '.failure_reason // ""' <<<"$y" 2>/dev/null | grep -q "never made"; then
+  fail "6: test-set-1's reason says a call was never made, though the application made its startup call and keploy refused it: $(yq -r '.failure_reason // ""' <<<"$y" 2>/dev/null)"
+fi
+# The refusal is the event: the set's end did not wait for the recorded
+# startup call, and keploy's log says so.
+grep -q "not waiting for the worker scope's boot calls the application made and keploy refused" restart-boot-a.log ||
+  fail "6: keploy's log does not say test-set-1's end did not wait for its recorded startup call, which the application made and keploy refused"
+yq -r '.background_calls[]? | select(.actual_summary // "" | test("/boot")) | .background_why // ""' <<<"$y" 2>/dev/null |
+  grep -q "made before the set's first test began" ||
+  fail "6: test-set-1 does not list the startup call keploy's start made among its background calls, made before its first test: $(grep -A8 '^background_calls:' <<<"$y" | head -10)"
+if yq -r '.unclaimed_calls[]? | .actual_summary // ""' <<<"$y" 2>/dev/null | grep -q '/boot'; then
+  fail "6: test-set-1 has the startup call among its unclaimed calls; made before its first test, it is background work, charged to no test"
+fi
 [ "$FAIL" -eq 0 ] || tail -80 restart-boot-a.log
 cd "$WORK" || exit 1
 

@@ -47,17 +47,31 @@ func (c *composeInstr) StartComposeApp(context.Context) (bool, error) {
 	return anew, nil
 }
 
+// GetMockStats says the agent holds what keploy stored on it for the set, as
+// a compose agent that was not replaced does (ensureAgentHoldsStoredMocks).
+func (c *composeInstr) GetMockStats(context.Context) (models.MockStats, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return models.MockStats{Loaded: len(c.storedFiltered) + len(c.storedUnfiltered)}, nil
+}
+
 func (c *composeInstr) MakeAgentReadyForDockerCompose(ctx context.Context) error {
 	c.order = append(c.order, "agent ready")
 	return c.prInstr.MakeAgentReadyForDockerCompose(ctx)
 }
 
-// composeHarness is the harness for a set of a docker compose stack, with c as
-// its instrumentation: a stack kept across sets (runServing), or one the set
-// brings up afresh (run).
+// composeHarness is the harness for a set of two tests of a docker compose
+// stack, with c as its instrumentation: a stack kept across sets
+// (runServing), or one the set brings up afresh (run).
 func composeHarness(t *testing.T, c *composeInstr) *prRun {
 	t.Helper()
-	h := newPartialRunHarness(t, 2, 0)
+	return composeHarnessOf(t, c, 2)
+}
+
+// composeHarnessOf is composeHarness for a set of n tests.
+func composeHarnessOf(t *testing.T, c *composeInstr, n int) *prRun {
+	t.Helper()
+	h := newPartialRunHarness(t, n, 0)
 	h.replayer.config.CommandType = string(utils.DockerCompose)
 	// A set that brings its stack up afresh (run: serveTest false) waits for
 	// the agent in it to answer /health before anything else; with nothing

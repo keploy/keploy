@@ -1051,13 +1051,26 @@ var workerWake = func(ctx context.Context) (<-chan time.Time, func()) {
 // no longer makes holds the set's end for that many. A read that fails ends
 // the wait with its error: what the worker scope answered is then not known,
 // and the set is not judged.
-func (r *Replayer) awaitWorkerScope(ctx context.Context, plan *exactPlan, consumed map[string]models.MockState, add func([]models.MockState)) ([]string, error) {
+//
+// It does not wait for a mock placed at the set's start (its boot) whose call
+// the application made and keploy refused: refused, the calls the set read so
+// far that no mock answered, holds one whose closest recording is that mock
+// (bootRefused). The application boots once, so the refusal is the event:
+// the mock is returned unanswered, and the set fails naming the refused call
+// (workerWhy). A boot call first made after the set's last test was read is
+// read only at the set's end, after this wait.
+func (r *Replayer) awaitWorkerScope(ctx context.Context, plan *exactPlan, consumed map[string]models.MockState, add func([]models.MockState), refused []models.UnmatchedCall) ([]string, error) {
 	missing := plan.unansweredWorker(consumed, false)
-	if len(missing) == 0 {
-		return nil, nil
+	awaited := plan.awaitedWorker(missing, refused)
+	if len(awaited) < len(missing) {
+		r.logger.Info("not waiting for the worker scope's boot calls the application made and keploy refused: the set's end fails for them ("+provenswitch.Env+"=1)",
+			zap.Strings("mocks", plan.bootRefused(missing, refused)))
+	}
+	if len(awaited) == 0 {
+		return missing, nil
 	}
 	r.logger.Info("waiting for the test set's worker scope: the calls the application makes on its own that no test owns, which its recording made by the set's end ("+provenswitch.Env+"=1)",
-		zap.Int("calls", len(missing)), zap.Strings("mocks", missing[:min(len(missing), 20)]))
+		zap.Int("calls", len(awaited)), zap.Strings("mocks", awaited[:min(len(awaited), 20)]))
 	wake, stop := workerWake(ctx)
 	defer stop()
 	stalls := 0
@@ -1075,24 +1088,107 @@ func (r *Replayer) awaitWorkerScope(ctx context.Context, plan *exactPlan, consum
 			return missing, err
 		}
 		add(read)
-		now := plan.unansweredWorker(consumed, false)
+		missing = plan.unansweredWorker(consumed, false)
+		now := plan.awaitedWorker(missing, refused)
 		if len(now) == 0 {
-			return nil, nil
+			return missing, nil
 		}
-		if len(now) < len(missing) {
+		if len(now) < len(awaited) {
 			stalls = 0
 		} else {
 			stalls++
 		}
-		missing = now
+		awaited = now
 		if stalls >= workerStallLimit {
 			return missing, nil
 		}
 	}
 }
 
+// refusedWorker is, by each worker-scope mock of missing, the first call of
+// calls that no mock answered whose closest recording is that mock
+// (models.UnmatchedCall.ClosestMock): the application made the call the
+// recording made, differently, and keploy refused it. nil when none is.
+func refusedWorker(missing []string, calls []models.UnmatchedCall) map[string]models.UnmatchedCall {
+	var out map[string]models.UnmatchedCall
+	for _, c := range calls {
+		if c.Answer != "" || c.ClosestMock == "" || !slices.Contains(missing, c.ClosestMock) {
+			continue
+		}
+		if _, seen := out[c.ClosestMock]; seen {
+			continue
+		}
+		if out == nil {
+			out = map[string]models.UnmatchedCall{}
+		}
+		out[c.ClosestMock] = c
+	}
+	return out
+}
+
+// bootRefused is, in missing's order, the worker-scope mocks of missing placed
+// at the set's start (its boot: MockEntry.Place "") whose call the application
+// made and keploy refused (refusedWorker over refused).
+func (p *exactPlan) bootRefused(missing []string, refused []models.UnmatchedCall) []string {
+	by := refusedWorker(missing, refused)
+	if p == nil || len(by) == 0 {
+		return nil
+	}
+	boot := map[string]bool{}
+	for _, e := range p.worker {
+		if e.Place == "" {
+			boot[e.Name] = true
+		}
+	}
+	var out []string
+	for _, m := range missing {
+		if _, ok := by[m]; ok && boot[m] {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// awaitedWorker is missing less its boot calls the application made and
+// keploy refused (bootRefused): the worker-scope mocks the set's end waits
+// for.
+func (p *exactPlan) awaitedWorker(missing []string, refused []models.UnmatchedCall) []string {
+	skip := p.bootRefused(missing, refused)
+	if len(skip) == 0 {
+		return missing
+	}
+	var out []string
+	for _, m := range missing {
+		if !slices.Contains(skip, m) {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
 // workerWhy says what a set's end found of its worker scope: the calls its
-// recording made that the application never did.
-func workerWhy(missing []string) string {
-	return fmt.Sprintf("the application never made %d of the calls the test set's worker scope recorded (the calls no test owns: %s)", len(missing), strings.Join(missing[:min(len(missing), 20)], ", "))
+// recording made that the application never did, and those it made
+// differently, which keploy refused (refusedWorker over refused, the set's
+// calls no mock answered), each named with the call refused. That holds for
+// every worker-scope mock: one placed at the set's start, which the end did
+// not wait for (bootRefused), and one placed after a test, which it waited
+// for and which no later call answered.
+func (p *exactPlan) workerWhy(missing []string, refused []models.UnmatchedCall) string {
+	by := refusedWorker(missing, refused)
+	var never, differently []string
+	for _, m := range missing {
+		if c, ok := by[m]; ok {
+			differently = append(differently, describeUnclaimed(c)+" (closest to "+m+")")
+			continue
+		}
+		never = append(never, m)
+	}
+	var parts []string
+	if len(never) > 0 {
+		parts = append(parts, fmt.Sprintf("the application never made %d of the calls the test set's worker scope recorded (the calls no test owns: %s)", len(never), strings.Join(never[:min(len(never), 20)], ", ")))
+	}
+	if len(differently) > 0 {
+		parts = append(parts, fmt.Sprintf("the application made %d of the calls the test set's worker scope recorded (the calls no test owns) differently, and keploy refused each: %s", len(differently), strings.Join(differently[:min(len(differently), 20)], "; ")))
+	}
+	return strings.Join(parts, "; ")
 }

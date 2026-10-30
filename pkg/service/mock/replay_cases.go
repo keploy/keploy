@@ -89,17 +89,6 @@ func (m *mockService) watchIncoming(ctx context.Context, on bool) *actualCapture
 	return c
 }
 
-// wait blocks until the incoming stream has been drained, or it has taken
-// nothing for grace of the time this process could run (utils/stall), as the
-// record side's caseCapture.wait does: a reader still taking requests is
-// waited for however long that takes.
-func (c *actualCapture) wait(grace time.Duration) {
-	if c == nil {
-		return
-	}
-	utils.WaitWhileProgressing(c.done, grace, func() uint64 { return uint64(c.seen.Load()) })
-}
-
 func (c *actualCapture) list() []*models.TestCase {
 	if c == nil {
 		return nil
