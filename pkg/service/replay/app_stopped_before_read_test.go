@@ -17,6 +17,10 @@ import (
 // its way out), lands after a set-end read made while the app still runs, and
 // is judged by no one. Under the proven switch keploy stops the app keploy
 // started for the set, waits for its exit, and only then reads the set's end.
+// Since item (b) a call so made that no mock answers is the application's
+// background work: the agent marks it made outside every test's window
+// (MissOutsideTest, Background), and the set's end lists it with where it was
+// made, failing nothing.
 
 // stoppingApp is the harness's agent and application, whose application
 // makes, as it is stopped, a call no mock answers; the agent holds it until
@@ -36,8 +40,12 @@ func (s *stoppingApp) Run(ctx context.Context, _ models.RunOptions) models.AppEr
 	<-ctx.Done()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	// Its shutdown flushes a publish, which no mock answers.
-	s.held = append(s.held, models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "POST /publish", Destination: "broker:9099", Diff: "body: shutdown-changed"})
+	// Its shutdown flushes a publish, which no mock answers. Made after the
+	// last test's misses were read, the switch-on agent sends it as a call
+	// made outside every test's window (betweenTestsMiss): MissOutsideTest,
+	// Background.
+	s.held = append(s.held, models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "POST /publish", Destination: "broker:9099", Diff: "body: shutdown-changed",
+		Kind: models.MissOutsideTest, Background: true})
 	s.stopped = true
 	return models.AppError{AppErrorType: models.ErrCtxCanceled, ExitCode: -1}
 }
@@ -65,12 +73,19 @@ func TestRunTestSet_ACallTheAppMakesAsItIsStoppedIsJudged(t *testing.T) {
 	if !app.readAfterStop {
 		t.Fatalf("the set's end read the agent's misses (%d reads) only while the app still ran: a call it makes as it is stopped is judged by no one", app.reads)
 	}
-	if status != models.TestSetStatusFailed {
-		t.Fatalf("status %s; the publish the app made as it was stopped, which no mock answered, must fail the set", status)
-	}
+	// Item (b): the publish, made after the last test was read and answered
+	// by no mock, is background work. It fails nothing, and the set's report
+	// lists it with where it was made. It used to fail the set, read without
+	// the Kind and the mark the switch-on agent sends.
 	rep := h.report.report
-	if len(rep.UnclaimedCalls) != 1 || !strings.Contains(rep.FailureReason, "POST /publish to broker:9099") {
-		t.Fatalf("unclaimed %+v, reason %q; want the shutdown publish named", rep.UnclaimedCalls, rep.FailureReason)
+	if status != models.TestSetStatusPassed {
+		t.Fatalf("status %s (reason %q); the publish the app made as it was stopped, which no mock answered, is background work and fails nothing", status, rep.FailureReason)
+	}
+	if len(rep.UnclaimedCalls) != 0 {
+		t.Fatalf("unclaimed calls %+v; the publish is charged to no test and not to the set", rep.UnclaimedCalls)
+	}
+	if got := rep.BackgroundCalls; len(got) != 1 || got[0].ActualSummary != "POST /publish" || got[0].BackgroundWhy != madeAfterLast {
+		t.Fatalf("background calls %+v; want the shutdown publish, saying it was made after the set's last test was read", got)
 	}
 	for _, r := range rep.Tests {
 		if r.Status != models.TestStatusPassed {
@@ -78,7 +93,7 @@ func TestRunTestSet_ACallTheAppMakesAsItIsStoppedIsJudged(t *testing.T) {
 		}
 	}
 	if h.replayer.notJudged("test-set-0") {
-		t.Fatal("the set is marked not judged; it was judged, FAILED")
+		t.Fatal("the set is marked not judged; it was judged, PASSED")
 	}
 }
 
