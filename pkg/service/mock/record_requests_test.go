@@ -580,6 +580,63 @@ func TestRecordRequests_ATestCaseTheStoreRefusedEndsAsARecordingNotSaved(t *test
 	}
 }
 
+// refusesTwoTestDB is the real test-case store, whose disk refuses the first
+// and the third test case it is handed, each with its own error.
+type refusesTwoTestDB struct {
+	*testdb.TestYaml
+	mu    sync.Mutex
+	calls int
+}
+
+func (d *refusesTwoTestDB) InsertTestCase(ctx context.Context, tc *models.TestCase, set string, enableLog bool) error {
+	d.mu.Lock()
+	d.calls++
+	n := d.calls
+	d.mu.Unlock()
+	switch n {
+	case 1:
+		return errors.New("write the test case: no space left on device (the first refusal)")
+	case 3:
+		return errors.New("write the test case: disk quota exceeded (the second refusal)")
+	}
+	return d.TestYaml.InsertTestCase(ctx, tc, set, enableLog)
+}
+
+// keploy mock record --record-requests whose test-case store refused two of
+// four test cases: the run counts every refusal ("2 of the 4"), and the error
+// it says is the first refusal's, not a later one's. The exit code is
+// keploy's 1 and the set is left exactly as it was.
+func TestRecordRequests_EveryTestCaseTheStoreRefusedIsCountedAndTheFirstErrorSaid(t *testing.T) {
+	dir := t.TempDir()
+	set := filepath.Join(dir, "set")
+	require.NoError(t, os.MkdirAll(filepath.Join(set, "tests"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(set, "mocks.yaml"), []byte("# old mocks\nversion: api.keploy.io/v1beta1\nkind: Http\nname: mock-0\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(set, "tests", "test-1.yaml"), []byte("# old case\nname: test-1\n"), 0o644))
+	before := snapshotTree(t, dir)
+
+	instr := newRunnerInstr(t, sequentialMarks()...)
+	instr.incoming = []*models.TestCase{
+		caseAt("", runnerT0.Add(5*time.Millisecond)),
+		caseAt("", runnerT0.Add(15*time.Millisecond)),
+		caseAt("", runnerT0.Add(30*time.Millisecond)),
+		caseAt("", runnerT0.Add(50*time.Millisecond)),
+	}
+	instr.mocks = []*models.Mock{mockAt("mock-0", runnerT0.Add(5*time.Millisecond))}
+	cfg := instrConfig(instr.composeInstr, utils.Native, "go test -json ./...")
+	cfg.Path = dir
+	withRequests(cfg)
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = 0 })
+	svc := New(zap.NewNop(), instr, mockdb.New(zap.NewNop(), dir, ""), mapdb.New(zap.NewNop(), dir, ""), nil, nil, cfg)
+	svc.(TestDBSetter).SetTestDB(&refusesTwoTestDB{TestYaml: testdb.New(zap.NewNop(), dir)})
+	err := svc.Record(context.Background())
+	require.ErrorContains(t, err, "2 of the 4 test cases handed to the test-case store were not written")
+	require.ErrorContains(t, err, "(the first refusal)", "the first error was not the one said")
+	require.NotContains(t, err.Error(), "(the second refusal)", "a later error was said as the first")
+	require.Equal(t, utils.ExitKeployError, utils.ErrCode)
+	require.Equal(t, before, snapshotTree(t, dir), "the set was not left exactly as it was")
+}
+
 func TestAnAcceptedRecordReplacesTheSetAndLeavesNoCopy(t *testing.T) {
 	dir := t.TempDir()
 	set := filepath.Join(dir, "set")

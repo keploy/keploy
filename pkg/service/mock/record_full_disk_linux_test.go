@@ -205,3 +205,57 @@ func TestRecord_AStoppedRecordingWhoseStoreRefusedMocksExits1WithTheSignalKnown(
 	require.NoError(t, rerr)
 	require.Equal(t, "# the existing recording\n", string(got), "the existing set was not kept")
 }
+
+// sigintRunnerInstrumentation is fullDiskInstrumentation's runner, whose test
+// command the user's Ctrl+C reached too (a terminal sends SIGINT to the whole
+// foreground group): the run is stopped (stopped, the parent's cancel), and
+// the command exits 130 itself, which the agent's runner can return as a
+// command error when the app's exit wins its select.
+type sigintRunnerInstrumentation struct{ fullDiskInstrumentation }
+
+func (f *sigintRunnerInstrumentation) Run(ctx context.Context, o models.RunOptions) models.AppError {
+	f.fullDiskInstrumentation.Run(ctx, o)
+	return models.AppError{AppErrorType: models.ErrCommandError, ExitCode: 130, Err: errors.New("exit status 130")}
+}
+
+// A recording the user stopped, whose yaml store refused mocks, exits
+// keploy's 1 even when the test command's own exit (130, from the same
+// Ctrl+C) reached Record: the test command's code is kept only for a run the
+// user did not stop.
+func TestRecord_AStoppedRunWhoseTestCommandExited130AndWhoseStoreRefusedExits1(t *testing.T) {
+	t.Setenv("KEPLOY_MOCK_FORMAT", "yaml")
+	utils.ResetInterruptedAgain()
+	utils.ClearInterrupted()
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ResetInterruptedAgain(); utils.ClearInterrupted(); utils.ErrCode = 0 })
+	t.Cleanup(utils.SetInterruptSignalForTest(2))
+	utils.MarkInterrupted()
+	dir := t.TempDir()
+	const name, n = "orders", 5
+	existing := filepath.Join(dir, name, "mocks.yaml")
+	require.NoError(t, os.MkdirAll(filepath.Dir(existing), 0o755))
+	require.NoError(t, os.WriteFile(existing, []byte("# the existing recording\n"), 0o644))
+	inst := &sigintRunnerInstrumentation{fullDiskInstrumentation{stuckFileInstrumentation{
+		trickleInstrumentation: trickleInstrumentation{out: make(chan *models.Mock, n)},
+		t:                      t, n: n,
+		fifo: filepath.Join(dir, name+yaml.MockStagingSuffix, "mocks.yaml"),
+	}}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	inst.stopped = cancel
+	cfg := &config.Config{}
+	cfg.Mock.Name = name
+	cfg.Path = dir
+	db := mockdb.New(zap.NewNop(), dir, "mocks")
+	returned := make(chan error, 1)
+	go func() {
+		returned <- New(zap.NewNop(), inst, db, nil, FileStore{}, nil, cfg).Record(ctx)
+	}()
+	err := returnedWithin(t, returned)
+	inst.wg.Wait()
+	require.ErrorIs(t, err, models.ErrMocksNotWritten)
+	require.Equal(t, utils.ExitKeployError, utils.ErrCode, "a stopped run exited with its test command's code")
+	got, rerr := os.ReadFile(existing)
+	require.NoError(t, rerr)
+	require.Equal(t, "# the existing recording\n", string(got), "the existing set was not kept")
+}
