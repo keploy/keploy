@@ -751,7 +751,10 @@ jobs:
       # open when it is made (P101): a changed one fails that test, the set,
       # and keploy test; so does one the app no longer makes, on a connection
       # of its own opened and closed inside the test (P091). One it makes as
-      # it starts, before the set's first test, fails the set (F2).
+      # it starts, before the set's first test, or as it stops, after the
+      # set's last test, that no mock answers is the application's background
+      # work: listed among the set's background calls, failing nothing; the
+      # set fails because the recorded publish was never made.
       - name: Run proven after-answer e2e
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
