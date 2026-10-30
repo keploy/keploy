@@ -10,7 +10,7 @@ import (
 )
 
 // The calls a test set's application made outside every test's window that
-// no mock answered (under the proven switch; founder 2026-10-29, item b).
+// no mock answered (under the proven switch).
 //
 // Before the set's first test the application is starting, and none of its
 // calls is a test's: the agent hands the misses made then to the set's first
@@ -25,7 +25,7 @@ import (
 // write it starts once its last answer has left): the replay keeps it out of
 // every test's verdict, fails nothing with it, and lists it once for the
 // set, saying where it was made (TestReport.BackgroundCalls), as keploy mock
-// does (founder D1).
+// does.
 //
 // The dataflow guard: a call made before the set's first test, or between two
 // tests, whose recorded answer reaches the test read next (flowGuard: by the
@@ -72,9 +72,19 @@ func (s *setCalls) reset(guard *flowGuard) {
 
 // Where a background call was made (models.UnmatchedCall.BackgroundWhy).
 const (
-	madeBeforeFirst = "made before the set's first test began, as the application started, and its recorded answer reaches no test"
+	madeBeforeFirst = "made before the set's first test began, as the application started"
 	madeAfterLast   = "made after the set's last test was read, with no test left to run"
 )
+
+// backgroundWhy is the reason of a background call made where says, which
+// the dataflow guard read (flowGuard.reaches): its recorded answer reaches
+// no test, or keploy could not tell, and why (unknown).
+func backgroundWhy(where, unknown string) string {
+	if unknown != "" {
+		return where + ", and keploy could not tell whether its recorded answer reaches a test: " + unknown
+	}
+	return where + ", and its recorded answer reaches no test"
+}
 
 // madeInside is where a call of a marked background series made inside
 // test's window was ("" for a test the read does not name).
@@ -130,13 +140,14 @@ func (s *setCalls) take(ctx context.Context, read []models.UnmatchedCall, test s
 	for _, c := range read {
 		switch {
 		case setsCall(c) && c.CountsAgainstTest():
-			if why := s.guard.reaches(ctx, c, test, "made before the set's first test", driftsOf()); why != "" {
+			why, unknown := s.guard.reaches(ctx, c, test, "made before the set's first test", driftsOf())
+			if why != "" {
 				c.ReachesTest = why
 				rest = append(rest, c)
 				changed = true
 				continue
 			}
-			c.Background, c.BackgroundWhy = true, madeBeforeFirst
+			c.Background, c.BackgroundWhy = true, backgroundWhy(madeBeforeFirst, unknown)
 			s.background = append(s.background, c)
 		case setsCall(c):
 			s.calls = append(s.calls, c)
@@ -157,13 +168,14 @@ func (s *setCalls) take(ctx context.Context, read []models.UnmatchedCall, test s
 				// rule): charged to test, failing closed.
 				where = madeInside(test)
 			}
-			if why := s.guard.reaches(ctx, c, test, where, driftsOf()); why != "" {
+			why, unknown := s.guard.reaches(ctx, c, test, where, driftsOf())
+			if why != "" {
 				c.Background, c.ReachesTest = false, why
 				rest = append(rest, c)
 				changed = true
 				continue
 			}
-			c.BackgroundWhy = where + ", and its recorded answer reaches no test"
+			c.BackgroundWhy = backgroundWhy(where, unknown)
 			s.background = append(s.background, c)
 		default:
 			rest = append(rest, c)
@@ -203,7 +215,7 @@ func (s *setCalls) backgroundCalls() []models.UnmatchedCall {
 // application made outside every test's window, or inside one as a call of a
 // marked background series (MadeInTest), that no mock answered: its
 // background work (a timer, a start-up job, a late write), which may fail
-// inside the application but fails no test and not the set (founder D1). The
+// inside the application but fails no test and not the set. The
 // line says which of the two it was, and where names the place.
 func (r *Replayer) logBackgroundCalls(testSetID string, calls []models.UnmatchedCall) {
 	for _, c := range calls {

@@ -451,6 +451,8 @@ type prHooks struct {
 	// consumedFailsOnStop fails GetConsumedMocks once the run's context is
 	// cancelled, as the real agent call does after the app exits.
 	consumedFailsOnStop bool
+	// liveBody answers the named tests with that body.
+	liveBody map[string]string
 }
 
 func (h prHooks) SimulateRequest(_ context.Context, tc *models.TestCase, _ string) (interface{}, error) {
@@ -476,6 +478,9 @@ func (h prHooks) SimulateRequest(_ context.Context, tc *models.TestCase, _ strin
 	resp := tc.HTTPResp
 	if h.wrongBody[tc.Name] {
 		resp.Body = `{"ok":false}`
+	}
+	if body, ok := h.liveBody[tc.Name]; ok {
+		resp.Body = body
 	}
 	return &resp, nil
 }
