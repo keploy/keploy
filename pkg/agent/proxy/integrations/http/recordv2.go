@@ -322,9 +322,9 @@ func (h *HTTP) readRequestV2(ctx context.Context, stream *fakeconn.FakeConn, fin
 	contentLengthHeader, transferEncodingHeader := parseHeaders(head)
 
 	if contentLengthHeader != "" {
-		contentLength, err := strconv.Atoi(contentLengthHeader)
+		contentLength, err := contentLengthValue(contentLengthHeader)
 		if err != nil {
-			return fmt.Errorf("invalid content-length: %w", err)
+			return err
 		}
 		remaining := contentLength - (len(*finalReq) - bodyStart)
 		for remaining > 0 {
@@ -417,9 +417,9 @@ func (h *HTTP) readResponseV2(ctx context.Context, stream *fakeconn.FakeConn, fi
 	contentLengthHeader, transferEncodingHeader := parseHeaders(head)
 
 	if contentLengthHeader != "" {
-		contentLength, err := strconv.Atoi(contentLengthHeader)
+		contentLength, err := contentLengthValue(contentLengthHeader)
 		if err != nil {
-			return lastWr, fmt.Errorf("invalid content-length: %w", err)
+			return lastWr, err
 		}
 		remaining := contentLength - (len(*finalResp) - bodyStart)
 		for remaining > 0 {
