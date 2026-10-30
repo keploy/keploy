@@ -133,8 +133,12 @@ const kcmpFile = 0
 // that settled can still, rarely, count a descriptor that closed and opened
 // again between its comparisons beside the one that took its file over
 // (fileTally.settle). Where the kernel cannot compare them at all (no kcmp,
-// or keploy may not ask: a seccomp filter, a process it may not trace), each
-// descriptor counts, and uncompared says why. A churn of descriptors then
+// or keploy may not ask: a seccomp filter, a process it may not trace; its
+// first comparison is refused with ENOSYS, EPERM or EACCES), each
+// descriptor counts, and uncompared says why. A first comparison that fails
+// otherwise is no refusal: ESRCH is a process (or the thread read for it)
+// released after its descriptors were listed, a read that did not settle,
+// as the next look finds it gone (kcmpRefused). A churn of descriptors then
 // reads as steps out again, but the ratchet takes only a new fewest
 // (ExitRatchet), so it moves a stop at most once for each descriptor of the
 // reading that set the mark: a longer wait, but a bounded one. Taken as no
@@ -152,6 +156,15 @@ func openFiles(task int, fds []os.DirEntry) (n int, settled bool, uncompared err
 // while a stop it left runs on.
 var filesCompared atomic.Pointer[func(task, a, b int) (int, error)]
 
+// SetFilesComparedForTest makes openFiles compare two descriptors' files
+// with cmp in place of kcmp(2) (filesCompared), for a test of a stop in
+// another package (the daemons' stop, pkg/platform/http); restore puts back
+// what was there.
+func SetFilesComparedForTest(cmp func(task, a, b int) (int, error)) (restore func()) {
+	old := filesCompared.Swap(&cmp)
+	return func() { filesCompared.Store(old) }
+}
+
 // openFilesBy is openFiles with the kernel's comparison of two descriptors'
 // files (kcmpFiles; the tests' own).
 func openFilesBy(kcmp func(task, a, b int) (int, error), task int, fds []os.DirEntry) (n int, settled bool, uncompared error) {
@@ -165,13 +178,25 @@ func openFilesBy(kcmp func(task, a, b int) (int, error), task int, fds []os.DirE
 	switch err := t.settle(); {
 	case err == nil:
 		return len(t.held), !t.unsettled, nil
-	case t.answered:
-		// Refused part way through: the files held by then, no evidence.
-		return len(t.held), false, nil
-	default:
+	case !t.answered && kcmpRefused(err):
 		// Refused from the first comparison: each descriptor counts.
 		return len(fds), true, err
+	default:
+		// Refused part way through, or a comparison that failed otherwise
+		// (ESRCH: the process or thread was released after its descriptors
+		// were listed): the files held by then, no evidence.
+		return len(t.held), false, nil
 	}
+}
+
+// kcmpRefused reports whether err is the kernel refusing to compare a
+// process's files at all: kcmp(2) not built in, or a seccomp filter (ENOSYS,
+// EPERM or EACCES), or a ptrace rule that keeps keploy from reading the
+// process (EPERM). kcmp finds both tasks before it asks whether keploy may
+// read them, so one released since its descriptors were listed is ESRCH: a
+// read that did not settle, which says nothing of the host.
+func kcmpRefused(err error) bool {
+	return errors.Is(err, unix.EPERM) || errors.Is(err, unix.EACCES) || errors.Is(err, unix.ENOSYS)
 }
 
 // fileTally is a read of the open files a process holds through its

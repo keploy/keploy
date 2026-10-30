@@ -1512,6 +1512,97 @@ func TestAStopWhoseReadNeverSettlesSaysItCannotTell(t *testing.T) {
 	}
 }
 
+// A stop of the daemons whose first look compared their files, and whose
+// later looks could not (a daemon ran a program keploy's user may not read,
+// or changed its credentials), says that it counts descriptors at the first
+// of those later looks, naming the daemon, and not again at the next, as the
+// app's own stop does (utils' TestAStopSaysItCountsDescriptorsFromTheLookThatDid).
+func TestTheDaemonsStopSaysItCountsDescriptorsFromTheLookThatDid(t *testing.T) {
+	if !inOwnProcess(t) {
+		return
+	}
+	stop, err := startAdopting(zap.NewNop())
+	if err != nil {
+		t.Fatalf("startAdopting: %v", err)
+	}
+	defer stop()
+	stopCheck, stopStallChecks = 20*time.Millisecond, 50
+	dir := t.TempDir()
+	ready, release := filepath.Join(dir, "ready"), filepath.Join(dir, "release")
+	if err := unix.Mkfifo(release, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Held open by the test, so the daemon's open of it never blocks, and
+	// its read ends at the test's write, or at EOF once the test is gone.
+	fifo, err := os.OpenFile(release, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = fifo.Close() })
+	// On TERM it waits for the test (a builtin's read: it starts nothing
+	// the stop would read as the daemon's), then exits.
+	pid := daemonize(t, `trap 'read x <"$2"; exit 0' TERM; : > "$1"; while kill -0 "$DAEMON_OWNER"; do sleep 0.05; done`, ready, release)
+	await(t, "the daemon adopted", func() bool { return parentIs(pid, os.Getpid()) })
+	await(t, "the daemon ready", func() bool { _, err := os.Stat(ready); return err == nil })
+	// Each descriptor is a file of its own, until the kernel refuses.
+	compared := func(_, a, b int) (int, error) {
+		switch {
+		case a < b:
+			return 1, nil
+		case a > b:
+			return 2, nil
+		}
+		return 0, nil
+	}
+	refused := func(int, int, int) (int, error) { return 0, syscall.EPERM }
+	t.Cleanup(utils.SetFilesComparedForTest(compared))
+	var said atomic.Int64
+	core, logs := observer.New(zapcore.InfoLevel)
+	logger := zap.New(core, zap.Hooks(func(e zapcore.Entry) error {
+		if strings.Contains(e.Message, "counts the open files of the processes it stops as their descriptors") {
+			said.Add(1)
+		}
+		return nil
+	}))
+	// The stop's first look compares; the kernel refuses from the loop's
+	// first look on, and the daemon exits once the loop has looked twice.
+	// Each count is taken as the loop is about to look again: what the
+	// looks before said.
+	var looks atomic.Int32
+	atFirst, atSecond := atomic.Int64{}, atomic.Int64{}
+	looked := func() {
+		switch looks.Add(1) {
+		case 1:
+			atFirst.Store(said.Load())
+			utils.SetFilesComparedForTest(refused)
+		case 2:
+			atSecond.Store(said.Load())
+			_, _ = fifo.WriteString("go\n")
+		}
+	}
+	stopLooked.Store(&looked)
+	defer stopLooked.Store(nil)
+	if _, left := stopAdopted(logger, nil, nil); left != "" {
+		t.Fatalf("left %q; want nothing: the daemon exited", left)
+	}
+	if parentIs(pid, os.Getpid()) {
+		t.Fatalf("premise: daemon %d was not stopped", pid)
+	}
+	if n := looks.Load(); n < 2 {
+		t.Fatalf("the stop looked %d times after its first look; want 2", n)
+	}
+	if n := atFirst.Load(); n != 0 {
+		t.Fatalf("a stop whose first look compared the daemon's files said %d times that it counts descriptors; want never", n)
+	}
+	if n := atSecond.Load(); n != 1 {
+		t.Fatalf("a stop whose look counted the daemon's descriptors had said so %d times by its next look; want once, at that look", n)
+	}
+	if all := logs.FilterMessageSnippet("as their descriptors").All(); len(all) != 1 ||
+		!strings.Contains(fmt.Sprint(all[0].ContextMap()["error"]), "process "+strconv.Itoa(pid)+"'s descriptors: operation not permitted") {
+		t.Fatalf("a stop whose later looks counted the daemon's descriptors said so %d times (%v); want once, naming daemon %d and why", len(all), all, pid)
+	}
+}
+
 // A stop whose second read, once its daemons are stopped, cannot tell its
 // own children from what they started on their way out (its fds unreadable
 // by then) says so: what the daemons started may run on.

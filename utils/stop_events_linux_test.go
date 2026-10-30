@@ -1356,7 +1356,7 @@ func TestMarkExitOfDescriptorsTheKernelWillNotListIsUnsettled(t *testing.T) {
 // but a bounded one.
 func TestOpenFilesAreDescriptorsWhereTheKernelCannotCompareThem(t *testing.T) {
 	listed := []os.DirEntry{fdEntry("0"), fdEntry("1"), fdEntry("2"), fdEntry("3")}
-	for _, no := range []error{syscall.ENOSYS, syscall.EPERM} {
+	for _, no := range []error{syscall.ENOSYS, syscall.EPERM, syscall.EACCES} {
 		cannot := func(int, int, int) (int, error) { return 0, no }
 		if n, settled, why := openFilesBy(cannot, 1, listed); n != len(listed) || !settled || !errors.Is(why, no) {
 			t.Fatalf("kcmp failing with %v: %d open files of %d descriptors (settled %v, uncompared %v); want each counted, settled, uncompared for %v", no, n, len(listed), settled, why, no)
@@ -1424,6 +1424,93 @@ func TestOpenFilesAreDescriptorsWhereTheKernelCannotCompareThem(t *testing.T) {
 	}
 	if n, settled, _ := openFilesBy(selfRefused, 1, []os.DirEntry{fdEntry("0"), fdEntry("3")}); settled || n > 2 {
 		t.Fatalf("kcmp refused asking a descriptor of itself: %d open files, settled %v; want at most 2, unsettled", n, settled)
+	}
+}
+
+// A first comparison that fails, but not as a refusal (ESRCH: the process,
+// or the thread read for it, was released after its descriptors were
+// listed, as kcmp finds both tasks before it asks whether keploy may read
+// them), is a read that did not settle: no evidence, and no word of the
+// host, whose kernel compares files. A stop that looks so says nothing of it.
+func TestAProcessGoneBeforeItsFilesAreComparedIsNoRefusal(t *testing.T) {
+	listed := []os.DirEntry{fdEntry("0"), fdEntry("1"), fdEntry("2"), fdEntry("3")}
+	gone := func(int, int, int) (int, error) { return 0, syscall.ESRCH }
+	if n, settled, why := openFilesBy(gone, 1, listed); settled || why != nil {
+		t.Fatalf("kcmp failing with ESRCH from the first comparison: %d open files, settled %v, uncompared %v; want unsettled, no refusal", n, settled, why)
+	}
+	st, ok := ReadProcStat(os.Getpid())
+	if !ok {
+		t.Fatal("premise: this process's stat could not be read")
+	}
+	filesCompared.Store(&gone)
+	t.Cleanup(func() { filesCompared.Store(nil) })
+	procs := []Reached{{PID: os.Getpid(), Start: st.StartTime}}
+	m := MarkExit(procs)
+	if m.Running != 1 || !m.FilesUnsettled || m.FilesUncompared != nil {
+		t.Fatalf("this process, its first comparison failing with ESRCH, read as %+v; want running, its files unsettled, no refusal", m)
+	}
+	core, logs := observer.New(zap.InfoLevel)
+	var note FilesUncomparedNote
+	note.Say(zap.New(core), m)
+	exited := make(chan struct{})
+	close(exited)
+	if end, _ := WaitExitByEvents(zap.New(core), exited, procs, nil); end != StopExited {
+		t.Fatalf("a stop of an app that exited ended %v", end)
+	}
+	if all := logs.FilterMessageSnippet("as their descriptors").All(); len(all) != 0 {
+		t.Fatalf("readings whose first comparison failed with ESRCH said the host's kernel will not compare files: %v", all)
+	}
+}
+
+// The same on the kernel: a child's descriptors listed, the child killed and
+// reaped, then its files read from that listing, as MarkExit reads them once
+// it has listed them (an app that exits on the stop's signal, reaped at once
+// by its parent, as keploy reaps the app it runs). Where the kernel compares
+// a running child's files, this read did not settle and says no refusal.
+// Where it does not, the read of the child gone is a refusal again (a
+// seccomp filter refuses before kcmp finds the task) or did not settle (a
+// ptrace rule is asked after); KEPLOY_TEST_KCMP_REQUIRED=1 fails it there.
+func TestAChildReapedBeforeItsFilesAreComparedIsNoRefusal(t *testing.T) {
+	ready := filepath.Join(t.TempDir(), "ready")
+	cmd := exec.Command("/bin/sh", "-c", `exec 3</dev/null 4</dev/null; : > "$1"; exec sleep 1000`, "sh", ready)
+	// Killed by the kernel too when the thread that started it ends
+	// (Pdeathsig), so a test binary killed mid-test leaves no sleep behind:
+	// the test keeps to this thread until it ends.
+	runtime.LockOSThread()
+	t.Cleanup(runtime.UnlockOSThread)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pid := cmd.Process.Pid
+	reaped := make(chan struct{})
+	go func() { _ = cmd.Wait(); close(reaped) }()
+	t.Cleanup(func() { _ = syscall.Kill(-pid, syscall.SIGKILL); <-reaped })
+	awaitFile(t, ready, reaped)
+	fds, err := os.ReadDir("/proc/" + strconv.Itoa(pid) + "/fd")
+	if err != nil {
+		t.Fatalf("premise: the child's descriptors could not be listed: %v", err)
+	}
+	_, _, before := openFiles(pid, fds)
+	refusal := ""
+	if before != nil {
+		refusal = kcmpRefusal(pid) // read while the child runs
+	}
+	_ = syscall.Kill(-pid, syscall.SIGKILL)
+	<-reaped
+	n, settled, why := openFiles(pid, fds)
+	if before == nil {
+		if settled || why != nil {
+			t.Fatalf("a child reaped after its %d descriptors were listed read as %d open files, settled %v, uncompared %v; want unsettled, no refusal: the kernel compared its files while it ran", len(fds), n, settled, why)
+		}
+		return
+	}
+	if os.Getenv("KEPLOY_TEST_KCMP_REQUIRED") == "1" {
+		t.Fatalf("KEPLOY_TEST_KCMP_REQUIRED=1, but the kernel refuses to compare a child's files (%v): %s", before, refusal)
+	}
+	t.Logf("the kernel refuses to compare a child's files (%v: %s); reaped, its read is %d, settled %v, uncompared %v", before, refusal, n, settled, why)
+	if why != nil && !errors.Is(why, before) || why == nil && settled {
+		t.Fatalf("a child reaped after its files were refused (%v) read as %d open files, settled %v, uncompared %v; want the same refusal, or unsettled", before, n, settled, why)
 	}
 }
 
