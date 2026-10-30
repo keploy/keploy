@@ -53,6 +53,11 @@ type composeDocker struct {
 	// intDelay, set: a SIGINT stops the container this long after it,
 	// not at once (an app whose shutdown takes a while).
 	intDelay time.Duration
+	// onKill, set, is called with each signal a kill sends (the Linux
+	// tests send it on to the container's real process); waited, set, gets
+	// one value for each wait asked for.
+	onKill func(signal string)
+	waited chan struct{}
 }
 
 func (d *composeDocker) ContainerList(_ context.Context, opts container.ListOptions) ([]container.Summary, error) {
@@ -102,6 +107,9 @@ func (d *composeDocker) ContainerKill(_ context.Context, _ string, signal string
 	if !d.running {
 		return errdefs.Conflict(errors.New("container is not running"))
 	}
+	if d.onKill != nil {
+		d.onKill(signal)
+	}
 	switch {
 	case signal == "SIGINT" && d.intDelay > 0:
 		go func() {
@@ -120,6 +128,9 @@ func (d *composeDocker) ContainerWait(ctx context.Context, _ string, _ container
 	d.mu.Lock()
 	exited := d.exitedCh
 	running := d.running
+	if d.waited != nil {
+		d.waited <- struct{}{}
+	}
 	d.mu.Unlock()
 	out, errs := make(chan container.WaitResponse, 1), make(chan error, 1)
 	if !running {
