@@ -9,8 +9,10 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -18,7 +20,9 @@ import (
 	"golang.org/x/sys/unix"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/agent"
 	incoming "go.keploy.io/server/v3/pkg/agent/proxy/incoming"
+	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 )
 
 // A test's client that hangs up on a live call while the app's answer still
@@ -87,15 +91,174 @@ func TestALiveClientsHangUpMidAnswerReachesTheAppAndSettles(t *testing.T) {
 			}
 			// The proxy forgets a connection once its handler is done
 			// (handleConnection): the handler's end is the settle's.
+			// That the exchange its client left is not recorded is the
+			// incoming package's row (it waits on the captures).
 			select {
 			case <-lc.served:
 			case <-lc.never:
 				t.Fatalf("the live call's handler never ended: %s", lc.state())
 			}
+		})
+	}
+}
+
+// The same hang-up through the proxy's own chain under the proven switch:
+// serveTreeListener hands the live handler (incoming.ServeLive) the call's
+// tracked conn wrapped as a LIVE call (liveReader) and, for a mock.real
+// destination, as one counted to it (treeRealConn). Neither wrapper gave the
+// conn it wraps, so the watch found no socket under them and watched
+// nothing: in a proven run, the flow that left its test not judged, the app
+// never learned its client had gone.
+func TestALiveClientsHangUpReachesTheAppThroughTheProxysChain(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		sync bool
+		// real: the destination is mock.real (treeRealConn over
+		// liveReader); else only live (liveReader).
+		real bool
+		want string
+	}{
+		{"live", false, false, "*proxy.liveReader"},
+		{"synchronous: live", true, false, "*proxy.liveReader"},
+		{"mock.real", false, true, "*proxy.treeRealConn"},
+		{"synchronous: mock.real", true, true, "*proxy.treeRealConn"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gone := make(chan struct{})
+			release := make(chan struct{})
+			t.Cleanup(sync.OnceFunc(func() { close(release) }))
+			lc, handed := serveTreeCall(t, tc.sync, tc.real, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/x-ndjson")
+				w.WriteHeader(http.StatusOK)
+				fmt.Fprintln(w, `{"status":"RUNNING"}`)
+				w.(http.Flusher).Flush()
+				select {
+				case <-r.Context().Done():
+					close(gone)
+				case <-release:
+				}
+			}))
+			if _, err := lc.app.Write([]byte("GET /client/v1/jobs/j/events HTTP/1.1\r\nHost: api\r\n\r\n")); err != nil {
+				t.Fatal(err)
+			}
+			readUntil(t, bufio.NewReader(lc.app), "RUNNING")
+			if got := <-handed; got != tc.want {
+				t.Fatalf("precondition: the live handler was handed a %s, want the proxy's %s", got, tc.want)
+			}
+			_ = lc.app.Close()
 			select {
-			case got := <-lc.pm.TCChan():
-				t.Fatalf("the exchange its client left was recorded: %v", got.HTTPReq.URL)
-			default:
+			case <-gone:
+			case <-lc.never:
+				t.Fatalf("the app never saw its client gone: %s", lc.state())
+			}
+			select {
+			case <-lc.served:
+			case <-lc.never:
+				t.Fatalf("the live call's handler never ended: %s", lc.state())
+			}
+		})
+	}
+}
+
+// Each wrapper the proxy puts around a live call's conn gives the conn it
+// wraps, so the socket under it can be watched for the caller's hang-up.
+// Red with any of them not giving it: the watch finds no socket.
+func TestEachWrapperOfALiveCallGivesItsSocket(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		wrap func(net.Conn) net.Conn
+	}{
+		{"trackedConn", func(c net.Conn) net.Conn { return c }},
+		{"liveReader", func(c net.Conn) net.Conn { return &liveReader{Conn: c} }},
+		{"treeRealConn over liveReader", func(c net.Conn) net.Conn {
+			return &treeRealConn{Conn: &liveReader{Conn: c}}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, c := acceptedPair(t, &inflight{})
+			stop, watched := pUtil.WatchPeerEnd(tc.wrap(c), func(bool) {})
+			defer stop()
+			if !watched {
+				t.Fatalf("no socket found under %T", tc.wrap(c))
+			}
+		})
+	}
+}
+
+// A long poll: the app writes nothing until its event comes, and the client
+// hangs up before the answer's first byte. The app is told, as it would be
+// without keploy.
+func TestALiveClientsHangUpBeforeTheAnswerReachesTheApp(t *testing.T) {
+	for _, synchronous := range []bool{false, true} {
+		t.Run(fmt.Sprintf("synchronous %v", synchronous), func(t *testing.T) {
+			t.Parallel()
+			gone, entered := make(chan struct{}), make(chan struct{})
+			release := make(chan struct{})
+			t.Cleanup(sync.OnceFunc(func() { close(release) }))
+			lc := serveLiveCallWith(t, synchronous, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				close(entered)
+				select {
+				case <-r.Context().Done():
+					close(gone)
+				case <-release:
+				}
+			}))
+			if _, err := lc.app.Write([]byte("GET /poll HTTP/1.1\r\nHost: api\r\n\r\n")); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-entered:
+			case <-lc.never:
+				t.Fatalf("the app never got the request: %s", lc.state())
+			}
+			_ = lc.app.Close()
+			select {
+			case <-gone:
+			case <-lc.never:
+				t.Fatalf("the app never saw its client gone: %s", lc.state())
+			}
+			select {
+			case <-lc.served:
+			case <-lc.never:
+				t.Fatalf("the live call's handler never ended: %s", lc.state())
+			}
+		})
+	}
+}
+
+// A client that hangs up before any answer, on an app that then drops its
+// connection without answering, is not sent its request again: the ingress
+// sends an idempotent request again on a fresh connection when the app's
+// ends with no answer (a stale keep-alive), which here would be a second
+// side effect of a request its client gave up on.
+func TestALiveClientsHangUpBeforeTheAnswerIsNotSentAgain(t *testing.T) {
+	for _, synchronous := range []bool{false, true} {
+		t.Run(fmt.Sprintf("synchronous %v", synchronous), func(t *testing.T) {
+			t.Parallel()
+			var calls atomic.Int32
+			entered := make(chan struct{}, 4)
+			lc := serveLiveCallWith(t, synchronous, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				entered <- struct{}{}
+				<-r.Context().Done()
+				panic(http.ErrAbortHandler) // drop the connection, no answer
+			}))
+			if _, err := lc.app.Write([]byte("GET /poll HTTP/1.1\r\nHost: api\r\n\r\n")); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-entered:
+			case <-lc.never:
+				t.Fatalf("the app never got the request: %s", lc.state())
+			}
+			_ = lc.app.Close()
+			select {
+			case <-lc.served:
+			case <-lc.never:
+				t.Fatalf("the live call's handler never ended: %s", lc.state())
+			}
+			if n := calls.Load(); n != 1 {
+				t.Fatalf("the app got the request %d times; its client had gone before the first answer", n)
 			}
 		})
 	}
@@ -162,6 +325,13 @@ func TestALiveCallsPipelinedRequestIsStillServed(t *testing.T) {
 			free := sync.OnceFunc(func() { close(release) })
 			t.Cleanup(free)
 			lc := serveLiveCall(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				// A watch that took a byte of the next request
+				// leaves it a request still, with a method cut
+				// short ("ET").
+				if r.Method != http.MethodGet {
+					http.Error(w, "method "+r.Method, http.StatusBadRequest)
+					return
+				}
 				if r.URL.Path == "/fast" {
 					fmt.Fprint(w, "fast")
 					return
@@ -304,6 +474,57 @@ func serveLiveCallWith(t *testing.T, synchronous bool, h http.Handler) *liveCall
 	}
 	lc.never = never
 	return lc
+}
+
+// serveTreeCall serves a live call through the proxy's own chain, under the
+// proven switch: serveTreeListener, as handleConnection calls it for a call
+// to a listener of the run's tree (the app server here, this process's,
+// called by this process's parent, which it descends from), and its live
+// handler incoming.ServeLive. real lists the app server as a mock.real
+// destination. handed gets the type of the conn the live handler was handed.
+// Not parallel: the switch is the environment's.
+func serveTreeCall(t *testing.T, synchronous, real bool, h http.Handler) (lc *liveCall, handed <-chan string) {
+	t.Helper()
+	p, _ := provenTreeProxy(t)
+	srv := &http.Server{Handler: h}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close() })
+	addr := ln.Addr().String()
+	if real {
+		if err := p.SetRealDeps(context.Background(), []string{addr}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := &config.Config{}
+	cfg.Agent.MockMode = true
+	cfg.Agent.RecordRequests = true
+	cfg.Agent.Synchronous = synchronous
+	lc = &liveCall{tr: &inflight{}, served: make(chan struct{}), pm: incoming.New(zap.NewNop(), nil, cfg)}
+	kinds := make(chan string, 1)
+	p.live = func(ctx context.Context, conn net.Conn, upstream string, port uint16) {
+		kinds <- fmt.Sprintf("%T", conn)
+		lc.pm.ServeLive(ctx, conn, upstream, port)
+	}
+	lc.app, lc.proxy = acceptedPair(t, lc.tr)
+	port := uint32(ln.Addr().(*net.TCPAddr).Port)
+	dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: uint32(os.Getppid())}
+	go func() {
+		defer close(lc.served)
+		defer lc.proxy.Close() // as handleConnection does once it returns
+		if served, _, err := p.serveTreeListener(context.Background(), lc.proxy, dest, addr, "1"); !served || err != nil {
+			kinds <- fmt.Sprintf("not served (served %v, err %v)", served, err)
+		}
+	}()
+	never := make(<-chan time.Time)
+	if d, ok := t.Deadline(); ok {
+		never = time.After(time.Until(d) - 5*time.Second)
+	}
+	lc.never = never
+	return lc, kinds
 }
 
 func (lc *liveCall) state() string {

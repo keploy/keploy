@@ -460,7 +460,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 				return
 			}
 			req.Body.Close() // Close explicitly to avoid defer leak in loop.
-			watch = watchClient(clientConn, clientReader, appConn)
+			watch = watchClient(logger, clientConn, clientReader, appConn)
 		}
 
 		resp, _, err := readFinalResponse(upstreamReader, req, clientConn)
@@ -508,7 +508,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		} else if relay != nil {
 			// The body that waited for the 100 is all read: the app holds
 			// the whole request now.
-			watch = watchClient(clientConn, clientReader, appConn)
+			watch = watchClient(logger, clientConn, clientReader, appConn)
 		}
 
 		// Response modifications for sync/sampling modes. appResp is the
@@ -619,8 +619,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			// The client went before the answer's end, and the app was
 			// told (watchClient): the exchange is not one to record, and
 			// the connection carries nothing after it.
-			logger.Debug("HTTP/1 ingress client ended the connection before the app's answer ended; the app was told, and the exchange is not recorded",
-				zap.String("method", req.Method), zap.String("url", req.URL.String()))
+			tellClientLeft(logger, req)
 			return
 		}
 
@@ -1395,7 +1394,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 			_ = req.Body.Close()
 		}
 		if relay == nil {
-			watch = watchClient(clientConn, clientReader, appConn)
+			watch = watchClient(logger, clientConn, clientReader, appConn)
 		}
 
 		// Read response. Empty-response on idempotent methods is also
@@ -1454,7 +1453,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 				if req.Body != nil {
 					_ = req.Body.Close()
 				}
-				watch = watchClient(clientConn, clientReader, appConn)
+				watch = watchClient(logger, clientConn, clientReader, appConn)
 				resp, _, err = readFinalResponse(upstreamReader, req, clientConn)
 				if err != nil && endWatch() {
 					logger.Debug("The client ended the connection before the app answered its request; the app was told as the client's going would have told it", zap.Error(err))
@@ -1505,7 +1504,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		} else if relay != nil {
 			// The body that waited for the 100 is all read: the app holds
 			// the whole request now.
-			watch = watchClient(clientConn, clientReader, appConn)
+			watch = watchClient(logger, clientConn, clientReader, appConn)
 		}
 
 		captureEligible = captureEnabled && requestWhole
@@ -1585,8 +1584,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 			// The client went before the answer's end, and the app was
 			// told (watchClient): the exchange is not one to record, and
 			// the connection carries nothing after it.
-			logger.Debug("The client ended the connection before the app's answer ended; the app was told, and the exchange is not recorded",
-				zap.String("method", req.Method), zap.String("url", req.URL.String()))
+			tellClientLeft(logger, req)
 			return
 		}
 

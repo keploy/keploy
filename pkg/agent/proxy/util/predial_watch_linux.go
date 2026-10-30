@@ -158,22 +158,3 @@ func ArrivedNothing(conn net.Conn) (nothing, known bool) {
 	})
 	return nothing, known
 }
-
-// rawSocket is the socket under conn, looked for through wrappers that give
-// the connection beneath (NetConn), at most 8 deep so a cycle cannot hang.
-func rawSocket(conn net.Conn) (syscall.RawConn, bool) {
-	for i := 0; ; i++ {
-		if sc, ok := conn.(syscall.Conn); ok {
-			rc, err := sc.SyscallConn()
-			return rc, err == nil
-		}
-		if i == 8 || conn == nil {
-			return nil, false
-		}
-		u, ok := conn.(interface{ NetConn() net.Conn })
-		if !ok {
-			return nil, false
-		}
-		conn = u.NetConn()
-	}
-}

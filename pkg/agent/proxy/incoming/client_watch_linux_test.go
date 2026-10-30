@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 
 	"go.keploy.io/server/v3/config"
 )
@@ -22,7 +24,9 @@ import (
 // in either loop: the client did not take the answer, and the app's end of it
 // is its being told the client went (watchClient). Its capture, were one
 // started, is over once captures is waited on, so the check is not a race
-// with it.
+// with it. A half-closed client may have read the whole answer: that its
+// exchange is not recorded is told at Info, as a test the user expects would
+// otherwise be missing with no trace.
 func TestAnExchangeItsClientLeftIsNotRecorded(t *testing.T) {
 	for _, tc := range []struct {
 		synchronous bool
@@ -54,7 +58,8 @@ func TestAnExchangeItsClientLeftIsNotRecorded(t *testing.T) {
 			cfg.Agent.MockMode = true
 			cfg.Agent.RecordRequests = true
 			cfg.Agent.Synchronous = synchronous
-			pm := New(zap.NewNop(), nil, cfg)
+			core, logs := observer.New(zapcore.InfoLevel)
+			pm := New(zap.New(core), nil, cfg)
 
 			client, proxied := tcpPairForWatch(t)
 			served := make(chan struct{})
@@ -108,6 +113,14 @@ func TestAnExchangeItsClientLeftIsNotRecorded(t *testing.T) {
 				t.Fatalf("the exchange its client left was recorded: %s %s", tc.HTTPReq.Method, tc.HTTPReq.URL)
 			default:
 			}
+			if !tc.halfClose {
+				return
+			}
+			told := logs.FilterMessageSnippet("Not recording this request as a test case: its client closed its side").
+				FilterField(zap.String("url", "/client/v1/jobs/j/events")).Len()
+			if told != 1 {
+				t.Fatalf("the half-closed client's exchange not recorded was told %d times at Info, want once", told)
+			}
 		})
 	}
 }
@@ -136,3 +149,28 @@ func tcpPairForWatch(t *testing.T) (client, proxied net.Conn) {
 	t.Cleanup(func() { _ = client.Close(); _ = proxied.Close() })
 	return client, proxied
 }
+
+// A client conn with no socket to be found under it (a wrapper that does not
+// give the conn it wraps) is not watched, and that is told at Info, once for
+// its kind: never a silent no-op, where its app would not be told its
+// client went.
+func TestAClientThatCannotBeWatchedIsToldOnce(t *testing.T) {
+	core, logs := observer.New(zapcore.InfoLevel)
+	logger := zap.New(core)
+	_, proxied := tcpPairForWatch(t)
+	c := unwatchable{proxied}
+	for i := 0; i < 2; i++ {
+		stop := watchClient(logger, c, bufio.NewReader(c), func() net.Conn { return nil })
+		if stop() {
+			t.Fatal("an unwatched client reported an end")
+		}
+	}
+	told := logs.FilterMessageSnippet("cannot watch this kind of client connection").
+		FilterField(zap.String("connection", fmt.Sprintf("%T", c))).Len()
+	if told != 1 {
+		t.Fatalf("an unwatchable client was told %d times, want once", told)
+	}
+}
+
+// unwatchable wraps a conn and does not give it (no NetConn).
+type unwatchable struct{ net.Conn }
