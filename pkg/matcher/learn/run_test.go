@@ -1008,8 +1008,14 @@ func TestTheRunsPlacesStayWithinTheirShareOfTheSetsBudget(t *testing.T) {
 
 // Each way a place reaches the run is within the bound (keepRun): a test's
 // own call as the next test begins, one told after the next began, and the
-// start-up's exchange, kept whole. Past it the run keeps no more, the place
-// that says so last, once; a new set starts with its whole share again.
+// start-up's exchange, kept whole, the start-up's with the switch off too
+// (the bound is no proven-only change there: past it a later call's changed
+// value is refused, where it was learned as noise). Past it the run keeps no
+// more, the place that says so last, once, and a later call's changed value
+// is refused in each way it is read: a text, an instant its protocol types
+// that its call's window holds as a read of the clock, and one at that read
+// plus an offset (Mongo's BSON datetimes); a new set starts with its whole
+// share again.
 func TestEveryWayAPlaceReachesTheRunIsBounded(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	defer func(b int64) { learnBudget = b }(learnBudget)
@@ -1018,16 +1024,17 @@ func TestEveryWayAPlaceReachesTheRunIsBounded(t *testing.T) {
 	t0 := time.Unix(1_792_000_000, 0)
 	value := func(c string, i int) string { return strings.Repeat(c, big) + strconv.Itoa(i) }
 	for _, c := range []struct {
-		name  string
-		serve func(tr *Tracker, i int)
+		name    string
+		startUp bool
+		serve   func(tr *Tracker, i int)
 	}{
-		{"as the next test begins", func(tr *Tracker, i int) {
+		{"as the next test begins", false, func(tr *Tracker, i int) {
 			tr.Begin()
 			n, _, _, _ := tr.Test()
 			tr.Served(n, ranCall("mock-"+strconv.Itoa(i), t0.Add(time.Duration(i)*time.Second), value("r", i), value("l", i)))
 			tr.End()
 		}},
-		{"told after the next began", func(tr *Tracker, i int) {
+		{"told after the next began", false, func(tr *Tracker, i int) {
 			tr.Begin()
 			n, _, _, _ := tr.Test()
 			tr.End()
@@ -1035,13 +1042,14 @@ func TestEveryWayAPlaceReachesTheRunIsBounded(t *testing.T) {
 			tr.Served(n, ranCall("mock-"+strconv.Itoa(i), t0.Add(time.Duration(i)*time.Second), value("r", i), value("l", i)))
 			tr.End()
 		}},
-		{"the start-up's", func(tr *Tracker, i int) {
+		{"the start-up's", true, func(tr *Tracker, i int) {
 			n, _, _, _ := tr.Test()
 			e := ranCall("mock-"+strconv.Itoa(i), t0.Add(time.Duration(i)*time.Second), value("r", i), value("l", i))
 			e.Own = false
+			e.Payload = Raw{mock: e.Mock, at: e.At, rText: "p-" + strconv.Itoa(i), rRead: true}
 			tr.Served(n, e)
 		}},
-		{"the start-up's, its recording's text held whole", func(tr *Tracker, i int) {
+		{"the start-up's, its recording's text held whole", true, func(tr *Tracker, i int) {
 			n, _, _, _ := tr.Test()
 			e := ranCall("mock-"+strconv.Itoa(i), t0.Add(time.Duration(i)*time.Second), "s-"+strconv.Itoa(i), "s-"+strconv.Itoa(i)+"-9")
 			e.Own = false
@@ -1049,37 +1057,72 @@ func TestEveryWayAPlaceReachesTheRunIsBounded(t *testing.T) {
 			tr.Served(n, e)
 		}},
 	} {
-		t.Run(c.name, func(t *testing.T) {
-			tr := NewTracker()
-			for set := 0; set < 2; set++ {
-				tr.NewSet()
-				for i := 0; i < 64; i++ {
-					c.serve(tr, i)
-				}
-				tr.Begin()
-				_, earlier, _, _ := tr.Test()
-				var marks, kept int64
-				for _, e := range earlier {
-					if e.Unread != "" {
-						marks++
-						continue
-					}
-					kept += runPlaceBytes(e)
-				}
-				if last := earlier[len(earlier)-1]; marks != 1 || last.Unread == "" || kept > learnBudget/runShare || kept < learnBudget/runShare-4*big-4096 {
-					t.Fatalf("set %d: the run keeps %d bytes of its places and %d that say it keeps no more (the last %+v): want its share, %d bytes, then one", set, kept, marks, last, learnBudget/runShare)
-				}
-				// Read by a call recorded after every kept place and before
-				// the one past the bound: the place that says the run keeps
-				// no more is still earlier than the call.
-				last := earlier[len(earlier)-1]
-				ln := ClassifyIn(clockedDrifts(), []string{"body.order"}, strLeaf("body.order", "o-x-9"), strLeaf("body.order", "o-x"), last.At.Add(-time.Second/2), earlier, nil, nil, nil)
-				if ln[0].Kind != KindUnaccounted || ln[0].Why != runFullWhy(last.Mock, learnBudget/runShare) {
-					t.Fatalf("set %d: a value no test sent, in a call recorded before the place past the bound, is %s (%s): want refused, the run keeps no more", set, ln[0].Kind, ln[0].Why)
-				}
-				tr.End()
+		switches := []string{"1"}
+		if c.startUp {
+			switches = append(switches, "0")
+		}
+		for _, on := range switches {
+			t.Run(c.name+", switch "+on, func(t *testing.T) {
+				t.Setenv(provenswitch.Env, on)
+				everyWayAPlaceReachesTheRunIsBounded(t, c.serve, big)
+			})
+		}
+	}
+}
+
+// everyWayAPlaceReachesTheRunIsBounded is TestEveryWayAPlaceReachesTheRunIsBounded
+// of the places serve tells the tracker, each about big bytes.
+func everyWayAPlaceReachesTheRunIsBounded(t *testing.T, serve func(tr *Tracker, i int), big int64) {
+	tr := NewTracker()
+	for set := 0; set < 2; set++ {
+		tr.NewSet()
+		for i := 0; i < 64; i++ {
+			serve(tr, i)
+		}
+		tr.Begin()
+		_, earlier, _, _ := tr.Test()
+		var marks, kept int64
+		for _, e := range earlier {
+			if e.Unread != "" {
+				marks++
+				continue
 			}
-		})
+			kept += runPlaceBytes(e)
+		}
+		if last := earlier[len(earlier)-1]; marks != 1 || last.Unread == "" || kept > learnBudget/runShare || kept < learnBudget/runShare-4*big-4096 {
+			t.Fatalf("set %d: the run keeps %d bytes of its places and %d that say it keeps no more (the last %+v): want its share, %d bytes, then one", set, kept, marks, last, learnBudget/runShare)
+		}
+		// Read by a call recorded after every kept place and before
+		// the one past the bound: the place that says the run keeps
+		// no more is still earlier than the call.
+		last := earlier[len(earlier)-1]
+		ln := ClassifyIn(clockedDrifts(), []string{"body.order"}, strLeaf("body.order", "o-x-9"), strLeaf("body.order", "o-x"), last.At.Add(-time.Second/2), earlier, nil, nil, nil)
+		if ln[0].Kind != KindUnaccounted || ln[0].Why != runFullWhy(last.Mock, learnBudget/runShare) {
+			t.Fatalf("set %d: a value no test sent, in a call recorded before the place past the bound, is %s (%s): want refused, the run keeps no more", set, ln[0].Kind, ln[0].Why)
+		}
+		// The same call's instants its protocol types, each a read of
+		// the clock in its call's window in both runs (learned as a
+		// clock read, or as that read plus 30 m, where the run kept
+		// all): refused too, as the text is.
+		ms := time.Millisecond
+		call := last.At.Add(-time.Second / 2)
+		fCall := call.Add(FullRoundLead - 8*ms)
+		w := &Window{Rec: Span{From: call.Add(-50 * ms), To: call}, F: Span{From: fCall.Add(-60 * ms), To: fCall}}
+		read, fRead := call.Add(-40*ms), fCall.Add(-45*ms)
+		for _, r := range []struct {
+			name      string
+			rec, live time.Time
+			w         *Window
+		}{
+			{"an instant at the clock", read, fRead, w},
+			{"an instant at the clock plus 30 m", read.Add(30 * time.Minute), fRead.Add(30 * time.Minute), w.ComparesOffsets()},
+		} {
+			ln := ClassifyIn(clockedDrifts(), []string{"body.at"}, typedLeaf("body.at", r.live, ms), typedLeaf("body.at", r.rec, ms), call, earlier, nil, nil, r.w)
+			if ln[0].Kind != KindUnaccounted || ln[0].Offset != nil || ln[0].Why != runFullWhy(last.Mock, learnBudget/runShare) {
+				t.Fatalf("set %d: %s, in a call recorded before the place past the bound, is %s %+v (%s): want refused, the run keeps no more", set, r.name, ln[0].Kind, ln[0].Offset, ln[0].Why)
+			}
+		}
+		tr.End()
 	}
 }
 
