@@ -9,10 +9,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/api/types/filters"
+	"github.com/docker/docker/errdefs"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
@@ -471,7 +471,7 @@ func (a *App) stopComposeProject(ctx context.Context) bool {
 			// keploy's agent, under keploy record, waits for keploy to drain
 			// what it captured, and goes by that event; its grace
 			// (stop_grace_period) only bounds an agent that never goes.
-			if err := a.docker.ContainerStop(ctx, id, container.StopOptions{}); err != nil && !cerrdefs.IsNotFound(err) {
+			if err := a.docker.ContainerStop(ctx, id, container.StopOptions{}); err != nil && !errdefs.IsNotFound(err) {
 				a.logger.Debug("could not stop a container of the application's compose project", zap.String("container", id), zap.Error(err))
 			}
 		}(c.ID)
@@ -493,9 +493,7 @@ func (a *App) composeAppHalt() *composeHalt {
 // the app's service (composeAppContainer), then a wait for it to stop on the
 // stop's events, as a docker run
 // app's stop waits (stopDockerRunByEvents): the daemon's word, or its main
-// process exiting (its pidfd), which a starved daemon is slow to report, says
-// no kill is due; the stop is through once the daemon has the container
-// stopped too (awaitDaemonsStop), as the next set's start is the daemon's. It
+// process exiting (its pidfd), which a starved daemon is slow to report. It
 // kills only when the container's processes made no progress on its way out
 // for utils.StopStallBudget of the time both they and keploy could run
 // (utils.ExitClock), or at the user's Ctrl+C, which it offers; never on a
@@ -556,28 +554,38 @@ func (a *App) stopComposeApp(ctx context.Context) (killed string, err error) {
 	}
 	a.composeApp.stopping.Store(true)
 	// Asked for before the interrupt: an exit before it is still seen.
-	daemonStopped := a.awaitComposeAppStopped(wctx, id)
+	daemonSaid, waitErr := a.docker.ContainerWait(wctx, id, container.WaitConditionNotRunning)
 	if err := a.signalComposeApp(wctx, id, composeInterrupt(w.stopSignal)); err != nil {
-		if cerrdefs.IsConflict(err) || cerrdefs.IsNotFound(err) {
+		if errdefs.IsConflict(err) || errdefs.IsNotFound(err) {
 			return "", nil
 		}
 		return "", fmt.Errorf("keploy could not interrupt the application's container %q: %w", a.container, err)
 	}
-	// Its processes' exit, or the daemon's word, says no kill is due.
 	stopped := make(chan struct{})
 	go func() {
-		select {
-		case <-daemonStopped:
-		case <-w.mainGone:
-		case <-wctx.Done():
+		for {
+			select {
+			case <-daemonSaid:
+			case err := <-waitErr:
+				if !errdefs.IsNotFound(err) {
+					// No news of the container (removed, once seen, is
+					// stopped): its main process's exit stands.
+					a.logger.Debug("the daemon's wait for the app's container failed; waiting for its main process", zap.Error(err))
+					daemonSaid, waitErr = nil, nil
+					continue
+				}
+			case <-w.mainGone:
+			case <-wctx.Done():
+				return
+			}
+			close(stopped)
 			return
 		}
-		close(stopped)
 	}()
 	end, bound := utils.WaitExitByEvents(a.logger, stopped, w.procs, a.teardown.Load())
 	switch end {
 	case utils.StopExited:
-		return "", a.awaitDaemonsStop(daemonStopped)
+		return "", nil
 	case utils.StopPressed:
 		killed = "keploy killed its container at the press of Ctrl+C, before it had stopped"
 	default:
@@ -589,7 +597,7 @@ func (a *App) stopComposeApp(ctx context.Context) (killed string, err error) {
 	}
 	a.logger.Warn("keploy is killing the app it stopped: "+killed, zap.String("container", a.container))
 	if err := a.signalComposeApp(wctx, id, "SIGKILL"); err != nil {
-		if cerrdefs.IsConflict(err) || cerrdefs.IsNotFound(err) {
+		if errdefs.IsConflict(err) || errdefs.IsNotFound(err) {
 			// It had stopped, or was gone, by the kill: no kill reached it.
 			return "", nil
 		}
@@ -601,69 +609,7 @@ func (a *App) stopComposeApp(ctx context.Context) (killed string, err error) {
 	if end, _ := utils.WaitExitByEvents(a.logger, stopped, w.procs, a.teardown.Load()); end != utils.StopExited {
 		return killed, fmt.Errorf("the application's container %q had not stopped after keploy killed it", a.container)
 	}
-	return killed, a.awaitDaemonsStop(daemonStopped)
-}
-
-// awaitComposeAppStopped is closed once the docker daemon has the app's
-// container id stopped (its wait for the container not running answered),
-// or no longer has it (removed, once seen, is stopped). The first wait is
-// asked for before it returns; a wait the daemon fails otherwise is asked for
-// again, at a walking pace, until ctx ends.
-func (a *App) awaitComposeAppStopped(ctx context.Context, id string) <-chan struct{} {
-	done := make(chan struct{})
-	said, failed := a.docker.ContainerWait(ctx, id, container.WaitConditionNotRunning)
-	go func() {
-		for {
-			select {
-			case <-said:
-				close(done)
-				return
-			case err := <-failed:
-				if cerrdefs.IsNotFound(err) {
-					close(done)
-					return
-				}
-				if ctx.Err() != nil {
-					return
-				}
-				a.logger.Debug("the daemon's wait for the app's container failed; asking for it again", zap.Error(err))
-			case <-ctx.Done():
-				return
-			}
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(200 * time.Millisecond):
-			}
-			said, failed = a.docker.ContainerWait(ctx, id, container.WaitConditionNotRunning)
-		}
-	}()
-	return done
-}
-
-// awaitDaemonsStop waits, once the app's processes have exited, for the
-// docker daemon to have its container stopped too (daemonStopped): keploy's
-// stop is through only then. What follows it is the daemon's: the next set's
-// start of the container, and the reading of the stop's die (the watch's).
-// A starved daemon handles the exit late, and calls the container running
-// until it has: a start of it then is its no-op (304), and the die it gives
-// after that start, of keploy's own stop, is taken for a halt. Bounded only as
-// the bound on no news at all, keploy's runnable time (utils.WaitExitByEvents
-// with no processes to read), or the user's Ctrl+C: a daemon that never says
-// so is an error, the container's state unknown.
-func (a *App) awaitDaemonsStop(daemonStopped <-chan struct{}) error {
-	select {
-	case <-daemonStopped:
-		return nil
-	default:
-	}
-	switch end, _ := utils.WaitExitByEvents(a.logger, daemonStopped, nil, a.teardown.Load()); end {
-	case utils.StopExited:
-		return nil
-	case utils.StopPressed:
-		return fmt.Errorf("the application's container %q exited, but the docker daemon had not said it had stopped by the press of Ctrl+C", a.container)
-	}
-	return fmt.Errorf("the application's container %q exited, but the docker daemon had not said it had stopped %s later", a.container, utils.StopStallSaid())
+	return killed, nil
 }
 
 // composeInterrupt is the signal keploy interrupts the app's container
