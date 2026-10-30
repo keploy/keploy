@@ -72,21 +72,38 @@ func TestAGenericServesViewIsTheRequestAsSentAndTheRecordedAnswer(t *testing.T) 
 }
 
 // A request is the recording byte for byte (as recorded) only where every
-// piece is compared: one that differs only in a recorded piece obfuscated
-// as noise, which the matcher does not compare, is not.
+// piece is compared, as bytes: one that differs only in a recorded piece
+// obfuscated as noise, which the matcher does not compare without an exact
+// view, is not; nor is one that sent a binary recording's base64 text, or
+// binary bytes whose base64 is a text recording (the text the recording
+// stores a piece in is not what the application sent). Before, the text
+// compare stated the base64 text as the recorded bytes where a serve was
+// made without an exact view (the switch makes none once the agent has
+// staged a set; exact serving compares the bytes, as this does).
 func TestOnlyARequestEveryPieceOfWhichIsRecordedIsAsRecorded(t *testing.T) {
 	rec := viewRecording("+OK\r\n", "GET k ", "id=1\r\n")
+	ping := []byte{0x3c, 0x83, 0x46}
+	bin := viewRecording("+OK\r\n", string(ping))
+	if bin.Spec.GenericRequests[0].Message[0].Type == models.String {
+		t.Fatalf("the recorder kept %x as text; want it binary (base64)", ping)
+	}
+	b64 := bin.Spec.GenericRequests[0].Message[0].Data
+	text := viewRecording("+OK\r\n", base64.StdEncoding.EncodeToString(ping))
 	for _, tc := range []struct {
 		name string
+		rec  *models.Mock
 		sent [][]byte
 		want bool
 	}{
-		{"in the recorded pieces", [][]byte{[]byte("GET k "), []byte("id=1\r\n")}, true},
-		{"in other pieces", [][]byte{[]byte("GET k id=1\r\n")}, true},
-		{"other bytes", [][]byte{[]byte("GET k "), []byte("id=2\r\n")}, false},
-		{"longer", [][]byte{[]byte("GET k id=1\r\n"), []byte("x")}, false},
+		{"in the recorded pieces", rec, [][]byte{[]byte("GET k "), []byte("id=1\r\n")}, true},
+		{"in other pieces", rec, [][]byte{[]byte("GET k id=1\r\n")}, true},
+		{"other bytes", rec, [][]byte{[]byte("GET k "), []byte("id=2\r\n")}, false},
+		{"longer", rec, [][]byte{[]byte("GET k id=1\r\n"), []byte("x")}, false},
+		{"a binary recording's bytes", bin, [][]byte{ping}, true},
+		{"a binary recording's base64 text", bin, [][]byte{[]byte(b64)}, false},
+		{"binary bytes whose base64 is a text recording", text, [][]byte{ping}, false},
 	} {
-		if got := newSentRequest(tc.sent).isRecorded(rec.Spec.GenericRequests, nil, false); got != tc.want {
+		if got := sentAsRecorded(tc.rec, tc.sent); got != tc.want {
 			t.Errorf("%s: as recorded %v; want %v", tc.name, got, tc.want)
 		}
 	}
