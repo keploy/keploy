@@ -88,10 +88,15 @@
 #      c-ping's response does not hold, is background work: the report lists
 #      it among the set's background calls, made before the set's first
 #      test, and not among its unclaimed calls. The set fails because the
-#      recorded publish, a call of the set's worker scope, was never made,
-#      and its reason says so. (Before item (b) the changed call itself
-#      failed the set (F2); before F2 it was dropped with a warning, and the
-#      set passed.)
+#      recorded publish, a call of the set's worker scope, was made
+#      differently and keploy refused it: its reason names the refused call
+#      and the recording it was closest to, and does not say the publish was
+#      never made. The set's end does not wait for that recording, since the
+#      refusal already settles it: keploy says so once, and the set ends
+#      without the worker scope's wait. (Before, the reason said the publish
+#      was never made, after the wait ran its course; before item (b) the
+#      changed call itself failed the set (F2); before F2 it was dropped with
+#      a warning, and the set passed.)
 #
 # A delayed publish the app starts on its own after its last answer, and
 # that lands before it is stopped, is the same read's; whether it lands
@@ -320,6 +325,21 @@ unmade_named() {
     yq -r '.failure_reason // ""' "$(REPORT)" 2>/dev/null | grep -q "never made 1 of the calls the test set's worker scope recorded" ||
         fail "$1: the reason does not say the recorded publish was never made: $(yq -r '.failure_reason // ""' "$(REPORT)" 2>/dev/null)"
 }
+# refused_named <step> <log>: the set's reason names the publish the app made
+# differently, which keploy refused, as a call of its worker scope, with the
+# recording it was closest to, and does not say it was never made; and
+# keploy test's log <log> says once that the set's end does not wait for it.
+refused_named() {
+    local why
+    why="$(yq -r '.failure_reason // ""' "$(REPORT)" 2>/dev/null)"
+    printf '%s' "$why" | grep -q "the application made 1 of the calls the test set's worker scope recorded (the calls no test owns) differently, and keploy refused each: HTTP POST /publish to .* (closest to mock-[0-9]*)" ||
+        fail "$1: the reason does not name the refused publish as the worker scope's call made differently: $why"
+    if printf '%s' "$why" | grep -q "never made"; then
+        fail "$1: the reason says a worker call was never made; the app made it, and keploy refused it: $why"
+    fi
+    [ "$(grep -c "not waiting for the worker scope's boot calls the application made and keploy refused" "$2")" -eq 1 ] ||
+        fail "$1: keploy test did not say once that the set's end does not wait for the refused boot call ($(grep -c "not waiting for the worker scope" "$2") line(s) in $2)"
+}
 
 echo "== recordings =="
 record tcp tcp
@@ -448,7 +468,7 @@ fi
 background_named "13 (HTTP, changed startup publish)" "made before the set.*first test began"
 yq -r '.background_calls[]? | select(.before_set == true) | .actual_summary // ""' "$(REPORT)" 2>/dev/null | grep -q '/publish' ||
     fail "13 (HTTP, changed startup publish): the publish listed is not marked made before the set (before_set)"
-unmade_named "13 (HTTP, changed startup publish)"
+refused_named "13 (HTTP, changed startup publish)" "$WORK/startup/changed.log"
 [ "$(test_status get-c-ping-1)" = PASSED ] ||
     fail "13 (HTTP, changed startup publish): c-ping did not pass ($(test_status get-c-ping-1))"
 
