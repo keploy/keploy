@@ -5624,6 +5624,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// nothing waits for it.
 		// Under the background rules the set's end requires none of it
 		// (exactPlan.background): nothing waits for it.
+		// A boot call the application made that keploy refused is not
+		// waited for: the set's calls read so far that no mock answered
+		// (its background calls) say so.
 		checkWorker := r.exact != nil && !r.exact.background && captureOpened && testSetStatus == models.TestSetStatusPassed
 		if checkWorker {
 			workerMissing, workerUnread = r.awaitWorkerScope(runTestSetCtx, r.exact, totalConsumedMocks.Map(), func(read []models.MockState) {
@@ -5631,7 +5634,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					totalConsumedMocks.Set(m)
 					allConsumedAcrossCycles[m.Name] = m
 				}
-			})
+			}, r.setCalls.backgroundCalls())
 		}
 		stopDrained := false
 		// The final attempt of a run's last set stops the app --keep-app-alive
@@ -5788,7 +5791,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				testSetStatus = models.TestSetStatusInternalErr
 				r.markNotJudged(testSetID)
 			} else if len(workerMissing) > 0 {
-				unclaimedReason = workerWhy(workerMissing)
+				// A boot call the application made differently is named
+				// with the call keploy refused: of the set's calls no mock
+				// answered, its background ones (the set end's read just
+				// above included) and those filed late in its last test.
+				unclaimedReason = r.exact.workerWhy(workerMissing, append(r.setCalls.backgroundCalls(), calls...))
 				r.logger.Error("test-set failed: "+unclaimedReason+" ("+provenswitch.Env+"=1)",
 					zap.String("test-set", testSetID), zap.Strings("mocks", workerMissing),
 					zap.String("next_step", "if the application no longer makes these calls on its own, record the test set again"))
