@@ -355,8 +355,8 @@ func procChildrenIn(root string, parent int) ([]child, error) {
 // procStat reads process pid's stat from the /proc at root
 // (utils.ParseProcStat); gone says it is not there: it exited and was reaped
 // before, or while, it was read (a task being reaped reads as state X, dead,
-// or Z, its parent and group gone: 0 and -1, which no line of a process that
-// is there has).
+// or its parent and group gone: 0 and -1, which no line of a process that is
+// there has, whatever state it read as: reaped).
 func procStat(root string, pid int) (st utils.ProcStat, gone bool, err error) {
 	b, err := os.ReadFile(root + "/" + strconv.Itoa(pid) + "/stat")
 	if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ESRCH) {
@@ -371,7 +371,7 @@ func procStat(root string, pid int) (st utils.ProcStat, gone bool, err error) {
 	}
 	st, ok := utils.ParseProcStat(b)
 	if !ok {
-		if state == 'Z' && reaped(b) {
+		if reaped(b) {
 			return utils.ProcStat{}, true, nil
 		}
 		return utils.ProcStat{}, false, fmt.Errorf("its stat line does not parse: %q", b)
@@ -380,12 +380,17 @@ func procStat(root string, pid int) (st utils.ProcStat, gone bool, err error) {
 }
 
 // reaped reports whether a stat line is a task's being released: its parent
-// and group, the two fields after its state, gone (0 and -1). The group's -1
-// is the one field of such a line utils.ParseProcStat refuses, so a line the
-// kernel wrote that says Z and does not parse is always one; both fields are
-// asked all the same, so a line that does not parse for another reason (a
-// read cut short, a parent of 0 included, or no stat line at all) is no
-// process gone, but one keploy could not read (procStat's error).
+// and group, the two fields after its state, gone (0 and -1). The kernel
+// prints those (and a session of -1) when it finds the task's signal
+// handlers already released, and it reads the state before it looks for
+// them: a task that exits and is released between the two reads as R, S or
+// D with them (one on a box: "(update-ca-certi) R 0 -1 -1", its PF_EXITING
+// set), so the state says nothing here. The group's -1 is the one field of
+// such a line utils.ParseProcStat refuses, and no line of a task that is
+// there has it; both fields are asked all the same, so a line that does not
+// parse for another reason (a read cut short, a parent of 0 included, or no
+// stat line at all) is no process gone, but one keploy could not read
+// (procStat's error).
 func reaped(line []byte) bool {
 	end := bytes.LastIndexByte(line, ')')
 	if end < 0 {

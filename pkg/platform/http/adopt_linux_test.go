@@ -1328,7 +1328,7 @@ func TestAReadOfTheChildrenSettlesOrSaysItCannotTell(t *testing.T) {
 
 // The scan of /proc reads each listed process's stat: one that is gone by
 // then (its directory, or its stat, no longer there; a task being reaped,
-// state X, or Z with its parent and group gone) is no child; one that is
+// state X, or its parent and group gone, in any state) is no child; one that is
 // this process's child, a zombie or not, is, and one whose stat says Z is a
 // zombie only where none of its threads runs (its main thread may have
 // exited while another runs on); a stat that cannot be read otherwise is the
@@ -1377,6 +1377,12 @@ func TestTheScanOfProcSaysWhatItCouldNotRead(t *testing.T) {
 		t.Fatal(err)
 	}
 	stat(111, fmt.Sprintf(released, 111))
+	// A process released between the kernel's read of its state and of its
+	// parent and group: it still reads as running, sleeping or on storage
+	// (the first as a box read one, PF_EXITING set).
+	stat(113, "113 (update-ca-certi) R 0 -1 -1 0 -1 4227404 3601 67036 0 0 0 6 52 11 20 0 0 0 7217377 2748416 196 0 1 1 0 0\n")
+	stat(114, "114 (sh) S 0 -1 -1 0 -1 4227404 100 0 0 0 0 0 0 0 20 0 1 0 7217378 0 0\n")
+	stat(115, "115 (sh) D 0 -1 -1 0 -1 4227404 100 0 0 0 0 0 0 0 20 0 1 0 7217379 0 0\n")
 	if err := os.MkdirAll(filepath.Join(root, "104"), 0o755); err != nil { // gone: no stat
 		t.Fatal(err)
 	}
