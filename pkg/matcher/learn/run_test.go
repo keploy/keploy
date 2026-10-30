@@ -1481,3 +1481,82 @@ func TestAnEarlierTestsClockReadOfTheSameSecondIsNoRunsVariable(t *testing.T) {
 		}
 	}
 }
+
+// Where a client test's clock word (TestAClientTestLearnsAWordOfATextReadInItsCallsWindow)
+// meets the run's variable: an earlier test's call sent a text whose one
+// changed word is a read of the clock (its learn step learned the place so,
+// Seen.Clock), or that word alone, and a later test's call sends a text that
+// holds it. Where a window of the later call holds the word as its own read
+// of the clock, it is that call's word read, checked at every replay, and the
+// rest of the text is still compared: the re-read that takes a whole value as
+// the call's own read takes one word of it alike, never as noise. Where none
+// does, it is refused naming the earlier call and its place, never the value,
+// and never noise. Outside client tests no word is read (dc.clientTests): a
+// copy of the whole text stays the run's variable, and the word alone is the
+// word rule's clock word, let go as it is with the switch off. A text no
+// clock read was learned at stays the run's variable. With the switch off, no
+// earlier test's call is a place of the next, and each text is what its own
+// call's window learns: a read of the word, or refused naming no earlier
+// call.
+func TestAClockWordMeetsTheRunsVariableAsTheUsesOwnReadOrARefusal(t *testing.T) {
+	rec := time.Date(2026, 10, 30, 23, 50, 7, 0, time.UTC)
+	aRead := rec.Add(50 * time.Millisecond)
+	job := func(at time.Time) string { return "job " + strconv.FormatInt(at.Unix(), 10) + " queued" }
+	alone := func(at time.Time) string { return strconv.FormatInt(at.Unix(), 10) }
+	word := sides{"job ", " queued"}
+	for name, row := range map[string]struct {
+		sent         func(time.Time) string
+		clock        bool
+		after        time.Duration
+		notClient    bool
+		switchOff    bool
+		want         Kind
+		wantWordRead bool
+	}{
+		"the whole text, the same second":            {sent: job, clock: true, after: 250 * time.Millisecond, want: KindClockRead, wantWordRead: true},
+		"the whole text, nine seconds later":         {sent: job, clock: true, after: 9 * time.Second, want: KindUnaccounted},
+		"the word alone, the same second":            {sent: alone, clock: true, after: 250 * time.Millisecond, want: KindClockRead, wantWordRead: true},
+		"the word alone, nine seconds later":         {sent: alone, clock: true, after: 9 * time.Second, want: KindUnaccounted},
+		"the word alone, the same second, no client": {sent: alone, clock: true, after: 250 * time.Millisecond, notClient: true, want: KindNoise},
+		"the whole text, the same second, no client": {sent: job, after: 250 * time.Millisecond, notClient: true, want: KindVariable},
+		"no clock read, nine seconds later":          {sent: job, after: 9 * time.Second, want: KindVariable},
+		"switch 0, the same second":                  {sent: job, clock: true, after: 250 * time.Millisecond, switchOff: true, want: KindClockRead, wantWordRead: true},
+		"switch 0, nine seconds later":               {sent: job, clock: true, after: 9 * time.Second, switchOff: true, want: KindUnaccounted},
+	} {
+		t.Run(name, func(t *testing.T) {
+			sw := "1"
+			if row.switchOff {
+				sw = "0"
+			}
+			t.Setenv(provenswitch.Env, sw)
+			dc := clientTestCache()
+			if row.notClient {
+				dc = clockedDrifts()
+			}
+			tr := NewTracker()
+			tr.Begin()
+			a, _, _, _ := tr.Test()
+			tr.Served(a, Earlier{Mock: "mock-a", At: aRead, Own: true, Seen: []Seen{{Side: Request, Leaf: Leaf{Path: "body.job", Type: String, Value: row.sent(aRead)}, Live: row.sent(aRead.Add(FullRoundLead)), Place: "body.job", Clock: row.clock}}})
+			tr.End()
+			tr.Begin()
+			_, earlier, _, _ := tr.Test()
+			call := aRead.Add(row.after)
+			fCall := call.Add(FullRoundLead)
+			w := &Window{Rec: Span{From: call.Add(-5 * time.Millisecond), To: call}, F: Span{From: fCall.Add(-5 * time.Millisecond), To: fCall.Add(time.Millisecond)}}
+			bRec := job(aRead)
+			ln := ClassifyIn(dc, []string{"body.name"}, strLeaf("body.name", job(aRead.Add(FullRoundLead))), strLeaf("body.name", bRec), call, earlier, nil, nil, w)[0]
+			if ln.Kind != row.want {
+				t.Fatalf("test B's text is %s from %+v (%s); want %s", ln.Kind, ln.From, ln.Why, row.want)
+			}
+			o, _ := ln.Clock()
+			switch {
+			case row.wantWordRead && (o.Word != word.at(t, bRec) || !o.Plain() || ln.From != (Place{}) || ln.Recorded.Value != bRec):
+				t.Fatalf("test B's word read is %+v from %+v, the leaf %q; want a plain read of the word in the whole text, no place to bind at", o, ln.From, ln.Recorded.Value)
+			case row.want == KindUnaccounted && (strings.Contains(ln.Why, "mock-a at body.job, an earlier test's call,") == row.switchOff || strings.Contains(ln.Why, alone(aRead)) || strings.Contains(ln.Why, alone(aRead.Add(FullRoundLead))) || ln.From != (Place{})):
+				t.Fatalf("the refusal names %q from %+v; want the earlier call and its place, never the value, and no place to bind at", ln.Why, ln.From)
+			case row.want == KindVariable && ln.From.Mock != "mock-a":
+				t.Fatalf("test B's copy follows %+v; want mock-a's text", ln.From)
+			}
+		})
+	}
+}

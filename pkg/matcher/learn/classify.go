@@ -1731,6 +1731,81 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		}
 		return ln
 	}
+	// read is leaf under the run's rule (ofRun), the reading every word of a
+	// text read alone takes (wordRead, sinceWord), as the whole value takes
+	// it below: a word an earlier test's call sent is the later call's own
+	// read where a window of that call holds it so, and refused where none
+	// does and the earlier call's learn step read it from the clock, never
+	// left the noise of the text.
+	var read func(r, l Leaf, w *Window, skip skipRule) Learned
+	// clientWord is ln, a text w learns as noise, learned instead as the read
+	// of its one changed word in w, in keploy mock's client tests
+	// (wordRead), the word read by read.
+	clientWord := func(ln Learned, w *Window) Learned {
+		if dc.clientTests {
+			if word, ok := wordRead(ln, w, read); ok {
+				return word
+			}
+		}
+		return ln
+	}
+	// ofRun is ln, the reading of (r, l) in w, under the run's rule: the
+	// run's variable (Place.Run: a value the set's start-up or an earlier
+	// test sent) that, read as a value no earlier place is the source of and
+	// no moved place builds by an offset, is a plain read of the clock its
+	// own call's window holds in both runs, the whole value or one word of it
+	// (clientWord), is learned as that read, checked in that window at every
+	// replay, never as the variable (founder, 2026-10-30). Where that window
+	// does not hold it, one that holds it in one run's own window and since
+	// its test began in the other (Window.oneRunSinceBegin, the copy rule's
+	// windows below: a full round slower than the recording) learns it as
+	// that read since its test began. The earlier call held the same value
+	// in both runs, so it is a read of the clock in the same second as well,
+	// and two calls that read one clock in one second are a coincidence, not
+	// dataflow. As the variable, a replay whose clock crosses a second
+	// between the two calls would fail the later one, and the earlier call's
+	// place would carry a variable and a clock read at once, which the HTTP
+	// replay refuses for every test, the earlier one's included. Of an
+	// earlier place no clock read was learned at, a copy neither run's own
+	// call's window holds (sent a minute later) stays the variable, and so
+	// does one the re-read learns as anything but that read: an id minted
+	// that second with a random word in it is refused read without its
+	// source (the word drifted alike in both calls, which only dataflow
+	// explains). Only the whole value, or its one changed word, read as the
+	// clock is the clock's.
+	//
+	// Whose earlier place is itself a plain read of the clock (Place.Clock:
+	// the earlier call's learn step learned it so), a copy the re-read does
+	// not learn as this call's read is refused (clockSourceWhy), never
+	// followed, wherever its call stands: keploy cannot tell a copy of that
+	// read from a read of the clock made in the same second where keploy
+	// does not see it (a token the test's client holds, minted at that
+	// second; a value this call made the same second, which its answer
+	// echoes), and followed, the earlier place would carry a variable and a
+	// clock read at once, which the HTTP replay refuses for every test, the
+	// earlier one's included, and a replay whose two reads cross a second
+	// would fail the later test.
+	ofRun := func(ln Learned, r, l Leaf, w *Window) Learned {
+		if ln.Kind != KindVariable || !ln.From.Run {
+			return ln
+		}
+		for i, ow := range append([]*Window{w}, w.oneRunSinceBegin()...) {
+			if !dc.windowHolds(dc.ofIn(r.Value, l.Value, ow, at), ow) {
+				continue
+			}
+			if own := clientWord(leaf(r, l, ow, skipBoth), ow); own.Kind == KindClockRead {
+				if i > 0 {
+					own, _ = sinceTestBegin(own)
+				}
+				return own
+			}
+		}
+		if ln.From.Clock {
+			ln.Kind, ln.From, ln.Why = KindUnaccounted, Place{}, clockSourceWhy(ln.From)
+		}
+		return ln
+	}
+	read = func(r, l Leaf, w *Window, skip skipRule) Learned { return ofRun(leaf(r, l, w, skip), r, l, w) }
 	for _, p := range drift {
 		r, l := rec.Leaves[p], live.Leaves[p]
 		ln := leaf(r, l, w, 0)
@@ -1744,11 +1819,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// replay, and the rest of the text is still compared. A text whose
 		// changed word is no read of the clock in the window, or one more of
 		// whose bytes changed, stays the noise the window learned.
-		if dc.clientTests {
-			if word, ok := wordRead(ln, w, leaf); ok {
-				ln = word
-			}
-		}
+		ln = clientWord(ln, w)
 		// A read made before its call's window: in keploy mock's client
 		// tests (the only calls whose window knows each run's test begin),
 		// a value refused in its call's window is classified again in the
@@ -1822,58 +1893,8 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 				}
 			}
 		}
-		// The run's variable (Place.Run: a value the set's start-up or an
-		// earlier test sent) that, read as a value no earlier place is the
-		// source of and no moved place builds by an offset, is a plain read
-		// of the clock its own call's window holds in both runs, is learned
-		// as that read, checked in that window at every replay, never as the
-		// variable (founder, 2026-10-30). Where that window does not hold it,
-		// one that holds it in one run's own window and since its test began
-		// in the other (Window.oneRunSinceBegin, the copy rule's windows
-		// above: a full round slower than the recording) learns it as that
-		// read since its test began. The earlier call held the same
-		// value in both runs, so it is a read of the clock in the same
-		// second as well, and two calls that read one clock in one second
-		// are a coincidence, not dataflow. As the variable, a replay whose
-		// clock crosses a second between the two calls would fail the
-		// later one, and the earlier call's place would carry a variable
-		// and a clock read at once, which the HTTP replay refuses for every
-		// test, the earlier one's included. Of an earlier place no clock
-		// read was learned at, a copy neither run's own call's window holds
-		// (sent a minute later) stays the variable, and so does one the
-		// re-read learns as anything but that read: an id minted that second
-		// with a random word in it is refused read without its source (the
-		// word drifted alike in both calls, which only dataflow explains).
-		// Only the whole value read as the clock is the clock's.
-		//
-		// Whose earlier place is itself a plain read of the clock (Place.Clock:
-		// the earlier call's learn step learned it so), a copy the re-read
-		// does not learn as this call's read is refused (clockSourceWhy),
-		// never followed, wherever its call stands: keploy cannot tell a copy
-		// of that read from a read of the clock made in the same second where
-		// keploy does not see it (a token the test's client holds, minted at
-		// that second; a value this call made the same second, which its
-		// answer echoes), and followed, the earlier place would carry a
-		// variable and a clock read at once, which the HTTP replay refuses
-		// for every test, the earlier one's included, and a replay whose two
-		// reads cross a second would fail the later test.
-		if ln.Kind == KindVariable && ln.From.Run {
-			for i, ow := range append([]*Window{w}, w.oneRunSinceBegin()...) {
-				if !dc.windowHolds(dc.ofIn(r.Value, l.Value, ow, at), ow) {
-					continue
-				}
-				if own := leaf(r, l, ow, skipBoth); own.Kind == KindClockRead {
-					if i > 0 {
-						own, _ = sinceTestBegin(own)
-					}
-					ln = own
-					break
-				}
-			}
-			if ln.Kind == KindVariable && ln.From.Clock {
-				ln.Kind, ln.From, ln.Why = KindUnaccounted, Place{}, clockSourceWhy(ln.From)
-			}
-		}
+		// The run's variable, under the run's rule (ofRun).
+		ln = ofRun(ln, r, l, w)
 		// A value built by an offset on what the application was given that
 		// is a read in its own call's window too: under the rule a copy
 		// follows its source (follow), in keploy mock's client tests (the
