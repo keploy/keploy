@@ -1176,6 +1176,13 @@ func TestASkippedTestNoBeginServesTheTestsRecordedAfterIt(t *testing.T) {
 				{TestCase: "o::TestZ", Start: t0.Add(3 * time.Second), End: t0.Add(3500 * time.Millisecond)},
 			}))
 			require.NoError(t, a.SetScopeSkips(ctx, map[string]string{tc.skipped: "manual/the first use's owner"}, nil))
+			if !tc.served {
+				// TestQ, kept, runs first and makes its own call: a test
+				// the run began hands nothing to the tests after it.
+				got, e := runTest(t, a, rp, "TestQ", "/pat")
+				require.Equal(t, []string{"200 pat"}, got)
+				require.Empty(t, e.Action, e.Reason)
+			}
 			// The skipped test is never begun: the run does not select it.
 			got, e := runTest(t, a, rp, "TestK", "/k", "/pat")
 			ev := evidenceOf(t, a, "o::TestK")
@@ -1202,6 +1209,106 @@ func TestASkippedTestNoBeginServesTheTestsRecordedAfterIt(t *testing.T) {
 			require.Equal(t, models.ScopeActionFail, e.Action)
 		})
 	}
+}
+
+// notBegunAgent is TestQ (/pat), TestK (/k, and its own /pat when own) and
+// TestZ (/z), recorded in that order, none skipped: a kept test's recordings
+// with the windows that order them.
+func notBegunAgent(t *testing.T, own bool) (*Agent, *servingProxy) {
+	t.Helper()
+	mocks := []*models.Mock{pingMock("mock-1", "/pat", "pat", t0), pingMock("mock-2", "/k", "k", t0.Add(time.Second)), pingMock("mock-5", "/z", "z", t0.Add(3*time.Second))}
+	table := map[string][]string{"o::TestQ": {"mock-1"}, "o::TestK": {"mock-2"}, "o::TestZ": {"mock-5"}}
+	if own {
+		mocks = append(mocks, pingMock("mock-3", "/pat", "own", t0.Add(1100*time.Millisecond)))
+		table["o::TestK"] = []string{"mock-2", "mock-3"}
+	}
+	a, rp := exactAgent(t, mocks, table, map[string][]string{})
+	require.NoError(t, a.SetRecordedWindows(context.Background(), []models.TestWindow{
+		{TestCase: "o::TestQ", Start: t0, End: t0.Add(500 * time.Millisecond)},
+		{TestCase: "o::TestK", Start: t0.Add(time.Second), End: t0.Add(1500 * time.Millisecond)},
+		{TestCase: "o::TestZ", Start: t0.Add(3 * time.Second), End: t0.Add(3500 * time.Millisecond)},
+	}))
+	return a, rp
+}
+
+// api-server's first-use PAT read under a partial replay (keploy mock replay
+// -- -run TestListApps): TestAppCRUD, kept and recorded before it, made the
+// read at record and is not run, so TestListApps makes it in its own window.
+// A test the replay has not begun hands its recordings aside at the begin of
+// a test recorded after it, as a skipped one does: the call beyond the
+// open test's own recordings is answered by that test's exact copy,
+// unchecked and named; past every copy the call is an extra call; a call
+// that is not exactly the copy misses; a test the run began hands nothing
+// (its recordings are its own, required of it), so a full run in recorded
+// order is served as before.
+func TestAKeptTestTheRunDoesNotBeginServesTheTestsRecordedAfterIt(t *testing.T) {
+	t.Run("partial replay: served", func(t *testing.T) {
+		a, rp := notBegunAgent(t, false)
+		got, e := runTest(t, a, rp, "TestK", "/k", "/pat")
+		require.Equal(t, []string{"200 k", "200 pat"}, got)
+		require.Empty(t, e.Action, e.Reason)
+		ev := evidenceOf(t, a, "o::TestK")
+		require.Equal(t, []string{"mock-1 served from o::TestQ (set aside)"}, ev.ServedAside)
+		require.Empty(t, ev.Unconsumed, "another test's recording is never the open test's to make")
+		// Answered once: the next test's same call misses.
+		got, e = runTest(t, a, rp, "TestZ", "/z", "/pat")
+		require.Equal(t, "200 z", got[0])
+		require.NotEqual(t, 200, mustCode(got[1]), "a recording answers once in the set")
+		require.Equal(t, models.ScopeActionFail, e.Action)
+	})
+	t.Run("past its own and every copy: an extra call", func(t *testing.T) {
+		a, rp := notBegunAgent(t, true)
+		got, e := runTest(t, a, rp, "TestK", "/k", "/pat", "/pat", "/pat")
+		require.Equal(t, []string{"200 k", "200 own", "200 pat"}, got[:3], "its own first, then the copy")
+		require.NotEqual(t, 200, mustCode(got[3]), "no copy left")
+		require.Equal(t, models.ScopeActionFail, e.Action)
+		require.Contains(t, e.Reason, "GET /pat to 127.0.0.1:18093 was called 3 times, recorded 2")
+	})
+	t.Run("not exactly the copy: refused", func(t *testing.T) {
+		a, rp := notBegunAgent(t, false)
+		got, e := runTest(t, a, rp, "TestK", "/k", "/pat?fresh=1")
+		require.Equal(t, "200 k", got[0])
+		require.NotEqual(t, 200, mustCode(got[1]))
+		require.Equal(t, models.ScopeActionFail, e.Action)
+		require.Contains(t, e.Reason, "GET /pat to 127.0.0.1:18093 had no recorded answer")
+		require.Empty(t, evidenceOf(t, a, "o::TestK").ServedAside)
+	})
+	t.Run("begun: its recordings stay its own", func(t *testing.T) {
+		a, rp := notBegunAgent(t, false)
+		// TestQ ran first, in recorded order, and did not make its call.
+		_, e := runTest(t, a, rp, "TestQ")
+		require.Equal(t, models.ScopeActionFail, e.Action)
+		require.Equal(t, []string{"mock-1"}, evidenceOf(t, a, "o::TestQ").Unconsumed)
+		got, e := runTest(t, a, rp, "TestK", "/k", "/pat")
+		require.Equal(t, "200 k", got[0])
+		require.NotEqual(t, 200, mustCode(got[1]), "a test the run began is handed to no later test")
+		require.Equal(t, models.ScopeActionFail, e.Action)
+		require.Empty(t, evidenceOf(t, a, "o::TestK").ServedAside)
+	})
+	t.Run("begun later: its own copy is the one answer", func(t *testing.T) {
+		// Served aside to TestK, which ran first: TestQ's own call then
+		// finds no answer left.
+		a, rp := notBegunAgent(t, false)
+		got, e := runTest(t, a, rp, "TestK", "/k", "/pat")
+		require.Equal(t, []string{"200 k", "200 pat"}, got)
+		require.Empty(t, e.Action, e.Reason)
+		got, e = runTest(t, a, rp, "TestQ", "/pat")
+		require.NotEqual(t, 200, mustCode(got[0]), "the recording answered once, in TestK")
+		require.Equal(t, models.ScopeActionFail, e.Action)
+		// Answered TestQ itself: no later test is served it aside.
+		a, rp = notBegunAgent(t, false)
+		got, e = runTest(t, a, rp, "TestK", "/k")
+		require.Equal(t, []string{"200 k"}, got)
+		require.Empty(t, e.Action, e.Reason)
+		got, e = runTest(t, a, rp, "TestQ", "/pat")
+		require.Equal(t, []string{"200 pat"}, got)
+		require.Empty(t, e.Action, e.Reason)
+		got, e = runTest(t, a, rp, "TestZ", "/z", "/pat")
+		require.Equal(t, "200 z", got[0])
+		require.NotEqual(t, 200, mustCode(got[1]), "TestQ's own call took the one answer")
+		require.Equal(t, models.ScopeActionFail, e.Action)
+		require.Empty(t, evidenceOf(t, a, "o::TestZ").ServedAside)
+	})
 }
 
 // mustCode is the status code of a runTest answer ("<code> <body>").
