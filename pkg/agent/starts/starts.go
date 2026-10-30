@@ -58,15 +58,19 @@ type procKey struct {
 }
 
 type Registry struct {
-	mu       sync.Mutex
-	proc     Proc
-	slack    time.Duration
-	workers  map[uint32]*worker
-	all      []*Start
-	byRoot   map[procKey]*Start
-	byProc   map[procKey]*Start
-	byPID    map[uint32]*Start
-	conns    map[string]uint32
+	mu      sync.Mutex
+	proc    Proc
+	slack   time.Duration
+	workers map[uint32]*worker
+	all     []*Start
+	byRoot  map[procKey]*Start
+	byProc  map[procKey]*Start
+	byPID   map[uint32]*Start
+	conns   map[string]uint32
+	// chains is, under the proven switch, each connection's process and its
+	// ancestors as read when it was accepted (NoteChain), which Stamp puts on
+	// its mocks.
+	chains   map[string][]uint32
 	child    map[string]bool
 	root     string
 	sets     map[string]models.SetTable
@@ -95,6 +99,7 @@ func (r *Registry) Reset() {
 	r.byProc = nil
 	r.byPID = nil
 	r.conns = nil
+	r.chains = nil
 	r.child = nil
 	r.root = ""
 	r.sets = nil
@@ -180,6 +185,23 @@ func (r *Registry) Note(conn string, pid uint32, at time.Time) {
 		r.conns[conn] = pid
 	}
 	r.startOf(pid, at)
+}
+
+// NoteChain keeps, under the proven switch, the chain of connection conn's
+// process (its pid and ancestors, nearest first, as read when the connection
+// was accepted: models.WithSrcChain), which Stamp puts on each of its mocks
+// (models.Mock.SourceChain): keploy mock record's mapping tells the mock's
+// test by it as the Generic recorder did. The chain is shared, never written.
+func (r *Registry) NoteChain(conn string, chain []uint32) {
+	if conn == "" || len(chain) == 0 || !provenswitch.On() {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.chains == nil {
+		r.chains = map[string][]uint32{}
+	}
+	r.chains[conn] = chain
 }
 
 func (r *Registry) Child(conn string) {
@@ -293,6 +315,9 @@ func (r *Registry) Stamp(m *models.Mock) {
 		return
 	}
 	m.SourcePID = pid
+	if c := r.chains[id]; m.SourceChain == nil && len(c) > 0 && c[0] == pid {
+		m.SourceChain = c
+	}
 	if m.Start != "" {
 		return
 	}

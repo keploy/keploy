@@ -141,8 +141,15 @@ type Mock struct {
 	// for parallel runners). Runtime-only: never serialized (yaml/json/bson "-")
 	// — it is an in-process hint, not part of the recorded mock. 0 if unknown.
 	SourcePID uint32 `json:"-" yaml:"-" bson:"-"`
-	Start     string `json:"start,omitempty" yaml:"start,omitempty" bson:"start,omitempty"`
-	StartRef  string `json:"-" yaml:"-" bson:"-"`
+	// SourceChain is, under the proven switch, SourcePID and its ancestors,
+	// nearest first, as read once when its connection was accepted
+	// (WithSrcChain): carried to keploy mock record, whose
+	// mapping tells the test that owns the mock by it (CallOwner), as the
+	// Generic recorder did. Runtime-only, never serialized, shared by every
+	// mock of one connection and never written in place; nil if unknown.
+	SourceChain []uint32 `json:"-" yaml:"-" bson:"-"`
+	Start       string   `json:"start,omitempty" yaml:"start,omitempty" bson:"start,omitempty"`
+	StartRef    string   `json:"-" yaml:"-" bson:"-"`
 	// Origin is, under the proven switch, where the call came from: the clock
 	// its ReqTimestampMock is on, and the process that made it. Only a record
 	// under the switch sets it; a file's is read and

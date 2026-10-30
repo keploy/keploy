@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 type bootPlan struct {
@@ -30,7 +31,7 @@ func classify(tests, starts []models.ScopeWindow, suites []models.SuiteSpan, moc
 				boots[i].Mocks = append(boots[i].Mocks, entry)
 				continue
 			}
-			test := testAt(tests, s.Worker, mk.ts)
+			test := testAt(tests, s.Worker, mk.chain, mk.ts)
 			if test == "" {
 				boots[i].Mocks = append(boots[i].Mocks, entry)
 				continue
@@ -40,7 +41,7 @@ func classify(tests, starts []models.ScopeWindow, suites []models.SuiteSpan, moc
 			out.perTest = append(out.perTest, mk)
 			continue
 		}
-		if test := testAt(tests, mk.pid, mk.ts); test != "" {
+		if test := testAt(tests, mk.pid, mk.chain, mk.ts); test != "" {
 			out.tests[test] = append(out.tests[test], entry)
 			out.perTest = append(out.perTest, mk)
 			continue
@@ -58,7 +59,24 @@ func classify(tests, starts []models.ScopeWindow, suites []models.SuiteSpan, moc
 	return out
 }
 
-func testAt(tests []models.ScopeWindow, worker uint32, at time.Time) string {
+// testAt names the test whose window holds a per-test call made at at, or ""
+// when none, or no one, does. worker is the process the call is attributed
+// to (the mock's own pid, or the worker that started its app), 0 if unknown;
+// chain the call's process and its ancestors (models.Mock.SourceChain), nil
+// if unknown.
+//
+// Under the proven switch it asks models.CallOwner, the rule the Generic
+// recorder's held first exchange asks (syncMock.SyncMockManager.TestSpanAt),
+// with the same chain: a call the recorder states as one test's, unmarked,
+// is that test's here, and one it could not place (marked manyTests) is no
+// test's here either. With no chain read, the chain is the worker alone.
+// Without the switch, a window whose PID is the worker's exactly owns it,
+// the latest begun of several; with none, the latest begun of the windows
+// holding at, when they are all one worker's.
+func testAt(tests []models.ScopeWindow, worker uint32, chain []uint32, at time.Time) string {
+	if provenswitch.On() {
+		return ownerAt(tests, worker, chain, at)
+	}
 	var mine, all []models.ScopeWindow
 	for _, w := range tests {
 		if at.Before(w.Start) || at.After(w.End) {
@@ -85,6 +103,27 @@ func testAt(tests []models.ScopeWindow, worker uint32, at time.Time) string {
 	}
 	sort.SliceStable(pick, func(i, j int) bool { return pick[i].Start.After(pick[j].Start) })
 	return pick[0].Name
+}
+
+// ownerAt is testAt under the proven switch: models.CallOwner of the windows
+// holding at.
+func ownerAt(tests []models.ScopeWindow, worker uint32, chain []uint32, at time.Time) string {
+	if len(chain) == 0 && worker != 0 {
+		chain = []uint32{worker}
+	}
+	var holding []models.ScopeWindow
+	var cands []models.OwnerCandidate
+	for _, w := range tests {
+		if at.Before(w.Start) || at.After(w.End) {
+			continue
+		}
+		holding = append(holding, w)
+		cands = append(cands, models.OwnerCandidate{PID: w.PID, Start: w.Start})
+	}
+	if i := models.CallOwner(cands, chain); i >= 0 {
+		return holding[i].Name
+	}
+	return ""
 }
 
 func suiteAt(suites []models.SuiteSpan, at time.Time) string {

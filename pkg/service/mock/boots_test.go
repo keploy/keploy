@@ -4,7 +4,10 @@ import (
 	"testing"
 	"time"
 
+	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.uber.org/zap"
 )
 
 func TestClassifyPutsEachStartupCallWithItsOwnStart(t *testing.T) {
@@ -90,11 +93,126 @@ func TestClassifyPutsEachStartupCallWithItsOwnStart(t *testing.T) {
 func TestTestAtUsesTheOnlyOpenTestWhenTheCallerHasNone(t *testing.T) {
 	at := time.Date(2026, 10, 5, 10, 0, 1, 0, time.UTC)
 	tests := []models.ScopeWindow{{Name: "login", Start: at.Add(-time.Second), End: at.Add(time.Second), PID: 30}}
-	if got := testAt(tests, 10, at); got != "login" {
+	if got := testAt(tests, 10, nil, at); got != "login" {
 		t.Fatalf("testAt = %q", got)
 	}
 	tests = append(tests, models.ScopeWindow{Name: "other", Start: at.Add(-time.Second), End: at.Add(time.Second), PID: 31})
-	if got := testAt(tests, 10, at); got != "" {
+	if got := testAt(tests, 10, nil, at); got != "" {
 		t.Fatalf("two workers with open tests must be ambiguous, got %q", got)
+	}
+}
+
+// Under the proven switch keploy mock record's mapping gives a per-test call
+// to the test the Generic recorder states it is (models.CallOwner, asked by
+// both with the same chain): a call the recorder states as one test's,
+// unmarked, is that test's here, and one it marks manyTests is no test's
+// here. Each case runs with the tests begun, and listed, in either order.
+func TestTestAtNamesTheTestTheGenericRecorderStates(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	t0 := time.Unix(7000, 0)
+	ms := func(f float64) time.Time { return t0.Add(time.Duration(f * float64(time.Millisecond))) }
+	type test struct {
+		name       string
+		pid        uint32
+		start, end float64
+	}
+	const other = 4000000000
+	at := ms(19)
+	for _, tc := range []struct {
+		name  string
+		tests []test
+		chain []uint32 // the call's process, then its ancestors
+		want  string   // the owner, or "" when no one can be told
+	}{
+		{"a child of B's worker (a browser it launched)", []test{{"A", other, 0, 19.1}, {"B", 100, 1, 30}}, []uint32{101, 100, 1}, "B"},
+		{"B's worker itself", []test{{"A", other, 0, 19.1}, {"B", 100, 1, 30}}, []uint32{100, 1}, "B"},
+		{"a grandchild of A's worker", []test{{"A", 100, 0, 25}, {"B", other, 1, 30}}, []uint32{102, 101, 100, 1}, "A"},
+		{"the process known to neither worker", []test{{"A", other, 0, 19.1}, {"B", 100, 1, 30}}, []uint32{300, 1}, ""},
+		{"no process known", []test{{"A", other, 0, 19.1}, {"B", 100, 1, 30}}, nil, ""},
+		{"two tests with no worker", []test{{"A", 0, 0, 19.1}, {"B", 0, 1, 30}}, []uint32{300, 1}, ""},
+		{"one worker's nested tests: the innermost", []test{{"A", 100, 0, 30}, {"B", 100, 1, 25}}, []uint32{101, 100, 1}, "B"},
+		{"one worker's nested tests, the process not of it", []test{{"A", 100, 0, 30}, {"B", 100, 1, 25}}, []uint32{300, 1}, ""},
+		{"two workers both on the chain", []test{{"A", 100, 0, 30}, {"B", 101, 1, 25}}, []uint32{102, 101, 100, 1}, ""},
+		{"two workers' tests begun at one instant, the process known to neither", []test{{"A", 100, 1, 19.1}, {"B", 200, 1, 30}}, []uint32{300, 1}, ""},
+		{"two workers' tests begun at one instant, a child of B's worker", []test{{"A", 100, 1, 19.1}, {"B", 200, 1, 30}}, []uint32{201, 200, 1}, "B"},
+		{"one worker's two tests begun at one instant", []test{{"A", 100, 1, 20}, {"B", 100, 1, 30}}, []uint32{100, 1}, ""},
+		{"the only test, the process not its worker's", []test{{"A", 100, 0, 30}}, []uint32{300, 1}, "A"},
+	} {
+		for _, reverse := range []bool{false, true} {
+			tests := tc.tests
+			if reverse {
+				tests = []test{}
+				for i := len(tc.tests) - 1; i >= 0; i-- {
+					tests = append(tests, tc.tests[i])
+				}
+			}
+			mgr := syncMock.New(zap.NewNop())
+			var windows []models.ScopeWindow
+			var scopes []*syncMock.TestScope
+			for _, x := range tests {
+				scopes = append(scopes, mgr.BeginTestScope(ms(x.start), x.pid))
+				windows = append(windows, models.ScopeWindow{Name: x.name, Start: ms(x.start), End: ms(x.end), PID: x.pid})
+			}
+			if open, ok := mgr.TestSpanAt(at, tc.chain); !ok || open.Final() || open.Shared() != (tc.want == "") {
+				t.Fatalf("%s (reverse %v): while open the recorder got %+v %v, want shared %v", tc.name, reverse, open, ok, tc.want == "")
+			}
+			for i, x := range tests {
+				scopes[i].End(ms(x.end))
+			}
+			span, ok := mgr.TestSpanAt(at, tc.chain)
+			if !ok || !span.Final() {
+				t.Fatalf("%s (reverse %v): the recorder got %+v %v, want final", tc.name, reverse, span, ok)
+			}
+			recorder := ""
+			if !span.Shared() {
+				for _, x := range tests {
+					if span.Start.Equal(ms(x.start)) && span.End.Equal(ms(x.end)) {
+						recorder = x.name
+					}
+				}
+			}
+			var pid uint32
+			if len(tc.chain) > 0 {
+				pid = tc.chain[0]
+			}
+			mapping := testAt(windows, pid, tc.chain, at)
+			if recorder != tc.want || mapping != tc.want {
+				t.Fatalf("%s (reverse %v): the recorder states %q, the mapping gives %q, want %q", tc.name, reverse, recorder, mapping, tc.want)
+			}
+			plan := classify(windows, nil, nil, []capturedMock{{name: "mock-0", kind: "Generic", ts: at, pid: pid, chain: tc.chain}})
+			owner := ""
+			for name, entries := range plan.tests {
+				for _, e := range entries {
+					if e.Name == "mock-0" {
+						owner = name
+					}
+				}
+			}
+			if owner != tc.want {
+				t.Fatalf("%s (reverse %v): classify gives the mock to %q, want %q (tests %v, boots %v)", tc.name, reverse, owner, tc.want, plan.tests, plan.boots)
+			}
+		}
+	}
+}
+
+// Without the proven switch the mapping is as it was: a window whose PID is
+// the call's own pid exactly owns it, the latest begun of several; with none,
+// the latest begun of the windows holding the call, when they are all one
+// worker's. No chain is read: a worker's child's call is no test's while
+// another worker's test is open too.
+func TestTestAtWithTheSwitchOffMatchesThePIDExactly(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0")
+	t0 := time.Unix(7000, 0)
+	ms := func(f float64) time.Time { return t0.Add(time.Duration(f * float64(time.Millisecond))) }
+	two := []models.ScopeWindow{{Name: "A", Start: t0, End: ms(19.1), PID: 4000000000}, {Name: "B", Start: ms(1), End: ms(30), PID: 100}}
+	if got := testAt(two, 101, []uint32{101, 100, 1}, ms(19)); got != "" {
+		t.Fatalf("a child of B's worker: %q, want none", got)
+	}
+	if got := testAt(two, 100, nil, ms(19)); got != "B" {
+		t.Fatalf("B's worker: %q, want B", got)
+	}
+	nested := []models.ScopeWindow{{Name: "A", Start: t0, End: ms(30), PID: 100}, {Name: "B", Start: ms(1), End: ms(25), PID: 100}}
+	if got := testAt(nested, 300, []uint32{300, 1}, ms(19)); got != "B" {
+		t.Fatalf("one worker's nested tests, the process not of it: %q, want the innermost, B", got)
 	}
 }

@@ -375,7 +375,7 @@ func (m *mockService) Record(ctx context.Context) error {
 		// Under the proven switch a protocol-phase mock is the pool's, never
 		// a test's (design v14 §5.2): the mapping lists data-plane mocks only.
 		protocol := provenswitch.On() && mk.IsProtocolPhase()
-		recorded = append(recorded, capturedMock{name: mk.Name, kind: string(mk.Kind), ts: models.PlaceOf(mk), pid: mk.SourcePID, boot: typ == "config" || typ == "connection", protocol: protocol, start: mk.Start, ref: mk.StartRef})
+		recorded = append(recorded, capturedMock{name: mk.Name, kind: string(mk.Kind), ts: models.PlaceOf(mk), pid: mk.SourcePID, chain: mk.SourceChain, boot: typ == "config" || typ == "connection", protocol: protocol, start: mk.Start, ref: mk.StartRef})
 	}
 	go func() {
 		defer utils.Recover(m.logger)
@@ -1071,10 +1071,14 @@ type capturedMock struct {
 	// ts is where the call sits (models.PlaceOf): its request timestamp, or
 	// its answer's for one a parser holds until its answer (a consumer's
 	// poll), which is the test's whose window holds its answer.
-	ts   time.Time
-	pid  uint32 // source worker PID (0 if unknown); enables exact parallel attribution
-	end  time.Time
-	boot bool
+	ts  time.Time
+	pid uint32 // source worker PID (0 if unknown); enables exact parallel attribution
+	// chain is, under the proven switch, pid and its ancestors as read when
+	// its connection was accepted (models.Mock.SourceChain), nil if unknown:
+	// testAt tells its test by it, as the Generic recorder did.
+	chain []uint32
+	end   time.Time
+	boot  bool
 	// protocol: protocol-phase under the proven switch (models.Mock.IsProtocolPhase),
 	// so in no test's mapping and in the pool.
 	protocol bool

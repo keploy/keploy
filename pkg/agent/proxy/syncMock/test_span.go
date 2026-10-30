@@ -4,6 +4,7 @@ import (
 	"slices"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
@@ -13,6 +14,10 @@ import (
 type testSpan struct {
 	start, end int64
 	pid        uint32
+	// w is the window whose test case it is (Window.Tested), nil for a
+	// scope's or one noted as its window ends: while w is still open it is
+	// that one test's candidate, never a second one beside it.
+	w *Window
 }
 
 // TestSpan is the span of the test that owns a mock requested at a time
@@ -25,8 +30,10 @@ type TestSpan struct {
 	// when it is Shared.
 	Start, End time.Time
 	// starts is when each test that may own the request began, earliest
-	// first, each once.
+	// first, each instant once.
 	starts []time.Time
+	// shared: more than one test may own the request (Shared).
+	shared bool
 	// changed is closed when the open window the span waits on leaves the
 	// open ones; nil once the span is final.
 	changed <-chan struct{}
@@ -44,9 +51,11 @@ func (s TestSpan) Final() bool { return s.changed == nil }
 func (s TestSpan) Changed() <-chan struct{} { return s.changed }
 
 // Shared reports whether more than one test may own the request: their
-// windows overlap at it, and the connection's process is not the worker of
-// exactly one of them. No owner can be told then: no time decides it.
-func (s TestSpan) Shared() bool { return len(s.starts) > 1 }
+// windows overlap at it, and the connection's process does not tell one of
+// them as the owner (models.CallOwner). No owner can be told then: no time
+// decides it. Two such tests that began at one instant are Shared, though
+// Starts names their instant once.
+func (s TestSpan) Shared() bool { return s.shared }
 
 // Starts is when each test that may own the request began, earliest first:
 // the owner's alone when there is one.
@@ -57,14 +66,17 @@ func (s TestSpan) Starts() []time.Time { return slices.Clone(s.starts) }
 // the candidates are the test cases whose span [request, answer] holds t, and
 // the windows and test scopes still open that started at or before t, which
 // may yet be such a test. chain is the calling connection's process and its
-// ancestors (utils.ProcAncestors; nil when unknown): when exactly one
-// candidate is a test scope whose worker pid is on it, that test alone is the
-// candidate. That is the only tie-break: while any candidate is still open the
-// span is not final, and Changed fires when the one it waits on leaves the
-// open ones; once every candidate is a test case, one is the owner, and more
-// than one are Shared, as their windows overlap at t and no time tells which
-// made the call (parallel workers, nested scopes, concurrent requests). ok is
-// false when there is no candidate: no test may own t any more.
+// ancestors (utils.ProcAncestors; nil when unknown). models.CallOwner, the
+// rule keploy mock record's mapping asks too, tells the owner among them:
+// when it names one, that test alone is the candidate (a worker's test, or of
+// one worker's nested tests the innermost, for a call from the worker or a
+// process it started). That is the only tie-break: while any candidate is
+// still open the span is not final, and Changed fires when the one it waits
+// on leaves the open ones; once every candidate is a test case, one is the
+// owner, and more than one are Shared, as their windows overlap at t and
+// nothing tells which made the call (parallel workers the process names
+// none of, concurrent requests). ok is false when there is no candidate: no
+// test may own t any more.
 //
 // It goes by the request time only, so a call sent in the gap before a test
 // and answered once that test began (models.WindowSchedule.InFlightInto) is
@@ -104,6 +116,10 @@ func (m *SyncMockManager) TestSpanAt(t time.Time, chain []uint32) (TestSpan, boo
 		}
 	}
 	for _, s := range m.testSpans {
+		if s.w != nil && s.w.m == m && s.w.idx >= 0 {
+			// Its window is open, and a candidate already.
+			continue
+		}
 		if s.start <= n && n <= s.end {
 			cands = append(cands, candidate{start: time.Unix(0, s.start), end: s.end, pid: s.pid})
 		}
@@ -111,16 +127,13 @@ func (m *SyncMockManager) TestSpanAt(t time.Time, chain []uint32) (TestSpan, boo
 	if len(cands) == 0 {
 		return TestSpan{}, false
 	}
-	// The worker that made the call names its test, when it is exactly one
-	// candidate's.
-	var mine []candidate
-	for _, c := range cands {
-		if c.pid != 0 && slices.Contains(chain, c.pid) {
-			mine = append(mine, c)
-		}
+	// The process that made the call names its test, when it tells one.
+	weigh := make([]models.OwnerCandidate, len(cands))
+	for i, c := range cands {
+		weigh[i] = models.OwnerCandidate{PID: c.pid, Start: c.start}
 	}
-	if len(mine) == 1 {
-		cands = mine
+	if i := models.CallOwner(weigh, chain); i >= 0 {
+		cands = cands[i : i+1]
 	}
 	// Earliest first; of two at once, an open one (it is waited on), the
 	// window before the scope, so the choice does not hang on the order they
@@ -140,7 +153,7 @@ func (m *SyncMockManager) TestSpanAt(t time.Time, chain []uint32) (TestSpan, boo
 		}
 		return rank(a) - rank(b)
 	})
-	span := TestSpan{Start: cands[0].start}
+	span := TestSpan{Start: cands[0].start, shared: len(cands) > 1}
 	for _, c := range cands {
 		if len(span.starts) == 0 || !span.starts[len(span.starts)-1].Equal(c.start) {
 			span.starts = append(span.starts, c.start)
@@ -186,7 +199,7 @@ func (w *Window) Tested(start, end time.Time) {
 	m := w.m
 	m.mu.Lock()
 	if w.idx >= 0 {
-		m.noteTestSpanLocked(start, end, 0)
+		m.noteTestSpanLocked(start, end, 0, w)
 	}
 	m.mu.Unlock()
 }
@@ -194,13 +207,14 @@ func (w *Window) Tested(start, end time.Time) {
 // noteTestSpanLocked keeps, under the proven switch, the span of a test case
 // whose window is still open, for TestSpanAt: one that ends before it starts,
 // or has no end, ends where it starts, as models.DeriveWindowMappings takes
-// it. pid is the worker that reported it (a test scope's), or 0. Caller holds
-// mu.
-func (m *SyncMockManager) noteTestSpanLocked(start, end time.Time, pid uint32) {
+// it. pid is the worker that reported it (a test scope's), or 0; w the
+// window whose test case it is while that window stays open, or nil. Caller
+// holds mu.
+func (m *SyncMockManager) noteTestSpanLocked(start, end time.Time, pid uint32, w *Window) {
 	if !provenswitch.On() || start.IsZero() {
 		return
 	}
-	s := testSpan{start: start.UnixNano(), end: start.UnixNano(), pid: pid}
+	s := testSpan{start: start.UnixNano(), end: start.UnixNano(), pid: pid, w: w}
 	if end.After(start) {
 		s.end = end.UnixNano()
 	}
@@ -242,7 +256,7 @@ type TestScope struct {
 // BeginTestScope opens, under the proven switch, the scope of a test that
 // began at start (TestScope), reported by the worker pid (0 when none said
 // which): a call whose process is that worker, or descends from it, is that
-// test's when it is the only such candidate (TestSpanAt). nil with the switch
+// test's when models.CallOwner tells it (TestSpanAt). nil with the switch
 // off, a zero start, or a nil manager: nothing waits on it, and its End notes
 // nothing.
 func (m *SyncMockManager) BeginTestScope(start time.Time, pid uint32) *TestScope {
@@ -280,7 +294,7 @@ func (s *TestScope) leave(end time.Time, tested bool) {
 	s.ended = true
 	// Noted before it leaves the open ones, so a waiter told finds it.
 	if tested {
-		m.noteTestSpanLocked(s.start, end, s.pid)
+		m.noteTestSpanLocked(s.start, end, s.pid, nil)
 	}
 	m.scopes = slices.DeleteFunc(m.scopes, func(o *TestScope) bool { return o == s })
 	if s.changed != nil {

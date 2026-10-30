@@ -629,8 +629,10 @@ const (
 	// the recorder holds while it waits to decide.
 	LifetimeUndecidedManyExchanges = "manyExchanges"
 	// LifetimeUndecidedManyTests: more than one test's window held the
-	// request, and the connection's process is not the worker of exactly one
-	// of them: the recorder cannot tell whose call it is.
+	// request, and the connection's process tells no one of them as the
+	// owner (CallOwner: it descends from none of their workers, or from more
+	// than one, or one worker's innermost two began at one instant): the
+	// recorder cannot tell whose call it is.
 	LifetimeUndecidedManyTests = "manyTests"
 )
 

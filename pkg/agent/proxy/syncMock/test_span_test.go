@@ -50,8 +50,8 @@ func TestTestSpanAtWaitsForTheWindowToEndATestCase(t *testing.T) {
 		if closed(span.Changed()) {
 			t.Fatal("Changed fired before the window ended")
 		}
-		if again, ok := mgr.TestSpanAt(sec(1), nil); !ok || again.Final() {
-			t.Fatalf("an open window answered: %+v %v, want not final until it ends", again, ok)
+		if again, ok := mgr.TestSpanAt(sec(1), nil); !ok || again.Final() || again.Shared() || len(again.Starts()) != 1 {
+			t.Fatalf("an open window answered: %+v %v, want it alone (its test case is no second test), not final until it ends", again, ok)
 		}
 		w.Close()
 		if !closed(span.Changed()) {
@@ -70,6 +70,14 @@ func TestTestSpanAtWaitsForTheWindowToEndATestCase(t *testing.T) {
 		if _, ok := mgr.TestSpanAt(sec(4), nil); ok {
 			t.Fatal("a test case answered before t holds t")
 		}
+		// Its test case noted at another instant than the window's start is
+		// still that one test, not a second candidate.
+		w2 := mgr.OpenWindow(sec(10), nil)
+		w2.Tested(sec(11), sec(12))
+		if got, ok := mgr.TestSpanAt(sec(11), nil); !ok || got.Final() || got.Shared() || len(got.Starts()) != 1 || !got.Start.Equal(sec(10)) {
+			t.Fatalf("an open window and its own test case: %+v %v, want the window alone", got, ok)
+		}
+		w2.Close()
 		if len(mgr.spanWatch) != 0 {
 			t.Fatalf("%d waits left after the window ended", len(mgr.spanWatch))
 		}
@@ -108,9 +116,9 @@ func TestTestSpanAtSharedByOverlappingTestsHasNoOwner(t *testing.T) {
 	sec := func(n int) time.Time { return t0.Add(time.Duration(n) * time.Second) }
 	mgr := New(zap.NewNop())
 	mgr.mu.Lock()
-	mgr.noteTestSpanLocked(sec(1), sec(5), 0)
-	mgr.noteTestSpanLocked(sec(0), sec(10), 0)
-	mgr.noteTestSpanLocked(sec(0), sec(8), 0)
+	mgr.noteTestSpanLocked(sec(1), sec(5), 0, nil)
+	mgr.noteTestSpanLocked(sec(0), sec(10), 0, nil)
+	mgr.noteTestSpanLocked(sec(0), sec(8), 0, nil)
 	mgr.mu.Unlock()
 	got, ok := mgr.TestSpanAt(sec(2), nil)
 	if !ok || !got.Final() || !got.Shared() || !got.End.IsZero() || !slices.EqualFunc(got.Starts(), []time.Time{sec(0), sec(1)}, time.Time.Equal) {
@@ -129,10 +137,10 @@ func TestTestSpanAtSharedByOverlappingTestsHasNoOwner(t *testing.T) {
 	}
 }
 
-// When exactly one candidate is a test scope whose worker the calling process
-// is, or descends from, that test alone is the candidate: the others, open or
-// not, are not waited on. A worker with two candidates (nested scopes), or a
-// chain naming none, leaves them all.
+// When the calling process is, or descends from, the worker of a candidate
+// test scope, that worker's test alone is the candidate (of its nested tests
+// the innermost): the others, open or not, are not waited on. Two workers on
+// the chain, or a chain naming none, leave them all (models.CallOwner).
 func TestTestSpanAtTakesTheCallingWorkersTest(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	t0 := time.Unix(5000, 0)
@@ -152,11 +160,28 @@ func TestTestSpanAtTakesTheCallingWorkersTest(t *testing.T) {
 	if got, _ := mgr.TestSpanAt(sec(2), []uint32{300}); got.Final() || !slices.EqualFunc(got.Starts(), []time.Time{sec(0), sec(1)}, time.Time.Equal) {
 		t.Fatalf("got %+v: a call from no candidate's worker is not every candidate's", got)
 	}
-	nested := mgr.BeginTestScope(sec(0), 200)
-	if got, _ := mgr.TestSpanAt(sec(2), []uint32{200}); got.Final() || len(got.Starts()) != 2 {
-		t.Fatalf("got %+v: a worker with two candidates named one", got)
+	// Of one worker's nested tests the innermost, the latest begun, owns a
+	// call from the worker or a process it started (models.CallOwner, as
+	// keploy mock record's mapping, testAt, gives it): here worker 200's test
+	// begun at 1s, inside its scope begun at 0s.
+	outer := mgr.BeginTestScope(sec(0), 200)
+	for _, chain := range [][]uint32{{200}, {201, 200, 1}} {
+		if got, _ := mgr.TestSpanAt(sec(2), chain); !got.Final() || got.Shared() || !got.Start.Equal(sec(1)) || !got.End.Equal(sec(3)) {
+			t.Fatalf("chain %v: got %+v, want worker 200's innermost test [1s, 3s]", chain, got)
+		}
 	}
-	nested.Abandon()
+	// One begun inside that one, still open, is the innermost now: waited on.
+	inner := mgr.BeginTestScope(sec(2), 200)
+	if got, _ := mgr.TestSpanAt(sec(2), []uint32{201, 200, 1}); got.Final() || got.Shared() || !slices.EqualFunc(got.Starts(), []time.Time{sec(2)}, time.Time.Equal) {
+		t.Fatalf("got %+v, want worker 200's innermost open scope (2s) alone", got)
+	}
+	inner.Abandon()
+	// Two workers both on the chain (a worker started by another that
+	// reports tests too) tell no owner.
+	if got, _ := mgr.TestSpanAt(sec(2), []uint32{201, 200, 100, 1}); got.Final() || !got.Shared() || !slices.EqualFunc(got.Starts(), []time.Time{sec(0), sec(1)}, time.Time.Equal) {
+		t.Fatalf("got %+v: two workers' tests on the chain named one", got)
+	}
+	outer.Abandon()
 	w.Close()
 	a.End(sec(4))
 	if got, _ := mgr.TestSpanAt(sec(2), nil); !got.Final() || !got.Shared() || !slices.EqualFunc(got.Starts(), []time.Time{sec(0), sec(1)}, time.Time.Equal) {
@@ -171,14 +196,14 @@ func TestTestSpansAreARingOfTheLastTestCases(t *testing.T) {
 	t0 := time.Unix(5000, 0)
 	mgr := New(zap.NewNop())
 	mgr.mu.Lock()
-	mgr.noteTestSpanLocked(t0, time.Time{}, 0)
-	mgr.noteTestSpanLocked(t0.Add(time.Second), t0, 0)
+	mgr.noteTestSpanLocked(t0, time.Time{}, 0, nil)
+	mgr.noteTestSpanLocked(t0.Add(time.Second), t0, 0, nil)
 	if mgr.testSpans[0].end != mgr.testSpans[0].start || mgr.testSpans[1].end != mgr.testSpans[1].start {
 		mgr.mu.Unlock()
 		t.Fatalf("spans with no end, or one before the start: %+v", mgr.testSpans)
 	}
 	for i := 2; i < maxRecentWindows+2; i++ {
-		mgr.noteTestSpanLocked(t0.Add(time.Duration(i)*time.Second), t0.Add(time.Duration(i)*time.Second), 0)
+		mgr.noteTestSpanLocked(t0.Add(time.Duration(i)*time.Second), t0.Add(time.Duration(i)*time.Second), 0, nil)
 	}
 	n := len(mgr.testSpans)
 	mgr.mu.Unlock()
@@ -332,5 +357,31 @@ func TestTestScopesAreNotOpenedWithTheSwitchOff(t *testing.T) {
 	var nilMgr *SyncMockManager
 	if nilMgr.BeginTestScope(t0, 0) != nil || mgr.BeginTestScope(time.Time{}, 0) != nil {
 		t.Fatal("a nil manager, or a zero begin, opened a scope")
+	}
+}
+
+// Two workers' tests that began at one instant are two candidates, Shared,
+// though Starts names their instant once: a call from a process that names
+// neither worker has no owner (the mark's reason is manyTests, never
+// readAfterAnswer), and one from either worker is that worker's alone.
+func TestTestSpanAtSharesTwoWorkersTestsBegunAtOneInstant(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	t0 := time.Unix(5000, 0)
+	sec := func(n int) time.Time { return t0.Add(time.Duration(n) * time.Second) }
+	mgr := New(zap.NewNop())
+	a, b := mgr.BeginTestScope(sec(1), 100), mgr.BeginTestScope(sec(1), 200)
+	if got, ok := mgr.TestSpanAt(sec(2), []uint32{300, 1}); !ok || got.Final() || !got.Shared() {
+		t.Fatalf("open: got %+v %v, want shared, not final", got, ok)
+	}
+	a.End(sec(4))
+	b.End(sec(5))
+	got, ok := mgr.TestSpanAt(sec(2), []uint32{300, 1})
+	if !ok || !got.Final() || !got.Shared() || !got.End.IsZero() || !slices.EqualFunc(got.Starts(), []time.Time{sec(1)}, time.Time.Equal) {
+		t.Fatalf("got %+v %v, want final, shared, no End, the one instant", got, ok)
+	}
+	for pid, end := range map[uint32]time.Time{100: sec(4), 200: sec(5)} {
+		if got, _ := mgr.TestSpanAt(sec(2), []uint32{pid + 1, pid, 1}); !got.Final() || got.Shared() || !got.End.Equal(end) {
+			t.Fatalf("a call from worker %d's child: got %+v, want its test alone, ending %v", pid, got, end)
+		}
 	}
 }

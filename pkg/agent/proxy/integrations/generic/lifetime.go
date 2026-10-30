@@ -144,7 +144,10 @@ type preambleHold struct {
 // holds it: under the proven switch, while a test may own its request
 // (opened, the connection's first). last is the connection's latest chunk
 // time so far; src is the kernel pid of the process that opened the
-// connection (models.OutgoingOptions.SrcPid), 0 when not known. nil means
+// connection (models.OutgoingOptions.SrcPid), 0 when not known. The chain
+// asked is src and its ancestors as read when the connection was accepted
+// (models.SrcChainFrom: keploy mock record's mapping tells the call's test
+// by the same chain), else read here. nil means
 // emit it now, as the session preamble: with the switch off, and for a
 // connection opened outside every test (a boot-time pool, a call made after a
 // test was answered), which no test can wholly contain.
@@ -153,8 +156,8 @@ func holdPreamble(ctx context.Context, first *models.Mock, opened, last time.Tim
 		return nil
 	}
 	mgr := syncMock.FromContextOrGlobal(ctx)
-	var chain []uint32
-	if src != 0 {
+	chain := models.SrcChainFrom(ctx)
+	if chain == nil && src != 0 {
 		chain = utils.ProcAncestors(src)
 	}
 	span, ok := mgr.TestSpanAt(opened, chain)

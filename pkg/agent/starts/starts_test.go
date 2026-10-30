@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 type fake struct {
@@ -400,5 +401,40 @@ func TestLiveLeavesOutASetWhoseRunnerDiedMidSuite(t *testing.T) {
 	f.spawn(7, 1, at(5), "/tmp/other")
 	if got := r.Live(); !slices.Equal(got, []string{"b"}) {
 		t.Fatalf("a new process with the dead runner's pid holds its set: %v", got)
+	}
+}
+
+// Under the proven switch each mock of a connection carries the chain its
+// process had as the connection was accepted (NoteChain), which keploy mock
+// record's mapping tells its test by; never a chain of another process, and
+// none with the switch off or after a reset.
+func TestStampCarriesTheConnectionsProcessChain(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	r := New(newFake(), 0)
+	chain := []uint32{101, 100, 1}
+	r.Note("7", 101, at(0))
+	r.NoteChain("7", chain)
+	m := &models.Mock{ConnectionID: "7"}
+	r.Stamp(m)
+	if m.SourcePID != 101 || !slices.Equal(m.SourceChain, chain) {
+		t.Fatalf("stamped pid %d chain %v, want 101 %v", m.SourcePID, m.SourceChain, chain)
+	}
+	other := &models.Mock{ConnectionID: "7", SourcePID: 555}
+	r.Stamp(other)
+	if other.SourceChain != nil {
+		t.Fatalf("a mock its parser gave another process got that connection's chain %v", other.SourceChain)
+	}
+	r.Reset()
+	again := &models.Mock{ConnectionID: "7", SourcePID: 101}
+	r.Stamp(again)
+	if again.SourceChain != nil {
+		t.Fatalf("a chain outlived the reset: %v", again.SourceChain)
+	}
+	t.Setenv(provenswitch.Env, "0")
+	r.NoteChain("8", chain)
+	off := &models.Mock{ConnectionID: "8", SourcePID: 101}
+	r.Stamp(off)
+	if off.SourceChain != nil {
+		t.Fatalf("with the switch off a chain was stamped: %v", off.SourceChain)
 	}
 }

@@ -1126,9 +1126,11 @@ func startsOf(starts []time.Time) string {
 // (parallel workers' tests, nested scopes, concurrent requests), no time tells
 // which test made the call: the connection is the preamble, marked with every
 // one of them, so none of them that owns no call is judged on it. Only the
-// calling process tells: a connection whose process is, or descends from, the
-// worker of exactly one of them is that test's alone, and judged as any
-// other. The probe: test A (another worker's) begins at t0 and ends at 19.1
+// calling process tells (models.CallOwner, which keploy mock record's mapping
+// asks too): a connection whose process is, or descends from, the worker of
+// one of them is that test's alone, of one worker's nested tests the
+// innermost, and judged as any other; one that descends from two of their
+// workers, or from none, is every one's. The probe: test A (another worker's) begins at t0 and ends at 19.1
 // ms; test B begins at 1 ms, makes the call at 19 ms, its answer is read at
 // 19.2 ms, and ends at 30 ms. Picking the earliest test would mark A alone
 // and leave B, which owns no call, judged: a pass with its call skipped.
@@ -1137,22 +1139,38 @@ func TestV2AConnectionInOverlappingTestsIsMarkedWithEveryOne(t *testing.T) {
 	t0 := time.Unix(7000, 0)
 	ms := func(f float64) time.Time { return t0.Add(time.Duration(f * float64(time.Millisecond))) }
 	self := uint32(os.Getpid())
-	const other = 4000000000 // no such process
+	parent := uint32(os.Getppid()) // this process is its child, as a browser or CLI a worker started is
+	const other = 4000000000       // no such process
 	both := models.LifetimeUndecidedManyTests + "@" + startsOf([]time.Time{t0, ms(1)})
-	for _, tc := range []struct {
+	type overlapCase struct {
 		name         string
 		windows      bool   // windows, not test scopes (pids are scopes')
 		pidA, pidB   uint32 // the workers that began A and B
 		src          uint32 // the connection's process
+		atOnce       bool   // B began at A's instant
 		lifetime, mk string
-	}{
-		{"two workers' tests, the process known to neither", false, other, other + 1, self, models.MetadataLifetimeSession, both},
-		{"two workers' tests, no process known", false, other, other + 1, 0, models.MetadataLifetimeSession, both},
-		{"two tests reported with no worker", false, 0, 0, self, models.MetadataLifetimeSession, both},
-		{"one worker's nested tests", false, self, self, self, models.MetadataLifetimeSession, both},
-		{"two windows", true, 0, 0, self, models.MetadataLifetimeSession, both},
-		{"the process is B's worker", false, other, self, self, models.MetadataLifetimePerTest, ""},
-		{"the process is A's worker", false, self, other, self, models.MetadataLifetimeSession, models.LifetimeUndecidedReadAfterAnswer + "@" + startsOf([]time.Time{t0})},
+		// chain is the one read as the connection was accepted
+		// (models.WithSrcChain); nil: read from /proc now.
+		chain []uint32
+	}
+	for _, tc := range []overlapCase{
+		{"two workers' tests, the process known to neither", false, other, other + 1, self, false, models.MetadataLifetimeSession, both, nil},
+		{"two workers' tests, no process known", false, other, other + 1, 0, false, models.MetadataLifetimeSession, both, nil},
+		{"two tests reported with no worker", false, 0, 0, self, false, models.MetadataLifetimeSession, both, nil},
+		{"one worker's nested tests, the process not of it", false, other, other, self, false, models.MetadataLifetimeSession, both, nil},
+		{"two windows", true, 0, 0, self, false, models.MetadataLifetimeSession, both, nil},
+		{"the process is B's worker", false, other, self, self, false, models.MetadataLifetimePerTest, "", nil},
+		{"the process is a child of B's worker", false, other, parent, self, false, models.MetadataLifetimePerTest, "", nil},
+		{"one worker's nested tests, the process its own: the innermost, B", false, self, self, self, false, models.MetadataLifetimePerTest, "", nil},
+		{"one worker's nested tests, the process its child: the innermost, B", false, parent, parent, self, false, models.MetadataLifetimePerTest, "", nil},
+		{"the process descends from both workers", false, parent, self, self, false, models.MetadataLifetimeSession, both, nil},
+		{"the process is A's worker", false, self, other, self, false, models.MetadataLifetimeSession, models.LifetimeUndecidedReadAfterAnswer + "@" + startsOf([]time.Time{t0}), nil},
+		{"the process is a child of A's worker", false, parent, other, self, false, models.MetadataLifetimeSession, models.LifetimeUndecidedReadAfterAnswer + "@" + startsOf([]time.Time{t0}), nil},
+		{"two workers' tests begun at one instant, the process known to neither", false, other, other + 1, self, true, models.MetadataLifetimeSession, models.LifetimeUndecidedManyTests + "@" + startsOf([]time.Time{t0}), nil},
+		{"two workers' tests begun at one instant, the process a child of B's", false, other, parent, self, true, models.MetadataLifetimePerTest, "", nil},
+		// The chain read at accept is the one asked, not /proc now: here it
+		// names B's worker for a process gone since.
+		{"the chain read at accept names B's worker, the process gone since", false, other, other + 1, other + 2, false, models.MetadataLifetimePerTest, "", []uint32{other + 2, other + 1, 1}},
 	} {
 		for _, endsFirst := range []bool{true, false} {
 			name := tc.name
@@ -1173,7 +1191,11 @@ func TestV2AConnectionInOverlappingTestsIsMarkedWithEveryOne(t *testing.T) {
 						b.Close()
 					}
 				} else {
-					a, b := mgr.BeginTestScope(t0, tc.pidA), mgr.BeginTestScope(ms(1), tc.pidB)
+					bStart := ms(1)
+					if tc.atOnce {
+						bStart = t0
+					}
+					a, b := mgr.BeginTestScope(t0, tc.pidA), mgr.BeginTestScope(bStart, tc.pidB)
 					end = func() {
 						a.End(ms(19.1))
 						b.End(ms(30))
@@ -1188,6 +1210,7 @@ func TestV2AConnectionInOverlappingTestsIsMarkedWithEveryOne(t *testing.T) {
 				sess, mocks := newV2Session(t, clientCh, destCh)
 				sess.Ctx = syncMock.NewContext(context.Background(), mgr)
 				sess.Opts.SrcPid = tc.src
+				sess.Ctx = models.WithSrcChain(sess.Ctx, tc.chain)
 				if endsFirst {
 					end()
 					if err := dispatch(t, sess); err != nil {

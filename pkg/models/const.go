@@ -194,6 +194,35 @@ type contextKey string
 
 const ErrGroupKey contextKey = "errGroup"
 const ClientConnectionIDKey contextKey = "clientConnectionId"
+
+// srcChainKey holds, in a connection's parser context, its process's chain
+// (WithSrcChain).
+const srcChainKey contextKey = "srcChain"
+
+// WithSrcChain returns ctx carrying, under the proven switch while keploy
+// mock records, the chain of the process that opened the connection: its pid
+// and ancestors, nearest first (utils.ProcAncestors), read once as the
+// connection was accepted, while its process lives. The Generic recorder's
+// held first exchange and keploy mock record's mapping (through
+// Mock.SourceChain) both tell the call's test by this one chain
+// (CallOwner), so they agree. It rides the context, not OutgoingOptions,
+// whose per-connection copy every Session embeds at a fixed size class.
+func WithSrcChain(ctx context.Context, chain []uint32) context.Context {
+	if len(chain) == 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, srcChainKey, chain)
+}
+
+// SrcChainFrom is the chain WithSrcChain put in ctx, nil if none.
+func SrcChainFrom(ctx context.Context) []uint32 {
+	if ctx == nil {
+		return nil
+	}
+	c, _ := ctx.Value(srcChainKey).([]uint32)
+	return c
+}
+
 const DestConnectionIDKey contextKey = "destConnectionId"
 const PostTLSModeKey contextKey = "postTLSMode"
 const TLSHandshakeStoreKey contextKey = "tlsHandshakeStore"

@@ -2759,7 +2759,17 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// copy so the mock-serve and record-capture paths can attribute the call to
 	// the test worker that made it (per-PID scoping). 0 when unavailable.
 	outgoingOpts.SrcPid = destInfo.KernelPid
+	// srcChain is, under the proven switch while keploy mock records, the
+	// connection's process and its ancestors, read once, while the process
+	// lives: the Generic recorder's held first exchange (through the parser
+	// context) and keploy mock record's mapping (through each mock) tell the
+	// call's test by this one chain (models.CallOwner).
+	var srcChain []uint32
 	if p.mockMode {
+		if proven && rule.Mode == models.MODE_RECORD && outgoingOpts.SrcPid != 0 {
+			srcChain = utils.ProcAncestors(outgoingOpts.SrcPid)
+			starts.Default.NoteChain(fmt.Sprint(clientConnID), srcChain)
+		}
 		starts.Default.Note(fmt.Sprint(clientConnID), outgoingOpts.SrcPid, time.Now())
 	}
 
@@ -2795,6 +2805,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	parserCtx = context.WithValue(parserCtx, models.ErrGroupKey, parserErrGrp)
 	parserCtx = context.WithValue(parserCtx, models.ClientConnectionIDKey, fmt.Sprint(clientConnID))
 	parserCtx = context.WithValue(parserCtx, models.DestConnectionIDKey, fmt.Sprint(destConnID))
+	parserCtx = models.WithSrcChain(parserCtx, srcChain)
 	// Under the proven switch, or settleReads, the accept kept the connection
 	// (inflight.go): a parser that reads ahead says through it which requests
 	// it holds (integrations.HoldRequest).
