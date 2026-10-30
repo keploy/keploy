@@ -1031,6 +1031,74 @@ func TestAPausedInFlightExchangeIsCountedBeforeItEnds(t *testing.T) {
 	}
 }
 
+// A pause read as the request comes is counted before the request reaches
+// the app, in either loop, with no clock: the request's body is larger than
+// the sockets between the proxy and the app hold, so the proxy's forward of
+// it cannot end until the app reads it, and the app reads the count before
+// it reads the body. A count run once the forward has ended reads 0 here.
+func TestAPausedRequestIsCountedBeforeItsBodyReachesTheApp(t *testing.T) {
+	var paused atomic.Bool
+	paused.Store(true)
+	stubIngressPaused(t, paused.Load)
+	const bodySize = 64 << 20
+	for _, synchronous := range []bool{false, true} {
+		t.Run(fmt.Sprintf("synchronous %v", synchronous), func(t *testing.T) {
+			appLn, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			mgr := syncMock.New(zap.NewNop())
+			var atHeaders atomic.Int64
+			atHeaders.Store(-1)
+			serveApp(t, appLn, func(w http.ResponseWriter, r *http.Request) {
+				atHeaders.Store(int64(mgr.NotRecordedUnderPressure().Total))
+				n, _ := io.Copy(io.Discard, r.Body)
+				_, _ = fmt.Fprintf(w, "read %d", n)
+			})
+			_, client, served, _ := serveWatchedIn(t, syncMock.NewContext(context.Background(), mgr), synchronous, appLn, nil)
+			sent := make(chan error, 1)
+			go func() {
+				head := fmt.Sprintf("POST /upload HTTP/1.1\r\nHost: api\r\nContent-Length: %d\r\n\r\n", bodySize)
+				if _, err := io.WriteString(client, head); err != nil {
+					sent <- err
+					return
+				}
+				_, err := io.Copy(client, io.LimitReader(zeros{}, bodySize))
+				sent <- err
+			}()
+			resp, err := http.ReadResponse(bufio.NewReader(client), nil)
+			if err != nil {
+				t.Fatalf("the answer: %v", err)
+			}
+			b, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			if err := <-sent; err != nil {
+				t.Fatalf("the request: %v", err)
+			}
+			_ = client.Close()
+			<-served
+			if want := fmt.Sprintf("read %d", bodySize); !strings.Contains(string(b), want) {
+				t.Fatalf("the answer %q, want %q", b, want)
+			}
+			if got := atHeaders.Load(); got != 1 {
+				t.Fatalf("counted %d time(s) when the app had the request's headers, want 1", got)
+			}
+			if after := mgr.NotRecordedUnderPressure().Total; after != 1 {
+				t.Fatalf("counted %d time(s) once the handler ended, want 1", after)
+			}
+		})
+	}
+}
+
+type zeros struct{}
+
+func (zeros) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = 0
+	}
+	return len(p), nil
+}
+
 // A pause that begins mid-answer and cuts the capture of the rest is counted
 // as its exchange ends, not as its connection does: on a kept-alive
 // connection the next exchange starts a count of its own, and a count left
