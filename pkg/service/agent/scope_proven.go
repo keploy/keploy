@@ -61,15 +61,16 @@ type provenWire struct {
 	// skip is the gate: test ID -> the reason its harness skips it with.
 	// needs holds a test to the tests that must begin before it
 	// (models.ScopeGateReq.Needs), and began is every test opened since the
-	// session began.
+	// session began, gated ones aside: none of them is handed aside from
+	// then on (serveNotBegunBefore).
 	skip  map[string]string
 	needs map[string][]models.ScopeNeed
 	began map[string]bool
-	// asideHanded is, of the tests the gate holds (skip, or needs unmet),
-	// the tests whose recordings the set's replay has handed the proxy to
-	// serve aside (serveAside): at the test's own gated begin, or at the
-	// begin of a test recorded after it (serveSkippedBefore). SetScopeSkips
-	// starts it over with the set.
+	// asideHanded is the tests whose recordings the set's replay has handed
+	// the proxy to serve aside (serveAside): a gated test's (skip, or needs
+	// unmet) at its own gated begin, and a skipped or kept test's that the
+	// replay had not begun at the begin of a test recorded after it
+	// (serveNotBegunBefore). SetScopeSkips starts it over with the set.
 	asideHanded map[string]bool
 	// charged holds the misses the ends drained from the proxy, until the
 	// CLI's own end-of-run read (GetMockErrors) collects them, so charging a
@@ -631,9 +632,15 @@ func (a *Agent) noteBegunInOrder(id string) {
 // for a test with neither: one that was not recorded.
 func (a *Agent) recordedStart(id string, starts map[string]time.Time) (start time.Time, known bool) {
 	a.scopeMu.Lock()
-	began := a.testBegins[id]
+	begins := a.testBegins
 	a.scopeMu.Unlock()
-	if !began.IsZero() {
+	return recordedAt(id, begins, starts)
+}
+
+// recordedAt is recordedStart's answer from begins (SetTestBegins) and
+// starts (SetRecordedWindows).
+func recordedAt(id string, begins, starts map[string]time.Time) (start time.Time, known bool) {
+	if began := begins[id]; !began.IsZero() {
 		return began, true
 	}
 	start, known = starts[id]
@@ -736,52 +743,78 @@ func (a *Agent) handAside(id string) bool {
 	return true
 }
 
-// serveSkippedBefore hands the proxy, at test id's begin, the recordings of
-// every test the replay skips (the proven gate) that was recorded before id
-// (recordedStart) and that this replay has not handed yet, as that test's
-// own skipped begin does (serveAside), in recorded order. A run that does
-// not select a skipped test (go test -run) never begins it, yet the tests
-// recorded after it still make the calls its recording holds, in their own
-// windows: a per-process first use's refresh, a cache it filled. Served as
-// at its skipped begin: exact only, unchecked, never required, each
-// recording at most once. A skipped test the recording has no place for (no
-// begin, no window) is handed only at its own begin, and none is handed to
-// a test recorded before it: what it answers may be what that skipped test
-// caused.
-func (a *Agent) serveSkippedBefore(id string) {
-	a.provenMu.Lock()
-	skip, starts := a.proven.skip, a.proven.order.starts
-	a.provenMu.Unlock()
-	if len(skip) == 0 {
-		return
-	}
-	at, known := a.recordedStart(id, starts)
-	if !known {
-		return
-	}
+// serveNotBegunBefore hands the proxy, at test id's begin, the recordings of
+// every test of the set recorded before id (recordedStart) that this replay
+// has not begun and has not handed yet, in recorded order, as a skipped
+// test's own begin does (serveAside): a test the replay skips (the proven
+// gate), and a kept test the run does not select (go test -run) or has not
+// reached (tests run in another order than recorded). Neither has made its
+// calls, yet the tests after it still make the calls its recording holds,
+// in their own windows: a per-process first use's refresh, a cache it
+// filled. Served as at a skipped begin: exact only, unchecked, never
+// required, only for a call beyond the calling test's own recordings, and
+// each recording at most once in the set, its own test's copy included (a
+// kept test that begins after its recordings were handed is answered one
+// only if no test was served it aside: the proxy's claim). A run that
+// begins every test in its recorded order hands nothing here. A test the
+// recording has no place for (no begin, no window) is handed only at its
+// own skipped begin, and none is handed to a test recorded before it: what
+// it answers may be what that test caused.
+func (a *Agent) serveNotBegunBefore(id string) {
+	a.scopeMu.Lock()
+	begins := a.testBegins // replaced whole (SetTestBegins), never written
+	a.scopeMu.Unlock()
 	type due struct {
 		id string
 		at time.Time
 	}
 	var dues []due
-	for s := range skip {
-		if s == id {
-			continue
+	a.provenMu.Lock()
+	skip, starts := a.proven.skip, a.proven.order.starts
+	at, known := recordedAt(id, begins, starts)
+	if !known {
+		a.provenMu.Unlock()
+		return
+	}
+	consider := func(s string) {
+		if s == id || a.proven.began[s] || a.proven.asideHanded[s] {
+			return
 		}
-		if st, ok := a.recordedStart(s, starts); ok && st.Before(at) {
+		if st, ok := recordedAt(s, begins, starts); ok && st.Before(at) {
 			dues = append(dues, due{s, st})
 		}
 	}
+	for s := range begins {
+		consider(s)
+	}
+	for s := range starts {
+		if _, dup := begins[s]; !dup {
+			consider(s)
+		}
+	}
+	if len(dues) > 0 && a.proven.asideHanded == nil {
+		a.proven.asideHanded = map[string]bool{}
+	}
+	for _, d := range dues {
+		a.proven.asideHanded[d.id] = true
+	}
+	a.provenMu.Unlock()
 	slices.SortFunc(dues, func(x, y due) int {
 		if c := x.at.Compare(y.at); c != 0 {
 			return c
 		}
 		return strings.Compare(x.id, y.id)
 	})
+	var notRun []string
 	for _, d := range dues {
-		if a.handAside(d.id) {
-			a.serveAside(d.id)
+		a.serveAside(d.id)
+		if _, skipped := skip[d.id]; !skipped {
+			notRun = append(notRun, d.id)
 		}
+	}
+	if len(notRun) > 0 {
+		a.logger.Info("keploy serves the recordings of the tests recorded before this one that the replay has not run to the calls made after them: a call such a test recorded that a later test makes beyond its own recordings is answered by that recording, exact only, unchecked and at most once",
+			zap.String("test", id), zap.Strings("not run", notRun))
 	}
 }
 
@@ -845,7 +878,7 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 	dir := a.proven.dir
 	a.provenMu.Unlock()
 	if a.replaying() {
-		a.serveSkippedBefore(id)
+		a.serveNotBegunBefore(id)
 	}
 	if a.replaying() && gated {
 		a.noteScopeNotRun(id, 0, at, outcome)
