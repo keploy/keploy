@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -169,5 +170,152 @@ func TestInsertMock_AddingToACutGobFileKeepsTheMocksBeforeTheCut(t *testing.T) {
 	}
 	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o640 {
 		t.Fatalf("mocks.gob mode is %v (%v), want 0640 as it was", info.Mode().Perm(), err)
+	}
+}
+
+// setFiles is the names of the files in set under dir.
+func setFiles(t *testing.T, dir, set string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Join(dir, set))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	return names
+}
+
+// An insert writes to the mock file the set already has, in that file's
+// format, whatever format the writer is configured with: the readers read a
+// mocks.gob whenever there is one. A yaml writer adding to a gob set used to
+// write a mocks.yaml the readers never read, and a gob writer adding to a yaml
+// set began a mocks.gob that hid the set's mocks.yaml.
+func TestInsertMock_AddsToTheFileTheSetHasInItsFormat(t *testing.T) {
+	for _, c := range []struct{ recordedIn, addIn, file string }{
+		{mockFormatGob, "yaml", "mocks.gob"},
+		{"yaml", mockFormatGob, "mocks.yaml"},
+	} {
+		t.Run(c.recordedIn+" set, "+c.addIn+" writer", func(t *testing.T) {
+			t.Setenv("KEPLOY_MOCK_FORMAT", "")
+			dir := t.TempDir()
+			rec := newMockYamlForFormat(dir, c.recordedIn)
+			insertURLs(t, rec, "set-0", "http://a", "http://b", "http://c")
+			closeOK(t, rec)
+
+			add := newMockYamlForFormat(dir, c.addIn)
+			add.SetCounterID(3)
+			insertURLs(t, add, "set-0", "http://d", "http://e")
+			closeOK(t, add)
+
+			wantURLs(t, dir, "set-0", "http://a", "http://b", "http://c", "http://d", "http://e")
+			if got := setFiles(t, dir, "set-0"); !reflect.DeepEqual(got, []string{c.file}) {
+				t.Fatalf("set-0 holds %v, want only %s", got, c.file)
+			}
+		})
+	}
+}
+
+// A set that holds a mocks.gob and a mocks.yaml (an older keploy's --on-miss
+// record left such sets) is not added to, under either format: the insert
+// fails naming both files and neither file changes, since the readers read
+// the mocks.gob alone and a mock added to either would be lost or hide the
+// other's. Reading the set says the mocks.yaml is not read.
+func TestInsertMock_ASetWithAGobAndATextFileIsRefused(t *testing.T) {
+	t.Setenv("KEPLOY_MOCK_FORMAT", "")
+	dir := t.TempDir()
+	gobDB := newMockYamlForFormat(dir, mockFormatGob)
+	insertURLs(t, gobDB, "set-0", "http://g")
+	closeOK(t, gobDB)
+	set := filepath.Join(dir, "set-0")
+	text := []byte("# a mock file an older keploy wrote beside the gob one\n")
+	if err := os.WriteFile(filepath.Join(set, "mocks.yaml"), text, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gobBytes, err := os.ReadFile(filepath.Join(set, "mocks.gob"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, format := range []string{"yaml", mockFormatGob} {
+		t.Run(format+" writer", func(t *testing.T) {
+			ys := newMockYamlForFormat(dir, format)
+			err := ys.InsertMock(context.Background(), httpMockURL("http://new"), "set-0")
+			if !errors.Is(err, ErrMixedMockFiles) || !errors.Is(err, models.ErrMocksNotWritten) {
+				t.Fatalf("InsertMock = %v, want ErrMixedMockFiles and ErrMocksNotWritten", err)
+			}
+			for _, f := range []string{"mocks.gob", "mocks.yaml"} {
+				if !bytes.Contains([]byte(err.Error()), []byte(filepath.Join(set, f))) {
+					t.Fatalf("the error does not name %s: %v", f, err)
+				}
+			}
+			closeOK(t, ys)
+			if got, _ := os.ReadFile(filepath.Join(set, "mocks.gob")); !bytes.Equal(got, gobBytes) {
+				t.Fatal("mocks.gob changed")
+			}
+			if got, _ := os.ReadFile(filepath.Join(set, "mocks.yaml")); !bytes.Equal(got, text) {
+				t.Fatal("mocks.yaml changed")
+			}
+		})
+	}
+
+	core, logs := observer.New(zapcore.WarnLevel)
+	if _, err := New(zap.New(core), dir, "mocks").GetTestSetMocks(context.Background(), "set-0", models.BaseTime, time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC), nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	warned := logs.FilterMessageSnippet("only the gob one is read").All()
+	if len(warned) != 1 || warned[0].ContextMap()["not_read"] != filepath.Join(set, "mocks.yaml") {
+		t.Fatalf("reading the set warned %v, want one warning naming %s", warned, filepath.Join(set, "mocks.yaml"))
+	}
+}
+
+// A writer looks at a set's files again once they may have changed under it:
+// after DeleteMocksForSet (a re-record), and in its next session (after
+// Close: PromoteStagedSet and DiscardStagedSet close it too). A yaml writer
+// that added to a gob set and kept writing gob there after the set was
+// deleted would record the new set in a format it was not configured for.
+func TestInsertMock_ASetsFilesAreLookedAtAgainOnceTheyMayHaveChanged(t *testing.T) {
+	t.Setenv("KEPLOY_MOCK_FORMAT", "")
+	for _, c := range []struct {
+		name  string
+		clear func(t *testing.T, ys *MockYaml, dir string)
+	}{
+		{"deleted", func(t *testing.T, ys *MockYaml, _ string) {
+			if err := ys.DeleteMocksForSet(context.Background(), "set-0"); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"next session", func(t *testing.T, ys *MockYaml, dir string) {
+			closeOK(t, ys)
+			if err := os.Remove(filepath.Join(dir, "set-0", "mocks.gob")); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			rec := newMockYamlForFormat(dir, mockFormatGob)
+			insertURLs(t, rec, "set-0", "http://a")
+			closeOK(t, rec)
+
+			ys := newMockYamlForFormat(dir, "yaml")
+			insertURLs(t, ys, "set-0", "http://b")
+			closeOK(t, ys)
+			wantURLs(t, dir, "set-0", "http://a", "http://b")
+
+			// The writer has found the set to write in gob (as an insert into
+			// it does), with no mock queued that would land after the change.
+			if useGob, _, err := ys.insertFormat(context.Background(), filepath.Join(dir, "set-0"), "mocks"); err != nil || !useGob {
+				t.Fatalf("insertFormat = %v, %v; want gob", useGob, err)
+			}
+			c.clear(t, ys, dir)
+			insertURLs(t, ys, "set-0", "http://c")
+			closeOK(t, ys)
+			if got := setFiles(t, dir, "set-0"); !reflect.DeepEqual(got, []string{"mocks.yaml"}) {
+				t.Fatalf("set-0 holds %v, want only mocks.yaml", got)
+			}
+			wantURLs(t, dir, "set-0", "http://c")
+		})
 	}
 }

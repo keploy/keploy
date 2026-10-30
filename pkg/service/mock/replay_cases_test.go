@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -517,41 +518,112 @@ func TestAnAppendedMockNeverTakesASkippedDocumentsName(t *testing.T) {
 }
 
 // --on-miss record over a set on disk keeps the set's recorded mocks and adds
-// the captured ones, in either format, and they are in the set when it says
-// they were appended. Over a gob set it used to leave an empty mocks.gob: the
-// writer truncated the set's file, and keploy exited without closing it, the
-// captured mock still in its queue.
+// the captured ones, and they are in the set when it says they were appended:
+// for a set recorded in either format, under either configured format. Over a
+// gob set it used to leave an empty mocks.gob: the writer truncated the set's
+// file, and keploy exited without closing it, the captured mock still in its
+// queue. Across formats the captured mock went to a file of the configured
+// format that the readers did not read (a mocks.yaml beside a mocks.gob) or
+// that hid the recorded one (a mocks.gob beside a mocks.yaml): it is written
+// to the file the set has, in its format.
 func TestOnMissRecordKeepsTheRecordedSetAndAddsTheCapturedCalls(t *testing.T) {
-	for _, format := range []string{"yaml", "gob"} {
-		t.Run(format, func(t *testing.T) {
-			t.Setenv("KEPLOY_MOCK_FORMAT", format)
-			dir := t.TempDir()
-			httpTo := func(url string) *models.Mock {
-				return &models.Mock{Version: "api.keploy.io/v1beta1", Kind: models.HTTP, Spec: models.MockSpec{
-					HTTPReq:  &models.HTTPReq{Method: "GET", URL: url},
-					HTTPResp: &models.HTTPResp{StatusCode: 200},
-				}}
-			}
-			recorded := mockdb.New(zap.NewNop(), dir, "mocks")
-			for _, u := range []string{"http://dep/a", "http://dep/b", "http://dep/c"} {
-				require.NoError(t, recorded.InsertMock(context.Background(), httpTo(u), "set-0"))
-			}
-			require.NoError(t, recorded.Close())
+	ext := map[string]string{"yaml": "mocks.yaml", "gob": "mocks.gob"}
+	for _, recordedIn := range []string{"yaml", "gob"} {
+		for _, onMissIn := range []string{"yaml", "gob"} {
+			t.Run(recordedIn+"/"+onMissIn, func(t *testing.T) {
+				t.Setenv("KEPLOY_MOCK_FORMAT", "")
+				dir := t.TempDir()
+				recorded := mockdb.New(zap.NewNop(), dir, "mocks")
+				recorded.MockFormat = recordedIn
+				for _, u := range []string{"http://dep/a", "http://dep/b", "http://dep/c"} {
+					require.NoError(t, recorded.InsertMock(context.Background(), httpTo(u), "set-0"))
+				}
+				require.NoError(t, recorded.Close())
 
+				core, logs := observer.New(zapcore.InfoLevel)
+				onMiss := mockdb.New(zap.NewNop(), dir, "mocks")
+				onMiss.MockFormat = onMissIn
+				m := &mockService{logger: zap.New(core), instrumentation: capturingInstr{captured: []*models.Mock{httpTo("http://dep/new")}},
+					mockDB: onMiss, store: FileStore{}}
+				m.persistCaptured(context.Background(), "set-0")
+				require.Empty(t, logs.FilterLevelExact(zapcore.ErrorLevel).All())
+				require.Equal(t, 1, logs.FilterMessageSnippet("appended new dependency calls").Len())
+
+				require.Equal(t, []string{"mock-0 http://dep/a", "mock-1 http://dep/b", "mock-2 http://dep/c", "mock-3 http://dep/new"}, setMocks(t, dir))
+				files, err := os.ReadDir(filepath.Join(dir, "set-0"))
+				require.NoError(t, err)
+				var names []string
+				for _, f := range files {
+					names = append(names, f.Name())
+				}
+				require.Equal(t, []string{ext[recordedIn]}, names, "the set's one mock file, in the format it was recorded in")
+			})
+		}
+	}
+}
+
+// A set that holds a mocks.gob and a mocks.yaml, as an older keploy's
+// --on-miss record left one, is not added to: the captured calls are said, at
+// ERROR, not to be saved, with both files named, and neither file changes.
+func TestOnMissRecordRefusesASetWithTwoMockFiles(t *testing.T) {
+	t.Setenv("KEPLOY_MOCK_FORMAT", "")
+	dir := t.TempDir()
+	for _, format := range []string{"gob", "yaml"} {
+		db := mockdb.New(zap.NewNop(), filepath.Join(dir, format), "mocks")
+		db.MockFormat = format
+		require.NoError(t, db.InsertMock(context.Background(), httpTo("http://dep/"+format), "set-0"))
+		require.NoError(t, db.Close())
+	}
+	set := filepath.Join(dir, "set-0")
+	require.NoError(t, os.MkdirAll(set, 0o755))
+	before := map[string][]byte{}
+	for _, f := range []string{"mocks.gob", "mocks.yaml"} {
+		require.NoError(t, os.Rename(filepath.Join(dir, strings.TrimPrefix(filepath.Ext(f), "."), "set-0", f), filepath.Join(set, f)))
+		b, err := os.ReadFile(filepath.Join(set, f))
+		require.NoError(t, err)
+		before[f] = b
+	}
+
+	for _, onMissIn := range []string{"yaml", "gob"} {
+		t.Run(onMissIn, func(t *testing.T) {
 			core, logs := observer.New(zapcore.InfoLevel)
+			onMiss := mockdb.New(zap.NewNop(), dir, "mocks")
+			onMiss.MockFormat = onMissIn
 			m := &mockService{logger: zap.New(core), instrumentation: capturingInstr{captured: []*models.Mock{httpTo("http://dep/new")}},
-				mockDB: mockdb.New(zap.NewNop(), dir, "mocks"), store: FileStore{}}
+				mockDB: onMiss, store: FileStore{}}
 			m.persistCaptured(context.Background(), "set-0")
-			require.Empty(t, logs.FilterLevelExact(zapcore.ErrorLevel).All())
-			require.Equal(t, 1, logs.FilterMessageSnippet("appended new dependency calls").Len())
-
-			var got []string
-			require.NoError(t, mockdb.New(zap.NewNop(), dir, "mocks").WalkTestSetMocks(context.Background(), "set-0", func(mk *models.Mock, _, _ bool) {
-				got = append(got, mk.Name+" "+mk.Spec.HTTPReq.URL)
-			}))
-			require.Equal(t, []string{"mock-0 http://dep/a", "mock-1 http://dep/b", "mock-2 http://dep/c", "mock-3 http://dep/new"}, got)
+			require.Zero(t, logs.FilterMessageSnippet("appended new dependency calls").Len())
+			errs := logs.FilterLevelExact(zapcore.ErrorLevel).All()
+			require.Len(t, errs, 1)
+			require.Contains(t, errs[0].Message, "it is not saved")
+			msg := fmt.Sprint(errs[0].ContextMap()["error"])
+			require.Contains(t, msg, filepath.Join(set, "mocks.gob"))
+			require.Contains(t, msg, filepath.Join(set, "mocks.yaml"))
+			for f, b := range before {
+				got, err := os.ReadFile(filepath.Join(set, f))
+				require.NoError(t, err)
+				require.Equal(t, b, got, "%s changed", f)
+			}
 		})
 	}
+}
+
+// httpTo is a recorded HTTP call to url.
+func httpTo(url string) *models.Mock {
+	return &models.Mock{Version: "api.keploy.io/v1beta1", Kind: models.HTTP, Spec: models.MockSpec{
+		HTTPReq:  &models.HTTPReq{Method: "GET", URL: url},
+		HTTPResp: &models.HTTPResp{StatusCode: 200},
+	}}
+}
+
+// setMocks is set-0 under dir as replay reads it: each mock's name and URL.
+func setMocks(t *testing.T, dir string) []string {
+	t.Helper()
+	var got []string
+	require.NoError(t, mockdb.New(zap.NewNop(), dir, "mocks").WalkTestSetMocks(context.Background(), "set-0", func(mk *models.Mock, _, _ bool) {
+		got = append(got, mk.Name+" "+mk.Spec.HTTPReq.URL)
+	}))
+	return got
 }
 
 // closeFailStore is a mock set written in the background whose writer could
