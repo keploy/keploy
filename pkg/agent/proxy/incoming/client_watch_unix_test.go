@@ -854,7 +854,7 @@ func TestAPausedExchangeIsNotToldAsNotRecorded(t *testing.T) {
 // not recorded for its client's going too, both true. The control: a
 // pause that begins mid-answer while the app sends nothing more cuts no
 // capture, and costs nothing (told, not counted). The synchronous loop
-// counted none of the first three, the zero-copy loop not the cut one.
+// counted none of the first three, the zero-copy loop not the cut ones.
 func TestAnExchangeAPauseCostIsCountedOnceHoweverItEnds(t *testing.T) {
 	var paused atomic.Bool
 	stubIngressPaused(t, paused.Load)
@@ -968,6 +968,68 @@ func (c *pauseAtFirstEvent) Read(p []byte) (int, error) {
 // CloseWrite half-closes the client conn, as the hangUps shape that reads on
 // does.
 func (c *pauseAtFirstEvent) CloseWrite() error { return c.Conn.(*net.TCPConn).CloseWrite() }
+
+// An exchange the memory guard's pause keeps from being recorded as its
+// request comes is counted while it is still in flight, in either loop: the
+// recording's end reads the count (routes/record.go, the stream's end
+// summary) without waiting for an exchange that opened no window, so a long
+// poll or a stream still running then must already be in it. Both loops count
+// it before the request reaches the app, so the app having it orders the
+// read, with no clock. The synchronous loop counted it only as its handler
+// returned.
+func TestAPausedInFlightExchangeIsCountedBeforeItEnds(t *testing.T) {
+	var paused atomic.Bool
+	paused.Store(true)
+	stubIngressPaused(t, paused.Load)
+	for _, synchronous := range []bool{false, true} {
+		t.Run(fmt.Sprintf("synchronous %v", synchronous), func(t *testing.T) {
+			appLn, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := make(chan struct{})
+			release := make(chan struct{})
+			serveApp(t, appLn, func(w http.ResponseWriter, r *http.Request) {
+				close(got)
+				select {
+				case <-release:
+				case <-r.Context().Done():
+				}
+				_, _ = io.WriteString(w, "done")
+			})
+			mgr := syncMock.New(zap.NewNop())
+			_, client, served, _ := serveWatchedIn(t, syncMock.NewContext(context.Background(), mgr), synchronous, appLn, nil)
+			if _, err := client.Write([]byte("GET /poll HTTP/1.1\r\nHost: api\r\n\r\n")); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-got:
+			case <-never(t):
+				t.Fatal("never: the app got the request")
+			}
+			inFlight := mgr.NotRecordedUnderPressure().Total
+			close(release)
+			resp, err := http.ReadResponse(bufio.NewReader(client), nil)
+			if err != nil {
+				t.Fatalf("the answer: %v", err)
+			}
+			_, _ = io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			_ = client.Close()
+			select {
+			case <-served:
+			case <-never(t):
+				t.Fatal("never: the handler ended")
+			}
+			if after := mgr.NotRecordedUnderPressure().Total; after != 1 {
+				t.Fatalf("counted %d time(s) once the handler ended, want 1", after)
+			}
+			if inFlight != 1 {
+				t.Fatalf("counted %d time(s) while the exchange was in flight, want 1: a summary read then misses it", inFlight)
+			}
+		})
+	}
+}
 
 // A pause that begins mid-answer and cuts the capture of the rest is counted
 // as its exchange ends, not as its connection does: on a kept-alive

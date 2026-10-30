@@ -229,13 +229,15 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 	defer func() { win.Close() }()
 	// countPause counts the exchange in flight as not recorded under the
 	// memory guard's pause (syncMock NoteNotRecordedUnderPressure), if the
-	// pause kept it from being recorded: once, however it ends. Its end runs
-	// it, and every way out before its end does too (deferred here): its
-	// client's going, an app that failed, a close under pressure. Counted
-	// only at the end it reached, a paused stream whose client hung up was
-	// missing from the count, and so from the recording's summary. Deferred
-	// after win's, so it runs before win.Close: the count is in before the
-	// window's close lets a stop's drain end and its summary read the count.
+	// pause kept it from being recorded: once, however it ends. A pause read
+	// as the request comes runs it at once, while the exchange is in flight.
+	// Its end runs it, and every way out before its end does too (deferred
+	// here): its client's going, an app that failed, a close under pressure.
+	// Counted only at the end it reached, a paused stream whose client hung
+	// up was missing from the count, and so from the recording's summary.
+	// Deferred after win's, so it runs before win.Close: the count is in
+	// before the window's close lets a stop's drain end and its summary read
+	// the count.
 	countPause := func() {}
 	defer func() { countPause() }()
 
@@ -411,6 +413,15 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		// One that cannot be captured opens none: nothing would decide it.
 		if captureEnabled {
 			win = syncMock.FromContextOrGlobal(ctx).OpenWindow(reqTimestamp, nil)
+		}
+		// A pause read as the request comes is counted at once, as the
+		// zero-copy loop counts it: the exchange opens no window, so a stop's
+		// drain does not wait for it, and the recording's summary, read while
+		// a long poll or a stream it kept from being recorded is still in
+		// flight, must already hold it. The once flag makes the run as its
+		// handler returns a no-op.
+		if pausedAtRequest {
+			countPause()
 		}
 
 		// Request modifications for sync/sampling modes.
