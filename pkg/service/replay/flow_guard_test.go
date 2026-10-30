@@ -277,6 +277,25 @@ func TestFlowGuard_WhenKeployCannotTellTheReasonSaysSo(t *testing.T) {
 	}
 }
 
+// A call made before the set's first test that no test's read took (the
+// first read was cut short, or no test of the set was read) reaches keploy
+// at the set's end, which reads it for no test (unclaimedCalls: take with
+// no test and no response). Whatever the guard holds, it cannot say whether
+// the call's recorded answer reaches a test, and the call's reason says so,
+// and why: never that its answer reaches no test.
+func TestFlowGuard_ACallReadOnlyAtTheSetsEndSaysKeployCouldNotTell(t *testing.T) {
+	var s setCalls
+	s.reset(newFlowGuard([]*models.TestCase{guardCase("test-1", `{"item":"pen"}`, `{"tenant":"tenantA7K29Q"}`)}, nil,
+		[]*models.Mock{guardMock(`{"tenant":"tenantA7K29Q"}`)}))
+	if rest := s.take(context.Background(), []models.UnmatchedCall{startUpCall()}, "", nil); len(rest) != 0 {
+		t.Fatalf("the set's end keeps %+v as unclaimed; want the call as background work", rest)
+	}
+	want := madeBeforeFirst + ", and keploy could not tell whether its recorded answer reaches a test: it reached keploy only at the set's end, after every test was read"
+	if got := s.backgroundCalls(); len(got) != 1 || got[0].BackgroundWhy != want {
+		t.Fatalf("the set lists %+v; want it saying %q", got, want)
+	}
+}
+
 // The guard holds one test's words at a time: what it read for a test is
 // dropped as it reads the next, so what it keeps does not grow with the
 // set (keploy's no-unbounded-memory rule). 64 tests, each with a 96 KiB

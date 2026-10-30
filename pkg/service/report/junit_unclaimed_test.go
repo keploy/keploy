@@ -43,6 +43,25 @@ func TestBuildJUnitSuites_UnclaimedCalls(t *testing.T) {
 	}
 }
 
+// A call the agent placed outside every test's window (Kind outside_test)
+// but gave no instant is not background work: the agent marks a call made
+// after a test's read as background by when it was made (proxy.go's
+// madeBetweenTests), and a miss with no time is never so marked. The set's
+// end reads it as unclaimed, and the suite's failed case says where it was
+// made, not that keploy cannot place it.
+func TestBuildJUnitSuites_ACallPlacedOutsideEveryTestIsSaidAsMadeThere(t *testing.T) {
+	passed := []models.TestResult{{TestCaseID: "tc-1", Name: "s", Status: models.TestStatusPassed, TimeTaken: "1ms"}}
+	calls := []models.UnmatchedCall{{Protocol: "TCP", Destination: "127.0.0.1:9098", Kind: models.MissOutsideTest}}
+	s := buildJUnitSuites(map[string]*models.TestReport{"s": {Total: 1, Success: 1, Status: "FAILED", Tests: passed, UnclaimedCalls: calls}}).Suites[0]
+	last := s.Cases[len(s.Cases)-1]
+	if last.Name != junitUnclaimedCase || last.Failure == nil {
+		t.Fatalf("last case %+v, want %q failed", last, junitUnclaimedCase)
+	}
+	if want := "made outside every test: TCP to 127.0.0.1:9098"; !strings.Contains(last.Failure.Text, want) || strings.Contains(last.Failure.Text, "cannot place") {
+		t.Fatalf("failure text %q; want it saying %q, not that keploy cannot place the call", last.Failure.Text, want)
+	}
+}
+
 // Every call made in the last test's window (an extra call among them) is
 // said so, and so is the case's message.
 func TestBuildJUnitSuites_CallsMadeInTheLastTestAreSaidAsMadeThere(t *testing.T) {
