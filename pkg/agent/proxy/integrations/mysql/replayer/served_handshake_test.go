@@ -3,6 +3,7 @@ package replayer_test
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/binary"
 	"io"
 	"net"
@@ -29,6 +30,15 @@ import (
 // later call reads it.
 func handshakeServedOn(t *testing.T, tracker *learn.Tracker, recs []*models.Mock, served *models.Mock, hr41 *mysql.HandshakeResponse41Packet, login func(app net.Conn)) learn.Raw {
 	t.Helper()
+	return handshakeServedOver(t, tracker, recs, served, hr41, login, false)
+}
+
+// handshakeServedOver is handshakeServedOn; overTLS, the application asks
+// for TLS first, as a client with ssl-mode set does: it answers the greeting
+// with an SSLRequest (sslRequestPayload), upgrades the connection with a TLS
+// handshake with keploy's MITM, and sends hr41 and the rest over TLS.
+func handshakeServedOver(t *testing.T, tracker *learn.Tracker, recs []*models.Mock, served *models.Mock, hr41 *mysql.HandshakeResponse41Packet, login func(app net.Conn), overTLS bool) learn.Raw {
+	t.Helper()
 	mm := proxy.NewMockManager(nil, nil, zap.NewNop())
 	t.Cleanup(mm.Close)
 	mm.SetServedObserver(tracker.ServedMock)
@@ -51,11 +61,20 @@ func handshakeServedOn(t *testing.T, tracker *learn.Tracker, recs []*models.Mock
 	if err != nil {
 		t.Fatal(err)
 	}
-	sendPacket(t, app, 1, payload)
-	if login != nil {
-		login(app)
+	conn, seq := app, uint8(1)
+	if overTLS {
+		sendPacket(t, app, 1, sslRequestPayload(hr41))
+		c := tls.Client(app, &tls.Config{ServerName: "db.test", InsecureSkipVerify: true}) //nolint:gosec // keploy's MITM leaf is not under test
+		if err := c.Handshake(); err != nil {
+			t.Fatalf("the application's TLS handshake after its SSLRequest: %v", err)
+		}
+		conn, seq = c, 2
 	}
-	if v := readPacket(t, app); len(v) == 0 || v[0] != mysql.OK {
+	sendPacket(t, conn, seq, payload)
+	if login != nil {
+		login(conn)
+	}
+	if v := readPacket(t, conn); len(v) == 0 || v[0] != mysql.OK {
 		t.Fatalf("the application read %x as its verdict; want the recorded OK", v)
 	}
 	_ = app.Close()
@@ -67,6 +86,17 @@ func handshakeServedOn(t *testing.T, tracker *learn.Tracker, recs []*models.Mock
 	order := tracker.Placed().Order
 	first, last := order.Of(served)
 	return order.ServedView(served, learn.RawOf(served, true).ServedIn(first, last))
+}
+
+// sslRequestPayload is the SSLRequest a client that asks for TLS sends in
+// place of hr41 (which it sends once TLS is up): hr41's capability flags with
+// CLIENT_SSL, its max packet size and character set, and 23 bytes of filler.
+func sslRequestPayload(hr41 *mysql.HandshakeResponse41Packet) []byte {
+	p := make([]byte, 4+4+1+23)
+	binary.LittleEndian.PutUint32(p, hr41.CapabilityFlags|mysql.CLIENT_SSL)
+	binary.LittleEndian.PutUint32(p[4:], hr41.MaxPacketSize)
+	p[8] = hr41.CharacterSet
+	return p
 }
 
 // readPacket reads one MySQL packet's payload from conn.
@@ -256,14 +286,111 @@ func TestEveryMySQLHandshakeServeStatesTheViewItGave(t *testing.T) {
 	}
 }
 
+// tlsClient is withPid(pid) from a client that asked for TLS: CLIENT_SSL is
+// among its capability flags, in its SSLRequest and in the
+// HandshakeResponse41 it sends once TLS is up.
+func tlsClient(pid string) *mysql.HandshakeResponse41Packet {
+	hr := withPid(pid)
+	hr.CapabilityFlags |= mysql.CLIENT_SSL
+	return hr
+}
+
+// recordedTLSLogin is a recorded native-password login over TLS that the
+// server let in, named mock-0: the greeting, the client's SSLRequest, the
+// HandshakeResponse41 hr41 it sent once TLS was up, and the OK; each packet
+// the client sent as a recording holds it (recordedPacket).
+func recordedTLSLogin(t *testing.T, hr41 *mysql.HandshakeResponse41Packet) *models.Mock {
+	t.Helper()
+	m := replayer.HandshakeMockForTest()
+	greeting := m.Spec.MySQLResponses[0].Message.(*mysql.HandshakeV10Packet)
+	payload, err := connphase.EncodeHandshakeResponse41(context.Background(), zap.NewNop(), hr41)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Spec.MySQLRequests = []mysql.Request{
+		{PacketBundle: recordedPacket(t, greeting, mysql.HandshakeV10, 1, sslRequestPayload(hr41))},
+		{PacketBundle: recordedPacket(t, greeting, mysql.HandshakeV10, 2, payload)},
+	}
+	if typ := m.Spec.MySQLRequests[0].Header.Type; typ != mysql.SSLRequest {
+		t.Fatalf("the recorded SSLRequest decoded as a %s", typ)
+	}
+	m.Spec.MySQLResponses[1].Header.Header.SequenceID = 3
+	return m
+}
+
+// A connection whose client asks for TLS states its view as one without TLS
+// does: the packets the application sent are its SSLRequest and the
+// HandshakeResponse41 it sent over TLS, read after the MITM upgrade, and the
+// view is as recorded only where both are the recording's own. A recording
+// made without TLS serves such a client too (no recorded SSLRequest), and its
+// serve is a view of the packets the client sent. Before this row no
+// connection of the package's rows asked for TLS, so the HandshakeResponse41
+// read after the upgrade could go unnoted, and a pid only the live client
+// sent there would be learned (a false green), or the view stated without it.
+func TestAMySQLHandshakeOverTLSStatesTheViewItGave(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "1")
+	const (
+		unstated = "where its adapter did not say what it gave the application there"
+		path     = "body.ref"
+		recorded = "82"
+		fresh    = "9f3e"
+	)
+	for _, tc := range []struct {
+		name       string
+		plaintext  bool   // the recording was made without TLS
+		pid        string // the live client's pid
+		value      string // the later call's changed value
+		asRecorded bool
+		why        string // "" learns; else a part of the refusal
+	}{
+		{"a TLS handshake sent as recorded, a fresh value", false, "6801", fresh, true, ""},
+		{"a TLS handshake from another process, a fresh value", false, "4242", fresh, false, ""},
+		{"a TLS handshake from another process, the pid only it sent over TLS", false, "4242", "4242", false, "as record's full round gave it"},
+		{"a TLS client served from a recording without TLS, a fresh value", true, "6801", fresh, false, ""},
+		{"a TLS client served from a recording without TLS, the pid only it sent", true, "4242", "4242", false, "as record's full round gave it"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			served := recordedTLSLogin(t, tlsClient("6801"))
+			if tc.plaintext {
+				served = recordedLogin(t, replayer.HandshakeMockForTest(), withPid("6801"))
+			}
+			r := handshakeServedOver(t, learn.NewTracker(), []*models.Mock{served}, served, tlsClient(tc.pid), nil, true)
+			rec := learn.Shape{Leaves: map[string]learn.Leaf{path: {Path: path, Type: learn.String, Value: recorded}}}
+			now := learn.Shape{Leaves: map[string]learn.Leaf{path: {Path: path, Type: learn.String, Value: tc.value}}}
+			got := learn.Classify(learn.NewDriftCache(), []string{path}, now, rec, time.Now(), nil, []learn.Raw{r}, nil)
+			if len(got) != 1 {
+				t.Fatalf("%d verdicts; want one", len(got))
+			}
+			switch {
+			case tc.why == "" && got[0].Kind == learn.KindUnaccounted:
+				t.Fatalf("FALSE RED: %s refused (%q); want learned: no word of it stands in what F gave at %s", tc.value, got[0].Why, served.Name)
+			case tc.why != "" && got[0].Kind != learn.KindUnaccounted:
+				t.Fatalf("FALSE GREEN: %s %s (%q); want refused, naming %s", tc.value, got[0].Kind, got[0].Why, tc.why)
+			case tc.why != "" && (!strings.Contains(got[0].Why, served.Name) || !strings.Contains(got[0].Why, tc.why) || strings.Contains(got[0].Why, unstated)):
+				t.Fatalf("FALSE REASON: %s refused (%q); want it to name %s by what F gave there: %s", tc.value, got[0].Why, served.Name, tc.why)
+			}
+			if r.AsRecorded() != tc.asRecorded || r.Live() == tc.asRecorded {
+				t.Fatalf("%s read as recorded %v, with a view %v; want as recorded %v", served.Name, r.AsRecorded(), r.Live(), tc.asRecorded)
+			}
+		})
+	}
+}
+
 // With the proven switch off the connection phase states nothing, and serves
 // as it did: the recorded verdict, and the handshake read as a serve no
-// adapter stated (which no learn step reads with the switch off).
+// adapter stated (which no learn step reads with the switch off); over TLS
+// as well.
 func TestAMySQLHandshakeStatesNothingWithTheSwitchOff(t *testing.T) {
 	t.Setenv("KEPLOY_PROVEN", "0")
-	served := recordedLogin(t, replayer.HandshakeMockForTest(), withPid("6801"))
-	r := handshakeServedOn(t, learn.NewTracker(), []*models.Mock{served}, served, withPid("4242"), nil)
-	if r.AsRecorded() || r.Live() {
-		t.Fatalf("%s read as recorded %v, with a view %v; want nothing stated with the switch off", served.Name, r.AsRecorded(), r.Live())
+	for _, overTLS := range []bool{false, true} {
+		served := recordedLogin(t, replayer.HandshakeMockForTest(), withPid("6801"))
+		hr41 := withPid("4242")
+		if overTLS {
+			served, hr41 = recordedTLSLogin(t, tlsClient("6801")), tlsClient("4242")
+		}
+		r := handshakeServedOver(t, learn.NewTracker(), []*models.Mock{served}, served, hr41, nil, overTLS)
+		if r.AsRecorded() || r.Live() {
+			t.Fatalf("%s (over TLS %v) read as recorded %v, with a view %v; want nothing stated with the switch off", served.Name, overTLS, r.AsRecorded(), r.Live())
+		}
 	}
 }
