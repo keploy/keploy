@@ -7,6 +7,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/containerkey"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 // What the proxy learns of a test set's recorded destinations is read from
@@ -25,9 +26,16 @@ import (
 // (SeedRecordedDestinations). The proxy keeps them, and every staging derives
 // from them as from the mocks it stages: what the recording says of its
 // destinations is known from the start, read from the whole recording,
-// bounded by its distinct destinations. (The loopback ports a recording
-// reached, recorded.add, are read only by keploy mock, whose staging was
-// never narrowed, so they are not seeded.)
+// bounded by its distinct destinations.
+//
+// The ports a recording reached, which keploy mock's loopback rules read
+// (recordedPorts), are seeded the same way under the proven switch, where
+// keploy mock replay stages as keploy test does (keploy #4970): a local
+// dependency the recording reached only inside tests is a recorded port while
+// the app starts and while each test runs, whose own mocks reach the proxy
+// through the exact view, never staged. The store keeps the first mock of
+// each port (reachedPortKey) beside the destinations' (LoadDestinations).
+// Without the switch a set's ports are, as before, what its stagings stage.
 
 // destinationKey identifies a recorded destination as the proxy's seeded
 // rules read it: a MySQL mock's address (destAddr) with the recorded
@@ -129,7 +137,11 @@ func (p *Proxy) SeedRecordedDestinations(mocks []*models.Mock) {
 	// so nothing recorded stays resident: a MySQL mock's kind and metadata,
 	// and, of another dependency reached at a built-in default MySQL port,
 	// its kind and the address it reached there (otherDependencyAddr), which
-	// tells a replay that port held something other than MySQL.
+	// tells a replay that port held something other than MySQL. Under the
+	// proven switch the store also keeps the first mock of each port reached
+	// (reachedPortKey): one of no recorded destination (destinationKey "")
+	// feeds none of these rules, being no MySQL mock, at no default MySQL
+	// port, and of no HTTP/2 authority.
 	var seeded []*models.Mock
 	for _, mk := range mocks {
 		switch {
@@ -146,6 +158,14 @@ func (p *Proxy) SeedRecordedDestinations(mocks []*models.Mock) {
 	}
 	p.seededDests.Store(&seeded)
 	p.recordedH2.seed(mocks)
+	// The ports, of the mocks the store keeps of each (reachedPortKey), and
+	// none without the proven switch, where a set's ports are what its
+	// stagings stage.
+	if provenswitch.On() {
+		recorded.seed(mocks)
+	} else {
+		recorded.seed(nil)
+	}
 }
 
 // seededDestinations is the stored set's seeded recorded destinations

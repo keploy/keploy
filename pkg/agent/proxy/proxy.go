@@ -4243,7 +4243,9 @@ func (p *Proxy) loadUpstreamTLSTrustAnchors() {
 }
 
 func (p *Proxy) Record(ctx context.Context, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
-	recorded.reset()
+	// A recording replays nothing: no port is recorded, whatever a replay's
+	// store seeded before it.
+	recorded.forget()
 	p.serverFirstSaid.reset()
 	p.startContainerKeys(ctx)
 	// Reconcile the two mock-noise spellings on receipt. This is the process
@@ -4323,6 +4325,9 @@ func (p *Proxy) Record(ctx context.Context, mocks chan<- *models.Mock, opts mode
 }
 
 func (p *Proxy) Mock(ctx context.Context, opts models.OutgoingOptions) error {
+	// The ports the stored set's recording reached, seeded with its on-disk
+	// store (SeedRecordedDestinations), stay: keploy mock replay publishes
+	// the store after its Mock, keploy test may before.
 	recorded.reset()
 	p.startContainerKeys(ctx)
 	// Reconcile the two mock-noise spellings on receipt. This is the process

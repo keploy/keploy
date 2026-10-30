@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/config"
 	proxyPkg "go.keploy.io/server/v3/pkg/agent/proxy"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -523,5 +524,55 @@ func TestAStoreSeedsTheProxyWithItsRecordedDestinations(t *testing.T) {
 	a.finalizeClientMocks(context.Background(), &ClientMockStorage{})
 	if want := [][]string{{"cache", "db-first"}, nil}; !reflect.DeepEqual(p.seeded, want) {
 		t.Fatalf("seeded %v; want the first mock of each destination, then none", p.seeded)
+	}
+}
+
+// Under the proven switch keploy mock replay stages only what was recorded
+// before the set's first test (keploy #4970), so the loopback ports a
+// recording reached, which keploy mock's loopback rules read, are seeded from
+// the on-disk store when it is published, as its destinations are: a local
+// dependency the recording reached only inside a test is a recorded port
+// before any staging, and one it never reached is not. A store with no
+// on-disk store seeds none, replacing the previous store's.
+func TestAStoreSeedsTheProxyWithThePortsItsRecordingReached(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "1")
+	at := func(name, addr string, d time.Duration, startedByTests bool) *models.Mock {
+		m := stageMock(name, "/q", stageT0.Add(d))
+		m.Spec.Metadata["destAddr"] = addr
+		if startedByTests {
+			m.Spec.Metadata["startedByTests"] = "true"
+		}
+		return m
+	}
+	disk, err := proxyPkg.NewDiskMocks(zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = disk.Close() })
+	for _, m := range []*models.Mock{
+		at("boot", "10.0.0.5:443", -5*time.Second, false),
+		at("in-test", "127.0.0.1:18094", time.Second, false),
+		at("in-test-later", "127.0.0.1:18094", time.Minute, false),
+		at("started", "127.0.0.1:18095", time.Minute, true),
+	} {
+		if err := disk.Add(m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	disk.Finalize()
+	a := &Agent{logger: zap.NewNop(), Proxy: proxyPkg.New(zap.NewNop(), nil, &config.Config{})}
+	t.Cleanup(func() { a.finalizeClientMocks(context.Background(), &ClientMockStorage{}) })
+	a.finalizeClientMocks(context.Background(), &ClientMockStorage{diskMocks: disk})
+	if !proxyPkg.RecordedPort(18094) {
+		t.Fatal("the local dependency the recording reached only inside a test is not a recorded port; its connect would be refused")
+	}
+	for _, port := range []uint32{18095, 18096} {
+		if proxyPkg.RecordedPort(port) {
+			t.Fatalf("port %d is a recorded outside dependency; want it only a test-started one's, or never reached", port)
+		}
+	}
+	a.finalizeClientMocks(context.Background(), &ClientMockStorage{})
+	if proxyPkg.RecordedPort(18094) {
+		t.Fatal("a store with no on-disk store kept the previous store's ports")
 	}
 }

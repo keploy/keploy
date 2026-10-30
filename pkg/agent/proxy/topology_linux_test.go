@@ -159,8 +159,8 @@ func hold(t *testing.T) *exec.Cmd {
 
 func provenTreeProxy(t *testing.T) (*Proxy, *rowSink) {
 	t.Helper()
-	recorded.reset()
-	t.Cleanup(recorded.reset)
+	recorded.forget()
+	t.Cleanup(recorded.forget)
 	t.Setenv("KEPLOY_PROVEN", "1")
 	p := selfCallProxy()
 	s := &rowSink{}
@@ -471,8 +471,8 @@ func TestUnderTheSwitchAppMarkingDoesNotMakeATreeListenerADependency(t *testing.
 	}
 	port := pingServer(t)
 
-	recorded.reset()
-	t.Cleanup(recorded.reset)
+	recorded.forget()
+	t.Cleanup(recorded.forget)
 	t.Setenv("KEPLOY_PROVEN", "")
 	if served, _, _ := callTree(t, selfCallProxy(), port, uint32(os.Getppid())); served {
 		t.Fatal("with the switch off a dependency by app marking stays on the mock path")
@@ -744,8 +744,8 @@ func TestUnderTheSwitchACallToAnAppTheCallerStartedIsLiveThroughTheLiveHandler(t
 
 // With the switch off nothing is told, whatever the call.
 func TestOffTheSwitchNoRowIsTold(t *testing.T) {
-	recorded.reset()
-	t.Cleanup(recorded.reset)
+	recorded.forget()
+	t.Cleanup(recorded.forget)
 	t.Setenv("KEPLOY_PROVEN", "")
 	s := &rowSink{}
 	p := selfCallProxy()
@@ -794,8 +794,8 @@ func TestHandleConnectionListsAMockedLocalDestinationOnlyWhenItIsMocked(t *testi
 		{models.MODE_RECORD, false, false, false}, {models.MODE_RECORD, true, false, false}, {models.MODE_RECORD, false, true, false},
 	} {
 		t.Run(fmt.Sprintf("%s/passthrough=%v/container=%v/unread=%v", tc.mode, tc.passthrough, tc.container, tc.unread), func(t *testing.T) {
-			recorded.reset()
-			t.Cleanup(recorded.reset)
+			recorded.forget()
+			t.Cleanup(recorded.forget)
 			t.Setenv("KEPLOY_PROVEN", "1")
 			upstream, _, _ := echoUpstream(t)
 			saved := containerkey.Default
@@ -887,8 +887,8 @@ func TestHandleConnectionNeverListsARealDestinationMocked(t *testing.T) {
 		container bool
 	}{{models.MODE_TEST, false}, {models.MODE_TEST, true}, {models.MODE_RECORD, false}, {models.MODE_RECORD, true}} {
 		t.Run(fmt.Sprintf("%s/container=%v", tc.mode, tc.container), func(t *testing.T) {
-			recorded.reset()
-			t.Cleanup(recorded.reset)
+			recorded.forget()
+			t.Cleanup(recorded.forget)
 			t.Setenv("KEPLOY_PROVEN", "1")
 			upstream, _, _ := echoUpstream(t)
 			saved := containerkey.Default
@@ -976,8 +976,8 @@ func TestHandleConnectionNeverListsADestinationABypassRulePassesThroughMocked(t 
 		{models.MODE_RECORD, overTLS, func(port uint) models.BypassRule { return models.BypassRule{Host: "^localhost$", Port: port} }, true},
 	} {
 		t.Run(fmt.Sprintf("%s/kind=%d/through=%v", tc.mode, tc.kind, tc.through), func(t *testing.T) {
-			recorded.reset()
-			t.Cleanup(recorded.reset)
+			recorded.forget()
+			t.Cleanup(recorded.forget)
 			resetBypassRulesWarned(t)
 			t.Setenv("KEPLOY_PROVEN", "1")
 			var wrap func(net.Listener) net.Listener
@@ -1104,8 +1104,8 @@ func TestHandleConnectionListsAnHTTPConnectionABypassRulePassesThroughOnlyForACa
 			rule = "host"
 		}
 		t.Run(fmt.Sprintf("%s/%s/%v", tc.mode, rule, tc.paths), func(t *testing.T) {
-			recorded.reset()
-			t.Cleanup(recorded.reset)
+			recorded.forget()
+			t.Cleanup(recorded.forget)
 			resetBypassRulesWarned(t)
 			t.Setenv("KEPLOY_PROVEN", "1")
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
