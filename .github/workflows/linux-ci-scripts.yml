@@ -7,6 +7,10 @@ name: Linux CI scripts
 # index is broken, which an ordinary run never shows. The tests make all three
 # happen on purpose, against a stub mirror. They run on every change to the
 # helper or its tests.
+#
+# Also here: free-port.sh, the port the compose lanes publish their app on,
+# whose window keeps clear of the port Docker's DNS server holds in every
+# container on a user-defined network. Its tests check that on Docker itself.
 
 on:
   push:
@@ -15,11 +19,15 @@ on:
     paths:
       - '.github/workflows/test_workflow_scripts/apt-install.sh'
       - '.github/workflows/test_workflow_scripts/apt-install.tests.sh'
+      - '.github/workflows/test_workflow_scripts/free-port.sh'
+      - '.github/workflows/test_workflow_scripts/free-port.tests.sh'
       - '.github/workflows/linux-ci-scripts.yml'
   pull_request:
     paths:
       - '.github/workflows/test_workflow_scripts/apt-install.sh'
       - '.github/workflows/test_workflow_scripts/apt-install.tests.sh'
+      - '.github/workflows/test_workflow_scripts/free-port.sh'
+      - '.github/workflows/test_workflow_scripts/free-port.tests.sh'
       - '.github/workflows/linux-ci-scripts.yml'
 
 permissions:
@@ -109,3 +117,16 @@ jobs:
             echo "::error::apt's list cleanup kept the sentinel, so the check above proves nothing"
             exit 1
           fi
+
+  # Docker's DNS server listens in each container on a user-defined network
+  # on a port of the ephemeral range, so an app given a port the kernel picked
+  # could not bind it there (job 124142018005). The tests start one such
+  # container: its pull and start are most of a run.
+  free-port:
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test free-port.sh (its window, busy and skipped ports, Docker's DNS port)
+        run: bash .github/workflows/test_workflow_scripts/free-port.tests.sh

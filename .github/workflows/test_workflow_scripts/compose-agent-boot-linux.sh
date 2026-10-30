@@ -66,7 +66,8 @@ WORK="$(mktemp -d)"
 cd "$WORK" || exit 1
 FAIL=0
 ID=$$
-PORT=$(python3 -c 'import socket; s = socket.socket(); s.bind(("", 0)); print(s.getsockname()[1])')
+source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/free-port.sh"
+PORT=$(free_port) || exit 1
 EVENTS_PID=""
 ACTOR_PID=""
 

@@ -9,7 +9,9 @@
 #
 # The app listens on the same port inside its container as on the host
 # (PORT:PORT): keploy sends a test to the port the recording names, which is
-# the container's.
+# the container's. free_port picks it below the ephemeral range: one the
+# kernel picks can be the port Docker's DNS server holds in the app's network
+# namespace, and the app cannot bind it (free-port.sh).
 #
 # The app answers GET /price/<id> with its dependency's answer, and as it is
 # stopped publishes POST /shutdown {"msg": $SHUTDOWN_MSG} to the dependency
@@ -72,7 +74,8 @@ FAIL=0
 ID=$$
 PROJECT="cps$ID"
 APP="cps-app-$ID"
-PORT=$(python3 -c 'import socket; s = socket.socket(); s.bind(("", 0)); print(s.getsockname()[1])')
+source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/free-port.sh"
+PORT=$(free_port) || exit 1
 # KNAME is the name keploy is given the app by (--container-name).
 KNAME="$APP"
 fail() {
