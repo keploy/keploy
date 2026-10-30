@@ -12,6 +12,7 @@ import (
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/api/types/filters"
+	"github.com/docker/docker/client"
 	"github.com/docker/docker/errdefs"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -164,32 +165,56 @@ func (a *App) composeAbortEnds(ctx context.Context, project string, m events.Mes
 // From keploy's clock, a daemon ahead of it by more than the retry's gap
 // replays the last attempt's dies to the retried up's watch, and the project
 // as that abort left it reads as the abort: keploy killed every retried up
-// before compose started anything. A read that fails is read again
-// (composeAbortRead); a daemon that will not say its time (it refuses the
-// read, or gives none) leaves keploy's clock, which is as right as the
-// daemon's is close to it.
+// before compose started anything.
+//
+// The up starts only once this read is done, so it never waits on a daemon
+// that will not say its time: one that refuses the read, gives no time,
+// cannot be reached by keploy's Engine API client (DOCKER_HOST, else the
+// default socket, which is not always the daemon the compose CLI uses), or
+// fails the read composeAbortSinceReads times, leaves keploy's clock, which
+// is as right as the daemon's is close to it. A daemon keploy cannot reach
+// gives the watch no events either, so that up runs unwatched, as it did
+// before the watch.
 func (a *App) composeAbortSince(ctx context.Context) time.Time {
 	var since time.Time
+	var unsaid error
+	reads := 0
 	_ = a.composeAbortRead(ctx, "the docker daemon's clock", func(rctx context.Context) error {
+		reads++
 		info, err := a.docker.Info(rctx)
-		if err != nil {
-			if composeAbortDaemonRefuses(err) {
-				a.logger.Debug("the docker daemon does not say its time; the compose abort's watch reads its events from keploy's clock", zap.Error(err))
-				return nil
+		switch {
+		case err == nil:
+			if since, err = time.Parse(time.RFC3339Nano, info.SystemTime); err != nil || since.IsZero() {
+				since, unsaid = time.Time{}, fmt.Errorf("the daemon gave the time %q", info.SystemTime)
 			}
-			return err
+			return nil
+		case composeAbortDaemonRefuses(err), client.IsErrConnectionFailed(err):
+			unsaid = err
+			return nil
 		}
-		if since, err = time.Parse(time.RFC3339Nano, info.SystemTime); err != nil {
-			a.logger.Debug("the docker daemon gave no time keploy reads; the compose abort's watch reads its events from keploy's clock",
-				zap.String("systemTime", info.SystemTime), zap.Error(err))
+		// Every read before this one failed too. Bounded by a count, not a
+		// time: a daemon that keeps failing this one request (a 5xx) must
+		// not hold the up's start.
+		if reads >= composeAbortSinceReads {
+			unsaid = err
+			return nil
 		}
-		return nil
+		return err
 	})
+	if unsaid != nil {
+		a.logger.Warn("keploy could not read the docker daemon's time; it reads the daemon's events for compose aborting the up before the application started from keploy's clock instead",
+			zap.Int("reads", reads), zap.Error(unsaid))
+	}
 	if since.IsZero() {
 		return time.Now()
 	}
 	return since
 }
+
+// composeAbortSinceReads is how many failed reads of the daemon's time
+// (other than a refusal or no connection, each of which ends the reads at
+// once) the watch makes before it takes keploy's clock.
+const composeAbortSinceReads = 3
 
 // composeAbortDaemonRefuses reports whether err is the daemon's answer that
 // it will not serve a request, which reading it again does not change: one

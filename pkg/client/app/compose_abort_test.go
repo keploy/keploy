@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,13 +13,16 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/api/types/system"
+	"github.com/docker/docker/client"
 	"github.com/docker/docker/errdefs"
+	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -237,30 +241,27 @@ type abortedUp struct {
 	afterAgent             func(ended string)
 }
 
-// playAbortedUp is the compose-dep-retry lane's all-attached case: the
-// dependency exits before it is healthy, compose aborts and stops every
-// container, keploy's agent with it, and the app's container, which it never
-// started, stays "created". docker compose v5.6.1's up then waits for that
-// container to go, forever, unless it happened to return first. The stand-in
-// up waits until its file exists, which only afterAgent may write. keploy
-// must see the stack's end in the daemon's events and end the up itself (not
-// at the dependency's exit alone, while the agent still runs), leave the
-// project as compose left it (no down: the retry's decision reads it), and
-// retry the bring-up, which comes up this time.
-func playAbortedUp(t *testing.T, d *abortDaemon, p abortedUp) {
+// abortedUpRun is run() of the compose-dep-retry lane's app on a daemon,
+// with the stand-in docker CLI (stubDockerCLI): the first up runs until the
+// file ended exists (only a kill ends it before), then exits 3; the retried
+// up exits 0 at once. ran gives run()'s result once it returns.
+type abortedUpRun struct {
+	argvLog, ended string
+	ran            chan models.AppError
+}
+
+// startAbortedUpRun starts that run() on dc, and returns once its first up
+// has started its child (see stubDockerCLI). The test's cleanup ends the
+// stand-in up and the run.
+func startAbortedUpRun(t *testing.T, dc docker.Client) abortedUpRun {
 	t.Helper()
 	ps := `{"Service":"dep","State":"exited","ExitCode":3,"ID":"tmpproj-dep-1"}
 {"Service":"runner","State":"created","ExitCode":0,"ID":"runner"}
 {"Service":"keploy-agent","State":"exited","ExitCode":0,"ID":"keploy-v3-test"}
 `
-	argvLog := stubDockerCLI(t, ps, 0)
-	ended := filepath.Join(t.TempDir(), "up-ends")
-	t.Setenv("KEPLOY_STUB_UP_WAIT_FILE", ended)
+	r := abortedUpRun{argvLog: stubDockerCLI(t, ps, 0), ended: filepath.Join(t.TempDir(), "up-ends"), ran: make(chan models.AppError, 1)}
+	t.Setenv("KEPLOY_STUB_UP_WAIT_FILE", r.ended)
 	t.Setenv("KEPLOY_STUB_UP_CODE", "3")
-	dc := p.dc
-	if dc == nil {
-		dc = d
-	}
 	a := &App{
 		logger:          zap.NewNop(),
 		docker:          dc,
@@ -274,23 +275,46 @@ func playAbortedUp(t *testing.T, d *abortDaemon, p abortedUp) {
 		opts:            models.SetupOptions{Mode: models.MODE_RECORD},
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	ran := make(chan models.AppError, 1)
-	go func() { ran <- a.run(ctx) }()
+	go func() { r.ran <- a.run(ctx) }()
 	t.Cleanup(func() {
 		// The stand-in up waits for this file: one keploy did not end (its
 		// kill broken) ends here, not as an orphan of the test.
-		_ = os.WriteFile(ended, nil, 0o600)
+		_ = os.WriteFile(r.ended, nil, 0o600)
 		cancel()
 		select {
-		case <-ran:
+		case appErr := <-r.ran:
+			r.ran <- appErr
 		case <-time.After(time.Minute):
 			// A run() stuck past its stop (a read that outlives the watch)
 			// fails the test here rather than hanging the package.
 			t.Errorf("run() did not return within a minute of its context's end")
 		}
 	})
+	// Until the first up has set its traps and started its child, an end of
+	// it would not be the end of an up that has them.
+	eventually(t, "the up starts", func() bool { return strings.Contains(recordedLog(t, r.argvLog), "UP-CHILD-STARTED") })
+	return r
+}
 
-	eventually(t, "the up starts", func() bool { return strings.Contains(recordedLog(t, argvLog), "ARG up") })
+// playAbortedUp is the compose-dep-retry lane's all-attached case: the
+// dependency exits before it is healthy, compose aborts and stops every
+// container, keploy's agent with it, and the app's container, which it never
+// started, stays "created". docker compose v5.6.1's up then waits for that
+// container to go, forever, unless it happened to return first. The stand-in
+// up waits until its file exists, which only afterAgent may write. keploy
+// must see the stack's end in the daemon's events and end the up itself (not
+// at the dependency's exit alone, while the agent still runs), leave the
+// project as compose left it (no down: the retry's decision reads it), and
+// retry the bring-up, which comes up this time.
+func playAbortedUp(t *testing.T, d *abortDaemon, p abortedUp) {
+	t.Helper()
+	dc := p.dc
+	if dc == nil {
+		dc = d
+	}
+	r := startAbortedUpRun(t, dc)
+	argvLog, ended, ran := r.argvLog, r.ended, r.ran
+
 	// The up makes the project: the dependency and keploy's agent run, the
 	// app waits on the dependency's health.
 	d.add(&abortContainer{name: "tmpproj-dep-1", service: "dep", status: "running"},
@@ -342,6 +366,16 @@ func playAbortedUp(t *testing.T, d *abortDaemon, p abortedUp) {
 	if strings.Contains(before, "UP-SIGNALLED") {
 		t.Fatalf("keploy ended the up it saw abort with a signal compose can catch, not a kill\n%s", log)
 	}
+	// The first up started a child, as the docker CLI starts its compose
+	// plugin: keploy's kill is of the up's whole process group, so no part
+	// of the aborted up is left waiting on the app's container beside the
+	// retried up.
+	if !strings.Contains(before, "UP-CHILD-STARTED") {
+		t.Fatalf("the stand-in's first up started no child\n%s", log)
+	}
+	if strings.Contains(before, "UP-CHILD-OUTLIVED") {
+		t.Fatalf("a child of the aborted up outlived keploy's end of it (keploy killed the up's process group leader, not the group)\n%s", log)
+	}
 	// The retry removes the crashed dependency; the app's container goes
 	// only in the run's teardown, after the retried up.
 	trail := d.trailNow()
@@ -386,29 +420,41 @@ func TestAComposeUpThatAbortedBeforeTheAppStartedEndsAndIsRetried(t *testing.T) 
 // when the test sends on breakFirst; the stream asked for after it opens only
 // once the test closes reopen, and asked is closed as the watch asks for it.
 // Its next read of the daemon's time fails once failInfo is set (as the
-// others, at once or slow); it refuses every one when infoRefused is set.
+// others, at once or slow); every one fails with infoErr when that is set,
+// and says the time infoTime when that is set. infoReads counts those reads.
+// Once agentFails is set, every inspect of keploy's agent's container fails,
+// as a daemon's that fails it for good (a socket proxy's rule); agentReads
+// counts those inspects.
 type flakyDaemon struct {
 	*abortDaemon
-	agent       string
-	slow        bool
-	infoRefused bool
-	breakFirst  chan error
-	asked       chan struct{}
-	reopen      chan struct{}
+	agent      string
+	slow       bool
+	infoErr    error
+	infoTime   *string
+	breakFirst chan error
+	asked      chan struct{}
+	reopen     chan struct{}
 
 	fmu                           sync.Mutex
 	failList, failAgent, failInfo bool
-	listFails                     bool
+	listFails, agentFails         bool
 	listNeeds                     time.Duration
-	streams                       int
+	streams, infoReads            int
+	agentReads                    int
 }
 
 func (d *flakyDaemon) Info(ctx context.Context) (system.Info, error) {
-	if d.infoRefused {
-		return system.Info{}, errdefs.Forbidden(errors.New("Error response from daemon: forbidden by the socket proxy"))
+	d.fmu.Lock()
+	d.infoReads++
+	d.fmu.Unlock()
+	if d.infoErr != nil {
+		return system.Info{}, d.infoErr
 	}
 	if err := d.fails(ctx, &d.failInfo); err != nil {
 		return system.Info{}, err
+	}
+	if d.infoTime != nil {
+		return system.Info{SystemTime: *d.infoTime}, nil
 	}
 	return d.abortDaemon.Info(ctx)
 }
@@ -460,6 +506,15 @@ func (d *flakyDaemon) ContainerList(ctx context.Context, o container.ListOptions
 
 func (d *flakyDaemon) ContainerInspect(ctx context.Context, ref string) (container.InspectResponse, error) {
 	if ref == d.agent {
+		d.fmu.Lock()
+		fails := d.agentFails
+		if fails {
+			d.agentReads++
+		}
+		d.fmu.Unlock()
+		if fails {
+			return container.InspectResponse{}, errdefs.Forbidden(errors.New("Error response from daemon: forbidden by the socket proxy"))
+		}
 		if err := d.fails(ctx, &d.failAgent); err != nil {
 			return container.InspectResponse{}, err
 		}
@@ -644,12 +699,137 @@ func TestTheAbortWatchReadsEventsOnTheDaemonsClock(t *testing.T) {
 	}
 }
 
-// TestAnAbortWatchOnADaemonThatWillNotSayItsTime: a daemon that refuses
-// to say its time (a socket proxy that forbids the request) leaves the watch
-// on keploy's clock: the up starts, and its abort is seen and retried.
+// TestAnAbortWatchOnADaemonThatWillNotSayItsTime: the up starts only once
+// the watch has read the daemon's time, so a daemon that will not say it
+// must leave the watch on keploy's clock, not hold the up: one that refuses
+// the read, cannot be reached, or gives no time it reads, at the first read;
+// one whose every read fails (a 5xx), after composeAbortSinceReads reads.
+// The up starts, and its abort is seen and retried. Each of the run's two up
+// attempts (the aborted one and its retry) reads the time.
 func TestAnAbortWatchOnADaemonThatWillNotSayItsTime(t *testing.T) {
-	d := newAbortDaemon("tmpproj")
-	playAbortedUp(t, d, abortedUp{dc: &flakyDaemon{abortDaemon: d, agent: "keploy-v3-test", infoRefused: true}})
+	refused := errors.New("Error response from daemon: not served")
+	empty, malformed := "", "Thu Oct 30 15:25:00 IST 2026"
+	for _, tc := range []struct {
+		name  string
+		err   error
+		time  *string
+		perUp int
+	}{
+		{name: "forbidden (a socket proxy's rule)", err: errdefs.Forbidden(refused), perUp: 1},
+		{name: "unauthorized", err: errdefs.Unauthorized(refused), perUp: 1},
+		{name: "not found", err: errdefs.NotFound(refused), perUp: 1},
+		{name: "not implemented", err: errdefs.NotImplemented(refused), perUp: 1},
+		{name: "an invalid parameter", err: errdefs.InvalidParameter(refused), perUp: 1},
+		{name: "keploy's client cannot connect", err: client.ErrorConnectionFailed("unix:///run/user/1000/docker.sock"), perUp: 1},
+		{name: "an empty time", time: &empty, perUp: 1},
+		{name: "a time keploy does not read", time: &malformed, perUp: 1},
+		{name: "every read fails (a 500)", err: errdefs.System(errors.New("Error response from daemon: internal error")), perUp: composeAbortSinceReads},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := newAbortDaemon("tmpproj")
+			fd := &flakyDaemon{abortDaemon: d, agent: "keploy-v3-test", infoErr: tc.err, infoTime: tc.time}
+			playAbortedUp(t, d, abortedUp{dc: fd})
+			fd.fmu.Lock()
+			reads := fd.infoReads
+			fd.fmu.Unlock()
+			if want := 2 * tc.perUp; reads != want {
+				t.Fatalf("the two ups read the daemon's time %d times, want %d (%d each)", reads, want, tc.perUp)
+			}
+		})
+	}
+}
+
+// TestAnAbortWatchOnADaemonKeployCannotReachLetsTheUpStart: keploy's Engine
+// API client is client.FromEnv (DOCKER_HOST, else the default socket), while
+// the compose CLI keploy runs reads its own context, or runs through sudo:
+// keploy may not reach the daemon the up uses (Docker Desktop for Linux,
+// rootless, colima; a user not in the docker group). With a real client at
+// such a DOCKER_HOST, the watch takes keploy's clock at the first read and
+// returns, so the up starts, unwatched as before the watch. It read the
+// daemon's time for ever before, and the up never started.
+func TestAnAbortWatchOnADaemonKeployCannotReachLetsTheUpStart(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		sock func(t *testing.T) string
+	}{
+		{name: "no socket at DOCKER_HOST", sock: func(t *testing.T) string {
+			return filepath.Join(t.TempDir(), "docker.sock")
+		}},
+		{name: "a socket nobody listens on", sock: func(t *testing.T) string {
+			p := filepath.Join(t.TempDir(), "docker.sock")
+			l, err := net.Listen("unix", p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			l.(*net.UnixListener).SetUnlinkOnClose(false)
+			_ = l.Close()
+			return p
+		}},
+		{name: "a socket keploy's user may not open", sock: func(t *testing.T) string {
+			if os.Geteuid() == 0 {
+				t.Skip("root opens any socket")
+			}
+			p := filepath.Join(t.TempDir(), "docker.sock")
+			l, err := net.Listen("unix", p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = l.Close() })
+			if err := os.Chmod(p, 0); err != nil {
+				t.Fatal(err)
+			}
+			return p
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if runtime.GOOS == "windows" {
+				t.Skip("a unix socket DOCKER_HOST")
+			}
+			t.Setenv("DOCKER_HOST", "unix://"+tc.sock(t))
+			dc, err := docker.New(zap.NewNop(), &config.Config{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			cd := &infoCountingDaemon{Client: dc}
+			a := &App{logger: zap.NewNop(), docker: cd, kind: utils.DockerCompose,
+				keployContainer: "keploy-v3-test", container: "runner", composeService: "runner"}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			type watch struct {
+				upCtx context.Context
+				stop  func()
+			}
+			watched := make(chan watch, 1)
+			go func() {
+				upCtx, stop := a.watchComposeAbort(ctx)
+				watched <- watch{upCtx, stop}
+			}()
+			var w watch
+			select {
+			case w = <-watched:
+			case <-time.After(time.Minute):
+				t.Fatal("the watch did not return within a minute: the up waits for the time of a daemon keploy's Engine API client cannot reach")
+			}
+			if err := w.upCtx.Err(); err != nil {
+				t.Fatalf("the watch ended the up it let start: %v", context.Cause(w.upCtx))
+			}
+			w.stop()
+			if n := cd.reads.Load(); n != 1 {
+				t.Fatalf("the watch read the time of a daemon it cannot reach %d times, want 1", n)
+			}
+		})
+	}
+}
+
+// infoCountingDaemon counts its reads of the daemon's time.
+type infoCountingDaemon struct {
+	docker.Client
+	reads atomic.Int32
+}
+
+func (d *infoCountingDaemon) Info(ctx context.Context) (system.Info, error) {
+	d.reads.Add(1)
+	return d.Client.Info(ctx)
 }
 
 // TestAReadThatKeepsFailingEndsWithTheUp: from the agent's die on, every list
@@ -672,6 +852,42 @@ func TestAReadThatKeepsFailingEndsWithTheUp(t *testing.T) {
 			}
 		},
 	})
+}
+
+// TestAnAgentReadThatKeepsFailingEndsWithTheUp: from the project's first
+// die on, every inspect of keploy's agent's container fails (a socket proxy
+// that forbids it), so the watch never learns its project, and compose's up
+// returns on its own. That read ends with the watch, which ends with the up:
+// run() returns, and keploy retries the bring-up.
+func TestAnAgentReadThatKeepsFailingEndsWithTheUp(t *testing.T) {
+	d := newAbortDaemon("tmpproj")
+	fd := &flakyDaemon{abortDaemon: d, agent: "keploy-v3-test"}
+	r := startAbortedUpRun(t, fd)
+	d.add(&abortContainer{name: "tmpproj-dep-1", service: "dep", status: "running"},
+		&abortContainer{name: "keploy-v3-test", service: keployAgentComposeService, status: "running"},
+		&abortContainer{name: "runner", service: "runner", status: "created"})
+	fd.fmu.Lock()
+	fd.agentFails = true
+	fd.fmu.Unlock()
+	d.exit("tmpproj-dep-1", 3)
+	eventually(t, "the watch reads keploy's agent's container again", func() bool {
+		fd.fmu.Lock()
+		defer fd.fmu.Unlock()
+		return fd.agentReads >= 2
+	})
+	d.exit("keploy-v3-test", 0)
+	if err := os.WriteFile(r.ended, nil, 0o600); err != nil {
+		t.Fatalf("could not end the stand-in up: %v", err)
+	}
+	select {
+	case appErr := <-r.ran:
+		r.ran <- appErr
+	case <-time.After(time.Minute):
+		t.Fatalf("run() did not return within a minute of the up's own return: the watch's read of keploy's agent outlives the up\n%s", recordedLog(t, r.argvLog))
+	}
+	if log := recordedLog(t, r.argvLog); !strings.Contains(log, "UP-RETRIED") {
+		t.Fatalf("the bring-up was not retried\n%s", log)
+	}
 }
 
 // TestTheAbortWatchTellsItsProjectByKeployAgent: another compose project on
@@ -705,9 +921,10 @@ func TestTheProvenSwitchLeavesTheAbortWatchOff(t *testing.T) {
 // TestTheVendoredComposeHasNoAbortWait: the compose library keploy vendors
 // for its in-process path must be older than v5.6.0, whose up waits forever
 // for an app's container it never started after it aborted
-// (docker/compose#14426). keploy does not watch that path for the abort
+// (docker/compose#14426; compose's maintainers reproduced it on their main,
+// ed976f1cd, too). keploy does not watch that path for the abort
 // (compose_abort.go); a bump to v5.6.0 or later must bring the watch to it
-// first, and fails here until then.
+// first, or be to a release with compose's fix, and fails here until then.
 func TestTheVendoredComposeHasNoAbortWait(t *testing.T) {
 	dir, err := os.Getwd()
 	if err != nil {
@@ -743,7 +960,7 @@ func TestTheVendoredComposeHasNoAbortWait(t *testing.T) {
 			t.Fatalf("go.mod's %s version %q does not read as vX.Y: %v", path, v, err)
 		}
 		if major != 5 || minor >= 6 {
-			t.Fatalf("go.mod has %s %s: compose v5.6.0 and later wait forever after an abort before the app started (docker/compose#14426), and keploy does not watch its in-process up for that (compose_abort.go); watch it before the bump", path, v)
+			t.Fatalf("go.mod has %s %s: compose v5.6.0 and later wait forever after an abort before the app started (docker/compose#14426), and keploy does not watch its in-process up for that (compose_abort.go); watch it before the bump, or, for a release with compose's fix, teach this row that version", path, v)
 		}
 		found = true
 	}
