@@ -5976,6 +5976,10 @@ func (p *Proxy) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 					FieldReasons:     parserErr.MismatchReport.FieldReasons,
 					VariablePlaces:   parserErr.MismatchReport.VariablePlaces,
 					NotOwned:         parserErr.MismatchReport.NotOwned,
+					Shape:            parserErr.MismatchReport.Shape,
+					// A call of a marked series nothing answered: the
+					// application's background work, charged to no test.
+					Background: provenswitch.On() && parserErr.MismatchReport.Background,
 					// Why the call missed, when record's full round's learn
 					// step decided it: judging's evidence.
 					Reason:     parserErr.MismatchReport.Reason,
@@ -6014,6 +6018,9 @@ func (p *Proxy) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 		}
 		if isBefore {
 			for i := first; i < len(errs); i++ {
+				if errs[i].Background {
+					continue // a marked series' call: the set's background, failing nothing
+				}
 				errs[i].BeforeSet = true
 				errs[i].Kind = models.MissOutsideTest
 			}

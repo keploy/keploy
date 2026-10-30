@@ -83,9 +83,10 @@ func (m *MockManager) StageExactBackground(rules string) {
 	m.exact.staging.Store(true)
 	if rules == models.RecordedWithS12Routing && provenswitch.On() {
 		m.exact.bg.Store(&backgroundState{settling: true})
-		return
+	} else {
+		m.exact.bg.Store(nil)
 	}
-	m.exact.bg.Store(nil)
+	m.beginMarkedSeries() // none while it settles: the previous set's read stops
 }
 
 // ServeExactBackground sets the rules the staged set's background is served
@@ -101,6 +102,7 @@ func (m *MockManager) ServeExactBackground(rules string, pool, worker []string) 
 	m.exact.staging.Store(false)
 	if rules != models.RecordedWithS12Routing || !provenswitch.On() {
 		m.exact.bg.Store(nil)
+		m.beginMarkedSeries()
 		return
 	}
 	b := &backgroundState{pool: make(map[string]struct{}, len(pool)), worker: make(map[string]struct{}, len(worker))}
@@ -115,6 +117,9 @@ func (m *MockManager) ServeExactBackground(rules string, pool, worker []string) 
 		}
 	}
 	m.exact.bg.Store(b)
+	// The set's background is named: its marked series are read now, before
+	// any call asks for them.
+	m.beginMarkedSeries()
 	if m.logger != nil {
 		m.logger.Debug("exact serving: the set's background is served by proven routing",
 			zap.Int("pool", len(b.pool)), zap.Int("worker", len(b.worker)))

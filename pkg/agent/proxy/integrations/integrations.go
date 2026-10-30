@@ -5,8 +5,10 @@ import (
 	"context"
 	"errors"
 	"net"
+	"sync"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/variables"
 	"go.uber.org/zap"
@@ -454,6 +456,158 @@ type SetAsideReader interface {
 // other call, and each still answered once in the test's own count.
 type AnsweredBackgroundReader interface {
 	AnsweredBackground() []*models.Mock
+}
+
+// MarkedSeriesReader is an optional MockMemDb capability under the proven
+// switch and the background rules: a timer's call that judging marked as the
+// application's background work wherever it was recorded (a series, set-wide).
+// Such a call comes again and again with only its reads of the clock changed
+// (learn.SeriesOf), so at replay its copies are no recording's very request,
+// and they come as often as the replay's timing makes them, not as recorded:
+// none is the open test's. MarkedSeries is the staged set's series of kind
+// (learn.SeriesOfSet, read as judging reads them: every recording of the set,
+// each in its call's span) whose every recording is background, judging's
+// mark on a test's list (models.MockEntry.Background, of any test) or the
+// set's worker scope or pool, and at least one marked: a series a test's
+// unmarked recording is in is a call that test must make, and is none. known
+// excuses leaves as SeriesOf's: keploy.yml's noise of kind, one reading for
+// the staging (the series are read once per staging, with the first call's).
+// The set's recordings are read as it is staged, before any call: a call
+// that comes while they are still being read waits for them, or for ctx
+// (the call's: its error is then ctx's).
+// The parser answers a call of a marked series (Series.HasShape) whose reads
+// of the clock hold on the run's clock (Series.Holds on the call's span) with
+// one of its recordings, unchecked, consuming none of a test's: as often as
+// it comes for a series (MarkedSeries.Again), each recording at most once
+// for one-offs (MarkedSeries.Once); and
+// a call of one that does not hold is a miss of the set's background
+// (models.MockMismatchReport.Background), never the open test's. err is why
+// the store could not read the set's recordings: then no series is marked.
+// The agent's MockManager implements it, and every MockMemDb wrapper must
+// forward it.
+type MarkedSeriesReader interface {
+	MarkedSeries(ctx context.Context, kind models.Kind, known learn.Known) ([]MarkedSeries, error)
+}
+
+// MarkedSeries is one series judging marked (MarkedSeriesReader): what was
+// learned of it, and its recordings (Series.Members), in the order of their
+// calls, the newest last. The recordings are the store's; read-only.
+//
+// Again says a call of it is answered again, as often as it comes: judging
+// marked it as a series (models.IsBackgroundSeries, on any list that holds a
+// recording of it). Otherwise its recordings are one-offs judging marked (a
+// call made once more than recorded, outside every window, a delayed write):
+// set-wide, each answers at most once (Once), whichever test's window the
+// call lands in, and a copy beyond them is a miss of the set's background,
+// never the open test's. Once records that the recording named answered a
+// call so and reports whether it had not before in the staging; it takes
+// nothing from a test's own recordings (its own window still answers it as
+// recorded). nil Once spends nothing: a one-off then answers none.
+//
+// Restaged says the replay staged a test set (the next set, or this one
+// again) after the call asking was marked (CallRound): the series is of the
+// call's own staging, and answers no call (Again false, Once nil), since a
+// call is never answered from the series of a set it was not made in. A
+// call of it is the set's background miss, never a test's
+// (SeriesRestagedNote).
+type MarkedSeries struct {
+	Series     learn.Series
+	Recordings []*models.Mock
+	Again      bool
+	Once       func(name string) bool
+	Restaged   bool
+}
+
+// SeriesRestagedNote is what the miss of a call of a restaged series says
+// (MarkedSeries.Restaged), for every parser alike.
+const SeriesRestagedNote = "This call is of a series judging marked as the application's background work set-wide (a timer's call, recorded with only its reads of the clock changing), and the replay staged a test set again (the next set, or this one once more) after the call was made and before keploy answered it: a call is answered only from the series of the staging it was made in, so no recording answered it. It is the set's background miss, charged to no test of either staging."
+
+// MarkedSeriesOf is db's MarkedSeriesReader.MarkedSeries: none when db does
+// not implement it.
+func MarkedSeriesOf(ctx context.Context, db MockMemDb, kind models.Kind, known learn.Known) ([]MarkedSeries, error) {
+	if r, ok := db.(MarkedSeriesReader); ok {
+		return r.MarkedSeries(ctx, kind, known)
+	}
+	return nil, nil
+}
+
+// SeriesAnswerer answers, for a parser keploy ships (HTTP), a call no
+// earlier step answered that may be of a series judging marked
+// (MarkedSeriesReader). live is the call as a recording holds its request
+// (Kind set; no answer), arrived when keploy had it whole, and known
+// keploy.yml's noise of its kind as the parser's learn step reads it. served
+// is the recording of a marked series that answers it, consuming none of a
+// test's; miss, why the marked series it is a call of answers it with none,
+// which makes it the set's background miss, never the open test's
+// (SeriesMiss.Mark); both nil when it is a call of no marked series, and it
+// goes on as before. A build that judges series registers one per kind,
+// with that kind's series reading (learn.RegisterSeriesShape): keploy
+// enterprise. keploy itself registers none.
+type SeriesAnswerer func(ctx context.Context, db MockMemDb, live *models.Mock, arrived time.Time, known learn.Known) (served *models.Mock, miss *SeriesMiss, err error)
+
+// SeriesMiss is why no recording of a marked series answered a call of it
+// (SeriesAnswerer): NextSteps says so for the report, and Newest is the
+// series' newest recording, which the miss names.
+type SeriesMiss struct {
+	NextSteps string
+	Newest    *models.Mock
+}
+
+// Mark marks report as a miss of the set's background work
+// (models.MockMismatchReport.Background): charged to no test, failing none.
+// The report names the series' newest recording and shows nothing of the
+// closest recording the parser's report read in the open view (its request,
+// field diffs and diff): that one is no recording of the series, and the
+// replay prints a request beside the name it shows.
+func (m *SeriesMiss) Mark(report *models.MockMismatchReport) {
+	if m == nil || report == nil {
+		return
+	}
+	report.Background = true
+	if m.Newest != nil {
+		report.ClosestMock = m.Newest.Name
+	}
+	report.ClosestMockReq, report.Diff = "", ""
+	report.FieldDiffs, report.Differs, report.FieldReasons = nil, nil, nil
+	report.NextSteps = m.NextSteps
+}
+
+var seriesAnswerers = struct {
+	sync.RWMutex
+	of map[models.Kind]SeriesAnswerer
+}{of: map[models.Kind]SeriesAnswerer{}}
+
+// RegisterSeriesAnswerer makes a the SeriesAnswerer of kind, in place of
+// any before it; unregister restores that one.
+func RegisterSeriesAnswerer(kind models.Kind, a SeriesAnswerer) (unregister func()) {
+	seriesAnswerers.Lock()
+	defer seriesAnswerers.Unlock()
+	prev, had := seriesAnswerers.of[kind]
+	seriesAnswerers.of[kind] = a
+	return func() {
+		seriesAnswerers.Lock()
+		defer seriesAnswerers.Unlock()
+		if had {
+			seriesAnswerers.of[kind] = prev
+			return
+		}
+		delete(seriesAnswerers.of, kind)
+	}
+}
+
+// AnswerSeries is live.Kind's SeriesAnswerer's answer to live: all nil when
+// none is registered.
+func AnswerSeries(ctx context.Context, db MockMemDb, live *models.Mock, arrived time.Time, known learn.Known) (*models.Mock, *SeriesMiss, error) {
+	if live == nil {
+		return nil, nil, nil
+	}
+	seriesAnswerers.RLock()
+	a := seriesAnswerers.of[live.Kind]
+	seriesAnswerers.RUnlock()
+	if a == nil {
+		return nil, nil, nil
+	}
+	return a(ctx, db, live, arrived, known)
 }
 
 // ExactServedReader is an optional MockMemDb extension of a store that
