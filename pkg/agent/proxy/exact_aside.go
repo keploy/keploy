@@ -38,6 +38,12 @@ import (
 // exact copy left the call stays an extra call (never a
 // recording served again, nor one the call is not). A parser that does not
 // ask serves none, as before.
+//
+// keploy mock replay also hands aside the recordings of a test it has not
+// begun when a test recorded after it begins (a run that does not select
+// it). Should that test begin later, its own copy of each is the same one
+// answer (exactView.handed): it answers the test only if no test was
+// served it aside, and once it has, it is offered aside to no later test.
 
 // asideRecording is one recording of a set-aside test: the test, and the
 // recording as the replay staged it.
@@ -73,6 +79,28 @@ func (m *MockManager) setAsideRecordings() []asideRecording {
 		return *p
 	}
 	return nil
+}
+
+// markHanded marks the open test's own recordings in recs: the replay handed
+// them aside before the test began (exactView.handed). Called once v holds
+// every one of its own.
+func (v *exactView) markHanded(recs []asideRecording) {
+	if v.test == "" {
+		return
+	}
+	for _, r := range recs {
+		if r.from != v.test {
+			continue
+		}
+		i, ok := v.index[r.mock.Name]
+		if !ok {
+			continue
+		}
+		if v.handed == nil {
+			v.handed = make([]bool, len(v.owned))
+		}
+		v.handed[i] = true
+	}
 }
 
 // addAside files the set-aside recordings into v after every recording it

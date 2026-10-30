@@ -75,6 +75,58 @@ func TestASetAsideRecordingIsServedAfterItsTestUnchecked(t *testing.T) {
 	}
 }
 
+// A kept test's recordings handed aside before it began (keploy mock replay:
+// a test recorded after it began first) answer once in the staging, the
+// test's own copy included: served aside to a later test, the owner's own
+// read no longer holds it and its consume is refused; consumed by the owner
+// first, no later test is offered it. One the replay never handed takes no
+// claim, as before.
+func TestAHandedAsideRecordingAnswersOnceWithItsOwnTestsCopy(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	pat := exactMock("pat", 0, models.LifetimeSession)
+	// Served aside first: the owner is refused its own.
+	mm := stagedManager(t, nil, []*models.Mock{pat})
+	mm.ServeExactAside("Q", []*models.Mock{pat})
+	mm.ServeExactTest("K", nil)
+	sa := mm.SetAsideMocks("")
+	if got := asideNames(sa); !slices.Equal(got, []string{"pat<Q"}) {
+		t.Fatalf("set-aside copies %v", got)
+	}
+	if !mm.MarkMockAsUsed(*sa[0]) {
+		t.Fatal("the handed recording did not answer the later test's call")
+	}
+	mm.ServeExactTest("Q", []*models.Mock{pat})
+	pt, _ := mm.GetPerTestMocksInWindow()
+	equalNames(t, "per-test: the owner's copy answered elsewhere", pt)
+	if mm.MarkMockAsUsed(*pat) {
+		t.Fatal("the owner's own copy answered again after another test was served it aside")
+	}
+	// Consumed by its owner first: offered to no later test.
+	mm = stagedManager(t, nil, []*models.Mock{pat})
+	mm.ServeExactAside("Q", []*models.Mock{pat})
+	mm.ServeExactTest("K", nil)
+	mm.ServeExactTest("Q", []*models.Mock{pat})
+	pt, _ = mm.GetPerTestMocksInWindow()
+	equalNames(t, "per-test", pt, "pat")
+	if !mm.MarkMockAsUsed(*pt[0]) {
+		t.Fatal("the owner's own copy did not answer")
+	}
+	mm.ServeExactTest("Z", nil)
+	if got := mm.SetAsideMocks(""); len(got) != 0 {
+		t.Fatalf("a recording its owner answered is offered aside: %v", asideNames(got))
+	}
+	// Never handed: the owner's consume takes no claim.
+	mm = stagedManager(t, nil, []*models.Mock{pat})
+	mm.ServeExactTest("Q", []*models.Mock{pat})
+	pt, _ = mm.GetPerTestMocksInWindow()
+	if len(pt) != 1 || !mm.MarkMockAsUsed(*pt[0]) {
+		t.Fatal("the test's own recording did not answer")
+	}
+	if who, ok := mm.exact.asideClaims.claimant(mm.stagingEpoch.Load(), "pat"); ok {
+		t.Fatalf("a recording never handed aside was claimed for %q", who)
+	}
+}
+
 // What is not served aside: a recording that places or binds variables (its
 // values are its own test's), one the open test owns (its own, required), and
 // anything after a session reset.
