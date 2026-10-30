@@ -149,11 +149,17 @@ while kill -0 "$test_pid" 2>/dev/null; do
     fi
     sleep 0.5
 done
-wait "$test_pid"
-test_exit=$?
+# The step's shell runs under -e: a bare `wait` of a test that failed would
+# end the lane here, before its exit code and its log were printed.
+test_exit=0
+wait "$test_pid" || test_exit=$?
 cat test_logs.txt
 peak_mb=$(( peak_kb / 1024 ))
 echo "keploy test exited $test_exit; its peak RSS was ${peak_mb} MiB, the largest mocks.yaml ${largest_mb} MiB"
+if [ "$test_exit" -ne 0 ]; then
+    echo "::error::keploy test exited $test_exit"
+    exit 1
+fi
 
 if grep "ERROR" test_logs.txt; then
     echo "::error::Error found in the replay"
