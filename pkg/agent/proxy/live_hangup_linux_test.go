@@ -160,6 +160,114 @@ func TestALiveClientsHangUpReachesTheAppThroughTheProxysChain(t *testing.T) {
 	}
 }
 
+// An app deaf to its client's going (a long poll quiet until its own
+// timeout, a handler that does not read its request's context) holds the
+// live call's handler once its client hangs up, but not the test's end: once
+// the hang-up is told on to the app, the call's connection holds no test's
+// work, in a record as in a replay, for a settle's scope begun while the
+// answer streamed as for one begun after. The exchange is not recorded and
+// nothing asserts its answer, so waiting on it would prove nothing. Before,
+// the handler, forwarding an answer that never came, held the connection for
+// good, and the settle's watchdog gave up on it, leaving the round not
+// judged.
+func TestALiveCallsAppDeafToItsClientsGoingDoesNotHoldTheTestsEnd(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		sync bool
+	}{{"zero-copy", false}, {"synchronous", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			deafAppsClientHangsUp(t, func(h http.Handler) *liveCall { return serveLiveCallWith(t, tc.sync, h) })
+		})
+	}
+}
+
+// The same through the proxy's own chain under the proven switch: the hold
+// on the hang-up, and its telling, reach the call's tracked conn through the
+// wrappers the proxy puts around a live call (liveReader, treeRealConn).
+func TestALiveCallsAppDeafToItsClientsGoingDoesNotHoldTheTestsEndThroughTheProxysChain(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		sync, real bool
+	}{
+		{"live", false, false},
+		{"synchronous: live", true, false},
+		{"mock.real", false, true},
+		{"synchronous: mock.real", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			deafAppsClientHangsUp(t, func(h http.Handler) *liveCall {
+				lc, _ := serveTreeCall(t, tc.sync, tc.real, h)
+				return lc
+			})
+		})
+	}
+}
+
+// deafAppsClientHangsUp serves (serve) a live call to an app that sees its
+// client go and goes on with the request, and checks that once its client
+// hangs up mid-answer the call's connection holds no test's work while its
+// handler still waits on the app.
+func deafAppsClientHangsUp(t *testing.T, serve func(http.Handler) *liveCall) {
+	t.Helper()
+	gone, release := make(chan struct{}), make(chan struct{})
+	t.Cleanup(sync.OnceFunc(func() { close(release) }))
+	lc := serve(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintln(w, `{"status":"RUNNING"}`)
+		w.(http.Flusher).Flush()
+		select {
+		case <-r.Context().Done():
+			close(gone)
+		case <-release:
+			return
+		}
+		<-release // deaf: it goes on with the request its client left
+	}))
+	if _, err := lc.app.Write([]byte("GET /client/v1/jobs/j/events HTTP/1.1\r\nHost: api\r\n\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	br := bufio.NewReader(lc.app)
+	readUntil(t, br, "RUNNING")
+	// The chunk's end too: a client that closes with bytes unread resets
+	// its socket, and a reset closes the app's connection, which ends the
+	// handler whatever the app does. This client sends its FIN.
+	if line, err := br.ReadString('\n'); err != nil || line != "\r\n" {
+		t.Fatalf("precondition: the chunk's end read %q, %v", line, err)
+	}
+	streaming := lc.tr.scope()
+	if n, _ := streaming.State(true); n != 1 {
+		t.Fatalf("precondition: a live call whose answer streams to its client held no work of a replay's settle (pending %d): %s", n, lc.state())
+	}
+	_ = lc.app.Close()
+	select {
+	case <-gone:
+	case <-lc.never:
+		t.Fatalf("the app never saw its client gone: %s", lc.state())
+	}
+	for {
+		changed := lc.tr.Changed()
+		n, _ := streaming.State(true)
+		if n == 0 && lc.tr.Pending(true) == 0 && lc.tr.Pending(false) == 0 {
+			break
+		}
+		select {
+		case <-changed:
+		case <-lc.never:
+			t.Fatalf("the hang-up told on to an app deaf to it, the call's connection still holds work (scope's %d): %s", n, lc.state())
+		}
+	}
+	if left := lc.tr.scope().PendingProgress(true); len(left) != 0 {
+		t.Fatalf("a settle begun after the hang-up was told on would wait on %v: %s", left, lc.state())
+	}
+	select {
+	case <-lc.served:
+		t.Fatalf("precondition: the handler ended, though the app still holds the request: %s", lc.state())
+	default:
+	}
+}
+
 // Each wrapper the proxy puts around a live call's conn gives the conn it
 // wraps, so the socket under it can be watched for the caller's hang-up.
 // Red with any of them not giving it: the watch finds no socket.

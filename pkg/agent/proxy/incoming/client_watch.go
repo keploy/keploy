@@ -36,6 +36,11 @@ import (
 // A client with no socket to be found under it (a wrapper that does not
 // give the conn it wraps, or a platform with no watch) is not watched, and
 // the first of each kind is told at Info: its app is not told of its going.
+//
+// Under the proxy's settle, the connection it keeps under client holds the
+// hang-up while the watch runs and, once the hang-up is told on to the app,
+// holds no test's work (proxyutil.HoldHangUp): the exchange is not recorded
+// and nothing asserts its answer.
 func watchClient(logger *zap.Logger, client net.Conn, buffered *bufio.Reader, app func() net.Conn) (stop func() (ended bool)) {
 	if buffered.Buffered() > 0 {
 		return noClientEnd
@@ -46,7 +51,13 @@ func watchClient(logger *zap.Logger, client net.Conn, buffered *bufio.Reader, ap
 		// read by the time a request is: bufio's first fill takes it.
 		conn = r.Conn
 	}
-	stop, watched := proxyutil.WatchPeerEnd(conn, func(reset bool) {
+	// The proxy's kept connection under conn holds its client's hang-up
+	// until it is told on, and holds no test's work once it is
+	// (proxyutil.HangUpTeller): an app that goes on with the request its
+	// client left (one deaf to its request's context) is no test's to wait
+	// for.
+	release := proxyutil.HoldHangUp(conn)
+	stopWatch, watched := proxyutil.WatchPeerEnd(conn, func(reset bool) {
 		up := app()
 		if up == nil {
 			return
@@ -54,11 +65,18 @@ func watchClient(logger *zap.Logger, client net.Conn, buffered *bufio.Reader, ap
 		if reset || proxyutil.CloseWriteIfPossible(up) != nil {
 			_ = up.Close()
 		}
+		release(true)
 	})
 	if !watched {
+		release(false)
 		tellUnwatched(logger, conn)
+		return stopWatch
 	}
-	return stop
+	return func() bool {
+		ended := stopWatch()
+		release(false) // no-op once told
+		return ended
+	}
 }
 
 func noClientEnd() bool { return false }
