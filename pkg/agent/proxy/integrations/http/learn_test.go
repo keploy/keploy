@@ -782,6 +782,68 @@ func TestLearnMatchAVariableFromThePoolIsRefused(t *testing.T) {
 	}
 }
 
+// Two calls a few milliseconds apart each send the app's clock in epoch
+// seconds (a sweep's cutoff, then a token's lastUsedAt): both read one
+// second when recorded and in record's full round, so the second's value
+// stands whole in the first's request, and the learn step finds it a
+// variable of the first. Made at start-up (pool calls), no test's own call
+// carries it: it is learned as a read of the app's clock (MockSpec.Clocks),
+// which every replay checks against its call's clock, where it was refused
+// before, and the recording kept no clock place. Made in a test, the pass
+// follows it: a variable bound at the sweep, as before, no read of the
+// clock.
+func TestLearnMatchACopyOfAnEarlierCallsSecondIsAReadOfTheClockWhereItIsNotFollowed(t *testing.T) {
+	secs := func(at time.Time) string { return strconv.FormatInt(at.Unix(), 10) }
+	rec, f := secs(learnAt), secs(learnAt.Add(learn.FullRoundLead+300*time.Millisecond))
+	for _, startUp := range []bool{true, false} {
+		t.Run(map[bool]string{true: "at start-up", false: "in a test"}[startUp], func(t *testing.T) {
+			h, n, opts := learnOn(t)
+			opts.LearnPool = true
+			tr := learn.NewTracker()
+			tr.NewSet()
+			ctx := learn.WithTracker(context.Background(), tr)
+			sweep := learnRecorded("mock-0", time.Millisecond, "POST", "/v1/sweeps", `{"before":`+rec+`}`, nil, `{"swept":0}`)
+			stamp := learnRecorded("mock-1", 5*time.Millisecond, "PUT", "/v1/tokens/t-1", `{"lastUsedAt":`+rec+`}`, nil, `{}`)
+			db := &learnDb{observe: tr.ServedMock}
+			if startUp {
+				for _, m := range []*models.Mock{sweep, stamp} {
+					m.TestModeInfo.Lifetime = models.LifetimeSession
+				}
+				db.mockMemDb = mockMemDb{mocks: []*models.Mock{sweep, stamp}}
+				db.pool = map[time.Time]bool{sweep.Spec.ReqTimestampMock: true, stamp.Spec.ReqTimestampMock: true}
+			} else {
+				tr.Begin()
+				db.perTest = []*models.Mock{sweep, stamp}
+			}
+			if served, miss, err := h.learnMatch(ctx, live("POST", "/v1/sweeps", `{"before":`+f+`}`, nil), db, n, opts); err != nil || served == nil || miss != nil {
+				t.Fatalf("the sweep: served %v, miss %+v, err %v", served != nil, miss, err)
+			}
+			served, miss, err := h.learnMatch(ctx, live("PUT", "/v1/tokens/t-1", `{"lastUsedAt":`+f+`}`, nil), db, n, opts)
+			if err != nil || served == nil || miss != nil {
+				t.Fatalf("the stamp: served %v, miss %+v, err %v; want it answered", served != nil, miss, err)
+			}
+			var spec *models.MockSpec
+			for i := range db.consumed {
+				if db.consumed[i].Name == "mock-1" {
+					spec = &db.consumed[i].Spec
+				}
+			}
+			for _, m := range db.pooled {
+				if m.Name == "mock-1" {
+					spec = &m.Spec
+				}
+			}
+			if spec == nil {
+				t.Fatalf("mock-1 was not written back")
+			}
+			_, clock := spec.Clocks["body.lastUsedAt"]
+			if startUp != clock || startUp == (len(spec.Learned()) == 1) {
+				t.Fatalf("lastUsedAt learned clocks %v, variables %v, noise %v; want a read of the clock: %v, else one variable", spec.Clocks, spec.Learned(), spec.ReqBodyNoise, startUp)
+			}
+		})
+	}
+}
+
 // Leaves of one call that drifted from one recorded value, echoed by its
 // answer, are one variable: bound at the first, used at the others (the
 // variable pass refuses one value bound as two variables).

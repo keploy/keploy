@@ -746,6 +746,18 @@ type Place struct {
 	// a value holding an escape (appearedIn's decoded site), which the copy
 	// rule never reads as a clock read.
 	givenWhole bool
+	// sent: the place stands in what the application sent, never in what it
+	// was given: a leaf of an earlier exchange's request (not the test
+	// case's own: Given), or a field of a raw mock's request, every field of
+	// the payload that holds what was found standing in its request
+	// (requestPath, sentOnly). A field of an answer is not, whole or a part,
+	// whether or not the full round refutes the copy (givenWhole), and
+	// neither is a value no one field holds. Only a variable the application
+	// sent the source of can be its own read of the clock as well
+	// (Learned.ReadToo): two reads of the clock in one second are one value.
+	// A value an answer holds the application was given (an SQS message's
+	// SentTimestamp), and storing it is no read the application made.
+	sent bool
 }
 
 // atCallNote is what a reason says of a recording it names that was made at
@@ -803,10 +815,12 @@ type Learned struct {
 	// variable (no test's own call carries it, its source was never served
 	// before the call) learns it as that read instead (Unfollowed): the
 	// value moved in the full round as its call's clock did, so a replay
-	// still checks it is a read made in the call's own span. A whole copy of
-	// what an answer gave the application (Place.givenWhole) carries none: a
-	// replay serves that answer as recorded, so the copy then holds the
-	// recorded stamp, which no read in the call's span gives.
+	// still checks it is a read made in the call's own span. A copy of what
+	// an answer gave the application carries none (only a source the
+	// application sent does: Place.sent), even where the full round refutes
+	// the copy (no Place.givenWhole): the application may store what it was
+	// given, and a replay serves that answer as recorded, so the copy then
+	// holds the recorded stamp, which no read in the call's span gives.
 	ReadToo *models.ClockOffset
 	// Why, of an unaccounted drift, is why it cannot be noise; of noise
 	// record's full round learned past a source it served unchanged that
@@ -1828,8 +1842,10 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// call's window too (ReadToo), read without the source search and
 		// the offset rule: what a caller that cannot follow it learns. Only
 		// a value the lead or its window shows wholly as reads of the clock
-		// is read again (v.clock), so no other variable pays for it.
-		if ln.Kind == KindVariable && !ln.From.givenWhole {
+		// is read again (v.clock), so no other variable pays for it, and
+		// only one whose source the application sent (Place.sent): a value
+		// an answer held, whole, is what the application was given.
+		if ln.Kind == KindVariable && ln.From.sent {
 			if v := dc.ofIn(r.Value, l.Value, w, at); v.clock.whole && len(v.clock.reads) > 0 {
 				if alt := leaf(r, l, w, skipBoth); alt.Kind == KindClockRead && alt.Read != nil {
 					ln.ReadToo = alt.Read
@@ -3112,7 +3128,7 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 				} else {
 					field, _ = dc.fieldOf(x, texts, held)
 				}
-				p := Place{Mock: x.mock, Field: field, Held: held, AtCall: atCall, noTime: x.noTime, unserved: !x.served, startUp: swap, givenWhole: given}
+				p := Place{Mock: x.mock, Field: field, Held: held, AtCall: atCall, noTime: x.noTime, unserved: !x.served, startUp: swap, givenWhole: given, sent: sentOnly(x, texts, held)}
 				rf := fol
 				if rf == nil {
 					// A step that reads no word under the rule (ClassifyGiven)
@@ -3129,7 +3145,7 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 		for _, w := range searched {
 			if (ContainsToken(texts[0], w) || ContainsToken(texts[1], w)) && !insideAnotherID(v, x, texts, w, true) {
 				field, given := dc.fieldOf(x, texts, w)
-				p := Place{Mock: x.mock, Field: field, Held: w, AtCall: atCall, noTime: x.noTime, unserved: !x.served, givenWhole: given && w == recorded}
+				p := Place{Mock: x.mock, Field: field, Held: w, AtCall: atCall, noTime: x.noTime, unserved: !x.served, givenWhole: given && w == recorded, sent: sentOnlyWord(x, texts, w)}
 				p.startUp = x.swapHolds(texts[0], raw, func(own string) bool { return holdsToken(own, w) })
 				// A word of a connection's start-up a swap can change is
 				// never set aside as a source the value moved away from: F
@@ -3199,8 +3215,12 @@ func (dc *DriftCache) echoRaw(x Raw, echoed []echoMatch) (Place, bool) {
 		// only to name the field that holds one.
 		for i := range fields {
 			if holdsRecordedIn(fields[i], echoed) {
-				f := x.payload().fields[i]
-				return Place{Mock: x.mock, Field: f.describe(), Echo: true, givenWhole: answerPath(f.path)}, true
+				xf := x.payload().fields
+				f, sent := xf[i], true
+				for j := i; j < len(fields) && sent; j++ {
+					sent = !holdsRecordedIn(fields[j], echoed) || requestPath(xf[j].path)
+				}
+				return Place{Mock: x.mock, Field: f.describe(), Echo: true, givenWhole: answerPath(f.path), sent: sent}, true
 			}
 		}
 		if holdsRecordedIn(dc.payloadMoments(x), echoed) {
@@ -3209,9 +3229,13 @@ func (dc *DriftCache) echoRaw(x Raw, echoed []echoMatch) (Place, bool) {
 		return Place{}, false
 	}
 	xb := x.payload()
-	for _, f := range xb.fields {
-		if own := xb.text[f.start:f.end]; !f.key && (dc.holdsRecorded(own, echoed) || dc.holdsRecorded(dc.rawExtra(own), echoed)) {
-			return Place{Mock: x.mock, Field: f.describe(), Echo: true, givenWhole: answerPath(f.path)}, true
+	holds := func(f rawField) bool {
+		own := xb.text[f.start:f.end]
+		return !f.key && (dc.holdsRecorded(own, echoed) || dc.holdsRecorded(dc.rawExtra(own), echoed))
+	}
+	for i, f := range xb.fields {
+		if holds(f) {
+			return Place{Mock: x.mock, Field: f.describe(), Echo: true, givenWhole: answerPath(f.path), sent: sentFrom(xb.fields[i:], holds)}, true
 		}
 	}
 	if dc.holdsRecorded(xb.text, echoed) || dc.holdsRecorded(dc.rawExtra(xb.text), echoed) {
@@ -3402,7 +3426,7 @@ func placeRank(e Earlier, s Seen, whole bool) int {
 func seenPlace(e Earlier, s Seen, whole bool) Place {
 	return Place{Mock: e.Mock, Side: s.Side, Path: s.Leaf.Path, Noise: s.Leaf.Noise,
 		Var: s.Place, Live: s.Live, Whole: whole, Own: e.Own, Run: e.Run, Given: e.Given, Name: s.Name,
-		givenWhole: s.Side == Response && whole}
+		givenWhole: s.Side == Response && whole, sent: s.Side == Request && !e.Given}
 }
 
 // echoedIn are v's changed instants the echo takes for a copy of what the
@@ -3877,6 +3901,28 @@ func (dc *DriftCache) copiedInBoth(x Raw, f rawField, in func(own string) bool) 
 	return false
 }
 
+// sentOnlyWord is sentOnly of a word w held as a token (eachFieldWith):
+// every field of x that holds it stands in x's request, and one does.
+func sentOnlyWord(x Raw, texts [2]string, w string) bool {
+	sent, found := true, false
+	eachFieldWith(x, texts, w, func(f rawField) bool {
+		found, sent = true, requestPath(f.path)
+		return sent
+	})
+	return found && sent
+}
+
+// sentFrom is sentOnly of fields, the first of which holds what was found
+// (holds): every one that holds it stands in its payload's request.
+func sentFrom(fields []rawField, holds func(rawField) bool) bool {
+	for _, f := range fields {
+		if holds(f) && !requestPath(f.path) {
+			return false
+		}
+	}
+	return len(fields) > 0
+}
+
 // sentOnly reports whether every field of x's text as searched (texts[0])
 // that holds the whole clock read held, in its own text or in a declared
 // form of it, stands in x's request (requestPath), and one does: an instant
@@ -4182,7 +4228,7 @@ func ReadBack(r Leaf, record string, earlier []Earlier) (Place, bool) {
 				continue
 			}
 			first = Place{Mock: e.Mock, Side: Request, Path: s.Leaf.Path, Noise: s.Leaf.Noise,
-				Var: s.Place, Live: s.Live, Whole: true, Own: e.Own, Run: e.Run, Name: s.Name}
+				Var: s.Place, Live: s.Live, Whole: true, Own: e.Own, Run: e.Run, Name: s.Name, sent: true}
 			found = true
 		}
 	}
