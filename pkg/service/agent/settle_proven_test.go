@@ -833,6 +833,29 @@ func TestAnEndThatGivesUpOnAConnectionCarriesItAndTheNextBeginGoesOn(t *testing.
 	require.Zero(t, wakes, "a begin with nothing to wait for needs no wake-up")
 }
 
+// A test's end that gives up on a stuck connection says so at WARN in the
+// agent's own log, naming the test, the connection and what it held: its
+// caller tells only the test's failing, and a run's kept agent log is where
+// the lines of the calls on that connection are.
+func TestAnEndThatGivesUpSaysWhichConnectionsAtWarn(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	w := stallWake(t)
+	a, h, p := settleAgent()
+	core, logs := observer.New(zap.WarnLevel)
+	a.logger = zap.New(core)
+	sp := &scopedProxy{settleProxy: p, stuck: map[uint64]uint64{7: 1}}
+	sp.scopePending.Store(1)
+	a.Proxy = sp
+	h.established = 1
+	p.set(1, 0)
+	_, err := w.run(func() error { return a.settledSince(context.Background(), true, "TestEnd") }, nil)
+	require.ErrorIs(t, err, errNoProgress)
+	warns := logs.FilterMessageSnippet("settling the test's calls at its end").All()
+	require.Len(t, warns, 1, "the give-up is said once at WARN: %v", logs.All())
+	require.Equal(t, "TestEnd", warns[0].ContextMap()["test"])
+	require.Equal(t, []interface{}{"connection 7 held 1 request(s) its parser had read and not answered"}, warns[0].ContextMap()["connections"], "it names the connection and what it held")
+}
+
 // missesProxy is scopedProxy with a read of the misses that finds none.
 type missesProxy struct{ *scopedProxy }
 
