@@ -170,22 +170,22 @@ func clientWordAt(t *testing.T, rec, live string, prev time.Duration, untold boo
 }
 
 // A text whose one changed word is a client test's clock read made inside
-// its call's own window is the word noise the call's window learns where
-// nothing F served before the call may hold the word: only that word goes
-// unchecked, and the rest of the text is still compared. Where another
+// its call's own window is learned as a read of that word in its call's
+// window where nothing F served before the call may hold the word
+// (TestAClientTestLearnsAWordOfATextReadInItsCallsWindow). Where another
 // test's recording F served unstated may hold it (mock-4565 of run 7), the
 // word rule refuses it in the call's window, and that refusal is never
 // turned into noise: read again from each run's test begin, the word is
 // learned as a read of the clock since its test began
-// (models.ClockOffset.Word), checked at every replay. The word rule lets a
-// word that holds a clock word go in the reading from the begin alone
+// (models.ClockOffset.Word), checked at every replay. The word rule lets
+// the words of a text's runs go in the reading from the begin alone
 // (valueDrift.clockChanged); let go in every window, the untold serve's
 // refusal would become noise no replay checks.
 func TestAWordReadInItsCallsWindowIsNeverNoiseWhereAnUntoldServeMayHoldIt(t *testing.T) {
 	const name = "[E2E] generate-stop-%d"
 	ln, rec := clientWordAt(t, name, name, -100*time.Millisecond, false, nil)
-	if ln.Kind != KindNoise || ln.Read != nil {
-		t.Fatalf("nothing served unstated: %s Read=%+v (%s); want the word noise the call's window learns", ln.Kind, ln.Read, ln.Why)
+	if o, ok := ln.Clock(); ln.Kind != KindClockRead || !ok || !o.Plain() || o.Since != "" || o.Word != (sides{"[E2E] generate-stop-", ""}).at(t, rec) {
+		t.Fatalf("nothing served unstated: %s Read=%+v (%s); want a checked read of the word in its call's window", ln.Kind, ln.Read, ln.Why)
 	}
 	// The test's first call opens its window at the test's begin: the two
 	// readings' windows have the same bounds, and the reading from the
@@ -195,6 +195,92 @@ func TestAWordReadInItsCallsWindowIsNeverNoiseWhereAnUntoldServeMayHoldIt(t *tes
 		o, ok := ln.Clock()
 		if ln.Kind != KindClockRead || !ok || !o.Plain() || o.Since != models.SinceTestBegin || o.Res != time.Nanosecond || o.Word != (sides{"[E2E] generate-stop-", ""}).at(t, rec) {
 			t.Fatalf("served unstated, the window opening %v after the read: %s Read=%+v Word=%+v (%s); want a checked read of the word since its test began, never noise", prev, ln.Kind, ln.Read, o.Word, ln.Why)
+		}
+	}
+}
+
+// classifyWordAt is clientWordAt of a text each run's read writes by f, in
+// dc's tests: its call's window opening prev after the read (negative: the
+// read is inside it), with mock-4565 served unstated before the call where
+// untold.
+func classifyWordAt(dc *DriftCache, f func(time.Time) string, prev time.Duration, untold bool) (Learned, string) {
+	const p = "body.cmd.query.app.name"
+	var raw []Raw
+	if untold {
+		raw = untoldServe(wordRec.read.Add(-time.Second))
+	}
+	span := func(read time.Time) Span {
+		return Span{From: read.Add(prev), To: read.Add(250 * time.Millisecond), Began: read.Add(-2 * time.Second)}
+	}
+	str := func(v string) Shape {
+		return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: v}}}
+	}
+	r := f(wordRec.read)
+	return ClassifyFollowing(dc, []string{p}, str(f(wordF.read)), str(r), wordRec.read.Add(250*time.Millisecond), nil, raw, nil, &Window{Rec: span(wordRec.read), F: span(wordF.read)}, nil)[0], r
+}
+
+// In keploy mock's client tests, a text whose one changed word is the
+// test's own clock read made inside its call's own window, in both runs, is
+// learned as a read of that word (models.ClockOffset.Word), never as the
+// noise of that word no replay checks, and the rest of the text is still
+// compared. With nothing F served before the call that may hold the word,
+// the read is checked in its call's window. With another test's recording
+// F served unstated before the call (mock-4565 of run 7), a word the word
+// rule lets go there, the clock read alone or inside an ISO text, is
+// checked in its call's window too, and one it refuses there ("[E2E]
+// generate-stop-<UnixNano>") is checked from its test's begin
+// (TestAWordReadInItsCallsWindowIsNeverNoiseWhereAnUntoldServeMayHoldIt). A
+// text more of whose bytes changed, or with two changed reads, stays the
+// noise its call's window learns, and so does the text of a test that is no
+// client test.
+func TestAClientTestLearnsAWordOfATextReadInItsCallsWindow(t *testing.T) {
+	ns := func(format string) func(time.Time) string {
+		return func(r time.Time) string { return fmt.Sprintf(format, r.UnixNano()) }
+	}
+	const window, begin = "", models.SinceTestBegin
+	for _, tc := range []struct {
+		name        string
+		f           func(time.Time) string
+		word        sides
+		res         time.Duration
+		sinceUntold string
+	}{
+		{"run 7's name", ns("[E2E] generate-stop-%d"), sides{"[E2E] generate-stop-", ""}, time.Nanosecond, begin},
+		{"a word with text after it", ns("job %d queued"), sides{"job ", " queued"}, time.Nanosecond, window},
+		{"an ISO time", func(r time.Time) string { return "at " + r.Format(time.RFC3339Nano) + " ok" }, sides{"at ", " ok"}, time.Nanosecond, window},
+		{"epoch milliseconds", func(r time.Time) string { return fmt.Sprintf("batch-%d", r.UnixMilli()) }, sides{"batch-", ""}, time.Millisecond, begin},
+		{"inside JSON", ns(`{"name":"[E2E] x-%d","k":1}`), sides{`{"name":"[E2E] x-`, `","k":1}`}, time.Nanosecond, begin},
+	} {
+		for _, untold := range []bool{false, true} {
+			ln, rec := classifyWordAt(clientTestCache(), tc.f, -100*time.Millisecond, untold)
+			since := window
+			if untold {
+				since = tc.sinceUntold
+			}
+			if o, ok := ln.Clock(); ln.Kind != KindClockRead || !ok || !o.Plain() || o.Since != since || o.Res != tc.res || o.Word != tc.word.at(t, rec) {
+				t.Errorf("%s, served unstated %v: %s Read=%+v (%s); want a read of the word at %v checked with since %q", tc.name, untold, ln.Kind, ln.Read, ln.Why, tc.res, since)
+			} else if ln.Recorded.Value != rec {
+				t.Errorf("%s, served unstated %v: learned the leaf as %q, want the whole text", tc.name, untold, ln.Recorded.Value)
+			}
+		}
+	}
+	for _, tc := range []struct {
+		name string
+		dc   *DriftCache
+		f    func(time.Time) string
+	}{
+		{"the text after the word changed too", clientTestCache(), func(r time.Time) string {
+			if r.Equal(wordRec.read) {
+				return fmt.Sprintf("job %d queued", r.UnixNano())
+			}
+			return fmt.Sprintf("job %d waiting", r.UnixNano())
+		}},
+		{"two reads changed", clientTestCache(), func(r time.Time) string { return fmt.Sprintf("a-%d b-%d", r.UnixNano(), r.UnixNano()) }},
+		{"no client test", clockedDrifts(), ns("[E2E] generate-stop-%d")},
+	} {
+		if ln, _ := classifyWordAt(tc.dc, tc.f, -100*time.Millisecond, false); ln.Kind != KindNoise || ln.Read != nil {
+			o, _ := ln.Clock()
+			t.Errorf("%s: %s %s (%s); want the noise its call's window learns", tc.name, ln.Kind, o.String(), ln.Why)
 		}
 	}
 }

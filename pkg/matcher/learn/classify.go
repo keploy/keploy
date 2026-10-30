@@ -1705,6 +1705,21 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 	for _, p := range drift {
 		r, l := rec.Leaves[p], live.Leaves[p]
 		ln := leaf(r, l, w, 0)
+		// A client test's own clock read made inside its call's window as
+		// one word of a longer text (keploy mock's harness naming an app
+		// "[E2E] stop-<UnixNano>", or "job <UnixNano> queued", by its own
+		// clock, which keploy's launcher puts on the run's clock as it does
+		// the application's), which that window learns as noise of that
+		// word, is learned instead as a read of that word in its call's
+		// window (wordRead: models.ClockOffset.Word), checked at every
+		// replay, and the rest of the text is still compared. A text whose
+		// changed word is no read of the clock in the window, or one more of
+		// whose bytes changed, stays the noise the window learned.
+		if dc.clientTests {
+			if word, ok := wordRead(ln, w, leaf); ok {
+				ln = word
+			}
+		}
 		// A read made before its call's window: in keploy mock's client
 		// tests (the only calls whose window knows each run's test begin),
 		// a value refused in its call's window is classified again in the
@@ -1820,38 +1835,46 @@ func sinceTestBegin(ln Learned) (Learned, bool) {
 	return ln, true
 }
 
-// sinceWord is early, a text its call's window from each run's test begin
-// (wb) learns as noise (no read of it whole: Read nil), learned instead as a
-// read of the clock since its test began of the one word of it that
-// changed (clockWordIn): the word, read alone in wb by leaf as a value of
-// its own (every rule of a value: its sources, its echo, a read plus an
-// offset, the form and zone it is read in), is a plain read of the clock
-// (KindClockRead), and the text around it is the same in both runs. The
-// read carries where the word stands in the recorded text, with the length
-// and SHA-256 of the text on each side of it, never the text
-// (models.ClockOffset.Word), so a replay reads the word alone as the clock
-// and compares the rest, checked from its test's begin
-// (models.SinceTestBegin). ok is false for anything else (a text two
-// words of which changed, one whose changed word is no read in wb, or one
-// leaf learns otherwise), which stays as the call's own window learned it:
-// the wider window turns a refusal into a checked read, never into noise.
+// sinceWord is wordRead of early in wb, a call's window from each run's
+// test begin, the word's read checked from its test's begin
+// (models.SinceTestBegin).
 func sinceWord(early Learned, wb *Window, leaf func(r, l Leaf, w *Window, skip skipRule) Learned) (Learned, bool) {
+	own, ok := wordRead(early, wb, leaf)
+	if ok {
+		own.Read.Since = models.SinceTestBegin
+	}
+	return own, ok
+}
+
+// wordRead is early, a text a window w learns as noise (no read of it
+// whole: Read nil), learned instead as a read of the clock in w of the one
+// word of it that changed (clockWordIn): the word, read alone in w by leaf
+// as a value of its own (every rule of a value: its sources, its echo, a
+// read plus an offset, the form and zone it is read in), is a plain read of
+// the clock (KindClockRead), and the text around it is the same in both
+// runs. The read carries where the word stands in the recorded text, with
+// the length and SHA-256 of the text on each side of it, never the text
+// (models.ClockOffset.Word), so a replay reads the word alone as the clock
+// and compares the rest. ok is false for anything else (a text two words of
+// which changed, one whose changed word is no read in w, or one leaf learns
+// otherwise), which stays as w learned it: a word read turns noise into a
+// checked read, and a refusal into one, never into noise.
+func wordRead(early Learned, w *Window, leaf func(r, l Leaf, w *Window, skip skipRule) Learned) (Learned, bool) {
 	if early.Kind != KindNoise || early.Read != nil {
 		return early, false
 	}
 	r, l := early.Recorded, early.Live
-	before, rw, lw, after, ok := clockWordIn(r.Value, l.Value, wb)
+	before, rw, lw, after, ok := clockWordIn(r.Value, l.Value, w)
 	if !ok || before == "" && after == "" {
 		return early, false
 	}
 	wr, wl := r, l
 	wr.Value, wl.Value = rw, lw
-	own := leaf(wr, wl, wb, 0)
+	own := leaf(wr, wl, w, 0)
 	if own.Kind != KindClockRead || own.Read == nil {
 		return early, false
 	}
 	own.Recorded, own.Live = r, l
-	own.Read.Since = models.SinceTestBegin
 	own.Read.Word = models.ClockWordOf(r.Value, len(before), len(r.Value)-len(after))
 	if own.Refuted == "" {
 		own.Refuted = early.Refuted
@@ -2285,8 +2308,8 @@ type valueDrift struct {
 	// in every form, by reading.
 	recTok, liveTok []map[string]bool
 	// begun: the value was read in a call's window from each run's test
-	// begin (Window.begun), where the word rule lets a word of its runs go
-	// that holds a clock word (clockChanged).
+	// begin (Window.begun), where the word rule lets every word of its runs
+	// go (clockChanged).
 	begun bool
 	// encodedRec is the text the recorded value's encoded runs decode to
 	// (b64Text), "" when none.

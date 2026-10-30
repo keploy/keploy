@@ -159,10 +159,10 @@ type Window struct {
 	// constant offset (ComparesOffsets).
 	offsets bool
 	// begun: w is a call's window read from each run's test begin
-	// (sinceBegin), the reading in which the word rule lets go a word of a
-	// text's runs that holds a clock word (valueDrift.clockChanged), since
-	// only sinceWord takes what it learns there as noise, and only as a
-	// checked read of one word.
+	// (sinceBegin), the reading in which the word rule lets go every word
+	// of a text's runs (valueDrift.clockChanged), since only sinceWord
+	// takes what it learns there as noise, and only as a checked read of
+	// one word.
 	begun bool
 }
 
