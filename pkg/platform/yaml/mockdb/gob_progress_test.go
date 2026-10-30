@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -111,15 +112,19 @@ func TestGobFileWriter_CountsEachPieceTheFileTakes(t *testing.T) {
 // stuckDisk stands in for a gob file (gobFileOf): it takes the writes that
 // fit in its first take bytes, then, on the first that does not, closes
 // blocked and, when fail is set, fails that write and every later one; else
-// it does not return from it until release closes, and then takes the rest.
-// took is what the writes that returned took.
+// it does not return from it until free, and then takes the rest. took is
+// what the writes that returned took. The test's end frees it, so a row that
+// fails leaves no write hanging.
 type stuckDisk struct {
-	take    int
-	fail    error
-	took    []byte
-	blocked chan struct{}
-	release chan struct{}
+	take     int
+	fail     error
+	took     []byte
+	blocked  chan struct{}
+	release  chan struct{}
+	freeOnce sync.Once
 }
+
+func (d *stuckDisk) free() { d.freeOnce.Do(func() { close(d.release) }) }
 
 func useStuckDisk(t *testing.T, take int, fail error) *stuckDisk {
 	t.Helper()
@@ -141,6 +146,7 @@ func useStuckDisk(t *testing.T, take int, fail error) *stuckDisk {
 		})
 	}
 	t.Cleanup(func() { gobFileOf = saved })
+	t.Cleanup(d.free)
 	return d
 }
 
@@ -159,30 +165,34 @@ func wholeMocksIn(t *testing.T, b []byte) int {
 }
 
 // Close waits for a write the disk does not return from, for as long as it
-// does not return: no clock gives up on it and drops the mocks it holds.
-// Once the disk takes the rest, every mock is on it.
+// does not return: no clock, of any length, gives up on it and drops the
+// mocks it holds. Once the disk takes the rest, every mock is on it. The row
+// runs in a synctest bubble, whose clock moves a day at once while the write
+// has not returned: a cutoff of any length would fire in it. Main gave up
+// after 30 s with no progress.
 func TestClose_WaitsForAWriteThatDoesNotReturnUntilItDoes(t *testing.T) {
 	t.Setenv("KEPLOY_MOCK_FORMAT", "gob")
 	dir := t.TempDir()
-	disk := useStuckDisk(t, 100<<10, nil)
-	ys := New(zap.NewNop(), dir, "mocks")
 	const n = 20 // about 320 KiB: the buffer writes once it holds 256 KiB
-	insertGobMocks(t, ys, n)
-	closed := make(chan error, 1)
-	go func() { closed <- ys.Close() }()
-	<-disk.blocked
-	// Long past any no-progress bound a test would have set: Close waits.
-	hold := time.NewTimer(2 * time.Second)
-	defer hold.Stop()
-	select {
-	case err := <-closed:
-		t.Fatalf("Close returned (%v) while the disk's write had not", err)
-	case <-hold.C:
-	}
-	close(disk.release)
-	if err := <-closed; err != nil {
-		t.Fatalf("Close, once the disk took the rest: %v", err)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		disk := useStuckDisk(t, 100<<10, nil)
+		ys := New(zap.NewNop(), dir, "mocks")
+		insertGobMocks(t, ys, n)
+		closed := make(chan error, 1)
+		go func() { closed <- ys.Close() }()
+		<-disk.blocked
+		time.Sleep(24 * time.Hour) // the bubble's clock: every timer in it fires
+		synctest.Wait()
+		select {
+		case err := <-closed:
+			t.Fatalf("Close returned (%v) a day after the disk's write had not", err)
+		default:
+		}
+		disk.free()
+		if err := <-closed; err != nil {
+			t.Fatalf("Close, once the disk took the rest: %v", err)
+		}
+	})
 	got, err := readGobMocks(filepath.Join(dir, "set-0", "mocks.gob"))
 	if err != nil || len(got) != n {
 		t.Fatalf("the disk holds %d mocks (%v), want all %d", len(got), err, n)
@@ -213,7 +223,7 @@ func TestCloseUnless_EndsAStuckDiskAtTheStopAndCountsWhatItDidNotWrite(t *testin
 	if left == 0 || left == n {
 		t.Fatalf("the disk took %d bytes holding %d of %d mocks whole: the test wants some, not all, written", len(disk.took), n-left, n)
 	}
-	close(disk.release)
+	disk.free()
 	if err := ys.Close(); err != nil {
 		t.Fatalf("Close, once the disk took the rest: %v", err)
 	}
@@ -435,5 +445,156 @@ func TestInsertMock_AFullQueueGivesUpAtTheCallersCancel(t *testing.T) {
 	}
 	if got := mockNamesIn(t, dir, "set-0"); len(got) != n {
 		t.Fatalf("set-0 holds %d mocks, want the %d handed before the cancelled one", len(got), n)
+	}
+}
+
+// stuckDiskCallEndsAtCancel hands 20 mocks to a gob store at a disk whose
+// write never returns and, once the disk holds that write, runs call, which
+// closes the store, with a ctx that is then cancelled: call must end at the
+// cancel. It returns what call returned, with the store's dir.
+func stuckDiskCallEndsAtCancel(t *testing.T, call func(ys *MockYaml, ctx context.Context) error) (error, string) {
+	t.Helper()
+	t.Setenv("KEPLOY_MOCK_FORMAT", "gob")
+	dir := t.TempDir()
+	disk := useStuckDisk(t, 100<<10, nil)
+	ys := New(zap.NewNop(), dir, "mocks")
+	// The test's end lets the disk go and waits for the writer to end, so it
+	// does not outlive the row (it reads the package's seams as it ends).
+	t.Cleanup(func() { disk.free(); _ = ys.Close() })
+	insertGobMocks(t, ys, 20)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	<-disk.blocked // the writer has opened the set's file, and is stuck in it
+	done := make(chan error, 1)
+	go func() { done <- call(ys, ctx) }()
+	cancel()
+	select {
+	case err := <-done:
+		return err, dir
+	case <-time.After(time.Minute): // only turns a hang into a failure
+		disk.free()
+		<-done
+		t.Fatal("it did not end at its caller's cancel, on a write that never returns")
+		return nil, dir
+	}
+}
+
+// keploy mock record promotes its staging set (PromoteStagedSet), which
+// closes the gob writer: on a disk that is stuck, it ends at its caller's
+// cancel with how many mocks were not written, and leaves the target as it
+// was. Its close had no stop: it hung.
+func TestPromoteStagedSet_OnAStuckDiskEndsAtItsCallersCancel(t *testing.T) {
+	err, dir := stuckDiskCallEndsAtCancel(t, func(ys *MockYaml, ctx context.Context) error {
+		if err := os.MkdirAll(filepath.Join(ys.MockPath, "set-target"), 0o755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(ys.MockPath, "set-target", "mocks.gob"), []byte("old"), 0o644); err != nil {
+			return err
+		}
+		return ys.PromoteStagedSet(ctx, "set-0", "set-target")
+	})
+	if !errors.Is(err, models.ErrMocksNotWritten) || !strings.Contains(err.Error(), "of the 20 mocks handed to the gob mock writer were not written") {
+		t.Fatalf("PromoteStagedSet at its caller's cancel returned %v, want models.ErrMocksNotWritten saying how many of the 20", err)
+	}
+	if got, rerr := os.ReadFile(filepath.Join(dir, "set-target", "mocks.gob")); rerr != nil || string(got) != "old" {
+		t.Fatalf("the target set holds %q (%v), want it as it was", got, rerr)
+	}
+}
+
+// The discard of a staging set (DiscardStagedSet: keploy mock record's at any
+// failure, the user's give-up included) ends at its caller's cancel on a disk
+// that is stuck, and removes the staging set. Its close had no stop: it hung.
+func TestDiscardStagedSet_OnAStuckDiskEndsAtItsCallersCancel(t *testing.T) {
+	err, dir := stuckDiskCallEndsAtCancel(t, func(ys *MockYaml, ctx context.Context) error {
+		return ys.DiscardStagedSet(ctx, "set-0")
+	})
+	if err != nil {
+		t.Fatalf("DiscardStagedSet at its caller's cancel: %v", err)
+	}
+	if _, serr := os.Stat(filepath.Join(dir, "set-0")); !os.IsNotExist(serr) {
+		t.Fatalf("the staging set is still there (%v)", serr)
+	}
+}
+
+// The prune (UpdateMocks) quiesces the gob writer before it rewrites the
+// file: on a disk that is stuck, it ends at its caller's cancel with how many
+// mocks were not written. Its close had no stop: it hung.
+func TestUpdateMocks_OnAStuckDiskEndsAtItsCallersCancel(t *testing.T) {
+	err, _ := stuckDiskCallEndsAtCancel(t, func(ys *MockYaml, ctx context.Context) error {
+		return ys.UpdateMocks(ctx, "set-0", map[string]models.MockState{}, time.Time{}, time.Time{})
+	})
+	if !errors.Is(err, models.ErrMocksNotWritten) || !strings.Contains(err.Error(), "of the 20 mocks handed to the gob mock writer were not written") {
+		t.Fatalf("UpdateMocks at its caller's cancel returned %v, want models.ErrMocksNotWritten saying how many of the 20", err)
+	}
+}
+
+// The write-back of learned noise (PersistMockNoise) quiesces the gob writer
+// as the prune does, and ends at its caller's cancel the same way.
+func TestPersistMockNoise_OnAStuckDiskEndsAtItsCallersCancel(t *testing.T) {
+	err, _ := stuckDiskCallEndsAtCancel(t, func(ys *MockYaml, ctx context.Context) error {
+		return ys.PersistMockNoise(ctx, "set-0", map[string]models.MockState{"mock-0": {ReqBodyNoise: map[string][]string{"body.x": nil}}})
+	})
+	if !errors.Is(err, models.ErrMocksNotWritten) || !strings.Contains(err.Error(), "of the 20 mocks handed to the gob mock writer were not written") {
+		t.Fatalf("PersistMockNoise at its caller's cancel returned %v, want models.ErrMocksNotWritten saying how many of the 20", err)
+	}
+}
+
+// A file that took every mock, then failed as it was closed (a write back the
+// OS reports only then), may not hold them: Close says so, with the file's
+// error, as models.ErrMocksNotWritten. Returning nil would have a recording
+// that is not on disk look complete.
+func TestClose_SaysAFileThatFailedAsItClosedAfterTakingEveryMock(t *testing.T) {
+	t.Setenv("KEPLOY_MOCK_FORMAT", "gob")
+	saved := closeGobFile
+	closeGobFile = func(f *os.File) error {
+		if err := f.Close(); err != nil {
+			return err
+		}
+		return syscall.EIO
+	}
+	t.Cleanup(func() { closeGobFile = saved })
+	ys := New(zap.NewNop(), t.TempDir(), "mocks")
+	insertGobMocks(t, ys, 3)
+	err := ys.Close()
+	want := "the 3 mocks handed to the gob mock writer were written, but the mock file failed as it was closed"
+	if !errors.Is(err, models.ErrMocksNotWritten) || !errors.Is(err, syscall.EIO) || !strings.Contains(err.Error(), want) {
+		t.Fatalf("Close returned %v, want models.ErrMocksNotWritten with the file's error, saying %q", err, want)
+	}
+}
+
+// An insert whose caller has already given up (its ctx is done) may still be
+// queued while the queue has room, or not: one that is not queued is not
+// counted as handed to the writer, so Close does not say a mock was not
+// written that was never handed over. Run often enough that both happen.
+func TestInsertMock_AnInsertWhoseCallerHasGivenUpIsCountedOnlyIfQueued(t *testing.T) {
+	t.Setenv("KEPLOY_MOCK_FORMAT", "gob")
+	dir := t.TempDir()
+	ys := New(zap.NewNop(), dir, "mocks")
+	insertTinyGobMock(t, ys, "set-0") // the writer is running
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	queued, refused := 1, 0
+	for i := 0; i < 200; i++ {
+		m := &models.Mock{Version: "api.keploy.io/v1beta1", Kind: models.HTTP, Spec: models.MockSpec{
+			HTTPReq:  &models.HTTPReq{Method: "GET", URL: "http://x/y"},
+			HTTPResp: &models.HTTPResp{StatusCode: 200},
+		}}
+		switch err := ys.InsertMock(ctx, m, "set-0"); {
+		case err == nil:
+			queued++
+		case errors.Is(err, context.Canceled):
+			refused++
+		default:
+			t.Fatalf("insert %d: %v", i, err)
+		}
+	}
+	if refused == 0 {
+		t.Fatal("setup: no insert was refused at its done ctx in 200")
+	}
+	if err := ys.Close(); err != nil {
+		t.Fatalf("Close after %d inserts refused at their done ctx: %v", refused, err)
+	}
+	if got := mockNamesIn(t, dir, "set-0"); len(got) != queued {
+		t.Fatalf("set-0 holds %d mocks, want the %d queued", len(got), queued)
 	}
 }

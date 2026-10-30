@@ -6,6 +6,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
@@ -339,44 +340,110 @@ func TestReplayWaitsForARequestStreamStillOpenAfterTheWatchStops(t *testing.T) {
 	require.True(t, got.Cases[0].Passed)
 }
 
-// waitConsumers has no bound: a consumer that takes nothing for a long time
-// (here, twenty notices) is still waited for, and each notice says what it
-// holds. One that ends as the user gives the wait up has ended: the wait is
-// not lost.
+// A replay whose user gives up its wait for the request stream, at the wait's
+// offer, ends unjudged: what it would judge is short of the requests the
+// stream still held, and a verdict on part of the run could pass a suite that
+// did not. It exits as a replay the user stopped (128+N), and no outcome is
+// reported.
+func TestReplayGivenUpAtItsRequestStreamsWaitEndsUnjudged(t *testing.T) {
+	defer func(d time.Duration) { mockDrainNotice = d }(mockDrainNotice)
+	mockDrainNotice = 20 * time.Millisecond
+	utils.ResetInterruptedAgain()
+	utils.ClearInterrupted()
+	t.Cleanup(func() { utils.ResetInterruptedAgain(); utils.ClearInterrupted() })
+	t.Cleanup(utils.SetInterruptSignalForTest(0))
+	instr := newRunnerInstr(t, sequentialMarks()...)
+	late := afterStopIncoming{runnerInstr: instr, release: make(chan struct{}),
+		tc: httpCase("", "POST", "http://localhost:8080/orders", 201, `{}`, runnerT0.Add(5*time.Millisecond))}
+	t.Cleanup(func() { close(late.release) })
+	dir := t.TempDir()
+	mapDB := mapdb.New(zap.NewNop(), dir, "")
+	require.NoError(t, mapDB.UpsertCases(context.Background(), "set", map[string]models.MappedTestCase{"orders/e2e.TestA": {Cases: []string{"post-orders-1"}}}, nil, nil))
+	db := &memTestDB{existing: []*models.TestCase{httpCase("post-orders-1", "POST", "http://localhost:8080/orders", 201, `{}`, runnerT0)}}
+	var reported atomic.Bool
+	RegisterReplayOutcomeReporter(func(context.Context, ReplayOutcome) { reported.Store(true) })
+	t.Cleanup(func() { RegisterReplayOutcomeReporter(nil) })
+	cfg := instrConfig(instr.composeInstr, utils.Native, "./shop.test -test.v")
+	cfg.Path = dir
+	withRequests(cfg)
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = 0 })
+	core, logs := observer.New(zapcore.InfoLevel)
+	svc := New(zap.New(core), late, stubMockDB{}, mapDB, nil, nil, cfg)
+	svc.(TestDBSetter).SetTestDB(db)
+	returned := make(chan error, 1)
+	go func() { returned <- svc.Replay(context.Background()) }()
+	if err, early := untilSaid(t, logs, replayDrainWords.writing, returned); early {
+		t.Fatalf("the replay returned (%v) with its request stream still open", err)
+	}
+	utils.SetInterruptSignalForTest(2) // the user's Ctrl+C: SIGINT
+	utils.MarkInterrupted()
+	if err, early := untilSaid(t, logs, replayDrainWords.writing+"; "+replayDrainWords.stopNow, returned); early {
+		t.Fatalf("the replay returned (%v) before it offered to stop now", err)
+	}
+	if !utils.MarkInterruptedAgain() { // the user, as told
+		t.Fatal("setup: no offer standing")
+	}
+	require.NoError(t, returnedWithin(t, returned))
+	require.False(t, reported.Load(), "a replay short of a request its stream held was judged")
+	require.Equal(t, 130, utils.ErrCode, "a replay the user gave up did not exit as one the user stopped")
+}
+
+// waitConsumers has no bound: a consumer that takes nothing for a day is
+// still waited for, and each notice says what it holds. The wait runs in a
+// synctest bubble, whose clock moves the day at once: a bound of any length
+// would fire in it. One that ends as the user gives the wait up has ended:
+// the wait is not lost.
 func TestWaitConsumers_WaitsWithoutABoundAndEndsOnlyAtTheUsersStop(t *testing.T) {
 	defer func(d time.Duration) { mockDrainNotice = d }(mockDrainNotice)
-	mockDrainNotice = 5 * time.Millisecond
-	core, logs := observer.New(zapcore.InfoLevel)
-	m := &mockService{logger: zap.New(core)}
-	done := make(chan struct{})
+	mockDrainNotice = time.Hour
+	utils.ResetInterruptedAgain()
+	utils.ClearInterrupted()
+	t.Cleanup(func() { utils.ResetInterruptedAgain(); utils.ClearInterrupted() })
 	one := func() uint64 { return 1 }
-	ended := make(chan bool, 1)
-	go func() {
-		ended <- m.waitConsumers(recordDrainWords, streamConsumer{what: "mocks", done: done, taken: func() uint64 { return 3 }, handled: one})
-	}()
-	for logs.FilterMessage(recordDrainWords.writing).Len() < 20 {
+	synctest.Test(t, func(t *testing.T) {
+		core, logs := observer.New(zapcore.InfoLevel)
+		m := &mockService{logger: zap.New(core)}
+		done := make(chan struct{})
+		t.Cleanup(func() {
+			select {
+			case <-done:
+			default:
+				close(done)
+			}
+		})
+		ended := make(chan bool, 1)
+		go func() {
+			ended <- m.waitConsumers(recordDrainWords, streamConsumer{what: "mocks", done: done, taken: func() uint64 { return 3 }, handled: one})
+		}()
+		time.Sleep(24 * time.Hour)
+		synctest.Wait()
 		select {
 		case e := <-ended:
-			t.Fatalf("the wait ended (%v) with its consumer still working", e)
-		case <-time.After(time.Millisecond):
+			t.Fatalf("the wait ended (%v) a day into its consumer's work", e)
+		default:
 		}
-	}
-	if left := logs.FilterMessage(recordDrainWords.writing).All()[0].ContextMap()["mocksLeft"]; left != uint64(2) {
-		t.Fatalf("the notice said %v mocks left, want 2", left)
-	}
-	close(done)
-	require.True(t, <-ended)
+		said := logs.FilterMessage(recordDrainWords.writing).All()
+		if len(said) < 24 {
+			t.Fatalf("said %d notices in a day of hourly ones, want 24", len(said))
+		}
+		if left := said[0].ContextMap()["mocksLeft"]; left != uint64(2) {
+			t.Fatalf("the notice said %v mocks left, want 2", left)
+		}
+		close(done)
+		require.True(t, <-ended)
+	})
 
 	// A press the user gave an earlier wait of the stop (the drain's offer)
 	// does not end this one: a consumer that ends as its stream closes is
 	// not given up for it.
-	utils.ResetInterruptedAgain()
-	utils.ClearInterrupted()
-	t.Cleanup(func() { utils.ResetInterruptedAgain(); utils.ClearInterrupted() })
+	mockDrainNotice = 5 * time.Millisecond
 	utils.MarkInterrupted()
 	_, withdraw := utils.OfferStopNow()
 	require.True(t, utils.MarkInterruptedAgain())
 	withdraw()
+	m := &mockService{logger: zap.NewNop()}
+	ended := make(chan bool, 1)
 	ending := make(chan struct{})
 	go func() {
 		ended <- m.waitConsumers(recordDrainWords, streamConsumer{what: "mocks", done: ending, taken: one, handled: one})

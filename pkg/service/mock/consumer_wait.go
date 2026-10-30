@@ -97,3 +97,58 @@ func (m *mockService) consumerFields(consumers []streamConsumer) []zap.Field {
 	}
 	return fields
 }
+
+// mockStoreWriter is a mock store that writes in the background, and is
+// closed to write the rest (MockYaml in the gob format): CloseUnless stops
+// waiting once stop is closed, and MocksLeft is how many mocks it has yet to
+// write.
+type mockStoreWriter interface {
+	CloseUnless(stop <-chan struct{}) error
+	MocksLeft() uint64
+}
+
+// closeStore closes the mock store once its consumers have ended
+// (waitConsumers), so what it still holds is written before the recording is
+// read or saved. As waitConsumers does, it waits for as long as the store
+// writes, which a slow disk makes long, with no bound of any length: every
+// mockDrainNotice it says how many mocks the store has left (words.
+// storeWriting), and, once the run has been interrupted, that another
+// interrupt stops it now (words.stopNow); from then the next one does. It
+// returns the store's error: models.ErrMocksNotWritten, with how many mocks
+// were not written, for a disk that failed a write, or that the user gave up
+// on (gaveUp). A store that writes as it is handed mocks has nothing left to
+// write here.
+//
+// The staging set's promote used to be what closed the store, with no stop:
+// on a disk that is stuck, keploy mock record then hung with nothing said,
+// and no interrupt could end it.
+func (m *mockService) closeStore(words drainWords) (gaveUp bool, err error) {
+	w, ok := m.mockDB.(mockStoreWriter)
+	if !ok {
+		return false, nil
+	}
+	stop := make(chan struct{})
+	done := make(chan error, 1)
+	go func() { done <- w.CloseUnless(stop) }()
+	notice := utils.NewStopNowNotice(mockDrainNotice)
+	defer notice.Withdraw()
+	notices := time.NewTicker(mockDrainNotice)
+	defer notices.Stop()
+	for {
+		select {
+		case err := <-done:
+			return false, err
+		case <-notice.Interrupt():
+			close(stop)
+			// What it waited for wins over the stop (CloseUnless): a store
+			// that wrote everything as it was given up returns nil.
+			return true, <-done
+		case <-notices.C:
+			msg := words.storeWriting
+			if notice.Next() {
+				msg += "; " + words.stopNow
+			}
+			m.logger.Info(msg, zap.Uint64("mocksLeft", w.MocksLeft()))
+		}
+	}
+}

@@ -104,6 +104,13 @@ func (m *mockService) Record(ctx context.Context) error {
 	// Writes must outlive a SIGINT teardown so the tail of the recording still
 	// reaches disk (same rationale as pkg/service/record's persistCtx).
 	persistCtx := context.WithoutCancel(ctx)
+	// storeCtx is what the staging set's promote and discard close the mock
+	// store with. It outlives an interrupt, as persistCtx does, and ends only
+	// when the user gives up keploy's wait for the store's writing or for its
+	// consumers (closeStore, waitConsumers): a disk that is stuck then holds
+	// neither the promote nor the discard after it.
+	storeCtx, giveUpStore := context.WithCancel(persistCtx)
+	defer giveUpStore()
 
 	// The agent's lifetime (setupCtx). A Ctrl+C while it is still being set
 	// up cancels the setup at once. Once it is up, it records until the drain
@@ -255,7 +262,7 @@ func (m *mockService) Record(ctx context.Context) error {
 	// promoted and, being preferred on read, shadow the fresh recording) and then
 	// promote that polluted set over the real one. The real set is untouched
 	// here, so aborting now is safe and leaves it intact.
-	if err := m.mockDB.DiscardStagedSet(persistCtx, staging); err != nil {
+	if err := m.mockDB.DiscardStagedSet(storeCtx, staging); err != nil {
 		stopReason = "failed to clear a leftover staging set before recording"
 		utils.LogError(m.logger, err, stopReason, zap.String("staging", staging),
 			zap.String("next_step", "remove the leftover staging directory under your keploy mocks folder (its name ends in "+yaml.MockStagingSuffix+") and retry"))
@@ -263,7 +270,7 @@ func (m *mockService) Record(ctx context.Context) error {
 	}
 	defer func() {
 		if !keep {
-			_ = m.mockDB.DiscardStagedSet(persistCtx, staging)
+			_ = m.mockDB.DiscardStagedSet(storeCtx, staging)
 		}
 	}()
 	m.mockDB.ResetCounterID()
@@ -528,8 +535,28 @@ func (m *mockService) Record(ctx context.Context) error {
 	}
 	if !m.waitConsumers(recordDrainWords, consumers...) {
 		// The deferred stopWriting ends the writes still under way, before
-		// the deferred discard of the staging set.
+		// the deferred discard of the staging set, which does not wait for a
+		// store the user gave up on either.
+		giveUpStore()
 		return errors.New("the recording was not saved: keploy was stopped before it had written every mock and test case the agent handed over")
+	}
+	// 8'''. Every mock is now handed to the mock store: a store that writes
+	//       in the background (the gob writer) writes the rest here, however
+	//       long that takes (closeStore), before anything reads the recording
+	//       or saves it. One the user gives up at a second interrupt, or that
+	//       could not write every mock, is not saved: the existing set is
+	//       kept (the deferred discard and restore), and the run says so at
+	//       ERROR, with how many mocks were not written.
+	if gaveUp, err := m.closeStore(recordDrainWords); err != nil {
+		next := "check the disk the recording writes to (space, speed, permissions), then re-record; the existing mock set is kept"
+		if gaveUp {
+			giveUpStore()
+			next = recordDrainWords.nextStep
+		} else {
+			utils.SetExitCodeOnce(utils.ExitKeployError)
+		}
+		m.logger.Error(recordDrainWords.storeNotWritten, zap.String("mock-set", name), zap.Error(err), zap.String("next_step", next))
+		return fmt.Errorf("the recording was not saved: %w", err)
 	}
 
 	// 8a. A process the agent could not track -- the kernel refused it a place
@@ -546,7 +573,7 @@ func (m *mockService) Record(ctx context.Context) error {
 		m.logger.Error("the agent could not track every process the test command ran, so their calls were not recorded: the tests charged with it keep their previous recordings in judging",
 			append(pidMapFields(refused), zap.String("mock-set", name), zap.String("reason", refused.CaptureIncomplete()))...)
 	} else if pidCheck.known && refused.Any() {
-		if derr := m.mockDB.DiscardStagedSet(persistCtx, staging); derr != nil {
+		if derr := m.mockDB.DiscardStagedSet(storeCtx, staging); derr != nil {
 			m.logger.Debug("failed to discard staging set after an incomplete capture", zap.String("staging", staging), zap.Error(derr))
 		}
 		reason := refused.CaptureIncomplete()
@@ -572,7 +599,7 @@ func (m *mockService) Record(ctx context.Context) error {
 		m.logger.Error("keploy could not capture every call the test command made: the tests charged with it keep their previous recordings in judging ("+provenswitch.Env+"=1)",
 			zap.String("mock-set", name), zap.String("reason", t))
 	} else if t != "" {
-		if derr := m.mockDB.DiscardStagedSet(persistCtx, staging); derr != nil {
+		if derr := m.mockDB.DiscardStagedSet(storeCtx, staging); derr != nil {
 			m.logger.Debug("failed to discard staging set after an incomplete capture", zap.String("staging", staging), zap.Error(derr))
 		}
 		m.logger.Error("the recording was not kept: keploy could not capture every call the test command made; the existing mock set (if any) was left unchanged ("+provenswitch.Env+"=1)",
@@ -630,14 +657,14 @@ func (m *mockService) Record(ctx context.Context) error {
 
 	if parent.Err() != nil { // user stopped the recording (Ctrl+C, or a session stop)
 		if mockCount == 0 && len(capture.list()) == 0 {
-			if derr := m.mockDB.DiscardStagedSet(persistCtx, staging); derr != nil {
+			if derr := m.mockDB.DiscardStagedSet(storeCtx, staging); derr != nil {
 				m.logger.Debug("failed to discard an empty staging set after interrupt", zap.String("staging", staging), zap.Error(derr))
 			}
 			m.logger.Info("recording stopped; nothing was captured, the existing mock set was left unchanged", zap.String("mock-set", name))
 			return nil
 		}
 		keep = true
-		if err := m.saveMocks(persistCtx, staging, name, mockCount); err != nil {
+		if err := m.saveMocks(storeCtx, staging, name, mockCount); err != nil {
 			utils.LogError(m.logger, err, "recording stopped, but saving the captured mocks failed", zap.Int("mocks", mockCount), zap.String("mock-set", name))
 			return nil
 		}
@@ -652,7 +679,7 @@ func (m *mockService) Record(ctx context.Context) error {
 	// stops the project -- test command included, whose exit is then compose's
 	// stop and not its verdict -- and only the agent's container says so.
 	if cause := m.runFailure(ctx); cause != nil {
-		if derr := m.mockDB.DiscardStagedSet(persistCtx, staging); derr != nil {
+		if derr := m.mockDB.DiscardStagedSet(storeCtx, staging); derr != nil {
 			m.logger.Debug("failed to discard staging set after an incomplete recording", zap.String("staging", staging), zap.Error(derr))
 		}
 		stopReason = "the recording did not finish"
@@ -764,7 +791,7 @@ func (m *mockService) Record(ctx context.Context) error {
 		return nil
 	}
 	if keep {
-		if err := m.saveMocks(persistCtx, staging, name, mockCount); err != nil {
+		if err := m.saveMocks(storeCtx, staging, name, mockCount); err != nil {
 			keep = false
 			stopReason = "failed to promote the recorded mocks over the existing set"
 			utils.LogError(m.logger, err, stopReason, zap.String("mock-set", name))
@@ -1423,6 +1450,10 @@ type drainWords struct {
 	// mockDrainNotice; notWritten is said at ERROR, with nextStep, when the
 	// user ends that wait at a second interrupt.
 	writing, notWritten string
+	// Then the mock store writes what it still holds (closeStore):
+	// storeWriting is said every mockDrainNotice while it does, and
+	// storeNotWritten at ERROR when it did not write every mock.
+	storeWriting, storeNotWritten string
 }
 
 // recordDrainWords are keploy mock record's: a recording ended before it has
@@ -1442,6 +1473,9 @@ var recordDrainWords = drainWords{
 
 	writing:    "Still writing the mocks and test cases the keploy agent handed over to this recording",
 	notWritten: "the recording was not saved: a second interrupt stopped keploy writing the mocks and test cases the agent had handed over to it",
+
+	storeWriting:    "Still writing the recording's mocks to the mock file",
+	storeNotWritten: "the recording was not saved: the mock file did not take every mock the recording captured",
 }
 
 // composeTailUnconfirmed, with its next step, is said at WARN once keploy mock

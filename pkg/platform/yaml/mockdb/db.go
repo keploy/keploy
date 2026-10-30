@@ -171,6 +171,11 @@ const progressChunk = 32 << 10
 // Tests stand a disk that is stuck, or fails, in its place.
 var gobFileOf = func(f *os.File) io.Writer { return f }
 
+// closeGobFile is how the writer closes a gob file it has finished: the
+// file's own Close. Tests stand a file whose close fails (a write back the OS
+// reports only then) in its place.
+var closeGobFile = func(f *os.File) error { return f.Close() }
+
 func (f *gobFileWriter) Write(b []byte) (int, error) {
 	written := 0
 	for len(b) > 0 {
@@ -497,8 +502,10 @@ func (ys *MockYaml) updateMocksGob(ctx context.Context, testSetID, gobPath strin
 	// ys.gobBufw / ys.gobEnc; rewriting the file out from under it
 	// would corrupt the next Encode. Close drains the queue and
 	// resets lifecycle state; the next InsertMock restarts a fresh
-	// writer via the inline init in insertMockGob.
-	if err := ys.Close(); err != nil {
+	// writer via the inline init in insertMockGob. It waits for the writer
+	// until the caller's ctx ends: a disk that is stuck is the caller's to
+	// give up on (CloseUnless).
+	if err := ys.CloseUnless(ctx.Done()); err != nil {
 		utils.LogError(ys.Logger, err, "failed to quiesce async gob writer before pruning; check disk space and writer state", zap.String("path", gobPath))
 		return err
 	}
@@ -687,8 +694,8 @@ func (ys *MockYaml) persistLearned(ctx context.Context, testSetID string, mockSt
 	gobPath := filepath.Join(path, mockFileName+".gob")
 	if _, err := os.Stat(gobPath); err == nil {
 		// Quiesce any in-flight async gob writer before the rewrite —
-		// same reasoning as updateMocksGob.
-		if err := ys.Close(); err != nil {
+		// same reasoning, and the same end at ctx, as updateMocksGob.
+		if err := ys.CloseUnless(ctx.Done()); err != nil {
 			utils.LogError(ys.Logger, err, "failed to quiesce async gob writer before noise persistence", zap.String("path", gobPath))
 			return nil, err
 		}
@@ -1300,7 +1307,7 @@ func (ys *MockYaml) gobFinishFileLocked() {
 		flushErr = ys.gobBufw.Flush()
 	}
 	if ys.gobFile != nil {
-		closeErr = ys.gobFile.Close()
+		closeErr = closeGobFile(ys.gobFile)
 	}
 	if err := errors.Join(flushErr, closeErr); err != nil {
 		ys.gobFlushErr = errors.Join(ys.gobFlushErr, fmt.Errorf("finishing %s: %w", ys.gobFilePath, err))
@@ -2179,7 +2186,6 @@ func (ys *MockYaml) mockFileVariants(setDir string) []string {
 // one. An empty staging set is refused, so a bug upstream can never blank the
 // target.
 func (ys *MockYaml) PromoteStagedSet(ctx context.Context, stagingID, targetID string) error {
-	_ = ctx
 	for _, id := range []string{stagingID, targetID} {
 		if err := pathsafe.ValidateSingleSegment(id, false); err != nil {
 			return fmt.Errorf("rejecting PromoteStagedSet: testSetID %q must be a non-empty single-segment name (no separators, no drive/volume prefix, not '.' or '..'): %w", id, err)
@@ -2188,8 +2194,10 @@ func (ys *MockYaml) PromoteStagedSet(ctx context.Context, stagingID, targetID st
 
 	// Finalize any open (gob) writer so staging's file is complete on disk before
 	// it is moved. No-op for yaml/json, whose writes are synchronous. A flush
-	// error means the staged recording is incomplete — do not promote it.
-	if err := ys.Close(); err != nil {
+	// error means the staged recording is incomplete — do not promote it. It
+	// waits for the writer until ctx ends: on a disk that is stuck, the
+	// caller's give-up is then a counted failure, and the target is kept.
+	if err := ys.CloseUnless(ctx.Done()); err != nil {
 		return fmt.Errorf("not promoting staged set %q: finalizing its mock file failed, so %q is left untouched: %w", stagingID, targetID, err)
 	}
 
@@ -2269,12 +2277,13 @@ func (ys *MockYaml) PromoteStagedSet(ctx context.Context, stagingID, targetID st
 // never promoted over stays intact. Also called before capture to clear any
 // staging directory a previously-crashed run left behind.
 func (ys *MockYaml) DiscardStagedSet(ctx context.Context, stagingID string) error {
-	_ = ctx
 	if err := pathsafe.ValidateSingleSegment(stagingID, false); err != nil {
 		return fmt.Errorf("rejecting DiscardStagedSet: testSetID %q must be a non-empty single-segment name (no separators, no drive/volume prefix, not '.' or '..'): %w", stagingID, err)
 	}
-	// Release any open (gob) writer handle before removing the directory.
-	if err := ys.Close(); err != nil {
+	// Release any open (gob) writer handle before removing the directory,
+	// waiting for the writer until ctx ends: a disk that is stuck must not
+	// hold a discard the caller has given up on.
+	if err := ys.CloseUnless(ctx.Done()); err != nil {
 		ys.Logger.Debug("discardStagedSet: closing the mock writer reported an error; removing the staging dir anyway", zap.Error(err))
 	}
 	stagingDir := filepath.Join(ys.MockPath, stagingID)
