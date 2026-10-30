@@ -59,6 +59,11 @@ type provenWire struct {
 	open string
 	// skip is the gate: test ID -> the reason its harness skips it with.
 	skip map[string]string
+	// asideHanded is, of skip, the tests whose recordings the set's replay
+	// has handed the proxy to serve aside (serveAside): at the test's own
+	// skipped begin, or at the begin of a test recorded after it
+	// (serveSkippedBefore). SetScopeSkips starts it over with the set.
+	asideHanded map[string]bool
 	// charged holds the misses the ends drained from the proxy, until the
 	// CLI's own end-of-run read (GetMockErrors) collects them, so charging a
 	// miss to a test never hides it from the run's totals.
@@ -707,8 +712,73 @@ func (a *Agent) SetScopeSkips(_ context.Context, skip map[string]string) error {
 	}
 	a.provenMu.Lock()
 	a.proven.skip = cp
+	a.proven.asideHanded = nil
 	a.provenMu.Unlock()
 	return nil
+}
+
+// handAside reports whether test id's recordings are still to be handed to
+// the proxy to serve aside in this set, and notes them handed.
+func (a *Agent) handAside(id string) bool {
+	a.provenMu.Lock()
+	defer a.provenMu.Unlock()
+	if a.proven.asideHanded[id] {
+		return false
+	}
+	if a.proven.asideHanded == nil {
+		a.proven.asideHanded = map[string]bool{}
+	}
+	a.proven.asideHanded[id] = true
+	return true
+}
+
+// serveSkippedBefore hands the proxy, at test id's begin, the recordings of
+// every test the replay skips (the proven gate) that was recorded before id
+// (recordedStart) and that this replay has not handed yet, as that test's
+// own skipped begin does (serveAside), in recorded order. A run that does
+// not select a skipped test (go test -run) never begins it, yet the tests
+// recorded after it still make the calls its recording holds, in their own
+// windows: a per-process first use's refresh, a cache it filled. Served as
+// at its skipped begin: exact only, unchecked, never required, each
+// recording at most once. A skipped test the recording has no place for (no
+// begin, no window) is handed only at its own begin, and none is handed to
+// a test recorded before it: what it answers may be what that skipped test
+// caused.
+func (a *Agent) serveSkippedBefore(id string) {
+	a.provenMu.Lock()
+	skip, starts := a.proven.skip, a.proven.order.starts
+	a.provenMu.Unlock()
+	if len(skip) == 0 {
+		return
+	}
+	at, known := a.recordedStart(id, starts)
+	if !known {
+		return
+	}
+	type due struct {
+		id string
+		at time.Time
+	}
+	var dues []due
+	for s := range skip {
+		if s == id {
+			continue
+		}
+		if st, ok := a.recordedStart(s, starts); ok && st.Before(at) {
+			dues = append(dues, due{s, st})
+		}
+	}
+	slices.SortFunc(dues, func(x, y due) int {
+		if c := x.at.Compare(y.at); c != 0 {
+			return c
+		}
+		return strings.Compare(x.id, y.id)
+	})
+	for _, d := range dues {
+		if a.handAside(d.id) {
+			a.serveAside(d.id)
+		}
+	}
 }
 
 func (a *Agent) replaying() bool {
@@ -762,9 +832,14 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 	reason, gated := a.proven.skip[id]
 	dir := a.proven.dir
 	a.provenMu.Unlock()
+	if a.replaying() {
+		a.serveSkippedBefore(id)
+	}
 	if a.replaying() && gated {
 		a.NoteScopeGated(id, 0, at)
-		a.serveAside(id)
+		if a.handAside(id) {
+			a.serveAside(id)
+		}
 		return models.ScopeBeginResp{V: models.ScopeProtocolVersion, Status: "ok", Action: models.ScopeActionSkip, Reason: reason}, nil
 	}
 
