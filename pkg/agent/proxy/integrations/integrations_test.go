@@ -3,6 +3,8 @@ package integrations
 import (
 	"testing"
 	"time"
+
+	"go.keploy.io/server/v3/pkg/models"
 )
 
 // A call's mark is moved, at a later read of the round, by another staging
@@ -90,5 +92,33 @@ func TestASequenceWalksTheOpenTestsRecordedWindow(t *testing.T) {
 		if lo != c.lo || hi != c.hi {
 			t.Errorf("%s: span [%d, %d); want [%d, %d)", c.name, lo, hi, c.lo, c.hi)
 		}
+	}
+}
+
+// A miss of a marked series (SeriesMiss.Mark) is the set's background miss,
+// named as the series' newest recording, saying why the series answered
+// none, and showing nothing of the closest recording the parser's report
+// read in the open view: its request, which the replay prints against the
+// call under the name the report shows, its diff, field diffs, the fields
+// that differ and their reasons are of a recording that is no recording of
+// the series. What else the report says of the call stays.
+func TestASeriesMissShowsNothingOfTheOpenViewsClosest(t *testing.T) {
+	r := &models.MockMismatchReport{
+		Protocol: "HTTP", ActualSummary: "GET /internal/claims/next", ReceivedReq: "GET /internal/claims/next?since=1793000470",
+		ClosestMock: "mock-own", ClosestMockReq: "GET /internal/claims/next?since=1793000410", Diff: "url.query.since differs",
+		FieldDiffs:   []models.MockFieldDiff{{Path: "url.query.since"}},
+		Differs:      []string{"url.query.since"},
+		FieldReasons: []models.FieldReason{{Field: "url.query.since", Why: "url.query.since was learned as a read of the application's clock"}},
+		NextSteps:    "the open view's closest's next steps",
+	}
+	(&SeriesMiss{NextSteps: "its reads of the clock do not hold on this run's clock", Newest: &models.Mock{Name: "mock-poll-12"}}).Mark(r)
+	if !r.Background || r.ClosestMock != "mock-poll-12" || r.NextSteps != "its reads of the clock do not hold on this run's clock" {
+		t.Fatalf("the series' miss is background %v, closest %q, next steps %q; want the set's background miss naming mock-poll-12 with the series' why", r.Background, r.ClosestMock, r.NextSteps)
+	}
+	if r.ClosestMockReq != "" || r.Diff != "" || r.FieldDiffs != nil || r.Differs != nil || r.FieldReasons != nil {
+		t.Fatalf("the series' miss names mock-poll-12 but shows mock-own's request %q, diff %q, fields %v %v %v", r.ClosestMockReq, r.Diff, r.FieldDiffs, r.Differs, r.FieldReasons)
+	}
+	if r.Protocol != "HTTP" || r.ActualSummary != "GET /internal/claims/next" || r.ReceivedReq != "GET /internal/claims/next?since=1793000470" {
+		t.Fatalf("the series' miss lost what it says of the call: %+v", r)
 	}
 }
