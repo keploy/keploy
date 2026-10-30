@@ -1720,7 +1720,7 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 					zap.String("type", string(l.Recorded.Type)), zap.String("fromMock", l.From.Mock), zap.String("fromField", l.From.Path), zap.Bool("fromSet", l.From.Run))
 			}
 			if e, ok := n.servedExchange(tracker.Drifts(), m, answered, c.Shape, recordedParts(m), liveShape, input, live, out, own, h.learnedView(m, plan)); ok {
-				tracker.Served(test, learn.Named(e, plan.vars))
+				tracker.Served(test, learn.Named(e, plan.vars, plan.clocks))
 			}
 			return out, nil, nil
 		}

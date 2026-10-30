@@ -346,7 +346,7 @@ func TestAStartUpExchangeDriftsOnlyAtAVariablePlace(t *testing.T) {
 // variables hold after the first by name.
 func TestNamedLeavesTheExchangeItWasGiven(t *testing.T) {
 	e := Earlier{Mock: "mock-1", Seen: []Seen{{Side: Request, Place: "body.id", Leaf: Leaf{Path: "body.id"}}}}
-	named := Named(e, models.MockVariables{"second": {Bind: "body.id"}, "first": {Use: []string{"body.id"}}})
+	named := Named(e, models.MockVariables{"second": {Bind: "body.id"}, "first": {Use: []string{"body.id"}}}, nil)
 	if e.Seen[0].Name != "" {
 		t.Fatalf("Named wrote %q into the exchange it was given", e.Seen[0].Name)
 	}
@@ -354,9 +354,38 @@ func TestNamedLeavesTheExchangeItWasGiven(t *testing.T) {
 		t.Fatalf("the place two variables hold is named %q, want the first by name", named.Seen[0].Name)
 	}
 	named.Seen = append(named.Seen, Seen{Side: Response, Name: "stale"})
-	again := Named(named, nil)
+	again := Named(named, nil, nil)
 	if again.Seen[0].Name != "" || again.Seen[1].Name != "" || &again.Seen[0] == &named.Seen[0] {
 		t.Fatalf("Named with no variables keeps a stale name or the exchange's own Seen: %+v", again.Seen)
+	}
+}
+
+// Named marks a request leaf its call's learn step learned as a plain read of
+// the clock (Seen.Clock), by the leaf's path as MockSpec.Clocks keys it: not
+// a read plus an offset, not an answer's leaf at the same path, not a leaf
+// the clocks do not hold, and a mark the exchange held before is not kept.
+func TestNamedMarksAPlainClockReadOfARequestOnly(t *testing.T) {
+	e := Earlier{Mock: "mock-1", Seen: []Seen{
+		{Side: Request, Place: "body.lastUsedAt", Leaf: Leaf{Path: "body.lastUsedAt"}},
+		{Side: Request, Place: "body.expiresAt", Leaf: Leaf{Path: "body.expiresAt"}},
+		{Side: Response, Place: "body.lastUsedAt", Leaf: Leaf{Path: "body.lastUsedAt"}},
+		{Side: Request, Place: "body.id", Leaf: Leaf{Path: "body.id"}, Clock: true},
+	}}
+	clocks := map[string]models.ClockOffset{
+		"body.lastUsedAt": {Res: time.Second},
+		"body.expiresAt":  {Min: 30 * time.Minute, Max: 30*time.Minute + time.Second, Res: time.Second},
+	}
+	named := Named(e, nil, clocks)
+	for i, want := range []bool{true, false, false, false} {
+		if named.Seen[i].Clock != want {
+			t.Errorf("%s %s is marked a plain clock read %v; want %v", named.Seen[i].Side, named.Seen[i].Leaf.Path, named.Seen[i].Clock, want)
+		}
+	}
+	if !e.Seen[3].Clock || e.Seen[0].Clock {
+		t.Fatalf("Named wrote its marks into the exchange it was given: %+v", e.Seen)
+	}
+	if p := seenPlace(named, named.Seen[0], true); !p.Clock {
+		t.Fatalf("the place of a marked leaf is no clock read: %+v", p)
 	}
 }
 
@@ -681,7 +710,7 @@ func TestNamedSkipsAnEcho(t *testing.T) {
 	named := Named(e, models.MockVariables{
 		"echoed": {Bind: "body.id", Echo: true},
 		"ref":    {Bind: "body.ref"},
-	})
+	}, nil)
 	if named.Seen[0].Name != "" || named.Seen[1].Name != "ref" {
 		t.Fatalf("Named named the places %q and %q; want none for the echo, ref for ref", named.Seen[0].Name, named.Seen[1].Name)
 	}
@@ -1051,6 +1080,62 @@ func TestARunsPlaceKeepsTheWordRulesClockExclusions(t *testing.T) {
 		}
 		if p, ok := appeared(clockedDrifts(), text(rec), text(rec.Add(FullRoundLead)), bRec.Add(time.Minute), []Earlier{a}, nil); !ok || p.Mock != "mock-a" {
 			t.Fatalf("own %v: test B's copy of test A's clock read whole is not followed: %+v (%v)", own, p, ok)
+		}
+	}
+}
+
+// A value an earlier test's call sent at a place its learn step learned as a
+// plain read of the clock (Seen.Clock), which a later test's call carries
+// where no window of that call holds it as a read of the clock, is refused,
+// never followed (founder, 2026-10-30): keploy cannot tell a copy of the read
+// from another read of the clock in the same second that keploy does not see
+// (a session token's auth time, minted by the test's client's login). The
+// reason names the earlier call and its place, never the value. The same
+// value a window of the later call holds is that call's read still; one an
+// earlier test sent at a place no clock read was learned at stays the run's
+// variable; and a copy of the test's own call's clock read is no earlier
+// test's.
+func TestAnEarlierTestsClockReadIsNoRunsVariableWhereNoWindowOfTheUseHoldsIt(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	rec := time.Date(2026, 10, 30, 12, 26, 2, 0, time.UTC)
+	epoch := func(at time.Time) string { return strconv.FormatInt(at.Unix(), 10) }
+	aRead := rec.Add(50 * time.Millisecond)
+	for name, row := range map[string]struct {
+		clock, own, echoed bool
+		after              time.Duration
+		want               Kind
+	}{
+		"a clock read, nine seconds later":              {clock: true, after: 9 * time.Second, want: KindUnaccounted},
+		"a clock read, the same second":                 {clock: true, after: 250 * time.Millisecond, want: KindClockRead},
+		"a clock read, the same second, echoed":         {clock: true, echoed: true, after: 250 * time.Millisecond, want: KindVariable},
+		"no clock read, nine seconds later":             {after: 9 * time.Second, want: KindVariable},
+		"the test's own clock read, nine seconds later": {clock: true, own: true, after: 9 * time.Second, want: KindVariable},
+	} {
+		tr := NewTracker()
+		tr.Begin()
+		a, _, _, _ := tr.Test()
+		tr.Served(a, Earlier{Mock: "mock-a", At: aRead, Own: true, Seen: []Seen{{Side: Request, Leaf: Leaf{Path: "body.data.lastUsedAt", Type: String, Value: epoch(aRead)}, Live: epoch(aRead.Add(FullRoundLead)), Place: "body.data.lastUsedAt", Clock: row.clock}}})
+		if !row.own {
+			tr.End()
+			tr.Begin()
+		}
+		_, earlier, _, _ := tr.Test()
+		call := aRead.Add(row.after)
+		fCall := call.Add(FullRoundLead)
+		w := &Window{Rec: Span{From: call.Add(-5 * time.Millisecond), To: call}, F: Span{From: fCall.Add(-5 * time.Millisecond), To: fCall.Add(time.Millisecond)}}
+		var resp []Leaf
+		if row.echoed {
+			resp = []Leaf{{Path: "body.code.authTime", Type: String, Value: epoch(aRead)}}
+		}
+		ln := ClassifyIn(clockedDrifts(), []string{"body.authTime"}, strLeaf("body.authTime", epoch(aRead.Add(FullRoundLead))), strLeaf("body.authTime", epoch(aRead)), call, earlier, nil, resp, w)[0]
+		if ln.Kind != row.want {
+			t.Fatalf("%s: test B's value is %s from %+v (%s); want %s", name, ln.Kind, ln.From, ln.Why, row.want)
+		}
+		switch {
+		case row.want == KindUnaccounted && (!strings.Contains(ln.Why, "mock-a at body.data.lastUsedAt") || strings.Contains(ln.Why, epoch(aRead)) || strings.Contains(ln.Why, epoch(aRead.Add(FullRoundLead))) || ln.From != (Place{})):
+			t.Fatalf("%s: the refusal names %q from %+v; want the earlier call and its place, never the value, and no place to bind at", name, ln.Why, ln.From)
+		case row.want == KindVariable && ln.From.Mock != "mock-a":
+			t.Fatalf("%s: test B's copy follows %+v; want mock-a's value", name, ln.From)
 		}
 	}
 }
