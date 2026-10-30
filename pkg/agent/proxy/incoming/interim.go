@@ -12,6 +12,7 @@ import (
 	"time"
 
 	proxyutil "go.keploy.io/server/v3/pkg/agent/proxy/util"
+	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"golang.org/x/net/http/httpguts"
@@ -127,7 +128,7 @@ func relayRequest(req *http.Request, app, client net.Conn) *requestRelay {
 		if body.err != nil && !r.answered.Load() {
 			_ = proxyutil.CloseWriteIfPossible(app)
 		}
-		r.done <- err
+		r.done <- models.BodyReadError("the client's request", err)
 	}()
 	return r
 }

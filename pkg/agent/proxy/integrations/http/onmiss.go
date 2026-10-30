@@ -107,7 +107,7 @@ func (h *HTTP) serveOnMiss(ctx context.Context, clientConn net.Conn, reqBuf []by
 	respBody, err := io.ReadAll(respParsed.Body)
 	_ = respParsed.Body.Close()
 	if err != nil {
-		return false, err
+		return false, models.BodyReadError("the server's answer's body", err)
 	}
 	resTs := time.Now()
 

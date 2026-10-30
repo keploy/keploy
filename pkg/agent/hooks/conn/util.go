@@ -147,6 +147,7 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 		if err != nil {
 			// The body is the app's content: the line says how much of it was
 			// read and what kind it is, never what it holds.
+			err = models.BodyReadError("the HTTP request's body", err)
 			logger.Debug("failed to read the http request body", zap.Any("metadata", utils.GetReqMeta(req)), zap.Int("bytesRead", len(reqBody)), zap.String("contentType", req.Header.Get("Content-Type")), zap.Error(err))
 		}
 
@@ -174,6 +175,7 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
+		err = models.BodyReadError("the HTTP response's body", err)
 		utils.LogError(logger, err, "failed to read the http response body")
 		return
 	}

@@ -1,18 +1,22 @@
 package models
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
+	"net/http"
+	"net/textproto"
 	"net/url"
 	"os"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"unicode"
 	"unicode/utf8"
 )
@@ -642,6 +646,120 @@ func unparsedError(what string, n int, says string, err error) error {
 		}
 	}
 	return fmt.Errorf("%s%s %s", what, size, says)
+}
+
+// BodyReadError is err, the error of a read of an HTTP message's body (its
+// trailer is read with it), or of a write that reads one (Request.Write,
+// Response.Write), as keploy logs and returns it. It is an allowlist that
+// fails closed: err is returned as it is only when it is of a kind whose text
+// names no byte of the message (namesNoContent):
+//   - a short read's or a closed body's sentinel (io.EOF, io.ErrUnexpectedEOF,
+//     http.ErrBodyReadAfterClose), or a stream's line longer than its scanner
+//     holds (bufio.ErrTooLong);
+//   - a connection's error (*net.OpError, a syscall's errno, net.ErrClosed, a
+//     deadline, a context's end);
+//   - *http.MaxBytesError;
+//   - net/http's own fixed texts for a chunked body that does not frame or a
+//     trailer that runs long (netHTTPBodyReadTexts);
+//   - keploy's own error types that say they name no content, by a
+//     NamesNoContent method (pkg.AnswerStallError).
+//
+// Any other error is named by fixed text instead: "<what>'s trailer does not
+// parse" for a textproto.ProtocolError (net/http's for a trailer line, which
+// it quotes whole), and "<what> could not be read" for every other, an error
+// net/http may yet add among them. Either ends with the text of the first
+// error of a kind above in err's tree (": unexpected EOF"), if there is one.
+// It wraps err, so errors.Is and errors.As still tell what it is.
+func BodyReadError(what string, err error) error {
+	if err == nil || namesNoContent(err) {
+		return err
+	}
+	text := what + " could not be read"
+	var pe textproto.ProtocolError
+	if errors.As(err, &pe) {
+		text = what + "'s trailer does not parse"
+	}
+	if kept := firstNoContent(err); kept != nil {
+		text += ": " + kept.Error()
+	}
+	return &bodyReadError{text: text, err: err}
+}
+
+// bodyReadError is BodyReadError's: fixed text that wraps the error it
+// names.
+type bodyReadError struct {
+	text string
+	err  error
+}
+
+func (e *bodyReadError) Error() string { return e.text }
+func (e *bodyReadError) Unwrap() error { return e.err }
+
+// NamesNoContent marks BodyReadError's own error as one whose text names no
+// byte of a message, so a second BodyReadError keeps it as it is.
+func (*bodyReadError) NamesNoContent() {}
+
+// noContentSentinels are the errors whose text is fixed and names no byte of
+// a message, which BodyReadError keeps when err is one of them.
+var noContentSentinels = []error{
+	io.EOF, io.ErrUnexpectedEOF, io.ErrClosedPipe, net.ErrClosed, os.ErrDeadlineExceeded,
+	context.Canceled, context.DeadlineExceeded,
+	http.ErrBodyReadAfterClose, http.ErrLineTooLong, http.ErrContentLength, http.ErrHandlerTimeout,
+	bufio.ErrTooLong,
+}
+
+// netHTTPBodyReadTexts are net/http's errors of a body read whose text is
+// fixed, and which it does not export: its chunked reader's
+// (net/http/internal/chunked.go) and its trailer read's (transfer.go). An
+// error is one of them only when its whole text is.
+var netHTTPBodyReadTexts = []string{
+	"malformed chunked encoding",
+	"chunked encoding contains too much non-data",
+	"chunked line ends with bare LF",
+	"invalid CR in chunked line",
+	"empty hex number for chunk length",
+	"invalid byte in chunk length",
+	"http chunk length too large",
+	"http: unexpected EOF reading trailer",
+	"http: suspiciously long trailer after chunked body",
+	"http: read on closed response body",
+	"net/http: request canceled",
+}
+
+// namesNoContent reports whether err itself, not an error it wraps, is of a
+// kind whose text names no byte of a message (BodyReadError's list). A
+// wrapper's own text is not known, so a wrapper is not one, whatever it
+// wraps.
+func namesNoContent(err error) bool {
+	switch err.(type) {
+	case *net.OpError, *os.SyscallError, syscall.Errno, *http.MaxBytesError, interface{ NamesNoContent() }:
+		return true
+	}
+	for _, s := range noContentSentinels {
+		if err == s {
+			return true
+		}
+	}
+	return slices.Contains(netHTTPBodyReadTexts, err.Error())
+}
+
+// firstNoContent is the first error in err's tree, err itself first, that
+// namesNoContent, or nil.
+func firstNoContent(err error) error {
+	if err == nil || namesNoContent(err) {
+		return err
+	}
+	switch u := err.(type) {
+	case interface{ Unwrap() error }:
+		return firstNoContent(u.Unwrap())
+	case interface{ Unwrap() []error }:
+		for _, e := range u.Unwrap() {
+			if kept := firstNoContent(e); kept != nil {
+				return kept
+			}
+		}
+	}
+	return nil
 }
 
 // connReadError reports whether err is a connection's read error, as a

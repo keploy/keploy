@@ -4830,6 +4830,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					if notAStream {
 						var body []byte
 						body, streamErr = io.ReadAll(streamReader)
+						streamErr = models.BodyReadError("the app's answer's body", streamErr)
 						capturedBody = string(body)
 					} else {
 						streamMatched, capturedBody, streamMismatchInfo, streamErr = pkg.CompareHTTPStream(expectedStream.HTTPResp, streamReader, streamResp.StreamConfig, jsonNoiseKeys, r.logger)

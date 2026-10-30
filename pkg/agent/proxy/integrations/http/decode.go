@@ -150,6 +150,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 
 			reqBody, err := io.ReadAll(request.Body)
 			if err != nil {
+				err = models.BodyReadError("the HTTP request's body", err)
 				utils.LogError(h.Logger, err, "failed to read from request body", zap.Any("metadata", utils.GetReqMeta(request)))
 				errCh <- err
 				return
@@ -924,7 +925,7 @@ func passOneCallThrough(ctx context.Context, logger *zap.Logger, clientConn net.
 			// call: a server that neither reads nor writes once the client
 			// has gone would otherwise hold it open.
 			if err := resp.Write(clientConn); err != nil {
-				return false, fmt.Errorf("write the answer of %s to the client: %w", dstCfg.Addr, err)
+				return false, fmt.Errorf("write the answer of %s to the client: %w", dstCfg.Addr, models.BodyReadError("the server's answer", err))
 			}
 			copied := make(chan struct{}, 2)
 			go func() { _, _ = io.Copy(conn, clientConn); copied <- struct{}{} }()
@@ -942,7 +943,7 @@ func passOneCallThrough(ctx context.Context, logger *zap.Logger, clientConn net.
 		werr := resp.Write(clientConn)
 		_ = resp.Body.Close()
 		if werr != nil {
-			return false, fmt.Errorf("write the answer of %s to the client: %w", dstCfg.Addr, werr)
+			return false, fmt.Errorf("write the answer of %s to the client: %w", dstCfg.Addr, models.BodyReadError("the server's answer", werr))
 		}
 		// resp.Close: the server said Connection: close, or its body ran to
 		// the close, which resp.Write tells the client as Connection: close.

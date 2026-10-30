@@ -435,6 +435,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			relay = relayRequest(req, upConn, clientConn)
 		} else {
 			if err := req.Write(upConn); err != nil {
+				err = models.BodyReadError("the client's request", err)
 				if pressureCloseMode && isIngressExpectedCloseErr(err) {
 					logger.Debug("HTTP/1 ingress request write ended during close-under-pressure path", zap.Error(err))
 					req.Body.Close()
@@ -576,6 +577,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		}
 
 		if err := resp.Write(clientConn); err != nil {
+			err = models.BodyReadError("the app's answer", err)
 			if pressureCloseMode && isIngressExpectedCloseErr(err) {
 				logger.Debug("HTTP/1 ingress client connection closed while finishing close-under-pressure path", zap.Error(err))
 				resp.Body.Close()
@@ -1119,6 +1121,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 			}
 			upConnFresh = false
 			if err := req.Write(upConn); err != nil {
+				err = models.BodyReadError("the client's request", err)
 				logger.Error("Failed to forward upgrade request to upstream. Verify upstream supports the requested upgrade and is listening on the resolved address.",
 					zap.String("method", req.Method),
 					zap.String("upgrade", req.Header.Get("Upgrade")),
@@ -1222,6 +1225,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 				b, rerr := io.ReadAll(io.LimitReader(req.Body, req.ContentLength+1))
 				_ = req.Body.Close()
 				if rerr != nil {
+					rerr = models.BodyReadError("the client's request's body", rerr)
 					// Failure reading the DOWNSTREAM client body —
 					// usually a client disconnect mid-body or a
 					// truncated request. This is not an upstream
@@ -1296,6 +1300,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		if continues {
 			relay = relayRequest(req, upConn, clientConn)
 		} else if err := req.Write(upConn); err != nil {
+			err = models.BodyReadError("the client's request", err)
 			if req.Body != nil {
 				_ = req.Body.Close()
 			}
@@ -1318,6 +1323,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 					req.Body = http.NoBody
 				}
 				if rerr := req.Write(upConn); rerr != nil {
+					rerr = models.BodyReadError("the client's request", rerr)
 					logger.Error("Replay of idempotent request failed after redial; upstream may be unhealthy or rejecting writes. Check application status and recent restarts on the resolved address.",
 						zap.String("method", req.Method), zap.String("upstream", upstreamAddr), zap.Error(rerr))
 					pm.appGone(clientConn)
@@ -1385,6 +1391,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 					req.Body = http.NoBody
 				}
 				if rerr := req.Write(upConn); rerr != nil {
+					rerr = models.BodyReadError("the client's request", rerr)
 					logger.Error("Replay request write failed after redial; upstream may be unhealthy. Check application status on the resolved address.",
 						zap.String("method", req.Method), zap.String("upstream", upstreamAddr), zap.Error(rerr))
 					pm.appGone(clientConn)
@@ -1498,6 +1505,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		}
 
 		if err := resp.Write(clientConn); err != nil {
+			err = models.BodyReadError("the app's answer", err)
 			if resp.Body != nil {
 				_ = resp.Body.Close()
 			}

@@ -238,6 +238,7 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 		reqBody, err = io.ReadAll(req.Body)
 		if err != nil {
 			// TODO right way to log errors
+			err = models.BodyReadError("the HTTP request's body", err)
 			utils.LogError(h.Logger, err, "failed to read the http request body", zap.Any("metadata", utils.GetReqMeta(req)))
 			return err
 		}
@@ -267,6 +268,7 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 	if respParsed.Body != nil { // Read
 		respBody, err = io.ReadAll(respParsed.Body)
 		if err != nil {
+			err = models.BodyReadError("the HTTP response's body", err)
 			utils.LogError(h.Logger, err, "failed to read the the http response body", zap.Any("metadata", utils.GetReqMeta(req)))
 			return err
 		}

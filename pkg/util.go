@@ -1328,6 +1328,7 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 				Body:          decodedPart(httpResp.Header.Get("Content-Encoding"), respBody),
 			}, cfg.answer.err()
 		}
+		errReadRespBody = models.BodyReadError("the app's answer's body", errReadRespBody)
 		utils.LogError(logger, errReadRespBody, "failed reading response body")
 		return nil, errReadRespBody
 	}
@@ -2193,7 +2194,7 @@ func compareBinaryStream(expectedResp models.HTTPResp, stream io.Reader, logger 
 				cut = true
 				break
 			}
-			return false, strconv.Itoa(actualSize), nil, err
+			return false, strconv.Itoa(actualSize), nil, models.BodyReadError("the app's streamed answer", err)
 		}
 	}
 
@@ -2747,7 +2748,7 @@ func parseMultipartQueue(reader io.Reader, boundary string) ([]multipartPartPayl
 
 	data, err := io.ReadAll(reader)
 	if err != nil {
-		return nil, err
+		return nil, models.BodyReadError("the app's multipart answer", err)
 	}
 
 	queue, parseErr := parseMultipartQueueBytes(data, boundary)
@@ -3433,7 +3434,7 @@ func agentHealthAnswer(ctx context.Context, logger *zap.Logger, client *http.Cli
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		logger.Debug("Failed to read agent health response body", zap.Error(err))
+		logger.Debug("Failed to read agent health response body", zap.Error(models.BodyReadError("the agent's health answer's body", err)))
 		return nil
 	}
 	logger.Debug("Agent health check response", zap.Int("status_code", resp.StatusCode), zap.Int("body_bytes", len(body)))

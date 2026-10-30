@@ -676,7 +676,7 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 	if req.Body != nil {
 		reqBody, err = io.ReadAll(req.Body)
 		if err != nil {
-			return nil, fmt.Errorf("read request body: %w", err)
+			return nil, fmt.Errorf("read request body: %w", models.BodyReadError("the HTTP request's body", err))
 		}
 		if req.Header.Get("Content-Encoding") != "" {
 			reqBody, err = pkg.Decompress(h.Logger, req.Header.Get("Content-Encoding"), reqBody, pkg.MaxDecompressedSize)
@@ -702,7 +702,7 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 		// its own length (the Content-Length set below).
 		if err != nil {
 			if !m.RespReadInPart || !errors.Is(err, io.ErrUnexpectedEOF) {
-				return nil, fmt.Errorf("read response body: %w", err)
+				return nil, fmt.Errorf("read response body: %w", models.BodyReadError("the HTTP response's body", err))
 			}
 			cut = true
 		}

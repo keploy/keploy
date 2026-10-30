@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils/stall"
 )
@@ -126,6 +127,11 @@ func (e *AnswerStallError) Error() string {
 	return what + "; " + waited
 }
 
+// NamesNoContent marks the error as one whose text names no byte of the
+// exchange (its target is in its shape, Came is counts), so
+// models.BodyReadError keeps it as it is.
+func (*AnswerStallError) NamesNoContent() {}
+
 // Is makes the error an ErrStreamHeldOpen for a stream the comparison read
 // up to the cut (Stream), and an ErrAnswerStalled otherwise: nothing of the
 // answer to compare.
@@ -158,12 +164,13 @@ func (e *AnswerStallError) asStream(came string) *AnswerStallError {
 // stall: what of its recorded answer came (came of recorded frames). A
 // stream none of whose frames came has nothing to judge, and stays an
 // ErrAnswerStalled: its test fails closed, not judged (the coordinator's
-// ruling (a)), never a pass on the recording's fill. Any other err is
-// itself.
+// ruling (a)), never a pass on the recording's fill. Any other err is the
+// read's as models.BodyReadError names it: net/http's error for a chunked
+// answer's trailer quotes the trailer line.
 func streamCut(err error, came, recorded int, unit string) error {
 	var st *AnswerStallError
 	if !errors.As(err, &st) {
-		return err
+		return models.BodyReadError("the app's streamed answer", err)
 	}
 	if came == 0 {
 		return st
