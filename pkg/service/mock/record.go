@@ -345,8 +345,12 @@ func (m *mockService) Record(ctx context.Context) error {
 	// the consumer is still running - hence atomic. mocksDone counts every
 	// mock the consumer has finished with (persisted, or not), for the wait
 	// on it once the capture has stopped (waitConsumers). mockCount and
-	// recorded stay plain: they are only read after consumerDone.
+	// recorded stay plain: they are only read after consumerDone, as are
+	// insertsFailed and firstInsertErr, the mocks the store refused to write
+	// (a full disk, a permission) and the first of its errors.
 	var mocksSeen, mocksDone, heldSeen, heldDone, drainFrom atomic.Int64
+	var insertsFailed int
+	var firstInsertErr error
 	var heldBusy atomic.Bool
 	consumerDone := make(chan struct{})
 	// writeCtx is the consumers' writes': it outlives an interrupt, as
@@ -371,7 +375,13 @@ func (m *mockService) Record(ctx context.Context) error {
 				m.logger.Warn("dropping one unencodable mock and continuing", zap.String("kind", mk.GetKind()), zap.Error(err))
 				return
 			}
+			// Not in the recording: counted, and the run then ends as one
+			// that is not saved (closeStore's step). Before, it was said at
+			// ERROR and left out, and the set was saved as whole, exit 0.
 			utils.LogError(m.logger, err, "failed to persist mock", zap.String("mock", mk.Name))
+			if insertsFailed++; firstInsertErr == nil {
+				firstInsertErr = err
+			}
 			return
 		}
 		if err := m.hooks.AfterMockInsert(ctx, &rec.MockContext{
@@ -546,8 +556,20 @@ func (m *mockService) Record(ctx context.Context) error {
 	//       or saves it. One the user gives up at a second interrupt, or that
 	//       could not write every mock, is not saved: the existing set is
 	//       kept (the deferred discard and restore), and the run says so at
-	//       ERROR, with how many mocks were not written.
-	if gaveUp, err := m.closeStore(recordDrainWords); err != nil {
+	//       ERROR, with how many mocks were not written. A store that writes
+	//       as it is handed mocks (the yaml one) refused them as it was
+	//       handed them (insertsFailed): the same.
+	gaveUp, storeErr := m.closeStore(recordDrainWords)
+	if insertsFailed > 0 {
+		refused := fmt.Errorf("%w: %d of the %d mocks handed to the mock store were not written; the first write failed: %w",
+			models.ErrMocksNotWritten, insertsFailed, insertsFailed+mockCount, firstInsertErr)
+		if storeErr == nil {
+			gaveUp, storeErr = false, refused // a refused write is no give-up of the user's
+		} else {
+			storeErr = fmt.Errorf("%w; and %w", storeErr, refused)
+		}
+	}
+	if storeErr != nil {
 		next := "check the disk the recording writes to (space, speed, permissions), then re-record; the existing mock set is kept"
 		if gaveUp {
 			giveUpStore()
@@ -555,8 +577,8 @@ func (m *mockService) Record(ctx context.Context) error {
 		} else {
 			utils.SetExitCodeOnce(utils.ExitKeployError)
 		}
-		m.logger.Error(recordDrainWords.storeNotWritten, zap.String("mock-set", name), zap.Error(err), zap.String("next_step", next))
-		return fmt.Errorf("the recording was not saved: %w", err)
+		m.logger.Error(recordDrainWords.storeNotWritten, zap.String("mock-set", name), zap.Error(storeErr), zap.String("next_step", next))
+		return fmt.Errorf("the recording was not saved: %w", storeErr)
 	}
 
 	// 8a. A process the agent could not track -- the kernel refused it a place

@@ -35,23 +35,31 @@ func (f *fullDiskInstrumentation) GetOutgoing(ctx context.Context, o models.Outg
 	return f.trickleInstrumentation.GetOutgoing(ctx, o)
 }
 
-// keploy mock record with a real gob store on a disk that is full: the
-// store's close (closeStore) returns how many of the mocks it was handed the
-// disk did not take, so the run ends as a recording that is NOT saved, said
-// at ERROR with that count and the disk to check; the existing set is kept.
-// No second interrupt is needed: a disk that fails a write ends the wait on
-// its own. The run's exit code is keploy's 1 however it ended: when the user
-// stopped the run, keploy mock record's command returns no error (a user
-// interrupt is not a failure), so the exit code is utils.ErrCode alone.
+// keploy mock record with a real mock store on a disk that is full: the run
+// ends as a recording that is NOT saved, said at ERROR with how many of the
+// mocks handed to the store the disk did not take and the disk to check; the
+// existing set is kept. The gob store says it at its close (closeStore); the
+// yaml one, the default, refuses each mock as it is handed it, and Record
+// counts them (persist). Before, keploy mock record saved a yaml recording
+// short of every mock the disk refused, and exited 0. No second interrupt is
+// needed: a disk that fails a write ends the wait on its own. The run's exit
+// code is keploy's 1 however it ended: when the user stopped the run, keploy
+// mock record's command returns no error (a user interrupt is not a
+// failure), so the exit code is utils.ErrCode alone.
 func TestRecord_AMockFileOnAFullDiskEndsAsARecordingNotSaved(t *testing.T) {
 	_, err := os.Stat("/dev/full")
 	require.NoError(t, err, "setup: no /dev/full")
 	for _, tc := range []struct {
-		name          string
-		userStoppedIt bool
-	}{{"the run ended", false}, {"the user stopped it", true}} {
+		name, format, file, handedTo string
+		userStoppedIt                bool
+	}{
+		{"gob/the run ended", "gob", "mocks.gob", "gob mock writer", false},
+		{"gob/the user stopped it", "gob", "mocks.gob", "gob mock writer", true},
+		{"yaml/the run ended", "yaml", "mocks.yaml", "mock store", false},
+		{"yaml/the user stopped it", "yaml", "mocks.yaml", "mock store", true},
+	} {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("KEPLOY_MOCK_FORMAT", "gob")
+			t.Setenv("KEPLOY_MOCK_FORMAT", tc.format)
 			utils.ResetInterruptedAgain()
 			utils.ClearInterrupted()
 			utils.ErrCode = 0
@@ -64,7 +72,7 @@ func TestRecord_AMockFileOnAFullDiskEndsAsARecordingNotSaved(t *testing.T) {
 			inst := &fullDiskInstrumentation{stuckFileInstrumentation{
 				trickleInstrumentation: trickleInstrumentation{out: make(chan *models.Mock, n)},
 				t:                      t, n: n,
-				fifo: filepath.Join(dir, name+yaml.MockStagingSuffix, "mocks.gob"),
+				fifo: filepath.Join(dir, name+yaml.MockStagingSuffix, tc.file),
 			}}
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
@@ -96,7 +104,7 @@ func TestRecord_AMockFileOnAFullDiskEndsAsARecordingNotSaved(t *testing.T) {
 			failed := logs.FilterLevelExact(zapcore.ErrorLevel).FilterMessage(recordDrainWords.storeNotWritten).All()
 			require.Len(t, failed, 1, "the mocks not written were not said")
 			fields := failed[0].ContextMap()
-			require.Contains(t, fields["error"], fmt.Sprintf("of the %d mocks handed to the gob mock writer were not written", n))
+			require.Contains(t, fields["error"], fmt.Sprintf("of the %d mocks handed to the %s were not written", n, tc.handedTo))
 			require.Contains(t, fields["error"], "no space left on device", "the disk's own error was not said")
 			require.Contains(t, fields["next_step"], "check the disk")
 		})

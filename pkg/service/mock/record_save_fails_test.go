@@ -103,3 +103,58 @@ func TestRecord_AStoppedRecordingThatCouldNotBeSavedFailsTheRun(t *testing.T) {
 	_, serr := os.Stat(filepath.Join(dir, name+yaml.MockStagingSuffix))
 	require.True(t, os.IsNotExist(serr), "the staging set was left behind: %v", serr)
 }
+
+// refusesAndFailsCloseDB is the real (yaml) mock store, which refuses one
+// mock (mock-1) as a full disk would, and whose close then fails too.
+type refusesAndFailsCloseDB struct{ *mockdb.MockYaml }
+
+func (d refusesAndFailsCloseDB) InsertMock(ctx context.Context, m *models.Mock, set string) error {
+	if m.Name == "mock-1" {
+		return errors.New("write mocks.yaml: no space left on device")
+	}
+	return d.MockYaml.InsertMock(ctx, m, set)
+}
+
+func (refusesAndFailsCloseDB) CloseUnless(<-chan struct{}) error {
+	return fmt.Errorf("%w: the mock file failed as it was closed: input/output error", models.ErrMocksNotWritten)
+}
+
+// A store that refused a mock as it was handed it, and whose close then
+// failed too, says both: how many of the mocks it was handed it refused, and
+// its close's own error. The recording is not saved, the existing set is
+// kept, and the run fails with keploy's exit code.
+func TestRecord_AStoreThatRefusedAMockAndFailedItsCloseSaysBoth(t *testing.T) {
+	t.Setenv("KEPLOY_MOCK_FORMAT", "yaml")
+	utils.ResetInterruptedAgain()
+	utils.ClearInterrupted()
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ResetInterruptedAgain(); utils.ClearInterrupted(); utils.ErrCode = 0 })
+	dir := t.TempDir()
+	const name, n = "orders", 3
+	existing := filepath.Join(dir, name, "mocks.yaml")
+	require.NoError(t, os.MkdirAll(filepath.Dir(existing), 0o755))
+	require.NoError(t, os.WriteFile(existing, []byte("# the existing recording\n"), 0o644))
+	inst := &stoppedRunner{trickleInstrumentation: trickleInstrumentation{out: make(chan *models.Mock, n)}, n: n, stop: func() {}}
+	cfg := &config.Config{}
+	cfg.Mock.Name = name
+	cfg.Path = dir
+	core, logs := observer.New(zapcore.InfoLevel)
+	db := refusesAndFailsCloseDB{mockdb.New(zap.New(core), dir, "mocks")}
+	returned := make(chan error, 1)
+	go func() {
+		returned <- New(zap.New(core), inst, db, nil, FileStore{}, nil, cfg).Record(context.Background())
+	}()
+	err := returnedWithin(t, returned)
+	inst.wg.Wait()
+	require.ErrorIs(t, err, models.ErrMocksNotWritten, "a recording short of a mock its store refused ended as %v", err)
+	require.ErrorContains(t, err, "the mock file failed as it was closed", "the store's close error was not said")
+	require.ErrorContains(t, err, fmt.Sprintf("1 of the %d mocks handed to the mock store were not written", n), "the mock the store refused was not said")
+	require.ErrorContains(t, err, "no space left on device", "the refused write's own error was not said")
+	require.Equal(t, utils.ExitKeployError, utils.ErrCode, "a recording that was not saved left the exit code at %d", utils.ErrCode)
+	require.Equal(t, 1, logs.FilterLevelExact(zapcore.ErrorLevel).FilterMessage(recordDrainWords.storeNotWritten).Len(), "the recording not saved was not said: %v", logs.All())
+	got, rerr := os.ReadFile(existing)
+	require.NoError(t, rerr)
+	require.Equal(t, "# the existing recording\n", string(got), "the existing set was not kept")
+	_, serr := os.Stat(filepath.Join(dir, name+yaml.MockStagingSuffix))
+	require.True(t, os.IsNotExist(serr), "the staging set was left behind: %v", serr)
+}
