@@ -2213,6 +2213,10 @@ func wordPairsBy(x run, word func(byte) bool) []run {
 // with '-' and '_' inside them (nanoid, base64url, token_urlsafe).
 var readings = []func(byte) bool{isWord, wordByte, idByte}
 
+// asciiReading is isWord's place in readings: a value's recTok and liveTok
+// at it are its ASCII words, recorded and live, in every form.
+const asciiReading = 0
+
 // pieces are the parts of a drifted value that drifted, each recorded and
 // live: its runs and their changed words, in every reading.
 func pieces(recorded, live string) []run {
@@ -2394,28 +2398,25 @@ func (v *valueDrift) inOrder(words map[string]bool, recorded bool) []string {
 			texts = append(texts, f[1])
 		}
 	}
-	pos := make(map[string]int, len(out))
-	for _, w := range out {
-		off := 0
-		p := -1
-		for _, t := range texts {
-			if i := tokenIndex(t, w); i >= 0 {
-				p = off + i
-				break
-			}
-			off += len(t) + 1
-		}
-		if p < 0 {
-			p = off
-		}
-		pos[w] = p
+	pos := firstTokens(texts, out)
+	// Each word beside its place, so the sort compares numbers, not map
+	// reads.
+	at := make([]struct {
+		w string
+		p int
+	}, len(out))
+	for i, w := range out {
+		at[i].w, at[i].p = w, pos[w]
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if pos[out[i]] != pos[out[j]] {
-			return pos[out[i]] < pos[out[j]]
+	sort.Slice(at, func(i, j int) bool {
+		if at[i].p != at[j].p {
+			return at[i].p < at[j].p
 		}
-		return out[i] < out[j]
+		return at[i].w < at[j].w
 	})
+	for i := range at {
+		out[i] = at[i].w
+	}
 	return out
 }
 
@@ -2889,12 +2890,14 @@ func newDrift(rec, live string, w *Window, lead bool, call time.Time, zone *time
 // clockWord reports whether token t, which value d lost (recorded) or
 // gained, changed only with F's clock: every ASCII word of it the other side
 // of d does not hold is a clock word of one of cs (a token whose words the
-// other side all holds is only regrouped: nothing new).
+// other side all holds is only regrouped: nothing new). The other side's
+// words are those d read once as it was made (recTok, liveTok), never read
+// again per token: a value whose every word changed is read in time linear
+// in its length, not in its length times its changed words.
 func clockWord(t string, recorded bool, d *valueDrift, cs ...clockSet) bool {
-	// The other side's ASCII words in every form (readings[0] is isWord).
-	other := d.liveTok[0]
-	if !recorded {
-		other = d.recTok[0]
+	other := d.recTok[asciiReading]
+	if recorded {
+		other = d.liveTok[asciiReading]
 	}
 	ws := tokensBy(t, isWord)
 	if len(ws) == 0 {
