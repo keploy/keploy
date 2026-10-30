@@ -2308,7 +2308,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			r.exact.returned = returnedMoves
 			// The set's start is reached only when keploy starts its
 			// application for it: an application kept alive from an earlier
-			// set, or one keploy does not start, booted before this set.
+			// set, or one keploy does not start, booted before this set. A
+			// docker compose set says it once its app is started
+			// (bootsHere): a reused stack's app is stopped at each set's end
+			// and started again for the next.
 			r.exact.bootSeen = r.instrument && !serveTest && (strings.TrimSpace(conf.AppCommand) != "" || strings.TrimSpace(r.config.Command) != "")
 			r.noteOwnsNothing(testSetID)
 		}
@@ -2507,6 +2510,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// here. Only for an agent this test set started; one reused across
 		// test sets carries the mark the last test set left, once a test set
 		// has taken one (pidMarked: the first test set can end before here).
+		// bootsHere: the app's boot is this set's (its start comes after the
+		// set is staged), so the worker scope's recordings placed at the
+		// set's start are due by its end (exactPlan.bootSeen). Compose holds
+		// the app of a stack this set started, and the first app of a
+		// reused one, behind keploy-agent's health (depends_on:
+		// service_healthy) until MakeAgentReadyForDockerCompose below; one
+		// started again below boots here only where its start says it was
+		// anew.
+		bootsHere := false
 		if !serveTest || !r.pidMarked {
 			r.markPIDMaps(ctx)
 			// A stack this set started, or one reused whose app starts for
@@ -2514,6 +2526,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// is anew only where its start says so.
 			if composeRestart == nil {
 				r.appStartsAnew()
+				bootsHere = true
 			}
 		}
 
@@ -2545,11 +2558,20 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			switch start {
 			case models.ComposeAppStartedAnew:
 				r.appStartsAnew()
+				bootsHere = true
 			case models.ComposeAppFoundRunning:
 				r.lossAppKept = "keploy found the application's container still running when it started it for this test-set (its stop at an earlier test-set's end did not end it, or a start keploy was told failed was carried out by the docker daemon)"
 			default:
 				r.lossAppKept = "keploy could not read the application's container from the docker daemon when it started it for this test-set (the daemon gave no answer for keploy's stall bound), so it cannot tell whether its stop at an earlier test-set's end ended the application"
 			}
+		}
+		// A reused stack (serveTest) is not an app kept alive from an
+		// earlier set here: under the switch each set's end stops its app,
+		// and the next set starts it again once staged. Read as one
+		// (loadMocksForAgent's rule), a set whose recorded boot call was
+		// never made passed.
+		if r.exact != nil {
+			r.exact.bootSeen = bootsHere
 		}
 
 		// Wait for the user application to become ready before firing the first test.
