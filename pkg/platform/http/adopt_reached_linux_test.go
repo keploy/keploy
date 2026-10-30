@@ -624,9 +624,9 @@ func TestAKillOfOneThatIgnoredTermOnlyOnItsWayOutIsSaid(t *testing.T) {
 	stopCheck, stopStallChecks = 20*time.Millisecond, 10
 	dir := t.TempDir()
 	script := filepath.Join(dir, "daemon.sh")
-	if err := os.WriteFile(script, []byte(`trap 'trap "" TERM; while :; do sleep 1; done' TERM
+	if err := os.WriteFile(script, []byte(`trap 'trap "" TERM' TERM
 touch "$1"
-while :; do sleep 1; done
+while kill -0 "$DAEMON_OWNER"; do sleep 1; done
 `), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -663,7 +663,7 @@ func TestTheDaemonsStepsOutMoveTheTeardownOfTheRunThatRanTheApp(t *testing.T) {
 	if err := os.WriteFile(daemon, []byte(`exec 3</dev/null 4</dev/null 5</dev/null 6</dev/null 7</dev/null
 trap 'for fd in 3 4 5 6 7; do eval "exec $fd<&-"; sleep 0.3; done; exit 0' TERM
 echo $$ > "$1"
-while :; do sleep 0.05; done
+while kill -0 "$DAEMON_OWNER"; do sleep 0.05; done
 `), 0o755); err != nil {
 		t.Fatal(err)
 	}
