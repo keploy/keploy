@@ -44,11 +44,11 @@ func TestAnExchangeItsClientLeftIsNotRecorded(t *testing.T) {
 			srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/x-ndjson")
 				w.WriteHeader(http.StatusOK)
-				fmt.Fprintln(w, `{"status":"RUNNING"}`)
+				_, _ = fmt.Fprintln(w, `{"status":"RUNNING"}`)
 				w.(http.Flusher).Flush()
 				<-r.Context().Done()
 				close(gone)
-				fmt.Fprintln(w, `{"status":"CLIENT GONE"}`)
+				_, _ = fmt.Fprintln(w, `{"status":"CLIENT GONE"}`)
 			})}
 			appLn, err := net.Listen("tcp", "127.0.0.1:0")
 			if err != nil {
@@ -68,7 +68,7 @@ func TestAnExchangeItsClientLeftIsNotRecorded(t *testing.T) {
 			served := make(chan struct{})
 			go func() {
 				defer close(served)
-				defer proxied.Close() // as the caller does once the handler returns
+				defer func() { _ = proxied.Close() }() // as the caller does once the handler returns
 				pm.ServeLive(context.Background(), proxied, appLn.Addr().String(), 8083)
 			}()
 			if _, err := client.Write([]byte("GET /client/v1/jobs/j/events HTTP/1.1\r\nHost: api\r\n\r\n")); err != nil {
@@ -135,7 +135,7 @@ func tcpPairForWatch(t *testing.T) (client, proxied net.Conn) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 	accepted := make(chan net.Conn, 1)
 	go func() {
 		c, _ := ln.Accept()
@@ -302,7 +302,7 @@ func serveWatchedIn(t *testing.T, ctx context.Context, synchronous bool, appLn n
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		defer proxied.Close() // as the caller does once the handler returns
+		defer func() { _ = proxied.Close() }() // as the caller does once the handler returns
 		pm.ServeLive(ctx, handed, appLn.Addr().String(), 8083)
 	}()
 	return pm, client, done, logs
@@ -332,7 +332,7 @@ func streamUntilGone(gone chan struct{}) http.HandlerFunc {
 		_, _ = io.ReadAll(r.Body)
 		w.Header().Set("Content-Type", "application/x-ndjson")
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprintln(w, `{"status":"RUNNING"}`)
+		_, _ = fmt.Fprintln(w, `{"status":"RUNNING"}`)
 		w.(http.Flusher).Flush()
 		<-r.Context().Done()
 		close(gone)
@@ -560,7 +560,7 @@ func rawApp(t *testing.T, ln net.Listener, serve func(n int, c net.Conn, br *buf
 			}
 			n := int(accepted.Add(1))
 			go func() {
-				defer c.Close()
+				defer func() { _ = c.Close() }()
 				br := bufio.NewReader(c)
 				for {
 					if line, err := br.ReadString('\n'); err != nil || line == "\r\n" {
@@ -718,11 +718,11 @@ var hangUps = []struct {
 			serveApp(t, ln, func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/x-ndjson")
 				w.WriteHeader(http.StatusOK)
-				fmt.Fprintln(w, `{"status":"RUNNING"}`)
+				_, _ = fmt.Fprintln(w, `{"status":"RUNNING"}`)
 				w.(http.Flusher).Flush()
 				<-r.Context().Done()
 				close(told)
-				fmt.Fprintln(w, `{"status":"CLIENT GONE"}`)
+				_, _ = fmt.Fprintln(w, `{"status":"CLIENT GONE"}`)
 			})
 		},
 		func(t *testing.T, client net.Conn) {
@@ -770,7 +770,7 @@ func TestABypassedExchangeIsNotToldAsNotRecorded(t *testing.T) {
 			served := make(chan struct{})
 			go func() {
 				defer close(served)
-				defer proxied.Close()
+				defer func() { _ = proxied.Close() }()
 				pm.ServeLive(context.Background(), proxied, appLn.Addr().String(), 8083)
 			}()
 			if _, err := client.Write([]byte("GET /client/v1/jobs/j/events HTTP/1.1\r\nHost: api\r\n\r\n")); err != nil {
@@ -848,8 +848,10 @@ func TestAPausedExchangeIsNotToldAsNotRecorded(t *testing.T) {
 // as its request comes, with its client gone mid-answer (each hangUps shape)
 // or before the app answered; a pause that begins mid-answer, once the first
 // event has reached the client, and cuts the capture of what the app sends
-// after (Go's server, to a half-closed client): that exchange is counted, and
-// told as not recorded for its client's going too, both true. The control: a
+// after (Go's server, to a half-closed client, the forwarding ended whole; or
+// an app that sends one more event to a client that closed, then ends
+// mid-stream, the forwarding failed): that exchange is counted, and told as
+// not recorded for its client's going too, both true. The control: a
 // pause that begins mid-answer while the app sends nothing more cuts no
 // capture, and costs nothing (told, not counted). The synchronous loop
 // counted none of the first three, the zero-copy loop not the cut one.
@@ -865,6 +867,20 @@ func TestAnExchangeAPauseCostIsCountedOnceHoweverItEnds(t *testing.T) {
 		})
 	}
 	beforeAnswer.hangUp = func(t *testing.T, client net.Conn) { _ = client.Close() }
+	// The client closes; the app, told, sends one more event, which a pause
+	// begun mid-answer cuts from the capture, then ends the connection
+	// mid-stream, with no last chunk: the forwarding fails, and the told
+	// return of a failed forward counts the cut, as that of a whole one does.
+	cutThenDropped := hangUps[0]
+	cutThenDropped.name = "closes, one more event sent and the answer cut short"
+	cutThenDropped.serve = func(t *testing.T, ln net.Listener, told chan struct{}) {
+		rawApp(t, ln, func(_ int, c net.Conn, br *bufio.Reader) {
+			_, _ = io.WriteString(c, "HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nTransfer-Encoding: chunked\r\n\r\n15\r\n{\"status\":\"RUNNING\"}\n\r\n")
+			untilEnd(br)
+			close(told)
+			_, _ = io.WriteString(c, "19\r\n{\"status\":\"CLIENT GONE\"}\n\r\n")
+		})
+	}
 	type end struct {
 		name      string
 		midAnswer bool // the pause begins once the first event reached the client
@@ -872,12 +888,13 @@ func TestAnExchangeAPauseCostIsCountedOnceHoweverItEnds(t *testing.T) {
 		counted   uint64
 		told      int // "Not recording ... its client closed"
 	}
-	ways := append(append(hangUps[:0:0], hangUps...), beforeAnswer)
+	ways := append(append(hangUps[:0:0], hangUps...), beforeAnswer, cutThenDropped)
 	ends := []end{
 		{"paused as its request comes, " + ways[0].name, false, 0, 1, 0},
 		{"paused as its request comes, " + ways[1].name, false, 1, 1, 0},
 		{"paused as its request comes, " + ways[2].name, false, 2, 1, 0},
 		{"paused mid-answer, the rest's capture cut, " + ways[1].name, true, 1, 1, 1},
+		{"paused mid-answer, the rest's capture cut, " + ways[3].name, true, 3, 1, 1},
 		{"paused mid-answer, nothing more sent, " + ways[0].name, true, 0, 0, 1},
 	}
 	for _, synchronous := range []bool{false, true} {
@@ -967,17 +984,17 @@ func TestAPauseCutIsCountedAsItsExchangeEndsOnAKeptAliveConnection(t *testing.T)
 	step := make(chan struct{})
 	serveApp(t, appLn, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/next" {
-			fmt.Fprint(w, "next")
+			_, _ = fmt.Fprint(w, "next")
 			return
 		}
-		fmt.Fprintln(w, `{"status":"RUNNING"}`)
+		_, _ = fmt.Fprintln(w, `{"status":"RUNNING"}`)
 		w.(http.Flusher).Flush()
 		select {
 		case <-step:
 		case <-r.Context().Done():
 			return
 		}
-		fmt.Fprintln(w, `{"status":"DONE"}`)
+		_, _ = fmt.Fprintln(w, `{"status":"DONE"}`)
 	})
 	mgr := syncMock.New(zap.NewNop())
 	pm, client, served, _ := serveWatchedIn(t, syncMock.NewContext(context.Background(), mgr), false, appLn, nil)
@@ -1041,17 +1058,17 @@ func TestAPauseCutOnALaterExchangeOfAKeptAliveConnectionIsCounted(t *testing.T) 
 	serveApp(t, appLn, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/first", "/next":
-			fmt.Fprint(w, strings.TrimPrefix(r.URL.Path, "/"))
+			_, _ = fmt.Fprint(w, strings.TrimPrefix(r.URL.Path, "/"))
 			return
 		}
-		fmt.Fprintln(w, `{"status":"RUNNING"}`)
+		_, _ = fmt.Fprintln(w, `{"status":"RUNNING"}`)
 		w.(http.Flusher).Flush()
 		select {
 		case <-step:
 		case <-r.Context().Done():
 			return
 		}
-		fmt.Fprintln(w, `{"status":"DONE"}`)
+		_, _ = fmt.Fprintln(w, `{"status":"DONE"}`)
 	})
 	mgr := syncMock.New(zap.NewNop())
 	pm, client, served, _ := serveWatchedIn(t, syncMock.NewContext(context.Background(), mgr), false, appLn, nil)
@@ -1142,7 +1159,7 @@ func TestAPauseCutIsCountedBeforeItsExchangesWindowCloses(t *testing.T) {
 	served := make(chan struct{})
 	go func() {
 		defer close(served)
-		defer proxied.Close()
+		defer func() { _ = proxied.Close() }()
 		pm.handleHttp1ZeroCopy(ctx, proxied, upConn, pm.logger, pm.tcChan, 8083, false, nil)
 	}()
 	if _, err := client.Write([]byte("GET /client/v1/jobs/j/events HTTP/1.1\r\nHost: api\r\n\r\n")); err != nil {

@@ -16,7 +16,7 @@ func pairForWatch(t *testing.T) (peer, watched *net.TCPConn) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 	accepted := make(chan net.Conn, 1)
 	go func() {
 		c, _ := ln.Accept()
@@ -87,8 +87,11 @@ func TestWatchPeerEnd(t *testing.T) {
 	t.Run("stopped before anything came", func(t *testing.T) {
 		peer, c := pairForWatch(t)
 		stop := watched(t, c, func(bool) { t.Error("an end was told with none") })
-		if stop() || stop() {
-			t.Fatal("a watch with nothing to tell reported an end")
+		// stop twice: the second call, on a watch already over, must not
+		// report an end either.
+		first, again := stop(), stop()
+		if first || again {
+			t.Fatalf("a watch with nothing to tell reported an end (first stop %v, second %v)", first, again)
 		}
 		// The deadline that stopped the watch is gone: a read waits for
 		// what the peer sends next.

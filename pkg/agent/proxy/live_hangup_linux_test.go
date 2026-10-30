@@ -60,7 +60,7 @@ func TestALiveClientsHangUpMidAnswerReachesTheAppAndSettles(t *testing.T) {
 			lc := serveLiveCallWith(t, tc.sync, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/x-ndjson")
 				w.WriteHeader(http.StatusOK)
-				fmt.Fprintln(w, `{"status":"RUNNING"}`)
+				_, _ = fmt.Fprintln(w, `{"status":"RUNNING"}`)
 				w.(http.Flusher).Flush()
 				if tc.again {
 					select {
@@ -68,7 +68,7 @@ func TestALiveClientsHangUpMidAnswerReachesTheAppAndSettles(t *testing.T) {
 					case <-release:
 						return
 					}
-					fmt.Fprintln(w, `{"status":"STILL RUNNING"}`)
+					_, _ = fmt.Fprintln(w, `{"status":"STILL RUNNING"}`)
 					w.(http.Flusher).Flush()
 				}
 				select {
@@ -130,7 +130,7 @@ func TestALiveClientsHangUpReachesTheAppThroughTheProxysChain(t *testing.T) {
 			lc, handed := serveTreeCall(t, tc.sync, tc.real, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/x-ndjson")
 				w.WriteHeader(http.StatusOK)
-				fmt.Fprintln(w, `{"status":"RUNNING"}`)
+				_, _ = fmt.Fprintln(w, `{"status":"RUNNING"}`)
 				w.(http.Flusher).Flush()
 				select {
 				case <-r.Context().Done():
@@ -215,7 +215,7 @@ func deafAppsClientHangsUp(t *testing.T, serve func(http.Handler) *liveCall) {
 	lc := serve(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/x-ndjson")
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprintln(w, `{"status":"RUNNING"}`)
+		_, _ = fmt.Fprintln(w, `{"status":"RUNNING"}`)
 		w.(http.Flusher).Flush()
 		select {
 		case <-r.Context().Done():
@@ -385,10 +385,10 @@ func TestALiveCallsAnswerStillHoldsWorkWhileTheClientWaits(t *testing.T) {
 	lc := serveLiveCall(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/x-ndjson")
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprintln(w, `{"status":"RUNNING"}`)
+		_, _ = fmt.Fprintln(w, `{"status":"RUNNING"}`)
 		w.(http.Flusher).Flush()
 		<-release
-		fmt.Fprintln(w, `{"status":"DONE"}`)
+		_, _ = fmt.Fprintln(w, `{"status":"DONE"}`)
 	}))
 	if _, err := lc.app.Write([]byte("GET /client/v1/jobs/j/events HTTP/1.1\r\nHost: api\r\n\r\n")); err != nil {
 		t.Fatal(err)
@@ -441,19 +441,19 @@ func TestALiveCallsPipelinedRequestIsStillServed(t *testing.T) {
 					return
 				}
 				if r.URL.Path == "/fast" {
-					fmt.Fprint(w, "fast")
+					_, _ = fmt.Fprint(w, "fast")
 					return
 				}
 				w.Header().Set("Content-Type", "application/x-ndjson")
 				w.WriteHeader(http.StatusOK)
-				fmt.Fprintln(w, `{"status":"RUNNING"}`)
+				_, _ = fmt.Fprintln(w, `{"status":"RUNNING"}`)
 				w.(http.Flusher).Flush()
 				close(began)
 				select {
 				case <-release:
-					fmt.Fprintln(w, `{"status":"DONE"}`)
+					_, _ = fmt.Fprintln(w, `{"status":"DONE"}`)
 				case <-r.Context().Done():
-					fmt.Fprintln(w, `{"status":"TOLD THE CLIENT WENT"}`)
+					_, _ = fmt.Fprintln(w, `{"status":"TOLD THE CLIENT WENT"}`)
 				}
 			}))
 			first := slowReq
@@ -510,11 +510,11 @@ func TestALiveCallsHalfClosingClientGetsTheWholeAnswer(t *testing.T) {
 	lc := serveLiveCall(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/x-ndjson")
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprintln(w, `{"line":1}`)
+		_, _ = fmt.Fprintln(w, `{"line":1}`)
 		w.(http.Flusher).Flush()
 		<-r.Context().Done()
-		fmt.Fprintln(w, `{"line":2}`)
-		fmt.Fprintln(w, `{"line":3}`)
+		_, _ = fmt.Fprintln(w, `{"line":2}`)
+		_, _ = fmt.Fprintln(w, `{"line":3}`)
 	}))
 	if _, err := lc.app.Write([]byte("GET /lines HTTP/1.1\r\nHost: api\r\n\r\n")); err != nil {
 		t.Fatal(err)
@@ -622,7 +622,7 @@ func serveTreeCall(t *testing.T, synchronous, real bool, h http.Handler) (lc *li
 	dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: uint32(os.Getppid())}
 	go func() {
 		defer close(lc.served)
-		defer lc.proxy.Close() // as handleConnection does once it returns
+		defer func() { _ = lc.proxy.Close() }() // as handleConnection does once it returns
 		if served, _, err := p.serveTreeListener(context.Background(), lc.proxy, dest, addr, "1"); !served || err != nil {
 			kinds <- fmt.Sprintf("not served (served %v, err %v)", served, err)
 		}

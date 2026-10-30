@@ -635,8 +635,11 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 				// pause had kept from it. What the pause cost the
 				// exchange, that or a body's capture it cut, is counted as
 				// the handler returns (countPause): a capture cut before
-				// the client went is told and counted, both true.
-				resp.Body.Close()
+				// the client went is told and counted, both true. The
+				// body's close error is dropped: the client is gone and the
+				// exchange is not recorded, so it changes neither, and the
+				// upstream connection is closed as the handler returns.
+				_ = resp.Body.Close()
 				if captureEligible && captureEnabled {
 					tellClientLeft(logger, req)
 				}

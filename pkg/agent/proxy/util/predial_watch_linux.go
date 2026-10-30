@@ -158,3 +158,10 @@ func ArrivedNothing(conn net.Conn) (nothing, known bool) {
 	})
 	return nothing, known
 }
+
+// rawSocket is the socket under conn (socketOf). It is linux-only, as its
+// callers here are.
+func rawSocket(conn net.Conn) (syscall.RawConn, bool) {
+	_, rc, ok := socketOf(conn)
+	return rc, ok
+}
