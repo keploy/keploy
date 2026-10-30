@@ -622,9 +622,14 @@ const (
 	// client wrote on after the answer, or the relay read its last write
 	// late: the recorder cannot tell which.
 	LifetimeUndecidedReadAfterAnswer = "readAfterAnswer"
-	// LifetimeUndecidedStoppedFirst: the recording stopped, or the recorder
-	// ended, before the test's answer was known.
+	// LifetimeUndecidedStoppedFirst: the recording stopped before the
+	// test's answer was known.
 	LifetimeUndecidedStoppedFirst = "stoppedFirst"
+	// LifetimeUndecidedRecorderEnded: the recorder ended (its parser's
+	// context ended, as when the connection's session was torn down) before
+	// the test's answer was known, while the recording went on: keploy's
+	// limit, not the test's.
+	LifetimeUndecidedRecorderEnded = "recorderEnded"
 	// LifetimeUndecidedManyExchanges: the connection had more exchanges than
 	// the recorder holds while it waits to decide.
 	LifetimeUndecidedManyExchanges = "manyExchanges"

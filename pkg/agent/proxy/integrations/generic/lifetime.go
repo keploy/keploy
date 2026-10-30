@@ -210,7 +210,8 @@ func (h *preambleHold) decided() bool {
 }
 
 // wholly reports whether the connection, ended, lay wholly inside its test.
-// Undecided (the recording stopped first), it did not.
+// Undecided (the recording stopped, or the recorder ended, first), it did
+// not.
 func (h *preambleHold) wholly() bool {
 	return !h.outlived() && h.span.Final()
 }
@@ -258,14 +259,28 @@ func (h *preambleHold) undecided() string {
 		return ""
 	case h.exchanges > maxHeldExchanges:
 		return models.LifetimeUndecidedManyExchanges
-	case !h.span.Final():
+	case !h.span.Final() && h.stopped():
 		return models.LifetimeUndecidedStoppedFirst
+	case !h.span.Final():
+		return models.LifetimeUndecidedRecorderEnded
 	case h.span.Shared():
 		return models.LifetimeUndecidedManyTests
 	case h.last.After(h.span.End):
 		return models.LifetimeUndecidedReadAfterAnswer
 	}
 	return ""
+}
+
+// stopped reports whether the recording's stop has begun. A hold released
+// undecided while it has not was released because the recorder ended (its
+// parser's context ended), not the recording.
+func (h *preambleHold) stopped() bool {
+	select {
+	case <-h.stopping:
+		return true
+	default:
+		return false
+	}
 }
 
 // handOn emits the held exchanges in recorded order (release), then tells the

@@ -14,6 +14,7 @@ import (
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 )
 
@@ -1021,6 +1022,45 @@ func TestAPreambleHoldMarksOnlyAnUndecidedPreamble(t *testing.T) {
 			t.Fatalf("marked %q, want %q", m, want)
 		}
 	})
+	// Two tests' windows still open as the recorder must state it (more
+	// exchanges than it holds, the recording's stop, the recorder's end):
+	// either test may own the call, so the mark names both, and why.
+	for _, tc := range []struct {
+		forced string
+		why    string
+	}{
+		{"more exchanges than the recorder holds", models.LifetimeUndecidedManyExchanges},
+		{"the recording's stop", models.LifetimeUndecidedStoppedFirst},
+		{"the recorder's end", models.LifetimeUndecidedRecorderEnded},
+	} {
+		t.Run("two open windows at "+tc.forced, func(t *testing.T) {
+			mgr := syncMock.New(zap.NewNop())
+			mgr.SetWatermark(neverBehind{})
+			a := mgr.OpenWindow(t0, nil)
+			defer a.Close()
+			b := mgr.OpenWindow(sec(0.5), nil)
+			defer b.Close()
+			h := holdPreamble(syncMock.NewContext(context.Background(), mgr), first(), sec(1), sec(1), 0)
+			if h == nil {
+				t.Fatal("a connection opened inside two open windows is not held")
+			}
+			switch tc.why {
+			case models.LifetimeUndecidedManyExchanges:
+				for i := 0; i < maxHeldExchanges; i++ {
+					h.add(&models.Mock{})
+				}
+			case models.LifetimeUndecidedStoppedFirst:
+				mgr.BacklogBefore(sec(10)) // the stop begins
+			}
+			got := h.release(h.wholly())[0]
+			if l := got.Spec.Metadata[models.MetadataLifetimeKey]; l != models.MetadataLifetimeSession {
+				t.Fatalf("stated %q, want session", l)
+			}
+			if m, want := markOf(t, got), tc.why+"@"+startsOf([]time.Time{t0, sec(0.5)}); m != want {
+				t.Fatalf("marked %q, want %q: both open tests may own it", m, want)
+			}
+		})
+	}
 	t.Run("its window, open as it held, ends no test case", func(t *testing.T) {
 		mgr := syncMock.New(zap.NewNop())
 		w := mgr.OpenWindow(t0, nil)
@@ -1233,9 +1273,10 @@ func TestV2AConnectionInOverlappingTestsIsMarkedWithEveryOne(t *testing.T) {
 }
 
 // A held connection whose test is still open when the parser's context ends
-// (the session aborted while the connection lives) is handed on as the
-// preamble, marked as stopped first with its test's start: never as the
-// test's own, which the recorder never knew it was.
+// (the session aborted while the connection lives, the recording going on) is
+// handed on as the preamble, marked as the recorder ended with its test's
+// start: never as the test's own, which the recorder never knew it was, and
+// never as the recording stopped, which it did not.
 func TestV2AHoldTheParserEndsOnIsThePreambleMarked(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	t0 := time.Unix(5000, 0)
@@ -1257,7 +1298,7 @@ func TestV2AHoldTheParserEndsOnIsThePreambleMarked(t *testing.T) {
 	<-held // the first exchange is held; the streams stay open
 	cancel()
 	m := <-mocks
-	if got, want := []string{m.Spec.Metadata[models.MetadataLifetimeKey], markOf(t, m)}, []string{models.MetadataLifetimeSession, models.LifetimeUndecidedStoppedFirst + "@" + startsOf([]time.Time{t0})}; !equal(got, want) {
+	if got, want := []string{m.Spec.Metadata[models.MetadataLifetimeKey], markOf(t, m)}, []string{models.MetadataLifetimeSession, models.LifetimeUndecidedRecorderEnded + "@" + startsOf([]time.Time{t0})}; !equal(got, want) {
 		t.Fatalf("handed on as the parser ended stated and marked %q, want %q", got, want)
 	}
 	close(clientCh)
@@ -1287,7 +1328,7 @@ func TestV2AConnectionThatEndsBeforeItsTestIsDecidedAsItSettles(t *testing.T) {
 		{"wholly inside its test", false, "end", []string{models.MetadataLifetimePerTest, ""}},
 		{"its last write read after its test's answer", true, "end", []string{models.MetadataLifetimeSession, models.LifetimeUndecidedReadAfterAnswer + "@" + at}},
 		{"the recording stops first", false, "stop", []string{models.MetadataLifetimeSession, models.LifetimeUndecidedStoppedFirst + "@" + at}},
-		{"the parser ends first", false, "ctx", []string{models.MetadataLifetimeSession, models.LifetimeUndecidedStoppedFirst + "@" + at}},
+		{"the parser ends first", false, "ctx", []string{models.MetadataLifetimeSession, models.LifetimeUndecidedRecorderEnded + "@" + at}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			mgr := syncMock.New(zap.NewNop())
@@ -1329,5 +1370,94 @@ func TestV2AConnectionThatEndsBeforeItsTestIsDecidedAsItSettles(t *testing.T) {
 				t.Fatalf("the connection's only exchange is stated and marked %q, want %q", g, tc.want)
 			}
 		})
+	}
+}
+
+// A connection that ends while its test is still open waits in settle on the
+// test's end, which no input brings. The parser has consumed its input, so it
+// clears the session's pending work as it starts to wait (Session.MockHeld,
+// wired to the supervisor's ClearPendingWork as proxy_v2 wires it), the last
+// request no answer followed included: the hang watchdog stays disarmed while
+// it waits, however long the test runs on, and the parser is not retired as
+// hung (its connection fallen through to passthrough, its exchanges
+// unrecorded). The test's end then decides it.
+func TestV2ASettlingConnectionLeavesTheHangWatchdogDisarmed(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	t0 := time.Unix(7000, 0)
+	ms := func(f float64) time.Time { return t0.Add(time.Duration(f * float64(time.Millisecond))) }
+	mgr := syncMock.New(zap.NewNop())
+	mgr.SetWatermark(neverBehind{})
+	sc := mgr.BeginTestScope(t0, 0)
+	defer sc.Abandon()
+	const budget = 50 * time.Millisecond
+	clk := &stall.ManualClock{}
+	sv := supervisor.New(supervisor.Config{Logger: zap.NewNop(), HangBudget: budget, Clock: clk})
+	clientCh := make(chan fakeconn.Chunk, 2)
+	destCh := make(chan fakeconn.Chunk, 1)
+	clientCh <- fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: []byte("QUOTE item=book"), ConnSeq: 1, ReadAt: ms(19)}
+	destCh <- fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: []byte("CENTS 1250"), ConnSeq: 2, ReadAt: ms(19.2)}
+	sess, mocks := newV2Session(t, clientCh, destCh)
+	cleared := make(chan struct{}, 2*maxHeldExchanges)
+	sess.OnPendingCleared = func() {
+		sv.ClearPendingWork()
+		cleared <- struct{}{}
+	}
+	g := New(zap.NewNop()).(*Generic)
+	res := make(chan supervisor.Result, 1)
+	go func() {
+		res <- sv.Run(syncMock.NewContext(context.Background(), mgr), func(ctx context.Context, s *supervisor.Session) error {
+			return g.RecordOutgoing(ctx, &integrations.RecordSession{V2: s})
+		}, sess)
+	}()
+	// Each wait only turns a hang into a failure.
+	waitFor := func(what string, ok func() bool) {
+		t.Helper()
+		for deadline := time.Now().Add(time.Minute); !ok(); time.Sleep(time.Millisecond) {
+			select {
+			case r := <-res:
+				t.Fatalf("the parser ended (%s) while %s", r.Status, what)
+			default:
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("never %s", what)
+			}
+		}
+	}
+	got := 0
+	clearedOnce := func() bool {
+		select {
+		case <-cleared:
+			got++
+		default:
+		}
+		return got > 0
+	}
+	waitFor("held the first exchange", clearedOnce)
+	// The relay forwards the client's last request, which no answer
+	// follows, and the connection ends.
+	sv.MarkPendingWork()
+	clientCh <- fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: []byte("BYE"), ConnSeq: 3, ReadAt: ms(19.5)}
+	close(clientCh)
+	close(destCh)
+	got = 0
+	waitFor("cleared the pending work as it settles", clearedOnce)
+	// The process runs on for more than the budget while the test does:
+	// the watchdog looks, and finds nothing pending.
+	waitFor("armed the watchdog's look", func() bool { return clk.Pending() > 0 })
+	clk.Advance(budget + time.Millisecond)
+	waitFor("looked again", func() bool { return clk.Pending() > 0 })
+	select {
+	case r := <-res:
+		t.Fatalf("the parser was retired (%s) while it settled", r.Status)
+	case m := <-mocks:
+		t.Fatalf("the exchange was handed on (%s) before its test ended", m.Spec.Metadata[models.MetadataLifetimeKey])
+	default:
+	}
+	sc.End(ms(20.8))
+	if r := <-res; r.Status != supervisor.StatusOK {
+		t.Fatalf("the parser ended %s, want ok", r.Status)
+	}
+	if m := <-mocks; m.Spec.Metadata[models.MetadataLifetimeKey] != models.MetadataLifetimePerTest {
+		t.Fatalf("the connection's only exchange is stated %q, want per-test", m.Spec.Metadata[models.MetadataLifetimeKey])
 	}
 }
