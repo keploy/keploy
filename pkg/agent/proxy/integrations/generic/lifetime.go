@@ -94,7 +94,13 @@ const maxHeldExchanges = 64
 //     first;
 //   - the connection is wholly that test's when none of its chunks is
 //     recorded after the test's answer, and it has no more than
-//     maxHeldExchanges exchanges.
+//     maxHeldExchanges exchanges. A chunk is recorded when the relay read
+//     it (fakeconn.Chunk.ReadAt), in either direction: a write's return can
+//     be stamped after the other side acted on the bytes, the test's answer
+//     included. A read can be stamped late too, but a request's read is
+//     before its answer's, which the test waited for; a client's last write
+//     that no answer follows, read after the test's answer, still reads as
+//     outliving it (a known limit).
 //
 // Then its first exchange is per-test; else it is the connection's preamble:
 // session. Its close is not stamped by when it happened (the proxy sees it as
