@@ -80,9 +80,9 @@ type Earlier struct {
 	// own mocks carry its variables.
 	Own bool
 	// Run: served while no test was open (Tracker.Served), or the request
-	// places of an earlier test's own call that carried a value the run made
-	// (Tracker's ranCalls; StartUp false): a variable bound at it is the
-	// run's, which every later test uses (Tracker.RunName).
+	// leaves of an earlier test's own call that carried a value the run
+	// made, those alone (Tracker's ranCalls; StartUp false): a variable bound
+	// at it is the run's, which every later test uses (Tracker.RunName).
 	Run bool
 	// StartUp: served before the set's first test began (Tracker.Served),
 	// so the call it is an earlier place of was made then too: no test was
@@ -152,6 +152,18 @@ type toldOf struct {
 	order Order
 	mock  *models.Mock
 }
+
+// ofEarlierTest: e is a place an earlier test of the set left the run
+// (ranCalls): the request leaves of its call that drifted, and nothing else.
+// It has no answer, payload or view to read, which is no fault of keploy's.
+func (e Earlier) ofEarlierTest() bool { return e.Run && !e.StartUp }
+
+// alwaysEarlier: e is earlier than every call of the test it is read for,
+// whatever its recorded time says: the test case's own request (Given), or a
+// place an earlier test left the run (ofEarlierTest), which ended before this
+// test began. Its time splits no reading (timedEarlier, leafedAfterCall,
+// leafedAtCall).
+func (e Earlier) alwaysEarlier() bool { return e.Given || e.ofEarlierTest() }
 
 // servedAsRecorded reports whether e's adapter said F served it as recorded
 // (AsRecorded) and every leaf it saw bears it out: a Seen whose live value
@@ -1023,7 +1035,7 @@ func leafedAfterCall(earlier []Earlier, raw []Raw, at time.Time) ([]Earlier, []R
 	var kept []Earlier
 	var moved []Raw
 	for i, e := range earlier {
-		if e.Given || !e.At.After(at) {
+		if e.alwaysEarlier() || !e.At.After(at) {
 			if moved != nil {
 				kept = append(kept, e)
 			}
@@ -1050,7 +1062,7 @@ func leafedAfterCall(earlier []Earlier, raw []Raw, at time.Time) ([]Earlier, []R
 func timedEarlier(earlier []Earlier, at time.Time) []Earlier {
 	var out []Earlier
 	for i, e := range earlier {
-		if e.Given || !e.At.IsZero() || at.IsZero() {
+		if e.alwaysEarlier() || !e.At.IsZero() || at.IsZero() {
 			continue
 		}
 		if out == nil {
@@ -1107,7 +1119,7 @@ func timedRaw(raw []Raw, at time.Time) []Raw {
 // there is none, and earlier is then returned as it is.
 func leafedAtCall(earlier []Earlier, at time.Time) (kept []Earlier, late []Raw) {
 	for i, e := range earlier {
-		if e.Given || !e.At.Equal(at) {
+		if e.alwaysEarlier() || !e.At.Equal(at) {
 			if late != nil {
 				kept = append(kept, e)
 			}

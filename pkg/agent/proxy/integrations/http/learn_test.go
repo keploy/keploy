@@ -2802,6 +2802,34 @@ func TestLearnMatchRefusesAWordAnEarlierTestHeld(t *testing.T) {
 	}
 }
 
+// A word of an earlier test's leaf that did not drift is no source of a
+// later test's value: the run keeps of test A's call only the request
+// leaves that drifted (learn's ranCalls). A's call drifts at node and sends
+// qty as recorded ("7"); test B's key, which drifted and holds a 7 too, but
+// came from nowhere in A, is learned as noise, as it is within one test,
+// never refused for A's qty.
+func TestLearnMatchAWordOfAnEarlierTestsLeafThatDidNotDriftIsNoSource(t *testing.T) {
+	h, n, opts := learnOn(t)
+	tr := learn.NewTracker()
+	tr.NewSet()
+	ctx := learn.WithTracker(context.Background(), tr)
+	tr.Begin()
+	a := &learnDb{perTest: []*models.Mock{learnRecorded("mock-a", time.Second, "POST", "/v1/register", `{"node":"n-1","qty":"7"}`, nil, `{}`)}}
+	if served, miss, err := h.learnMatch(ctx, live("POST", "/v1/register", `{"node":"n-2","qty":"7"}`, nil), a, n, opts); err != nil || served == nil || miss != nil {
+		t.Fatalf("test A's call: served %v miss %+v err %v", served, miss, err)
+	}
+	tr.End()
+	tr.Begin()
+	db := &learnDb{perTest: []*models.Mock{learnRecorded("mock-1", 2*time.Second, "POST", "/v1/charges", `{"key":"k-7"}`, nil, `{}`)}}
+	served, miss, err := h.learnMatch(ctx, live("POST", "/v1/charges", `{"key":"k-8"}`, nil), db, n, opts)
+	if miss != nil {
+		t.Fatalf("test B's call was refused: %s", miss.res.Why)
+	}
+	if err != nil || served == nil || len(db.consumed) != 1 || !reflect.DeepEqual(db.consumed[0].Spec.ReqBodyNoise, map[string][]string{"body.key": {}}) {
+		t.Fatalf("served %v err %v consumed %d; want test B's key learned as noise", served, err, len(db.consumed))
+	}
+}
+
 // An exchange the learn step served whose parked answer read back for the
 // claim and then cannot be read back again is not kept as an exchange with
 // no answer: a later value from it is refused, naming the recording it

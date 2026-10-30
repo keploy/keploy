@@ -2,6 +2,8 @@ package learn
 
 import (
 	"reflect"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -735,9 +737,10 @@ func ranCall(mock string, at time.Time, rec, live string) Earlier {
 // is a place of the run's for every later test of the set: a later test's
 // call that sends the value finds it there with the rule its own earlier
 // calls are read by, and names it by the run's name, one for the set. Each
-// own call whose request drifted is kept whole, one answered after the test
-// ended among them; one whose request did not drift and a pool call leave
-// none, and a new set none of the previous set's.
+// own call whose request drifted is kept as its drifted request leaves
+// (ranCalls), one answered after the test ended among them; one whose
+// request did not drift and a pool call leave none, and a new set none of
+// the previous set's.
 func TestAnEarlierTestsCallIsAPlaceOfTheRun(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	tr := NewTracker()
@@ -755,8 +758,7 @@ func TestAnEarlierTestsCallIsAPlaceOfTheRun(t *testing.T) {
 	b, earlier, _, _ := tr.Test()
 	var want []Earlier
 	for _, e := range []Earlier{ranCall("mock-a", t0, "o-1", "o-9"), ranCall("mock-late", t0.Add(time.Second), "o-2", "o-8")} {
-		e.Own, e.Run = false, true
-		want = append(want, e)
+		want = append(want, Earlier{Mock: e.Mock, At: e.At, Run: true, Seen: e.Seen[:1]})
 	}
 	if !reflect.DeepEqual(earlier, want) {
 		t.Fatalf("test B's earlier places are %+v, want test A's own calls that drifted, as the run's", earlier)
@@ -792,6 +794,57 @@ func TestAnEarlierTestsCallIsAPlaceOfTheRun(t *testing.T) {
 	}
 }
 
+// The run keeps of an earlier test's call only the request leaves that
+// drifted: no leaf the application sent as recorded, no answer, payload or
+// view. A word of a leaf that did not drift is then no earlier place of a
+// later test's value, and the set holds the values its tests made, not
+// their calls.
+func TestTheRunKeepsOnlyTheDriftedRequestLeaves(t *testing.T) {
+	t0 := time.Unix(1_792_000_000, 0)
+	e := ranCall("mock-a", t0, "o-1", "o-9")
+	e.noTime, e.AsRecorded, e.ViewKey = true, true, "v"
+	e.View = func() (*models.Mock, error) { return nil, nil }
+	e.Payload = Raw{mock: "mock-a", rText: "o-1 pen"}
+	e.Seen = append(e.Seen, Seen{Side: Request, Leaf: Leaf{Path: "body.note", Type: String, Value: "n-1"}, Live: "n-2", Place: "body.note"})
+	got := ranCalls([]Earlier{e})
+	want := []Earlier{{Mock: "mock-a", At: t0, Run: true, noTime: true, Seen: []Seen{e.Seen[0], e.Seen[3]}}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("the run keeps %+v of test A's call, want its drifted request leaves alone: %+v", got, want)
+	}
+}
+
+// The run's places hold the values a set's tests made, not their calls: a
+// set of many tests, each of whose calls sends a large leaf as recorded
+// beside the value it made, keeps a heap that grows with those values alone
+// (no-OOM: the row pins the heap the set holds as its last test begins).
+func TestTheRunsPlacesHoldTheValuesNotTheCalls(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	const tests, big = 2000, 32 << 10
+	tr := NewTracker()
+	t0 := time.Unix(1_792_000_000, 0)
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	for i := 0; i < tests; i++ {
+		tr.Begin()
+		n, _, _, _ := tr.Test()
+		e := ranCall("mock-"+strconv.Itoa(i), t0, "o-"+strconv.Itoa(i), "o-"+strconv.Itoa(i)+"-9")
+		e.Seen[1].Leaf.Value = strings.Repeat(strconv.Itoa(i%10), big)
+		e.Seen[1].Live = e.Seen[1].Leaf.Value
+		tr.Served(n, e)
+		tr.End()
+	}
+	tr.Begin()
+	runtime.GC()
+	runtime.ReadMemStats(&after)
+	if _, earlier, _, _ := tr.Test(); len(earlier) != tests {
+		t.Fatalf("the last test reads %d of the run's places, want one of each earlier test", len(earlier))
+	}
+	if grew := int64(after.HeapAlloc) - int64(before.HeapAlloc); grew > tests*big/8 {
+		t.Fatalf("the set holds %d bytes for %d tests' places: their %d-byte calls, not the values they made", grew, tests, big)
+	}
+}
+
 // A test's own call whose serve is told after the next test began is a place
 // of the run's as well: dropping it would refuse the next test's call that
 // sends the value the earlier test made, though the earlier test made it. A
@@ -811,7 +864,7 @@ func TestAnEarlierTestsCallToldAfterTheNextBeganIsAPlaceOfTheRun(t *testing.T) {
 	tr.Served(a, ranCall("mock-a", t0, "o-1", "o-9"))
 	_, earlier, _, _ := tr.Test()
 	want := ranCall("mock-a", t0, "o-1", "o-9")
-	want.Own, want.Run = false, true
+	want = Earlier{Mock: want.Mock, At: want.At, Run: true, Seen: want.Seen[:1]}
 	if !reflect.DeepEqual(earlier, []Earlier{want}) {
 		t.Fatalf("test B's earlier places are %+v, want test A's own call told after B began, as the run's", earlier)
 	}

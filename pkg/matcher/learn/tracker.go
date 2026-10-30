@@ -1351,29 +1351,44 @@ func (t *Tracker) statedLocked(id string) {
 // its recording's at some place a variable can hold.
 func drifted(e Earlier) bool {
 	for _, s := range e.Seen {
-		if s.Side == Request && s.Place != "" && s.Live != "" && s.Live != s.Leaf.Value {
+		if driftedLeaf(s) {
 			return true
 		}
 	}
 	return false
 }
 
+// driftedLeaf: s is a request leaf the application sent with another value
+// than its recording's, a value the run made.
+func driftedLeaf(s Seen) bool {
+	return s.Side == Request && s.Place != "" && s.Live != "" && s.Live != s.Leaf.Value
+}
+
 // ranCalls are the run's exchanges the ended test's own calls (served)
-// leave to the tests after it in the set: each call whose request carried a
-// value the run made (drifted), as an exchange of the run's (Earlier.Run, no
-// longer Own), as the start-up's are. A later test's call that sends such a
-// value is read with the same rule as one its own earlier call sent, and
-// binds it by the run's name (RunName) where the earlier test's call sent
-// it: a value one test made and a later one reuses is followed, never
-// learned as noise. A call of the pool's (not Own) carries no test's
-// variable, and leaves none; nor does one that carried no value the run
-// made, which the later test reads as another test's recording (Raw).
+// leave to the tests after it in the set: of each call whose request carried
+// a value the run made, those request leaves alone (driftedLeaf), as an
+// exchange of the run's (Earlier.Run, no longer Own). A later test's call
+// that sends such a value is read with the same rule as one its own earlier
+// call sent, and binds it by the run's name (RunName) where the earlier
+// test's call sent it: a value one test made and a later one reuses is
+// followed, never learned as noise. Nothing else of the call is kept (its
+// other leaves, its answer, its payload and view), so a word of a leaf that
+// did not drift is no earlier place of a later test, and the set holds the
+// values its tests made, not their calls. A call of the pool's (not Own)
+// carries no test's variable, and leaves none; nor does one that carried no
+// value the run made, which the later test reads as another test's recording
+// (Raw).
 func ranCalls(served []Earlier) []Earlier {
 	var out []Earlier
 	for _, e := range served {
-		if e.Own && drifted(e) {
-			e.Own, e.Run = false, true
-			out = append(out, e)
+		var seen []Seen
+		for _, s := range e.Seen {
+			if e.Own && driftedLeaf(s) {
+				seen = append(seen, s)
+			}
+		}
+		if seen != nil {
+			out = append(out, Earlier{Mock: e.Mock, At: e.At, Run: true, Seen: seen, noTime: e.noTime})
 		}
 	}
 	return out
