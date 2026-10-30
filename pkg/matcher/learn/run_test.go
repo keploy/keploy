@@ -1496,8 +1496,10 @@ func TestAnEarlierTestsClockReadOfTheSameSecondIsNoRunsVariable(t *testing.T) {
 // calls would fail the later test). A time of day its window does not hold
 // modulo a day, nine seconds later, is refused naming the earlier call where
 // that call read it from the clock, and stays the run's variable where it
-// did not, as an instant is. With the switch off, each is what its own call
-// learns.
+// did not, as an instant is. So is one its recorded window holds but record's
+// full round's does not (the full round ran the two calls nine seconds
+// apart): a read is held in both runs, or it is no read of the call's own
+// clock. With the switch off, each is what its own call learns.
 func TestALaterTestsOwnSameSecondReadIsItsOwnByTheLeafsRules(t *testing.T) {
 	rec := time.Date(2026, 10, 30, 18, 40, 58, 579_000_000, time.UTC)
 	minute := func(at time.Time) string { return at.In(ist).Format("2006-01-02T15:04") }
@@ -1506,21 +1508,23 @@ func TestALaterTestsOwnSameSecondReadIsItsOwnByTheLeafsRules(t *testing.T) {
 	for _, row := range []struct {
 		name                   string
 		value                  func(time.Time) string
-		after                  time.Duration
+		after, fAfter          time.Duration
 		window, clock, switch0 bool
 		want                   Kind
 	}{
-		{"a time of day, the same second, a window", tod, same, true, true, false, KindClockRead},
-		{"a time of day, the same second, no window", tod, same, false, true, false, KindClockRead},
-		{"a minute, the same second, a window", minute, same, true, true, false, KindClockRead},
-		{"a minute, the same second, no window", minute, same, false, true, false, KindClockRead},
-		{"an unmarked time of day, the same second, a window", tod, same, true, false, false, KindClockRead},
-		{"an unmarked time of day, the same second, no window", tod, same, false, false, false, KindClockRead},
-		{"a time of day, nine seconds later, a window", tod, later, true, true, false, KindUnaccounted},
-		{"an unmarked time of day, nine seconds later, a window", tod, later, true, false, false, KindVariable},
-		{"a time of day, nine seconds later, no window", tod, later, false, true, false, KindClockRead},
-		{"switch 0: a time of day, the same second, a window", tod, same, true, true, true, KindClockRead},
-		{"switch 0: a minute, the same second, no window", minute, same, false, true, true, KindClockRead},
+		{"a time of day, the same second, a window", tod, same, same, true, true, false, KindClockRead},
+		{"a time of day, the same second, no window", tod, same, same, false, true, false, KindClockRead},
+		{"a minute, the same second, a window", minute, same, same, true, true, false, KindClockRead},
+		{"a minute, the same second, no window", minute, same, same, false, true, false, KindClockRead},
+		{"an unmarked time of day, the same second, a window", tod, same, same, true, false, false, KindClockRead},
+		{"an unmarked time of day, the same second, no window", tod, same, same, false, false, false, KindClockRead},
+		{"a time of day, nine seconds later, a window", tod, later, later, true, true, false, KindUnaccounted},
+		{"an unmarked time of day, nine seconds later, a window", tod, later, later, true, false, false, KindVariable},
+		{"a time of day, nine seconds later, no window", tod, later, later, false, true, false, KindClockRead},
+		{"a time of day, the same second, nine seconds later in the full round, a window", tod, same, later, true, true, false, KindUnaccounted},
+		{"an unmarked time of day, the same second, nine seconds later in the full round, a window", tod, same, later, true, false, false, KindVariable},
+		{"switch 0: a time of day, the same second, a window", tod, same, same, true, true, true, KindClockRead},
+		{"switch 0: a minute, the same second, no window", minute, same, same, false, true, true, KindClockRead},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			t.Setenv(provenswitch.Env, map[bool]string{false: "1", true: "0"}[row.switch0])
@@ -1534,7 +1538,7 @@ func TestALaterTestsOwnSameSecondReadIsItsOwnByTheLeafsRules(t *testing.T) {
 			tr.Begin()
 			_, earlier, _, _ := tr.Test()
 			call := rec.Add(row.after)
-			fCall := call.Add(FullRoundLead)
+			fCall := rec.Add(FullRoundLead + row.fAfter)
 			var w *Window
 			if row.window {
 				w = &Window{Rec: Span{From: call.Add(-5 * time.Millisecond), To: call}, F: Span{From: fCall.Add(-5 * time.Millisecond), To: fCall.Add(time.Millisecond)}}
