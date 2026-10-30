@@ -488,7 +488,16 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		}
 	}
 	stopWatch()
-	actual.wait(mockDrainStall)
+	// The watch has stopped: what the agent handed over is read, however
+	// long that takes (waitConsumers), and only then is the run judged on
+	// it. One the user gives up at a second interrupt ends unjudged, as a
+	// drain given up so does (below).
+	if actual != nil && !stoppedNow {
+		seen := func() uint64 { return uint64(actual.seen.Load()) }
+		if !m.waitConsumers(replayDrainWords, streamConsumer{what: "requests", done: actual.done, taken: seen, handled: seen}) {
+			stoppedNow = true
+		}
+	}
 	if stoppedNow {
 		// The user's Ctrl+C, at the drain's offer, gave up the requests the
 		// agent still held: what this run would judge is short of them, and

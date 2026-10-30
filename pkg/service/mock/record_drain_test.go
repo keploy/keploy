@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
@@ -273,7 +274,12 @@ func TestRecord_InterruptStillDrainsWhatTheAgentHas(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Mock.Name = "interrupt-test"
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // the user interrupted; the runner has already exited
+	defer cancel()
+	// The user interrupts as the test command runs, once the recording is
+	// set up. A stop before Record raced the setup gate (NewSetupGate's
+	// AfterFunc against its Up), and a Ctrl+C during setup rightly ends the
+	// run before anything is captured: the row failed 2 runs in 300.
+	inst.onRun = cancel
 	_ = New(zap.NewNop(), inst, db, nil, FileStore{}, nil, cfg).Record(ctx)
 	inst.wg.Wait()
 	if got := db.inserted(); len(got) != 2 {
@@ -491,6 +497,55 @@ func TestRecord_AStopDeliveredTwiceStillSavesWhatTheAgentHolds(t *testing.T) {
 	}
 	if logs.FilterMessage(recordDrainWords.gaveUp).Len() != 0 {
 		t.Fatalf("the copy of the stop was taken for a second interrupt: %v", logs.All())
+	}
+}
+
+// A drain the user gives up at its offer (a second Ctrl+C) leaves out the mock
+// the agent still holds: the recording is not saved over the set, and the run
+// fails. keploy mock record's command returns no error for a run the user
+// stopped (an interrupt is not a failure), so the exit code is what says it:
+// 128+N for the signal that stopped the run, as keploy mock replay exits for a
+// run the user stopped before it finished, or keploy's 1 where no signal's
+// number is known (a build with its own handler). Before, it was 0, a pass.
+func TestRecord_ADrainTheUserGaveUpIsNotSavedAndExitsNonZero(t *testing.T) {
+	defer func(d time.Duration) { mockDrainNotice = d }(mockDrainNotice)
+	mockDrainNotice = 20 * time.Millisecond
+	for _, tc := range []struct {
+		name         string
+		signal, code int
+	}{{"stopped by SIGINT", 2, 130}, {"no signal number known", 0, utils.ExitKeployError}} {
+		t.Run(tc.name, func(t *testing.T) {
+			utils.ResetInterruptedAgain()
+			utils.ClearInterrupted()
+			utils.ErrCode = 0
+			t.Cleanup(func() { utils.ResetInterruptedAgain(); utils.ClearInterrupted(); utils.ErrCode = 0 })
+			t.Cleanup(utils.SetInterruptSignalForTest(tc.signal))
+			utils.MarkInterrupted() // the stop
+			inst := &pendingInstrumentation{
+				trickleInstrumentation: trickleInstrumentation{out: make(chan *models.Mock)},
+				quietFor:               time.Hour, // the agent still holds its mock when the user gives up
+			}
+			db := &recordingMockDB{}
+			cfg := &config.Config{}
+			cfg.Mock.Name = "given-up-drain"
+			core, logs := observer.New(zapcore.InfoLevel)
+			returned := make(chan error, 1)
+			go func() {
+				returned <- New(zap.New(core), inst, db, nil, FileStore{}, nil, cfg).Record(context.Background())
+			}()
+			if err, early := untilSaid(t, logs, recordDrainWords.saving+"; "+recordDrainWords.stopNow, returned); early {
+				t.Fatalf("Record returned (%v) before its drain offered to stop now", err)
+			}
+			if !utils.MarkInterruptedAgain() { // the user, as told
+				t.Fatal("setup: no offer standing")
+			}
+			err := returnedWithin(t, returned)
+			inst.wg.Wait()
+			require.Error(t, err, "a recording short of the mock the agent held ended as a success")
+			require.False(t, db.promoted.Load(), "a recording short of the mock the agent held was saved over the set")
+			require.Equal(t, 1, logs.FilterLevelExact(zapcore.WarnLevel).FilterMessage(recordDrainWords.gaveUp).Len(), "the give-up was not said: %v", logs.All())
+			require.Equal(t, tc.code, utils.ErrCode, "a recording the user gave up, not saved, left exit code %d", utils.ErrCode)
+		})
 	}
 }
 
