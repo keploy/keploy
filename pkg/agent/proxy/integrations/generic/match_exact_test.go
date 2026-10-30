@@ -189,3 +189,85 @@ func TestAnExchangeLikeAnAnsweredOneIsNotAnExtraCall(t *testing.T) {
 		t.Fatalf("a changed exchange, %.2f like the answered one, is an extra call recorded %d times", fuzzyCheck(book, pens), n)
 	}
 }
+
+// redactedToken is what enterprise's obfuscator writes for a Generic request
+// buffer that is a token and nothing else (here recordedToken): the buffer
+// redacted whole, and the redaction listed in the mock's Noise as ^...$.
+const (
+	recordedToken = "ghp_aB3dE5fG7hJ9kL1mN3pQ5rS7tU9vW1xY3zA5"
+	redactedToken = "lse_6754647392hwnlvgduizUSSJRYLUFX581872"
+)
+
+// tokenMock is a recording of reqs, the buffer at tokenAt the redacted
+// token, answered with answer; filtered, a per-test mock of the switch-off
+// pool, else a session one.
+func tokenMock(name string, filtered bool, answer string, tokenAt int, reqs ...string) *models.Mock {
+	m := exchange(name, reqs...)
+	m.Spec.GenericRequests[tokenAt].Message[0].Data = redactedToken
+	m.Noise = []string{"^" + redactedToken + "$"}
+	m.TestModeInfo.IsFiltered = filtered
+	m.Spec.GenericResponses = []models.Payload{{Message: []models.OutputBinary{{Type: models.String, Data: answer}}}}
+	return m
+}
+
+// Under exact serving a request buffer the obfuscator redacted is compared as
+// recorded, like any other: a recording whose one buffer is a redacted token
+// answers no other one-buffer request to its destination, nor does an
+// exchange whose token buffer changed get the recorded answer. keploy cannot
+// redact a live buffer as the recording was, so the recorded token misses
+// too (fail-closed). Before, the redaction matched any live buffer: under
+// exact serving a GitHub token's recording answered another token, and
+// "DELETE ALL ROWS". Without exact serving the redacted buffer is still not
+// compared, as before.
+func TestUnderExactServingARedactedBufferIsNoExcuse(t *testing.T) {
+	ctx, logger := context.Background(), zap.NewNop()
+	changed := recordedToken[:len(recordedToken)-1] + "B"
+	for _, filtered := range []bool{true, false} {
+		for _, row := range []struct {
+			name    string
+			tokenAt int
+			rec     []string
+			live    [][]byte
+		}{
+			{"one buffer, another token", 0, []string{""}, [][]byte{[]byte(changed)}},
+			{"one buffer, another command", 0, []string{""}, [][]byte{[]byte("DELETE ALL ROWS")}},
+			{"one buffer, the recorded token", 0, []string{""}, [][]byte{[]byte(recordedToken)}},
+			{"hello then token, the token changed", 1, []string{"HELLO v1", "", "GET balance"}, [][]byte{[]byte("HELLO v1"), []byte(changed), []byte("GET balance")}},
+		} {
+			name := fmt.Sprintf("filtered=%v, %s", filtered, row.name)
+			on := true
+			var consumed []string
+			db := switchedStore{servedStore{mocks: []*models.Mock{tokenMock("mock-token", filtered, "OK-USER-42", row.tokenAt, row.rec...)}, consumed: &consumed}, &on}
+			ok, resp, err := fuzzyMatch(ctx, logger, row.live, db)
+			if err != nil || ok || resp != nil || len(consumed) != 0 {
+				t.Errorf("%s: served under exact serving: ok %v, %v, %v, consumed %v; want a miss", name, ok, resp, err, consumed)
+			}
+			// Switch off: the redacted buffer is skipped, as before.
+			on = false
+			ok, resp, err = fuzzyMatch(ctx, logger, row.live, db)
+			if err != nil || !ok || len(resp) != 1 || resp[0].Message[0].Data != "OK-USER-42" || len(consumed) != 1 {
+				t.Errorf("%s, switch off: ok %v, %v, %v, consumed %v; want the recording, as before", name, ok, resp, err, consumed)
+			}
+		}
+	}
+	// The other buffers of a redacted exchange still decide: with the switch
+	// off, a changed hello does not match exactly through the token.
+	mk := []*models.Mock{tokenMock("mock-token", true, "OK-USER-42", 1, "HELLO v1", "", "GET balance")}
+	if idx := findExactMatch(mk, [][]byte{[]byte("HELLO v2"), []byte(changed), []byte("GET balance")}, false); idx != -1 {
+		t.Fatalf("switch off: a changed hello matched exactly through the redacted token: %d", idx)
+	}
+}
+
+// Under exact serving an exchange whose redacted token buffer changed is a
+// changed exchange, not the answered one again: the extra-call check matches
+// as the pool does.
+func TestAChangedRedactedBufferIsNotAnExtraCall(t *testing.T) {
+	changed := recordedToken[:len(recordedToken)-1] + "B"
+	db := answered{mocks: []*models.Mock{tokenMock("mock-token", false, "OK-USER-42", 1, "HELLO v1", "", "GET balance")}}
+	if n := extraCall([][]byte{[]byte("HELLO v1"), []byte(changed), []byte("GET balance")}, db); n != 0 {
+		t.Fatalf("an exchange whose redacted token changed is an extra call recorded %d times", n)
+	}
+	if n := extraCall([][]byte{[]byte("HELLO v1"), []byte(redactedToken), []byte("GET balance")}, db); n != 1 {
+		t.Fatalf("the answered exchange's own bytes again: %d, want an extra call recorded once", n)
+	}
+}

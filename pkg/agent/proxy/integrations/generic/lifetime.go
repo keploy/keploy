@@ -60,7 +60,7 @@ func notOwnedExchange(reqBuffs [][]byte, mockDb integrations.MockMemDb, call int
 	}
 	return sf.FindStagedNotOwned(models.GENERIC, call, func(mk *models.Mock) bool {
 		return mk.Spec.Metadata[models.MetadataLifetimeKey] == models.MetadataLifetimePerTest &&
-			findExactMatch([]*models.Mock{mk}, reqBuffs) == 0
+			findExactMatch([]*models.Mock{mk}, reqBuffs, true) == 0
 	})
 }
 
