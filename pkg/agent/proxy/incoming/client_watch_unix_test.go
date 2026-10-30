@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -216,6 +217,27 @@ func TestAWatchedClientsHangUpIsHeldUntilToldOn(t *testing.T) {
 				t.Fatalf("after the watch: held %d, released %d, told %d; want held and released once, told %d", held, released, told, want)
 			}
 		})
+	}
+}
+
+// A kept conn (proxyutil.HangUpTeller) under a client the watch cannot watch
+// (no socket under it, as for every client on Windows, whose WatchPeerEnd
+// watches nothing) has the hold on its hang-up released at once, nothing
+// told. A hold left held keeps the conn busy for good once its client goes,
+// so every test's end with such a client would give up on it.
+func TestAnUnwatchedKeptConnHoldsNoHangUp(t *testing.T) {
+	a, b := net.Pipe() // no socket under it
+	t.Cleanup(func() { _ = a.Close(); _ = b.Close() })
+	c := &hangUpTeller{Conn: b}
+	stop := watchClient(zap.NewNop(), c, bufio.NewReader(c), func() net.Conn { return nil })
+	if held, released, told := c.counts(); held != 1 || released != 1 || told != 0 {
+		t.Fatalf("an unwatched client: held %d, released %d, told %d; want held and released at once, nothing told", held, released, told)
+	}
+	if stop() {
+		t.Fatal("an unwatched client reported an end")
+	}
+	if held, released, told := c.counts(); held != 1 || released != 1 || told != 0 {
+		t.Fatalf("after stop: held %d, released %d, told %d; want held and released once, nothing told", held, released, told)
 	}
 }
 
@@ -515,4 +537,118 @@ func (c *answerEndConn) watchOverAtEnd() []bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return append([]bool(nil), c.over...)
+}
+
+// rawApp serves ln as an app that is not a Go server: each connection's
+// request head is read, then serve has it. accepted counts the connections.
+func rawApp(t *testing.T, ln net.Listener, serve func(n int, c net.Conn, br *bufio.Reader)) (accepted *atomic.Int32) {
+	t.Helper()
+	accepted = new(atomic.Int32)
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			n := int(accepted.Add(1))
+			go func() {
+				defer c.Close()
+				br := bufio.NewReader(c)
+				for {
+					if line, err := br.ReadString('\n'); err != nil || line == "\r\n" {
+						break
+					}
+				}
+				serve(n, c, br)
+			}()
+		}
+	}()
+	t.Cleanup(func() { _ = ln.Close() })
+	return accepted
+}
+
+// untilEnd reads c until its peer's end.
+func untilEnd(br *bufio.Reader) {
+	_, _ = io.Copy(io.Discard, br)
+}
+
+// An app told of its client's going that ends its answer there, closing
+// the connection mid-stream (a server that is not Go's sends no last
+// chunk), fails the answer's forwarding on the client's going: that is told
+// at Info as the exchange not recorded, as any exchange its client left is,
+// and is no error of keploy's or the app's, in either loop.
+func TestAnAnswerCutShortByItsClientsGoingIsToldAsNotRecorded(t *testing.T) {
+	for _, synchronous := range []bool{false, true} {
+		t.Run(fmt.Sprintf("synchronous %v", synchronous), func(t *testing.T) {
+			t.Parallel()
+			appLn, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			rawApp(t, appLn, func(_ int, c net.Conn, br *bufio.Reader) {
+				_, _ = io.WriteString(c, "HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nTransfer-Encoding: chunked\r\n\r\n15\r\n{\"status\":\"RUNNING\"}\n\r\n")
+				untilEnd(br) // told of its client's going: it ends its answer
+			})
+			_, client, served, logs := serveWatched(t, synchronous, appLn, nil)
+			if _, err := client.Write([]byte("GET /client/v1/jobs/j/events HTTP/1.1\r\nHost: api\r\n\r\n")); err != nil {
+				t.Fatal(err)
+			}
+			hangUpAfterTheFirstEvent(t, client, bufio.NewReader(client))
+			select {
+			case <-served:
+			case <-never(t):
+				t.Fatal("never: the handler ended")
+			}
+			if n := logs.FilterMessageSnippet("Not recording this request as a test case: its client closed").
+				FilterField(zap.String("url", "/client/v1/jobs/j/events")).Len(); n != 1 {
+				t.Fatalf("the exchange its client left was told %d times at Info, want once; logs: %v", n, logs.All())
+			}
+			if n := logs.FilterLevelExact(zapcore.ErrorLevel).Len(); n != 0 {
+				t.Fatalf("a client's going was logged as %d error(s): %v", n, logs.FilterLevelExact(zapcore.ErrorLevel).All())
+			}
+		})
+	}
+}
+
+// After the zero-copy loop sent a request again on a new connection (the
+// app's first ended with no answer), a client that hangs up before the app
+// answers has its app told, and the app's end with no answer is the
+// client's going: no error, no 502 for an app that crashed, and the request
+// is not sent a third time.
+func TestAClientsHangUpBeforeTheReplayedAnswerIsNoAppFailure(t *testing.T) {
+	appLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	asked := make(chan struct{})
+	accepted := rawApp(t, appLn, func(n int, _ net.Conn, br *bufio.Reader) {
+		if n == 1 {
+			return // a stale connection: closed with no answer
+		}
+		if n == 2 {
+			close(asked)
+		}
+		untilEnd(br) // told of its client's going: it ends, unanswered
+	})
+	_, client, served, logs := serveWatched(t, false, appLn, nil)
+	if _, err := client.Write([]byte("GET /client/v1/jobs/j/poll HTTP/1.1\r\nHost: api\r\n\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-asked:
+	case <-never(t):
+		t.Fatal("never: the request was sent again on a new connection")
+	}
+	_ = client.Close()
+	select {
+	case <-served:
+	case <-never(t):
+		t.Fatal("never: the handler ended")
+	}
+	if n := logs.FilterLevelExact(zapcore.ErrorLevel).Len(); n != 0 {
+		t.Fatalf("a client's going before the replayed answer was logged as %d error(s): %v", n, logs.FilterLevelExact(zapcore.ErrorLevel).All())
+	}
+	if n := accepted.Load(); n != 2 {
+		t.Fatalf("the app had %d connections, want 2: the request was sent again after its client went", n)
+	}
 }

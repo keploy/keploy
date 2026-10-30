@@ -156,3 +156,25 @@ func (c noDeadlines) SetDeadline(time.Time) error     { return nil }
 
 // hidden is a wrapper that does not give the conn it wraps.
 type hidden struct{ net.Conn }
+
+// stop returns only once the watch is over, as WatchPeerEnd promises
+// (nothing may read the conn until stop has returned): a stop that returned
+// while the watch still held the socket would report no end while onEnd
+// could still fire, and an exchange whose client left could be recorded.
+func TestAWatchsStopReturnsOnceTheWatchIsOver(t *testing.T) {
+	for i := 0; i < 50; i++ {
+		_, c := pairForWatch(t)
+		stop, done, ok := watchPeerEnd(c, func(bool) { t.Error("an end was told with none") })
+		if !ok {
+			t.Fatal("a TCP conn was not watched")
+		}
+		if stop() {
+			t.Fatal("a watch with nothing to tell reported an end")
+		}
+		select {
+		case <-done:
+		default:
+			t.Fatal("stop returned while the watch still ran")
+		}
+	}
+}

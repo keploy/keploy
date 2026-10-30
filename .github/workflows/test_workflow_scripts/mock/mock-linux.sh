@@ -645,24 +645,67 @@ echo "== 9. under the proven switch, a client that hangs up on a quiet streaming
 # it relayed the answer: the app never learned its client went, the call's
 # connection held the test's end, and keploy's agent gave up on it ("made no
 # progress settling the test's calls"), so the test was not judged.
-# streamapp.py, a child of pytest (so its calls are live, not mocked):
+# In a record a call's connection holds its test's end only while bytes its
+# client sent are untaken, so the lane makes the failing run's shape: once
+# its client has hung up, the app sends one more event, keploy relays it, and
+# the client's kernel resets keploy's side (the client's FIN is then counted
+# as a byte its handler never read). streamapp.py, a child of pytest (so its
+# calls are live, not mocked):
 #   /events  one NDJSON event, then nothing; it watches its socket for its
-#            client's going, as a Go server's request context does, and logs
-#            "gone /events" when it sees it
+#            client's going, as a Go server's request context does
 #   /poll    the answer's headers, then nothing; deaf: it never looks at its
-#            client again, until it is stopped
+#            client again
+# Each sends one more event on its own signal (SIGUSR1, SIGUSR2). Stopped
+# (SIGTERM), the app says, for each call, whether it was told its client went:
+# "told PATH" once its socket held the end (read by /events, or found waiting
+# unread at the stop), else "not told PATH".
 # test_stream.py: test_events_hang_up and test_poll_hang_up each read what the
-# app sent and hang up. test_app_stops then stops the app, which ends the deaf
-# app's call. Each test's end must pass: the attentive app is told (its log),
-# the deaf app's call holds no test's end once keploy told it on, and each
-# exchange is told at Info as not recorded.
+# app sent, hang up, and signal the app; test_app_stops stops it, which ends
+# the deaf app's call. Each test's end must pass with no give-up, the app must
+# have been told of both hang-ups, and each exchange is told at Info as not
+# recorded.
 STREAM_PORT=18996
 cat > streamapp.py <<'PY'
-import http.server, json, os, select, socketserver, sys, threading
+import http.server, json, os, select, signal, socket, socketserver, sys, threading
 PORT, LOG = int(sys.argv[1]), sys.argv[2]
+lock, streams = threading.Lock(), {}
 def say(line):
-    with open(LOG, "a") as f:
-        f.write(line + "\n")
+    with lock:
+        with open(LOG, "a") as f:
+            f.write(line + "\n")
+def told(sock):
+    with lock:
+        path = streams.pop(sock, None)
+    if path:
+        say("told " + path)
+more = {}
+for sig in (signal.SIGUSR1, signal.SIGUSR2):
+    r, w = os.pipe()
+    more[sig] = r
+    signal.signal(sig, lambda *_, w=w: os.write(w, b"x"))
+def stop(*_):
+    with lock:
+        held = list(streams.items())
+    for sock, path in held:
+        try:
+            r, _, _ = select.select([sock], [], [], 0)
+            if r and sock.recv(1, socket.MSG_PEEK) == b"":
+                told(sock)
+        except OSError:
+            told(sock)
+    with lock:
+        left = list(streams.values())
+    for path in left:
+        say("not told " + path)
+    os._exit(0)
+signal.signal(signal.SIGTERM, stop)
+def event(w, n):
+    line = json.dumps({"seq": n}).encode() + b"\n"
+    try:
+        w.write(b"%x\r\n%s\r\n" % (len(line), line))
+        w.flush()
+    except OSError:
+        pass
 class H(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     def do_GET(self):
@@ -670,25 +713,31 @@ class H(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/x-ndjson")
         self.send_header("Transfer-Encoding", "chunked")
         self.end_headers()
+        with lock:
+            streams[self.connection] = self.path
         if self.path == "/events":
-            line = json.dumps({"seq": 1, "event": "started"}).encode() + b"\n"
-            self.wfile.write(b"%x\r\n%s\r\n" % (len(line), line))
-            self.wfile.flush()
-            say("streaming /events")
-            # No heartbeat: only the socket tells this app its client went.
+            event(self.wfile, 1)
+            sig = more[signal.SIGUSR1]
             while True:
-                select.select([self.connection], [], [])
-                try:
-                    b = self.connection.recv(1)
-                except OSError:
-                    b = b""
-                if not b:
-                    break
-            say("gone /events")
+                r, _, _ = select.select([self.connection, sig], [], [])
+                if sig in r:
+                    os.read(sig, 1)
+                    event(self.wfile, 2)
+                if self.connection in r:
+                    try:
+                        b = self.connection.recv(1)
+                    except OSError:
+                        b = b""
+                    if not b:
+                        break
+            told(self.connection)
             self.close_connection = True
             return
         self.wfile.flush()
-        say("polling " + self.path)
+        sig = more[signal.SIGUSR2]
+        select.select([sig], [], [])
+        os.read(sig, 1)
+        event(self.wfile, 2)
         threading.Event().wait()
     def log_message(self, *a): pass
 class S(socketserver.ThreadingTCPServer):
@@ -701,7 +750,7 @@ with S(("127.0.0.1", PORT), H) as s:
     s.serve_forever()
 PY
 cat > test_stream.py <<PY
-import socket, subprocess, sys
+import signal, socket, subprocess, sys
 import pytest
 PORT = $STREAM_PORT
 
@@ -716,8 +765,9 @@ def app():
         p.terminate()
         p.wait()
 
-def hang_up(path, until):
-    # Reads the answer until it ends with until, then hangs up on it.
+def hang_up(app, path, until, sig):
+    # Reads the answer until it ends with until, hangs up on it, and has the
+    # app send one more event.
     s = socket.create_connection(("127.0.0.1", PORT))
     s.sendall(("GET %s HTTP/1.1\r\nHost: localhost\r\n\r\n" % path).encode())
     data = b""
@@ -726,14 +776,15 @@ def hang_up(path, until):
         assert b, data
         data += b
     s.close()
+    app.send_signal(sig)
     return data
 
 def test_events_hang_up(app):
-    data = hang_up("/events", b'"started"}\n\r\n')
+    data = hang_up(app, "/events", b'{"seq": 1}\n\r\n', signal.SIGUSR1)
     assert data.startswith(b"HTTP/1.1 200"), data
 
 def test_poll_hang_up(app):
-    data = hang_up("/poll", b"\r\n\r\n")
+    data = hang_up(app, "/poll", b"\r\n\r\n", signal.SIGUSR2)
     assert data.startswith(b"HTTP/1.1 200"), data
 
 def test_app_stops(app):
@@ -745,14 +796,15 @@ rm -f streamapp.pid
 sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$RECORD_BIN" mock record -c "python3 -m pytest -q -p no:cacheprovider test_stream.py" --name e2e-stream --disable-tele 2>&1 | tee rec-stream.log
 RC=${PIPESTATUS[0]}
 # The app is pytest's, which stopped it; stop it here too if pytest did not.
-[ -s streamapp.pid ] && sudo kill "$(cat streamapp.pid)" 2>/dev/null
+APP_PID=$(cat streamapp.pid 2>/dev/null)
+[ -n "$APP_PID" ] && grep -qs streamapp.py "/proc/$APP_PID/cmdline" && sudo kill "$APP_PID"
 [ "$RC" -eq 0 ] && grep -q "3 passed" rec-stream.log ||
   { echo "FAIL: a client's hang-up on a quiet streaming answer should leave its test judged (exit 0, 3 passed), got $RC"; FAIL=1; }
 GAVE=$(grep -c "made no progress settling" rec-stream.log)
 [ "$GAVE" -eq 0 ] || { echo "FAIL: keploy's agent gave up settling a test's calls ($GAVE line(s)): the client's hang-up held the test's end"; FAIL=1; }
-grep -qx "gone /events" streamapp.log ||
-  { echo "FAIL: the app was never told its /events client went: keploy did not pass on the client's hang-up"; cat streamapp.log; FAIL=1; }
 for P in /events /poll; do
+  grep -qx "told $P" streamapp.log ||
+    { echo "FAIL: the app was never told its $P client went: keploy did not pass on the client's hang-up"; cat streamapp.log; FAIL=1; }
   grep -q "Not recording this request as a test case: its client closed.*\"url\": \"$P\"" rec-stream.log ||
     { echo "FAIL: keploy did not say it left $P's exchange unrecorded because its client closed"; FAIL=1; }
 done

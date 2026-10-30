@@ -600,6 +600,14 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		}
 
 		if err := resp.Write(clientConn); err != nil {
+			if endWatch() {
+				// The client went before the answer's end, and the app was
+				// told (watchClient): the write failed on the client's
+				// going, and the exchange is not one to record.
+				resp.Body.Close()
+				tellClientLeft(logger, req)
+				return
+			}
 			if pressureCloseMode && isIngressExpectedCloseErr(err) {
 				logger.Debug("HTTP/1 ingress client connection closed while finishing close-under-pressure path", zap.Error(err))
 				resp.Body.Close()
@@ -1573,6 +1581,13 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		if err := resp.Write(clientConn); err != nil {
 			if resp.Body != nil {
 				_ = resp.Body.Close()
+			}
+			if endWatch() {
+				// The client went before the answer's end, and the app was
+				// told (watchClient): the write failed on the client's
+				// going, and the exchange is not one to record.
+				tellClientLeft(logger, req)
+				return
 			}
 			logger.Debug("Failed to forward response to client", zap.Error(err))
 			return
