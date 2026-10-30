@@ -343,32 +343,26 @@ func buildJUnitSuiteOf(name string, rep *models.TestReport, explained bool) juni
 			},
 		})
 	}
-	// The calls its application made outside every test that no mock
-	// answered (after its last test, or before its first as it started)
-	// failed the set while its tests may all have passed: a case of its own,
-	// failed, naming them.
+	// The calls the set's end read that no mock answered and that the agent
+	// could not place outside every test's window (made in the last test's
+	// window and filed after its read, or at a time it does not say) failed
+	// the set while its tests may all have passed: a case of its own,
+	// failed, naming each and where it was made, from its Kind. A call made
+	// outside every test's window is background work, never here.
 	if calls := rep.UnclaimedCalls; len(calls) > 0 {
 		lines := make([]string, 0, len(calls))
-		message := "a call after the last test got no recorded answer"
-		before := false
+		message := "a call in the set's last test got no recorded answer, read only at the set's end"
 		for _, c := range calls {
-			before = before || c.BeforeSet
-		}
-		if before {
-			message = "a call outside every test got no recorded answer"
+			if !c.MadeInTest() {
+				message = "a call read only at the set's end got no recorded answer"
+			}
 		}
 		for _, c := range calls {
 			l := strings.TrimSpace(c.Protocol + " " + c.ActualSummary)
 			if c.Destination != "" {
 				l += " to " + c.Destination
 			}
-			switch {
-			case c.BeforeSet:
-				l = "before the first test: " + l
-			case before:
-				l = "after the last test: " + l
-			}
-			lines = append(lines, l)
+			lines = append(lines, unclaimedWhere(c)+l)
 		}
 		suite.Tests++
 		suite.Failures++
@@ -402,10 +396,23 @@ func buildJUnitSuiteOf(name string, rep *models.TestReport, explained bool) juni
 	return suite
 }
 
-// junitUnclaimedCase is the test case a suite whose application made a call
-// after its last test that no mock answered carries, failed with the calls
-// (buildJUnitSuite).
-const junitUnclaimedCase = "keploy calls after the last test"
+// junitUnclaimedCase is the test case a suite carries whose set's end read
+// a call that no mock answered and that the agent could not place outside
+// every test's window, failed with the calls (buildJUnitSuite).
+const junitUnclaimedCase = "keploy calls read at the set's end"
+
+// unclaimedWhere is where c, a call the set's end read, was made, from its
+// Kind: in the last test's window, outside every test's window, or at a
+// time keploy cannot place (no Kind: the agent did not serve exactly).
+func unclaimedWhere(c models.UnmatchedCall) string {
+	switch {
+	case c.MadeInTest():
+		return "made in the last test: "
+	case c.Kind == models.MissOutsideTest:
+		return "made outside every test: "
+	}
+	return "made at a time keploy cannot place: "
+}
 
 // junitCaptureCase is the test case a suite whose capture was incomplete
 // carries, failed with the reason (buildJUnitSuite).
