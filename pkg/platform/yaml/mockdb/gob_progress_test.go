@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.uber.org/zap"
 )
 
@@ -559,6 +560,36 @@ func TestClose_SaysAFileThatFailedAsItClosedAfterTakingEveryMock(t *testing.T) {
 	want := "the 3 mocks handed to the gob mock writer were written, but the mock file failed as it was closed"
 	if !errors.Is(err, models.ErrMocksNotWritten) || !errors.Is(err, syscall.EIO) || !strings.Contains(err.Error(), want) {
 		t.Fatalf("Close returned %v, want models.ErrMocksNotWritten with the file's error, saying %q", err, want)
+	}
+}
+
+// The yaml store's counterpart (and the json one's): a mock file that failed
+// as it was closed, after the mock's document was written to it, fails the
+// insert with the file's error, and not as a mock that cannot be encoded
+// (models.ErrMockEncode), which the recorder drops and goes on from: the
+// recorder counts it as a mock not written. Returning nil would have a
+// recording that is not on disk look complete.
+func TestInsertMock_AYamlMockFileThatFailedAsItClosedFailsTheInsert(t *testing.T) {
+	t.Setenv("KEPLOY_MOCK_FORMAT", "yaml")
+	saved := closeMockFile
+	closeMockFile = func(f *os.File) error {
+		if err := f.Close(); err != nil {
+			return err
+		}
+		return syscall.EIO
+	}
+	t.Cleanup(func() { closeMockFile = saved })
+	for _, format := range []yaml.Format{yaml.FormatYAML, yaml.FormatJSON} {
+		ys := New(zap.NewNop(), t.TempDir(), "mocks")
+		ys.Format = format
+		m := &models.Mock{Version: "api.keploy.io/v1beta1", Kind: models.HTTP, Name: "mock-0", Spec: models.MockSpec{
+			HTTPReq:  &models.HTTPReq{Method: "GET", URL: "http://x/y"},
+			HTTPResp: &models.HTTPResp{StatusCode: 200},
+		}}
+		err := ys.InsertMock(context.Background(), m, "set-0")
+		if !errors.Is(err, syscall.EIO) || errors.Is(err, models.ErrMockEncode) || !strings.Contains(err.Error(), "failed as it was closed") {
+			t.Fatalf("%s: InsertMock returned %v, want the file's close error, said as such, and not an encode error", format, err)
+		}
 	}
 }
 

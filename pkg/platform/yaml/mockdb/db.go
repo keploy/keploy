@@ -176,6 +176,11 @@ var gobFileOf = func(f *os.File) io.Writer { return f }
 // reports only then) in its place.
 var closeGobFile = func(f *os.File) error { return f.Close() }
 
+// closeMockFile is how appendMock closes the yaml or json mock file it
+// appended to: the file's own Close. Tests stand a file whose close fails in
+// its place.
+var closeMockFile = func(f *os.File) error { return f.Close() }
+
 func (f *gobFileWriter) Write(b []byte) (int, error) {
 	written := 0
 	for len(b) > 0 {
@@ -894,7 +899,7 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 
 // appendMock appends mock's document to the mocks file in effFormat, under the
 // file's lock. The document is made in buf, and buf is what is written.
-func (ys *MockYaml) appendMock(ctx context.Context, mock *models.Mock, mockPath, mockFileName string, effFormat yaml.Format, buf *bytes.Buffer) error {
+func (ys *MockYaml) appendMock(ctx context.Context, mock *models.Mock, mockPath, mockFileName string, effFormat yaml.Format, buf *bytes.Buffer) (err error) {
 	lock := getMockFileLock(mockFileLockKey(mockPath, mockFileName, effFormat))
 	lock.Lock()
 	defer lock.Unlock()
@@ -921,7 +926,16 @@ func (ys *MockYaml) appendMock(ctx context.Context, mock *models.Mock, mockPath,
 	if err != nil {
 		return fmt.Errorf("failed to open mock file for append: %w", err)
 	}
-	defer file.Close()
+	// The file's close error is the mock's: a write the file system refuses
+	// only as the file closes (NFS, a quota, some FUSE mounts) may have left
+	// the mock out, and an insert that returned nil would have the recording
+	// look complete. It runs after the deferred flush below. An error already
+	// returned is kept.
+	defer func() {
+		if cerr := closeMockFile(file); cerr != nil && err == nil {
+			err = fmt.Errorf("the mock file failed as it was closed: %w", cerr)
+		}
+	}()
 
 	writer := bufio.NewWriter(file)
 	// Belt-and-braces: always flush the bufio writer before file.Close,
