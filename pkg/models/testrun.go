@@ -659,6 +659,11 @@ type UnmatchedCall struct {
 	// likely one that test recorded, such as a later exchange of a connection
 	// it opened, whose handshake was recorded there.
 	RecordedIn string `json:"recorded_in,omitempty" yaml:"recorded_in,omitempty"`
+	// Shape mirrors MockMismatchReport.Shape: on a miss that names no
+	// recording, the call's shape, values aside and hashed
+	// (learn.CallShapeOf), so judging can tell which series of the set the
+	// call is a copy of. It holds no value of the call.
+	Shape string `json:"shape,omitempty" yaml:"shape,omitempty"`
 	// Reason is why the call missed, in judging's words (design v14 §5.3,
 	// §7.3): MissRequestChanged, MissUnstableOrder or MissUnmockedCall. Only
 	// record's full round, where the learn step runs, gives one; empty

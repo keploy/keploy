@@ -1,8 +1,11 @@
 package learn
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -69,6 +72,48 @@ func SeriesShapeOf(m *models.Mock) (Shape, bool) {
 		return Shape{}, false
 	}
 	return of(m)
+}
+
+// CallShapeOf is the shape of m's call that says which series it can be a
+// call of when no recording names it: its kind, its operation key (a
+// database call's command, collection and database), its fixed parts, and
+// its leaves by path and type, values aside, as its kind's reading reads it
+// (SeriesShapeOf), hashed, so it holds no value of the call. SeriesOf parts
+// a set's recordings by these, so a call is of a series only when its
+// CallShapeOf is a recording's of the series. It is not yet a call the
+// series answers: the series' values, and its reads of the clock on the
+// call's span, are checked when it is answered (Series.Holds). "" when no
+// reading is registered for m's kind, or the reading does not read m.
+func CallShapeOf(m *models.Mock) string {
+	s, ok := SeriesShapeOf(m)
+	if !ok {
+		return ""
+	}
+	h := sha256.New()
+	write := func(parts ...string) {
+		for _, p := range parts {
+			h.Write([]byte(p))
+			h.Write([]byte{0})
+		}
+	}
+	write(string(m.Kind), s.Key)
+	fixed := make([]string, 0, len(s.Fixed))
+	for n := range s.Fixed {
+		fixed = append(fixed, n)
+	}
+	sort.Strings(fixed)
+	for _, n := range fixed {
+		write("fixed", n, s.Fixed[n])
+	}
+	leaves := make([]string, 0, len(s.Leaves))
+	for p := range s.Leaves {
+		leaves = append(leaves, p)
+	}
+	sort.Strings(leaves)
+	for _, p := range leaves {
+		write("leaf", p, strconv.Itoa(int(s.Leaves[p].Type)))
+	}
+	return hex.EncodeToString(h.Sum(nil)[:16])
 }
 
 // SetSeries is a set's recordings read into series (SeriesOf): Series, with

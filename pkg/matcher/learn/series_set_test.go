@@ -480,3 +480,63 @@ func TestSeriesOfSetKeepsAFirstCallInItsValuesSeriesWhenNoneReadsTheClock(t *tes
 		t.Errorf("the first series does not begin with the first call: %+v", got.Series)
 	}
 }
+
+// A call no recording names is told to be of a series by its shape alone:
+// two calls of one series, whose values (an epoch read, a value) differ,
+// have one CallShapeOf, and it is the series' recordings'. Another
+// operation, another fixed part, a leaf more, or a leaf of another type is
+// another shape. No value of the call is in it, and a kind nobody registers
+// has none.
+func TestCallShapeOfIsTheCallsShapeValuesAside(t *testing.T) {
+	read := func(m *models.Mock) (Shape, bool) {
+		md := m.Spec.Metadata
+		if md["op"] == "" {
+			return Shape{}, false
+		}
+		at := Leaf{Path: "body.at", Noise: "body.at", Type: Number, Value: md["at"]}
+		if md["atType"] == "string" {
+			at.Type = String
+		}
+		s := Shape{Key: md["op"], Leaves: map[string]Leaf{"body.at": at, "body.v": {Path: "body.v", Noise: "body.v", Type: String, Value: md["v"]}}}
+		if md["more"] != "" {
+			s.Leaves["body.more"] = Leaf{Path: "body.more", Noise: "body.more", Type: String, Value: md["more"]}
+		}
+		if md["fixed"] != "" {
+			s.Fixed = map[string]string{"media": md["fixed"]}
+		}
+		return s, true
+	}
+	defer RegisterSeriesShape(seriesKind, read)()
+	call := func(md map[string]string) *models.Mock {
+		return rowMock("c", seriesKind, time.Time{}, time.Time{}, md)
+	}
+	of := CallShapeOf(call(map[string]string{"op": "claim", "at": "1793336500", "v": "a"}))
+	if of == "" {
+		t.Fatal("a call its kind's reading reads has no shape")
+	}
+	if got := CallShapeOf(call(map[string]string{"op": "claim", "at": "1793336562", "v": "b"})); got != of {
+		t.Errorf("two calls that differ in values only have shapes %q and %q", of, got)
+	}
+	for what, md := range map[string]map[string]string{
+		"another operation":  {"op": "find", "at": "1793336500", "v": "a"},
+		"another fixed part": {"op": "claim", "at": "1793336500", "v": "a", "fixed": "text/plain"},
+		"a leaf more":        {"op": "claim", "at": "1793336500", "v": "a", "more": "x"},
+		"a leaf's type":      {"op": "claim", "at": "1793336500", "v": "a", "atType": "string"},
+	} {
+		if got := CallShapeOf(call(md)); got == of || got == "" {
+			t.Errorf("%s: shape %q, want one of its own (the call's is %q)", what, got, of)
+		}
+	}
+	if strings.Contains(of, "1793336500") || strings.Contains(of, "claim") {
+		t.Errorf("the shape %q holds a value of the call", of)
+	}
+	if got := CallShapeOf(call(nil)); got != "" {
+		t.Errorf("a call its reading does not read has shape %q", got)
+	}
+	if got := CallShapeOf(rowMock("h", models.HTTP, time.Time{}, time.Time{}, map[string]string{"op": "claim"})); got != "" {
+		t.Errorf("a call of a kind nobody registered has shape %q", got)
+	}
+	if got := CallShapeOf(nil); got != "" {
+		t.Errorf("no call has shape %q", got)
+	}
+}
