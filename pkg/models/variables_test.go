@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"go.mongodb.org/mongo-driver/v2/bson"
 	"gopkg.in/yaml.v3"
 )
 
@@ -1534,5 +1535,50 @@ func TestAWallTimeShownTwiceHoldingAnHoursStartIsReadAtAnHoursCut(t *testing.T) 
 	}
 	if turn, _, l, met := o.FallBackAnywhereAcrossHour(hour, nt, nt.Add(time.Second)); met {
 		t.Errorf("FallBackAnywhereAcrossHour at %s met %s's turn at %s; want none of a zone whose wall time shown twice holds an hour's start", nt, l, turn)
+	}
+}
+
+// A read of the clock that is its value whole writes no Word in json, yaml
+// or bson, so a file learned before Word reads and writes the same; one
+// that is a word of a text keeps the text around it through each, and two
+// learnings of one word read compare equal (Word is a value, not a
+// pointer).
+func TestClockWordIsOmittedWholeAndKeptAsAWord(t *testing.T) {
+	whole := ClockOffset{Res: time.Nanosecond, Since: SinceTestBegin}
+	word := whole
+	word.Word = ClockWord{Before: "[E2E] generate-stop-"}
+	type enc struct {
+		name      string
+		marshal   func(any) ([]byte, error)
+		unmarshal func([]byte, any) error
+	}
+	for _, e := range []enc{
+		{"json", json.Marshal, json.Unmarshal},
+		{"yaml", yaml.Marshal, yaml.Unmarshal},
+		{"bson", bson.Marshal, bson.Unmarshal},
+	} {
+		b, err := e.marshal(whole)
+		if err != nil {
+			t.Fatalf("%s: %v", e.name, err)
+		}
+		if strings.Contains(string(b), "word") {
+			t.Errorf("%s: a whole read wrote a word: %q", e.name, b)
+		}
+		b, err = e.marshal(word)
+		if err != nil {
+			t.Fatalf("%s: %v", e.name, err)
+		}
+		var back ClockOffset
+		if err := e.unmarshal(b, &back); err != nil {
+			t.Fatalf("%s: %v", e.name, err)
+		}
+		if back != word {
+			t.Errorf("%s: a word read came back as %+v, want %+v", e.name, back, word)
+		}
+	}
+	again := whole
+	again.Word = ClockWord{Before: "[E2E] generate-stop-"}
+	if again != word || !whole.Word.IsZero() || word.Word.IsZero() {
+		t.Errorf("two learnings of one word read compare apart, or IsZero is wrong")
 	}
 }

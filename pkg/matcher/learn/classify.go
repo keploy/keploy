@@ -1850,7 +1850,7 @@ func sinceWord(early Learned, wb *Window, leaf func(r, l Leaf, w *Window, skip s
 	}
 	own.Recorded, own.Live = r, l
 	own.Read.Since = models.SinceTestBegin
-	own.Read.Word = &models.ClockWord{Before: before, After: after}
+	own.Read.Word = models.ClockWord{Before: before, After: after}
 	if own.Refuted == "" {
 		own.Refuted = early.Refuted
 	}

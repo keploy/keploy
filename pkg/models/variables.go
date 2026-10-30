@@ -303,33 +303,34 @@ type ClockOffset struct {
 	// read since the test began), is the text around that word as
 	// recorded (ClockWord): a replay checks the value is Before, then one
 	// such read, then After, so only the word is read as the clock and the
-	// rest is still compared. nil for a read that is its value whole, as
-	// every learning before Word was: an old file reads the same. A keploy
-	// that does not read Word checks the whole value as one read, which a
-	// text around the word is not, so it refuses it.
-	Word *ClockWord `json:"word,omitempty" yaml:"word,omitempty" bson:"word,omitempty"`
+	// rest is still compared. Zero (IsZero) for a read that is its value
+	// whole, as every learning before Word was, and then omitted: an old
+	// file reads the same. A value, not a pointer, so two learnings of one
+	// read compare equal (==). A keploy that does not read Word checks the
+	// whole value as one read, which a text around the word is not, so it
+	// refuses it.
+	Word ClockWord `json:"word,omitzero" yaml:"word,omitempty" bson:"word,omitempty"`
 }
 
 // ClockWord is where a read of the clock stands in a longer text
-// (ClockOffset.Word): the text before it and after it, as recorded.
+// (ClockOffset.Word): the text before it and after it, as recorded. A
+// word read always has text on one side at least (the learn step learns a
+// read of a value whole otherwise), so the zero ClockWord is a read whole.
 type ClockWord struct {
 	Before string `json:"before" yaml:"before" bson:"before"`
 	After  string `json:"after" yaml:"after" bson:"after"`
 }
 
+// IsZero reports whether w is no word: the read is its value whole. The
+// json, yaml and bson encoders omit a zero Word by it.
+func (w ClockWord) IsZero() bool { return w == ClockWord{} }
+
 // meetWord is the Word two learnings of one place read it at, a and b, and
-// whether they share one: both whole (nil), or both the same word of the
+// whether they share one: both whole (zero), or both the same word of the
 // same text. A read whole and one inside a text, or two at different places
 // of a text, are two forms of the value: their Meet is LayoutApart (Empty).
-func meetWord(a, b *ClockWord) (*ClockWord, bool) {
-	switch {
-	case a == nil && b == nil:
-		return nil, true
-	case a == nil || b == nil || *a != *b:
-		return nil, false
-	}
-	w := *a
-	return &w, true
+func meetWord(a, b ClockWord) (ClockWord, bool) {
+	return a, a == b
 }
 
 // AppZoneMatters reports whether what the learn step learned of o depends
@@ -1433,7 +1434,7 @@ func (o ClockOffset) String() string {
 		return "clock read from a start this keploy does not read (" + strconv.Quote(o.Since) + ")"
 	}
 	s := o.offsetString() + o.zoneString() + o.layoutString()
-	if o.Word != nil {
+	if !o.Word.IsZero() {
 		// Where the word stands, never what the text holds.
 		s += ", as the word after the text's first " + strconv.Itoa(len(o.Word.Before)) + " bytes and before its last " + strconv.Itoa(len(o.Word.After))
 	}
