@@ -116,6 +116,29 @@ func TestARecordedTestsWindowIsATestSpanForTheRecorders(t *testing.T) {
 		require.False(t, ok, "a call after the test's end is the test's")
 		require.Empty(t, a.openScopes)
 	})
+	t.Run("the window's begin is its span's, to the nanosecond", func(t *testing.T) {
+		// The Generic recorder's lifetimeUndecided mark names the test by
+		// its span's start (TestSpanAt), and keploy mock record writes each
+		// test's begin (its mapping's at) from its window's start
+		// (stampBegins): enterprise places the mark on the test whose begin
+		// is that instant, so the two must be one instant, read back as
+		// written.
+		t.Setenv(provenswitch.Env, "1")
+		a := newAgent(t)
+		at := start.Add(123456789 * time.Nanosecond)
+		require.NoError(t, a.BeginScopeAt(ctx, "t", 0, at))
+		require.NoError(t, a.EndScopeAt(ctx, "t", 0, end))
+		span, ok := a.spanMgr.TestSpanAt(mid)
+		require.True(t, ok && span.Final())
+		ws, _ := a.GetScopeWindows(ctx)
+		require.Len(t, ws, 1)
+		require.True(t, ws[0].Start.Equal(span.Start) && ws[0].Start.Equal(at), "window %v, span %v", ws[0].Start, span.Start)
+		m := models.Mock{Spec: models.MockSpec{Metadata: map[string]string{
+			models.MetadataLifetimeUndecidedKey: models.MockLifetimeUndecided{Why: models.LifetimeUndecidedReadAfterAnswer, TestStart: span.Start}.String()}}}
+		u, ok := m.LifetimeUndecided()
+		require.True(t, ok)
+		require.True(t, u.TestStart.Equal(ws[0].Start), "the mark reads back %v, the window began %v", u.TestStart, ws[0].Start)
+	})
 	t.Run("withdrawn", func(t *testing.T) {
 		t.Setenv(provenswitch.Env, "1")
 		a := newAgent(t)
