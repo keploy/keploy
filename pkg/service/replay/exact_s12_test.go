@@ -446,6 +446,58 @@ func TestUnderTheSwitchABootCallIsNotRequiredOfAnAppKeployDidNotStart(t *testing
 	}
 }
 
+// A docker compose app, its stack kept across sets, boots in each set's run
+// under the switch: compose holds the first set's app back until that set
+// has made keploy's agent ready (depends_on keploy-agent: service_healthy),
+// and keploy starts it again for each later set once the set is staged. Its
+// boot calls are the set's: one never made fails the set, naming it. A later
+// set whose start found the app's container still running (its stop at an
+// earlier set's end did not end it) did not boot it: its boot calls are not
+// required of it. Before, every set of a kept stack was taken for one whose
+// app booted before it, and a set whose recorded boot call was never made
+// passed (compose-proven-setend scenario 6, its second set).
+func TestUnderTheSwitchABootCallIsRequiredOfAComposeAppStartedForTheSet(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		later   bool // the last set's end stopped the app: keploy starts it again
+		ranOn   bool // that start found its container still running
+		made    bool
+		want    models.TestSetStatus
+		missing int // how many times the set's end names the boot call
+	}{
+		{"the first set, the boot made", false, false, true, models.TestSetStatusPassed, 0},
+		{"the first set, the boot never made", false, false, false, models.TestSetStatusFailed, 1},
+		{"a later set, the boot made", true, false, true, models.TestSetStatusPassed, 0},
+		{"a later set, the boot never made", true, false, false, models.TestSetStatusFailed, 1},
+		{"a later set whose app ran on, the boot never made", true, true, false, models.TestSetStatusPassed, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setSwitch(t, true)
+			fastWorkerWait(t)
+			c := &composeInstr{stopped: tc.later && !tc.ranOn}
+			h := composeHarnessOf(t, c, 1)
+			pinWindows(h)
+			h.replayer.config.Command = "docker compose up"
+			h.replayer.composeAppStopped = tc.later
+			core, logs := observer.New(zap.InfoLevel)
+			h.replayer.logger = zap.New(core)
+			h.mocks.filtered = []*models.Mock{httpAt("mock-boot", 500), httpAt("mock-a", 1010)}
+			mappingFile(t, h, nil)
+			made := []models.MockState{mongoAt("mock-a", 1010)}
+			if tc.made {
+				made = append(made, mongoAt("mock-boot", 500))
+			}
+			h.replayer.hookImpl = prHooks{consumedFor: consumedByWindow(h, map[string][]models.MockState{"test-1": made})}
+			if got := h.runServing(t); got != tc.want || workerNamed(logs) != tc.missing {
+				t.Fatalf("set %s, the boot call named %d time(s); want %s, named %d", got, workerNamed(logs), tc.want, tc.missing)
+			}
+			if want := map[bool]int{false: 0, true: 1}[tc.later]; c.starts != want {
+				t.Fatalf("%d starts of the app, want %d", c.starts, want)
+			}
+		})
+	}
+}
+
 // A call the application makes as keploy stops it (a deregistration, a
 // flush on its way out) is read with what the app consumed as it stopped, and
 // the worker scope is judged with it. One the recording made as keploy record
