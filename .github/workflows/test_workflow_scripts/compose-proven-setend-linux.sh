@@ -367,12 +367,14 @@ done
 [ "$FAIL" -eq 0 ] || tail -80 as-recorded.log
 
 echo "== 2. a changed shutdown publish =="
+failed_before=$FAIL
 replay changed SHUTDOWN_MSG=changed
 [ "$RC" -ne 0 ] || fail "2: keploy test exited 0, want non-zero"
 for s in test-set-0 test-set-1; do
   [ "$(set_status $s)" = FAILED ] || fail "2: $s is $(set_status $s), want FAILED"
   shutdown_named 2 "$s"
 done
+[ "$FAIL" -eq "$failed_before" ] || tail -80 changed.log
 
 echo "== 3. the app exits on its own =="
 replay halts HALT_AFTER=1
