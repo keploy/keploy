@@ -325,7 +325,7 @@ func TestExplainMissNamesANotOwnedRecordingBesideTheRepeat(t *testing.T) {
 		t.Fatalf("a not-owned call with no closest got %q, want Explain's", got)
 	}
 	got := n.ExplainMiss(true, "mock-w", "test-5", "keploy record")
-	if !strings.HasPrefix(got, "This request is mock-w, a recording keploy made in test test-5's window,") || !strings.Contains(got, plain) || !strings.HasSuffix(got, "keploy record's judging treats this miss as any call made elsewhere: it moves mock-w to the test set's worker scope (mappings.yaml worker:), and its confirming round still compares this test's response. The repeat is named here for information only.") || strings.Contains(got, "does not move") {
+	if !strings.HasPrefix(got, "This request is mock-w, a recording keploy made in test test-5's window,") || !strings.Contains(got, plain) || !strings.HasSuffix(got, "In keploy record's full round, judging treats this miss as any call made elsewhere: it moves mock-w to the test set's worker scope (mappings.yaml worker:), and its confirming round still compares this test's response; in any other replay the miss stands. The repeat is named here for information only.") || strings.Contains(got, "does not move") {
 		t.Fatalf("a not-owned repeat's next step is %q", got)
 	}
 	if got := n.ExplainMiss(true, "mock-w", "", "keploy record"); !strings.HasPrefix(got, "This request is mock-w, a recording keploy made between tests or in another test's window,") {
