@@ -20,13 +20,16 @@ type SetEndHook interface {
 
 // SetCallsHook is an optional TestHooks extension, under the proven switch:
 // it is told, with each run of each test set's end (SetEndHook's moment), the
-// calls no mock answered that the set's end charged to the set, no test: made
-// before its first test, or after its last (the final report's
-// UnclaimedCalls); none when there were none. Each carries what its parser
-// found of it, as a test's own misses do in its result
-// (UnmatchedCall.NotOwned, ClosestMock): what record's judging reads to bake a
-// recording made elsewhere into the worker scope (design v14, a2). It is
-// a notification: it changes nothing the replayer does.
+// calls no mock answered that the set's end charged to the set, no test (the
+// final report's UnclaimedCalls): read at the set's end but made before its
+// last test's misses were read (filed late), or at a time keploy cannot
+// place; none when there were none. A call made outside every test's window
+// is not one of them: it is background work (TestReport.BackgroundCalls),
+// or, when its recorded answer reaches a test, that test's miss. Each
+// carries what its parser found of it, as a test's own misses do in its result
+// (UnmatchedCall.NotOwned, ClosestMock): what record's judging reads to bake
+// a recording made elsewhere into the worker scope. It is a notification: it
+// changes nothing the replayer does.
 type SetCallsHook interface {
 	SetCalls(testSetID string, calls []models.UnmatchedCall)
 }
