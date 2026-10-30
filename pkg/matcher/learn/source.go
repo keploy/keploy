@@ -28,16 +28,22 @@ func (dc *DriftCache) WordFrom(recorded, live string, m *models.Mock, given ...s
 
 // WordFromIn is WordFrom of a value whose clock reads are read in w too,
 // the window of what carries it in each run (nil: by the lead alone, as
-// WordFrom): an instant that falls in its run's span in both runs is a read
-// of each run's clock (clockAt), so its words are clock words, left out of
-// what the value changed. keploy test's dataflow guard reads a test's
-// response so, in the span from the test's request to its answer, recorded
-// and this run: the application stamps its answer with its clock (an HTTP
-// Date header), and this run's stamp is no word an earlier recording gave.
-// Read by the lead alone, the stamp's minute or second was a word of what
-// changed, and a start-up answer that held the same number by chance (its
-// length, a version) was taken as reaching the test.
+// WordFrom): an instant that falls in its run's span in both runs, at the
+// same place of the value (the k-th of its layout in each, as clockAt pairs
+// them), is a read of each run's clock, and is no change there
+// (Window.inPlace). Its words are no clock words elsewhere: the rest of the
+// value is read by the lead alone, as WordFrom reads it. keploy test's
+// dataflow guard reads a test's response so, in the span from the test's
+// request to its answer, recorded and this run: the application stamps its
+// answer with its clock (an HTTP Date header), and this run's stamp is no
+// word an earlier recording gave. Read by the lead alone, the stamp's minute
+// or second was a word of what changed, and a start-up answer that held the
+// same number by chance (its length, a version) was taken as reaching the
+// test. Read as clock words of the whole value, the stamp's words hid the
+// same number lost from the response's body, which may have come from the
+// start-up answer.
 func (dc *DriftCache) WordFromIn(recorded, live string, w *Window, m *models.Mock, given ...string) (string, error) {
+	live = w.inPlace(recorded, live)
 	if m == nil || recorded == live {
 		return "", nil
 	}
@@ -63,7 +69,7 @@ func (dc *DriftCache) WordFromIn(recorded, live string, w *Window, m *models.Moc
 			}
 		}
 	}
-	return dc.ofIn(recorded, live, w, time.Time{}).eachChanged(func(i int, t string, _ bool) string {
+	return dc.ofIn(recorded, live, nil, time.Time{}).eachChanged(func(i int, t string, _ bool) string {
 		if i < len(src) && src[i][t] && !held[i][t] {
 			return t
 		}

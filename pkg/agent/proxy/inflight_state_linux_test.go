@@ -249,6 +249,55 @@ func TestTheApplicationsFINIsNoUntakenByte(t *testing.T) {
 	})
 }
 
+// A hold on a client's hang-up (HoldHangUp, as the HTTP/1 ingress's watch of
+// a live call's client takes it) holds work once the client shows gone, in a
+// record as in a replay, until the hang-up is told on (HangUpTold): from then
+// on the connection holds no test's work, whatever its socket shows. Here it
+// shows the shape a live call's left in a test run: TCP_CLOSE, the client's
+// kernel having reset it when one more write came after its FIN, with that
+// FIN counted as a byte no read returned, and no read in progress (its
+// handler waits on the app). A settle's scope cut before it lets it go, and
+// a watchdog has nothing to give up on.
+func TestAClientsHangUpToldOnHoldsNoTestsWork(t *testing.T) {
+	tr := &inflight{}
+	app, proxy := acceptedPair(t, tr)
+	release := proxy.HoldHangUp()
+	defer release()
+	s := tr.scope()
+	_ = app.Close()
+	waitState(t, proxy, tcpCloseWait)
+	if n := tr.Pending(false); n != 1 {
+		t.Fatalf("the client gone, its hang-up held and not told: pending %d in a record, want 1", n)
+	}
+	if _, err := proxy.Write([]byte("more")); err != nil {
+		t.Fatal(err)
+	}
+	waitState(t, proxy, tcpClose)
+	if v := proxy.view(); proxy.untaken(v) != 1 {
+		t.Fatalf("precondition: reset after the client's FIN, untaken %d, want the FIN counted as 1", proxy.untaken(v))
+	}
+	if n, _ := s.State(true); n != 1 {
+		t.Fatalf("not told: the scope's pending %d, want 1", n)
+	}
+	proxy.HangUpTold()
+	if n := tr.Pending(false); n != 0 {
+		t.Fatalf("told on: pending %d in a record, want 0", n)
+	}
+	if n := tr.Pending(true); n != 0 {
+		t.Fatalf("told on: pending %d in a replay, want 0", n)
+	}
+	if n, _ := s.State(true); n != 0 {
+		t.Fatalf("told on: the scope's pending %d, want 0", n)
+	}
+	later := tr.scope()
+	if p := later.PendingProgress(true); len(p) != 0 {
+		t.Fatalf("told on: a later scope waits on %v", p)
+	}
+	if words := later.GiveUp([]uint64{proxy.id}, true); len(words) != 0 {
+		t.Fatalf("told on: a watchdog gave up on %v", words)
+	}
+}
+
 // waitState waits until c's socket is in TCP state want: the peer's segments
 // cross loopback, which no event of the tracker reports.
 func waitState(t *testing.T, c *trackedConn, want uint8) {

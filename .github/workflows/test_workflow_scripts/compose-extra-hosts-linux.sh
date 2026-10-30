@@ -34,10 +34,10 @@ FAIL=0
 # Names of this run's own: two runs on one runner never share a container.
 ID=$$
 DEP_NAME=deps.keploy-lane.test
-free_port() { python3 -c 'import socket; s = socket.socket(); s.bind(("", 0)); print(s.getsockname()[1])'; }
+source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/free-port.sh"
 # The app's port, and the dependency's, on this host.
-PORT=$(free_port)
-DEP_PORT=$(free_port)
+PORT=$(free_port) || exit 1
+DEP_PORT=$(free_port "$PORT") || exit 1
 
 # Tear down only this run's project and containers, by name. Never a blanket
 # prune.

@@ -266,6 +266,9 @@ func (c *treeRealConn) CloseWrite() error {
 	return util.CloseWriteIfPossible(c.Conn)
 }
 
+// NetConn is the connection underneath, as liveReader's is.
+func (c *treeRealConn) NetConn() net.Conn { return c.Conn }
+
 // relayReal dials a REAL connection's destination and relays every byte to
 // it (realdeps.Relay). A dial that fails is the app's to see, as it would be
 // without keploy: its connection is reset, and the test's REAL row counts the

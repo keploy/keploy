@@ -229,7 +229,9 @@ func responseTexts(tc *models.TestCase, live any) (recorded, now string, ok bool
 		if x == nil {
 			return "", "", false
 		}
-		return jsonText(tc.GrpcResp), jsonText(*x), true
+		rec, got := tc.GrpcResp, *x
+		rec.Timestamp, got.Timestamp = time.Time{}, time.Time{}
+		return jsonText(rec), jsonText(got), true
 	}
 	return "", "", false
 }

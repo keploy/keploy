@@ -3,6 +3,7 @@ package replay
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"runtime"
 	"strings"
 	"testing"
@@ -401,5 +402,265 @@ func TestFlowGuard_TheClockStampOfTheTestsAnswerInItsSpanIsNoWordOfAStartUpCall(
 				t.Fatalf("the test keeps %+v; want the start-up call charged to it, through %s", rest, c.charged)
 			}
 		})
+	}
+}
+
+// stampedAt is an HTTP answer's headers, stamped (Date) at at by the
+// application's clock, at the second, as an HTTP server writes it.
+func stampedAt(at time.Time) map[string]string {
+	return map[string]string{"Date": at.UTC().Format(time.RFC1123), "Content-Type": "application/json"}
+}
+
+// stamped is a test recorded from recFrom to its answer at recTo, stamped
+// with the application's clock at recStamp, and the response it got this run,
+// stamped at runStamp, keploy having sent its request at runFrom and read the
+// test's misses at runTo.
+type stamped struct {
+	recFrom, recTo, recStamp time.Time
+	runFrom, runTo, runStamp time.Time
+	recBody, runBody         string
+}
+
+// charged runs the guard on the start-up call, whose recording answered
+// boot, for the test of s, with own the test's own calls; the calls the test
+// keeps.
+func (s stamped) charged(t *testing.T, boot string, own ...models.UnmatchedCall) []models.UnmatchedCall {
+	t.Helper()
+	tc := guardCase("get-price-r1a-1", "", s.recBody)
+	tc.HTTPReq.Timestamp, tc.HTTPResp.Timestamp = s.recFrom, s.recTo
+	tc.HTTPResp.Header = stampedAt(s.recStamp)
+	got := live(s.runBody)
+	got.Header, got.Timestamp = stampedAt(s.runStamp), s.runTo
+	var calls setCalls
+	calls.reset(newFlowGuard([]*models.TestCase{tc}, nil, []*models.Mock{guardMock(boot)}))
+	read := append([]models.UnmatchedCall{startUpCall()}, own...)
+	rest := calls.take(context.Background(), read, "get-price-r1a-1", ranLive{resp: got, from: s.runFrom, to: s.runTo})
+	var startUp []models.UnmatchedCall
+	for _, c := range rest {
+		if c.BeforeSet {
+			startUp = append(startUp, c)
+		}
+	}
+	return startUp
+}
+
+// quick is the compose lane's shape: an answer 2 ms after its request,
+// stamped as it is sent, recorded at recAt and run at runAt, the body
+// recorded as rec and got as run.
+func quick(recAt, runAt time.Time, rec, run string) stamped {
+	return stamped{recFrom: recAt, recTo: recAt.Add(2 * time.Millisecond), recStamp: recAt,
+		runFrom: runAt, runTo: runAt.Add(4 * time.Millisecond), runStamp: runAt.Add(time.Millisecond), recBody: rec, runBody: run}
+}
+
+// The answer's clock stamp is a read of each run's clock at its own place,
+// and nowhere else: a start-up answer's number that the first test's body
+// carried, and lost this run (the start-up call missed), still charges the
+// test when it equals a part of the stamp (its day, hour, minute, second or
+// year), as it does when it equals none.
+func TestFlowGuard_AStartUpWordTheBodyLostChargesTheTestWhateverTheStampHolds(t *testing.T) {
+	recAt := time.Date(2026, 10, 30, 15, 21, 46, 310000000, time.UTC)
+	runAt := time.Date(2026, 10, 31, 9, 2, 3, 120000000, time.UTC)
+	for _, n := range []string{"30", "15", "21", "46", "2026", "17", "58"} {
+		s := quick(recAt, runAt, `{"price":42,"shard":`+n+`}`, `{"price":42,"shard":0}`)
+		if rest := s.charged(t, `{"shard":`+n+`}`); len(rest) != 1 || !strings.Contains(rest[0].ReachesTest, n) {
+			t.Errorf("shard %s: the test keeps %+v; want the start-up call, its answer's %s lost from the body", n, rest, n)
+		}
+	}
+}
+
+// An instant the start-up answer gave, which the first test's body carried
+// and lost this run, charges the test however near the test's span it was
+// made, at the nanosecond or at the second: the response's own stamp, at its
+// own place, takes none of its words.
+func TestFlowGuard_AStartUpInstantTheBodyLostChargesTheTestNearItsSpan(t *testing.T) {
+	recAt := time.Date(2026, 10, 30, 15, 21, 46, 310000000, time.UTC)
+	runAt := time.Date(2026, 10, 31, 9, 2, 3, 120000000, time.UTC)
+	for _, off := range []time.Duration{-30 * time.Second, -5 * time.Second, -1500 * time.Millisecond, -900 * time.Millisecond,
+		-300 * time.Millisecond, -10 * time.Millisecond, 0, time.Millisecond} {
+		for _, layout := range []string{time.RFC3339Nano, time.RFC1123} {
+			stamp := recAt.Add(off).UTC().Format(layout)
+			s := quick(recAt, runAt, `{"price":42,"since":"`+stamp+`"}`, `{"price":42,"since":""}`)
+			if rest := s.charged(t, `{"booted":"`+stamp+`"}`); len(rest) != 1 {
+				t.Errorf("a start-up instant %s (%v from the request) lost from the body: the test keeps %+v; want the start-up call", stamp, off, rest)
+			}
+		}
+	}
+}
+
+// The stamp alone changed: whatever instant the test ran at, the start-up
+// answer's numbers (a length, a version, a list) are no word of it.
+func TestFlowGuard_TheAnswersStampAloneNeverChargesAStartUpCall(t *testing.T) {
+	recAt := time.Date(2026, 10, 30, 15, 21, 46, 310000000, time.UTC)
+	boots := []string{`{"published":{"msg":"b"},"length":"12"}`, `{"ok":true,"version":"3.47"}`, `{"n":21,"m":7,"id":"a-15"}`,
+		`{"seq":[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59]}`}
+	for _, boot := range boots {
+		// Each second of two minutes, then each minute of two hours.
+		for _, step := range []struct {
+			n   int
+			per time.Duration
+		}{{120, time.Second}, {120, time.Minute}} {
+			for i := 0; i < step.n; i++ {
+				runAt := recAt.Add(3*time.Minute + time.Duration(i)*step.per + time.Duration(i%997)*time.Millisecond)
+				if rest := quick(recAt, runAt, `{"price":42}`, `{"price":42}`).charged(t, boot); len(rest) != 0 {
+					t.Fatalf("run at %v, start-up answer %s: the test keeps %+v; the answer's stamp came from no start-up call", runAt, boot, rest)
+				}
+			}
+		}
+	}
+}
+
+// The span's edges. A test whose span either run does not know (a stamp
+// missing or out of order) reads its answer's stamp by the lead alone, so a
+// start-up answer holding a word of it charges the test (failing closed). A
+// request the test sent never takes its answer's span. An instant a
+// start-up answer gave as now plus an offset is no read of the clock in the
+// span, and charges the test. A slow answer, stamped at its end past the
+// second its request was sent in, is in the span in either run.
+func TestFlowGuard_TheSpanOfATestsAnswerAtItsEdges(t *testing.T) {
+	recAt := time.Date(2026, 10, 30, 15, 21, 46, 310000000, time.UTC)
+	runAt := time.Date(2026, 10, 31, 9, 2, 3, 120000000, time.UTC)
+	stampSecond := `{"length":"46"}` // the recorded stamp's second
+	t.Run("no recorded request stamp", func(t *testing.T) {
+		s := quick(recAt, runAt, `{"price":42}`, `{"price":42}`)
+		s.recFrom = time.Time{}
+		if rest := s.charged(t, stampSecond); len(rest) != 1 {
+			t.Fatalf("the test keeps %+v; with no recorded span its stamp is read by the lead alone", rest)
+		}
+	})
+	t.Run("no recorded answer stamp", func(t *testing.T) {
+		s := quick(recAt, runAt, `{"price":42}`, `{"price":42}`)
+		s.recTo = time.Time{}
+		if rest := s.charged(t, stampSecond); len(rest) != 1 {
+			t.Fatalf("the test keeps %+v; with no recorded span its stamp is read by the lead alone", rest)
+		}
+	})
+	t.Run("this run's send not known", func(t *testing.T) {
+		s := quick(recAt, runAt, `{"price":42}`, `{"price":42}`)
+		s.runFrom = time.Time{}
+		if rest := s.charged(t, stampSecond); len(rest) != 1 {
+			t.Fatalf("the test keeps %+v; with no span this run its stamp is read by the lead alone", rest)
+		}
+	})
+	t.Run("recorded stamps out of order", func(t *testing.T) {
+		// The answer recorded half a second before its request: inside
+		// the stamp's second, so only the refusal keeps it from a span.
+		s := quick(recAt, runAt, `{"price":42}`, `{"price":42}`)
+		s.recFrom = recAt.Add(500 * time.Millisecond)
+		if rest := s.charged(t, stampSecond); len(rest) != 1 {
+			t.Fatalf("the test keeps %+v; an answer recorded before its request gives no span", rest)
+		}
+	})
+	t.Run("a request the test sent", func(t *testing.T) {
+		// The test sent an instant a start-up answer gave, inside the
+		// test's span in each run: the request is read by the lead alone.
+		sent := recAt.Add(time.Millisecond).Format(time.RFC3339Nano)
+		own := models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "POST /quote", Kind: models.MissInTest, ClosestMock: "mock-7",
+			ClosestMockReq: `{"since":"` + sent + `"}`, ReceivedReq: `{"since":"` + runAt.Add(time.Millisecond).Format(time.RFC3339Nano) + `"}`}
+		s := quick(recAt, runAt, `{"price":42}`, `{"price":42}`)
+		if rest := s.charged(t, `{"lease":"`+sent+`"}`, own); len(rest) != 1 || !strings.Contains(rest[0].ReachesTest, "the request this test sent") {
+			t.Fatalf("the test keeps %+v; want the start-up call, through the request the test sent", rest)
+		}
+	})
+	t.Run("a start-up instant now plus an hour", func(t *testing.T) {
+		exp := recAt.Add(time.Hour).Format(time.RFC1123)
+		s := quick(recAt, runAt, `{"price":42,"expires":"`+exp+`"}`, `{"price":42,"expires":"`+runAt.Add(time.Hour).Format(time.RFC1123)+`"}`)
+		if rest := s.charged(t, `{"expires":"`+exp+`"}`); len(rest) != 1 {
+			t.Fatalf("the test keeps %+v; an instant an hour past the span is no read of the clock in it", rest)
+		}
+	})
+	t.Run("a slow answer recorded", func(t *testing.T) {
+		s := quick(recAt, runAt, `{"price":42}`, `{"price":42}`)
+		s.recTo = recAt.Add(2590 * time.Millisecond)
+		s.recStamp = s.recTo // 15:21:48
+		if rest := s.charged(t, `{"length":"48"}`); len(rest) != 0 {
+			t.Fatalf("the test keeps %+v; the stamp at the slow answer's end is in its span", rest)
+		}
+	})
+	t.Run("a slow answer this run", func(t *testing.T) {
+		s := quick(recAt, runAt, `{"price":42}`, `{"price":42}`)
+		s.runTo = runAt.Add(2780 * time.Millisecond)
+		s.runStamp = s.runTo.Add(-time.Millisecond) // 09:02:05
+		if rest := s.charged(t, `{"length":"05"}`); len(rest) != 0 {
+			t.Fatalf("the test keeps %+v; the stamp at the slow answer's end is in its span", rest)
+		}
+	})
+}
+
+// A gRPC answer's clock stamp (a date header) is read in its span as an
+// HTTP answer's is; a start-up word its body lost still charges the test.
+func TestFlowGuard_AGRPCAnswersStampIsReadInItsSpan(t *testing.T) {
+	recAt := time.Date(2026, 10, 30, 15, 21, 46, 310000000, time.UTC)
+	runAt := time.Date(2026, 10, 31, 9, 2, 3, 120000000, time.UTC)
+	answer := func(at time.Time, body string) models.GrpcResp {
+		return models.GrpcResp{
+			Headers:  models.GrpcHeaders{PseudoHeaders: map[string]string{":status": "200"}, OrdinaryHeaders: map[string]string{"date": at.UTC().Format(time.RFC1123), "content-type": "application/grpc"}},
+			Body:     models.GrpcLengthPrefixedMessage{MessageLength: uint32(len(body)), DecodedData: body},
+			Trailers: models.GrpcHeaders{OrdinaryHeaders: map[string]string{"grpc-status": "0"}},
+		}
+	}
+	run := func(t *testing.T, rec, got string, boot string) []models.UnmatchedCall {
+		tc := &models.TestCase{Name: "get-price-r1a-1", Kind: models.GRPC_EXPORT,
+			GrpcReq:  models.GrpcReq{Headers: models.GrpcHeaders{PseudoHeaders: map[string]string{":path": "/price.Price/Get"}}, Timestamp: recAt},
+			GrpcResp: answer(recAt, rec)}
+		tc.GrpcResp.Timestamp = recAt.Add(2 * time.Millisecond)
+		now := answer(runAt.Add(time.Millisecond), got)
+		var calls setCalls
+		calls.reset(newFlowGuard([]*models.TestCase{tc}, nil, []*models.Mock{guardMock(boot)}))
+		return calls.take(context.Background(), []models.UnmatchedCall{startUpCall()}, "get-price-r1a-1",
+			ranLive{resp: &now, from: runAt, to: runAt.Add(4 * time.Millisecond)})
+	}
+	if rest := run(t, "price:42", "price:42", `{"length":"46"}`); len(rest) != 0 {
+		t.Fatalf("the test keeps %+v; its answer's date stamp, in its span in each run, came from no start-up call", rest)
+	}
+	if rest := run(t, "price:42 shard:46", "price:42 shard:0", `{"shard":46}`); len(rest) != 1 {
+		t.Fatalf("the test keeps %+v; want the start-up call, its answer's 46 lost from the body", rest)
+	}
+}
+
+// stampingHooks answer each test as an application that stamps its answer
+// (Date) with its clock as it starts answering, and sends it in the next
+// second.
+type stampingHooks struct{ prHooks }
+
+func (stampingHooks) SimulateRequest(context.Context, *models.TestCase, string) (interface{}, error) {
+	stamp := time.Now()
+	time.Sleep(time.Until(stamp.Truncate(time.Second).Add(time.Second + 50*time.Millisecond)))
+	return &models.HTTPResp{StatusCode: 200, Header: map[string]string{"Date": stamp.UTC().Format(http.TimeFormat)},
+		Body: `{"ok":true}`, Timestamp: time.Now()}, nil
+}
+
+// keploy test hands the guard the span the test ran in this run, from its
+// send to its read of the test's misses: the application's stamp, made as
+// it started answering, is no start-up call's word, however the recorded
+// stamp's second falls. Handed the bare response, or a span from the read
+// alone, the stamp's second was a word of what changed, and the start-up
+// answer that held it charged the test.
+func TestRunTestSet_TheAnswersClockStampChargesNoStartUpCall(t *testing.T) {
+	provenOn(t, true)
+	h := newPartialRunHarness(t, 1, 0)
+	h.replayer.hookImpl = stampingHooks{}
+	// Recorded a day, an hour, a minute and seven seconds before: no word of
+	// its stamp is this run's.
+	recAt := time.Now().Add(-(25*time.Hour + time.Minute + 7*time.Second))
+	tc := h.cases[0]
+	tc.HTTPReq.Timestamp, tc.HTTPResp.Timestamp = recAt, recAt.Add(2*time.Millisecond)
+	tc.HTTPResp.Header = map[string]string{"Date": recAt.UTC().Format(http.TimeFormat)}
+	h.mocks.filtered = []*models.Mock{guardMock(fmt.Sprintf(`{"length":"%02d"}`, recAt.UTC().Second()))}
+	boot := startUpCall()
+	h.instr.mockErrorsFor = misses(reads(boot))
+
+	h.run(t)
+	rep := h.report.report
+	if len(rep.Tests) != 1 {
+		t.Fatalf("results %+v; want the one test", rep.Tests)
+	}
+	for _, c := range rep.Tests[0].FailureInfo.UnmatchedCalls {
+		if c.BeforeSet {
+			t.Fatalf("the test is charged %+v; its answer's clock stamp came from no start-up call", c)
+		}
+	}
+	if len(rep.BackgroundCalls) != 1 || rep.BackgroundCalls[0].ActualSummary != boot.ActualSummary ||
+		!strings.Contains(rep.BackgroundCalls[0].BackgroundWhy, madeBeforeFirst) {
+		t.Fatalf("background calls %+v; want the start-up call, made before the set's first test", rep.BackgroundCalls)
 	}
 }

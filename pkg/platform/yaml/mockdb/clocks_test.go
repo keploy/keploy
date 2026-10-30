@@ -193,6 +193,66 @@ func TestPersistLearnedWritesClockReadsAndDropsNoiseThere(t *testing.T) {
 	}
 }
 
+// A read of the clock learned as one word of a text (models.ClockOffset.Word:
+// keploy mock's client test naming an app "[E2E] stop-<UnixNano>", read
+// since its test began) is written onto the recording with where the word
+// stands (no byte of the text), read back the same in every storage format,
+// and never added twice: two learnings of the word compare equal. A later
+// learning that reads the same place as a read whole is another form of the
+// value: their meet is an Empty read, which refuses every value there.
+func TestPersistLearnedKeepsAClockWordInEveryFormat(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	const name = "[E2E] stop-1793336961102639022"
+	word := models.ClockOffset{Res: time.Nanosecond, Since: models.SinceTestBegin, Word: models.ClockWordOf(name, len("[E2E] stop-"), len(name))}
+	whole := models.ClockOffset{Res: time.Nanosecond, Since: models.SinceTestBegin}
+	for _, f := range []string{string(yaml.FormatYAML), string(yaml.FormatJSON), mockFormatGob} {
+		t.Run(f, func(t *testing.T) {
+			dir := t.TempDir()
+			ys := clockStore(dir, f)
+			ctx := context.Background()
+			set := "test-set-0"
+			m := noiseTestMock(`{"name":"` + name + `"}`)
+			m.Name = "mock-0"
+			if err := ys.InsertMock(ctx, m, set); err != nil {
+				t.Fatal(err)
+			}
+			if err := ys.Close(); err != nil {
+				t.Fatal(err)
+			}
+			states := map[string]models.MockState{"mock-0": {Name: "mock-0", Clocks: map[string]models.ClockOffset{"body.name": word}}}
+			added, err := ys.PersistLearned(ctx, set, states)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want := (map[string][]string{"mock-0": {"body.name (" + word.String() + ")"}}); !reflect.DeepEqual(added, want) {
+				t.Fatalf("added %v, want %v", added, want)
+			}
+			got := readBack(t, ys, set, "mock-0")
+			if want := (map[string]models.ClockOffset{"body.name": word}); !reflect.DeepEqual(got.Spec.Clocks, want) {
+				t.Fatalf("the word read back %+v, want %+v", got.Spec.Clocks, want)
+			}
+			if again, err := ys.PersistLearned(ctx, set, states); err != nil || len(again) != 0 {
+				t.Fatalf("a word the mock already carries is not added again: %v %v", again, err)
+			}
+
+			added, err = ys.PersistLearned(ctx, set, map[string]models.MockState{"mock-0": {Name: "mock-0", Clocks: map[string]models.ClockOffset{"body.name": whole}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			empty := word.Meet(whole)
+			if !empty.Empty() {
+				t.Fatalf("a word met with a read whole is %+v, not Empty", empty)
+			}
+			if want := (map[string][]string{"mock-0": {"body.name (" + empty.String() + ")"}}); !reflect.DeepEqual(added, want) {
+				t.Fatalf("added %v, want %v", added, want)
+			}
+			if got := readBack(t, ys, set, "mock-0"); !reflect.DeepEqual(got.Spec.Clocks, map[string]models.ClockOffset{"body.name": empty}) {
+				t.Fatalf("the met read read back %+v, want %+v", got.Spec.Clocks, empty)
+			}
+		})
+	}
+}
+
 // Compat: with the switch off nothing learns a clock read, and every rewrite
 // of a recording (the noise write-back, the prune of keploy test
 // --remove-unused-mocks) carries the clock reads a recording holds, as they
