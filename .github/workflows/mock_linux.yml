@@ -754,7 +754,8 @@ jobs:
       # it starts, before the set's first test, or as it stops, after the
       # set's last test, that no mock answers is the application's background
       # work: listed among the set's background calls, failing nothing; the
-      # set fails because the recorded publish was never made.
+      # set fails because the recorded publish was made differently, and its
+      # reason names the call keploy refused with its closest recording.
       - name: Run proven after-answer e2e
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}

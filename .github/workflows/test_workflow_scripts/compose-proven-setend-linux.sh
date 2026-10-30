@@ -27,9 +27,12 @@
 #      after the set's last test was read: answered by no mock, it is the
 #      application's background work (item (b)), charged to no test and not
 #      among the unclaimed calls; the set fails because the recorded
-#      publish, a call of its worker scope, was never made. Read with the
-#      app running, the publish came after the read and passed. (Before item
-#      (b) the changed call itself failed each set, as an unclaimed call.)
+#      publish, a call of its worker scope, was made differently and keploy
+#      refused it: the reason names the refused call and the recording it
+#      was closest to, and does not say the publish was never made. Read with
+#      the app running, the publish came after the read and passed. (Before,
+#      the reason said the publish was never made; before item (b) the
+#      changed call itself failed each set, as an unclaimed call.)
 #   3. The app exits on its own after its first answer (HALT_AFTER=1): the
 #      first set is APP_HALTED, as compose's abort made it, though keploy ran
 #      compose without it.
@@ -349,7 +352,9 @@ done
 
 # shutdown_named STEP SET: SET's report lists the publish among its background
 # calls, made after its last test was read, and not among its unclaimed calls
-# (item (b)), and its reason says the recorded publish was never made.
+# (item (b)), and its reason names the publish keploy refused, a call of its
+# worker scope made differently, with the recording it was closest to, and
+# does not say it was never made.
 shutdown_named() {
   local step=$1 s=$2 y
   y="$(sudo cat "$(report "$s")" 2>/dev/null)"
@@ -359,8 +364,12 @@ shutdown_named() {
   if yq -r '.unclaimed_calls[]? | .actual_summary // ""' <<<"$y" 2>/dev/null | grep -q '/shutdown'; then
     fail "$step: $s has the publish among its unclaimed calls; it is background work, charged to no test"
   fi
-  yq -r '.failure_reason // ""' <<<"$y" 2>/dev/null | grep -q "never made 1 of the calls the test set's worker scope recorded" ||
-    fail "$step: $s's reason does not say the recorded publish was never made: $(yq -r '.failure_reason // ""' <<<"$y" 2>/dev/null)"
+  yq -r '.failure_reason // ""' <<<"$y" 2>/dev/null |
+    grep -q "the application made 1 of the calls the test set's worker scope recorded (the calls no test owns) differently, and keploy refused each: HTTP POST /shutdown.* (closest to mock-[0-9]*)" ||
+    fail "$step: $s's reason does not name the refused publish as the worker scope's call made differently: $(yq -r '.failure_reason // ""' <<<"$y" 2>/dev/null)"
+  if yq -r '.failure_reason // ""' <<<"$y" 2>/dev/null | grep -q "never made"; then
+    fail "$step: $s's reason says a worker call was never made; the app made it, and keploy refused it: $(yq -r '.failure_reason // ""' <<<"$y" 2>/dev/null)"
+  fi
 }
 
 echo "== 1. both sets as recorded =="
