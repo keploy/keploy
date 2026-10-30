@@ -18,12 +18,12 @@ import (
 // The chunked and Content-Length framing reads the app's bytes, and what it
 // says about them reaches the agent's log through the parser's logger (at Warn
 // and Error), the error the parser returns (which the proxy logs again), and a
-// recording's stopped-on reason (recordV2). None of it may carry the app's
-// bytes. A mis-framed chunk (a sized chunk, then the next chunk's data with no
-// size line) makes that data the chunk-size line, a chunk size too large is
-// the app's hex digits, and a client can send anything as a Content-Length.
-// The errors name such a value by its length instead (parseChunkSize,
-// contentLengthValue).
+// recording's stopped-on reason (recordV2). None of it may carry any
+// framingWindow-byte run of the app's bytes. A mis-framed chunk (a sized
+// chunk, then the next chunk's data with no size line) makes that data the
+// chunk-size line, a chunk size too large is the app's hex digits, and a
+// client can send anything as a Content-Length. The errors name such a value
+// by its length instead (parseChunkSize, contentLengthValue).
 
 const (
 	framingSecret = "s3cr3t-t0k3n-8823"
@@ -45,14 +45,46 @@ func framingForbidden(t *testing.T) []string {
 	return []string{framingSecret, framingEmail, framingHexSecret, strconv.FormatUint(n, 10)}
 }
 
-// framingNoContent fails the test when what holds any of framingForbidden.
+// framingWindow is the shortest run of the app's bytes that counts as
+// carrying them, as in enterprise's logkeytest.Carries: a cut-down copy (a
+// %.16q preview of the line, say) still holds a run this long.
+const framingWindow = 8
+
+// framingForms is f as it is and %q-escaped (without the quotes): the two
+// spellings this code had of the app's bytes. For an f of printable ASCII
+// with no quote or backslash, the two are the same.
+func framingForms(f string) []string {
+	q := strconv.Quote(f)
+	return []string{f, q[1 : len(q)-1]}
+}
+
+// framingNoContent fails the test when what holds any framingWindow-byte run
+// of any framingForbidden spelling, in either of its framingForms, and names
+// the first run it finds per spelling. Other encodings of the app's bytes
+// (hex, base64, upper- or lower-cased) are a stated limit: nothing here
+// encodes them so, and the row does not look for them.
 func framingNoContent(t *testing.T, where, what string) {
 	t.Helper()
 	for _, f := range framingForbidden(t) {
-		if strings.Contains(what, f) {
-			t.Errorf("%s carries the app's bytes %q: %s", where, f, what)
+		if run, ok := framingCarries(what, f); ok {
+			t.Errorf("%s carries the app's bytes %q (a run of %q): %s", where, run, f, what)
 		}
 	}
+}
+
+// framingCarries reports the first framingWindow-byte run of f, in either of
+// its framingForms, that what holds. A form shorter than the window is looked
+// for whole.
+func framingCarries(what, f string) (string, bool) {
+	for _, form := range framingForms(f) {
+		n := min(framingWindow, len(form))
+		for i := 0; i+n <= len(form); i++ {
+			if run := form[i : i+n]; strings.Contains(what, run) {
+				return run, true
+			}
+		}
+	}
+	return "", false
 }
 
 // framingLines renders every logged entry, at every level, with its fields.
@@ -74,11 +106,13 @@ func framingLevelSeen(logs *observer.ObservedLogs, level zapcore.Level) bool {
 	return false
 }
 
+// framingHead and framingBody share no framingWindow-byte run with
+// framingForbidden, so a line that names the host is not a finding.
 const framingHead = "POST /v1/queue HTTP/1.1\r\n" +
-	"Host: queue.example.internal\r\n" +
+	"Host: queue.svc.internal\r\n" +
 	"Content-Type: application/json\r\n"
 
-const framingBody = `{"QueueUrl":"https://queue.example.internal/1/orders","MessageBody":"hi"}`
+const framingBody = `{"QueueUrl":"https://queue.svc.internal/1/orders","MessageBody":"hi"}`
 
 func framingChunked(chunks string) string {
 	return framingHead + "Transfer-Encoding: chunked\r\n\r\n" + chunks + "\r\n0\r\n\r\n"
@@ -164,12 +198,15 @@ func TestRequestFramingLogsNoContent(t *testing.T) {
 // record, through the same logger.
 func TestResponseFramingLogsNoContent(t *testing.T) {
 	const status = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
-	type tc struct{ name, resp string }
+	type tc struct {
+		name, resp string
+		want       error // nil: relayed, the failure said at Warn
+	}
 	var cases []tc
 	for _, c := range framingChunkedCases {
-		cases = append(cases, tc{c.name, status + "Transfer-Encoding: chunked\r\n\r\n" + c.body + "\r\n0\r\n\r\n"})
+		cases = append(cases, tc{c.name, status + "Transfer-Encoding: chunked\r\n\r\n" + c.body + "\r\n0\r\n\r\n", nil})
 	}
-	cases = append(cases, tc{"a Content-Length that is not a number", framingBadContentLength(status)})
+	cases = append(cases, tc{"a Content-Length that is not a number", framingBadContentLength(status), errBadContentLength})
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
@@ -188,13 +225,26 @@ func TestResponseFramingLogsNoContent(t *testing.T) {
 				if !framingLevelSeen(logs, zapcore.WarnLevel) {
 					t.Errorf("no Warn or Error line: the framing failure went unsaid (err %v)", err)
 				}
+				// A chunked body that does not frame is relayed; a
+				// Content-Length that does not parse fails, and the error
+				// names the value by its length.
+				switch {
+				case c.want == nil && err != nil:
+					t.Errorf("record relays a body that does not frame, but handleChunkedResponses returned %v", err)
+				case c.want != nil && !errors.Is(err, c.want):
+					t.Errorf("handleChunkedResponses returned %v, want %v", err, c.want)
+				case c.want != nil && !strings.Contains(err.Error(), "-byte"):
+					t.Errorf("the returned error does not name the value by its length: %v", err)
+				}
 			})
 		})
 	}
 }
 
 // The V2 readers return the framing error to recordV2, which logs it at Error
-// and keeps it as the recording's stopped-on reason.
+// and keeps it as the recording's stopped-on reason. readRequestV2 and
+// readResponseV2 log nothing themselves, so this row checks only the error
+// they return (and runs them on a Nop logger).
 func TestV2FramingErrorsCarryNoContent(t *testing.T) {
 	for _, c := range framingChunkedCases {
 		t.Run("request/"+c.name, func(t *testing.T) {
@@ -229,7 +279,7 @@ func TestV2FramingErrorsCarryNoContent(t *testing.T) {
 }
 
 // framingV2Err checks the error a V2 reader returned: it carries none of the
-// app's bytes, and is want.
+// app's bytes, is want, and names the value it could not read by its length.
 func framingV2Err(t *testing.T, reader string, err, want error) {
 	t.Helper()
 	if err == nil {
@@ -238,5 +288,8 @@ func framingV2Err(t *testing.T, reader string, err, want error) {
 	framingNoContent(t, reader+"'s error", err.Error())
 	if !errors.Is(err, want) {
 		t.Errorf("%s returned %v, want %v", reader, err, want)
+	}
+	if !strings.Contains(err.Error(), "-byte") && !strings.Contains(err.Error(), "-digit") {
+		t.Errorf("%s's error does not name the value by its length: %v", reader, err)
 	}
 }
