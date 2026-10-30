@@ -178,9 +178,11 @@ func qnTyped(at time.Time) Leaf {
 // saying that nothing shows a read of the clock and naming no recording, with
 // mock-15 or without: an instant read whole is noise only by its provenance.
 // The same text as a String (the date a string field holds) is read word by
-// word as before: noise in its window; outside it refused, naming mock-15 at
-// its requestId, and, without mock-15, noise (no earlier place holds a word
-// of it).
+// word as before: noise in its window; outside it a read of the clock, with
+// mock-15 or without. INTENTIONAL change (run 5's round F): it was refused
+// naming mock-15 at its requestId, but a frame's header is the wire's
+// framing, no place of the application's (payloadSpec), so mock-15 holds no
+// word of it.
 func TestATypedInstantIsComparedWhole(t *testing.T) {
 	raw := qnRecordings()
 	noMonitor := raw[:len(raw)-1]
@@ -206,12 +208,10 @@ func TestATypedInstantIsComparedWhole(t *testing.T) {
 	str := func(at time.Time) Leaf {
 		return Leaf{Path: qnPath, Noise: "body.docs.msgs.0.processed_at", Type: String, Value: at.Format(time.RFC3339Nano)}
 	}
-	ln := classifyTyped(str(qnRec), str(qnLive), nil, nil, nil, raw...)
-	if ln.Kind == KindNoise || ln.From.Mock != "mock-15" && !strings.Contains(ln.Why, "mock-15") {
-		t.Errorf("a date-like string, no provenance: %s (from %q, %s); want refused for mock-15's requestId", ln.Kind, ln.From.Mock, ln.Why)
-	}
-	if ln := classifyTyped(str(qnRec), str(qnLive), nil, nil, nil, noMonitor...); ln.Kind != KindClockRead || ln.Read == nil {
-		t.Errorf("a date-like string, no provenance, without mock-15: %s (from %q, %s); want a read of the clock: one instant whole, with no call window, compared at replay", ln.Kind, ln.From.Mock, ln.Why)
+	for name, rs := range map[string][]*models.Mock{"with mock-15": raw, "without mock-15": noMonitor} {
+		if ln := classifyTyped(str(qnRec), str(qnLive), nil, nil, nil, rs...); ln.Kind != KindClockRead || ln.Read == nil || strings.Contains(ln.Why, "mock-15") {
+			t.Errorf("a date-like string, no provenance, %s: %s (from %q, %s); want a read of the clock: one instant whole, with no call window, compared at replay, naming no recording", name, ln.Kind, ln.From.Mock, ln.Why)
+		}
 	}
 	if ln := classifyTyped(str(qnRec), str(qnLive), qnWindow(), nil, nil, raw...); !noiseOrRead(ln) {
 		t.Errorf("a date-like string, in its window: %s (from %q, %s); want noise", ln.Kind, ln.From.Mock, ln.Why)
@@ -573,8 +573,10 @@ func TestInstantClockRead(t *testing.T) {
 // SQS SDK's User-Agent (mock-5). Read whole, the minute is no word: in its
 // call's window, or moved by the lead, the instant is noise; shown by
 // neither, it is refused for its provenance alone, naming no recording.
-// Read word by word (a String), it is refused for the recording, as the lane
-// was.
+// Read word by word (a String), it is refused for the User-Agent's version,
+// as the lane was. INTENTIONAL change (run 5's round F): a reply's requestId
+// is the frame's header, no place of the application's (payloadSpec), so the
+// String is read there as with no such recording: a read of the clock.
 func TestATypedInstantMeetsNoTwoDigitCoincidence(t *testing.T) {
 	reply := func(name string, requestID int32, asked time.Time) *models.Mock {
 		return &models.Mock{Name: name, Kind: models.Mongo, ConnectionID: "0", Spec: models.MockSpec{
@@ -602,10 +604,10 @@ func TestATypedInstantMeetsNoTwoDigitCoincidence(t *testing.T) {
 		name      string
 		rec, live time.Time
 		holder    func(at time.Time) *models.Mock
-		field     string
+		field     string // "": a frame header's, which holds no word
 	}{
 		{"a reply's requestId", time.UnixMilli(1792726422011).UTC(), time.UnixMilli(1792726485013).UTC(),
-			func(at time.Time) *models.Mock { return reply("mock-10", 34, at.Add(-2*time.Second)) }, "spec.responses[0].header.requestId"},
+			func(at time.Time) *models.Mock { return reply("mock-10", 34, at.Add(-2*time.Second)) }, ""},
 		{"a version in a User-Agent", time.UnixMilli(1792726643396).UTC(), time.UnixMilli(1792726702045).UTC(),
 			func(at time.Time) *models.Mock {
 				return receive("mock-5", "aws-sdk-go-v2/1.36.3 ua/2.1 os/linux lang/go#1.27.0 md/GOOS#linux md/GOARCH#amd64 api/sqs#1.38.1 m/E", at.Add(-3*time.Second))
@@ -630,7 +632,14 @@ func TestATypedInstantMeetsNoTwoDigitCoincidence(t *testing.T) {
 		str := func(at time.Time) Leaf {
 			return Leaf{Path: qnPath, Noise: "body.docs.msgs.0.processed_at", Type: String, Value: at.Format(time.RFC3339Nano)}
 		}
-		if ln := classify(str(row.rec), str(row.live), nil); ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "in "+holder.Name+" at "+row.field+":") {
+		ln := classify(str(row.rec), str(row.live), nil)
+		if row.field == "" {
+			if ln.Kind != KindClockRead || ln.Read == nil || strings.Contains(ln.Why, holder.Name) {
+				t.Errorf("%s, a date-like string, no provenance: %s (from %q, %s); want a read of the clock naming no recording: a frame header holds no word", row.name, ln.Kind, ln.From.Mock, ln.Why)
+			}
+			continue
+		}
+		if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "in "+holder.Name+" at "+row.field+":") {
 			t.Errorf("%s, a date-like string, no provenance: %s (from %q, %s); want refused for %s, as the lane was", row.name, ln.Kind, ln.From.Mock, ln.Why, holder.Name)
 		}
 	}
@@ -1190,7 +1199,7 @@ func TestATimeOfDayInTheOtherFormIsTheSameMoment(t *testing.T) {
 		}
 	}
 	// A payload holding the recorded moment as a text (instantRawFrom).
-	raw := []Raw{{read: true, mock: "mock-db", at: call.Add(-time.Second), served: true, text: `{"rows":[["42","` + read.Format("15:04:05.000000") + `"]]}`}}
+	raw := []Raw{{rRead: true, mock: "mock-db", at: call.Add(-time.Second), served: true, rText: `{"rows":[["42","` + read.Format("15:04:05.000000") + `"]]}`}}
 	if ln := classify("typed", nil, raw, nil); ln.Kind != KindVariable || ln.From.Mock != "mock-db" || ln.Why != instantEvidence(ln.From) {
 		t.Errorf("typed, its recorded moment a text in a payload: %s (from %+v, %q); want a variable of mock-db, with its evidence", ln.Kind, ln.From, ln.Why)
 	}

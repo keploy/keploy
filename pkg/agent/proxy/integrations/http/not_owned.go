@@ -199,7 +199,11 @@ func markNotOwned(report *models.MockMismatchReport, m *models.Mock) {
 }
 
 // notOwnedNextSteps says what a miss on a call that is a recording the open
-// view does not show (notOwnedRecording) likely means, and what to do.
+// view does not show (notOwnedRecording) likely means, and what to do. It
+// holds in every replay: only keploy record's full round has its judging
+// move the recording to the worker scope; in any other replay (its
+// confirming round, keploy test) the miss stands, and a set-aside test's
+// recording answers a later test's call only as the proxy's addAside lets it.
 func notOwnedNextSteps(name string) string {
-	return fmt.Sprintf("This request is %s, which keploy recorded where this replay did not make it: in another test's window, or between tests after a test this replay had not reached. A call the application makes on its own (a queue consumer, a scheduler) falls in whichever window its timing puts it in. keploy record's judging reads this miss and moves %s to the test set's worker scope (mappings.yaml worker:), which answers it wherever the replay makes it from its place on; record again if this replay was not keploy record's.", name, name)
+	return fmt.Sprintf("This request is %s, which keploy recorded where this replay did not make it: in another test's window, or between tests after a test this replay had not reached. A call the application makes on its own (a queue consumer, a scheduler, a first use's refresh) falls in whichever window its timing puts it in. In keploy record's full round, judging reads this miss and moves %s to the test set's worker scope (mappings.yaml worker:), which answers it from its place on in the rounds after. In any other replay the miss stands: when the test that recorded %s is set aside, keploy answers a later test's call with it only if the call is exactly it and it holds no variable, and keploy record's judging never keeps a test over a miss on a set-aside test's recording. Record again, or fix what set that test aside, so that its own window answers the call.", name, name, name)
 }

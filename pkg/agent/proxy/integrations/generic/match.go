@@ -1,8 +1,10 @@
 package generic
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"strings"
 
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
@@ -10,6 +12,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mismatch"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
+	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -253,13 +256,15 @@ func buildGenericMismatchReport(ctx context.Context, reqBuffs [][]byte, mockDb i
 	}
 
 	bestIdx, bestSim := -1, -1.0
+	var old [][]byte
 	for idx, mock := range genericMocks {
-		if len(mock.Spec.GenericRequests) != len(reqBuffs) {
+		pieces := similarPieces(mock.Spec.GenericRequests, reqBuffs, &old)
+		if pieces == nil {
 			continue
 		}
 		var simSum float64
 		comparable := true
-		for i, reqBuff := range reqBuffs {
+		for i, reqBuff := range pieces {
 			msg := mock.Spec.GenericRequests[i].Message[0]
 			// The recorder stores ASCII payloads verbatim (Type String) and
 			// binary payloads base64-encoded — decode per the recorded type,
@@ -281,7 +286,7 @@ func buildGenericMismatchReport(ctx context.Context, reqBuffs [][]byte, mockDb i
 		if !comparable {
 			continue
 		}
-		if avg := simSum / float64(len(reqBuffs)); avg > bestSim {
+		if avg := simSum / float64(len(pieces)); avg > bestSim {
 			bestSim = avg
 			bestIdx = idx
 		}
@@ -302,12 +307,13 @@ func buildGenericMismatchReport(ctx context.Context, reqBuffs [][]byte, mockDb i
 func findBinaryMatch(tcsMocks []*models.Mock, reqBuffs [][]byte, mxSim float64) int {
 	// TODO: need find a proper similarity index to set a benchmark for matching or need to find another way to do approximate matching
 	mxIdx := -1
+	var old [][]byte
 	for idx, mock := range tcsMocks {
-		if len(mock.Spec.GenericRequests) == len(reqBuffs) {
+		if pieces := similarPieces(mock.Spec.GenericRequests, reqBuffs, &old); pieces != nil {
 			nc := util.NewNoiseChecker(mock.Noise)
 			var simSum float64
 			var simCount int
-			for requestIndex, reqBuff := range reqBuffs {
+			for requestIndex, reqBuff := range pieces {
 				mockData := mock.Spec.GenericRequests[requestIndex].Message[0].Data
 
 				// Skip noisy (obfuscated) buffers — don't let them influence similarity
@@ -330,7 +336,7 @@ func findBinaryMatch(tcsMocks []*models.Mock, reqBuffs [][]byte, mxSim float64) 
 					mxSim = avgSim
 					mxIdx = idx
 				}
-			} else if len(reqBuffs) > 0 {
+			} else if len(pieces) > 0 {
 				// All buffers were noisy — neutral match
 				if 1.0 > mxSim {
 					mxSim = 1.0
@@ -350,36 +356,177 @@ func fuzzyCheck(encoded, reqBuf []byte) float64 {
 	return similarity
 }
 
+// findExactMatch returns the index of the first mock whose recorded request
+// is reqBuffs' bytes, or -1. The pieces a recording holds need not be the
+// pieces this replay read: a read returns what has arrived, at most
+// pUtil.ReadChunkSize, and the old read loop joined what arrived together
+// into one piece (a 40 KiB request recorded whole is read here as 32 KiB and
+// 8 KiB). So a mock whose pieces are not reqBuffs' is compared with
+// reqBuffs' bytes cut where its own pieces end (cutLikeRecorded).
 func findExactMatch(tcsMocks []*models.Mock, reqBuffs [][]byte) int {
+	req := newSentRequest(reqBuffs)
 	for idx, mock := range tcsMocks {
-		if len(mock.Spec.GenericRequests) == len(reqBuffs) {
-			nc := util.NewNoiseChecker(mock.Noise)
-			matched := true // Flag to track if all requests match
-
-			for requestIndex, reqBuff := range reqBuffs {
-				mockData := mock.Spec.GenericRequests[requestIndex].Message[0].Data
-
-				// If mock data is noisy (obfuscated), skip comparison for this buffer
-				if nc != nil && nc.IsNoisy(mockData) {
-					continue
-				}
-
-				bufStr := string(reqBuff)
-				if !util.IsASCII(string(reqBuff)) {
-					bufStr = util.EncodeBase64(reqBuff)
-				}
-
-				// Compare the encoded data
-				if mockData != bufStr {
-					matched = false
-					break // Exit the loop if any request doesn't match
-				}
-			}
-
-			if matched {
-				return idx
-			}
+		recorded := mock.Spec.GenericRequests
+		nc := util.NewNoiseChecker(mock.Noise)
+		if len(recorded) == len(reqBuffs) && sameAsRecorded(recorded, reqBuffs, nc) {
+			return idx
+		}
+		if pieces := req.cutLikeRecorded(recorded); pieces != nil && sameAsRecorded(recorded, pieces, nc) {
+			return idx
 		}
 	}
 	return -1
+}
+
+// sameAsRecorded reports whether each piece is the recorded piece at its
+// index. A noisy (obfuscated) recorded piece is not compared.
+func sameAsRecorded(recorded []models.Payload, pieces [][]byte, nc *util.NoiseChecker) bool {
+	for i, piece := range pieces {
+		mockData := recorded[i].Message[0].Data
+		if nc != nil && nc.IsNoisy(mockData) {
+			continue
+		}
+		// The recorder keeps an ASCII piece as it is, any other base64
+		// encoded (encodePayload): the piece is compared in that form.
+		bufStr := string(piece)
+		if !util.IsASCII(bufStr) {
+			bufStr = util.EncodeBase64(piece)
+		}
+		if mockData != bufStr {
+			return false
+		}
+	}
+	return true
+}
+
+// sentRequest is what a connection sent for one exchange, in the pieces its
+// reads returned, and those pieces joined, made once when first asked.
+type sentRequest struct {
+	pieces [][]byte
+	total  int
+	joined []byte
+}
+
+func newSentRequest(pieces [][]byte) *sentRequest {
+	r := &sentRequest{pieces: pieces}
+	for _, p := range pieces {
+		r.total += len(p)
+	}
+	return r
+}
+
+func (r *sentRequest) bytes() []byte {
+	if r.joined == nil {
+		if len(r.pieces) == 1 {
+			r.joined = r.pieces[0]
+		} else {
+			r.joined = bytes.Join(r.pieces, nil)
+		}
+	}
+	return r.joined
+}
+
+// cutLikeRecorded returns the request's bytes cut where recorded's pieces
+// end, to be compared with them piece by piece. nil when the request is not
+// as long as the recording (it cannot be the same bytes), when a recorded
+// piece's length is unknown, or when the request's pieces already end where
+// the recording's do (compared as they are).
+//
+// A noisy recorded piece is cut at its recorded (obfuscated) length: an
+// obfuscation that changed a piece's length leaves the recording to be
+// compared piece by piece only, as before.
+func (r *sentRequest) cutLikeRecorded(recorded []models.Payload) [][]byte {
+	if len(recorded) == 0 {
+		return nil
+	}
+	sum, aligned := 0, len(recorded) == len(r.pieces)
+	for i, p := range recorded {
+		n := recordedPieceLen(p)
+		if n < 0 {
+			return nil
+		}
+		sum += n
+		aligned = aligned && n == len(r.pieces[i])
+	}
+	if aligned || sum != r.total {
+		return nil
+	}
+	b := r.bytes()
+	out := make([][]byte, len(recorded))
+	off := 0
+	for i, p := range recorded {
+		n := recordedPieceLen(p)
+		out[i] = b[off : off+n]
+		off += n
+	}
+	return out
+}
+
+// recordedPieceLen is how many bytes a recorded request piece holds: its
+// data's length for a piece kept as text (models.String), the length its
+// base64 decodes to for any other (encodePayload; the replay decodes a
+// response piece the same way). -1 when that data is not base64 of a whole
+// number of bytes, or the piece holds no message.
+func recordedPieceLen(p models.Payload) int {
+	if len(p.Message) == 0 {
+		return -1
+	}
+	msg := p.Message[0]
+	if msg.Type == models.String {
+		return len(msg.Data)
+	}
+	d := msg.Data
+	if len(d)%4 != 0 {
+		return -1
+	}
+	n := len(d) / 4 * 3
+	switch {
+	case strings.HasSuffix(d, "=="):
+		n -= 2
+	case strings.HasSuffix(d, "="):
+		n--
+	}
+	return n
+}
+
+// similarPieces is reqBuffs in pieces as many as recorded's, to be compared
+// with them piece by piece for a similarity: reqBuffs as they were read, or,
+// for a recording the old read loop made, as it would have read them
+// (coalescedLikeOldReads, made once into *old). nil when neither has as many
+// pieces. Unlike an exact match (cutLikeRecorded), a similarity never cuts the
+// bytes where a recording's pieces end: a recording in other pieces than
+// either is compared with no request it was not compared with before.
+func similarPieces(recorded []models.Payload, reqBuffs [][]byte, old *[][]byte) [][]byte {
+	if len(recorded) == len(reqBuffs) {
+		return reqBuffs
+	}
+	if *old == nil {
+		*old = coalescedLikeOldReads(reqBuffs)
+	}
+	if len(recorded) == len(*old) {
+		return *old
+	}
+	return nil
+}
+
+// coalescedLikeOldReads is pieces as the old read loop would have returned
+// them, for the similarity of a recording it made. It read on while a read
+// filled its buffer, so what had arrived together came back as one piece; a
+// read now returns at most pUtil.ReadChunkSize, and a piece that long is
+// joined with the pieces after it, up to and with the first shorter one.
+func coalescedLikeOldReads(pieces [][]byte) [][]byte {
+	out := make([][]byte, 0, len(pieces))
+	for i := 0; i < len(pieces); {
+		j := i
+		for j < len(pieces)-1 && len(pieces[j]) == pUtil.ReadChunkSize {
+			j++
+		}
+		if j == i {
+			out = append(out, pieces[i])
+		} else {
+			out = append(out, bytes.Join(pieces[i:j+1], nil))
+		}
+		i = j + 1
+	}
+	return out
 }

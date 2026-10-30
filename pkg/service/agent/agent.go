@@ -1698,7 +1698,10 @@ func (a *Agent) seedStatementCatalog(storage *ClientMockStorage) {
 // starts: a non-default MySQL port would not be routed to the MySQL parser,
 // a default one (3306, 4000) the recording reached an HTTP or gRPC service at
 // would be greeted as MySQL, and a TLS client would not be offered h2 for a
-// destination recorded speaking HTTP/2. They are seeded once per store, when it is published, and
+// destination recorded speaking HTTP/2; and, under the proven switch, where
+// keploy mock replay stages so too (keploy #4970), a local dependency reached
+// only inside tests would not be a recorded port, so keploy mock would refuse
+// its connect while it is stopped. They are seeded once per store, when it is published, and
 // replace the previous store's; the proxy keeps them, and every staging
 // derives from them beside what it stages. A store with no on-disk store
 // seeds none: its per-test mocks are all resident, so its staging reaches

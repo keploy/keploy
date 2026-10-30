@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/relay"
+	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
@@ -120,5 +122,122 @@ func TestAChangedExchangeIsComparedWithTheTestsAnsweredOnes(t *testing.T) {
 	if r.MissKind != models.MissExtraCall || r.ClosestMock != "mock-1" || len(r.FieldDiffs)+len(r.Differs) != 0 ||
 		!strings.Contains(r.Diff, "repeats mock-1") || !strings.Contains(r.NextSteps, "repeats mock-1") || strings.Contains(r.Diff+r.NextSteps, "mock-0") {
 		t.Fatalf("an extra call with mock-0 in view: %+v; want it named as mock-1, the recording it repeats, and mock-0 nowhere", r)
+	}
+}
+
+// varied is n bytes that differ along their length, so a request cut in the
+// wrong place is not the same bytes; binary adds bytes no ASCII piece holds
+// (the recorder keeps such a piece base64 encoded).
+func varied(n int, binary bool) []byte {
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = byte('a' + (i*7+i/251)%26)
+		if binary && i%97 == 0 {
+			b[i] = 0x80 | byte(i)
+		}
+	}
+	return b
+}
+
+// recordedAs is a generic exchange whose request was recorded in pieces, each
+// kept as the recorder keeps it (encodePayload).
+func recordedAs(name string, pieces ...[]byte) *models.Mock {
+	m := &models.Mock{Name: name, Kind: models.GENERIC}
+	for _, p := range pieces {
+		m.Spec.GenericRequests = append(m.Spec.GenericRequests, encodePayload(p, models.FromClient))
+	}
+	return m
+}
+
+// splitAt cuts b where each of at ends.
+func splitAt(b []byte, at ...int) [][]byte {
+	var out [][]byte
+	prev := 0
+	for _, n := range at {
+		out = append(out, b[prev:n])
+		prev = n
+	}
+	return append(out, b[prev:])
+}
+
+// A recording whose request is longer than one read still matches exactly,
+// whatever pieces this replay read it in. The old read loop joined what had
+// arrived together into one piece, so a 40 KiB request was recorded whole; a
+// read now returns at most ReadChunkSize (32 KiB), and the request came in
+// as 32 KiB and 8 KiB, compared piece by piece with the one: no exact match,
+// left to the 0.9 similarity (findBinaryMatch), which a request that differs
+// at all misses. The same holds for a recording read in pieces (the relay's,
+// 32 KiB and 8 KiB) that arrives in others. Lengths 40960, 32768 and 8192
+// leave a base64 piece with both paddings.
+func TestARequestLongerThanAReadMatchesItsRecordingExactly(t *testing.T) {
+	const chunk = 32 << 10
+	for _, binary := range []bool{false, true} {
+		req := varied(40<<10, binary)
+		cases := []struct {
+			name  string
+			mock  *models.Mock
+			reads [][][]byte
+		}{
+			{"recorded whole by the old read loop", recordedAs("old", req), [][][]byte{
+				splitAt(req, chunk), splitAt(req, 16<<10), splitAt(req, 1000, chunk+1000), {req},
+			}},
+			{"recorded in the relay's pieces", recordedAs("v2", req[:chunk], req[chunk:]), [][][]byte{
+				splitAt(req, chunk), splitAt(req, 16<<10), splitAt(req, 16<<10, chunk), {req},
+			}},
+			{"recorded in three pieces", recordedAs("v2-3", req[:1000], req[1000:chunk], req[chunk:]), [][][]byte{
+				splitAt(req, chunk), splitAt(req, 16<<10), {req},
+			}},
+		}
+		for _, c := range cases {
+			for _, reads := range c.reads {
+				if got := findExactMatch([]*models.Mock{c.mock}, reads); got != 0 {
+					t.Errorf("binary=%v, %s, read in %d pieces: findExactMatch = %d, want 0", binary, c.name, len(reads), got)
+				}
+			}
+			// Other bytes are no match: one changed byte in the last piece,
+			// a byte more, a byte less.
+			changed := append([]byte(nil), req...)
+			changed[len(changed)-2] ^= 1
+			for what, other := range map[string][]byte{
+				"a changed byte": changed,
+				"a byte more":    append(append([]byte(nil), req...), 'z'),
+				"a byte less":    req[:len(req)-1],
+			} {
+				if got := findExactMatch([]*models.Mock{c.mock}, splitAt(other, chunk)); got != -1 {
+					t.Errorf("binary=%v, %s, %s: findExactMatch = %d, want -1", binary, c.name, what, got)
+				}
+			}
+		}
+	}
+}
+
+// A request that differs a little from an old recording longer than one read
+// is still compared with it for a similarity, as the old read loop would have
+// read it: a 32 KiB read is joined with the reads after it, up to the first
+// shorter one. A request in pieces no full read joins is compared with no
+// recording of another number of pieces, as before.
+func TestASimilarRequestIsComparedWithAnOldRecordingAsTheOldLoopReadIt(t *testing.T) {
+	req := varied(40<<10, true)
+	old := recordedAs("old", req)
+	near := append([]byte(nil), req...)
+	near[100] ^= 1
+	if got := findBinaryMatch([]*models.Mock{old}, splitAt(near, 32<<10), 0.9); got != 0 {
+		t.Fatalf("a near request read as 32 KiB and 8 KiB: findBinaryMatch = %d, want 0", got)
+	}
+	if got := findBinaryMatch([]*models.Mock{old}, splitAt(near, 16<<10), 0.9); got != -1 {
+		t.Fatalf("a request in two pieces no full read joins was compared with a one-piece recording: %d", got)
+	}
+	store := eofStore{mocks: []*models.Mock{exchange("ping", "PING"), old}}
+	if r := buildGenericMismatchReport(context.Background(), splitAt(near, 32<<10), store, nil); r.ClosestMock != "old" {
+		t.Fatalf("the miss report's closest is %q, want old", r.ClosestMock)
+	}
+}
+
+// The replay reads with the size the relay that records reads with, so a
+// recording's pieces are the replay's reads for a similarity, which compares
+// them piece by piece.
+func TestTheReplayReadsWithTheRecordersReadSize(t *testing.T) {
+	if pUtil.ReadChunkSize != relay.DefaultForwardBuf {
+		t.Fatalf("ReadChunkSize %d, relay.DefaultForwardBuf %d", pUtil.ReadChunkSize, relay.DefaultForwardBuf)
 	}
 }

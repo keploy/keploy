@@ -9,6 +9,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/containerkey"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 )
 
@@ -103,37 +104,51 @@ func TestDestinationKey_NamesWhatADefaultPortHeld(t *testing.T) {
 }
 
 // The on-disk store keeps the first mock it holds of each recorded
-// destination, in recorded order.
+// destination, in recorded order, with the switch on or off: two destinations
+// on one port (b shares a's 6033) are both kept. Under the switch it also
+// keeps the first mock of each port reached (reachedPortKey), which adds the
+// mock of no known destination and none of the others: a-first is 6033's.
 func TestLoadDestinations_KeepsTheFirstMockOfEachDestination(t *testing.T) {
-	s, err := NewDiskMocks(zap.NewNop())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
-	at := func(name, addr string, sec int64) *models.Mock {
-		m := perTestMockAt(name, sec)
-		m.Kind = models.MySQL
-		m.Spec.Metadata = map[string]string{"destAddr": addr}
-		return m
-	}
-	for _, m := range []*models.Mock{
-		at("a-late", "10.0.0.1:6033", 30), at("a-first", "10.0.0.1:6033", 10),
-		at("b", "10.0.0.2:6033", 20), perTestMockAt("no-address", 5),
+	for _, c := range []struct {
+		on   string
+		want []string
+	}{
+		{"0", []string{"a-first", "b"}},
+		{"1", []string{"no-address", "a-first", "b"}},
 	} {
-		if err := s.Add(m); err != nil {
-			t.Fatal(err)
-		}
-	}
-	got, err := s.LoadDestinations()
-	if err != nil {
-		t.Fatal(err)
-	}
-	var out []string
-	for _, m := range got {
-		out = append(out, m.Name)
-	}
-	if want := []string{"a-first", "b"}; !reflect.DeepEqual(out, want) {
-		t.Fatalf("destinations %v; want the first mock of each, in recorded order: %v", out, want)
+		t.Run("KEPLOY_PROVEN="+c.on, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, c.on)
+			s, err := NewDiskMocks(zap.NewNop())
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = s.Close() })
+			at := func(name, addr string, sec int64) *models.Mock {
+				m := perTestMockAt(name, sec)
+				m.Kind = models.MySQL
+				m.Spec.Metadata = map[string]string{"destAddr": addr}
+				return m
+			}
+			for _, m := range []*models.Mock{
+				at("a-late", "10.0.0.1:6033", 30), at("a-first", "10.0.0.1:6033", 10),
+				at("b", "10.0.0.2:6033", 20), perTestMockAt("no-address", 5),
+			} {
+				if err := s.Add(m); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got, err := s.LoadDestinations()
+			if err != nil {
+				t.Fatal(err)
+			}
+			var out []string
+			for _, m := range got {
+				out = append(out, m.Name)
+			}
+			if !reflect.DeepEqual(out, c.want) {
+				t.Fatalf("destinations %v; want the first mock of each, in recorded order: %v", out, c.want)
+			}
+		})
 	}
 }
 

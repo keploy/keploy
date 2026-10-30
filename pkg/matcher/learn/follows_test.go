@@ -236,9 +236,14 @@ func eRows(rows []models.PostgresV3Cells) Raw {
 }
 
 // jobsServed is eJobs(id, n) served by F as the 6th serve, after eStartup's,
-// changed, with F's view of it (live; the zero Raw: none).
+// with F's view of it (live; the zero Raw: an adapter that states no view,
+// which never calls ServedLive).
 func jobsServed(id, n string, live Raw) []Raw {
-	return append(eStartup(), eJobs(id, n).ServedAs(6).ServedLive(live))
+	x := eJobs(id, n).ServedAs(6)
+	if live.mock != "" {
+		x = x.ServedLive(live)
+	}
+	return append(eStartup(), x)
 }
 
 // A word of the value at a place F gave the application another value at
@@ -268,8 +273,6 @@ func TestAWordAtAPlaceTheFullRoundGaveAnotherValueAtIsNoCopyWhereTheValueTookNon
 			{Side: Request, Leaf: Leaf{Path: "body.cmd.documents.0._id", Type: String, Value: rec}, Live: live},
 		}}}
 	}
-	notServed := append(eStartup(), eJobs(chanceSrcRec, "5").ServedLive(eJobs(chanceSrcLive, "6")))
-	unserved := append(eStartup(), eJobs(chanceSrcRec, "5").ServedAs(6).ServedLive(eJobs(chanceSrcLive, "6")).WithServed(false))
 	for _, tc := range []struct {
 		name           string
 		recorded, live string
@@ -285,8 +288,6 @@ func TestAWordAtAPlaceTheFullRoundGaveAnotherValueAtIsNoCopyWhereTheValueTookNon
 		{"payload, F's view holds the value F saw", chanceValRec, chanceValLive, nil, jobsServed(chanceSrcRec, "5", eJobs(chanceSrcLive, chanceValLive)), KindVariable, "", "mock-6"},
 		{"payload, F's view lacks the field", chanceValRec, chanceValLive, nil, jobsServed(chanceSrcRec, "5", ePg("mock-6", 100*time.Millisecond, "SELECT id, n FROM jobs", nil, "SELECT 0")), KindVariable, "", "mock-6"},
 		{"payload, served changed with no view", chanceValRec, chanceValLive, nil, jobsServed(chanceSrcRec, "5", Raw{}), KindVariable, "", "mock-6"},
-		{"payload, not served, a view handed anyway", chanceValRec, chanceValLive, nil, notServed, KindVariable, "", "mock-6"},
-		{"payload, a view dropped as not served", chanceValRec, chanceValLive, nil, unserved, KindVariable, "", "mock-6"},
 		// The value whole at a field F gave another value at: a whole value
 		// is followed (sources), as at a leaf.
 		{"payload, F's view, the recorded value whole there", chanceSrcRec, chanceValLive, nil, jobsServed(chanceSrcRec, "5", eJobs(chanceSrcLive, "6")), KindVariable, "", "mock-6"},
@@ -308,7 +309,10 @@ func TestAWordAtAPlaceTheFullRoundGaveAnotherValueAtIsNoCopyWhereTheValueTookNon
 		{"payload, F's view gave the word the value took at two columns", "k-48d1", "k-6c7d", nil, append(eStartup(), eRow("48d1", "6c7d", "aaaa").ServedAs(6).ServedLive(eRow("9999", "6c7d", "6c7d"))), KindUnaccounted, "record's full round gave the application that word at spec.postgresV3.query.response.rows[0][2]" + other, ""},
 		{"payload, F's view gave the word the value took at a column besides the one both gave it at", "k-zzzz", "k-6c7d", nil, append(eStartup(), eRow("qqqq", "6c7d", "aaaa").ServedAs(6).ServedLive(eRow("qqqq", "6c7d", "6c7d"))), KindUnaccounted, "record's full round gave the application that word at spec.postgresV3.query.response.rows[0][2]" + other, ""},
 		{"payload, F's view grew a row holding the word the value took", "k-48d1", "k-6c7d", nil, append(eStartup(), eRows([]models.PostgresV3Cells{{{Value: "48d1"}, {Value: "6c7d"}}}).ServedAs(6).ServedLive(eRows([]models.PostgresV3Cells{{{Value: "9999"}, {Value: "6c7d"}}, {{Value: "6c7d"}, {Value: "1"}}}))), KindUnaccounted, "record's full round gave the application that word at spec.postgresV3.query.response.rows[1][0]" + other, ""},
-		// A view of another mock is no view of this one.
+		// A view of another mock is no view of this one: one keploy could
+		// not read (ServedLive), so a word only F's serve may have given is
+		// refused; a value copied where the recording gave it is still bound
+		// there, checked at replay.
 		{"payload, a view of another mock", chanceValRec, chanceCopy, nil, jobsServed(chanceSrcRec, "5", ePg("mock-7", 100*time.Millisecond, "SELECT name FROM users", []models.PostgresV3Cells{{{Value: "zzzz"}, {Value: "5"}}}, "SELECT 1")), KindVariable, "", "mock-6"},
 		// F gave 48d1's place a longer word that holds what the value took.
 		{"payload, F's view, the value took a part of a longer word F gave", "k-48d1", "k-6c7d", nil, append(eStartup(), eRow("48d1 aaaa", "x", "y").ServedAs(6).ServedLive(eRow("6c7daaaa", "x", "y"))), KindVariable, "", "mock-6"},
@@ -978,17 +982,17 @@ func TestAStartUpWordTheConnectionsDifferInIsRefusedWhateverItsField(t *testing.
 func TestAStartUpMatchInNoOneFieldIsReadAsASwapsWord(t *testing.T) {
 	a, b := RawOf(eLaneSession("mock-hs-81", 900*time.Millisecond, 81), false), RawOf(eLaneSession("mock-hs-82", 850*time.Millisecond, 82), false)
 	raw := []Raw{a, b}
-	if !a.swapHolds(a.text, raw, func(string) bool { return false }) {
+	if !a.swapHolds(a.payload().text, raw, func(string) bool { return false }) {
 		t.Error("a start-up's match in no one field is not read as a swap's word; want refused")
 	}
-	if a.swapHolds(a.text, raw, func(own string) bool { return own == "UTF8" }) {
+	if a.swapHolds(a.payload().text, raw, func(own string) bool { return own == "UTF8" }) {
 		t.Error("a start-up's match in a field every start-up carries alike is read as a swap's word")
 	}
-	if !a.swapHolds(a.text, raw, func(own string) bool { return own == "81" }) {
+	if !a.swapHolds(a.payload().text, raw, func(own string) bool { return own == "81" }) {
 		t.Error("a start-up's backend pid is not read as a swap's word")
 	}
 	other := RawOf(&models.Mock{Name: "mock-q", Kind: models.HTTP, Spec: models.MockSpec{HTTPReq: &models.HTTPReq{Method: "GET", URL: "http://deps.example/a"}}}, false)
-	if other.swapHolds(other.text, raw, func(string) bool { return false }) {
+	if other.swapHolds(other.payload().text, raw, func(string) bool { return false }) {
 		t.Error("a recording that is no start-up is read as one")
 	}
 }

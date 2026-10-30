@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -48,9 +49,43 @@ import (
 // Telling the two apart takes where the value came from, not its shape.
 const maxDecodeLevels = 4
 
-// b64Run is a run of the base64 alphabets, standard or URL-safe, with its
-// padding (base32's too: up to six '=').
-var b64Run = regexp.MustCompile(`[A-Za-z0-9+/_-]+={0,6}`)
+// nextB64Run is the first run of the base64 alphabets in s at or after
+// from, standard or URL-safe, with its padding (base32's too: up to six
+// '='), as s[start:end]; ok is false where s has none there. It reads each
+// byte it passes once, and the runs it gives one after another, each from
+// the last one's end, are what the pattern [A-Za-z0-9+/_-]+={0,6} finds in
+// s, leftmost first and none overlapping: a staging reads every payload's
+// runs, and a regexp scan of them was about a sixth of its CPU.
+func nextB64Run(s string, from int) (start, end int, ok bool) {
+	i := from
+	for i < len(s) && !isB64Byte(s[i]) {
+		i++
+	}
+	if i >= len(s) {
+		return 0, 0, false
+	}
+	start = i
+	for i < len(s) && isB64Byte(s[i]) {
+		i++
+	}
+	for pad := 0; pad < 6 && i < len(s) && s[i] == '='; pad++ {
+		i++
+	}
+	return start, i, true
+}
+
+// isB64Run says whether s is one run of the base64 alphabets whole, with
+// its padding (nextB64Run).
+func isB64Run(s string) bool {
+	start, end, ok := nextB64Run(s, 0)
+	return ok && start == 0 && end == len(s)
+}
+
+// isB64Byte says whether c is of the base64 alphabets, standard or
+// URL-safe.
+func isB64Byte(c byte) bool {
+	return c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '+' || c == '/' || c == '_' || c == '-'
+}
 
 // b64Text is the text the encoded runs of s decode to, each on a line of
 // its own, decoded again while that finds more, up to maxDecodeLevels
@@ -126,7 +161,8 @@ func b64Text(s string, clock map[string]bool) string {
 				texts = append(texts, j)
 			}
 			for ti, tx := range texts {
-				for _, ix := range b64Run.FindAllStringIndex(tx, -1) {
+				for st, en, ok := nextB64Run(tx, 0); ok; st, en, ok = nextB64Run(tx, en) {
+					ix := [2]int{st, en}
 					if tryRun(tx[ix[0]:ix[1]]) || ti == 0 {
 						continue
 					}
@@ -155,7 +191,7 @@ func b64Text(s string, clock map[string]bool) string {
 					}
 				}
 				for _, part := range strings.FieldsFunc(tx, func(r rune) bool { return r == '.' }) {
-					if b64Run.FindString(part) == part {
+					if isB64Run(part) {
 						try(part)
 					}
 				}
@@ -657,8 +693,8 @@ func unparsed(rec, live string, clock clockSet) string {
 // b64Runs are the runs of the base64 alphabets in s, with their padding.
 func b64Runs(s string) map[string]bool {
 	out := map[string]bool{}
-	for _, r := range b64Run.FindAllString(s, -1) {
-		out[r] = true
+	for st, en, ok := nextB64Run(s, 0); ok; st, en, ok = nextB64Run(s, en) {
+		out[s[st:en]] = true
 	}
 	return out
 }
@@ -714,28 +750,70 @@ func allIn(ws, set map[string]bool) bool {
 
 // textForms are the declared forms of one text (a payload): as recorded,
 // decoded, case-folded, and its base64 runs' text.
-func textForms(text string) []string {
-	out := []string{text}
+func textForms(text string) []string { return decodeForms(text).formsOf(text) }
+
+// decoded are what textForms decodes of a text, each a scan of its own
+// (unescaped, qpForm, b64Text: the learn step's dearest reads of a
+// payload): its escapes read (dec, where they change it: hasDec), its
+// quoted-printable form (q, where it is not dec: hasQ) and its encoded
+// runs' text (b). Its other forms are their case-foldings, a pass over each
+// that reads no pattern (formsOf). A set keeps a payload's (decodedOf), so
+// each is decoded once for the set, not once per call.
+type decoded struct {
+	dec, q, b    string
+	hasDec, hasQ bool
+}
+
+// decodeForms decodes text's forms (decoded).
+var decodeForms = func(text string) decoded {
+	var d decoded
 	dec := unescaped(text)
 	if dec != text {
+		d.dec, d.hasDec = dec, true
+	}
+	if q := qpForm(text); q != dec {
+		d.q, d.hasQ = q, true
+	}
+	d.b = b64Text(dec, nil)
+	return d
+}
+
+// formsOf are textForms(text) of the text d decodes.
+func (d decoded) formsOf(text string) []string {
+	out := []string{text}
+	dec := text
+	if d.hasDec {
+		dec = d.dec
 		out = append(out, dec)
 	}
 	if low := strings.ToLower(dec); low != dec {
 		out = append(out, low)
 	}
-	if q := qpForm(text); q != dec {
-		out = append(out, q)
-		if low := strings.ToLower(q); low != q {
+	if d.hasQ {
+		out = append(out, d.q)
+		if low := strings.ToLower(d.q); low != d.q {
 			out = append(out, low)
 		}
 	}
-	if b := b64Text(dec, nil); b != "" {
-		out = append(out, b)
-		if low := strings.ToLower(b); low != b {
+	if d.b != "" {
+		out = append(out, d.b)
+		if low := strings.ToLower(d.b); low != d.b {
 			out = append(out, low)
 		}
 	}
 	return out
+}
+
+// extraOf is extraOf of the text d decodes.
+func (d decoded) extraOf(text string) string { return strings.Join(d.formsOf(text)[1:], "\n") }
+
+// size is about the bytes d holds.
+func (d decoded) size() int64 { return headerBytes + int64(len(d.dec)+len(d.q)+len(d.b)) }
+
+// clone is d, each text a copy, holding no part of the text it decodes.
+func (d decoded) clone() decoded {
+	d.dec, d.q, d.b = strings.Clone(d.dec), strings.Clone(d.q), strings.Clone(d.b)
+	return d
 }
 
 // nonASCIIRuns are the stretches of s beyond ASCII, in order: text of a
@@ -793,6 +871,7 @@ func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, 
 	}
 	keep := dc.stampsEchoed(v, served, raw)
 	word := v.wordOf
+	held := dc.wordsHeld(v, keep, raw)
 	return v.eachChanged(func(i int, t string, recorded bool) string {
 		for _, e := range served {
 			// The run's exchange (Earlier.Run) is an earlier place of every
@@ -834,13 +913,13 @@ func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, 
 				}
 			}
 		}
-		for _, x := range raw {
+		for j, x := range raw {
 			if !x.earlierThan(at) {
 				continue
 			}
 			// A protocol-phase answer's own clock reads blanked
 			// (instants.go, rule 2).
-			if dc.searchedTokens(x, keep)[i][t] {
+			if held.of(j).raw[changedWord{i, t}] && !insideAnotherID(v, x, dc.searched(x, keep), t, recorded) {
 				note := x.atNote(at)
 				place := x.mock + "'s payload"
 				if f, _ := dc.fieldOf(x, dc.searched(x, keep), t); f != "" {
@@ -861,7 +940,7 @@ func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, 
 			// fields where the recording gave another value, which the
 			// recorded value took none of the words of, is let go
 			// (follows.excusedLive).
-			if !recorded && x.Live() && dc.searchedTokens(*x.live, keep)[i][t] {
+			if !recorded && x.Live() && held.of(j).live[changedWord{i, t}] {
 				place := x.mock + "'s payload, as record's full round gave it"
 				if f, _ := dc.fieldOf(*x.live, dc.searched(*x.live, keep), t); f != "" {
 					place = x.mock + " at " + f + ", as record's full round gave it"
@@ -872,9 +951,48 @@ func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, 
 				}
 				return why
 			}
+			// A word the value holds now, where F served x changed in ways
+			// keploy keeps no one view of (ServedChanged): one that stands
+			// in a view of a serve of it, and not in what the recording gave
+			// there, or any word where a serve's view could not be read. F
+			// may have given it there, and keploy cannot tell which view the
+			// application read: no rule lets it go. So is any word where F
+			// served x and its adapter stated no view of it (viewUnstated):
+			// keploy cannot tell what F gave the application there either.
+			if !recorded && (x.unseen || x.viewUnstated()) {
+				if why := unseenWhy(dc, x, held.of(j).unseen[changedWord{i, t}], keep, word(t, recorded), t, at); why != "" {
+					return why + "; " + notClock(v) + ". " + correction(x.mock, false)
+				}
+			}
 		}
 		return ""
 	})
+}
+
+// unseenWhy says where a word t the value holds now (named), which F may
+// have given the application in x, a recording it served changed in ways
+// keploy keeps no one view of (Raw.ServedChanged), stands: in a view of
+// one of its serves (held), or, where a serve's view could not be read, or
+// x's adapter stated none (Raw.viewUnstated), in what F gave there unread.
+// "" where neither: every view was read, and none holds the word.
+func unseenWhy(dc *DriftCache, x Raw, held, keep bool, named, t string, at time.Time) string {
+	if x.viewUnstated() {
+		return named + " may stand in " + x.mock + x.atNote(at) + ", an earlier recording record's full round served, where its adapter did not say what it gave the application there: keploy cannot tell whether it came from there"
+	}
+	if len(x.views) == 0 {
+		return named + " may stand in " + x.mock + x.atNote(at) + ", an earlier recording record's full round served changed, where keploy could not read what it gave the application: keploy cannot tell whether it came from there"
+	}
+	if !held {
+		return ""
+	}
+	place := x.mock + "'s payload"
+	for _, view := range x.views {
+		if f, _ := dc.fieldOf(*view, dc.searched(*view, keep), t); f != "" {
+			place = x.mock + " at " + f
+			break
+		}
+	}
+	return named + " appears in an earlier recording, in " + place + x.atNote(at) + ", as record's full round gave it in one of " + strconv.Itoa(len(x.views)) + " serves that gave the application different views of it, where the recording did not give the application that word: keploy cannot tell which of them the application read, nor whether it came from there"
 }
 
 // givenWhy says why a drifted value (v) that no earlier place of the call's
@@ -921,6 +1039,23 @@ func givenWhy(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, raw
 					continue
 				}
 				return why
+			}
+		}
+		// A word the value holds now that F may have given the application
+		// at one of them and the recording did not (servedWhy): no rule
+		// lets it go. Read after every recording's own words, so that a
+		// word found where the recording gave it is named there; one that
+		// reached here past a recording holding it was let go there by the
+		// rule a copy follows its source, which reads F's view of it too
+		// (follows.excusedGiven), as a place of the call's own test lets it
+		// go past that view (unaccounted). The first loop read keep for
+		// every word the value holds now, wherever there is a recording.
+		if recorded {
+			return ""
+		}
+		for _, g := range op.words {
+			if why := g.servedWhy(i, t, v.wordOf(t, recorded), givenWhose(g.at, at, g.late, g.noTime), keep); why != "" {
+				return why + "; " + notClock(v) + ". " + correction(g.mock, false)
 			}
 		}
 		return ""
@@ -971,6 +1106,84 @@ func (v *valueDrift) wordOf(t string, recorded bool) string {
 // (clockWord). Each set of words is handed in the order its words stand in
 // the value (inOrder), never in a set's: the first one found names the
 // place and the reason.
+// changedWord is a word of what changed (eachChanged): its reading and its
+// text.
+type changedWord struct {
+	i int
+	t string
+}
+
+// heldWords are which of a value's changed words each earlier payload
+// holds (searchedTokens), by the payload's index, each payload's read once,
+// where unaccounted first asks of it.
+type heldWords struct {
+	of func(j int) wordsIn
+}
+
+// wordsIn are the changed words a payload holds, as recorded (raw), as F
+// gave it (live: its ServedLive view), and as any of the views F's serves
+// of it gave where they differ (unseen: its ServedChanged views).
+type wordsIn struct{ raw, live, unseen map[changedWord]bool }
+
+// wordsHeld are which of v's changed words each of raw holds, searched as
+// keep says (stampsEchoed). Each payload's words are read once for the
+// value, not once for each of its changed words: the set keeps them within
+// a budget (setDerived), and a payload let go would be read again at each
+// word of each reading, its cost per call growing with the value's words.
+func (dc *DriftCache) wordsHeld(v *valueDrift, keep bool, raw []Raw) heldWords {
+	var words []changedWord
+	seen := map[changedWord]bool{}
+	v.eachChanged(func(i int, t string, _ bool) string {
+		if w := (changedWord{i, t}); !seen[w] {
+			seen[w] = true
+			words = append(words, w)
+		}
+		return ""
+	})
+	in := func(toks []map[string]bool) map[changedWord]bool {
+		out := map[changedWord]bool{}
+		for _, w := range words {
+			if toks[w.i][w.t] {
+				out[w] = true
+			}
+		}
+		return out
+	}
+	// A recording whose filter of words, kept for the set, holds no run of
+	// letters and digits of any changed word (mayHoldWords) holds none of
+	// them: its words are not read. A set's words are more than its budget
+	// keeps (api-server's round: 14 813 recordings, 335 MB of payloads), and
+	// each call read every earlier recording's words anew, holding them
+	// while it read.
+	runs := make([][]string, len(words))
+	for k, w := range words {
+		runs[k] = wordsBy(w.t, isWord)
+	}
+	read := make([]*wordsIn, len(raw))
+	return heldWords{of: func(j int) wordsIn {
+		if read[j] == nil {
+			x := raw[j]
+			var h wordsIn
+			if dc.mayHoldWords(x, keep, runs) {
+				h.raw = in(dc.searchedTokens(x, keep))
+			}
+			if x.Live() {
+				h.live = in(dc.searchedTokens(*x.live, keep))
+			}
+			if len(x.views) > 0 {
+				h.unseen = map[changedWord]bool{}
+				for _, view := range x.views {
+					for w := range in(dc.searchedTokens(*view, keep)) {
+						h.unseen[w] = true
+					}
+				}
+			}
+			read[j] = &h
+		}
+		return *read[j]
+	}}
+}
+
 func (v *valueDrift) eachChanged(find func(i int, t string, recorded bool) string) string {
 	for i := range readings {
 		for _, set := range []struct {

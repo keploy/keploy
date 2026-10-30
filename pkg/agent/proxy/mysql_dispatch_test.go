@@ -448,10 +448,10 @@ func TestMySQLProbeBranchHonoursTheKillSwitch(t *testing.T) {
 // dispatching and only inspects the parser, so it cannot tell a working
 // passthrough from a dropped connection — replacing the relay with a bare
 // `return nil` keeps it green. That gap hid a real defect: the gate first
-// routed through globalPassThrough, which never calls CloseWrite and returns
-// on io.EOF, so a client doing shutdown(SHUT_WR) — the end-of-request signal
-// for every EOF-delimited exchange — had its connection torn down instead of
-// receiving the reply. relayDeclinedConn documents exactly this and uses
+// routed through globalPassThrough, which then never called CloseWrite and
+// returned on io.EOF, so a client doing shutdown(SHUT_WR) — the
+// end-of-request signal for every EOF-delimited exchange — had its connection
+// torn down instead of receiving the reply. relayDeclinedConn documents exactly this and uses
 // util.RelayRawPassthrough; the gate now does too.
 //
 // This matters here specifically because probeMysql's fast path admits by PORT
@@ -542,8 +542,8 @@ func TestMySQLProbeKillSwitchRelaysAndHonoursHalfClose(t *testing.T) {
 	n, _ := appConn.Read(buf)
 	if got := string(buf[:n]); got != "SERVER-REPLY" {
 		t.Fatalf("app half-closed its write side and read back %q, want %q — the kill "+
-			"switch must relay the connection, not end it. globalPassThrough returns on "+
-			"io.EOF without forwarding the FIN or the reply; use util.RelayRawPassthrough", got, "SERVER-REPLY")
+			"switch must relay the connection, not end it: the relay must forward the "+
+			"FIN and the reply", got, "SERVER-REPLY")
 	}
 	if called, _, _ := parser.snapshot(); called {
 		t.Error("the parser was invoked with the kill switch tripped")

@@ -16,7 +16,7 @@ import (
 // it. The decoder hands it to the learn step as an Instant leaf
 // (InstantLeaf), and ClassifyIn compares it as one instant
 // (classifyInstant), never word by word: a minute of it is no word an
-// unrelated recording can hold (a Mongo reply's requestId of 40, a version
+// unrelated recording can hold (a count of 40 in a Mongo reply, a version
 // in an SDK's User-Agent, SQS's API version 2012-11-05). Only a decoder's
 // type makes a leaf an instant. A string that reads as a date stays a
 // String, read word by word: no text's shape decides anything. Where the
@@ -1445,12 +1445,13 @@ func (dc *DriftCache) instantEchoFrom(r Leaf, echoed []echoMatch, at time.Time, 
 		if !x.earlierThan(at) {
 			continue
 		}
-		for _, f := range x.fields {
-			if !f.key && dc.holdsRecorded(x.text[f.start:f.end], echoed) {
+		xb := x.payload()
+		for _, f := range xb.fields {
+			if !f.key && dc.holdsRecorded(xb.text[f.start:f.end], echoed) {
 				return Place{Mock: x.mock, Field: f.describe(), Echo: true, unserved: !x.served}, true
 			}
 		}
-		if dc.holdsRecorded(x.text, echoed) || dc.holdsRecorded(dc.rawExtra(x.text), echoed) {
+		if dc.holdsRecorded(xb.text, echoed) || dc.holdsRecorded(dc.rawExtra(xb.text), echoed) {
 			return Place{Mock: x.mock, Echo: true, unserved: !x.served}, true
 		}
 	}
@@ -1503,7 +1504,7 @@ func (dc *DriftCache) instantLeafFrom(r Leaf, rec moment, served []Earlier) (Pla
 // (copiedInBoth).
 func (dc *DriftCache) instantRawFrom(r Leaf, rec, live moment, at time.Time, raw []Raw) (Place, bool) {
 	for _, x := range raw {
-		if !x.earlierThan(at) {
+		if !x.earlierThan(at) || !dc.mayHoldInstant(x, rec) {
 			continue
 		}
 		texts := dc.searched(x, false)
@@ -1512,7 +1513,7 @@ func (dc *DriftCache) instantRawFrom(r Leaf, rec, live moment, at time.Time, raw
 		}
 		field, given, found := "", false, false
 		in := func(own string) bool { return dc.holdsExact(own, live) }
-		for _, f := range x.fields {
+		for _, f := range x.payload().fields {
 			if f.key || f.end > len(texts[0]) {
 				continue
 			}
