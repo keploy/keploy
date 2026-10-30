@@ -80,8 +80,16 @@ var sanitizedDroppedFields = map[string]string{
 	// off this list, with a row.
 	"DestinationScope": "not kept in evidence: keploy test's report carries it from the agent's miss",
 	"CandidateCount":   "not kept in evidence: keploy test's report carries it from the agent's miss",
-	"BeforeSet":        "not kept in evidence: keploy test reads it off the agent's miss (Kind says MissOutsideTest in both)",
-	"BackgroundWhy":    "not kept in evidence: keploy test's replay writes it",
+	// BeforeSet's two readers take it off the agent's own miss (its read
+	// of a test's misses, GetMockErrors, as keploy test's replay gets it),
+	// never off evidence: keploy test's replay (replay/before_set_calls.go,
+	// setsCall) and enterprise's bake (proven.MovedOf, fed only keploy
+	// record's replay results: its TestHooks' results, SetCalls and
+	// SetAnswers). What reads evidence (keploy mock's receipt; enterprise's
+	// mock judging: umjudge, umproven, unmocked) never reads it, and where
+	// a call was made it reads off Kind (UnmatchedCall.MadeInTest).
+	"BeforeSet":     "not kept in evidence: its readers take it off the agent's miss, and evidence's readers read Kind (MissOutsideTest in both)",
+	"BackgroundWhy": "not kept in evidence: keploy test's replay writes it",
 }
 
 // fillMissFields sets every field of the struct v to a value other than

@@ -1,6 +1,7 @@
 package integrations
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -120,5 +121,38 @@ func TestASeriesMissShowsNothingOfTheOpenViewsClosest(t *testing.T) {
 	}
 	if r.Protocol != "HTTP" || r.ActualSummary != "GET /internal/claims/next" || r.ReceivedReq != "GET /internal/claims/next?since=1793000470" {
 		t.Fatalf("the series' miss lost what it says of the call: %+v", r)
+	}
+}
+
+// A miss of a test's own series (SeriesMiss.Owner) is that test's own miss:
+// a call of its own job that nothing answers in its own window is never
+// passed off as the set's background work.
+func TestAnOwnSeriesMissIsItsOwnersNotTheBackgrounds(t *testing.T) {
+	r := &models.MockMismatchReport{Protocol: "Mongo", ClosestMock: "mock-own"}
+	(&SeriesMiss{NextSteps: "its reads of the clock do not hold on this run's clock", Newest: &models.Mock{Name: "mock-beat-8"}, Owner: "T1"}).Mark(r)
+	if r.Background || r.ClosestMock != "mock-beat-8" || r.NextSteps != "its reads of the clock do not hold on this run's clock" {
+		t.Fatalf("the own series' miss is background %v, closest %q, next steps %q; want T1's own miss naming mock-beat-8", r.Background, r.ClosestMock, r.NextSteps)
+	}
+}
+
+// OwnedBy hands a call made in a test's window the series marked set-wide
+// and that test's own series, never another test's own series; between
+// tests ("") it hands no test's own series.
+func TestOwnedByLeavesOutOtherTestsOwnSeries(t *testing.T) {
+	all := []MarkedSeries{{Owner: ""}, {Owner: "T1"}, {Owner: "T2"}}
+	owners := func(s []MarkedSeries) string {
+		out := []string{}
+		for _, m := range s {
+			out = append(out, "<"+m.Owner+">")
+		}
+		return strings.Join(out, ",")
+	}
+	for test, want := range map[string]string{"T1": "<>,<T1>", "T2": "<>,<T2>", "": "<>", "T3": "<>"} {
+		if got := owners(OwnedBy(all, test)); got != want {
+			t.Fatalf("OwnedBy(%q) = %s; want %s", test, got, want)
+		}
+	}
+	if got := OwnedBy(all[:1], "T1"); &got[0] != &all[0] {
+		t.Fatalf("OwnedBy copied a list it leaves nothing out of")
 	}
 }

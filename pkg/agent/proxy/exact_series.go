@@ -61,6 +61,11 @@ type setSeriesRead struct {
 	err     error
 	marked  map[string]bool
 	series  map[string]bool // marked as a series' recording on some list (models.IsBackgroundSeries)
+	// own is, for a recording marked as a test's own series' on a list
+	// (models.IsBackgroundOwnSeries), that test; "" when another list
+	// marks it too (another test's own series, or any other mark): it then
+	// owns no series (seriesOf), failing closed.
+	own map[string]string
 
 	mu     sync.Mutex
 	byKind map[models.Kind][]integrations.MarkedSeries // the first call's known, per kind
@@ -126,13 +131,29 @@ func (m *MockManager) seriesReadLocked() *setSeriesRead {
 		c.read.stop.Store(true)
 	}
 	r := &setSeriesRead{key: key, done: make(chan struct{}), marked: map[string]bool{}, series: map[string]bool{},
-		byKind: map[models.Kind][]integrations.MarkedSeries{}, once: map[string]bool{}}
-	for _, byName := range *marks {
+		own: map[string]string{}, byKind: map[models.Kind][]integrations.MarkedSeries{}, once: map[string]bool{}}
+	plain := map[string]bool{}
+	for test, byName := range *marks {
 		for name, why := range byName {
 			r.marked[name] = true
-			if models.IsBackgroundSeries(why) {
+			switch {
+			case models.IsBackgroundOwnSeries(why):
+				if owner, seen := r.own[name]; seen && owner != test {
+					r.own[name] = ""
+				} else if !seen {
+					r.own[name] = test
+				}
+			case models.IsBackgroundSeries(why):
 				r.series[name] = true
+				plain[name] = true
+			default:
+				plain[name] = true
 			}
+		}
+	}
+	for name := range r.own {
+		if plain[name] {
+			r.own[name] = ""
 		}
 	}
 	c.read = r
@@ -172,11 +193,17 @@ func (m *MockManager) readSetSeries(r *setSeriesRead) {
 // recordings were read as it was staged (beginMarkedSeries); a call that
 // comes while they are still being read waits for them, or for ctx. known is
 // the first call's of kind in a staging (MarkedSeriesReader).
+//
+// A test's own series (integrations.MarkedSeries.Owner) is handed only while
+// its test's window is open as the call asks: in another test's window, or
+// between tests, its call is compared as any other.
 func (m *MockManager) MarkedSeries(ctx context.Context, kind models.Kind, known learn.Known) ([]integrations.MarkedSeries, error) {
-	if m.exactView() == nil {
+	v := m.exactView()
+	if v == nil {
 		return nil, nil
 	}
-	return m.seriesFrom(ctx, m.currentSeriesRead(), kind, known)
+	s, err := m.seriesFrom(ctx, m.currentSeriesRead(), kind, known)
+	return integrations.OwnedBy(s, v.test), err
 }
 
 // currentSeriesRead is the read of the staged set's series for what is
@@ -223,6 +250,7 @@ func (r *setSeriesRead) seriesOf(kind models.Kind, known learn.Known) []integrat
 	for _, s := range set.Series {
 		recs := make([]*models.Mock, 0, len(s.Members))
 		anyMarked, again := false, false
+		owner, owned, mixed := "", 0, false
 		for _, i := range s.Members {
 			mk := set.Mocks[i]
 			if !r.background(mk) {
@@ -231,10 +259,26 @@ func (r *setSeriesRead) seriesOf(kind models.Kind, known learn.Known) []integrat
 			}
 			anyMarked = anyMarked || r.marked[mk.Name]
 			again = again || r.series[mk.Name]
+			if o, ok := r.own[mk.Name]; ok {
+				if owned == 0 {
+					owner = o
+				}
+				mixed = mixed || o != owner
+				owned++
+			}
 			recs = append(recs, mk)
 		}
-		if len(recs) > 0 && anyMarked {
+		switch {
+		case len(recs) == 0 || !anyMarked:
+		case owned == 0:
 			out = append(out, integrations.MarkedSeries{Series: s, Recordings: recs, Again: again, Once: r.answerOnce})
+		case owned == len(recs) && !mixed && owner != "":
+			// A test's own series: answered again in its window alone.
+			out = append(out, integrations.MarkedSeries{Series: s, Recordings: recs, Again: true, Owner: owner})
+		default:
+			// Some of it is a test's own series and some is not (another
+			// test's, a series marked set-wide, a one-off, the pool's):
+			// none of it is answered as marked, failing closed.
 		}
 	}
 	r.byKind[kind] = out
@@ -283,11 +327,20 @@ func (h *heldScope) keepSeriesRead() {
 // charged to that set's test. A staging whose read another read took the
 // place of before it ended (the next staging's) hands none: its series were
 // never read whole, and the call goes on as any other call the replay
-// staged a set under.
+// staged a set under. A test's own series is handed only to a call read in
+// its test's window (the view the call was read in, SequenceView): a call
+// read there and asking after the window closed is still its test's.
 func (h *heldScope) MarkedSeries(ctx context.Context, kind models.Kind, known learn.Known) ([]integrations.MarkedSeries, error) {
 	if h.exactView() == nil {
 		return nil, nil
 	}
+	sv, _ := h.SequenceView()
+	s, err := h.markedSeries(ctx, kind, known)
+	return integrations.OwnedBy(s, sv.Test), err
+}
+
+// markedSeries is MarkedSeries, every owner's own series included.
+func (h *heldScope) markedSeries(ctx context.Context, kind models.Kind, known learn.Known) ([]integrations.MarkedSeries, error) {
 	for {
 		h.keepSeriesRead()
 		r := h.series

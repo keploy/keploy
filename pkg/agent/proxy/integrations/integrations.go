@@ -510,12 +510,43 @@ type MarkedSeriesReader interface {
 // call is never answered from the series of a set it was not made in. A
 // call of it is the set's background miss, never a test's
 // (SeriesRestagedNote).
+//
+// Owner is, for a test's own series (models.IsBackgroundOwnSeries: judging
+// marked every recording of it on that one test's list), that test: the
+// reader hands it only to a call made in that test's window, Again, so it
+// answers as often as its call comes there; in any other window and between
+// tests it is no marked series, and its call is compared as any other. A
+// call of it that no recording answers is the owner's own miss, never the
+// set's background (SeriesMiss.Owner). "" for a series marked set-wide.
 type MarkedSeries struct {
 	Series     learn.Series
 	Recordings []*models.Mock
 	Again      bool
 	Once       func(name string) bool
 	Restaged   bool
+	Owner      string
+}
+
+// OwnedBy is s without the own series of a test other than test
+// (MarkedSeries.Owner): what a call made in test's window ("" between tests)
+// is handed. s itself when it holds none to leave out.
+func OwnedBy(s []MarkedSeries, test string) []MarkedSeries {
+	keep := 0
+	for i := range s {
+		if s[i].Owner == "" || s[i].Owner == test {
+			keep++
+		}
+	}
+	if keep == len(s) {
+		return s
+	}
+	out := make([]MarkedSeries, 0, keep)
+	for _, m := range s {
+		if m.Owner == "" || m.Owner == test {
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 // SeriesRestagedNote is what the miss of a call of a restaged series says
@@ -551,11 +582,16 @@ type SeriesAnswerer func(ctx context.Context, db MockMemDb, live *models.Mock, a
 type SeriesMiss struct {
 	NextSteps string
 	Newest    *models.Mock
+	// Owner is the series' owner when it is a test's own series
+	// (MarkedSeries.Owner): the miss is then that test's own, in its window.
+	Owner string
 }
 
 // Mark marks report as a miss of the set's background work
-// (models.MockMismatchReport.Background): charged to no test, failing none.
-// The report names the series' newest recording and shows nothing of the
+// (models.MockMismatchReport.Background): charged to no test, failing none;
+// for a test's own series (Owner), a miss of that test, whose window it came
+// in, as any of its own calls that nothing answers. The report names the
+// series' newest recording and shows nothing of the
 // closest recording the parser's report read in the open view (its request,
 // field diffs and diff): that one is no recording of the series, and the
 // replay prints a request beside the name it shows.
@@ -563,7 +599,7 @@ func (m *SeriesMiss) Mark(report *models.MockMismatchReport) {
 	if m == nil || report == nil {
 		return
 	}
-	report.Background = true
+	report.Background = m.Owner == ""
 	if m.Newest != nil {
 		report.ClosestMock = m.Newest.Name
 	}

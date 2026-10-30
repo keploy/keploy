@@ -117,6 +117,24 @@ const BackgroundSeriesPrefix = "series_of: "
 // (BackgroundSeriesPrefix).
 func IsBackgroundSeries(why string) bool { return strings.HasPrefix(why, BackgroundSeriesPrefix) }
 
+// BackgroundOwnSeriesPrefix begins the why of a mark judging wrote for a
+// test's OWN series: a call recorded again and again inside that one test's
+// window alone, with only its reads of the clock changed, on a value the
+// test's own window first held (a job the test started, writing its clock
+// to its own row until it ends). judging writes it on that test's list only.
+// A call of an own series is answered again, as often as it comes (zero
+// times too), but only while its test's window is open: the same call in
+// any other test's window, or between tests (the job outlived its test), is
+// compared as any other call, so a series that never stops still fails. It
+// is no series' mark (IsBackgroundSeries) and no one-off's.
+const BackgroundOwnSeriesPrefix = "own_series_of: "
+
+// IsBackgroundOwnSeries reports whether why is a test's own series' mark
+// (BackgroundOwnSeriesPrefix).
+func IsBackgroundOwnSeries(why string) bool {
+	return strings.HasPrefix(why, BackgroundOwnSeriesPrefix)
+}
+
 // Add marks name on test's list with why.
 func (b BackgroundMarks) Add(test, name, why string) {
 	if b[test] == nil {

@@ -606,3 +606,114 @@ func TestMarkedSeriesIsReadAtStagingNotByTheFirstCall(t *testing.T) {
 type excuseAll struct{}
 
 func (excuseAll) Excused(learn.Leaf) (bool, bool) { return true, false }
+
+// ownMarks marks names on test's list as test's own series'
+// (models.BackgroundOwnSeriesPrefix).
+func ownMarks(marks models.BackgroundMarks, test string, names ...string) models.BackgroundMarks {
+	if marks == nil {
+		marks = models.BackgroundMarks{}
+	}
+	for _, n := range names {
+		marks.Add(test, n, models.BackgroundOwnSeriesPrefix+"claim, every 2s, in "+test+"'s window alone")
+	}
+	return marks
+}
+
+var allClaims = []string{"claim-1", "claim-2", "claim-3", "claim-4", "claim-5", "claim-6"}
+
+// A test's own series (every recording of it marked as T1's own on T1's
+// list) is handed to a call in T1's window, answered again as often as it
+// comes (Again) and spending no one-off (Once nil); in T2's window and
+// between tests it is no marked series at all, so its call there is
+// compared as any other call: a job's beat after its test ended is refused.
+func TestATestsOwnSeriesIsHandedOnlyInItsOwnersWindow(t *testing.T) {
+	mm := timerSet(t)
+	mm.SetUnrequired(ownMarks(nil, "T1", allClaims...))
+	mm.ServeExactTest("T1", nil)
+	got, err := mm.MarkedSeries(context.Background(), seriesRowKind, nil)
+	if err != nil || len(got) != 1 {
+		t.Fatalf("in T1's window MarkedSeries = %d series, %v; want T1's own one", len(got), err)
+	}
+	if n := seriesNames(got[0]); n != strings.Join(allClaims, ",") || !got[0].Again || got[0].Once != nil {
+		t.Fatalf("T1's own series is %s, again %v, once set %v; want every claim, answered again, no one-off", n, got[0].Again, got[0].Once != nil)
+	}
+	held, _ := mm.HoldToRound(mm.MarkCallRound())
+
+	mm.ServeExactTest("T2", nil)
+	if got, err := mm.MarkedSeries(context.Background(), seriesRowKind, nil); err != nil || len(got) != 0 {
+		t.Fatalf("in T2's window MarkedSeries = %d series, %v; want none of T1's own", len(got), err)
+	}
+	// A call read in T1's window that asks once T2's opened is still T1's.
+	if got, err := held.(integrations.MarkedSeriesReader).MarkedSeries(context.Background(), seriesRowKind, nil); err != nil || len(got) != 1 {
+		t.Fatalf("a call read in T1's window was handed %d series, %v; want T1's own one", len(got), err)
+	}
+	mm.ServeExactPool("", nil)
+	if got, err := mm.MarkedSeries(context.Background(), seriesRowKind, nil); err != nil || len(got) != 0 {
+		t.Fatalf("between tests MarkedSeries = %d series, %v; want none of T1's own", len(got), err)
+	}
+	held, _ = mm.HoldToRound(mm.MarkCallRound())
+	mm.ServeExactTest("T1", nil)
+	if got, err := held.(integrations.MarkedSeriesReader).MarkedSeries(context.Background(), seriesRowKind, nil); err != nil || len(got) != 0 {
+		t.Fatalf("a call read between tests was handed %d series once T1 opened, %v; want none", len(got), err)
+	}
+}
+
+// A series only part of which is one test's own (another test owns, or
+// marks otherwise, one of its recordings; or one of them is the pool's,
+// unmarked) is handed in no window: keploy cannot tell whose it is, and
+// fails closed, as if nothing of it were marked.
+func TestASeriesPartlyATestsOwnIsHandedNowhere(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		marks models.BackgroundMarks
+	}{
+		{"another test owns one of it", ownMarks(ownMarks(nil, "T1", allClaims[:5]...), "T2", "claim-6")},
+		{"two tests own one recording of it", ownMarks(ownMarks(nil, "T1", allClaims...), "T2", "claim-6")},
+		{"one of it is marked set-wide too", func() models.BackgroundMarks {
+			m := ownMarks(nil, "T1", allClaims...)
+			m.Add("T2", "claim-6", models.BackgroundSeriesPrefix+"claim, every 2s")
+			return m
+		}()},
+		{"one of it is another list's one-off", func() models.BackgroundMarks {
+			m := ownMarks(nil, "T1", allClaims...)
+			m.Add("T2", "claim-6", "a delayed write")
+			return m
+		}()},
+		{"part of it is the pool's alone", ownMarks(nil, "T1", allClaims[2:]...)},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			mm := timerSet(t)
+			mm.SetUnrequired(c.marks)
+			for _, test := range []string{"T1", "T2"} {
+				mm.ServeExactTest(test, nil)
+				if got, err := mm.MarkedSeries(context.Background(), seriesRowKind, nil); err != nil || len(got) != 0 {
+					t.Fatalf("in %s's window MarkedSeries = %d series, %v; want none", test, len(got), err)
+				}
+			}
+		})
+	}
+}
+
+// A series of one recording that two tests' lists mark as their own is
+// handed in neither window, nor as a series marked set-wide: whose own it is
+// cannot be told.
+func TestALoneRecordingTwoTestsOwnIsHandedNowhere(t *testing.T) {
+	timerSet(t) // registers the rows' series reading
+	lone := exactMock("lone", 3*time.Second, models.LifetimeSession)
+	lone.Kind = seriesRowKind
+	lone.Spec.Metadata = map[string]string{"op": "beat", "at": strconv.FormatInt(exactT0.Add(3*time.Second).Unix(), 10)}
+	mm := stagedManager(t, nil, []*models.Mock{lone})
+	mm.ServeExactBackground(models.RecordedWithS12Routing, nil, nil)
+	mm.SetUnrequired(ownMarks(ownMarks(nil, "T1", "lone"), "T2", "lone"))
+	for _, test := range []string{"T1", "T2", "T3"} {
+		mm.ServeExactTest(test, nil)
+		if got, err := mm.MarkedSeries(context.Background(), seriesRowKind, nil); err != nil || len(got) != 0 {
+			t.Fatalf("in %s's window MarkedSeries = %d series, %v; want none", test, len(got), err)
+		}
+	}
+	mm.SetUnrequired(ownMarks(nil, "T1", "lone"))
+	mm.ServeExactTest("T1", nil)
+	if got, err := mm.MarkedSeries(context.Background(), seriesRowKind, nil); err != nil || len(got) != 1 || got[0].Owner != "T1" {
+		t.Fatalf("one test's own lone recording: MarkedSeries = %d series, %v; want T1's own one", len(got), err)
+	}
+}
