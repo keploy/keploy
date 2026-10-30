@@ -1,6 +1,7 @@
 package learn
 
 import (
+	"slices"
 	"sort"
 	"strings"
 )
@@ -43,6 +44,101 @@ func tokenIndex(s, v string) int {
 		i += j + 1
 	}
 	return -1
+}
+
+// firstTokens is, for each of words, where texts first hold it as a token
+// (tokenIndex), the texts read as one with a byte between each: the offset
+// in the first text that holds it plus the lengths before that text, or the
+// length of them all where none does. It reads each text once, not once per
+// word, so many words in a long text take time linear in the text. A token
+// can start only where tokenAt lets it: a word that begins with a letter or
+// digit starts a run of letters and digits (and one made of them alone is
+// that whole run), and a word that begins with another byte starts at that
+// byte. So only those places are tried, with each length a word of that
+// start has.
+func firstTokens(texts, words []string) map[string]int {
+	whole, rest := map[string]bool{}, map[string]bool{}
+	empty := false
+	// lens are the lengths of the words in rest by their first byte, and at
+	// alnum those of the words in rest that begin with a letter or digit.
+	const alnum = 256
+	var lens [alnum + 1][]int
+	for _, w := range words {
+		switch {
+		case w == "":
+			empty = true
+		case whole[w] || rest[w]:
+		case wordsOnly(w):
+			whole[w] = true
+		default:
+			rest[w] = true
+			k := int(w[0])
+			if isWord(w[0]) {
+				k = alnum
+			}
+			if !slices.Contains(lens[k], len(w)) {
+				lens[k] = append(lens[k], len(w))
+			}
+		}
+	}
+	pos := make(map[string]int, len(whole)+len(rest))
+	left := len(whole) + len(rest)
+	off := 0
+	try := func(s string, i int, ns []int) {
+		for _, n := range ns {
+			if i+n > len(s) {
+				continue
+			}
+			w := s[i : i+n]
+			if _, done := pos[w]; !done && rest[w] && tokenAt(s, w, i) {
+				pos[w] = off + i
+				left--
+			}
+		}
+	}
+	for _, s := range texts {
+		for i := 0; i < len(s) && left > 0; i++ {
+			if !isWord(s[i]) {
+				try(s, i, lens[s[i]])
+				continue
+			}
+			// i starts a run of letters and digits (the loop steps past
+			// each run whole).
+			j := i + 1
+			for j < len(s) && isWord(s[j]) {
+				j++
+			}
+			if _, done := pos[s[i:j]]; !done && whole[s[i:j]] {
+				pos[s[i:j]] = off + i
+				left--
+			}
+			try(s, i, lens[alnum])
+			i = j - 1
+		}
+		off += len(s) + 1
+	}
+	for _, set := range []map[string]bool{whole, rest} {
+		for w := range set {
+			if _, done := pos[w]; !done {
+				pos[w] = off
+			}
+		}
+	}
+	if empty {
+		// No text holds "" as a token (tokenIndex).
+		pos[""] = off
+	}
+	return pos
+}
+
+// wordsOnly reports whether w is letters and digits alone (isWord).
+func wordsOnly(w string) bool {
+	for i := 0; i < len(w); i++ {
+		if !isWord(w[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 // ReplaceToken is s with each occurrence of v as a token (ContainsToken)
