@@ -139,11 +139,15 @@ for f in "${mock_files[@]}"; do
 done
 
 # The replay, its keploy test process sampled for its peak RSS until it ends.
+# The read of its status is the loop's test: the process can end, and this
+# shell reap it, between any check and a read after it, and under the step's
+# -e a failed read in the loop's body (awk's exit 2 on a status file gone)
+# ended the lane there, the replay's exit and log never printed.
 "$REPLAY_BIN" test -c "./http-pokeapi" --delay 7 --generateGithubActions=false > test_logs.txt 2>&1 &
 test_pid=$!
 peak_kb=0
-while kill -0 "$test_pid" 2>/dev/null; do
-    hwm=$(awk '/^VmHWM:/ {print $2}' "/proc/$test_pid/status" 2>/dev/null)
+while status=$(cat "/proc/$test_pid/status" 2>/dev/null); do
+    hwm=$(awk '/^VmHWM:/ {print $2}' <<<"$status")
     if [ -n "$hwm" ] && [ "$hwm" -gt "$peak_kb" ]; then
         peak_kb=$hwm
     fi
