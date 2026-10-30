@@ -652,3 +652,179 @@ func TestAClientsHangUpBeforeTheReplayedAnswerIsNoAppFailure(t *testing.T) {
 		t.Fatalf("the app had %d connections, want 2: the request was sent again after its client went", n)
 	}
 }
+
+// An app that dies mid-answer while its client stays fails the answer's
+// forwarding too, but its client did not go: that is never told as an
+// exchange its client left, in either loop.
+func TestAnAppThatDiesMidAnswerIsNoClientsGoing(t *testing.T) {
+	for _, synchronous := range []bool{false, true} {
+		t.Run(fmt.Sprintf("synchronous %v", synchronous), func(t *testing.T) {
+			t.Parallel()
+			appLn, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			rawApp(t, appLn, func(_ int, c net.Conn, _ *bufio.Reader) {
+				_, _ = io.WriteString(c, "HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nTransfer-Encoding: chunked\r\n\r\n15\r\n{\"status\":\"RUNNING\"}\n\r\n")
+				// it dies here: no last chunk, and its client is still there
+			})
+			_, client, served, logs := serveWatched(t, synchronous, appLn, nil)
+			if _, err := client.Write([]byte("GET /client/v1/jobs/j/events HTTP/1.1\r\nHost: api\r\n\r\n")); err != nil {
+				t.Fatal(err)
+			}
+			_, _ = io.Copy(io.Discard, client) // the client stays to the end
+			select {
+			case <-served:
+			case <-never(t):
+				t.Fatal("never: the handler ended")
+			}
+			if n := logs.FilterMessageSnippet("its client closed").Len(); n != 0 {
+				t.Fatalf("an app's death mid-answer was told %d time(s) as its client's going: %v", n, logs.All())
+			}
+		})
+	}
+}
+
+// hangUps are two ways a client goes mid-answer, each with an app that ends
+// its answer once told. A client that closes, with an app that then closes
+// the connection mid-stream: the answer's forwarding fails. A client that
+// half-closes and reads on, with Go's server, which sends one more event and
+// its last chunk: the forwarding ends whole.
+var hangUps = []struct {
+	name   string
+	serve  func(t *testing.T, ln net.Listener, told chan struct{})
+	hangUp func(t *testing.T, client net.Conn)
+}{
+	{"closes, the answer cut short",
+		func(t *testing.T, ln net.Listener, told chan struct{}) {
+			rawApp(t, ln, func(_ int, c net.Conn, br *bufio.Reader) {
+				_, _ = io.WriteString(c, "HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nTransfer-Encoding: chunked\r\n\r\n15\r\n{\"status\":\"RUNNING\"}\n\r\n")
+				untilEnd(br)
+				close(told)
+			})
+		},
+		func(t *testing.T, client net.Conn) { hangUpAfterTheFirstEvent(t, client, bufio.NewReader(client)) },
+	},
+	{"half-closes, the answer ended whole",
+		func(t *testing.T, ln net.Listener, told chan struct{}) {
+			serveApp(t, ln, func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/x-ndjson")
+				w.WriteHeader(http.StatusOK)
+				fmt.Fprintln(w, `{"status":"RUNNING"}`)
+				w.(http.Flusher).Flush()
+				<-r.Context().Done()
+				close(told)
+				fmt.Fprintln(w, `{"status":"CLIENT GONE"}`)
+			})
+		},
+		func(t *testing.T, client net.Conn) {
+			br := bufio.NewReader(client)
+			for {
+				line, err := br.ReadString('\n')
+				if err != nil {
+					t.Fatalf("the answer's first event: %v", err)
+				}
+				if strings.Contains(line, "RUNNING") {
+					break
+				}
+			}
+			_ = client.(*net.TCPConn).CloseWrite()
+			if rest, err := io.ReadAll(br); err != nil || !strings.Contains(string(rest), "CLIENT GONE") {
+				t.Fatalf("the half-closed client got %q, %v", rest, err)
+			}
+		},
+	},
+}
+
+// A sampling-bypass connection (every sampling slot is taken) is never
+// captured: when its client hangs up mid-answer the app is told, but the
+// exchange was never one to record, so "Not recording this request as a
+// test case: its client closed" is not its reason, and is not told; nor is
+// the client's going an error.
+func TestABypassedExchangeIsNotToldAsNotRecorded(t *testing.T) {
+	for _, h := range hangUps {
+		t.Run(h.name, func(t *testing.T) {
+			t.Parallel()
+			appLn, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			told := make(chan struct{})
+			h.serve(t, appLn, told)
+			cfg := &config.Config{}
+			cfg.Agent.MockMode = true
+			cfg.Agent.RecordRequests = true
+			cfg.Agent.EnableSampling = 1
+			core, logs := observer.New(zapcore.InfoLevel)
+			pm := New(zap.New(core), nil, cfg)
+			pm.samplingSem <- struct{}{} // every sampling slot is taken: this conn bypasses
+			client, proxied := tcpPairForWatch(t)
+			served := make(chan struct{})
+			go func() {
+				defer close(served)
+				defer proxied.Close()
+				pm.ServeLive(context.Background(), proxied, appLn.Addr().String(), 8083)
+			}()
+			if _, err := client.Write([]byte("GET /client/v1/jobs/j/events HTTP/1.1\r\nHost: api\r\n\r\n")); err != nil {
+				t.Fatal(err)
+			}
+			h.hangUp(t, client)
+			select {
+			case <-told:
+			case <-never(t):
+				t.Fatal("never: the bypassed connection's app was not told its client went")
+			}
+			select {
+			case <-served:
+			case <-never(t):
+				t.Fatal("never: the handler ended")
+			}
+			if n := logs.FilterMessageSnippet("Not recording this request as a test case").Len(); n != 0 {
+				t.Fatalf("a bypassed (never captured) exchange was told %d time(s) as not recorded for its client's going: %v", n, logs.All())
+			}
+			if n := logs.FilterLevelExact(zapcore.ErrorLevel).Len(); n != 0 {
+				t.Fatalf("a client's going was logged as %d error(s): %v", n, logs.FilterLevelExact(zapcore.ErrorLevel).All())
+			}
+		})
+	}
+}
+
+// An exchange the memory guard's pause keeps from being recorded is counted
+// as lost to the pause, not told as not recorded for its client's going,
+// in either loop; its app is still told, and the client's going is no error.
+func TestAPausedExchangeIsNotToldAsNotRecorded(t *testing.T) {
+	stubIngressPaused(t, func() bool { return true })
+	for _, synchronous := range []bool{false, true} {
+		for _, h := range hangUps {
+			t.Run(fmt.Sprintf("synchronous %v, %s", synchronous, h.name), func(t *testing.T) {
+				appLn, err := net.Listen("tcp", "127.0.0.1:0")
+				if err != nil {
+					t.Fatal(err)
+				}
+				told := make(chan struct{})
+				h.serve(t, appLn, told)
+				_, client, served, logs := serveWatched(t, synchronous, appLn, nil)
+				if _, err := client.Write([]byte("GET /client/v1/jobs/j/events HTTP/1.1\r\nHost: api\r\n\r\n")); err != nil {
+					t.Fatal(err)
+				}
+				h.hangUp(t, client)
+				select {
+				case <-told:
+				case <-never(t):
+					t.Fatal("never: the paused exchange's app was not told its client went")
+				}
+				select {
+				case <-served:
+				case <-never(t):
+					t.Fatal("never: the handler ended")
+				}
+				if n := logs.FilterMessageSnippet("Not recording this request as a test case: its client closed").Len(); n != 0 {
+					t.Fatalf("an exchange lost to the pause was told %d time(s) as not recorded for its client's going: %v", n, logs.All())
+				}
+				if n := logs.FilterLevelExact(zapcore.ErrorLevel).Len(); n != 0 {
+					t.Fatalf("a client's going was logged as %d error(s): %v", n, logs.FilterLevelExact(zapcore.ErrorLevel).All())
+				}
+			})
+		}
+	}
+}

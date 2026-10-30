@@ -603,9 +603,14 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			if endWatch() {
 				// The client went before the answer's end, and the app was
 				// told (watchClient): the write failed on the client's
-				// going, and the exchange is not one to record.
+				// going, and the exchange is not one to record. That is
+				// its reason only if it could have been recorded, as
+				// warnNotRecorded's: not one the memory guard's pause
+				// kept from it (counted as lost to the pause).
 				resp.Body.Close()
-				tellClientLeft(logger, req)
+				if captureEligible && captureEnabled {
+					tellClientLeft(logger, req)
+				}
 				return
 			}
 			if pressureCloseMode && isIngressExpectedCloseErr(err) {
@@ -626,8 +631,11 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		if endWatch() {
 			// The client went before the answer's end, and the app was
 			// told (watchClient): the exchange is not one to record, and
-			// the connection carries nothing after it.
-			tellClientLeft(logger, req)
+			// the connection carries nothing after it. Told only for one
+			// that could have been recorded, as above.
+			if captureEligible && captureEnabled {
+				tellClientLeft(logger, req)
+			}
 			return
 		}
 
@@ -1585,8 +1593,14 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 			if endWatch() {
 				// The client went before the answer's end, and the app was
 				// told (watchClient): the write failed on the client's
-				// going, and the exchange is not one to record.
-				tellClientLeft(logger, req)
+				// going, and the exchange is not one to record. That is
+				// its reason only if it could have been recorded, as
+				// warnNotRecorded's: not on a sampling-bypass connection
+				// (never captured), nor one the memory guard's pause kept
+				// from it (counted as lost to the pause).
+				if captureEnabled {
+					tellClientLeft(logger, req)
+				}
 				return
 			}
 			logger.Debug("Failed to forward response to client", zap.Error(err))
@@ -1598,8 +1612,11 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		if endWatch() {
 			// The client went before the answer's end, and the app was
 			// told (watchClient): the exchange is not one to record, and
-			// the connection carries nothing after it.
-			tellClientLeft(logger, req)
+			// the connection carries nothing after it. Told only for one
+			// that could have been recorded, as above.
+			if captureEnabled {
+				tellClientLeft(logger, req)
+			}
 			return
 		}
 
