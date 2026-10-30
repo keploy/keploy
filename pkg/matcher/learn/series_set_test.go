@@ -445,3 +445,38 @@ func TestSeriesOfSetSplitsOffAFirstCallThatIsNoReadOfTheirClock(t *testing.T) {
 		}
 	}
 }
+
+// The first call is split off only when the calls a call before bounds read
+// the clock without it: in a series whose number tracks no clock (two values
+// taken in turn, a value of the call), the first call is a recording of its
+// value's call like any other, never a series of its own.
+func TestSeriesOfSetKeepsAFirstCallInItsValuesSeriesWhenNoneReadsTheClock(t *testing.T) {
+	defer RegisterSeriesShape(seriesKind, readSeriesRow)()
+	base := time.Date(2026, 10, 29, 10, 0, 0, 0, time.UTC)
+	const even, odd = "1793311200", "1793314800"
+	var recorded []*models.Mock
+	for i := 0; i <= 5; i++ {
+		at := base.Add(time.Duration(2*i)*time.Second + 500*time.Millisecond)
+		v := even
+		if i%2 == 1 {
+			v = odd
+		}
+		recorded = append(recorded, rowMock("claim-"+strconv.Itoa(i), seriesKind, at, at.Add(3*time.Millisecond),
+			map[string]string{"op": "claim", "at": v}))
+	}
+	got := SeriesOfSet(recorded, nil)
+	if len(got.Mocks) != len(recorded) || len(got.Series) != 2 {
+		t.Fatalf("read %d recording(s) into %d series, want all %d into two (one per value): %+v", len(got.Mocks), len(got.Series), len(recorded), got.Series)
+	}
+	for _, s := range got.Series {
+		if _, clock := s.Clock["body.at"]; clock {
+			t.Errorf("a series reads body.at as the clock: %+v", s)
+		}
+		if len(s.Members) != 3 {
+			t.Errorf("a series of %d member(s) from %q: want three per value, the first call (claim-0) in the even one", len(s.Members), got.Mocks[s.Members[0]].Name)
+		}
+	}
+	if s := got.Series[0]; len(s.Members) == 0 || got.Mocks[s.Members[0]].Name != "claim-0" {
+		t.Errorf("the first series does not begin with the first call: %+v", got.Series)
+	}
+}

@@ -186,14 +186,34 @@ func TestMarkedSeriesIsATimersCallMarkedWhereverItWasRecorded(t *testing.T) {
 			t.Fatalf("a staging by today's rules whose mocks are not staged yet has %d marked series", len(got))
 		}
 	})
-	t.Run("switch off", func(t *testing.T) {
+	t.Run("its staging over, its background not stored yet", func(t *testing.T) {
+		// ServeExactBackground between its two stores: the staging is over
+		// and the background still settling. Every claim is on a list, so
+		// only the settling state can refuse it.
 		mm := timerSet(t)
-		mm.SetUnrequired(all)
+		mm.SetUnrequired(listed)
+		mm.ServeExactTest("T1", nil)
+		mm.StageExactBackground(models.RecordedWithS12Routing)
+		mm.exact.staging.Store(false)
+		if got, _ := mm.MarkedSeries(context.Background(), seriesRowKind, nil); len(got) != 0 {
+			t.Fatalf("a set whose background is still settling has %d marked series", len(got))
+		}
+	})
+	t.Run("switch off", func(t *testing.T) {
+		// Every claim on a list, so only the switch can refuse it.
+		mm := timerSet(t)
+		mm.SetUnrequired(listed)
 		mm.ServeExactTest("T1", nil)
 		t.Setenv(provenswitch.Env, "")
-		mm.ServeExactBackground(models.RecordedWithS12Routing, []string{"claim-1", "claim-2"}, nil)
+		mm.ServeExactBackground(models.RecordedWithS12Routing, nil, nil)
 		if got, _ := mm.MarkedSeries(context.Background(), seriesRowKind, nil); len(got) != 0 {
 			t.Fatalf("with the switch off %d series are marked", len(got))
+		}
+		mm.exact.series.mu.Lock()
+		began := mm.exact.series.read != nil
+		mm.exact.series.mu.Unlock()
+		if began {
+			t.Fatal("with the switch off, staging a set began a read of its series")
 		}
 	})
 }
