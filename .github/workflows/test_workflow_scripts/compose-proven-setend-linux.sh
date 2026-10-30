@@ -49,8 +49,16 @@
 #      own stop signal, which the daemon takes for a stop, so it does not
 #      start it again: the replay booting a starts the app's container twice
 #      (compose's up, keploy's start for the second set), the first set
-#      passes, and the second fails on its startup call, which keploy's start
-#      made once the set was staged. Interrupted with SIGINT, the daemon
+#      passes, and the second fails: its recorded startup call (b), a call
+#      of its worker scope, was never made. The startup call keploy's start
+#      made once the set was staged (a), answered by no mock before the
+#      set's first test, is the application's background work (item (b)):
+#      the report lists it among the set's background calls, made before its
+#      first test, not among its unclaimed calls. (Before item (b) that call
+#      itself failed the set. With item (b), until keploy took each set's
+#      start of a kept stack's app for that set's boot, a recorded startup
+#      call never made was not required of a compose set, and the second set
+#      passed, keploy test exit 0.) Interrupted with SIGINT, the daemon
 #      started the app again 100 ms after each of keploy's stops; its startup
 #      call came while keploy staged the second set, which no set judged, and
 #      the second set passed, keploy test exit 0 (2 of 3 replays on
@@ -89,7 +97,9 @@ cleanup() {
   [ -f docker-compose.yml ] && sudo docker compose -p "$PROJECT" down --remove-orphans >/dev/null 2>&1
   return 0
 }
+STARTS_PID=
 finish() {
+  [ -z "$STARTS_PID" ] || sudo kill "$STARTS_PID" 2>/dev/null
   cleanup
   cd / && sudo rm -rf "$WORK"
 }
@@ -418,11 +428,24 @@ $keys
     command: python dep.py
 YML
 }
-# app_starts SINCE: how many times the daemon started the app's container
-# since SINCE (a time), as its events say.
+# watch_starts FILE: streams the daemon's start events of the app's container
+# into FILE from now on, in the background (STARTS_PID); app_starts FILE ends
+# the stream and says how many there were. A stream, not a read of the past
+# once the replay is over: the daemon keeps only its last 256 events, and a
+# set's end that waits for its worker scope (scenario 6's second set, up to
+# 600 wake-ups) outlasts them under the agent's health checks (their exec
+# events), so a read after the replay found none of the starts.
+watch_starts() {
+  sudo docker events --since "$(date +%s.%N)" --filter type=container --filter event=start \
+    --filter "label=com.docker.compose.project=$PROJECT" --filter label=com.docker.compose.service=app \
+    --format '{{.Actor.ID}}' > "$1" 2>/dev/null &
+  STARTS_PID=$!
+}
 app_starts() {
-  sudo docker events --since "$1" --until "$(date +%s.%N)" --filter type=container --filter event=start \
-    --filter "label=com.docker.compose.project=$PROJECT" --filter label=com.docker.compose.service=app --format '{{.Actor.ID}}' | wc -l
+  sudo kill "$STARTS_PID" 2>/dev/null
+  wait "$STARTS_PID" 2>/dev/null
+  STARTS_PID=
+  wc -l < "$1"
 }
 
 echo "== 5. keploy given the app by its service's key =="
@@ -444,13 +467,22 @@ variant restart "    restart: always
     stop_signal: SIGTERM"
 record 0 BOOT_MSG=a
 BULK=16000000 record 1 BOOT_MSG=b
-since=$(date +%s.%N)
+watch_starts restart-starts.txt
 replay restart-boot-a BOOT_MSG=a
-starts=$(app_starts "$since")
+starts=$(app_starts restart-starts.txt)
 [ "$starts" -eq 2 ] || fail "6: the app's container was started $starts times in the replay of two sets, want 2 (compose's up, keploy's start for the second set): the daemon started it again after keploy's stop"
 [ "$(set_status test-set-0)" = PASSED ] || fail "6: test-set-0, recorded booting a, replayed booting a, is $(set_status test-set-0), want PASSED"
-[ "$(set_status test-set-1)" = FAILED ] || fail "6: test-set-1, recorded booting b, replayed booting a, is $(set_status test-set-1), want FAILED: its startup call was judged by no set"
+[ "$(set_status test-set-1)" = FAILED ] || fail "6: test-set-1, recorded booting b, replayed booting a, is $(set_status test-set-1), want FAILED: its recorded startup call was never made"
 [ "$RC" -ne 0 ] || fail "6: keploy test exited 0, want non-zero"
+y="$(sudo cat "$(report test-set-1)" 2>/dev/null)"
+yq -r '.failure_reason // ""' <<<"$y" 2>/dev/null | grep -q "never made 1 of the calls the test set's worker scope recorded" ||
+  fail "6: test-set-1's reason does not say its recorded startup call was never made: $(yq -r '.failure_reason // ""' <<<"$y" 2>/dev/null)"
+yq -r '.background_calls[]? | select(.actual_summary // "" | test("/boot")) | .background_why // ""' <<<"$y" 2>/dev/null |
+  grep -q "made before the set's first test began" ||
+  fail "6: test-set-1 does not list the startup call keploy's start made among its background calls, made before its first test: $(grep -A8 '^background_calls:' <<<"$y" | head -10)"
+if yq -r '.unclaimed_calls[]? | .actual_summary // ""' <<<"$y" 2>/dev/null | grep -q '/boot'; then
+  fail "6: test-set-1 has the startup call among its unclaimed calls; made before its first test, it is background work, charged to no test"
+fi
 [ "$FAIL" -eq 0 ] || tail -80 restart-boot-a.log
 cd "$WORK" || exit 1
 
