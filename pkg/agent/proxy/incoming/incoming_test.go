@@ -91,7 +91,7 @@ func TestDialIngressTargetWaitsForAppToListen(t *testing.T) {
 		listening <- l
 	}()
 
-	conn, err := dialIngressTarget(context.Background(), addr, 2*time.Second)
+	conn, err := dialIngressTarget(context.Background(), addr, 2*time.Second, neverFinal, nil)
 	if err != nil {
 		t.Fatalf("dialIngressTarget returned error: %v", err)
 	}
@@ -107,7 +107,7 @@ func TestDialIngressTargetGivesUpAfterTimeout(t *testing.T) {
 	addr := testnet.RefusedAddr(t, "tcp")
 
 	start := time.Now()
-	if _, err := dialIngressTarget(context.Background(), addr, 100*time.Millisecond); err == nil {
+	if _, err := dialIngressTarget(context.Background(), addr, 100*time.Millisecond, neverFinal, nil); err == nil {
 		t.Fatal("expected an error dialing a port nothing listens on")
 	}
 	if elapsed := time.Since(start); elapsed < 100*time.Millisecond || elapsed > time.Second {
@@ -121,7 +121,7 @@ func TestDialIngressTargetStopsOnCanceledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	start := time.Now()
-	if _, err := dialIngressTarget(ctx, addr, 5*time.Second); err == nil {
+	if _, err := dialIngressTarget(ctx, addr, 5*time.Second, neverFinal, nil); err == nil {
 		t.Fatal("expected an error dialing a port nothing listens on")
 	}
 	if elapsed := time.Since(start); elapsed > time.Second {
@@ -423,7 +423,7 @@ func TestDialIngressTargetReachesAnIPv6App(t *testing.T) {
 		t.Skipf("no IPv6 loopback: %v", err)
 	}
 	defer ln.Close()
-	conn, err := dialIngressTarget(context.Background(), ln.Addr().String(), time.Second)
+	conn, err := dialIngressTarget(context.Background(), ln.Addr().String(), time.Second, neverFinal, nil)
 	if err != nil {
 		t.Fatalf("dialIngressTarget(%s): %v", ln.Addr(), err)
 	}
