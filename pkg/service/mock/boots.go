@@ -23,7 +23,7 @@ func classify(tests, starts []models.ScopeWindow, suites []models.SuiteSpan, moc
 	runner := map[string]int{}
 	out := bootPlan{tests: map[string][]models.MockEntry{}}
 	for _, mk := range mocks {
-		entry := models.MockEntry{Name: mk.name}
+		entry := models.MockEntry{Name: mk.name, Kind: mk.kind}
 		if i, ok := byRef[mk.ref]; ok && mk.ref != "" {
 			s := starts[i]
 			if mk.boot || (!s.Ready.IsZero() && mk.ts.Before(s.Ready)) {

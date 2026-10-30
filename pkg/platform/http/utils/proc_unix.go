@@ -177,6 +177,7 @@ func TerminatePTYCommand(handle *PTYHandle, logger *zap.Logger) error {
 // PTYHandle represents a PTY session for interactive command execution
 type PTYHandle struct {
 	ptmx         *os.File
+	output       *keployutils.ChildOutputCopy
 	cmd          *exec.Cmd
 	logger       *zap.Logger
 	resizeCh     chan os.Signal
@@ -276,16 +277,12 @@ func StartCommandWithPTY(cmd *exec.Cmd, logger *zap.Logger) (*PTYHandle, error) 
 	// Trigger initial resize
 	handle.resizeCh <- syscall.SIGWINCH
 
-	// Copy PTY output to real stdout (for agent logs, prompts, etc.)
-	// We add to WG so we can wait for this to finish (or error out)
-	handle.wg.Add(1)
-	go func() {
-		defer handle.wg.Done()
-		_, copyErr := io.Copy(os.Stdout, ptmx)
-		if copyErr != nil && !isClosedPTYError(copyErr) {
-			logger.Debug("error copying PTY output to stdout", zap.Error(copyErr))
-		}
-	}()
+	// Copy PTY output to real stdout (for agent logs, prompts, etc.), cut of
+	// the values the log redactor holds when it holds any, as a
+	// ChildConsole's is. It ends at EIO, once the command and all it left
+	// holding the terminal have closed it: Wait waits for that before it
+	// closes ptmx.
+	handle.output = keployutils.StartChildOutputCopy(os.Stdout, ptmx, false)
 
 	// Copy stdin to PTY (for password input, etc.)
 	// NOTE: We do NOT add this to WaitGroup because io.Copy blocks on os.Stdin.Read()
@@ -306,8 +303,13 @@ func (h *PTYHandle) Wait() error {
 	// Wait for the command to finish
 	cmdErr := h.cmd.Wait()
 
-	// Restore terminal state before any other cleanup
+	// Restore terminal state before any other cleanup, the wait for the
+	// output copy included
 	h.RestoreTerminal()
+
+	// All the command printed is written out before ptmx is closed: closing
+	// it first dropped what the copy had not yet read.
+	<-h.output.Done()
 
 	// stopOnce: the cleanup happens once
 	h.stopOnce.Do(func() {
@@ -331,7 +333,7 @@ func (h *PTYHandle) Wait() error {
 		h.ptmxMu.Unlock()
 	})
 
-	// Wait for background goroutines (resize, stdout copy, stdin copy) to finish
+	// Wait for the resize goroutine to finish
 	h.wg.Wait()
 
 	return cmdErr

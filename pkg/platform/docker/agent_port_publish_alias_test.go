@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
@@ -46,7 +47,7 @@ func TestGetAlias_LinuxPublishesAgentPortToHostLoopbackOnly(t *testing.T) {
 		Mode:            models.MODE_RECORD,
 	}
 
-	alias, err := getAlias(context.Background(), zap.NewNop(), opts, false)
+	alias, err := getAlias(context.Background(), zap.NewNop(), opts, &config.Config{})
 	if err != nil {
 		t.Fatalf("getAlias: %v", err)
 	}

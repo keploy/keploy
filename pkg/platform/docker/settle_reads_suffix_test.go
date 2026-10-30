@@ -32,12 +32,12 @@ func TestGetAlias_LinuxCarriesSettleReads(t *testing.T) {
 		t.Skip("getAlias switches on runtime.GOOS; the linux arm only executes here")
 	}
 	opts := models.SetupOptions{KeployContainer: "keploy-test", AgentPort: 16789, ProxyPort: 16790, DnsPort: 16791, ClientNSPID: 4242, Mode: models.MODE_TEST}
-	off, err := getAlias(context.Background(), zap.NewNop(), opts, false)
+	off, err := getAlias(context.Background(), zap.NewNop(), opts, &config.Config{})
 	if err != nil {
 		t.Fatalf("getAlias: %v", err)
 	}
 	opts.SettleReads = true
-	on, err := getAlias(context.Background(), zap.NewNop(), opts, false)
+	on, err := getAlias(context.Background(), zap.NewNop(), opts, &config.Config{})
 	if err != nil {
 		t.Fatalf("getAlias: %v", err)
 	}

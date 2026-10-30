@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/captureloss"
 	"go.keploy.io/server/v3/pkg/agent/containerkey"
 
 	"go.keploy.io/server/v3/config"
@@ -56,6 +57,11 @@ type ClientMockStorage struct {
 	// when it is built (DiskMocks.LoadStatements) and seeded on the proxy when
 	// the store is published (seedStatementCatalog); nil with no on-disk store.
 	statements []*models.Mock
+	// dests is the recording's destinations as its mocks spell them
+	// (recordedDests), noted as the mocks are read, before any is parked on
+	// disk, and only under the proven switch (its only readers are proven
+	// paths); nil until noted.
+	dests recordedDests
 }
 
 type Agent struct {
@@ -209,6 +215,11 @@ type Agent struct {
 	// taking scopeMu.
 	provenMu sync.Mutex
 	proven   provenWire
+	// listenerDrops counts what the kernel dropped at the proxy's listener
+	// that the tests' ends charged them (settledSince), as their own capture
+	// loss, for the agent's life: CaptureLosses reads it with every other
+	// count.
+	listenerDrops captureloss.Counter
 	// wire is held across every operation of the wire (a claim, a begin,
 	// an end, the final reap) so they never interleave; taken before
 	// provenMu.
@@ -918,9 +929,18 @@ func (a *Agent) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 			// waits for calls that can never settle.
 			settleErr = lost
 		} else {
-			// keploy test reads a test case's misses after its end: what the
-			// listener dropped since is no test's, and is not compared here.
+			// The settle's own read of the listener's drops is not used:
+			// closeDropsGap, below, reads them after it.
 			_, settleErr = a.settle(ctx, true)
+			// A read whose watchdog gave up on connections it found stuck
+			// (only the proven switch's settle gives up per connection)
+			// says which, and what each held, as a test's end does: the
+			// read's caller reports its misses unknown and points to
+			// this log for why.
+			var g gaveUp
+			if errors.As(settleErr, &g) {
+				a.logger.Warn("keploy's agent made no progress settling the application's calls before reading the misses; it gave up on them, so this read cannot vouch for every miss", zap.Strings("connections", g.held))
+			}
 			if lost := a.countingLost(); settleErr == nil && lost != nil {
 				// Dropped while it settled: a call accepted since is not
 				// kept, so the settle could not have seen it.
@@ -934,6 +954,13 @@ func (a *Agent) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 			}
 		}
 	}
+	// What the listener dropped since the last test case's end, the settle
+	// included, is counted now (closeDropsGap), just before the misses are
+	// read: a drop goes where a miss made at the same moment goes, to the
+	// test case whose misses this read takes (keploy test reads its losses
+	// after it), and after the last test case to the run, as every loss
+	// after it is: this read may be the run's last.
+	a.closeDropsGap(ctx)
 	errs, err := a.Proxy.GetMockErrors(ctx)
 	if settleErr != nil && err == nil {
 		err = fmt.Errorf("%w: keploy could not tell that every call reached it: %v", models.ErrUnmatchedCallsUnread, settleErr)
@@ -1083,14 +1110,18 @@ func (a *Agent) StoreMocks(ctx context.Context, filtered []*models.Mock, unfilte
 	copy(storage.filtered, filtered)
 	copy(storage.unfiltered, unfiltered)
 	if provenswitch.On() {
-		// Which recorded container keys are ambiguous is read from the whole
-		// set, before any mock is refused or consumed.
+		// Which recorded container keys are ambiguous, and the destinations
+		// the recording names (read only by the proven paths), are read from
+		// the whole set, before any mock is refused or consumed.
 		var tally containerkey.RecordedTally
+		storage.dests = recordedDests{}
 		for _, m := range storage.filtered {
 			tally.Add(m)
+			storage.dests.add(m)
 		}
 		for _, m := range storage.unfiltered {
 			tally.Add(m)
+			storage.dests.add(m)
 		}
 		containerkey.Default.SetRecorded(&tally)
 		storage.filtered = a.refuseUnfollowable(storage.filtered, storage)
@@ -1225,10 +1256,14 @@ func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHe
 	var asyncMocks []*models.Mock
 	wantAsync := a.wantsAsyncMocks() // skip the per-mock async check when unused
 	// Under the proven switch, which recorded container keys are ambiguous
-	// is read from the whole set (containerkey.RecordedTally), every mock
+	// is read from the whole set (containerkey.RecordedTally), and the
+	// destinations the recording names are noted (recordedDests), every mock
 	// counted as it is decoded, before any is refused or parked on disk.
 	proven := provenswitch.On()
 	var tally containerkey.RecordedTally
+	if proven {
+		storage.dests = recordedDests{}
+	}
 
 	for i := 0; i < total; i++ {
 		if i%1024 == 0 {
@@ -1245,6 +1280,7 @@ func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHe
 		mocknoise.MaterializeCorrelations(mock)
 		if proven {
 			tally.Add(mock)
+			storage.dests.add(mock)
 		}
 		if proven && !a.followable(mock) {
 			storage.noteRefused(mock)

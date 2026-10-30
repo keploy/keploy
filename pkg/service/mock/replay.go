@@ -207,6 +207,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		RecordRequests:   requests,
 		ConfigPath:       m.config.ConfigPath,
 		PassThroughPorts: config.GetByPassPorts(m.config),
+		AllowEgress:      m.config.Test.AllowEgress,
 
 		DisableHandshakeHold: m.config.Record.DisableHandshakeHold,
 	}
@@ -740,7 +741,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	// failure, but nothing proves the run isolated either.
 	if t := lostNotJudged.NotJudgedText(); t != "" && captureIncomplete == "" && captureUnverified == "" {
 		captureUnverified = t
-		m.logger.Warn("this replay is not verified: the test command called what keploy cannot capture, a TLS client abandoned its handshake, or the Docker daemon did not answer keploy's read of a container a call reached ("+provenswitch.Env+"=1)",
+		m.logger.Warn("this replay is not verified: the test command called what keploy cannot capture, a TLS client abandoned its handshake, the kernel dropped connection attempts at keploy's proxy listener, or the Docker daemon did not answer keploy's read of a container a call reached ("+provenswitch.Env+"=1)",
 			zap.String("mock-set", name), zap.String("reason", t),
 			zap.String("next_step", lostNotJudged.NotJudgedRemedy()))
 	}
@@ -1116,6 +1117,13 @@ func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded, 
 	refuse := func(why string) error {
 		return fmt.Errorf("keploy cannot judge each test of mock set %q: %s; record it again with keploy mock record", name, why)
 	}
+	// unreadable is refuse for a mappings file keploy cannot read, which a
+	// hand edit may have made so (a test entry with both mock lists): a
+	// record would replace the edit, so correcting it comes first. err is
+	// kept (models.BothMockListsError names the test).
+	unreadable := func(err error) error {
+		return fmt.Errorf("keploy cannot judge each test of mock set %q: its mappings cannot be read: %w; if you edited the set's mappings file, correct that edit (a record would replace it), otherwise record the set again with keploy mock record", name, err)
+	}
 	if m.mappingDB == nil {
 		return refuse("this keploy reads no per-test mappings")
 	}
@@ -1125,14 +1133,14 @@ func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded, 
 	}
 	mp, err := reader.GetMapping(ctx, name)
 	if err != nil {
-		return refuse("its mappings cannot be read: " + err.Error())
+		return unreadable(err)
 	}
 	if mp != nil && (len(mp.Boots) > 0 || len(mp.Suites) > 0) {
 		return refuse("its tests start apps of their own (boots), which this release does not judge test by test")
 	}
 	mappings, _, err := m.mappingDB.Get(ctx, name)
 	if err != nil {
-		return refuse("its mappings cannot be read: " + err.Error())
+		return unreadable(err)
 	}
 	pp, ok := m.instrumentation.(ProvenTablePusher)
 	if !ok {
@@ -1147,8 +1155,8 @@ func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded, 
 		table[testName] = names
 	}
 	pool, unknown := poolSlices(mp, table, loaded, decoded)
-	if len(unknown) > 0 {
-		return refuse("its mappings name mocks the recording does not have: " + strings.Join(unknown, ", "))
+	if unknown = append(unknown, unknownBesideTests(mp, decoded, unknown)...); len(unknown) > 0 {
+		return m.refuseUnknownMocks(ctx, name, mp, unknown)
 	}
 	table = heldOnly(table, loaded)
 	if !ownsTestMocks(table, loaded) {
@@ -1159,8 +1167,144 @@ func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded, 
 	if err := pp.PushProvenTable(ctx, table, pool); err != nil {
 		return refuse("its agent refused the per-test table: " + err.Error())
 	}
+	m.mockOwners = models.MockOwners(table)
 	m.logger.Info("per-test scoping enabled", zap.Int("tests", len(table)), zap.Int("pool slices", len(pool)), zap.String("mock-set", name))
 	return nil
+}
+
+// unknownBesideTests is, sorted, each name mappings' worker:, shared: and
+// runner: give that no decoded mock has and that seen does not list: a name
+// none of them serves (they are the pool's whatever they say), but a hand edit
+// that names a mock the recording does not have, which is refused like one in
+// a test's list or startup: (poolSlices) rather than ignored.
+func unknownBesideTests(mp *models.Mapping, decoded []*models.Mock, seen []string) []string {
+	if mp == nil {
+		return nil
+	}
+	have := make(map[string]bool, len(decoded)+len(seen))
+	for _, mk := range decoded {
+		if mk != nil && mk.Name != "" {
+			have[mk.Name] = true
+		}
+	}
+	for _, n := range seen {
+		have[n] = true
+	}
+	var out []string
+	for _, entries := range [][]models.MockEntry{mp.Worker, mp.Shared, mp.Runner} {
+		for _, e := range entries {
+			if e.Name != "" && !have[e.Name] {
+				have[e.Name] = true
+				out = append(out, e.Name)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// refuseUnknownMocks is the refusal of a set whose mappings.yaml names mocks
+// (unknown) its recording does not have: each with where the file names it
+// (models.Mapping.MockPlaces), and what to do, for a hand edit and for a
+// recording that lost them alike.
+func (m *mockService) refuseUnknownMocks(ctx context.Context, name string, mp *models.Mapping, unknown []string) error {
+	places := mp.MockPlaces()
+	sort.Strings(unknown)
+	dir := filepath.Base(m.config.Path)
+	// The file the replay's read took the set's mocks from, and the named
+	// documents of it the read skipped, with the read's own reasons: such a
+	// name is not a wrong one, the edit to correct is in the mocks file. Nil
+	// when the file could not be read again: then no name is called absent.
+	var file string
+	var unread map[string]models.SkippedMock
+	if m.mockDB != nil {
+		file, unread = m.mockDB.SkippedMocks(ctx, name)
+	}
+	if file == "" {
+		file = MocksFile(m.config.Path, name)
+	}
+	mocks := "mocks.yaml"
+	if file != "" {
+		mocks = filepath.Base(file)
+	}
+	mappings := "mappings.yaml"
+	for _, f := range []string{"mappings.yaml", "mappings.json"} {
+		if info, err := os.Stat(filepath.Join(m.config.Path, name, f)); err == nil && info.Mode().IsRegular() {
+			mappings = f
+			break
+		}
+	}
+	var absent, unchecked, skipped []string
+	var cutShort, edited, newer, connFailure, yamlOnly bool
+	for _, n := range unknown {
+		where := ""
+		if w := places[n]; len(w) > 0 {
+			where = " (under " + strings.Join(w, ", ") + ")"
+		}
+		d, ok := unread[n]
+		switch {
+		case unread == nil:
+			unchecked = append(unchecked, n+where)
+		case !ok:
+			absent = append(absent, n+where)
+		case d.Why == models.MockSkipCutShort && d.Cause != "":
+			// An NDJSON line: whole JSON, with a spec that does not decode.
+			cutShort = true
+			skipped = append(skipped, fmt.Sprintf("%s%s, the file's last line, which has no newline and whose spec does not decode (%s): keploy reads it as a write cut short", n, where, d.Cause))
+		case d.Why == models.MockSkipCutShort:
+			cutShort = true
+			skipped = append(skipped, n+where+", the file's last document, whose last line has no newline: keploy reads it as a write cut short")
+		case d.Why == models.MockSkipNoKind:
+			edited = true
+			skipped = append(skipped, n+where+", which has no kind")
+		case d.Why == models.MockSkipConnFailure:
+			connFailure = true
+			skipped = append(skipped, n+where+", a connection failure this keploy cannot replay")
+		case d.Why == models.MockSkipYAMLOnlyKind:
+			yamlOnly = true
+			skipped = append(skipped, fmt.Sprintf("%s%s, of kind %q, which keploy reads only from a YAML mock file", n, where, d.Kind))
+		default:
+			edited, newer = true, true
+			skipped = append(skipped, fmt.Sprintf("%s%s, of kind %q, which this keploy cannot read", n, where, d.Kind))
+		}
+	}
+	var why, fix []string
+	if len(skipped) > 0 {
+		why = append(why, fmt.Sprintf("%s/%s/%s has mocks %s/%s/%s names that this keploy skips: %s",
+			dir, name, mocks, dir, name, mappings, strings.Join(skipped, "; ")))
+		if cutShort {
+			if filepath.Ext(mocks) == ".json" {
+				fix = append(fix, fmt.Sprintf("If you saved %s by hand, give its last line the spec keploy wrote and end the line with a newline", mocks))
+			} else {
+				fix = append(fix, fmt.Sprintf("If you saved %s by hand, end it with a newline once its last mock is whole", mocks))
+			}
+		}
+		if edited {
+			fix = append(fix, fmt.Sprintf("If you edited %s, give each mock this keploy cannot read back the kind and spec keploy wrote", mocks))
+		}
+		if newer {
+			fix = append(fix, "If a newer keploy or keploy enterprise recorded them, upgrade keploy or use keploy enterprise")
+		}
+		if connFailure {
+			fix = append(fix, fmt.Sprintf("If a newer keploy recorded a connection failure, upgrade keploy to replay it; if you edited one in %s, give it back the fields keploy wrote", mocks))
+		}
+		if yamlOnly {
+			fix = append(fix, fmt.Sprintf("Keploy reads a mock of such a kind only from a YAML mock file, and one with a \"-\" in its kind only with keploy enterprise: record the set again in YAML, not as %s", mocks))
+		}
+	}
+	if len(absent) > 0 {
+		why = append(why, fmt.Sprintf("%s/%s/%s names mocks %s/%s/%s does not have: %s",
+			dir, name, mappings, dir, name, mocks, strings.Join(absent, ", ")))
+		fix = append(fix, fmt.Sprintf("If you edited %s, correct those names", mappings))
+	}
+	if len(unchecked) > 0 {
+		// The file was not read again, so nothing says whether it has them.
+		why = append(why, fmt.Sprintf("%s/%s/%s names mocks the replay did not read from %s/%s/%s: %s",
+			dir, name, mappings, dir, name, mocks, strings.Join(unchecked, ", ")))
+		fix = append(fix, fmt.Sprintf("Check that %s has each of them, and that keploy can read it", mocks))
+	}
+	return fmt.Errorf("keploy cannot judge each test of mock set %q: %s. %s; otherwise record the set again with keploy mock record",
+		name, strings.Join(why, "; "), strings.Join(fix, ". "))
 }
 
 // ownsTestMocks reports whether a test of table owns a test mock: a
@@ -1880,6 +2024,15 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 		counts.missesUnread = models.UnreadCause(missesErr)
 	}
 	counts.tests = withRealListed(withReal(withEvidence(testReceipts(flows, consumedErr == nil, missesErr == nil), detail.windows), detail.windows), m.realListed)
+	// Under the proven switch a miss whose closest recording another test
+	// owns names that test, as keploy test's replay does (markRecordedIn):
+	// judging lists it as the root of the test's entry.
+	if named := withRecordedIn(counts.tests, m.mockOwners); len(named) > 0 {
+		m.logger.Warn("tests made a call that another test recorded: likely, at record time that test made it on a connection it opened, whose handshake was recorded there (KEPLOY_PROVEN=1); each is named under evidence.misses.recorded_in in "+TestsReceiptFile,
+			zap.String("mock-set", m.setName()),
+			zap.Strings("calls", named[:min(len(named), 20)]),
+			zap.String("next_step", "record the set again with keploy mock record so each test opens the connections it uses, or keep the application's connection reuse as it was when recording"))
+	}
 	for i := range counts.tests {
 		counts.tests[i].Learned = learned[counts.tests[i].Name]
 	}
@@ -1991,6 +2144,30 @@ func withEvidence(tests []TestReceipt, windows []models.ScopeWindow) []TestRecei
 		}
 	}
 	return tests
+}
+
+// withRecordedIn names, on each miss of tests' evidence that is a recording
+// its test does not own (NotOwned, ClosestMock), the other test that owns it
+// (owners: models.MockOwners of the table the replay pushed), as keploy
+// test's replay does (models.UnmatchedCall.NameRecordedIn). The evidence is
+// withEvidence's own copy, never the windows'. It returns
+// "test: call (closest mock, recorded in test)" for each it named. With the
+// switch off owners is nil and no miss is NotOwned: nothing changes.
+func withRecordedIn(tests []TestReceipt, owners map[string][]string) []string {
+	var named []string
+	for i := range tests {
+		ev := tests[i].Evidence
+		if ev == nil {
+			continue
+		}
+		for j := range ev.Misses {
+			c := &ev.Misses[j]
+			if c.NameRecordedIn(tests[i].Name, owners) {
+				named = append(named, fmt.Sprintf("%s: %s (%s, recorded in %s)", tests[i].Name, c.ActualSummary, c.ClosestMock, c.RecordedIn))
+			}
+		}
+	}
+	return named
 }
 
 // testReceipts is each test's line in the receipt: its verdict and what it

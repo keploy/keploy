@@ -9,6 +9,7 @@ require (
 	github.com/agnivade/levenshtein v1.1.1
 	github.com/andybalholm/brotli v1.2.0
 	github.com/bufbuild/protocompile v0.14.1
+	github.com/cespare/xxhash/v2 v2.3.0
 	github.com/cilium/ebpf v0.22.0
 	github.com/cloudflare/cfssl v1.6.4
 	github.com/compose-spec/compose-go/v2 v2.15.0
@@ -92,7 +93,6 @@ require (
 	github.com/bodgit/windows v1.0.1 // indirect
 	github.com/buger/goterm v1.0.4 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
-	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/charmbracelet/colorprofile v0.4.2 // indirect
 	github.com/charmbracelet/lipgloss v0.12.1 // indirect
 	github.com/charmbracelet/ultraviolet v0.0.0-20251205161215-1948445e3318 // indirect

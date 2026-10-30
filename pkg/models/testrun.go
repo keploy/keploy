@@ -476,9 +476,15 @@ type UnmatchedCall struct {
 	Protocol      string `json:"protocol" yaml:"protocol"`
 	ActualSummary string `json:"actual_summary,omitempty" yaml:"actual_summary,omitempty"` // e.g. "POST /comments"
 	Destination   string `json:"destination,omitempty" yaml:"destination,omitempty"`       // outgoing call's destination/domain (HTTP Host, or host:port) — which upstream missed
-	ClosestMock   string `json:"closest_mock,omitempty" yaml:"closest_mock,omitempty"`     // internal mock reference for View Closest
-	Diff          string `json:"diff,omitempty" yaml:"diff,omitempty"`
-	NextSteps     string `json:"next_steps,omitempty" yaml:"next_steps,omitempty"` // actionable remediation guidance from the matcher
+	// LiveDestination is, under the proven switch, the address the call was
+	// made to when Destination names it as the recording does instead (the
+	// mocks' destAddr: 127.0.0.1:27017 where the app reached [::1]:27017,
+	// the same loopback port), so a reader who greps mocks.yaml for
+	// Destination finds the mocks; "" when the two are the same.
+	LiveDestination string `json:"live_destination,omitempty" yaml:"live_destination,omitempty"`
+	ClosestMock     string `json:"closest_mock,omitempty" yaml:"closest_mock,omitempty"` // internal mock reference for View Closest
+	Diff            string `json:"diff,omitempty" yaml:"diff,omitempty"`
+	NextSteps       string `json:"next_steps,omitempty" yaml:"next_steps,omitempty"` // actionable remediation guidance from the matcher
 	// MatchPhase, CandidateCount and FieldDiffs mirror MockMismatchReport so
 	// report consumers (CLI `keploy report`, report yaml, platform UI) can
 	// render structured field-level drift instead of an opaque string. Paths

@@ -60,6 +60,7 @@ var mockDeps = struct {
 func RegisterMockDeps(kind Kind, fn MockDepsFunc) (previous MockDepsFunc) {
 	mockDeps.Lock()
 	defer mockDeps.Unlock()
+	defer mockRulesChanged()
 	previous = mockDeps.byKind[kind]
 	if fn == nil {
 		delete(mockDeps.byKind, kind)

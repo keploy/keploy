@@ -632,6 +632,9 @@ type Replayer struct {
 	// answered and that are the set's, no test's (proven switch): those made
 	// before its first test (before_set_calls.go).
 	setCalls setCalls
+	// keptInside is each destination the app called that no mock answered,
+	// over the whole run, for the run's report of them (kept_inside.go).
+	keptInside keptInside
 	// requestsUnread are the test cases of the set RunTestSet is running
 	// whose request the agent did not say its learn step took
 	// (test_request_read.go).
@@ -1424,6 +1427,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 	if !abortTestRun {
 		r.printSummary(ctx, testRunResult)
 		r.sayUnattributed()
+		r.sayKeptInside()
 
 		// Print the mismatch table whenever there ARE mock mismatches — not
 		// only when the run as a whole failed. A green run with mock misses
@@ -1684,7 +1688,7 @@ func (r *Replayer) Instrument(ctx context.Context) (*InstrumentState, error) {
 		passPortsUint32[i] = uint32(port)
 	}
 
-	setupOpts := models.SetupOptions{Container: r.config.ContainerName, CommandType: r.config.CommandType, DockerDelay: r.config.BuildDelay, Mode: models.MODE_TEST, BuildDelay: r.config.BuildDelay, EnableTesting: true, GlobalPassthrough: r.config.Record.GlobalPassthrough, DisableHandshakeHold: r.config.Record.DisableHandshakeHold, ChannelBindingShim: r.config.Record.ChannelBindingShim, ConfigPath: r.config.ConfigPath, PassThroughPorts: passPortsUint, InMemoryCompose: r.config.InMemoryCompose,
+	setupOpts := models.SetupOptions{Container: r.config.ContainerName, CommandType: r.config.CommandType, DockerDelay: r.config.BuildDelay, Mode: models.MODE_TEST, BuildDelay: r.config.BuildDelay, EnableTesting: true, GlobalPassthrough: r.config.Record.GlobalPassthrough, AllowEgress: r.config.Test.AllowEgress, DisableHandshakeHold: r.config.Record.DisableHandshakeHold, ChannelBindingShim: r.config.Record.ChannelBindingShim, ConfigPath: r.config.ConfigPath, PassThroughPorts: passPortsUint, InMemoryCompose: r.config.InMemoryCompose,
 		// A run that learns noise from its misses settles each test's calls
 		// before they are read, from the agent's start (SettleReads).
 		SettleReads: r.config.Test.LearnsNoise}
@@ -5843,7 +5847,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	if uncapturable, lost := testsKeployCannotCapture(testCaseResults); len(uncapturable) > 0 && (testSetStatus == models.TestSetStatusPassed || testSetStatus == models.TestSetStatusFailed || notJudged != "") {
 		what := lost.NotJudgedText()
 		notJudged = alsoNotJudged(notJudged, notCapturableReason(uncapturable, what))
-		r.logger.Error("test-set is not judged: while some of its tests ran, the application called what keploy cannot capture, a TLS client abandoned its handshake, the Docker daemon did not answer keploy's read of a container a call reached, or keploy's agent had been started again under the running application ("+provenswitch.Env+"=1)",
+		r.logger.Error("test-set is not judged: while some of its tests ran, the application called what keploy cannot capture, a TLS client abandoned its handshake, the kernel dropped connection attempts at keploy's proxy listener, the Docker daemon did not answer keploy's read of a container a call reached, or keploy's agent had been started again under the running application ("+provenswitch.Env+"=1)",
 			zap.String("test-set", testSetID),
 			zap.Strings("tests", uncapturable),
 			zap.String("reason", what),
@@ -8967,6 +8971,7 @@ func (r *Replayer) readMockErrors(ctx context.Context) testMisses {
 		return testMisses{}
 	}
 	calls, err := r.instrumentation.GetMockErrors(ctx)
+	r.keptInside.add(calls)
 	// What was missed before the set's first test is the set's, not this
 	// test's (before_set_calls.go).
 	calls = r.setCalls.take(calls)
@@ -9294,7 +9299,10 @@ func buildActualMockInfos(consumed []models.MockState, known bool) []models.Mock
 // passing tests' entries, pass --update-test-mapping").
 //
 // With TestCases empty, Insert's seed-from-existing loop carries every
-// on-disk entry through untouched and only the section is added.
+// on-disk entry's mocks through and only the section is added. Under the
+// proven switch the rest of each entry (cases, dir, starts...) and the boots,
+// suites and runner sections are kept too; without it Insert drops them, as
+// it always has (mapdb.TestInsertKeepsWhatItDoesNotWrite).
 //
 // Fires at most once per test set (gated on the section being genuinely
 // absent), so it cannot churn the file. A read failure costs the section,

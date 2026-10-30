@@ -3,6 +3,7 @@ package models
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -267,6 +268,42 @@ type BootSpec struct {
 	Mocks   []MockEntry `json:"mocks" yaml:"mocks" bson:"mocks"`
 }
 
+// MockPlaces says where in the mapping each mock name is named, as a reader of
+// mappings.yaml finds it: "test <id>" for a test's own list, and "startup:",
+// "runner:", "worker:", "shared:" or "boots:" for the set's sections. A name
+// named in several places has each once: its tests in the file's order,
+// then the sections in that order.
+func (m *Mapping) MockPlaces() map[string][]string {
+	out := map[string][]string{}
+	if m == nil {
+		return out
+	}
+	add := func(name, place string) {
+		if name != "" && !slices.Contains(out[name], place) {
+			out[name] = append(out[name], place)
+		}
+	}
+	for _, tc := range m.TestCases {
+		for _, e := range tc.Mocks {
+			add(e.Name, "test "+tc.ID)
+		}
+	}
+	for _, s := range []struct {
+		place   string
+		entries []MockEntry
+	}{{"startup:", m.Startup}, {"runner:", m.Runner}, {"worker:", m.Worker}, {"shared:", m.Shared}} {
+		for _, e := range s.entries {
+			add(e.Name, s.place)
+		}
+	}
+	for _, b := range m.Boots {
+		for _, e := range b.Mocks {
+			add(e.Name, "boots:")
+		}
+	}
+	return out
+}
+
 // StartupMockNames returns the names of the test-set-scoped startup mocks. Callers
 // building a "which mocks does this run need?" set MUST include these regardless of
 // which test cases were selected: unlike per-test entries they are not tied to a
@@ -287,7 +324,10 @@ func (m *Mapping) StartupMockNames() []string {
 }
 
 type MappedTestCase struct {
-	ID    string      `json:"id" yaml:"id" bson:"id"`
+	ID string `json:"id" yaml:"id" bson:"id"`
+	// Mocks is written and read as mock_entries (MarshalYAML, MarshalJSON);
+	// mocks is the key of the older shapes only, and under the proven switch
+	// an entry with both is refused (errBothMockLists).
 	Mocks []MockEntry `json:"mocks" yaml:"mocks" bson:"mocks"`
 	// Cases names the test cases this test produced when its record captured incoming requests.
 	Cases     []string            `json:"cases,omitempty" yaml:"cases,omitempty" bson:"cases,omitempty"`
@@ -448,13 +488,38 @@ func (tc *MappedTestCase) UnmarshalYAML(node *yaml.Node) error {
 	return nil
 }
 
+// errBothMockLists is a test entry with a mock_entries list and a mocks list
+// beside it, under the proven switch: keploy reads mock_entries only, so the
+// mocks list (a hand edit, or an undo followed to the letter) would be dropped
+// without a word, and the next rewrite of the file would erase it. With the
+// switch off the entry reads as it did before: mock_entries alone.
+const errBothMockLists = "test %q in mappings has both `mocks` and `mock_entries`, and keploy reads only `mock_entries`: move the entries under `mocks` into `mock_entries`, then delete `mocks`"
+
+// BothMockListsError is the refusal of a test entry that holds both mock
+// lists (errBothMockLists), with the entry's id (Test): a reader that checks
+// a set (enterprise's keploy mock check) names the entry from it, as a
+// replay refuses the set with it.
+type BothMockListsError struct{ Test string }
+
+func (e *BothMockListsError) Error() string { return fmt.Sprintf(errBothMockLists, e.Test) }
+
 // unmarshalYAMLEntry reads a test entry's id, mocks and the persisted
 // format's other fields, in whichever shape the entry has.
 func (tc *MappedTestCase) unmarshalYAMLEntry(node *yaml.Node) error {
+	if provenswitch.On() && mergedField(node, "mock_entries") != nil && nodeHasEntries(mergedField(node, "mocks"), "mocks") {
+		var e struct {
+			ID string `yaml:"id"`
+		}
+		_ = node.Decode(&e)
+		return &BothMockListsError{Test: e.ID}
+	}
 	// Prefer the backward-compatible persisted format first.
 	var persisted persistedTestFormat
 	perr := node.Decode(&persisted)
-	if perr == nil && (nodeHasField(node, "mock_entries") || ((nodeHasField(node, "dir") || nodeHasField(node, "starts") || nodeHasField(node, "cases")) && !nodeHasField(node, "mocks"))) {
+	// A field a merge key (<<) brings counts as the entry's own, as the
+	// decode above reads it and as the both-lists check sees it.
+	has := func(field string) bool { return mergedField(node, field) != nil }
+	if perr == nil && (has("mock_entries") || ((has("dir") || has("starts") || has("cases")) && !has("mocks"))) {
 		tc.applyDecodedMocks(persisted.ID, persisted.MockEntries, "", persisted.Cases)
 		tc.extras(persisted)
 		return nil
@@ -512,6 +577,13 @@ func (tc *MappedTestCase) UnmarshalJSON(data []byte) error {
 
 // unmarshalJSONEntry is unmarshalYAMLEntry for a JSON entry.
 func (tc *MappedTestCase) unmarshalJSONEntry(data []byte) error {
+	if provenswitch.On() && jsonContainsField(data, "mock_entries") && jsonHasEntries(data, "mocks") {
+		var e struct {
+			ID string `json:"id"`
+		}
+		_ = json.Unmarshal(data, &e)
+		return &BothMockListsError{Test: e.ID}
+	}
 	var persisted persistedTestFormat
 	perr := json.Unmarshal(data, &persisted)
 	if perr == nil && (jsonContainsField(data, "mock_entries") || ((jsonContainsField(data, "dir") || jsonContainsField(data, "starts") || jsonContainsField(data, "cases")) && !jsonContainsField(data, "mocks"))) {
@@ -629,6 +701,77 @@ func nodeHasField(node *yaml.Node, field string) bool {
 		}
 	}
 	return false
+}
+
+// nodeHasEntries reports whether the mapping node holds field with at least
+// one entry: a list with an item, or the earlier format's comma-separated
+// string of names with one. An empty or null value loses nothing when it is
+// not read.
+func nodeHasEntries(node *yaml.Node, field string) bool {
+	if node == nil || node.Kind != yaml.MappingNode {
+		return false
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		if node.Content[i].Value == field {
+			v := node.Content[i+1]
+			for v.Kind == yaml.AliasNode && v.Alias != nil {
+				v = v.Alias
+			}
+			switch v.Kind {
+			case yaml.SequenceNode, yaml.MappingNode:
+				return len(v.Content) > 0
+			case yaml.ScalarNode:
+				return v.Tag != "!!null" && strings.Trim(v.Value, " ,") != ""
+			}
+			return true
+		}
+	}
+	return false
+}
+
+// mergedField is the mapping that gives node field: node itself, else the
+// first mapping its merge keys (<<) name that has it, as YAML resolves them;
+// nil when none does.
+func mergedField(node *yaml.Node, field string) *yaml.Node {
+	if nodeHasField(node, field) {
+		return node
+	}
+	if node == nil || node.Kind != yaml.MappingNode {
+		return nil
+	}
+	var merged []*yaml.Node
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		if node.Content[i].Value == "<<" {
+			merged = append(merged, node.Content[i+1])
+		}
+	}
+	for _, m := range MergedMappings(merged) {
+		if nodeHasField(m, field) {
+			return m
+		}
+	}
+	return nil
+}
+
+// jsonHasEntries is nodeHasEntries for a JSON object.
+func jsonHasEntries(data []byte, field string) bool {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return false
+	}
+	var list []json.RawMessage
+	if json.Unmarshal(raw[field], &list) == nil {
+		return len(list) > 0
+	}
+	var names string
+	if json.Unmarshal(raw[field], &names) == nil {
+		return strings.Trim(names, " ,") != ""
+	}
+	var object map[string]json.RawMessage
+	if json.Unmarshal(raw[field], &object) == nil {
+		return len(object) > 0
+	}
+	return len(raw[field]) > 0 && string(raw[field]) != "null"
 }
 
 func jsonContainsField(data []byte, field string) bool {

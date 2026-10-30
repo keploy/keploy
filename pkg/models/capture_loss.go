@@ -140,6 +140,29 @@ const (
 	// (ContainerUnreadMetadata), whenever its stamp came, and leaves the
 	// count out (Without). Only under the proven switch.
 	CaptureLossContainerUnread CaptureLossKind = "container_unread"
+	// CaptureLossListenerDropped: the kernel dropped, at keploy's proxy
+	// listener, what can lose a connection while a test ran (a SYN or final
+	// ACK its SYN or accept queue had no room for: both the listener's drops
+	// and its network namespace's ListenDrops rose, models.ListenDrops), so a
+	// call of the test's may not have reached keploy. The client's
+	// retransmission completes most such connections, and one keploy then
+	// accepted lost nothing, but keploy cannot tell it from one whose client
+	// gave up: that takes a count of the connects begun to the proxy, which
+	// keploy's kernel programs do not keep. So the test is NOT JUDGED
+	// (NotJudged), never failed. A test's own kind (PerTest), charged where
+	// a call keploy missed then would be (listenerDropWhere): the agent
+	// charges it at the end of the test whose window the drop fell in, or,
+	// in keploy test, at the read of the misses of the test case that ended
+	// before it; a drop between two tests is the next test's; one before a
+	// test process's claim (the agent's ClaimInstance), or after the run's
+	// last test (its closeDropsGap), is the run's, where every loss there
+	// is. The one place a drop is not charged as a miss: in keploy test, one
+	// before a set's first test case is that test case's, where a miss is
+	// the set's. A drop is counted once both its counts have risen, so one whose
+	// second rise comes after a test's end is the next test's. What says why
+	// every drop at the listener counted, when keploy could not read its
+	// network namespace's count. Only under the proven switch.
+	CaptureLossListenerDropped CaptureLossKind = "listener_dropped"
 	// CaptureLossKernelSkip: the kernel skipped runs of a kernel program of
 	// keploy's that sees the application's connections, and nothing else
 	// does that program's work (the hooks' coverage map, programSkips). A
@@ -230,10 +253,11 @@ const ContainerUnreadMetadata = "containerUnread"
 // NotJudged reports whether a loss of kind k leaves the tests it taints
 // without a verdict (decision 20), rather than failing them: a call keploy
 // cannot capture at all (a Unix socket, a server-first protocol it relays),
-// or a TLS handshake abandoned without a word, which keploy cannot tell lost
-// a call, as opposed to one it saw and lost.
+// or a TLS handshake abandoned without a word, or a connection attempt the
+// kernel dropped at keploy's listener, which keploy cannot tell lost a call,
+// as opposed to one it saw and lost.
 func (k CaptureLossKind) NotJudged() bool {
-	return k == CaptureLossUnixSocket || k == CaptureLossUnixUnseen || k == CaptureLossTLSAbandoned || k == CaptureLossServerFirst || k == CaptureLossRefusedAtAccept || k == CaptureLossContainerUnread || k == CaptureLossUnclassified || k == CaptureLossAgentStartedAgain
+	return k == CaptureLossUnixSocket || k == CaptureLossUnixUnseen || k == CaptureLossTLSAbandoned || k == CaptureLossServerFirst || k == CaptureLossRefusedAtAccept || k == CaptureLossContainerUnread || k == CaptureLossListenerDropped || k == CaptureLossUnclassified || k == CaptureLossAgentStartedAgain
 }
 
 // Evidence reports whether a loss of kind k is evidence only, never a
@@ -428,13 +452,19 @@ const KernelSkipRemedy = "run keploy where the kernel does not preempt its progr
 // again while the application ran on (CaptureLossAgentStartedAgain).
 const AgentStartedAgainRemedy = "find why the agent restarted (its container's restart count, an OOM kill, its log); where keploy starts the application (a command, without --keep-app-alive), the test-sets after its next start are judged again"
 
+// ListenerDroppedRemedy is what to do when the kernel dropped connection
+// attempts at keploy's proxy listener (CaptureLossListenerDropped): its SYN
+// or accept queue was full, from the host's load or from more connects at
+// once than the queues hold.
+const ListenerDroppedRemedy = "find why the kernel dropped connection attempts at keploy's proxy listener (`nstat -az TcpExtListenDrops TcpExtListenOverflows` counts them: a host loaded enough to starve keploy's agent, or more connects at once than net.core.somaxconn and net.ipv4.tcp_max_syn_backlog let its queues hold)"
+
 // NotJudgedRemedy is what to do about losses that leave a test without a
 // verdict (Split's notJudged), for a next_step: reach a Unix-socket
 // dependency over TCP; report to keploy why it cannot see those calls at
 // all; make a TLS client that abandoned its handshake trust keploy's CA; list
 // a server-first destination in mock.real. Empty for none.
 func (l CaptureLosses) NotJudgedRemedy() string {
-	var unix, unseen, tls, serverFirst, refused, docker, unclassified, restarted bool
+	var unix, unseen, tls, serverFirst, refused, docker, dropped, unclassified, restarted bool
 	for _, c := range l {
 		switch c.Kind {
 		case CaptureLossAgentStartedAgain:
@@ -453,6 +483,8 @@ func (l CaptureLosses) NotJudgedRemedy() string {
 			refused = true
 		case CaptureLossContainerUnread:
 			docker = true
+		case CaptureLossListenerDropped:
+			dropped = true
 		}
 	}
 	var do []string
@@ -473,6 +505,9 @@ func (l CaptureLosses) NotJudgedRemedy() string {
 	}
 	if docker {
 		do = append(do, "make `docker inspect` of the container named answer (another operation on it, such as a stop's grace period or a hung exec, holds it)")
+	}
+	if dropped {
+		do = append(do, ListenerDroppedRemedy)
 	}
 	if unclassified {
 		do = append(do, "report it to keploy, with the agent's log, which names the process (a read of a process's PID namespace failed)")
@@ -518,12 +553,20 @@ var ErrCaptureLossesUnsupported = errors.New("this agent cannot tell whether it 
 //     sent;
 //   - a call whose container's configuration the Docker daemon did not give
 //     (container_unread), counted when the call gives up waiting;
+//   - a connection attempt the kernel dropped at keploy's listener while the
+//     test ran, or before it while no test was open (listener_dropped),
+//     counted once both its counts have risen: at the test's end, or, for
+//     one after it, at the next begin or the read that follows the test
+//     (keploy test's read of a test case's misses, a test process's claim,
+//     the run's last read), where a call keploy missed then would be
+//     charged but for the one place listenerDropWhere names;
 //   - one call's bytes the capture skipped, could not read, or stopped
 //     recording (kernel_skipped_call, capture_unread,
 //     connection_unrecorded, counted for each piece the connection carries).
 //
-// One between two tests is the next test's, as a miss between tests is.
-// Every other kind is agent-life: it taints the test it happened in and
+// One between two tests is the next test's, as a miss between tests is;
+// one before a test process's claim, or after the run's last test, is the
+// run's. Every other kind is agent-life: it taints the test it happened in and
 // every later one. That is a process keploy could not place, which lives on
 // (pid_map_refused, pid_map_refused_excluded, process_unclassified,
 // app_subtree_untracked); a connection keploy stopped parsing, failed
@@ -537,7 +580,7 @@ var ErrCaptureLossesUnsupported = errors.New("this agent cannot tell whether it 
 // build does not know. (CaptureLossRealUncaptured is a test's own too, but never in the
 // agent's counts: the agent charges it to its test itself.)
 func (k CaptureLossKind) PerTest() bool {
-	return k == CaptureLossTLSAbort || k == CaptureLossTLSAbandoned || k == CaptureLossServerFirst || k == CaptureLossRefusedAtAccept || k == CaptureLossContainerUnread || k == CaptureLossKernelSkipCall || k == CaptureLossUnread || k == CaptureLossUnrecorded
+	return k == CaptureLossTLSAbort || k == CaptureLossTLSAbandoned || k == CaptureLossServerFirst || k == CaptureLossRefusedAtAccept || k == CaptureLossContainerUnread || k == CaptureLossListenerDropped || k == CaptureLossKernelSkipCall || k == CaptureLossUnread || k == CaptureLossUnrecorded
 }
 
 // Charged is what a test is charged from l, the counts as it ends: each kind
@@ -676,6 +719,13 @@ func captureWhatShape(what string) string {
 	return strings.Join(words, " ")
 }
 
+// listenerDropWhere is where a listener_dropped loss is charged: where a call
+// keploy missed then would be, but for the one place it names (in keploy
+// test, before a set's first test case, a drop is that test case's and a
+// miss the set's). Its text says it, as the count lands on a test's line, a
+// test case's, or the run's.
+const listenerDropWhere = "a drop is charged where a call keploy missed then would be: to the test it fell in (in keploy test, to the test case that ended before it, until that test case's misses were read), otherwise to the next test, but to the run when it fell before a test process claimed the run (keploy's SDK claims it as the process starts) or after the run's last test; one exception: in keploy test, a drop before a test set's first test case is that test case's, where a missed call would be the set's"
+
 func captureLossText(c CaptureLoss) string {
 	switch c.Kind {
 	case CaptureLossPIDMap:
@@ -714,6 +764,13 @@ func captureLossText(c CaptureLoss) string {
 		return fmt.Sprintf("a destination refused the application's connections at accept, and its calls on them were passed through for real, neither recorded nor mocked: it sent data on them %d time(s)", c.Count)
 	case CaptureLossContainerUnread:
 		return fmt.Sprintf("the Docker daemon did not answer keploy's read of a container's configuration (%d time(s) a call to it was matched or recorded), so keploy cannot tell which container those calls reached, nor whether they were matched or recorded as that container's", c.Count)
+	case CaptureLossListenerDropped:
+		if c.What != "" {
+			// Its network namespace's count unread: every packet the
+			// listener dropped counted (What says why).
+			return fmt.Sprintf("the kernel dropped %d packet(s) at keploy's proxy listener (a full SYN or accept queue, or a client that gave up its connect: keploy could not tell which), so a call may not have reached keploy; "+listenerDropWhere, c.Count)
+		}
+		return fmt.Sprintf("the kernel dropped %d connection attempt(s) at keploy's proxy listener (its SYN or accept queue full), so a call may not have reached keploy: a client that retried one, which keploy then accepted, lost nothing, but keploy cannot tell that from one that gave up; "+listenerDropWhere, c.Count)
 	case CaptureLossKernelSkip:
 		return fmt.Sprintf("during its recording the kernel skipped %d capture run(s) of keploy's programs that see the application's connections (a run of a tracing program is skipped on a CPU where another run of it was preempted), while this test or one before it ran", c.Count)
 	case CaptureLossKernelSkipCall:

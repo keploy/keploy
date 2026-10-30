@@ -79,7 +79,7 @@ func TestWindowMappingsRouteAnInFlightWriteAndMarkTheSet(t *testing.T) {
 		t.Fatalf("worker scope %+v; want mock-6 at the set's start", db.worker)
 	}
 	reason := db.worker[0].Reason
-	for _, want := range []string{"mock-6 (Test insert keploy.events) routed to background at record", "`sqs` (`./sqs`) sent it before post-url-1 began", "keploy's proxy clock (proxy:run-1)", "Undo: move this entry under tests[post-url-1].mocks"} {
+	for _, want := range []string{"mock-6 (Test insert keploy.events) routed to background at record", "`sqs` (`./sqs`) sent it before post-url-1 began", "keploy's proxy clock (proxy:run-1)", "Undo: move this entry back under `tests[post-url-1].mock_entries`, without its `reason`"} {
 		if !strings.Contains(reason, want) {
 			t.Errorf("the routing line %q does not say %q", reason, want)
 		}
@@ -292,5 +292,23 @@ func TestARecordingWithNoWindowsSaysItIsNotMarked(t *testing.T) {
 				t.Fatalf("said %d times; want %v", n, tc.said)
 			}
 		})
+	}
+}
+
+// A routed write's undo names the worker-only fields its entry carries, which
+// an entry under a test's mock_entries does not take.
+func TestARoutedUndoNamesTheWorkerOnlyFields(t *testing.T) {
+	for _, tc := range []struct {
+		e    models.MockEntry
+		want string
+	}{
+		{models.MockEntry{Name: "mock-6"}, "without its `reason`:"},
+		{models.MockEntry{Name: "mock-6", Place: "P"}, "without its `reason` and `place`:"},
+		{models.MockEntry{Name: "mock-6", Place: "P", AtStop: true}, "without its `reason`, `place` and `atStop`:"},
+	} {
+		got := routedReason(models.WindowedMock{Name: "mock-6"}, "post-url-1", true, tc.e)
+		if !strings.Contains(got, "Undo: move this entry back under `tests[post-url-1].mock_entries`, "+tc.want) {
+			t.Errorf("entry %+v: the undo %q does not say %q", tc.e, got, tc.want)
+		}
 	}
 }

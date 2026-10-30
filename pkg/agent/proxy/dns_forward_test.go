@@ -80,10 +80,16 @@ func newProxyWithUpstream(t *testing.T, addr string, timeout time.Duration) *Pro
 		IP6:                "::1",
 		EnableIPv6Redirect: false,
 		dnsUpstreamServers: []string{host},
-		dnsUpstreamPort:    port,
-		dnsForwardTimeout:  timeout,
-		dnsCache:           newDNSCache(),
-		recordedDNSMocks:   newRecordedDNSMocksCache(),
+		// The fake upstream stands for an in-cluster agent's cluster DNS,
+		// the case forward-on-miss exists for: a resolver inside the
+		// replay's own network (inNetworkResolvers).
+		dnsInNetworkServers: []string{host},
+		// The cluster's own names are the ones forwarded (networkOwnsName).
+		dnsClusterDomain:  "cluster.local",
+		dnsUpstreamPort:   port,
+		dnsForwardTimeout: timeout,
+		dnsCache:          newDNSCache(),
+		recordedDNSMocks:  newRecordedDNSMocksCache(),
 	}
 }
 
@@ -341,7 +347,7 @@ func TestResolveUncachedDNSResponse_TestMode_UpstreamTimeoutFallback(t *testing.
 	t.Cleanup(emptyMgr.Close)
 	p.mockManager = emptyMgr
 
-	q := dns.Question{Name: "unreachable.example.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	q := dns.Question{Name: "unreachable.default.svc.cluster.local.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
 	entry := p.resolveUncachedDNSResponse(q, models.MODE_TEST, true, time.Now(), nil)
 
 	// On fallback we expect the synthetic A response pointing at
@@ -503,7 +509,9 @@ func TestResolveUncachedDNSResponse_TestMode_UpstreamNODATA_AQuery_RelayedNotSte
 	t.Cleanup(emptyMgr.Close)
 	p.mockManager = emptyMgr
 
-	q := dns.Question{Name: "localstack.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	// A name under the cluster domain, the in-cluster agent's own: a bare
+	// one is not forwarded at all (networkOwnsName).
+	q := dns.Question{Name: "localstack.default.svc.cluster.local.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
 	entry := p.resolveUncachedDNSResponse(q, models.MODE_TEST, true /*mockingEnabled*/, time.Now(), nil)
 
 	if entry.Msg == nil {
@@ -555,7 +563,7 @@ func TestResolveUncachedDNSResponse_TestMode_UpstreamNODATA_DualEmpty(t *testing
 	p.mockManager = emptyMgr
 
 	for _, qtype := range []uint16{dns.TypeA, dns.TypeAAAA} {
-		q := dns.Question{Name: "ipv-less.svc.", Qtype: qtype, Qclass: dns.ClassINET}
+		q := dns.Question{Name: "ipv-less.default.svc.cluster.local.", Qtype: qtype, Qclass: dns.ClassINET}
 		entry := p.resolveUncachedDNSResponse(q, models.MODE_TEST, true, time.Now(), nil)
 		if entry.Msg == nil || entry.Msg.Rcode != dns.RcodeSuccess || len(entry.Msg.Answer) != 0 {
 			t.Fatalf("%s: expected relayed empty NOERROR, got %+v", dns.TypeToString[qtype], entry.Msg)
@@ -586,7 +594,7 @@ func TestResolveUncachedDNSResponse_TestMode_UpstreamSERVFAIL_FallsBackToProxyIP
 	t.Cleanup(emptyMgr.Close)
 	p.mockManager = emptyMgr
 
-	q := dns.Question{Name: "flaky.svc.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	q := dns.Question{Name: "flaky.default.svc.cluster.local.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
 	entry := p.resolveUncachedDNSResponse(q, models.MODE_TEST, true, time.Now(), nil)
 
 	if entry.Msg == nil {

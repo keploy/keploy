@@ -16,6 +16,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/containerkey"
 	"go.keploy.io/server/v3/pkg/agent/realdeps"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -91,9 +92,21 @@ type provenWire struct {
 	unservable []string
 	// drops are the proxy listener's drops read when the window now open
 	// began (a test's begin, or the previous end); dropsKnown says they were
-	// read (settle).
-	drops      uint64
-	dropsKnown bool
+	// read (settle); dropCarry is what the window before left unpaired
+	// (chargeDrops); dropsInTest says the window open is a test's, not the
+	// gap no test holds (closeDropsGap, and a claim's closeDropsGapHeld). dropsUncounted are what the gaps
+	// charged, with why every drop counted, that an agent which counts no
+	// capture losses keeps for the next test's end (countDrops).
+	drops             models.ListenDrops
+	dropsKnown        bool
+	dropCarry         dropCarry
+	dropsInTest       bool
+	dropsUncounted    uint64
+	dropsUncountedWhy string
+	// owned is the work the last window's end cut (settledSince), nil when
+	// it cut none (its proxy cannot, or the switch is off): all a begin
+	// waits for (settleBegin).
+	owned coreAgent.InFlightScope
 	// refusals are what the wire refused, and what an integration refused
 	// and told the agent, in order, as windows (models.ScopeWindow.Refused).
 	refusals []models.ScopeWindow
@@ -105,8 +118,9 @@ type provenWire struct {
 	topology topologyRows
 	// losses is the run's capture-loss counts at its start, which each
 	// test's end counts from (capture_loss.go); testLosses the counts as the
-	// previous test ended, which a test's own kinds (models.PerTest) count
-	// from (nil before the first test's end: the run's mark).
+	// previous test ended, or its process claimed, which a test's own kinds
+	// (models.PerTest) count from (nil before the first test's end: the
+	// run's mark).
 	losses     captureLossMark
 	testLosses models.CaptureLosses
 	// scopeTests is, by the id of the keyer's scope each test was
@@ -222,6 +236,10 @@ func (a *Agent) resetSession(ctx context.Context) error {
 	a.provenMu.Lock()
 	a.proven = provenWire{losses: losses}
 	a.provenMu.Unlock()
+	if provenswitch.On() {
+		// The listener's drops are counted from here too (openDrops).
+		a.openDrops()
+	}
 	// A mock its stamp could not name the container of is its own test's
 	// in a record, whenever it is stamped (unreadMock).
 	containerkey.Default.OnUnreadMock(a.unreadMock)
@@ -328,8 +346,11 @@ func (a *Agent) ClaimInstance(ctx context.Context, req models.InstanceReq, calle
 		// A failed TLS handshake before this claim is the run's -- charged
 		// to no test (UnchargedCaptureLosses), and in the run's own verdict,
 		// which counts every loss while the command ran -- as its misses
-		// are: not this process's first test's. A read that fails leaves
-		// that test to count from the previous test's end.
+		// are: not this process's first test's. So is what the kernel
+		// dropped at the proxy's listener before it, counted now, before the
+		// read below (closeDropsGapHeld: the claim holds the wire). A read
+		// that fails leaves that test to count from the previous test's end.
+		a.closeDropsGapHeld(ctx)
 		if now, err := a.CaptureLosses(ctx); err == nil {
 			a.provenMu.Lock()
 			a.proven.testLosses = now
@@ -532,18 +553,22 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 		}
 		capture = c
 	}
-	// The calls the application made before this begin are settled first
-	// (settle_proven.go): they are the pool's, or the previous test's, never
-	// this test's.
+	// The previous test's calls are settled first (settleBegin): they are
+	// never this test's. Calls made since its end are this test's or
+	// background work, and do not hold the begin.
 	// A connection whose held requests cannot be told does not stop the
 	// begin: the test's end finds it, and the test is not verified.
-	drops, err := a.settle(ctx, a.replaying())
+	drops, err := a.settleBegin(ctx, a.replaying())
 	if err != nil && !errors.Is(err, errHoldsUnknown) {
 		return models.ScopeBeginResp{}, scopeErr(http.StatusInternalServerError, models.ScopeErrInternal,
 			"keploy cannot judge "+id+": "+err.Error(), "check the agent's log")
 	}
-	// The test's end compares the listener's drops with these.
-	a.markDrops(drops)
+	// The test's end waits only for the requests opened from here.
+	a.beginWindow()
+	// The drops read now close the gap's window, whose drops are the
+	// beginning test's (markDrops), and open the test's: its end compares
+	// the listener's drops with these.
+	a.markDrops(ctx, drops)
 	a.NoteScope(id, 0, dir, false)
 	// opened: the test's capture window opened (open), so a begin that
 	// fails after it takes the window back.
@@ -1058,7 +1083,7 @@ func (a *Agent) testEvidence(ctx context.Context, id string, unmade bool) (*mode
 		if !m.CountsAgainstTest() {
 			continue
 		}
-		ev.Misses = append(ev.Misses, sanitizedMiss(m))
+		ev.Misses = append(ev.Misses, sanitizedMiss(a.asRecorded(m)))
 	}
 	if err != nil {
 		return ev, fmt.Errorf("reading its misses: %w", err)
@@ -1136,7 +1161,7 @@ func (a *Agent) mocksByName(names []string) (map[string]*models.Mock, error) {
 	}
 	if len(missing) > 0 {
 		sort.Strings(missing)
-		return nil, fmt.Errorf("its mapping names mocks the loaded recording does not have: %s; record the set again", strings.Join(missing, ", "))
+		return nil, fmt.Errorf("its mappings file (mappings.yaml, or mappings.json) names mocks the loaded recording does not have: %s; if you edited it, correct those names, otherwise record the set again", strings.Join(missing, ", "))
 	}
 	return out, nil
 }
@@ -1284,7 +1309,7 @@ func (a *Agent) reapOpenTest(ctx context.Context) error {
 // value the test bound). The next step is the matcher's own fixed advice
 // (nextStepOf).
 func sanitizedMiss(m models.UnmatchedCall) models.UnmatchedCall {
-	out := models.UnmatchedCall{Protocol: m.Protocol, Destination: m.Destination, MatchPhase: m.MatchPhase,
+	out := models.UnmatchedCall{Protocol: m.Protocol, Destination: m.Destination, LiveDestination: m.LiveDestination, MatchPhase: m.MatchPhase,
 		ClosestMock: m.ClosestMock, NextSteps: nextStepOf(m), At: m.At, ActualSummary: models.MissShape(m), Differs: models.FieldShapes(m.Differs),
 		Kind: m.Kind, Recorded: m.Recorded, NotOwned: m.NotOwned, Reason: m.Reason, Concurrent: m.Concurrent.Clone(),
 		// An answered call stays one (models.UnmatchedCall.Answer): how it was
@@ -1342,7 +1367,7 @@ func (a *Agent) charge(misses []models.UnmatchedCall) {
 	}
 	kept := make([]models.UnmatchedCall, len(misses))
 	for i, m := range misses {
-		kept[i] = sanitizedMiss(m)
+		kept[i] = sanitizedMiss(a.asRecorded(m))
 	}
 	a.provenMu.Lock()
 	a.proven.charged = append(a.proven.charged, kept...)
@@ -1479,6 +1504,9 @@ func missText(m models.UnmatchedCall) string {
 	}
 	if m.Destination != "" {
 		s += " to " + m.Destination
+		if m.LiveDestination != "" {
+			s += " (live " + m.LiveDestination + ")"
+		}
 	}
 	return s
 }

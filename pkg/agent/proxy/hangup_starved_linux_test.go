@@ -92,9 +92,12 @@ func TestAHangUpItsStarvedHandlerHasNotToldIsChargedToItsTest(t *testing.T) {
 			}
 		}},
 	} {
-		for _, answers := range []bool{false, true} {
+		// scoped: the test's end reads the scope it cut as it began, as the
+		// agent's end does under the proven switch.
+		for _, mode := range []struct{ answers, scoped bool }{{false, false}, {true, false}, {false, true}, {true, true}} {
+			answers := mode.answers
 			for _, hand := range hands {
-				name := tc.name + map[bool]string{false: ", in a record", true: ", in a replay"}[answers] + hand.name
+				name := tc.name + map[bool]string{false: ", in a record", true: ", in a replay"}[answers] + hand.name + map[bool]string{false: "", true: ", its end reading its scope"}[mode.scoped]
 				t.Run(name, func(t *testing.T) {
 					ck := containerkey.Default
 					ck.Reset()
@@ -113,7 +116,7 @@ func TestAHangUpItsStarvedHandlerHasNotToldIsChargedToItsTest(t *testing.T) {
 						defer close(handled)
 						defer p.inflight.forget(tracked)
 						defer func() { _ = tracked.Close() }()
-						c, _, err := pTls.HandleTLSConnection(p.withClientTLS(context.Background(), "10.0.0.1:443"), zap.NewNop(), hand.conn(tracked), time.Time{})
+						c, _, err := pTls.HandleTLSConnection(p.withClientTLS(context.Background(), "10.0.0.1:443", 0), zap.NewNop(), hand.conn(tracked), time.Time{})
 						if err == nil {
 							_, _ = c.Read(make([]byte, 1)) // the client's first request
 						}
@@ -135,13 +138,18 @@ func TestAHangUpItsStarvedHandlerHasNotToldIsChargedToItsTest(t *testing.T) {
 					// told, the end's last step. Told first, the scope
 					// could close as late as the scheduler runs the end:
 					// in a later row's test, whose abandon it then drops.
+					pending := func() int { return p.inflight.Pending(answers) }
+					if mode.scoped {
+						sc := p.inflight.scope()
+						pending = func() int { n, _ := sc.State(answers); return n }
+					}
 					waiting := make(chan struct{})
 					lost := make(chan uint64, 1)
 					go func() {
 						first := true
 						for {
 							changed := p.inflight.Changed()
-							if p.inflight.Pending(answers) == 0 {
+							if pending() == 0 {
 								break
 							}
 							if first {
@@ -191,7 +199,7 @@ func TestAHangUpHoldHoldsNoWorkWhileItsClientIsThere(t *testing.T) {
 		defer close(read)
 		defer p.inflight.forget(tracked)
 		defer func() { _ = tracked.Close() }()
-		c, _, err := pTls.HandleTLSConnection(p.withClientTLS(context.Background(), "10.0.0.1:443"), zap.NewNop(), tracked, time.Time{})
+		c, _, err := pTls.HandleTLSConnection(p.withClientTLS(context.Background(), "10.0.0.1:443", 0), zap.NewNop(), tracked, time.Time{})
 		close(handshook)
 		if err == nil {
 			_, _ = c.Read(make([]byte, 1))
