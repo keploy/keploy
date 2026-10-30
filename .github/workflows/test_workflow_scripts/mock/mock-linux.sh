@@ -798,13 +798,16 @@ RC=${PIPESTATUS[0]}
 # The app is pytest's, which stopped it; stop it here too if pytest did not.
 APP_PID=$(cat streamapp.pid 2>/dev/null)
 [ -n "$APP_PID" ] && grep -qs streamapp.py "/proc/$APP_PID/cmdline" && sudo kill "$APP_PID"
-[ "$RC" -eq 0 ] && grep -q "3 passed" rec-stream.log ||
+# "3 passed in": a test keploy fails at its end is an error at its teardown
+# ("3 passed, 2 errors in").
+[ "$RC" -eq 0 ] && grep -q "3 passed in" rec-stream.log ||
   { echo "FAIL: a client's hang-up on a quiet streaming answer should leave its test judged (exit 0, 3 passed), got $RC"; FAIL=1; }
 GAVE=$(grep -c "made no progress settling" rec-stream.log)
 [ "$GAVE" -eq 0 ] || { echo "FAIL: keploy's agent gave up settling a test's calls ($GAVE line(s)): the client's hang-up held the test's end"; FAIL=1; }
+echo "the app's log:"; cat streamapp.log
 for P in /events /poll; do
   grep -qx "told $P" streamapp.log ||
-    { echo "FAIL: the app was never told its $P client went: keploy did not pass on the client's hang-up"; cat streamapp.log; FAIL=1; }
+    { echo "FAIL: the app was never told its $P client went: keploy did not pass on the client's hang-up"; FAIL=1; }
   grep -q "Not recording this request as a test case: its client closed.*\"url\": \"$P\"" rec-stream.log ||
     { echo "FAIL: keploy did not say it left $P's exchange unrecorded because its client closed"; FAIL=1; }
 done
