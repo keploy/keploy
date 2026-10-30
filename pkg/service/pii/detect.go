@@ -116,17 +116,26 @@ func detectJSON(value interface{}, path string) []Detection {
 	case string:
 		detections = append(detections, DetectValue(path, v)...)
 	default:
-		// Non-string JSON values are ignored unless field name itself is sensitive.
-		if isPIIFieldName(path) {
-			detections = append(detections, Detection{Field: path, PatternType: PatternFieldName})
-			detections = append(detections, DetectValue(path, fmt.Sprint(v))...)
-		}
+		// Non-string JSON values (numbers, booleans, etc.) are converted to
+		// strings so that regex-based patterns (SSN, credit card, etc.) can
+		// still match their textual representation.
+		detections = append(detections, DetectValue(path, fmt.Sprint(v))...)
 	}
 	return dedupeDetections(detections)
 }
 
 func isPIIFieldName(field string) bool {
-	parts := strings.FieldsFunc(strings.ToLower(field), func(r rune) bool {
+	// Insert a separator before each uppercase letter so that camelCase keys
+	// like "creditCard" or "socialSecurity" are split into their component
+	// words (e.g. "credit_card", "social_security") before lookup.
+	var expanded strings.Builder
+	for i, r := range field {
+		if r >= 'A' && r <= 'Z' && i > 0 {
+			expanded.WriteByte('_')
+		}
+		expanded.WriteRune(r)
+	}
+	parts := strings.FieldsFunc(strings.ToLower(expanded.String()), func(r rune) bool {
 		switch r {
 		case '.', '_', '-', '[', ']':
 			return true
