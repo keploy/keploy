@@ -277,3 +277,30 @@ func TestSimulateHTTPLogsAFailedSendByNoByteOfTheCallOrTheAnswer(t *testing.T) {
 		})
 	}
 }
+
+// keploy test's sender reads the app's chunked answer, whose trailer line has
+// no colon: net/http reads the trailer as it reads the body, and its error
+// quotes the line. The Error line ("failed reading response body") and the
+// error SimulateHTTP returns name the trailer, never the line
+// (models.BodyReadError).
+func TestSimulateHTTPLogsNoByteOfAnUnparsedTrailer(t *testing.T) {
+	const secret = "Zq7TRAILERsecret91"
+	addr := answerWith(t, "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nok\r\n0\r\nX-Sig "+secret+"\r\n\r\n")
+	logger, out := logleak.Logger(nil)
+	tc := &models.TestCase{
+		Name:    "pay",
+		Kind:    models.HTTP,
+		HTTPReq: models.HTTPReq{Method: http.MethodGet, URL: clientErrTarget(addr), Header: map[string]string{}},
+	}
+	_, err := SimulateHTTP(context.Background(), tc, "set", logger, SimulationConfig{APITimeout: 10})
+	const want = "the app's answer's body's trailer does not parse"
+	if err == nil || err.Error() != want {
+		t.Fatalf("SimulateHTTP = %v, want %q", err, want)
+	}
+	if !strings.Contains(out.String(), "failed reading response body") || !strings.Contains(out.String(), want) {
+		t.Errorf("no Error line names the trailer:\n%s", out.String())
+	}
+	if found := logleak.Find(t, out.String(), []byte(secret)); len(found) > 0 {
+		t.Errorf("the sender's log holds the app's trailer line: %v\n%s", found, out.String())
+	}
+}

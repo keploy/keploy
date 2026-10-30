@@ -2167,4 +2167,22 @@ func TestReadinessProbeReasonHoldsNoByteOfTheHealthAnswer(t *testing.T) {
 			t.Errorf("answers on a URL that does not parse = %v, %q", ok, what)
 		}
 	})
+	// A probe refused at the dial keeps its cause as it came (a refusal is
+	// told), without the *url.Error that quotes the health URL whole.
+	t.Run("a refused probe", func(t *testing.T) {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		addr := ln.Addr().String()
+		_ = ln.Close() // nothing listens there now: the dial is refused
+		const key = "Zq7PROBEURLsecret54"
+		ok, what := answers(context.Background(), "http://"+addr+"/health?token="+key, false)
+		if ok || !strings.HasPrefix(what, "last: dial tcp") || !strings.Contains(what, "refused") {
+			t.Fatalf("answers on a refused probe = %v, %q, want the refusal as its cause", ok, what)
+		}
+		if found := logleak.Find(t, what, []byte(key)); len(found) > 0 {
+			t.Errorf("the refused probe's reason holds the health URL: %v\n%q", found, what)
+		}
+	})
 }

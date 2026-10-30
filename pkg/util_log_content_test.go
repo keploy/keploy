@@ -1,8 +1,10 @@
 package pkg
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -10,6 +12,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/logleak"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap"
 )
 
 // A stream's mismatch line names the frame that differs and how long each
@@ -256,4 +259,60 @@ func TestMultipartStreamErrorHoldsNoByteOfEitherBody(t *testing.T) {
 			t.Fatalf("compareMultipartStream's error = %v, not the stall rule's cut", err)
 		}
 	})
+}
+
+// trailerSecret is planted in a chunked answer's trailer line, without its
+// colon: net/http reads the trailer as it reads the body, and its error
+// (textproto's) quotes the line whole.
+const trailerSecret = "Zq7TRAILERsecret94"
+
+// chunkedAnswerBody is the body of a chunked answer carrying body, whose
+// trailer line does not parse, as net/http's body reader gives it.
+func chunkedAnswerBody(t *testing.T, contentType, body string) io.Reader {
+	t.Helper()
+	raw := fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: %s\r\nTransfer-Encoding: chunked\r\n\r\n%x\r\n%s\r\n0\r\nX-Sig %s\r\n\r\n", contentType, len(body), body, trailerSecret)
+	resp, err := http.ReadResponse(bufio.NewReader(strings.NewReader(raw)), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp.Body
+}
+
+// Each stream compare reads a chunked answer whose trailer does not parse:
+// its error, which replay logs at Error, names the trailer, never the line
+// (models.BodyReadError, in streamCut and the binary compare's read).
+func TestStreamCompareErrorHoldsNoByteOfAnUnparsedTrailer(t *testing.T) {
+	const want = "the app's streamed answer's trailer does not parse"
+	for _, c := range []struct {
+		name    string
+		compare func(io.Reader) error
+	}{
+		{"SSE", func(r io.Reader) error {
+			_, _, _, err := compareSSEStream(models.HTTPResp{StatusCode: 200, Body: "data: one\n\ndata: two\n\n"}, r, nil, zap.NewNop())
+			return err
+		}},
+		{"NDJSON", func(r io.Reader) error {
+			_, _, _, err := compareNDJSONStream(models.HTTPResp{StatusCode: 200, Body: "{\"a\":1}\n{\"a\":2}\n"}, r, nil, zap.NewNop())
+			return err
+		}},
+		{"plain text", func(r io.Reader) error {
+			_, _, _, err := comparePlainTextStream(models.HTTPResp{StatusCode: 200, Body: "one\ntwo\n"}, r, zap.NewNop())
+			return err
+		}},
+		{"binary", func(r io.Reader) error {
+			_, _, _, err := compareBinaryStream(models.HTTPResp{StatusCode: 200, Body: "one\ntwo\n"}, r, zap.NewNop())
+			return err
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			body := map[string]string{"SSE": "data: one\n\n", "NDJSON": "{\"a\":1}\n", "plain text": "one\n", "binary": "one\n"}[c.name]
+			err := c.compare(chunkedAnswerBody(t, "text/event-stream", body))
+			if err == nil || err.Error() != want {
+				t.Fatalf("the compare's error = %v, want %q", err, want)
+			}
+			if found := logleak.Find(t, err.Error(), []byte(trailerSecret)); len(found) > 0 {
+				t.Errorf("the compare's error holds the trailer line: %v", found)
+			}
+		})
+	}
 }

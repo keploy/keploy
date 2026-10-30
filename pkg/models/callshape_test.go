@@ -9,6 +9,7 @@ import (
 	"mime/multipart"
 	"net"
 	"net/http"
+	"net/textproto"
 	"net/url"
 	"os"
 	"strings"
@@ -629,4 +630,115 @@ func TestTargetShapeKeepsNoValue(t *testing.T) {
 	} {
 		require.Equal(t, want, TargetShape(in), "%q", in)
 	}
+}
+
+// bodyReadSecret is planted where net/http's or a reader's error would quote
+// it.
+const bodyReadSecret = "Zq7BODYsecret31x"
+
+// readChunked is the error of reading a chunked body whose bytes after the
+// head are framing, as net/http's body reader gives it.
+func readChunked(t *testing.T, framing string) error {
+	t.Helper()
+	resp, err := http.ReadResponse(bufio.NewReader(strings.NewReader("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"+framing)), nil)
+	require.NoError(t, err)
+	_, err = io.ReadAll(resp.Body)
+	require.Error(t, err, "precondition: the body %q reads", framing)
+	return err
+}
+
+// net/http reads a chunked body's trailer as it reads the body, and its error
+// for a trailer line without its colon (textproto's) quotes the line whole.
+// BodyReadError names the trailer instead, and keeps the error typed.
+func TestBodyReadErrorNamesAnUnparsedTrailerByNoByteOfIt(t *testing.T) {
+	raw := readChunked(t, "2\r\nok\r\n0\r\nX-Sig "+bodyReadSecret+"\r\n\r\n")
+	require.Contains(t, raw.Error(), bodyReadSecret, "precondition: net/http's error quotes the trailer line")
+	err := BodyReadError("the app's answer's body", raw)
+	require.EqualError(t, err, "the app's answer's body's trailer does not parse")
+	var pe textproto.ProtocolError
+	require.ErrorAs(t, err, &pe, "the error is no longer typed")
+	req, rerr := http.ReadRequest(bufio.NewReader(strings.NewReader("POST / HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nok\r\n0\r\nX-Sig " + bodyReadSecret + "\r\n\r\n")))
+	require.NoError(t, rerr)
+	_, rerr = io.ReadAll(req.Body)
+	require.ErrorContains(t, rerr, bodyReadSecret, "precondition: net/http's error quotes the request's trailer line")
+	require.EqualError(t, BodyReadError("the HTTP request's body", rerr), "the HTTP request's body's trailer does not parse")
+}
+
+// An error of a kind whose text names no byte of the message is returned as
+// it is (the same error, so err == io.EOF and a type switch still tell it):
+// the short reads, a connection's errors, net/http's fixed texts for a body
+// that does not frame (each provoked from a real body, so a change of net/
+// http's text fails here), and keploy's own types that say so.
+func TestBodyReadErrorKeepsAContentFreeErrorAsItIs(t *testing.T) {
+	kept := []error{
+		io.EOF, io.ErrUnexpectedEOF, io.ErrClosedPipe, net.ErrClosed, os.ErrDeadlineExceeded,
+		context.Canceled, context.DeadlineExceeded, http.ErrBodyReadAfterClose, bufio.ErrTooLong,
+		&net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET}, syscall.EPIPE,
+		os.NewSyscallError("read", syscall.ECONNRESET), &http.MaxBytesError{Limit: 5},
+		namesNoContentForTest{},
+	}
+	for framing, text := range map[string]string{
+		"zz\r\nok\r\n0\r\n\r\n":                   "invalid byte in chunk length",
+		"\r\nok\r\n0\r\n\r\n":                     "empty hex number for chunk length",
+		"11111111111111111\r\nok\r\n":             "http chunk length too large",
+		"2\r\nokXX0\r\n\r\n":                      "malformed chunked encoding",
+		"2\nok\r\n0\r\n\r\n":                      "chunked line ends with bare LF",
+		"2\r\nok\r\n0\r\nX-A: b\r\n":              "http: suspiciously long trailer after chunked body",
+		"2\r\nok\r\n" + strings.Repeat(" ", 5000): "header line too long",
+	} {
+		e := readChunked(t, framing)
+		require.EqualError(t, e, text, "net/http's text for %q changed", framing)
+		kept = append(kept, e)
+	}
+	for _, e := range kept {
+		require.True(t, BodyReadError("the body", e) == e, "%T %q is not kept as it is", e, e)
+		require.True(t, namesNoContent(e), "%T %q", e, e)
+	}
+	for _, text := range netHTTPBodyReadTexts {
+		e := errors.New(text)
+		require.True(t, BodyReadError("the body", e) == e, "%q is not kept", text)
+	}
+	once := BodyReadError("the body", errors.New(bodyReadSecret))
+	require.True(t, BodyReadError("the body", once) == once, "a named error is named again")
+}
+
+// namesNoContentForTest is keploy's own kind of error that says its text names
+// no content.
+type namesNoContentForTest struct{}
+
+func (namesNoContentForTest) Error() string   { return "a keploy error" }
+func (namesNoContentForTest) NamesNoContent() {}
+
+// unknownBodyError is an error type BodyReadError has never seen.
+type unknownBodyError struct{ held string }
+
+func (e *unknownBodyError) Error() string { return "read failed near " + e.held }
+
+// The allowlist fails closed: an error of any other kind, an error type no
+// one has seen among them, is named by fixed text, never its own, with the
+// text of a kept kind in its tree; it stays typed, so errors.Is and errors.As
+// still tell it. A wrapper is not kept for what it wraps: its own text is not
+// known.
+func TestBodyReadErrorFailsClosedOnAnErrorItDoesNotKnow(t *testing.T) {
+	unknown := &unknownBodyError{held: bodyReadSecret}
+	for _, c := range []struct {
+		err  error
+		want string
+	}{
+		{unknown, "the body could not be read"},
+		{fmt.Errorf("read %s: %w", bodyReadSecret, io.ErrUnexpectedEOF), "the body could not be read: unexpected EOF"},
+		{fmt.Errorf("%s: %w", bodyReadSecret, &net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET}), "the body could not be read: read tcp: connection reset by peer"},
+		{fmt.Errorf("%s: %w", bodyReadSecret, errors.New("malformed chunked encoding")), "the body could not be read: malformed chunked encoding"},
+		{errors.Join(errors.New(bodyReadSecret), io.EOF), "the body could not be read: EOF"},
+		{errors.New("http: " + bodyReadSecret), "the body could not be read"},
+	} {
+		err := BodyReadError("the body", c.err)
+		require.EqualError(t, err, c.want)
+		require.NotContains(t, err.Error(), bodyReadSecret)
+		require.ErrorIs(t, err, c.err)
+	}
+	var ue *unknownBodyError
+	require.ErrorAs(t, BodyReadError("the body", fmt.Errorf("x: %w", unknown)), &ue)
+	require.ErrorIs(t, BodyReadError("the body", fmt.Errorf("x %s: %w", bodyReadSecret, io.ErrUnexpectedEOF)), io.ErrUnexpectedEOF)
+	require.NoError(t, BodyReadError("the body", nil))
 }

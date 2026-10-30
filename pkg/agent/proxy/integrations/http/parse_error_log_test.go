@@ -2,6 +2,8 @@ package http
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"net"
 	"strings"
 	"testing"
@@ -123,5 +125,107 @@ func TestPassOneCallThrough_AnUnparsedAnswerIsNamedWithoutItsText(t *testing.T) 
 	}
 	if strings.Contains(err.Error(), parseLeakToken) || !strings.Contains(err.Error(), "does not parse") {
 		t.Errorf("passOneCallThrough = %v, want the answer named without its text", err)
+	}
+}
+
+// trailerLeakToken is planted in a trailer line without its colon, after a
+// chunked body framed in chunks: net/http reads a trailer as it reads the
+// body, and its error (textproto's) quotes the line whole.
+const trailerLeakToken = "Zq7TRAILERsecret92"
+
+// trailerExchanges are a chunked request, then a chunked response, each
+// framed in chunks, whose trailer line has no colon.
+var trailerExchanges = []struct{ name, req, resp, what string }{
+	{"request trailer without its colon", "POST /pay HTTP/1.1\r\nHost: api.example.com\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nok\r\n0\r\nX-Sig " + trailerLeakToken + "\r\n\r\n", okAnswer, "the HTTP request's body's trailer does not parse"},
+	{"response trailer without its colon", "GET /me HTTP/1.1\r\nHost: api.example.com\r\n\r\n", "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nok\r\n0\r\nX-Sig " + trailerLeakToken + "\r\n\r\n", "the HTTP response's body's trailer does not parse"},
+}
+
+// The V2 recorder reads a body whose trailer does not parse: the exchange is
+// not recorded, and the Warn and Error lines that say so name the trailer,
+// never net/http's error text, which quotes the line (models.BodyReadError).
+func TestRecordV2_AnUnparsedTrailerIsLoggedByNoByteOfIt(t *testing.T) {
+	for _, c := range trailerExchanges {
+		t.Run(c.name, func(t *testing.T) {
+			obs, logs := observer.New(zapcore.DebugLevel)
+			logger, out := logleak.Logger(obs)
+			h := &HTTP{Logger: logger}
+			sess, sendReq, closeReq, sendResp, closeResp, _ := newTestSession(t)
+			sess.Logger = logger
+			at := time.Unix(1_700_005_000, 0)
+			sendReq([]byte(c.req), at, at)
+			sendResp([]byte(c.resp), at.Add(time.Millisecond), at.Add(time.Millisecond))
+			closeReq()
+			closeResp()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_ = h.recordV2(ctx, sess)
+			cancel()
+			named := false
+			for _, e := range logs.All() {
+				if e.Level >= zapcore.WarnLevel && strings.Contains(fmt.Sprint(e.ContextMap()), c.what) {
+					named = true
+				}
+			}
+			if !named {
+				t.Errorf("no line at Warn or above names %q:\n%s", c.what, out.String())
+			}
+			if found := logleak.Find(t, out.String(), []byte(trailerLeakToken)); len(found) > 0 {
+				t.Errorf("the V2 recorder's log holds the trailer line: %v\n%s", found, out.String())
+			}
+		})
+	}
+}
+
+// The legacy recorder (parseFinalHTTP) logs a body whose trailer does not
+// parse at Error, and returns why, by the trailer, never its line.
+func TestParseFinalHTTP_AnUnparsedTrailerIsLoggedByNoByteOfIt(t *testing.T) {
+	for _, c := range trailerExchanges {
+		t.Run(c.name, func(t *testing.T) {
+			logger, out := logleak.Logger(nil)
+			h := &HTTP{Logger: logger}
+			mocks := make(chan *models.Mock, 1)
+			err := h.parseFinalHTTP(context.Background(), &FinalHTTP{Req: []byte(c.req), Resp: []byte(c.resp)}, 80, mocks, models.OutgoingOptions{}, nil)
+			if err == nil || err.Error() != c.what {
+				t.Fatalf("parseFinalHTTP = %v, want %q", err, c.what)
+			}
+			if !strings.Contains(out.String(), c.what) {
+				t.Errorf("the Error line does not name the trailer:\n%s", out.String())
+			}
+			if found := logleak.Find(t, out.String(), []byte(trailerLeakToken)); len(found) > 0 {
+				t.Errorf("the legacy recorder's log holds the trailer line: %v\n%s", found, out.String())
+			}
+		})
+	}
+}
+
+// A call passed through to its real server whose chunked answer's trailer
+// does not parse ends with an error that names the trailer, never its line:
+// resp.Write reads the trailer as it writes the answer to the app.
+func TestPassOneCallThrough_AnUnparsedTrailerIsNamedWithoutItsText(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		buf := make([]byte, 4096)
+		_, _ = c.Read(buf)
+		_, _ = c.Write([]byte(trailerExchanges[1].resp))
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	client, proxySide := net.Pipe()
+	t.Cleanup(func() { _ = client.Close(); _ = proxySide.Close() })
+	go func() { _, _ = io.Copy(io.Discard, client) }()
+	_, err = passOneCallThrough(ctx, zap.NewNop(), proxySide, &models.ConditionalDstCfg{Addr: ln.Addr().String()}, []byte("GET /a HTTP/1.1\r\nHost: x\r\n\r\n"), "GET")
+	if err == nil {
+		t.Fatal("precondition: an answer whose trailer does not parse was passed through")
+	}
+	if strings.Contains(err.Error(), trailerLeakToken) || !strings.Contains(err.Error(), "the server's answer's trailer does not parse") {
+		t.Errorf("passOneCallThrough = %v, want the trailer named without its text", err)
 	}
 }

@@ -160,4 +160,10 @@ func TestReadFinalResponseNamesAnUnparsedResponseWithoutItsText(t *testing.T) {
 	if err != error(reset) {
 		t.Errorf("ReadFinalResponse on a reset connection = %v, want the reset as the reader gave it", err)
 	}
+	// A connection closed before a response began: net/http's ReadResponse
+	// gives io.ErrUnexpectedEOF for it, never a bare io.EOF, and the error
+	// keeps that sentinel, so errors.Is still tells it.
+	if _, err = ReadFinalResponse(bufio.NewReader(strings.NewReader("")), req, nil); !errors.Is(err, io.ErrUnexpectedEOF) || err.Error() != "the HTTP response does not parse: unexpected EOF" {
+		t.Errorf("ReadFinalResponse on no byte = %v, want the short read named with its sentinel", err)
+	}
 }

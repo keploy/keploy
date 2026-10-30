@@ -1397,3 +1397,94 @@ func TestAClientRequestThatDoesNotParseIsLoggedByNoByteOfIt(t *testing.T) {
 		})
 	}
 }
+
+// A chunked message whose trailer line has no colon: net/http reads the
+// trailer as it reads the body, so the error of the write that forwards it
+// (req.Write to the app, resp.Write to the client) quotes the line. Both
+// HTTP/1 loops log that error by fixed text, never the line
+// (models.BodyReadError). req.Write hides a body read's error in a type
+// with no Unwrap (net/http's requestBodyReadError), so the request's is
+// named by the default, "could not be read".
+func TestAnUnparsedTrailerIsLoggedByNoByteOfIt(t *testing.T) {
+	const secret = "Zq7TRAILERsecret93"
+	chunked := "Transfer-Encoding: chunked\r\n\r\n2\r\nok\r\n0\r\nX-Sig " + secret + "\r\n\r\n"
+	badRequest := "POST /pay HTTP/1.1\r\nHost: app\r\n" + chunked
+	badAnswer := "HTTP/1.1 200 OK\r\n" + chunked
+	const okAnswer = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
+	stubCaptureHook(t, func(ctx context.Context, logger *zap.Logger, tc chan *models.TestCase,
+		req *http.Request, resp *http.Response, reqTS, respTS time.Time,
+		opts models.IncomingOptions, sync bool, mapping bool, appPort uint16) {
+	})
+	// app answers each request it reads with answer, or reads on when
+	// answer is empty, until the test ends.
+	app := func(t *testing.T, c net.Conn, answer string) {
+		go func() {
+			defer c.Close()
+			if answer == "" {
+				_, _ = io.Copy(io.Discard, c)
+				return
+			}
+			if _, err := http.ReadRequest(bufio.NewReader(c)); err == nil {
+				_, _ = io.WriteString(c, answer)
+				_, _ = io.Copy(io.Discard, c)
+			}
+		}()
+	}
+	for _, c := range []struct {
+		name, request, answer, want string
+		zeroCopy                    bool
+	}{
+		{"the sync loop, the client's request", badRequest, "", "the client's request could not be read", false},
+		{"the sync loop, the app's answer", "GET /me HTTP/1.1\r\nHost: app\r\n\r\n", badAnswer, "the app's answer's trailer does not parse", false},
+		{"the zero-copy loop, the client's request", badRequest, "", "the client's request could not be read", true},
+		{"the sync loop, a request that waits for a 100 (the relay)", "POST /pay HTTP/1.1\r\nHost: app\r\nExpect: 100-continue\r\n" + chunked, okAnswer, "the client's request could not be read", false},
+		{"the zero-copy loop, the app's answer", "GET /me HTTP/1.1\r\nHost: app\r\n\r\n", badAnswer, "the app's answer's trailer does not parse", true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			logger, out := logleak.Logger(nil)
+			pm := &IngressProxyManager{logger: logger, tcChan: make(chan *models.TestCase, 4), samplingSem: make(chan struct{}, 1)}
+			ctx := syncMock.NewContext(context.Background(), syncMock.New(zap.NewNop()))
+			var client net.Conn
+			var done chan struct{}
+			if c.zeroCopy {
+				appSide, upConn := tcpPair(t)
+				app(t, appSide, c.answer)
+				server, cl := tcpPair(t)
+				client, done = cl, make(chan struct{})
+				go func() {
+					defer close(done)
+					defer server.Close()
+					pm.handleHttp1ZeroCopy(ctx, server, upConn, pm.logger, pm.tcChan, 8080, false, func() {})
+				}()
+			} else {
+				ln, err := net.Listen("tcp4", "127.0.0.1:0")
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = ln.Close() })
+				go func() {
+					for {
+						conn, err := ln.Accept()
+						if err != nil {
+							return
+						}
+						app(t, conn, c.answer)
+					}
+				}()
+				pm.synchronous = true // else it hands the connection to the zero-copy loop
+				client, done = ingressPipe(t, ctx, pm, ln.Addr().String())
+			}
+			go func() { _, _ = io.Copy(io.Discard, client) }()
+			if _, err := io.WriteString(client, c.request); err != nil {
+				t.Fatal(err)
+			}
+			<-done // the loop ends the connection on the failed write; go test's -timeout is the hang guard
+			if !strings.Contains(out.String(), c.want) {
+				t.Fatalf("precondition: no line names %q:\n%s", c.want, out.String())
+			}
+			if found := logleak.Find(t, out.String(), []byte(secret)); len(found) > 0 {
+				t.Errorf("the ingress log holds the trailer line: %v\n%s", found, out.String())
+			}
+		})
+	}
+}
