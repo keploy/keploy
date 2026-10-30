@@ -318,6 +318,99 @@ func TestV2AConnectionWhollyInsideATestIsThatTestsWhole(t *testing.T) {
 	}
 }
 
+// A connection's chunks are timed by when the relay read them, never by when
+// its write returned. Under load the relay's write of a destination's answer
+// returned after the client had read it, ended its test and the next test had
+// begun (seen at PLG_LOAD=8: read 1.0 ms before the test's end, written 4.7 ms
+// after it): timed by that return, a connection wholly inside its test read
+// as outliving it, its only exchange went to the session pool, and the test
+// passed at replay with its call skipped. An answer the relay read after the
+// test's end still makes the connection outlive it; one with no read time
+// does not.
+func TestV2AnAnswerWrittenOnAfterItsTestEndedIsStillThatTestsWhole(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	t0 := time.Unix(7000, 0)
+	ms := func(f float64) time.Time { return t0.Add(time.Duration(f * float64(time.Millisecond))) }
+	for _, tc := range []struct {
+		name               string
+		answerRead, answer time.Time // the destination's answer read; the test's end
+		want               string
+	}{
+		{"the answer read inside the test, its write returned after the next test began", ms(19.2), ms(20.8), models.MetadataLifetimePerTest},
+		{"the answer read after the test ended", ms(21.5), ms(20.8), models.MetadataLifetimeSession},
+		// No read time shows nothing: its write's return is no time the
+		// connection was used.
+		{"the answer with no read time, its write returned after the next test began", time.Time{}, ms(20.8), models.MetadataLifetimePerTest},
+	} {
+		for _, scope := range []bool{true, false} {
+			for _, endsFirst := range []bool{true, false} {
+				name := tc.name
+				if scope {
+					name = "a test scope: " + name
+				}
+				if endsFirst {
+					name += ", the test ends before the recorder reads the connection"
+				}
+				t.Run(name, func(t *testing.T) {
+					mgr := syncMock.New(zap.NewNop())
+					var sc *syncMock.TestScope
+					var w *syncMock.Window
+					if scope {
+						sc = mgr.BeginTestScope(t0)
+					} else {
+						w = mgr.OpenWindow(t0, nil)
+					}
+					end := func() {
+						if sc != nil {
+							sc.End(tc.answer)
+						} else {
+							w.Yield(tc.answer)
+							w.Tested(t0, tc.answer)
+							w.Close()
+						}
+						// The next test begins before the relay's write returns.
+						if scope {
+							mgr.BeginTestScope(ms(21))
+						} else {
+							mgr.OpenWindow(ms(21), nil)
+						}
+					}
+					clientCh := make(chan fakeconn.Chunk, 1)
+					destCh := make(chan fakeconn.Chunk, 1)
+					clientCh <- fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: []byte("QUOTE item=book"), ConnSeq: 1, ReadAt: ms(19), WrittenAt: ms(19.05)}
+					destCh <- fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: []byte("CENTS 1250"), ConnSeq: 2, ReadAt: tc.answerRead, WrittenAt: ms(25.5)}
+					close(clientCh)
+					close(destCh)
+					if endsFirst {
+						end()
+					}
+					sess, mocks := newV2Session(t, clientCh, destCh)
+					sess.Ctx = syncMock.NewContext(context.Background(), mgr)
+					done := make(chan error, 1)
+					go func() { done <- dispatch(t, sess) }()
+					if !endsFirst {
+						end()
+					}
+					if err := <-done; err != nil {
+						t.Fatal(err)
+					}
+					close(mocks)
+					got := drainMocks(mocks)
+					if len(got) != 1 {
+						t.Fatalf("emitted %d mocks, want 1", len(got))
+					}
+					if !got[0].Spec.ResTimestampMock.Equal(ms(25.5)) {
+						t.Fatalf("the exchange's answer is stamped %v, want its write's return %v: the mock's own times are unchanged", got[0].Spec.ResTimestampMock, ms(25.5))
+					}
+					if l := got[0].Spec.Metadata[models.MetadataLifetimeKey]; l != tc.want {
+						t.Fatalf("the connection's only exchange is stated %q, want %q", l, tc.want)
+					}
+				})
+			}
+		}
+	}
+}
+
 // A held first exchange is decided by recorded times, never by when the
 // recorder's goroutines run, and only once the test's answer is known: a
 // connection opened after its test was answered is never held; one with a
