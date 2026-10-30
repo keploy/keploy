@@ -273,6 +273,29 @@ sudo -E env PATH="$PATH" "$REPLAY_BIN" mock replay -c "python3 -m pytest -q -p n
 RC=$?
 [ "$RC" -eq 0 ] || { echo "FAIL: a replay that served the recorded calls must still pass, got $RC"; FAIL=1; }
 
+echo "== 2e. --on-miss record over a gob set keeps the recorded calls and adds the captured one =="
+# The gob writer used to truncate the set it added to: the replay said it had
+# appended the call, exited 0, and left an empty mocks.gob that no longer loads.
+cat > test_new.py <<PY
+from client import get
+def test_new(): assert get("/new/7")["path"]=="/new/7"
+PY
+start_dep
+sudo -E env PATH="$PATH" KEPLOY_MOCK_FORMAT=gob "$RECORD_BIN" mock record -c "python3 -m pytest -q -p no:cacheprovider test_api.py" --name e2e-gob --disable-tele 2>&1 | tee rec-gob.log
+RC=${PIPESTATUS[0]}
+[ "$RC" -eq 0 ] || { echo "FAIL: the gob record should pass (exit 0), got $RC"; FAIL=1; }
+sudo -E env PATH="$PATH" KEPLOY_MOCK_FORMAT=gob "$REPLAY_BIN" mock replay -c "python3 -m pytest -q -p no:cacheprovider test_api.py test_new.py" --name e2e-gob --on-miss record --disable-tele 2>&1 | tee onmiss-gob.log
+stop_dep
+grep -q "appended new dependency calls" onmiss-gob.log || { echo "FAIL: --on-miss record did not add the captured call to the gob set"; FAIL=1; }
+sudo -E env PATH="$PATH" KEPLOY_MOCK_FORMAT=gob "$REPLAY_BIN" mock replay -c "python3 -m pytest -q -p no:cacheprovider test_api.py test_new.py" --name e2e-gob --on-miss fail --disable-tele 2>&1 | tee rep-gob.log
+RC=${PIPESTATUS[0]}
+[ "$RC" -eq 0 ] && grep -q "4 passed" rep-gob.log ||
+  { echo "FAIL: the gob set should serve the 3 recorded calls and the captured one (exit 0, 4 passed), got $RC"; FAIL=1; }
+grep -qx 'loaded: 4' keploy/e2e-gob/last-replay.yaml ||
+  { echo "FAIL: want the gob set to hold 4 mocks, the receipt says: $(grep '^loaded:' keploy/e2e-gob/last-replay.yaml)"; FAIL=1; }
+[ -s keploy/e2e-gob/mocks.gob ] && [ ! -e keploy/e2e-gob/mocks.yaml ] ||
+  { echo "FAIL: want the set in one mocks.gob, got: $(ls keploy/e2e-gob)"; FAIL=1; }
+
 echo "== 3. exit-code propagation: a failing runner must fail keploy =="
 cat > test_fail.py <<PY
 def test_boom(): assert False
