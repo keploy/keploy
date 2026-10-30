@@ -1811,7 +1811,8 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// are a coincidence, not dataflow. As the variable, a replay whose
 		// clock crosses a second between the two calls would fail the
 		// later one, and the earlier call's place would carry a variable
-		// and a clock read at once (MergeLearned keeps one). A copy its own
+		// and a clock read at once, which the HTTP replay refuses for every
+		// test, the earlier one's included. A copy its own
 		// call's window does not hold (sent a minute later) stays the
 		// variable, and so does one the re-read learns as anything but that
 		// read: an id minted that second with a random word in it is refused

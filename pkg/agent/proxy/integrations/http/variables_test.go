@@ -2172,14 +2172,15 @@ func TestVariables_AClockReadBesideAVariableIsCheckedInItsCallsWindow(t *testing
 	})
 }
 
-// One learning per place, at replay (founder, 2026-10-30): a vault PUT whose
-// body.data.lastUsedAt the learn step learned as a read of the clock alone
-// (two calls that read one clock in one second: no run's variable) is
-// served in its test's window, and its read checked there: an hour off is
-// no match. Learned as the run's variable alone (a later test copied it
-// where its own clock did not explain it), it is served too. A recording an
-// older keploy wrote with both at the one place is still refused (fail
-// closed): keploy cannot hold one value to both.
+// A vault PUT whose body.data.lastUsedAt the learn step learned as a read of
+// the clock alone (two calls that read one clock in one second: no run's
+// variable) is served in its test's window, and its read checked there: an
+// hour off is no match. Learned as the run's variable alone (a later test
+// copied it where its own clock did not explain it), it is served too. A
+// place learned as both (a createdAt that is the app's clock and that a
+// later call carries) is refused: the HTTP replay cannot hold one value to
+// both yet, so it fails closed. That is a stated limit; the Mongo replay
+// checks both.
 func TestAPlaceLearnedAsOneThingIsServed(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	base := time.Date(2026, 10, 30, 5, 8, 52, 0, time.UTC)
@@ -2199,7 +2200,7 @@ func TestAPlaceLearnedAsOneThingIsServed(t *testing.T) {
 		{"the clock read alone", clock, nil, base, true},
 		{"the clock read alone, an hour off", clock, nil, base.Add(time.Hour), false},
 		{"the variable alone", nil, variable, base, true},
-		{"both, as an older keploy wrote it", clock, variable, base, false},
+		{"both: refused, a stated limit", clock, variable, base, false},
 	} {
 		m := varMock("mock-195", "PUT", "http://store/v1/secret/data/pat", body(rec), 200, `{"data":{"version":2}}`, row.vars)
 		m.Spec.Clocks = row.clocks
