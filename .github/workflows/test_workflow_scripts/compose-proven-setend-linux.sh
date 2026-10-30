@@ -21,9 +21,13 @@
 #      second set ran against the app keploy started again, and neither
 #      report says it was read with the app running (app_not_stopped).
 #   2. A changed shutdown publish (SHUTDOWN_MSG=changed): both sets fail, and
-#      each report names the publish among the calls made after the set's
-#      last test. Read with the app running, the publish came after the read
-#      and passed.
+#      each report lists the publish among the set's background calls, made
+#      after the set's last test was read: answered by no mock, it is the
+#      application's background work (item (b)), charged to no test and not
+#      among the unclaimed calls; the set fails because the recorded
+#      publish, a call of its worker scope, was never made. Read with the
+#      app running, the publish came after the read and passed. (Before item
+#      (b) the changed call itself failed each set, as an unclaimed call.)
 #   3. The app exits on its own after its first answer (HALT_AFTER=1): the
 #      first set is APP_HALTED, as compose's abort made it, though keploy ran
 #      compose without it.
@@ -34,7 +38,7 @@
 #      <project>-app-1 (P101-b-n). keploy record's stop and each set's end
 #      stop are of the container compose made for the service: the
 #      recording holds the shutdown publish, the set as recorded passes, and
-#      a changed publish fails it. Read by the name, the stop found no
+#      a changed publish fails it, listed as in 2. Read by the name, the stop found no
 #      container and took that for an app it had stopped: the recording
 #      lacked the publish, and the replay of a changed one passed, exit 0.
 #   6. The app's service has restart: always and stop_signal: SIGTERM
@@ -325,6 +329,22 @@ for s in test-set-0 test-set-1; do
   sudo grep -q '/shutdown' "keploy/$s/mocks.yaml" 2>/dev/null || fail "$s: the shutdown publish was not recorded"
 done
 
+# shutdown_named STEP SET: SET's report lists the publish among its background
+# calls, made after its last test was read, and not among its unclaimed calls
+# (item (b)), and its reason says the recorded publish was never made.
+shutdown_named() {
+  local step=$1 s=$2 y
+  y="$(sudo cat "$(report "$s")" 2>/dev/null)"
+  yq -r '.background_calls[]? | select(.actual_summary // "" | test("/shutdown")) | .background_why // ""' <<<"$y" 2>/dev/null |
+    grep -q "made after the set's last test was read" ||
+    fail "$step: $s does not list the publish among its background calls, made after its last test: $(grep -A8 '^background_calls:' <<<"$y" | head -10)"
+  if yq -r '.unclaimed_calls[]? | .actual_summary // ""' <<<"$y" 2>/dev/null | grep -q '/shutdown'; then
+    fail "$step: $s has the publish among its unclaimed calls; it is background work, charged to no test"
+  fi
+  yq -r '.failure_reason // ""' <<<"$y" 2>/dev/null | grep -q "never made 1 of the calls the test set's worker scope recorded" ||
+    fail "$step: $s's reason does not say the recorded publish was never made: $(yq -r '.failure_reason // ""' <<<"$y" 2>/dev/null)"
+}
+
 echo "== 1. both sets as recorded =="
 replay as-recorded
 [ "$RC" -eq 0 ] || fail "1: keploy test exited $RC, want 0"
@@ -341,8 +361,7 @@ replay changed SHUTDOWN_MSG=changed
 [ "$RC" -ne 0 ] || fail "2: keploy test exited 0, want non-zero"
 for s in test-set-0 test-set-1; do
   [ "$(set_status $s)" = FAILED ] || fail "2: $s is $(set_status $s), want FAILED"
-  sudo grep -A6 '^unclaimed_calls:' "$(report $s)" 2>/dev/null | grep -q '/shutdown' ||
-    fail "2: $s does not name the publish among the calls made after its last test"
+  shutdown_named 2 "$s"
 done
 
 echo "== 3. the app exits on its own =="
@@ -417,8 +436,7 @@ replay svckey-as-recorded
 replay svckey-changed SHUTDOWN_MSG=changed
 [ "$RC" -ne 0 ] || fail "5: a changed shutdown publish: keploy test exited 0, want non-zero: the set's end was read with the app running"
 [ "$(set_status test-set-0)" = FAILED ] || fail "5: a changed shutdown publish: test-set-0 is $(set_status test-set-0), want FAILED"
-sudo grep -A6 '^unclaimed_calls:' "$(report test-set-0)" 2>/dev/null | grep -q '/shutdown' ||
-  fail "5: test-set-0 does not name the publish among the calls made after its last test"
+shutdown_named 5 test-set-0
 [ "$FAIL" -eq 0 ] || tail -60 svckey-changed.log
 
 echo "== 6. the app's restart policy =="
