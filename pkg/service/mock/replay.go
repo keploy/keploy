@@ -1962,7 +1962,7 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 		m.logger.Debug("failed to read consumed mocks", zap.Error(consumedErr))
 	}
 	if missesErr != nil {
-		m.logger.Debug("failed to read mock misses", zap.Error(missesErr))
+		m.logger.Debug("failed to read the misses the agent recorded", zap.Error(missesErr))
 	}
 
 	// The outcome is read after the runner exits, from an agent that may have
@@ -2108,7 +2108,7 @@ func logMiss(logger *zap.Logger, miss models.UnmatchedCall) {
 		// Made outside every test's window, or inside one as a call of a
 		// marked background series (MadeInTest): the application's own
 		// work (a timer, a start-up job), which may fail in the
-		// application, but fails no test (founder D1). Said once, for the
+		// application, but fails no test. Said once, for the
 		// set, with when, and worded from where it was made.
 		logger.Warn(miss.BackgroundLine(),
 			zap.String("protocol", miss.Protocol),

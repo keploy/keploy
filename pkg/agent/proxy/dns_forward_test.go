@@ -1,9 +1,11 @@
 package proxy
 
 import (
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +13,8 @@ import (
 	"github.com/miekg/dns"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // startFakeUpstream spins up a miekg/dns UDP server on a
@@ -831,5 +835,157 @@ func TestForwardDNSUpstream_NoUpstreamConfigured(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "no upstream") {
 		t.Errorf("err = %v; want message containing 'no upstream'", err)
+	}
+}
+
+// TestDNSForwardLinesSayMockMissOnlyOnAMiss holds the forward path's log
+// lines to what users grep keploy's output for: "mock miss" only when mocking
+// is on, no DNS mock answered and keploy counts it as a miss. With mocking off
+// no mock is asked; a name upstream says does not exist (NXDOMAIN) could have
+// no mock; and keploy never reports the gRPC service-config probe or a
+// redundant search-list expansion. Those lines say what happened without the
+// phrase. The miss lines keep it word for word, a NODATA miss logged again for
+// the same name and qtype too.
+func TestDNSForwardLinesSayMockMissOnlyOnAMiss(t *testing.T) {
+	reply := func(rcode int, answer bool) dns.HandlerFunc {
+		return func(w dns.ResponseWriter, r *dns.Msg) {
+			m := new(dns.Msg)
+			m.SetRcode(r, rcode)
+			if answer {
+				// A record of the type asked: the gRPC probe asks for TXT.
+				data := "A 10.0.0.7"
+				if r.Question[0].Qtype == dns.TypeTXT {
+					data = `TXT "grpc_config=[]"`
+				}
+				rr, err := dns.NewRR(r.Question[0].Name + " 30 IN " + data)
+				if err != nil {
+					t.Errorf("build the answer: %v", err)
+					return
+				}
+				m.Answer = []dns.RR{rr}
+			}
+			_ = w.WriteMsg(m)
+		}
+	}
+	const negativeOff = "DNS upstream returned negative answer; mocking disabled, returning upstream response"
+	// It answers only startFakeUpstream's probe, so a forward fails on its
+	// timeout; nothing here measures time.
+	unanswered := func(w dns.ResponseWriter, r *dns.Msg) {
+		if len(r.Question) > 0 && strings.HasPrefix(r.Question[0].Name, "probe.test") {
+			m := new(dns.Msg)
+			m.SetReply(r)
+			_ = w.WriteMsg(m)
+		}
+	}
+	const failedOff = "DNS upstream forward failed; mocking disabled, falling back to synthetic response"
+	orders := dns.Question{Name: "orders.shop.svc.cluster.local.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	grpcProbe := dns.Question{Name: "_grpc_config.orders.shop.svc.cluster.local.", Qtype: dns.TypeTXT, Qclass: dns.ClassINET}
+	// With the search list below, this is orders.svc.cluster.local expanded
+	// once more: unrecordable, never reported.
+	searchExpansion := dns.Question{Name: "orders.svc.cluster.local.svc.cluster.local.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	cases := []struct {
+		name    string
+		handler dns.HandlerFunc
+		timeout time.Duration
+		q       dns.Question
+		on, off string // the line logged with mocking on, and off (always at Debug)
+		onInfo  bool   // whether the mocking-on line is at Info, not Debug
+		onMiss  bool   // whether the mocking-on run is a miss
+		again   bool   // the line is the second resolution's, the first already logged
+	}{
+		{name: "answered", handler: reply(dns.RcodeSuccess, true), timeout: 5 * time.Second, q: orders,
+			on:     "DNS mock miss resolved via upstream forward",
+			off:    "DNS query resolved via upstream forward; mocking disabled",
+			onMiss: true},
+		{name: "nodata", handler: reply(dns.RcodeSuccess, false), timeout: 5 * time.Second, q: orders,
+			on:     "DNS mock miss: upstream NODATA (empty NOERROR), relaying as valid negative answer (a genuinely unrecorded record of this type would also relay empty here)",
+			off:    "DNS NODATA (empty NOERROR); mocking disabled, relaying real upstream answer",
+			onInfo: true, onMiss: true},
+		{name: "nodata-again", handler: reply(dns.RcodeSuccess, false), timeout: 5 * time.Second, q: orders,
+			on:     "DNS mock miss: upstream NODATA, relaying (already logged for this name/qtype)",
+			off:    "DNS NODATA (empty NOERROR); mocking disabled, relaying real upstream answer",
+			onMiss: true, again: true},
+		{name: "servfail", handler: reply(dns.RcodeServerFailure, false), timeout: 5 * time.Second, q: orders,
+			on:     "DNS mock miss: upstream returned negative answer; falling back to synthetic DNS response",
+			off:    negativeOff,
+			onMiss: true},
+		{name: "nxdomain", handler: reply(dns.RcodeNameError, false), timeout: 5 * time.Second, q: orders,
+			on:  "DNS name does not exist upstream (NXDOMAIN), so no mock could answer it; falling back to synthetic DNS response",
+			off: negativeOff},
+		{name: "unanswered", handler: unanswered, timeout: 200 * time.Millisecond, q: orders,
+			on:     "DNS mock miss + upstream forward failed; falling back to synthetic response",
+			off:    failedOff,
+			onMiss: true},
+		{name: "grpc-probe-answered", handler: reply(dns.RcodeSuccess, true), timeout: 5 * time.Second, q: grpcProbe,
+			on:  "DNS upstream forward answered a query keploy does not report as a miss; relaying upstream answer",
+			off: "DNS query resolved via upstream forward; mocking disabled"},
+		{name: "grpc-probe-nodata", handler: reply(dns.RcodeSuccess, false), timeout: 5 * time.Second, q: grpcProbe,
+			on:  "DNS NODATA (empty NOERROR) for a query keploy does not report as a miss; relaying upstream answer",
+			off: "DNS NODATA (empty NOERROR); mocking disabled, relaying real upstream answer"},
+		{name: "search-expansion-nodata", handler: reply(dns.RcodeSuccess, false), timeout: 5 * time.Second, q: searchExpansion,
+			on:  "DNS NODATA (empty NOERROR) for a query keploy does not report as a miss; relaying upstream answer",
+			off: "DNS NODATA (empty NOERROR); mocking disabled, relaying real upstream answer"},
+		{name: "grpc-probe-unanswered", handler: unanswered, timeout: 200 * time.Millisecond, q: grpcProbe,
+			on:  "DNS upstream forward failed for a query keploy does not report as a miss; falling back to synthetic response",
+			off: failedOff},
+		{name: "search-expansion-servfail", handler: reply(dns.RcodeServerFailure, false), timeout: 5 * time.Second, q: searchExpansion,
+			on:  "DNS upstream returned negative answer for a query keploy does not report as a miss; falling back to synthetic DNS response",
+			off: negativeOff},
+		{name: "search-expansion-answered", handler: reply(dns.RcodeSuccess, true), timeout: 5 * time.Second, q: searchExpansion,
+			on:  "DNS upstream forward answered a query keploy does not report as a miss; relaying upstream answer",
+			off: "DNS query resolved via upstream forward; mocking disabled"},
+		{name: "search-expansion-unanswered", handler: unanswered, timeout: 200 * time.Millisecond, q: searchExpansion,
+			on:  "DNS upstream forward failed for a query keploy does not report as a miss; falling back to synthetic response",
+			off: failedOff},
+		{name: "grpc-probe-servfail", handler: reply(dns.RcodeServerFailure, false), timeout: 5 * time.Second, q: grpcProbe,
+			on:  "DNS upstream returned negative answer for a query keploy does not report as a miss; falling back to synthetic DNS response",
+			off: negativeOff},
+	}
+	for _, tc := range cases {
+		for _, mocking := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/mocking=%v", tc.name, mocking), func(t *testing.T) {
+				addr, stop := startFakeUpstream(t, tc.handler)
+				defer stop()
+				p := newProxyWithUpstream(t, addr, tc.timeout)
+				// As the agent builds it: a NODATA miss is logged at Info
+				// once per name and qtype, at Debug after that.
+				p.nodataRelayLogged = newNodataRelayLogCache()
+				core, logs := observer.New(zapcore.DebugLevel)
+				p.logger = zap.New(core)
+				mgr := NewMockManager(nil, nil, zap.NewNop())
+				t.Cleanup(mgr.Close)
+				p.mockManager = mgr
+				p.dnsSearch = []string{"svc.cluster.local"}
+
+				if tc.again {
+					p.resolveUncachedDNSResponse(tc.q, models.MODE_TEST, mocking, time.Now(), nil)
+					logs.TakeAll()
+				}
+				p.resolveUncachedDNSResponse(tc.q, models.MODE_TEST, mocking, time.Now(), nil)
+
+				want, level, miss := tc.off, zapcore.DebugLevel, false
+				if mocking {
+					want, miss = tc.on, tc.onMiss
+					if tc.onInfo {
+						level = zapcore.InfoLevel
+					}
+				}
+				var said []string
+				for _, e := range logs.All() {
+					said = append(said, e.Message)
+					if !miss && strings.Contains(strings.ToLower(e.Message), "mock miss") {
+						t.Errorf("not a miss, yet logged %q", e.Message)
+					}
+				}
+				if !slices.Contains(said, want) {
+					t.Errorf("want the line %q, logged %q", want, said)
+				}
+				for _, e := range logs.FilterMessage(want).All() {
+					if e.Level != level {
+						t.Errorf("%q logged at %s, want %s", want, e.Level, level)
+					}
+				}
+			})
+		}
 	}
 }

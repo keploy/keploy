@@ -77,6 +77,7 @@ func (a *App) newLibraryComposeStack(ctx context.Context) (composeStack, error) 
 		Content:     a.composeContent,
 		ProjectName: projectName,
 		WorkingDir:  projectDir,
+		EnvFiles:    composeEnvFiles(a.cmd),
 	})
 }
 

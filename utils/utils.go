@@ -497,12 +497,18 @@ func ConfigHeader() string {
 		"#   keploy config defaults -o FILE    # save them\n"
 }
 
-// attachLogFileToSentry attaches logFile, this run's log, to the crash report:
-// read through its name only while that is still this run's log, never
-// whatever a symlink there points at (a root run's crash would otherwise send
-// the link's target).
+// crashReportLogTail is how much of the end of this run's log a crash report
+// carries: the log holds up to log.FileCapBytes, the native agent's lines and
+// --debug's among them, and a crash report must stay well under Sentry's
+// 1 MB event limit, and be read into no more memory than it sends.
+const crashReportLogTail = 512 << 10
+
+// attachLogFileToSentry attaches the end of logFile, this run's log, to the
+// crash report (crashReportLogTail): read through its name only while that is
+// still this run's log, never whatever a symlink there points at (a root
+// run's crash would otherwise send the link's target).
 func attachLogFileToSentry(logFile *os.File) error {
-	content, err := keployLog.ReadLogFile(logFile)
+	content, err := keployLog.ReadLogFileTail(logFile, crashReportLogTail)
 	if err != nil {
 		return fmt.Errorf("error reading log file: %s", err.Error())
 	}

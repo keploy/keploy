@@ -50,6 +50,7 @@ import (
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/service/agent"
 	"go.keploy.io/server/v3/utils"
+	keployLog "go.keploy.io/server/v3/utils/log"
 	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -117,6 +118,10 @@ type AgentClient struct {
 	// last staging call said it serves the set by
 	// (models.BackgroundRulesHeader): "" until one says the background rules.
 	stagedBackground atomic.Pointer[string]
+	// mockWindows is what the agent's answers to /updatemockparams since the
+	// last StoreMocks said of how it served their windows
+	// (models.MockWindowHeader; AgentMockWindow).
+	mockWindows mockWindowsHeard
 	// clientTestsRead holds whether the agent's answer to the last /mock
 	// said its learn step reads the session's tests as keploy mock's client
 	// tests (models.ClientTestsReadHeader). Every call clears it first.
@@ -335,6 +340,48 @@ func (a *AgentClient) AgentServesBackground() string {
 		return *r
 	}
 	return ""
+}
+
+// mockWindowsHeard folds what the agent's answers to /updatemockparams said
+// of how it served their windows (models.MockWindowHeader) since the last
+// StoreMocks, the set's mocks: said, what they said (models.MockWindowsSaid);
+// unsaid, that some answer said nothing.
+type mockWindowsHeard struct {
+	mu            sync.Mutex
+	said          models.MockWindowsSaid
+	heard, unsaid bool
+}
+
+func (h *mockWindowsHeard) reset() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.said, h.heard, h.unsaid = models.MockWindowsSaid{}, false, false
+}
+
+func (h *mockWindowsHeard) note(v string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	m, ok := models.ParseMockWindowMode(v)
+	if !ok {
+		h.unsaid = true
+		return
+	}
+	h.heard = true
+	h.said.Add(m)
+}
+
+// AgentMockWindow is what the agent's answers to /updatemockparams since the
+// set's mocks were stored said of how it served their windows
+// (pkg.MockWindowReader): ok is false when none was answered, or some answer
+// said nothing, as an agent older than models.MockWindowHeader does.
+func (a *AgentClient) AgentMockWindow() (models.MockWindowsSaid, bool) {
+	h := &a.mockWindows
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !h.heard || h.unsaid {
+		return models.MockWindowsSaid{}, false
+	}
+	return h.said, true
 }
 
 // var initStopScript []byte
@@ -1265,6 +1312,7 @@ func (a *AgentClient) StoreMocks(ctx context.Context, filtered []*models.Mock, u
 	}()
 	a.consumedPerTest.Store(false)
 	a.concurrentServing.Store(false)
+	a.mockWindows.reset()
 	// A dedicated cancelable context for the stream request: cancelling it tears
 	// down the transport's read of the io.Pipe body, which unblocks the encoder
 	// goroutine's pw.Write if the agent responded before consuming the whole
@@ -1749,6 +1797,7 @@ func (a *AgentClient) sendMockParams(ctx context.Context, params models.MockFilt
 	}
 	a.consumedPerTest.Store(res.Header.Get(models.ConsumedScopeHeader) == models.ConsumedScopePerTest)
 	a.noteAgentVersion(res.Header)
+	a.mockWindows.note(res.Header.Get(models.MockWindowHeader))
 	if ex := params.Exact; ex != nil && ex.Stage {
 		rules := res.Header.Get(models.BackgroundRulesHeader)
 		a.stagedBackground.Store(&rules)
@@ -2288,6 +2337,14 @@ func (a *AgentClient) nativeAgentArgs(opts models.SetupOptions) []string {
 	// only where it names this process (utils.ClientPIDHere).
 	if ns := utils.OwnPIDNamespace(); ns != "" {
 		args = append(args, "--client-pid-ns", ns)
+	}
+	// This run's log, for the agent to append its lines to: one run, one file,
+	// which this process removes at its end (keployLog.ClientLogFileFlag).
+	// Absolute, as a relative TMPDIR would make it.
+	if utils.LogFile != nil {
+		if p, err := filepath.Abs(utils.LogFile.Name()); err == nil {
+			args = append(args, "--"+keployLog.ClientLogFileFlag+"="+p)
+		}
 	}
 
 	extraArgs := opts.ExtraArgs

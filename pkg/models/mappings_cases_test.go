@@ -272,3 +272,37 @@ func TestAMergeKeyGivesATestEntryItsMocks(t *testing.T) {
 		}
 	}
 }
+
+// An entry with no mock (a passing test that consumed nothing) is written and
+// read back as an entry, in YAML and in JSON, never dropped: a test with no
+// entry is one its replay gave no verdict on.
+func TestMappedTestCaseWithNoMockRoundTrips(t *testing.T) {
+	in := Mapping{Version: "api.keploy.io/v1beta1", Kind: MappingKind, TestSetID: "set", TestCases: []MappedTestCase{
+		{ID: "t1", Mocks: []MockEntry{{Name: "mock-0", Kind: "Http"}}},
+		{ID: "t2"},
+	}}
+	check := func(format string, out Mapping) {
+		t.Helper()
+		if len(out.TestCases) != 2 || out.TestCases[1].ID != "t2" || len(out.TestCases[1].Mocks) != 0 {
+			t.Fatalf("%s: entries read back = %+v; want t1 and t2, t2 with no mock", format, out.TestCases)
+		}
+	}
+	y, err := yaml.Marshal(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fromYAML Mapping
+	if err := yaml.Unmarshal(y, &fromYAML); err != nil {
+		t.Fatal(err)
+	}
+	check("yaml", fromYAML)
+	j, err := json.Marshal(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fromJSON Mapping
+	if err := json.Unmarshal(j, &fromJSON); err != nil {
+		t.Fatal(err)
+	}
+	check("json", fromJSON)
+}

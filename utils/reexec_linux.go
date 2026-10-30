@@ -10,14 +10,23 @@ import (
 	"syscall"
 
 	"go.keploy.io/server/v3/pkg/platform/engine"
+	keployLog "go.keploy.io/server/v3/utils/log"
 	"go.uber.org/zap"
 )
+
+// execProcess is syscall.Exec, which ReexecWithSudo replaces this process
+// with sudo through; a test swaps in one that looks at what the process leaves
+// behind at that moment.
+var execProcess = syscall.Exec
 
 // ReexecWithSudo re-executes the current keploy command with sudo.
 // This is used when a Docker/Docker Compose command is detected and keploy is not running as root.
 // Uses syscall.Exec to replace the current process entirely - no parent process remains.
-// This function never returns on success.
-func ReexecWithSudo(logger *zap.Logger) {
+// This function never returns on success. On a failure it says why and returns
+// the error, for the caller to end the run with exit code 1 through its own
+// return: an os.Exit here skipped every deferred call of the run, the removal
+// of its temp log among them.
+func ReexecWithSudo(logger *zap.Logger) error {
 	// Get the current PATH to preserve it
 	currentPath := os.Getenv("PATH")
 
@@ -26,14 +35,14 @@ func ReexecWithSudo(logger *zap.Logger) {
 	if err != nil {
 		logger.Error("sudo not found in PATH, cannot re-execute with elevated privileges", zap.Error(err))
 		fmt.Println("Error: sudo is required to run Docker commands. Please install sudo or run as root.")
-		os.Exit(1)
+		return fmt.Errorf("find sudo: %w", err)
 	}
 
 	// Find keploy binary - use the current executable
 	keployPath, err := os.Executable()
 	if err != nil {
 		logger.Error("failed to get current executable path", zap.Error(err))
-		os.Exit(1)
+		return fmt.Errorf("find this executable: %w", err)
 	}
 
 	// Build the command: sudo -E env PATH="$PATH" keploy <original-args>
@@ -52,15 +61,23 @@ func ReexecWithSudo(logger *zap.Logger) {
 	logger.Info("Re-executing with sudo for elevated privileges as Linux Docker/cloud replay path needs root-level eBPF privileges.")
 	logger.Debug("Re-exec command", zap.Strings("args", args))
 
+	// The run goes on in the process the exec starts, which creates a log of
+	// its own; this one's, a temp file, would be left with no run to remove
+	// it. Its name goes now; the file itself, open close-on-exec as Go opens
+	// every file, goes at the exec, or with this process if the exec fails.
+	if err := keployLog.RemoveLogFile(LogFile); err != nil {
+		logger.Debug("failed to remove this process's log before re-executing", zap.Error(err))
+	}
 	// Use syscall.Exec to replace the current process
 	// This means no parent process remains - clean handoff
-	err = syscall.Exec(sudoPath, args, os.Environ())
+	err = execProcess(sudoPath, args, os.Environ())
 	if err != nil {
 		// syscall.Exec only returns on error
 		logger.Error("failed to re-execute with sudo", zap.Error(err))
 		fmt.Printf("Error: failed to re-execute with sudo: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("re-execute with sudo: %w", err)
 	}
+	return nil
 }
 
 // ShouldReexecWithSudo checks if keploy should re-execute itself with sudo.

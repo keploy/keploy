@@ -1679,77 +1679,68 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 	if isInitialStaging {
 		filteredForTree = nil
 	}
+	// sessionIn is what the per-test slice holds that lax mode promotes to
+	// the session pool (KEPLOY_STRICT_MOCK_WINDOW=0: an unstated per-test mock
+	// out of the window), as the agent's window filter promotes it.
+	var sessionIn []*models.Mock
 	if !isInitialStaging && !start.IsZero() && !end.IsZero() {
 		out := make([]*models.Mock, 0, len(filtered))
-		// The recorded windows say which calls were in flight when this
-		// window's test began: those sent in the gap before it
-		// (models.WindowSchedule.GapBefore) and answered at or after its
-		// start.
-		gapFrom, hasGap := m.testWindows.Load().GapBefore(start)
+		// Every mock is staged by the agent's one serve decision
+		// (pkg.StageInWindow, the window filter's own rule, which the
+		// replayer's mock prune asks too), strict as this manager filters,
+		// and by where it is placed whatever its lifetime, which the filter
+		// has split the slices by:
+		//
+		//   - no recorded time: kept, so legacy or incomplete recordings
+		//     still match;
+		//   - response stamped before its request: left out, and said of once
+		//     for each such mock (pkg.LeaveOutAnsweredBeforeAsked);
+		//   - placed in the window (models.PlaceOf, ends included): its own.
+		//     Responses may straggle past end, async downstream completion
+		//     being normal;
+		//   - placed before the earliest window this manager has seen: app
+		//     bootstrap traffic (Flyway migrations, Hibernate init, HikariCP
+		//     validation, driver handshakes), routed to the startup tree, not
+		//     the session tree and with no Lifetime mutation, so tier-aware
+		//     parsers see startup, session and per-test as a strict three-way
+		//     partition (legacy GetSessionMocks callers see startup through
+		//     the union shim). Stale previous-test mocks (firstStart <= place
+		//     < start) are dropped: the bleed this machinery exists to stop;
+		//   - in flight when the window's test began (sent in the gap before
+		//     it, models.WindowSchedule.GapBefore, and answered at or after its
+		//     start): a consumer's long poll (a Kafka fetch, an SQS
+		//     ReceiveMessage, a BLPOP) the app keeps outstanding between
+		//     tests, whose answer the test waits for (models.InFlightEligible);
+		//   - a window-bound mock (a connection failure): its own window or
+		//     the startup band, nowhere else.
+		//
+		// A carry-over mock no rule serves here (loaded ahead of its window,
+		// or mapped to this test from a gap) is offered to the carry-over
+		// tier below, which serves it from its release window on
+		// (models.WindowSchedule.CarryOverReachable).
+		sw := pkg.ServeWindow{Start: start, End: end, FirstStart: firstStart, StrictPerCall: true, StrictWindow: true}
+		if gapFrom, hasGap := m.testWindows.Load().GapBefore(start); hasGap {
+			sw.InFlightFrom = gapFrom
+		}
 		for _, mock := range filtered {
 			if mock == nil {
 				continue
 			}
-			req := mock.Spec.ReqTimestampMock
-			res := mock.Spec.ResTimestampMock
-			// Missing timestamps: keep defensively so legacy/incomplete
-			// recordings still match.
-			if req.IsZero() || res.IsZero() {
+			serve, answeredBeforeAsked := pkg.StageInWindow(m.logger, mock, sw)
+			switch {
+			case serve == pkg.ServedPerTest:
 				out = append(out, mock)
-				continue
-			}
-			// Inconsistent recording — response before request: left
-			// out, and said of once for each such mock, since a call it
-			// recorded is answered by another mock or by none; never
-			// under the proven switch (pkg.LeaveOutAnsweredBeforeAsked).
-			if pkg.LeaveOutAnsweredBeforeAsked(m.logger, mock) {
-				droppedInvalid++
-				continue
-			}
-			// Window containment by place (models.PlaceOf): the request
-			// timestamp, or the answer's for a mock placed at its answer.
-			// Responses may legitimately straggle past `end` (async
-			// downstream completion is normal).
-			place := models.PlaceOf(mock)
-			if !place.Before(start) && !place.After(end) {
-				out = append(out, mock)
-				continue
-			}
-			// Wave 2: startup-init preservation. A mock whose request
-			// timestamp is strictly BEFORE the earliest test window
-			// this manager has ever seen is app-bootstrap traffic
-			// (Flyway migrations, Hibernate init, HikariCP connection
-			// validation, driver handshake queries) that fired before
-			// any test started. It's routed to the dedicated startup
-			// tree (NOT the session tree, NOT with a Lifetime mutation)
-			// so tier-aware parsers can see startup/session/perTest as
-			// a strict three-way partition. Legacy parsers that call
-			// GetSessionMocks still observe startup entries via the
-			// union shim below.
-			//
-			// Stale previous-test mocks (firstStart <= req < start)
-			// continue to be dropped — that's the bleed case this
-			// whole machinery exists to protect against.
-			if !firstStart.IsZero() && place.Before(firstStart) {
+			case serve == pkg.ServedStartup:
 				startupInit = append(startupInit, mock)
-				continue
-			}
-			// A call sent in the gap before this test and answered at or
-			// after its start was in flight when the test began: a consumer's
-			// long poll (a Kafka fetch, an SQS ReceiveMessage, a BLPOP) the
-			// app keeps outstanding between tests. It is this test's: the
-			// answer it carries is what the test waits for. Not a carry-over
-			// mock, which the carry-over tier below keeps reachable from the
-			// window it belongs to (models.InFlightEligible).
-			if inFlightAtStart(mock, req, res, gapFrom, start, hasGap) {
-				out = append(out, mock)
-				continue
-			}
-			if carryOn && models.IsCarryOver(mock) {
+			case serve == pkg.ServedSession:
+				sessionIn = append(sessionIn, mock)
+			case answeredBeforeAsked:
+				droppedInvalid++
+			case carryOn && models.IsCarryOver(mock):
 				carryIn = append(carryIn, mock)
-				continue
+			default:
+				droppedOutOfWindow++
 			}
-			droppedOutOfWindow++
 		}
 		filteredForTree = out
 	}
@@ -1771,6 +1762,9 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 	// pointer swap is safe; readers of startup go through a treesMu
 	// RLock (see GetStartupMocks below).
 	unfilteredForTree := unfiltered
+	if len(sessionIn) > 0 {
+		unfilteredForTree = append(append(make([]*models.Mock, 0, len(unfiltered)+len(sessionIn)), unfiltered...), sessionIn...)
+	}
 	newStartup := NewTreeDb(customComparator)
 	newStartup.bootBuilt = !m.testFiredThisSet && !m.scopeFiredThisSet
 	newStartupKeys := make(map[*models.Mock]models.TestModeInfo, len(startupInit)+len(explicitStartup))
@@ -5161,9 +5155,10 @@ func (m *MockManager) consumedOutOfWindow(mock models.Mock) bool {
 // sent in the gap before the window (gapFrom, hasGap: the recorded windows'
 // models.WindowSchedule.GapBefore(start)) and answered at or after its start
 // (models.SentInGapAnsweredBy). It is that test's own. One rule for what the
-// staging files in the window's tier (setMocksWithWindowLocked), what the
 // windowed read serves (GetFilteredMocksInWindow), what the open test owns
-// (OwnedByOpenTest) and what consumes out of no window (consumedOutOfWindow).
+// (OwnedByOpenTest) and what consumes out of no window (consumedOutOfWindow);
+// the staging files the window's tier by the agent's serve decision
+// (pkg.StageInWindow), whose in-flight rule is this one.
 //
 // The times are looked at first: a reader asks of every mock it holds, and
 // InFlightEligible may derive a copy's lifetime.

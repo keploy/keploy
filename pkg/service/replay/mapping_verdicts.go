@@ -1,6 +1,8 @@
 package replay
 
 import (
+	"sort"
+
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -63,6 +65,14 @@ import (
 // switch; a consumption that could not be read; the OBSOLETE shape) leave a
 // file that exists as it is; only a run that creates the file can leave such a
 // test without an entry.
+//
+// A passing test that consumed nothing, or only the startup section's mocks,
+// gets an entry with none (addConsumedNothingEntries), so a test with no entry
+// is one the run gave no verdict on, with two exceptions, which get no entry
+// from the run, as before: a passing test whose drain caught only other tests'
+// flagged mocks (carryOverAttribution.caughtOnlyOthers), and one whose
+// recording holds a carry-over mock the run attributed to no one
+// (carryOverAttribution.unattributedCarryOverOwners).
 //
 //   - PASSED: passing. A pass that left a recorded mock unconsumed is a pass
 //     when its answer matched (it stays PASSED only while --assert-dependencies
@@ -214,6 +224,127 @@ func markWrittenByKeployTest(doc *models.Mapping) {
 	if doc != nil && len(doc.TestCases) > 0 {
 		doc.Source = models.MappingSourceKeployTest
 	}
+}
+
+// addConsumedNothingEntries gives every passing test that has no entry in doc
+// an entry with no mock: it passed, and consumed nothing but, if anything, the
+// startup section's mocks, which the same file lists. none names the tests
+// whose consumption the run read and found empty of any other
+// (carryOverAttribution.consumedNothing; a test that caught another test's
+// flagged mock is not one); a test outside it gets nothing, and none does
+// when the run read no test's consumption (none nil: not instrumented, so the
+// agent was never asked, or the run served no mock to consume). The entries
+// are added in the order of results; the write sorts them by test (mapdb).
+//
+// Without this "no entry" meant two things: the test needs no mock, or the run
+// gave no verdict on it (it failed, was held, or got none). A replay that
+// downloads only the mocks a mapping names, and skips a test with no entry,
+// could not tell them apart, and would skip for good every test that needs no
+// mock: its next auto-replay gives it no entry again. With it, no entry means
+// only "no verdict". A local replay serves an empty entry as it serves no
+// entry (models.MergeStartupMockNames hands it no names: its recorded window).
+//
+// The holds that keep a run from creating a file that maps no mock, and the
+// default flag's create, decide on mapsAMock, and an empty entry maps none. A
+// new file is created only when every passing test has an entry
+// (passingWithNoEntry), an empty one counting, but for a test that caught
+// only other tests' flagged mocks, or whose recording holds a carry-over mock
+// the run attributed to no one, which a new file leaves out, as before.
+func addConsumedNothingEntries(doc *models.Mapping, results []models.TestResult, passing map[string]bool, none map[string]struct{}) {
+	if doc == nil || len(none) == 0 {
+		return
+	}
+	has := make(map[string]bool, len(doc.TestCases))
+	for _, tc := range doc.TestCases {
+		has[tc.ID] = true
+	}
+	for _, r := range results {
+		id := r.TestCaseID
+		if _, ok := none[id]; !ok || has[id] || !passing[id] {
+			continue
+		}
+		has[id] = true
+		doc.TestCases = append(doc.TestCases, models.MappedTestCase{ID: id})
+	}
+}
+
+// passingWithNoEntry names, once each and sorted, the passing tests doc holds
+// no entry for: tests the run could not tell what they
+// consumed (each mock they consumed fell in no test's window or in another
+// test's, or the run read no consumption). A file created from doc would leave
+// such a test with no entry, which a replay that skips a test with no entry
+// reads as "no verdict" and skips, though it passed: RunTestSet creates no
+// file then.
+func passingWithNoEntry(doc *models.Mapping, results []models.TestResult, passing map[string]bool) []string {
+	seen := make(map[string]bool, len(results))
+	if doc != nil {
+		for _, tc := range doc.TestCases {
+			seen[tc.ID] = true
+		}
+	}
+	var out []string
+	for _, r := range results {
+		id := r.TestCaseID
+		if !passing[id] || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// noEntryHold is the reason, and the next step, of the hold that keeps a run
+// from creating a mappings.yaml that would leave a passing test with no entry
+// (passingWithNoEntry): such a test would read as one the run gave no verdict
+// on. instrumented: keploy ran the application and asked the agent what each
+// test consumed; servedMocks: the run answered dependency calls from the
+// recording (not --mocking=false, not a global passthrough), so there was
+// something to consume. unread names a read of what the application consumed
+// that failed: no test can then be said to have consumed nothing.
+func noEntryHold(instrumented, servedMocks bool, unread string) (reason, nextStep string) {
+	switch {
+	case !instrumented:
+		return "keploy did not run the application, so it read nothing a passing test consumed, and a new file would leave it with no entry, as if the run had given it no verdict",
+			"run keploy test with the application's command (-c), so that keploy reads what each test consumes; until a run can map every passing test, each is served the mocks of its recorded window, as with no mappings.yaml"
+	case !servedMocks:
+		return "the run served no mock (--mocking=false or a global passthrough), so a passing test consumed none, and a new file would leave it with no entry, as if the run had given it no verdict",
+			"run keploy test with mocking on (the default) and without a global passthrough, so that each test consumes the mocks it is served; until a run can map every passing test, each is served the mocks of its recorded window, as with no mappings.yaml"
+	case unread != "":
+		return "keploy could not read from its agent " + unread + ", which may hold a mock a passing test consumed, so it cannot tell that the test consumed nothing, and a new file would leave it with no entry, as if the run had given it no verdict",
+			"run keploy test again; a run in which every read of what the application consumed succeeds creates mappings.yaml. Until then each test is served the mocks of its recorded window, as with no mappings.yaml"
+	default:
+		return "what a passing test consumed fell, by its recorded time, in no test's window or in another test's, so a new file would leave it with no entry, as if the run had given it no verdict",
+			"nothing to do: with no mappings.yaml each test is served the mocks of its recorded window, as before. A call the application makes after it answers, or between tests, is recorded outside the test's window, and a later run creates the file once it can place what each passing test consumes in that test's window"
+	}
+}
+
+// withoutTests is ids less the tests in drop, in order.
+func withoutTests(ids []string, drop map[string]struct{}) []string {
+	if len(drop) == 0 {
+		return ids
+	}
+	var out []string
+	for _, id := range ids {
+		if _, ok := drop[id]; !ok {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// mapsAMock reports whether doc maps at least one mock to a test.
+func mapsAMock(doc *models.Mapping) bool {
+	if doc == nil {
+		return false
+	}
+	for _, tc := range doc.TestCases {
+		if len(tc.Mocks) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // passingEntriesOf is the mapping document a run may write: doc with the entries

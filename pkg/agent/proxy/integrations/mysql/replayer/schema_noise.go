@@ -11,6 +11,8 @@ import (
 
 	lru "github.com/hashicorp/golang-lru/v2"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
+	// vitesslog must load before any vitess code logs: see that package.
+	_ "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/vitesslog"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
