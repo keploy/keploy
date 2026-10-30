@@ -2043,6 +2043,49 @@ type pairing struct {
 	values map[string]variables.Binding
 }
 
+// variableUse is the place of the call's request where keploy uses l, a
+// variable Classify found, or why keploy cannot follow it into the call
+// (learnPlan; own: the call is one of the test's own): it is bound at a
+// request place of one of the test's own HTTP mocks, or under the proven
+// switch of the run's (from.Run), that held the value whole, and used here, at a place a variable can stand at, with the value
+// it had there.
+func variableUse(l learn.Learned, own, jsonReq bool) (string, string) {
+	r, from := l.Recorded, l.From
+	why := ""
+	switch {
+	case from.Given:
+		// The test case's own request (learn.Earlier.Given): what the
+		// application was given, which no variable binds at.
+		why = r.Path + " carries a value the test case's own request holds (" + from.Mock + " at " + from.Path + "), which keploy cannot follow into a call yet"
+	case from.Side == "":
+		why = r.Path + " carries a value the test's recording holds earlier (in " + from.Mock + "), where keploy cannot bind it yet: a call of another protocol, or inside its payload"
+	case from.Side != learn.Request:
+		why = r.Path + " carries a value " + from.Mock + " answered earlier in the test at " + from.Path + ", which keploy cannot follow from an answer"
+	case !from.Whole || from.Var == "":
+		why = r.Path + " carries a value " + from.Mock + " sent earlier in the test at " + from.Path + ", inside a longer value or at a place keploy cannot bind it"
+	case !own || !from.Own && (!from.Run || !provenswitch.On()):
+		// A value the run made, sent by the set's start-up or an earlier
+		// test's own call (from.Run), is the run's variable: bound there,
+		// used here, under the proven switch; without it only a test's own
+		// calls carry its variables.
+		return "", r.Path + " carries a value " + from.Mock + " sent earlier, and only a test's own calls carry its variables"
+	}
+	if why != "" {
+		if l.Why != "" {
+			why += "; " + l.Why
+		}
+		return "", why
+	}
+	use, ok := learn.VarPlace(r, jsonReq)
+	if !ok {
+		return "", r.Path + " carries a value " + from.Mock + " sent earlier in the test, at a place keploy cannot follow a variable to (a form or multipart field)"
+	}
+	if !variables.SameValue(from.Live, l.Live.Value, r.Type == learn.Number) {
+		return "", r.Path + " does not hold the value the test sent at " + from.Var + " of " + from.Mock + ", which it held when recorded"
+	}
+	return use, ""
+}
+
 // learnPlan turns what Classify learned about mock m (paired as rec; own: one
 // of the test's own mocks) into what is written onto the recording, or says
 // why the request cannot be answered (request_changed). A value never
@@ -2099,6 +2142,26 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 			p.values[g.Name] = g
 			continue
 		}
+		// A variable keploy cannot follow into a call that is no test's
+		// own (a start-up's or the pool's, which no test's variable
+		// reaches: variableUse) whose value is also a plain read of the
+		// app's clock in its own call's window (learn.Learned.ReadToo) is
+		// learned as that read (learn.Learned.Unfollowed): two reads of the
+		// clock in one second written in seconds are one value, so a later
+		// one stands whole in an earlier call's request. Refused, the
+		// recording kept no clock place, and a replay whose clock read the
+		// two a second apart missed the call. In a test's own call such a
+		// value stays refused: there it may be a copy of a value stored or
+		// sent earlier, which a read anywhere in the call's span would
+		// pass. A variable keploy can follow stays one, and one with no
+		// such read is refused as before.
+		if l.Kind == learn.KindVariable && !own {
+			if _, why := variableUse(l, own, jsonReq); why != "" {
+				if read, ok := l.Unfollowed(why); ok {
+					l = read
+				}
+			}
+		}
 		if o, ok := l.Clock(); ok {
 			// A read of the app's clock (a noise leaf that is one whole, or
 			// one plus a constant offset) stays compared: a replay checks it
@@ -2115,46 +2178,9 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 
 		case learn.KindVariable:
 			from := l.From
-			switch {
-			case from.Given:
-				// The test case's own request (learn.Earlier.Given): what
-				// the application was given, which no variable binds at.
-				why := r.Path + " carries a value the test case's own request holds (" + from.Mock + " at " + from.Path + "), which keploy cannot follow into a call yet"
-				if l.Why != "" {
-					why += "; " + l.Why
-				}
+			use, why := variableUse(l, own, jsonReq)
+			if why != "" {
 				return p, why
-			case from.Side == "":
-				why := r.Path + " carries a value the test's recording holds earlier (in " + from.Mock + "), where keploy cannot bind it yet: a call of another protocol, or inside its payload"
-				if l.Why != "" {
-					why += "; " + l.Why
-				}
-				return p, why
-			case from.Side != learn.Request:
-				why := r.Path + " carries a value " + from.Mock + " answered earlier in the test at " + from.Path + ", which keploy cannot follow from an answer"
-				if l.Why != "" {
-					why += "; " + l.Why
-				}
-				return p, why
-			case !from.Whole || from.Var == "":
-				why := r.Path + " carries a value " + from.Mock + " sent earlier in the test at " + from.Path + ", inside a longer value or at a place keploy cannot bind it"
-				if l.Why != "" {
-					why += "; " + l.Why
-				}
-				return p, why
-			case !own || !from.Own && (!from.Run || !provenswitch.On()):
-				// A value the run made, sent by the set's start-up or an
-				// earlier test's own call (from.Run), is the run's variable:
-				// bound there, used here, under the proven switch; without
-				// it only a test's own calls carry its variables.
-				return p, r.Path + " carries a value " + from.Mock + " sent earlier, and only a test's own calls carry its variables"
-			}
-			use, ok := learn.VarPlace(r, jsonReq)
-			if !ok {
-				return p, r.Path + " carries a value " + from.Mock + " sent earlier in the test, at a place keploy cannot follow a variable to (a form or multipart field)"
-			}
-			if !variables.SameValue(from.Live, l.Live.Value, r.Type == learn.Number) {
-				return p, r.Path + " does not hold the value the test sent at " + from.Var + " of " + from.Mock + ", which it held when recorded"
 			}
 			name, ok := tracker.PlaceName(test, from, reserved)
 			if !ok {
