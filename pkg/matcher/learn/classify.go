@@ -1813,7 +1813,11 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// later one, and the earlier call's place would carry a variable
 		// and a clock read at once (MergeLearned keeps one). A copy its own
 		// call's window does not hold (sent a minute later) stays the
-		// variable.
+		// variable, and so does one the re-read learns as anything but that
+		// read: an id minted that second with a random word in it is refused
+		// read without its source (the word drifted alike in both calls,
+		// which only dataflow explains), and one the call's answer echoes is
+		// an echo. Only the whole value read as the clock is the clock's.
 		if ln.Kind == KindVariable && ln.From.Run && dc.windowHolds(dc.ofIn(r.Value, l.Value, w, at), w) {
 			if own := leaf(r, l, w, skipBoth); own.Kind == KindClockRead {
 				ln = own

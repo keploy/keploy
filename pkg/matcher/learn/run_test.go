@@ -1001,27 +1001,44 @@ func TestARunsPlaceKeepsTheWordRulesClockExclusions(t *testing.T) {
 // every replay, so a replay whose clock crosses a second between the two
 // calls still passes, and nothing binds the run's variable at the earlier
 // call, which keeps its own clock read alone. A copy a minute later, which
-// its own call's clock does not explain, is the run's variable still.
+// its own call's clock does not explain, is the run's variable still, and so
+// is an id test A minted the same second with a random word in it (the
+// second is read from its digits, the word drifted with it in both calls):
+// only the whole value read as the clock is that read, and the word that
+// drifted alike in both calls is dataflow, followed, neither noise nor
+// refused (founder, 2026-10-30).
 func TestAnEarlierTestsClockReadOfTheSameSecondIsNoRunsVariable(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	rec := time.Date(2026, 10, 30, 5, 8, 52, 0, time.UTC)
 	epoch := func(at time.Time) string { return strconv.FormatInt(at.Unix(), 10) }
+	minted := func(at time.Time) string {
+		word := "q7xk2"
+		if at.After(rec.Add(time.Minute)) {
+			word = "m3pz9" // record's full round mints another
+		}
+		return "ord-" + epoch(at) + "-" + word
+	}
 	aRead := rec.Add(50 * time.Millisecond)
 	for name, row := range map[string]struct {
+		value func(time.Time) string
 		after time.Duration
 		clock bool
-	}{"the same second": {250 * time.Millisecond, true}, "a minute later": {time.Minute, false}} {
+	}{
+		"the same second":                 {epoch, 250 * time.Millisecond, true},
+		"a minute later":                  {epoch, time.Minute, false},
+		"an id minted in the same second": {minted, 250 * time.Millisecond, false},
+	} {
 		tr := NewTracker()
 		tr.Begin()
 		a, _, _, _ := tr.Test()
-		tr.Served(a, Earlier{Mock: "mock-a", At: aRead, Own: true, Seen: []Seen{{Side: Request, Leaf: Leaf{Path: "body.data.lastUsedAt", Type: String, Value: epoch(aRead)}, Live: epoch(aRead.Add(FullRoundLead)), Place: "body.data.lastUsedAt"}}})
+		tr.Served(a, Earlier{Mock: "mock-a", At: aRead, Own: true, Seen: []Seen{{Side: Request, Leaf: Leaf{Path: "body.data.lastUsedAt", Type: String, Value: row.value(aRead)}, Live: row.value(aRead.Add(FullRoundLead)), Place: "body.data.lastUsedAt"}}})
 		tr.End()
 		tr.Begin()
 		_, earlier, _, _ := tr.Test()
 		call := aRead.Add(row.after)
 		fCall := call.Add(FullRoundLead)
 		w := &Window{Rec: Span{From: call.Add(-5 * time.Millisecond), To: call}, F: Span{From: fCall.Add(-5 * time.Millisecond), To: fCall.Add(time.Millisecond)}}
-		ln := ClassifyIn(clockedDrifts(), []string{"body.createdAt"}, strLeaf("body.createdAt", epoch(aRead.Add(FullRoundLead))), strLeaf("body.createdAt", epoch(aRead)), call, earlier, nil, nil, w)[0]
+		ln := ClassifyIn(clockedDrifts(), []string{"body.createdAt"}, strLeaf("body.createdAt", row.value(aRead.Add(FullRoundLead))), strLeaf("body.createdAt", row.value(aRead)), call, earlier, nil, nil, w)[0]
 		_, isClock := ln.Clock()
 		switch {
 		case row.clock && (!isClock || ln.Kind == KindVariable):
