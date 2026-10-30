@@ -657,6 +657,51 @@ func MarkedSeriesOf(ctx context.Context, db MockMemDb, kind models.Kind, known l
 	return nil, nil
 }
 
+// PassOverOwnSeries is marked, the open test's recordings judging marked as
+// background work that answered in its window (AnsweredBackgroundReader),
+// less those of a test's own series that db hands a call now (MarkedSeriesOf,
+// MarkedSeries.Owner set). A call that repeats one of them is a call of that
+// own series, and the parser's series step, asked next, answers it on the id
+// the owner's window bound (MarkedSeries.OwnCall), its reads of the clock on
+// the run's clock, reported as its own series' answer, or charges it to the
+// owner as its own miss. Answered again here, the call would skip that id
+// check and be named background work. A recording of a series marked
+// set-wide, a one-off's and a plain mark's stay in. marked itself when db
+// hands no own series or cannot read its series: the series step then
+// answers none of them either. Recordings are told apart by name, as a
+// staging names them.
+func PassOverOwnSeries(ctx context.Context, db MockMemDb, kind models.Kind, known learn.Known, marked []*models.Mock) []*models.Mock {
+	if len(marked) == 0 {
+		return marked
+	}
+	series, err := MarkedSeriesOf(ctx, db, kind, known)
+	if err != nil {
+		return marked
+	}
+	own := map[string]bool{}
+	for _, s := range series {
+		if s.Owner == "" {
+			continue
+		}
+		for _, m := range s.Recordings {
+			if m != nil {
+				own[m.Name] = true
+			}
+		}
+	}
+	if len(own) == 0 {
+		return marked
+	}
+	out := make([]*models.Mock, 0, len(marked))
+	for _, m := range marked {
+		if m != nil && own[m.Name] {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
 // SeriesAnswerer answers, for a parser keploy ships (HTTP), a call no
 // earlier step answered that may be of a series judging marked
 // (MarkedSeriesReader). live is the call as a recording holds its request
