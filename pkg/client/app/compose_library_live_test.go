@@ -17,6 +17,7 @@ import (
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/network"
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -415,5 +416,86 @@ services:
 	}
 	if runs[0] == runs[1] {
 		t.Fatalf("both runs read %q: the second run's app is a new container, and its output must be its own", runs[0])
+	}
+}
+
+// TestLiveAnInProcessUpThatComposeAbortedBeforeTheAppStartedIsRetried runs
+// run() on the compose library's path against the real daemon. The
+// dependency exits before it is healthy on its first start (and is healthy on
+// every later one, its marker in a volume), so the library's up aborts with
+// the app's container never started. The stand-in agent stops slowly, as
+// keploy's agent does. The library keploy vendors (v5.5.1) does not mark its
+// up terminated on that abort, so the failed start's error ends the up on its
+// own and keploy retries the bring-up, whose app runs and exits 0. keploy
+// does not watch this path for the abort (compose_abort.go): compose v5.6.0
+// and later wait there for the never-started app's container
+// (docker/compose#14426). On a library that does, this row can fail at its
+// hang guard, but only when compose's race goes that way (1 of 4 runs
+// measured, the library patched as v5.6.0 is); the deterministic guard
+// against such a library is TestTheVendoredComposeHasNoAbortWait.
+func TestLiveAnInProcessUpThatComposeAbortedBeforeTheAppStartedIsRetried(t *testing.T) {
+	project := fmt.Sprintf("keployabortlive%d", time.Now().UnixNano()%100000)
+	appc, agentc := project+"-appc", project+"-agent"
+	yaml := fmt.Sprintf(`
+services:
+  dep:
+    image: busybox:1.36
+    command: ["sh", "-c", "if [ -f /data/marker ]; then touch /data/healthy; exec sleep 3600; fi; touch /data/marker; sleep 2; exit 3"]
+    volumes: ["flaky:/data"]
+    stop_signal: SIGKILL
+    healthcheck:
+      test: ["CMD", "test", "-f", "/data/healthy"]
+      interval: 1s
+      retries: 60
+  %s:
+    image: busybox:1.36
+    container_name: %s
+    command: ["sleep", "3600"]
+  app:
+    image: busybox:1.36
+    container_name: %s
+    command: ["sh", "-c", "echo app-ran; exit 0"]
+    depends_on:
+      dep: {condition: service_healthy}
+      %s: {condition: service_started}
+volumes:
+  flaky: {}
+`, keployAgentComposeService, agentc, appc, keployAgentComposeService)
+
+	a := liveApp(t, project, yaml, "--abort-on-container-exit --exit-code-from app", appc)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_ = a.docker.VolumeRemove(ctx, project+"_flaky", true)
+	})
+	core, logs := observer.New(zap.InfoLevel)
+	a.logger = zap.New(core)
+	a.keployContainer = agentc
+	a.composeService = "app"
+	a.composeServices = []string{"dep", "app", keployAgentComposeService}
+	a.opts = models.SetupOptions{Mode: models.MODE_RECORD}
+	if !a.useComposeLibrary() {
+		t.Fatal("the row does not take the compose library's path")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ran := make(chan models.AppError, 1)
+	go func() { ran <- a.run(ctx) }()
+	var appErr models.AppError
+	select {
+	case appErr = <-ran:
+	case <-time.After(3 * time.Minute): // a hang guard, not a budget the fix meets
+		left := projectContainers(t, a, project)
+		cancel()
+		<-ran
+		t.Fatalf("run() did not return within 3 minutes: the library's up waits for the app's container after compose stopped the project before it started the app (docker/compose#14426), and keploy does not end it; the project: %v", left)
+	}
+	ups := logs.FilterMessage("Starting Application :").Len()
+	if appErr.AppErrorType != models.ErrAppStopped {
+		t.Fatalf("the retried up's app exited 0, run() reported %+v (in-process ups: %d)", appErr, ups)
+	}
+	if ups != 2 {
+		t.Fatalf("the in-process bring-up ran %d time(s), want 2 (the aborted up, then its retry)", ups)
 	}
 }
