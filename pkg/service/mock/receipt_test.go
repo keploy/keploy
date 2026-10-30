@@ -76,6 +76,10 @@ type replayCase struct {
 	// losses: the agent counts what it could not capture (GET
 	// /agent/capturelosses).
 	losses *lossCounter
+	// captured: the calls the agent captured on miss (--on-miss record),
+	// which the mock store refuses with insertErr when it is set.
+	captured  []*models.Mock
+	insertErr error
 }
 
 // replayIn runs one replay against a real keploy/ directory in a temp repo
@@ -141,7 +145,13 @@ func replayIn(t *testing.T, c replayCase) (string, int, *observer.ObservedLogs) 
 	if c.losses != nil {
 		run = lossReplayInstr{instr, c.losses}
 	}
+	if c.captured != nil {
+		run = missCaptureInstr{instr, c.captured}
+	}
 	var store MockDB = stubMockDB{}
+	if c.insertErr != nil {
+		store = refusingMockDB{err: c.insertErr}
+	}
 	if c.mapped && provenswitch.On() {
 		// Under the switch the mapping must name mocks the recording has.
 		store = named("mock-0")

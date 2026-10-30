@@ -285,7 +285,9 @@ sudo -E env PATH="$PATH" KEPLOY_MOCK_FORMAT=gob "$RECORD_BIN" mock record -c "py
 RC=${PIPESTATUS[0]}
 [ "$RC" -eq 0 ] || { echo "FAIL: the gob record should pass (exit 0), got $RC"; FAIL=1; }
 sudo -E env PATH="$PATH" KEPLOY_MOCK_FORMAT=gob "$REPLAY_BIN" mock replay -c "python3 -m pytest -q -p no:cacheprovider test_api.py test_new.py" --name e2e-gob --on-miss record --disable-tele 2>&1 | tee onmiss-gob.log
+RC=${PIPESTATUS[0]}
 stop_dep
+[ "$RC" -eq 0 ] || { echo "FAIL: --on-miss record that added the captured call should pass (exit 0), got $RC"; FAIL=1; }
 grep -q "appended new dependency calls" onmiss-gob.log || { echo "FAIL: --on-miss record did not add the captured call to the gob set"; FAIL=1; }
 sudo -E env PATH="$PATH" KEPLOY_MOCK_FORMAT=gob "$REPLAY_BIN" mock replay -c "python3 -m pytest -q -p no:cacheprovider test_api.py test_new.py" --name e2e-gob --on-miss fail --disable-tele 2>&1 | tee rep-gob.log
 RC=${PIPESTATUS[0]}
@@ -295,6 +297,28 @@ grep -qx 'loaded: 4' keploy/e2e-gob/last-replay.yaml ||
   { echo "FAIL: want the gob set to hold 4 mocks, the receipt says: $(grep '^loaded:' keploy/e2e-gob/last-replay.yaml)"; FAIL=1; }
 [ -s keploy/e2e-gob/mocks.gob ] && [ ! -e keploy/e2e-gob/mocks.yaml ] ||
   { echo "FAIL: want the set in one mocks.gob, got: $(ls keploy/e2e-gob)"; FAIL=1; }
+
+echo "== 2f. --on-miss record that cannot add the captured call fails the run =="
+# A set with a mocks.gob and a mocks.yaml (an older keploy's --on-miss record
+# left such sets) is refused, naming both files: the run used to exit 0, and a
+# CI job that ran it to grow the set went green while the set did not grow.
+sudo cp -r keploy/e2e-gob keploy/e2e-mixed && sudo cp keploy/e2e/mocks.yaml keploy/e2e-mixed/mocks.yaml
+sudo cp keploy/e2e-mixed/mocks.gob mixed-before.gob && sudo cp keploy/e2e-mixed/mocks.yaml mixed-before.yaml
+cat > test_new2.py <<PY
+from client import get
+def test_new2(): assert get("/fresh/8")["path"]=="/fresh/8"
+PY
+start_dep
+sudo -E env PATH="$PATH" "$REPLAY_BIN" mock replay -c "python3 -m pytest -q -p no:cacheprovider test_api.py test_new2.py" --name e2e-mixed --on-miss record --disable-tele 2>&1 | tee onmiss-mixed.log
+RC=${PIPESTATUS[0]}
+stop_dep
+grep -q "4 passed" onmiss-mixed.log || { echo "FAIL: the tests should pass (4 passed), so that the run fails on the refused call alone"; FAIL=1; }
+[ "$RC" -ne 0 ] && grep -qx 'failedBy: keploy' keploy/e2e-mixed/last-replay.yaml ||
+  { echo "FAIL: --on-miss record whose captured call the set refused should fail the run as keploy's, got exit $RC, receipt $(grep '^failedBy:' keploy/e2e-mixed/last-replay.yaml)"; FAIL=1; }
+grep -q "e2e-mixed/mocks.gob and .*e2e-mixed/mocks.yaml" onmiss-mixed.log || { echo "FAIL: the refusal should name both of the set's mock files"; FAIL=1; }
+! grep -q "appended new dependency calls" onmiss-mixed.log || { echo "FAIL: a refused call was said to be appended"; FAIL=1; }
+sudo cmp -s mixed-before.gob keploy/e2e-mixed/mocks.gob && sudo cmp -s mixed-before.yaml keploy/e2e-mixed/mocks.yaml ||
+  { echo "FAIL: a refused set's mock files changed"; FAIL=1; }
 
 echo "== 3. exit-code propagation: a failing runner must fail keploy =="
 cat > test_fail.py <<PY
