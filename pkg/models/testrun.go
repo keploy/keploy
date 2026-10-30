@@ -691,8 +691,10 @@ type UnmatchedCall struct {
 	// ClosestMock, the marked recording it repeated, unchecked.
 	// AnswerBackgroundSeries: a call of a marked background series answered
 	// with ClosestMock, a recording of the series, its clock reads checked on
-	// the run's clock. An answer never counts against a test and never lands
-	// in a miss list.
+	// the run's clock. AnswerOwnSeries: a call of the test's own series
+	// answered with ClosestMock, a recording of the series, its clock reads
+	// and its id checked, at any count. An answer never counts against a
+	// test and never lands in a miss list.
 	Answer    string `json:"answer,omitempty" yaml:"answer,omitempty"`
 	Drift     bool   `json:"drift,omitempty" yaml:"drift,omitempty"`
 	Reused    bool   `json:"reused,omitempty" yaml:"reused,omitempty"`
@@ -860,6 +862,16 @@ const (
 	// newest recording the open test's unmade writes admit (ClosestMock),
 	// consuming none, unchecked otherwise. Every copy of it is answered so.
 	AnswerBackgroundSeries = "background_series"
+	// AnswerOwnSeries: a call of a test's own series (a call shape judging
+	// marked on that one test's list alone, whose count varied between
+	// rounds on an id the test's window made: a job's heartbeat on the
+	// job's id), made in its owner's window, answered with the series'
+	// newest recording whose answer names no recorded id the run bound to
+	// another value (ClosestMock), consuming none, as often as it comes.
+	// Its clock reads hold on the run's clock and it carries the id the
+	// window bound this run at every place its mark names; only its count
+	// is not checked.
+	AnswerOwnSeries = "own_series"
 )
 
 // The reasons a miss of record's full round carries (UnmatchedCall.Reason),

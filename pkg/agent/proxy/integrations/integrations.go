@@ -663,13 +663,17 @@ func MarkedSeriesOf(ctx context.Context, db MockMemDb, kind models.Kind, known l
 // (Kind set; no answer), arrived when keploy had it whole, and known
 // keploy.yml's noise of its kind as the parser's learn step reads it. served
 // is the recording of a marked series that answers it, consuming none of a
-// test's; miss, why the marked series it is a call of answers it with none,
-// which makes it the set's background miss, never the open test's
-// (SeriesMiss.Mark); both nil when it is a call of no marked series, and it
-// goes on as before. A build that judges series registers one per kind,
-// with that kind's series reading (learn.RegisterSeriesShape): keploy
+// test's, and owner, when that series is a test's own (MarkedSeries.Owner),
+// that test, whose window the call came in ("" for a series marked
+// set-wide): the parser then reports the call as its own series' answer
+// (models.AnswerOwnSeries), not the background's. miss is why the marked
+// series it is a call of answers it with none, which makes it the set's
+// background miss, never the open test's, or its owner's own miss
+// (SeriesMiss.Mark); all nil and "" when it is a call of no marked series,
+// and it goes on as before. A build that judges series registers one per
+// kind, with that kind's series reading (learn.RegisterSeriesShape): keploy
 // enterprise. keploy itself registers none.
-type SeriesAnswerer func(ctx context.Context, db MockMemDb, live *models.Mock, arrived time.Time, known learn.Known) (served *models.Mock, miss *SeriesMiss, err error)
+type SeriesAnswerer func(ctx context.Context, db MockMemDb, live *models.Mock, arrived time.Time, known learn.Known) (served *models.Mock, owner string, miss *SeriesMiss, err error)
 
 // SeriesMiss is why no recording of a marked series answered a call of it
 // (SeriesAnswerer): NextSteps says so for the report, and Newest is the
@@ -726,17 +730,17 @@ func RegisterSeriesAnswerer(kind models.Kind, a SeriesAnswerer) (unregister func
 	}
 }
 
-// AnswerSeries is live.Kind's SeriesAnswerer's answer to live: all nil when
-// none is registered.
-func AnswerSeries(ctx context.Context, db MockMemDb, live *models.Mock, arrived time.Time, known learn.Known) (*models.Mock, *SeriesMiss, error) {
+// AnswerSeries is live.Kind's SeriesAnswerer's answer to live: all nil and
+// "" when none is registered.
+func AnswerSeries(ctx context.Context, db MockMemDb, live *models.Mock, arrived time.Time, known learn.Known) (*models.Mock, string, *SeriesMiss, error) {
 	if live == nil {
-		return nil, nil, nil
+		return nil, "", nil, nil
 	}
 	seriesAnswerers.RLock()
 	a := seriesAnswerers.of[live.Kind]
 	seriesAnswerers.RUnlock()
 	if a == nil {
-		return nil, nil, nil
+		return nil, "", nil, nil
 	}
 	return a(ctx, db, live, arrived, known)
 }
