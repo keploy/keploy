@@ -28,3 +28,6 @@ func (r *PrefixReader) Read(p []byte) (int, error) {
 	}
 	return r.reader.Read(p)
 }
+
+// Buffered is how many bytes of the prefix are still to be read.
+func (r *PrefixReader) Buffered() int { return len(r.prefix) }

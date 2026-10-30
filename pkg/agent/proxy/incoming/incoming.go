@@ -536,7 +536,7 @@ func (pm *IngressProxyManager) handleConnection(ctx context.Context, clientConn 
 
 type replayConn struct {
 	net.Conn
-	reader io.Reader
+	reader *util.PrefixReader
 }
 
 func newReplayConn(initial []byte, c net.Conn) net.Conn {

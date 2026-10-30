@@ -291,6 +291,19 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 	upAhead := newAheadReader(upConn)
 	defer upAhead.Close() // before upConn's close, which ends its read
 	upstreamReader := bufio.NewReader(upAhead)
+	// The client is watched for its end while the app holds a whole request
+	// of it (watchClient); endWatch ends the watch that runs, if one does,
+	// and reports whether the client ended the exchange.
+	watch, clientEnded := noClientEnd, false
+	appConn := func() net.Conn { return upConn }
+	endWatch := func() bool {
+		if watch() {
+			clientEnded = true
+		}
+		watch = noClientEnd
+		return clientEnded
+	}
+	defer endWatch()
 
 	for {
 		// iterStart is the loop entry time, captured BEFORE ReadRequest
@@ -447,11 +460,16 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 				return
 			}
 			req.Body.Close() // Close explicitly to avoid defer leak in loop.
+			watch = watchClient(clientConn, clientReader, appConn)
 		}
 
 		resp, _, err := readFinalResponse(upstreamReader, req, clientConn)
 		if err != nil {
 			relay.abandon()
+			if endWatch() {
+				logger.Debug("HTTP/1 ingress client ended the connection before the app answered its request; the app was told as the client's going would have told it", zap.Error(err))
+				return
+			}
 			var gone *clientWriteError
 			if errors.As(err, &gone) {
 				logger.Debug("HTTP/1 ingress client connection closed while an interim response was forwarded to it", zap.Error(err))
@@ -487,6 +505,10 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 				warnNotRecorded(logger, req, resp, err)
 			}
 			captureEnabled = false
+		} else if relay != nil {
+			// The body that waited for the 100 is all read: the app holds
+			// the whole request now.
+			watch = watchClient(clientConn, clientReader, appConn)
 		}
 
 		// Response modifications for sync/sampling modes. appResp is the
@@ -563,6 +585,10 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			return headersAt
 		}
 		waitPastEnd := func() {
+			// The answer's end is read from the app: what the client does
+			// from here (it closes the connection once it has the end) is
+			// not a going the app should be told of.
+			endWatch()
 			if captureEligible && !reqCapture.Truncated() && !respCapture.Truncated() {
 				waitPastYield(win, endAt())
 			}
@@ -589,6 +615,14 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			return
 		}
 		resp.Body.Close() // Close explicitly.
+		if endWatch() {
+			// The client went before the answer's end, and the app was
+			// told (watchClient): the exchange is not one to record, and
+			// the connection carries nothing after it.
+			logger.Debug("HTTP/1 ingress client ended the connection before the app's answer ended; the app was told, and the exchange is not recorded",
+				zap.String("method", req.Method), zap.String("url", req.URL.String()))
+			return
+		}
 
 		// The response's time is its LAST byte's: when that byte arrived from
 		// the app (for a body that ends when the app closes the connection,
@@ -951,6 +985,24 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 	// response arrived from the app is where its exchange's window ends.
 	upWire := &wireTimeConn{Conn: upConn}
 	upstreamReader := bufio.NewReader(upWire)
+	// The client is watched for its end while the app holds a whole request
+	// of it (watchClient); endWatch ends the watch that runs, if one does,
+	// and reports whether the client ended the exchange.
+	watch, clientEnded := noClientEnd, false
+	appConn := func() net.Conn {
+		if h := upConnHolder.Load(); h != nil {
+			return h.c
+		}
+		return nil
+	}
+	endWatch := func() bool {
+		if watch() {
+			clientEnded = true
+		}
+		watch = noClientEnd
+		return clientEnded
+	}
+	defer endWatch()
 	// t == nil → caller (sampling-bypass path) wants MSG_PEEK protection
 	// without capture. Suppress capture for this connection's lifetime.
 	// connCapture is the connection's capture; whether one exchange of it is
@@ -1342,6 +1394,9 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		} else if req.Body != nil {
 			_ = req.Body.Close()
 		}
+		if relay == nil {
+			watch = watchClient(clientConn, clientReader, appConn)
+		}
 
 		// Read response. Empty-response on idempotent methods is also
 		// classified as stale-conn; replay once. canReplay is the
@@ -1364,6 +1419,13 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		resp, interims, err := readFinalResponse(upstreamReader, req, clientConn)
 		if err != nil {
 			relay.abandon()
+			// The client went before the app answered, and the app was
+			// told: what it did then is not an answer to give anyone, nor
+			// a request to send it again.
+			if endWatch() {
+				logger.Debug("The client ended the connection before the app answered its request; the app was told as the client's going would have told it", zap.Error(err))
+				return
+			}
 			var gone *clientWriteError
 			if errors.As(err, &gone) {
 				logger.Debug("Failed to forward an interim response to client", zap.Error(err))
@@ -1392,7 +1454,12 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 				if req.Body != nil {
 					_ = req.Body.Close()
 				}
+				watch = watchClient(clientConn, clientReader, appConn)
 				resp, _, err = readFinalResponse(upstreamReader, req, clientConn)
+				if err != nil && endWatch() {
+					logger.Debug("The client ended the connection before the app answered its request; the app was told as the client's going would have told it", zap.Error(err))
+					return
+				}
 				if errors.As(err, &gone) {
 					logger.Debug("Failed to forward an interim response to client", zap.Error(err))
 					return
@@ -1435,6 +1502,10 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 			if captureEnabled {
 				warnNotRecorded(logger, req, resp, rerr)
 			}
+		} else if relay != nil {
+			// The body that waited for the 100 is all read: the app holds
+			// the whole request now.
+			watch = watchClient(clientConn, clientReader, appConn)
 		}
 
 		captureEligible = captureEnabled && requestWhole
@@ -1479,6 +1550,10 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		hasBody := resp.Body != nil && resp.Body != http.NoBody
 		closeDelimited := hasBody && resp.ContentLength < 0 && !isChunked(resp.TransferEncoding)
 		markEnd := func() {
+			// The answer's end is read from the app: what the client does
+			// from here (it closes the connection once it has the end) is
+			// not a going the app should be told of.
+			endWatch()
 			ended = true
 			if closeDelimited {
 				endAt = clockNow()
@@ -1505,6 +1580,14 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		}
 		if resp.Body != nil {
 			_ = resp.Body.Close()
+		}
+		if endWatch() {
+			// The client went before the answer's end, and the app was
+			// told (watchClient): the exchange is not one to record, and
+			// the connection carries nothing after it.
+			logger.Debug("The client ended the connection before the app's answer ended; the app was told, and the exchange is not recorded",
+				zap.String("method", req.Method), zap.String("url", req.URL.String()))
+			return
 		}
 
 		// The window invariant (reqTimestamp <= an egress call's time <=
