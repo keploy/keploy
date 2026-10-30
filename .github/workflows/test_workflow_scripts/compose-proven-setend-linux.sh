@@ -203,13 +203,31 @@ services:
 YML
 
 # await LOG PID PATTERN N: 0 once LOG has N whole lines that carry PATTERN, 1
-# when keploy (PID) exited first.
+# when keploy (PID) exited first. LOG is made by the redirection of keploy's
+# background job, which runs after the job is started, so await may come
+# first: it waits for LOG while keploy runs. Opened at once, a LOG not made
+# yet (a loaded host runs the job late) failed the open, and read as keploy
+# having exited before the app listened.
 await() {
   python3 - "$@" <<'PY'
 import sys, time
 log, pid, pattern, n = sys.argv[1], int(sys.argv[2]), sys.argv[3].encode(), int(sys.argv[4])
+def exited():
+    try:
+        with open("/proc/%d/stat" % pid) as st:
+            return st.read().rsplit(")", 1)[1].split()[0] == "Z"
+    except FileNotFoundError:
+        return True
+while True:
+    try:
+        f = open(log, "rb")
+        break
+    except FileNotFoundError:
+        if exited():
+            sys.exit(1)
+        time.sleep(0.2)
 seen, buf = 0, b""
-with open(log, "rb") as f:
+with f:
     while True:
         chunk = f.read(65536)
         if chunk:
@@ -218,11 +236,7 @@ with open(log, "rb") as f:
             if seen >= n:
                 sys.exit(0)
             continue
-        try:
-            with open("/proc/%d/stat" % pid) as st:
-                if st.read().rsplit(")", 1)[1].split()[0] == "Z":
-                    sys.exit(1)
-        except FileNotFoundError:
+        if exited():
             sys.exit(1)
         time.sleep(0.2)
 PY

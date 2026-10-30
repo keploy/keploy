@@ -22,14 +22,24 @@
 # every request succeeds, its test case written as it is answered
 #   record() has to stop keploy record and find both test cases.
 # every request succeeds, its test case written as keploy record stops
-#   keploy record's stop writes what it still holds. record() has to count
-#   the test cases once keploy record has exited, not before. A record()
-#   that waits for them while keploy record runs hangs here.
+#   keploy record's stop writes what it still holds, a moment after its
+#   interrupt. record() has to count the test cases once keploy record has
+#   exited, not before: a count made before finds none. A record() that
+#   waits for them while keploy record runs hangs here.
 # keploy record drops a test case of a request that succeeded
 #   It writes one of the two. record() has to say it wrote 1 of 2, print its
 #   log and return. A record() that waits for the second while keploy record
 #   runs on hangs: the lane held until its job was cancelled, with the
 #   recording's log never printed.
+#
+# await, on a log keploy's background job makes after await begins
+#   The job's redirection makes the log once the job runs, which a loaded
+#   host can delay past the await's start. await has to wait for the log
+#   while keploy runs, and find the app listening in it; it opened the log
+#   at once, failed, and the lane said keploy exited before the app
+#   listened.
+# await, on a log keploy's job never makes
+#   keploy exits first: await has to say so (1), not wait on.
 set -uo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -86,19 +96,22 @@ echo "curl: (56) Recv failure: Connection reset by peer" >&2
 exit 56
 SH
 # keploy record: the app listens; on keploy's interrupt the app publishes its
-# shutdown, keploy record writes what it still holds (WRITE=stop: a test case
-# for each request answered, but the last where DROP=1), says how many test
-# cases it had written, and exits. Python, as a background job's SIGINT,
-# ignored on entry, cannot be trapped in bash; the handler is in place before
-# the app is said to listen.
+# shutdown, keploy record takes a moment to write what it still holds
+# (WRITE=stop: a test case for each request answered, but the last where
+# DROP=1), says how many test cases it had written, and exits. The moment is
+# keploy record's drain: a count made as soon as keploy record is signalled,
+# before it has exited, finds none of what it writes on its way out. Python,
+# as a background job's SIGINT, ignored on entry, cannot be trapped in bash;
+# the handler is in place before the app is said to listen.
 cat >"$root/bin/record" <<'PY'
 #!/usr/bin/env python3
-import os, signal, sys
+import os, signal, sys, time
 tests = "keploy/test-set-0/tests"
 def written():
     return len([f for f in os.listdir(tests) if f.endswith(".yaml")]) if os.path.isdir(tests) else 0
 def bye(*_):
     print("APP SHUTDOWN PUBLISHED bye", flush=True)
+    time.sleep(1)
     if os.environ.get("WRITE") == "stop":
         answered = os.path.join(os.environ["ROOT"], "answered")
         n = sum(1 for _ in open(answered)) if os.path.exists(answered) else 0
@@ -150,6 +163,37 @@ grep -q "FAIL: record 0: keploy record wrote 1 test cases, want 2" "$out" || fai
 grep -q "^RECORD RETURNED FAIL=[1-9]" "$out" || fail_case "keploy record drops a test case: record() did not return with the failure counted"
 grep -q "^RECORDED 1" "$out" || fail_case "keploy record drops a test case: record() did not print keploy record's log"
 
+# await_case CASE MAKES: the lane's await of "APP LISTENING" in $root/CASE.log,
+# made by a job that makes it a second after it starts (MAKES=yes), as keploy's
+# background job's redirection does on a loaded host, or that exits with no
+# log made (MAKES=no). It returns await's exit code (124: it did not return).
+await_case() {
+    local log="$root/$1.log" job rc
+    rm -f "$log"
+    if [ "$2" = yes ]; then
+        (
+            sleep 1
+            exec >"$log"
+            echo "APP LISTENING"
+            exec sleep 600
+        ) &
+    else
+        (sleep 1) &
+    fi
+    job=$!
+    FUNCS="$funcs" LOG="$log" JOB="$job" timeout 60 bash -c '. "$FUNCS"; await "$LOG" "$JOB" "APP LISTENING" 1'
+    rc=$?
+    kill "$job" 2>/dev/null
+    wait "$job" 2>/dev/null
+    return "$rc"
+}
+await_case late-log yes
+rc=$?
+[ "$rc" -eq 0 ] || fail_case "await, on a log keploy's job makes after await begins: returned $rc, want 0 (the app listens)"
+await_case no-log no
+rc=$?
+[ "$rc" -eq 1 ] || fail_case "await, on a log keploy's job never makes: returned $rc, want 1 (keploy exited first)"
+
 if [ "$failures" -ne 0 ]; then
     for f in "$root"/*.out "$root"/*.log; do
         echo "--- $f:"
@@ -157,4 +201,4 @@ if [ "$failures" -ne 0 ]; then
     done
     exit 1
 fi
-echo "PASS: compose-proven-setend-linux.sh's record() cases"
+echo "PASS: compose-proven-setend-linux.sh's record() and await cases"
