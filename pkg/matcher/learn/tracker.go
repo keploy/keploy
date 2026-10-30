@@ -7,6 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unsafe"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -139,7 +140,9 @@ type Tracker struct {
 	// runTaken their names, which no test's variable takes. setTaken are the
 	// names every test of the set has taken so far, which no run's variable
 	// takes: a run's variable is named when a test first uses it, after
-	// earlier tests named their own.
+	// earlier tests named their own. run is kept within its share of the
+	// set's budget (keepRun): from the first place past it, the run keeps
+	// no more, and its last place says so (Earlier.Unread).
 	run      []Earlier
 	runNames map[string]string
 	runTaken map[string]bool
@@ -551,7 +554,7 @@ func (t *Tracker) beginAt(at time.Time) func() {
 	say := t.closeUnread()
 	t.epoch++
 	if provenswitch.On() {
-		t.run = append(t.run, ranCalls(t.served)...)
+		t.keepRun(ranCalls(t.served))
 	}
 	t.served = nil
 	t.before, t.mocks, t.kept = t.mocks, nil, nil
@@ -1225,12 +1228,12 @@ func (t *Tracker) Served(n uint64, e Earlier) {
 		// the run's as one told in time is (ranCalls); the start-up's and a
 		// previous set's are nobody's.
 		if n > t.setEpoch && provenswitch.On() {
-			t.run = append(t.run, ranCalls([]Earlier{e})...)
+			t.keepRun(ranCalls([]Earlier{e}))
 		}
 	case e.StartUp && e.Own:
 	case e.StartUp && drifted(e):
 		e.Run = true
-		t.run = append(t.run, e)
+		t.keepRun([]Earlier{e})
 	default:
 		t.served = append(t.served, e)
 	}
@@ -1392,6 +1395,48 @@ func ranCalls(served []Earlier) []Earlier {
 		}
 	}
 	return out
+}
+
+// keepRun adds places to the run's (run), each within the run's share of
+// the set's budget (setDerived.keepRun), so a set whose tests send large
+// values (a generated document, an upload) holds a bounded part of them, not
+// all of them. From the first place past it the run keeps no more: in its
+// stead one place of no leaves says so (Earlier.Unread, runFullWhy), and
+// every value that changed in a later call of the set is then refused
+// rather than learned as noise or an echo (requestUnread): it may have come
+// from a place the run no longer keeps, and keploy cannot tell. That place
+// is an earlier test's (not StartUp), which no recorded time moves past a
+// call (alwaysEarlier). A value a kept place holds is followed as before.
+// t.mu is held.
+func (t *Tracker) keepRun(places []Earlier) {
+	for _, e := range places {
+		if n := len(t.run); n > 0 && t.run[n-1].Unread != "" {
+			return
+		}
+		if !t.derived.keepRun(runPlaceBytes(e)) {
+			e = Earlier{Mock: e.Mock, At: e.At, Run: true, Unread: runFullWhy(e.Mock, t.derived.runCap())}
+		}
+		t.run = append(t.run, e)
+	}
+}
+
+// runPlaceBytes is what the run counts of a place it keeps (keepRun): the
+// exchange and its leaves, with their text. The start-up's exchange, kept
+// whole, keeps its recording too (Payload): its text where it holds it
+// (RawOf), none where the set's store does, which lets it go (LazyRawOf).
+func runPlaceBytes(e Earlier) int64 {
+	n := int64(unsafe.Sizeof(e)) + int64(len(e.Mock)+len(e.Payload.rText))
+	for _, s := range e.Seen {
+		n += int64(unsafe.Sizeof(s)) + int64(len(s.Leaf.Path)+len(s.Leaf.Noise)+len(s.Leaf.Value)+len(s.Live)+len(s.Place)+len(s.Record)+len(s.Name))
+	}
+	return n
+}
+
+// runFullWhy is why a value that changed is refused once the run keeps no
+// more places (keepRun), from mock's call on, past limit bytes: it names the
+// call and the bound, never a value, and how to correct it.
+func runFullWhy(mock string, limit int64) string {
+	return "keploy keeps the values each test of a set sends, for the tests after it, within " + strconv.FormatInt(limit>>10, 10) + " KiB, and the set's tests sent more from " + mock + "'s call on: the value may have come from one it no longer keeps, and keploy cannot tell. Split the test set, or give the keploy agent more memory"
 }
 
 // Name is the name of test number n's variable bound at place of mock: the

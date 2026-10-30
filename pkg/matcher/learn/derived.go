@@ -123,6 +123,9 @@ type setDerived struct {
 	// offsets are the set's places the offset rule reads, by place and
 	// moment (offsetIndex), within offsetBudget: its handlers share them.
 	offsets *offsetIndex
+	// run is the bytes the tracker's run keeps of the set's tests' places
+	// (Tracker.keepRun), on budget (keepRun).
+	run int64
 }
 
 // driftPart is what setDerived keeps of one drift (drifts).
@@ -543,6 +546,36 @@ func (s *setDerived) usedBytes() int64 {
 	defer s.mu.Unlock()
 	return s.held.used + s.words.used + s.forms.used + s.drifts.used + s.bodies.kept.used
 }
+
+// keepRun counts size bytes more of the run's places (Tracker.keepRun) on
+// the set's budget, and reports whether they are within the run's share of
+// it (runCap); past it, it counts none. The run has the first claim on its
+// share: the tiers that let go (words, payloads) make room for it
+// (budget.letGo), and those that do not keep no more once the set is past
+// its budget. So a set whose never-let-go tiers filled its budget at its
+// staging (WarmSet) still keeps its tests' values, and holds an eighth more
+// than its budget at most; a run with no room at all would refuse every
+// value a later test sent.
+func (s *setDerived) keepRun(size int64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.run+size > s.budget.limit/runShare {
+		return false
+	}
+	s.run += size
+	s.budget.used += size
+	if need := s.budget.used - s.budget.limit; need > 0 && s.budget.letGo != nil {
+		s.budget.letGo(need)
+	}
+	return true
+}
+
+// runCap is the run's share of the set's budget (keepRun), for its reason.
+func (s *setDerived) runCap() int64 { return s.budget.limit / runShare }
+
+// runShare: the run keeps its places within an eighth of the set's budget
+// (keepRun): 8 MiB at the least budget, 512 MiB at the most.
+const runShare = 8
 
 // driftOf is what the drifted value (rec, live) changed, read with the lead
 // where lead holds, bounded by no call (newDrift), kept for the set (drifts)

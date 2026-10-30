@@ -931,6 +931,217 @@ func TestTheRunsPlacesHoldTheValuesNotTheCalls(t *testing.T) {
 	runtime.KeepAlive(earlier)
 }
 
+// The run keeps its places within its share of the set's budget (keepRun),
+// at the least budget a set has (64 MiB, an eighth of it the run's): 2000
+// tests that each send a 32 KiB value the run made (a generated document,
+// an upload) held 157 MB before; now the set holds about the run's share.
+// Past it, the run keeps no more, and the later tests' values are refused,
+// naming the call it stopped at and the bound, never learned as noise: the
+// value a dropped place holds, and one no test sent, alike. A value the
+// first test made, kept, is still followed as the run's variable.
+func TestTheRunsPlacesStayWithinTheirShareOfTheSetsBudget(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	defer func(b int64) { learnBudget = b }(learnBudget)
+	learnBudget = minSetBudget
+	const tests, big = 2000, 32 << 10
+	// Each value is 32 KiB exactly: the run counts a value by its length,
+	// and Go rounds an allocation past 32 KiB up to its 8 KiB pages, so
+	// values a little past it hold up to a quarter more than counted.
+	bigOf := func(c string, i int) string {
+		n := strconv.Itoa(i)
+		return strings.Repeat(c, big-len(n)) + n
+	}
+	t0 := time.Unix(1_792_000_000, 0)
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	tr := NewTracker()
+	for i := 0; i < tests; i++ {
+		tr.Begin()
+		n, _, _, _ := tr.Test()
+		e := ranCall("mock-"+strconv.Itoa(i), t0, bigOf("r", i), bigOf("l", i))
+		if i == 0 {
+			e = ranCall("mock-0", t0, "o-0", "o-0-9")
+		}
+		tr.Served(n, e)
+		tr.End()
+	}
+	tr.Begin()
+	runtime.GC()
+	runtime.ReadMemStats(&after)
+	share := int64(minSetBudget / runShare)
+	if grew := int64(after.HeapAlloc) - int64(before.HeapAlloc); grew > share+1<<20 {
+		t.Fatalf("the set holds %d bytes for %d tests' %d KiB values, over the run's share of %d and 1 MiB", grew, tests, big>>10, share)
+	}
+	_, earlier, _, _ := tr.Test()
+	last := earlier[len(earlier)-1]
+	if len(earlier) == tests || last.Unread == "" || len(last.Seen) != 0 {
+		t.Fatalf("the run keeps %d of %d tests' places, the last %+v: want those within its share, then one that says it keeps no more", len(earlier), tests, last)
+	}
+	stop := last.Mock
+	dc := func() *DriftCache {
+		tr.mu.Lock()
+		defer tr.mu.Unlock()
+		dc := tr.newDrifts()
+		dc.appClock = true
+		return dc
+	}
+	call := t0.Add(time.Hour)
+	for _, c := range []struct{ name, rec, live string }{
+		{"a value the first test made", "o-0", "o-0-9"},
+		{"the last test's value, past the bound", bigOf("r", tests-1), bigOf("l", tests-1)},
+		{"a value no test sent", "o-x", "o-x-9"},
+	} {
+		ln := ClassifyIn(dc(), []string{"body.order"}, strLeaf("body.order", c.live), strLeaf("body.order", c.rec), call, earlier, nil, nil, nil)
+		if c.rec == "o-0" {
+			if ln[0].Kind != KindVariable || ln[0].From.Mock != "mock-0" || !ln[0].From.Run {
+				t.Errorf("%s is %s from %+v (%s), want the run's variable from mock-0", c.name, ln[0].Kind, ln[0].From, ln[0].Why)
+			}
+			continue
+		}
+		if ln[0].Kind != KindUnaccounted || ln[0].Why != runFullWhy(stop, share) {
+			t.Errorf("%s is %s (%s), want refused: the run keeps no more from %s's call on, past %d bytes", c.name, ln[0].Kind, ln[0].Why, stop, share)
+		}
+	}
+	runtime.KeepAlive(tr)
+}
+
+// Each way a place reaches the run is within the bound (keepRun): a test's
+// own call as the next test begins, one told after the next began, and the
+// start-up's exchange, kept whole. Past it the run keeps no more, the place
+// that says so last, once; a new set starts with its whole share again.
+func TestEveryWayAPlaceReachesTheRunIsBounded(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	defer func(b int64) { learnBudget = b }(learnBudget)
+	learnBudget = 8 << 20
+	const big = 32 << 10
+	t0 := time.Unix(1_792_000_000, 0)
+	value := func(c string, i int) string { return strings.Repeat(c, big) + strconv.Itoa(i) }
+	for _, c := range []struct {
+		name  string
+		serve func(tr *Tracker, i int)
+	}{
+		{"as the next test begins", func(tr *Tracker, i int) {
+			tr.Begin()
+			n, _, _, _ := tr.Test()
+			tr.Served(n, ranCall("mock-"+strconv.Itoa(i), t0.Add(time.Duration(i)*time.Second), value("r", i), value("l", i)))
+			tr.End()
+		}},
+		{"told after the next began", func(tr *Tracker, i int) {
+			tr.Begin()
+			n, _, _, _ := tr.Test()
+			tr.End()
+			tr.Begin()
+			tr.Served(n, ranCall("mock-"+strconv.Itoa(i), t0.Add(time.Duration(i)*time.Second), value("r", i), value("l", i)))
+			tr.End()
+		}},
+		{"the start-up's", func(tr *Tracker, i int) {
+			n, _, _, _ := tr.Test()
+			e := ranCall("mock-"+strconv.Itoa(i), t0.Add(time.Duration(i)*time.Second), value("r", i), value("l", i))
+			e.Own = false
+			tr.Served(n, e)
+		}},
+		{"the start-up's, its recording's text held whole", func(tr *Tracker, i int) {
+			n, _, _, _ := tr.Test()
+			e := ranCall("mock-"+strconv.Itoa(i), t0.Add(time.Duration(i)*time.Second), "s-"+strconv.Itoa(i), "s-"+strconv.Itoa(i)+"-9")
+			e.Own = false
+			e.Payload = Raw{mock: e.Mock, at: e.At, rText: value("p", i) + value("p", i) + value("p", i), rRead: true}
+			tr.Served(n, e)
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			tr := NewTracker()
+			for set := 0; set < 2; set++ {
+				tr.NewSet()
+				for i := 0; i < 64; i++ {
+					c.serve(tr, i)
+				}
+				tr.Begin()
+				_, earlier, _, _ := tr.Test()
+				var marks, kept int64
+				for _, e := range earlier {
+					if e.Unread != "" {
+						marks++
+						continue
+					}
+					kept += runPlaceBytes(e)
+				}
+				if last := earlier[len(earlier)-1]; marks != 1 || last.Unread == "" || kept > learnBudget/runShare || kept < learnBudget/runShare-4*big-4096 {
+					t.Fatalf("set %d: the run keeps %d bytes of its places and %d that say it keeps no more (the last %+v): want its share, %d bytes, then one", set, kept, marks, last, learnBudget/runShare)
+				}
+				// Read by a call recorded after every kept place and before
+				// the one past the bound: the place that says the run keeps
+				// no more is still earlier than the call.
+				last := earlier[len(earlier)-1]
+				ln := ClassifyIn(clockedDrifts(), []string{"body.order"}, strLeaf("body.order", "o-x-9"), strLeaf("body.order", "o-x"), last.At.Add(-time.Second/2), earlier, nil, nil, nil)
+				if ln[0].Kind != KindUnaccounted || ln[0].Why != runFullWhy(last.Mock, learnBudget/runShare) {
+					t.Fatalf("set %d: a value no test sent, in a call recorded before the place past the bound, is %s (%s): want refused, the run keeps no more", set, ln[0].Kind, ln[0].Why)
+				}
+				tr.End()
+			}
+		})
+	}
+}
+
+// The run has the first claim on its share of the set's budget
+// (setDerived.keepRun): a set whose tiers that never let go (held, forms)
+// filled the budget as it was staged still keeps its tests' values, and is
+// then past its budget by the run's share at most, never refusing every
+// later test's value for want of room; where the budget is the words tier's,
+// which lets go, the words make room, and the set stays within it.
+func TestTheRunHasTheFirstClaimOnItsShare(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	defer func(b int64) { learnBudget = b }(learnBudget)
+	learnBudget = 8 << 20
+	t0 := time.Unix(1_792_000_000, 0)
+	for _, c := range []struct {
+		name  string
+		fill  func(s *setDerived, size int64)
+		bound int64
+	}{
+		{"held, which never lets go", func(s *setDerived, size int64) {
+			s.held.keep("staged", partMoments, size, func(*heldParts) {})
+		}, learnBudget + learnBudget/runShare},
+		{"words, which let go", func(s *setDerived, size int64) {
+			for i := int64(0); i < 64; i++ {
+				s.words.keep("staged-"+strconv.FormatInt(i, 10), partTokens, size/64-slotBytes-16, func(*wordParts) {})
+			}
+		}, learnBudget},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			tr := NewTracker()
+			s := tr.derived
+			s.mu.Lock()
+			c.fill(s, s.budget.limit-slotBytes-int64(len("staged")))
+			filled := s.budget.used
+			s.mu.Unlock()
+			if filled < learnBudget-learnBudget/64 {
+				t.Fatalf("the staging filled %d of the set's %d bytes, want about all", filled, learnBudget)
+			}
+			for i := 0; i < 4; i++ {
+				tr.Begin()
+				n, _, _, _ := tr.Test()
+				tr.Served(n, ranCall("mock-"+strconv.Itoa(i), t0, strings.Repeat("r", 32<<10), strings.Repeat("l", 32<<10)))
+				tr.End()
+			}
+			tr.Begin()
+			_, earlier, _, _ := tr.Test()
+			s.mu.Lock()
+			used, run := s.budget.used, s.run
+			s.mu.Unlock()
+			if tiers := s.usedBytes(); used != tiers+run || run == 0 {
+				t.Fatalf("the set's budget counts %d bytes, its tiers %d and the run %d: want the run's on the set's budget", used, tiers, run)
+			}
+			if len(earlier) != 4 || earlier[3].Unread != "" {
+				t.Fatalf("a set staged to its budget keeps %d of 4 tests' places (the last %+v): want each, the run's first claim", len(earlier), earlier[len(earlier)-1])
+			}
+			if used > c.bound {
+				t.Fatalf("the set holds %d bytes with the run's places, over %d", used, c.bound)
+			}
+		})
+	}
+}
+
 // One call's read of the run's places as the last test of a set of n tests
 // learns its one changed value: the tracker's read (a copy of every place),
 // the learn step's sorted copy, and the source search over every place

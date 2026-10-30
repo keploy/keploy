@@ -106,8 +106,10 @@ type Earlier struct {
 	Given bool
 	// Unread, of a Given place, says why the test case's request could not
 	// be read (none was sent with the test case, or keploy cannot read its
-	// kind): it has no Seen, and every value that changed is refused
-	// (ClassifyIn), never learned as noise or an echo.
+	// kind); of a Run place, that the run keeps no more of the set's tests'
+	// places, past its bound (Tracker.keepRun), the reason itself. It has
+	// no Seen, and every value that changed is refused (ClassifyIn,
+	// requestUnread), never learned as noise or an echo.
 	Unread string
 	Seen   []Seen
 	// noTime: the exchange's recorded time keploy cannot read (At was the
@@ -1496,7 +1498,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 			v := dc.ofIn(r.Value, l.Value, w, at)
 			why, sourced := "", false
 			if unreadReq != "" {
-				why = unreadRequestWhy(unreadReq)
+				why = unreadReq
 			} else if where, asRecorded := dc.requestHolds(lostMoments(v), v.liveMoments, served); where != "" {
 				why = requestHoldsWhy(where, asRecorded)
 			} else if m, ok := offsetOfValue(v, places); ok && skip&skipOffset == 0 {
