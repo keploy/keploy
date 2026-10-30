@@ -401,8 +401,8 @@ func clockWordIn(rec, live string, w *Window) (before, rw, lw, after string, ok 
 // both texts, as are those from er in rec and el in live. ok is false where
 // a differing part spans more bytes than any layout's instant can
 // (clockWordMax): no one instant changed there. Where the layouts' instants
-// have no bound, or no seam lies near, the part is the whole text on that
-// side.
+// have no bound, where no seam lies near, or where the side is short
+// (clockSeamMin), the part is the whole text on that side.
 func clockWordWindow(rec, live string) (q, er, el int, ok bool) {
 	if clockWordMax < 0 {
 		return 0, len(rec), len(live), true
@@ -412,9 +412,17 @@ func clockWordWindow(rec, live string) (q, er, el int, ok bool) {
 		return 0, 0, 0, false
 	}
 	// A seam's own reading reads up to clockWordMax bytes past each place
-	// before it: it is read where both texts are the same.
-	q = clockSeamBefore(rec, p-clockWordMax)
-	er = clockSeamAfter(rec, len(rec)-s+clockWordMax)
+	// before it: it is read where both texts are the same. A side shorter
+	// than clockSeamMin past that margin is read whole: its seam would
+	// cost more to find than the bytes it leaves out, and the whole side
+	// is what a reading of the whole texts reads.
+	q, er = 0, len(rec)
+	if p-clockWordMax >= clockSeamMin {
+		q = clockSeamBefore(rec, p-clockWordMax)
+	}
+	if s-clockWordMax >= clockSeamMin {
+		er = clockSeamAfter(rec, len(rec)-s+clockWordMax)
+	}
 	return q, er, er + len(live) - len(rec), true
 }
 
@@ -439,8 +447,13 @@ func commonEnds(a, b string) (p, s int) {
 }
 
 // clockCutSearch is how far clockSeamBefore and clockSeamAfter look for a
-// seam before they take the text's own end as one.
-const clockCutSearch = 256
+// seam before they take the text's own end as one; clockSeamMin is how
+// long a side of the two texts' differing part must be, past the margin a
+// seam is read in, for clockWordWindow to look for a seam on it at all.
+const (
+	clockCutSearch = 256
+	clockSeamMin   = 32
+)
 
 // clockSeamBefore is the last seam of s at or before hi, and at most
 // clockCutSearch before it: a place q no instant of any layout a reading of
@@ -722,7 +735,7 @@ func clockMatches(lay clockLayout, s string, from, to int, taken []bool) [][]int
 // atWordBounds reports whether s[a:b] stands at ASCII word boundaries of s:
 // no letter or digit of s runs into its first or its last byte.
 func atWordBounds(s string, a, b int) bool {
-	return !(a > 0 && isWord(s[a-1]) && isWord(s[a]) || b < len(s) && isWord(s[b-1]) && isWord(s[b]))
+	return (a <= 0 || !isWord(s[a-1]) || !isWord(s[a])) && (b >= len(s) || !isWord(s[b-1]) || !isWord(s[b]))
 }
 
 // moved reports whether the live text is the recorded one's instant moved by

@@ -363,9 +363,10 @@ func clockTextPair(rnd *rand.Rand, n int) (string, string) {
 // than the other (paired by a whole reading with the same instants after
 // the change), runs that chain instants across every place near the change
 // (where the whole text on that side is read), and random texts of
-// instants, separators and other bytes, short ones and ones inside a long
-// text the same in both, each read in a window that holds every instant
-// and in the call's window of the word rows.
+// instants, separators and other bytes, short ones (read whole) and ones
+// inside a longer text the same in both (cut at a seam), each read in a
+// window that holds every instant and in the call's window of the word
+// rows.
 func TestAClockWordIsFoundWhereTwoTextsDifferAsInTheWholeTexts(t *testing.T) {
 	runWin := &Window{
 		Rec: Span{From: wordRec.prev.Add(-time.Second), To: wordRec.call},
@@ -433,6 +434,14 @@ func TestAClockWordIsFoundWhereTwoTextsDifferAsInTheWholeTexts(t *testing.T) {
 		after, _ := clockTextPair(rnd, 1+rnd.Intn(120))
 		pairs = append(pairs, pair{"random inside a long text", before + rec + after, before + live + after})
 	}
+	// Texts long enough on each side to be cut at a seam (clockSeamMin),
+	// on one side or both.
+	for i := 0; i < 3000; i++ {
+		rec, live := clockTextPair(rnd, 1+rnd.Intn(8))
+		before, _ := clockTextPair(rnd, 4+rnd.Intn(16))
+		after, _ := clockTextPair(rnd, 4+rnd.Intn(16))
+		pairs = append(pairs, pair{"random inside a text cut at a seam", before + rec + after, before + live + after})
+	}
 	found, parted := 0, 0
 	for _, pc := range pairs {
 		for _, w := range []*Window{anyInstant, runWin} {
@@ -454,6 +463,63 @@ func TestAClockWordIsFoundWhereTwoTextsDifferAsInTheWholeTexts(t *testing.T) {
 	// in part.
 	if found < 2000 || parted < 5000 {
 		t.Fatalf("%d of %d text pairs found a word, %d were read in part; the row reads too few of either", found, 2*len(pairs), parted)
+	}
+}
+
+// clockWordIn's window has the outcome of the whole reading at its edges
+// too: where an instant after the window starts at the window's very end,
+// where an instant after it is glued to a word (and is no instant), and
+// where a glued word stands before the window. The changed fraction of
+// "at 1793336961.5:00:00:00" leaves one text a time of day more than the
+// other, which a whole reading pairs with the next time after the window:
+// a time that differs from it refuses the text, and a glued one is passed
+// over. Each shape is padded by 0 to 80 bytes, so that the instant after the
+// change lands on every place near the window's end, and stands alone, after
+// a long text, before one, or both, so that both sides of the window are
+// short enough to be read whole (clockSeamMin) and long enough to be cut at
+// a seam.
+func TestAClockWordWindowsEdgesReadAsTheWholeTexts(t *testing.T) {
+	fill := strings.Repeat("z", clockSeamMin+2*clockWordMax)
+	type pair struct{ rec, live string }
+	var pairs []pair
+	for k := 0; k <= 80; k++ {
+		pad := strings.Repeat("x", k)
+		for _, tail := range []string{"12:34", "12:34:56", " 12:34", "1793336961", "2026-10-30", "y12:34", "a1793336961"} {
+			for _, sh := range [][2]string{
+				{"at 1793336961.5:00:00:00 " + pad + tail, "at 1793336961.55:00:00:00 " + pad + tail},
+				{"at 1793336961.55:00:00:00 " + pad + tail, "at 1793336961.5:00:00:00 " + pad + tail},
+				{pad + tail + " " + pad + " 1793336961102639022", pad + tail + " " + pad + " 1793336961102639023"},
+				{"1793336961102639022 " + pad + tail + pad, "1793336961102639023 " + pad + tail + pad},
+			} {
+				for _, f := range [][2]string{{"", ""}, {fill + " ", ""}, {"", " " + fill}, {fill + " ", " " + fill}} {
+					pairs = append(pairs, pair{f[0] + sh[0] + f[1], f[0] + sh[1] + f[1]})
+				}
+			}
+		}
+	}
+	found, cutBefore, cutAfter := 0, 0, 0
+	for _, pc := range pairs {
+		b, rw, lw, a, ok := clockWordIn(pc.rec, pc.live, anyInstant)
+		wb, wrw, wlw, wa, wok := clockWordInWhole(pc.rec, pc.live, anyInstant)
+		if ok != wok || b != wb || rw != wrw || lw != wlw || a != wa {
+			t.Fatalf("%q -> %q: clockWordIn = %v %q/%q (%d bytes before, %d after), the whole texts' = %v %q/%q (%d, %d)",
+				pc.rec, pc.live, ok, rw, lw, len(b), len(a), wok, wrw, wlw, len(wb), len(wa))
+		}
+		if ok {
+			found++
+		}
+		if q, er, _, near := clockWordWindow(pc.rec, pc.live); near {
+			if q > 0 {
+				cutBefore++
+			}
+			if er < len(pc.rec) {
+				cutAfter++
+			}
+		}
+	}
+	// The row reads words found and refused, and windows cut on each side.
+	if found == 0 || found == len(pairs) || cutBefore == 0 || cutAfter == 0 {
+		t.Fatalf("%d pairs: %d found a word, %d were cut before the change, %d after it", len(pairs), found, cutBefore, cutAfter)
 	}
 }
 
