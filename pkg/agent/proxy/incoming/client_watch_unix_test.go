@@ -1026,3 +1026,193 @@ func TestAPauseCutIsCountedAsItsExchangeEndsOnAKeptAliveConnection(t *testing.T)
 	}
 	pm.captures.Wait()
 }
+
+// A pause cut on a later exchange of a kept-alive connection is counted too:
+// the once-only count is the exchange's, not the connection's. A whole,
+// unpaused exchange comes first, then the one the pause cuts, then the next.
+func TestAPauseCutOnALaterExchangeOfAKeptAliveConnectionIsCounted(t *testing.T) {
+	var paused atomic.Bool
+	stubIngressPaused(t, paused.Load)
+	appLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	step := make(chan struct{})
+	serveApp(t, appLn, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/first", "/next":
+			fmt.Fprint(w, strings.TrimPrefix(r.URL.Path, "/"))
+			return
+		}
+		fmt.Fprintln(w, `{"status":"RUNNING"}`)
+		w.(http.Flusher).Flush()
+		select {
+		case <-step:
+		case <-r.Context().Done():
+			return
+		}
+		fmt.Fprintln(w, `{"status":"DONE"}`)
+	})
+	mgr := syncMock.New(zap.NewNop())
+	pm, client, served, _ := serveWatchedIn(t, syncMock.NewContext(context.Background(), mgr), false, appLn, nil)
+	br := bufio.NewReader(client)
+	get := func(path, want string) {
+		t.Helper()
+		if _, err := client.Write([]byte("GET " + path + " HTTP/1.1\r\nHost: api\r\n\r\n")); err != nil {
+			t.Fatal(err)
+		}
+		resp, err := http.ReadResponse(br, nil)
+		if err != nil {
+			t.Fatalf("%s: %v", path, err)
+		}
+		if b, err := io.ReadAll(resp.Body); err != nil || string(b) != want {
+			t.Fatalf("%s: %q, %v", path, b, err)
+		}
+	}
+	get("/first", "first")
+	if _, err := client.Write([]byte("GET /events HTTP/1.1\r\nHost: api\r\n\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := bufio.NewReader(resp.Body)
+	if line, err := body.ReadString('\n'); err != nil || !strings.Contains(line, "RUNNING") {
+		t.Fatalf("the answer's first event: %q, %v", line, err)
+	}
+	paused.Store(true) // the first event is captured; the pause cuts the rest
+	close(step)
+	if rest, err := io.ReadAll(body); err != nil || !strings.Contains(string(rest), "DONE") {
+		t.Fatalf("the rest of the answer: %q, %v", rest, err)
+	}
+	_ = resp.Body.Close()
+	paused.Store(false)
+	// The next exchange is read only once the cut one has ended: its answer
+	// here means the cut one's count is in.
+	get("/next", "next")
+	if got := mgr.NotRecordedUnderPressure(); got.Total != 1 {
+		t.Fatalf("the later exchange the pause cut was counted %d time(s), want 1", got.Total)
+	}
+	_ = client.Close()
+	select {
+	case <-served:
+	case <-never(t):
+		t.Fatal("never: the handler ended")
+	}
+	pm.captures.Wait()
+}
+
+// A pause cut whose client then hangs up is counted before its exchange's
+// window closes, in the zero-copy loop: that close is what a stop's drain
+// waits on (Window.Close ends a request the stop found in flight), and the
+// recording's summary reads the count once the drain is done. Counted after
+// the close, the cut could miss the summary. No clock orders the two: the
+// upstream conn's close, which comes after the window's as the handler
+// returns, is held until the count has been read where the window's close is
+// seen (TestSpanAt's Changed). The synchronous loop dials its own upstream,
+// so this row is the zero-copy loop's; its countPause is deferred after win's
+// the same way.
+func TestAPauseCutIsCountedBeforeItsExchangesWindowCloses(t *testing.T) {
+	var paused atomic.Bool
+	stubIngressPaused(t, paused.Load)
+	appLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	told := make(chan struct{})
+	hangUps[1].serve(t, appLn, told) // the app sends on to a half-closed client
+	up, err := net.Dial("tcp", appLn.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseClose := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseClose) // a failed step never leaves the handler held
+	upConn := &closeHeldOnceClosed{TCPConn: up.(*net.TCPConn), release: release}
+	mgr := syncMock.New(zap.NewNop())
+	ctx := syncMock.NewContext(context.Background(), mgr)
+	cfg := &config.Config{}
+	cfg.Agent.MockMode = true
+	cfg.Agent.RecordRequests = true
+	core, logs := observer.New(zapcore.InfoLevel)
+	pm := New(zap.New(core), nil, cfg)
+	client, proxied := tcpPairForWatch(t)
+	served := make(chan struct{})
+	go func() {
+		defer close(served)
+		defer proxied.Close()
+		pm.handleHttp1ZeroCopy(ctx, proxied, upConn, pm.logger, pm.tcChan, 8083, false, nil)
+	}()
+	if _, err := client.Write([]byte("GET /client/v1/jobs/j/events HTTP/1.1\r\nHost: api\r\n\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	br := bufio.NewReader(client)
+	for {
+		line, err := br.ReadString('\n')
+		if err != nil {
+			t.Fatalf("the answer's first event: %v", err)
+		}
+		if strings.Contains(line, "RUNNING") {
+			break
+		}
+	}
+	paused.Store(true) // the first event is captured; the pause cuts the rest
+	span, ok := mgr.TestSpanAt(time.Now())
+	if !ok || span.Final() {
+		t.Fatalf("the exchange's window is not open as its answer streams: %+v, %v", span, ok)
+	}
+	upConn.closed.Store(&span)
+	_ = client.(*net.TCPConn).CloseWrite()
+	select {
+	case <-span.Changed():
+	case <-never(t):
+		t.Fatal("never: the exchange's window closed")
+	}
+	counted := mgr.NotRecordedUnderPressure().Total
+	releaseClose()
+	if rest, err := io.ReadAll(br); err != nil || !strings.Contains(string(rest), "CLIENT GONE") {
+		t.Fatalf("the half-closed client got %q, %v", rest, err)
+	}
+	select {
+	case <-told:
+	case <-never(t):
+		t.Fatal("never: the app was not told its client went")
+	}
+	select {
+	case <-served:
+	case <-never(t):
+		t.Fatal("never: the handler ended")
+	}
+	pm.captures.Wait()
+	if counted != 1 {
+		t.Fatalf("the cut was counted %d time(s) as its exchange's window closed, want 1: a stop's drain could end before it", counted)
+	}
+	if got := mgr.NotRecordedUnderPressure(); got.Total != 1 {
+		t.Fatalf("counted %d time(s) once the handler ended, want 1", got.Total)
+	}
+	if n := logs.FilterMessageSnippet("Not recording this request as a test case: its client closed").Len(); n != 1 {
+		t.Fatalf("told %d time(s) as not recorded for its client's going, want 1: %v", n, logs.All())
+	}
+}
+
+// closeHeldOnceClosed is an upstream conn whose Close, once the window in
+// closed has closed, waits for release first: what the handler does after
+// the window's close waits until the test has looked.
+type closeHeldOnceClosed struct {
+	*net.TCPConn
+	closed  atomic.Pointer[syncMock.TestSpan]
+	release <-chan struct{}
+}
+
+func (c *closeHeldOnceClosed) Close() error {
+	if span := c.closed.Load(); span != nil {
+		select {
+		case <-span.Changed():
+			<-c.release
+		default:
+		}
+	}
+	return c.TCPConn.Close()
+}

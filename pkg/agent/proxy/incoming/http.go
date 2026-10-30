@@ -233,7 +233,9 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 	// it, and every way out before its end does too (deferred here): its
 	// client's going, an app that failed, a close under pressure. Counted
 	// only at the end it reached, a paused stream whose client hung up was
-	// missing from the count, and so from the recording's summary.
+	// missing from the count, and so from the recording's summary. Deferred
+	// after win's, so it runs before win.Close: the count is in before the
+	// window's close lets a stop's drain end and its summary read the count.
 	countPause := func() {}
 	defer func() { countPause() }()
 
@@ -1063,14 +1065,6 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 	notRecordedUnderPressure := func() {
 		syncMock.FromContextOrGlobal(ctx).NoteNotRecordedUnderPressure(connName)
 	}
-	// countCut counts the exchange in flight as not recorded under the
-	// pause if a pause that began after its request came cut a body's
-	// capture: once, however it ends. Its end runs it, and every way out
-	// before its end does too (deferred here): its client's going, an app
-	// that failed. One the pause cost as its request came is counted then,
-	// and has no capture to cut.
-	countCut := func() {}
-	defer func() { countCut() }()
 
 	// forceCloseActive mirrors the caller's forceClose intent but can be
 	// flipped to false mid-connection by demoteToBypass when the exchange
@@ -1150,6 +1144,17 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 	// A capture takes it over; any other way out ends it here.
 	var win *syncMock.Window
 	defer func() { win.Close() }()
+	// countCut counts the exchange in flight as not recorded under the
+	// pause if a pause that began after its request came cut a body's
+	// capture: once, however it ends. Its end runs it, and every way out
+	// before its end does too (deferred here): its client's going, an app
+	// that failed. One the pause cost as its request came is counted then,
+	// and has no capture to cut. Deferred after win's, so it runs before
+	// win.Close: the count is in before the window's close lets a stop's
+	// drain end and its summary read the count, as the synchronous loop's
+	// countPause.
+	countCut := func() {}
+	defer func() { countCut() }()
 
 	for {
 		iterStart := clockNow()
