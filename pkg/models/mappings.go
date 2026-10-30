@@ -142,35 +142,55 @@ const backgroundOwnSeriesIDAt = "the id at "
 
 // BackgroundOwnSeriesWhy is the why of a mark judging writes for a test's own
 // series (BackgroundOwnSeriesPrefix) whose calls all carry the id the test's
-// window first held at idPath (a leaf's path, as keploy's learn step reads a
-// call): the prefix, the path quoted, then words, judging's account of the
-// mark. The agent reads the path back (BackgroundOwnSeriesID) and gives a call
-// of the series its recorded id back there alone: a value at any other place
-// of the call is compared as recorded, even one that equals an id the run
-// bound.
-func BackgroundOwnSeriesWhy(idPath, words string) string {
-	return BackgroundOwnSeriesPrefix + backgroundOwnSeriesIDAt + strconv.Quote(idPath) + "; " + words
+// window first held at every one of idPaths (leaves' paths, as keploy's learn
+// step reads a call: a beat with the job's id in its URL and in its body
+// names both): the prefix, the paths quoted, sorted and joined by ", ", then
+// words, judging's account of the mark. The agent reads the paths back
+// (BackgroundOwnSeriesIDs) and gives a call of the series its recorded id
+// back at those places alone: a value at any other place of the call is
+// compared as recorded, even one that equals an id the run bound.
+func BackgroundOwnSeriesWhy(idPaths []string, words string) string {
+	paths := slices.Clone(idPaths)
+	slices.Sort(paths)
+	paths = slices.Compact(paths)
+	quoted := make([]string, len(paths))
+	for i, p := range paths {
+		quoted[i] = strconv.Quote(p)
+	}
+	return BackgroundOwnSeriesPrefix + backgroundOwnSeriesIDAt + strings.Join(quoted, ", ") + "; " + words
 }
 
-// BackgroundOwnSeriesID is the path of the id why, an own series' mark,
-// names (BackgroundOwnSeriesWhy). ok is false when why is no own series'
-// mark, or names no path as BackgroundOwnSeriesWhy writes it (a line someone
-// edited): the agent then gives no id of the series back, and a call of it
-// on an id the run bound anew is its owner's miss, failing closed.
-func BackgroundOwnSeriesID(why string) (idPath string, ok bool) {
+// BackgroundOwnSeriesIDs is the paths of the id why, an own series' mark,
+// names (BackgroundOwnSeriesWhy), sorted, each once. ok is false when why is
+// no own series' mark, or names no path as BackgroundOwnSeriesWhy writes it
+// (a line someone edited; an empty path): the agent then gives no id of the
+// series back, and a call of it on an id the run bound anew is its owner's
+// miss, failing closed.
+func BackgroundOwnSeriesIDs(why string) (idPaths []string, ok bool) {
 	rest, ok := strings.CutPrefix(why, BackgroundOwnSeriesPrefix+backgroundOwnSeriesIDAt)
 	if !ok {
-		return "", false
+		return nil, false
 	}
-	q, err := strconv.QuotedPrefix(rest)
-	if err != nil || !strings.HasPrefix(rest[len(q):], "; ") {
-		return "", false
+	for {
+		q, err := strconv.QuotedPrefix(rest)
+		if err != nil {
+			return nil, false
+		}
+		p, err := strconv.Unquote(q)
+		if err != nil || p == "" {
+			return nil, false
+		}
+		idPaths = append(idPaths, p)
+		rest = rest[len(q):]
+		if strings.HasPrefix(rest, "; ") {
+			break
+		}
+		if rest, ok = strings.CutPrefix(rest, ", "); !ok {
+			return nil, false
+		}
 	}
-	idPath, err = strconv.Unquote(q)
-	if err != nil || idPath == "" {
-		return "", false
-	}
-	return idPath, true
+	slices.Sort(idPaths)
+	return slices.Compact(idPaths), true
 }
 
 // Add marks name on test's list with why.

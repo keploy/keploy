@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"math"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -66,10 +67,11 @@ type setSeriesRead struct {
 	// marks it too (another test's own series, or any other mark): it then
 	// owns no series (seriesOf), failing closed.
 	own map[string]string
-	// ownID is, for a recording in own, the path of the id its own series'
-	// marks name (models.BackgroundOwnSeriesID); "" when one names none, or
-	// two name two paths: then no id of its series is given back.
-	ownID map[string]string
+	// ownIDs is, for a recording in own, the paths of the id its own
+	// series' marks name (models.BackgroundOwnSeriesIDs); nil when one names
+	// none, or two name two sets of paths: then no id of its series is
+	// given back.
+	ownIDs map[string][]string
 
 	mu     sync.Mutex
 	byKind map[models.Kind][]integrations.MarkedSeries // the first call's known, per kind
@@ -135,21 +137,21 @@ func (m *MockManager) seriesReadLocked() *setSeriesRead {
 		c.read.stop.Store(true)
 	}
 	r := &setSeriesRead{key: key, done: make(chan struct{}), marked: map[string]bool{}, series: map[string]bool{},
-		own: map[string]string{}, ownID: map[string]string{}, byKind: map[models.Kind][]integrations.MarkedSeries{}, once: map[string]bool{}}
+		own: map[string]string{}, ownIDs: map[string][]string{}, byKind: map[models.Kind][]integrations.MarkedSeries{}, once: map[string]bool{}}
 	plain := map[string]bool{}
 	for test, byName := range *marks {
 		for name, why := range byName {
 			r.marked[name] = true
 			switch {
 			case models.IsBackgroundOwnSeries(why):
-				id, _ := models.BackgroundOwnSeriesID(why)
+				ids, _ := models.BackgroundOwnSeriesIDs(why)
 				// A test marks a recording once (marks is test -> name), so a
 				// second sight of name is another test's: no test's own.
 				if _, seen := r.own[name]; seen {
 					r.own[name] = ""
 				} else {
 					r.own[name] = test
-					r.ownID[name] = id
+					r.ownIDs[name] = ids
 				}
 			case models.IsBackgroundSeries(why):
 				r.series[name] = true
@@ -259,7 +261,7 @@ func (r *setSeriesRead) seriesOf(kind models.Kind, known learn.Known) []integrat
 		recs := make([]*models.Mock, 0, len(s.Members))
 		anyMarked, again := false, false
 		owner, owned, mixed := "", 0, false
-		ownID := ""
+		var ownIDs []string
 		for _, i := range s.Members {
 			mk := set.Mocks[i]
 			if !r.background(mk) {
@@ -270,11 +272,11 @@ func (r *setSeriesRead) seriesOf(kind models.Kind, known learn.Known) []integrat
 			again = again || r.series[mk.Name]
 			if o, ok := r.own[mk.Name]; ok {
 				if owned == 0 {
-					owner, ownID = o, r.ownID[mk.Name]
+					owner, ownIDs = o, r.ownIDs[mk.Name]
 				}
 				mixed = mixed || o != owner
-				if r.ownID[mk.Name] != ownID {
-					ownID = "" // two paths named: give no id back
+				if !slices.Equal(r.ownIDs[mk.Name], ownIDs) {
+					ownIDs = nil // two sets of paths named: give no id back
 				}
 				owned++
 			}
@@ -286,7 +288,7 @@ func (r *setSeriesRead) seriesOf(kind models.Kind, known learn.Known) []integrat
 			out = append(out, integrations.MarkedSeries{Series: s, Recordings: recs, Again: again, Once: r.answerOnce})
 		case owned == len(recs) && !mixed && owner != "":
 			// A test's own series: answered again in its window alone.
-			out = append(out, integrations.MarkedSeries{Series: s, Recordings: recs, Again: true, Owner: owner, OwnID: ownID})
+			out = append(out, integrations.MarkedSeries{Series: s, Recordings: recs, Again: true, Owner: owner, OwnIDs: ownIDs})
 		default:
 			// Some of it is a test's own series and some is not (another
 			// test's, a series marked set-wide, a one-off, the pool's):
