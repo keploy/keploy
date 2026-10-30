@@ -247,7 +247,9 @@ func Match(tc *models.TestCase, actualResponse *models.HTTPResp, noiseConfig map
 			// Mark body as passing when compareAll is false and body is not JSON
 		} else if !skipBody {
 			bodyActuallyCompared = true
-			if tc.HTTPResp.Body != actualResponse.Body {
+			// A body that is a presigned URL is compared but for its
+			// signature and session token (matcher presigned.go).
+			if tc.HTTPResp.Body != actualResponse.Body && !matcherUtils.SamePresignedSigV4(tc.HTTPResp.Body, actualResponse.Body) {
 				pass = false
 			}
 		}

@@ -4,6 +4,8 @@ import (
 	"strings"
 	"sync"
 
+	// vitesslog must load before any vitess code logs: see that package.
+	_ "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/vitesslog"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"vitess.io/vitess/go/vt/sqlparser"

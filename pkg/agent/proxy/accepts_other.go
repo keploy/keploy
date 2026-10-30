@@ -16,5 +16,10 @@ func listenerDrops(syscall.RawConn) (uint64, error) {
 	return 0, fmt.Errorf("%w: this platform cannot read a listener's drops", models.ErrProxyConnsUnsupported)
 }
 
+// netListenDrops cannot be read here either.
+func netListenDrops(syscall.RawConn) (uint64, error) {
+	return 0, fmt.Errorf("this platform cannot read a network namespace's listen drops")
+}
+
 // noFastOpen has nothing to do here: the kernel count is Linux's.
 func noFastOpen(net.Listener) error { return nil }

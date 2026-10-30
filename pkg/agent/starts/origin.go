@@ -21,7 +21,8 @@ import (
 // names it too (models.UnmatchedCall.Source). No committed file holds more of
 // its command line: the whole of it, with its secrets redacted
 // (containerkey.RedactArgs), goes to the record log once per process, at
-// debug, beside its pid.
+// debug, beside its pid, and travels with a miss (SourceOf) to keploy mock's
+// local receipt, which names the process of a call no test was charged with.
 //
 // The proxy notes each connection's process as it accepts the connection
 // (NoteOrigin: the pid the kernel's redirect gave it), and forgets it once
@@ -109,9 +110,12 @@ type connOrigin struct {
 
 // procName is a process's comm and argv[0]; ok is false when it could not
 // be read. foreign: its pid is a kernel pid keploy does not read a process by
-// (KernelPids), so nothing was read. pid is the pid it was asked by.
+// (KernelPids), so nothing was read. pid is the pid it was asked by. line is
+// its whole command line, redacted (containerkey.RedactArgs), which only a
+// call's source carries (SourceOf), never a mock's origin.
 type procName struct {
 	comm, exe string
+	line      string
 	ok        bool
 	foreign   bool
 	pid       uint32
@@ -226,16 +230,21 @@ func (r *Registry) ProcessOf(pid uint32) (comm, exe string, ok bool) {
 }
 
 // SourceOf is how a call from process pid (a kernel pid) names it
-// (models.UnmatchedCall.Source): its comm and argv[0]; where keploy does not
-// read a process by a kernel pid (KernelPids), no name, why, and the pid;
-// nil for pid 0, or a process that cannot be read.
+// (models.UnmatchedCall.Source): its comm and argv[0], with the pid and its
+// whole command line, redacted, which only travel (models.Origin.Cmdline);
+// where keploy does not read a process by a kernel pid (KernelPids), no
+// name, why, and the pid; nil for pid 0, or a process that cannot be read.
 func (r *Registry) SourceOf(pid uint32) *models.Origin {
 	if pid == 0 {
 		return nil
 	}
 	n := r.nameOf(pid)
 	n.pid = pid
-	return n.origin()
+	o := n.origin()
+	if o != nil && n.ok {
+		o.PID, o.Cmdline = pid, n.line
+	}
+	return o
 }
 
 // connName is the process of connection id, named once (at its first
@@ -310,6 +319,7 @@ func (r *Registry) nameOf(pid uint32) procName {
 		n.exe = r.programOf(cmd, pid, argv[0])
 	}
 	line := strings.Join(containerkey.RedactArgs(argv), " ")
+	n.line = line
 	if !bornKnown {
 		// Not kept, but its command line is logged all the same, once per
 		// pid: a routing line may name it.

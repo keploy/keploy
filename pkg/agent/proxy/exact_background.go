@@ -353,10 +353,7 @@ var _ integrations.ByKindBackground = (*MockManager)(nil)
 // spentBackground reports whether name, one of the background's recordings,
 // is spent: consumed in the view, or for the staging.
 func (v *exactView) spentBackground(name string) bool {
-	v.mu.Lock()
-	spent := v.spent[name]
-	v.mu.Unlock()
-	return spent || v.spentOutside(name)
+	return v.spentIn(name) || v.spentOutside(name)
 }
 
 // BackgroundCursor is, under the background rules, the stateful cursor of
@@ -399,6 +396,13 @@ func (m *MockManager) backgroundCursorKey(key string) string {
 }
 
 var _ integrations.BackgroundCursor = (*MockManager)(nil)
+
+// learns reports whether the running set's learn step is on: the session is
+// record's full round (SetPairing) and the set's learn step has not ended
+// (SetLearnEnded).
+func (m *MockManager) learns() bool {
+	return m.exact.pairs.Load() && !m.exact.learnEnded.Load()
+}
 
 // pairing is the view to pair in, and the staging's epoch: a view of a set
 // served by the background rules, its background named (not settling), while

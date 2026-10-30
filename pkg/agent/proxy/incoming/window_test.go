@@ -351,56 +351,66 @@ func TestHandleHttp1ZeroCopy_EndsTheWindowOfAnExchangeItDoesNotCapture(t *testin
 
 // An Upgrade (a WebSocket) becomes a raw tunnel that nothing will ever decide
 // as an HTTP exchange: it opens no window, however long the tunnel lasts.
+// One that comes during a pause of the memory guard is not counted as a request
+// the pause cost.
 func TestHandleHttp1ZeroCopy_OpensNoWindowForAnUpgradeTunnel(t *testing.T) {
-	stubIngressPaused(t, func() bool { return false })
-	mgr := syncMock.New(zap.NewNop())
-	up, err := net.Listen("tcp4", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+	for _, paused := range []bool{false, true} {
+		t.Run(map[bool]string{false: "recording", true: "paused"}[paused], func(t *testing.T) {
+			stubIngressPaused(t, func() bool { return paused })
+			mgr := syncMock.New(zap.NewNop())
+			up, err := net.Listen("tcp4", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = up.Close() })
+			go func() {
+				c, aerr := up.Accept()
+				if aerr != nil {
+					return
+				}
+				defer c.Close()
+				r := bufio.NewReader(c)
+				if _, rerr := http.ReadRequest(r); rerr != nil {
+					return
+				}
+				_, _ = c.Write([]byte("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"))
+				_, _ = io.Copy(c, r) // echo the tunnel
+			}()
+			stubCaptureHook(t, func(ctx context.Context, logger *zap.Logger, tc chan *models.TestCase,
+				req *http.Request, resp *http.Response, reqTS, respTS time.Time,
+				opts models.IncomingOptions, sync bool, mapping bool, appPort uint16) {
+				t.Error("an Upgrade tunnel was captured")
+			})
+			pm := &IngressProxyManager{logger: zap.NewNop(), tcChan: make(chan *models.TestCase, 4), samplingSem: make(chan struct{}, 1)}
+			ctx, cancel := context.WithTimeout(syncMock.NewContext(context.Background(), mgr), 10*time.Second)
+			defer cancel()
+			client, done := ingressPipe(t, ctx, pm, up.Addr().String())
+			br := bufio.NewReader(client)
+			if _, err := client.Write([]byte("GET /ws HTTP/1.1\r\nHost: app.local\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")); err != nil {
+				t.Fatal(err)
+			}
+			resp, err := http.ReadResponse(br, nil)
+			if err != nil || resp.StatusCode != http.StatusSwitchingProtocols {
+				t.Fatalf("upgrade: %v %v", resp, err)
+			}
+			if _, err := client.Write([]byte("ping")); err != nil {
+				t.Fatal(err)
+			}
+			echo := make([]byte, 4)
+			if _, err := io.ReadFull(br, echo); err != nil || string(echo) != "ping" {
+				t.Fatalf("tunnel echo %q %v", echo, err)
+			}
+			if n := mgr.OpenWindows(); n != 0 {
+				t.Fatalf("%d windows open while an Upgrade tunnel runs, want none", n)
+			}
+			// A tunnel is not recorded, paused or not: a pause costs it nothing.
+			if n := mgr.NotRecordedUnderPressure().Total; n != 0 {
+				t.Fatalf("an Upgrade tunnel counted %d requests not recorded under pressure, want none", n)
+			}
+			_ = client.Close()
+			<-done
+		})
 	}
-	t.Cleanup(func() { _ = up.Close() })
-	go func() {
-		c, aerr := up.Accept()
-		if aerr != nil {
-			return
-		}
-		defer c.Close()
-		r := bufio.NewReader(c)
-		if _, rerr := http.ReadRequest(r); rerr != nil {
-			return
-		}
-		_, _ = c.Write([]byte("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"))
-		_, _ = io.Copy(c, r) // echo the tunnel
-	}()
-	stubCaptureHook(t, func(ctx context.Context, logger *zap.Logger, tc chan *models.TestCase,
-		req *http.Request, resp *http.Response, reqTS, respTS time.Time,
-		opts models.IncomingOptions, sync bool, mapping bool, appPort uint16) {
-		t.Error("an Upgrade tunnel was captured")
-	})
-	pm := &IngressProxyManager{logger: zap.NewNop(), tcChan: make(chan *models.TestCase, 4), samplingSem: make(chan struct{}, 1)}
-	ctx, cancel := context.WithTimeout(syncMock.NewContext(context.Background(), mgr), 10*time.Second)
-	defer cancel()
-	client, done := ingressPipe(t, ctx, pm, up.Addr().String())
-	br := bufio.NewReader(client)
-	if _, err := client.Write([]byte("GET /ws HTTP/1.1\r\nHost: app.local\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")); err != nil {
-		t.Fatal(err)
-	}
-	resp, err := http.ReadResponse(br, nil)
-	if err != nil || resp.StatusCode != http.StatusSwitchingProtocols {
-		t.Fatalf("upgrade: %v %v", resp, err)
-	}
-	if _, err := client.Write([]byte("ping")); err != nil {
-		t.Fatal(err)
-	}
-	echo := make([]byte, 4)
-	if _, err := io.ReadFull(br, echo); err != nil || string(echo) != "ping" {
-		t.Fatalf("tunnel echo %q %v", echo, err)
-	}
-	if n := mgr.OpenWindows(); n != 0 {
-		t.Fatalf("%d windows open while an Upgrade tunnel runs, want none", n)
-	}
-	_ = client.Close()
-	<-done
 }
 
 // An exchange that ends early — the upstream closes without a response —

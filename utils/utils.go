@@ -23,6 +23,7 @@ import (
 	"regexp"
 	"runtime"
 	"runtime/debug"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -164,18 +165,45 @@ func ReplacePort(currentURL string, port string) (string, error) {
 	return parsedURL.String(), nil
 }
 
-// GetReqMeta returns the metadata of the request
+// GetReqMeta is what a log says about req: its method, its host, its path
+// and the names of its query parameters. Never a query value, a header or
+// the body: those are the application's content (tokens, credentials), and
+// logs get pasted into issues. A query part with no "=" is not named either,
+// since it may be a bare token; a bare token that holds "=" (padded base64,
+// ?dG9rZW4=) is named by what comes before its first "=" (dG9rZW4).
 func GetReqMeta(req *http.Request) map[string]string {
 	reqMeta := map[string]string{}
-	if req != nil {
-		// get request metadata
-		reqMeta = map[string]string{
-			"method": req.Method,
-			"url":    req.URL.String(),
-			"host":   req.Host,
+	if req == nil {
+		return reqMeta
+	}
+	reqMeta["method"] = req.Method
+	reqMeta["host"] = req.Host
+	if req.URL != nil {
+		reqMeta["path"] = req.URL.Path
+		if keys := queryKeys(req.URL.RawQuery); len(keys) > 0 {
+			reqMeta["query keys"] = strings.Join(keys, ",")
 		}
 	}
 	return reqMeta
+}
+
+// queryKeys are the names of rawQuery's name=value parameters, unescaped,
+// sorted and each once. A name ends at its part's first "=": a value may
+// hold "=" too (base64 padding).
+func queryKeys(rawQuery string) []string {
+	var keys []string
+	for _, part := range strings.Split(rawQuery, "&") {
+		k, _, ok := strings.Cut(part, "=")
+		if !ok || k == "" {
+			continue
+		}
+		if u, err := url.QueryUnescape(k); err == nil {
+			k = u
+		}
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	return slices.Compact(keys)
 }
 
 func IsPassThrough(logger *zap.Logger, req *http.Request, destPort uint, opts models.OutgoingOptions) bool {
@@ -197,6 +225,9 @@ func IsPassThrough(logger *zap.Logger, req *http.Request, destPort uint, opts mo
 			regex, err := regexp.Compile(bypass.Path)
 			if err != nil {
 				LogError(logger, err, "failed to compile the path regex", zap.Any("metadata", GetReqMeta(req)))
+				// The rule's host may have matched; a path that does not
+				// compile matches no call.
+				passThrough = false
 				continue
 			}
 			passThrough = regex.MatchString(req.URL.String())
@@ -224,9 +255,24 @@ func kebabToCamel(s string) string {
 	return strings.Join(parts, "")
 }
 
+// ConfigKeyAnnotation marks a flag whose value keploy moves into the config
+// itself, under the config key the annotation names, so BindFlagsToViper does
+// not bind it to a key of its own name. Without the mark, record's
+// --pass-through-ports (a port list, which ValidateFlags turns into
+// bypassRules) was bound to record.passThroughPorts, which holds telemetry
+// rules, and the config failed to load whenever the flag was passed.
+const ConfigKeyAnnotation = "keploy.io/config-key"
+
+// BindFlagsToViper binds each flag of cmd to the config key of its own name,
+// at the top level and under viperKeyPrefix (the command's name by default),
+// and that key to its environment variable. A flag marked with
+// ConfigKeyAnnotation is left out.
 func BindFlagsToViper(logger *zap.Logger, cmd *cobra.Command, viperKeyPrefix string) error {
 	var bindErr error
 	cmd.Flags().VisitAll(func(flag *pflag.Flag) {
+		if _, ok := flag.Annotations[ConfigKeyAnnotation]; ok {
+			return
+		}
 		camelCaseName := kebabToCamel(flag.Name)
 		err := viper.BindPFlag(camelCaseName, flag)
 		if err != nil {
@@ -428,6 +474,10 @@ func CheckFileExists(path string) bool {
 }
 
 var Version string
+
+// DevVersion is the version of a build that was not given one.
+const DevVersion = "3-dev"
+
 var VersionIdentifier string
 var LogFile *os.File
 
@@ -447,12 +497,18 @@ func ConfigHeader() string {
 		"#   keploy config defaults -o FILE    # save them\n"
 }
 
-// attachLogFileToSentry attaches logFile, this run's log, to the crash report:
-// read through its name only while that is still this run's log, never
-// whatever a symlink there points at (a root run's crash would otherwise send
-// the link's target).
+// crashReportLogTail is how much of the end of this run's log a crash report
+// carries: the log holds up to log.FileCapBytes, the native agent's lines and
+// --debug's among them, and a crash report must stay well under Sentry's
+// 1 MB event limit, and be read into no more memory than it sends.
+const crashReportLogTail = 512 << 10
+
+// attachLogFileToSentry attaches the end of logFile, this run's log, to the
+// crash report (crashReportLogTail): read through its name only while that is
+// still this run's log, never whatever a symlink there points at (a root
+// run's crash would otherwise send the link's target).
 func attachLogFileToSentry(logFile *os.File) error {
-	content, err := keployLog.ReadLogFile(logFile)
+	content, err := keployLog.ReadLogFileTail(logFile, crashReportLogTail)
 	if err != nil {
 		return fmt.Errorf("error reading log file: %s", err.Error())
 	}
@@ -466,11 +522,16 @@ func attachLogFileToSentry(logFile *os.File) error {
 
 // HandleRecovery handles the common logic for recovering from a panic.
 func HandleRecovery(logger *zap.Logger, r interface{}, errMsg string) {
-	err := attachLogFileToSentry(LogFile)
-	if err != nil {
-		LogError(logger, err, "failed to attach log file to sentry")
+	// With no crash-report client (telemetry off, or not yet resolved: see
+	// ResolveCrashReports) nothing is reported, so the log is not read into
+	// memory for a report that goes nowhere.
+	if sentry.CurrentHub().Client() != nil {
+		err := attachLogFileToSentry(LogFile)
+		if err != nil {
+			LogError(logger, err, "failed to attach log file to sentry")
+		}
+		sentry.CaptureException(errors.New(fmt.Sprint(r)))
 	}
-	sentry.CaptureException(errors.New(fmt.Sprint(r)))
 	// Get the stack trace
 	stackTrace := debug.Stack()
 	LogError(logger, nil, errMsg, zap.String("stack trace", string(stackTrace)))
@@ -780,16 +841,6 @@ func Keys(m map[string][]string) []string {
 		keys = append(keys, k)
 	}
 	return keys
-}
-
-func SentryInit(logger *zap.Logger, dsn string) {
-	err := sentry.Init(sentry.ClientOptions{
-		Dsn:              dsn,
-		TracesSampleRate: 1.0,
-	})
-	if err != nil {
-		logger.Debug("Could not initialise sentry.", zap.Error(err))
-	}
 }
 
 //func FetchHomeDirectory(isNewConfigPath bool) string {

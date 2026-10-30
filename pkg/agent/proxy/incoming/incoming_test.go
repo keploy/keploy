@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -11,11 +12,16 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	"go.keploy.io/server/v3/pkg/agent/proxy/internal/testnet"
+	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
+	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/hpack"
 )
 
 func TestWaitForIngressTargetReady(t *testing.T) {
@@ -487,4 +493,92 @@ func TestReplayConnHalfClosesTheConnectionUnderneath(t *testing.T) {
 	if _, err := io.ReadFull(conn, got); err != nil || string(got) != "GET /" {
 		t.Fatalf("read %q (%v) after the half-close, want what was read ahead, then what the client sent", got, err)
 	}
+}
+
+// A gRPC call a pause of the memory guard costs is counted on its ingress
+// connection, named as the HTTP ingress names one (ingressConnName): the
+// recording's warning names the connections that lost calls, gRPC's too.
+func TestAGRPCCallAPauseCostsIsCountedOnItsConnection(t *testing.T) {
+	frames := func(write func(*http2.Framer, *hpack.Encoder, *bytes.Buffer) error) []byte {
+		t.Helper()
+		var out, block bytes.Buffer
+		if err := write(http2.NewFramer(&out, nil), hpack.NewEncoder(&block), &block); err != nil {
+			t.Fatal(err)
+		}
+		return out.Bytes()
+	}
+	headers := func(fr *http2.Framer, enc *hpack.Encoder, block *bytes.Buffer, end bool, fields ...string) error {
+		block.Reset()
+		for i := 0; i < len(fields); i += 2 {
+			if err := enc.WriteField(hpack.HeaderField{Name: fields[i], Value: fields[i+1]}); err != nil {
+				return err
+			}
+		}
+		return fr.WriteHeaders(http2.HeadersFrameParam{StreamID: 1, BlockFragment: block.Bytes(), EndStream: end, EndHeaders: true})
+	}
+	msg := []byte{0, 0, 0, 0, 0} // an empty gRPC message
+	req := append([]byte(clientPreface), frames(func(fr *http2.Framer, enc *hpack.Encoder, block *bytes.Buffer) error {
+		if err := headers(fr, enc, block, false, ":method", "POST", ":scheme", "http", ":path", "/svc.Echo/Ping",
+			":authority", "localhost", "content-type", "application/grpc"); err != nil {
+			return err
+		}
+		return fr.WriteData(1, true, msg)
+	})...)
+	resp := frames(func(fr *http2.Framer, enc *hpack.Encoder, block *bytes.Buffer) error {
+		if err := headers(fr, enc, block, false, ":status", "200", "content-type", "application/grpc"); err != nil {
+			return err
+		}
+		if err := fr.WriteData(1, false, msg); err != nil {
+			return err
+		}
+		return headers(fr, enc, block, true, "grpc-status", "0")
+	})
+
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	go func() { // the app: takes the call, answers it
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		if _, err := io.ReadFull(c, make([]byte, len(req))); err == nil {
+			_, _ = c.Write(resp)
+		}
+		_, _ = io.Copy(io.Discard, c)
+	}()
+
+	restore := memoryguard.SetRecordingPausedForTest(true)
+	defer restore()
+	mgr := syncMock.New(zap.NewNop())
+	ctx, cancel := context.WithCancel(syncMock.NewContext(context.Background(), mgr))
+	defer cancel()
+	pm := &IngressProxyManager{logger: zap.NewNop()}
+	client, server := net.Pipe()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		pm.handleConnection(ctx, server, ln.Addr().String(), pm.logger, make(chan *models.TestCase), make(chan struct{}, 1), 8080)
+	}()
+	go func() { _, _ = client.Write(req) }()
+	if _, err := io.ReadFull(client, make([]byte, len(resp))); err != nil {
+		t.Fatalf("the call's response: %v", err)
+	}
+	want := ingressConnName(server, ln.Addr().String())
+	deadline := time.Now().Add(30 * time.Second) // bounds only a call never decided
+	for mgr.NotRecordedUnderPressure().Total == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the call the pause cost was not counted")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if got := mgr.NotRecordedUnderPressure(); got.Total != 1 || got.ByConn[want] != 1 {
+		t.Fatalf("not recorded under pressure: %+v, want the call on %q", got, want)
+	}
+	cancel() // the ingress closes both ends
+	<-done
+	_ = client.Close()
 }

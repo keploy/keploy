@@ -325,6 +325,13 @@ func shrinkUnswitchedMaps(spec *ebpf.CollectionSpec) {
 }
 
 func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.Agent) error {
+	// The pass-through list is checked before anything is loaded: a run whose
+	// ports the kernel cannot hold is refused at once, with nothing to undo.
+	clientInfo, err := clientInfoFor(ctx, setupOpts, opts.Rules)
+	if err != nil {
+		return err
+	}
+
 	// Allow the current process to lock memory for eBPF resources.
 	if err := rlimit.RemoveMemlock(); err != nil {
 		utils.LogError(h.logger, err, "failed to lock memory for eBPF resources")
@@ -674,10 +681,12 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	agentInfo.Flags &^= structs.FlagProvenReady
 	agentInfo.Flags |= readyFlags
 
-	err = h.RegisterClient(ctx, setupOpts, opts.Rules)
-	if err != nil {
-		h.logger.Debug("Failed to register Client")
+	// A client keploy cannot register would have none of its pass-through
+	// ports bypassed, so the start fails here rather than going on without them.
+	if err := h.registerClient(clientInfo, setupOpts); err != nil {
+		return fmt.Errorf("failed to register the client's pass-through ports with the kernel: %w", err)
 	}
+	logKernelPassThroughEgress(ctx, h.logger, setupOpts, opts.Rules)
 	proxyInfo, err := h.resolveProxyInfo(ctx, setupOpts, opts)
 	if err != nil {
 		return err
@@ -863,10 +872,20 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 
 }
 
-func (h *Hooks) RegisterClient(ctx context.Context, opts config.Agent, rules []models.BypassRule) error {
+// registerClient hands the kernel the client info clientInfoFor built.
+func (h *Hooks) registerClient(clientInfo structs.ClientInfo, opts config.Agent) error {
 	h.logger.Debug("Registering the client Info with keploy")
-	// Register the client and start processing
+	h.clientMu.Lock()
+	h.clientPIDNS = opts.ClientPIDNS
+	h.clientMu.Unlock()
 
+	return h.SendClientInfo(clientInfo)
+}
+
+// clientInfoFor is the client info registerClient hands the kernel: the mode,
+// the client's pid, and the pass-through list (kernelPassThroughList), with
+// keploy's own ports in it before the ports of the user's bypassRules.
+func clientInfoFor(ctx context.Context, opts config.Agent, rules []models.BypassRule) (structs.ClientInfo, error) {
 	clientInfo := structs.ClientInfo{}
 
 	switch opts.Mode {
@@ -878,10 +897,29 @@ func (h *Hooks) RegisterClient(ctx context.Context, opts config.Agent, rules []m
 		clientInfo.Mode = uint32(0)
 	}
 
-	ports := agent.GetPortToSendToKernel(ctx, rules)
+	own, user := passThroughSources(ctx, opts, rules)
+	var ownPorts []uint
+	for _, s := range own {
+		ownPorts = append(ownPorts, s.Ports...)
+	}
+	list, err := kernelPassThroughList(ownPorts, user.Ports)
+	if err != nil {
+		return structs.ClientInfo{}, err
+	}
+	clientInfo.PassThroughPorts = list
+	clientInfo.ClientNSPID = opts.ClientNSPID
+	return clientInfo, nil
+}
 
+// passThroughSources is each knob that puts ports in the kernel's pass-through
+// list, with its ports: keploy's own (own), then the user's port-only
+// bypassRules (user).
+func passThroughSources(ctx context.Context, opts config.Agent, rules []models.BypassRule) (own []agent.PassThroughSource, user agent.PassThroughSource) {
 	if agent.ExtraPassThroughPortsHook != nil {
-		ports = append(ports, agent.ExtraPassThroughPortsHook()...)
+		own = append(own, agent.PassThroughSource{
+			Knob:  "a pass-through port this build registers (RegisterExtraPassThroughPortsHook)",
+			Ports: agent.ExtraPassThroughPortsHook(),
+		})
 	}
 
 	// Mock mode: the wrapped test runner calls the agent's own HTTP server
@@ -890,22 +928,33 @@ func (h *Hooks) RegisterClient(ctx context.Context, opts config.Agent, rules []m
 	// scope calls would be redirected into the proxy instead of reaching the
 	// agent. Kernel-level bypass the agent's own control port.
 	if opts.MockMode && opts.AgentPort != 0 {
-		ports = append(ports, uint(opts.AgentPort))
+		own = append(own, agent.PassThroughSource{
+			Knob:  "keploy mock's agent API port",
+			Ports: []uint{uint(opts.AgentPort)},
+		})
 	}
 
-	for i := 0; i < 10; i++ {
-		if len(ports) <= i {
-			clientInfo.PassThroughPorts[i] = -1
-			continue
+	return own, agent.PassThroughSource{
+		Knob:  "bypassRules naming only a port",
+		Ports: agent.GetPortToSendToKernel(ctx, rules),
+	}
+}
+
+// logKernelPassThroughEgress names, in a replay, each knob whose ports the
+// kernel hands to their real destination: keploy neither serves nor reports a
+// connection to one, so each is real egress. The list holds every port or the
+// run was refused (kernelPassThroughList), so no knob is named for a port the
+// kernel does not leave alone.
+func logKernelPassThroughEgress(ctx context.Context, logger *zap.Logger, opts config.Agent, rules []models.BypassRule) {
+	if opts.Mode != models.MODE_TEST {
+		return
+	}
+	own, user := passThroughSources(ctx, opts, rules)
+	for _, s := range append(own, user) {
+		if len(s.Ports) > 0 {
+			agent.LogRealEgress(logger, s.Knob, agent.KernelPassThroughDest, zap.Uints("ports", s.Ports))
 		}
-		clientInfo.PassThroughPorts[i] = int32(ports[i])
 	}
-	clientInfo.ClientNSPID = opts.ClientNSPID
-	h.clientMu.Lock()
-	h.clientPIDNS = opts.ClientPIDNS
-	h.clientMu.Unlock()
-
-	return h.SendClientInfo(clientInfo)
 }
 
 func (h *Hooks) GetProxyInfo(ctx context.Context, opts config.Agent, cfg agent.HookCfg) (structs.ProxyInfo, error) {

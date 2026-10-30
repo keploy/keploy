@@ -417,8 +417,11 @@ func (a *AgentClient) setUpRestartedAgent(ctx context.Context) error {
 	// replaced, whether or not the setup below takes: the replay counts
 	// what this one counts from its start (AgentStartedBeforeApp).
 	instancesAt(agentHost(a.conf.Agent.AgentURI)).startedBeforeApp()
-	// A docker-mode agent that restarted holds no container list.
+	// A docker-mode agent that restarted holds no container list, nor the
+	// names its networks answer.
 	a.pushContainers(ctx)
+	forgetNetworkNames(a.conf.Agent.AgentURI)
+	a.pushNetworkNames(ctx)
 	if err := a.session().reapply(ctx, a.logger); err != nil {
 		return err
 	}

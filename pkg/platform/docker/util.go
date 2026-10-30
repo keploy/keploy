@@ -14,6 +14,7 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent/token"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/agentargs"
 	"go.keploy.io/server/v3/pkg/platform/engine"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
@@ -72,6 +73,23 @@ func buildUpstreamTLSFlags(opts models.SetupOptions) (string, error) {
 	}
 
 	return flags + " --upstream-tls-ca-cert=" + shellQuote(opts.UpstreamTLSCACert), nil
+}
+
+// allowEgressFlags renders --allow-egress for the containerised agent. The
+// host's keploy.yml is not visible inside the agent container, so argv is the
+// only way test.allowEgress reaches it. Only the normalized list is emitted
+// (models.NormalizeAllowEgress): each entry is keploy's own spelling of one it
+// knows, so nothing in it needs quoting on any shell the alias runs under.
+func allowEgressFlags(opts models.SetupOptions) (string, error) {
+	entries, err := models.NormalizeAllowEgress(opts.AllowEgress)
+	if err != nil {
+		return "", err
+	}
+	var flags strings.Builder
+	for _, e := range entries {
+		flags.WriteString(" --allow-egress=" + e)
+	}
+	return flags.String(), nil
 }
 
 // windowsCmdOperators are the characters cmd.exe acts on in the windows
@@ -193,7 +211,7 @@ func GetKeployDockerAlias(ctx context.Context, logger *zap.Logger, conf *config.
 	}
 
 	// Preserves the alias generation
-	keployalias, err := getAlias(ctx, logger, opts, conf.Debug)
+	keployalias, err := getAlias(ctx, logger, opts, conf)
 	if err != nil {
 		return "", err
 	}
@@ -228,7 +246,9 @@ func agentPortPublish(agentPort uint32) string {
 	return fmt.Sprintf(" -p 127.0.0.1:%d:%d", agentPort, agentPort)
 }
 
-func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions, debug bool) (string, error) {
+// getAlias's conf is the CLI's config, whose root-level settings the agent
+// container shares (rootSuffix).
+func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions, conf *config.Config) (string, error) {
 	// Get the name of the operating system.
 	osName := runtime.GOOS
 	//TODO: configure the hardcoded port mapping
@@ -294,6 +314,14 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		utils.LogError(logger, err, "failed to build the keploy agent docker alias")
 		return "", err
 	}
+	// The app's own resolver settings likewise: it reads this container's
+	// /etc/resolv.conf (app_dns.go).
+	appDNSStr, err := agentDNSFlags(opts.AppDNS)
+	if err != nil {
+		utils.LogError(logger, err, "failed to build the keploy agent docker alias")
+		return "", err
+	}
+	appHostsStr += appDNSStr
 
 	tlsVolumeMount := fmt.Sprintf("-v %s:%s ", KeployTLSVolumeName, KeployTLSMountPath)
 	agentMemoryLimitFlag := ""
@@ -325,6 +353,11 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 	// Forward upstream TLS verification to the containerised agent — same
 	// argv-only propagation channel as recordBufferFlags above.
 	upstreamTLSFlags, err := buildUpstreamTLSFlags(opts)
+	if err != nil {
+		utils.LogError(logger, err, "failed to build the keploy agent docker alias")
+		return "", err
+	}
+	egressFlags, err := allowEgressFlags(opts)
 	if err != nil {
 		utils.LogError(logger, err, "failed to build the keploy agent docker alias")
 		return "", err
@@ -390,7 +423,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			proxyPortStr + appPortsStr +
 			" --cap-add=BPF --cap-add=PERFMON --cap-add=NET_ADMIN --cap-add=SYS_RESOURCE --cap-add=SYS_PTRACE" + agentSecurityOptFlags() + " " + Volumes +
 			" -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf " +
-			" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) + clientPIDNSSuffix() + " --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker" + mockModeSuffix(opts) + settleReadsSuffix(opts) + provenSuffix()
+			" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) + clientPIDNSSuffix() + " --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker" + mockModeSuffix(opts) + settleReadsSuffix(opts) + provenSuffix() + rootSuffix(conf)
 
 		if opts.EnableTesting {
 			alias += " --enable-testing"
@@ -400,6 +433,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		if opts.GlobalPassthrough {
 			alias += " --global-passthrough"
 		}
+		alias += egressFlags
 		if opts.DisableHandshakeHold {
 			alias += " --disable-handshake-hold"
 		}
@@ -418,9 +452,6 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		alias += agentMemoryLimitFlag
 		alias += recordBufferFlags
 		alias += upstreamTLSFlags
-		if models.IsAnsiDisabled {
-			alias += " --disable-ansi"
-		}
 		if len(opts.PassThroughPorts) > 0 {
 			portStrings := make([]string, len(opts.PassThroughPorts))
 			for i, port := range opts.PassThroughPorts {
@@ -428,9 +459,6 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			}
 			// Note the "=" sign, which is good practice for docker run
 			alias += fmt.Sprintf(" --pass-through-ports=%s", strings.Join(portStrings, ","))
-		}
-		if debug {
-			alias += " --debug"
 		}
 		alias += configPathFlag
 		if opts.Synchronous {
@@ -466,7 +494,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 				" --cap-add=BPF --cap-add=PERFMON --cap-add=NET_ADMIN --cap-add=SYS_RESOURCE --cap-add=SYS_PTRACE " + Volumes +
 				" -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf " +
 				" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) + clientPIDNSSuffix() +
-				" --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker" + mockModeSuffix(opts) + settleReadsSuffix(opts) + provenSuffix()
+				" --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker" + mockModeSuffix(opts) + settleReadsSuffix(opts) + provenSuffix() + rootSuffix(conf)
 
 			if opts.EnableTesting {
 				alias += " --enable-testing"
@@ -477,6 +505,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			if opts.GlobalPassthrough {
 				alias += " --global-passthrough"
 			}
+			alias += egressFlags
 			if opts.DisableHandshakeHold {
 				alias += " --disable-handshake-hold"
 			}
@@ -495,9 +524,6 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			alias += agentMemoryLimitFlag
 			alias += recordBufferFlags
 			alias += upstreamTLSFlags
-			if models.IsAnsiDisabled {
-				alias += " --disable-ansi"
-			}
 			if len(opts.PassThroughPorts) > 0 {
 				portStrings := make([]string, len(opts.PassThroughPorts))
 				for i, port := range opts.PassThroughPorts {
@@ -505,9 +531,6 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 				}
 				// Note the "=" sign, which is good practice for docker run
 				alias += fmt.Sprintf(" --pass-through-ports=%s", strings.Join(portStrings, ","))
-			}
-			if debug {
-				alias += " --debug"
 			}
 			alias += configPathFlag
 			if opts.Synchronous {
@@ -528,7 +551,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			" --cap-add=BPF --cap-add=PERFMON --cap-add=NET_ADMIN --cap-add=SYS_RESOURCE --cap-add=SYS_PTRACE " + Volumes +
 			" -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf " +
 			" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) + clientPIDNSSuffix() +
-			" --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker" + mockModeSuffix(opts) + settleReadsSuffix(opts) + provenSuffix()
+			" --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker" + mockModeSuffix(opts) + settleReadsSuffix(opts) + provenSuffix() + rootSuffix(conf)
 
 		if opts.EnableTesting {
 			alias += " --enable-testing"
@@ -539,6 +562,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		if opts.GlobalPassthrough {
 			alias += " --global-passthrough"
 		}
+		alias += egressFlags
 		if opts.DisableHandshakeHold {
 			alias += " --disable-handshake-hold"
 		}
@@ -557,9 +581,6 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		alias += agentMemoryLimitFlag
 		alias += recordBufferFlags
 		alias += upstreamTLSFlags
-		if models.IsAnsiDisabled {
-			alias += " --disable-ansi"
-		}
 		if len(opts.PassThroughPorts) > 0 {
 			portStrings := make([]string, len(opts.PassThroughPorts))
 			for i, port := range opts.PassThroughPorts {
@@ -567,9 +588,6 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			}
 			// Note the "=" sign, which is good practice for docker run
 			alias += fmt.Sprintf(" --pass-through-ports=%s", strings.Join(portStrings, ","))
-		}
-		if debug {
-			alias += " --debug"
 		}
 		alias += configPathFlag
 		if opts.Synchronous {
@@ -605,7 +623,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 				" --cap-add=BPF --cap-add=PERFMON --cap-add=NET_ADMIN --cap-add=SYS_RESOURCE --cap-add=SYS_PTRACE " + Volumes +
 				" -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf " +
 				" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) + clientPIDNSSuffix() +
-				" --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker" + mockModeSuffix(opts) + settleReadsSuffix(opts) + provenSuffix()
+				" --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker" + mockModeSuffix(opts) + settleReadsSuffix(opts) + provenSuffix() + rootSuffix(conf)
 
 			if opts.EnableTesting {
 				alias += " --enable-testing"
@@ -616,6 +634,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			if opts.GlobalPassthrough {
 				alias += " --global-passthrough"
 			}
+			alias += egressFlags
 			if opts.DisableHandshakeHold {
 				alias += " --disable-handshake-hold"
 			}
@@ -634,9 +653,6 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			alias += agentMemoryLimitFlag
 			alias += recordBufferFlags
 			alias += upstreamTLSFlags
-			if models.IsAnsiDisabled {
-				alias += " --disable-ansi"
-			}
 			if len(opts.PassThroughPorts) > 0 {
 				portStrings := make([]string, len(opts.PassThroughPorts))
 				for i, port := range opts.PassThroughPorts {
@@ -644,9 +660,6 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 				}
 				// Note the "=" sign, which is good practice for docker run
 				alias += fmt.Sprintf(" --pass-through-ports=%s", strings.Join(portStrings, ","))
-			}
-			if debug {
-				alias += " --debug"
 			}
 			alias += configPathFlag
 			if opts.Synchronous {
@@ -666,7 +679,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			" --cap-add=BPF --cap-add=PERFMON --cap-add=NET_ADMIN --cap-add=SYS_RESOURCE --cap-add=SYS_PTRACE " + Volumes +
 			" -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf " +
 			" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) + clientPIDNSSuffix() +
-			" --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker" + mockModeSuffix(opts) + settleReadsSuffix(opts) + provenSuffix()
+			" --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker" + mockModeSuffix(opts) + settleReadsSuffix(opts) + provenSuffix() + rootSuffix(conf)
 
 		if opts.EnableTesting {
 			alias += " --enable-testing"
@@ -677,6 +690,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		if opts.GlobalPassthrough {
 			alias += " --global-passthrough"
 		}
+		alias += egressFlags
 		if opts.DisableHandshakeHold {
 			alias += " --disable-handshake-hold"
 		}
@@ -695,9 +709,6 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		alias += agentMemoryLimitFlag
 		alias += recordBufferFlags
 		alias += upstreamTLSFlags
-		if models.IsAnsiDisabled {
-			alias += " --disable-ansi"
-		}
 		if len(opts.PassThroughPorts) > 0 {
 			portStrings := make([]string, len(opts.PassThroughPorts))
 			for i, port := range opts.PassThroughPorts {
@@ -705,9 +716,6 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			}
 			// Note the "=" sign, which is good practice for docker run
 			alias += fmt.Sprintf(" --pass-through-ports=%s", strings.Join(portStrings, ","))
-		}
-		if debug {
-			alias += " --debug"
 		}
 		alias += configPathFlag
 		if opts.Synchronous {
@@ -780,6 +788,17 @@ func provenSuffix() string {
 		return ""
 	}
 	return " " + strings.Join(args, " ")
+}
+
+// rootSuffix carries the CLI's root-level settings into the agent container
+// (agentargs.Root: --debug, --disable-tele, --disable-ansi, --disable-mapping),
+// each with its value. The container sees no keploy.yml, so without them the
+// agent holds the defaults: `keploy record --disable-tele` still resolved and
+// contacted the telemetry host from the agent, and --debug and
+// --disable-mapping never reached it. No word holds a space, so the alias
+// splits the same on every platform.
+func rootSuffix(conf *config.Config) string {
+	return " " + strings.Join(agentargs.Root(conf), " ")
 }
 
 // settleReadsSuffix returns " --settle-reads" for a run that learns noise

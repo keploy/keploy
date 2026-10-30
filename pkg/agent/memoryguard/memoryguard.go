@@ -151,13 +151,24 @@ func IsRecordingPaused() bool {
 // pressure does, without telling the mock managers, and returns what puts the
 // previous value back. Tests only.
 func SetRecordingPausedForTest(paused bool) (restore func()) {
+	pauseEdgeMu.Lock()
+	defer pauseEdgeMu.Unlock()
 	was := recordingPaused.Swap(paused)
-	return func() { recordingPaused.Store(was) }
+	notePauseEdgeLocked(paused)
+	return func() {
+		pauseEdgeMu.Lock()
+		defer pauseEdgeMu.Unlock()
+		recordingPaused.Store(was)
+		notePauseEdgeLocked(was)
+	}
 }
 
 // Start enables the memory guard when a Docker agent is running with a limit.
 func Start(ctx context.Context, logger *zap.Logger, isDocker bool, memoryLimitMB uint64) error {
 	resetAllPressure()
+	// The debug knob that forces a pause by request count, read whether or
+	// not the guard itself runs (ForcePauseEnv).
+	startForcedPause(logger)
 
 	limitBytes, err := LimitBytes(memoryLimitMB)
 	if err != nil {
@@ -392,7 +403,12 @@ func RegisterPressureHook(fn func(paused bool)) (unregister func()) {
 }
 
 func applyPausedState(paused bool) {
+	// The flag and the request count read at its change move together, so
+	// each open PauseTally sees the pauses in the order the ingress does.
+	pauseEdgeMu.Lock()
 	recordingPaused.Store(paused)
+	notePauseEdgeLocked(paused)
+	pauseEdgeMu.Unlock()
 	// Global manager: the buffering manager in single-app mode.
 	if mgr := syncMock.Get(); mgr != nil {
 		mgr.SetMemoryPressure(paused)

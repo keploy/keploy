@@ -202,8 +202,8 @@ func (l *answeredLog) fence(set uint64) {
 }
 
 // answeredProbe is what the log keeps of mk: a copy with its name, kind,
-// noise, test-mode bookkeeping, metadata, times, learned request noise and
-// request, whatever its kind, and no response, nor the loader that would read
+// noise, test-mode bookkeeping, metadata, times, learned request noise,
+// learned clock reads and request, whatever its kind, and no response, nor the loader that would read
 // one back from disk. A match (FindAnsweredEarlier) reads the request side
 // only, and the note names the recording and its times.
 func answeredProbe(mk *models.Mock) *models.Mock {
@@ -224,6 +224,7 @@ func answeredProbe(mk *models.Mock) *models.Mock {
 		ReqTimestampMock:   s.ReqTimestampMock,
 		ResTimestampMock:   s.ResTimestampMock,
 		ReqBodyNoise:       s.ReqBodyNoise,
+		Clocks:             s.Clocks,
 	}
 	return c
 }

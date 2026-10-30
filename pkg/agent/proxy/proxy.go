@@ -28,6 +28,7 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/containerkey"
+	"go.keploy.io/server/v3/pkg/agent/netnames"
 	"golang.org/x/sync/errgroup"
 
 	"go.keploy.io/server/v3/pkg/agent/acceptcount"
@@ -128,6 +129,10 @@ type Proxy struct {
 	// whenever its error capture window opens (openTestErrorCapture). Under
 	// the proven switch the parsers find it on their connection's context.
 	learnTracker *learn.Tracker
+	// procZones reads the zone each application process writes a wall
+	// clock of no zone in, from /proc, by the connection's origin PID
+	// (learn.WithProcZone): its calls are learned and checked in it.
+	procZones *learn.ProcZones
 
 	// recordedH2 is the stored set's recorded HTTP/2 destinations, seeded
 	// from the whole recording (SeedRecordedDestinations), for the ALPN a
@@ -340,6 +345,10 @@ type Proxy struct {
 	// losses counts the calls the proxy intercepted and could not record or
 	// mock (CaptureLosses).
 	losses captureloss.Counter
+	// caTrust is the client processes that sent a call through keploy's
+	// certificate in this run, whose TLS hang-ups are cancels, not losses,
+	// and the hang-ups held for a call of the others' (clientTLS).
+	caTrust caTrust
 	// accepts counts every connection the listener has accepted
 	// (Accepted). They are the connections the kernel counts only when the
 	// listener is the one the hooks marked: acceptsLn, set by listen while
@@ -481,6 +490,28 @@ type Proxy struct {
 	// dnsUpstreamPort is the port read alongside dnsUpstreamServers.
 	// Defaults to "53" when resolv.conf does not specify one.
 	dnsUpstreamPort string
+	// dnsInNetworkServers are the dnsUpstreamServers inside the replay's own
+	// network (inNetworkResolvers), the only ones a replay's DNS mock miss is
+	// forwarded to without an opt-in. Captured with dnsUpstreamServers.
+	dnsInNetworkServers []string
+	// dnsClusterDomain is an in-cluster agent's cluster DNS domain
+	// (clusterDomain, e.g. cluster.local), empty elsewhere: names under it
+	// are the replay network's own (networkOwnsName). Captured with
+	// dnsUpstreamServers.
+	dnsClusterDomain string
+	// netNames holds the names a docker-mode replay's networks answer
+	// themselves (networkOwnsName); nil is the agent process's own
+	// (netnames.Default), which its routes fill.
+	netNames *netnames.Store
+	// allowEgressDNS is test.allowEgress naming models.AllowEgressDNS: a
+	// replay's DNS mock miss may then be forwarded to every dnsUpstreamServers
+	// entry, the host's and public resolvers included.
+	allowEgressDNS bool
+	// lastSessionEgress is what the last replay session's options opened
+	// (sessionEgressKnobs), so a session that opens the same is not logged
+	// again. Guarded by egressKnobsMu.
+	lastSessionEgress []egressKnob
+	egressKnobsMu     sync.Mutex
 	// dnsSearch is the resolv.conf search list, kept so a query can be
 	// recognised as a redundant search expansion without asking upstream.
 	// A resolver probes name.S for each search domain S — before the name
@@ -1048,6 +1079,7 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		clientClose:               make(chan bool, 1),
 		Integrations:              make(map[integrations.IntegrationType]integrations.Integrations),
 		GlobalPassthrough:         opts.Agent.GlobalPassthrough,
+		allowEgressDNS:            models.AllowsEgress(opts.Agent.AllowEgress, models.AllowEgressDNS),
 		DisableHandshakeHold:      opts.Agent.DisableHandshakeHold,
 		OpportunisticTLSIntercept: opts.Agent.OpportunisticTLSIntercept,
 		errChannel:                make(chan error, 100), // buffered channel to prevent blocking
@@ -1103,8 +1135,22 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 	proxy.learnTracker.SetClientTests(opts.Agent.MockMode)
 	// The application runs beside the agent, and writes a wall clock of no
 	// zone in its local zone, the agent's own, or in UTC
-	// (learn.Tracker.SetAppZone).
-	proxy.learnTracker.SetAppZone(time.Local)
+	// (learn.Tracker.SetAppZone), read with its name where the agent's TZ or
+	// /etc/localtime gives one, so a learning that depends on it names it
+	// (models.ClockOffset.AppZone). Where keploy cannot read it (a TZ of a
+	// POSIX rule, which Go reads as UTC; a link to no zone file; a zone file
+	// whose name and rules disagree, as where the host's /etc/localtime is
+	// bind-mounted over the link to the zone, or keploy cannot read its
+	// mounts: learn.ReadZone), Go's own reading, and no learning names it
+	// (SetAppZoneUnnamed), as before.
+	tz, tzSet := os.LookupEnv("TZ")
+	if loc, err := learn.ReadZone("/", tz, tzSet); err == nil {
+		proxy.learnTracker.SetAppZone(loc)
+	} else {
+		logger.Debug("keploy cannot read the agent's zone; a learning that depends on the application's zone names no zone, and a replay reads its own", zap.Error(err))
+		proxy.learnTracker.SetAppZoneUnnamed(time.Local)
+	}
+	proxy.procZones = learn.NewProcZones("/proc")
 	proxy.sayLearnWaits()
 
 	// Upstream TLS verification (record.upstreamTls). Only the PRECEDENCE is
@@ -1358,8 +1404,9 @@ func (p *Proxy) mockMySQLOutgoing(parserCtx context.Context, srcConn net.Conn, d
 
 	// The replayer makes the client's TLS handshake itself, on its
 	// SSLRequest: charged as the proxy's own client handshakes are.
-	reportCtx := p.withClientTLS(parserCtx, dstAddr)
-	err := mysqlMocker.MockOutgoing(reportCtx, srcConn, &models.ConditionalDstCfg{Addr: dstAddr}, p.scopedFor(outgoingOpts.SrcPid, m), outgoingOpts)
+	reportCtx := p.withClientTLS(parserCtx, dstAddr, outgoingOpts.SrcPid)
+	mysqlDst := &models.ConditionalDstCfg{Addr: dstAddr}
+	err := mysqlMocker.MockOutgoing(reportCtx, srcConn, mysqlDst, p.scopedFor(outgoingOpts.SrcPid, m), outgoingOpts)
 	p.countParserPanic(err, integrations.MYSQL, dstAddr)
 	if errors.Is(err, util.ErrParserPanicked) {
 		// Counted as a capture loss just above; no miss (mockFailed).
@@ -1368,7 +1415,7 @@ func (p *Proxy) mockMySQLOutgoing(parserCtx context.Context, srcConn net.Conn, d
 	}
 	if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
 		p.logger.Debug("mysql mock outgoing finished with error", zap.Error(err))
-		p.sendMockNotFoundErrorFrom(err, outgoingOpts.SrcPid)
+		p.sendMockNotFoundErrorFrom(err, outgoingOpts.SrcPid, mysqlDst)
 		if provenswitch.On() && isMockMiss(err) {
 			return reportedMiss{err}
 		}
@@ -1416,16 +1463,16 @@ func mysqlSessionForRelay(srcConn, dstConn net.Conn, logger *zap.Logger) *integr
 // the whole file: proxy.go also dials in MODE_TEST when !rule.Mocking,
 // and in any mode under GlobalPassthrough — both return before dispatch.)
 //
-// WHY util.RelayRawPassthrough AND NOT globalPassThrough. globalPassThrough
-// never calls CloseWrite on either side and returns on io.EOF, so a
-// client that does shutdown(SHUT_WR) — the end-of-request signal for
-// every EOF-delimited exchange — ends the connection instead of getting
-// its reply. Relaying through it would re-break, one round trip later,
-// the exact thing this function exists to stop breaking. That is also why
-// recordViaSupervisor refuses it (proxy_v2.go: "Critically we do NOT call
-// globalPassThrough here"). RelayRawPassthrough forwards the FIN on a
-// clean EOF and lets a surviving direction finish, which is what a
-// pass-through has to mean.
+// WHY util.RelayRawPassthrough. A client that does shutdown(SHUT_WR) — the
+// end-of-request signal for every EOF-delimited exchange — must get its
+// reply, so the relay forwards the FIN on a clean EOF and lets the surviving
+// direction finish, which is what a pass-through has to mean.
+// RelayRawPassthrough does. globalPassThrough did not when this was written:
+// it returned on io.EOF, and the caller's close tore both sockets down, one
+// round trip later than the bug this function exists to stop. It forwards the
+// FIN now as well, so the choice here no longer turns on the half-close.
+// (recordViaSupervisor refuses globalPassThrough for a reason of its own:
+// proxy_v2.go.)
 //
 // WHY NO ORPHAN WINDOW. Nothing is captured on this connection from here
 // on, so the test cases recorded over the same window will fail at replay
@@ -2090,6 +2137,7 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 	// non-fatal: on failure the forwarder simply falls back to the
 	// legacy default response.
 	p.captureDNSUpstream()
+	p.logAgentEgressKnobs()
 
 	// Wait for the proxy server to be ready or fail
 	if err := <-readyChan; err != nil {
@@ -2756,6 +2804,22 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	if proven {
 		parserCtx = containerkey.WithConn(parserCtx, containerkey.Default, fmt.Sprint(clientConnID))
 		parserCtx = learn.WithTracker(parserCtx, p.learnTracker)
+		// The zone of the process that made the connection, by its origin
+		// PID: its calls' clock reads are learned and checked in it, never
+		// in the agent's (a zero zone where keploy cannot read it). A
+		// docker-mode agent, in a PID namespace of its own, reads none by
+		// a PID: it takes the zone keploy's CLI read of the app container
+		// that made the connection.
+		if p.procZones != nil {
+			z, zerr := p.procZones.Of(destInfo.KernelPid)
+			if errors.Is(zerr, learn.ErrPIDNamespace) && containerkey.TakesPushed() {
+				z, zerr = connZoneOf(ctx, appConn)
+			}
+			if zerr != nil {
+				p.logger.Debug(learn.ZoneUnreadLog+"; its calls are learned in the agent's zone, naming no zone, and a replay here checks a learned clock read in the zone its learn step named (one learned in the application's zone alone and checked at an hour or coarser must hold read in UTC too, and an hour is refused where that zone stands more than an hour from UTC), else in the agent's, refusing one cut to an hour or coarser that it learned in the application's zone alone (one learned in either zone is checked in UTC and the agent's)", zap.Uint32("pid", destInfo.KernelPid), zap.Error(zerr))
+			}
+			parserCtx = learn.WithProcZone(parserCtx, z)
+		}
 	}
 	// A handshake made under parserCtx (a parser's STARTTLS upgrade, MySQL
 	// or Postgres; opportunistic TLS) names its leaf for the IP the client
@@ -2865,13 +2929,35 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		}
 		return nil
 	}
-	// From here the connection is recorded, or answered from mocks: under
-	// the proven switch a local destination is listed mocked (design v14
-	// §3.1). In a replay, now; in a record, once the probe has said what
-	// the connection is (below).
-	if proven && rule.Mode == models.MODE_TEST {
-		p.noteMockedLocal(dstAddr, destInfo.Port, outside, ctrKey)
+	// keploy test of a connection to a port a bypassRule with a host or a
+	// path names: one whose server speaks first, which shows keploy no host
+	// and which keploy record passed through, is passed through before its
+	// client's bytes are read (lookUndecidedReplay). Not listed mocked.
+	looked := false
+	if rule.Mode == models.MODE_TEST {
+		look, err := p.lookUndecidedReplay(parserCtx, p.logger, srcConn, dstAddr, predialed, uint(destInfo.Port), outgoingOpts.Rules)
+		srcConn = look.Src
+		if look.Predialed != nil {
+			predialed, looked = look.Predialed, true
+			defer predialed.CloseIfUnused()
+		}
+		if look.Dst != nil {
+			dstConn = look.Dst
+			return p.passBypassRulesUndecided(parserCtx, p.logger, srcConn, &dstConn, nil, look.Undecided, dstAddr, "")
+		}
+		if err != nil {
+			switch {
+			case refusedLocally(err):
+				p.logger.Debug("nothing is listening at the destination yet; the caller sees the connection refused", zap.String("server address", dstAddr))
+			case errors.Is(err, errLookIncomplete):
+				utils.LogError(p.logger, err, "keploy could not tell whether this connection's server speaks first, and closed it", zap.String("server address", dstAddr), zap.String("next_step", "a recovered panic is logged above this line: report both to keploy"))
+			default:
+				utils.LogError(p.logger, err, "failed to dial the server of a port a bypassRule names, to see whether it speaks first", zap.String("server address", dstAddr), zap.String("next_step", util.NextStepDialDestination))
+			}
+			return err
+		}
 	}
+
 	if p.synchronous {
 		outgoingOpts.Synchronous = true
 	}
@@ -2903,12 +2989,6 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			defer predialed.CloseIfUnused()
 		}
 	}
-	// A record's local destination is listed mocked, except a server-first
-	// one keploy relays (relayServerFirst): it is reached for real, and
-	// nothing of it is recorded.
-	if proven && rule.Mode != models.MODE_TEST && (probe == nil || probe.Reason != reasonServerFirst && probe.Reason != reasonRefusedAtAccept) {
-		p.noteMockedLocal(dstAddr, destInfo.Port, outside, ctrKey)
-	}
 	if err != nil {
 		switch {
 		case refusedLocally(err):
@@ -2925,7 +3005,22 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		zap.String("reason", probe.Reason),
 		zap.Uint32("destPort", destInfo.Port))
 
-	if rule.Mode != models.MODE_TEST && (probe.Reason == reasonServerFirst || probe.Reason == reasonRefusedAtAccept) {
+	// A server-first connection, and a MySQL one, shows no host or path: a
+	// bypassRule with one for this port passes it through
+	// (bypassRulesUndecided), as the kernel passed the rule's whole port
+	// before, and not as a protocol keploy cannot record (no loss is
+	// charged). keploy refuses one at start for a port listed in mysqlPorts.
+	// In a record, the probe's connection (dstConn, or the one it handed
+	// back) replays what it read of the server.
+	serverFirst := probe.Reason == reasonServerFirst || probe.Reason == reasonRefusedAtAccept
+	if serverFirst || probe.IsMySQL {
+		if undecided := bypassRulesUndecided(p.logger, outgoingOpts.Rules, uint(destInfo.Port), "", false); len(undecided) > 0 {
+			return p.passBypassRulesUndecided(parserCtx, p.logger, srcConn, &dstConn, func() (net.Conn, error) {
+				return util.DialDestination(parserCtx, p.logger, "tcp", util.DialTarget{Addr: dstAddr, Predialed: predialed})
+			}, undecided, dstAddr, "")
+		}
+	}
+	if rule.Mode != models.MODE_TEST && serverFirst {
 		// The destination spoke first with a server-first protocol's
 		// greeting (on a port already learned, the probe looked again at a
 		// destination marked as one), whose client waits to be greeted; or,
@@ -2935,6 +3030,15 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 
 	if probe.IsMySQL {
+		// Recorded, or answered from mocks: under the proven switch a
+		// local destination is listed mocked (design v14 §3.1), once
+		// nothing passes it through (above): a destination keploy relays
+		// is reached for real, so listing it would claim an isolation that
+		// did not happen. The other connections are listed below, past
+		// the last pass-through.
+		if proven {
+			p.noteMockedLocal(dstAddr, destInfo.Port, outside, ctrKey)
+		}
 		if rule.Mode != models.MODE_TEST {
 			// probeMysql already dialed when it had to read the
 			// upstream greeting; dstConn then replays those bytes.
@@ -2974,7 +3078,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			// Built HERE, in handleConnection scope, so it holds pointers to
 			// the real srcConn/dstConn variables the deferred close uses —
 			// not to copies. See recordMySQLOutgoing's doc comment.
-			mysqlUpgrader := util.NewConnTLSUpgrader(&srcConn, &dstConn, p.logger, p.clientTLSHandler(dstAddr))
+			mysqlUpgrader := util.NewConnTLSUpgrader(&srcConn, &dstConn, p.logger, p.clientTLSHandler(dstAddr, outgoingOpts.SrcPid))
 			return p.recordMySQLOutgoing(parserCtx, srcConn, dstConn, rule.MC,
 				parserErrGrp, mysqlLogger, clientConnID, destConnID, outgoingOpts, mysqlUpgrader)
 		}
@@ -3046,7 +3150,12 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		}
 		testBuffer = sslBuf
 	}
+	// keploy answered the client's Postgres SSLRequest itself: its server
+	// has not seen it, so the client's TLS cannot be handed to the server
+	// as it is (the pass-through before keploy's TLS, below).
+	answeredSSLRequest := false
 	if agent.InterceptPostgresSSLRequest && isPostgresSSLRequest(testBuffer) {
+		answeredSSLRequest = true
 		p.logger.Debug("Postgres SSLRequest detected, accepting and upgrading to TLS",
 			zap.Int("sourcePort", sourcePort),
 			zap.String("dstAddr", dstAddr),
@@ -3138,6 +3247,13 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			return err
 		}
 		connectTargetHost = connectResult.TargetHost
+		if connectResult.DstReader != nil && connectResult.DstReader.Buffered() > 0 {
+			// keploy record: what the corporate proxy's reader holds past its
+			// 200 is the server's (a greeting), so every reader of the tunnel
+			// below (keploy's TLS dial, a parser, a pass-through) reads it
+			// first.
+			dstConn = &util.Conn{Conn: dstConn, Reader: connectResult.DstReader, Logger: p.logger}
+		}
 		// A parser that terminates TLS on this connection later (a STARTTLS
 		// upgrade) names its leaf for the target too.
 		parserCtx = pTls.WithConnectTarget(parserCtx, connectTargetHost)
@@ -3194,6 +3310,35 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// MITM below; "" when it sent none.
 	var clientSNI string
 	isTLS := pTls.IsTLSHandshake(testBuffer)
+	// The TLS server the client asked for: its SNI, else its CONNECT target
+	// ("" when not TLS, or none).
+	var serverName string
+
+	if isTLS && !answeredSSLRequest && hostRulesAt(outgoingOpts.Rules, uint(destInfo.Port)) {
+		// A bypassRule with a host and no path that names the server the
+		// client's ClientHello asks for (its SNI, else its CONNECT target)
+		// passes the connection through before keploy's TLS, in every mode:
+		// the client's handshake reaches its server untouched, so a client
+		// certificate (mTLS) and a pinned server certificate work as they
+		// do without keploy, and nothing of the connection is recorded or
+		// mocked. A ClientHello that names no server, on a port such a rule
+		// names, goes on to keploy's TLS, and then to the rules it cannot
+		// decide (bypassRulesUndecided). What was read of the client is
+		// handed on ahead of the rest, for whichever reads it next.
+		name, hello, helloErr := serverNameOf(srcConn)
+		read := srcConn
+		srcConn = &util.Conn{Conn: stripUtilConn(read), Reader: io.MultiReader(bytes.NewReader(hello), read), Logger: p.logger}
+		if name == "" {
+			name = connectTargetHost
+		}
+		if bypassRule, ok := bypassByServerName(p.logger, outgoingOpts.Rules, name, uint(destInfo.Port)); ok && helloErr == nil {
+			p.logger.Debug("a bypassRule names the TLS server the client asks for; passing the connection through before keploy's TLS",
+				zap.String("serverName", name), zap.String("ruleHost", bypassRule.Host), zap.Uint("rulePort", bypassRule.Port))
+			return p.passBypassRulesUndecided(parserCtx, p.logger, srcConn, &dstConn, func() (net.Conn, error) {
+				return util.DialDestination(parserCtx, p.logger, "tcp", util.DialTarget{Addr: dstAddr, Predialed: predialed})
+			}, nil, dstAddr, name)
+		}
+	}
 
 	if isTLS {
 		probeProxy(p.logger, "tls-handshake-start", clientConnID,
@@ -3247,7 +3392,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		var tlsSrcConn net.Conn
 		// What the handshake, and the client just after it, lose is charged
 		// to the destination (clientTLS).
-		hsCtx = p.withClientTLS(hsCtx, dstAddr)
+		hsCtx = p.withClientTLS(hsCtx, dstAddr, outgoingOpts.SrcPid)
 		tlsSrcConn, isMTLS, err = pTls.HandleTLSConnection(hsCtx, p.logger, srcConn, rule.Backdate)
 		probeProxy(p.logger, "tls-handshake-done", clientConnID,
 			zap.Int("srcPort", sourcePort),
@@ -3293,6 +3438,12 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	if err != nil {
 		utils.LogError(logger, err, "failed to read the initial buffer")
 		return err
+	}
+	if isTLS && len(initialBuf) > 0 {
+		// The client sent a call through keploy's certificate: its
+		// process trusts keploy's CA (caTrust), and its hang-ups held in
+		// this test are cancels.
+		p.noteTLSCall(outgoingOpts.SrcPid)
 	}
 
 	if util.IsHTTPReq(initialBuf) && !util.HasCompleteHTTPHeaders(initialBuf) {
@@ -3388,6 +3539,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		if dstURL == "" {
 			dstURL = connectTargetHost
 		}
+		// A bypassRule with a host and no path that names this server
+		// passed the connection through before keploy's TLS (above).
+		serverName = dstURL
 
 		logger.Debug("the external call is tls-encrypted", zap.Bool("isTLS", isTLS))
 
@@ -3429,10 +3583,18 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			KeyLogWriter:       pTls.KeyLogWriter(),
 		}
 
-		if isMTLS && rule.Mode != models.MODE_TEST && clientPeerCert != nil {
+		// In keploy test the server is dialled only for a call a bypassRule
+		// passes through, with this cfg: an HTTP call the HTTP parser
+		// matches by its Host and path, or a connection keploy cannot
+		// decide (bypassRulesUndecided).
+		scopedRules := len(outgoingOpts.Rules) > 0
+		if isMTLS && (rule.Mode != models.MODE_TEST || scopedRules) && clientPeerCert != nil {
 			err = p.applyMTLSClientCert(cfg, clientPeerCert, outgoingOpts.TLSPrivateKey)
-			if err != nil {
+			if err != nil && rule.Mode != models.MODE_TEST {
 				return err
+			}
+			if err != nil {
+				logger.Debug("no client certificate for a call a bypassRule may pass through", zap.Error(err))
 			}
 		}
 
@@ -3445,17 +3607,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		if rule.Mode != models.MODE_TEST {
 			if connectResult != nil && dstConn != nil {
 				// CONNECT tunnel: dstConn is already connected through the
-				// corporate proxy tunnel. If the proxyReader has buffered
-				// bytes beyond the 200 response, wrap dstConn to preserve them.
-				var tlsTransport net.Conn = dstConn
-				if connectResult.DstReader != nil && connectResult.DstReader.Buffered() > 0 {
-					tlsTransport = &util.Conn{
-						Conn:   dstConn,
-						Reader: connectResult.DstReader,
-						Logger: p.logger,
-					}
-				}
-				tlsConn := tls.Client(tlsTransport, cfg)
+				// corporate proxy tunnel, and reads first what the proxy's
+				// reader holds past its 200 (above).
+				tlsConn := tls.Client(dstConn, cfg)
 				if err := tlsConn.Handshake(); err != nil {
 					utils.LogError(logger, err, "failed TLS handshake over CONNECT tunnel; verify the corporate proxy allows CONNECT to this target, check proxy auth/egress rules, and confirm the target hostname is reachable",
 						zap.String("target", addr))
@@ -3573,6 +3727,68 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		zap.Bool("generic", generic),
 	)
 
+	// A bypassRule with a host or a path is applied by the HTTP parser (each
+	// call's Host and path) and above (a TLS connection's server name). A
+	// connection that shows keploy no host or path for one is passed
+	// through, as the kernel passed the rule's whole port before, and keploy
+	// says so once for each rule (bypassRulesUndecided). In keploy test the
+	// server is dialled here, as the HTTP parser dials it for a call.
+	// A plain CONNECT tunnel shows its target's host.
+	if serverName == "" {
+		serverName = connectTargetHost
+	}
+	httpParsed := !generic && parserType == integrations.HTTP
+	dialServer := func() (net.Conn, error) {
+		target := util.DialTarget{Addr: dstCfg.Addr, Predialed: predialed}
+		if dstCfg.TLSCfg != nil {
+			return util.DialDestinationTLS(parserCtx, logger, "tcp", target, dstCfg.TLSCfg)
+		}
+		return util.DialDestination(parserCtx, logger, "tcp", target)
+	}
+	// A connection to a server a rule with a host and no path names
+	// (bypassByServerName) that is still here is passed through whole: a
+	// plain CONNECT tunnel that is not HTTP inside (no parser sees a host
+	// in it), or a TLS one that could not be passed through before keploy's
+	// TLS (keploy answered its client's Postgres SSLRequest, or its
+	// ClientHello could not be read whole), passed through after it, as
+	// before. An HTTP call in a plain tunnel is the HTTP parser's to decide.
+	if serverName != "" && (isTLS || !httpParsed) {
+		if _, ok := bypassByServerName(logger, outgoingOpts.Rules, serverName, uint(destInfo.Port)); ok {
+			return p.passBypassRulesUndecided(parserCtx, logger, srcConn, &dstConn, dialServer, nil, dstAddr, serverName)
+		}
+	}
+	if undecided := bypassRulesUndecided(logger, outgoingOpts.Rules, uint(destInfo.Port), serverName, httpParsed); len(undecided) > 0 {
+		return p.passBypassRulesUndecided(parserCtx, logger, srcConn, &dstConn, dialServer, undecided, dstAddr, serverName)
+	}
+	if looked {
+		// Nothing below dials with it in keploy test: a call a bypassRule
+		// passes through dials its own (the HTTP parser's
+		// passOneCallThrough). So the server lookUndecidedReplay reached for
+		// this connection is let go now, not held open, unused, while the
+		// connection lasts, where it would keep a server that serves one
+		// connection at a time from serving it.
+		predialed.CloseIfUnused()
+	}
+	// From here the connection is recorded, or answered from mocks: under
+	// the proven switch a local destination is listed mocked (design v14
+	// §3.1). Not before: a connection a bypassRule passes through (above),
+	// or a server-first one a record relays (relayServerFirst), is reached
+	// for real, and listing it would claim an isolation that did not
+	// happen. An HTTP connection a bypassRule with a host or a path may
+	// pass calls of through is listed at its first call the parser records
+	// or mocks (integrations.CallServed), so one whose every call the rule
+	// passes through is not listed.
+	if proven {
+		if httpParsed && callRulesAt(outgoingOpts.Rules, uint(destInfo.Port)) {
+			var listed sync.Once
+			parserCtx = integrations.WithCallServed(parserCtx, func() {
+				listed.Do(func() { p.noteMockedLocal(dstAddr, destInfo.Port, outside, ctrKey) })
+			})
+		} else {
+			p.noteMockedLocal(dstAddr, destInfo.Port, outside, ctrKey)
+		}
+	}
+
 	// Record-mode parsing kill switch: if record-time parsing has been
 	// disabled via env var (KEPLOY_DISABLE_PARSING), SIGUSR1, or admin
 	// endpoint, skip parser dispatch and hand the connection to
@@ -3626,7 +3842,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			if parserType == integrations.MYSQL ||
 				parserType == integrations.POSTGRES_V2 ||
 				parserType == integrations.POSTGRES_V3 {
-				upgrader = util.NewConnTLSUpgrader(&srcConn, &dstConn, p.logger, p.clientTLSHandler(dstAddr))
+				upgrader = util.NewConnTLSUpgrader(&srcConn, &dstConn, p.logger, p.clientTLSHandler(dstAddr, outgoingOpts.SrcPid))
 			}
 			session := p.buildRecordSession(srcConn, dstConn, rule.MC, parserErrGrp, logger, clientConnID, destConnID, outgoingOpts, upgrader)
 			err := matchedParser.RecordOutgoing(parserCtx, session)
@@ -3654,7 +3870,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			// The reporter names the process the connection came from on
 			// each miss and answer it takes (UnmatchedCall.Source).
 			srcPid := outgoingOpts.SrcPid
-			testCtx := models.WithMockMismatchReporter(parserCtx, func(err error) { p.sendMockNotFoundErrorFrom(err, srcPid) })
+			testCtx := models.WithMockMismatchReporter(parserCtx, func(err error) { p.sendMockNotFoundErrorFrom(err, srcPid, dstCfg) })
 			// A test's end tells this connection's requests apart only if its
 			// parser answers before it reads again, or marks what it holds
 			// (inflight.go).
@@ -3665,7 +3881,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			p.countParserPanic(err, parserType, dstAddr)
 			if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
 				// Send specific error type to error channel for external monitoring
-				return p.mockFailedFrom(logger, err, srcPid)
+				return p.mockFailedFrom(logger, err, srcPid, dstCfg)
 			}
 		}
 	}
@@ -3776,7 +3992,7 @@ func (p *Proxy) mockGenericOutgoing(
 	p.countParserPanic(err, integrations.GENERIC, dstCfg.Addr)
 	if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
 		// Send specific error type to error channel for external monitoring
-		return p.mockFailedFrom(logger, err, outgoingOpts.SrcPid)
+		return p.mockFailedFrom(logger, err, outgoingOpts.SrcPid, dstCfg)
 	}
 	return nil
 }
@@ -4028,7 +4244,9 @@ func (p *Proxy) loadUpstreamTLSTrustAnchors() {
 }
 
 func (p *Proxy) Record(ctx context.Context, mocks chan<- *models.Mock, opts models.OutgoingOptions) error {
-	recorded.reset()
+	// A recording replays nothing: no port is recorded, whatever a replay's
+	// store seeded before it.
+	recorded.forget()
 	p.serverFirstSaid.reset()
 	p.startContainerKeys(ctx)
 	// Reconcile the two mock-noise spellings on receipt. This is the process
@@ -4108,6 +4326,9 @@ func (p *Proxy) Record(ctx context.Context, mocks chan<- *models.Mock, opts mode
 }
 
 func (p *Proxy) Mock(ctx context.Context, opts models.OutgoingOptions) error {
+	// The ports the stored set's recording reached, seeded with its on-disk
+	// store (SeedRecordedDestinations), stay: keploy mock replay publishes
+	// the store after its Mock, keploy test may before.
 	recorded.reset()
 	p.startContainerKeys(ctx)
 	// Reconcile the two mock-noise spellings on receipt. This is the process
@@ -4259,9 +4480,7 @@ func (p *Proxy) Mock(ctx context.Context, opts models.OutgoingOptions) error {
 	}
 	p.ensureHandshakeHold(rule) // the listener may have opened in between
 
-	if !opts.Mocking {
-		p.logger.Info("🔀 Mocking is disabled, the response will be fetched from the actual service")
-	}
+	p.logSessionEgressKnobs(opts)
 
 	p.nsSwitchMutex.Lock()
 	defer p.nsSwitchMutex.Unlock()
@@ -4555,12 +4774,14 @@ func (p *Proxy) openExact(open func(*MockManager)) error {
 }
 
 // SetPoolNames implements agent.PoolNamesSetter: the mock manager's pool
-// membership (MockManager.SetPoolNames).
-func (p *Proxy) SetPoolNames(names []string) error {
+// membership (MockManager.SetPoolNames) and the key of the test process
+// whose tests list each mock (MockManager.SetPoolOwners), the owners first.
+func (p *Proxy) SetPoolNames(names []string, owners map[string]string) error {
 	m := p.getMockManager()
 	if m == nil {
 		return errNoMockManager
 	}
+	m.SetPoolOwners(owners)
 	m.SetPoolNames(names)
 	return nil
 }
@@ -4624,6 +4845,14 @@ func (p *Proxy) SetAppClock(f func(real time.Time) (time.Time, bool)) {
 }
 
 var _ agent.AppClockSetter = (*Proxy)(nil)
+
+// SetAppClockRun makes the learn step read, through f, where the app's
+// clock's run to a real instant began (agent.AppClockRunSetter).
+func (p *Proxy) SetAppClockRun(f func(real time.Time) (time.Time, bool)) {
+	p.learnTracker.SetAppClockRun(f)
+}
+
+var _ agent.AppClockRunSetter = (*Proxy)(nil)
 
 // ServeExactTestConcurrent implements agent.ExactConcurrentServer (exact.go).
 func (p *Proxy) ServeExactTestConcurrent(test string, owned, cands []*models.Mock) error {
@@ -4706,6 +4935,18 @@ func (p *Proxy) SetRecordedOfKind(src func(kind models.Kind, visit func(name str
 
 var _ agent.RecordedOfKindSetter = (*Proxy)(nil)
 
+// SetRecordingTimes implements agent.RecordingTimesSetter (exact.go).
+func (p *Proxy) SetRecordingTimes(src func(visit func(name string, req, res time.Time, protocolPhase bool) bool) error) error {
+	m := p.getMockManager()
+	if m == nil {
+		return errNoMockManager
+	}
+	m.SetRecordingTimes(src)
+	return nil
+}
+
+var _ agent.RecordingTimesSetter = (*Proxy)(nil)
+
 // SetRecordedBefore implements agent.RecordedBeforeSetter (exact.go).
 func (p *Proxy) SetRecordedBefore(src func(t time.Time, visit func(*models.Mock) bool) error) error {
 	m := p.getMockManager()
@@ -4717,6 +4958,74 @@ func (p *Proxy) SetRecordedBefore(src func(t time.Time, visit func(*models.Mock)
 }
 
 var _ agent.RecordedBeforeSetter = (*Proxy)(nil)
+
+// lastRecorded is the latest instant a recording's request can be read at
+// (time.Time.UnixNano's last): every recording is recorded before it.
+var lastRecorded = time.Unix(0, math.MaxInt64)
+
+// WarmLearnSet implements agent.LearnSetWarmer: in record's full round,
+// while the set's learn step is on (MockManager.learns), the learn tracker
+// reads, in the background, what the learn step reads of each recording of
+// the staged set (learn.Tracker.WarmSet): every one the manager stages and
+// the agent keeps on disk, in recorded order across the two
+// (rangeRecordedInOrder), so the recordings of the set's earlier tests are
+// read first, before the later tests that read them open. The set's
+// calls then find its payloads read, off their answer path, and each waits
+// only for a recording of its own the staging is reading. Any other session
+// reads nothing: no learn step reads the recordings. With no mock manager
+// there is no set (errNoMockManager). Once the staging ends, the agent logs
+// what it read and what the set's tiers keep (logSetUse).
+func (p *Proxy) WarmLearnSet() error {
+	done, err := p.warmLearnSet()
+	if err != nil || done == nil {
+		return err
+	}
+	go p.logSetUse(done)
+	return nil
+}
+
+// logSetUse logs, once the set's staging ends, what it read and what the
+// set's tiers keep (learn.SetUse): the line a round reads to see whether the
+// set fit its budget. A staging that stopped short because the set's
+// recordings could not be read (learn.SetUse.Err) is logged at Warn with
+// that error: its calls read the rest on their answer path. A channel
+// closed with no use (no tracker) read nothing and logs nothing.
+func (p *Proxy) logSetUse(done <-chan learn.SetUse) {
+	u, ok := <-done
+	if !ok {
+		return
+	}
+	fields := []zap.Field{
+		zap.Int("read_at_staging", u.Staged), zap.Int("read_by_calls", u.Called), zap.Int("finished_at_staging", u.Finished), zap.Int("staging_readers", u.Readers),
+		zap.Int("payloads_decoded", u.Decoded), zap.Int64("kept_held_bytes", u.Held), zap.Int64("kept_words_bytes", u.Words),
+		zap.Int64("kept_forms_bytes", u.Forms), zap.Int64("kept_payload_bytes", u.Bodies), zap.Int64("set_budget_bytes", u.Budget), zap.Bool("held_full", u.HeldFull), zap.Bool("forms_full", u.FormsFull),
+	}
+	if u.Err != nil {
+		p.logger.Warn("the learn step stopped reading the test set's recordings as it was staged: they could not be read, so its calls read the rest themselves, on their answer path",
+			append(fields, zap.Error(u.Err))...)
+		return
+	}
+	p.logger.Info("the learn step read the test set's recordings as it was staged, before its calls read them", fields...)
+}
+
+// warmLearnSet is WarmLearnSet's gate and its read: the staging's channel
+// (learn.Tracker.WarmSet), or nil where the session reads nothing (the
+// proven switch off, not record's full round, or the set's learn step
+// ended), decided before anything is read.
+func (p *Proxy) warmLearnSet() (<-chan learn.SetUse, error) {
+	m := p.getMockManager()
+	if m == nil {
+		return nil, errNoMockManager
+	}
+	if !provenswitch.On() || !m.learns() {
+		return nil, nil
+	}
+	return p.learnTracker.WarmSet(func(visit func(*models.Mock) bool) error {
+		return m.rangeRecordedInOrder(lastRecorded, visit)
+	}), nil
+}
+
+var _ agent.LearnSetWarmer = (*Proxy)(nil)
 
 // SetLearnEnded implements agent.LearnEndSetter: the mock store says it
 // (MockManager.SetLearnEnded, integrations.LearnEnded), and so does the learn
@@ -5525,6 +5834,7 @@ func (p *Proxy) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 					Kind:             parserErr.MissKind,
 					Recorded:         parserErr.Recorded,
 					Differs:          parserErr.MismatchReport.Differs,
+					FieldReasons:     parserErr.MismatchReport.FieldReasons,
 					VariablePlaces:   parserErr.MismatchReport.VariablePlaces,
 					NotOwned:         parserErr.MismatchReport.NotOwned,
 					// Why the call missed, when record's full round's learn
@@ -5659,12 +5969,14 @@ func isMockMiss(err error) bool {
 // and returned as reportedMiss; anything else, and every run with the switch
 // off, keeps the error log it always had.
 func (p *Proxy) mockFailed(logger *zap.Logger, err error) error {
-	return p.mockFailedFrom(logger, err, 0)
+	return p.mockFailedFrom(logger, err, 0, nil)
 }
 
 // mockFailedFrom is mockFailed for a connection from process pid (0 when the
-// redirect gave none), whom its miss names (sendMockNotFoundErrorFrom).
-func (p *Proxy) mockFailedFrom(logger *zap.Logger, err error, pid uint32) error {
+// redirect gave none), whom its miss names, dialled at dst (nil when none is
+// known), which its miss names when its parser named no destination
+// (sendMockNotFoundErrorFrom).
+func (p *Proxy) mockFailedFrom(logger *zap.Logger, err error, pid uint32, dst *models.ConditionalDstCfg) error {
 	if errors.Is(err, util.ErrParserPanicked) {
 		// keploy's failure, counted as a capture loss where the parser
 		// returned it (countParserPanic): no miss, so neither the mismatch
@@ -5682,7 +5994,7 @@ func (p *Proxy) mockFailedFrom(logger *zap.Logger, err error, pid uint32) error 
 	// queued for its test already; queued again it would count twice, the
 	// second time possibly against the next test.
 	if !models.IsMismatchReported(err) {
-		p.sendMockNotFoundErrorFrom(err, pid)
+		p.sendMockNotFoundErrorFrom(err, pid, dst)
 	}
 	if quiet {
 		return reportedMiss{err}
@@ -5704,7 +6016,7 @@ func (p *Proxy) mismatchLog() func(string, ...zap.Field) {
 // sendMockNotFoundError builds a ParserError from a mock-miss error,
 // extracting the MismatchReport if the error carries one.
 func (p *Proxy) sendMockNotFoundError(err error) {
-	p.sendMockNotFoundErrorFrom(err, 0)
+	p.sendMockNotFoundErrorFrom(err, 0, nil)
 }
 
 // sendMockNotFoundErrorFrom is sendMockNotFoundError for a call from process
@@ -5714,7 +6026,14 @@ func (p *Proxy) sendMockNotFoundError(err error) {
 // answered call (models.ErrAnswered) is stamped as a miss is, and kept for
 // the test's read with the misses, but it is no miss: it is not logged as
 // one.
-func (p *Proxy) sendMockNotFoundErrorFrom(err error, pid uint32) {
+//
+// dst is where the connection was dialled (nil when that is not known). A
+// report whose parser named no destination names dst's address: an HTTP call
+// with no Host header (an HTTP/1.0 client, an instance-metadata probe) has no
+// authority of its own, and its miss said nothing of where the call went. A
+// fabricated address (models.ConditionalDstCfg.AddrFabricated) names no
+// server, so it is not named either.
+func (p *Proxy) sendMockNotFoundErrorFrom(err error, pid uint32, dst *models.ConditionalDstCfg) {
 	proxyErr := models.ParserError{
 		ParserErrorType: models.ErrMockNotFound,
 		Err:             err,
@@ -5735,10 +6054,19 @@ func (p *Proxy) sendMockNotFoundErrorFrom(err error, pid uint32) {
 		stamped.At = proxyErr.At
 		proxyErr.MismatchReport = &stamped
 	}
+	// The address the call was dialled at, when its parser named none. A
+	// copy, as above; the report's destination scope was settled by its
+	// parser, on what the parser saw.
+	if r := proxyErr.MismatchReport; r != nil && r.Destination == "" && dst != nil && dst.Addr != "" && !dst.AddrFabricated {
+		stamped := *r
+		stamped.Destination = dst.Addr
+		proxyErr.MismatchReport = &stamped
+	}
 	// The process that made the call (proven switch): its comm and argv[0],
-	// no more of its command line; where keploy runs in a PID namespace of
-	// its own, no name, why, and its kernel pid (starts.Registry.SourceOf).
-	// A copy, as above.
+	// and, only to travel to keploy's receipt, its pid and whole command
+	// line, redacted; where keploy runs in a PID namespace of its own, no
+	// name, why, and its kernel pid (starts.Registry.SourceOf). A copy, as
+	// above.
 	if r := proxyErr.MismatchReport; r != nil && r.Source == nil && pid != 0 && provenswitch.On() {
 		if src := starts.Default.SourceOf(pid); src != nil {
 			stamped := *r

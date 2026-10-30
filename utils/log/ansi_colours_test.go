@@ -53,7 +53,8 @@ func logKeployColours(logger *zap.Logger) {
 // that code. The one change is under --disable-ansi with the Highlight*
 // colours still on, where main wrote a colour in the message raw.
 func TestKeployColoursAreByteIdentical(t *testing.T) {
-	t.Chdir(t.TempDir()) // New() opens keploy-logs.txt in the working directory.
+	t.Chdir(t.TempDir())
+	t.Setenv("TMPDIR", t.TempDir()) // New() creates its log file there.
 	origNoColor, origAnsiDisabled := color.NoColor, models.IsAnsiDisabled
 	t.Cleanup(TestOnlyResetSink) // the lazy os.Stdout, which PrimarySink would report as an explicit one
 	t.Cleanup(func() { color.NoColor, models.IsAnsiDisabled = origNoColor, origAnsiDisabled })

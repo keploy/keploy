@@ -936,6 +936,20 @@ type TestWindows interface {
 	SameRecordedTestWindow(a, b time.Time) (same, known bool)
 }
 
+// RecordedWindowIndex is an optional TestWindows capability: where a time
+// lies among the set's recorded test windows, by their starts. A matcher
+// tells by it which gap between two recorded tests a recording made outside
+// every test lies in, and which gaps a call made with a test's window open
+// may fall in (the one before that window, or the one after it).
+type RecordedWindowIndex interface {
+	// RecordedWindowIndex is the index, in start order, of the last
+	// recorded test window that starts at or before t, -1 when t precedes
+	// every window (the app's start-up) or is zero. A time inside no window
+	// lies in the gap after that window. known is false when the replay
+	// sent none.
+	RecordedWindowIndex(t time.Time) (index int, known bool)
+}
+
 // VariableScopes is an optional MockMemDb capability, beside VariableStore:
 // the scope a call binds test variables in, by the mock that answers it. Under
 // exact serving, between tests, the next test's calls in flight the pool view
@@ -1170,6 +1184,16 @@ type SessionWindowReader interface {
 // once, at package level.
 type MockIndex struct {
 	Keys func(*models.Mock) []string
+	// OwnedKeys, when set, gives the open test's own mocks their keys under
+	// exact serving, in place of Keys: the mocks a SessionKeyReader's walk
+	// reads ahead of the staged ones. Under exact serving the per-test tier
+	// (GetPerTestMocksInWindow) leads with every one of those mocks, in that
+	// walk's order. A matcher that walks the per-test tier whole before each
+	// keyed walk has read them all there already, so it files them only
+	// under the keys it looks up without that read, and a test that owns
+	// thousands of mocks has none of their other keys computed. The same
+	// rules as for Keys hold.
+	OwnedKeys func(*models.Mock) []string
 }
 
 // SessionKeyReader is an optional MockMemDb extension: the GetSessionMocks
@@ -1184,6 +1208,22 @@ type SessionKeyReader interface {
 	// back into the store; the walk then sees the tier as it is by the time
 	// it gets there, as successive reads would.
 	RangeSessionMocksWithKey(ix *MockIndex, key string, fn func(*models.Mock) bool) error
+}
+
+// PerTestRanger is an optional MockMemDb extension: the
+// GetPerTestMocksInWindow read handed one mock at a time, in its order, until
+// the caller stops. Under exact serving the open test's own unanswered mocks
+// come first, read a few at a time, and the tier only after them: a matcher
+// that stops at the test's next recording reads neither the mocks the test
+// answered nor the rest of the tier, so a test that owns many recordings
+// costs each call the same as one that owns few.
+type PerTestRanger interface {
+	// RangePerTestMocksInWindow calls fn with each mock
+	// GetPerTestMocksInWindow would return, in its order, until fn
+	// returns false. fn is called without the store's locks held, so it
+	// may call back into the store; the walk then sees the tier as it is
+	// by the time it gets there, as successive reads would.
+	RangePerTestMocksInWindow(fn func(*models.Mock) bool) error
 }
 
 // MockReader is the read-only facet of MockMemDb. Parsers that need

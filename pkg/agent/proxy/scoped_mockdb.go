@@ -452,6 +452,7 @@ func (s *scopedMockDb) Unheld() string { return integrations.UnheldWhy(s.MockMem
 var (
 	_ integrations.RoundHolder  = (*scopedMockDb)(nil)
 	_ integrations.UnheldTeller = (*scopedMockDb)(nil)
+	_ integrations.TestOwner    = (*scopedMockDb)(nil)
 )
 
 // passThrough reports whether this view passes every read and consume
@@ -604,6 +605,33 @@ func (s *scopedMockDb) GetPerTestMocksInWindow() ([]*models.Mock, error) {
 	return s.keep(s.MockMemDb.GetPerTestMocksInWindow())
 }
 
+// RangePerTestMocksInWindow forwards the per-test walk of the wrapped store
+// through the same name filter as GetPerTestMocksInWindow. A store without
+// the walk, or a live view (which orders the read by start), is read whole.
+func (s *scopedMockDb) RangePerTestMocksInWindow(fn func(*models.Mock) bool) error {
+	r, ok := s.MockMemDb.(integrations.PerTestRanger)
+	if ok && s.passThrough() {
+		return r.RangePerTestMocksInWindow(fn)
+	}
+	if !ok || s.live {
+		all, err := s.GetPerTestMocksInWindow()
+		if err != nil {
+			return err
+		}
+		for _, mk := range all {
+			if !fn(mk) {
+				break
+			}
+		}
+		return nil
+	}
+	v := s.current()
+	gone := s.consumed(v)
+	return r.RangePerTestMocksInWindow(func(mk *models.Mock) bool {
+		return !visibleIn(v, mk) || (gone != nil && gone(mk.Name)) || fn(mk)
+	})
+}
+
 func (s *scopedMockDb) GetSessionMocks() ([]*models.Mock, error) {
 	return s.keep(s.MockMemDb.GetSessionMocks())
 }
@@ -706,6 +734,45 @@ func (s *scopedMockDb) RevisionByKind(kind models.Kind) uint64 {
 	}
 	return rev + s.viewVersion()
 }
+
+// StagingGeneration and StagingGenerationByKind are the store's
+// (integrations.StagingGenerations) plus the view's version, as Revision is:
+// a worker beginning or ending a test changes what this view shows.
+func (s *scopedMockDb) StagingGeneration() uint64 {
+	var gen uint64
+	if g, ok := s.MockMemDb.(integrations.StagingGenerations); ok {
+		gen = g.StagingGeneration()
+	} else if r, ok := s.MockMemDb.(interface{ Revision() uint64 }); ok {
+		gen = r.Revision()
+	}
+	return gen + s.viewVersion()
+}
+
+func (s *scopedMockDb) StagingGenerationByKind(kind models.Kind) uint64 {
+	var gen uint64
+	if g, ok := s.MockMemDb.(integrations.StagingGenerations); ok {
+		gen = g.StagingGenerationByKind(kind)
+	} else if r, ok := s.MockMemDb.(interface {
+		RevisionByKind(models.Kind) uint64
+	}); ok {
+		gen = r.RevisionByKind(kind)
+	}
+	return gen + s.viewVersion()
+}
+
+// MockSpent is the store's while this view passes through to it (exact
+// serving). A view that narrows the reads itself drops a consumed recording
+// through a consume that moves the store's revisions, and with them its
+// staging generations (holdUsedUp, Spend), so it reports none.
+func (s *scopedMockDb) MockSpent(name string) bool {
+	if !s.passThrough() {
+		return false
+	}
+	g, ok := s.MockMemDb.(integrations.StagingGenerations)
+	return ok && g.MockSpent(name)
+}
+
+var _ integrations.StagingGenerations = (*scopedMockDb)(nil)
 
 func (s *scopedMockDb) viewVersion() uint64 {
 	if s.src == nil {
@@ -818,6 +885,19 @@ func (s *scopedMockDb) InRecordedTestWindow(t time.Time) (bool, bool) {
 func (s *scopedMockDb) InPool(m *models.Mock) (bool, bool) {
 	return integrations.InPool(s.MockMemDb, m)
 }
+
+// RecordedWindowIndex forwards integrations.RecordedWindowIndex.
+func (s *scopedMockDb) RecordedWindowIndex(t time.Time) (int, bool) {
+	if w, ok := s.MockMemDb.(integrations.RecordedWindowIndex); ok {
+		return w.RecordedWindowIndex(t)
+	}
+	return -1, false
+}
+
+var (
+	_ integrations.RecordedWindowIndex = (*MockManager)(nil)
+	_ integrations.RecordedWindowIndex = (*scopedMockDb)(nil)
+)
 
 // SameRecordedTestWindow forwards integrations.TestWindows.
 func (s *scopedMockDb) SameRecordedTestWindow(a, b time.Time) (bool, bool) {
@@ -1292,4 +1372,13 @@ var (
 // states its kind mocks' lifetimes is the set's, not the worker's.
 func (s *scopedMockDb) StatesLifetimes(kind models.Kind) bool {
 	return integrations.StatesLifetimes(s.MockMemDb, kind)
+}
+
+// WhenRestaged implements integrations.Restaged: the store's, so a parser's
+// index of the reads through a view made before exact serving began goes
+// with the store's recordings too. Over a store that does not tell, the
+// parser's data goes at its next call that reads another generation, as
+// over that store itself.
+func (s *scopedMockDb) WhenRestaged(slot any, release func()) {
+	integrations.WhenRestaged(s.MockMemDb, slot, release)
 }

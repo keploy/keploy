@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -397,6 +398,97 @@ func TestAConsumeThatLearnsAfterTheLearnStepEndedSaysSo(t *testing.T) {
 	})
 }
 
+// A consume carries the clock reads the learn step of record's full round
+// learned on the copy a parser consumed (MockSpec.Clocks) to the replay, as
+// it carries variables: under the proven switch, and nothing without it.
+// Two pairings of one recording carry the Meet of their reads, whichever
+// came first, so a plain read met with one plus thirty minutes is Empty and
+// refuses every value there. Once the set's learn step has ended, a copy
+// whose clock reads the kept learning holds learns nothing beyond it; one
+// with another offset, or another place, does (LearnedAfterEnd).
+func TestAConsumeCarriesItsClockReadsAndSaysWhenTheyComeAfterTheLearnStep(t *testing.T) {
+	plain := models.ClockOffset{Res: time.Millisecond}
+	ttl := models.ClockOffset{Min: 30 * time.Minute, Max: 30*time.Minute + time.Millisecond, Res: time.Millisecond}
+	read := func(mm *MockManager) *models.Mock {
+		un, _ := mm.GetUnFilteredMocks()
+		for _, mk := range un {
+			if mk.Name == "beat" {
+				return mk
+			}
+		}
+		t.Fatal("precondition: the pool holds no beat")
+		return nil
+	}
+	file := func(mm *MockManager, clocks map[string]models.ClockOffset) {
+		t.Helper()
+		got := read(mm)
+		c := *got
+		c.Spec.Clocks = clocks
+		if !mm.UpdateUnFilteredMock(got, &c) {
+			t.Fatal("precondition: the copy is not filed")
+		}
+	}
+	state := func(mm *MockManager) models.MockState {
+		for _, st := range mm.GetConsumedMocks() {
+			if st.Name == "beat" {
+				return st
+			}
+		}
+		t.Fatal("beat's consume is not reported")
+		return models.MockState{}
+	}
+	t.Run("switch off", func(t *testing.T) {
+		t.Setenv(provenswitch.Env, "")
+		mm := stagedManager(t, nil, []*models.Mock{beatMock("beat")})
+		mm.ServeExactPool("-", []string{"beat"})
+		file(mm, map[string]models.ClockOffset{"body.at": plain})
+		if got := state(mm).Clocks; got != nil {
+			t.Fatalf("switch off: the consume carries clock reads %+v", got)
+		}
+	})
+	for _, order := range [][]models.ClockOffset{{plain, ttl}, {ttl, plain}} {
+		t.Run("met "+order[0].String()+" first", func(t *testing.T) {
+			t.Setenv(provenswitch.Env, "1")
+			mm := stagedManager(t, nil, []*models.Mock{beatMock("beat")})
+			mm.ServeExactPool("-", []string{"beat"})
+			file(mm, map[string]models.ClockOffset{"body.at": order[0], "body.only": plain})
+			if got := state(mm).Clocks; !reflect.DeepEqual(got, map[string]models.ClockOffset{"body.at": order[0], "body.only": plain}) {
+				t.Fatalf("the first consume carries clock reads %+v", got)
+			}
+			file(mm, map[string]models.ClockOffset{"body.at": order[1]})
+			got := state(mm).Clocks
+			if want := (map[string]models.ClockOffset{"body.at": plain.Meet(ttl), "body.only": plain}); !reflect.DeepEqual(got, want) || !got["body.at"].Empty() {
+				t.Fatalf("two pairings carry clock reads %+v, want %+v (an Empty body.at)", got, want)
+			}
+		})
+	}
+	kept := learn.NewKeptLearning([]models.MockState{{Name: "beat", Clocks: map[string]models.ClockOffset{"body.at": ttl}}})
+	for _, tc := range []struct {
+		name   string
+		clocks map[string]models.ClockOffset
+		want   bool
+	}{
+		{"the kept learning's clock read", map[string]models.ClockOffset{"body.at": ttl}, false},
+		{"another offset there", map[string]models.ClockOffset{"body.at": {Min: 31 * time.Minute, Max: 31*time.Minute + time.Millisecond, Res: time.Millisecond}}, true},
+		{"a clock read at another place", map[string]models.ClockOffset{"body.at": ttl, "body.key": plain}, true},
+	} {
+		t.Run("ended, "+tc.name, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, "1")
+			mm := stagedManager(t, nil, []*models.Mock{beatMock("beat")})
+			mm.SetLearnEnded(true)
+			mm.SetKeptLearning(kept)
+			mm.ServeExactPool("-", []string{"beat"})
+			if got := read(mm).Spec.Clocks; !reflect.DeepEqual(got, map[string]models.ClockOffset{"body.at": ttl}) {
+				t.Fatalf("precondition: a retry cycle is served beat with clock reads %+v, the kept learning's", got)
+			}
+			file(mm, tc.clocks)
+			if got := state(mm).LearnedAfterEnd; got != tc.want {
+				t.Fatalf("LearnedAfterEnd = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 // Every door a parser consumes a recording through says, once the set's
 // learn step has ended, whether the copy it names carries learning beyond
 // what exact serving handed out of the staged recording of that name
@@ -538,6 +630,13 @@ func TestEveryConsumeDoorSaysWhenItLearnedAfterTheLearnStepEnded(t *testing.T) {
 				mm, got := door.staged(t, tc.ended)
 				c := *got
 				c.Spec.ReqBodyNoise = tc.noise
+				// While the learn step runs, the copy also carries a clock
+				// read it learned, which every door hands on with its
+				// consume (MockState.Clocks), with exact serving on or off.
+				clocks := map[string]models.ClockOffset{"body.at": {Res: time.Millisecond}}
+				if !tc.ended {
+					c.Spec.Clocks = clocks
+				}
 				if !door.consume(mm)(c) {
 					t.Fatal("precondition: the door did not consume the copy")
 				}
@@ -550,6 +649,9 @@ func TestEveryConsumeDoorSaysWhenItLearnedAfterTheLearnStepEnded(t *testing.T) {
 				}
 				if st == nil {
 					t.Fatal("the consume is not reported")
+				}
+				if !tc.ended && !reflect.DeepEqual(st.Clocks, clocks) {
+					t.Fatalf("the consume carries clock reads %+v, want the copy's %+v", st.Clocks, clocks)
 				}
 				if st.LearnedAfterEnd != tc.want {
 					t.Fatalf("LearnedAfterEnd = %v, want %v", st.LearnedAfterEnd, tc.want)
@@ -656,4 +758,87 @@ func TestASecondStagingsFilingIsNotServedInItsRetryCycle(t *testing.T) {
 	if got := beatAt(t, mm, "t-1"); got != two {
 		t.Fatalf("staging 2's retry cycle answered the recorded call %s; want staging 2's own recording %s", got, two)
 	}
+}
+
+// asStaged gives a matcher's copy the staged recording's clock reads, never
+// the ones the learn step learned on the copy, as it does noise and
+// variables.
+func TestAStagedCopyHoldsTheRecordingsClockReadsNotTheCopys(t *testing.T) {
+	base := beatMock("beat")
+	base.Spec.Clocks = map[string]models.ClockOffset{"body.at": {Res: time.Millisecond}}
+	mk := base.DeepCopy()
+	mk.Spec.Clocks = map[string]models.ClockOffset{"body.key": {Res: time.Second}}
+	if got := asStaged(mk, base).Spec.Clocks; !reflect.DeepEqual(got, base.Spec.Clocks) {
+		t.Fatalf("the staged copy holds clock reads %+v, want the recording's %+v", got, base.Spec.Clocks)
+	}
+}
+
+// Every delete door carries the consumed copy's clock reads (MockSpec.Clocks)
+// on its consume, as it carries noise and variables: the per-test tree's,
+// the pool's and the start-up tier's, without exact serving.
+func TestEveryDeleteDoorCarriesTheCopysClockReads(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	clocks := map[string]models.ClockOffset{"body.at": {Res: time.Millisecond}}
+	consumed := func(t *testing.T, mm *MockManager) map[string]models.ClockOffset {
+		t.Helper()
+		for _, st := range mm.GetConsumedMocks() {
+			if st.Name == "beat" {
+				return st.Clocks
+			}
+		}
+		t.Fatal("beat's consume is not reported")
+		return nil
+	}
+	learned := func(t *testing.T, got []*models.Mock) models.Mock {
+		t.Helper()
+		if len(got) != 1 {
+			t.Fatalf("precondition: the tier holds %d mocks, want beat alone", len(got))
+		}
+		c := *got[0].DeepCopy()
+		c.Spec.Clocks = clocks
+		return c
+	}
+	t.Run("per-test", func(t *testing.T) {
+		pt := beatMock("beat")
+		pt.TestModeInfo = models.TestModeInfo{ID: 1, SortOrder: 1, IsFiltered: true, Lifetime: models.LifetimePerTest}
+		mm := NewMockManager(nil, nil, zap.NewNop())
+		t.Cleanup(mm.Close)
+		mm.SetMocksWithWindow([]*models.Mock{pt}, nil, exactT0.Add(-time.Second), exactT0.Add(time.Second))
+		got, _ := mm.GetFilteredMocks()
+		if !mm.DeleteFilteredMock(learned(t, got)) {
+			t.Fatal("precondition: the per-test delete is refused")
+		}
+		if g := consumed(t, mm); !reflect.DeepEqual(g, clocks) {
+			t.Fatalf("the per-test consume carries clock reads %+v, want %+v", g, clocks)
+		}
+	})
+	t.Run("pool", func(t *testing.T) {
+		mm := stagedManager(t, nil, []*models.Mock{beatMock("beat")})
+		got, _ := mm.GetUnFilteredMocks()
+		if !mm.DeleteUnFilteredMock(learned(t, got)) {
+			t.Fatal("precondition: the pool's delete is refused")
+		}
+		if g := consumed(t, mm); !reflect.DeepEqual(g, clocks) {
+			t.Fatalf("the pool's consume carries clock reads %+v, want %+v", g, clocks)
+		}
+	})
+	t.Run("start-up", func(t *testing.T) {
+		mm := NewMockManager(nil, nil, zap.NewNop())
+		t.Cleanup(mm.Close)
+		mm.ResetForReplaySession()
+		mm.SeedStartupCutoff(exactT0.Add(time.Second))
+		boot := beatMock("beat")
+		boot.TestModeInfo.IsFiltered, boot.TestModeInfo.Lifetime = true, models.LifetimePerTest
+		mm.SetMocksWithWindow([]*models.Mock{boot}, nil, models.BaseTime, time.Now())
+		mm.treesMu.RLock()
+		tier := mm.startup
+		mm.treesMu.RUnlock()
+		got, _ := mm.GetStartupMocks()
+		if !mm.deleteStartupMockFrom(tier, learned(t, got)) {
+			t.Fatal("precondition: the start-up delete is refused")
+		}
+		if g := consumed(t, mm); !reflect.DeepEqual(g, clocks) {
+			t.Fatalf("the start-up consume carries clock reads %+v, want %+v", g, clocks)
+		}
+	})
 }

@@ -335,20 +335,29 @@ func snapshotBoot(beat uint64, busy bool) BootProgress {
 // agent chose itself (a containerised agent's, in its own container): see
 // reportBootProgress. The returned channel is closed once the reporter has
 // returned, and so written its last report (at once for an empty path).
+// StopTeardownReporting ends the reporter.
 func ReportBootProgress(ctx context.Context, logger *zap.Logger, path string) (exited <-chan struct{}) {
 	if path == "" {
 		done := make(chan struct{})
 		close(done)
 		return done
 	}
-	return reportBootProgress(ctx, logger, pathSink(path), nil)
+	return startBootReporting(ctx, logger, pathSink(path))
+}
+
+// startBootReporting starts a boot reporter on sink that StopTeardownReporting
+// ends, and returns the channel it closes once it has returned.
+func startBootReporting(ctx context.Context, logger *zap.Logger, sink progressSink) <-chan struct{} {
+	return trackReporter(func(stop <-chan struct{}) <-chan struct{} {
+		return reportBootProgress(ctx, logger, sink, stop)
+	})
 }
 
 // ReportBootProgressTo writes the agent's start's progress next to the
 // teardown progress file its command line gave (--teardown-progress-file), as
 // BootProgressFileName, through that file's directory, checked as
 // ReportTeardownProgressTo checks it: an agent elevated by sudo writes there
-// as root, and touches no other file.
+// as root, and touches no other file. StopTeardownReporting ends the reporter.
 func ReportBootProgressTo(ctx context.Context, logger *zap.Logger, teardownPath string) error {
 	if teardownPath == "" {
 		return nil
@@ -357,7 +366,7 @@ func ReportBootProgressTo(ctx context.Context, logger *zap.Logger, teardownPath 
 	if err != nil {
 		return err
 	}
-	reportBootProgress(ctx, logger, sink, nil)
+	startBootReporting(ctx, logger, sink)
 	return nil
 }
 
@@ -366,11 +375,11 @@ func ReportBootProgressTo(ctx context.Context, logger *zap.Logger, teardownPath 
 // (BootBeat of the agent's own runnable time, bootClock), until it has written
 // the report that says the agent is ready or that its start has failed, ctx is
 // done (the agent is stopping: its teardown reports from there), or stop is
-// closed (tests; nil: never). Whatever an earlier agent left is cleared first,
-// so a CLI never reads it as this agent's. A failed write is only logged: a
-// CLI that reads no report gives the agent's process bootSilence of its
-// runnable time to make its first (bootJudge). The returned channel is closed
-// once the reporter has returned.
+// closed (StopTeardownReporting, and tests; nil: never). Whatever an earlier
+// agent left is cleared first, so a CLI never reads it as this agent's. A
+// failed write is only logged: a CLI that reads no report gives the agent's
+// process bootSilence of its runnable time to make its first (bootJudge). The
+// returned channel is closed once the reporter has returned.
 func reportBootProgress(ctx context.Context, logger *zap.Logger, sink progressSink, stop <-chan struct{}) (exited <-chan struct{}) {
 	if err := sink.clear(); err != nil && !os.IsNotExist(err) && logger != nil {
 		logger.Debug("failed to remove a stale boot progress report", zap.Error(err))

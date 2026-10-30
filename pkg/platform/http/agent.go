@@ -43,12 +43,14 @@ import (
 	"go.keploy.io/server/v3/pkg/client/app"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/neterr"
+	"go.keploy.io/server/v3/pkg/platform/agentargs"
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/pkg/platform/engine"
 	agentUtils "go.keploy.io/server/v3/pkg/platform/http/utils"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/service/agent"
 	"go.keploy.io/server/v3/utils"
+	keployLog "go.keploy.io/server/v3/utils/log"
 	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -116,6 +118,10 @@ type AgentClient struct {
 	// last staging call said it serves the set by
 	// (models.BackgroundRulesHeader): "" until one says the background rules.
 	stagedBackground atomic.Pointer[string]
+	// mockWindows is what the agent's answers to /updatemockparams since the
+	// last StoreMocks said of how it served their windows
+	// (models.MockWindowHeader; AgentMockWindow).
+	mockWindows mockWindowsHeard
 	// clientTestsRead holds whether the agent's answer to the last /mock
 	// said its learn step reads the session's tests as keploy mock's client
 	// tests (models.ClientTestsReadHeader). Every call clears it first.
@@ -336,6 +342,48 @@ func (a *AgentClient) AgentServesBackground() string {
 	return ""
 }
 
+// mockWindowsHeard folds what the agent's answers to /updatemockparams said
+// of how it served their windows (models.MockWindowHeader) since the last
+// StoreMocks, the set's mocks: said, what they said (models.MockWindowsSaid);
+// unsaid, that some answer said nothing.
+type mockWindowsHeard struct {
+	mu            sync.Mutex
+	said          models.MockWindowsSaid
+	heard, unsaid bool
+}
+
+func (h *mockWindowsHeard) reset() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.said, h.heard, h.unsaid = models.MockWindowsSaid{}, false, false
+}
+
+func (h *mockWindowsHeard) note(v string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	m, ok := models.ParseMockWindowMode(v)
+	if !ok {
+		h.unsaid = true
+		return
+	}
+	h.heard = true
+	h.said.Add(m)
+}
+
+// AgentMockWindow is what the agent's answers to /updatemockparams since the
+// set's mocks were stored said of how it served their windows
+// (pkg.MockWindowReader): ok is false when none was answered, or some answer
+// said nothing, as an agent older than models.MockWindowHeader does.
+func (a *AgentClient) AgentMockWindow() (models.MockWindowsSaid, bool) {
+	h := &a.mockWindows
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !h.heard || h.unsaid {
+		return models.MockWindowsSaid{}, false
+	}
+	return h.said, true
+}
+
 // var initStopScript []byte
 
 func New(logger *zap.Logger, client kdocker.Client, c *config.Config) *AgentClient {
@@ -490,6 +538,10 @@ func (a *AgentClient) sayAgentSummary(s models.StreamEndSummary) {
 	if s.Unsettled > 0 {
 		a.logger.Warn("the keploy agent saved some test cases before it had parsed all the traffic they overlap; if a connection's parser failed on it afterwards, they lack mocks",
 			zap.Int("test_cases", s.Unsettled))
+	}
+	if p := s.NotRecordedUnderPressure; p.Requests > 0 {
+		a.logger.Warn("the keploy agent did not record some requests: it was short of memory when they came, and its memory guard had paused recording; each connection's requests after the pause are recorded",
+			zap.Uint64("requests", p.Requests), zap.Int("connections", p.Connections))
 	}
 	if s.MassSuppressed {
 		a.logger.Warn("the keploy agent left out a large share of this recording's test cases: it could not capture their mocks",
@@ -942,6 +994,7 @@ func (a *AgentClient) MockOutgoing(ctx context.Context, opts models.OutgoingOpti
 		}
 	}()
 	a.pushContainers(ctx)
+	a.pushNetworkNames(ctx)
 	// Only a successful answer that says so (models.ClientTestsReadHeader)
 	// sets it again below.
 	a.clientTestsRead.Store(false)
@@ -1259,6 +1312,7 @@ func (a *AgentClient) StoreMocks(ctx context.Context, filtered []*models.Mock, u
 	}()
 	a.consumedPerTest.Store(false)
 	a.concurrentServing.Store(false)
+	a.mockWindows.reset()
 	// A dedicated cancelable context for the stream request: cancelling it tears
 	// down the transport's read of the io.Pipe body, which unblocks the encoder
 	// goroutine's pw.Write if the agent responded before consuming the whole
@@ -1410,9 +1464,13 @@ func (a *AgentClient) storeMocksStream(ctx context.Context, filtered []*models.M
 		if encoding == models.MockStreamEncodingZstd {
 			var err error
 			// One encoder goroutine: the link, not the CPU, bounds a remote
-			// upload, and a local one is fast either way.
+			// upload, and a local one is fast either way. SpeedFastest, not
+			// SpeedDefault: a k8s-proxy pod's replayer is held to one CPU,
+			// and there SpeedFastest cut zstd's CPU by 0.6 to 2.5 seconds
+			// per 0.52 GB of gob (six interleaved runs), for 2.4% more bytes
+			// on the wire (191.05 MB against 186.56 MB).
 			zw, err = zstd.NewWriter(out,
-				zstd.WithEncoderLevel(zstd.SpeedDefault),
+				zstd.WithEncoderLevel(zstd.SpeedFastest),
 				zstd.WithWindowSize(models.MockStreamZstdWindow),
 				zstd.WithEncoderConcurrency(1))
 			if err != nil {
@@ -1739,6 +1797,7 @@ func (a *AgentClient) sendMockParams(ctx context.Context, params models.MockFilt
 	}
 	a.consumedPerTest.Store(res.Header.Get(models.ConsumedScopeHeader) == models.ConsumedScopePerTest)
 	a.noteAgentVersion(res.Header)
+	a.mockWindows.note(res.Header.Get(models.MockWindowHeader))
 	if ex := params.Exact; ex != nil && ex.Stage {
 		rules := res.Header.Get(models.BackgroundRulesHeader)
 		a.stagedBackground.Store(&rules)
@@ -1928,7 +1987,28 @@ func (a *AgentClient) GetCaptureLosses(ctx context.Context) (models.CaptureLosse
 // its start, and an agent started again in its place counts afresh. "" where
 // the answer names none (an agent with the switch off, or older than the
 // header).
+//
+// The read ends at the agent's answer, the end of ctx, the interrupt that
+// gives a stop's waits up, or once keploy had captureLossStall of its own
+// runnable time with no answer (boundedAgentRead): an error then, never a
+// count.
 func (a *AgentClient) GetCaptureLossesAndAgent(ctx context.Context) (models.CaptureLosses, string, error) {
+	got, err := boundedAgentRead(ctx, "the read of the agent's capture losses", func(ctx context.Context) (lossesAnswer, error) {
+		losses, agent, err := a.getCaptureLossesAndAgent(ctx)
+		return lossesAnswer{losses, agent}, err
+	})
+	return got.losses, got.agent, err
+}
+
+// lossesAnswer is an answer of GET /capturelosses: the counts, and the agent
+// process that gave them.
+type lossesAnswer struct {
+	losses models.CaptureLosses
+	agent  string
+}
+
+// getCaptureLossesAndAgent is GetCaptureLossesAndAgent's exchange, unbounded.
+func (a *AgentClient) getCaptureLossesAndAgent(ctx context.Context) (models.CaptureLosses, string, error) {
 	url := fmt.Sprintf("%s/capturelosses", a.conf.Agent.AgentURI)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -1960,8 +2040,15 @@ func (a *AgentClient) GetCaptureLossesAndAgent(ctx context.Context) (models.Capt
 // GetUnchargedCaptureLosses asks the agent what it could not capture since
 // the run began that no test was charged with: what was lost after the last
 // test ended (GET /agent/capturelosses/uncharged). An agent that cannot say
-// is ErrCaptureLossesUnsupported.
+// is ErrCaptureLossesUnsupported. The read is bounded as
+// GetCaptureLossesAndAgent's is (boundedAgentRead).
 func (a *AgentClient) GetUnchargedCaptureLosses(ctx context.Context) (models.CaptureLosses, error) {
+	return boundedAgentRead(ctx, "the read of the agent's capture losses no test was charged with", a.getUnchargedCaptureLosses)
+}
+
+// getUnchargedCaptureLosses is GetUnchargedCaptureLosses's exchange,
+// unbounded.
+func (a *AgentClient) getUnchargedCaptureLosses(ctx context.Context) (models.CaptureLosses, error) {
 	url := fmt.Sprintf("%s/capturelosses/uncharged", a.conf.Agent.AgentURI)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -1988,6 +2075,66 @@ func (a *AgentClient) GetUnchargedCaptureLosses(ctx context.Context) (models.Cap
 		return nil, fmt.Errorf("failed to decode the capture losses no test was charged with: %w", err)
 	}
 	return losses, nil
+}
+
+// captureLossStall is how long, in time keploy could run (utils/stall), a
+// read of the agent's capture losses may go with no answer before keploy
+// gives it up: stall.HangBudget, as for a read of a container's
+// configuration the Docker daemon does not answer. The agent client's
+// http.Client has no timeout of its own, and a wedged agent that took the
+// read and never answered it held the run, and a CI job with it, for good:
+// record's per-test read is made on a context the stop does not end. A
+// starved keploy accrues it only as fast as it gets to run, so load is never
+// taken for a silent agent. captureLossClock is the clock it is counted on
+// (nil: keploy's own runnable time); tests drive one of their own.
+var (
+	captureLossStall = stall.HangBudget
+	captureLossClock stall.Clock
+)
+
+// errAgentSilent is a read of the agent given up on: it made no answer while
+// keploy had the read's whole bound of its own time to run.
+var errAgentSilent = errors.New("the keploy agent made no answer")
+
+// boundedAgentRead is read, an exchange with the agent, made on a context it
+// ends. It returns read's answer, or an error, never an answer, when one of
+// these comes first: ctx ends; the interrupt that gives a stop's waits up
+// (utils.StopNow, "press Ctrl+C again to stop now": the Ctrl+C escape of a
+// read made on a context the stop does not end, as record's per-test read
+// is); or keploy had captureLossStall of its own runnable time with no
+// answer (errAgentSilent; what names the read). The count it would have
+// given is then unknown, and every caller fails closed on an error: no
+// count, no verdict that relies on one. A read given up on ends as its
+// context does, on its own goroutine.
+func boundedAgentRead[T any](ctx context.Context, what string, read func(context.Context) (T, error)) (T, error) {
+	readCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	type answer struct {
+		v   T
+		err error
+	}
+	got := make(chan answer, 1) // a read given up on does not block
+	go func() {
+		v, err := read(readCtx)
+		got <- answer{v, err}
+	}()
+	m := stall.NewMeter(captureLossClock, captureLossStall)
+	defer m.Stop()
+	var zero T
+	for {
+		select {
+		case a := <-got:
+			return a.v, a.err
+		case <-ctx.Done():
+			return zero, fmt.Errorf("%s ended: %w", what, ctx.Err())
+		case <-utils.StopNow():
+			return zero, fmt.Errorf("keploy gave up %s at the interrupt", what)
+		case <-m.Wait():
+			if m.Expired() {
+				return zero, fmt.Errorf("%w to %s while keploy had %s of its own time to run", errAgentSilent, what, m.Grace())
+			}
+		}
+	}
 }
 
 func (a *AgentClient) Run(ctx context.Context, _ models.RunOptions) (ret models.AppError) {
@@ -2191,24 +2338,27 @@ func (a *AgentClient) nativeAgentArgs(opts models.SetupOptions) []string {
 	if ns := utils.OwnPIDNamespace(); ns != "" {
 		args = append(args, "--client-pid-ns", ns)
 	}
+	// This run's log, for the agent to append its lines to: one run, one file,
+	// which this process removes at its end (keployLog.ClientLogFileFlag).
+	// Absolute, as a relative TMPDIR would make it.
+	if utils.LogFile != nil {
+		if p, err := filepath.Abs(utils.LogFile.Name()); err == nil {
+			args = append(args, "--"+keployLog.ClientLogFileFlag+"="+p)
+		}
+	}
 
 	extraArgs := opts.ExtraArgs
 	if len(extraArgs) > 0 {
 		args = append(args, extraArgs...)
 	}
-	if a.conf.Debug {
-		args = append(args, "--debug")
-	}
+	// The CLI's root-level settings (--debug, --disable-tele, --disable-ansi,
+	// --disable-mapping), each with its value: the native agent reads the same
+	// keploy.yml (--config-path), and only an explicit value keeps the
+	// flag > yaml > default the CLI resolved.
+	args = append(args, agentargs.Root(a.conf)...)
 	if a.conf.Record.Synchronous {
 		args = append(args, "--sync")
 	}
-	// Forward the operator's --disable-mapping (root-level config) so
-	// the native agent process — even though it inherits the same
-	// keploy.yml via --config-path — sees an explicit override on
-	// invocations where the host CLI mutated the in-memory config
-	// after viper load (e.g. --disable-mapping=false on the test
-	// subcommand path that drove this agent start).
-	args = append(args, fmt.Sprintf("--disable-mapping=%t", a.conf.DisableMapping))
 	if a.conf.Record.EnableSampling > 0 {
 		args = append(args, fmt.Sprintf("--enable-sampling=%d", a.conf.Record.EnableSampling))
 	}
@@ -2217,6 +2367,9 @@ func (a *AgentClient) nativeAgentArgs(opts models.SetupOptions) []string {
 	}
 	if opts.GlobalPassthrough {
 		args = append(args, "--global-passthrough")
+	}
+	for _, e := range opts.AllowEgress {
+		args = append(args, "--allow-egress="+e)
 	}
 	if opts.DisableHandshakeHold {
 		args = append(args, "--disable-handshake-hold")
@@ -2246,7 +2399,7 @@ func (a *AgentClient) nativeAgentArgs(opts models.SetupOptions) []string {
 	// too, so the agent can name container destinations (containerkey).
 	args = append(args, containerkey.AgentArgs()...)
 	// Upstream TLS verification. Forwarded UNCONDITIONALLY as =%t, the same
-	// pattern (and for the same reason) as --disable-mapping above: the
+	// pattern (and for the same reason) as the root settings above: the
 	// orchestrator has already applied flag > yaml > default, and the native
 	// agent inherits the very same keploy.yml through --config-path below. If
 	// we only sent the flag when it was true, an explicit
@@ -2261,9 +2414,6 @@ func (a *AgentClient) nativeAgentArgs(opts models.SetupOptions) []string {
 	args = append(args, fmt.Sprintf("--upstream-tls-ca-cert=%s", opts.UpstreamTLSCACert))
 	if opts.BuildDelay > 0 {
 		args = append(args, "--build-delay", strconv.FormatUint(opts.BuildDelay, 10))
-	}
-	if models.IsAnsiDisabled == true {
-		args = append(args, "--disable-ansi")
 	}
 	if len(opts.PassThroughPorts) > 0 {
 		// Convert []uint32 to []string
@@ -2348,14 +2498,13 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	// If credentials are cached, this will use sudo -n (non-interactive)
 	cmd := newNativeAgentCommand(keployBin, args, sudoCached)
 
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
 	a.mu.Lock()
 	a.agentCmd = cmd // this has been set for proper stopping of the native agent
 	a.mu.Unlock()
-	// Start (OS-specific tweaks happen inside utils.StartCommand)
-	if err := agentUtils.StartCommand(cmd); err != nil {
+	// Start (OS-specific tweaks happen inside utils.StartCommand), its lines
+	// reaching keploy's console cut (startWithConsole)
+	console, err := startWithConsole(cmd, agentUtils.StartCommand)
+	if err != nil {
 		removeProgress()
 		utils.LogError(a.logger, err, "failed to start keploy agent")
 		return err
@@ -2372,6 +2521,7 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	go func() {
 		defer utils.Recover(a.logger)
 		err := cmd.Wait()
+		console.Exited()
 		run.exited()
 		removeProgress()
 		// Reported BEFORE the group goroutine below can return it: returning
@@ -3198,13 +3348,30 @@ func (a *AgentClient) fetchAgentCA(ctx context.Context) ([]byte, error) {
 // directory's project instead of the one they named, and every tool that
 // resolved the project from the command, the user's own `docker compose -p`
 // included, then missed the stack keploy started.
-func runFlagsOf(cmd string, kind utils.CmdType) (cleaned string, ports, networks, hosts []string) {
+func runFlagsOf(cmd string, kind utils.CmdType) (cleaned string, ports, networks, hosts []string, dns models.AppDNS) {
 	if kind == utils.DockerCompose {
-		return cmd, nil, nil, nil
+		return cmd, nil, nil, nil, models.AppDNS{}
 	}
 	cmd, ports, networks = agentUtils.ExtractDockerFlags(cmd)
 	cmd, hosts = agentUtils.ExtractAddHosts(cmd)
-	return cmd, ports, networks, hosts
+	cmd, dns = agentUtils.ExtractDNSFlags(cmd)
+	return cmd, ports, networks, hosts, dns
+}
+
+// withAppRunSettings hands the agent container what keploy took out of the
+// app's own docker command (runFlagsOf) or read off the --from-container
+// container: the app joins the agent container's network namespace, where
+// docker refuses or ignores its own ports, networks, host entries and
+// resolver settings, so the agent container publishes, joins and takes them
+// on its behalf (GetKeployDockerAlias).
+func withAppRunSettings(opts models.SetupOptions, ports, networks, hosts []string, dns models.AppDNS) models.SetupOptions {
+	opts.AppPorts = ports
+	opts.AppExtraHosts = hosts
+	opts.AppDNS = dns
+	if len(networks) > 0 {
+		opts.AppNetworks = networks
+	}
+	return opts
 }
 
 func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOptions) error {
@@ -3272,6 +3439,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	a.conf.DNSPort = dnsPort
 	a.conf.Agent.AgentURI = opts.AgentURI
 	forgetContainers(opts.AgentURI)
+	forgetNetworkNames(opts.AgentURI)
 
 	a.logger.Debug("Using available ports",
 		zap.Uint32("agent-port", agentPort),
@@ -3314,6 +3482,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		}
 
 		var appPorts, appNetworks, appHosts []string
+		var appDNS models.AppDNS
 		if utils.CmdType(opts.CommandType) == utils.FromContainer {
 			// No command to scrape. The container itself is the source of
 			// truth, and it answers with published ports and networks the
@@ -3321,7 +3490,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 			// space-separated spelling, so `--network=foo` and `-p=8080:80`
 			// slip past it today and then collide with the `--network=container:`
 			// keploy splices in.
-			appPorts, appNetworks, appHosts, err = a.appNetworkingFromContainer(ctx, opts.FromContainer)
+			appPorts, appNetworks, appHosts, appDNS, err = a.appNetworkingFromContainer(ctx, opts.FromContainer)
 			if err != nil {
 				return fmt.Errorf("failed to read the networking of %q: %w", opts.FromContainer, err)
 			}
@@ -3357,13 +3526,10 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 				}
 			}()
 		} else {
-			cmd, appPorts, appNetworks, appHosts = runFlagsOf(cmd, utils.CmdType(opts.CommandType))
+			cmd, appPorts, appNetworks, appHosts, appDNS = runFlagsOf(cmd, utils.CmdType(opts.CommandType))
 		}
-		opts.AppExtraHosts = appHosts
-
-		opts.AppPorts = appPorts
+		opts = withAppRunSettings(opts, appPorts, appNetworks, appHosts, appDNS)
 		if len(appNetworks) > 0 {
-			opts.AppNetworks = appNetworks
 			a.logger.Debug("Found docker networks", zap.Strings("networks", opts.AppNetworks))
 		}
 
@@ -3693,9 +3859,9 @@ func (a *AgentClient) ComposeDownOnSetupFailure(_ context.Context) error {
 }
 
 func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opts models.SetupOptions, run *agentRun) error {
-	keployAlias, err := kdocker.GetKeployDockerAlias(ctx, logger, &config.Config{
-		InstallationID: a.conf.InstallationID,
-	}, opts)
+	// The CLI's own config: the alias forwards the root flags the agent
+	// container must share with the CLI (agentargs.Root) from it.
+	keployAlias, err := kdocker.GetKeployDockerAlias(ctx, logger, a.conf, opts)
 	if err != nil {
 		utils.LogError(logger, err, "failed to prepare docker command and environment")
 		return err
@@ -3716,12 +3882,18 @@ func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opt
 		return a.startInDockerWithPTY(ctx, logger, cmd)
 	}
 
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	if err := cmd.Run(); err != nil {
+	// As the native agent's (startWithConsole).
+	console, err := startWithConsole(cmd, (*exec.Cmd).Start)
+	if err == nil {
+		err = cmd.Wait()
+		console.Exited()
+	}
+	if err != nil {
 		if ctx.Err() == context.Canceled {
-			cmd.Process.Kill()
+			// A start a cancelled context refused left no process.
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
+			}
 			logger.Info("Keploy agent in docker stopped gracefully.")
 			return nil
 		}
@@ -4423,6 +4595,13 @@ func (a *AgentClient) MakeAgentReadyForDockerCompose(ctx context.Context) (retEr
 			resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
 				a.logger.Debug("Successfully marked agent as ready")
+				// A docker-mode agent is given the names its replay's
+				// networks answer once it takes its release, not only at a
+				// test set's start (MockOutgoing): a launcher that never
+				// calls MockOutgoing, as enterprise's in-Pod replay stack
+				// (whose agent k8s-proxy drives), would otherwise leave it
+				// answering its own network's names itself.
+				a.pushNetworkNames(parent)
 				return nil
 			}
 			// A CA setup failure is latched in the agent (pTls.MarkCAFailed):
@@ -4650,17 +4829,21 @@ func (a *AgentClient) PushSetTable(ctx context.Context, root string, sets map[st
 // table and each key's pool slice (models.ScopeTableReq.Pool) in one
 // request. Every answer but 200 is an error: a replay judged per test must
 // not run on an agent that serves its tests and pool otherwise.
-func (a *AgentClient) PushProvenTable(ctx context.Context, table, pool map[string][]string) (retErr error) {
+//
+// windows are the recorded window of every test of the set
+// (models.ScopeTableReq.Windows), sent with them: the agent installs them
+// before it serves the pool.
+func (a *AgentClient) PushProvenTable(ctx context.Context, table, pool map[string][]string, windows []models.TestWindow) (retErr error) {
 	if pool == nil {
 		pool = map[string][]string{}
 	}
 	defer func() {
 		if retErr == nil && a.session().recording() {
-			t, p := maps.Clone(table), maps.Clone(pool)
-			a.session().record(stepScopeTable, func(c context.Context) error { return a.PushProvenTable(c, t, p) })
+			t, p, w := maps.Clone(table), maps.Clone(pool), slices.Clone(windows)
+			a.session().record(stepScopeTable, func(c context.Context) error { return a.PushProvenTable(c, t, p, w) })
 		}
 	}()
-	body, err := json.Marshal(models.ScopeTableReq{Mappings: table, Pool: pool})
+	body, err := json.Marshal(models.ScopeTableReq{Mappings: table, Pool: pool, Windows: windows})
 	if err != nil {
 		return fmt.Errorf("failed to marshal scope table: %w", err)
 	}
@@ -4882,7 +5065,8 @@ const fromContainerRestoreBudget = 90 * time.Second
 // appNetworkingFromContainer reads the published ports, user networks and host
 // entries off an already-running container, in the shapes GenerateDockerCommand
 // expects: AppPorts as whole `-p …` flags, AppNetworks as bare names,
-// AppExtraHosts as NAME:ADDRESS.
+// AppExtraHosts as NAME:ADDRESS, AppDNS as the container's own resolver
+// settings.
 //
 // The agent publishes on the app's behalf, because the app shares the agent's
 // network namespace and therefore cannot publish anything itself. That is true
@@ -4893,15 +5077,21 @@ const fromContainerRestoreBudget = 90 * time.Second
 // Network ALIASES are not carried over yet - they are attached per-network with
 // a separate flag - so a dependency that resolves the app by alias rather than
 // by container name still needs that alias set by hand.
-func (a *AgentClient) appNetworkingFromContainer(ctx context.Context, name string) (ports, networks, hosts []string, err error) {
+func (a *AgentClient) appNetworkingFromContainer(ctx context.Context, name string) (ports, networks, hosts []string, dns models.AppDNS, err error) {
 	inspect, err := a.dockerClient.ContainerInspect(ctx, name)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, models.AppDNS{}, err
 	}
-	// Its host entries, which its replacement cannot carry under the agent's
-	// network mode: the agent container carries them (AppExtraHosts).
+	// Its host entries and resolver settings, which its replacement cannot
+	// carry under the agent's network mode (replicaConfig): the agent
+	// container carries them (AppExtraHosts, AppDNS).
 	if inspect.HostConfig != nil {
 		hosts = append(hosts, inspect.HostConfig.ExtraHosts...)
+		dns = models.AppDNS{
+			Servers: append([]string(nil), inspect.HostConfig.DNS...),
+			Search:  append([]string(nil), inspect.HostConfig.DNSSearch...),
+			Options: append([]string(nil), inspect.HostConfig.DNSOptions...),
+		}
 	}
 
 	// PortBindings is the REQUEST ("-p 8080" -> HostPort ""), which is what to
@@ -4951,7 +5141,7 @@ func (a *AgentClient) appNetworkingFromContainer(ctx context.Context, name strin
 		}
 	}
 	sort.Strings(networks)
-	return ports, networks, hosts, nil
+	return ports, networks, hosts, dns, nil
 }
 
 // RestoreFromContainer removes keploy's copy of the user's container and starts
@@ -5612,4 +5802,21 @@ func (a *AgentClient) TestVariables(ctx context.Context) ([]models.VariableBindi
 		return nil, err
 	}
 	return out.Variables, nil
+}
+
+// startWithConsole starts an agent's cmd through start, its output going to
+// keploy's console through a utils.ChildConsole: so the agent's lines are cut
+// of the values the log redactor holds, when it holds any. Call the console's
+// Exited once cmd.Wait has returned.
+func startWithConsole(cmd *exec.Cmd, start func(*exec.Cmd) error) (*utils.ChildConsole, error) {
+	console, err := utils.SetChildConsole(cmd)
+	if err != nil {
+		return nil, err
+	}
+	err = start(cmd)
+	console.Started()
+	if err != nil {
+		return nil, err
+	}
+	return console, nil
 }

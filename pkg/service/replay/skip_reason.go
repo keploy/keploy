@@ -12,14 +12,13 @@ import (
 )
 
 // skipReasonFor is the reason the run skips one test, for its IGNORED result:
-// what config.Test.SkipReasons holds for it, under the proven switch. A test
-// skipped for a reason is said as it is skipped (at Debug), once a run, and is
-// listed in the run's summary (quarantinedSummary). With the switch off it is always "",
-// and nothing is said.
+// what config.Test.SkipReasons holds for it, whoever set it, with the proven
+// switch on or off. A test skipped for a reason is said as it is skipped (at
+// Debug), once a run, and is listed in the run's summary (quarantinedSummary).
+// A test skipped with no reason gets "", and nothing is said, so a run whose
+// caller sets no reason (every run with the switch off, but a cloud replay
+// that skips a test for having no mapping entry) is what it was.
 func (r *Replayer) skipReasonFor(testSetID, testCaseID string) string {
-	if !provenswitch.On() {
-		return ""
-	}
 	reason := r.config.Test.SkipReasons[testSetID][testCaseID]
 	if reason != "" {
 		r.noteQuarantined(testSetID, testCaseID, reason)
@@ -41,7 +40,11 @@ func (r *Replayer) noteQuarantined(testSetID, testCaseID, reason string) {
 		r.quarantined = make(map[[2]string]string)
 	}
 	r.quarantined[key] = reason
-	r.logger.Debug("skipping a quarantined test ("+provenswitch.Env+"=1)",
+	msg := "skipping a test for a reason"
+	if provenswitch.On() {
+		msg = "skipping a quarantined test (" + provenswitch.Env + "=1)"
+	}
+	r.logger.Debug(msg,
 		zap.String("testcase", testCaseID),
 		zap.String("testset", testSetID),
 		zap.String("reason", reason))
@@ -56,7 +59,7 @@ func (r *Replayer) forgetQuarantined() {
 
 // quarantinedSummary is the run summary's list of the tests it skipped for a
 // reason, by test set and test, each with its reason on one line; "" when it
-// skipped none (always, with the switch off).
+// skipped none. Its heading names the proven switch only when the switch is on.
 func (r *Replayer) quarantinedSummary() string {
 	r.quarantinedMu.Lock()
 	keys := make([][2]string, 0, len(r.quarantined))
@@ -78,7 +81,11 @@ func (r *Replayer) quarantinedSummary() string {
 		return keys[i][1] < keys[j][1]
 	})
 	var b strings.Builder
-	fmt.Fprintf(&b, "\n\n\tQuarantined tests, skipped by keploy (%s=1): %d\n", provenswitch.Env, len(keys))
+	if provenswitch.On() {
+		fmt.Fprintf(&b, "\n\n\tQuarantined tests, skipped by keploy (%s=1): %d\n", provenswitch.Env, len(keys))
+	} else {
+		fmt.Fprintf(&b, "\n\n\tTests skipped by keploy for a reason: %d\n", len(keys))
+	}
 	for _, k := range keys {
 		fmt.Fprintf(&b, "\t\t%s/%s: %s\n", k[0], k[1], models.SkipReasonOneLine(reasons[k]))
 	}
@@ -95,15 +102,18 @@ func ignoredKind(tc *models.TestCase) models.Kind {
 }
 
 // ignoredSetResults is one IGNORED result, with its reason, for each test of a
-// test set the run ignores whole, under the proven switch. A set's skip used
-// to leave its report with counts and no rows, so neither the report nor
-// JUnit could say which tests were skipped, or why. The run's own selection
-// still decides which tests exist: a test it did not select is not reported
-// as skipped.
+// test set the run ignores whole, under the proven switch, or with it off when
+// the run's caller gave a reason for any test of the set (config.Test.SkipReasons:
+// a cloud replay that skips a set's tests for having no mapping entry). A set's
+// skip used to leave its report with counts and no rows, so neither the report
+// nor JUnit could say which tests were skipped, or why. The run's own
+// selection still decides which tests exist: a test it did not select is not
+// reported as skipped.
 //
-// With the switch off it returns nil, and the set's report is what it was.
+// With the switch off and no reason for the set it returns nil, and the set's
+// report is what it was.
 func (r *Replayer) ignoredSetResults(testSetID string, testCases []*models.TestCase) []models.TestResult {
-	if !provenswitch.On() {
+	if !provenswitch.On() && len(r.config.Test.SkipReasons[testSetID]) == 0 {
 		return nil
 	}
 	selected := r.config.Test.SelectedTests[testSetID]

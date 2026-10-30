@@ -329,10 +329,9 @@ section "Building sample application image"
 docker_build_retry docker compose build
 
 section "Cleaning previous artifacts"
-# sudo for keploy/ and keploy-logs.txt: a prior privileged run leaves them
-# root-owned, and a stale root-owned keploy-logs.txt makes the (unprivileged)
-# `config --generate` below fail on its chmod. Harmless on a fresh runner.
-sudo rm -rf keploy/ keploy-logs.txt
+# sudo for keploy/: a prior privileged run leaves it root-owned. Harmless on
+# a fresh runner.
+sudo rm -rf keploy/
 rm -f "$RECORD_LOG" "$REPLAY_LOG" "$WORKLOAD_LOG" "$PWD"/docker-*.prof
 cleanup_compose
 

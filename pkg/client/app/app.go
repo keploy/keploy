@@ -100,6 +100,14 @@ type App struct {
 	// made once those containers are gone (the stale-agent probe before the
 	// next up).
 	composeProjectSeen atomic.Pointer[string]
+	// composeChildOut keeps the tails of keploy's own compose stack when it
+	// runs as a `docker compose` child (no compose library in this build):
+	// the last Up's, set before its child starts (composeChildTee), and
+	// dropped with the document it ran (setComposeSource).
+	composeChildOut atomic.Pointer[docker.ComposeChildOutput]
+	// composeChildWarned: composeChildTee has said that it keeps none of the
+	// document's output; once per document, reset with it (setComposeSource).
+	composeChildWarned atomic.Bool
 	// teardown is the teardown scope of the run that set the app up or ran
 	// it last (utils.TeardownScopeOf of Setup's or Run's context): each step
 	// keploy sees its stop take -- the app's processes or container on
@@ -539,6 +547,10 @@ func (a *App) recentAppLogs(ctx context.Context) string {
 		ctx = context.Background()
 	}
 
+	if len(a.composeContent) > 0 {
+		return a.recentAppOutput()
+	}
+
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
@@ -583,6 +595,82 @@ func (a *App) recentAppLogs(ctx context.Context) string {
 	}
 
 	return trimRecentAppLogs(combined, 20)
+}
+
+// recentAppOutput is recentAppLogs for keploy's own compose stack (in-memory
+// compose content), in-process or run as a `docker compose` child: the app
+// container's tail as keploy took it from what compose attached to
+// (docker.ServiceOutputTail), cut, and never `docker logs`. So the stack's
+// containers need no log driver that stores what they print on the docker
+// host's disk, and the answer comes after compose has removed the container.
+// The tail is of the stack's project and of its last Up alone (one test
+// set), as `docker logs` of that Up's container was; with no stack built or
+// started, nothing ran and there is none.
+func (a *App) recentAppOutput() string {
+	project := a.composeOutputProject()
+	if project == "" {
+		return ""
+	}
+	var tail []byte
+	if a.composeService != "" {
+		tail = docker.ServiceOutputTail(project, a.composeService)
+	} else if a.container != "" {
+		tail = docker.AppOutputTail(project, a.container)
+	}
+	return trimRecentAppLogs(string(tail), 20)
+}
+
+// composeOutputProject is the compose project the tails of keploy's own
+// stack are kept under: the library's project when this build drives the
+// stack in-process, else the project of the last `docker compose` child
+// keploy started for it (composeChildTee); "" when there is none.
+func (a *App) composeOutputProject() string {
+	// Only the shell-out's project now: the library's in-process runner went
+	// with the library.
+	return a.composeChildOut.Load().Project()
+}
+
+// executeCommand runs runCmd once as a child process (utils.ExecuteCommand),
+// with keploy's own compose document on its stdin when there is one, and that
+// document's containers' output kept in their tails (composeChildTee).
+func (a *App) executeCommand(ctx context.Context, runCmd string, runEnv []string, cancel func(*exec.Cmd) func() error) utils.CmdError {
+	return utils.ExecuteCommand(ctx, a.logger, runCmd, a.kind, cancel, 25*time.Second, a.composeContent, runEnv, a.composeChildTee(ctx)...)
+}
+
+// composeChildTee is the output tee for the `docker compose` child that runs
+// keploy's own compose stack in a build without the compose library: it
+// starts a new run of the project's tails (one per Up, as the library's Up
+// does) and keeps each container's lines there, cut, from what compose prints
+// (docker.ComposeChildOutput). The project is the one the child's compose
+// takes: the command's -p, else its COMPOSE_PROJECT_NAME assignment, else
+// keploy's environment or an env file's (the command's --env-file, else the
+// project's .env), the document's name: or the project directory's name. None
+// for any other command, which keeps `docker logs`; and none when keploy's
+// loader cannot load the document (the library path refuses it alike), when
+// the app's recent output is then empty, said once per document. The loader
+// sees keploy's environment and the env files compose reads, not what only
+// the shell gives the child: an assignment in the command (`DB_PASS=x docker
+// compose up`) or a flag value the shell expands (`--env-file $HOME/x.env`).
+func (a *App) composeChildTee(ctx context.Context) []utils.ExecOption {
+	// Was also skipped when the library drove the stack in-process; with the
+	// library gone, only "this is not keploy's own document" skips it.
+	if len(a.composeContent) == 0 {
+		return nil
+	}
+	projectName, projectDir := composeProjectScope(a.cmd)
+	if projectName == "" {
+		projectName = normalizeComposeProjectName(composeProjectEnvAssignment(a.cmd))
+	}
+	out, err := docker.StartComposeChildOutput(ctx, a.composeContent, projectName, projectDir, composeEnvFiles(a.cmd))
+	a.composeChildOut.Store(out)
+	if err != nil {
+		if a.composeChildWarned.CompareAndSwap(false, true) {
+			a.logger.Warn("keploy could not load the compose document it runs, so it keeps none of its containers' output, and an app crash will show no recent output. Keploy reads its own environment and the env files compose reads (--env-file, COMPOSE_ENV_FILES, the project's .env), not an assignment in the command (DB_PASS=x docker compose up) or a flag value the shell expands: export such a variable or put it in an env file, and write an --env-file path out in full",
+				zap.Error(err))
+		}
+		return nil
+	}
+	return []utils.ExecOption{utils.WithOutputTee(out.Stream)}
 }
 
 func (a *App) logTargetContainer(ctx context.Context) string {
@@ -1092,6 +1180,14 @@ func (a *App) setComposeSource(file string, content []byte, compose *docker.Comp
 	a.composeContent = content
 	a.composeServices = composeServiceNames(compose)
 
+	// Drop what the PREVIOUS document left behind, or `down`/`ps` and the
+	// attach tail would point at the stack of the last test-set.
+	//
+	// The compose RUNNER's reset went with the library this branch removes;
+	// the child-output tail stays, because it is the shell-out's (keploy#4992),
+	// and the shell-out is now the only path.
+	a.composeChildOut.Store(nil)
+	a.composeChildWarned.Store(false)
 }
 
 // composeServiceNames returns the service keys of a parsed compose document.
@@ -2181,7 +2277,10 @@ func (a *App) run(ctx context.Context) models.AppError {
 	// existing shell-out: it may carry flags and shell syntax keploy does not
 	// model, and it is not keploy's to reinterpret.
 	executeApp := func(runCmd string, runEnv []string) utils.CmdError {
-		return utils.ExecuteCommand(ctx, a.logger, runCmd, a.kind, cmdCancel, 25*time.Second, a.composeContent, runEnv)
+		// a.executeCommand, not utils.ExecuteCommand directly: it adds
+		// a.composeChildTee, which is keploy#4992's fix and applies to the
+		// SHELL-OUT -- the only path left here.
+		return a.executeCommand(ctx, runCmd, runEnv, cmdCancel)
 	}
 
 	var err error

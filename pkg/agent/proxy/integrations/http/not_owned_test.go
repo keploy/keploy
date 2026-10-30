@@ -62,9 +62,10 @@ func TestNotOwnedRecordingIsTheCallMadeElsewhere(t *testing.T) {
 		t.Fatalf("a store that stages nothing more named %s", got.Name)
 	}
 
-	r := &models.MockMismatchReport{ClosestMock: "visible", Differs: []string{"path"}, FieldDiffs: []models.MockFieldDiff{{Path: "path"}}}
+	r := &models.MockMismatchReport{ClosestMock: "visible", Differs: []string{"path"}, FieldDiffs: []models.MockFieldDiff{{Path: "path"}},
+		FieldReasons: []models.FieldReason{{Field: "body.since", Why: "body.since was learned as a read of the application's clock"}}}
 	markNotOwned(r, elsewhere)
-	if r.ClosestMock != elsewhere.Name || !r.NotOwned || r.Differs != nil || r.FieldDiffs != nil || r.ClosestMockReq == "" || r.NextSteps == "" {
+	if r.ClosestMock != elsewhere.Name || !r.NotOwned || r.Differs != nil || r.FieldDiffs != nil || r.FieldReasons != nil || r.ClosestMockReq == "" || r.NextSteps == "" {
 		t.Fatalf("the report of a call made elsewhere is %+v", r)
 	}
 }

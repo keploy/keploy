@@ -86,7 +86,6 @@ send_request() {
 
 # Clean up
 rm -rf keploy/ record.txt test.txt
-sudo rm -f /tmp/keploy-logs.txt
 
 # Build
 section "Build App"

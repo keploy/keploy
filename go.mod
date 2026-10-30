@@ -7,11 +7,13 @@ require (
 	facette.io/natsort v0.0.0-20181210072756-2cd4dd1e2dcb
 	github.com/7sDream/geko v0.1.1
 	github.com/agnivade/levenshtein v1.1.1
-	github.com/andybalholm/brotli v1.2.0
+	github.com/andybalholm/brotli v1.2.3
 	github.com/bufbuild/protocompile v0.14.1
+	github.com/cespare/xxhash/v2 v2.3.0
 	github.com/cilium/ebpf v0.22.0
 	github.com/cloudflare/cfssl v1.6.4
 	github.com/compose-spec/compose-go/v2 v2.15.0
+	github.com/containerd/errdefs v1.0.0
 	github.com/creack/pty v1.1.24
 	github.com/denisbrodbeck/machineid v1.0.1
 	github.com/distribution/reference v0.6.0
@@ -25,6 +27,7 @@ require (
 	github.com/go-chi/chi/v5 v5.2.3
 	github.com/go-chi/render v1.0.3
 	github.com/go-sql-driver/mysql v1.9.3
+	github.com/golang/glog v1.2.5
 	github.com/google/nftables v0.3.0
 	github.com/google/uuid v1.6.0
 	github.com/gopacket/gopacket v1.4.0
@@ -37,6 +40,7 @@ require (
 	github.com/klauspost/compress v1.19.2
 	github.com/miekg/dns v1.1.57
 	github.com/moby/docker-image-spec v1.3.1
+	github.com/moby/moby/client v0.5.1
 	github.com/olekukonko/tablewriter v1.1.0
 	github.com/opencontainers/image-spec v1.1.1
 	github.com/pavlo-v-chernykh/keystore-go/v4 v4.5.0
@@ -82,7 +86,6 @@ require (
 	github.com/bodgit/plumbing v1.3.0 // indirect
 	github.com/bodgit/sevenzip v1.6.0 // indirect
 	github.com/bodgit/windows v1.0.1 // indirect
-	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/charmbracelet/colorprofile v0.4.2 // indirect
 	github.com/charmbracelet/lipgloss v0.12.1 // indirect
 	github.com/charmbracelet/ultraviolet v0.0.0-20251205161215-1948445e3318 // indirect
@@ -93,7 +96,6 @@ require (
 	github.com/charmbracelet/x/windows v0.2.2 // indirect
 	github.com/clipperhouse/displaywidth v0.11.0 // indirect
 	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
-	github.com/containerd/errdefs v1.0.0 // indirect
 	github.com/containerd/errdefs/pkg v0.3.0 // indirect
 	github.com/containerd/log v0.1.0 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
@@ -122,7 +124,6 @@ require (
 	github.com/go-openapi/swag/typeutils v0.28.0 // indirect
 	github.com/go-openapi/swag/yamlutils v0.28.0 // indirect
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
-	github.com/golang/glog v1.2.5 // indirect
 	github.com/google/certificate-transparency-go v1.3.3 // indirect
 	github.com/google/gnostic-models v0.7.0 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
@@ -140,7 +141,7 @@ require (
 	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/mattn/go-runewidth v0.0.23 // indirect
-	github.com/mattn/go-shellwords v1.0.12 // indirect
+	github.com/mattn/go-shellwords v1.0.14 // indirect
 	github.com/mdlayher/netlink v1.9.0 // indirect
 	github.com/mdlayher/socket v0.5.1 // indirect
 	github.com/mholt/archives v0.1.2 // indirect
@@ -148,6 +149,7 @@ require (
 	github.com/minio/minlz v1.0.0 // indirect
 	github.com/mitchellh/copystructure v1.2.0 // indirect
 	github.com/mitchellh/reflectwalk v1.0.2 // indirect
+	github.com/moby/moby/api v1.55.0 // indirect
 	github.com/moby/sys/atomicwriter v0.1.0 // indirect
 	github.com/moby/sys/sequential v0.7.0 // indirect
 	github.com/mohae/deepcopy v0.0.0-20170929034955-c48cc78d4826 // indirect
@@ -201,7 +203,7 @@ require (
 	go.uber.org/multierr v1.11.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.4 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
-	go.yaml.in/yaml/v4 v4.0.0-rc.4 // indirect
+	go.yaml.in/yaml/v4 v4.0.0-rc.6 // indirect
 	go4.org v0.0.0-20230225012048-214862532bf5 // indirect
 	golang.org/x/crypto v0.56.0 // indirect
 	golang.org/x/exp v0.0.0-20260603202125-055de637280b // indirect

@@ -53,15 +53,27 @@ func main() {
 
 func setVersion() {
 	if version == "" {
-		version = "3-dev"
+		version = utils.DevVersion
 	}
 	utils.Version = version
 	utils.VersionIdentifier = "version"
 }
 
-// newLogger is log.New; a test swaps in one that fails. log.New itself no
-// longer fails where it cannot open keploy-logs.txt: it logs to the console.
-var newLogger = log.New
+// newLogger is runLogger; a test swaps in one that fails. log.New itself does
+// not fail where it cannot create its temp log file: it logs to the console.
+var newLogger = runLogger
+
+// runLogger is log.New, less the log file for a run whose stdout is a document
+// (provider.WantsMachineOutput: --json, `report --format json`): such a run
+// names no log, so it creates none, and one killed before its flags are
+// checked leaves nothing in the temp directory.
+func runLogger() (*zap.Logger, *os.File, error) {
+	if provider.WantsMachineOutput(os.Args) {
+		logger, err := log.NewWithoutFile()
+		return logger, nil, err
+	}
+	return log.New()
+}
 
 func start(ctx context.Context) {
 	logger, logFile, err := newLogger()
@@ -71,6 +83,21 @@ func start(ctx context.Context) {
 		return
 	}
 	utils.LogFile = logFile
+	// The first deferred call, so the last to run: every return of start()
+	// from here on, the early ones included (a failed sudo re-exec), ends the
+	// log, and what the other deferred calls log reaches it first.
+	defer func() {
+		if os.Getenv("KEPLOY_INDOCKER") != "true" {
+			// This run's own temp log (log.LogFilePattern), closed and
+			// removed; whatever else is at its name is not this run's. A
+			// native agent's log is its CLI's (log.ClientLogFileFlag), which
+			// it only closes: the CLI removes it.
+			if err := log.CloseLogFile(utils.LogFile); err != nil {
+				utils.LogError(logger, err, "Failed to close and remove Keploy Logs")
+			}
+			utils.LogFile = nil
+		}
+	}()
 
 	// If KEPLOY_DEBUG_FILE is set, tee debug-level log records into that
 	// file in addition to whatever sinks log.New configured. Used by
@@ -147,9 +174,12 @@ func start(ctx context.Context) {
 	// Early check: If Docker command detected and not running as root, re-exec with sudo
 	// This must happen before any other initialization to ensure clean process handoff
 	if utils.ShouldReexecWithSudo() {
-		utils.ReexecWithSudo(logger)
-		// ReexecWithSudo calls syscall.Exec which replaces the process, so this line
-		// is only reached if there's an error (which is handled inside ReexecWithSudo)
+		// ReexecWithSudo calls syscall.Exec which replaces the process, so this
+		// line is only reached if there's an error, which it has said. The run
+		// ends here, through start()'s deferred calls, which remove its log.
+		if err := utils.ReexecWithSudo(logger); err != nil {
+			utils.ErrCode = utils.ExitKeployError
+		}
 		return
 	}
 
@@ -200,23 +230,7 @@ func start(ctx context.Context) {
 	}
 
 	defer func() {
-		inDocker := os.Getenv("KEPLOY_INDOCKER")
-		if inDocker != "true" {
-			var ownLog os.FileInfo
-			if utils.LogFile != nil {
-				ownLog, _ = utils.LogFile.Stat()
-				err := utils.LogFile.Close()
-				if err != nil {
-					utils.LogError(logger, err, "Failed to close Keploy Logs")
-				}
-			}
-			// Only the log this run kept: a keploy-logs.txt it refused (a
-			// link, another user's file) is not this run's to delete.
-			if log.IsLogFile(ownLog) {
-				if err := utils.DeleteFileIfExists(logger, log.LogFileName); err != nil {
-					return
-				}
-			}
+		if os.Getenv("KEPLOY_INDOCKER") != "true" {
 			if err := utils.DeleteFileIfExists(logger, "docker-compose-tmp.yaml"); err != nil {
 				return
 			}
@@ -234,10 +248,10 @@ func start(ctx context.Context) {
 	oldMask := utils.SetUmask()
 	defer utils.RestoreUmask(oldMask)
 
-	if dsn != "" {
-		utils.SentryInit(logger, dsn)
-		//logger = utils.ModifyToSentryLogger(ctx, logger, sentry.CurrentHub().Client(), configDb)
-	}
+	// Armed only: the crash-report client starts once the command has read
+	// --disable-tele and keploy.yml, and only with telemetry on
+	// (utils.ResolveCrashReports, from ValidateFlags).
+	utils.ArmCrashReports(dsn)
 	conf := config.New()
 	conf.APIServerURL = apiServerURI
 	conf.GitHubClientID = gitHubClientID
@@ -249,7 +263,10 @@ func start(ctx context.Context) {
 	if err != nil {
 		errMsg := "failed to get installation id"
 		utils.LogError(logger, err, errMsg)
-		os.Exit(1)
+		// Returned, not os.Exit(1): the run ends through its deferred calls,
+		// which remove its temp log.
+		utils.ErrCode = utils.ExitKeployError
+		return
 	}
 
 	svcProvider := provider.NewServiceProvider(logger, conf)
@@ -332,7 +349,7 @@ func maybeAttachDebugFileSink(logger *zap.Logger) (*os.File, *log.DebugFileSink)
 			zap.String("path", path), zap.Error(err))
 		return nil, nil
 	}
-	wrapped, sink := log.AddDebugFileSink(logger, f, 100<<20)
+	wrapped, sink := log.AddDebugFileSink(logger, f, log.FileCapBytes)
 	if wrapped == nil || sink == nil {
 		_ = f.Close()
 		return nil, nil

@@ -88,6 +88,13 @@ func (a *Agent) ProxyConns(ctx context.Context) (models.ProxyConnCounts, error) 
 // read, a count was lost, the bytes cannot be told, or the listener closes. A
 // test's begin and end call it with the counts they read.
 func (a *Agent) WaitProxySettled(ctx context.Context, counts models.ProxyConnCounts) error {
+	return a.waitProxySettled(ctx, counts, nil)
+}
+
+// waitProxySettled is WaitProxySettled; accepting, when set, is told the
+// count of accepts the wait then waits for, before it waits for them (the
+// settle's watchdog weighs those accepts only: settle).
+func (a *Agent) waitProxySettled(ctx context.Context, counts models.ProxyConnCounts, accepting func(n uint64)) error {
 	h, _, err := a.proxyConnSides()
 	if err != nil {
 		return err
@@ -104,7 +111,11 @@ func (a *Agent) WaitProxySettled(ctx context.Context, counts models.ProxyConnCou
 	if err != nil {
 		return err
 	}
-	if err := a.WaitProxyAccepted(ctx, max(now.Established, counts.Established)); err != nil {
+	accepts := max(now.Established, counts.Established)
+	if accepting != nil {
+		accepting(accepts)
+	}
+	if err := a.WaitProxyAccepted(ctx, accepts); err != nil {
 		return err
 	}
 	// Every paired connection is now the proxy's: the bytes written to them.

@@ -367,6 +367,19 @@ type IncomingOptions struct {
 	BasePath string
 }
 
+// AppDNS is an app container's resolver settings, as docker run takes them:
+// name servers (IP addresses), search domains and resolver options.
+type AppDNS struct {
+	Servers []string
+	Search  []string
+	Options []string
+}
+
+// Empty says the app set none of its own.
+func (d AppDNS) Empty() bool {
+	return len(d.Servers) == 0 && len(d.Search) == 0 && len(d.Options) == 0
+}
+
 type SetupOptions struct {
 	ClientNSPID uint32
 	// ClientPIDNS is the pid namespace keploy's CLI said it runs in, beside
@@ -417,6 +430,10 @@ type SetupOptions struct {
 	// kernel's count before it listens. Forwarded as --settle-reads.
 	SettleReads       bool
 	GlobalPassthrough bool
+	// AllowEgress mirrors config.Test.AllowEgress: what a replay may reach for
+	// real, by the entries models.NormalizeAllowEgress accepts. Forwarded to the
+	// agent as --allow-egress; record ignores it.
+	AllowEgress []string
 	// DisableHandshakeHold turns off holding each redirected connection's
 	// handshake until its destination answers (pkg/agent/proxy/synhold), so
 	// the proxy accepts every connection at once as it used to. Forwarded to
@@ -458,6 +475,15 @@ type SetupOptions struct {
 	// from the /etc/hosts it shares with it. A compose service's extra_hosts
 	// are moved onto the keploy-agent service instead (ModifyComposeForAgent).
 	AppExtraHosts []string
+	// AppDNS is the app's own resolver settings (docker run --dns,
+	// --dns-search, --dns-option; a container's DNS, DNSSearch and
+	// DNSOptions). Under the agent container's network mode Docker refuses
+	// DNS servers of the app's own ("conflicting options: dns and the network
+	// mode") and ignores its search list and options: the app shares the
+	// agent container's /etc/resolv.conf. So the agent container carries
+	// them. A compose service's dns, dns_search and dns_opt are moved onto the
+	// keploy-agent service instead (ModifyComposeForAgent).
+	AppDNS AppDNS
 	// HostGateway says the daemon resolves the address host-gateway (Docker
 	// Engine 20.10, API 1.41; Podman 4.7): the agent container then maps
 	// host.docker.internal to it, as Docker Desktop does for every container,

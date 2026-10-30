@@ -1,8 +1,6 @@
 package proxy
 
 import (
-	"bytes"
-	"encoding/gob"
 	"fmt"
 	"os"
 	"sort"
@@ -15,9 +13,11 @@ import (
 	"go.uber.org/zap"
 )
 
-// DiskMocks parks per-test mocks on the agent's local disk and loads only the
-// mocks a given test needs (its request-time window) on demand, so resident RAM
-// is O(config/startup + one window) instead of the whole delivered pool.
+// DiskMocks keeps per-test mocks encoded, the first residentBudgetBytes of
+// them in memory and the rest on the agent's local disk, and decodes only the
+// mocks a given test needs (its request-time window) on demand, so resident
+// RAM is O(config/startup + the budget + one window) instead of the whole
+// delivered pool decoded.
 type DiskMocks struct {
 	mu       sync.Mutex
 	f        *os.File
@@ -48,8 +48,9 @@ type DiskMocks struct {
 	placed []diskEntry
 
 	// destinations is, for each recorded destination a mock on disk reached
-	// (destinationKey), the entry of the first one recorded
-	// (LoadDestinations). One entry per destination, resident.
+	// (destinationKey) and, under the proven switch, each port one reached
+	// (reachedPortKey), the entry of the first one recorded
+	// (LoadDestinations). One entry per destination and port, resident.
 	destinations map[string]diskEntry
 
 	// statements is the statement catalog: for each statement a mock on disk
@@ -72,9 +73,26 @@ type DiskMocks struct {
 	// (kindOf); kept under the proven switch only.
 	byKind map[models.Kind][]string
 	kindOf map[string]models.Kind
+
+	// phase names the mocks on disk that are protocol-phase
+	// (models.Mock.IsProtocolPhase at Add): few, so only those are listed
+	// (RangeTimes); kept under the proven switch only. nil while none is.
+	phase map[string]bool
+
+	// budget is how many bytes of records the store keeps in memory
+	// (residentBudgetBytes); the first records up to it stay there, in mem by
+	// offset, and once one does not fit, it and every record after it go to
+	// the file, at their offset less memEnd.
+	budget int64
+	mem    map[int64][]byte
+	memEnd int64
+
+	// records decodes what the store reads, with decoders that live as long
+	// as it does (gobRecords).
+	records gobRecords
 }
 
-// diskEntry locates one on-disk mock: 48 B, held in entries and byName and in
+// diskEntry locates one stored mock: 48 B, held in entries and byName and in
 // each index that lists the mock (carry, staged, placed, destinations,
 // statements).
 // For spilled HTTP/Mongo mocks the response is a separate blob at
@@ -93,9 +111,15 @@ type diskEntry struct {
 	respLen     int
 }
 
-// responseSpillMinBytes: only elide HTTP bodies at least this big; smaller ones
-// stay inline (a serve-time disk read isn't worth it). Mongo always spills.
+// responseSpillMinBytes: only answers at least this big are kept apart from
+// their mock (an HTTP body, or the Mongo responses as encoded); smaller ones
+// stay inline, decoded with the mock, as reading one apart on each serve costs
+// more than it saves.
 const responseSpillMinBytes = 8 * 1024
+
+// residentBudgetBytes is how many bytes of encoded records a store keeps in
+// memory before it writes the rest to its file.
+const residentBudgetBytes = 64 << 20
 
 // spilledResponse is the elided response payload, stored apart from the mock so
 // the resident window holds only matchers. Exactly one field is populated.
@@ -104,8 +128,15 @@ type spilledResponse struct {
 	Mongo []models.MongoResponse
 }
 
-// NewDiskMocks creates the store over a fresh temp file; caller must Close it.
+// NewDiskMocks creates the store over a fresh temp file, keeping up to
+// residentBudgetBytes of records in memory; caller must Close it.
 func NewDiskMocks(logger *zap.Logger) (*DiskMocks, error) {
+	return newDiskMocks(logger, residentBudgetBytes)
+}
+
+// newDiskMocks is NewDiskMocks keeping up to budget bytes of records in
+// memory.
+func newDiskMocks(logger *zap.Logger, budget int64) (*DiskMocks, error) {
 	f, err := os.CreateTemp("", "keploy-diskmocks-*.gob")
 	if err != nil {
 		return nil, fmt.Errorf("disk mocks: create temp file: %w", err)
@@ -115,10 +146,12 @@ func NewDiskMocks(logger *zap.Logger) (*DiskMocks, error) {
 		path = ""
 	}
 	return &DiskMocks{
-		f:      f,
-		path:   path,
-		byName: make(map[string]diskEntry),
-		logger: logger,
+		f:       f,
+		path:    path,
+		byName:  make(map[string]diskEntry),
+		logger:  logger,
+		budget:  budget,
+		records: newGobRecords(),
 	}, nil
 }
 
@@ -137,8 +170,10 @@ func EligibleForDisk(m *models.Mock) bool {
 	return true
 }
 
-// EligibleForResponseSpill reports whether a disk-eligible mock has a big
-// HTTP/Mongo response worth eliding from the window (matching never reads it).
+// EligibleForResponseSpill reports whether a disk-eligible mock's HTTP/Mongo
+// response may be worth eliding from the window (matching never reads it): an
+// HTTP body of responseSpillMinBytes or more, or any Mongo responses, which
+// Add keeps apart only when they encode to responseSpillMinBytes or more.
 func EligibleForResponseSpill(m *models.Mock) bool {
 	if !EligibleForDisk(m) {
 		return false
@@ -152,42 +187,43 @@ func EligibleForResponseSpill(m *models.Mock) bool {
 	return false
 }
 
-// Add writes a mock to disk and indexes it; caller drops its resident ref after.
-// Spill-eligible mocks write their response as a separate blob and encode the
-// record with the response elided. Called from the single-threaded ingest loop.
+// Add stores a mock and indexes it; caller drops its resident ref after.
+// A mock with a big answer (EligibleForResponseSpill, and for Mongo
+// responses that encode to responseSpillMinBytes or more) has its answer
+// written as a separate blob and the record encoded with it elided. Called
+// from the single-threaded ingest loop.
 func (d *DiskMocks) Add(m *models.Mock) error {
 	spill := EligibleForResponseSpill(m)
-
-	var respBlob []byte
-	if spill {
-		var rb bytes.Buffer
-		sr := spilledResponse{HTTP: m.Spec.HTTPResp, Mongo: m.Spec.MongoResponses}
-		if err := gob.NewEncoder(&rb).Encode(&sr); err != nil {
-			return fmt.Errorf("disk mocks: encode response %q: %w", m.Name, err)
-		}
-		respBlob = rb.Bytes()
-	}
-
-	// Fresh encoder per record → each is self-contained and decodable via ReadAt.
-	var buf bytes.Buffer
-	if spill {
-		// Elide the response for encoding, then restore (caller drops m anyway).
-		httpResp, mongoResp := m.Spec.HTTPResp, m.Spec.MongoResponses
-		m.Spec.HTTPResp, m.Spec.MongoResponses = nil, nil
-		err := gob.NewEncoder(&buf).Encode(m)
-		m.Spec.HTTPResp, m.Spec.MongoResponses = httpResp, mongoResp
-		if err != nil {
-			return fmt.Errorf("disk mocks: encode %q: %w", m.Name, err)
-		}
-	} else if err := gob.NewEncoder(&buf).Encode(m); err != nil {
-		return fmt.Errorf("disk mocks: encode %q: %w", m.Name, err)
-	}
 
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.closed {
 		return fmt.Errorf("disk mocks: store closed")
 	}
+	var respBlob []byte
+	if spill {
+		sr := spilledResponse{HTTP: m.Spec.HTTPResp, Mongo: m.Spec.MongoResponses}
+		b, err := d.records.encodeLocked(&sr, true, d.offset, d.writeLocked)
+		if err != nil {
+			return fmt.Errorf("disk mocks: encode response %q: %w", m.Name, err)
+		}
+		respBlob = b
+		if m.Kind == models.Mongo && len(respBlob) < responseSpillMinBytes {
+			spill, respBlob = false, nil
+		}
+	}
+
+	// Elide a spilled response for encoding, then restore (caller drops m anyway).
+	httpResp, mongoResp := m.Spec.HTTPResp, m.Spec.MongoResponses
+	if spill {
+		m.Spec.HTTPResp, m.Spec.MongoResponses = nil, nil
+	}
+	rec, err := d.records.encodeLocked(m, false, d.offset, d.writeLocked)
+	m.Spec.HTTPResp, m.Spec.MongoResponses = httpResp, mongoResp
+	if err != nil {
+		return fmt.Errorf("disk mocks: encode %q: %w", m.Name, err)
+	}
+
 	respOff := int64(-1)
 	respLen := 0
 	if spill {
@@ -197,7 +233,7 @@ func (d *DiskMocks) Add(m *models.Mock) error {
 		}
 		respOff, respLen = off, n
 	}
-	off, n, err := d.writeLocked(buf.Bytes())
+	off, n, err := d.writeLocked(rec)
 	if err != nil {
 		return fmt.Errorf("disk mocks: write %q: %w", m.Name, err)
 	}
@@ -219,6 +255,18 @@ func (d *DiskMocks) Add(m *models.Mock) error {
 			d.kindOf[m.Name] = m.Kind
 		}
 	}
+	// The teardown bound reads which are protocol-phase (RangeTimes), under
+	// the proven switch only.
+	if provenswitch.On() {
+		if m.IsProtocolPhase() {
+			if d.phase == nil {
+				d.phase = make(map[string]bool)
+			}
+			d.phase[m.Name] = true
+		} else {
+			delete(d.phase, m.Name)
+		}
+	}
 	for _, k := range models.RequestKeys(m) {
 		if d.byKey == nil {
 			d.byKey = make(map[string][]string)
@@ -234,7 +282,18 @@ func (d *DiskMocks) Add(m *models.Mock) error {
 	if models.IsAnswerPlaced(m) {
 		d.placed = append(d.placed, e)
 	}
-	if k := destinationKey(m); k != "" {
+	// Under the proven switch the store also keeps the first mock of each
+	// port the recording reached (reachedPortKey), for the loopback rules
+	// keploy mock replay reads (recordedPorts.seed): its staging reads only
+	// what was recorded before the set's first test.
+	keys := []string{destinationKey(m)}
+	if provenswitch.On() {
+		keys = append(keys, reachedPortKey(m))
+	}
+	for _, k := range keys {
+		if k == "" {
+			continue
+		}
 		if first, ok := d.destinations[k]; !ok || e.reqTsNano < first.reqTsNano {
 			if d.destinations == nil {
 				d.destinations = make(map[string]diskEntry)
@@ -255,15 +314,53 @@ func (d *DiskMocks) Add(m *models.Mock) error {
 	return nil
 }
 
-// writeLocked appends b at the running offset and advances it. Caller holds mu.
+// writeLocked appends b at the running offset and advances it: in memory
+// while the records so far and b fit the budget, else to the file, and so is
+// every record after it, as the offset only grows. The store keeps b, which
+// nothing may change after. Caller holds mu.
 func (d *DiskMocks) writeLocked(b []byte) (int64, int, error) {
 	off := d.offset
-	n, err := d.f.WriteAt(b, off)
+	if off+int64(len(b)) <= d.budget {
+		if d.mem == nil {
+			d.mem = make(map[int64][]byte)
+		}
+		d.mem[off] = b
+		d.offset += int64(len(b))
+		d.memEnd = d.offset
+		return off, len(b), nil
+	}
+	n, err := d.f.WriteAt(b, off-d.memEnd)
 	if err != nil {
 		return 0, 0, err
 	}
 	d.offset += int64(n)
 	return off, n, nil
+}
+
+// bytesAt returns the n bytes stored at off: the record itself while it is
+// kept in memory (never changed, so it is read without a copy), else read
+// from the file, which nothing writes again once written.
+func (d *DiskMocks) bytesAt(off int64, n int) ([]byte, error) {
+	d.mu.Lock()
+	if d.closed {
+		d.mu.Unlock()
+		return nil, fmt.Errorf("disk mocks: store closed")
+	}
+	if off < d.memEnd {
+		b, ok := d.mem[off]
+		d.mu.Unlock()
+		if !ok || len(b) != n {
+			return nil, fmt.Errorf("disk mocks: no record of %d bytes at %d", n, off)
+		}
+		return b, nil
+	}
+	f, fileOff := d.f, off-d.memEnd
+	d.mu.Unlock()
+	buf := make([]byte, n)
+	if _, err := f.ReadAt(buf, fileOff); err != nil {
+		return nil, err
+	}
+	return buf, nil
 }
 
 // Finalize sorts the index and the answer-placed one by place
@@ -283,19 +380,20 @@ func (d *DiskMocks) Finalize() {
 	d.finalize = true
 }
 
-// readAt decodes the mock at an entry. The file is immutable after Finalize, so
-// ReadAt is concurrency-safe. Elided responses get a lazy serve-time loader.
+// readAt decodes the mock at an entry, into a mock of its own (gobRecords).
+// Stored records never change, so reads are concurrency-safe. Elided
+// responses get a lazy serve-time loader.
 func (d *DiskMocks) readAt(e diskEntry) (*models.Mock, error) {
-	buf := make([]byte, e.length)
-	if _, err := d.f.ReadAt(buf, e.off); err != nil {
+	buf, err := d.bytesAt(e.off, e.length)
+	if err != nil {
 		return nil, fmt.Errorf("disk mocks: read at %d: %w", e.off, err)
 	}
-	var m models.Mock
-	if err := gob.NewDecoder(bytes.NewReader(buf)).Decode(&m); err != nil {
+	m, err := decodeRecord[models.Mock](d, e.off, buf)
+	if err != nil {
 		return nil, fmt.Errorf("disk mocks: decode at %d: %w", e.off, err)
 	}
 	if f := d.onLoad.Load(); f != nil {
-		(*f)(&m)
+		(*f)(m)
 	}
 	if e.respOff >= 0 {
 		respOff, respLen := e.respOff, e.respLen
@@ -303,8 +401,12 @@ func (d *DiskMocks) readAt(e diskEntry) (*models.Mock, error) {
 			return d.loadResponse(respOff, respLen)
 		})
 	}
-	return &m, nil
+	return m, nil
 }
+
+// DecodersBuilt returns how many gob decoders the store has made to read
+// what it holds (gobRecords; diagnostics/tests).
+func (d *DiskMocks) DecodersBuilt() int64 { return d.records.built.Load() }
 
 // SetOnLoad has f applied to every mock the store reads from now on, as it is
 // decoded, before any caller holds it: the agent puts on them what a test
@@ -320,19 +422,12 @@ func (d *DiskMocks) SetOnLoad(f func(*models.Mock)) {
 
 // loadResponse reads and decodes an elided response blob on demand at serve.
 func (d *DiskMocks) loadResponse(off int64, length int) (*models.HTTPResp, []models.MongoResponse, error) {
-	d.mu.Lock()
-	closed := d.closed
-	f := d.f
-	d.mu.Unlock()
-	if closed {
-		return nil, nil, fmt.Errorf("disk mocks: store closed")
-	}
-	buf := make([]byte, length)
-	if _, err := f.ReadAt(buf, off); err != nil {
+	buf, err := d.bytesAt(off, length)
+	if err != nil {
 		return nil, nil, fmt.Errorf("disk mocks: read response at %d: %w", off, err)
 	}
-	var sr spilledResponse
-	if err := gob.NewDecoder(bytes.NewReader(buf)).Decode(&sr); err != nil {
+	sr, err := decodeRecord[spilledResponse](d, off, buf)
+	if err != nil {
 		return nil, nil, fmt.Errorf("disk mocks: decode response at %d: %w", off, err)
 	}
 	return sr.HTTP, sr.Mongo, nil
@@ -582,9 +677,11 @@ func (d *DiskMocks) LoadStatements() ([]*models.Mock, error) {
 }
 
 // LoadDestinations returns, in recorded order, the first mock on disk of
-// each recorded destination (destinationKey): what the recording says of its
-// destinations, bounded by how many it reached, for the proxy's destination
-// rules to read before any of them is staged (Proxy.SeedRecordedDestinations).
+// each recorded destination (destinationKey) and, under the proven switch, of
+// each port the recording reached (reachedPortKey), each mock once: what the
+// recording says of its destinations, bounded by how many it reached, for the
+// proxy's destination rules to read before any of them is staged
+// (Proxy.SeedRecordedDestinations).
 func (d *DiskMocks) LoadDestinations() ([]*models.Mock, error) {
 	d.mu.Lock()
 	if d.closed {
@@ -592,8 +689,13 @@ func (d *DiskMocks) LoadDestinations() ([]*models.Mock, error) {
 		return nil, fmt.Errorf("disk mocks: store closed")
 	}
 	sel := make([]diskEntry, 0, len(d.destinations))
+	seen := make(map[int64]bool, len(d.destinations))
 	for _, e := range d.destinations {
-		sel = append(sel, e)
+		// One mock may be the first of a destination and of a port.
+		if !seen[e.off] {
+			seen[e.off] = true
+			sel = append(sel, e)
+		}
 	}
 	d.mu.Unlock()
 	sort.Slice(sel, func(i, j int) bool {
@@ -701,6 +803,29 @@ func (d *DiskMocks) RangeKind(kind models.Kind, visit func(name string, load fun
 	return nil
 }
 
+// RangeTimes calls visit with every mock on disk, each once, in no order:
+// its name, its request and answer times, and whether it is protocol-phase
+// (models.Mock.IsProtocolPhase; told under the proven switch only, the only
+// one the teardown bound reads it under), until visit returns false. Nothing is
+// decoded: the times are the store's own, kept as each mock was added. It
+// is what bounds a set's teardown under keploy mock replay
+// (MockManager.SetRecordingTimes): the latest recording of the set's tests,
+// which the staging does not read. visit runs under the store's lock, so it
+// must not call the store.
+func (d *DiskMocks) RangeTimes(visit func(name string, req, res time.Time, protocolPhase bool) bool) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.closed {
+		return fmt.Errorf("disk mocks: store closed")
+	}
+	for name, e := range d.byName {
+		if !visit(name, time.Unix(0, e.reqTsNano), time.Unix(0, e.resTsNano), d.phase[name]) {
+			return nil
+		}
+	}
+	return nil
+}
+
 // diskKey is the byKey index of kind and request key.
 func diskKey(kind models.Kind, key string) string { return string(kind) + "\x00" + key }
 
@@ -772,7 +897,15 @@ func (d *DiskMocks) SpilledResponses() int {
 func (d *DiskMocks) DiskBytes() int64 {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return d.offset
+	return d.offset - d.memEnd
+}
+
+// ResidentBytes returns the bytes of records kept in memory, at most the
+// store's budget (diagnostics/tests).
+func (d *DiskMocks) ResidentBytes() int64 {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.memEnd
 }
 
 // Close closes and removes the temp file. Idempotent; later ops then fail.
@@ -783,6 +916,7 @@ func (d *DiskMocks) Close() error {
 		return nil
 	}
 	d.closed = true
+	d.mem = nil
 	var firstErr error
 	if d.f != nil {
 		if err := d.f.Close(); err != nil {

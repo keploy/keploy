@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"go.keploy.io/server/v3/pkg/agent/containerkey"
 	"go.keploy.io/server/v3/pkg/agent/starts"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -18,8 +19,9 @@ import (
 // selfSource is how the sink names this test's own process (a call from its
 // pid): its comm, and its program as keploy names one (starts.ProcessOf: a
 // test binary the go tool built by its go test, else argv[0], redacted),
-// where kernel pids are keploy's own (utils.KernelPidsAreLocal); else no
-// name, why, and the pid. The comm is read here from /proc; how a program is
+// with, only to travel to keploy mock's receipt, its pid and its whole
+// command line, redacted (containerkey.RedactArgs), where kernel pids are
+// keploy's own (utils.KernelPidsAreLocal); else no name, why, and the pid. The comm is read here from /proc; how a program is
 // named is starts' to pin (TestAGoTestBinaryIsNamedByItsGoTest), and this
 // row pins only that the sink names the call's process.
 func selfSource(t *testing.T) models.Origin {
@@ -36,7 +38,12 @@ func selfSource(t *testing.T) models.Origin {
 	if !ok || exe == "" {
 		t.Fatalf("keploy names no program of this process (pid %d)", pid)
 	}
-	return models.Origin{Comm: strings.TrimSpace(string(comm)), Exe: exe}
+	raw, err := os.ReadFile("/proc/self/cmdline")
+	if err != nil {
+		t.Skipf("no /proc/self/cmdline: %v", err)
+	}
+	argv := strings.Split(strings.TrimSuffix(string(raw), "\x00"), "\x00")
+	return models.Origin{Comm: strings.TrimSpace(string(comm)), Exe: exe, PID: pid, Cmdline: strings.Join(containerkey.RedactArgs(argv), " ")}
 }
 
 // The sink names the process that made each call it is told of, a miss and
@@ -58,7 +65,7 @@ func TestTheSinkNamesTheProcessOfEachCallUnderTheSwitchOnly(t *testing.T) {
 		}
 		p := &Proxy{logger: zap.NewNop(), errChannel: make(chan error, 8)}
 		p.BeginTestErrorCapture()
-		ctx := models.WithMockMismatchReporter(context.Background(), func(err error) { p.sendMockNotFoundErrorFrom(err, self) })
+		ctx := models.WithMockMismatchReporter(context.Background(), func(err error) { p.sendMockNotFoundErrorFrom(err, self, nil) })
 		if !models.ReportMockMismatch(ctx, models.NewMockMismatchError(models.ErrNoMockMatched, &models.MockMismatchReport{Protocol: "MongoDB", ActualSummary: "insert on events"})) {
 			t.Fatal("the miss was not reported")
 		}

@@ -3,10 +3,13 @@ package replayer
 import (
 	"context"
 	"fmt"
+	"sync"
+	"sync/atomic"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
-	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/schemanoise"
+	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.uber.org/zap"
 )
@@ -15,7 +18,7 @@ import (
 // tests, which run it against the real mock manager. With fullScan every
 // command scans the whole pool: the reference the first passes are checked
 // against. The miss diagnostics come back as text.
-func MatchCommandForTest(ctx context.Context, logger *zap.Logger, req mysql.Request, db integrations.MockMemDb, dctx *wire.DecodeContext, eng *schemanoise.Engine, fullScan bool) (*mysql.Response, bool, string, error) {
+func MatchCommandForTest(ctx context.Context, logger *zap.Logger, req mysql.Request, db integrations.MockMemDb, dctx *wire.DecodeContext, eng *mocknoise.Engine, fullScan bool) (*mysql.Response, bool, string, error) {
 	resp, ok, miss, err := matchCommandWith(ctx, logger, req, db, dctx, eng, nil, matchOptions{fullScan: fullScan})
 	missText := ""
 	if miss != nil {
@@ -24,11 +27,37 @@ func MatchCommandForTest(ctx context.Context, logger *zap.Logger, req mysql.Requ
 	return resp, ok, missText, err
 }
 
+// MatchExaminedForTest is MatchCommandForTest's match (no full scan) that
+// also returns how many candidates the scan visited (matchOptions.examined).
+func MatchExaminedForTest(ctx context.Context, logger *zap.Logger, req mysql.Request, db integrations.MockMemDb, dctx *wire.DecodeContext) (*mysql.Response, bool, int, error) {
+	examined := 0
+	resp, ok, _, err := matchCommandWith(ctx, logger, req, db, dctx, nil, nil, matchOptions{examined: &examined})
+	return resp, ok, examined, err
+}
+
 // MatchForTest is the command phase's match of one command
 // (matchCommand), as simulateCommandPhase runs it for each command it reads.
 // The miss comes back as text.
 func MatchForTest(ctx context.Context, logger *zap.Logger, req mysql.Request, db integrations.MockMemDb, dctx *wire.DecodeContext) (*mysql.Response, bool, string, error) {
-	resp, ok, miss, err := matchCommand(ctx, logger, req, db, dctx, nil, nil)
+	return MatchWithEngineForTest(ctx, logger, req, db, dctx, nil)
+}
+
+// MatchWithEngineForTest is MatchForTest with the schema-noise engine eng
+// (StrictEngineForTest: strict enforcement).
+func MatchWithEngineForTest(ctx context.Context, logger *zap.Logger, req mysql.Request, db integrations.MockMemDb, dctx *wire.DecodeContext, eng *mocknoise.Engine) (*mysql.Response, bool, string, error) {
+	resp, ok, miss, err := matchCommand(ctx, logger, req, db, dctx, eng, nil)
+	missText := ""
+	if miss != nil {
+		missText = fmt.Sprintf("%+v", *miss)
+	}
+	return resp, ok, missText, err
+}
+
+// MatchWithNoiseConfigForTest is MatchForTest with the user's noise
+// configuration (test.globalNoise), its requestBody bucket read as the
+// command phase reads it (requestBodyNoise).
+func MatchWithNoiseConfigForTest(ctx context.Context, logger *zap.Logger, req mysql.Request, db integrations.MockMemDb, dctx *wire.DecodeContext, cfg map[string]map[string][]string) (*mysql.Response, bool, string, error) {
+	resp, ok, miss, err := matchCommand(ctx, logger, req, db, dctx, nil, requestBodyNoise(cfg))
 	missText := ""
 	if miss != nil {
 		missText = fmt.Sprintf("%+v", *miss)
@@ -38,6 +67,97 @@ func MatchForTest(ctx context.Context, logger *zap.Logger, req mysql.Request, db
 
 // StrictEngineForTest is the schema-noise engine matchCommand runs with under
 // strict enforcement.
-func StrictEngineForTest() *schemanoise.Engine {
-	return schemanoise.New(mysqlNoiseAdapter{}, false, true)
+func StrictEngineForTest() *mocknoise.Engine {
+	return mocknoise.New(mysqlNoiseAdapter{}, false, true)
+}
+
+// MatchCommandExaminedForTest is MatchCommandForTest that also returns how
+// many candidates the scan visited (matchOptions.examined).
+func MatchCommandExaminedForTest(ctx context.Context, req mysql.Request, db integrations.MockMemDb, dctx *wire.DecodeContext, eng *mocknoise.Engine, fullScan bool) (*mysql.Response, bool, int, error) {
+	examined := 0
+	resp, ok, _, err := matchCommandWith(ctx, zap.NewNop(), req, db, dctx, eng, nil, matchOptions{fullScan: fullScan, examined: &examined})
+	return resp, ok, examined, err
+}
+
+// MatchCommandBodiesForTest is MatchCommandForTest that also returns how many
+// live request bodies the command built (matchOptions.bodiesBuilt). With eager
+// it builds the body before the scan, as the matcher did before it built the
+// body on first read (matchOptions.eagerBody).
+func MatchCommandBodiesForTest(ctx context.Context, logger *zap.Logger, req mysql.Request, db integrations.MockMemDb, dctx *wire.DecodeContext, eng *mocknoise.Engine, eager bool) (*mysql.Response, bool, string, int, error) {
+	built := 0
+	resp, ok, miss, err := matchCommandWith(ctx, logger, req, db, dctx, eng, nil, matchOptions{bodiesBuilt: &built, eagerBody: eager})
+	missText := ""
+	if miss != nil {
+		missText = fmt.Sprintf("%+v", *miss)
+	}
+	return resp, ok, missText, built, err
+}
+
+// NoiseEngineForTest is the schema-noise engine matchCommand runs with, with
+// detection (auto-replay learning request-body noise) and strict enforcement
+// on or off.
+func NoiseEngineForTest(detection, strict bool) *mocknoise.Engine {
+	return mocknoise.New(mysqlNoiseAdapter{}, detection, strict)
+}
+
+// ConfigTagReadsForTest runs fn and returns how many times it read a mock's
+// config tag (hasConfigTag), a map lookup on the mock's metadata.
+func ConfigTagReadsForTest(fn func()) int {
+	var n atomic.Int64
+	h := func() { n.Add(1) }
+	configTagReadHook.Store(&h)
+	defer configTagReadHook.Store(nil)
+	fn()
+	return int(n.Load())
+}
+
+// CountStatementKeysForTest runs f and returns how many times a mock's
+// statement keys (preparedIndex's, queryIndex's or executeIndex's) were
+// computed meanwhile, by the store's indexes or by a walk, and how many keys
+// of each kind they filed, by the key's first byte: P (a PREPARE), S (a
+// PREPARE's entry), C (a CLOSE), Q (a COM_QUERY) or E (an EXECUTE). f must
+// not run matches on other goroutines past its return.
+func CountStatementKeysForTest(f func()) (int, map[string]int) {
+	var (
+		mu     sync.Mutex
+		calls  int
+		filed  = map[string]int{}
+		counts = func(keys func(*models.Mock) []string) func(*models.Mock) []string {
+			return func(m *models.Mock) []string {
+				ks := keys(m)
+				mu.Lock()
+				calls++
+				for _, k := range ks {
+					filed[k[:1]]++
+				}
+				mu.Unlock()
+				return ks
+			}
+		}
+	)
+	for _, ix := range []*integrations.MockIndex{preparedIndex, queryIndex, executeIndex} {
+		keys := ix.Keys
+		ix.Keys = counts(keys)
+		defer func() { ix.Keys = keys }()
+	}
+	f()
+	mu.Lock()
+	defer mu.Unlock()
+	return calls, filed
+}
+
+// CountUnnamedExecKeysForTest runs f and returns how many times a mock's
+// unnamedExecIndex keys were computed meanwhile, by the store's indexes or by
+// an exact view's index of the mocks it owns. f must not run matches on other
+// goroutines past its return.
+func CountUnnamedExecKeysForTest(f func()) int {
+	var n atomic.Int64
+	keys := unnamedExecIndex.Keys
+	unnamedExecIndex.Keys = func(m *models.Mock) []string {
+		n.Add(1)
+		return keys(m)
+	}
+	defer func() { unnamedExecIndex.Keys = keys }()
+	f()
+	return int(n.Load())
 }

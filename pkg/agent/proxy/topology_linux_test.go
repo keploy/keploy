@@ -3,14 +3,20 @@
 package proxy
 
 import (
+	"bufio"
+	"bytes"
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -18,12 +24,17 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/containerkey"
+	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	httpint "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql"
 	"go.keploy.io/server/v3/pkg/agent/proxy/internal/testnet"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/agent/starts"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // rowSink is a TopologySink that keeps what it is told.
@@ -152,8 +163,8 @@ func hold(t *testing.T) *exec.Cmd {
 
 func provenTreeProxy(t *testing.T) (*Proxy, *rowSink) {
 	t.Helper()
-	recorded.reset()
-	t.Cleanup(recorded.reset)
+	recorded.forget()
+	t.Cleanup(recorded.forget)
 	t.Setenv("KEPLOY_PROVEN", "1")
 	p := selfCallProxy()
 	s := &rowSink{}
@@ -464,8 +475,8 @@ func TestUnderTheSwitchAppMarkingDoesNotMakeATreeListenerADependency(t *testing.
 	}
 	port := pingServer(t)
 
-	recorded.reset()
-	t.Cleanup(recorded.reset)
+	recorded.forget()
+	t.Cleanup(recorded.forget)
 	t.Setenv("KEPLOY_PROVEN", "")
 	if served, _, _ := callTree(t, selfCallProxy(), port, uint32(os.Getppid())); served {
 		t.Fatal("with the switch off a dependency by app marking stays on the mock path")
@@ -737,8 +748,8 @@ func TestUnderTheSwitchACallToAnAppTheCallerStartedIsLiveThroughTheLiveHandler(t
 
 // With the switch off nothing is told, whatever the call.
 func TestOffTheSwitchNoRowIsTold(t *testing.T) {
-	recorded.reset()
-	t.Cleanup(recorded.reset)
+	recorded.forget()
+	t.Cleanup(recorded.forget)
 	t.Setenv("KEPLOY_PROVEN", "")
 	s := &rowSink{}
 	p := selfCallProxy()
@@ -787,8 +798,8 @@ func TestHandleConnectionListsAMockedLocalDestinationOnlyWhenItIsMocked(t *testi
 		{models.MODE_RECORD, false, false, false}, {models.MODE_RECORD, true, false, false}, {models.MODE_RECORD, false, true, false},
 	} {
 		t.Run(fmt.Sprintf("%s/passthrough=%v/container=%v/unread=%v", tc.mode, tc.passthrough, tc.container, tc.unread), func(t *testing.T) {
-			recorded.reset()
-			t.Cleanup(recorded.reset)
+			recorded.forget()
+			t.Cleanup(recorded.forget)
 			t.Setenv("KEPLOY_PROVEN", "1")
 			upstream, _, _ := echoUpstream(t)
 			saved := containerkey.Default
@@ -826,7 +837,10 @@ func TestHandleConnectionListsAMockedLocalDestinationOnlyWhenItIsMocked(t *testi
 			defer cancel()
 			done := make(chan error, 1)
 			go func() { done <- p.handleConnection(ctx, src) }()
-			if _, err := app.Write([]byte("ping")); err != nil {
+			// A line: keploy decides what the connection is (TLS or not,
+			// and so whether a bypassRule passes it through) from its first
+			// five bytes, and lists it only then.
+			if _, err := app.Write([]byte("ping\n")); err != nil {
 				t.Fatal(err)
 			}
 			if tc.passthrough {
@@ -861,7 +875,7 @@ func TestHandleConnectionListsAMockedLocalDestinationOnlyWhenItIsMocked(t *testi
 			}
 			_ = app.Close()
 			cancel()
-			awaitEvent(t, done, "handleConnection returning")
+			_ = awaitEvent(t, done, "handleConnection returning")
 		})
 	}
 }
@@ -877,8 +891,8 @@ func TestHandleConnectionNeverListsARealDestinationMocked(t *testing.T) {
 		container bool
 	}{{models.MODE_TEST, false}, {models.MODE_TEST, true}, {models.MODE_RECORD, false}, {models.MODE_RECORD, true}} {
 		t.Run(fmt.Sprintf("%s/container=%v", tc.mode, tc.container), func(t *testing.T) {
-			recorded.reset()
-			t.Cleanup(recorded.reset)
+			recorded.forget()
+			t.Cleanup(recorded.forget)
 			t.Setenv("KEPLOY_PROVEN", "1")
 			upstream, _, _ := echoUpstream(t)
 			saved := containerkey.Default
@@ -922,7 +936,7 @@ func TestHandleConnectionNeverListsARealDestinationMocked(t *testing.T) {
 				t.Fatalf("the REAL relay carried %q, want the real echo %q", got, "ping")
 			}
 			_ = app.Close()
-			awaitEvent(t, done, "handleConnection returning")
+			_ = awaitEvent(t, done, "handleConnection returning")
 			select {
 			case r := <-sink.mocked:
 				t.Fatalf("a REAL destination was listed mocked: %+v", r)
@@ -930,6 +944,717 @@ func TestHandleConnectionNeverListsARealDestinationMocked(t *testing.T) {
 			}
 			if got := p.RealRun().Reached; len(got) != 1 {
 				t.Fatalf("the REAL destination was not reached: %v", got)
+			}
+		})
+	}
+}
+
+// Under the proven switch a local destination a bypassRule passes through is
+// reached for real, so it is never listed mocked, in a record as in a replay:
+// a plain connection that shows no host for a host rule on its port, a
+// server-first (MySQL, in a replay) one, and a TLS one to the server a host
+// rule names. A connection on the same port that no rule passes through is
+// still listed (keploy test, a rule for another port).
+func TestHandleConnectionNeverListsADestinationABypassRulePassesThroughMocked(t *testing.T) {
+	tlsWrap := func(ln net.Listener) net.Listener {
+		return tls.NewListener(ln, &tls.Config{Certificates: []tls.Certificate{selfSignedForDispatch(t)}})
+	}
+	type kind int
+	const (
+		plain kind = iota
+		greeted
+		overTLS
+	)
+	for _, tc := range []struct {
+		mode    models.Mode
+		kind    kind
+		rule    func(port uint) models.BypassRule
+		through bool
+	}{
+		{models.MODE_TEST, plain, func(port uint) models.BypassRule { return models.BypassRule{Host: "db.internal", Port: port} }, true},
+		{models.MODE_TEST, greeted, func(port uint) models.BypassRule { return models.BypassRule{Host: "db.internal", Port: port} }, true},
+		{models.MODE_TEST, overTLS, func(port uint) models.BypassRule { return models.BypassRule{Host: "^localhost$", Port: port} }, true},
+		{models.MODE_TEST, plain, func(port uint) models.BypassRule { return models.BypassRule{Host: "db.internal", Port: port + 1} }, false},
+		{models.MODE_RECORD, plain, func(port uint) models.BypassRule { return models.BypassRule{Host: "db.internal", Port: port} }, true},
+		{models.MODE_RECORD, greeted, func(port uint) models.BypassRule { return models.BypassRule{Host: "db.internal", Port: port} }, true},
+		{models.MODE_RECORD, overTLS, func(port uint) models.BypassRule { return models.BypassRule{Host: "^localhost$", Port: port} }, true},
+	} {
+		t.Run(fmt.Sprintf("%s/kind=%d/through=%v", tc.mode, tc.kind, tc.through), func(t *testing.T) {
+			recorded.forget()
+			t.Cleanup(recorded.forget)
+			resetBypassRulesWarned(t)
+			t.Setenv("KEPLOY_PROVEN", "1")
+			var wrap func(net.Listener) net.Listener
+			if tc.kind == overTLS {
+				wrap = tlsWrap
+			}
+			upstream, _ := lineServer(t, tc.kind == greeted, wrap)
+			_, portText, _ := net.SplitHostPort(upstream)
+			port, _ := strconv.Atoi(portText)
+			saved := containerkey.Default
+			t.Cleanup(func() { containerkey.Default = saved })
+			containerkey.Default = containerkey.NewKeyer(containerAt{})
+			cfg := config.New()
+			cfg.Agent.Mode = tc.mode
+			cfg.Agent.MockMode = true
+			// The run's tree is another process's, so this test process's
+			// listener is outside it.
+			cfg.Agent.ClientNSPID = uint32(hold(t).Process.Pid)
+			p := New(zap.NewNop(), fakeDestInfo{dest: ipv4Dest(t, upstream)}, cfg)
+			p.nsswitchData = []byte("preseeded-by-test") // see testProxy
+			// A record looks at a greeting with the MySQL parser's probe.
+			p.Integrations = map[integrations.IntegrationType]integrations.Integrations{
+				integrations.MYSQL: mysql.New(zap.NewNop()),
+			}
+			sink := chanSink{mocked: make(chan models.MockedRow, 1)}
+			p.SetTopologySink(sink)
+			opts := models.OutgoingOptions{Rules: []models.BypassRule{tc.rule(uint(port))}}
+			if tc.mode == models.MODE_RECORD {
+				if err := p.Record(context.Background(), make(chan *models.Mock, 16), opts); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { syncMock.Get().SetOutputChannel(nil) })
+			} else {
+				opts.Mocking, opts.DisableMysqlAutoDetect = true, true
+				if err := p.Mock(context.Background(), opts); err != nil {
+					t.Fatal(err)
+				}
+				if tc.kind == greeted {
+					p.mysqlPorts.Learn(uint32(port))
+				}
+			}
+			app, src := acceptedConn(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan error, 1)
+			go func() { done <- p.handleConnection(ctx, src) }()
+			var client net.Conn = app
+			if tc.kind == overTLS {
+				c := tls.Client(app, &tls.Config{ServerName: "localhost", InsecureSkipVerify: true}) //nolint:gosec // the server's leaf is not under test
+				if err := c.Handshake(); err != nil {
+					t.Fatalf("client handshake: %v", err)
+				}
+				client = c
+			}
+			if !tc.through {
+				if _, err := client.Write([]byte("ping\n")); err != nil {
+					t.Fatal(err)
+				}
+				r := awaitEvent(t, sink.mocked, "the mocked-local row of a connection no rule passes through")
+				if int(r.Port) != port {
+					t.Fatalf("listed %+v, want port %d", r, port)
+				}
+				_ = client.Close()
+				cancel()
+				_ = awaitEvent(t, done, "handleConnection returning")
+				return
+			}
+			got := make(chan string, 1)
+			go func() {
+				r := bufio.NewReader(client)
+				var lines string
+				if tc.kind == greeted {
+					line, _ := r.ReadString('\n')
+					lines += line
+				}
+				if _, err := client.Write([]byte("ping\n")); err != nil {
+					got <- lines + err.Error()
+					return
+				}
+				line, _ := r.ReadString('\n')
+				got <- lines + line
+			}()
+			want := "pong:ping\n"
+			if tc.kind == greeted {
+				want = "hello\n" + want
+			}
+			if a := awaitEvent(t, got, "the client's answer"); a != want {
+				t.Fatalf("the client got %q, want the server's %q", a, want)
+			}
+			_ = client.Close()
+			cancel()
+			_ = awaitEvent(t, done, "handleConnection returning")
+			select {
+			case r := <-sink.mocked:
+				t.Fatalf("a destination a bypassRule passed through was listed mocked: %+v", r)
+			default:
+			}
+		})
+	}
+}
+
+// A connection a bypassRule passes through ends when its context does,
+// whatever the client still has to read: the relay's write to a client that
+// reads nothing more waited for it to read, and kept handleConnection, which
+// waits for the relay, from returning, and the connection's goroutines and its
+// port with it. It ends too when either side closes and the other, told of it,
+// closes in turn: each side's end is forwarded to the other (a half-close),
+// so a side's close alone ends only its direction.
+func TestHandleConnectionEndsAPassThroughOnCancelAndOnEitherSidesClose(t *testing.T) {
+	type end int
+	const (
+		cancelled    end = iota // the context ends as the client reads on
+		clientStalls            // the context ends as the client reads nothing more
+		clientCloses            // the client closes, and the server, told, closes; the context lasts
+		serverCloses            // the server closes with the client's bytes unread, and the client, told, closes; the context lasts
+	)
+	for _, tc := range []struct {
+		name string
+		end  end
+	}{
+		{"the context ends as the client reads on", cancelled},
+		{"the context ends as the client reads nothing more", clientStalls},
+		{"the client closes, and the server told of it", clientCloses},
+		{"the server closes with the client's bytes unread, and the client told of it", serverCloses},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ln, err := net.Listen("tcp4", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = ln.Close() })
+			// The server speaks first, so a record passes the connection
+			// through for the rule (a server-first connection shows no
+			// host): a line and 64 KiB, then a line more for each of more,
+			// and it holds the connection open until it reads the client's
+			// end.
+			more := make(chan struct{}, 1)
+			t.Cleanup(func() { close(more) })
+			served := make(chan net.Conn, 1)
+			t.Cleanup(func() {
+				select {
+				case c := <-served:
+					_ = c.Close()
+				default:
+				}
+			})
+			go func() {
+				conn, err := ln.Accept()
+				if err != nil {
+					return
+				}
+				served <- conn
+				if tc.end == serverCloses {
+					// It greets, reads 64 KiB of the client's and closes
+					// with the rest unread.
+					defer func() { _ = conn.Close() }()
+					if _, err := conn.Write([]byte("hello\n")); err == nil {
+						_, _ = io.CopyN(io.Discard, conn, 64<<10)
+					}
+					return
+				}
+				if _, err := conn.Write(append([]byte("hello\n"), bytes.Repeat([]byte("s"), 64<<10)...)); err != nil {
+					return
+				}
+				go func() {
+					_, _ = io.Copy(io.Discard, conn)
+					_ = conn.Close()
+				}()
+				for range more {
+					if _, err := conn.Write([]byte("more\n")); err != nil {
+						return
+					}
+				}
+			}()
+			p, logs := bypassRecordProxyLogging(t, ln.Addr().String())
+			app, src := acceptedConn(t)
+			conn := newStallingConn(src)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan error, 1)
+			go func() { done <- p.handleConnection(ctx, conn) }()
+
+			if tc.end == serverCloses {
+				if got := <-readN(app, len("hello\n")); got != "hello\n" {
+					t.Fatalf("the client got %q, want the server's greeting", got)
+				}
+				// Twice what the server reads, a multiple of 1 KiB (a relay
+				// reader used to hold such bytes for more, so the server
+				// never read its 64 KiB), and the client holds the
+				// connection open.
+				if _, err := app.Write(bytes.Repeat([]byte("c"), 128<<10)); err != nil {
+					t.Fatal(err)
+				}
+				// The server's end reaches the client, which closes on it.
+				if rest := awaitEvent(t, readAll(app), "the client reading to the server's end"); len(rest) != 0 {
+					t.Fatalf("the client got %q after the greeting, want the server's end", rest)
+				}
+				_ = app.Close()
+				_ = awaitEvent(t, done, "handleConnection returning")
+				return
+			}
+			// The client reads on, so the proxy's writes to it never wait
+			// for room, until it closes.
+			relayed := make(chan struct{})
+			go func() {
+				buf := make([]byte, 32<<10)
+				for n := 0; ; {
+					m, err := app.Read(buf)
+					if n < 64<<10 && n+m >= 64<<10 {
+						close(relayed)
+					}
+					n += m
+					if err != nil {
+						return
+					}
+				}
+			}()
+			_ = awaitEvent(t, relayed, "the client getting the server's first 64 KiB")
+			switch tc.end {
+			case cancelled:
+				cancel()
+			case clientStalls:
+				conn.stall()
+				more <- struct{}{}
+				_ = awaitEvent(t, conn.stalled, "a write to the client waiting for room")
+				cancel()
+			case clientCloses:
+				_ = app.Close()
+			}
+			_ = awaitEvent(t, done, "handleConnection returning")
+			if tc.end == cancelled || tc.end == clientStalls {
+				noErrorLogged(t, logs)
+			}
+		})
+	}
+}
+
+// A relay reader holding the server's last bytes when the relay ends returns
+// with it: here the relay waits on a write to a client that reads nothing
+// more, its queue of the server's reads is full (passThroughQueue of them),
+// the reader has read what the server sent after and holds it for the queue,
+// and the context ends. The reader's hand-off waits for its taker only while
+// the context lasts; one that waited for the full queue regardless kept
+// handleConnection, which waits for its readers, from ever returning.
+//
+// That hand-off is the reader's last step after its read, and nothing it does
+// can be seen there: a cancel that lands before the reader passes its own
+// context check ends the reader there, the hand-off untried. The scenario is
+// therefore run several rounds (a count), and the first round that fails ends
+// the row.
+func TestHandleConnectionEndsAPassThroughWhoseReaderHoldsTheServersLastBytes(t *testing.T) {
+	const rounds = 8
+	for round := 0; round < rounds; round++ {
+		if !t.Run(fmt.Sprintf("round %d", round), passThroughReaderHoldingAReadAtAFullQueue) {
+			break
+		}
+	}
+}
+
+func passThroughReaderHoldingAReadAtAFullQueue(t *testing.T) {
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	// The server greets (so a record passes the connection through for the
+	// rule), then sends each line it is given.
+	lines := make(chan string, 2)
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer func() { _ = conn.Close() }()
+				if _, err := conn.Write([]byte("hello\n")); err != nil {
+					return
+				}
+				for line := range lines {
+					if _, err := conn.Write([]byte(line)); err != nil {
+						return
+					}
+				}
+			}()
+		}
+	}()
+	t.Cleanup(func() { close(lines) })
+	p, logs := bypassRecordProxyLogging(t, ln.Addr().String())
+	app, src := acceptedConn(t)
+	// The proxy's connection to the server tells what it has read.
+	up, err := net.Dial("tcp4", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = up.Close() })
+	server := &readsTellingConn{Conn: up, read: make(chan string, 16)}
+	end, ok := clientEnd(src.RemoteAddr())
+	if !ok {
+		t.Fatalf("no client end for %v", src.RemoteAddr())
+	}
+	p.predials.put(end, util.NewPredialed(ln.Addr().String(), connseq.NewUpstream(server)))
+	conn := newStallingConn(src)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- p.handleConnection(ctx, conn) }()
+	if got := <-readN(app, len("hello\n")); got != "hello\n" {
+		t.Fatalf("the client got %q, want the server's greeting", got)
+	}
+	conn.stall()
+	lines <- "held\n"
+	// What the reader read so far (the greeting too) ends with the line.
+	for got := ""; !strings.HasSuffix(got, "held\n"); {
+		got += awaitEvent(t, server.read, "the relay reading the server's held line")
+	}
+	_ = awaitEvent(t, conn.stalled, "the relay's write of the server's line waiting for room")
+	// The relay writes nothing more, so each read the reader makes now goes
+	// to its queue: passThroughQueue of them fill it, and the reader holds
+	// the next. A line is sent once all of the one before is read, so the
+	// reads are counted, whatever pieces a line comes in.
+	for reads := 0; reads <= passThroughQueue; {
+		line := fmt.Sprintf("line %02d\n", reads)
+		lines <- line
+		for got := 0; got < len(line) && reads <= passThroughQueue; reads++ {
+			got += len(awaitEvent(t, server.read, "the relay reading the server's next line"))
+		}
+	}
+	cancel()
+	_ = awaitEvent(t, done, "handleConnection returning")
+	noErrorLogged(t, logs)
+}
+
+// A pass-through ends on cancel whatever the server still has not read: the
+// relay's write of the client's bytes to a server that reads nothing more
+// waits for room, and the context's end puts the server connection's deadline
+// in the past, so the write returns, quietly (the relay ended because the
+// context did). The connection to the server is the proxy's own, made to
+// stall its writes as a full socket does.
+func TestHandleConnectionEndsAPassThroughOnCancelAsTheServerReadsNothingMore(t *testing.T) {
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	// The server greets, so a record passes the connection through for the
+	// rule, and reads to the connection's end.
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		if _, err := conn.Write([]byte("hello\n")); err == nil {
+			_, _ = io.Copy(io.Discard, conn)
+		}
+	}()
+	p, logs := bypassRecordProxyLogging(t, ln.Addr().String())
+	app, src := acceptedConn(t)
+	up, err := net.Dial("tcp4", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = up.Close() })
+	server := newStallingConn(&closeCountingConn{Conn: up})
+	end, ok := clientEnd(src.RemoteAddr())
+	if !ok {
+		t.Fatalf("no client end for %v", src.RemoteAddr())
+	}
+	p.predials.put(end, util.NewPredialed(ln.Addr().String(), connseq.NewUpstream(server)))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- p.handleConnection(ctx, src) }()
+	if got := <-readN(app, len("hello\n")); got != "hello\n" {
+		t.Fatalf("the client got %q, want the server's greeting", got)
+	}
+	server.stall()
+	if _, err := app.Write([]byte("request\n")); err != nil {
+		t.Fatal(err)
+	}
+	_ = awaitEvent(t, server.stalled, "the relay's write of the client's bytes to the server waiting for room")
+	cancel()
+	_ = awaitEvent(t, done, "handleConnection returning")
+	noErrorLogged(t, logs)
+}
+
+// A client of a connection a bypassRule passes through that half-closes to
+// end its request gets the server's whole answer, a MiB each way, every byte
+// in its place: the client's end is forwarded to the server, which answers
+// only then. The relay used to end on the client's EOF, and the caller's close
+// left the client with no answer at all.
+func TestHandleConnectionPassesAHalfCloseThroughABypassRule(t *testing.T) {
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	request, answer := counted(1<<20, 5), counted(1<<20, 6)
+	heard := make(chan []byte, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		// It greets, so a record passes the connection through for the
+		// rule, and answers once the request has ended.
+		if _, err := conn.Write([]byte("hello\n")); err != nil {
+			return
+		}
+		got, _ := io.ReadAll(conn)
+		heard <- got
+		_, _ = conn.Write(answer)
+	}()
+	p := bypassRecordProxy(t, ln.Addr().String())
+	app, src := acceptedConn(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- p.handleConnection(ctx, src) }()
+	if got := <-readN(app, len("hello\n")); got != "hello\n" {
+		t.Fatalf("the client got %q, want the server's greeting", got)
+	}
+	got := readAll(app)
+	if _, err := app.Write(request); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	if h := awaitEvent(t, heard, "the server reading the request to its end"); !bytes.Equal(h, request) {
+		t.Fatalf("the server got %d bytes of the request, want its %d in order", len(h), len(request))
+	}
+	if a := awaitEvent(t, got, "the client reading the answer to its end"); !bytes.Equal(a, answer) {
+		t.Fatalf("the client got %d bytes of the answer, want its %d in order", len(a), len(answer))
+	}
+	_ = awaitEvent(t, done, "handleConnection returning")
+}
+
+// readsTellingConn tells each read of its connection that returned bytes.
+type readsTellingConn struct {
+	net.Conn
+	read chan string
+}
+
+func (c *readsTellingConn) Read(b []byte) (int, error) {
+	n, err := c.Conn.Read(b)
+	if n > 0 {
+		select {
+		case c.read <- string(b[:n]):
+		default:
+		}
+	}
+	return n, err
+}
+
+// bypassRecordProxy is a record's proxy, under the proven switch, for a server
+// at addr, whose port a bypassRule with a host names: a connection that shows
+// no host (one whose server speaks first) is passed through.
+func bypassRecordProxy(t *testing.T, addr string) *Proxy {
+	t.Helper()
+	p, _ := bypassRecordProxyLogging(t, addr)
+	return p
+}
+
+// bypassRecordProxyLogging is bypassRecordProxy with what the proxy logs at
+// the Error level and above.
+func bypassRecordProxyLogging(t *testing.T, addr string) (*Proxy, *observer.ObservedLogs) {
+	t.Helper()
+	recorded.reset()
+	t.Cleanup(recorded.reset)
+	resetBypassRulesWarned(t)
+	t.Setenv("KEPLOY_PROVEN", "1")
+	_, portText, _ := net.SplitHostPort(addr)
+	port, _ := strconv.Atoi(portText)
+	saved := containerkey.Default
+	t.Cleanup(func() { containerkey.Default = saved })
+	containerkey.Default = containerkey.NewKeyer(containerAt{})
+	cfg := config.New()
+	cfg.Agent.Mode = models.MODE_RECORD
+	cfg.Agent.MockMode = true
+	cfg.Agent.ClientNSPID = uint32(hold(t).Process.Pid)
+	core, logs := observer.New(zap.ErrorLevel)
+	p := New(zap.New(core), fakeDestInfo{dest: ipv4Dest(t, addr)}, cfg)
+	p.nsswitchData = []byte("preseeded-by-test") // see testProxy
+	p.Integrations = map[integrations.IntegrationType]integrations.Integrations{
+		integrations.MYSQL: mysql.New(zap.NewNop()),
+	}
+	p.SetTopologySink(chanSink{mocked: make(chan models.MockedRow, 1)})
+	opts := models.OutgoingOptions{Rules: []models.BypassRule{{Host: "db.internal", Port: uint(port)}}}
+	if err := p.Record(context.Background(), make(chan *models.Mock, 16), opts); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { syncMock.Get().SetOutputChannel(nil) })
+	// The session's mock manager sweeps its pools on a ticker until it is
+	// closed: closed here, or each run leaves its sweeper behind. (The
+	// proxy's expiring caches keep their janitors: golang-lru's expirable
+	// LRU has no way to stop one.)
+	t.Cleanup(func() { p.setMockManager(nil) })
+	return p, logs
+}
+
+// noErrorLogged fails t if the proxy logged at the Error level or above: a
+// pass-through that ends because its context did ends quietly.
+func noErrorLogged(t *testing.T, logs *observer.ObservedLogs) {
+	t.Helper()
+	for _, e := range logs.All() {
+		t.Errorf("the proxy logged %s %q (%v), want nothing at Error on the context's end", e.Level, e.Message, e.ContextMap())
+	}
+}
+
+// stallingConn is the client's connection as the proxy holds it, which can
+// stand for a client that reads nothing more: once stalled, a write to it
+// waits, as one to a full socket does, until its deadline is put in the past
+// or it is closed.
+type stallingConn struct {
+	*closeCountingConn
+	stalls      chan struct{} // closed: writes wait
+	stalled     chan struct{} // closed once a write waits
+	interrupted chan struct{} // closed by a past deadline, or the close
+	stallOnce   sync.Once
+	waitOnce    sync.Once
+	stopOnce    sync.Once
+}
+
+func newStallingConn(c *closeCountingConn) *stallingConn {
+	return &stallingConn{closeCountingConn: c, stalls: make(chan struct{}), stalled: make(chan struct{}), interrupted: make(chan struct{})}
+}
+
+func (c *stallingConn) stall() { c.stallOnce.Do(func() { close(c.stalls) }) }
+
+func (c *stallingConn) Write(b []byte) (int, error) {
+	select {
+	case <-c.stalls:
+	default:
+		return c.closeCountingConn.Write(b)
+	}
+	c.waitOnce.Do(func() { close(c.stalled) })
+	<-c.interrupted
+	return 0, os.ErrDeadlineExceeded
+}
+
+func (c *stallingConn) interruptIfPast(d time.Time) {
+	if !d.IsZero() && !d.After(time.Now()) {
+		c.stopOnce.Do(func() { close(c.interrupted) })
+	}
+}
+
+func (c *stallingConn) SetDeadline(d time.Time) error {
+	c.interruptIfPast(d)
+	return c.closeCountingConn.SetDeadline(d)
+}
+
+func (c *stallingConn) SetWriteDeadline(d time.Time) error {
+	c.interruptIfPast(d)
+	return c.closeCountingConn.SetWriteDeadline(d)
+}
+
+func (c *stallingConn) Close() error {
+	c.stopOnce.Do(func() { close(c.interrupted) })
+	return c.closeCountingConn.Close()
+}
+
+// Under the proven switch an HTTP connection whose every call a bypassRule
+// with a path or a host passes through is reached for real, so it is never
+// listed mocked, in a record as in a replay. One with a call the rule does
+// not name (recorded, or answered from mocks) is listed, at that call.
+func TestHandleConnectionListsAnHTTPConnectionABypassRulePassesThroughOnlyForACallItServes(t *testing.T) {
+	for _, tc := range []struct {
+		mode     models.Mode
+		hostRule bool     // the rule names the Host header, not the path
+		paths    []string // the client's calls, in order, on one connection
+		listed   bool
+	}{
+		{models.MODE_TEST, false, []string{"/health", "/health"}, false},
+		{models.MODE_TEST, false, []string{"/health", "/orders"}, true},
+		{models.MODE_RECORD, false, []string{"/health", "/health"}, false},
+		{models.MODE_RECORD, false, []string{"/health", "/orders"}, true},
+		// A host-only rule: the parser decides it per call too, from the
+		// Host header, so the connection is not listed at dispatch.
+		{models.MODE_TEST, true, []string{"/health", "/health"}, false},
+		{models.MODE_RECORD, true, []string{"/health", "/health"}, false},
+	} {
+		rule := "path"
+		if tc.hostRule {
+			rule = "host"
+		}
+		t.Run(fmt.Sprintf("%s/%s/%v", tc.mode, rule, tc.paths), func(t *testing.T) {
+			recorded.forget()
+			t.Cleanup(recorded.forget)
+			resetBypassRulesWarned(t)
+			t.Setenv("KEPLOY_PROVEN", "1")
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.WriteString(w, "real:"+r.URL.Path)
+			}))
+			t.Cleanup(srv.Close)
+			upstream := srv.Listener.Addr().String()
+			_, portText, _ := net.SplitHostPort(upstream)
+			port, _ := strconv.Atoi(portText)
+			saved := containerkey.Default
+			t.Cleanup(func() { containerkey.Default = saved })
+			containerkey.Default = containerkey.NewKeyer(containerAt{})
+			cfg := config.New()
+			cfg.Agent.Mode = tc.mode
+			cfg.Agent.MockMode = true
+			// The run's tree is another process's, so this test process's
+			// listener is outside it.
+			cfg.Agent.ClientNSPID = uint32(hold(t).Process.Pid)
+			p := New(zap.NewNop(), fakeDestInfo{dest: ipv4Dest(t, upstream)}, cfg)
+			p.nsswitchData = []byte("preseeded-by-test") // see testProxy
+			p.Integrations = map[integrations.IntegrationType]integrations.Integrations{
+				integrations.HTTP: httpint.New(zap.NewNop()),
+			}
+			p.integrationsPriority = []ParserPriority{{Priority: 1, ParserType: integrations.HTTP}}
+			sink := chanSink{mocked: make(chan models.MockedRow, 1)}
+			p.SetTopologySink(sink)
+			bypass := models.BypassRule{Path: "^/health$", Port: uint(port)}
+			if tc.hostRule {
+				bypass = models.BypassRule{Host: `^api\.internal$`, Port: uint(port)}
+			}
+			opts := models.OutgoingOptions{Rules: []models.BypassRule{bypass}, DisableMysqlAutoDetect: true}
+			if tc.mode == models.MODE_RECORD {
+				if err := p.Record(context.Background(), make(chan *models.Mock, 16), opts); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { syncMock.Get().SetOutputChannel(nil) })
+			} else {
+				opts.Mocking = true
+				if err := p.Mock(context.Background(), opts); err != nil {
+					t.Fatal(err)
+				}
+			}
+			app, src := acceptedConn(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan error, 1)
+			go func() { done <- p.handleConnection(ctx, src) }()
+			r := bufio.NewReader(app)
+			for _, path := range tc.paths {
+				if _, err := fmt.Fprintf(app, "GET %s HTTP/1.1\r\nHost: api.internal\r\n\r\n", path); err != nil {
+					t.Fatal(err)
+				}
+				if path != "/health" {
+					// Not the rule's: recorded, or (with no mock) missed;
+					// either way the connection is listed at this call.
+					break
+				}
+				resp, err := http.ReadResponse(r, nil)
+				if err != nil {
+					t.Fatalf("the call %s passed through got no answer: %v", path, err)
+				}
+				body, _ := io.ReadAll(resp.Body)
+				_ = resp.Body.Close()
+				if string(body) != "real:"+path {
+					t.Fatalf("the call %s passed through got %q, want the server's", path, body)
+				}
+			}
+			if tc.listed {
+				row := awaitEvent(t, sink.mocked, "the mocked-local row of a connection with a call the rule does not name")
+				if int(row.Port) != port {
+					t.Fatalf("listed %+v, want port %d", row, port)
+				}
+			}
+			_ = app.Close()
+			cancel()
+			_ = awaitEvent(t, done, "handleConnection returning")
+			if !tc.listed {
+				select {
+				case row := <-sink.mocked:
+					t.Fatalf("a connection whose every call a %s rule passed through was listed mocked: %+v", rule, row)
+				default:
+				}
 			}
 		})
 	}

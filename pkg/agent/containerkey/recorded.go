@@ -55,7 +55,14 @@ func (k *Keyer) SetRecorded(t *RecordedTally) {
 	defer k.mu.Unlock()
 	k.recorded = amb
 	k.recordedNamed = t.named
+	k.recordedGen.Add(1)
 }
+
+// RecordedGeneration is the generation of the tally SetRecorded last took:
+// it moves with each SetRecorded, so a reader that kept what
+// RecordedAmbiguous said of a mock (an HTTP recording's destination, parsed
+// once) knows to read it again. Read without the keyer's lock.
+func (k *Keyer) RecordedGeneration() uint64 { return k.recordedGen.Load() }
 
 // RecordingNamesContainers reports whether the test set the agent was given
 // (SetRecorded) was recorded naming containers — a mock of it, of any

@@ -38,15 +38,7 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 	// User request-body noise from test.globalNoise.requestBody — the same
 	// DEDICATED request-matching bucket HTTP consumes (see http/decode.go for
 	// why the response "body" bucket must not soften request matching).
-	// Lowercased, presence-only: request-body matching and drift detection are
-	// path-based, a value-regex cannot gate here.
-	var userBodyNoise map[string][]string
-	if bn, ok := opts.NoiseConfig["requestbody"]; ok {
-		userBodyNoise = make(map[string][]string, len(bn))
-		for k := range bn {
-			userBodyNoise[strings.ToLower(k)] = []string{}
-		}
-	}
+	userBodyNoise := requestBodyNoise(opts.NoiseConfig)
 
 	commandCount := 0
 	for {
@@ -98,9 +90,10 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 				return err
 			}
 
-			logger.Debug("Successfully read command from client",
-				zap.Int("command_count", commandCount),
-				zap.Int("command_size_bytes", len(command)))
+			if ce := logger.Check(zap.DebugLevel, "Successfully read command from client"); ce != nil {
+				ce.Write(zap.Int("command_count", commandCount),
+					zap.Int("command_size_bytes", len(command)))
+			}
 
 			// reset the read deadline
 			err = clientConn.SetReadDeadline(time.Time{})
@@ -251,7 +244,9 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 				return models.NewMockMismatchError(baseErr, report)
 			}
 
-			logger.Debug("Matched the command with the mock", zap.Any("mock", resp))
+			if ce := logger.Check(zap.DebugLevel, "Matched the command with the mock"); ce != nil {
+				ce.Write(zap.Any("mock", resp))
+			}
 
 			// Handle prepared statement cleanup for COM_STMT_CLOSE
 			if commandPkt.Header.Type == mysql.CommandStatusToString(mysql.COM_STMT_CLOSE) {
@@ -260,7 +255,9 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 					if decodeCtx.StmtIDToQuery != nil {
 						delete(decodeCtx.StmtIDToQuery, closePacket.StatementID)
 					}
-					logger.Debug("Cleaned up prepared statement", zap.Uint32("StatementID", closePacket.StatementID))
+					if ce := logger.Check(zap.DebugLevel, "Cleaned up prepared statement"); ce != nil {
+						ce.Write(zap.Uint32("StatementID", closePacket.StatementID))
+					}
 				}
 			}
 
@@ -268,7 +265,9 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 			// But we need to remove the corresponding mock from the mockDb for no response commands.
 			if wire.IsNoResponseCommand(commandPkt.Header.Type) {
 				// No response for COM_STMT_CLOSE and COM_STMT_SEND_LONG_DATA
-				logger.Debug("No response for the command", zap.Any("command", command))
+				if ce := logger.Check(zap.DebugLevel, "No response for the command"); ce != nil {
+					ce.Write(zap.Any("command", command))
+				}
 				continue
 			}
 
@@ -279,11 +278,12 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 				return err
 			}
 
-			logger.Debug("About to write response to client",
-				zap.String("request_type", req.Header.Type),
-				zap.String("response_type", resp.Header.Type),
-				zap.Int("response_size_bytes", len(buf)),
-				zap.Int("commands_processed", commandCount))
+			if ce := logger.Check(zap.DebugLevel, "About to write response to client"); ce != nil {
+				ce.Write(zap.String("request_type", req.Header.Type),
+					zap.String("response_type", resp.Header.Type),
+					zap.Int("response_size_bytes", len(buf)),
+					zap.Int("commands_processed", commandCount))
+			}
 
 			// Write the response to the client
 			_, err = clientConn.Write(buf)
@@ -300,23 +300,45 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 				return err
 			}
 
-			logger.Debug("successfully wrote the response to the client",
-				zap.Any("request", req.Header.Type),
-				zap.String("response_type", resp.Header.Type),
-				zap.Int("response_size_bytes", len(buf)),
-				zap.Int("commands_processed", commandCount))
+			if ce := logger.Check(zap.DebugLevel, "successfully wrote the response to the client"); ce != nil {
+				ce.Write(zap.Any("request", req.Header.Type),
+					zap.String("response_type", resp.Header.Type),
+					zap.Int("response_size_bytes", len(buf)),
+					zap.Int("commands_processed", commandCount))
+			}
 
 			// Check connection state after writing large response
 			if len(buf) > 1000 {
-				logger.Debug("Large response written, checking connection state",
-					zap.Int("response_size_bytes", len(buf)),
-					zap.String("request_type", req.Header.Type))
+				if ce := logger.Check(zap.DebugLevel, "Large response written, checking connection state"); ce != nil {
+					ce.Write(zap.Int("response_size_bytes", len(buf)),
+						zap.String("request_type", req.Header.Type))
+				}
 			}
 
-			// Add a small delay and log to see if connection is still alive
-			logger.Debug("Response write completed, continuing to next iteration",
-				zap.Int("commands_processed", commandCount),
-				zap.String("last_request", req.Header.Type))
+			if ce := logger.Check(zap.DebugLevel, "Response write completed, continuing to next iteration"); ce != nil {
+				ce.Write(zap.Int("commands_processed", commandCount),
+					zap.String("last_request", req.Header.Type))
+			}
 		}
 	}
+}
+
+// requestBodyNoise is the requestBody bucket of the user's noise
+// (test.globalNoise) as the matcher compares it: lowercased, presence-only
+// (request-body matching and drift detection are path-based, a value-regex
+// cannot gate here), and root-relative (parameters.0.value). A key may also
+// be written as a miss lists the field, with its leading "body."
+// (body.parameters.0.value): a MySQL command's body has no field named
+// body, so the prefix only ever names the body itself. Without it, the
+// field a miss lists, copied as listed, changed nothing.
+func requestBodyNoise(cfg map[string]map[string][]string) map[string][]string {
+	bn, ok := cfg["requestbody"]
+	if !ok {
+		return nil
+	}
+	out := make(map[string][]string, len(bn))
+	for k := range bn {
+		out[strings.TrimPrefix(strings.ToLower(k), "body.")] = []string{}
+	}
+	return out
 }

@@ -17,6 +17,7 @@ import (
 	"github.com/andybalholm/brotli"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
 	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/bodydigest"
@@ -247,6 +248,10 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 			return err
 		}
 		if mock != nil {
+			// Recorded, not passed through: under the proven switch the
+			// connection's local destination is listed mocked
+			// (integrations.CallServed).
+			integrations.CallServed(ctx)
 			// EmitMock takes the incomplete-mock flag itself. Clearing it
 			// again here would wipe a mark set while EmitMock delivered
 			// (on another goroutine, meanwhile): that mark is the
@@ -317,9 +322,9 @@ func (h *HTTP) readRequestV2(ctx context.Context, stream *fakeconn.FakeConn, fin
 	contentLengthHeader, transferEncodingHeader := parseHeaders(head)
 
 	if contentLengthHeader != "" {
-		contentLength, err := strconv.Atoi(contentLengthHeader)
+		contentLength, err := contentLengthValue(contentLengthHeader)
 		if err != nil {
-			return fmt.Errorf("invalid content-length: %w", err)
+			return err
 		}
 		remaining := contentLength - (len(*finalReq) - bodyStart)
 		for remaining > 0 {
@@ -412,9 +417,9 @@ func (h *HTTP) readResponseV2(ctx context.Context, stream *fakeconn.FakeConn, fi
 	contentLengthHeader, transferEncodingHeader := parseHeaders(head)
 
 	if contentLengthHeader != "" {
-		contentLength, err := strconv.Atoi(contentLengthHeader)
+		contentLength, err := contentLengthValue(contentLengthHeader)
 		if err != nil {
-			return lastWr, fmt.Errorf("invalid content-length: %w", err)
+			return lastWr, err
 		}
 		remaining := contentLength - (len(*finalResp) - bodyStart)
 		for remaining > 0 {
@@ -765,6 +770,13 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 			meta["passthrough"] = string(models.PassThroughRecordOne)
 		}
 	}
+	// A CORS preflight the server allowed, under the proven switch, is a
+	// phase of the call it guards (corsPreflightPhase): protocol-phase, served
+	// to any test as often as asked, owned by none.
+	preflight := corsPreflightPhase(req, respParsed.StatusCode)
+	if preflight {
+		meta["type"] = "config"
+	}
 
 	// The digest headers the body matched as the server sent it, which a
 	// replay recomputes over the body it sends (models.MetadataBodyDigestsKey),
@@ -778,10 +790,11 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 
 	// The lifetime the mock is stated (models.MetadataLifetimeKey), beside the
 	// type tag older replayers read: an exchange is the data of the test it
-	// was made in, a recordOne representative is served to every test.
+	// was made in, a recordOne representative and an allowed CORS preflight
+	// (corsPreflightPhase) are served to every test.
 	ptLifetime := models.LifetimePerTest
 	meta[models.MetadataLifetimeKey] = models.MetadataLifetimePerTest
-	if ptRecordOne {
+	if ptRecordOne || preflight {
 		ptLifetime = models.LifetimeSession
 		meta[models.MetadataLifetimeKey] = models.MetadataLifetimeSession
 	}

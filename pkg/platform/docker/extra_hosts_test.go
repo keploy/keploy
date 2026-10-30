@@ -123,14 +123,14 @@ func TestGetAlias_LinuxCarriesTheAppsHostEntries(t *testing.T) {
 	alias, err := getAlias(context.Background(), zap.NewNop(), models.SetupOptions{
 		KeployContainer: "keploy-test", AgentPort: 16789, ProxyPort: 16790, DnsPort: 16791, ClientNSPID: 4242,
 		Mode: models.MODE_RECORD, AppExtraHosts: []string{"db.test:10.1.2.3"}, HostGateway: true,
-	}, false)
+	}, &config.Config{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(alias, " --add-host db.test:10.1.2.3 --add-host host.docker.internal:host-gateway ") {
 		t.Fatalf("the agent's docker run carries no host entries:\n%s", alias)
 	}
-	if _, err := getAlias(context.Background(), zap.NewNop(), models.SetupOptions{AppExtraHosts: []string{"db.test"}}, false); err == nil {
+	if _, err := getAlias(context.Background(), zap.NewNop(), models.SetupOptions{AppExtraHosts: []string{"db.test"}}, &config.Config{}); err == nil {
 		t.Fatal("an entry that is not NAME:ADDRESS went into the agent's docker run")
 	}
 }

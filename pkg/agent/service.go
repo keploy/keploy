@@ -178,19 +178,21 @@ type AcceptCounter interface {
 	// ctx ends first, or with Accepted's error, at once or when it comes.
 	// It has no deadline of its own; each accept wakes it.
 	WaitAccepted(ctx context.Context, n uint64) error
-	// ListenDrops is the marked listener's count of the packets the kernel
-	// dropped at it (models.ProxyConnCounts' ListenDrops). It fails as
-	// Accepted does.
-	ListenDrops() (uint64, error)
+	// ListenDrops are the kernel's counts of what it dropped at the marked
+	// listener (models.ListenDrops). It fails as Accepted does; its
+	// namespace's count it cannot read is said in it (NetUnread), not failed.
+	ListenDrops() (models.ListenDrops, error)
 }
 
 // ProxyConnCounter is what the agent offers a test's begin and end: the
 // connections to the proxy, numbered on both sides, and a wait for every call
 // the application had started by a read to be in the proxy's hands. begin and
 // end read ProxyConns, then WaitProxySettled(ctx, counts), then go on to the
-// bytes and requests the proxy holds; a test whose ListenDrops differ between
-// its begin and its end is not verified, and an application connection lost
-// before the proxy got it is a capture loss (CaptureLossAppConnLost).
+// bytes and requests the proxy holds; a test during which the kernel dropped,
+// at the proxy's listener, what can lose a connection (models.ListenDrops) is
+// charged it as its own capture loss (CaptureLossListenerDropped: not
+// judged), and an application connection lost before the proxy got it is a
+// capture loss (CaptureLossAppConnLost).
 //
 // The counts only ever grow for the life of the agent process. An agent that
 // cannot count answers an error wrapping models.ErrProxyConnsUnsupported
@@ -239,6 +241,49 @@ type InFlightReader interface {
 	// read apart, a connection whose parser ends a state it could not tell
 	// between the two reads is seen neither busy nor unknown.
 	InFlightState(answers bool) (pending int, unknown []string)
+}
+
+// InFlightScoper is the optional extension of an InFlightReader whose wait
+// can be kept to the connections a settle began with (InFlightScope), so
+// that an application that keeps calling cannot hold a test's end.
+type InFlightScoper interface {
+	// InFlightScope keeps the accepted connections now: once every
+	// connection and byte a settle waits for is in the proxy's hands, the
+	// connections that can hold its calls.
+	InFlightScope() InFlightScope
+}
+
+// InFlightWindower is the optional extension of an InFlightScoper whose
+// scopes can leave out the requests opened before a test's window began.
+type InFlightWindower interface {
+	// InFlightBeginWindow cuts, on every connection kept now, what its
+	// socket has received: an InFlightScope cut from then on leaves out the
+	// requests its parser held by the time its reads passed that cut (an
+	// HTTP/2 or gRPC stream is held from its opening frame, so one opened
+	// before the window began, still sending or not, is not the test's),
+	// until the next InFlightBeginWindow.
+	InFlightBeginWindow()
+}
+
+// InFlightScope is InFlightState and InFlightPendingProgress over the
+// connections kept when it began, each with the bytes it had received then,
+// until they are taken and, in a replay, answered: a connection accepted
+// later never counts, nor bytes one receives later (the application's next
+// call on it). unknown names every protocol whose parser, as its connection
+// was seen done, could not say what it held.
+//
+// GiveUp is a settle's watchdog giving up on the connections it found stuck
+// (PendingProgress's ids): the work each still holds is charged to that
+// settle, with words, one per connection, saying what it held, and no later
+// scope waits for it while its handler has not passed it. Behind names each
+// connection a scope so left out that has received bytes since they were
+// last charged (calls the application queued behind the lost work); its
+// charge charges them.
+type InFlightScope interface {
+	State(answers bool) (pending int, unknown []string)
+	PendingProgress(answers bool) map[uint64]uint64
+	GiveUp(ids []uint64, answers bool) []string
+	Behind() (conns []string, charge func())
 }
 
 // PairedBytesWaiter is the optional extension of a proxy that holds the
@@ -590,6 +635,17 @@ type RecordedOfKindSetter interface {
 	SetRecordedOfKind(src func(kind models.Kind, visit func(name string, load func() (*models.Mock, error)) bool) error) error
 }
 
+// RecordingTimesSetter is implemented by a proxy whose teardown bound under
+// keploy mock replay (the calls a test process makes after its own last test)
+// reads, beside what is staged, the times of the set's recordings the agent
+// keeps on disk: a test's own are staged only as it opens, and the bound is
+// the latest of them. SetRecordingTimes sets where (src visits every on-disk
+// mock with its name, request and answer times and whether it is
+// protocol-phase, decoding none; nil for none).
+type RecordingTimesSetter interface {
+	SetRecordingTimes(src func(visit func(name string, req, res time.Time, protocolPhase bool) bool) error) error
+}
+
 // RecordingSourceSetter is implemented by a proxy whose miss diagnosis under
 // exact serving (a call that is a recording made elsewhere) can read, beside
 // what is staged, the set's recordings the agent keeps on disk: a test's own
@@ -610,6 +666,15 @@ type RecordingSourceSetter interface {
 // time, decoding one at a time; nil for none). Nothing it reads is served.
 type RecordedBeforeSetter interface {
 	SetRecordedBefore(src func(t time.Time, visit func(*models.Mock) bool) error) error
+}
+
+// LearnSetWarmer is implemented by a proxy whose learn step reads the staged
+// set's recordings before its tests' calls do: WarmLearnSet, called once the
+// set is staged and its on-disk recordings are set (RecordedBeforeSetter),
+// starts that read in the background, in record's full round alone, and
+// returns at once. Nothing it reads is served.
+type LearnSetWarmer interface {
+	WarmLearnSet() error
 }
 
 // LearnEndSetter is implemented by a proxy whose learn step a keploy test
@@ -664,13 +729,24 @@ type AppClockSetter interface {
 	SetAppClock(f func(real time.Time) (time.Time, bool))
 }
 
+// AppClockRunSetter is an optional proxy capability, beside AppClockSetter:
+// SetAppClockRun makes the learn step read, through f, the real instant
+// from which the app's clock has run as one to a real instant, as the
+// agent's hooks moved it (learn.Tracker.SetAppClockRun); nil for none.
+type AppClockRunSetter interface {
+	SetAppClockRun(f func(real time.Time) (time.Time, bool))
+}
+
 // PoolNamesSetter is an optional ExactServer capability: SetPoolNames hands the
 // proxy the names the replay's scope table puts in a pool slice, of every key,
 // so that the parsers' learn steps can tell the pool's mocks from a test's
 // where the replay sends no recorded test windows (keploy mock replay):
-// integrations.PoolMembership.
+// integrations.PoolMembership. owners is, of the same table, the key of the
+// test process whose tests list each mock ("" where no one key is known),
+// which bounds each process's teardown, the calls it makes after its own last
+// test.
 type PoolNamesSetter interface {
-	SetPoolNames(names []string) error
+	SetPoolNames(names []string, owners map[string]string) error
 }
 
 // ExactAheadServer is an optional ExactServer capability: ServeExactPoolAhead

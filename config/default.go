@@ -93,6 +93,17 @@ test:
   # legacy lax behaviour, opt out with strictMockWindow: false here or
   # export KEPLOY_STRICT_MOCK_WINDOW=0 — the env var wins.
   strictMockWindow: true
+  # allowEgress names what a replay may reach on the real network. A
+  # replay's DNS query that no mock answers gets keploy's own answer. Only a
+  # name the replay's own network owns goes to that network's resolver: in
+  # docker, a container, compose service or alias name docker's resolver
+  # holds for the replay's networks (keploy lists them); in a cluster, a
+  # name under the cluster domain. Those resolvers send every other name,
+  # single-label ones included, to the host's and public resolvers, and
+  # docker's resolver sends every query type but A, AAAA and MX of its own
+  # names there too, so keploy answers those itself. Add "dns" to forward
+  # every miss to the host's and public resolvers.
+  allowEgress: []
 record:
   recordTimer: 0s
   filters: []

@@ -273,6 +273,37 @@ func TestARefusalAtAcceptIsALossOfItsOwnKind(t *testing.T) {
 	}
 }
 
+// A connection attempt the kernel dropped at keploy's proxy listener while a
+// test ran is that test's own loss, and leaves it, and no other, not judged:
+// the text says a call may not have reached keploy and what keploy cannot
+// tell, the remedy where to look, and a test after it is charged nothing.
+func TestAListenerDropLeavesOnlyItsTestNotJudged(t *testing.T) {
+	k := CaptureLossListenerDropped
+	if !k.PerTest() || !k.NotJudged() || k.runScoped() || k.AppLife() || k.Evidence() {
+		t.Fatal("a listener's drop is a test's own and not judged")
+	}
+	at := func(n uint64) CaptureLosses { return CaptureLosses{{Kind: k, Count: n}} }
+	if got := at(3).Charged(SameBases(nil), at(2)); !reflect.DeepEqual(got, at(1)) {
+		t.Fatalf("Charged = %+v, want the one since the previous test's end", got)
+	}
+	if got := at(3).Charged(SameBases(nil), at(3)); len(got) != 0 {
+		t.Fatalf("Charged = %+v: a later test is charged nothing", got)
+	}
+	judged, notJudged := at(1).Split()
+	if len(judged) != 0 || !reflect.DeepEqual(notJudged, at(1)) {
+		t.Fatalf("Split = %+v, %+v: not judged, never failed", judged, notJudged)
+	}
+	txt := notJudged.NotJudgedText()
+	for _, want := range []string{"not judged: the kernel dropped 1 connection attempt(s) at keploy's proxy listener (its SYN or accept queue full)", "so a call may not have reached keploy", "keploy cannot tell that from one that gave up", "to the test it fell in (in keploy test, to the test case that ended before it, until that test case's misses were read), otherwise to the next test, but to the run when it fell before a test process claimed the run", "one exception: in keploy test, a drop before a test set's first test case is that test case's, where a missed call would be the set's"} {
+		if !strings.Contains(txt, want) {
+			t.Fatalf("%q lacks %q", txt, want)
+		}
+	}
+	if remedy := notJudged.NotJudgedRemedy(); remedy != ListenerDroppedRemedy {
+		t.Fatalf("remedy %q", remedy)
+	}
+}
+
 // A use of a container whose configuration's read the Docker daemon did not
 // answer is the test's own loss, and leaves it not judged: the text names
 // the container and says the daemon did not answer, and the remedy is to

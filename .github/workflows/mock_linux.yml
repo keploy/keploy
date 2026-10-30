@@ -64,6 +64,10 @@ name: Mock Mode Regression (Linux)
 # own test: never in the next one, never not at all. The same job replays a
 # publish the app makes after it answered a test (P101), and asserts it is
 # judged in the test it was made in, failing the set and keploy test.
+# Another replays an app whose dependency call carries its clock read as a
+# date and an hour of no zone, under the proven switch, and asserts the read
+# is checked at its cut in the app's own zone, failing the set when it is
+# more than one cut off.
 # Another replays an app that passes keploy's own plain-text "no matching mock"
 # on with its 200 where JSON was recorded, and asserts the test fails on its
 # body, with the switch on and off.
@@ -83,6 +87,14 @@ on:
         type: string
         required: false
         default: 'all'
+
+env:
+  # Every run under the proven switch (KEPLOY_PROVEN=1) runs the agent's exact
+  # view in verify mode: each read the view keeps materialised is recomputed,
+  # and any difference fails that read (pkg/agent/proxy exact_view_verify.go).
+  # The client passes it to the agent as --exact-view-verify under the switch
+  # only (provenswitch.AgentArgs); a run without the switch is unchanged.
+  KEPLOY_EXACT_VIEW_VERIFY: '1'
 
 jobs:
   mock_linux:
@@ -275,7 +287,7 @@ jobs:
       # `keploy mock record` on a terminal that hangs up -- SIGHUP, then the
       # terminal closed, with and without a gap between the two -- must stop
       # as it does on SIGTERM: by itself, with SIGTERM's exit code, leaving
-      # nothing running and no keploy-logs.txt. The script says why.
+      # nothing running and no log behind. The script says why.
       - name: Run mock-mode hang-up e2e
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
@@ -473,6 +485,8 @@ jobs:
   # SigV4-signed calls (founder decision 25): the Authorization header is
   # compared by its parts, its signature not at all, so the set replays under
   # the switch, and fails naming the part when the region or key id differs.
+  # Then a learned clock read of no zone, checked at its cut in the app's own
+  # zone.
   proven_strict_http_linux:
     if: ${{ inputs.jobs_to_run == 'all' }}
     runs-on: ${{ inputs.runner }}
@@ -554,6 +568,20 @@ jobs:
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/aws-sigv4/proven-aws-sigv4-linux.sh"
 
+      # A learned read of the application's clock of no zone, cut to a day
+      # and to an hour, is checked at its cut under the proven switch in the
+      # zone the app's own process runs in (its TZ), which wins over the zone
+      # its learn step named: in the set's first test it passes, in another
+      # zone too, and a value more than one cut off fails naming the field.
+      # Without the switch it passes, as on main.
+      - name: Run proven clock-zone e2e (a clock read checked in the app's zone)
+        if: ${{ !cancelled() }}
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/clock-zone/proven-clock-zone-linux.sh"
+
       # A response body of another kind than the recorded one fails its test,
       # with the switch on or off (O-K): an app that answers keploy's own
       # plain-text "no matching mock" with its 200, where the test recorded
@@ -577,6 +605,62 @@ jobs:
           REPLAY_BIN: ${{ steps.record.outputs.path }}
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/daemonized/proven-daemonized-linux.sh"
+
+  # keploy's own CLI flags on a native run: --pass-through-ports (both
+  # spellings) and keploy.yml's bypassRules in keploy record and keploy test,
+  # and --disable-tele (no telemetry or crash-report lookup, in the CLI and in
+  # the agent it starts). Its own job: the proven strict-HTTP job above is
+  # near its timeout. The disable-tele leg builds this checkout with a crash
+  # tag, so Go comes from keploy's go.mod.
+  cli_flags_linux:
+    if: ${{ inputs.jobs_to_run == 'all' }}
+    runs-on: ${{ inputs.runner }}
+    name: CLI flags (record_replay_build)
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/keploy
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: build
+
+      # keploy record and keploy test take --pass-through-ports (both
+      # spellings) beside keploy.yml's record.passThroughPorts telemetry
+      # rules: from v3.6.13 the flag stopped keploy record at startup, bound
+      # to that key ("expected a map or struct, got uint").
+      - name: Run pass-through-ports e2e (the flag beside keploy.yml's telemetry rules)
+        if: ${{ !cancelled() }}
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/pass_through_ports/pass-through-ports-linux.sh"
+
+      # keploy record --disable-tele looks no telemetry host up: the native
+      # agent, a keploy process of its own that pings telemetry at its start,
+      # never got the CLI's --disable-tele, so telemetry.keploy.io was still
+      # resolved and posted to. A watcher counts the DNS queries of the
+      # runner's network namespace (resolv.conf untouched); a control leg
+      # without the flag must show keploy's lookup. Then a crash build of this
+      # checkout (-tags keploy_e2e_crash) panics in the CLI and in the agent:
+      # under --disable-tele its crash report resolves no sentry.io host (the
+      # client started before the flags were read and sent the run's whole
+      # log), and without the flag it does.
+      - name: Run disable-tele e2e (native, no telemetry or crash-report lookup under --disable-tele)
+        if: ${{ !cancelled() }}
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/disable_tele/disable-tele-linux.sh" native
 
   # A fire-and-forget call is the test's own under the proven switch, however
   # late its bytes reach keploy's proxy (design v14 §5.2): on a connection the

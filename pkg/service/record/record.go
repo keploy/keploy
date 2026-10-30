@@ -451,15 +451,26 @@ func mergeMockEntries(existing, incoming []models.MockEntry) []models.MockEntry 
 // teardown rather than accumulated here, because a test can also be revoked by
 // the AGENT (a RevokedTests control frame this function never sees) and a
 // revoked test is deleted, not shipped with a short pool.
+//
+// This form has no mock stream beside it: every mock's outcome is already
+// published, so an entry whose mock is unknown counts as uncorrelated at once.
 func (r *Recorder) consumeMappings(ctx context.Context, testSetID string, mappings <-chan models.TestMockMapping, correlationMap, asyncMockIDs *sync.Map, droppedMockIDs *droppedMockSet, revokeTest func(string), shortPoolByTest *sync.Map) error {
-	return r.consumeMappingsFor(ctx, testSetID, mappings, correlationMap, asyncMockIDs, droppedMockIDs, revokeTest, shortPoolByTest, nil)
+	return r.consumeMappingsFor(ctx, testSetID, mappings, correlationMap, asyncMockIDs, droppedMockIDs, nil, revokeTest, shortPoolByTest, nil)
 }
 
-// consumeMappingsFor is consumeMappings, telling mapped, when set, each test's
-// mocks as its mapping resolves them: the capture watch charges a test with a
-// mock of its whose container the Docker daemon did not answer the read of
-// (captureWatch.mapped), whenever that mapping comes.
-func (r *Recorder) consumeMappingsFor(ctx context.Context, testSetID string, mappings <-chan models.TestMockMapping, correlationMap, asyncMockIDs *sync.Map, droppedMockIDs *droppedMockSet, revokeTest func(string), shortPoolByTest *sync.Map, mapped func(test string, entries []models.MockEntry)) error {
+// consumeMappingsFor is consumeMappings beside a live mock stream, and telling
+// mapped, when set, each test's mocks as its mapping resolves them: the capture
+// watch charges a test with a mock of its whose container the Docker daemon did
+// not answer the read of (captureWatch.mapped), whenever that mapping comes.
+//
+// waits holds the entries whose mock the mock loop has not reported yet
+// (mappingWaits): they are applied when it does, and the function returns only
+// once the mapping stream is closed AND no entry still waits — an entry whose
+// mock never came is settled when the mock loop ends its stream (waits.end).
+// Nothing here is bounded by a clock: on a loaded host a mock is saved long
+// after the mapping that names it, and giving up on a clock is what left such
+// a mock out of its test's mapping while it sat in the mocks file.
+func (r *Recorder) consumeMappingsFor(ctx context.Context, testSetID string, mappings <-chan models.TestMockMapping, correlationMap, asyncMockIDs *sync.Map, droppedMockIDs *droppedMockSet, waits *mappingWaits, revokeTest func(string), shortPoolByTest *sync.Map, mapped func(test string, entries []models.MockEntry)) error {
 	persistCtx := context.WithoutCancel(ctx)
 
 	// pending batches mappings so the file is rewritten once per batch instead of
@@ -514,12 +525,14 @@ func (r *Recorder) consumeMappingsFor(ctx context.Context, testSetID string, map
 		}
 	}()
 
-	for mapping := range mappings {
-		r.frameProgress.Add(1)
-		r.mappingsStreamed.Add(1)
-		realMockEntries, lostMock, uncorrelated := r.resolveMappingEntries(mapping, correlationMap, asyncMockIDs, droppedMockIDs)
+	// apply folds what one test's entries settled as into the batch, the
+	// short-pool counts and the revokes. A test's entries settle in parts — a
+	// mapping's entries whose mocks were saved at once, then each held one as
+	// its mock arrives — and every part comes through here.
+	apply := func(testName string, res mappingResolution) {
+		realMockEntries, lostMock, uncorrelated := res.entries, res.lost, res.uncorrelated
 
-		// Persisted anyway (see resolveMappingEntries), so record that this test
+		// Persisted anyway (see addSettled), so record that this test
 		// reaches replay with an incomplete mock set.
 		//
 		// Counted per DISTINCT TEST, not per mapping: the agent emits a test's
@@ -528,10 +541,10 @@ func (r *Recorder) consumeMappingsFor(ctx context.Context, testSetID string, map
 		// A revoked test is excluded — it is deleted at finalize, so it never
 		// reaches replay with a short pool at all.
 		if uncorrelated > 0 && !lostMock {
-			if _, revoked := revokedHere[mapping.TestName]; !revoked {
-				prev, _ := shortPoolByTest.Load(mapping.TestName)
+			if _, revoked := revokedHere[testName]; !revoked {
+				prev, _ := shortPoolByTest.Load(testName)
 				n, _ := prev.(int64)
-				shortPoolByTest.Store(mapping.TestName, n+int64(uncorrelated))
+				shortPoolByTest.Store(testName, n+int64(uncorrelated))
 			}
 		}
 
@@ -540,25 +553,25 @@ func (r *Recorder) consumeMappingsFor(ctx context.Context, testSetID string, map
 		// product regression, so revoke it the same way the agent's own
 		// capacity-drop path does (RevokedTests) and let finalize delete it.
 		if lostMock {
-			revokedHere[mapping.TestName] = struct{}{}
+			revokedHere[testName] = struct{}{}
 			// Drop whatever an EARLIER delta recorded for this test. The revoke
-			// can arrive after a delta that saw only a correlation timeout, and a
+			// can arrive after a delta whose mock never came, and a
 			// deleted test never reaches replay with a short pool at all —
 			// leaving the entry in place inflates the very metric whose
-			// credibility is the reason the timeout path is not revoked.
+			// credibility is the reason the never-arrived path is not revoked.
 			// (Teardown applies the same exclusion for the agent's own revokes,
 			// keyed on tests it actually managed to DELETE.)
-			shortPoolByTest.Delete(mapping.TestName)
+			shortPoolByTest.Delete(testName)
 			if revokeTest != nil {
-				revokeTest(mapping.TestName)
+				revokeTest(testName)
 			}
 		}
 
 		if len(realMockEntries) == 0 {
-			continue
+			return
 		}
 		if mapped != nil {
-			mapped(mapping.TestName, realMockEntries)
+			mapped(testName, realMockEntries)
 		}
 
 		flushMu.Lock()
@@ -566,7 +579,7 @@ func (r *Recorder) consumeMappingsFor(ctx context.Context, testSetID string, map
 		// resolves and emits more later for mocks retroactively binned into that
 		// window. Those later emissions are a DELTA — overwriting would delete the
 		// mocks already recorded for the test and replay it with a short pool.
-		pending[mapping.TestName] = mergeMockEntries(pending[mapping.TestName], realMockEntries)
+		pending[testName] = mergeMockEntries(pending[testName], realMockEntries)
 		full := len(pending) >= mappingFlushBatch
 		flushMu.Unlock()
 
@@ -576,6 +589,49 @@ func (r *Recorder) consumeMappingsFor(ctx context.Context, testSetID string, map
 		// over. The ticker flushes whatever a partial batch leaves behind.
 		if full {
 			flush()
+		}
+	}
+
+	// applyReady settles the held entries handed back since the last look:
+	// their mock has an outcome now, or the mock stream ended without it.
+	applyReady := func() {
+		ready := waits.takeReady()
+		if len(ready) == 0 {
+			return
+		}
+		byTest := map[string]*mappingResolution{}
+		var order []string
+		for _, e := range ready {
+			res := byTest[e.test]
+			if res == nil {
+				res = &mappingResolution{}
+				byTest[e.test] = res
+				order = append(order, e.test)
+			}
+			entry, fate := settleMock(e.tempID, correlationMap, asyncMockIDs, droppedMockIDs)
+			r.addSettled(res, e.test, e.tempID, entry, fate, e.why, asyncMockIDs)
+		}
+		for _, tn := range order {
+			apply(tn, *byTest[tn])
+		}
+	}
+
+	// Drain the mapping stream, and the held entries as their mocks arrive,
+	// until the stream is closed and nothing waits.
+	in := mappings
+	for in != nil || !waits.settled() {
+		select {
+		case mapping, ok := <-in:
+			if !ok {
+				in = nil
+				continue
+			}
+			r.frameProgress.Add(1)
+			r.mappingsStreamed.Add(1)
+			entries, lost, uncorrelated := r.resolveMappingEntries(mapping, correlationMap, asyncMockIDs, droppedMockIDs, waits)
+			apply(mapping.TestName, mappingResolution{entries: entries, lost: lost, uncorrelated: uncorrelated})
+		case <-waits.wakeCh():
+			applyReady()
 		}
 	}
 
@@ -629,6 +685,9 @@ type Recorder struct {
 	// drainClock is the clock the stop's drains measure a stall on: nil,
 	// keploy's own runnable time; a test drives its own.
 	drainClock stall.Clock
+	// mappingWaitsMade, when set (a test), is handed each recording's mapping
+	// waits as Start makes them, before anything uses them.
+	mappingWaitsMade func(*mappingWaits)
 	// captureLost is set when a frame drain stopped waiting for what the
 	// agent still held from before the stop, or the mock store could not
 	// write mocks the recording captured (mocksNotWritten): the recording is
@@ -1087,93 +1146,67 @@ func (r *Recorder) SetRecordHooks(hooks RecordHooks) {
 // maps — a background egress whose owning test never completes — has no
 // consumer, so an unbounded set would grow for the life of the recording.
 //
-// Past the cap we stop tracking, and BOTH benefits lapse for further drops:
-// their owning tests are no longer revoked, and their mappings go back to
-// burning the full ~500ms correlation spin. That is the deliberate trade — a
+// Past the cap we stop tracking, and further drops lose their revoke: a
+// mapping entry already held for one settles at once, and one whose mapping
+// comes after the drop waits until the mock stream ends; either way it settles
+// as a mock that was never saved, so its test is counted as recorded with an
+// incomplete mock set instead of revoked. That is the deliberate trade — a
 // recording with 10k dropped mocks is systematically broken and the teardown
 // Warn plus the mocks-dropped telemetry still report the true scale — but it is
 // not free, so the cap is set well above any plausible healthy session.
-const maxLiveDroppedMockIDs = 10000
-
-// maxLiveBenignMockIDs bounds the BENIGN half of droppedMockSet separately, and
-// that separation is the point. Benign entries come from the highest-frequency
-// path in the recorder — a poll lane collapses most of its cycles by design —
-// while data-loss entries are rare. On a shared budget the benign traffic would
-// fill the set within minutes and `add` would then fail closed for real drops,
-// silently disabling the revoke this whole change exists to provide. Benign
-// entries are also not reliably consumed: several classes of mock reach the
-// recorder with no mapping referencing them at all, so nothing ever takes them.
-// Package-level var, not a const, only so a test can shrink it to prove that
-// the correctness guarantee (asyncMockIDs) holds when this best-effort cache
-// declines an entry. Never reassigned in production code.
-var maxLiveBenignMockIDs int64 = 10000
-
-// droppedMockSet is the set of mock tempIDs that will never reach
-// correlationMap, handed to the mapping consumer so it can skip the correlation
-// spin for them instead of burning ~500ms each.
 //
-// Entries carry whether the absence is DATA LOSS or intentional, because the
-// two demand opposite handling. A mock we failed to persist means its owning
-// test must be revoked. A mock we chose not to persist — a hook-collapsed async
-// poll cycle — is normal operation: revoking there would delete healthy tests
-// and counting it would fire a data-loss alarm on every async-poll recording.
+// A package-level var, not a const, only so a test can shrink it. Never
+// reassigned in production code.
+var maxLiveDroppedMockIDs = 10000
+
+// droppedMockSet is the set of mock tempIDs the recorder FAILED to persist, so
+// the mapping consumer revokes the test that owns one instead of replaying it
+// with a short mock pool.
+//
+// A mock a RecordHook asked us not to persist (a hook-collapsed async poll
+// cycle) is not here: it is no loss, and its skippedMockMarker in asyncMockIDs
+// is what settles a mapping entry naming it.
 //
 // take() removes the ID as it reports it: entries are consumed exactly once,
 // which is what keeps the set from growing across a multi-day recording.
 type droppedMockSet struct {
-	ids sync.Map // map[string]bool — value: true = data loss, false = intentional
-	// Separate budgets: see maxLiveBenignMockIDs.
-	liveLost   atomic.Int64
-	liveBenign atomic.Int64
-}
-
-func (d *droppedMockSet) store(tempID string, lost bool) bool {
-	counter, limit := &d.liveBenign, maxLiveBenignMockIDs
-	if lost {
-		counter, limit = &d.liveLost, int64(maxLiveDroppedMockIDs)
-	}
-	if counter.Load() >= limit {
-		return false
-	}
-	if _, loaded := d.ids.LoadOrStore(tempID, lost); !loaded {
-		counter.Add(1)
-	}
-	return true
+	ids  sync.Map // map[string]struct{}
+	live atomic.Int64
 }
 
 // add records a mock the recorder FAILED to persist. It reports whether the ID
 // was tracked; false means the set is at capacity and the owning test will NOT
 // be revoked.
-func (d *droppedMockSet) add(tempID string) bool { return d.store(tempID, true) }
-
-// addBenign records a mock the recorder intentionally did not persist. The
-// owning test is left alone — only the correlation spin is short-circuited.
-func (d *droppedMockSet) addBenign(tempID string) bool { return d.store(tempID, false) }
-
-// take reports whether tempID is in the set and, if so, whether its absence is
-// data loss. It removes the entry.
-func (d *droppedMockSet) take(tempID string) (present, lost bool) {
-	v, ok := d.ids.LoadAndDelete(tempID)
-	if !ok {
-		return false, false
+func (d *droppedMockSet) add(tempID string) bool {
+	if d.live.Load() >= int64(maxLiveDroppedMockIDs) {
+		return false
 	}
-	if v.(bool) {
-		d.liveLost.Add(-1)
-	} else {
-		d.liveBenign.Add(-1)
+	if _, loaded := d.ids.LoadOrStore(tempID, struct{}{}); !loaded {
+		d.live.Add(1)
 	}
-	return true, v.(bool)
+	return true
+}
+
+// take reports whether tempID is in the set, and removes it.
+func (d *droppedMockSet) take(tempID string) bool {
+	if _, ok := d.ids.LoadAndDelete(tempID); !ok {
+		return false
+	}
+	d.live.Add(-1)
+	return true
 }
 
 // skippedMockMarker tags an asyncMockIDs entry that exists ONLY because a
 // RecordHook asked us not to persist the mock (a collapsed async poll cycle).
 // Ordinary async-egress mocks are stored as struct{}{}.
 //
-// The distinction exists so the entry can be freed. asyncMockIDs is otherwise
-// never pruned, and skips are the highest-frequency event in a poll-heavy
-// recording — at ~105 bytes per entry, a single 100ms lane would retain
-// hundreds of MB for the life of the session, which is an OOM risk in the
-// DaemonSet embedding where Start is re-entered per session.
+// The distinction does two things. A skip is the mock's outcome — it will never
+// be saved — so a mapping entry naming it settles at once (settleMock) rather
+// than waiting for a save that never comes. And the entry can be freed:
+// asyncMockIDs is otherwise never pruned, and skips are the highest-frequency
+// event in a poll-heavy recording — at ~105 bytes per entry, a single 100ms
+// lane would retain hundreds of MB for the life of the session, which is an
+// OOM risk in the DaemonSet embedding where Start is re-entered per session.
 //
 // The release is best-effort, not a bound: it happens when a mapping consumes
 // the tempID, so a run with mappings disabled (--disable-mapping), or a skipped
@@ -1184,23 +1217,18 @@ type skippedMock struct{}
 
 var skippedMockMarker = skippedMock{}
 
-// markSkippedMock records a mock a RecordHook asked us not to persist, in both
-// places the mapping consumer looks.
+// markSkippedMock records a mock a RecordHook asked us not to persist.
 //
 // Extracted so the marker choice is directly assertable. It is the load-bearing
-// line: storing a plain struct{}{} here instead of skippedMockMarker still
-// satisfies every behavioural test — the entry is simply never released again,
-// and the leak returns silently.
-func markSkippedMock(asyncMockIDs *sync.Map, dropped *droppedMockSet, tempID string) {
-	// CORRECTNESS, unconditional: Skip means "never persisted", so this tempID
-	// must never reach a per-test mapping and must never read as loss. It cannot
-	// be gated on mock.IsAsync() — AsyncRecorder sets Skip and returns BEFORE
-	// assigning Spec.Async, so a collapsed cycle reports IsAsync()==false and the
-	// guard would be a no-op.
+// line: storing a plain struct{}{} here instead of skippedMockMarker would leave
+// a mapping entry naming the mock waiting for a save that never comes, until
+// the mock stream ends — and the entry would never be released again.
+//
+// It cannot be gated on mock.IsAsync(): AsyncRecorder sets Skip and returns
+// BEFORE assigning Spec.Async, so a collapsed cycle reports IsAsync()==false and
+// the guard would be a no-op.
+func markSkippedMock(asyncMockIDs *sync.Map, tempID string) {
 	asyncMockIDs.Store(tempID, skippedMockMarker)
-	// SPEED, best-effort: short-circuits the ~500ms correlation spin. Capped, so
-	// it eventually declines entries; that costs latency, never correctness.
-	dropped.addBenign(tempID)
 }
 
 // releaseSkippedMock frees a SKIP-marked asyncMockIDs entry once a mapping has
@@ -1209,126 +1237,140 @@ func markSkippedMock(asyncMockIDs *sync.Map, dropped *droppedMockSet, tempID str
 // The asymmetry is not fussiness. A real async mock IS in correlationMap, so if
 // a later mapping referenced a pruned entry it would resolve and be appended —
 // leaking a background egress into a test's mock pool. A skipped mock was never
-// persisted, so a later mapping referencing a pruned entry simply fails to
-// correlate: no revoke, no leak, at worst one spin and one counter tick.
+// persisted, so a later mapping referencing a pruned entry simply never
+// correlates: no revoke, no leak, at worst one counter tick at the end.
 func releaseSkippedMock(asyncMockIDs *sync.Map, tempID string, v any) {
 	if _, skipped := v.(skippedMock); skipped {
 		asyncMockIDs.Delete(tempID)
 	}
 }
 
-// resolveMappingEntries correlates a test's mapping tempIDs to the persisted
-// MockEntries in correlationMap, dropping each consumed tempID as it goes. It
-// EXCLUDES async-egress mocks (those in asyncMockIDs): they are served at replay
-// by the async engine from the complete corpus, so they must never be recorded
-// as a testcase's per-test mock — even when a background egress's timestamp
-// happened to fall inside the testcase's request window (the agent's mapper bins
-// purely by timestamp and has no async awareness). The Mock loop stores the
-// async marker before it publishes the tempID to correlationMap, so a resolved
-// tempID always has its async status already decided.
-func (r *Recorder) resolveMappingEntries(mapping models.TestMockMapping, correlationMap, asyncMockIDs *sync.Map, droppedMockIDs *droppedMockSet) ([]models.MockEntry, bool, int) {
-	var realMockEntries []models.MockEntry
-	droppedOwner := false
-	uncorrelated := 0
-	for _, tempID := range mapping.MockIDs {
-		// Async-egress mocks are deliberately excluded from per-test mappings
-		var realEntry models.MockEntry
-		found := false
-		dropped := false
-		lostMock := false
-		// Simple retry loop (fast spin) to wait for the Mock Loop.
-		for i := 0; i < 50; i++ { // Wait up to ~500ms
-			if val, ok := correlationMap.Load(tempID); ok {
-				realEntry = val.(models.MockEntry)
-				found = true
-				break
-			}
-			// A mock we gave up persisting will NEVER reach correlationMap, so
-			// without this the spin burns its full ~500ms per dropped mock —
-			// serialized in the single mapping consumer, which the agent cannot
-			// outrun: it DROPS mappings it cannot hand over, so the stall would
-			// corrupt unrelated healthy tests.
-			//
-			// The check MUST be inside the spin. Mocks and mappings arrive on
-			// two independent channels drained by two independent goroutines —
-			// that race is the whole reason the spin exists — so a mapping
-			// routinely arrives BEFORE its mock is even attempted. Checking
-			// once up front loses to that ordering every time: the test is
-			// silently persisted with a short mock pool AND the full stall is
-			// still paid.
-			if present, lost := droppedMockIDs.take(tempID); present {
-				// A benign skip (hook-collapsed poll cycle) short-circuits the
-				// spin but is NOT loss: it must not revoke and must not be
-				// counted as a short pool.
-				dropped = true
-				lostMock = lost
-				break
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
-		if dropped {
-			// Async status is decided HERE, not earlier. The mock loop stores
-			// the async marker before it attempts the insert, so by the time a
-			// drop is recorded the marker is already published — but a mapping
-			// routinely reaches this loop before either happens, so a check made
-			// up front would simply miss. Getting this wrong DELETES healthy
-			// tests: async-egress mocks are excluded from per-test mappings by
-			// design (see the doc above), so a dropped one is never a short pool
-			// for anybody, yet without this it would set droppedOwner and revoke
-			// the test that merely overlapped it in time.
-			if v, isAsync := asyncMockIDs.Load(tempID); isAsync {
-				releaseSkippedMock(asyncMockIDs, tempID, v)
-				continue
-			}
-			if lostMock {
-				droppedOwner = true
-			}
-			continue
-		}
-		if !found {
-			// Deliberately NOT treated as a drop. A drop is a fact — we know the
-			// mock was abandoned. A correlation timeout is an inference: the mock
-			// may well have been persisted and simply not observed inside 500ms,
-			// and revoking on that guess would convert a latency event into
-			// deterministic deletion of a customer's recorded test. So the test
-			// is still persisted, with a short pool, exactly as before.
-			//
-			// It is counted, though. Persisting a test whose mock set is
-			// incomplete is real data loss whatever the cause, and it was
-			// previously visible only as a per-occurrence log line — no total, so
-			// nobody could say how often it fires. The count is reported at
-			// teardown and in telemetry so the frequency is measurable BEFORE
-			// anyone argues about changing the semantics.
-			// Third and last settle point. If the async marker landed at any
-			// point during the spin, this tempID's absence is by design and must
-			// not be reported as an incomplete mock set — async-egress mocks are
-			// never part of a per-test mapping. Only a tempID we still cannot
-			// classify after the full wait is real, unexplained loss.
-			if v, isAsync := asyncMockIDs.Load(tempID); isAsync {
-				releaseSkippedMock(asyncMockIDs, tempID, v)
-				continue
-			}
-			uncorrelated++
-			r.logger.Error("Failed to correlate mock mapping",
-				zap.String("test", mapping.TestName),
-				zap.String("tempMockID", tempID),
-				zap.String("next_step", "ensure mapping store is enabled, avoid high parallelism, or re-record if mappings are inconsistent"))
-			continue
-		}
-		correlationMap.Delete(tempID)
-		// The other settle point. The doc's invariant — the mock loop stores the
-		// async marker before it publishes the tempID to correlationMap — makes
-		// this the moment async status is knowable for a RESOLVED mock. Checking
-		// only before the spin would let an async mock whose marker landed mid-
-		// spin resolve normally and leak into the per-test mapping, which is
-		// exactly what this exclusion exists to prevent.
+// settleMock reports what the mock loop has published, so far, of the mock
+// tempID names, and consumes it. fateUnknown means nothing yet.
+//
+// It EXCLUDES async-egress mocks (those in asyncMockIDs): they are served at
+// replay by the async engine from the complete corpus, so they must never be
+// recorded as a testcase's per-test mock — even when a background egress's
+// timestamp happened to fall inside the testcase's request window (the agent's
+// mapper bins purely by timestamp and has no async awareness). The mock loop
+// stores the async marker before it attempts the insert, so once the tempID is
+// saved or dropped its async status is decided: that is when it is read.
+func settleMock(tempID string, correlationMap, asyncMockIDs *sync.Map, droppedMockIDs *droppedMockSet) (models.MockEntry, mockFate) {
+	if val, ok := correlationMap.LoadAndDelete(tempID); ok {
 		if v, isAsync := asyncMockIDs.Load(tempID); isAsync {
 			releaseSkippedMock(asyncMockIDs, tempID, v)
+			return models.MockEntry{}, fateExcluded
+		}
+		return val.(models.MockEntry), fateMapped
+	}
+	if droppedMockIDs.take(tempID) {
+		// A dropped ASYNC mock is no short pool for anybody: revoking on it
+		// would delete the healthy test that merely overlapped it in time.
+		if v, isAsync := asyncMockIDs.Load(tempID); isAsync {
+			releaseSkippedMock(asyncMockIDs, tempID, v)
+			return models.MockEntry{}, fateExcluded
+		}
+		return models.MockEntry{}, fateLost
+	}
+	// A skip is an outcome of its own: the mock is never saved.
+	if v, ok := asyncMockIDs.Load(tempID); ok {
+		if _, skipped := v.(skippedMock); skipped {
+			asyncMockIDs.Delete(tempID)
+			return models.MockEntry{}, fateExcluded
+		}
+	}
+	return models.MockEntry{}, fateUnknown
+}
+
+// mappingResolution is what a test's mapping entries settled as.
+type mappingResolution struct {
+	entries []models.MockEntry
+	// lost: the test owned a mock we could not persist; it is revoked.
+	lost bool
+	// uncorrelated counts the mocks of the test that never arrived.
+	uncorrelated int
+}
+
+// addSettled folds one settled entry into res. An entry still fateUnknown
+// here has no mock for its test, and why says why (lossReason).
+func (r *Recorder) addSettled(res *mappingResolution, test, tempID string, entry models.MockEntry, fate mockFate, why lossReason, asyncMockIDs *sync.Map) {
+	if fate == fateUnknown {
+		// An async mock that never correlates is not an incomplete mock set
+		// for anyone — async-egress mocks are never part of a per-test
+		// mapping — so only a tempID still unclassified is real loss.
+		if v, isAsync := asyncMockIDs.Load(tempID); isAsync {
+			releaseSkippedMock(asyncMockIDs, tempID, v)
+			fate = fateExcluded
+		}
+	}
+	switch fate {
+	case fateMapped:
+		res.entries = append(res.entries, entry)
+	case fateLost:
+		res.lost = true
+	case fateUnknown:
+		// Deliberately NOT treated as a drop. A drop is a fact — we know the
+		// mock was abandoned. A mock the stream never delivered is not known
+		// to be lost by this recorder, so the test is still persisted, with a
+		// short pool, and counted: the count is reported at teardown and in
+		// telemetry.
+		res.uncorrelated++
+		if why == reasonRevoked {
+			// The test is deleted at the recording's end (and counted short
+			// there only if its delete fails): no loss to report per mock.
+			r.logger.Debug("not waiting for a revoked test's mock",
+				zap.String("test", test),
+				zap.String("tempMockID", tempID))
+			return
+		}
+		r.logger.Error("Failed to correlate mock mapping",
+			zap.String("test", test),
+			zap.String("tempMockID", tempID),
+			zap.String("next_step", lossNextStep(why)))
+	}
+}
+
+// lossNextStep is what a "Failed to correlate" line says of why.
+func lossNextStep(why lossReason) string {
+	switch why {
+	case reasonTaken:
+		return "another mapping entry naming the same mock took it first (a mock is mapped to one entry), so this test is recorded without it; re-record the test set"
+	case reasonUntrackedDrop:
+		return fmt.Sprintf("the recorder failed to save this mock while %d dropped mocks were already tracked, so its test is recorded without it instead of revoked; re-record the test set", maxLiveDroppedMockIDs)
+	case reasonCapFull:
+		return fmt.Sprintf("%d mapping entries were already waiting for their mocks, so this one was not held; re-record the test set", maxHeldMappingEntries)
+	case reasonAbandoned:
+		return "the recording's teardown gave the mock loop up before it said what became of this mock; re-record the test set"
+	case reasonConsumerGivenUp:
+		return "the mock loop said what became of this mock, but the recording's teardown gave the mapping consumer up before it applied it, so this test is recorded without it; re-record the test set"
+	default:
+		return "the agent named this mock in the test's mapping but the mock stream ended with no mock left for it: the agent never sent it, or another mapping entry naming the same mock took it (a mock is mapped to one entry); re-record the test set"
+	}
+}
+
+// resolveMappingEntries settles a test's mapping entries against what the mock
+// loop has published (settleMock). An entry whose mock has no outcome yet is
+// held in waits and handed back when it does (or when the mock stream ends);
+// such an entry is in none of the results. With nil waits the mock stream is
+// taken as over: an entry with no outcome counts as uncorrelated at once.
+func (r *Recorder) resolveMappingEntries(mapping models.TestMockMapping, correlationMap, asyncMockIDs *sync.Map, droppedMockIDs *droppedMockSet, waits *mappingWaits) ([]models.MockEntry, bool, int) {
+	var res mappingResolution
+	for _, tempID := range mapping.MockIDs {
+		c := waits.claim(mapping.TestName, tempID, func() (models.MockEntry, mockFate) {
+			return settleMock(tempID, correlationMap, asyncMockIDs, droppedMockIDs)
+		})
+		if c.held {
 			continue
 		}
-		realMockEntries = append(realMockEntries, realEntry)
+		if c.capFirst {
+			r.logger.Warn("too many mapping entries are waiting for their mocks: entries past the cap are not held, and each test that names one is recorded without that mock",
+				zap.Int("maxHeldMappingEntries", maxHeldMappingEntries),
+				zap.String("test", mapping.TestName),
+				zap.String("next_step", "the agent is naming mocks it does not send; re-record the test set and report it"))
+		}
+		r.addSettled(&res, mapping.TestName, tempID, c.entry, c.fate, c.why, asyncMockIDs)
 	}
-	return realMockEntries, droppedOwner, uncorrelated
+	return res.entries, res.lost, res.uncorrelated
 }
 
 // GetRecordHooks returns the current hooks.
@@ -1577,13 +1619,31 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	var droppedMockCount = 0
 	// shortPoolByTest maps a test name to how many of its mocks never
 	// correlated, i.e. tests persisted with an INCOMPLETE mock set (see the
-	// !found branch in resolveMappingEntries). Unlike a dropped mock this does
+	// fateUnknown branch in addSettled). Unlike a dropped mock this does
 	// not revoke the test, so without a total the loss shows up only as
 	// scattered per-occurrence log lines. Kept per-test rather than
 	// pre-aggregated so the teardown block can subtract EVERY revoke path — the
 	// agent's RevokedTests control frame revokes tests consumeMappings never
 	// sees, and a revoked test is deleted rather than shipped short.
 	var shortPoolByTest sync.Map
+	// correlationMap, asyncMockIDs, droppedMockIDs and mappingHolds are what
+	// the mock loop publishes of each mock for the mapping consumer; declared
+	// here so the teardown can settle what a mock loop it gave up still holds.
+	var correlationMap sync.Map
+	// asyncMockIDs holds tempIDs of async mocks (Spec.Async set); resolveMappingEntries uses it
+	// to keep async-egress mocks out of the per-test mappings (see its doc).
+	var asyncMockIDs sync.Map
+	// droppedMockIDs holds tempIDs of mocks the recorder gave up persisting,
+	// so the mapping consumer revokes the owning test rather than replay it
+	// with a short mock pool.
+	var droppedMockIDs droppedMockSet
+	// mappingHolds holds the mapping entries whose mock the mock loop has not
+	// reported yet (see mappingWaits); the mock loop reports each outcome to
+	// it, and ends it with its stream.
+	mappingHolds := newMappingWaits()
+	if r.mappingWaitsMade != nil {
+		r.mappingWaitsMade(mappingHolds)
+	}
 	var droppedMockKinds = make(map[string]int)
 	// mockCountMap is written by the mock-consumer goroutine and read at
 	// teardown for telemetry. Guard both with a mutex so that if teardown
@@ -1820,6 +1880,42 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		} else if timedOut {
 			recordDrainedCleanly = false
 		}
+		// A drain that gave the mock loop up (wedged in a save or a hook) left
+		// the mapping entries it would have settled held; one that gave the
+		// mapping consumer up (wedged in a write) left those handed back to it
+		// unapplied. Neither is counted by anyone else: take them here, before
+		// the totals, as the tests' incomplete mock sets they are; the totals
+		// subtract a deleted test as they do for every other entry. After a
+		// clean drain there are none.
+		abandonedReady, abandonedHeld := mappingHolds.abandon()
+		foldAbandoned := func(e heldEntry, unapplied lossReason) {
+			entry, fate := settleMock(e.tempID, &correlationMap, &asyncMockIDs, &droppedMockIDs)
+			why := e.why
+			if fate == fateMapped || fate == fateLost {
+				// Its outcome came, but the consumer will not apply it now:
+				// the test is recorded without it.
+				fate = fateUnknown
+				if why != reasonRevoked {
+					why = unapplied
+				}
+			}
+			var res mappingResolution
+			r.addSettled(&res, e.test, e.tempID, entry, fate, why, &asyncMockIDs)
+			if res.uncorrelated > 0 {
+				prev, _ := shortPoolByTest.Load(e.test)
+				n, _ := prev.(int64)
+				shortPoolByTest.Store(e.test, n+int64(res.uncorrelated))
+			}
+		}
+		// A handed-back entry with no mock keeps why it was handed back (the
+		// stream ended without it, another entry took it, an untracked drop);
+		// one whose mock came was the consumer's to apply.
+		for _, e := range abandonedReady {
+			foldAbandoned(e, reasonConsumerGivenUp)
+		}
+		for _, e := range abandonedHeld {
+			foldAbandoned(e, reasonAbandoned)
+		}
 		// Every drain is over: nothing still selects on utils.StopNow, which
 		// a press at this wait's offer closes, but what a drain abandoned on
 		// a stall (already counted as cut). The record drain joined the
@@ -2026,7 +2122,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 					zap.Int("testsWithShortMockPool", shortPoolTests),
 					zap.Int("mocksUncorrelated", shortPoolMocks),
 					zap.String("testSetID", newTestSetID),
-					zap.String("next_step", "ensure the mapping store is enabled and reduce recording parallelism; re-record the test set if this count is non-trivial"))
+					zap.String("next_step", "ensure the mapping store is enabled; each test's \"Failed to correlate mock mapping\" line says why its mock is missing; re-record the test set if this count is non-trivial"))
 			}
 			if droppedSnapshot > 0 {
 				r.logger.Warn("recording finished with mocks dropped; the tests that owned them were revoked rather than recorded with a short mock pool",
@@ -2046,8 +2142,8 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 				suiteMeta["mocks-dropped-by-kind"] = droppedKindSnapshot
 			}
 			// Gated separately from the drops. The motivating case for these two
-			// is a correlation timeout under parallelism with a perfectly
-			// healthy encoder — zero drops — which is exactly the recording the
+			// is a mock the agent names in a mapping but never sends, with a
+			// perfectly healthy encoder — zero drops — which is exactly the recording the
 			// drop gate excludes, so folding them in there would leave the
 			// frequency invisible in the one case they were added to measure.
 			if shortPoolTests > 0 {
@@ -2354,15 +2450,6 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 
 	r.logger.Debug("Agent is ready. Starting to fetch test cases and mocks...")
 
-	var correlationMap sync.Map
-	// asyncMockIDs holds tempIDs of async mocks (Spec.Async set); resolveMappingEntries uses it
-	// to keep async-egress mocks out of the per-test mappings (see its doc).
-	var asyncMockIDs sync.Map
-	// droppedMockIDs holds tempIDs of mocks the recorder gave up persisting.
-	// The mapping consumer checks it so it never burns its ~500ms correlation
-	// spin on a mock that will never arrive, and so it can revoke the owning
-	// test rather than replay it with a short mock pool.
-	var droppedMockIDs droppedMockSet
 	// A stop before the agent's streams open finds nothing captured: end here
 	// rather than open them only to drain them.
 	if ctx.Err() != nil {
@@ -2631,6 +2718,21 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	errGrp.Go(func() error {
 		// The document the MockDB writes for each mock, for AfterMockInsert.
 		insertedDoc := NewInsertedMockDoc(persistCtx, r.hooks)
+		// No mock comes after this loop: a mapping entry still waiting for
+		// one is settled as never arrived.
+		defer mappingHolds.end()
+		// dropMock publishes that the recorder failed to save tempID's mock,
+		// then tells the waits. It reports whether the drop is tracked (its
+		// test revocable): past maxLiveDroppedMockIDs it is not, and an entry
+		// held for it is settled as lost for that reason.
+		dropMock := func(tempID string) bool {
+			if droppedMockIDs.add(tempID) {
+				mappingHolds.arrived(tempID)
+				return true
+			}
+			mappingHolds.droppedUntracked(tempID)
+			return false
+		}
 		for mock := range frames.Outgoing {
 			r.frameProgress.Add(1)
 			// Deferred-orphan revoke: a reserved-Kind control frame, NOT a mock.
@@ -2638,15 +2740,21 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 			// domain-extraction / hook / InsertMock / correlation work — it
 			// carries no traffic and must never be persisted.
 			if mock.GetKind() == string(models.RevokedTests) {
+				var revoked []string
 				if mock.Spec.Metadata != nil {
 					for _, n := range strings.Split(mock.Spec.Metadata["revoked_tests"], ",") {
 						if n = strings.TrimSpace(n); n != "" {
 							revokedMu.Lock()
 							revokedNames[n] = struct{}{}
 							revokedMu.Unlock()
+							revoked = append(revoked, n)
 						}
 					}
 				}
+				// A revoked test is deleted at the end: its mapping still names
+				// the mock the agent dropped and never sends, so nothing of it
+				// may wait for that mock (and count toward the waits' cap).
+				mappingHolds.revoke(revoked)
 				continue
 			}
 			domainSet.AddAll(telemetry.ExtractDomainsFromMock(mock))
@@ -2664,22 +2772,16 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 				// cycle). Do not persist, map, or correlate it.
 				//
 				// The agent does not know we skipped it, so its tempID is still
-				// in the mapping it streams, and two separate things must be
-				// true for that not to hurt:
-				//
-				//  1. asyncMockIDs — CORRECTNESS, and unconditional. Skip means
-				//     "never persisted", so this tempID must never appear in a
-				//     per-test mapping and must never be read as loss. Note it
-				//     cannot be gated on mock.IsAsync(): AsyncRecorder sets
-				//     info.Skip and returns BEFORE it assigns Spec.Async, so a
-				//     collapsed cycle reports IsAsync()==false. Gating on it
-				//     would make this whole guard a no-op.
-				//  2. droppedMockIDs — SPEED, and best-effort. It short-circuits
-				//     the ~500ms correlation spin, but it is capped, so on a very
-				//     long poll-heavy recording it eventually declines entries.
-				//     That costs latency, never correctness, because (1) is not
-				//     capped.
-				markSkippedMock(&asyncMockIDs, &droppedMockIDs, tempID)
+				// in the mapping it streams. Skip means "never persisted", so
+				// this tempID must never appear in a per-test mapping and must
+				// never be read as loss: the skip marker says so, and is the
+				// outcome a mapping entry waiting for this mock is settled on.
+				// It cannot be gated on mock.IsAsync(): AsyncRecorder sets
+				// info.Skip and returns BEFORE it assigns Spec.Async, so a
+				// collapsed cycle reports IsAsync()==false. Gating on it would
+				// make this whole guard a no-op.
+				markSkippedMock(&asyncMockIDs, tempID)
+				mappingHolds.arrived(tempID)
 				continue
 			}
 			// The AsyncRecorder hook sets Spec.Async in BeforeMockInsert above;
@@ -2698,15 +2800,14 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 					// Bookkeep EVERY error class here, not just ErrMockEncode: past
 					// this point the mock is lost whatever the cause, and the
 					// consequences are identical — the owning test would otherwise be
-					// persisted with a short pool after its mapping burned the full
-					// correlation spin, invisible to both the teardown Warn and the
-					// telemetry. Nothing is being made non-fatal: teardown is already
+					// persisted with a short pool, invisible to both the teardown
+					// Warn and the telemetry. Nothing is being made non-fatal: teardown is already
 					// under way.
 					mockCountMapMu.Lock()
 					droppedMockCount++
 					droppedMockKinds[mock.GetKind()]++
 					mockCountMapMu.Unlock()
-					droppedMockIDs.add(tempID)
+					dropMock(tempID)
 					utils.LogError(r.logger, err, "failed to record mock during shutdown",
 						zap.String("mockName", mock.Name),
 						zap.String("mockKind", mock.GetKind()),
@@ -2727,8 +2828,8 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 					dropped := droppedMockCount
 					mockCountMapMu.Unlock()
 					// Tell the mapping consumer so it revokes the owning test
-					// instead of spinning on an ID that will never arrive.
-					tracked := droppedMockIDs.add(tempID)
+					// instead of recording it short.
+					tracked := dropMock(tempID)
 					// Loud on the first, then sampled: a recording that quietly
 					// grows holes is worse than one that dies, so this must stay
 					// visible without drowning the log on a systematic failure.
@@ -2756,7 +2857,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 				droppedMockKinds[mock.GetKind()]++
 				dropped := droppedMockCount
 				mockCountMapMu.Unlock()
-				droppedMockIDs.add(tempID)
+				dropMock(tempID)
 				if dropped == 1 || dropped%100 == 0 {
 					utils.LogError(r.logger, err, "failed to record mock (environmental); stopping the session",
 						zap.String("mockName", mock.Name),
@@ -2797,6 +2898,9 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 						ReqTimestampMock: models.FormatMockTimestamp(mock.Spec.ReqTimestampMock),
 						ResTimestampMock: models.FormatMockTimestamp(mock.Spec.ResTimestampMock),
 					})
+					// Published first, then told: a mapping entry held for it
+					// settles on what it now finds.
+					mappingHolds.arrived(tempID)
 				}
 				windowMaps.addMock(mock)
 				mockCountMapMu.Lock()
@@ -2809,7 +2913,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	})
 
 	errGrp.Go(func() error {
-		return r.consumeMappingsFor(ctx, newTestSetID, frames.Mappings, &correlationMap, &asyncMockIDs, &droppedMockIDs,
+		return r.consumeMappingsFor(ctx, newTestSetID, frames.Mappings, &correlationMap, &asyncMockIDs, &droppedMockIDs, mappingHolds,
 			func(testName string) {
 				// Reuse the deferred-orphan revoke path the agent's own
 				// capacity-drop uses: finalize deletes these test cases instead
@@ -2817,6 +2921,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 				revokedMu.Lock()
 				revokedNames[testName] = struct{}{}
 				revokedMu.Unlock()
+				mappingHolds.revoke([]string{testName})
 			}, &shortPoolByTest, capWatch.mapped)
 	})
 

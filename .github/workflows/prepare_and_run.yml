@@ -34,6 +34,10 @@ env:
   # SHA via the repo var if a feat branch needs to carry a cross-repo
   # change.
   INTEGRATION_REF: ${{ vars.INTEGRATION_REF || 'main' }}
+  # Every run under the proven switch (KEPLOY_PROVEN=1) runs the agent's exact
+  # view in verify mode (see mock_linux.yml); runs without the switch are
+  # unchanged. Called workflows set it themselves: they do not inherit this.
+  KEPLOY_EXACT_VIEW_VERIFY: '1'
 
 jobs:
   # -------------------------------------------------------------------
@@ -811,6 +815,14 @@ jobs:
     uses: ./.github/workflows/upstream-refusal-linux.yml
     with:
       legs: core
+  run_listener_drops_linux:
+    # Guard: a client that closed its connect mid-handshake (raising only the
+    # proxy listener's sk_drops) leaves its test judged; a full accept queue
+    # (raising the namespace's ListenDrops too) does not; and a test that
+    # abandons a connect leaves its window in an SDK-driven keploy mock record
+    # charged nothing, and every test case of keploy test judged. Builds
+    # keploy from source, so it needs no artifact.
+    uses: ./.github/workflows/listener-drops-linux.yml
   run_upstream_refusal_linux_extended:
     # Its arm64 and docker legs, on the artifacts built for same-repo PRs.
     needs: [build-and-upload, build-docker-image-amd64, build-linux-arm64]
@@ -1484,6 +1496,7 @@ jobs:
       - run_outbound_fin_stall_linux
       - run_upstream_refusal_linux
       - run_upstream_refusal_linux_extended
+      - run_listener_drops_linux
       - run_startup_mock_capture_linux
       - run_repeated_headers_linux
       - run_interim_responses_linux
@@ -1516,6 +1529,7 @@ jobs:
             "${{ needs.run_outbound_fin_stall_linux.result }}" \
             "${{ needs.run_upstream_refusal_linux.result }}" \
             "${{ needs.run_upstream_refusal_linux_extended.result }}" \
+            "${{ needs.run_listener_drops_linux.result }}" \
             "${{ needs.run_startup_mock_capture_linux.result }}" \
             "${{ needs.run_repeated_headers_linux.result }}" \
             "${{ needs.run_interim_responses_linux.result }}" \
