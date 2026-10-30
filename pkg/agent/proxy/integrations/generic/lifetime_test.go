@@ -170,6 +170,10 @@ func TestAMissOnAnExchangeTheTestDoesNotOwnIsNamed(t *testing.T) {
 	for i := range frame {
 		frame[i] = byte(0x80 + i)
 	}
+	// mock-frame holds frame as the recorder writes a binary request
+	// (encodePayload): its base64, typed binary.
+	frameMock := staged("mock-frame", "", models.MetadataLifetimePerTest)
+	frameMock.Spec.GenericRequests[0] = encodePayload(frame, models.FromClient)
 	store := exactStore{
 		exact: true,
 		own:   map[string]bool{"mock-get-y": true},
@@ -177,7 +181,8 @@ func TestAMissOnAnExchangeTheTestDoesNotOwnIsNamed(t *testing.T) {
 			staged("mock-hello", "HELLO", models.MetadataLifetimeSession),
 			staged("mock-auth-x", "AUTH step2", models.MetadataLifetimePerTest),
 			staged("mock-get-y", "GET y", models.MetadataLifetimePerTest),
-			staged("mock-frame", util.EncodeBase64(frame), models.MetadataLifetimePerTest),
+			frameMock,
+			staged("mock-ping", "PING", models.MetadataLifetimePerTest),
 		},
 	}
 	// A binary request one byte off mock-frame's: within the per-test
@@ -187,7 +192,9 @@ func TestAMissOnAnExchangeTheTestDoesNotOwnIsNamed(t *testing.T) {
 	if findBinaryMatch(store.staged[3:], [][]byte{like}, 0.9) != 0 {
 		t.Fatal("the fixture's near request is not within the per-test similarity of mock-frame")
 	}
-	for req, want := range map[string]string{"AUTH step2": "mock-auth-x", string(frame): "mock-frame", string(like): "", "GET y": "", "HELLO": "", "SET z": ""} {
+	// frame's base64 sent as text is other bytes than frame, and 3c 83 46
+	// other bytes than the text PING, its base64: neither is named.
+	for req, want := range map[string]string{"AUTH step2": "mock-auth-x", string(frame): "mock-frame", string(like): "", util.EncodeBase64(frame): "", "PING": "mock-ping", "\x3c\x83\x46": "", "GET y": "", "HELLO": "", "SET z": ""} {
 		if got, _ := notOwnedExchange([][]byte{[]byte(req)}, store, store.MarkCallRound()); got != want {
 			t.Errorf("%q: %q, want %q", req, got, want)
 		}

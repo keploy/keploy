@@ -271,3 +271,89 @@ func TestAChangedRedactedBufferIsNotAnExtraCall(t *testing.T) {
 		t.Fatalf("the answered exchange's own bytes again: %d, want an extra call recorded once", n)
 	}
 }
+
+// Under exact serving a recorded request buffer is compared with the live
+// one as bytes: a text payload's data, a binary payload's base64 decoded
+// (encodePayload). Its stored text is never compared with the live buffer's
+// own encoding, so two different byte strings, one the other's base64, are
+// different requests. Before, a recorded binary frame answered a live text
+// buffer that was its base64 (a client that starts to base64-wrap what it
+// sent raw), and a recorded text buffer that is valid base64 answered the
+// live bytes it decodes to (one that stops): the test passed on the recorded
+// answer. A payload of an unknown type, or binary data that is not base64,
+// holds no bytes keploy can compare, and differs. Without exact serving each
+// is served, as before.
+func TestUnderExactServingBytesAreComparedNotTheirEncoding(t *testing.T) {
+	ctx, logger := context.Background(), zap.NewNop()
+	frame := []byte{0x00, 0x00, 0x00, 0x0c, 0x82, 0xa4, 'i', 't', 'e', 'm', 0xa4, 'b', 'o', 'o', 'k', 0x01}
+	b64 := []byte(util.EncodeBase64(frame))
+	typed := func(typ, data string) models.Payload {
+		return models.Payload{Message: []models.OutputBinary{{Type: typ, Data: data}}}
+	}
+	rows := []struct {
+		name string
+		rec  models.Payload
+		live []byte
+	}{
+		{"recorded binary frame, live sends its base64 text", encodePayload(frame, models.FromClient), b64},
+		{"recorded base64 text, live sends the frame it decodes to", encodePayload(b64, models.FromClient), frame},
+		{"recorded text PING, live sends 3c 83 46, whose base64 is PING", encodePayload([]byte("PING"), models.FromClient), []byte{0x3c, 0x83, 0x46}},
+		{"recorded binary 3c 83 46, live sends the text PING", encodePayload([]byte{0x3c, 0x83, 0x46}, models.FromClient), []byte("PING")},
+		{"recorded with an unknown type, live sends its data", typed("hex", "PING"), []byte("PING")},
+		{"recorded binary that is not base64, live sends its data", typed(binaryPayload, "PING!"), []byte("PING!")},
+	}
+	if rows[3].rec.Message[0].Type != binaryPayload || rows[3].rec.Message[0].Data != "PING" || rows[1].rec.Message[0].Type != models.String {
+		t.Fatalf("the recorder's encoding moved: %+v, %+v", rows[3].rec, rows[1].rec)
+	}
+	for _, filtered := range []bool{true, false} {
+		for _, row := range rows {
+			name := fmt.Sprintf("filtered=%v, %s", filtered, row.name)
+			m := &models.Mock{Name: "mock-x", Kind: models.GENERIC}
+			m.Spec.GenericRequests = []models.Payload{row.rec}
+			m.Spec.GenericResponses = []models.Payload{{Message: []models.OutputBinary{{Type: models.String, Data: "OK"}}}}
+			m.TestModeInfo.IsFiltered = filtered
+			on := true
+			var consumed []string
+			db := switchedStore{servedStore{mocks: []*models.Mock{m}, consumed: &consumed}, &on}
+			ok, resp, err := fuzzyMatch(ctx, logger, [][]byte{row.live}, db)
+			if err != nil || ok || resp != nil || len(consumed) != 0 {
+				t.Errorf("%s: served under exact serving: ok %v, %v, %v, consumed %v; want a miss", name, ok, resp, err, consumed)
+			}
+			if n := extraCall([][]byte{row.live}, answered{mocks: []*models.Mock{m}}); n != 0 {
+				t.Errorf("%s: an extra call recorded %d times, want none", name, n)
+			}
+			// Switch off: served, as before.
+			on = false
+			ok, resp, err = fuzzyMatch(ctx, logger, [][]byte{row.live}, db)
+			if err != nil || !ok || len(resp) != 1 || resp[0].Message[0].Data != "OK" || len(consumed) != 1 {
+				t.Errorf("%s, switch off: ok %v, %v, %v, consumed %v; want the recording, as before", name, ok, resp, err, consumed)
+			}
+		}
+	}
+	// Nor through the pieces the recording holds: a recording whose first
+	// piece has an unknown type is cut as if it were base64 (recordedPieceLen),
+	// and the live piece cut there is still no bytes keploy can compare.
+	cut := &models.Mock{Name: "mock-x", Kind: models.GENERIC}
+	cut.Spec.GenericRequests = []models.Payload{typed("hex", "PING"), typed(models.String, "X")}
+	live := [][]byte{{0x3c, 0x83, 0x46, 'X'}}
+	if got := findExactMatch([]*models.Mock{cut}, live, true); got != -1 {
+		t.Errorf("an unknown type cut like the recording: findExactMatch = %d under exact serving, want -1", got)
+	}
+	if got := findExactMatch([]*models.Mock{cut}, live, false); got != 0 {
+		t.Errorf("an unknown type cut like the recording, switch off: findExactMatch = %d, want 0, as before", got)
+	}
+	// The recorded bytes themselves are served under exact serving, whichever
+	// way they were stored, read whole or in other pieces.
+	for _, req := range [][]byte{frame, b64, []byte("PING"), {0x3c, 0x83, 0x46}} {
+		m := &models.Mock{Name: "mock-x", Kind: models.GENERIC}
+		m.Spec.GenericRequests = []models.Payload{encodePayload(req, models.FromClient)}
+		for _, reads := range [][][]byte{{req}, {req[:1], req[1:]}} {
+			if got := findExactMatch([]*models.Mock{m}, reads, true); got != 0 {
+				t.Errorf("%q recorded as %s, read in %d pieces: findExactMatch = %d under exact serving, want 0", req, m.Spec.GenericRequests[0].Message[0].Type, len(reads), got)
+			}
+		}
+		if n := extraCall([][]byte{req}, answered{mocks: []*models.Mock{m}}); n != 1 {
+			t.Errorf("%q: the answered exchange again is an extra call recorded %d times, want once", req, n)
+		}
+	}
+}
