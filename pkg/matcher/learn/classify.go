@@ -3660,8 +3660,10 @@ func partOf(value, part string) string {
 // Incoming: what its harness gave the application in the test's window,
 // where a replay reads it again) rank right after a call of the test that
 // sent it whole and is no read of the clock: before the test's own call
-// that sent it as a read of the clock (Seen.Clock), and before the run's
-// call or another test's. Those are the same second read elsewhere (an
+// that sent it as a read of the clock (Seen.Clock) where no variable is
+// bound or used (a variable bound there stays the test's, its uses ranked
+// after its bind, the earlier first, as before), and before the run's call
+// or another test's. Those are the same second read elsewhere (an
 // earlier test's lastUsedAt beside the auth_time of the token the harness
 // signed for this test), which keploy cannot tell from a copy, or a value
 // the test's own window holds anyway: the test's own given place is the
@@ -3689,7 +3691,7 @@ func placeRank(e Earlier, s Seen, whole bool) int {
 		return 7
 	}
 	switch {
-	case e.Own && !s.Clock:
+	case e.Own && (!s.Clock || s.Name != ""):
 		return 0
 	case e.Own:
 		return 2

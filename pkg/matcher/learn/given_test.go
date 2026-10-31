@@ -1558,17 +1558,31 @@ func TestAClientTestsIncomingRequestsOutrankTheSameSecondElsewhere(t *testing.T)
 		e.Seen = []Seen{{Side: Request, Leaf: Leaf{Path: "body.data.lastUsedAt", Type: String, Value: epoch(aRead)}, Live: epoch(aRead.Add(FullRoundLead)), Place: "body.data.lastUsedAt", Clock: clock}}
 		return e
 	}
+	named := func(e Earlier, name string) Earlier {
+		e.Seen[0].Name = name
+		return e
+	}
 	gave := harnessGave(aRead, aRead.Add(FullRoundLead), call)
+	// A variable bound at the test's own read of the clock and used at a
+	// later call of the test: the bind is where it came from, the earlier,
+	// never a second variable bound at the use.
+	bound := named(place(Earlier{Mock: "mock-1013", Own: true}, true), "lastUsedAt")
+	use := named(place(Earlier{Mock: "mock-1014", Own: true}, false), "lastUsedAt")
+	use.At = aRead.Add(time.Second)
+	if ln := ClassifyIn(clientTestCache(), drift, live, rec, call, []Earlier{bound, use}, nil, nil, w)[0]; ln.Kind != KindVariable || ln.From.Mock != "mock-1013" {
+		t.Errorf("a variable bound at the test's own read of the clock: %s from %+v (%s); want its bind at mock-1013", ln.Kind, ln.From, ln.Why)
+	}
 	for name, row := range map[string]struct {
 		e        Earlier
 		incoming bool // the incoming requests are where it came from
 	}{
-		"an earlier test's read of the clock":    {place(Earlier{Mock: "mock-199", Run: true}, true), true},
-		"the start-up's read of the clock":       {place(Earlier{Mock: "mock-19", Run: true, StartUp: true}, true), true},
-		"the test's own read of the clock":       {place(Earlier{Mock: "mock-1013", Own: true}, true), true},
-		"the run's call":                         {place(Earlier{Mock: "mock-199", Run: true}, false), true},
-		"another test's call":                    {place(Earlier{Mock: "mock-199"}, false), true},
-		"the test's own call, no read the clock": {place(Earlier{Mock: "mock-1013", Own: true}, false), false},
+		"an earlier test's read of the clock":                      {place(Earlier{Mock: "mock-199", Run: true}, true), true},
+		"the start-up's read of the clock":                         {place(Earlier{Mock: "mock-19", Run: true, StartUp: true}, true), true},
+		"the test's own read of the clock":                         {place(Earlier{Mock: "mock-1013", Own: true}, true), true},
+		"the run's call":                                           {place(Earlier{Mock: "mock-199", Run: true}, false), true},
+		"another test's call":                                      {place(Earlier{Mock: "mock-199"}, false), true},
+		"the test's own call, no read the clock":                   {place(Earlier{Mock: "mock-1013", Own: true}, false), false},
+		"the test's own read of the clock, a variable bound there": {named(place(Earlier{Mock: "mock-1013", Own: true}, true), "lastUsedAt"), false},
 	} {
 		ln := ClassifyIn(clientTestCache(), drift, live, rec, call, []Earlier{row.e, gave}, nil, nil, w)[0]
 		from := ln.From
