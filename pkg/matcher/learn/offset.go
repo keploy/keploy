@@ -695,7 +695,8 @@ func (dc *DriftCache) answerListsOf(x Raw) (l answerLists, plain []map[string]bo
 
 // byChance reports whether t, a word of what v changed (recorded, or as it
 // stands now), that g's answer holds, as either run gave it, stands there by
-// chance (byChanceAt): the texts read are the answer's ids (its words of the
+// chance (byChanceAt), the value whole too where it is a short word
+// (chancePlace.whole: keploy follows no value of g): the texts read are the answer's ids (its words of the
 // idByte reading, its stamps' too), as the recording and as F gave them.
 // The answer is read as words: its ids by their shape, in any order, each
 // run's ids of that shape counted (movedID), and its fields only where F
@@ -736,6 +737,7 @@ func (g givenWords) byChance(v *valueDrift, t string, recorded bool) bool {
 		}
 		return chancePlace{
 			texts:    ids,
+			whole:    true,
 			evidence: g.startUp || recorded && (g.unread || g.unstated),
 			has: func(w string) bool {
 				for i := range readings {

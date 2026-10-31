@@ -919,8 +919,10 @@ func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, 
 				if recorded && ed.recTok[i][t] || !recorded && ed.liveTok[i][t] {
 					// A short word of an id that changed whole, which no id
 					// there holds beside another word of the value's id,
-					// stands there by chance (chanceBits).
-					if chanceIn(v, t, recorded, append(ed.sideForms(true), ed.sideForms(false)...)...) {
+					// stands there by chance (chanceBits), and so does the
+					// value whole, a short word, in another test's leaf
+					// (e.Run: chanceValue).
+					if chanceIn(v, t, recorded, e.Run, append(ed.sideForms(true), ed.sideForms(false)...)...) {
 						aside(t, recorded, func() string { return e.Mock + " at " + s.Leaf.Path })
 						continue
 					}
@@ -1589,8 +1591,18 @@ func rawPlace(dc *DriftCache, x Raw, keep bool, t string) string {
 // it stands now), by chance (chanceIn), which the search set aside as no
 // evidence v came from there (unaccounted): the learning says what it read
 // past (learning is legible).
+//
+// A value whole (chanceValue) is named as one: no id of it holds another
+// word, and the place did not move with it.
 func chanceWhy(v *valueDrift, t string, recorded bool, where string) string {
 	bits := v.partBits(t, recorded)
+	if _, ok := v.chanceWord(t, recorded); !ok && v.chanceValue(t, recorded) {
+		held := ""
+		if bits >= aloneBits {
+			held = ", which no id there holds as an id of its own"
+		}
+		return v.wordOf(t, recorded) + " stands in " + where + " by chance: the value whole, a word of " + strconv.Itoa(int(bits)) + " bits, fewer than " + strconv.Itoa(chanceBits) + held + ", where the place did not move with the value, so it is no evidence the value came from there, and keploy learns it as varying"
+	}
 	held := "beside another word of the value's id"
 	if bits >= aloneBits {
 		held += ", nor as an id of its own"

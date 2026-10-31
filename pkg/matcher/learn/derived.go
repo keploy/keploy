@@ -640,6 +640,9 @@ func driftBytes(d *valueDrift) int64 {
 			n += wordBytes + int64(len(w)) + wordsBytes(others)
 		}
 	}
+	for _, side := range d.oneWord {
+		n += wordsBytes(side)
+	}
 	// idBits and otherSide hold the words of idParts and of the word maps
 	// above: their entries, not the words again.
 	for i := range d.idBits {

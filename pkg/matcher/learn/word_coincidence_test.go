@@ -31,10 +31,11 @@ import (
 // Everything that is evidence stays so, refused or a variable naming the
 // place: the id whole there, a word of at least 32 bits (an 8-hex group, a
 // 10-digit number), two words of the id together there, a word of an id that
-// kept another (a counter in "order-18"), a word the value holds whole, a
-// word of at least 16 bits (aloneBits: "905c") a place holds as an id of
-// its own. Four decimal digits alone there ("2486", a count) carry fewer.
-// Noise names the place it read past.
+// kept another (a counter in "order-18"), a word of at least 16 bits
+// (aloneBits: "905c") a place holds as an id of its own. Four decimal
+// digits alone there ("2486", a count) carry fewer. The value whole, a short
+// word ("48d1"), stands in an earlier test's id by chance too
+// (chanceValue). Noise names the place it read past.
 func TestAShortWordOfAFreshIdIsNoEvidenceItCameFromAnotherTestOrTheStartUp(t *testing.T) {
 	at := time.Date(2026, 10, 31, 9, 0, 0, 0, time.UTC)
 	w := &Window{
@@ -83,12 +84,13 @@ func TestAShortWordOfAFreshIdIsNoEvidenceItCameFromAnotherTestOrTheStartUp(t *te
 				{"the start-up's id holds the fresh id's fourth group", "mock-448", rec, live, served("mock-448", true, text("body.request_id", "5a6b7c8d-1e2f-4a3b-9e21-0f1e2d3c4b5a"))},
 				{"a start-up key is a word of one character of the id", "mock-188", tokRec, tokLive, served("mock-188", true, Leaf{Path: "body{keys}", Type: Keys, Value: "_id\nn\nok"})},
 				{"an earlier test's field holds four digits of the id alone", "mock-231", "ed35a78f-2486-48d1-bc3d-a07311678c73", live, served("mock-231", false, text("body.count", "2486"))},
+				{"an earlier test's id holds the value whole, a short word", "mock-231", "48d1", "7e6d", served("mock-231", false, text("body.cursor.firstBatch.0._id", other))},
 			} {
 				base := c(mode.dc(), nil, row.rec, row.live)
 				got := c(mode.dc(), row.earlier, row.rec, row.live)
 				// Noise names the place it read past (learning is legible);
 				// anything else is as with no such exchange.
-				named := strings.Contains(got.Why, "stands in "+row.mock+" at ") && strings.Contains(got.Why, " by chance: a word of ") && strings.HasSuffix(got.Why, "and keploy learns it as varying")
+				named := strings.Contains(got.Why, "stands in "+row.mock+" at ") && (strings.Contains(got.Why, " by chance: a word of ") || strings.Contains(got.Why, " by chance: the value whole, a word of ")) && strings.HasSuffix(got.Why, "and keploy learns it as varying")
 				if got.Kind != base.Kind || got.Bindable != base.Bindable || got.Kind == KindNoise && !named || got.Kind != KindNoise && strings.Contains(got.Why, row.mock) {
 					t.Errorf("%s, %s: %s: %s bindable=%v (%q); want as with no such exchange: %s bindable=%v, noise naming %s", name, mode.name, row.what, got.Kind, got.Bindable, got.Why, base.Kind, base.Bindable, row.mock)
 				}
@@ -103,7 +105,6 @@ func TestAShortWordOfAFreshIdIsNoEvidenceItCameFromAnotherTestOrTheStartUp(t *te
 				{"two groups of the id together", rec, live, served("mock-231", false, text("body.cursor.firstBatch.0._id", "ffff0000-905c-48d1-aaaa-bbbbccccdddd"))},
 				{"a group of an id that kept another", rec, "ed35a78f-7e6d-4b8a-9e21-5c6d7e8f9a0b", served("mock-231", false, text("body.cursor.firstBatch.0._id", other))},
 				{"a counter of an id that kept its prefix", "order-17", "order-18", served("mock-231", false, text("body.value.seq", "17"))},
-				{"the value whole a short word", "48d1", "7e6d", served("mock-231", false, text("body.cursor.firstBatch.0._id", other))},
 				{"a 10-digit word of a fresh id, alone there", "kq-1730361600-z", "pw-2840472711-y", served("mock-231", true, text("body.cursor.firstBatch.0.n", "1730361600"))},
 				{"a word of letters and digits of the id alone there (aloneBits)", rec, live, served("mock-231", false, text("body.cursor.firstBatch.0.code", "905c"))},
 			} {
@@ -184,13 +185,13 @@ func TestAChanceWordReadsTheOtherSidesWordsAndNeedsAText(t *testing.T) {
 	if r, l := v.otherSideWords(true), v.otherSideWords(false); !has(r, "7e6d") || has(r, "905c") || !has(l, "905c") || has(l, "7e6d") {
 		t.Errorf("other side's words: of the recorded side %v, of the live side %v; want the live words, then the recorded ones", r, l)
 	}
-	if !chanceIn(v, "48d1", true, "x-48d1") {
+	if !chanceIn(v, "48d1", true, false, "x-48d1") {
 		t.Errorf("48d1 alone in another id: not by chance; want by chance")
 	}
-	if chanceIn(v, "48d1", true, "x-48d1", "7e6d") {
+	if chanceIn(v, "48d1", true, false, "x-48d1", "7e6d") {
 		t.Errorf("48d1 where a text holds the live word 7e6d (the place moved with the value): by chance; want evidence")
 	}
-	if chanceIn(v, "48d1", true) {
+	if chanceIn(v, "48d1", true, false) {
 		t.Errorf("48d1 in a place read with no text: by chance; want evidence (fail-closed)")
 	}
 }
@@ -363,14 +364,14 @@ func TestAPlaceMovedWithTheValueOnlyWhereTheOtherWordStandsForTheWordFound(t *te
 		}
 	}
 	all := func(texts ...string) func(string) []string { return func(string) []string { return texts } }
-	if movedWord(v, true, has(chance...), all(chance...)) {
+	if movedWord(v, true, false, has(chance...), all(chance...)) {
 		t.Errorf("4b8a inside another id: read as a place that moved; want by chance")
 	}
 	long := []string{`{"b":"3f0c9a12-0000-4111-8222-933334444555"}`}
-	if !movedWord(v, true, has(long...), all(long...)) {
+	if !movedWord(v, true, false, has(long...), all(long...)) {
 		t.Errorf("the fresh id's 8-hex group in the place: not read as moved; want moved")
 	}
-	if !movedWord(v, true, has("4b8a"), func(string) []string { return nil }) {
+	if !movedWord(v, true, false, has("4b8a"), func(string) []string { return nil }) {
 		t.Errorf("a word of the other side with no text read: not moved; want moved (fail-closed)")
 	}
 	for _, row := range []struct {
@@ -644,6 +645,121 @@ func TestAShortWordOfARunsDecodedTextIsNoEvidenceWhereTheRunChangedWhole(t *test
 			refused := got.Kind == KindUnaccounted && !got.Bindable && strings.Contains(got.Why, "mock-2571")
 			if !variable && !refused {
 				t.Errorf("FALSE GREEN? %s: %s in mock-2571: %s from %q bindable=%v (%q); want a variable of mock-2571 or refused naming it", mode.name, row.what, got.Kind, got.From.Mock, got.Bindable, got.Why)
+			}
+		}
+	}
+}
+
+// api-server's T2 suite (s9 trace-b, round F): the application wrote a
+// job's duration_ms, a short number whole ("46" recorded, "4499" in F), and
+// keploy refused the test because "46" stood in another test's recording:
+// "a word of its recorded value (its characters 1 to 2) appears in
+// mock-11193, a recording record's full round gave the application before
+// the call that is another test's ... keploy follows no value of another
+// test's". A value that is one word whole, of fewer than chanceBits bits,
+// which changed whole, stands in another test's recording (or the set's
+// start-up) by chance as a short word of a fresh id does, by the same rule
+// (chanceHeld, aloneBits): there it is no evidence the value came from
+// there, unless the place moved with the value. A value of two digits
+// stands in nearly every recording.
+//
+// Evidence stays (no false green): the place moved with the value (F gave
+// the fresh value at the cell holding the recorded one: a copy). Where the
+// rule a copy follows its source is absent (ClassifyGiven), so do a value of
+// at least 32 bits (ten digits), one of at least aloneBits a place holds as
+// an id of its own (five digits alone in a cell), a connection's start-up
+// (evidence whole), a value that changed only in case (its folded form
+// held on both sides: no value that changed whole), and the call's own
+// test's recording, which the chance rule does not read a value whole in (keploy follows a value of the call's
+// own test). ClassifyFollowing reads those apart, as before: both runs gave
+// the application the word there and one value lacks it (excusedGiven).
+func TestAShortValueWholeIsNoEvidenceItCameFromAnotherTestWhereThePlaceDidNotMoveWithIt(t *testing.T) {
+	type classify func(dc *DriftCache, drift []string, live, rec Shape, at time.Time, earlier []Earlier, raw []Raw, resp []Leaf, w *Window, given GivenEarlier) []Learned
+	const p = "body.docs.msgs.0.duration_ms.$numberLong"
+	shape := func(v string) Shape { return Shape{Leaves: map[string]Leaf{p: {Path: p, Type: String, Value: v}}} }
+	for name, c := range map[string]classify{"ClassifyGiven": ClassifyGiven, "ClassifyFollowing": ClassifyFollowing} {
+		run := func(rec, live string, raw ...Raw) Learned {
+			got := c(clockedDrifts(), []string{p}, shape(live), shape(rec), eRecAt, nil, raw, nil, nil, nil)
+			if len(got) != 1 {
+				t.Fatalf("%s: %q recorded, %q in F: %+v", name, rec, live, got)
+			}
+			return got[0]
+		}
+		for _, row := range []struct {
+			what, rec, live string
+			x               Raw
+		}{
+			{"another test's cell holds the recorded value, F gave it alike", "46", "4499", eRow("46", "1", "2").ServedAs(6).ServedLive(eRow("46", "1", "2")).OfAnotherTest()},
+			{"another test's cell holds the recorded value, F served it as recorded", "40", "2081", eRow("40", "1", "2").ServedAs(6).ServedAsRecorded().OfAnotherTest()},
+			{"another test's cell holds the fresh value, F gave it alike", "40", "2081", eRow("2081", "1", "2").ServedAs(6).ServedLive(eRow("2081", "1", "2")).OfAnotherTest()},
+			{"another test's id holds the recorded value as a word", "48d1", "7e6d", eRow("x-48d1", "1", "2").ServedAs(6).ServedLive(eRow("x-48d1", "1", "2")).OfAnotherTest()},
+		} {
+			if got := run(row.rec, row.live, row.x); got.Kind != KindNoise || !strings.Contains(got.Why, "stands in mock-6") || !strings.Contains(got.Why, " by chance: the value whole, a word of ") {
+				t.Errorf("%s: %s (%q recorded, %q in F): %s (%q); want noise naming mock-6 read past by chance", name, row.what, row.rec, row.live, got.Kind, got.Why)
+			}
+		}
+		for _, row := range []struct {
+			what, rec, live, mock string
+			x                     Raw
+			// given: evidence where the rule a copy follows its source is
+			// absent (ClassifyGiven) only.
+			given bool
+		}{
+			{"another test's cell F gave the fresh value at", "40", "2081", "mock-6", eRow("40", "1", "2").ServedAs(6).ServedLive(eRow("2081", "1", "2")).OfAnotherTest(), false},
+			{"another test's cell F gave the recorded value at, the recording the fresh one", "2081", "40", "mock-6", eRow("2081", "1", "2").ServedAs(6).ServedLive(eRow("40", "1", "2")).OfAnotherTest(), false},
+			{"a value of ten digits in another test's cell", "4821739056", "9930217845", "mock-6", eRow("4821739056", "1", "2").ServedAs(6).ServedLive(eRow("4821739056", "1", "2")).OfAnotherTest(), true},
+			{"a value of five digits alone in another test's cell (aloneBits)", "29782", "41377", "mock-6", eRow("29782", "1", "2").ServedAs(6).ServedLive(eRow("29782", "1", "2")).OfAnotherTest(), true},
+			{"another test's connection start-up", "81", "4499", "mock-hs-81", RawOf(eSession("mock-hs-81", 900*time.Millisecond, 81), false).ServedAs(1).ServedAsRecorded().OfAnotherTest(), true},
+			{"the call's own test's cell", "46", "4499", "mock-6", eRow("46", "1", "2").ServedAs(6).ServedLive(eRow("46", "1", "2")), true},
+			{"a value that changed only in case, in another test's cell", "Ab", "aB", "mock-6", eRow("Ab", "1", "2").ServedAs(6).ServedLive(eRow("Ab", "1", "2")).OfAnotherTest(), true},
+		} {
+			if row.given && name != "ClassifyGiven" {
+				continue
+			}
+			if got := run(row.rec, row.live, row.x); got.Kind == KindNoise || strings.Contains(got.Why, " by chance") || !strings.Contains(got.Why, row.mock) {
+				t.Errorf("FALSE GREEN? %s: %s (%q recorded, %q in F): %s (%q); want a variable of %s or refused naming it", name, row.what, row.rec, row.live, got.Kind, got.Why, row.mock)
+			}
+		}
+	}
+	// The same at a leaf of the running set's exchanges (Earlier): an
+	// earlier test's (Run) reads the value whole by the rule, and a leaf
+	// that drifted with the value (the recording gave "40" there, F
+	// "2081") is a copy; the call's own test's leaf is read as before.
+	w := &Window{
+		Rec: Span{From: eRecAt.Add(-900 * time.Millisecond), To: eRecAt},
+		F:   Span{From: eRecAt.Add(60_500 * time.Millisecond), To: eRecAt.Add(61_400 * time.Millisecond)},
+	}
+	leaf := func(run bool, rec, live string) []Earlier {
+		l := Leaf{Path: "body.count", Type: String, Value: rec}
+		return []Earlier{{Mock: "mock-231", At: eRecAt.Add(-2 * time.Second), Run: run, Payload: payloadOf("mock-231", eRecAt.Add(-2*time.Second)), Seen: []Seen{{Side: Response, Leaf: l, Live: live}}}}
+	}
+	for name, c := range map[string]func(earlier []Earlier, rec, live string) Learned{
+		"ClassifyIn": func(earlier []Earlier, rec, live string) Learned {
+			return ClassifyIn(clockedDrifts(), []string{p}, shape(live), shape(rec), eRecAt, earlier, nil, nil, w)[0]
+		},
+		"ClassifyFollowing": func(earlier []Earlier, rec, live string) Learned {
+			return ClassifyFollowing(clockedDrifts(), []string{p}, shape(live), shape(rec), eRecAt, earlier, nil, nil, w, nil)[0]
+		},
+	} {
+		if got := c(leaf(true, "46", "46"), "46", "4499"); got.Kind != KindNoise || !strings.Contains(got.Why, "stands in mock-231 at body.count by chance: the value whole, a word of ") {
+			t.Errorf("%s: an earlier test's leaf holds the recorded value, F gave it alike: %s (%q); want noise naming mock-231 read past by chance", name, got.Kind, got.Why)
+		}
+		for _, row := range []struct {
+			what    string
+			earlier []Earlier
+			given   bool
+		}{
+			{"an earlier test's leaf drifted with the value", leaf(true, "40", "2081"), false},
+			{"the call's own test's leaf", leaf(false, "40", "40"), true},
+		} {
+			if row.given && name != "ClassifyIn" {
+				continue
+			}
+			got := c(row.earlier, "40", "2081")
+			variable := got.Kind == KindVariable && got.From.Mock == "mock-231"
+			refused := got.Kind != KindNoise && got.Kind != KindVariable && !strings.Contains(got.Why, " by chance") && strings.Contains(got.Why, "mock-231")
+			if !variable && !refused {
+				t.Errorf("FALSE GREEN? %s: %s: %s from %q (%q); want a variable of mock-231 or refused naming it", name, row.what, got.Kind, got.From.Mock, got.Why)
 			}
 		}
 	}

@@ -2564,10 +2564,16 @@ type valueDrift struct {
 	// reading. Such an id was made or copied as one (insideAnotherID).
 	// Each word maps to the other words of its ids.
 	idParts [2]map[string]map[string]bool
-	// idBits are the bits each word of idParts carries as the value holds
-	// it (partBits), and otherSide the words of what the value changed on
-	// the side other than idParts' [side] (recorded [0]: those it holds
-	// now), in every reading (chanceIn).
+	// oneWord are the value whole, recorded [0] and live [1], in each
+	// declared form (raw, case-folded, the text its run decodes to) where
+	// the value is one word whole (letters and digits only) and the other
+	// side holds that form in no reading: a value that changed whole
+	// (chanceValue).
+	oneWord [2]map[string]bool
+	// idBits are the bits each word of idParts and oneWord carries as the
+	// value holds it (partBits), and otherSide the words of what the value
+	// changed on the side other than idParts' [side] (recorded [0]: those
+	// it holds now), in every reading (chanceIn).
 	idBits          [2]map[string]float64
 	otherSide       [2][]string
 	decRec, decLive string
@@ -4612,7 +4618,22 @@ func (d *valueDrift) readIDParts(forms [][2]string, enc int) {
 				d.idParts[side][w] = others
 			}
 		}
-		if len(d.idParts[side]) == 0 {
+		// The value whole, where it is one word, in each form that is one
+		// word whole: the raw value, its case-folding, the text it decodes
+		// to (b64Text). Where the other side holds one of them ("ABC" of
+		// "abc", folded) the value did not change whole: none is.
+		if oneWordText(forms[0][side]) {
+			whole := map[string]bool{}
+			for _, f := range forms {
+				if w := f[side]; oneWordText(w) {
+					whole[w] = true
+				}
+			}
+			if !heldAny(whole) {
+				d.oneWord[side] = whole
+			}
+		}
+		if len(d.idParts[side]) == 0 && len(d.oneWord[side]) == 0 {
 			continue
 		}
 		// The bits of a word are those of the word as the value holds it
@@ -4620,14 +4641,20 @@ func (d *valueDrift) readIDParts(forms [][2]string, enc int) {
 		// a word of the value's own "Xa9bT2" (35.7), which carries as many
 		// bits in either case.
 		d.idBits[side] = map[string]float64{}
+		known := func(w string) bool {
+			_, ok := d.idParts[side][w]
+			return ok || d.oneWord[side][w]
+		}
 		for w := range d.idParts[side] {
+			d.idBits[side][w] = wordBits(w)
+		}
+		for w := range d.oneWord[side] {
 			d.idBits[side][w] = wordBits(w)
 		}
 		for _, f := range forms {
 			for _, word := range []func(byte) bool{isWord, wordByte} {
 				for _, w := range wordsBy(f[side], word) {
-					l := strings.ToLower(w)
-					if _, ok := d.idParts[side][l]; ok && l != w {
+					if l := strings.ToLower(w); known(l) && l != w {
 						d.idBits[side][l] = math.Max(d.idBits[side][l], wordBits(w))
 					}
 				}
@@ -4716,7 +4743,12 @@ func heldAsID(s, t string, others map[string]bool) bool { return heldIn(s, t, ot
 // aloneBits a place holds as an id of its own stay evidence: keploy
 // refuses there as before, fail-closed. An application that builds an id
 // it otherwise mints fresh around a short word of a recording is, by its
-// words alone, an id that holds that word by chance.
+// words alone, an id that holds that word by chance. The value whole, one
+// such word (a duration_ms "46", a short code), reads by the same rule in
+// another test's recording, or the set's start-up (chanceValue,
+// chancePlace.whole): keploy follows no value of those, and a number of
+// two digits stands in nearly every recording; where the place moved with
+// the value (F gave "4499" at the field that held "46") it is a copy.
 const chanceBits = 32
 
 // aloneBits is the bound from which a word of what a value changed that a
@@ -4787,6 +4819,31 @@ func (v *valueDrift) chanceWord(t string, recorded bool) (others map[string]bool
 	return others, true
 }
 
+// oneWordText reports whether s is one word whole: letters and digits of
+// ASCII only, so that every reading reads it as one word.
+func oneWordText(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if !isWord(s[i]) {
+			return false
+		}
+	}
+	return s != ""
+}
+
+// chanceValue reports whether t is v's value whole (recorded, or as it
+// stands now) in one of its forms, one word that changed whole (oneWord),
+// of fewer than chanceBits bits: a short number ("46" of a duration_ms), a
+// short code. A place that reads a value whole by the chance rule
+// (chancePlace.whole) reads it as it reads a short word of an id that
+// changed whole, which no other word of the id stands beside.
+func (v *valueDrift) chanceValue(t string, recorded bool) bool {
+	side := 1
+	if recorded {
+		side = 0
+	}
+	return v.oneWord[side][t] && v.partBits(t, recorded) < chanceBits
+}
+
 // otherSideWords are the words of what v changed on the side t is not of
 // (recorded: those it holds now), in every reading.
 func (v *valueDrift) otherSideWords(recorded bool) []string {
@@ -4806,6 +4863,13 @@ type chancePlace struct {
 	// texts are the place's texts, as either run gave it, that chanceHeld
 	// reads t in: none read is no place a word stands in by chance.
 	texts []string
+	// whole: the place reads the value whole, where it is a short word
+	// (chanceValue), by the rule too: another test's recording, or one of
+	// an earlier test of the set or its start-up (givenWords). keploy
+	// follows no value of those, so a value whole that stands there only
+	// by chance would refuse the call; a value of the call's own test's
+	// recordings is followed (a variable) or set aside as before.
+	whole bool
 	// evidence: every word of the place is evidence, whatever its bits: a
 	// connection's start-up whose word a swap of start-ups can change
 	// (swapHolds), or a place F served whose view keploy cannot read.
@@ -4828,25 +4892,26 @@ type chancePlace struct {
 // byChanceAt reports whether t, a word of what v changed (recorded, or as
 // it stands now), stands in the place p builds by chance, so that finding
 // it there is no evidence v came from there (chanceBits): t is a chanceWord
-// of v, the place is no evidence whole (chancePlace.evidence), t stands in
-// its texts by chance (chanceHeld), and the place did not move with the
-// value: no word of the other side stands there but by chance (movedWord),
-// no id holding t holds such a word in t's place, as the other run gave it
-// (movedID), and no field holding t held one (atField). p is built only
-// for a word that may be one (chanceWord).
+// of v, or the value whole where the place reads one (chanceValue,
+// chancePlace.whole), the place is no evidence whole (chancePlace.evidence),
+// t stands in its texts by chance (chanceHeld), and the place did not move
+// with the value: no word of the other side stands there but by chance
+// (movedWord), no id holding t holds such a word in t's place, as the other
+// run gave it (movedID), and no field holding t held one (atField). p is
+// built only for a word that may be one (chanceWord, chanceValue).
 func (v *valueDrift) byChanceAt(t string, recorded bool, place func() chancePlace) bool {
-	if _, ok := v.chanceWord(t, recorded); !ok {
+	if _, ok := v.chanceWord(t, recorded); !ok && !v.chanceValue(t, recorded) {
 		return false
 	}
 	p := place()
-	if p.evidence || !chanceHeld(v, t, recorded, p.texts...) {
+	if p.evidence || !chanceHeld(v, t, recorded, p.whole, p.texts...) {
 		return false
 	}
 	idsOf := p.idsOf
 	if idsOf == nil {
 		idsOf = func(string) []string { return nil }
 	}
-	if movedWord(v, recorded, p.has, idsOf) {
+	if movedWord(v, recorded, p.whole, p.has, idsOf) {
 		return false
 	}
 	if movedID(v, t, recorded, p.self, p.other) {
@@ -4860,10 +4925,14 @@ func (v *valueDrift) byChanceAt(t string, recorded bool, place func() chancePlac
 // it, are texts (byChanceAt): a leaf is one place, so a text of it holding
 // a word of what v changed on the other side moved with the value (the
 // recording gave "48d1" there, F "6c7d", and the value took each): a copy,
-// which two short words together show.
-func chanceIn(v *valueDrift, t string, recorded bool, texts ...string) bool {
+// which two short words together show. whole: the leaf is another test's
+// (an earlier test's of the set, or the set's start-up's), which reads the
+// value whole by the rule too (chancePlace.whole); a word of the other side
+// in the leaf is the place moving with it, whatever its bits (no id is read
+// there: movedWord).
+func chanceIn(v *valueDrift, t string, recorded, whole bool, texts ...string) bool {
 	return v.byChanceAt(t, recorded, func() chancePlace {
-		return chancePlace{texts: texts, has: func(w string) bool {
+		return chancePlace{texts: texts, whole: whole, has: func(w string) bool {
 			for _, s := range texts {
 				if ContainsToken(s, w) {
 					return true
@@ -4876,14 +4945,20 @@ func chanceIn(v *valueDrift, t string, recorded bool, texts ...string) bool {
 
 // chanceHeld reports whether t, a word of what v changed (recorded, or as
 // it stands now), found in a place whose texts, as either run gave it, are
-// texts, stands there as it would by chance: t is a chanceWord of v, and no
-// id of the texts holds it beside another word of v's id, nor, where t
-// carries at least aloneBits, as an id of its own (heldIn). A place's ids
-// (its words of the idByte reading) are texts of it too. No text read is no
-// place a word stands in by chance (fail-closed). Whether the place moved
-// with the value is read apart (chanceIn, movedID, atPlace).
-func chanceHeld(v *valueDrift, t string, recorded bool, texts ...string) bool {
+// texts, stands there as it would by chance: t is a chanceWord of v, or,
+// where the place reads a value whole (whole: chancePlace.whole), the value
+// whole (chanceValue), and no id of the texts holds it beside another word
+// of v's id (a value whole has none), nor, where t carries at least
+// aloneBits, as an id of its own (heldIn): "29782" alone in a cell stays
+// evidence, as a 4-hex group does. A place's ids (its words of the idByte
+// reading) are texts of it too. No text read is no place a word stands in
+// by chance (fail-closed). Whether the place moved with the value is read
+// apart (chanceIn, movedID, atPlace).
+func chanceHeld(v *valueDrift, t string, recorded, whole bool, texts ...string) bool {
 	others, ok := v.chanceWord(t, recorded)
+	if !ok && whole {
+		ok = v.chanceValue(t, recorded)
+	}
 	if !ok || len(texts) == 0 {
 		return false
 	}
@@ -5050,10 +5125,11 @@ func idsAround(s, t string, yield func(id string, at int) bool) {
 // id, F a row holding a group of its new one). A short word of the other
 // side's fresh id inside another id of the place stands there by chance
 // and shows nothing; such a word at the place of t shows it (movedID,
-// atPlace). idsOf are the texts chanceHeld reads for a word found.
-func movedWord(v *valueDrift, recorded bool, has func(w string) bool, idsOf func(w string) []string) bool {
+// atPlace). idsOf are the texts chanceHeld reads for a word found; whole,
+// whether the place reads a value whole by the rule (chancePlace.whole).
+func movedWord(v *valueDrift, recorded, whole bool, has func(w string) bool, idsOf func(w string) []string) bool {
 	for _, w := range v.otherSideWords(recorded) {
-		if has(w) && !chanceHeld(v, w, !recorded, idsOf(w)...) {
+		if has(w) && !chanceHeld(v, w, !recorded, whole, idsOf(w)...) {
 			return true
 		}
 	}
