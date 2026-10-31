@@ -1510,7 +1510,8 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 	// leaf classifies one changed leaf, r as recorded and l as F saw it, as
 	// a value of the call whose window is w, without the rules skip names
 	// (skipRule), every other rule as it stands.
-	leaf := func(r, l Leaf, w *Window, skip skipRule) Learned {
+	var leaf func(r, l Leaf, w *Window, skip skipRule) Learned
+	leaf = func(r, l Leaf, w *Window, skip skipRule) Learned {
 		if unreadRaw != "" {
 			return Learned{Kind: KindUnaccounted, Recorded: r, Live: l, Why: unreadRaw}
 		}
@@ -1609,12 +1610,16 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 				// a replay passes it only as the clock plus that offset.
 				if why != "" {
 					off, cutWhy, ok := dc.textClockOffset(r, l, v, w, resp)
-					// The same instant inside a text (wordClockOffset).
-					if !ok && cutWhy == "" {
-						off, cutWhy, ok = dc.wordClockOffset(r, l, v, w, resp)
-					}
 					if ok {
 						return off
+					}
+					// The same instant inside a text, read alone as the
+					// value whole (wordRead): a read of the clock, plain
+					// or plus an offset, at its word.
+					if cutWhy == "" {
+						if word, ok := wordRead(Learned{Kind: KindNoise, Recorded: r, Live: l}, w, leaf); ok && word.Kind != KindUnaccounted {
+							return word
+						}
 					}
 					if cutWhy != "" {
 						why = clientCutAmbiguousWhy(cutWhy)
@@ -1732,15 +1737,6 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// A time of day whole in both runs, which no window holds (it names
 		// no day), is a read modulo a day all the same, never noise: every
 		// replay checks it in its call's span (textTodRead).
-		//
-		// One rule for the instant whole and inside a text: a text that
-		// holds an instant among other words (a query's literal "run_at >
-		// '<now - 1m>'", a note's "due <now - 3h>"), learned as noise of
-		// its changed words, is refused in a call with a window where an
-		// instant of it that changed is a read neither that window holds in
-		// both runs nor the lead moved (textOutsideWindowWhy), as the
-		// instant whole is (outsideWindowWhy), naming where it stands:
-		// noise there would let any value pass at every replay.
 		if ln.Kind == KindNoise && ln.Read == nil {
 			if read := dc.textTodRead(r.Value, l.Value, w, at); read != nil {
 				if w == nil && !dc.appClock {
@@ -1757,8 +1753,6 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 				default:
 					ln.Kind, ln.Why = KindUnaccounted, outsideWindowWhy
 				}
-			} else if why := dc.textOutsideWindowWhy(dc.ofIn(r.Value, l.Value, w, at), w); why != "" {
-				ln.Kind, ln.Why = KindUnaccounted, why
 			}
 		}
 		// A read whose two runs wrote it in two layouts (an ISO text, then
@@ -1795,14 +1789,12 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		}
 		return ln
 	}
-	// clientWord is ln, a text w learns as noise, learned instead as the read
-	// of its one changed word in w, in keploy mock's client tests
-	// (wordRead), the word read by rd.
+	// clientWord is ln, a text w learns as noise, read by the one rule for
+	// an instant wherever it stands (wordRead), each instant read by rd, in
+	// keploy test and in keploy mock's client tests alike.
 	clientWord := func(ln Learned, w *Window, rd func(r, l Leaf, w *Window, skip skipRule) Learned) Learned {
-		if dc.clientTests {
-			if word, ok := wordRead(ln, w, rd); ok {
-				return word
-			}
+		if word, ok := wordRead(ln, w, rd); ok {
+			return word
 		}
 		return ln
 	}
@@ -1917,16 +1909,16 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 	for _, p := range drift {
 		r, l := rec.Leaves[p], live.Leaves[p]
 		ln := leaf(r, l, w, 0)
-		// A client test's own clock read made inside its call's window as
-		// one word of a longer text (keploy mock's harness naming an app
-		// "[E2E] stop-<UnixNano>", or "job <UnixNano> queued", by its own
-		// clock, which keploy's launcher puts on the run's clock as it does
-		// the application's), which that window learns as noise of that
-		// word, is learned instead as a read of that word in its call's
-		// window (wordRead: models.ClockOffset.Word), checked at every
-		// replay, and the rest of the text is still compared. A text whose
-		// changed word is no read of the clock in the window, or one more of
-		// whose bytes changed, stays the noise the window learned.
+		// An instant inside a text the call's window learns as noise is
+		// judged as the same instant whole (wordRead): a client test's own
+		// read as one word of a longer text (keploy mock's harness naming an
+		// app "[E2E] stop-<UnixNano>" by its own clock, which keploy's
+		// launcher puts on the run's clock as it does the application's), a
+		// query's literal "run_at > '<now - 1m>'", a cursor's "since",
+		// percent-encoded or in base64. Learned as a read of the clock whole,
+		// it is learned as that read at its word (models.ClockOffset.Word),
+		// checked at every replay, and the rest of the text is still
+		// compared; refused whole, the text is refused, saying why.
 		ln = clientWord(ln, w, read)
 		// A read made before its call's window: in keploy mock's client
 		// tests (the only calls whose window knows each run's test begin),
@@ -2088,50 +2080,97 @@ func sinceTestBegin(ln Learned) (Learned, bool) {
 }
 
 // sinceWord is wordRead of early in wb, a call's window from each run's
-// test begin, the word's read checked from its test's begin
-// (models.SinceTestBegin).
+// test begin, where it learns a plain read of the clock at a word: the
+// word's read checked from its test's begin (models.SinceTestBegin).
 func sinceWord(early Learned, wb *Window, leaf func(r, l Leaf, w *Window, skip skipRule) Learned) (Learned, bool) {
 	own, ok := wordRead(early, wb, leaf)
-	if ok {
-		own.Read.Since = models.SinceTestBegin
+	if !ok || own.Kind != KindClockRead || own.Read == nil {
+		return early, false
 	}
-	return own, ok
+	own.Read.Since = models.SinceTestBegin
+	return own, true
 }
 
 // wordRead is early, a text a window w learns as noise (no read of it
-// whole: Read nil), learned instead as a read of the clock in w of the one
-// word of it that changed (clockWordIn): the word, read alone in w by leaf
-// as a value of its own (every rule of a value: its sources, its echo, a
-// read plus an offset, the form and zone it is read in), is a plain read of
-// the clock (KindClockRead), and the text around it is the same in both
-// runs. The read carries where the word stands in the recorded text, with
-// the length and SHA-256 of the text on each side of it, never the text
-// (models.ClockOffset.Word), so a replay reads the word alone as the clock
-// and compares the rest. ok is false for anything else (a text two words of
-// which changed, one whose changed word is no read in w, or one leaf learns
-// otherwise), which stays as w learned it: a word read turns noise into a
-// checked read, and a refusal into one, never into noise.
+// whole: Read nil), read by the one rule for an instant wherever it stands
+// (founder, 2026-10-31): an instant is the same object whole, inside a
+// text, or inside an encoded form of a text. The text is decoded once
+// (wordForm: its escapes read, its base64 runs decoded where they stand),
+// and each instant of it that changed (changedSpans) is read alone by leaf
+// as the value whole would be, in w (every rule of a value: its sources,
+// its echo, the lead, a read plus an offset, the form and zone it is read
+// in). One that leaf refuses refuses the text, naming where it stands and
+// saying why the instant whole is refused. Where one instant alone changed,
+// with the decoded text around it the same in both runs, and leaf learns
+// it as a read of the clock, plain or plus an offset, the text is learned
+// as that read at the word (models.ClockOffset.Word, in the form it was
+// read in: models.ClockWord.Form), carrying where the word stands with the
+// length and SHA-256 of the text on each side of it, never the text, so a
+// replay reads the word alone as the clock and compares the rest. ok is
+// false for anything else, which stays as w learned it: a text two
+// instants of which changed, or an instant and another word, that leaf
+// refuses neither of stays noise, as one an instant of which leaf learns
+// otherwise does (a copy of an earlier place's instant).
 func wordRead(early Learned, w *Window, leaf func(r, l Leaf, w *Window, skip skipRule) Learned) (Learned, bool) {
 	if early.Kind != KindNoise || early.Read != nil {
 		return early, false
 	}
 	r, l := early.Recorded, early.Live
-	before, rw, lw, after, ok := clockWordIn(r.Value, l.Value, w)
-	if !ok || before == "" && after == "" {
-		return early, false
+	dr, dl := wordForm(r.Value), wordForm(l.Value)
+	pairs := changedSpans(dr, dl)
+	for i, p := range pairs {
+		if p[0].start == 0 && p[0].end == len(dr) {
+			// The text is the instant: the value whole, read as one.
+			return early, false
+		}
+		wr, wl := r, l
+		wr.Value, wl.Value = dr[p[0].start:p[0].end], dl[p[1].start:p[1].end]
+		own := leaf(wr, wl, w, 0)
+		if own.Kind == KindUnaccounted {
+			early.Kind, early.Why = KindUnaccounted, "it holds an instant ("+partOf(r.Value, wr.Value)+"), which keploy refuses as it refuses that instant whole: "+own.Why
+			return early, true
+		}
+		word, one := instantWord(r.Value, l.Value, dr, dl, pairs)
+		at := own.Read
+		if own.Kind == KindClockOffset {
+			at = own.Offset
+		}
+		if i > 0 || !one || own.Kind != KindClockRead && own.Kind != KindClockOffset || at == nil {
+			continue
+		}
+		at.Word = word
+		own.Recorded, own.Live = r, l
+		if own.Kind == KindClockOffset {
+			own.Why = clockOffsetEvidence(fieldName(r), *own.Offset)
+		}
+		if own.Refuted == "" {
+			own.Refuted = early.Refuted
+		}
+		return own, true
 	}
-	wr, wl := r, l
-	wr.Value, wl.Value = rw, lw
-	own := leaf(wr, wl, w, 0)
-	if own.Kind != KindClockRead || own.Read == nil {
-		return early, false
+	return early, false
+}
+
+// instantWord is where the one instant that changed in a text stands, as
+// the one rule for an instant wherever it stands reads it (wordRead,
+// and its client tests' refused texts): the text recorded as rec and seen in record's full
+// round as live, dr and dl decoded once (wordForm), pairs the instants of
+// them that changed (changedSpans). ok is false where more than one
+// changed, where the decoded text around it differs, or where it is the
+// whole decoded text (a read of a value whole, which no word is).
+func instantWord(rec, live, dr, dl string, pairs [][2]instant) (models.ClockWord, bool) {
+	if len(pairs) != 1 {
+		return models.ClockWord{}, false
 	}
-	own.Recorded, own.Live = r, l
-	own.Read.Word = models.ClockWordOf(r.Value, len(before), len(r.Value)-len(after))
-	if own.Refuted == "" {
-		own.Refuted = early.Refuted
+	r, l := pairs[0][0], pairs[0][1]
+	if dr[:r.start] != dl[:l.start] || dr[r.end:] != dl[l.end:] || r.start == 0 && r.end == len(dr) {
+		return models.ClockWord{}, false
 	}
-	return own, true
+	w := models.ClockWordOf(dr, r.start, r.end)
+	if dr != rec || dl != live {
+		w.Form = models.ClockWordDecoded
+	}
+	return w, true
 }
 
 // rawUnread says why the classifier refuses raw: one of them was not read

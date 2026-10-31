@@ -719,6 +719,35 @@ func b64RunsIn(s string, out map[string]bool) {
 	}
 }
 
+// wordForm is s decoded once, as the one rule for an instant wherever it
+// stands reads it (wordRead) and a replay reads a word
+// learned in it (models.ClockWordDecoded): its escapes read (unescaped),
+// then each run of the base64 alphabets outside its instants (instantSpans,
+// as b64Runs reads them) of minEncodedRun characters or more that decodes
+// to text (b64Decode) decoded where it stands, its escapes read too: a
+// cursor's JSON, between the text before the run and the text after it.
+// It is s where s holds neither.
+func wordForm(s string) string {
+	d := unescaped(s)
+	var sb strings.Builder
+	done, from := 0, 0
+	for _, in := range append(instantSpans(d), instant{start: len(d), end: len(d)}) {
+		for st, en, ok := nextB64Run(d[:in.start], from); ok; st, en, ok = nextB64Run(d[:in.start], en) {
+			if t, ok := b64Decode(d[st:en]); ok && en-st >= minEncodedRun {
+				sb.WriteString(d[done:st])
+				sb.WriteString(unescaped(t))
+				done = en
+			}
+		}
+		from = in.end
+	}
+	if done == 0 {
+		return d
+	}
+	sb.WriteString(d[done:])
+	return sb.String()
+}
+
 // b64DecodeAny reports whether s decodes in any base64 variant, to text or
 // not.
 func b64DecodeAny(s string) ([]byte, bool) {

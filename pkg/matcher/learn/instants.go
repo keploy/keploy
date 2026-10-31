@@ -400,18 +400,28 @@ type driftedInstant struct{ rec, live moment }
 // the k-th of it in the other, as clockIn pairs them; one the live form holds
 // none of is no pair.
 func driftedInstants(recorded, live string) []driftedInstant {
+	var out []driftedInstant
+	for _, p := range changedSpans(recorded, live) {
+		out = append(out, driftedInstant{rec: p[0].moment(), live: p[1].moment()})
+	}
+	return out
+}
+
+// changedSpans are driftedInstants as the spans they stand at, recorded [0]
+// and live [1].
+func changedSpans(recorded, live string) [][2]instant {
 	rs := instantSpans(recorded)
 	if len(rs) == 0 {
 		return nil
 	}
-	byLayout := map[int][]moment{}
+	byLayout := map[int][]instant{}
 	for _, sp := range instantSpans(live) {
 		if sp.keyed {
-			byLayout[sp.layout] = append(byLayout[sp.layout], sp.moment())
+			byLayout[sp.layout] = append(byLayout[sp.layout], sp)
 		}
 	}
 	seen := map[int]int{}
-	var out []driftedInstant
+	var out [][2]instant
 	for _, r := range rs {
 		if !r.keyed {
 			continue
@@ -419,7 +429,7 @@ func driftedInstants(recorded, live string) []driftedInstant {
 		n := seen[r.layout]
 		seen[r.layout]++
 		if l := byLayout[r.layout]; n < len(l) && l[n].key != r.key {
-			out = append(out, driftedInstant{rec: r.moment(), live: l[n]})
+			out = append(out, [2]instant{r, l[n]})
 		}
 	}
 	return out

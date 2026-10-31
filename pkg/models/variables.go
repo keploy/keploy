@@ -336,7 +336,17 @@ type ClockWord struct {
 	After        int    `json:"after" yaml:"after" bson:"after"`
 	BeforeSHA256 string `json:"before_sha256" yaml:"before_sha256" bson:"before_sha256"`
 	AfterSHA256  string `json:"after_sha256" yaml:"after_sha256" bson:"after_sha256"`
+	// Form is the text the word stands in: "" the value as it is; Decoded
+	// (ClockWordDecoded) the value decoded once, its escapes read and its
+	// base64 runs decoded where they stand (a percent-encoded instant, one
+	// written with "\u002b" for its '+', one inside a base64 cursor), where
+	// the word and its sides are read, so the sides are compared as decoded
+	// text. A form this keploy does not read is no place of a text (Valid).
+	Form string `json:"form,omitempty" yaml:"form,omitempty" bson:"form,omitempty"`
 }
+
+// ClockWordDecoded is the Form of a word read in its value decoded once.
+const ClockWordDecoded = "decoded"
 
 // ClockWordOf is the ClockWord of the word at bytes start to end (end
 // exclusive) of text, a value as recorded, 0 <= start < end <= len(text).
@@ -350,11 +360,12 @@ func (w ClockWord) IsZero() bool { return w == ClockWord{} }
 
 // Valid reports whether w is a word a replay can check: a word of one byte
 // or more (Start < End), at bytes of a text (none negative), with text on
-// one side of it at least, and both hashes a SHA-256 in lower-case hex.
+// one side of it at least, both hashes a SHA-256 in lower-case hex, in a
+// form this keploy reads.
 // What a file holds otherwise (a hand edit, a cut copy) is no place of a
 // text, and a replay refuses the value there whatever it is.
 func (w ClockWord) Valid() bool {
-	return w.Start >= 0 && w.End > w.Start && w.After >= 0 && (w.Start > 0 || w.After > 0) && isSHA256Hex(w.BeforeSHA256) && isSHA256Hex(w.AfterSHA256)
+	return w.Start >= 0 && w.End > w.Start && w.After >= 0 && (w.Start > 0 || w.After > 0) && isSHA256Hex(w.BeforeSHA256) && isSHA256Hex(w.AfterSHA256) && (w.Form == "" || w.Form == ClockWordDecoded)
 }
 
 // WordOf is the word of live, a replay's text at a place learned as w (a

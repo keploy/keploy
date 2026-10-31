@@ -1,10 +1,14 @@
 package learn
 
 import (
+	"encoding/base64"
 	"fmt"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
+
+	"go.keploy.io/server/v3/pkg/models"
 )
 
 // A zone keploy's rows write an aware datetime in: its name in a row's
@@ -326,4 +330,160 @@ func TestAChangedRunGluedToAnInstantsStartIsRefused(t *testing.T) {
 			t.Errorf("%s (%q -> %q): %q; want %q", c.what, c.rec, c.live, why, want)
 		}
 	}
+}
+
+// One rule for an instant wherever it stands (founder, 2026-10-31): an
+// instant inside a text, or inside an encoded form of a text (percent-
+// encoded, a base64 or base64url cursor, a JSON string's escapes, "+"
+// for a zone's '+'), at its start or its end, gets the outcome the same
+// instant whole gets, in keploy test (a call with a window and one with
+// none) and in keploy mock's client tests, in every zone ("+05:30",
+// "-03:30", "Z", "+00:00", "+01:00", Postgres's "+00"), for the call's own
+// read, a poll of now - 2s, now - 60s or now - 3h, one of now + 1h, and,
+// in keploy test, a read the lead moved: refused whole, it is refused in
+// the text, saying why the instant whole is; learned whole as a read of the
+// clock, plain or plus an offset, it is learned as that read at its word,
+// in the text decoded once, the learning holding the whole text, and a
+// replay passes the text with a read made so and refuses one whose text
+// around the word changed. Never noise, which would let any value pass at
+// every replay.
+func TestAnInstantIsJudgedAsTheInstantWholeWhereverItStands(t *testing.T) {
+	call := time.Date(2026, 10, 31, 10, 52, 15, 438_000_000, time.UTC)
+	began := call.Add(-time.Second)
+	callF := call.Add(73*time.Second + 600*time.Millisecond)
+	beganF := began.Add(72 * time.Second)
+	w := (&Window{Rec: Span{From: call.Add(-100 * time.Millisecond), To: call, Began: began}, F: Span{From: callF.Add(-100 * time.Millisecond), To: callF, Began: beganF}}).ComparesOffsets()
+	const p = "body.note"
+	cursor := func(enc *base64.Encoding) func(string) string {
+		return func(s string) string { return "cursor=" + enc.EncodeToString([]byte(`{"since":"`+s+`","page":2}`)) }
+	}
+	forms := []struct {
+		name string
+		text func(instant string) string
+	}{
+		{"in a text", func(s string) string { return "jobs due before " + s + ", page 2" }},
+		{"at a text's start", func(s string) string { return s + " sharp" }},
+		{"at a text's end", func(s string) string { return "due " + s }},
+		{"percent-encoded", func(s string) string {
+			return "since=" + strings.ReplaceAll(url.QueryEscape(s), "+", "%20") + "&page=2"
+		}},
+		{"in a base64 cursor", cursor(base64.StdEncoding)},
+		{"in a base64url cursor", cursor(base64.RawURLEncoding)},
+		{"in a JSON string's escapes", func(s string) string { return `{\"since\":\"` + s + `\",\"page\":2}` }},
+		{"with its '+' escaped", func(s string) string { return "since " + strings.ReplaceAll(s, "+", `+`) + " page 2" }},
+	}
+	type spelling struct {
+		name    string
+		loc     *time.Location
+		instant func(at time.Time) string
+	}
+	var spellings []spelling
+	for _, z := range zonedRows {
+		spellings = append(spellings, spelling{z.name, z.loc, func(at time.Time) string { return at.In(z.loc).Format(z.iso) }})
+	}
+	spellings = append(spellings, spelling{"Postgres +00", time.UTC, func(at time.Time) string { return pgText(at.UTC()) }})
+	modes := []struct {
+		name   string
+		cache  func(*time.Location) *DriftCache
+		window *Window
+		lead   bool
+	}{
+		{"keploy test, a call with a window", func(z *time.Location) *DriftCache { dc := clockedDrifts(); dc.zone = z; return dc }, w, true},
+		{"keploy test, a call with no window", func(z *time.Location) *DriftCache { dc := clockedDrifts(); dc.zone = z; return dc }, nil, true},
+		{"a client test", clientTestCacheIn, w, false},
+	}
+	for _, sp := range spellings {
+		t.Run(sp.name, func(t *testing.T) {
+			for _, m := range modes {
+				reads := map[string]func(at time.Time) time.Time{
+					"the call's own read": func(at time.Time) time.Time { return at },
+					"now - 2s":            func(at time.Time) time.Time { return at.Add(-2 * time.Second) },
+					"now - 60s":           func(at time.Time) time.Time { return at.Add(-time.Minute) },
+					"now - 3h":            func(at time.Time) time.Time { return at.Add(-3 * time.Hour) },
+					"now + 1h":            func(at time.Time) time.Time { return at.Add(time.Hour) },
+				}
+				if m.lead {
+					reads["a read the lead moved"] = func(at time.Time) time.Time {
+						if at.Equal(call) {
+							return call.Add(-30 * time.Second)
+						}
+						return call.Add(-30*time.Second + FullRoundLead)
+					}
+				}
+				for what, read := range reads {
+					learn := func(value func(at time.Time) string) Learned {
+						shape := func(at time.Time) Shape {
+							return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: value(at)}}}
+						}
+						return ClassifyGiven(m.cache(sp.loc), []string{p}, shape(callF), shape(call), call, nil, nil, nil, m.window, nil)[0]
+					}
+					whole := learn(func(at time.Time) string { return sp.instant(read(at)) })
+					for _, f := range forms {
+						in := learn(func(at time.Time) string { return f.text(sp.instant(read(at))) })
+						where := fmt.Sprintf("%s, %s %s (%q)", m.name, what, f.name, in.Recorded.Value)
+						if in.Kind != whole.Kind {
+							t.Errorf("%s: learned %s (%s); the instant whole learned %s (%s); want alike", where, in.Kind, in.Why, whole.Kind, whole.Why)
+							continue
+						}
+						if in.Recorded.Value != f.text(sp.instant(read(call))) || in.Live.Value != f.text(sp.instant(read(callF))) {
+							t.Errorf("%s: the learning holds %q and %q, not the whole text", where, in.Recorded.Value, in.Live.Value)
+						}
+						switch whole.Kind {
+						case KindUnaccounted:
+							// keploy test refuses the text by the instant
+							// whole's refusal; a client test refuses it by
+							// the same reason, naming where the instant
+							// stands where the whole names it whole.
+							same := strings.HasPrefix(in.Why, "it holds an instant (") && strings.HasSuffix(in.Why, "which keploy refuses as it refuses that instant whole: "+whole.Why)
+							if !m.lead {
+								same = unplaced(in.Why) == unplaced(whole.Why) && strings.Contains(in.Why, "(an instant, ")
+							}
+							if !same {
+								t.Errorf("%s: refused %q; want the instant whole's refusal (%q), naming where it stands", where, in.Why, whole.Why)
+							}
+							continue
+						case KindClockRead, KindClockOffset:
+						default:
+							t.Fatalf("%s: the instant whole learned %s (%s); the row wants a read of the clock or a refusal", where, whole.Kind, whole.Why)
+						}
+						wo, io := whole.Read, in.Read
+						if whole.Kind == KindClockOffset {
+							wo, io = whole.Offset, in.Offset
+						}
+						if io == nil || io.Word.IsZero() {
+							t.Errorf("%s: learned %s with no word: %+v", where, in.Kind, io)
+							continue
+						}
+						got := *io
+						got.Word = models.ClockWord{}
+						if got != *wo {
+							t.Errorf("%s: learned %+v at its word; the instant whole %+v; want the same read", where, got, *wo)
+						}
+						// A replay a day later makes the same read in its call.
+						replay := call.Add(24 * time.Hour)
+						s := Span{From: replay.Add(-100 * time.Millisecond), To: replay, Zone: sp.loc, Own: true, Began: replay.Add(-time.Second)}
+						at := func(v string) Leaf { return Leaf{Path: p, Noise: p, Type: String, Value: v} }
+						okWhole, _ := CheckClockRead(p, *wo, at(sp.instant(read(replay))), s, true)
+						if ok, why := CheckClockRead(p, *io, at(f.text(sp.instant(read(replay)))), s, true); ok != okWhole {
+							t.Errorf("%s: a replay's text passed %v (%s); the instant whole passed %v", where, ok, why, okWhole)
+						}
+						if ok, _ := CheckClockRead(p, *io, at(f.text(sp.instant(read(replay)))+"!"), s, true); ok {
+							t.Errorf("%s: a replay's text that changed after the word passed; want refused", where)
+						}
+					}
+				}
+			}
+		})
+	}
+}
+
+// unplaced is why, a refusal, with the place it names, its first
+// parenthesis, taken out.
+func unplaced(why string) string {
+	i := strings.Index(why, " (")
+	j := strings.Index(why, "): ")
+	if i < 0 || j < i {
+		return why
+	}
+	return why[:i] + why[j+1:]
 }

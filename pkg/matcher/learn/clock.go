@@ -347,7 +347,7 @@ func clockWordIn(rec, live string, w *Window) (before, rw, lw, after string, ok 
 // as rec and seen in record's full round as live, as clockWordIn does,
 // where held, when not nil, says the two are what the caller reads (a read
 // in a window: clockWordIn); nil takes the instant whatever it is (a read
-// plus an offset, wordClockOffset). ok is false where no instant changed,
+// plus an offset). ok is false where no instant changed,
 // where more than one did, where held refuses the one that did, or where
 // the text around it changed too.
 //
