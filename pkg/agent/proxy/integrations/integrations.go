@@ -439,7 +439,11 @@ type ExactConsumedReader interface {
 // nothing, and serves the one it matched only when the store's consume door
 // takes it (each answers at most once in the staging, so the calls of one
 // shape across the set never exceed what the set recorded). A parser stops
-// at the first test that holds the call. None while no test is open.
+// at the first test that holds the call. Last it visits the set's
+// recordings made while no test was open (keploy mock replay's pool slice;
+// SetAsideFrom models.ServedFromBackground) that no call consumed in the
+// staging: a start-up job's or a timer's call that lands in the open test's
+// window at replay, served the same way. None while no test is open.
 type SetAsideReader interface {
 	RangeSetAside(kind models.Kind, keys []string, visit func(batch []*models.Mock) bool)
 }

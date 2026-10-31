@@ -174,10 +174,23 @@ type ScopeEvidence struct {
 }
 
 // ServedAsideLine is how ScopeEvidence.ServedAside names one call a
-// set-aside test's recording answered: the recording and its test.
+// set-aside test's recording answered: the recording and its test. For
+// from ServedFromBackground it names a recording the set made outside every
+// test (a start-up job's, a timer's between tests) that answered a call
+// inside the test's window instead.
 func ServedAsideLine(mock, from string) string {
+	if from == ServedFromBackground {
+		return mock + " served from the set's start-up and between-tests recordings (background)"
+	}
 	return mock + " served from " + from + " (set aside)"
 }
+
+// ServedFromBackground is the MockState.SetAsideFrom (and
+// TestModeInfo.SetAsideFrom) of a call an open test's window was served by
+// a recording the set made while no test was open (keploy mock replay's
+// pool slice): the application's background work, landed in the test at
+// replay. It is no test's name: a test's ID never holds a NUL.
+const ServedFromBackground = "\x00background"
 
 // escapeTestName escapes a test's name for its ID (TestID), so that the ID
 // never holds "::" after its path and no two names share an ID. A name with

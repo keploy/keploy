@@ -442,3 +442,23 @@ func TestAHandedAsideOnDiskIsReadOneTestAtATimeWithinABoundHeap(t *testing.T) {
 		t.Fatalf("a call of another shape was offered %d handed tests' recordings", n)
 	}
 }
+
+// The set-aside recordings a call is offered come in recorded order, and a
+// recording with no request time (an older keploy's) comes first, as the
+// agent orders a test's own: the first copy the matcher reads is the one a
+// test recorded first. Mutant: those with none sorted last.
+func TestInRecordedOrderPutsRecordingsWithNoRequestTimeFirst(t *testing.T) {
+	at := time.Date(2026, 10, 1, 10, 0, 0, 0, time.UTC)
+	mk := func(name string, req time.Time) *models.Mock {
+		return &models.Mock{Name: name, Spec: models.MockSpec{ReqTimestampMock: req}}
+	}
+	mocks := []*models.Mock{mk("late", at.Add(time.Second)), mk("none-1", time.Time{}), mk("early", at), mk("none-2", time.Time{})}
+	inRecordedOrder(mocks)
+	var got []string
+	for _, m := range mocks {
+		got = append(got, m.Name)
+	}
+	if want := []string{"none-1", "none-2", "early", "late"}; !slices.Equal(got, want) {
+		t.Fatalf("recorded order: got %v, want %v", got, want)
+	}
+}
