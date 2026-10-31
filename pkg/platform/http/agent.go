@@ -4825,18 +4825,20 @@ func (a *AgentClient) PushSetTable(ctx context.Context, root string, sets map[st
 // windows are the recorded window of every test of the set
 // (models.ScopeTableReq.Windows), and given the values each test gave when
 // it was recorded (models.ScopeTableReq.Given), sent with them: the agent
-// installs both before it serves the pool.
-func (a *AgentClient) PushProvenTable(ctx context.Context, table, pool map[string][]string, windows []models.TestWindow, given map[string][]models.GivenValue) (retErr error) {
+// installs both before it serves the pool. worker is each key's worker scope
+// (models.ScopeTableReq.Worker): names of its pool slice served in a test's
+// window too.
+func (a *AgentClient) PushProvenTable(ctx context.Context, table, pool, worker map[string][]string, windows []models.TestWindow, given map[string][]models.GivenValue) (retErr error) {
 	if pool == nil {
 		pool = map[string][]string{}
 	}
 	defer func() {
 		if retErr == nil && a.session().recording() {
-			t, p, w, g := maps.Clone(table), maps.Clone(pool), slices.Clone(windows), maps.Clone(given)
-			a.session().record(stepScopeTable, func(c context.Context) error { return a.PushProvenTable(c, t, p, w, g) })
+			t, p, wk, w, g := maps.Clone(table), maps.Clone(pool), maps.Clone(worker), slices.Clone(windows), maps.Clone(given)
+			a.session().record(stepScopeTable, func(c context.Context) error { return a.PushProvenTable(c, t, p, wk, w, g) })
 		}
 	}()
-	body, err := json.Marshal(models.ScopeTableReq{Mappings: table, Pool: pool, Windows: windows, Given: given})
+	body, err := json.Marshal(models.ScopeTableReq{Mappings: table, Pool: pool, Worker: worker, Windows: windows, Given: given})
 	if err != nil {
 		return fmt.Errorf("failed to marshal scope table: %w", err)
 	}

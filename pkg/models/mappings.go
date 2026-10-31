@@ -215,6 +215,13 @@ type Mapping struct {
 	// after the last test) is the scope's, at the place its recording holds
 	// it (DeriveWindowMappings). Omitted when empty; a reader that predates it
 	// ignores the key.
+	//
+	// keploy mock (record and replay) keeps it plainer: record lists here
+	// every call made outside every test's window after the first test began,
+	// with its claim's key and no place, and a reader may move a test's call
+	// here. Replay serves each from the set's start, in a test's window or
+	// between tests, at most once, and requires none of them
+	// (ScopeTableReq.Worker).
 	Worker []MockEntry `json:"worker,omitempty" yaml:"worker,omitempty" bson:"worker,omitempty"`
 	// Source is the keploy command that wrote the file's test entries, when
 	// it is not keploy record: MappingSourceKeployTest. A writer that names

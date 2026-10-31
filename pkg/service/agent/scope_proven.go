@@ -84,6 +84,10 @@ type provenWire struct {
 	// pool is, in a replay, each key's pool slice (the CLI's scope table,
 	// models.ScopeTableReq.Pool); nil until the CLI sent one.
 	pool map[string][]string
+	// worker is, in a replay, each key's worker scope (the CLI's scope
+	// table, models.ScopeTableReq.Worker): names of its pool slice shown in
+	// a test's window too (serveKeyWorker). nil when the table had none.
+	worker map[string][]string
 	// staged: the replay's mocks are staged on the proxy, which serves them
 	// exactly (exact_proven.go). Once per session, and again when the CLI
 	// sends a pool slice naming a recording the staging did not read.
@@ -484,6 +488,27 @@ func (a *Agent) SetScopePool(ctx context.Context, pool map[string][]string) erro
 		}
 	}
 	return a.applyPool(ctx)
+}
+
+// SetScopeWorker installs each key's worker scope for a replay
+// (models.ScopeTableReq.Worker): the names of its pool slice the set's
+// worker: lists. The pool slices sent next serve them (SetScopePool): from
+// then on, whenever the key holds the claim, each answers in a test's window
+// or between tests, at most once in the staging, and no test is required to
+// make it. None leaves the set none, never the previous set's.
+func (a *Agent) SetScopeWorker(ctx context.Context, worker map[string][]string) error {
+	if err := a.wire.lock(ctx); err != nil {
+		return err
+	}
+	defer a.wire.unlock()
+	cp := make(map[string][]string, len(worker))
+	for k, names := range worker {
+		cp[k] = append([]string{}, names...)
+	}
+	a.provenMu.Lock()
+	a.proven.worker = cp
+	a.provenMu.Unlock()
+	return nil
 }
 
 // teardownOwners is, of a replay's scope table (test ID -> the mocks it
