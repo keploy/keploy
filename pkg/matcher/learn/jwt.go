@@ -51,7 +51,7 @@ func ReadJWT(s string) (JWT, bool) {
 	if i := strings.IndexByte(s, ' '); i >= 0 {
 		j.Scheme, token = s[:i+1], s[i+1:]
 		for k := 0; k < i; k++ {
-			if c := s[k]; !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z') {
+			if !isASCIILetter(s[k]) {
 				return JWT{}, false
 			}
 		}
@@ -136,12 +136,21 @@ func jwtObject(seg string) (map[string]interface{}, bool) {
 // isB64URL reports whether s is of the base64url alphabet alone, unpadded.
 func isB64URL(s string) bool {
 	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '_') {
+		if !isB64URLByte(s[i]) {
 			return false
 		}
 	}
 	return true
+}
+
+// isB64URLByte reports whether c is of the base64url alphabet.
+func isB64URLByte(c byte) bool {
+	return isASCIILetter(c) || c >= '0' && c <= '9' || c == '-' || c == '_'
+}
+
+// isASCIILetter reports whether c is an ASCII letter.
+func isASCIILetter(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
 }
 
 // Fixed is what of the token must stay as recorded for a call to be its
