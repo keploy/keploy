@@ -551,8 +551,8 @@ type UnmatchedCall struct {
 	// the call to it: the call counts against that test (CountsAgainstTest)
 	// and that test's evidence lists it. Empty for a call no test was
 	// charged with: one made before the test process claimed the run, one
-	// outside every test that no test's end read (after the last test's,
-	// say), and every call without the switch. keploy mock's receipt lists
+	// made outside every test (before the first, between two, or after the
+	// last), and every call without the switch. keploy mock's receipt lists
 	// those of them that count against a test (Receipt.UnchargedMisses).
 	ChargedTo string `json:"charged_to,omitempty" yaml:"charged_to,omitempty"`
 	// Differs mirrors MockMismatchReport.Differs: the names of the fields in

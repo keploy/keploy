@@ -1198,7 +1198,7 @@ func TestASelfSkippedTestIsNotFailedForCallsItNeverMade(t *testing.T) {
 	a, _ := wireAgent(t, models.MODE_TEST)
 	storeMocks(a, httpMock("mock-1", "POST", "http://h/audit"))
 	a.scopeTable = map[string][]string{"t": {"mock-1"}}
-	ev, err := a.testEvidence(context.Background(), "t", false)
+	ev, err := a.testEvidence(context.Background(), "t", false, time.Time{})
 	require.NoError(t, err)
 	require.True(t, ev.Empty())
 }
@@ -1320,7 +1320,7 @@ func TestAnUnmadeRecordedCallIsEvidence(t *testing.T) {
 	require.NoError(t, a.serveTestExactly(context.Background(), "orders::TestPlaceOrder"))
 	p.served["mock-2"]++
 
-	ev, err := a.testEvidence(context.Background(), "orders::TestPlaceOrder", true)
+	ev, err := a.testEvidence(context.Background(), "orders::TestPlaceOrder", true, time.Time{})
 	require.NoError(t, err)
 	require.Equal(t, []string{"mock-1"}, ev.Unconsumed, "the audit call was not made; DNS is protocol-phase")
 
@@ -1627,10 +1627,61 @@ func TestAFailedConsumptionReadKeepsTheTestsMisses(t *testing.T) {
 	storeMocks(a, httpMock("mock-1", "GET", "http://h/x"))
 	a.scopeTable = map[string][]string{"o::TestA": {"mock-1"}}
 	p.misses = []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "POST /audit"}}
-	ev, err := a.testEvidence(context.Background(), "o::TestA", true)
+	ev, err := a.testEvidence(context.Background(), "o::TestA", true, time.Time{})
 	require.ErrorContains(t, err, "was not serving o::TestA exactly")
 	require.NotNil(t, ev)
 	require.Len(t, ev.Misses, 1)
+}
+
+// A call made outside every test, before the test that ends began, is no
+// call of that test's: the test framework set its window. It is charged to
+// no test (the run's receipt lists it), and the test's evidence holds only
+// what it made. A miss without a time, one filed while a test was open
+// (the previous test's call still in flight), and any miss read when the
+// test's begin is not known stay the ending test's.
+func TestAMissOutsideEveryTestIsChargedToNoTest(t *testing.T) {
+	began := time.Now()
+	misses := []models.UnmatchedCall{
+		{Protocol: "HTTP", ActualSummary: "GET /tick", Destination: "between:80", Kind: models.MissOutsideTest, At: began.Add(-time.Second)},
+		{Protocol: "HTTP", ActualSummary: "GET /late", Destination: "late:80", Kind: models.MissInTest, At: began.Add(-time.Second)},
+		{Protocol: "HTTP", ActualSummary: "GET /untimed", Destination: "untimed:80", Kind: models.MissOutsideTest},
+		{Protocol: "HTTP", ActualSummary: "GET /ending", Destination: "ending:80", Kind: models.MissOutsideTest, At: began.Add(time.Second)},
+		{Protocol: "HTTP", ActualSummary: "GET /own", Destination: "own:80", Kind: models.MissInTest, At: began.Add(time.Second)},
+	}
+	for _, c := range []struct {
+		name      string
+		beganAt   time.Time
+		uncharged []string
+	}{
+		{"begin known", began, []string{"between:80"}},
+		{"begin not known", time.Time{}, nil},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			a, p := wireAgent(t, models.MODE_TEST)
+			p.misses = append([]models.UnmatchedCall(nil), misses...)
+			ev, err := a.testEvidence(context.Background(), "o::TestA", false, c.beganAt)
+			require.NoError(t, err)
+			var listed, uncharged []string
+			for _, m := range ev.Misses {
+				listed = append(listed, m.Destination)
+			}
+			for _, m := range a.takeChargedMisses() {
+				if m.ChargedTo == "" {
+					uncharged = append(uncharged, m.Destination)
+				} else {
+					require.Equal(t, "o::TestA", m.ChargedTo)
+				}
+			}
+			require.Equal(t, c.uncharged, uncharged, "the misses charged to no test")
+			var want []string
+			for _, m := range misses {
+				if !slices.Contains(c.uncharged, m.Destination) {
+					want = append(want, m.Destination)
+				}
+			}
+			require.Equal(t, want, listed, "the misses the ending test's evidence lists")
+		})
+	}
 }
 
 // A test recorded with no call, or one the mapping omits, owns no test mock:
