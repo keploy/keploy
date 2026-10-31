@@ -3764,7 +3764,7 @@ func TestLearnMatchAClientTestLearnsTheAppsStampInItsWindowOnly(t *testing.T) {
 				if !tc.windowed {
 					head = field + " changed, and keploy saw no read of the app's clock for its call (an instant, its characters 1 to "
 				}
-				if got != nil || miss == nil || !strings.Contains(miss.res.Why, head) || !strings.Contains(miss.res.Why, "If your test supplies this value, have it supply the same value in every run") {
+				if got != nil || miss == nil || !strings.Contains(miss.res.Why, head) || !strings.Contains(miss.res.Why, "If your test supplies this value, give it to keploy where the test makes it, in Go v = keploytest.Given(t, \"v\", v), and each replay checks") {
 					t.Fatalf("served %v miss %+v; want %s refused, saying keploy saw no read of the app's clock that matched it", got, miss, field)
 				}
 				return

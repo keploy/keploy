@@ -433,7 +433,7 @@ const (
 // timeOfDayClientTestWhy is why a time of day (TimeOfDayLeaf) that changed
 // is refused in keploy mock's client tests: no window holds a time of day,
 // and the lead, the only rule that reads one, is not theirs.
-const timeOfDayClientTestWhy = "nothing shows it is a read of the application's clock: its protocol types it as a time of day, which keploy compares whole, and keploy mock's test harness gives the application its inputs, which keploy does not see, so keploy learns a changed instant as noise only where it lies within its call's window on the application's clock, and a time of day names no day, so no window holds it. If your test supplies this value, have it supply the same value in every run, and keploy keeps comparing it; if the application reads it from its own clock, declare it noise in keploy.yml, and keploy stops comparing it"
+const timeOfDayClientTestWhy = "nothing shows it is a read of the application's clock: its protocol types it as a time of day, which keploy compares whole, and keploy mock's test harness gives the application its inputs, which keploy does not see, so keploy learns a changed instant as noise only where it lies within its call's window on the application's clock, and a time of day names no day, so no window holds it. If your test supplies this value, " + clientGiveWhy + "; if the application reads it from its own clock, declare it noise in keploy.yml, and keploy stops comparing it"
 
 // what is what an Instant leaf of form n names, as a reason writes it.
 func (n instantNames) what() string {
@@ -1019,7 +1019,7 @@ func (dc *DriftCache) textClockOffset(r, l Leaf, v *valueDrift, w *Window, resp 
 // read matched it (learning legible), and adds the client test's own
 // correction, for a value the test's harness supplies.
 func clientCutAmbiguousWhy(cutWhy string) string {
-	return cutWhy + ". If your test supplies this value, have it supply the same value in every run, and keploy keeps comparing it"
+	return cutWhy + ". If your test supplies this value, " + clientGiveWhy
 }
 
 // fieldName is the leaf's name as keploy.yml's noise writes it (Leaf.Noise:

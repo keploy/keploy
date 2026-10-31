@@ -148,6 +148,20 @@ func TestAGivenLeavesTheApplicationsClockReadsAsTheyAre(t *testing.T) {
 	}
 }
 
+// A refusal of a call that carried the given whole when recorded and
+// another value in record's full round says so, plainly: not "made from" it.
+func TestGivenNotPassedOnWhyIsLegible(t *testing.T) {
+	why := GivenNotPassedOnWhy("body.name", "given:nonce", "apps_test.go:20")
+	for _, part := range []string{"body.name carried the value the test gave as given:nonce (apps_test.go:20) whole when recorded, but another value in record's full round than the test gave then", "the application did not pass the given on there", "If the application passes it on now, re-record the test"} {
+		if !strings.Contains(why, part) {
+			t.Fatalf("why %q lacks %q", why, part)
+		}
+	}
+	if strings.Contains(why, "made from") || strings.Contains(GivenNotPassedOnWhy("body.name", "given:nonce", ""), "()") {
+		t.Fatalf("why %q: wrong description, or an unknown source named empty", why)
+	}
+}
+
 // A refusal of a value made from a given names the leaf, the given, where
 // the test gave it, and what to do.
 func TestGivenDerivedWhyIsLegible(t *testing.T) {
