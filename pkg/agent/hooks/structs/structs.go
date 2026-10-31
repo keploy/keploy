@@ -41,12 +41,23 @@ const (
 
 type BpfSpinLock struct{ Val uint32 }
 
+// DestInfo mirrors struct dest_info_t (keploy/ebpf k_structs.h): a
+// redirected connection's original destination and the process that made it.
 type DestInfo struct {
 	IPVersion uint32
 	DestIP4   uint32
 	DestIP6   [4]uint32
 	DestPort  uint32
+	// KernelPid is the connecting process's TGID, the kernel's (the initial
+	// PID namespace's).
 	KernelPid uint32
+	// AgentNsPid is that process's TGID in the agent's PID namespace, by
+	// which the agent finds it in its own /proc: the kernel finds it by the
+	// namespace's inode the agent registered (KeployAgentInode). Equal to
+	// KernelPid for an agent in the initial namespace; 0 for a process outside
+	// the agent's namespace, which the agent then cannot name.
+	AgentNsPid uint32
+	_          uint32 // dest_info_t's _pad: 8-byte sized
 }
 
 type ProxyInfo struct {

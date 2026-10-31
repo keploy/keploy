@@ -1045,6 +1045,15 @@ type StreamEndSummary struct {
 	// LeftOutInFlight: test cases left out because each stayed in flight
 	// while mocks it may have made had to be let go.
 	LeftOutInFlight uint64 `json:"tcs_left_out_in_flight"`
+	// NotHandedOn: test cases of requests the app served that never reached
+	// the stream: the agent's ingress stopped first.
+	NotHandedOn uint64 `json:"tcs_not_handed_on,omitempty"`
+	// UnnamedCallerConns: connections to a listener of the run's own process
+	// tree whose caller the agent could not name in its PID namespace, so it
+	// could not tell whether a test made the calls they carried: none was
+	// recorded as a test case. Connections, not calls: the agent relays them
+	// without reading the calls, so a keep-alive connection counts once.
+	UnnamedCallerConns uint64 `json:"connections_from_unnamed_callers,omitempty"`
 	// Unsettled: test cases saved before the agent had parsed all the
 	// traffic they overlap.
 	Unsettled int `json:"tcs_released_unsettled"`

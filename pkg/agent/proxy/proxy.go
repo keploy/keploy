@@ -463,6 +463,15 @@ type Proxy struct {
 	selfCalls       atomic.Int64
 	selfCallOwners  sync.Map // owner pid -> struct{}
 	selfCallsLogged atomic.Int64
+	// unnamedConns counts the connections to a listener of the run's own
+	// tree whose caller the agent could not name in its PID namespace
+	// (callerOf), so that it could not tell whether a test made the calls
+	// they carried. The relay does not read those calls, so a connection
+	// counts once however many it carries. The first is logged at WARN as
+	// it comes, and the total when the run ends (logSelfCalls).
+	// unnamedConnsLogged is the total last logged.
+	unnamedConns       atomic.Int64
+	unnamedConnsLogged atomic.Int64
 
 	// dnsCache is a TTL-expiring, size-bounded LRU cache for DNS responses.
 	dnsCache *expirable.LRU[string, dnsCacheEntry]
@@ -2695,7 +2704,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			return err
 		}
 	}
-	seeProcess(destInfo.KernelPid)
+	seeProcess(Process{Pid: destInfo.AgentNsPid, KernelPid: destInfo.KernelPid})
 
 	var dstAddr string
 
@@ -2879,7 +2888,11 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		}
 	}()
 
-	served, outside, err := p.serveTreeListener(parserCtx, srcConn, destInfo, dstAddr, fmt.Sprint(clientConnID))
+	// With the proxy's life (ctx), not the connection's: what the live
+	// handler starts may outlive the connection (LiveHandler). While
+	// serveTreeListener runs, parserCtx ends only as ctx does: no parser has
+	// joined parserErrGrp yet, and its cancel is the deferred one above.
+	served, outside, err := p.serveTreeListener(withLifeOf(ctx, parserCtx), srcConn, destInfo, dstAddr, fmt.Sprint(clientConnID))
 	if served {
 		return err
 	}
@@ -6210,7 +6223,43 @@ func refusedLocally(err error) bool {
 	return host == "localhost" || (ip != nil && ip.IsLoopback())
 }
 
+// LiveHandler serves a test's call to the app it started (the ingress's
+// ServeLive), recording it as a test case, and returns once conn ends. ctx
+// carries the connection's values and lives as the proxy does, not as the
+// connection does: a test case is built after its exchange, off the
+// forwarding path, and so may still be in the making when conn has ended.
 type LiveHandler func(ctx context.Context, conn net.Conn, upstream string, port uint16)
+
+// connValues is a context with the values of a connection's context and the
+// life of another, longer one (Done, Err, Deadline): what the proxy hands the
+// live handler (LiveHandler), with the proxy's life. The connection's own
+// context is cancelled as its handler returns, and the test case of a
+// connection's last exchange, built after it, was dropped by that cancel
+// whenever it came first: half the live calls of a client that closes each
+// connection after one exchange (Connection: close) were recorded as
+// nothing. conn descends from life, so a key conn lacks life lacks too, but
+// for the one context.WithoutCancel hides: the context package's own, by
+// which a context derived from this one, and context.Cause, find the cancel
+// they belong to. That one is life's, read from life: a derived context is
+// life's child and ends as life does, with life's cause, and the
+// connection's cancel is never taken for this context's.
+type connValues struct {
+	context.Context
+	values context.Context
+}
+
+func (c connValues) Value(key any) any {
+	if v := c.values.Value(key); v != nil {
+		return v
+	}
+	return c.Context.Value(key)
+}
+
+// withLifeOf is conn's values with life's cancellation (connValues). conn
+// must descend from life.
+func withLifeOf(life, conn context.Context) context.Context {
+	return connValues{Context: life, values: context.WithoutCancel(conn)}
+}
 
 func (p *Proxy) SetLiveHandler(h LiveHandler) {
 	p.live = h
@@ -6264,6 +6313,7 @@ func (p *Proxy) trackTree(conn net.Conn, owner int) func() {
 // logged at INFO, and only when the count has moved since it last did:
 // SetGracefulShutdown, which calls it, may be called more than once.
 func (p *Proxy) logSelfCalls() {
+	p.logUnnamedConns()
 	n := p.selfCalls.Load()
 	if n < 2 {
 		return
@@ -6287,6 +6337,33 @@ func (p *Proxy) logSelfCalls() {
 		zap.String("reason", models.ReasonLoopbackOutsideRun))
 }
 
+// unnamedCallerWarning is what the agent says of a connection to a listener
+// of the run's own tree whose caller it cannot name in its PID namespace.
+const unnamedCallerWarning = "a connection to the run's own listener came from a process keploy cannot name in its PID namespace, so keploy cannot tell whether a test made its calls: it was passed to the listener and NONE of its calls was recorded as a test case"
+
+// logUnnamedConns logs, when the run ends, how many connections to the run's
+// own listeners came from a process the agent could not name (callerOf),
+// when there was more than the one already logged as it came, and only when
+// the count has moved since it last did.
+func (p *Proxy) logUnnamedConns() {
+	n := p.unnamedConns.Load()
+	if n < 2 {
+		return
+	}
+	for {
+		last := p.unnamedConnsLogged.Load()
+		if n <= last {
+			return
+		}
+		if p.unnamedConnsLogged.CompareAndSwap(last, n) {
+			break
+		}
+	}
+	p.logger.Warn("connections to the run's own listeners came from processes keploy cannot name in its PID namespace; none of the calls they carried was recorded as a test case",
+		zap.Int64("connections", n),
+		zap.String("next_step", "run keploy in the PID namespace of the app's tests, or in the host's (--pid=host, or hostPID in Kubernetes)"))
+}
+
 func (p *Proxy) closeDependencyConns() {
 	p.treeMu.Lock()
 	defer p.treeMu.Unlock()
@@ -6302,7 +6379,8 @@ func (p *Proxy) closeDependencyConns() {
 // tree to that listener (served). Under the proven switch, a call it leaves
 // to the mock path that is addressed to this machine comes back as outside,
 // its mocked-local row (without its test), for the caller to list once it
-// knows the call is recorded or mocked.
+// knows the call is recorded or mocked. ctx is the one the live handler is
+// handed (LiveHandler): the connection's values with the proxy's life.
 func (p *Proxy) serveTreeListener(ctx context.Context, srcConn net.Conn, dest *agent.NetworkAddress, dstAddr string, conn string) (served bool, outside *models.MockedRow, err error) {
 	if !p.mockMode || p.IsDocker || p.appPID == 0 {
 		return false, nil, nil
@@ -6352,7 +6430,7 @@ func (p *Proxy) serveTreeListener(ctx context.Context, srcConn net.Conn, dest *a
 		}
 		return false, outside, nil
 	}
-	seeProcess(pidToUint32(owner))
+	seeProcess(Process{Pid: pidToUint32(owner)})
 	if !proven && starts.Default.Dependency(pidToUint32(owner)) {
 		p.logger.Debug("the destination is a dependency the tests started; recording and serving it as mocks", zap.String("destination", dstAddr), zap.Int("owner", owner))
 		starts.Default.Child(conn)
@@ -6370,7 +6448,7 @@ func (p *Proxy) serveTreeListener(ctx context.Context, srcConn net.Conn, dest *a
 		p.logger.Debug("the destination is a port the recording called as an outside dependency; serving it as mocks", zap.String("destination", dstAddr), zap.Int("owner", owner))
 		return false, nil, nil
 	}
-	caller := int(dest.KernelPid)
+	caller, unnamed := callerOf(dest)
 	// A mock.real destination (proven switch only) that the tree's listener
 	// serves is reached through it: counted as a relay to the destination
 	// would be (treeRealConn), or the run, whose recordings list it, fails
@@ -6403,12 +6481,32 @@ func (p *Proxy) serveTreeListener(ctx context.Context, srcConn net.Conn, dest *a
 	if p.selfCalls.Add(1) == 1 {
 		p.logger.Info("self-call passed through to the run's own listener; the real handler answers it, not a mock",
 			zap.String("destination", dstAddr), zap.Int("owner", owner), zap.Int("caller", caller),
+			zap.Uint32("caller_kernel_pid", dest.KernelPid),
 			zap.String("reason", models.ReasonLoopbackOutsideRun),
 			zap.String("note", "further self-calls are logged at debug, and counted at the end of a run that finishes"))
 	} else {
 		p.logger.Debug("self-call passed through to the run's own listener; the real handler answers it, not a mock",
 			zap.String("destination", dstAddr), zap.Int("owner", owner), zap.Int("caller", caller),
+			zap.Uint32("caller_kernel_pid", dest.KernelPid),
 			zap.String("reason", models.ReasonLoopbackOutsideRun))
+	}
+	if p.live != nil && unnamed {
+		// A test's call to the app it started is recorded as a test case
+		// (the live handler), and only a test's: a connection whose caller
+		// the agent cannot name may carry such calls, so it is counted and
+		// said, not passed through in silence: over the agent's life here
+		// (the first warned of, the total logged as the run ends), and on
+		// the recording's manager, whose session summary and stream end
+		// marker report the session's count. Connections, not calls: this
+		// relays them unread.
+		syncMock.FromContextOrGlobal(ctx).NoteUnnamedCallerConn()
+		if p.unnamedConns.Add(1) == 1 {
+			p.logger.Warn(unnamedCallerWarning,
+				zap.String("destination", dstAddr), zap.Int("owner", owner),
+				zap.Uint32("caller_kernel_pid", dest.KernelPid),
+				zap.String("next_step", "run keploy in the PID namespace of the app's tests, or in the host's (--pid=host, or hostPID in Kubernetes)"),
+				zap.String("note", "further such connections are counted at the end of a run that finishes"))
+		}
 	}
 	if p.live != nil && caller != owner && descends(owner, caller) {
 		if isReal {

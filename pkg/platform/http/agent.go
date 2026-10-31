@@ -526,6 +526,11 @@ func (a *AgentClient) readIncoming(ctx context.Context, res *http.Response, tcCh
 	return a.readIncomingJSON(ctx, res, tcChan)
 }
 
+// unnamedCallerConnsSaid is what the client says of the session's connections
+// to the app whose callers the agent could not name
+// (models.StreamEndSummary.UnnamedCallerConns).
+const unnamedCallerConnsSaid = "the keploy agent recorded no test case for the calls some connections to the app carried: it could not name their callers in its PID namespace, so it could not tell whether a test made them"
+
 // sayAgentSummary says, in this client's own log, what the agent's summary of
 // the session says it lost (models.StreamEndSummary): for an agent this client
 // did not start (docker compose's, kubelet's), whose own log reaches the user
@@ -534,6 +539,15 @@ func (a *AgentClient) sayAgentSummary(s models.StreamEndSummary) {
 	if s.LeftOutInFlight > 0 {
 		a.logger.Warn("the keploy agent left some test cases out of the recording: each stayed in flight (a slow endpoint, a long poll, a stream) while mocks it may have made had to be let go",
 			zap.Uint64("test_cases", s.LeftOutInFlight))
+	}
+	if s.NotHandedOn > 0 {
+		a.logger.Warn("the keploy agent lost some test cases: the app served their requests, and the agent's ingress stopped before their test cases reached the recording",
+			zap.Uint64("test_cases", s.NotHandedOn))
+	}
+	if s.UnnamedCallerConns > 0 {
+		a.logger.Warn(unnamedCallerConnsSaid,
+			zap.Uint64("connections", s.UnnamedCallerConns),
+			zap.String("next_step", "run keploy in the PID namespace of the app's tests, or in the host's (--pid=host, or hostPID in Kubernetes)"))
 	}
 	if s.Unsettled > 0 {
 		a.logger.Warn("the keploy agent saved some test cases before it had parsed all the traffic they overlap; if a connection's parser failed on it afterwards, they lack mocks",
