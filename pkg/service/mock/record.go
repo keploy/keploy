@@ -895,6 +895,7 @@ func (m *mockService) Record(ctx context.Context) error {
 				stampBegins(byCase, windows)
 				stampReal(byCase, windows)
 				stampGiven(byCase, windows)
+				stampKeys(byCase, windows, m.claims)
 			}
 			if len(starts) > 0 {
 				m.upsertCases(persistCtx, name, byCase, nil, suites)
@@ -1381,6 +1382,26 @@ func stampGiven(byCase map[string]models.MappedTestCase, windows []models.ScopeW
 		}
 		tc.Given = slices.Clone(windows[i].Given)
 		byCase[name] = tc
+	}
+}
+
+// stampKeys writes into each test's mapping the key of the claim it began
+// under: its test process's. A reader who moves one of the test's calls to
+// worker: (a call that is the app's own work, a token's first use) gives the
+// moved entry this key, so its replay serves it while that process holds
+// the run; without it keploy could not name the key in a set whose test
+// processes have several. A test begun under no claim gets none.
+func stampKeys(byCase map[string]models.MappedTestCase, windows []models.ScopeWindow, claims []models.ScopeWindow) {
+	for _, w := range windows {
+		key := claimKeyAt(claims, w.Start)
+		if w.Start.IsZero() || key == "" || key == models.PoolKeyNone {
+			continue
+		}
+		tc := byCase[w.Name]
+		if tc.Key == "" {
+			tc.Key = key
+		}
+		byCase[w.Name] = tc
 	}
 }
 
