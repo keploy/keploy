@@ -93,3 +93,17 @@ func (m *MockManager) AnsweredBackground() []*models.Mock {
 }
 
 var _ integrations.AnsweredBackgroundReader = (*MockManager)(nil)
+
+// OwnSeriesMarked implements integrations.OwnSeriesMarkReader: whether
+// judging marked name, on the open test's own list (SetUnrequired), as that
+// test's own series (models.IsBackgroundOwnSeries); false while no test is
+// open, and with exact serving off.
+func (m *MockManager) OwnSeriesMarked(name string) bool {
+	v := m.exactView()
+	if v == nil || v.test == "" {
+		return false
+	}
+	return models.IsBackgroundOwnSeries(m.unrequiredOf(v.test)[name])
+}
+
+var _ integrations.OwnSeriesMarkReader = (*MockManager)(nil)

@@ -4,10 +4,7 @@ package integrations
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net"
-	"slices"
-	"strings"
 	"sync"
 	"time"
 
@@ -525,9 +522,11 @@ type MarkedSeriesReader interface {
 // OwnIDs is, for a test's own series, every path of the id each call of it
 // carries that its owner's window first held, as the mark of every recording
 // of it names them (models.BackgroundOwnSeriesIDs; a beat with the job's id
-// in its URL and in its body names both): OwnCall gives a call of it its
-// recorded id back at those places alone. nil when a mark names none, or two
-// of them name two sets of paths: no id of it is given back.
+// in its URL and in its body names both): the parser's series step gives a
+// call of it its recorded id back at those places alone, on the ids the
+// owner's window bound this run (keploy enterprise and the integrations
+// parsers; keploy itself answers no own series). nil when a mark names
+// none, or two of them name two sets of paths: no id of it is given back.
 type MarkedSeries struct {
 	Series     learn.Series
 	Recordings []*models.Mock
@@ -560,90 +559,6 @@ func OwnedBy(s []MarkedSeries, test string) []MarkedSeries {
 	return out
 }
 
-// OwnCall is live, a call asked in the window of m's owner (m a test's own
-// series: Owner), with the id that test's window bound this run given back
-// its recorded value at each place m's mark names (OwnIDs), as m's series
-// compares a call (learn.Series.HasShape, Holds): a job the test started
-// beats on the id its window made this run, never on the recorded one. When
-// every recording of m holds one value at every named place, that one value
-// at them all (learn.Series.Values), and a variable bound in force (inForce:
-// the store's variable table, variables.Table.Snapshot) was recorded as that
-// value, live must hold that binding's live value at each of them; asked
-// holds the recorded value there, and moved is that recorded value when the
-// run bound it to another value: the caller answers with a recording that
-// does not carry it, or with none. Only those leaves are given back: a value
-// at any other place of live is compared as recorded, even one that equals a
-// binding's live value, so a coincidence (a short or common value) never
-// turns another call into a call of m. An id the run bound no variable of
-// replays only as it was recorded, and so does a call of m when its named
-// places held two recorded values, or live lacks one of them (its shape is
-// then no call of m's). asked.Body is live's.
-//
-// off is why live is a call of m's on another id: at a named place it holds
-// another value than the binding's (the recorded id while the run bound
-// another, or a third value), or two bindings in force of the recorded id
-// hold two values this run (keploy cannot tell which one the job is). asked
-// then holds the recorded value at every named place all the same, so the
-// caller can tell the call is of m's series (HasShape) and charge it to the
-// owner as its own miss, saying off; no recording of m answers it. live, nil
-// and "" for a series marked set-wide (Owner ""), and for one whose mark names
-// no id (OwnIDs nil): it reads no variable.
-func (m MarkedSeries) OwnCall(live learn.Shape, inForce []variables.Binding) (asked learn.Shape, moved []string, off string) {
-	if m.Owner == "" || len(m.OwnIDs) == 0 || len(inForce) == 0 {
-		return live, nil, ""
-	}
-	rec := ""
-	for _, p := range m.OwnIDs {
-		recorded, ok := m.Series.Values[p]
-		_, held := live.Leaves[p]
-		if p == "" || !ok || !held || recorded.Value == "" || (rec != "" && recorded.Value != rec) {
-			return live, nil, ""
-		}
-		rec = recorded.Value
-	}
-	var values []string // the live values in force of the variables recorded as rec
-	for _, b := range inForce {
-		if b.Recorded == rec && !slices.Contains(values, b.Value) {
-			values = append(values, b.Value)
-		}
-	}
-	if len(values) == 0 {
-		return live, nil, ""
-	}
-	if len(values) > 1 {
-		off = fmt.Sprintf("two variables recorded as %s are bound to two values this run (%s), so keploy cannot tell which one %s's job is", rec, strings.Join(values, ", "), m.Owner)
-	}
-	given := false
-	for _, p := range m.OwnIDs {
-		l := live.Leaves[p]
-		switch {
-		case off != "":
-		case l.Value == values[0]:
-		case l.Value == rec:
-			off = fmt.Sprintf("it carries the recorded id %s at %s, but %s's window bound that id to %s this run", rec, p, m.Owner, values[0])
-		default:
-			off = fmt.Sprintf("it carries %s at %s, where %s's window bound the id recorded as %s to %s this run", l.Value, p, m.Owner, rec, values[0])
-		}
-		given = given || l.Value != rec
-	}
-	if off == "" && values[0] != rec {
-		moved = []string{rec}
-	}
-	if !given {
-		return live, moved, off
-	}
-	leaves := make(map[string]learn.Leaf, len(live.Leaves))
-	for k, v := range live.Leaves {
-		leaves[k] = v
-	}
-	for _, p := range m.OwnIDs {
-		l := leaves[p]
-		l.Value = rec
-		leaves[p] = l
-	}
-	return learn.Shape{Key: live.Key, Fixed: live.Fixed, Leaves: leaves, Body: live.Body}, moved, off
-}
-
 // SeriesRestagedNote is what the miss of a call of a restaged series says
 // (MarkedSeries.Restaged), for every parser alike.
 const SeriesRestagedNote = "This call is of a series judging marked as the application's background work set-wide (a timer's call, recorded with only its reads of the clock changing), and the replay staged a test set again (the next set, or this one once more) after the call was made and before keploy answered it: a call is answered only from the series of the staging it was made in, so no recording answered it. It is the set's background miss, charged to no test of either staging."
@@ -657,44 +572,41 @@ func MarkedSeriesOf(ctx context.Context, db MockMemDb, kind models.Kind, known l
 	return nil, nil
 }
 
+// OwnSeriesMarkReader is an optional MockMemDb extension of a store that
+// serves each test its own mocks exactly (the proven switch).
+// OwnSeriesMarked reports whether judging marked the recording named, on the
+// open test's own list, as that test's own series
+// (models.IsBackgroundOwnSeries); false while no test is open. It reads the
+// marks alone, never the set's series, so it answers when the series read
+// fails. The agent's MockManager implements it, and every MockMemDb wrapper
+// must forward it.
+type OwnSeriesMarkReader interface {
+	OwnSeriesMarked(name string) bool
+}
+
 // PassOverOwnSeries is marked, the open test's recordings judging marked as
 // background work that answered in its window (AnsweredBackgroundReader),
-// less those of a test's own series that db hands a call now (MarkedSeriesOf,
-// MarkedSeries.Owner set). A call that repeats one of them is a call of that
+// less those judging marked as that test's own series
+// (OwnSeriesMarkReader): a call that repeats one of them is a call of that
 // own series, and the parser's series step, asked next, answers it on the id
-// the owner's window bound (MarkedSeries.OwnCall), its reads of the clock on
-// the run's clock, reported as its own series' answer, or charges it to the
-// owner as its own miss. Answered again here, the call would skip that id
-// check and be named background work. A recording of a series marked
-// set-wide, a one-off's and a plain mark's stay in. marked itself when db
-// hands no own series or cannot read its series: the series step then
-// answers none of them either. Recordings are told apart by name, as a
-// staging names them.
-func PassOverOwnSeries(ctx context.Context, db MockMemDb, kind models.Kind, known learn.Known, marked []*models.Mock) []*models.Mock {
-	if len(marked) == 0 {
-		return marked
-	}
-	series, err := MarkedSeriesOf(ctx, db, kind, known)
-	if err != nil {
-		return marked
-	}
-	own := map[string]bool{}
-	for _, s := range series {
-		if s.Owner == "" {
-			continue
-		}
-		for _, m := range s.Recordings {
-			if m != nil {
-				own[m.Name] = true
-			}
-		}
-	}
-	if len(own) == 0 {
+// the owner's window bound, its reads of the clock on the run's clock,
+// reported as its own series' answer, or charges it to the owner as its own
+// miss. Answered again here, the call would skip that id check and be named
+// background work. They are told by their marks alone, so they are passed
+// over when the set's series cannot be read too (the series step then
+// answers none: fail closed), and so is one whose series the reader hands
+// as no test's own (some of it marked otherwise). A recording of a series
+// marked set-wide, a one-off's and a plain mark's stay in, in order: a new
+// list, marked itself untouched. marked itself when db reads no marks (no
+// store that reads none hands an own series).
+func PassOverOwnSeries(db MockMemDb, marked []*models.Mock) []*models.Mock {
+	r, ok := db.(OwnSeriesMarkReader)
+	if !ok || len(marked) == 0 {
 		return marked
 	}
 	out := make([]*models.Mock, 0, len(marked))
 	for _, m := range marked {
-		if m != nil && own[m.Name] {
+		if m != nil && r.OwnSeriesMarked(m.Name) {
 			continue
 		}
 		out = append(out, m)

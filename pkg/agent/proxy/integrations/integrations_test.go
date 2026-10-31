@@ -1,15 +1,11 @@
 package integrations
 
 import (
-	"context"
-	"errors"
 	"strings"
 	"testing"
 	"time"
 
-	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
-	"go.keploy.io/server/v3/pkg/variables"
 )
 
 // A call's mark is moved, at a later read of the round, by another staging
@@ -161,210 +157,54 @@ func TestOwnedByLeavesOutOtherTestsOwnSeries(t *testing.T) {
 	}
 }
 
-// seriesStore is a store that hands series (MarkedSeriesReader), or err.
-type seriesStore struct {
+// markStore is a store that reads own series marks (OwnSeriesMarkReader):
+// own names the recordings marked as the open test's own series.
+type markStore struct {
 	MockMemDb
-	series []MarkedSeries
-	err    error
+	own map[string]bool
 }
 
-func (s seriesStore) MarkedSeries(context.Context, models.Kind, learn.Known) ([]MarkedSeries, error) {
-	return s.series, s.err
-}
+func (s markStore) OwnSeriesMarked(name string) bool { return s.own[name] }
 
-// A call that repeats a recording of the open test's own series is left to
-// the series step (PassOverOwnSeries): that recording is passed over, so the
-// series step checks the call's id and names the own series. A recording of
-// a series marked set-wide, a plain mark's, and every recording when the
-// store hands no own series or cannot read its series stay in, in order.
+// A call that repeats a recording judging marked as the open test's own
+// series is left to the series step (PassOverOwnSeries): that recording is
+// passed over, told by its mark alone (no series read, so a read that fails
+// cannot let it through), and the series step checks the call's id and
+// names the own series. A recording of a series marked set-wide, a plain
+// mark's, a nil one, and every recording when the store reads no marks stay
+// in, in order, and the list handed is never changed.
 func TestPassOverOwnSeriesLeavesTheOwnSeriesToTheSeriesStep(t *testing.T) {
 	mk := func(name string) *models.Mock { return &models.Mock{Name: name} }
 	beat1, beat2, tick, plain := mk("beat-1"), mk("beat-2"), mk("tick-1"), mk("boot-1")
-	marked := []*models.Mock{tick, beat1, plain, beat2}
+	marked := []*models.Mock{beat1, tick, nil, plain, beat2}
 	names := func(ms []*models.Mock) string {
 		out := []string{}
 		for _, m := range ms {
+			if m == nil {
+				out = append(out, "nil")
+				continue
+			}
 			out = append(out, m.Name)
 		}
 		return strings.Join(out, ",")
 	}
-	// The series read hands its own copies of the recordings: names tell.
-	own := MarkedSeries{Owner: "T1", Recordings: []*models.Mock{mk("beat-1"), mk("beat-2")}}
-	setWide := MarkedSeries{Recordings: []*models.Mock{mk("tick-1")}}
 	for _, c := range []struct {
 		name  string
 		store MockMemDb
 		want  string
 	}{
-		{"an own series and one marked set-wide", seriesStore{series: []MarkedSeries{setWide, own}}, "tick-1,boot-1"},
-		{"no own series", seriesStore{series: []MarkedSeries{setWide}}, "tick-1,beat-1,boot-1,beat-2"},
-		{"series that cannot be read", seriesStore{series: []MarkedSeries{own}, err: errors.New("read failed")}, "tick-1,beat-1,boot-1,beat-2"},
-		{"a store that reads no series", struct{ MockMemDb }{}, "tick-1,beat-1,boot-1,beat-2"},
+		{"an own series' recordings", markStore{own: map[string]bool{"beat-1": true, "beat-2": true}}, "tick-1,nil,boot-1"},
+		{"no own series", markStore{}, "beat-1,tick-1,nil,boot-1,beat-2"},
+		{"a store that reads no marks", struct{ MockMemDb }{}, "beat-1,tick-1,nil,boot-1,beat-2"},
 	} {
-		if got := names(PassOverOwnSeries(context.Background(), c.store, models.Mongo, nil, marked)); got != c.want {
+		if got := names(PassOverOwnSeries(c.store, marked)); got != c.want {
 			t.Fatalf("%s: PassOverOwnSeries kept %s; want %s", c.name, got, c.want)
 		}
 	}
-	if got := names(marked); got != "tick-1,beat-1,boot-1,beat-2" {
+	if got := names(marked); got != "beat-1,tick-1,nil,boot-1,beat-2" {
 		t.Fatalf("PassOverOwnSeries changed the list it was handed: %s", got)
 	}
-}
-
-// A test's own series is compared on the id its window bound this run, at
-// the place its mark names alone (OwnIDs): the job's beat on this run's id is
-// the series' call, given back the recorded id; a beat on the recorded id, on
-// a third id, or on an id two variables bound to two values is the owner's
-// miss, said why. A value at any other place is compared as recorded: one
-// that equals a bound variable's live value there is not given back (a miss),
-// and one that holds its recorded value there is no call on another id. A
-// series marked set-wide, one whose mark names no place, and an id no
-// variable was recorded as are compared as recorded.
-func TestOwnCallGivesBackTheIDsTheOwnersWindowBound(t *testing.T) {
-	leaf := func(p, v string) learn.Leaf { return learn.Leaf{Path: p, Type: learn.String, Value: v} }
-	series := learn.Series{Key: "update jobs", Values: map[string]learn.Leaf{
-		"body.q._id": leaf("body.q._id", "job-rec"),
-		"body.u.by":  leaf("body.u.by", "job-rec"),
-		"body.u.st":  leaf("body.u.st", "RUNNING"),
-	}}
-	call := func(id, by, st string) learn.Shape {
-		return learn.Shape{Key: "update jobs", Leaves: map[string]learn.Leaf{
-			"body.q._id": leaf("body.q._id", id), "body.u.by": leaf("body.u.by", by), "body.u.st": leaf("body.u.st", st)}}
-	}
-	bind := func(name, rec, live string) variables.Binding {
-		return variables.Binding{Name: name, Recorded: rec, Value: live}
-	}
-	one := []variables.Binding{bind("v1", "job-rec", "job-live")}
-	own := MarkedSeries{Series: series, Owner: "T1", OwnIDs: []string{"body.q._id"}}
-	for _, c := range []struct {
-		name    string
-		m       MarkedSeries
-		live    learn.Shape
-		inForce []variables.Binding
-		shape   bool   // the series' shape holds asked
-		moved   string // joined
-		off     string // a part of it; "" for none
-	}{
-		{"this run's id is given back", own, call("job-live", "job-rec", "RUNNING"), one, true, "job-rec", ""},
-		{"a set-wide series reads no variable", MarkedSeries{Series: series, OwnIDs: []string{"body.q._id"}}, call("job-live", "job-rec", "RUNNING"), one, false, "", ""},
-		{"a mark that names no place gives nothing back", MarkedSeries{Series: series, Owner: "T1"}, call("job-live", "job-rec", "RUNNING"), one, false, "", ""},
-		{"a place the series holds no one value at gives nothing back", MarkedSeries{Series: series, Owner: "T1", OwnIDs: []string{"body.q.other"}}, call("job-live", "job-rec", "RUNNING"), one, false, "", ""},
-		{"no binding: compared as recorded", own, call("job-live", "job-rec", "RUNNING"), nil, false, "", ""},
-		{"no binding of that id: compared as recorded", own, call("job-live", "job-rec", "RUNNING"), []variables.Binding{bind("v1", "other-rec", "job-live")}, false, "", ""},
-		{"the recorded id while the run bound another", own, call("job-rec", "job-rec", "RUNNING"), one, true, "", "it carries the recorded id job-rec at body.q._id, but T1's window bound that id to job-live"},
-		{"a third id", own, call("job-3rd", "job-rec", "RUNNING"), one, true, "", "it carries job-3rd at body.q._id, where T1's window bound the id recorded as job-rec to job-live"},
-		{"the bound live value at another place is not given back", own, call("job-live", "job-live", "RUNNING"), one, false, "job-rec", ""},
-		{"the bound live value at another place alone is no call on the id", own, call("job-rec", "job-live", "RUNNING"), one, false, "", "it carries the recorded id job-rec at body.q._id"},
-		{"a third value at another place is compared as recorded", own, call("job-live", "job-3rd", "RUNNING"), one, false, "job-rec", ""},
-		{"two bindings, two values", own, call("job-live", "job-rec", "RUNNING"), []variables.Binding{bind("v1", "job-rec", "job-live"), bind("v2", "job-rec", "job-2nd")}, true, "", "two variables recorded as job-rec are bound to two values this run (job-live, job-2nd)"},
-		{"two bindings, one value", own, call("job-live", "job-rec", "RUNNING"), []variables.Binding{bind("v1", "job-rec", "job-live"), bind("v2", "job-rec", "job-live")}, true, "job-rec", ""},
-		{"an id that replays the same", own, call("job-rec", "job-rec", "RUNNING"), []variables.Binding{bind("v1", "job-rec", "job-rec")}, true, "", ""},
-		{"another value beside the id still differs", own, call("job-live", "job-rec", "STOPPED"), one, false, "job-rec", ""},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			before := c.live.Leaves["body.q._id"].Value
-			asked, moved, off := c.m.OwnCall(c.live, c.inForce)
-			if got := series.HasShape(asked, learn.None); got != c.shape {
-				t.Errorf("HasShape(asked) = %v; want %v (asked %v)", got, c.shape, asked.Leaves)
-			}
-			if got := strings.Join(moved, ","); got != c.moved {
-				t.Errorf("moved = %q; want %q", got, c.moved)
-			}
-			if c.off == "" && off != "" || c.off != "" && !strings.Contains(off, c.off) {
-				t.Errorf("off = %q; want it to say %q", off, c.off)
-			}
-			if c.live.Leaves["body.q._id"].Value != before {
-				t.Errorf("OwnCall wrote into live's leaves")
-			}
-			if c.live.Leaves["body.u.by"].Value != asked.Leaves["body.u.by"].Value {
-				t.Errorf("OwnCall gave back %s at body.u.by, a place the mark does not name", asked.Leaves["body.u.by"].Value)
-			}
-		})
-	}
-}
-
-// A test's own series whose mark names its id at two places (the job's id in
-// a beat's URL and in its body) is compared on the id its window bound at
-// both: the beat on this run's id at both is the series' call, given the
-// recorded id back at both; this run's id at one and the recorded id or a
-// third value at the other is the owner's miss, naming the place. A place
-// the mark does not name is compared as recorded even when it holds the id
-// (a mark naming the body alone leaves the URL as recorded), and so is a
-// call whose named places the series recorded two values at, or that lacks
-// one of them.
-func TestOwnCallGivesTheIDBackAtEveryPlaceItsMarkNames(t *testing.T) {
-	leaf := func(p, v string) learn.Leaf { return learn.Leaf{Path: p, Type: learn.String, Value: v} }
-	values := func(url, body string) map[string]learn.Leaf {
-		return map[string]learn.Leaf{"url.path.2": leaf("url.path.2", url), "body.q._id": leaf("body.q._id", body), "body.u.st": leaf("body.u.st", "RUNNING")}
-	}
-	series := learn.Series{Key: "PUT /jobs/{}/beat", Values: values("job-rec", "job-rec")}
-	call := func(url, body string) learn.Shape { return learn.Shape{Key: series.Key, Leaves: values(url, body)} }
-	both := []string{"body.q._id", "url.path.2"}
-	own := MarkedSeries{Series: series, Owner: "T1", OwnIDs: both}
-	one := []variables.Binding{{Name: "v1", Recorded: "job-rec", Value: "job-live"}}
-	for _, c := range []struct {
-		name  string
-		m     MarkedSeries
-		live  learn.Shape
-		shape bool
-		moved string
-		off   string
-	}{
-		{"this run's id at both places is given back at both", own, call("job-live", "job-live"), true, "job-rec", ""},
-		{"the recorded id in the body", own, call("job-live", "job-rec"), true, "", "it carries the recorded id job-rec at body.q._id"},
-		{"the recorded id in the URL", own, call("job-rec", "job-live"), true, "", "it carries the recorded id job-rec at url.path.2"},
-		{"a third id in the URL", own, call("job-3rd", "job-live"), true, "", "it carries job-3rd at url.path.2"},
-		{"the recorded id at both places", own, call("job-rec", "job-rec"), true, "", "it carries the recorded id job-rec at body.q._id"},
-		{"a mark naming the body alone leaves the URL as recorded", MarkedSeries{Series: series, Owner: "T1", OwnIDs: []string{"body.q._id"}}, call("job-live", "job-live"), false, "job-rec", ""},
-		{"two recorded values at the named places", MarkedSeries{Series: learn.Series{Key: series.Key, Values: values("job-rec", "other-rec")}, Owner: "T1", OwnIDs: both}, call("job-live", "job-live"), false, "", ""},
-		{"a call lacking a named place", own, learn.Shape{Key: series.Key, Leaves: map[string]learn.Leaf{"body.q._id": leaf("body.q._id", "job-live"), "body.u.st": leaf("body.u.st", "RUNNING")}}, false, "", ""},
-		{"an empty place among the named ones", MarkedSeries{Series: series, Owner: "T1", OwnIDs: []string{"", "body.q._id"}}, call("job-live", "job-live"), false, "", ""},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			url, body := c.live.Leaves["url.path.2"].Value, c.live.Leaves["body.q._id"].Value
-			asked, moved, off := c.m.OwnCall(c.live, one)
-			if got := c.m.Series.HasShape(asked, learn.None); got != c.shape {
-				t.Errorf("HasShape(asked) = %v; want %v (asked %v)", got, c.shape, asked.Leaves)
-			}
-			if got := strings.Join(moved, ","); got != c.moved {
-				t.Errorf("moved = %q; want %q", got, c.moved)
-			}
-			if c.off == "" && off != "" || c.off != "" && !strings.Contains(off, c.off) {
-				t.Errorf("off = %q; want it to say %q", off, c.off)
-			}
-			if c.live.Leaves["url.path.2"].Value != url || c.live.Leaves["body.q._id"].Value != body {
-				t.Errorf("OwnCall wrote into live's leaves")
-			}
-		})
-	}
-}
-
-// An own series gives nothing back where its mark names no place, even when
-// the series holds a value at the empty path, and nothing for an id recorded
-// empty, even when a variable recorded empty is bound this run: an empty
-// place or value is never read as the job's id.
-func TestOwnCallGivesNothingBackForAnEmptyPlaceOrID(t *testing.T) {
-	leaf := func(p, v string) learn.Leaf { return learn.Leaf{Path: p, Type: learn.String, Value: v} }
-	for _, c := range []struct {
-		name    string
-		path    string // the place the mark names
-		rec     string // the series' value there
-		inForce []variables.Binding
-	}{
-		{"a mark that names no place, with a value at the empty path", "", "job-rec", []variables.Binding{{Name: "v1", Recorded: "job-rec", Value: "job-live"}}},
-		{"an id recorded empty, with a variable recorded empty bound", "body.q._id", "", []variables.Binding{{Name: "v1", Recorded: "", Value: "job-live"}}},
-		{"a mark that names no place at all, with a variable recorded empty bound", "none", "job-rec", []variables.Binding{{Name: "v1", Recorded: "", Value: "job-live"}}},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			ids := []string{c.path}
-			if c.path == "none" {
-				ids, c.path = nil, "body.q._id"
-			}
-			m := MarkedSeries{Owner: "T1", OwnIDs: ids, Series: learn.Series{Key: "update jobs", Values: map[string]learn.Leaf{c.path: leaf(c.path, c.rec)}}}
-			live := learn.Shape{Key: "update jobs", Leaves: map[string]learn.Leaf{c.path: leaf(c.path, "job-live")}}
-			asked, moved, off := m.OwnCall(live, c.inForce)
-			if got := asked.Leaves[c.path].Value; got != "job-live" || len(moved) != 0 || off != "" {
-				t.Fatalf("OwnCall gave %q back at %q (moved %v, off %q); want the call as it came, nothing given back", got, c.path, moved, off)
-			}
-		})
+	if got := PassOverOwnSeries(markStore{own: map[string]bool{"beat-1": true}}, nil); len(got) != 0 {
+		t.Fatalf("PassOverOwnSeries of no recordings kept %v", got)
 	}
 }

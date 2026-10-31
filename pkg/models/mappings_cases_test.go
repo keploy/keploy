@@ -338,6 +338,9 @@ func TestBackgroundOwnSeriesIDsReadsBackEveryPathItsMarkNames(t *testing.T) {
 	if got, ok := BackgroundOwnSeriesIDs(BackgroundOwnSeriesPrefix + `the id at "url.path.2", "body.job"; words`); !ok || !slices.Equal(got, []string{"body.job", "url.path.2"}) {
 		t.Errorf("a mark naming its paths unsorted reads back %q, %v; want them sorted", got, ok)
 	}
+	if got, ok := BackgroundOwnSeriesIDs(BackgroundOwnSeriesPrefix + `the id at "url.path.2", "body.job", "url.path.2", "body.job"; words`); !ok || !slices.Equal(got, []string{"body.job", "url.path.2"}) {
+		t.Errorf("a mark naming a path twice (a line someone edited) reads back %q, %v; want each path once", got, ok)
+	}
 	for _, why := range []string{
 		"",
 		BackgroundSeriesPrefix + `the id at "body.q._id"; words`,

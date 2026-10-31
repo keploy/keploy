@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
-	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/variables"
@@ -80,17 +79,17 @@ func (h *HTTP) extraCall(ctx context.Context, input *req, mockDb integrations.Mo
 // test's bindings: the answer binds nothing, as the background work's answer
 // is not the test's.
 //
-// A recording of the open test's own series (integrations.PassOverOwnSeries,
-// its series read with known, as the series step reads it) is never answered
-// again here: the series step, asked next, answers a call of it on the id the
+// A recording judging marked as the open test's own series
+// (integrations.PassOverOwnSeries, told by its mark) is never answered again
+// here: the series step, asked next, answers a call of it on the id the
 // test's window bound, and names the own series.
-func (h *HTTP) backgroundAgain(ctx context.Context, input *req, mockDb integrations.MockMemDb, headerNoise, bodyNoise map[string][]string, urlNoise []string, autoURLDynamic, schemaNoiseStrict bool, known learn.Known) *models.Mock {
+func (h *HTTP) backgroundAgain(ctx context.Context, input *req, mockDb integrations.MockMemDb, headerNoise, bodyNoise map[string][]string, urlNoise []string, autoURLDynamic, schemaNoiseStrict bool) *models.Mock {
 	br, ok := mockDb.(integrations.AnsweredBackgroundReader)
 	if !ok {
 		return nil
 	}
 	marked := FilterHTTPMocks(br.AnsweredBackground())
-	marked = integrations.PassOverOwnSeries(ctx, mockDb, models.HTTP, known, marked)
+	marked = integrations.PassOverOwnSeries(mockDb, marked)
 	if len(marked) == 0 {
 		return nil
 	}

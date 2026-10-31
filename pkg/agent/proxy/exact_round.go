@@ -1150,6 +1150,16 @@ func (h *heldScope) AnsweredBackground() []*models.Mock {
 	return h.heldOf(h.MockManager.AnsweredBackground())
 }
 
+// OwnSeriesMarked is the manager's (integrations.OwnSeriesMarkReader) while
+// the staging is still h's call's, and true once it moved: the name, read
+// from the staging h's call was made in, may be another recording's in the
+// staged set (names restart in each set), so the recording is passed over
+// (integrations.PassOverOwnSeries), failing closed.
+func (h *heldScope) OwnSeriesMarked(name string) bool {
+	own := h.MockManager.OwnSeriesMarked(name)
+	return own || h.moved()
+}
+
 // FindAnsweredEarlier is the manager's (integrations.AnsweredFinder) while
 // the staging is still h's call's after the lookup: the answered log is the
 // staged set's, and recordings' names restart in each set, so a call of one

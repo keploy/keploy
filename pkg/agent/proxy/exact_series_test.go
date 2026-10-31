@@ -659,6 +659,65 @@ func TestATestsOwnSeriesIsHandedOnlyInItsOwnersWindow(t *testing.T) {
 	}
 }
 
+// A recording judging marked as a test's own series is told by its mark on
+// the open test's list (integrations.OwnSeriesMarkReader), with no read of
+// the set's series, so a parser passes it over even where that read fails:
+// in its owner's window alone (not in another test's, not between tests),
+// through every wrapper, and, for a call whose staging the replay moved
+// since, always (its name may be another set's recording: fail closed). A
+// plain mark and a series marked set-wide are no own series' marks.
+func TestAnOwnSeriesRecordingIsToldByItsMarkAlone(t *testing.T) {
+	mm := timerSet(t)
+	marks := ownMarks(nil, "T1", "claim-1", "claim-2")
+	marks.Add("T1", "claim-3", models.BackgroundSeriesPrefix+"claim, every 2s")
+	marks.Add("T1", "claim-4", "boot work")
+	mm.SetUnrequired(marks)
+	own := func(db integrations.MockMemDb) string {
+		r, ok := db.(integrations.OwnSeriesMarkReader)
+		if !ok {
+			return "no reader"
+		}
+		var out []string
+		for _, n := range allClaims {
+			if r.OwnSeriesMarked(n) {
+				out = append(out, n)
+			}
+		}
+		return strings.Join(out, ",")
+	}
+	if got := own(mm); got != "" {
+		t.Fatalf("with no test open, %q are marked own; want none", got)
+	}
+	mm.ServeExactTest("T1", nil)
+	for _, c := range []struct {
+		name string
+		db   integrations.MockMemDb
+	}{{"the manager", mm}, {"a scoped view", &scopedMockDb{MockMemDb: mm}}} {
+		if got := own(c.db); got != "claim-1,claim-2" {
+			t.Fatalf("in T1's window %s marks %q own; want claim-1,claim-2", c.name, got)
+		}
+	}
+	held, _ := mm.HoldToRound(mm.MarkCallRound())
+	if got := own(held); got != "claim-1,claim-2" {
+		t.Fatalf("a call held in T1's window marks %q own; want claim-1,claim-2", got)
+	}
+	mm.stagingEpoch.Add(1)
+	if got := own(held); got != strings.Join(allClaims, ",") {
+		t.Fatalf("a call whose staging moved marks %q own; want every name (fail closed)", got)
+	}
+	mm.ServeExactTest("T2", nil)
+	if got := own(mm); got != "" {
+		t.Fatalf("in T2's window %q are marked own; want none of T1's", got)
+	}
+	mm.ServeExactPool("", nil)
+	if got := own(mm); got != "" {
+		t.Fatalf("between tests %q are marked own; want none", got)
+	}
+	if got := own(&scopedMockDb{MockMemDb: struct{ integrations.MockMemDb }{mm}}); got != "" {
+		t.Fatalf("a view of a store that reads no marks marks %q own; want none", got)
+	}
+}
+
 // A test's own series is handed every path of the id its marks name
 // (MarkedSeries.OwnIDs), read back from every recording's mark (a URL and a
 // body path both); when one mark names none (a line someone edited), or two
