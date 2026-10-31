@@ -58,10 +58,12 @@ type Seen struct {
 	// and a later value that holds the longer leaf came from the variable's
 	// own place, with that text around it (placeRank).
 	Part Within
-	// Incoming: Name is a variable read in the test's incoming requests
-	// (models.MockVariable.Incoming), used here (Named): its value came
-	// from them, never from this place (placeRank).
-	Incoming bool
+	// Incoming, where Name is a variable read in the test's incoming
+	// requests (models.MockVariable.Incoming) used here (Named), is the
+	// part of them it is read at; "" for any other place. Its value came
+	// from them, never from this place (placeRank), and a later answer
+	// that holds it reads it there too.
+	Incoming string
 	// Stamp: the leaf is its answer's own clock stamp by its protocol (an
 	// HTTP answer's Date header within the span keploy stamped the exchange
 	// in: AnswerStamp, instants.go rule 3), which no value came from. Its
@@ -3726,7 +3728,7 @@ func partOf(value, part string) string {
 // the test's own window holds anyway: the test's own given place is the
 // one that holds it in the test.
 func placeRank(e Earlier, s Seen, whole bool) int {
-	if models.RunVariable(s.Name) || s.Incoming || s.Part.Set() {
+	if models.RunVariable(s.Name) || s.Incoming != "" || s.Part.Set() {
 		return placeNone
 	}
 	if e.Incoming && whole {
@@ -4593,8 +4595,9 @@ func ReadBack(r Leaf, record string, earlier []Earlier) (Place, bool) {
 // Named is e with each request place that holds one of vars (as its bind or
 // a use) naming that variable (Seen.Name), the first by name when two hold
 // one place, with the part it holds it at where a use holds it as one part
-// of a longer value (Seen.Part, from the variable's Within), marked where
-// that variable is read in the test's incoming requests (Seen.Incoming), and
+// of a longer value (Seen.Part, from the variable's Within), with the part
+// of the test's incoming requests that variable is read at, where it is
+// read there (Seen.Incoming), and
 // each request leaf clocks (the call's learn step's clock reads, by leaf
 // path, as MockSpec.Clocks keys them) holds as a plain read marked so
 // (Seen.Clock). An echo is not named: it is its call's alone, and
@@ -4624,11 +4627,13 @@ func Named(e Earlier, vars models.MockVariables, clocks map[string]models.ClockO
 	}
 	e.Seen = append([]Seen(nil), e.Seen...)
 	for i, s := range e.Seen {
-		e.Seen[i].Name, e.Seen[i].Incoming, e.Seen[i].Part = "", false, Within{}
+		e.Seen[i].Name, e.Seen[i].Incoming, e.Seen[i].Part = "", "", Within{}
 		if s.Side == Request && s.Place != "" {
 			name := at[s.Place]
 			e.Seen[i].Name = name
-			e.Seen[i].Incoming = name != "" && vars[name].Incoming != ""
+			if name != "" {
+				e.Seen[i].Incoming = vars[name].Incoming
+			}
 			if p, ok := vars[name].PartAt(s.Place, false); name != "" && ok {
 				e.Seen[i].Part = Within{Before: p.Before, After: p.After}
 			}

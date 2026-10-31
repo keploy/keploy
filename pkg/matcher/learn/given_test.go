@@ -1712,8 +1712,8 @@ func TestACallThatUsesAnIncomingVariableIsNoPlaceOfItsOwn(t *testing.T) {
 	first := Earlier{Mock: "mock-1013", At: aRead.Add(time.Second), Own: true, Seen: []Seen{{Side: Request, Leaf: Leaf{Path: use, Type: Number, Value: rec.Leaves[use].Value}, Live: live.Leaves[use].Value, Place: use}}}
 	vars := models.MockVariables{"auth_time": {Recorded: rec.Leaves[use].Value, Use: []string{use}, Incoming: "header.Authorization{jwt}.auth_time"}}
 	named := Named(first, vars, nil)
-	if s := named.Seen[0]; s.Name != "auth_time" || !s.Incoming {
-		t.Fatalf("the earlier call's place named %q, incoming %v", s.Name, s.Incoming)
+	if s := named.Seen[0]; s.Name != "auth_time" || s.Incoming != "header.Authorization{jwt}.auth_time" {
+		t.Fatalf("the earlier call's place named %q, incoming %q; want auth_time read at the token's claim", s.Name, s.Incoming)
 	}
 	ln := ClassifyIn(clientTestCache(), drift, live, rec, call, []Earlier{named, gave}, nil, nil, w)[0]
 	if ln.Kind != KindVariable || !ln.From.Incoming || ln.From.Path != "header.Authorization{jwt}.auth_time" {
@@ -1721,7 +1721,7 @@ func TestACallThatUsesAnIncomingVariableIsNoPlaceOfItsOwn(t *testing.T) {
 	}
 	// A call's own variable, bound at its place, stays that place.
 	vars = models.MockVariables{"auth_time": {Recorded: rec.Leaves[use].Value, Bind: use}}
-	if named := Named(first, vars, nil); named.Seen[0].Incoming {
+	if named := Named(first, vars, nil); named.Seen[0].Incoming != "" {
 		t.Fatalf("a bound variable's place marked incoming: %+v", named.Seen[0])
 	}
 }
