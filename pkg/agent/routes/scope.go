@@ -278,6 +278,19 @@ func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		// Each key's worker scope, before the pool is served, which shows
+		// it. Every table says it, an empty one too: a set never keeps the
+		// previous set's. An agent that cannot serve one refuses a table
+		// that has one: the CLI judges each test on it.
+		if ws, ok := a.svc.(scopeWorkerSetter); ok {
+			if err := ws.SetScopeWorker(r.Context(), req.Worker); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		} else if len(req.Worker) > 0 {
+			http.Error(w, "this keploy agent cannot serve a set's worker: calls in a test's window", http.StatusNotImplemented)
+			return
+		}
 		if err := s.SetScopePool(r.Context(), req.Pool); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -290,6 +303,12 @@ func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 // scopePoolSetter installs each key's pool slice (proven wire).
 type scopePoolSetter interface {
 	SetScopePool(ctx context.Context, pool map[string][]string) error
+}
+
+// scopeWorkerSetter installs each key's worker scope for a replay
+// (models.ScopeTableReq.Worker, proven wire).
+type scopeWorkerSetter interface {
+	SetScopeWorker(ctx context.Context, worker map[string][]string) error
 }
 
 // recordedWindowsSetter installs the recorded window of every test of the

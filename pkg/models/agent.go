@@ -310,6 +310,15 @@ type ScopeTableReq struct {
 	// another test's (integrations.TestWindows). Absent from an older CLI
 	// and from a set with no test: the agent then knows none.
 	Windows []TestWindow `json:"windows,omitempty"`
+	// Worker is, under the proven switch, each key's worker scope as keploy
+	// mock replay reads the set's mappings.yaml (Mapping.Worker): the names
+	// of the key's pool slice that worker: lists. Unlike the rest of the
+	// slice, which answers only while no test is open, they answer whether a
+	// test is open or not, after the open test's own, each at most one
+	// request in the staging, and no test is required to make them. A name
+	// no slice of its key holds is not served. Absent from an older CLI:
+	// worker: entries then answer between tests only, as the pool's.
+	Worker map[string][]string `json:"worker,omitempty"`
 }
 
 // TestBeginsReq is the body of POST /agent/replay/clock, which only the keploy

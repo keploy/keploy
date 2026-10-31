@@ -1170,7 +1170,9 @@ func (m *mockService) pushScopeTable(ctx context.Context, name string, filtered,
 // no mapping file or an all-empty one, owns none, so a dependency-free set
 // stays green and every other call misses with its reason. Every mock no
 // test lists is the pool's: under the key it was recorded with (mappings'
-// startup:), else models.PoolKeyNone. A mapping that cannot be read, or that
+// startup: or worker:), else models.PoolKeyNone. Those worker: lists are
+// each key's worker scope too, which answers in a test's window as well,
+// each at most once, and is required of no test. A mapping that cannot be read, or that
 // names a mock the recording does not have, refuses, and so does an agent
 // that refuses the table: nothing is served from a whole pool instead.
 func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded, decoded []*models.Mock) error {
@@ -1227,11 +1229,12 @@ func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded, 
 			zap.String("mock-set", name),
 			zap.String("next_step", "record the set again with this keploy: keploy mock record writes mappings.yaml"))
 	}
-	if err := pp.PushProvenTable(ctx, table, pool, windows); err != nil {
+	worker := workerSlices(mp, pool)
+	if err := pp.PushProvenTable(ctx, table, pool, worker, windows); err != nil {
 		return refuse("its agent refused the per-test table: " + err.Error())
 	}
 	m.mockOwners = models.MockOwners(table)
-	m.logger.Info("per-test scoping enabled", zap.Int("tests", len(table)), zap.Int("pool slices", len(pool)), zap.Int("recorded test windows", len(windows)), zap.String("mock-set", name))
+	m.logger.Info("per-test scoping enabled", zap.Int("tests", len(table)), zap.Int("pool slices", len(pool)), zap.Int("worker scope mocks", countNames(worker)), zap.Int("recorded test windows", len(windows)), zap.String("mock-set", name))
 	return nil
 }
 
@@ -1417,8 +1420,9 @@ func heldOnly(table map[string][]string, loaded []*models.Mock) map[string][]str
 // loaded mock no test's mapping lists, under the key its mappings' startup:
 // or worker: entry gives it, else models.PoolKeyNone (an older recording's,
 // or one made outside every claim). A call keploy mock record listed in
-// worker: (made between or after the tests) is served as one in startup:
-// is, and so is one a reader moved there from a test's list. unknown lists,
+// worker: (made between or after the tests), or one a reader moved there
+// from a test's list, is in its key's slice too, and its key's worker scope
+// (workerSlices) serves it in a test's window as well. unknown lists,
 // sorted, the names the table or those entries give that no decoded mock
 // has (a mock the agent never holds, a connection failure, is decoded, and
 // in no slice).
@@ -1479,6 +1483,47 @@ func poolSlices(mp *models.Mapping, table map[string][]string, loaded, decoded [
 	}
 	sort.Strings(unknown)
 	return pool, unknown
+}
+
+// workerSlices is each key's worker scope (models.ScopeTableReq.Worker): the
+// names of pool's slices that mappings' worker: lists, under the key whose
+// slice holds each, in worker:'s order. The agent serves them in a test's
+// window too, each at most once, and requires them of no test; the rest of
+// a slice answers between tests only. A worker: name no slice holds (a test
+// lists it, or the agent never holds it) is not one. nil when there is none.
+func workerSlices(mp *models.Mapping, pool map[string][]string) map[string][]string {
+	if mp == nil || len(mp.Worker) == 0 {
+		return nil
+	}
+	keyOf := map[string]string{}
+	for key, names := range pool {
+		for _, n := range names {
+			keyOf[n] = key
+		}
+	}
+	var out map[string][]string
+	seen := map[string]bool{}
+	for _, e := range mp.Worker {
+		key, ok := keyOf[e.Name]
+		if e.Name == "" || !ok || seen[e.Name] {
+			continue
+		}
+		seen[e.Name] = true
+		if out == nil {
+			out = map[string][]string{}
+		}
+		out[key] = append(out[key], e.Name)
+	}
+	return out
+}
+
+// countNames is how many names slices hold.
+func countNames(slices map[string][]string) int {
+	n := 0
+	for _, names := range slices {
+		n += len(names)
+	}
+	return n
 }
 
 // pushTestBegins hands the agent when each test of the recording began

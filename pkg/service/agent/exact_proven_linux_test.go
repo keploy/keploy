@@ -375,6 +375,43 @@ func TestThePoolAnswersOnlyBetweenTests(t *testing.T) {
 	require.Equal(t, []string{models.MissInTest}, kinds, "a miss between tests is charged to no test, not to the next one")
 }
 
+// A worker: mock of the claiming key's (one keploy mock record listed as made
+// between the tests, or one a reader moved out of a test's list, such as a
+// token's first-use read) answers in a test's window too, after the test's
+// own, and between tests, each at most once in the set, and no test is
+// required to make it. Another key's worker scope answers none of this
+// key's calls. Before, a test that made it missed: inside a test only its
+// own mocks answer, and a worker: entry was served as the pool, between
+// tests only.
+func TestAWorkerMockAnswersInAnyTestOnceAndIsRequiredOfNone(t *testing.T) {
+	a, _ := wireAgent(t, models.MODE_TEST)
+	p := newServingProxy()
+	a.Proxy = p
+	ctx := context.Background()
+	require.NoError(t, a.StoreMocks(ctx, nil, []*models.Mock{
+		pingMock("mock-1", "/a", "a", t0),
+		pingMock("mock-2", "/token", "first-use", t0.Add(time.Second)),
+		pingMock("mock-3", "/token", "again", t0.Add(2*time.Second)),
+		pingMock("mock-4", "/never", "unused", t0.Add(3*time.Second)),
+		pingMock("mock-5", "/other", "other key", t0.Add(4*time.Second)),
+	}))
+	require.NoError(t, a.SetScopeTable(ctx, map[string][]string{"o::TestA": {"mock-1"}, "o::TestB": {}, "o::TestC": {}}))
+	require.NoError(t, a.SetScopeWorker(ctx, map[string][]string{"o": {"mock-2", "mock-3", "mock-4"}, "p": {"mock-5"}}))
+	require.NoError(t, a.SetScopePool(ctx, map[string][]string{"o": {"mock-2", "mock-3", "mock-4"}, "p": {"mock-5"}}))
+	claimSelf(t, a)
+	got, e := runTest(t, a, p, "TestA", "/a", "/token")
+	require.Equal(t, []string{"200 a", "200 first-use"}, got, "a worker: mock answers in a test's window, in recorded order")
+	require.Empty(t, e.Action, e.Reason)
+	code, body := p.call(t, "/token")
+	require.Equal(t, "200 again", fmt.Sprintf("%d %s", code, body), "and between tests")
+	_, e = runTest(t, a, p, "TestB")
+	require.Empty(t, e.Action, "a worker: mock no call answered (mock-4) is required of no test: %s", e.Reason)
+	got, e = runTest(t, a, p, "TestC", "/token", "/other")
+	require.True(t, strings.HasPrefix(got[0], "502"), "a worker: mock answers at most once in the set: %s", got[0])
+	require.True(t, strings.HasPrefix(got[1], "502"), "another key's worker scope answered: %s", got[1])
+	require.Equal(t, models.ScopeActionFail, e.Action)
+}
+
 // sqsEmpty is the answer enterprise SQS's parser writes for a ReceiveMessage
 // no recording answers (generateEmptySQSMock): the queue has nothing.
 const sqsEmpty = "{} (the parser's own empty answer)"
