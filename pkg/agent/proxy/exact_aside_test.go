@@ -127,6 +127,91 @@ func TestAHandedAsideRecordingAnswersOnceWithItsOwnTestsCopy(t *testing.T) {
 	}
 }
 
+// A handed recording answers once in the staging for a call in flight before
+// its test's begin too (a pool view's ahead), whichever lands first: the
+// claim is taken as the copy answers, under the owner's name. The
+// interleavings are forced in order, one call after another.
+func TestAHandedRecordingAnswersOnceForACallInFlightBeforeItsTestBegins(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	pat := exactMock("pat", 0, models.LifetimeSession)
+	claimant := func(mm *MockManager) string {
+		who, _ := mm.exact.asideClaims.claimant(mm.stagingEpoch.Load(), "pat")
+		return who
+	}
+	// Served aside first: the owner's in-flight call is refused it.
+	mm := stagedManager(t, nil, []*models.Mock{pat})
+	mm.ServeExactAside("Q", []*models.Mock{pat})
+	mm.ServeExactTest("K", nil)
+	sa := mm.SetAsideMocks("")
+	if len(sa) != 1 || !mm.MarkMockAsUsed(*sa[0]) {
+		t.Fatal("the handed recording did not answer the later test's call")
+	}
+	mm.ServeExactPool(models.PoolKeyNone, nil, pat)
+	pt, _ := mm.GetPerTestMocksInWindow()
+	equalNames(t, "in flight: a copy another test was served aside", pt)
+	if mm.MarkMockAsUsed(*pat) {
+		t.Fatal("a call in flight before the owner's begin was answered a recording another test was served aside")
+	}
+	if who := claimant(mm); who != "K" {
+		t.Fatalf("claimed for %q, want K", who)
+	}
+	// In flight first: the claim is the owner's, kept as it opens, so no
+	// later test is offered it, nor answered with it.
+	mm = stagedManager(t, nil, []*models.Mock{pat})
+	mm.ServeExactAside("Q", []*models.Mock{pat})
+	mm.ServeExactTest("K", nil)
+	mm.ServeExactPool(models.PoolKeyNone, nil, pat)
+	pt, _ = mm.GetPerTestMocksInWindow()
+	equalNames(t, "in flight", pt, "pat")
+	if !mm.MarkMockAsUsed(*pt[0]) {
+		t.Fatal("the owner's call in flight was not answered its own recording")
+	}
+	if who := claimant(mm); who != "Q" {
+		t.Fatalf("an in-flight answer claimed for %q, want Q", who)
+	}
+	mm.ServeExactTest("Q", []*models.Mock{pat})
+	if who := claimant(mm); who != "Q" {
+		t.Fatalf("the owner's begin let go of its in-flight answer's claim (now %q)", who)
+	}
+	mm.ServeExactTest("Z", nil)
+	if got := mm.SetAsideMocks(""); len(got) != 0 {
+		t.Fatalf("a recording answered in flight is offered aside: %v", asideNames(got))
+	}
+	if mm.MarkMockAsUsed(*pat) {
+		t.Fatal("a recording answered in flight answered a later test aside")
+	}
+	// Its owner opened again (a retry): its own call in flight before the
+	// second begin is its own to answer, and carried in.
+	mm = stagedManager(t, nil, []*models.Mock{pat})
+	mm.ServeExactAside("Q", []*models.Mock{pat})
+	mm.ServeExactTest("K", nil)
+	mm.ServeExactTest("Q", []*models.Mock{pat})
+	pt, _ = mm.GetPerTestMocksInWindow()
+	if len(pt) != 1 || !mm.MarkMockAsUsed(*pt[0]) {
+		t.Fatal("the owner's own copy did not answer")
+	}
+	mm.ServeExactPool(models.PoolKeyNone, nil, pat)
+	pt, _ = mm.GetPerTestMocksInWindow()
+	equalNames(t, "in flight into the retry", pt, "pat")
+	if !mm.MarkMockAsUsed(*pt[0]) {
+		t.Fatal("the retry's call in flight was refused the owner's own recording")
+	}
+	mm.ServeExactTest("Q", []*models.Mock{pat})
+	if who := claimant(mm); who != "Q" {
+		t.Fatalf("the retry's carried answer is claimed for %q, want Q", who)
+	}
+	// Never handed: an in-flight answer takes no claim, as before.
+	mm = stagedManager(t, nil, []*models.Mock{pat})
+	mm.ServeExactPool(models.PoolKeyNone, nil, pat)
+	pt, _ = mm.GetPerTestMocksInWindow()
+	if len(pt) != 1 || !mm.MarkMockAsUsed(*pt[0]) {
+		t.Fatal("a call in flight was not answered")
+	}
+	if who, ok := mm.exact.asideClaims.claimant(mm.stagingEpoch.Load(), "pat"); ok {
+		t.Fatalf("a recording never handed aside was claimed for %q", who)
+	}
+}
+
 // What is not served aside: a recording that places or binds variables (its
 // values are its own test's), one the open test owns (its own, required), and
 // anything after a session reset.
