@@ -779,6 +779,25 @@ func settlesByCapture(answers bool) (CaptureSettler, bool) {
 	return cs, cs != nil && !answers && provenswitch.On()
 }
 
+// StartupCaptureLoss is what the capture a record's tests settle through
+// (settlesByCapture) lost before the run's first test began, which no test
+// is charged with: the record keeps it for its summary
+// (models.StartupCaptureLoss). Empty when the run's tests settle through
+// keploy's proxy, whose start-up losses are the run's
+// (UnchargedCaptureLosses), and when the capture does not say
+// (StartupLossReporter).
+func (a *Agent) StartupCaptureLoss(context.Context) (models.StartupCaptureLoss, error) {
+	cs, ok := settlesByCapture(a.replaying())
+	if !ok {
+		return models.StartupCaptureLoss{}, nil
+	}
+	r, ok := cs.(StartupLossReporter)
+	if !ok {
+		return models.StartupCaptureLoss{}, nil
+	}
+	return models.StartupCaptureLoss{Lost: r.StartupCaptureLoss()}, nil
+}
+
 // settleCapture settles a record's test end through cs, under the settle's
 // watchdog (watchSettle on cs.SettleProgress): a wait none of whose counts
 // moves for settleStallLimit wake-ups fails, as a proxy's does. An error says

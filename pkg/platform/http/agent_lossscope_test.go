@@ -48,3 +48,41 @@ func TestGetUnchargedCaptureLossesReadsWhatNoTestWasChargedWith(t *testing.T) {
 		t.Fatalf("an agent older than the route: %v", err)
 	}
 }
+
+// startupAgentSvc says what its capture lost before the first test began.
+type startupAgentSvc struct {
+	lossAgentSvc
+	lost models.StartupCaptureLoss
+	err  error
+}
+
+func (s startupAgentSvc) StartupCaptureLoss(context.Context) (models.StartupCaptureLoss, error) {
+	return s.lost, s.err
+}
+
+// The client reads what the agent's capture lost before the first test
+// through GET /agent/capturelosses/startup; an agent older than the route
+// (404) or one that cannot say (501) is "unsupported"; a 500 is an error that
+// is not. keploy mock record type-asserts for it.
+func TestGetStartupCaptureLossReadsWhatTheCaptureLostBeforeTheFirstTest(t *testing.T) {
+	var _ mock.StartupLossReader = newClient(t, agentWith(t, startupAgentSvc{}))
+	want := models.StartupCaptureLoss{Lost: "the capture ring lost 3, the TLS hooks lost 1"}
+	got, err := newClient(t, agentWith(t, startupAgentSvc{lost: want})).GetStartupCaptureLoss(context.Background())
+	if err != nil || got != want {
+		t.Fatalf("read %+v, %v; want %+v", got, err, want)
+	}
+	if got, err := newClient(t, agentWith(t, startupAgentSvc{})).GetStartupCaptureLoss(context.Background()); err != nil || got.Lost != "" {
+		t.Fatalf("nothing lost: %+v, %v", got, err)
+	}
+	if _, err := newClient(t, agentWith(t, lossAgentSvc{})).GetStartupCaptureLoss(context.Background()); !errors.Is(err, models.ErrCaptureLossesUnsupported) {
+		t.Fatalf("an agent that cannot say: %v", err)
+	}
+	if _, err := newClient(t, agentWith(t, startupAgentSvc{err: errors.New("bad file descriptor")})).GetStartupCaptureLoss(context.Background()); err == nil || errors.Is(err, models.ErrCaptureLossesUnsupported) {
+		t.Fatalf("a failed read: %v, want an error that is not 'unsupported'", err)
+	}
+	older := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(older.Close)
+	if _, err := newClient(t, older.URL+"/agent").GetStartupCaptureLoss(context.Background()); !errors.Is(err, models.ErrCaptureLossesUnsupported) {
+		t.Fatalf("an agent older than the route: %v", err)
+	}
+}

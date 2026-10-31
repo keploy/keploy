@@ -47,6 +47,35 @@ type UnchargedLossReader interface {
 	GetUnchargedCaptureLosses(ctx context.Context) (models.CaptureLosses, error)
 }
 
+// StartupLossReader is an optional Instrumentation extension: what the
+// capture a record's tests settle through lost before its first test began
+// (models.StartupCaptureLoss).
+type StartupLossReader interface {
+	GetStartupCaptureLoss(ctx context.Context) (models.StartupCaptureLoss, error)
+}
+
+// startupLoss is, for a record that is judged, what the capture its tests
+// settle through lost before the first test began, and why that could not be
+// read. No test is charged with it and it fails no recording: the record's
+// summary says it (TestsReceipt.StartupCaptureLoss). An agent older than the
+// read, or one that cannot say, has none to say: its tests settle through
+// keploy's proxy, which counts what it lost before the first test with the
+// run's (runLosses).
+func (m *mockService) startupLoss(ctx context.Context) (lost, unread string) {
+	reader, ok := m.instrumentation.(StartupLossReader)
+	if !ok {
+		return "", ""
+	}
+	got, err := reader.GetStartupCaptureLoss(ctx)
+	switch {
+	case errors.Is(err, models.ErrCaptureLossesUnsupported):
+		return "", ""
+	case err != nil:
+		return "", err.Error()
+	}
+	return got.Lost, ""
+}
+
 // runLosses is, for a record that is judged, what the agent could not
 // capture that no test was charged with: no recording holds what it carried,
 // so judging fails the run on it (design v14 §7.5). Read once the run's last

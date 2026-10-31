@@ -160,6 +160,14 @@ type CaptureSettler interface {
 	NoteTestBegin()
 }
 
+// StartupLossReporter is a CaptureSettler that says what its capture lost
+// before the run's first test began, counted to that begin
+// (CaptureSettler.NoteTestBegin): "" for nothing. No test is charged with
+// it; the record keeps it for its summary (models.StartupCaptureLoss).
+type StartupLossReporter interface {
+	StartupCaptureLoss() string
+}
+
 // captureSettler is the registered CaptureSettler, nil when none is.
 var captureSettler CaptureSettler
 

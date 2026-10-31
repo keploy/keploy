@@ -219,6 +219,10 @@ func (m *mockService) Record(ctx context.Context) error {
 	// recordLossesUnread, why that could not be read.
 	var recordLosses models.CaptureLosses
 	var recordLossesUnread string
+	// recordStartupLoss is, for a judged record, what the capture its tests
+	// settle through lost before the first test began (startupLoss), and
+	// recordStartupLossUnread why that could not be read.
+	var recordStartupLoss, recordStartupLossUnread string
 	recordJudged := false
 	defer func() {
 		// Only a build that judges the record reads these results; written
@@ -228,6 +232,7 @@ func (m *mockService) Record(ctx context.Context) error {
 			writeRecordTestsReceipt(m.logger, m.config.Path, TestsReceipt{
 				Set: name, At: started.UTC().Truncate(time.Second), Refusals: m.refusals, Live: m.live, Mocked: m.mocked, Real: recordReal,
 				CannotCapture: recordNotJudged, CaptureLosses: recordLosses, CaptureLossesUnread: recordLossesUnread,
+				StartupCaptureLoss: recordStartupLoss, StartupCaptureLossUnread: recordStartupLossUnread,
 			}, recordTests)
 		}
 	}()
@@ -793,6 +798,10 @@ func (m *mockService) Record(ctx context.Context) error {
 				m.logger.Error("keploy could not read whether its agent captured every call after the test command's last test, so judging fails the run ("+provenswitch.Env+"=1)",
 					zap.String("mock-set", name), zap.String("reason", recordLossesUnread),
 					zap.String("next_step", "check the agent's log for why its count could not be read, then record again"))
+			}
+			if recordStartupLoss, recordStartupLossUnread = m.startupLoss(ctx); recordStartupLossUnread != "" {
+				m.logger.Warn("keploy could not read what its capture lost before the first test; no test is charged with it",
+					zap.String("mock-set", name), zap.String("reason", recordStartupLossUnread))
 			}
 		}
 	} else if m.mappingDB != nil {

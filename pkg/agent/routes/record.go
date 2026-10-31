@@ -192,6 +192,7 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		r.Get("/capturelosses", a.HandleCaptureLosses)
 		// What of it no test was charged with (a loss after the last test).
 		r.Get("/capturelosses/uncharged", a.HandleUnchargedCaptureLosses)
+		r.Get("/capturelosses/startup", a.HandleStartupCaptureLoss)
 		r.Get("/app/listen-addrs", a.HandleAppListenAddrs)
 		// The application's listens and its start's progress, for keploy
 		// test's readiness under the proven switch (readiness.go).

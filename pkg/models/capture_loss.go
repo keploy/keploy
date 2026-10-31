@@ -542,6 +542,18 @@ type CaptureLosses []CaptureLoss
 // losses (hooks without the counters). It means "unknown", never "none".
 var ErrCaptureLossesUnsupported = errors.New("this agent cannot tell whether it captured every call")
 
+// StartupCaptureLoss is what the capture a proven record's tests settle
+// through (a downstream build's low-latency capture) lost before the run's
+// first test began: the application's start-up, which no test is charged
+// with (GET /agent/capturelosses/startup). It fails no recording; the
+// record's summary says it. Lost is "" when that capture lost nothing then,
+// and when the run's tests do not settle through such a capture: keploy's
+// proxy counts what it lost before the first test with the run's
+// (UnchargedCaptureLosses).
+type StartupCaptureLoss struct {
+	Lost string `json:"lost,omitempty"`
+}
+
 // PerTest says a loss of kind k, in the agent's counts, is the test's it
 // happened in, not a taint of every later test (design v14 §3.2's taint,
 // which the agent-life kinds carry). A kind is a test's own only where what

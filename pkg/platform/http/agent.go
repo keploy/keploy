@@ -2091,6 +2091,46 @@ func (a *AgentClient) getUnchargedCaptureLosses(ctx context.Context) (models.Cap
 	return losses, nil
 }
 
+// GetStartupCaptureLoss asks the agent what the capture its record's tests
+// settle through lost before the first test began, which no test is charged
+// with (GET /agent/capturelosses/startup). An agent older than the route, or
+// one that cannot say, is ErrCaptureLossesUnsupported. Bounded as
+// GetUnchargedCaptureLosses is (boundedAgentRead).
+func (a *AgentClient) GetStartupCaptureLoss(ctx context.Context) (models.StartupCaptureLoss, error) {
+	return boundedAgentRead(ctx, "the read of what the agent's capture lost before the first test", a.getStartupCaptureLoss)
+}
+
+// getStartupCaptureLoss is GetStartupCaptureLoss's exchange, unbounded.
+func (a *AgentClient) getStartupCaptureLoss(ctx context.Context) (models.StartupCaptureLoss, error) {
+	var none models.StartupCaptureLoss
+	url := fmt.Sprintf("%s/capturelosses/startup", a.conf.Agent.AgentURI)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return none, fmt.Errorf("failed to create request: %w", err)
+	}
+	res, err := a.client.Do(req)
+	if err != nil {
+		return none, fmt.Errorf("failed to ask the agent what its capture lost before the first test: %w", err)
+	}
+	defer func() {
+		if err := res.Body.Close(); err != nil {
+			utils.LogError(a.logger, err, "failed to close response body for capturelosses/startup")
+		}
+	}()
+	if res.StatusCode == http.StatusNotFound || res.StatusCode == http.StatusNotImplemented {
+		return none, fmt.Errorf("%w: agent returned %d", models.ErrCaptureLossesUnsupported, res.StatusCode)
+	}
+	if res.StatusCode != http.StatusOK {
+		rawBody, _ := readAgentBody(res)
+		return none, agentRespErr("get what the capture lost before the first test", res, rawBody)
+	}
+	var lost models.StartupCaptureLoss
+	if err := json.NewDecoder(res.Body).Decode(&lost); err != nil {
+		return none, fmt.Errorf("failed to decode what the capture lost before the first test: %w", err)
+	}
+	return lost, nil
+}
+
 // captureLossStall is how long, in time keploy could run (utils/stall), a
 // read of the agent's capture losses may go with no answer before keploy
 // gives it up: stall.HangBudget, as for a read of a container's

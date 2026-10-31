@@ -285,6 +285,13 @@ type TestsReceipt struct {
 	// test: judging fails the run on it, as on CaptureLosses (a read that
 	// failed is never "none").
 	CaptureLossesUnread string `yaml:"captureLossesUnread,omitempty" json:"captureLossesUnread,omitempty"`
+	// StartupCaptureLoss is, in a record's file under the proven switch, what
+	// the capture its tests settle through lost before the first test began
+	// (models.StartupCaptureLoss): the application's start-up's, charged to
+	// no test and failing no recording; keploy's summary says it.
+	// StartupCaptureLossUnread is why that could not be read.
+	StartupCaptureLoss       string `yaml:"startupCaptureLoss,omitempty" json:"startupCaptureLoss,omitempty"`
+	StartupCaptureLossUnread string `yaml:"startupCaptureLossUnread,omitempty" json:"startupCaptureLossUnread,omitempty"`
 	// Learned is what the learn step of a record's full round wrote onto
 	// mocks no test consumed (the set's start-up and pool), each field as
 	// "<mock> <path> (<kind>)"; a test's own is on its line (design v14

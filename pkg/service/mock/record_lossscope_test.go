@@ -3,6 +3,7 @@ package mock
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -244,4 +245,72 @@ func TestADropAfterAMockRecordsLastTestIsInWhatItCannotCapture(t *testing.T) {
 	require.Contains(t, out, "the recording is kept, but")
 	require.Contains(t, out, "the kernel dropped 1 connection attempt(s) at keploy's proxy listener")
 	require.Contains(t, out, "a client hung up on 1 TLS handshake(s)")
+}
+
+// startupRunner is lossRunner whose agent's capture says what it lost before
+// the first test began (StartupLossReader).
+type startupRunner struct {
+	*lossRunner
+	lost models.StartupCaptureLoss
+	err  error
+}
+
+func (s *startupRunner) GetStartupCaptureLoss(context.Context) (models.StartupCaptureLoss, error) {
+	return s.lost, s.err
+}
+
+// recordWithStartupLoss records two clean tests whose agent's capture says
+// it lost lost before the first, or fails that read with err, and returns the
+// record's per-test file.
+func recordWithStartupLoss(t *testing.T, lost string, err error) *TestsReceipt {
+	t.Helper()
+	t.Setenv(provenswitch.Env, "1")
+	judgedBuild(t)
+	dir := t.TempDir()
+	a := mark("orders::TestA", 0, 10*time.Millisecond)
+	a.Outcome, a.Dir = models.ScopeOutcomePassed, "orders"
+	b := mark("orders::TestB", 10*time.Millisecond, 20*time.Millisecond)
+	b.Outcome, b.Dir = models.ScopeOutcomePassed, "orders"
+	runner := &runnerInstr{composeInstr: newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped}),
+		windows: []models.ScopeWindow{a, b}}
+	runner.mocks = []*models.Mock{mockAt("mock-0", runnerT0.Add(5*time.Millisecond)), mockAt("mock-1", runnerT0.Add(15*time.Millisecond))}
+	instr := &startupRunner{lossRunner: &lossRunner{runnerInstr: runner, lossCounter: &lossCounter{}}, lost: models.StartupCaptureLoss{Lost: lost}, err: err}
+	cfg := instrConfig(runner.composeInstr, utils.Native, "go test -p 1 -json ./...")
+	cfg.Path = dir
+	set := (&mockService{config: cfg}).setName()
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = 0 })
+	svc := New(zap.NewNop(), instr, mockdb.New(zap.NewNop(), dir, ""), mapdb.New(zap.NewNop(), dir, ""), nil, nil, cfg)
+	require.NoError(t, svc.Record(context.Background()))
+	got, rerr := ReadRecordTestsReceipt(dir, set)
+	require.NoError(t, rerr)
+	require.NotNil(t, got, "no per-test file was written")
+	return got
+}
+
+// What the capture lost before the first test began is on the record's
+// per-test file for its summary to say, charged to no test and failing
+// nothing: both tests stay clean, and the run carries no loss of its own. A
+// read that fails says why, never "none"; an agent that cannot say (its
+// tests settle through keploy's proxy, which counts it with the run's) says
+// nothing.
+func TestAJudgedRecordKeepsWhatItsCaptureLostBeforeTheFirstTest(t *testing.T) {
+	got := recordWithStartupLoss(t, "the capture ring lost 3", nil)
+	require.Equal(t, "the capture ring lost 3", got.StartupCaptureLoss)
+	require.Empty(t, got.StartupCaptureLossUnread)
+	require.Empty(t, got.CaptureLosses, "a start-up loss is not the run's")
+	for _, name := range []string{"orders::TestA", "orders::TestB"} {
+		tr := receiptTest(got, name)
+		require.NotNil(t, tr, name)
+		require.Equal(t, "passed", tr.Outcome, name)
+		require.Nil(t, tr.Evidence, "%s is charged with the start-up's loss", name)
+	}
+
+	got = recordWithStartupLoss(t, "", errors.New("the agent went away"))
+	require.Empty(t, got.StartupCaptureLoss)
+	require.Contains(t, got.StartupCaptureLossUnread, "the agent went away")
+
+	got = recordWithStartupLoss(t, "", fmt.Errorf("%w: agent returned 404", models.ErrCaptureLossesUnsupported))
+	require.Empty(t, got.StartupCaptureLoss)
+	require.Empty(t, got.StartupCaptureLossUnread)
 }

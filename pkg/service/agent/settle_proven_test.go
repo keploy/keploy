@@ -1404,3 +1404,39 @@ func TestTheCapturesSettleRunsUnderTheWatchdog(t *testing.T) {
 	err := <-done
 	require.ErrorIs(t, err, errNoProgress)
 }
+
+// startupSettler is a capture that says what it lost before the first test
+// began (StartupLossReporter).
+type startupSettler struct {
+	fakeCaptureSettler
+	lost string
+}
+
+func (s *startupSettler) StartupCaptureLoss() string { return s.lost }
+
+// What the capture a proven record's tests settle through lost before the
+// first test began is the record's to read (GET /agent/capturelosses/startup)
+// for its summary, never a test's: it comes only from such a record's
+// capture, and only from one that says it. A replay settles through keploy's
+// proxy, as does every run with the switch off.
+func TestARecordReadsWhatItsCaptureLostBeforeTheFirstTest(t *testing.T) {
+	record := &Agent{logger: zap.NewNop(), config: &config.Config{}}
+	replay := &Agent{logger: zap.NewNop(), config: &config.Config{Agent: config.Agent{Mode: models.MODE_TEST}}}
+	read := func(a *Agent) string {
+		t.Helper()
+		got, err := a.StartupCaptureLoss(context.Background())
+		require.NoError(t, err)
+		return got.Lost
+	}
+	t.Setenv(provenswitch.Env, "1")
+	withCaptureSettler(t, &startupSettler{lost: "the capture ring lost 3"})
+	require.Equal(t, "the capture ring lost 3", read(record))
+	require.Empty(t, read(replay), "a replay settles through keploy's proxy")
+	t.Setenv(provenswitch.Env, "")
+	require.Empty(t, read(record), "with the switch off nothing settles through the capture")
+	t.Setenv(provenswitch.Env, "1")
+	withCaptureSettler(t, &fakeCaptureSettler{})
+	require.Empty(t, read(record), "a capture that does not say")
+	withCaptureSettler(t, nil)
+	require.Empty(t, read(record), "no capture settles the tests")
+}

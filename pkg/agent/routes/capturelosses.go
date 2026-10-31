@@ -22,6 +22,34 @@ type unchargedLossReader interface {
 	UnchargedCaptureLosses(ctx context.Context) (models.CaptureLosses, error)
 }
 
+// startupLossReader is the agent service's account of what the capture a
+// record's tests settle through lost before its first test began.
+type startupLossReader interface {
+	StartupCaptureLoss(ctx context.Context) (models.StartupCaptureLoss, error)
+}
+
+// HandleStartupCaptureLoss answers GET /agent/capturelosses/startup: what the
+// capture a record's tests settle through lost before the run's first test
+// began, which no test is charged with (models.StartupCaptureLoss). 501 from
+// an agent that cannot say, as HandleCaptureLosses.
+func (a *Agent) HandleStartupCaptureLoss(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	s, ok := a.svc.(startupLossReader)
+	if !ok {
+		render.Status(r, http.StatusNotImplemented)
+		render.JSON(w, r, map[string]string{"error": models.ErrCaptureLossesUnsupported.Error()})
+		return
+	}
+	lost, err := s.StartupCaptureLoss(r.Context())
+	if err != nil {
+		render.Status(r, http.StatusInternalServerError)
+		render.JSON(w, r, map[string]string{"error": err.Error()})
+		return
+	}
+	render.Status(r, http.StatusOK)
+	render.JSON(w, r, lost)
+}
+
 // HandleUnchargedCaptureLosses answers GET /agent/capturelosses/uncharged:
 // what the agent could not capture since the run began that no test's end
 // charged, by kind (what was lost after the last test ended). 501 from an
