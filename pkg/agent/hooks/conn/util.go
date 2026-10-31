@@ -120,6 +120,24 @@ func SkipGRPCUnderPressure(ctx context.Context, pausedAtRequest bool) bool {
 	return paused
 }
 
+// HandOn hands testCase, which a capture built, to t, the recording's queue,
+// and reports whether it did. A capture runs on its ingress's context (ctx),
+// which ends as that ingress stops: its forwarder for the app's port, or the
+// agent, is stopping. A test case that ctx's end beats to the queue never
+// reaches the recording, though the app served its request: it is counted on
+// the manager ctx carries (syncMock NoteNotHandedOn), so the recording says
+// how many it lost so. A CaptureFunc that builds its own test cases hands them
+// on with it.
+func HandOn(ctx context.Context, t chan<- *models.TestCase, testCase *models.TestCase) bool {
+	select {
+	case t <- testCase:
+		return true
+	case <-ctx.Done():
+		syncMock.FromContextOrGlobal(ctx).NoteNotHandedOn()
+		return false
+	}
+}
+
 func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time, opts models.IncomingOptions, synchronous bool, mapping bool, appPort uint16) {
 	if SkipUnderPressure(ctx, req, resp) {
 		return
@@ -367,16 +385,14 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 			zap.Time("in_flight_since", reqTimeTest))
 		return
 	}
-	select {
-	case <-ctx.Done():
+	if !HandOn(ctx, t, testCase) {
 		return
-	case t <- testCase:
-		sent = true
-		// Without --sync no resolve ends the window: it is noted a test
-		// case's here, before the ingress ends it (syncMock.TestSpanAt).
-		// With --sync ResolveKept noted it, and its window has ended.
-		syncMock.WindowFromContext(ctx).Tested(reqTimeTest, resTimeTest)
 	}
+	sent = true
+	// Without --sync no resolve ends the window: it is noted a test case's
+	// here, before the ingress ends it (syncMock.TestSpanAt). With --sync
+	// ResolveKept noted it, and its window has ended.
+	syncMock.WindowFromContext(ctx).Tested(reqTimeTest, resTimeTest)
 }
 func IsFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptions) bool {
 	dstPort := 0
@@ -708,10 +724,7 @@ func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCas
 	// The clock its window start is on (proven switch).
 	StampOrigin(ctx, testCase)
 
-	select {
-	case <-ctx.Done():
-		return
-	case t <- testCase:
+	if HandOn(ctx, t, testCase) {
 		logger.Debug("Captured gRPC test case",
 			zap.String("path", http2Stream.GRPCReq.Headers.PseudoHeaders[":path"]))
 	}

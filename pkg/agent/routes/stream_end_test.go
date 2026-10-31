@@ -121,6 +121,8 @@ func TestFrameStreamsEndWithTheirMarkerOnRequest(t *testing.T) {
 		// A request a pause cost before this session, and one the ingress
 		// read during a pause before it: not its own.
 		syncmgr.Get().NoteNotRecordedUnderPressure("10.0.0.9:5009 -> 127.0.0.1:8080")
+		// A test case an earlier session's ingress could not hand on.
+		syncmgr.Get().NoteNotHandedOn()
 		endPause := memoryguard.SetRecordingPausedForTest(true)
 		memoryguard.IngressRequest()
 		endPause()
@@ -135,6 +137,10 @@ func TestFrameStreamsEndWithTheirMarkerOnRequest(t *testing.T) {
 		for _, c := range []string{"10.0.0.1:5000 -> 127.0.0.1:8080", "10.0.0.1:5000 -> 127.0.0.1:8080", "10.0.0.2:5001 -> 127.0.0.1:8080"} {
 			syncmgr.Get().NoteNotRecordedUnderPressure(c)
 		}
+		// Two test cases this session's ingress could not hand on: it
+		// stopped first.
+		syncmgr.Get().NoteNotHandedOn()
+		syncmgr.Get().NoteNotHandedOn()
 		// The ingress requests of this session: one before its pause, two
 		// during it, one after.
 		memoryguard.IngressRequest()
@@ -181,6 +187,9 @@ func TestFrameStreamsEndWithTheirMarkerOnRequest(t *testing.T) {
 		if want := (models.PressureSkipSummary{Requests: 3, Connections: 2}); sum.NotRecordedUnderPressure != want {
 			t.Fatalf("the marker says a pause cost %+v, want %+v", sum.NotRecordedUnderPressure, want)
 		}
+		if sum.NotHandedOn != 2 {
+			t.Fatalf("the marker says %d test cases were not handed on, want this session's 2", sum.NotHandedOn)
+		}
 		if _, err := mr.NextPart(); err != io.EOF {
 			t.Fatalf("the stream did not end after its marker: %v", err)
 		}
@@ -201,6 +210,7 @@ func TestFrameStreamsEndWithTheirMarkerOnRequest(t *testing.T) {
 			"tcs_not_recorded_under_pressure": 3,
 			"requests_during_pauses":          2,
 			"requests_before_first_pause":     1,
+			"tcs_not_handed_on":               2,
 		} {
 			if got := sumLine[name]; got != want {
 				t.Errorf("the summary says %s=%v, want %d", name, got, want)
@@ -209,6 +219,9 @@ func TestFrameStreamsEndWithTheirMarkerOnRequest(t *testing.T) {
 		warn := fields("agent: some requests were not recorded: the agent was short of memory when they came, and the memory guard had paused recording; each connection's requests after the pause are recorded")
 		if got := fmt.Sprint(warn["requests"], " ", warn["requests_during_pauses"], " ", warn["connections"]); got != "3 2 2" {
 			t.Errorf("the warning says requests, requests_during_pauses, connections = %s, want 3 2 2", got)
+		}
+		if got := fields(notHandedOnSaid)["test_cases"]; got != uint64(2) {
+			t.Errorf("the warning of test cases not handed on says %v, want 2", got)
 		}
 		if got, want := fmt.Sprint(warn["connections_most"]), "[10.0.0.1:5000 -> 127.0.0.1:8080 (2) 10.0.0.2:5001 -> 127.0.0.1:8080 (1)]"; got != want {
 			t.Errorf("the warning names the connections %s, want %s", got, want)

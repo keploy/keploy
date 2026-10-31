@@ -506,6 +506,10 @@ type SyncMockManager struct {
 	// their warnings are rate-limited, so this is the one place each is
 	// counted.
 	leftOut atomic.Int64
+	// notHandedOn counts the requests an ingress served and was recording
+	// whose test case never reached the recording's queue: the ingress
+	// stopped first (NoteNotHandedOn).
+	notHandedOn atomic.Uint64
 
 	// outChanClosedDrops counts mocks that were already counted in
 	// totalAdded (they passed the pressure gate) but were then dropped

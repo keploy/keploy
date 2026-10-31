@@ -1714,6 +1714,10 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		if captureEligible && !reqTeeTruncated && !respTeeTruncated {
 			releaseCaptureSlot, ok := takeCaptureSlot(ctx)
 			if !ok {
+				// The ingress stopped before a slot came: the app served
+				// the exchange, and its test case is never made. Counted
+				// as one the capture could not hand on (conn.HandOn).
+				syncMock.FromContextOrGlobal(ctx).NoteNotHandedOn()
 				return
 			}
 

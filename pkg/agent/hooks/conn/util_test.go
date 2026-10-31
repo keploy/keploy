@@ -630,3 +630,31 @@ func TestSkipGRPCUnderPressureDecidesByThePauseAsTheRequestWasRead(t *testing.T)
 		t.Fatalf("not recorded under pressure: %+v, want the three calls left out, on their connection", got)
 	}
 }
+
+// A test case a capture built reaches the recording's queue, or, when its
+// ingress's context ends first, is counted on the manager the context carries
+// as one not handed on (syncMock NoteNotHandedOn): never a silent loss. The
+// gRPC capture hands its test cases on the same way.
+func TestATestCaseTheCaptureCannotHandOnIsCounted(t *testing.T) {
+	mgr := syncMock.New(zap.NewNop())
+	live := syncMock.NewContext(context.Background(), mgr)
+	stopped, stop := context.WithCancel(live)
+	stop()
+
+	queue := make(chan *models.TestCase, 1)
+	if !HandOn(live, queue, &models.TestCase{Name: "kept"}) || len(queue) != 1 || mgr.NotHandedOn() != 0 {
+		t.Fatalf("a running ingress with room in the queue: queued %d, counted %d; want it queued, none counted", len(queue), mgr.NotHandedOn())
+	}
+	if HandOn(stopped, make(chan *models.TestCase), &models.TestCase{Name: "lost"}) || mgr.NotHandedOn() != 1 {
+		t.Fatalf("a stopped ingress with no reader: counted %d, want the test case counted as not handed on", mgr.NotHandedOn())
+	}
+
+	stream := &pkg.HTTP2Stream{GRPCReq: &models.GrpcReq{}, GRPCResp: &models.GrpcResp{}}
+	origHook := GRPCCaptureHook
+	GRPCCaptureHook = nil
+	defer func() { GRPCCaptureHook = origHook }()
+	CaptureGRPC(stopped, zap.NewNop(), make(chan *models.TestCase), stream, 9090, false, false)
+	if mgr.NotHandedOn() != 2 {
+		t.Fatalf("a gRPC call's test case its stopped ingress could not hand on: counted %d in all, want 2", mgr.NotHandedOn())
+	}
+}

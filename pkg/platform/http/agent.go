@@ -535,6 +535,10 @@ func (a *AgentClient) sayAgentSummary(s models.StreamEndSummary) {
 		a.logger.Warn("the keploy agent left some test cases out of the recording: each stayed in flight (a slow endpoint, a long poll, a stream) while mocks it may have made had to be let go",
 			zap.Uint64("test_cases", s.LeftOutInFlight))
 	}
+	if s.NotHandedOn > 0 {
+		a.logger.Warn("the keploy agent lost some test cases: the app served their requests, and the agent's ingress stopped before their test cases reached the recording",
+			zap.Uint64("test_cases", s.NotHandedOn))
+	}
 	if s.Unsettled > 0 {
 		a.logger.Warn("the keploy agent saved some test cases before it had parsed all the traffic they overlap; if a connection's parser failed on it afterwards, they lack mocks",
 			zap.Int("test_cases", s.Unsettled))
