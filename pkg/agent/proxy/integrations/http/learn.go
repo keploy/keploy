@@ -238,9 +238,16 @@ func (n learnNoise) shape(p httpParts, d string) learn.Shape {
 		// and its scheme, JOSE header and signature's form stay as
 		// recorded (a fixed part). The strict comparison reads it so too
 		// (jwtDiffs).
-		if j, ok := learn.ReadJWT(v); ok {
-			j.Leaves("header."+k, s.Leaves)
-			s.Fixed["header."+k+learn.JWTMark] = j.Fixed()
+		// A Cookie header's cookies that hold one are read so too, each
+		// at its own place ("header.cookie{<cookie>}{jwt}.<claim>"), and
+		// the rest of the header (every other cookie, the names, their
+		// order) stays as recorded: a fixed part.
+		for _, h := range learn.HeaderJWTs("header."+k, v) {
+			h.JWT.Leaves(h.Place, s.Leaves)
+			s.Fixed[h.Place+learn.JWTMark] = h.JWT.Fixed()
+		}
+		if rest, ok := learn.CookiesBesideJWTs(v); ok && k == variables.CookieHeader {
+			s.Fixed["header."+k+otherCookies] = rest
 		}
 	}
 	switch {
@@ -2100,7 +2107,7 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 			continue // decided by its claims, each its own leaf
 		}
 		if c, ok := learn.ClaimOf(r.Path); ok {
-			if whole[c] {
+			if whole[learn.TokenHeader(c)] {
 				continue // the token is followed whole, claims and all
 			}
 			// A claim that carries a value of the test's (one the test
@@ -2407,8 +2414,14 @@ func earlierAnswers(earlier []learn.Earlier, mock string, r learn.Leaf) ([]strin
 	return at, parts, kept
 }
 
+// otherCookies is what a Cookie header's fixed part, beside the tokens its
+// cookies hold, is named under ("header.cookie{other cookies}"): every other
+// cookie, the names and their order, compared as recorded
+// (learn.CookiesBesideJWTs).
+const otherCookies = "{other cookies}"
+
 // jwtHeaders sorts the headers among learned that hold a JWT in both runs
-// (learn.ReadJWT): followed whole (whole), where the token is a value of the
+// (learn.HeaderJWTs: the whole value, or a cookie's): followed whole (whole), where the token is a value of the
 // test case's, a variable of the test sent whole at an earlier call of it, or
 // one a client test's harness gave the application whole (an incoming
 // request's header, learn.IncomingGiven), which a replay puts back or reads
@@ -2427,10 +2440,7 @@ func jwtHeaders(learned []learn.Learned, given []variables.Binding) (byClaims, w
 		if !strings.HasPrefix(r.Path, "header.") {
 			continue
 		}
-		if _, ok := learn.ReadJWT(r.Value); !ok {
-			continue
-		}
-		if _, ok := learn.ReadJWT(l.Live.Value); !ok {
+		if len(learn.HeaderJWTs(r.Path, r.Value)) == 0 || len(learn.HeaderJWTs(r.Path, l.Live.Value)) == 0 {
 			continue
 		}
 		from := l.From

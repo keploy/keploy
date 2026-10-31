@@ -1276,6 +1276,73 @@ func TestStrictComparesAJWTByItsClaims(t *testing.T) {
 	}
 }
 
+// A JWT a cookie holds is compared by what it says, at its cookie's place
+// ("header.cookie{<cookie>}{jwt}.<claim>"), as a header's whole token is:
+// a claim learned there moves, a role that changes is refused. Every other
+// cookie, the cookies' names and their order are compared as recorded, and
+// noise on the Cookie header whole excuses no claim.
+func TestStrictComparesACookiesJWTByItsClaims(t *testing.T) {
+	const hs = `{"alg":"HS256","typ":"JWT"}`
+	claims := func(role, jti string) string {
+		return `{"sub":"u-1","role":"` + role + `","cid":"c-1","jti":"` + jti + `"}`
+	}
+	tok := func(role, jti, sig string) string {
+		return strings.TrimPrefix(bearerJWT(hs, claims(role, jti), sig), "Bearer ")
+	}
+	sigA, sigB := "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE", "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI"
+	cookie := func(theme, token string) string { return "theme=" + theme + "; session=" + token + "; lang=en" }
+	rec := recorded("m", "/run/r-1", map[string]string{"Cookie": cookie("dark", tok("admin", "j-1", sigA))}, "")
+	learned := map[string][]string{"header.cookie{session}{jwt}.jti": {}}
+	wholeNoise := map[string][]string{"header.cookie": {}}
+	for _, tc := range []struct {
+		name    string
+		cookie  string
+		learned map[string][]string
+		served  bool
+		field   string
+	}{
+		{"the recording", cookie("dark", tok("admin", "j-1", sigA)), nil, true, ""},
+		{"a learned claim moved, signed again", cookie("dark", tok("admin", "j-2", sigB)), learned, true, ""},
+		{"an unlearned claim moved", cookie("dark", tok("admin", "j-2", sigB)), nil, false, "header.cookie{session}{jwt}.jti"},
+		{"the role changed", cookie("dark", tok("viewer", "j-2", sigB)), learned, false, "header.cookie{session}{jwt}.role"},
+		{"the role changed, noise on the header whole", cookie("dark", tok("viewer", "j-1", sigA)), wholeNoise, false, "header.cookie{session}{jwt}.role"},
+		{"another cookie changed", cookie("light", tok("admin", "j-2", sigB)), learned, false, "header.cookie{other cookies}"},
+		{"a cookie more", cookie("dark", tok("admin", "j-2", sigB)) + "; debug=1", learned, false, "header.cookie{other cookies}"},
+		{"the token in another cookie", "theme=dark; sess=" + tok("admin", "j-2", sigB) + "; lang=en", learned, false, "header.cookie{other cookies}"},
+		{"no token", cookie("dark", "kep_opaque"), learned, false, "header.cookie{other cookies}"},
+		{"a signature of another length", cookie("dark", tok("admin", "j-2", sigB+"QQ")), learned, false, "header.cookie{session}{jwt}{signature}"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := rec.DeepCopy()
+			m.Spec.ReqBodyNoise = tc.learned
+			got, diag := strictMatch(t, sent("/run/r-1", map[string]string{"Cookie": tc.cookie}, ""), nil, nil, nil, m)
+			if (got != nil) != tc.served {
+				t.Fatalf("served %v, want %v (differs %v)", got != nil, tc.served, differs(diag))
+			}
+			if !tc.served && !hasField(differs(diag), tc.field) {
+				t.Fatalf("differs %v does not name %s", differs(diag), tc.field)
+			}
+		})
+	}
+}
+
+// keploy.yml's noise on the Cookie header reaches each claim of a token one
+// of its cookies holds, as noise on a header reaches its whole token's
+// claims; noise on another header reaches none of them.
+func TestUserNoiseOnTheCookieHeaderReachesItsTokensClaims(t *testing.T) {
+	onCookie := strictKnown{n: strictNoise{header: map[string]bool{"cookie": true}}}
+	if !onCookie.userNoiseAt("header.cookie{session}{jwt}.exp", "1793374115") {
+		t.Error("noise on Cookie does not reach its cookie's token's claim")
+	}
+	if onCookie.userNoiseAt("header.authorization{jwt}.exp", "1793374115") {
+		t.Error("noise on Cookie reaches Authorization's claim")
+	}
+	onAuth := strictKnown{n: strictNoise{header: map[string]bool{"authorization": true}}}
+	if onAuth.userNoiseAt("header.cookie{session}{jwt}.exp", "1793374115") {
+		t.Error("noise on Authorization reaches a cookie's claim")
+	}
+}
+
 // A claim is compared by its type as well as its text: a number claim sent
 // as a string of the same digits ("uid":42 to "uid":"42") is another claim,
 // and the call is refused there, as a JSON body's leaf would be.

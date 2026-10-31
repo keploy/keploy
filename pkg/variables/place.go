@@ -57,6 +57,13 @@ const (
 // keploy holds no signer's key).
 const JWTMark = "{jwt}"
 
+// CookieHeader is the header whose cookies a place may name one of
+// (Place.Cookie): header.Cookie{<cookie>}{jwt}.<claim path>, a claim of the
+// JSON Web Token the cookie's value is (RFC 6265 §4.2: "<name>=<value>"
+// pairs joined by "; "). A cookie's name is a token, which holds no '{' or
+// '}', so the braces end it.
+const CookieHeader = "cookie"
+
 // Place is where in a call a variable's value is.
 type Place struct {
 	Part Part
@@ -70,6 +77,10 @@ type Place struct {
 	// Claim is the JSON path of a claim of the JSON Web Token a PartHeader
 	// place's header holds (JWTMark), nil for the header's whole value.
 	Claim []templates.PathSeg
+	// Cookie is, for a claim of a Cookie header's place, the cookie whose
+	// value the token is (CookieHeader), "" where the header's whole value
+	// is the token.
+	Cookie string
 }
 
 // The prefixes of the place grammar.
@@ -91,6 +102,8 @@ var ErrPlace = errors.New("not a variable place")
 //	header.X-Request-Id   the value of a header (any case)
 //	header.Authorization{jwt}.sub
 //	                      a claim of the JSON Web Token the header holds
+//	header.Cookie{session}{jwt}.sub
+//	                      a claim of the JSON Web Token the cookie session holds
 func Parse(s string) (Place, error) {
 	switch {
 	case s == bodyPrefix:
@@ -111,6 +124,18 @@ func Parse(s string) (Place, error) {
 		return Place{Part: PartQuery, Name: s[len(queryPrefix):]}, nil
 	case strings.HasPrefix(s, headerPrefix) && len(s) > len(headerPrefix):
 		name := s[len(headerPrefix):]
+		cookie := ""
+		if n := len(CookieHeader); len(name) > n && strings.EqualFold(name[:n], CookieHeader) && name[n] == '{' {
+			// A cookie's name, where its closing brace is followed by the
+			// token's mark: "Cookie{jwt}.sub" is a claim of the header's
+			// whole value, "Cookie{jwt}{jwt}.sub" one of cookie jwt's.
+			if end := strings.IndexByte(name[n:], '}'); end > 0 && strings.HasPrefix(name[n+end+1:], JWTMark) {
+				if cookie = name[n+1 : n+end]; cookie == "" || strings.ContainsAny(cookie, "{=; ") {
+					return Place{}, fmt.Errorf("%w: %q names no cookie between { and }", ErrPlace, s)
+				}
+				name = name[:n] + name[n+end+1:]
+			}
+		}
 		i := strings.Index(name, JWTMark)
 		if i < 0 {
 			return Place{Part: PartHeader, Name: name}, nil
@@ -122,7 +147,7 @@ func Parse(s string) (Place, error) {
 		if err != nil {
 			return Place{}, fmt.Errorf("%w: %q: the claim after %s: %v", ErrPlace, s, JWTMark, err)
 		}
-		return Place{Part: PartHeader, Name: name[:i], Claim: claim}, nil
+		return Place{Part: PartHeader, Name: name[:i], Claim: claim, Cookie: cookie}, nil
 	}
 	return Place{}, fmt.Errorf("%w: %q (want body.<path>, url.path[<n>], url.query.<name> or header.<name>)", ErrPlace, s)
 }
@@ -138,7 +163,11 @@ func (p Place) String() string {
 		return queryPrefix + p.Name
 	case PartHeader:
 		if len(p.Claim) > 0 {
-			return headerPrefix + p.Name + JWTMark + formatJSONPath(p.Claim)
+			name := p.Name
+			if p.Cookie != "" {
+				name += "{" + p.Cookie + "}"
+			}
+			return headerPrefix + name + JWTMark + formatJSONPath(p.Claim)
 		}
 		return headerPrefix + p.Name
 	}

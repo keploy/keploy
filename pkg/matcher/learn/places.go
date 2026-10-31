@@ -30,13 +30,24 @@ func VarPlace(l Leaf, jsonBody bool) (string, bool) {
 		return variables.Place{Part: variables.PartQuery, Name: strings.TrimPrefix(l.Path, "url.query.")}.String(), true
 	case strings.HasPrefix(l.Path, "header."):
 		name := strings.TrimPrefix(l.Path, "header.")
-		if i := strings.Index(name, JWTMark); i >= 0 {
-			// A claim of the token the header holds (JWT.Leaves).
-			claim, ok := jsonSegs(name[i+len(JWTMark):])
-			if !ok || i == 0 || len(claim) == 0 {
+		if token, ok := ClaimOf(l.Path); ok {
+			// A claim of the token the header holds, whole or as one
+			// cookie's value (JWT.Leaves, HeaderJWTs).
+			claim, ok := jsonSegs(l.Path[len(token)+len(JWTMark):])
+			header := strings.TrimPrefix(TokenHeader(token), "header.")
+			if !ok || header == "" || len(claim) == 0 {
 				return "", false
 			}
-			return variables.Place{Part: variables.PartHeader, Name: name[:i], Claim: claim}.String(), true
+			cookie := ""
+			if len(token) > len("header."+header) {
+				cookie = token[len("header."+header)+1 : len(token)-1]
+			}
+			return variables.Place{Part: variables.PartHeader, Name: header, Claim: claim, Cookie: cookie}.String(), true
+		}
+		if strings.ContainsRune(name, '{') {
+			// A token's place, or a part of a header, named with no claim
+			// ("header.authorization{jwt}"): a header's name holds no '{'.
+			return "", false
 		}
 		return variables.Place{Part: variables.PartHeader, Name: name}.String(), true
 	case jsonBody && (strings.HasPrefix(l.Path, "body.") || strings.HasPrefix(l.Path, "body[")):
@@ -64,7 +75,11 @@ func LeafPath(place string) (string, bool) {
 		return "url.query." + p.Name, true
 	case variables.PartHeader:
 		if len(p.Claim) > 0 {
-			return "header." + strings.ToLower(p.Name) + JWTMark + leafSegs(p.Claim), true
+			cookie := ""
+			if p.Cookie != "" {
+				cookie = "{" + p.Cookie + "}"
+			}
+			return "header." + strings.ToLower(p.Name) + cookie + JWTMark + leafSegs(p.Claim), true
 		}
 		return "header." + strings.ToLower(p.Name), true
 	case variables.PartBody:

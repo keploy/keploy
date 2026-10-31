@@ -21,6 +21,7 @@ import (
 	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/pkg/variables"
 )
 
 // The strict comparison of S1 (design v14 §9, rows S1 and §7.2 item 8): under
@@ -247,7 +248,7 @@ func (k strictKnown) clockDiffs(ctx context.Context, input *req) []strictField {
 // uncompared (headerDiffs), so it excuses the claim's read of the clock too.
 func (k strictKnown) userNoiseAt(place, value string) bool {
 	if token, ok := learn.ClaimOf(place); ok && strings.HasPrefix(token, "header.") {
-		place = token
+		place = learn.TokenHeader(token)
 	}
 	switch {
 	case strings.HasPrefix(place, "header."):
@@ -473,6 +474,15 @@ func (k strictKnown) headerDiffs(rec map[string]string, live http.Header, sent [
 				out = append(out, k.jwtDiffs(path, rv, rj, lvs)...)
 				continue
 			}
+			// A Cookie header whose cookies hold one: each such token
+			// read so, at its cookie's place, and the rest of the header
+			// compared whole (cookieDiffs).
+			if name == variables.CookieHeader {
+				if held := learn.HeaderJWTs(path, rv); len(held) > 0 {
+					out = append(out, k.cookieDiffs(path, rv, held, lvs)...)
+					continue
+				}
+			}
 		}
 		if k.learnedAt(path, "") || k.redacted(rv) {
 			continue
@@ -539,6 +549,31 @@ func (k strictKnown) jwtDiffs(path, rv string, rj learn.JWT, live []string) []st
 		case r.Type != l.Type || r.Value != l.Value:
 			out = append(out, field(valueDiff(p, r.Value, l.Value)))
 		}
+	}
+	return out
+}
+
+// cookieDiffs are the differences of a Cookie header's live lines from its
+// recorded value rv, whose cookies held hold a JWT (learn.HeaderJWTs): one
+// live line, the same as rv but for those tokens (every other cookie, the
+// names, their order: learn.CookiesBesideJWTs), and each token read by what
+// it says at its cookie's place (jwtDiffs: "header.cookie{<cookie>}{jwt}").
+func (k strictKnown) cookieDiffs(path, rv string, held []learn.HeldJWT, live []string) []strictField {
+	lv := strings.Join(live, ",")
+	rest, _ := learn.CookiesBesideJWTs(rv)
+	lrest, ok := learn.CookiesBesideJWTs(lv)
+	if len(live) != 1 || !ok || lrest != rest {
+		return []strictField{field(valueDiff(path+otherCookies, rest, lrest))}
+	}
+	var out []strictField
+	for _, h := range held {
+		rtok, _ := learn.CookieValue(rv, h.Cookie)
+		ltok, ok := learn.CookieValue(lv, h.Cookie)
+		if !ok {
+			out = append(out, field(models.MockFieldDiff{Path: h.Place, Kind: models.DiffKindMissingInLive, Expected: rtok}))
+			continue
+		}
+		out = append(out, k.jwtDiffs(h.Place, rtok, h.JWT, []string{ltok})...)
 	}
 	return out
 }

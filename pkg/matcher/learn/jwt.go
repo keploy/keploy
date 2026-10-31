@@ -175,7 +175,9 @@ func (j JWT) Leaves(place string, out map[string]Leaf) {
 }
 
 // ClaimOf is the place whose token a claim leaf's path names, and whether
-// path names one ("header.authorization" of "header.authorization{jwt}.exp").
+// path names one ("header.authorization" of "header.authorization{jwt}.exp",
+// "header.cookie{session}" of "header.cookie{session}{jwt}.exp": TokenHeader
+// is its header).
 func ClaimOf(path string) (string, bool) {
 	i := strings.Index(path, JWTMark+".")
 	if i <= 0 {

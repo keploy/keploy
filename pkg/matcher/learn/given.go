@@ -429,19 +429,22 @@ func paramName(part string) (string, bool) {
 	return "", false
 }
 
-// jwtSeen are the claims of the JWT a header part (place) holds as recorded
-// (ReadJWT), each as recorded and as sent ("<place>{jwt}.<claim>"), by path:
-// "" as sent where the sent value holds no token or not that claim. None
-// where the recorded value holds no token.
+// jwtSeen are the claims of each JWT a header part (place) holds as
+// recorded (HeaderJWTs: its whole value, or a cookie's), each as recorded
+// and as sent ("<token>{jwt}.<claim>"), by path: "" as sent where the sent
+// value holds no token at that place or not that claim. None where the
+// recorded value holds no token.
 func jwtSeen(place, recorded, sent string) []Seen {
-	rj, ok := ReadJWT(recorded)
-	if !ok {
+	held := HeaderJWTs(place, recorded)
+	if len(held) == 0 {
 		return nil
 	}
 	rec, live := map[string]Leaf{}, map[string]Leaf{}
-	rj.Leaves(place, rec)
-	if lj, ok := ReadJWT(sent); ok {
-		lj.Leaves(place, live)
+	for _, h := range held {
+		h.JWT.Leaves(h.Place, rec)
+	}
+	for _, h := range HeaderJWTs(place, sent) {
+		h.JWT.Leaves(h.Place, live)
 	}
 	paths := make([]string, 0, len(rec))
 	for p := range rec {

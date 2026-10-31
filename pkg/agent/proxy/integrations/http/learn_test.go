@@ -1420,6 +1420,60 @@ func TestLearnMatchAValueTheTestCaseGaveIsFollowedIntoAJWTClaim(t *testing.T) {
 	}
 }
 
+// The same, where the call sends its token in a cookie: the key is used at
+// the cookie's claim (header.cookie{<cookie>}{jwt}), every other claim and
+// every other cookie are still compared, and a call whose other cookie
+// changed is refused, named at the rest of the header.
+func TestLearnMatchAValueTheTestCaseGaveIsFollowedIntoACookiesJWTClaim(t *testing.T) {
+	h, n, opts := learnOn(t)
+	const hs = `{"alg":"HS256","typ":"JWT"}`
+	tok := func(theme, at, sig string) map[string]string {
+		return map[string]string{"Cookie": "theme=" + theme + "; session=" + strings.TrimPrefix(bearerJWT(hs, `{"sub":"u-1","auth_time":`+at+`}`, sig), "Bearer ")}
+	}
+	start := func() *givenDb {
+		db := &givenDb{learnDb: &learnDb{perTest: []*models.Mock{learnRecorded("mock-0", 0, "POST", "/run/r-1", `{}`, tok("dark", "1793373215", "QUFBQUFB"), `{"ok":true}`)}}}
+		db.table.Start([]variables.Binding{{Name: "authTime", Value: "1793387031", Recorded: "1793373215", Mock: "test case get-1", Place: "header.Cookie{jwt_token_staging}{jwt}.auth_time", Given: true}})
+		return db
+	}
+	db := start()
+	served, miss, _ := h.learnMatch(context.Background(), live("POST", "/run/r-1", `{}`, tok("dark", "1793387031", "QkJCQkJC")), db, n, opts)
+	if served == nil || miss != nil {
+		t.Fatalf("served %v miss %+v", served, miss)
+	}
+	if want := (models.MockVariables{"authTime": {Recorded: "1793373215", Use: []string{"header.cookie{session}{jwt}.auth_time"}}}); !reflect.DeepEqual(db.consumed[0].Spec.Learned(), want) {
+		t.Fatalf("variables %+v, want %+v", db.consumed[0].Spec.Learned(), want)
+	}
+	if len(db.consumed[0].Spec.ReqBodyNoise) != 0 {
+		t.Fatalf("noise %v: every other claim and cookie is still compared", db.consumed[0].Spec.ReqBodyNoise)
+	}
+	db = start()
+	served, miss, _ = h.learnMatch(context.Background(), live("POST", "/run/r-1", `{}`, tok("light", "1793387031", "QkJCQkJC")), db, n, opts)
+	if served != nil || miss == nil || !strings.Contains(miss.res.Why, "header.cookie{other cookies}") {
+		t.Fatalf("another cookie changed: served %v miss %+v", served, miss)
+	}
+}
+
+// A Cookie header the test case gave whole, its token and every other
+// cookie, and the call carries on whole: followed whole at the header, the
+// token's claims not learned apart (its bytes are compared, signature too).
+func TestLearnMatchACookieHeaderTheTestCaseGaveWholeIsFollowedWhole(t *testing.T) {
+	h, n, opts := learnOn(t)
+	const hs = `{"alg":"HS256","typ":"JWT"}`
+	cookie := func(at, sig string) string {
+		return "theme=dark; session=" + strings.TrimPrefix(bearerJWT(hs, `{"sub":"u-1","auth_time":`+at+`}`, sig), "Bearer ")
+	}
+	rec, liveC := cookie("1793373215", "QUFBQUFB"), cookie("1793387031", "QkJCQkJC")
+	db := &givenDb{learnDb: &learnDb{perTest: []*models.Mock{learnRecorded("mock-0", 0, "POST", "/run/r-1", `{}`, map[string]string{"Cookie": rec}, `{"ok":true}`)}}}
+	db.table.Start([]variables.Binding{{Name: "session", Value: liveC, Recorded: rec, Mock: "test case get-1", Place: "header.Cookie", Given: true}})
+	served, miss, _ := h.learnMatch(context.Background(), live("POST", "/run/r-1", `{}`, map[string]string{"Cookie": liveC}), db, n, opts)
+	if served == nil || miss != nil {
+		t.Fatalf("served %v miss %+v", served, miss)
+	}
+	if want := (models.MockVariables{"session": {Recorded: rec, Use: []string{"header.cookie"}}}); !reflect.DeepEqual(db.consumed[0].Spec.Learned(), want) {
+		t.Fatalf("variables %+v, want %+v", db.consumed[0].Spec.Learned(), want)
+	}
+}
+
 // (Round-4 review repro.) the app mints a session token, stores it with a SQL INSERT (one
 // query text, as the MySQL/generic recorders keep it), then sends it as a
 // bearer token. In F the token is minted again, so the bearer header drifts.

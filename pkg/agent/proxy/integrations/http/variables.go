@@ -309,9 +309,16 @@ func (v reqView) read(p variables.Place) (held, bool) {
 			return held{}, false
 		}
 		if len(p.Claim) > 0 {
-			// A claim of the token the header holds, read as a JSON
-			// scalar of its claims.
-			claims, ok := learn.JWTClaims(vals[0])
+			// A claim of the token the header holds (or the one cookie
+			// p.Cookie's value is), read as a JSON scalar of its claims.
+			token := vals[0]
+			if p.Cookie != "" {
+				var ok bool
+				if token, ok = learn.CookieValue(token, p.Cookie); !ok {
+					return held{}, false
+				}
+			}
+			claims, ok := learn.JWTClaims(token)
 			if !ok {
 				return held{}, false
 			}
@@ -359,15 +366,27 @@ func (v reqView) putBack(p variables.Place, rec held) (reqView, bool) {
 			if len(vals) != 1 {
 				return v, false
 			}
-			claims, ok := learn.JWTClaims(vals[0])
+			token := vals[0]
+			if p.Cookie != "" {
+				var ok bool
+				if token, ok = learn.CookieValue(token, p.Cookie); !ok {
+					return v, false
+				}
+			}
+			claims, ok := learn.JWTClaims(token)
 			if !ok {
 				return v, false
 			}
 			if claims, ok = variables.SpliceAt(claims, p.Claim, rec.raw); !ok {
 				return v, false
 			}
-			if value, ok = learn.WithJWTClaims(vals[0], claims); !ok {
+			if value, ok = learn.WithJWTClaims(token, claims); !ok {
 				return v, false
+			}
+			if p.Cookie != "" {
+				if value, ok = learn.WithCookieValue(vals[0], p.Cookie, value); !ok {
+					return v, false
+				}
 			}
 		}
 		h := v.header.Clone()

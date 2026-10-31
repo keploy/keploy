@@ -2280,6 +2280,63 @@ func TestVariables_AValueTheHarnessGaveIsReadFromTheTestsIncomingRequests(t *tes
 	}
 }
 
+// A harness that sends its session JWT in a cookie, and an application that
+// carries a claim of it on in a cookie's token of its own call, are read as
+// a header's whole token is: the call's claim (header.cookie{<cookie>}{jwt})
+// must hold this run's value of the incoming requests' cookie claim, every
+// other claim is still compared, and so is every other cookie.
+func TestVariables_AValueTheHarnessGaveInACookieIsReadFromTheTestsIncomingRequests(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	const hs = `{"alg":"HS256","typ":"JWT"}`
+	const place = "header.Cookie{jwt_token_staging}{jwt}.auth_time"
+	token := func(claims, sig string) string {
+		return strings.TrimPrefix(bearerJWT(hs, claims, sig), "Bearer ")
+	}
+	session := func(at string) map[string]string {
+		return map[string]string{"Cookie": "theme=dark; jwt_token_staging=" + token(`{"sid":"e2e-go-session","auth_time":`+at+`}`, "U0lHTg")}
+	}
+	agent := func(theme, role, at, sig string) string {
+		return "theme=" + theme + "; session=" + token(`{"sub":"u-1","role":"`+role+`","auth_time":`+at+`}`, sig)
+	}
+	recorded := func() *varDb {
+		m := at(varMock("mock-0", "POST", "http://jobs/run/r-1", `{}`, 200, `{"ok":true}`,
+			models.MockVariables{"auth_time": {Recorded: "1793373215", Use: []string{"header.cookie{session}{jwt}.auth_time"}, Incoming: place}}), 1)
+		m.Spec.HTTPReq.Header["Cookie"] = agent("dark", "agent", "1793373215", "QUFBQUFB")
+		return &varDb{perTest: []*models.Mock{m}}
+	}
+	call := func(cookie string) *req {
+		r := liveReq("POST", "http://jobs/run/r-1", `{}`)
+		r.header.Set("Cookie", cookie)
+		return r
+	}
+	tracker := func(liveAt string) context.Context {
+		tr := learn.NewTracker()
+		tr.SetClientTests(true)
+		tr.SetIncomingSeen(true)
+		tr.GiveIncoming("TestCLILogin", []learn.IncomingRequest{learn.IncomingHTTP("test-1", recordedAt, "http://app/v1/login", session("1793373215"))})
+		tr.Begin()
+		tr.Incoming(learn.IncomingHTTP("", time.Now(), "http://app/v1/login", session(liveAt)))
+		return learn.WithTracker(context.Background(), tr)
+	}
+	h := newHTTP()
+
+	ok, stub, diag := matchVarIn(t, tracker("1793387031"), h, recorded(), call(agent("dark", "agent", "1793387031", "QkJCQkJC")))
+	if !ok || stub.Name != "mock-0" {
+		t.Fatalf("the call carrying this run's auth_time in its cookie should be answered: ok=%v stub=%v diag=%+v", ok, stub, diag)
+	}
+	ok, _, diag = matchVarIn(t, tracker("1793387031"), h, recorded(), call(agent("dark", "agent", "1793390000", "QkJCQkJC")))
+	if p := wantProblem(t, ok, diag, `variable auth_time is "1793387031" in this test (taken at the test's incoming requests `+place+`)`); p.actual != "1793390000" {
+		t.Fatalf("evidence %+v: the call's own value", p)
+	}
+	// Fail closed: a claim that must not move, or another cookie, changed.
+	if ok, stub, _ := matchVarIn(t, tracker("1793387031"), h, recorded(), call(agent("dark", "admin", "1793387031", "QkJCQkJC"))); ok {
+		t.Fatalf("a call whose cookie's token changed its role was answered by %v", stub.Name)
+	}
+	if ok, stub, _ := matchVarIn(t, tracker("1793387031"), h, recorded(), call(agent("light", "agent", "1793387031", "QkJCQkJC"))); ok {
+		t.Fatalf("a call whose other cookie changed was answered by %v", stub.Name)
+	}
+}
+
 // A token the harness gave the application and the application forwards
 // whole is read whole in the test's incoming requests: the call answers only
 // where it carries this run's token byte for byte. One with the same claims
