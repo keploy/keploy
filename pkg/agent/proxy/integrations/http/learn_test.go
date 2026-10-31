@@ -1375,6 +1375,29 @@ func TestLearnMatchAValueTheTestCaseGaveIsItsKey(t *testing.T) {
 	}
 }
 
+// A value the test case's request gave, carried in a claim of the token a
+// call sends, uses the key at the claim's own place: the token is compared by
+// its claims, the given one checked to hold this run's value.
+func TestLearnMatchAValueTheTestCaseGaveIsFollowedIntoAJWTClaim(t *testing.T) {
+	h, n, opts := learnOn(t)
+	const hs = `{"alg":"HS256","typ":"JWT"}`
+	tok := func(at, sig string) map[string]string {
+		return map[string]string{"Authorization": bearerJWT(hs, `{"sub":"u-1","auth_time":`+at+`}`, sig)}
+	}
+	db := &givenDb{learnDb: &learnDb{perTest: []*models.Mock{learnRecorded("mock-0", 0, "POST", "/run/r-1", `{}`, tok("1793373215", "QUFBQUFB"), `{"ok":true}`)}}}
+	db.table.Start([]variables.Binding{{Name: "authTime", Value: "1793387031", Recorded: "1793373215", Mock: "test case get-1", Place: "header.Authorization{jwt}.auth_time", Given: true}})
+	served, miss, _ := h.learnMatch(context.Background(), live("POST", "/run/r-1", `{}`, tok("1793387031", "QkJCQkJC")), db, n, opts)
+	if served == nil || miss != nil {
+		t.Fatalf("served %v miss %+v", served, miss)
+	}
+	if want := (models.MockVariables{"authTime": {Recorded: "1793373215", Use: []string{"header.authorization{jwt}.auth_time"}}}); !reflect.DeepEqual(db.consumed[0].Spec.Learned(), want) {
+		t.Fatalf("variables %+v, want %+v", db.consumed[0].Spec.Learned(), want)
+	}
+	if len(db.consumed[0].Spec.ReqBodyNoise) != 0 {
+		t.Fatalf("noise %v: every other claim is still compared", db.consumed[0].Spec.ReqBodyNoise)
+	}
+}
+
 // (Round-4 review repro.) the app mints a session token, stores it with a SQL INSERT (one
 // query text, as the MySQL/generic recorders keep it), then sends it as a
 // bearer token. In F the token is minted again, so the bearer header drifts.
@@ -5288,30 +5311,83 @@ func TestLearnMatchLearnsAJWTByItsClaims(t *testing.T) {
 	}
 }
 
-// A claim that carries a value the test sent earlier is refused, naming the
-// claim and where the value was sent: keploy cannot follow a variable into
-// a token's claim yet, and never stops comparing it.
-func TestLearnMatchRefusesAVariableInsideAJWTClaim(t *testing.T) {
+// A claim that carries a value the test sent whole at an earlier call is
+// followed at its own place (header.<name>{jwt}.<claim>): a replay checks it
+// holds this run's value and puts the recorded one back in the token's
+// claims, and every other claim, the JOSE header and the signature's form are
+// still compared. A claim holding the value as one part of a longer value, or
+// a claim that must not move (role) that changes, is refused.
+func TestLearnMatchFollowsAVariableIntoAJWTClaim(t *testing.T) {
 	h, n, opts := learnOn(t)
 	const hs = `{"alg":"HS256","typ":"JWT"}`
-	tok := func(sub, sig string) map[string]string {
-		return map[string]string{"Authorization": bearerJWT(hs, `{"sub":"`+sub+`","role":"admin"}`, sig)}
+	tok := func(sub, role, sig string) map[string]string {
+		return map[string]string{"Authorization": bearerJWT(hs, `{"sub":"`+sub+`","role":"`+role+`","n":7}`, sig)}
 	}
-	tr := learn.NewTracker()
-	tr.Begin()
-	db := &learnDb{perTest: []*models.Mock{
-		learnRecorded("mock-0", 0, "POST", "/v1/users", `{"id":"u-71b2c3"}`, nil, `{}`),
-		learnRecorded("mock-1", time.Second, "POST", "/run/r-1", `{}`, tok("u-71b2c3", "QUFBQUFB"), `{"ok":true}`),
-	}}
-	ctx := learn.WithTracker(context.Background(), tr)
-	if served, miss, _ := h.learnMatch(ctx, live("POST", "/v1/users", `{"id":"u-94e5f6"}`, nil), db, n, opts); served == nil || miss != nil {
-		t.Fatalf("the first call is paired: %+v", miss)
+	const sigA, sigB = "QUFBQUFB", "QkJCQkJC"
+	setup := func(recSub string) (context.Context, *learnDb) {
+		tr := learn.NewTracker()
+		tr.Begin()
+		db := &learnDb{perTest: []*models.Mock{
+			learnRecorded("mock-0", 0, "POST", "/v1/users", `{"id":"u-71b2c3"}`, nil, `{}`),
+			learnRecorded("mock-1", time.Second, "POST", "/run/r-1", `{}`, tok(recSub, "admin", sigA), `{"ok":true}`),
+		}}
+		ctx := learn.WithTracker(context.Background(), tr)
+		if served, miss, _ := h.learnMatch(ctx, live("POST", "/v1/users", `{"id":"u-94e5f6"}`, nil), db, n, opts); served == nil || miss != nil {
+			t.Fatalf("the first call is paired: %+v", miss)
+		}
+		return ctx, db
 	}
-	served, miss, err := h.learnMatch(ctx, live("POST", "/run/r-1", `{}`, tok("u-94e5f6", "QkJCQkJC")), db, n, opts)
+	ctx, db := setup("u-71b2c3")
+	served, miss, err := h.learnMatch(ctx, live("POST", "/run/r-1", `{}`, tok("u-94e5f6", "admin", sigB)), db, n, opts)
+	if err != nil || miss != nil || served == nil {
+		t.Fatalf("served %v miss %+v err %v", served, miss, err)
+	}
+	use := db.consumed[1]
+	want := models.MockVariables{"id": {Recorded: "u-71b2c3", Use: []string{"header.authorization{jwt}.sub"}}}
+	if !reflect.DeepEqual(use.Spec.Learned(), want) {
+		t.Fatalf("variables %+v, want %+v", use.Spec.Learned(), want)
+	}
+	if len(use.Spec.ReqBodyNoise) != 0 {
+		t.Fatalf("noise %v: the token is compared by its claims", use.Spec.ReqBodyNoise)
+	}
+
+	// The replay: the claim holds this run's value; another value, a role
+	// that changed, or the claim gone is a miss.
+	written := func() []*models.Mock {
+		m0 := learnRecorded("mock-0", 0, "POST", "/v1/users", `{"id":"u-71b2c3"}`, nil, `{}`)
+		m1 := learnRecorded("mock-1", time.Second, "POST", "/run/r-1", `{}`, tok("u-71b2c3", "admin", sigA), `{"ok":true}`)
+		m0.Spec.Variables = models.MockVariables{"id": {Recorded: "u-71b2c3", Bind: "body.id"}}
+		m1.Spec.Variables = use.Spec.Learned()
+		return []*models.Mock{m0, m1}
+	}
+	for _, c := range []struct {
+		name string
+		hdr  map[string]string
+		pass bool
+	}{
+		{"this run's value", tok("u-55", "admin", sigB), true},
+		{"another value", tok("u-56", "admin", sigB), false},
+		{"a role that changed", tok("u-55", "owner", sigB), false},
+		{"another signature form", tok("u-55", "admin", sigA+"QQ"), false},
+		{"no claim", map[string]string{"Authorization": bearerJWT(hs, `{"role":"admin","n":7}`, sigB)}, false},
+		{"no token", map[string]string{"Authorization": "Bearer u-55"}, false},
+	} {
+		ci := &varDb{perTest: written()}
+		if ok, _, diag := matchVar(t, h, ci, live("POST", "/v1/users", `{"id":"u-55"}`, nil)); !ok {
+			t.Fatalf("%s: the first call in CI: %+v", c.name, diag)
+		}
+		if ok, _, diag := matchVar(t, h, ci, live("POST", "/run/r-1", `{}`, c.hdr)); ok != c.pass {
+			t.Fatalf("%s: answered %v, want %v (%+v)", c.name, ok, c.pass, diag)
+		}
+	}
+
+	// A claim that holds the value as one part of a longer value.
+	ctx, db = setup("user:u-71b2c3")
+	served, miss, err = h.learnMatch(ctx, live("POST", "/run/r-1", `{}`, tok("user:u-94e5f6", "admin", sigB)), db, n, opts)
 	if err != nil || served != nil || miss == nil {
 		t.Fatalf("served %v miss %+v err %v: refused", served, miss, err)
 	}
-	if why := fmt.Sprintf("%+v", miss); !strings.Contains(why, "header.authorization{jwt}.sub is a claim of the token header.authorization holds") || !strings.Contains(why, "mock-0 holds at body.id") {
+	if why := fmt.Sprintf("%+v", miss); !strings.Contains(why, "header.authorization{jwt}.sub is a claim of the token header.authorization holds") || !strings.Contains(why, "mock-0 sent at body.id as one part of a longer value") {
 		t.Fatalf("refused with %s", why)
 	}
 }

@@ -43,9 +43,19 @@ const (
 	PartPath
 	// PartQuery is the value of one query parameter, read decoded.
 	PartQuery
-	// PartHeader is the whole value of one header.
+	// PartHeader is the whole value of one header, or one claim of the JSON
+	// Web Token it holds (Place.Claim).
 	PartHeader
 )
+
+// JWTMark is what a header place's name gains for a claim of the JSON Web
+// Token the header holds ("<scheme> <token>" or the token alone):
+// header.<name>{jwt}.<claim path>. The claim is read decoded, as a JSON
+// scalar of the token's claims; a replay checks it as any place, and puts the
+// recorded claim back into the token's claims, whose signature the matcher
+// compares by its form alone (a signature changes with every claim, and
+// keploy holds no signer's key).
+const JWTMark = "{jwt}"
 
 // Place is where in a call a variable's value is.
 type Place struct {
@@ -57,6 +67,9 @@ type Place struct {
 	// Name is the parameter of a PartQuery place, or the header of a
 	// PartHeader place.
 	Name string
+	// Claim is the JSON path of a claim of the JSON Web Token a PartHeader
+	// place's header holds (JWTMark), nil for the header's whole value.
+	Claim []templates.PathSeg
 }
 
 // The prefixes of the place grammar.
@@ -76,6 +89,8 @@ var ErrPlace = errors.New("not a variable place")
 //	url.path[2]           the third segment of the URL path
 //	url.query.page        the value of the query parameter page
 //	header.X-Request-Id   the value of a header (any case)
+//	header.Authorization{jwt}.sub
+//	                      a claim of the JSON Web Token the header holds
 func Parse(s string) (Place, error) {
 	switch {
 	case s == bodyPrefix:
@@ -95,7 +110,19 @@ func Parse(s string) (Place, error) {
 	case strings.HasPrefix(s, queryPrefix) && len(s) > len(queryPrefix):
 		return Place{Part: PartQuery, Name: s[len(queryPrefix):]}, nil
 	case strings.HasPrefix(s, headerPrefix) && len(s) > len(headerPrefix):
-		return Place{Part: PartHeader, Name: s[len(headerPrefix):]}, nil
+		name := s[len(headerPrefix):]
+		i := strings.Index(name, JWTMark)
+		if i < 0 {
+			return Place{Part: PartHeader, Name: name}, nil
+		}
+		if i == 0 {
+			return Place{}, fmt.Errorf("%w: %q names no header before %s", ErrPlace, s, JWTMark)
+		}
+		claim, err := parseJSONPath(name[i+len(JWTMark):])
+		if err != nil {
+			return Place{}, fmt.Errorf("%w: %q: the claim after %s: %v", ErrPlace, s, JWTMark, err)
+		}
+		return Place{Part: PartHeader, Name: name[:i], Claim: claim}, nil
 	}
 	return Place{}, fmt.Errorf("%w: %q (want body.<path>, url.path[<n>], url.query.<name> or header.<name>)", ErrPlace, s)
 }
@@ -110,9 +137,22 @@ func (p Place) String() string {
 	case PartQuery:
 		return queryPrefix + p.Name
 	case PartHeader:
+		if len(p.Claim) > 0 {
+			return headerPrefix + p.Name + JWTMark + formatJSONPath(p.Claim)
+		}
 		return headerPrefix + p.Name
 	}
 	return ""
+}
+
+// Key is the place as String writes it with a header's name in lower case,
+// as it is read in any case: two places of one request are one where their
+// keys are.
+func (p Place) Key() string {
+	if p.Part == PartHeader {
+		p.Name = strings.ToLower(p.Name)
+	}
+	return p.String()
 }
 
 // BodyPlace is the place of a scalar of a JSON body.

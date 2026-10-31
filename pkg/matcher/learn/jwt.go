@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"strconv"
 	"strings"
+
+	"go.keploy.io/server/v3/pkg/variables"
 )
 
 // JWT is a JSON Web Token a value holds whole (RFC 7519, compact JWS): three
@@ -30,11 +32,13 @@ type JWT struct {
 	Claims interface{}
 	// Signature is the third segment as the value holds it.
 	Signature string
+	// head is the first segment as the value holds it.
+	head string
 }
 
 // JWTMark is what a place's name gains for the token it holds: its claims are
 // "<place>{jwt}.<claim>".
-const JWTMark = "{jwt}"
+const JWTMark = variables.JWTMark
 
 // ReadJWT reads s as a JWT (JWT), and reports whether it is one: three
 // segments joined by '.', the first two unpadded base64url of a JSON object,
@@ -75,8 +79,41 @@ func ReadJWT(s string) (JWT, bool) {
 	if err != nil {
 		return JWT{}, false
 	}
-	j.Header, j.Claims, j.Signature = string(hb), claims, seg[2]
+	j.Header, j.Claims, j.Signature, j.head = string(hb), claims, seg[2], seg[0]
 	return j, true
+}
+
+// JWTClaims is the JSON text of the claims of the JWT s holds (ReadJWT), and
+// whether s holds one: what a replay reads a claim's place in
+// (variables.JWTMark).
+func JWTClaims(s string) (string, bool) {
+	if _, ok := ReadJWT(s); !ok {
+		return "", false
+	}
+	seg := strings.Split(s[strings.IndexByte(s, ' ')+1:], ".")
+	b, err := base64.RawURLEncoding.DecodeString(seg[1])
+	if err != nil {
+		return "", false
+	}
+	return string(b), true
+}
+
+// WithJWTClaims is s, a value holding a JWT (ReadJWT), with its claims
+// replaced by the JSON object claims: its scheme, its JOSE header and its
+// signature kept as s holds them. A replay puts a claim's recorded value back
+// with it (variables.JWTMark); the signature no longer signs the claims, and
+// the matcher compares it by its form alone (SignatureForm).
+func WithJWTClaims(s, claims string) (string, bool) {
+	j, ok := ReadJWT(s)
+	if !ok {
+		return "", false
+	}
+	if v, ok := DecodeJSON([]byte(claims)); !ok {
+		return "", false
+	} else if _, obj := v.(map[string]interface{}); !obj {
+		return "", false
+	}
+	return j.Scheme + j.head + "." + base64.RawURLEncoding.EncodeToString([]byte(claims)) + "." + j.Signature, true
 }
 
 // jwtObject is the JSON object an unpadded base64url segment holds.

@@ -29,13 +29,15 @@ func TestParse_ReadsEveryPartAndWritesItBack(t *testing.T) {
 		{in: "url.query.page", want: Place{Part: PartQuery, Name: "page"}},
 		{in: "url.query.filter[id]", want: Place{Part: PartQuery, Name: "filter[id]"}},
 		{in: "header.X-Request-Id", want: Place{Part: PartHeader, Name: "X-Request-Id"}},
+		{in: "header.Authorization{jwt}.sub", want: Place{Part: PartHeader, Name: "Authorization", Claim: []templates.PathSeg{{Key: "sub"}}}},
+		{in: `header.authorization{jwt}.ctx[1]["a.b"]`, want: Place{Part: PartHeader, Name: "authorization", Claim: []templates.PathSeg{{Key: "ctx"}, {Index: 1, IsIndex: true}, {Key: "a.b"}}}},
 	}
 	for _, c := range cases {
 		got, err := Parse(c.in)
 		if err != nil {
 			t.Fatalf("Parse(%q): %v", c.in, err)
 		}
-		if got.Part != c.want.Part || got.Index != c.want.Index || got.Name != c.want.Name || !samePath(got.Path, c.want.Path) {
+		if got.Part != c.want.Part || got.Index != c.want.Index || got.Name != c.want.Name || !samePath(got.Path, c.want.Path) || !samePath(got.Claim, c.want.Claim) {
 			t.Fatalf("Parse(%q) = %+v, want %+v", c.in, got, c.want)
 		}
 		out := c.out
@@ -48,11 +50,30 @@ func TestParse_ReadsEveryPartAndWritesItBack(t *testing.T) {
 	}
 }
 
+// A header place's key reads its name in any case, never its claim's path.
+func TestPlace_KeyLowersAHeadersNameAlone(t *testing.T) {
+	for in, want := range map[string]string{
+		"header.X-Request-Id":           "header.x-request-id",
+		"header.Authorization{jwt}.Sub": "header.authorization{jwt}.Sub",
+		"body.Id":                       "body.Id",
+		"url.query.Page":                "url.query.Page",
+	} {
+		p, err := Parse(in)
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", in, err)
+		}
+		if got := p.Key(); got != want {
+			t.Fatalf("Parse(%q).Key() = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestParse_RefusesWhatIsNotAPlace(t *testing.T) {
 	for _, in := range []string{
 		"", "body", "body.", "body..a", "body.a]", "body[x]", "body[-1]", "body[01]", "body[1",
 		`body["a"`, `body["a"x]`, "url.path[]", "url.path[a]", "url.path[-1]", "url.path[01]",
 		"url.query.", "header.", "query.page", "path[0]", "BODY.id",
+		"header.{jwt}.sub", "header.Authorization{jwt}", "header.Authorization{jwt}sub", "header.Authorization{jwt}..sub",
 	} {
 		if p, err := Parse(in); err == nil {
 			t.Fatalf("Parse(%q) = %+v, want an error", in, p)

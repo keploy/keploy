@@ -2101,10 +2101,15 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 			if whole[c] {
 				continue // the token is followed whole, claims and all
 			}
-			if _, gave := givenFor(r, l.Live, given); gave || l.Kind != learn.KindNoise && l.Kind != learn.KindUnaccounted {
-				if _, clock := l.Clock(); !clock {
-					return p, r.Path + " is a claim of the token " + c + " holds, and keploy cannot follow a variable or an echo into a token's claim yet (" + claimWhy(l) + "); every other claim is still compared"
-				}
+			// A claim that carries a value of the test's (one the test
+			// case gave, a variable sent whole at an earlier call) is
+			// followed at its own place (variables.JWTMark): a replay
+			// checks it holds this run's value, and puts the recorded
+			// one back in the token's claims. An echo, or a value inside
+			// a longer claim, is not.
+			_, gave := givenFor(r, l.Live, given)
+			if _, clock := l.Clock(); !gave && !clock && (l.Kind == learn.KindEcho || l.Kind == learn.KindVariable && l.From.Within.Set()) {
+				return p, r.Path + " is a claim of the token " + c + " holds, and keploy cannot follow an echo or a part of a longer value into a token's claim yet (" + claimWhy(l) + "); every other claim is still compared"
 			}
 		}
 		if g, ok := givenFor(r, l.Live, given); ok {
@@ -2357,16 +2362,13 @@ func jwtHeaders(learned []learn.Learned, given []variables.Binding) (byClaims, w
 	return byClaims, whole
 }
 
-// claimWhy is what a claim learned as a variable or an echo carries, for the
-// refusal: where its value was found.
+// claimWhy is why a claim learned as an echo, or as a variable it holds as
+// one part of a longer value, is not followed: where its value was found.
 func claimWhy(l learn.Learned) string {
-	switch {
-	case l.Kind == learn.KindVariable && l.From.Mock != "":
-		return "it carries a value " + l.From.Mock + " holds at " + l.From.Path
-	case l.Kind == learn.KindEcho:
+	if l.Kind == learn.KindEcho {
 		return "its call's answer echoes it"
 	}
-	return "it carries a value of the test case's"
+	return "it holds a value " + l.From.Mock + " sent at " + l.From.Path + " as one part of a longer value"
 }
 
 // answerParts are the answer places among from (a call's answer leaves)

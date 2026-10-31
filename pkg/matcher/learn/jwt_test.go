@@ -3,6 +3,7 @@ package learn
 import (
 	"encoding/base64"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -70,5 +71,35 @@ func TestReadJWTReadsATokenByWhatItSays(t *testing.T) {
 	}
 	if j, ok := ReadJWT(testJWT(`{"alg":"none"}`, `{"sub":"u-1"}`, "")); !ok || j.SignatureForm() != "base64url, 0 characters" {
 		t.Fatalf("an unsecured token is one, with no signature: %+v %v", j, ok)
+	}
+}
+
+// A replay reads a token's claims as JSON text, and puts claims back into the
+// token with its scheme, JOSE header and signature as the value holds them.
+func TestJWTClaimsAreReadAndPutBack(t *testing.T) {
+	const hs = `{"alg":"HS256","typ":"JWT"}`
+	tok := "Bearer " + testJWT(hs, `{"sub":"u-1","auth_time":1793373215}`, "c2lnbmF0dXJl")
+	claims, ok := JWTClaims(tok)
+	if !ok || claims != `{"sub":"u-1","auth_time":1793373215}` {
+		t.Fatalf("claims %q %v", claims, ok)
+	}
+	back, ok := WithJWTClaims(tok, `{"sub":"u-1","auth_time":1793387031}`)
+	if !ok || back != "Bearer "+testJWT(hs, `{"sub":"u-1","auth_time":1793387031}`, "c2lnbmF0dXJl") {
+		t.Fatalf("put back %q %v", back, ok)
+	}
+	if bare, ok := WithJWTClaims(testJWT(hs, `{"a":1}`, "c2ln"), `{"a":2}`); !ok || strings.HasPrefix(bare, " ") || bare != testJWT(hs, `{"a":2}`, "c2ln") {
+		t.Fatalf("a token alone: %q %v", bare, ok)
+	}
+	for _, c := range []struct{ value, claims string }{
+		{"Bearer not-a-token", `{"a":1}`},
+		{tok, `[1]`},   // claims are an object
+		{tok, `{"a":`}, // and JSON
+	} {
+		if got, ok := WithJWTClaims(c.value, c.claims); ok {
+			t.Fatalf("WithJWTClaims(%q, %q) = %q, want none", c.value, c.claims, got)
+		}
+	}
+	if _, ok := JWTClaims("Bearer u-1"); ok {
+		t.Fatal("a value that holds no token has no claims")
 	}
 }

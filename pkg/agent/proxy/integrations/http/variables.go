@@ -137,6 +137,11 @@ func readDecls(m *models.Mock) ([]varDecl, string) {
 		if answer && p.Part != variables.PartBody && p.Part != variables.PartHeader {
 			return varPlace{}, fmt.Sprintf("the answer place %s of variable %s is not a place of a response (body.<path> or header.<name>)", raw, name)
 		}
+		if answer && len(p.Claim) > 0 {
+			// The application may check the token it is answered with,
+			// and keploy cannot sign one again.
+			return varPlace{}, fmt.Sprintf("the answer place %s of variable %s is a claim of a token, which keploy cannot answer with another value: the token's signature would not sign it", raw, name)
+		}
 		vp := varPlace{raw: raw, place: p}
 		if part, ok := m.Spec.Variables[name].PartAt(raw, answer); ok {
 			w := learn.Within{Before: part.Before, After: part.After}
@@ -189,10 +194,7 @@ func readDecls(m *models.Mock) ([]varDecl, string) {
 			return nil, fmt.Sprintf("variable %s names no place", name)
 		}
 		for _, vp := range d.requestPlaces() {
-			key := vp.place.String()
-			if vp.place.Part == variables.PartHeader {
-				key = strings.ToLower(key) // a header's name is read in any case
-			}
+			key := vp.place.Key() // a header's name is read in any case
 			if other, dup := seen[key]; dup {
 				return nil, fmt.Sprintf("the request place %s is declared twice (variables %s and %s)", key, other, name)
 			}
@@ -299,6 +301,19 @@ func (v reqView) read(p variables.Place) (held, bool) {
 		if len(vals) != 1 {
 			return held{}, false
 		}
+		if len(p.Claim) > 0 {
+			// A claim of the token the header holds, read as a JSON
+			// scalar of its claims.
+			claims, ok := learn.JWTClaims(vals[0])
+			if !ok {
+				return held{}, false
+			}
+			l, ok := variables.JSONLeafAt(claims, p.Claim)
+			if !ok {
+				return held{}, false
+			}
+			return held{value: l.Value(claims), kind: l.Kind, raw: l.Raw(claims), body: true}, true
+		}
 		return held{value: vals[0]}, true
 	}
 	return held{}, false
@@ -328,9 +343,29 @@ func (v reqView) putBack(p variables.Place, rec held) (reqView, bool) {
 		q[p.Name] = []string{rec.value}
 		v.query = q
 	case variables.PartHeader:
+		value := rec.value
+		if len(p.Claim) > 0 {
+			// The recorded claim back in the token's claims; its scheme,
+			// JOSE header and signature as the call sent them, which the
+			// matcher compares by what they say (a signature by its form).
+			vals := v.header.Values(p.Name)
+			if len(vals) != 1 {
+				return v, false
+			}
+			claims, ok := learn.JWTClaims(vals[0])
+			if !ok {
+				return v, false
+			}
+			if claims, ok = variables.SpliceAt(claims, p.Claim, rec.raw); !ok {
+				return v, false
+			}
+			if value, ok = learn.WithJWTClaims(vals[0], claims); !ok {
+				return v, false
+			}
+		}
 		h := v.header.Clone()
 		h.Del(p.Name)
-		h.Set(p.Name, rec.value)
+		h.Set(p.Name, value)
 		v.header = h
 	}
 	return v, true

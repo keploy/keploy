@@ -466,6 +466,11 @@ func TestVarPlaces(t *testing.T) {
 		{Leaf{Path: "body.id"}, false, ""},                // a form or multipart field
 		{Leaf{Path: "body"}, true, ""},                    // a whole body
 		{Leaf{Path: "body.a.b", Unnamed: true}, true, ""}, // no path names it alone
+		// A claim of the token a header holds (JWT.Leaves), in any body.
+		{Leaf{Path: "header.authorization{jwt}.auth_time"}, false, "header.authorization{jwt}.auth_time"},
+		{Leaf{Path: "header.authorization{jwt}.ctx[1].id"}, false, "header.authorization{jwt}.ctx[1].id"},
+		{Leaf{Path: "header.{jwt}.sub"}, false, ""},          // no header
+		{Leaf{Path: "header.authorization{jwt}"}, false, ""}, // no claim
 	} {
 		got, ok := VarPlace(tc.leaf, tc.json)
 		if got != tc.place || ok != (tc.place != "") {
@@ -482,6 +487,12 @@ func TestVarPlaces(t *testing.T) {
 	}
 	if p, ok := LeafPath("header.X-Request-Id"); !ok || p != "header.x-request-id" {
 		t.Errorf("a header place names the lowercased leaf: %q %v", p, ok)
+	}
+	if p, ok := LeafPath("header.Authorization{jwt}.Sub"); !ok || p != "header.authorization{jwt}.Sub" {
+		t.Errorf("a claim's place names the leaf with its header lowercased, its claim as written: %q %v", p, ok)
+	}
+	if n := varName("header.authorization{jwt}.ctx[0]"); n != "ctx" {
+		t.Errorf("a claim's variable is named by its claim's key: %q", n)
 	}
 	if _, ok := LeafPath("nowhere"); ok {
 		t.Error("a place that does not parse names no leaf")

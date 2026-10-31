@@ -29,7 +29,16 @@ func VarPlace(l Leaf, jsonBody bool) (string, bool) {
 	case strings.HasPrefix(l.Path, "url.query."):
 		return variables.Place{Part: variables.PartQuery, Name: strings.TrimPrefix(l.Path, "url.query.")}.String(), true
 	case strings.HasPrefix(l.Path, "header."):
-		return variables.Place{Part: variables.PartHeader, Name: strings.TrimPrefix(l.Path, "header.")}.String(), true
+		name := strings.TrimPrefix(l.Path, "header.")
+		if i := strings.Index(name, JWTMark); i >= 0 {
+			// A claim of the token the header holds (JWT.Leaves).
+			claim, ok := jsonSegs(name[i+len(JWTMark):])
+			if !ok || i == 0 || len(claim) == 0 {
+				return "", false
+			}
+			return variables.Place{Part: variables.PartHeader, Name: name[:i], Claim: claim}.String(), true
+		}
+		return variables.Place{Part: variables.PartHeader, Name: name}.String(), true
 	case jsonBody && (strings.HasPrefix(l.Path, "body.") || strings.HasPrefix(l.Path, "body[")):
 		path, ok := jsonSegs(strings.TrimPrefix(l.Path, "body"))
 		if !ok {
@@ -54,20 +63,28 @@ func LeafPath(place string) (string, bool) {
 	case variables.PartQuery:
 		return "url.query." + p.Name, true
 	case variables.PartHeader:
+		if len(p.Claim) > 0 {
+			return "header." + strings.ToLower(p.Name) + JWTMark + leafSegs(p.Claim), true
+		}
 		return "header." + strings.ToLower(p.Name), true
 	case variables.PartBody:
-		var b strings.Builder
-		b.WriteString("body")
-		for _, s := range p.Path {
-			if s.IsIndex {
-				b.WriteString("[" + strconv.Itoa(s.Index) + "]")
-				continue
-			}
-			b.WriteString("." + s.Key)
-		}
-		return b.String(), true
+		return "body" + leafSegs(p.Path), true
 	}
 	return "", false
+}
+
+// leafSegs writes a JSON path as a leaf's path holds it after its root
+// (jsonSegs reads it).
+func leafSegs(path []templates.PathSeg) string {
+	var b strings.Builder
+	for _, s := range path {
+		if s.IsIndex {
+			b.WriteString("[" + strconv.Itoa(s.Index) + "]")
+			continue
+		}
+		b.WriteString("." + s.Key)
+	}
+	return b.String()
 }
 
 // jsonSegs reads a JSON leaf path after its root (".a.b[0].c"), as
@@ -116,6 +133,13 @@ func varName(place string) string {
 			base = "path" + strconv.Itoa(p.Index)
 		case variables.PartQuery, variables.PartHeader:
 			base = p.Name
+			// A token's claim is named by its claim's key.
+			for i := len(p.Claim) - 1; i >= 0; i-- {
+				if !p.Claim[i].IsIndex {
+					base = p.Claim[i].Key
+					break
+				}
+			}
 		case variables.PartBody:
 			for i := len(p.Path) - 1; i >= 0 && base == ""; i-- {
 				if !p.Path[i].IsIndex && !strings.HasPrefix(p.Path[i].Key, "$") {
