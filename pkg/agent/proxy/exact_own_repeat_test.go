@@ -13,6 +13,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/generic"
 	httpint "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
@@ -245,6 +246,122 @@ func TestASnapshotsCallRoundShowsTheWorkerScopeAsTheMarkDoes(t *testing.T) {
 			snapped := integrations.ShowsBackgroundIn(snap.CallRound(), mm)
 			if marked != tc.want || snapped != tc.want {
 				t.Fatalf("the view shows a background: marked %v, from the snapshot %v; want %v for both", marked, snapped, tc.want)
+			}
+		})
+	}
+}
+
+// pairedRepeatRun stages, under the background rules, test-0's recording
+// mock-own-0 and test-1's mock-own-1 of the same GET /dup, each in its test's
+// recorded window and answered as its test was answered. baked says record's
+// judging moved mock-own-1 into the set's worker scope, reached from the
+// set's start, so test-1 lists nothing. The view is between tests.
+func pairedRepeatRun(t *testing.T, baked bool) (*Proxy, *MockManager) {
+	t.Helper()
+	t.Setenv(provenswitch.Env, "1")
+	p := startedDrainProxy(t, 100)
+	p.learnTracker = learn.NewTracker()
+	start := time.Now().Add(time.Second)
+	own0 := r3Mock("mock-own-0", start.Add(100*time.Millisecond), "GET", "/dup", "", `{"test":0}`)
+	own1 := r3Mock("mock-own-1", start.Add(1100*time.Millisecond), "GET", "/dup", "", `{"test":1}`)
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	mm.SeedRecordedWindows([]models.TestWindow{
+		{TestCase: "test-0", Start: start, End: start.Add(900 * time.Millisecond)},
+		{TestCase: "test-1", Start: start.Add(time.Second), End: start.Add(1900 * time.Millisecond)},
+	})
+	mm.SetMocksWithWindow(nil, []*models.Mock{own0, own1}, models.BaseTime, start.Add(time.Hour))
+	var worker []string
+	if baked {
+		worker = []string{own1.Name}
+	}
+	mm.ServeExactBackground(models.RecordedWithS12Routing, nil, worker)
+	mm.ServeExactWorker(worker)
+	p.setMockManager(mm)
+	t.Cleanup(func() { p.setMockManager(nil) })
+	mm.ServeExactPool(models.PoolKeyNone, nil)
+	return p, mm
+}
+
+// Under the proven switch, on a set served by the background rules, test-0
+// recorded GET /dup once and test-1 recorded the identical call once. A
+// test-0 that calls it twice:
+//
+//   - In record's full round the second call is paired with test-1's
+//     recording: answered with it, a claim reported for judging
+//     (models.AnswerProvisional, NotOwned), not consumed. This is the full
+//     round's stated limit: the full round learns, its pairing gives no
+//     verdict.
+//   - Judging then voids the pairing when test-1 consumed its recording
+//     itself (it stays test-1's), or else moves the recording into the set's
+//     worker scope. Either way the confirming round, a plain replay, misses
+//     the second call as one call more than test-0 recorded
+//     (models.MissExtraCall, recorded 1), and the recording still answers
+//     test-1's call: test-1's own, or the worker scope's, which the miss left
+//     unspent.
+//
+// Answered by the worker scope's copy in the confirming round, a test that
+// made its recorded call twice passed.
+func TestACallPairedInTheFullRoundOneMoreThanTheTestRecordedMissesInTheConfirmingRound(t *testing.T) {
+	t.Run("full round", func(t *testing.T) {
+		p, mm := pairedRepeatRun(t, false)
+		mm.SetPairing(true)
+		h := httpint.New(zap.NewNop())
+		opts := models.OutgoingOptions{Learn: true}
+		mm.ServeExactTest("test-0", []*models.Mock{roundMock(mm, "mock-own-0")})
+		p.ContinueTestErrorCapture()
+		if code, body := r3SendVia(t, context.Background(), h, p, mm, opts, httpGet("/dup")); code != http.StatusOK || body != `{"test":0}` {
+			t.Fatalf("test-0's GET /dup got %d %s; want its own", code, body)
+		}
+		if code, body := r3SendVia(t, context.Background(), h, p, mm, opts, httpGet("/dup")); code != http.StatusOK || body != `{"test":1}` {
+			t.Fatalf("test-0's second GET /dup got %d %s; want test-1's recording, paired", code, body)
+		}
+		calls, err := p.GetMockErrors(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(calls) != 1 || calls[0].Answer != models.AnswerProvisional || !calls[0].NotOwned || calls[0].ClosestMock != "mock-own-1" {
+			t.Fatalf("reported %+v; want the one pairing with mock-own-1, an answer for judging", calls)
+		}
+	})
+	for _, tc := range []struct {
+		judged string
+		baked  bool
+	}{
+		{"pairing void: test-1 consumed its recording", false},
+		{"recording moved into the worker scope", true},
+	} {
+		t.Run("confirming round, "+tc.judged, func(t *testing.T) {
+			p, mm := pairedRepeatRun(t, tc.baked)
+			h := httpint.New(zap.NewNop())
+			mm.ServeExactTest("test-0", []*models.Mock{roundMock(mm, "mock-own-0")})
+			p.ContinueTestErrorCapture()
+			if code, body, err := sendWithin(h, p, mm, httpGet("/dup")); err != nil || code != http.StatusOK || body != `{"test":0}` {
+				t.Fatalf("test-0's GET /dup got %d %s %v; want its own", code, body, err)
+			}
+			code, body, err := sendWithin(h, p, mm, httpGet("/dup"))
+			if err == nil && code == http.StatusOK {
+				t.Fatalf("test-0's second GET /dup, one more than it recorded, was answered %s", body)
+			}
+			if errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("test-0's second GET /dup: %v", err)
+			}
+			misses, err := p.GetMockErrors(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(misses) != 1 || misses[0].ActualSummary != "GET /dup" || misses[0].Kind != models.MissExtraCall || misses[0].Recorded != 1 {
+				t.Fatalf("misses %+v; want one extra_call miss of GET /dup, recorded 1", misses)
+			}
+			mm.ServeExactPool(models.PoolKeyNone, nil)
+			var owned []*models.Mock
+			if !tc.baked {
+				owned = []*models.Mock{roundMock(mm, "mock-own-1")}
+			}
+			mm.ServeExactTest("test-1", owned)
+			p.ContinueTestErrorCapture()
+			if code, body, err := sendWithin(h, p, mm, httpGet("/dup")); err != nil || code != http.StatusOK || body != `{"test":1}` {
+				t.Fatalf("test-1's GET /dup got %d %s %v; want mock-own-1", code, body, err)
 			}
 		})
 	}
