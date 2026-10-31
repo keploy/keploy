@@ -802,10 +802,9 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 				a.scopeMu.Unlock()
 				r.TakeRecordedBegin(began)
 			}
-			// Misses made from here, and those made since the previous test
-			// ended (or before the first test), are this test's: a miss
-			// outside every test is charged to the next test that begins
-			// (design v14 §5.1). Opening the window is where the proxy's
+			// Misses made from here are this test's; one made outside every
+			// test, since the previous test ended or before the first, is
+			// charged to no test (testEvidence). Opening the window is where the proxy's
 			// learn tracker begins the test, so it opens once the begin has
 			// moved the app's clock (beginScopeAt): a client test's call
 			// reads its window on the app's clock from the tracker's begin
@@ -1019,7 +1018,7 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, w
 		if err := a.servePoolExactly(ctx); err != nil {
 			a.logger.Warn("keploy could not stop serving the test before reading it; its end serves the pool again", zap.String("test", id), zap.Error(err))
 		}
-		ev, readErr = a.testEvidence(ctx, id, outcome != models.ScopeOutcomeSkipped)
+		ev, readErr = a.testEvidence(ctx, id, outcome != models.ScopeOutcomeSkipped, beganAt)
 	}
 	if len(incomplete) > 0 {
 		if ev == nil {
@@ -1294,12 +1293,28 @@ func (a *Agent) failClosedWindow(id, why string) {
 // a connection that sent nothing made no call), and the test mocks it did not
 // consume while it was open (exact serving tells which). A failed read is an
 // error. Every miss is still charged to the run, so its next step is said.
-func (a *Agent) testEvidence(ctx context.Context, id string, unmade bool) (*models.ScopeEvidence, error) {
+//
+// beganAt is when exact serving began serving the test (zero when it is not
+// known). A miss made outside every test before it (outsideEveryTest) is no
+// call of the test's: the test framework set the test's window, and keploy
+// does not move a call into it. It is charged to no test, and the run's
+// receipt lists it (Receipt.UnchargedMisses), so a reader who finds it the
+// test's own call edits the set's mappings rather than keploy guessing.
+func (a *Agent) testEvidence(ctx context.Context, id string, unmade bool, beganAt time.Time) (*models.ScopeEvidence, error) {
 	if a.Proxy == nil {
 		return nil, errors.New("no proxy")
 	}
 	ev := &models.ScopeEvidence{}
-	misses, err := a.Proxy.GetMockErrors(ctx)
+	all, err := a.Proxy.GetMockErrors(ctx)
+	var misses, outside []models.UnmatchedCall
+	for _, m := range all {
+		if outsideEveryTest(m, beganAt) {
+			outside = append(outside, m)
+			continue
+		}
+		misses = append(misses, m)
+	}
+	a.charge(outside, "")
 	// Misses a read returned with its error are this test's all the same.
 	a.charge(misses, id)
 	for _, m := range misses {
@@ -1329,6 +1344,16 @@ func (a *Agent) testEvidence(ctx context.Context, id string, unmade bool) (*mode
 	a.provenMu.Unlock()
 	ev.Unconsumed = append(unconsumed, unservable...)
 	return ev, nil
+}
+
+// outsideEveryTest reports whether miss m was made outside every test, before
+// the test that began being served at beganAt: filed while no test was open
+// (models.MissOutsideTest) at a time before beganAt. A miss without a time,
+// or read when beganAt is not known, is not told so: it stays the ending
+// test's, as a miss of another kind made before beganAt does (a call of the
+// previous test's still in flight as it ended), and fails it.
+func outsideEveryTest(m models.UnmatchedCall, beganAt time.Time) bool {
+	return m.Kind == models.MissOutsideTest && !beganAt.IsZero() && !m.At.IsZero() && m.At.Before(beganAt)
 }
 
 // mocksByName finds every stored mock named, resident or on disk. A name the

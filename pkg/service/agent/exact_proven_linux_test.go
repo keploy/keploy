@@ -350,7 +350,8 @@ func TestAnotherTestsMockNeverAnswers(t *testing.T) {
 }
 
 // Between tests the key's pool slice answers, as often as asked; no test's
-// mock answers there, and inside a test no data-plane pool mock answers.
+// mock answers there, and inside a test no data-plane pool mock answers. A
+// call between tests that nothing answers is charged to no test.
 func TestThePoolAnswersOnlyBetweenTests(t *testing.T) {
 	a, p := exactAgent(t,
 		[]*models.Mock{pingMock("mock-1", "/health", "ok", t0), pingMock("mock-2", "/a", "a", t0.Add(time.Second))},
@@ -371,7 +372,7 @@ func TestThePoolAnswersOnlyBetweenTests(t *testing.T) {
 	for _, m := range ev.Misses {
 		kinds = append(kinds, m.Kind)
 	}
-	require.ElementsMatch(t, []string{models.MissOutsideTest, models.MissInTest}, kinds, "the miss between tests is charged to the next test")
+	require.Equal(t, []string{models.MissInTest}, kinds, "a miss between tests is charged to no test, not to the next one")
 }
 
 // sqsEmpty is the answer enterprise SQS's parser writes for a ReceiveMessage
@@ -907,9 +908,9 @@ func (p *inFlightProxy) ServeExactPool(key string, names []string) error {
 }
 
 // A test's call that lands as its end stops serving it misses, fails the
-// test, and is said to be made as the test ended, not before it began; a
-// call made between tests is still said to precede the next test (round-3
-// review).
+// test, and is said to be made as the test ended, not before it began
+// (round-3 review); a call made between tests is charged to no test, and
+// fails neither test.
 func TestACallLandingAsTheTestEndsIsSaidToBeMadeThen(t *testing.T) {
 	a, rp := exactAgent(t,
 		[]*models.Mock{pingMock("mock-1", "/a", "a", t0), pingMock("mock-2", "/b", "b", t0.Add(time.Second)), pingMock("mock-3", "/c", "c", t0.Add(2*time.Second))},
@@ -932,8 +933,16 @@ func TestACallLandingAsTheTestEndsIsSaidToBeMadeThen(t *testing.T) {
 	require.Equal(t, 502, code)
 	got, e := runTest(t, a, p.servingProxy, "TestB", "/c")
 	require.Equal(t, []string{"200 c"}, got)
-	require.Equal(t, models.ScopeActionFail, e.Action)
-	require.Contains(t, e.Reason, "GET /zzz to 127.0.0.1:18093, made before this one began, had no recorded answer")
+	require.Empty(t, e.Action, e.Reason)
+	all, err := a.GetMockErrors(ctx)
+	require.NoError(t, err)
+	charged := map[string]string{}
+	for _, m := range all {
+		charged[m.ActualSummary] = m.ChargedTo
+	}
+	require.Equal(t, "o::TestA", charged["GET /b"], "the call landing as TestA ended is TestA's")
+	require.Contains(t, charged, "GET /zzz", "the call between tests is the run's miss")
+	require.Empty(t, charged["GET /zzz"], "the call between tests is charged to no test")
 }
 
 // lateProxy holds a miss between its report being built and its filing
