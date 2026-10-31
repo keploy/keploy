@@ -51,8 +51,9 @@ func TestAgentClient_PushTestBegins(t *testing.T) {
 	}
 }
 
-// A restarted agent is given the tests' recorded begins again, as the first
-// one was: its tests run on their recorded clocks too.
+// A restarted agent is given the tests' recorded begins and incoming requests
+// again, as the first one was: its tests run on their recorded clocks too, and
+// it reads what the harness gave the application as the first one did.
 func TestRestartedAgentGetsTheTestBeginsAgain(t *testing.T) {
 	var mu sync.Mutex
 	var got []models.TestBeginsReq
@@ -71,10 +72,12 @@ func TestRestartedAgentGetsTheTestBeginsAgain(t *testing.T) {
 	a := &AgentClient{logger: zap.NewNop(), client: http.Client{}, conf: &config.Config{Agent: config.Agent{AgentURI: srv.URL}}}
 	at := time.Date(2026, 10, 6, 9, 1, 0, 0, time.UTC)
 	begins := map[string]time.Time{"pkg::TestA": at}
-	if err := a.PushTestBegins(context.Background(), models.TestBeginsReq{Begins: begins}); err != nil {
+	incoming := map[string][]models.TestIncoming{"pkg::TestA": {{Case: "test-1", At: at, URL: "http://app/v1/x", Header: map[string]string{"X-Tenant": "tn-1"}}}}
+	if err := a.PushTestBegins(context.Background(), models.TestBeginsReq{Begins: begins, Incoming: incoming}); err != nil {
 		t.Fatal(err)
 	}
 	delete(begins, "pkg::TestA")
+	delete(incoming, "pkg::TestA")
 	if err := s.reapply(context.Background(), zap.NewNop()); err != nil {
 		t.Fatal(err)
 	}
@@ -85,5 +88,10 @@ func TestRestartedAgentGetsTheTestBeginsAgain(t *testing.T) {
 	}
 	if !got[1].Begins["pkg::TestA"].Equal(at) {
 		t.Fatalf("the restarted agent got %+v", got[1])
+	}
+	// The test's incoming requests too: without them the restarted agent
+	// finds every variable the harness gave the application unbound.
+	if in := got[1].Incoming["pkg::TestA"]; len(in) != 1 || in[0].Case != "test-1" || in[0].Header["X-Tenant"] != "tn-1" {
+		t.Fatalf("the restarted agent got the incoming requests %+v", got[1].Incoming)
 	}
 }

@@ -2326,3 +2326,58 @@ func TestVariables_AnIncomingVariableWithABindIsRefused(t *testing.T) {
 		t.Fatalf("readDecls said %q", bad)
 	}
 }
+
+// A header answer that holds a variable's value inside a longer text
+// ("Location: /v1/apps/<id>") is answered with this run's value inside that
+// text, never with the bare value.
+func TestVariables_AHeaderAnswerHoldsTheValueInsideItsText(t *testing.T) {
+	h, _, _ := learnOn(t)
+	m0 := learnRecorded("mock-0", 0, "POST", "/v1/apps", `{"app":"a-1"}`, nil, `{}`)
+	m0.Spec.Variables = models.MockVariables{"app": {Recorded: "a-1", Bind: "body.app"}}
+	m1 := learnRecorded("mock-1", time.Second, "POST", "/v1/apps/current", `{}`, nil, `{}`)
+	m1.Spec.HTTPResp.Header["Location"] = "/v1/apps/a-1"
+	m1.Spec.Variables = models.MockVariables{"app": {Recorded: "a-1", Answer: []string{"header.location"},
+		Within: []models.VariablePart{{Place: "header.location", Answer: true, Before: "/v1/apps/"}}}}
+	db := &varDb{perTest: []*models.Mock{m0, m1}}
+	if ok, _, diag := matchVar(t, h, db, live("POST", "/v1/apps", `{"app":"a-55"}`, nil)); !ok {
+		t.Fatalf("the create: %+v", diag)
+	}
+	ok, stub, diag := matchVar(t, h, db, live("POST", "/v1/apps/current", `{}`, nil))
+	if !ok {
+		t.Fatalf("the read: %+v", diag)
+	}
+	if got := stub.Spec.HTTPResp.Header["Location"]; got != "/v1/apps/a-55" {
+		t.Fatalf("Location %q, want /v1/apps/a-55: this run's value inside the recorded text", got)
+	}
+}
+
+// A part at a place its variable does not name is refused: a part says how
+// a named place holds the value, and never adds a place to compare.
+func TestVariables_APartAtAPlaceTheVariableDoesNotNameIsRefused(t *testing.T) {
+	h, _, _ := learnOn(t)
+	written := func(stray bool) *varDb {
+		m0 := learnRecorded("mock-0", 0, "POST", "/v1/apps", `{"app":"a-1"}`, nil, `{}`)
+		m0.Spec.Variables = models.MockVariables{"app": {Recorded: "a-1", Bind: "body.app"}}
+		m1 := learnRecorded("mock-1", time.Second, "POST", "/v1/bindings/find", `{"key":"a-1","scope":"APP:a-1"}`, nil, `{}`)
+		v := models.MockVariable{Recorded: "a-1", Use: []string{"body.key"}}
+		if stray {
+			v.Within = []models.VariablePart{{Place: "body.scope", Before: "APP:"}}
+		}
+		m1.Spec.Variables = models.MockVariables{"app": v}
+		return &varDb{perTest: []*models.Mock{m0, m1}}
+	}
+	for _, stray := range []bool{false, true} {
+		db := written(stray)
+		if ok, _, diag := matchVar(t, h, db, live("POST", "/v1/apps", `{"app":"a-55"}`, nil)); !ok {
+			t.Fatalf("the create: %+v", diag)
+		}
+		ok, _, diag := matchVar(t, h, db, live("POST", "/v1/bindings/find", `{"key":"a-55","scope":"APP:a-1"}`, nil))
+		if !stray {
+			if !ok {
+				t.Fatalf("the find with the variable at its one named place: %+v", diag)
+			}
+			continue
+		}
+		wantProblem(t, ok, diag, "does not name the place")
+	}
+}

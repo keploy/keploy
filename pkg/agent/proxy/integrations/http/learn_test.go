@@ -5530,3 +5530,51 @@ func TestLearnMatchAValueTheHarnessGaveIsFollowedInsideALongerValue(t *testing.T
 		t.Fatalf("variables %+v, want %+v", got, want)
 	}
 }
+
+// A value the harness gave the application, carried by a call that is not
+// the test's own (a pool call), is refused there: only a test's own calls
+// carry its variables, the incoming requests' as any other.
+func TestLearnMatchAValueTheHarnessGaveOnACallNotTheTestsOwnIsRefused(t *testing.T) {
+	h, n, opts := learnOn(t)
+	opts.LearnPool = true
+	tr := learn.NewTracker()
+	tr.SetClientTests(true)
+	tr.SetIncomingSeen(true)
+	tr.GiveIncoming("TestTenantOnClient", []learn.IncomingRequest{learn.IncomingHTTP("test-1", learnAt.Add(-time.Second), "http://app/v1/x", map[string]string{"X-Tenant": "tn-4f1a9c"})})
+	tr.Begin()
+	tr.Incoming(learn.IncomingHTTP("", time.Now(), "http://app/v1/x", map[string]string{"X-Tenant": "tn-77d0e2"}))
+	ctx := learn.WithTracker(context.Background(), tr)
+	pool := learnRecorded("pool-0", 0, "POST", "/v1/keys", `{"tenant":"tn-4f1a9c"}`, nil, `{"ok":true}`)
+	pool.TestModeInfo.Lifetime = models.LifetimeSession
+	db := &learnDb{mockMemDb: mockMemDb{mocks: []*models.Mock{pool}}}
+	served, miss, _ := h.learnMatch(ctx, live("POST", "/v1/keys", `{"tenant":"tn-77d0e2"}`, nil), db, n, opts)
+	if served != nil || miss == nil || miss.res.Reason != models.MissRequestChanged || !strings.Contains(miss.res.Why, "only a test's own calls carry its variables") {
+		t.Fatalf("served %v miss %+v", served, miss)
+	}
+}
+
+// What a token's form holds (its scheme, its JOSE header, its signature's
+// form) is never learned: a call whose token moved a claim and changed its
+// form there is refused, the claim that moved notwithstanding.
+func TestLearnMatchATokenWhoseFormChangedIsRefused(t *testing.T) {
+	h, n, opts := learnOn(t)
+	const hs = `{"alg":"HS256","typ":"JWT"}`
+	sig := "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE"
+	claims := func(jti string) string { return `{"sub":"u-1","role":"admin","jti":"` + jti + `"}` }
+	rec := bearerJWT(hs, claims("j-1"), sig)
+	for _, c := range []struct{ name, auth string }{
+		{"the recording's form", bearerJWT(hs, claims("j-2"), "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI")},
+		{"another scheme", "Token " + strings.TrimPrefix(bearerJWT(hs, claims("j-2"), "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI"), "Bearer ")},
+		{"another algorithm", bearerJWT(`{"alg":"HS512","typ":"JWT"}`, claims("j-2"), "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI")},
+		{"a signature of another length", bearerJWT(hs, claims("j-2"), "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJC")},
+	} {
+		tr := learn.NewTracker()
+		tr.Begin()
+		ctx := learn.WithTracker(context.Background(), tr)
+		db := &learnDb{perTest: []*models.Mock{learnRecorded("mock-0", 0, "POST", "/run/r-1", `{}`, map[string]string{"Authorization": rec}, `{"ok":true}`)}}
+		served, miss, _ := h.learnMatch(ctx, live("POST", "/run/r-1", `{}`, map[string]string{"Authorization": c.auth}), db, n, opts)
+		if want := c.name == "the recording's form"; (served != nil) != want || (miss == nil) != want {
+			t.Fatalf("%s: served %v miss %+v, want served %v", c.name, served != nil, miss, want)
+		}
+	}
+}

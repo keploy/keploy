@@ -1275,3 +1275,20 @@ func TestStrictComparesAJWTByItsClaims(t *testing.T) {
 		})
 	}
 }
+
+// A claim is compared by its type as well as its text: a number claim sent
+// as a string of the same digits ("uid":42 to "uid":"42") is another claim,
+// and the call is refused there, as a JSON body's leaf would be.
+func TestStrictComparesAJWTClaimByItsType(t *testing.T) {
+	const hs = `{"alg":"HS256","typ":"JWT"}`
+	sig := "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE"
+	rec := recorded("m", "/run/r-1", map[string]string{"Authorization": bearerJWT(hs, `{"sub":"u-1","uid":42,"jti":"j-1"}`, sig)}, "")
+	rec.Spec.ReqBodyNoise = map[string][]string{"header.authorization{jwt}.jti": {}}
+	if got, diag := strictMatch(t, sent("/run/r-1", map[string]string{"Authorization": bearerJWT(hs, `{"sub":"u-1","uid":42,"jti":"j-2"}`, sig)}, ""), nil, nil, nil, rec.DeepCopy()); got == nil {
+		t.Fatalf("the number claim as recorded is refused: %v", differs(diag))
+	}
+	got, diag := strictMatch(t, sent("/run/r-1", map[string]string{"Authorization": bearerJWT(hs, `{"sub":"u-1","uid":"42","jti":"j-2"}`, sig)}, ""), nil, nil, nil, rec.DeepCopy())
+	if got != nil || !hasField(differs(diag), "header.authorization{jwt}.uid") {
+		t.Fatalf("a claim sent as a string of its digits: served %v, differs %v", got != nil, differs(diag))
+	}
+}
