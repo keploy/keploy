@@ -154,13 +154,37 @@ func insideAny(path string, arrays []string) bool {
 
 // Compare says how live differs from rec, excusing what known excuses.
 func Compare(live, rec Shape, known Known) Diff {
+	d, _ := compare(live, rec, known, false)
+	return d
+}
+
+// compare is Compare, which stops at the first place live differs from rec
+// in more than values (Diff.Structural names it). With all it reads on past
+// it, and places are then every such place, as a miss names them: each
+// field on one side only once, however many leaves and fixed parts it holds
+// (fieldPlace, within), each change of type, each fixed part not shared
+// that no such field holds, and each drift no path names alone; first the
+// fixed parts, then the leaves by path. The shadow of a field on one side
+// only in a body's keys (a Keys leaf) is a place only when nothing else is.
+// Drift is then every drifted leaf, and Reordered is left empty (the order
+// rule reads only a request that differs in values alone). places is empty
+// exactly when Structural is "". Without all, places holds the first place
+// at most.
+func compare(live, rec Shape, known Known, all bool) (d Diff, places []string) {
 	if known == nil {
 		known = None
 	}
-	var d Diff
-	if name := fixedDiffers(live.Fixed, rec.Fixed); name != "" {
-		d.Structural = name + " differs"
-		return d
+	structural := func(why string) bool {
+		if d.Structural == "" {
+			d.Structural = why
+		}
+		places = append(places, why)
+		return !all
+	}
+	fixed := fixedDiffering(live.Fixed, rec.Fixed, all)
+	if !all && len(fixed) > 0 {
+		structural(fixed[0] + " differs")
+		return d, places
 	}
 	paths := make([]string, 0, len(rec.Leaves)+len(live.Leaves))
 	for p := range rec.Leaves {
@@ -172,6 +196,14 @@ func Compare(live, rec Shape, known Known) Diff {
 		}
 	}
 	sort.Strings(paths)
+	// With all: the fields on one side only, by path, each with the place
+	// that names it; each side's containers (fieldPlace); a body's keys
+	// that drifted.
+	var fields []string
+	var fieldWhy map[string]string
+	var liveHas, recHas map[string]bool
+	var keys []string
+	var leafPlaces []string
 	for _, p := range paths {
 		r, inRec := rec.Leaves[p]
 		l, inLive := live.Leaves[p]
@@ -185,33 +217,131 @@ func Compare(live, rec Shape, known Known) Diff {
 			if excused && !typed {
 				continue
 			}
+			why, lacking, lacks := " is missing", live.Leaves, &liveHas
 			if !inRec {
-				d.Structural = p + " is not in the recording"
-			} else {
-				d.Structural = p + " is missing"
+				why, lacking, lacks = " is not in the recording", rec.Leaves, &recHas
 			}
-			return d
+			if !all {
+				structural(p + why)
+				return d, places
+			}
+			if d.Structural == "" {
+				d.Structural = p + why
+			}
+			f := p
+			if !ref.Unnamed {
+				if *lacks == nil {
+					*lacks = containersOf(lacking)
+				}
+				f = fieldPlace(p, *lacks)
+			}
+			if fieldWhy == nil {
+				fieldWhy = map[string]string{}
+			}
+			if _, seen := fieldWhy[f+why]; !seen {
+				fieldWhy[f+why] = f + why
+				fields = append(fields, f)
+				leafPlaces = append(leafPlaces, f+why)
+			}
+			continue
 		case l.Type != r.Type:
 			if excused && !typed {
 				continue
 			}
-			d.Structural = p + " changed type"
-			return d
+			if !all {
+				structural(p + " changed type")
+				return d, places
+			}
+			if d.Structural == "" {
+				d.Structural = p + " changed type"
+			}
+			leafPlaces = append(leafPlaces, p+" changed type")
+			continue
 		case l.Value == r.Value || excused:
 			continue
 		case r.Unnamed:
-			d.Structural = p + " drifted, and no path names it alone"
-			return d
+			why := p + " drifted, and no path names it alone"
+			if !all {
+				structural(why)
+				return d, places
+			}
+			if d.Structural == "" {
+				d.Structural = why
+			}
+			if r.Type == Keys {
+				keys = append(keys, why)
+			} else {
+				leafPlaces = append(leafPlaces, why)
+			}
+			continue
 		}
 		d.Drift = append(d.Drift, p)
 	}
-	d.Reordered = reorderedArrays(rec.Body, live.Body, known)
-	return d
+	for _, name := range fixed {
+		if !withinAny(name, fields) {
+			places = append(places, name+" differs")
+		}
+	}
+	if len(fixed) > 0 {
+		d.Structural = fixed[0] + " differs"
+	}
+	places = append(places, leafPlaces...)
+	if len(places) == 0 {
+		places = keys
+	}
+	if d.Structural == "" {
+		d.Reordered = reorderedArrays(rec.Body, live.Body, known)
+	}
+	return d, places
 }
 
-// fixedDiffers names the first fixed part (in sorted order) the two requests
-// do not share, or "".
-func fixedDiffers(live, rec map[string]string) string {
+// containersOf is every path that holds a leaf of leaves: a leaf's path cut
+// where an object key or an array position begins ("a", "a.b" and "a.b[0]"
+// of "a.b[0].c"; "a" and "a.0" of "a.0.c").
+func containersOf(leaves map[string]Leaf) map[string]bool {
+	out := make(map[string]bool, len(leaves))
+	for p := range leaves {
+		for i := 1; i < len(p); i++ {
+			if p[i] == '.' || p[i] == '[' {
+				out[p[:i]] = true
+			}
+		}
+	}
+	return out
+}
+
+// fieldPlace is where a leaf the other side lacks is named: the outermost
+// path holding it that holds nothing on the other side (has: containersOf
+// the other side's leaves), so that a field on one side only is one place
+// however many leaves it holds, and a value that is a document on one side
+// and a scalar on the other is one place each way; the leaf's own path when
+// the other side holds leaves under every path above it.
+func fieldPlace(p string, has map[string]bool) string {
+	for i := 1; i < len(p); i++ {
+		if (p[i] == '.' || p[i] == '[') && !has[p[:i]] {
+			return p[:i]
+		}
+	}
+	return p
+}
+
+// withinAny reports whether the fixed part name is one of a field of
+// fields: named after a path in it (the field's path, then "'s", '.' or
+// '['), as an adapter names what the leaves of a path do not tell (a field
+// holding an array, a dotted key).
+func withinAny(name string, fields []string) bool {
+	for _, f := range fields {
+		if len(name) > len(f) && strings.HasPrefix(name, f) && strings.ContainsRune("'.[", rune(name[len(f)])) {
+			return true
+		}
+	}
+	return false
+}
+
+// fixedDiffering names the fixed parts the two requests do not share, in
+// sorted order (the first is the one a Diff names); without all, the first
+// one alone.
+func fixedDiffering(live, rec map[string]string, all bool) []string {
 	names := make([]string, 0, len(rec)+len(live))
 	for n := range rec {
 		names = append(names, n)
@@ -222,14 +352,18 @@ func fixedDiffers(live, rec map[string]string) string {
 		}
 	}
 	sort.Strings(names)
+	var out []string
 	for _, n := range names {
 		lv, inLive := live[n]
 		rv, inRec := rec[n]
 		if inLive != inRec || lv != rv {
-			return n
+			out = append(out, n)
+			if !all {
+				break
+			}
 		}
 	}
-	return ""
+	return out
 }
 
 // Outcome is what L decided about a request.
@@ -301,7 +435,11 @@ type Result struct {
 //     told apart by nothing the request carries, and the first pairable
 //     one, in recorded order, is taken: a test's mocks are consumed in
 //     recorded order. Otherwise the request is a miss: request_changed when
-//     some candidate had its key, unmocked_call when none did. When the
+//     some candidate had its key, unmocked_call when none did. A request
+//     that differs from every pairable candidate in more than values names
+//     the one closest to it (the fewest places that differ in more than
+//     values, as compare counts them, then the fewest drifted values, then
+//     recorded order), and those places. When the
 //     closest candidate is one the order rule refused and nothing else
 //     drifted, it is unstable_order, and nothing is learned from that
 //     array.
@@ -313,7 +451,14 @@ func Pair(live Shape, cands []Candidate) Result {
 		pairable bool
 	}
 	var pairable []scored
-	keyed, closest := false, Result{Outcome: Miss, Index: -1}
+	// far are the pairable candidates that differ in more than values, by
+	// their place in cands, with their Diff.
+	type farCand struct {
+		i int
+		d Diff
+	}
+	var far []farCand
+	keyed := false
 	spentExact := -1
 	for i, c := range cands {
 		if c.Shape.Key != live.Key {
@@ -331,8 +476,8 @@ func Pair(live Shape, cands []Candidate) Result {
 			continue
 		}
 		if d.Structural != "" {
-			if c.Pairable && closest.Index < 0 {
-				closest.Index, closest.Diff = i, d
+			if c.Pairable {
+				far = append(far, farCand{i: i, d: d})
 			}
 			continue
 		}
@@ -345,10 +490,25 @@ func Pair(live Shape, cands []Candidate) Result {
 		return Result{Outcome: Miss, Index: -1, Reason: models.MissUnmockedCall, Why: "no recorded call has its method, destination and shape"}
 	}
 	if len(pairable) == 0 {
-		closest.Reason = models.MissRequestChanged
-		closest.Why = "it differs from every recorded call in more than values"
+		closest := Result{Outcome: Miss, Index: -1, Reason: models.MissRequestChanged,
+			Why: "it differs from every recorded call in more than values"}
+		// The closest is the one it differs from in the fewest places in
+		// more than values, then in the fewest drifted values, the first in
+		// recorded order of those as close. Never merely the first: a
+		// recording of another operation sharing the key (another event
+		// written to the same collection) may come before the request's
+		// own, and its first difference then names a field the request's
+		// own recording never differed in.
+		best, bestDrift := -1, 0
+		var bestPlaces []string
+		for _, f := range far {
+			d, places := compare(live, cands[f.i].Shape, cands[f.i].Known, true)
+			if n := len(places); closest.Index < 0 || n < best || (n == best && len(d.Drift) < bestDrift) {
+				closest.Index, closest.Diff, best, bestDrift, bestPlaces = f.i, f.d, n, len(d.Drift), places
+			}
+		}
 		if closest.Index >= 0 {
-			closest.Why = "it differs from the closest recorded call in more than values: " + closest.Diff.Structural
+			closest.Why = "it differs from the closest recorded call in more than values: " + bestPlaces[0] + alsoPlaces(bestPlaces)
 		}
 		return closest
 	}
@@ -394,6 +554,32 @@ func Pair(live Shape, cands []Candidate) Result {
 			Why: "its closest recorded call is not one the learn step may learn onto (another test's, or the pool's outside a full record): " + strings.Join(best.drift, ", ") + " changed"}
 	}
 	return Result{Outcome: Paired, Index: best.i, Diff: best.d}
+}
+
+// maxAlso is how many places past the first a miss names.
+const maxAlso = 3
+
+// alsoPlaces is what a miss says of the places past the first that its
+// request differs from its closest recording in more than values (places,
+// as compare names them): up to maxAlso of them by name, then how many
+// more.
+func alsoPlaces(places []string) string {
+	if len(places) < 2 {
+		return ""
+	}
+	rest := places[1:]
+	named := rest
+	if len(named) > maxAlso {
+		named = named[:maxAlso]
+	}
+	out := "; also " + strings.Join(named, "; ")
+	switch more := len(rest) - len(named); {
+	case more == 1:
+		out += "; and 1 other place"
+	case more > 1:
+		out += fmt.Sprintf("; and %d other places", more)
+	}
+	return out
 }
 
 func sameStrings(a, b []string) bool {

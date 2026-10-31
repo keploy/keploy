@@ -1806,3 +1806,182 @@ func clockWordsOfUUID7(at, f time.Time) []string {
 	}
 	return out
 }
+
+// array is s with the fixed parts saying that the fields at paths hold arrays,
+// as a protocol's adapter writes what its leaves do not tell (the Mongo
+// adapter's structureOf).
+func array(s Shape, paths ...string) Shape {
+	for _, p := range paths {
+		s.Fixed[p+"'s kind (an array or a document)"] = "array"
+	}
+	return s
+}
+
+// TestPairNamesTheRecordingAMissIsClosestTo: a request that differs from every
+// recording of its key in more than values is a miss naming the recording it
+// is closest to, never merely the first. Read in the round F of a T2 replay:
+// an app's delete event, written to the audit collection every event of the
+// app is written to, missed with "app.appLevelAssertions's kind differs"
+// against an earlier config-update event of another operation, while the
+// delete event's own recording, differing in one field, went unnamed.
+func TestPairNamesTheRecordingAMissIsClosestTo(t *testing.T) {
+	live := body(t, "k", `{"event":"DeleteApp","version":4,"app":{"id":"a","name":"n"},"delta":{"deleted":true}}`)
+	update := array(body(t, "k", `{"event":"SystemConfigUpdate","version":3,"app":{"id":"a","name":"n","assertions":[{"k":"x"}]},"delta":{"assertions":[{"k":"x"}]}}`),
+		"body.app.assertions", "body.delta.assertions")
+	twin := array(body(t, "k", `{"event":"DeleteApp","version":4,"app":{"id":"a","name":"n"},"delta":{"deleted":true,"assertions":[{"k":"x"}]}}`),
+		"body.delta.assertions")
+	t.Run("the recording it differs from in the fewest places, though another precedes it", func(t *testing.T) {
+		r := Pair(live, []Candidate{cand(update, true), cand(twin, true)})
+		if r.Outcome != Miss || r.Reason != models.MissRequestChanged || r.Index != 1 {
+			t.Fatalf("%+v", r)
+		}
+		if r.Diff.Structural != "body.delta.assertions's kind (an array or a document) differs" ||
+			r.Why != "it differs from the closest recorded call in more than values: body.delta.assertions is missing" {
+			t.Fatalf("structural %q, why %q", r.Diff.Structural, r.Why)
+		}
+	})
+	t.Run("of recordings as far in more than values, the one with fewer drifted values", func(t *testing.T) {
+		live := body(t, "k", `{"id":"a","x":1,"y":2,"new":true}`)
+		r := Pair(live, []Candidate{
+			cand(body(t, "k", `{"id":"b","x":9,"y":2}`), true),
+			cand(body(t, "k", `{"id":"a","x":1,"y":2}`), true),
+		})
+		if r.Outcome != Miss || r.Index != 1 || r.Why != "it differs from the closest recorded call in more than values: body.new is not in the recording" {
+			t.Fatalf("%+v", r)
+		}
+	})
+	t.Run("fewer places in more than values outweigh fewer drifted values", func(t *testing.T) {
+		live := body(t, "k", `{"id":"a","x":1,"new":true}`)
+		r := Pair(live, []Candidate{
+			cand(body(t, "k", `{"id":"a","x":1,"y":2}`), true), // body.new added, body.y missing
+			cand(body(t, "k", `{"id":"b","x":2}`), true),       // body.new added; id and x drifted
+		})
+		if r.Outcome != Miss || r.Index != 1 || r.Why != "it differs from the closest recorded call in more than values: body.new is not in the recording" {
+			t.Fatalf("%+v", r)
+		}
+		r = Pair(live, []Candidate{cand(body(t, "k", `{"id":"a","x":1,"y":2,"z":3}`), true)})
+		if r.Outcome != Miss || r.Index != 0 || r.Why != "it differs from the closest recorded call in more than values: body.new is not in the recording; also body.y is missing; body.z is missing" {
+			t.Fatalf("%+v", r)
+		}
+	})
+	t.Run("the places past the first are named, up to three, then counted", func(t *testing.T) {
+		const first = "it differs from the closest recorded call in more than values: body.b is missing; also body.c is missing; body.d is missing; body.e is missing"
+		for _, tc := range []struct{ rec, why string }{
+			{`{"a":1,"b":1,"c":1}`, "it differs from the closest recorded call in more than values: body.b is missing; also body.c is missing"},
+			{`{"a":1,"b":1,"c":1,"d":1,"e":1}`, first},
+			{`{"a":1,"b":1,"c":1,"d":1,"e":1,"f":1}`, first + "; and 1 other place"},
+			{`{"a":1,"b":1,"c":1,"d":1,"e":1,"f":1,"g":1}`, first + "; and 2 other places"},
+		} {
+			if r := Pair(body(t, "k", `{"a":1}`), []Candidate{cand(body(t, "k", tc.rec), true)}); r.Why != tc.why {
+				t.Fatalf("why %q, want %q", r.Why, tc.why)
+			}
+		}
+	})
+	t.Run("recordings as close as each other: the first, in recorded order", func(t *testing.T) {
+		r := Pair(live, []Candidate{cand(update, true), cand(twin, true), cand(twin, true)})
+		if r.Outcome != Miss || r.Index != 1 {
+			t.Fatalf("%+v", r)
+		}
+	})
+	t.Run("a closer recording the learn step may not learn onto is not named", func(t *testing.T) {
+		r := Pair(live, []Candidate{cand(twin, false), cand(update, true)})
+		if r.Outcome != Miss || r.Index != 1 {
+			t.Fatalf("%+v", r)
+		}
+		if r := Pair(live, []Candidate{cand(twin, false)}); r.Outcome != Miss || r.Index != -1 || r.Why != "it differs from every recorded call in more than values" {
+			t.Fatalf("%+v", r)
+		}
+	})
+}
+
+func withFixed(s Shape, name, value string) Shape {
+	s.Fixed[name] = value
+	return s
+}
+
+// distance is how many places live differs from rec in more than values,
+// as a miss counts them (compare), and how many leaves drifted.
+func distance(live, rec Shape, known Known) (structural, drifted int) {
+	d, places := compare(live, rec, known, true)
+	return len(places), len(d.Drift)
+}
+
+// withKeys is s with its body's keys as a leaf (KeysLeaf), as the HTTP
+// adapter reads a JSON body.
+func withKeys(t *testing.T, s Shape) Shape {
+	t.Helper()
+	if l, ok := KeysLeaf("body", s.Body); ok {
+		s.Leaves[l.Path] = l
+	}
+	return s
+}
+
+func TestDistance(t *testing.T) {
+	rec := array(body(t, "k", `{"id":"a","n":1,"opt":"x","l":[1]}`), "body.l")
+	for _, tc := range []struct {
+		name              string
+		live              Shape
+		known             Known
+		structural, drift int
+	}{
+		{"same", array(body(t, "k", `{"id":"a","n":1,"opt":"x","l":[1]}`), "body.l"), nil, 0, 0},
+		{"values drifted", array(body(t, "k", `{"id":"b","n":2,"opt":"x","l":[1]}`), "body.l"), nil, 0, 2},
+		// body.l's kind, body.l[0] missing, body.l.0 added, body.n's type, body.new added, body.opt missing
+		{"every place counts, past the first", body(t, "k", `{"id":"b","n":"1","new":1,"l":{"0":1}}`), nil, 6, 1},
+		{"a field missing whole is one place, however many leaves and fixed parts it holds", array(body(t, "k", `{"id":"a","n":1,"opt":"x","l":[1],"big":{"a":1,"b":[1,2,3]}}`), "body.l", "body.big.b"), nil, 1, 0},
+		{"a leaf the live side lacks", array(body(t, "k", `{"id":"a","n":1,"l":[1]}`), "body.l"), nil, 1, 0},
+		{"every fixed part not shared", withFixed(body(t, "k", `{"id":"a","n":1,"opt":"x","l":[1]}`), "media type", "text/plain"), nil, 2, 0},
+		{"noise that may be absent is no place", array(body(t, "k", `{"id":"a","n":1,"l":[1]}`), "body.l"), declared{"body.opt": true}, 0, 0},
+		{"known noise keeps its type", array(body(t, "k", `{"id":7,"n":1,"opt":"x","l":[1]}`), "body.l"), known{"body.id": true}, 1, 0},
+		{"a drift no path names alone", array(body(t, "k", `{"id":"a","n":1,"opt":"x","l":[1],"a.b":2}`), "body.l"), nil, 1, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			n, drift := distance(tc.live, rec, tc.known)
+			if n != tc.structural || drift != tc.drift {
+				t.Fatalf("got %d places and %d drifted values, want %d and %d", n, drift, tc.structural, tc.drift)
+			}
+			if d := Compare(tc.live, rec, tc.known); (d.Structural == "") != (n == 0) {
+				t.Fatalf("Compare's structural %q disagrees with %d places", d.Structural, n)
+			}
+		})
+	}
+	t.Run("a drift no path names alone counts past the first place", func(t *testing.T) {
+		n, drift := distance(body(t, "k", `{"new":1,"z.b":2}`), body(t, "k", `{"z.b":1}`), nil)
+		if n != 2 || drift != 0 {
+			t.Fatalf("got %d places and %d drifted values, want 2 and 0", n, drift)
+		}
+	})
+	for _, tc := range []struct {
+		name, live, rec string
+		places          []string
+	}{
+		{"a scalar that became a document is one place each way", `{"x":{"a":1,"b":2,"c":3}}`, `{"x":1}`,
+			[]string{"body.x is missing", "body.x is not in the recording"}},
+		{"keys holding a dot are never cut into a field neither side has", `{"a":1}`, `{"a":1,"z.b":1,"z.c":1}`,
+			[]string{"body.z.b is missing", "body.z.c is missing"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, places := compare(body(t, "k", tc.live), body(t, "k", tc.rec), nil, true); !reflect.DeepEqual(places, tc.places) {
+				t.Fatalf("places %q, want %q", places, tc.places)
+			}
+		})
+	}
+	t.Run("a fixed part of a field that only shares its first letters is its own place", func(t *testing.T) {
+		live := withFixed(body(t, "k", `{"ab":1}`), "body.ab's kind (an array or a document)", "array")
+		if n, _ := distance(live, body(t, "k", `{"a":1,"ab":1}`), nil); n != 2 {
+			t.Fatalf("got %d places, want 2", n)
+		}
+	})
+	t.Run("a body's keys are a place only when nothing else is", func(t *testing.T) {
+		_, places := compare(withKeys(t, body(t, "k", `{"a":1}`)), withKeys(t, body(t, "k", `{"a":1,"y":2}`)), nil, true)
+		if !reflect.DeepEqual(places, []string{"body.y is missing"}) {
+			t.Fatalf("places %q", places)
+		}
+		rec := withKeys(t, body(t, "k", `{"a":1}`))
+		rec.Leaves["body{keys}"] = Leaf{Path: "body{keys}", Type: Keys, Value: "b", Unnamed: true}
+		live := withKeys(t, body(t, "k", `{"a":1}`))
+		if _, places := compare(live, rec, nil, true); len(places) != 1 || !strings.Contains(places[0], "no path names it alone") {
+			t.Fatalf("places %q", places)
+		}
+	})
+}
