@@ -1839,7 +1839,7 @@ func TestAnOffsetCutCoarserThanItsEncodingIsCheckedAtTheCut(t *testing.T) {
 		mc := clockOffsetCall{call: row.read.Add(600 * ms), fcall: fread.Add(600 * ms)}
 		mc.w = (&Window{Rec: Span{From: row.read.Add(-28 * sec), To: mc.call}, F: Span{From: fread.Add(-29 * sec), To: mc.fcall}}).ComparesOffsets()
 		ln := mc.classify(p, row.read.Truncate(time.Minute).Add(row.ttl), fread.Truncate(time.Minute).Add(row.ttl), sec, mc.w)
-		if ln.Kind != KindClockOffset || ln.Offset == nil || ln.Offset.Res != time.Minute || !strings.Contains(ln.Why, ", cut to a minute. A replay checks the offset at the minute") {
+		if ln.Kind != KindClockOffset || ln.Offset == nil || ln.Offset.Res != time.Minute || !strings.Contains(ln.Why, ", checked at a minute's cut, the step its two values stand apart (their digits show no such cut). A replay checks the offset at the minute") || strings.Contains(ln.Why, ", cut to a minute") {
 			t.Errorf("FALSE RED: a minute cut plus %s at a second's encoding: %s %+v (%s); want learned at the minute, never refused for its width", row.ttl, ln.Kind, ln.Offset, ln.Why)
 			continue
 		}
@@ -2070,14 +2070,47 @@ func TestARangeHoldingNoWholeCutIsReadAsItsRange(t *testing.T) {
 		{models.ClockOffset{Min: 89 * time.Minute, Max: 91 * time.Minute, Res: time.Hour}, "clock plus an offset from 1h29m to 1h31m"},
 		{models.ClockOffset{Min: -90*sec - 200*time.Millisecond, Max: -90*sec + 300*time.Millisecond, Res: time.Minute}, "clock plus an offset from -1m30.2s to -1m29.7s"},
 	} {
-		if !row.o.CoarseCut() || row.o.CutLookBack() {
-			t.Fatalf("precondition: %+v CoarseCut %v, CutLookBack %v; want a cut, no look-back at the cut", row.o, row.o.CoarseCut(), row.o.CutLookBack())
+		if !row.o.CoarseCut() {
+			t.Fatalf("precondition: %+v CoarseCut false; want a cut", row.o)
 		}
 		if got := cutOffsetsNamed(row.o); got != row.named {
 			t.Errorf("%+v reads as %q, want %q", row.o, got, row.named)
 		}
 		if why := clockOffsetEvidence(p, row.o); !strings.Contains(why, ", read as "+row.named+", on either side, whatever the window's width") {
 			t.Errorf("%+v: the learned line does not read it as its range, on either side: %s", row.o, why)
+		}
+	}
+}
+
+// The learned line of an offset checked at its cut names which way a
+// changed one passes: of a time to live (clock + 30d at the day, clock + 2h
+// at the hour), a longer one where turns of the cut fall between the
+// application's read and its call, a shorter one between the window's start
+// and the read; of a look-back (now - 7d at the day, now - 2h at the hour,
+// now - 2s at the second), the other way round. A replay checks both
+// within one cut on either side.
+func TestALearnedCutLineNamesWhichWayAChangedOffsetPasses(t *testing.T) {
+	const p = "body.cutoff"
+	hour, day := time.Hour, 24*time.Hour
+	ttl := "between the application's read and its call (a longer one) or between the window's start and the read (a shorter one)"
+	back := "between the window's start and the application's read (a longer one) or between the read and its call (a shorter one)"
+	for _, row := range []struct {
+		name string
+		o    models.ClockOffset
+		want string
+	}{
+		{"clock + 30d at the day", models.ClockOffset{Min: 30*day - 3*hour, Max: 30*day + 20*hour, Res: day, Layout: models.LayoutTyped}, ttl},
+		{"clock + 2h at the hour", models.ClockOffset{Min: 2*hour - 10*time.Minute, Max: 2*hour + 50*time.Minute, Res: hour, Layout: models.LayoutTyped}, ttl},
+		{"now - 7d at the day", models.ClockOffset{Min: -7*day - 3*hour, Max: -7*day + 20*hour, Res: day, Layout: models.LayoutTyped}, back},
+		{"now - 2h at the hour", models.ClockOffset{Min: -2*hour - 10*time.Minute, Max: -2*hour + 50*time.Minute, Res: hour, Layout: models.LayoutTyped}, back},
+		{"now - 2s at the second", models.ClockOffset{Min: -2*time.Second - 155*time.Millisecond, Max: -2*time.Second + 368*time.Millisecond, Res: time.Second, Layout: "epoch-s"}, back},
+	} {
+		if !row.o.CoarseCut() {
+			t.Fatalf("precondition: %s (%+v) is no offset checked at its cut", row.name, row.o)
+		}
+		why := clockOffsetEvidence(p, row.o)
+		if !strings.Contains(why, ", "+row.want+", ") || !strings.Contains(why, ", on either side, whatever the window's width") {
+			t.Errorf("%s: the learned line does not say %q, on either side: %s", row.name, row.want, why)
 		}
 	}
 }

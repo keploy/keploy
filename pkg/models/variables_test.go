@@ -1688,23 +1688,25 @@ func sha256Of(s string) string {
 }
 
 // A look-back at a second's cut (dirtyAt <= now - 2s, an epoch's seconds)
-// is held from the start of the second that holds its call's window's start
-// less two seconds, never one second before it, up to one second after its
-// call less two seconds: in a window across a turn of the second (950 ms
-// to 1.081 s), the right value read at the call and at the start holds, a
-// plain read at the start (a turn between it and the call) holds, a 3 s
-// look-back read after the turn holds and read before it does not, and a
-// 4 s look-back holds at no read; in a window with no turn a 3 s look-back
-// holds nowhere. The right look-back of a read made before the window holds
-// only where no turn falls between that read and the window's start. A
-// minute's cut is held the same way. A time to live at the second, a
-// look-back at an hour's cut and a range that holds no whole cut keep the
-// widening on both sides (CutLookBack false): a value one cut below holds.
-func TestALookBackAtASecondsCutIsHeldFromItsWindowsStartNeverACutBefore(t *testing.T) {
+// is held as a time to live is, within one second of its call's window
+// less two seconds on either side, never from the window's start alone (a
+// read cut coarser than a millisecond is checked at its cut, never refused,
+// and the verdict never turns on where the replay's read falls in its cut):
+// in a window across a turn of the second (950 ms to 1.081 s) and in one
+// with no turn, the right value read at the call or at the start holds, as
+// does the right value of a read made up to one second before the window
+// (and one 1.5 s before only where the window's start lies past the middle
+// of its second); a look-back a second longer or shorter holds at any read
+// (the cut's cost); a plain read (two seconds shorter) only where a turn
+// falls between it and the call; a 4 s look-back only where a turn falls
+// between the window's start and its read. A minute's cut, a time to live,
+// a look-back at an hour's cut and a range that holds no whole cut are held
+// the same way: a value one cut below holds.
+func TestALookBackAtASecondsCutIsHeldWithinOneSecondOnEitherSide(t *testing.T) {
 	ms, sec := time.Millisecond, time.Second
 	o := ClockOffset{Min: -2*sec - 155*ms, Max: -2*sec + 368*ms, Res: sec, Layout: "epoch-s"}
-	if lo, hi := o.CutOffsets(); !o.CutLookBack() || lo != -2*sec || hi != -2*sec {
-		t.Fatalf("precondition: %+v CutLookBack %v, CutOffsets %s to %s; want a look-back of 2s", o, o.CutLookBack(), lo, hi)
+	if lo, hi := o.CutOffsets(); lo != -2*sec || hi != -2*sec {
+		t.Fatalf("precondition: %+v CutOffsets %s to %s; want a look-back of 2s", o, lo, hi)
 	}
 	base := time.Date(2026, 10, 31, 10, 0, 0, 0, time.UTC)
 	cut := func(t time.Time) time.Time { return t.Truncate(sec) }
@@ -1716,6 +1718,7 @@ func TestALookBackAtASecondsCutIsHeldFromItsWindowsStartNeverACutBefore(t *testi
 		{"a window with no turn", base.Add(100 * ms), base.Add(231 * ms)},
 	} {
 		turn := !cut(w.from).Equal(cut(w.to))
+		late := w.from.Sub(cut(w.from)) >= 500*ms
 		for _, row := range []struct {
 			name string
 			at   time.Time
@@ -1723,13 +1726,16 @@ func TestALookBackAtASecondsCutIsHeldFromItsWindowsStartNeverACutBefore(t *testi
 		}{
 			{"the right value read at the call", cut(w.to.Add(-2 * sec)), true},
 			{"the right value read at the start", cut(w.from.Add(-2 * sec)), true},
+			{"a 1 s look-back read at the call", cut(w.to.Add(-1 * sec)), true},
 			{"a plain read at the call", cut(w.to), false},
 			{"a plain read at the start", cut(w.from), turn},
-			{"a 3 s look-back read at the call", cut(w.to.Add(-3 * sec)), turn},
-			{"a 3 s look-back read at the start", cut(w.from.Add(-3 * sec)), false},
-			{"a 4 s look-back read at the call", cut(w.to.Add(-4 * sec)), false},
+			{"a 3 s look-back read at the call", cut(w.to.Add(-3 * sec)), true},
+			{"a 3 s look-back read at the start", cut(w.from.Add(-3 * sec)), true},
+			{"a 4 s look-back read at the call", cut(w.to.Add(-4 * sec)), turn},
+			{"a 4 s look-back read at the start", cut(w.from.Add(-4 * sec)), false},
 			{"the right value of a read 40 ms before the window", cut(w.from.Add(-40*ms - 2*sec)), true},
-			{"the right value of a read 990 ms before the window", cut(w.from.Add(-990*ms - 2*sec)), false},
+			{"the right value of a read 990 ms before the window", cut(w.from.Add(-990*ms - 2*sec)), true},
+			{"the right value of a read 1.5 s before the window", cut(w.from.Add(-1500*ms - 2*sec)), late},
 		} {
 			if got := o.Holds(row.at, sec, w.from, w.to); got != row.want {
 				t.Errorf("%s, %s: Holds = %v, want %v", w.name, row.name, got, row.want)
@@ -1739,17 +1745,16 @@ func TestALookBackAtASecondsCutIsHeldFromItsWindowsStartNeverACutBefore(t *testi
 
 	from, to := base.Add(59*time.Second+950*ms), base.Add(time.Minute+81*ms)
 	m := ClockOffset{Min: -2*time.Minute - 10*sec, Max: -2*time.Minute + 50*sec, Res: time.Minute, Layout: "epoch-s"}
-	if !m.CutLookBack() {
-		t.Fatalf("precondition: %+v is a look-back at a minute's cut", m)
-	}
 	for _, row := range []struct {
 		name string
 		at   time.Time
 		want bool
 	}{
 		{"the right value read at the call", to.Add(-2 * time.Minute).Truncate(time.Minute), true},
-		{"a 4 m look-back read at the call", to.Add(-4 * time.Minute).Truncate(time.Minute), false},
-		{"a 3 m look-back read at the start", from.Add(-3 * time.Minute).Truncate(time.Minute), false},
+		{"a 3 m look-back read at the start", from.Add(-3 * time.Minute).Truncate(time.Minute), true},
+		{"a 4 m look-back read at the call (a turn in the window)", to.Add(-4 * time.Minute).Truncate(time.Minute), true},
+		{"a 4 m look-back read at the start", from.Add(-4 * time.Minute).Truncate(time.Minute), false},
+		{"a plain read at the call", to.Truncate(time.Minute), false},
 	} {
 		if got := m.Holds(row.at, sec, from, to); got != row.want {
 			t.Errorf("clock - 2m at the minute, %s: Holds = %v, want %v", row.name, got, row.want)
@@ -1766,9 +1771,6 @@ func TestALookBackAtASecondsCutIsHeldFromItsWindowsStartNeverACutBefore(t *testi
 		{"a look-back of 2 h at the hour, one hour below", ClockOffset{Min: -2*time.Hour - 10*time.Minute, Max: -2*time.Hour + 50*time.Minute, Res: time.Hour, Layout: "epoch-s"}, from.Add(-3 * time.Hour).Truncate(time.Hour)},
 		{"a cut minute less 90 s, one minute below", ClockOffset{Min: -90*sec - 200*ms, Max: -90*sec + 300*ms, Res: time.Minute, Layout: "epoch-s"}, from.Add(-90*sec - time.Minute).Truncate(sec)},
 	} {
-		if k.o.CutLookBack() {
-			t.Errorf("%s: %+v is no look-back at a second's or a minute's cut", k.name, k.o)
-		}
 		if !k.o.Holds(k.at, sec, from, to) {
 			t.Errorf("%s: Holds = false, want true (the widening on both sides)", k.name)
 		}

@@ -802,9 +802,9 @@ func (o ClockOffset) Checkable(res time.Duration, from, to time.Time) bool {
 // unit (a cut hour plus 90 minutes), is narrower than the cut: lo and hi
 // are Min and Max. The offset the application adds lies within one cut of
 // lo to hi, so a check of the call's window plus lo to hi, widened by one
-// cut on either side (of a look-back at a second's or a minute's cut,
-// CutLookBack, by one cut above it only), holds every value it writes, cut
-// down or rounded, wherever its read falls in the window (Holds).
+// cut on either side, a look-back's as a time to live's, holds every value
+// it writes, cut down or rounded, wherever its read falls in the window
+// (Holds).
 func (o ClockOffset) CutOffsets() (lo, hi time.Duration) {
 	if o.Res <= 0 {
 		return o.Min, o.Max
@@ -996,22 +996,20 @@ func (o ClockOffset) Within(spans ...time.Duration) bool {
 // hold, by where the read falls in its cut, and one changed by k cuts more
 // only where the call's window holds k turns of the cut, between the read
 // and the call (a longer one) or between the window's start and the read
-// (a shorter one); but for the 23-hour day, which holds three days where
-// the window is within an hour of a day. A look-back at a second's or a
-// minute's cut (CutLookBack: dirtyAt <= now - 2s) is held from the start
-// of the cut that holds from+lo, never one cut before it: one made shorter
-// holds as a time to live made longer does (one cut shorter at any read, k
-// cuts more where the window holds k turns between the read and the call),
-// and one made k cuts longer only where the window holds k turns between
-// its start and the read. So of clock - 2s at the second in a window
-// narrower than a second, a plain read (two seconds shorter) holds only
-// where a turn of the second falls between the application's read and its
-// call, a look-back a second longer only where one falls between the
-// window's start and the read, and one two seconds longer or more never
-// does: a value stale by more than the read's own cut, read before the
-// call's window, holds only where no turn of the cut falls between that
-// read and the window's start. Nor, at any cut
-// finer than a day, where the call's window or that span meets the wall
+// (a shorter one), and of a look-back the other way round, a longer one
+// between the window's start and the read and a shorter one between the
+// read and the call; but for the 23-hour day, which holds three days where
+// the window is within an hour of a day. A look-back is widened on both
+// sides as a time to live is (a read cut coarser than a millisecond is
+// checked at its cut, its span widened by one cut on either side, so the
+// verdict never turns on where the replay's read falls in its cut): of
+// clock - 2s at the second in a window narrower than a second, a plain
+// read (two seconds shorter) holds only where a turn of the second falls
+// between the application's read and its call, a look-back a second longer
+// or shorter holds at any read (the cut's cost), and one changed by three
+// seconds or more never does; the application's own value holds at every
+// read, and so does one read up to one cut before the window. Nor, at any
+// cut finer than a day, where the call's window or that span meets the wall
 // time at's zone shows twice as its clocks go back (FallBack): an
 // application that resolves that wall time to its first showing writes a
 // value an hour early there (two in Troll), and up to one cut more where it
@@ -1051,43 +1049,8 @@ func (o ClockOffset) Holds(at time.Time, res time.Duration, from, to time.Time) 
 	lo, hi := o.Min, o.Max
 	if o.CoarseChecked(res) {
 		lo, hi = o.CutOffsets()
-		if o.CutLookBack() {
-			loc := at.Location()
-			return !at.Before(ReadCut(from.Add(lo), c, loc)) && !at.After(CutAfter(to.Add(hi), c, loc))
-		}
 	}
 	return ClockOffset{Res: c}.holdsRead(at, c, from.Add(lo), to.Add(hi))
-}
-
-// CutLookBack reports whether o is a look-back a replay checks, at a
-// second's or a minute's cut, from the start of the cut that holds its
-// call's window's start plus the offset, never one cut before it (Holds):
-// o is cut to a second or a minute that no unit holds three of (CoarseCut)
-// and the whole cuts its range holds (CutOffsets) all lie below zero
-// (dirtyAt <= now - 2s at the second: -2s). One cut lower is what a
-// look-back one cut longer writes at any read in the window, and a
-// look-back two cuts longer where the window holds a turn of the cut and
-// the read falls after it: of the poll's clock - 2s at the second, read at
-// its call, the cut's lower widening passed a 4 s look-back at 7% of
-// replays in a 61 ms window, 14% at 131 ms, 31% at 300 ms, 70% at 700 ms
-// and every one at 2 s. Its cost: a value of a read made before the call's
-// window (one the application kept across an earlier call) fails where a
-// turn of the cut falls between that read and the window's start. A time
-// to live keeps the widening on both sides (a value stale by up to one
-// cut holds, as of a plain read), and so does a look-back at an hour's or
-// a day's cut: one the application counts on its wall clock or calendar
-// (seven days before today) stands a cut off the same look-back counted in
-// hours of 24 where its zone's clocks turned between, and one two cuts
-// longer passes only where the window holds a turn of the hour or the day.
-// A range that holds no whole cut (a cut hour plus 90 minutes) is a value
-// the application cuts first and offsets after, which lies anywhere in its
-// cut, and keeps it too.
-func (o ClockOffset) CutLookBack() bool {
-	if !o.CoarseCut() || o.Res >= time.Hour {
-		return false
-	}
-	lo, hi := o.CutOffsets()
-	return hi < 0 && lo%o.Res == 0
 }
 
 // FallBack is the turn at which loc's clocks go back, and by how much, that

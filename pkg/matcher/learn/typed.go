@@ -1015,7 +1015,11 @@ func (dc *DriftCache) clockOffset(ln Learned, off models.ClockOffset, enc, cutGa
 	case len(dc.instantEchoes(rec, resp)) > 0:
 		ln.Kind, ln.Why = KindUnaccounted, clockOffsetEchoedWhy(path, off)
 	default:
-		ln.Kind, ln.Offset, ln.Why = KindClockOffset, &off, clockOffsetEvidence(path, off)+gapCutWhy(off, enc, cutGap)
+		why := clockOffsetEvidence(path, off)
+		if gap := gapCutWhy(off, enc, cutGap); gap != "" {
+			why = clockOffsetEvidenceCut(path, off, ", checked at "+aUnit(off.Res)+"'s cut, the step its two values stand apart (their digits show no such cut)") + gap
+		}
+		ln.Kind, ln.Offset, ln.Why = KindClockOffset, &off, why
 	}
 	return ln
 }
@@ -1127,14 +1131,21 @@ func clockOffsetSeen(path string, off models.ClockOffset) string {
 // by two passes only where a turn falls in it, and one changed by three or
 // more never does, on a day of 24 hours; at a finer cut, a replay refuses
 // the value near a wall time the application's zone shows twice
-// (cutExceptions). A look-back at a second's or a minute's cut
-// (models.ClockOffset.CutLookBack) is checked from the start of the cut
-// that holds the window's start plus it, never a cut lower, so one made
-// longer passes only where the window holds a turn of the cut for each cut
-// longer, between its start and the read, and the line says what that
-// costs: a value read before the call's window fails where a turn of the
-// cut falls between that read and the window's start.
+// (cutExceptions). A look-back is checked the same way, widened by one cut
+// on either side (a read cut coarser than a millisecond is checked at its
+// cut, never refused, and the verdict never turns on where the replay's
+// read falls in its cut), and the line names its directions the other way
+// round: a longer one passes where turns fall between the window's start
+// and the read, a shorter one between the read and the call.
 func clockOffsetEvidence(path string, off models.ClockOffset) string {
+	return clockOffsetEvidenceCut(path, off, ", cut to "+aUnit(off.Res))
+}
+
+// clockOffsetEvidenceCut is clockOffsetEvidence with cut, what the line
+// says of the cut the offset is read at: ", cut to a second" where the
+// values show it, else what set it (clockOffset: the step two values stand
+// apart, gapCutWhy).
+func clockOffsetEvidenceCut(path string, off models.ClockOffset, cut string) string {
 	if off.CoarseCut() {
 		w := unitWord(off.Res)
 		outside, on := cutExceptions(off.Res)
@@ -1142,11 +1153,8 @@ func clockOffsetEvidence(path string, off models.ClockOffset) string {
 		if off.Res >= time.Hour {
 			in = ", read in the zone the value shows a whole " + w + " in, else the application's"
 		}
-		head := clockOffsetSeen(path, off) + ", cut to " + aUnit(off.Res) + ". A replay checks the offset at the " + w + in + ", as standing for its whole " + w + ", "
+		head := clockOffsetSeen(path, off) + cut + ". A replay checks the offset at the " + w + in + ", as standing for its whole " + w + ", "
 		tail := "; if the field is a time the application reads from its own clock with no rule, declare it noise in keploy.yml, and keploy stops comparing it"
-		if off.CutLookBack() {
-			return head + "from the start of the " + w + " that holds its call's window's start plus the offset, read as " + cutOffsetsNamed(off) + ", up to one " + w + " after its call plus it, whatever the window's width: a look-back made one " + w + " shorter can pass there, by where the replay's read falls in its " + w + ", and one made shorter by more " + w + "s only where the replay's call's window holds a turn of the " + w + " for each " + w + " more between the application's read and its call; one made longer only where the window holds a turn of the " + w + " for each " + w + " longer between its start and the application's read, so in a window narrower than the " + w + " one made two " + w + "s shorter passes only where a turn of the " + w + " falls between the read and the call (never where the application reads its clock at its call), one made a " + w + " longer only where one falls between the window's start and the read, and one made two " + w + "s longer or more fails, as does a value the application read before its call's window (kept across an earlier call) where a turn of the " + w + " falls between that read and the window's start" + on + tail
-		}
 		dir := "between the application's read and its call (a longer one) or between the window's start and the read (a shorter one)"
 		if off.Max < 0 {
 			dir = "between the window's start and the application's read (a longer one) or between the read and its call (a shorter one)"
