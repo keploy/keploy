@@ -85,6 +85,13 @@ func TestAShortWordOfAFreshIdIsNoEvidenceItCameFromAnotherTestOrTheStartUp(t *te
 				{"a start-up key is a word of one character of the id", "mock-188", tokRec, tokLive, served("mock-188", true, Leaf{Path: "body{keys}", Type: Keys, Value: "_id\nn\nok"})},
 				{"an earlier test's field holds four digits of the id alone", "mock-231", "ed35a78f-2486-48d1-bc3d-a07311678c73", live, served("mock-231", false, text("body.count", "2486"))},
 				{"an earlier test's id holds the value whole, a short word", "mock-231", "48d1", "7e6d", served("mock-231", false, text("body.cursor.firstBatch.0._id", other))},
+				// api-server's authorization request ids: "kepreq_" and a
+				// random tail. Both keep the kind label; a word of one
+				// character of the tail stood in a start-up's wire header
+				// (T2, TestStaffBlockAnOAuthClient: "its characters 16 to 16",
+				// mock-0 at spec.responses[0].message.response_flags).
+				{"a start-up's header holds a word of one character of a token that kept its kind label", "mock-0", "kepreq_" + tokRec, "kepreq_" + tokLive, served("mock-0", true, text("spec.responses[0].message.response_flags", "n"))},
+				{"an earlier test's token of the same kind holds a word of one character of it beside the label", "mock-231", "kepreq_" + tokRec, "kepreq_" + tokLive, served("mock-231", false, text("body.cursor.firstBatch.0._id", "kepreq_Hd5sW-n-Pe3fG7_k"))},
 			} {
 				base := c(mode.dc(), nil, row.rec, row.live)
 				got := c(mode.dc(), row.earlier, row.rec, row.live)
@@ -107,6 +114,10 @@ func TestAShortWordOfAFreshIdIsNoEvidenceItCameFromAnotherTestOrTheStartUp(t *te
 				{"a counter of an id that kept its prefix", "order-17", "order-18", served("mock-231", false, text("body.value.seq", "17"))},
 				{"a 10-digit word of a fresh id, alone there", "kq-1730361600-z", "pw-2840472711-y", served("mock-231", true, text("body.cursor.firstBatch.0.n", "1730361600"))},
 				{"a word of letters and digits of the id alone there (aloneBits)", rec, live, served("mock-231", false, text("body.cursor.firstBatch.0.code", "905c"))},
+				{"a word of a token that kept its kind label and a word of its tail", "kepreq_" + tokRec, "kepreq_Qz7kP-q-Zc8dV1_y", served("mock-231", false, text("body.cursor.firstBatch.0.code", "n"))},
+				{"a word of an id that kept a leading word of hex letters (no kind label)", "beef_" + tokRec, "beef_" + tokLive, served("mock-231", false, text("body.cursor.firstBatch.0.code", "n"))},
+				{"a word of an id that kept a leading word with digits (no kind label)", "kq7_" + tokRec, "kq7_" + tokLive, served("mock-231", false, text("body.cursor.firstBatch.0.code", "n"))},
+				{"a counter of an id that kept its kind label", "order-17", "order-18", served("mock-231", false, text("body.value.seq", "17"))},
 			} {
 				got := c(mode.dc(), row.earlier, row.rec, row.live)
 				variable := got.Kind == KindVariable && got.From.Mock == "mock-231"
@@ -480,6 +491,26 @@ func TestEveryPlaceReadsTheChanceRuleAlike(t *testing.T) {
 			}
 			if !row.evidence && !chance {
 				t.Errorf("%s: %s: %s (%q); want noise naming 48d1 read past in mock-6 by chance", name, row.what, got.Kind, got.Why)
+			}
+		}
+		// A token that kept its kind label (kindLabel) reads alike in a
+		// recording's payload: "n", a word of one character of its tail.
+		const tokRec, tokLive = "kepreq_Qz7kP-n-Xa9bT2_w", "kepreq_Lm4rT-q-Zc8dV1_y"
+		for _, row := range []struct {
+			what     string
+			x        Raw
+			evidence bool
+		}{
+			{"another test's row, F gave q at the cell holding n", eRow("x-n", "1", "2").ServedAs(6).ServedLive(eRow("w-q-z", "1", "2")).OfAnotherTest(), true},
+			{"another test's row, F gave q at another cell", eRow("x-n", "1", "2").ServedAs(6).ServedLive(eRow("x-n", "w-q-z", "2")).OfAnotherTest(), false},
+		} {
+			got := run(tokRec, tokLive, row.x)
+			chance := got.Kind == KindNoise && strings.Contains(got.Why, "stands in mock-6") && strings.Contains(got.Why, ` but its kind label "kepreq" (every id of its kind carries it)`)
+			if row.evidence && (got.Kind == KindNoise || strings.Contains(got.Why, " by chance") || !strings.Contains(got.Why, "mock-6")) {
+				t.Errorf("FALSE GREEN? %s: a token's tail: %s: %s (%q); want a variable of mock-6 or refused naming it", name, row.what, got.Kind, got.Why)
+			}
+			if !row.evidence && !chance {
+				t.Errorf("%s: a token's tail: %s: %s (%q); want noise naming n read past in mock-6 by chance, naming the kind label kept", name, row.what, got.Kind, got.Why)
 			}
 		}
 	}

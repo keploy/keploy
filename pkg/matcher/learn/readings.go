@@ -1607,7 +1607,15 @@ func chanceWhy(v *valueDrift, t string, recorded bool, where string) string {
 	if bits >= aloneBits {
 		held += ", nor as an id of its own"
 	}
-	return v.wordOf(t, recorded) + " stands in " + where + " by chance: a word of " + strconv.Itoa(int(bits)) + " bits, fewer than " + strconv.Itoa(chanceBits) + ", of an id the value changed whole, which no id there holds " + held + ", so it is no evidence the value came from there, and keploy learns it as varying"
+	side := 1
+	if recorded {
+		side = 0
+	}
+	id := "an id the value changed whole"
+	if label := v.idLabel[side][t]; label != "" {
+		id = "an id the value changed whole but its kind label " + strconv.Quote(label) + " (every id of its kind carries it)"
+	}
+	return v.wordOf(t, recorded) + " stands in " + where + " by chance: a word of " + strconv.Itoa(int(bits)) + " bits, fewer than " + strconv.Itoa(chanceBits) + ", of " + id + ", which no id there holds " + held + ", so it is no evidence the value came from there, and keploy learns it as varying"
 }
 
 // sideForms are the declared forms of a place's value (d), as recorded or

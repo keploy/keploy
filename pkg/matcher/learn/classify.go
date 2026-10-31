@@ -2561,9 +2561,14 @@ type valueDrift struct {
 	// value holds, recorded [0] and live [1], only inside ids (idByte
 	// words) that changed whole: an id the other side does not hold, of
 	// more than one word, none of which the other side holds in any
-	// reading. Such an id was made or copied as one (insideAnotherID).
-	// Each word maps to the other words of its ids.
+	// reading, but its kind label (kindLabel). Such an id was made or
+	// copied as one (insideAnotherID). Each word maps to the other words
+	// of its ids, never to a label.
 	idParts [2]map[string]map[string]bool
+	// idLabel are the kind labels (kindLabel) of the ids idParts' words
+	// stand in, recorded [0] and live [1], by word: what the chance rule
+	// names as kept (chanceWhy).
+	idLabel [2]map[string]string
 	// oneWord are the value whole, recorded [0] and live [1], in each
 	// declared form (raw, case-folded, the text its run decodes to) where
 	// the value is one word whole (letters and digits only) and the other
@@ -4524,6 +4529,36 @@ func Named(e Earlier, vars models.MockVariables, clocks map[string]models.ClockO
 	return e
 }
 
+// kindLabel is id's leading word where it names the id's kind, the same on
+// both sides: letters only, at least one of them no hex digit, followed by
+// more of the id, and held by the other side (held). api-server's
+// authorization request ids are "kepreq_" and 43 random characters of the
+// URL-safe alphabet: a fresh one keeps "kepreq" and changes every other
+// word, and a word of one character of its tail stands in nearly every
+// recording. A kept group of hex digits ("ed35a78f" of a UUID that kept its
+// first group) is no label: the ids are related, and the id did not change
+// whole. "" where id has no such word.
+func kindLabel(id string, held func(string) bool) string {
+	ws := wordsBy(id, isWord)
+	if len(ws) < 2 || !strings.HasPrefix(id, ws[0]) || !held(ws[0]) {
+		return ""
+	}
+	hex := true
+	for i := 0; i < len(ws[0]); i++ {
+		c := ws[0][i]
+		if c >= '0' && c <= '9' {
+			return ""
+		}
+		if !(c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F') {
+			hex = false
+		}
+	}
+	if hex {
+		return ""
+	}
+	return ws[0]
+}
+
 // readIDParts sets d.idParts from the value's declared forms (recorded,
 // live), after its tokens (recTok, liveTok) are read. The forms from enc on
 // are the text its encoded runs decode to (b64Text), a line for each run.
@@ -4593,10 +4628,33 @@ func (d *valueDrift) readIDParts(forms [][2]string, enc int) {
 				}
 				for _, id := range wordsBy(line, idByte) {
 					fine := finer(id)
-					whole := len(fine) > 1 && !heldByOther(id) && !heldAny(fine)
+					// The id's words but its kind label (kindLabel), which
+					// the other side's id carries too: the id changed whole
+					// where these did, and its words stand beside these, not
+					// beside the label every id of its kind carries.
+					label := kindLabel(id, heldByOther)
+					rest := fine
+					if label != "" {
+						rest = map[string]bool{}
+						for w := range fine {
+							if w != label {
+								rest[w] = true
+							}
+						}
+					}
+					whole := len(rest) > 1 && !heldByOther(id) && !heldAny(rest)
 					for w := range fine {
+						if whole && w == label {
+							continue
+						}
 						if whole && w != id {
-							addInside(w, fine)
+							addInside(w, rest)
+							if label != "" {
+								if d.idLabel[side] == nil {
+									d.idLabel[side] = map[string]string{}
+								}
+								d.idLabel[side][w] = label
+							}
 							continue
 						}
 						// An id of one word of a decoded line that holds
