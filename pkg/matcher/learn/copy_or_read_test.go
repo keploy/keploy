@@ -2065,7 +2065,11 @@ func TestAClientTestLearnsItsAuditReadAnEarlierAnswersClockNameRoundsToAsARead(t
 // echo reads only by its type), so the rows hold those forms too: a copy is
 // still followed there, and a read F saw send another moment is still set
 // aside there, an answer of the call that echoes the poll's value then
-// refused beside it, never answered unchecked. keploy test keeps the refusal
+// refused beside it, never answered unchecked. A poll sent as a text that
+// holds its seconds as one word among others is judged by the same rule,
+// learned only as the read of that word (the rest of the text still
+// compared at every replay), and refused naming the read set aside where
+// another word of it changed too, never left noise. keploy test keeps the refusal
 // of a possible pick, naming the read set aside: only keploy mock's client
 // tests judge a value as its call's own read.
 func TestAnEarlierClockReadFSawSendAnotherMomentIsNoSourceOfTheValue(t *testing.T) {
@@ -2077,6 +2081,7 @@ func TestAnEarlierClockReadFSawSendAnotherMomentIsNoSourceOfTheValue(t *testing.
 		created = "body.cursor.firstBatch.0.created_at.$date.$numberLong"
 		active  = "body.docs.msgs.0.u.$set.last_active.$numberLong"
 		echoed  = "body.value.dirtyAt.$numberLong"
+		filter  = "body.cmd.query.$and.0.$or.0.filter"
 	)
 	secs := func(at time.Time) string { return strconv.FormatInt(at.Unix(), 10) }
 	millis := func(at time.Time) string { return strconv.FormatInt(at.UnixMilli(), 10) }
@@ -2094,6 +2099,7 @@ func TestAnEarlierClockReadFSawSendAnotherMomentIsNoSourceOfTheValue(t *testing.
 	call := time.Date(2026, 10, 31, 10, 52, 15, 438_000_000, time.UTC)
 	beganF, callF := began.Add(72*time.Second), call.Add(73*time.Second+600*time.Millisecond)
 	judged := "no clock read by the app matched it (an instant, its characters 1 to 10)"
+	judgedText := "no clock read by the app matched it (an instant, its characters 8 to 17)"
 	apart := "keploy judged it as its call's own read of the clock because the moment it was recorded with stands only in mock-18 at " + expires + ", where keploy learned a read of the application's clock and record's full round saw the application send another moment than the value's, so the value is no copy of it (a copy moves with its source)"
 	aside := "the moment its recorded value was recorded with stands in mock-18 at " + expires + ", where keploy learned a read of the application's clock and record's full round saw the application send another moment than the value's: a copy moves with its source, so the value is no copy of it"
 	source := "its recorded value was sent in mock-18 at " + expires + ", the test set's start-up's call, where keploy learned it as a read of the application's clock"
@@ -2110,11 +2116,14 @@ func TestAnEarlierClockReadFSawSendAnotherMomentIsNoSourceOfTheValue(t *testing.
 		// b64: the read is a text whose base64 holds epoch milliseconds,
 		// so F's view of it holds the poll's moment only in the text it
 		// decodes to.
-		b64       bool
-		ago       time.Duration
-		kind      Kind
-		from, why string
-		since     bool
+		b64 bool
+		// text: the poll sends a text that holds its epoch seconds as one
+		// word among others; shard: another word of it changed too.
+		text, shard bool
+		ago         time.Duration
+		kind        Kind
+		from, why   string
+		since       bool
 	}{
 		{name: "(d) the start-up's read", kind: KindUnaccounted, why: judged},
 		{name: "(a) the start-up's read, the poll's window two seconds wide", wide: true, kind: KindClockRead},
@@ -2141,6 +2150,17 @@ func TestAnEarlierClockReadFSawSendAnotherMomentIsNoSourceOfTheValue(t *testing.
 		{name: "(c) the start-up's read as a base64 text of epoch milliseconds, copied, the window wide", b64: true, wide: true, copied: true, kind: KindClockRead, since: true},
 		{name: "(c) the test's own read as a base64 text of epoch milliseconds, copied", b64: true, own: true, copied: true, kind: KindVariable, from: "mock-18"},
 		{name: "(c) the test's own read as a base64 text of epoch milliseconds, copied, the window wide", b64: true, own: true, wide: true, copied: true, kind: KindClockRead, since: true},
+		{name: "(d) the start-up's read, the poll a text holding its seconds as one word", text: true, kind: KindUnaccounted, why: judgedText},
+		{name: "(a) the start-up's read, the poll a text holding its seconds as one word, its window two seconds wide", text: true, wide: true, kind: KindClockRead},
+		{name: "the test's own read, its test begun before it, the poll a text holding its seconds as one word", text: true, own: true, kind: KindClockRead, since: true},
+		{name: "the start-up's read, the poll a text another word of which changed too, its window two seconds wide", text: true, shard: true, wide: true, kind: KindUnaccounted, why: apartWordWhy},
+		{name: "(c) the start-up's read, copied as one word of a text", text: true, copied: true, kind: KindUnaccounted, why: source},
+		// As on main: the copy rule's re-read takes a copy of an earlier
+		// read whole (textClockRead), so a word of a text that copies the
+		// start-up's read is refused naming it, never followed unchecked.
+		{name: "(c) the start-up's read, copied as one word of a text, its window two seconds wide", text: true, copied: true, wide: true, kind: KindUnaccounted, why: source},
+		{name: "(c) the test's own read, copied as one word of a text", text: true, own: true, copied: true, kind: KindVariable, from: "mock-18"},
+		{name: "keploy test: the start-up's read, the poll a text holding its seconds as one word, its window two seconds wide", text: true, keployRun: true, wide: true, kind: KindUnaccounted, why: pick},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			// The poll's offset back from its now: two seconds, or a
@@ -2215,6 +2235,15 @@ func TestAnEarlierClockReadFSawSendAnotherMomentIsNoSourceOfTheValue(t *testing.
 			}
 			w := (&Window{Rec: Span{From: call.Add(-gap), To: call, Began: b}, F: Span{From: callF.Add(-gap), To: callF, Began: bF}}).ComparesOffsets()
 			shape := func(at time.Time) Shape { return Shape{Leaves: map[string]Leaf{dirty: num(dirty, at)}} }
+			if c.text {
+				shape = func(at time.Time) Shape {
+					shard := "7"
+					if c.shard && at.After(call) {
+						shard = "8"
+					}
+					return Shape{Leaves: map[string]Leaf{dirty: {Path: filter, Noise: filter, Type: String, Value: "dirty<=" + secs(at) + ";shard=" + shard}}}
+				}
+			}
 			var resp []Leaf
 			if c.echo {
 				resp = []Leaf{num(echoed, call.Add(-ago))}
@@ -2231,7 +2260,12 @@ func TestAnEarlierClockReadFSawSendAnotherMomentIsNoSourceOfTheValue(t *testing.
 			if c.kind == KindClockOffset && (ln.Offset == nil || ln.Offset.Min > -time.Minute || ln.Offset.Max < -time.Minute) {
 				t.Fatalf("dirtyAt learned as the clock plus %+v; want the clock - 1m", ln.Offset)
 			}
-			if c.why == judged && (!strings.HasPrefix(ln.Why, apart) || strings.Contains(ln.Why, source) || ln.Bindable) {
+			// A text is learned as the read of its one changed word alone,
+			// the rest of it still compared (Read.Word).
+			if c.text && c.kind == KindClockRead && (ln.Read == nil || ln.Read.Word.IsZero()) {
+				t.Fatalf("dirtyAt's text learned as %+v; want the read of its one changed word", ln.Read)
+			}
+			if (c.why == judged || c.why == judgedText || c.why == apartWordWhy) && (!strings.HasPrefix(ln.Why, apart) || strings.Contains(ln.Why, source) || ln.Bindable) {
 				t.Fatalf("dirtyAt's refusal does not lead with the read F set aside, names it as its source, or binds the value (bindable: %v): %s", ln.Bindable, ln.Why)
 			}
 			// A read or an offset learned past the read set aside names it

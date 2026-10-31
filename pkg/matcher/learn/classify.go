@@ -892,6 +892,13 @@ type Learned struct {
 	// it), which the rule's rescue in keploy mock's client tests reads
 	// again without it (classifyRead).
 	byOffset bool
+	// apart, of a text learned as noise only as its call's own read of the
+	// clock past a request's read of the application's clock set aside as
+	// its source (classifyRead's apart: a text holding the instant among
+	// other words), names that read: the text is taken only as the read of
+	// its one changed word a replay checks (wordRead), and refused naming
+	// the read otherwise (clientWord, apartWordWhy), never left noise.
+	apart string
 	// Bindable, of a KindUnaccounted leaf of keploy mock's client test
 	// (DriftCache.ClientTests), says the value is one its test gave the
 	// application, first sent at this call: keploy found no source of it
@@ -1546,9 +1553,13 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// pick from it by the clock whose pick in F the request does not
 		// list); and only where its readings account for all it changed. An
 		// echo is answered, never asserted against a source.
+		// apart: the read of the application's clock set aside as the
+		// value's source, where the value is judged as its call's own read
+		// past it (below).
+		apart := ""
 		if ln.Kind == KindNoise || ln.Kind == KindEcho {
 			v := dc.ofIn(r.Value, l.Value, w, at)
-			why, sourced, offWhy, apart := "", false, "", ""
+			why, sourced, offWhy := "", false, ""
 			if unreadReq != "" {
 				why = unreadReq
 			} else if where, asRecorded := dc.requestHolds(lostMoments(v), v.liveMoments, served); where != "" {
@@ -1621,10 +1632,17 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 			// refused, naming the read set aside, where neither holds, and
 			// never bound as the test's value (F's moment stands in what the
 			// application was given). A read F saw send the value's moment
-			// too is a copy, followed as before (echoServed).
+			// too is a copy, followed as before (echoServed). One rule for
+			// every form of the value: one instant whole, or a text that
+			// holds it as one word among others (dirty<=1793443933;shard=7),
+			// which is taken only as the read of that one changed word, the
+			// text around it the same in both runs and still compared
+			// (clientWord, wordRead: the word judged as above), and refused,
+			// naming the read set aside, where it is none (Learned.apart),
+			// never left noise no replay checks.
 			// (apart is set only where sourced is, and read only once why
 			// is "" here.)
-			if sourced && (skip&skipBoth == skipBoth || apart != "") && dc.clientTests && textClockRead(r.Value, l.Value) != nil {
+			if sourced && dc.clientTests && (apart != "" || skip&skipBoth == skipBoth && textClockRead(r.Value, l.Value) != nil) {
 				why = ""
 			}
 			// In keploy mock's client tests, a changed instant only where the
@@ -1815,16 +1833,30 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		if ln.Kind == KindNoise || ln.Kind == KindClockRead {
 			ln.Refuted = fol.refutedAll()
 		}
+		// A text left noise past a read set aside as its source is taken
+		// only as the read of its one changed word (clientWord).
+		if ln.Kind == KindNoise && apart != "" {
+			ln.apart = apart
+		}
 		return ln
 	}
 	// clientWord is ln, a text w learns as noise, learned instead as the read
 	// of its one changed word in w, in keploy mock's client tests
 	// (wordRead), the word read by rd.
+	//
+	// A text judged as its call's own read past a read set aside as its
+	// source (Learned.apart) is the read of its one changed word alone: one
+	// that is none (another word changed too, or the word is no read the
+	// window holds) is refused naming the read set aside (apartWordWhy),
+	// never left noise no replay checks.
 	clientWord := func(ln Learned, w *Window, rd func(r, l Leaf, w *Window, skip skipRule) Learned) Learned {
 		if dc.clientTests {
 			if word, ok := wordRead(ln, w, rd); ok {
 				return word
 			}
+		}
+		if ln.Kind == KindNoise && ln.apart != "" {
+			ln.Kind, ln.Why, ln.Refuted = KindUnaccounted, apartJudgedWhy(ln.apart)+"; "+apartWordWhy, ""
 		}
 		return ln
 	}

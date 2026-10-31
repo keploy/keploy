@@ -1247,6 +1247,12 @@ func apartJudgedWhy(apart string) string {
 	return "keploy judged it as its call's own read of the clock because the moment it was recorded with stands only in " + apart + ", where keploy learned a read of the application's clock and record's full round saw the application send another moment than the value's, so the value is no copy of it (a copy moves with its source)"
 }
 
+// apartWordWhy follows apartJudgedWhy where a text judged so holds no one
+// changed word a replay can check as that read (wordRead, clientWord):
+// another word of it changed too, or the text around it did, or the word is
+// no read its call's window holds in both runs.
+const apartWordWhy = "it holds no one changed word that its call's window shows a read of the application's clock in both runs, with the rest of the text the same in both, so keploy has no read of it to check at every replay and does not leave it unchecked. If the field is a time the application reads from its own clock, declare it noise in keploy.yml, and keploy stops comparing it"
+
 // pickUnaccounted is why a drifted value whose moment in record's full round
 // stands at where (earlier in the test), and whose recorded moment no earlier
 // place holds, is refused (unaccounted).
