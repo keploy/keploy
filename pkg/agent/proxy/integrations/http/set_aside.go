@@ -3,6 +3,8 @@ package http
 import (
 	"context"
 
+	"go.uber.org/zap"
+
 	"go.keploy.io/server/v3/pkg/variables"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
@@ -27,9 +29,12 @@ import (
 // answer a request one more than the open test's own recordings of it
 // (repeatsOwn): a duplicate of a recorded call stays the test's extra call
 // (keploy #4745's F20), whatever start-up or between-tests copy the set
-// holds. Past every exact copy, the test's own and the set-aside ones, the
-// request stays an extra call (never another recording of the call, nor one
-// served again).
+// holds. A call the test never recorded (a start-up call, a timer's tick,
+// each tick of it) is served from the pool, a timer's tick by a pool
+// recording whose clock reads moved with the call's clock too, when no pool
+// copy is the call exactly (clockMoved, pool_clock.go). Past every exact
+// copy, the test's own and the set-aside ones, the request stays an extra
+// call (never another recording of the call, nor one served again).
 //
 // The set-aside recordings are matched as the live pool's would be, on a view
 // that holds only them and that no match can consume, and on a copy of the
@@ -57,7 +62,8 @@ func (h *HTTP) setAsideAnswer(ctx context.Context, input *req, mockDb integratio
 		if len(aside) == 0 {
 			return true
 		}
-		if integrations.FromPool(aside) && h.repeatsOwn(ctx, input, mockDb, headerNoise, bodyNoise, urlNoise, autoURLDynamic, schemaNoiseStrict) {
+		pool := integrations.FromPool(aside)
+		if pool && h.repeatsOwn(ctx, input, mockDb, headerNoise, bodyNoise, urlNoise, autoURLDynamic, schemaNoiseStrict) {
 			// The pool (last) never answers the test's own extra call.
 			return false
 		}
@@ -69,6 +75,12 @@ func (h *HTTP) setAsideAnswer(ctx context.Context, input *req, mockDb integratio
 		}
 		matched, mk, _, err := h.match(ctx, input, answeredOnly{MockMemDb: mockDb, mocks: aside, vars: bound}, headerNoise, bodyNoise, urlNoise, autoURLDynamic, false, schemaNoiseStrict, false, true)
 		if err != nil || !matched || mk == nil || mk.Spec.HTTPReq == nil {
+			if err == nil && pool {
+				// The pool's recordings the call is but for its clock,
+				// first recorded first (the batch's order).
+				served, serr = h.claimClockMoved(ctx, input, aside, mockDb, h.newStrictNoise(headerNoise, bodyNoise, urlNoise))
+				return served == nil && serr == nil
+			}
 			return true
 		}
 		for _, orig := range aside {
@@ -85,4 +97,28 @@ func (h *HTTP) setAsideAnswer(ctx context.Context, input *req, mockDb integratio
 		return true
 	})
 	return served, serr
+}
+
+// claimClockMoved is the first of pool, the pool's batch in recorded order,
+// that the request is but for fields that moved with its clock
+// (clockMovedRecordings), claimed through the store's consume door and ready
+// to serve, with an Info line naming the recording and the fields read as
+// the clock (by shape, no values). One another call took first is passed
+// over for the next. nil when none is left.
+func (h *HTTP) claimClockMoved(ctx context.Context, input *req, pool []*models.Mock, mockDb integrations.MockMemDb, n strictNoise) (*models.Mock, error) {
+	for _, c := range clockMovedRecordings(ctx, input, pool, n) {
+		got, claimed, err := h.claim(ctx, c.m, mockDb, nil, nil)
+		if err != nil {
+			return nil, err
+		}
+		if !claimed {
+			continue
+		}
+		if h.Logger != nil {
+			h.Logger.Info("http: answered a call in the test's window from a start-up or between-tests recording whose clock reads moved with the call's clock (unchecked, never required, once)",
+				zap.String("mock", c.m.Name), zap.Strings("readAsTheClock", c.fields))
+		}
+		return got, nil
+	}
+	return nil, nil
 }

@@ -87,6 +87,11 @@ type strictKnown struct {
 	// application's clock (clocksOf): the walk lets their value change, and
 	// clockDiffs checks it.
 	clocks map[string]models.ClockOffset
+	// moved are the places a start-up or between-tests recording and the
+	// call each hold one instant at, and differ (clockMoved, pool_clock.go):
+	// the walk lets their value change and marks each place it compared;
+	// clockMoved checks them together. nil for every other comparison.
+	moved map[string]*movedPlace
 }
 
 // clocksOf is what the learn step learned of m as reads of the
@@ -107,6 +112,20 @@ func (k strictKnown) learnedAt(exact, legacy string) bool {
 	if _, clock := k.clocks[exact]; clock {
 		return true
 	}
+	if k.learnedNoiseAt(exact, legacy) {
+		return true
+	}
+	if mv, ok := k.moved[exact]; ok {
+		// Compared here, and let change: clockMoved checks it.
+		mv.compared = true
+		return true
+	}
+	return false
+}
+
+// learnedNoiseAt reports whether the mock learned the field as noise
+// (MockSpec.ReqBodyNoise), at exact or at legacy (learnedAt).
+func (k strictKnown) learnedNoiseAt(exact, legacy string) bool {
 	if len(k.learned) == 0 {
 		return false
 	}
@@ -172,12 +191,19 @@ func fieldDiffs(fields []strictField) []models.MockFieldDiff {
 // call. live is where the live request went; ctx is its connection's, whose
 // learn tracker tells the call's window on the application's clock.
 func strictDiff(ctx context.Context, input *req, live destination, m *models.Mock, n strictNoise) []strictField {
+	return strictDiffMoved(ctx, input, live, m, n, nil)
+}
+
+// strictDiffMoved is strictDiff that lets the places of moved change, each
+// marked where the walk compared it (strictKnown.moved): clockMoved's
+// comparison. nil moved is strictDiff's.
+func strictDiffMoved(ctx context.Context, input *req, live destination, m *models.Mock, n strictNoise, moved map[string]*movedPlace) []strictField {
 	r := m.Spec.HTTPReq
 	if r == nil {
 		return []strictField{field(models.MockFieldDiff{Path: "method", Kind: models.DiffKindMissingInMock, Actual: input.method})}
 	}
 	strictDiffs.Add(1)
-	k := strictKnown{n: n, learned: m.Spec.ReqBodyNoise, values: util.NewNoiseChecker(m.Noise), clocks: clocksOf(m)}
+	k := strictKnown{n: n, learned: m.Spec.ReqBodyNoise, values: util.NewNoiseChecker(m.Noise), clocks: clocksOf(m), moved: moved}
 	var out []strictField
 	if string(r.Method) != input.method {
 		out = append(out, field(valueDiff("method", string(r.Method), input.method)))

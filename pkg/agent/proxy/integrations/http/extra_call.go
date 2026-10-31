@@ -65,12 +65,13 @@ func (h *HTTP) extraCall(ctx context.Context, input *req, mockDb integrations.Mo
 }
 
 // repeatsOwn reports whether the request is, as the matcher reads it under
-// the switch (setAsideAnswer's reading), a call one of the open test's own
-// recordings already answered (integrations.OwnRecordings): one call more
-// than the test recorded, which the pool never answers
-// (integrations.FromPool). A set-aside test's or the pool's copy the test
-// was served is none of its own: a timer's second tick in a test that
-// recorded none is no extra call.
+// the switch (setAsideAnswer's reading), or but for fields that moved with
+// its clock (clockMovedRecordings, the rule the pool answers by), a call one
+// of the open test's own recordings already answered
+// (integrations.OwnRecordings): one call more than the test recorded, which
+// the pool never answers (integrations.FromPool). A set-aside test's or the
+// pool's copy the test was served is none of its own: a timer's second tick
+// in a test that recorded none is no extra call.
 func (h *HTTP) repeatsOwn(ctx context.Context, input *req, mockDb integrations.MockMemDb, headerNoise, bodyNoise map[string][]string, urlNoise []string, autoURLDynamic, schemaNoiseStrict bool) bool {
 	er, ok := mockDb.(integrations.ExactConsumedReader)
 	if !ok {
@@ -85,7 +86,10 @@ func (h *HTTP) repeatsOwn(ctx context.Context, input *req, mockDb integrations.M
 		vars = vars.Clone()
 	}
 	matched, mk, _, err := h.match(ctx, input, answeredOnly{MockMemDb: mockDb, mocks: own, vars: vars}, headerNoise, bodyNoise, urlNoise, autoURLDynamic, false, schemaNoiseStrict, false, true)
-	return err == nil && matched && mk != nil && mk.Spec.HTTPReq != nil
+	if err == nil && matched && mk != nil && mk.Spec.HTTPReq != nil {
+		return true
+	}
+	return len(clockMovedRecordings(ctx, input, own, h.newStrictNoise(headerNoise, bodyNoise, urlNoise))) > 0
 }
 
 // backgroundAgain is, for a request no mock answered under exact serving (the
