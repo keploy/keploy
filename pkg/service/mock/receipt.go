@@ -134,9 +134,10 @@ type Receipt struct {
 	CannotCapture models.CaptureLosses `yaml:"cannotCapture,omitempty" json:"cannotCapture,omitempty"`
 	// UnchargedMisses are, under the proven switch, the misses MissedData
 	// counts that no test was charged with (models.UnmatchedCall.ChargedTo
-	// empty): a call made before the test process claimed the run, after
-	// the last test's end, or between test processes (within one, a test's
-	// end charges it the misses made since the previous test's end). Each
+	// empty): a call made before the test process claimed the run, or
+	// outside every test's window (before the first test, between two, or
+	// after the last): the test framework sets the windows, and a call made
+	// in none is the set's, never a test's. Each
 	// is as evidence keeps a miss (models.UnmatchedCall.Sanitized: no value
 	// the app sent), with the process that made it. nil when the misses
 	// were not read, and with the switch off.

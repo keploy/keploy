@@ -12,7 +12,9 @@ const (
 	// it was recorded: each test mock answers at most one request.
 	MissExtraCall = "extra_call"
 	// MissOutsideTest is a call made while no test was open that the pool
-	// slice served then does not answer. It is charged to the next test that
-	// begins.
+	// slice served then does not answer. Under keploy mock it is charged to
+	// no test: the test framework sets each test's window, and keploy moves
+	// no call into one (the run's receipt lists it, Receipt.UnchargedMisses).
+	// One filed as a test ended, made after it began, is that test's.
 	MissOutsideTest = "outside_test"
 )
