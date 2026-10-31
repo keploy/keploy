@@ -476,8 +476,10 @@ func instantUnread(r, l Leaf) string {
 // its words. unread is why a place earlier than the call could not be read
 // (requestUnread: the test case's own request, or the run's places past
 // their bound; "" when each was): then the echo could not read it, and the
-// instant is never noise or an echo.
-func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier, raw []Raw, resp []Leaf, w *Window, unread string, places func() *offsetPlaces, skip skipRule) Learned {
+// instant is never noise or an echo. follow: under the rule a copy follows
+// its source (ClassifyFollowing), where a request's read of the
+// application's clock is set aside as its source (apartReads).
+func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier, raw []Raw, resp []Leaf, w *Window, unread string, places func() *offsetPlaces, skip skipRule, follow bool) Learned {
 	ln := Learned{Kind: KindNoise, Recorded: r, Live: l}
 	rt, okR := readTyped(r)
 	lt, okL := readTyped(l)
@@ -494,13 +496,31 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 	// place holds, with the recorded one held nowhere, is no copy the
 	// recording shows. skipOffset, as one no moved place builds by an offset
 	// (classifyRead's offset of a given instant its own window holds).
-	if from, ok := dc.instantServedFrom(r, rec, live, served); ok && skip&skipSource == 0 {
-		ln.Kind, ln.From = KindVariable, from
-		return ln
+	//
+	// Under the rule a copy follows its source (follow), no search takes a
+	// request's read of the application's clock that held the moment the
+	// instant was recorded with and that F saw send another moment than the
+	// instant's (apartReads: a copy moves with its source), as the text's
+	// echo takes none (echoServed): api-server's endpoint poll, dirtyAt <=
+	// now-2s cut to the second, in the second the set's start-up read the
+	// clock in. With no other source, the instant is judged as its call's
+	// own read of the clock (in keploy mock's client tests; in keploy test,
+	// whose calls know no test begin, a possible pick stays refused, naming
+	// that read): a read its window holds in both runs, or the clock plus an
+	// offset the offset rules learn, checked so at every replay; refused,
+	// naming the read set aside, where neither holds, and where the call's
+	// answer echoes it. A read F saw send the instant's moment too is a
+	// copy, followed as before.
+	ap := &apartReads{on: follow}
+	if skip&skipSource == 0 {
+		if from, ok := dc.instantServedFrom(r, l, rec, live, served, ap); ok {
+			ln.Kind, ln.From = KindVariable, from
+			return ln
+		}
 	}
 	// The echo, before any provenance excuses the instant.
 	if echoed := echoedPairs([]driftedInstant{{rec: rec, live: live}}, dc.earlierMoments(at, served, raw), dc.recordedMoments(at, served, raw)); len(echoed) > 0 {
-		if from, ok := dc.instantEchoFrom(r, echoed, at, served, raw); ok {
+		if from, ok := dc.instantEchoFrom(r, echoed, at, served, raw, ap); ok {
 			ln.Kind, ln.From, ln.Why = KindVariable, from, instantEvidence(from)
 			return ln
 		}
@@ -508,12 +528,20 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 		if where == "" {
 			where = "earlier in the test"
 		}
-		ln.Kind, ln.Why = KindUnaccounted, pickUnaccounted(where)
-		return ln
+		switch {
+		case ap.at == "":
+			ln.Kind, ln.Why = KindUnaccounted, pickUnaccounted(where)
+			return ln
+		case !dc.clientTests:
+			ln.Kind, ln.Why = KindUnaccounted, pickApartUnaccounted(where, ap.at)
+			return ln
+		}
 	}
-	if from, ok := dc.instantLeafFrom(r, rec, served); ok && skip&skipSource == 0 {
-		ln.Kind, ln.From, ln.Why = KindVariable, from, instantEvidence(from)
-		return ln
+	if skip&skipSource == 0 {
+		if from, ok := dc.instantLeafFrom(r, l, rec, live, served, ap); ok {
+			ln.Kind, ln.From, ln.Why = KindVariable, from, instantEvidence(from)
+			return ln
+		}
 	}
 	if from, ok := dc.instantRawFrom(r, rec, live, at, raw); ok && skip&skipSource == 0 {
 		ln.Kind, ln.From, ln.Why = KindVariable, from, instantEvidence(from)
@@ -587,6 +615,7 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 			if dc.clientTests {
 				ln.Why = clientCutAmbiguousWhy(cutWhy)
 			}
+			ln.Why += ap.judgedWhy()
 			return ln
 		}
 		why := instantNotClock
@@ -609,7 +638,7 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 		// With no window, one that names its moment is a plain read of
 		// the clock all the same, checked at every replay (noWindowRead).
 		if !dc.noWindowRead(rt, lt, w, at) {
-			ln.Kind, ln.Why = KindUnaccounted, why
+			ln.Kind, ln.Why = KindUnaccounted, why+ap.judgedWhy()
 			return ln
 		}
 		// Where keploy cannot tell which clock the application reads, no
@@ -629,9 +658,16 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 	}
 	if echo := dc.instantEchoes(rec, resp); len(echo) > 0 {
 		// An echo answers with this run's value and checks none, so one
-		// that neither the lead nor a window shows a read is refused.
+		// that neither the lead nor a window shows a read is refused, and
+		// so is one beside a read set aside as its source (apartReads), as
+		// the text's is (classifyRead's asideOnly): the instant is judged
+		// as its call's own read, which an echo never checks.
 		if noWindow != "" {
 			ln.Kind, ln.Why = KindUnaccounted, noWindow
+			return ln
+		}
+		if ap.at != "" {
+			ln.Kind, ln.Why = KindUnaccounted, apartAsideWhy(ap.at)+"; but the call's recorded answer holds it, an echo keploy cannot answer beside a source it set aside"
 			return ln
 		}
 		ln.Kind, ln.Echo = KindEcho, echo
@@ -1270,8 +1306,10 @@ func clockOffsetEchoedWhy(path string, off models.ClockOffset) string {
 // neither on its other side (it drifted with it, rule 1). Whole, of the
 // place, is its recorded text's being r's: where the value can be bound. The
 // test case's own request is such a place too, where keploy test sent a part
-// of it with template values (Earlier.Given): nothing binds there.
-func (dc *DriftCache) instantServedFrom(r Leaf, rec, live moment, served []Earlier) (Place, bool) {
+// of it with template values (Earlier.Given): nothing binds there. A request's
+// read of the application's clock that F saw send another moment than the
+// instant's (l, live) is none (apartReads).
+func (dc *DriftCache) instantServedFrom(r, l Leaf, rec, live moment, served []Earlier, ap *apartReads) (Place, bool) {
 	var best Place
 	rank := 7
 	for _, e := range served {
@@ -1282,6 +1320,9 @@ func (dc *DriftCache) instantServedFrom(r Leaf, rec, live moment, served []Earli
 			whole := s.Leaf.Value == r.Value
 			exact := whole || dc.isInstant(s.Leaf.Value, rec) || seenIs(s.Leaf, s.Leaf.Value, rec)
 			if !exact && !dc.instantCoDrifted(s.Leaf.Value, s.Live, rec, live) {
+				continue
+			}
+			if ap.refute(e, s, dc.seenHoldsInstant(s, l, live)) {
 				continue
 			}
 			if pr := placeRank(e, s, whole); pr < rank {
@@ -1299,6 +1340,50 @@ func (dc *DriftCache) instantServedFrom(r Leaf, rec, live moment, served []Earli
 		}
 	}
 	return best, rank < 7
+}
+
+// apartReads sets aside, under the rule a copy follows its source (on:
+// ClassifyFollowing), a request's read of the application's clock (Seen.Clock:
+// the learn step learned a plain read there) that held the moment a typed
+// instant was recorded with and that F saw send another moment there than
+// the instant's: a copy moves with its source, so the instant is no copy of
+// it, as the text's echo sets one aside (echoServed, follows.refuteEcho). at
+// names the first such read; the instant's reading names it (classifyInstant).
+// A read F saw no value at stays a place, as a copy does.
+type apartReads struct {
+	on bool
+	at string
+}
+
+// refute reports whether s, a leaf of e (an exchange F served before the
+// call) holding the moment the instant was recorded with, is such a read,
+// heldF whether F's view of it held the moment F saw in the instant; the
+// first is named (at).
+func (a *apartReads) refute(e Earlier, s Seen, heldF bool) bool {
+	if !a.on || !s.Clock || s.Live == "" || heldF {
+		return false
+	}
+	if a.at == "" {
+		a.at = placeAt(seenPlace(e, s, false))
+	}
+	return true
+}
+
+// judgedWhy follows why an instant judged as its call's own read of the
+// clock past a read set aside (at) is refused, naming that read
+// (apartJudgedWhy); "" where none was set aside.
+func (a *apartReads) judgedWhy() string {
+	if a.at == "" {
+		return ""
+	}
+	return "; " + apartJudgedWhy(a.at)
+}
+
+// seenHoldsInstant reports whether F's view of s (Seen.Live) held live, the
+// moment F saw in a drifted instant (l as F saw it), as an instant of its
+// own, exactly, in any form, or l whole.
+func (dc *DriftCache) seenHoldsInstant(s Seen, l Leaf, live moment) bool {
+	return s.Live == l.Value || dc.holdsExact(s.Live, live) || dc.holdsExact(dc.rawExtra(s.Live), live) || seenIs(s.Leaf, s.Live, live)
 }
 
 // seenMoment is the moment value names where l, a leaf of an earlier
@@ -1421,23 +1506,44 @@ func (dc *DriftCache) instantCoDrifted(rec, live string, rm, lm moment) bool {
 // reads the places): a leaf of an exchange F served earlier, a typed time of
 // day there as the echo reads it (seenHoldsRecorded), ranked by placeRank,
 // then a payload served or recorded before at, its field where one holds it.
-func (dc *DriftCache) instantEchoFrom(r Leaf, echoed []echoMatch, at time.Time, served []Earlier, raw []Raw) (Place, bool) {
-	var best Place
-	rank := 7
+//
+// As the text's echo reads them (echoServed): a request's read of the
+// application's clock that F saw send another moment than the instant's, by
+// the rule the echo found the copy by (holdsLive), is no such place
+// (apartReads); and once one is set aside, the recorded moment is shown to
+// be one the application read its clock in, so only a leaf F saw hold the
+// instant's moment too, or saw no value at, is then the place.
+func (dc *DriftCache) instantEchoFrom(r Leaf, echoed []echoMatch, at time.Time, served []Earlier, raw []Raw, ap *apartReads) (Place, bool) {
+	var best, moved Place
+	rank, movedRank := 7, 7
+	aside := false
 	for _, e := range served {
 		for _, s := range e.Seen {
 			if !dc.holdsRecorded(s.Leaf.Value, echoed) && !dc.holdsRecorded(dc.rawExtra(s.Leaf.Value), echoed) && !seenHoldsRecorded(s.Leaf, s.Leaf.Value, echoed) {
 				continue
 			}
+			withF := s.Live != "" && (dc.holdsLive(s.Live, echoed) || dc.holdsLive(dc.rawExtra(s.Live), echoed) || seenHoldsLive(s.Leaf, s.Live, echoed))
+			if ap.refute(e, s, withF) {
+				aside = true
+				continue
+			}
 			whole := s.Leaf.Value == r.Value
-			if pr := placeRank(e, s, whole); pr < rank {
+			pr := placeRank(e, s, whole)
+			if pr < rank {
 				best, rank = seenPlace(e, s, whole), pr
 				// No givenWhole here: classifyInstant's re-read without the
 				// source rules (skipBoth, the copy rule's) takes this echo
 				// again, so the copy rule never reads it as a clock read.
 				best.Echo = true
 			}
+			if (withF || s.Live == "") && pr < movedRank {
+				moved, movedRank = seenPlace(e, s, whole), pr
+				moved.Echo = true
+			}
 		}
+	}
+	if aside {
+		best, rank = moved, movedRank
 	}
 	if rank < 7 {
 		return best, true
@@ -1467,8 +1573,10 @@ func (dc *DriftCache) instantEchoFrom(r Leaf, echoed []echoMatch, at time.Time, 
 // leaf is an earlier place, and an instant equal to one it holds is followed
 // as a value from there, whether or not it is a read of the clock. An answer's
 // own clock stamp served as recorded is none (Seen.Stamp, rule 3), nor is the
-// test case's own request, which requestHolds reads.
-func (dc *DriftCache) instantLeafFrom(r Leaf, rec moment, served []Earlier) (Place, bool) {
+// test case's own request, which requestHolds reads, nor a request's read of
+// the application's clock that F saw send another moment than the instant's
+// (l, live: apartReads).
+func (dc *DriftCache) instantLeafFrom(r, l Leaf, rec, live moment, served []Earlier, ap *apartReads) (Place, bool) {
 	var best Place
 	rank := 7
 	for _, e := range served {
@@ -1477,6 +1585,9 @@ func (dc *DriftCache) instantLeafFrom(r Leaf, rec moment, served []Earlier) (Pla
 		}
 		for _, s := range e.Seen {
 			if stamped(s) || !dc.holdsExact(s.Leaf.Value, rec) && !dc.holdsExact(dc.rawExtra(s.Leaf.Value), rec) && !seenIs(s.Leaf, s.Leaf.Value, rec) {
+				continue
+			}
+			if ap.refute(e, s, dc.seenHoldsInstant(s, l, live)) {
 				continue
 			}
 			whole := s.Leaf.Value == r.Value

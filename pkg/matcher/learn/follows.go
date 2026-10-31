@@ -346,9 +346,17 @@ func (f *follows) refuteEcho(e Earlier, s Seen) {
 		f.apart = at
 	}
 	if f.aside == "" {
-		f.aside = "the moment its recorded value was recorded with stands in " + at + ", where keploy learned a read of the application's clock and record's full round saw the application send another moment than the value's: a copy moves with its source, so the value is no copy of it"
+		f.aside = apartAsideWhy(at)
 	}
 	f.source(e.Mock)
+}
+
+// apartAsideWhy says that at, a request's read of the application's clock
+// that held the moment a value was recorded with, was set aside as its
+// source: F saw the application send another moment there than the value's
+// (follows.refuteEcho, apartReads).
+func apartAsideWhy(at string) string {
+	return "the moment its recorded value was recorded with stands in " + at + ", where keploy learned a read of the application's clock and record's full round saw the application send another moment than the value's: a copy moves with its source, so the value is no copy of it"
 }
 
 // fView is what record's full round shows it gave the application at a

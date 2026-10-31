@@ -1515,7 +1515,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 			return Learned{Kind: KindUnaccounted, Recorded: r, Live: l, Why: unreadRaw}
 		}
 		if r.Type == Instant || l.Type == Instant {
-			return dc.classifyInstant(r, l, at, served, raw, resp, w, unreadReq, places, skip)
+			return dc.classifyInstant(r, l, at, served, raw, resp, w, unreadReq, places, skip, follow)
 		}
 		ln := Learned{Kind: KindNoise, Recorded: r, Live: l}
 		var fol *follows
@@ -3442,11 +3442,13 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 // and then the recorded moment is shown to be a second the application read
 // its clock in, so a place holding it that F saw hold another moment than the
 // value's (an answer of that second) is no evidence of a pick either: only a
-// place F saw hold the value's moment too is then the source. With none, the
-// echo names no place, and the value is read as one no earlier place is the
-// source of: the echo refuses it as a possible pick (unaccounted), never
-// learned from the read F set aside. A read F saw send the value's moment (a
-// copy) stays the source, as before, and so does one F saw no value at.
+// place F saw hold the value's moment too, or saw no value at (F shows
+// nothing against it), is then the source. With none, the echo names no
+// place, and the value is read as one no earlier place is the source of: the
+// echo refuses it as a possible pick (unaccounted), never learned from the
+// read F set aside. A read F saw send the value's moment (a copy) stays the
+// source, as before, and so does one F saw no value at, ranked as before
+// among such places (placeRank).
 func (dc *DriftCache) echoServed(echoed []echoMatch, recorded string, served []Earlier, fol *follows) (Place, bool) {
 	if len(echoed) == 0 {
 		return Place{}, false
@@ -3471,7 +3473,7 @@ func (dc *DriftCache) echoServed(echoed []echoMatch, recorded string, served []E
 				best, rank = seenPlace(e, s, whole), r
 				best.Echo, best.givenWhole = true, s.Side == Response
 			}
-			if withF && r < movedRank {
+			if (withF || s.Live == "") && r < movedRank {
 				moved, movedRank = seenPlace(e, s, whole), r
 				moved.Echo, moved.givenWhole = true, s.Side == Response
 			}
