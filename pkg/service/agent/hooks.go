@@ -141,6 +141,30 @@ func SetSkipProxyListener(skip bool) {
 	coreAgent.SkipProxyListener = skip
 }
 
+// CaptureSettler settles a capture that reads the application's calls beside
+// its path rather than in it (a downstream build's low-latency capture, with
+// no keploy proxy for the calls to wait on). Under the proven switch a
+// record's test end settles through it instead of through the proxy's
+// listener (settle_proven.go): SettleCapture returns once every call the
+// application made before it was called has reached keploy's recorder, and
+// an error, never nil, when it cannot tell (the capture lost events, or holds
+// a source it cannot fence). SettleProgress is a count for each thing the
+// settle waits on that moves whenever that thing gets further; the settle's
+// watchdog fails it when one of them stops moving (watchSettle).
+type CaptureSettler interface {
+	SettleCapture(ctx context.Context) error
+	SettleProgress() map[string]uint64
+}
+
+// captureSettler is the registered CaptureSettler, nil when none is.
+var captureSettler CaptureSettler
+
+// RegisterCaptureSettler registers the capture a proven record's test ends
+// settle through (CaptureSettler); nil unregisters it.
+func RegisterCaptureSettler(s CaptureSettler) {
+	captureSettler = s
+}
+
 // SetAgentInfoCustomizer registers a callback that mutates AgentInfo
 // before it is written to the BPF map. Use it to set the extensible
 // Flags slot from a downstream build.

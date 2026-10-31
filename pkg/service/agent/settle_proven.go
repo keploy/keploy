@@ -179,6 +179,11 @@ func (a *Agent) settle(ctx context.Context, answers bool) (models.ListenDrops, e
 // answered later is never the next test's.
 func (a *Agent) settleKeeping(ctx context.Context, answers bool, keep func(coreAgent.InFlightScope)) (models.ListenDrops, error) {
 	none := models.ListenDrops{}
+	// A capture beside the application's path has no proxy to count: it
+	// settles itself, and cuts no scope (settlesByCapture).
+	if cs, ok := settlesByCapture(answers); ok {
+		return none, a.settleCapture(ctx, cs)
+	}
 	cut := false
 	if keep != nil && provenswitch.On() {
 		defer func() {
@@ -738,6 +743,12 @@ func (a *Agent) settleBegin(ctx context.Context, answers bool) (models.ListenDro
 	if !provenswitch.On() {
 		return a.settle(ctx, answers)
 	}
+	// A capture that settles itself leaves a begin nothing to wait for: its
+	// ends cut no scope that a begin would settle, and what it lost before a
+	// begin is the next end's (CaptureSettler).
+	if _, ok := settlesByCapture(answers); ok {
+		return models.ListenDrops{}, nil
+	}
 	ir, ok := a.Proxy.(coreAgent.InFlightReader)
 	if !ok || a.Proxy == nil {
 		return models.ListenDrops{}, errors.New("this keploy agent's proxy cannot tell which calls it still holds")
@@ -755,6 +766,34 @@ func (a *Agent) settleBegin(ctx context.Context, answers bool) (models.ListenDro
 		return models.ListenDrops{}, fmt.Errorf("keploy cannot count the calls still waiting for its proxy: %w", err)
 	}
 	return c.ListenDrops, nil
+}
+
+// settlesByCapture returns the registered CaptureSettler when a settle goes
+// through it: under the proven switch, in a record. A replay (answers) serves
+// its mocks through keploy's proxy whatever recorded them, and settles there;
+// with the switch off nothing changes.
+func settlesByCapture(answers bool) (CaptureSettler, bool) {
+	cs := captureSettler
+	return cs, cs != nil && !answers && provenswitch.On()
+}
+
+// settleCapture settles a record's test end through cs, under the settle's
+// watchdog (watchSettle on cs.SettleProgress): a wait none of whose counts
+// moves for settleStallLimit wake-ups fails, as a proxy's does. An error says
+// keploy cannot tell: the test is not judged.
+func (a *Agent) settleCapture(ctx context.Context, cs CaptureSettler) error {
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	stop := a.watchSettle(ctx, cancel, cs.SettleProgress)
+	err := cs.SettleCapture(ctx)
+	stop()
+	if err == nil {
+		return nil
+	}
+	if cause := context.Cause(ctx); cause != nil {
+		return fmt.Errorf("keploy cannot tell that the capture holds no call of the test: %w", cause)
+	}
+	return fmt.Errorf("keploy cannot tell that the capture holds no call of the test: %w", err)
 }
 
 // beginWindow, under the proven switch, cuts where a test's window begins on

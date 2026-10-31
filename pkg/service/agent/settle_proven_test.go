@@ -1274,3 +1274,126 @@ func TestWithTheSwitchOffABeginWaitsForEveryConnection(t *testing.T) {
 	defer sp.fmu.Unlock()
 	require.Zero(t, sp.scopes, "with the switch off a settle keeps to no scope")
 }
+
+// fakeCaptureSettler is a CaptureSettler that counts its settles, returns
+// err, and, while block is set, waits for it (or the settle's end); progress
+// is what its watchdog reads.
+type fakeCaptureSettler struct {
+	settles  atomic.Int32
+	err      error
+	block    chan struct{}
+	progress atomic.Uint64
+	// entered is closed at the first settle, when set.
+	entered     chan struct{}
+	enteredOnce sync.Once
+}
+
+func (s *fakeCaptureSettler) SettleCapture(ctx context.Context) error {
+	s.settles.Add(1)
+	if s.entered != nil {
+		s.enteredOnce.Do(func() { close(s.entered) })
+	}
+	if s.block != nil {
+		select {
+		case <-s.block:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return s.err
+}
+
+func (s *fakeCaptureSettler) SettleProgress() map[string]uint64 {
+	return map[string]uint64{"capture": s.progress.Load()}
+}
+
+func withCaptureSettler(t *testing.T, s CaptureSettler) {
+	t.Helper()
+	prev := captureSettler
+	RegisterCaptureSettler(s)
+	t.Cleanup(func() { RegisterCaptureSettler(prev) })
+}
+
+// Under the proven switch a record whose capture settles itself (a
+// low-latency capture: no proxy in the application's path) settles each
+// test's end through it and never asks for the proxy's counts, which such an
+// agent cannot give; its begin waits for nothing.
+func TestARecordsEndSettlesThroughTheCaptureWhenOneIsRegistered(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	a, h, _ := settleAgent()
+	h.err = models.ErrProxyConnsUnsupported
+	cs := &fakeCaptureSettler{}
+	withCaptureSettler(t, cs)
+	_, err := a.settleBegin(context.Background(), false)
+	require.NoError(t, err, "a begin asks the proxy for nothing")
+	require.Zero(t, cs.settles.Load(), "a begin waits for nothing")
+	require.NoError(t, a.settledSince(context.Background(), false, "TestEnd"))
+	require.EqualValues(t, 1, cs.settles.Load(), "the end settled through the capture")
+}
+
+// What the capture cannot tell fails the end: the test is not judged.
+func TestAnEndTheCaptureCannotSettleIsNotJudged(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	a, _, _ := settleAgent()
+	lost := errors.New("the capture lost 3 events")
+	withCaptureSettler(t, &fakeCaptureSettler{err: lost})
+	err := a.settledSince(context.Background(), false, "TestEnd")
+	require.ErrorIs(t, err, lost)
+	require.ErrorContains(t, err, "cannot tell that the capture holds no call of the test")
+}
+
+// A replay serves its mocks through keploy's proxy, and settles there; with
+// the switch off nothing settles through the capture either: both still need
+// the proxy's counts.
+func TestOnlyAProvenRecordSettlesThroughTheCapture(t *testing.T) {
+	cs := &fakeCaptureSettler{}
+	withCaptureSettler(t, cs)
+	for _, c := range []struct {
+		proven  string
+		answers bool
+	}{{"1", true}, {"", false}, {"", true}} {
+		t.Setenv(provenswitch.Env, c.proven)
+		a, h, _ := settleAgent()
+		h.err = models.ErrProxyConnsUnsupported
+		_, err := a.settleBegin(context.Background(), c.answers)
+		require.ErrorIs(t, err, models.ErrProxyConnsUnsupported, "proven=%q answers=%v", c.proven, c.answers)
+		err = a.settledSince(context.Background(), c.answers, "TestEnd")
+		require.ErrorIs(t, err, models.ErrProxyConnsUnsupported, "proven=%q answers=%v", c.proven, c.answers)
+	}
+	require.Zero(t, cs.settles.Load())
+}
+
+// The capture's settle runs under the settle's watchdog: one whose counts
+// stop moving fails at settleStallLimit wake-ups, and one whose counts move
+// is never failed for it. It counts wake-ups, never time.
+func TestTheCapturesSettleRunsUnderTheWatchdog(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	wake := manualWake(t)
+	prev := settleStallLimit
+	settleStallLimit = 3
+	t.Cleanup(func() { settleStallLimit = prev })
+	a, _, _ := settleAgent()
+	cs := &fakeCaptureSettler{block: make(chan struct{}), entered: make(chan struct{})}
+	withCaptureSettler(t, cs)
+	done := make(chan error, 1)
+	go func() { done <- a.settledSince(context.Background(), false, "TestEnd") }()
+	select {
+	case <-cs.entered:
+	case err := <-done:
+		t.Fatalf("the end did not settle through the capture: %v", err)
+	}
+	wake()
+	wake()
+	cs.progress.Add(1) // the capture got further
+	wake()
+	wake()
+	wake()
+	select {
+	case err := <-done:
+		t.Fatalf("the watchdog fired before its count: %v", err)
+	default:
+	}
+	wake()
+	err := <-done
+	require.ErrorIs(t, err, errNoProgress)
+}
