@@ -823,16 +823,16 @@ func TestAnOffsetCutToAnHourInTheApplicationsZoneIsLearnedAndCheckedThere(t *tes
 	// A slow call's windows, 70 minutes: read in IST the values are whole
 	// hours, learned at the hour; read in UTC alone they show a minute, at
 	// which one offset holds both runs too, and their gap is a whole hour:
-	// refused as ambiguous, naming both cuts.
+	// learned at the hour all the same (a cut is checked, never refused),
+	// which holds both, naming the gap, read in no zone.
 	if slow := learn(ist, call, time.Hour, day, 70*time.Minute); slow.Kind != KindClockOffset || slow.Offset == nil || slow.Offset.Res != time.Hour || slow.Offset.AppZone != "+05:30" {
 		t.Errorf("FALSE RED: a day on, cut to the IST hour, a slow call's windows, learned in IST: %s %+v (%s); want clock + 1d at the hour", slow.Kind, slow.Offset, slow.Why)
 	}
-	if slow := learn(nil, call, time.Hour, day, 70*time.Minute); slow.Kind != KindUnaccounted || !strings.Contains(slow.Why, "a whole number of 1h") {
-		t.Errorf("a day on, cut to the IST hour, a slow call's windows, the zone unread: %s %+v (%s); want refused as ambiguous, naming the hour", slow.Kind, slow.Offset, slow.Why)
+	if slow := learn(nil, call, time.Hour, day, 70*time.Minute); slow.Kind != KindClockOffset || slow.Offset == nil || slow.Offset.Res != time.Hour || slow.Offset.AppZone != "" || !strings.Contains(slow.Why, ". Its two values stand 1h apart, a whole number of 1h") {
+		t.Errorf("FALSE RED: a day on, cut to the IST hour, a slow call's windows, the zone unread: %s %+v (%s); want clock + 1d at the hour, naming the gap", slow.Kind, slow.Offset, slow.Why)
 	}
-	// So is a client test's (keploy mock), naming the two cuts and how to
-	// correct it, with the client test's own correction added, never only
-	// that no clock read matched it.
+	// So is a client test's (keploy mock), naming the gap, never that no
+	// clock read matched it.
 	{
 		dc := clockedDrifts()
 		dc.clientTests = true
@@ -840,8 +840,29 @@ func TestAnOffsetCutToAnHourInTheApplicationsZoneIsLearnedAndCheckedThere(t *tes
 		w := (&Window{Rec: Span{From: call.Add(-70 * time.Minute), To: call}, F: Span{From: fcall.Add(-70 * time.Minute), To: fcall}}).ComparesOffsets()
 		shape := func(at time.Time) Shape { return Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, at, ms)}} }
 		c := ClassifyIn(dc, []string{p}, shape(cutIn(ist, fcall, time.Hour).Add(day)), shape(cutIn(ist, call, time.Hour).Add(day)), call, nil, nil, nil, w)[0]
-		if c.Kind != KindUnaccounted || c.Offset != nil || !strings.Contains(c.Why, "a whole number of 1h") || !strings.HasSuffix(c.Why, ". If your test supplies this value, have it supply the same value in every run, and keploy keeps comparing it") || strings.Contains(c.Why, "no clock read by the app matched it") {
-			t.Errorf("a client test's value a day on, cut to the IST hour, a slow call's windows, the zone unread: %s %+v (%s); want refused as ambiguous, naming the hour and how to correct it", c.Kind, c.Offset, c.Why)
+		if c.Kind != KindClockOffset || c.Offset == nil || c.Offset.Res != time.Hour || !strings.Contains(c.Why, ". Its two values stand 1h apart, a whole number of 1h") || strings.Contains(c.Why, "no clock read by the app matched it") {
+			t.Errorf("FALSE RED: a client test's value a day on, cut to the IST hour, a slow call's windows, the zone unread: %s %+v (%s); want clock + 1d at the hour, naming the gap", c.Kind, c.Offset, c.Why)
+		}
+		// A replay that reads the process's zone (IST) checks it at the
+		// IST hour: the application's value a day on,
+		// cut to the IST hour, holds wherever its read falls in the hour; a
+		// time to live changed by half a day or a day never does (one
+		// changed by less than the windows, the range and three cuts can,
+		// by where the read falls: models.ClockOffset.Within).
+		if c.Offset != nil {
+			for m := time.Duration(0); m < 2*time.Hour; m += 7 * time.Minute {
+				from := time.Date(2026, 11, 3, 4, 0, 0, 0, time.UTC).Add(m)
+				to, read := from.Add(100*ms), from.Add(50*ms)
+				for _, v := range []struct {
+					ttl  time.Duration
+					want bool
+				}{{day, true}, {day + 12*time.Hour, false}, {day - 12*time.Hour, false}, {2 * day, false}} {
+					val := cutIn(ist, read, time.Hour).Add(v.ttl)
+					if ok, why := CheckClockRead(p, *c.Offset, InstantLeaf(p, p, val, ms), Span{From: from, To: to, Zone: ist, Own: true}, true); ok != v.want {
+						t.Errorf("%s: clock + 1d at the hour learned in no zone, a replay's read at %s plus %s cut to the IST hour: holds %v (%s), want %v", map[bool]string{true: "FALSE RED", false: "FALSE GREEN"}[v.want], read.Format("15:04:05"), models.ShortDuration(v.ttl), ok, why, v.want)
+					}
+				}
+			}
 		}
 	}
 	verdict := map[bool]string{true: "FALSE RED", false: "FALSE GREEN"}
@@ -1292,8 +1313,8 @@ func TestAClientTestsTextOffsetCutToAnHourIsLearnedInTheApplicationsZone(t *test
 	if slow := learn(ist, inUTC, 70*time.Minute); slow.Kind != KindClockOffset || slow.Offset == nil || slow.Offset.Res != time.Hour || slow.Offset.AppZone != "+05:30" {
 		t.Fatalf("FALSE RED: a client test's text written in UTC, a slow call's windows, learned in IST: %s %+v (%s); want clock + 1d at the IST hour, naming +05:30", slow.Kind, slow.Offset, slow.Why)
 	}
-	if slow := learn(nil, inUTC, 70*time.Minute); slow.Kind != KindUnaccounted || slow.Bindable || slow.Offset != nil || !strings.HasPrefix(slow.Why, p+" = clock + 1d") || !strings.Contains(slow.Why, "stand 1h apart, a whole number of 1h") || !strings.Contains(slow.Why, "keploy cannot tell at which cut a replay must check it, so it refuses it. Record the test again") || !strings.HasSuffix(slow.Why, ". If your test supplies this value, have it supply the same value in every run, and keploy keeps comparing it") || strings.Contains(slow.Why, "no clock read by the app matched it") {
-		t.Errorf("FALSE GREEN: a client test's text written in UTC, a slow call's windows, the zone unread: %s %+v bindable=%v (%s); want no offset learned, refused naming the two cuts and how to correct it, never bound as the test's own value", slow.Kind, slow.Offset, slow.Bindable, slow.Why)
+	if slow := learn(nil, inUTC, 70*time.Minute); slow.Kind != KindClockOffset || slow.Bindable || slow.Offset == nil || slow.Offset.Res != time.Hour || slow.Offset.AppZone != "" || !strings.HasPrefix(slow.Why, p+" = clock + 1d") || !strings.Contains(slow.Why, ". Its two values stand 1h apart, a whole number of 1h") || strings.Contains(slow.Why, "no clock read by the app matched it") {
+		t.Errorf("FALSE RED: a client test's text written in UTC, a slow call's windows, the zone unread: %s %+v bindable=%v (%s); want clock + 1d at the hour, naming the gap, never bound as the test's own value", slow.Kind, slow.Offset, slow.Bindable, slow.Why)
 	}
 	for _, row := range []struct {
 		name string

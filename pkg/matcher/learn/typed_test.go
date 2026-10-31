@@ -1774,7 +1774,12 @@ func TestAnOffsetCutCoarserThanItsEncodingIsCheckedAtTheCut(t *testing.T) {
 	// stand a whole minute apart: one offset at the second holds both runs
 	// (from 29m30.9s up to 30m0.5s, and from 29m58.9s up to 30m28.5s), and
 	// one at the minute too, so keploy cannot tell at which cut a replay
-	// must check them: refused, naming both (offsetReading).
+	// must check them. The minute's check holds both, so the offset is
+	// read there (offsetReading), where a range of offsets about a minute
+	// wide, with the three cuts a replay's check spans, is no narrower than
+	// the minute the offset reads in: refused as too wide, naming the range
+	// at the minute (clockOffset), as any offset whose cut is its unit is
+	// but an hour's or a day's (models.ClockOffset.CoarseCut).
 	for _, row := range []struct {
 		ttl  time.Duration
 		read time.Time
@@ -1787,19 +1792,20 @@ func TestAnOffsetCutCoarserThanItsEncodingIsCheckedAtTheCut(t *testing.T) {
 		mc := clockOffsetCall{call: row.read.Add(600 * ms), fcall: fread.Add(600 * ms)}
 		mc.w = (&Window{Rec: Span{From: row.read.Add(-28 * sec), To: mc.call}, F: Span{From: fread.Add(-29 * sec), To: mc.fcall}}).ComparesOffsets()
 		ln := mc.classify(p, row.read.Truncate(time.Minute).Add(row.ttl), fread.Truncate(time.Minute).Add(row.ttl), sec, mc.w)
-		if want := cutAmbiguousWhy(p, row.want, time.Minute, time.Minute); ln.Kind != KindUnaccounted || ln.Offset != nil || ln.Why != want || !strings.Contains(ln.Why, "but its two values stand 1m apart, a whole number of 1m: an application that cuts its value to 1m") {
-			t.Errorf("FALSE GREEN? a minute cut plus %s at a second's encoding: %s %+v (%s); want refused: %s", row.ttl, ln.Kind, ln.Offset, ln.Why, want)
+		if !strings.Contains(ln.Why, "at a resolution of 1m (the cut both runs' values show") || ln.Kind != KindUnaccounted || ln.Offset != nil || !strings.Contains(ln.Why, "are not narrower than the minute the offset reads in, so a replay could not tell a time to live changed by a minute from it, and keploy refuses it") {
+			t.Errorf("FALSE GREEN? a minute cut plus %s at a second's encoding: %s %+v (%s); want refused as too wide at the minute", row.ttl, ln.Kind, ln.Offset, ln.Why)
 		}
 	}
 	// Two millisecond values the application does not cut that stand a
 	// whole number of seconds apart by chance (62 s, a slow call's): one
-	// offset at the millisecond holds both, and one at the second could:
-	// refused, naming both.
+	// offset at the millisecond holds both, and one at the second too, which
+	// holds a writer that cuts to the second as well: learned at the second
+	// (a cut is checked, never refused), naming the gap.
 	apart := clockOffsetCall{call: c.call, fcall: c.call.Add(62005 * ms)}
 	apart.w = (&Window{Rec: Span{From: apart.call.Add(-50 * ms), To: apart.call}, F: Span{From: apart.fcall.Add(-60 * ms), To: apart.fcall}}).ComparesOffsets()
-	apartAt := models.ClockOffset{Min: 30*time.Minute - 40*ms, Max: 30*time.Minute + 11*ms, Res: ms, Layout: models.LayoutTyped}
-	if ln := apart.classify(p, apart.call.Add(-40*ms+30*time.Minute), apart.fcall.Add(-45*ms+30*time.Minute), ms, apart.w); ln.Kind != KindUnaccounted || ln.Offset != nil || ln.Why != cutAmbiguousWhy(p, apartAt, 62*sec, sec) {
-		t.Errorf("two millisecond values 62 s apart: %s %+v (%s); want refused: %s", ln.Kind, ln.Offset, ln.Why, cutAmbiguousWhy(p, apartAt, 62*sec, sec))
+	apartAt := models.ClockOffset{Min: 30*time.Minute - 40*ms, Max: 30*time.Minute + 1010*ms, Res: sec, Layout: models.LayoutTyped}
+	if ln := apart.classify(p, apart.call.Add(-40*ms+30*time.Minute), apart.fcall.Add(-45*ms+30*time.Minute), ms, apart.w); ln.Kind != KindClockOffset || ln.Offset == nil || *ln.Offset != apartAt || ln.Why != clockOffsetEvidence(p, apartAt)+gapCutWhy(apartAt, ms, 62*sec) {
+		t.Errorf("FALSE RED: two millisecond values 62 s apart: %s %+v (%s); want the offset %+v at the second: %s", ln.Kind, ln.Offset, ln.Why, apartAt, clockOffsetEvidence(p, apartAt)+gapCutWhy(apartAt, ms, 62*sec))
 	}
 
 	// Thirty minutes cut to the second, each window 57 s wide: from
@@ -1900,8 +1906,29 @@ func TestAnExpiryOfThirtyDaysWithItsMillisecondsZeroedIsKeptAndCheckedAtTheSecon
 		oc.w = (&Window{Rec: Span{From: call.Add(-300 * ms), To: call}, F: Span{From: fcall.Add(-300 * ms), To: fcall}}).ComparesOffsets()
 		ln := oc.classify(p, rec, fcall.Add(month).Truncate(sec), ms, oc.w)
 		if drift == -1400*ms {
-			if ln.Kind != KindUnaccounted || ln.Offset != nil || !strings.Contains(ln.Why, "but its two values stand 1m apart, a whole number of 1m") {
-				t.Errorf("eui's expiresAt, F's read 1.4 s early, its value a whole minute on: %s %+v (%s); want refused, naming both cuts", ln.Kind, ln.Offset, ln.Why)
+			// Its two values a whole minute apart: learned at the minute,
+			// which holds both cuts (a cut is checked, never refused),
+			// naming the gap; a replay checks it there.
+			if ln.Kind != KindClockOffset || ln.Offset == nil || ln.Offset.Res != time.Minute || ln.Offset.Min > month || ln.Offset.Max <= month || !strings.Contains(ln.Why, ". Its two values stand 1m apart, a whole number of 1m: an application that cuts its value to 1m") {
+				t.Errorf("FALSE RED: eui's expiresAt, F's read 1.4 s early, its value a whole minute on: %s %+v (%s); want clock + 30d at the minute, naming the gap", ln.Kind, ln.Offset, ln.Why)
+				continue
+			}
+			from := call.Add(48 * time.Hour)
+			to := from.Add(300 * ms)
+			at := from.Add(150 * ms)
+			for _, row := range []struct {
+				name string
+				at   time.Time
+				want bool
+			}{
+				{"the read plus thirty days, cut to the second", at.Add(month).Truncate(sec), true},
+				{"twenty-nine days", at.Add(month - 24*time.Hour).Truncate(sec), false},
+				{"thirty-one days", at.Add(month + 24*time.Hour).Truncate(sec), false},
+				{"three minutes stale", at.Add(month - 3*time.Minute).Truncate(sec), false},
+			} {
+				if got, why := CheckClockRead(p, *ln.Offset, InstantLeaf(p, p, row.at, ms), Span{From: from, To: to}, true); got != row.want {
+					t.Errorf("%s: eui's expiresAt learned at the minute, %s: holds %v (%s), want %v", map[bool]string{true: "FALSE RED", false: "FALSE GREEN"}[row.want], row.name, got, why, row.want)
+				}
 			}
 			continue
 		}
@@ -1913,10 +1940,12 @@ func TestAnExpiryOfThirtyDaysWithItsMillisecondsZeroedIsKeptAndCheckedAtTheSecon
 
 // B1 and S2 of the review of the cut's first fix: two values cut to an hour
 // (its boundaries on a zone's half hour, which the epoch reads as thirty
-// minutes) show no offset (offsetCut: they stand a whole hour apart), even
-// where windows over an hour wide put one offset in both runs' bounds:
-// thirty minutes would read the hour cut finer than it is, and a time to
-// live changed by an hour could hold. A value that did not move (its text
+// minutes) show no offset finer than the hour (they stand a whole hour
+// apart, so it is read at the hour: offsetReading), even where windows over
+// an hour wide put one offset in both runs' bounds: thirty minutes would
+// read the hour cut finer than it is, and a time to live changed by an hour
+// could hold; the hour's range is no narrower than the hour, so none is
+// learned (models.ClockOffset.Narrow). A value that did not move (its text
 // drifted, not its moment) shows none either. Two values cut to the minute
 // that share two minutes, more than FullRoundLead, show one, at the minute.
 func TestACutCoarserThanTheLeadShowsNoOffset(t *testing.T) {
@@ -1933,8 +1962,8 @@ func TestACutCoarserThanTheLeadShowsNoOffset(t *testing.T) {
 	if g := sharedGrain(r.at, l.at); g != 30*time.Minute {
 		t.Fatalf("precondition: the two values share %s, want thirty minutes", g)
 	}
-	if o, ok := clockOffsetOf(r, l, w, nil); ok {
-		t.Errorf("FALSE GREEN? an hour cut on a zone's half hour: %+v (%s); want no offset", o, o)
+	if o, ok := clockOffsetOf(r, l, w, nil); ok && (o.Res != time.Hour || o.Narrow()) {
+		t.Errorf("FALSE GREEN? an hour cut on a zone's half hour: %+v (%s); want no offset finer than the hour, and none narrow enough to learn", o, o)
 	}
 	if o, ok := clockOffsetOf(r, r, w, nil); ok {
 		t.Errorf("a value that did not move: %+v; want no offset", o)
@@ -1951,8 +1980,8 @@ func TestACutCoarserThanTheLeadShowsNoOffset(t *testing.T) {
 	if g := sharedGrain(r.at, l.at); g != 30*time.Minute {
 		t.Fatalf("precondition: an hour cut plus ninety minutes shares %s, want thirty minutes", g)
 	}
-	if o, ok := clockOffsetOf(r, l, w, nil); ok {
-		t.Errorf("FALSE GREEN? an hour cut plus ninety minutes: %+v (%s); want no offset", o, o)
+	if o, ok := clockOffsetOf(r, l, w, nil); ok && (o.Res != time.Hour || o.Narrow()) {
+		t.Errorf("FALSE GREEN? an hour cut plus ninety minutes: %+v (%s); want no offset finer than the hour, and none narrow enough to learn", o, o)
 	}
 	// The recording reads at 12:02:58.5, F FullRoundLead later, past two
 	// minutes' turns: 14:02 and 14:04, two hours on, share two minutes.
@@ -2023,7 +2052,7 @@ func TestAnOffsetsCutIsTheOneItsValuesShowOrItsGapsWhereTheirsHoldsNone(t *testi
 		{"an hour cut on the half hour, plus two hours", ms, time.Date(2026, 10, 26, 13, 30, 0, 0, time.UTC), time.Date(2026, 10, 26, 14, 30, 0, 0, time.UTC), &Window{Rec: Span{From: time.Date(2026, 10, 26, 12, 29, 58, 950e6, time.UTC), To: time.Date(2026, 10, 26, 12, 29, 59, 50e6, time.UTC)}, F: Span{From: time.Date(2026, 10, 26, 12, 31, 0, 495e6, time.UTC), To: time.Date(2026, 10, 26, 12, 31, 0, 595e6, time.UTC)}}, time.Hour, ""},
 		{"a value that did not move", ms, read.Add(time.Hour), read.Add(time.Hour), narrow, 0, ""},
 	} {
-		o, why, ok := offsetReading("p", in(row.a, row.enc), in(row.b, row.enc), row.w, nil)
+		o, why, _, ok := offsetReading("p", in(row.a, row.enc), in(row.b, row.enc), row.w, nil)
 		if row.want != 0 && (!ok || why != "" || o.Res != row.want) || row.want == 0 && (ok || !strings.Contains(why, row.why) || (row.why == "") != (why == "")) {
 			t.Errorf("%s: %+v %v (%s); want the cut %s, why %q", row.name, o, ok, why, row.want, row.why)
 		}
@@ -3419,4 +3448,76 @@ func clientDriftsIn(zone *time.Location) *DriftCache {
 	dc := NewDriftCache()
 	dc.zone, dc.clientTests = zone, true
 	return dc
+}
+
+// An OAuth grant's expires_at = now + 30d, a millisecond $date the
+// application does not cut, whose two values (the recording's and record's
+// full round's) stand a whole number of seconds apart by chance (1m49s, one
+// recording in a thousand; api-server's TestStaffBlockAnOAuthClient): an
+// application that cuts its value to the second and adds a time to live of
+// no whole number of seconds writes such values too. A cut is checked, never
+// refused (founder decision, 2026-10-27): learned at the second, which holds
+// both readings, the line naming the gap and the cut, in keploy test and in
+// keploy mock's client tests, as its protocol types it and as its
+// millisecond text. A replay checks it at the second: the application's
+// value holds whether it cuts or not, wherever its read falls in its
+// second; a time to live changed by a day, or a value more than a cut
+// stale or ahead, fails.
+func TestMillisecondValuesAWholeNumberOfSecondsApartAreCheckedAtTheSecond(t *testing.T) {
+	const p = "body.docs.msgs.{}.expires_at"
+	ms, sec, day := time.Millisecond, time.Second, 24*time.Hour
+	call := time.Date(2026, 10, 30, 19, 44, 12, 155e6, time.UTC)
+	read := call.Add(-ms)
+	fread := read.Add(109 * sec)
+	c := clockOffsetCall{call: call, read: read, fcall: fread.Add(ms), fread: fread}
+	w := (&Window{Rec: Span{From: call.Add(-2 * ms), To: call}, F: Span{From: fread.Add(-ms), To: fread.Add(ms)}}).ComparesOffsets()
+	rec, live := read.Add(30*day), fread.Add(30*day)
+	want := models.ClockOffset{Min: 30*day - ms, Max: 30*day + sec + ms, Res: sec, Layout: models.LayoutTyped}
+	const gapLine = ". Its two values stand 1m49s apart, a whole number of 1s: an application that cuts its value to 1s and adds a time to live that is no whole number of it writes such values"
+	for _, row := range []struct {
+		name string
+		ln   Learned
+	}{
+		{"keploy test", c.classify(p, rec, live, ms, w)},
+		{"a client test", c.classifyClient(p, InstantLeaf(p, p, rec, ms), InstantLeaf(p, p, live, ms), w)},
+	} {
+		if row.ln.Kind != KindClockOffset || row.ln.Offset == nil || *row.ln.Offset != want || !strings.HasPrefix(row.ln.Why, clockOffsetEvidence(p, want)) || !strings.Contains(row.ln.Why, gapLine) {
+			t.Errorf("FALSE RED: %s, thirty days at the millisecond, its values 1m49s apart: %s %+v (%s); want the offset %+v at the second, naming the gap", row.name, row.ln.Kind, row.ln.Offset, row.ln.Why, want)
+		}
+	}
+	// As recorded: its millisecond text, the offset read in the text's
+	// layout.
+	if ln := c.classifyClient(p, millisText(p, rec), millisText(p, live), w); ln.Kind != KindClockOffset || ln.Offset == nil || ln.Offset.Min != want.Min || ln.Offset.Max != want.Max || ln.Offset.Res != sec || !strings.Contains(ln.Why, gapLine) {
+		t.Errorf("FALSE RED: a client test's millisecond text, thirty days, its values 1m49s apart: %s %+v (%s); want the offset at the second, naming the gap", ln.Kind, ln.Offset, ln.Why)
+	}
+	// A look-back of 300 ms, its values 1m49s apart: at the second the value
+	// stands within one second of its read, on both sides of it in the
+	// runs' windows, so no offset there holds both runs, and the
+	// millisecond's check would fail a writer that cuts to the second by
+	// where its read fell: refused, naming both cuts.
+	if ln := c.classify(p, read.Add(-300*ms), fread.Add(-300*ms), ms, w); ln.Kind != KindUnaccounted || ln.Offset != nil || !strings.Contains(ln.Why, "but its two values stand 1m49s apart, a whole number of 1s") || !strings.Contains(ln.Why, "so keploy has no offset to check at that cut, and refuses it") {
+		t.Errorf("FALSE GREEN? a look-back of 300 ms, its values 1m49s apart: %s %+v (%s); want refused, naming both cuts", ln.Kind, ln.Offset, ln.Why)
+	}
+	// A replay's call, its window 50 ms wide, its read anywhere in a second.
+	for phase := time.Duration(0); phase < sec; phase += 25 * ms {
+		from := time.Date(2026, 11, 2, 9, 0, 7, 0, time.UTC).Add(phase)
+		to, at := from.Add(50*ms), from.Add(20*ms)
+		for _, v := range []struct {
+			name  string
+			value time.Time
+			holds bool
+		}{
+			{"the read plus thirty days", at.Add(30 * day), true},
+			{"the read cut to the second plus thirty days and 154 ms", at.Truncate(sec).Add(30*day + 154*ms), true},
+			{"the read cut to the second plus thirty days and 999 ms", at.Truncate(sec).Add(30*day + 999*ms), true},
+			{"the read plus thirty-one days", at.Add(31 * day), false},
+			{"the read plus twenty-nine days", at.Add(29 * day), false},
+			{"the read plus thirty days and 3 s", at.Add(30*day + 3*sec), false},
+			{"the read plus thirty days less 3 s", at.Add(30*day - 3*sec), false},
+		} {
+			if got := want.Holds(v.value, ms, from, to); got != v.holds {
+				t.Errorf("%s: a replay's read %s into its second, %s: holds %v, want %v", map[bool]string{true: "FALSE RED", false: "FALSE GREEN"}[v.holds], at.Sub(at.Truncate(sec)), v.name, got, v.holds)
+			}
+		}
+	}
 }
