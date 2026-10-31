@@ -265,8 +265,11 @@ func TestSetScopeMocks(t *testing.T) {
 // first test in startup:, and what came between or after the tests in
 // worker:, so a reader who finds a test's call is the app's own work moves
 // it to worker: by hand. Without the switch every call outside every window
-// stays in startup:, as before. Mutation: drop the worker write
-// (upsertWorker) or the split (setScopeMocks), and the proven row fails.
+// stays in startup:, as before. Each test's entry keeps the key of the claim
+// it ran under (its test process's), which a moved entry needs to be served
+// in a set of two test processes. Mutation: drop the worker write
+// (upsertWorker), the split (setScopeMocks) or the keys (stampKeys), and
+// the proven row fails.
 func TestMockRecordListsCallsOutsideEveryWindowAsTheSets(t *testing.T) {
 	for _, proven := range []bool{true, false} {
 		t.Run(fmt.Sprintf("proven=%v", proven), func(t *testing.T) {
@@ -277,9 +280,10 @@ func TestMockRecordListsCallsOutsideEveryWindowAsTheSets(t *testing.T) {
 				t.Setenv(provenswitch.Env, "")
 			}
 			dir := t.TempDir()
-			a, b := mark("orders::TestA", 0, 10*time.Millisecond), mark("orders::TestB", 20*time.Millisecond, 30*time.Millisecond)
+			a, b := mark("orders::TestA", 0, 10*time.Millisecond), mark("users::TestB", 20*time.Millisecond, 30*time.Millisecond)
 			a.Outcome, b.Outcome = models.ScopeOutcomePassed, models.ScopeOutcomePassed
-			instr := &runnerInstr{composeInstr: newInstr(t, agentUpFromSetup, false, models.AppError{}), windows: []models.ScopeWindow{a, b}}
+			claims := []models.ScopeWindow{{Claim: "orders", Start: runnerT0.Add(-time.Millisecond)}, {Claim: "users", Start: runnerT0.Add(18 * time.Millisecond)}}
+			instr := &runnerInstr{composeInstr: newInstr(t, agentUpFromSetup, false, models.AppError{}), windows: []models.ScopeWindow{claims[0], a, claims[1], b}}
 			instr.mocks = []*models.Mock{
 				mockAt("mock-0", runnerT0.Add(-5*time.Millisecond)),
 				mockAt("mock-1", runnerT0.Add(5*time.Millisecond)),
@@ -297,11 +301,11 @@ func TestMockRecordListsCallsOutsideEveryWindowAsTheSets(t *testing.T) {
 			mapping, err := mapdb.New(zap.NewNop(), dir, "").GetMapping(context.Background(), set)
 			require.NoError(t, err)
 			require.NotNil(t, mapping)
-			own := map[string][]string{}
+			own, keys := map[string][]string{}, map[string]string{}
 			for _, tc := range mapping.TestCases {
-				own[tc.ID] = tc.MockNames()
+				own[tc.ID], keys[tc.ID] = tc.MockNames(), tc.Key
 			}
-			require.Equal(t, map[string][]string{"orders::TestA": {"mock-1"}, "orders::TestB": {"mock-3"}}, own)
+			require.Equal(t, map[string][]string{"orders::TestA": {"mock-1"}, "users::TestB": {"mock-3"}}, own)
 			var worker []string
 			for _, e := range mapping.Worker {
 				worker = append(worker, e.Name)
@@ -309,8 +313,10 @@ func TestMockRecordListsCallsOutsideEveryWindowAsTheSets(t *testing.T) {
 			if !proven {
 				require.Equal(t, []string{"mock-0", "mock-2", "mock-4"}, mapping.StartupMockNames())
 				require.Empty(t, worker)
+				require.Equal(t, map[string]string{"orders::TestA": "", "users::TestB": ""}, keys, "without the switch no test's key is written")
 				return
 			}
+			require.Equal(t, map[string]string{"orders::TestA": "orders", "users::TestB": "users"}, keys, "each test keeps its process's claim key")
 			require.Equal(t, []string{"mock-0"}, mapping.StartupMockNames(), "only what came before the first test is startup:")
 			require.Equal(t, []string{"mock-2", "mock-4"}, worker, "what came between and after the tests is worker:")
 		})
