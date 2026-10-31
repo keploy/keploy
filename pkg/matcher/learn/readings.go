@@ -1236,6 +1236,16 @@ func pickApartUnaccounted(where, apart string) string {
 	return "the moment record's full round saw in it stands " + where + ", while the moment it was recorded with stands in " + apart + ", where keploy learned a read of the application's clock and record's full round saw the application send another moment than the value's, so the value is no copy of it (a copy moves with its source), and no other earlier place is its source: it may be a pick from what the application was given, by its clock, and keploy cannot tell it is a read of the clock. If the field is a time the application reads from its own clock, declare it noise in keploy.yml, and keploy stops comparing it"
 }
 
+// apartJudgedWhy follows why a value judged as its call's own read of the
+// clock is refused, where the echo set aside apart, a request's read of the
+// application's clock that held the moment the value was recorded with and
+// that F saw send another moment than the value's (follows.refuteEcho), as
+// its source: it names that read, and why keploy judged the value as the
+// call's own read instead of a copy of it.
+func apartJudgedWhy(apart string) string {
+	return "keploy judged it as its call's own read of the clock because the moment it was recorded with stands only in " + apart + ", where keploy learned a read of the application's clock and record's full round saw the application send another moment than the value's, so the value is no copy of it (a copy moves with its source)"
+}
+
 // pickUnaccounted is why a drifted value whose moment in record's full round
 // stands at where (earlier in the test), and whose recorded moment no earlier
 // place holds, is refused (unaccounted).

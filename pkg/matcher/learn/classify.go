@@ -1543,7 +1543,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// echo is answered, never asserted against a source.
 		if ln.Kind == KindNoise || ln.Kind == KindEcho {
 			v := dc.ofIn(r.Value, l.Value, w, at)
-			why, sourced, offWhy := "", false, ""
+			why, sourced, offWhy, apart := "", false, "", ""
 			if unreadReq != "" {
 				why = unreadReq
 			} else if where, asRecorded := dc.requestHolds(lostMoments(v), v.liveMoments, served); where != "" {
@@ -1555,6 +1555,13 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 				offWhy = why
 			} else if why = unaccounted(dc, v, at, served, raw, fol); why != "" {
 				sourced = true
+				// Refused as a possible pick whose recorded moment stands
+				// only at a read of the clock F saw send another moment
+				// (follows.apart, pickApartUnaccounted): set aside as its
+				// source, and no other place refuted.
+				if fol != nil && fol.apart != "" && fol.refused == "" && v.unparsed == "" {
+					apart = fol.apart
+				}
 				if fol != nil && fol.refused != "" {
 					why += "; " + fol.refused
 				}
@@ -1592,8 +1599,25 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 			// request's checks stands too, and anything else the reading
 			// learns (noise, an echo, a refusal) the copy rule does not
 			// take: it takes a read of the clock alone (sinceTestBegin).
-			if sourced && skip&skipBoth == skipBoth && dc.clientTests && textClockRead(r.Value, l.Value) != nil {
+			//
+			// So, in the call's own reading, does one the echo refused as a
+			// possible pick only because the moment it was recorded with
+			// stands at a request's read of the application's clock that F
+			// saw send another moment than the value's (apart: no copy of
+			// it, a copy moves with its source; api-server's endpoint poll,
+			// dirtyAt <= now-2s, in the second the set's start-up read the
+			// clock in). That second is one the application read its clock
+			// in, so the value is judged as its call's own read of the
+			// clock: a read its window holds in both runs, or the clock plus
+			// an offset the offset rules learn, checked so at every replay;
+			// refused, naming the read set aside, where neither holds, and
+			// never bound as the test's value (F's moment stands in what the
+			// application was given). A read F saw send the value's moment
+			// too is a copy, followed as before (echoServed).
+			if sourced && (skip&skipBoth == skipBoth || apart != "") && dc.clientTests && textClockRead(r.Value, l.Value) != nil {
 				why = ""
+			} else {
+				apart = ""
 			}
 			// In keploy mock's client tests, a changed instant only where the
 			// call's window shows it a read of the application's clock.
@@ -1623,8 +1647,11 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 					// no order of places is needed either. Never where the
 					// value may be a clock read at a cut keploy cannot tell
 					// (cutWhy): that stays refused.
-					bindable = cutWhy == "" && ln.Kind == KindNoise && skip&skipSource == 0 && echoedPart(dc, v, resp) == "" &&
+					bindable = cutWhy == "" && ln.Kind == KindNoise && skip&skipSource == 0 && apart == "" && echoedPart(dc, v, resp) == "" &&
 						(fol == nil || fol.first == "" && fol.refuted == "")
+					if apart != "" {
+						why += "; " + apartJudgedWhy(apart)
+					}
 				}
 			}
 			if why != "" {
