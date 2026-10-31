@@ -115,7 +115,21 @@ func TestFrameStreamsEndWithTheirMarkerOnRequest(t *testing.T) {
 	t.Run("test cases", func(t *testing.T) {
 		syncmgr.Get().SetWatermark(nil) // no hold: test cases go at once
 		svc := streamsSvc{tc: make(chan *models.TestCase, 4), mocks: make(chan *models.Mock), maps: make(chan models.TestMockMapping)}
-		core, logs := observer.New(zapcore.InfoLevel)
+		core, logs := observer.New(zapcore.DebugLevel)
+		// Counted after the marker went out and before the session's
+		// summary, which the handler defers, reads them: the handler logs
+		// the marker's flush on its own goroutine, and this hook runs there.
+		// The summary must say what the marker said (the counts are read
+		// once), not these too.
+		var markerSeen int
+		core = zapcore.RegisterHooks(core, func(e zapcore.Entry) error {
+			if e.Message == streamEndMarkerSent {
+				markerSeen++
+				syncmgr.Get().NoteNotHandedOn()
+				syncmgr.Get().NoteUnnamedCaller()
+			}
+			return nil
+		})
 		a := &Agent{logger: zap.New(core), svc: svc}
 		tok := rand.Text() // its own each run: a token ended stays ended
 		// A request a pause cost before this session, and one the ingress
@@ -199,10 +213,6 @@ func TestFrameStreamsEndWithTheirMarkerOnRequest(t *testing.T) {
 		if sum.UnnamedCallers != 2 {
 			t.Fatalf("the marker says %d calls came from unnamed callers, want this session's 2", sum.UnnamedCallers)
 		}
-		// Counted after the marker was written: the agent's summary says
-		// what the marker said (the counts are read once), not more.
-		syncmgr.Get().NoteNotHandedOn()
-		syncmgr.Get().NoteUnnamedCaller()
 		if _, err := mr.NextPart(); err != io.EOF {
 			t.Fatalf("the stream did not end after its marker: %v", err)
 		}
@@ -218,6 +228,9 @@ func TestFrameStreamsEndWithTheirMarkerOnRequest(t *testing.T) {
 			return got[0].ContextMap()
 		}
 		done() // the handler has returned, its summary said
+		if markerSeen != 1 {
+			t.Fatalf("the agent logged the marker's flush %d times, want once", markerSeen)
+		}
 		sumLine := fields("agent: recording complete")
 		for name, want := range map[string]uint64{
 			"tcs_not_recorded_under_pressure": 3,

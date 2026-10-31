@@ -79,6 +79,11 @@ const notHandedOnSaid = "agent: some test cases were lost: the app served their 
 // whether a test made them, and recorded none as a test case.
 const unnamedCallersSaid = "agent: some calls to the app were not recorded as test cases: keploy could not name their callers in its PID namespace, so it could not tell whether a test made them"
 
+// streamEndMarkerSent is what the agent logs (debug) once an incoming
+// stream's end marker is flushed, with the counts it carried: the session's
+// summary, deferred, follows it and says the same counts (sessionLost).
+const streamEndMarkerSent = "agent: incoming stream ended with its marker"
+
 // massSuppressed reports whether a session that sent sent test cases and
 // suppressed suppressed of them suppressed a large share
 // (massSuppressionPercent): its summary says so at WARN.
@@ -1038,6 +1043,10 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			flusher.Flush()
+			a.logger.Debug(streamEndMarkerSent,
+				zap.Int("tcs_sent_to_cli", tcsSentSoFar),
+				zap.Uint64("tcs_not_handed_on", notHandedOn),
+				zap.Uint64("calls_from_unnamed_callers", unnamedCallers))
 			endedBy = "end"
 			return
 		case <-tickC:
