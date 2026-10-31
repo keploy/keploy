@@ -2718,6 +2718,9 @@ func (m *MockManager) exactConsume(mk *models.Mock, evicts bool) exactVerdict {
 // (exact_round.go), as every snapshot does, so a snapshot sees a consume,
 // its take and the observer's account of it all, or none of them.
 func (m *MockManager) exactConsumeAt(mk *models.Mock, evicts bool, g *roundGuard, observe func()) exactVerdict {
+	if f := m.exact.round.onConsume.Load(); f != nil && mk != nil {
+		(*f)(mk.Name)
+	}
 	return settleInForce(m, exactRefused, func(v *exactView) (exactVerdict, <-chan struct{}) {
 		if v != nil && mk != nil && (evicts || v.isWorker(mk.Name)) {
 			if _, own := v.index[mk.Name]; !own {

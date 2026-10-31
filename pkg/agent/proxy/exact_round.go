@@ -4,6 +4,7 @@ import (
 	"context"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
@@ -79,6 +80,9 @@ type roundState struct {
 	// let the round lock go, before what it tells the replay
 	// (flagMockAsUsed).
 	onSettled func()
+	// onConsume is a test seam too (MockManager.OnConsume): it runs as a
+	// consume is about to be settled, no lock held.
+	onConsume atomic.Pointer[func(name string)]
 	// moveCh is closed, and dropped, as the round moves (bump, a staging,
 	// the manager's Close): a call waiting for the store to open the test
 	// the learn tracker began (AwaitRoundMove) wakes on it. Made by the

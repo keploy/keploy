@@ -12,41 +12,67 @@ import (
 	"go.uber.org/zap"
 )
 
-// ownRepeats are the recordings of answered, the open test's MySQL
-// recordings that answered (integrations.OwnRepeatRead), that the command
-// matches as the matcher judges it under exact serving: the command is one
-// call more than the test recorded of it unless the test recorded it again.
-// The match is a dry one (matchOptions.probed) on a view that holds only
-// answered and the connection's prepared statements: it consumes nothing,
-// binds no statement id and sends no served event. Each recording it finds
-// is passed over by the next, so it ends with every one the command matches.
-func ownRepeats(ctx context.Context, req mysql.Request, db integrations.MockMemDb, answered []*models.Mock, decodeCtx *wire.DecodeContext, noiseEngine *schemanoise.Engine, userBodyNoise map[string][]string) []*models.Mock {
-	view := answeredOnly{MockMemDb: db, mocks: answered}
-	own := make(map[*models.Mock]struct{}, len(answered))
-	for _, mk := range answered {
-		own[mk] = struct{}{}
+// ownCommands is the index of the open test's own MySQL recordings the
+// own-call check reads (integrations.OwnRepeatRead), each filed under its
+// command's type (commandType): the matcher never answers a command with a
+// recording of another type, so a command reads only the test's recordings
+// of its type, never every recording the test owns.
+var ownCommands = integrations.NewOwnIndex(models.MySQL, func(mk *models.Mock) (string, bool) {
+	if len(mk.Spec.MySQLRequests) == 0 {
+		return "", false
+	}
+	return commandType(mk.Spec.MySQLRequests[0].PacketBundle), true
+})
+
+// commandType is a command's type, "" for one with no header.
+func commandType(b mysql.PacketBundle) string {
+	if b.Header == nil {
+		return ""
+	}
+	return b.Header.Type
+}
+
+// ownRepeats are the recordings of own, the open test's own MySQL
+// recordings of the command's type, answered or not, that the command
+// matches as the matcher judges it under exact serving, in the order the
+// matcher finds them, at most limit of them (0: all). The own-call check
+// (integrations.OwnRepeatRead) asks for one; a command that then missed with
+// the background hidden, one call more than the test recorded, for all of
+// them: how often the test recorded it. The match is a dry one
+// (matchOptions.probed) on a view that holds only own and the connection's
+// prepared statements: it consumes nothing, binds no statement id and sends
+// no served event. Each recording it finds is passed over by the next.
+func ownRepeats(ctx context.Context, req mysql.Request, db integrations.MockMemDb, own []*models.Mock, decodeCtx *wire.DecodeContext, noiseEngine *schemanoise.Engine, userBodyNoise map[string][]string, limit int) []*models.Mock {
+	if len(own) == 0 {
+		return nil
+	}
+	view := answeredOnly{MockMemDb: db, mocks: own}
+	ownSet := make(map[*models.Mock]struct{}, len(own))
+	for _, mk := range own {
+		ownSet[mk] = struct{}{}
 	}
 	opts := matchOptions{refused: make(map[*models.Mock]struct{})}
 	var out []*models.Mock
-	for {
+	for limit == 0 || len(out) < limit {
 		var probed *models.Mock
 		opts.probed = &probed
 		if _, _, _, err := matchCommandWith(ctx, zap.NewNop(), req, view, decodeCtx, noiseEngine, userBodyNoise, opts); err != nil || probed == nil {
 			return out
 		}
 		// A connection's prepared statement the scan reads too is no
-		// recording of the test's: passed over, as each answered one is.
-		if _, ok := own[probed]; ok {
+		// recording of the test's: passed over, as each own one is.
+		if _, ok := ownSet[probed]; ok {
 			out = append(out, probed)
 		}
 		opts.refused[probed] = struct{}{}
 	}
+	return out
 }
 
 // answeredOnly is the store ownRepeats matches a command on: the open test's
-// answered recordings as its only per-test mocks, under exact serving, each
-// of them the test's own, with the connection's prepared statements and the
-// test's window read from the store; no session, start-up or background
+// own recordings of its type as its only per-test mocks, under exact
+// serving, with the connection's prepared statements and the test's window
+// read from the store; no session, start-up or background
 // recording, and no consume (the dry match reaches none).
 type answeredOnly struct {
 	integrations.MockMemDb

@@ -366,3 +366,123 @@ func TestACallPairedInTheFullRoundOneMoreThanTheTestRecordedMissesInTheConfirmin
 		})
 	}
 }
+
+// Under the proven switch, two identical requests made at once, of a request
+// the open test recorded once, while the background holds an identical
+// recording (the worker scope's under today's rules, the pool's under the
+// background rules): one is answered with the test's own recording, and the
+// other misses as one call more than the test recorded, recorded once. The
+// background's recording stays unspent. The interleave is fixed, not timed:
+// the first request matches the test's recording, and before its consume
+// settles the second runs to its end (OnConsume), so the first finds the
+// recording taken and is matched again. Decided on what the test had
+// answered so far, both requests read the background, and the first was
+// answered with the background's copy every run: a test whose app sent a
+// recorded call twice at once (a double submit, a client retry) passed.
+func TestTwoIdenticalRequestsAtOnceOfARequestTheTestRecordedOnceAnswerOnlyOne(t *testing.T) {
+	for _, scope := range []string{"worker", "pool"} {
+		t.Run(scope, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, "1")
+			bg := workerProbe("mock-"+scope+"-x", time.Second, "/x", scope)
+			own := workerProbe("mock-own-x", 4*time.Second, "/x", "own")
+			mm := stagedManager(t, nil, []*models.Mock{bg, own})
+			mm.SeedRecordedWindows([]models.TestWindow{{TestCase: "test-a", Start: exactT0.Add(3 * time.Second), End: exactT0.Add(5 * time.Second)}})
+			pool := []string(nil)
+			if scope == "worker" {
+				mm.ServeExactWorker([]string{bg.Name})
+			} else {
+				pool = []string{bg.Name}
+				mm.ServeExactBackground(models.RecordedWithS12Routing, pool, nil)
+			}
+			mm.ServeExactPool(models.PoolKeyNone, pool)
+			mm.ServeExactTest("test-a", []*models.Mock{roundMock(mm, own.Name)})
+			if !mm.ExactServing() || integrations.S12Background(mm) != (scope == "pool") {
+				t.Fatalf("precondition: test-a is not served exactly, by the %s's rules", scope)
+			}
+
+			armed := true
+			var second string
+			var secondMiss *models.MockMismatchReport
+			mm.OnConsume(func(name string) {
+				if name != own.Name || !armed {
+					return
+				}
+				armed = false
+				second, secondMiss = httpMissCall(t, mm, "/x")
+			})
+			first, miss := httpMissCall(t, mm, "/x")
+			mm.OnConsume(nil)
+			if armed {
+				t.Fatalf("precondition: the first GET /x never came to consume test-a's recording (answered %q, miss %+v)", first, miss)
+			}
+			if second != "own" {
+				t.Fatalf("the GET /x that ran while the first was consuming was answered %q (miss %+v); want test-a's own", second, secondMiss)
+			}
+			if first != "" {
+				t.Fatalf("the first GET /x, whose recording the second took, was answered %q: two calls of a call recorded once both passed", first)
+			}
+			if miss.MissKind != models.MissExtraCall || miss.Recorded != 1 {
+				t.Fatalf("the first GET /x missed as %q, recorded %d; want %q, recorded 1", miss.MissKind, miss.Recorded, models.MissExtraCall)
+			}
+
+			mm.ServeExactPool(models.PoolKeyNone, pool)
+			if got, miss := httpMissCall(t, mm, "/x"); got != scope {
+				t.Fatalf("the GET /x between tests was answered %q (miss %+v); want the %s's, unspent", got, miss, scope)
+			}
+		})
+	}
+}
+
+// The generic parser's row of the same: two identical exchanges sent at once,
+// of an exchange the open test recorded once, on a set whose pool holds an
+// identical recording. One is answered with the test's own recording, the
+// other misses as one exchange more than the test recorded, and the pool's
+// recording stays unspent.
+func TestTwoIdenticalExchangesAtOnceOfAnExchangeTheTestRecordedOnceAnswerOnlyOne(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	now := time.Now()
+	start := now.Add(time.Second)
+	pool := ownRepeatExchange("mock-pool-ping", "PING", "POOL", now)
+	own := ownRepeatExchange("mock-own-ping", "PING", "OWN1", start.Add(100*time.Millisecond))
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	mm.SeedRecordedWindows([]models.TestWindow{{TestCase: "test-0", Start: start, End: start.Add(900 * time.Millisecond)}})
+	mm.SetMocksWithWindow([]*models.Mock{own}, []*models.Mock{pool}, models.BaseTime, now.Add(time.Hour))
+	poolNames := []string{pool.Name}
+	mm.ServeExactBackground(models.RecordedWithS12Routing, poolNames, nil)
+	mm.ServeExactPool(models.PoolKeyNone, poolNames)
+	mm.ServeExactTest("test-0", []*models.Mock{roundMock(mm, own.Name)})
+	if !mm.ExactServing() {
+		t.Fatal("precondition: test-0 is not served exactly")
+	}
+
+	armed := true
+	var second string
+	var secondMiss *models.MockMismatchReport
+	mm.OnConsume(func(name string) {
+		if name != own.Name || !armed {
+			return
+		}
+		armed = false
+		second, secondMiss = genericCall(t, mm, "PING")
+	})
+	first, miss := genericCall(t, mm, "PING")
+	mm.OnConsume(nil)
+	if armed {
+		t.Fatalf("precondition: the first PING never came to consume test-0's recording (answered %q, miss %+v)", first, miss)
+	}
+	if second != "OWN1" {
+		t.Fatalf("the PING sent while the first was consuming was answered %q (miss %+v); want test-0's own OWN1", second, secondMiss)
+	}
+	if first != "" {
+		t.Fatalf("the first PING, whose recording the second took, was answered %q: two exchanges of one recorded once both passed", first)
+	}
+	if miss.MissKind != models.MissExtraCall || miss.Recorded != 1 {
+		t.Fatalf("the first PING missed as %q, recorded %d; want %q, recorded 1", miss.MissKind, miss.Recorded, models.MissExtraCall)
+	}
+
+	mm.ServeExactPool(models.PoolKeyNone, poolNames)
+	if got, miss := genericCall(t, mm, "PING"); got != "POOL" {
+		t.Fatalf("the PING between tests was answered %q (miss %+v); want the pool's POOL, unspent", got, miss)
+	}
+}

@@ -44,8 +44,39 @@ func (h *HTTP) extraCall(ctx context.Context, input *req, mockDb integrations.Mo
 	return max(n, 1)
 }
 
-// answeredMatch is the dry match extraCall and OwnRepeatRead read a request
-// against some of the open test's answered mocks with: whether the request
+// ownCall reports whether the request is one of the open test's own calls
+// (integrations.OwnRepeatRead): whether it matches one of the test's own HTTP
+// recordings, answered or not, as the matcher judges it (answeredMatch). It
+// reads only the recordings the strict pass's index of the test's own files
+// for the request (strictOwned.at: those of its method and masked path, those
+// of its method that learned a place of their URL, and those that declare
+// variables), the only ones the variable and strict passes, which decide
+// every call under the proven switch, may answer it with: never every
+// recording the test owns. db is the call's held store, base the store it is
+// held from, whose index the strict pass keeps too.
+func (h *HTTP) ownCall(ctx context.Context, input *req, db, base integrations.MockMemDb, headerNoise, bodyNoise map[string][]string, urlNoise []string, autoURLDynamic, schemaNoiseStrict bool) bool {
+	sr, ok := db.(integrations.SharedReads)
+	if !ok {
+		return false
+	}
+	n := h.newStrictNoise(headerNoise, bodyNoise, urlNoise)
+	ix, _, owned, ok := h.strictIx.owned.of(base, sr, urlNoiseKey(n.url), func(owned []*models.Mock) *strictOwned { return buildStrictOwned(owned, n) })
+	if !ok {
+		return false
+	}
+	at := ix.at(newStrictSieve(input, n))
+	if len(at) == 0 {
+		return false
+	}
+	mocks := make([]*models.Mock, len(at))
+	for i, p := range at {
+		mocks[i] = owned[p]
+	}
+	return h.answeredMatch(ctx, input, db, headerNoise, bodyNoise, urlNoise, autoURLDynamic, false, schemaNoiseStrict, true)(mocks)
+}
+
+// answeredMatch is the dry match extraCall and ownCall read a request
+// against some of the open test's own mocks with: whether the request
 // matches one of mocks, as the matcher judges it, on a view that holds only
 // them and that no match can consume, with the test's bindings on a copy (a
 // mock that declares a variable is matched as it was answered, and the dry

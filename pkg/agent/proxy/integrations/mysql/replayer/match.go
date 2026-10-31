@@ -386,16 +386,19 @@ type matchOptions struct {
 func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext, noiseEngine *schemanoise.Engine, userBodyNoise map[string][]string) (*mysql.Response, bool, *mockMiss, error) {
 	call := integrations.MarkCallRound(mockDb)
 	db, restaged := integrations.HoldToRound(mockDb, call)
-	// A command one of the open test's own recordings already answered, as
-	// the matcher judges it (ownRepeats), is matched with the set's
+	// A command one of the open test's own recordings is, answered or not,
+	// as the matcher judges it (ownRepeats), is matched with the set's
 	// background hidden (integrations.OwnRepeatRead): no pool or worker
 	// recording answers a command one more than the test recorded, which then
-	// misses as such, its background copy left unspent.
-	var repeated []*models.Mock
+	// misses as such, its background copy left unspent, even when two of
+	// them are run at once (the retry below reads the same hidden store).
+	var own []*models.Mock
 	held := db
-	db = integrations.OwnRepeatRead(db, call, models.MySQL, func(answered []*models.Mock) bool {
-		repeated = ownRepeats(ctx, req, held, answered, decodeCtx, noiseEngine, userBodyNoise)
-		return len(repeated) > 0
+	hidden := false
+	db = integrations.OwnRepeatRead(db, call, func() bool {
+		own = ownCommands.Of(held, commandType(req.PacketBundle))
+		hidden = len(ownRepeats(ctx, req, held, own, decodeCtx, noiseEngine, userBodyNoise, 1)) > 0
+		return hidden
 	})
 	var opts matchOptions
 	resp, ok, miss, err := matchCommandWith(ctx, logger, req, db, decodeCtx, noiseEngine, userBodyNoise, opts)
@@ -441,8 +444,8 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 		miss.call = call
 		// One command more than the open test recorded: its own recordings
 		// of it answered, and the background was hidden from it.
-		if !miss.restaged {
-			miss.extraCall = len(repeated)
+		if !miss.restaged && hidden {
+			miss.extraCall = len(ownRepeats(ctx, req, held, own, decodeCtx, noiseEngine, userBodyNoise, 0))
 		}
 	}
 	return resp, ok, miss, err

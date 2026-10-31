@@ -6,21 +6,22 @@ import (
 )
 
 // A CALL ONE MORE THAN THE OPEN TEST'S OWN RECORDINGS OF IT
-// (integrations.HideBackground; keploy #4745's F20).
+// (integrations.HideBackground).
 //
 // A view shows a test a background after the test's own recordings
 // (exactView.shows): under the background rules the pool's and the reached
 // worker scope's data-plane recordings, under any rules the reached worker
-// scope's (ServeExactWorker), each answering once in the staging. A parser that finds a call identical to one the open test's own
-// recordings already answered reads the call's held store with the
-// background hidden: none of its reads holds a background recording that is
-// not the open test's own, and its consume and spend doors refuse one. The
-// call then finds the test's own recordings not yet answered, if any, and
-// otherwise misses as one call more than the test recorded
-// (models.MissExtraCall), whatever the background holds of it: a duplicate
-// of a recorded call never passes answered by a call the application made
-// between tests or from a worker. The background's recording is not spent,
-// and still answers the call it is the recording of.
+// scope's (ServeExactWorker), each answering once in the staging. A parser
+// that finds a call is one of the open test's own recordings, answered or
+// not, reads the call's held store with the background hidden: none of its
+// reads holds a background recording that is not the open test's own, and
+// its consume and spend doors refuse one. The call then finds the test's own
+// recordings not yet answered, if any, and otherwise misses as one call more
+// than the test recorded (models.MissExtraCall), whatever the background
+// holds of it: a duplicate of a recorded call never passes answered by a
+// call the application made between tests or from a worker, made after the
+// test's own call or at once with it. The background's recording is not
+// spent, and still answers the call it is the recording of.
 
 // HideBackground implements integrations.BackgroundHider: h, in place (it is
 // one call's, as ServingFor's is), with the background hidden from its reads
@@ -114,4 +115,18 @@ func (h *heldScope) UpdateUnFilteredMock(old, new *models.Mock) bool {
 
 func (h *heldScope) MarkMockAsUsed(mock models.Mock) bool {
 	return !h.hides(&mock) && h.roundScope.MarkMockAsUsed(mock)
+}
+
+// OnConsume is a test seam: f, when not nil, runs on a consuming call's
+// goroutine as the store is about to settle the consume of the recording
+// named name, holding no lock of the store's; nil removes it. A test runs
+// another call to its end between a call's match and its consume with it, so
+// two calls interleave the same way every run, never by timing. Production
+// code never sets it.
+func (m *MockManager) OnConsume(f func(name string)) {
+	if f == nil {
+		m.exact.round.onConsume.Store(nil)
+		return
+	}
+	m.exact.round.onConsume.Store(&f)
 }
