@@ -871,7 +871,6 @@ func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, 
 			where = "earlier in the test"
 		}
 		if ap != nil && ap.at != "" {
-			ap.picked = true
 			return pickApartUnaccounted(where, ap.at)
 		}
 		return pickUnaccounted(where)
@@ -899,6 +898,13 @@ func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, 
 				where = "earlier in the recording"
 			}
 			for _, s := range e.Seen {
+				// A read set aside as no source of the value (apartReads:
+				// F saw it send another moment) is no place a word of it
+				// came from either: the value is read as with no read
+				// there.
+				if ap.aside(e, s) {
+					continue
+				}
 				// An answer's own clock stamp is no place a value came
 				// from (Seen.Stamp), unless a stamp F served holds a word
 				// the value took in F (stampsEchoed).
@@ -1247,12 +1253,6 @@ func pickApartUnaccounted(where, apart string) string {
 func apartJudgedWhy(apart string) string {
 	return "keploy judged it as its call's own read of the clock because the moment it was recorded with stands only in " + apart + ", where keploy learned a read of the application's clock and record's full round saw the application send another moment than the value's, so the value is no copy of it (a copy moves with its source)"
 }
-
-// apartWordWhy follows apartJudgedWhy where a text judged so holds no one
-// changed word a replay can check as that read (wordRead, clientWord):
-// another word of it changed too, or the text around it did, or the word is
-// no read its call's window holds in both runs.
-const apartWordWhy = "it holds no one changed word that its call's window shows a read of the application's clock in both runs, with the rest of the text the same in both, so keploy has no read of it to check at every replay and does not leave it unchecked. If the field is a time the application reads from its own clock, declare it noise in keploy.yml, and keploy stops comparing it"
 
 // pickUnaccounted is why a drifted value whose moment in record's full round
 // stands at where (earlier in the test), and whose recorded moment no earlier

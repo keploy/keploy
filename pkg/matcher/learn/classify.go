@@ -891,13 +891,6 @@ type Learned struct {
 	// it), which the rule's rescue in keploy mock's client tests reads
 	// again without it (classifyRead).
 	byOffset bool
-	// apart, of a text learned as noise only as its call's own read of the
-	// clock past a request's read of the application's clock set aside as
-	// its source (classifyRead's apart: a text holding the instant among
-	// other words), names that read: the text is taken only as the read of
-	// its one changed word a replay checks (wordRead), and refused naming
-	// the read otherwise (clientWord, apartWordWhy), never left noise.
-	apart string
 	// Bindable, of a KindUnaccounted leaf of keploy mock's client test
 	// (DriftCache.ClientTests), says the value is one its test gave the
 	// application, first sent at this call: keploy found no source of it
@@ -1556,10 +1549,6 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// pick from it by the clock whose pick in F the request does not
 		// list); and only where its readings account for all it changed. An
 		// echo is answered, never asserted against a source.
-		// apart: the read of the application's clock set aside as the
-		// value's source, where the value is judged as its call's own read
-		// past it (below).
-		apart := ""
 		if ln.Kind == KindNoise || ln.Kind == KindEcho {
 			v := dc.ofIn(r.Value, l.Value, w, at)
 			why, sourced, offWhy := "", false, ""
@@ -1574,16 +1563,12 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 				offWhy = why
 			} else if why = unaccounted(dc, v, at, served, raw, fol, ap); why != "" {
 				sourced = true
-				// Refused as a possible pick whose recorded moment stands
-				// only at a read of the clock F saw send another moment
-				// (apartReads, pickApartUnaccounted): set aside as its
-				// source, and no other place refuted. unaccounted gives that
-				// refusal before the word rule reads a word (refused), so
-				// refused is "" here; the guard keeps a refusal of the word
-				// rule from ever being lifted with it.
-				if ap.picked && (fol == nil || fol.refused == "") && v.unparsed == "" {
-					apart = ap.at
-				}
+				// A possible pick whose recorded moment stands only at a
+				// read of the clock F saw send another moment (apartReads)
+				// stays refused, naming that read (pickApartUnaccounted):
+				// the read set aside is no evidence against a pick, which
+				// the echo refuses without the read too (holdsApart: F's
+				// moment alone held), so it lifts no refusal.
 				if fol != nil && fol.refused != "" {
 					why += "; " + fol.refused
 				}
@@ -1622,30 +1607,18 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 			// learns (noise, an echo, a refusal) the copy rule does not
 			// take: it takes a read of the clock alone (sinceTestBegin).
 			//
-			// So, in the call's own reading, does one the echo refused as a
-			// possible pick only because the moment it was recorded with
-			// stands at a request's read of the application's clock that F
-			// saw send another moment than the value's (apart: no copy of
-			// it, a copy moves with its source; api-server's endpoint poll,
-			// dirtyAt <= now-2s, in the second the set's start-up read the
-			// clock in). That second is one the application read its clock
-			// in, so the value is judged as its call's own read of the
-			// clock: a read its window holds in both runs, or the clock plus
-			// an offset the offset rules learn, checked so at every replay;
-			// refused, naming the read set aside, where neither holds, and
-			// never bound as the test's value (F's moment stands in what the
-			// application was given). A read F saw send the value's moment
-			// too is a copy, followed as before (echoServed). One rule for
-			// every form of the value: one instant whole, or a text that
-			// holds it as one word among others (dirty<=1793443933;shard=7),
-			// which is taken only as the read of that one changed word, the
-			// text around it the same in both runs and still compared
-			// (clientWord, wordRead: the word judged as above), and refused,
-			// naming the read set aside, where it is none (Learned.apart),
-			// never left noise no replay checks.
-			// (apart is set only where sourced is, and read only once why
-			// is "" here.)
-			if sourced && dc.clientTests && (apart != "" || skip&skipBoth == skipBoth && textClockRead(r.Value, l.Value) != nil) {
+			// A value whose recorded moment stands at a request's read of
+			// the application's clock that F saw send another moment than
+			// the value's (apartReads: no copy of it, a copy moves with its
+			// source; api-server's endpoint poll, dirtyAt <= now-2s, in the
+			// second the set's start-up read the clock in) has that read set
+			// aside as its source and goes on as it would with no read
+			// there: judged as its call's own read of the clock where no
+			// other place refuses it, a refusal of the judgement leading
+			// with the read set aside (apartJudgedWhy). A refusal that
+			// stands without the read stands beside it: a read set aside
+			// never makes keploy accept what it refuses without the read.
+			if sourced && skip&skipBoth == skipBoth && dc.clientTests && textClockRead(r.Value, l.Value) != nil {
 				why = ""
 			}
 			// In keploy mock's client tests, a changed instant only where the
@@ -1677,10 +1650,10 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 					// no order of places is needed either. Never where the
 					// value may be a clock read at a cut keploy cannot tell
 					// (cutWhy): that stays refused.
-					bindable = cutWhy == "" && ln.Kind == KindNoise && skip&skipSource == 0 && apart == "" && echoedPart(dc, v, resp) == "" &&
+					bindable = cutWhy == "" && ln.Kind == KindNoise && skip&skipSource == 0 && echoedPart(dc, v, resp) == "" &&
 						(fol == nil || fol.first == "" && fol.refuted == "")
-					if apart != "" {
-						why = apartJudgedWhy(apart) + "; " + why
+					if ap.at != "" {
+						why = apartJudgedWhy(ap.at) + "; " + why
 					}
 				}
 			}
@@ -1844,30 +1817,16 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		if ln.Kind == KindNoise || ln.Kind == KindClockRead {
 			ln.Refuted = fol.refutedAll(ap)
 		}
-		// A text left noise past a read set aside as its source is taken
-		// only as the read of its one changed word (clientWord).
-		if ln.Kind == KindNoise && apart != "" {
-			ln.apart = apart
-		}
 		return ln
 	}
 	// clientWord is ln, a text w learns as noise, learned instead as the read
 	// of its one changed word in w, in keploy mock's client tests
 	// (wordRead), the word read by rd.
-	//
-	// A text judged as its call's own read past a read set aside as its
-	// source (Learned.apart) is the read of its one changed word alone: one
-	// that is none (another word changed too, or the word is no read the
-	// window holds) is refused naming the read set aside (apartWordWhy),
-	// never left noise no replay checks.
 	clientWord := func(ln Learned, w *Window, rd func(r, l Leaf, w *Window, skip skipRule) Learned) Learned {
 		if dc.clientTests {
 			if word, ok := wordRead(ln, w, rd); ok {
 				return word
 			}
-		}
-		if ln.Kind == KindNoise && ln.apart != "" {
-			ln.Kind, ln.Why, ln.Refuted = KindUnaccounted, apartJudgedWhy(ln.apart)+"; "+apartWordWhy, ""
 		}
 		return ln
 	}

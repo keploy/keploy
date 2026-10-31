@@ -501,14 +501,16 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 	// instant's (apartReads: a copy moves with its source), as the text's
 	// echo takes none (echoServed): api-server's endpoint poll, dirtyAt <=
 	// now-2s cut to the second, in the second the set's start-up read the
-	// clock in. With no other source, the instant is judged as its call's
-	// own read of the clock (in keploy mock's client tests; in keploy test,
-	// whose calls know no test begin, a possible pick stays refused, naming
-	// that read): a read its window holds in both runs, or the clock plus an
-	// offset the offset rules learn, checked so at every replay; refused,
-	// naming the read set aside, where neither holds, and where the call's
-	// answer echoes it. A read F saw send the instant's moment too is a
-	// copy, followed as before.
+	// clock in. The instant then goes on as it would with no read there: a
+	// possible pick the echo refuses without the read stays refused, naming
+	// the read set aside (pickApartUnaccounted); with no other source and
+	// no pick, the instant is judged as its call's own read of the clock (in
+	// keploy mock's client tests): a read its window holds in both runs, or
+	// the clock plus an offset the offset rules learn, checked so at every
+	// replay; refused, naming the read set aside, where neither holds, and
+	// where the call's answer echoes it. A read set aside never makes keploy
+	// accept what it refuses without the read. A read F saw send the
+	// instant's moment too is a copy, followed as before.
 	ap := &apartReads{}
 	if skip&skipSource == 0 {
 		if from, ok := dc.instantServedFrom(r, l, rec, live, served, ap); ok {
@@ -526,14 +528,11 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 		if where == "" {
 			where = "earlier in the test"
 		}
-		switch {
-		case ap.at == "":
-			ln.Kind, ln.Why = KindUnaccounted, pickUnaccounted(where)
-			return ln
-		case !dc.clientTests:
-			ln.Kind, ln.Why = KindUnaccounted, pickApartUnaccounted(where, ap.at)
-			return ln
+		ln.Kind, ln.Why = KindUnaccounted, pickUnaccounted(where)
+		if ap.at != "" {
+			ln.Why = pickApartUnaccounted(where, ap.at)
 		}
+		return ln
 	}
 	if skip&skipSource == 0 {
 		if from, ok := dc.instantLeafFrom(r, l, rec, live, served, ap); ok {
@@ -1354,14 +1353,26 @@ func (dc *DriftCache) instantServedFrom(r, l Leaf, rec, live moment, served []Ea
 // source, so the value is no copy of it. A typed instant's searches set one
 // aside (classifyInstant), and so does the echo of any other value
 // (echoServed). at names the first such read; the value's reading names it.
+// The value then goes on as it would with no read there: setting the read
+// aside lifts no refusal that stands without it (a possible pick stays one).
 // A read F saw no value at stays a place, as a copy does. A nil one sets
 // nothing aside (appeared, outside a call's learn step).
 type apartReads struct {
 	at string
-	// picked: the echo's refusal of the value as a possible pick named at
-	// (unaccounted, pickApartUnaccounted), the one refusal the read set
-	// aside lifts (classifyRead's leaf).
-	picked bool
+	// set holds every read set aside (apartKey): no search of the value
+	// reads one again, nor the word rule a word of it (unaccounted), as
+	// with no read there.
+	set map[string]bool
+}
+
+// apartKey names s, a leaf of e, among the reads set aside.
+func apartKey(e Earlier, s Seen) string {
+	return e.Mock + "\x00" + string(s.Side) + "\x00" + s.Place
+}
+
+// aside reports whether s, a leaf of e, is a read set aside (refute).
+func (a *apartReads) aside(e Earlier, s Seen) bool {
+	return a != nil && a.set[apartKey(e, s)]
 }
 
 // refute reports whether s, a leaf of e (an exchange F served before the
@@ -1375,6 +1386,10 @@ func (a *apartReads) refute(e Earlier, s Seen, heldF bool) bool {
 	if a.at == "" {
 		a.at = placeAt(seenPlace(e, s, false))
 	}
+	if a.set == nil {
+		a.set = map[string]bool{}
+	}
+	a.set[apartKey(e, s)] = true
 	return true
 }
 

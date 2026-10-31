@@ -3,6 +3,7 @@ package learn
 import (
 	"encoding/base64"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -2103,9 +2104,8 @@ func TestAnEarlierClockReadFSawSendAnotherMomentIsNoSourceOfTheValue(t *testing.
 	apart := "keploy judged it as its call's own read of the clock because the moment it was recorded with stands only in mock-18 at " + expires + ", where keploy learned a read of the application's clock and record's full round saw the application send another moment than the value's, so the value is no copy of it (a copy moves with its source)"
 	aside := "the moment its recorded value was recorded with stands in mock-18 at " + expires + ", where keploy learned a read of the application's clock and record's full round saw the application send another moment than the value's: a copy moves with its source, so the value is no copy of it"
 	source := "its recorded value was sent in mock-18 at " + expires + ", the test set's start-up's call, where keploy learned it as a read of the application's clock"
-	echo := "the moment its recorded value was recorded with stands in mock-18 at " + expires + ", where keploy learned a read of the application's clock and record's full round saw the application send another moment than the value's: a copy moves with its source, so the value is no copy of it; but the call's recorded answer holds it, an echo keploy cannot answer beside a source it set aside"
+	echoAside := "but the call's recorded answer holds it, an echo keploy cannot answer beside a source it set aside"
 	pick := "while the moment it was recorded with stands in mock-18 at " + expires + ", where keploy learned a read of the application's clock and record's full round saw the application send another moment than the value's, so the value is no copy of it (a copy moves with its source), and no other earlier place is its source"
-	word := "appears in the test set's start-up, in mock-18 at " + expires + ", which did not drift with it"
 	for _, c := range []struct {
 		name                              string
 		own, answer, wide, copied, noView bool
@@ -2123,33 +2123,40 @@ func TestAnEarlierClockReadFSawSendAnotherMomentIsNoSourceOfTheValue(t *testing.
 		text, shard bool
 		// noPick: no answer the test was given holds the second F's poll
 		// names (mock-1070), so the echo has no evidence of a pick.
-		noPick    bool
-		ago       time.Duration
-		kind      Kind
-		from, why string
-		since     bool
+		noPick bool
+		// unread: no search reaches the read (only the echo reads its
+		// form, and the echo has no pick), so nothing names it; stricter:
+		// the row's refusal stands beside the read set aside alone.
+		unread, stricter bool
+		ago              time.Duration
+		kind             Kind
+		from, why        string
+		since            bool
 		// underGiven: the outcome under HTTP's and Postgres's learn
 		// (ClassifyGiven), where it is not Mongo's (learnRules).
 		underGiven *ruleOutcome
 	}{
-		{name: "(d) the start-up's read", kind: KindUnaccounted, why: judged},
-		{name: "(a) the start-up's read, the poll's window two seconds wide", wide: true, kind: KindClockRead},
-		{name: "(b) the start-up's read, a poll of now-60s", ago: time.Minute, kind: KindClockOffset},
-		{name: "(d) the start-up's read and an answer of its second", answer: true, kind: KindUnaccounted, why: judged},
-		{name: "the test's own read, its test begun before it", own: true, kind: KindClockRead, since: true},
+		{name: "the start-up's read", kind: KindUnaccounted, why: pick},
+		{name: "the start-up's read, the poll's window two seconds wide", wide: true, kind: KindUnaccounted, why: pick},
+		{name: "the start-up's read, a poll of now-60s", ago: time.Minute, kind: KindUnaccounted, why: pick},
+		// Stricter than with no read there, where the echo takes the answer
+		// as the source though F saw it hold another moment: past a read set
+		// aside the echo takes only a place F saw hold the value's moment.
+		{name: "the start-up's read and an answer of its second", answer: true, stricter: true, kind: KindUnaccounted, why: pick},
+		{name: "the test's own read, its test begun before it", own: true, kind: KindUnaccounted, why: pick},
 		{name: "(c) the start-up's read, copied", copied: true, kind: KindUnaccounted, why: source},
 		{name: "(c) the start-up's read, copied, the poll's window two seconds wide", copied: true, wide: true, kind: KindClockRead, since: true, underGiven: ownSpan},
 		{name: "(c) the test's own read, copied", own: true, copied: true, kind: KindVariable, from: "mock-18"},
 		{name: "(c) the start-up's read and a read the test made that F saw no value at", noView: true, kind: KindVariable, from: "mock-1050"},
-		{name: "(d) the start-up's read in milliseconds", millis: true, kind: KindUnaccounted, why: judged},
-		{name: "(a) the start-up's read in milliseconds, the poll's window two seconds wide", millis: true, wide: true, kind: KindClockRead},
-		{name: "the start-up's read in milliseconds, the poll's window two seconds wide, the call's answer echoing the poll", millis: true, wide: true, echo: true, kind: KindUnaccounted, why: echo},
+		{name: "the start-up's read in milliseconds", millis: true, kind: KindUnaccounted, why: pick},
+		{name: "the start-up's read in milliseconds, the poll's window two seconds wide", millis: true, wide: true, kind: KindUnaccounted, why: pick},
+		{name: "the start-up's read in milliseconds, the poll's window two seconds wide, the call's answer echoing the poll", millis: true, wide: true, echo: true, kind: KindUnaccounted, why: pick},
 		{name: "(c) the start-up's read in milliseconds, copied in seconds", millis: true, copied: true, kind: KindUnaccounted, why: source},
 		{name: "(c) the start-up's read in milliseconds, copied in seconds, the poll's window two seconds wide", millis: true, copied: true, wide: true, kind: KindClockRead, since: true, underGiven: ownSpan},
 		{name: "(c) the test's own read in milliseconds, copied in seconds", own: true, millis: true, copied: true, kind: KindVariable, from: "mock-18"},
 		{name: "keploy test: the start-up's read", keployRun: true, kind: KindUnaccounted, why: pick},
 		{name: "keploy test: the start-up's read, the poll's window two seconds wide", keployRun: true, wide: true, kind: KindUnaccounted, why: pick},
-		{name: "(d) the start-up's read as a time of day", tod: true, kind: KindUnaccounted, why: judged},
+		{name: "the start-up's read as a time of day", tod: true, kind: KindUnaccounted, why: pick},
 		{name: "(c) the start-up's read as a time of day, copied", tod: true, copied: true, kind: KindUnaccounted, why: source},
 		{name: "(c) the start-up's read as a time of day, copied, the poll's window two seconds wide", tod: true, copied: true, wide: true, kind: KindClockRead, since: true, underGiven: ownSpan},
 		{name: "(c) the test's own read as a time of day, copied", own: true, tod: true, copied: true, kind: KindVariable, from: "mock-18"},
@@ -2157,10 +2164,10 @@ func TestAnEarlierClockReadFSawSendAnotherMomentIsNoSourceOfTheValue(t *testing.
 		{name: "(c) the start-up's read as a base64 text of epoch milliseconds, copied, the window wide", b64: true, wide: true, copied: true, kind: KindClockRead, since: true, underGiven: ownSpan},
 		{name: "(c) the test's own read as a base64 text of epoch milliseconds, copied", b64: true, own: true, copied: true, kind: KindVariable, from: "mock-18"},
 		{name: "(c) the test's own read as a base64 text of epoch milliseconds, copied, the window wide", b64: true, own: true, wide: true, copied: true, kind: KindClockRead, since: true, underGiven: ownCopy},
-		{name: "(d) the start-up's read, the poll a text holding its seconds as one word", text: true, kind: KindUnaccounted, why: judgedText},
-		{name: "(a) the start-up's read, the poll a text holding its seconds as one word, its window two seconds wide", text: true, wide: true, kind: KindClockRead},
-		{name: "the test's own read, its test begun before it, the poll a text holding its seconds as one word", text: true, own: true, kind: KindClockRead, since: true},
-		{name: "the start-up's read, the poll a text another word of which changed too, its window two seconds wide", text: true, shard: true, wide: true, kind: KindUnaccounted, why: apartWordWhy},
+		{name: "the start-up's read, the poll a text holding its seconds as one word", text: true, kind: KindUnaccounted, why: pick},
+		{name: "the start-up's read, the poll a text holding its seconds as one word, its window two seconds wide", text: true, wide: true, kind: KindUnaccounted, why: pick},
+		{name: "the test's own read, its test begun before it, the poll a text holding its seconds as one word", text: true, own: true, kind: KindUnaccounted, why: pick},
+		{name: "the start-up's read, the poll a text another word of which changed too, its window two seconds wide", text: true, shard: true, wide: true, kind: KindUnaccounted, why: pick},
 		{name: "(c) the start-up's read, copied as one word of a text", text: true, copied: true, kind: KindUnaccounted, why: source},
 		// As on main: the copy rule's re-read takes a copy of an earlier
 		// read whole (textClockRead), so a word of a text that copies the
@@ -2172,13 +2179,28 @@ func TestAnEarlierClockReadFSawSendAnotherMomentIsNoSourceOfTheValue(t *testing.
 		// echo has no evidence of a pick, and the search that takes an
 		// earlier place holding the value whole sets the read aside alone
 		// (apartReads), naming it in what is learned past it.
-		{name: "the start-up's read, no answer in F's second", noPick: true, kind: KindUnaccounted, why: word},
+		{name: "(d) the start-up's read, no answer in F's second", noPick: true, kind: KindUnaccounted, why: judged},
 		{name: "(a) the start-up's read, no answer in F's second, the poll's window two seconds wide", noPick: true, wide: true, kind: KindClockRead},
 		{name: "the test's own read, its test begun before it, no answer in F's second", noPick: true, own: true, kind: KindClockRead, since: true},
 		{name: "keploy test: the start-up's read, no answer in F's second, the poll's window two seconds wide", noPick: true, keployRun: true, wide: true, kind: KindClockRead},
 		{name: "(c) the start-up's read, copied, no answer in F's second", noPick: true, copied: true, kind: KindUnaccounted, why: source},
 		{name: "(c) the start-up's read, copied, no answer in F's second, the poll's window two seconds wide", noPick: true, copied: true, wide: true, kind: KindClockRead, since: true, underGiven: ownSpan},
 		{name: "(c) the test's own read, copied, no answer in F's second", noPick: true, own: true, copied: true, kind: KindVariable, from: "mock-18"},
+		{name: "(b) the start-up's read, no answer in F's second, a poll of now-60s", noPick: true, ago: time.Minute, kind: KindClockOffset},
+		{name: "(d) the start-up's read and an answer of its second, no answer in F's second", noPick: true, answer: true, kind: KindUnaccounted, why: judged},
+		{name: "(d) the start-up's read in milliseconds, no answer in F's second", noPick: true, millis: true, unread: true, kind: KindUnaccounted, why: judged},
+		{name: "(a) the start-up's read in milliseconds, no answer in F's second, the poll's window two seconds wide", noPick: true, millis: true, wide: true, unread: true, kind: KindClockRead},
+		{name: "the start-up's read in milliseconds, no answer in F's second, the poll's window two seconds wide, the call's answer echoing the poll", noPick: true, millis: true, wide: true, echo: true, unread: true, kind: KindEcho},
+		// The one refusal a read set aside adds: an echo of the value in its
+		// call's answer, answered unchecked with no read there, is refused
+		// beside a source the search set aside (stricter: the false green a
+		// read in another form and an echo made, M11 of the review).
+		{name: "the start-up's read, no answer in F's second, the poll's window two seconds wide, the call's answer echoing the poll", noPick: true, wide: true, echo: true, stricter: true, kind: KindUnaccounted, why: echoAside},
+		{name: "(d) the start-up's read as a time of day, no answer in F's second", noPick: true, tod: true, unread: true, kind: KindUnaccounted, why: judged},
+		{name: "(d) the start-up's read, no answer in F's second, the poll a text holding its seconds as one word", noPick: true, text: true, unread: true, stricter: true, kind: KindUnaccounted, why: judgedText, underGiven: &ruleOutcome{kind: KindUnaccounted, why: "which did not drift with it"}},
+		{name: "(a) the start-up's read, no answer in F's second, the poll a text holding its seconds as one word, its window two seconds wide", noPick: true, text: true, wide: true, kind: KindClockRead},
+		{name: "the test's own read, its test begun before it, no answer in F's second, the poll a text holding its seconds as one word", noPick: true, text: true, own: true, kind: KindClockRead, since: true},
+		{name: "the start-up's read, no answer in F's second, the poll a text another word of which changed too, its window two seconds wide", noPick: true, text: true, shard: true, wide: true, kind: KindNoise},
 	} {
 		for _, rule := range learnRules {
 			t.Run(rule.name+": "+c.name, func(t *testing.T) {
@@ -2218,68 +2240,82 @@ func TestAnEarlierClockReadFSawSendAnotherMomentIsNoSourceOfTheValue(t *testing.
 				case c.tod:
 					readLeaf, readLive = timeOfDay(expires, read), timeOfDay(expires, live).Value
 				}
-				tr := NewTracker()
-				tr.SetClientTests(!c.keployRun)
-				if c.own {
-					tr.Begin()
-				}
-				n, _, _, _ := tr.Test()
-				tr.Served(n, Earlier{Mock: "mock-18", At: read, Own: c.own, Payload: payload("mock-18", read), Seen: []Seen{
-					{Side: Request, Leaf: readLeaf, Live: readLive, Place: expires, Clock: true},
-				}})
-				if !c.own {
-					tr.Begin()
-				}
-				n, _, _, _ = tr.Test()
-				if c.answer {
-					// A document the test was given, created in the second the
-					// start-up read the clock in (F: another second).
-					at := call.Add(-800 * time.Millisecond)
-					tr.Served(n, Earlier{Mock: "mock-16", At: at, Own: true, Payload: payload("mock-16", at), Seen: []Seen{
-						{Side: Response, Leaf: ms(created, read.Add(-150*time.Millisecond)), Live: ms(created, readF.Add(-150*time.Millisecond)).Value, Place: created},
-					}})
-				}
-				if c.noView {
-					at := call.Add(-700 * time.Millisecond)
-					tr.Served(n, Earlier{Mock: "mock-1050", At: at, Own: true, Payload: payload("mock-1050", at), Seen: []Seen{
-						{Side: Request, Leaf: num(active, read), Place: active, Clock: true},
-					}})
-				}
-				// An answer the test was given half a second before the poll: a
-				// stamp that F gave in the second F's dirtyAt names.
-				if !c.noPick {
-					at := call.Add(-500 * time.Millisecond)
-					tr.Served(n, Earlier{Mock: "mock-1070", At: at, Own: true, Payload: payload("mock-1070", at), Seen: []Seen{
-						{Side: Response, Leaf: ms(stamp, at), Live: ms(stamp, callF.Add(-ago+200*time.Millisecond)).Value, Place: stamp},
-					}})
-				}
-				_, earlier, _, _ := tr.Test()
-				gap := 100 * time.Millisecond
-				if c.wide {
-					gap = 2 * time.Second
-				}
-				w := (&Window{Rec: Span{From: call.Add(-gap), To: call, Began: b}, F: Span{From: callF.Add(-gap), To: callF, Began: bF}}).ComparesOffsets()
-				shape := func(at time.Time) Shape { return Shape{Leaves: map[string]Leaf{dirty: num(dirty, at)}} }
-				if c.text {
-					shape = func(at time.Time) Shape {
-						shard := "7"
-						if c.shard && at.After(call) {
-							shard = "8"
+				learnWith := func(withRead bool) Learned {
+					tr := NewTracker()
+					tr.SetClientTests(!c.keployRun)
+					if c.own {
+						tr.Begin()
+					}
+					n, _, _, _ := tr.Test()
+					if withRead {
+						tr.Served(n, Earlier{Mock: "mock-18", At: read, Own: c.own, Payload: payload("mock-18", read), Seen: []Seen{
+							{Side: Request, Leaf: readLeaf, Live: readLive, Place: expires, Clock: true},
+						}})
+					}
+					if !c.own {
+						tr.Begin()
+					}
+					n, _, _, _ = tr.Test()
+					if c.answer {
+						// A document the test was given, created in the second the
+						// start-up read the clock in (F: another second).
+						at := call.Add(-800 * time.Millisecond)
+						tr.Served(n, Earlier{Mock: "mock-16", At: at, Own: true, Payload: payload("mock-16", at), Seen: []Seen{
+							{Side: Response, Leaf: ms(created, read.Add(-150*time.Millisecond)), Live: ms(created, readF.Add(-150*time.Millisecond)).Value, Place: created},
+						}})
+					}
+					if c.noView {
+						at := call.Add(-700 * time.Millisecond)
+						tr.Served(n, Earlier{Mock: "mock-1050", At: at, Own: true, Payload: payload("mock-1050", at), Seen: []Seen{
+							{Side: Request, Leaf: num(active, read), Place: active, Clock: true},
+						}})
+					}
+					// An answer the test was given half a second before the poll: a
+					// stamp that F gave in the second F's dirtyAt names.
+					if !c.noPick {
+						at := call.Add(-500 * time.Millisecond)
+						tr.Served(n, Earlier{Mock: "mock-1070", At: at, Own: true, Payload: payload("mock-1070", at), Seen: []Seen{
+							{Side: Response, Leaf: ms(stamp, at), Live: ms(stamp, callF.Add(-ago+200*time.Millisecond)).Value, Place: stamp},
+						}})
+					}
+					_, earlier, _, _ := tr.Test()
+					gap := 100 * time.Millisecond
+					if c.wide {
+						gap = 2 * time.Second
+					}
+					w := (&Window{Rec: Span{From: call.Add(-gap), To: call, Began: b}, F: Span{From: callF.Add(-gap), To: callF, Began: bF}}).ComparesOffsets()
+					shape := func(at time.Time) Shape { return Shape{Leaves: map[string]Leaf{dirty: num(dirty, at)}} }
+					if c.text {
+						shape = func(at time.Time) Shape {
+							shard := "7"
+							if c.shard && at.After(call) {
+								shard = "8"
+							}
+							return Shape{Leaves: map[string]Leaf{dirty: {Path: filter, Noise: filter, Type: String, Value: "dirty<=" + secs(at) + ";shard=" + shard}}}
 						}
-						return Shape{Leaves: map[string]Leaf{dirty: {Path: filter, Noise: filter, Type: String, Value: "dirty<=" + secs(at) + ";shard=" + shard}}}
+					}
+					var resp []Leaf
+					if c.echo {
+						resp = []Leaf{num(echoed, call.Add(-ago))}
+					}
+					dc := clientTestCache()
+					if c.keployRun {
+						dc = clockedDrifts()
+					}
+					return rule.classify(dc, []string{dirty}, shape(callF.Add(-ago)), shape(call.Add(-ago)), call, earlier, nil, resp, w, nil)[0]
+				}
+				ln := learnWith(true)
+				// A read set aside lifts no refusal: the value is learned as
+				// it is with no read there (copies aside: a read F saw send
+				// the value's moment, or no moment, is its source).
+				if !c.copied && !c.stricter {
+					alone := learnWith(false)
+					if alone.Kind != ln.Kind || alone.From.Mock != ln.From.Mock || (alone.Offset == nil) != (ln.Offset == nil) || alone.Bindable != ln.Bindable {
+						t.Fatalf("dirtyAt learned %s from %q beside the read set aside (%s), %s from %q with no read there (%s); want them alike", ln.Kind, ln.From.Mock, ln.Why, alone.Kind, alone.From.Mock, alone.Why)
 					}
 				}
-				var resp []Leaf
-				if c.echo {
-					resp = []Leaf{num(echoed, call.Add(-ago))}
-				}
-				dc := clientTestCache()
-				if c.keployRun {
-					dc = clockedDrifts()
-				}
-				ln := rule.classify(dc, []string{dirty}, shape(callF.Add(-ago)), shape(call.Add(-ago)), call, earlier, nil, resp, w, nil)[0]
 				since := ln.Read != nil && ln.Read.Since == models.SinceTestBegin
-				if ln.Kind != c.kind || ln.From.Mock != c.from || !strings.Contains(ln.Why, c.why) || since != c.since || len(ln.Echo) != 0 {
+				if ln.Kind != c.kind || ln.From.Mock != c.from || !strings.Contains(ln.Why, c.why) || since != c.since || (len(ln.Echo) != 0) != (c.kind == KindEcho) {
 					t.Fatalf("dirtyAt learned %s from %q (since its test began: %v): %s\nwant %s from %q (since: %v), its reason holding %q", ln.Kind, ln.From.Mock, since, ln.Why, c.kind, c.from, c.since, c.why)
 				}
 				if c.kind == KindClockOffset && (ln.Offset == nil || ln.Offset.Min > -time.Minute || ln.Offset.Max < -time.Minute) {
@@ -2290,12 +2326,12 @@ func TestAnEarlierClockReadFSawSendAnotherMomentIsNoSourceOfTheValue(t *testing.
 				if c.text && c.kind == KindClockRead && (ln.Read == nil || ln.Read.Word.IsZero()) {
 					t.Fatalf("dirtyAt's text learned as %+v; want the read of its one changed word", ln.Read)
 				}
-				if (c.why == judged || c.why == judgedText || c.why == apartWordWhy) && (!strings.HasPrefix(ln.Why, apart) || strings.Contains(ln.Why, source) || ln.Bindable) {
+				if (c.why == judged || c.why == judgedText) && (strings.HasPrefix(ln.Why, apart) == c.unread || strings.Contains(ln.Why, source) || ln.Bindable && !c.noPick) {
 					t.Fatalf("dirtyAt's refusal does not lead with the read F set aside, names it as its source, or binds the value (bindable: %v): %s", ln.Bindable, ln.Why)
 				}
 				// A read or an offset learned past the read set aside names it
 				// (Learned.Refuted); one learned past a copy names none.
-				if (c.kind == KindClockRead || c.kind == KindClockOffset) && strings.Contains(ln.Refuted, aside) == c.copied {
+				if (c.kind == KindClockRead || c.kind == KindClockOffset) && strings.Contains(ln.Refuted, aside) == (c.copied || c.unread) {
 					t.Fatalf("dirtyAt learned past %q; want the read set aside named: %v", ln.Refuted, !c.copied)
 				}
 			})
@@ -2303,27 +2339,29 @@ func TestAnEarlierClockReadFSawSendAnotherMomentIsNoSourceOfTheValue(t *testing.
 	}
 }
 
-// The read set aside lifts one refusal alone: the echo's refusal of a
-// possible pick, which named the read as where the value's recorded moment
-// stands. Any other refusal of the value stands as it stands with no read
-// there: an aware datetime, its zone written "+05:30", whose words keploy
-// cannot read once its seconds changed beside the zone's hour ("13+05": a
-// run of the base64 alphabet), is refused so beside the start-up's read in
-// the poll's second as without it, never then judged as its call's own read
-// or learned as the clock plus an offset. A read set aside never makes
-// keploy accept what it refuses without the read.
-func TestAReadFSetAsideLiftsTheRefusalOfAPickAlone(t *testing.T) {
+// A read set aside lifts no refusal: a value is learned beside a read F
+// saw send another moment than the value's as it is learned with no read
+// there, in every zone its text is written in ("Z", "-03:30", "+05:30",
+// "+00:00"), under every learn step. The endpoint poll of api-server's
+// end-to-end suite, an aware datetime here, beside an answer the test was
+// given that F gave in the second F's poll names (mock-1070: no answer
+// holds its recorded second) is refused as a possible pick from that answer
+// with no read there, and so beside the start-up's read in its recorded
+// second, which then names the read set aside: before, that refusal was
+// lifted beside the read, and the poll learned as the clock - 1m (a read
+// set aside made keploy accept what it refuses without the read). With no
+// such answer, and with no earlier read at all, the poll is judged alike
+// beside the read and without it.
+func TestAReadFSetAsideLiftsNoRefusal(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	const (
 		expires = "body.cmd.filter.expires_at.$lte.$numberLong"
 		dirty   = "body.cmd.query.$and.0.$or.0.dirtyAt.$lte"
 		stamp   = "body.cursor.firstBatch.0.claimedAt.$date.$numberLong"
+		aside   = "mock-18 at " + expires
 	)
 	millis := func(at time.Time) string { return strconv.FormatInt(at.UnixMilli(), 10) }
 	ms := func(p string, at time.Time) Leaf { return InstantLeaf(p, p, at, time.Millisecond) }
-	zoned := func(at time.Time) Leaf {
-		return Leaf{Path: dirty, Noise: dirty, Type: String, Value: at.In(ist).Format("2006-01-02T15:04:05-07:00")}
-	}
 	payload := func(name string, at time.Time) Raw {
 		return RawOf(&models.Mock{Name: name, Spec: models.MockSpec{ReqTimestampMock: at, ResTimestampMock: at.Add(time.Millisecond)}}, true).ServedAs(1)
 	}
@@ -2331,7 +2369,7 @@ func TestAReadFSetAsideLiftsTheRefusalOfAPickAlone(t *testing.T) {
 	call := time.Date(2026, 10, 31, 10, 52, 15, 438_000_000, time.UTC)
 	beganF, callF := began.Add(72*time.Second), call.Add(73*time.Second+600*time.Millisecond)
 	type classify = func(dc *DriftCache, drift []string, live, rec Shape, at time.Time, earlier []Earlier, raw []Raw, resp []Leaf, w *Window, given GivenEarlier) []Learned
-	learn := func(cl classify, ago time.Duration, wide, withRead bool) Learned {
+	learn := func(cl classify, zone *time.Location, layout string, ago time.Duration, wide, withRead, withPick bool) Learned {
 		read := call.Add(-ago).Truncate(time.Second).Add(305 * time.Millisecond)
 		readF := read.Add(70*time.Second + 900*time.Millisecond)
 		tr := NewTracker()
@@ -2344,35 +2382,77 @@ func TestAReadFSetAsideLiftsTheRefusalOfAPickAlone(t *testing.T) {
 		}
 		tr.Begin()
 		n, _, _, _ = tr.Test()
-		at := call.Add(-500 * time.Millisecond)
-		tr.Served(n, Earlier{Mock: "mock-1070", At: at, Own: true, Payload: payload("mock-1070", at), Seen: []Seen{
-			{Side: Response, Leaf: ms(stamp, at), Live: ms(stamp, callF.Add(-ago+200*time.Millisecond)).Value, Place: stamp},
-		}})
+		if withPick {
+			at := call.Add(-500 * time.Millisecond)
+			tr.Served(n, Earlier{Mock: "mock-1070", At: at, Own: true, Payload: payload("mock-1070", at), Seen: []Seen{
+				{Side: Response, Leaf: ms(stamp, at), Live: ms(stamp, callF.Add(-ago+200*time.Millisecond)).Value, Place: stamp},
+			}})
+		}
 		_, earlier, _, _ := tr.Test()
 		gap := 100 * time.Millisecond
 		if wide {
 			gap = 2 * time.Second
 		}
 		w := (&Window{Rec: Span{From: call.Add(-gap), To: call, Began: began}, F: Span{From: callF.Add(-gap), To: callF, Began: beganF}}).ComparesOffsets()
-		shape := func(at time.Time) Shape { return Shape{Leaves: map[string]Leaf{dirty: zoned(at)}} }
-		return cl(clientTestCacheIn(ist), []string{dirty}, shape(callF.Add(-ago)), shape(call.Add(-ago)), call, earlier, nil, nil, w, nil)[0]
+		shape := func(at time.Time) Shape {
+			return Shape{Leaves: map[string]Leaf{dirty: {Path: dirty, Noise: dirty, Type: String, Value: at.In(zone).Format(layout)}}}
+		}
+		return cl(clientTestCacheIn(zone), []string{dirty}, shape(callF.Add(-ago)), shape(call.Add(-ago)), call, earlier, nil, nil, w, nil)[0]
 	}
-	for _, c := range []struct {
-		name string
-		ago  time.Duration
-		wide bool
+	// named are the reasons a refusal with no read there may give beside
+	// the read set aside: the same, or the same naming the read.
+	named := func(why string) []string {
+		out := []string{why, apartJudgedWhy(aside) + "; " + why}
+		const lead, none = "the moment record's full round saw in it stands ", ", while no earlier place holds the moment it was recorded with"
+		if k := strings.Index(why, none); strings.HasPrefix(why, lead) && k > len(lead) {
+			out = append(out, pickApartUnaccounted(why[len(lead):k], aside))
+		}
+		return out
+	}
+	for _, z := range []struct {
+		name   string
+		zone   *time.Location
+		layout string
 	}{
-		{"a poll of now-2s", 2 * time.Second, false},
-		{"a poll of now-60s", time.Minute, false},
-		{"a poll of now-60s, its window two seconds wide", time.Minute, true},
+		{"Z", time.UTC, "2006-01-02T15:04:05Z07:00"},
+		{"-03:30", time.FixedZone("NST", -(3*3600 + 1800)), "2006-01-02T15:04:05-07:00"},
+		{"+05:30", ist, "2006-01-02T15:04:05-07:00"},
+		{"+00:00", time.UTC, "2006-01-02T15:04:05-07:00"},
 	} {
-		for _, rule := range learnRules {
-			t.Run(rule.name+": "+c.name, func(t *testing.T) {
-				alone, beside := learn(rule.classify, c.ago, c.wide, false), learn(rule.classify, c.ago, c.wide, true)
-				if alone.Kind != KindUnaccounted || beside.Kind != alone.Kind || beside.Why != alone.Why {
-					t.Fatalf("dirtyAt learned %s beside the start-up's read set aside (%s), %s without it (%s); want both refused alike", beside.Kind, beside.Why, alone.Kind, alone.Why)
+		for _, c := range []struct {
+			name string
+			ago  time.Duration
+			wide bool
+		}{
+			{"a poll of now-2s", 2 * time.Second, false},
+			{"a poll of now-60s", time.Minute, false},
+			{"a poll of now-60s, its window two seconds wide", time.Minute, true},
+		} {
+			for _, pick := range []bool{true, false} {
+				for _, rule := range learnRules {
+					name := z.name + ", " + c.name + ", no earlier read at all: " + rule.name
+					if pick {
+						name = z.name + ", " + c.name + ", an answer in F's second: " + rule.name
+					}
+					t.Run(name, func(t *testing.T) {
+						alone := learn(rule.classify, z.zone, z.layout, c.ago, c.wide, false, pick)
+						beside := learn(rule.classify, z.zone, z.layout, c.ago, c.wide, true, pick)
+						if pick && alone.Kind != KindUnaccounted {
+							t.Fatalf("dirtyAt learned %s with no read there (%s); want it refused", alone.Kind, alone.Why)
+						}
+						same := beside.Kind == alone.Kind && beside.From.Mock == alone.From.Mock && beside.Bindable == alone.Bindable && slices.Contains(named(alone.Why), beside.Why)
+						if (beside.Offset == nil) != (alone.Offset == nil) || beside.Offset != nil && (beside.Offset.Min != alone.Offset.Min || beside.Offset.Max != alone.Offset.Max) {
+							same = false
+						}
+						if !same {
+							t.Fatalf("dirtyAt learned %s from %q beside the start-up's read set aside (%s), %s from %q with no read there (%s); want them alike", beside.Kind, beside.From.Mock, beside.Why, alone.Kind, alone.From.Mock, alone.Why)
+						}
+						if beside.Kind == KindUnaccounted && beside.Why != alone.Why && !strings.Contains(beside.Why, aside) {
+							t.Fatalf("dirtyAt's refusal beside the read set aside does not name it: %s", beside.Why)
+						}
+					})
 				}
-			})
+			}
 		}
 	}
 }
@@ -2444,6 +2524,9 @@ func TestAnEarlierTypedClockReadFSawSendAnotherMomentIsNoSourceOfTheInstant(t *t
 		// (mock-1070), so the echo has no evidence of a pick and the search
 		// for an equal instant decides alone.
 		number, b64, b64ms, todms, noPick bool
+		// unread: no search reaches the read (a time of day only the echo
+		// reads, and the echo has no pick), so nothing names it.
+		unread bool
 		// full: record's full round made the call this long after the
 		// recording made it (73.6 s where 0), its test begun as long before.
 		full      time.Duration
@@ -2455,20 +2538,28 @@ func TestAnEarlierTypedClockReadFSawSendAnotherMomentIsNoSourceOfTheInstant(t *t
 		// (ClassifyGiven), where it is not Mongo's (learnRules).
 		underGiven *ruleOutcome
 	}{
-		{name: "(d) the start-up's read", kind: KindUnaccounted, why: judged},
-		{name: "(a) the start-up's read, the poll's window three seconds wide", wide: true, kind: KindClockRead},
-		{name: "(b) the start-up's read, a poll of now-60s", ago: time.Minute, kind: KindClockOffset},
-		{name: "(d) the start-up's read, a poll of now-60s whose two values stand a minute apart, the window three seconds wide", wide: true, ago: time.Minute, full: time.Minute + 400*time.Millisecond, kind: KindUnaccounted, why: ambiguous},
-		{name: "the test's own read, its test begun before it", own: true, kind: KindClockRead, since: true},
-		{name: "the start-up's read, the window wide, the call's answer echoing the poll", wide: true, answer: true, kind: KindUnaccounted, why: echo},
+		{name: "the start-up's read", kind: KindUnaccounted, why: pick},
+		{name: "(d) the start-up's read, no answer in F's second", noPick: true, kind: KindUnaccounted, why: judged},
+		{name: "the start-up's read, the poll's window three seconds wide", wide: true, kind: KindUnaccounted, why: pick},
+		{name: "(a) the start-up's read, no answer in F's second, the poll's window three seconds wide", noPick: true, wide: true, kind: KindClockRead},
+		{name: "the start-up's read, a poll of now-60s", ago: time.Minute, kind: KindUnaccounted, why: pick},
+		{name: "(b) the start-up's read, no answer in F's second, a poll of now-60s", noPick: true, ago: time.Minute, kind: KindClockOffset},
+		{name: "the start-up's read, a poll of now-60s whose two values stand a minute apart, the window three seconds wide", wide: true, ago: time.Minute, full: time.Minute + 400*time.Millisecond, kind: KindUnaccounted, why: pick},
+		{name: "(d) the start-up's read, no answer in F's second, a poll of now-60s whose two values stand a minute apart, the window three seconds wide", noPick: true, wide: true, ago: time.Minute, full: time.Minute + 400*time.Millisecond, kind: KindUnaccounted, why: ambiguous},
+		{name: "the test's own read, its test begun before it", own: true, kind: KindUnaccounted, why: pick},
+		{name: "the test's own read, its test begun before it, no answer in F's second", noPick: true, own: true, kind: KindClockRead, since: true},
+		{name: "the start-up's read, the window wide, the call's answer echoing the poll", wide: true, answer: true, kind: KindUnaccounted, why: pick},
+		{name: "the start-up's read, no answer in F's second, the window wide, the call's answer echoing the poll", noPick: true, wide: true, answer: true, kind: KindUnaccounted, why: echo},
 		{name: "keploy test: the start-up's read", keployRun: true, kind: KindUnaccounted, why: pick},
 		{name: "(c) the start-up's read, copied", copied: true, kind: KindUnaccounted, why: source},
 		{name: "(c) the test's own read, copied", own: true, copied: true, kind: KindVariable, from: "mock-18"},
-		{name: "(d) the start-up's read and an answer of its second", given: true, kind: KindUnaccounted, why: judged},
+		{name: "the start-up's read and an answer of its second", given: true, kind: KindUnaccounted, why: pick},
+		{name: "(d) the start-up's read and an answer of its second, no answer in F's second", noPick: true, given: true, kind: KindUnaccounted, why: judged},
 		{name: "(c) the start-up's read to the second, copied", form: true, copied: true, kind: KindUnaccounted, why: source},
 		{name: "(c) the test's own read to the second, copied", form: true, own: true, copied: true, kind: KindVariable, from: "mock-18"},
 		{name: "(c) the start-up's read and a read the test made that F saw no value at", noView: true, kind: KindVariable, from: "mock-1050"},
-		{name: "(d) the start-up's read as a time of day", tod: true, kind: KindUnaccounted, why: judged},
+		{name: "the start-up's read as a time of day", tod: true, kind: KindUnaccounted, why: pick},
+		{name: "(d) the start-up's read as a time of day, no answer in F's second", noPick: true, tod: true, unread: true, kind: KindUnaccounted, why: judged},
 		{name: "(c) the start-up's read as a time of day, copied", tod: true, copied: true, kind: KindUnaccounted, why: source},
 		{name: "(c) the test's own read as a time of day, copied", own: true, tod: true, copied: true, kind: KindVariable, from: "mock-18"},
 		{name: "(c) the start-up's read as epoch seconds, copied", number: true, copied: true, kind: KindUnaccounted, why: source},
@@ -2613,7 +2704,7 @@ func TestAnEarlierTypedClockReadFSawSendAnotherMomentIsNoSourceOfTheInstant(t *t
 						t.Fatalf("the exact search took %+v (found %v) and set aside %q; want the copy at mock-18, nothing set aside", from, ok, ap.at)
 					}
 				}
-				if (c.why == judged || c.why == ambiguous) && (!strings.HasPrefix(ln.Why, apart) || strings.Contains(ln.Why, source)) {
+				if (c.why == judged || c.why == ambiguous) && (strings.HasPrefix(ln.Why, apart) == c.unread || strings.Contains(ln.Why, source)) {
 					t.Fatalf("dirtyAt's refusal does not lead with the read F set aside, or names it as its source: %s", ln.Why)
 				}
 				// A read or an offset learned past the read set aside names it
