@@ -1619,3 +1619,37 @@ func sha256Of(s string) string {
 	sum := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(sum[:])
 }
+
+// Two recordings that hold a variable at one place inside other text say
+// two things about the place: the merge keeps neither, so the place is
+// compared whole and a replay refuses it; parts at other places, or the
+// same part twice, are kept once. A part at a place the variable does not
+// name is stray.
+func TestMergePartsDropsAPlaceTwoRecordingsDisagreeOn(t *testing.T) {
+	app := VariablePart{Place: "body.key", Before: "APP:"}
+	answer := VariablePart{Place: "body.key", Answer: true, Before: "APP:"}
+	org := VariablePart{Place: "body.key", Before: "ORG:"}
+	if got := MergeParts([]VariablePart{app}, []VariablePart{app, answer}); !reflect.DeepEqual(got, []VariablePart{app, answer}) {
+		t.Fatalf("merged %+v", got)
+	}
+	if got := MergeParts([]VariablePart{app, answer}, []VariablePart{org}); !reflect.DeepEqual(got, []VariablePart{answer}) {
+		t.Fatalf("a place two recordings disagree on is dropped: %+v", got)
+	}
+	if got := MergeParts([]VariablePart{app}, []VariablePart{org}); got != nil {
+		t.Fatalf("nothing left is nil: %+v", got)
+	}
+	a := MockVariables{"app": {Recorded: "a-1", Use: []string{"body.key"}, Within: []VariablePart{app}}}
+	b := MockVariables{"app": {Recorded: "a-1", Use: []string{"body.key"}, Within: []VariablePart{org}}}
+	if got := MergeVariables(a, b)["app"]; got.Within != nil || !reflect.DeepEqual(got.Use, []string{"body.key"}) {
+		t.Fatalf("merged variable %+v", got)
+	}
+	if c := a.Clone(); &c["app"].Within[0] == &a["app"].Within[0] {
+		t.Fatal("a clone shares its parts")
+	}
+	if p, stray := (MockVariable{Use: []string{"body.key"}, Within: []VariablePart{answer}}).StrayPart(); !stray || p != answer {
+		t.Fatalf("an answer part with no answer place is stray: %+v %v", p, stray)
+	}
+	if _, stray := a["app"].StrayPart(); stray {
+		t.Fatal("a part at a use place is not stray")
+	}
+}

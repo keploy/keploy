@@ -52,6 +52,19 @@ import (
 type varPlace struct {
 	raw   string
 	place variables.Place
+	// part: where the place holds the variable's value as one part of a
+	// longer value (models.MockVariable.Within), the text around it; nil
+	// where it holds the value whole.
+	part *learn.Within
+}
+
+// text is what the place holds where the variable's value is value: value,
+// inside the text around it at a part.
+func (vp varPlace) text(value string) string {
+	if vp.part == nil {
+		return value
+	}
+	return vp.part.Render(value)
 }
 
 // varDecl is one variable of a mock, read.
@@ -124,7 +137,15 @@ func readDecls(m *models.Mock) ([]varDecl, string) {
 		if answer && p.Part != variables.PartBody && p.Part != variables.PartHeader {
 			return varPlace{}, fmt.Sprintf("the answer place %s of variable %s is not a place of a response (body.<path> or header.<name>)", raw, name)
 		}
-		return varPlace{raw: raw, place: p}, ""
+		vp := varPlace{raw: raw, place: p}
+		if part, ok := m.Spec.Variables[name].PartAt(raw, answer); ok {
+			w := learn.Within{Before: part.Before, After: part.After}
+			if !w.Set() {
+				return varPlace{}, fmt.Sprintf("the %s place %s of variable %s is declared to hold its value inside a longer value, with no text around it", role, raw, name)
+			}
+			vp.part = &w
+		}
+		return vp, ""
 	}
 	seen := map[string]string{}
 	out := make([]varDecl, 0, len(names))
@@ -157,6 +178,9 @@ func readDecls(m *models.Mock) ([]varDecl, string) {
 				return nil, why
 			}
 			d.answer = append(d.answer, p)
+		}
+		if part, stray := mv.StrayPart(); stray {
+			return nil, fmt.Sprintf("variable %s says how %s holds its value inside a longer value, and does not name the place", name, part.Place)
 		}
 		if d.echo && d.bind == nil {
 			return nil, fmt.Sprintf("the echo variable %s has no bind place: an echo is what this call sends", name)
@@ -511,12 +535,30 @@ func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *mo
 			if !ok {
 				return refuse(fmt.Sprintf("its recorded request holds no single value at %s (variable %s)", vp.raw, d.name))
 			}
-			if !variables.SameValue(d.recorded, r.value, r.number()) {
+			if vp.part != nil {
+				// The value stands inside a longer one: the recording holds
+				// the text around the recorded value, the call the same text
+				// around this run's (only the variable's words move).
+				if r.value != vp.text(d.recorded) {
+					return refuse(fmt.Sprintf("its recorded request holds %q at %s, not variable %s's recorded value %q inside the text recorded around it", r.value, vp.raw, d.name, d.recorded))
+				}
+			} else if !variables.SameValue(d.recorded, r.value, r.number()) {
 				return refuse(fmt.Sprintf("its recorded request holds %q at %s, not variable %s's recorded value %q", r.value, vp.raw, d.name, d.recorded))
 			}
 			l, ok := live.read(vp.place)
 			if !ok {
 				return nil, nil // the call has no such place: it is not this mock's call
+			}
+			if vp.part != nil {
+				v, ok := vp.part.ValueIn(l.value)
+				if !ok || l.kind != r.kind {
+					return nil, &varProblem{
+						mock: m.Name, name: d.name, place: vp.raw, expected: r.value, actual: l.value,
+						why:  fmt.Sprintf("variable %s at %s: the call does not hold the text the recording holds around the variable's value (%q before it, %q after it) with one value between", d.name, vp.raw, vp.part.Before, vp.part.After),
+						next: "the application changed the text it sends around the value at " + vp.raw + ": if that is intended, re-record the test; otherwise fix the application",
+					}
+				}
+				l.value = v
 			}
 			if l.body && l.kind != r.kind && typeChange == nil {
 				typeChange = &varProblem{
@@ -915,7 +957,7 @@ func (h *HTTP) renderAnswers(served *models.Mock, hit *varHit, table *variables.
 		for _, vp := range d.answer {
 			switch vp.place.Part {
 			case variables.PartBody:
-				e, why := variables.AnswerEdit(resp.Body, vp.place.Path, d.recorded, b.Value)
+				e, why := variables.AnswerEdit(resp.Body, vp.place.Path, vp.text(d.recorded), vp.text(b.Value))
 				if why != "" {
 					return nil, &varProblem{mock: served.Name, name: d.name, place: vp.raw, expected: d.recorded, actual: b.Value,
 						why: fmt.Sprintf("its answer place %s cannot hold variable %s: %s", vp.raw, d.name, why), next: "re-record the test"}
@@ -923,11 +965,11 @@ func (h *HTTP) renderAnswers(served *models.Mock, hit *varHit, table *variables.
 				edits = append(edits, e)
 			case variables.PartHeader:
 				key, ok := headerKey(header, vp.place.Name)
-				if !ok || header[key] != d.recorded || len(resp.HeaderLineLengths[key]) > 1 {
-					return nil, &varProblem{mock: served.Name, name: d.name, place: vp.raw, expected: d.recorded,
+				if !ok || header[key] != vp.text(d.recorded) || len(resp.HeaderLineLengths[key]) > 1 {
+					return nil, &varProblem{mock: served.Name, name: d.name, place: vp.raw, expected: vp.text(d.recorded),
 						why: fmt.Sprintf("its recorded response does not hold variable %s's recorded value %q as the one value of %s", d.name, d.recorded, vp.raw), next: "re-record the test"}
 				}
-				header[key] = b.Value
+				header[key] = vp.text(b.Value)
 				changed[strings.ToLower(key)] = true
 			}
 		}

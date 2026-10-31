@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -80,6 +81,92 @@ type MockVariable struct {
 	// regression. Each is still asserted at every one of its places. Only the
 	// learn step sets it, with a Bind; none for any other variable.
 	Clock []ClockRead `json:"clock,omitempty" yaml:"clock,omitempty" bson:"clock,omitempty"`
+	// Within lists the places above (a use, or an answer) that hold the
+	// variable's value as one part of a longer value, with the constant
+	// text around it there ("APP:" before an app id): a replay reads the
+	// value out of the place's text and compares the text around it as
+	// recorded, and answers with this run's value inside that text. Every
+	// place not listed holds the value whole. A replay that reads no Within
+	// compares such a place whole, and refuses the call.
+	Within []VariablePart `json:"within,omitempty" yaml:"within,omitempty" bson:"within,omitempty"`
+}
+
+// VariablePart is a place that holds a variable's value as one part of a
+// longer value (MockVariable.Within): the place's text is Before, the
+// value, After. Answer says the place is one of Answer's (a response
+// place), else one of Use's: an HTTP request and its response both name
+// body places "body.<path>".
+type VariablePart struct {
+	Place  string `json:"place" yaml:"place" bson:"place"`
+	Answer bool   `json:"answer,omitempty" yaml:"answer,omitempty" bson:"answer,omitempty"`
+	Before string `json:"before,omitempty" yaml:"before,omitempty" bson:"before,omitempty"`
+	After  string `json:"after,omitempty" yaml:"after,omitempty" bson:"after,omitempty"`
+}
+
+// PartAt is the part v holds its value at, at place (a use place, or an
+// answer place where answer), and whether the place holds it as one.
+func (v MockVariable) PartAt(place string, answer bool) (VariablePart, bool) {
+	for _, p := range v.Within {
+		if p.Place == place && p.Answer == answer {
+			return p, true
+		}
+	}
+	return VariablePart{}, false
+}
+
+// StrayPart is a part of v at a place v does not name (Within's place is
+// none of Use's, or of Answer's for an answer part), which a replay refuses:
+// a part says how a place holds the value, never adds one.
+func (v MockVariable) StrayPart() (VariablePart, bool) {
+	for _, p := range v.Within {
+		list := v.Use
+		if p.Answer {
+			list = v.Answer
+		}
+		if !slices.Contains(list, p.Place) {
+			return p, true
+		}
+	}
+	return VariablePart{}, false
+}
+
+// MergeParts is a's and b's parts as one list (neither is changed): one per
+// place, a's first. A place both hold with other text around the value is
+// in neither: two recordings disagree on the text that stands beside the
+// value there, so the place is compared whole again and a replay refuses
+// it, never takes one recording's text for the other's.
+func MergeParts(a, b []VariablePart) []VariablePart {
+	if len(a) == 0 && len(b) == 0 {
+		return nil
+	}
+	type key struct {
+		place  string
+		answer bool
+	}
+	var out []VariablePart
+	at := map[key]int{}
+	torn := map[key]bool{}
+	for _, p := range append(append([]VariablePart(nil), a...), b...) {
+		k := key{p.Place, p.Answer}
+		if i, ok := at[k]; ok {
+			if out[i] != p {
+				torn[k] = true
+			}
+			continue
+		}
+		at[k] = len(out)
+		out = append(out, p)
+	}
+	kept := out[:0]
+	for _, p := range out {
+		if !torn[key{p.Place, p.Answer}] {
+			kept = append(kept, p)
+		}
+	}
+	if len(kept) == 0 {
+		return nil
+	}
+	return kept
 }
 
 // ClockRead is one clock read a recorded value holds, as the learn step read
@@ -1615,16 +1702,17 @@ func (v MockVariables) Clone() MockVariables {
 		mv.Use = append([]string(nil), mv.Use...)
 		mv.Answer = append([]string(nil), mv.Answer...)
 		mv.Clock = append([]ClockRead(nil), mv.Clock...)
+		mv.Within = append([]VariablePart(nil), mv.Within...)
 		out[name] = mv
 	}
 	return out
 }
 
 // MergeVariables is a and b as one block (neither is changed): a variable in
-// both keeps a's bind and both's uses and answers, and is an echo only when
-// both say so. Clock goes with the bind it was read at: a's bind keeps a's,
-// one taken from b keeps b's, and a variable both bind is a clock read only
-// when both say so.
+// both keeps a's bind, both's uses and answers and their parts
+// (MergeParts), and is an echo only when both say so. Clock goes with the
+// bind it was read at: a's bind keeps a's, one taken from b keeps b's, and
+// a variable both bind is a clock read only when both say so.
 func MergeVariables(a, b MockVariables) MockVariables {
 	out := a.Clone()
 	for name, v := range b {
@@ -1643,6 +1731,7 @@ func MergeVariables(a, b MockVariables) MockVariables {
 		}
 		cur.Use = appendNewPlaces(cur.Use, v.Use...)
 		cur.Answer = appendNewPlaces(cur.Answer, v.Answer...)
+		cur.Within = MergeParts(cur.Within, v.Within)
 		cur.Echo = cur.Echo && v.Echo
 		out[name] = cur
 	}

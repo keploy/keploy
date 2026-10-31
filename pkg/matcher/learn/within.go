@@ -110,3 +110,34 @@ func partFrom(rec, live, fromRec, fromLive string) (Within, string) {
 	}
 	return w, ""
 }
+
+// Carried is the variable value a request leaf learned as a variable
+// (KindVariable) carries: the value it holds as recorded and as sent live,
+// the leaf's whole values where its earlier place's value stands whole in it
+// (From.Within is the zero Within), else the values read out of each at
+// that part. ok is false where a leaf is not the part's text around a value.
+func (l Learned) Carried() (rec, live string, ok bool) {
+	w := l.From.Within
+	if !w.Set() {
+		return l.Recorded.Value, l.Live.Value, true
+	}
+	rec, okRec := w.ValueIn(l.Recorded.Value)
+	live, okLive := w.ValueIn(l.Live.Value)
+	return rec, live, okRec && okLive
+}
+
+// AnswerPart is how an answer leaf a holds the recorded value of r (a
+// variable's recorded value, r's type): whole (ok, the zero Within), or as
+// one part of a longer string, by PartWithin's bound (ok, a set Within). ok
+// is false where a holds it at neither: not at all, at two places, or as a
+// part of a word, where an answer keeps its recorded text.
+func AnswerPart(r, a Leaf) (Within, bool) {
+	if WholeEcho(r, a) {
+		return Within{}, true
+	}
+	if r.Type != String || a.Type != String || a.Unnamed {
+		return Within{}, false
+	}
+	w, why := PartWithin(a.Value, r.Value)
+	return w, why == "" && w.Set()
+}

@@ -162,8 +162,9 @@ func MergeLearned(mock *models.Mock, st models.MockState, binds models.MockVaria
 }
 
 // MergeVariable is two declarations of one variable in one call as one: a
-// bind place from either, every use and answer place of both, and an echo
-// only when both say so (a call another uses the value of is not its echo).
+// bind place from either, every use and answer place of both with their
+// parts (models.MergeParts), and an echo only when both say so (a call
+// another uses the value of is not its echo).
 // A clock read goes with its bind, and holds for one both bind only when
 // both say so (models.MergeVariables).
 func MergeVariable(a, b models.MockVariable) models.MockVariable {
@@ -179,6 +180,7 @@ func MergeVariable(a, b models.MockVariable) models.MockVariable {
 	}
 	a.Use = unionSorted(a.Use, b.Use)
 	a.Answer = unionSorted(a.Answer, b.Answer)
+	a.Within = models.MergeParts(a.Within, b.Within)
 	return a
 }
 
