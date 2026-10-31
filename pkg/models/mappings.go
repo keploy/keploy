@@ -358,6 +358,14 @@ type MappedTestCase struct {
 	// given-api §3). Written and read only under the proven switch; empty in
 	// recordings made without it.
 	Given []GivenValue `json:"given,omitempty" yaml:"given,omitempty" bson:"given,omitempty"`
+	// Key is the key of the claim the test ran under in its recording: the
+	// test process's (POST /agent/instance). A reader who moves one of the
+	// test's calls to the set's worker: list gives the moved entry this key,
+	// so a replay serves it while that process holds the run (MockEntry.Key).
+	// Written and read only under the proven switch; empty in recordings
+	// made before keploy kept it, in those made without the switch, and for
+	// a test run under no claim.
+	Key string `json:"key,omitempty" yaml:"key,omitempty" bson:"key,omitempty"`
 }
 
 type persistedTestFormat struct {
@@ -379,6 +387,7 @@ type writtenTestFormat struct {
 	At                  time.Time    `json:"at,omitzero" yaml:"at,omitempty"`
 	Real                []string     `json:"real,omitempty" yaml:"real,omitempty"`
 	Given               []GivenValue `json:"given,omitempty" yaml:"given,omitempty"`
+	Key                 string       `json:"key,omitempty" yaml:"key,omitempty"`
 }
 
 type structuredTestFormat struct {
@@ -393,11 +402,11 @@ type stringSliceTestFormat struct {
 }
 
 func (tc MappedTestCase) MarshalYAML() (interface{}, error) {
-	return writtenTestFormat{persistedTestFormat: tc.persistedFormat(), At: tc.At, Real: tc.Real, Given: tc.Given}, nil
+	return writtenTestFormat{persistedTestFormat: tc.persistedFormat(), At: tc.At, Real: tc.Real, Given: tc.Given, Key: tc.Key}, nil
 }
 
 func (tc MappedTestCase) MarshalJSON() ([]byte, error) {
-	return json.Marshal(writtenTestFormat{persistedTestFormat: tc.persistedFormat(), At: tc.At, Real: tc.Real, Given: tc.Given})
+	return json.Marshal(writtenTestFormat{persistedTestFormat: tc.persistedFormat(), At: tc.At, Real: tc.Real, Given: tc.Given, Key: tc.Key})
 }
 
 // errRecordedBegin is a test entry whose at: is not a time.
@@ -486,6 +495,41 @@ func recordedGivenJSON(data []byte) ([]GivenValue, error) {
 		return nil, fmt.Errorf(errRecordedGiven, err)
 	}
 	return g.Given, nil
+
+}
+
+// errRecordedKey is a test entry whose key: is not a string.
+const errRecordedKey = "a test's claim key (key) is not a string: %w"
+
+// recordedKeyYAML is a test entry's key: under the proven switch. One that
+// is not a string is an error, never a reason to read the entry without it:
+// an edit that moves the test's call to worker: would lose the key its
+// replay serves it under. With the switch off key: is not read.
+func recordedKeyYAML(node *yaml.Node) (string, error) {
+	if !provenswitch.On() || !nodeHasField(node, "key") {
+		return "", nil
+	}
+	var k struct {
+		Key string `yaml:"key"`
+	}
+	if err := node.Decode(&k); err != nil {
+		return "", fmt.Errorf(errRecordedKey, err)
+	}
+	return k.Key, nil
+}
+
+// recordedKeyJSON is recordedKeyYAML for a JSON entry.
+func recordedKeyJSON(data []byte) (string, error) {
+	if !provenswitch.On() || !jsonContainsField(data, "key") {
+		return "", nil
+	}
+	var k struct {
+		Key string `json:"key"`
+	}
+	if err := json.Unmarshal(data, &k); err != nil {
+		return "", fmt.Errorf(errRecordedKey, err)
+	}
+	return k.Key, nil
 }
 
 // recordedBeginJSON is recordedBeginYAML for a JSON entry.
@@ -533,10 +577,14 @@ func (tc *MappedTestCase) UnmarshalYAML(node *yaml.Node) error {
 	if err != nil {
 		return err
 	}
+	key, err := recordedKeyYAML(node)
+	if err != nil {
+		return err
+	}
 	if err := tc.unmarshalYAMLEntry(node); err != nil {
 		return err
 	}
-	tc.At, tc.Real, tc.Given = at, rl, gv
+	tc.At, tc.Real, tc.Given, tc.Key = at, rl, gv, key
 	return nil
 }
 
@@ -624,10 +672,14 @@ func (tc *MappedTestCase) UnmarshalJSON(data []byte) error {
 	if err != nil {
 		return err
 	}
+	key, err := recordedKeyJSON(data)
+	if err != nil {
+		return err
+	}
 	if err := tc.unmarshalJSONEntry(data); err != nil {
 		return err
 	}
-	tc.At, tc.Real, tc.Given = at, rl, gv
+	tc.At, tc.Real, tc.Given, tc.Key = at, rl, gv, key
 	return nil
 }
 

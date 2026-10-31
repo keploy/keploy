@@ -122,3 +122,30 @@ func TestReplayRefusesWhenTheAgentCannotTakeTheBegins(t *testing.T) {
 		t.Fatalf("the test command ran %d times after the replay was refused", runs)
 	}
 }
+
+// Each test keeps the key of the claim it began under, its test process's,
+// so a reader who moves one of its calls to worker: can name the key a
+// replay serves the moved entry under, in a set whose test processes have
+// several. A test begun before any claim, or with no start, gets none.
+func TestStampKeysGivesEachTestItsProcesssClaimKey(t *testing.T) {
+	t0 := time.Date(2026, 10, 6, 9, 0, 0, 0, time.UTC)
+	byCase := map[string]models.MappedTestCase{"a::TestA": {Dir: "a"}}
+	claims := []models.ScopeWindow{{Claim: "a", Start: t0}, {Claim: "b", Start: t0.Add(time.Minute)}}
+	stampKeys(byCase, []models.ScopeWindow{
+		{Name: "TestEarly", Start: t0.Add(-time.Second)},
+		{Name: "a::TestA", Start: t0.Add(time.Second), End: t0.Add(2 * time.Second)},
+		{Name: "b::TestB", Start: t0.Add(2 * time.Minute)},
+		{Name: "b::TestC"},
+	}, claims)
+	if got := byCase["a::TestA"]; got.Key != "a" || got.Dir != "a" {
+		t.Fatalf("a::TestA: %+v", got)
+	}
+	if got := byCase["b::TestB"]; got.Key != "b" {
+		t.Fatalf("b::TestB: %+v", got)
+	}
+	for _, id := range []string{"TestEarly", "b::TestC"} {
+		if got, ok := byCase[id]; ok {
+			t.Fatalf("%s got %+v", id, got)
+		}
+	}
+}
