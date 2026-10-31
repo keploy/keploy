@@ -151,9 +151,13 @@ func SetSkipProxyListener(skip bool) {
 // a source it cannot fence). SettleProgress is a count for each thing the
 // settle waits on that moves whenever that thing gets further; the settle's
 // watchdog fails it when one of them stops moving (watchSettle).
+// NoteTestBegin is called at each such record's test begin, which waits for
+// nothing else: the capture counts what it lost from the first one, so what
+// it lost before it (the application's start-up) is never the first test's.
 type CaptureSettler interface {
 	SettleCapture(ctx context.Context) error
 	SettleProgress() map[string]uint64
+	NoteTestBegin()
 }
 
 // captureSettler is the registered CaptureSettler, nil when none is.

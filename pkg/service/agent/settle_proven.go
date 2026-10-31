@@ -744,9 +744,11 @@ func (a *Agent) settleBegin(ctx context.Context, answers bool) (models.ListenDro
 		return a.settle(ctx, answers)
 	}
 	// A capture that settles itself leaves a begin nothing to wait for: its
-	// ends cut no scope that a begin would settle, and what it lost before a
-	// begin is the next end's (CaptureSettler).
-	if _, ok := settlesByCapture(answers); ok {
+	// ends cut no scope that a begin would settle, and what it lost between
+	// two tests is the next end's. It is told of the begin, so that what it
+	// lost before the first one is not (CaptureSettler.NoteTestBegin).
+	if cs, ok := settlesByCapture(answers); ok {
+		cs.NoteTestBegin()
 		return models.ListenDrops{}, nil
 	}
 	ir, ok := a.Proxy.(coreAgent.InFlightReader)
