@@ -1518,10 +1518,8 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 			return dc.classifyInstant(r, l, at, served, raw, resp, w, unreadReq, places, skip)
 		}
 		ln := Learned{Kind: KindNoise, Recorded: r, Live: l}
-		var fol *follows
-		if follow {
-			fol = &follows{dc: dc, rec: r.Value, live: l.Value, at: at, served: served, raw: raw, places: places}
-		}
+		// Under ClassifyGiven the rule reads a short word only (follows.reads).
+		fol := &follows{dc: dc, every: follow, rec: r.Value, live: l.Value, at: at, served: served, raw: raw, places: places}
 		if r.Value != "" {
 			if from, ok := appearedIn(dc, dc.ofIn(r.Value, l.Value, w, at), at, served, raw, fol); ok && skip&skipSource == 0 {
 				ln.Kind, ln.From = KindVariable, from
@@ -1662,6 +1660,8 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 					ln.Why = fol.moved + ", and keploy learns it as varying"
 				case fol.chance != "":
 					ln.Why = fol.chance + ", and keploy learns it as varying"
+				case fol.same != "":
+					ln.Why = fol.same + ", and keploy learns it as varying"
 				}
 			case KindEcho:
 				why := fol.first
@@ -3353,11 +3353,11 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 					p.sentBefore = x.at
 				}
 				rf := fol
-				if rf == nil {
+				if rf == nil || !rf.every {
 					// A step that reads no word under the rule (ClassifyGiven)
 					// reads a whole clock read under it all the same: it
 					// needs only x and what F gave there.
-					rf = &follows{dc: dc, rec: v.rec, live: v.live, at: at}
+					rf = &follows{dc: dc, every: true, rec: v.rec, live: v.live, at: at}
 				}
 				if !swap && (x.InAnOlderTest() || sentOnly(x, texts, held)) && rf.refute(x, texts, keep, v, p) {
 					break

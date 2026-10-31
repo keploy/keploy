@@ -180,8 +180,9 @@ func TestTheTestRequestIsAnEarlierPlace(t *testing.T) {
 // A value the application picks from its test case's request (by its clock,
 // or otherwise) is refused wherever a word of what changed stands in the
 // request, as it is when an exchange F served holds it, never learned as
-// noise: a shift, a slot's id, a number, a body's key. Each reason names the
-// request's leaf.
+// noise: a shift, a slot's id, a number, a body's key. Each run's value
+// holds a word of the request there (a pick of two places of one:
+// follows.tookAt). Each reason names the request's leaf.
 func TestAPickFromTheTestRequestThatIsNoInstantIsRefused(t *testing.T) {
 	at := time.Date(2026, 10, 22, 11, 13, 40, 0, time.UTC)
 	const p = "body.slot"
@@ -192,7 +193,7 @@ func TestAPickFromTheTestRequestThatIsNoInstantIsRefused(t *testing.T) {
 		{`{"shifts":["morning","evening"]}`, "morning", "evening", "body.shifts[0]"},
 		{`{"slots":[{"id":"s17","at":"11:14"},{"id":"s18","at":"11:15"}]}`, "s17", "s18", "body.slots[0].id"},
 		{`{"slots":[{"id":17,"at":"11:14"},{"id":18,"at":"11:15"}]}`, "17", "18", "body.slots[0].id"},
-		{`{"open":"2026-10-22T09:00:00Z","close":"2026-10-22T17:00:00Z"}`, "open", "closed", "body{keys}"},
+		{`{"open":"2026-10-22T09:00:00Z","close":"2026-10-22T17:00:00Z"}`, "open", "close", "body{keys}"},
 	} {
 		given := []Earlier{GivenRequest(&models.TestRequest{Test: "test-1", Parts: []models.TestRequestPart{jsonType, {Name: "body", Recorded: c.body, Sent: c.body}}})}
 		ln := ClassifyIn(clockedDrifts(), []string{p}, shape(c.live), shape(c.rec), at, given, nil, nil, nil)[0]
@@ -223,10 +224,27 @@ func TestAPickFromTheTestRequestThatIsNoInstantIsRefused(t *testing.T) {
 	if ln := ClassifyIn(clockedDrifts(), []string{p}, shape("evening"), shape("morning"), at, query, nil, nil, nil)[0]; ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "test case test-1 at url.query.shift,") {
 		t.Errorf("a query value: %s (%s); want it refused, naming url.query.shift", ln.Kind, ln.Why)
 	}
-	// A header's name the request sends is a place too.
-	given := []Earlier{GivenRequest(&models.TestRequest{Test: "test-1", Parts: []models.TestRequestPart{{Name: "header.X-Tenant-acme7", Recorded: "1", Sent: "1"}}})}
-	if ln := ClassifyIn(clockedDrifts(), []string{p}, shape("tenant-beta2"), shape("tenant-acme7"), at, given, nil, nil, nil)[0]; ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "test case test-1 at request{names}") {
+	// A header's name the request sends is a place too: a value holding a
+	// word of 32 bits or more of it is refused by its text.
+	given := []Earlier{GivenRequest(&models.TestRequest{Test: "test-1", Parts: []models.TestRequestPart{{Name: "header.X-Tenant-acme7f3k9", Recorded: "1", Sent: "1"}}})}
+	if ln := ClassifyIn(clockedDrifts(), []string{p}, shape("tenant-beta2"), shape("tenant-acme7f3k9"), at, given, nil, nil, nil)[0]; ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "test case test-1 at request{names}") {
 		t.Errorf("a header's name: %s (%s); want it refused, naming the request's names", ln.Kind, ln.Why)
+	}
+	// A short word (under chanceBits) both runs sent the application as
+	// recorded, which the value F saw took none of the words of, is chance
+	// (follows.reads): an application that copied it would have copied it
+	// in both runs. Learned as varying, naming the place.
+	for _, c := range []struct {
+		given     []Earlier
+		rec, live string
+		at        string
+	}{
+		{[]Earlier{GivenRequest(&models.TestRequest{Test: "test-1", Parts: []models.TestRequestPart{jsonType, {Name: "body", Recorded: `{"open":"2026-10-22T09:00:00Z","close":"2026-10-22T17:00:00Z"}`, Sent: `{"open":"2026-10-22T09:00:00Z","close":"2026-10-22T17:00:00Z"}`}}})}, "open", "closed", "body{keys}"},
+		{[]Earlier{GivenRequest(&models.TestRequest{Test: "test-1", Parts: []models.TestRequestPart{{Name: "header.X-Tenant-acme7", Recorded: "1", Sent: "1"}}})}, "tenant-acme7", "tenant-beta2", "request{names}"},
+	} {
+		if ln := ClassifyIn(clockedDrifts(), []string{p}, shape(c.live), shape(c.rec), at, c.given, nil, nil, nil)[0]; ln.Kind != KindNoise || !strings.Contains(ln.Why, "stands in test case test-1 at "+c.at+", which the recording and record's full round both gave the application there before the call, and the value record's full round saw lacks that word") {
+			t.Errorf("%q -> %q, a short word at %s both runs gave: %s (%s); want noise naming it", c.rec, c.live, c.at, ln.Kind, ln.Why)
+		}
 	}
 }
 

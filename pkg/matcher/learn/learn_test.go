@@ -243,8 +243,8 @@ func TestPair(t *testing.T) {
 
 func TestClassify(t *testing.T) {
 	at := time.Date(2026, 10, 14, 0, 0, 0, 0, time.UTC)
-	rec := body(t, "k", `{"order":"o-1","n":12345,"tok":"Bearer tok-A","nonce":"nc-41f2","ts":"t-5","tags":["t1","t2"],"empty":"","db":"u-77","sess":"sess s-71a","at":"2026-10-14 09:59:30","seq":"q-1","file":"7c9e6679.json"}`)
-	live := body(t, "k", `{"order":"o-9","n":54321,"tok":"Bearer tok-B","nonce":"nc-9c3e","ts":"t-6","tags":["u1","t2"],"empty":"now","db":"u-88","sess":"sess s-82b","at":"2026-10-14 10:00:31","seq":"q-9","file":"1b4e28ba.json"}`)
+	rec := body(t, "k", `{"order":"order-10001","n":12345,"tok":"Bearer tok-A","nonce":"nc-41f2","ts":"t-5","tags":["t1","t2"],"empty":"","db":"u-77","sess":"sess s-71a","at":"2026-10-14 09:59:30","seq":"q-1","file":"7c9e6679.json"}`)
+	live := body(t, "k", `{"order":"order-10009","n":54321,"tok":"Bearer tok-B","nonce":"nc-9c3e","ts":"t-6","tags":["u1","t2"],"empty":"now","db":"u-88","sess":"sess s-82b","at":"2026-10-14 10:00:31","seq":"q-9","file":"1b4e28ba.json"}`)
 	resp := map[string]Leaf{}
 	v, _ := DecodeJSON([]byte(`{"echo":"nc-41f2","location":"/orders/x/nc-41f2","items":[{"tag":"t1"}]}`))
 	JSONLeaves("body", v, resp)
@@ -261,8 +261,11 @@ func TestClassify(t *testing.T) {
 			// came from it.
 			{Side: Response, Leaf: Leaf{Path: "body.count", Noise: "body.count", Type: Number, Value: "5"}, Live: "5"},
 			// F saw another value here than the request sends: the
-			// recorded value still came from here, and is asserted.
-			{Side: Request, Leaf: Leaf{Path: "body.id", Noise: "body.id", Type: String, Value: "o-1"}, Live: "o-7", Place: "body.id"},
+			// recorded value still came from here, and is asserted. Whole
+			// and of 32 bits or more, it is evidence by its text (a short
+			// one goes through the rule a copy follows its source:
+			// follows.reads).
+			{Side: Request, Leaf: Leaf{Path: "body.id", Noise: "body.id", Type: String, Value: "order-10001"}, Live: "order-10007", Place: "body.id"},
 			{Side: Request, Leaf: Leaf{Path: "body.token", Noise: "body.token", Type: String, Value: "tok-A"}, Live: "tok-B", Place: "body.token"},
 			// A minted id sent whole, then inside a file name: the part
 			// drifted with it.
@@ -321,7 +324,7 @@ func TestClassify(t *testing.T) {
 	// The place says what binding it needs: the variable place, the value F
 	// saw there, that the value was whole there, and that the mock is the
 	// test's own.
-	if from["body.order"] != (Place{Mock: "mock-1", Side: Request, Path: "body.id", Noise: "body.id", Var: "body.id", Live: "o-7", Whole: true, Own: true}) {
+	if from["body.order"] != (Place{Mock: "mock-1", Side: Request, Path: "body.id", Noise: "body.id", Var: "body.id", Live: "order-10007", Whole: true, Own: true}) {
 		t.Fatalf("body.order from %+v", from["body.order"])
 	}
 	if f := from["body.tok"]; f.Whole || f.Path != "body.token" {
@@ -1683,15 +1686,16 @@ func TestAReasonIsOneTextForOneInput(t *testing.T) {
 		want            string
 	}{
 		// Two words the value lost stand in two fields of one payload: a
-		// variable of the field of the first (appearedIn).
-		{"a variable found in a payload", "x-aaa1-ccc3", "x-bbb2-ddd4",
-			[]*models.Mock{mk("mock-1", `{}`, map[string]string{"X-A": "aaa1", "X-B": "ccc3"}, -3*time.Second)},
-			"variable | mock-1 | spec.resp.header.X-A | a part of its recorded value (its characters 3 to 6)"},
+		// variable of the field of the first (appearedIn). Each word is of
+		// 32 bits, evidence by its text (follows.reads).
+		{"a variable found in a payload", "x-aaaa1111-cccc3333", "x-bbbb2222-dddd4444",
+			[]*models.Mock{mk("mock-1", `{}`, map[string]string{"X-A": "aaaa1111", "X-B": "cccc3333"}, -3*time.Second)},
+			"variable | mock-1 | spec.resp.header.X-A | a part of its recorded value (its characters 3 to 10)"},
 		// Two words F saw stand in two payloads: refused naming the first
 		// of them, in the payload that holds it (unaccounted).
-		{"an unaccounted word in a payload", "x-aaa1", "x-bbb2-ccc3",
-			[]*models.Mock{mk("mock-1", `{"a":"ccc3"}`, nil, -3*time.Second), mk("mock-2", `{"b":"bbb2"}`, nil, -2*time.Second)},
-			"unaccounted |  |  | a word of what record's full round saw in it (its characters 3 to 6) appears in an earlier recording, in mock-2"},
+		{"an unaccounted word in a payload", "x-aaaa1111", "x-bbbb2222-cccc3333",
+			[]*models.Mock{mk("mock-1", `{"a":"cccc3333"}`, nil, -3*time.Second), mk("mock-2", `{"b":"bbbb2222"}`, nil, -2*time.Second)},
+			"unaccounted |  |  | a word of what record's full round saw in it (its characters 3 to 10) appears in an earlier recording, in mock-2"},
 	} {
 		seen := map[string]int{}
 		for i := 0; i < 200; i++ {

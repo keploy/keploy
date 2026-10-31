@@ -144,6 +144,19 @@ func heldWord(text string, rec, live time.Time, typed bool) bool {
 // classifyProcessedAt classifies the insert's processed_at, recorded at rec
 // and live in F, recorded at insert (r1Insert when zero), against the
 // recordings F served before it (raw), read in w.
+// boundOrRefused reports whether ln binds the value to mock's field, or
+// refuses it naming that place. A short word (under chanceBits) these
+// fixtures hold is read by the rule a copy follows its source
+// (follows.reads), which refuses it where the fixtures show no serve order:
+// fail closed, never noise.
+// An empty field reads any field of mock.
+func boundOrRefused(ln Learned, mock, field string) bool {
+	if ln.Kind == KindVariable {
+		return ln.From.Mock == mock && (field == "" || ln.From.Field == field)
+	}
+	return ln.Kind == KindUnaccounted && strings.Contains(ln.Why, strings.TrimSuffix(mock+" at "+field, " at "))
+}
+
 func classifyProcessedAt(rec, live time.Time, typed bool, insert time.Time, w *Window, mocks ...*models.Mock) Learned {
 	const p = "body.docs.msgs.0.processed_at.$date.$numberLong"
 	if insert.IsZero() {
@@ -234,10 +247,10 @@ func TestAClockReadIsNoiseOnlyWhereItsWindowShowsIt(t *testing.T) {
 			if i == 0 && !noise(ln) {
 				t.Errorf("%s, the receive as recorded, typed: %s (from %q at %q, %s); want noise (a read of the clock with no window, refused outside its window): its Date header is its server's stamp, and nothing else holds a word of it", wname, ln.Kind, ln.From.Mock, ln.From.Field, ln.Why)
 			}
-			if i == 1 && (ln.Kind != KindVariable || ln.From.Mock != "mock-4" || ln.From.Field != "spec.resp.body" || ln.From.Held != "14") {
-				t.Errorf("%s, a receive count of 14, typed: %s (from %q at %q, %q); want refused, a variable from mock-4's spec.resp.body: its minute is a word there, and nothing shows it is a clock read", wname, ln.Kind, ln.From.Mock, ln.From.Field, ln.From.Held)
+			if i == 1 && !boundOrRefused(ln, "mock-4", "spec.resp.body") {
+				t.Errorf("%s, a receive count of 14, typed: %s (from %q at %q, %q); want refused, or a variable from mock-4's spec.resp.body: its minute is a word there, and nothing shows it is a clock read", wname, ln.Kind, ln.From.Mock, ln.From.Field, ln.From.Held)
 			}
-			if i == 1 && !strings.Contains(ln.Why, "a part of its recorded value (its characters 15 to 16) stands in mock-4 at spec.resp.body") || i == 1 && !strings.Contains(ln.Why, "declare it noise in keploy.yml") || i == 1 && strings.Contains(ln.Why, `"14"`) || i == 1 && !strings.Contains(ln.Why, "nothing shows the value is a read of the application's clock") {
+			if i == 1 && !strings.Contains(ln.Why, "of its recorded value (its characters 15 to 16)") || i == 1 && !strings.Contains(ln.Why, "mock-4 at spec.resp.body") || i == 1 && !strings.Contains(ln.Why, "declare it noise in keploy.yml") || i == 1 && strings.Contains(ln.Why, `"14"`) || i == 1 && !strings.Contains(ln.Why, "nothing shows the value is a read of the application's clock") {
 				t.Errorf("%s, a receive count of 14: the reason %q does not name the part, the field, the missing provenance and the fix, or names the value's text", wname, ln.Why)
 			}
 		}
@@ -253,8 +266,8 @@ func TestAClockReadIsNoiseOnlyWhereItsWindowShowsIt(t *testing.T) {
 		// server's clock ahead) is no stamp: its words are searched.
 		ahead := r1Receive("")
 		ahead.Spec.ResTimestampMock = time.Date(2026, 10, 22, 11, 14, 15, 0, time.UTC)
-		if ln := classifyProcessedAt(rec, live, true, time.Time{}, w, ahead); ln.Kind != KindVariable || ln.From.Mock != "mock-4" || ln.From.Field != "spec.resp.header.Date" {
-			t.Errorf("%s, a Date header after its answer, typed: %s (from %q at %q); want a variable from mock-4's spec.resp.header.Date", wname, ln.Kind, ln.From.Mock, ln.From.Field)
+		if ln := classifyProcessedAt(rec, live, true, time.Time{}, w, ahead); !boundOrRefused(ln, "mock-4", "spec.resp.header.Date") {
+			t.Errorf("%s, a Date header after its answer, typed: %s (from %q at %q, %s); want a variable from mock-4's spec.resp.header.Date, or refused naming it", wname, ln.Kind, ln.From.Mock, ln.From.Field, ln.Why)
 		}
 	}
 }
@@ -335,7 +348,11 @@ func TestAWholeInstantEchoIsStillAVariable(t *testing.T) {
 						held := heldWord(recorded[i], sent, got, typed) || m == early && heldWord(m.Spec.HTTPResp.Header["Date"], sent, got, typed)
 						want := sameText(recorded[i], typed) || typed && !shownClockRead(sent, got, typed, w) && held
 						ln := classifyProcessedAt(sent, got, typed, time.Time{}, w, m)
-						if want && (ln.Kind != KindVariable || ln.From.Mock != "mock-4") || !want && !noiseIn(ln, w) {
+						// A word of the reading (not the text whole) is
+						// short: bound, or refused naming mock-4
+						// (boundOrRefused).
+						bound := ln.Kind == KindVariable && ln.From.Mock == "mock-4" || !sameText(recorded[i], typed) && boundOrRefused(ln, "mock-4", "")
+						if want && !bound || !want && !noiseIn(ln, w) {
 							t.Errorf("%s, no protocol-phase answer's clock read (early %v), F's value in no payload, %s, typed %v: %s from %q; want a variable %v", recorded[i], m == early, wname, typed, ln.Kind, ln.From.Mock, want)
 						}
 						// The variable names the field the value stands
@@ -828,8 +845,8 @@ func TestAWordIsNeverFoundInAProtocolPhaseAnswersClockRead(t *testing.T) {
 		"a receive count of 14":                         configReceive(`{"ApproximateReceiveCount": "14"}`),
 		"a data-plane receive count of 14 and its Date": r1Receive(`{"ApproximateReceiveCount": "14"}`),
 	} {
-		if ln := classify(m, nil); ln.Kind != KindVariable || ln.From.Mock != "mock-4" {
-			t.Errorf("beside %s: %s from %q; want a variable from mock-4", name, ln.Kind, ln.From.Mock)
+		if ln := classify(m, nil); !boundOrRefused(ln, "mock-4", "") {
+			t.Errorf("beside %s: %s from %q (%s); want a variable from mock-4, or refused naming it", name, ln.Kind, ln.From.Mock, ln.Why)
 		}
 	}
 	for name, v := range map[string]string{"a date of its minute": "Thu, 22 Oct 2026 11:14:16 GMT", "14 as a word": "seen 14 times"} {

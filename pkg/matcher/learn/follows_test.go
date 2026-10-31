@@ -73,6 +73,18 @@ func classifyF(t *testing.T, recorded, live string, earlier []Earlier, raw []Raw
 	return got[0]
 }
 
+// classifyG is classifyF under ClassifyGiven (keploy test).
+func classifyG(t *testing.T, recorded, live string, earlier []Earlier, raw []Raw, resp []Leaf) Learned {
+	t.Helper()
+	const path = "bind.$8"
+	rec := Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: recorded}}}
+	got := ClassifyGiven(clockedDrifts(), []string{path}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: live}}}, rec, eRecAt, earlier, raw, resp, nil, nil)
+	if len(got) != 1 {
+		t.Fatalf("%q recorded, %q in F: %+v", recorded, live, got)
+	}
+	return got[0]
+}
+
 // with is raw with its i-th place replaced by x.
 func with(raw []Raw, i int, x Raw) []Raw {
 	out := append([]Raw(nil), raw...)
@@ -83,8 +95,8 @@ func with(raw []Raw, i int, x Raw) []Raw {
 // Flyway's execution_time, 82 at record, a start-up word in F: the recording
 // gave the application that word at the same place before the call and its
 // value lacked it, so the value is no copy of it, and it is learned as
-// varying (noise) in F alone. ClassifyGiven, the rule's absence, still
-// refuses it.
+// varying (noise). ClassifyGiven reads it alike: a short word (under
+// chanceBits) goes through the rule there too (follows.reads).
 func TestEFlywayExecutionTimeBesideStartupWordsIsLearnedVarying(t *testing.T) {
 	for _, tc := range []struct{ f, matched string }{
 		{"1", `"1" of SELECT 1 and INSERT 0 1`},
@@ -96,10 +108,8 @@ func TestEFlywayExecutionTimeBesideStartupWordsIsLearnedVarying(t *testing.T) {
 		if got := classifyF(t, "82", tc.f, nil, eStartup(), nil); got.Kind != KindNoise {
 			t.Errorf("execution_time 82 at record, %s in F (%s): %s (%q), want noise", tc.f, tc.matched, got.Kind, got.Why)
 		}
-		path := "bind.$8"
-		today := ClassifyGiven(clockedDrifts(), []string{path}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: tc.f}}}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: "82"}}}, eRecAt, nil, eStartup(), nil, nil, nil)
-		if today[0].Kind != KindUnaccounted {
-			t.Errorf("ClassifyGiven, execution_time 82 at record, %s in F: %s, want refused (the rule is ClassifyFollowing's)", tc.f, today[0].Kind)
+		if got := classifyG(t, "82", tc.f, nil, eStartup(), nil); got.Kind != KindNoise {
+			t.Errorf("ClassifyGiven, execution_time 82 at record, %s in F: %s (%q), want noise as under the rule", tc.f, got.Kind, got.Why)
 		}
 	}
 }
@@ -256,8 +266,9 @@ func jobsServed(id, n string, live Raw) []Raw {
 // the value took a word of what F gave there (a copy), or the place
 // gained nothing, or F's view of it is missing, lacks the field, or holds
 // the value F saw, it stays where the value came from (a variable), or the
-// word is refused: fail closed. ClassifyGiven, the rule's absence, never
-// learns it.
+// word is refused: fail closed. ClassifyGiven refuses a short word at a
+// place F gave another value at (movedWithIt: the place changed with the
+// value), and learns one F gave as recorded there as the rule does.
 func TestAWordAtAPlaceTheFullRoundGaveAnotherValueAtIsNoCopyWhereTheValueTookNoneOfIt(t *testing.T) {
 	const (
 		moved   = "where record's full round gave the application another value, which the value took none of the words of: a copy moves with its source"
@@ -266,6 +277,10 @@ func TestAWordAtAPlaceTheFullRoundGaveAnotherValueAtIsNoCopyWhereTheValueTookNon
 		holds   = "record's full round gave the application another value there, and it holds a word the value took"
 		other   = ", where the recording did not, so it cannot show the value does not follow it"
 		fOnly   = "where the recording did not give the application that word"
+		// The value lacking the word holds a word of the same payload both
+		// runs gave (follows.tookAt): a pick of two places of one, refused
+		// before the place F moved the word to is read.
+		picked = "the value that lacks that word holds a word of a place both runs gave the application before the call: a word of what record's full round saw in it (its characters "
 	)
 	before := eRecAt.Add(-50 * time.Millisecond)
 	leaf := func(rec, live string) []Earlier {
@@ -301,14 +316,14 @@ func TestAWordAtAPlaceTheFullRoundGaveAnotherValueAtIsNoCopyWhereTheValueTookNon
 		// F gave the rows in another order: the id's field holds the other
 		// job's there, and the value took the word F gave at the row the
 		// recorded id moved to, which the recording did not give.
-		{"payload, F's view moved the row, the value took its word", chanceValRec, chanceCopy, nil, append(eStartup(), ePg("mock-6", 100*time.Millisecond, "SELECT id FROM jobs", []models.PostgresV3Cells{{{Value: chanceSrcRec}}, {{Value: "c0ffee00-1234-4321-abcd-0000000000ff"}}}, "SELECT 2").ServedAs(6).ServedLive(ePg("mock-6", 100*time.Millisecond, "SELECT id FROM jobs", []models.PostgresV3Cells{{{Value: "c0ffee00-1234-4321-abcd-0000000000ff"}}, {{Value: chanceSrcLive}}}, "SELECT 2"))), KindUnaccounted, "appears in an earlier recording, in mock-6 at spec.postgresV3.query.response.rows[1][0], as record's full round gave it, " + fOnly, ""},
+		{"payload, F's view moved the row, the value took its word", chanceValRec, chanceCopy, nil, append(eStartup(), ePg("mock-6", 100*time.Millisecond, "SELECT id FROM jobs", []models.PostgresV3Cells{{{Value: chanceSrcRec}}, {{Value: "c0ffee00-1234-4321-abcd-0000000000ff"}}}, "SELECT 2").ServedAs(6).ServedLive(ePg("mock-6", 100*time.Millisecond, "SELECT id FROM jobs", []models.PostgresV3Cells{{{Value: "c0ffee00-1234-4321-abcd-0000000000ff"}}, {{Value: chanceSrcLive}}}, "SELECT 2"))), KindUnaccounted, picked + "20 to 23) stands in mock-6 at spec.postgresV3.query.response.rows[1][0]", ""},
 		// F gave the word the value took at another field than the one
 		// whose recorded text holds it, or at a field the recording lacks:
 		// what F gave there is read field by field, never as moved.
-		{"payload, F's view moved the word the value took to another column", "k-48d1", "k-6c7d", nil, append(eStartup(), eRow("48d1", "6c7d", "aaaa").ServedAs(6).ServedLive(eRow("9998", "9999", "6c7d"))), KindUnaccounted, "record's full round gave the application that word at spec.postgresV3.query.response.rows[0][2]" + other, ""},
-		{"payload, F's view gave the word the value took at two columns", "k-48d1", "k-6c7d", nil, append(eStartup(), eRow("48d1", "6c7d", "aaaa").ServedAs(6).ServedLive(eRow("9999", "6c7d", "6c7d"))), KindUnaccounted, "record's full round gave the application that word at spec.postgresV3.query.response.rows[0][2]" + other, ""},
+		{"payload, F's view moved the word the value took to another column", "k-48d1", "k-6c7d", nil, append(eStartup(), eRow("48d1", "6c7d", "aaaa").ServedAs(6).ServedLive(eRow("9998", "9999", "6c7d"))), KindUnaccounted, picked + "3 to 6) stands in mock-6", ""},
+		{"payload, F's view gave the word the value took at two columns", "k-48d1", "k-6c7d", nil, append(eStartup(), eRow("48d1", "6c7d", "aaaa").ServedAs(6).ServedLive(eRow("9999", "6c7d", "6c7d"))), KindUnaccounted, picked + "3 to 6) stands in mock-6", ""},
 		{"payload, F's view gave the word the value took at a column besides the one both gave it at", "k-zzzz", "k-6c7d", nil, append(eStartup(), eRow("qqqq", "6c7d", "aaaa").ServedAs(6).ServedLive(eRow("qqqq", "6c7d", "6c7d"))), KindUnaccounted, "record's full round gave the application that word at spec.postgresV3.query.response.rows[0][2]" + other, ""},
-		{"payload, F's view grew a row holding the word the value took", "k-48d1", "k-6c7d", nil, append(eStartup(), eRows([]models.PostgresV3Cells{{{Value: "48d1"}, {Value: "6c7d"}}}).ServedAs(6).ServedLive(eRows([]models.PostgresV3Cells{{{Value: "9999"}, {Value: "6c7d"}}, {{Value: "6c7d"}, {Value: "1"}}}))), KindUnaccounted, "record's full round gave the application that word at spec.postgresV3.query.response.rows[1][0]" + other, ""},
+		{"payload, F's view grew a row holding the word the value took", "k-48d1", "k-6c7d", nil, append(eStartup(), eRows([]models.PostgresV3Cells{{{Value: "48d1"}, {Value: "6c7d"}}}).ServedAs(6).ServedLive(eRows([]models.PostgresV3Cells{{{Value: "9999"}, {Value: "6c7d"}}, {{Value: "6c7d"}, {Value: "1"}}}))), KindUnaccounted, picked + "3 to 6) stands in mock-6", ""},
 		// A view of another mock is no view of this one: one keploy could
 		// not read (ServedLive), so a word only F's serve may have given is
 		// refused; a value copied where the recording gave it is still bound
@@ -335,10 +350,17 @@ func TestAWordAtAPlaceTheFullRoundGaveAnotherValueAtIsNoCopyWhereTheValueTookNon
 		if tc.kind != KindNoise {
 			continue
 		}
-		path := "bind.$8"
-		given := ClassifyGiven(clockedDrifts(), []string{path}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: tc.live}}}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: tc.recorded}}}, eRecAt, tc.earlier, tc.raw, nil, nil, nil)
-		if given[0].Kind == KindNoise {
-			t.Errorf("FALSE GREEN? ClassifyGiven, %s: noise (%q), want it never learned (the rule is ClassifyFollowing's)", tc.name, given[0].Why)
+		// The words here are short (under chanceBits): keploy test reads
+		// them by the rule (follows.reads), but a place F gave another
+		// value at changed with the value: evidence there (movedWithIt).
+		given := classifyG(t, tc.recorded, tc.live, tc.earlier, tc.raw, nil)
+		switch {
+		case strings.Contains(tc.why, moved):
+			if given.Kind != KindUnaccounted || !strings.Contains(given.Why, movedWithIt) {
+				t.Errorf("FALSE GREEN? ClassifyGiven, %s: %s (%q), want it refused: the place changed with the value", tc.name, given.Kind, given.Why)
+			}
+		case given.Kind != KindNoise || given.Why != got.Why:
+			t.Errorf("ClassifyGiven, %s: %s (%q), want noise as under the rule (%q)", tc.name, given.Kind, given.Why, got.Why)
 		}
 	}
 }
@@ -378,8 +400,10 @@ func TestAVariableReadingFDidNotFollowIsNoise(t *testing.T) {
 	if got.Kind != KindNoise || !strings.Contains(got.Why, "its recorded value stands whole in mock-5 at") || !strings.Contains(got.Why, "which record's full round sent and gave the application as recorded, byte for byte, while the value changed: a copy moves with its source, so the value is no copy of it, and keploy learns it as varying") {
 		t.Errorf("50 recorded beside VARCHAR(50) F sent unchanged, 7 in F: %s (%q), want noise naming mock-5", got.Kind, got.Why)
 	}
-	if today := ClassifyGiven(clockedDrifts(), []string{"bind.$8"}, Shape{Leaves: map[string]Leaf{"bind.$8": {Path: "bind.$8", Type: String, Value: "7"}}}, Shape{Leaves: map[string]Leaf{"bind.$8": {Path: "bind.$8", Type: String, Value: "50"}}}, eRecAt, nil, startup(eHistory(before, 6, true)), nil, nil, nil); today[0].Kind != KindVariable || today[0].From.Mock != "mock-5" {
-		t.Errorf("ClassifyGiven, 50 beside VARCHAR(50), 7 in F: %s (%q), want a variable of mock-5 (the rule is ClassifyFollowing's)", today[0].Kind, today[0].Why)
+	// "50" is a short word (under chanceBits): keploy test reads it as the
+	// rule does (follows.reads).
+	if given := classifyG(t, "50", "7", nil, startup(eHistory(before, 6, true)), nil); given.Kind != KindNoise || given.Why != got.Why {
+		t.Errorf("ClassifyGiven, 50 beside VARCHAR(50), 7 in F: %s (%q), want noise as under the rule", given.Kind, given.Why)
 	}
 	for _, tc := range []struct {
 		name, live string
@@ -393,6 +417,9 @@ func TestAVariableReadingFDidNotFollowIsNoise(t *testing.T) {
 	} {
 		if got := classifyF(t, "50", tc.live, nil, tc.raw, nil); got.Kind != KindVariable || got.From.Mock != "mock-5" {
 			t.Errorf("FALSE GREEN? 50 beside VARCHAR(50), %s, %s in F: %s (%q), want a variable of mock-5", tc.name, tc.live, got.Kind, got.Why)
+		}
+		if got := classifyG(t, "50", tc.live, nil, tc.raw, nil); got.Kind != KindVariable || got.From.Mock != "mock-5" {
+			t.Errorf("FALSE GREEN? ClassifyGiven, 50 beside VARCHAR(50), %s, %s in F: %s (%q), want a variable of mock-5", tc.name, tc.live, got.Kind, got.Why)
 		}
 	}
 	// A source F served as recorded holding F's value in the form a bind
@@ -900,8 +927,8 @@ func eLaneSession(name string, before time.Duration, pid int32) *models.Mock {
 // connection carried the same word there. So a migration's execution_time
 // of 0, 3, 4 or 16 ms at record is learned again (F served both start-ups
 // as recorded and the value moved while they did not: noise under the rule
-// a copy follows its source; a variable at the start-up without it, as any
-// recording's word, which the adapters refuse in a raw payload).
+// a copy follows its source, which keploy test reads such a short word by
+// too).
 func TestAValueRecordedAsAWordEveryStartUpCarriesAlikeIsReadAsAnyRecordings(t *testing.T) {
 	raw := []Raw{
 		RawOf(eLaneSession("mock-hs-81", 900*time.Millisecond, 81), false).ServedAs(1).ServedAsRecorded(),
@@ -912,12 +939,14 @@ func TestAValueRecordedAsAWordEveryStartUpCarriesAlikeIsReadAsAnyRecordings(t *t
 		{"0", "12", "protocolVersion"}, {"3", "12", "protocolVersion"}, {"4", "12", "serverVersion"}, {"16", "12", "serverVersion"},
 		{"4096", "12", "parameterStatus.scram_iterations"}, {"on", "off", "parameterStatus.integer_datetimes"}, {"UTC", "IST", "parameterStatus.TimeZone"},
 	} {
-		if got := classifyF(t, tc.recorded, tc.live, nil, raw, nil); got.Kind != KindNoise {
+		got := classifyF(t, tc.recorded, tc.live, nil, raw, nil)
+		if got.Kind != KindNoise {
 			t.Errorf("%s at record, a word every start-up carries alike (%s), %s in F, the rule a copy follows its source: %s (%q); want noise", tc.recorded, tc.field, tc.live, got.Kind, got.Why)
 		}
-		got := ClassifyGiven(clockedDrifts(), []string{path}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: tc.live}}}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: tc.recorded}}}, eRecAt, nil, raw, nil, nil, nil)
-		if len(got) != 1 || got[0].Kind != KindVariable || got[0].From.Mock != "mock-hs-81" || got[0].From.startUp {
-			t.Errorf("%s at record, a word every start-up carries alike (%s), %s in F, without the rule: %+v; want a variable at mock-hs-81 like any recording's word, not a start-up refusal", tc.recorded, tc.field, tc.live, got)
+		// Each word is short (under chanceBits): keploy test reads it as the
+		// rule does (follows.reads), never as a start-up refusal.
+		if given := classifyG(t, tc.recorded, tc.live, nil, raw, nil); given.Kind != KindNoise || given.Why != got.Why {
+			t.Errorf("%s at record, a word every start-up carries alike (%s), %s in F, keploy test: %s (%q); want noise as under the rule", tc.recorded, tc.field, tc.live, given.Kind, given.Why)
 		}
 	}
 }

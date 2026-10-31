@@ -18,7 +18,8 @@ import (
 // and F served it as recorded, or its view shows the word at the same field.
 // An application that copied the word would have copied it in both runs.
 // Everywhere else the word stays refused, naming why; keploy test
-// (ClassifyGiven) refuses it as before. Nothing reads the id's shape.
+// (ClassifyGiven) reads it alike: a 4-hex word is under chanceBits
+// (follows.reads). Nothing reads the id's shape.
 func TestAChanceWordOfAnotherTestsAnswerIsLearnedAsVarying(t *testing.T) {
 	const p = "body.appId"
 	const (
@@ -88,7 +89,7 @@ func TestAChanceWordOfAnotherTestsAnswerIsLearnedAsVarying(t *testing.T) {
 				}
 				refused := "appears in mock-31, a recording record's full round gave the application before the call that is another test's"
 				switch {
-				case follow && row.want == "":
+				case row.want == "":
 					// The noise names its evidence (learning is legible): the
 					// word, where both runs gave it, which value lacks it, and
 					// that no word that changed of the value lacking it
@@ -100,13 +101,9 @@ func TestAChanceWordOfAnotherTestsAnswerIsLearnedAsVarying(t *testing.T) {
 					if ln.Kind != KindNoise || !strings.HasPrefix(ln.Why, word) || !strings.HasSuffix(ln.Why, ") stands in mock-31, which the recording and record's full round both gave the application at the same fields before the call, and "+lacks+", and no word of it that changed, but for a read of the clock, stands in any place either run gave the application before the call: an application that copied the word would have copied it in both runs, so the value holds it by chance, and keploy learns it as varying") {
 						t.Errorf("%s (set %v): %s (%s); want noise naming the chance word", row.name, viaSet, ln.Kind, ln.Why)
 					}
-				case follow:
-					if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, refused) || !strings.Contains(ln.Why, row.want) {
-						t.Errorf("%s (set %v): %s (%s); want it refused: %s", row.name, viaSet, ln.Kind, ln.Why, row.want)
-					}
 				default:
-					if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, refused) {
-						t.Errorf("%s (set %v), keploy test: %s (%s); want it refused as before", row.name, viaSet, ln.Kind, ln.Why)
+					if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, refused) || !strings.Contains(ln.Why, row.want) {
+						t.Errorf("%s (set %v, follow %v): %s (%s); want it refused: %s", row.name, viaSet, follow, ln.Kind, ln.Why, row.want)
 					}
 				}
 			}
@@ -295,10 +292,14 @@ func TestAChanceWordStaysRefusedWhereTheValueLackingItHoldsAWordOfAnyPlaceBothRu
 				}
 				ln := classify(dc, []string{p}, strLeaf(p, row.live), strLeaf(p, row.rec), r1Insert, nil, raw, nil, nil, set)[0]
 				switch {
+				case row.want == "":
+					// The chance word is a 4-hex group: keploy test reads it
+					// as the rule does (follows.reads).
+					if ln.Kind != KindNoise {
+						t.Errorf("%s (set %v, follow %v): %s (%s); want noise", row.name, viaSet, follow, ln.Kind, ln.Why)
+					}
 				case !follow && ln.Kind == KindNoise:
-					t.Errorf("%s (set %v), keploy test: %s (%s); want it refused, or bound where the recorded value stands whole in the own place, as before", row.name, viaSet, ln.Kind, ln.Why)
-				case follow && row.want == "" && ln.Kind != KindNoise:
-					t.Errorf("%s (set %v): %s (%s); want noise", row.name, viaSet, ln.Kind, ln.Why)
+					t.Errorf("FALSE GREEN? %s (set %v), keploy test: %s (%s); want it refused, or bound where the recorded value stands whole in the own place, as before", row.name, viaSet, ln.Kind, ln.Why)
 				case follow && row.want != "" && (ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, lacks) || !strings.Contains(ln.Why, row.want)):
 					t.Errorf("FALSE GREEN? %s (set %v): %s (%s); want it refused: %s", row.name, viaSet, ln.Kind, ln.Why, row.want)
 				}
