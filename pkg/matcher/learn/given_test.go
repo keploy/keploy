@@ -877,11 +877,12 @@ func TestAClientTestLearnsAChangedInstantOnlyWhereItsWindowShowsARead(t *testing
 	}
 }
 
-// In a client test the lead makes no clock read of a value either where it
-// drifted with an earlier exchange's instant: the slot the harness gave the
-// application, sent by an earlier call and again inside a longer value, is
-// that call's variable (followed, compared), not two clock reads of one
-// moment, which in keploy test it is (noise).
+// The lead makes no clock read of a value where it drifted with an earlier
+// exchange's instant: the slot the harness gave the application, sent by
+// an earlier call and again inside a longer value, is that call's variable
+// inside a longer value (followed, compared), in a client test and in
+// keploy test alike, as the slot whole is that call's variable: never
+// noise, which would let any value pass at every replay.
 func TestAClientTestFollowsAnInstantTheLeadMoved(t *testing.T) {
 	// The call is in the minute the slot names: a read of the clock is no
 	// later than its call.
@@ -894,8 +895,8 @@ func TestAClientTestFollowsAnInstantTheLeadMoved(t *testing.T) {
 	if ln := ClassifyIn(clientTestCache(), []string{p}, str("book 2026-10-22T11:21Z"), str("book 2026-10-22T11:20Z"), at, call, nil, nil, nil)[0]; ln.Kind != KindVariable || ln.From.Mock != "mock-1" || ln.From.Path != "body.slot" {
 		t.Errorf("a client test: %s from %+v (%s); want a variable of mock-1's body.slot", ln.Kind, ln.From, ln.Why)
 	}
-	if ln := ClassifyIn(clockedDrifts(), []string{p}, str("book 2026-10-22T11:21Z"), str("book 2026-10-22T11:20Z"), at, call, nil, nil, nil)[0]; ln.Kind != KindNoise {
-		t.Errorf("keploy test: %s from %+v (%s); want noise, two clock reads the lead moved", ln.Kind, ln.From, ln.Why)
+	if ln := ClassifyIn(clockedDrifts(), []string{p}, str("book 2026-10-22T11:21Z"), str("book 2026-10-22T11:20Z"), at, call, nil, nil, nil)[0]; ln.Kind != KindVariable || ln.From.Mock != "mock-1" || ln.From.Path != "body.slot" || ln.From.Whole {
+		t.Errorf("keploy test: %s from %+v (%s); want a variable of mock-1's body.slot inside a longer value, as a client test learns", ln.Kind, ln.From, ln.Why)
 	}
 }
 

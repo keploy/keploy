@@ -1658,9 +1658,6 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// whole; refused whole, it refuses the text.
 		if fol != nil && ln.Kind == KindNoise {
 			if word, ok := wordRead(ln, w, leaf); ok {
-				if word.Kind != KindUnaccounted && word.Refuted == "" {
-					word.Refuted = fol.refutedAll()
-				}
 				return word
 			}
 		}
@@ -2124,11 +2121,17 @@ func sinceWord(early Learned, wb *Window, leaf func(r, l Leaf, w *Window, skip s
 // and SHA-256 of the text on each side of it, never the text, so a replay
 // reads the word alone as the clock and compares the rest. The word may be
 // the whole of the decoded text (a percent-encoded instant, a bare base64
-// cursor of one): read as the instant whole is, in its decoded form. ok is
-// false for anything else, which stays as w learned it: the value whole an
-// instant as it stands (leaf read it whole already), a text whose one
-// changed instant changed beside another word, or one leaf learns
-// otherwise (a copy of an earlier place's instant).
+// cursor of one): read as the instant whole is, in its decoded form. The
+// read names the places its search set aside (Learned.Refuted) from leaf's
+// own search for the word: the search for the text sets aside only places
+// that hold a part of it that changed, and the word is the one part that
+// did, so they are the same places. One that leaf learns as a copy of an
+// earlier place is that place's variable inside a longer value
+// (Place.Whole false), and one it learns as an echo of the call's own
+// answer refuses the text: never noise. ok is false for anything else,
+// which stays as w learned it: the value whole an instant as it stands
+// (leaf read it whole already), or a text whose one changed instant
+// changed beside another word.
 func wordRead(early Learned, w *Window, leaf func(r, l Leaf, w *Window, skip skipRule) Learned) (Learned, bool) {
 	if early.Kind != KindNoise || early.Read != nil {
 		return early, false
@@ -2153,6 +2156,23 @@ func wordRead(early Learned, w *Window, leaf func(r, l Leaf, w *Window, skip ski
 		early.Kind, early.Why = KindUnaccounted, moreInstantsWhy
 		return early, true
 	}
+	// A copy of an earlier place, or an echo of the call's own answer, as
+	// the instant whole is: never left noise. A copy is that place's
+	// variable inside a longer value (Place.Whole false), as the search for
+	// a part of a value learns one; an echo inside a text keploy cannot
+	// answer with this run's value, so the text is refused (echoedPart).
+	part := "it holds an instant (" + partOf(r.Value, dr[pairs[0][0].start:pairs[0][0].end]) + ")"
+	switch {
+	case own.Kind == KindVariable:
+		own.Recorded, own.Live, own.From.Whole = r, l, false
+		if own.Why != "" {
+			own.Why = part + ": " + own.Why
+		}
+		return own, true
+	case own.Kind == KindEcho && len(own.Echo) > 0:
+		early.Kind, early.Why = KindUnaccounted, part+" that comes back in the answer at "+own.Echo[0].Path+", which keploy cannot answer with this run's value inside a text"
+		return early, true
+	}
 	word, one := instantWord(r.Value, l.Value, dr, dl, pairs)
 	at := own.Read
 	if own.Kind == KindClockOffset {
@@ -2165,9 +2185,6 @@ func wordRead(early Learned, w *Window, leaf func(r, l Leaf, w *Window, skip ski
 	own.Recorded, own.Live = r, l
 	if own.Kind == KindClockOffset {
 		own.Why = clockOffsetEvidence(fieldName(r), *own.Offset)
-	}
-	if own.Refuted == "" {
-		own.Refuted = early.Refuted
 	}
 	return own, true
 }

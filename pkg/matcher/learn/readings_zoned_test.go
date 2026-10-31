@@ -384,6 +384,128 @@ func TestAnEncodedInstantWholeIsJudgedAsThePlainWhole(t *testing.T) {
 	})
 }
 
+// wordRow is the call the rows below learn a value of, in keploy test:
+// its instant, record's full round's, its window, and the forms they
+// write an instant in (the instant whole first).
+type wordRow struct {
+	call, callF time.Time
+	w           *Window
+	forms       []textForm
+}
+
+func newWordRow() wordRow {
+	call := time.Date(2026, 10, 31, 10, 52, 15, 438_000_000, time.UTC)
+	callF := call.Add(73*time.Second + 600*time.Millisecond)
+	return wordRow{call, callF, &Window{Rec: Span{From: call.Add(-100 * time.Millisecond), To: call}, F: Span{From: callF.Add(-100 * time.Millisecond), To: callF}}, []textForm{
+		{"whole", func(s string) string { return s }},
+		{"in a text", func(s string) string { return "jobs due before " + s + ", page 2" }},
+		{"percent-encoded", func(s string) string {
+			return "since=" + strings.ReplaceAll(url.QueryEscape(s), "+", "%20") + "&page=2"
+		}},
+		{"in a base64 cursor", func(s string) string {
+			return "cursor=" + base64.StdEncoding.EncodeToString([]byte(`{"since":"`+s+`"}`))
+		}},
+		{"a bare base64 cursor of it", func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }},
+	}}
+}
+
+// answered is mock-s, a query answered with v just before the row's call,
+// which record's full round gave the application as recorded.
+func (r wordRow) answered(v string) []Raw {
+	return []Raw{RawOf(&models.Mock{Name: "mock-s", Kind: models.PostgresV3, Spec: models.MockSpec{
+		ReqTimestampMock: r.call.Add(-150 * time.Millisecond),
+		ResTimestampMock: r.call.Add(-149 * time.Millisecond),
+		PostgresV3: &models.PostgresV3Spec{Type: models.PostgresV3TypeQuery, Query: &models.PostgresV3QuerySpec{
+			SQLNormalized: "SELECT note FROM jobs",
+			Response:      &models.PostgresV3Response{Rows: []models.PostgresV3Cells{{{Value: v}}}, CommandComplete: "SELECT 1"},
+		}},
+	}}, false).ServedAs(1).ServedAsRecorded()}
+}
+
+// learn is what cl learns of the value text writes the call's own read in,
+// in zone z, beside raw and the call's recorded answer resp, in win.
+func (r wordRow) learn(cl func(dc *DriftCache, drift []string, live, rec Shape, at time.Time, earlier []Earlier, raw []Raw, resp []Leaf, w *Window, given GivenEarlier) []Learned, z rowZone, text func(string) string, raw func(rec string) []Raw, resp []Leaf, win *Window) Learned {
+	const p = "body.note"
+	shape := func(v string) Shape {
+		return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: v}}}
+	}
+	rec := text(r.call.In(z.loc).Format(z.iso))
+	dc := clockedDrifts()
+	dc.zone = z.loc
+	return cl(dc, []string{p}, shape(text(r.callF.In(z.loc).Format(z.iso))), shape(rec), r.call, nil, raw(rec), resp, win, nil)[0]
+}
+
+// An instant read at its word names the place its search set aside, as
+// the instant whole does: in every zone and form (inside a text,
+// percent-encoded, in a base64 cursor, a bare base64 cursor of it), where
+// an earlier answer that record's full round gave the application as
+// recorded held the value while it changed, keploy test learns the read at
+// its word naming that answer (Learned.Refuted), from the search for the
+// word itself (the one part of the text that changed, so the places the
+// search for the text sets aside).
+func TestAReadAtAWordNamesThePlaceItsSearchSetAside(t *testing.T) {
+	r := newWordRow()
+	for _, z := range zonedRows {
+		for _, f := range r.forms {
+			ln := r.learn(ClassifyFollowing, z, f.text, r.answered, nil, nil)
+			if !plainRead(ln) || !strings.Contains(ln.Refuted, "mock-s at spec.postgresV3.query.response.rows[0][0]") || !strings.Contains(ln.Refuted, "a copy moves with its source") {
+				t.Errorf("%s, %s: %s read=%+v (%q), set aside %q; want a read of the clock naming mock-s as set aside", z.name, f.name, ln.Kind, ln.Read, ln.Why, ln.Refuted)
+			}
+		}
+	}
+}
+
+// An instant the whole of which is a copy of an earlier place (an earlier
+// answer holds it) or an echo (the call's recorded answer holds it) is
+// never noise inside a text: in every zone and form, in keploy test with a
+// window and with none, under the rule a copy follows its source and
+// without it. Where the instant whole is a read of the clock, the text is
+// that read at its word; a copy, the text is the earlier answer's variable
+// inside a longer value (Place.Whole false, which no caller binds), or
+// refused; an echo, the text is refused (keploy answers an echo with this
+// run's value only whole). Before, a call with a window learned the text as
+// noise, which let any value pass at every replay.
+func TestAnInstantACopyOrAnEchoIsNeverNoiseInAText(t *testing.T) {
+	r := newWordRow()
+	none := func(string) []Raw { return nil }
+	type classify = func(dc *DriftCache, drift []string, live, rec Shape, at time.Time, earlier []Earlier, raw []Raw, resp []Leaf, w *Window, given GivenEarlier) []Learned
+	for _, z := range zonedRows {
+		instant := r.call.In(z.loc).Format(z.iso)
+		cases := []struct {
+			name string
+			raw  func(string) []Raw
+			resp []Leaf
+		}{
+			{"an earlier answer holds it", func(string) []Raw { return r.answered(instant) }, nil},
+			{"the call's recorded answer holds it", none, []Leaf{{Path: "body.since", Type: String, Value: instant}}},
+		}
+		for _, c := range cases {
+			for _, cl := range []struct {
+				name string
+				cl   classify
+			}{{"following", ClassifyFollowing}, {"given", ClassifyGiven}} {
+				for _, win := range []*Window{r.w, nil} {
+					whole := r.learn(cl.cl, z, r.forms[0].text, c.raw, c.resp, win)
+					for _, f := range r.forms[1:] {
+						in := r.learn(cl.cl, z, f.text, c.raw, c.resp, win)
+						where := fmt.Sprintf("%s, %s, %s, window %v, %s", z.name, c.name, cl.name, win != nil, f.name)
+						switch {
+						case in.Kind == KindNoise:
+							t.Errorf("FALSE GREEN: %s: learned noise (%q); the instant whole %s (%q); want refused", where, in.Why, whole.Kind, whole.Why)
+						case whole.Kind == KindEcho && in.Kind != KindUnaccounted:
+							t.Errorf("%s: learned %s (%q); the instant whole is an echo; want refused", where, in.Kind, in.Why)
+						case plainRead(whole) && !plainRead(in):
+							t.Errorf("%s: learned %s (%q); the instant whole a read of the clock; want that read at its word", where, in.Kind, in.Why)
+						case whole.Kind == KindVariable && in.Kind != KindUnaccounted && (in.Kind != KindVariable || in.From.Mock != "mock-s" || in.From.Whole):
+							t.Errorf("%s: learned %s from %+v (%q); the instant whole a copy of mock-s; want refused, or followed from mock-s as a part of it", where, in.Kind, in.From, in.Why)
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
 // textForm is a form a row writes an instant in: its name, and the text
 // holding the instant.
 type textForm struct {

@@ -374,8 +374,8 @@ func TestAReadOfTheClockIsNoLaterThanItsCall(t *testing.T) {
 	if ln := one(Leaf{Path: p, Noise: p, Type: String, Value: "book 2026-10-22T11:20Z"}, Leaf{Path: p, Noise: p, Type: String, Value: "book 2026-10-22T11:21Z"}, at, call); ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "in mock-1 at body.slot") {
 		t.Errorf("text six minutes after its call: %s (%s); want it refused, its word at mock-1's body.slot", ln.Kind, ln.Why)
 	}
-	if ln := one(Leaf{Path: p, Noise: p, Type: String, Value: "book 2026-10-22T11:20Z"}, Leaf{Path: p, Noise: p, Type: String, Value: "book 2026-10-22T11:21Z"}, time.Date(2026, 10, 22, 11, 20, 17, 0, time.UTC), call); ln.Kind != KindNoise {
-		t.Errorf("text at its call's minute: %s (%s); want noise, two reads of the clock", ln.Kind, ln.Why)
+	if ln := one(Leaf{Path: p, Noise: p, Type: String, Value: "book 2026-10-22T11:20Z"}, Leaf{Path: p, Noise: p, Type: String, Value: "book 2026-10-22T11:21Z"}, time.Date(2026, 10, 22, 11, 20, 17, 0, time.UTC), call); ln.Kind != KindVariable || ln.From.Mock != "mock-1" || ln.From.Path != "body.slot" || ln.From.Whole {
+		t.Errorf("text at its call's minute: %s from %+v (%s); want mock-1's body.slot inside a longer value, as the slot whole is mock-1's variable, never noise", ln.Kind, ln.From, ln.Why)
 	}
 	// A wall clock of no zone is a read in the application's zone where it
 	// is one there: an application in a zone ahead of UTC writes its read
