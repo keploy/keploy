@@ -1011,6 +1011,11 @@ func TestHandleHttp1Connection_SyncWindowsShareABodyOnlyWithWhatNoOtherRequestCl
 					t.Fatal("an exchange was not recorded")
 				}
 			}
+			// Each capture has returned: with --sync a capture resolves its
+			// request's mocks, and sends their mapping, only once its test
+			// case is in the queue (conn.Capture), so the test cases read
+			// above say nothing of the mappings yet.
+			pm.captures.Wait()
 			waitOpenWindows(t, mgr, 0, "after both were decided")
 
 			owner := map[string]string{}
@@ -1222,6 +1227,11 @@ func TestHandleHttp1Connection_SyncLockIsGivenBackOnlyOnceTheClockIsPastTheExcha
 					t.Fatal("an exchange was not recorded")
 				}
 			}
+			// Each capture has returned: with --sync a capture resolves its
+			// request's mocks, and sends their mapping, only once its test
+			// case is in the queue (conn.Capture), so the test cases read
+			// above say nothing of the mappings yet.
+			pm.captures.Wait()
 			waitOpenWindows(t, mgr, 0, "after both were decided")
 
 			owner := map[string]string{}
@@ -1405,6 +1415,10 @@ func TestHandleHttp1Connection_SyncCallAfterAResponseEndsIsNotThatResponses(t *t
 							t.Fatal("an exchange was not recorded")
 						}
 					}
+					// Each capture has returned: with --sync a capture
+					// resolves its request's mocks, and sends their mapping,
+					// only once its test case is in the queue (conn.Capture).
+					pm.captures.Wait()
 					waitOpenWindows(t, mgr, 0, "after both were decided")
 
 					owner := map[string]string{}
@@ -1594,6 +1608,7 @@ func TestHandleHttp1Connection_SyncWindowYieldsAtItsLastByte(t *testing.T) {
 	}()
 
 	decideKept := make(chan struct{})
+	streamDecided := make(chan struct{}) // its capture has returned
 	var decideOnce sync.Once
 	letKeptBeDecided := func() { decideOnce.Do(func() { close(decideKept) }) }
 	stubCaptureHook(t, func(ctx context.Context, logger *zap.Logger, tc chan *models.TestCase,
@@ -1603,6 +1618,9 @@ func TestHandleHttp1Connection_SyncWindowYieldsAtItsLastByte(t *testing.T) {
 			wait(decideKept) // its window stays open, past its last byte
 		}
 		hooksUtils.Capture(ctx, logger, tc, req, resp, reqTS, respTS, opts, sync, mapping, appPort)
+		if req.URL.Path == "/stream" {
+			close(streamDecided)
+		}
 	})
 	pm := &IngressProxyManager{logger: zap.NewNop(), tcChan: make(chan *models.TestCase, 4), synchronous: true, mapping: true, samplingSem: make(chan struct{}, 1)}
 	ctx, cancel := context.WithTimeout(syncMock.NewContext(context.Background(), mgr), 10*time.Second)
@@ -1650,6 +1668,12 @@ func TestHandleHttp1Connection_SyncWindowYieldsAtItsLastByte(t *testing.T) {
 	}
 	if !wait(callMade) {
 		t.Fatal("fixture: the stream never called out")
+	}
+	// With --sync the stream's capture claims its window, resolves its mocks
+	// and sends their mapping only once its test case is in the queue
+	// (conn.Capture): the test case read above says nothing of those yet.
+	if !wait(streamDecided) {
+		t.Fatal("the stream's capture did not return")
 	}
 	if n := mgr.OpenWindows(); n != 1 {
 		t.Fatalf("%d windows open, want the first request's: its capture is held", n)
