@@ -418,6 +418,7 @@ func TestWhatADownstreamCaptureLostFailsTheTestsItTaints(t *testing.T) {
 	}{
 		{CaptureLossUnread, "could not read 2 piece(s) of what the application's connections carried", true, false},
 		{CaptureLossUnrecorded, "stopped recording a connection of the application's mid-stream (a capture hole its parser could not re-align across, or a parser that failed), and 2 piece(s)", true, false},
+		{CaptureLossCaptureEvents, "keploy's capture, which reads the application's calls beside their path, lost 2 event(s) of them (a full ring buffer, a hook the kernel skipped, a process that exited before keploy could read it)", true, false},
 		{CaptureLossAppSubtreeUntracked, "keploy could not mark 2 process(es) forked in the application's subtree as the application's (its map of the subtree was full, or it could not read the fork's start time), so their calls may have been neither recorded nor mocked while this test ran, or before it; report it to keploy with the agent's log, which names the process", false, true},
 	} {
 		if tc.k.NotJudged() || tc.k.Evidence() || tc.k.PerTest() != tc.perTest || tc.k.AppLife() != tc.appLife || tc.k.runScoped() {

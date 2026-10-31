@@ -214,6 +214,18 @@ const (
 	// it: each test it carries traffic in fails (judged), a test's own kind
 	// (PerTest). Only under the proven switch.
 	CaptureLossUnrecorded CaptureLossKind = "connection_unrecorded"
+	// CaptureLossCaptureEvents: events of the application's calls that a
+	// downstream build's capture which settles a record's tests itself (its
+	// low-latency capture: no keploy proxy in the calls' path) counted lost
+	// -- its ring buffer was full, the kernel skipped one of its hooks, a
+	// process exited before the capture could tell it was the application's
+	// -- after the run's last test ended (CaptureSettler's
+	// LastEndLossReporter in the agent service). A test's end fails on what
+	// that capture lost before it, through its settle, so this kind is only
+	// ever in what no test was charged with: the record says it. A test's own
+	// kind (PerTest). What names the capture's count. Only under the proven
+	// switch.
+	CaptureLossCaptureEvents CaptureLossKind = "capture_events_lost"
 	// CaptureLossAppSubtreeUntracked: processes forked in the application's
 	// subtree that a downstream build's capture could not mark as the
 	// application's (its kernel map of the subtree was full, or it could not
@@ -575,7 +587,9 @@ type StartupCaptureLoss struct {
 //     charged but for the one place listenerDropWhere names;
 //   - one call's bytes the capture skipped, could not read, or stopped
 //     recording (kernel_skipped_call, capture_unread,
-//     connection_unrecorded, counted for each piece the connection carries).
+//     connection_unrecorded, counted for each piece the connection carries);
+//   - events a capture that settles a record's tests itself lost
+//     (capture_events_lost), which only the read after the last test has.
 //
 // One between two tests is the next test's, as a miss between tests is;
 // one before a test process's claim, or after the run's last test, is the
@@ -593,7 +607,7 @@ type StartupCaptureLoss struct {
 // build does not know. (CaptureLossRealUncaptured is a test's own too, but never in the
 // agent's counts: the agent charges it to its test itself.)
 func (k CaptureLossKind) PerTest() bool {
-	return k == CaptureLossTLSAbort || k == CaptureLossTLSAbandoned || k == CaptureLossServerFirst || k == CaptureLossRefusedAtAccept || k == CaptureLossContainerUnread || k == CaptureLossListenerDropped || k == CaptureLossKernelSkipCall || k == CaptureLossUnread || k == CaptureLossUnrecorded
+	return k == CaptureLossTLSAbort || k == CaptureLossTLSAbandoned || k == CaptureLossServerFirst || k == CaptureLossRefusedAtAccept || k == CaptureLossContainerUnread || k == CaptureLossListenerDropped || k == CaptureLossKernelSkipCall || k == CaptureLossUnread || k == CaptureLossUnrecorded || k == CaptureLossCaptureEvents
 }
 
 // Charged is what a test is charged from l, the counts as it ends: each kind
@@ -792,6 +806,8 @@ func captureLossText(c CaptureLoss) string {
 		return fmt.Sprintf("keploy's capture could not read %d piece(s) of what the application's connections carried (memory it could not read; the kernel's own pages: sendfile, splice, io_uring fixed buffers; a call of more than 16 MiB; bytes moved in calls the capture saw no end of; bytes the application discarded unread), so the calls they belong to were not recorded whole", c.Count)
 	case CaptureLossUnrecorded:
 		return fmt.Sprintf("keploy stopped recording a connection of the application's mid-stream (a capture hole its parser could not re-align across, or a parser that failed), and %d piece(s) of its traffic, its stops included, were neither recorded nor mocked", c.Count)
+	case CaptureLossCaptureEvents:
+		return fmt.Sprintf("keploy's capture, which reads the application's calls beside their path, lost %d event(s) of them (a full ring buffer, a hook the kernel skipped, a process that exited before keploy could read it), so the calls they belong to may be neither recorded nor mocked", c.Count)
 	case CaptureLossUnclassified:
 		return fmt.Sprintf("keploy could not tell %d time(s) whether a process was the application's (a read of its PID namespace failed where nothing had classified it), so its calls may have gone unseen while this test or one before it ran", c.Count)
 	case CaptureLossAppSubtreeUntracked:

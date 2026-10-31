@@ -169,10 +169,17 @@ func (a *Agent) markCaptureLosses(ctx context.Context) captureLossMark {
 // reads it once the run's last test has ended; a record's judging fails the
 // run on it (design v14 §7.5: evidence charged to no test). A standing state
 // (unix_unseen) is kept by every mark and is in it whatever was charged.
+// A record whose tests settle through a capture of a downstream build's
+// (settlesByCapture) adds what that capture lost since the last test ended
+// (lostSinceLastEnd), which it counts apart from the agent's counts.
 func (a *Agent) UnchargedCaptureLosses(ctx context.Context) (models.CaptureLosses, error) {
 	// What the listener dropped after the last test is counted first
 	// (closeDropsGap), as every loss after it is.
 	a.closeDropsGap(ctx)
+	settled, err := a.lostSinceLastEnd(ctx)
+	if err != nil {
+		return nil, err
+	}
 	a.provenMu.Lock()
 	mark, charged, outside := a.proven.losses, a.proven.lossesCharged, a.proven.unreadOutside
 	a.provenMu.Unlock()
@@ -187,7 +194,7 @@ func (a *Agent) UnchargedCaptureLosses(ctx context.Context) (models.CaptureLosse
 		// the time outside tests, whatever the count.
 		uncharged = uncharged.Without(models.CaptureLossContainerUnread).Plus(outside)
 	}
-	return uncharged, nil
+	return append(uncharged, settled...), nil
 }
 
 // sinceRun is what was lost since the run began, read as now: what keploy

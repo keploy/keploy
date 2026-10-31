@@ -803,18 +803,56 @@ func (a *Agent) StartupCaptureLoss(context.Context) (models.StartupCaptureLoss, 
 // moves for settleStallLimit wake-ups fails, as a proxy's does. An error says
 // keploy cannot tell: the test is not judged.
 func (a *Agent) settleCapture(ctx context.Context, cs CaptureSettler) error {
+	if err := a.watchedSettle(ctx, cs, cs.SettleCapture); err != nil {
+		return fmt.Errorf("keploy cannot tell that the capture holds no call of the test: %w", err)
+	}
+	return nil
+}
+
+// watchedSettle runs settle, a wait on cs, under the settle's watchdog
+// (watchSettle on cs.SettleProgress): when it fires, or ctx ends, the error
+// is why.
+func (a *Agent) watchedSettle(ctx context.Context, cs CaptureSettler, settle func(context.Context) error) error {
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
 	stop := a.watchSettle(ctx, cancel, cs.SettleProgress)
-	err := cs.SettleCapture(ctx)
+	err := settle(ctx)
 	stop()
 	if err == nil {
 		return nil
 	}
 	if cause := context.Cause(ctx); cause != nil {
-		return fmt.Errorf("keploy cannot tell that the capture holds no call of the test: %w", cause)
+		return cause
 	}
-	return fmt.Errorf("keploy cannot tell that the capture holds no call of the test: %w", err)
+	return err
+}
+
+// lostSinceLastEnd is what the capture a record's tests settle through
+// (settlesByCapture) lost since the run's last test ended
+// (LastEndLossReporter), read under the settle's watchdog as an end's settle
+// is. Nothing when the run's tests settle through keploy's proxy, whose
+// losses after the last test are the agent's own counts
+// (UnchargedCaptureLosses), and when the capture does not say. An error says
+// keploy cannot tell what it lost.
+func (a *Agent) lostSinceLastEnd(ctx context.Context) (models.CaptureLosses, error) {
+	cs, ok := settlesByCapture(a.replaying())
+	if !ok {
+		return nil, nil
+	}
+	r, ok := cs.(LastEndLossReporter)
+	if !ok {
+		return nil, nil
+	}
+	var lost models.CaptureLosses
+	err := a.watchedSettle(ctx, cs, func(ctx context.Context) error {
+		var err error
+		lost, err = r.CaptureLossesSinceLastEnd(ctx)
+		return err
+	})
+	if err != nil {
+		return nil, fmt.Errorf("keploy cannot tell what the capture lost after the last test: %w", err)
+	}
+	return lost, nil
 }
 
 // beginWindow, under the proven switch, cuts where a test's window begins on

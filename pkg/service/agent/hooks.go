@@ -176,6 +176,20 @@ type StartupLossReporter interface {
 	StartupCaptureLoss() string
 }
 
+// LastEndLossReporter is a CaptureSettler that says what its capture lost
+// since the run's last test ended -- each such end fails on what it lost
+// before it (SettleCapture) -- counted once every call the application made
+// before it was asked has reached keploy's recorder, as an end's settle
+// counts: one models.CaptureLossCaptureEvents loss for each of its counts
+// that rose. The agent's read of what no test was charged with takes it
+// (UnchargedCaptureLosses), so that what the capture lost after the last
+// test is the record's to say, never only the agent's log. Asked again, it
+// counts from the same end; before the first test, from the capture's
+// start. An error, never nil, when it cannot tell.
+type LastEndLossReporter interface {
+	CaptureLossesSinceLastEnd(ctx context.Context) (models.CaptureLosses, error)
+}
+
 // captureSettler is the registered CaptureSettler, nil when none is.
 var captureSettler CaptureSettler
 
