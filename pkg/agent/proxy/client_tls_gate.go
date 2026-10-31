@@ -16,10 +16,12 @@ type ClientTLSGate interface {
 	// checks keploy's certificate) does so here, and returns when that is
 	// done, when it cannot be done, or when ctx ends.
 	//
-	// realOrPassthrough is the run's mock.real / pass-through destinations: the
-	// peers the proxy relays this process's connections to live, whose real
-	// certificates the process still checks itself. It is empty when the run
-	// reaches only keploy's own mocks. A gate that readies the process by
+	// realOrPassthrough is the destinations the run reaches live for this
+	// process (realOrPassthroughLabels): its mock.real entries, its session's
+	// bypassRules, the replay options that relay calls to their real servers,
+	// or a global pass-through marker; peers whose real certificates the
+	// process still checks itself. It is empty when the run reaches only
+	// keploy's own mocks. A gate that readies the process by
 	// turning its certificate checks off (keploy's TLS pin bypass) must not do
 	// so when this is non-empty — the same process-wide switch would stop the
 	// process verifying those real servers too — and should leave the process's

@@ -130,22 +130,39 @@ func (p *Proxy) KeepRealDeps(ctx context.Context, raw []string) error {
 // and the run's verdict.
 func (p *Proxy) RealTracker() *realdeps.Tracker { return &p.realTracker }
 
-// realOrPassthroughLabels is the destinations this run reaches live rather
-// than mocking: its mock.real entries (realState.list labels), and a marker
-// when every connection is passed through (GlobalPassthrough). It is empty
-// when the run reaches only keploy's mocks. A client TLS gate reads it to
-// refuse turning a process's certificate checks off while the process still
-// talks to a real server (ClientTLSGate.Ready); the empty slice frees it to
-// prepare the process.
-func (p *Proxy) realOrPassthroughLabels() []string {
+// realOrPassthroughLabels is the destinations the run reaches live rather
+// than mocking, for the connections of process tgid: a marker when every
+// connection is passed through (GlobalPassthrough); else the run's mock.real
+// entries (realState.list labels), the bypassRules of tgid's session (each
+// passes its connections through to the real server, in the kernel or in the
+// proxy), and, for a replay session, each of its options that relays calls
+// to their real destinations (sessionEgressKnobs: mocking off, an onMiss that
+// passes through, an opportunistic TLS intercept). It is empty when the run
+// reaches only keploy's mocks. A client TLS gate reads it to refuse turning a
+// process's certificate checks off while the process still talks to a real
+// server (ClientTLSGate.Ready); the empty slice frees it to prepare the
+// process.
+func (p *Proxy) realOrPassthroughLabels(tgid uint32) []string {
 	if p.GlobalPassthrough {
 		return []string{"every destination (global pass-through)"}
 	}
-	st := p.realList()
-	if st == nil {
-		return nil
+	var labels []string
+	if st := p.realList(); st != nil {
+		labels = append(labels, st.list.Labels()...)
 	}
-	return st.list.Labels()
+	s := p.GetSessionFor(tgid)
+	if s == nil {
+		return labels
+	}
+	for _, r := range s.Rules {
+		labels = append(labels, fmt.Sprintf("bypassRule {host: %q, path: %q, port: %d}", r.Host, r.Path, r.Port))
+	}
+	if s.Mode == models.MODE_TEST {
+		for _, k := range sessionEgressKnobs(s.OutgoingOptions) {
+			labels = append(labels, k.knob+": "+k.dest)
+		}
+	}
+	return labels
 }
 
 // realList is the run's list when one is installed and the switch is on.

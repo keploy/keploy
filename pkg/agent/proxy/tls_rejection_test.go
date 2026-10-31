@@ -250,23 +250,51 @@ func TestAClientTLSGateIsReadyBeforeKeployAnswersAndSaysWhyAHandshakeFailed(t *t
 }
 
 // The labels a client TLS gate reads to refuse turning a process's
-// certificate checks off while it still talks to a real server: the run's
-// mock.real list, or a marker for global pass-through, and none when the run
-// reaches only keploy's mocks (realOrPassthroughLabels).
+// certificate checks off while it still talks to a real server: a marker for
+// global pass-through; else the run's mock.real list, the bypassRules of the
+// process's session and a replay session's options that relay calls live; and
+// none when the run reaches only keploy's mocks (realOrPassthroughLabels).
 func TestRealOrPassthroughLabelsTellsAGateWhatTheRunReachesLive(t *testing.T) {
-	t.Run("only keploy's mocks", func(t *testing.T) {
-		p := &Proxy{logger: zap.NewNop()}
-		if got := p.realOrPassthroughLabels(); len(got) != 0 {
-			t.Fatalf("a run with no real destination gave the gate %v, want none", got)
-		}
-	})
-	t.Run("global pass-through", func(t *testing.T) {
-		p := &Proxy{logger: zap.NewNop(), GlobalPassthrough: true}
-		got := p.realOrPassthroughLabels()
-		if len(got) != 1 || got[0] != "every destination (global pass-through)" {
-			t.Fatalf("a global-pass-through run gave the gate %v, want the pass-through marker", got)
-		}
-	})
+	replay := func(o models.OutgoingOptions) *agent.Session {
+		return &agent.Session{Mode: models.MODE_TEST, OutgoingOptions: o}
+	}
+	for _, tc := range []struct {
+		name    string
+		global  bool
+		real    []string
+		session *agent.Session
+		want    []string
+	}{
+		{name: "only keploy's mocks, no session yet"},
+		{name: "only keploy's mocks", session: replay(models.OutgoingOptions{Mocking: true})},
+		{name: "global pass-through", global: true, session: replay(models.OutgoingOptions{Mocking: true, Rules: []models.BypassRule{{Port: 443}}}),
+			want: []string{"every destination (global pass-through)"}},
+		{name: "mock.real", real: []string{"localhost:5432"}, session: replay(models.OutgoingOptions{Mocking: true}),
+			want: []string{"localhost:5432"}},
+		{name: "a bypassRule", session: replay(models.OutgoingOptions{Mocking: true, Rules: []models.BypassRule{{Host: "api.example.com", Port: 443}}}),
+			want: []string{`bypassRule {host: "api.example.com", path: "", port: 443}`}},
+		{name: "a replay with mocking off", session: replay(models.OutgoingOptions{}),
+			want: []string{"test.mocking: false (--mocking=false): " + allDestinations}},
+		{name: "a replay that passes a miss through", session: replay(models.OutgoingOptions{Mocking: true, OnMiss: models.MissPassthrough}),
+			want: []string{"onMiss passthrough (--on-miss passthrough): an HTTP call no mock answers goes to its real destination"}},
+		{name: "a record session's options are no replay's", session: &agent.Session{Mode: models.MODE_RECORD}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &Proxy{logger: zap.NewNop(), GlobalPassthrough: tc.global}
+			if tc.real != nil {
+				t.Setenv(provenswitch.Env, "1")
+				if err := p.SetRealDeps(context.Background(), tc.real); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.session != nil {
+				p.setSession(tc.session)
+			}
+			if got := p.realOrPassthroughLabels(4242); fmt.Sprint(got) != fmt.Sprint(tc.want) {
+				t.Fatalf("the gate was told %q, want %q", got, tc.want)
+			}
+		})
+	}
 }
 
 // keploy's own stop cuts handshakes short: no loss of a test's.

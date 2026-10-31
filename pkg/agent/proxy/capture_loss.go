@@ -334,7 +334,7 @@ func (c *clientTLS) lossWhat() string {
 // once the gate returns.
 func (c *clientTLS) HandshakeBegin() {
 	if g := OnClientTLS; g != nil && c.tgid != 0 {
-		g.Ready(c.ctx, c.tgid, c.p.realOrPassthroughLabels())
+		g.Ready(c.ctx, c.tgid, c.p.realOrPassthroughLabels(c.tgid))
 	}
 	now := c.p.testScopeNow()
 	c.mu.Lock()
