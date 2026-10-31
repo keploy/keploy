@@ -1222,6 +1222,22 @@ func (m *MockManager) OpenExactTest(test string, owned []*models.Mock, given []m
 	m.serveExactTest(test, owned, nil, true, given)
 }
 
+// GiveExactTest binds b, a value the open test gave, as a given variable of
+// its scope (variables.Table.Give): test must be the test the view serves,
+// and b's name not bound yet.
+func (m *MockManager) GiveExactTest(test string, b models.VariableBinding) error {
+	if v := m.exactView(); v == nil || v.test != test || test == "" {
+		return fmt.Errorf("%s is not the test keploy serves now", test)
+	}
+	if have, ok := m.vars.Give(b); !ok {
+		if have.Name == "" {
+			return fmt.Errorf("no scope of %s's variables has begun", test)
+		}
+		return fmt.Errorf("variable %s is bound already in %s, to %q", b.Name, test, have.Value)
+	}
+	return nil
+}
+
 // ServeExactTestConcurrent is ServeExactTest for a test that shares
 // recordings with the tests whose requests were open beside its own at
 // record time (keploy record's full round, models.ExactServing.Concurrent):

@@ -603,7 +603,7 @@ func holdVariables(m *models.Mock, decls []varDecl, liveAt map[string]held, tabl
 		if bound, ok := table.Lookup(d.name); ok {
 			hit.saw[bound.Name] = bound.Value
 			if !variables.SameValue(bound.Recorded, d.recorded, false) {
-				if bound.Given {
+				if bound.Given && !models.IsGivenVariable(d.name) {
 					// A template key holds one recorded value for the whole
 					// set: a call that names it with another is no call of
 					// another test, but a declaration keploy cannot follow.
@@ -611,7 +611,9 @@ func holdVariables(m *models.Mock, decls []varDecl, liveAt map[string]held, tabl
 				}
 				// Recorded with another value than the one the test bound: a
 				// call of another test (reusable mocks are seen by every
-				// test), not this one.
+				// test), not this one. A value a test gave (a given) is the
+				// test's alone, so one recorded with another value is
+				// another test's too.
 				return nil, nil
 			}
 			if p := holdsAt(m.Name, d, places, bound.Value, bound.Mock, bound.Place, liveAt); p != nil {
@@ -626,6 +628,14 @@ func holdVariables(m *models.Mock, decls []varDecl, liveAt map[string]held, tabl
 				sent = liveAt[d.use[0].place.String()].value
 			} else {
 				place = d.answer[0].raw
+			}
+			if models.IsGivenVariable(d.name) {
+				// No call binds a given: the test gives it.
+				return nil, &varProblem{
+					mock: m.Name, name: d.name, place: place, actual: sent,
+					why:  fmt.Sprintf("the recording's test gave %s, which this call carries at %s; this run's test did not give it before this call", d.name, place),
+					next: fmt.Sprintf("give %s in the test before the application makes this call, as the test did when it was recorded; if the test no longer gives it, re-record the test", d.name),
+				}
 			}
 			why := fmt.Sprintf("variable %s is used at %s before the call that binds it was made in this test", d.name, place)
 			if models.RunVariable(d.name) {
@@ -687,6 +697,18 @@ func holdsAt(mock string, d varDecl, places []varPlace, want, boundMock, boundPl
 		verb := "sent"
 		if d.bind != nil && vp.raw == d.bind.raw {
 			verb = "sent, at a place that binds it,"
+		}
+		if models.IsGivenVariable(d.name) {
+			// The test gave the value (boundPlace: where, if it said).
+			where := ""
+			if boundPlace != "" {
+				where = " (" + boundPlace + ")"
+			}
+			return &varProblem{
+				mock: mock, name: d.name, place: vp.raw, kind: models.DiffKindVariable, expected: want, actual: l.value,
+				why:  fmt.Sprintf("the test gave %s = %q%s, and this call %s %q at %s: the application did not pass on the value the test gave", d.name, want, where, verb, l.value, vp.raw),
+				next: fmt.Sprintf("the application sent another value at %s than the one the test gave it: fix the application; if the call no longer carries the test's value, re-record the test", vp.raw),
+			}
 		}
 		return &varProblem{
 			mock: mock, name: d.name, place: vp.raw, kind: models.DiffKindVariable, expected: want, actual: l.value,

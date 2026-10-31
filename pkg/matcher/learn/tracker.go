@@ -162,6 +162,12 @@ type Tracker struct {
 	// given, and for a test no keploy test case opened (keploy mock's).
 	// Begin forgets it.
 	given *Earlier
+	// gave are the values the running test gave keploy so far (GiveValue),
+	// in the order it gave them: earlier places of its calls after its
+	// request (Earlier.Gave). The agent bounds how many a test gives
+	// (service/agent.MaxGivensPerTest) and how long each is; Begin and NewSet
+	// forget them, so a test's givens live only while it runs.
+	gave []Earlier
 	// awaiting is open while the running test awaits its test case's request
 	// (BeginAwaiting, Await): a call that reads the test's places then
 	// (Places) waits (AwaitRequest) until Give brings the request, or the
@@ -248,7 +254,7 @@ func (t *Tracker) NewSetAt(at time.Time) {
 	t.names, t.taken = nil, nil
 	t.answered, t.drifts = nil, t.newDrifts()
 	t.servedAt = nil
-	t.given = nil
+	t.given, t.gave = nil, nil
 	say := t.closeUnread()
 	t.open, t.began = false, false
 	t.beganAt, t.recBegan, t.nextRecBegan = time.Time{}, time.Time{}, time.Time{}
@@ -561,7 +567,7 @@ func (t *Tracker) beginAt(at time.Time) func() {
 	t.answered = nil
 	t.drifts = t.newDrifts()
 	t.names, t.taken = nil, nil
-	t.given = nil
+	t.given, t.gave = nil, nil
 	t.open, t.began = true, true
 	t.beganAt = at
 	t.recBegan, t.nextRecBegan = t.nextRecBegan, time.Time{}
@@ -625,6 +631,29 @@ func (t *Tracker) Give(e Earlier) {
 	t.mu.Unlock()
 }
 
+// GiveValue makes e (TestGiven: a value the running test gave keploy) an
+// earlier place of the test's calls from now until the next test begins,
+// after its test case's request (Earlier.Gave): a call that carries a value
+// made from it (a part of its text, it in another reading) finds it there,
+// and the learn step refuses it naming the given, never learns it as noise.
+// No moment it names is a place (withoutGave): a read of the application's
+// own clock learns as it does with no given. A value carried whole is the
+// given's variable, which the test's variable table binds
+// (variables.Binding.Given). One given while no test is open is tied to no
+// test's calls, and dropped.
+func (t *Tracker) GiveValue(e Earlier) {
+	if t == nil || len(e.Seen) == 0 {
+		return
+	}
+	e.Given, e.Gave = true, true
+	e.Seen = append([]Seen(nil), e.Seen...)
+	t.mu.Lock()
+	if t.open {
+		t.gave = append(t.gave, e)
+	}
+	t.mu.Unlock()
+}
+
 // End ends the running test: until the next Begin no test is open, and a
 // request belongs to no test's own mocks. A test that still awaited its
 // request closes without it: the calls waiting for it read the test's places
@@ -663,9 +692,9 @@ func (t *Tracker) Begun() bool {
 }
 
 // Test is the running test's number, its earlier places: its test case's
-// own request first (Give), then what the learn step served in it so
-// far, leaf by leaf; every mock any parser served in it so far
-// (ServedMock), and the mocks served before it began: those served since the
+// own request first (Give), the values it gave keploy (GiveValue), then
+// what the learn step served in it so far, leaf by leaf; every mock any
+// parser served in it so far (ServedMock), and the mocks served before it began: those served since the
 // previous test began (see Tracker.before), and every one served while no
 // test was open (see Tracker.outside), each once. A request reads it once
 // its scope is read, and hands the number back to Served. It never waits:
@@ -732,11 +761,11 @@ func (t *Tracker) Placed() Placed {
 			before = append(before, m)
 		}
 	}
-	earlier := make([]Earlier, 0, len(t.run)+len(t.served)+1)
+	earlier := make([]Earlier, 0, len(t.gave)+len(t.run)+len(t.served)+1)
 	if t.given != nil {
 		earlier = append(earlier, *t.given)
 	}
-	earlier = append(append(earlier, t.run...), t.served...)
+	earlier = append(append(append(earlier, t.gave...), t.run...), t.served...)
 	return Placed{
 		Test: t.epoch, Earlier: earlier, Served: append([]*models.Mock(nil), t.mocks...), Before: before, Awaiting: t.awaiting != nil,
 		Open: t.open, Begun: t.began, SetAt: t.setEpoch,

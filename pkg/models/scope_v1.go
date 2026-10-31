@@ -116,7 +116,8 @@ const (
 	// ScopeErrOneTestProcess: a test process claimed the run while another
 	// live one held it; the first release runs one at a time.
 	ScopeErrOneTestProcess = "one_test_process_at_a_time"
-	// ScopeErrNotOpen: an end for a test that is not open.
+	// ScopeErrNotOpen: an end for a test that is not open, or a given
+	// while no test is open.
 	ScopeErrNotOpen = "not_open"
 	// ScopeErrBadRequest: an unreadable or invalid body.
 	ScopeErrBadRequest = "bad_request"
