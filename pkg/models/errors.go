@@ -293,6 +293,13 @@ type MockMismatchReport struct {
 	// which the miss's shape writes {} (MissShape); the summary then names
 	// the path escaped, as a place counts segments.
 	VariablePlaces []string
+	// Given is, under the proven switch, the given (GivenVariable) a
+	// variable miss is about: the call carried another value than the one the
+	// test gave, or a value of another JSON type, or this run's test did not
+	// give the value before the call. It is the test's own name for a value
+	// it chose, never a value, and the miss's evidence names it
+	// (UnmatchedCall.Sanitized). Set by the HTTP matcher's variable check.
+	Given string
 	// NotOwned says, under the proven switch, the call is ClosestMock, a
 	// recording the open test does not own (byte for byte, or at the per-test
 	// similarity): likely one another test recorded, which the replay names

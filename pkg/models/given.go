@@ -94,3 +94,23 @@ func GivenVariable(name string, n int) string {
 func IsGivenVariable(name string) bool {
 	return strings.HasPrefix(name, GivenPrefix)
 }
+
+// ValidGivenVariable reports whether v is a given's variable name as
+// GivenVariable writes it: given:<name>, or given:<name>#<n> with n from 2,
+// where name is a ValidGivenName. A miss's evidence names a given only when
+// it is one (UnmatchedCall.Sanitized): a variables block edited by hand can
+// hold any name.
+func ValidGivenVariable(v string) bool {
+	name, ok := strings.CutPrefix(v, GivenPrefix)
+	if !ok {
+		return false
+	}
+	if base, n, repeat := strings.Cut(name, "#"); repeat {
+		k, err := strconv.Atoi(n)
+		if err != nil || k < 2 || strconv.Itoa(k) != n {
+			return false
+		}
+		name = base
+	}
+	return ValidGivenName(name)
+}

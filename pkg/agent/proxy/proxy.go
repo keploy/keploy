@@ -5868,6 +5868,7 @@ func (p *Proxy) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 					Differs:          parserErr.MismatchReport.Differs,
 					FieldReasons:     parserErr.MismatchReport.FieldReasons,
 					VariablePlaces:   parserErr.MismatchReport.VariablePlaces,
+					Given:            parserErr.MismatchReport.Given,
 					NotOwned:         parserErr.MismatchReport.NotOwned,
 					// Why the call missed, when record's full round's learn
 					// step decided it: judging's evidence.
