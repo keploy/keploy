@@ -2348,12 +2348,16 @@ func TestAnEarlierTypedClockReadFSawSendAnotherMomentIsNoSourceOfTheInstant(t *t
 	source := "its recorded value was sent in mock-18 at " + expires + ", the test set's start-up's call, where keploy learned it as a read of the application's clock"
 	pick := "while the moment it was recorded with stands in mock-18 at " + expires + ", where keploy learned a read of the application's clock and record's full round saw the application send another moment than the value's"
 	echo := "but the call's recorded answer holds it, an echo keploy cannot answer beside a source it set aside"
+	ambiguous := "but its two values stand 1m apart, a whole number of 1m: an application that cuts its value to 1m"
 	for _, c := range []struct {
 		name                                                      string
 		own, wide, copied, answer, keployRun, given, form, noView bool
 		// tod: the read is a typed time of day (a Postgres time), which
 		// the echo alone reads, by its type.
-		tod       bool
+		tod bool
+		// full: record's full round made the call this long after the
+		// recording made it (73.6 s where 0), its test begun as long before.
+		full      time.Duration
 		ago       time.Duration
 		kind      Kind
 		from, why string
@@ -2362,6 +2366,7 @@ func TestAnEarlierTypedClockReadFSawSendAnotherMomentIsNoSourceOfTheInstant(t *t
 		{name: "(d) the start-up's read", kind: KindUnaccounted, why: judged},
 		{name: "(a) the start-up's read, the poll's window three seconds wide", wide: true, kind: KindClockRead},
 		{name: "(b) the start-up's read, a poll of now-60s", ago: time.Minute, kind: KindClockOffset},
+		{name: "(d) the start-up's read, a poll of now-60s whose two values stand a minute apart, the window three seconds wide", wide: true, ago: time.Minute, full: time.Minute + 400*time.Millisecond, kind: KindUnaccounted, why: ambiguous},
 		{name: "the test's own read, its test begun before it", own: true, kind: KindClockRead, since: true},
 		{name: "the start-up's read, the window wide, the call's answer echoing the poll", wide: true, answer: true, kind: KindUnaccounted, why: echo},
 		{name: "keploy test: the start-up's read", keployRun: true, kind: KindUnaccounted, why: pick},
@@ -2382,6 +2387,10 @@ func TestAnEarlierTypedClockReadFSawSendAnotherMomentIsNoSourceOfTheInstant(t *t
 			}
 			read := call.Add(-ago).Truncate(time.Second).Add(305 * time.Millisecond)
 			readF := read.Add(70*time.Second + 900*time.Millisecond)
+			callF, beganF := callF, beganF
+			if c.full != 0 {
+				callF, beganF = call.Add(c.full), beganF.Add(call.Add(c.full).Sub(callF))
+			}
 			b, bF := began, beganF
 			if c.own {
 				b, bF = read.Add(-time.Second), readF.Add(-time.Second)
@@ -2467,7 +2476,7 @@ func TestAnEarlierTypedClockReadFSawSendAnotherMomentIsNoSourceOfTheInstant(t *t
 					t.Fatalf("the exact search took %+v (found %v) and set aside %q; want the copy at mock-18, nothing set aside", from, ok, ap.at)
 				}
 			}
-			if c.why == judged && (!strings.HasPrefix(ln.Why, apart) || strings.Contains(ln.Why, source)) {
+			if (c.why == judged || c.why == ambiguous) && (!strings.HasPrefix(ln.Why, apart) || strings.Contains(ln.Why, source)) {
 				t.Fatalf("dirtyAt's refusal does not lead with the read F set aside, or names it as its source: %s", ln.Why)
 			}
 			// A read or an offset learned past the read set aside names it

@@ -368,3 +368,50 @@ func TestClassifyFollowing_AnOlderTestsStartUpTheValueMovedApartFromStaysRefused
 		}
 	}
 }
+
+// An offset learned past an older test's answer that record's full round
+// gave the application as recorded, byte for byte, while the value changed
+// names that answer as set aside, as a read learned past it does: keploy
+// test's cutoff two minutes before its call's window, whose recorded
+// millisecond text an older test's answer held whole, is the clock less two
+// minutes in both runs, checked so at every replay, and what it learned says
+// which answer keploy did not take as its source, and why.
+func TestClassifyFollowing_AnOffsetLearnedPastAnOlderTestsAnswerNamesIt(t *testing.T) {
+	const p = "body.filter.createdAt.$gte"
+	c := newClockOffsetCall()
+	ms, min2 := time.Millisecond, 2*time.Minute
+	rec, live := c.read.Add(-min2), c.fread.Add(-min2)
+	found := func(at time.Time) string {
+		return `{ SectionSingle msg: {"cursor":{"firstBatch":[{"_id":"c43d5d9a","createdAt":{"$numberLong":"` + strconv.FormatInt(at.UnixMilli(), 10) + `"}}],"id":{"$numberLong":"0"},"ns":"api-server.apps"},"ok":{"$numberDouble":"1.0"}} }`
+	}
+	x := r2Mongo("mock-646", c.call.Add(-time.Second), c.call.Add(-time.Second+ms), []string{`{ SectionSingle msg: {"find":"apps","filter":{"_id":"c43d5d9a"},"$db":"api-server"} }`}, found(rec))
+	tr := NewTracker()
+	tr.Begin()
+	tr.ServedMock(x)
+	tr.ServedMockAsRecorded(x)
+	tr.End()
+	tr.Begin()
+	pl := tr.Placed()
+	dc := clockedDrifts()
+	raw := []Raw{pl.Order.ServedView(x, dc.RawOf(x, true).ServedIn(pl.Order.Of(x)))}
+	millis := models.ClockOffset{Min: -min2 - 40*ms, Max: -min2 + 11*ms, Res: ms, Layout: "epoch-ms"}
+	for _, older := range []bool{false, true} {
+		var in []Raw
+		if older {
+			in = raw
+		}
+		ln := ClassifyFollowing(dc, []string{p}, Shape{Leaves: map[string]Leaf{p: millisText(p, live)}}, Shape{Leaves: map[string]Leaf{p: millisText(p, rec)}}, c.call, nil, in, nil, c.w.ComparesOffsets(), nil)[0]
+		if ln.Kind != KindClockOffset || ln.Offset == nil || *ln.Offset != millis || ln.Read != nil {
+			t.Fatalf("older test's answer %v: learned %s %+v %+v (%s); want the offset %+v", older, ln.Kind, ln.Offset, ln.Read, ln.Why, millis)
+		}
+		if !older {
+			if ln.Refuted != "" {
+				t.Fatalf("with no older answer, names %q as set aside", ln.Refuted)
+			}
+			continue
+		}
+		if !strings.Contains(ln.Refuted, "mock-646") || !strings.Contains(ln.Refuted, "which record's full round sent and gave the application as recorded, byte for byte") || !strings.Contains(ln.Refuted, "a copy moves with its source") {
+			t.Fatalf("names what it set aside as %q; want mock-646 and why", ln.Refuted)
+		}
+	}
+}
