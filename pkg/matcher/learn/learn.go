@@ -488,9 +488,9 @@ func bodyKinds(path, up string, v interface{}, out, parent map[string]string) {
 // outermost path holding it (pathsTo, on its own side), p included, that
 // the other side holds nothing at (a field on one side only) or holds as
 // another kind (a kind changed). A path held with no kind (one only
-// unnamed leaves are under, or two values of other kinds spell) is passed
-// over: nothing says what it is. ok is false when both sides hold every
-// path down to p alike.
+// unnamed leaves are under, or two values of other kinds spell), p
+// included, is passed over: nothing says what it is. ok is false when both
+// sides hold every path down to p alike, or one with no kind.
 func placeOf(p string, c leafDiff, rec, live kinds) (at, why string, ok bool) {
 	own := rec
 	if c == leafOnlyLive {
@@ -500,13 +500,13 @@ func placeOf(p string, c leafDiff, rec, live kinds) (at, why string, ok bool) {
 		rk, inRec := rec.of[q]
 		lk, inLive := live.of[q]
 		switch {
-		case q != p && ((inRec && rk == "") || (inLive && lk == "")):
+		case (inRec && rk == "") || (inLive && lk == ""):
 			continue
 		case !inRec:
 			return q, q + " is not in the recording", true
 		case !inLive:
 			return q, q + " is missing", true
-		case rk != "" && lk != "" && rk != lk:
+		case rk != lk:
 			return q, q + " was " + rk + ", is " + lk, true
 		}
 	}
@@ -530,34 +530,35 @@ func kindsNamed(rec, live Shape) []string {
 
 // kindChangeHolding is the kind change a fixed part not shared is named as
 // (name: the fixed part's name): at the outermost of paths (kindsNamed)
-// that the name is named after (withinAny) and that both sides hold as
+// that the name is named after (within) and that both sides hold as
 // different kinds.
 func kindChangeHolding(name string, paths []string, recKinds, liveKinds kinds) (at, why string, ok bool) {
 	for _, q := range paths {
 		rk, inRec := recKinds.of[q]
 		lk, inLive := liveKinds.of[q]
-		if inRec && inLive && rk != "" && lk != "" && rk != lk && withinAny(name, []string{q}) {
+		if inRec && inLive && rk != "" && lk != "" && rk != lk && within(name, q) {
 			return q, q + " was " + rk + ", is " + lk, true
 		}
 	}
 	return "", "", false
 }
 
-// withinAny reports whether name is named after one of paths: the path
-// itself (a body's media type, named "body"), or the path then "'s", '.' or
-// '[' (a fixed part an adapter names after a path, as what the leaves of
-// the path do not tell: a field holding an array, a dotted key; a path
-// inside it).
+// withinAny reports whether name is named after one of paths (within).
 func withinAny(name string, paths []string) bool {
 	for _, f := range paths {
-		if name == f {
-			return true
-		}
-		if len(name) > len(f) && strings.HasPrefix(name, f) && strings.ContainsRune("'.[", rune(name[len(f)])) {
+		if within(name, f) {
 			return true
 		}
 	}
 	return false
+}
+
+// within reports whether name is named after the path f: f itself (a
+// body's media type, named "body"), or f then "'s", '.' or '[' (a fixed
+// part an adapter names after a path, as what the leaves of the path do
+// not tell: a field holding an array, a dotted key; a path inside it).
+func within(name, f string) bool {
+	return name == f || len(name) > len(f) && strings.HasPrefix(name, f) && strings.ContainsRune("'.[", rune(name[len(f)]))
 }
 
 // fixedDiffering names the fixed parts the two requests do not share, in

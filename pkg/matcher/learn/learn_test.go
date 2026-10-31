@@ -2098,6 +2098,16 @@ func TestMissPlacesSayAKindChangeOnce(t *testing.T) {
 			[]string{"body.x was a document, is a number"}},
 		{"a dotted key at the root, a field of its first word on the other side", body(t, "k", `{"a":1}`), body(t, "k", `{"a.b":1}`), nil,
 			[]string{"body.a is not in the recording", "body.a.b is missing"}},
+		{"a dotted key added beside a field is that key, never a field its first word names", body(t, "k", `{"z":1,"x.y":2}`), body(t, "k", `{"z":1}`), nil,
+			[]string{"body.x.y is not in the recording"}},
+		{"a field the request holds only under dotted keys is missing",
+			flat(nil, nil, "!body.a.x", "n:1"),
+			flat(nil, nil, "body.a", "n:1"), nil,
+			[]string{"body.a is missing", "body.a.x is not in the recording"}},
+		{"an array its paths cut at '[' that became a document, read from its leaves alone",
+			flat(nil, nil, "body.a.b", "n:1"),
+			flat(nil, nil, "body.a[0]", "n:1"), nil,
+			[]string{"body.a was an array, is a document"}},
 		{"a dotted key beside a document emptied of its noise", body(t, "k", `{"a":{}}`), body(t, "k", `{"a":{"n":1},"a.b":1}`), declared{"body.a.n": true},
 			[]string{"body.a was a document, is an empty document", "body.a.b is missing"}},
 		{"a document of dotted keys that became a number is one place", body(t, "k", `{"a":1}`), body(t, "k", `{"a":{"x.y":1,"z":1}}`), nil,
@@ -2144,11 +2154,16 @@ func TestMissPlacesReadAPathSpelledBothWaysAsADocument(t *testing.T) {
 
 // TestMissPlacesReadAPathTwoValuesSpellAlike: a key "a.b" beside a holding
 // b spell one path; the place a miss names for it is the same whichever is
-// read first.
+// read first, and, when the two are of other kinds, neither kind is the
+// path's: the leaves at and under it say what changed.
 func TestMissPlacesReadAPathTwoValuesSpellAlike(t *testing.T) {
 	for i := 0; i < 32; i++ {
 		if _, places := missPlaces(body(t, "k", `{"q":1}`), body(t, "k", `{"q":1,"a":{"b":1},"a.b":1}`), nil); !reflect.DeepEqual(places, []string{"body.a.b is missing"}) {
 			t.Fatalf("places %q", places)
+		}
+		want := []string{"body.a.b was a number, is a string", "body.a.b.c is missing"}
+		if _, places := missPlaces(body(t, "k", `{"a":{"b":"s"}}`), body(t, "k", `{"a.b":1,"a":{"b":{"c":1}}}`), nil); !reflect.DeepEqual(places, want) {
+			t.Fatalf("places %q, want %q", places, want)
 		}
 	}
 }
