@@ -89,6 +89,12 @@ type MockVariable struct {
 	// place not listed holds the value whole. A replay that reads no Within
 	// compares such a place whole, and refuses the call.
 	Within []VariablePart `json:"within,omitempty" yaml:"within,omitempty" bson:"within,omitempty"`
+	// Kept lists the answer places that hold the variable's value as one
+	// part of a longer string a replay still serves as recorded, each with
+	// why (learn.AnswerPart): the value is short or all digits, so it may
+	// stand there by coincidence ("1" in "page 1 of 3"). A note for a reader
+	// only: a replay reads nothing from it. Only the learn step sets it.
+	Kept []VariableKept `json:"kept,omitempty" yaml:"kept,omitempty" bson:"kept,omitempty"`
 	// Incoming is, for a variable of a keploy mock client test that its
 	// test harness gave the application, the part of the test's incoming
 	// requests that holds its value, as the learn step names it
@@ -113,6 +119,26 @@ type VariablePart struct {
 	Answer bool   `json:"answer,omitempty" yaml:"answer,omitempty" bson:"answer,omitempty"`
 	Before string `json:"before,omitempty" yaml:"before,omitempty" bson:"before,omitempty"`
 	After  string `json:"after,omitempty" yaml:"after,omitempty" bson:"after,omitempty"`
+}
+
+// VariableKept is an answer place that holds a variable's value as one
+// part of a longer string and is served as recorded (MockVariable.Kept),
+// and why, in plain words.
+type VariableKept struct {
+	Place string `json:"place" yaml:"place" bson:"place"`
+	Why   string `json:"why" yaml:"why" bson:"why"`
+}
+
+// MergeKept is a's and b's kept places as one list (neither is changed):
+// one per place, a's first.
+func MergeKept(a, b []VariableKept) []VariableKept {
+	var out []VariableKept
+	for _, k := range append(append([]VariableKept(nil), a...), b...) {
+		if !slices.ContainsFunc(out, func(o VariableKept) bool { return o.Place == k.Place }) {
+			out = append(out, k)
+		}
+	}
+	return out
 }
 
 // PartAt is the part v holds its value at, at place (a use place, or an
@@ -1715,6 +1741,7 @@ func (v MockVariables) Clone() MockVariables {
 		mv.Answer = append([]string(nil), mv.Answer...)
 		mv.Clock = append([]ClockRead(nil), mv.Clock...)
 		mv.Within = append([]VariablePart(nil), mv.Within...)
+		mv.Kept = append([]VariableKept(nil), mv.Kept...)
 		out[name] = mv
 	}
 	return out
@@ -1744,6 +1771,7 @@ func MergeVariables(a, b MockVariables) MockVariables {
 		cur.Use = appendNewPlaces(cur.Use, v.Use...)
 		cur.Answer = appendNewPlaces(cur.Answer, v.Answer...)
 		cur.Within = MergeParts(cur.Within, v.Within)
+		cur.Kept = MergeKept(cur.Kept, v.Kept)
 		cur.Echo = cur.Echo && v.Echo
 		if cur.Incoming == "" {
 			cur.Incoming = v.Incoming

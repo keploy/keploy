@@ -3,6 +3,7 @@ package learn
 import (
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // Within is how a leaf holds a variable's value as one part of a longer
@@ -128,16 +129,46 @@ func (l Learned) Carried() (rec, live string, ok bool) {
 
 // AnswerPart is how an answer leaf a holds the recorded value of r (a
 // variable's recorded value, r's type): whole (ok, the zero Within), or as
-// one part of a longer string, by PartWithin's bound (ok, a set Within). ok
-// is false where a holds it at neither: not at all, at two places, or as a
-// part of a word, where an answer keeps its recorded text.
-func AnswerPart(r, a Leaf) (Within, bool) {
+// one part of a longer string, by PartWithin's bound, where the value is
+// distinctive (Distinctive) (ok, a set Within). ok is false where a holds
+// it at neither: not at all, at two places, or as a part of a word, where an
+// answer keeps its recorded text. kept says why where a holds a value that
+// is not distinctive as such a part: an answer has no live evidence of its
+// own, so a short value standing there ("1" in "page 1 of 3") may stand by
+// coincidence, and the answer keeps its recorded text there too.
+func AnswerPart(r, a Leaf) (w Within, ok bool, kept string) {
 	if WholeEcho(r, a) {
-		return Within{}, true
+		return Within{}, true, ""
 	}
 	if r.Type != String || a.Type != String || a.Unnamed {
-		return Within{}, false
+		return Within{}, false, ""
 	}
 	w, why := PartWithin(a.Value, r.Value)
-	return w, why == "" && w.Set()
+	if why != "" || !w.Set() {
+		return Within{}, false, ""
+	}
+	if why := NotDistinctive(r.Value); why != "" {
+		return Within{}, false, "it holds the value as one part of a longer string, but " + why + ", and keploy answers a value inside a longer answer with this run's value only where it is at least " + strconv.Itoa(distinctiveLen) + " characters long and not all digits (an id, a UUID, a token), so a value that may stand there by coincidence keeps the answer's recorded text"
+	}
+	return w, true, ""
+}
+
+// distinctiveLen is the fewest characters a distinctive value holds.
+const distinctiveLen = 8
+
+// NotDistinctive is why value is not distinctive, "" where it is: at least
+// distinctiveLen characters long and not all digits, as ids, UUIDs, object
+// ids and tokens are. Only a distinctive value is answered with this run's
+// value inside a longer answer string (AnswerPart); a request place keeps
+// its own bounds, compared against what the call sends.
+func NotDistinctive(value string) string {
+	if utf8.RuneCountInString(value) < distinctiveLen {
+		return "the value is shorter than " + strconv.Itoa(distinctiveLen) + " characters"
+	}
+	for i := 0; i < len(value); i++ {
+		if value[i] < '0' || value[i] > '9' {
+			return ""
+		}
+	}
+	return "the value is all digits"
 }

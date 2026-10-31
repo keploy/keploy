@@ -39,6 +39,38 @@ func TestPartWithin(t *testing.T) {
 	}
 }
 
+// An answer is rewritten inside a longer string only for a distinctive
+// value (at least 8 characters, not all digits): a short or all-digit value
+// standing there may be a coincidence, so the answer keeps its recorded
+// text and kept says why; whole, any value is answered.
+func TestAnswerPartNeedsADistinctiveValue(t *testing.T) {
+	str := func(v string) Leaf { return Leaf{Type: String, Value: v} }
+	for _, c := range []struct {
+		name, value, answer string
+		want                Within
+		ok                  bool
+		kept                string // a word kept holds, "" for none
+	}{
+		{name: "a UUID in a path", value: "cf5d2c03-50e1-48ee-96e7-6e4eec946178", answer: "apps/cf5d2c03-50e1-48ee-96e7-6e4eec946178/settings", want: Within{Before: "apps/", After: "/settings"}, ok: true},
+		{name: "eight characters", value: "tn-4f1a9", answer: "tenants/tn-4f1a9", want: Within{Before: "tenants/"}, ok: true},
+		{name: "seven characters", value: "tn-4f1a", answer: "tenants/tn-4f1a", kept: "shorter than 8 characters"},
+		{name: "page 1 of 3", value: "1", answer: "page 1 of 3", kept: "shorter than 8 characters"},
+		{name: "all digits", value: "48213977", answer: "orders/48213977/items", kept: "all digits"},
+		{name: "whole and short", value: "1", answer: "1", ok: true},
+		{name: "short, twice", value: "1", answer: "1 of 1"},
+		{name: "short, a part of a word", value: "a-1", answer: "xa-1"},
+		{name: "not in it", value: "48213977", answer: "orders"},
+	} {
+		w, ok, kept := AnswerPart(str(c.value), str(c.answer))
+		if w != c.want || ok != c.ok || (c.kept == "") != (kept == "") || !strings.Contains(kept, c.kept) {
+			t.Errorf("%s: AnswerPart = %+v, %v, %q; want %+v, %v and kept holding %q", c.name, w, ok, kept, c.want, c.ok, c.kept)
+		}
+		if kept != "" && strings.Contains(kept, c.value+" ") {
+			t.Errorf("%s: kept %q names the value by its text", c.name, kept)
+		}
+	}
+}
+
 // A replay reads the value at a part only from a leaf the part makes: the
 // constant text as recorded, and a value standing there as PartWithin reads
 // it.

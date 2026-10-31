@@ -1653,3 +1653,25 @@ func TestMergePartsDropsAPlaceTwoRecordingsDisagreeOn(t *testing.T) {
 		t.Fatal("a part at a use place is not stray")
 	}
 }
+
+// A kept answer place is a note: one per place, the first recording's why
+// first; a merge of two learns keeps both's places, and a clone shares none.
+func TestMergeKeptKeepsEachPlaceOnce(t *testing.T) {
+	label := VariableKept{Place: "body.label", Why: "the value is shorter than 8 characters"}
+	again := VariableKept{Place: "body.label", Why: "another learn's words"}
+	link := VariableKept{Place: "body.link", Why: "the value is all digits"}
+	if got := MergeKept([]VariableKept{label}, []VariableKept{again, link}); !reflect.DeepEqual(got, []VariableKept{label, link}) {
+		t.Fatalf("merged %+v", got)
+	}
+	if got := MergeKept(nil, nil); got != nil {
+		t.Fatalf("nothing is nil: %+v", got)
+	}
+	a := MockVariables{"page": {Recorded: "1", Answer: []string{"body.key"}, Kept: []VariableKept{label}}}
+	b := MockVariables{"page": {Recorded: "1", Answer: []string{"body.key"}, Kept: []VariableKept{link}}}
+	if got := MergeVariables(a, b)["page"]; !reflect.DeepEqual(got.Kept, []VariableKept{label, link}) {
+		t.Fatalf("merged variable %+v", got)
+	}
+	if c := a.Clone(); &c["page"].Kept[0] == &a["page"].Kept[0] {
+		t.Fatal("a clone shares its kept places")
+	}
+}

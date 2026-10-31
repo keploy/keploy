@@ -238,3 +238,13 @@ func TestAClockReadAtAVariablesPlaceStays(t *testing.T) {
 		}
 	}
 }
+
+// Two learns of one variable keep both's kept answer places, once each.
+func TestMergeVariableKeepsBothsKeptPlaces(t *testing.T) {
+	label := models.VariableKept{Place: "body.label", Why: "the value is shorter than 8 characters"}
+	link := models.VariableKept{Place: "body.link", Why: "the value is all digits"}
+	got := MergeVariable(models.MockVariable{Recorded: "1", Kept: []models.VariableKept{label}}, models.MockVariable{Recorded: "1", Kept: []models.VariableKept{link, label}})
+	if !reflect.DeepEqual(got.Kept, []models.VariableKept{label, link}) {
+		t.Fatalf("kept %+v", got.Kept)
+	}
+}
