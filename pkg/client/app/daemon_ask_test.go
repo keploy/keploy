@@ -170,6 +170,27 @@ func TestTheComposeGraceEndsAtTheUpsReturnWhileTheDaemonFailsItsReads(t *testing
 	}
 }
 
+// The grace keploy gives a compose app it interrupted ends on the app's exit
+// while compose's up still runs, as it does when the app exits at once and
+// keploy's agent is still stopping: the up returns only once every service
+// has stopped, which the down after the grace hastens. The grace's watcher of
+// the up ends with the grace; one that ended only at the up's return held the
+// grace's end, and the teardown after it, on the slowest service.
+func TestTheComposeGraceEndsOnTheAppsExitWhileTheUpStillRuns(t *testing.T) {
+	core, logs := observer.New(zap.DebugLevel)
+	a := &App{logger: zap.New(core), docker: &slowDaemon{Client: exitedApp()}, container: "app"}
+	done := make(chan struct{})
+	go func() { a.composeAppGrace(func() bool { return false }); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(time.Minute):
+		t.Fatal("the grace did not return after the app had exited: its watcher of compose's up held it")
+	}
+	if logs.FilterMessage("app container stopped gracefully; tearing down the rest of the compose stack").Len() != 1 {
+		t.Fatal("the grace did not end on the app's exit")
+	}
+}
+
 // The wait for a docker run app's container to exit after keploy's interrupt
 // reads the daemon's answer, however slow (2.2 s, inside the wait's 8 s), and
 // asks again a read that failed: with a 2 s budget per read, the first slow or

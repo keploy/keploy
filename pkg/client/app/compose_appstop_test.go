@@ -2113,3 +2113,90 @@ func TestTheAppsServiceIsReadOnTheDaemonsAnswerThoughItFailsReads(t *testing.T) 
 		})
 	}
 }
+
+// The reads that find the app's container, the project's name on keploy's
+// agent and the list of the service's containers, end at their caller's end
+// while the daemon fails every one: a watch that is stopped, a set-end stop
+// or a start whose ctx is cancelled returns then, not once keploy's stall
+// bound (here an hour) of runnable time passes. A read under a ctx of its own
+// held the watch's stop, the set-end stop (stopMu with it) and the start on a
+// failing daemon after their caller had gone.
+func TestTheAppsServiceReadsEndAtTheirCallersEndWhileTheDaemonFailsThem(t *testing.T) {
+	const always = 1 << 30
+	failing := func(t *testing.T, failInspects int) (*App, *daemonModel, *modelContainer, *slowDaemon) {
+		stallBudget(t, time.Hour)
+		d, app := appStack()
+		a := stackApp(d, "app")
+		sd := &slowDaemon{Client: d, failInspects: failInspects, failLists: always}
+		a.docker = sd
+		return a, d, app, sd
+	}
+	// failedA says the daemon has failed a read of the kind (an inspect,
+	// or a list) since it began failing them all.
+	failedA := func(sd *slowDaemon, inspect bool) func() bool {
+		return func() bool {
+			sd.mu.Lock()
+			defer sd.mu.Unlock()
+			if inspect {
+				return sd.failInspects < always
+			}
+			return sd.failLists < always
+		}
+	}
+	returned := func(t *testing.T, what string, done <-chan error) error {
+		t.Helper()
+		select {
+		case err := <-done:
+			return err
+		case <-time.After(time.Minute):
+			t.Fatalf("%s did not return at its end while the daemon failed every read: the read waits out the stall bound", what)
+			return nil
+		}
+	}
+	t.Run("a watch's stop, the agent's project unread", func(t *testing.T) {
+		a, d, app, sd := failing(t, always)
+		ended := make(chan struct{}, 1)
+		stop := a.watchComposeApp(context.Background(), func() { ended <- struct{}{} })
+		eventually(t, "the watch asked the daemon for events", func() bool {
+			d.mu.Lock()
+			defer d.mu.Unlock()
+			return len(d.subs) > 0
+		})
+		d.mu.Lock()
+		d.emit(app, events.ActionDie, map[string]string{"exitCode": "0"})
+		d.mu.Unlock()
+		eventually(t, "the watch read the agent's project for the die", failedA(sd, true))
+		done := make(chan error, 1)
+		go func() { stop(); done <- nil }()
+		returned(t, "the watch's stop", done)
+		select {
+		case <-ended:
+			t.Fatal("a watch that was stopped took the die for a halt")
+		default:
+		}
+	})
+	t.Run("a set-end stop at its ctx, the agent's project unread", func(t *testing.T) {
+		a, _, _, sd := failing(t, always)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		done := make(chan error, 1)
+		go func() { _, err := a.StopComposeApp(ctx); done <- err }()
+		eventually(t, "the stop read the agent's project", failedA(sd, true))
+		cancel()
+		if err := returned(t, "StopComposeApp", done); err == nil {
+			t.Fatal("a stop that could not read the app's project returned no error")
+		}
+	})
+	t.Run("a start at its ctx, the service's list failing", func(t *testing.T) {
+		a, _, _, sd := failing(t, 0)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		done := make(chan error, 1)
+		go func() { _, err := a.StartComposeApp(ctx); done <- err }()
+		eventually(t, "the start listed the service's containers", failedA(sd, false))
+		cancel()
+		if err := returned(t, "StartComposeApp", done); err == nil {
+			t.Fatal("a start that could not list the app's service returned no error")
+		}
+	})
+}
