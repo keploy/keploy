@@ -449,6 +449,11 @@ func (s RoundSnapshot) Owner(m *models.Mock) RoundOwner {
 	if m == nil {
 		return OwnerNone
 	}
+	// A set-aside test's recording is filed in no view until it answers: a
+	// copy the store offered says whose it is (SetAsideReader).
+	if m.TestModeInfo.SetAsideFrom != "" {
+		return OwnerSetAside
+	}
 	return s.owners[m.Name]
 }
 
