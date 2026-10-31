@@ -2233,3 +2233,36 @@ func TestCutsNoneTurnsAwayOnlyPairsNoRuleNames(t *testing.T) {
 	}
 	t.Logf("turned away %d of 400000 pairs, cutsEach named %d", turned, named)
 }
+
+// BenchmarkCuts is what cutsNone saves where it matters: a drifted value's
+// moment, read now, held against every instant a set's earlier places hold
+// (4,096 of them, recorded at millisecond resolution over 10 minutes or 3
+// days, half in UTC and half at +05:30), by cuts and by cutsEach alone.
+func BenchmarkCuts(b *testing.B) {
+	base := time.Date(2026, 10, 31, 19, 12, 30, 432000000, time.UTC).UnixNano()
+	m := moment{key: instantKey{at: base}, wall: timeOfDay(base), res: time.Millisecond}
+	accept := func(cutRule) bool { return true }
+	for _, span := range []time.Duration{10 * time.Minute, 3 * 24 * time.Hour} {
+		held := make([]moment, 0, 4096)
+		for i := 0; i < 4096; i++ {
+			at := base - int64(span)*int64(i)/4096 - 7*int64(time.Millisecond)*int64(i%13)
+			z := int64(0)
+			if i%2 == 1 {
+				z = int64(5*time.Hour + 30*time.Minute)
+			}
+			held = append(held, moment{key: instantKey{at: at}, wall: timeOfDay(at + z), res: time.Millisecond, zone: z, zoned: true})
+		}
+		for _, by := range []struct {
+			name string
+			cut  func(held, m moment, visit func(cutRule) bool) bool
+		}{{"cuts", cuts}, {"cutsEach", cutsEach}} {
+			b.Run("span="+span.String()+"/"+by.name, func(b *testing.B) {
+				for i := 0; i < b.N; i++ {
+					for _, h := range held {
+						by.cut(h, m, accept)
+					}
+				}
+			})
+		}
+	}
+}

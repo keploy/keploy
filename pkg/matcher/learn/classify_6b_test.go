@@ -85,9 +85,10 @@ var (
 // unescapedCases are texts where a hand scan most easily parts from the
 // patterns ('#' is a backslash, esc): an escape cut short at the end, a
 // stray '%' or '#' right before an escape, escapes next to each other, a
-// surrogate pair half there or the wrong way round, an escape that decodes
-// to another (read on the next pass, at most four), and bytes that are not
-// UTF-8.
+// surrogate pair half there or the wrong way round, a high surrogate whose
+// third digit is a capital letter, two halves with no backslash between
+// them, an escape that decodes to another (read on the next pass, at most
+// four), and bytes that are not UTF-8.
 var unescapedCases = []string{
 	"", "plain text", "%", "%4", "%41", "%%41", "%4%41", "%gg%41", "%2F%2f", "a%2Fb%2", "%E2%82%AC",
 	"%252F", "%25252541", "%2525252525252541", "%5Cn", "%5Cu0041", "%5Cud83d%5Cude00", "%5C%5C",
@@ -95,6 +96,7 @@ var unescapedCases = []string{
 	"##", "###", "####n", "########n", "#u005C#u006E", "#u002541", "#u00e9#u00E9",
 	"#uD83D#uDE00", "#ud83d#ude00x", "#ud83d#ud83d#ude00", "#ud83d", "#ude00#ud83d", "#ud83d#u0041",
 	"#ud83d##ude00", "#udbff#udfff", "#ud800#udc00", "#udc00", "#uD7FF#uDC00", "#uDC00#uDC00",
+	"#udA00#udC00", "#uDBff#uDfff", "#ud800xudc00", "%5Cud8000udC00", "#ud8000#udc00",
 	"\xff%41\xe2#u0041\x80", "\xe2\x82#n", "%C3#u00a9%A9", "x%5C%75%30%30%34%31",
 	`{"a":"b#"c#"","u":"https:#/#/h#/uploads%2Fid%3Fq%3D1"}`,
 }
