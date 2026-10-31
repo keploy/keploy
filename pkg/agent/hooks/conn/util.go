@@ -708,12 +708,16 @@ func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCas
 	// keep=false releases them from the buffer so they don't accumulate as
 	// orphans. Must run before the isDuplicate early-return below.
 	if synchronous {
-		// Always increment the counter so every stream — duplicate or not —
-		// gets a unique window name. Concurrent duplicates would otherwise all
-		// share "test-0" and collide in the mock manager's window map.
-		currentID := atomic.AddInt64(&GlobalTestCounter, 1)
-		testName = fmt.Sprintf("test-%d", currentID)
-		if mgr := syncMock.Get(); mgr != nil {
+		// Every stream, duplicate or not, takes a name of its own: concurrent
+		// duplicates would otherwise share one and collide in the manager's
+		// window map. It is the name its mocks are mapped to and its test
+		// case's (below), as an HTTP request's is (Capture): the recording
+		// joins a mapping to its test case by it. It comes off the manager
+		// the call's context carries, as Capture's does, so an HTTP
+		// request's and a gRPC call's names never share one, and the call's
+		// mocks resolve on that manager.
+		if mgr := syncMock.FromContextOrGlobal(ctx); mgr != nil {
+			testName = fmt.Sprintf("test-%d", mgr.NextTestID())
 			mgr.ResolveRange(
 				http2Stream.GRPCReq.Timestamp,
 				http2Stream.GRPCResp.Timestamp,
@@ -741,7 +745,7 @@ func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCas
 
 	testCase := &models.TestCase{
 		Version:   models.GetVersion(),
-		Name:      http2Stream.GRPCReq.Headers.OrdinaryHeaders["Keploy-Test-Name"],
+		Name:      testName,
 		Kind:      models.GRPC_EXPORT,
 		Created:   time.Now().Unix(),
 		SourcePod: SourcePodFromContext(ctx),
