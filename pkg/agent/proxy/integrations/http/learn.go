@@ -725,6 +725,9 @@ func (h *HTTP) learnRules(mockDb integrations.MockMemDb, tracker *learn.Tracker)
 	// test's is learned onto a background recording. The pool is learned
 	// from between tests only.
 	r.exactBackground = r.open && integrations.S12Background(mockDb)
+	if r.exactBackground {
+		r.background = func(name string) bool { return integrations.InBackground(mockDb, name) }
+	}
 	return r
 }
 
@@ -767,6 +770,7 @@ func (h *HTTP) learnScopeIn(snap integrations.RoundSnapshot, live httpParts, liv
 		perTest: snap.PerTest, session: snap.Session, open: snap.Open,
 		windows: snap, inFlight: snap, pools: snap,
 		exactBackground: snap.ExactBackground(),
+		background:      snap.InBackground,
 		answered:        func(name string) bool { return answered[name] != nil },
 		answeredMocks:   func() []*models.Mock { return order },
 	}
@@ -784,6 +788,9 @@ type scopeReads struct {
 	inFlight         integrations.InFlightOwner
 	pools            integrations.PoolMembership
 	exactBackground  bool
+	// background reports whether a recording, by name, is the set's
+	// background's (integrations.BackgroundMember); nil names none.
+	background func(name string) bool
 	// answered reports whether one of the test's own answered a request of
 	// it; answeredMocks are those, as recorded, read after the scope's
 	// mocks.
@@ -873,6 +880,10 @@ func (r scopeReads) candidateOf(m *models.Mock, perTestTier bool, rp httpParts, 
 	c := learn.Candidate{
 		Known:    n.known(m),
 		Pairable: !m.IsProtocolPhase() && (own || pool && poolsOwn && !r.exactBackground),
+		// Where the background answers exactly or not at all, its
+		// data-plane recordings never answer a call one more than the open
+		// test recorded (learn.Candidate.Background).
+		Background: !own && r.exactBackground && !m.IsProtocolPhase() && r.background != nil && r.background(m.Name),
 	}
 	if r.sieve.shapes(m, masked, spent) {
 		c.Shape = n.shape(rp, d)

@@ -48,3 +48,21 @@ func HideBackground(db MockMemDb) MockMemDb {
 	}
 	return db
 }
+
+// BackgroundMember is an optional capability of a store (and of a
+// RoundSnapshot): whether a recording, by name, is one of the background's
+// (the pool's or the worker scope's) of a set served by the background
+// rules that the view in force holds as no test's own. The learn step reads it to keep the background from answering a
+// call one more than the open test recorded (learn.Candidate.Background).
+// The agent's MockManager implements it, and every MockMemDb wrapper that
+// forwards RoundHolder must forward it.
+type BackgroundMember interface {
+	InBackground(name string) bool
+}
+
+// InBackground is db's BackgroundMember answer for name: false from a store
+// that has none (it serves no set by the background rules).
+func InBackground(db MockMemDb, name string) bool {
+	b, ok := db.(BackgroundMember)
+	return ok && b.InBackground(name)
+}

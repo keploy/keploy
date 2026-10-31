@@ -290,3 +290,47 @@ func TestTheManagerNeverShowsATestsOwnRecordingInTheSharedPartOfItsReads(t *test
 		})
 	}
 }
+
+// In record's full round (OutgoingOptions.Learn) too, a test that owns one
+// of the pool's recordings and calls a path once more than its own
+// recordings of it gets a miss: the learn step neither answers the call with
+// the pool's other recording of the path nor pairs it, and the pool's
+// recording still answers the path's call between tests.
+func TestACallPastWhatATestRecordedMissesInRecordsFullRound(t *testing.T) {
+	for _, tier := range []string{"session", "perTest"} {
+		t.Run(tier, func(t *testing.T) {
+			p, mm, poolNames := ownedPoolRun(t, tier, zap.NewNop())
+			h := httpint.New(zap.NewNop())
+			opts := models.OutgoingOptions{Learn: true}
+			mm.ServeExactTest("test-a", nil)
+			p.ContinueTestErrorCapture()
+			for i, want := range []string{`{"pool":1}`, `{"pool":3}`} {
+				if code, body := r3SendVia(t, context.Background(), h, p, mm, opts, httpGet("/pool/1")); code != http.StatusOK || body != want {
+					t.Fatalf("test-a's call %d of /pool/1 got %d %s; want %s", i, code, body, want)
+				}
+			}
+			mm.ServeExactPool(models.PoolKeyNone, poolNames)
+			mm.ServeExactTest("test-0", []*models.Mock{roundMock(mm, "mock-own-0-0"), roundMock(mm, "mock-pool-2")})
+			p.ContinueTestErrorCapture()
+			for i, want := range []string{`{"own":"0-0"}`, `{"pool":2}`} {
+				if code, body := r3SendVia(t, context.Background(), h, p, mm, opts, httpGet("/pool/0")); code != http.StatusOK || body != want {
+					t.Fatalf("test-0's call %d of /pool/0 got %d %s; want %s", i, code, body, want)
+				}
+			}
+			if code, body := r3SendVia(t, context.Background(), h, p, mm, opts, httpGet("/pool/0")); code == http.StatusOK {
+				t.Fatalf("test-0's call 2 of /pool/0, one more than the test recorded, was answered %s", body)
+			}
+			misses, err := p.GetMockErrors(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(misses) != 1 || misses[0].ActualSummary != "GET /pool/0" || misses[0].Kind != models.MissExtraCall || misses[0].Recorded != 2 {
+				t.Fatalf("misses %+v; want one extra_call miss of GET /pool/0, recorded 2", misses)
+			}
+			mm.ServeExactPool(models.PoolKeyNone, poolNames)
+			if code, body := r3SendVia(t, context.Background(), h, p, mm, opts, httpGet("/pool/0")); code != http.StatusOK || body != `{"pool":0}` {
+				t.Fatalf("the call of /pool/0 between tests got %d %s; want {\"pool\":0}", code, body)
+			}
+		})
+	}
+}

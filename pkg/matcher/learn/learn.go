@@ -631,6 +631,13 @@ type Candidate struct {
 	// it is the closest to, is one call more than recorded, a miss, never
 	// paired with a farther recording.
 	Spent bool
+	// Background: a recording of the set's background (its pool's or the
+	// worker scope's, under the background rules) that is not the open
+	// test's own. It answers a request it matches exactly that no recording
+	// of the test answered already: a request a spent candidate matches
+	// exactly is one call more than the test recorded, a miss, whatever the
+	// background holds of it.
+	Background bool
 }
 
 // Result is L's decision about one request.
@@ -655,9 +662,12 @@ type Result struct {
 // recorded order, then the pool.
 //
 //  1. The first candidate that matches exactly, modulo what is known, is
-//     served, unless it is spent; a request only a spent candidate matches
-//     exactly is one call more than recorded: a miss with no reason of the
-//     learn step's.
+//     served, unless it is spent or the background's; a request only a
+//     spent candidate matches exactly is one call more than recorded: a
+//     miss with no reason of the learn step's. So is a request a spent
+//     candidate and the background's match exactly: the background never
+//     answers a call one more than the test recorded (Candidate.Background),
+//     and otherwise answers the request with its first exact candidate.
 //  2. The others with the request's operation key are compared.
 //  3. Order first: an array the order rule refuses is not a drift.
 //  4. A pairable candidate differs only by values, in learnable leaves, with
@@ -699,6 +709,7 @@ func Pair(live Shape, cands []Candidate) Result {
 	var far []farCand
 	keyed := false
 	spentExact := -1
+	bgExact, bgDiff := -1, Diff{}
 	for i, c := range cands {
 		if c.Shape.Key != live.Key {
 			continue
@@ -706,6 +717,12 @@ func Pair(live Shape, cands []Candidate) Result {
 		keyed = true
 		d := Compare(live, c.Shape, c.Known)
 		if d.Structural == "" && d.count() == 0 && len(d.Reordered) == 0 {
+			if c.Background && !c.Spent {
+				if bgExact < 0 {
+					bgExact, bgDiff = i, d
+				}
+				continue
+			}
 			if !c.Spent {
 				return Result{Outcome: Exact, Index: i, Diff: d}
 			}
@@ -727,6 +744,9 @@ func Pair(live Shape, cands []Candidate) Result {
 	}
 	if spentExact >= 0 {
 		return Result{Outcome: Miss, Index: spentExact, Why: "it is the call a recorded call of the test answered already: one call more than the test recorded"}
+	}
+	if bgExact >= 0 {
+		return Result{Outcome: Exact, Index: bgExact, Diff: bgDiff}
 	}
 	if !keyed {
 		return Result{Outcome: Miss, Index: -1, Reason: models.MissUnmockedCall, Why: "no recorded call has its method, destination and shape"}

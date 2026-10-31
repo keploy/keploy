@@ -730,7 +730,7 @@ func (m *MockManager) RoundSnapshot(q integrations.RoundQuery) (integrations.Rou
 		}
 	}
 	if v.bg != nil {
-		parts.BackgroundPool = v.bg.pool
+		parts.BackgroundPool, parts.BackgroundWorker = v.bg.pool, v.bg.worker
 	}
 	m.windowMu.RLock()
 	parts.WindowStart, parts.WindowEnd = m.windowStart, m.windowEnd

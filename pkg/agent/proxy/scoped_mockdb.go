@@ -460,6 +460,13 @@ func (s *scopedMockDb) HideBackground() integrations.MockMemDb {
 
 var _ integrations.BackgroundHider = (*scopedMockDb)(nil)
 
+// InBackground implements integrations.BackgroundMember: the store's.
+func (s *scopedMockDb) InBackground(name string) bool {
+	return integrations.InBackground(s.MockMemDb, name)
+}
+
+var _ integrations.BackgroundMember = (*scopedMockDb)(nil)
+
 // Unheld implements integrations.UnheldTeller: the store's, so a view over
 // the fail-closed store HoldToRound made says why its call read nothing.
 func (s *scopedMockDb) Unheld() string { return integrations.UnheldWhy(s.MockMemDb) }
