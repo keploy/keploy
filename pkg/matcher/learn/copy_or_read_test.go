@@ -1943,3 +1943,89 @@ func TestASlowFullRoundLearnsASameSecondCopyAsAReadSinceItsTestBegan(t *testing.
 		})
 	}
 }
+
+// A client test's own audit read whose moment record's full round saw is
+// named by an earlier answer the test was given, rounded or cut to the
+// second (the test's client named the app by its own clock, "[E2E]
+// generate-client-<UnixNano>", and a find answered that name back; it
+// registered a user the same way, and the user service echoed it), is
+// learned as a read of the clock since its test began, never as a variable
+// of the app's createdAt. The echo reads the answer's moment as what the
+// application was given and takes the recorded moment from the first place
+// that holds it, the app's insert's createdAt; but in record's full round
+// the app read createdAt a second earlier (a full round that crossed a
+// second inside the app's insert), so as a variable the audit never holds
+// what the test sent there and the test was set aside (api-server
+// TestGenerateTestSuitesOnClient: "auditedAt does not hold the value the
+// test sent at app.createdAt"). The audit's own window holds the read in
+// both runs, and the copy rule learns that read under both explanations.
+func TestAClientTestLearnsItsAuditReadAnEarlierAnswersClockNameRoundsToAsARead(t *testing.T) {
+	const p = "body.docs.msgs.0.auditedAt.$numberLong"
+	ms := time.Millisecond
+	secs := func(at time.Time) string { return strconv.FormatInt(at.Unix(), 10) }
+	nanos := func(at time.Time) string { return strconv.FormatInt(at.UnixNano(), 10) }
+	r0 := time.Date(2026, 10, 30, 19, 3, 52, 304_000_000, time.UTC)
+	for _, tc := range []struct {
+		name         string
+		f0           time.Time     // the app's clock as record's full round's test began
+		client       time.Duration // the test client's clock ahead of the app's
+		user, find   bool          // the user service's echo, the find's answer
+		createdApart bool          // createdAt read a second before the audit in F
+	}{
+		{"the name rounds up to the audit's second", time.Date(2026, 10, 30, 19, 5, 7, 760_000_000, time.UTC), 0, false, true, true},
+		{"the user's name rounds up to the audit's second", time.Date(2026, 10, 30, 19, 5, 7, 760_000_000, time.UTC), 0, true, false, true},
+		{"the app's insert crosses a second inside itself", time.Date(2026, 10, 30, 19, 5, 7, 980_000_000, time.UTC), 0, true, true, true},
+		{"the client's clock runs ahead of the app's", time.Date(2026, 10, 30, 19, 5, 7, 760_000_000, time.UTC), 300 * ms, true, true, true},
+		{"all in one second", time.Date(2026, 10, 30, 19, 5, 7, 300_000_000, time.UTC), 0, true, true, false},
+	} {
+		f0 := tc.f0
+		client := func(d time.Duration) time.Time { return f0.Add(tc.client + d) }
+		name := func(at time.Time) string { return "[E2E] generate-client-" + nanos(at) }
+		user := func(at time.Time) string { return "e2e-user-" + nanos(at) }
+		// The client names the app at +0.5 ms; the app reads createdAt at
+		// +5 ms and its audit's clock at +8 ms (+25 ms in F) and inserts
+		// both; the client registers its user at +10 ms; a find answers the
+		// app back at +242 ms; the app reads its clock for the next audit
+		// and sends it at +254 ms.
+		recName, fName := name(r0.Add(500*time.Microsecond)), name(client(500*time.Microsecond))
+		earlier := []Earlier{{Mock: "mock-968", At: r0.Add(9 * ms), Own: true, Seen: []Seen{
+			{Side: Request, Leaf: Leaf{Path: "body.docs.msgs.0.app.name", Type: String, Value: recName}, Live: fName},
+			{Side: Request, Leaf: Leaf{Path: "body.docs.msgs.0.app.createdAt.$numberLong", Type: Number, Value: secs(r0.Add(5 * ms))}, Live: secs(f0.Add(5 * ms))},
+			{Side: Request, Leaf: Leaf{Path: "body.docs.msgs.0.auditedAt.$numberLong", Type: Number, Value: secs(r0.Add(8 * ms))}, Live: secs(f0.Add(25 * ms))},
+			{Side: Request, Leaf: Leaf{Path: "body.docs.msgs.0.auditedAtNanos.$numberLong", Type: Number, Value: nanos(r0.Add(8 * ms))}, Live: nanos(f0.Add(25 * ms))},
+		}}}
+		if tc.user {
+			recUser, fUser := user(r0.Add(10*ms)), user(client(10*ms))
+			earlier = append(earlier, Earlier{Mock: "mock-970", At: r0.Add(70 * ms), Own: true, Seen: []Seen{
+				{Side: Request, Leaf: Leaf{Path: "body.username", Type: String, Value: recUser}, Live: fUser},
+				{Side: Response, Leaf: Leaf{Path: "body.username", Type: String, Value: recUser}, Live: fUser},
+			}})
+		}
+		if tc.find {
+			earlier = append(earlier, Earlier{Mock: "mock-971", At: r0.Add(242 * ms), Own: true, Seen: []Seen{
+				{Side: Response, Leaf: Leaf{Path: "body.cursor.firstBatch.0.app.name", Type: String, Value: recName}, Live: fName},
+			}})
+		}
+		w := &Window{
+			Rec: Span{From: r0.Add(249 * ms), To: r0.Add(254 * ms), Began: r0},
+			F:   Span{From: f0.Add(249 * ms), To: f0.Add(254 * ms), Began: f0},
+		}
+		rec, live := secs(r0.Add(254*ms)), secs(f0.Add(254*ms))
+		num := func(v string) Shape {
+			return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: Number, Value: v}}}
+		}
+		dc := clientTestCache()
+		// The shape: the echo takes the audit's moment for what the
+		// application was given, from the app's createdAt, which in F held
+		// another second than the audit where the insert crossed one.
+		v := dc.ofIn(rec, live, w, r0.Add(254*ms))
+		from, ok := dc.echoServed(dc.echoedIn(v, r0.Add(254*ms), earlier, nil), rec, earlier)
+		if !ok || from.Mock != "mock-968" || from.Path != "body.docs.msgs.0.app.createdAt.$numberLong" || (from.Live != live) != tc.createdApart {
+			t.Fatalf("%s: the echo took %+v (found %v); want mock-968's app.createdAt, holding another second than %s in F: %v", tc.name, from, ok, live, tc.createdApart)
+		}
+		ln := ClassifyFollowing(dc, []string{p}, num(live), num(rec), r0.Add(254*ms), earlier, nil, nil, w, nil)[0]
+		if ln.Kind != KindClockRead || ln.Read == nil || ln.Read.Since != models.SinceTestBegin || ln.From.Mock != "" {
+			t.Errorf("%s: %s from %+v (%s); want a read of the clock since its test began, no variable", tc.name, ln.Kind, ln.From, ln.Why)
+		}
+	}
+}
