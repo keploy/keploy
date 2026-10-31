@@ -22,6 +22,34 @@ import (
 // carries as its Write): a read made once more is a cached copy expiring on
 // the application's clock, which judging sets aside instead.
 
+// OwnRecordings is, of the open test's answered mocks
+// (ExactConsumedReader.ConsumedTestMocks), the test's own recordings: none a
+// copy of a set-aside test's or of the pool's recording that answered a call
+// of its window (models.TestModeInfo.SetAsideFrom names those). A call one
+// more than these is the test's own extra call.
+func OwnRecordings(answered []*models.Mock) []*models.Mock {
+	var own []*models.Mock
+	for _, m := range answered {
+		if m != nil && m.TestModeInfo.SetAsideFrom == "" {
+			own = append(own, m)
+		}
+	}
+	return own
+}
+
+// FromPool reports whether batch, as SetAsideReader.RangeSetAside visits
+// it, is the set's recordings made while no test was open (its last batch,
+// from models.ServedFromBackground). A parser never serves one of them to a
+// call one more than the open test's own recordings of it (OwnRecordings):
+// that call stays the test's extra call (models.MissExtraCall; keploy
+// #4745's F20), whatever the pool holds, since a regression that makes a
+// recorded call once more (a duplicate write, a retried POST) would pass
+// served by a start-up or between-tests copy of it. A set-aside test's copy
+// still serves such a call (the batches before).
+func FromPool(batch []*models.Mock) bool {
+	return len(batch) > 0 && batch[0] != nil && batch[0].TestModeInfo.SetAsideFrom == models.ServedFromBackground
+}
+
 // RepeatedRecording is, of copies, the open test's recordings of one call
 // that already answered, the recording a call made once more repeats: the
 // one recorded last. It is the newest answer the test recorded to the call,

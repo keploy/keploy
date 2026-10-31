@@ -77,7 +77,10 @@ import (
 // data-plane recordings (RangeSetAside): served by exact match only,
 // unchecked and never required of the test it lands in, and named on its
 // evidence (models.ServedFromBackground's line), at most once in the
-// staging. One a call between tests consumes (a per-test recording, through
+// staging, and never to a call one more than the test's own recordings of
+// it, which stays the test's extra call (integrations.FromPool: a
+// duplicate write a regression makes passes no test on a start-up copy of
+// it). One a call between tests consumes (a per-test recording, through
 // a delete door) has one ledger with the calls between tests
 // (outsideAnswers): one consumed between tests is offered to no test, and
 // one a test was served is spent for the staging, so it answers no later

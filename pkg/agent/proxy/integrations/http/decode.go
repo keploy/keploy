@@ -394,8 +394,9 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				if !ok && err == nil && proven {
 					// A set-aside test's recording the call is exactly, left
 					// unanswered in the staging, also for a call one more
-					// than the test recorded: served, unchecked, named on the
-					// test's evidence.
+					// than the test recorded, then the pool's, never for a
+					// call one more than the test's own recordings:
+					// served, unchecked, named on the test's evidence.
 					aside, aerr := h.setAsideAnswer(reqCtx, input, db, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseStrict())
 					if aerr != nil {
 						err = aerr
