@@ -117,11 +117,6 @@ func TestAShortWordIsChanceOnlyWhereBothRunsShowItsPlaceDidNotMoveWithTheValue(t
 			// value took no word of (an earlier test's random id beside the
 			// call's own, each made afresh in F).
 			{"given: an earlier test's id F gave another id at, which the value took no word of", "mock-231", rec, live, served("mock-231", false, text("body.cursor.firstBatch.0._id", other), "c0ffee00-1234-4321-abcd-0000000000ff", time.Millisecond)},
-			// The same the other way about: F's application sent, in an
-			// earlier test's insert, an id that holds a group of the value
-			// as F saw it, where the recording sent an id the recorded value
-			// took no word of (TestStopGeneration's eventsV2 _id).
-			{"given: an earlier test's insert F sent an id holding a group of the fresh id at", "mock-694", rec, live, sent("mock-694", text("body.docs.msgs.0._id", "b0fd3b58-3ff5-4a1a-a1b2-c3d4e5f60718"), "c1d2e3f4-5a6b-4b8a-8e9f-a0b1c2d3e4f5")},
 		} {
 			if strings.HasPrefix(r.what, "given: ") && name == "ClassifyFollowing" {
 				continue // it keeps its reading of a place that moved
@@ -135,6 +130,12 @@ func TestAShortWordIsChanceOnlyWhereBothRunsShowItsPlaceDidNotMoveWithTheValue(t
 		// to the place, or refused naming it.
 		for _, r := range []row{
 			// Shown: the place changed with the value (B2's probes).
+			// The other way about: the value F saw took a word of what F
+			// sent or gave at a leaf (an earlier test's insert _id holding a
+			// group of it), where the recording's text there lacks it. The
+			// value took the place's new word: refused, as a whole echo of
+			// a leaf F served is (TestACopyFollowsItsSourceForEveryKindOfPlace).
+			{"given: shown: an earlier test's insert F sent an id holding a group of the fresh id at", "mock-694", rec, live, sent("mock-694", text("body.docs.msgs.0._id", "b0fd3b58-3ff5-4a1a-a1b2-c3d4e5f60718"), "c1d2e3f4-5a6b-4b8a-8e9f-a0b1c2d3e4f5")},
 			{"shown: an earlier test's id held the group F's id holds in F", "mock-231", rec, live, served("mock-231", false, text("body.cursor.firstBatch.0._id", other), "b0fd3b58-3ff5-4b8a-a1b2-c3d4e5f60718", time.Millisecond)},
 			{"shown: an earlier test's count drifted with the value", "mock-231", "40", "2081", served("mock-231", false, text("body.count", "40"), "2081", time.Millisecond)},
 			{"shown: an earlier test's counter drifted with the id that holds it", "mock-231", "order-17", "order-18", served("mock-231", false, text("body.value.seq", "17"), "18", time.Millisecond)},

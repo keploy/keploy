@@ -196,6 +196,11 @@ func TestACopyFollowsItsSourceForEveryKindOfPlace(t *testing.T) {
 		case tc.want != "" && (got.Kind != KindUnaccounted || !strings.Contains(got.Why, tc.want) || !strings.Contains(got.Why, "in "+tc.at)):
 			t.Errorf("FALSE GREEN? %s: %q recorded, %q in F: %s (%q), want refused naming %s: %q", tc.name, tc.recorded, tc.live, got.Kind, got.Why, tc.at, tc.want)
 		}
+		// keploy test reads a short word by the same rule (follows.reads):
+		// what the rule refuses, it never learns as varying either.
+		if g := classifyG(t, tc.recorded, tc.live, tc.earlier, tc.raw, nil); tc.want != "" && g.Kind == KindNoise {
+			t.Errorf("FALSE GREEN? ClassifyGiven, %s: %q recorded, %q in F: noise (%q), want it never learned", tc.name, tc.recorded, tc.live, g.Why)
+		}
 	}
 	// A word the recorded value held, at a payload: the recorded value is a
 	// copy of that payload's word as far as the recording alone shows. F

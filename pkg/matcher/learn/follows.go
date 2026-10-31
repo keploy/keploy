@@ -803,9 +803,6 @@ func (f *follows) excusedSeen(e Earlier, ed, v *valueDrift, i int, t string, at 
 		before, untimed = recordedGave(e.recordedAt(), e.Payload.answered, at, e.Mock)
 	}
 	took := func() string { return f.tookAt(v, t, e.Mock) }
-	if !f.every && ed.liveTok[i][t] && !ed.recTok[i][t] {
-		return f.excusedSeenLive(e, ed, v, t, before, untimed, why, path, took)
-	}
 	fv, followed := fNone, ""
 	switch {
 	case ed.liveTok[i][t]:
@@ -818,35 +815,6 @@ func (f *follows) excusedSeen(e Earlier, ed, v *valueDrift, i int, t string, at 
 	}
 	if !f.excused(t, before && ed.recTok[i][t], fv, followed, untimed, why, v.wordOf(t, v.recTok[i][t])+" stands in "+e.Mock+" at "+path, took) {
 		return false
-	}
-	f.source(e.Mock)
-	return true
-}
-
-// excusedSeenLive is excusedSeen the other way about, under ClassifyGiven,
-// of word t the drifted value v holds as F saw it, which stands at the leaf
-// (path) as F gave or sent it there and not as the recording did (ed): the
-// recording gave or sent the leaf strictly before the call (before), and
-// the recorded value took none of the words of the value it had there
-// (movedFrom), as excusedLive reads a payload. A copy moves with its source,
-// so a value that took nothing of the recorded leaf, while F's leaf holds t,
-// is no copy of it (an earlier test's insert _id F's application made
-// afresh, a group of which the value F made holds by chance). A leaf whose
-// recorded words the recorded value took, or that drifted with it, stays
-// where the value may have come from; so does one keploy cannot time.
-func (f *follows) excusedSeenLive(e Earlier, ed, v *valueDrift, t string, before bool, untimed, why, path string, took func() string) bool {
-	if untimed == "" && before {
-		if from := movedFrom(ed, v); from != "" {
-			f.refused = "the recording gave the application another value there, " + from + ", so it cannot show the value does not follow it"
-			return false
-		}
-	}
-	moved := f.moved == ""
-	if !f.excused(t, before, fMoved, "", untimed, why, v.wordOf(t, false)+" stands in "+e.Mock+" at "+path+", as record's full round gave it", took) {
-		return false
-	}
-	if moved {
-		f.moved = v.wordOf(t, false) + " stands in " + e.Mock + " at " + path + ", as record's full round gave it, where the recording gave the application another value, which the recorded value took none of the words of: a copy moves with its source, so the value is no copy of it"
 	}
 	f.source(e.Mock)
 	return true
