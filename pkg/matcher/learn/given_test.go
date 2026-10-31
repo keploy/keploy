@@ -1472,3 +1472,31 @@ func TestTrackerReadsTheValueAClientTestsIncomingRequestsHold(t *testing.T) {
 	var nilTracker *Tracker
 	read(nilTracker, "", incomingUncaptured)
 }
+
+// One part of a test's incoming requests is one variable of the test,
+// whichever parser's call carries it (an HTTP call and a Mongo call name it
+// alike), never the name of a variable a call binds at a place of that
+// path, and none of the test case's keys; a test that ended names none.
+func TestTrackerNamesAPartOfTheIncomingRequestsOneVariableOfTheTest(t *testing.T) {
+	const place = "header.Authorization{jwt}.auth_time"
+	tr := NewTracker()
+	tr.Begin()
+	n := tr.Placed().Test
+	first, ok := tr.IncomingName(n, place, nil)
+	if !ok || first != "auth_time" {
+		t.Fatalf("named %q (%v); want auth_time", first, ok)
+	}
+	if again, ok := tr.IncomingName(n, place, nil); !ok || again != first {
+		t.Fatalf("named %q (%v) again; want %q", again, ok, first)
+	}
+	if bound, ok := tr.Name(n, "mock-1", place, nil); !ok || bound == first {
+		t.Fatalf("a call's place of that path named %q (%v); want another variable", bound, ok)
+	}
+	if other, ok := tr.IncomingName(n, "header.Authorization{jwt}.sid", map[string]bool{"sid": true}); !ok || other == "sid" {
+		t.Fatalf("named %q (%v); want no test case's key", other, ok)
+	}
+	tr.Begin()
+	if name, ok := tr.IncomingName(n, place, nil); ok {
+		t.Fatalf("an ended test named %q", name)
+	}
+}

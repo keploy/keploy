@@ -1708,6 +1708,20 @@ func (t *Tracker) RunName(n uint64, mock, place string, reserved map[string]bool
 	return name, true
 }
 
+// IncomingName is the name of test number n's variable read at place of its
+// incoming requests (models.MockVariable.Incoming, a part IncomingGiven
+// names): one part of them is one variable in the test, whichever of its
+// requests first held it and whichever parser's call carries it, so an HTTP
+// call and a Mongo call that carry it name one variable. ok is false when
+// that test has ended (Name).
+func (t *Tracker) IncomingName(n uint64, place string, reserved map[string]bool) (string, bool) {
+	return t.Name(n, incomingNameKey, place, reserved)
+}
+
+// incomingNameKey is the mock Name keys a variable of a test's incoming
+// requests under: no mock is named so (a mock's name holds no NUL byte).
+const incomingNameKey = "\x00the test's incoming requests"
+
 // PlaceName names, for a request of test number n, the variable bound at
 // p, the earlier place a value came from: the run's variable (RunName) at
 // an exchange of the run (Place.Run), the test's own (Name) at any other.

@@ -2173,7 +2173,7 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 				if !ok || !variables.SameValue(from.Live, live, r.Type == learn.Number) {
 					return p, r.Path + " does not hold the value the test's harness gave the application at " + from.Path + ", which it held when recorded"
 				}
-				name, ok := tracker.Name(test, incomingVarKey, from.Path, reserved)
+				name, ok := tracker.IncomingName(test, from.Path, reserved)
 				if !ok {
 					return p, "the test ended before " + r.Path + " was learned"
 				}
@@ -2321,11 +2321,6 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 	}
 	return p, ""
 }
-
-// incomingVarKey is the place a variable read in a client test's incoming
-// requests is named under (learn.Tracker.Name): one part of them is one
-// variable in the test, whichever of its requests first held it.
-const incomingVarKey = "the test's incoming requests"
 
 // givenBindings are the values the running test case's request gave
 // (variables.Binding.Given), as keploy test bound them for the test: none
