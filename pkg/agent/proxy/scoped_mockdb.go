@@ -494,6 +494,17 @@ func (s *scopedMockDb) AnsweredBackground() []*models.Mock {
 
 var _ integrations.AnsweredBackgroundReader = (*scopedMockDb)(nil)
 
+// OwnSeriesMarked forwards the store's own series marks (integrations.
+// OwnSeriesMarkReader), false when it reads none.
+func (s *scopedMockDb) OwnSeriesMarked(name string) bool {
+	if r, ok := s.MockMemDb.(integrations.OwnSeriesMarkReader); ok {
+		return r.OwnSeriesMarked(name)
+	}
+	return false
+}
+
+var _ integrations.OwnSeriesMarkReader = (*scopedMockDb)(nil)
+
 // MarkedSeries forwards the store's marked series (integrations.
 // MarkedSeriesReader), none when it reads none, so a parser on a view made
 // before exact serving began still answers a timer's call judging marked.

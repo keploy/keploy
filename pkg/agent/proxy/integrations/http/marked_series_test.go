@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"slices"
 	"strconv"
 	"testing"
 	"time"
@@ -345,17 +346,17 @@ func TestASeriesAnswererIsHandedTheStoreHeldToTheCall(t *testing.T) {
 	}
 }
 
-// ownAgainDb is againDb whose marked recordings that answered are one
-// series, owner's own ("" for a series marked set-wide), as the store hands
-// it (integrations.MarkedSeriesReader). It holds each call to its round as
-// itself, so the background step and the series step read it.
+// ownAgainDb is againDb whose marked recordings that answered are marked as
+// owner's own series ("" for a series marked set-wide), as the store reads
+// its marks (integrations.OwnSeriesMarkReader). It holds each call to its
+// round as itself, so the background step and the series step read it.
 type ownAgainDb struct {
 	againDb
 	owner string
 }
 
-func (d ownAgainDb) MarkedSeries(context.Context, models.Kind, learn.Known) ([]integrations.MarkedSeries, error) {
-	return []integrations.MarkedSeries{{Recordings: d.marked, Again: true, Owner: d.owner}}, nil
+func (d ownAgainDb) OwnSeriesMarked(name string) bool {
+	return d.owner != "" && slices.ContainsFunc(d.marked, func(m *models.Mock) bool { return m.Name == name })
 }
 
 func (d ownAgainDb) HoldToRound(integrations.CallRound) (integrations.MockMemDb, func() bool) {

@@ -386,18 +386,13 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					}
 					ok, stub, diag, err = h.matchOf(reqCtx, input, db, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, detect, opts.NoiseStrict(), !opts.DisableStatefulMocks, correlate) // calling match function to match mocks
 				}
-				// What the series step reads a call with (keploy.yml's
-				// noise, as the learn step reads it), read once for it and
-				// for the background step before it.
-				var seriesKnown httpKnown
 				if !ok && err == nil && proven {
-					seriesKnown = httpKnown{n: h.newLearnNoise(opts, bodyNoise, urlNoise)}
 					// The application's background work made again in the
 					// test's window, after its marked recording answered
 					// there: answered again with it, unchecked, not a miss.
 					// A test's own series' recording is left to the series
 					// step below, which checks the call's id.
-					if again := h.backgroundAgain(reqCtx, input, db, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseStrict(), seriesKnown); again != nil {
+					if again := h.backgroundAgain(reqCtx, input, db, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseStrict()); again != nil {
 						reportBackgroundAgain(reqCtx, input, again)
 						stub, ok = again, true
 					}
@@ -418,7 +413,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					// held to the call's first read (db): a call made in one
 					// staging is never answered from the series of a set the
 					// replay staged after it (MarkedSeries.Restaged).
-					served, owner, miss, serr := integrations.AnswerSeries(reqCtx, db, seriesCall(input), input.arrived, seriesKnown)
+					served, owner, miss, serr := integrations.AnswerSeries(reqCtx, db, seriesCall(input), input.arrived, httpKnown{n: h.newLearnNoise(opts, bodyNoise, urlNoise)})
 					switch {
 					case serr != nil:
 						err = serr
