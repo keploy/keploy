@@ -85,7 +85,7 @@ func TestHandleConnectionTellsTheBuildTheCaller(t *testing.T) {
 			}
 			_ = app.Close()
 			cancel()
-			awaitEvent(t, done, "handleConnection returning")
+			_ = awaitEvent(t, done, "handleConnection returning")
 		})
 	}
 }

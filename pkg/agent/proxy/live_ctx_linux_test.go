@@ -50,7 +50,7 @@ func TestTheLiveHandlersContextOutlivesItsConnectionWithItsValues(t *testing.T) 
 		if err != nil {
 			return
 		}
-		defer up.Close()
+		defer func() { _ = up.Close() }()
 		util.RelayRawPassthrough(conn, up)
 	}
 
@@ -67,7 +67,7 @@ func TestTheLiveHandlersContextOutlivesItsConnectionWithItsValues(t *testing.T) 
 		t.Fatalf("the live call was not relayed to the app: %q, %v", buf, err)
 	}
 	_ = app.Close()
-	awaitEvent(t, done, "handleConnection returning")
+	_ = awaitEvent(t, done, "handleConnection returning")
 	ctx := awaitEvent(t, handed, "the live handler being handed the call")
 
 	if err := ctx.Err(); err != nil {

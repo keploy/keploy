@@ -49,7 +49,7 @@ func liveCounter(p *Proxy) *atomic.Int64 {
 		if err != nil {
 			return
 		}
-		defer up.Close()
+		defer func() { _ = up.Close() }()
 		util.RelayRawPassthrough(conn, up)
 	}
 	return &n
