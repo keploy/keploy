@@ -74,3 +74,27 @@ func TestAnExtraCallSaysWhatTheRecordingItRepeatsWrites(t *testing.T) {
 		t.Fatalf("a repeated read is filed %+v", read)
 	}
 }
+
+// A test's own recordings are its answered mocks that no set-aside test's
+// or pool's copy is; the pool's batch is the one from
+// models.ServedFromBackground, and no other.
+func TestOwnRecordingsAndThePoolsBatch(t *testing.T) {
+	mk := func(name, from string) *models.Mock {
+		m := &models.Mock{Name: name}
+		m.TestModeInfo.SetAsideFrom = from
+		return m
+	}
+	own, aside, pool := mk("own", ""), mk("aside", "o::TestQ"), mk("pool", models.ServedFromBackground)
+	got := OwnRecordings([]*models.Mock{aside, own, nil, pool})
+	if len(got) != 1 || got[0] != own {
+		t.Fatalf("OwnRecordings = %v, want only the test's own", got)
+	}
+	if !FromPool([]*models.Mock{pool}) {
+		t.Fatal("the pool's batch was not told as the pool's")
+	}
+	for _, b := range [][]*models.Mock{nil, {aside}, {own}, {nil}} {
+		if FromPool(b) {
+			t.Fatalf("FromPool(%v) = true", b)
+		}
+	}
+}

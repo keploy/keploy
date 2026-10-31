@@ -443,7 +443,9 @@ type ExactConsumedReader interface {
 // recordings made while no test was open (keploy mock replay's pool slice;
 // SetAsideFrom models.ServedFromBackground) that no call consumed in the
 // staging: a start-up job's or a timer's call that lands in the open test's
-// window at replay, served the same way. None while no test is open.
+// window at replay, served the same way, except to a call one more than the
+// open test's own recordings of it (FromPool, OwnRecordings): that one stays
+// the test's extra call. None while no test is open.
 type SetAsideReader interface {
 	RangeSetAside(kind models.Kind, keys []string, visit func(batch []*models.Mock) bool)
 }

@@ -514,6 +514,45 @@ func TestWhatThePoolDoesNotServeInATest(t *testing.T) {
 	})
 }
 
+// The pool in a test never answers the test's own extra call: a call one
+// more than the test's own recordings of it misses as an extra call, though
+// the set holds an identical start-up or between-tests recording (a
+// duplicate write a regression makes would pass on it), and that recording
+// stays unspent for the calls between tests. A copy the test was served
+// aside is none of its own: a timer that ticks twice in a test that
+// recorded neither tick is served both of the set's recordings of it.
+func TestThePoolNeverAnswersATestsOwnExtraCall(t *testing.T) {
+	t.Run("one call more than the test's own recording misses", func(t *testing.T) {
+		a, p := exactAgent(t,
+			[]*models.Mock{pingMock("startup-obj", "/obj", "between", t0.Add(-time.Second)), pingMock("own-obj", "/obj", "own", t0.Add(time.Second))},
+			map[string][]string{"o::TestA": {"own-obj"}}, map[string][]string{"o": {"startup-obj"}})
+		got, e := runTest(t, a, p, "TestA", "/obj", "/obj")
+		require.Equal(t, "200 own", got[0])
+		require.True(t, strings.HasPrefix(got[1], "502"), "the pool answered the test's own extra call: %s", got[1])
+		require.Equal(t, models.ScopeActionFail, e.Action)
+		require.Contains(t, e.Reason, "was called 2 times, recorded 1")
+		ev := windowOf(t, a, "o::TestA").Evidence
+		require.Len(t, ev.Misses, 1)
+		require.Equal(t, models.MissExtraCall, ev.Misses[0].Kind)
+		require.Empty(t, ev.ServedAside)
+		code, body := p.call(t, "/obj")
+		require.Equal(t, 200, code, "the pool's recording was spent on a call it did not answer")
+		require.Equal(t, "between", body)
+	})
+	t.Run("two ticks the test never recorded are both served", func(t *testing.T) {
+		a, p := exactAgent(t,
+			[]*models.Mock{pingMock("tick-1", "/tick", "t1", t0.Add(-2*time.Second)), pingMock("tick-2", "/tick", "t2", t0.Add(-time.Second)), pingMock("mock-a", "/a", "a", t0.Add(time.Second))},
+			map[string][]string{"o::TestA": {"mock-a"}}, map[string][]string{"o": {"tick-1", "tick-2"}})
+		got, e := runTest(t, a, p, "TestA", "/a", "/tick", "/tick")
+		require.Equal(t, []string{"200 a", "200 t1", "200 t2"}, got, "a pool copy the test was served counted as its own recording")
+		require.Empty(t, e.Action, e.Reason)
+		require.Equal(t, []string{
+			models.ServedAsideLine("tick-1", models.ServedFromBackground),
+			models.ServedAsideLine("tick-2", models.ServedFromBackground),
+		}, windowOf(t, a, "o::TestA").Evidence.ServedAside)
+	})
+}
+
 // sqsEmpty is the answer enterprise SQS's parser writes for a ReceiveMessage
 // no recording answers (generateEmptySQSMock): the queue has nothing.
 const sqsEmpty = "{} (the parser's own empty answer)"
@@ -705,6 +744,7 @@ func TestASetAsideCopyAnswersACallBeyondTheTestsOwnCount(t *testing.T) {
 	}
 	for _, tc := range []struct {
 		name, asideKey string
+		pool           bool
 		calls, want    []string
 		served         []string
 		miss           string
@@ -723,6 +763,16 @@ func TestASetAsideCopyAnswersACallBeyondTheTestsOwnCount(t *testing.T) {
 			miss:   "was called 4 times, recorded 3",
 		},
 		{
+			// The set's start-up copy of the call never answers the test's
+			// own extra call: the handed copies answer first, then the
+			// call is an extra call.
+			name: "past every copy left the pool's copy answers no extra call", asideKey: "/pat/key", pool: true,
+			calls:  []string{"/k", "/pat/key", "/pat/key", "/pat/key", "/pat/key"},
+			want:   []string{"200 k", "200 own-key", "200 key", "200 key-again", "502"},
+			served: []string{"aside-key served from o::TestQ (set aside)", "aside-key-again served from o::TestQ (set aside)"},
+			miss:   "was called 4 times, recorded 3",
+		},
+		{
 			name: "a copy that is not exactly the call answers none", asideKey: "/pat/key?v=2",
 			calls: []string{"/k", "/pat/key", "/pat/key"},
 			want:  []string{"200 k", "200 own-key", "502"},
@@ -731,9 +781,14 @@ func TestASetAsideCopyAnswersACallBeyondTheTestsOwnCount(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			mocks := append(refresh(tc.asideKey), pingMock("own-key", "/pat/key", "own-key", t0.Add(5*time.Second)), pingMock("mock-k", "/k", "k", t0.Add(6*time.Second)))
+			pool := map[string][]string{}
+			if tc.pool {
+				mocks = append(mocks, pingMock("startup-key", "/pat/key", "startup-key", t0.Add(-time.Second)))
+				pool["o"] = []string{"startup-key"}
+			}
 			a, rp := exactAgent(t, mocks,
 				map[string][]string{"o::TestQ": {"aside-key", "aside-id", "aside-key-again", "aside-used"}, "o::TestK": {"own-key", "mock-k"}},
-				map[string][]string{})
+				pool)
 			ctx := context.Background()
 			require.NoError(t, a.SetScopeSkips(ctx, map[string]string{"o::TestQ": "flaky/request_changed"}, nil))
 			b, serr := a.ProvenBegin(ctx, begin("TestQ"))
@@ -792,12 +847,13 @@ func TestOverlappingRecordedWindowsNeverReServe(t *testing.T) {
 	}
 }
 
-// Past its own recordings a test is never served another's or its last
-// again (keploy #4745's F20 scenarios under ConsumeExact); the set's
-// recording of the call made between tests answers test2's third identical
-// call, once in the staging (the pool in a test); test3, which recorded no
-// such call, misses it, since that copy answered already; and the pool
-// answers it between tests, where it is reused.
+// Past its own recordings a test is never served another's, its last
+// again, or the pool's copy of the call (keploy #4745's F20 scenarios under
+// ConsumeExact): test2's third identical call is an extra call, though the
+// set holds a recording of the call made between tests. test3, which
+// recorded no such call, is served that copy (the pool in a test: a call no
+// recording of the test's own is); and the pool answers it between tests,
+// where it is reused.
 func TestPastItsRecordingsATestIsServedNothingElse(t *testing.T) {
 	a, p := exactAgent(t,
 		[]*models.Mock{
@@ -811,16 +867,16 @@ func TestPastItsRecordingsATestIsServedNothingElse(t *testing.T) {
 	got, e := runTest(t, a, p, "test2", "/obj", "/obj", "/obj")
 	require.Equal(t, "200 test2-a", got[0], "test1 never ran; its recording is not test2's")
 	require.Equal(t, "200 test2-b", got[1])
-	// Past its own, the set's recording of the call made between tests
-	// answers it once, unchecked and never required (the pool in a test).
-	require.Equal(t, "200 between", got[2], "past its recordings test2 was not served the pool's copy of the call")
-	require.Empty(t, e.Action, e.Reason)
-	require.Equal(t, []string{models.ServedAsideLine("between-tests", models.ServedFromBackground)}, evidenceOf(t, a, "o::test2").ServedAside)
+	require.True(t, strings.HasPrefix(got[2], "502"), "past its recordings test2 was served %s", got[2])
+	require.Equal(t, models.ScopeActionFail, e.Action)
+	require.Contains(t, e.Reason, "was called 3 times, recorded 2")
+	require.Equal(t, models.MissExtraCall, evidenceOf(t, a, "o::test2").Misses[0].Kind)
+	require.Empty(t, evidenceOf(t, a, "o::test2").ServedAside, "the pool answered the test's own extra call")
 
 	got, e = runTest(t, a, p, "test3", "/obj")
-	require.True(t, strings.HasPrefix(got[0], "502"), "test3 recorded no such call and was served %s", got[0])
-	require.Equal(t, models.ScopeActionFail, e.Action)
-	require.Equal(t, models.MissInTest, evidenceOf(t, a, "o::test3").Misses[0].Kind)
+	require.Equal(t, "200 between", got[0], "test3 recorded no such call and was not served the pool's copy of it")
+	require.Empty(t, e.Action, e.Reason)
+	require.Equal(t, []string{models.ServedAsideLine("between-tests", models.ServedFromBackground)}, evidenceOf(t, a, "o::test3").ServedAside)
 
 	code, body := p.call(t, "/obj")
 	require.Equal(t, 200, code, "the pool answers between tests")

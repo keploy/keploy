@@ -19,13 +19,17 @@ import (
 // evidence). nil when the store shows none, when no set-aside recording is
 // the request exactly, and when another call took the one it is first.
 //
-// A request one more than the open test recorded (extraCall) is served too
-// when such a copy is left: the copy is the set's own recording of the call,
-// and each set-aside recording answers once in the staging, so the calls of
-// that shape across the set never exceed what the set recorded. Past every
-// exact copy, the test's own and the set-aside ones, the request stays an
-// extra call (never another recording of the call, nor
-// one served again).
+// A request one more than the open test recorded (extraCall) is served a
+// set-aside test's copy too when one is left: the copy is the set's own
+// recording of the call, and each set-aside recording answers once in the
+// staging, so the calls of that shape across the set never exceed what the
+// set recorded. The pool's copies (integrations.FromPool, offered last) never
+// answer a request one more than the open test's own recordings of it
+// (repeatsOwn): a duplicate of a recorded call stays the test's extra call
+// (keploy #4745's F20), whatever start-up or between-tests copy the set
+// holds. Past every exact copy, the test's own and the set-aside ones, the
+// request stays an extra call (never another recording of the call, nor one
+// served again).
 //
 // The set-aside recordings are matched as the live pool's would be, on a view
 // that holds only them and that no match can consume, and on a copy of the
@@ -52,6 +56,10 @@ func (h *HTTP) setAsideAnswer(ctx context.Context, input *req, mockDb integratio
 		aside := FilterHTTPMocks(batch)
 		if len(aside) == 0 {
 			return true
+		}
+		if integrations.FromPool(aside) && h.repeatsOwn(ctx, input, mockDb, headerNoise, bodyNoise, urlNoise, autoURLDynamic, schemaNoiseStrict) {
+			// The pool (last) never answers the test's own extra call.
+			return false
 		}
 		// As the replay's matcher reads under the switch: no request noise
 		// is detected, and a learned correlation is followed.
