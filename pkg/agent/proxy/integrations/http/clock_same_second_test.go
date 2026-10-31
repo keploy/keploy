@@ -9,6 +9,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 // The shape of api-server's TestAppCRUD (run 5's mock-199): a start-up call
@@ -21,13 +22,19 @@ import (
 // the start-up call as recorded, or its view shows another second there, the
 // value moved and the start-up's did not move with it: the start-up is no
 // source, and lastUsedAt is learned as a read of the clock. Where the view
-// holds the second this call sent, or keploy has no view, a copy of the
-// start-up's instant and a read of the clock in that second are one value:
-// refused, naming the start-up. So too where the second stands in the
-// start-up's answer, which the application was given, F giving it as
-// recorded, whether or not its request sent it too: an instant an answer
-// gave is followed whole (a founder decision), and a start-up's is no source
-// a test's call may follow.
+// holds the second this call sent, the start-up and the call read the clock
+// in one second in both runs, which keploy cannot tell from a copy; the
+// call's own window holds the value in both runs, so it is learned as the
+// call's own read of the clock, checked in that window at every replay (the
+// rule for a start-up's same-second read). Refused, naming the start-up,
+// where that evidence is not whole: keploy has no view of what F's start-up
+// sent; the call's own window holds the value in the recording alone; F
+// served the start-up's recording in the test too; or the recording made it
+// after its test began. So too where the second stands in the start-up's
+// answer, which the application was given, F giving it as recorded, whether
+// or not its request sent it too: an instant an answer gave is followed whole
+// (a founder decision), and a start-up's is no source a test's call may
+// follow.
 func TestASameSecondClockReadOfAnEarlierCallIsNoSourceWhereThatCallMovedApart(t *testing.T) {
 	recBegin := learnAt.Add(800 * time.Millisecond)
 	base := learnAt.Add(10 * time.Minute) // F's begin, on the real clock
@@ -65,41 +72,77 @@ func TestASameSecondClockReadOfAnEarlierCallIsNoSourceWhereThatCallMovedApart(t 
 		// sending sent.
 		answer bool
 		sent   string
+		// put is the second F's PUT sends ("" for the one its own window
+		// holds); inTest serves the start-up's recording again in the test,
+		// with its view; recBegin moves the recorded test's begin (0: 800ms
+		// past learnAt, after the start-up's recording).
+		put      string
+		inTest   bool
+		recBegin time.Duration
+		// off: the proven switch is off. rec is the second the start-up
+		// and the PUT sent when recorded ("" for 1791972000).
+		off bool
+		rec string
 	}{
-		{"served with a view of another second", func(tr *learn.Tracker, m *models.Mock) { tr.ServedMockLive(m, "a", viewOf("1791972004")) }, true, false, ""},
-		{"served as recorded", func(tr *learn.Tracker, m *models.Mock) { tr.ServedMockAsRecorded(m) }, true, false, ""},
-		{"served with a view of the second this call sent", func(tr *learn.Tracker, m *models.Mock) { tr.ServedMockLive(m, "a", viewOf("1791972005")) }, false, false, ""},
-		{"served with no view", func(tr *learn.Tracker, m *models.Mock) { tr.ServedMock(m) }, false, false, ""},
-		{"the second in its answer, served as recorded", func(tr *learn.Tracker, m *models.Mock) { tr.ServedMockAsRecorded(m) }, false, true, "0"},
-		{"the second in its request and its answer, served as recorded", func(tr *learn.Tracker, m *models.Mock) { tr.ServedMockAsRecorded(m) }, false, true, "1791972000"},
+		{"served with a view of another second", func(tr *learn.Tracker, m *models.Mock) { tr.ServedMockLive(m, "a", viewOf("1791972004")) }, true, false, "", "", false, 0, false, ""},
+		{"served as recorded", func(tr *learn.Tracker, m *models.Mock) { tr.ServedMockAsRecorded(m) }, true, false, "", "", false, 0, false, ""},
+		{"served with a view of the second this call sent", func(tr *learn.Tracker, m *models.Mock) { tr.ServedMockLive(m, "a", viewOf("1791972005")) }, true, false, "", "", false, 0, false, ""},
+		{"served with no view", func(tr *learn.Tracker, m *models.Mock) { tr.ServedMock(m) }, false, false, "", "", false, 0, false, ""},
+		{"served with a view of the second this call sent, which its own window holds in the recording alone", func(tr *learn.Tracker, m *models.Mock) { tr.ServedMockLive(m, "a", viewOf("1791972004")) }, false, false, "", "1791972004", false, 0, false, ""},
+		{"served with a view of the second this call sent, and again in the test", func(tr *learn.Tracker, m *models.Mock) { tr.ServedMockLive(m, "a", viewOf("1791972005")) }, false, false, "", "", true, 0, false, ""},
+		{"served with a view of the second this call sent, the proven switch off", func(tr *learn.Tracker, m *models.Mock) { tr.ServedMockLive(m, "a", viewOf("1791972005")) }, false, false, "", "", false, 0, true, ""},
+		{"an expiry thirty days on, sent in the same second, with a view of the second this call sent", func(tr *learn.Tracker, m *models.Mock) { tr.ServedMockLive(m, "a", viewOf("1794564005")) }, false, false, "", "1794564005", false, 0, false, "1794564000"},
+		{"served with a view of the second this call sent, recorded after its test began", func(tr *learn.Tracker, m *models.Mock) { tr.ServedMockLive(m, "a", viewOf("1791972005")) }, false, false, "", "", false, 200 * time.Millisecond, false, ""},
+		{"the second in its answer, served as recorded", func(tr *learn.Tracker, m *models.Mock) { tr.ServedMockAsRecorded(m) }, false, true, "0", "", false, 0, false, ""},
+		{"the second in its request and its answer, served as recorded", func(tr *learn.Tracker, m *models.Mock) { tr.ServedMockAsRecorded(m) }, false, true, "1791972000", "", false, 0, false, ""},
+		{"the second in its request and its answer, with a view of the second this call sent", func(tr *learn.Tracker, m *models.Mock) { tr.ServedMockLive(m, "a", viewOf("1791972005")) }, false, true, "1791972000", "", false, 0, false, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			h, n, opts := learnOn(t)
+			if tc.off {
+				t.Setenv(provenswitch.Env, "0")
+			}
 			tr := learn.NewTracker()
 			tr.SetClientTests(true)
 			tr.SetAppClock(appClock)
-			startUp := startUpOf("1791972000")
+			recSec := tc.rec
+			if recSec == "" {
+				recSec = "1791972000"
+			}
+			startUp := startUpOf(recSec)
 			if tc.answer {
-				startUp = answeredOf(tc.sent, "1791972000")
+				startUp = answeredOf(tc.sent, recSec)
 			}
 			tr.ServedMockAt(startUp, base.Add(-time.Second))
 			tc.served(tr, startUp)
-			tr.RecordedBegin(recBegin)
+			if tc.recBegin != 0 {
+				tr.RecordedBegin(learnAt.Add(tc.recBegin))
+			} else {
+				tr.RecordedBegin(recBegin)
+			}
 			tr.BeginAt(base)
+			if tc.inTest {
+				tr.ServedMockAt(startUp, base.Add(time.Millisecond))
+				tc.served(tr, startUp)
+			}
 			ctx := learn.WithTracker(context.Background(), tr)
 			get := learnRecorded("mock-196", 817257*time.Microsecond, "GET", "/v1/secret/data/pat/e2e-go-key", "", nil,
 				`{"data":{"data":{"lastUsedAt":0,"name":"e2e-go"},"metadata":{"version":1}}}`)
 			get.Spec.ResTimestampMock = learnAt.Add(817624 * time.Microsecond)
 			put := learnRecorded("mock-199", 817800*time.Microsecond, "PUT", "/v1/secret/data/pat/e2e-go-key",
-				`{"data":{"lastUsedAt":1791972000,"name":"e2e-go"},"options":{"cas":1}}`, nil, `{"data":{"version":2}}`)
+				`{"data":{"lastUsedAt":`+recSec+`,"name":"e2e-go"},"options":{"cas":1}}`, nil, `{"data":{"version":2}}`)
 			db := &learnDb{perTest: []*models.Mock{get, put}, pool: map[time.Time]bool{startUp.Spec.ReqTimestampMock: true}, staged: []*models.Mock{startUp}}
 			in := live("GET", "/v1/secret/data/pat/e2e-go-key", "", nil)
 			in.arrived = base.Add(2 * time.Millisecond)
 			if got, miss, err := h.learnMatch(ctx, in, db, n, opts); err != nil || got == nil {
 				t.Fatalf("the GET: served %v miss %+v err %v", got != nil, miss, err)
 			}
-			in = live("PUT", "/v1/secret/data/pat/e2e-go-key", `{"data":{"lastUsedAt":1791972005,"name":"e2e-go"},"options":{"cas":1}}`, nil)
+			putSec := tc.put
+			if putSec == "" {
+				putSec = "1791972005"
+			}
+			in = live("PUT", "/v1/secret/data/pat/e2e-go-key", `{"data":{"lastUsedAt":`+putSec+`,"name":"e2e-go"},"options":{"cas":1}}`, nil)
 			in.arrived = base.Add(3 * time.Millisecond)
 			got, miss, err := h.learnMatch(ctx, in, db, n, opts)
 			if err != nil {

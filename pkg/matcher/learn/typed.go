@@ -529,7 +529,7 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 	// Built on a moved place by an offset (offset.go), before any provenance
 	// excuses it.
 	if m, ok := places().offsetFrom([]driftedInstant{{rec: rec, live: live}}); ok && skip&skipOffset == 0 {
-		ln.Kind, ln.Why = KindUnaccounted, offsetWhy(m)
+		ln.Kind, ln.Why, ln.byOffset = KindUnaccounted, offsetWhy(m), true
 		return ln
 	}
 	// A copy of what F gave the application in another test or in a

@@ -25,8 +25,8 @@ import (
 )
 
 // composeDocker is a docker daemon holding one app container: a kill with
-// SIGINT stops it when exitsOnInt, a SIGKILL always does; a start runs it;
-// events go out on the stream each Events call opens.
+// SIGINT stops it when exitsOnInt, a SIGKILL does unless holdsKill; a start
+// runs it; events go out on the stream each Events call opens.
 type composeDocker struct {
 	docker.Client
 	mu         sync.Mutex
@@ -53,6 +53,28 @@ type composeDocker struct {
 	// intDelay, set: a SIGINT stops the container this long after it,
 	// not at once (an app whose shutdown takes a while).
 	intDelay time.Duration
+	// onKill, set, is called with each signal a kill sends (the Linux
+	// tests send it on to the container's real process).
+	onKill func(signal string)
+	// holdsKill: a SIGKILL does not stop the container; the daemon records
+	// the stop only when the test says (stop), as a loaded one is late to.
+	holdsKill bool
+	// waitFails, set, is the next wait's end: it fails with the error the
+	// test sends on it, and never answers otherwise (a wait whose
+	// connection broke); waitErr, set, fails every wait at once (a daemon
+	// that refuses them); removed: the container is gone, and every wait
+	// answers that the daemon has no such container. waits counts the
+	// waits asked for.
+	waitFails chan error
+	waitErr   error
+	removed   bool
+	waits     int
+	// inspectFails, set, is asked at each inspect: an error it returns is
+	// the inspect's (a loaded daemon's read that gave up, or broke off).
+	inspectFails func(ctx context.Context) error
+	// startedAt is when the container's current run began (a start that
+	// started it), as its inspect gives it; zero: not said.
+	startedAt time.Time
 }
 
 func (d *composeDocker) ContainerList(_ context.Context, opts container.ListOptions) ([]container.Summary, error) {
@@ -102,6 +124,9 @@ func (d *composeDocker) ContainerKill(_ context.Context, _ string, signal string
 	if !d.running {
 		return errdefs.Conflict(errors.New("container is not running"))
 	}
+	if d.onKill != nil {
+		d.onKill(signal)
+	}
 	switch {
 	case signal == "SIGINT" && d.intDelay > 0:
 		go func() {
@@ -110,21 +135,50 @@ func (d *composeDocker) ContainerKill(_ context.Context, _ string, signal string
 			d.stop()
 			d.mu.Unlock()
 		}()
-	case signal == "SIGKILL" || (signal == "SIGINT" && d.exitsOnInt):
+	case (signal == "SIGKILL" && !d.holdsKill) || (signal == "SIGINT" && d.exitsOnInt):
 		d.stop()
 	}
 	return nil
 }
 
-func (d *composeDocker) ContainerWait(ctx context.Context, _ string, _ container.WaitCondition) (<-chan container.WaitResponse, <-chan error) {
+// ContainerWait answers as the daemon does for the condition: not-running at
+// once on a stopped container, next-exit only at the exit of a run to come
+// (none here: a stop holds keploy's stop lock, which its starts take).
+func (d *composeDocker) ContainerWait(ctx context.Context, _ string, cond container.WaitCondition) (<-chan container.WaitResponse, <-chan error) {
 	d.mu.Lock()
 	exited := d.exitedCh
 	running := d.running
+	fails := d.waitFails
+	d.waitFails = nil
+	refused, removed := d.waitErr, d.removed
+	d.waits++
 	d.mu.Unlock()
 	out, errs := make(chan container.WaitResponse, 1), make(chan error, 1)
-	if !running {
-		out <- container.WaitResponse{}
+	switch {
+	case removed:
+		errs <- errdefs.NotFound(errors.New("No such container: app-1"))
 		return out, errs
+	case refused != nil:
+		errs <- refused
+		return out, errs
+	}
+	if fails != nil {
+		go func() {
+			select {
+			case err := <-fails:
+				errs <- err
+			case <-ctx.Done():
+				errs <- ctx.Err()
+			}
+		}()
+		return out, errs
+	}
+	if !running {
+		if cond != container.WaitConditionNextExit {
+			out <- container.WaitResponse{}
+			return out, errs
+		}
+		exited = nil
 	}
 	go func() {
 		select {
@@ -144,17 +198,30 @@ func (d *composeDocker) ContainerStart(context.Context, string, container.StartO
 	if !d.running {
 		d.running = true
 		d.exitedCh = make(chan struct{})
+		d.startedAt = time.Now()
 	}
 	return nil
 }
 
-func (d *composeDocker) ContainerInspect(context.Context, string) (container.InspectResponse, error) {
+func (d *composeDocker) ContainerInspect(ctx context.Context, _ string) (container.InspectResponse, error) {
+	defer func() { d.inspected <- struct{}{} }()
+	d.mu.Lock()
+	fails := d.inspectFails
+	d.mu.Unlock()
+	if fails != nil {
+		if err := fails(ctx); err != nil {
+			return container.InspectResponse{}, err
+		}
+	}
 	d.mu.Lock()
 	running, project, pid, id, code := d.running, d.project, d.pid, d.id, d.exitCode
+	var startedAt string
+	if !d.startedAt.IsZero() {
+		startedAt = d.startedAt.UTC().Format(time.RFC3339Nano)
+	}
 	d.mu.Unlock()
-	defer func() { d.inspected <- struct{}{} }()
 	return container.InspectResponse{
-		ContainerJSONBase: &container.ContainerJSONBase{ID: id, State: &container.State{Running: running, Pid: pid, ExitCode: code}},
+		ContainerJSONBase: &container.ContainerJSONBase{ID: id, State: &container.State{Running: running, Pid: pid, ExitCode: code, StartedAt: startedAt}},
 		Config:            &container.Config{Labels: map[string]string{"com.docker.compose.project": project}},
 	}, nil
 }
@@ -328,6 +395,7 @@ func TestTheComposeAppsWatchEndsTheRunOnAnExitKeployDidNotAskFor(t *testing.T) {
 	}
 
 	d.mu.Lock()
+	d.exitCode = 3
 	d.stop()
 	d.mu.Unlock()
 	stream <- die("3")
@@ -339,6 +407,315 @@ func TestTheComposeAppsWatchEndsTheRunOnAnExitKeployDidNotAskFor(t *testing.T) {
 	if h := a.composeAppHalt(); h == nil || h.exitCode != 3 || ends.Load() != 1 {
 		t.Fatalf("halt %+v after %d ends; want exit code 3, once", h, ends.Load())
 	}
+}
+
+// The die of keploy's own stop can reach the watch after keploy has started
+// the container again, and after that new run has exited on its own: it was
+// taken for the new run's halt, with keploy's interrupt's exit code (130) for
+// an app that had crashed (3), and the new run's own die was never read. A
+// die sent before the container's current run began is an earlier run's: it
+// is dropped, and the current run's own die ends the run, with its exit code.
+// One the watch cannot place (the daemon gives it no time) still ends it
+// with the exit code of the run that is down now, as the daemon records it.
+func TestALateDieOfKeploysStopIsNotTheHaltOfTheRunAfterIt(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// placed: the late die has the time the daemon sent it.
+		placed bool
+	}{
+		{"a die sent before the run began is dropped", true},
+		{"a die the watch cannot place says the run's own exit code", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			d := newComposeDocker(true, true)
+			a := composeApp(d)
+			ended := make(chan struct{}, 2)
+			stop := a.watchComposeApp(ctx, func() { ended <- struct{}{} })
+			defer stop()
+			stream := <-d.streams
+			<-d.errStreams
+
+			// keploy's stop, which the daemon has recorded; its die has
+			// not reached the watch yet.
+			if _, err := a.StopComposeApp(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if anew, err := startAnew(a.StartComposeApp(ctx)); err != nil || !anew {
+				t.Fatalf("the next start: anew %v, err %v; want the app started anew", anew, err)
+			}
+			// The die was sent before the start began the new run.
+			d.mu.Lock()
+			late := die("130")
+			late.TimeNano = d.startedAt.Add(-time.Millisecond).UnixNano()
+			if !tc.placed {
+				late.TimeNano = 0
+			}
+			// The new run exits on its own, with 3.
+			d.exitCode = 3
+			d.stop()
+			d.mu.Unlock()
+			for len(d.inspected) > 0 {
+				<-d.inspected
+			}
+			stream <- late
+			<-d.inspected // the watch has read the late die
+			if tc.placed {
+				// The watch reads the new run's own die only once it has
+				// decided the late one: an end before that read is the
+				// late die's.
+				stream <- die("3")
+				select {
+				case <-d.inspected:
+				case <-ended:
+					t.Fatalf("the late die of keploy's own stop ended the run (halt %+v); want it dropped, as an earlier run's", a.composeAppHalt())
+				}
+			}
+			select {
+			case <-ended:
+			case <-time.After(time.Minute):
+				t.Fatal("the new run's own exit did not end the run")
+			}
+			if h := a.composeAppHalt(); h == nil || h.exitCode != 3 {
+				t.Fatalf("halt %+v; want the new run's own exit code, 3, not keploy's interrupt's (130)", h)
+			}
+		})
+	}
+}
+
+// A die is of an earlier run of its container only when the daemon sent it
+// before the container's current run began. One the daemon dates only to the
+// second is compared to the second: read as the start of that second, the
+// current run's own die, sent in the second the run began, was dropped. One
+// with no date, or of a run with none, is not placed.
+func TestADieIsOfAnEarlierRunOnlyWhenSentBeforeTheRunBegan(t *testing.T) {
+	began := time.Date(2026, 10, 31, 10, 0, 0, 300_000_000, time.UTC)
+	state := &container.State{StartedAt: began.Format(time.RFC3339Nano)}
+	for _, tc := range []struct {
+		name    string
+		m       events.Message
+		state   *container.State
+		earlier bool
+	}{
+		{"sent before the run began, to the nanosecond", events.Message{TimeNano: began.Add(-time.Millisecond).UnixNano()}, state, true},
+		{"sent after the run began, to the nanosecond", events.Message{TimeNano: began.Add(time.Millisecond).UnixNano()}, state, false},
+		{"sent in the second before the run's, to the second", events.Message{Time: began.Unix() - 1}, state, true},
+		{"sent in the run's own second, to the second", events.Message{Time: began.Unix()}, state, false},
+		{"not dated", events.Message{}, state, false},
+		{"of a run with no start said", events.Message{TimeNano: began.Add(-time.Millisecond).UnixNano()}, &container.State{}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := composeDieOfAnEarlierRun(tc.m, tc.state); got != tc.earlier {
+				t.Fatalf("an earlier run's: %v; want %v", got, tc.earlier)
+			}
+		})
+	}
+}
+
+// The watch's read of the container a die names had a wall-clock budget of
+// 2 s: a loaded daemon slower than that failed it, and the die it could not
+// place was taken for a halt when no stop of keploy's was in progress, as for
+// the late die of keploy's own stop, read after keploy had started the
+// container again: the run ended, and the next set was lost. A read the
+// daemon fails is asked again: the watch decides the die on the daemon's
+// answer. One the daemon never answers is given up once utils.StopStallBudget
+// of keploy's runnable time has passed (here shortened), and the die is
+// decided on the event: a real halt still ends the run.
+func TestTheComposeAppsWatchAsksAgainWhenTheDaemonFailsToDescribeADiesContainer(t *testing.T) {
+	t.Run("a slow read that fails", func(t *testing.T) {
+		stallBudget(t, time.Minute)
+		ctx := context.Background()
+		d := newComposeDocker(true, true)
+		a := composeApp(d)
+		ended := make(chan struct{}, 2)
+		stop := a.watchComposeApp(ctx, func() { ended <- struct{}{} })
+		defer stop()
+		stream := <-d.streams
+		<-d.errStreams
+		// keploy's stop, which the daemon has recorded, and its start of
+		// the next set's run; the stop's die reaches the watch after both.
+		if _, err := a.StopComposeApp(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if anew, err := startAnew(a.StartComposeApp(ctx)); err != nil || !anew {
+			t.Fatalf("the next start: anew %v, err %v; want the app started anew", anew, err)
+		}
+		for len(d.inspected) > 0 {
+			<-d.inspected
+		}
+		// The daemon is slow to answer the watch's first read, which then
+		// fails, as a read that gave up does; it fails the next four too,
+		// and answers the sixth.
+		const failed = 5
+		var reads atomic.Int32
+		d.mu.Lock()
+		d.inspectFails = func(ctx context.Context) error {
+			read := reads.Add(1)
+			if read > failed {
+				return nil
+			}
+			if read == 1 {
+				select {
+				case <-time.After(300 * time.Millisecond):
+				case <-ctx.Done():
+				}
+			}
+			return context.DeadlineExceeded
+		}
+		d.mu.Unlock()
+		stream <- die("0")
+		// The reads that fail, then the one the daemon answers.
+		for i := 0; i <= failed; i++ {
+			select {
+			case <-d.inspected:
+			case <-ended:
+				t.Fatalf("the die of keploy's own stop ended the run (halt %+v) after the daemon had failed %d read(s) of its container; want the daemon asked again until it answers", a.composeAppHalt(), reads.Load())
+			}
+		}
+		// Deciding the late die, the watch reads the next one: the run's
+		// own exit, which ends the run with its code.
+		d.mu.Lock()
+		d.exitCode = 3
+		d.stop()
+		d.mu.Unlock()
+		stream <- die("3")
+		select {
+		case <-ended:
+		case <-time.After(time.Minute):
+			t.Fatal("the run's own exit did not end the run")
+		}
+		if h := a.composeAppHalt(); h == nil || h.exitCode != 3 {
+			t.Fatalf("halt %+v; want the run's own exit code, 3", h)
+		}
+	})
+	t.Run("a daemon that fails every read", func(t *testing.T) {
+		// Asked again at a walking pace (composeDaemonAskPace), not in a
+		// spin, until the stall bound; the die is then decided on the
+		// event.
+		stallBudget(t, time.Second)
+		d := newComposeDocker(false, true)
+		var reads atomic.Int32
+		d.inspectFails = func(context.Context) error {
+			reads.Add(1)
+			return errors.New("Error response from daemon: the daemon is shutting down")
+		}
+		a := composeApp(d)
+		ended := make(chan struct{}, 1)
+		stop := a.watchComposeApp(context.Background(), func() { ended <- struct{}{} })
+		defer stop()
+		stream := <-d.streams
+		<-d.errStreams
+		drained := make(chan struct{})
+		defer close(drained)
+		go func() {
+			for {
+				select {
+				case <-d.inspected:
+				case <-drained:
+					return
+				}
+			}
+		}()
+		began := time.Now()
+		stream <- die("3")
+		select {
+		case <-ended:
+		case <-time.After(time.Minute):
+			t.Fatal("an exit keploy did not ask for, whose container the daemon never described, did not end the run")
+		}
+		asked, took := int(reads.Load()), time.Since(began)
+		if most := int(took/composeDaemonAskPace) + 2; asked < 2 || asked > most {
+			t.Fatalf("the watch read the container %d times in %v; want it asked again, at most %d times (one each %v)", asked, took, most, composeDaemonAskPace)
+		}
+		if h := a.composeAppHalt(); h == nil || h.exitCode != 3 {
+			t.Fatalf("halt %+v; want the event's exit code, 3", h)
+		}
+	})
+	t.Run("a container the daemon no longer has", func(t *testing.T) {
+		// Removed: the daemon has no more to say of it, and the die is
+		// decided on the event at once, with that one read.
+		stallBudget(t, time.Minute)
+		d := newComposeDocker(false, true)
+		var reads atomic.Int32
+		d.inspectFails = func(context.Context) error {
+			reads.Add(1)
+			return errdefs.NotFound(errors.New("No such container: app-1"))
+		}
+		a := composeApp(d)
+		ended := make(chan struct{}, 1)
+		stop := a.watchComposeApp(context.Background(), func() { ended <- struct{}{} })
+		defer stop()
+		stream := <-d.streams
+		<-d.errStreams
+		stream <- die("3")
+		select {
+		case <-ended:
+		case <-time.After(30 * time.Second):
+			t.Fatalf("the die of a container the daemon no longer has was not decided at once (%d reads)", reads.Load())
+		}
+		if h := a.composeAppHalt(); h == nil || h.exitCode != 3 || reads.Load() != 1 {
+			t.Fatalf("halt %+v after %d read(s); want the event's exit code, 3, at the one read", h, reads.Load())
+		}
+	})
+	t.Run("a watch that ends while it waits for the read", func(t *testing.T) {
+		// It decides nothing: keploy's next stop of the container reads
+		// the die. Its end ends the read: the stall bound is an hour, so a
+		// read that went on past the watch's end would hold the watch's
+		// stop (and stopMu) until that bound.
+		stallBudget(t, time.Hour)
+		d := newComposeDocker(false, true)
+		reading := make(chan struct{}, 1)
+		d.inspectFails = func(ctx context.Context) error {
+			reading <- struct{}{}
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		a := composeApp(d)
+		ended := make(chan struct{}, 1)
+		stop := a.watchComposeApp(context.Background(), func() { ended <- struct{}{} })
+		stream := <-d.streams
+		<-d.errStreams
+		stream <- die("3")
+		<-reading
+		stopped := make(chan struct{})
+		go func() { stop(); close(stopped) }()
+		select {
+		case <-stopped:
+		case <-time.After(time.Minute):
+			t.Fatal("the watch's stop did not end its read of the die's container: the read waits for the stall bound")
+		}
+		select {
+		case <-ended:
+			t.Fatalf("a watch that had ended took the die it was reading for a halt (%+v)", a.composeAppHalt())
+		default:
+		}
+		if h := a.composeAppHalt(); h != nil {
+			t.Fatalf("a watch that had ended kept the halt %+v", h)
+		}
+	})
+	t.Run("a read the daemon never answers", func(t *testing.T) {
+		stallBudget(t, 300*time.Millisecond)
+		d := newComposeDocker(false, true)
+		d.inspectFails = func(ctx context.Context) error {
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		a := composeApp(d)
+		ended := make(chan struct{}, 1)
+		stop := a.watchComposeApp(context.Background(), func() { ended <- struct{}{} })
+		defer stop()
+		stream := <-d.streams
+		<-d.errStreams
+		stream <- die("3")
+		select {
+		case <-ended:
+		case <-time.After(time.Minute):
+			t.Fatal("an exit keploy did not ask for, whose container the daemon never described, did not end the run")
+		}
+		if h := a.composeAppHalt(); h == nil || h.exitCode != 3 {
+			t.Fatalf("halt %+v; want the event's exit code, 3", h)
+		}
+	})
 }
 
 // A halt ends the run as compose's abort did: APP_HALTED, with the app's exit
@@ -1142,19 +1519,127 @@ func (d *inspectFailsDocker) ContainerInspect(ctx context.Context, ref string) (
 	return d.daemonModel.ContainerInspect(ctx, ref)
 }
 
-// A start whose inspect of the app's container, before it, fails cannot tell
-// whether it starts one that was not running: it never says anew, though the
-// start itself works, as the container runs on (a stop that did not end it).
-// Said anew, the replay would count the app's losses from the start of an
-// app that ran before it.
+// A start whose inspect of the app's container, before it, the daemon never
+// answers cannot tell whether it starts one that was not running: it never
+// says anew, though the start itself works, as the container runs on (a stop
+// that did not end it). Said anew, the replay would count the app's losses
+// from the start of an app that ran before it. Nor does it say the container
+// was found running: the daemon never said so, and the replay's reason for
+// the losses it charges the set would name a running container no one saw.
 func TestAStartWhoseInspectFailsIsNoStartAnew(t *testing.T) {
 	stallBudget(t, 2*time.Second)
 	d, app := appStack()
 	a := stackApp(d, "app")
 	a.docker = &inspectFailsDocker{daemonModel: d, failID: app.id}
-	if anew, err := a.StartComposeApp(context.Background()); err == nil && anew {
-		t.Fatal("the inspect could not tell, the container runs on, and the start says anew")
+	start, err := a.StartComposeApp(context.Background())
+	if err != nil || start != models.ComposeAppUnread {
+		t.Fatalf("the daemon never described the container, and the start said %d (err %v); want unread (%d): neither anew nor found running", start, err, models.ComposeAppUnread)
 	}
+}
+
+// startAnew is whether a start of keploy's said the app it started is a new
+// one, with the start's error.
+func startAnew(start models.ComposeAppStart, err error) (bool, error) {
+	return start.Anew(), err
+}
+
+// A start reads the stop's record as the daemon has it, however slow the
+// daemon is to give it: a stopped container the daemon takes longer than a
+// few seconds to describe (a loaded host) is started anew. With a 2 s
+// wall-clock budget on that read, the start was told not anew, and the
+// replay charged the set the earlier sets' capture losses, as of an app
+// keploy's stop had not ended.
+func TestAStartReadsTheStopsRecordHoweverSlowTheDaemonIs(t *testing.T) {
+	stallBudget(t, time.Hour)
+	start := func(t *testing.T, inspect func(ctx context.Context, read int32) error) {
+		t.Helper()
+		d := newComposeDocker(false, true)
+		a := composeApp(d)
+		var reads atomic.Int32
+		d.inspectFails = func(ctx context.Context) error { return inspect(ctx, reads.Add(1)) }
+		type result struct {
+			anew bool
+			err  error
+		}
+		done := make(chan result, 1)
+		go func() {
+			anew, err := startAnew(a.StartComposeApp(context.Background()))
+			done <- result{anew, err}
+		}()
+		var r result
+		select {
+		case r = <-done:
+		case <-time.After(time.Minute):
+			t.Fatalf("the start did not end after %d read(s) of the container", reads.Load())
+		}
+		running, _, starts := d.state()
+		if r.err != nil || !r.anew || !running || starts != 1 {
+			t.Fatalf("anew %v (err %v), running %v after %d start(s), %d read(s); want anew, running after 1 start", r.anew, r.err, running, starts, reads.Load())
+		}
+	}
+	t.Run("a daemon that takes 2.5 s to describe the container", func(t *testing.T) {
+		start(t, func(ctx context.Context, _ int32) error {
+			select {
+			case <-time.After(2500 * time.Millisecond):
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		})
+	})
+	t.Run("reads the daemon fails are asked again", func(t *testing.T) {
+		// Five in a row: a read given up after one or two failed asks
+		// passes a row that fails only the first.
+		var asked atomic.Int32
+		start(t, func(_ context.Context, read int32) error {
+			asked.Store(read)
+			if read <= 5 {
+				return errors.New("the daemon's connection broke")
+			}
+			return nil
+		})
+		if n := asked.Load(); n != 6 {
+			t.Fatalf("the start read the container %d times; want the five failed reads asked again, and the sixth answered", n)
+		}
+	})
+	t.Run("a start whose ctx ends while the daemon holds its read", func(t *testing.T) {
+		// It returns at its ctx's end, and not anew: the read never said
+		// the container had stopped. The stall bound is an hour, so a read
+		// that went on past the ctx would hold the start, and stopMu (the
+		// teardown's stop), until that bound.
+		d := newComposeDocker(false, true)
+		a := composeApp(d)
+		reading := make(chan struct{}, 1)
+		d.inspectFails = func(ctx context.Context) error {
+			select {
+			case reading <- struct{}{}:
+			default:
+			}
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		type result struct {
+			anew bool
+			err  error
+		}
+		done := make(chan result, 1)
+		go func() {
+			anew, err := startAnew(a.StartComposeApp(ctx))
+			done <- result{anew, err}
+		}()
+		<-reading
+		cancel()
+		select {
+		case r := <-done:
+			if r.anew {
+				t.Fatalf("a start whose read ended at its ctx's end said anew (err %v); want not anew", r.err)
+			}
+		case <-time.After(30 * time.Second):
+			t.Fatal("a start whose ctx had ended did not return: its read of the container waits on for the stall bound")
+		}
+	})
 }
 
 // appStack is a daemon holding compose project "proj": keploy's agent
@@ -1516,22 +2001,23 @@ func TestAComposeAppTheDaemonIsRestartingIsAHalt(t *testing.T) {
 // keploy's start of the app's container says whether it started one that was
 // not running: after a stop that ended it, yes; on a container that runs on
 // (a stop that did not end it, a start told failed that the daemon carried
-// out), no, the start being the daemon's no-op; and no with an error.
+// out), no, found running, the start being the daemon's no-op; and no with an
+// error.
 func TestAComposeStartSaysWhetherItStartedTheAppAnew(t *testing.T) {
 	stallBudget(t, 2*time.Second)
 	d, app := appStack()
 	a := stackApp(d, "app")
-	if anew, err := a.StartComposeApp(context.Background()); err != nil || anew {
-		t.Fatalf("a start of the running app: anew %v (%v), want false: it runs on", anew, err)
+	if start, err := a.StartComposeApp(context.Background()); err != nil || start != models.ComposeAppFoundRunning {
+		t.Fatalf("a start of the running app: %d (%v), want found running (%d): it runs on", start, err, models.ComposeAppFoundRunning)
 	}
 	if _, err := a.StopComposeApp(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if anew, err := a.StartComposeApp(context.Background()); err != nil || !anew {
+	if anew, err := startAnew(a.StartComposeApp(context.Background())); err != nil || !anew {
 		t.Fatalf("a start after a stop that ended it: anew %v (%v), want true", anew, err)
 	}
-	if anew, err := a.StartComposeApp(context.Background()); err != nil || anew {
-		t.Fatalf("a second start: anew %v (%v), want false: the first one's app runs on", anew, err)
+	if start, err := a.StartComposeApp(context.Background()); err != nil || start != models.ComposeAppFoundRunning {
+		t.Fatalf("a second start: %d (%v), want found running (%d): the first one's app runs on", start, err, models.ComposeAppFoundRunning)
 	}
 	d.mu.Lock()
 	kept := d.cs[:0]
@@ -1542,7 +2028,175 @@ func TestAComposeStartSaysWhetherItStartedTheAppAnew(t *testing.T) {
 	}
 	d.cs = kept
 	d.mu.Unlock()
-	if anew, err := a.StartComposeApp(context.Background()); err == nil || anew {
+	if anew, err := startAnew(a.StartComposeApp(context.Background())); err == nil || anew {
 		t.Fatalf("a start that failed: anew %v (%v), want false with an error", anew, err)
 	}
+}
+
+// A loaded daemon fails the reads of the run's end before it answers them:
+// the app that exited on its own (code 3) is still the run's halt, and the
+// halt stops the project as compose's abort did, keploy's agent with it. The
+// reads had 2 s budgets, and a failed one was taken for an answer: the app
+// for one that had not exited (the run ended as on a clean stop, its down
+// taking the agent down mid-drain, the halt's exit code lost), the project
+// for one keploy could not list (taken down whole instead).
+func TestTheRunsEndReadsTheDaemonsAnswerHoweverSlowItIs(t *testing.T) {
+	t.Run("the app's exit", func(t *testing.T) {
+		inner := &inspectRecorder{inspects: map[string]container.InspectResponse{"app": {ContainerJSONBase: &container.ContainerJSONBase{State: &container.State{Status: "exited", ExitCode: 3}}}}}
+		d := &slowDaemon{Client: inner, failInspects: 5}
+		a := &App{logger: zap.NewNop(), container: "app", docker: d}
+		ended := 0
+		if got := a.composeAwaitTeardown(context.Background(), nil, func() { ended++ }); got != composeHaltCame || ended != 1 {
+			t.Fatalf("composeAwaitTeardown = %d, ending the run %d times; want the halt (%d), once", got, ended, composeHaltCame)
+		}
+		if h := a.composeAppHalt(); h == nil || h.exitCode != 3 {
+			t.Fatalf("the halt kept is %+v; want the app's exit, code 3", h)
+		}
+	})
+	t.Run("the project's containers", func(t *testing.T) {
+		inner := newComposeDocker(false, true)
+		inner.project, inner.others = "proj", []string{"keploy-agent", "dep"}
+		d := &slowDaemon{Client: inner, failInspects: 5, failLists: 5}
+		a := composeApp(inner)
+		a.docker = d
+		if !a.stopComposeProject(context.Background()) {
+			t.Fatal("the project was taken down whole, not stopped")
+		}
+		if len(inner.stopped) != 2 {
+			t.Fatalf("stopped %v; want the agent and the dependency", inner.stopped)
+		}
+	})
+}
+
+// The reads that find the app's container compose made for its service, the
+// project's name on keploy's agent and the list of the service's containers,
+// are asked again when the daemon fails them, at each place keploy decides on
+// them. One failed read was taken for no project, or no container: the up's
+// end took the app that exited with 3 for one that had not (the run ended as
+// on a clean stop, the halt's exit code lost); a halt took the project down
+// whole, keploy's agent with it, mid-drain; and the next set's start failed,
+// which replay marks AppHalted, the whole set lost. Each subtest fails that
+// many reads of each kind (the project's name, the service's list, and the
+// reads after them); failed 0 is the control.
+func TestTheAppsServiceIsReadOnTheDaemonsAnswerThoughItFailsReads(t *testing.T) {
+	stallBudget(t, 10*time.Second)
+	stack := func(failLists, failInspects int) (*App, *modelContainer, *daemonModel) {
+		d, app := appStack()
+		a := stackApp(d, "app")
+		a.docker = &slowDaemon{Client: d, failLists: failLists, failInspects: failInspects}
+		return a, app, d
+	}
+	for _, failed := range []int{0, 1, 5} {
+		t.Run(fmt.Sprintf("the up's end, %d failed reads of each", failed), func(t *testing.T) {
+			a, app, d := stack(failed, failed)
+			d.mu.Lock()
+			app.running, app.exitCode = false, 3
+			d.mu.Unlock()
+			if h, exited := a.composeAppExited(context.Background()); !exited || h.exitCode != 3 {
+				t.Fatalf("composeAppExited = %+v, %v; want the app's exit, code 3", h, exited)
+			}
+		})
+		t.Run(fmt.Sprintf("a halt's stop, %d failed reads of each", failed), func(t *testing.T) {
+			a, _, _ := stack(failed, failed)
+			if !a.stopComposeProject(context.Background()) {
+				t.Fatal("the project was taken down whole, keploy's agent with it; want it stopped")
+			}
+		})
+		t.Run(fmt.Sprintf("the next set's start, %d failed reads of each", failed), func(t *testing.T) {
+			a, app, d := stack(failed, failed)
+			d.mu.Lock()
+			app.running = false
+			d.mu.Unlock()
+			if start, err := a.StartComposeApp(context.Background()); err != nil || start != models.ComposeAppStartedAnew {
+				t.Fatalf("StartComposeApp = %d, %v; want started anew (an error is replay's AppHalted: the set lost)", start, err)
+			}
+		})
+	}
+}
+
+// The reads that find the app's container, the project's name on keploy's
+// agent and the list of the service's containers, end at their caller's end
+// while the daemon fails every one: a watch that is stopped, a set-end stop
+// or a start whose ctx is cancelled returns then, not once keploy's stall
+// bound (here an hour) of runnable time passes. A read under a ctx of its own
+// held the watch's stop, the set-end stop (stopMu with it) and the start on a
+// failing daemon after their caller had gone.
+func TestTheAppsServiceReadsEndAtTheirCallersEndWhileTheDaemonFailsThem(t *testing.T) {
+	const always = 1 << 30
+	failing := func(t *testing.T, failInspects int) (*App, *daemonModel, *modelContainer, *slowDaemon) {
+		stallBudget(t, time.Hour)
+		d, app := appStack()
+		a := stackApp(d, "app")
+		sd := &slowDaemon{Client: d, failInspects: failInspects, failLists: always}
+		a.docker = sd
+		return a, d, app, sd
+	}
+	// failedA says the daemon has failed a read of the kind (an inspect,
+	// or a list) since it began failing them all.
+	failedA := func(sd *slowDaemon, inspect bool) func() bool {
+		return func() bool {
+			sd.mu.Lock()
+			defer sd.mu.Unlock()
+			if inspect {
+				return sd.failInspects < always
+			}
+			return sd.failLists < always
+		}
+	}
+	returned := func(t *testing.T, what string, done <-chan error) error {
+		t.Helper()
+		select {
+		case err := <-done:
+			return err
+		case <-time.After(time.Minute):
+			t.Fatalf("%s did not return at its end while the daemon failed every read: the read waits out the stall bound", what)
+			return nil
+		}
+	}
+	t.Run("a watch's stop, the agent's project unread", func(t *testing.T) {
+		a, d, app, sd := failing(t, always)
+		ended := make(chan struct{}, 1)
+		stop := a.watchComposeApp(context.Background(), func() { ended <- struct{}{} })
+		eventually(t, "the watch asked the daemon for events", func() bool {
+			d.mu.Lock()
+			defer d.mu.Unlock()
+			return len(d.subs) > 0
+		})
+		d.mu.Lock()
+		d.emit(app, events.ActionDie, map[string]string{"exitCode": "0"})
+		d.mu.Unlock()
+		eventually(t, "the watch read the agent's project for the die", failedA(sd, true))
+		done := make(chan error, 1)
+		go func() { stop(); done <- nil }()
+		_ = returned(t, "the watch's stop", done) // a watch's stop returns nothing to check
+		select {
+		case <-ended:
+			t.Fatal("a watch that was stopped took the die for a halt")
+		default:
+		}
+	})
+	t.Run("a set-end stop at its ctx, the agent's project unread", func(t *testing.T) {
+		a, _, _, sd := failing(t, always)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		done := make(chan error, 1)
+		go func() { _, err := a.StopComposeApp(ctx); done <- err }()
+		eventually(t, "the stop read the agent's project", failedA(sd, true))
+		cancel()
+		if err := returned(t, "StopComposeApp", done); err == nil {
+			t.Fatal("a stop that could not read the app's project returned no error")
+		}
+	})
+	t.Run("a start at its ctx, the service's list failing", func(t *testing.T) {
+		a, _, _, sd := failing(t, 0)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		done := make(chan error, 1)
+		go func() { _, err := a.StartComposeApp(ctx); done <- err }()
+		eventually(t, "the start listed the service's containers", failedA(sd, false))
+		cancel()
+		if err := returned(t, "StartComposeApp", done); err == nil {
+			t.Fatal("a start that could not list the app's service returned no error")
+		}
+	})
 }

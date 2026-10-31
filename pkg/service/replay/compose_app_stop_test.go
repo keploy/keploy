@@ -26,6 +26,9 @@ type composeInstr struct {
 	// stopped: the last stop ended the app's container, so a start starts
 	// it anew; a stop that failed leaves it running.
 	stopped bool
+	// unread: the daemon gives keploy's start no answer of the container,
+	// so the start cannot tell whether it starts it anew.
+	unread bool
 }
 
 func (c *composeInstr) StopComposeApp(context.Context) (string, error) {
@@ -36,15 +39,21 @@ func (c *composeInstr) StopComposeApp(context.Context) (string, error) {
 	return c.killed, c.stopErr
 }
 
-func (c *composeInstr) StartComposeApp(context.Context) (bool, error) {
+func (c *composeInstr) StartComposeApp(context.Context) (models.ComposeAppStart, error) {
 	c.starts++
 	c.order = append(c.order, "start")
 	if c.startErr != nil {
-		return false, c.startErr
+		return models.ComposeAppUnread, c.startErr
 	}
-	anew := c.stopped
+	start := models.ComposeAppFoundRunning
+	if c.stopped {
+		start = models.ComposeAppStartedAnew
+	}
+	if c.unread {
+		start = models.ComposeAppUnread
+	}
 	c.stopped = false
-	return anew, nil
+	return start, nil
 }
 
 // GetMockStats says the agent holds what keploy stored on it for the set, as

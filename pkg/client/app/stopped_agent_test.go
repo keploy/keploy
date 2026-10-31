@@ -77,7 +77,7 @@ func (d *stoppedAgentDocker) ContainerList(context.Context, container.ListOption
 func (d *stoppedAgentDocker) ContainerInspect(_ context.Context, name string) (container.InspectResponse, error) {
 	st, ok := d.states[name]
 	if !ok || (d.removed != nil && d.removed()) {
-		return container.InspectResponse{}, errors.New("no such container")
+		return container.InspectResponse{}, errdefs.NotFound(errors.New("no such container"))
 	}
 	return container.InspectResponse{ContainerJSONBase: &container.ContainerJSONBase{State: st}}, nil
 }

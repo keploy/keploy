@@ -235,6 +235,13 @@ type Raw struct {
 	// (appearedIn, follows.refute); one F gave the application anywhere else
 	// stays its source whatever F gave there.
 	olderTest bool
+	// beforeTest: F gave the application the mock only before the call's
+	// test began (ServedBeforeTheTest; Order.ServedView marks it by the
+	// serves' numbers): at the set's start-up, between tests, or in an older
+	// test, every serve in an order keploy can tell, none in the call's own
+	// test. Only the rule for a start-up's same-second read (classifyRead,
+	// ofSentBefore) reads it.
+	beforeTest bool
 	// call is the call the mock answers, as one recording of it stands in
 	// for another (callOf): only an answer to the same call is given in
 	// another's place (the offset rule, offsetFrom).
@@ -301,6 +308,13 @@ type Raw struct {
 	// unread, of a Raw that was not read, says why where the place it stands
 	// for says more than rawUnread can (Earlier.lateOf: payloadUnread).
 	unread string
+	// ordered: r holds no text, only where its recording stands in the
+	// orders the rules read (orderOf: the payload of an earlier test's call
+	// the run keeps, ranCalls): its mock, when its request and its answer
+	// were recorded, where its request was carried, and F's serves of it as
+	// numbered when the call's test ended (Order.orderOf). No rule reads a
+	// word of it.
+	ordered bool
 	// rText is Text; rClock is AnswerClock.
 	rText string
 	// id is the recording's identity (MockID) where text is all of its
@@ -462,6 +476,20 @@ func (r Raw) ServedInAnOlderTest() Raw {
 // InAnOlderTest reports whether F served r only in an older test of the set
 // than the call's (ServedInAnOlderTest).
 func (r Raw) InAnOlderTest() bool { return r.served && r.olderTest }
+
+// ServedBeforeTheTest is r, marked as a recording F gave the application only
+// before the call's test began: at the set's start-up, between tests or in an
+// older test, never in the call's own test. Order.ServedView says it where
+// F's serves of the mock show it, each in an order keploy can tell; an
+// adapter need not. Of a Raw F did not serve it says nothing.
+func (r Raw) ServedBeforeTheTest() Raw {
+	r.beforeTest = true
+	return r
+}
+
+// BeforeTheTest reports whether F served r only before the call's test began
+// (ServedBeforeTheTest).
+func (r Raw) BeforeTheTest() bool { return r.served && r.beforeTest }
 
 // viewUnstated reports whether F served r and no adapter said what F gave
 // the application there: not as recorded (ServedAsRecorded), with no view
@@ -776,6 +804,19 @@ type Place struct {
 	// a value holding an escape (appearedIn's decoded site), which the copy
 	// rule never reads as a clock read.
 	givenWhole bool
+	// sentBefore, of a place found in a raw mock's payload, is when that
+	// mock was recorded, where the place may be a read of the clock the
+	// application made before the call's test began, in the same second in
+	// both runs: the value stands whole, as one instant, only in what the
+	// application sent there (sentOnly); F gave the application the mock
+	// only before the call's test began (Raw.BeforeTheTest), and F's stated
+	// view of it (Raw.ServedLive) holds the value F saw. The zero time
+	// otherwise. Only the rule for a start-up's same-second read
+	// (classifyRead, ofSentBefore) reads it, which takes it only where the
+	// recording made the mock before its test began too. A field a swap of
+	// start-ups can change is refused before that rule reads anything
+	// (startUpWhy).
+	sentBefore time.Time
 	// sent: the place stands in what the application sent, never in what it
 	// was given: a leaf of an earlier exchange's request (not the test
 	// case's own: Given), or a field of a raw mock's request, every field of
@@ -870,6 +911,11 @@ type Learned struct {
 	// refusal of a caller whose replay checks no read), so a caller that
 	// learns the read names them from here where it says what it learned.
 	Refuted string
+	// byOffset: the offset rule refused it (offsetWhy: built by an offset on
+	// what the application was given, before any lead or window excused
+	// it), which the rule's rescue in keploy mock's client tests reads
+	// again without it (classifyRead).
+	byOffset bool
 	// Bindable, of a KindUnaccounted leaf of keploy mock's client test
 	// (DriftCache.ClientTests), says the value is one its test gave the
 	// application, first sent at this call: keploy found no source of it
@@ -1526,7 +1572,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// echo is answered, never asserted against a source.
 		if ln.Kind == KindNoise || ln.Kind == KindEcho {
 			v := dc.ofIn(r.Value, l.Value, w, at)
-			why, sourced := "", false
+			why, sourced, offWhy := "", false, ""
 			if unreadReq != "" {
 				why = unreadReq
 			} else if where, asRecorded := dc.requestHolds(lostMoments(v), v.liveMoments, served); where != "" {
@@ -1535,6 +1581,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 				// An instant of it built on a moved place by an offset, before
 				// any lead or window excuses its words (offset.go).
 				why = offsetWhy(m)
+				offWhy = why
 			} else if why = unaccounted(dc, v, at, served, raw, fol); why != "" {
 				sourced = true
 				if fol != nil && fol.refused != "" {
@@ -1612,6 +1659,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 			if why != "" {
 				ln.Kind, ln.Why, ln.Echo = KindUnaccounted, why, nil
 				ln.Bindable = bindable
+				ln.byOffset = why == offWhy
 			}
 		}
 		// Noise only where no word of what changed comes back in the
@@ -1837,6 +1885,42 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		}
 		return ln
 	}
+	// ofSentBefore is ln, the reading of (r, l) in w, under the rule for a
+	// start-up's same-second read: a value whose source is a place found in
+	// a raw mock's payload that the application sent before the call's test
+	// began in both runs (Place.sentBefore: one instant whole, only in what
+	// the application sent there; F gave it the mock only before the test
+	// began, its stated view holding the value F saw; the recording made the
+	// mock before its test's recorded begin, w.Rec.Began, so only keploy
+	// mock's client tests, whose windows know each run's test begin) is
+	// read as a value no earlier place is the source of and no moved place
+	// builds by an offset, and learned as the plain read of the clock that
+	// reading gives, checked in its call's window at every replay. That
+	// reading learns a read only where the call's own window holds it in
+	// both runs (clientTestUnread, windowHolds); a read plus an offset, or
+	// anything else it learns, is not taken. Two calls that read one clock in
+	// one second in both runs are a coincidence keploy cannot tell from a
+	// copy; a replay passes the later one's value only as a read made in its
+	// own call's window, whichever second the start-up read. api-server's
+	// TestAppCRUD: the pool's start-up sweep sent "expires_at <= now" in the
+	// second the test's PAT PUT stamped lastUsedAt, in record and in its
+	// full round.
+	// Never for a place of the test's own calls (the copy rules read those),
+	// an instant an answer gave (followed whole, a founder decision), a
+	// place F served with no view stated or with several (one view must show
+	// the same second), a window of one run alone, or keploy test's calls,
+	// which know no test begin. Without the proven switch it is not applied,
+	// as ofRun is not.
+	ofSentBefore := func(ln Learned, r, l Leaf, w *Window) Learned {
+		from := ln.From
+		if ln.Kind != KindVariable || from.sentBefore.IsZero() || w == nil || !from.sentBefore.Before(w.Rec.Began) || !provenswitch.On() {
+			return ln
+		}
+		if own := leaf(r, l, w, skipBoth); own.Kind == KindClockRead {
+			return own
+		}
+		return ln
+	}
 	// read is leaf under the run's rule (ofRun), the reading every word of a
 	// text read alone in the call's window takes (wordRead), as the whole
 	// value takes it below: a word an earlier test's call sent is the later
@@ -1931,8 +2015,9 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 				}
 			}
 		}
-		// The run's variable, under the run's rule (ofRun).
-		ln = ofRun(ln, r, l, w)
+		// The run's variable, under the run's rule (ofRun); a start-up's
+		// same-second read, under its rule (ofSentBefore).
+		ln = ofSentBefore(ofRun(ln, r, l, w), r, l, w)
 		// A value built by an offset on what the application was given that
 		// is a read in its own call's window too: under the rule a copy
 		// follows its source (follow), in keploy mock's client tests (the
@@ -1949,12 +2034,31 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// that read holds under both: a replay passes the value only inside
 		// its test's span on the application's clock, whichever it was built
 		// on. Refused, the test would be set aside for a place a replay can
-		// check. A value its own window does not hold stays refused (the
-		// offset alone explains it), and so does anything else the value
-		// reads as without the rule (noise, another refusal).
+		// check. Where the rule refused it (Learned.byOffset), the windows
+		// the copy rule reads hold it too (Window.oneRunSinceBegin: one
+		// run's own window, the other run's since its test began): a full
+		// round slower than the recording opens the call's window after a
+		// read the application made at the start of its handler, so the
+		// learning does not hang on how fast the full round ran (api-
+		// server's app.createdAt, read half a second and a second boundary
+		// before its audit in record's full round). Those windows take a
+		// plain read alone, as the window from each run's test begin does:
+		// a read plus an offset there spans half a second and a second
+		// boundary of offsets, which no replay could check tightly. A value
+		// neither run's own window holds stays refused (the offset alone
+		// explains it), and so does anything else the value reads as
+		// without the rule (noise, another refusal, the clock plus an
+		// offset in one run's own window alone).
 		if wb := w.sinceBegin(); follow && ln.Kind == KindUnaccounted && wb != nil {
 			if own, ok := sinceTestBegin(leaf(r, l, w, skipOffset)); ok {
 				ln = own
+			} else if ln.byOffset {
+				for _, ow := range w.oneRunSinceBegin() {
+					if own, ok := sinceTestBegin(leaf(r, l, ow, skipOffset)); ok && own.Kind == KindClockRead {
+						ln = own
+						break
+					}
+				}
 			}
 		}
 		// A variable whose value is a plain read of the clock in its own
@@ -3291,6 +3395,9 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 					field, _ = dc.fieldOf(x, texts, held)
 				}
 				p := Place{Mock: x.mock, Field: field, Held: held, AtCall: atCall, noTime: x.noTime, unserved: !x.served, startUp: swap, givenWhole: given, sent: sentOnly(x, texts, held)}
+				if whole && !x.noTime && x.BeforeTheTest() && x.Live() && ContainsToken(x.live.payload().text, v.live) && p.sent {
+					p.sentBefore = x.at
+				}
 				rf := fol
 				if rf == nil {
 					// A step that reads no word under the rule (ClassifyGiven)

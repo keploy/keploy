@@ -199,18 +199,33 @@ func TestClassifyFollowing_AnOlderTestsAnswerTheValueMovedApartFromIsNoSource(t 
 // tests back; not one served in the running test, nor in an older test and
 // again in it, nor one served at the start-up or between tests at all (a
 // founder decision keeps such an answer's instant a variable), nor one of
-// the previous set, nor before the new set's first test.
+// the previous set, nor before the new set's first test. It reads one as
+// served before the running test (before: Raw.BeforeTheTest) where F made
+// every serve of it the read saw before that test began, in an order keploy
+// can tell: at the start-up, between tests or in an older test; not one
+// served in the running test too, nor one of the previous set, nor any
+// before the set's first test began, nor one served on parallel requests
+// aloft together.
 func TestOrderServedViewMarksARecordingServedOnlyBeforeTheRunningTest(t *testing.T) {
 	m := &models.Mock{Name: "mock-1", Kind: models.Mongo}
 	for _, c := range []struct {
-		name string
-		run  func(tr *Tracker)
-		want bool
+		name   string
+		run    func(tr *Tracker)
+		want   bool
+		before bool
 	}{
-		{"served at the start-up, read in the first test", func(tr *Tracker) { tr.ServedMock(m); tr.Begin() }, false},
-		{"served at the start-up, read before any test", func(tr *Tracker) { tr.ServedMock(m) }, false},
-		{"served in the running test", func(tr *Tracker) { tr.Begin(); tr.ServedMock(m) }, false},
-		{"served in the previous test", func(tr *Tracker) { tr.Begin(); tr.ServedMock(m); tr.End(); tr.Begin() }, true},
+		{"served at the start-up, read in the first test", func(tr *Tracker) { tr.ServedMock(m); tr.Begin() }, false, true},
+		{"served at the start-up, read before any test", func(tr *Tracker) { tr.ServedMock(m) }, false, false},
+		{"served at the start-up on parallel requests aloft together, read in the first test", func(tr *Tracker) {
+			a, b := tr.Lift(), tr.Lift()
+			tr.ServedMock(m)
+			tr.ServedMock(&models.Mock{Name: "mock-0", Kind: models.Mongo})
+			a.Land()
+			b.Land()
+			tr.Begin()
+		}, false, false},
+		{"served in the running test", func(tr *Tracker) { tr.Begin(); tr.ServedMock(m) }, false, false},
+		{"served in the previous test", func(tr *Tracker) { tr.Begin(); tr.ServedMock(m); tr.End(); tr.Begin() }, true, true},
 		{"served two tests back", func(tr *Tracker) {
 			tr.Begin()
 			tr.ServedMock(m)
@@ -218,30 +233,30 @@ func TestOrderServedViewMarksARecordingServedOnlyBeforeTheRunningTest(t *testing
 			tr.Begin()
 			tr.End()
 			tr.Begin()
-		}, true},
-		{"served between tests", func(tr *Tracker) { tr.Begin(); tr.End(); tr.ServedMock(m); tr.Begin() }, false},
+		}, true, true},
+		{"served between tests", func(tr *Tracker) { tr.Begin(); tr.End(); tr.ServedMock(m); tr.Begin() }, false, true},
 		{"served at the start-up and in the previous test", func(tr *Tracker) {
 			tr.ServedMock(m)
 			tr.Begin()
 			tr.ServedMock(m)
 			tr.End()
 			tr.Begin()
-		}, false},
+		}, false, true},
 		{"served in the previous test and between tests", func(tr *Tracker) {
 			tr.Begin()
 			tr.ServedMock(m)
 			tr.End()
 			tr.ServedMock(m)
 			tr.Begin()
-		}, false},
+		}, false, true},
 		{"served in the previous test and the running one", func(tr *Tracker) {
 			tr.Begin()
 			tr.ServedMock(m)
 			tr.End()
 			tr.Begin()
 			tr.ServedMock(m)
-		}, false},
-		{"served in the previous set", func(tr *Tracker) { tr.Begin(); tr.ServedMock(m); tr.NewSet(); tr.Begin() }, false},
+		}, false, false},
+		{"served in the previous set", func(tr *Tracker) { tr.Begin(); tr.ServedMock(m); tr.NewSet(); tr.Begin() }, false, false},
 		{"served in a new set before its first test", func(tr *Tracker) {
 			tr.Begin()
 			tr.ServedMock(&models.Mock{Name: "mock-0", Kind: models.Mongo})
@@ -250,7 +265,7 @@ func TestOrderServedViewMarksARecordingServedOnlyBeforeTheRunningTest(t *testing
 			tr.Begin()
 			tr.NewSet()
 			tr.ServedMock(m)
-		}, false},
+		}, false, false},
 	} {
 		tr := NewTracker()
 		c.run(tr)
@@ -259,6 +274,9 @@ func TestOrderServedViewMarksARecordingServedOnlyBeforeTheRunningTest(t *testing
 		r := RawOf(m, true).ServedIn(first, last)
 		if got := o.ServedView(m, r).InAnOlderTest(); got != c.want {
 			t.Errorf("%s (at %d,%d): read as served in an older test %v; want %v", c.name, first, last, got, c.want)
+		}
+		if got := o.ServedView(m, r).BeforeTheTest(); got != c.before {
+			t.Errorf("%s (at %d,%d): read as served before the running test %v; want %v", c.name, first, last, got, c.before)
 		}
 	}
 	// Of a Raw F did not serve it says nothing.
@@ -269,6 +287,9 @@ func TestOrderServedViewMarksARecordingServedOnlyBeforeTheRunningTest(t *testing
 	tr.Begin()
 	if tr.Placed().Order.ServedView(m, RawOf(m, false)).InAnOlderTest() || RawOf(m, false).ServedInAnOlderTest().InAnOlderTest() {
 		t.Errorf("a recording F did not serve read as served in an older test")
+	}
+	if tr.Placed().Order.ServedView(m, RawOf(m, false)).BeforeTheTest() || RawOf(m, false).ServedBeforeTheTest().BeforeTheTest() {
+		t.Errorf("a recording F did not serve read as served before the running test")
 	}
 	if RawOf(m, true).ServedIn(1, 1).ServedInAnOlderTest().WithServed(false).ServedIn(2, 2).InAnOlderTest() {
 		t.Errorf("WithServed(false) kept served in an older test")

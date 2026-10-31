@@ -1495,12 +1495,6 @@ func (v *exactView) notOwn(i int) bool {
 	return v.isCand(i) || v.asideOf(i) != ""
 }
 
-// asideTaken reports whether owned position i is a set-aside recording a
-// test other than the open one answered a call with in the current staging.
-func (v *exactView) asideTaken(i int) bool {
-	return v.asideOf(i) != "" && v.epoch != nil && v.asideClaims.takenByOther(v.epoch.Load(), v.owned[i].Name, v.test)
-}
-
 // takenByOther reports whether owned position i is a shared recording another
 // test answered with in the current staging, or one of the open test's own
 // that the replay handed aside before it began and another test was served

@@ -25,6 +25,7 @@ import (
 	"go.keploy.io/server/v3/internal/starvetest"
 	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
 	"golang.org/x/sys/unix"
 )
@@ -2121,9 +2122,12 @@ func TestAGroupsLeaderIsWaitedForAsTheSignalReachedIt(t *testing.T) {
 // The processes a stop watches all gone is the app's exit, though its event
 // has not come (a starved daemon slow to say its container stopped); and at
 // the user's Ctrl+C, which the stop offers once the run is interrupted, a
-// group's stop kills at once, and says so as the user's.
+// group's stop kills at once, and says so as the user's. The press comes at
+// the offer, from its log line (pressAtOffer). The stall bound is 10 s, so a
+// stop that missed either fails the test (it ends stalled), not holds it to
+// go test's timeout, as the hour's bound and a press tried every 5 ms did.
 func TestAStopEndsOnItsProcessesGoneAndAtAPress(t *testing.T) {
-	shortStall(t, time.Hour)
+	shortStall(t, 10*time.Second)
 	cmd, reaped := startGroupLeader(t, "sh", "-c", "sleep 1")
 	p, ok := ProcOf(cmd.Process.Pid)
 	if !ok {
@@ -2135,24 +2139,40 @@ func TestAStopEndsOnItsProcessesGoneAndAtAPress(t *testing.T) {
 	}
 	awaitReaped(t, "the process", reaped)
 
+	pid, reaped := readyLeader(t, t.TempDir(), `trap "" INT; touch ready; exec sleep 600`)
+	logger, taken := pressAtOffer(t)
+	killed, _, err := InterruptProcessTreeStop(logger, pid, syscall.SIGINT, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if killed != "keploy killed a process of it at the press of Ctrl+C, before it had exited" || !taken.Load() {
+		t.Fatalf("the stop said %q, the press taken %v; want the press's kill", killed, taken.Load())
+	}
+	awaitReaped(t, "the app", reaped)
+}
+
+// pressAtOffer is a logger whose first offer to end a stop at the next
+// Ctrl+C ("press Ctrl+C again") is answered by a press, as the user's, in
+// the offer's own look: the press only a standing offer takes
+// (MarkInterruptedAgain). It sets the offer at the run's interrupt
+// (StopOffer 0, the run interrupted) for the test. taken is whether the
+// press was taken; read it once the stop is over.
+func pressAtOffer(t *testing.T) (logger *zap.Logger, taken *atomic.Bool) {
+	t.Helper()
 	offer := StopOffer
 	StopOffer = 0
 	t.Cleanup(func() { StopOffer = offer; ClearInterrupted(); ResetInterruptedAgain() })
 	MarkInterrupted()
-	go func() {
-		for !MarkInterruptedAgain() {
-			time.Sleep(5 * time.Millisecond)
+	taken = &atomic.Bool{}
+	var offered atomic.Bool
+	core, _ := observer.New(zapcore.InfoLevel)
+	logger = zap.New(zapcore.RegisterHooks(core, func(e zapcore.Entry) error {
+		if strings.Contains(e.Message, "press Ctrl+C again") && offered.CompareAndSwap(false, true) {
+			taken.Store(MarkInterruptedAgain())
 		}
-	}()
-	pid, reaped := readyLeader(t, t.TempDir(), `trap "" INT; touch ready; exec sleep 600`)
-	killed, _, err := InterruptProcessTreeStop(zap.NewNop(), pid, syscall.SIGINT, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if killed != "keploy killed a process of it at the press of Ctrl+C, before it had exited" {
-		t.Fatalf("the stop said %q; want the press's kill", killed)
-	}
-	awaitReaped(t, "the app", reaped)
+		return nil
+	}))
+	return logger, taken
 }
 
 // A process is named by its pid and start time: a pid that names another
