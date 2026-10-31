@@ -2168,7 +2168,7 @@ func TestTheAppsServiceReadsEndAtTheirCallersEndWhileTheDaemonFailsThem(t *testi
 		eventually(t, "the watch read the agent's project for the die", failedA(sd, true))
 		done := make(chan error, 1)
 		go func() { stop(); done <- nil }()
-		returned(t, "the watch's stop", done)
+		_ = returned(t, "the watch's stop", done) // a watch's stop returns nothing to check
 		select {
 		case <-ended:
 			t.Fatal("a watch that was stopped took the die for a halt")
