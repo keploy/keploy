@@ -592,6 +592,7 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 	var tried Learned
 	if offset {
 		if tried = dc.clockOffset(ln, off, max(rt.res, lt.res), w, unread, rec, resp); tried.Kind == KindClockOffset {
+			tried.Refuted = ap.refuted()
 			return tried
 		}
 	}
@@ -615,7 +616,7 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 			if dc.clientTests {
 				ln.Why = clientCutAmbiguousWhy(cutWhy)
 			}
-			ln.Why += ap.judgedWhy()
+			ln.Why = ap.judgedWhy() + ln.Why
 			return ln
 		}
 		why := instantNotClock
@@ -638,7 +639,7 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 		// With no window, one that names its moment is a plain read of
 		// the clock all the same, checked at every replay (noWindowRead).
 		if !dc.noWindowRead(rt, lt, w, at) {
-			ln.Kind, ln.Why = KindUnaccounted, why+ap.judgedWhy()
+			ln.Kind, ln.Why = KindUnaccounted, ap.judgedWhy()+why
 			return ln
 		}
 		// Where keploy cannot tell which clock the application reads, no
@@ -699,6 +700,11 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 		rtod, ltod := rt.at.Sub(timeOfDayDay)%day, lt.at.Sub(timeOfDayDay)%day
 		read := dc.todRead(rtod, ltod, rt.res, lt.res, models.LayoutTypedTimeOfDay, models.LayoutTypedTimeOfDay, w, at)
 		ln.Kind, ln.Why, ln.Read = KindClockRead, clockReadUncheckedWhy, read
+	}
+	// A read learned past a read set aside as its source names it
+	// (Learned.Refuted), as the text's does (follows.refutedAll).
+	if ln.Kind == KindClockRead {
+		ln.Refuted = ap.refuted()
 	}
 	return ln
 }
@@ -1369,14 +1375,24 @@ func (a *apartReads) refute(e Earlier, s Seen, heldF bool) bool {
 	return true
 }
 
-// judgedWhy follows why an instant judged as its call's own read of the
-// clock past a read set aside (at) is refused, naming that read
-// (apartJudgedWhy); "" where none was set aside.
+// judgedWhy leads why an instant judged as its call's own read of the clock
+// past a read set aside (at) is refused, naming that read before the refusal
+// and its advice (apartJudgedWhy); "" where none was set aside.
 func (a *apartReads) judgedWhy() string {
 	if a.at == "" {
 		return ""
 	}
-	return "; " + apartJudgedWhy(a.at)
+	return apartJudgedWhy(a.at) + "; "
+}
+
+// refuted names the read set aside (at) and why it is none (apartAsideWhy),
+// what an instant learned past it as a read of the clock or as the clock
+// plus an offset names (Learned.Refuted); "" where none was set aside.
+func (a *apartReads) refuted() string {
+	if a.at == "" {
+		return ""
+	}
+	return apartAsideWhy(a.at)
 }
 
 // seenHoldsInstant reports whether F's view of s (Seen.Live) held live, the

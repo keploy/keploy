@@ -255,16 +255,29 @@ type refutedPlace struct {
 	mock, why string
 }
 
-// refutedAll names every mock the search for the value's source went past
-// (follows.refute), what a value learned past them names (Learned.Refuted):
-// the first two more after the first with why, then the rest by name, the
-// first maxRefutedNamed of them and how many more. "" where it went past
-// none.
+// refutedAll names every place the search for the value's source went past,
+// what a value learned past them names (Learned.Refuted): the request's read
+// of the application's clock the echo set aside (follows.refuteEcho: apart,
+// apartAsideWhy) first, as the search went past it first; then the mocks it
+// went past (follows.refute), the first two more after the first with why,
+// then the rest by name, the first maxRefutedNamed of them and how many
+// more. "" where it went past none.
 func (f *follows) refutedAll() string {
-	if f == nil || f.refuted == "" {
+	if f == nil {
 		return ""
 	}
+	apart := ""
+	if f.apart != "" {
+		apart = apartAsideWhy(f.apart)
+	}
+	if f.refuted == "" {
+		return apart
+	}
 	var b strings.Builder
+	if apart != "" {
+		b.WriteString(apart)
+		b.WriteString("; ")
+	}
 	b.WriteString(f.refuted)
 	for i, r := range f.refutes {
 		if i == 2 {

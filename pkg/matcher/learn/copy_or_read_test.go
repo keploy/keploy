@@ -2094,6 +2094,7 @@ func TestAnEarlierClockReadFSawSendAnotherMomentIsNoSourceOfTheValue(t *testing.
 	beganF, callF := began.Add(72*time.Second), call.Add(73*time.Second+600*time.Millisecond)
 	judged := "no clock read by the app matched it (an instant, its characters 1 to 10)"
 	apart := "keploy judged it as its call's own read of the clock because the moment it was recorded with stands only in mock-18 at " + expires + ", where keploy learned a read of the application's clock and record's full round saw the application send another moment than the value's, so the value is no copy of it (a copy moves with its source)"
+	aside := "the moment its recorded value was recorded with stands in mock-18 at " + expires + ", where keploy learned a read of the application's clock and record's full round saw the application send another moment than the value's: a copy moves with its source, so the value is no copy of it"
 	source := "its recorded value was sent in mock-18 at " + expires + ", the test set's start-up's call, where keploy learned it as a read of the application's clock"
 	echo := "the moment its recorded value was recorded with stands in mock-18 at " + expires + ", where keploy learned a read of the application's clock and record's full round saw the application send another moment than the value's: a copy moves with its source, so the value is no copy of it; but the call's recorded answer holds it, an echo keploy cannot answer beside a source it set aside"
 	pick := "while the moment it was recorded with stands in mock-18 at " + expires + ", where keploy learned a read of the application's clock and record's full round saw the application send another moment than the value's, so the value is no copy of it (a copy moves with its source), and no other earlier place is its source"
@@ -2216,8 +2217,13 @@ func TestAnEarlierClockReadFSawSendAnotherMomentIsNoSourceOfTheValue(t *testing.
 			if c.kind == KindClockOffset && (ln.Offset == nil || ln.Offset.Min > -time.Minute || ln.Offset.Max < -time.Minute) {
 				t.Fatalf("dirtyAt learned as the clock plus %+v; want the clock - 1m", ln.Offset)
 			}
-			if c.why == judged && (!strings.Contains(ln.Why, apart) || strings.Contains(ln.Why, source) || ln.Bindable) {
-				t.Fatalf("dirtyAt's refusal does not name the read F set aside, names it as its source, or binds the value (bindable: %v): %s", ln.Bindable, ln.Why)
+			if c.why == judged && (!strings.HasPrefix(ln.Why, apart) || strings.Contains(ln.Why, source) || ln.Bindable) {
+				t.Fatalf("dirtyAt's refusal does not lead with the read F set aside, names it as its source, or binds the value (bindable: %v): %s", ln.Bindable, ln.Why)
+			}
+			// A read or an offset learned past the read set aside names it
+			// (Learned.Refuted); one learned past a copy names none.
+			if (c.kind == KindClockRead || c.kind == KindClockOffset) && strings.Contains(ln.Refuted, aside) == c.copied {
+				t.Fatalf("dirtyAt learned past %q; want the read set aside named: %v", ln.Refuted, !c.copied)
 			}
 		})
 	}
@@ -2338,6 +2344,7 @@ func TestAnEarlierTypedClockReadFSawSendAnotherMomentIsNoSourceOfTheInstant(t *t
 	beganF, callF := began.Add(72*time.Second), call.Add(73*time.Second+600*time.Millisecond)
 	judged := "no clock read by the app matched it"
 	apart := "keploy judged it as its call's own read of the clock because the moment it was recorded with stands only in mock-18 at " + expires + ", where keploy learned a read of the application's clock and record's full round saw the application send another moment than the value's"
+	aside := "the moment its recorded value was recorded with stands in mock-18 at " + expires + ", where keploy learned a read of the application's clock and record's full round saw the application send another moment than the value's: a copy moves with its source, so the value is no copy of it"
 	source := "its recorded value was sent in mock-18 at " + expires + ", the test set's start-up's call, where keploy learned it as a read of the application's clock"
 	pick := "while the moment it was recorded with stands in mock-18 at " + expires + ", where keploy learned a read of the application's clock and record's full round saw the application send another moment than the value's"
 	echo := "but the call's recorded answer holds it, an echo keploy cannot answer beside a source it set aside"
@@ -2460,8 +2467,13 @@ func TestAnEarlierTypedClockReadFSawSendAnotherMomentIsNoSourceOfTheInstant(t *t
 					t.Fatalf("the exact search took %+v (found %v) and set aside %q; want the copy at mock-18, nothing set aside", from, ok, ap.at)
 				}
 			}
-			if c.why == judged && (!strings.Contains(ln.Why, apart) || strings.Contains(ln.Why, source)) {
-				t.Fatalf("dirtyAt's refusal does not name the read F set aside, or names it as its source: %s", ln.Why)
+			if c.why == judged && (!strings.HasPrefix(ln.Why, apart) || strings.Contains(ln.Why, source)) {
+				t.Fatalf("dirtyAt's refusal does not lead with the read F set aside, or names it as its source: %s", ln.Why)
+			}
+			// A read or an offset learned past the read set aside names it
+			// (Learned.Refuted); one learned past a copy names none.
+			if (c.kind == KindClockRead || c.kind == KindClockOffset) && strings.Contains(ln.Refuted, aside) == c.copied {
+				t.Fatalf("dirtyAt learned past %q; want the read set aside named: %v", ln.Refuted, !c.copied)
 			}
 		})
 	}

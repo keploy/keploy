@@ -873,14 +873,19 @@ type Learned struct {
 	// the value is a clock read, and how to correct it (evidence). It never
 	// holds a value: it names a part of one by where it stands.
 	Why string
-	// Refuted, of a value learned as noise or as a read of the clock past
-	// sources the search for it set aside under the rule a copy follows
-	// its source (ClassifyFollowing, follows.refute: a place F gave the
-	// application that the value moved apart from), names them and why
-	// each is none (follows.refutedAll); "" otherwise. Noise's Why names
-	// the first too; a read of the clock's does not (its Why is the
-	// refusal of a caller whose replay checks no read), so a caller that
-	// learns the read names them from here where it says what it learned.
+	// Refuted, of a value learned as noise, as a read of the clock or as
+	// the clock plus an offset past sources the search for it set aside
+	// under the rule a copy follows its source (ClassifyFollowing:
+	// follows.refute, a place F gave the application that the value moved
+	// apart from; follows.refuteEcho and an instant's apartReads, a
+	// request's read of the application's clock that held the moment the
+	// value was recorded with and that F saw send another moment than the
+	// value's), names them and why each is none (follows.refutedAll,
+	// apartAsideWhy); "" otherwise. Noise's Why names the first too; a read
+	// of the clock's does not (its Why is the refusal of a caller whose
+	// replay checks no read), nor does an offset's (its evidence), so a
+	// caller that learns either names them from here where it says what it
+	// learned.
 	Refuted string
 	// byOffset: the offset rule refused it (offsetWhy: built by an offset on
 	// what the application was given, before any lead or window excused
@@ -1558,7 +1563,10 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 				// Refused as a possible pick whose recorded moment stands
 				// only at a read of the clock F saw send another moment
 				// (follows.apart, pickApartUnaccounted): set aside as its
-				// source, and no other place refuted.
+				// source, and no other place refuted. unaccounted gives that
+				// refusal before the word rule reads a word (refused), so
+				// refused is "" here; the guard keeps a refusal of the word
+				// rule from ever being lifted with it.
 				if fol != nil && fol.apart != "" && fol.refused == "" && v.unparsed == "" {
 					apart = fol.apart
 				}
@@ -1634,6 +1642,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 				if why != "" {
 					off, cutWhy, ok := dc.textClockOffset(r, l, v, w, resp)
 					if ok {
+						off.Refuted = fol.refutedAll()
 						return off
 					}
 					if cutWhy != "" {
@@ -1650,7 +1659,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 					bindable = cutWhy == "" && ln.Kind == KindNoise && skip&skipSource == 0 && apart == "" && echoedPart(dc, v, resp) == "" &&
 						(fol == nil || fol.first == "" && fol.refuted == "")
 					if apart != "" {
-						why += "; " + apartJudgedWhy(apart)
+						why = apartJudgedWhy(apart) + "; " + why
 					}
 				}
 			}
@@ -1719,6 +1728,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// as before. A value its window holds shows no offset.
 		if v := dc.ofIn(r.Value, l.Value, w, at); ln.Kind == KindNoise && v.clock.whole {
 			if off, _, ok := dc.textClockOffset(r, l, v, w, resp); ok {
+				off.Refuted = fol.refutedAll()
 				return off
 			}
 			ln.Read = textClockReadIn(r.Value, l.Value, dc.zone)
