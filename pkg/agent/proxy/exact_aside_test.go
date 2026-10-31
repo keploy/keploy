@@ -1,13 +1,17 @@
 package proxy
 
 import (
+	"fmt"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	httpint "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.uber.org/zap"
 )
 
 // asideNames is the names of the mocks in mks that are set-aside recordings,
@@ -23,7 +27,7 @@ func asideNames(mks []*models.Mock) []string {
 }
 
 // A set-aside test's recordings are offered to every test view installed
-// after it, in no read but SetAsideMocks, by kind, marked with their test;
+// after it, in no read but RangeSetAside, by kind, marked with their test;
 // none is required of the test, carried into it, or counted as its own
 // consume; one that answered is named for the test it answered in, and is
 // offered to no later test; the round's snapshot holds it as no test's own
@@ -37,11 +41,11 @@ func TestASetAsideRecordingIsServedAfterItsTestUnchecked(t *testing.T) {
 	mm.ServeExactTest("T", []*models.Mock{own})
 	pt, _ := mm.GetPerTestMocksInWindow()
 	equalNames(t, "per-test: a set-aside recording is in no read", pt, "own")
-	sa := mm.SetAsideMocks(models.HTTP)
+	sa := setAsideOf(mm, models.HTTP)
 	if got := asideNames(sa); !slices.Equal(got, []string{"aside<Q"}) {
 		t.Fatalf("set-aside copies %v", got)
 	}
-	if len(mm.SetAsideMocks(models.Mongo)) != 0 {
+	if len(setAsideOf(mm, models.Mongo)) != 0 {
 		t.Fatal("SetAsideMocks gave a recording of another kind")
 	}
 	snap, _ := mm.RoundSnapshot(integrations.RoundQuery{})
@@ -62,12 +66,12 @@ func TestASetAsideRecordingIsServedAfterItsTestUnchecked(t *testing.T) {
 	if st, served, ok := mm.ExactTestServedAside(); !ok || st != "T" || !slices.Equal(served, []string{"aside served from Q (set aside)"}) {
 		t.Fatalf("served aside %q %v %v", st, served, ok)
 	}
-	if len(mm.SetAsideMocks("")) != 0 {
+	if len(setAsideOf(mm, "")) != 0 {
 		t.Fatal("a set-aside recording that answered is still offered")
 	}
 	// Answered once: the next test is not offered it.
 	mm.ServeExactTest("U", nil)
-	if got := mm.SetAsideMocks(""); len(got) != 0 {
+	if got := setAsideOf(mm, ""); len(got) != 0 {
 		t.Fatalf("a set-aside recording another test answered with is offered again: %v", asideNames(got))
 	}
 	if _, served, _ := mm.ExactTestServedAside(); len(served) != 0 {
@@ -88,7 +92,7 @@ func TestAHandedAsideRecordingAnswersOnceWithItsOwnTestsCopy(t *testing.T) {
 	mm := stagedManager(t, nil, []*models.Mock{pat})
 	mm.ServeExactAside("Q", []*models.Mock{pat})
 	mm.ServeExactTest("K", nil)
-	sa := mm.SetAsideMocks("")
+	sa := setAsideOf(mm, "")
 	if got := asideNames(sa); !slices.Equal(got, []string{"pat<Q"}) {
 		t.Fatalf("set-aside copies %v", got)
 	}
@@ -112,7 +116,7 @@ func TestAHandedAsideRecordingAnswersOnceWithItsOwnTestsCopy(t *testing.T) {
 		t.Fatal("the owner's own copy did not answer")
 	}
 	mm.ServeExactTest("Z", nil)
-	if got := mm.SetAsideMocks(""); len(got) != 0 {
+	if got := setAsideOf(mm, ""); len(got) != 0 {
 		t.Fatalf("a recording its owner answered is offered aside: %v", asideNames(got))
 	}
 	// Never handed: the owner's consume takes no claim.
@@ -142,7 +146,7 @@ func TestAHandedRecordingAnswersOnceForACallInFlightBeforeItsTestBegins(t *testi
 	mm := stagedManager(t, nil, []*models.Mock{pat})
 	mm.ServeExactAside("Q", []*models.Mock{pat})
 	mm.ServeExactTest("K", nil)
-	sa := mm.SetAsideMocks("")
+	sa := setAsideOf(mm, "")
 	if len(sa) != 1 || !mm.MarkMockAsUsed(*sa[0]) {
 		t.Fatal("the handed recording did not answer the later test's call")
 	}
@@ -174,7 +178,7 @@ func TestAHandedRecordingAnswersOnceForACallInFlightBeforeItsTestBegins(t *testi
 		t.Fatalf("the owner's begin let go of its in-flight answer's claim (now %q)", who)
 	}
 	mm.ServeExactTest("Z", nil)
-	if got := mm.SetAsideMocks(""); len(got) != 0 {
+	if got := setAsideOf(mm, ""); len(got) != 0 {
 		t.Fatalf("a recording answered in flight is offered aside: %v", asideNames(got))
 	}
 	if mm.MarkMockAsUsed(*pat) {
@@ -225,14 +229,14 @@ func TestWhatASetAsideTestDoesNotServe(t *testing.T) {
 	mm.ServeExactTest("T", []*models.Mock{shared})
 	pt, _ := mm.GetPerTestMocksInWindow()
 	equalNames(t, "per-test", pt, "shared")
-	if got := asideNames(append(pt, mm.SetAsideMocks("")...)); len(got) != 0 {
+	if got := asideNames(append(pt, setAsideOf(mm, "")...)); len(got) != 0 {
 		t.Fatalf("set-aside copies %v", got)
 	}
 	if _, _, unconsumed, _ := mm.ExactTestOutcome(); !slices.Equal(unconsumed, []string{"shared"}) {
 		t.Fatalf("the test's own recording is required whoever else recorded it: %v", unconsumed)
 	}
 	mm.ResetForReplaySession()
-	if got := mm.setAsideRecordings(); len(got) != 0 {
+	if got := mm.exact.aside.snapshot(); len(got) != 0 {
 		t.Fatalf("a session reset kept %d set-aside recordings", len(got))
 	}
 }
@@ -253,11 +257,106 @@ func TestASetAsideRecordingWithALearnedClockReadIsOffered(t *testing.T) {
 	mm := stagedManager(t, nil, []*models.Mock{clock})
 	mm.ServeExactAside("Q", []*models.Mock{clock})
 	mm.ServeExactTest("T", nil)
-	sa := mm.SetAsideMocks(models.HTTP)
+	sa := setAsideOf(mm, models.HTTP)
 	if got := asideNames(sa); !slices.Equal(got, []string{"clock<Q"}) {
 		t.Fatalf("set-aside copies %v; want the recording with a learned clock read offered", got)
 	}
 	if len(sa[0].Spec.Clocks) != 1 {
 		t.Fatalf("the offered copy lost its learned clock read: %v", sa[0].Spec.Clocks)
+	}
+}
+
+// setAsideOf is every set-aside recording mm offers the open test of kind
+// (every kind for ""), across its handed tests (RangeSetAside).
+func setAsideOf(mm *MockManager, kind models.Kind) []*models.Mock {
+	var out []*models.Mock
+	mm.RangeSetAside(kind, nil, func(b []*models.Mock) bool {
+		out = append(out, b...)
+		return true
+	})
+	return out
+}
+
+// A partial replay hands, at its first begin, every earlier test it has not
+// run (founder rule no-oom-components: "a row pins peak heap"). Handing aside
+// 1000 tests' 2 recordings kept on disk, each with a 64 KiB request (128 MiB
+// decoded), holds their names only; a call no recording answers reads them
+// one handed test at a time, in hand order, under its request keys, and the
+// heap held at any point of that read, and after it, stays under 16 MiB.
+// Mutants: decoding at the hand, or every test's before the first visit,
+// holds the 128 MiB.
+func TestAHandedAsideOnDiskIsReadOneTestAtATimeWithinABoundHeap(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	const tests, per, body, bound = 1000, 2, 64 << 10, 16 << 20
+	disk, err := newDiskMocks(zap.NewNop(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = disk.Close() })
+	pad := strings.Repeat("x", body)
+	type handed struct {
+		from  string
+		names []string
+	}
+	var hands []handed
+	for i := 0; i < tests; i++ {
+		h := handed{from: fmt.Sprintf("T%04d", i)}
+		for j := 0; j < per; j++ {
+			at := exactT0.Add(time.Duration(i*per+j) * time.Millisecond)
+			mk := &models.Mock{Version: models.GetVersion(), Name: fmt.Sprintf("big-%d-%d", i, j), Kind: models.HTTP,
+				Spec: models.MockSpec{
+					HTTPReq:          &models.HTTPReq{Method: "GET", URL: fmt.Sprintf("http://api/big/%d", i), Header: map[string]string{"X-Pad": pad}},
+					HTTPResp:         &models.HTTPResp{StatusCode: 200, Body: "ok"},
+					ReqTimestampMock: at, ResTimestampMock: at.Add(time.Microsecond),
+				}}
+			mk.TestModeInfo.Lifetime = models.LifetimePerTest
+			if err := disk.Add(mk); err != nil {
+				t.Fatal(err)
+			}
+			h.names = append(h.names, mk.Name)
+		}
+		hands = append(hands, h)
+	}
+	disk.Finalize()
+	own := exactMock("own", time.Hour, models.LifetimeSession)
+	mm := stagedManager(t, nil, []*models.Mock{own})
+	mm.SetRecordingSource(disk.RangeKeys)
+	base := liveHeap()
+	for _, h := range hands {
+		mm.ServeExactAsideOnDisk(h.from, h.names, nil)
+	}
+	mm.ServeExactTest("LAST", []*models.Mock{own})
+	if held := int64(liveHeap()) - int64(base); held > bound {
+		t.Fatalf("handing %d tests aside holds %d bytes, over %d: the hand must hold names only", tests, held, bound)
+	}
+	keys := httpint.RequestKeysOf("GET", "/big/none", "", true)
+	var peak int64
+	var from []string
+	mm.RangeSetAside(models.HTTP, keys, func(b []*models.Mock) bool {
+		if len(b) != per {
+			t.Fatalf("a batch of %d, want one handed test's %d", len(b), per)
+		}
+		from = append(from, b[0].TestModeInfo.SetAsideFrom)
+		if len(from)%100 == 0 {
+			if h := int64(liveHeap()) - int64(base); h > peak {
+				peak = h
+			}
+		}
+		return true
+	})
+	if len(from) != tests || from[0] != "T0000" || from[tests-1] != hands[tests-1].from {
+		t.Fatalf("visited %d tests (%v...), want all %d in hand order", len(from), from[:min(3, len(from))], tests)
+	}
+	if peak > bound {
+		t.Fatalf("reading the handed tests held %d bytes at its peak, over %d: one test at a time", peak, bound)
+	}
+	if held := int64(liveHeap()) - int64(base); held > bound {
+		t.Fatalf("after the read %d bytes are held, over %d: none is kept", held, bound)
+	}
+	// Another shape's keys read none of them.
+	n := 0
+	mm.RangeSetAside(models.HTTP, httpint.RequestKeysOf("POST", "/big/1", "", true), func([]*models.Mock) bool { n++; return true })
+	if n != 0 {
+		t.Fatalf("a call of another shape was offered %d handed tests' recordings", n)
 	}
 }

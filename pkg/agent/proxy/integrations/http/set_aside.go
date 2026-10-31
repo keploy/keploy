@@ -3,6 +3,8 @@ package http
 import (
 	"context"
 
+	"go.keploy.io/server/v3/pkg/variables"
+
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
 )
@@ -27,35 +29,52 @@ import (
 //
 // The set-aside recordings are matched as the live pool's would be, on a view
 // that holds only them and that no match can consume, and on a copy of the
-// test's bindings: the answer binds nothing, as it is another test's.
+// test's bindings: the answer binds nothing, as it is another test's. They
+// are read one handed test at a time, in hand order, by the call's shape key
+// alone (its method and number of path segments: RequestKeysOf, loose),
+// under which every recording a comparison could accept is filed, whatever
+// noise, learned place or correlation it excuses; the first test that holds
+// the call answers it.
 func (h *HTTP) setAsideAnswer(ctx context.Context, input *req, mockDb integrations.MockMemDb, headerNoise, bodyNoise map[string][]string, urlNoise []string, autoURLDynamic, schemaNoiseStrict bool) (*models.Mock, error) {
 	sr, ok := mockDb.(integrations.SetAsideReader)
 	if !ok {
 		return nil, nil
 	}
-	aside := FilterHTTPMocks(sr.SetAsideMocks(models.HTTP))
-	if len(aside) == 0 {
-		return nil, nil
+	path := ""
+	if input.url != nil {
+		path = input.url.Path
 	}
+	keys := RequestKeysOf(input.method, path, "", true)
 	vars := variableTable(mockDb)
-	if vars != nil {
-		vars = vars.Clone()
-	}
-	// As the replay's matcher reads under the switch: no request noise is
-	// detected, and a learned correlation is followed.
-	matched, mk, _, err := h.match(ctx, input, answeredOnly{MockMemDb: mockDb, mocks: aside, vars: vars}, headerNoise, bodyNoise, urlNoise, autoURLDynamic, false, schemaNoiseStrict, false, true)
-	if err != nil || !matched || mk == nil || mk.Spec.HTTPReq == nil {
-		return nil, nil
-	}
-	for _, orig := range aside {
-		if orig.Name != mk.Name {
-			continue
+	var served *models.Mock
+	var serr error
+	sr.RangeSetAside(models.HTTP, keys, func(batch []*models.Mock) bool {
+		aside := FilterHTTPMocks(batch)
+		if len(aside) == 0 {
+			return true
 		}
-		served, claimed, err := h.claim(ctx, orig, mockDb, nil, nil)
-		if err != nil || !claimed {
-			return nil, err
+		// As the replay's matcher reads under the switch: no request noise
+		// is detected, and a learned correlation is followed.
+		var bound *variables.Table
+		if vars != nil {
+			bound = vars.Clone()
 		}
-		return served, nil
-	}
-	return nil, nil
+		matched, mk, _, err := h.match(ctx, input, answeredOnly{MockMemDb: mockDb, mocks: aside, vars: bound}, headerNoise, bodyNoise, urlNoise, autoURLDynamic, false, schemaNoiseStrict, false, true)
+		if err != nil || !matched || mk == nil || mk.Spec.HTTPReq == nil {
+			return true
+		}
+		for _, orig := range aside {
+			if orig.Name != mk.Name {
+				continue
+			}
+			got, claimed, err := h.claim(ctx, orig, mockDb, nil, nil)
+			if err == nil && claimed {
+				served = got
+			}
+			serr = err
+			return false
+		}
+		return true
+	})
+	return served, serr
 }

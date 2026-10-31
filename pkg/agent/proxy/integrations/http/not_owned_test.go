@@ -307,7 +307,7 @@ func TestALookupIsAskedOfTheRoundTheCallWasMadeIn(t *testing.T) {
 // record's full round has judging move the recording to the worker scope; in
 // any other replay (its confirming round, keploy test in CI) the miss
 // stands, and a set-aside test's recording answers a later test only if the
-// call is exactly it and it holds no variable (the proxy's addAside,
+// call is exactly it and it holds no variable (the proxy's RangeSetAside,
 // TestWhatASetAsideTestDoesNotServe), a miss judging never keeps a test over.
 // Acceptance run 7 printed "moves mock-195 to the worker scope" on a
 // confirming round, whose mappings.yaml had no worker: entry.

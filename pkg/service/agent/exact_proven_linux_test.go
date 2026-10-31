@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	nethttp "net/http"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -85,6 +86,14 @@ func (p *servingProxy) ExactTestUnusedBackground() (string, []string, bool) {
 }
 func (p *servingProxy) ServeExactAside(from string, mocks []*models.Mock) error {
 	p.mm.ServeExactAside(from, mocks)
+	return nil
+}
+func (p *servingProxy) ServeExactAsideOnDisk(from string, names []string) error {
+	p.mm.ServeExactAsideOnDisk(from, names, nil)
+	return nil
+}
+func (p *servingProxy) SetRecordingSource(src func(kind models.Kind, keys []string, visit func(name string, load func() (*models.Mock, error)) bool) error) error {
+	p.mm.SetRecordingSource(src)
 	return nil
 }
 func (p *servingProxy) ExactTestServedAside() (string, []string, bool) {
@@ -2186,4 +2195,86 @@ func (a *Agent) storage() *ClientMockStorage {
 	v, _ := a.clientMocks.Load(uint64(0))
 	s, _ := v.(*ClientMockStorage)
 	return s
+}
+
+// A partial replay of the last test of a large set (keploy mock replay --
+// -run TestLast) hands, at its begin, every earlier test the run has not
+// begun (founder rule no-oom-components: "a row pins peak heap"). With 1000
+// such tests' 2 recordings each on the agent's disk store, each with a
+// 64 KiB request (128 MiB decoded), the begin reads none of them: the heap
+// held after it stays under 16 MiB. A call of the first test's recording is
+// still served aside, read from disk as the call asks, by its keys (the
+// big ones are of another shape and are never read), and after it the heap
+// held stays under the bound. Mutant: the agent reads them at the begin.
+func TestAPartialReplayOfALargeSetHandsAsideWithinABoundHeap(t *testing.T) {
+	const tests, per, body, bound = 1000, 2, 64 << 10, 16 << 20
+	ctx := context.Background()
+	disk, err := proxyPkg.NewDiskMocks(zap.NewNop())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = disk.Close() })
+	pat := pingMock("pat", "/pat", "pat", t0)
+	pat.TestModeInfo.Lifetime = models.LifetimePerTest
+	require.NoError(t, disk.Add(pat))
+	table := map[string][]string{"o::T0000": {"pat"}}
+	windows := []models.TestWindow{{TestCase: "o::T0000", Start: t0, End: t0.Add(time.Second)}}
+	pad := strings.Repeat("x", body)
+	for i := 1; i <= tests; i++ {
+		id := fmt.Sprintf("o::T%04d", i)
+		at := t0.Add(time.Duration(i) * time.Second)
+		for j := 0; j < per; j++ {
+			mk := pingMock(fmt.Sprintf("big-%d-%d", i, j), fmt.Sprintf("/big/%d", i), "ok", at.Add(time.Duration(j)*time.Millisecond))
+			mk.Spec.HTTPReq.Method = "POST"
+			mk.Spec.HTTPReq.Body = pad
+			mk.TestModeInfo.Lifetime = models.LifetimePerTest
+			require.NoError(t, disk.Add(mk))
+			table[id] = append(table[id], mk.Name)
+		}
+		windows = append(windows, models.TestWindow{TestCase: id, Start: at, End: at.Add(500 * time.Millisecond)})
+	}
+	disk.Finalize()
+	last := t0.Add(time.Duration(tests+1) * time.Second)
+	own := pingMock("own", "/own", "own", last)
+	table["o::TestLast"] = []string{"own"}
+	windows = append(windows, models.TestWindow{TestCase: "o::TestLast", Start: last, End: last.Add(time.Second)})
+
+	a, _ := wireAgent(t, models.MODE_TEST)
+	p := newServingProxy()
+	a.Proxy = p
+	require.NoError(t, a.StoreMocks(ctx, nil, []*models.Mock{own}))
+	st := loadStorage(t, a)
+	st.mu.Lock()
+	st.diskMocks = disk
+	st.mu.Unlock()
+	p.mm.SetRecordingSource(disk.RangeKeys)
+	require.NoError(t, a.SetScopeTable(ctx, table))
+	require.NoError(t, a.SetScopePool(ctx, map[string][]string{}))
+	require.NoError(t, a.SetRecordedWindows(ctx, windows))
+	claimSelf(t, a)
+
+	base := heapHeld()
+	_, serr := a.ProvenBegin(ctx, begin("TestLast"))
+	require.Nil(t, serr)
+	held := int64(heapHeld()) - int64(base)
+	require.LessOrEqual(t, held, int64(bound), "the begin hands %d tests aside: it must read none of their recordings", tests)
+	var got []string
+	for _, path := range []string{"/own", "/pat"} {
+		code, b := p.call(t, path)
+		got = append(got, fmt.Sprintf("%d %s", code, strings.TrimSpace(b)))
+	}
+	require.Equal(t, []string{"200 own", "200 pat"}, got, "the first test's recording is served aside, read from disk as the call asks")
+	held = int64(heapHeld()) - int64(base)
+	require.LessOrEqual(t, held, int64(bound), "after the call none of the handed recordings is kept")
+	e, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: "TestLast", CanSkip: true, Outcome: models.ScopeOutcomePassed})
+	require.Nil(t, serr)
+	require.Empty(t, e.Action, e.Reason)
+	require.Equal(t, []string{"pat served from o::T0000 (set aside)"}, evidenceOf(t, a, "o::TestLast").ServedAside)
+}
+
+// heapHeld is the heap's live bytes after a collection.
+func heapHeld() uint64 {
+	runtime.GC()
+	runtime.GC()
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&ms)
+	return ms.HeapAlloc
 }

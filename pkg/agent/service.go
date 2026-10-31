@@ -777,6 +777,16 @@ type ExactAsideServer interface {
 	ExactTestServedAside() (test string, served []string, ok bool)
 }
 
+// ExactAsideDiskServer is an optional ExactAsideServer capability:
+// ServeExactAsideOnDisk adds, by name, the recordings of a test the replay
+// set aside or has not begun that the agent keeps on disk, read only as a
+// later call asks for them, through the staged set's recording source
+// (RecordingSourceSetter), so handing a test aside decodes none of them. A
+// proxy without it is handed them read (ServeExactAside).
+type ExactAsideDiskServer interface {
+	ServeExactAsideOnDisk(from string, names []string) error
+}
+
 // ExactAheadServer is an optional ExactServer capability: ServeExactPoolAhead
 // is ServeExactPool that also answers, while no test is open, the next test's
 // mocks that were in flight when it began (ahead, models.ExactServing.Ahead),
