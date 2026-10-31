@@ -345,6 +345,22 @@ func TestASiblingFServedOnlyAfterTheCallArrivedIsNoSourceOfItsStartUpRead(t *tes
 		if got := classify(dc, raw(tr.Placed().Order.ArrivedAt(arrival))); got.Kind != KindVariable || got.From.Mock != "mock-17" {
 			t.Errorf("served before the call arrived and again after: %s from %q (%q); want the variable of mock-17, as before", got.Kind, got.From.Mock, got.Why)
 		}
+		// A later set numbers its serves from 1 again, and each serve's
+		// instant is that set's own: the earlier set's serve, made before
+		// this call arrived, never stands for the find served after it.
+		// Kept, the earlier instant would read as the find's serve, and the
+		// rule would switch off in every set after the first.
+		tr = NewTracker()
+		tr.ServedMock(&models.Mock{Name: "mock-3", Kind: models.Mongo, Spec: models.MockSpec{ReqTimestampMock: at.Add(-time.Second)}})
+		time.Sleep(time.Millisecond)
+		tr.NewSetAt(time.Now())
+		time.Sleep(time.Millisecond)
+		arrival = time.Now()
+		time.Sleep(time.Millisecond)
+		tr.ServedMock(find)
+		if got := classify(dc, raw(tr.Placed().Order.ArrivedAt(arrival))); got.Kind != unserved.Kind || got.From.Mock != "" || !strings.Contains(got.Refuted, "mock-17") {
+			t.Errorf("the second set's find served after the call arrived: %s from %q (%q); want as with the find unserved: %s, mock-17 set aside", got.Kind, got.From.Mock, got.Why, unserved.Kind)
+		}
 	}
 }
 
