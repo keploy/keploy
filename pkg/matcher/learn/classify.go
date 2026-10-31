@@ -2917,6 +2917,15 @@ func newDrift(rec, live string, w *Window, lead bool, call time.Time, zone *time
 	}
 	forms, encoded := formsOf(rec, live, d.decRec, d.decLive, d.clock)
 	d.encodedRec = encoded[0]
+	// The forms from enc on are the text the value's encoded runs decode
+	// to (formsOf: encoded, and its case-folding where it differs).
+	enc := len(forms)
+	if encoded != ([2]string{}) {
+		enc--
+		if f := forms[enc]; f != encoded {
+			enc--
+		}
+	}
 	// The clock reads of every other form (the first is the decoded value,
 	// read above).
 	for _, f := range forms[1:] {
@@ -2924,6 +2933,7 @@ func newDrift(rec, live string, w *Window, lead bool, call time.Time, zone *time
 	}
 	if d.decoded {
 		forms = append([][2]string{{rec, live}}, forms...)
+		enc++
 		d.clock.whole = d.clock.whole || dclock.whole
 		// Read raw, a clock read's escapes are no words of their own: an
 		// escape's remnant glued to a clock word is one ("3A41Z" of
@@ -3001,7 +3011,7 @@ func newDrift(rec, live string, w *Window, lead bool, call time.Time, zone *time
 		}
 		d.movedRec, d.movedLive = append(d.movedRec, movedRec), append(d.movedLive, movedLive)
 	}
-	d.readIDParts(forms)
+	d.readIDParts(forms, enc)
 	// Pieces of the value in every form.
 	for _, f := range forms {
 		d.pieces = append(d.pieces, pieces(f[0], f[1])...)
@@ -4509,8 +4519,17 @@ func Named(e Earlier, vars models.MockVariables, clocks map[string]models.ClockO
 }
 
 // readIDParts sets d.idParts from the value's declared forms (recorded,
-// live), after its tokens (recTok, liveTok) are read.
-func (d *valueDrift) readIDParts(forms [][2]string) {
+// live), after its tokens (recTok, liveTok) are read. The forms from enc on
+// are the text its encoded runs decode to (b64Text), a line for each run.
+//
+// A run that decodes to text is an id of the value, and the words of that
+// text stand in the value only inside it, in another form: a word of a
+// line that holds more than the word, whose words the other side holds in
+// no reading, is a part of the run, beside the line's other words. An
+// eight-digit duration read as hex ("29782478": ")x$x") is no id of one
+// word "x" a recording may have given the application. A line that is one
+// word whole is the run whole in another form, held as an id of its own.
+func (d *valueDrift) readIDParts(forms [][2]string, enc int) {
 	for side := 0; side < 2; side++ {
 		otherTok := d.liveTok
 		if side == 1 {
@@ -4525,32 +4544,62 @@ func (d *valueDrift) readIDParts(forms [][2]string) {
 			return false
 		}
 		inside, outside := map[string]map[string]bool{}, map[string]bool{}
-		for _, f := range forms {
-			for _, id := range wordsBy(f[side], idByte) {
-				fine := map[string]bool{}
-				for _, word := range []func(byte) bool{isWord, wordByte} {
-					for _, w := range wordsBy(id, word) {
-						fine[w] = true
+		finer := func(s string) map[string]bool {
+			fine := map[string]bool{}
+			for _, word := range []func(byte) bool{isWord, wordByte} {
+				for _, w := range wordsBy(s, word) {
+					fine[w] = true
+				}
+			}
+			return fine
+		}
+		heldAny := func(ws map[string]bool) bool {
+			for w := range ws {
+				if heldByOther(w) {
+					return true
+				}
+			}
+			return false
+		}
+		addInside := func(w string, others map[string]bool) {
+			if inside[w] == nil {
+				inside[w] = map[string]bool{}
+			}
+			for o := range others {
+				if o != w {
+					inside[w][o] = true
+				}
+			}
+		}
+		for k, f := range forms {
+			lines := []string{f[side]}
+			if k >= enc {
+				lines = strings.Split(f[side], "\n")
+			}
+			for _, line := range lines {
+				// The words of a decoded line, where the run it decoded
+				// from changed whole: no word of it the other side holds.
+				var run map[string]bool
+				if k >= enc {
+					if run = finer(line); heldAny(run) {
+						run = nil
 					}
 				}
-				whole := len(fine) > 1 && !heldByOther(id)
-				for w := range fine {
-					if heldByOther(w) {
-						whole = false
-					}
-				}
-				for w := range fine {
-					if !whole || w == id {
-						outside[w] = true
-						continue
-					}
-					if inside[w] == nil {
-						inside[w] = map[string]bool{}
-					}
-					for o := range fine {
-						if o != w {
-							inside[w][o] = true
+				for _, id := range wordsBy(line, idByte) {
+					fine := finer(id)
+					whole := len(fine) > 1 && !heldByOther(id) && !heldAny(fine)
+					for w := range fine {
+						if whole && w != id {
+							addInside(w, fine)
+							continue
 						}
+						// An id of one word of a decoded line that holds
+						// more than it: a part of the run in another form.
+						if run != nil && w == id && id != line {
+							addInside(w, run)
+							continue
+						}
+						outside[w] = true
 					}
 				}
 			}

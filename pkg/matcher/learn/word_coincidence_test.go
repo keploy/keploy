@@ -569,3 +569,82 @@ func manyIDs(seed string, n int, avoid ...string) string {
 	}
 	return strings.Join(out, " ")
 }
+
+// api-server's T2 suite (s9 head-b, TestStopGenerationWhileExecuting): a
+// jobEvents insert's response.response_time, a duration in nanoseconds,
+// changed to 29782478, and keploy refused it: "a word of what record's full
+// round saw in it (a part of it in another form) appears earlier in the
+// test, in mock-2571 at body.password". The eight digits read as hex decode
+// to the text ")x$x" (b64Text), and its word "x" stood in a password hash.
+// One 8-digit number in six reads as hex text so (16.5%), and a word of one
+// or two characters of it stands in nearly every recording. A word of the
+// text a run of the value decodes to stands in the value only inside that
+// run, in another form: where the run changed whole it is a part of it, and
+// the chance rule (chanceBits) reads it as it reads a word of any id that
+// changed whole.
+//
+// Evidence stays: the run whole there, a decoded text that is one word
+// whole, a decoded word of at least 32 bits, and a decoded word beside one
+// the other side holds (a counter "n:18" of "n:17").
+func TestAShortWordOfARunsDecodedTextIsNoEvidenceWhereTheRunChangedWhole(t *testing.T) {
+	at := time.Date(2026, 10, 31, 9, 0, 0, 0, time.UTC)
+	w := &Window{
+		Rec: Span{From: at.Add(-900 * time.Millisecond), To: at},
+		F:   Span{From: at.Add(60_500 * time.Millisecond), To: at.Add(61_400 * time.Millisecond)},
+	}
+	const p = "body.docs.msgs.0.event.response.response_time"
+	if d, ok := decodeText("29782478"); !ok || d != ")x$x" {
+		t.Fatalf("29782478 read as hex: %q %v; want the text \")x$x\"", d, ok)
+	}
+	shape := func(typ Type, v string) Shape {
+		return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: typ, Value: v}}}
+	}
+	text := func(path, v string) Leaf { return Leaf{Path: path, Type: String, Value: v} }
+	// An exchange served before the call, which did not drift: of the
+	// call's own test, or an earlier test's (Run).
+	served := func(run bool, l Leaf) []Earlier {
+		return []Earlier{{Mock: "mock-2571", At: at.Add(-2 * time.Second), Run: run, Payload: payloadOf("mock-2571", at.Add(-2*time.Second)), Seen: []Seen{{Side: Response, Leaf: l, Live: l.Value}}}}
+	}
+	hash := text("body.password", "$2a$10$Qz7kP.x.Xa9bT2wLm4rTqZc8dV1yAbCdEfGhIjKlMnOpQrStUv")
+	hexOf := func(s string) string { return hex.EncodeToString([]byte(s)) }
+	for _, mode := range []struct {
+		name string
+		dc   func() *DriftCache
+	}{{"client test", clientTestCache}, {"keploy test", clockedDrifts}} {
+		for _, row := range []struct {
+			what      string
+			typ       Type
+			rec, live string
+			earlier   []Earlier
+		}{
+			{"an earlier place of the test holds a word of the number's hex reading", Number, "5586980", "29782478", served(false, hash)},
+			{"an earlier test holds a word of the number's hex reading", Number, "5586980", "29782478", served(true, hash)},
+			{"an earlier place holds a word of the recorded number's hex reading", Number, "29782478", "5586980", served(false, hash)},
+		} {
+			base := ClassifyIn(mode.dc(), []string{p}, shape(row.typ, row.live), shape(row.typ, row.rec), at, nil, nil, nil, w)[0]
+			got := ClassifyIn(mode.dc(), []string{p}, shape(row.typ, row.live), shape(row.typ, row.rec), at, row.earlier, nil, nil, w)[0]
+			named := strings.Contains(got.Why, "stands in mock-2571 at ") && strings.Contains(got.Why, " by chance: a word of ") && strings.HasSuffix(got.Why, "and keploy learns it as varying")
+			if got.Kind != base.Kind || got.Bindable != base.Bindable || got.Kind == KindNoise && !named || got.Kind != KindNoise && strings.Contains(got.Why, "mock-2571") {
+				t.Errorf("%s: %s: %s bindable=%v (%q); want as with no such exchange: %s bindable=%v, noise naming mock-2571", mode.name, row.what, got.Kind, got.Bindable, got.Why, base.Kind, base.Bindable)
+			}
+		}
+		for _, row := range []struct {
+			what      string
+			typ       Type
+			rec, live string
+			earlier   []Earlier
+		}{
+			{"the number whole", Number, "5586980", "29782478", served(false, text("body.n", "29782478"))},
+			{"a decoded text that is one word whole", String, hexOf("abce"), hexOf("abcd"), served(false, text("body.code", "abcd"))},
+			{"a decoded word of at least 32 bits", String, hexOf("k=Wm4rTq9Z;"), hexOf("k=Xa9bT2wL;"), served(false, text("body.token", "Xa9bT2wL"))},
+			{"a decoded word beside one the other side holds", String, hexOf("n:17"), hexOf("n:18"), served(false, text("body.seq", "18"))},
+		} {
+			got := ClassifyIn(mode.dc(), []string{p}, shape(row.typ, row.live), shape(row.typ, row.rec), at, row.earlier, nil, nil, w)[0]
+			variable := got.Kind == KindVariable && got.From.Mock == "mock-2571"
+			refused := got.Kind == KindUnaccounted && !got.Bindable && strings.Contains(got.Why, "mock-2571")
+			if !variable && !refused {
+				t.Errorf("FALSE GREEN? %s: %s in mock-2571: %s from %q bindable=%v (%q); want a variable of mock-2571 or refused naming it", mode.name, row.what, got.Kind, got.From.Mock, got.Bindable, got.Why)
+			}
+		}
+	}
+}

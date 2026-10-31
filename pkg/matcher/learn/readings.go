@@ -716,7 +716,8 @@ func b64DecodeAny(s string) ([]byte, bool) {
 // formsOf are the declared forms of a drifted value, recorded and live,
 // beside the value as read raw: decoded (percent and backslash escapes),
 // case-folded, and the text its encoded runs decode to (b64Text), itself
-// case-folded; and that text, recorded and live, on its own (encoded).
+// case-folded, the last forms; and that text, recorded and live, on its own
+// (encoded).
 func formsOf(rec, live, decRec, decLive string, clock clockSet) (forms [][2]string, encoded [2]string) {
 	forms = [][2]string{{decRec, decLive}}
 	fold := func(f [2]string) {
