@@ -3685,8 +3685,9 @@ func TestLearnMatchAStartUpClockReadIsReadInItsCallsWindow(t *testing.T) {
 // on F's clock, and from the recording's previous call, and holds the stamp
 // in both runs: noise, and the replay after it answers the call with a
 // third stamp. A slot the harness gave the app that moved a minute on, by
-// about the lead, lies in neither span: refused, saying no clock read by the
-// app matched it; in keploy test, where a test's own call has no window, it
+// about the lead, lies in neither span, but in both it is the app's clock
+// plus about five minutes, which this protocol's replay does not compare:
+// refused, naming that offset; in keploy test, where a test's own call has no window, it
 // is one instant whole, learned as a read of the clock, which the replay
 // after it (record's confirming round) refuses, naming the field: it is no
 // read of the clock, and record filters it there. With no app clock (no clock hooks) nothing shows the stamp is
@@ -3721,13 +3722,17 @@ func TestLearnMatchAClientTestLearnsTheAppsStampInItsWindowOnly(t *testing.T) {
 		// staged), and the test's recorded begin is given or not (begun).
 		first, begun bool
 		windowed     bool // the refusal's call had a window
+		// offset: the refusal names the field as the clock plus this
+		// offset, which this protocol's replay does not compare ("": it
+		// names no offset).
+		offset string
 	}{
-		{"the app's stamp", true, true, `"at":"` + iso(recRead) + `"`, `"at":"` + iso(read.Add(after)) + `"`, true, false, false, true},
-		{"a slot the harness gave, a minute on", true, true, `"slot":"2026-10-14T10:05Z"`, `"slot":"2026-10-14T10:06Z"`, false, false, false, true},
-		{"the slot in keploy test", false, true, `"slot":"2026-10-14T10:05Z"`, `"slot":"2026-10-14T10:06Z"`, true, false, false, true},
-		{"the app's stamp, no clock hooks", true, false, `"at":"` + iso(recRead) + `"`, `"at":"` + iso(read.Add(after)) + `"`, false, false, false, false},
-		{"the app's stamp in the recording's first call", true, true, `"at":"` + iso(recRead) + `"`, `"at":"` + iso(read.Add(after)) + `"`, true, true, true, true},
-		{"the app's stamp in the recording's first call, no recorded begin", true, true, `"at":"` + iso(recRead) + `"`, `"at":"` + iso(read.Add(after)) + `"`, false, true, false, false},
+		{"the app's stamp", true, true, `"at":"` + iso(recRead) + `"`, `"at":"` + iso(read.Add(after)) + `"`, true, false, false, true, ""},
+		{"a slot the harness gave, a minute on", true, true, `"slot":"2026-10-14T10:05Z"`, `"slot":"2026-10-14T10:06Z"`, false, false, false, true, "clock + 5m"},
+		{"the slot in keploy test", false, true, `"slot":"2026-10-14T10:05Z"`, `"slot":"2026-10-14T10:06Z"`, true, false, false, true, ""},
+		{"the app's stamp, no clock hooks", true, false, `"at":"` + iso(recRead) + `"`, `"at":"` + iso(read.Add(after)) + `"`, false, false, false, false, ""},
+		{"the app's stamp in the recording's first call", true, true, `"at":"` + iso(recRead) + `"`, `"at":"` + iso(read.Add(after)) + `"`, true, true, true, true, ""},
+		{"the app's stamp in the recording's first call, no recorded begin", true, true, `"at":"` + iso(recRead) + `"`, `"at":"` + iso(read.Add(after)) + `"`, false, true, false, false, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h, n, opts := learnOn(t)
@@ -3763,6 +3768,16 @@ func TestLearnMatchAClientTestLearnsTheAppsStampInItsWindowOnly(t *testing.T) {
 				head := field + " changed, and no clock read by the app matched it (an instant, its characters 1 to "
 				if !tc.windowed {
 					head = field + " changed, and keploy saw no read of the app's clock for its call (an instant, its characters 1 to "
+				}
+				// The slot a minute on is, in its call's window in both
+				// runs, the app's clock plus about five minutes: the refusal
+				// names that offset and why (learning legible), never only
+				// that no clock read matched it.
+				if tc.offset != "" && miss != nil {
+					head = field + " changed, and " + field + " = " + tc.offset + " ("
+					if !strings.Contains(miss.res.Why, "this protocol's replay does not compare such an offset yet") {
+						t.Fatalf("miss %+v; want %s refused as %s, which this protocol's replay does not compare", miss, field, tc.offset)
+					}
 				}
 				if got != nil || miss == nil || !strings.Contains(miss.res.Why, head) || !strings.Contains(miss.res.Why, "If your test supplies this value, have it supply the same value in every run") {
 					t.Fatalf("served %v miss %+v; want %s refused, saying keploy saw no read of the app's clock that matched it", got, miss, field)

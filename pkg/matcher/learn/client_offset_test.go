@@ -108,8 +108,8 @@ func TestAClientTestsOffsetIsRefusedWhereNoComparedOffsetReads(t *testing.T) {
 		}
 	}
 	// An offset the learn step refused: the client test's refusal names it
-	// and why (B2 of the review of ccdc38fa4: learning legible), and never
-	// binds it (S1: a clock read left unchecked).
+	// and why (learning legible), and never binds it (bound, every replay
+	// would bind it and never compare it: a clock read left unchecked).
 	named := func(name string, ln Learned, why string) {
 		t.Helper()
 		if !offsetRefused(ln, p, why) {
@@ -663,6 +663,153 @@ func TestAnOffsetIsRefusedWhereEitherRunsWindowIsTooWideForItsUnit(t *testing.T)
 		ln := c.classify(p, c.read.Add(30*time.Minute).Truncate(ms), c.fread.Add(30*time.Minute).Truncate(ms), ms, w)
 		if ln.Kind != KindUnaccounted || ln.Offset != nil || !strings.Contains(ln.Why, "its call's window (1m1s) with the offset's range and three of its cut is no narrower than the minute the offset reads in") {
 			t.Errorf("%s: %s %+v (%s); want refused, naming the window", ws.name, ln.Kind, ln.Offset, ln.Why)
+		}
+	}
+}
+
+// An application that reads its clock once, early in its test, and writes
+// that read, cut to the second, at a call 2.5 to 9 seconds later (a login's
+// authTime stored by a later insert, a createdAt taken at its handler's
+// start): in its call's window, it reads as clock - Ns at the second, a
+// look-back, but the window from each run's test begin holds it as a plain
+// read in both runs, so it is learned as that read since its test began,
+// never as the offset, in every recording (both runs' phases over their
+// second, record's full round 150 ms slower). A replay checks it from its
+// test's begin to its call, so the application's value passes whatever the
+// replay's wait between its read and its call: the same, two seconds
+// shorter (the slow calls in between are mocks that answer at once), or
+// three seconds longer. A value read before the replay's test began fails.
+func TestAnEarlyReadCutToTheSecondIsLearnedAsAReadSinceItsTestBegan(t *testing.T) {
+	ms, sec := time.Millisecond, time.Second
+	const p = "body.documents[].authTime"
+	for _, gap := range []time.Duration{2500 * ms, 3 * sec, 9 * sec} {
+		for rph := time.Duration(0); rph < sec; rph += 100 * ms {
+			for fph := time.Duration(0); fph < sec; fph += 100 * ms {
+				rcall := time.Date(2026, 10, 31, 10, 42, 14, 0, time.UTC).Add(rph)
+				fcall := rcall.Add(FullRoundLead).Truncate(sec).Add(fph)
+				rread, fread := rcall.Add(-gap), fcall.Add(-gap-150*ms)
+				c := clockOffsetCall{call: rcall, read: rread, fcall: fcall, fread: fread}
+				w := (&Window{Rec: Span{From: rcall.Add(-50 * ms), To: rcall, Began: rread.Add(-500 * ms)}, F: Span{From: fcall.Add(-50 * ms), To: fcall, Began: fread.Add(-500 * ms)}}).ComparesOffsets()
+				ln := c.classifyClient(p, secondsText(p, rread), secondsText(p, fread), w)
+				o, ok := ln.Clock()
+				if ln.Kind != KindClockRead || !ok || !o.Plain() || o.Since != models.SinceTestBegin {
+					t.Fatalf("read %s before its call, phases %v and %v: %s %+v (%s); want a plain read since its test began", gap, rph, fph, ln.Kind, ln.Offset, ln.Why)
+				}
+				for _, extra := range []time.Duration{-2 * sec, -1500 * ms, -1 * sec, 0, 1200 * ms, 2 * sec, 3 * sec} {
+					for ph := time.Duration(0); ph < sec; ph += 50 * ms {
+						to := rcall.Add(72 * time.Hour).Truncate(sec).Add(ph)
+						read := to.Add(-gap - extra)
+						s := Span{From: to.Add(-50 * ms), To: to, Began: read.Add(-500 * ms)}
+						if got, why := CheckClockRead(p, o, secondsText(p, read), s, true); !got {
+							t.Fatalf("FALSE RED: read %s before its call, a replay %+v longer, %v into its second: %s", gap, extra, ph, why)
+						}
+						if got, _ := CheckClockRead(p, o, secondsText(p, read.Add(-3*sec)), s, true); got {
+							t.Fatalf("FALSE GREEN: read %s before its call, a replay %+v longer: a value read 2.5 s before its test began passes", gap, extra)
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+// api-server's endpoint poll (dirtyAt <= now - 2s, firstDirtyAt <= now -
+// 30s, an epoch's seconds), read at its call, in a test begun a second
+// before it: each value lies before the test's begin in both runs, which no
+// read since the test began explains, so it is learned as the look-back it
+// names, checked at the second in its call's window, and a replay that drops
+// the look-back (a plain read) fails at every phase. In a test begun five
+// seconds before its poll, now - 2s lies after the begin in both runs: it is
+// learned as a read since its test began, which passes a replay's look-back
+// wherever its test began two seconds or more before it, and a plain read
+// too (the cost of the rule that never lets a verdict turn on load: an
+// application's early read and a look-back look the same there); now - 30s
+// is still the look-back.
+func TestAPollsLookBackBeforeItsTestBeganIsLearnedAsTheOffset(t *testing.T) {
+	ms, sec := time.Millisecond, time.Second
+	const p = "body.cmd.query.$and[].$or[].dirtyAt.$lte"
+	for _, row := range []struct {
+		back, began time.Duration
+		since       bool // learned as a read since its test began
+	}{
+		{2 * sec, sec, false},
+		{30 * sec, sec, false},
+		{2 * sec, 5 * sec, true},
+		{30 * sec, 5 * sec, false},
+	} {
+		for rph := time.Duration(0); rph < sec; rph += 100 * ms {
+			rcall := time.Date(2026, 10, 31, 10, 42, 14, 0, time.UTC).Add(rph)
+			fcall := rcall.Add(FullRoundLead + 37*ms)
+			c := clockOffsetCall{call: rcall, read: rcall.Add(-ms), fcall: fcall, fread: fcall.Add(-ms)}
+			w := (&Window{Rec: Span{From: rcall.Add(-61 * ms), To: rcall, Began: rcall.Add(-row.began)}, F: Span{From: fcall.Add(-131 * ms), To: fcall, Began: fcall.Add(-row.began)}}).ComparesOffsets()
+			ln := c.classifyClient(p, secondsText(p, c.read.Add(-row.back)), secondsText(p, c.fread.Add(-row.back)), w)
+			o, ok := ln.Clock()
+			if row.since {
+				if ln.Kind != KindClockRead || !ok || !o.Plain() || o.Since != models.SinceTestBegin {
+					t.Fatalf("now - %s, begun %s before, phase %v: %s %+v (%s); want a read since its test began", row.back, row.began, rph, ln.Kind, ln.Offset, ln.Why)
+				}
+				continue
+			}
+			if lo, hi := o.CutOffsets(); ln.Kind != KindClockOffset || !ok || o.Since != "" || lo > -row.back || hi < -row.back {
+				t.Fatalf("now - %s, begun %s before, phase %v: %s %+v (%s); want the look-back of %s in its call's window", row.back, row.began, rph, ln.Kind, ln.Offset, ln.Why, row.back)
+			}
+			for _, rw := range []time.Duration{61 * ms, 131 * ms, 700 * ms} {
+				for ph := time.Duration(0); ph < sec; ph += 10 * ms {
+					from := rcall.Add(72 * time.Hour).Truncate(sec).Add(ph)
+					s := Span{From: from, To: from.Add(rw), Began: from.Add(-row.began)}
+					if got, why := CheckClockRead(p, o, secondsText(p, s.To.Add(-row.back)), s, true); !got {
+						t.Fatalf("FALSE RED: now - %s, a replay's window %s, %v into its second: %s", row.back, rw, ph, why)
+					}
+					if got, _ := CheckClockRead(p, o, secondsText(p, s.To), s, true); got {
+						t.Fatalf("FALSE GREEN: now - %s, a replay's window %s, %v into its second: a plain read passes", row.back, rw, ph)
+					}
+				}
+			}
+		}
+	}
+}
+
+// The poll's look-backs at the recording's real phase (.680), its windows
+// 61 ms, with record's full round reaching its poll 1.3 to 2 s sooner after
+// its begin than the recording did: the two values of now - 2s, and of now
+// - 30s, stand a whole minute apart. At the minute no offset holds both
+// runs (each value stands within a minute of its read, on both sides of
+// it), so the offset is read at the values' own cut, the second, and
+// learned as the look-back it names, never refused for the two cuts. A
+// replay passes the application's value and fails a plain read.
+func TestAPollsValuesAWholeMinuteApartAreLearnedAtTheSecond(t *testing.T) {
+	ms, sec := time.Millisecond, time.Second
+	const p = "body.cmd.query.$and[].$or[].dirtyAt.$lte"
+	for _, back := range []time.Duration{2 * sec, 30 * sec} {
+		apart := 0
+		for d := -2 * sec; d <= -1300*ms; d += 100 * ms {
+			rcall := time.Date(2026, 10, 31, 10, 42, 14, 680e6, time.UTC)
+			fcall := rcall.Add(FullRoundLead + d)
+			c := clockOffsetCall{call: rcall, read: rcall.Add(-ms), fcall: fcall, fread: fcall.Add(-ms)}
+			w := (&Window{Rec: Span{From: rcall.Add(-61 * ms), To: rcall}, F: Span{From: fcall.Add(-61 * ms), To: fcall}}).ComparesOffsets()
+			rv, fv := c.read.Add(-back).Truncate(sec), c.fread.Add(-back).Truncate(sec)
+			if fv.Sub(rv)%time.Minute != 0 {
+				continue
+			}
+			apart++
+			ln := c.classifyClient(p, secondsText(p, rv), secondsText(p, fv), w)
+			o, ok := ln.Clock()
+			if lo, hi := o.CutOffsets(); ln.Kind != KindClockOffset || !ok || o.Res != sec || lo > -back || hi < -back {
+				t.Fatalf("now - %s, record's full round %v sooner, its values %s apart: %s %+v (%s); want the look-back of %s at the second", back, -d, fv.Sub(rv), ln.Kind, ln.Offset, ln.Why, back)
+			}
+			for ph := time.Duration(0); ph < sec; ph += 10 * ms {
+				from := rcall.Add(72 * time.Hour).Truncate(sec).Add(ph)
+				s := Span{From: from, To: from.Add(61 * ms)}
+				if got, why := CheckClockRead(p, o, secondsText(p, s.To.Add(-back)), s, true); !got {
+					t.Fatalf("FALSE RED: now - %s, %v into its second: %s", back, ph, why)
+				}
+				if got, _ := CheckClockRead(p, o, secondsText(p, s.To), s, true); got {
+					t.Fatalf("FALSE GREEN: now - %s, %v into its second: a plain read passes", back, ph)
+				}
+			}
+		}
+		if apart == 0 {
+			t.Fatalf("now - %s: no timing put its two values a whole minute apart", back)
 		}
 	}
 }

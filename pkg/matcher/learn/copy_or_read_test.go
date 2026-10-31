@@ -737,8 +737,13 @@ func TestAClientTestLearnsACopyThatIsAlsoAnOffsetOfAGivenInstantAsAReadSinceItsT
 // holds under both, as for a plain read (the row above). Replays inside their
 // test and at its begin pass, for epoch seconds and a typed instant to the
 // second; one a day before its test, one that keeps the recorded value, and
-// one a day longer miss. A value its own window does not hold, a window with
-// no test begin, and ClassifyGiven stay refused by the offset rule.
+// one a day longer miss. A value read two seconds before its call's window
+// shows, in that window, an offset checked at its cut (clock + 719h59m58s at
+// the second) that measures the wait as much as the time to live: it is
+// read again from each run's test begin, as the clock plus thirty days read
+// after its test began, which holds a replay's read anywhere in its test,
+// at its call too; one a day longer misses. A window with no test begin and
+// ClassifyGiven stay refused by the offset rule.
 func TestAClientTestLearnsAnOffsetOfAGivenInstantThatIsItsOwnClockPlusAnOffsetAsThatOffsetSinceItsTestBegan(t *testing.T) {
 	const p = "body.cmd.documents.0.app.expiresAt"
 	const month = 30 * 24 * time.Hour
@@ -816,12 +821,33 @@ func TestAClientTestLearnsAnOffsetOfAGivenInstantThatIsItsOwnClockPlusAnOffsetAs
 				r, f             copyOrReadRun
 				began, following bool
 			}{
-				{"a value its own window does not hold", early(rec), early(f), true, true},
 				{"a call whose window knows no test begin", rec, f, false, true},
 				{"the rule's absence (ClassifyGiven)", rec, f, true, false},
 			} {
 				if ln := learn(fm, c.r, c.f, c.began, c.following); ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, offsetRule) || !strings.Contains(ln.Why, "mock-3") || !strings.Contains(ln.Why, "mock-11") {
 					t.Fatalf("%s: %s Offset=%+v (%s); want refused by the offset rule, naming mock-3 and mock-11", c.name, ln.Kind, ln.Offset, ln.Why)
+				}
+			}
+			ln = learn(fm, early(rec), early(f), true, true)
+			if o, ok = ln.Clock(); ln.Kind != KindClockOffset || !ok || o.Min > month || o.Max <= month || o.Since != models.SinceTestBegin {
+				t.Fatalf("a value its own window does not hold: %s Offset=%+v (%s); want the clock plus thirty days, read again since the test began", ln.Kind, ln.Offset, ln.Why)
+			}
+			for _, r := range []struct {
+				name string
+				at   func(r copyOrReadRun) time.Time
+				want bool
+			}{
+				{"replay with its read two seconds before its call", value, true},
+				{"replay with its read at its call", func(r copyOrReadRun) time.Time { return r.at(r.audit).Add(month) }, true},
+				{"replay with its read at its test's begin", func(r copyOrReadRun) time.Time { return r.began.Add(month) }, true},
+				{"replay with a time to live a day longer", func(r copyOrReadRun) time.Time { return value(r).Add(24 * time.Hour) }, false},
+				{"replay that keeps the recorded value", func(copyOrReadRun) time.Time { return value(early(rec)) }, false},
+			} {
+				for _, base := range []time.Duration{0, 800 * time.Millisecond} {
+					x := early(rp(base))
+					if ok, why := CheckClockRead(p, o, fm.leaf(r.at(x)), x.window(true), true); ok != r.want {
+						t.Fatalf("a value its own window does not hold, %s (%v past a second): CheckClockRead = %v (%s); want %v", r.name, base, ok, why, r.want)
+					}
 				}
 			}
 		})
@@ -842,9 +868,12 @@ func TestAClientTestLearnsAnOffsetOfAGivenInstantThatIsItsOwnClockPlusAnOffsetAs
 // timings of the full round (in one minute, and across one, where no word of
 // the full round's value stands in its cookie). Replays a second apart pass;
 // a value that keeps the recorded one, a day longer, or thirty days after a
-// read a day before its test miss. ClassifyGiven, a window with no test
-// begin, and a value its own window does not hold stay the variable of
-// mock-1; and a word of two characters the value really copies from an
+// read a day before its test miss. ClassifyGiven and a window with no test
+// begin stay the variable of mock-1; a value read two seconds before its
+// call's window is read again from each run's test begin, as the clock plus
+// thirty days read after its test began (its call's window shows an offset
+// checked at its cut that measures the wait as much as the time to live),
+// which a replay's read anywhere in its test passes; and a word of two characters the value really copies from an
 // earlier answer (a region code) stays a variable of that answer, never an
 // offset, a read, or noise.
 func TestAClientTestLearnsAnExpiryALoginsCookieHoldsAWordOfAsTheClockPlusItsOffsetSinceItsTestBegan(t *testing.T) {
@@ -931,10 +960,31 @@ func TestAClientTestLearnsAnExpiryALoginsCookieHoldsAWordOfAsTheClockPlusItsOffs
 				}{
 					{"the rule's absence (ClassifyGiven)", rec, f.run, true, false},
 					{"a call whose window knows no test begin", rec, f.run, false, true},
-					{"a value its own window does not hold", run{began: rec.began, read: -2 * time.Second}, run{began: f.run.began, read: -2 * time.Second}, true, true},
 				} {
 					if ln := learn(c.r, c.f, c.began, c.following); ln.Kind != KindVariable || ln.From.Mock != "mock-1" || ln.From.Held != "59" {
 						t.Fatalf("%s: %s Offset=%+v from %+v held %q (%s); want the variable of mock-1 holding \"59\", as before", c.name, ln.Kind, ln.Offset, ln.From, ln.From.Held, ln.Why)
+					}
+				}
+				two := func(x run) run { x.read = -2 * time.Second; return x }
+				ln = learn(two(rec), two(f.run), true, true)
+				if o, ok = ln.Clock(); ln.Kind != KindClockOffset || !ok || o.Min > month || o.Max <= month || o.Since != models.SinceTestBegin {
+					t.Fatalf("a value its own window does not hold: %s Offset=%+v from %+v (%s); want the clock plus thirty days, read again since the test began", ln.Kind, ln.Offset, ln.From, ln.Why)
+				}
+				for _, c := range []struct {
+					name      string
+					read, ttl time.Duration
+					want      bool
+				}{
+					{"replay with its read two seconds before its call", -2 * time.Second, month, true},
+					{"replay with its read at its call", 0, month, true},
+					{"replay with its read six seconds before its call", -6 * time.Second, month, true},
+					{"replay with a time to live a day longer", -2 * time.Second, month + 24*time.Hour, false},
+				} {
+					for _, base := range []time.Duration{0, 800 * time.Millisecond} {
+						x := run{began: time.Date(2026, 10, 28, 9, 0, 0, 0, time.UTC).Add(base), read: c.read}
+						if ok, why := CheckClockRead(p, o, leaf(call(x).Add(c.read+c.ttl)), span(x, true), true); ok != c.want {
+							t.Fatalf("a value its own window does not hold, %s (%v past a second): CheckClockRead = %v (%s); want %v", c.name, base, ok, why, c.want)
+						}
 					}
 				}
 				// The re-read sets aside the searches for a source only: a

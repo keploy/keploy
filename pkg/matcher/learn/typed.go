@@ -562,7 +562,7 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 	// earlier stands from the window by how long ago it was made; cut to a
 	// second or coarser, it is checked at the cut, as a poll's dirtyAt <=
 	// now - 2s is (clockOffset).
-	off, cutWhy, cutGap, offset := offsetReading(fieldName(ln.Recorded), rt, lt, w, dc.zone)
+	off, cutGap, offset := offsetReading(rt, lt, w, dc.zone)
 	var tried Learned
 	if offset {
 		if tried = dc.clockOffset(ln, off, max(rt.res, lt.res), cutGap, w, unread, rec, resp); tried.Kind == KindClockOffset {
@@ -585,17 +585,6 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 		}
 		if offset && off.Min > 0 {
 			return tried
-		}
-		// An offset the values' cut leaves ambiguous where no offset at the
-		// gap's step holds both runs (a look-back within one step of its
-		// read: offsetReading) is refused naming both cuts, in a client test
-		// with its own correction added (clientOffsetRefusedWhy).
-		if cutWhy != "" {
-			ln.Kind, ln.Why = KindUnaccounted, cutWhy
-			if dc.clientTests {
-				ln.Why = clientOffsetRefusedWhy(cutWhy)
-			}
-			return ln
 		}
 		why := instantNotClock
 		switch {
@@ -708,8 +697,8 @@ func (dc *DriftCache) noWindowRead(r, l typedInstant, w *Window, at time.Time) b
 // in zone too (the application's, nil where keploy cannot read it), where it
 // learns one; false where it learns none or refuses the cut it reads.
 func clockOffsetOf(r, l typedInstant, w *Window, zone *time.Location) (models.ClockOffset, bool) {
-	o, why, _, ok := offsetReading("", r, l, w, zone)
-	return o, ok && why == ""
+	o, _, ok := offsetReading(r, l, w, zone)
+	return o, ok
 }
 
 // offsetReading is the offset (models.ClockOffset) r and l, an instant as
@@ -740,10 +729,12 @@ func clockOffsetOf(r, l typedInstant, w *Window, zone *time.Location) (models.Cl
 // a thousand), show it; a fast call's never do (FullRoundLead keeps its gap
 // off every step). Where no offset at the step holds both (a look-back
 // within one step of its read, which at the step stands on both sides of
-// it) but the values' own cut puts one in both runs, a check at that cut
-// would fail a writer that cuts to the step by where its read fell, and
-// one at the step has no offset to check: refused, why naming both cuts
-// (cutAmbiguousWhy).
+// it: a poll's dirtyAt <= now - 2s, its two values a whole minute apart),
+// the offset the values' own cut puts in both runs, checked at that cut,
+// never refused for the step it might have been cut to (founder decision,
+// 2026-10-27: a cut is checked, never refused): an application that cut its
+// value to the step and added an offset of no whole number of it then fails
+// a replay by where its read fell, a false red, never a false green.
 //
 // A cut coarser than a minute (an hour, a day), which a zone's offset
 // moves, is learned as any other, checked at the cut (founder decision,
@@ -774,11 +765,10 @@ func clockOffsetOf(r, l typedInstant, w *Window, zone *time.Location) (models.Cl
 // offset as much as by one the application adds, which keploy cannot tell
 // apart, and a time of day names no day. One of two forms, outside the
 // years a recording's clock reads (inClockRange), one that did not move,
-// or of a call with no window shows none, and no why. path names the place
-// in why.
-func offsetReading(path string, r, l typedInstant, w *Window, zone *time.Location) (models.ClockOffset, string, time.Duration, bool) {
+// or of a call with no window shows none.
+func offsetReading(r, l typedInstant, w *Window, zone *time.Location) (models.ClockOffset, time.Duration, bool) {
 	if w == nil || r.names != namesMoment || l.names != namesMoment || !inClockRange(r.at) || !inClockRange(l.at) || r.at.Equal(l.at) {
-		return models.ClockOffset{}, "", 0, false
+		return models.ClockOffset{}, 0, false
 	}
 	enc := max(r.res, l.res)
 	cut := zonedRes(enc, r.at, l.at, false, zone)
@@ -794,17 +784,21 @@ func offsetReading(path string, r, l typedInstant, w *Window, zone *time.Locatio
 		// passes either, and never turns on which it is (founder decision,
 		// 2026-10-27: a cut is checked, never refused).
 		if so, sok := offsetAt(r, l, w, step); sok {
-			return so, "", gap.Abs(), true
+			return so, gap.Abs(), true
 		}
-		if ok {
-			return models.ClockOffset{}, cutAmbiguousWhy(path, o, gap, step), 0, false
-		}
-		return models.ClockOffset{}, "", 0, false
+		// No offset at the step holds both runs (a look-back within one
+		// step of its read stands on both sides of it there), but the
+		// values' own cut puts one in both: that offset, checked at that
+		// cut, never refused for the step it might have been cut to
+		// (founder decision, 2026-10-27: a cut is checked, never refused).
+		// An application that cut its value to the step and added an
+		// offset of no whole number of it fails a replay by where its read
+		// fell, a false red, never a false green.
 	}
 	if !ok {
-		return models.ClockOffset{}, "", 0, false
+		return models.ClockOffset{}, 0, false
 	}
-	return o, "", 0, true
+	return o, 0, true
 }
 
 // offsetAt is the offset r and l stand at from a read of each run's clock
@@ -839,20 +833,6 @@ func offsetAt(r, l typedInstant, w *Window, res time.Duration) (models.ClockOffs
 	}
 	o := models.ClockOffset{Min: max(rlo, llo), Max: min(rhi, lhi), Res: res, Layout: models.LayoutTyped}
 	return o, o.Min < o.Max
-}
-
-// cutAmbiguousWhy is why an instant at the clock plus the offset off, read
-// at the cut its two values show, is refused where they stand gap apart, a
-// whole number of a coarser step (offsetReading), and no offset at the step
-// holds both runs: an application that cuts to the step and adds an offset
-// of no whole number of it writes them too, a check at the values' own cut
-// would fail its values by where its read fell, and at the step the value
-// stands within one step of its read, on both sides of it in the runs'
-// windows (a look-back shorter than the step), where no offset on one side
-// of the read holds both runs, so keploy has none to check there.
-func cutAmbiguousWhy(path string, off models.ClockOffset, gap, step time.Duration) string {
-	c := models.ShortDuration(step)
-	return clockOffsetSeen(path, off) + " at a cut of " + models.ShortDuration(off.Res) + ", but its two values stand " + models.ShortDuration(gap) + " apart, a whole number of " + c + ": an application that cuts its value to " + c + " and adds an offset that is no whole number of it writes such values too, which a check at the cut of " + models.ShortDuration(off.Res) + " would fail by where its read fell, and at the cut of " + c + " the value stands within one " + c + " of its read in the runs' windows, where no offset on one side of the read holds both runs, so keploy has no offset to check at that cut, and refuses it. Record the test again (record's full round then reads its clock at another moment); if the field is a time the application reads from its own clock with no rule, declare it noise in keploy.yml, and keploy stops comparing it"
 }
 
 // gapCutWhy is what a KindClockOffset's Why adds where the learn step read
@@ -1062,9 +1042,7 @@ func (dc *DriftCache) clockOffset(ln Learned, off models.ClockOffset, enc, cutGa
 // refused it for, which a client test's refusal names instead
 // (clientOffsetRefusedWhy: learning legible): clockOffset's reason (an
 // offset that reads in less than a second, or in seconds at no cut; one
-// too wide for its unit; a turn of the clocks), or, where the cut the two
-// values show leaves the offset ambiguous, offsetReading's
-// (cutAmbiguousWhy, naming both cuts). The value may then be a read of the
+// too wide for its unit; a turn of the clocks). The value may then be a read of the
 // application's clock, so the caller never binds it (Learned.Bindable).
 func (dc *DriftCache) textClockOffset(r, l Leaf, v *valueDrift, w *Window, resp []Leaf) (got Learned, refusedWhy string, ok bool) {
 	rat, rres, rwall, okR := readClockTextWall(r.Value)
@@ -1076,9 +1054,9 @@ func (dc *DriftCache) textClockOffset(r, l Leaf, v *valueDrift, w *Window, resp 
 	if lay == "" || lay == models.LayoutApart {
 		return Learned{}, "", false
 	}
-	off, cutWhy, cutGap, ok := offsetReading(fieldName(r), typedInstant{at: rat, res: rres, names: namesMoment}, typedInstant{at: lat, res: lres, names: namesMoment}, w, dc.zone)
+	off, cutGap, ok := offsetReading(typedInstant{at: rat, res: rres, names: namesMoment}, typedInstant{at: lat, res: lres, names: namesMoment}, w, dc.zone)
 	if !ok {
-		return Learned{}, cutWhy, false
+		return Learned{}, "", false
 	}
 	// The recorded moment the echo check reads the call's answer for.
 	for _, p := range v.instants {
@@ -1097,8 +1075,8 @@ func (dc *DriftCache) textClockOffset(r, l Leaf, v *valueDrift, w *Window, resp 
 // clientOffsetRefusedWhy is a client test's refusal of a changed instant
 // whose two values its call's window holds as a read of the application's
 // clock plus an offset the learn step refused (refusedWhy, textClockOffset's:
-// clockOffset's reason, or cutAmbiguousWhy's, each naming the offset, what
-// it was refused for and how to correct it): it names that, never only that
+// clockOffset's reason, naming the offset, what it was refused for and how
+// to correct it): it names that, never only that
 // no clock read matched it (learning legible), and adds the client test's
 // own correction, for a value the test's harness supplies.
 func clientOffsetRefusedWhy(refusedWhy string) string {

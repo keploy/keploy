@@ -2074,9 +2074,10 @@ func TestAReasonSaysWhatSetTheResolution(t *testing.T) {
 }
 
 // An offset's cut (offsetReading) is the one both values show; where their
-// gap is a whole multiple of a coarser step, that step where the values'
-// own cut puts no offset in both runs, and refused, naming both, where it
-// does. Uncut millisecond values a fast call's lead apart: the
+// gap is a whole multiple of a coarser step, that step where an offset at
+// it holds both runs, and the values' own cut where none does, never
+// refused for the cut (a poll's now - 2s in seconds, its two values a whole
+// minute apart: the second). Uncut millisecond values a fast call's lead apart: the
 // millisecond; two whole seconds, a fast call's: the second; a minute's
 // start plus 30m30s, narrow windows: the minute (the second holds no one
 // offset); 10 ms values at a microsecond's encoding: 10 ms; at a
@@ -2091,6 +2092,12 @@ func TestAnOffsetsCutIsTheOneItsValuesShowOrItsGapsWhereTheirsHoldsNone(t *testi
 	read := time.Date(2026, 10, 26, 11, 14, 17, 123e6, time.UTC)
 	fread := read.Add(FullRoundLead)
 	narrow := &Window{Rec: Span{From: read.Add(-20 * ms), To: read.Add(20 * ms)}, F: Span{From: fread.Add(-20 * ms), To: fread.Add(20 * ms)}}
+	// A poll's: the recording's read at .680, record's full round's a minute
+	// and 300 ms later, so its value, cut to the second, stands a whole
+	// minute after the recording's, each run's window 40 ms wide.
+	poll := time.Date(2026, 10, 31, 10, 42, 14, 680e6, time.UTC)
+	fpoll := poll.Add(time.Minute + 300*ms)
+	polls := &Window{Rec: Span{From: poll.Add(-20 * ms), To: poll.Add(20 * ms)}, F: Span{From: fpoll.Add(-20 * ms), To: fpoll.Add(20 * ms)}}
 	in := func(at time.Time, enc time.Duration) typedInstant {
 		return typedInstant{at: at, res: enc, names: namesMoment}
 	}
@@ -2100,19 +2107,19 @@ func TestAnOffsetsCutIsTheOneItsValuesShowOrItsGapsWhereTheirsHoldsNone(t *testi
 		a, b time.Time
 		w    *Window
 		want time.Duration
-		why  string
 	}{
-		{"uncut, a fast call's lead apart", ms, read.Add(time.Hour), fread.Add(time.Hour), narrow, ms, ""},
-		{"two whole seconds", ms, read.Add(time.Hour).Truncate(sec), fread.Add(time.Hour).Truncate(sec), narrow, sec, ""},
-		{"a minute's start plus 30m30s", sec, read.Truncate(min).Add(30*min + 30*sec), fread.Truncate(min).Add(30*min + 30*sec), narrow, min, ""},
-		{"10 ms at a microsecond's encoding", us, read.Add(time.Hour).Truncate(10 * ms), fread.Add(time.Hour).Truncate(10 * ms), narrow, 10 * ms, ""},
-		{"10 ms at a millisecond's encoding", ms, read.Add(time.Hour).Truncate(10 * ms), fread.Add(time.Hour).Truncate(10 * ms), narrow, ms, ""},
-		{"an hour cut on the half hour, plus two hours", ms, time.Date(2026, 10, 26, 13, 30, 0, 0, time.UTC), time.Date(2026, 10, 26, 14, 30, 0, 0, time.UTC), &Window{Rec: Span{From: time.Date(2026, 10, 26, 12, 29, 58, 950e6, time.UTC), To: time.Date(2026, 10, 26, 12, 29, 59, 50e6, time.UTC)}, F: Span{From: time.Date(2026, 10, 26, 12, 31, 0, 495e6, time.UTC), To: time.Date(2026, 10, 26, 12, 31, 0, 595e6, time.UTC)}}, time.Hour, ""},
-		{"a value that did not move", ms, read.Add(time.Hour), read.Add(time.Hour), narrow, 0, ""},
+		{"uncut, a fast call's lead apart", ms, read.Add(time.Hour), fread.Add(time.Hour), narrow, ms},
+		{"two whole seconds", ms, read.Add(time.Hour).Truncate(sec), fread.Add(time.Hour).Truncate(sec), narrow, sec},
+		{"a minute's start plus 30m30s", sec, read.Truncate(min).Add(30*min + 30*sec), fread.Truncate(min).Add(30*min + 30*sec), narrow, min},
+		{"10 ms at a microsecond's encoding", us, read.Add(time.Hour).Truncate(10 * ms), fread.Add(time.Hour).Truncate(10 * ms), narrow, 10 * ms},
+		{"10 ms at a millisecond's encoding", ms, read.Add(time.Hour).Truncate(10 * ms), fread.Add(time.Hour).Truncate(10 * ms), narrow, ms},
+		{"an hour cut on the half hour, plus two hours", ms, time.Date(2026, 10, 26, 13, 30, 0, 0, time.UTC), time.Date(2026, 10, 26, 14, 30, 0, 0, time.UTC), &Window{Rec: Span{From: time.Date(2026, 10, 26, 12, 29, 58, 950e6, time.UTC), To: time.Date(2026, 10, 26, 12, 29, 59, 50e6, time.UTC)}, F: Span{From: time.Date(2026, 10, 26, 12, 31, 0, 495e6, time.UTC), To: time.Date(2026, 10, 26, 12, 31, 0, 595e6, time.UTC)}}, time.Hour},
+		{"a value that did not move", ms, read.Add(time.Hour), read.Add(time.Hour), narrow, 0},
+		{"a look-back of 2 s in seconds, its values a whole minute apart", sec, poll.Add(-2 * sec).Truncate(sec), fpoll.Add(-2 * sec).Truncate(sec), polls, sec},
 	} {
-		o, why, _, ok := offsetReading("p", in(row.a, row.enc), in(row.b, row.enc), row.w, nil)
-		if row.want != 0 && (!ok || why != "" || o.Res != row.want) || row.want == 0 && (ok || !strings.Contains(why, row.why) || (row.why == "") != (why == "")) {
-			t.Errorf("%s: %+v %v (%s); want the cut %s, why %q", row.name, o, ok, why, row.want, row.why)
+		o, _, ok := offsetReading(in(row.a, row.enc), in(row.b, row.enc), row.w, nil)
+		if row.want != 0 && (!ok || o.Res != row.want) || row.want == 0 && ok {
+			t.Errorf("%s: %+v %v; want the cut %s", row.name, o, ok, row.want)
 		}
 	}
 }
@@ -3550,11 +3557,16 @@ func TestMillisecondValuesAWholeNumberOfSecondsApartAreCheckedAtTheSecond(t *tes
 	}
 	// A look-back of 300 ms, its values 1m49s apart: at the second the value
 	// stands within one second of its read, on both sides of it in the
-	// runs' windows, so no offset there holds both runs, and the
-	// millisecond's check would fail a writer that cuts to the second by
-	// where its read fell: refused, naming both cuts.
-	if ln := c.classify(p, read.Add(-300*ms), fread.Add(-300*ms), ms, w); ln.Kind != KindUnaccounted || ln.Offset != nil || !strings.Contains(ln.Why, "but its two values stand 1m49s apart, a whole number of 1s") || !strings.Contains(ln.Why, "so keploy has no offset to check at that cut, and refuses it") {
-		t.Errorf("FALSE GREEN? a look-back of 300 ms, its values 1m49s apart: %s %+v (%s); want refused, naming both cuts", ln.Kind, ln.Offset, ln.Why)
+	// runs' windows, so no offset there holds both runs, and the offset is
+	// read at the values' own cut, the millisecond, never refused for the
+	// cut: an offset that reads in less than a second is refused as any
+	// look-back of 300 ms is (a read made before its window), never for the
+	// two cuts.
+	if ln := c.classify(p, read.Add(-300*ms), fread.Add(-300*ms), ms, w); ln.Kind != KindUnaccounted || ln.Offset != nil || strings.Contains(ln.Why, "a whole number of 1s") {
+		t.Errorf("a look-back of 300 ms, its values 1m49s apart: %s %+v (%s); want refused as a look-back of 300 ms, never for the cut", ln.Kind, ln.Offset, ln.Why)
+	}
+	if ln := c.classifyClient(p, InstantLeaf(p, p, read.Add(-300*ms), ms), InstantLeaf(p, p, fread.Add(-300*ms), ms), w); ln.Kind != KindUnaccounted || ln.Offset != nil || !strings.Contains(ln.Why, p+" = clock plus an offset from -301ms to -298ms") || !strings.Contains(ln.Why, "the offset reads in milliseconds") || strings.Contains(ln.Why, "a whole number of 1s") {
+		t.Errorf("a client test's look-back of 300 ms, its values 1m49s apart: %s %+v (%s); want refused naming the offset, which reads in milliseconds, never the cut", ln.Kind, ln.Offset, ln.Why)
 	}
 	// A replay's call, its window 50 ms wide, its read anywhere in a second.
 	for phase := time.Duration(0); phase < sec; phase += 25 * ms {
