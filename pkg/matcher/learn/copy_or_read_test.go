@@ -379,9 +379,10 @@ func TestAClientTestLearnsAnOffsetOfAGivenInstantItsOwnWindowHoldsAsAReadSinceIt
 // refuses each: classifyInstant, classifyRead).
 //
 // Where neither run's own window holds the read (read two seconds before the
-// call before it in both), where a window knows no test begin, and under
-// ClassifyGiven (the proven switch off), it stays refused, naming mock-3 and
-// mock-11.
+// call before it in both), where a window knows no test begin, under
+// ClassifyGiven (the proven switch off), and where an answer earlier in the
+// test that F served as recorded holds the recorded second (a source the
+// rescue's reading keeps), it stays refused, naming mock-3 and mock-11.
 func TestAClientTestLearnsAnOffsetOfAGivenInstantOneRunsOwnWindowHoldsAsAReadSinceItsTestBegan(t *testing.T) {
 	const p = "body.docs.msgs.0.app.createdAt.$numberLong"
 	const gap = 11484*time.Hour + 35*time.Minute + 49*time.Second
@@ -410,12 +411,13 @@ func TestAClientTestLearnsAnOffsetOfAGivenInstantOneRunsOwnWindowHoldsAsAReadSin
 		{"epoch seconds", func(at time.Time) Leaf { return Leaf{Path: p, Noise: p, Type: Number, Value: secs(at)} }},
 		{"a typed instant to the second", func(at time.Time) Leaf { return InstantLeaf(p, p, at.Truncate(time.Second), time.Second) }},
 	}
-	learn := func(fm form, r, f copyOrReadRun, began, following, earlierTest bool) Learned {
+	learn := func(fm form, r, f copyOrReadRun, began, following, earlierTest bool, more ...Raw) Learned {
 		dc := clientTestCache()
 		raw := []Raw{
 			dc.RawOf(stamp("mock-3", r.at(r.audited).Add(-gap), r.began.Add(-6*time.Minute)), true),
 			dc.RawOf(stamp("mock-11", f.at(f.audited).Add(-gap), r.began.Add(-5*time.Minute)), true),
 		}
+		raw = append(raw, more...)
 		var earlier []Earlier
 		if earlierTest {
 			// An earlier test's insert of its own app, recorded in the
@@ -494,6 +496,21 @@ func TestAClientTestLearnsAnOffsetOfAGivenInstantOneRunsOwnWindowHoldsAsAReadSin
 				t.Fatalf("%s, %s: %s Read=%+v (%s); want refused by the offset rule, naming mock-3 and mock-11", fm.name, c.name, ln.Kind, ln.Read, ln.Why)
 			}
 		}
+	}
+	// A dependency's answer earlier in the test, which F served as
+	// recorded, holding the recorded second whole: read without the offset
+	// rule in the recording's own window, the value is a copy of it there,
+	// not a read of the clock, and the rescue takes a read of the clock
+	// alone, so the value stays refused. Read without the source search too
+	// (as the copy rule reads a value already learned as a copy), it would
+	// be learned as a read since its test began, past a source no rule set
+	// aside.
+	held := r1Receive(`{"createdAt": "` + secs(rec.at(rec.audited)) + `"}`)
+	held.Name = "mock-h"
+	held.Spec.HTTPResp.Header["Date"] = "Thu, 22 Oct 2026 03:02:51 GMT"
+	held.Spec.ReqTimestampMock, held.Spec.ResTimestampMock = rec.at(3*time.Millisecond), rec.at(4*time.Millisecond)
+	if ln := learn(forms[0], rec, f, true, true, false, RawOf(held, true).ServedAs(3).ServedAsRecorded()); ln.Kind != KindUnaccounted || !ln.byOffset || !strings.Contains(ln.Why, offsetRule) || !strings.Contains(ln.Why, "mock-3") || !strings.Contains(ln.Why, "mock-11") {
+		t.Fatalf("an answer F served as recorded holds the recorded second: %s Read=%+v from %+v (%s); want refused by the offset rule, naming mock-3 and mock-11", ln.Kind, ln.Read, ln.From, ln.Why)
 	}
 }
 
