@@ -232,6 +232,16 @@ func (n learnNoise) shape(p httpParts, d string) learn.Shape {
 			continue
 		}
 		add("header."+k, v, false)
+		// A header holding a JWT (alone or after its scheme) is also read
+		// by what the token says (learn.JWT): its claims are leaves of
+		// their own, so the learn step learns only the claims that moved,
+		// and its scheme, JOSE header and signature's form stay as
+		// recorded (a fixed part). The strict comparison reads it so too
+		// (jwtDiffs).
+		if j, ok := learn.ReadJWT(v); ok {
+			j.Leaves("header."+k, s.Leaves)
+			s.Fixed["header."+k+learn.JWTMark] = j.Fixed()
+		}
 	}
 	switch {
 	case len(p.body) == 0:
@@ -2081,8 +2091,22 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 		return out
 	}
 	echoed := map[string]string{} // recorded value -> its echo variable
+	byClaims, whole := jwtHeaders(learned, given)
 	for _, l := range learned {
 		r := l.Recorded
+		if byClaims[r.Path] {
+			continue // decided by its claims, each its own leaf
+		}
+		if c, ok := learn.ClaimOf(r.Path); ok {
+			if whole[c] {
+				continue // the token is followed whole, claims and all
+			}
+			if _, gave := givenFor(r, l.Live, given); gave || l.Kind != learn.KindNoise && l.Kind != learn.KindUnaccounted {
+				if _, clock := l.Clock(); !clock {
+					return p, r.Path + " is a claim of the token " + c + " holds, and keploy cannot follow a variable or an echo into a token's claim yet (" + claimWhy(l) + "); every other claim is still compared"
+				}
+			}
+		}
 		if g, ok := givenFor(r, l.Live, given); ok {
 			// The test case gave this value: a use of its key, no bind.
 			place, placeable := learn.VarPlace(r, jsonReq)
@@ -2296,6 +2320,53 @@ func earlierAnswers(earlier []learn.Earlier, mock string, r learn.Leaf) []string
 		}
 	}
 	return out
+}
+
+// jwtHeaders sorts the headers among learned that hold a JWT in both runs
+// (learn.ReadJWT): followed whole (whole), where the token is a value of the
+// test case's or a variable of the test sent whole at an earlier call of it,
+// which a replay puts back whole, claims and signature alike; else decided by
+// its claims (byClaims), where the token's own learning (noise on it whole, a
+// read of the clock in it, a refusal naming one word of it) is none: each
+// claim that moved is learned at its own place ("<header>{jwt}.<claim>"),
+// and every other claim, the scheme, the JOSE header and the signature's
+// form are still compared (jwtDiffs). A token that stops comparing its
+// claims would pass a call that changed one that must not move (a role, a
+// subject).
+func jwtHeaders(learned []learn.Learned, given []variables.Binding) (byClaims, whole map[string]bool) {
+	byClaims, whole = map[string]bool{}, map[string]bool{}
+	for _, l := range learned {
+		r := l.Recorded
+		if !strings.HasPrefix(r.Path, "header.") {
+			continue
+		}
+		if _, ok := learn.ReadJWT(r.Value); !ok {
+			continue
+		}
+		if _, ok := learn.ReadJWT(l.Live.Value); !ok {
+			continue
+		}
+		from := l.From
+		_, gave := givenFor(r, l.Live, given)
+		if gave || l.Kind == learn.KindVariable && from.Side == learn.Request && !from.Given && from.Var != "" && (from.Whole || from.Within.Set()) {
+			whole[r.Path] = true
+			continue
+		}
+		byClaims[r.Path] = true
+	}
+	return byClaims, whole
+}
+
+// claimWhy is what a claim learned as a variable or an echo carries, for the
+// refusal: where its value was found.
+func claimWhy(l learn.Learned) string {
+	switch {
+	case l.Kind == learn.KindVariable && l.From.Mock != "":
+		return "it carries a value " + l.From.Mock + " holds at " + l.From.Path
+	case l.Kind == learn.KindEcho:
+		return "its call's answer echoes it"
+	}
+	return "it carries a value of the test case's"
 }
 
 // answerParts are the answer places among from (a call's answer leaves)

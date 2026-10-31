@@ -2171,8 +2171,10 @@ func TestLearnMatchRefusesIdsOfAnEarlierAnswerInAnotherOrder(t *testing.T) {
 }
 
 // Two calls each carry a token minted for it (jti random, iat now): the
-// header and the claims' names they share did not change, and each token is
-// noise.
+// header and the claims' names they share did not change, and each token's
+// moved claims are learned at their own places (the jti noise, the iat a
+// read of the clock), never the token whole: every other claim, its JOSE
+// header and its signature's form are still compared (jwtDiffs).
 func TestLearnMatchLearnsTwoFreshTokensThatShareAHeader(t *testing.T) {
 	h, n, opts := learnOn(t)
 	tr := learn.NewTracker()
@@ -2194,8 +2196,12 @@ func TestLearnMatchLearnsTwoFreshTokensThatShareAHeader(t *testing.T) {
 		}
 	}
 	for _, m := range db.consumed {
-		if _, ok := m.Spec.ReqBodyNoise["header.x-svc-token"]; !ok {
-			t.Fatalf("%s: noise %v", m.Name, m.Spec.ReqBodyNoise)
+		_, whole := m.Spec.ReqBodyNoise["header.x-svc-token"]
+		_, jti := m.Spec.ReqBodyNoise["header.x-svc-token{jwt}.jti"]
+		_, iatNoise := m.Spec.ReqBodyNoise["header.x-svc-token{jwt}.iat"]
+		_, iatClock := m.Spec.Clocks["header.x-svc-token{jwt}.iat"]
+		if whole || !jti || !iatNoise && !iatClock {
+			t.Fatalf("%s: noise %v clocks %v", m.Name, m.Spec.ReqBodyNoise, m.Spec.Clocks)
 		}
 	}
 }
@@ -5253,5 +5259,59 @@ func TestLearnMatchFollowsAVariableInsideALongerValue(t *testing.T) {
 		if served != nil || miss == nil || miss.res.Reason != models.MissRequestChanged || !strings.Contains(miss.res.Why, c.why) {
 			t.Fatalf("%s: served %v miss %+v", c.name, served, miss)
 		}
+	}
+}
+
+// A call whose bearer JWT moved learns the claims that moved, each at its
+// own place, never the token whole: the replay compares every other claim,
+// the scheme, the JOSE header and the signature's form (jwtDiffs).
+func TestLearnMatchLearnsAJWTByItsClaims(t *testing.T) {
+	h, n, opts := learnOn(t)
+	const hs = `{"alg":"HS256","typ":"JWT"}`
+	tok := func(jti, sig string) map[string]string {
+		return map[string]string{"Authorization": bearerJWT(hs, `{"sub":"u-1","role":"admin","cid":"c-1","jti":"`+jti+`"}`, sig)}
+	}
+	sigA, sigB := "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE", "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI"
+	tr := learn.NewTracker()
+	tr.Begin()
+	db := &learnDb{perTest: []*models.Mock{
+		learnRecorded("mock-0", 0, "POST", "/run/r-1", `{}`, tok("6f1c2a9e-4b7d-4e21-9a3f-1d2c3b4a5e6f", sigA), `{"ok":true}`),
+	}}
+	ctx := learn.WithTracker(context.Background(), tr)
+	served, miss, err := h.learnMatch(ctx, live("POST", "/run/r-1", `{}`, tok("0b9d8c7a-1e2f-4a3b-8c5d-6e7f8091a2b3", sigB)), db, n, opts)
+	if err != nil || miss != nil || served == nil {
+		t.Fatalf("served %v miss %+v err %v", served, miss, err)
+	}
+	got := db.consumed[0].Spec.ReqBodyNoise
+	if _, ok := got["header.authorization{jwt}.jti"]; !ok || len(got) != 1 {
+		t.Fatalf("learned %v, want the jti claim alone", got)
+	}
+}
+
+// A claim that carries a value the test sent earlier is refused, naming the
+// claim and where the value was sent: keploy cannot follow a variable into
+// a token's claim yet, and never stops comparing it.
+func TestLearnMatchRefusesAVariableInsideAJWTClaim(t *testing.T) {
+	h, n, opts := learnOn(t)
+	const hs = `{"alg":"HS256","typ":"JWT"}`
+	tok := func(sub, sig string) map[string]string {
+		return map[string]string{"Authorization": bearerJWT(hs, `{"sub":"`+sub+`","role":"admin"}`, sig)}
+	}
+	tr := learn.NewTracker()
+	tr.Begin()
+	db := &learnDb{perTest: []*models.Mock{
+		learnRecorded("mock-0", 0, "POST", "/v1/users", `{"id":"u-71b2c3"}`, nil, `{}`),
+		learnRecorded("mock-1", time.Second, "POST", "/run/r-1", `{}`, tok("u-71b2c3", "QUFBQUFB"), `{"ok":true}`),
+	}}
+	ctx := learn.WithTracker(context.Background(), tr)
+	if served, miss, _ := h.learnMatch(ctx, live("POST", "/v1/users", `{"id":"u-94e5f6"}`, nil), db, n, opts); served == nil || miss != nil {
+		t.Fatalf("the first call is paired: %+v", miss)
+	}
+	served, miss, err := h.learnMatch(ctx, live("POST", "/run/r-1", `{}`, tok("u-94e5f6", "QkJCQkJC")), db, n, opts)
+	if err != nil || served != nil || miss == nil {
+		t.Fatalf("served %v miss %+v err %v: refused", served, miss, err)
+	}
+	if why := fmt.Sprintf("%+v", miss); !strings.Contains(why, "header.authorization{jwt}.sub is a claim of the token header.authorization holds") || !strings.Contains(why, "mock-0 holds at body.id") {
+		t.Fatalf("refused with %s", why)
 	}
 }

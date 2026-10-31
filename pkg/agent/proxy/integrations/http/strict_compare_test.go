@@ -3,6 +3,7 @@ package http
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"mime/multipart"
 	"net/http"
 	"net/url"
@@ -1218,5 +1219,59 @@ func TestAClockReadsRefusalsAndKeployYmlNoise(t *testing.T) {
 	m.Spec.Clocks = nil
 	if ex, _ := (learnNoise{}).known(m).Excused(leaf); !ex {
 		t.Fatal("learned noise no longer excuses its own place")
+	}
+}
+
+// bearerJWT is "Bearer " and a compact JWT of a JOSE header and claims (JSON
+// text) and a signature segment.
+func bearerJWT(header, claims, sig string) string {
+	return "Bearer " + base64.RawURLEncoding.EncodeToString([]byte(header)) + "." + base64.RawURLEncoding.EncodeToString([]byte(claims)) + "." + sig
+}
+
+// A JWT is compared by what it says: its scheme, JOSE header and
+// signature's form, and each claim but those learned at their own place
+// (noise, a read of the clock). Noise learned on the token whole excuses no
+// claim: a call whose token changed a claim that must not move (a role, a
+// customer, a user) stays refused, whatever the token's signature.
+func TestStrictComparesAJWTByItsClaims(t *testing.T) {
+	const hs = `{"alg":"HS256","typ":"JWT"}`
+	claims := func(role, cid, jti string) string {
+		return `{"sub":"u-1","role":"` + role + `","cid":"` + cid + `","jti":"` + jti + `"}`
+	}
+	sigA, sigB := "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE", "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI"
+	rec := recorded("m", "/run/r-1", map[string]string{"Authorization": bearerJWT(hs, claims("admin", "c-1", "j-1"), sigA)}, "")
+	learned := map[string][]string{"header.authorization{jwt}.jti": {}}
+	wholeNoise := map[string][]string{"header.authorization": {}}
+	for _, tc := range []struct {
+		name    string
+		auth    string
+		learned map[string][]string
+		served  bool
+		field   string
+	}{
+		{"the recording", bearerJWT(hs, claims("admin", "c-1", "j-1"), sigA), nil, true, ""},
+		{"a learned claim moved, signed again", bearerJWT(hs, claims("admin", "c-1", "j-2"), sigB), learned, true, ""},
+		{"an unlearned claim moved", bearerJWT(hs, claims("admin", "c-1", "j-2"), sigB), nil, false, "header.authorization{jwt}.jti"},
+		{"the role changed", bearerJWT(hs, claims("viewer", "c-1", "j-2"), sigB), learned, false, "header.authorization{jwt}.role"},
+		{"the customer changed", bearerJWT(hs, claims("admin", "c-2", "j-2"), sigB), learned, false, "header.authorization{jwt}.cid"},
+		{"the role changed, noise on the token whole", bearerJWT(hs, claims("viewer", "c-1", "j-1"), sigA), wholeNoise, false, "header.authorization{jwt}.role"},
+		{"a claim more", bearerJWT(hs, `{"sub":"u-1","role":"admin","cid":"c-1","jti":"j-2","adm":true}`, sigB), learned, false, "header.authorization{jwt}.adm"},
+		{"a claim less", bearerJWT(hs, `{"sub":"u-1","role":"admin","jti":"j-2"}`, sigB), learned, false, "header.authorization{jwt}.cid"},
+		{"another algorithm", bearerJWT(`{"alg":"none","typ":"JWT"}`, claims("admin", "c-1", "j-2"), ""), learned, false, "header.authorization{jwt}"},
+		{"a signature of another length", bearerJWT(hs, claims("admin", "c-1", "j-2"), sigB+"QQ"), learned, false, "header.authorization{jwt}{signature}"},
+		{"another scheme", "Token " + strings.TrimPrefix(bearerJWT(hs, claims("admin", "c-1", "j-2"), sigB), "Bearer "), learned, false, "header.authorization{jwt}"},
+		{"no token", "Bearer kep_opaque", learned, false, "header.authorization"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := rec.DeepCopy()
+			m.Spec.ReqBodyNoise = tc.learned
+			got, diag := strictMatch(t, sent("/run/r-1", map[string]string{"Authorization": tc.auth}, ""), nil, nil, nil, m)
+			if (got != nil) != tc.served {
+				t.Fatalf("served %v, want %v (differs %v)", got != nil, tc.served, differs(diag))
+			}
+			if !tc.served && !hasField(differs(diag), tc.field) {
+				t.Fatalf("differs %v does not name %s", differs(diag), tc.field)
+			}
+		})
 	}
 }

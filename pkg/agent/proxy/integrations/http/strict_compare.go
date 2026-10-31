@@ -456,6 +456,18 @@ func (k strictKnown) headerDiffs(rec map[string]string, live http.Header, sent [
 				continue
 			}
 		}
+		// A JWT is read by what it says before learned noise (jwtDiffs):
+		// noise a learner that read the token whole learned on it excuses
+		// no claim; only a claim learned at its own place is excused, and
+		// the scheme, the JOSE header and the signature's form are always
+		// compared. A recorded value the obfuscator redacted is no token
+		// to read.
+		if !k.redacted(rv) {
+			if rj, ok := learn.ReadJWT(rv); ok {
+				out = append(out, k.jwtDiffs(path, rv, rj, lvs)...)
+				continue
+			}
+		}
 		if k.learnedAt(path, "") || k.redacted(rv) {
 			continue
 		}
@@ -470,6 +482,57 @@ func (k strictKnown) headerDiffs(rec map[string]string, live http.Header, sent [
 			}
 		}
 		out = append(out, field(valueDiff(path, rv, lv)))
+	}
+	return out
+}
+
+// jwtDiffs are the differences of a header's live lines from its recorded
+// value rv, a JWT (rj, learn.ReadJWT), read by what the token says: one live
+// line that is a JWT with the recorded scheme, JOSE header and signature
+// form (learn.JWT.SignatureForm: a signature's bytes change with every claim
+// and cannot be made again without the signer's key, so they are never
+// compared), and every claim as recorded but those the learn step learned
+// at their own place ("<header>{jwt}.<claim>": noise, or a read of the
+// application's clock that clockDiffs checks). A claim one side alone holds
+// differs too.
+func (k strictKnown) jwtDiffs(path, rv string, rj learn.JWT, live []string) []strictField {
+	lv := strings.Join(live, ",")
+	lj, ok := learn.ReadJWT(lv)
+	if len(live) != 1 || !ok {
+		return []strictField{field(valueDiff(path, rv, lv))}
+	}
+	mark := path + learn.JWTMark
+	var out []strictField
+	if lj.Scheme != rj.Scheme || lj.Header != rj.Header {
+		out = append(out, field(valueDiff(mark, rj.Scheme+rj.Header, lj.Scheme+lj.Header)))
+	}
+	if lj.SignatureForm() != rj.SignatureForm() {
+		out = append(out, field(valueDiff(mark+"{signature}", rj.SignatureForm(), lj.SignatureForm())))
+	}
+	rl, ll := map[string]learn.Leaf{}, map[string]learn.Leaf{}
+	rj.Leaves(path, rl)
+	lj.Leaves(path, ll)
+	names := make(map[string]bool, len(rl)+len(ll))
+	for p := range rl {
+		names[p] = true
+	}
+	for p := range ll {
+		names[p] = true
+	}
+	for _, p := range sortedNames(names) {
+		if k.learnedAt(p, "") {
+			continue
+		}
+		r, inRec := rl[p]
+		l, inLive := ll[p]
+		switch {
+		case !inLive:
+			out = append(out, field(models.MockFieldDiff{Path: p, Kind: models.DiffKindMissingInLive, Expected: r.Value}))
+		case !inRec:
+			out = append(out, field(models.MockFieldDiff{Path: p, Kind: models.DiffKindMissingInMock, Actual: l.Value}))
+		case r.Type != l.Type || r.Value != l.Value:
+			out = append(out, field(valueDiff(p, r.Value, l.Value)))
+		}
 	}
 	return out
 }
