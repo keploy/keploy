@@ -1395,18 +1395,24 @@ func TestARunsPlaceKeepsTheWordRulesClockExclusions(t *testing.T) {
 // place would carry the run's variable and a clock read at once, which the
 // HTTP replay refuses for test A too. One an earlier test sent at a place no
 // clock read was learned at stays the run's variable, and a copy of the
-// test's own call's clock read is no earlier test's.
+// test's own call's clock read is no earlier test's. In keploy mock's client
+// tests, where the later call's window holds the value nine seconds before
+// it in both runs as the clock less 9 s at the second, it is refused the
+// same way, never learned as that look-back, in its call's window or since
+// its test began (sinceRead declines a look-back): its replay would fail by
+// how far the gap between the two tests moved.
 func TestAnEarlierTestsClockReadIsNoRunsVariableWhereNoWindowOfTheUseHoldsIt(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	rec := time.Date(2026, 10, 30, 12, 26, 2, 0, time.UTC)
 	epoch := func(at time.Time) string { return strconv.FormatInt(at.Unix(), 10) }
 	aRead := rec.Add(50 * time.Millisecond)
 	for name, row := range map[string]struct {
-		clock, own, echoed bool
-		after              time.Duration
-		want               Kind
+		clock, own, echoed, client bool
+		after                      time.Duration
+		want                       Kind
 	}{
-		"a clock read, nine seconds later":              {clock: true, after: 9 * time.Second, want: KindUnaccounted},
+		"a clock read, nine seconds later": {clock: true, after: 9 * time.Second, want: KindUnaccounted},
+		"a clock read, nine seconds later, in a client test whose window holds it as clock - 9s": {clock: true, client: true, after: 9 * time.Second, want: KindUnaccounted},
 		"a clock read, the same second":                 {clock: true, after: 250 * time.Millisecond, want: KindClockRead},
 		"a clock read, the same second, echoed":         {clock: true, echoed: true, after: 250 * time.Millisecond, want: KindUnaccounted},
 		"no clock read, nine seconds later":             {after: 9 * time.Second, want: KindVariable},
@@ -1428,7 +1434,19 @@ func TestAnEarlierTestsClockReadIsNoRunsVariableWhereNoWindowOfTheUseHoldsIt(t *
 		if row.echoed {
 			resp = []Leaf{{Path: "body.code.authTime", Type: String, Value: epoch(aRead)}}
 		}
-		ln := ClassifyIn(clockedDrifts(), []string{"body.authTime"}, strLeaf("body.authTime", epoch(aRead.Add(FullRoundLead))), strLeaf("body.authTime", epoch(aRead)), call, earlier, nil, resp, w)[0]
+		dc := clockedDrifts()
+		if row.client {
+			dc.clientTests = true
+			w.Rec.Began, w.F.Began = call.Add(-2*time.Millisecond), fCall.Add(-2*time.Millisecond)
+			w = w.ComparesOffsets()
+		}
+		live, recd := strLeaf("body.authTime", epoch(aRead.Add(FullRoundLead))), strLeaf("body.authTime", epoch(aRead))
+		ln := ClassifyIn(dc, []string{"body.authTime"}, live, recd, call, earlier, nil, resp, w)[0]
+		if row.client {
+			// Under the rule a copy follows its source, as keploy mock's
+			// learn step classifies a client test's call.
+			ln = ClassifyFollowing(dc, []string{"body.authTime"}, live, recd, call, earlier, nil, resp, w, nil)[0]
+		}
 		if ln.Kind != row.want {
 			t.Fatalf("%s: test B's value is %s from %+v (%s); want %s", name, ln.Kind, ln.From, ln.Why, row.want)
 		}

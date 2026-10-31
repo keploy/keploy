@@ -1980,6 +1980,10 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 			} else if ttl, ok := sinceTimeToLive(early, wb); ok {
 				ln = ttl
 			} else if word, ok := sinceWord(early, wb, leaf); ok && ln.Kind == KindUnaccounted {
+				// A refusal only: the other ln this block takes (sinceFirst,
+				// an offset its call's window learned) is a value that is one
+				// instant whole, which no word reading of a longer text
+				// holds, so a word read is never taken in its place.
 				ln = word
 			}
 		}
@@ -2159,8 +2163,17 @@ func sinceFirst(ln Learned) bool {
 // took between its read and its call. Anything else wb learns declines the
 // rescue (ok false), as an offset no replay could check does
 // (sinceTestBegin), whatever the test's length: the verdict never turns on
-// how long the test ran at learn.
+// how long the test ran at learn. So does a look-back, in its call's window
+// or in wb (lookBack: an offset whose values lie before the call, as
+// sinceTimeToLive declines one): checked from its test's begin, it would
+// pass one the application changed by up to the test's span, so the
+// explanation the first classification learned stands (a copy of an
+// earlier place, which the run's rule refuses where that place is an
+// earlier test's read of the clock: clockSourceWhy).
 func sinceRead(ln Learned, r, l Leaf, wb *Window, skip skipRule, leaf func(r, l Leaf, w *Window, skip skipRule) Learned) (Learned, bool) {
+	if lookBack(ln) {
+		return ln, false
+	}
 	if !sinceFirst(ln) {
 		return sinceTestBegin(ln, wb)
 	}
@@ -2168,10 +2181,17 @@ func sinceRead(ln Learned, r, l Leaf, wb *Window, skip skipRule, leaf func(r, l 
 		return ln, false
 	}
 	early := leaf(r, l, wb, skip)
-	if early.Kind != KindClockRead && early.Kind != KindClockOffset {
+	if early.Kind != KindClockRead && (early.Kind != KindClockOffset || lookBack(early)) {
 		return ln, false
 	}
 	return sinceTestBegin(early, wb)
+}
+
+// lookBack reports whether ln is the clock plus an offset whose values lie
+// before their call in both runs (Min at or below zero: dirtyAt <= now -
+// 2s), never a time to live.
+func lookBack(ln Learned) bool {
+	return ln.Kind == KindClockOffset && ln.Offset != nil && ln.Offset.Min <= 0
 }
 
 // sinceCheckable reports whether sinceTestBegin may check off, an offset
@@ -2193,7 +2213,7 @@ func sinceCheckable(off models.ClockOffset, wb *Window) bool {
 // anything else, and for an offset a replay could not check over that span
 // (sinceTestBegin).
 func sinceTimeToLive(early Learned, wb *Window) (Learned, bool) {
-	if early.Kind != KindClockOffset || early.Offset == nil || early.Offset.Min <= 0 {
+	if early.Kind != KindClockOffset || early.Offset == nil || lookBack(early) {
 		return early, false
 	}
 	return sinceTestBegin(early, wb)

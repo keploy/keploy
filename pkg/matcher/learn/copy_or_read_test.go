@@ -528,7 +528,7 @@ func TestAClientTestLearnsAnOffsetOfAGivenInstantOneRunsOwnWindowHoldsAsAReadSin
 // whatever its wait between its read and its call, and fails a time to live
 // changed by a day. Where both runs' own windows hold the read, it is
 // learned as the clock plus thirty days in its call's window.
-func TestAClientTestKeepsAnExpiryNoOffsetRuleRefusedThatOneRunsOwnWindowHoldsRefused(t *testing.T) {
+func TestAClientTestLearnsAnExpiryNoOffsetRuleRefusedThatOneRunsOwnWindowHoldsSinceItsTestBegan(t *testing.T) {
 	const p = "body.docs.msgs.0.token.expiresAt.$numberLong"
 	const month = 30 * 24 * time.Hour
 	secs := func(t time.Time) string { return strconv.FormatInt(t.Unix(), 10) }
