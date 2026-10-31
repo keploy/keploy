@@ -664,6 +664,14 @@ func TestPoolSlices(t *testing.T) {
 	pool, unknown := poolSlices(mp, map[string][]string{"o::TestA": {"mock-0", "mock-9"}, "o::TestB": {"mock-cf"}}, held, decoded)
 	require.Equal(t, map[string][]string{"o": {"mock-1"}, models.PoolKeyNone: {"mock-2", "mock-3"}}, pool)
 	require.Equal(t, []string{"mock-8", "mock-9"}, unknown)
+
+	// A worker: entry (a call made between or after the tests, or one a
+	// reader moved there from a test's list) keeps its key as a startup:
+	// one does; one a test lists is still the test's.
+	mp.Worker = []models.MockEntry{{Name: "mock-3", Key: "o"}, {Name: "mock-0", Key: "o"}, {Name: "mock-7"}}
+	pool, unknown = poolSlices(mp, map[string][]string{"o::TestA": {"mock-0", "mock-9"}, "o::TestB": {"mock-cf"}}, held, decoded)
+	require.Equal(t, map[string][]string{"o": {"mock-1", "mock-3"}, models.PoolKeyNone: {"mock-2"}}, pool)
+	require.Equal(t, []string{"mock-7", "mock-8", "mock-9"}, unknown)
 	pool, unknown = poolSlices(nil, nil, nil, nil)
 	require.Empty(t, pool)
 	require.Empty(t, unknown)

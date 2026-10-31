@@ -1455,10 +1455,13 @@ func heldOnly(table map[string][]string, loaded []*models.Mock) map[string][]str
 
 // poolSlices is each key's pool slice of a recording (design v14 §5.2): every
 // loaded mock no test's mapping lists, under the key its mappings' startup:
-// entry gives it, else models.PoolKeyNone (an older recording's, or one made
-// outside every claim). unknown lists, sorted, the names the table or the
-// startup entries give that no decoded mock has (a mock the agent never holds,
-// a connection failure, is decoded, and in no slice).
+// or worker: entry gives it, else models.PoolKeyNone (an older recording's,
+// or one made outside every claim). A call keploy mock record listed in
+// worker: (made between or after the tests) is served as one in startup:
+// is, and so is one a reader moved there from a test's list. unknown lists,
+// sorted, the names the table or those entries give that no decoded mock
+// has (a mock the agent never holds, a connection failure, is decoded, and
+// in no slice).
 func poolSlices(mp *models.Mapping, table map[string][]string, loaded, decoded []*models.Mock) (pool map[string][]string, unknown []string) {
 	have := make(map[string]bool, len(decoded))
 	for _, mk := range decoded {
@@ -1485,7 +1488,7 @@ func poolSlices(mp *models.Mapping, table map[string][]string, loaded, decoded [
 	pool = map[string][]string{}
 	keyed := map[string]bool{}
 	if mp != nil {
-		for _, e := range mp.Startup {
+		for _, e := range slices.Concat(mp.Startup, mp.Worker) {
 			if e.Name == "" || mapped[e.Name] || keyed[e.Name] {
 				continue
 			}
