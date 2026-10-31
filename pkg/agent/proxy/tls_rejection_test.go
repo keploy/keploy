@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -138,6 +139,102 @@ func TestOnlyAClientThatGaveUpLostNoCallInATLSHandshake(t *testing.T) {
 			}
 			if got[models.CaptureLossTLSAbort] != tc.failed || got[models.CaptureLossTLSAbandoned] != tc.abandoned || len(got) > 2 {
 				t.Fatalf("%s: charged %v, want %d tls_handshake_failed and %d tls_handshake_abandoned", tc.name, got, tc.failed, tc.abandoned)
+			}
+		})
+	}
+}
+
+// readCounting is a client's connection that counts what it has read: none
+// of keploy's server flight while it is 0.
+type readCounting struct {
+	net.Conn
+	n *atomic.Int64
+}
+
+func (c readCounting) Read(b []byte) (int, error) {
+	n, err := c.Conn.Read(b)
+	c.n.Add(int64(n))
+	return n, err
+}
+
+// gateSpy is a build's TLS gate (OnClientTLS) that notes each process it was
+// asked to make ready, with what the client had read of keploy's answer by
+// then, and gives why for any failed handshake.
+type gateSpy struct {
+	read  *atomic.Int64
+	mu    sync.Mutex
+	ready []uint32
+	seen  []int64
+	why   string
+}
+
+func (g *gateSpy) Ready(_ context.Context, pid uint32) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.ready = append(g.ready, pid)
+	g.seen = append(g.seen, g.read.Load())
+}
+
+func (g *gateSpy) Why(uint32) string { return g.why }
+
+// keploy's proxy consults a build's TLS gate (OnClientTLS) on each handshake
+// it makes with a process it knows: Ready before it answers the client, so
+// what the gate does (keploy's TLS pin bypass) is in place before the client
+// checks keploy's certificate; and Why in the capture loss a failed handshake
+// is charged as, so the test's reason names the process and the cause. A
+// connection whose process the proxy does not know consults neither.
+func TestAClientTLSGateIsReadyBeforeKeployAnswersAndSaysWhyAHandshakeFailed(t *testing.T) {
+	const why = "process 4242 (probe): keploy's TLS pin bypass could not attach to it: operation not permitted"
+	for _, tc := range []struct {
+		name  string
+		pid   uint32
+		ready []uint32
+		what  string
+	}{
+		{"a process keploy knows", 4242, []uint32{4242}, "to 127.0.0.1:8443: " + why},
+		{"a process keploy does not know", 0, nil, "to 127.0.0.1:8443"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			read := &atomic.Int64{}
+			g := &gateSpy{read: read, why: why}
+			prev := OnClientTLS
+			OnClientTLS = g
+			t.Cleanup(func() { OnClientTLS = prev })
+			dest := ipv4Dest(t, "127.0.0.1:8443")
+			dest.KernelPid = tc.pid
+			app, src := acceptedConn(t)
+			p := &Proxy{logger: zap.NewNop(), DestInfo: fakeDestInfo{dest: dest}, mysqlPorts: newMysqlPortRegistry()}
+			p.BeginTestErrorCapture()
+			p.setSession(&agent.Session{
+				Mode:            models.MODE_TEST,
+				OutgoingOptions: models.OutgoingOptions{Mocking: true, DisableMysqlAutoDetect: true},
+			})
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				// A client that trusts only its own roots rejects keploy's
+				// certificate: a bad_certificate alert.
+				_ = tls.Client(readCounting{Conn: app, n: read}, &tls.Config{ServerName: "dep.example"}).Handshake()
+				_ = app.Close()
+			}()
+			if err := p.handleConnection(context.Background(), src); err == nil {
+				t.Fatal("handleConnection returned no error for a failed handshake")
+			}
+			<-done
+			g.mu.Lock()
+			ready, seen := g.ready, g.seen
+			g.mu.Unlock()
+			if fmt.Sprint(ready) != fmt.Sprint(tc.ready) {
+				t.Fatalf("the gate was asked to make ready %v, want %v", ready, tc.ready)
+			}
+			for i, n := range seen {
+				if n != 0 {
+					t.Fatalf("the gate's Ready for process %d came after the client had read %d byte(s) of keploy's answer, want before it", ready[i], n)
+				}
+			}
+			l := p.losses.Snapshot()
+			if len(l) != 1 || l[0].Kind != models.CaptureLossTLSAbort || l[0].What != tc.what {
+				t.Fatalf("charged %+v, want one tls_handshake_failed %q", l, tc.what)
 			}
 		})
 	}

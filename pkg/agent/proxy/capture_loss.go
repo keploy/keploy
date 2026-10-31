@@ -309,11 +309,33 @@ func (c *clientTLS) hungUp(how string) {
 		c.p.logger.Debug("a client process that has not sent a call through keploy's certificate yet "+how+": a cancel if it sends one in this test, a capture loss otherwise",
 			zap.Uint32("tgid", c.tgid), zap.String("destination", c.dst))
 	default:
-		c.p.losses.Add(models.CaptureLossTLSAbandoned, "to "+c.dst)
+		c.p.losses.Add(models.CaptureLossTLSAbandoned, c.lossWhat())
 	}
 }
 
+// lossWhat is what a handshake c lost is charged as: its destination, and
+// what a build's gate knows of why its process failed it (OnClientTLS's
+// Why), so the test's reason names the process and the cause, not only the
+// call.
+func (c *clientTLS) lossWhat() string {
+	what := "to " + c.dst
+	if g := OnClientTLS; g != nil && c.tgid != 0 {
+		if why := g.Why(c.tgid); why != "" {
+			what += ": " + why
+		}
+	}
+	return what
+}
+
+// HandshakeBegin waits, before keploy's proxy answers the client, for a
+// build's gate to have the client's process ready (OnClientTLS's Ready): the
+// gate's work, keploy's TLS pin bypass, has to be in place before the client
+// checks the certificate keploy answers with. The handshake's scope begins
+// once the gate returns.
 func (c *clientTLS) HandshakeBegin() {
+	if g := OnClientTLS; g != nil && c.tgid != 0 {
+		g.Ready(c.ctx, c.tgid)
+	}
 	now := c.p.testScopeNow()
 	c.mu.Lock()
 	c.began = now
@@ -326,7 +348,7 @@ func (c *clientTLS) HandshakeFailed(err error) {
 	case errors.Is(err, net.ErrClosed):
 		// keploy closed its own end: the client gave nothing up.
 	case !pTls.IsClientGiveUp(err):
-		c.p.losses.Add(models.CaptureLossTLSAbort, "to "+c.dst)
+		c.p.losses.Add(models.CaptureLossTLSAbort, c.lossWhat())
 	case pTls.CertificateSent(err) && c.inScope():
 		c.hungUp("gave a TLS handshake up")
 	}
