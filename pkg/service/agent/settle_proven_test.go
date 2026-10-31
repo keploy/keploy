@@ -1280,6 +1280,7 @@ func TestWithTheSwitchOffABeginWaitsForEveryConnection(t *testing.T) {
 // is what its watchdog reads.
 type fakeCaptureSettler struct {
 	settles  atomic.Int32
+	begins   atomic.Int32
 	err      error
 	block    chan struct{}
 	progress atomic.Uint64
@@ -1307,6 +1308,8 @@ func (s *fakeCaptureSettler) SettleProgress() map[string]uint64 {
 	return map[string]uint64{"capture": s.progress.Load()}
 }
 
+func (s *fakeCaptureSettler) NoteTestBegin() { s.begins.Add(1) }
+
 func withCaptureSettler(t *testing.T, s CaptureSettler) {
 	t.Helper()
 	prev := captureSettler
@@ -1317,7 +1320,8 @@ func withCaptureSettler(t *testing.T, s CaptureSettler) {
 // Under the proven switch a record whose capture settles itself (a
 // low-latency capture: no proxy in the application's path) settles each
 // test's end through it and never asks for the proxy's counts, which such an
-// agent cannot give; its begin waits for nothing.
+// agent cannot give; its begin waits for nothing, and tells the capture that
+// a test began (so that what it lost before the first is no test's).
 func TestARecordsEndSettlesThroughTheCaptureWhenOneIsRegistered(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	a, h, _ := settleAgent()
@@ -1327,8 +1331,10 @@ func TestARecordsEndSettlesThroughTheCaptureWhenOneIsRegistered(t *testing.T) {
 	_, err := a.settleBegin(context.Background(), false)
 	require.NoError(t, err, "a begin asks the proxy for nothing")
 	require.Zero(t, cs.settles.Load(), "a begin waits for nothing")
+	require.EqualValues(t, 1, cs.begins.Load(), "the capture was told that the test began")
 	require.NoError(t, a.settledSince(context.Background(), false, "TestEnd"))
 	require.EqualValues(t, 1, cs.settles.Load(), "the end settled through the capture")
+	require.EqualValues(t, 1, cs.begins.Load(), "an end is no begin")
 }
 
 // What the capture cannot tell fails the end: the test is not judged.
@@ -1361,6 +1367,7 @@ func TestOnlyAProvenRecordSettlesThroughTheCapture(t *testing.T) {
 		require.ErrorIs(t, err, models.ErrProxyConnsUnsupported, "proven=%q answers=%v", c.proven, c.answers)
 	}
 	require.Zero(t, cs.settles.Load())
+	require.Zero(t, cs.begins.Load(), "no begin but a proven record's is the capture's")
 }
 
 // The capture's settle runs under the settle's watchdog: one whose counts
