@@ -95,15 +95,17 @@ type composeAppState struct {
 
 // composeAppProject is the app's compose project: the compose label on
 // keploy's agent's container (compose's own, in-process or not), kept once
-// read; "" while it cannot be read. The inspect is bounded only as a hang
-// guard (utils.StopStallBudget), as the stop's other calls to the daemon are.
+// read; "" while it cannot be read. The inspect is asked again when it fails
+// (composeProjectLabelAnswered), so it ends on the daemon's answer, its word
+// that the agent's container is gone, ctx, or keploy's runnable-time bound
+// on no answer: one failed read, taken for no project, lost the app's exit at
+// the up's end, took a halted project down whole, keploy's agent with it,
+// and failed the next set's start, the set lost as halted.
 func (a *App) composeAppProject(ctx context.Context) string {
 	if p := a.composeApp.project.Load(); p != nil {
 		return *p
 	}
-	ictx, cancel := context.WithTimeout(ctx, utils.StopStallBudget)
-	p := a.composeProjectLabelOf(ictx, a.keployContainer)
-	cancel()
+	p := a.composeProjectLabelAnswered(ctx, a.keployContainer, "keploy cannot tell which container is the application's")
 	if p != "" {
 		a.composeApp.project.Store(&p)
 	}
@@ -113,8 +115,9 @@ func (a *App) composeAppProject(ctx context.Context) string {
 // composeAppContainer is the ID of the app's container: the one compose made
 // for the app's service in the app's project (composeAppProject), one-offs
 // (`compose run`) aside. With no service known, it is the name keploy was
-// given, as before. The list is bounded only as a hang guard, as
-// composeAppProject's inspect is.
+// given, as before. The list is asked again when it fails (askDaemon), as
+// composeAppProject's inspect is: no container of the service, or several,
+// are the daemon's answer; a failed list is no answer.
 func (a *App) composeAppContainer(ctx context.Context) (string, error) {
 	if a.composeService == "" {
 		return a.container, nil
@@ -123,12 +126,13 @@ func (a *App) composeAppContainer(ctx context.Context) (string, error) {
 	if project == "" {
 		return "", fmt.Errorf("keploy could not read the compose project of keploy's agent's container %q, so it cannot tell which container is the application's", a.keployContainer)
 	}
-	lctx, cancel := context.WithTimeout(ctx, utils.StopStallBudget)
-	list, err := a.docker.ContainerList(lctx, container.ListOptions{All: true, Filters: filters.NewArgs(
-		filters.Arg("label", composeProjectLabelKey+"="+project),
-		filters.Arg("label", composeServiceLabelKey+"="+a.composeService),
-	)})
-	cancel()
+	list, err := askDaemon(ctx, a.logger, fmt.Sprintf("the containers of the application's service %q (with no answer, keploy cannot tell which container is the application's)", a.composeService),
+		func(ctx context.Context) ([]container.Summary, error) {
+			return a.docker.ContainerList(ctx, container.ListOptions{All: true, Filters: filters.NewArgs(
+				filters.Arg("label", composeProjectLabelKey+"="+project),
+				filters.Arg("label", composeServiceLabelKey+"="+a.composeService),
+			)})
+		})
 	if err != nil {
 		return "", fmt.Errorf("keploy could not list the containers of the application's service %q in compose project %q: %w", a.composeService, project, err)
 	}
@@ -533,7 +537,7 @@ func (a *App) composeAppExited(ctx context.Context) (composeHalt, bool) {
 func (a *App) stopComposeProject(ctx context.Context) bool {
 	project := a.composeAppProject(ctx)
 	if project == "" && a.composeService == "" {
-		project = a.composeProjectLabelAnswered(ctx, a.container)
+		project = a.composeProjectLabelAnswered(ctx, a.container, "keploy takes the project down instead")
 	}
 	if project == "" {
 		a.logger.Warn("keploy could not tell the application's compose project; taking it down instead",

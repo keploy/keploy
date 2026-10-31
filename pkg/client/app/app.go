@@ -561,6 +561,10 @@ func (a *App) waitTillExit() {
 	}
 }
 
+// composeGraceTick is the pace at which composeAppGrace looks at the app's
+// container and at compose's up: a walking pace, not a bound.
+const composeGraceTick = 500 * time.Millisecond
+
 // composeAppGrace gives the app's container keploy interrupted graceBudget to
 // exit: its coverage flush is done once it has (Go has written GOCOVERDIR,
 // Java its jacoco .exec), with no reason to keep waiting on the slower
@@ -569,19 +573,39 @@ func (a *App) waitTillExit() {
 // The grace is wall-clock-bounded; its reads end only on the daemon's answer
 // or the grace's end (inspectContainer): with a 2 s budget per read, a loaded
 // daemon's slow answers never came in time, and an app that had exited at
-// once was given the whole grace, and then some.
+// once was given the whole grace, and then some. The up's return ends the
+// grace while a read waits on the daemon too: it is watched beside the reads,
+// not between them, so a daemon that fails every read does not hold a grace
+// whose up has returned.
 func (a *App) composeAppGrace(upReturned func() bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), graceBudget)
 	defer cancel()
+	if upReturned != nil {
+		watched := make(chan struct{})
+		defer func() { cancel(); <-watched }()
+		go func() {
+			defer close(watched)
+			tick := time.NewTicker(composeGraceTick)
+			defer tick.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-tick.C:
+				}
+				if upReturned() {
+					a.logger.Debug("docker compose process exited")
+					cancel()
+					return
+				}
+			}
+		}()
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(500 * time.Millisecond):
-		}
-		if upReturned != nil && upReturned() {
-			a.logger.Debug("docker compose process exited")
-			return
+		case <-time.After(composeGraceTick):
 		}
 		info, read, _ := a.inspectContainer(ctx, a.container, fmt.Sprintf("the application's container %q (with no answer, keploy gives it the rest of its grace)", a.container))
 		if read && (info.State.Status == "exited" || info.State.Status == "dead") {
@@ -1010,10 +1034,11 @@ func (a *App) composeDownProject(ctx context.Context) string {
 			}
 		}
 	}
-	if p := a.composeProjectLabelAnswered(ctx, a.container); p != "" {
+	const unanswered = "keploy names the project by what the command says"
+	if p := a.composeProjectLabelAnswered(ctx, a.container, unanswered); p != "" {
 		return p
 	}
-	if p := a.composeProjectLabelAnswered(ctx, a.keployContainer); p != "" {
+	if p := a.composeProjectLabelAnswered(ctx, a.keployContainer, unanswered); p != "" {
 		return p
 	}
 	// Read off the labels by an earlier down, when the containers that bore
@@ -1070,28 +1095,15 @@ func composeProjectEnvAssignment(cmd string) string {
 // name, as the daemon says it: asked again when a read fails (askDaemon),
 // until the daemon answers, says it has no such container, ctx ends, or
 // keploy's runnable-time bound on no answer passes. "" when it has none, or
-// the daemon never said.
-func (a *App) composeProjectLabelAnswered(ctx context.Context, name string) string {
+// the daemon never said; unanswered, in the log, says what keploy then does.
+func (a *App) composeProjectLabelAnswered(ctx context.Context, name, unanswered string) string {
 	if name == "" {
 		return ""
 	}
-	info, err := askDaemon(ctx, a.logger, fmt.Sprintf("the compose project label of container %q (with no answer, keploy names the project by what the command says)", name),
+	info, err := askDaemon(ctx, a.logger, fmt.Sprintf("the compose project label of container %q (with no answer, %s)", name, unanswered),
 		func(ctx context.Context) (container.InspectResponse, error) {
 			return a.docker.ContainerInspect(ctx, name)
 		})
-	if err != nil || info.Config == nil {
-		return ""
-	}
-	return strings.TrimSpace(info.Config.Labels["com.docker.compose.project"])
-}
-
-// composeProjectLabelOf is the compose project label on container name, ""
-// when it has none or cannot be read.
-func (a *App) composeProjectLabelOf(ctx context.Context, name string) string {
-	if name == "" {
-		return ""
-	}
-	info, err := a.docker.ContainerInspect(ctx, name)
 	if err != nil || info.Config == nil {
 		return ""
 	}

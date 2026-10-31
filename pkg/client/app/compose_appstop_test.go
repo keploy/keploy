@@ -2067,3 +2067,49 @@ func TestTheRunsEndReadsTheDaemonsAnswerHoweverSlowItIs(t *testing.T) {
 		}
 	})
 }
+
+// The reads that find the app's container compose made for its service, the
+// project's name on keploy's agent and the list of the service's containers,
+// are asked again when the daemon fails them, at each place keploy decides on
+// them. One failed read was taken for no project, or no container: the up's
+// end took the app that exited with 3 for one that had not (the run ended as
+// on a clean stop, the halt's exit code lost); a halt took the project down
+// whole, keploy's agent with it, mid-drain; and the next set's start failed,
+// which replay marks AppHalted, the whole set lost. Each subtest fails that
+// many reads of each kind (the project's name, the service's list, and the
+// reads after them); failed 0 is the control.
+func TestTheAppsServiceIsReadOnTheDaemonsAnswerThoughItFailsReads(t *testing.T) {
+	stallBudget(t, 10*time.Second)
+	stack := func(failLists, failInspects int) (*App, *modelContainer, *daemonModel) {
+		d, app := appStack()
+		a := stackApp(d, "app")
+		a.docker = &slowDaemon{Client: d, failLists: failLists, failInspects: failInspects}
+		return a, app, d
+	}
+	for _, failed := range []int{0, 1, 5} {
+		t.Run(fmt.Sprintf("the up's end, %d failed reads of each", failed), func(t *testing.T) {
+			a, app, d := stack(failed, failed)
+			d.mu.Lock()
+			app.running, app.exitCode = false, 3
+			d.mu.Unlock()
+			if h, exited := a.composeAppExited(context.Background()); !exited || h.exitCode != 3 {
+				t.Fatalf("composeAppExited = %+v, %v; want the app's exit, code 3", h, exited)
+			}
+		})
+		t.Run(fmt.Sprintf("a halt's stop, %d failed reads of each", failed), func(t *testing.T) {
+			a, _, _ := stack(failed, failed)
+			if !a.stopComposeProject(context.Background()) {
+				t.Fatal("the project was taken down whole, keploy's agent with it; want it stopped")
+			}
+		})
+		t.Run(fmt.Sprintf("the next set's start, %d failed reads of each", failed), func(t *testing.T) {
+			a, app, d := stack(failed, failed)
+			d.mu.Lock()
+			app.running = false
+			d.mu.Unlock()
+			if start, err := a.StartComposeApp(context.Background()); err != nil || start != models.ComposeAppStartedAnew {
+				t.Fatalf("StartComposeApp = %d, %v; want started anew (an error is replay's AppHalted: the set lost)", start, err)
+			}
+		})
+	}
+}

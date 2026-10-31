@@ -150,6 +150,26 @@ func TestTheComposeGraceEndsOnTheDaemonsSlowAnswer(t *testing.T) {
 	}
 }
 
+// The grace keploy gives a compose app it interrupted ends at compose's up
+// returning (here at 0.6 s), while the daemon fails every read of the app's
+// container: the up's return was looked at only between reads, and a read
+// asked again until the grace's end held the grace to its 5 s.
+func TestTheComposeGraceEndsAtTheUpsReturnWhileTheDaemonFailsItsReads(t *testing.T) {
+	stallBudget(t, time.Hour)
+	core, logs := observer.New(zap.DebugLevel)
+	d := &slowDaemon{Client: exitedApp(), failInspects: 1 << 30}
+	a := &App{logger: zap.New(core), docker: d, container: "app"}
+	began := time.Now()
+	returnedAt := began.Add(600 * time.Millisecond)
+	a.composeAppGrace(func() bool { return time.Now().After(returnedAt) })
+	if took := time.Since(began); took >= graceBudget {
+		t.Fatalf("the grace took %v, its whole %v, after the up returned at 0.6 s; want it ended at the up's return", took, graceBudget)
+	}
+	if logs.FilterMessage("docker compose process exited").Len() != 1 {
+		t.Fatal("the grace did not say it ended at the up's return")
+	}
+}
+
 // The wait for a docker run app's container to exit after keploy's interrupt
 // reads the daemon's answer, however slow (2.2 s, inside the wait's 8 s), and
 // asks again a read that failed: with a 2 s budget per read, the first slow or
