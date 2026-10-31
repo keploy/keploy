@@ -82,6 +82,29 @@ func WithPreferH2(ctx context.Context) context.Context {
 	return context.WithValue(ctx, preferH2CtxKey{}, true)
 }
 
+// preferH2ForCtxKey carries the replay-side per-destination h2 decision into
+// HandleTLSConnection. Unlike WithPreferH2 it is asked inside the handshake,
+// with the SNI the client sent: on the transparent path that is the first
+// point the destination's host is known, and a port-only answer pushes an
+// http/1.1 destination onto h2 whenever any other host on its port (every
+// :443 service) has an Http2 mock (keploy #4713).
+type preferH2ForCtxKey struct{}
+
+// WithPreferH2For marks ctx so the MITM, once it has the client's hello,
+// advertises h2 when prefer(hello.ServerName) says the destination has an
+// Http2 mock. sni is "" for a client that sent none.
+func WithPreferH2For(ctx context.Context, prefer func(sni string) bool) context.Context {
+	return context.WithValue(ctx, preferH2ForCtxKey{}, prefer)
+}
+
+func preferH2ForFrom(ctx context.Context) func(sni string) bool {
+	if ctx == nil {
+		return nil
+	}
+	v, _ := ctx.Value(preferH2ForCtxKey{}).(func(sni string) bool)
+	return v
+}
+
 func preferH2From(ctx context.Context) bool {
 	if ctx == nil {
 		return false
@@ -294,6 +317,7 @@ func ConnectTargetFrom(ctx context.Context) string {
 
 func HandleTLSConnection(ctx context.Context, logger *zap.Logger, conn net.Conn, backdate time.Time) (net.Conn, bool, error) {
 	preserveH2 := preferH2From(ctx)
+	preferH2For := preferH2ForFrom(ctx)
 	dstIP := dstIPFrom(ctx)
 	connectTarget := ConnectTargetFrom(ctx)
 	// 1. Load this run's signing CA (generated per run; see cagen.go). It is set
@@ -327,7 +351,8 @@ func HandleTLSConnection(ctx context.Context, logger *zap.Logger, conn net.Conn,
 	var certSent atomic.Bool
 	config := &tls.Config{
 		GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
-			nextProtos := negotiateNextProtos(hello.SupportedProtos, preserveH2)
+			h2 := preserveH2 || (preferH2For != nil && preferH2For(hello.ServerName))
+			nextProtos := negotiateNextProtos(hello.SupportedProtos, h2)
 			logger.Debug("ALPN negotiation",
 				zap.Strings("clientProtos", hello.SupportedProtos),
 				zap.Strings("serverProtos", nextProtos))

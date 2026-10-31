@@ -412,3 +412,37 @@ func TestASeededDefaultPortDestinationDecidesItsReplay(t *testing.T) {
 		})
 	}
 }
+
+// keploy #4713: on the transparent path the host is only known from the
+// client's hello, so the replay handshake asks by SNI. An Http2 mock of one
+// :443 host must not offer h2 to another :443 host whose recording is
+// http/1.1; a hello without SNI falls back to the CONNECT target's host.
+func TestReplayPreferH2ForScopesByTheHelloSNI(t *testing.T) {
+	ctx := context.Background()
+	p := testProxy(t)
+	if err := p.Mock(ctx, models.OutgoingOptions{}); err != nil {
+		t.Fatalf("Mock: %v", err)
+	}
+	p.SeedRecordedDestinations([]*models.Mock{{Kind: models.HTTP2, Spec: models.MockSpec{
+		HTTP2Req: &models.HTTP2Req{Scheme: "https", Authority: "h2.example:443"}, ReqTimestampMock: time.Unix(100, 0)}}})
+
+	transparent := p.replayPreferH2For("", 443)
+	if transparent("keploymocks.blob.core.windows.net") {
+		t.Fatal("an http/1.1 destination on :443 is offered h2 because another :443 host has an Http2 mock")
+	}
+	if !transparent("h2.example") {
+		t.Fatal("the destination recorded speaking HTTP/2 is not offered h2")
+	}
+	if !transparent("H2.Example") {
+		t.Fatal("SNI is matched case-sensitively")
+	}
+	if !p.replayPreferH2For("h2.example:443", 443)("") {
+		t.Fatal("a hello without SNI does not fall back to the CONNECT target's host")
+	}
+	if p.replayPreferH2For("other.example:443", 443)("") {
+		t.Fatal("a hello without SNI to another CONNECT host is offered h2")
+	}
+	if p.replayPreferH2For("", 8443)("h2.example") {
+		t.Fatal("the HTTP/2 host on another port is offered h2")
+	}
+}
