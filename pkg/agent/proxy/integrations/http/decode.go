@@ -367,6 +367,14 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					// replay stages another set, the request finds nothing
 					// to be answered with, and misses saying so.
 					db, _ = integrations.HoldToRound(mockDb, call)
+					// A call one of the open test's own recordings already
+					// answered is read with the set's background hidden: no
+					// pool or worker recording answers a call one more than
+					// the test recorded, which then misses as such
+					// (extraCall), its background copy left unspent.
+					if h.repeatsOwn(reqCtx, input, db, call, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, false, opts.NoiseStrict(), true) {
+						db = integrations.HideBackground(db)
+					}
 					stub, err = h.learnedMatchOf(reqCtx, input, db, mockDb, h.newLearnNoise(opts, bodyNoise, urlNoise), opts)
 					ok = stub != nil
 				}
