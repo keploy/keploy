@@ -1846,7 +1846,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 			}
 			if own := clientWord(leaf(r, l, ow, skipBoth), ow, leaf); own.Kind == KindClockRead {
 				if i > 0 {
-					own, _ = sinceTestBegin(own)
+					own, _ = sinceTestBegin(own, w.sinceBegin())
 				}
 				return own
 			}
@@ -1980,7 +1980,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// sent are no such place.
 		if follow && ln.Kind == KindVariable && !ln.From.givenWhole {
 			for _, ow := range w.oneRunSinceBegin() {
-				if own, ok := sinceTestBegin(leaf(r, l, ow, skipBoth)); ok {
+				if own, ok := sinceTestBegin(leaf(r, l, ow, skipBoth), w.sinceBegin()); ok {
 					ln = own
 					break
 				}
@@ -1999,7 +1999,9 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// is a read of the clock, or of the clock plus one constant offset,
 		// its call's window holds in both runs (sinceTestBegin), is learned
 		// as that read since its test began (models.SinceTestBegin), never
-		// refused. Both explanations hold in the rounds (a start-up
+		// refused, where a replay can check it from its test's begin to its
+		// call (checkableIn: a look-back cut to the second, over a test a
+		// second long or more, it cannot, and the refusal stands). Both explanations hold in the rounds (a start-up
 		// recording's stamp, minutes before the test began, that record's
 		// full round's start-up wrote as many minutes before its own), and
 		// that read holds under both: a replay passes the value only inside
@@ -2021,11 +2023,11 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// without the rule (noise, another refusal, the clock plus an
 		// offset in one run's own window alone).
 		if wb := w.sinceBegin(); follow && ln.Kind == KindUnaccounted && wb != nil {
-			if own, ok := sinceTestBegin(leaf(r, l, w, skipOffset)); ok {
+			if own, ok := sinceTestBegin(leaf(r, l, w, skipOffset), wb); ok {
 				ln = own
 			} else if ln.byOffset {
 				for _, ow := range w.oneRunSinceBegin() {
-					if own, ok := sinceTestBegin(leaf(r, l, ow, skipOffset)); ok && own.Kind == KindClockRead {
+					if own, ok := sinceTestBegin(leaf(r, l, ow, skipOffset), wb); ok && own.Kind == KindClockRead {
 						ln = own
 						break
 					}
@@ -2059,12 +2061,20 @@ func clockSourceWhy(from Place) string {
 // explanation holds in the rounds too (a copy of an earlier place, an
 // offset of a given instant), which holds under both. ok is false for any
 // other ln (noise, a variable, an echo, a refusal), which those rules leave
-// as the first classification learned it.
-func sinceTestBegin(ln Learned) (Learned, bool) {
+// as the first classification learned it, and for an offset a replay could
+// not check in wb, each run's span from its test's begin to the call
+// (checkableIn), which a replay checks it in: a look-back cut to the second
+// (clock + 719h59m58s at the second: a value read two seconds before its
+// call's window, thirty days on) over a test two seconds long or more,
+// which every replay would refuse.
+func sinceTestBegin(ln Learned, wb *Window) (Learned, bool) {
 	switch {
 	case ln.Kind == KindClockRead && ln.Read != nil:
 		ln.Read.Since = models.SinceTestBegin
 	case ln.Kind == KindClockOffset && ln.Offset != nil:
+		if !checkableIn(*ln.Offset, ln.Offset.Res, wb) {
+			return ln, false
+		}
 		ln.Offset.Since = models.SinceTestBegin
 	default:
 		return ln, false

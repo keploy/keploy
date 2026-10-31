@@ -406,7 +406,12 @@ func TestAClockOffsetCutToADayIsCheckedAtTheDay(t *testing.T) {
 // An hour's cut that reads in minutes (a cut hour plus 90 minutes, or any
 // time to live of no whole number of hours) is checked so too; one that
 // reads in days is not (Within decides it, three hours against the day),
-// nor is a Res of two hours, which is no step.
+// nor is a Res of two hours, which is no step. So is a minute's cut that
+// reads in minutes (clock + 30m at the minute) and a second's that reads in
+// seconds (a poll's dirtyAt <= now - 2s, an epoch's seconds), each where
+// its width is narrower than the cut; one at the second that reads in
+// minutes is not (Within decides it), nor is one at 100 ms (a decimal step
+// between units, no unit's cut).
 func TestAClockOffsetCutToAnHourThatReadsInHoursIsCheckedAtTheHour(t *testing.T) {
 	ms, hour := time.Millisecond, time.Hour
 	o := ClockOffset{Min: 2*hour - 62*time.Second, Max: 2*hour + 30*time.Second, Res: hour}
@@ -462,7 +467,12 @@ func TestAClockOffsetCutToAnHourThatReadsInHoursIsCheckedAtTheHour(t *testing.T)
 		{"a look-back of two hours at the hour", ClockOffset{Min: -2*hour - 30*time.Second, Max: -2*hour + 31*time.Second, Res: hour}, true, true},
 		{"a day at the hour", ClockOffset{Min: 24*hour - 31*time.Second, Max: 24*hour + 30*time.Second, Res: hour}, false, true},
 		{"two hours at two hours (no step)", ClockOffset{Min: 2*hour - 31*time.Second, Max: 2*hour + 30*time.Second, Res: 2 * hour}, false, false},
-		{"thirty minutes at the minute", ClockOffset{Min: 30*time.Minute - 31*time.Second, Max: 30*time.Minute + 30*time.Second, Res: time.Minute}, false, false},
+		{"thirty minutes at the minute, its width a minute and a second", ClockOffset{Min: 30*time.Minute - 31*time.Second, Max: 30*time.Minute + 30*time.Second, Res: time.Minute}, true, false},
+		{"thirty minutes at the minute, its width just under a minute", ClockOffset{Min: 30*time.Minute - 30*time.Second, Max: 30*time.Minute + 30*time.Second - 1, Res: time.Minute}, true, true},
+		{"a look-back of two seconds at the second", ClockOffset{Min: -2*time.Second - 155*ms, Max: -2*time.Second + 368*ms, Res: time.Second}, true, true},
+		{"a look-back of two seconds at the second, its width a second", ClockOffset{Min: -2*time.Second - 500*ms, Max: -time.Second - 500*ms, Res: time.Second}, true, false},
+		{"a look-back of two minutes at the second", ClockOffset{Min: -2*time.Minute - 155*ms, Max: -2*time.Minute + 368*ms, Res: time.Second}, false, true},
+		{"forty-five seconds at 100 ms", ClockOffset{Min: 45*time.Second - 155*ms, Max: 45*time.Second + 368*ms, Res: 100 * ms}, false, true},
 	} {
 		if got, n := c.o.CoarseCut(), c.o.Narrow(); got != c.coarse || n != c.narrow {
 			t.Errorf("%s: CoarseCut %v, Narrow %v; want %v, %v", c.name, got, n, c.coarse, c.narrow)
@@ -479,8 +489,10 @@ func TestAClockOffsetCutToAnHourThatReadsInHoursIsCheckedAtTheHour(t *testing.T)
 // never do; a window that with three of Res adds up to a minute holds
 // nothing. A cut the learn step read (a second) is checked at the cut,
 // within one of it of the span on either side, at every read position. An
-// offset that reads in seconds or finer holds nothing (a cut to the unit
-// makes a time to live changed by one look the same), and neither does one
+// offset that reads in seconds or finer, at no cut of a second or a coarser
+// unit (half a second, a millisecond), holds nothing (a read made seconds
+// before the call's window shows one too, and a cut to the unit makes a
+// time to live changed by one look the same), and neither does one
 // with a Res of none or below, which the learn step never finds: one built
 // without it (from the API, or a hand-edited mock) would have its sums read
 // finer than it was learned at.
@@ -508,9 +520,10 @@ func TestAClockOffsetHoldsAtTheReplaysOwnResolution(t *testing.T) {
 	// holds, the edges of the widened span hold (from the second that holds
 	// the earliest read plus Min, less a second, up to the latest plus Max,
 	// plus a second), a millisecond past either does not, and thirty-one or
-	// twenty-nine minutes never do. Thirty minutes cut to the minute holds
-	// nothing: three minutes and its width add up to more than the minute it
-	// reads in. A Res of 2 s or 31 s (no step: two values shared it by
+	// twenty-nine minutes never do. Thirty minutes cut to the minute, which no
+	// unit holds three minutes of, is checked at the minute (CoarseCut): the
+	// read plus thirty minutes holds, three minutes off never does. A Res of
+	// 2 s or 31 s (no step: two values shared it by
 	// chance) is checked at the replay's millisecond.
 	cut := ClockOffset{Min: 30*time.Minute - 155*ms, Max: 30*time.Minute + 368*ms, Res: sec}
 	for step := time.Duration(0); step < sec; step += 10 * ms {
@@ -539,8 +552,9 @@ func TestAClockOffsetHoldsAtTheReplaysOwnResolution(t *testing.T) {
 		t.Errorf("FALSE RED: a window 56 s wide, which with the offset's width and three seconds adds up to less than a minute: not held")
 	}
 	late := base.Add(59*sec + 900*ms)
-	if wide := (ClockOffset{Min: 30*time.Minute - 600*ms, Max: 30*time.Minute + 600*ms, Res: time.Minute}); wide.Holds(late.Truncate(time.Minute).Add(30*time.Minute), ms, late.Add(-10*ms), late) {
-		t.Errorf("FALSE GREEN? thirty minutes cut to the minute held: want nothing held")
+	if atMinute := (ClockOffset{Min: 30*time.Minute - 600*ms, Max: 30*time.Minute + 600*ms, Res: time.Minute}); !atMinute.Holds(late.Truncate(time.Minute).Add(30*time.Minute), ms, late.Add(-10*ms), late) ||
+		atMinute.Holds(late.Truncate(time.Minute).Add(33*time.Minute), ms, late.Add(-10*ms), late) || atMinute.Holds(late.Truncate(time.Minute).Add(27*time.Minute), ms, late.Add(-10*ms), late) {
+		t.Errorf("thirty minutes cut to the minute: want the read plus thirty minutes, cut down, held at the minute, and three minutes off either way not")
 	}
 	chance := ClockOffset{Min: 30*time.Minute - 155*ms, Max: 30*time.Minute + 368*ms, Res: 2 * sec}
 	if !chance.Holds(late.Add(30*time.Minute), ms, late.Add(-10*ms), late) || chance.Holds(late.Truncate(sec).Add(30*time.Minute-sec), ms, late.Add(-10*ms), late) {

@@ -556,10 +556,12 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 	// one, and only otherwise the plain read the lead shows, as before. In
 	// keploy mock's client tests too: a value the harness gives the
 	// application is compared all the same (the replay checks the offset,
-	// never lets it pass), and one built on a read made before its call's
-	// window shows no offset coarser than a second (clockOffset refuses
-	// it), as a read the application made earlier stands from the window by
-	// how long ago it was made.
+	// never lets it pass), and one built on a read made seconds before its
+	// call's window shows an offset that reads in seconds, which clockOffset
+	// refuses read finer than a second, as a read the application made
+	// earlier stands from the window by how long ago it was made; cut to a
+	// second or coarser, it is checked at the cut, as a poll's dirtyAt <=
+	// now - 2s is (clockOffset).
 	off, cutWhy, cutGap, offset := offsetReading(fieldName(ln.Recorded), rt, lt, w, dc.zone)
 	var tried Learned
 	if offset {
@@ -748,8 +750,9 @@ func clockOffsetOf(r, l typedInstant, w *Window, zone *time.Location) (models.Cl
 // it starts, whatever zone that cut is of), and clockOffset refuses one
 // whose range and three cuts are no narrower than its unit as it does at
 // any cut (an hour's cut on an offset of a day or more is decided so), but
-// a day's cut, and an hour's that reads in hours or minutes (clock + 2h, a
-// cut hour plus 90 minutes), which no unit holds three of
+// a day's cut, and an hour's, a minute's or a second's that reads in that
+// unit or a finer one (clock + 2h, a cut hour plus 90 minutes, clock - 2s
+// at the second), which no unit holds three of
 // (models.ClockOffset.CoarseCut), only where its range is no narrower than
 // the cut (models.ClockOffset.Narrow): a replay checks it at the cut.
 // ok only where one offset
@@ -820,8 +823,11 @@ func offsetAt(r, l typedInstant, w *Window, res time.Duration) (models.ClockOffs
 	// in both runs only where the two waited as long as each other to a
 	// few milliseconds, and the checks of clockOffset (a unit coarser than
 	// a second, one multiple of it in range) refuse it in all but a whole
-	// number of minutes; even then every replay compares that offset, so a
-	// read whose wait changed fails there, never passes unchecked.
+	// number of minutes; cut to a second, where the two need only have
+	// waited as long as each other to within a second, it is learned as a
+	// look-back that reads in seconds, checked at the cut (clockOffset).
+	// Every replay compares that offset, so a read whose wait changed by
+	// more than the check admits fails there, never passes unchecked.
 	later, earlier := rlo > 0 && llo > 0, rhi <= 0 && lhi <= 0
 	if !later && !earlier {
 		return models.ClockOffset{}, false
@@ -975,11 +981,16 @@ func offsetBounds(v time.Time, res time.Duration, s Span) (lo, hi time.Duration,
 // second, and off and three of its resolution (off.Res, the cut its values
 // show: a replay checks a value within one cut of its span on either side)
 // are narrower than that unit (off.Within: off holds one multiple of it,
-// and a replay can tell a time to live changed by one), or, cut to a day or
-// to an hour that no unit holds three of (off.CoarseCut: clock + 2h at the
-// hour), off alone is narrower than the cut (off.Narrow: a replay checks it
-// at the cut, admitting a time to live changed by less than two cuts at
-// some reads, as a date cut to a day admits yesterday), for a caller whose
+// and a replay can tell a time to live changed by one), or, cut to a day,
+// or to an hour, a minute or a second that no unit holds three of
+// (off.CoarseCut: clock + 2h at the hour, clock - 2s at the second, whose
+// offset reads in seconds), off alone is narrower than the
+// cut (off.Narrow: a replay checks it at the cut, admitting a time to live
+// changed by less than two cuts at some reads, as a date cut to a day
+// admits yesterday), where a replay of its call as wide as each run's
+// window could check it (checkableIn: a window that with off's range is a
+// cut or more, which every such replay would refuse whatever value it
+// carried, is refused here, clockOffsetWindowWhy), for a caller whose
 // replay compares it (Window.ComparesOffsets), where the echo could read
 // the test case's own request (unread: why not) and the call's recorded
 // answer does not hold it (rec, its recorded moment, in resp: an answer
@@ -988,15 +999,26 @@ func offsetBounds(v time.Time, res time.Duration, s Span) (lo, hi time.Duration,
 // the resolution its values' encoding writes, beside a cut. A cut is never
 // refused (founder decision, 2026-10-27; a clock read plus a constant
 // offset, then cut, is a clock read, 2026-10-28): thirty days cut to the
-// second is learned, and a replay checks it at the second.
+// second is learned, and a replay checks it at the second; so is a poll's
+// dirtyAt <= now - 2s, an epoch's seconds, though a read the application
+// made two seconds before its call's window, cut to the second, shows the
+// same: every replay compares it, at the second, so one whose wait grew by
+// more than a cut fails there (a false red under load, never a false
+// green). An offset that reads in less than a second, or in seconds at no
+// cut of a second or a coarser unit (clock + 45s at the millisecond),
+// stays refused (off.Fine, clockOffsetFineWhy): there that early read
+// shows it to a few of the values' resolution, which a replay would check
+// it to.
 func (dc *DriftCache) clockOffset(ln Learned, off models.ClockOffset, enc, cutGap time.Duration, w *Window, unread string, rec moment, resp []Leaf) Learned {
 	path := fieldName(ln.Recorded)
 	fallBack := dc.offsetFallBackWhy(path, off, enc, w)
 	switch {
-	case off.Unit() <= time.Second:
+	case off.Fine():
 		ln.Kind, ln.Why = KindUnaccounted, clockOffsetFineWhy(path, off)
 	case !off.Narrow():
 		ln.Kind, ln.Why = KindUnaccounted, clockOffsetWideWhy(path, off, enc)
+	case !checkableIn(off, enc, w):
+		ln.Kind, ln.Why = KindUnaccounted, clockOffsetWindowWhy(path, off, enc, w)
 	case fallBack != "":
 		ln.Kind, ln.Why = KindUnaccounted, fallBack
 	case !w.offsets:
@@ -1021,8 +1043,8 @@ func (dc *DriftCache) clockOffset(ln Learned, off models.ClockOffset, enc, cutGa
 // with its zone), both written in one layout, and w holds the two as a read of
 // each run's clock plus one constant offset (offsetReading), that offset,
 // learned as classifyInstant learns a typed one (clockOffset: only for a
-// caller whose replay compares it, in a unit coarser than a second, and the
-// rest of its checks), in the text's layout, which a replay reads its value
+// caller whose replay compares it, in a unit coarser than a second or cut
+// to a second or a coarser unit, and the rest of its checks), in the text's layout, which a replay reads its value
 // in. ok is false where no offset is learned (the value is no such instant,
 // a wall clock of no zone, which stands from the clock by its zone's offset
 // as much as by one the application adds; the two runs wrote two layouts; w
@@ -1097,9 +1119,10 @@ func clockOffsetSeen(path string, off models.ClockOffset) string {
 }
 
 // clockOffsetEvidence is a KindClockOffset's Why: what was seen, and how the
-// replay compares it. Of an offset cut to an hour or a day that no unit
-// holds three of (models.ClockOffset.CoarseCut: a day's cut, or an hour's
-// that reads in hours or minutes, clock + 2h), what a replay checking it at
+// replay compares it. Of an offset cut to a unit that no unit holds three
+// of (models.ClockOffset.CoarseCut: a day's cut, or an hour's, a minute's
+// or a second's that reads in that unit or a finer one: clock + 2h at the
+// hour, clock - 2s at the second), what a replay checking it at
 // the cut admits (models.ClockOffset.Checkable): as a date cut to a day
 // admits yesterday, a time to live changed by less than two cuts can pass,
 // by where the replay's read falls in its cut (one changed by one cut
@@ -1112,7 +1135,11 @@ func clockOffsetEvidence(path string, off models.ClockOffset) string {
 	if off.CoarseCut() {
 		w := unitWord(off.Res)
 		outside, on := cutExceptions(off.Res)
-		return clockOffsetSeen(path, off) + ", cut to " + aUnit(off.Res) + ". A replay checks the offset at the " + w + ", read in the zone the value shows a whole " + w + " in, else the application's, as standing for its whole " + w + ", within one " + w + " of its call's window plus the offset on either side, as a date cut to a day passes from yesterday: " + offsetNamed(off) + " changed by less than two " + w + "s can pass there, by where the replay's read falls in its " + w + ", " + outside + "one changed by two " + w + "s fails unless the replay's read falls within its call's window and the offset's range (" + models.ShortDuration(off.Max-off.Min) + ") of the " + w + "'s turn, and one changed by three " + w + "s or more fails" + on + "; if the field is a time the application reads from its own clock with no rule, declare it noise in keploy.yml, and keploy stops comparing it"
+		in := ""
+		if off.Res >= time.Hour {
+			in = ", read in the zone the value shows a whole " + w + " in, else the application's"
+		}
+		return clockOffsetSeen(path, off) + ", cut to " + aUnit(off.Res) + ". A replay checks the offset at the " + w + in + ", as standing for its whole " + w + ", within one " + w + " of its call's window plus the offset on either side, as a date cut to a day passes from yesterday: " + offsetNamed(off) + " changed by less than two " + w + "s can pass there, by where the replay's read falls in its " + w + ", " + outside + "one changed by two " + w + "s fails unless the replay's read falls within its call's window and the offset's range (" + models.ShortDuration(off.Max-off.Min) + ") of the " + w + "'s turn, and one changed by three " + w + "s or more fails" + on + "; if the field is a time the application reads from its own clock with no rule, declare it noise in keploy.yml, and keploy stops comparing it"
 	}
 	return clockOffsetSeen(path, off) + ". A replay compares the offset: " + offsetNamed(off) + " changed by " + aUnit(off.Unit()) + " or more still fails; near a wall time the application's zone shows twice as its clocks go back (any zone's, where keploy knows none of the application's) a replay refuses the value, since an application that resolves that wall time to its first showing writes a value an hour early there (two hours in Antarctica/Troll); if the field is a time the application reads from its own clock with no rule, declare it noise in keploy.yml, and keploy stops comparing it"
 }
@@ -1217,11 +1244,22 @@ func backWords(back time.Duration) string {
 }
 
 // clockOffsetFineWhy is why an instant at the clock plus an offset off is
-// refused where off reads in a second or a finer unit, read after "<field>
-// changed, and ": an application that cuts its value to that unit (a whole
-// second) makes a time to live changed by one look the same.
+// refused where off reads in a unit the learn step never learns an offset
+// in (models.ClockOffset.Fine), read after "<field> changed, and ": a unit
+// finer than a second, or a second where its values are cut to no second
+// or coarser unit (clock + 45s at the millisecond). A read the application
+// made outside its call's window shows such an offset too, which a replay
+// would check to the values' resolution and fail as soon as that wait
+// changed, and an application that cuts its value to that unit makes a
+// time to live changed by one look the same. One that reads in seconds,
+// cut to a second or a coarser unit, is checked at the cut (clockOffset).
 func clockOffsetFineWhy(path string, off models.ClockOffset) string {
-	return clockOffsetSeen(path, off) + ", but the offset reads in " + unitWord(off.Unit()) + "s, and an application that cuts its value to the " + unitWord(off.Unit()) + " makes " + offsetNamed(off) + " changed by " + aUnit(off.Unit()) + " look the same, so keploy refuses an offset that reads in a second or finer. If the field is a time the application reads from its own clock with no rule, declare it noise in keploy.yml, and keploy stops comparing it"
+	u := unitWord(off.Unit())
+	tail := " so keploy refuses an offset that reads in less than a second. If the field is a time the application reads from its own clock with no rule, declare it noise in keploy.yml, and keploy stops comparing it"
+	if off.Unit() == time.Second {
+		tail = " so keploy refuses an offset that reads in seconds unless its values are cut to a second or a coarser unit, which a replay checks at the cut. If the field is a time the application reads from its own clock with no rule, declare it noise in keploy.yml, and keploy stops comparing it"
+	}
+	return clockOffsetSeen(path, off) + ", but the offset reads in " + u + "s and its values at a resolution of " + models.ShortDuration(off.Res) + ": a read the application made outside its call's window, " + u + "s before or after it, shows such an offset too, which a replay would check to " + models.ShortDuration(off.Res) + " and fail as soon as that wait changed, and an application that cuts its value to the " + u + " makes " + offsetNamed(off) + " changed by " + aUnit(off.Unit()) + " look the same," + tail
 }
 
 // clockOffsetWideWhy is why an instant at the clock plus an offset in off is
@@ -1240,6 +1278,42 @@ func clockOffsetWideWhy(path string, off models.ClockOffset, enc time.Duration) 
 	return path + " = " + off.Range() + " at a resolution of " + resolutionOf(off.Res, enc) + ": in the recording and in record's full round alike, it is a read of the application's clock in its call's window plus an offset in that range, but the range and three of its resolution (a replay checks the value within one of it of its window plus the offset, on either side) are not narrower than the " + unitWord(off.Unit()) + " the offset reads in, so a replay could not tell " + offsetNamed(off) + " changed by " + aUnit(off.Unit()) + " from it, and keploy refuses it. If the field is a time the application reads from its own clock with no rule, declare it noise in keploy.yml, and keploy stops comparing it"
 }
 
+// checkableIn reports whether a replay can check off, an offset learned
+// from values written at enc, in a window as wide as its call's window w
+// was in each run (models.ClockOffset.Checkable, which Holds asks first):
+// the learn step learns no offset a replay of its call, as wide as both
+// runs', would refuse whatever value it carried, a certain false red. Of
+// an offset cut to a unit that no unit holds three of (CoarseCut: clock -
+// 2s at the second), the window and off's range together narrower than the
+// cut; of any other, the window, off's range and three of its cut narrower
+// than the unit off reads in. Of a read learned before its call's window
+// (models.SinceTestBegin), w is each run's span from its test's begin to
+// the call (Window.sinceBegin), which a replay checks it in (sinceTestBegin).
+// False for a nil w.
+func checkableIn(off models.ClockOffset, enc time.Duration, w *Window) bool {
+	return w != nil && off.Checkable(enc, w.Rec.From, w.Rec.To) && off.Checkable(enc, w.F.From, w.F.To)
+}
+
+// clockOffsetWindowWhy is why an instant at the clock plus an offset in off,
+// which the learn step could tell (off.Narrow), is refused where its call's
+// window w in either run, with off's range, is too wide for a replay to
+// check it (checkableIn): a replay as wide would refuse the value whatever
+// it carried. It names the wider window, never a value.
+func clockOffsetWindowWhy(path string, off models.ClockOffset, enc time.Duration, w *Window) string {
+	win := max(w.Rec.To.Sub(w.Rec.From), w.F.To.Sub(w.F.From))
+	head := path + " = " + off.Range() + " at a resolution of " + resolutionOf(off.Res, enc) + ": in the recording and in record's full round alike, it is a read of the application's clock in its call's window plus an offset in that range, but "
+	tail := ", so a replay of the call as wide could not tell " + offsetNamed(off) + " changed by "
+	if off.CoarseChecked(enc) {
+		u := unitWord(off.Res)
+		head += "a replay checks it at the " + u + " it is cut to against its call's window, and its call's window (" + models.ShortDuration(win) + ") with the offset's range is no narrower than the " + u
+		tail += u + "s"
+	} else {
+		head += "its call's window (" + models.ShortDuration(win) + ") with the offset's range and three of its cut is no narrower than the " + unitWord(off.Unit()) + " the offset reads in"
+		tail += aUnit(off.Unit())
+	}
+	return head + tail + " from it, and keploy refuses it rather than learn a check every such replay fails. If the field is a time the application reads from its own clock with no rule, declare it noise in keploy.yml, and keploy stops comparing it"
+}
+
 // resolutionOf is res as a reason reads it, saying what set it: the
 // encoding's (enc), or the cut both runs' values show where that is
 // coarser (offsetReading).
@@ -1251,16 +1325,22 @@ func resolutionOf(res, enc time.Duration) string {
 }
 
 // cutExceptions are where a reason's claims on a time to live changed by
-// two or three of the cut c, an hour or a day, do not hold
-// (models.ClockOffset.Checkable): outside goes before both claims, on after
-// the last. A daylight-saving turn makes a day 23 or 25 hours long; near the
-// hour the clocks go back an application that cuts to the hour's first
-// showing (JavaScript; java.time's LocalDateTime then atZone) writes a value
-// up to two hours before the instant it cuts, so a replay refuses an hour's
-// cut there (models.ClockOffset.FallBack).
+// two or three of the cut c, a day, an hour, a minute or a second, do not
+// hold (models.ClockOffset.Checkable): outside goes before both claims, on
+// after the last. A daylight-saving turn makes a day 23 or 25 hours long;
+// near the hour the clocks go back an application that cuts to the hour's
+// first showing (JavaScript; java.time's LocalDateTime then atZone) writes
+// a value up to two hours before the instant it cuts, so a replay refuses
+// an hour's cut there; at a finer cut, one that resolves a wall time shown
+// twice to its first showing writes a value an hour early (two in
+// Antarctica/Troll), so a replay refuses it near that wall time too
+// (models.ClockOffset.FallBack, at any cut finer than a day).
 func cutExceptions(c time.Duration) (outside, on string) {
-	if c == time.Hour {
+	switch {
+	case c == time.Hour:
 		return "", ", and near an hour the application's zone shows twice as its clocks go back a replay refuses the value (an application that cuts to that hour's first showing writes a value up to two hours early there)"
+	case c < time.Hour:
+		return "", ", and near a wall time the application's zone shows twice as its clocks go back a replay refuses the value (an application that resolves that wall time to its first showing writes a value an hour early there, two hours in Antarctica/Troll)"
 	}
 	return "", " on a day of 24 hours"
 }
