@@ -59,6 +59,15 @@ type provenWire struct {
 	open string
 	// skip is the gate: test ID -> the reason its harness skips it with.
 	skip map[string]string
+	// asideHanded is the tests whose recordings the set's replay has handed
+	// the proxy to serve aside (serveAside): a skipped test's at its own
+	// skipped begin, and a skipped or kept test's that the replay had not
+	// begun at the begin of a test recorded after it (serveNotBegunBefore).
+	// SetScopeSkips starts it over with the set.
+	asideHanded map[string]bool
+	// begun is the tests the session began, skipped ones aside: none of
+	// them is handed aside from then on (serveNotBegunBefore).
+	begun map[string]bool
 	// charged holds the misses the ends drained from the proxy, until the
 	// CLI's own end-of-run read (GetMockErrors) collects them, so charging a
 	// miss to a test never hides it from the run's totals.
@@ -619,9 +628,15 @@ func (a *Agent) noteBegunInOrder(id string) {
 // for a test with neither: one that was not recorded.
 func (a *Agent) recordedStart(id string, starts map[string]time.Time) (start time.Time, known bool) {
 	a.scopeMu.Lock()
-	began := a.testBegins[id]
+	begins := a.testBegins
 	a.scopeMu.Unlock()
-	if !began.IsZero() {
+	return recordedAt(id, begins, starts)
+}
+
+// recordedAt is recordedStart's answer from begins (SetTestBegins) and
+// starts (SetRecordedWindows).
+func recordedAt(id string, begins, starts map[string]time.Time) (start time.Time, known bool) {
+	if began := begins[id]; !began.IsZero() {
 		return began, true
 	}
 	start, known = starts[id]
@@ -707,8 +722,99 @@ func (a *Agent) SetScopeSkips(_ context.Context, skip map[string]string) error {
 	}
 	a.provenMu.Lock()
 	a.proven.skip = cp
+	a.proven.asideHanded = nil
 	a.provenMu.Unlock()
 	return nil
+}
+
+// handAside reports whether test id's recordings are still to be handed to
+// the proxy to serve aside in this set, and notes them handed.
+func (a *Agent) handAside(id string) bool {
+	a.provenMu.Lock()
+	defer a.provenMu.Unlock()
+	if a.proven.asideHanded[id] {
+		return false
+	}
+	if a.proven.asideHanded == nil {
+		a.proven.asideHanded = map[string]bool{}
+	}
+	a.proven.asideHanded[id] = true
+	return true
+}
+
+// serveNotBegunBefore hands the proxy, at test id's begin, the recordings of
+// every test of the set recorded before id (recordedStart) that this replay
+// has not begun and has not handed yet, in recorded order, as a skipped
+// test's own begin does (serveAside): a test the replay skips (the proven
+// gate), and a kept test the run does not select (go test -run) or has not
+// reached (tests run in another order than recorded). Neither has made its
+// calls, yet the tests after it still make the calls its recording holds,
+// in their own windows: a per-process first use's refresh, a cache it
+// filled. Served as at a skipped begin: exact only, unchecked, never
+// required, only for a call beyond the calling test's own recordings, and
+// each recording at most once in the set, its own test's copy included (a
+// kept test that begins after its recordings were handed is answered one
+// only if no test was served it aside: the proxy's claim). A run that
+// begins every test in its recorded order hands nothing here. A test the
+// recording has no place for (no begin, no window) is handed only at its
+// own skipped begin, and none is handed to a test recorded before it: what
+// it answers may be what that test caused.
+func (a *Agent) serveNotBegunBefore(id string) {
+	a.scopeMu.Lock()
+	begins := a.testBegins // replaced whole (SetTestBegins), never written
+	a.scopeMu.Unlock()
+	type due struct {
+		id string
+		at time.Time
+	}
+	var dues []due
+	a.provenMu.Lock()
+	skip, starts := a.proven.skip, a.proven.order.starts
+	at, known := recordedAt(id, begins, starts)
+	if !known {
+		a.provenMu.Unlock()
+		return
+	}
+	consider := func(s string) {
+		if s == id || a.proven.begun[s] || a.proven.asideHanded[s] {
+			return
+		}
+		if st, ok := recordedAt(s, begins, starts); ok && st.Before(at) {
+			dues = append(dues, due{s, st})
+		}
+	}
+	for s := range begins {
+		consider(s)
+	}
+	for s := range starts {
+		if _, dup := begins[s]; !dup {
+			consider(s)
+		}
+	}
+	if len(dues) > 0 && a.proven.asideHanded == nil {
+		a.proven.asideHanded = map[string]bool{}
+	}
+	for _, d := range dues {
+		a.proven.asideHanded[d.id] = true
+	}
+	a.provenMu.Unlock()
+	slices.SortFunc(dues, func(x, y due) int {
+		if c := x.at.Compare(y.at); c != 0 {
+			return c
+		}
+		return strings.Compare(x.id, y.id)
+	})
+	var notRun []string
+	for _, d := range dues {
+		a.serveAside(d.id)
+		if _, skipped := skip[d.id]; !skipped {
+			notRun = append(notRun, d.id)
+		}
+	}
+	if len(notRun) > 0 {
+		a.logger.Info("keploy serves the recordings of the tests recorded before this one that the replay has not run to the calls made after them: a call such a test recorded that a later test makes beyond its own recordings is answered by that recording, exact only, unchecked and at most once",
+			zap.String("test", id), zap.Strings("not run", notRun))
+	}
 }
 
 func (a *Agent) replaying() bool {
@@ -762,9 +868,14 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 	reason, gated := a.proven.skip[id]
 	dir := a.proven.dir
 	a.provenMu.Unlock()
+	if a.replaying() {
+		a.serveNotBegunBefore(id)
+	}
 	if a.replaying() && gated {
 		a.NoteScopeGated(id, 0, at)
-		a.serveAside(id)
+		if a.handAside(id) {
+			a.serveAside(id)
+		}
 		return models.ScopeBeginResp{V: models.ScopeProtocolVersion, Status: "ok", Action: models.ScopeActionSkip, Reason: reason}, nil
 	}
 
@@ -859,6 +970,10 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 	}
 	a.provenMu.Lock()
 	a.proven.open = id
+	if a.proven.begun == nil {
+		a.proven.begun = map[string]bool{}
+	}
+	a.proven.begun[id] = true
 	a.provenMu.Unlock()
 	a.noteBegunInOrder(id)
 	// The test is a scope of its own from here (containerkey); closeOpen
@@ -1398,13 +1513,19 @@ func (a *Agent) serveAside(id string) {
 // serveRecordingsAside hands the proxy names, the recordings of test id,
 // which the replay set aside, to serve the calls made after it, as serveAside
 // says: keploy mock's skipped begin, and keploy test's opening of the test
-// after it (models.ExactServing.Aside).
+// after it (models.ExactServing.Aside). A proxy that reads them from disk as
+// a call asks (coreAgent.ExactAsideDiskServer) is handed those the store
+// keeps on disk by name, none of them read: a partial replay hands every
+// earlier test it has not run, and what it holds must not grow with their
+// size (founder rule no-oom-components). The resident ones are the store's
+// own copies.
 func (a *Agent) serveRecordingsAside(id string, names []string) {
 	as, ok := a.Proxy.(coreAgent.ExactAsideServer)
 	if !ok || id == "" || len(names) == 0 {
 		return
 	}
-	mocks, err := a.mocksByName(names)
+	ds, lazy := a.Proxy.(coreAgent.ExactAsideDiskServer)
+	mocks, onDisk, err := a.storedByName(names, !lazy)
 	if err != nil {
 		a.logger.Warn("keploy could not read a set-aside test's recordings: no later test is served them",
 			zap.String("test", id), zap.Error(err), zap.String("next_step", "check that the recording's mocks are all loaded"))
@@ -1413,17 +1534,31 @@ func (a *Agent) serveRecordingsAside(id string, names []string) {
 	if err := as.ServeExactAside(id, a.notReal(id, testMocks(names, mocks))); err != nil {
 		a.logger.Warn("keploy could not serve a set-aside test's recordings to the tests after it", zap.String("test", id), zap.Error(err))
 	}
+	if lazy && len(onDisk) > 0 {
+		if err := ds.ServeExactAsideOnDisk(id, onDisk); err != nil {
+			a.logger.Warn("keploy could not serve a set-aside test's recordings to the tests after it", zap.String("test", id), zap.Error(err))
+		}
+	}
 }
 
 // mocksByName finds every stored mock named, resident or on disk. A name the
 // stored set does not have is an error: the mapping names a recording that
 // is not loaded, so whether the test made that call cannot be told.
 func (a *Agent) mocksByName(names []string) (map[string]*models.Mock, error) {
+	out, _, err := a.storedByName(names, true)
+	return out, err
+}
+
+// storedByName is mocksByName, and with load false it reads none of those
+// on disk: it returns the resident ones and, in names' order, the names of
+// those the store keeps on disk. A name the store has neither way is an
+// error, as for mocksByName.
+func (a *Agent) storedByName(names []string, load bool) (map[string]*models.Mock, []string, error) {
 	out := make(map[string]*models.Mock, len(names))
 	v, ok := a.clientMocks.Load(uint64(0))
 	s, _ := v.(*ClientMockStorage)
 	if !ok || s == nil {
-		return nil, errors.New("no mocks are loaded")
+		return nil, nil, errors.New("no mocks are loaded")
 	}
 	want := make(map[string]bool, len(names))
 	s.mu.RLock()
@@ -1444,33 +1579,50 @@ func (a *Agent) mocksByName(names []string) (map[string]*models.Mock, error) {
 	disk := s.diskMocks
 	s.mu.RUnlock()
 	var rest []string
-	for n := range want {
-		if out[n] == nil {
+	for _, n := range names {
+		if want[n] && out[n] == nil {
 			rest = append(rest, n)
+			want[n] = false // once each; still wanted (missing reads out)
 		}
 	}
+	for _, n := range rest {
+		want[n] = true
+	}
+	var onDisk []string
 	if len(rest) > 0 && disk != nil {
-		found, err := disk.LoadByNames(rest)
-		if err != nil {
-			return nil, fmt.Errorf("reading mocks %s: %w", strings.Join(rest, ", "), err)
-		}
-		for _, m := range found {
-			if m != nil {
-				out[m.Name] = m
+		if !load {
+			held, err := disk.Holds(rest)
+			if err != nil {
+				return nil, nil, fmt.Errorf("reading mocks %s: %w", strings.Join(rest, ", "), err)
+			}
+			onDisk = held
+		} else {
+			found, err := disk.LoadByNames(rest)
+			if err != nil {
+				return nil, nil, fmt.Errorf("reading mocks %s: %w", strings.Join(rest, ", "), err)
+			}
+			for _, m := range found {
+				if m != nil {
+					out[m.Name] = m
+				}
 			}
 		}
 	}
+	held := make(map[string]bool, len(onDisk))
+	for _, n := range onDisk {
+		held[n] = true
+	}
 	var missing []string
 	for n := range want {
-		if out[n] == nil {
+		if out[n] == nil && !held[n] {
 			missing = append(missing, n)
 		}
 	}
 	if len(missing) > 0 {
 		sort.Strings(missing)
-		return nil, fmt.Errorf("its mappings file (mappings.yaml, or mappings.json) names mocks the loaded recording does not have: %s; if you edited it, correct those names, otherwise record the set again", strings.Join(missing, ", "))
+		return nil, nil, fmt.Errorf("its mappings file (mappings.yaml, or mappings.json) names mocks the loaded recording does not have: %s; if you edited it, correct those names, otherwise record the set again", strings.Join(missing, ", "))
 	}
-	return out, nil
+	return out, onDisk, nil
 }
 
 // servedSpan is when exact serving served one test: from since, when its

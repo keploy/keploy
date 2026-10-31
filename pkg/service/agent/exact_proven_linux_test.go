@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	nethttp "net/http"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -85,6 +86,14 @@ func (p *servingProxy) ExactTestUnusedBackground() (string, []string, bool) {
 }
 func (p *servingProxy) ServeExactAside(from string, mocks []*models.Mock) error {
 	p.mm.ServeExactAside(from, mocks)
+	return nil
+}
+func (p *servingProxy) ServeExactAsideOnDisk(from string, names []string) error {
+	p.mm.ServeExactAsideOnDisk(from, names, nil)
+	return nil
+}
+func (p *servingProxy) SetRecordingSource(src func(kind models.Kind, keys []string, visit func(name string, load func() (*models.Mock, error)) bool) error) error {
+	p.mm.SetRecordingSource(src)
 	return nil
 }
 func (p *servingProxy) ExactTestServedAside() (string, []string, bool) {
@@ -1149,6 +1158,168 @@ func TestASetAsideTestsRecordingAnswersTheCallAfterIt(t *testing.T) {
 	}
 }
 
+// api-server's first-use PAT read under a run that does not select the
+// skipped test that recorded it (keploy mock replay --lock -- -run with a
+// skip line on TestAppCRUD): that test never begins, yet the test recorded
+// after it makes its call in its own window. The skipped test's recording
+// answers it, as at the skipped test's own begin: unchecked, never required,
+// named on the evidence. A skipped test recorded after the open one serves
+// it nothing (what it answers may be what that test caused): the call
+// misses and fails the test.
+func TestASkippedTestNoBeginServesTheTestsRecordedAfterIt(t *testing.T) {
+	for _, tc := range []struct {
+		name, skipped string
+		served        bool
+	}{
+		{"skipped and recorded before: served", "o::TestQ", true},
+		{"skipped and recorded after: not served", "o::TestZ", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, rp := exactAgent(t,
+				[]*models.Mock{pingMock("mock-1", "/pat", "pat", t0), pingMock("mock-2", "/k", "k", t0.Add(time.Second)), pingMock("mock-3", "/pat", "pat", t0.Add(3*time.Second))},
+				map[string][]string{"o::TestQ": {"mock-1"}, "o::TestK": {"mock-2"}, "o::TestZ": {"mock-3"}}, map[string][]string{})
+			ctx := context.Background()
+			require.NoError(t, a.SetRecordedWindows(ctx, []models.TestWindow{
+				{TestCase: "o::TestQ", Start: t0, End: t0.Add(500 * time.Millisecond)},
+				{TestCase: "o::TestK", Start: t0.Add(time.Second), End: t0.Add(1500 * time.Millisecond)},
+				{TestCase: "o::TestZ", Start: t0.Add(3 * time.Second), End: t0.Add(3500 * time.Millisecond)},
+			}))
+			require.NoError(t, a.SetScopeSkips(ctx, map[string]string{tc.skipped: "manual/the first use's owner"}))
+			if !tc.served {
+				// TestQ, kept, runs first and makes its own call: a test
+				// the run began hands nothing to the tests after it.
+				got, e := runTest(t, a, rp, "TestQ", "/pat")
+				require.Equal(t, []string{"200 pat"}, got)
+				require.Empty(t, e.Action, e.Reason)
+			}
+			// The skipped test is never begun: the run does not select it.
+			got, e := runTest(t, a, rp, "TestK", "/k", "/pat")
+			ev := evidenceOf(t, a, "o::TestK")
+			require.NotNil(t, ev)
+			if !tc.served {
+				require.Equal(t, "200 k", got[0])
+				require.NotEqual(t, 200, mustCode(got[1]), "a test recorded after the open one serves it nothing")
+				require.Equal(t, models.ScopeActionFail, e.Action)
+				require.Contains(t, e.Reason, "GET /pat to 127.0.0.1:18093 had no recorded answer")
+				require.Empty(t, ev.ServedAside)
+				return
+			}
+			require.Equal(t, []string{"200 k", "200 pat"}, got)
+			require.Empty(t, e.Action, e.Reason)
+			require.Equal(t, []string{"mock-1 served from o::TestQ (set aside)"}, ev.ServedAside)
+			require.Empty(t, ev.Unconsumed, "a set-aside recording is never the test's to make")
+			// Its begin arriving later hands nothing again: answered once.
+			b, serr := a.ProvenBegin(ctx, begin("TestQ"))
+			require.Nil(t, serr)
+			require.Equal(t, models.ScopeActionSkip, b.Action)
+			got, e = runTest(t, a, rp, "TestZ", "/pat", "/pat")
+			require.Equal(t, "200 pat", got[0], "TestZ's own recording")
+			require.NotEqual(t, 200, mustCode(got[1]), "the skipped test's recording answered once, in TestK")
+			require.Equal(t, models.ScopeActionFail, e.Action)
+		})
+	}
+}
+
+// notBegunAgent is TestQ (/pat), TestK (/k, and its own /pat when own) and
+// TestZ (/z), recorded in that order, none skipped: a kept test's recordings
+// with the windows that order them.
+func notBegunAgent(t *testing.T, own bool) (*Agent, *servingProxy) {
+	t.Helper()
+	mocks := []*models.Mock{pingMock("mock-1", "/pat", "pat", t0), pingMock("mock-2", "/k", "k", t0.Add(time.Second)), pingMock("mock-5", "/z", "z", t0.Add(3*time.Second))}
+	table := map[string][]string{"o::TestQ": {"mock-1"}, "o::TestK": {"mock-2"}, "o::TestZ": {"mock-5"}}
+	if own {
+		mocks = append(mocks, pingMock("mock-3", "/pat", "own", t0.Add(1100*time.Millisecond)))
+		table["o::TestK"] = []string{"mock-2", "mock-3"}
+	}
+	a, rp := exactAgent(t, mocks, table, map[string][]string{})
+	require.NoError(t, a.SetRecordedWindows(context.Background(), []models.TestWindow{
+		{TestCase: "o::TestQ", Start: t0, End: t0.Add(500 * time.Millisecond)},
+		{TestCase: "o::TestK", Start: t0.Add(time.Second), End: t0.Add(1500 * time.Millisecond)},
+		{TestCase: "o::TestZ", Start: t0.Add(3 * time.Second), End: t0.Add(3500 * time.Millisecond)},
+	}))
+	return a, rp
+}
+
+// api-server's first-use PAT read under a partial replay (keploy mock replay
+// -- -run TestListApps): TestAppCRUD, kept and recorded before it, made the
+// read at record and is not run, so TestListApps makes it in its own window.
+// A test the replay has not begun hands its recordings aside at the begin of
+// a test recorded after it, as a skipped one does: the call beyond the
+// open test's own recordings is answered by that test's exact copy,
+// unchecked and named; past every copy the call is an extra call; a call
+// that is not exactly the copy misses; a test the run began hands nothing
+// (its recordings are its own, required of it), so a full run in recorded
+// order is served as before.
+func TestAKeptTestTheRunDoesNotBeginServesTheTestsRecordedAfterIt(t *testing.T) {
+	t.Run("partial replay: served", func(t *testing.T) {
+		a, rp := notBegunAgent(t, false)
+		got, e := runTest(t, a, rp, "TestK", "/k", "/pat")
+		require.Equal(t, []string{"200 k", "200 pat"}, got)
+		require.Empty(t, e.Action, e.Reason)
+		ev := evidenceOf(t, a, "o::TestK")
+		require.Equal(t, []string{"mock-1 served from o::TestQ (set aside)"}, ev.ServedAside)
+		require.Empty(t, ev.Unconsumed, "another test's recording is never the open test's to make")
+		// Answered once: the next test's same call misses.
+		got, e = runTest(t, a, rp, "TestZ", "/z", "/pat")
+		require.Equal(t, "200 z", got[0])
+		require.NotEqual(t, 200, mustCode(got[1]), "a recording answers once in the set")
+		require.Equal(t, models.ScopeActionFail, e.Action)
+	})
+	t.Run("past its own and every copy: an extra call", func(t *testing.T) {
+		a, rp := notBegunAgent(t, true)
+		got, e := runTest(t, a, rp, "TestK", "/k", "/pat", "/pat", "/pat")
+		require.Equal(t, []string{"200 k", "200 own", "200 pat"}, got[:3], "its own first, then the copy")
+		require.NotEqual(t, 200, mustCode(got[3]), "no copy left")
+		require.Equal(t, models.ScopeActionFail, e.Action)
+		require.Contains(t, e.Reason, "GET /pat to 127.0.0.1:18093 was called 3 times, recorded 2")
+	})
+	t.Run("not exactly the copy: refused", func(t *testing.T) {
+		a, rp := notBegunAgent(t, false)
+		got, e := runTest(t, a, rp, "TestK", "/k", "/pat?fresh=1")
+		require.Equal(t, "200 k", got[0])
+		require.NotEqual(t, 200, mustCode(got[1]))
+		require.Equal(t, models.ScopeActionFail, e.Action)
+		require.Contains(t, e.Reason, "GET /pat to 127.0.0.1:18093 had no recorded answer")
+		require.Empty(t, evidenceOf(t, a, "o::TestK").ServedAside)
+	})
+	t.Run("begun: its recordings stay its own", func(t *testing.T) {
+		a, rp := notBegunAgent(t, false)
+		// TestQ ran first, in recorded order, and did not make its call.
+		_, e := runTest(t, a, rp, "TestQ")
+		require.Equal(t, models.ScopeActionFail, e.Action)
+		require.Equal(t, []string{"mock-1"}, evidenceOf(t, a, "o::TestQ").Unconsumed)
+		got, e := runTest(t, a, rp, "TestK", "/k", "/pat")
+		require.Equal(t, "200 k", got[0])
+		require.NotEqual(t, 200, mustCode(got[1]), "a test the run began is handed to no later test")
+		require.Equal(t, models.ScopeActionFail, e.Action)
+		require.Empty(t, evidenceOf(t, a, "o::TestK").ServedAside)
+	})
+	t.Run("begun later: its own copy is the one answer", func(t *testing.T) {
+		// Served aside to TestK, which ran first: TestQ's own call then
+		// finds no answer left.
+		a, rp := notBegunAgent(t, false)
+		got, e := runTest(t, a, rp, "TestK", "/k", "/pat")
+		require.Equal(t, []string{"200 k", "200 pat"}, got)
+		require.Empty(t, e.Action, e.Reason)
+		got, e = runTest(t, a, rp, "TestQ", "/pat")
+		require.NotEqual(t, 200, mustCode(got[0]), "the recording answered once, in TestK")
+		require.Equal(t, models.ScopeActionFail, e.Action)
+		// Answered TestQ itself: no later test is served it aside.
+		a, rp = notBegunAgent(t, false)
+		got, e = runTest(t, a, rp, "TestK", "/k")
+		require.Equal(t, []string{"200 k"}, got)
+		require.Empty(t, e.Action, e.Reason)
+		got, e = runTest(t, a, rp, "TestQ", "/pat")
+		require.Equal(t, []string{"200 pat"}, got)
+		require.Empty(t, e.Action, e.Reason)
+		got, e = runTest(t, a, rp, "TestZ", "/z", "/pat")
+		require.Equal(t, "200 z", got[0])
+		require.NotEqual(t, 200, mustCode(got[1]), "TestQ's own call took the one answer")
+		require.Equal(t, models.ScopeActionFail, e.Action)
+		require.Empty(t, evidenceOf(t, a, "o::TestZ").ServedAside)
+	})
+}
+
 // mustCode is the status code of a runTest answer ("<code> <body>").
 func mustCode(answer string) int {
 	var code int
@@ -2024,4 +2195,86 @@ func (a *Agent) storage() *ClientMockStorage {
 	v, _ := a.clientMocks.Load(uint64(0))
 	s, _ := v.(*ClientMockStorage)
 	return s
+}
+
+// A partial replay of the last test of a large set (keploy mock replay --
+// -run TestLast) hands, at its begin, every earlier test the run has not
+// begun (founder rule no-oom-components: "a row pins peak heap"). With 1000
+// such tests' 2 recordings each on the agent's disk store, each with a
+// 64 KiB request (128 MiB decoded), the begin reads none of them: the heap
+// held after it stays under 16 MiB. A call of the first test's recording is
+// still served aside, read from disk as the call asks, by its keys (the
+// big ones are of another shape and are never read), and after it the heap
+// held stays under the bound. Mutant: the agent reads them at the begin.
+func TestAPartialReplayOfALargeSetHandsAsideWithinABoundHeap(t *testing.T) {
+	const tests, per, body, bound = 1000, 2, 64 << 10, 16 << 20
+	ctx := context.Background()
+	disk, err := proxyPkg.NewDiskMocks(zap.NewNop())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = disk.Close() })
+	pat := pingMock("pat", "/pat", "pat", t0)
+	pat.TestModeInfo.Lifetime = models.LifetimePerTest
+	require.NoError(t, disk.Add(pat))
+	table := map[string][]string{"o::T0000": {"pat"}}
+	windows := []models.TestWindow{{TestCase: "o::T0000", Start: t0, End: t0.Add(time.Second)}}
+	pad := strings.Repeat("x", body)
+	for i := 1; i <= tests; i++ {
+		id := fmt.Sprintf("o::T%04d", i)
+		at := t0.Add(time.Duration(i) * time.Second)
+		for j := 0; j < per; j++ {
+			mk := pingMock(fmt.Sprintf("big-%d-%d", i, j), fmt.Sprintf("/big/%d", i), "ok", at.Add(time.Duration(j)*time.Millisecond))
+			mk.Spec.HTTPReq.Method = "POST"
+			mk.Spec.HTTPReq.Body = pad
+			mk.TestModeInfo.Lifetime = models.LifetimePerTest
+			require.NoError(t, disk.Add(mk))
+			table[id] = append(table[id], mk.Name)
+		}
+		windows = append(windows, models.TestWindow{TestCase: id, Start: at, End: at.Add(500 * time.Millisecond)})
+	}
+	disk.Finalize()
+	last := t0.Add(time.Duration(tests+1) * time.Second)
+	own := pingMock("own", "/own", "own", last)
+	table["o::TestLast"] = []string{"own"}
+	windows = append(windows, models.TestWindow{TestCase: "o::TestLast", Start: last, End: last.Add(time.Second)})
+
+	a, _ := wireAgent(t, models.MODE_TEST)
+	p := newServingProxy()
+	a.Proxy = p
+	require.NoError(t, a.StoreMocks(ctx, nil, []*models.Mock{own}))
+	st := loadStorage(t, a)
+	st.mu.Lock()
+	st.diskMocks = disk
+	st.mu.Unlock()
+	p.mm.SetRecordingSource(disk.RangeKeys)
+	require.NoError(t, a.SetScopeTable(ctx, table))
+	require.NoError(t, a.SetScopePool(ctx, map[string][]string{}))
+	require.NoError(t, a.SetRecordedWindows(ctx, windows))
+	claimSelf(t, a)
+
+	base := heapHeld()
+	_, serr := a.ProvenBegin(ctx, begin("TestLast"))
+	require.Nil(t, serr)
+	held := int64(heapHeld()) - int64(base)
+	require.LessOrEqual(t, held, int64(bound), "the begin hands %d tests aside: it must read none of their recordings", tests)
+	var got []string
+	for _, path := range []string{"/own", "/pat"} {
+		code, b := p.call(t, path)
+		got = append(got, fmt.Sprintf("%d %s", code, strings.TrimSpace(b)))
+	}
+	require.Equal(t, []string{"200 own", "200 pat"}, got, "the first test's recording is served aside, read from disk as the call asks")
+	held = int64(heapHeld()) - int64(base)
+	require.LessOrEqual(t, held, int64(bound), "after the call none of the handed recordings is kept")
+	e, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: "TestLast", CanSkip: true, Outcome: models.ScopeOutcomePassed})
+	require.Nil(t, serr)
+	require.Empty(t, e.Action, e.Reason)
+	require.Equal(t, []string{"pat served from o::T0000 (set aside)"}, evidenceOf(t, a, "o::TestLast").ServedAside)
+}
+
+// heapHeld is the heap's live bytes after a collection.
+func heapHeld() uint64 {
+	runtime.GC()
+	runtime.GC()
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&ms)
+	return ms.HeapAlloc
 }

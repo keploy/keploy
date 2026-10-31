@@ -4817,6 +4817,21 @@ func (p *Proxy) ServeExactAside(from string, mocks []*models.Mock) error {
 	return nil
 }
 
+// ServeExactAsideOnDisk implements agent.ExactAsideDiskServer
+// (MockManager.ServeExactAsideOnDisk): a recording read from disk whose
+// destination keploy now reaches for real (mock.real) is never served.
+func (p *Proxy) ServeExactAsideOnDisk(from string, names []string) error {
+	m := p.getMockManager()
+	if m == nil {
+		return errNoMockManager
+	}
+	m.ServeExactAsideOnDisk(from, names, func(mk *models.Mock) bool {
+		_, real := p.RealDestination(mk)
+		return !real
+	})
+	return nil
+}
+
 // ExactTestServedAside implements agent.ExactAsideServer
 // (MockManager.ExactTestServedAside).
 func (p *Proxy) ExactTestServedAside() (string, []string, bool) {

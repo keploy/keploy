@@ -724,6 +724,23 @@ func (d *DiskMocks) LoadByNames(names []string) ([]*models.Mock, error) {
 	return d.decodeAll(sel)
 }
 
+// Holds returns, of names, those the store holds, in names' order, decoding
+// none.
+func (d *DiskMocks) Holds(names []string) ([]string, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.closed {
+		return nil, fmt.Errorf("disk mocks: store closed")
+	}
+	var out []string
+	for _, n := range names {
+		if _, ok := d.byName[n]; ok {
+			out = append(out, n)
+		}
+	}
+	return out, nil
+}
+
 // RangeKeys calls visit, in recorded order (request time), with each on-disk
 // mock of kind indexed under any of keys (models.RequestKeys), once each, until
 // visit returns false: its name, and load, which decodes it. Only what visit
