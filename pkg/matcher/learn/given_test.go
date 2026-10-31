@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +14,7 @@ import (
 	_ "time/tzdata"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 // slotRequest is a test case's request listing slots, as recorded and as
@@ -1498,5 +1500,164 @@ func TestTrackerNamesAPartOfTheIncomingRequestsOneVariableOfTheTest(t *testing.T
 	tr.Begin()
 	if name, ok := tr.IncomingName(n, place, nil); ok {
 		t.Fatalf("an ended test named %q", name)
+	}
+}
+
+// sameSecondCall is a client test's call recorded nine seconds after aRead,
+// an instant an earlier place read the clock at, with its window in both
+// runs, and the auth_time claim of the token the application mints for it,
+// recorded at aRead's second, at aRead's second plus record's full round's
+// lead in that round.
+func sameSecondCall(aRead time.Time) (time.Time, *Window, []string, Shape, Shape) {
+	call := aRead.Add(9 * time.Second)
+	fCall := call.Add(FullRoundLead)
+	w := &Window{Rec: Span{From: call.Add(-5 * time.Millisecond), To: call}, F: Span{From: fCall.Add(-5 * time.Millisecond), To: fCall.Add(time.Millisecond)}}
+	const p = "header.authorization{jwt}.auth_time"
+	shape := func(at time.Time) Shape {
+		return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: Number, Value: strconv.FormatInt(at.Unix(), 10)}}}
+	}
+	return call, w, []string{p}, shape(aRead.Add(FullRoundLead)), shape(aRead)
+}
+
+// harnessGave is a client test's incoming requests (IncomingGiven, at call):
+// one the harness sent with the token it signed for the test's session at
+// signed's second as recorded, and at live's in record's full round.
+func harnessGave(signed, live, call time.Time) Earlier {
+	epoch := func(at time.Time) string { return strconv.FormatInt(at.Unix(), 10) }
+	req := func(name string, at time.Time, authTime string) IncomingRequest {
+		return IncomingRequest{Name: name, At: at, Parts: []models.TestRequestPart{
+			{Name: "url", Recorded: "http://localhost:8080/v1/generate"},
+			{Name: "header.Authorization", Recorded: harnessToken(authTime, "j-1")},
+		}}
+	}
+	return IncomingGiven("TestGenerateOnClient", []IncomingRequest{req("test-7", call.Add(-time.Second), epoch(signed))}, []IncomingRequest{req("", call.Add(FullRoundLead-time.Second), epoch(live))}, true, call)
+}
+
+// A value the test's harness gave the application whole in the test's window
+// (the auth_time of the token it signed for the test's session, which the
+// application carries into the token it mints for its agent) is followed from
+// the test's incoming requests, wherever else the same second stands: an
+// earlier test's or the set's start-up's call that sent it as a read of the
+// clock (T2 rev2: mock-199's lastUsedAt), the test's own call that did, the
+// run's call or another test's (founder 10-31: never bind across tests or
+// from a clock read). keploy cannot tell those from a copy; the test's own
+// given place holds it in the test. Only a call of the test that sent it
+// whole and is no read of the clock comes before it, the earlier place
+// keploy binds a variable at. Where the incoming requests hold another
+// second (the harness signed its token apart), or keploy did not see them,
+// nothing changes: an earlier test's read of the clock stays refused, never
+// bound. Every place is listed before the incoming requests, so the rank
+// decides, never the order.
+func TestAClientTestsIncomingRequestsOutrankTheSameSecondElsewhere(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	aRead := time.Date(2026, 10, 30, 12, 26, 2, 50e6, time.UTC)
+	epoch := func(at time.Time) string { return strconv.FormatInt(at.Unix(), 10) }
+	call, w, drift, live, rec := sameSecondCall(aRead)
+	place := func(e Earlier, clock bool) Earlier {
+		e.At = aRead
+		e.Seen = []Seen{{Side: Request, Leaf: Leaf{Path: "body.data.lastUsedAt", Type: String, Value: epoch(aRead)}, Live: epoch(aRead.Add(FullRoundLead)), Place: "body.data.lastUsedAt", Clock: clock}}
+		return e
+	}
+	gave := harnessGave(aRead, aRead.Add(FullRoundLead), call)
+	for name, row := range map[string]struct {
+		e        Earlier
+		incoming bool // the incoming requests are where it came from
+	}{
+		"an earlier test's read of the clock":    {place(Earlier{Mock: "mock-199", Run: true}, true), true},
+		"the start-up's read of the clock":       {place(Earlier{Mock: "mock-19", Run: true, StartUp: true}, true), true},
+		"the test's own read of the clock":       {place(Earlier{Mock: "mock-1013", Own: true}, true), true},
+		"the run's call":                         {place(Earlier{Mock: "mock-199", Run: true}, false), true},
+		"another test's call":                    {place(Earlier{Mock: "mock-199"}, false), true},
+		"the test's own call, no read the clock": {place(Earlier{Mock: "mock-1013", Own: true}, false), false},
+	} {
+		ln := ClassifyIn(clientTestCache(), drift, live, rec, call, []Earlier{row.e, gave}, nil, nil, w)[0]
+		from := ln.From
+		switch {
+		case ln.Kind != KindVariable:
+			t.Errorf("%s: %s from %+v (%s); want a variable", name, ln.Kind, from, ln.Why)
+		case row.incoming && (!from.Given || !from.Incoming || !from.Whole || from.Path != "header.Authorization{jwt}.auth_time" || from.Mock != "incoming request test-7 of test TestGenerateOnClient"):
+			t.Errorf("%s: followed from %+v; want the test's incoming requests' auth_time, whole", name, from)
+		case !row.incoming && (from.Mock != "mock-1013" || from.Given):
+			t.Errorf("%s: followed from %+v; want the test's own call that sent it", name, from)
+		}
+	}
+	// The harness signed its token in another second, or keploy did not
+	// see the incoming requests: an earlier test's read of the clock in the
+	// same second as the call's value stays refused, with no place.
+	for name, gave := range map[string]Earlier{
+		"another second": harnessGave(aRead.Add(-3*time.Second), aRead.Add(FullRoundLead-3*time.Second), call),
+		"not seen":       IncomingGiven("TestGenerateOnClient", nil, nil, false, call),
+	} {
+		ln := ClassifyIn(clientTestCache(), drift, live, rec, call, []Earlier{place(Earlier{Mock: "mock-199", Run: true}, true), gave}, nil, nil, w)[0]
+		if ln.Kind != KindUnaccounted || ln.From != (Place{}) || !strings.Contains(ln.Why, "mock-199 at body.data.lastUsedAt, an earlier test's call, where keploy learned it as a read of the application's clock") {
+			t.Errorf("%s: %s from %+v (%s); want refused as an earlier test's read of the clock, with no place", name, ln.Kind, ln.From, ln.Why)
+		}
+	}
+}
+
+// A call that uses a variable read in the test's incoming requests (Named
+// marks its place Seen.Incoming) is no place a later call's copy came from:
+// the later call is followed from the incoming requests too, so one value is
+// one variable of the test, never a second one bound at the earlier call
+// beside the one read there.
+func TestACallThatUsesAnIncomingVariableIsNoPlaceOfItsOwn(t *testing.T) {
+	aRead := time.Date(2026, 10, 30, 12, 26, 2, 50e6, time.UTC)
+	call, w, drift, live, rec := sameSecondCall(aRead)
+	gave := harnessGave(aRead, aRead.Add(FullRoundLead), call)
+	const use = "header.authorization{jwt}.auth_time"
+	first := Earlier{Mock: "mock-1013", At: aRead.Add(time.Second), Own: true, Seen: []Seen{{Side: Request, Leaf: Leaf{Path: use, Type: Number, Value: rec.Leaves[use].Value}, Live: live.Leaves[use].Value, Place: use}}}
+	vars := models.MockVariables{"auth_time": {Recorded: rec.Leaves[use].Value, Use: []string{use}, Incoming: "header.Authorization{jwt}.auth_time"}}
+	named := Named(first, vars, nil)
+	if s := named.Seen[0]; s.Name != "auth_time" || !s.Incoming {
+		t.Fatalf("the earlier call's place named %q, incoming %v", s.Name, s.Incoming)
+	}
+	ln := ClassifyIn(clientTestCache(), drift, live, rec, call, []Earlier{named, gave}, nil, nil, w)[0]
+	if ln.Kind != KindVariable || !ln.From.Incoming || ln.From.Path != "header.Authorization{jwt}.auth_time" {
+		t.Fatalf("the later call's copy is %s from %+v (%s); want the incoming requests' auth_time, the variable the earlier call uses", ln.Kind, ln.From, ln.Why)
+	}
+	// A call's own variable, bound at its place, stays that place.
+	vars = models.MockVariables{"auth_time": {Recorded: rec.Leaves[use].Value, Bind: use}}
+	if named := Named(first, vars, nil); named.Seen[0].Incoming {
+		t.Fatalf("a bound variable's place marked incoming: %+v", named.Seen[0])
+	}
+}
+
+// S4 (T2 mv2s1 round-F.log:1591, a must-stay-refused row): a client test's
+// insert holds app.createdAt, a read of the clock keploy missed, whose
+// recorded second stands in the previous test's aggregate (mock-2864,
+// expiration $gt that second, another read of the clock). The test's incoming
+// requests hold another second (the harness's token). The value is never
+// followed from the incoming requests or bound at the other test's place,
+// whether that place is a payload or a call served leaf by leaf, and never
+// learned as noise: it stays refused (its wording is
+// clock-read-refusal-legible's).
+func TestAnotherTestsSameSecondStaysRefusedBesideTheIncomingRequests(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	read := time.Date(2026, 10, 30, 19, 10, 53, 400e6, time.UTC)
+	epoch := func(at time.Time) string { return strconv.FormatInt(at.Unix(), 10) }
+	call := read.Add(200 * time.Millisecond)
+	fCall := call.Add(FullRoundLead)
+	w := &Window{Rec: Span{From: call.Add(-5 * time.Millisecond), To: call}, F: Span{From: fCall.Add(-5 * time.Millisecond), To: fCall.Add(time.Millisecond)}}
+	const p = "body.docs.msgs.0.app.createdAt"
+	shape := func(v string) Shape {
+		return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: Number, Value: v}}}
+	}
+	gave := harnessGave(read.Add(-22*time.Second), read.Add(FullRoundLead-22*time.Second), call)
+	payload := Raw{rRead: true, mock: "mock-2864", at: read.Add(-300 * time.Millisecond), served: true,
+		rText: `{"aggregate":"refresh_tokens","pipeline":[{"$match":{"expiration":{"$gt":` + epoch(read) + `}}}]}`}.OfAnotherTest()
+	leafed := Earlier{Mock: "mock-2864", At: read.Add(-300 * time.Millisecond), Seen: []Seen{{Side: Request, Leaf: Leaf{Path: "body.pipeline.0.$match.expiration.$gt", Type: String, Value: "gt:" + epoch(read)}, Live: "gt:" + epoch(read.Add(FullRoundLead)), Place: "body.pipeline.0.$match.expiration.$gt"}}}
+	for name, row := range map[string]struct {
+		earlier []Earlier
+		raw     []Raw
+	}{
+		"the previous test's payload":                     {[]Earlier{gave}, []Raw{payload}},
+		"the previous test's call, inside a longer value": {[]Earlier{leafed, gave}, nil},
+	} {
+		ln := ClassifyIn(clientTestCache(), []string{p}, shape(epoch(read.Add(FullRoundLead))), shape(epoch(read)), call, row.earlier, row.raw, nil, w)[0]
+		// Refused: unaccounted, or a variable of a place no plan binds at
+		// (another test's: only a test's own calls carry its variables).
+		if ln.Kind != KindUnaccounted && (ln.Kind != KindVariable || ln.From.Given || ln.From.Own || ln.From.Run) {
+			t.Errorf("%s: %s from %+v (%s); want refused, from no place of the test's or the run's", name, ln.Kind, ln.From, ln.Why)
+		}
 	}
 }

@@ -5392,6 +5392,48 @@ func TestLearnMatchFollowsAVariableIntoAJWTClaim(t *testing.T) {
 	}
 }
 
+// Two calls of a client test carry the value the harness gave the
+// application (its token's auth_time) into the token the application mints
+// for each: both use the one variable read in the test's incoming requests.
+// The second is not followed from the first call's claim, a use of that
+// variable (learn.Seen.Incoming), so no second variable is bound there.
+func TestLearnMatchTwoCallsCarryingWhatTheHarnessGaveUseOneVariable(t *testing.T) {
+	h, n, opts := learnOn(t)
+	const hs = `{"alg":"HS256","typ":"JWT"}`
+	session := func(at string) map[string]string {
+		return map[string]string{"Authorization": bearerJWT(hs, `{"sid":"e2e-go-session","role":"admin","auth_time":`+at+`}`, "U0lHTg")}
+	}
+	agent := func(at, sig string) map[string]string {
+		return map[string]string{"Authorization": bearerJWT(hs, `{"sub":"u-1","role":"agent","auth_time":`+at+`}`, sig)}
+	}
+	tr := learn.NewTracker()
+	tr.SetClientTests(true)
+	tr.SetIncomingSeen(true)
+	tr.GiveIncoming("TestRunReportOnClient", []learn.IncomingRequest{learn.IncomingHTTP("test-1", learnAt.Add(-time.Second), "http://app/v1/report", session("1793373215"))})
+	tr.Begin()
+	tr.Incoming(learn.IncomingHTTP("", time.Now(), "http://app/v1/report", session("1793387031")))
+	ctx := learn.WithTracker(context.Background(), tr)
+	db := &learnDb{perTest: []*models.Mock{
+		learnRecorded("mock-0", 0, "POST", "/run/r-1", `{}`, agent("1793373215", "QUFBQUFB"), `{"ok":true}`),
+		learnRecorded("mock-1", time.Second, "POST", "/run/r-2", `{}`, agent("1793373215", "Q0NDQ0ND"), `{"ok":true}`),
+	}}
+	for i, path := range []string{"/run/r-1", "/run/r-2"} {
+		served, miss, _ := h.learnMatch(ctx, live("POST", path, `{}`, agent("1793387031", "QkJCQkJC")), db, n, opts)
+		if served == nil || miss != nil {
+			t.Fatalf("call %d: served %v miss %+v", i, served, miss)
+		}
+	}
+	want := models.MockVariables{"auth_time": {Recorded: "1793373215", Use: []string{"header.authorization{jwt}.auth_time"}, Incoming: "header.Authorization{jwt}.auth_time"}}
+	for i, m := range db.consumed {
+		if got := m.Spec.Learned(); !reflect.DeepEqual(got, want) {
+			t.Errorf("call %d: variables %+v, want %+v", i, got, want)
+		}
+		if binds := m.Spec.LearnedBinds(); len(binds) != 0 {
+			t.Errorf("call %d: binds %+v: no call binds what the harness gave", i, binds)
+		}
+	}
+}
+
 // A value a client test's harness gave the application (the auth_time claim
 // of the bearer token it signed for its session), carried into a claim of
 // the token the application mints from it, is a variable read in the test's

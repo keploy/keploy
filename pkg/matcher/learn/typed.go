@@ -1273,7 +1273,7 @@ func clockOffsetEchoedWhy(path string, off models.ClockOffset) string {
 // of it with template values (Earlier.Given): nothing binds there.
 func (dc *DriftCache) instantServedFrom(r Leaf, rec, live moment, served []Earlier) (Place, bool) {
 	var best Place
-	rank := 7
+	rank := placeNone
 	for _, e := range served {
 		for _, s := range e.Seen {
 			if s.Live == s.Leaf.Value {
@@ -1298,7 +1298,7 @@ func (dc *DriftCache) instantServedFrom(r Leaf, rec, live moment, served []Earli
 			}
 		}
 	}
-	return best, rank < 7
+	return best, rank < placeNone
 }
 
 // seenMoment is the moment value names where l, a leaf of an earlier
@@ -1423,7 +1423,7 @@ func (dc *DriftCache) instantCoDrifted(rec, live string, rm, lm moment) bool {
 // then a payload served or recorded before at, its field where one holds it.
 func (dc *DriftCache) instantEchoFrom(r Leaf, echoed []echoMatch, at time.Time, served []Earlier, raw []Raw) (Place, bool) {
 	var best Place
-	rank := 7
+	rank := placeNone
 	for _, e := range served {
 		for _, s := range e.Seen {
 			if !dc.holdsRecorded(s.Leaf.Value, echoed) && !dc.holdsRecorded(dc.rawExtra(s.Leaf.Value), echoed) && !seenHoldsRecorded(s.Leaf, s.Leaf.Value, echoed) {
@@ -1439,7 +1439,7 @@ func (dc *DriftCache) instantEchoFrom(r Leaf, echoed []echoMatch, at time.Time, 
 			}
 		}
 	}
-	if rank < 7 {
+	if rank < placeNone {
 		return best, true
 	}
 	for _, x := range raw {
@@ -1470,7 +1470,7 @@ func (dc *DriftCache) instantEchoFrom(r Leaf, echoed []echoMatch, at time.Time, 
 // test case's own request, which requestHolds reads.
 func (dc *DriftCache) instantLeafFrom(r Leaf, rec moment, served []Earlier) (Place, bool) {
 	var best Place
-	rank := 7
+	rank := placeNone
 	for _, e := range served {
 		if e.Given {
 			continue
@@ -1491,7 +1491,7 @@ func (dc *DriftCache) instantLeafFrom(r Leaf, rec moment, served []Earlier) (Pla
 			}
 		}
 	}
-	return best, rank < 7
+	return best, rank < placeNone
 }
 
 // instantRawFrom is the first payload served earlier in the test or recorded

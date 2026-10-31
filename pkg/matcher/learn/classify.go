@@ -50,6 +50,10 @@ type Seen struct {
 	// Name is the variable the learn step put at Place (bound or used
 	// there), "" for none (Named).
 	Name string
+	// Incoming: Name is a variable read in the test's incoming requests
+	// (models.MockVariable.Incoming), used here (Named): its value came
+	// from them, never from this place (placeRank).
+	Incoming bool
 	// Stamp: the leaf is its answer's own clock stamp by its protocol (an
 	// HTTP answer's Date header within the span keploy stamped the exchange
 	// in: AnswerStamp, instants.go rule 3), which no value came from. Its
@@ -3203,10 +3207,12 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 	// The place is where the value was sent whole, not where it was answered
 	// or sent inside a longer value (a variable is bound where the
 	// application sent it, whole): the test's own call that sent it first,
-	// else the run's, else another's; then the same inside a longer value;
-	// an answer that gave it only when no call sent it. Earliest within each.
+	// else a client test's incoming requests that held it whole, else the
+	// run's, else another's (placeRank); then the same inside a longer
+	// value; an answer that gave it only when no call sent it. Earliest
+	// within each.
 	var best Place
-	rank := 7
+	rank := placeNone
 	for _, e := range served {
 		for _, s := range e.Seen {
 			// A place F saw hold its recorded value did not drift: the
@@ -3248,7 +3254,7 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 			}
 		}
 	}
-	if rank < 7 {
+	if rank < placeNone {
 		return best, true
 	}
 	// The echo (instants.go): where an earlier place holds the moment F saw
@@ -3436,7 +3442,7 @@ func (dc *DriftCache) echoServed(echoed []echoMatch, recorded string, served []E
 		return Place{}, false
 	}
 	var best Place
-	rank := 7
+	rank := placeNone
 	for _, e := range served {
 		for _, s := range e.Seen {
 			if !dc.holdsRecorded(s.Leaf.Value, echoed) && !dc.holdsRecorded(dc.rawExtra(s.Leaf.Value), echoed) && !seenHoldsRecorded(s.Leaf, s.Leaf.Value, echoed) {
@@ -3449,7 +3455,7 @@ func (dc *DriftCache) echoServed(echoed []echoMatch, recorded string, served []E
 			}
 		}
 	}
-	return best, rank < 7
+	return best, rank < placeNone
 }
 
 // echoRaw is the place of payload x that holds the recorded moment of one of
@@ -3645,31 +3651,56 @@ func partOf(value, part string) string {
 // request that sent it whole first, the test's own call before the run's,
 // the run's before another's; then the same inside a longer value; then an
 // answer, or the test case's own request, the earlier first. A place that
-// uses the run's variable (Seen.Name) is none (7): its value came from the
-// run's place that binds it, which a later call uses too, never a second
-// variable bound at the use.
+// uses the run's variable (Seen.Name), or a variable read in the test's
+// incoming requests (Seen.Incoming), is none (placeNone): its value came
+// from the run's place that binds it, or from those requests, which a later
+// call uses too, never a second variable bound at the use.
+//
+// A client test's incoming requests holding the value whole (Earlier.
+// Incoming: what its harness gave the application in the test's window,
+// where a replay reads it again) rank right after a call of the test that
+// sent it whole and is no read of the clock: before the test's own call
+// that sent it as a read of the clock (Seen.Clock), and before the run's
+// call or another test's. Those are the same second read elsewhere (an
+// earlier test's lastUsedAt beside the auth_time of the token the harness
+// signed for this test), which keploy cannot tell from a copy, or a value
+// the test's own window holds anyway: the test's own given place is the
+// one that holds it in the test.
 func placeRank(e Earlier, s Seen, whole bool) int {
-	if models.RunVariable(s.Name) {
-		return 7
+	if models.RunVariable(s.Name) || s.Incoming {
+		return placeNone
+	}
+	if e.Incoming && whole {
+		return 1
 	}
 	// The test case's own request is what the application was given, as an
 	// answer is: a call that sent the value, where it can be bound, is
 	// named before it.
 	if s.Side != Request || e.Given {
-		return 6
-	}
-	r := 2
-	switch {
-	case e.Own:
-		r = 0
-	case e.Run:
-		r = 1
+		return placeNone - 1
 	}
 	if !whole {
-		r += 3
+		switch {
+		case e.Own:
+			return 5
+		case e.Run:
+			return 6
+		}
+		return 7
 	}
-	return r
+	switch {
+	case e.Own && !s.Clock:
+		return 0
+	case e.Own:
+		return 2
+	case e.Run:
+		return 3
+	}
+	return 4
 }
+
+// placeNone is placeRank's rank of no place.
+const placeNone = 9
 
 // seenPlace is the place s of e is.
 func seenPlace(e Earlier, s Seen, whole bool) Place {
@@ -4469,7 +4500,8 @@ func ReadBack(r Leaf, record string, earlier []Earlier) (Place, bool) {
 
 // Named is e with each request place that holds one of vars (as its bind or
 // a use) naming that variable (Seen.Name), the first by name when two hold
-// one place, and each request leaf clocks (the call's learn step's clock
+// one place, marked where that variable is read in the test's incoming
+// requests (Seen.Incoming), and each request leaf clocks (the call's learn step's clock
 // reads, by leaf path, as MockSpec.Clocks keys them) holds as a plain read
 // marked so (Seen.Clock). An echo is not named: it is its call's alone, and
 // a later call that reads its value back binds it there as a variable of the
@@ -4498,9 +4530,10 @@ func Named(e Earlier, vars models.MockVariables, clocks map[string]models.ClockO
 	}
 	e.Seen = append([]Seen(nil), e.Seen...)
 	for i, s := range e.Seen {
-		e.Seen[i].Name = ""
+		e.Seen[i].Name, e.Seen[i].Incoming = "", false
 		if s.Side == Request && s.Place != "" {
 			e.Seen[i].Name = at[s.Place]
+			e.Seen[i].Incoming = e.Seen[i].Name != "" && vars[e.Seen[i].Name].Incoming != ""
 		}
 		o, clock := clocks[s.Leaf.Path]
 		e.Seen[i].Clock = s.Side == Request && clock && o.Plain()
