@@ -2113,17 +2113,22 @@ func sinceWord(early Learned, wb *Window, leaf func(r, l Leaf, w *Window, skip s
 // as the value whole would be, in w (every rule of a value: its sources,
 // its echo, the lead, a read plus an offset, the form and zone it is read
 // in). One that leaf refuses refuses the text, naming where it stands and
-// saying why the instant whole is refused. Where one instant alone changed,
-// with the decoded text around it the same in both runs, and leaf learns
-// it as a read of the clock, plain or plus an offset, the text is learned
-// as that read at the word (models.ClockOffset.Word, in the form it was
-// read in: models.ClockWord.Form), carrying where the word stands with the
-// length and SHA-256 of the text on each side of it, never the text, so a
-// replay reads the word alone as the clock and compares the rest. ok is
-// false for anything else, which stays as w learned it: a text two
-// instants of which changed, or an instant and another word, that leaf
-// refuses neither of stays noise, as one an instant of which leaf learns
-// otherwise does (a copy of an earlier place's instant).
+// saying why the instant whole is refused. A text more than one instant of
+// which changed is refused (moreInstantsWhy): keploy reads one word of a
+// text as the clock, and leaves no changed instant unchecked. Where one
+// instant alone changed, with the decoded text around it the same in both
+// runs, and leaf learns it as a read of the clock, plain or plus an
+// offset, the text is learned as that read at the word
+// (models.ClockOffset.Word, in the form it was read in:
+// models.ClockWord.Form), carrying where the word stands with the length
+// and SHA-256 of the text on each side of it, never the text, so a replay
+// reads the word alone as the clock and compares the rest. The word may be
+// the whole of the decoded text (a percent-encoded instant, a bare base64
+// cursor of one): read as the instant whole is, in its decoded form. ok is
+// false for anything else, which stays as w learned it: the value whole an
+// instant as it stands (leaf read it whole already), a text whose one
+// changed instant changed beside another word, or one leaf learns
+// otherwise (a copy of an earlier place's instant).
 func wordRead(early Learned, w *Window, leaf func(r, l Leaf, w *Window, skip skipRule) Learned) (Learned, bool) {
 	if early.Kind != KindNoise || early.Read != nil {
 		return early, false
@@ -2131,59 +2136,68 @@ func wordRead(early Learned, w *Window, leaf func(r, l Leaf, w *Window, skip ski
 	r, l := early.Recorded, early.Live
 	dr, dl := wordForm(r.Value), wordForm(l.Value)
 	pairs := changedSpans(dr, dl)
-	for i, p := range pairs {
-		if p[0].start == 0 && p[0].end == len(dr) {
-			// The text is the instant: the value whole, read as one.
-			return early, false
-		}
+	if len(pairs) == 0 || dr == r.Value && dl == l.Value && pairs[0][0].start == 0 && pairs[0][0].end == len(dr) {
+		return early, false
+	}
+	var own Learned
+	for _, p := range pairs {
 		wr, wl := r, l
 		wr.Value, wl.Value = dr[p[0].start:p[0].end], dl[p[1].start:p[1].end]
-		own := leaf(wr, wl, w, 0)
+		own = leaf(wr, wl, w, 0)
 		if own.Kind == KindUnaccounted {
 			early.Kind, early.Why = KindUnaccounted, "it holds an instant ("+partOf(r.Value, wr.Value)+"), which keploy refuses as it refuses that instant whole: "+own.Why
 			return early, true
 		}
-		word, one := instantWord(r.Value, l.Value, dr, dl, pairs)
-		at := own.Read
-		if own.Kind == KindClockOffset {
-			at = own.Offset
-		}
-		if i > 0 || !one || own.Kind != KindClockRead && own.Kind != KindClockOffset || at == nil {
-			continue
-		}
-		at.Word = word
-		own.Recorded, own.Live = r, l
-		if own.Kind == KindClockOffset {
-			own.Why = clockOffsetEvidence(fieldName(r), *own.Offset)
-		}
-		if own.Refuted == "" {
-			own.Refuted = early.Refuted
-		}
-		return own, true
 	}
-	return early, false
+	if len(pairs) > 1 {
+		early.Kind, early.Why = KindUnaccounted, moreInstantsWhy
+		return early, true
+	}
+	word, one := instantWord(r.Value, l.Value, dr, dl, pairs)
+	at := own.Read
+	if own.Kind == KindClockOffset {
+		at = own.Offset
+	}
+	if !one || own.Kind != KindClockRead && own.Kind != KindClockOffset || at == nil {
+		return early, false
+	}
+	at.Word = word
+	own.Recorded, own.Live = r, l
+	if own.Kind == KindClockOffset {
+		own.Why = clockOffsetEvidence(fieldName(r), *own.Offset)
+	}
+	if own.Refuted == "" {
+		own.Refuted = early.Refuted
+	}
+	return own, true
 }
 
+// moreInstantsWhy is why wordRead refuses a text more than one instant of
+// which changed.
+const moreInstantsWhy = "it holds more than one changed instant in one text: keploy reads one changed instant of a text as the application's clock, at its word, and refuses a text in which more changed rather than leave any of them unchecked. If the field holds times the application reads from its own clock, declare it noise in keploy.yml, and keploy stops comparing it"
+
 // instantWord is where the one instant that changed in a text stands, as
-// the one rule for an instant wherever it stands reads it (wordRead,
-// and its client tests' refused texts): the text recorded as rec and seen in record's full
-// round as live, dr and dl decoded once (wordForm), pairs the instants of
-// them that changed (changedSpans). ok is false where more than one
-// changed, where the decoded text around it differs, or where it is the
-// whole decoded text (a read of a value whole, which no word is).
+// the one rule for an instant wherever it stands reads it (wordRead): the
+// text recorded as rec and seen in record's full round as live, dr and dl
+// decoded once (wordForm), pairs the instants of them that changed
+// (changedSpans). The word is read in the decoded text where that differs
+// from the text (models.ClockWordDecoded), and may then be the whole of it.
+// ok is false where more than one changed, where the decoded text around
+// it differs, or where it is the whole text as it stands (a read of a
+// value whole, which no word is: models.ClockWord.Valid).
 func instantWord(rec, live, dr, dl string, pairs [][2]instant) (models.ClockWord, bool) {
 	if len(pairs) != 1 {
 		return models.ClockWord{}, false
 	}
 	r, l := pairs[0][0], pairs[0][1]
-	if dr[:r.start] != dl[:l.start] || dr[r.end:] != dl[l.end:] || r.start == 0 && r.end == len(dr) {
+	if dr[:r.start] != dl[:l.start] || dr[r.end:] != dl[l.end:] {
 		return models.ClockWord{}, false
 	}
 	w := models.ClockWordOf(dr, r.start, r.end)
 	if dr != rec || dl != live {
 		w.Form = models.ClockWordDecoded
 	}
-	return w, true
+	return w, w.Valid()
 }
 
 // rawUnread says why the classifier refuses raw: one of them was not read

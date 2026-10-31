@@ -1574,25 +1574,60 @@ func TestClockWordIsOmittedWholeAndKeptAsAWord(t *testing.T) {
 		if strings.Contains(string(b), "word") {
 			t.Errorf("%s: a whole read wrote a word: %q", e.name, b)
 		}
-		b, err = e.marshal(word)
-		if err != nil {
-			t.Fatalf("%s: %v", e.name, err)
-		}
-		if strings.Contains(string(b), "generate") || strings.Contains(string(b), "E2E") {
-			t.Errorf("%s: a word read wrote the text around it: %q", e.name, b)
-		}
-		var back ClockOffset
-		if err := e.unmarshal(b, &back); err != nil {
-			t.Fatalf("%s: %v", e.name, err)
-		}
-		if back != word {
-			t.Errorf("%s: a word read came back as %+v, want %+v", e.name, back, word)
+		decoded := word
+		decoded.Word.Form = ClockWordDecoded
+		for _, word := range []ClockOffset{word, decoded} {
+			b, err = e.marshal(word)
+			if err != nil {
+				t.Fatalf("%s: %v", e.name, err)
+			}
+			if strings.Contains(string(b), "generate") || strings.Contains(string(b), "E2E") {
+				t.Errorf("%s: a word read wrote the text around it: %q", e.name, b)
+			}
+			var back ClockOffset
+			if err := e.unmarshal(b, &back); err != nil {
+				t.Fatalf("%s: %v", e.name, err)
+			}
+			if back != word {
+				t.Errorf("%s: a word read came back as %+v, want %+v", e.name, back, word)
+			}
 		}
 	}
 	again := whole
 	again.Word = ClockWordOf(text, 20, len(text))
 	if again != word || !whole.Word.IsZero() || word.Word.IsZero() {
 		t.Errorf("two learnings of one word read compare apart, or IsZero is wrong")
+	}
+}
+
+// A word is a place a replay can check (Valid) only where text stands on
+// one side of it at least, or where it is read in its value's decoded form
+// (a percent-encoded instant whole, a bare base64 cursor of one), and only
+// in a form this keploy reads: a word as long as its value as it stands is
+// the value whole, which no word is, and a word in another form (a later
+// keploy's, or a hand edit) is no place keploy can read.
+func TestClockWordIsValidBesideTextOrWholeInItsDecodedForm(t *testing.T) {
+	const instant = "2026-10-31T16:22:15+05:30"
+	whole := ClockWordOf(instant, 0, len(instant))
+	decodedWhole := whole
+	decodedWhole.Form = ClockWordDecoded
+	inText := ClockWordOf("due "+instant, 4, 4+len(instant))
+	decodedText, other := inText, inText
+	decodedText.Form, other.Form = ClockWordDecoded, "rot13"
+	for _, c := range []struct {
+		name  string
+		w     ClockWord
+		valid bool
+	}{
+		{"a word in a text", inText, true},
+		{"a word in a text, decoded", decodedText, true},
+		{"the whole decoded form", decodedWhole, true},
+		{"the whole value as it stands", whole, false},
+		{"a form this keploy does not read", other, false},
+	} {
+		if got := c.w.Valid(); got != c.valid {
+			t.Errorf("%s (%+v): Valid() = %v; want %v", c.name, c.w, got, c.valid)
+		}
 	}
 }
 

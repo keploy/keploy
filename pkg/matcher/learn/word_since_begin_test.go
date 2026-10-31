@@ -230,8 +230,9 @@ func classifyWordAt(dc *DriftCache, f func(time.Time) string, prev time.Duration
 // checked in its call's window too, and one it refuses there ("[E2E]
 // generate-stop-<UnixNano>") is checked from its test's begin
 // (TestAWordReadInItsCallsWindowIsNeverNoiseWhereAnUntoldServeMayHoldIt). A
-// text more of whose bytes changed, or with two changed reads, stays the
-// noise its call's window learns. keploy test (no client test) reads the
+// text more of whose bytes changed stays the noise its call's window
+// learns; one with two changed reads is refused, as any text more than one
+// instant of which changed is. keploy test (no client test) reads the
 // word as the instant whole: a plain read in its call's window, at its word.
 func TestAClientTestLearnsAWordOfATextReadInItsCallsWindow(t *testing.T) {
 	ns := func(format string) func(time.Time) string {
@@ -275,12 +276,15 @@ func TestAClientTestLearnsAWordOfATextReadInItsCallsWindow(t *testing.T) {
 			}
 			return fmt.Sprintf("job %d waiting", r.UnixNano())
 		}},
-		{"two reads changed", clientTestCache(), func(r time.Time) string { return fmt.Sprintf("a-%d b-%d", r.UnixNano(), r.UnixNano()) }},
 	} {
 		if ln, _ := classifyWordAt(tc.dc, tc.f, -100*time.Millisecond, false); ln.Kind != KindNoise || ln.Read != nil {
 			o, _ := ln.Clock()
 			t.Errorf("%s: %s %s (%s); want the noise its call's window learns", tc.name, ln.Kind, o.String(), ln.Why)
 		}
+	}
+	two := func(r time.Time) string { return fmt.Sprintf("a-%d b-%d", r.UnixNano(), r.UnixNano()) }
+	if ln, _ := classifyWordAt(clientTestCache(), two, -100*time.Millisecond, false); ln.Kind != KindUnaccounted || ln.Why != moreInstantsWhy {
+		t.Errorf("two reads changed: %s (%s); want it refused as more than one changed instant in one text", ln.Kind, ln.Why)
 	}
 	if ln, _ := classifyWordAt(clockedDrifts(), ns("[E2E] generate-stop-%d"), -100*time.Millisecond, false); !readAtWord(ln, "[E2E] generate-stop-", "") {
 		t.Errorf("no client test: %s Read=%+v (%s); want a plain read in its call's window at its word", ln.Kind, ln.Read, ln.Why)

@@ -306,9 +306,11 @@ type ClockOffset struct {
 	// recorded (ClockWord): a replay checks the value holds the recorded
 	// text's bytes before the word and after it (by their length and
 	// SHA-256) with one such read between them, so only the word is read as
-	// the clock and every other byte is still compared. Zero (IsZero) for a
-	// read that is its value whole, as every learning before Word was, and
-	// then omitted: an old file reads the same. A value, not a pointer, so
+	// the clock and every other byte is still compared; or the whole of the
+	// value's decoded form (a percent-encoded instant: ClockWord.Form).
+	// Zero (IsZero) for a read that is its value whole as it stands, as
+	// every learning before Word was, and then omitted: an old file reads
+	// the same. A value, not a pointer, so
 	// two learnings of one read compare equal (==). A keploy that does not
 	// read Word checks the whole value as one read, which a text around the
 	// word is not, so it refuses it.
@@ -325,8 +327,10 @@ type ClockOffset struct {
 // recording holds (which may be a secret) is copied into what was learned:
 // the recording holds the text, and "the word at bytes Start-End" names
 // where to read it there. A word read always has text on one side at
-// least (the learn step learns a read of a value whole otherwise), so the
-// zero ClockWord is a read whole. The word's own length may differ at a
+// least, or is the whole of the value's decoded form (Form Decoded: a
+// percent-encoded instant, a bare base64 cursor of one); the learn step
+// learns a read of a value whole as it stands otherwise, so the zero
+// ClockWord is a read whole. The word's own length may differ at a
 // replay (a time with a fraction cut of its trailing zeros), so a replay
 // reads its word between the first Start bytes and the last After bytes
 // of its value (WordOf); End only says where the recording's word ends.
@@ -360,12 +364,12 @@ func (w ClockWord) IsZero() bool { return w == ClockWord{} }
 
 // Valid reports whether w is a word a replay can check: a word of one byte
 // or more (Start < End), at bytes of a text (none negative), with text on
-// one side of it at least, both hashes a SHA-256 in lower-case hex, in a
-// form this keploy reads.
+// one side of it at least or read in the value's decoded form, both hashes
+// a SHA-256 in lower-case hex, in a form this keploy reads.
 // What a file holds otherwise (a hand edit, a cut copy) is no place of a
 // text, and a replay refuses the value there whatever it is.
 func (w ClockWord) Valid() bool {
-	return w.Start >= 0 && w.End > w.Start && w.After >= 0 && (w.Start > 0 || w.After > 0) && isSHA256Hex(w.BeforeSHA256) && isSHA256Hex(w.AfterSHA256) && (w.Form == "" || w.Form == ClockWordDecoded)
+	return w.Start >= 0 && w.End > w.Start && w.After >= 0 && (w.Start > 0 || w.After > 0 || w.Form == ClockWordDecoded) && isSHA256Hex(w.BeforeSHA256) && isSHA256Hex(w.AfterSHA256) && (w.Form == "" || w.Form == ClockWordDecoded)
 }
 
 // WordOf is the word of live, a replay's text at a place learned as w (a
