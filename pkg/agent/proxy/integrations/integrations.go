@@ -426,18 +426,22 @@ type ExactConsumedReader interface {
 }
 
 // SetAsideReader is an optional MockMemDb extension of a store under exact
-// serving: SetAsideMocks are the recordings of the tests the replay set aside
-// before the open test (models.TestModeInfo.SetAsideFrom names each one's),
-// of kind ("" for every kind), that have not answered. They are in none of
-// the store's reads. A parser asks for them only for a call that no
-// recording it read answered, one more than the open test recorded
-// included; it matches the call exactly against them alone, binding
+// serving: RangeSetAside visits the recordings of the tests the replay set
+// aside, or has not begun, before the open test (models.TestModeInfo.
+// SetAsideFrom names each one's), of kind, that have not answered, one
+// handed test at a time in hand order, until visit returns false. They are
+// in none of the store's reads. A parser asks for them only for a call that
+// no recording it read answered, one more than the open test recorded
+// included, by the call's request keys (models.RequestKeys: the store reads
+// the recordings it keeps on disk only under them, so a parser asks by keys
+// every recording its comparison could accept is filed under, as for a
+// miss's diagnosis); it matches the call exactly against them alone, binding
 // nothing, and serves the one it matched only when the store's consume door
 // takes it (each answers at most once in the staging, so the calls of one
-// shape across the set never exceed what the set recorded). None while no
-// test is open.
+// shape across the set never exceed what the set recorded). A parser stops
+// at the first test that holds the call. None while no test is open.
 type SetAsideReader interface {
-	SetAsideMocks(kind models.Kind) []*models.Mock
+	RangeSetAside(kind models.Kind, keys []string, visit func(batch []*models.Mock) bool)
 }
 
 // AnsweredBackgroundReader is an optional MockMemDb extension of a store
