@@ -86,7 +86,7 @@ var (
 // patterns ('#' is a backslash, esc): an escape cut short at the end, a
 // stray '%' or '#' right before an escape, escapes next to each other, a
 // surrogate pair half there or the wrong way round, a high surrogate whose
-// third digit is a capital letter, two halves with no backslash between
+// second digit is a capital letter, two halves with no backslash between
 // them, an escape that decodes to another (read on the next pass, at most
 // four), and bytes that are not UTF-8.
 var unescapedCases = []string{
@@ -108,6 +108,28 @@ func TestUnescapedReadsWhatThePatternsRead(t *testing.T) {
 		c = esc(c)
 		if got, want := unescaped(c), unescapedByPattern(c); got != want {
 			t.Errorf("unescaped(%q) = %q, the patterns read %q", c, got, want)
+		}
+	}
+}
+
+// TestUnescapedReadsEveryByteOfASurrogatePairAsThePatterns holds the
+// surrogate pair check to the patterns on every byte at every position of
+// four pairs (lower case, upper case, mixed, and one whose backslashes are
+// percent-escaped), bare and inside text: 26,624 texts. The table holds the
+// shapes someone thought of; this holds every digit and letter each place
+// of a pair may take, so a check that drops or adds one fails here, not
+// only under the fuzzer, which CI does not run.
+func TestUnescapedReadsEveryByteOfASurrogatePairAsThePatterns(t *testing.T) {
+	for _, pair := range []string{esc("#ud800#udc00"), esc("#uDBFF#uDFFF"), esc("#udA9b#uDcEf"), "%5Cud800%5Cudc00"} {
+		for p := 0; p < len(pair); p++ {
+			for b := 0; b < 256; b++ {
+				s := pair[:p] + string([]byte{byte(b)}) + pair[p+1:]
+				for _, c := range []string{s, "x" + s + "y"} {
+					if got, want := unescaped(c), unescapedByPattern(c); got != want {
+						t.Fatalf("unescaped(%q) = %q, the patterns read %q", c, got, want)
+					}
+				}
+			}
 		}
 	}
 }
