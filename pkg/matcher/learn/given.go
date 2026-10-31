@@ -537,12 +537,24 @@ func unreadRequestWhy(why string) string {
 // which the learn step cannot follow. An instant that names a lost moment by
 // one rule and a moment F saw by another (one truncated, one rounded) does
 // not explain F's: the application cuts by one rule.
+//
+// A client test's incoming requests (Earlier.Incoming) are no such request:
+// keploy test sends a test case's request again as recorded, or with
+// template values, so the application picks in F from what the recording
+// gave it while its clock runs ahead; but the harness sends its requests in
+// F itself, with its own clock, and keploy reads them as the agent saw them.
+// What F's request holds is then the evidence: a value F's request names by
+// the rule is a copy the variable rules follow (appearedIn), and one it does
+// not name did not come from it in F, which refutes the recorded coincidence
+// (the application's clock read in the second the harness signed its token
+// at). Either way the incoming requests refuse nothing here, and a client
+// test's own rules judge the value (clientTestUnread).
 func (dc *DriftCache) requestHolds(lost, live []moment, served []Earlier) (where string, asRecorded bool) {
 	if len(lost) == 0 {
 		return "", false
 	}
 	for _, e := range served {
-		if !e.Given {
+		if !e.Given || e.Incoming {
 			continue
 		}
 		// The rules by which the request, as sent, names a moment F saw.

@@ -1764,3 +1764,82 @@ func TestAnotherTestsSameSecondStaysRefusedBesideTheIncomingRequests(t *testing.
 		}
 	}
 }
+
+// A client test's incoming requests are live: its harness sends them in
+// record's full round with its own clock, and keploy reads them as the agent
+// saw them, never sent again as recorded. So a value whose recorded moment an
+// incoming request held (the application's clock read createdAt, in epoch
+// seconds, in the second the harness signed its session token at, a token
+// per request) while in record's full round the harness's requests hold
+// another second than F's value is no copy of them, and no pick from them
+// either: F refutes it, and the client test's own rule judges it, a read of
+// the application's clock in its call's window in both runs, learned as a
+// plain read (requestHolds skips the incoming requests). Must stay:
+//   - the harness signed in F's second too: the value is followed from the
+//     incoming requests' auth_time (they outrank a same-second read, the
+//     accepted ranking), never learned as a read or bound at another place;
+//     a replay whose two seconds differ then refuses it (a false red, which
+//     fails closed);
+//   - keploy test's own request (no client test), its recorded second
+//     replaced by a template value: refused as a pick from the request
+//     (requestHolds), as before.
+func TestAClockReadInTheSecondOfTheHarnesssTokenIsLearnedAsARead(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	read := time.Date(2026, 10, 31, 9, 50, 25, 100e6, time.UTC) // the app's clock read, recorded: neither run's second is a whole minute
+	epoch := func(at time.Time) string { return strconv.FormatInt(at.Unix(), 10) }
+	call := read.Add(200 * time.Millisecond)
+	fRead, fCall := read.Add(FullRoundLead), call.Add(FullRoundLead)
+	w := &Window{Rec: Span{From: call.Add(-5 * time.Millisecond), To: call}, F: Span{From: fCall.Add(-5 * time.Millisecond), To: fCall.Add(time.Millisecond)}}
+	const p = "body.docs.msgs.0.app.createdAt"
+	shape := func(v string) Shape {
+		return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: Number, Value: v}}}
+	}
+	rec, live := shape(epoch(read)), shape(epoch(fRead))
+	signed := read.Add(-50 * time.Millisecond) // the same second as the read
+	// The harness's requests of the test's window: a token per request (its
+	// jti), the session's auth_time in each, as recorded and in F.
+	harness := func(signed, fSigned time.Time) Earlier {
+		req := func(name string, at, authTime time.Time, jti string) IncomingRequest {
+			return IncomingRequest{Name: name, At: at, Parts: []models.TestRequestPart{
+				{Name: "url", Recorded: "http://localhost:8080/v1/apps"},
+				{Name: "header.Authorization", Recorded: harnessToken(epoch(authTime), jti)},
+			}}
+		}
+		recorded := []IncomingRequest{req("post-query-11", call.Add(-2*time.Second), signed, "j-1"), req("post-query-12", call.Add(-time.Second), signed, "j-2")}
+		live := []IncomingRequest{req("", fCall.Add(-2*time.Second), fSigned, "j-3"), req("", fCall.Add(-time.Second), fSigned, "j-4")}
+		return IncomingGiven("TestAuthorizationDirectives", recorded, live, true, call)
+	}
+	if epoch(signed) != epoch(read) || epoch(fRead.Add(-7*time.Second)) == epoch(fRead) {
+		t.Fatalf("fixture: seconds %s/%s", epoch(signed), epoch(read))
+	}
+
+	// F's token holds another second: learned as a read of the clock.
+	gave := harness(signed, fRead.Add(-7*time.Second))
+	if !hasSeen(gave, "header.Authorization{jwt}.auth_time") || hasSeen(gave, "header.Authorization") {
+		t.Fatalf("fixture: places %+v; want auth_time, and no token whole", gave.Seen)
+	}
+	ln := ClassifyFollowing(clientTestCache(), []string{p}, live, rec, call, []Earlier{gave}, nil, nil, w, nil)[0]
+	if ln.Kind != KindClockRead || ln.Read == nil || !ln.Read.Plain() || ln.From != (Place{}) {
+		t.Errorf("the app's clock read, the harness's token in another second in F: %s from %+v Read=%+v (%s); want learned as a plain read of the clock", ln.Kind, ln.From, ln.Read, ln.Why)
+	}
+
+	// F's token holds F's second too: followed from the incoming requests.
+	same := harness(signed, fRead.Add(-500*time.Millisecond))
+	if epoch(fRead.Add(-500*time.Millisecond)) != epoch(fRead) {
+		t.Fatalf("fixture: F's token in another second")
+	}
+	ln = ClassifyFollowing(clientTestCache(), []string{p}, live, rec, call, []Earlier{same}, nil, nil, w, nil)[0]
+	if ln.Kind != KindVariable || !ln.From.Incoming || !ln.From.Whole || ln.From.Path != "header.Authorization{jwt}.auth_time" {
+		t.Errorf("the harness's token in F's second too: %s from %+v (%s); want followed from the incoming requests' auth_time", ln.Kind, ln.From, ln.Why)
+	}
+
+	// keploy test's own request, its token's second replaced by a template
+	// value: refused as a pick from the request.
+	own := GivenRequest(&models.TestRequest{Test: "test-1", Parts: []models.TestRequestPart{
+		{Name: "url", Recorded: "http://localhost:8080/v1/apps?since=" + epoch(signed), Sent: "http://localhost:8080/v1/apps?since=" + epoch(fRead.Add(-7*time.Second))},
+	}})
+	ln = ClassifyFollowing(clockedDrifts(), []string{p}, live, rec, call, []Earlier{own}, nil, nil, nil, nil)[0]
+	if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "stands in test case test-1 at url.query.since, which keploy test sent with template values in it") {
+		t.Errorf("keploy test's own request: %s from %+v (%s); want refused as a pick from the test case's request", ln.Kind, ln.From, ln.Why)
+	}
+}
