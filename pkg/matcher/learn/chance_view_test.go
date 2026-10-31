@@ -10,7 +10,7 @@ import (
 )
 
 // The other way about (excusedLive): a random id the application makes
-// (api-server's appId) whose 4-hex group stands by chance in what record's
+// (api-server's appId) whose 8-hex group stands by chance in what record's
 // full round gave the application in an earlier answer of its own test,
 // served changed (F gave the application its own id there: another id of
 // the test, F's), where the recording gave another id that the recorded
@@ -23,15 +23,21 @@ import (
 // recording gave there (in any case) or holds the word too, a place that
 // lost no word, one answered at the call or with no answer time. keploy test
 // (ClassifyGiven) refuses it as before. Nothing reads the id's shape.
+//
+// INTENTIONAL (cross-test word coincidence): the shared word is an 8-hex
+// group, "48d1c0de", of at least chanceBits. A 4-hex group of one id inside
+// another (a v4 UUID's "48d1") is no evidence at all now, learned as with no
+// such place before this rule reads it (word_coincidence_test.go); this
+// rule keeps its cases for a word long enough to be evidence.
 func TestAChanceWordOfWhatTheFullRoundGaveIsLearnedAsVarying(t *testing.T) {
 	const p = "body.appId"
 	const (
-		recID   = "bb7ed9ee-670e-4aa1-982f-b54b2b73982f" // the earlier answer's id, as recorded
-		liveID  = "e1f2a3b4-c5d6-48d1-8a9b-0c1d2e3f4a5b" // F's id there: "48d1" by chance
-		chance  = "5c0e9a7b-1f2d-48d1-9a3b-c4d5e6f70812" // the call's random appId F saw
-		other   = "0c1d2e3f-4a5b-4c7d-8e9f-a0b1c2d3e4f5" // the call's appId, as recorded
-		sharing = "bb7ed9ee-4a5b-4c7d-8e9f-a0b1c2d3e4f5" // a recorded appId that took recID's first group
-		inside  = "0c1d2e3f-4a5b-4c7d-8e9f-b54b2b7398"   // a recorded appId whose last group stands inside recID's
+		recID   = "bb7ed9ee-670e-4aa1-982f-b54b2b73982f"         // the earlier answer's id, as recorded
+		liveID  = "e1f2a3b4-c5d6-48d1c0de-8a9b-0c1d2e3f4a5b"     // F's id there: "48d1c0de" by chance
+		chance  = "5c0e9a7b-1f2d0e1f-48d1c0de-9a3b-c4d5e6f70812" // the call's random appId F saw
+		other   = "0c1d2e3f-4a5b-4c7d-8e9f-a0b1c2d3e4f5"         // the call's appId, as recorded
+		sharing = "bb7ed9ee-4a5b-4c7d-8e9f-a0b1c2d3e4f5"         // a recorded appId that took recID's first group
+		inside  = "0c1d2e3f-4a5b-4c7d-8e9f-b54b2b7398"           // a recorded appId whose last group stands inside recID's
 	)
 	before := r1Insert.Add(-time.Minute)
 	src := func(id string, req, res time.Time) *models.Mock {
@@ -64,7 +70,7 @@ func TestAChanceWordOfWhatTheFullRoundGaveIsLearnedAsVarying(t *testing.T) {
 	twoFields := src(liveID, before, before.Add(time.Second))
 	twoFields.Spec.HTTPResp.Header = newField.Spec.HTTPResp.Header
 	// A view that only added the word: the place lost none.
-	added := src(recID+" 48d1", before, before.Add(time.Second))
+	added := src(recID+" 48d1c0de", before, before.Add(time.Second))
 	for _, m := range []*models.Mock{okView, sentRec, newField, added} {
 		if m.Spec.HTTPReq.Body == okSrc.Spec.HTTPReq.Body && m.Spec.HTTPResp.Body == okSrc.Spec.HTTPResp.Body && len(m.Spec.HTTPResp.Header) == len(okSrc.Spec.HTTPResp.Header) {
 			t.Fatal("the view did not change")
@@ -81,11 +87,11 @@ func TestAChanceWordOfWhatTheFullRoundGaveIsLearnedAsVarying(t *testing.T) {
 		{"a word the application sent there itself", sentRec, viewOf(sentView), other, chance, "in what the application sent there and not in an answer it was given"},
 		{"the word at a field the recording lacks", okSrc, viewOf(newField), other, chance, "which the recording lacks"},
 		{"the word at the id's field and at a field the recording lacks", okSrc, viewOf(twoFields), other, chance, "which the recording lacks"},
-		{"the recorded value took a word of what the recording gave there", okSrc, viewOf(okView), sharing, "bb7ed9ee-1f2d-48d1-9a3b-c4d5e6f70812", "and the recorded value took a word of it"},
-		{"the recorded value took a word of what the recording gave there, in another case", okSrc, viewOf(okView), strings.ToUpper(sharing[:8]) + sharing[8:], "BB7ED9EE-1f2d-48d1-9a3b-c4d5e6f70812", "and the recorded value took a word of it"},
+		{"the recorded value took a word of what the recording gave there", okSrc, viewOf(okView), sharing, "bb7ed9ee-1f2d0e1f-48d1c0de-9a3b-c4d5e6f70812", "and the recorded value took a word of it"},
+		{"the recorded value took a word of what the recording gave there, in another case", okSrc, viewOf(okView), strings.ToUpper(sharing[:8]) + sharing[8:], "BB7ED9EE-1f2d0e1f-48d1c0de-9a3b-c4d5e6f70812", "and the recorded value took a word of it"},
 		{"what the recording gave there holds a word the recorded value lost", okSrc, viewOf(okView), inside, chance, "and it holds a word the recorded value lost"},
 		{"the place lost no word", okSrc, viewOf(added), other, chance, "which holds no word record's full round's lacks"},
-		{"the recorded value holds the word too, in another order", okSrc, viewOf(okView), "48d1-0c1d2e3f-4a5b", "0c1d2e3f-4a5b-48d1", "the recorded value holds that word too"},
+		{"the recorded value holds the word too, in another order", okSrc, viewOf(okView), "48d1c0de-0c1d2e3f-4a5b", "0c1d2e3f-4a5b-48d1c0de", "the recorded value holds that word too"},
 		{"answered at the call", src(recID, before, r1Insert), viewOf(src(liveID, before, r1Insert)), other, chance, "the recording did not give the application that payload before the call"},
 		{"no answer time", src(recID, before, time.Time{}), viewOf(src(liveID, before, time.Time{})), other, chance, "keploy cannot read when the recording answered mock-31"},
 	} {
@@ -127,8 +133,8 @@ func TestAChanceWordOfWhatTheFullRoundGaveIsLearnedAsVarying(t *testing.T) {
 func TestAChanceWordNoOneFieldOfTheViewHoldsIsRefused(t *testing.T) {
 	const (
 		recID  = "bb7ed9ee-670e-4aa1-982f-b54b2b73982f"
-		liveID = "e1f2a3b4-c5d6-48d1-8a9b-0c1d2e3f4a5b"
-		chance = "5c0e9a7b-1f2d-48d1-9a3b-c4d5e6f70812"
+		liveID = "e1f2a3b4-c5d6-48d1c0de-8a9b-0c1d2e3f4a5b"
+		chance = "5c0e9a7b-1f2d0e1f-48d1c0de-9a3b-c4d5e6f70812"
 		other  = "0c1d2e3f-4a5b-4c7d-8e9f-a0b1c2d3e4f5"
 	)
 	before := r1Insert.Add(-time.Minute)
@@ -162,8 +168,8 @@ func TestAChanceWordOfWhatTheFullRoundGaveIsOrderedWithTheOtherSources(t *testin
 	const p = "body.appId"
 	const (
 		recID  = "bb7ed9ee-670e-4aa1-982f-b54b2b73982f"
-		liveID = "e1f2a3b4-c5d6-48d1-8a9b-0c1d2e3f4a5b"
-		chance = "5c0e9a7b-1f2d-48d1-9a3b-c4d5e6f70812"
+		liveID = "e1f2a3b4-c5d6-48d1c0de-8a9b-0c1d2e3f4a5b"
+		chance = "5c0e9a7b-1f2d0e1f-48d1c0de-9a3b-c4d5e6f70812"
 		other  = "0c1d2e3f-4a5b-4c7d-8e9f-a0b1c2d3e4f5"
 	)
 	before := r1Insert.Add(-time.Minute)
@@ -181,7 +187,7 @@ func TestAChanceWordOfWhatTheFullRoundGaveIsOrderedWithTheOtherSources(t *testin
 		{"and another test's chance word, served at a place keploy does not know", func(dc *DriftCache) []Raw {
 			return []Raw{
 				dc.RawOf(receiveOf("mock-31", recID, before), true).ServedAs(3).ServedLive(dc.RawOf(receiveOf("mock-31", liveID, before), true)),
-				dc.RawOf(receiveOf("mock-32", "aaaaaaaa-1f2d-4222-8333-bbbbbbbbbbbb", before.Add(5*time.Second)), true).ServedAsRecorded(),
+				dc.RawOf(receiveOf("mock-32", "aaaaaaaa-1f2d0e1f-4222-8333-bbbbbbbbbbbb", before.Add(5*time.Second)), true).ServedAsRecorded(),
 			}
 		}, "keploy does not know where record's full round served mock-"},
 	} {
@@ -206,8 +212,8 @@ func TestAChanceWordStaysRefusedWhereTheRecordedValueTookAWordOfThePayloadsStamp
 	const p = "body.appId"
 	const (
 		recID  = "bb7ed9ee-670e-4aa1-982f-b54b2b73982f"
-		liveID = "e1f2a3b4-c5d6-48d1-8a9b-0c1d2e3f4a5b"
-		chance = "5c0e9a7b-1f2d-48d1-9a3b-c4d5e6f70812"
+		liveID = "e1f2a3b4-c5d6-48d1c0de-8a9b-0c1d2e3f4a5b"
+		chance = "5c0e9a7b-1f2d0e1f-48d1c0de-9a3b-c4d5e6f70812"
 		other  = "0c1d2e3f-4a5b-4c7d-8e9f-a0b1c2d3e4f5"
 	)
 	before := r1Insert.Add(-time.Minute)

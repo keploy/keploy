@@ -640,6 +640,11 @@ func driftBytes(d *valueDrift) int64 {
 			n += wordBytes + int64(len(w)) + wordsBytes(others)
 		}
 	}
+	// idBits and otherSide hold the words of idParts and of the word maps
+	// above: their entries, not the words again.
+	for i := range d.idBits {
+		n += int64(len(d.idBits[i]))*(wordBytes+8) + int64(len(d.otherSide[i]))*headerBytes
+	}
 	n += int64(len(d.clock.reads))*int64(unsafe.Sizeof(models.ClockRead{})) + int64(len(d.instants))*int64(unsafe.Sizeof(driftedInstant{}))
 	n += int64(len(d.recKeys)+len(d.liveKeys))*(wordBytes+int64(unsafe.Sizeof(instantKey{}))) + momentBytes*int64(len(d.recMoments)+len(d.liveMoments))
 	return n

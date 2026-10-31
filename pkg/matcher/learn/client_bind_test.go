@@ -116,7 +116,7 @@ func TestAClientTestsValueBesideAnEarlierWordIsNeverBindable(t *testing.T) {
 		raw       []Raw
 		noiseWhy  string // what keploy test's noise names
 	}{
-		{"a word the word rule let go", recName + " 48d1", liveNm + " dddd", insert, eStartup(), "stands in mock-8 at body.cmd.documents.0._id"},
+		{"a word the word rule let go", recName + " 48d1c0de", liveNm + " dddd", insert, eStartup(), "stands in mock-8 at body.cmd.documents.0._id"},
 		{"a source the search went past", recName, liveNm, nil, answered, "its recorded value stands whole in mock-s at"},
 	} {
 		// keploy test: noise, naming the earlier place (the row's shape is

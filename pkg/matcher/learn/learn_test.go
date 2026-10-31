@@ -981,7 +981,7 @@ func TestUnaccounted(t *testing.T) {
 		{"text of a script with no spaces", "您的订单已创建", "您的订单已发货", true},
 	} {
 		dc := clockedDrifts()
-		why := unaccounted(dc, dc.of(tc.recorded, tc.now), at, earlier, raw, nil)
+		why, _ := unaccounted(dc, dc.of(tc.recorded, tc.now), at, earlier, raw, nil)
 		if (why != "") != tc.refused {
 			t.Errorf("%s: unaccounted %q, want refused %v", tc.name, why, tc.refused)
 		}

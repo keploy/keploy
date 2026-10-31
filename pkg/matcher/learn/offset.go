@@ -693,6 +693,68 @@ func (dc *DriftCache) answerListsOf(x Raw) (l answerLists, plain []map[string]bo
 	return l, plain
 }
 
+// byChance reports whether t, a word of what v changed (recorded, or as it
+// stands now), that g's answer holds, as either run gave it, stands there by
+// chance (byChanceAt): the texts read are the answer's ids (its words of the
+// idByte reading, its stamps' too), as the recording and as F gave them.
+// The answer is read as words: its ids by their shape, in any order, each
+// run's ids of that shape counted (movedID), and its fields only where F
+// gave other text at one than the recording (fieldMoves). A connection's start-up is read as no place a word
+// stands in by chance: keploy keeps no other start-up of the set beside
+// another test's to tell which of its fields a swap can change (swapHolds).
+func (g givenWords) byChance(v *valueDrift, t string, recorded bool) bool {
+	return v.byChanceAt(t, recorded, func() chancePlace {
+		lists := append([]answerLists{g.answerLists, g.view, {words: g.gave}}, g.views...)
+		idsOf := func(w string, ls ...answerLists) (out []string) {
+			for _, l := range ls {
+				for _, list := range [][][]string{l.words, l.stamped} {
+					if idReading < len(list) {
+						for _, id := range list[idReading] {
+							if strings.Contains(id, w) {
+								out = append(out, id)
+							}
+						}
+					}
+				}
+			}
+			return out
+		}
+		// Every word of the answer stands inside one of its ids: none read
+		// means the lists lack the idByte reading, and the word is
+		// evidence (fail-closed: chanceHeld reads no text).
+		ids := idsOf(t, lists...)
+		// What the other run gave there: for a word the recording gave,
+		// F's view, or the recording where F served it as recorded; for one
+		// F gave, the recording. F served it changed with no view keploy
+		// reads, or no adapter stated it: the place may have moved
+		// (fail-closed).
+		other := idsOf("", g.answerLists)
+		if recorded {
+			if f := idsOf("", append([]answerLists{g.view, {words: g.gave}}, g.views...)...); len(f) > 0 {
+				other = f
+			}
+		}
+		return chancePlace{
+			texts:    ids,
+			evidence: g.startUp || recorded && (g.unread || g.unstated),
+			has: func(w string) bool {
+				for i := range readings {
+					for _, l := range lists {
+						if l.holds(i, w, true) {
+							return true
+						}
+					}
+				}
+				return false
+			},
+			idsOf:   func(w string) []string { return idsOf(w, lists...) },
+			self:    idsOf("", lists...),
+			other:   other,
+			atField: func(t string, moved []string) bool { return atPlace(g.fieldMoves, t, recorded, moved) },
+		}
+	})
+}
+
 // holds reports whether l holds t in reading i, a word of its stamps too
 // where keep says they are searched as any text (stampsEchoed).
 func (l answerLists) holds(i int, t string, keep bool) bool {
@@ -756,11 +818,16 @@ type givenWords struct {
 	// test (unseenWhy).
 	unstated, unread bool
 	views            []answerLists
+	// fieldMoves are the fields F gave other text at than the recording
+	// (fieldMovesOf); startUp: the recording is a connection's start-up
+	// (Raw.startUp). byChance reads both.
+	fieldMoves []fieldMove
+	startUp    bool
 }
 
 // wordsOf is x's givenWords, every word a copy.
 func (dc *DriftCache) wordsOf(x Raw) givenWords {
-	g := givenWords{mock: strings.Clone(x.mock), at: x.at, late: x.late, noTime: x.noTime, answered: x.answered, conn: strings.Clone(x.conn), pos: x.pos, first: x.first, last: x.last}
+	g := givenWords{mock: strings.Clone(x.mock), at: x.at, late: x.late, noTime: x.noTime, answered: x.answered, conn: strings.Clone(x.conn), pos: x.pos, first: x.first, last: x.last, startUp: x.startUp}
 	lists, plain := dc.answerListsOf(x)
 	g.answerLists = lists
 	// Served unchanged, every word is one both gave: the same lists.
@@ -778,6 +845,10 @@ func (dc *DriftCache) wordsOf(x Raw) givenWords {
 		lists, _ := dc.answerListsOf(*view)
 		g.views = append(g.views, lists)
 	}
+	// Stamps read as any text, as byChance finds a word (holds, keep):
+	// the fail-closed side. Read once for the test (fieldMovesIn): every
+	// call of it reads its earlier recordings' words.
+	g.fieldMoves = dc.fieldMovesIn(x, true)
 	for _, same := range dc.sameWords(x, plain) {
 		g.same = append(g.same, sortedWords(same, nil))
 	}
@@ -904,7 +975,7 @@ func sortedWords(set, minus map[string]bool) []string {
 // the call's own places say stamps are (keep: stampsEchoed), as a place of
 // the call's own test is (wordsHeld): a word the view's stamps alone hold
 // is no word F gave there where they are not searched as any text.
-func (g givenWords) servedWhy(i int, t, named, whose string, keep bool) string {
+func (g givenWords) servedWhy(v *valueDrift, i int, t, named, whose string, keep bool, aside func()) string {
 	of := ", a recording record's full round gave the application before the call that " + whose
 	switch {
 	case g.unstated:
@@ -914,10 +985,18 @@ func (g givenWords) servedWhy(i int, t, named, whose string, keep bool) string {
 	case g.holds(i, t, keep):
 		return ""
 	case g.view.holds(i, t, keep):
-		return named + " appears in " + g.mock + " as record's full round gave it, where the recording did not give the application that word" + of + ": keploy cannot tell whether it came from there"
+		if !g.byChance(v, t, false) {
+			return named + " appears in " + g.mock + " as record's full round gave it, where the recording did not give the application that word" + of + ": keploy cannot tell whether it came from there"
+		}
+		aside()
 	}
 	for _, view := range g.views {
-		if view.holds(i, t, keep) {
+		if !view.holds(i, t, keep) {
+			continue
+		}
+		if g.byChance(v, t, false) {
+			aside()
+		} else {
 			return named + " appears in " + g.mock + " as record's full round gave it in one of " + strconv.Itoa(len(g.views)) + " serves that gave the application different views of it, where the recording did not give the application that word" + of + ": keploy cannot tell which of them the application read, nor whether it came from there"
 		}
 	}

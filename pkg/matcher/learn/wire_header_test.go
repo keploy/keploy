@@ -86,7 +86,12 @@ func TestAWordOfAValueIsNeverFollowedFromAFramesHeader(t *testing.T) {
 					}
 				}
 				// Still a candidate source: the word in the frame's message.
-				got := c(mode.dc(), atgFind(7, `,"run":"2486"`, false), v.rec, v.live)
+				// INTENTIONAL (cross-test word coincidence): a word of letters
+				// and digits, "a486", of at least aloneBits; four decimal
+				// digits alone in a recording ("2486", a count, a year) carry
+				// fewer and stand there by chance (word_coincidence_test.go).
+				rec, live := strings.ReplaceAll(v.rec, "2486", "a486"), strings.ReplaceAll(v.live, "2486", "a486")
+				got := c(mode.dc(), atgFind(7, `,"run":"a486"`, false), rec, live)
 				variable := got.Kind == KindVariable && got.From.Mock == "mock-2124"
 				refused := got.Kind == KindUnaccounted && !got.Bindable && strings.Contains(got.Why, "mock-2124")
 				if !variable && !refused {

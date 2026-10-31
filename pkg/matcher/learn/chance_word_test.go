@@ -10,22 +10,27 @@ import (
 )
 
 // A random id the application makes (api-server's appId, a document's _id)
-// whose 4-hex group stands by chance in the answer of a recording another
-// test was given (another test's random id: "48d1", the version group of a
-// v4 UUID, has 4096 values) is learned as varying in record's full round
-// where both runs gave the application that word there and one of the two
+// whose 8-hex group stands by chance in the answer of a recording another
+// test was given (another test's random id: "48d1c0de") is learned as
+// varying in record's full round where both runs gave the application that word there and one of the two
 // values lacks it: the recording gave the answer strictly before the call,
 // and F served it as recorded, or its view shows the word at the same field.
 // An application that copied the word would have copied it in both runs.
 // Everywhere else the word stays refused, naming why; keploy test
 // (ClassifyGiven) refuses it as before. Nothing reads the id's shape.
+//
+// INTENTIONAL (cross-test word coincidence): the shared word is an 8-hex
+// group, "48d1c0de", of at least chanceBits. A 4-hex group of one id inside
+// another (a v4 UUID's "48d1") is no evidence at all now, learned as with no
+// such place before this rule reads it (word_coincidence_test.go); this
+// rule keeps its cases for a word long enough to be evidence.
 func TestAChanceWordOfAnotherTestsAnswerIsLearnedAsVarying(t *testing.T) {
 	const p = "body.appId"
 	const (
-		srcID   = "bb7ed9ee-670e-48d1-982f-b54b2b73982f" // another test's random message id
-		chance  = "5c0e9a7b-1f2d-48d1-9a3b-c4d5e6f70812" // the call's random appId: "48d1" by chance
-		other   = "0c1d2e3f-4a5b-4c7d-8e9f-a0b1c2d3e4f5" // the call's appId in the other run
-		movedID = "e1f2a3b4-c5d6-4e7f-8a9b-0c1d2e3f4a5b" // what a view gave at the message id instead
+		srcID   = "bb7ed9ee-670e-48d1c0de-982f-b54b2b73982f"     // another test's random message id
+		chance  = "5c0e9a7b-1f2d0e1f-48d1c0de-9a3b-c4d5e6f70812" // the call's random appId: "48d1c0de" by chance
+		other   = "0c1d2e3f-4a5b-4c7d-8e9f-a0b1c2d3e4f5"         // the call's appId in the other run
+		movedID = "e1f2a3b4-c5d6-4e7f-8a9b-0c1d2e3f4a5b"         // what a view gave at the message id instead
 	)
 	before := r1Insert.Add(-time.Minute)
 	src := func(id string, req, res time.Time) *models.Mock {
@@ -48,7 +53,7 @@ func TestAChanceWordOfAnotherTestsAnswerIsLearnedAsVarying(t *testing.T) {
 	for k, v := range okSrc.Spec.HTTPResp.Header {
 		elsewhere.Spec.HTTPResp.Header[k] = v
 	}
-	elsewhere.Spec.HTTPResp.Header["X-Amzn-Requestid"] = "ec39f47f-d674-48d1-99d6-15655f71954a"
+	elsewhere.Spec.HTTPResp.Header["X-Amzn-Requestid"] = "ec39f47f-d674-48d1c0de-99d6-15655f71954a"
 	if bodyMoved.Spec.HTTPResp.Body == okSrc.Spec.HTTPResp.Body || okSrc.Spec.HTTPResp.Header["X-Amzn-Requestid"] == elsewhere.Spec.HTTPResp.Header["X-Amzn-Requestid"] {
 		t.Fatal("the view did not change")
 	}
@@ -63,7 +68,7 @@ func TestAChanceWordOfAnotherTestsAnswerIsLearnedAsVarying(t *testing.T) {
 		{"the id's group F saw, served as recorded", okSrc, asRecorded, other, chance, ""},
 		{"served changed, its view giving the word at the same field", okSrc, viewOf(bodyMoved), chance, other, ""},
 		{"the id's group F saw, served changed, its view giving the word at the same field", okSrc, viewOf(bodyMoved), other, chance, ""},
-		{"two groups of the id in one answer, served as recorded", src("bb7ed9ee-1f2d-48d1-982f-b54b2b73982f", before, before.Add(time.Second)), asRecorded, chance, other, ""},
+		{"two groups of the id in one answer, served as recorded", src("bb7ed9ee-1f2d0e1f-48d1c0de-982f-b54b2b73982f", before, before.Add(time.Second)), asRecorded, chance, other, ""},
 		{"served changed with no view", okSrc, noView, chance, other, "record's full round did not give the application that word there before the call"},
 		{"served changed, its view giving the word at another field too (a header the recording's lacks it at)", okSrc, viewOf(elsewhere), chance, other, "record's full round did not give the application that word there before the call"},
 		{"served changed, its view giving another id there", okSrc, viewOf(src(movedID, before, before.Add(time.Second))), chance, other, "record's full round did not give the application that word there before the call"},
@@ -122,19 +127,19 @@ func TestAChanceWordOfAnotherTestsAnswerIsLearnedAsVarying(t *testing.T) {
 func TestChanceWordsOfTwoOtherTestsInAnUnknownServeOrderAreRefused(t *testing.T) {
 	const p = "body.appId"
 	before := r1Insert.Add(-time.Minute)
-	m1 := receiveOf("mock-31", "bb7ed9ee-670e-48d1-982f-b54b2b73982f", before)
-	m2 := receiveOf("mock-32", "aaaaaaaa-1f2d-4222-8333-bbbbbbbbbbbb", before.Add(5*time.Second))
+	m1 := receiveOf("mock-31", "bb7ed9ee-670e-48d1c0de-982f-b54b2b73982f", before)
+	m2 := receiveOf("mock-32", "aaaaaaaa-1f2d0e1f-4222-8333-bbbbbbbbbbbb", before.Add(5*time.Second))
 	for _, viaSet := range []bool{false, true} {
 		dc := clockedDrifts()
 		x1 := dc.RawOf(m1, true).ServedAs(3).ServedAsRecorded()
 		x2 := dc.RawOf(m2, true).ServedAsRecorded()
 		var ln Learned
 		if viaSet {
-			ln = ClassifyFollowing(dc, []string{p}, strLeaf(p, "0c1d2e3f-4a5b-4c7d-8e9f-a0b1c2d3e4f5"), strLeaf(p, "5c0e9a7b-1f2d-48d1-9a3b-c4d5e6f70812"), r1Insert, nil, nil, nil, nil, func() ([]GivenPlaces, error) {
+			ln = ClassifyFollowing(dc, []string{p}, strLeaf(p, "0c1d2e3f-4a5b-4c7d-8e9f-a0b1c2d3e4f5"), strLeaf(p, "5c0e9a7b-1f2d0e1f-48d1c0de-9a3b-c4d5e6f70812"), r1Insert, nil, nil, nil, nil, func() ([]GivenPlaces, error) {
 				return []GivenPlaces{PlacesOf(x1), PlacesOf(x2)}, nil
 			})[0]
 		} else {
-			ln = ClassifyFollowing(dc, []string{p}, strLeaf(p, "0c1d2e3f-4a5b-4c7d-8e9f-a0b1c2d3e4f5"), strLeaf(p, "5c0e9a7b-1f2d-48d1-9a3b-c4d5e6f70812"), r1Insert, nil, []Raw{x1.OfAnotherTest(), x2.OfAnotherTest()}, nil, nil, nil)[0]
+			ln = ClassifyFollowing(dc, []string{p}, strLeaf(p, "0c1d2e3f-4a5b-4c7d-8e9f-a0b1c2d3e4f5"), strLeaf(p, "5c0e9a7b-1f2d0e1f-48d1c0de-9a3b-c4d5e6f70812"), r1Insert, nil, []Raw{x1.OfAnotherTest(), x2.OfAnotherTest()}, nil, nil, nil)[0]
 		}
 		if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "keploy does not know where record's full round served mock-32 among the other earlier answers it served") {
 			t.Errorf("set %v: %s (%s); want it refused for the order", viaSet, ln.Kind, ln.Why)
@@ -156,11 +161,11 @@ func TestChanceWordsOfTwoOtherTestsInAnUnknownServeOrderAreRefused(t *testing.T)
 func TestAChanceWordStaysRefusedWhereTheValueLackingItHoldsAnotherWordOfThatPayload(t *testing.T) {
 	const p = "body.message_id"
 	const (
-		idA    = "bb7ed9ee-670e-48d1-982f-b54b2b73982f" // the first message's id at record
-		idB    = "5c0e9a7b-1f2d-4c3e-9a3b-c4d5e6f70812" // the second message's id
-		idC    = "e1f2a3b4-c5d6-4e7f-8a9b-0c1d2e3f4a5b" // a third message's id
-		chance = "0c1d2e3f-4a5b-48d1-8e9f-a0b1c2d3e4f5" // the value F saw: "48d1" by chance
-		other  = "9a8b7c6d-5e4f-4a3b-9c2d-1e0f9a8b7c6d" // the value at record
+		idA    = "bb7ed9ee-670e-48d1c0de-982f-b54b2b73982f" // the first message's id at record
+		idB    = "5c0e9a7b-1f2d-4c3e-9a3b-c4d5e6f70812"     // the second message's id
+		idC    = "e1f2a3b4-c5d6-4e7f-8a9b-0c1d2e3f4a5b"     // a third message's id
+		chance = "0c1d2e3f-4a5b-48d1c0de-8e9f-a0b1c2d3e4f5" // the value F saw: "48d1c0de" by chance
+		other  = "9a8b7c6d-5e4f-4a3b-9c2d-1e0f9a8b7c6d"     // the value at record
 	)
 	before := r1Insert.Add(-time.Minute)
 	two := func(first, second string) *models.Mock {
@@ -251,10 +256,10 @@ func TestAChanceWordStaysRefusedWhereTheValueLackingItHoldsAnotherWordOfThatPayl
 func TestAChanceWordStaysRefusedWhereTheValueLackingItHoldsAWordOfAnyPlaceBothRunsGave(t *testing.T) {
 	const p = "body.message_id"
 	const (
-		idA    = "bb7ed9ee-670e-48d1-982f-b54b2b73982f" // mock-31's message id
-		idB    = "5c0e9a7b-1f2d-4c3e-9a3b-c4d5e6f70812" // mock-32's message id
-		chance = "0c1d2e3f-4a5b-48d1-8e9f-a0b1c2d3e4f5" // a fresh id: "48d1" by chance
-		fresh  = "9a8b7c6d-5e4f-4a3b-9c2d-1e0f9a8b7c6d" // a fresh id, no word of any place
+		idA    = "bb7ed9ee-670e-48d1c0de-982f-b54b2b73982f" // mock-31's message id
+		idB    = "5c0e9a7b-1f2d-4c3e-9a3b-c4d5e6f70812"     // mock-32's message id
+		chance = "0c1d2e3f-4a5b-48d1c0de-8e9f-a0b1c2d3e4f5" // a fresh id: "48d1c0de" by chance
+		fresh  = "9a8b7c6d-5e4f-4a3b-9c2d-1e0f9a8b7c6d"     // a fresh id, no word of any place
 	)
 	before := r1Insert.Add(-time.Minute)
 	const lacks = "the value that lacks that word holds a word of a place both runs gave the application before the call: "

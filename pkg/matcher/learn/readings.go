@@ -4,10 +4,13 @@ import (
 	"encoding/base32"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
+	"io"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 )
@@ -858,21 +861,29 @@ func nonASCIIRuns(s string) []string {
 // place holds the moment it was recorded with (else it is a variable of that
 // place, appearedIn), is refused before any lead or window excuses its words:
 // what F saw came from what F served, whatever moved it.
-func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, raw []Raw, fol *follows) string {
+func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, raw []Raw, fol *follows) (why, chance string) {
 	if v.unparsed != "" {
-		return v.unparsed
+		return v.unparsed, ""
 	}
 	if echoed := dc.echoedIn(v, at, served, raw); len(echoed) > 0 {
 		where := dc.heldAt(echoed, at, served, raw)
 		if where == "" {
 			where = "earlier in the test"
 		}
-		return pickUnaccounted(where)
+		return pickUnaccounted(where), ""
 	}
 	keep := dc.stampsEchoed(v, served, raw)
 	word := v.wordOf
 	held := dc.wordsHeld(v, keep, raw)
-	return v.eachChanged(func(i int, t string, recorded bool) string {
+	// chance names the first place the search set aside a word of what v
+	// changed at, as standing there by chance (chanceIn): where nothing
+	// refuses, the value's learning names it (learning is legible).
+	aside := func(t string, recorded bool, where func() string) {
+		if chance == "" {
+			chance = chanceWhy(v, t, recorded, where())
+		}
+	}
+	why = v.eachChanged(func(i int, t string, recorded bool) string {
 		for _, e := range served {
 			// The run's exchange (Earlier.Run) is an earlier place of every
 			// test of the set: the set's start-up's, or an earlier test's
@@ -905,6 +916,13 @@ func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, 
 				}
 				ed := dc.of(s.Leaf.Value, s.Live)
 				if recorded && ed.recTok[i][t] || !recorded && ed.liveTok[i][t] {
+					// A short word of an id that changed whole, which no id
+					// there holds beside another word of the value's id,
+					// stands there by chance (chanceBits).
+					if chanceIn(v, t, recorded, append(ed.sideForms(true), ed.sideForms(false)...)...) {
+						aside(t, recorded, func() string { return e.Mock + " at " + s.Leaf.Path })
+						continue
+					}
 					why := word(t, recorded) + " appears " + where + ", in " + e.Mock + " at " + s.Leaf.Path + ", which did not drift with it: keploy cannot tell whether it came from there; " + notClock(v) + ". " + correction(e.Mock, false)
 					if fol.excusedSeen(e, ed, v, i, t, at, why, s.Leaf.Path) {
 						continue
@@ -923,17 +941,16 @@ func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, 
 			// A protocol-phase answer's own clock reads blanked
 			// (instants.go, rule 2).
 			if held.of(j).raw[changedWord{i, t}] && !insideAnotherID(v, x, dc.searched(x, keep), t, recorded) {
-				note := x.atNote(at)
-				place := x.mock + "'s payload"
-				if f, _ := dc.fieldOf(x, dc.searched(x, keep), t); f != "" {
-					place = x.mock + " at " + f
+				if searchedByChance(dc, v, x, t, recorded, keep, raw) {
+					aside(t, recorded, func() string { return rawPlace(dc, x, keep, t) })
+				} else {
+					place := rawPlace(dc, x, keep, t) + x.atNote(at)
+					why := word(t, recorded) + " appears in an earlier recording, in " + place + ": keploy cannot tell whether it came from there; " + notClock(v) + ". " + correction(x.mock, !x.served)
+					if fol.excusedRaw(x, v, i, t, at, why, place) {
+						continue
+					}
+					return why
 				}
-				place += note
-				why := word(t, recorded) + " appears in an earlier recording, in " + place + ": keploy cannot tell whether it came from there; " + notClock(v) + ". " + correction(x.mock, !x.served)
-				if fol.excusedRaw(x, v, i, t, at, why, place) {
-					continue
-				}
-				return why
 			}
 			// A word the value holds now that stands in what F gave the
 			// application in a payload it served changed (ServedLive), and
@@ -944,15 +961,17 @@ func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, 
 			// recorded value took none of the words of, is let go
 			// (follows.excusedLive).
 			if !recorded && x.Live() && held.of(j).live[changedWord{i, t}] {
-				place := x.mock + "'s payload, as record's full round gave it"
-				if f, _ := dc.fieldOf(*x.live, dc.searched(*x.live, keep), t); f != "" {
-					place = x.mock + " at " + f + ", as record's full round gave it"
+				place := func() string { return rawPlace(dc, *x.live, keep, t) + ", as record's full round gave it" }
+				if searchedByChance(dc, v, x, t, false, keep, raw) {
+					aside(t, recorded, place)
+				} else {
+					place := place()
+					why := word(t, recorded) + " appears in an earlier recording, in " + place + x.atNote(at) + ", where the recording did not give the application that word: keploy cannot tell whether it came from there; " + notClock(v) + ". " + correction(x.mock, false)
+					if fol.excusedLive(x, v, i, t, at, why, place) {
+						continue
+					}
+					return why
 				}
-				why := word(t, recorded) + " appears in an earlier recording, in " + place + x.atNote(at) + ", where the recording did not give the application that word: keploy cannot tell whether it came from there; " + notClock(v) + ". " + correction(x.mock, false)
-				if fol.excusedLive(x, v, i, t, at, why, place) {
-					continue
-				}
-				return why
 			}
 			// A word the value holds now, where F served x changed in ways
 			// keploy keeps no one view of (ServedChanged): one that stands
@@ -970,6 +989,10 @@ func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, 
 		}
 		return ""
 	})
+	if why != "" {
+		chance = ""
+	}
+	return why, chance
 }
 
 // unseenWhy says where a word t the value holds now (named), which F may
@@ -1018,9 +1041,16 @@ func unseenWhy(dc *DriftCache, x Raw, held, keep bool, named, t string, at time.
 // at such a place before the call, which one of the two values lacks, is no
 // word the value copied there and is let go (follows.excusedGiven): a group
 // of a random id that another test's random id holds by chance.
-func givenWhy(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, raw []Raw, places func() *offsetPlaces, fol *follows) string {
+func givenWhy(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, raw []Raw, places func() *offsetPlaces, fol *follows) (why, chance string) {
 	keep, kept := false, false
-	return v.eachChanged(func(i int, t string, recorded bool) string {
+	// chance names the first recording the search set aside a word at as
+	// standing there by chance (byChance), as unaccounted's does.
+	aside := func(t string, recorded bool, where string) {
+		if chance == "" {
+			chance = chanceWhy(v, t, recorded, where)
+		}
+	}
+	why = v.eachChanged(func(i int, t string, recorded bool) string {
 		op := places()
 		if op.unread != "" {
 			return op.unread
@@ -1036,13 +1066,18 @@ func givenWhy(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, raw
 			if !kept {
 				keep, kept = dc.stampsEchoed(v, served, raw), true
 			}
-			if g.holds(i, t, keep) {
-				why := v.wordOf(t, recorded) + " appears in " + g.mock + ", a recording record's full round gave the application before the call that " + givenWhose(g.at, at, g.late, g.noTime) + ", so it cannot tell whether it came from there; " + notClock(v) + ". " + correction(g.mock, false)
-				if fol.excusedGiven(g, v, i, t, at, why) {
-					continue
-				}
-				return why
+			if !g.holds(i, t, keep) {
+				continue
 			}
+			if g.byChance(v, t, recorded) {
+				aside(t, recorded, g.mock)
+				continue
+			}
+			why := v.wordOf(t, recorded) + " appears in " + g.mock + ", a recording record's full round gave the application before the call that " + givenWhose(g.at, at, g.late, g.noTime) + ", so it cannot tell whether it came from there; " + notClock(v) + ". " + correction(g.mock, false)
+			if fol.excusedGiven(g, v, i, t, at, why) {
+				continue
+			}
+			return why
 		}
 		// A word the value holds now that F may have given the application
 		// at one of them and the recording did not (servedWhy): no rule
@@ -1057,12 +1092,16 @@ func givenWhy(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, raw
 			return ""
 		}
 		for _, g := range op.words {
-			if why := g.servedWhy(i, t, v.wordOf(t, recorded), givenWhose(g.at, at, g.late, g.noTime), keep); why != "" {
+			if why := g.servedWhy(v, i, t, v.wordOf(t, recorded), givenWhose(g.at, at, g.late, g.noTime), keep, func() { aside(t, recorded, g.mock+" as record's full round gave it") }); why != "" {
 				return why + "; " + notClock(v) + ". " + correction(g.mock, false)
 			}
 		}
 		return ""
 	})
+	if why != "" {
+		chance = ""
+	}
+	return why, chance
 }
 
 // givenWhose says whose a recording F gave the application before a call
@@ -1220,6 +1259,356 @@ func gluedIn(ed *valueDrift, t string, recorded bool) bool {
 		}
 	}
 	return false
+}
+
+// searchedByChance reports whether t, a word of what v changed (recorded,
+// or as it stands now) that x's payload holds, searched as keep says
+// (stampsEchoed), stands there by chance (byChanceAt). x's texts are read
+// only for a word that may (chanceWord).
+func searchedByChance(dc *DriftCache, v *valueDrift, x Raw, t string, recorded, keep bool, raw []Raw) bool {
+	return v.byChanceAt(t, recorded, func() chancePlace {
+		texts := dc.searched(x, keep)
+		// A word of a connection's start-up a swap can change stands
+		// there by no chance: F may have given the application's
+		// connection another connection's start-up, whose word the value
+		// then copied (swapHolds, startUpWhy).
+		if x.swapHolds(texts[0], raw, func(own string) bool { return holdsToken(own, t) }) {
+			return chancePlace{evidence: true}
+		}
+		all := []string{texts[0], texts[1]}
+		// What F gave there too: a place that moved with the value is
+		// none, read where t stands, at its id (movedID) or its field
+		// or leaf (atPlace), or where a word of the other side stands
+		// there but by chance (movedWord), not wherever a short word of it
+		// stands in a payload of many fields.
+		for _, o := range append([]*Raw{x.live}, x.views...) {
+			if o != nil {
+				t := dc.searched(*o, keep)
+				all = append(all, t[0], t[1])
+			}
+		}
+		return chancePlace{
+			texts: all,
+			has: func(w string) bool {
+				for _, s := range all {
+					if ContainsToken(s, w) {
+						return true
+					}
+				}
+				return false
+			},
+			idsOf: func(string) []string { return all },
+			self:  all,
+			other: all,
+			atField: func(t string, moved []string) bool {
+				return atPlace(dc.fieldMovesIn(x, keep), t, recorded, moved)
+			},
+		}
+	})
+}
+
+// fieldMovesIn are x's fieldMoves (fieldMovesOf) against F's views of it
+// (its live view and its serves' views: Raw.ServedLive, ServedChanged),
+// its text and theirs as searched as keep says (stampsEchoed); none where
+// F gave no view. Where x is all of its recording's payload (Raw.id) they
+// are read once for the test, kept in its text cache by x's identity and
+// the views' texts (rawKey) whole: the search reads the place for each
+// word of each value it holds, and a payload of many fields or leaves
+// would be read again each time; a view F's later serves gave reads anew.
+// They keep no text of x's or of a view's: each word is a copy.
+func (dc *DriftCache) fieldMovesIn(x Raw, keep bool) []fieldMove {
+	var views []Raw
+	for _, o := range append([]*Raw{x.live}, x.views...) {
+		if o != nil {
+			views = append(views, *o)
+		}
+	}
+	if len(views) == 0 {
+		return nil
+	}
+	read := func() []fieldMove {
+		live := make([]string, len(views))
+		for k, o := range views {
+			live[k] = dc.searched(o, keep)[0]
+		}
+		return fieldMovesOf(x, dc.searched(x, keep)[0], views, live)
+	}
+	if dc == nil || x.id == "" {
+		return read()
+	}
+	// The key is x's identity, keep, and each view's text whole, each
+	// after its length: no two different lists of views read as one.
+	var sb strings.Builder
+	sb.WriteString(strconv.Itoa(len(x.id)))
+	sb.WriteByte(':')
+	sb.WriteString(x.id)
+	sb.WriteByte(byte(keepIndex(keep)))
+	for _, o := range views {
+		k := rawKey(o)
+		sb.WriteString(strconv.Itoa(len(k)))
+		sb.WriteByte(':')
+		sb.WriteString(k)
+	}
+	key := textKey{textMoves, sb.String()}
+	if v, ok := dc.text.get(key); ok {
+		return v.([]fieldMove)
+	}
+	moves := read()
+	dc.text.put(key, moves, movesBytes(moves))
+	return moves
+}
+
+// movesBytes is about the bytes moves keep.
+func movesBytes(moves []fieldMove) int64 {
+	n := int64(headerBytes)
+	for _, f := range moves {
+		for _, side := range [][]string{f.rec, f.live} {
+			n += headerBytes
+			for _, w := range side {
+				n += headerBytes + int64(len(w))
+			}
+		}
+	}
+	return n
+}
+
+// fieldMoveReads counts the reads of fieldMovesOf, for the rows: one atomic
+// add next to that read. Nothing in keploy reads it.
+var fieldMoveReads atomic.Int64
+
+// fieldMove is a place of a recording F served changed, a field (by path),
+// or a leaf of one holding a JSON document, at which one of F's views of
+// it gave other text than the recording: the words (isWord, in every
+// declared form) the place held as recorded and as F gave it. A place
+// that moved with a value is one of them (atPlace).
+type fieldMove struct{ rec, live []string }
+
+// fieldMovesOf are the fieldMoves of x, its text as searched (rec), against
+// each of views, F's views of it (their texts as searched: live), field by
+// field of the same path; a field whose text holds a JSON document on both
+// sides read leaf by leaf (leafSpans), so that a body of many leaves is
+// many places, not one. A place both gave alike gave the application the
+// same words in both runs: no value moved with it there.
+func fieldMovesOf(x Raw, rec string, views []Raw, live []string) []fieldMove {
+	fieldMoveReads.Add(1)
+	type key struct {
+		path string
+		key  bool
+	}
+	// Its words in every reading (readings), as otherSideWords reads the
+	// value's.
+	words := func(text string) []string {
+		set := map[string]bool{}
+		for _, form := range textForms(text) {
+			for _, r := range readings {
+				for w := range tokensBy(form, r) {
+					set[w] = true
+				}
+			}
+		}
+		return sortedWords(set, nil)
+	}
+	if len(views) == 0 {
+		return nil
+	}
+	xb := x.payload()
+	xt := xb.text
+	var out []fieldMove
+	for k, o := range views {
+		ob := o.payload()
+		ot := ob.text
+		at := map[key][]rawField{}
+		for _, g := range ob.fields {
+			if g.end <= len(live[k]) && g.end <= len(ot) {
+				at[key{g.path, g.key}] = append(at[key{g.path, g.key}], g)
+			}
+		}
+		for _, f := range xb.fields {
+			if f.end > len(rec) || f.end > len(xt) {
+				continue
+			}
+			r := rec[f.start:f.end]
+			var (
+				rl      map[string][2]int
+				rok, rd bool
+			)
+			for _, g := range at[key{f.path, f.key}] {
+				l := live[k][g.start:g.end]
+				if l == r {
+					continue
+				}
+				if !rd {
+					rl, rok = leafSpans(xt[f.start:f.end])
+					rd = true
+				}
+				// Read leaf by leaf only where both hold one JSON document
+				// of the same leaves (paths) and a leaf differs: a key that
+				// changed, a leaf that moved to another path, or text that
+				// differs between leaves is read as the whole field
+				// (fail-closed).
+				ll, lok := leafSpans(ot[g.start:g.end])
+				var leaves []fieldMove
+				if rok && lok && len(rl) == len(ll) {
+					for path, rs := range rl {
+						ls, ok := ll[path]
+						if !ok {
+							leaves = nil
+							break
+						}
+						if r[rs[0]:rs[1]] != l[ls[0]:ls[1]] {
+							leaves = append(leaves, fieldMove{rec: words(r[rs[0]:rs[1]]), live: words(l[ls[0]:ls[1]])})
+						}
+					}
+				}
+				if len(leaves) == 0 {
+					leaves = []fieldMove{{rec: words(r), live: words(l)}}
+				}
+				out = append(out, leaves...)
+			}
+		}
+	}
+	return out
+}
+
+// atPlace reports whether one of moves, a place F gave other text at than
+// the recording, held t, a word of what a value changed (recorded: as
+// recorded; else as F gave it), and, as the other run gave it, a word of
+// moved (what the value changed on the other side): the place moved with
+// the value, whatever else of it changed.
+func atPlace(moves []fieldMove, t string, recorded bool, moved []string) bool {
+	for _, f := range moves {
+		self, other := f.rec, f.live
+		if !recorded {
+			self, other = f.live, f.rec
+		}
+		if !sortedHas(self, t) {
+			continue
+		}
+		for _, w := range moved {
+			if sortedHas(other, w) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// sortedHas reports whether words, sorted, holds w.
+func sortedHas(words []string, w string) bool {
+	k := sort.SearchStrings(words, w)
+	return k < len(words) && words[k] == w
+}
+
+// leafSpans are the spans of the scalars of text, a JSON document, by
+// their path (keys dot-joined, an array's positions bracketed), each with
+// the separators before it, which hold no word; false where text is not
+// one JSON document or two of its leaves share a path.
+func leafSpans(text string) (map[string][2]int, bool) {
+	type frame struct {
+		arr     bool
+		i       int
+		key     string
+		wantKey bool
+	}
+	dec := json.NewDecoder(strings.NewReader(text))
+	dec.UseNumber()
+	var stack []frame
+	out := map[string][2]int{}
+	tops := 0
+	path := func() string {
+		var b strings.Builder
+		for _, f := range stack {
+			if f.arr {
+				b.WriteString("[" + strconv.Itoa(f.i) + "]")
+			} else {
+				b.WriteString("." + f.key)
+			}
+		}
+		return b.String()
+	}
+	for {
+		before := int(dec.InputOffset())
+		tok, err := dec.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, false
+		}
+		top := len(stack) - 1
+		if d, ok := tok.(json.Delim); ok && (d == '}' || d == ']') {
+			stack = stack[:top]
+			if top > 0 && !stack[top-1].arr {
+				stack[top-1].wantKey = true
+			}
+			continue
+		}
+		if top >= 0 && !stack[top].arr && stack[top].wantKey {
+			k, _ := tok.(string)
+			stack[top].key, stack[top].wantKey = k, false
+			continue
+		}
+		// A value begins: of an array, at its next position.
+		if top < 0 {
+			if tops++; tops > 1 {
+				return nil, false
+			}
+		} else if stack[top].arr {
+			stack[top].i++
+		}
+		if d, ok := tok.(json.Delim); ok {
+			stack = append(stack, frame{arr: d == '[', i: -1, wantKey: d == '{'})
+			continue
+		}
+		// Two leaves of one path (a key "a.b" beside "a" holding "b", a
+		// key twice): no one leaf to pair.
+		at := path()
+		if _, dup := out[at]; dup {
+			return nil, false
+		}
+		out[at] = [2]int{before, int(dec.InputOffset())}
+		if top >= 0 && !stack[top].arr {
+			stack[top].wantKey = true
+		}
+	}
+	return out, tops == 1 && len(stack) == 0
+}
+
+// rawPlace names where x, a recording searched (keep: dc.searched), holds
+// t: x's field holding it, or x's payload.
+func rawPlace(dc *DriftCache, x Raw, keep bool, t string) string {
+	if f, _ := dc.fieldOf(x, dc.searched(x, keep), t); f != "" {
+		return x.mock + " at " + f
+	}
+	return x.mock + "'s payload"
+}
+
+// chanceWhy is why v, learned as varying, is no copy of where, a place
+// before the call that holds t, a word of what v changed (recorded, or as
+// it stands now), by chance (chanceIn), which the search set aside as no
+// evidence v came from there (unaccounted): the learning says what it read
+// past (learning is legible).
+func chanceWhy(v *valueDrift, t string, recorded bool, where string) string {
+	bits := v.partBits(t, recorded)
+	held := "beside another word of the value's id"
+	if bits >= aloneBits {
+		held += ", nor as an id of its own"
+	}
+	return v.wordOf(t, recorded) + " stands in " + where + " by chance: a word of " + strconv.Itoa(int(bits)) + " bits, fewer than " + strconv.Itoa(chanceBits) + ", of an id the value changed whole, which no id there holds " + held + ", so it is no evidence the value came from there, and keploy learns it as varying"
+}
+
+// sideForms are the declared forms of a place's value (d), as recorded or
+// as it stands now.
+func (d *valueDrift) sideForms(recorded bool) []string {
+	side := 1
+	if recorded {
+		side = 0
+	}
+	out := make([]string, 0, len(d.forms))
+	for _, f := range d.forms {
+		out = append(out, f[side])
+	}
+	return out
 }
 
 // pickUnaccounted is why a drifted value whose moment in record's full round

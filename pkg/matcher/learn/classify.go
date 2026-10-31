@@ -3,6 +3,7 @@ package learn
 import (
 	"encoding/hex"
 	"encoding/json"
+	"math"
 	"net/url"
 	"regexp"
 	"sort"
@@ -1518,6 +1519,9 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 			return dc.classifyInstant(r, l, at, served, raw, resp, w, unreadReq, places, skip)
 		}
 		ln := Learned{Kind: KindNoise, Recorded: r, Live: l}
+		// chance names a place the search read past a word of the value at,
+		// as standing there by chance (unaccounted, chanceBits).
+		chance := ""
 		var fol *follows
 		if follow {
 			fol = &follows{dc: dc, rec: r.Value, live: l.Value, at: at, served: served, raw: raw, places: places}
@@ -1553,7 +1557,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 				// any lead or window excuses its words (offset.go).
 				why = offsetWhy(m)
 				offWhy = why
-			} else if why = unaccounted(dc, v, at, served, raw, fol); why != "" {
+			} else if why, chance = unaccounted(dc, v, at, served, raw, fol); why != "" {
 				sourced = true
 				if fol != nil && fol.refused != "" {
 					why += "; " + fol.refused
@@ -1564,7 +1568,11 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 				// an instant of it copied from there, or picked from it,
 				// which the word rule leaves to the clock (the echo of
 				// those places).
-				if why = givenWhy(dc, v, at, served, raw, places, fol); why == "" {
+				given := ""
+				if why, given = givenWhy(dc, v, at, served, raw, places, fol); why == "" {
+					if chance == "" {
+						chance = given
+					}
 					why = dc.echoedElsewhere(v.instants, at, served, raw, places)
 				} else if fol != nil && fol.refused != "" {
 					why += "; " + fol.refused
@@ -1617,13 +1625,14 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 					}
 					// The test's value, first sent here (Learned.Bindable):
 					// no source, no echo, no word of it at an earlier place
-					// (unaccounted and givenWhy found none), none of it in
-					// the call's own answer (echoedPart), and no word the
-					// word rule let go in record's full round (follows), so
-					// no order of places is needed either. Never where the
-					// value may be a clock read at a cut keploy cannot tell
-					// (cutWhy): that stays refused.
-					bindable = cutWhy == "" && ln.Kind == KindNoise && skip&skipSource == 0 && echoedPart(dc, v, resp) == "" &&
+					// (unaccounted and givenWhy found none, nor one they
+					// read past as standing there by chance: chance), none
+					// of it in the call's own answer (echoedPart), and no
+					// word the word rule let go in record's full round
+					// (follows), so no order of places is needed either.
+					// Never where the value may be a clock read at a cut
+					// keploy cannot tell (cutWhy): that stays refused.
+					bindable = cutWhy == "" && ln.Kind == KindNoise && skip&skipSource == 0 && chance == "" && echoedPart(dc, v, resp) == "" &&
 						(fol == nil || fol.first == "" && fol.refuted == "")
 				}
 			}
@@ -1777,6 +1786,11 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		}
 		if ln.Kind == KindNoise || ln.Kind == KindClockRead {
 			ln.Refuted = fol.refutedAll()
+		}
+		// Noise that read past a word of it standing in an earlier place by
+		// chance (chanceBits) names that place.
+		if ln.Kind == KindNoise && ln.Why == "" {
+			ln.Why = chance
 		}
 		return ln
 	}
@@ -2317,6 +2331,10 @@ func wordPairsBy(x run, word func(byte) bool) []run {
 // with '-' and '_' inside them (nanoid, base64url, token_urlsafe).
 var readings = []func(byte) bool{isWord, wordByte, idByte}
 
+// idReading is the index of idByte in readings: the reading whose words
+// are a value's ids whole.
+const idReading = 2
+
 // pieces are the parts of a drifted value that drifted, each recorded and
 // live: its runs and their changed words, in every reading.
 func pieces(recorded, live string) []run {
@@ -2545,7 +2563,13 @@ type valueDrift struct {
 	// more than one word, none of which the other side holds in any
 	// reading. Such an id was made or copied as one (insideAnotherID).
 	// Each word maps to the other words of its ids.
-	idParts         [2]map[string]map[string]bool
+	idParts [2]map[string]map[string]bool
+	// idBits are the bits each word of idParts carries as the value holds
+	// it (partBits), and otherSide the words of what the value changed on
+	// the side other than idParts' [side] (recorded [0]: those it holds
+	// now), in every reading (chanceIn).
+	idBits          [2]map[string]float64
+	otherSide       [2][]string
 	decRec, decLive string
 	decoded         bool
 	// forms are the value in the declared forms: raw where it has escapes,
@@ -3366,32 +3390,36 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 			}
 		}
 		for _, w := range searched {
-			if (ContainsToken(texts[0], w) || ContainsToken(texts[1], w)) && !insideAnotherID(v, x, texts, w, true) {
-				field, given := dc.fieldOf(x, texts, w)
-				p := Place{Mock: x.mock, Field: field, Held: w, AtCall: atCall, noTime: x.noTime, unserved: !x.served, givenWhole: given && w == recorded}
-				p.startUp = x.swapHolds(texts[0], raw, func(own string) bool { return holdsToken(own, w) })
-				// A word of a connection's start-up a swap can change is
-				// never set aside as a source the value moved away from: F
-				// may have given the application's connection another
-				// connection's start-up, whose word the value then copied
-				// (isStartUp, swapHolds). The value is refused there
-				// (startUpWhy). A word every start-up carries alike reads
-				// as any recording's.
-				//
-				// A payload F served as recorded is set aside whole: F gave
-				// every word of it. One F gave its view of (ServedLive) is
-				// set aside a word at a time, its fields read one by one
-				// (liveAt), so the search goes on to the value's next word
-				// there: a field F gave another value at that the value
-				// drifted with stays a place.
-				if !p.startUp && fol.refute(x, texts, keep, v, p) {
-					if x.AsRecorded() {
-						break
-					}
-					continue
-				}
-				return p, true
+			if !(ContainsToken(texts[0], w) || ContainsToken(texts[1], w)) || insideAnotherID(v, x, texts, w, true) {
+				continue
 			}
+			// A word of a connection's start-up a swap can change is
+			// never set aside, neither as a source the value moved away
+			// from nor as one it stands in by chance (searchedByChance):
+			// F may have given the application's connection another
+			// connection's start-up, whose word the value then copied
+			// (isStartUp, swapHolds). The value is refused there
+			// (startUpWhy). A word every start-up carries alike reads as
+			// any recording's.
+			if searchedByChance(dc, v, x, w, true, keep, raw) {
+				continue
+			}
+			swap := x.swapHolds(texts[0], raw, func(own string) bool { return holdsToken(own, w) })
+			field, given := dc.fieldOf(x, texts, w)
+			p := Place{Mock: x.mock, Field: field, Held: w, AtCall: atCall, noTime: x.noTime, unserved: !x.served, givenWhole: given && w == recorded, startUp: swap}
+			// A payload F served as recorded is set aside whole: F gave
+			// every word of it. One F gave its view of (ServedLive) is set
+			// aside a word at a time, its fields read one by one (liveAt),
+			// so the search goes on to the value's next word there: a field
+			// F gave another value at that the value drifted with stays a
+			// place.
+			if !p.startUp && fol.refute(x, texts, keep, v, p) {
+				if x.AsRecorded() {
+					break
+				}
+				continue
+			}
+			return p, true
 		}
 	}
 	return Place{}, false
@@ -4535,7 +4563,63 @@ func (d *valueDrift) readIDParts(forms [][2]string) {
 				d.idParts[side][w] = others
 			}
 		}
+		if len(d.idParts[side]) == 0 {
+			continue
+		}
+		// The bits of a word are those of the word as the value holds it
+		// (wordBits): a form folded to lower case ("xa9bt2", 31 bits) holds
+		// a word of the value's own "Xa9bT2" (35.7), which carries as many
+		// bits in either case.
+		d.idBits[side] = map[string]float64{}
+		for w := range d.idParts[side] {
+			d.idBits[side][w] = wordBits(w)
+		}
+		for _, f := range forms {
+			for _, word := range []func(byte) bool{isWord, wordByte} {
+				for _, w := range wordsBy(f[side], word) {
+					l := strings.ToLower(w)
+					if _, ok := d.idParts[side][l]; ok && l != w {
+						d.idBits[side][l] = math.Max(d.idBits[side][l], wordBits(w))
+					}
+				}
+			}
+		}
+		// The words of what the value changed on the other side, in every
+		// reading, which a place that moved with the value holds
+		// (chanceIn).
+		lost, moved := d.gained, d.movedLive
+		if side == 1 {
+			lost, moved = d.lost, d.movedRec
+		}
+		other := map[string]bool{}
+		for i := range lost {
+			for _, set := range []map[string]bool{lost[i], moved[i]} {
+				for w := range set {
+					other[w] = true
+				}
+			}
+		}
+		// The words are the maps' own keys, shared, not copies.
+		d.otherSide[side] = make([]string, 0, len(other))
+		for w := range other {
+			d.otherSide[side] = append(d.otherSide[side], w)
+		}
+		sort.Strings(d.otherSide[side])
 	}
+}
+
+// partBits is how many bits t, a word of what v changed inside an id that
+// changed whole (idParts; recorded, or as it stands now), carries as the
+// value holds it (wordBits, in any case).
+func (v *valueDrift) partBits(t string, recorded bool) float64 {
+	side := 1
+	if recorded {
+		side = 0
+	}
+	if b, ok := v.idBits[side][t]; ok {
+		return b
+	}
+	return wordBits(t)
 }
 
 // insideAnotherID reports whether t, a word of value v (recorded, or as it
@@ -4564,14 +4648,331 @@ func insideAnotherID(v *valueDrift, x Raw, texts [2]string, t string, recorded b
 // heldAsID reports whether s holds the word t as an id of its own, or
 // inside an id (a run of idByte) that holds one of others, other words of
 // the id t stands in, as a word too.
-func heldAsID(s, t string, others map[string]bool) bool {
-	if t == "" {
+func heldAsID(s, t string, others map[string]bool) bool { return heldIn(s, t, others, true) }
+
+// chanceBits is the bound below which a word of what a value changed is no
+// evidence of where the value came from, where it stands in the value only
+// inside ids that changed whole (idParts) and in a place only apart from
+// any other word of the value's id (heldIn). Such a word carries fewer
+// bits by its alphabet (wordBits) than one that stands in a real set by
+// chance only rarely: a 4-hex group of a random UUID carries at most 21,
+// and api-server's 7186 UUIDs held 83% of the 4096 values of a v4 UUID's
+// third group, 36% of its fourth's, 10% of its second's, so a freshly
+// minted UUID shares such a word with the set nine times in ten; a word of
+// one character stands in nearly every recording (a key "n"). A word of at
+// least 32 bits (8 hex digits, 10 decimal ones, 6 letters and digits of
+// both cases), one the value holds as an id of its own, a word of an id
+// that kept another word (an "order-18" whose "18" is a counter), two
+// words of one id standing together in a place, and a word of at least
+// aloneBits a place holds as an id of its own stay evidence: keploy
+// refuses there as before, fail-closed. An application that builds an id
+// it otherwise mints fresh around a short word of a recording is, by its
+// words alone, an id that holds that word by chance.
+const chanceBits = 32
+
+// aloneBits is the bound from which a word of what a value changed that a
+// place holds as an id of its own (a field "905c", a cell of a row) stays
+// evidence the value came from there, though it carries fewer than
+// chanceBits: such a place gives the application that word whole, to copy.
+// A word of fewer bits (one to three letters or digits, four decimal
+// digits) stands alone in nearly every recording (a key "n", a count, a
+// code), so there it is no evidence either.
+const aloneBits = 16
+
+// wordBits is about how many bits t carries by its alphabet: its length
+// times log2 of the sizes of the classes of characters it holds (digits 10,
+// lower-case letters 26, upper-case 26); one holding a byte beyond ASCII
+// counts 8 bits for each of its bytes. Nothing reads its shape.
+func wordBits(t string) float64 {
+	size := 0
+	var digit, lower, upper bool
+	for i := 0; i < len(t); i++ {
+		switch c := t[i]; {
+		case c >= '0' && c <= '9':
+			digit = true
+		case c >= 'a' && c <= 'z':
+			lower = true
+		case c >= 'A' && c <= 'Z':
+			upper = true
+		default:
+			return 8 * float64(len(t))
+		}
+	}
+	for _, c := range []struct {
+		has  bool
+		size int
+	}{{digit, 10}, {lower, 26}, {upper, 26}} {
+		if c.has {
+			size += c.size
+		}
+	}
+	if size == 0 {
+		return 0
+	}
+	return float64(len(t)) * math.Log2(float64(size))
+}
+
+// chanceWord reports whether t, a word of what v changed (recorded, or as
+// it stands now), is one that stands in a place by chance wherever no id
+// there holds another word of v's id beside it (chanceIn): it carries fewer
+// than chanceBits bits, and it stands in v only inside ids that changed
+// whole (idParts). others are the other words of those ids.
+func (v *valueDrift) chanceWord(t string, recorded bool) (others map[string]bool, ok bool) {
+	side := 1
+	if recorded {
+		side = 0
+	}
+	others, ok = v.idParts[side][t]
+	if !ok || v.partBits(t, recorded) >= chanceBits {
+		return nil, false
+	}
+	// An id of a script beyond ASCII glues the word to text kept around
+	// it ("您的订单A7K29Q已发货"): no id minted whole.
+	for o := range others {
+		for k := 0; k < len(o); k++ {
+			if o[k] >= 0x80 {
+				return nil, false
+			}
+		}
+	}
+	return others, true
+}
+
+// otherSideWords are the words of what v changed on the side t is not of
+// (recorded: those it holds now), in every reading.
+func (v *valueDrift) otherSideWords(recorded bool) []string {
+	if recorded {
+		return v.otherSide[0]
+	}
+	return v.otherSide[1]
+}
+
+// chancePlace is a place a word of what a value changed stands in, as the
+// chance rule reads it (byChanceAt). Each kind of place fills it as it is
+// kept: a leaf (chanceIn), a recording of the call's own test, read as
+// texts and fields (searchedByChance), another test's recording, read as
+// words (givenWords.byChance). One rule reads them all, so that a check of
+// the place one kind makes the others make too.
+type chancePlace struct {
+	// texts are the place's texts, as either run gave it, that chanceHeld
+	// reads t in: none read is no place a word stands in by chance.
+	texts []string
+	// evidence: every word of the place is evidence, whatever its bits: a
+	// connection's start-up whose word a swap of start-ups can change
+	// (swapHolds), or a place F served whose view keploy cannot read.
+	evidence bool
+	// has reports whether the place holds w, in any reading; idsOf are the
+	// texts chanceHeld reads a word found there in (none: a word of the
+	// other side found anywhere there moved with the value).
+	has   func(w string) bool
+	idsOf func(w string) []string
+	// self are the texts t is searched in, other what the other run gave
+	// there, that movedID reads by the shape of their ids, and counts the
+	// ids of a shape in (idsByShape).
+	self, other []string
+	// atField reports whether a field of the place holding t held, as the
+	// other run gave it, a word of moved (what the value changed on the
+	// other side): nil where the place keeps no fields.
+	atField func(t string, moved []string) bool
+}
+
+// byChanceAt reports whether t, a word of what v changed (recorded, or as
+// it stands now), stands in the place p builds by chance, so that finding
+// it there is no evidence v came from there (chanceBits): t is a chanceWord
+// of v, the place is no evidence whole (chancePlace.evidence), t stands in
+// its texts by chance (chanceHeld), and the place did not move with the
+// value: no word of the other side stands there but by chance (movedWord),
+// no id holding t holds such a word in t's place, as the other run gave it
+// (movedID), and no field holding t held one (atField). p is built only
+// for a word that may be one (chanceWord).
+func (v *valueDrift) byChanceAt(t string, recorded bool, place func() chancePlace) bool {
+	if _, ok := v.chanceWord(t, recorded); !ok {
 		return false
+	}
+	p := place()
+	if p.evidence || !chanceHeld(v, t, recorded, p.texts...) {
+		return false
+	}
+	idsOf := p.idsOf
+	if idsOf == nil {
+		idsOf = func(string) []string { return nil }
+	}
+	if movedWord(v, recorded, p.has, idsOf) {
+		return false
+	}
+	if movedID(v, t, recorded, p.self, p.other) {
+		return false
+	}
+	return p.atField == nil || !p.atField(t, v.otherSideWords(recorded))
+}
+
+// chanceIn reports whether t, a word of what v changed (recorded, or as it
+// stands now), stands by chance in a leaf whose texts, as either run gave
+// it, are texts (byChanceAt): a leaf is one place, so a text of it holding
+// a word of what v changed on the other side moved with the value (the
+// recording gave "48d1" there, F "6c7d", and the value took each): a copy,
+// which two short words together show.
+func chanceIn(v *valueDrift, t string, recorded bool, texts ...string) bool {
+	return v.byChanceAt(t, recorded, func() chancePlace {
+		return chancePlace{texts: texts, has: func(w string) bool {
+			for _, s := range texts {
+				if ContainsToken(s, w) {
+					return true
+				}
+			}
+			return false
+		}}
+	})
+}
+
+// chanceHeld reports whether t, a word of what v changed (recorded, or as
+// it stands now), found in a place whose texts, as either run gave it, are
+// texts, stands there as it would by chance: t is a chanceWord of v, and no
+// id of the texts holds it beside another word of v's id, nor, where t
+// carries at least aloneBits, as an id of its own (heldIn). A place's ids
+// (its words of the idByte reading) are texts of it too. No text read is no
+// place a word stands in by chance (fail-closed). Whether the place moved
+// with the value is read apart (chanceIn, movedID, atPlace).
+func chanceHeld(v *valueDrift, t string, recorded bool, texts ...string) bool {
+	others, ok := v.chanceWord(t, recorded)
+	if !ok || len(texts) == 0 {
+		return false
+	}
+	alone := v.partBits(t, recorded) >= aloneBits
+	for _, s := range texts {
+		if heldIn(s, t, others, alone) {
+			return false
+		}
+	}
+	return true
+}
+
+// movedID reports whether a place moved with the value at an id that holds
+// t, a word of what v changed (recorded, or as it stands now): an id of
+// texts (a run of idByte) holds t as a word, and an id of other (what the
+// other run gave there) holds a word of what v changed on the other side
+// where that id holds t, its words around it standing between the same
+// separators, whatever they are (shapeOf): the recording gave
+// "req-48d1-1700000000" there, F "req-7e6d-1700000555", or a row whose
+// fresh UUID's second group the value took, in any order. A word of the
+// other side standing elsewhere in another id shows nothing of t's place.
+//
+// The ids are read by their shape, not paired one to one, so the two words
+// stand at one place by chance too, the more often the more ids of that
+// shape each run gave there: the pair is evidence the place moved only
+// where its words' bits (partBits) less log2 of how many distinct ids of
+// that whole shape texts hold, and log2 of how many other holds, reach
+// chanceBits, the bound a word alone needs. Two 4-hex groups of two UUIDs
+// in an answer of a few ids carry about 41 bits less a few, so they show
+// it; in an answer of thousands of UUIDs (all of an app's testSuiteEvents,
+// 3706 ids) a fresh UUID's group stands in some id's place nearly always,
+// and they carry about 18 (fail-closed: bits by the alphabet, about 21 for
+// a 4-hex group whose third group carries 12).
+//
+// The shapes the other run's ids hold a word of moved in are read once, and
+// the ids counted only where a pair is found, so a word standing many times
+// in a big payload (a key "n") costs one look-up a time, not a scan of the
+// payload.
+func movedID(v *valueDrift, t string, recorded bool, texts, other []string) bool {
+	var shapes map[[2]string]map[string]bool
+	var mine, theirs map[string]int
+	hit := false
+	for _, s := range texts {
+		idsAround(s, t, func(id string, at int) bool {
+			if shapes == nil {
+				shapes = map[[2]string]map[string]bool{}
+				for _, w := range v.otherSideWords(recorded) {
+					for _, o := range other {
+						idsAround(o, w, func(id string, at int) bool {
+							k := [2]string{shapeOf(id[:at]), shapeOf(id[at+len(w):])}
+							if shapes[k] == nil {
+								shapes[k] = map[string]bool{}
+							}
+							shapes[k][w] = true
+							return true
+						})
+					}
+				}
+			}
+			ws := shapes[[2]string{shapeOf(id[:at]), shapeOf(id[at+len(t):])}]
+			if len(ws) == 0 {
+				return true
+			}
+			if mine == nil {
+				mine, theirs = idsByShape(texts), idsByShape(other)
+			}
+			whole := shapeOf(id)
+			spread := math.Log2(float64(max(1, mine[whole]))) + math.Log2(float64(max(1, theirs[whole])))
+			for w := range ws {
+				if v.partBits(t, recorded)+v.partBits(w, !recorded)-spread >= chanceBits {
+					hit = true
+					return false
+				}
+			}
+			return true
+		})
+		if hit {
+			return true
+		}
+	}
+	return false
+}
+
+// idsByShape is how many distinct ids (runs of idByte) texts hold, by
+// their shape (shapeOf).
+func idsByShape(texts []string) map[string]int {
+	seen := map[string]bool{}
+	out := map[string]int{}
+	for _, s := range texts {
+		for i := 0; i < len(s); {
+			if !idByte(s[i]) {
+				i++
+				continue
+			}
+			j := i
+			for j < len(s) && idByte(s[j]) {
+				j++
+			}
+			if id := s[i:j]; !seen[id] {
+				seen[id] = true
+				out[shapeOf(id)]++
+			}
+			i = j
+		}
+	}
+	return out
+}
+
+// shapeOf is s, a part of an id, with each of its words (a run of isWord)
+// read as one: the separators its words stand between.
+func shapeOf(s string) string {
+	var sb strings.Builder
+	in := false
+	for i := 0; i < len(s); i++ {
+		if isWord(s[i]) {
+			if !in {
+				sb.WriteByte(0)
+			}
+			in = true
+			continue
+		}
+		in = false
+		sb.WriteByte(s[i])
+	}
+	return sb.String()
+}
+
+// idsAround calls yield with each id (a run of idByte) of s that holds t as
+// a word, not inside a longer one, and where t stands in it, until yield
+// returns false.
+func idsAround(s, t string, yield func(id string, at int) bool) {
+	if t == "" {
+		return
 	}
 	for i := 0; i <= len(s)-len(t); {
 		j := strings.Index(s[i:], t)
 		if j < 0 {
-			return false
+			return
 		}
 		at := i + j
 		i = at + 1
@@ -4585,16 +4986,50 @@ func heldAsID(s, t string, others map[string]bool) bool {
 		for to < len(s) && idByte(s[to]) {
 			to++
 		}
-		if from == at && to == at+len(t) {
-			return true
+		if !yield(s[from:to], at-from) {
+			return
 		}
-		for _, word := range []func(byte) bool{isWord, wordByte} {
-			for _, w := range wordsBy(s[from:to], word) {
-				if w != t && others[w] {
-					return true
-				}
-			}
+	}
+}
+
+// movedWord reports whether a place, whose texts as either run gave it are
+// texts and which has finds a word in (any reading), holds a word of what v
+// changed on the other side of a word it holds (recorded: of the recorded
+// side) as no word stands there by chance (chanceHeld read from that side):
+// the place gave the application the value's other word too, so it moved
+// with the value (the recording gave the row holding the value's recorded
+// id, F a row holding a group of its new one). A short word of the other
+// side's fresh id inside another id of the place stands there by chance
+// and shows nothing; such a word at the place of t shows it (movedID,
+// atPlace). idsOf are the texts chanceHeld reads for a word found.
+func movedWord(v *valueDrift, recorded bool, has func(w string) bool, idsOf func(w string) []string) bool {
+	for _, w := range v.otherSideWords(recorded) {
+		if has(w) && !chanceHeld(v, w, !recorded, idsOf(w)...) {
+			return true
 		}
 	}
 	return false
+}
+
+// heldIn reports whether s holds the word t inside an id (a run of idByte)
+// that holds one of others, other words of the id t stands in, as a word
+// too, or, where alone, as an id of its own (heldAsID).
+func heldIn(s, t string, others map[string]bool, alone bool) bool {
+	held := false
+	idsAround(s, t, func(id string, _ int) bool {
+		if len(id) == len(t) {
+			held = alone
+			return !held
+		}
+		for _, word := range []func(byte) bool{isWord, wordByte} {
+			for _, w := range wordsBy(id, word) {
+				if w != t && others[w] {
+					held = true
+					return false
+				}
+			}
+		}
+		return true
+	})
+	return held
 }

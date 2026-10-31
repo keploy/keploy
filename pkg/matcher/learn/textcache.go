@@ -44,6 +44,9 @@ const (
 	textBlanked
 	textBlankTok
 	textDecoded
+	// textMoves keys a payload's fieldMoves by its identity and its views'
+	// texts (fieldMovesIn), not by a text of its own.
+	textMoves
 )
 
 type textKey struct {

@@ -208,13 +208,16 @@ func TestACopyFollowsItsSourceForEveryKindOfPlace(t *testing.T) {
 
 // The random ids of the chance-word case: an earlier answer's job id, as
 // recorded and as record's full round gave it, and the call's own random
-// value, which holds "48d1" of the job's recorded id by chance.
+// value, which holds "48d1c0de" of the job's recorded id by chance.
+// INTENTIONAL (cross-test word coincidence): an 8-hex group, of at least
+// chanceBits; a 4-hex group of one id inside another is no evidence at all
+// now (word_coincidence_test.go).
 const (
-	chanceSrcRec  = "bb7ed9ee-670e-48d1-982f-b54b2b73982f"
+	chanceSrcRec  = "bb7ed9ee-670e-48d1c0de-982f-b54b2b73982f"
 	chanceSrcLive = "0c1d2e3f-4a5b-6c7d-8e9f-a0b1c2d3e4f5"
-	chanceValRec  = "1111aaaa-2222-3333-48d1-444455556666"
+	chanceValRec  = "1111aaaa-2222-3333-48d1c0de-444455556666"
 	chanceValLive = "9999cccc-7777-8888-dddd-000011112222"
-	// chanceCopy took "6c7d", the word F gave in place of "48d1".
+	// chanceCopy took "6c7d", the word F gave in place of "48d1c0de".
 	chanceCopy = "9999cccc-7777-8888-6c7d-000011112222"
 )
 
@@ -250,7 +253,7 @@ func jobsServed(id, n string, live Raw) []Raw {
 // (a leaf F served drifted, or a field of a payload F served changed and
 // gave its view of: Raw.ServedLive) is no word the value copied there where
 // the value took none of the words the place gained, in any form: a copy
-// moves with its source. The call's random value held "48d1" of an earlier
+// moves with its source. The call's random value held "48d1c0de" of an earlier
 // answer's random id by chance; F gave the application another id there,
 // and the value took none of it: noise, naming the place set aside. Where
 // the value took a word of what F gave there (a copy), or the place
@@ -282,7 +285,7 @@ func TestAWordAtAPlaceTheFullRoundGaveAnotherValueAtIsNoCopyWhereTheValueTookNon
 		why            string // what the reason holds ("" for a variable: the place it names)
 		from           string // a variable's place
 	}{
-		{"payload, F's view, the value took none of what F gave", chanceValRec, chanceValLive, nil, jobsServed(chanceSrcRec, "5", eJobs(chanceSrcLive, "6")), KindNoise, "(its characters 20 to 23) stands in mock-6 at spec.postgresV3.query.response.rows[0][0], " + moved, ""},
+		{"payload, F's view, the value took none of what F gave", chanceValRec, chanceValLive, nil, jobsServed(chanceSrcRec, "5", eJobs(chanceSrcLive, "6")), KindNoise, "(its characters 20 to 27) stands in mock-6 at spec.postgresV3.query.response.rows[0][0], " + moved, ""},
 		{"payload, F's view, the value took the word F gave there (a copy)", chanceValRec, chanceCopy, nil, jobsServed(chanceSrcRec, "5", eJobs(chanceSrcLive, "6")), KindVariable, "", "mock-6"},
 		{"payload, F's view, F gave that word as recorded there", chanceValRec, chanceValLive, nil, jobsServed(chanceSrcRec, "5", eJobs(chanceSrcRec, "6")), KindNoise, "where record's full round gave the application that word as recorded, while the value changed", ""},
 		{"payload, F's view holds the value F saw", chanceValRec, chanceValLive, nil, jobsServed(chanceSrcRec, "5", eJobs(chanceSrcLive, chanceValLive)), KindVariable, "", "mock-6"},
@@ -294,7 +297,7 @@ func TestAWordAtAPlaceTheFullRoundGaveAnotherValueAtIsNoCopyWhereTheValueTookNon
 		// 48d1 at the id F moved, which the value took none of; 77 at the
 		// count F gave 78 at, which the value took: the search goes past
 		// the first to the second, a place.
-		{"payload, F's view, one word moved away from, one followed", "48d1 77", "dddd 78", nil, jobsServed(chanceSrcRec, "77", eJobs(chanceSrcLive, "78")), KindVariable, "", "mock-6"},
+		{"payload, F's view, one word moved away from, one followed", "48d1c0de 77", "dddd 78", nil, jobsServed(chanceSrcRec, "77", eJobs(chanceSrcLive, "78")), KindVariable, "", "mock-6"},
 		// A word the value holds now that only F's view holds there: F gave
 		// it, the recording did not.
 		{"payload, F's view alone holds the word the value holds now", "82", "6c7d", nil, jobsServed(chanceSrcRec, "5", eJobs(chanceSrcLive, "5")), KindUnaccounted, "appears in an earlier recording, in mock-6 at spec.postgresV3.query.response.rows[0][0], as record's full round gave it, " + fOnly, ""},
@@ -318,7 +321,7 @@ func TestAWordAtAPlaceTheFullRoundGaveAnotherValueAtIsNoCopyWhereTheValueTookNon
 		{"payload, F's view, the value took a part of a longer word F gave", "k-48d1", "k-6c7d", nil, append(eStartup(), eRow("48d1 aaaa", "x", "y").ServedAs(6).ServedLive(eRow("6c7daaaa", "x", "y"))), KindVariable, "", "mock-6"},
 		{"leaf, the value took a part of a longer word F gave", "k-48d1", "k-6c7d", leaf("48d1 aaaa", "6c7daaaa"), eStartup(), KindUnaccounted, holds, ""},
 		{"leaf, the value took a word F gave inside a longer word", "k-48d1", "k-x6c7dx", leaf("48d1", "6c7d"), eStartup(), KindUnaccounted, took, ""},
-		{"leaf, the value took none of what F gave", chanceValRec, chanceValLive, leaf(chanceSrcRec, chanceSrcLive), eStartup(), KindNoise, "a word of its recorded value (its characters 20 to 23) stands in mock-8 at body.cmd.documents.0._id, " + moved, ""},
+		{"leaf, the value took none of what F gave", chanceValRec, chanceValLive, leaf(chanceSrcRec, chanceSrcLive), eStartup(), KindNoise, "a word of its recorded value (its characters 20 to 27) stands in mock-8 at body.cmd.documents.0._id, " + moved, ""},
 		{"leaf, the value took the word F gave there (a copy)", chanceValRec, chanceCopy, leaf(chanceSrcRec, chanceSrcLive), eStartup(), KindVariable, "", "mock-8"},
 		{"leaf, the value holds a word F gave there it held before", "82 b", "5 b", leaf("82", "b"), eStartup(), KindUnaccounted, took, ""},
 		{"leaf, F gave nothing new there", "took 82 ms", "took 5 ms", leaf("82 7", "7"), eStartup(), KindUnaccounted, nothing, ""},
@@ -843,6 +846,10 @@ func TestAValueCopiedFromAStartUpIsRefusedWhenItsConnectionsSwapRoles(t *testing
 			{"the backend pid", "81", "82", "its recorded value stands whole in mock-hs-81 at spec.postgresV3.session.backendProcessID"},
 			{"the secret key", "7081", "7082", "its recorded value stands whole in mock-hs-81 at spec.postgresV3.session.backendSecretKey"},
 			{"the pid inside a longer value", "conn-81", "conn-82", "a part of its recorded value (its characters 6 to 7) stands in mock-hs-81 at spec.postgresV3.session.backendProcessID"},
+			// A short word of an id that changed whole is set aside where it
+			// stands by chance (chanceBits), but never a start-up's word a
+			// swap can change: the swap, not chance, may have changed it.
+			{"the pid inside an id that changed whole", "81-ab12cd34ef", "82-c0de5eed01", "a part of its recorded value (its characters 1 to 2) stands in mock-hs-81 at spec.postgresV3.session.backendProcessID"},
 		} {
 			for rule, got := range map[string]Learned{"a copy follows its source": classifyF(t, tc.recorded, tc.live, nil, raw, nil), "without it": given(tc.recorded, tc.live, raw)} {
 				if got.Kind != KindUnaccounted || !strings.Contains(got.Why, tc.found+", a connection's recorded start-up") || !strings.Contains(got.Why, "never varies") {

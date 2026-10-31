@@ -67,7 +67,9 @@ func TestAMintedIdIsNotFollowedFromAPartOfItInsideAnotherIdOfAnUnservedRecording
 			// beside a word of the id is no place of it at all.
 			for _, held := range []string{other, other + `","tag":"zz905c-4631`} {
 				got := c(mode.dc(), jobEvent(held, false), rec, live)
-				if got.Kind != base.Kind || got.Bindable != base.Bindable || strings.Contains(got.Why, "mock-1786") {
+				// INTENTIONAL (cross-test word coincidence): noise may name
+				// the place, as one it read past by chance (chanceWhy).
+				if got.Kind != base.Kind || got.Bindable != base.Bindable || strings.Contains(got.Why, "mock-1786") && !strings.Contains(got.Why, " by chance: a word of ") {
 					t.Errorf("%s, %s: the id's word inside another id of an unserved recording (%s): %s bindable=%v (%q); want as with no such recording: %s bindable=%v", name, mode.name, held, got.Kind, got.Bindable, got.Why, base.Kind, base.Bindable)
 				}
 			}
