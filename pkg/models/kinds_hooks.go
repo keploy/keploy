@@ -151,9 +151,11 @@ func (r *mockNamers) register(api string, kind Kind, fn func(*Mock) (string, boo
 	}
 	n := &mockNamer{fn: fn}
 	r.byKind[kind] = n
+	mockRulesChanged()
 	return func() {
 		r.mu.Lock()
 		defer r.mu.Unlock()
+		defer mockRulesChanged()
 		if r.byKind[kind] == n {
 			delete(r.byKind, kind)
 		}
@@ -218,9 +220,11 @@ func (r *exactKeyRegistry) register(kind Kind, fn func(*Mock) (string, bool), wh
 	r.next++
 	k := &exactKey{fn: fn, where: where, id: r.next}
 	r.byKind[kind] = append(r.byKind[kind], k)
+	mockRulesChanged()
 	return func() {
 		r.mu.Lock()
 		defer r.mu.Unlock()
+		defer mockRulesChanged()
 		keys := r.byKind[kind]
 		for i, o := range keys {
 			if o == k {

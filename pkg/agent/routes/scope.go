@@ -268,6 +268,16 @@ func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "this keploy agent cannot serve a pool slice per key", http.StatusNotImplemented)
 			return
 		}
+		// The recorded window of every test of the set, before the pool is
+		// served: serving it may stage the set, which installs them with
+		// it. A table without them (an older CLI) leaves the set none, not
+		// a previous set's.
+		if ws, ok := a.svc.(recordedWindowsSetter); ok {
+			if err := ws.SetRecordedWindows(r.Context(), req.Windows); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
 		if err := s.SetScopePool(r.Context(), req.Pool); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -280,6 +290,13 @@ func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 // scopePoolSetter installs each key's pool slice (proven wire).
 type scopePoolSetter interface {
 	SetScopePool(ctx context.Context, pool map[string][]string) error
+}
+
+// recordedWindowsSetter installs the recorded window of every test of the
+// set a replay serves (models.ScopeTableReq.Windows), for the learn step
+// (proven wire).
+type recordedWindowsSetter interface {
+	SetRecordedWindows(ctx context.Context, ws []models.TestWindow) error
 }
 
 // HandleScopeGate installs the replay's gate: the only tests that should run
@@ -301,8 +318,8 @@ func (a *Agent) HandleScopeGate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("invalid scope-gate request: %v", err), http.StatusBadRequest)
 		return
 	}
-	// Under the proven switch the skip map is the gate, and every push
-	// replaces it: one without a map skips nothing. The answer acknowledges
+	// Under the proven switch the skip map and its needs are the gate, and
+	// every push replaces them: one without a map skips nothing. The answer acknowledges
 	// it with the wire's version, so a CLI never takes an agent that ignored
 	// the list for one that applies it. A run list is not part of it.
 	switch {
@@ -315,7 +332,7 @@ func (a *Agent) HandleScopeGate(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	case proven:
-		if err := p.SetScopeSkips(r.Context(), req.Skip); err != nil {
+		if err := p.SetScopeSkips(r.Context(), req.Skip, req.Needs); err != nil {
 			writeScopeError(w, r, &models.ScopeError{Status: http.StatusInternalServerError, Code: models.ScopeErrInternal, Message: err.Error()})
 			return
 		}
@@ -326,9 +343,9 @@ func (a *Agent) HandleScopeGate(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		render.Status(r, http.StatusOK)
-		render.JSON(w, r, models.ScopeGateResp{V: models.ScopeProtocolVersion, Status: "ok", Skips: len(req.Skip)})
+		render.JSON(w, r, models.ScopeGateResp{V: models.ScopeProtocolVersion, Status: "ok", Skips: len(req.Skip), Needs: len(req.Needs)})
 		return
-	case len(req.Skip) > 0:
+	case len(req.Skip) > 0 || len(req.Needs) > 0:
 		writeScopeError(w, r, &models.ScopeError{
 			Status:  http.StatusUnprocessableEntity,
 			Code:    models.ScopeErrUpgradeIntegration,

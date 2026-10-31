@@ -227,6 +227,19 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 	// A capture takes it over; any other way out ends it here.
 	var win *syncMock.Window
 	defer func() { win.Close() }()
+	// countPause counts the exchange in flight as not recorded under the
+	// memory guard's pause (syncMock NoteNotRecordedUnderPressure), if the
+	// pause kept it from being recorded: once, however it ends. A pause read
+	// as the request comes runs it at once, while the exchange is in flight.
+	// Its end runs it, and every way out before its end does too (deferred
+	// here): its client's going, an app that failed, a close under pressure.
+	// Counted only at the end it reached, a paused stream whose client hung
+	// up was missing from the count, and so from the recording's summary.
+	// Deferred after win's, so it runs before win.Close: the count is in
+	// before the window's close lets a stop's drain end and its summary read
+	// the count.
+	countPause := func() {}
+	defer func() { countPause() }()
 
 	// forceCloseMode: only sync mode needs the traditional HTTP parsing loop
 	// (strict one-at-a-time ordering with forced close). Sampling mode now
@@ -291,6 +304,19 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 	upAhead := newAheadReader(upConn)
 	defer upAhead.Close() // before upConn's close, which ends its read
 	upstreamReader := bufio.NewReader(upAhead)
+	// The client is watched for its end while the app holds a whole request
+	// of it (watchClient); endWatch ends the watch that runs, if one does,
+	// and reports whether the client ended the exchange.
+	watch, clientEnded := noClientEnd, false
+	appConn := func() net.Conn { return upConn }
+	endWatch := func() bool {
+		if watch() {
+			clientEnded = true
+		}
+		watch = noClientEnd
+		return clientEnded
+	}
+	defer endWatch()
 
 	for {
 		// iterStart is the loop entry time, captured BEFORE ReadRequest
@@ -354,7 +380,8 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		pressureCloseMode := forceCloseMode || pausedAtRequest
 		captureEnabled := !pausedAtRequest
 		// lostToPause: a pause of the memory guard decided this exchange is
-		// not recorded, at any of the checks below; counted once, as it ends.
+		// not recorded, at any of the checks below; counted once, however it
+		// ends (countPause).
 		lostToPause := !captureEnabled
 		// pausedNow is every check below of a pause that began mid-exchange:
 		// when the memory guard has paused recording, the exchange is lost
@@ -367,11 +394,34 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			lostToPause = true
 			return true
 		}
+		// The exchange's count (countPause): a pause that one of the checks
+		// read, or one that cut a body's capture, which ended before any
+		// check read it.
+		var reqCapture, respCapture *captureBuffer
+		pauseCounted := false
+		countPause = func() {
+			if pauseCounted {
+				return
+			}
+			pauseCounted = true
+			if lostToPause || reqCapture.LostToPause() || respCapture.LostToPause() {
+				syncMock.FromContextOrGlobal(ctx).NoteNotRecordedUnderPressure(connName)
+			}
+		}
 		// The exchange may be captured: open its window before the request
 		// reaches the app, so no egress call it makes is ever older than it.
 		// One that cannot be captured opens none: nothing would decide it.
 		if captureEnabled {
 			win = syncMock.FromContextOrGlobal(ctx).OpenWindow(reqTimestamp, nil)
+		}
+		// A pause read as the request comes is counted at once, as the
+		// zero-copy loop counts it: the exchange opens no window, so a stop's
+		// drain does not wait for it, and the recording's summary, read while
+		// a long poll or a stream it kept from being recorded is still in
+		// flight, must already hold it. The once flag makes the run as its
+		// handler returns a no-op.
+		if pausedAtRequest {
+			countPause()
 		}
 
 		// Request modifications for sync/sampling modes.
@@ -420,7 +470,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			req.Header.Set("Connection", "close")
 		}
 
-		reqCapture := newCaptureBuffer(maxHTTPBodyCaptureBytes)
+		reqCapture = newCaptureBuffer(maxHTTPBodyCaptureBytes)
 		if captureEligible && req.Body != nil && req.Body != http.NoBody {
 			req.Body = newTeeReadCloser(req.Body, reqCapture)
 		}
@@ -447,11 +497,16 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 				return
 			}
 			req.Body.Close() // Close explicitly to avoid defer leak in loop.
+			watch = watchClient(logger, clientConn, clientReader, appConn)
 		}
 
 		resp, _, err := readFinalResponse(upstreamReader, req, clientConn)
 		if err != nil {
 			relay.abandon()
+			if endWatch() {
+				logger.Debug("HTTP/1 ingress client ended the connection before the app answered its request; the app was told as the client's going would have told it", zap.Error(err))
+				return
+			}
 			var gone *clientWriteError
 			if errors.As(err, &gone) {
 				logger.Debug("HTTP/1 ingress client connection closed while an interim response was forwarded to it", zap.Error(err))
@@ -487,6 +542,10 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 				warnNotRecorded(logger, req, resp, err)
 			}
 			captureEnabled = false
+		} else if relay != nil {
+			// The body that waited for the 100 is all read: the app holds
+			// the whole request now.
+			watch = watchClient(logger, clientConn, clientReader, appConn)
 		}
 
 		// Response modifications for sync/sampling modes. appResp is the
@@ -540,7 +599,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			resp.Header.Set("Connection", "close")
 		}
 
-		respCapture := newCaptureBuffer(maxHTTPBodyCaptureBytes)
+		respCapture = newCaptureBuffer(maxHTTPBodyCaptureBytes)
 		if captureEligible && resp.Body != nil && resp.Body != http.NoBody {
 			resp.Body = newTeeReadCloser(resp.Body, respCapture)
 		}
@@ -563,6 +622,10 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			return headersAt
 		}
 		waitPastEnd := func() {
+			// The answer's end is read from the app: what the client does
+			// from here (it closes the connection once it has the end) is
+			// not a going the app should be told of.
+			endWatch()
 			if captureEligible && !reqCapture.Truncated() && !respCapture.Truncated() {
 				waitPastYield(win, endAt())
 			}
@@ -574,6 +637,25 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		}
 
 		if err := resp.Write(clientConn); err != nil {
+			if endWatch() {
+				// The client went before the answer's end, and the app was
+				// told (watchClient): the write failed on the client's
+				// going, and the exchange is not one to record. That is
+				// its reason only if it could have been recorded, as
+				// warnNotRecorded's: not one a check of the memory guard's
+				// pause had kept from it. What the pause cost the
+				// exchange, that or a body's capture it cut, is counted as
+				// the handler returns (countPause): a capture cut before
+				// the client went is told and counted, both true. The
+				// body's close error is dropped: the client is gone and the
+				// exchange is not recorded, so it changes neither, and the
+				// upstream connection is closed as the handler returns.
+				_ = resp.Body.Close()
+				if captureEligible && captureEnabled {
+					tellClientLeft(logger, req)
+				}
+				return
+			}
 			if pressureCloseMode && isIngressExpectedCloseErr(err) {
 				logger.Debug("HTTP/1 ingress client connection closed while finishing close-under-pressure path", zap.Error(err))
 				resp.Body.Close()
@@ -589,6 +671,17 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			return
 		}
 		resp.Body.Close() // Close explicitly.
+		if endWatch() {
+			// The client went before the answer's end, and the app was
+			// told (watchClient): the exchange is not one to record, and
+			// the connection carries nothing after it. Told only for one
+			// that could have been recorded, and what the pause cost it
+			// counted as the handler returns, as above.
+			if captureEligible && captureEnabled {
+				tellClientLeft(logger, req)
+			}
+			return
+		}
 
 		// The response's time is its LAST byte's: when that byte arrived from
 		// the app (for a body that ends when the app closes the connection,
@@ -634,9 +727,9 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		}
 
 		// A pause that cut a body's capture and ended before the checks
-		// above read it: the exchange is lost to the pause, and counted.
+		// above read it: the exchange is lost to the pause, and counted
+		// (countPause reads the cut).
 		if shouldCapture && (reqCapture.LostToPause() || respCapture.LostToPause()) {
-			lostToPause = true
 			shouldCapture = false
 		}
 
@@ -669,9 +762,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		}
 
 		if !shouldCapture {
-			if lostToPause {
-				syncMock.FromContextOrGlobal(ctx).NoteNotRecordedUnderPressure(connName)
-			}
+			countPause()
 			win.Close()
 			win = nil
 			if forceCloseMode || pressureCloseMode {
@@ -932,14 +1023,18 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 	// upstream unblocks http.ReadResponse / req.Write if the loop is
 	// stuck in upstream I/O on a hung backend. Race-safe via the
 	// atomic — we always close whatever connHolder pointer is current,
-	// even if redial swapped it concurrently.
-	go func() {
-		<-ctx.Done()
+	// even if redial swapped it concurrently. ctx lives as long as the
+	// ingress, not the connection, so the close is registered for this
+	// call's life only: a goroutine parked on ctx.Done() outlived every
+	// connection that ended on its own, one per connection the agent ever
+	// proxied, each holding its closed connection until the agent stopped.
+	stopCloseOnCancel := context.AfterFunc(ctx, func() {
 		_ = clientConn.Close()
 		if h := upConnHolder.Load(); h != nil {
 			_ = h.c.Close()
 		}
-	}()
+	})
+	defer stopCloseOnCancel()
 
 	wireConn := &wireTimeConn{Conn: clientConn}
 	clientReader := bufio.NewReader(wireConn)
@@ -947,6 +1042,24 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 	// response arrived from the app is where its exchange's window ends.
 	upWire := &wireTimeConn{Conn: upConn}
 	upstreamReader := bufio.NewReader(upWire)
+	// The client is watched for its end while the app holds a whole request
+	// of it (watchClient); endWatch ends the watch that runs, if one does,
+	// and reports whether the client ended the exchange.
+	watch, clientEnded := noClientEnd, false
+	appConn := func() net.Conn {
+		if h := upConnHolder.Load(); h != nil {
+			return h.c
+		}
+		return nil
+	}
+	endWatch := func() bool {
+		if watch() {
+			clientEnded = true
+		}
+		watch = noClientEnd
+		return clientEnded
+	}
+	defer endWatch()
 	// t == nil → caller (sampling-bypass path) wants MSG_PEEK protection
 	// without capture. Suppress capture for this connection's lifetime.
 	// connCapture is the connection's capture; whether one exchange of it is
@@ -1045,6 +1158,17 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 	// A capture takes it over; any other way out ends it here.
 	var win *syncMock.Window
 	defer func() { win.Close() }()
+	// countCut counts the exchange in flight as not recorded under the
+	// pause if a pause that began after its request came cut a body's
+	// capture: once, however it ends. Its end runs it, and every way out
+	// before its end does too (deferred here): its client's going, an app
+	// that failed. One the pause cost as its request came is counted then,
+	// and has no capture to cut. Deferred after win's, so it runs before
+	// win.Close: the count is in before the window's close lets a stop's
+	// drain end and its summary read the count, as the synchronous loop's
+	// countPause.
+	countCut := func() {}
+	defer func() { countCut() }()
 
 	for {
 		iterStart := clockNow()
@@ -1262,7 +1386,17 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		// or the body is already pre-buffered or absent, we never
 		// touch reqCapture, so don't pay the per-request alloc.
 		captureEligible := captureEnabled
-		var reqCapture *captureBuffer
+		var reqCapture, respCapture *captureBuffer
+		cutCounted := false
+		countCut = func() {
+			if cutCounted {
+				return
+			}
+			cutCounted = true
+			if reqCapture.LostToPause() || respCapture.LostToPause() {
+				notRecordedUnderPressure()
+			}
+		}
 		if captureEligible && preBufferedReqBody == nil && req.Body != nil && req.Body != http.NoBody {
 			reqCapture = newCaptureBuffer(maxHTTPBodyCaptureBytes)
 			req.Body = newTeeReadCloser(req.Body, reqCapture)
@@ -1338,6 +1472,9 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		} else if req.Body != nil {
 			_ = req.Body.Close()
 		}
+		if relay == nil {
+			watch = watchClient(logger, clientConn, clientReader, appConn)
+		}
 
 		// Read response. Empty-response on idempotent methods is also
 		// classified as stale-conn; replay once. canReplay is the
@@ -1360,6 +1497,13 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		resp, interims, err := readFinalResponse(upstreamReader, req, clientConn)
 		if err != nil {
 			relay.abandon()
+			// The client went before the app answered, and the app was
+			// told: what it did then is not an answer to give anyone, nor
+			// a request to send it again.
+			if endWatch() {
+				logger.Debug("The client ended the connection before the app answered its request; the app was told as the client's going would have told it", zap.Error(err))
+				return
+			}
 			var gone *clientWriteError
 			if errors.As(err, &gone) {
 				logger.Debug("Failed to forward an interim response to client", zap.Error(err))
@@ -1388,7 +1532,12 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 				if req.Body != nil {
 					_ = req.Body.Close()
 				}
+				watch = watchClient(logger, clientConn, clientReader, appConn)
 				resp, _, err = readFinalResponse(upstreamReader, req, clientConn)
+				if err != nil && endWatch() {
+					logger.Debug("The client ended the connection before the app answered its request; the app was told as the client's going would have told it", zap.Error(err))
+					return
+				}
 				if errors.As(err, &gone) {
 					logger.Debug("Failed to forward an interim response to client", zap.Error(err))
 					return
@@ -1431,10 +1580,13 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 			if captureEnabled {
 				warnNotRecorded(logger, req, resp, rerr)
 			}
+		} else if relay != nil {
+			// The body that waited for the 100 is all read: the app holds
+			// the whole request now.
+			watch = watchClient(logger, clientConn, clientReader, appConn)
 		}
 
 		captureEligible = captureEnabled && requestWhole
-		var respCapture *captureBuffer
 		if captureEligible && resp.Body != nil && resp.Body != http.NoBody {
 			respCapture = newCaptureBuffer(maxHTTPBodyCaptureBytes)
 			resp.Body = newTeeReadCloser(resp.Body, respCapture)
@@ -1475,6 +1627,10 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		hasBody := resp.Body != nil && resp.Body != http.NoBody
 		closeDelimited := hasBody && resp.ContentLength < 0 && !isChunked(resp.TransferEncoding)
 		markEnd := func() {
+			// The answer's end is read from the app: what the client does
+			// from here (it closes the connection once it has the end) is
+			// not a going the app should be told of.
+			endWatch()
 			ended = true
 			if closeDelimited {
 				endAt = clockNow()
@@ -1496,11 +1652,37 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 			if resp.Body != nil {
 				_ = resp.Body.Close()
 			}
+			if endWatch() {
+				// The client went before the answer's end, and the app was
+				// told (watchClient): the write failed on the client's
+				// going, and the exchange is not one to record. That is
+				// its reason only if it could have been recorded, as
+				// warnNotRecorded's: not on a sampling-bypass connection
+				// (never captured), nor one the memory guard's pause kept
+				// from it as its request came (counted then). A pause that
+				// began later and cut a body's capture is counted as the
+				// handler returns (countCut): told and counted, both true.
+				if captureEnabled {
+					tellClientLeft(logger, req)
+				}
+				return
+			}
 			logger.Debug("Failed to forward response to client", zap.Error(err))
 			return
 		}
 		if resp.Body != nil {
 			_ = resp.Body.Close()
+		}
+		if endWatch() {
+			// The client went before the answer's end, and the app was
+			// told (watchClient): the exchange is not one to record, and
+			// the connection carries nothing after it. Told only for one
+			// that could have been recorded, and a cut capture counted as
+			// the handler returns, as above.
+			if captureEnabled {
+				tellClientLeft(logger, req)
+			}
+			return
 		}
 
 		// The window invariant (reqTimestamp <= an egress call's time <=
@@ -1525,11 +1707,10 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		respTeeTruncated := respCapture != nil && respCapture.Truncated()
 		// The pause is read once, as the request comes: one that starts
 		// later in the exchange cuts a body's capture instead, and the
-		// exchange it costs is counted here. Not twice: a body is captured
-		// only for an exchange the pause had not cost as its request came.
-		if reqCapture.LostToPause() || respCapture.LostToPause() {
-			notRecordedUnderPressure()
-		}
+		// exchange it costs is counted here (countCut), or at the way out it
+		// took before here. Not twice: a body is captured only for an
+		// exchange the pause had not cost as its request came.
+		countCut()
 		if captureEligible && !reqTeeTruncated && !respTeeTruncated {
 			releaseCaptureSlot, ok := takeCaptureSlot(ctx)
 			if !ok {
@@ -1627,12 +1808,14 @@ func ingressConnName(clientConn net.Conn, app string) string {
 // Keep-alive is preserved (no Connection: close injected), so the client
 // can reuse the connection for multiple requests.
 func forwardRawTCP(ctx context.Context, clientConn, upConn net.Conn) {
-	// Close connections on context cancellation (shutdown).
-	go func() {
-		<-ctx.Done()
+	// Close connections on context cancellation (shutdown), for this call's
+	// life only: ctx is the ingress's, and a goroutine parked on it outlived
+	// every connection that ended on its own.
+	stopCloseOnCancel := context.AfterFunc(ctx, func() {
 		clientConn.Close()
 		upConn.Close()
-	}()
+	})
+	defer stopCloseOnCancel()
 
 	done := make(chan struct{}, 2)
 	// The FIN forwarding below used to assert *net.TCPConn concretely,

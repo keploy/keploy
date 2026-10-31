@@ -74,7 +74,7 @@ func TestAnInstantBuiltOnAServedOneByAnOffsetIsRefused(t *testing.T) {
 		{"a time of day, the minute", strLeaf(p, offSent.Add(5*time.Minute).Format("15:04")), strLeaf(p, offGot.Add(5*time.Minute).Format("15:04")), "5m0s after"},
 	} {
 		for _, served := range []string{"payloads", "delivered leaf by leaf", "delivered leaf by leaf, recorded before the call too"} {
-			dc := NewDriftCache()
+			dc := clockedDrifts()
 			raw := []Raw{dc.RawOf(receive, false), dc.RawOf(delivered, true)}
 			var earlier []Earlier
 			switch served {
@@ -110,8 +110,9 @@ func unreadPayload(m *models.Mock) Raw {
 // whose adapter gave no payload at all (the zero Raw), is a place the offset
 // rule and the word rule cannot search, never one they drop: an instant
 // built on it by an offset and a word copied from its answer are each
-// refused, naming it and why, never learned as noise. Its payload read from
-// its mock is searched, and refuses nothing for want of a reading.
+// refused, naming it and why, never learned as noise; so is a start-up
+// exchange given none. Its payload read from its mock is searched, and
+// refuses nothing for want of a reading.
 func TestAnUnreadLeafByLeafPayloadIsRefusedNamingIt(t *testing.T) {
 	receive, delivered := offReceives()
 	const p = "body.visible_after"
@@ -126,9 +127,16 @@ func TestAnUnreadLeafByLeafPayloadIsRefusedNamingIt(t *testing.T) {
 		{"an instant by an offset", strLeaf(p, offSent.Add(5*time.Minute).Format("2006-01-02T15:04Z07:00")), strLeaf(p, offGot.Add(5*time.Minute).Format("2006-01-02T15:04Z07:00"))},
 		{"a word", strLeaf(p, "slot-7"), strLeaf(p, "slot-9")},
 	} {
-		for _, payload := range []string{"unread", "none given", "read"} {
-			dc := NewDriftCache()
-			e := Earlier{Mock: delivered.Name, At: delivered.Spec.ReqTimestampMock}
+		for _, c := range []struct {
+			payload string
+			startUp bool
+		}{{"unread", false}, {"none given", false}, {"none given", true}, {"read", false}} {
+			payload := c.payload
+			dc := clockedDrifts()
+			// Served before the set's first test (StartUp), it is a place of
+			// the run's whole call, payload and all, unlike an earlier test's
+			// (ranCalls): one given no payload is refused all the same.
+			e := Earlier{Mock: delivered.Name, At: delivered.Spec.ReqTimestampMock, Run: c.startUp, StartUp: c.startUp}
 			switch payload {
 			case "unread":
 				e.Payload = unreadPayload(delivered)
@@ -138,7 +146,7 @@ func TestAnUnreadLeafByLeafPayloadIsRefusedNamingIt(t *testing.T) {
 			ln := ClassifyIn(dc, []string{p}, row.live, row.rec, r1Insert, []Earlier{e}, []Raw{dc.RawOf(receive, false)}, nil, nil)[0]
 			switch {
 			case payload != "read" && (ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, why[payload])):
-				t.Fatalf("%s, %s payload: %s (%s); want it refused, naming mock-11's payload as %s", row.name, payload, ln.Kind, ln.Why, payload)
+				t.Fatalf("%s, %s payload (start-up %v): %s (%s); want it refused, naming mock-11's payload as %s", row.name, payload, c.startUp, ln.Kind, ln.Why, payload)
 			case payload == "read" && strings.Contains(ln.Why, "mock-11, an exchange record's full round served the application leaf by leaf"):
 				t.Fatalf("%s, %s payload: %s (%s); want no unread place where the adapter gave a payload read from its mock", row.name, payload, ln.Kind, ln.Why)
 			}
@@ -180,7 +188,7 @@ func TestADateBuiltOnAServedOneByAnOffsetIsRefused(t *testing.T) {
 		{"text, the day", strLeaf(p, sent.Add(-2*day).Format("2006-01-02")), strLeaf(p, got.Add(-2*day).Format("2006-01-02"))},
 		{"typed, the day", typedLeaf(p, sent.Add(-2*day), day), typedLeaf(p, got.Add(-2*day), day)},
 	} {
-		dc := NewDriftCache()
+		dc := clockedDrifts()
 		ln := ClassifyIn(dc, []string{p}, row.live, row.rec, r1Insert, nil, []Raw{dc.RawOf(receive, false), dc.RawOf(delivered, true)}, nil, nil)[0]
 		if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "stands 48h0m0s before the moment mock-4 at spec.resp.body holds as the recording gave it") {
 			t.Errorf("%s: %s from %+v (%s); want it refused, naming the receive and the offset", row.name, ln.Kind, ln.From, ln.Why)
@@ -204,8 +212,8 @@ func TestAReadOfTheClockBesideAMovedPlaceItDoesNotMatchIsNoise(t *testing.T) {
 		{"typed, the minute", typedLeaf(p, now, time.Minute), typedLeaf(p, now.Add(FullRoundLead), time.Minute)},
 		{"typed, the millisecond", typedLeaf(p, now, time.Millisecond), typedLeaf(p, now.Add(FullRoundLead+37*time.Millisecond), time.Millisecond)},
 	} {
-		dc := NewDriftCache()
-		if ln := ClassifyIn(dc, []string{p}, row.live, row.rec, r1Insert, nil, []Raw{dc.RawOf(receive, false), dc.RawOf(delivered, true)}, nil, nil)[0]; ln.Kind != KindNoise {
+		dc := clockedDrifts()
+		if ln := ClassifyIn(dc, []string{p}, row.live, row.rec, r1Insert, nil, []Raw{dc.RawOf(receive, false), dc.RawOf(delivered, true)}, nil, nil)[0]; !noiseOrRead(ln) {
 			t.Errorf("%s: %s from %+v (%s); want noise", row.name, ln.Kind, ln.From, ln.Why)
 		}
 	}
@@ -239,17 +247,17 @@ func TestAMoveIsWhatTheFullRoundGaveInPlaceOfTheRecordings(t *testing.T) {
 		{"text, the minute", strLeaf(p, now.Format("2006-01-02T15:04Z07:00")), strLeaf(p, now.Add(FullRoundLead).Format("2006-01-02T15:04Z07:00"))},
 		{"typed, the minute", typedLeaf(p, now, time.Minute), typedLeaf(p, now.Add(FullRoundLead), time.Minute)},
 	} {
-		dc := NewDriftCache()
-		if ln := ClassifyIn(dc, []string{p}, row.live, row.rec, r1Insert, nil, []Raw{dc.RawOf(first, false), dc.RawOf(second, false)}, nil, nil)[0]; ln.Kind != KindNoise {
+		dc := clockedDrifts()
+		if ln := ClassifyIn(dc, []string{p}, row.live, row.rec, r1Insert, nil, []Raw{dc.RawOf(first, false), dc.RawOf(second, false)}, nil, nil)[0]; !noiseOrRead(ln) {
 			t.Errorf("%s, F serving neither: %s from %+v (%s); want noise", row.name, ln.Kind, ln.From, ln.Why)
 		}
 		later1, later2 := *first, *second
 		later1.Spec.ReqTimestampMock, later2.Spec.ReqTimestampMock = r1Insert.Add(time.Second), r1Insert.Add(61*time.Second)
-		dc = NewDriftCache()
-		if ln := ClassifyIn(dc, []string{p}, row.live, row.rec, r1Insert, nil, []Raw{dc.RawOf(&later1, true), dc.RawOf(&later2, true)}, nil, nil)[0]; ln.Kind != KindNoise {
+		dc = clockedDrifts()
+		if ln := ClassifyIn(dc, []string{p}, row.live, row.rec, r1Insert, nil, []Raw{dc.RawOf(&later1, true), dc.RawOf(&later2, true)}, nil, nil)[0]; !noiseOrRead(ln) {
 			t.Errorf("%s, F serving two recorded after the call: %s from %+v (%s); want noise", row.name, ln.Kind, ln.From, ln.Why)
 		}
-		dc = NewDriftCache()
+		dc = clockedDrifts()
 		if ln := ClassifyIn(dc, []string{p}, row.live, row.rec, r1Insert, nil, []Raw{dc.RawOf(first, false), dc.RawOf(second, true)}, nil, nil)[0]; ln.Kind != KindUnaccounted ||
 			!strings.Contains(ln.Why, "the moment mock-4 at spec.resp.body holds as the recording gave it") || !strings.Contains(ln.Why, "the moment mock-5 at spec.resp.body holds, which record's full round gave the application in its place") {
 			t.Errorf("%s, F serving the later: %s from %+v (%s); want it refused, naming both receives", row.name, ln.Kind, ln.From, ln.Why)
@@ -277,7 +285,7 @@ func TestOnlyAnAnswersPlaceMovesForTheOffsetRule(t *testing.T) {
 	const p = "body.processed_at"
 	call := next.Spec.ResTimestampMock.Add(time.Second)
 	now := call.Add(-40 * time.Millisecond)
-	dc := NewDriftCache()
+	dc := clockedDrifts()
 	raw := []Raw{dc.RawOf(first, false), dc.RawOf(next, true)}
 	for _, row := range []struct {
 		name      string
@@ -286,7 +294,7 @@ func TestOnlyAnAnswersPlaceMovesForTheOffsetRule(t *testing.T) {
 		{"text, the second", strLeaf(p, now.Format(time.RFC3339)), strLeaf(p, now.Add(FullRoundLead).Format(time.RFC3339))},
 		{"typed, the second", typedLeaf(p, now, time.Second), typedLeaf(p, now.Add(FullRoundLead), time.Second)},
 	} {
-		if ln := ClassifyIn(dc, []string{p}, row.live, row.rec, call, nil, raw, nil, nil)[0]; ln.Kind != KindNoise {
+		if ln := ClassifyIn(dc, []string{p}, row.live, row.rec, call, nil, raw, nil, nil)[0]; !noiseOrRead(ln) {
 			t.Errorf("%s: %s from %+v (%s); want noise", row.name, ln.Kind, ln.From, ln.Why)
 		}
 	}
@@ -309,7 +317,7 @@ func TestAValueBuiltOnAMovedPartOfTheRequestIsRefused(t *testing.T) {
 		{"text, the minute", strLeaf(p, "2026-10-22T11:14Z"), strLeaf(p, "2026-10-22T11:15Z")},
 		{"typed, the minute", typedLeaf(p, at.Truncate(time.Minute), time.Minute), typedLeaf(p, at.Truncate(time.Minute).Add(time.Minute), time.Minute)},
 	} {
-		ln := ClassifyIn(NewDriftCache(), []string{p}, row.live, row.rec, at, req, nil, nil, nil)[0]
+		ln := ClassifyIn(clockedDrifts(), []string{p}, row.live, row.rec, at, req, nil, nil, nil)[0]
 		if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "stands 5m0s after the moment test case test-1 at body.since holds as the recording gave it") {
 			t.Errorf("%s: %s from %+v (%s); want it refused, built on the request's since", row.name, ln.Kind, ln.From, ln.Why)
 		}
@@ -329,7 +337,7 @@ func TestAReadOfTheClockIsNoLaterThanItsCall(t *testing.T) {
 	const p = "body.due"
 	day := 24 * time.Hour
 	one := func(r, l Leaf, at time.Time, earlier []Earlier) Learned {
-		return ClassifyIn(NewDriftCache(), []string{p}, Shape{Leaves: map[string]Leaf{p: l}}, Shape{Leaves: map[string]Leaf{p: r}}, at, earlier, nil, nil, nil)[0]
+		return ClassifyIn(clockedDrifts(), []string{p}, Shape{Leaves: map[string]Leaf{p: l}}, Shape{Leaves: map[string]Leaf{p: r}}, at, earlier, nil, nil, nil)[0]
 	}
 	typed := func(at time.Time, res time.Duration) Leaf { return InstantLeaf(p, p, at, res) }
 	for _, row := range []struct {
@@ -339,11 +347,15 @@ func TestAReadOfTheClockIsNoLaterThanItsCall(t *testing.T) {
 		noise bool
 	}{
 		{"a day a month on", typed(time.Date(2026, 11, 21, 0, 0, 0, 0, time.UTC), day), typed(time.Date(2026, 11, 22, 0, 0, 0, 0, time.UTC), day), at, false},
-		{"the call's day, F's the next", typed(time.Date(2026, 10, 22, 0, 0, 0, 0, time.UTC), day), typed(time.Date(2026, 10, 23, 0, 0, 0, 0, time.UTC), day), at, false},
+		// A date names no zone: a wall clock of no zone, with no window a
+		// plain read of the clock all the same (noWindowRead).
+		{"the call's day, F's the next", typed(time.Date(2026, 10, 22, 0, 0, 0, 0, time.UTC), day), typed(time.Date(2026, 10, 23, 0, 0, 0, 0, time.UTC), day), at, true},
 		{"the call's day before midnight, F's the next", typed(time.Date(2026, 10, 22, 0, 0, 0, 0, time.UTC), day), typed(time.Date(2026, 10, 23, 0, 0, 0, 0, time.UTC), day), time.Date(2026, 10, 22, 23, 59, 31, 0, time.UTC), true},
 		{"an hour after the call", typed(time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC), time.Minute), typed(time.Date(2026, 10, 22, 12, 1, 0, 0, time.UTC), time.Minute), at, false},
 		{"a minute after the call's", typed(time.Date(2026, 10, 22, 11, 15, 0, 0, time.UTC), time.Minute), typed(time.Date(2026, 10, 22, 11, 16, 0, 0, time.UTC), time.Minute), at, false},
-		{"the call's minute, F's two on", typed(time.Date(2026, 10, 22, 11, 14, 0, 0, time.UTC), time.Minute), typed(time.Date(2026, 10, 22, 11, 16, 0, 0, time.UTC), time.Minute), at, false},
+		// With no window, a plain read of the clock all the same, which
+		// every replay checks in its call's span (noWindowRead).
+		{"the call's minute, F's two on", typed(time.Date(2026, 10, 22, 11, 14, 0, 0, time.UTC), time.Minute), typed(time.Date(2026, 10, 22, 11, 16, 0, 0, time.UTC), time.Minute), at, true},
 		{"the call's minute, F's the next", typed(time.Date(2026, 10, 22, 11, 14, 0, 0, time.UTC), time.Minute), typed(time.Date(2026, 10, 22, 11, 15, 0, 0, time.UTC), time.Minute), at, true},
 		{"a second a month on", typed(time.Date(2026, 11, 21, 17, 30, 0, 0, time.UTC), time.Second), typed(time.Date(2026, 11, 21, 17, 31, 1, 0, time.UTC), time.Second), at, false},
 		{"the second before the call", typed(at.Add(-time.Second), time.Second), typed(at.Add(-time.Second+FullRoundLead), time.Second), at, true},
@@ -353,7 +365,7 @@ func TestAReadOfTheClockIsNoLaterThanItsCall(t *testing.T) {
 		ln := one(row.r, row.l, row.at, nil)
 		// Each refused one moved by the lead: its reason says it is past its
 		// call, never that it did not move by the lead.
-		if row.noise && ln.Kind != KindNoise || !row.noise && (ln.Kind != KindUnaccounted || ln.Why != instantAfterCall && ln.Why != instantPastCall) {
+		if row.noise && !noiseOrRead(ln) || !row.noise && (ln.Kind != KindUnaccounted || ln.Why != instantAfterCall && ln.Why != instantPastCall) {
 			t.Errorf("%s: %s (%s); want noise %v, or refused as past its call", row.name, ln.Kind, ln.Why, row.noise)
 		}
 	}
@@ -375,7 +387,7 @@ func TestAReadOfTheClockIsNoLaterThanItsCall(t *testing.T) {
 		zone  *time.Location
 		noise bool
 	}{{"the application's zone IST", ist, true}, {"UTC alone", nil, false}, {"the application's zone UTC-5", time.FixedZone("EST", -5*3600), false}} {
-		dc := NewDriftCache()
+		dc := clockedDrifts()
 		dc.zone = z.zone
 		ln := ClassifyIn(dc, []string{p}, Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: "book " + at.Add(-time.Second+FullRoundLead).In(ist).Format("2006-01-02 15:04:05")}}}, Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: "book " + at.Add(-time.Second).In(ist).Format("2006-01-02 15:04:05")}}}, at,
 			[]Earlier{{Mock: "mock-1", At: at.Add(-time.Second), Payload: payloadOf("mock-1", at.Add(-time.Second)), Own: true, Seen: []Seen{{Side: Request, Leaf: Leaf{Path: "body.at", Noise: "body.at", Type: String, Value: at.Add(-time.Second).In(ist).Format("15:04:05")}, Live: "x", Place: "body.at"}}}}, nil, nil, nil)[0]
@@ -499,8 +511,8 @@ func TestAnswersBothRunsGaveOrOfTwoCallsAreNoMove(t *testing.T) {
 			{"text, the second", strLeaf(p, now.Format(time.RFC3339)), strLeaf(p, now.Add(FullRoundLead).Format(time.RFC3339))},
 			{"typed, the second", typedLeaf(p, now, time.Second), typedLeaf(p, now.Add(FullRoundLead), time.Second)},
 		} {
-			dc := NewDriftCache()
-			if ln := ClassifyIn(dc, []string{p}, row.live, row.rec, r1Insert, nil, set.raw(dc), nil, nil)[0]; ln.Kind != KindNoise {
+			dc := clockedDrifts()
+			if ln := ClassifyIn(dc, []string{p}, row.live, row.rec, r1Insert, nil, set.raw(dc), nil, nil)[0]; !noiseOrRead(ln) {
 				t.Errorf("%s, %s: %s from %+v (%s); want noise", set.name, row.name, ln.Kind, ln.From, ln.Why)
 			}
 		}
@@ -590,7 +602,7 @@ func TestRecordingsBothRunsGaveInAnotherOrderAreAMove(t *testing.T) {
 					return []Raw{dc.RawOf(a, false), dc.RawOf(b, true).ServedAs(2)}, []Earlier{{Mock: a.Name, At: a.Spec.ReqTimestampMock, Own: true, Payload: RawOf(a, true).ServedAs(1)}}
 				}},
 			} {
-				dc := NewDriftCache()
+				dc := clockedDrifts()
 				raw, earlier := served.of(dc)
 				ln := ClassifyIn(dc, []string{p}, row.live, row.rec, r1Insert, earlier, raw, nil, nil)[0]
 				if row.name == "text, the hour" {
@@ -608,7 +620,7 @@ func TestRecordingsBothRunsGaveInAnotherOrderAreAMove(t *testing.T) {
 					continue
 				}
 				if !served.refused {
-					if ln.Kind != KindNoise {
+					if !noiseOrRead(ln) {
 						t.Errorf("gap %v, %s, %s: %s (%s); want noise, the lead's move", gap, row.name, served.name, ln.Kind, ln.Why)
 					}
 					continue
@@ -627,7 +639,7 @@ func TestRecordingsBothRunsGaveInAnotherOrderAreAMove(t *testing.T) {
 	sentB := sentA.Add(2*time.Minute + 311*time.Millisecond)
 	a := receive("mock-4", sentA, time.Date(2026, 10, 22, 11, 14, 13, 778e6, time.UTC))
 	b := receive("mock-11", sentB, time.Date(2026, 10, 22, 11, 16, 20, 0, time.UTC))
-	dc := NewDriftCache()
+	dc := clockedDrifts()
 	if ln := ClassifyIn(dc, []string{p}, strLeaf(p, sentB.Add(time.Minute).Format("2006-01-02T15:04Z07:00")), strLeaf(p, sentA.Add(time.Minute).Format("2006-01-02T15:04Z07:00")), r1Insert, nil, []Raw{dc.RawOf(a, false), dc.RawOf(b, true).ServedAs(1)}, nil, nil)[0]; ln.Kind != KindUnaccounted {
 		t.Errorf("B alone served, after the call: %s (%s); want it refused", ln.Kind, ln.Why)
 	}
@@ -645,7 +657,7 @@ func TestRecordingsBothRunsGaveInAnotherOrderAreAMove(t *testing.T) {
 		{"B at the call's own instant, F serving A then B", a, receive("mock-11", sentB, r1Insert), "", ", and"},
 		{"A at the call's own instant, F serving B then A", receive("mock-4", sentA, r1Insert), receive("mock-11", sentB, time.Date(2026, 10, 22, 11, 14, 15, 101e6, time.UTC)), "b", " (recorded at the call's own instant, so keploy reads it as given to the application before the call), and"},
 	} {
-		dc := NewDriftCache()
+		dc := clockedDrifts()
 		ra, rb := dc.RawOf(c.a, true).ServedAs(1), dc.RawOf(c.b, true).ServedAs(2)
 		if c.firstA == "b" {
 			ra, rb = dc.RawOf(c.a, true).ServedAs(2), dc.RawOf(c.b, true).ServedAs(1)
@@ -726,7 +738,7 @@ func TestAnInstantBuiltOnAnotherIndexOfAServedListIsRefused(t *testing.T) {
 			{"a time of day", strLeaf(p, "retry at "+recJob.Add(off).Format("15:04")), strLeaf(p, "retry at "+fJob.Add(off).Format("15:04")), true},
 			{"typed", typedLeaf(p, recJob.Add(off).Truncate(time.Minute), time.Minute), typedLeaf(p, fJob.Add(off).Truncate(time.Minute), time.Minute), false},
 		} {
-			dc := NewDriftCache()
+			dc := clockedDrifts()
 			ln := ClassifyIn(dc, []string{p}, row.live, row.rec, call, nil, []Raw{dc.RawOf(rec, false), dc.RawOf(f, true)}, nil, nil)[0]
 			if row.noZone && off == 15*time.Minute {
 				if ln.Kind != KindVariable || !ln.From.Echo || ln.From.Mock != "mock-1" {
@@ -761,20 +773,20 @@ func TestAnotherTestsRecordingIsAPlaceOfTheOffsetAndWordRulesAlone(t *testing.T)
 	}
 	const p = "body.due"
 	day := 24 * time.Hour
-	dc := NewDriftCache()
+	dc := clockedDrifts()
 	raw := []Raw{dc.RawOf(receive, true).ServedAs(2).OfAnotherTest(), dc.RawOf(delivered, true).ServedAs(1).OfAnotherTest()}
 	ln := ClassifyIn(dc, []string{p}, strLeaf(p, got.Add(-2*day).Format("2006-01-02")), strLeaf(p, sent.Add(-2*day).Format("2006-01-02")), r1Insert, nil, raw, nil, nil)[0]
 	if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "stands 48h0m0s before the moment mock-4 at spec.resp.body holds as the recording gave it") {
 		t.Errorf("an offset from another test's recordings: %s (%s); want it refused, naming the receive and the offset", ln.Kind, ln.Why)
 	}
 	const q = "body.user"
-	row := Raw{read: true, mock: "pg-3", at: r1Insert.Add(-2 * time.Second), text: `{"query":"INSERT INTO users VALUES ($1)","params":["u-12"]}`}
+	row := Raw{rRead: true, mock: "pg-3", at: r1Insert.Add(-2 * time.Second), rText: `{"query":"INSERT INTO users VALUES ($1)","params":["u-12"]}`}
 	for _, another := range []bool{false, true} {
 		x := row
 		if another {
 			x = x.OfAnotherTest()
 		}
-		ln := ClassifyIn(NewDriftCache(), []string{q}, strLeaf(q, "u-77"), strLeaf(q, "u-12"), r1Insert, nil, []Raw{x}, nil, nil)[0]
+		ln := ClassifyIn(clockedDrifts(), []string{q}, strLeaf(q, "u-77"), strLeaf(q, "u-12"), r1Insert, nil, []Raw{x}, nil, nil)[0]
 		if want := map[bool]Kind{false: KindVariable, true: KindUnaccounted}[another]; ln.Kind != want || another && !strings.Contains(ln.Why, "appears in pg-3, a recording record's full round gave the application before the call that is another test's") {
 			t.Errorf("another test's %v: %s from %+v (%s); want %s", another, ln.Kind, ln.From, ln.Why, want)
 		}
@@ -825,8 +837,8 @@ func TestAWordOfAnotherTestsAnswerIsRefusedNamingIt(t *testing.T) {
 		{"the live id in another test's request alone", sentOnly, recID, liveID, ""},
 	} {
 		for _, viaSet := range []bool{false, true} {
-			dc := NewDriftCache()
-			x := dc.RawOf(row.m, true).ServedAs(3)
+			dc := clockedDrifts()
+			x := dc.RawOf(row.m, true).ServedAs(3).ServedAsRecorded()
 			var ln Learned
 			if viaSet {
 				reads := 0
@@ -862,17 +874,8 @@ func TestAWordOfAnotherTestsAnswerIsRefusedNamingIt(t *testing.T) {
 // row of TestAWordOfAnotherTestsAnswerIsRefusedNamingIt).
 func TestAnotherTestsAnswerStampIsSearchedWhereTheValueEchoesAStamp(t *testing.T) {
 	const p = "body.slot"
-	date := func(v string) Seen {
-		return Seen{Side: Response, Leaf: Leaf{Path: "header.date", Noise: "header.date", Type: String, Value: v}, Live: v, Stamp: true}
-	}
-	own := []Earlier{
-		{Mock: "mock-1", At: r1Insert.Add(-3 * time.Second), Payload: payloadOf("mock-1", r1Insert.Add(-3*time.Second)), Own: true, Seen: []Seen{date("Wed, 21 Oct 2026 08:14:44 GMT")}},
-		{Mock: "mock-2", At: r1Insert.Add(-2 * time.Second), Payload: payloadOf("mock-2", r1Insert.Add(-2*time.Second)), Own: true, Seen: []Seen{date("Wed, 21 Oct 2026 08:15:44 GMT")}},
-	}
-	// The value's instant moves by the lead, so its minute and second are
-	// clock words the word rules skip; only "03" -> "54" changed besides.
-	rec := "slot-03 " + r1Insert.Format(time.RFC3339)
-	live := "slot-54 " + r1Insert.Add(FullRoundLead).Format(time.RFC3339)
+	own := stampEcho()
+	rec, live := stampEchoValues()
 	for _, stampHolds := range []bool{false, true} {
 		// Another test's answer, its Date header its own clock stamp (its
 		// span holds it): 10:54:17 holds the word 54, 10:53:17 does not.
@@ -887,8 +890,8 @@ func TestAnotherTestsAnswerStampIsSearchedWhereTheValueEchoesAStamp(t *testing.T
 			if echoed {
 				earlier = own
 			}
-			dc := NewDriftCache()
-			x := dc.RawOf(other, true).ServedAs(3).OfAnotherTest()
+			dc := clockedDrifts()
+			x := dc.RawOf(other, true).ServedAs(3).ServedAsRecorded().OfAnotherTest()
 			ln := ClassifyIn(dc, []string{p}, strLeaf(p, live), strLeaf(p, rec), r1Insert, earlier, []Raw{x}, nil, nil)[0]
 			if stampHolds && echoed {
 				if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "a word of what record's full round saw in it (its characters 6 to 7) appears in mock-21, a recording record's full round gave the application before the call that is another test's") {
@@ -900,6 +903,263 @@ func TestAnotherTestsAnswerStampIsSearchedWhereTheValueEchoesAStamp(t *testing.T
 				t.Errorf("another test's stamp holds 54 %v, the value echoes a stamp %v: %s (%s); want noise", stampHolds, echoed, ln.Kind, ln.Why)
 			}
 		}
+	}
+}
+
+// stampEcho are two exchanges of the call's own test whose Date headers,
+// stamps F served, moved apart by a minute, as the minute of the value of
+// stampEchoValues moves: the value echoes a stamp (stampsEchoed), and stamps
+// are searched as any text.
+func stampEcho() []Earlier {
+	date := func(v string) Seen {
+		return Seen{Side: Response, Leaf: Leaf{Path: "header.date", Noise: "header.date", Type: String, Value: v}, Live: v, Stamp: true}
+	}
+	return []Earlier{
+		{Mock: "mock-1", At: r1Insert.Add(-3 * time.Second), Payload: payloadOf("mock-1", r1Insert.Add(-3*time.Second)), Own: true, Seen: []Seen{date("Wed, 21 Oct 2026 08:14:44 GMT")}},
+		{Mock: "mock-2", At: r1Insert.Add(-2 * time.Second), Payload: payloadOf("mock-2", r1Insert.Add(-2*time.Second)), Own: true, Seen: []Seen{date("Wed, 21 Oct 2026 08:15:44 GMT")}},
+	}
+}
+
+// stampEchoValues are a value as recorded and as it stands now whose
+// instant moves by the lead, so its minute and second are clock words the
+// word rules skip; only "03" -> "54" changed besides.
+func stampEchoValues() (rec, live string) {
+	return "slot-03 " + r1Insert.Format(time.RFC3339), "slot-54 " + r1Insert.Add(FullRoundLead).Format(time.RFC3339)
+}
+
+// F's view of a recording no earlier place of the call's own test is
+// (another test's, or one F served in an older test of the set) is searched
+// as the call's own places say stamps are (stampsEchoed), as the
+// recording's own words are and as a place of the call's own test is
+// (wordsHeld): a word of the value that the Date header of the view F gave
+// alone holds is noise where the value echoes no stamp, as it is where the
+// recording is of the call's own test, and refused, naming the recording,
+// where it echoes one. Each view's words were read with their stamps as any
+// text whatever the echo said, so the word was refused with a false reason
+// ("where the recording did not give the application that word") where a
+// place of the call's own test learned it (FALSE RED).
+func TestAStampOfFsViewOfAnotherTestsAnswerIsSearchedAsTheCallsOwnPlacesSay(t *testing.T) {
+	const p = "body.slot"
+	rec, live := stampEchoValues()
+	// The recording's Date (10:53:17) holds no word 54; that of the view F
+	// gave (10:54:17) does, and the view's body differs too.
+	recAt, viewAt := r1Insert.Add(-21*time.Minute), r1Insert.Add(-20*time.Minute)
+	m := receiveOf("mock-21", "aaaaaaaa-1111-4222-8333-bbbbbbbbbbbb", recAt)
+	m.Spec.HTTPResp.Header["Date"] = recAt.Format(http.TimeFormat)
+	viewOf := func(at time.Time, body string) *models.Mock {
+		v := receiveOf("mock-21", "aaaaaaaa-1111-4222-8333-bbbbbbbbbbbb", at)
+		v.Spec.HTTPResp.Header["Date"] = at.Format(http.TimeFormat)
+		v.Spec.HTTPResp.Body = strings.Replace(v.Spec.HTTPResp.Body, `"Body": "S12 message"`, `"Body": "`+body+`"`, 1)
+		return v
+	}
+	view, other := viewOf(viewAt, "S13 message"), viewOf(recAt, "S14 message")
+	if !strings.Contains(view.Spec.HTTPResp.Header["Date"], ":54:") || strings.Contains(m.Spec.HTTPResp.Header["Date"], "54") || view.Spec.HTTPResp.Body == m.Spec.HTTPResp.Body || other.Spec.HTTPResp.Body == m.Spec.HTTPResp.Body {
+		t.Fatalf("the fixture: recorded %q, view %q", m.Spec.HTTPResp.Header["Date"], view.Spec.HTTPResp.Header["Date"])
+	}
+	const (
+		inView = "a word of what record's full round saw in it (its characters 6 to 7) appears in mock-21 as record's full round gave it, where the recording did not give the application that word"
+		inTwo  = "a word of what record's full round saw in it (its characters 6 to 7) appears in mock-21 as record's full round gave it in one of 2 serves that gave the application different views of it, where the recording did not give the application that word"
+	)
+	served := func(dc *DriftCache) Raw { return dc.RawOf(m, true).ServedAs(3) }
+	// order is the set's Order after tell said what F's serve of m in its
+	// first test gave the application, read in its third.
+	order := func(tell func(tr *Tracker)) Order {
+		tr := NewTracker()
+		tr.Begin()
+		tr.ServedMock(m)
+		tell(tr)
+		tr.End()
+		tr.Begin()
+		tr.End()
+		tr.Begin()
+		return tr.Placed().Order
+	}
+	loader := func(v *models.Mock) func() (*models.Mock, error) {
+		return func() (*models.Mock, error) { return v, nil }
+	}
+	for _, row := range []struct {
+		name string
+		want string // refused where the value echoes a stamp
+		run  func(dc *DriftCache, own []Earlier) Learned
+	}{
+		{"another test's, served with a view", inView, func(dc *DriftCache, own []Earlier) Learned {
+			x := served(dc).ServedLive(dc.RawOf(view, true)).OfAnotherTest()
+			return ClassifyIn(dc, []string{p}, strLeaf(p, live), strLeaf(p, rec), r1Insert, own, []Raw{x}, nil, nil)[0]
+		}},
+		{"another test's, served with two views", inTwo, func(dc *DriftCache, own []Earlier) Learned {
+			x := served(dc).ServedChanged(dc.RawOf(other, true), dc.RawOf(view, true)).OfAnotherTest()
+			return ClassifyIn(dc, []string{p}, strLeaf(p, live), strLeaf(p, rec), r1Insert, own, []Raw{x}, nil, nil)[0]
+		}},
+		{"earlier in the set, served with a view", inView, func(dc *DriftCache, own []Earlier) Learned {
+			x := served(dc).ServedLive(dc.RawOf(view, true))
+			return ClassifyGiven(dc, []string{p}, strLeaf(p, live), strLeaf(p, rec), r1Insert, own, nil, nil, nil, func() ([]GivenPlaces, error) { return []GivenPlaces{PlacesOf(x)}, nil })[0]
+		}},
+		{"in an older test of the set, told with a view", inView, func(dc *DriftCache, own []Earlier) Learned {
+			o := order(func(tr *Tracker) { tr.ServedMockLive(m, "a", loader(view)) })
+			return ClassifyGiven(dc, []string{p}, strLeaf(p, live), strLeaf(p, rec), r1Insert, own, nil, nil, nil, func() ([]GivenPlaces, error) {
+				g, err := o.GivenPlaces(m)
+				return []GivenPlaces{g}, err
+			})[0]
+		}},
+		{"in an older test of the set, told as recorded and with a view", inTwo, func(dc *DriftCache, own []Earlier) Learned {
+			o := order(func(tr *Tracker) {
+				tr.ServedMockAsRecorded(m)
+				tr.ServedMock(m)
+				tr.ServedMockLive(m, "a", loader(view))
+			})
+			return ClassifyGiven(dc, []string{p}, strLeaf(p, live), strLeaf(p, rec), r1Insert, own, nil, nil, nil, func() ([]GivenPlaces, error) {
+				g, err := o.GivenPlaces(m)
+				return []GivenPlaces{g}, err
+			})[0]
+		}},
+		{"the call's own test's, served with a view", "a word of what record's full round saw in it (its characters 6 to 7) appears in an earlier recording, in mock-21 at spec.resp.header.Date, as record's full round gave it", func(dc *DriftCache, own []Earlier) Learned {
+			x := served(dc).ServedLive(dc.RawOf(view, true))
+			return ClassifyIn(dc, []string{p}, strLeaf(p, live), strLeaf(p, rec), r1Insert, own, []Raw{x}, nil, nil)[0]
+		}},
+	} {
+		for _, echoed := range []bool{false, true} {
+			var own []Earlier
+			if echoed {
+				own = stampEcho()
+			}
+			ln := row.run(clockedDrifts(), own)
+			switch {
+			case !echoed && ln.Kind != KindNoise:
+				t.Errorf("FALSE RED: %s, the value echoes no stamp: %s (%s); want noise: only the Date of the view F gave holds 54", row.name, ln.Kind, ln.Why)
+			case echoed && (ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, row.want)):
+				t.Errorf("FALSE GREEN? %s, the value echoes a stamp: %s (%s); want refused: %s", row.name, ln.Kind, ln.Why, row.want)
+			}
+		}
+	}
+}
+
+// A word of a value that echoes no clock stamp, which only the recording's
+// own Date stamp holds of its text and the body of F's view of it holds, is
+// one F gave the application there that the recording did not, as the word
+// rule reads the recording (stamps searched only where the value echoes one:
+// answerLists.holds with the call's keep): refused naming the recording,
+// another test's too, as in the call's own test. servedWhy reading the
+// recording's own words with its stamps whatever the value echoes would let
+// the word go as one the recording gave (a false green; mutant R12).
+func TestAWordOnlyTheRecordingsStampHoldsAndFsViewsBodyHoldsIsRefused(t *testing.T) {
+	const p = "body.slot"
+	rec, live := stampEchoValues()
+	recAt, viewAt := r1Insert.Add(-20*time.Minute), r1Insert.Add(-21*time.Minute)
+	m := receiveOf("mock-21", "aaaaaaaa-1111-4222-8333-bbbbbbbbbbbb", recAt)
+	m.Spec.HTTPResp.Header["Date"] = recAt.Format(http.TimeFormat)
+	v := receiveOf("mock-21", "aaaaaaaa-1111-4222-8333-bbbbbbbbbbbb", recAt)
+	v.Spec.HTTPResp.Header["Date"] = viewAt.Format(http.TimeFormat)
+	v.Spec.HTTPResp.Body = strings.Replace(v.Spec.HTTPResp.Body, `"Body": "S12 message"`, `"Body": "54 message"`, 1)
+	if !strings.Contains(m.Spec.HTTPResp.Header["Date"], ":54:") || strings.Contains(v.Spec.HTTPResp.Header["Date"], "54") || v.Spec.HTTPResp.Body == m.Spec.HTTPResp.Body {
+		t.Fatalf("fixture: recorded Date %q, view Date %q", m.Spec.HTTPResp.Header["Date"], v.Spec.HTTPResp.Header["Date"])
+	}
+	for _, other := range []bool{false, true} {
+		dc := clockedDrifts()
+		x := dc.RawOf(m, true).ServedAs(3).ServedLive(dc.RawOf(v, true))
+		if other {
+			x = x.OfAnotherTest()
+		}
+		ln := ClassifyIn(dc, []string{p}, strLeaf(p, live), strLeaf(p, rec), r1Insert, nil, []Raw{x}, nil, nil)[0]
+		if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "mock-21") {
+			t.Errorf("FALSE GREEN: another test's %v: %s (%s); want refused naming mock-21: only F's view's body gave 54", other, ln.Kind, ln.Why)
+		}
+	}
+}
+
+// Two recordings F gave the application in another test, each told with its
+// own view, of which only the second's holds the value's word: refused
+// naming the second, read as Raws and as the set reads them (GivenPlaces, a
+// first read and one from the set's cache). Each recording's views are its
+// own in the set's cache (setPlaces.views, keyed by the recording), and the
+// word rule searches every recording's view (servedWhy), not the first's
+// alone: either slip lets the word go (false greens; mutants R1, R30).
+func TestOnlyTheSecondRecordingsViewHoldsTheWordAndItIsRefused(t *testing.T) {
+	const p = "body.slot"
+	rec, live := stampEchoValues()
+	at := r1Insert.Add(-21 * time.Minute)
+	mk := func(name, id, body string) *models.Mock {
+		m := receiveOf(name, id, at)
+		m.Spec.HTTPResp.Header["Date"] = at.Format(http.TimeFormat)
+		if body != "" {
+			m.Spec.HTTPResp.Body = strings.Replace(m.Spec.HTTPResp.Body, `"Body": "S12 message"`, `"Body": "`+body+`"`, 1)
+		}
+		return m
+	}
+	a, b := mk("mock-21", "aaaaaaaa-1111-4222-8333-bbbbbbbbbbbb", ""), mk("mock-22", "cccccccc-1111-4222-8333-dddddddddddd", "")
+	va, vb := mk("mock-21", "aaaaaaaa-1111-4222-8333-bbbbbbbbbbbb", "S13 message"), mk("mock-22", "cccccccc-1111-4222-8333-dddddddddddd", "54 message")
+	t.Run("raw", func(t *testing.T) {
+		dc := clockedDrifts()
+		xa := dc.RawOf(a, true).ServedAs(3).ServedLive(dc.RawOf(va, true)).OfAnotherTest()
+		xb := dc.RawOf(b, true).ServedAs(4).ServedLive(dc.RawOf(vb, true)).OfAnotherTest()
+		ln := ClassifyIn(dc, []string{p}, strLeaf(p, live), strLeaf(p, rec), r1Insert, nil, []Raw{xa, xb}, nil, nil)[0]
+		if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "mock-22") {
+			t.Errorf("FALSE GREEN: %s (%s); want refused naming mock-22", ln.Kind, ln.Why)
+		}
+	})
+	t.Run("set", func(t *testing.T) {
+		tr := NewTracker()
+		tr.Begin()
+		tr.ServedMock(a)
+		tr.ServedMockLive(a, "k", func() (*models.Mock, error) { return va, nil })
+		tr.ServedMock(b)
+		tr.ServedMockLive(b, "k", func() (*models.Mock, error) { return vb, nil })
+		tr.End()
+		tr.Begin()
+		tr.End()
+		tr.Begin()
+		o := tr.Placed().Order
+		for _, read := range []string{"first read", "cached read"} {
+			ln := ClassifyGiven(clockedDrifts(), []string{p}, strLeaf(p, live), strLeaf(p, rec), r1Insert, nil, nil, nil, nil, func() ([]GivenPlaces, error) {
+				ga, err := o.GivenPlaces(a)
+				if err != nil {
+					return nil, err
+				}
+				gb, err := o.GivenPlaces(b)
+				return []GivenPlaces{ga, gb}, err
+			})[0]
+			if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "mock-22") {
+				t.Errorf("FALSE GREEN: %s: %s (%s); want refused naming mock-22", read, ln.Kind, ln.Why)
+			}
+		}
+	})
+}
+
+// The set reads a recording's statements as of each read (Order.GivenPlaces
+// reads them under the tracker's lock), never as of its first: told as
+// recorded in one test, a fresh value learns; served again in the next and
+// told with a view that holds the value's word, the next read refuses it
+// naming the recording. Statements kept for the set from the first read
+// would let the word go (a false green; mutant R2).
+func TestAViewToldAfterAFirstReadIsReadByTheNext(t *testing.T) {
+	const p = "body.slot"
+	rec, live := stampEchoValues()
+	at := r1Insert.Add(-21 * time.Minute)
+	m := receiveOf("mock-21", "aaaaaaaa-1111-4222-8333-bbbbbbbbbbbb", at)
+	m.Spec.HTTPResp.Header["Date"] = at.Format(http.TimeFormat)
+	v := receiveOf("mock-21", "aaaaaaaa-1111-4222-8333-bbbbbbbbbbbb", at)
+	v.Spec.HTTPResp.Header["Date"] = at.Format(http.TimeFormat)
+	v.Spec.HTTPResp.Body = strings.Replace(v.Spec.HTTPResp.Body, `"Body": "S12 message"`, `"Body": "54 message"`, 1)
+	read := func(o Order) Learned {
+		return ClassifyGiven(clockedDrifts(), []string{p}, strLeaf(p, live), strLeaf(p, rec), r1Insert, nil, nil, nil, nil, func() ([]GivenPlaces, error) {
+			g, err := o.GivenPlaces(m)
+			return []GivenPlaces{g}, err
+		})[0]
+	}
+	tr := NewTracker()
+	tr.Begin()
+	tr.ServedMock(m)
+	tr.ServedMockAsRecorded(m)
+	tr.End()
+	tr.Begin()
+	if ln := read(tr.Placed().Order); ln.Kind == KindUnaccounted {
+		t.Fatalf("told as recorded: refused (%s); want learned", ln.Why)
+	}
+	tr.ServedMock(m)
+	tr.ServedMockLive(m, "k", func() (*models.Mock, error) { return v, nil })
+	tr.End()
+	tr.Begin()
+	if ln := read(tr.Placed().Order); ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "mock-21") {
+		t.Errorf("FALSE GREEN: told as recorded, then with a view holding the word: %s (%s); want refused naming mock-21", ln.Kind, ln.Why)
 	}
 }
 
@@ -921,7 +1181,7 @@ func TestARecordingThatHoldsNoAnswerGaveTheApplicationNothing(t *testing.T) {
 		if answered {
 			m.Spec.GenericResponses = frame(models.FromServer, "VALUE user u-77 at 2026-10-22T11:13:16Z")
 		}
-		dc := NewDriftCache()
+		dc := clockedDrifts()
 		x := dc.RawOf(m, true).ServedAs(2)
 		places := dc.keyedPlaces(x)
 		if len(places) > 0 != answered {
@@ -971,7 +1231,7 @@ func TestAPostgresQueryRecordingGaveTheApplicationOnlyItsAnswer(t *testing.T) {
 		m := &models.Mock{Name: "conn-2", Kind: models.PostgresV3, Spec: models.MockSpec{
 			PostgresV3:       &models.PostgresV3Spec{Type: models.PostgresV3TypeQuery, Query: &q},
 			ReqTimestampMock: r1Insert.Add(-time.Minute), ResTimestampMock: r1Insert.Add(-time.Minute + time.Millisecond)}}
-		dc := NewDriftCache()
+		dc := clockedDrifts()
 		x := dc.RawOf(m, true).ServedAs(2)
 		places := dc.keyedPlaces(x)
 		if len(places) > 0 != tc.answers {
@@ -1022,7 +1282,7 @@ func TestClassifyGivenReadsTheSetOnlyForTheOffsetAndWordRules(t *testing.T) {
 	for _, m := range []*models.Mock{receive, delivered} {
 		m.Spec.HTTPResp.Header["Date"] = "Thu, 22 Oct 2026 10:02:51 GMT"
 	}
-	row := Raw{read: true, mock: "pg-3", at: r1Insert.Add(-2 * time.Second), text: `{"query":"INSERT INTO users VALUES ($1)","params":["u-12"]}`}
+	row := Raw{rRead: true, mock: "pg-3", at: r1Insert.Add(-2 * time.Second), rText: `{"query":"INSERT INTO users VALUES ($1)","params":["u-12"]}`}
 	reads := 0
 	set := func(raw []Raw, err error) GivenEarlier {
 		return func() ([]GivenPlaces, error) {
@@ -1042,27 +1302,27 @@ func TestClassifyGivenReadsTheSetOnlyForTheOffsetAndWordRules(t *testing.T) {
 	}
 	// A value a place of the call's own test accounts for: the set is not
 	// read, and it is a variable of that place.
-	dc := NewDriftCache()
+	dc := clockedDrifts()
 	if ln := ClassifyGiven(dc, []string{q}, strLeaf(q, "u-77"), strLeaf(q, "u-12"), r1Insert, nil, []Raw{row}, nil, nil, set(both(dc), nil))[0]; ln.Kind != KindVariable || reads != 0 {
 		t.Errorf("a place of the test's own: %s (%s), the set read %d times; want a variable, the set unread", ln.Kind, ln.Why, reads)
 	}
 	// A value a place of the call's own test refuses (a word of it there):
 	// the set is not read.
-	dc = NewDriftCache()
-	own := Raw{read: true, mock: "pg-5", at: r1Insert.Add(-time.Second), text: `{"params":["77"]}`}
+	dc = clockedDrifts()
+	own := Raw{rRead: true, mock: "pg-5", at: r1Insert.Add(-time.Second), rText: `{"params":["77"]}`}
 	if ln := ClassifyGiven(dc, []string{q}, strLeaf(q, "u-77"), strLeaf(q, "u-12"), r1Insert, nil, []Raw{own}, nil, nil, set(both(dc), nil))[0]; ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "pg-5") || reads != 0 {
 		t.Errorf("refused by a place of the test's own: %s (%s), the set read %d times; want it refused, naming pg-5, the set unread", ln.Kind, ln.Why, reads)
 	}
 	// A value of no changed instant whose word F gave earlier in the set:
 	// refused, naming it, never bound; the set read once for the call.
-	dc = NewDriftCache()
+	dc = clockedDrifts()
 	if ln := ClassifyGiven(dc, []string{q, "body.user2"}, Shape{Leaves: map[string]Leaf{q: strLeaf(q, "u-77").Leaves[q], "body.user2": strLeaf(q, "u-77").Leaves[q]}}, Shape{Leaves: map[string]Leaf{q: strLeaf(q, "u-12").Leaves[q], "body.user2": strLeaf(q, "u-12").Leaves[q]}}, r1Insert, nil, nil, nil, nil, set(both(dc), nil)); ln[0].Kind != KindUnaccounted || !strings.Contains(ln[0].Why, "appears in pg-3, a recording record's full round gave the application before the call that is another test's") || ln[1].Kind != KindUnaccounted || reads != 1 {
 		t.Errorf("a word F gave earlier in the set: %s (%s), the set read %d times; want it refused, naming pg-3, the set read once", ln[0].Kind, ln[0].Why, reads)
 	}
 	// A changed instant built on what F gave earlier in the set by an
 	// offset: refused, the set read once for the call.
 	reads = 0
-	dc = NewDriftCache()
+	dc = clockedDrifts()
 	ln := ClassifyGiven(dc, []string{p, "body.due2"}, Shape{Leaves: map[string]Leaf{p: due(got).Leaves[p], "body.due2": due(got).Leaves[p]}}, Shape{Leaves: map[string]Leaf{p: due(sent).Leaves[p], "body.due2": due(sent).Leaves[p]}}, r1Insert, nil, nil, nil, nil, set(both(dc), nil))
 	if ln[0].Kind != KindUnaccounted || !strings.Contains(ln[0].Why, "stands 48h0m0s before the moment mock-4 at spec.resp.body holds as the recording gave it") || reads != 1 {
 		t.Errorf("an offset from the set: %s (%s), the set read %d times; want it refused, naming the receive, the set read once", ln[0].Kind, ln[0].Why, reads)
@@ -1081,7 +1341,7 @@ func TestClassifyGivenReadsTheSetOnlyForTheOffsetAndWordRules(t *testing.T) {
 			if leaf == q {
 				live, rec = strLeaf(q, "u-77"), strLeaf(q, "u-12")
 			}
-			ln := ClassifyGiven(NewDriftCache(), []string{leaf}, live, rec, r1Insert, nil, nil, nil, nil, set(c.raw, c.err))[0]
+			ln := ClassifyGiven(clockedDrifts(), []string{leaf}, live, rec, r1Insert, nil, nil, nil, nil, set(c.raw, c.err))[0]
 			if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, c.want) {
 				t.Errorf("%s, at %s: %s (%s); want it refused, naming mock-9", name, leaf, ln.Kind, ln.Why)
 			}
@@ -1129,12 +1389,12 @@ func TestATimeCopiedFromWhatFGaveElsewhereIsRefusedNamingIt(t *testing.T) {
 		copied    string
 	}{
 		{"a minute", strLeaf(p, recT.Format(minute)), strLeaf(p, recT.Add(time.Minute).Format(minute)), recT.Add(time.Minute).Format(minute)},
-		{"a typed instant", typedLeaf(p, recT, time.Millisecond), typedLeaf(p, recT.Add(61*time.Second), time.Millisecond), recT.Add(61 * time.Second).Format(time.RFC3339Nano)},
+		{"a typed instant", typedLeaf(p, recT.Add(137*time.Millisecond), time.Millisecond), typedLeaf(p, recT.Add(FullRoundLead+137*time.Millisecond), time.Millisecond), recT.Add(FullRoundLead + 137*time.Millisecond).Format(time.RFC3339Nano)},
 	}
 	for _, f := range forms {
 		// Nothing gave the application the moment: a read of the clock the
 		// lead moved, learned as noise.
-		if ln := ClassifyIn(NewDriftCache(), []string{p}, f.live, f.rec, at, nil, nil, nil, nil)[0]; ln.Kind != KindNoise {
+		if ln := ClassifyIn(clockedDrifts(), []string{p}, f.live, f.rec, at, nil, nil, nil, nil)[0]; !noiseOrRead(ln) {
 			t.Fatalf("%s given nowhere: %s (%s); want a read of the clock, noise", f.name, ln.Kind, ln.Why)
 		}
 		for _, row := range []struct {
@@ -1149,7 +1409,7 @@ func TestATimeCopiedFromWhatFGaveElsewhereIsRefusedNamingIt(t *testing.T) {
 			{"copied, inside a base64 body", base64Receive("mock-36", after, f.copied), "was recorded after the call"},
 		} {
 			for _, viaSet := range []bool{false, true} {
-				dc := NewDriftCache()
+				dc := clockedDrifts()
 				x := dc.RawOf(row.m, true).ServedAs(2)
 				var ln Learned
 				if viaSet {
@@ -1160,7 +1420,7 @@ func TestATimeCopiedFromWhatFGaveElsewhereIsRefusedNamingIt(t *testing.T) {
 					ln = ClassifyIn(dc, []string{p}, f.live, f.rec, at, nil, []Raw{x.OfAnotherTest()}, nil, nil)[0]
 				}
 				if row.want == "" {
-					if ln.Kind != KindNoise {
+					if !noiseOrRead(ln) {
 						t.Errorf("%s, %s (set %v): %s (%s); want noise", f.name, row.name, viaSet, ln.Kind, ln.Why)
 					}
 					continue
@@ -1189,7 +1449,7 @@ func TestATimeCopiedFromWhatFGaveElsewhereIsRefusedNamingIt(t *testing.T) {
 		{"recorded after the call", sentAtReceive("mock-34", after, both, neighbour), "was recorded after the call"},
 	} {
 		for _, viaSet := range []bool{false, true} {
-			dc := NewDriftCache()
+			dc := clockedDrifts()
 			x := dc.RawOf(row.m, true).ServedAs(2)
 			var ln Learned
 			if viaSet {
@@ -1267,7 +1527,7 @@ func TestARecordingMadeAtOrAfterTheCallCountsOnlyWhatFServed(t *testing.T) {
 				want = " the moment mock-44 at spec.resp.body holds as the recording gave it (recorded at the call's own instant, so keploy reads it as given to the application before the call), and record's full round saw it "
 			}
 			for _, viaSet := range []bool{false, true} {
-				dc := NewDriftCache()
+				dc := clockedDrifts()
 				nb := dc.RawOf(sentAtReceive("mock-44", when.at, tc.sent.Format(time.RFC3339)), true).ServedAs(1)
 				var own []Raw
 				if tc.withOwn {
@@ -1282,7 +1542,7 @@ func TestARecordingMadeAtOrAfterTheCallCountsOnlyWhatFServed(t *testing.T) {
 					ln = ClassifyIn(dc, []string{p}, live, rec, at, nil, append(own, nb.OfAnotherTest()), nil, nil)[0]
 				}
 				if want == "" {
-					if ln.Kind != KindNoise {
+					if !noiseOrRead(ln) {
 						t.Errorf("%s, %s (set %v): %s (%s); want noise, no copy shown", when.name, tc.name, viaSet, ln.Kind, ln.Why)
 					}
 					continue
@@ -1296,7 +1556,7 @@ func TestARecordingMadeAtOrAfterTheCallCountsOnlyWhatFServed(t *testing.T) {
 		// it is the source of no change (what changed is the application's
 		// own minute), so the value is noise, never refused naming it.
 		for _, viaSet := range []bool{false, true} {
-			dc := NewDriftCache()
+			dc := clockedDrifts()
 			nb := dc.RawOf(sentAtReceive("mock-45", when.at, base.Format("2006-01-02")), true).ServedAs(1)
 			var ln Learned
 			if viaSet {
@@ -1306,7 +1566,7 @@ func TestARecordingMadeAtOrAfterTheCallCountsOnlyWhatFServed(t *testing.T) {
 			} else {
 				ln = ClassifyIn(dc, []string{p}, live, rec, at, nil, []Raw{nb.OfAnotherTest()}, nil, nil)[0]
 			}
-			if ln.Kind != KindNoise {
+			if !noiseOrRead(ln) {
 				t.Errorf("%s, the day both moments fall in (set %v): %s (%s); want noise, the day no source of the change", when.name, viaSet, ln.Kind, ln.Why)
 			}
 		}
@@ -1324,7 +1584,7 @@ func TestAnUnservedRecordingAtTheCallsOwnInstantIsAnEarlierPlace(t *testing.T) {
 	recID, liveID := "ce3bb3a8-8bbe-4fd8-b25d-1efc489f7323", "0b6e2f1c-5d7a-4e8b-9c3d-2a1f4e6b8c7d"
 	at := r1Insert
 	verdict := func(when time.Time) Learned {
-		dc := NewDriftCache()
+		dc := clockedDrifts()
 		x := dc.RawOf(receiveOf("mock-50", liveID, when), false)
 		return ClassifyIn(dc, []string{p}, strLeaf(p, liveID), strLeaf(p, recID), at, nil, []Raw{x}, nil, nil)[0]
 	}
@@ -1359,8 +1619,8 @@ func TestAServedRecordingAtTheCallsOwnInstantIsReadAsOneAMomentBefore(t *testing
 	at := r1Insert
 	for _, viaSet := range []bool{false, true} {
 		verdict := func(when time.Time) Learned {
-			dc := NewDriftCache()
-			x := dc.RawOf(receiveOf("mock-50", recID, when), true).ServedAs(1)
+			dc := clockedDrifts()
+			x := dc.RawOf(receiveOf("mock-50", recID, when), true).ServedAs(1).ServedAsRecorded()
 			if viaSet {
 				return ClassifyGiven(dc, []string{p}, strLeaf(p, liveID), strLeaf(p, recID), at, nil, nil, nil, nil, func() ([]GivenPlaces, error) {
 					return []GivenPlaces{PlacesOf(x)}, nil
@@ -1401,7 +1661,7 @@ func TestAServedRecordingAtTheCallsOwnInstantIsReadAsOneAMomentBefore(t *testing
 	base := recT.Truncate(time.Minute)
 	rec, live := strLeaf(sp, recT.Format(minute)), strLeaf(sp, recT.Add(time.Minute).Format(minute))
 	echo := func(when time.Time) Learned {
-		dc := NewDriftCache()
+		dc := clockedDrifts()
 		x := dc.RawOf(sentAtReceive("mock-51", when, base.Add(65*time.Second).Format(time.RFC3339)), true).ServedAs(1)
 		return ClassifyIn(dc, []string{sp}, live, rec, at, nil, []Raw{x}, nil, nil)[0]
 	}
@@ -1442,7 +1702,7 @@ func TestTheEchoOfWhatFGaveElsewhereNamesItsPlace(t *testing.T) {
 	before, after := at.Add(-time.Minute), at.Add(3*time.Minute)
 	const minute = "2006-01-02T15:04Z07:00"
 	rec, live := strLeaf(p, recT.Format(minute)), strLeaf(p, recT.Add(time.Minute).Format(minute))
-	dc := NewDriftCache()
+	dc := clockedDrifts()
 	other, copied := dc.RawOf(sentAtReceive("mock-40", after, recT.Add(-time.Hour).Format(time.RFC3339)), true).ServedAs(1), dc.RawOf(sentAtReceive("mock-41", after, recT.Add(time.Minute).Format(minute)), true).ServedAs(2)
 	ln := ClassifyGiven(dc, []string{p}, live, rec, at, nil, nil, nil, nil, func() ([]GivenPlaces, error) {
 		return []GivenPlaces{PlacesOf(other), PlacesOf(copied)}, nil
@@ -1455,10 +1715,10 @@ func TestTheEchoOfWhatFGaveElsewhereNamesItsPlace(t *testing.T) {
 	// recorded before the call, holds 11:14:10, the recorded minute rounded.
 	base := recT.Truncate(time.Minute)
 	for _, viaSet := range []bool{false, true} {
-		dc := NewDriftCache()
+		dc := clockedDrifts()
 		own := dc.RawOf(sentAtReceive("mock-42", before, base.Add(45*time.Second).Format(time.RFC3339)), true).ServedAs(3)
 		nb := dc.RawOf(sentAtReceive("mock-43", before.Add(-time.Minute), base.Add(10*time.Second).Format(time.RFC3339)), true).ServedAs(1)
-		if ln := ClassifyIn(dc, []string{p}, live, rec, at, nil, []Raw{own}, nil, nil)[0]; ln.Kind != KindNoise {
+		if ln := ClassifyIn(dc, []string{p}, live, rec, at, nil, []Raw{own}, nil, nil)[0]; !noiseOrRead(ln) {
 			t.Fatalf("the own place alone: %s (%s); want no copy, noise", ln.Kind, ln.Why)
 		}
 		var ln Learned
@@ -1481,13 +1741,13 @@ func TestTheEchoOfWhatFGaveElsewhereNamesItsPlace(t *testing.T) {
 	// (no copy alone), so nothing shows a copy: the value is noise, never
 	// refused naming the later recording as where the recorded moment
 	// stands.
-	dc = NewDriftCache()
+	dc = clockedDrifts()
 	own := dc.RawOf(sentAtReceive("mock-42", before, base.Add(45*time.Second).Format(time.RFC3339)), true).ServedAs(3)
 	late := dc.RawOf(sentAtReceive("mock-44", after, base.Add(10*time.Second).Format(time.RFC3339)), true).ServedAs(1)
 	ln = ClassifyGiven(dc, []string{p}, live, rec, at, nil, []Raw{own}, nil, nil, func() ([]GivenPlaces, error) {
 		return []GivenPlaces{PlacesOf(late)}, nil
 	})[0]
-	if ln.Kind != KindNoise {
+	if !noiseOrRead(ln) {
 		t.Errorf("the own place and a neighbour recorded after the call: %s (%s); want noise, the later recording no source of the recorded moment", ln.Kind, ln.Why)
 	}
 	// Both neighbours, the one recorded after the call read first: the
@@ -1496,7 +1756,7 @@ func TestTheEchoOfWhatFGaveElsewhereNamesItsPlace(t *testing.T) {
 	// neighbour as where the recorded moment stands, never the later one,
 	// which the recording made the call before.
 	for _, viaSet := range []bool{false, true} {
-		dc := NewDriftCache()
+		dc := clockedDrifts()
 		own := dc.RawOf(sentAtReceive("mock-42", before, base.Add(45*time.Second).Format(time.RFC3339)), true).ServedAs(3)
 		late := dc.RawOf(sentAtReceive("mock-44", after, base.Add(-10*time.Second).Format(time.RFC3339)), true).ServedAs(1)
 		nb := dc.RawOf(sentAtReceive("mock-43", before.Add(-time.Minute), base.Add(10*time.Second).Format(time.RFC3339)), true).ServedAs(2)
@@ -1537,7 +1797,7 @@ func TestAnOffsetOnARecordingAtTheCallsOwnInstantIsRefused(t *testing.T) {
 		for _, m := range []*models.Mock{receive, delivered} {
 			m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock = when, when
 		}
-		dc := NewDriftCache()
+		dc := clockedDrifts()
 		raw := []Raw{dc.RawOf(receive, true).ServedAs(2).OfAnotherTest(), dc.RawOf(delivered, true).ServedAs(1).OfAnotherTest()}
 		return ClassifyIn(dc, []string{p}, strLeaf(p, got.Add(-2*day).Format("2006-01-02")), strLeaf(p, sent.Add(-2*day).Format("2006-01-02")), r1Insert, nil, raw, nil, nil)[0]
 	}
@@ -1567,7 +1827,7 @@ func TestARecordingOfAnotherCallAtTheCallsOwnInstantIsWhereTheRecordedMomentStan
 	rec, live := strLeaf(p, recT.Format(minute)), strLeaf(p, recT.Add(time.Minute).Format(minute))
 	base := recT.Truncate(time.Minute)
 	for _, viaSet := range []bool{false, true} {
-		dc := NewDriftCache()
+		dc := clockedDrifts()
 		own := dc.RawOf(sentAtReceive("mock-42", at.Add(-time.Minute), base.Add(45*time.Second).Format(time.RFC3339)), true).ServedAs(3)
 		other := sentAtReceive("mock-44", at, base.Add(10*time.Second).Format(time.RFC3339))
 		other.Spec.HTTPReq.Method = "GET"
@@ -1632,7 +1892,7 @@ func TestAServedRecordingAtTheCallsOwnInstantIsReadBothWays(t *testing.T) {
 	} {
 		for _, hand := range []string{"served in the test", "served before the test", "unserved, the set showing F gave it"} {
 			verdict := func(when time.Time) (string, string) {
-				dc := NewDriftCache()
+				dc := clockedDrifts()
 				m := sentAtReceive("mock-44", when, base.Add(tc.sent).Format(time.RFC3339))
 				var nb Raw
 				var given GivenEarlier
@@ -1652,12 +1912,12 @@ func TestAServedRecordingAtTheCallsOwnInstantIsReadBothWays(t *testing.T) {
 					raw = append(raw, dc.RawOf(sentAtReceive("mock-42", before, base.Add(45*time.Second).Format(time.RFC3339)), true).ServedAs(3))
 				}
 				ln := ClassifyGiven(dc, []string{p}, live, rec, at, nil, raw, nil, nil, given)[0]
-				switch ln.Kind {
-				case KindNoise:
+				switch {
+				case noiseOrRead(ln):
 					return noise, ln.Why
-				case KindVariable:
+				case ln.Kind == KindVariable:
 					return bound, ln.Why
-				case KindUnaccounted:
+				case ln.Kind == KindUnaccounted:
 					return refused, ln.Why
 				}
 				return string(ln.Kind), ln.Why
@@ -1688,7 +1948,7 @@ func TestAServedRecordingAtTheCallsOwnInstantIsReadBothWays(t *testing.T) {
 	// first binds the value to the own place without reading the set. A
 	// value one reading binds and the other refuses is refused (fail
 	// closed), and the reason says where the first would have bound it.
-	dc := NewDriftCache()
+	dc := clockedDrifts()
 	raw := []Raw{
 		dc.RawOf(sentAtReceive("mock-44", at, base.Add(10*time.Second).Format(time.RFC3339)), false),
 		dc.RawOf(sentAtReceive("mock-42", before, base.Add(45*time.Second).Format(time.RFC3339)), true).ServedAs(3),
@@ -1791,8 +2051,8 @@ func TestAnExchangeServedLeafByLeafIsReadByWhenItWasRecorded(t *testing.T) {
 					if rc.at.After(at) {
 						twin = twin.OfAnotherTest()
 					}
-					asRaw := ClassifyGiven(NewDriftCache(), []string{p}, live, rec, at, nil, append([]Raw{twin}, ownRaw...), nil, nil, nil)[0]
-					got := ClassifyGiven(NewDriftCache(), []string{p}, live, rec, at, []Earlier{leafedOf(nb, rc.own, nbN)}, ownRaw, nil, nil, nil)[0]
+					asRaw := ClassifyGiven(clockedDrifts(), []string{p}, live, rec, at, nil, append([]Raw{twin}, ownRaw...), nil, nil, nil)[0]
+					got := ClassifyGiven(clockedDrifts(), []string{p}, live, rec, at, []Earlier{leafedOf(nb, rc.own, nbN)}, ownRaw, nil, nil, nil)[0]
 					if f.copy && (got.Kind != KindUnaccounted || !strings.Contains(got.Why, "mock-44")) {
 						t.Errorf("FALSE GREEN? %s: %s (%s); want it refused naming mock-44, whose answer F served before the call", name, got.Kind, got.Why)
 					}
@@ -1817,12 +2077,12 @@ func TestAnExchangeServedLeafByLeafIsReadByWhenItWasRecorded(t *testing.T) {
 				e.Seen[i].Live = servedAs
 			}
 		}
-		got := ClassifyGiven(NewDriftCache(), []string{p}, live, rec, at, []Earlier{e}, nil, nil, nil, nil)[0]
+		got := ClassifyGiven(clockedDrifts(), []string{p}, live, rec, at, []Earlier{e}, nil, nil, nil, nil)[0]
 		copied := servedAs != base.Add(10*time.Second).Format(time.RFC3339)
 		if copied && (got.Kind != KindUnaccounted || !strings.Contains(got.Why, "mock-44 at spec.resp.body.Messages[0].SentAt")) {
 			t.Errorf("FALSE GREEN? F served %s at a leaf of an exchange recorded after the call that holds 15:50:10: %s (%s); want it refused naming the leaf F served it at", servedAs, got.Kind, got.Why)
 		}
-		if !copied && got.Kind != KindNoise {
+		if !copied && !noiseOrRead(got) {
 			t.Errorf("the leaf served as recorded, 15:50:10, names no moment of F's: %s (%s); want noise", got.Kind, got.Why)
 		}
 	}
@@ -1831,7 +2091,7 @@ func TestAnExchangeServedLeafByLeafIsReadByWhenItWasRecorded(t *testing.T) {
 	// it and why, never read as nothing.
 	e := leafedOf(sentAtReceive("mock-44", at.Add(30*time.Second), base.Add(10*time.Second).Format(time.RFC3339)), true, 1)
 	e.Payload = Raw{}
-	if got := ClassifyGiven(NewDriftCache(), []string{p}, live, rec, at, []Earlier{e}, nil, nil, nil, nil)[0]; got.Kind != KindUnaccounted || !strings.Contains(got.Why, "was given no payload of mock-44") {
+	if got := ClassifyGiven(clockedDrifts(), []string{p}, live, rec, at, []Earlier{e}, nil, nil, nil, nil)[0]; got.Kind != KindUnaccounted || !strings.Contains(got.Why, "was given no payload of mock-44") {
 		t.Errorf("FALSE GREEN? an exchange recorded after the call with no payload: %s (%s); want it refused, naming it", got.Kind, got.Why)
 	}
 }
@@ -1881,9 +2141,9 @@ func TestAnOffsetOnWhatFServedAtAnExchangesLeafIsRefused(t *testing.T) {
 					}
 				}
 				name := rc.name + ", " + leaf + " served " + servedAs
-				got := ClassifyGiven(NewDriftCache(), []string{p}, live, rec, at, []Earlier{e}, []Raw{RawOf(m43, false)}, nil, nil, nil)[0]
+				got := ClassifyGiven(clockedDrifts(), []string{p}, live, rec, at, []Earlier{e}, []Raw{RawOf(m43, false)}, nil, nil, nil)[0]
 				if servedAs == recorded {
-					if got.Kind != KindNoise {
+					if !noiseOrRead(got) {
 						t.Errorf("%s: %s (%s); want noise: the leaf served as recorded names no moment of F's", name, got.Kind, got.Why)
 					}
 					continue
@@ -1898,7 +2158,7 @@ func TestAnOffsetOnWhatFServedAtAnExchangesLeafIsRefused(t *testing.T) {
 	}
 	m43 := RawOf(sentAtReceive("mock-43", at.Add(-3*time.Second), "2026-10-22T11:09:10Z"), true).ServedAs(1)
 	e := leafedOf(sentAtReceive("mock-44", at.Add(-time.Second), template), true, 2)
-	if got := ClassifyGiven(NewDriftCache(), []string{p}, live, rec, at, []Earlier{e}, []Raw{m43}, nil, nil, nil)[0]; got.Kind != KindNoise {
+	if got := ClassifyGiven(clockedDrifts(), []string{p}, live, rec, at, []Earlier{e}, []Raw{m43}, nil, nil, nil)[0]; !noiseOrRead(got) {
 		t.Errorf("two recordings both runs gave in the recording's order, the later one's leaf served as recorded: %s (%s); want noise", got.Kind, got.Why)
 	}
 	// What F served at the leaf is no place the recording gave the
@@ -1920,7 +2180,7 @@ func TestAnOffsetOnWhatFServedAtAnExchangesLeafIsRefused(t *testing.T) {
 					e.Seen[i].Live = template
 				}
 			}
-			if got := ClassifyGiven(NewDriftCache(), []string{p}, live, rec, at, []Earlier{e}, []Raw{x43}, nil, nil, nil)[0]; got.Kind != KindNoise {
+			if got := ClassifyGiven(clockedDrifts(), []string{p}, live, rec, at, []Earlier{e}, []Raw{x43}, nil, nil, nil)[0]; !noiseOrRead(got) {
 				t.Errorf("mock-43 served as serve %d, mock-44 recorded %v from the call, its leaf served %s: %s (%s); want noise: what F served there is no place the recording gave the application", n43, when, template, got.Kind, got.Why)
 			}
 		}
@@ -1962,13 +2222,13 @@ func TestAnExchangeWithNoRecordedTimeIsReadBothWays(t *testing.T) {
 				ownRaw = []Raw{RawOf(sentAtReceive("mock-42", at.Add(-time.Second), base.Add(45*time.Second).Format(time.RFC3339)), true).ServedAs(2)}
 			}
 			nb := sentAtReceive("mock-44", time.Time{}, f.sent)
-			got := ClassifyGiven(NewDriftCache(), []string{p}, live, rec, at, []Earlier{leafedOf(nb, true, 1)}, ownRaw, nil, nil, nil)[0]
-			twin := ClassifyGiven(NewDriftCache(), []string{p}, live, rec, at, []Earlier{leafedOf(sentAtReceive("mock-44", at, f.sent), true, 1)}, ownRaw, nil, nil, nil)[0]
+			got := ClassifyGiven(clockedDrifts(), []string{p}, live, rec, at, []Earlier{leafedOf(nb, true, 1)}, ownRaw, nil, nil, nil)[0]
+			twin := ClassifyGiven(clockedDrifts(), []string{p}, live, rec, at, []Earlier{leafedOf(sentAtReceive("mock-44", at, f.sent), true, 1)}, ownRaw, nil, nil, nil)[0]
 			if got.Kind != twin.Kind {
 				t.Errorf("%s: %s (%s); the same exchange recorded at the call's own instant is %s (%s)", name, got.Kind, got.Why, twin.Kind, twin.Why)
 			}
 			if !f.copy {
-				if !withOwn && got.Kind != KindNoise {
+				if !withOwn && !noiseOrRead(got) {
 					t.Errorf("%s: %s (%s); want noise", name, got.Kind, got.Why)
 				}
 				// Beside the own place, the offset rule reads it as one
@@ -2043,7 +2303,7 @@ func TestARecordingWithNoRecordedTimeIsReadBothWays(t *testing.T) {
 							return []GivenPlaces{PlacesOf(RawOf(sentAtReceive("mock-44", rat, f.sent), true).ServedAs(1))}, nil
 						}
 					}
-					return ClassifyGiven(NewDriftCache(), []string{p}, live, rec, at, nil, nb(rat), nil, nil, given)[0]
+					return ClassifyGiven(clockedDrifts(), []string{p}, live, rec, at, nil, nb(rat), nil, nil, given)[0]
 				}
 				got, twin := read(time.Time{}), read(at)
 				if got.Kind != twin.Kind {
@@ -2053,7 +2313,7 @@ func TestARecordingWithNoRecordedTimeIsReadBothWays(t *testing.T) {
 					continue
 				}
 				if !f.copy {
-					if !withOwn && got.Kind != KindNoise {
+					if !withOwn && !noiseOrRead(got) {
 						t.Errorf("%s: %s (%s); want noise", name, got.Kind, got.Why)
 					}
 					continue

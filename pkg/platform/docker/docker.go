@@ -940,6 +940,13 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	if opts.GlobalPassthrough {
 		command = append(command, "--global-passthrough")
 	}
+	allowEgress, err := models.NormalizeAllowEgress(opts.AllowEgress)
+	if err != nil {
+		return nil, err
+	}
+	for _, e := range allowEgress {
+		command = append(command, "--allow-egress="+e)
+	}
 	if opts.DisableHandshakeHold {
 		command = append(command, "--disable-handshake-hold")
 	}

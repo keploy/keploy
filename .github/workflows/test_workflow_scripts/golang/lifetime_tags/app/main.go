@@ -194,7 +194,7 @@ func (a *app) getRate(r *http.Request) (int, error) {
 		a.rate = rate
 		return a.rate, nil
 	}
-	if err := a.db.QueryRowContext(r.Context(), `SELECT v FROM settings WHERE k = 'tax_rate'`).Scan(&a.rate); err != nil {
+	if err := a.db.QueryRowContext(r.Context(), rateQuery).Scan(&a.rate); err != nil {
 		return 0, fmt.Errorf("read the tax rate: %w", err)
 	}
 	return a.rate, nil
@@ -366,11 +366,40 @@ func (a *app) count(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]int{"orders": orders})
 }
 
+// rateQuery reads the tax rate with its key inlined: a COM_QUERY, whose
+// literals are its parameters. SHOP_RATE_KEY inlines another key (a word):
+// the lane replays a recording with it, as an app that now sends another
+// literal in the statement it recorded. A replayer that answers it with the
+// recording of the statement made with another literal serves the rate the
+// recording read, so the test passes: a false green.
+var rateQuery = fmt.Sprintf(`SELECT v FROM settings WHERE k = '%s'`, rateKey(getenv("SHOP_RATE_KEY", "tax_rate")))
+
+// rateKey is key when it is a word (letters, digits, '_'), so inlining it
+// cannot change the statement; it exits otherwise.
+func rateKey(key string) string {
+	for _, c := range key {
+		if !(c == '_' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9') {
+			log.Fatalf("SHOP_RATE_KEY %q is not a word", key)
+		}
+	}
+	return key
+}
+
 // itemQuery is the statement /pool prepares; item is the row it must read
-// for id, as itemRows seeds it.
-const itemQuery = `SELECT id, name, price FROM items WHERE id = ?`
+// for id, as itemRows seeds it. SHOP_ITEM_QUERY puts another statement in
+// its place: the lane replays a recording with it, as an app whose query
+// changed since it was recorded.
+var itemQuery = getenv("SHOP_ITEM_QUERY", `SELECT id, name, price FROM items WHERE id = ?`)
 
 func item(id int) string { return fmt.Sprintf("%d:item-%d:%d", id, id, id*100+7) }
+
+// itemShift is added to the id the sequential read binds, not to the id
+// whose row it must read (SHOP_ITEM_ID_SHIFT, 0 by default): the lane
+// replays a recording with it, as an app that now sends another parameter
+// to the statement it recorded. A replayer that answers such a read with a
+// recording of the statement made with another parameter serves the row
+// the app wants, so the test passes: a false green.
+var itemShift, _ = strconv.Atoi(getenv("SHOP_ITEM_ID_SHIFT", "0"))
 
 const poolConns = 8
 
@@ -485,7 +514,7 @@ func sequential(ctx context.Context, db *sql.DB, ids []int) ([]string, []error) 
 	}
 	defer stmt.Close()
 	for i, id := range ids {
-		got[i], errs[i] = scanItem(stmt.QueryRowContext(ctx, id))
+		got[i], errs[i] = scanItem(stmt.QueryRowContext(ctx, id+itemShift))
 	}
 	return got, errs
 }

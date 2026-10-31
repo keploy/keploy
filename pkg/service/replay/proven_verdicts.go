@@ -3,7 +3,6 @@ package replay
 import (
 	"fmt"
 	"slices"
-	"sort"
 	"strings"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -615,7 +614,8 @@ func noteConsumers(consumers map[string][]string, test string, consumed []models
 // call is likely one that test recorded, such as a later exchange of a
 // connection it opened at record time and this test opened at replay. A
 // recording its own test owns too, or none owns (one recorded between tests),
-// is named with none. It returns "test: call (closest mock, recorded in test)"
+// is named with none (models.UnmatchedCall.NameRecordedIn, which keploy mock
+// replay's receipt shares). It returns "test: call (closest mock, recorded in test)"
 // for each it named.
 func markRecordedIn(results []models.TestResult, owners map[string][]string) []string {
 	var named []string
@@ -623,34 +623,21 @@ func markRecordedIn(results []models.TestResult, owners map[string][]string) []s
 		r := &results[i]
 		for j := range r.FailureInfo.UnmatchedCalls {
 			c := &r.FailureInfo.UnmatchedCalls[j]
-			by := owners[c.ClosestMock]
-			if !c.NotOwned || c.ClosestMock == "" || len(by) == 0 || slices.Contains(by, r.TestCaseID) {
-				continue
+			if c.NameRecordedIn(r.TestCaseID, owners) {
+				named = append(named, fmt.Sprintf("%s: %s (%s, recorded in %s)", r.TestCaseID, c.ActualSummary, c.ClosestMock, c.RecordedIn))
 			}
-			c.RecordedIn = by[0]
-			named = append(named, fmt.Sprintf("%s: %s (%s, recorded in %s)", r.TestCaseID, c.ActualSummary, c.ClosestMock, by[0]))
 		}
 	}
 	return named
 }
 
-// ownersOf is the tests that own each mock of the plan, by name, sorted.
+// ownersOf is the tests that own each mock of the plan, by name, sorted
+// (models.MockOwners).
 func (p *exactPlan) ownersOf() map[string][]string {
 	if p == nil {
 		return nil
 	}
-	out := map[string][]string{}
-	for test, names := range p.owned {
-		for _, n := range names {
-			if !slices.Contains(out[n], test) {
-				out[n] = append(out[n], test)
-			}
-		}
-	}
-	for _, tests := range out {
-		sort.Strings(tests)
-	}
-	return out
+	return models.MockOwners(p.owned)
 }
 
 // markConsumedBy names, on each unconsumed test mock of the set's results

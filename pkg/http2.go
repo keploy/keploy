@@ -624,6 +624,12 @@ func isGRPCNoAnswer(err error) bool {
 	return false
 }
 
+// isGRPCCanceled reports whether err is a gRPC call cancelled under it, which
+// grpc-go reports as codes.Canceled with no cause (see isGRPCNoAnswer).
+func isGRPCCanceled(err error) bool {
+	return status.Code(err) == codes.Canceled
+}
+
 // unreachableGRPCAuthority is err, or, when a gRPC call lost its connection
 // after the dial went through (isGRPCConnectionLost) at an address reach says
 // the app's server on appPort (the port the test was recorded on, 0 when not

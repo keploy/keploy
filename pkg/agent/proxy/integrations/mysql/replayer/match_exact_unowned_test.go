@@ -84,24 +84,32 @@ func TestAPreparedStatementRunOutsideEveryTestIsAnsweredByItsParametersRecording
 }
 
 // Under exact serving with a test open, the open test's own recording of a
-// prepared statement ranks first, above a recording no test owns that the
-// view shows too (the worker scope's), even one recorded with the command's
-// own parameters; of two recordings no test owns, the one recorded with the
-// command's own parameters ranks above the first one with other parameters.
-// The first row pins the ownership read: were the worker scope's recordings
-// counted as the test's own, its recording of id 1 would answer.
+// prepared statement with the command's parameters ranks first, above a
+// recording with them that no test owns but the view shows too (the worker
+// scope's). Its own recording with other parameters does not answer: that
+// is another call's rows (sameStatementOnly), and the worker scope's with
+// the command's parameters does. Of two recordings no test owns, the one
+// recorded with the command's own parameters ranks above the first one with
+// other parameters. The first row pins the ownership read: were the worker
+// scope's recordings counted as the test's own, its recording of id 1, the
+// first of the two in recorded order, would answer.
 func TestUnderExactServingTheOpenTestsOwnRecordingRanksFirstThenTheParametersOwn(t *testing.T) {
-	t.Run("the test's own with other parameters above the worker scope's with the command's", func(t *testing.T) {
-		prep := diffPrepareMock("prep-c1", "c1", poolQuery, 1, diffBase.Add(-time.Millisecond))
-		worker := unownedExecs("worker-exec", models.LifetimePerTest, "1")
-		own := diffMock("t-exec-2", "c1", []mysql.Request{executeReq(1, "2")}, diffBase.Add(5*time.Millisecond), models.LifetimePerTest, "mocks")
-		mm := proxy.NewMockManager(nil, nil, zap.NewNop())
-		t.Cleanup(mm.Close)
-		mm.SetMocksWithWindow(nil, append([]*models.Mock{prep, own}, worker...), models.BaseTime, time.Now().Add(time.Hour))
-		mm.ServeExactWorker(mockNamesOf(worker))
-		mm.ServeExactTest("T", []*models.Mock{own})
-		expectAnswers(t, mm, func(string) string { return "t-exec-2" }, "1")
-	})
+	for _, c := range []struct{ name, ownID, want string }{
+		{"the test's own with the command's parameters above the worker scope's with them", "1", "t-exec-1"},
+		{"the worker scope's with the command's parameters, not the test's own with other parameters", "2", "worker-exec-1"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			prep := diffPrepareMock("prep-c1", "c1", poolQuery, 1, diffBase.Add(-time.Millisecond))
+			worker := unownedExecs("worker-exec", models.LifetimePerTest, "1")
+			own := diffMock("t-exec-"+c.ownID, "c1", []mysql.Request{executeReq(1, c.ownID)}, diffBase.Add(5*time.Millisecond), models.LifetimePerTest, "mocks")
+			mm := proxy.NewMockManager(nil, nil, zap.NewNop())
+			t.Cleanup(mm.Close)
+			mm.SetMocksWithWindow(nil, append([]*models.Mock{prep, own}, worker...), models.BaseTime, time.Now().Add(time.Hour))
+			mm.ServeExactWorker(mockNamesOf(worker))
+			mm.ServeExactTest("T", []*models.Mock{own})
+			expectAnswers(t, mm, func(string) string { return c.want }, "1")
+		})
+	}
 	for _, order := range [][]string{{"1", "2"}, {"2", "1"}} {
 		t.Run(fmt.Sprintf("of the worker scope's, the command's parameters' own/order=%v", order), func(t *testing.T) {
 			prep := diffPrepareMock("prep-c1", "c1", poolQuery, 1, diffBase.Add(-time.Millisecond))

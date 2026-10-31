@@ -7,9 +7,12 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // readsInstr is the harness's agent, which answers every filter that opens a
@@ -329,14 +332,15 @@ func sortedNoVerdicts(r *Replayer) map[string][]string {
 func TestWithoutUnreadLearning(t *testing.T) {
 	consumed := map[string]models.MockState{
 		"mock-1": {Name: "mock-1", ReqBodyNoise: map[string][]string{"body.b": {}, "body.a": {}}, Variables: models.MockVariables{"e": {Echo: true}, "v": {Use: []string{"body.v"}}},
-			Binds: map[string]models.MockVariables{"mock-0": {"v": {Bind: "body.v"}}}},
+			Binds:  map[string]models.MockVariables{"mock-0": {"v": {Bind: "body.v"}}},
+			Clocks: map[string]models.ClockOffset{"body.at": {Res: time.Millisecond}}},
 		"mock-2": {Name: "mock-2", ReqBodyNoise: map[string][]string{"body.c": {}}},
 		"boot":   {Name: "boot", ReqBodyNoise: map[string][]string{"body.d": {}}},
 	}
 	consumers := map[string][]string{"mock-1": {"test-1", "test-2"}, "mock-2": {"test-2"}}
 	for i := 0; i < 50; i++ {
 		kept, dropped, byTest, from := withoutUnreadLearning(consumed, consumers, map[string]bool{"test-1": true})
-		want := "mock-1 body.a (noise),mock-1 body.b (noise),mock-1 e (echo),mock-1 v (bound at mock-0),mock-1 v (variable)"
+		want := "mock-1 body.a (noise),mock-1 body.at (clock),mock-1 body.b (noise),mock-1 e (echo),mock-1 v (bound at mock-0),mock-1 v (variable)"
 		if strings.Join(dropped, ",") != want {
 			t.Fatalf("dropped %v; want %s", dropped, want)
 		}
@@ -350,7 +354,7 @@ func TestWithoutUnreadLearning(t *testing.T) {
 		if !reflect.DeepEqual(from, map[string][]string{"test-2": {"test-1"}}) {
 			t.Fatalf("from %v; want test-2's naming test-1", from)
 		}
-		if kept["mock-1"].ReqBodyNoise != nil || kept["mock-1"].Variables != nil || kept["mock-1"].Binds != nil || len(kept["mock-2"].ReqBodyNoise) != 1 || len(kept["boot"].ReqBodyNoise) != 1 {
+		if kept["mock-1"].ReqBodyNoise != nil || kept["mock-1"].Variables != nil || kept["mock-1"].Binds != nil || kept["mock-1"].Clocks != nil || len(kept["mock-2"].ReqBodyNoise) != 1 || len(kept["boot"].ReqBodyNoise) != 1 {
 			t.Fatalf("kept %+v", kept)
 		}
 	}
@@ -359,6 +363,11 @@ func TestWithoutUnreadLearning(t *testing.T) {
 	}
 	if kept, dropped, byTest, from := withoutUnreadLearning(consumed, consumers, nil); dropped != nil || byTest != nil || from != nil || !reflect.DeepEqual(kept, consumed) {
 		t.Fatalf("with every request read: kept %v, dropped %v, by test %v", kept, dropped, byTest)
+	}
+	// A mock the unread test consumed that learned only a clock read is
+	// dropped and named as one that learned anything else is.
+	if kept, dropped, _, _ := withoutUnreadLearning(map[string]models.MockState{"mock-4": {Name: "mock-4", Clocks: map[string]models.ClockOffset{"body.exp": {Min: 30 * time.Minute, Max: 30*time.Minute + time.Millisecond, Res: time.Millisecond}}}}, map[string][]string{"mock-4": {"test-1"}}, map[string]bool{"test-1": true}); strings.Join(dropped, ",") != "mock-4 body.exp (clock + 30m (from 30m to 30m0.001s))" || kept["mock-4"].Clocks != nil {
+		t.Fatalf("a clock read alone: dropped %v, kept %+v", dropped, kept)
 	}
 	// A mock the unread test consumed that learned nothing marks no test.
 	if _, dropped, byTest, from := withoutUnreadLearning(map[string]models.MockState{"mock-3": {Name: "mock-3"}}, map[string][]string{"mock-3": {"test-1"}}, map[string]bool{"test-1": true}); dropped != nil || byTest != nil || from != nil {
@@ -370,32 +379,86 @@ func TestWithoutUnreadLearning(t *testing.T) {
 // (keptLearning) is what the round keeps of it: nothing learned on a shared
 // recording the settlement did not pin (stripUnresolved), nor what the agent
 // learned for a test whose request it did not say it read
-// (withoutUnreadLearning); the rest as it is, and consumed unchanged.
+// (withoutUnreadLearning); the rest as it is, and consumed unchanged. A
+// clock read is learning like any other: one learned alone is kept or
+// dropped as noise is.
 func TestKeptLearningIsWhatTheRoundKeeps(t *testing.T) {
 	noise := func(name string) models.MockState {
 		return models.MockState{Name: name, Kind: models.HTTP, ReqBodyNoise: map[string][]string{"body.at": {}}}
 	}
-	consumed := map[string]models.MockState{"shared-1": noise("shared-1"), "pinned-1": noise("pinned-1"), "own-2": noise("own-2"), "own-3": noise("own-3")}
+	clock := func(name string) models.MockState {
+		return models.MockState{Name: name, Kind: models.HTTP, Clocks: map[string]models.ClockOffset{"body.at": {Res: time.Millisecond}}}
+	}
+	consumed := map[string]models.MockState{"shared-1": noise("shared-1"), "pinned-1": noise("pinned-1"), "own-2": noise("own-2"), "own-3": noise("own-3"),
+		"shared-4": clock("shared-4"), "pinned-4": clock("pinned-4"), "own-4": clock("own-4"), "own-5": clock("own-5")}
 	r := &Replayer{exact: &exactPlan{share: &sharePlan{
 		sharing: true,
-		candOf:  map[string][]string{"shared-1": {"test-1", "test-3"}, "pinned-1": {"test-1", "test-3"}},
-		settled: models.SetShares{Pins: map[string]string{"pinned-1": "test-3"}},
+		candOf:  map[string][]string{"shared-1": {"test-1", "test-3"}, "pinned-1": {"test-1", "test-3"}, "shared-4": {"test-1", "test-3"}, "pinned-4": {"test-1", "test-3"}},
+		settled: models.SetShares{Pins: map[string]string{"pinned-1": "test-3", "pinned-4": "test-3"}},
 	}}}
 	r.requestsUnread.note("test-2", "")
-	kept := r.keptLearning(consumed, map[string][]string{"own-2": {"test-2"}, "own-3": {"test-3"}, "pinned-1": {"test-3"}})
+	kept := r.keptLearning(consumed, map[string][]string{"own-2": {"test-2"}, "own-3": {"test-3"}, "pinned-1": {"test-3"}, "own-4": {"test-2"}, "own-5": {"test-3"}, "pinned-4": {"test-3"}})
 	var learned []string
 	for name, st := range kept {
-		if len(st.ReqBodyNoise) > 0 || len(st.Variables) > 0 || len(st.Binds) > 0 {
+		if len(st.ReqBodyNoise) > 0 || len(st.Variables) > 0 || len(st.Binds) > 0 || len(st.Clocks) > 0 {
 			learned = append(learned, name)
 		}
 	}
 	sort.Strings(learned)
-	if want := []string{"own-3", "pinned-1"}; !reflect.DeepEqual(learned, want) {
+	if want := []string{"own-3", "own-5", "pinned-1", "pinned-4"}; !reflect.DeepEqual(learned, want) {
 		t.Fatalf("the retry cycles are served the learning of %v; the round keeps %v (not the unpinned share's, nor what test-2 learned with its request unread)", learned, want)
 	}
 	for name, st := range consumed {
-		if len(st.ReqBodyNoise) == 0 {
+		if len(st.ReqBodyNoise) == 0 && len(st.Clocks) == 0 {
 			t.Fatalf("keptLearning changed what was consumed: %s lost its learning", name)
 		}
+	}
+}
+
+// The learning keploy record keeps of a set (readLearning, which it
+// persists) and what its retry cycles are served (keptLearning) give each
+// recording place one variable: where a later test binds the run's variable
+// at an earlier test's call that carries the earlier test's own there, the
+// run's takes it in every state of that test (learn.RunTakesPlaces), a mock
+// read as learned in the one test that consumed it. A mock two tests
+// consumed is read as of none, and keeps its names. The kept set says so,
+// naming the tests' calls and fields, never the value.
+func TestTheKeptLearningGivesTheRunsVariableAnEarlierTestsOwnPlace(t *testing.T) {
+	v := func(bind string, use ...string) models.MockVariable {
+		return models.MockVariable{Recorded: "o-1", Bind: bind, Use: use}
+	}
+	consumed := map[string]models.MockState{
+		"mock-0": {Name: "mock-0"},
+		"mock-1": {Name: "mock-1", Variables: models.MockVariables{"order": v("", "path1")}, Binds: map[string]models.MockVariables{"mock-0": {"order": v("body.order")}}},
+		"mock-2": {Name: "mock-2", Variables: models.MockVariables{"run-order": v("", "path1")}, Binds: map[string]models.MockVariables{"mock-0": {"run-order": v("body.order")}}},
+	}
+	consumers := map[string][]string{"mock-0": {"test-b"}, "mock-1": {"test-b"}, "mock-2": {"test-c"}}
+	want := map[string]models.MockState{"mock-0": consumed["mock-0"], "mock-2": consumed["mock-2"],
+		"mock-1": {Name: "mock-1", Variables: models.MockVariables{"run-order": v("", "path1")}, Binds: map[string]models.MockVariables{"mock-0": {"run-order": v("body.order")}}}}
+	core, logs := observer.New(zap.InfoLevel)
+	r := &Replayer{logger: zap.New(core)}
+	if got := r.keptLearning(consumed, consumers); !reflect.DeepEqual(got, want) {
+		t.Fatalf("the retry cycles are served %+v; want %+v", got, want)
+	}
+	kept, notKept, from := r.readLearning("s", consumed, consumers)
+	if !reflect.DeepEqual(kept, want) || notKept != nil || from != nil {
+		t.Fatalf("the round keeps %+v (%v, %v); want %+v", kept, notKept, from, want)
+	}
+	lines := logs.FilterMessageSnippet("own variable as the test set's").All()
+	if len(lines) != 1 {
+		t.Fatalf("logged %d lines of the run's variable taking test B's place; want one", len(lines))
+	}
+	f := lines[0].ContextMap()
+	if f["test"] != "test-b" || f["variable"] != "order" || f["setVariable"] != "run-order" || f["mock"] != "mock-0" || f["field"] != "body.order" {
+		t.Fatalf("the line says %v; want test B's variable, the run's, and B's call and field", f)
+	}
+	for _, c := range lines[0].Context {
+		if strings.Contains(c.String, "o-1") {
+			t.Fatalf("the line's %s carries the value: %q", c.Key, c.String)
+		}
+	}
+	consumers["mock-1"] = []string{"test-b", "test-c"}
+	if got := r.keptLearning(consumed, consumers); !reflect.DeepEqual(got["mock-1"], consumed["mock-1"]) {
+		t.Fatalf("a mock two tests consumed became %+v; want its names kept", got["mock-1"])
 	}
 }

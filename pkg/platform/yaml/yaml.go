@@ -69,6 +69,12 @@ type NetworkTrafficDoc struct {
 	// like noise, kept off the per-kind spec.
 	Variables models.MockVariables `json:"variables,omitempty" yaml:"variables,omitempty"`
 
+	// Clocks, when present, names the request places of the call the learn
+	// step learned as a read of the application's clock, plain or plus a
+	// constant offset (models.MockSpec.Clocks): a kind-agnostic top-level
+	// block, like variables, kept off the per-kind spec.
+	Clocks map[string]models.ClockOffset `json:"clocks,omitempty" yaml:"clocks,omitempty"`
+
 	// Real, on a test case, is the mock.real destinations its request used in
 	// its recording (models.TestCase.Real); written and read only under the
 	// proven switch.

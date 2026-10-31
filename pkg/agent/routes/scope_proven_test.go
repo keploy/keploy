@@ -26,6 +26,7 @@ type wireSvc struct {
 	begun       []models.ScopeReq
 	ended       []models.ScopeReq
 	skips       map[string]string
+	needs       map[string][]models.ScopeNeed
 	beginResp   models.ScopeBeginResp
 	beginErr    *models.ScopeError
 	endResp     models.ScopeEndResp
@@ -48,8 +49,8 @@ func (s *wireSvc) ProvenEnd(_ context.Context, req models.ScopeReq) (models.Scop
 	return s.endResp, s.endErr
 }
 
-func (s *wireSvc) SetScopeSkips(_ context.Context, skip map[string]string) error {
-	s.skips = skip
+func (s *wireSvc) SetScopeSkips(_ context.Context, skip map[string]string, needs map[string][]models.ScopeNeed) error {
+	s.skips, s.needs = skip, needs
 	return nil
 }
 
@@ -144,9 +145,15 @@ func TestTheGateTakesTheSkipMapAndAcknowledgesIt(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &ack); err != nil || ack.V != 1 || ack.Skips != 1 {
 		t.Fatalf("ack %s (%v)", rec.Body.String(), err)
 	}
+	// The needs ride the same push, and are acknowledged by count.
+	rec = call(t, a.HandleScopeGate, `{"run":null,"needs":{"o::TestUse":[{"test":"o::TestMake","reason":"r"}]}}`)
+	if err := json.Unmarshal(rec.Body.Bytes(), &ack); err != nil || rec.Code != http.StatusOK || ack.Needs != 1 || ack.Skips != 0 ||
+		len(svc.needs["o::TestUse"]) != 1 || svc.needs["o::TestUse"][0] != (models.ScopeNeed{Test: "o::TestMake", Reason: "r"}) {
+		t.Fatalf("needs: %d %s, needs %v (%v)", rec.Code, rec.Body.String(), svc.needs, err)
+	}
 	// A push without a map (an empty one is left out of the JSON) skips nothing.
 	rec = call(t, a.HandleScopeGate, `{"run":null}`)
-	if rec.Code != http.StatusOK || svc.skips != nil {
+	if rec.Code != http.StatusOK || svc.skips != nil || svc.needs != nil {
 		t.Fatalf("empty gate: %d %s, skips %v", rec.Code, rec.Body.String(), svc.skips)
 	}
 }
@@ -173,6 +180,10 @@ func TestAnAgentWithoutTheSwitchRefusesASkipList(t *testing.T) {
 	rec := call(t, a.HandleScopeGate, `{"run":null,"skip":{"a::T":"r"}}`)
 	if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "KEPLOY_PROVEN") {
 		t.Fatalf("gate: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = call(t, a.HandleScopeGate, `{"run":null,"needs":{"a::B":[{"test":"a::A","reason":"r"}]}}`)
+	if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "KEPLOY_PROVEN") {
+		t.Fatalf("needs without the switch: %d %s", rec.Code, rec.Body.String())
 	}
 }
 

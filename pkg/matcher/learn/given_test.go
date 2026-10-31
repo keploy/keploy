@@ -109,20 +109,29 @@ func TestAPickFromTheTestRequestIsRefused(t *testing.T) {
 		rec := Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: f[0]}}}
 		live := Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: f[1]}}}
 		// Without the request, nothing earlier holds it: noise (what the
-		// learn step did before it read the request).
-		if ln := ClassifyIn(NewDriftCache(), []string{p}, live, rec, at, nil, nil, nil, nil)[0]; ln.Kind != KindNoise {
-			t.Errorf("%q -> %q, no test case's request: %s (%s); want noise", f[0], f[1], ln.Kind, ln.Why)
+		// learn step did before it read the request), and of a whole
+		// instant, with no call window, a read of the clock a replay checks.
+		// Written to the second, the pair is taken off the whole minute
+		// (:07), where the learn step would learn it at the minute's cut.
+		off := func(v string) Shape {
+			if strings.HasSuffix(v, ":00Z") {
+				v = strings.TrimSuffix(v, ":00Z") + ":07Z"
+			}
+			return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: v}}}
+		}
+		if ln := ClassifyIn(clockedDrifts(), []string{p}, off(f[1]), off(f[0]), at, nil, nil, nil, nil)[0]; !noiseIn(ln, nil) || ln.Kind == KindUnaccounted {
+			t.Errorf("%q -> %q (off the whole minute), no test case's request: %s Read=%+v (%s); want noise, and of a whole instant a read of the clock", f[0], f[1], ln.Kind, ln.Read, ln.Why)
 		}
 		for _, slots := range [][]string{{"11:13", "11:14", "11:15", "11:16"}, {"2026-10-22T11:14:00Z", "2026-10-22T11:15:00Z"}, {"2026-10-22 11:14", "2026-10-22 11:15"}} {
 			given := []Earlier{GivenRequest(slotRequest(slots...))}
-			ln := ClassifyIn(NewDriftCache(), []string{p}, live, rec, at, given, nil, nil, nil)[0]
+			ln := ClassifyIn(clockedDrifts(), []string{p}, live, rec, at, given, nil, nil, nil)[0]
 			if ln.Kind != KindVariable || !ln.From.Given || !ln.From.Echo || ln.From.Mock != "test case test-1" || !strings.HasPrefix(ln.From.Path, "body.slots[") || !strings.Contains(ln.Why, "stands in test case test-1 at body.slots[") {
 				t.Errorf("%q -> %q, slots %v: %s from %+v (%s); want a variable of the test case's slot", f[0], f[1], slots, ln.Kind, ln.From, ln.Why)
 			}
 		}
 		// The request lists F's pick only.
 		given := []Earlier{GivenRequest(slotRequest("11:15", "11:16"))}
-		if ln := ClassifyIn(NewDriftCache(), []string{p}, live, rec, at, given, nil, nil, nil)[0]; ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "stands in test case test-1 at body.slots[0]") {
+		if ln := ClassifyIn(clockedDrifts(), []string{p}, live, rec, at, given, nil, nil, nil)[0]; ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "stands in test case test-1 at body.slots[0]") {
 			t.Errorf("%q -> %q, F's pick listed only: %s (%s); want it refused, naming the test case's slot", f[0], f[1], ln.Kind, ln.Why)
 		}
 	}
@@ -131,7 +140,7 @@ func TestAPickFromTheTestRequestIsRefused(t *testing.T) {
 		return Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, at, time.Second)}}
 	}
 	given := []Earlier{GivenRequest(slotRequest("11:14", "11:15"))}
-	if ln := ClassifyIn(NewDriftCache(), []string{p}, typed(time.Date(2026, 10, 22, 11, 15, 0, 0, time.UTC)), typed(time.Date(2026, 10, 22, 11, 14, 0, 0, time.UTC)), at, given, nil, nil, nil)[0]; ln.Kind != KindVariable || !ln.From.Given {
+	if ln := ClassifyIn(clockedDrifts(), []string{p}, typed(time.Date(2026, 10, 22, 11, 15, 0, 0, time.UTC)), typed(time.Date(2026, 10, 22, 11, 14, 0, 0, time.UTC)), at, given, nil, nil, nil)[0]; ln.Kind != KindVariable || !ln.From.Given {
 		t.Errorf("a typed pick: %s from %+v (%s); want a variable of the test case's slot", ln.Kind, ln.From, ln.Why)
 	}
 }
@@ -149,7 +158,7 @@ func TestTheTestRequestIsAnEarlierPlace(t *testing.T) {
 		return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: v}}}
 	}
 	for _, f := range [][2]string{{"ref-3f2b8c-ord-77", "ref-3f2b8c-ord-78"}, {"ref-ord-77", "ref-ord-78"}, {"ord-77", "ord-78"}} {
-		ln := ClassifyIn(NewDriftCache(), []string{p}, shape(f[1]), shape(f[0]), at, given, nil, nil, nil)[0]
+		ln := ClassifyIn(clockedDrifts(), []string{p}, shape(f[1]), shape(f[0]), at, given, nil, nil, nil)[0]
 		if ln.Kind != KindVariable || !ln.From.Given || ln.From.Mock != "test case test-1" || ln.From.Path != "body.order" || ln.From.Whole != (f[0] == "ord-77") {
 			t.Errorf("%q -> %q, drifted with the request's template value: %s from %+v (%s); want a variable of the request's body.order", f[0], f[1], ln.Kind, ln.From, ln.Why)
 		}
@@ -158,7 +167,7 @@ func TestTheTestRequestIsAnEarlierPlace(t *testing.T) {
 	// before the request does: what the application was given ranks as an
 	// answer does.
 	call := Earlier{Mock: "mock-2", At: at.Add(-time.Second), Own: true, Seen: []Seen{{Side: Request, Leaf: Leaf{Path: "body.q", Noise: "body.q", Type: String, Value: "for ord-77 now"}, Live: "for ord-78 now", Place: "body.q"}}}
-	if ln := ClassifyIn(NewDriftCache(), []string{p}, shape("ord-78"), shape("ord-77"), at, append(append([]Earlier(nil), given...), call), nil, nil, nil)[0]; ln.Kind != KindVariable || ln.From.Mock != "mock-2" || ln.From.Path != "body.q" {
+	if ln := ClassifyIn(clockedDrifts(), []string{p}, shape("ord-78"), shape("ord-77"), at, append(append([]Earlier(nil), given...), call), nil, nil, nil)[0]; ln.Kind != KindVariable || ln.From.Mock != "mock-2" || ln.From.Path != "body.q" {
 		t.Errorf("sent by a call too: %s from %+v (%s); want a variable of mock-2's body.q", ln.Kind, ln.From, ln.Why)
 	}
 	given[0].Seen[0].Written, given[0].Seen[0].Record = true, "orders/1"
@@ -186,14 +195,14 @@ func TestAPickFromTheTestRequestThatIsNoInstantIsRefused(t *testing.T) {
 		{`{"open":"2026-10-22T09:00:00Z","close":"2026-10-22T17:00:00Z"}`, "open", "closed", "body{keys}"},
 	} {
 		given := []Earlier{GivenRequest(&models.TestRequest{Test: "test-1", Parts: []models.TestRequestPart{jsonType, {Name: "body", Recorded: c.body, Sent: c.body}}})}
-		ln := ClassifyIn(NewDriftCache(), []string{p}, shape(c.live), shape(c.rec), at, given, nil, nil, nil)[0]
+		ln := ClassifyIn(clockedDrifts(), []string{p}, shape(c.live), shape(c.rec), at, given, nil, nil, nil)[0]
 		if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "appears in what the test case gave the application, in test case test-1 at "+c.at+",") {
 			t.Errorf("%q -> %q from %s: %s (%s); want it refused, naming the request's %s", c.rec, c.live, c.body, ln.Kind, ln.Why, c.at)
 		}
 		// Unread, it is refused for the request keploy could not read,
 		// saying to run keploy record with the agent of its version, never
 		// to declare the field noise.
-		if ln := ClassifyIn(NewDriftCache(), []string{p}, shape(c.live), shape(c.rec), at, []Earlier{GivenRequest(nil)}, nil, nil, nil)[0]; ln.Kind != KindUnaccounted || ln.Why != unreadRequestWhy(unsentRequest) || strings.Contains(ln.Why, "declare it noise") || !strings.Contains(ln.Why, "Run keploy record with the keploy agent of its own version") {
+		if ln := ClassifyIn(clockedDrifts(), []string{p}, shape(c.live), shape(c.rec), at, []Earlier{GivenRequest(nil)}, nil, nil, nil)[0]; ln.Kind != KindUnaccounted || ln.Why != unreadRequestWhy(unsentRequest) || strings.Contains(ln.Why, "declare it noise") || !strings.Contains(ln.Why, "Run keploy record with the keploy agent of its own version") {
 			t.Errorf("%q -> %q, no request sent: %s (%s); want it refused for the request", c.rec, c.live, ln.Kind, ln.Why)
 		}
 	}
@@ -205,18 +214,18 @@ func TestAPickFromTheTestRequestThatIsNoInstantIsRefused(t *testing.T) {
 		{Name: "header.content-length", Recorded: "42", Sent: "43"}, {Name: "header.Host", Recorded: "localhost:8080", Sent: "localhost:8080"},
 		jsonType, {Name: "body", Recorded: `{"q":"a"}`, Sent: `{"q":"b"}`}}})}
 	for _, f := range [][2]string{{"item-42", "item-43"}, {"port 8080", "port 8081"}} {
-		if ln := ClassifyIn(NewDriftCache(), []string{p}, shape(f[1]), shape(f[0]), at, framed, nil, nil, nil)[0]; ln.Kind != KindNoise {
+		if ln := ClassifyIn(clockedDrifts(), []string{p}, shape(f[1]), shape(f[0]), at, framed, nil, nil, nil)[0]; ln.Kind != KindNoise {
 			t.Errorf("%q -> %q beside a Content-Length that changed alike and the app's address: %s from %+v (%s); want noise", f[0], f[1], ln.Kind, ln.From, ln.Why)
 		}
 	}
 	// A query value is a place.
 	query := []Earlier{GivenRequest(&models.TestRequest{Test: "test-1", Parts: []models.TestRequestPart{{Name: "url", Recorded: "http://h/book?shift=morning", Sent: "http://h/book?shift=morning"}}})}
-	if ln := ClassifyIn(NewDriftCache(), []string{p}, shape("evening"), shape("morning"), at, query, nil, nil, nil)[0]; ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "test case test-1 at url.query.shift,") {
+	if ln := ClassifyIn(clockedDrifts(), []string{p}, shape("evening"), shape("morning"), at, query, nil, nil, nil)[0]; ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "test case test-1 at url.query.shift,") {
 		t.Errorf("a query value: %s (%s); want it refused, naming url.query.shift", ln.Kind, ln.Why)
 	}
 	// A header's name the request sends is a place too.
 	given := []Earlier{GivenRequest(&models.TestRequest{Test: "test-1", Parts: []models.TestRequestPart{{Name: "header.X-Tenant-acme7", Recorded: "1", Sent: "1"}}})}
-	if ln := ClassifyIn(NewDriftCache(), []string{p}, shape("tenant-beta2"), shape("tenant-acme7"), at, given, nil, nil, nil)[0]; ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "test case test-1 at request{names}") {
+	if ln := ClassifyIn(clockedDrifts(), []string{p}, shape("tenant-beta2"), shape("tenant-acme7"), at, given, nil, nil, nil)[0]; ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "test case test-1 at request{names}") {
 		t.Errorf("a header's name: %s (%s); want it refused, naming the request's names", ln.Kind, ln.Why)
 	}
 }
@@ -237,17 +246,17 @@ func TestAnUnreadTestRequestRefusesEveryChange(t *testing.T) {
 	unread := []Earlier{GivenRequest(&models.TestRequest{Test: "test-1", Unread: "keploy reads no request of a test case of kind X"})}
 	for name, earlier := range map[string][]Earlier{"none sent": unsent, "unread": unread} {
 		for _, f := range [][2]string{{"11:14", "11:15"}, {"2026-10-22T11:14:00Z", "2026-10-22T11:15:01Z"}, {"at 1792667640", "at 1792667701"}} {
-			ln := ClassifyIn(NewDriftCache(), []string{p}, shape(f[1]), shape(f[0]), at, earlier, nil, nil, nil)[0]
+			ln := ClassifyIn(clockedDrifts(), []string{p}, shape(f[1]), shape(f[0]), at, earlier, nil, nil, nil)[0]
 			if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "keploy could not read the test case's own request ("+earlier[0].Unread+")") {
 				t.Errorf("%s, %q -> %q: %s (%s); want it refused for the unread request", name, f[0], f[1], ln.Kind, ln.Why)
 			}
 			// Echoed in its answer: refused too.
 			resp := []Leaf{{Path: "body.slot", Noise: "body.slot", Type: String, Value: f[0]}}
-			if ln := ClassifyIn(NewDriftCache(), []string{p}, shape(f[1]), shape(f[0]), at, earlier, nil, resp, nil)[0]; ln.Kind != KindUnaccounted {
+			if ln := ClassifyIn(clockedDrifts(), []string{p}, shape(f[1]), shape(f[0]), at, earlier, nil, resp, nil)[0]; ln.Kind != KindUnaccounted {
 				t.Errorf("%s, %q -> %q echoed: %s (%s); want it refused for the unread request", name, f[0], f[1], ln.Kind, ln.Why)
 			}
 		}
-		if ln := ClassifyIn(NewDriftCache(), []string{p}, shape("req-a7c4e2d10b3f"), shape("req-3f2b8c1e9a4d"), at, earlier, nil, nil, nil)[0]; ln.Kind != KindUnaccounted || ln.Why != unreadRequestWhy(earlier[0].Unread) {
+		if ln := ClassifyIn(clockedDrifts(), []string{p}, shape("req-a7c4e2d10b3f"), shape("req-3f2b8c1e9a4d"), at, earlier, nil, nil, nil)[0]; ln.Kind != KindUnaccounted || ln.Why != unreadRequestWhy(earlier[0].Unread) {
 			t.Errorf("%s, no instant: %s (%s); want it refused for the unread request", name, ln.Kind, ln.Why)
 		}
 		typed := func(at time.Time) Shape {
@@ -255,13 +264,13 @@ func TestAnUnreadTestRequestRefusesEveryChange(t *testing.T) {
 		}
 		// Read before its call, at: a clock read the lead moved.
 		rec := time.Date(2026, 10, 22, 11, 13, 39, 152e6, time.UTC)
-		if ln := ClassifyIn(NewDriftCache(), []string{p}, typed(rec.Add(FullRoundLead)), typed(rec), at, earlier, nil, nil, nil)[0]; ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "could not read the test case's own request") {
+		if ln := ClassifyIn(clockedDrifts(), []string{p}, typed(rec.Add(FullRoundLead)), typed(rec), at, earlier, nil, nil, nil)[0]; ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "could not read the test case's own request") {
 			t.Errorf("%s, a typed clock read: %s (%s); want it refused for the unread request", name, ln.Kind, ln.Why)
 		}
 	}
 	for _, f := range [][2]string{{"11:14", "11:15"}, {"req-3f2b8c1e9a4d", "req-a7c4e2d10b3f"}} {
-		if ln := ClassifyIn(NewDriftCache(), []string{p}, shape(f[1]), shape(f[0]), at, nil, nil, nil, nil)[0]; ln.Kind != KindNoise {
-			t.Errorf("%q -> %q, no test case's request: %s (%s); want noise", f[0], f[1], ln.Kind, ln.Why)
+		if ln := ClassifyIn(clockedDrifts(), []string{p}, shape(f[1]), shape(f[0]), at, nil, nil, nil, nil)[0]; !noiseIn(ln, nil) {
+			t.Errorf("%q -> %q, no test case's request: %s (%s); want noise, and of a time of day a read of the clock modulo a day", f[0], f[1], ln.Kind, ln.Why)
 		}
 	}
 }
@@ -356,7 +365,7 @@ func TestACallInTheGapWaitsForTheRequest(t *testing.T) {
 		for {
 			_, earlier, _, _, awaiting := tr.Places()
 			if !awaiting {
-				return ClassifyIn(NewDriftCache(), []string{p}, live, rec, at, earlier, nil, nil, nil)[0], nil
+				return ClassifyIn(clockedDrifts(), []string{p}, live, rec, at, earlier, nil, nil, nil)[0], nil
 			}
 			if err := tr.AwaitRequest(context.Background()); err != nil {
 				return Learned{}, err
@@ -634,10 +643,10 @@ func TestTheEchoReadsTheTestRequestAsSent(t *testing.T) {
 	req := func(recorded, sent string) []Earlier {
 		return []Earlier{GivenRequest(&models.TestRequest{Test: "test-1", Parts: []models.TestRequestPart{jsonType, {Name: "body", Recorded: `{"slots":["` + recorded + `"]}`, Sent: `{"slots":["` + sent + `"]}`}}})}
 	}
-	if ln := ClassifyIn(NewDriftCache(), []string{p}, shape("11:15"), shape("11:14"), at, req("11:14", "11:15"), nil, nil, nil)[0]; ln.Kind != KindVariable || !ln.From.Given || ln.From.Path != "body.slots[0]" {
+	if ln := ClassifyIn(clockedDrifts(), []string{p}, shape("11:15"), shape("11:14"), at, req("11:14", "11:15"), nil, nil, nil)[0]; ln.Kind != KindVariable || !ln.From.Given || ln.From.Path != "body.slots[0]" {
 		t.Errorf("F's pick in the request as sent: %s from %+v (%s); want a variable of the request's slot", ln.Kind, ln.From, ln.Why)
 	}
-	if ln := ClassifyIn(NewDriftCache(), []string{p}, shape("11:15"), shape("11:14"), at, req("09:00", "11:15"), nil, nil, nil)[0]; ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "stands in test case test-1 at body.slots[0]") {
+	if ln := ClassifyIn(clockedDrifts(), []string{p}, shape("11:15"), shape("11:14"), at, req("09:00", "11:15"), nil, nil, nil)[0]; ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "stands in test case test-1 at body.slots[0]") {
 		t.Errorf("F's pick in the request as sent only: %s (%s); want it refused, naming the request's slot", ln.Kind, ln.Why)
 	}
 	rec := time.Date(2026, 10, 22, 11, 14, 17, 152e6, time.UTC)
@@ -645,7 +654,7 @@ func TestTheEchoReadsTheTestRequestAsSent(t *testing.T) {
 		return Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, at, time.Millisecond)}}
 	}
 	stamp := rec.Format("2006-01-02T15:04:05.000Z")
-	if ln := ClassifyIn(NewDriftCache(), []string{p}, typed(rec.Add(FullRoundLead)), typed(rec), at, req(stamp, stamp), nil, nil, nil)[0]; ln.Kind != KindUnaccounted || ln.Why != requestHoldsWhy("test case test-1 at body.slots[0]", true) {
+	if ln := ClassifyIn(clockedDrifts(), []string{p}, typed(rec.Add(FullRoundLead)), typed(rec), at, req(stamp, stamp), nil, nil, nil)[0]; ln.Kind != KindUnaccounted || ln.Why != requestHoldsWhy("test case test-1 at body.slots[0]", true) {
 		t.Errorf("a typed value whose recorded moment the request holds: %s from %+v (%s); want it refused, naming the request's slot", ln.Kind, ln.From, ln.Why)
 	}
 	// A typed value that is the request's instant as recorded and as sent
@@ -653,7 +662,7 @@ func TestTheEchoReadsTheTestRequestAsSent(t *testing.T) {
 	// it, whole, found as a leaf that drifted with it before the echo reads
 	// it; nothing is bound at the request (the adapter refuses it).
 	sent := rec.Add(FullRoundLead).Format("2006-01-02T15:04:05.000Z")
-	if ln := ClassifyIn(NewDriftCache(), []string{p}, typed(rec.Add(FullRoundLead)), typed(rec), at, req(stamp, sent), nil, nil, nil)[0]; ln.Kind != KindVariable || !ln.From.Given || !ln.From.Whole || ln.From.Echo || ln.From.Path != "body.slots[0]" {
+	if ln := ClassifyIn(clockedDrifts(), []string{p}, typed(rec.Add(FullRoundLead)), typed(rec), at, req(stamp, sent), nil, nil, nil)[0]; ln.Kind != KindVariable || !ln.From.Given || !ln.From.Whole || ln.From.Echo || ln.From.Path != "body.slots[0]" {
 		t.Errorf("a typed value the request sent: %s from %+v (%s); want a variable of the request's slot", ln.Kind, ln.From, ln.Why)
 	}
 }
@@ -677,11 +686,11 @@ func TestAPickTheRequestNoLongerListsIsRefused(t *testing.T) {
 	read := []Earlier{GivenRequest(slotRequest("11:13", "11:14"))}
 	for _, live := range []string{"none", "", "2026-10-23 09:00", "11:20"} {
 		for wname, w := range map[string]*Window{"no window": nil, "in its window": w} {
-			ln := ClassifyIn(NewDriftCache(), []string{p}, shape(live), shape("11:14"), at, read, nil, nil, w)[0]
+			ln := ClassifyIn(clockedDrifts(), []string{p}, shape(live), shape("11:14"), at, read, nil, nil, w)[0]
 			if ln.Kind != KindUnaccounted || ln.Why != requestHoldsWhy("test case test-1 at body.slots[1]", true) {
 				t.Errorf("11:14 -> %q, %s: %s (%s); want it refused, naming the request's slot", live, wname, ln.Kind, ln.Why)
 			}
-			ln = ClassifyIn(NewDriftCache(), []string{p}, shape(live), shape("11:14"), at, []Earlier{GivenRequest(nil)}, nil, nil, w)[0]
+			ln = ClassifyIn(clockedDrifts(), []string{p}, shape(live), shape("11:14"), at, []Earlier{GivenRequest(nil)}, nil, nil, w)[0]
 			if ln.Kind != KindUnaccounted || ln.Why != unreadRequestWhy(unsentRequest) {
 				t.Errorf("11:14 -> %q, %s, no request sent: %s (%s); want it refused for the request", live, wname, ln.Kind, ln.Why)
 			}
@@ -689,14 +698,14 @@ func TestAPickTheRequestNoLongerListsIsRefused(t *testing.T) {
 	}
 	// One slot names both moments, by two rules.
 	cut := []Earlier{GivenRequest(slotRequest("11:14:40.120"))}
-	if ln := ClassifyIn(NewDriftCache(), []string{p}, shape("11:15"), shape("11:14"), at, cut, nil, nil, w)[0]; ln.Kind != KindUnaccounted || ln.Why != requestHoldsWhy("test case test-1 at body.slots[0]", true) {
+	if ln := ClassifyIn(clockedDrifts(), []string{p}, shape("11:15"), shape("11:14"), at, cut, nil, nil, w)[0]; ln.Kind != KindUnaccounted || ln.Why != requestHoldsWhy("test case test-1 at body.slots[0]", true) {
 		t.Errorf("a minute read in its window beside a slot of both moments: %s (%s); want it refused, naming the slot", ln.Kind, ln.Why)
 	}
 	// Where the request as sent gives F's moment by the rule that gives the
 	// recorded one, it explains F's value: no pick the request no longer
 	// lists (the echo's to read).
 	both := []Earlier{GivenRequest(slotRequest("11:14:20.120", "11:15:20.120"))}
-	if ln := ClassifyIn(NewDriftCache(), []string{p}, shape("11:15"), shape("11:14"), at, both, nil, nil, w)[0]; ln.Kind == KindNoise || strings.HasPrefix(ln.Why, "the moment it was recorded with stands in test case test-1 at body.slots[0], which") {
+	if ln := ClassifyIn(clockedDrifts(), []string{p}, shape("11:15"), shape("11:14"), at, both, nil, nil, w)[0]; ln.Kind == KindNoise || strings.HasPrefix(ln.Why, "the moment it was recorded with stands in test case test-1 at body.slots[0], which") {
 		t.Errorf("a slot for each moment, by one rule: %s (%s); want the echo's, not a pick the request no longer lists", ln.Kind, ln.Why)
 	}
 	// The part keploy test sent with template values: the request as
@@ -704,7 +713,7 @@ func TestAPickTheRequestNoLongerListsIsRefused(t *testing.T) {
 	// and the request as sent is not what decides (it holds neither).
 	templated := []Earlier{GivenRequest(&models.TestRequest{Test: "test-1", Parts: []models.TestRequestPart{jsonType, {Name: "body",
 		Recorded: `{"slots":["2026-10-22T11:13:00Z","2026-10-22T11:14:00Z"]}`, Sent: `{"slots":["2026-10-22T11:20:00Z","2026-10-22T11:21:00Z"]}`}}})}
-	if ln := ClassifyIn(NewDriftCache(), []string{p}, shape("none"), shape("11:14"), at, templated, nil, nil, nil)[0]; ln.Kind != KindUnaccounted || ln.Why != requestHoldsWhy("test case test-1 at body.slots[1]", false) {
+	if ln := ClassifyIn(clockedDrifts(), []string{p}, shape("none"), shape("11:14"), at, templated, nil, nil, nil)[0]; ln.Kind != KindUnaccounted || ln.Why != requestHoldsWhy("test case test-1 at body.slots[1]", false) {
 		t.Errorf("a pick from a part sent with template values: %s (%s); want it refused, naming the slot as recorded", ln.Kind, ln.Why)
 	}
 	if !strings.Contains(requestHoldsWhy("x", false), "which keploy test sent with template values in it") || !strings.Contains(requestHoldsWhy("x", true), "which keploy test sent as recorded") {
@@ -720,7 +729,7 @@ func clientTestCache() *DriftCache { return clientTestCacheIn(nil) }
 // clientTestCacheIn is clientTestCache of an application that writes a wall
 // clock of no zone in zone, beside UTC (Tracker.SetAppZone).
 func clientTestCacheIn(zone *time.Location) *DriftCache {
-	dc := NewDriftCache()
+	dc := clockedDrifts()
 	dc.clientTests, dc.zone = true, zone
 	return dc
 }
@@ -812,14 +821,16 @@ func TestAClientTestLearnsAChangedInstantOnlyWhereItsWindowShowsARead(t *testing
 		t.Run(tc.name, func(t *testing.T) {
 			ln := ClassifyIn(clientTestCacheIn(tc.zone), []string{p}, str(tc.live), str(tc.rec), rec, nil, nil, nil, tc.w)[0]
 			if tc.noise {
-				if ln.Kind != KindNoise {
+				if !noiseOrRead(ln) {
 					t.Fatalf("%q -> %q: %s (%s); want noise", tc.rec, tc.live, ln.Kind, ln.Why)
 				}
 			} else if ln.Kind != KindUnaccounted || !clientTestRefusal(ln.Why, tc.part, tc.w != nil, tc.rec, tc.live) {
 				t.Fatalf("%q -> %q: %s (%s); want it refused, naming %s, saying keploy saw no read of the app's clock that matched it, and quoting no value", tc.rec, tc.live, ln.Kind, ln.Why, tc.part)
 			}
-			if ln := ClassifyIn(NewDriftCache(), []string{p}, str(tc.live), str(tc.rec), rec, nil, nil, nil, nil)[0]; ln.Kind != KindNoise {
-				t.Fatalf("keploy test, %q -> %q: %s (%s); want noise", tc.rec, tc.live, ln.Kind, ln.Why)
+			// In keploy test with no call window, a whole instant is a read
+			// of the clock a replay checks, moved by the lead or not.
+			if ln := ClassifyIn(clockedDrifts(), []string{p}, str(tc.live), str(tc.rec), rec, nil, nil, nil, nil)[0]; !noiseIn(ln, nil) {
+				t.Fatalf("keploy test, %q -> %q: %s Read=%+v (%s); want noise, and of a whole instant a read of the clock", tc.rec, tc.live, ln.Kind, ln.Read, ln.Why)
 			}
 		})
 	}
@@ -836,7 +847,7 @@ func TestAClientTestLearnsAChangedInstantOnlyWhereItsWindowShowsARead(t *testing
 		return Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, at, time.Millisecond)}}
 	}
 	tr, tl := rec.Add(-427*time.Millisecond), rec.Add(61_050*time.Millisecond)
-	if ln := ClassifyIn(clientTestCache(), []string{p}, typed(tl), typed(tr), rec, nil, nil, nil, w)[0]; ln.Kind != KindNoise {
+	if ln := ClassifyIn(clientTestCache(), []string{p}, typed(tl), typed(tr), rec, nil, nil, nil, w)[0]; !noiseOrRead(ln) {
 		t.Errorf("a typed stamp in its window: %s (%s); want noise", ln.Kind, ln.Why)
 	}
 	for _, c := range []struct {
@@ -849,7 +860,7 @@ func TestAClientTestLearnsAChangedInstantOnlyWhereItsWindowShowsARead(t *testing
 			t.Errorf("a typed stamp, %s: %s (%s); want it refused, saying keploy saw no read of the app's clock that matched it", c.name, ln.Kind, ln.Why)
 		}
 		if c.w == nil {
-			if ln := ClassifyIn(NewDriftCache(), []string{p}, typed(c.l), typed(tr), rec, nil, nil, nil, nil)[0]; ln.Kind != KindNoise {
+			if ln := ClassifyIn(clockedDrifts(), []string{p}, typed(c.l), typed(tr), rec, nil, nil, nil, nil)[0]; !noiseOrRead(ln) {
 				t.Errorf("keploy test, a typed stamp the lead moved: %s (%s); want noise", ln.Kind, ln.Why)
 			}
 		}
@@ -873,7 +884,7 @@ func TestAClientTestFollowsAnInstantTheLeadMoved(t *testing.T) {
 	if ln := ClassifyIn(clientTestCache(), []string{p}, str("book 2026-10-22T11:21Z"), str("book 2026-10-22T11:20Z"), at, call, nil, nil, nil)[0]; ln.Kind != KindVariable || ln.From.Mock != "mock-1" || ln.From.Path != "body.slot" {
 		t.Errorf("a client test: %s from %+v (%s); want a variable of mock-1's body.slot", ln.Kind, ln.From, ln.Why)
 	}
-	if ln := ClassifyIn(NewDriftCache(), []string{p}, str("book 2026-10-22T11:21Z"), str("book 2026-10-22T11:20Z"), at, call, nil, nil, nil)[0]; ln.Kind != KindNoise {
+	if ln := ClassifyIn(clockedDrifts(), []string{p}, str("book 2026-10-22T11:21Z"), str("book 2026-10-22T11:20Z"), at, call, nil, nil, nil)[0]; ln.Kind != KindNoise {
 		t.Errorf("keploy test: %s from %+v (%s); want noise, two clock reads the lead moved", ln.Kind, ln.From, ln.Why)
 	}
 }
@@ -892,7 +903,7 @@ func TestAClientTestsCacheGivesNoClockEvidenceByTheLead(t *testing.T) {
 		t.Fatalf("ClockReads(%q, %q) is empty: no row", rec, live)
 	}
 	var none *DriftCache
-	for name, dc := range map[string]*DriftCache{"keploy test": NewDriftCache(), "no cache": none} {
+	for name, dc := range map[string]*DriftCache{"keploy test": clockedDrifts(), "no cache": none} {
 		if got := dc.ClockReads(rec, live); !reflect.DeepEqual(got, want) {
 			t.Errorf("%s's clock evidence %v; want %v", name, got, want)
 		}
@@ -902,7 +913,7 @@ func TestAClientTestsCacheGivesNoClockEvidenceByTheLead(t *testing.T) {
 	if clientTestCache().InstantClockRead(r, l, nil) {
 		t.Error("a client test reads a typed instant the lead moved as a clock read")
 	}
-	if !NewDriftCache().InstantClockRead(r, l, nil) || !none.InstantClockRead(r, l, nil) || !InstantClockRead(r, l, nil) {
+	if !clockedDrifts().InstantClockRead(r, l, nil) || !none.InstantClockRead(r, l, nil) || !InstantClockRead(r, l, nil) {
 		t.Error("keploy test does not read a typed instant the lead moved as a clock read")
 	}
 	w := &Window{Rec: Span{From: at.Add(-time.Second), To: at}, F: Span{From: at.Add(FullRoundLead - time.Second), To: at.Add(FullRoundLead)}}
@@ -1001,10 +1012,10 @@ func TestABinaryRequestBodyIsReadForItsText(t *testing.T) {
 		return []Earlier{GivenRequest(&models.TestRequest{Test: "test-1", Parts: parts})}
 	}
 	text := requestAs("text/plain; charset=utf-8", "binary", []byte("slots s17 s18"))
-	if ln := ClassifyIn(NewDriftCache(), []string{p}, shape("s18"), shape("s17"), at, text, nil, nil, nil)[0]; ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "in test case test-1 at binary{text}") {
+	if ln := ClassifyIn(clockedDrifts(), []string{p}, shape("s18"), shape("s17"), at, text, nil, nil, nil)[0]; ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "in test case test-1 at binary{text}") {
 		t.Errorf("a pick from a binary request of text: %s from %+v (%s); want it refused, naming the request's text", ln.Kind, ln.From, ln.Why)
 	}
-	if ln := ClassifyIn(NewDriftCache(), []string{p}, shape("n-77c0d3"), shape("n-5f2a91"), at, text, nil, nil, nil)[0]; ln.Kind != KindNoise {
+	if ln := ClassifyIn(clockedDrifts(), []string{p}, shape("n-77c0d3"), shape("n-5f2a91"), at, text, nil, nil, nil)[0]; ln.Kind != KindNoise {
 		t.Errorf("a value a binary request of text does not hold: %s (%s); want noise", ln.Kind, ln.Why)
 	}
 	// Field 8, length 65: "B" and "A", printable, before "s17"; every byte
@@ -1023,7 +1034,7 @@ func TestABinaryRequestBodyIsReadForItsText(t *testing.T) {
 	} {
 		req := requestAs(row.ct, row.part, row.body)
 		for _, v := range [][2]string{{"s17", "s18"}, {"n-5f2a91", "n-77c0d3"}} {
-			ln := ClassifyIn(NewDriftCache(), []string{p}, shape(v[1]), shape(v[0]), at, req, nil, nil, nil)[0]
+			ln := ClassifyIn(clockedDrifts(), []string{p}, shape(v[1]), shape(v[0]), at, req, nil, nil, nil)[0]
 			if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, row.why) {
 				t.Errorf("%s, %s: %s from %+v (%s); want it refused, the request unread", row.name, v[0], ln.Kind, ln.From, ln.Why)
 			}
@@ -1081,10 +1092,10 @@ func TestARequestBodyOfNoDeclaredTypeIsReadWhereItsBytesAreText(t *testing.T) {
 	}
 	b64 := func(b []byte) string { return base64.StdEncoding.EncodeToString(b) }
 	pick := func(req []Earlier) Learned {
-		return ClassifyIn(NewDriftCache(), []string{p}, shape("s18"), shape("s17"), at, req, nil, nil, nil)[0]
+		return ClassifyIn(clockedDrifts(), []string{p}, shape("s18"), shape("s17"), at, req, nil, nil, nil)[0]
 	}
 	other := func(req []Earlier) Learned {
-		return ClassifyIn(NewDriftCache(), []string{p}, shape("n-77c0d3"), shape("n-5f2a91"), at, req, nil, nil, nil)[0]
+		return ClassifyIn(clockedDrifts(), []string{p}, shape("n-77c0d3"), shape("n-5f2a91"), at, req, nil, nil, nil)[0]
 	}
 	for _, row := range []struct {
 		name  string
@@ -1197,7 +1208,7 @@ func TestAWordGluedInARequestBodyOfNoDeclaredTypeIsRefused(t *testing.T) {
 		{"a word of the base64 only", "", "binary", base64.StdEncoding.EncodeToString([]byte("text here")), "dGV4", "dGV5", KindNoise, ""},
 	} {
 		req := request(row.ct, row.part, row.body)
-		ln := ClassifyIn(NewDriftCache(), []string{p}, shape(row.live), shape(row.rec), at, req, nil, nil, nil)[0]
+		ln := ClassifyIn(clockedDrifts(), []string{p}, shape(row.live), shape(row.rec), at, req, nil, nil, nil)[0]
 		if ln.Kind != row.kind || !strings.Contains(ln.Why, row.why) {
 			t.Errorf("%s: %s (%s); want %s naming %q", row.name, ln.Kind, ln.Why, row.kind, row.why)
 		}

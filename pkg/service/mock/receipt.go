@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -130,6 +132,65 @@ type Receipt struct {
 	// means the run has no verdict, whatever its tests' lines say: a call
 	// after the last test's read is on no line. Empty with the switch off.
 	CannotCapture models.CaptureLosses `yaml:"cannotCapture,omitempty" json:"cannotCapture,omitempty"`
+	// UnchargedMisses are, under the proven switch, the misses MissedData
+	// counts that no test was charged with (models.UnmatchedCall.ChargedTo
+	// empty): a call made before the test process claimed the run, after
+	// the last test's end, or between test processes (within one, a test's
+	// end charges it the misses made since the previous test's end). Each
+	// is as evidence keeps a miss (models.UnmatchedCall.Sanitized: no value
+	// the app sent), with the process that made it. nil when the misses
+	// were not read, and with the switch off.
+	UnchargedMisses []UnchargedMiss `yaml:"unchargedMisses,omitempty" json:"unchargedMisses,omitempty"`
+}
+
+// UnchargedMiss is a call no recorded mock answered that no test was charged
+// with (Receipt.UnchargedMisses), and the process that made it.
+type UnchargedMiss struct {
+	models.UnmatchedCall `yaml:",inline"`
+	// Process is the process that made the call, as the agent saw it then;
+	// nil when it named none.
+	Process *MissProcess `yaml:"process,omitempty" json:"process,omitempty"`
+}
+
+// MissProcess names the process that made a call: its pid, its comm and its
+// whole command line, its secrets redacted as keploy's log of it is. Its pid
+// and command line are in the receipt's file only, which describes one run
+// on this machine and is never committed (receiptIgnore): the receipt's JSON
+// form (enterprise's keploy mock status --json embeds it) leaves them out,
+// and no recording, test case or report holds a pid or a command line
+// (models.Origin.Persisted). Unnamed says why keploy named none
+// (models.UnnamedPIDNamespace), and PID is then the kernel pid it was told.
+type MissProcess struct {
+	PID     uint32 `yaml:"pid,omitempty" json:"-"`
+	Comm    string `yaml:"comm,omitempty" json:"comm,omitempty"`
+	Exe     string `yaml:"exe,omitempty" json:"exe,omitempty"`
+	Cmdline string `yaml:"cmdline,omitempty" json:"-"`
+	Unnamed string `yaml:"unnamed,omitempty" json:"unnamed,omitempty"`
+}
+
+// unchargedMisses is, of misses, those that count against a test
+// (models.UnmatchedCall.CountsAgainstTest, what MissedData counts) and that
+// no test was charged with, each as evidence keeps a miss, with its process.
+// The calls a test's end charged come from the agent already kept so; the
+// rest, read from the proxy at the run's end, carry the call's values, which
+// the receipt never holds.
+func unchargedMisses(misses []models.UnmatchedCall) []UnchargedMiss {
+	var out []UnchargedMiss
+	for _, m := range misses {
+		if m.ChargedTo != "" || !m.CountsAgainstTest() {
+			continue
+		}
+		u := UnchargedMiss{UnmatchedCall: m.Sanitized()}
+		if src := m.Source; src != nil {
+			u.Process = &MissProcess{PID: src.PID, Comm: src.Comm, Exe: src.Exe, Cmdline: src.Cmdline, Unnamed: src.Unnamed}
+			// Process holds what only travels; the call's own source keeps
+			// what a file holds, so the receipt's JSON form carries no pid
+			// or command line through it either.
+			u.Source = src.Persisted()
+		}
+		out = append(out, u)
+	}
+	return out
 }
 
 // TestCounts counts a replay's tests by their verdict this run.
@@ -137,8 +198,10 @@ type TestCounts struct {
 	Passed  int `yaml:"passed" json:"passed"`
 	Failed  int `yaml:"failed" json:"failed"`
 	Skipped int `yaml:"skipped" json:"skipped"`
-	// Gated tests were told not to run this replay, for GateReason. A run
-	// with gated tests proved nothing about them.
+	// Gated tests were told not to run this replay, for GateReason, or
+	// because a test they need had not begun before them
+	// (models.ScopeOutcomeUnmet). A run with gated tests proved nothing
+	// about them.
 	Gated      int    `yaml:"gated" json:"gated"`
 	GateReason string `yaml:"gateReason,omitempty" json:"gateReason,omitempty"`
 	// NoVerdict tests did not run this replay, or ran with a harness that
@@ -165,7 +228,7 @@ func countTests(tests []TestReceipt, gateReason string) *TestCounts {
 			c.Failed++
 		case models.ScopeOutcomeSkipped:
 			c.Skipped++
-		case models.ScopeOutcomeGated:
+		case models.ScopeOutcomeGated, models.ScopeOutcomeUnmet:
 			c.Gated++
 		default:
 			c.NoVerdict++
@@ -248,10 +311,16 @@ type TestReceipt struct {
 	Outcome  string `yaml:"outcome,omitempty" json:"outcome,omitempty"`
 	Consumed int    `yaml:"consumed" json:"consumed"`
 	Missed   int    `yaml:"missed" json:"missed"`
+	// Began is when the test's latest run began (its window's start); zero
+	// when the replay saw it begin no run. The test with the latest Began is
+	// the last test begun: the one a run cut short was in, or left last.
+	Began time.Time `yaml:"began,omitempty" json:"began,omitzero"`
 	// Evidence is, under the proven wire, what failed the test at its end:
 	// its misses, the recorded calls of its mapping it never made, and the
 	// connections keploy could not capture; or what left it not judged
 	// (CannotCapture: a call keploy cannot capture at all, a Unix socket).
+	// A miss that is a recording another test owns names that test
+	// (recorded_in, withRecordedIn).
 	Evidence *models.ScopeEvidence `yaml:"evidence,omitempty" json:"evidence,omitempty"`
 	// Real is, under the proven wire, the mock.real destinations the test
 	// used while it was open: its REAL rows (design v14 §4).
@@ -297,13 +366,14 @@ func isolation(runnerExit int, policy models.MissPolicy, counts replayCounts, by
 	return true, ""
 }
 
-// bypassList renders the bypass rules as destinations.
+// bypassList renders the bypass rules as destinations, an IPv6 host in
+// brackets ([::1]:27017) as the set's other files write one.
 func bypassList(rules []models.BypassRule) []string {
 	var out []string
 	for _, r := range rules {
 		d := r.Host
 		if r.Port != 0 {
-			d += fmt.Sprintf(":%d", r.Port)
+			d = net.JoinHostPort(strings.Trim(r.Host, "[]"), strconv.FormatUint(uint64(r.Port), 10))
 		}
 		d += r.Path
 		if d != "" {

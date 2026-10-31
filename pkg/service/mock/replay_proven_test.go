@@ -2,6 +2,7 @@ package mock
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml/mapdb"
+	"go.keploy.io/server/v3/pkg/platform/yaml/mockdb"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -26,11 +28,12 @@ type skipPusher struct {
 	Instrumentation
 	pushed bool
 	skip   map[string]string
+	needs  map[string][]models.ScopeNeed
 	err    error
 }
 
-func (s *skipPusher) PushScopeSkips(_ context.Context, skip map[string]string) error {
-	s.pushed, s.skip = true, skip
+func (s *skipPusher) PushScopeSkips(_ context.Context, skip map[string]string, needs map[string][]models.ScopeNeed) error {
+	s.pushed, s.skip, s.needs = true, skip, needs
 	return s.err
 }
 
@@ -54,16 +57,20 @@ func TestPushScopeSkips(t *testing.T) {
 	require.False(t, p.pushed, "no source installed: nothing to push")
 
 	var asked ScopeGateRequest
-	RegisterScopeSkipSource(func(_ context.Context, req ScopeGateRequest) (map[string]string, error) {
+	needs := map[string][]models.ScopeNeed{"orders::TestUse": {{Test: "orders::TestMake", Reason: "r"}}}
+	RegisterScopeSkipSource(func(_ context.Context, req ScopeGateRequest) (map[string]string, map[string][]models.ScopeNeed, error) {
 		asked = req
-		return map[string]string{"orders::TestToken": "flaky: replay_only"}, nil
+		return map[string]string{"orders::TestToken": "flaky: replay_only"}, needs, nil
 	})
 	t.Cleanup(func() { RegisterScopeSkipSource(nil) })
 	require.NoError(t, m.pushScopeSkips(context.Background(), "t2-go", "d1"))
 	require.Equal(t, ScopeGateRequest{Set: "t2-go", MocksDigest: "d1", Path: m.config.Path}, asked)
 	require.Equal(t, map[string]string{"orders::TestToken": "flaky: replay_only"}, p.skip)
+	require.Equal(t, needs, p.needs, "the needs ride the same push")
 
-	RegisterScopeSkipSource(func(context.Context, ScopeGateRequest) (map[string]string, error) { return nil, nil })
+	RegisterScopeSkipSource(func(context.Context, ScopeGateRequest) (map[string]string, map[string][]models.ScopeNeed, error) {
+		return nil, nil, nil
+	})
 	require.NoError(t, m.pushScopeSkips(context.Background(), "t2-go", "d1"))
 	require.NotNil(t, p.skip, "an empty list is pushed, not left out")
 	require.Empty(t, p.skip)
@@ -74,20 +81,25 @@ func TestPushScopeSkipsRefuses(t *testing.T) {
 	provenOn(t)
 	p := &skipPusher{}
 	m := &mockService{logger: zap.NewNop(), instrumentation: p, config: &config.Config{}}
-	RegisterScopeSkipSource(func(context.Context, ScopeGateRequest) (map[string]string, error) {
-		return nil, errors.New("unreadable")
+	RegisterScopeSkipSource(func(context.Context, ScopeGateRequest) (map[string]string, map[string][]models.ScopeNeed, error) {
+		return nil, nil, errors.New("unreadable")
 	})
 	t.Cleanup(func() { RegisterScopeSkipSource(nil) })
 	require.ErrorContains(t, m.pushScopeSkips(context.Background(), "s", ""), "unreadable")
 
-	RegisterScopeSkipSource(func(context.Context, ScopeGateRequest) (map[string]string, error) {
-		return map[string]string{"a": "b"}, nil
+	RegisterScopeSkipSource(func(context.Context, ScopeGateRequest) (map[string]string, map[string][]models.ScopeNeed, error) {
+		return map[string]string{"a": "b"}, nil, nil
 	})
 	p.err = errors.New("refused")
 	require.ErrorContains(t, m.pushScopeSkips(context.Background(), "s", ""), "refused")
 
-	// An instrumentation without the capability cannot skip a listed test.
+	// An instrumentation without the capability cannot skip a listed test,
+	// nor one that needs a test that did not run before it.
 	m.instrumentation = &gatePusher{}
+	require.Error(t, m.pushScopeSkips(context.Background(), "s", ""))
+	RegisterScopeSkipSource(func(context.Context, ScopeGateRequest) (map[string]string, map[string][]models.ScopeNeed, error) {
+		return nil, map[string][]models.ScopeNeed{"s::B": {{Test: "s::A", Reason: "r"}}}, nil
+	})
 	require.Error(t, m.pushScopeSkips(context.Background(), "s", ""))
 }
 
@@ -96,9 +108,9 @@ func TestPushScopeSkipsNeedsTheSwitch(t *testing.T) {
 	t.Setenv(provenswitch.Env, "")
 	p := &skipPusher{}
 	m := &mockService{logger: zap.NewNop(), instrumentation: p, config: &config.Config{}}
-	RegisterScopeSkipSource(func(context.Context, ScopeGateRequest) (map[string]string, error) {
+	RegisterScopeSkipSource(func(context.Context, ScopeGateRequest) (map[string]string, map[string][]models.ScopeNeed, error) {
 		t.Fatal("read with the switch off")
-		return nil, nil
+		return nil, nil, nil
 	})
 	t.Cleanup(func() { RegisterScopeSkipSource(nil) })
 	require.NoError(t, m.pushScopeSkips(context.Background(), "s", ""))
@@ -177,6 +189,7 @@ func TestTheReceiptCountsDataMissesUnderTheSwitchOnly(t *testing.T) {
 	t.Setenv(provenswitch.Env, "")
 	dir, _, _ := replayIn(t, replayCase{mockErrs: misses})
 	require.Nil(t, mustReceipt(t, dir).MissedData, "absent with the switch off")
+	require.Nil(t, mustReceipt(t, dir).UnchargedMisses, "absent with the switch off")
 	raw, err := os.ReadFile(filepath.Join(dir, "set", ReceiptFile))
 	require.NoError(t, err)
 	require.NotContains(t, string(raw), "missedData")
@@ -186,6 +199,119 @@ func TestTheReceiptCountsDataMissesUnderTheSwitchOnly(t *testing.T) {
 	r := mustReceipt(t, dir)
 	require.NotNil(t, r.MissedData)
 	require.Equal(t, 1, *r.MissedData, "a DNS lookup is protocol-phase, and a connection that sent nothing made no call")
+	require.Len(t, r.UnchargedMisses, 1, "the call no test was charged with is named, not only counted")
+	require.Equal(t, "GET /x", r.UnchargedMisses[0].ActualSummary)
+}
+
+// Under the switch the receipt names each call MissedData counts that no
+// test was charged with: as evidence keeps a miss (no value the app sent),
+// with the process that made it (its pid, comm and command line, which only
+// this local receipt holds). A call a test's end charged to it is that
+// test's, not listed; one that does not count against a test (DNS) is not
+// listed either. Each test's line says when its latest run began, so a cut
+// round names the last test begun.
+func TestTheReceiptNamesTheCallsChargedToNoTest(t *testing.T) {
+	provenOn(t)
+	repo := t.TempDir()
+	t.Chdir(repo)
+	keployDir := filepath.Join(repo, "keploy")
+	require.NoError(t, os.MkdirAll(filepath.Join(keployDir, "set"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mocks.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: Http\nname: mock-0\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mappings.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: TestMocksMapping\ntest_set_id: set\ntests:\n    - id: o::TestA\n      dir: o\n      mocks:\n        - name: mock-0\n"), 0o644))
+	instr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
+	instr.consumedMocks = []models.MockState{{Name: "mock-0"}}
+	t0 := time.Date(2026, 10, 26, 9, 0, 0, 0, time.UTC)
+	instr.windows = []models.ScopeWindow{
+		{Name: "o::TestA", Start: t0, End: t0.Add(time.Second), Outcome: models.ScopeOutcomeFailed},
+		// Its retry: the latest run's begin is the line's.
+		{Name: "o::TestA", Start: t0.Add(2 * time.Second), End: t0.Add(3 * time.Second), Outcome: models.ScopeOutcomePassed},
+		// An app the test started is no run of the test, so not its begin:
+		// the run's test windows leave it out (testWindows).
+		{Name: "o::TestA", Start: t0.Add(2500 * time.Millisecond), End: t0.Add(3 * time.Second), App: true},
+	}
+	src := &models.Origin{Comm: "api", Exe: "./api", PID: 4242, Cmdline: "./api --token <redacted>"}
+	instr.mockErrors = []models.UnmatchedCall{
+		{Protocol: "HTTP", ActualSummary: "GET /in-test", Destination: "dep:80", At: t0.Add(500 * time.Millisecond), ChargedTo: "o::TestA"},
+		{Protocol: "HTTP", ActualSummary: "POST /teardown", Destination: "dep:80", At: t0.Add(4 * time.Second), Source: src,
+			MatchPhase: models.MatchPhaseBody, NextSteps: "body.user.email drifted.", ReceivedReq: "POST /teardown {\"user\":{\"email\":\"a@b.c\"}}",
+			Diff: "a@b.c", FieldDiffs: []models.MockFieldDiff{{Path: "body.user.email", Expected: "x@y.z", Actual: "a@b.c"}}},
+		{Protocol: "DNS", ActualSummary: "A dep", At: t0.Add(4 * time.Second)},
+	}
+	cfg := instrConfig(instr, utils.Native, "go test -p 1 -json ./...")
+	cfg.Path, cfg.Mock.OnMiss = keployDir, "fail"
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = 0 })
+	require.NoError(t, New(zap.NewNop(), instr, named("mock-0"), mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background()))
+	r, err := ReadReceipt(keployDir, "set")
+	require.NoError(t, err)
+	require.Len(t, r.UnchargedMisses, 1)
+	u := r.UnchargedMisses[0]
+	require.Equal(t, "dep:80", u.Destination)
+	require.Equal(t, "body.user.email drifted.", u.NextSteps)
+	require.Equal(t, &MissProcess{PID: 4242, Comm: "api", Exe: "./api", Cmdline: "./api --token <redacted>"}, u.Process)
+	require.Empty(t, u.ReceivedReq, "no value the app sent")
+	require.Empty(t, u.Diff, "no value the app sent")
+	for _, d := range u.FieldDiffs {
+		require.Empty(t, d.Expected+d.Actual, "no value the app sent")
+	}
+	raw, err := os.ReadFile(filepath.Join(keployDir, "set", ReceiptFile))
+	require.NoError(t, err)
+	require.NotContains(t, string(raw), "a@b.c")
+	require.NotContains(t, string(raw), "GET /in-test", "a call a test's end charged is that test's")
+	// The receipt's JSON form (enterprise's keploy mock status --json embeds
+	// it) carries no pid and no command line, neither on the process nor on
+	// the call's source.
+	js, err := json.Marshal(r)
+	require.NoError(t, err)
+	require.Contains(t, string(js), `"comm":"api"`)
+	require.NotContains(t, string(js), "4242")
+	require.NotContains(t, string(js), "--token")
+	// So does the receipt as the run holds it, before its file is written
+	// and read back (which keeps no pid or command line on a call's source,
+	// models.Origin).
+	js, err = json.Marshal(Receipt{UnchargedMisses: unchargedMisses(instr.mockErrors)})
+	require.NoError(t, err)
+	require.Contains(t, string(js), `"comm":"api"`)
+	require.NotContains(t, string(js), "4242")
+	require.NotContains(t, string(js), "--token")
+	tests, err := ReadTestsReceipt(keployDir, "set")
+	require.NoError(t, err)
+	require.Len(t, tests.Tests, 1)
+	require.True(t, tests.Tests[0].Began.Equal(t0.Add(2*time.Second)), "began %v", tests.Tests[0].Began)
+}
+
+// Without the proven switch the tests receipt (last-replay-tests.yaml, what
+// keploy mock status reads) is what it was before: no test's line says when
+// it began, in the file or in its JSON form.
+func TestWithTheSwitchOffTheTestsReceiptSaysNoBegin(t *testing.T) {
+	t.Setenv(provenswitch.Env, "")
+	repo := t.TempDir()
+	t.Chdir(repo)
+	keployDir := filepath.Join(repo, "keploy")
+	require.NoError(t, os.MkdirAll(filepath.Join(keployDir, "set"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mocks.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: Http\nname: mock-0\n"), 0o644))
+	instr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
+	instr.consumedMocks = []models.MockState{{Name: "mock-0"}}
+	t0 := time.Date(2026, 10, 26, 9, 0, 0, 0, time.UTC)
+	instr.windows = []models.ScopeWindow{
+		{Name: "o::TestA", Start: t0, End: t0.Add(time.Second), Outcome: models.ScopeOutcomePassed},
+	}
+	cfg := instrConfig(instr, utils.Native, "go test -p 1 -json ./...")
+	cfg.Path = keployDir
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = 0 })
+	_ = New(zap.NewNop(), instr, named("mock-0"), mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background())
+	raw, err := os.ReadFile(filepath.Join(keployDir, "set", TestsReceiptFile))
+	require.NoError(t, err)
+	require.Contains(t, string(raw), "o::TestA", "the test's line is written")
+	require.NotContains(t, string(raw), "began", "without the switch no test's line says when it began")
+	tests, err := ReadTestsReceipt(keployDir, "set")
+	require.NoError(t, err)
+	require.Len(t, tests.Tests, 1)
+	require.True(t, tests.Tests[0].Began.IsZero(), "began %v", tests.Tests[0].Began)
+	js, err := json.Marshal(tests)
+	require.NoError(t, err)
+	require.NotContains(t, string(js), "began")
 }
 
 // Under the switch a run list conflicts with the deny list: --run-only is
@@ -388,9 +514,61 @@ func TestAMappingNamingAnAbsentMockIsRefusedUnderTheSwitch(t *testing.T) {
 	utils.ErrCode = 0
 	t.Cleanup(func() { utils.ErrCode = 0 })
 	err := New(zap.NewNop(), instr, named("mock-0"), mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background())
-	require.ErrorContains(t, err, "its mappings name mocks the recording does not have: mock-9")
+	require.ErrorContains(t, err, "keploy/set/mappings.yaml names mocks keploy/set/mocks.yaml does not have: mock-9 (under test o::TestA)")
+	require.ErrorContains(t, err, "If you edited mappings.yaml, correct those names; otherwise record the set again with keploy mock record")
 	runs, _ := instr.counts()
 	require.Zero(t, runs, "the test command ran unjudged")
+}
+
+// Under the switch every section of a mapping that names mocks is checked:
+// a name under startup:, worker:, shared: or runner: that the recording
+// does not have refuses too, each said where it is. Before, only a test's
+// list and startup: were checked, so a mistyped worker: entry was ignored
+// without a word.
+func TestAMappingNamingAnAbsentMockAnywhereIsRefusedSayingWhere(t *testing.T) {
+	provenOn(t)
+	repo := t.TempDir()
+	t.Chdir(repo)
+	keployDir := filepath.Join(repo, "keploy")
+	require.NoError(t, os.MkdirAll(filepath.Join(keployDir, "set"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mappings.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: TestMocksMapping\ntest_set_id: set\ntests:\n    - id: o::TestA\n      dir: o\n      mock_entries:\n        - name: mock-0\nstartup:\n    - name: mock-7\nworker:\n    - name: mock-1\n    - name: mock-8\nshared:\n    - name: mock-9\nrunner:\n    - name: mock-10\n"), 0o644))
+	instr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
+	cfg := instrConfig(instr, utils.Native, "go test -p 1 -json ./...")
+	cfg.Path, cfg.Mock.OnMiss = keployDir, "fail"
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = 0 })
+	err := New(zap.NewNop(), instr, named("mock-0", "mock-1"), mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background())
+	require.ErrorContains(t, err, "names mocks keploy/set/mocks.yaml does not have: mock-10 (under runner:), mock-7 (under startup:), mock-8 (under worker:), mock-9 (under shared:)")
+	runs, _ := instr.counts()
+	require.Zero(t, runs, "the test command ran unjudged")
+}
+
+// Under the switch a mapping with a test entry that lists mocks under both
+// mock_entries and mocks is refused before the test command runs, naming the
+// test and both keys: read as before, the mocks list would be dropped and its
+// mock served to no test.
+func TestAMappingWithBothMockListsIsRefusedUnderTheSwitch(t *testing.T) {
+	provenOn(t)
+	repo := t.TempDir()
+	t.Chdir(repo)
+	keployDir := filepath.Join(repo, "keploy")
+	require.NoError(t, os.MkdirAll(filepath.Join(keployDir, "set"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mappings.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: TestMocksMapping\ntest_set_id: set\ntests:\n    - id: o::TestA\n      dir: o\n      mock_entries:\n        - name: mock-0\n      mocks:\n        - name: mock-1\n"), 0o644))
+	instr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
+	cfg := instrConfig(instr, utils.Native, "go test -p 1 -json ./...")
+	cfg.Path, cfg.Mock.OnMiss = keployDir, "fail"
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = 0 })
+	err := New(zap.NewNop(), instr, named("mock-0", "mock-1"), mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background())
+	require.ErrorContains(t, err, "its mappings cannot be read")
+	require.ErrorContains(t, err, "test \"o::TestA\" in mappings has both `mocks` and `mock_entries`")
+	// The edit comes first: a record would replace it. The typed refusal is
+	// kept for a caller.
+	require.ErrorContains(t, err, "if you edited the set's mappings file, correct that edit (a record would replace it)")
+	var both *models.BothMockListsError
+	require.ErrorAs(t, err, &both)
+	runs, _ := instr.counts()
+	require.Zero(t, runs, "the test command ran")
 }
 
 // Each key's pool slice is every mock no test lists, under the key its
@@ -517,6 +695,41 @@ func TestTheReplayPushesThePoolSlices(t *testing.T) {
 	require.NoError(t, New(zap.NewNop(), instr, named("mock-0", "mock-1", "mock-2", "mock-3", "mock-4"), mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background()))
 	require.Equal(t, map[string][]string{"o": {"mock-1"}, models.PoolKeyNone: {"mock-2", "mock-4"}, "users": {"mock-3"}}, instr.pool, "a mock no test lists and no startup entry keys is the keyless slice's")
 	require.NotNil(t, instr.begins, "the replay sends the agent the tests' recorded begins")
+}
+
+// Under the switch the replay hands the agent, with the table, the recorded
+// window of every test of the set from its mappings (keploy test's staging
+// sends them from its test cases): the learn step then reads another test's
+// recording as that test's, not as an earlier place of the paired one. A
+// recording the mapping lists that the agent never holds (a connection
+// failure, models.AgentBound) is left out of the table but still ends its
+// test's window: it was made in it.
+func TestTheReplayPushesTheRecordedTestWindows(t *testing.T) {
+	provenOn(t)
+	repo := t.TempDir()
+	t.Chdir(repo)
+	keployDir := filepath.Join(repo, "keploy")
+	require.NoError(t, os.MkdirAll(filepath.Join(keployDir, "set"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mappings.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: TestMocksMapping\ntest_set_id: set\ntests:\n    - id: o::TestA\n      dir: o\n      mocks:\n        - name: mock-1\n      at: 2026-01-02T03:04:10Z\n    - id: o::TestB\n      dir: o\n      mocks:\n        - name: mock-2\n        - name: mock-3\n      at: 2026-01-02T03:04:20Z\nstartup:\n    - name: mock-0\n      key: o\n"), 0o644))
+	instr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
+	instr.consumedMocks = []models.MockState{{Name: "mock-1"}, {Name: "mock-2"}}
+	cfg := instrConfig(instr, utils.Native, "go test -p 1 -json ./...")
+	cfg.Path, cfg.Mock.OnMiss = keployDir, "fail"
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = 0 })
+	t0 := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	db := named("mock-0", "mock-1", "mock-2", "mock-3")
+	for i, span := range [][2]int{{1, 2}, {11, 12}, {21, 23}, {25, 26}} {
+		db.mocks[i].Spec.ReqTimestampMock = t0.Add(time.Duration(span[0]) * time.Second)
+		db.mocks[i].Spec.ResTimestampMock = t0.Add(time.Duration(span[1]) * time.Second)
+	}
+	db.mocks[3].Kind = models.ConnectionFailure
+	require.NoError(t, New(zap.NewNop(), instr, db, mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background()))
+	require.Equal(t, []string{"mock-2"}, instr.table["o::TestB"], "the agent is handed only the recordings it holds")
+	require.Equal(t, []models.TestWindow{
+		{TestCase: "o::TestA", Start: t0.Add(5 * time.Second), End: t0.Add(12 * time.Second)},
+		{TestCase: "o::TestB", Start: t0.Add(15 * time.Second), End: t0.Add(26 * time.Second)},
+	}, instr.recordedWindows)
 }
 
 // Under the switch the replay never arms the whole pool before its run: the
@@ -661,4 +874,169 @@ func TestOwnsTestMocks(t *testing.T) {
 	require.True(t, ownsTestMocks(map[string][]string{"o::TestA": {"mock-1", "mock-0"}}, loaded))
 	require.False(t, ownsTestMocks(map[string][]string{"o::TestA": {"mock-1", "mock-2"}, "o::TestB": {}}, loaded))
 	require.False(t, ownsTestMocks(map[string][]string{}, loaded))
+}
+
+// The refusal names the mapping file the set has: mappings.json for a set
+// stored as JSON, never a mappings.yaml that does not exist.
+func TestARefusalNamesTheMappingFileTheSetHas(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "set"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "set", "mappings.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := &mockService{config: &config.Config{Path: dir}, mockDB: mockdb.New(zap.NewNop(), dir, "mocks")}
+	err := m.refuseUnknownMocks(context.Background(), "set", &models.Mapping{}, []string{"mock-9"})
+	if err == nil || !strings.Contains(err.Error(), "/set/mappings.json names mocks") || !strings.Contains(err.Error(), "If you edited mappings.json") || strings.Contains(err.Error(), "mappings.yaml") {
+		t.Fatalf("refusal: %v", err)
+	}
+}
+
+// A mock a hand edit gave a kind this keploy has no reader for (Http ->
+// HTTP) is skipped when the set's mocks are read (mockdb logs it), so the
+// test that lists it would own nothing: the replay refuses the set, and the
+// refusal names the document in the mocks file, with its kind, as the edit
+// to correct, not the name in mappings.yaml, which is right. A name the
+// mocks file does not have is still named as one.
+func TestARefusalNamesAMockOfAKindKeployCannotRead(t *testing.T) {
+	provenOn(t)
+	repo := t.TempDir()
+	t.Chdir(repo)
+	keployDir := filepath.Join(repo, "keploy")
+	require.NoError(t, os.MkdirAll(filepath.Join(keployDir, "set"), 0o755))
+	mocks := "version: api.keploy.io/v1beta1\nkind: HTTP\nname: mock-0\nspec:\n    req:\n        method: GET\n        url: http://h/a\n---\nversion: api.keploy.io/v1beta1\nkind: Http\nname: mock-1\nspec:\n    req:\n        method: GET\n        url: http://h/b\n"
+	maps := "version: api.keploy.io/v1beta1\nkind: TestMocksMapping\ntest_set_id: set\ntests:\n    - id: o::TestA\n      dir: o\n      mock_entries:\n        - name: mock-0\n    - id: o::TestB\n      dir: o\n      mock_entries:\n        - name: mock-1\n"
+	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mocks.yaml"), []byte(mocks), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mappings.yaml"), []byte(maps), 0o644))
+	instr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
+	cfg := instrConfig(instr, utils.Native, "go test -p 1 -json ./...")
+	cfg.Path, cfg.Mock.OnMiss = keployDir, "fail"
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = 0 })
+	err := New(zap.NewNop(), instr, mockdb.New(zap.NewNop(), keployDir, "mocks"), mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), `keploy/set/mocks.yaml has mocks keploy/set/mappings.yaml names that this keploy skips: mock-0 (under test o::TestA), of kind "HTTP", which this keploy cannot read.`)
+	require.Contains(t, err.Error(), "If you edited mocks.yaml, give each mock this keploy cannot read back the kind and spec keploy wrote. If a newer keploy or keploy enterprise recorded them, upgrade keploy or use keploy enterprise; otherwise")
+	require.NotContains(t, err.Error(), "correct those names")
+	runs, _ := instr.counts()
+	require.Zero(t, runs, "a refused set runs no test")
+
+	// With a name the mocks file does not have beside it, both are named.
+	m := &mockService{config: &config.Config{Path: keployDir}, mockDB: mockdb.New(zap.NewNop(), keployDir, "mocks")}
+	err = m.refuseUnknownMocks(context.Background(), "set", &models.Mapping{}, []string{"mock-9", "mock-0"})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), `skips: mock-0, of kind "HTTP", which this keploy cannot read; keploy/set/mappings.yaml names mocks keploy/set/mocks.yaml does not have: mock-9.`)
+	require.Contains(t, err.Error(), "upgrade keploy or use keploy enterprise. If you edited mappings.yaml, correct those names; otherwise")
+}
+
+// A mocks.yaml saved by hand without its final newline: the replay's read
+// skips the last mock as a write cut short (mockdb nextDoc), though it parses
+// whole and its kind is right, so the test that lists it owns nothing and the
+// set is refused. The refusal says that, and that the fix is the newline; it
+// does not blame the mock's kind, which is right, or the name in
+// mappings.yaml. The reason is the read's own (mockdb.MockFileReader), so it
+// cannot drift from what the replay did.
+func TestARefusalNamesALastMockWithNoFinalNewlineAsCutShort(t *testing.T) {
+	provenOn(t)
+	repo := t.TempDir()
+	t.Chdir(repo)
+	keployDir := filepath.Join(repo, "keploy")
+	require.NoError(t, os.MkdirAll(filepath.Join(keployDir, "set"), 0o755))
+	mocks := "version: api.keploy.io/v1beta1\nkind: Http\nname: mock-0\nspec:\n    req:\n        method: GET\n        url: http://h/a\n---\nversion: api.keploy.io/v1beta1\nkind: Http\nname: mock-1\nspec:\n    req:\n        method: GET\n        url: http://h/b"
+	maps := "version: api.keploy.io/v1beta1\nkind: TestMocksMapping\ntest_set_id: set\ntests:\n    - id: o::TestA\n      dir: o\n      mock_entries:\n        - name: mock-0\n    - id: o::TestB\n      dir: o\n      mock_entries:\n        - name: mock-1\n"
+	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mocks.yaml"), []byte(mocks), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mappings.yaml"), []byte(maps), 0o644))
+	instr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
+	cfg := instrConfig(instr, utils.Native, "go test -p 1 -json ./...")
+	cfg.Path, cfg.Mock.OnMiss = keployDir, "fail"
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = 0 })
+	err := New(zap.NewNop(), instr, mockdb.New(zap.NewNop(), keployDir, "mocks"), mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "names that this keploy skips: mock-1 (under test o::TestB), the file's last document, whose last line has no newline: keploy reads it as a write cut short.")
+	require.Contains(t, err.Error(), "If you saved mocks.yaml by hand, end it with a newline once its last mock is whole; otherwise record the set again")
+	for _, wrong := range []string{"of kind", "kind and spec", "upgrade", "correct those names"} {
+		require.NotContains(t, err.Error(), wrong)
+	}
+	runs, _ := instr.counts()
+	require.Zero(t, runs, "a refused set runs no test")
+
+	// Beside a mistyped kind, each is named with its own reason, and the
+	// fix names both edits.
+	m := &mockService{config: &config.Config{Path: keployDir}, mockDB: mockdb.New(zap.NewNop(), keployDir, "mocks")}
+	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mocks.yaml"), []byte(strings.Replace(mocks, "kind: Http\nname: mock-0", "kind: HTTP\nname: mock-0", 1)), 0o644))
+	err = m.refuseUnknownMocks(context.Background(), "set", &models.Mapping{}, []string{"mock-1", "mock-0"})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), `mock-0, of kind "HTTP", which this keploy cannot read; mock-1, the file's last document`)
+	require.Contains(t, err.Error(), "end it with a newline once its last mock is whole. If you edited mocks.yaml, give each mock this keploy cannot read back the kind and spec keploy wrote. If a newer")
+
+	// An NDJSON set whose last line parses and does not decode, with no
+	// newline, is skipped the same way. Its JSON is whole, so the refusal
+	// says what is wrong, the spec, with the decoder's own error: the fix is
+	// the spec, not the newline alone (which would make the read fail on it).
+	require.NoError(t, os.Remove(filepath.Join(keployDir, "set", "mocks.yaml")))
+	line := `{"version":"api.keploy.io/v1beta1","kind":"Http","name":"mock-1","spec":{"req":[1,2]}}`
+	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mocks.json"), []byte(line), 0o644))
+	err = m.refuseUnknownMocks(context.Background(), "set", &models.Mapping{}, []string{"mock-1"})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "keploy/set/mocks.json has mocks keploy/set/mappings.yaml names that this keploy skips: mock-1, the file's last line, which has no newline and whose spec does not decode (")
+	require.Contains(t, err.Error(), "cannot unmarshal array")
+	require.Contains(t, err.Error(), "If you saved mocks.json by hand, give its last line the spec keploy wrote and end the line with a newline; otherwise")
+}
+
+// A connection failure this keploy cannot replay, and an NDJSON mock of a
+// kind keploy reads only from YAML, are each named with their own fix. The
+// connection failure's is an upgrade or the fields keploy wrote, never
+// "use keploy enterprise", which replays it no better; the YAML-only kind's
+// is the YAML format (and keploy enterprise for a "-" kind), never an
+// upgrade, since no keploy reads it from NDJSON.
+func TestARefusalGivesASkippedConnectionFailureAndAYAMLOnlyKindTheirOwnFix(t *testing.T) {
+	keployDir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(keployDir, "set"), 0o755))
+	cf := "version: api.keploy.io/v1beta1\nkind: ConnectionFailure\nname: cf-0\nspec:\n    address: 10.0.3.7:443\n    phase: request\n    outcome: reset\n    reqTimestampMock: 2026-10-08T11:12:00.01Z\n    resTimestampMock: 2026-10-08T11:12:00.041Z\n"
+	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mocks.yaml"), []byte(cf), 0o644))
+	m := &mockService{config: &config.Config{Path: keployDir}, mockDB: mockdb.New(zap.NewNop(), keployDir, "mocks")}
+	err := m.refuseUnknownMocks(context.Background(), "set", &models.Mapping{}, []string{"cf-0"})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "skips: cf-0, a connection failure this keploy cannot replay.")
+	require.Contains(t, err.Error(), "If a newer keploy recorded a connection failure, upgrade keploy to replay it; if you edited one in mocks.yaml, give it back the fields keploy wrote; otherwise record")
+	for _, wrong := range []string{"enterprise", "kind and spec", "correct those names"} {
+		require.NotContains(t, err.Error(), wrong)
+	}
+
+	require.NoError(t, os.Remove(filepath.Join(keployDir, "set", "mocks.yaml")))
+	line := `{"version":"api.keploy.io/v1beta1","kind":"Redis-Ent","name":"mock-0","spec":{}}` + "\n"
+	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mocks.json"), []byte(line), 0o644))
+	err = m.refuseUnknownMocks(context.Background(), "set", &models.Mapping{}, []string{"mock-0"})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), `skips: mock-0, of kind "Redis-Ent", which keploy reads only from a YAML mock file.`)
+	require.Contains(t, err.Error(), `Keploy reads a mock of such a kind only from a YAML mock file, and one with a "-" in its kind only with keploy enterprise: record the set again in YAML, not as mocks.json; otherwise`)
+	for _, wrong := range []string{"upgrade", "use keploy enterprise", "correct those names"} {
+		require.NotContains(t, err.Error(), wrong)
+	}
+}
+
+// unreadStore is a MockDB whose set's mock file cannot be read again.
+type unreadStore struct{ MockDB }
+
+func (unreadStore) SkippedMocks(context.Context, string) (string, map[string]models.SkippedMock) {
+	return "", nil
+}
+
+// When the mocks file cannot be read again, the refusal does not call a
+// listed name one the file does not have, nor tell the user to correct
+// mappings.yaml: it says the replay did not read them.
+func TestARefusalDoesNotCallANameAbsentWhenTheMocksFileCannotBeReadAgain(t *testing.T) {
+	keployDir := filepath.Join(t.TempDir(), "keploy")
+	require.NoError(t, os.MkdirAll(filepath.Join(keployDir, "set"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mocks.yaml"), []byte("x"), 0o644))
+	m := &mockService{config: &config.Config{Path: keployDir}, mockDB: unreadStore{}}
+	err := m.refuseUnknownMocks(context.Background(), "set", &models.Mapping{}, []string{"mock-0"})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "keploy/set/mappings.yaml names mocks the replay did not read from keploy/set/mocks.yaml: mock-0.")
+	require.Contains(t, err.Error(), "Check that mocks.yaml has each of them, and that keploy can read it; otherwise")
+	for _, wrong := range []string{"does not have", "correct those names"} {
+		require.NotContains(t, err.Error(), wrong)
+	}
 }

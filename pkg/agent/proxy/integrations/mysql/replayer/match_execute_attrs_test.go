@@ -2,9 +2,12 @@ package replayer
 
 import (
 	"context"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/schemanoise"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/models"
@@ -253,8 +256,166 @@ func TestMatchCommand_StrictComparesTheAttributesAnExecuteReads(t *testing.T) {
 	if err != nil || ok {
 		t.Fatalf("strict served %v (%v): the statement reads a traceparent the replay changed", resp, err)
 	}
-	if miss == nil || len(miss.fieldDiffs) != 1 || miss.fieldDiffs[0].Path != "body.parameters.1.value" {
+	if miss == nil || len(miss.fieldDiffs) != 1 || miss.fieldDiffs[0].Path != "body.attributes.traceparent.value" {
 		t.Errorf("the miss %+v does not name the attribute's drift", miss)
+	}
+}
+
+// Strict compares, of a prepared statement's attributes, only the ones it
+// reads, by name: a traceparent sent with it changes on every call, and the
+// client may send it before the read one.
+func TestMatchCommand_StrictComparesOnlyTheAttributesAnExecuteReadsByName(t *testing.T) {
+	const reads = "SELECT ? AS k, mysql_query_attribute_string('tenant') AS t"
+	tenant := func(v string) mysql.Parameter {
+		return mysql.Parameter{Type: uint16(mysql.FieldTypeString), Name: "tenant", Value: v}
+	}
+	cases := []struct {
+		name   string
+		attrs  []mysql.Parameter
+		served bool
+		drift  string
+	}{
+		{name: "the same tenant, another traceparent", attrs: []mysql.Parameter{tenant("a"), traceparentAttr(replayTraceparent)}, served: true},
+		{name: "the same tenant after another traceparent", attrs: []mysql.Parameter{traceparentAttr(replayTraceparent), tenant("a")}, served: true},
+		{name: "the same tenant, no traceparent", attrs: []mysql.Parameter{tenant("a")}, served: true},
+		{name: "another tenant, the same traceparent", attrs: []mysql.Parameter{tenant("b"), traceparentAttr(recordedTraceparent)}, drift: "body.attributes.tenant.value"},
+		{name: "another tenant after the same traceparent", attrs: []mysql.Parameter{traceparentAttr(recordedTraceparent), tenant("b")}, drift: "body.attributes.tenant.value"},
+		{name: "no tenant", attrs: []mysql.Parameter{traceparentAttr(recordedTraceparent)}, drift: "body.attributes.tenant.value"},
+		// MySQL looks the name up in the connection's collation:
+		// case-insensitive under its default ones.
+		{name: "the same tenant sent as Tenant", attrs: []mysql.Parameter{traceparentAttr(replayTraceparent), {Type: uint16(mysql.FieldTypeString), Name: "Tenant", Value: "a"}}, served: true},
+		{name: "another tenant sent as TENANT", attrs: []mysql.Parameter{{Type: uint16(mysql.FieldTypeString), Name: "TENANT", Value: "b"}, traceparentAttr(recordedTraceparent)}, drift: "body.attributes.tenant.value"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			at := stmtT0.Add(time.Second)
+			m := executedMock("mock-reads", 1, at, "row", reads, "k1")
+			withAttrs(m.Spec.MySQLRequests[0].Message.(*mysql.StmtExecutePacket), tenant("a"), traceparentAttr(recordedTraceparent))
+			db := &fakeMockDb{session: []*models.Mock{m}, winStart: at.Add(-time.Second), winEnd: at.Add(time.Second)}
+			req := liveExecute("k1")
+			withAttrs(req.Message.(*mysql.StmtExecutePacket), c.attrs...)
+			dctx := newDecodeCtx()
+			dctx.StmtIDToQuery[33] = reads
+			dctx.PreparedStatements[33] = &mysql.StmtPrepareOkPacket{StatementID: 33, NumParams: 1}
+			ctx := context.WithValue(context.Background(), models.ClientConnectionIDKey, "0")
+			resp, ok, miss, err := matchCommand(ctx, zap.NewNop(), req, db, dctx, mocknoise.New(mysqlNoiseAdapter{}, false, true), nil)
+			if err != nil || ok != c.served {
+				t.Fatalf("served=%v (%v, %v, miss %+v); want served=%v", ok, resp, err, miss, c.served)
+			}
+			if c.served {
+				return
+			}
+			// Only the read attribute's fields: its value, and its type
+			// when it was not sent (a NULL).
+			named := false
+			for _, d := range miss.fieldDiffs {
+				named = named || d.Path == c.drift
+				if !strings.HasPrefix(d.Path, "body.attributes.tenant.") {
+					t.Errorf("the miss names %s: only the read attribute is compared", d.Path)
+				}
+			}
+			if !named {
+				t.Errorf("the miss %+v does not name the read attribute's drift (%s)", miss, c.drift)
+			}
+		})
+	}
+}
+
+// An EXECUTE whose statement names its attribute with a variable
+// (mysql_query_attribute_string(@n)): which one it reads is not known, so
+// strict compares every parameter sent, attributes included, by position
+// (body.parameters.N, as before). Another tenant misses.
+func TestMatchCommand_StrictComparesEveryAttributeOfAnExecuteReadingOneByVariable(t *testing.T) {
+	const reads = "SELECT ? AS k, mysql_query_attribute_string(@n) AS t"
+	tenant := func(v string) mysql.Parameter {
+		return mysql.Parameter{Type: uint16(mysql.FieldTypeString), Name: "tenant", Value: v}
+	}
+	for _, c := range []struct {
+		name   string
+		live   string
+		served bool
+	}{
+		{name: "the same tenant", live: "a", served: true},
+		{name: "another tenant", live: "b", served: false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			at := stmtT0.Add(time.Second)
+			m := executedMock("mock-reads-var", 1, at, "row", reads, "k1")
+			withAttrs(m.Spec.MySQLRequests[0].Message.(*mysql.StmtExecutePacket), tenant("a"))
+			db := &fakeMockDb{session: []*models.Mock{m}, winStart: at.Add(-time.Second), winEnd: at.Add(time.Second)}
+			req := liveExecute("k1")
+			withAttrs(req.Message.(*mysql.StmtExecutePacket), tenant(c.live))
+			dctx := newDecodeCtx()
+			dctx.StmtIDToQuery[33] = reads
+			dctx.PreparedStatements[33] = &mysql.StmtPrepareOkPacket{StatementID: 33, NumParams: 1}
+			ctx := context.WithValue(context.Background(), models.ClientConnectionIDKey, "0")
+			resp, ok, miss, err := matchCommand(ctx, zap.NewNop(), req, db, dctx, mocknoise.New(mysqlNoiseAdapter{}, false, true), nil)
+			if err != nil || ok != c.served {
+				t.Fatalf("served=%v (%v, %v, miss %+v); want served=%v", ok, resp, err, miss, c.served)
+			}
+			if c.served {
+				return
+			}
+			named := false
+			for _, d := range miss.fieldDiffs {
+				named = named || d.Path == "body.parameters.1.value"
+			}
+			if !named {
+				t.Errorf("the miss %+v does not name the attribute sent after k by position (body.parameters.1.value)", miss)
+			}
+		})
+	}
+}
+
+// Noise learned on the layout older versions compared, where an EXECUTE's
+// body held every attribute sent after its own parameters, by position (a
+// traceparent sent first at 1, after k), unchecks no attribute it reads: the
+// body keys those by name (body.attributes.<name>).
+func TestMatchCommand_StrictPositionalNoiseUnchecksNoReadAttribute(t *testing.T) {
+	const reads = "SELECT ? AS k, mysql_query_attribute_string('tenant') AS t"
+	tenant := func(v string) mysql.Parameter {
+		return mysql.Parameter{Type: uint16(mysql.FieldTypeString), Name: "tenant", Value: v}
+	}
+	for _, key := range []string{"body.parameters.1.value", "body.parameters.2.value"} {
+		at := stmtT0.Add(time.Second)
+		m := executedMock("mock-reads", 1, at, "row", reads, "k1")
+		withAttrs(m.Spec.MySQLRequests[0].Message.(*mysql.StmtExecutePacket), traceparentAttr(recordedTraceparent), tenant("a"))
+		m.Spec.ReqBodyNoise = map[string][]string{key: {}}
+		db := &fakeMockDb{session: []*models.Mock{m}, winStart: at.Add(-time.Second), winEnd: at.Add(time.Second)}
+		req := liveExecute("k1")
+		withAttrs(req.Message.(*mysql.StmtExecutePacket), traceparentAttr(replayTraceparent), tenant("b"))
+		dctx := newDecodeCtx()
+		dctx.StmtIDToQuery[33] = reads
+		dctx.PreparedStatements[33] = &mysql.StmtPrepareOkPacket{StatementID: 33, NumParams: 1}
+		ctx := context.WithValue(context.Background(), models.ClientConnectionIDKey, "0")
+		resp, ok, _, err := matchCommand(ctx, zap.NewNop(), req, db, dctx, mocknoise.New(mysqlNoiseAdapter{}, false, true), nil)
+		if err != nil || ok {
+			t.Errorf("noise %s: strict served %v (%v): tenant b got tenant a's rows", key, resp, err)
+		}
+	}
+}
+
+// The names a statement reads, in the order it first names them; not known
+// when it reads one it does not name with a string literal.
+func TestAttributesRead(t *testing.T) {
+	for _, c := range []struct {
+		query string
+		names []string
+		ok    bool
+	}{
+		{query: "SELECT 1", ok: true},
+		{query: "SELECT mysql_query_attribute_string('tenant')", names: []string{"tenant"}, ok: true},
+		{query: `SELECT MYSQL_QUERY_ATTRIBUTE_STRING ( "Tenant" ), mysql_query_attribute_string('a''b'), mysql_query_attribute_string('tenant')`, names: []string{"Tenant", "a'b", "tenant"}, ok: true},
+		{query: "SELECT mysql_query_attribute_string('x'), mysql_query_attribute_string('x')", names: []string{"x"}, ok: true},
+		{query: `SELECT mysql_query_attribute_string("a""b")`, names: []string{`a"b`}, ok: true},
+		{query: `SELECT mysql_query_attribute_string('a\'b')`, names: []string{"a'b"}, ok: true},
+		{query: "SELECT mysql_query_attribute_string('tenant'), mysql_query_attribute_string(@name)", ok: false},
+		{query: "SELECT mysql_query_attribute_string(CONCAT('ten', 'ant'))", ok: false},
+	} {
+		names, ok := attributesRead(c.query)
+		if ok != c.ok || (ok && !reflect.DeepEqual(names, c.names)) {
+			t.Errorf("attributesRead(%q) = %q, %v; want %q, %v", c.query, names, ok, c.names, c.ok)
+		}
 	}
 }
 
@@ -428,8 +589,8 @@ func TestMatchCommand_LearnsTheDriftOfAnAttributeAnExecuteReads(t *testing.T) {
 	if _, _, _, err := matchCommand(ctx, zap.NewNop(), req, db, dctx, schemanoise.New(mysqlNoiseAdapter{}, true, false), nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := db.learned["body.parameters.1.value"]; !ok {
-		t.Errorf("learned %v, want the read attribute's drift (body.parameters.1.value)", db.learned)
+	if _, ok := db.learned["body.attributes.traceparent.value"]; !ok {
+		t.Errorf("learned %v, want the read attribute's drift (body.attributes.traceparent.value)", db.learned)
 	}
 }
 
@@ -477,7 +638,7 @@ func TestMatchCommand_AnAutoReplayLearnsTheDriftStrictCompares(t *testing.T) {
 				withAttrs(r.Message.(*mysql.StmtExecutePacket), traceparentAttr(replayTraceparent))
 				return r
 			},
-			query: reads, params: 1, want: "body.parameters.1.value",
+			query: reads, params: 1, want: "body.attributes.traceparent.value",
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -565,6 +726,71 @@ func TestMatchCommand_StrictComparesTheAttributesTheRecordedStatementReads(t *te
 		resp, ok, _, err := matchCommand(ctx, zap.NewNop(), req, db, dctx, schemanoise.New(mysqlNoiseAdapter{}, false, true), nil)
 		if err != nil || ok {
 			t.Errorf("live traceparent %s: strict served %v (%v), a recording of a statement that reads its attributes", tp, resp, err)
+		}
+	}
+}
+
+// An app that comments its statements (sqlcommenter, a database monitor's
+// trace comment) prepares the statement with a comment its recording may
+// lack, or with a new trace id in it on every request. Both sides are
+// compared by the statement's identity, which leaves the comment out: the
+// recording is the same statement's, and its parameters decide. That holds
+// for a client that also names its statement's own parameter and sends a
+// per-call traceparent attribute the statement does not read: the recording
+// is split off by its statement, so the attribute is not compared.
+func TestMatchStmtExecute_ATraceCommentOnTheLiveStatementKeepsItTheRecordedStatement(t *testing.T) {
+	const plain = "SELECT v FROM kv WHERE id = ?"
+	traced := func(traceID string) string {
+		return "/* traceparent='00-" + traceID + "-b7ad6b7169203331-01' */ " + plain
+	}
+	const traceA, traceB = "0af7651916cd43dd8448eb211c80319c", "1bf7651916cd43dd8448eb211c80319c"
+	key := func(v string) []mysql.Parameter {
+		return []mysql.Parameter{{Type: uint16(mysql.FieldTypeString), Value: v}}
+	}
+	namedKey := func(v, tp string) []mysql.Parameter {
+		return []mysql.Parameter{{Type: uint16(mysql.FieldTypeString), Name: "id", Value: v}, traceparentAttr(tp)}
+	}
+	for name, tc := range map[string]struct {
+		recordedSQL, liveSQL string
+		recorded, live       []mysql.Parameter
+		definitive, sameSQL  bool
+	}{
+		"a comment the recording lacks, the recorded value": {plain, traced(traceA), key("k1"), key("k1"), true, true},
+		"a comment the recording lacks, another value":      {plain, traced(traceA), key("k1"), key("k2"), false, true},
+		"both commented with other trace ids":               {traced(traceA), traced(traceB), key("k1"), key("k1"), true, true},
+		"both commented, another value":                     {traced(traceA), traced(traceB), key("k1"), key("k2"), false, true},
+		"a named own parameter and a per-call traceparent":  {plain, traced(traceA), namedKey("k1", "tp-a"), namedKey("k1", "tp-b"), true, true},
+		"a named own parameter with another value":          {plain, traced(traceA), namedKey("k1", "tp-a"), namedKey("k2", "tp-b"), false, true},
+	} {
+		def, _, same := matchStmtExecutePacketQueryAware(zap.NewNop(), executeOf(executePacket(1, tc.recorded...)), executeOf(executePacket(1, tc.live...)),
+			tc.recordedSQL, tc.liveSQL, 1, "m", util.NewNoiseChecker(nil))
+		if def != tc.definitive || same != tc.sameSQL {
+			t.Errorf("%s: definitive %v and the same statement %v, want %v and %v", name, def, same, tc.definitive, tc.sameSQL)
+		}
+	}
+}
+
+// A recording that lost its statement (its PREPARE was pruned) is matched on
+// its parameters alone. When the live statement reads a query attribute, the
+// attribute is part of the answer, so it is compared too: a recording made for
+// another tenant is not a match on the parameters alone.
+func TestMatchStmtExecute_AnAttributeTheLiveStatementReadsCountsWhenTheRecordingLostItsStatement(t *testing.T) {
+	const reads = "SELECT ? AS k, mysql_query_attribute_string('tenant') AS t"
+	tenant := func(v string) mysql.Parameter {
+		return mysql.Parameter{Type: uint16(mysql.FieldTypeString), Name: "tenant", Value: v}
+	}
+	key := mysql.Parameter{Type: uint16(mysql.FieldTypeString), Value: "k1"}
+	for name, tc := range map[string]struct {
+		recorded, live string
+		want           bool
+	}{
+		"another tenant":  {"a", "b", false},
+		"the same tenant": {"a", "a", true},
+	} {
+		def, _, _ := matchStmtExecutePacketQueryAware(zap.NewNop(), executeOf(withAttrs(executePacket(1, key), tenant(tc.recorded))),
+			executeOf(withAttrs(executePacket(1, key), tenant(tc.live))), "", reads, 1, "m", util.NewNoiseChecker(nil))
+		if def != tc.want {
+			t.Errorf("%s: definitive %v, want %v", name, def, tc.want)
 		}
 	}
 }

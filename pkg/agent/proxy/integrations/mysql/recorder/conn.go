@@ -378,9 +378,9 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 		}
 
 		// save the auth switch response packet: its length, not the
-		// credential it carries (clientAuthData). There is no specific
+		// credential it carries (mysqlUtils.ClientAuthData). There is no specific
 		// identifier for AuthSwitchResponse.
-		res.req = append(res.req, clientAuthData(authSwithResp, mysql.AuthSwithResponse))
+		res.req = append(res.req, mysqlUtils.ClientAuthData(authSwithResp, mysql.AuthSwithResponse))
 
 		logger.Debug("Auth mechanism is switched successfully")
 
@@ -710,7 +710,7 @@ func handleFullAuth(ctx context.Context, logger *zap.Logger, clientConn, destCon
 		return res, err
 	}
 
-	res.req = append(res.req, clientAuthData(encPass, mysql.EncryptedPassword))
+	res.req = append(res.req, mysqlUtils.ClientAuthData(encPass, mysql.EncryptedPassword))
 
 	// read the final response from the server (ok or error)
 	finalServerResponse, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
@@ -773,8 +773,8 @@ func handlePlainPassword(ctx context.Context, logger *zap.Logger, clientConn, de
 		return res, err
 	}
 
-	// The password is recorded by its length only (clientAuthData).
-	res.req = append(res.req, clientAuthData(plainPass, mysql.PlainPassword))
+	// The password is recorded by its length only (mysqlUtils.ClientAuthData).
+	res.req = append(res.req, mysqlUtils.ClientAuthData(plainPass, mysql.PlainPassword))
 
 	// read the final response from the server (ok or error)
 	finalServerResponse, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
@@ -1127,7 +1127,7 @@ func handlePostTLSRecord(ctx context.Context, logger *zap.Logger, clientConn, de
 		if err != nil {
 			return fmt.Errorf("failed to parse post-TLS auth switch response: %w", err)
 		}
-		requests = append(requests, clientAuthData(switchPkt, mysql.AuthSwithResponse))
+		requests = append(requests, mysqlUtils.ClientAuthData(switchPkt, mysql.AuthSwithResponse))
 
 		// Read next auth response after switch.
 		authData, err = mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)

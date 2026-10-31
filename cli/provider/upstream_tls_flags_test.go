@@ -147,9 +147,7 @@ func newAgentCmdForTest(t *testing.T, cfg *config.Config) (*cobra.Command, *zap.
 	}
 	t.Cleanup(func() {
 		_ = logger.Sync()
-		if logFile != nil {
-			_ = logFile.Close()
-		}
+		_ = log.CloseLogFile(logFile)
 	})
 	c := NewCmdConfigurator(logger, cfg)
 	cmd := &cobra.Command{Use: "agent"}

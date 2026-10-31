@@ -26,6 +26,7 @@ import (
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/containerkey"
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
+	"go.keploy.io/server/v3/pkg/agent/proxy"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/engine"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -253,6 +254,11 @@ var pinProvenSwitch = provenswitch.Pin
 // see the call.
 var setDockerHost = containerkey.SetDockerHost
 
+// setExactViewVerify is what the agent's --exact-view-verify flag decides: the
+// exact view's verify mode (proxy.SetExactViewVerify). A variable so a test can
+// see the call without turning the mode on for the rest of its process.
+var setExactViewVerify = proxy.SetExactViewVerify
+
 // usePushedContainers is what a docker-mode agent does at start under the
 // proven switch: it has no Docker socket, so it names container destinations
 // from the list its keploy CLI pushes. A variable so a test can see the call.
@@ -425,6 +431,12 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		if err := cmd.Flags().MarkHidden("client-pid-ns"); err != nil {
 			c.logger.Debug("failed to hide the client-pid-ns flag", zap.Error(err))
 		}
+		// Read before the command line is parsed, by log.New, which opens the
+		// log; registered so that parsing accepts it.
+		cmd.Flags().String(log.ClientLogFileFlag, "", "The keploy client's log, which the agent appends its lines to (set by keploy itself)")
+		if err := cmd.Flags().MarkHidden(log.ClientLogFileFlag); err != nil {
+			c.logger.Debug("failed to hide the "+log.ClientLogFileFlag+" flag", zap.Error(err))
+		}
 		// Only the PATH travels here. The token itself stays in a 0600 file,
 		// because argv is world-readable through /proc/<pid>/cmdline and `ps`,
 		// and the local users that would read it there are the ones this token
@@ -448,6 +460,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Lookup("enable-sampling").NoOptDefVal = "5"
 		cmd.Flags().Uint64("memory-limit", c.cfg.Agent.MemoryLimit, "Memory limit for the keploy-agent container in MB")
 		cmd.Flags().Bool("global-passthrough", c.cfg.Agent.GlobalPassthrough, "Allow all outgoing calls to be mocked if set to true")
+		cmd.Flags().StringSlice("allow-egress", c.cfg.Agent.AllowEgress, "What a replay may reach on the real network, forwarded from keploy test's test.allowEgress")
 		cmd.Flags().Bool("disable-handshake-hold", c.cfg.Agent.DisableHandshakeHold, "Accept every outgoing connection at once instead of holding its handshake until the real destination answers")
 		cmd.Flags().Bool("capture-packets", c.cfg.Agent.CapturePackets, "Capture raw network packets on the proxy ports and write a pcap file into each test-set directory")
 		cmd.Flags().Bool("opportunistic-tls-intercept", c.cfg.Agent.OpportunisticTLSIntercept, "Sniff and hijack TLS connections in passthrough mode; the captured pcap is decryptable via the keylog")
@@ -486,6 +499,11 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		// which must never decide an agent's switch.
 		cmd.Flags().Bool(provenswitch.AgentFlag, false, "Internal: the proven model's staging switch (KEPLOY_PROVEN=1), passed by the keploy client that starts this agent. Not intended to be set by users directly.")
 		_ = cmd.Flags().MarkHidden(provenswitch.AgentFlag)
+		// Internal orchestrator→agent flag: the exact view's verify mode
+		// (KEPLOY_EXACT_VIEW_VERIFY=1 on the client, CI's lanes under the
+		// proven switch), which the agent does not inherit either.
+		cmd.Flags().Bool(provenswitch.VerifyFlag, false, "Internal: recompute each read of the exact view and fail on any difference (KEPLOY_EXACT_VIEW_VERIFY=1), passed by the keploy client that starts this agent. Not intended to be set by users directly.")
+		_ = cmd.Flags().MarkHidden(provenswitch.VerifyFlag)
 		// Internal orchestrator→agent flag: the Docker endpoint the client
 		// uses (its DOCKER_HOST), which sudo drops, for naming container
 		// destinations (containerkey.AgentArgs). Passed only under the proven
@@ -598,6 +616,7 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().Bool("update-template", c.cfg.Test.UpdateTemplate, "[DEPRECATED] This flag is ignored. config.yaml keeps the recorded template values; {{capture ...}} placeholders take each run's values as it goes.")
 		_ = cmd.Flags().MarkDeprecated("update-template", "keploy test no longer writes a run's template values into config.yaml; this flag is ignored")
 		cmd.Flags().Bool("mocking", true, "enable/disable mocking for the testcases")
+		cmd.Flags().StringSlice("allow-egress", c.cfg.Test.AllowEgress, "What the replay may reach on the real network (repeat or comma-separated). \"dns\" forwards a DNS query no mock answers to the host's and public resolvers too; without it a miss is forwarded only to a resolver inside the replay's own network (docker's, the container network's or the cluster's)")
 		cmd.Flags().Bool("disable-line-coverage", c.cfg.Test.DisableLineCoverage, "Disable line coverage generation.")
 		cmd.Flags().Bool("must-pass", c.cfg.Test.MustPass, "enforces that the tests must pass, if it doesn't, remove failing testcases")
 		cmd.Flags().Uint32Var(&c.cfg.Test.MaxFailAttempts, "max-fail-attempts", 5, "maximum number of testset failure that can be allowed during must-pass mode")
@@ -761,6 +780,11 @@ func (c *CmdConfigurator) validate(ctx context.Context, cmd *cobra.Command) erro
 			example = DockerExample(cmd.Name())
 		}
 		c.logger.Info(LogExample(example))
+		return err
+	}
+	if errors.Is(err, ErrNoTestSets) {
+		// Said by ValidateFlags, with the command that records test-sets,
+		// and not again as "failed to validate flags".
 		return err
 	}
 	if err != nil {
@@ -1330,6 +1354,18 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		if err == nil {
 			*c.logger = *logger
 		}
+		// Nor does such a run keep a log file: the `logs:` line that names it
+		// is PrintLogo's, which a document on stdout has no room for, and a
+		// file nobody is told about is one a killed run leaves in the temp
+		// directory for nobody to find. main created none where its early
+		// read of the command line saw this (WantsMachineOutput); a log a
+		// spelling that read missed is closed here, so no later line reaches
+		// it, and removed. The lines logged so far are on the console
+		// (stderr), as every later one is.
+		if err := log.CloseLogFile(utils.LogFile); err != nil {
+			c.logger.Debug("failed to remove the log file of a run with machine-readable output", zap.Error(err))
+		}
+		utils.LogFile = nil
 	}
 
 	// A KEPLOY_PROVEN keploy cannot read would otherwise mean "off" without a
@@ -1724,6 +1760,12 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				utils.LogError(c.logger, err, "refusing a deleted readiness flag")
 				return err
 			}
+			allowEgress, err := models.NormalizeAllowEgress(c.cfg.Test.AllowEgress)
+			if err != nil {
+				utils.LogError(c.logger, err, "refusing test.allowEgress")
+				return err
+			}
+			c.cfg.Test.AllowEgress = allowEgress
 		}
 
 		// Before the command type: refusing an engine does not depend on it,
@@ -1928,7 +1970,9 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				recordCmd := models.HighlightGrayString("keploy record")
 				c.logger.Info(fmt.Sprintf("No test-sets found. Please record testcases using %s command", recordCmd))
 				c.logger.Info("Example: " + RecordExample(utils.CmdType(c.cfg.CommandType)))
-				os.Exit(1)
+				// Returned, not os.Exit(1): the run ends through main, whose
+				// deferred calls remove its temp log (ErrNoTestSets).
+				return ErrNoTestSets
 			}
 
 			testSets, err := cmd.Flags().GetStringSlice("testsets")
@@ -2228,6 +2272,17 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 		c.cfg.Agent.GlobalPassthrough = globalPassthrough
 
+		allowEgress, err := cmd.Flags().GetStringSlice("allow-egress")
+		if err != nil {
+			errMsg := "failed to read the allow-egress flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		if c.cfg.Agent.AllowEgress, err = models.NormalizeAllowEgress(allowEgress); err != nil {
+			utils.LogError(c.logger, err, "refusing --allow-egress")
+			return err
+		}
+
 		disableHandshakeHold, err := cmd.Flags().GetBool("disable-handshake-hold")
 		if err != nil {
 			errMsg := "failed to read the disable-handshake-hold flag"
@@ -2302,6 +2357,10 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		}
 		if host, err := cmd.Flags().GetString(containerkey.AgentFlag); err == nil && host != "" {
 			setDockerHost(host)
+		}
+		if verify, err := cmd.Flags().GetBool(provenswitch.VerifyFlag); err == nil && verify {
+			setExactViewVerify(true)
+			c.logger.Info("the exact view's verify mode is on in this agent: each read it keeps is recomputed, and a difference fails the read (KEPLOY_EXACT_VIEW_VERIFY=1, passed as --exact-view-verify)")
 		}
 
 		// Upstream TLS verification, forwarded from the orchestrator. Gated on
@@ -2711,7 +2770,32 @@ func (c *CmdConfigurator) addMockFlags(cmd *cobra.Command) error {
 		cmd.Flags().Float64("min-coverage", c.cfg.Mock.MinCoverage, "Fail the replay when the test run covers less than this percentage of the code, from the coverage report the test command writes (0 disables)")
 		cmd.Flags().String("coverage-report", c.cfg.Mock.CoverageReport, "Coverage report the test command writes, when it is not a default location (coverage.out, coverage/lcov.info, coverage.xml, jacoco.xml, ...)")
 		cmd.Flags().StringArray("run-only", c.cfg.Mock.RunOnly, "Run only this test (repeat the flag for more; the name as the test runner's harness reports it, and a subtest runs with its test); the harness skips the rest")
+		cmd.Flags().StringSlice("allow-egress", c.cfg.Test.AllowEgress, "What the replay may reach on the real network (repeat or comma-separated), the same list as keploy test's test.allowEgress. \"dns\" forwards a DNS query no mock answers to the host's and public resolvers too; without it a miss is forwarded only to a resolver inside the replay's own network (docker's, the container network's or the cluster's)")
 	}
+	return nil
+}
+
+// readMockAllowEgress resolves `keploy mock replay`'s opt-in to real egress.
+// It is keploy test's list, not a mock.* one: keploy.yml's test.allowEgress
+// opens the same egress for both replays, and --allow-egress replaces it for
+// this run. An entry keploy does not act on stops the run before anything
+// starts, as it does for keploy test.
+func (c *CmdConfigurator) readMockAllowEgress(cmd *cobra.Command) error {
+	entries := c.cfg.Test.AllowEgress
+	if cmd.Flags().Changed("allow-egress") {
+		flagEntries, err := cmd.Flags().GetStringSlice("allow-egress")
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to read the allow-egress flag")
+			return errors.New("failed to read the allow-egress flag")
+		}
+		entries = flagEntries
+	}
+	allowEgress, err := models.NormalizeAllowEgress(entries)
+	if err != nil {
+		utils.LogError(c.logger, err, "refusing test.allowEgress")
+		return err
+	}
+	c.cfg.Test.AllowEgress = allowEgress
 	return nil
 }
 
@@ -3009,6 +3093,9 @@ func (c *CmdConfigurator) validateMockFlags(ctx context.Context, cmd *cobra.Comm
 			return err
 		}
 		if err := c.readMockRunOnly(cmd); err != nil {
+			return err
+		}
+		if err := c.readMockAllowEgress(cmd); err != nil {
 			return err
 		}
 	}

@@ -2,6 +2,7 @@ package http
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"math/big"
@@ -17,7 +18,9 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/matcher"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 // The strict comparison of S1 (design v14 §9, rows S1 and §7.2 item 8): under
@@ -38,6 +41,11 @@ import (
 //     learner it replaces (body.items[].id). A learned field's value may
 //     change; its type and its presence may not;
 //   - a recorded value the obfuscator redacted (Mock.Noise).
+//
+// A place the learn step learned as a read of the application's clock
+// (MockSpec.Clocks) is no noise: its value may change, and is checked apart,
+// against the call's window on the application's clock (clockDiffs), and no
+// learned noise excuses it; keploy.yml's noise still does.
 //
 // The User-Agent is compared by its first product token's name, so an SDK's
 // version bump is not a different caller while another client is. The
@@ -75,12 +83,30 @@ type strictKnown struct {
 	n       strictNoise
 	learned map[string][]string
 	values  *util.NoiseChecker
+	// clocks are the places the learn step learned as reads of the
+	// application's clock (clocksOf): the walk lets their value change, and
+	// clockDiffs checks it.
+	clocks map[string]models.ClockOffset
+}
+
+// clocksOf is what the learn step learned of m as reads of the
+// application's clock (MockSpec.Clocks), under the proven switch; none
+// without it, which compares as before it.
+func clocksOf(m *models.Mock) map[string]models.ClockOffset {
+	if m == nil || !provenswitch.On() {
+		return nil
+	}
+	return m.Spec.Clocks
 }
 
 // learnedAt reports whether the mock learned the field at exact (the learn
 // step's dialect: that field or a container of it) or at legacy (the
-// request-body learner's dialect, by its exact key).
+// request-body learner's dialect, by its exact key), or learned a read of the
+// application's clock at exact, whose value clockDiffs checks.
 func (k strictKnown) learnedAt(exact, legacy string) bool {
+	if _, clock := k.clocks[exact]; clock {
+		return true
+	}
 	if len(k.learned) == 0 {
 		return false
 	}
@@ -112,6 +138,9 @@ func (k strictKnown) redacted(recorded string) bool {
 type strictField struct {
 	diff  models.MockFieldDiff
 	shape string
+	// why is, of a read of the application's clock a replay refused
+	// (clockDiffs), the reason learn.CheckClockRead gives.
+	why string
 }
 
 // field is a strictField whose name holds no value (a fixed part, a header).
@@ -140,13 +169,15 @@ func fieldDiffs(fields []strictField) []models.MockFieldDiff {
 
 // strictDiff returns the compared fields in which the live request differs
 // from m's recording outside known noise, nil when m's recording is this
-// call. live is where the live request went.
-func strictDiff(input *req, live destination, m *models.Mock, n strictNoise) []strictField {
+// call. live is where the live request went; ctx is its connection's, whose
+// learn tracker tells the call's window on the application's clock.
+func strictDiff(ctx context.Context, input *req, live destination, m *models.Mock, n strictNoise) []strictField {
 	r := m.Spec.HTTPReq
 	if r == nil {
 		return []strictField{field(models.MockFieldDiff{Path: "method", Kind: models.DiffKindMissingInMock, Actual: input.method})}
 	}
-	k := strictKnown{n: n, learned: m.Spec.ReqBodyNoise, values: util.NewNoiseChecker(m.Noise)}
+	strictDiffs.Add(1)
+	k := strictKnown{n: n, learned: m.Spec.ReqBodyNoise, values: util.NewNoiseChecker(m.Noise), clocks: clocksOf(m)}
 	var out []strictField
 	if string(r.Method) != input.method {
 		out = append(out, field(valueDiff("method", string(r.Method), input.method)))
@@ -154,7 +185,7 @@ func strictDiff(input *req, live destination, m *models.Mock, n strictNoise) []s
 	for _, d := range destinationDiff(live, m) {
 		out = append(out, field(d))
 	}
-	recPath, recQuery := recordedURL(r)
+	recPath, recQuery := recordedStrictURL(m)
 	livePath := ""
 	var liveQuery url.Values
 	if input.url != nil {
@@ -164,7 +195,94 @@ func strictDiff(input *req, live destination, m *models.Mock, n strictNoise) []s
 	out = append(out, k.queryDiffs(recQuery, liveQuery)...)
 	out = append(out, k.headerDiffs(r.Header, input.header, input.sentBody())...)
 	out = append(out, k.bodyDiffs(r, input)...)
+	return append(out, k.clockDiffs(ctx, input)...)
+}
+
+// clockDiffs are the places the learn step learned as reads of the
+// application's clock (k.clocks) at which the call carries no such read made
+// in its own window on the application's clock (learn.ClockSpanFrom,
+// learn.CheckClockRead), each with the reason it gives; none where
+// keploy.yml's noise reaches the place, which the user declared not
+// compared. Every place is checked, whatever the walk found: a value equal to
+// its recording is a read of this run's clock only where the application's
+// clock showed it in the call's window, and a place the call does not carry,
+// or keploy cannot read, is refused. So is every place where keploy cannot
+// tell the application's clock at the call.
+func (k strictKnown) clockDiffs(ctx context.Context, input *req) []strictField {
+	if len(k.clocks) == 0 {
+		return nil
+	}
+	var leaves map[string]learn.Leaf
+	if input.url != nil {
+		leaves = learnNoise{}.shape(liveParts(ctx, input), "").Leaves
+	}
+	span, known := learn.ClockSpanFrom(ctx, input.arrived)
+	places := make([]string, 0, len(k.clocks))
+	for p := range k.clocks {
+		places = append(places, p)
+	}
+	sort.Strings(places)
+	var out []strictField
+	for _, p := range places {
+		live := leaves[p]
+		if k.userNoiseAt(p, live.Value) {
+			continue
+		}
+		// The reason names the field as a failed test's reason does (its
+		// shape), never a value an object key of it may be.
+		f := clockField(p)
+		if ok, why := learn.CheckClockRead(f.shape, k.clocks[p], live, span, known); !ok {
+			f.why = why
+			out = append(out, f)
+		}
+	}
 	return out
+}
+
+// userNoiseAt reports whether keploy.yml's noise reaches place, in the learn
+// step's dialect, holding value: its header names, a url pattern that
+// matches in a path segment or a query value, and its request-body paths.
+func (k strictKnown) userNoiseAt(place, value string) bool {
+	switch {
+	case strings.HasPrefix(place, "header."):
+		return k.n.header[strings.TrimPrefix(place, "header.")]
+	case strings.HasPrefix(place, "url."):
+		return maskURLNoise(value, k.n.url) != value
+	case strings.HasPrefix(place, "body."):
+		return k.n.body.Covers(riskOf(strings.TrimPrefix(place, "body.")), value, true)
+	}
+	return false
+}
+
+// arrayIndex is an array position in the learn step's dialect ([0]), which
+// the request matcher's writes [].
+var arrayIndex = regexp.MustCompile(`\[[0-9]+\]`)
+
+// riskOf is a body path in the learn step's dialect (items[0].at) in the
+// request matcher's, which keploy.yml's noise is written in (items[].at).
+func riskOf(exact string) string {
+	return arrayIndex.ReplaceAllString(exact, "[]")
+}
+
+// clockField is the field a refused read of the application's clock at
+// place (the learn step's dialect) is, named as the walk names that field.
+func clockField(place string) strictField {
+	switch {
+	case strings.HasPrefix(place, "url.path."):
+		return field(models.MockFieldDiff{Path: "path", Kind: models.DiffKindValueChanged})
+	case strings.HasPrefix(place, "url.query."):
+		name := strings.TrimPrefix(place, "url.query.")
+		return shaped("query."+name, "query."+shapeKey(name), models.DiffKindValueChanged, "", "")
+	case strings.HasPrefix(place, "body."):
+		risk := riskOf(strings.TrimPrefix(place, "body."))
+		keys := strings.Split(risk, ".")
+		for i, key := range keys {
+			base := strings.TrimRight(key, "[]")
+			keys[i] = shapeKey(base) + key[len(base):]
+		}
+		return shaped("body."+risk, "body."+strings.Join(keys, "."), models.DiffKindValueChanged, "", "")
+	}
+	return field(models.MockFieldDiff{Path: place, Kind: models.DiffKindValueChanged})
 }
 
 func valueDiff(path, expected, actual string) models.MockFieldDiff {

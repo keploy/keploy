@@ -319,7 +319,8 @@ func replayedTests(tests int) []int {
 }
 
 // TestExactServingAnswersARecordedSetAsKeployTestDoes replays recorded sets of
-// 100, 1k and 10k commands twice, as keploy test serves them (the path this
+// 100, 1k and 10k commands (10k only without -short and -race, see
+// raceEnabled) twice, as keploy test serves them (the path this
 // change leaves as it was) and under exact serving, and requires both,
 // command by command, to answer with the same recording, byte for byte; that
 // recording to be one of the command's own request; and no recording to
@@ -340,7 +341,11 @@ func replayedTests(tests int) []int {
 // The keploy test answers' digest is logged, so runs of this test on two
 // builds show the switch-off answers byte-identical between them.
 func TestExactServingAnswersARecordedSetAsKeployTestDoes(t *testing.T) {
-	for _, n := range []int{100, 1000, 10000} {
+	sizes := []int{100, 1000, 10000}
+	if testing.Short() || raceEnabled {
+		sizes = sizes[:2]
+	}
+	for _, n := range sizes {
 		for _, run := range setRuns {
 			t.Run(fmt.Sprintf("n=%d/%s/strict=%v", n, run.order, run.strict), func(t *testing.T) {
 				// Each run builds its own stores and shares nothing with the
@@ -430,7 +435,8 @@ func setMocksCommands(tests [][]setCommand) []setCommand {
 }
 
 // TestExactServingAnswersARecordedSetRunEightAtOnce replays recorded sets of
-// 100, 1k and 10k commands under exact serving on eight connections: in each
+// 100, 1k and 10k commands (10k only without -short and -race, see
+// raceEnabled) under exact serving on eight connections: in each
 // test, each connection's commands in recorded order, the eight connections'
 // next commands at once (each reads the pool before any consumes), and so
 // the commands made outside every test (recordedOutside), from the pool view.
@@ -440,7 +446,11 @@ func setMocksCommands(tests [][]setCommand) []setCommand {
 // order of the consumes, not compared.
 func TestExactServingAnswersARecordedSetRunEightAtOnce(t *testing.T) {
 	const conns = 8
-	for _, n := range []int{100, 1000, 10000} {
+	sizes := []int{100, 1000, 10000}
+	if testing.Short() || raceEnabled {
+		sizes = sizes[:2]
+	}
+	for _, n := range sizes {
 		for _, strict := range []bool{false, true} {
 			t.Run(fmt.Sprintf("n=%d/strict=%v", n, strict), func(t *testing.T) {
 				t.Parallel()

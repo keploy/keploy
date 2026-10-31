@@ -309,6 +309,9 @@ type SyncMockManager struct {
 	testSpans     []testSpan
 	testSpansNext int
 	spanWatch     map[*Window]chan struct{}
+	// scopes is, under the proven switch, the test scopes open now
+	// (BeginTestScope): tests whose recording opens no window. Guarded by mu.
+	scopes []*TestScope
 	// exchangeHolds is the exchanges parsers hold while they cannot yet tell
 	// what they are (HoldExchanges), each by its earliest request time in
 	// Unix nanoseconds; exchangeHoldsNext numbers them. holdsStopping is

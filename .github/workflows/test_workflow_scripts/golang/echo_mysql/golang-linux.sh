@@ -118,7 +118,6 @@ run_record_iteration() {
 
   echo "Record iteration $idx${label:+ (json)}"
 
-  sudo rm -f /tmp/keploy-logs.txt
 
   # A plain redirect, NOT `| tee`. A pipeline's $! is its LAST element, so this
   # used to hold tee's pid and the recorder's own was never available — which is
@@ -218,7 +217,6 @@ echo "REPLAY_BIN : $REPLAY_BIN"
 rm -rf keploy/ keploy.yml || true
  # Generate config
 
-sudo rm -f /tmp/keploy-logs.txt
 
 # Keploy's config now carries only the settings that DIFFER from its
 # defaults, so patching a default value out of the generated file with
@@ -318,7 +316,6 @@ endsec
 
 section "Replay"
 # Run replay but DON'T crash the step; capture rc and print logs.
-sudo rm -f /tmp/keploy-logs.txt
 
 # An `if` condition is exempt from errexit, so the step survives a failing
 # replay long enough to say WHICH test set failed. Deliberately not
@@ -397,7 +394,6 @@ fi
 
 if json_pass_supported; then
   section "Replay (json)"
-  sudo rm -f /tmp/keploy-logs.txt
   # Same shape and same reasons as REPLAY_RC above.
   if "$REPLAY_BIN" test --storage-format json -c "./urlShort" --delay 7 --generateGithubActions=false \
     2>&1 | tee test_logs_json.txt

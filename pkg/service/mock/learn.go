@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
@@ -88,6 +89,9 @@ func (m *mockService) learnedOnto(consumed []models.MockState, expected map[stri
 		for field := range st.ReqBodyNoise {
 			out = append(out, st.Name+" "+field+" (noise)")
 		}
+		for field, o := range st.Clocks {
+			out = append(out, st.Name+" "+field+" ("+o.String()+")")
+		}
 		for v, mv := range st.Variables {
 			kind := "variable"
 			if mv.Echo {
@@ -147,8 +151,17 @@ func (m *mockService) persistLearned(ctx context.Context, set string, consumed [
 			owner[e.Name] = test
 		}
 	}
-	states := make(map[string]models.MockState, len(consumed))
+	all := make(map[string]models.MockState, len(consumed))
 	for _, st := range consumed {
+		all[st.Name] = st
+	}
+	all, taken := learn.RunTakesPlaces(all, func(mock string) string { return owner[mock] })
+	for _, t := range taken {
+		m.logger.Info("keploy follows a test's own variable as the test set's: a later test sends the value it sent",
+			zap.String("test", t.Test), zap.String("variable", t.Own), zap.String("setVariable", t.Run), zap.String("mock", t.Mock), zap.String("field", t.Place))
+	}
+	states := make(map[string]models.MockState, len(consumed))
+	for _, st := range all {
 		if !m.learnsOnto(owner[st.Name]) {
 			continue
 		}

@@ -147,13 +147,18 @@ type ScopeReq struct {
 	Project string `json:"project,omitempty"`
 }
 
-// The verdicts a harness reports in ScopeReq.Outcome, and ScopeOutcomeGated,
-// which the agent records for a test the replay told not to run.
+// The verdicts a harness reports in ScopeReq.Outcome, and the two the agent
+// records for a test the replay told not to run: ScopeOutcomeGated, which the
+// gate's list (ScopeGateReq.Run or Skip) skipped, and ScopeOutcomeUnmet,
+// skipped because a test it needs (ScopeGateReq.Needs) had not begun before
+// it in this replay. An unmet test's run says nothing of it: the run that
+// selects the test it needs runs it.
 const (
 	ScopeOutcomePassed  = "passed"
 	ScopeOutcomeFailed  = "failed"
 	ScopeOutcomeSkipped = "skipped"
 	ScopeOutcomeGated   = "gated"
+	ScopeOutcomeUnmet   = "unmet"
 )
 
 // maxScopeOutcome bounds a verdict a harness sends; anything longer is not one.
@@ -214,6 +219,20 @@ type ScopeGateReq struct {
 	// deny list: every test it does not name runs. Read under the proven
 	// switch, where it replaces Run.
 	Skip map[string]string `json:"skip,omitempty"`
+	// Needs, read with Skip, holds a test to tests that must run before it:
+	// at its begin, the first ScopeNeed whose Test has not begun earlier in
+	// this replay skips it with that need's Reason. Its call holds a value
+	// their calls send in the same run (a run's variable), so it cannot run
+	// without them.
+	Needs map[string][]ScopeNeed `json:"needs,omitempty"`
+}
+
+// ScopeNeed is one test a replayed test needs to have begun before it
+// (ScopeGateReq.Needs), and the reason its harness skips it with when that
+// test has not.
+type ScopeNeed struct {
+	Test   string `json:"test"`
+	Reason string `json:"reason"`
 }
 
 // ScopeWindow is one recorded per-test scope: the agent-clock interval during
@@ -283,6 +302,14 @@ type ScopeTableReq struct {
 	// omitzero: an empty pool ({}) is sent, and means "serve no pool mock
 	// between tests"; only a nil one is left out (with the switch off).
 	Pool map[string][]string `json:"pool,omitzero"`
+	// Windows is, under the proven switch, the recorded window of every test
+	// of the set, the gated ones included: what keploy test's staging sends
+	// as MockFilterParams.RecordedWindows. keploy mock replay derives each
+	// from the set's mappings (the test's recorded begin and its own
+	// recordings), so the learn step tells a test's own recordings from
+	// another test's (integrations.TestWindows). Absent from an older CLI
+	// and from a set with no test: the agent then knows none.
+	Windows []TestWindow `json:"windows,omitempty"`
 }
 
 // TestBeginsReq is the body of POST /agent/replay/clock, which only the keploy
@@ -444,6 +471,11 @@ type MockFilterParams struct {
 	// in: an enabling value forces strict; an explicit disabling value
 	// ("0") forces strict off regardless of the per-call flag.
 	StrictMockWindow bool `json:"strictMockWindow,omitempty"`
+	// ExactStaging marks the agent's own staging of keploy mock replay, which
+	// asks for the strict window's staging load (StrictMockWindow) but is no
+	// user's strict window: the strict window's notice, about keploy test's
+	// per-test windows, is not printed for it. Never on the wire.
+	ExactStaging bool `json:"-"`
 
 	// Variables are the test variables the test's own request carries (its
 	// test case's template values), under the proven switch: a mock filter
@@ -641,6 +673,99 @@ const (
 // scope required by its end) whatever it asked for: never looser than the
 // rules the set was served by.
 const BackgroundRulesHeader = "X-Keploy-Background-Rules"
+
+// MockWindowHeader is the /updatemockparams response header in which an agent
+// says how it served the call's window (MockWindowMode.String): its strict
+// mock window mode, with its own KEPLOY_STRICT_MOCK_WINDOW folded in, and its
+// per-test load mode. The agent's process reads that env, which the replay's
+// does not share: sudo drops it on the way to a native agent, a docker agent's
+// container is not given it, and a k8s-proxy agent runs in its own pod. An
+// agent that does not send the header, every agent released before it, has
+// said nothing, and the replay's mock prune then assumes the mode that holds
+// the most (MockWindowsSaid).
+const MockWindowHeader = "X-Keploy-Mock-Window"
+
+// The per-test load modes an agent says in MockWindowHeader: which per-test
+// mocks its on-disk store loads for a call (the agent's perTestLoadMode).
+const (
+	// MockLoadMapping: the mocks the test's mapping names, and the
+	// carry-over lookahead.
+	MockLoadMapping = "mapping"
+	// MockLoadStrictWindow: the window's mocks, the startup band, the calls
+	// in flight, and the carry-over lookahead.
+	MockLoadStrictWindow = "strict-window"
+	// MockLoadLaxAll: every per-test mock, which the lax window filter
+	// routes; no lookahead.
+	MockLoadLaxAll = "lax-all"
+)
+
+// MockWindowMode is how an agent served one /updatemockparams call's window,
+// as it says in MockWindowHeader.
+type MockWindowMode struct {
+	// Strict: its strict mock window was on for the call
+	// (pkg.IsStrictMockWindow of the call's StrictMockWindow in the agent's
+	// process).
+	Strict bool
+	// Load is its per-test load mode: MockLoadMapping, MockLoadStrictWindow
+	// or MockLoadLaxAll.
+	Load string
+}
+
+// Lookahead says the load runs the carry-over lookahead: a load by mapping or
+// by the strict window, whenever the agent holds the per-test mocks on disk.
+func (m MockWindowMode) Lookahead() bool {
+	return m.Load == MockLoadMapping || m.Load == MockLoadStrictWindow
+}
+
+// String is m as MockWindowHeader carries it: "strict=on;load=<mode>", or
+// "strict=off;load=<mode>".
+func (m MockWindowMode) String() string {
+	strict := "off"
+	if m.Strict {
+		strict = "on"
+	}
+	return "strict=" + strict + ";load=" + m.Load
+}
+
+// ParseMockWindowMode reads a MockWindowHeader value (MockWindowMode.String).
+// ok is false for one that says nothing, or what this keploy cannot read.
+func ParseMockWindowMode(v string) (m MockWindowMode, ok bool) {
+	strict, load, found := strings.Cut(strings.TrimSpace(v), ";")
+	if !found {
+		return MockWindowMode{}, false
+	}
+	switch strict {
+	case "strict=on":
+		m.Strict = true
+	case "strict=off":
+	default:
+		return MockWindowMode{}, false
+	}
+	switch load {
+	case "load=" + MockLoadMapping, "load=" + MockLoadStrictWindow, "load=" + MockLoadLaxAll:
+		m.Load = strings.TrimPrefix(load, "load=")
+	default:
+		return MockWindowMode{}, false
+	}
+	return m, true
+}
+
+// MockWindowsSaid is what an agent said in MockWindowHeader over a set's
+// /updatemockparams calls, its staging and every test's window: Strict, that
+// some call ran its strict mock window; Lookahead, that some call's load ran
+// the carry-over lookahead. Either is the mode that holds more: the replay's
+// mock prune asks what the agent serves a test that got no answer by them
+// (pkg.ServeWindow), and holding one more mock is safe where deleting one the
+// agent serves is not. When the agent has not said, the prune takes both.
+type MockWindowsSaid struct {
+	Strict, Lookahead bool
+}
+
+// Add folds one call's mode into s.
+func (s *MockWindowsSaid) Add(m MockWindowMode) {
+	s.Strict = s.Strict || m.Strict
+	s.Lookahead = s.Lookahead || m.Lookahead()
+}
 
 // TestRequestReadHeader is the /updatemockparams response header in which an
 // agent says, answering the filter that opens a keploy test case
@@ -994,6 +1119,15 @@ const DrainsOnAgentStopHeader = "Keploy-Drains-On-Agent-Stop"
 // a stop signal has reached the agent and the agent waits for the client to
 // drain its streams. 404 from an agent that predates it.
 const StopNoticePath = "/record/stopping"
+
+// NetworkNamesPath is the agent route, under its prefix, the keploy CLI gives
+// a docker-mode agent the names the replay's docker networks answer
+// themselves on (netnames.List), and NetworkNamesAskPath the one it holds open
+// for the agent's ask for a fresh list.
+const (
+	NetworkNamesPath    = "/dns/names"
+	NetworkNamesAskPath = "/dns/names/ask"
+)
 
 type agentStopNoticeKey struct{}
 

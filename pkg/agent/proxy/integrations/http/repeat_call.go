@@ -31,7 +31,7 @@ func repeatOfAnswered(ctx context.Context, input *req, mockDb integrations.MockM
 	}
 	live := liveDestination(ctx, input)
 	match := func(m *models.Mock) bool {
-		return m.Spec.HTTPReq != nil && sameRequest(strictDiff(input, live, m, n))
+		return m.Spec.HTTPReq != nil && sameRequest(strictDiff(ctx, input, live, m, n))
 	}
 	path := ""
 	if input.url != nil {
@@ -113,7 +113,7 @@ func markRepeat(report *models.MockMismatchReport, a integrations.AnsweredCall) 
 	m := a.Mock
 	if !report.NotOwned {
 		report.ClosestMock = m.Name
-		report.FieldDiffs, report.Differs, report.Diff = nil, nil, ""
+		report.FieldDiffs, report.Differs, report.FieldReasons, report.Diff = nil, nil, nil, ""
 		report.ClosestMockReq = renderMockRequest(m.Spec.HTTPReq, m.Noise)
 	}
 	report.Repeat = models.NewRepeatNote(m.Name, a.AnsweredAt, m.Spec.ReqTimestampMock, report.At)

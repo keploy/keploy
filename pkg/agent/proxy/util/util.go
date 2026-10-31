@@ -44,10 +44,9 @@ var Emoji = "\U0001F430" + " Keploy:"
 // behind a dual-stack name: that looks exactly like a dependency that has not
 // started yet. So name the address family as a possibility, conditionally, and
 // leave the timing advice as the other possibility rather than the answer.
-// The counterpart retry is SUPPRESSED for a Fabricated target, and PassThrough
-// (the two sites below) is the only site attaching this hint where a fabricated
-// address can arrive — so the wording must not promise a retry those callers
-// never get.
+// The counterpart retry is SUPPRESSED for a Fabricated target, so the wording
+// must not promise a retry: a caller that dials a fabricated address never gets
+// one.
 // Kept as a const so all sites update together.
 const NextStepDialDestination = "check which address FAMILY the dependency binds — a container published port is IPv4-only by default, and a loopback destination may be retried on the other family (not when the capture layer had to fabricate the address), so check both — and confirm the dependency is up before traffic starts (sequence its start, raise --delay, or add a readiness probe)"
 
@@ -73,24 +72,56 @@ type Conn struct {
 	mu     sync.Mutex
 }
 
+// ErrCannotHalfClose is what a half-close of a conn that has no way to
+// end only what it sends reports: nothing was sent, and its peer was
+// told nothing. It is errors.ErrUnsupported.
+var ErrCannotHalfClose = fmt.Errorf("the connection cannot half-close: %w", errors.ErrUnsupported)
+
 // CloseWriteIfPossible forwards a FIN on c when the conn supports
-// half-close, and does nothing when it does not. Doing nothing is the
-// right fallback: losing a half-close costs a protocol signal, whereas
-// closing the connection to compensate would cost the connection.
+// half-close, and does nothing when it does not, but says so: it
+// returns ErrCannotHalfClose. Doing nothing is the right fallback for a
+// caller that only passes the signal on (losing a half-close costs a
+// protocol signal, whereas closing the connection to compensate would
+// cost the connection), and it ignores the error. A caller that keeps
+// the other direction open for the peer's answer to the FIN must know
+// the peer got one: a wrapper that answered nil for a FIN it never sent
+// held a pass-through open for an end its peer never knew to send.
 //
 // It lives here because this package defines the wrappers that sit
 // between the proxy and every real socket, and is the only one able to
-// see through them.
+// see through them. A conn with a CloseWrite of its own is asked, and
+// each wrapper's CloseWrite returns what this returns for the conn it
+// wraps. A conn with none is looked through to the conn it wraps (its
+// NetConn, the convention *tls.Conn set, or its Unwrap), so a wrapper
+// that only filters what is read, such as the HTTP/2 preface's
+// ackFilter, does not hide a leaf that can half-close. So the answer is
+// the leaf's, however they nest: ErrCannotHalfClose only when no conn
+// down the chain has a CloseWrite, or the chain is deeper than
+// maxHalfCloseDepth (a wrapper that returns itself must not hang this).
 func CloseWriteIfPossible(c net.Conn) error {
 	if c == nil {
 		return nil
 	}
 	type closeWriter interface{ CloseWrite() error }
-	if cw, ok := c.(closeWriter); ok {
-		return cw.CloseWrite()
+	for i := 0; i < maxHalfCloseDepth && c != nil; i++ {
+		if cw, ok := c.(closeWriter); ok {
+			return cw.CloseWrite()
+		}
+		switch u := c.(type) {
+		case interface{ NetConn() net.Conn }:
+			c = u.NetConn()
+		case interface{ Unwrap() net.Conn }:
+			c = u.Unwrap()
+		default:
+			return ErrCannotHalfClose
+		}
 	}
-	return nil
+	return ErrCannotHalfClose
 }
+
+// maxHalfCloseDepth bounds CloseWriteIfPossible's walk down a conn's
+// wrappers. The proxy nests a handful at most.
+const maxHalfCloseDepth = 16
 
 // CloseWrite forwards a half-close to the conn underneath.
 //
@@ -270,6 +301,12 @@ type DirectChunkReader interface {
 // self-aware memory guard pauses recording, allowing record-mode parsers to
 // fall back to passthrough without reading more data for decoding.
 // errChannel should be buffered to hold one terminal error per reader goroutine.
+//
+// Every hand-off, of a read and of the error that ends the reader, waits for
+// its taker only while ctx lasts: a relay that stops taking (it ended on the
+// other side's close, or on its own write's error) cancels ctx, and the reader
+// holding a read then returns instead of waiting for a taker forever. One that
+// did wait kept its caller, which waits for its readers, from ever returning.
 func ReadBuffConn(ctx context.Context, logger *zap.Logger, conn net.Conn, bufferChannel chan []byte, errChannel chan error, stopOnRecordingPause bool) {
 	if dcr, ok := conn.(DirectChunkReader); ok {
 		// Drain ALL pending carry-over in a loop before switching to
@@ -363,7 +400,8 @@ func ReadBuffConn(ctx context.Context, logger *zap.Logger, conn net.Conn, buffer
 			if conn == nil {
 				logger.Debug("the conn is nil")
 			}
-			buffer, err := ReadBytes(ctx, logger, conn)
+			// A relay's side can wait for hours: a small read (WaitReadSize).
+			buffer, err := ReadBytesWaiting(ctx, logger, conn)
 			if err != nil {
 				if ctx.Err() != nil { // to avoid sending buffer to closed channel if the context is cancelled
 					return
@@ -374,14 +412,32 @@ func ReadBuffConn(ctx context.Context, logger *zap.Logger, conn net.Conn, buffer
 						logger.Debug("Failed to read buffer", zap.String("base64_encoded", util.EncodeBase64(buffer)))
 					}
 				}
-				errChannel <- err
+				// The bytes that came with the error are the peer's last
+				// ones (a TLS peer's last record read together with its
+				// close_notify comes back with io.EOF): handed on before
+				// the error, or a relay ends without them.
+				if len(buffer) > 0 {
+					select {
+					case bufferChannel <- buffer:
+					case <-ctx.Done():
+						return
+					}
+				}
+				select {
+				case errChannel <- err:
+				case <-ctx.Done():
+				}
 				return
 			}
 			if ctx.Err() != nil { // to avoid sending buffer to closed channel if the context is cancelled
 				return
 			}
 
-			bufferChannel <- buffer
+			select {
+			case bufferChannel <- buffer:
+			case <-ctx.Done():
+				return
+			}
 		}
 	}
 }
@@ -487,8 +543,17 @@ const (
 	HandshakeEOFRetrySleep = 50 * time.Millisecond
 )
 
-// ReadBytes function is utilized to read the complete message from the reader until the end of the file (EOF).
-// It returns the content as a byte array.
+// ReadBytes returns the bytes of the reader's next Read that returns any: what
+// has arrived, up to ReadChunkSize, sized to what was read. It never waits for
+// more than that one Read: a caller that needs a whole message (a header, a
+// declared length) reads again until it has it.
+//
+// It used to read 1 KiB at a time into a growing buffer and return only on a
+// short read, which held bytes from their taker in two ways: a message whose
+// length is a multiple of 1 KiB waited for the peer's next bytes, which a peer
+// waiting for its answer never sends (a pass-through stalled on it), and a peer
+// that streams faster than 1 KiB reads grew the buffer without bound (one relay
+// held 69 MB). Each Read is now handed on as it comes, so neither can happen.
 //
 // History:
 //   - Pre Track D: a 100ms x 5 retry loop sat on EOF unconditionally, adding
@@ -519,7 +584,16 @@ const (
 // never answered, so the caller waited forever. ctx is checked before every
 // Read; a panic in Read ends the read with an error.
 func ReadBytes(ctx context.Context, logger *zap.Logger, reader io.Reader) ([]byte, error) {
-	return readBytes(ctx, logger, reader, HandshakeEOFRetryMax)
+	return readBytes(ctx, logger, reader, HandshakeEOFRetryMax, &readScratch)
+}
+
+// ReadBytesWaiting is ReadBytes for a read that may wait long for the
+// connection's next bytes: a pass-through's reader (ReadBuffConn), an HTTP
+// keep-alive connection's wait for its next request. It reads at most
+// WaitReadSize, so a connection that waits holds that much while it waits,
+// not ReadChunkSize.
+func ReadBytesWaiting(ctx context.Context, logger *zap.Logger, reader io.Reader) ([]byte, error) {
+	return readBytes(ctx, logger, reader, HandshakeEOFRetryMax, &waitScratch)
 }
 
 // ReadBytesUntilEOF is ReadBytes for a reader whose end is its peer's close:
@@ -527,60 +601,75 @@ func ReadBytes(ctx context.Context, logger *zap.Logger, reader io.Reader) ([]byt
 // retry, under a read deadline shorter than its sleep, comes back as the
 // deadline's timeout, which hides that the peer closed.
 func ReadBytesUntilEOF(ctx context.Context, logger *zap.Logger, reader io.Reader) ([]byte, error) {
-	return readBytes(ctx, logger, reader, 0)
+	return readBytes(ctx, logger, reader, 0, &readScratch)
 }
 
-func readBytes(ctx context.Context, logger *zap.Logger, reader io.Reader, eofRetryMax int) ([]byte, error) {
-	// One scratch buffer per call, and the message appended from it, so what is
-	// returned is sized to the message as it always was.
-	scratch := make([]byte, 1024)
-	var buffer []byte
+// ReadChunkSize is the most one ReadBytes or ReadBytesUntilEOF returns. It is
+// the size the relay that records a connection reads with
+// (relay.DefaultForwardBuf), so a replay reads a request in the pieces its
+// recording read: the generic parser's similarity compares a request with a
+// recording piece by piece (its exact match compares the bytes wherever the
+// pieces end).
+const ReadChunkSize = 32 << 10
+
+// WaitReadSize is the most one ReadBytesWaiting returns, and the most a relay
+// reader (ReadBuffConn) holds of a connection's bytes while it waits for its
+// taker: the size the old ReadBytes loop read with. A read holds its buffer
+// for as long as it waits, and a pass-through or a keep-alive connection can
+// wait for hours, so these reads take 1 KiB, not ReadChunkSize: 10k idle
+// pass-throughs (two readers each) held about 600 MiB more at 32 KiB.
+const WaitReadSize = 1 << 10
+
+// readScratch and waitScratch hold the buffers ReadBytes and ReadBytesWaiting
+// read into. What they return is copied out, sized to the read, so a scratch
+// buffer is never held past the call.
+var (
+	readScratch = sync.Pool{New: func() any { b := make([]byte, ReadChunkSize); return &b }}
+	waitScratch = sync.Pool{New: func() any { b := make([]byte, WaitReadSize); return &b }}
+)
+
+func readBytes(ctx context.Context, logger *zap.Logger, reader io.Reader, eofRetryMax int, scratchPool *sync.Pool) ([]byte, error) {
+	scratch := scratchPool.Get().(*[]byte)
+	defer scratchPool.Put(scratch)
 	emptyEOFRetries := 0
 	for {
 		if err := ctx.Err(); err != nil {
-			return buffer, err
+			return nil, err
 		}
-		n, err := readContained(logger, reader, scratch)
+		n, err := readContained(logger, reader, *scratch)
 		if ctx.Err() != nil {
 			// As before: a read that returns after the context ended is not
 			// taken.
-			return buffer, ctx.Err()
+			return nil, ctx.Err()
 		}
+		var buffer []byte
 		if n > 0 {
-			buffer = append(buffer, scratch[:n]...)
+			buffer = append([]byte(nil), (*scratch)[:n]...)
 		}
-
-		if err != nil {
-			// Non-EOF errors always surface immediately.
-			if err != io.EOF {
-				return buffer, err
-			}
-			// EOF with data already collected in this call is
-			// authoritative (short-data-then-EOF / mid-stream peer
-			// close on a clean message boundary). Fast-return as
-			// Track D intended.
-			if len(buffer) > 0 {
-				return buffer, err
-			}
-			// Zero-byte EOF on an empty buffer: apply the
-			// bounded handshake retry budget. This protects the
-			// Postgres v3 handshake race where the replayer's
-			// startup response is still being written when the
-			// app issues its first Read. Budget is capped so
-			// mid-stream closes surface within 150ms.
-			if emptyEOFRetries >= eofRetryMax {
-				return buffer, err
-			}
-			emptyEOFRetries++
-			select {
-			case <-ctx.Done():
-				return buffer, ctx.Err()
-			case <-time.After(HandshakeEOFRetrySleep):
-			}
-			continue
+		if n > 0 || err == nil {
+			// Bytes, with or without the error that ended the Read: an EOF
+			// after data is authoritative (short-data-then-EOF, a peer's
+			// close on a message boundary). A Read of nothing with no error
+			// is returned as it is, as an empty Read always was.
+			return buffer, err
 		}
-		if n < len(scratch) {
-			return buffer, nil
+		// Non-EOF errors always surface immediately.
+		if err != io.EOF {
+			return nil, err
+		}
+		// Zero-byte EOF: apply the bounded handshake retry budget. This
+		// protects the Postgres v3 handshake race where the replayer's
+		// startup response is still being written when the app issues its
+		// first Read. Budget is capped so mid-stream closes surface within
+		// 150ms.
+		if emptyEOFRetries >= eofRetryMax {
+			return nil, err
+		}
+		emptyEOFRetries++
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(HandshakeEOFRetrySleep):
 		}
 	}
 }
@@ -695,99 +784,6 @@ func ReadFromPeer(ctx context.Context, logger *zap.Logger, conn net.Conn, buffCh
 	})
 
 	return nil
-}
-
-// PassThrough function is used to pass the network traffic to the destination connection.
-// It also closes the destination connection if the function returns an error.
-func PassThrough(ctx context.Context, logger *zap.Logger, clientConn net.Conn, dstCfg *models.ConditionalDstCfg, requestBuffer [][]byte) ([]byte, error) {
-	logger.Debug("passing through the network traffic to the destination server", zap.Any("Destination Addr", dstCfg.Addr))
-	// making destConn
-	var destConn net.Conn
-	var err error
-	if dstCfg.TLSCfg != nil {
-		logger.Debug("trying to establish a TLS connection with the destination server", zap.Any("Destination Addr", dstCfg.Addr))
-
-		destConn, err = DialDestinationTLS(ctx, logger, "tcp",
-			DialTarget{Addr: dstCfg.Addr, Fabricated: dstCfg.AddrFabricated}, dstCfg.TLSCfg)
-		if err != nil {
-			utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Any("server address", dstCfg.Addr), zap.String("next_step", NextStepDialDestination))
-			return nil, err
-		}
-		logger.Debug("TLS connection established with the destination server", zap.Any("Destination Addr", destConn.RemoteAddr().String()))
-	} else {
-		logger.Debug("trying to establish a connection with the destination server", zap.Any("Destination Addr", dstCfg.Addr))
-		destConn, err = DialDestination(ctx, logger, "tcp",
-			DialTarget{Addr: dstCfg.Addr, Fabricated: dstCfg.AddrFabricated})
-		if err != nil {
-			utils.LogError(logger, err, "failed to dial the conn to destination server", zap.Any("server address", dstCfg.Addr), zap.String("next_step", NextStepDialDestination))
-			return nil, err
-		}
-		logger.Debug("connection established with the destination server", zap.Any("Destination Addr", destConn.RemoteAddr().String()))
-	}
-
-	logger.Debug("trying to forward requests to target", zap.Any("Destination Addr", destConn.RemoteAddr().String()))
-	for _, v := range requestBuffer {
-		_, err := destConn.Write(v)
-		if err != nil {
-			utils.LogError(logger, err, "failed to write request message to the destination server", zap.Any("Destination Addr", destConn.RemoteAddr().String()))
-			return nil, err
-		}
-	}
-
-	destBufferChannel := make(chan []byte)
-	clientBufferChannel := make(chan []byte)
-	errChannel := make(chan error, 2)
-	passthroughContext, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	go func() {
-		defer Recover(logger, clientConn, nil)
-		defer close(destBufferChannel)
-		defer func(destConn net.Conn) {
-			LogCloseErr(logger, destConn.Close(), "failed to close the destination connection")
-		}(destConn)
-
-		ReadBuffConn(passthroughContext, logger, destConn, destBufferChannel, errChannel, false)
-	}()
-
-	go func() {
-		defer Recover(logger, clientConn, nil)
-		defer close(clientBufferChannel)
-		ReadBuffConn(passthroughContext, logger, clientConn, clientBufferChannel, errChannel, false)
-	}()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-
-		case buffer := <-clientBufferChannel:
-			_, err := destConn.Write(buffer)
-			if err != nil {
-				utils.LogError(logger, err, "failed to write subsequent request to destination")
-				return nil, err
-			}
-
-		case buffer := <-destBufferChannel:
-			_, err := clientConn.Write(buffer)
-			if err != nil {
-				if ctx.Err() != nil {
-					return nil, ctx.Err()
-				}
-				utils.LogError(logger, err, "failed to write response to the client")
-				return nil, err
-			}
-
-		case err := <-errChannel:
-			// nolint:staticcheck
-			if netErr, ok := err.(net.Error); !(ok && netErr.Timeout()) && err != nil {
-				if err == io.EOF {
-					return nil, nil
-				}
-				return nil, err
-			}
-		}
-	}
 }
 
 // ToIP4AddressStr converts the integer IP4 Address to the octet format

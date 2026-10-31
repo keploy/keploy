@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"reflect"
 	"strconv"
 	"strings"
@@ -587,11 +588,13 @@ func TestALearnStepOwnMockAnswersOnceSoTheNextIsPaired(t *testing.T) {
 // default, so test 1's recordings stay visible in test 2. A visible
 // recording of another recorded test is no earlier place of test 2's calls:
 // test 1's call in the same second does not refuse test 2's own clock read
-// (request_changed), as the mocks served before test 2 began do not.
+// (request_changed), as the mocks served before test 2 began do not: it is
+// learned as a read of the clock.
 func TestALearnStepAnotherTestsVisibleRecordingIsNoSource(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	p := startedDrainProxy(t, 100)
 	p.learnTracker = learn.NewTracker()
+	p.learnTracker.SetAppClock(func(r time.Time) (time.Time, bool) { return r, true })
 	now := time.Now()
 	m1 := r3Mock("mock-t1", now.Add(500*time.Millisecond), "POST", "/ping", `{"at":1760436000}`, `{}`)
 	m2 := r3Mock("mock-t2", now.Add(2500*time.Millisecond), "POST", "/pong", `{"at":1760436000}`, `{}`)
@@ -614,8 +617,12 @@ func TestALearnStepAnotherTestsVisibleRecordingIsNoSource(t *testing.T) {
 		misses, _ := p.GetMockErrors(context.Background())
 		t.Fatalf("test 2's own clock read was refused because test 1's recording (same second) is visible: %d %s %+v", code, got, misses)
 	}
-	if _, ok := r3States(mm)["mock-t2"].ReqBodyNoise["body.at"]; !ok {
-		t.Fatalf("test 2's clock read is noise: %+v", r3States(mm)["mock-t2"])
+	// One instant whole (an epoch second) in a test's own call, which has no
+	// window, read 93 s after its recording (no lead moves it): a read of the
+	// clock a replay checks in its call's own span, never noise.
+	st := r3States(mm)["mock-t2"]
+	if _, ok := st.Clocks["body.at"]; !ok || st.ReqBodyNoise["body.at"] != nil {
+		t.Fatalf("test 2's clock read is no read of the clock: %+v", st)
 	}
 }
 
@@ -1062,12 +1069,15 @@ func TestATestsOwnCallIsNotRefusedForAnotherTestsRowOnDisk(t *testing.T) {
 
 // Through the HTTP integration, the call's window ends when decodeHTTP had
 // the request whole: a start-up pool call's clock read in it is learned as
-// noise, whatever the receive's Date header holds. Read by the lead alone
-// (the minute and second words of the receive's Date header, in GMT as HTTP
-// writes it), it is learned where that header is its server's stamp, and
-// refused where the server's clock ran a second ahead (its Date header
-// after its answer is no stamp): only the window learns that one. The
-// instants are fixed in UTC, so the row reads the same in every zone.
+// a read of the clock, whatever the receive's Date header holds: a read a
+// replay checks in its call's window, never noise, which would pass any value
+// at every replay. With no app clock (keploy cannot tell which clock the
+// application reads), the call has no window, the lead alone does not read
+// the value (F's clock ran 2 s past the lead), and no replay could check a
+// read of the clock: it is refused at learn (the reason says so: learn's
+// TestAnInstantIsRefusedAtLearnWhereKeployCannotTellTheAppsClock), whether
+// or not that header is its server's stamp. The instants are fixed in UTC,
+// so the row reads the same in every zone.
 func TestAStartUpPoolCallsClockReadIsReadInTheWindowDecodeHTTPEnds(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	iso := func(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:05.000Z07:00") }
@@ -1103,15 +1113,20 @@ func TestAStartUpPoolCallsClockReadIsReadInTheWindowDecodeHTTPEnds(t *testing.T)
 				body := `{"processed_at":"` + iso(served.Add(offset)) + `"}`
 				code, got := r3Send(t, p, mm, models.OutgoingOptions{Learn: true, LearnPool: true},
 					"POST /v1/events HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\nContent-Length: "+strconv.Itoa(len(body))+"\r\n\r\n"+body)
-				noise := r3States(mm)["mock-1"].ReqBodyNoise
-				if window || tc.stamp {
-					if code != http.StatusOK || got != `{"ok":true}` || noise["body.processed_at"] == nil {
-						t.Fatalf("answered %d %s, learned %v; want the pool recording, its clock read learned at body.processed_at", code, got, noise)
+				st := r3States(mm)["mock-1"]
+				noise := st.ReqBodyNoise
+				if window {
+					// An instant whole its call's window holds: a read of the
+					// clock, still compared at every replay (MockState.Clocks),
+					// never noise.
+					_, clock := st.Clocks["body.processed_at"]
+					if code != http.StatusOK || got != `{"ok":true}` || !clock || noise["body.processed_at"] != nil {
+						t.Fatalf("answered %d %s, learned noise %v clocks %v; want the pool recording, its clock read learned at body.processed_at", code, got, noise, st.Clocks)
 					}
 					return
 				}
-				if code == http.StatusOK || noise["body.processed_at"] != nil {
-					t.Fatalf("by the lead alone, the server's clock a second ahead: answered %d %s, learned %v; want refused", code, got, noise)
+				if code == http.StatusOK || noise["body.processed_at"] != nil || len(st.Clocks) != 0 {
+					t.Fatalf("by the lead alone, no app clock: answered %d %s, learned noise %v clocks %v; want refused", code, got, noise, st.Clocks)
 				}
 			})
 		}
@@ -1196,8 +1211,24 @@ func TestAMockModeAgentsLearnStepReadsTheAppsZoneAndATestsRecordedBegin(t *testi
 			cfg := config.New()
 			cfg.Agent.MockMode = true
 			p := New(zap.NewNop(), fakeDestInfo{}, cfg)
-			if got := p.learnTracker.Drifts().Zone(); got != time.Local {
-				t.Fatalf("the learn step's zone %v; want the agent's own, %v", got, time.Local)
+			// The agent's own zone, with its name where its TZ or
+			// /etc/localtime gives one (learn.ReadZone), so a learning that
+			// depends on it names it; it writes Go's time.Local's offsets.
+			tz, tzSet := os.LookupEnv("TZ")
+			want, err := learn.ReadZone("/", tz, tzSet)
+			if err != nil {
+				want = time.Local
+			}
+			got := p.learnTracker.Drifts().Zone()
+			if got == nil || got.String() != want.String() {
+				t.Fatalf("the learn step's zone %v; want the agent's own, %v", got, want)
+			}
+			for _, at := range []time.Time{time.Now(), time.Now().AddDate(0, 6, 0)} {
+				_, g := at.In(got).Zone()
+				_, l := at.In(time.Local).Zone()
+				if g != l {
+					t.Fatalf("the learn step's zone %v writes offset %d at %s; Go's time.Local %d", got, g, at, l)
+				}
 			}
 			rec := time.Date(2026, 10, 22, 11, 14, 15, 0, time.UTC)
 			paired := &models.Mock{Name: "mock-1", Kind: models.HTTP, Spec: models.MockSpec{ReqTimestampMock: rec.Add(time.Second)}}

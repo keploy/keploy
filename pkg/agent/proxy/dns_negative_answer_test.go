@@ -129,11 +129,13 @@ func TestDNSMockMiss_UpstreamNXDOMAIN_IsNotReportedAsAMockMiss(t *testing.T) {
 	defer stop()
 
 	p := &Proxy{
-		logger:             zap.NewNop(),
-		errChannel:         make(chan error, 4),
-		dnsUpstreamServers: []string{host},
-		dnsUpstreamPort:    port,
-		dnsForwardTimeout:  2 * time.Second,
+		logger:              zap.NewNop(),
+		errChannel:          make(chan error, 4),
+		dnsUpstreamServers:  []string{host},
+		dnsInNetworkServers: []string{host}, // cluster DNS: in the replay's own network
+		dnsClusterDomain:    "cluster.local",
+		dnsUpstreamPort:     port,
+		dnsForwardTimeout:   2 * time.Second,
 		// Without this the synthesised A record carries a nil address, and an
 		// assertion on Rcode alone would pass on a response no app could use.
 		IP4: "127.0.0.1",
@@ -172,11 +174,13 @@ func TestDNSMockMiss_UpstreamUnreachable_IsStillReported(t *testing.T) {
 	// Port 1 on loopback: nothing listens, so the forward fails rather than
 	// returning an authoritative negative answer.
 	p := &Proxy{
-		logger:             zap.NewNop(),
-		errChannel:         make(chan error, 4),
-		dnsUpstreamServers: []string{"127.0.0.1"},
-		dnsUpstreamPort:    "1",
-		dnsForwardTimeout:  200 * time.Millisecond,
+		logger:              zap.NewNop(),
+		errChannel:          make(chan error, 4),
+		dnsUpstreamServers:  []string{"127.0.0.1"},
+		dnsInNetworkServers: []string{"127.0.0.1"},
+		dnsClusterDomain:    "cluster.local",
+		dnsUpstreamPort:     "1",
+		dnsForwardTimeout:   200 * time.Millisecond,
 	}
 
 	q := dns.Question{Name: "some-service.default.svc.cluster.local.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
@@ -220,11 +224,13 @@ func TestDNSMockMiss_UpstreamSERVFAILOrREFUSED_IsStillReported(t *testing.T) {
 			defer stop()
 
 			p := &Proxy{
-				logger:             zap.NewNop(),
-				errChannel:         make(chan error, 4),
-				dnsUpstreamServers: []string{host},
-				dnsUpstreamPort:    port,
-				dnsForwardTimeout:  2 * time.Second,
+				logger:              zap.NewNop(),
+				errChannel:          make(chan error, 4),
+				dnsUpstreamServers:  []string{host},
+				dnsInNetworkServers: []string{host}, // cluster DNS: in the replay's own network
+				dnsClusterDomain:    "cluster.local",
+				dnsUpstreamPort:     port,
+				dnsForwardTimeout:   2 * time.Second,
 			}
 			q := dns.Question{Name: "some-service.default.svc.cluster.local.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
 			_ = p.resolveUncachedDNSResponse(q, models.MODE_TEST, true, time.Now(), nil)
@@ -251,11 +257,13 @@ func TestDNSMockMiss_UpstreamNODATA_IsRelayedAndNotReported(t *testing.T) {
 	defer stop()
 
 	p := &Proxy{
-		logger:             zap.NewNop(),
-		errChannel:         make(chan error, 4),
-		dnsUpstreamServers: []string{host},
-		dnsUpstreamPort:    port,
-		dnsForwardTimeout:  2 * time.Second,
+		logger:              zap.NewNop(),
+		errChannel:          make(chan error, 4),
+		dnsUpstreamServers:  []string{host},
+		dnsInNetworkServers: []string{host}, // cluster DNS: in the replay's own network
+		dnsClusterDomain:    "cluster.local",
+		dnsUpstreamPort:     port,
+		dnsForwardTimeout:   2 * time.Second,
 	}
 
 	q := dns.Question{Name: "postgres.checkr.svc.cluster.local.", Qtype: dns.TypeAAAA, Qclass: dns.ClassINET}

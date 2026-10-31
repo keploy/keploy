@@ -90,3 +90,15 @@ jobs:
       - name: Test the Windows stop (amd64)
         run: go test -count=1 -run "TestTheWindowsStopSaysItKilled" ./utils/
         shell: cmd
+
+      # The run's log on Windows: a full log is sealed with the read-only
+      # attribute through its handle, by whichever of the CLI and its native
+      # agent fills it, and closing a log twice is a no-op (a closed file's
+      # Stat is an error of its own here, not os.ErrClosed). These rows are
+      # the only ones of ./utils/log/ that run here: the package's other
+      # tests are Unix-only or have not been shown to pass on Windows. They
+      # were added with the code they test, which no Windows host or Wine was
+      # at hand to run, so this job is their first Windows run.
+      - name: Test the run's log (amd64)
+        run: go test -count=1 -run "TestTheRunsLog|TestCloseLogFileOfAClosedLogIsANoOp|TestCloseLogFileLeavesAFileThatIsNotALog" ./utils/log/
+        shell: cmd

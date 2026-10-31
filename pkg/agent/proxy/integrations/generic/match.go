@@ -1,8 +1,10 @@
 package generic
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"strings"
 
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
@@ -10,6 +12,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mismatch"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
+	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -22,7 +25,16 @@ import (
 //
 // What it consumes is told to the learn step as served in this connection's
 // request (integrations.ServingIn), so a request aloft on another connection
-// that reads no recording leaves this one's serve in its order.
+// that reads no recording leaves this one's serve in its order, and with
+// what the serve gave the application (stateServed).
+//
+// Under exact serving (the proven switch) a recording answers only the
+// exchange it recorded: one whose every request buffer is the recorded one,
+// byte for byte, a buffer the obfuscator redacted included (findExactMatch).
+// The closest recording is never served for an exchange that changed, at
+// either similarity: that is a miss, which the replay reports as
+// keploy/unmocked_call. Exact serving is read at each attempt, as it begins
+// and ends with tests. Without it the match is as before.
 func fuzzyMatch(ctx context.Context, logger *zap.Logger, reqBuff [][]byte, mockDb integrations.MockMemDb) (bool, []models.Payload, error) {
 	serving := integrations.ServingIn(ctx, mockDb)
 	for {
@@ -57,9 +69,10 @@ func fuzzyMatch(ctx context.Context, logger *zap.Logger, reqBuff [][]byte, mockD
 				logger.Debug("Unfiltered Mocks", zap.String(fmt.Sprintf("Mock[%d]", i), mock.Name), zap.Int64("sortOrder", mock.TestModeInfo.SortOrder))
 			}
 
-			index := findExactMatch(filteredMocks, reqBuff)
+			exact := integrations.ExactServing(mockDb)
+			index := findExactMatch(filteredMocks, reqBuff, exact)
 
-			if index == -1 {
+			if index == -1 && !exact {
 				index = findBinaryMatch(filteredMocks, reqBuff, 0.9)
 			}
 
@@ -78,13 +91,14 @@ func fuzzyMatch(ctx context.Context, logger *zap.Logger, reqBuff [][]byte, mockD
 				if !isUpdated {
 					continue
 				}
+				stateServed(ctx, filteredMocks[index], reqBuff)
 				logger.Debug("Filtered mock found for generic request", zap.String("Mock", updatedMock.Name), zap.Int64("sortOrder", updatedMock.TestModeInfo.SortOrder))
 				return true, responseMock, nil
 			}
 
-			index = findExactMatch(unfilteredMocks, reqBuff)
+			index = findExactMatch(unfilteredMocks, reqBuff, exact)
 
-			if index == -1 {
+			if index == -1 && !exact {
 				index = findBinaryMatch(unfilteredMocks, reqBuff, 0.4)
 			}
 			if index != -1 {
@@ -97,6 +111,7 @@ func fuzzyMatch(ctx context.Context, logger *zap.Logger, reqBuff [][]byte, mockD
 				if !isUpdated {
 					continue
 				}
+				stateServed(ctx, unfilteredMocks[index], reqBuff)
 				logger.Debug("Unfiltered mock found for generic request", zap.String("Mock", updatedMock.Name), zap.Int64("sortOrder", updatedMock.TestModeInfo.SortOrder))
 				return true, responseMock, nil
 			}
@@ -107,18 +122,17 @@ func fuzzyMatch(ctx context.Context, logger *zap.Logger, reqBuff [][]byte, mockD
 
 // extraCall tells, for an exchange no mock answered under exact serving (the
 // proven switch), whether it is one exchange more than the open test
-// recorded: one its own mocks already answered, matched as the per-test pool
-// is (exactly, or at the per-test similarity). It returns how many times the
-// test recorded that exchange, 0 when it is not one or exact serving is off.
+// recorded: one its own mocks already answered, matched as exact serving
+// matches the pool (fuzzyMatch): exactly. An exchange merely like one the
+// test answered is a changed exchange, not one more. It returns how many
+// times the test recorded that exchange, 0 when it is not one or exact
+// serving is off.
 func extraCall(reqBuffs [][]byte, mockDb integrations.MockMemDb) int {
 	answered := answeredExchanges(mockDb)
 	if len(answered) == 0 {
 		return 0
 	}
-	idx := findExactMatch(answered, reqBuffs)
-	if idx == -1 {
-		idx = findBinaryMatch(answered, reqBuffs, 0.9)
-	}
+	idx := findExactMatch(answered, reqBuffs, true)
 	if idx == -1 {
 		return 0
 	}
@@ -203,13 +217,15 @@ func buildGenericMismatchReport(ctx context.Context, reqBuffs [][]byte, mockDb i
 	}
 
 	bestIdx, bestSim := -1, -1.0
+	var old [][]byte
 	for idx, mock := range genericMocks {
-		if len(mock.Spec.GenericRequests) != len(reqBuffs) {
+		pieces := similarPieces(mock.Spec.GenericRequests, reqBuffs, &old)
+		if pieces == nil {
 			continue
 		}
 		var simSum float64
 		comparable := true
-		for i, reqBuff := range reqBuffs {
+		for i, reqBuff := range pieces {
 			msg := mock.Spec.GenericRequests[i].Message[0]
 			// The recorder stores ASCII payloads verbatim (Type String) and
 			// binary payloads base64-encoded — decode per the recorded type,
@@ -231,7 +247,7 @@ func buildGenericMismatchReport(ctx context.Context, reqBuffs [][]byte, mockDb i
 		if !comparable {
 			continue
 		}
-		if avg := simSum / float64(len(reqBuffs)); avg > bestSim {
+		if avg := simSum / float64(len(pieces)); avg > bestSim {
 			bestSim = avg
 			bestIdx = idx
 		}
@@ -240,8 +256,14 @@ func buildGenericMismatchReport(ctx context.Context, reqBuffs [][]byte, mockDb i
 	b := mismatch.NewReport(mismatch.ProtocolGeneric, summary).
 		WithPhase(models.MatchPhaseExhausted, len(genericMocks))
 	if bestIdx >= 0 {
+		// Under exact serving no similarity serves (fuzzyMatch): the
+		// thresholds would tell a near-miss it should have been answered.
+		served := "thresholds: 0.9 per-test, 0.4 session"
+		if integrations.ExactServing(mockDb) {
+			served = "exact serving answers only an identical exchange"
+		}
 		b = b.WithClosest(genericMocks[bestIdx].Name, nil).
-			WithDiff(fmt.Sprintf("closest recorded exchange %q has Jaccard similarity %.2f (thresholds: 0.9 per-test, 0.4 session)", genericMocks[bestIdx].Name, bestSim))
+			WithDiff(fmt.Sprintf("closest recorded exchange %q has Jaccard similarity %.2f (%s)", genericMocks[bestIdx].Name, bestSim, served))
 	} else {
 		b = b.WithDiff("no recorded exchange has the same number of request buffers")
 	}
@@ -252,12 +274,13 @@ func buildGenericMismatchReport(ctx context.Context, reqBuffs [][]byte, mockDb i
 func findBinaryMatch(tcsMocks []*models.Mock, reqBuffs [][]byte, mxSim float64) int {
 	// TODO: need find a proper similarity index to set a benchmark for matching or need to find another way to do approximate matching
 	mxIdx := -1
+	var old [][]byte
 	for idx, mock := range tcsMocks {
-		if len(mock.Spec.GenericRequests) == len(reqBuffs) {
+		if pieces := similarPieces(mock.Spec.GenericRequests, reqBuffs, &old); pieces != nil {
 			nc := util.NewNoiseChecker(mock.Noise)
 			var simSum float64
 			var simCount int
-			for requestIndex, reqBuff := range reqBuffs {
+			for requestIndex, reqBuff := range pieces {
 				mockData := mock.Spec.GenericRequests[requestIndex].Message[0].Data
 
 				// Skip noisy (obfuscated) buffers — don't let them influence similarity
@@ -280,7 +303,7 @@ func findBinaryMatch(tcsMocks []*models.Mock, reqBuffs [][]byte, mxSim float64) 
 					mxSim = avgSim
 					mxIdx = idx
 				}
-			} else if len(reqBuffs) > 0 {
+			} else if len(pieces) > 0 {
 				// All buffers were noisy — neutral match
 				if 1.0 > mxSim {
 					mxSim = 1.0
@@ -300,36 +323,241 @@ func fuzzyCheck(encoded, reqBuf []byte) float64 {
 	return similarity
 }
 
-func findExactMatch(tcsMocks []*models.Mock, reqBuffs [][]byte) int {
+// findExactMatch returns the index of the first mock whose recorded request
+// is reqBuffs' bytes, or -1. The pieces a recording holds need not be the
+// pieces this replay read: a read returns what has arrived, at most
+// pUtil.ReadChunkSize, and the old read loop joined what arrived together
+// into one piece (a 40 KiB request recorded whole is read here as 32 KiB and
+// 8 KiB). So a mock whose pieces are not reqBuffs' is compared with
+// reqBuffs' bytes cut where its own pieces end (cutLikeRecorded).
+//
+// Without exact serving a recorded piece that matches the mock's Noise is
+// skipped, so any live piece matches it. For Generic, Noise lists the
+// obfuscator's redactions (keploy writes none): a piece recorded wholly as a
+// redaction is one whose secret was taken out. Under exact serving (exact,
+// the proven switch) that is no excuse: the piece is compared as recorded,
+// as every other one is, so a request that does not send those bytes misses
+// (keploy/unmocked_call). Otherwise a one-piece recording of a redacted
+// token would answer any one-piece request to its destination, and an
+// exchange whose token piece changed would be served the recorded answer.
+// keploy has no way to redact a live piece as the recording was, so under
+// exact serving such a recording fails closed: the same token misses too.
+// Under exact serving the pieces are compared as bytes (isRecordedBytes),
+// never as the text the recording stores them in.
+func findExactMatch(tcsMocks []*models.Mock, reqBuffs [][]byte, exact bool) int {
+	req := newSentRequest(reqBuffs)
 	for idx, mock := range tcsMocks {
-		if len(mock.Spec.GenericRequests) == len(reqBuffs) {
-			nc := util.NewNoiseChecker(mock.Noise)
-			matched := true // Flag to track if all requests match
-
-			for requestIndex, reqBuff := range reqBuffs {
-				mockData := mock.Spec.GenericRequests[requestIndex].Message[0].Data
-
-				// If mock data is noisy (obfuscated), skip comparison for this buffer
-				if nc != nil && nc.IsNoisy(mockData) {
-					continue
-				}
-
-				bufStr := string(reqBuff)
-				if !util.IsASCII(string(reqBuff)) {
-					bufStr = util.EncodeBase64(reqBuff)
-				}
-
-				// Compare the encoded data
-				if mockData != bufStr {
-					matched = false
-					break // Exit the loop if any request doesn't match
-				}
-			}
-
-			if matched {
-				return idx
-			}
+		var nc *util.NoiseChecker
+		if !exact {
+			nc = util.NewNoiseChecker(mock.Noise)
+		}
+		if req.isRecorded(mock.Spec.GenericRequests, nc, exact) {
+			return idx
 		}
 	}
 	return -1
+}
+
+// isRecorded reports whether the request is recorded's bytes, in its own
+// pieces or cut where recorded's end (cutLikeRecorded), a noisy
+// (obfuscated) recorded piece not compared where nc names it (nil: every
+// piece compared). With exact, each piece is compared as bytes
+// (sameAsRecorded).
+func (r *sentRequest) isRecorded(recorded []models.Payload, nc *util.NoiseChecker, exact bool) bool {
+	if len(recorded) == len(r.pieces) && sameAsRecorded(recorded, r.pieces, nc, exact) {
+		return true
+	}
+	pieces := r.cutLikeRecorded(recorded)
+	return pieces != nil && sameAsRecorded(recorded, pieces, nc, exact)
+}
+
+// sameAsRecorded reports whether each piece is the recorded piece at its
+// index. With nc set (no exact serving), a noisy (obfuscated) recorded piece
+// is not compared. Under exact serving each piece must be the recorded
+// piece's bytes (isRecordedBytes).
+func sameAsRecorded(recorded []models.Payload, pieces [][]byte, nc *util.NoiseChecker, exact bool) bool {
+	for i, piece := range pieces {
+		if exact {
+			if !isRecordedBytes(recorded[i], piece) {
+				return false
+			}
+			continue
+		}
+		mockData := recorded[i].Message[0].Data
+		if nc != nil && nc.IsNoisy(mockData) {
+			continue
+		}
+		// The recorder keeps an ASCII piece as it is, any other base64
+		// encoded (encodePayload): the piece is compared in that form.
+		bufStr := string(piece)
+		if !util.IsASCII(bufStr) {
+			bufStr = util.EncodeBase64(piece)
+		}
+		if mockData != bufStr {
+			return false
+		}
+	}
+	return true
+}
+
+// isRecordedBytes reports whether piece is the bytes the recorded piece p
+// holds: its message's Data for a piece the recorder kept as text
+// (models.String), what that Data decodes from base64 to for one it kept as
+// binary (encodePayload). The text is not compared with the piece's own
+// encoding: a live binary piece whose base64 is a recorded text piece, or a
+// live text piece that is a recorded binary piece's base64, is other bytes (a
+// client that stops base64-wrapping what it sent, or starts). A piece of any
+// other type, or binary data that is not base64, holds no bytes keploy can
+// compare, so it differs. So does a recorded piece that holds no message, or
+// more than one: encodePayload writes exactly one, and comparing only the
+// first of several would answer a live piece that sent part of what was
+// recorded (a hand-edited or imported mock).
+func isRecordedBytes(p models.Payload, piece []byte) bool {
+	if len(p.Message) != 1 {
+		return false
+	}
+	msg := p.Message[0]
+	switch msg.Type {
+	case models.String:
+		return msg.Data == string(piece)
+	case binaryPayload:
+		b, err := util.DecodeBase64(msg.Data)
+		return err == nil && bytes.Equal(b, piece)
+	}
+	return false
+}
+
+// sentRequest is what a connection sent for one exchange, in the pieces its
+// reads returned, and those pieces joined, made once when first asked.
+type sentRequest struct {
+	pieces [][]byte
+	total  int
+	joined []byte
+}
+
+func newSentRequest(pieces [][]byte) *sentRequest {
+	r := &sentRequest{pieces: pieces}
+	for _, p := range pieces {
+		r.total += len(p)
+	}
+	return r
+}
+
+func (r *sentRequest) bytes() []byte {
+	if r.joined == nil {
+		if len(r.pieces) == 1 {
+			r.joined = r.pieces[0]
+		} else {
+			r.joined = bytes.Join(r.pieces, nil)
+		}
+	}
+	return r.joined
+}
+
+// cutLikeRecorded returns the request's bytes cut where recorded's pieces
+// end, to be compared with them piece by piece. nil when the request is not
+// as long as the recording (it cannot be the same bytes), when a recorded
+// piece's length is unknown, or when the request's pieces already end where
+// the recording's do (compared as they are).
+//
+// A noisy recorded piece is cut at its recorded (obfuscated) length: an
+// obfuscation that changed a piece's length leaves the recording to be
+// compared piece by piece only, as before.
+func (r *sentRequest) cutLikeRecorded(recorded []models.Payload) [][]byte {
+	if len(recorded) == 0 {
+		return nil
+	}
+	sum, aligned := 0, len(recorded) == len(r.pieces)
+	for i, p := range recorded {
+		n := recordedPieceLen(p)
+		if n < 0 {
+			return nil
+		}
+		sum += n
+		aligned = aligned && n == len(r.pieces[i])
+	}
+	if aligned || sum != r.total {
+		return nil
+	}
+	b := r.bytes()
+	out := make([][]byte, len(recorded))
+	off := 0
+	for i, p := range recorded {
+		n := recordedPieceLen(p)
+		out[i] = b[off : off+n]
+		off += n
+	}
+	return out
+}
+
+// recordedPieceLen is how many bytes a recorded request piece holds: its
+// data's length for a piece kept as text (models.String), the length its
+// base64 decodes to for any other (encodePayload; the replay decodes a
+// response piece the same way). -1 when that data is not base64 of a whole
+// number of bytes, or the piece holds no message. A piece holding more than
+// one message is cut at its first's length, as before: under exact serving
+// the piece cut there is then refused (isRecordedBytes), and with the switch
+// off it is compared with that first message, so switch-off is unchanged.
+func recordedPieceLen(p models.Payload) int {
+	if len(p.Message) == 0 {
+		return -1
+	}
+	msg := p.Message[0]
+	if msg.Type == models.String {
+		return len(msg.Data)
+	}
+	d := msg.Data
+	if len(d)%4 != 0 {
+		return -1
+	}
+	n := len(d) / 4 * 3
+	switch {
+	case strings.HasSuffix(d, "=="):
+		n -= 2
+	case strings.HasSuffix(d, "="):
+		n--
+	}
+	return n
+}
+
+// similarPieces is reqBuffs in pieces as many as recorded's, to be compared
+// with them piece by piece for a similarity: reqBuffs as they were read, or,
+// for a recording the old read loop made, as it would have read them
+// (coalescedLikeOldReads, made once into *old). nil when neither has as many
+// pieces. Unlike an exact match (cutLikeRecorded), a similarity never cuts the
+// bytes where a recording's pieces end: a recording in other pieces than
+// either is compared with no request it was not compared with before.
+func similarPieces(recorded []models.Payload, reqBuffs [][]byte, old *[][]byte) [][]byte {
+	if len(recorded) == len(reqBuffs) {
+		return reqBuffs
+	}
+	if *old == nil {
+		*old = coalescedLikeOldReads(reqBuffs)
+	}
+	if len(recorded) == len(*old) {
+		return *old
+	}
+	return nil
+}
+
+// coalescedLikeOldReads is pieces as the old read loop would have returned
+// them, for the similarity of a recording it made. It read on while a read
+// filled its buffer, so what had arrived together came back as one piece; a
+// read now returns at most pUtil.ReadChunkSize, and a piece that long is
+// joined with the pieces after it, up to and with the first shorter one.
+func coalescedLikeOldReads(pieces [][]byte) [][]byte {
+	out := make([][]byte, 0, len(pieces))
+	for i := 0; i < len(pieces); {
+		j := i
+		for j < len(pieces)-1 && len(pieces[j]) == pUtil.ReadChunkSize {
+			j++
+		}
+		if j == i {
+			out = append(out, pieces[i])
+		} else {
+			out = append(out, bytes.Join(pieces[i:j+1], nil))
+		}
+		i = j + 1
+	}
+	return out
 }
