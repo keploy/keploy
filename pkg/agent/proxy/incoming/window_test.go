@@ -528,6 +528,12 @@ func TestHandleHttp1Connection_KeptExchangeRecordsAMockHeldForIt(t *testing.T) {
 				t.Fatal("the exchange was not recorded")
 			}
 			<-done
+			// The capture has returned: with --sync it resolves its
+			// request's mocks, and sends them on, only once its test case
+			// is in the queue (conn.Capture), and its resolve ends the
+			// window before it sends them (ResolveKept), so neither the
+			// test case nor the open windows say the mocks are out yet.
+			pm.captures.Wait()
 			waitOpenWindows(t, mgr, 0, "after the capture")
 			found := false
 			for len(out) > 0 {
@@ -663,6 +669,13 @@ func TestHandleHttp1Connection_KeptExchangeRecordsAMockItMadeWhileSendingItsBody
 					t.Fatal("the exchange was not recorded")
 				}
 				<-done
+				// The capture has returned: with --sync it resolves its
+				// request's mocks, and sends them on, only once its test
+				// case is in the queue (conn.Capture), and its resolve ends
+				// the window before it sends them (ResolveKept), so neither
+				// the test case nor the open windows say the mocks are out
+				// yet.
+				pm.captures.Wait()
 				waitOpenWindows(t, mgr, 0, "after the capture")
 
 				recorded := map[*models.Mock]bool{}
