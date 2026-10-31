@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"testing"
 	"time"
 
@@ -67,8 +68,25 @@ func TestStopOutcomePathOnlyForAContainerisedMockReplay(t *testing.T) {
 }
 
 // What the agent leaves is exactly what /consumedmocks and /mockerrors would
-// have answered, in the one document the CLI decodes.
+// have answered, in the one document the CLI decodes. Under the proven switch
+// the agent also finishes its end of the run first, and the account says it
+// did (Settled); with the switch off it does not say so.
+// TestWriteStopOutcomeSettlesTheRunUnderTheSwitch checks the settle itself.
 func TestWriteStopOutcomeLeavesWhatTheReplayServedAndMissed(t *testing.T) {
+	for _, on := range []bool{false, true} {
+		t.Run(fmt.Sprintf("switch %v", on), func(t *testing.T) {
+			t.Setenv(provenswitch.Env, strconv.FormatBool(on))
+			// The default hooks, whose end of the run succeeds, whatever
+			// an earlier test left in place.
+			prev := ActiveHooks
+			ActiveHooks = &AgentHook{}
+			t.Cleanup(func() { ActiveHooks = prev })
+			writeStopOutcomeLeavesWhatTheReplayServedAndMissed(t, on)
+		})
+	}
+}
+
+func writeStopOutcomeLeavesWhatTheReplayServedAndMissed(t *testing.T, on bool) {
 	proxy := &outcomeProxy{
 		consumed: []models.MockState{{Name: "mock-0", Kind: models.HTTP}, {Name: "mock-3"}},
 		missed:   []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "GET /price/tsla", Destination: "dep:9411"}},
@@ -88,7 +106,7 @@ func TestWriteStopOutcomeLeavesWhatTheReplayServedAndMissed(t *testing.T) {
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("the outcome is not a models.MockOutcome: %v\n%s", err, raw)
 	}
-	want := models.MockOutcome{Consumed: proxy.consumed, Missed: proxy.missed}
+	want := models.MockOutcome{Consumed: proxy.consumed, Missed: proxy.missed, Settled: on}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("left %+v, want %+v", got, want)
 	}
