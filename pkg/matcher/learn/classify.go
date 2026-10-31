@@ -740,6 +740,16 @@ type Place struct {
 	// Whole: the leaf held the value whole (not as a word of a longer
 	// value), so the value can be bound there.
 	Whole bool
+	// Within, of a request leaf that held the value of the drifted leaf as
+	// one bindable part (not Whole, with a Var: the leaf held the earlier
+	// value whole, and the drifted leaf holds it inside a longer one), is
+	// the constant text beside it there (partFrom), which a replay keeps
+	// comparing around the variable's value. NotWithin says why the drifted
+	// leaf holds the earlier value at no part keploy can bind: at two
+	// places, as a part of a word, or with the text beside it changed. Both
+	// are zero for any other place.
+	Within    Within
+	NotWithin string
 	// Own: the mock is one of the test's own (Earlier.Own).
 	Own bool
 	// Run: the mock was served while no test was open, or in an earlier
@@ -3213,6 +3223,12 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 				// copied as epoch seconds): a whole copy too.
 				if s.Leaf.Type == Instant && !whole {
 					best.givenWhole = s.Side == Response && dc.instantWhole(s.Leaf, recorded)
+				}
+				// A call that sent the value whole at a variable place, which
+				// the drifted value holds inside a longer one: bound there,
+				// used here as one part of the longer value (Within).
+				if !whole && s.Side == Request && s.Place != "" && s.Leaf.Type == String {
+					best.Within, best.NotWithin = partFrom(v.rec, v.live, s.Leaf.Value, s.Live)
 				}
 			}
 			if rank == 0 {
