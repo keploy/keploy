@@ -65,6 +65,31 @@ func TestLearnMatchRefusesAValueMadeFromAGiven(t *testing.T) {
 	}
 }
 
+// A call that carried the given whole when recorded, but in record's full
+// round another value than the test gave then (an answer the application
+// kept from before), is refused with its own plain reason, naming the
+// given: never the given's use, never noise, never "made from" it.
+func TestLearnMatchRefusesAGivenTheAppDidNotPassOn(t *testing.T) {
+	h, n, opts := learnOn(t)
+	const rec, full = "1761609600123456789", "1761700000000000001"
+	db := &givenDb{learnDb: &learnDb{perTest: []*models.Mock{learnRecorded("mock-0", 0, "POST", "/v1/apps", `{"name":"`+rec+`"}`, nil, `{"id":7}`)}}}
+	db.table.Start(nil)
+	if _, ok := db.table.Give(variables.Binding{Name: "given:nonce", Value: full, Recorded: rec, Mock: "test o::TestApps", Place: "apps_test.go:20", Given: true}); !ok {
+		t.Fatal("the test's given did not bind")
+	}
+	tr := learn.NewTracker()
+	tr.Begin()
+	tr.GiveValue(learn.TestGiven("test o::TestApps", "given:nonce", rec, full))
+	ctx := learn.WithTracker(context.Background(), tr)
+	served, miss, _ := h.learnMatch(ctx, live("POST", "/v1/apps", `{"name":"app-cached-0001"}`, nil), db, n, opts)
+	if served != nil || miss == nil || !strings.HasPrefix(miss.res.Why, learn.GivenNotPassedOnWhy("body.name", "given:nonce", "apps_test.go:20")) {
+		t.Fatalf("served %v miss %+v", served, miss)
+	}
+	if len(db.consumed) != 0 {
+		t.Fatalf("a refused call consumed %v", db.consumed)
+	}
+}
+
 // A given never makes the application's own clock read in the same call a
 // value made from it: the test gives a nonce from its clock
 // (UnixNano), the application sends it whole beside a createdAt it stamps

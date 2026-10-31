@@ -751,7 +751,7 @@ func clientTestRefusal(why, part string, windowed bool, values ...string) bool {
 	if !windowed {
 		head = "keploy saw no read of the app's clock for its call" + which + ": "
 	}
-	if !strings.HasPrefix(why, head) || !strings.Contains(why, "If your test supplies this value, have it supply the same value in every run") || strings.Contains(why, "template variable") {
+	if !strings.HasPrefix(why, head) || !strings.Contains(why, "If your test supplies this value, give it to keploy where the test makes it, in Go v = keploytest.Given(t, \"v\", v), and each replay checks") || strings.Contains(why, "template variable") {
 		return false
 	}
 	for _, v := range values {

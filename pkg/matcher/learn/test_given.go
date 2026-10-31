@@ -68,6 +68,22 @@ func GivenDerivedWhy(path, name, source string) string {
 		"Give the value the application sends on as a given of its own, or have the test give the value the application sends whole"
 }
 
+// GivenNotPassedOnWhy is why a call's leaf at path is refused that carried
+// the value the test gave as name (source: where it gave it, file:line,
+// empty when unknown) whole when recorded, and in record's full round
+// another value than the test gave then (Earlier.Gave, the place whole): the
+// application did not pass the given on there. The call is no use of the
+// given, and nothing else checks the value, so it is never learned as
+// noise.
+func GivenNotPassedOnWhy(path, name, source string) string {
+	where := ""
+	if source != "" {
+		where = " (" + source + ")"
+	}
+	return path + " carried " + GivenNamed(name) + where + " whole when recorded, but another value in record's full round than the test gave then: the application did not pass the given on there, and keploy follows a given only where a call carries it whole both times. " +
+		"If the application passes it on now, re-record the test; otherwise give the value the application sends here as a given of its own"
+}
+
 // GivenNamed is how a learn step's reason names a given variable: the value
 // the test gave as it, or, for a template key the test case's request gave,
 // the test case's key.
@@ -77,6 +93,14 @@ func GivenNamed(name string) string {
 	}
 	return "the test case's " + name
 }
+
+// clientGiveWhy is a client test's correction for a changed value its test
+// may supply (read after "If your test supplies this value, "): the one-line
+// call that gives it to keploy, after which each replay checks that the
+// application passes on the value the test gives then (a value the test
+// chose is never learned as noise, unchecked); or the same value in every
+// run, which keploy keeps comparing.
+const clientGiveWhy = "give it to keploy where the test makes it, in Go v = keploytest.Given(t, \"v\", v), and each replay checks that the application passes on the value the test gives then; or have it supply the same value in every run, and keploy keeps comparing it"
 
 // quoteGiven quotes v, cut to givenWhyValue bytes on a rune boundary.
 func quoteGiven(v string) string {
