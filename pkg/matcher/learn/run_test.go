@@ -870,8 +870,9 @@ func TestARunPlaceIsEarlierWhateverItsRecordedTimeSays(t *testing.T) {
 }
 
 // The run keeps of an earlier test's call only the request leaves that
-// drifted: no leaf the application sent as recorded, no answer, payload or
-// view. A word of a leaf that did not drift is then no earlier place of a
+// drifted, and where its recording stands in the orders (Raw.ordered): no
+// leaf the application sent as recorded, no answer, no word of its payload,
+// no view. A word of a leaf that did not drift is then no earlier place of a
 // later test's value, and the set holds the values its tests made, not
 // their calls.
 func TestTheRunKeepsOnlyTheDriftedRequestLeaves(t *testing.T) {
@@ -881,8 +882,8 @@ func TestTheRunKeepsOnlyTheDriftedRequestLeaves(t *testing.T) {
 	e.View = func() (*models.Mock, error) { return nil, nil }
 	e.Payload = Raw{mock: "mock-a", rText: "o-1 pen"}
 	e.Seen = append(e.Seen, Seen{Side: Request, Leaf: Leaf{Path: "body.note", Type: String, Value: "n-1"}, Live: "n-2", Place: "body.note"})
-	got := ranCalls([]Earlier{e})
-	want := []Earlier{{Mock: "mock-a", At: t0, Run: true, noTime: true, Seen: []Seen{e.Seen[0], e.Seen[3]}}}
+	got := ranCalls([]Earlier{e}, Order{})
+	want := []Earlier{{Mock: "mock-a", At: t0, Run: true, noTime: true, Seen: []Seen{e.Seen[0], e.Seen[3]}, Payload: Raw{mock: "mock-a", ordered: true}}}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("the run keeps %+v of test A's call, want its drifted request leaves alone: %+v", got, want)
 	}
@@ -1698,5 +1699,62 @@ func TestAClockWordMeetsTheRunsVariableAsTheUsesOwnReadOrARefusal(t *testing.T) 
 				t.Fatalf("test B's copy follows %+v; want mock-a's text", ln.From)
 			}
 		})
+	}
+}
+
+// A place an earlier test's call left the run keeps when the recording asked
+// and answered it, and the numbers of F's serves of it when its test ended
+// (Order.orderOf), with no word of its text: a later call's copy rule reads
+// by them whether the recording gave the application that answer before the
+// call (recordedGave) and where F served it among the other earlier answers
+// (servedOrder). Without them every value a later test holds that the place
+// held in the recording was refused as "keploy cannot read when the
+// recording answered" or "does not know where record's full round served"
+// it (api-server's create audits, a test's own clock reads in the second an
+// earlier test's audit was recorded in).
+func TestARunPlaceKeepsItsAnswerTimeAndServeOrder(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	t0 := time.Unix(1_792_000_000, 0)
+	m := &models.Mock{Name: "mock-a", Spec: models.MockSpec{ReqTimestampMock: t0, ResTimestampMock: t0.Add(time.Millisecond)}}
+	other := &models.Mock{Name: "mock-o", Spec: models.MockSpec{ReqTimestampMock: t0.Add(2 * time.Millisecond), ResTimestampMock: t0.Add(3 * time.Millisecond)}}
+	tr := NewTracker()
+	tr.Begin()
+	a, _, _, _ := tr.Test()
+	tr.ServedMockAt(other, t0)
+	tr.ServedMockAt(m, t0.Add(time.Millisecond))
+	e := ranCall("mock-a", t0, "o-1", "o-9")
+	e.Payload = Raw{mock: "mock-a", at: t0, answered: t0.Add(time.Millisecond), rRead: true, rText: "o-1 pen", conn: "c1", pos: 2}
+	tr.Served(a, e)
+	tr.End()
+	tr.Begin()
+	_, earlier, _, _ := tr.Test()
+	if len(earlier) != 1 {
+		t.Fatalf("test B reads %d earlier places, want test A's call alone: %+v", len(earlier), earlier)
+	}
+	got := earlier[0].Payload
+	want := Raw{mock: "mock-a", at: t0, answered: t0.Add(time.Millisecond), conn: "c1", pos: 2, served: true, first: 2, last: 2, ordered: true}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("the run keeps test A's call's payload as %+v, want its orders alone: %+v", got, want)
+	}
+	if got.isRead() || got.rText != "" {
+		t.Fatalf("the run keeps a word of test A's call's payload: %+v", got)
+	}
+	if before, untimed := recordedGave(earlier[0].recordedAt(), got.answered, t0.Add(time.Second), "mock-a"); !before || untimed != "" {
+		t.Fatalf("a later call cannot tell the recording gave the application test A's answer before it: before=%v, %s", before, untimed)
+	}
+	if order, untold := servedOrder(earlier, []Raw{RawOf(other, true).ServedAs(1)}, func(string) bool { return true }); untold != "" || !reflect.DeepEqual(order, []string{"mock-o", "mock-a"}) {
+		t.Fatalf("a later call reads F's serves of test A's call as %v (%s), want after mock-o's", order, untold)
+	}
+	// A call its test's end found no serve of keeps no number, and F's
+	// order of it stays one keploy cannot tell beside another served source.
+	tr2 := NewTracker()
+	tr2.Begin()
+	a2, _, _, _ := tr2.Test()
+	tr2.Served(a2, e)
+	tr2.End()
+	tr2.Begin()
+	_, earlier2, _, _ := tr2.Test()
+	if _, untold := servedOrder(earlier2, []Raw{RawOf(other, true).ServedAs(1)}, func(string) bool { return true }); untold == "" {
+		t.Fatalf("an unnumbered run place is ordered: %+v", earlier2[0].Payload)
 	}
 }

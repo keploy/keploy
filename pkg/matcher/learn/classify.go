@@ -301,6 +301,13 @@ type Raw struct {
 	// unread, of a Raw that was not read, says why where the place it stands
 	// for says more than rawUnread can (Earlier.lateOf: payloadUnread).
 	unread string
+	// ordered: r holds no text, only where its recording stands in the
+	// orders the rules read (orderOf: the payload of an earlier test's call
+	// the run keeps, ranCalls): its mock, when its request and its answer
+	// were recorded, where its request was carried, and F's serves of it as
+	// numbered when the call's test ended (Order.orderOf). No rule reads a
+	// word of it.
+	ordered bool
 	// rText is Text; rClock is AnswerClock.
 	rText string
 	// id is the recording's identity (MockID) where text is all of its
