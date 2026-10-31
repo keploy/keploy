@@ -943,6 +943,10 @@ type heldScope struct {
 	// (integrations.CallRound.Sequence), seqOK whether its mark kept one.
 	seq   integrations.SequenceView
 	seqOK bool
+	// hideBg says the call is one more than the open test's own recordings
+	// of it (HideBackground): the set's background is in none of h's reads
+	// and its doors refuse it (hides).
+	hideBg bool
 }
 
 // SequenceView implements integrations.SequenceViewer: the sequence view of
@@ -1014,7 +1018,7 @@ func (h *heldScope) held(mocks []*models.Mock, err error) ([]*models.Mock, error
 	if h.moved() {
 		return nil, nil
 	}
-	return mocks, err
+	return h.unhidden(mocks), err
 }
 
 // heldOf is held for a read that returns no error.
@@ -1055,7 +1059,7 @@ func (h *heldScope) RangePerTestMocksInWindow(fn func(*models.Mock) bool) error 
 		return nil
 	}
 	return h.MockManager.RangePerTestMocksInWindow(func(mk *models.Mock) bool {
-		return !h.moved() && fn(mk)
+		return !h.moved() && (h.hides(mk) || fn(mk))
 	})
 }
 
@@ -1087,7 +1091,7 @@ func (h *heldScope) RangeSessionMocksWithKey(ix *integrations.MockIndex, key str
 		return nil
 	}
 	return h.MockManager.RangeSessionMocksWithKey(ix, key, func(mk *models.Mock) bool {
-		return !h.moved() && fn(mk)
+		return !h.moved() && (h.hides(mk) || fn(mk))
 	})
 }
 
@@ -1124,7 +1128,7 @@ func (h *heldScope) KindBackground(kind models.Kind) (unused, spent []*models.Mo
 	if h.moved() {
 		return nil, nil
 	}
-	return unused, spent
+	return h.unhidden(unused), h.unhidden(spent)
 }
 
 func (h *heldScope) PairingCandidates(kind models.Kind) []*models.Mock {
@@ -1153,6 +1157,9 @@ func (h *heldScope) ExactTakenCandidates(kind models.Kind) []*models.Mock {
 }
 
 func (h *heldScope) SpendByKind(mk *models.Mock) bool {
+	if h.hides(mk) {
+		return false
+	}
 	ok, _ := h.spendByKindAt(mk, &h.g)
 	return ok
 }

@@ -120,12 +120,18 @@ func callWithin(h integrations.Integrations, p *Proxy, mm *MockManager, request 
 }
 
 // A test that owns one of the pool's recordings (in either tier), whose own
-// recordings of a path and the pool's of it have all answered, and that calls
-// the path once more, gets a miss that says why, after reading the store a
-// few times: never a read of the pool's copy of its own recording, which the
-// view refuses to hand out again, and so never the same read without end.
-// The HTTP parser keeps its indexes of the pool from an earlier test (one
-// that owns none of it), so the call reads through them.
+// recordings of a path have all answered, and that calls the path once more,
+// gets a miss that says it is one call more than the test recorded
+// (models.MissExtraCall, recorded twice), after reading the store a few
+// times: never the pool's other recording of the path, which the background
+// rules never hand a call one more than the open test's own recordings of it
+// (a duplicate of a recorded call would pass, answered by a call the
+// application made between tests), and never a read of the pool's copy of its
+// own recording, which the view refuses to hand out again, and so never the
+// same read without end. The pool's recording the miss left is the
+// background's still: it answers the path's call between tests. The HTTP
+// parser keeps its indexes of the pool from an earlier test (one that owns
+// none of it), so the call reads through them.
 func TestACallPastWhatATestRecordedMissesWhenTheTestOwnsAPoolRecording(t *testing.T) {
 	for _, tier := range []string{"session", "perTest"} {
 		t.Run(tier, func(t *testing.T) {
@@ -147,7 +153,7 @@ func TestACallPastWhatATestRecordedMissesWhenTheTestOwnsAPoolRecording(t *testin
 			// reads one refused recording again and again reads it tens of
 			// thousands of times before the deadline.
 			const maxReads = 8
-			for i, want := range []string{`{"own":"0-0"}`, `{"pool":2}`, `{"pool":0}`, ""} {
+			for i, want := range []string{`{"own":"0-0"}`, `{"pool":2}`, ""} {
 				before := logs.FilterMessage("mocks under consideration for match function").Len()
 				code, body, err := sendWithin(h, p, mm, httpGet("/pool/0"))
 				reads := logs.FilterMessage("mocks under consideration for match function").Len() - before
@@ -161,9 +167,10 @@ func TestACallPastWhatATestRecordedMissesWhenTheTestOwnsAPoolRecording(t *testin
 					}
 					continue
 				}
-				// One call more than the test and the pool recorded: a miss.
+				// One call more than the test recorded: a miss, whatever
+				// the pool holds of the path.
 				if err == nil && code == http.StatusOK {
-					t.Fatalf("call %d of /pool/0, one more than recorded, was answered %s", i, body)
+					t.Fatalf("call %d of /pool/0, one more than the test recorded, was answered %s", i, body)
 				}
 				if errors.Is(err, context.DeadlineExceeded) {
 					t.Fatalf("call %d of /pool/0: %v", i, err)
@@ -179,6 +186,15 @@ func TestACallPastWhatATestRecordedMissesWhenTheTestOwnsAPoolRecording(t *testin
 				t.Fatalf("misses %+v; want one HTTP miss of GET /pool/0 that says what it was", misses)
 			}
 			t.Logf("the miss: kind %s, recorded %d, reason %q", misses[0].Kind, misses[0].Recorded, misses[0].Reason)
+			if misses[0].Kind != models.MissExtraCall || misses[0].Recorded != 2 {
+				t.Fatalf("the miss is %s, recorded %d; want %s, recorded 2 (test-0's own two recordings of the path)", misses[0].Kind, misses[0].Recorded, models.MissExtraCall)
+			}
+			// The pool's recording the extra call was refused stays the
+			// background's: between tests it answers the path's call.
+			mm.ServeExactPool(models.PoolKeyNone, poolNames)
+			if code, body, err := sendWithin(h, p, mm, httpGet("/pool/0")); err != nil || code != http.StatusOK || body != `{"pool":0}` {
+				t.Fatalf("the call of /pool/0 between tests got %d %s %v; want {\"pool\":0}", code, body, err)
+			}
 		})
 	}
 }
