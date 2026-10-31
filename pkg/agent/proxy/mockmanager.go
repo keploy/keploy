@@ -591,6 +591,9 @@ func (m *MockManager) Close() {
 	m.closeOnce.Do(func() {
 		m.closed.Store(true)
 		close(m.sweeperStop)
+		// What parsers kept for the view in force alone is forgotten: no
+		// view replaces it (AtViewEnd).
+		m.endExactView()
 		// A learn step waiting for this manager's round to move
 		// (AwaitRoundMove) is told it never will.
 		m.closeRound()
