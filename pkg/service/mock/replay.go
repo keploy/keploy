@@ -232,7 +232,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	//    compose the agent is a service inside the compose project keploy
 	//    generates, so it does not exist until the wrapped `docker compose up`
 	//    runs. startComposeApp brings the project up and waits for the agent
-	//    to answer; the app itself stays parked at the agent's healthcheck
+	//    to answer; the app itself stays parked behind keploy-app-gate
 	//    until step 7 releases it, so it cannot make a dependency call before
 	//    the mocks are loaded. Its exit is collected at step 8 instead of
 	//    being started there.
@@ -391,7 +391,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 			// proof of a run that had just failed.
 			return nil
 		}
-		utils.LogError(m.logger, err, "failed to release the app behind the keploy-agent healthcheck")
+		utils.LogError(m.logger, err, "failed to release the app behind keploy-app-gate")
 		return err
 	}
 

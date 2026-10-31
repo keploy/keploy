@@ -379,11 +379,9 @@ func svcField(t *testing.T, out map[string]interface{}, service, key string) int
 }
 
 // TestEmptyServiceSection_DependsOnStillGatesOnTheAgent covers the writer whose
-// silent no-op costs the most. Without `keploy-agent: {condition:
-// service_healthy}` the app container starts before the agent's proxy is
-// listening and races it, which shows up as a few unrecorded calls at the head
-// of a session rather than as an error — the hardest possible thing to trace
-// back to a compose shape.
+// silent no-op costs the most. Without keploy-agent + keploy-app-gate the app
+// container starts before interception is ready and races it, which shows up
+// as a few unrecorded calls at the head of a session rather than as an error.
 func TestEmptyServiceSection_DependsOnStillGatesOnTheAgent(t *testing.T) {
 	for _, tc := range []struct{ name, in string }{
 		{"null", `services:
@@ -421,8 +419,12 @@ services:
 					svcField(t, out, "app", "depends_on"))
 			}
 			if deps["keploy-agent"] == nil {
-				t.Errorf("the app does not wait for keploy-agent to become healthy, "+
+				t.Errorf("the app does not wait for keploy-agent to start, "+
 					"so it races the proxy at startup: %v", deps)
+			}
+			if deps[KeployAppGateServiceName] == nil {
+				t.Errorf("the app does not wait for %s to complete, "+
+					"so it starts before MakeAgentReady: %v", KeployAppGateServiceName, deps)
 			}
 			// The user's own dependency must survive the rewrite.
 			if tc.name == "alias to a shared fragment" && deps["db"] == nil {

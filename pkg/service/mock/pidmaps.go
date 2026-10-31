@@ -65,7 +65,7 @@ type pidMapCheck struct {
 
 // pidMapBaseline reads the agent's refusals before the test command runs.
 // Under compose the agent is reachable once startComposeApp has returned,
-// while the app is still parked behind its healthcheck; a compose recording
+// while the app is still parked behind keploy-app-gate; a compose recording
 // is not checked at all (pidMapRefusedDuring), so it is not read.
 func (m *mockService) pidMapBaseline(ctx context.Context, phase string) pidMapBase {
 	reader, ok := m.instrumentation.(PIDMapReader)

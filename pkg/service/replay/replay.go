@@ -2494,9 +2494,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			return models.TestSetStatusFailed, err
 		}
 
-		// The compose agent is up and the app is still parked behind its
-		// healthcheck: this test set's refused PID map inserts are counted from
-		// here. Only for an agent this test set started; one reused across
+		// The compose agent is up and the app is still parked behind
+		// keploy-app-gate: this test set's refused PID map inserts are counted
+		// from here. Only for an agent this test set started; one reused across
 		// test sets carries the mark the last test set left, once a test set
 		// has taken one (pidMarked: the first test set can end before here).
 		if !serveTest || !r.pidMarked {

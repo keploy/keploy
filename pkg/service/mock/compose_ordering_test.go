@@ -52,8 +52,8 @@ const composeAgentBootProbes = 3
 // It records the order of everything keploy did to it, because both ways this
 // path has broken are ordering bugs: waiting for the agent before starting the
 // project (the agent never comes up), and posting /agent/ready before the
-// proxy is armed (that post is what releases the app service from the agent's
-// compose healthcheck, so the app runs uninstrumented).
+// proxy is armed (that post is what releases keploy-app-gate so the app
+// starts; too early and the app runs uninstrumented).
 type composeInstr struct {
 	Instrumentation // embedded: nil, so any unexpected call panics loudly
 
@@ -63,8 +63,8 @@ type composeInstr struct {
 	runPanics bool
 	runResult models.AppError
 	// runUntilReady makes Run return runResult only once the app has been
-	// released -- the "ready" post -- the way a compose runner held at the
-	// agent's healthcheck runs and then exits.
+	// released -- the "ready" post -- the way a compose runner held behind
+	// keploy-app-gate runs and then exits.
 	runUntilReady bool
 
 	// What the agent reports back when asked for the replay outcome. Under
