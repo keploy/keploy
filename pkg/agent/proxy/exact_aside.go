@@ -44,6 +44,9 @@ import (
 // it). Should that test begin later, its own copy of each is the same one
 // answer (exactView.handed): it answers the test only if no test was
 // served it aside, and once it has, it is offered aside to no later test.
+// That holds for a call in flight before the test's begin too (a pool view's
+// ahead): the claim is taken as the copy answers, under the view's lock, so
+// one answer of an in-flight call and another test's aside never both land.
 
 // asideRecording is one recording of a set-aside test: the test, and the
 // recording as the replay staged it.
@@ -81,15 +84,14 @@ func (m *MockManager) setAsideRecordings() []asideRecording {
 	return nil
 }
 
-// markHanded marks the open test's own recordings in recs: the replay handed
-// them aside before the test began (exactView.handed). Called once v holds
-// every one of its own.
+// markHanded marks the open test's own recordings in recs, each with its
+// test: the replay handed them aside before the test began
+// (exactView.handed). On a pool view it marks those of its ahead (the next
+// test's calls in flight before its begin), each with the test recs says it
+// is from. Called once v holds every one of its own.
 func (v *exactView) markHanded(recs []asideRecording) {
-	if v.test == "" {
-		return
-	}
 	for _, r := range recs {
-		if r.from != v.test {
+		if v.test != "" && r.from != v.test {
 			continue
 		}
 		i, ok := v.index[r.mock.Name]
@@ -97,9 +99,9 @@ func (v *exactView) markHanded(recs []asideRecording) {
 			continue
 		}
 		if v.handed == nil {
-			v.handed = make([]bool, len(v.owned))
+			v.handed = make([]string, len(v.owned))
 		}
-		v.handed[i] = true
+		v.handed[i] = r.from
 	}
 }
 
