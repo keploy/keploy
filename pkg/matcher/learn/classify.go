@@ -1622,10 +1622,10 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 			// never bound as the test's value (F's moment stands in what the
 			// application was given). A read F saw send the value's moment
 			// too is a copy, followed as before (echoServed).
+			// (apart is set only where sourced is, and read only once why
+			// is "" here.)
 			if sourced && (skip&skipBoth == skipBoth || apart != "") && dc.clientTests && textClockRead(r.Value, l.Value) != nil {
 				why = ""
-			} else {
-				apart = ""
 			}
 			// In keploy mock's client tests, a changed instant only where the
 			// call's window shows it a read of the application's clock.

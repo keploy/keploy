@@ -22,7 +22,7 @@ func clientJWT(authTime int64, jti, sig string) string {
 	return "Bearer " + enc([]byte(`{"alg":"HS256","typ":"JWT"}`)) + "." + enc([]byte(claims)) + "." + sig
 }
 
-// The shape of api-server's T2 run (cross-test-word-coincidence s3, round F):
+// The shape of api-server's end-to-end suite run under keploy mock (record's full round):
 // the test client signs its admin login at start-up (auth_time = its clock),
 // and test A (TestAppCRUD) stamps its PAT's lastUsedAt with the app's clock
 // in the same second, in the recording and in F. A later test B

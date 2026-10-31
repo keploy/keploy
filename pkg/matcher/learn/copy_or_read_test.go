@@ -1,6 +1,7 @@
 package learn
 
 import (
+	"encoding/base64"
 	"net/url"
 	"strconv"
 	"strings"
@@ -2030,7 +2031,7 @@ func TestAClientTestLearnsItsAuditReadAnEarlierAnswersClockNameRoundsToAsARead(t
 	}
 }
 
-// api-server's endpoint poll (ptw_endpoints, as the T2 recording shows it):
+// api-server's endpoint poll (ptw_endpoints, as its end-to-end suite's recording shows it):
 // every two seconds a findAndModify claims an endpoint whose dirtyAt <= now-2s,
 // read from the clock as epoch seconds. In TestGenerateTestSuitesOnClient the
 // poll's now-2s fell in the second the test set's start-up read the clock in
@@ -2106,10 +2107,14 @@ func TestAnEarlierClockReadFSawSendAnotherMomentIsNoSourceOfTheValue(t *testing.
 		// the call's answer holds the poll's value; keployRun: a keploy
 		// test, no client one.
 		millis, tod, echo, keployRun bool
-		ago                          time.Duration
-		kind                         Kind
-		from, why                    string
-		since                        bool
+		// b64: the read is a text whose base64 holds epoch milliseconds,
+		// so F's view of it holds the poll's moment only in the text it
+		// decodes to.
+		b64       bool
+		ago       time.Duration
+		kind      Kind
+		from, why string
+		since     bool
 	}{
 		{name: "(d) the start-up's read", kind: KindUnaccounted, why: judged},
 		{name: "(a) the start-up's read, the poll's window two seconds wide", wide: true, kind: KindClockRead},
@@ -2132,6 +2137,10 @@ func TestAnEarlierClockReadFSawSendAnotherMomentIsNoSourceOfTheValue(t *testing.
 		{name: "(c) the start-up's read as a time of day, copied", tod: true, copied: true, kind: KindUnaccounted, why: source},
 		{name: "(c) the start-up's read as a time of day, copied, the poll's window two seconds wide", tod: true, copied: true, wide: true, kind: KindClockRead, since: true},
 		{name: "(c) the test's own read as a time of day, copied", own: true, tod: true, copied: true, kind: KindVariable, from: "mock-18"},
+		{name: "(c) the start-up's read as a base64 text of epoch milliseconds, copied", b64: true, copied: true, kind: KindUnaccounted, why: source},
+		{name: "(c) the start-up's read as a base64 text of epoch milliseconds, copied, the window wide", b64: true, wide: true, copied: true, kind: KindClockRead, since: true},
+		{name: "(c) the test's own read as a base64 text of epoch milliseconds, copied", b64: true, own: true, copied: true, kind: KindVariable, from: "mock-18"},
+		{name: "(c) the test's own read as a base64 text of epoch milliseconds, copied, the window wide", b64: true, own: true, wide: true, copied: true, kind: KindClockRead, since: true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			// The poll's offset back from its now: two seconds, or a
@@ -2158,6 +2167,11 @@ func TestAnEarlierClockReadFSawSendAnotherMomentIsNoSourceOfTheValue(t *testing.
 			switch {
 			case c.millis:
 				readLeaf.Value, readLive = millis(read), millis(live)
+			case c.b64:
+				enc := func(at time.Time) string {
+					return base64.StdEncoding.EncodeToString([]byte("at=" + millis(at) + ";v=1"))
+				}
+				readLeaf, readLive = Leaf{Path: expires, Noise: expires, Type: String, Value: enc(read)}, enc(live)
 			case c.tod:
 				readLeaf, readLive = timeOfDay(expires, read), timeOfDay(expires, live).Value
 			}
@@ -2355,6 +2369,18 @@ func TestAnEarlierTypedClockReadFSawSendAnotherMomentIsNoSourceOfTheInstant(t *t
 		// tod: the read is a typed time of day (a Postgres time), which
 		// the echo alone reads, by its type.
 		tod bool
+		// number: the read sends epoch seconds (a $numberLong, as
+		// api-server's expires_at does); b64, b64ms: the read is a text
+		// whose base64 holds the instant, to the second or (which only the
+		// echo reads, by the poll's cut) to the millisecond; todms: the read
+		// is a typed time of day to the millisecond and the poll one to the
+		// second. Of a copy, F's view of the read then holds the poll's
+		// moment in another form than the poll's own: as a number, in the
+		// text the base64 decodes to, or as a typed time of day of another
+		// precision. noPick: the test was given no answer in F's second
+		// (mock-1070), so the echo has no evidence of a pick and the search
+		// for an equal instant decides alone.
+		number, b64, b64ms, todms, noPick bool
 		// full: record's full round made the call this long after the
 		// recording made it (73.6 s where 0), its test begun as long before.
 		full      time.Duration
@@ -2379,6 +2405,26 @@ func TestAnEarlierTypedClockReadFSawSendAnotherMomentIsNoSourceOfTheInstant(t *t
 		{name: "(d) the start-up's read as a time of day", tod: true, kind: KindUnaccounted, why: judged},
 		{name: "(c) the start-up's read as a time of day, copied", tod: true, copied: true, kind: KindUnaccounted, why: source},
 		{name: "(c) the test's own read as a time of day, copied", own: true, tod: true, copied: true, kind: KindVariable, from: "mock-18"},
+		{name: "(c) the start-up's read as epoch seconds, copied", number: true, copied: true, kind: KindUnaccounted, why: source},
+		{name: "(c) the start-up's read as epoch seconds, copied, the window three seconds wide", number: true, wide: true, copied: true, kind: KindUnaccounted, why: source},
+		{name: "(c) the test's own read as epoch seconds, copied", number: true, own: true, copied: true, kind: KindVariable, from: "mock-18"},
+		{name: "(c) the test's own read as epoch seconds, copied, the window three seconds wide", number: true, own: true, wide: true, copied: true, kind: KindVariable, from: "mock-18"},
+		{name: "(c) the start-up's read as epoch seconds, copied, no answer in F's second", number: true, noPick: true, copied: true, kind: KindUnaccounted, why: source},
+		{name: "(c) the start-up's read as epoch seconds, copied, the window three seconds wide, no answer in F's second", number: true, wide: true, noPick: true, copied: true, kind: KindClockRead, since: true},
+		{name: "(c) the test's own read as epoch seconds, copied, no answer in F's second", number: true, own: true, noPick: true, copied: true, kind: KindVariable, from: "mock-18"},
+		{name: "(c) the test's own read as epoch seconds, copied, the window three seconds wide, no answer in F's second", number: true, own: true, wide: true, noPick: true, copied: true, kind: KindClockRead, since: true},
+		{name: "(c) the start-up's read as a base64 text, copied", b64: true, noPick: true, copied: true, kind: KindUnaccounted, why: source},
+		{name: "(c) the start-up's read as a base64 text, copied, the window three seconds wide", b64: true, wide: true, noPick: true, copied: true, kind: KindClockRead, since: true},
+		{name: "(c) the test's own read as a base64 text, copied", b64: true, own: true, noPick: true, copied: true, kind: KindVariable, from: "mock-18"},
+		{name: "(c) the test's own read as a base64 text, copied, the window three seconds wide", b64: true, own: true, wide: true, noPick: true, copied: true, kind: KindClockRead, since: true},
+		{name: "(c) the start-up's read as a base64 text to the millisecond, copied", b64ms: true, copied: true, kind: KindUnaccounted, why: source},
+		{name: "(c) the start-up's read as a base64 text to the millisecond, copied, the window three seconds wide", b64ms: true, wide: true, copied: true, kind: KindUnaccounted, why: source},
+		{name: "(c) the test's own read as a base64 text to the millisecond, copied", b64ms: true, own: true, copied: true, kind: KindVariable, from: "mock-18"},
+		{name: "(c) the test's own read as a base64 text to the millisecond, copied, the window three seconds wide", b64ms: true, own: true, wide: true, copied: true, kind: KindVariable, from: "mock-18"},
+		{name: "(c) the start-up's read as a time of day to the millisecond, the poll to the second, copied", todms: true, noPick: true, copied: true, kind: KindUnaccounted, why: source},
+		{name: "(c) the start-up's read as a time of day to the millisecond, the poll to the second, copied, the window three seconds wide", todms: true, wide: true, noPick: true, copied: true, kind: KindUnaccounted, why: source},
+		{name: "(c) the test's own read as a time of day to the millisecond, the poll to the second, copied", todms: true, own: true, noPick: true, copied: true, kind: KindVariable, from: "mock-18"},
+		{name: "(c) the test's own read as a time of day to the millisecond, the poll to the second, copied, the window three seconds wide", todms: true, own: true, wide: true, noPick: true, copied: true, kind: KindVariable, from: "mock-18"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			ago := 2 * time.Second
@@ -2405,7 +2451,15 @@ func TestAnEarlierTypedClockReadFSawSendAnotherMomentIsNoSourceOfTheInstant(t *t
 				tr.Begin()
 			}
 			n, _, _, _ := tr.Test()
-			readLeaf := date
+			readLeaf, pollLeaf := date, date
+			b64 := func(p, layout string, at time.Time) Leaf {
+				return Leaf{Path: p, Noise: p, Type: String, Value: base64.StdEncoding.EncodeToString([]byte("at=" + at.UTC().Format(layout) + ";v=1"))}
+			}
+			todOf := func(res time.Duration) func(p string, at time.Time) Leaf {
+				return func(p string, at time.Time) Leaf {
+					return TimeOfDayLeaf(p, p, time.Duration(clockOfDay(at.Truncate(time.Second))), res)
+				}
+			}
 			switch {
 			case c.form:
 				readLeaf = second
@@ -2413,6 +2467,16 @@ func TestAnEarlierTypedClockReadFSawSendAnotherMomentIsNoSourceOfTheInstant(t *t
 				readLeaf = func(p string, at time.Time) Leaf {
 					return TimeOfDayLeaf(p, p, time.Duration(clockOfDay(at)), time.Millisecond)
 				}
+			case c.number:
+				readLeaf = func(p string, at time.Time) Leaf {
+					return Leaf{Path: p, Noise: p, Type: Number, Value: strconv.FormatInt(at.Unix(), 10)}
+				}
+			case c.b64:
+				readLeaf = func(p string, at time.Time) Leaf { return b64(p, "2006-01-02T15:04:05.000Z", at.Truncate(time.Second)) }
+			case c.b64ms:
+				readLeaf = func(p string, at time.Time) Leaf { return b64(p, "2006-01-02T15:04:05.000Z", at) }
+			case c.todms:
+				readLeaf, pollLeaf = todOf(time.Millisecond), todOf(time.Second)
 			}
 			tr.Served(n, Earlier{Mock: "mock-18", At: read, Own: c.own, Payload: payload("mock-18", read), Seen: []Seen{
 				{Side: Request, Leaf: readLeaf(expires, read), Live: readLeaf(expires, live).Value, Place: expires, Clock: true},
@@ -2435,10 +2499,12 @@ func TestAnEarlierTypedClockReadFSawSendAnotherMomentIsNoSourceOfTheInstant(t *t
 					{Side: Request, Leaf: ms(active, read.Add(400*time.Millisecond)), Place: active, Clock: true},
 				}})
 			}
-			at := call.Add(-500 * time.Millisecond)
-			tr.Served(n, Earlier{Mock: "mock-1070", At: at, Own: true, Payload: payload("mock-1070", at), Seen: []Seen{
-				{Side: Response, Leaf: ms(stamp, at), Live: ms(stamp, callF.Add(-ago+200*time.Millisecond)).Value, Place: stamp},
-			}})
+			if !c.noPick {
+				at := call.Add(-500 * time.Millisecond)
+				tr.Served(n, Earlier{Mock: "mock-1070", At: at, Own: true, Payload: payload("mock-1070", at), Seen: []Seen{
+					{Side: Response, Leaf: ms(stamp, at), Live: ms(stamp, callF.Add(-ago+200*time.Millisecond)).Value, Place: stamp},
+				}})
+			}
 			_, earlier, _, _ := tr.Test()
 			// A $date names its millisecond: the poll's now-2s cut to the
 			// second is read as made up to three seconds before its call.
@@ -2447,7 +2513,7 @@ func TestAnEarlierTypedClockReadFSawSendAnotherMomentIsNoSourceOfTheInstant(t *t
 				gap = 3 * time.Second
 			}
 			w := (&Window{Rec: Span{From: call.Add(-gap), To: call, Began: b}, F: Span{From: callF.Add(-gap), To: callF, Began: bF}}).ComparesOffsets()
-			shape := func(at time.Time) Shape { return Shape{Leaves: map[string]Leaf{dirty: date(dirty, at)}} }
+			shape := func(at time.Time) Shape { return Shape{Leaves: map[string]Leaf{dirty: pollLeaf(dirty, at)}} }
 			var resp []Leaf
 			if c.answer {
 				resp = []Leaf{date(echoed, call.Add(-ago))}
