@@ -169,6 +169,44 @@ type TestCaseMutator interface {
 	BeforeTestCaseRun(ctx context.Context, tc *models.TestCase, testSetID string) error
 }
 
+// TestCaseReporter is an optional extension to TestHooks.
+// RunTestSet detects it via type assertion once a test case has its FINAL
+// verdict; implementations that do not need per-case reporting can safely omit
+// it without breaking existing code.
+//
+// It exists because there is no per-case post-verdict hook otherwise.
+// BeforeTestResult is handed the whole test set at once, and InsertTestCaseResult
+// is batched and flushed after the retry loop closes — so what looks like a live
+// feed is really a burst per test set. A supervising process that wants to show
+// progress while a long test set runs, or to stream results across a process
+// boundary, has nothing to attach to.
+//
+// Called EXACTLY ONCE per test case the run recorded a verdict for, with that
+// verdict, after every retry cycle and the streaming phase have finished.
+//
+// "Recorded a verdict for" is the whole set, not the happy path: a case whose
+// app never answered, whose response type was wrong, or whose result came back
+// nil is persisted by its own terminal branch. An earlier version of this hook
+// was called from the single site that filled finalTestCaseResults, which those
+// branches never reach, and that site sat INSIDE the --retry-passing loop -- so
+// it both missed verdicts and fired once per cycle for the ones it saw.
+// Measured on a set of 4 with 3 no-answer failures: 4 verdicts recorded, 1
+// reported.
+//
+// Once per case, with the LAST verdict: the run keeps a per-name map and drains
+// it at the end, so a retry cycle that re-runs a passing case replaces its
+// earlier entry rather than reporting twice.
+//
+// It is drained on every exit path, including a run that bails: those runs have
+// still recorded the verdicts they got, and a consumer may be settling or
+// retiring cases from them.
+//
+// Errors are logged and the replay continues: a reporter that cannot report
+// must not be able to fail a run whose tests passed.
+type TestCaseReporter interface {
+	AfterTestCaseRun(ctx context.Context, testSetID string, tc *models.TestCase, result *models.TestResult) error
+}
+
 // MockPayloadMutator is an optional extension to TestHooks: it changes each
 // mock's payload before the mock is sent to the agent (e.g. decrypts ENC:
 // fields), so the agent receives plaintext values without plaintext ever being

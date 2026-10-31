@@ -138,16 +138,20 @@ func exitedApp() *inspectRecorder {
 // The grace keploy gives a compose app it interrupted ends once the daemon
 // says the app's container exited, however slow its answer (here 2.2 s, well
 // inside the 5 s grace): the reads had 2 s budgets, every slow answer was cut,
-// and the app that had exited at once was given the whole grace. cmdCancel's
-// compose branch gives the same grace (composeAppGrace).
+// and the app that had exited at once was given the whole grace.
+//
+// Driven through composeAppGrace itself. It used to be driven through
+// composeGraceThenDown, the in-process compose library's wrapper, which also
+// counted the down that followed; the library is gone and the shell-out calls
+// composeAppGrace directly (app.go, cmdCancel's compose branch), so the down
+// is no longer this grace's to make.
 func TestTheComposeGraceEndsOnTheDaemonsSlowAnswer(t *testing.T) {
 	core, logs := observer.New(zap.DebugLevel)
 	d := &slowDaemon{Client: exitedApp(), latency: 2200 * time.Millisecond}
 	a := &App{logger: zap.New(core), docker: d, container: "app"}
-	downs := 0
-	a.composeGraceThenDown(func() { downs++ })
-	if downs != 1 || logs.FilterMessage("app container stopped gracefully; tearing down the rest of the compose stack").Len() != 1 {
-		t.Fatalf("downs %d, %d answers read; want the grace ended on the daemon's answer that the app exited, then one down", downs, d.answers())
+	a.composeAppGrace(nil)
+	if logs.FilterMessage("app container stopped gracefully; tearing down the rest of the compose stack").Len() != 1 {
+		t.Fatalf("%d answers read; want the grace ended on the daemon's answer that the app exited", d.answers())
 	}
 }
 
