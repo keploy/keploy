@@ -899,7 +899,13 @@ func (m *mockService) Record(ctx context.Context) error {
 				m.upsertCases(persistCtx, name, byCase, nil, suites)
 				m.upsertBoots(persistCtx, name, plan.boots)
 			} else {
-				m.upsertCases(persistCtx, name, byCase, startupMocks(windows, withoutRetries(recorded, retries), m.claims), suites)
+				startup := startupMocks(windows, withoutRetries(recorded, retries), m.claims)
+				var worker []models.MockEntry
+				if provenswitch.On() {
+					startup, worker = setScopeMocks(windows, withoutRetries(recorded, retries), m.claims)
+				}
+				m.upsertCases(persistCtx, name, byCase, startup, suites)
+				m.upsertWorker(persistCtx, name, worker)
 			}
 		}
 	}
@@ -1126,6 +1132,23 @@ func (m *mockService) upsertCases(ctx context.Context, name string, byCase map[s
 	m.logger.Info("wrote per-flow test cases", zap.Int("flows", len(byCase)), zap.String("mock-set", name))
 }
 
+// upsertWorker writes the set's worker scope (mappings.yaml worker:): the
+// calls the app made outside every test's window once the first test had
+// begun (setScopeMocks). Without one nothing is written.
+func (m *mockService) upsertWorker(ctx context.Context, name string, worker []models.MockEntry) {
+	if len(worker) == 0 {
+		return
+	}
+	mapper, ok := m.mappingDB.(WorkerMapper)
+	if !ok {
+		m.logger.Warn("the mapping store cannot list the calls made between or after the tests (worker:), so mappings.yaml lists them nowhere; replay still serves them to any test, and never requires them", zap.String("mock-set", name))
+		return
+	}
+	if err := mapper.UpsertWorker(ctx, name, worker); err != nil {
+		m.logger.Warn("failed to list the calls made between or after the tests in mappings.yaml (worker:); replay still serves them to any test, and never requires them", zap.String("mock-set", name), zap.Error(err))
+	}
+}
+
 func (m *mockService) upsertBoots(ctx context.Context, name string, boots []models.BootSpec) {
 	mapper, ok := m.mappingDB.(BootMapper)
 	if !ok {
@@ -1345,6 +1368,37 @@ func flowOf(windows []models.ScopeWindow, test string) string {
 		}
 	}
 	return flow
+}
+
+// setScopeMocks is startupMocks under the proven switch, split as the set
+// scope of mappings.yaml lists it: keploy decides no call's owner, so a
+// call is a test's only when a test's window holds it, and every other one
+// is the set's. startup: is what came before the first test began, and the
+// protocol-phase and app-start calls; worker: is every other call outside
+// every window, made between or after the tests, in recorded order. Each
+// keeps the key of the claim it was made under. A replay serves both to any
+// test and requires neither; a reader who finds one of a test's own calls
+// is the app's moves it from the test's list to worker: (models.Mapping).
+// Without a window every call is startup:'s, as startupMocks has it.
+func setScopeMocks(windows []models.ScopeWindow, mocks []capturedMock, claims []models.ScopeWindow) (startup, worker []models.MockEntry) {
+	var first time.Time
+	for _, w := range windows {
+		if !w.Start.IsZero() && (first.IsZero() || w.Start.Before(first)) {
+			first = w.Start
+		}
+	}
+	for _, mk := range mocks {
+		if !mk.boot && !mk.protocol && containing(windows, mk.ts) != "" {
+			continue
+		}
+		e := models.MockEntry{Name: mk.name, Kind: mk.kind, Key: claimKeyAt(claims, mk.ts)}
+		if mk.boot || mk.protocol || first.IsZero() || mk.ts.Before(first) {
+			startup = append(startup, e)
+			continue
+		}
+		worker = append(worker, e)
+	}
+	return startup, worker
 }
 
 func startupMocks(windows []models.ScopeWindow, mocks []capturedMock, claims []models.ScopeWindow) []models.MockEntry {
