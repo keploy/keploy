@@ -70,10 +70,10 @@ type composeInstr struct {
 	// What the agent reports back when asked for the replay outcome. Under
 	// compose it is routinely asked after it has already been stopped, so both
 	// reads failing is the normal case there, not an exotic one.
-	// table and pool are the per-test table and the pool slices the last
-	// proven table push sent, and given the values each test gave when it
-	// was recorded that it sent with them.
-	table, pool map[string][]string
+	// table, pool and worker are the per-test table, the pool slices and
+	// the worker scope the last proven table push sent, and given the
+	// values each test gave when it was recorded that it sent with them.
+	table, pool, worker map[string][]string
 	// recordedWindows are the recorded test windows that push sent.
 	recordedWindows []models.TestWindow
 	given           map[string][]models.GivenValue
@@ -220,10 +220,11 @@ func (f *composeInstr) GetScopeWindows(context.Context) ([]models.ScopeWindow, e
 // PushScopeTable takes the per-test table (ScopePusher).
 func (f *composeInstr) PushScopeTable(context.Context, map[string][]string) error { return nil }
 
-// PushProvenTable takes the per-test table, the pool slices, the recorded
-// test windows and the recorded givens (ProvenTablePusher), and keeps them.
-func (f *composeInstr) PushProvenTable(_ context.Context, table, pool map[string][]string, windows []models.TestWindow, given map[string][]models.GivenValue) error {
-	f.table, f.pool, f.recordedWindows, f.given = table, pool, windows, given
+// PushProvenTable takes the per-test table, the pool slices, the worker
+// scope, the recorded test windows and the recorded givens
+// (ProvenTablePusher), and keeps them.
+func (f *composeInstr) PushProvenTable(_ context.Context, table, pool, worker map[string][]string, windows []models.TestWindow, given map[string][]models.GivenValue) error {
+	f.table, f.pool, f.worker, f.recordedWindows, f.given = table, pool, worker, windows, given
 	return nil
 }
 
