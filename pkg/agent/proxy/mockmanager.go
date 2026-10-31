@@ -702,7 +702,7 @@ func (m *MockManager) ResetForReplaySession() {
 	// (SetUnrequired): the next session's staging names its own.
 	m.exact.unrequired.Store(nil)
 	// Nor the recordings of the tests it set aside (ServeExactAside).
-	m.exact.setAside.Store(nil)
+	m.exact.aside.reset()
 	if m.exact.view.Load() != nil {
 		m.installExact(&exactView{poolKey: models.PoolKeyNone, pool: map[string]struct{}{}})
 	}

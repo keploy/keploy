@@ -673,7 +673,10 @@ func (m *MockManager) RoundSnapshot(q integrations.RoundQuery) (integrations.Rou
 	v.mu.Lock()
 	s.Consumed = make([]*models.Mock, 0, len(v.order))
 	for _, i := range v.order {
-		s.Consumed = append(s.Consumed, v.owned[i])
+		s.Consumed = append(s.Consumed, v.at(i))
+	}
+	for _, a := range v.asideServed {
+		owners[a.mock.Name] = integrations.OwnerSetAside
 	}
 	v.mu.Unlock()
 	epoch := m.stagingEpoch.Load()
@@ -687,8 +690,6 @@ func (m *MockManager) RoundSnapshot(q integrations.RoundQuery) (integrations.Rou
 			} else {
 				owners[mk.Name] = integrations.OwnerShared
 			}
-		case v.asideOf(i) != "":
-			owners[mk.Name] = integrations.OwnerSetAside
 		case v.inFlight[mk.Name]:
 			owners[mk.Name] = integrations.OwnerInFlight
 		default:

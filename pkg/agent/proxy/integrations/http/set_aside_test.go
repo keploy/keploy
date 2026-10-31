@@ -21,14 +21,21 @@ func (d asideDb) HoldToRound(integrations.CallRound) (integrations.MockMemDb, fu
 	return d, func() bool { return false }
 }
 
-func (d asideDb) SetAsideMocks(kind models.Kind) []*models.Mock {
+func (d asideDb) RangeSetAside(kind models.Kind, _ []string, visit func([]*models.Mock) bool) {
+	rangeAside(d.aside, kind, visit)
+}
+
+// rangeAside offers aside to visit as one handed test's batch, of kind.
+func rangeAside(aside []*models.Mock, kind models.Kind, visit func([]*models.Mock) bool) {
 	var out []*models.Mock
-	for _, mk := range d.aside {
+	for _, mk := range aside {
 		if kind == "" || mk.Kind == kind {
 			out = append(out, mk)
 		}
 	}
-	return out
+	if len(out) > 0 {
+		visit(out)
+	}
 }
 
 // A call one more than the open test recorded, which a set-aside test's
@@ -75,14 +82,8 @@ type asideMemDb struct {
 	aside []*models.Mock
 }
 
-func (d *asideMemDb) SetAsideMocks(kind models.Kind) []*models.Mock {
-	var out []*models.Mock
-	for _, m := range d.aside {
-		if kind == "" || m.Kind == kind {
-			out = append(out, m)
-		}
-	}
-	return out
+func (d *asideMemDb) RangeSetAside(kind models.Kind, _ []string, visit func([]*models.Mock) bool) {
+	rangeAside(d.aside, kind, visit)
 }
 
 // A set-aside test's recording whose request holds a read of the
