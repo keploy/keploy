@@ -1066,8 +1066,12 @@ func (r *Replayer) awaitWorkerScope(ctx context.Context, plan *exactPlan, consum
 	}
 }
 
+// workerWhyNames is how many of a set's unmade worker-scope mocks its
+// failure_reason names: the report's WorkerUnmade carries every one.
+const workerWhyNames = 20
+
 // workerWhy says what a set's end found of its worker scope: the calls its
 // recording made that the application never did.
 func workerWhy(missing []string) string {
-	return fmt.Sprintf("the application never made %d of the calls the test set's worker scope recorded (the calls no test owns: %s)", len(missing), strings.Join(missing[:min(len(missing), 20)], ", "))
+	return fmt.Sprintf("the application never made %d of the calls the test set's worker scope recorded (the calls no test owns: %s)", len(missing), strings.Join(missing[:min(len(missing), workerWhyNames)], ", "))
 }

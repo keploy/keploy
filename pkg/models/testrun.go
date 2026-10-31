@@ -51,6 +51,13 @@ type TestReport struct {
 	// (UnmatchedCall.BeforeSet). They fail the set; JUnit fails a case of its
 	// own with them.
 	UnclaimedCalls []UnmatchedCall `json:"unclaimedCalls,omitempty" yaml:"unclaimed_calls,omitempty"`
+	// WorkerUnmade are, in recorded order, the names of the set's worker-scope
+	// mocks (the calls no test owns) whose place its run reached and that the
+	// application never made (proven switch). They fail the set, as
+	// UnclaimedCalls do. The report's failure_reason names at most the first
+	// 20 of them, for reading; this field carries every one, so a judging that
+	// reads the report can name them as evidence without parsing that text.
+	WorkerUnmade []string `json:"workerUnmade,omitempty" yaml:"worker_unmade,omitempty"`
 	// AppNotStopped, under the proven switch, says why keploy read the set's
 	// end with its application still running (a stack kept across test-sets,
 	// --keep-app-alive, an application keploy did not start): a call the
