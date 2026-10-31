@@ -2128,6 +2128,14 @@ func TestMissPlacesSayAKindChangeOnce(t *testing.T) {
 		{"a body that became JSON is one place, its media type with it",
 			body(t, "k", `{"a":1}`), Shape{Key: "k", Fixed: map[string]string{"body": "text"}, Leaves: map[string]Leaf{}}, nil,
 			[]string{"body is not in the recording"}},
+		{"a fixed part named after a position inside a missing field is that field's",
+			flat(nil, nil, "body.z", "n:1"),
+			flat(map[string]string{"body.a[0]'s kind (an array or a document)": "array"}, nil, "body.a[0].b", "n:1", "body.z", "n:1"), nil,
+			[]string{"body.a is missing"}},
+		{"a fixed part inside two values whose kinds changed is the outermost change",
+			flat(nil, map[string]string{"body.o": "a double"}, "body.o.i.0", "s:x"),
+			flat(map[string]string{"body.o.i's kind (an array or a document)": "array"}, map[string]string{"body.o": "a 32-bit integer", "body.o.i": "an array"}, "body.o.i.0", "s:x"), nil,
+			[]string{"body.o was a 32-bit integer, is a double"}},
 		{"a kind the adapter names alike on both sides is no change",
 			flat(nil, map[string]string{"body.k": "a 32-bit integer"}, "body.k.$numberInt", "s:2"),
 			flat(nil, map[string]string{"body.k": "a 32-bit integer"}, "body.k.$numberInt", "s:1"), nil,
@@ -2177,6 +2185,92 @@ func TestMissPlacesReadAPathTwoValuesSpellAlike(t *testing.T) {
 	}
 }
 
+// withParents is s with the adapter's Shape.Parents (path, parent pairs).
+func withParents(s Shape, kv ...string) Shape {
+	s.Parents = map[string]string{}
+	for i := 0; i+1 < len(kv); i += 2 {
+		s.Parents[kv[i]] = kv[i+1]
+	}
+	return s
+}
+
+// dottedKey is the fixed part the Mongo adapter names a dotted key by, after
+// the key's own path, so that the place at that path holds it.
+func dottedKey(path, key string) map[string]string {
+	return map[string]string{path + "'s spelling (the dotted key " + strconv.Quote(key) + ")": "dotted"}
+}
+
+// TestMissPlacesNameAKeyItsAdapterSaysIsOneStepWhole: a protocol that joins
+// keys with '.' (Mongo) names a key holding a '.' as one step
+// (Shape.Parents). A miss then says that key added or removed as one place,
+// at its own path, the key's fixed part with it; never a field its first
+// word names, which neither side holds.
+func TestMissPlacesNameAKeyItsAdapterSaysIsOneStepWhole(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		live, rec Shape
+		places    []string
+	}{
+		{"a dotted key added in a document",
+			withParents(flat(dottedKey("body.x.q.r", "q.r"), nil, "body.a", "s:1", "body.x.p", "s:1", "body.x.q.r", "s:2"), "body.x.q.r", "body.x"),
+			flat(nil, nil, "body.a", "s:1", "body.x.p", "s:1"),
+			[]string{"body.x.q.r is not in the recording"}},
+		{"a dotted key removed from a document",
+			flat(nil, nil, "body.a", "s:1", "body.x.p", "s:1"),
+			withParents(flat(dottedKey("body.x.q.r", "q.r"), nil, "body.a", "s:1", "body.x.p", "s:1", "body.x.q.r", "s:2"), "body.x.q.r", "body.x"),
+			[]string{"body.x.q.r is missing"}},
+		{"a dotted key added at the top",
+			withParents(flat(dottedKey("body.q.r", "q.r"), nil, "body.a", "s:1", "body.q.r", "s:2"), "body.q.r", "body"),
+			flat(nil, nil, "body.a", "s:1"),
+			[]string{"body.q.r is not in the recording"}},
+		{"a dotted key holding a document, added",
+			withParents(flat(dottedKey("body.x.q.r", "q.r"), nil, "body.x.p", "s:1", "body.x.q.r.s", "s:2", "body.x.q.r.t", "s:3"), "body.x.q.r", "body.x"),
+			flat(nil, nil, "body.x.p", "s:1"),
+			[]string{"body.x.q.r is not in the recording"}},
+		{"a dotted key where the recording held a field of its first word",
+			withParents(flat(dottedKey("body.x.q.r", "q.r"), nil, "body.x.q.r", "s:1"), "body.x.q.r", "body.x"),
+			flat(nil, nil, "body.x.q.t", "s:1", "body.x.q.u", "s:1"),
+			[]string{"body.x.q.r is not in the recording", "body.x.q is missing"}},
+		{"a dotted key the recording nested is said by its spelling",
+			withParents(flat(dottedKey("body.f.a.b", "a.b"), nil, "body.f.a.b", "s:x"), "body.f.a.b", "body.f"),
+			flat(nil, nil, "body.f.a.b", "s:x"),
+			[]string{`body.f.a.b's spelling (the dotted key "a.b") differs`}},
+		{"a parent that is no path the key goes on from is passed over",
+			withParents(flat(nil, nil, "body.x.q.r", "s:2", "body.x.p", "s:1"), "body.x.q.r", "body.y"),
+			flat(nil, nil, "body.x.p", "s:1"),
+			[]string{"body.x.q is not in the recording"}},
+		{"a parent the key does not go on from by '.' or '[' is passed over",
+			withParents(flat(nil, nil, "body.xq.r", "s:2", "body.x.p", "s:1"), "body.xq.r", "body.x"),
+			flat(nil, nil, "body.x.p", "s:1"),
+			[]string{"body.xq is not in the recording"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, places := missPlaces(tc.live, tc.rec, nil)
+			if !reflect.DeepEqual(places, tc.places) {
+				t.Fatalf("places %q, want %q", places, tc.places)
+			}
+			if c := Compare(tc.live, tc.rec, nil); (c.Structural == "") != (len(places) == 0) {
+				t.Fatalf("Compare's structural %q disagrees with places %q", c.Structural, places)
+			}
+			if d.Structural != places[0] {
+				t.Fatalf("structural %q, want the first place %q", d.Structural, places[0])
+			}
+		})
+	}
+}
+
+// TestMissPlacesReadAFlatPathSpelledBothWaysAsADocument: leaves whose paths
+// go on from one path by both '.' and '[' make it a document, whichever leaf
+// is read first.
+func TestMissPlacesReadAFlatPathSpelledBothWaysAsADocument(t *testing.T) {
+	for i := 0; i < 32; i++ {
+		_, places := missPlaces(flat(nil, nil, "body.a", "n:1"), flat(nil, nil, "body.a.b", "n:1", "body.a[0]", "n:1"), nil)
+		if !reflect.DeepEqual(places, []string{"body.a was a document, is a number"}) {
+			t.Fatalf("places %q", places)
+		}
+	}
+}
+
 // TestPairCountsEachPlaceOnce: the places a miss counts are uniform, so
 // the recording it is closest to is never passed over for how its
 // differences are spelled.
@@ -2213,6 +2307,17 @@ func TestPairCountsEachPlaceOnce(t *testing.T) {
 			cand(body(t, "k", `{"a":1,"y":2,"z":9}`), true),
 		})
 		if r.Outcome != Miss || r.Index != 0 {
+			t.Fatalf("%+v", r)
+		}
+	})
+	t.Run("the call's own recording, a dotted key added, over one lacking a field", func(t *testing.T) {
+		dotted := func(s Shape) Shape { return withParents(s, "body.q.r", "body") }
+		live := dotted(flat(dottedKey("body.q.r", "q.r"), nil, "body.e", "s:Mine", "body.a", "s:1", "body.q.r", "s:2"))
+		r := Pair(live, []Candidate{
+			cand(dotted(flat(dottedKey("body.q.r", "q.r"), nil, "body.e", "s:Other", "body.a", "s:9", "body.q.r", "s:5", "body.m", "s:1")), true),
+			cand(flat(nil, nil, "body.e", "s:Mine", "body.a", "s:1"), true),
+		})
+		if r.Outcome != Miss || r.Index != 1 || r.Why != why+"body.q.r is not in the recording" {
 			t.Fatalf("%+v", r)
 		}
 	})

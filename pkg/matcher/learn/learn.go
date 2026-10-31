@@ -105,6 +105,13 @@ type Shape struct {
 	// pairs is decided by the leaves and fixed parts alone. nil when the
 	// leaves tell every kind.
 	Kinds map[string]string
+	// Parents name, by path, the path a value is directly in where cutting
+	// the path at its last '.' or '[' would not find it: a key holding a
+	// '.' (a Mongo dotted key "q.r" in a document x is at x.q.r, directly
+	// in x, and no field x.q holds it). A miss then names such a key whole,
+	// as one place at its own path, never a field its first word names.
+	// Like Kinds, Parents only name. nil when every path cuts so.
+	Parents map[string]string
 }
 
 // Known says which leaves a comparison excuses: noise keploy.yml declares,
@@ -375,12 +382,13 @@ const bodyRoot = "body"
 // names there; else, in a decoded Body, the kind of the value at each of its
 // paths, spelled as JSONLeaves spells them (so a key holding '.', '[' or ']'
 // is one step, and only its own path is held); else a leaf's, by its type
-// (kindNames); else, for a path other leaves are under, a document or an
-// array as their paths go on from it ('.' or '['; a document when both
-// do), held with no kind ("") when only unnamed leaves are under it.
+// (kindNames); else, for a path other leaves are in (step by step, up),
+// a document or an array as their paths go on from it ('.' or '['; a
+// document when both do, whichever leaf is read first), held with no kind
+// ("") when only unnamed leaves are in it.
 func kindsOf(s Shape) kinds {
 	out := make(map[string]string, 2*len(s.Leaves))
-	var parent map[string]string
+	k := kinds{of: out, steps: s.Parents}
 	inBody := func(p string) bool {
 		return s.Body != nil && (p == bodyRoot || strings.HasPrefix(p, bodyRoot+".") || strings.HasPrefix(p, bodyRoot+"["))
 	}
@@ -388,17 +396,16 @@ func kindsOf(s Shape) kinds {
 		if inBody(p) {
 			continue
 		}
-		for i := 1; i < len(p); i++ {
+		for c, q := p, k.up(p); q != ""; c, q = q, k.up(q) {
 			switch {
-			case p[i] != '.' && p[i] != '[':
 			case l.Unnamed:
-				if _, ok := out[p[:i]]; !ok {
-					out[p[:i]] = ""
+				if _, ok := out[q]; !ok {
+					out[q] = ""
 				}
-			case p[i] == '.':
-				out[p[:i]] = docKind
-			case out[p[:i]] != docKind:
-				out[p[:i]] = arrayKind
+			case c[len(q)] == '.':
+				out[q] = docKind
+			case out[q] != docKind:
+				out[q] = arrayKind
 			}
 		}
 	}
@@ -408,40 +415,48 @@ func kindsOf(s Shape) kinds {
 		}
 	}
 	if s.Body != nil {
-		parent = map[string]string{}
-		bodyKinds(bodyRoot, "", s.Body, out, parent)
+		k.parent = map[string]string{}
+		bodyKinds(bodyRoot, "", s.Body, out, k.parent)
 	}
-	for p, k := range s.Kinds {
-		out[p] = k
+	for p, kind := range s.Kinds {
+		out[p] = kind
 	}
-	return kinds{of: out, parent: parent}
+	return k
 }
 
-// kinds are one side's kindsOf: the kind at each path it holds (of), and,
-// for a decoded Body's paths, the path each is directly in (parent).
+// kinds are one side's kindsOf: the kind at each path it holds (of), for a
+// decoded Body's paths, the path each is directly in (parent), and the
+// adapter's Shape.Parents (steps).
 type kinds struct {
-	of, parent map[string]string
+	of, parent, steps map[string]string
 }
 
-// pathsTo are the paths holding the leaf at p, outermost first, p last:
-// in a decoded Body, the paths it is in, step by step; elsewhere p cut
-// where a key or a position begins.
+// up is the path the value at p is directly in ("" at the root): parent's
+// in a decoded Body; else steps' (Shape.Parents), when it names a path p
+// goes on from by '.' or '['; else p cut at its last '.' or '[' past its
+// first byte.
+func (k kinds) up(p string) string {
+	if q, ok := k.parent[p]; ok {
+		return q
+	}
+	if q, ok := k.steps[p]; ok && len(q) < len(p) && strings.HasPrefix(p, q) && (p[len(q)] == '.' || p[len(q)] == '[') {
+		return q
+	}
+	if i := strings.LastIndexAny(p, ".["); i > 0 {
+		return p[:i]
+	}
+	return ""
+}
+
+// pathsTo are the paths holding the leaf at p, outermost first, p last,
+// step by step (up).
 func (k kinds) pathsTo(p string) []string {
-	if _, ok := k.parent[p]; ok {
-		out := []string{p}
-		for q := k.parent[p]; q != ""; q = k.parent[q] {
-			out = append(out, q)
-		}
-		slices.Reverse(out)
-		return out
+	out := []string{p}
+	for q := k.up(p); q != ""; q = k.up(q) {
+		out = append(out, q)
 	}
-	var out []string
-	for i := 1; i < len(p); i++ {
-		if p[i] == '.' || p[i] == '[' {
-			out = append(out, p[:i])
-		}
-	}
-	return append(out, p)
+	slices.Reverse(out)
+	return out
 }
 
 // bodyKinds adds the kind of the decoded JSON value v at path (in the path
