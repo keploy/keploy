@@ -203,13 +203,31 @@ services:
 YML
 
 # await LOG PID PATTERN N: 0 once LOG has N whole lines that carry PATTERN, 1
-# when keploy (PID) exited first.
+# when keploy (PID) exited first. LOG is made by the redirection of keploy's
+# background job, which runs after the job is started, so await may come
+# first: it waits for LOG while keploy runs. Opened at once, a LOG not made
+# yet (a loaded host runs the job late) failed the open, and read as keploy
+# having exited before the app listened.
 await() {
   python3 - "$@" <<'PY'
 import sys, time
 log, pid, pattern, n = sys.argv[1], int(sys.argv[2]), sys.argv[3].encode(), int(sys.argv[4])
+def exited():
+    try:
+        with open("/proc/%d/stat" % pid) as st:
+            return st.read().rsplit(")", 1)[1].split()[0] == "Z"
+    except FileNotFoundError:
+        return True
+while True:
+    try:
+        f = open(log, "rb")
+        break
+    except FileNotFoundError:
+        if exited():
+            sys.exit(1)
+        time.sleep(0.2)
 seen, buf = 0, b""
-with open(log, "rb") as f:
+with f:
     while True:
         chunk = f.read(65536)
         if chunk:
@@ -218,37 +236,12 @@ with open(log, "rb") as f:
             if seen >= n:
                 sys.exit(0)
             continue
-        try:
-            with open("/proc/%d/stat" % pid) as st:
-                if st.read().rsplit(")", 1)[1].split()[0] == "Z":
-                    sys.exit(1)
-        except FileNotFoundError:
+        if exited():
             sys.exit(1)
         time.sleep(0.2)
 PY
 }
 test_files() { sudo sh -c 'ls keploy/test-set-*/tests/ 2>/dev/null' | grep -c '\.yaml$'; }
-# pid_running PID: whether PID still runs, by its state in /proc, which shows
-# root's processes to this user too: gone, or a zombie, is not running. Not
-# kill -0: keploy runs under sudo here, and while sudo checks its policy it
-# holds every uid as root, so kill -0 from this user fails (EPERM) on a sudo
-# that is alive, and keploy would be taken for ended before it started.
-pid_running() {
-  local st
-  case $1 in "" | *[!0-9]*) return 1 ;; esac
-  { read -r st <"/proc/$1/stat"; } 2>/dev/null || return 1
-  st=${st##*) }
-  [ "${st%% *}" != Z ]
-}
-
-# wait_tests N PID: until the recordings hold N test cases, or keploy (PID)
-# exits.
-wait_tests() {
-  while [ "$(test_files)" -lt "$1" ]; do
-    pid_running "$2" || return 1
-    sleep 0.2
-  done
-}
 # signal_keploy SUDO_PID SIG: SIG to the keploy that sudo (SUDO_PID) runs, its
 # child: nothing is looked up by name.
 signal_keploy() {
@@ -275,7 +268,7 @@ set_status() { sudo grep -m1 '^status:' "$(report "$1")" 2>/dev/null | awk '{pri
 # whose answer is BULK random bytes). keploy record's stop, its own, waits
 # for the app's shutdown publish, which the recording must hold.
 record() {
-  local n=$1 log="record$1.log" pid before=$FAIL
+  local n=$1 log="record$1.log" pid before=$FAIL want=0
   shift
   sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$@" "$RECORD_BIN" record -c "docker compose -p $PROJECT up" --container-name "$KNAME" \
     --disable-tele > "$log" 2>&1 &
@@ -283,21 +276,25 @@ record() {
   if await "$log" "$pid" "APP LISTENING" 1; then
     curl -fsS -o /dev/null "http://127.0.0.1:$PORT/price/r${n}a" || fail "record $n: GET /price/r${n}a failed"
     curl -fsS -o /dev/null "http://127.0.0.1:$PORT/price/r${n}b" || fail "record $n: GET /price/r${n}b failed"
-    local want=$((2 * (n + 1)))
+    want=$((2 * (n + 1)))
     if [ -n "${BULK:-}" ]; then
       curl -fsS -o /dev/null "http://127.0.0.1:$PORT/bulk/$BULK" || fail "record $n: GET /bulk/$BULK failed"
       want=$((want + 1))
     fi
-    # A call that failed writes no test case, so its count is never reached:
-    # wait only when every call was made.
-    if [ "$FAIL" -eq "$before" ]; then
-      wait_tests "$want" "$pid" || fail "record $n: keploy record wrote $(test_files) test cases, want $want"
-    fi
   else
     fail "record $n: keploy exited before the app listened"
   fi
+  # keploy record's stop, its own, waits for what it captured: the requests'
+  # test cases and the app's shutdown publish. So the test cases are counted
+  # once it has exited, not waited for while it runs: a wait for one keploy
+  # dropped (or one a failed call never made) held the lane, keploy record
+  # running on, until the job was cancelled, with this recording's log never
+  # printed. A call that failed writes no test case: its failure is said.
   signal_keploy "$pid" INT
   wait "$pid"
+  if [ "$FAIL" -eq "$before" ] && [ "$(test_files)" -lt "$want" ]; then
+    fail "record $n: keploy record wrote $(test_files) test cases, want $want"
+  fi
   grep -q "APP SHUTDOWN PUBLISHED bye" "$log" || fail "record $n: the app did not publish as keploy record stopped it"
   [ "$FAIL" -eq "$before" ] || {
     tail -60 "$log"
@@ -340,6 +337,7 @@ done
 [ "$FAIL" -eq 0 ] || tail -80 as-recorded.log
 
 echo "== 2. a changed shutdown publish =="
+failed_before=$FAIL
 replay changed SHUTDOWN_MSG=changed
 [ "$RC" -ne 0 ] || fail "2: keploy test exited 0, want non-zero"
 for s in test-set-0 test-set-1; do
@@ -347,6 +345,7 @@ for s in test-set-0 test-set-1; do
   sudo grep -A6 '^unclaimed_calls:' "$(report $s)" 2>/dev/null | grep -q '/shutdown' ||
     fail "2: $s does not name the publish among the calls made after its last test"
 done
+[ "$FAIL" -eq "$failed_before" ] || tail -80 changed.log
 
 echo "== 3. the app exits on its own =="
 replay halts HALT_AFTER=1

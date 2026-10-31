@@ -76,7 +76,8 @@ func noAttemptFollows(attempt int, test config.Test) bool {
 // switch (AgentClient; P101-c).
 type composeAppStopper interface {
 	StopComposeApp(ctx context.Context) (string, error)
-	// StartComposeApp says whether it started a container that was not
-	// running (anew).
-	StartComposeApp(ctx context.Context) (anew bool, err error)
+	// StartComposeApp says what keploy read of the container as it started
+	// it: one that was not running (a new app), one found running, or one
+	// the docker daemon gave no answer of.
+	StartComposeApp(ctx context.Context) (models.ComposeAppStart, error)
 }
