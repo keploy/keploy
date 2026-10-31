@@ -5,8 +5,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode"
-	"unicode/utf8"
 )
 
 // SetCookie is one cookie of a Set-Cookie header value, by byte span. keploy
@@ -268,12 +266,15 @@ func nextCookieStart(s string, from int) int {
 	return len(s)
 }
 
+// cookieNameStart recognizes the first byte of an HTTP token (RFC 6265
+// section 4.1.1). In particular, a leading dot is common in ASP.NET cookies.
 func cookieNameStart(name string) bool {
-	r, size := utf8.DecodeRuneInString(name)
-	if size == 0 || r == utf8.RuneError {
+	if name == "" {
 		return false
 	}
-	return unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == '$'
+	c := name[0]
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' ||
+		c >= '0' && c <= '9' || strings.ContainsRune("!#$%&'*+-.^_`|~", rune(c))
 }
 
 // parseCookie reads the cookie in s[start:end].
