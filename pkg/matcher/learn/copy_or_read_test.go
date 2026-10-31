@@ -2019,7 +2019,7 @@ func TestAClientTestLearnsItsAuditReadAnEarlierAnswersClockNameRoundsToAsARead(t
 		// application was given, from the app's createdAt, which in F held
 		// another second than the audit where the insert crossed one.
 		v := dc.ofIn(rec, live, w, r0.Add(254*ms))
-		from, ok := dc.echoServed(dc.echoedIn(v, r0.Add(254*ms), earlier, nil), rec, earlier)
+		from, ok := dc.echoServed(dc.echoedIn(v, r0.Add(254*ms), earlier, nil), rec, earlier, nil)
 		if !ok || from.Mock != "mock-968" || from.Path != "body.docs.msgs.0.app.createdAt.$numberLong" || (from.Live != live) != tc.createdApart {
 			t.Fatalf("%s: the echo took %+v (found %v); want mock-968's app.createdAt, holding another second than %s in F: %v", tc.name, from, ok, live, tc.createdApart)
 		}
@@ -2027,5 +2027,123 @@ func TestAClientTestLearnsItsAuditReadAnEarlierAnswersClockNameRoundsToAsARead(t
 		if ln.Kind != KindClockRead || ln.Read == nil || ln.Read.Since != models.SinceTestBegin || ln.From.Mock != "" {
 			t.Errorf("%s: %s from %+v (%s); want a read of the clock since its test began, no variable", tc.name, ln.Kind, ln.From, ln.Why)
 		}
+	}
+}
+
+// api-server's endpoint poll (ptw_endpoints, as the T2 recording shows it):
+// every two seconds a findAndModify claims an endpoint whose dirtyAt <= now-2s,
+// read from the clock as epoch seconds. In TestGenerateTestSuitesOnClient the
+// poll's now-2s fell in the second the test set's start-up read the clock in
+// (its sweep of expired branches sent expires_at <= now, mock-18), and in
+// record's full round an answer the test was given just before the poll (a
+// claimedAt stamp) held the second F's dirtyAt names, so the echo took the
+// value for a pick by the clock and looked for its recorded second: it found
+// it at the start-up's read and refused the poll naming it ("its recorded
+// value was sent in mock-18 at body.cmd.filter.expires_at.$lte.$numberLong,
+// the test set's start-up's call, where keploy learned it as a read of the
+// application's clock"). F saw the start-up send another second there than
+// the poll's: a copy moves with its source, so the read is no source of the
+// value, and is never named as one, nor bound (the test's own read was bound
+// as the value's variable, a replay then expecting the poll to send the
+// read's value). The value is read as one no earlier place is the source
+// of, which the echo refuses as a possible pick (F's moment stands in what
+// the application was given), naming the read F set aside; so it is where
+// the call's window is wide enough to hold the value as its read, which the
+// read F set aside no longer explains, and where an answer recorded in the
+// start-up's second holds the recorded moment too (a second the application
+// read its clock in is no evidence of a pick). A value F saw the read send
+// too (a copy) is still followed: refused naming the start-up's read, bound
+// to the test's own read, or learned as a read since the test began where
+// one run's window holds it, as before.
+func TestAnEarlierClockReadFSawSendAnotherMomentIsNoSourceOfTheValue(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	const (
+		expires = "body.cmd.filter.expires_at.$lte.$numberLong"
+		dirty   = "body.cmd.query.$and.0.$or.0.dirtyAt.$lte.$numberLong"
+		stamp   = "body.cursor.firstBatch.0.claimedAt.$date.$numberLong"
+		created = "body.cursor.firstBatch.0.created_at.$date.$numberLong"
+	)
+	secs := func(at time.Time) string { return strconv.FormatInt(at.Unix(), 10) }
+	num := func(p string, at time.Time) Leaf { return Leaf{Path: p, Noise: p, Type: Number, Value: secs(at)} }
+	ms := func(p string, at time.Time) Leaf { return InstantLeaf(p, p, at, time.Millisecond) }
+	payload := func(name string, at time.Time) Raw {
+		return RawOf(&models.Mock{Name: name, Spec: models.MockSpec{ReqTimestampMock: at, ResTimestampMock: at.Add(time.Millisecond)}}, true).ServedAs(1)
+	}
+	// The recording's times (the start-up's read, the test's begin, the
+	// poll), and record's full round's, each at its own lead.
+	read := time.Date(2026, 10, 31, 10, 52, 13, 305_000_000, time.UTC)
+	began := time.Date(2026, 10, 31, 10, 52, 14, 430_000_000, time.UTC)
+	call := time.Date(2026, 10, 31, 10, 52, 15, 438_000_000, time.UTC)
+	readF, beganF, callF := read.Add(70*time.Second+900*time.Millisecond), began.Add(72*time.Second), call.Add(73*time.Second+600*time.Millisecond)
+	apart := "while the moment it was recorded with stands in mock-18 at " + expires + ", where keploy learned a read of the application's clock and record's full round saw the application send another moment than the value's, so the value is no copy of it (a copy moves with its source), and no other earlier place is its source"
+	source := "its recorded value was sent in mock-18 at " + expires + ", the test set's start-up's call, where keploy learned it as a read of the application's clock"
+	for _, c := range []struct {
+		name                      string
+		own, answer, wide, copied bool
+		kind                      Kind
+		from, why                 string
+		since                     bool
+	}{
+		{name: "the start-up's read", kind: KindUnaccounted, why: apart},
+		{name: "the start-up's read, the poll's window two seconds wide", wide: true, kind: KindUnaccounted, why: apart},
+		{name: "the start-up's read and an answer of its second", answer: true, kind: KindUnaccounted, why: apart},
+		{name: "the test's own read", own: true, kind: KindUnaccounted, why: apart},
+		{name: "the start-up's read, copied", copied: true, kind: KindUnaccounted, why: source},
+		{name: "the start-up's read, copied, the poll's window two seconds wide", copied: true, wide: true, kind: KindClockRead, since: true},
+		{name: "the test's own read, copied", own: true, copied: true, kind: KindVariable, from: "mock-18"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			b, bF := began, beganF
+			if c.own {
+				// The test began before the read: its own earlier call.
+				b, bF = read.Add(-time.Second), readF.Add(-time.Second)
+			}
+			// What F saw the read send: its own second, or, of a copy, the
+			// second F saw in the poll's value.
+			live := readF
+			if c.copied {
+				live = callF.Add(-2 * time.Second)
+			}
+			tr := NewTracker()
+			tr.SetClientTests(true)
+			if c.own {
+				tr.Begin()
+			}
+			n, _, _, _ := tr.Test()
+			if c.answer {
+				at := read.Add(-100 * time.Millisecond)
+				tr.Served(n, Earlier{Mock: "mock-16", At: at, Own: c.own, Payload: payload("mock-16", at), Seen: []Seen{
+					{Side: Response, Leaf: ms(created, read.Add(-150*time.Millisecond)), Live: ms(created, readF.Add(-150*time.Millisecond)).Value, Place: created},
+				}})
+			}
+			tr.Served(n, Earlier{Mock: "mock-18", At: read, Own: c.own, Payload: payload("mock-18", read), Seen: []Seen{
+				{Side: Request, Leaf: num(expires, read), Live: secs(live), Place: expires, Clock: true},
+			}})
+			if !c.own {
+				tr.Begin()
+			}
+			n, _, _, _ = tr.Test()
+			// An answer the test was given half a second before the poll: a
+			// stamp that F gave in the second F's dirtyAt names.
+			at := call.Add(-500 * time.Millisecond)
+			tr.Served(n, Earlier{Mock: "mock-1070", At: at, Own: true, Payload: payload("mock-1070", at), Seen: []Seen{
+				{Side: Response, Leaf: ms(stamp, at), Live: ms(stamp, callF.Add(-1800*time.Millisecond)).Value, Place: stamp},
+			}})
+			_, earlier, _, _ := tr.Test()
+			gap := 100 * time.Millisecond
+			if c.wide {
+				gap = 2 * time.Second
+			}
+			w := (&Window{Rec: Span{From: call.Add(-gap), To: call, Began: b}, F: Span{From: callF.Add(-gap), To: callF, Began: bF}}).ComparesOffsets()
+			shape := func(at time.Time) Shape { return Shape{Leaves: map[string]Leaf{dirty: num(dirty, at)}} }
+			ln := ClassifyFollowing(clientTestCache(), []string{dirty}, shape(callF.Add(-2*time.Second)), shape(call.Add(-2*time.Second)), call, earlier, nil, nil, w, nil)[0]
+			since := ln.Read != nil && ln.Read.Since == models.SinceTestBegin
+			if ln.Kind != c.kind || ln.From.Mock != c.from || !strings.Contains(ln.Why, c.why) || since != c.since {
+				t.Fatalf("dirtyAt learned %s from %q (since its test began: %v): %s\nwant %s from %q (since: %v), its reason holding %q", ln.Kind, ln.From.Mock, since, ln.Why, c.kind, c.from, c.since, c.why)
+			}
+			if c.why == apart && (!strings.Contains(ln.Why, "stands in mock-1070 at "+stamp) || strings.Contains(ln.Why, source)) {
+				t.Fatalf("dirtyAt's refusal names the read F set aside as its source, or not the answer F's moment stands in: %s", ln.Why)
+			}
+		})
 	}
 }

@@ -119,6 +119,12 @@ type follows struct {
 	// why (refutedAll); refutedOf are the mocks of all of them.
 	refutes   []refutedPlace
 	refutedOf map[string]bool
+	// apart, where the echo went past a request's read of the application's
+	// clock that held the moment the value was recorded with and that F saw
+	// send another moment than the value's (refuteEcho), names the first
+	// such place: what a value then refused as a possible pick says of it
+	// (pickApartUnaccounted).
+	apart string
 	// aside, where the search for the value's source went past a leaf that
 	// held its recorded value whole and that F saw hold another value
 	// (refuteSeen), names the first such leaf: what a value learned as noise
@@ -323,6 +329,26 @@ func (f *follows) refuteSeen(e Earlier, s Seen, whole bool, v *valueDrift) bool 
 	}
 	f.source(e.Mock)
 	return true
+}
+
+// refuteEcho sets s, a leaf of e (an exchange F served before the call), aside
+// as no place the value came from, as refuteSeen does a leaf that held the
+// value whole: the echo found the moment the value was recorded with there,
+// at a request's read of the application's clock, and F saw the application
+// send another moment there than the one F saw in the value (echoServed).
+// The first such place is named (apart, and aside where nothing set it), and
+// the place is a candidate source (sources): a value then refused as a
+// possible pick names it (unaccounted), and one learned as noise is ordered,
+// as beside a leaf refuteSeen sets aside.
+func (f *follows) refuteEcho(e Earlier, s Seen) {
+	at := placeAt(seenPlace(e, s, false))
+	if f.apart == "" {
+		f.apart = at
+	}
+	if f.aside == "" {
+		f.aside = "the moment its recorded value was recorded with stands in " + at + ", where keploy learned a read of the application's clock and record's full round saw the application send another moment than the value's: a copy moves with its source, so the value is no copy of it"
+	}
+	f.source(e.Mock)
 }
 
 // fView is what record's full round shows it gave the application at a

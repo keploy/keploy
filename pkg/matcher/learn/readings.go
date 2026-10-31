@@ -857,7 +857,10 @@ func nonASCIIRuns(s string) []string {
 // holds (echoedIn: a pick from served data, by the clock), while no earlier
 // place holds the moment it was recorded with (else it is a variable of that
 // place, appearedIn), is refused before any lead or window excuses its words:
-// what F saw came from what F served, whatever moved it.
+// what F saw came from what F served, whatever moved it. So is one whose
+// recorded moment only a read of the application's clock holds that F saw
+// send another moment than the value's (follows.apart: no copy of it), named
+// so (pickApartUnaccounted).
 func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, raw []Raw, fol *follows) string {
 	if v.unparsed != "" {
 		return v.unparsed
@@ -866,6 +869,9 @@ func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, 
 		where := dc.heldAt(echoed, at, served, raw)
 		if where == "" {
 			where = "earlier in the test"
+		}
+		if fol != nil && fol.apart != "" {
+			return pickApartUnaccounted(where, fol.apart)
 		}
 		return pickUnaccounted(where)
 	}
@@ -1220,6 +1226,14 @@ func gluedIn(ed *valueDrift, t string, recorded bool) bool {
 		}
 	}
 	return false
+}
+
+// pickApartUnaccounted is pickUnaccounted of a value whose recorded moment
+// stands at apart, a request's read of the application's clock that F
+// saw send another moment than the value's (follows.refuteEcho), which is
+// then no place the value came from.
+func pickApartUnaccounted(where, apart string) string {
+	return "the moment record's full round saw in it stands " + where + ", while the moment it was recorded with stands in " + apart + ", where keploy learned a read of the application's clock and record's full round saw the application send another moment than the value's, so the value is no copy of it (a copy moves with its source), and no other earlier place is its source: it may be a pick from what the application was given, by its clock, and keploy cannot tell it is a read of the clock. If the field is a time the application reads from its own clock, declare it noise in keploy.yml, and keploy stops comparing it"
 }
 
 // pickUnaccounted is why a drifted value whose moment in record's full round

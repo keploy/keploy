@@ -3229,7 +3229,7 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 	// window excuses a word of it. An exchange F served leaf by leaf first,
 	// then a raw mock (below).
 	echoed := dc.echoedIn(v, at, served, raw)
-	if from, ok := dc.echoServed(echoed, recorded, served); ok {
+	if from, ok := dc.echoServed(echoed, recorded, served, fol); ok {
 		return from, true
 	}
 	// Of a mock with no live view, F cannot tell whether a place drifted:
@@ -3403,23 +3403,55 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 // (recorded) was recorded with, by the rule the echo found it a copy by
 // (echoedIn, holdsRecorded): the first by placeRank. ok is false when none
 // does.
-func (dc *DriftCache) echoServed(echoed []echoMatch, recorded string, served []Earlier) (Place, bool) {
+//
+// Under the rule a copy follows its source (fol non-nil), a request's place
+// the learn step learned a plain read of the application's clock at
+// (Seen.Clock) is that source only where what F saw the application send
+// there (Seen.Live) holds the moment F saw in the value too, in every form,
+// as it holds the recorded one: a copy moves with its source, and a read F
+// saw send another moment than the value's is no place the value came from
+// (a poll's dirtyAt <= now-2s whose recorded second is the second the set's
+// start-up read the clock in). It is set aside and named (follows.refuteEcho),
+// and then the recorded moment is shown to be a second the application read
+// its clock in, so a place holding it that F saw hold another moment than the
+// value's (an answer of that second) is no evidence of a pick either: only a
+// place F saw hold the value's moment too is then the source. With none, the
+// echo names no place, and the value is read as one no earlier place is the
+// source of: the echo refuses it as a possible pick (unaccounted), never
+// learned from the read F set aside. A read F saw send the value's moment (a
+// copy) stays the source, as before, and so does one F saw no value at.
+func (dc *DriftCache) echoServed(echoed []echoMatch, recorded string, served []Earlier, fol *follows) (Place, bool) {
 	if len(echoed) == 0 {
 		return Place{}, false
 	}
-	var best Place
-	rank := 7
+	var best, moved Place
+	rank, movedRank := 7, 7
+	aside := false
 	for _, e := range served {
 		for _, s := range e.Seen {
 			if !dc.holdsRecorded(s.Leaf.Value, echoed) && !dc.holdsRecorded(dc.rawExtra(s.Leaf.Value), echoed) && !seenHoldsRecorded(s.Leaf, s.Leaf.Value, echoed) {
 				continue
 			}
+			withF := s.Live != "" && (dc.holdsLive(s.Live, echoed) || dc.holdsLive(dc.rawExtra(s.Live), echoed) || seenHoldsLive(s.Leaf, s.Live, echoed))
+			if fol != nil && s.Clock && s.Live != "" && !withF {
+				fol.refuteEcho(e, s)
+				aside = true
+				continue
+			}
 			whole := s.Leaf.Value == recorded
-			if r := placeRank(e, s, whole); r < rank {
+			r := placeRank(e, s, whole)
+			if r < rank {
 				best, rank = seenPlace(e, s, whole), r
 				best.Echo, best.givenWhole = true, s.Side == Response
 			}
+			if withF && r < movedRank {
+				moved, movedRank = seenPlace(e, s, whole), r
+				moved.Echo, moved.givenWhole = true, s.Side == Response
+			}
 		}
+	}
+	if aside {
+		return moved, movedRank < 7
 	}
 	return best, rank < 7
 }
