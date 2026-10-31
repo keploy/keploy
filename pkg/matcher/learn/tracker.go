@@ -1232,9 +1232,15 @@ func (t *Tracker) Served(n uint64, e Earlier) {
 	case t.epoch != n:
 		// An earlier test's call of the set told after the next began is
 		// the run's as one told in time is (ranCalls); the start-up's and a
-		// previous set's are nobody's.
+		// previous set's are nobody's. It keeps no number of F's serves
+		// (an Order of no tracker numbers none): the order now numbers the
+		// serves of the tests after its own too, and F's serve of it may
+		// itself be numbered after its test ended, so no count read now is
+		// the one its test's end saw. A later call's copy rule then cannot
+		// tell where F served it among other served sources, and refuses
+		// (servedOrder).
 		if n > t.setEpoch && provenswitch.On() {
-			t.keepRun(ranCalls([]Earlier{e}, t.orderLocked()))
+			t.keepRun(ranCalls([]Earlier{e}, Order{}))
 		}
 	case e.StartUp && e.Own:
 	case e.StartUp && drifted(e):
@@ -1414,26 +1420,30 @@ func ranCalls(served []Earlier, o Order) []Earlier {
 // (ranCalls): where its recording stands in the orders the rules read, its
 // mock, when its request and its answer were recorded, where its request was
 // carried, and F's serves of it as o numbers them (Order.ofLocked: those
-// told by the call's test's end; none where o does not number them), with no
-// word of its text, its identity or a view (Raw.ordered). A payload of no
-// mock stays the zero Raw: an exchange that came with none gives no order
-// either. Its text is never loaded here. o's tracker's lock is held.
+// told by the next test's begin, where the call was told in its own test;
+// none where o is of no tracker, a call told after its test ended), with no
+// word of its text, its identity or a view (Raw.ordered). A number x carries
+// is not kept: only o numbers it. A payload of no mock stays the zero Raw: an
+// exchange that came with none gives no order either. Its text is never
+// loaded here. o's tracker's lock is held.
 func (o Order) orderOf(x Raw) Raw {
 	if x.mock == "" {
 		return Raw{}
 	}
-	r := Raw{mock: x.mock, at: x.at, served: x.served, answered: x.answered, conn: x.conn, pos: x.pos, first: x.first, last: x.last, noTime: x.noTime, ordered: true}
+	r := Raw{mock: x.mock, at: x.at, served: x.served, answered: x.answered, conn: x.conn, pos: x.pos, noTime: x.noTime, ordered: true}
 	if o.t == nil {
 		return r
 	}
-	key := x.mock + "\x00" + x.at.String()
+	// The name first: the set's names are its mocks' (one each), so the
+	// scan builds no key and allocates nothing for a mock of another name.
 	for _, m := range o.t.set {
-		if m != nil && m.Name+"\x00"+m.Spec.ReqTimestampMock.String() == key {
-			if first, last := o.ofLocked(MockID(m)); first > 0 {
-				r = r.ServedIn(first, last)
-			}
-			break
+		if m == nil || m.Name != x.mock || !m.Spec.ReqTimestampMock.Equal(x.at) {
+			continue
 		}
+		if first, last := o.ofLocked(MockID(m)); first > 0 {
+			r = r.ServedIn(first, last)
+		}
+		break
 	}
 	return r
 }
@@ -1980,8 +1990,9 @@ func (t *Tracker) State() (number uint64, open, began bool) {
 // (lateOf), never as one whose view no adapter stated. One said as recorded
 // that its leaves do not bear out stays one whose view no adapter stated
 // (fail closed). A copy: earlier is the round's. Nothing is numbered where
-// no payload was read: the place an earlier test's call left the run keeps
-// the numbers its serves had when its test ended (ranCalls, Raw.ordered).
+// no payload was read: the place an earlier test's call told in its own
+// test left the run keeps the numbers its serves had when the next test
+// began, and one told later keeps none (ranCalls, Raw.ordered).
 // Every learn step numbers them by it, so a payload reads the same in each.
 func InServeOrder(earlier []Earlier, mocks []*models.Mock, order Order) []Earlier {
 	read := false

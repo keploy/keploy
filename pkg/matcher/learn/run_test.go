@@ -1745,16 +1745,44 @@ func TestARunPlaceKeepsItsAnswerTimeAndServeOrder(t *testing.T) {
 	if order, untold := servedOrder(earlier, []Raw{RawOf(other, true).ServedAs(1)}, func(string) bool { return true }); untold != "" || !reflect.DeepEqual(order, []string{"mock-o", "mock-a"}) {
 		t.Fatalf("a later call reads F's serves of test A's call as %v (%s), want after mock-o's", order, untold)
 	}
-	// A call its test's end found no serve of keeps no number, and F's
-	// order of it stays one keploy cannot tell beside another served source.
+	// A call its test's end found no serve of keeps no number, not even one
+	// its payload came with, and F's order of it stays one keploy cannot
+	// tell beside another served source.
 	tr2 := NewTracker()
 	tr2.Begin()
 	a2, _, _, _ := tr2.Test()
-	tr2.Served(a2, e)
+	numbered := e
+	numbered.Payload = e.Payload.ServedIn(5, 5)
+	tr2.Served(a2, numbered)
 	tr2.End()
 	tr2.Begin()
 	_, earlier2, _, _ := tr2.Test()
 	if _, untold := servedOrder(earlier2, []Raw{RawOf(other, true).ServedAs(1)}, func(string) bool { return true }); untold == "" {
 		t.Fatalf("an unnumbered run place is ordered: %+v", earlier2[0].Payload)
+	}
+	// A call told after the next test began keeps no number either, though
+	// F's serve of it was numbered in its own test: the order then numbers
+	// the next test's serves too, and no count read then is the one its
+	// test's end saw.
+	tr3 := NewTracker()
+	tr3.Begin()
+	a3, _, _, _ := tr3.Test()
+	tr3.ServedMockAt(other, t0)
+	tr3.ServedMockAt(m, t0.Add(time.Millisecond))
+	tr3.End()
+	tr3.Begin()
+	tr3.ServedMockAt(m, t0.Add(time.Second))
+	tr3.Served(a3, e)
+	tr3.End()
+	tr3.Begin()
+	_, earlier3, _, _ := tr3.Test()
+	if len(earlier3) != 1 || earlier3[0].Mock != "mock-a" {
+		t.Fatalf("test C reads %+v, want test A's call told late alone", earlier3)
+	}
+	if got := earlier3[0].Payload; got.first != 0 || got.last != 0 || !got.ordered || !got.answered.Equal(t0.Add(time.Millisecond)) {
+		t.Fatalf("the run keeps test A's call told late as %+v, want its answer time and no serve number", got)
+	}
+	if _, untold := servedOrder(earlier3, []Raw{RawOf(other, true).ServedAs(1)}, func(string) bool { return true }); untold == "" {
+		t.Fatalf("a run place told after its test ended is ordered: %+v", earlier3[0].Payload)
 	}
 }
