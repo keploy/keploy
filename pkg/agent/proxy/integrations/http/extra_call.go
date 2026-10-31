@@ -64,6 +64,30 @@ func (h *HTTP) extraCall(ctx context.Context, input *req, mockDb integrations.Mo
 	return len(copies), integrations.RepeatedRecording(copies)
 }
 
+// repeatsOwn reports whether the request is, as the matcher reads it under
+// the switch (setAsideAnswer's reading), a call one of the open test's own
+// recordings already answered (integrations.OwnRecordings): one call more
+// than the test recorded, which the pool never answers
+// (integrations.FromPool). A set-aside test's or the pool's copy the test
+// was served is none of its own: a timer's second tick in a test that
+// recorded none is no extra call.
+func (h *HTTP) repeatsOwn(ctx context.Context, input *req, mockDb integrations.MockMemDb, headerNoise, bodyNoise map[string][]string, urlNoise []string, autoURLDynamic, schemaNoiseStrict bool) bool {
+	er, ok := mockDb.(integrations.ExactConsumedReader)
+	if !ok {
+		return false
+	}
+	own := FilterHTTPMocks(integrations.OwnRecordings(er.ConsumedTestMocks()))
+	if len(own) == 0 {
+		return false
+	}
+	vars := variableTable(mockDb)
+	if vars != nil {
+		vars = vars.Clone()
+	}
+	matched, mk, _, err := h.match(ctx, input, answeredOnly{MockMemDb: mockDb, mocks: own, vars: vars}, headerNoise, bodyNoise, urlNoise, autoURLDynamic, false, schemaNoiseStrict, false, true)
+	return err == nil && matched && mk != nil && mk.Spec.HTTPReq != nil
+}
+
 // backgroundAgain is, for a request no mock answered under exact serving (the
 // proven switch), the recording of the open test that judging marked as the
 // application's background work and that the request repeats: identical, as

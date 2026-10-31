@@ -31,7 +31,7 @@ import (
 //     call none of the test's own answers is offered aside, unchecked and
 //     never required, the recordings of the tests the replay set aside and
 //     then the pool slice's data-plane ones (exact_aside.go: the pool in a
-//     test).
+//     test), the pool's never to one more than the test's own recordings.
 //   - While no test is open, the current key's pool slice answers, with
 //     reuse or cursor-saturate as its mocks were recorded, beside the
 //     protocol-phase mocks. Its stateful cursors are the key's own.
