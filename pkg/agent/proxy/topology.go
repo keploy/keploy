@@ -34,7 +34,11 @@ func (p *Proxy) SetTopologySink(s TopologySink) {
 	p.topology.Store(&topologyBox{sink: s})
 }
 
-func (p *Proxy) topologySink() TopologySink {
+// TopologySink is the sink SetTopologySink installed, nil when none is. A
+// capture that is not in the calls' path (low latency, which binds no proxy
+// listener) tells it where the run's calls to local listeners went, as the
+// proxy does.
+func (p *Proxy) TopologySink() TopologySink {
 	if b := p.topology.Load(); b != nil {
 		return b.sink
 	}
@@ -61,7 +65,7 @@ func localListener(owner int, dstAddr string, port uint32) *models.MockedRow {
 // this machine outside the run's tree (outside, from serveTreeListener). Any
 // other destination is not listed. Only keploy mock's runs list them.
 func (p *Proxy) noteMockedLocal(dstAddr string, port uint32, outside *models.MockedRow, ctrKey string) {
-	s := p.topologySink()
+	s := p.TopologySink()
 	if s == nil || !p.mockMode {
 		return
 	}
@@ -79,7 +83,7 @@ func (p *Proxy) noteMockedLocal(dstAddr string, port uint32, outside *models.Moc
 // across tests (HTTP keep-alive) is listed for every test that used it. With
 // no sink, conn is returned as it is.
 func (p *Proxy) liveConn(conn net.Conn, owner int, port uint32) net.Conn {
-	s := p.topologySink()
+	s := p.TopologySink()
 	if s == nil {
 		return conn
 	}

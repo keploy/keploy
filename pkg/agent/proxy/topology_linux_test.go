@@ -1667,3 +1667,22 @@ func TestHandleConnectionListsAnHTTPConnectionABypassRulePassesThroughOnlyForACa
 		})
 	}
 }
+
+// TestTheTopologySinkIsReadBack: a capture that is not in the calls' path
+// (low latency) reads the sink the agent installed, to tell it the rows the
+// proxy would have; once the sink is removed it reads none.
+func TestTheTopologySinkIsReadBack(t *testing.T) {
+	p := &Proxy{}
+	if s := p.TopologySink(); s != nil {
+		t.Fatalf("a proxy with no sink installed reads back %v, want nil", s)
+	}
+	sink := &rowSink{}
+	p.SetTopologySink(sink)
+	if s := p.TopologySink(); s != TopologySink(sink) {
+		t.Fatalf("the installed sink reads back as %v, want the one installed", s)
+	}
+	p.SetTopologySink(nil)
+	if s := p.TopologySink(); s != nil {
+		t.Fatalf("a removed sink reads back as %v, want nil", s)
+	}
+}
