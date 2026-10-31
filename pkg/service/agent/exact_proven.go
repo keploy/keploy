@@ -34,6 +34,10 @@ import (
 //   - While no test is open, the current key's pool slice answers, with
 //     reuse or cursor-saturate as recorded. The stateful cursors start afresh
 //     with the session and are each key's own.
+//   - The current key's worker scope (the names of its slice the set's
+//     worker: lists, SetScopeWorker) answers whether a test is open or not,
+//     after the open test's own, each at most once in the staging, and is
+//     required of no test (serveKeyWorker).
 //   - At its end, each test mock the test did not consume is evidence.
 //
 // The replay's mocks are staged on the proxy once per session, whole; exact
@@ -69,6 +73,10 @@ func (a *Agent) servePoolExactly(ctx context.Context) error {
 		key = models.PoolKeyNone
 	}
 	if !staged {
+		// The staging's view shows nothing staged: no worker scope either.
+		if err := showWorker(es, nil); err != nil {
+			return err
+		}
 		if err := es.ServeExactPool(key, nil); err != nil {
 			return err
 		}
@@ -82,7 +90,50 @@ func (a *Agent) servePoolExactly(ctx context.Context) error {
 			a.provenMu.Unlock()
 		}
 	}
+	if err := a.serveKeyWorker(es, key); err != nil {
+		return err
+	}
 	return es.ServeExactPool(key, append([]string(nil), slice[key]...))
+}
+
+// serveKeyWorker tells the proxy, before the proven wire installs a view,
+// which recordings it shows whether a test is open or not: key's worker
+// scope (SetScopeWorker), each name of it that key's pool slice holds, and
+// so staged. The proxy answers each at most one request in the staging,
+// after the open test's own, and no test's end requires it
+// (ExactTestOutcome reads a test's own mocks only). A test process claimed
+// again starts them afresh with the rest of its slice (restartKey). An
+// empty scope clears what the previous key or set showed.
+func (a *Agent) serveKeyWorker(es coreAgent.ExactServer, key string) error {
+	a.provenMu.Lock()
+	var names []string
+	if w := a.proven.worker[key]; len(w) > 0 {
+		inSlice := make(map[string]bool, len(a.proven.pool[key]))
+		for _, n := range a.proven.pool[key] {
+			inSlice[n] = true
+		}
+		for _, n := range w {
+			if inSlice[n] {
+				names = append(names, n)
+			}
+		}
+	}
+	a.provenMu.Unlock()
+	return showWorker(es, names)
+}
+
+// showWorker has the proxy show names as the worker scope from its next view
+// on (coreAgent.ExactWorkerServer). A proxy that has no worker scope shows
+// none, and cannot serve a set that has one.
+func showWorker(es coreAgent.ExactServer, names []string) error {
+	ws, ok := es.(coreAgent.ExactWorkerServer)
+	if !ok {
+		if len(names) > 0 {
+			return errors.New("this keploy agent's proxy cannot serve a set's worker: calls in a test's window")
+		}
+		return nil
+	}
+	return ws.ServeExactWorker(names)
 }
 
 // stageForExactServing stages the replay's mocks on the proxy, as keploy
@@ -270,6 +321,16 @@ func (a *Agent) serveTestExactly(ctx context.Context, id string) error {
 	a.provenMu.Lock()
 	a.proven.unservable = unservable
 	a.provenMu.Unlock()
+	// The key's worker scope answers in the test's window too.
+	a.provenMu.Lock()
+	key := a.proven.key
+	a.provenMu.Unlock()
+	if key == "" {
+		key = models.PoolKeyNone
+	}
+	if err := a.serveKeyWorker(es, key); err != nil {
+		return err
+	}
 	// A test is the scope of the variables keploy mock replay binds: it
 	// begins with none bound, as it opens.
 	if err := a.openExactTest(es, id, owned, nil); err != nil {
