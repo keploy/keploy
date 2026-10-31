@@ -129,6 +129,10 @@ type Proxy struct {
 	// whenever its error capture window opens (openTestErrorCapture). Under
 	// the proven switch the parsers find it on their connection's context.
 	learnTracker *learn.Tracker
+	// readsIncoming: the agent sees the application's incoming requests in
+	// keploy mock (its record-requests), so its learn step reads a client
+	// test's as the test's given place (WatchIncoming).
+	readsIncoming bool
 	// procZones reads the zone each application process writes a wall
 	// clock of no zone in, from /proc, by the connection's origin PID
 	// (learn.WithProcZone): its calls are learned and checked in it.
@@ -1133,6 +1137,9 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 	// its inputs and keploy no request: the learn step reads them so
 	// (learn.Tracker.SetClientTests).
 	proxy.learnTracker.SetClientTests(opts.Agent.MockMode)
+	// Their incoming requests are their given place where the agent sees
+	// them (WatchIncoming, GiveTestIncoming).
+	proxy.readsIncoming = opts.Agent.MockMode && opts.Agent.RecordRequests
 	// The application runs beside the agent, and writes a wall clock of no
 	// zone in its local zone, the agent's own, or in UTC
 	// (learn.Tracker.SetAppZone), read with its name where the agent's TZ or
@@ -4837,6 +4844,42 @@ func (p *Proxy) TakeRecordedBegin(at time.Time) {
 }
 
 var _ agent.RecordedBeginTaker = (*Proxy)(nil)
+
+// GiveTestIncoming gives the learn step the requests the next client test's
+// recording holds (agent.TestIncomingGiver; learn.Tracker.GiveIncoming),
+// under the proven switch.
+func (p *Proxy) GiveTestIncoming(test string, recorded []models.TestIncoming) {
+	if !provenswitch.On() {
+		return
+	}
+	reqs := make([]learn.IncomingRequest, 0, len(recorded))
+	for _, r := range recorded {
+		reqs = append(reqs, learn.IncomingHTTP(r.Case, r.At, r.URL, r.Header))
+	}
+	p.learnTracker.GiveIncoming(test, reqs)
+}
+
+var _ agent.TestIncomingGiver = (*Proxy)(nil)
+
+// WatchIncoming is what the agent's ingress tells of each HTTP request the
+// application is sent, as it reads it and before it hands it on (its URL,
+// as a recorded test case holds it, and headers): nil where the learn step
+// reads no client test's incoming requests (not keploy mock, or keploy mock
+// without record-requests). Asking for it says the agent sees them
+// (learn.Tracker.SetIncomingSeen): an agent whose ingress never asks reads
+// a client test's incoming requests as a place it could not read, which
+// binds nothing.
+func (p *Proxy) WatchIncoming() func(url string, header map[string]string, at time.Time) {
+	if !p.readsIncoming {
+		return nil
+	}
+	p.learnTracker.SetIncomingSeen(true)
+	return func(url string, header map[string]string, at time.Time) {
+		if provenswitch.On() {
+			p.learnTracker.Incoming(learn.IncomingHTTP("", at, url, header))
+		}
+	}
+}
 
 // SetAppClock makes the learn step read the app's clock through f
 // (agent.AppClockSetter).

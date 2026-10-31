@@ -892,7 +892,7 @@ func TestATestBegunOutOfItsRecordedOrderEndsTheRoundsLearnStep(t *testing.T) {
 			ctx := context.Background()
 			require.NoError(t, a.MockOutgoing(ctx, models.OutgoingOptions{Learn: c.learn}))
 			require.NoError(t, a.SetRecordedWindows(ctx, c.windows))
-			require.NoError(t, a.SetTestBegins(ctx, c.began, nil))
+			require.NoError(t, a.SetTestBegins(ctx, models.TestBeginsReq{Begins: c.began}))
 			claimSelf(t, a)
 			for i, name := range c.begins {
 				p.mu.Lock()
@@ -940,7 +940,7 @@ func TestATestBegunOutOfItsRecordedOrderEndsTheRoundsLearnStep(t *testing.T) {
 		session := func() {
 			require.NoError(t, a.MockOutgoing(ctx, models.OutgoingOptions{Learn: true}))
 			require.NoError(t, a.SetRecordedWindows(ctx, recorded))
-			require.NoError(t, a.SetTestBegins(ctx, began, nil))
+			require.NoError(t, a.SetTestBegins(ctx, models.TestBeginsReq{Begins: began}))
 			claimSelf(t, a)
 		}
 		run := func(name string) {
@@ -2127,16 +2127,25 @@ func TestStoredMocksHandTheProxyWhereTheAppsClocksRunBegan(t *testing.T) {
 }
 
 // recBeginProxy is a wireProxy that takes a test's recorded begin
-// (coreAgent.RecordedBeginTaker), and says in which order it was given it and
-// opened the test's capture window.
+// (coreAgent.RecordedBeginTaker) and recorded requests
+// (coreAgent.TestIncomingGiver), and says in which order it was given them
+// and opened the test's capture window.
 type recBeginProxy struct {
 	*wireProxy
-	order []string
-	taken []time.Time
+	order    []string
+	taken    []time.Time
+	incoming map[string][]models.TestIncoming
 }
 
 func (p *recBeginProxy) TakeRecordedBegin(at time.Time) {
 	p.order, p.taken = append(p.order, "recorded begin"), append(p.taken, at)
+}
+
+func (p *recBeginProxy) GiveTestIncoming(test string, recorded []models.TestIncoming) {
+	if p.incoming == nil {
+		p.incoming = map[string][]models.TestIncoming{}
+	}
+	p.order, p.incoming[test] = append(p.order, "incoming"), recorded
 }
 
 func (p *recBeginProxy) ContinueTestErrorCapture() {
@@ -2145,25 +2154,28 @@ func (p *recBeginProxy) ContinueTestErrorCapture() {
 }
 
 // A replayed test's begin gives the proxy's learn step the instant the test
-// began at in its recording, before the test's capture window opens (the
-// tracker begins the test with it): a test the recording lists no begin of
-// gives none.
-func TestABeginGivesTheLearnStepItsRecordedBegin(t *testing.T) {
+// began at in its recording, and the requests its recording holds, before
+// the test's capture window opens (the tracker begins the test with them): a
+// test the recording lists no begin or request of gives none, never the
+// previous test's.
+func TestABeginGivesTheLearnStepItsRecordedBeginAndRequests(t *testing.T) {
 	a, wp := wireAgent(t, models.MODE_TEST)
 	p := &recBeginProxy{wireProxy: wp}
 	a.Proxy = p
 	ctx := context.Background()
 	claimSelf(t, a)
 	at := time.Date(2026, 10, 22, 11, 14, 15, 0, time.UTC)
-	require.NoError(t, a.SetTestBegins(ctx, map[string]time.Time{"o::TestA": at}, nil))
+	reqs := []models.TestIncoming{{Case: "test-3", At: at.Add(time.Second), URL: "http://app/run", Header: map[string]string{"Authorization": "Bearer t"}}}
+	require.NoError(t, a.SetTestBegins(ctx, models.TestBeginsReq{Begins: map[string]time.Time{"o::TestA": at}, Incoming: map[string][]models.TestIncoming{"o::TestA": reqs}}))
 	_, serr := a.ProvenBegin(ctx, begin("TestA"))
 	require.Nil(t, serr)
 	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", Outcome: models.ScopeOutcomePassed})
 	require.Nil(t, serr)
 	_, serr = a.ProvenBegin(ctx, begin("TestB"))
 	require.Nil(t, serr)
-	require.Equal(t, []string{"recorded begin", "open", "recorded begin", "open"}, p.order)
+	require.Equal(t, []string{"recorded begin", "incoming", "open", "recorded begin", "incoming", "open"}, p.order)
 	require.Equal(t, []time.Time{at, {}}, p.taken)
+	require.Equal(t, map[string][]models.TestIncoming{"o::TestA": reqs, "o::TestB": nil}, p.incoming)
 }
 
 // A begin opens the test's capture window, where the proxy's learn tracker
@@ -2262,7 +2274,7 @@ func TestAClientTestsFirstCallHasAWindowOnTheClockItsBeginMoved(t *testing.T) {
 	ctx := context.Background()
 	claimSelf(t, a)
 	recBegan := time.Date(2026, 10, 22, 11, 14, 15, 0, time.UTC)
-	require.NoError(t, a.SetTestBegins(ctx, map[string]time.Time{"o::TestStampAnEvent": recBegan}, nil))
+	require.NoError(t, a.SetTestBegins(ctx, models.TestBeginsReq{Begins: map[string]time.Time{"o::TestStampAnEvent": recBegan}}))
 	_, serr := a.ProvenBegin(ctx, begin("TestStampAnEvent"))
 	require.Nil(t, serr)
 	wp.mu.Lock()
@@ -2286,7 +2298,7 @@ func TestABeginWhoseClockCannotMoveOpensNoWindow(t *testing.T) {
 	a, p := wireAgent(t, models.MODE_TEST)
 	ctx := context.Background()
 	claimSelf(t, a)
-	require.NoError(t, a.SetTestBegins(ctx, map[string]time.Time{"o::TestA": time.Date(2026, 10, 22, 11, 14, 15, 0, time.UTC)}, nil))
+	require.NoError(t, a.SetTestBegins(ctx, models.TestBeginsReq{Begins: map[string]time.Time{"o::TestA": time.Date(2026, 10, 22, 11, 14, 15, 0, time.UTC)}}))
 	_, serr := a.ProvenBegin(ctx, begin("TestA"))
 	require.NotNil(t, serr, "a begin whose clock cannot move")
 	p.mu.Lock()

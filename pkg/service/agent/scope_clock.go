@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 )
@@ -79,11 +80,13 @@ var ErrNoTestClock = errors.New("this keploy agent freezes the run's clock but c
 var ErrNoRealTestClock = errors.New("this keploy agent freezes the run's clock but cannot put it on real time for a test that uses mock.real")
 
 // SetTestBegins installs when each test of the replayed recording began, by
-// test name, and the mock.real destinations each test's recording lists
-// (real): those tests run on the real clock. The CLI installs them for a
-// replay session, like the scope table; a new session clears them
-// (resetScopeState).
-func (a *Agent) SetTestBegins(_ context.Context, begins map[string]time.Time, real map[string][]string) error {
+// test name, the mock.real destinations each test's recording lists (real:
+// those tests run on the real clock), and the requests each test's recording
+// holds (incoming: the learn step reads them as a client test's given place,
+// TestIncomingGiver). The CLI installs them for a replay session, like the
+// scope table; a new session clears them (resetScopeState).
+func (a *Agent) SetTestBegins(_ context.Context, req models.TestBeginsReq) error {
+	begins, real := req.Begins, req.Real
 	if provenswitch.On() && TimeFile() != "" {
 		if _, ok := ActiveHooks.(TestClock); !ok {
 			return ErrNoTestClock
@@ -104,6 +107,7 @@ func (a *Agent) SetTestBegins(_ context.Context, begins map[string]time.Time, re
 		}
 		a.testReal[test] = slices.Clone(dests)
 	}
+	a.testIncoming = maps.Clone(req.Incoming)
 	a.scopeMu.Unlock()
 	return nil
 }

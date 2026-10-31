@@ -4846,18 +4846,18 @@ func (a *AgentClient) PushProvenTable(ctx context.Context, table, pool map[strin
 }
 
 // PushTestBegins hands the agent when each test of the replayed recording
-// began, so it moves the run's clock per test (models.TestBeginsReq). They
-// are given again to a restarted agent, like the scope table. An agent that
-// cannot take them is an error: the tests would run on another clock than
-// their recording's.
-func (a *AgentClient) PushTestBegins(ctx context.Context, begins map[string]time.Time, real map[string][]string) (retErr error) {
+// began, so it moves the run's clock per test, with the requests each test's
+// recording holds (models.TestBeginsReq). They are given again to a
+// restarted agent, like the scope table. An agent that cannot take them is an
+// error: the tests would run on another clock than their recording's.
+func (a *AgentClient) PushTestBegins(ctx context.Context, tb models.TestBeginsReq) (retErr error) {
 	defer func() {
 		if retErr == nil && a.session().recording() {
-			recorded, recordedReal := maps.Clone(begins), maps.Clone(real)
-			a.session().record(stepTestBegins, func(c context.Context) error { return a.PushTestBegins(c, recorded, recordedReal) })
+			recorded := models.TestBeginsReq{Begins: maps.Clone(tb.Begins), Real: maps.Clone(tb.Real), Incoming: maps.Clone(tb.Incoming)}
+			a.session().record(stepTestBegins, func(c context.Context) error { return a.PushTestBegins(c, recorded) })
 		}
 	}()
-	body, err := json.Marshal(models.TestBeginsReq{Begins: begins, Real: real})
+	body, err := json.Marshal(tb)
 	if err != nil {
 		return fmt.Errorf("failed to marshal the tests' recorded begins: %w", err)
 	}

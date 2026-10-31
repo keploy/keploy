@@ -200,6 +200,9 @@ type Agent struct {
 	testBegunAt  map[string]int       // keploy test, proven switch: each begun test case's place in the order they began (exact_proven.go)
 	testBg       *testBackground      // keploy test, proven switch: the set's background under the background rules, nil for today's (exact_proven.go)
 	loadedMocks  int                  // replay: count of mocks stored, for /agent/mock/stats
+	// testIncoming is, by test name, the requests its recording holds
+	// (replay; SetTestBegins).
+	testIncoming map[string][]models.TestIncoming
 	// replay: the tests allowed to run (SetScopeGate); nil = every test runs.
 	// Cleared by resetScopeState.
 	gateRun    map[string]struct{}
@@ -670,6 +673,7 @@ func (a *Agent) resetScopeState() {
 	// the clock's holder is given back by releaseTestClock, before this.
 	a.testBegins = nil
 	a.testReal = nil
+	a.testIncoming = nil
 	// keploy test's pool belongs to the set that staged it.
 	a.testPool = nil
 	a.testWorker, a.testBegun = nil, nil

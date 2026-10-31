@@ -3,6 +3,7 @@ package proxy
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net"
@@ -1196,6 +1197,69 @@ func TestAMockModeAgentsLearnStepReadsClientTests(t *testing.T) {
 		if got := p.learnTracker.ClientTests(); got != mock || p.learnTracker.Drifts().ClientTests() != mock || p.ClientTests() != mock {
 			t.Fatalf("mock mode %v: client tests %v", mock, got)
 		}
+	}
+}
+
+// keploy mock's agent that sees the application's incoming requests (its
+// record-requests) reads a client test's as the test's given place: its
+// ingress is told to watch each request (WatchIncoming), whose URL and
+// headers reach the learn step, beside those the test's recording holds
+// (GiveTestIncoming), under the proven switch; a claim of the token the
+// test's harness signed is found there. An agent of keploy test, or of
+// keploy mock without record-requests, has its ingress watch nothing, and
+// the place could not be read.
+func TestAMockModeAgentReadsAClientTestsIncomingRequests(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	b64 := base64.RawURLEncoding.EncodeToString
+	bearer := func(authTime string) map[string]string {
+		return map[string]string{"Authorization": "Bearer " + b64([]byte(`{"alg":"HS256","typ":"JWT"}`)) + "." +
+			b64([]byte(`{"sid":"e2e-go-session","auth_time":`+authTime+`}`)) + ".c2lnbmF0dXJl"}
+	}
+	rec := time.Date(2026, 10, 30, 15, 13, 36, 0, time.UTC)
+	for _, c := range []struct{ mock, requests bool }{{true, true}, {true, false}, {false, true}} {
+		t.Run(fmt.Sprintf("mock mode %v, record-requests %v", c.mock, c.requests), func(t *testing.T) {
+			cfg := config.New()
+			cfg.Agent.MockMode, cfg.Agent.RecordRequests = c.mock, c.requests
+			p := New(zap.NewNop(), fakeDestInfo{}, cfg)
+			watch := p.WatchIncoming()
+			if want := c.mock && c.requests; (watch != nil) != want {
+				t.Fatalf("the ingress is told to watch: %v, want %v", watch != nil, want)
+			}
+			p.GiveTestIncoming("o::TestRun", []models.TestIncoming{{Case: "test-3", At: rec, URL: "http://app/run", Header: bearer("1793373215")}})
+			p.learnTracker.Begin()
+			if watch != nil {
+				watch("http://app/run", bearer("1793387031"), time.Now())
+			}
+			var place *learn.Earlier
+			_, earlier, _, _ := p.learnTracker.Test()
+			for i := range earlier {
+				if earlier[i].Incoming {
+					place = &earlier[i]
+				}
+			}
+			if !c.mock {
+				if place != nil {
+					t.Fatalf("keploy test's agent has a client test's place: %+v", *place)
+				}
+				return
+			}
+			if place == nil {
+				t.Fatalf("no incoming place in %+v", earlier)
+			}
+			if !c.requests {
+				if place.Unread == "" || len(place.Seen) != 0 {
+					t.Fatalf("record-requests off: %+v, want a place that could not be read", *place)
+				}
+				return
+			}
+			found := false
+			for _, s := range place.Seen {
+				found = found || (s.Leaf.Path == "header.Authorization{jwt}.auth_time" && s.Live == "1793387031")
+			}
+			if place.Unread != "" || place.Mock != "incoming request test-3 of test o::TestRun" || !found {
+				t.Fatalf("the test's place: %+v", *place)
+			}
+		})
 	}
 }
 

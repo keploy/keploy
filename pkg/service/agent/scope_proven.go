@@ -796,11 +796,17 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 			// in its recording, the instant its begin moved the app's clock
 			// to (coreAgent.RecordedBeginTaker): given before the window
 			// opens, so the test begins with it.
+			// The requests the test's recording holds too
+			// (coreAgent.TestIncomingGiver): read beside those the
+			// application is sent in this run as the test's given place.
+			a.scopeMu.Lock()
+			began, incoming := a.testBegins[id], a.testIncoming[id]
+			a.scopeMu.Unlock()
 			if r, ok := a.Proxy.(coreAgent.RecordedBeginTaker); ok {
-				a.scopeMu.Lock()
-				began := a.testBegins[id]
-				a.scopeMu.Unlock()
 				r.TakeRecordedBegin(began)
+			}
+			if g, ok := a.Proxy.(coreAgent.TestIncomingGiver); ok {
+				g.GiveTestIncoming(id, incoming)
 			}
 			// Misses made from here, and those made since the previous test
 			// ended (or before the first test), are this test's: a miss

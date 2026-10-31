@@ -3,6 +3,7 @@ package mock
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -38,11 +39,12 @@ type beginsPusher struct {
 	Instrumentation
 	begins map[string]time.Time
 	real   map[string][]string
+	in     map[string][]models.TestIncoming
 	calls  int
 }
 
-func (p *beginsPusher) PushTestBegins(_ context.Context, begins map[string]time.Time, real map[string][]string) error {
-	p.begins, p.real = begins, real
+func (p *beginsPusher) PushTestBegins(_ context.Context, req models.TestBeginsReq) error {
+	p.begins, p.real, p.in = req.Begins, req.Real, req.Incoming
 	p.calls++
 	return nil
 }
@@ -120,5 +122,51 @@ func TestReplayRefusesWhenTheAgentCannotTakeTheBegins(t *testing.T) {
 	}
 	if runs, _ := instr.counts(); runs != 0 {
 		t.Fatalf("the test command ran %d times after the replay was refused", runs)
+	}
+}
+
+// Replay hands the agent, by test, the requests the application was sent
+// while each test was open in its recording (its mapping's cases, read from
+// the set's test cases), earliest first, URL and headers alone, so the
+// agent's learn step reads them as the test's given place. A case the store
+// does not hold, or of another kind, is left out; a test with none, a
+// recording with no test case, or no test-case store gives none.
+func TestPushTestBeginsSendsEachTestsRecordedRequests(t *testing.T) {
+	t0 := time.Date(2026, 10, 30, 15, 13, 36, 0, time.UTC)
+	auth := map[string]string{"Authorization": "Bearer t-1"}
+	db := &memTestDB{existing: []*models.TestCase{
+		{Name: "test-2", Kind: models.HTTP, HTTPReq: models.HTTPReq{Method: "POST", URL: "http://app/b", Header: auth, Body: "{}", Timestamp: t0.Add(2 * time.Second)}},
+		{Name: "test-1", Kind: models.HTTP, HTTPReq: models.HTTPReq{Method: "GET", URL: "http://app/a", Header: auth, Timestamp: t0.Add(time.Second)}},
+		{Name: "test-9", Kind: models.HTTP, HTTPReq: models.HTTPReq{Method: "GET", URL: "http://app/other", Timestamp: t0}},
+		{Name: "grpc-1", Kind: models.GRPC_EXPORT},
+	}}
+	mapping := &models.Mapping{TestCases: []models.MappedTestCase{
+		{ID: "pkg::TestA", At: t0, Cases: []string{"test-2", "test-1", "grpc-1", "gone-1"}},
+		{ID: "pkg::TestB", At: t0},
+	}}
+	p := &beginsPusher{}
+	m := &mockService{logger: zap.NewNop(), instrumentation: p, mappingDB: setTableDB{mapping: mapping}, testDB: db}
+	if err := m.pushTestBegins(context.Background(), "rec"); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string][]models.TestIncoming{"pkg::TestA": {
+		{Case: "test-1", At: t0.Add(time.Second), URL: "http://app/a", Header: auth},
+		{Case: "test-2", At: t0.Add(2 * time.Second), URL: "http://app/b", Header: auth},
+	}}
+	if !reflect.DeepEqual(p.in, want) {
+		t.Fatalf("pushed requests %+v, want %+v", p.in, want)
+	}
+
+	for name, m := range map[string]*mockService{
+		"no test-case store": {logger: zap.NewNop(), instrumentation: p, mappingDB: setTableDB{mapping: mapping}},
+		"no test case":       {logger: zap.NewNop(), instrumentation: p, mappingDB: setTableDB{mapping: &models.Mapping{TestCases: []models.MappedTestCase{{ID: "pkg::TestA", At: t0}}}}, testDB: db},
+	} {
+		p.in = nil
+		if err := m.pushTestBegins(context.Background(), "rec"); err != nil {
+			t.Fatal(err)
+		}
+		if p.in != nil {
+			t.Fatalf("%s: pushed requests %+v", name, p.in)
+		}
 	}
 }

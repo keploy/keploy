@@ -323,6 +323,24 @@ type TestBeginsReq struct {
 	// a test runs on the real clock, not at its recorded begin (design v14
 	// §3.4, F3). Absent when no test lists any.
 	Real map[string][]string `json:"real,omitempty"`
+	// Incoming is, by test, the requests keploy mock recorded the
+	// application being sent while the test was open (MappedTestCase.Cases),
+	// earliest first: in a client test the agent reads them, beside the
+	// requests the application is sent in this run, as the test's given
+	// place (learn.IncomingGiven). Absent when the recording kept none.
+	Incoming map[string][]TestIncoming `json:"incoming,omitempty"`
+}
+
+// TestIncoming is one request the application was sent while a keploy mock
+// test was open in its recording (a test case of the set's): its URL and
+// headers as recorded (HTTPReq.URL, HTTPReq.Header), never its body.
+type TestIncoming struct {
+	// Case is the test case's name.
+	Case string `json:"case"`
+	// At is when the application was sent it (HTTPReq.Timestamp).
+	At     time.Time         `json:"at"`
+	URL    string            `json:"url"`
+	Header map[string]string `json:"header,omitempty"`
 }
 
 type SetTable struct {

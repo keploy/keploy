@@ -1389,6 +1389,11 @@ func TestTrackerGivesAClientTestItsIncomingRequests(t *testing.T) {
 	if e, ok := incoming(tr); ok {
 		t.Fatalf("a test keploy mock gave no recorded requests has a place: %+v", e)
 	}
+	tr.GiveIncoming("TestNone", nil)
+	tr.Begin()
+	if e, ok := incoming(tr); ok {
+		t.Fatalf("a test keploy mock gave an empty list of recorded requests has a place: %+v", e)
+	}
 	tr.GiveIncoming("TestNext", []IncomingRequest{in("test-7", "1793373215")})
 	tr.Begin()
 	if e, ok := incoming(tr); !ok || e.Unread == "" || len(e.Seen) != 0 {

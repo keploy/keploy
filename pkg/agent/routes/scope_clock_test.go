@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/service/agent"
 	"go.uber.org/zap"
@@ -23,11 +24,11 @@ type beginsSvc struct {
 	err    error
 }
 
-func (s *beginsSvc) SetTestBegins(_ context.Context, begins map[string]time.Time, real map[string][]string) error {
+func (s *beginsSvc) SetTestBegins(_ context.Context, req models.TestBeginsReq) error {
 	if s.err != nil {
 		return s.err
 	}
-	s.begins, s.real = begins, real
+	s.begins, s.real = req.Begins, req.Real
 	return nil
 }
 

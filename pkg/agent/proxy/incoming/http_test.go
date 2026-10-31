@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -1343,5 +1344,87 @@ func TestBothIngressLoopsCountAnExchangeAPauseCutMidBody(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// Both HTTP/1 loops tell the watcher (WatchRequests) of each request as they
+// read it, before the app is handed it: its URL as a recorded test case
+// holds it, its headers joined as a test case joins them. keploy mock's learn
+// step reads a client test's incoming requests so (proxy.WatchIncoming). A
+// manager with no watcher tells nothing, and relays as before.
+func TestBothIngressLoopsTellTheWatcherOfARequestBeforeTheApp(t *testing.T) {
+	stubIngressPaused(t, func() bool { return false })
+	stubCaptureHook(t, func(context.Context, *zap.Logger, chan *models.TestCase, *http.Request, *http.Response, time.Time, time.Time, models.IncomingOptions, bool, bool, uint16) {
+	})
+	type told struct {
+		url    string
+		header map[string]string
+	}
+	for _, mode := range []string{"sync", "zero-copy", "zero-copy, no watcher"} {
+		t.Run(mode, func(t *testing.T) {
+			seen := make(chan told, 4)
+			// The app answers only once the watcher was told: a request
+			// handed on first is answered 500.
+			ln, err := net.Listen("tcp4", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = ln.Close() })
+			go func() {
+				c, err := ln.Accept()
+				if err != nil {
+					return
+				}
+				defer c.Close()
+				if _, err := http.ReadRequest(bufio.NewReader(c)); err != nil {
+					return
+				}
+				status := "200 OK"
+				if len(seen) == 0 && mode != "zero-copy, no watcher" {
+					status = "500 Internal Server Error"
+				}
+				_, _ = io.WriteString(c, "HTTP/1.1 "+status+"\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+			}()
+			pm := &IngressProxyManager{logger: zap.NewNop(), tcChan: make(chan *models.TestCase, 4), synchronous: mode == "sync", samplingSem: make(chan struct{}, 1)}
+			t.Cleanup(pm.captures.Wait)
+			if mode != "zero-copy, no watcher" {
+				pm.WatchRequests(func(url string, header map[string]string, _ time.Time) { seen <- told{url, header} })
+			}
+			client, server := net.Pipe()
+			t.Cleanup(func() { _ = client.Close(); _ = server.Close() })
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				pm.handleHttp1Connection(ctx, server, ln.Addr().String(), pm.logger, pm.tcChan, make(chan struct{}, 1), 8080)
+			}()
+			go func() {
+				_, _ = io.WriteString(client, "POST /run/7?x=1 HTTP/1.1\r\nHost: localhost:43900\r\nAuthorization: Bearer t-1\r\nX-Two: a\r\nX-Two: b\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+			}()
+			resp, err := http.ReadResponse(bufio.NewReader(client), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _ = io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("the app was handed the request before the watcher was told (status %d)", resp.StatusCode)
+			}
+			_ = client.Close()
+			select {
+			case <-done:
+			case <-ctx.Done():
+				t.Fatal("handleHttp1Connection did not return")
+			}
+			if mode == "zero-copy, no watcher" {
+				return
+			}
+			got := <-seen
+			want := told{"http://localhost:43900/run/7?x=1", map[string]string{"Authorization": "Bearer t-1", "X-Two": "a,b", "Content-Length": "2", "Connection": "close"}}
+			if got.url != want.url || !reflect.DeepEqual(got.header, want.header) || len(seen) != 0 {
+				t.Fatalf("the watcher was told %+v (and %d more), want %+v once", got, len(seen), want)
+			}
+		})
 	}
 }

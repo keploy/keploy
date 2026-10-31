@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/utils"
 	"go.keploy.io/server/v3/utils/plaintcp"
 
@@ -48,6 +50,8 @@ type IngressProxyManager struct {
 	tcChan   chan *models.TestCase
 	mockMode bool
 	requests bool
+	// watch is told of each HTTP/1 request the app is sent (WatchRequests).
+	watch atomic.Pointer[RequestWatcher]
 	// incomingOpts is read by ingress capture goroutines on every
 	// captured request (CaptureHook call sites in http.go) and written
 	// by IngressProxyManager.Start on every recorder (re)connect. Pre-
@@ -131,6 +135,34 @@ func (pm *IngressProxyManager) loadIncomingOpts() models.IncomingOptions {
 		return *p
 	}
 	return models.IncomingOptions{}
+}
+
+// RequestWatcher is told of an HTTP request the app is sent: its URL, as a
+// recorded test case holds it ("http://<host><request URI>"), its headers,
+// each name's lines joined as a test case joins them, and when it came.
+type RequestWatcher func(url string, header map[string]string, at time.Time)
+
+// WatchRequests has w told of each HTTP/1 request the Go forwarder reads,
+// before it hands it on to the app (the proxy's learn step reads a keploy
+// mock test's incoming requests so: proxy.WatchIncoming); nil stops it. An
+// HTTP/2 or gRPC request, and one an external ingress hook (SetIngressHook)
+// reads, is not told.
+func (pm *IngressProxyManager) WatchRequests(w RequestWatcher) {
+	if w == nil {
+		pm.watch.Store(nil)
+		return
+	}
+	pm.watch.Store(&w)
+}
+
+// sawRequest tells the watcher (WatchRequests), if any, of req, which came
+// at at.
+func (pm *IngressProxyManager) sawRequest(req *http.Request, at time.Time) {
+	w := pm.watch.Load()
+	if w == nil || req == nil {
+		return
+	}
+	(*w)(fmt.Sprintf("http://%s%s", req.Host, req.URL.RequestURI()), pkg.ToYamlHTTPHeader(req.Header), at)
 }
 
 // SetIngressHook replaces the default Go TCP forwarder with an external

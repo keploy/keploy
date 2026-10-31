@@ -362,6 +362,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		if !reqTimestamp.After(iterStart) {
 			reqTimestamp = iterStart
 		}
+		pm.sawRequest(req, reqTimestamp)
 
 		// streamingExchange tracks whether EITHER side (request or response)
 		// lacked a concrete Content-Length or used Transfer-Encoding:
@@ -1189,6 +1190,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		if !reqTimestamp.After(iterStart) {
 			reqTimestamp = iterStart
 		}
+		pm.sawRequest(req, reqTimestamp)
 
 		// Sampling-tracked demote checks. The user-stated invariant is:
 		// the sampling slot budget applies only to non-streaming

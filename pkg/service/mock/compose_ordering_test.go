@@ -227,8 +227,8 @@ func (f *composeInstr) PushProvenTable(_ context.Context, table, pool map[string
 
 // PushTestBegins takes the tests' recorded begins (TestBeginsPusher), or
 // fails with beginsErr.
-func (f *composeInstr) PushTestBegins(_ context.Context, begins map[string]time.Time, _ map[string][]string) error {
-	f.begins = begins
+func (f *composeInstr) PushTestBegins(_ context.Context, req models.TestBeginsReq) error {
+	f.begins = req.Begins
 	return f.beginsErr
 }
 

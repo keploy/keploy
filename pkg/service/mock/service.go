@@ -119,9 +119,10 @@ type ScopeGatePusher interface {
 
 // TestBeginsPusher is an optional Instrumentation extension: under the proven
 // switch Replay hands the agent when each test of the recording began, so the
-// agent moves the run's clock per test (design v14 §3.4).
+// agent moves the run's clock per test (design v14 §3.4), with the requests
+// each test's recording holds (models.TestBeginsReq.Incoming).
 type TestBeginsPusher interface {
-	PushTestBegins(ctx context.Context, begins map[string]time.Time, real map[string][]string) error
+	PushTestBegins(ctx context.Context, req models.TestBeginsReq) error
 }
 
 type SetPusher interface {

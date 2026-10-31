@@ -563,6 +563,16 @@ type RecordedBeginTaker interface {
 	TakeRecordedBegin(at time.Time)
 }
 
+// TestIncomingGiver is the optional extension implemented by proxies whose
+// learn step reads a keploy mock test's incoming requests as its given place
+// (learn.IncomingGiven): the agent gives it, as the test begins and before
+// the proxy opens it, the requests the test's recording holds
+// (models.TestBeginsReq.Incoming; none for a test whose recording holds
+// none). A proxy that lacks it reads no test's incoming requests.
+type TestIncomingGiver interface {
+	GiveTestIncoming(test string, recorded []models.TestIncoming)
+}
+
 // VariableBinder is the optional extension implemented by proxies that keep
 // the test variables a replay binds: it begins a test's variables with the
 // values its own request gave (false when it holds no table), and reads back

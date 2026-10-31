@@ -246,7 +246,7 @@ func TestTheWireMovesTheClockPerTest(t *testing.T) {
 	require.Nil(t, serr)
 	require.Equal(t, "/tmp/kclk1/t", resp.TimeFile, "the claim names the clock record the run's processes read")
 	b := time.Date(2026, 10, 6, 9, 1, 0, 0, time.UTC)
-	require.NoError(t, a.SetTestBegins(ctx, map[string]time.Time{"o::TestA": b}, nil))
+	require.NoError(t, a.SetTestBegins(ctx, models.TestBeginsReq{Begins: map[string]time.Time{"o::TestA": b}}))
 
 	_, serr = a.ProvenBegin(ctx, begin("TestA"))
 	require.Nil(t, serr)

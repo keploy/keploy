@@ -51,6 +51,26 @@ type IncomingRequest struct {
 	Parts []models.TestRequestPart
 }
 
+// IncomingHTTP is an HTTP request the application was sent (name, the test
+// case keploy recorded it as, "" for one of this run; at, when) as an
+// IncomingRequest: its URL ("url") and each header ("header.<name>", its
+// lines joined as a recorded test case joins them), in the order of their
+// names, so a request recorded and the same request sent in this run give
+// the same parts.
+func IncomingHTTP(name string, at time.Time, url string, header map[string]string) IncomingRequest {
+	r := IncomingRequest{Name: name, At: at, Parts: make([]models.TestRequestPart, 0, len(header)+1)}
+	r.Parts = append(r.Parts, models.TestRequestPart{Name: "url", Recorded: url})
+	names := make([]string, 0, len(header))
+	for k := range header {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	for _, k := range names {
+		r.Parts = append(r.Parts, models.TestRequestPart{Name: "header." + k, Recorded: header[k]})
+	}
+	return r
+}
+
 // incomingUncaptured is why a client test's incoming requests could not be
 // read where the agent saw none of this run's.
 const incomingUncaptured = "keploy did not see the application's incoming requests in this run (record-requests is off, or the agent has no incoming stream), so a value its test harness gave it cannot be told from one it made"

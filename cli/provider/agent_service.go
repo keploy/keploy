@@ -31,6 +31,11 @@ func GetAgent(ctx context.Context, cmd string, cfg *config.Config, logger *zap.L
 	p := proxy.New(logger, h, cfg)
 	ip := incoming.New(logger, h, cfg)
 	p.SetLiveHandler(ip.ServeLive)
+	// keploy mock's learn step reads a client test's incoming requests as
+	// its given place (proxy.WatchIncoming).
+	if w := p.WatchIncoming(); w != nil {
+		ip.WatchRequests(w)
+	}
 
 	instrumentation := agent.New(logger, h, p, client, ip, cfg)
 

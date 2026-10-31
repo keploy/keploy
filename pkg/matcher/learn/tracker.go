@@ -533,13 +533,17 @@ const maxLiveIncoming = 256
 // GiveIncoming gives the next client test (test, its name), before it
 // begins (BeginAt takes it, as it takes RecordedBegin's), the requests its
 // window holds as keploy mock recorded them: its incoming requests'
-// recorded side (IncomingGiven). A test given none has no such place.
+// recorded side (IncomingGiven). A test given none (recorded empty) has no
+// such place, as one never given any.
 func (t *Tracker) GiveIncoming(test string, recorded []IncomingRequest) {
 	if t == nil {
 		return
 	}
 	t.mu.Lock()
-	t.nextIn = &incomingOf{test: test, recorded: append([]IncomingRequest(nil), recorded...)}
+	t.nextIn = nil
+	if len(recorded) > 0 {
+		t.nextIn = &incomingOf{test: test, recorded: append([]IncomingRequest(nil), recorded...)}
+	}
 	t.mu.Unlock()
 }
 
