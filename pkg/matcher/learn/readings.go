@@ -1295,7 +1295,7 @@ func pickUnaccounted(where string) string {
 // for a value that is one read whole. That reading's noise is taken only by
 // sinceWord, as a checked read of one word, and only where exactly one
 // instant of the text changed and every other byte of it is the same in
-// both runs (clockWordIn), the word read alone with every rule of a value:
+// both runs (instantWord), the word read alone with every rule of a value:
 // a word whose other bytes changed too, or that holds two changed reads, is
 // refused there as in the call's window. In a call's own window the word
 // rule searches for such a word as it does for any other, so one F served

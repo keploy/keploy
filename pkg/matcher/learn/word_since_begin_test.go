@@ -231,8 +231,8 @@ func classifyWordAt(dc *DriftCache, f func(time.Time) string, prev time.Duration
 // generate-stop-<UnixNano>") is checked from its test's begin
 // (TestAWordReadInItsCallsWindowIsNeverNoiseWhereAnUntoldServeMayHoldIt). A
 // text more of whose bytes changed, or with two changed reads, stays the
-// noise its call's window learns, and so does the text of a test that is no
-// client test.
+// noise its call's window learns. keploy test (no client test) reads the
+// word as the instant whole: a plain read in its call's window, at its word.
 func TestAClientTestLearnsAWordOfATextReadInItsCallsWindow(t *testing.T) {
 	ns := func(format string) func(time.Time) string {
 		return func(r time.Time) string { return fmt.Sprintf(format, r.UnixNano()) }
@@ -276,12 +276,14 @@ func TestAClientTestLearnsAWordOfATextReadInItsCallsWindow(t *testing.T) {
 			return fmt.Sprintf("job %d waiting", r.UnixNano())
 		}},
 		{"two reads changed", clientTestCache(), func(r time.Time) string { return fmt.Sprintf("a-%d b-%d", r.UnixNano(), r.UnixNano()) }},
-		{"no client test", clockedDrifts(), ns("[E2E] generate-stop-%d")},
 	} {
 		if ln, _ := classifyWordAt(tc.dc, tc.f, -100*time.Millisecond, false); ln.Kind != KindNoise || ln.Read != nil {
 			o, _ := ln.Clock()
 			t.Errorf("%s: %s %s (%s); want the noise its call's window learns", tc.name, ln.Kind, o.String(), ln.Why)
 		}
+	}
+	if ln, _ := classifyWordAt(clockedDrifts(), ns("[E2E] generate-stop-%d"), -100*time.Millisecond, false); !readAtWord(ln, "[E2E] generate-stop-", "") {
+		t.Errorf("no client test: %s Read=%+v (%s); want a plain read in its call's window at its word", ln.Kind, ln.Read, ln.Why)
 	}
 }
 

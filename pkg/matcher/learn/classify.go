@@ -1651,6 +1651,19 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 				ln.Kind, ln.Why = KindUnaccounted, why
 			}
 		}
+		// An instant inside the text is judged as the instant whole
+		// (wordRead) before the order of the places the search went past
+		// decides its noise: read at its word as a read of the clock, a
+		// replay checks it whatever that order, as it checks the instant
+		// whole; refused whole, it refuses the text.
+		if fol != nil && ln.Kind == KindNoise {
+			if word, ok := wordRead(ln, w, leaf); ok {
+				if word.Kind != KindUnaccounted && word.Refuted == "" {
+					word.Refuted = fol.refutedAll()
+				}
+				return word
+			}
+		}
 		// Words the word rule let go in record's full round: noise only
 		// where the recording and F gave the application the places before
 		// the call in the same order (follows.followed); an echo they stood

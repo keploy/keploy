@@ -380,19 +380,31 @@ func TestAReadOfTheClockIsNoLaterThanItsCall(t *testing.T) {
 	// A wall clock of no zone is a read in the application's zone where it
 	// is one there: an application in a zone ahead of UTC writes its read
 	// later than its call in UTC. In UTC alone, or in a zone the application
-	// is not in, it is no read before its call.
+	// is not in, it is no read before its call. Inside a longer text it is
+	// read as the instant whole is: that read at its word, or refused.
 	ist := time.FixedZone("IST", 5*3600+1800)
 	for _, z := range []struct {
 		name  string
 		zone  *time.Location
 		noise bool
 	}{{"the application's zone IST", ist, true}, {"UTC alone", nil, false}, {"the application's zone UTC-5", time.FixedZone("EST", -5*3600), false}} {
-		dc := clockedDrifts()
-		dc.zone = z.zone
-		ln := ClassifyIn(dc, []string{p}, Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: "book " + at.Add(-time.Second+FullRoundLead).In(ist).Format("2006-01-02 15:04:05")}}}, Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: "book " + at.Add(-time.Second).In(ist).Format("2006-01-02 15:04:05")}}}, at,
-			[]Earlier{{Mock: "mock-1", At: at.Add(-time.Second), Payload: payloadOf("mock-1", at.Add(-time.Second)), Own: true, Seen: []Seen{{Side: Request, Leaf: Leaf{Path: "body.at", Noise: "body.at", Type: String, Value: at.Add(-time.Second).In(ist).Format("15:04:05")}, Live: "x", Place: "body.at"}}}}, nil, nil, nil)[0]
-		if (ln.Kind == KindNoise) != z.noise {
-			t.Errorf("an IST wall clock of no zone read just before its call, %s: %s (%s); want noise %v", z.name, ln.Kind, ln.Why, z.noise)
+		book := func(before string) Learned {
+			dc := clockedDrifts()
+			dc.zone = z.zone
+			return ClassifyIn(dc, []string{p}, Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: before + at.Add(-time.Second+FullRoundLead).In(ist).Format("2006-01-02 15:04:05")}}}, Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: before + at.Add(-time.Second).In(ist).Format("2006-01-02 15:04:05")}}}, at,
+				[]Earlier{{Mock: "mock-1", At: at.Add(-time.Second), Payload: payloadOf("mock-1", at.Add(-time.Second)), Own: true, Seen: []Seen{{Side: Request, Leaf: Leaf{Path: "body.at", Noise: "body.at", Type: String, Value: at.Add(-time.Second).In(ist).Format("15:04:05")}, Live: "x", Place: "body.at"}}}}, nil, nil, nil)[0]
+		}
+		ln, whole := book("book "), book("")
+		if !z.noise {
+			if ln.Kind != KindUnaccounted || whole.Kind != KindUnaccounted {
+				t.Errorf("an IST wall clock of no zone read just before its call, %s: %s (%s), whole %s (%s); want both refused", z.name, ln.Kind, ln.Why, whole.Kind, whole.Why)
+			}
+			continue
+		}
+		o, _ := ln.Clock()
+		o.Word = models.ClockWord{}
+		if wo, ok := whole.Clock(); !readAtWord(ln, "book ", "") || !plainRead(whole) || !ok || o != wo {
+			t.Errorf("an IST wall clock of no zone read just before its call, %s: %s Read=%+v (%s), whole %s Read=%+v; want the whole's plain read at its word", z.name, ln.Kind, ln.Read, ln.Why, whole.Kind, whole.Read)
 		}
 	}
 }

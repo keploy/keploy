@@ -370,7 +370,7 @@ func TestAnInstantIsJudgedAsTheInstantWholeWhereverItStands(t *testing.T) {
 		{"in a base64 cursor", cursor(base64.StdEncoding)},
 		{"in a base64url cursor", cursor(base64.RawURLEncoding)},
 		{"in a JSON string's escapes", func(s string) string { return `{\"since\":\"` + s + `\",\"page\":2}` }},
-		{"with its '+' escaped", func(s string) string { return "since " + strings.ReplaceAll(s, "+", `+`) + " page 2" }},
+		{"with its '+' escaped", func(s string) string { return "since " + strings.ReplaceAll(s, "+", `\u002b`) + " page 2" }},
 	}
 	type spelling struct {
 		name    string
@@ -486,4 +486,185 @@ func unplaced(why string) string {
 		return why
 	}
 	return why[:i] + why[j+1:]
+}
+
+// readAtWord reports whether ln is a plain read of the clock at the word of
+// its recorded text between before and after, the text whole in Recorded
+// and Live: what the one rule for an instant wherever it stands learns a
+// text whose one changed instant is, whole, a plain read of the clock
+// (wordRead).
+func readAtWord(ln Learned, before, after string) bool {
+	o, ok := ln.Clock()
+	rec := ln.Recorded.Value
+	if !plainRead(ln) || !ok || !strings.HasPrefix(rec, before) || !strings.HasSuffix(rec, after) || len(rec) <= len(before)+len(after) {
+		return false
+	}
+	return o.Word == models.ClockWordOf(rec, len(before), len(rec)-len(after))
+}
+
+// asWhole says how in, a text holding a changed instant, is not learned as
+// whole, the same instant whole, is: "" where it is. Refused, the text is
+// refused for the instant whole's reason (keploy test names where the
+// instant stands before it; a client test names it in the reason's own
+// place); learned whole as a read of the clock, plain or plus an offset,
+// the text is learned as that read at the instant's word.
+func asWhole(in, whole Learned) string {
+	if in.Kind != whole.Kind {
+		return fmt.Sprintf("learned %s (%s); the instant whole %s (%s)", in.Kind, in.Why, whole.Kind, whole.Why)
+	}
+	switch in.Kind {
+	case KindUnaccounted:
+		if in.Why == whole.Why || unplaced(in.Why) == unplaced(whole.Why) && strings.Contains(in.Why, "(an instant, ") ||
+			strings.HasPrefix(in.Why, "it holds an instant (") && strings.HasSuffix(in.Why, "which keploy refuses as it refuses that instant whole: "+whole.Why) {
+			return ""
+		}
+		return fmt.Sprintf("refused %q; the instant whole %q", in.Why, whole.Why)
+	case KindClockRead, KindClockOffset:
+		wo, io := whole.Read, in.Read
+		if in.Kind == KindClockOffset {
+			wo, io = whole.Offset, in.Offset
+		}
+		if wo == nil || io == nil || io.Word.IsZero() {
+			return fmt.Sprintf("learned %s %+v, no read at a word; the instant whole %+v", in.Kind, io, wo)
+		}
+		got := *io
+		got.Word = models.ClockWord{}
+		if got != *wo {
+			return fmt.Sprintf("learned %+v at its word; the instant whole %+v", got, *wo)
+		}
+		return ""
+	}
+	return fmt.Sprintf("learned %s (%s); the row wants a read of the clock or a refusal", in.Kind, in.Why)
+}
+
+// api-server's poll inside a filter string ("dirty<=<now - 2s>;shard=7",
+// "<now - 60s>"), with and without an answer the test was served in F's
+// second beside it (mock-1070's claimedAt, a moment record's full round
+// saw that a pick from it may give), gets the outcome the poll whole gets,
+// in keploy mock's client tests and in keploy test, under the rule a copy
+// follows its source and without it, in every zone ("+05:30", "-03:30",
+// "Z", "+00:00", "+01:00", Postgres's "+00"): refused for the whole's
+// reason, or learned as the whole's read at its word.
+func TestAPollInsideAFilterGetsTheWholePollsOutcome(t *testing.T) {
+	const (
+		dirty = "body.cmd.query.$and.0.$or.0.dirtyAt.$lte"
+		stamp = "body.cursor.firstBatch.0.claimedAt.$date.$numberLong"
+	)
+	payload := func(name string, at time.Time) Raw {
+		return RawOf(&models.Mock{Name: name, Spec: models.MockSpec{ReqTimestampMock: at, ResTimestampMock: at.Add(time.Millisecond)}}, true).ServedAs(1)
+	}
+	began := time.Date(2026, 10, 31, 10, 52, 14, 430_000_000, time.UTC)
+	call := time.Date(2026, 10, 31, 10, 52, 15, 438_000_000, time.UTC)
+	beganF, callF := began.Add(72*time.Second), call.Add(73*time.Second+600*time.Millisecond)
+	w := (&Window{Rec: Span{From: call.Add(-100 * time.Millisecond), To: call, Began: began}, F: Span{From: callF.Add(-100 * time.Millisecond), To: callF, Began: beganF}}).ComparesOffsets()
+	type classify = func(dc *DriftCache, drift []string, live, rec Shape, at time.Time, earlier []Earlier, raw []Raw, resp []Leaf, w *Window, given GivenEarlier) []Learned
+	rules := map[string]classify{"without the rule a copy follows its source": ClassifyGiven, "under the rule a copy follows its source": ClassifyFollowing}
+	learn := func(cl classify, client bool, zone *time.Location, value func(time.Time) string, ago time.Duration, pick bool) Learned {
+		tr := NewTracker()
+		tr.SetClientTests(client)
+		tr.Begin()
+		n, _, _, _ := tr.Test()
+		if pick {
+			at := call.Add(-500 * time.Millisecond)
+			tr.Served(n, Earlier{Mock: "mock-1070", At: at, Own: true, Payload: payload("mock-1070", at), Seen: []Seen{
+				{Side: Response, Leaf: InstantLeaf(stamp, stamp, at, time.Millisecond), Live: InstantLeaf(stamp, stamp, callF.Add(-ago+200*time.Millisecond), time.Millisecond).Value, Place: stamp},
+			}})
+		}
+		_, earlier, _, _ := tr.Test()
+		shape := func(at time.Time) Shape {
+			return Shape{Leaves: map[string]Leaf{dirty: {Path: dirty, Noise: dirty, Type: String, Value: value(at.Add(-ago))}}}
+		}
+		dc := clientTestCacheIn(zone)
+		if !client {
+			dc = clockedDrifts()
+			dc.zone = zone
+		}
+		return cl(dc, []string{dirty}, shape(callF), shape(call), call, earlier, nil, nil, w, nil)[0]
+	}
+	type spelling struct {
+		name    string
+		loc     *time.Location
+		instant func(at time.Time) string
+	}
+	var spellings []spelling
+	for _, z := range zonedRows {
+		spellings = append(spellings, spelling{z.name, z.loc, func(at time.Time) string { return at.In(z.loc).Format(z.iso) }})
+	}
+	spellings = append(spellings, spelling{"Postgres +00", time.UTC, func(at time.Time) string { return pgText(at.UTC()) }})
+	for _, sp := range spellings {
+		t.Run(sp.name, func(t *testing.T) {
+			inText := func(at time.Time) string { return "dirty<=" + sp.instant(at) + ";shard=7" }
+			for _, ago := range []time.Duration{2 * time.Second, time.Minute} {
+				for _, client := range []bool{true, false} {
+					for _, pick := range []bool{false, true} {
+						for rule, cl := range rules {
+							whole := learn(cl, client, sp.loc, sp.instant, ago, pick)
+							in := learn(cl, client, sp.loc, inText, ago, pick)
+							if why := asWhole(in, whole); why != "" {
+								t.Errorf("now - %v, client test %v, its answer in F's second beside it %v, %s: %s", ago, client, pick, rule, why)
+							}
+						}
+					}
+				}
+			}
+		})
+	}
+}
+
+// A text holding two changed instants is refused where the instant whole
+// of either is, whichever stands first: the call's own read, which its
+// window holds, before or after a time the harness gave three hours back
+// that moved ten minutes in record's full round (neither the clock, the clock
+// plus one offset, nor the lead),
+// in keploy test (a call with a window) and in keploy mock's client tests,
+// in every zone. keploy test names where the refused instant stands and
+// says why the instant whole is refused.
+func TestATextIsRefusedWhereAnyInstantOfItIsRefusedWhole(t *testing.T) {
+	call := time.Date(2026, 10, 31, 10, 52, 15, 438_000_000, time.UTC)
+	began := call.Add(-time.Second)
+	callF := call.Add(73*time.Second + 600*time.Millisecond)
+	w := (&Window{Rec: Span{From: call.Add(-100 * time.Millisecond), To: call, Began: began}, F: Span{From: callF.Add(-100 * time.Millisecond), To: callF, Began: began.Add(72 * time.Second)}}).ComparesOffsets()
+	const p = "body.sql"
+	for _, z := range zonedRows {
+		t.Run(z.name, func(t *testing.T) {
+			own := func(at time.Time) string { return at.In(z.loc).Format(z.iso) }
+			poll := func(at time.Time) string {
+				v := call.Add(-3 * time.Hour)
+				if !at.Equal(call) {
+					v = v.Add(10 * time.Minute)
+				}
+				return v.In(z.loc).Format(z.iso)
+			}
+			for _, m := range []struct {
+				name   string
+				client bool
+				w      *Window
+			}{{"keploy test, a call with a window", false, w}, {"a client test", true, w}} {
+				learn := func(value func(at time.Time) string) Learned {
+					dc := clientTestCacheIn(z.loc)
+					if !m.client {
+						dc = clockedDrifts()
+						dc.zone = z.loc
+					}
+					shape := func(at time.Time) Shape {
+						return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: value(at)}}}
+					}
+					return ClassifyGiven(dc, []string{p}, shape(callF), shape(call), call, nil, nil, nil, m.w, nil)[0]
+				}
+				refused := learn(poll)
+				if refused.Kind != KindUnaccounted {
+					t.Fatalf("%s: the time whole learned %s (%s); the row wants it refused", m.name, refused.Kind, refused.Why)
+				}
+				for order, text := range map[string]func(at time.Time) string{
+					"the held instant first": func(at time.Time) string { return "ran_at >= '" + own(at) + "' AND due < '" + poll(at) + "'" },
+					"the held instant last":  func(at time.Time) string { return "due < '" + poll(at) + "' AND ran_at >= '" + own(at) + "'" },
+				} {
+					ln := learn(text)
+					if ln.Kind != KindUnaccounted || !m.client && (!strings.HasPrefix(ln.Why, "it holds an instant (") || !strings.HasSuffix(ln.Why, "which keploy refuses as it refuses that instant whole: "+refused.Why)) {
+						t.Errorf("%s, %s: %s (%s); want it refused as the time whole is (%s)", m.name, order, ln.Kind, ln.Why, refused.Why)
+					}
+				}
+			}
+		})
+	}
 }

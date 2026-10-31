@@ -1632,10 +1632,11 @@ func TestALaterTestsOwnSameSecondReadIsItsOwnByTheLeafsRules(t *testing.T) {
 // rest of the text is still compared: the re-read that takes a whole value as
 // the call's own read takes one word of it alike, never as noise. Where none
 // does, it is refused naming the earlier call and its place, never the value,
-// and never noise. Outside client tests no word is read (dc.clientTests): a
-// copy of the whole text stays the run's variable, and the word alone is the
-// word rule's clock word, let go as it is with the switch off. A text no
-// clock read was learned at stays the run's variable. With the switch off, no
+// and never noise. keploy test reads them alike, by the one rule for an
+// instant wherever it stands: a copy of the whole text, and a text holding
+// the word alone an earlier call sent, is the call's read of that word in
+// its own window, as the instant whole is. A text no clock read was learned
+// at, sent nine seconds later, stays the run's variable. With the switch off, no
 // earlier test's call is a place of the next, and each text is what its own
 // call's window learns: a read of the word, or refused naming no earlier
 // call.
@@ -1658,8 +1659,8 @@ func TestAClockWordMeetsTheRunsVariableAsTheUsesOwnReadOrARefusal(t *testing.T) 
 		"the whole text, nine seconds later":         {sent: job, clock: true, after: 9 * time.Second, want: KindUnaccounted},
 		"the word alone, the same second":            {sent: alone, clock: true, after: 250 * time.Millisecond, want: KindClockRead, wantWordRead: true},
 		"the word alone, nine seconds later":         {sent: alone, clock: true, after: 9 * time.Second, want: KindUnaccounted},
-		"the word alone, the same second, no client": {sent: alone, clock: true, after: 250 * time.Millisecond, notClient: true, want: KindNoise},
-		"the whole text, the same second, no client": {sent: job, after: 250 * time.Millisecond, notClient: true, want: KindVariable},
+		"the word alone, the same second, no client": {sent: alone, clock: true, after: 250 * time.Millisecond, notClient: true, want: KindClockRead, wantWordRead: true},
+		"the whole text, the same second, no client": {sent: job, after: 250 * time.Millisecond, notClient: true, want: KindClockRead, wantWordRead: true},
 		"no clock read, nine seconds later":          {sent: job, after: 9 * time.Second, want: KindVariable},
 		"switch 0, the same second":                  {sent: job, clock: true, after: 250 * time.Millisecond, switchOff: true, want: KindClockRead, wantWordRead: true},
 		"switch 0, nine seconds later":               {sent: job, clock: true, after: 9 * time.Second, switchOff: true, want: KindUnaccounted},

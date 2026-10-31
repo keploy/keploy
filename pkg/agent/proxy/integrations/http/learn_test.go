@@ -3590,8 +3590,11 @@ func TestInServeOrderNumbersTheLeafedPayloadsByTheServedMocks(t *testing.T) {
 // Its words are read one by one, the value whole or inside a longer one
 // ("at <instant>") alike, and the window, its provenance, decides: read in
 // the call's window (the receive served before it, its arrival, on the app's
-// clock) it is a clock read, learned as noise, whether the boot took 2 s or
-// 30 s longer; read by the lead alone (no app clock, or a test's own call,
+// clock) it is a clock read, whether the boot took 2 s or 30 s longer,
+// learned as a read a replay checks in its call's window, the value whole or,
+// inside a longer one, at its word (the rest of the text still compared):
+// a replay's own read passes, and the recorded value, or a text whose rest
+// changed, is refused; read by the lead alone (no app clock, or a test's own call,
 // which is read so: F sets each test's clock), nothing shows it is one, and
 // the minute and second that changed are words of the receive's Date header,
 // a value that may have flowed from the receive: refused, naming it.
@@ -3661,17 +3664,49 @@ func TestLearnMatchAStartUpClockReadIsReadInItsCallsWindow(t *testing.T) {
 				if tc.own {
 					learned = db.consumed
 				}
-				// A read of the clock inside a longer value stays noise; one
-				// that is an instant whole is still compared, in its call's
-				// window at every replay (MockSpec.Clocks).
-				ok := len(learned) == 1
-				if ok && form.name == "one instant whole" {
-					ok = learnedClockRead(learned[0].Spec, "body.processed_at")
-				} else if ok {
-					ok = reflect.DeepEqual(learned[0].Spec.ReqBodyNoise, map[string][]string{"body.processed_at": {}}) && len(learned[0].Spec.Clocks) == 0
+				// A read of the clock, the instant whole or inside a longer
+				// value at its word, is still compared, in its call's window
+				// at every replay (MockSpec.Clocks).
+				const field = "body.processed_at"
+				ok := len(learned) == 1 && learnedClockRead(learned[0].Spec, field)
+				if ok && form.name != "one instant whole" {
+					rec := form.of(recRead)
+					ok = learned[0].Spec.Clocks[field].Word == models.ClockWordOf(rec, len("at "), len(rec))
 				}
 				if got == nil || miss != nil || !ok {
-					t.Fatalf("served %v miss %+v learned %+v; want body.processed_at learned (%s)", got, miss, learned, form.name)
+					t.Fatalf("served %v miss %+v learned %+v; want %s learned as a read of the clock (%s)", got, miss, learned, field, form.name)
+				}
+				// A replay a day later: its own read in its call's window
+				// passes; the recorded value, and a text whose rest
+				// changed, are refused, naming the field.
+				at := learnAt.Add(24 * time.Hour)
+				mocks := learnedOnto([]*models.Mock{event}, learned)
+				for _, c := range []struct {
+					name, value string
+					ok          bool
+				}{
+					{"its own read", form.of(at), true},
+					{"the recorded value", form.of(recRead), false},
+					{"its rest changed", "on " + form.of(at), false},
+				} {
+					call := live("POST", "/v1/events", `{"event":"m-1","processed_at":"`+c.value+`"}`, nil)
+					call.arrived = at.Add(time.Millisecond)
+					ok, _, diag := matchVarIn(t, clockConn(true, at.Add(-time.Second)), newHTTP(), &varDb{perTest: append([]*models.Mock(nil), mocks...)}, call)
+					if c.ok {
+						if !ok {
+							t.Fatalf("the replay, %s: refused (%v); want it answered", c.name, differs(diag))
+						}
+						continue
+					}
+					why := ""
+					for _, f := range diag.differs {
+						if f.shape == field {
+							why = f.why
+						}
+					}
+					if ok || !strings.HasPrefix(why, field+" was learned as ") {
+						t.Fatalf("the replay, %s: answered %v, differs %v (%q); want it refused, naming %s", c.name, ok, differs(diag), why, field)
+					}
 				}
 			})
 		}

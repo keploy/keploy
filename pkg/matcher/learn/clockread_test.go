@@ -741,9 +741,11 @@ func zonedRead(ln Learned, zone string) bool {
 // compared at every replay in its call's own span, whether or not the lead
 // moved it: how late record's full round read its clock (a loaded box) must
 // not decide what is learned, and noise there would let any value pass at
-// every replay. In a window that holds it in both runs it is one too. A value
-// that is no instant whole (a random id, an instant inside a longer value) is
-// noise as before. A value learned so that is no read of the clock fails the
+// every replay. In a window that holds it in both runs it is one too. An
+// instant inside a longer value is judged as the instant whole: a plain read
+// of the clock at its word, the rest of the text compared. A value with no
+// instant (a random id) is noise as before. A value learned so that is no
+// read of the clock fails the
 // next replay's check, record's confirming round's first, which names the
 // field: it is filtered there with that reason, never kept to go red later.
 func TestAWholeInstantWithNoCallWindowIsAClockReadCheckedAtReplay(t *testing.T) {
@@ -767,16 +769,23 @@ func TestAWholeInstantWithNoCallWindowIsAClockReadCheckedAtReplay(t *testing.T) 
 		r, l string
 		w    *Window
 		read bool
+		word string // the text before the instant, of a read at its word
 	}{
-		{"one instant whole, no window, read late", iso(rec), iso(late), nil, true},
-		{"one instant whole, no window, read early", iso(rec), iso(early), nil, true},
-		{"an epoch millisecond, no window, read late", strconv.FormatInt(rec.UnixMilli(), 10), strconv.FormatInt(late.UnixMilli(), 10), nil, true},
-		{"one instant whole, no window, moved by the lead", iso(rec), iso(rec.Add(FullRoundLead)), nil, true},
-		{"one instant whole, its window holds it in both runs", iso(rec), iso(late), window, true},
-		{"a random id, no window", "a7f3c2e9", "9c21e04b", nil, false},
-		{"an instant inside a longer value, no window", "ord-" + iso(rec), "ord-" + iso(late), nil, false},
+		{"one instant whole, no window, read late", iso(rec), iso(late), nil, true, ""},
+		{"one instant whole, no window, read early", iso(rec), iso(early), nil, true, ""},
+		{"an epoch millisecond, no window, read late", strconv.FormatInt(rec.UnixMilli(), 10), strconv.FormatInt(late.UnixMilli(), 10), nil, true, ""},
+		{"one instant whole, no window, moved by the lead", iso(rec), iso(rec.Add(FullRoundLead)), nil, true, ""},
+		{"one instant whole, its window holds it in both runs", iso(rec), iso(late), window, true, ""},
+		{"a random id, no window", "a7f3c2e9", "9c21e04b", nil, false, ""},
+		{"an instant inside a longer value, no window", "ord-" + iso(rec), "ord-" + iso(late), nil, true, "ord-"},
 	} {
 		ln := classify(row.r, row.l, row.w)
+		if row.word != "" {
+			if !readAtWord(ln, row.word, "") {
+				t.Errorf("%s: %s Read=%+v (%s); want a plain read of the clock at its word, as the instant whole is", row.what, ln.Kind, ln.Read, ln.Why)
+			}
+			continue
+		}
 		if !row.read {
 			if ln.Kind != KindNoise || ln.Read != nil {
 				t.Errorf("%s: %s Read=%+v (%s); want noise", row.what, ln.Kind, ln.Read, ln.Why)

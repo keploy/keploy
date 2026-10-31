@@ -775,9 +775,10 @@ func clientTestRefusal(why, part string, windowed bool, values ...string) bool {
 // wall clock of no zone that only a zone other than UTC and the
 // application's reads in the window (the harness's "now plus two hours"). A
 // value with no instant is read as in any test. In keploy test (no client
-// test) each of these refused values is noise by the lead or as a fresh
-// value, as before. A refusal where the call had no window says keploy saw
-// no read of the app's clock for it.
+// test), a call with no window, each instant whole is a read of the clock a
+// replay checks, and one inside a longer value is that read at its word,
+// as the instant whole is. A refusal where the call had no window says
+// keploy saw no read of the app's clock for it.
 func TestAClientTestLearnsAChangedInstantOnlyWhereItsWindowShowsARead(t *testing.T) {
 	rec := time.Date(2026, 10, 22, 11, 14, 16, 900_000_000, time.UTC) // the recorded call
 	w := &Window{
@@ -788,6 +789,9 @@ func TestAClientTestLearnsAChangedInstantOnlyWhereItsWindowShowsARead(t *testing
 	str := func(v string) Shape {
 		return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: v}}}
 	}
+	// The text before the instant of a longer value, which keploy test
+	// reads at its word.
+	inText := map[string]string{"the app's stamp inside a longer value": "sent at ", "a time the harness gave, by the lead, outside the window": "book "}
 	for _, tc := range []struct {
 		name      string
 		rec, live string
@@ -828,8 +832,14 @@ func TestAClientTestLearnsAChangedInstantOnlyWhereItsWindowShowsARead(t *testing
 				t.Fatalf("%q -> %q: %s (%s); want it refused, naming %s, saying keploy saw no read of the app's clock that matched it, and quoting no value", tc.rec, tc.live, ln.Kind, ln.Why, tc.part)
 			}
 			// In keploy test with no call window, a whole instant is a read
-			// of the clock a replay checks, moved by the lead or not.
-			if ln := ClassifyIn(clockedDrifts(), []string{p}, str(tc.live), str(tc.rec), rec, nil, nil, nil, nil)[0]; !noiseIn(ln, nil) {
+			// of the clock a replay checks, moved by the lead or not, and
+			// one inside a longer value is that read at its word.
+			ln = ClassifyIn(clockedDrifts(), []string{p}, str(tc.live), str(tc.rec), rec, nil, nil, nil, nil)[0]
+			if before, ok := inText[tc.name]; ok {
+				if !readAtWord(ln, before, "") {
+					t.Fatalf("keploy test, %q -> %q: %s Read=%+v (%s); want a plain read of the clock at its word", tc.rec, tc.live, ln.Kind, ln.Read, ln.Why)
+				}
+			} else if !noiseIn(ln, nil) {
 				t.Fatalf("keploy test, %q -> %q: %s Read=%+v (%s); want noise, and of a whole instant a read of the clock", tc.rec, tc.live, ln.Kind, ln.Read, ln.Why)
 			}
 		})

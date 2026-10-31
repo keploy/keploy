@@ -24,11 +24,10 @@ import (
 // call's answer is refused, naming the place set aside, as is a moment of
 // the test case's request keploy test sent another value at (requestHolds).
 // A read is checked against its call's clock at every replay, so no order of
-// its sources is needed; a value left noise (a read inside a longer value)
-// is noise only where the order of its candidate sources is shown, and
-// refused, naming the leaf set aside, where it is not (a leaf whose recorded
-// time keploy cannot read, or that the recording answered at the call's own
-// instant: followed). Where F saw the leaf hold the value F saw (a copy), and under the rule's
+// its sources is needed; a read inside a longer value is read as the read
+// whole is (wordRead): that read at its word, whatever the order of its
+// candidate sources (a leaf whose recorded time keploy cannot read, or that
+// the recording answered at the call's own instant). Where F saw the leaf hold the value F saw (a copy), and under the rule's
 // absence (ClassifyGiven), the place stays the value's source.
 func TestALeafIsAValuesSourceOnlyWhereItHeldTheValueInBothRuns(t *testing.T) {
 	before := eRecAt.Add(-50 * time.Millisecond)
@@ -36,7 +35,7 @@ func TestALeafIsAValuesSourceOnlyWhereItHeldTheValueInBothRuns(t *testing.T) {
 	rec, live := secs(eRecAt), secs(eRecAt.Add(FullRoundLead))
 	other := secs(eRecAt.Add(FullRoundLead - time.Second))
 	const setAside = "its recorded value stands whole in mock-8 at body.retries, where record's full round gave the application another value than the value's: a copy moves with its source, so the value is no copy of it"
-	const read, refused = Kind("a read"), KindUnaccounted
+	const read, atWord, refused = Kind("a read"), Kind("a read at its word"), KindUnaccounted
 	for _, tc := range []struct {
 		name           string
 		recorded, live string
@@ -51,13 +50,12 @@ func TestALeafIsAValuesSourceOnlyWhereItHeldTheValueInBothRuns(t *testing.T) {
 		{"a value recorded whole at a leaf F saw hold the value F saw", "82", "83", []Earlier{eLeaf(before, 6, "82", "83")}, nil, KindVariable, ""},
 		{"a leaf whose recorded time keploy cannot read", rec, live, []Earlier{eLeaf(time.Time{}, 6, rec, other)}, nil, read, ""},
 		{"a leaf recorded at the call's own instant", rec, live, []Earlier{eLeaf(eRecAt, 6, rec, other)}, nil, read, ""},
-		// A read inside a longer value is learned as noise (its words are
-		// a read's, which the word rule lets go): noise only where the
-		// order of its candidate sources, the leaf set aside among them,
-		// is shown, and named so.
-		{"a read inside a longer value recorded whole at a leaf F saw hold another value", "at " + rec, "at " + live, []Earlier{eLeaf(before, 6, "at "+rec, "at "+other)}, nil, KindNoise, setAside + ", and keploy learns it as varying"},
-		{"a read inside a longer value, at a leaf whose recorded time keploy cannot read", "at " + rec, "at " + live, []Earlier{eLeaf(time.Time{}, 6, "at "+rec, "at "+other)}, nil, refused, setAside + "; keploy cannot read when the recording gave the application mock-8"},
-		{"a read inside a longer value, at a leaf recorded at the call's own instant", "at " + rec, "at " + live, []Earlier{eLeaf(eRecAt, 6, "at "+rec, "at "+other)}, nil, refused, setAside + "; the recording and record's full round gave the application the earlier answers in a different order"},
+		// A read inside a longer value is the read whole's at its word,
+		// whatever the order of its candidate sources, the leaf set aside
+		// among them.
+		{"a read inside a longer value recorded whole at a leaf F saw hold another value", "at " + rec, "at " + live, []Earlier{eLeaf(before, 6, "at "+rec, "at "+other)}, nil, atWord, ""},
+		{"a read inside a longer value, at a leaf whose recorded time keploy cannot read", "at " + rec, "at " + live, []Earlier{eLeaf(time.Time{}, 6, "at "+rec, "at "+other)}, nil, atWord, ""},
+		{"a read inside a longer value, at a leaf recorded at the call's own instant", "at " + rec, "at " + live, []Earlier{eLeaf(eRecAt, 6, "at "+rec, "at "+other)}, nil, atWord, ""},
 		{"a read inside a longer value, at a leaf F saw hold the value F saw", "at " + rec, "at " + live, []Earlier{eLeaf(before, 6, "at "+rec, "at "+live)}, nil, KindVariable, ""},
 		{"the call's recorded answer holds the recorded value", rec, live, []Earlier{eLeaf(before, 6, rec, other)}, []Leaf{{Path: "body.n", Noise: "body.n", Type: Number, Value: rec}}, refused, setAside + "; but the call's recorded answer holds it"},
 		{"the test case's own request, sent another value", rec, live, []Earlier{{Mock: givenPlace("test-1"), Given: true, Seen: []Seen{
@@ -73,6 +71,10 @@ func TestALeafIsAValuesSourceOnlyWhereItHeldTheValueInBothRuns(t *testing.T) {
 			case tc.want == read:
 				if !noiseOrRead(got) {
 					t.Fatalf("%q recorded, %q in F: %s (%q) from %+v; want a read of the clock", tc.recorded, tc.live, got.Kind, got.Why, got.From)
+				}
+			case tc.want == atWord:
+				if !readAtWord(got, "at ", "") {
+					t.Fatalf("%q recorded, %q in F: %s Read=%+v (%q); want a plain read of the clock at its word", tc.recorded, tc.live, got.Kind, got.Read, got.Why)
 				}
 			case got.Kind != tc.want || !strings.Contains(got.Why, tc.why):
 				t.Fatalf("%q recorded, %q in F: %s (%q) from %+v; want %s, its reason holding %q", tc.recorded, tc.live, got.Kind, got.Why, got.From, tc.want, tc.why)

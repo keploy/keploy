@@ -18,8 +18,9 @@ import (
 // source (a variable, held to the bound value); so does a later call that
 // sends another value in its place, whose caller's variable pass then
 // refuses it (the bound value differs), and it is no binding place itself.
-// keploy test (no client test) learns the first appearance as noise, as
-// before, and marks nothing.
+// keploy test (no client test) reads the instant in its first appearance
+// as it reads the instant whole: in a call with no window, a plain read of
+// the clock at its word, which every replay checks; it marks nothing.
 func TestAClientTestsGivenValueIsBindableWhereItIsFirstSent(t *testing.T) {
 	at := time.Date(2026, 10, 28, 9, 30, 0, 0, time.UTC) // the recorded call
 	w := &Window{
@@ -45,8 +46,8 @@ func TestAClientTestsGivenValueIsBindableWhereItIsFirstSent(t *testing.T) {
 			t.Errorf("first sent, window %v: not bindable; want it bindable as the test's variable", win != nil)
 		}
 	}
-	if ln := ClassifyIn(clockedDrifts(), []string{p}, str(live), str(rec), at, nil, nil, nil, nil)[0]; ln.Kind != KindNoise || ln.Bindable {
-		t.Errorf("keploy test, first sent: %s bindable=%v (%s); want noise, not bindable", ln.Kind, ln.Bindable, ln.Why)
+	if ln := ClassifyIn(clockedDrifts(), []string{p}, str(live), str(rec), at, nil, nil, nil, nil)[0]; !readAtWord(ln, "[E2E] app-crud-", "") || ln.Bindable {
+		t.Errorf("keploy test, first sent: %s Read=%+v bindable=%v (%s); want a plain read of the clock at its word, not bindable", ln.Kind, ln.Read, ln.Bindable, ln.Why)
 	}
 	// Its own answer holds it, whole (an echo), or the word of it that
 	// changed alone (an echo keploy cannot answer with this run's value):
@@ -114,14 +115,22 @@ func TestAClientTestsValueBesideAnEarlierWordIsNeverBindable(t *testing.T) {
 		rec, live string
 		earlier   []Earlier
 		raw       []Raw
-		noiseWhy  string // what keploy test's noise names
+		noiseWhy  string // what keploy test's noise, or its read's Refuted, names
+		read      bool   // keploy test reads its one changed instant at its word
 	}{
-		{"a word the word rule let go", recName + " 48d1", liveNm + " dddd", insert, eStartup(), "stands in mock-8 at body.cmd.documents.0._id"},
-		{"a source the search went past", recName, liveNm, nil, answered, "its recorded value stands whole in mock-s at"},
+		{"a word the word rule let go", recName + " 48d1", liveNm + " dddd", insert, eStartup(), "stands in mock-8 at body.cmd.documents.0._id", false},
+		{"a source the search went past", recName, liveNm, nil, answered, "its recorded value stands whole in mock-s at", true},
 	} {
 		// keploy test: noise, naming the earlier place (the row's shape is
-		// the word rule's, not a client test's own value).
-		if ln := ClassifyFollowing(clockedDrifts(), []string{p}, str(tc.live), str(tc.rec), eRecAt, tc.earlier, tc.raw, nil, nil, nil)[0]; ln.Kind != KindNoise || ln.Bindable || !strings.Contains(ln.Why, tc.noiseWhy) {
+		// the word rule's, not a client test's own value); a text whose one
+		// changed instant is, whole, a read of the clock, that read at its
+		// word, naming the place set aside (Refuted), as the instant whole
+		// is.
+		ln := ClassifyFollowing(clockedDrifts(), []string{p}, str(tc.live), str(tc.rec), eRecAt, tc.earlier, tc.raw, nil, nil, nil)[0]
+		if tc.read && (!readAtWord(ln, "[E2E] app-crud-", "") || ln.Bindable || !strings.Contains(ln.Refuted, tc.noiseWhy)) {
+			t.Fatalf("keploy test, %s: %s Read=%+v bindable=%v (%q, refuted %q); want a read at its word naming %q", tc.name, ln.Kind, ln.Read, ln.Bindable, ln.Why, ln.Refuted, tc.noiseWhy)
+		}
+		if !tc.read && (ln.Kind != KindNoise || ln.Bindable || !strings.Contains(ln.Why, tc.noiseWhy)) {
 			t.Fatalf("keploy test, %s: %s bindable=%v (%q); want noise naming %q", tc.name, ln.Kind, ln.Bindable, ln.Why, tc.noiseWhy)
 		}
 		// Without the earlier place, the client test's own value: bindable.
