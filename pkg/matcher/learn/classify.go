@@ -3323,7 +3323,9 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 			// does: where F's stated view shows the value moved apart from
 			// it, the value is no copy of it, and the refuted place is named
 			// (a founder ruling, 2026-10-29). With no view stated it stays
-			// the source.
+			// the source. A sent one F had not served before the call at all
+			// is no source either (follows.notServed): in F the application
+			// sent the call first.
 			for _, text := range texts {
 				// A whole copy of a stamp x's answer gave the application is
 				// marked so (Place.givenWhole) only where the full round does
@@ -3359,7 +3361,15 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 					// needs only x and what F gave there.
 					rf = &follows{dc: dc, rec: v.rec, live: v.live, at: at}
 				}
-				if !swap && (x.InAnOlderTest() || sentOnly(x, texts, held)) && rf.refute(x, texts, keep, v, p) {
+				sent := sentOnly(x, texts, held)
+				if !swap && (x.InAnOlderTest() || sent) && rf.refute(x, texts, keep, v, p) {
+					break
+				}
+				// A recording F had not served before the call is no source
+				// of the instant the application sent there (notServed):
+				// the search goes on, and a value no other place holds is
+				// read as the call's own read of the clock.
+				if whole && !swap && sent && rf.notServed(x, texts, v, p) {
 					break
 				}
 				return p, true

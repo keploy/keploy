@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 // A copy follows its source (founder decision, 2026-10-24; the recording is
@@ -220,27 +222,72 @@ func (f *follows) refute(x Raw, texts [2]string, keep bool, v *valueDrift, p Pla
 			return false
 		}
 	}
-	if f.refuted == "" || !f.refutedOf[x.mock] {
-		found := "its recorded value stands whole in " + placeAt(p)
-		if p.Held != v.rec && p.Held != v.decRec {
-			found = "a part of its recorded value (" + partOf(v.rec, p.Held) + ") stands in " + placeAt(p)
-		}
-		why := found + gave + ": a copy moves with its source, so the value is no copy of it"
-		if f.refuted == "" {
-			f.refuted = why
-		} else {
-			f.refutes = append(f.refutes, refutedPlace{x.mock, why})
-		}
-		if f.refutedOf == nil {
-			f.refutedOf = map[string]bool{}
-		}
-		f.refutedOf[x.mock] = true
+	found := "its recorded value stands whole in " + placeAt(p)
+	if p.Held != v.rec && p.Held != v.decRec {
+		found = "a part of its recorded value (" + partOf(v.rec, p.Held) + ") stands in " + placeAt(p)
 	}
+	f.wentPast(x.mock, found+gave+": a copy moves with its source, so the value is no copy of it")
 	// The word rule reads the same word at the same place on the same terms
 	// and notes it there too (excusedRaw); a source set aside is noted here
 	// as well, so it is ordered should the two searches ever part.
 	f.source(x.mock)
 	return true
+}
+
+// notServed reports whether p, a place in x's request that holds whole the
+// read of the clock v was recorded with (appearedIn: one instant, only in
+// what the application sent there, sentOnly), is no place the value came
+// from because record's full round had not served x before the call
+// (Raw.Served false): in that round the application sent the call before
+// x's own call was answered, or x's call missed or was not made. The
+// recording sending x first is then no dataflow either: two reads of the
+// clock in one second are a coincidence (api-server's start-up janitors,
+// each reading its clock on its own connection, sent in the order the
+// network gave them, which the two rounds need not share). So the search
+// goes on past it, and the value is read as it is with no such recording
+// (the call's own read of the clock, checked at every replay, where no other
+// place holds it); the place is named (refuted). It is no candidate source
+// whose order the rule reads (sources, followed): F gave the application
+// nothing there before the call, so the recording's order and F's would
+// always differ by it, and a recording that sent x first, then the call (F
+// sending them the other way round), would be refused for an order no
+// dataflow made.
+//
+// Everywhere else the place stays where the value came from, as before: the
+// proven switch off (the rule's absence, as for the run's rule and the
+// start-up rule, classifyRead), a place F served (refute reads it),
+// an instant an answer gave the application (followed whole, a founder
+// decision: the caller hands only a sent one), a word of a connection's
+// start-up a swap can change (startUpWhy), and a place whose recorded text
+// holds the value F saw too.
+func (f *follows) notServed(x Raw, texts [2]string, v *valueDrift, p Place) bool {
+	if f == nil || x.served || !provenswitch.On() {
+		return false
+	}
+	for _, text := range texts {
+		if ContainsToken(text, v.live) || v.decoded && ContainsToken(text, v.decLive) {
+			return false
+		}
+	}
+	f.wentPast(x.mock, "its recorded value stands whole in "+placeAt(p)+", which the application sent there and record's full round had not served before this call: in that round the application sent this call first, and two reads of the clock in one second are a coincidence, not dataflow, so the value is no copy of it")
+	return true
+}
+
+// wentPast names mock, a place the search for the value's source went past,
+// and why (refuted, refutes), once.
+func (f *follows) wentPast(mock, why string) {
+	if f.refuted != "" && f.refutedOf[mock] {
+		return
+	}
+	if f.refuted == "" {
+		f.refuted = why
+	} else {
+		f.refutes = append(f.refutes, refutedPlace{mock, why})
+	}
+	if f.refutedOf == nil {
+		f.refutedOf = map[string]bool{}
+	}
+	f.refutedOf[mock] = true
 }
 
 // refutedPlace is a mock the search for a value's source went past
