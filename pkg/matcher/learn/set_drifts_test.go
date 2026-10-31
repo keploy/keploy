@@ -153,14 +153,14 @@ func TestASetsTestsShareTheDriftsOfItsPlaces(t *testing.T) {
 	if b.of("o-3", "o-3-9"); b.set.drifts.used != 0 || b.set.usedBytes() != 0 {
 		t.Fatalf("the earlier set still keeps %d bytes of drifts (%d in all)", b.set.drifts.used, b.set.usedBytes())
 	}
-	if NewDriftCache().of("o-1", "o-1-9") == NewDriftCache().of("o-1", "o-1-9") {
+	if x, y := NewDriftCache().of("o-1", "o-1-9"), NewDriftCache().of("o-1", "o-1-9"); x == y {
 		t.Fatal("two caches no tracker made share a drift")
 	}
 	old := driftBudget
 	defer func() { driftBudget = old }()
 	driftBudget = 0
 	s := newSetDerived()
-	if s.driftOf("o-1", "o-1-9", true) == s.driftOf("o-1", "o-1-9", true) {
+	if x, y := s.driftOf("o-1", "o-1-9", true), s.driftOf("o-1", "o-1-9", true); x == y {
 		t.Fatal("a set with no room for drifts keeps one")
 	}
 	// Room for a small drift and a larger one, not both: the first is kept,
@@ -182,7 +182,7 @@ func TestASetsTestsShareTheDriftsOfItsPlaces(t *testing.T) {
 	if s.driftOf("o-1", "o-1-9", true) != a1 {
 		t.Fatal("the set lets go of a drift it kept")
 	}
-	if s.driftOf("o-2", "o-2-9", true) == s.driftOf("o-2", "o-2-9", true) {
+	if x, y := s.driftOf("o-2", "o-2-9", true), s.driftOf("o-2", "o-2-9", true); x == y {
 		t.Fatal("the set keeps a drift after one did not fit")
 	}
 }

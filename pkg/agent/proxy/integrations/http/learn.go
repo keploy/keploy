@@ -2143,7 +2143,7 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 					why += "; " + l.Why
 				}
 				return p, why
-			case !own || !from.Own && !(from.Run && provenswitch.On()):
+			case !own || !from.Own && (!from.Run || !provenswitch.On()):
 				// A value the run made, sent by the set's start-up or an
 				// earlier test's own call (from.Run), is the run's variable:
 				// bound there, used here, under the proven switch; without
