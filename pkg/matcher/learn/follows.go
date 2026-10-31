@@ -238,8 +238,9 @@ func (f *follows) refute(x Raw, texts [2]string, keep bool, v *valueDrift, p Pla
 // read of the clock v was recorded with (appearedIn: one instant, only in
 // what the application sent there, sentOnly), is no place the value came
 // from because record's full round had not served x before the call
-// (Raw.Served false): in that round the application sent the call before
-// x's own call was answered, or x's call missed or was not made. The
+// (Raw.Served false, or every serve of it made after the call reached
+// keploy: Order.ArrivedAt, Raw.servedAfter): in that round the application
+// sent the call before x's own call was answered, or x's call missed or was not made. The
 // recording sending x first is then no dataflow either: two reads of the
 // clock in one second are a coincidence (api-server's start-up janitors,
 // each reading its clock on its own connection, sent in the order the
@@ -258,10 +259,13 @@ func (f *follows) refute(x Raw, texts [2]string, keep bool, v *valueDrift, p Pla
 // start-up rule, classifyRead), a place F served (refute reads it),
 // an instant an answer gave the application (followed whole, a founder
 // decision: the caller hands only a sent one), a word of a connection's
-// start-up a swap can change (startUpWhy), and a place whose recorded text
-// holds the value F saw too.
+// start-up a swap can change (startUpWhy; no start-up holds a request's
+// field, so a swap's word is never a sent one either), and a place whose
+// searched texts hold the value F saw too. That last check is defensive: the
+// echo of what F gave (echoRaw) reads a recorded text holding F's value
+// before the search reaches this rule, and no row reaches it.
 func (f *follows) notServed(x Raw, texts [2]string, v *valueDrift, p Place) bool {
-	if f == nil || x.served || !provenswitch.On() {
+	if f == nil || x.served && !x.servedAfter || !provenswitch.On() {
 		return false
 	}
 	for _, text := range texts {

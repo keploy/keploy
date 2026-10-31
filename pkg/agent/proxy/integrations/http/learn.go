@@ -1501,7 +1501,11 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 		}
 		retake = false
 		sc, windows, claimDb := read.sc, read.windows, read.claimDb
-		test, earlier, served, before, set, order := read.test, read.earlier, read.served, read.before, read.set, read.order
+		test, earlier, served, before, set := read.test, read.earlier, read.served, read.before, read.set
+		// F's serves the read saw made after the call reached keploy are
+		// none F made before it (learn.Order.ArrivedAt): a sibling served
+		// while the call waited for this read leaves the verdict as it was.
+		order := read.order.ArrivedAt(input.arrived)
 		if read.awaiting {
 			// The call came after the test's window opened and before the
 			// filter that opens it brought its test case's request: it

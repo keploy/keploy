@@ -242,6 +242,12 @@ type Raw struct {
 	// test. Only the rule for a start-up's same-second read (classifyRead,
 	// ofSentBefore) reads it.
 	beforeTest bool
+	// servedAfter: every serve of the mock's the read saw was made after the
+	// call reached keploy (Order.ArrivedAt, ServedView), so F had not served
+	// it before the call. Only the rule a recording F had not served before
+	// the call reads it (follows.notServed); every other rule reads the mock
+	// as served, with F's view of it.
+	servedAfter bool
 	// call is the call the mock answers, as one recording of it stands in
 	// for another (callOf): only an answer to the same call is given in
 	// another's place (the offset rule, offsetFrom).
@@ -432,7 +438,7 @@ func (r Raw) WithServed(served bool) Raw {
 	r.served = served
 	if !served {
 		r.first, r.last, r.asRecorded, r.live = 0, 0, false, nil
-		r.unseen, r.views, r.olderTest = false, nil, false
+		r.unseen, r.views, r.olderTest, r.servedAfter = false, nil, false, false
 	}
 	return r
 }

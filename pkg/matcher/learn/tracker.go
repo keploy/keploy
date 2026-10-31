@@ -157,6 +157,11 @@ type Tracker struct {
 	// in the order of the real instants it served them at (servedIn), each
 	// with the instant its call reached keploy. NewSet forgets them.
 	servedAt []servedInstant
+	// serveAt is the real instant each of the running set's serves was made
+	// at, by number (serveAt[n-1] of the n-th, ServedMockAt's at): what an
+	// Order cut at a call's arrival (Order.ArrivedAt) reads. NewSet forgets
+	// it.
+	serveAt []time.Time
 	// given is the running test case's own request (Give), an earlier place
 	// the learn step reads as any other (Earlier.Given); nil until it is
 	// given, and for a test no keploy test case opened (keploy mock's).
@@ -247,7 +252,7 @@ func (t *Tracker) NewSetAt(at time.Time) {
 	t.run, t.runNames, t.runTaken, t.setTaken = nil, nil, nil, nil
 	t.names, t.taken = nil, nil
 	t.answered, t.drifts = nil, t.newDrifts()
-	t.servedAt = nil
+	t.servedAt, t.serveAt = nil, nil
 	t.given = nil
 	say := t.closeUnread()
 	t.open, t.began = false, false
@@ -748,7 +753,7 @@ func (t *Tracker) Placed() Placed {
 // orderLocked is the order of the set's serves as a read now sees it
 // (Placed.Order). t.mu is held.
 func (t *Tracker) orderLocked() Order {
-	return Order{t: t, serves: t.serves, asRecorded: t.asRecorded, lives: t.lives, upTo: t.seq, testFrom: t.testFrom, outside: t.outsideSeq, places: t.places, flights: t.flights, handshakes: t.handshakes, set: t.setEpoch, landings: t.landings, flying: t.flying}
+	return Order{t: t, serves: t.serves, asRecorded: t.asRecorded, lives: t.lives, upTo: t.seq, testFrom: t.testFrom, outside: t.outsideSeq, places: t.places, flights: t.flights, handshakes: t.handshakes, set: t.setEpoch, landings: t.landings, flying: t.flying, serveAt: t.serveAt[:len(t.serveAt):len(t.serveAt)]}
 }
 
 // ServedMock notes a mock any parser served in the running test: an earlier
@@ -843,6 +848,7 @@ func (t *Tracker) servedIn(m *models.Mock, at, from time.Time, in *Flight, k ser
 	}
 	t.seq++
 	t.serves[id] = append(t.serves[id], t.seq)
+	t.serveAt = append(t.serveAt, at)
 	if !t.open {
 		if t.outsideSeq == nil {
 			t.outsideSeq = map[int]bool{}
@@ -913,6 +919,45 @@ type Order struct {
 	set      uint64
 	landings uint64
 	flying   bool
+	// serveAt is the real instant of each serve numbered up to upTo
+	// (Tracker.serveAt), and arrival the instant the call the read is for
+	// reached keploy (ArrivedAt; zero: not said).
+	serveAt []time.Time
+	arrival time.Time
+}
+
+// ArrivedAt is o for the call that reached keploy at the real instant
+// arrival: ServedView marks a recording every serve of which o saw was made
+// after arrival (Raw.servedAfter), which F had not served when the call
+// reached keploy, however soon after it F served it and the call's learn
+// step read the tracker. The rule a recording F had not served before the
+// call reads it so (follows.notServed), so that its verdict does not hang
+// on how long the call waited for its learn step: a sibling served in that
+// wait, which grows with load, leaves it as it was. A zero arrival is o.
+func (o Order) ArrivedAt(arrival time.Time) Order {
+	o.arrival = arrival
+	return o
+}
+
+// servedAfterLocked reports whether every serve of the mock of identity id
+// that o saw was made after o's arrival (ArrivedAt), and there was one: no
+// arrival said, a serve of an instant not kept, or one made at or before the
+// arrival, says it was served before the call. o.t.mu is held.
+func (o Order) servedAfterLocked(id string) bool {
+	if o.arrival.IsZero() {
+		return false
+	}
+	n := o.serves[id]
+	k := sort.SearchInts(n, o.upTo+1)
+	if k == 0 {
+		return false
+	}
+	for _, s := range n[:k] {
+		if s < 1 || s > len(o.serveAt) || !o.serveAt[s-1].After(o.arrival) {
+			return false
+		}
+	}
+	return true
 }
 
 // Of is where F served m in the set, in one sequence across its start-up,
@@ -986,7 +1031,7 @@ func (o Order) ServedView(m *models.Mock, r Raw) Raw {
 	var recorded, unread, ok bool
 	var loads []func() (*models.Mock, error)
 	o.t.mu.Lock()
-	older, before := o.olderTestLocked(id), o.beforeTestLocked(id)
+	older, before, after := o.olderTestLocked(id), o.beforeTestLocked(id), o.servedAfterLocked(id)
 	if unstated {
 		recorded, _, loads, unread, ok = o.viewsLocked(id)
 	}
@@ -997,6 +1042,7 @@ func (o Order) ServedView(m *models.Mock, r Raw) Raw {
 	if before {
 		r = r.ServedBeforeTheTest()
 	}
+	r.servedAfter = after
 	switch {
 	case !unstated, !ok:
 		return r
