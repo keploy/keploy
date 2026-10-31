@@ -420,9 +420,11 @@ var _ integrations.BackgroundCursor = (*MockManager)(nil)
 
 // learns reports whether the running set's learn step is on: the session is
 // record's full round (SetPairing) and the set's learn step has not ended
-// (SetLearnEnded) and is not held (SetLearnHeld).
+// (SetLearnEnded). A held one (SetLearnHeld) is on: it still reads the set's
+// recordings to serve what is exactly one, so the staging's read of them
+// (warmLearnSet) stands while it is held.
 func (m *MockManager) learns() bool {
-	return m.exact.pairs.Load() && !m.exact.learnEnded.Load() && !m.exact.learnHeld.Load()
+	return m.exact.pairs.Load() && !m.exact.learnEnded.Load()
 }
 
 // pairing is the view to pair in, and the staging's epoch: a view of a set

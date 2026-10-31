@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -226,5 +227,72 @@ func TestAProxyHoldsItsLearnStepOnlyWithAMockManager(t *testing.T) {
 	p.learnTracker.SetLearnHeld(true)
 	if err := p.SetLearnHeld(false); err != nil || p.learnTracker.LearnHeld() {
 		t.Fatalf("a release with no mock manager: %v, tracker still held %v", err, p.learnTracker.LearnHeld())
+	}
+
+	// A session's start: a hold the previous session's test left is
+	// released on the mock store and on the tracker both.
+	t.Setenv(provenswitch.Env, "1")
+	p = New(zap.NewNop(), nil, &config.Config{})
+	p.nsswitchData = []byte("preseeded-by-test") // Mock leaves the host's DNS alone
+	mm := NewMockManager(NewTreeDb(customComparator), NewTreeDb(customComparator), zap.NewNop())
+	defer mm.Close()
+	p.setMockManager(mm)
+	if err := p.SetLearnHeld(true); err != nil {
+		t.Fatal(err)
+	}
+	if !mm.LearnHeld() || !p.learnTracker.LearnHeld() {
+		t.Fatal("holding the learn step did not hold it")
+	}
+	_ = p.Mock(context.Background(), models.OutgoingOptions{Learn: true})
+	if mm.LearnHeld() || p.learnTracker.LearnHeld() {
+		t.Fatalf("a session's start left the previous session's hold: mock store held %v, tracker held %v", mm.LearnHeld(), p.learnTracker.LearnHeld())
+	}
+}
+
+// Under proven routing record's full round answers a call the open test's
+// view does not with another test's recording that call is exactly, which
+// the test has yet to consume (the pairing, which claims it). A later replay
+// pairs nothing, so it never answers that call. While a test that keeps its
+// recording from an earlier record is open the learn step is held, and the
+// pairing pairs nothing: the kept test's call misses as in the later replay,
+// and the other test's recording stays unclaimed for that test. Paired, the
+// kept test would pass only in the record, a false green that changes no
+// value, so the classification's hold alone does not refuse it. Unheld (a
+// fresh test) the same call is paired, as before.
+func TestAHeldLearnStepPairsNoCallWithAnotherTestsRecording(t *testing.T) {
+	now := time.Now()
+	for _, held := range []bool{false, true} {
+		t.Run(map[bool]string{false: "a fresh test pairs", true: "a kept test pairs nothing"}[held], func(t *testing.T) {
+			t.Setenv(provenswitch.Env, "1")
+			p := startedDrainProxy(t, 100)
+			p.learnTracker = learn.NewTracker()
+			mm := NewMockManager(nil, nil, zap.NewNop())
+			mm.SetMocksWithWindow([]*models.Mock{
+				r3Mock("mock-own", now.Add(100*time.Millisecond), "GET", "/status", "", `{"up":true}`),
+				r3Mock("mock-x", now.Add(1500*time.Millisecond), "POST", "/orders", `{"item":"apple"}`, `{"order":1}`),
+			}, nil, models.BaseTime, now.Add(time.Hour))
+			mm.ServeExactBackground(models.RecordedWithS12Routing, nil, nil)
+			mm.SetPairing(true)
+			p.setMockManager(mm)
+			t.Cleanup(func() { p.setMockManager(nil) })
+			if held {
+				if err := p.SetLearnHeld(true); err != nil {
+					t.Fatal(err)
+				}
+			}
+			p.ContinueTestErrorCapture()
+			mm.ServeExactTest("test-1", []*models.Mock{roundMock(mm, "mock-own")})
+			code, got := r3Send(t, p, mm, models.OutgoingOptions{Learn: true}, roundPost(`{"item":"apple"}`))
+			claimed := mm.exact.claimed.has(mm.StagingEpoch(), "mock-x")
+			if !held {
+				if code != http.StatusOK || got != `{"order":1}` || !claimed {
+					t.Fatalf("precondition: a fresh test's call that is exactly mock-x got %d %s, mock-x claimed %v; want it paired", code, got, claimed)
+				}
+				return
+			}
+			if code == http.StatusOK || claimed {
+				t.Fatalf("FALSE GREEN: the kept test's call that is exactly another test's mock-x got %d %s, mock-x claimed %v; held, the round pairs nothing, as a later replay", code, got, claimed)
+			}
+		})
 	}
 }

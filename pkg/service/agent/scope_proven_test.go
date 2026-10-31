@@ -1130,6 +1130,37 @@ func TestAKeptTestNeitherEndsNorMovesTheRecordedOrderAndLearnsNothing(t *testing
 		require.True(t, p.learnHeld)
 	})
 
+	// A kept test whose begin fails after its hold (the proxy refuses to
+	// serve its mocks) did not begin: the failed begin releases the hold, so
+	// the fresh test begun next learns, and a close of the kept test that
+	// never began has nothing of its own to release.
+	t.Run("a failed begin releases its hold", func(t *testing.T) {
+		a, p := wireAgent(t, models.MODE_TEST)
+		ctx := context.Background()
+		require.NoError(t, a.MockOutgoing(ctx, models.OutgoingOptions{Learn: true, LearnTests: fresh("TestB")}))
+		require.NoError(t, a.SetRecordedWindows(ctx, recorded))
+		claimSelf(t, a)
+		p.mu.Lock()
+		p.setErr, p.order = errors.New("the proxy refused the test's mocks"), nil
+		p.mu.Unlock()
+		_, serr := a.ProvenBegin(ctx, begin("TestA"))
+		require.NotNil(t, serr, "the kept test's begin did not fail")
+		require.Contains(t, serr.Message, "the proxy refused the test's mocks")
+		p.mu.Lock()
+		order, held := p.order, p.learnHeld
+		p.setErr, p.order = nil, nil
+		p.mu.Unlock()
+		require.Equal(t, "learn held true", order[0], "the failed begin is one past the hold: %v", order)
+		require.False(t, held, "the failed begin left its hold: %v", order)
+		_, serr = a.ProvenBegin(ctx, begin("TestB"))
+		require.Nil(t, serr)
+		p.mu.Lock()
+		require.False(t, p.learnHeld, "the fresh test after the failed begin learns nothing: %v", p.order)
+		p.mu.Unlock()
+		_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestB", Outcome: "passed"})
+		require.Nil(t, serr)
+	})
+
 	// A session that starts while a kept test holds the learn step (its
 	// process went away, the set ended) starts with it released: the hold
 	// is the open test's, and the next session's fresh test learns.
