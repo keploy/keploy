@@ -1941,16 +1941,20 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// read the application made at the start of its handler, so the
 		// learning does not hang on how fast the full round ran (api-
 		// server's app.createdAt, read half a second and a second boundary
-		// before its audit in record's full round). A value neither run's
-		// own window holds stays refused (the offset alone explains it),
-		// and so does anything else the value reads as without the rule
-		// (noise, another refusal).
+		// before its audit in record's full round). Those windows take a
+		// plain read alone, as the window from each run's test begin does:
+		// a read plus an offset there spans half a second and a second
+		// boundary of offsets, which no replay could check tightly. A value
+		// neither run's own window holds stays refused (the offset alone
+		// explains it), and so does anything else the value reads as
+		// without the rule (noise, another refusal, the clock plus an
+		// offset in one run's own window alone).
 		if wb := w.sinceBegin(); follow && ln.Kind == KindUnaccounted && wb != nil {
 			if own, ok := sinceTestBegin(leaf(r, l, w, skipOffset)); ok {
 				ln = own
 			} else if ln.byOffset {
 				for _, ow := range w.oneRunSinceBegin() {
-					if own, ok := sinceTestBegin(leaf(r, l, ow, skipOffset)); ok {
+					if own, ok := sinceTestBegin(leaf(r, l, ow, skipOffset)); ok && own.Kind == KindClockRead {
 						ln = own
 						break
 					}

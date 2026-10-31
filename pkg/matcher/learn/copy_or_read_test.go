@@ -357,15 +357,15 @@ func TestAClientTestLearnsAnOffsetOfAGivenInstantItsOwnWindowHoldsAsAReadSinceIt
 // gap before the value) that is a read of the clock made for its call in one
 // run and earlier in its test in the other is learned as a read of the clock
 // since its test began (models.SinceTestBegin), as the copy rule learns a
-// copy in those windows (Window.oneRunSinceBegin): api-server's T2
-// (clock-read-carried-later, 2026-10-31) read an app's createdAt, updatedAt
-// and auditedAt at the start of its create handler; the recording made the
-// handler's calls in 5 ms, so the audit's own window held them, while record's
-// full round took half a second over them and crossed a second, so only its
-// window since the test began did. The offset rule refused createdAt, and the
-// test was set aside (TestTestSuiteAssertionTypes, TestTestSuitePagination,
-// TestCITokensEndWithTheirServiceAccount; mv2s1's TestSavedBearerTokenIsSent-
-// Trimmed and TestSlowStepFailsOnlyItself). The rescue read only the call's
+// copy in those windows (Window.oneRunSinceBegin): api-server's create
+// handler reads an app's createdAt, updatedAt and auditedAt at its start; the
+// recording made the handler's calls in 5 ms, so the audit's own window held
+// them, while record's full round took half a second over them and crossed a
+// second, so only its window since the test began did. The offset rule
+// refused createdAt, and the test was set aside (api-server's
+// TestTestSuiteAssertionTypes, TestTestSuitePagination,
+// TestCITokensEndWithTheirServiceAccount, TestSavedBearerTokenIsSentTrimmed
+// and TestSlowStepFailsOnlyItself). The rescue read only the call's
 // own window in both runs, so the learning hung on how fast the full round
 // ran. It is read without the offset rule alone, every other rule as it
 // stands, in those windows too. An earlier test's insert recorded in the same
@@ -556,6 +556,61 @@ func TestAClientTestKeepsAnExpiryNoOffsetRuleRefusedThatOneRunsOwnWindowHoldsRef
 	}
 	if ln := learn(rec, slow); ln.Kind != KindUnaccounted || ln.byOffset {
 		t.Fatalf("one run's own window: %s Read=%+v Offset=%+v byOffset=%v (%s); want refused, by no offset rule", ln.Kind, ln.Read, ln.Offset, ln.byOffset, ln.Why)
+	}
+}
+
+// The rescue reads one run's own window and the other's since its test began
+// for a plain read of the clock alone. An expiry the offset rule refused
+// (mock-3 and mock-11, each the same gap before the value in its run) that
+// those windows hold as the clock plus thirty days, read in the slower run
+// half a second and a second boundary before its call's window, stays
+// refused by the offset rule: an offset read there spans that half second,
+// which no replay checks as tightly as the read itself. A guard row: read
+// without the offset rule in those windows, the value is refused today by
+// the search for its source too (F served mock-3 and mock-11 with no view an
+// adapter stated, and the windows show no plain read), so the rescue's own
+// restriction to a plain read is not what keeps it refused here.
+func TestAClientTestKeepsAnOffsetRefusedExpiryOnlyOneRunsOwnWindowHoldsRefused(t *testing.T) {
+	const p = "body.docs.msgs.0.token.expiresAt.$numberLong"
+	const month = 30 * 24 * time.Hour
+	const gap = 11484*time.Hour + 35*time.Minute + 49*time.Second
+	const offsetRule = "a value built on what the application was given by an offset moves so"
+	secs := func(t time.Time) string { return strconv.FormatInt(t.Unix(), 10) }
+	rec := copyOrReadRun{began: time.Date(2026, 10, 30, 23, 3, 29, 548_000_000, time.UTC), audited: time.Millisecond, insert: 5400 * time.Microsecond, audit: 5800 * time.Microsecond}
+	slow := copyOrReadRun{began: time.Date(2026, 10, 30, 23, 4, 46, 796_000_000, time.UTC), audited: time.Millisecond, insert: 488 * time.Millisecond, audit: 489 * time.Millisecond}
+	stamp := func(name string, sent, at time.Time) *models.Mock {
+		m := r1Receive(`{"SentTimestamp": "` + strconv.FormatInt(sent.UnixMilli(), 10) + `"}`)
+		m.Name = name
+		m.Spec.HTTPResp.Header["Date"] = "Thu, 22 Oct 2026 03:02:51 GMT"
+		m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock = at, at.Add(200*time.Millisecond)
+		return m
+	}
+	leaf := func(x copyOrReadRun) Leaf {
+		return Leaf{Path: p, Noise: p, Type: Number, Value: secs(x.at(x.audited).Add(month))}
+	}
+	learn := func(r, f copyOrReadRun) Learned {
+		dc := clientTestCache()
+		raw := []Raw{
+			dc.RawOf(stamp("mock-3", r.at(r.audited).Add(month-gap), r.began.Add(-6*time.Minute)), true),
+			dc.RawOf(stamp("mock-11", f.at(f.audited).Add(month-gap), r.began.Add(-5*time.Minute)), true),
+		}
+		w := (&Window{Rec: r.window(true), F: f.window(true)}).ComparesOffsets()
+		shape := func(x copyOrReadRun) Shape { return Shape{Leaves: map[string]Leaf{p: leaf(x)}} }
+		return ClassifyFollowing(dc, []string{p}, shape(f), shape(r), r.at(r.audit), nil, raw, nil, w, nil)[0]
+	}
+	if secs(slow.at(slow.audited)) == secs(slow.at(slow.insert)) || secs(rec.at(rec.audited)) != secs(rec.at(rec.insert)) {
+		t.Fatal("fixture: the read must lie in the recording's own window and outside the slow round's")
+	}
+	for _, c := range []struct {
+		name string
+		r, f copyOrReadRun
+	}{
+		{"the recording's own window", rec, slow},
+		{"record's full round's own window", slow, rec},
+	} {
+		if ln := learn(c.r, c.f); ln.Kind != KindUnaccounted || !ln.byOffset || !strings.Contains(ln.Why, offsetRule) || !strings.Contains(ln.Why, "mock-3") || !strings.Contains(ln.Why, "mock-11") {
+			t.Fatalf("%s alone: %s Read=%+v Offset=%+v (%s); want refused by the offset rule, naming mock-3 and mock-11", c.name, ln.Kind, ln.Read, ln.Offset, ln.Why)
+		}
 	}
 }
 
