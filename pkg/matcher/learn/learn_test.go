@@ -2204,7 +2204,8 @@ func dottedKey(path, key string) map[string]string {
 // keys with '.' (Mongo) names a key holding a '.' as one step
 // (Shape.Parents). A miss then says that key added or removed as one place,
 // at its own path, the key's fixed part with it; never a field its first
-// word names, which neither side holds.
+// word names, which neither side holds. A key a protocol spells in brackets
+// goes on from the path it is in by '[', and is one step the same way.
 func TestMissPlacesNameAKeyItsAdapterSaysIsOneStepWhole(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -2235,6 +2236,10 @@ func TestMissPlacesNameAKeyItsAdapterSaysIsOneStepWhole(t *testing.T) {
 			withParents(flat(dottedKey("body.f.a.b", "a.b"), nil, "body.f.a.b", "s:x"), "body.f.a.b", "body.f"),
 			flat(nil, nil, "body.f.a.b", "s:x"),
 			[]string{`body.f.a.b's spelling (the dotted key "a.b") differs`}},
+		{"a key holding a '.' that its protocol spells in brackets, added",
+			withParents(flat(nil, nil, "body.x[a]", "s:1", "body.x[q.r]", "s:2"), "body.x[q.r]", "body.x"),
+			flat(nil, nil, "body.x[a]", "s:1"),
+			[]string{"body.x[q.r] is not in the recording"}},
 		{"a parent that is no path the key goes on from is passed over",
 			withParents(flat(nil, nil, "body.x.q.r", "s:2", "body.x.p", "s:1"), "body.x.q.r", "body.y"),
 			flat(nil, nil, "body.x.p", "s:1"),
