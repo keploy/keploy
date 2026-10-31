@@ -1843,3 +1843,135 @@ func TestAClockReadInTheSecondOfTheHarnesssTokenIsLearnedAsARead(t *testing.T) {
 		t.Errorf("keploy test's own request: %s from %+v (%s); want refused as a pick from the test case's request", ln.Kind, ln.From, ln.Why)
 	}
 }
+
+// A client test's harness that sends one token for every request (signed
+// once for the session) gives the application the token whole, as well as
+// each claim of it: the token is a place of its own (a token the application
+// forwards is followed whole), holding the auth_time claim's second in
+// another form (its base64 claims). An application's read of its clock in
+// that second as recorded is no copy of the token where in record's full
+// round the token holds another second than the read: a copy moves with its
+// source, the claim's place and the token's alike (follows.refutePart), so
+// the value is learned as a plain read of the clock, as it is where the
+// harness signs a token per request. Must stay:
+//   - the harness's token in F's second too: followed from the incoming
+//     requests' auth_time claim, never refused as a part of the token;
+//   - a header the harness sends with no claims keploy reads, base64 text
+//     holding the second (the only place that holds it): in F's second too,
+//     it stays where the value came from (refused as a value inside a
+//     longer one keploy cannot bind); in another second in F, it is no
+//     copy, and the value is a read of the clock;
+//   - the same header sent by a call of the test: kept as the value's place,
+//     as before (the incoming requests alone are read so).
+func TestAClockReadInTheSecondOfAReusedTokenIsLearnedAsARead(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	read := time.Date(2026, 10, 31, 9, 50, 25, 100e6, time.UTC) // the app's clock read, recorded: neither run's second is a whole minute
+	epoch := func(at time.Time) string { return strconv.FormatInt(at.Unix(), 10) }
+	call := read.Add(200 * time.Millisecond)
+	fRead, fCall := read.Add(FullRoundLead), call.Add(FullRoundLead)
+	w := &Window{Rec: Span{From: call.Add(-5 * time.Millisecond), To: call}, F: Span{From: fCall.Add(-5 * time.Millisecond), To: fCall.Add(time.Millisecond)}}
+	const p = "body.docs.msgs.0.app.createdAt"
+	shape := func(v string) Shape {
+		return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: Number, Value: v}}}
+	}
+	rec, live := shape(epoch(read)), shape(epoch(fRead))
+	signed := read.Add(-50 * time.Millisecond) // the same second as the read
+	learn := func(gave Earlier) Learned {
+		return ClassifyFollowing(clientTestCache(), []string{p}, live, rec, call, []Earlier{gave}, nil, nil, w, nil)[0]
+	}
+
+	// One token for every request, its auth_time in another second in F.
+	gave := harnessGave(signed, fRead.Add(-7*time.Second), call)
+	if !hasSeen(gave, "header.Authorization") || !hasSeen(gave, "header.Authorization{jwt}.auth_time") {
+		t.Fatalf("fixture: places %+v; want the token whole and its auth_time", gave.Seen)
+	}
+	if ln := learn(gave); ln.Kind != KindClockRead || ln.Read == nil || !ln.Read.Plain() || ln.From != (Place{}) {
+		t.Errorf("one token for every request, in another second in F: %s from %s whole=%v (%s); want learned as a plain read of the clock", ln.Kind, ln.From.Path, ln.From.Whole, ln.Why)
+	}
+
+	// The same token in F's second too: followed from its auth_time.
+	if epoch(fRead.Add(-500*time.Millisecond)) != epoch(fRead) {
+		t.Fatalf("fixture: F's token in another second")
+	}
+	ln := learn(harnessGave(signed, fRead.Add(-500*time.Millisecond), call))
+	if ln.Kind != KindVariable || !ln.From.Incoming || !ln.From.Whole || ln.From.Path != "header.Authorization{jwt}.auth_time" {
+		t.Errorf("one token for every request, in F's second too: %s from %s whole=%v (%s); want followed from the incoming requests' auth_time", ln.Kind, ln.From.Path, ln.From.Whole, ln.Why)
+	}
+
+	// A header of base64 text holding the second, no claims read.
+	ctx := func(at time.Time) string {
+		return base64.StdEncoding.EncodeToString([]byte(`{"session":"s-1","at":` + epoch(at) + `}`))
+	}
+	header := func(fSigned time.Time) Earlier {
+		req := func(name string, at time.Time, v string) IncomingRequest {
+			return IncomingRequest{Name: name, At: at, Parts: []models.TestRequestPart{
+				{Name: "url", Recorded: "http://localhost:8080/v1/apps"},
+				{Name: "header.X-Context", Recorded: v},
+			}}
+		}
+		return IncomingGiven("TestAuthorizationDirectives", []IncomingRequest{req("post-query-11", call.Add(-time.Second), ctx(signed))}, []IncomingRequest{req("", fCall.Add(-time.Second), ctx(fSigned))}, true, call)
+	}
+	same := header(fRead.Add(-500 * time.Millisecond))
+	if !hasSeen(same, "header.X-Context") {
+		t.Fatalf("fixture: places %+v; want the header whole", same.Seen)
+	}
+	for _, s := range same.Seen {
+		if strings.Contains(s.Leaf.Path, "{jwt}") {
+			t.Fatalf("fixture: %s read as a token's claim; want no claims", s.Leaf.Path)
+		}
+	}
+	// Kept as the place itself: never set aside, then found back only as
+	// an echo of the moment F saw there (Place.Echo).
+	if ln := learn(same); ln.Kind == KindClockRead || !ln.From.Incoming || ln.From.Whole || ln.From.Echo || ln.From.Path != "header.X-Context" {
+		t.Errorf("the header in F's second too: %s from %s whole=%v echo=%v (%s); want the header kept as where the value came from, a part", ln.Kind, ln.From.Path, ln.From.Whole, ln.From.Echo, ln.Why)
+	}
+	if ln := learn(header(fRead.Add(-7 * time.Second))); ln.Kind != KindClockRead || ln.Read == nil || !ln.Read.Plain() || ln.From != (Place{}) {
+		t.Errorf("the header in another second in F: %s from %s whole=%v (%s); want learned as a plain read of the clock", ln.Kind, ln.From.Path, ln.From.Whole, ln.Why)
+	}
+
+	// The same header sent by a call of the test (not given by its harness):
+	// it stays where the value came from, as before (the incoming requests
+	// alone are read so).
+	sent := Earlier{Mock: "mock-5", Own: true, At: call.Add(-time.Second), Seen: []Seen{{Side: Request, Leaf: Leaf{Path: "header.X-Context", Noise: "header.X-Context", Type: String, Value: ctx(signed)}, Live: ctx(fRead.Add(-7 * time.Second)), Place: "header.X-Context"}}}
+	if ln := learn(sent); ln.From.Mock != "mock-5" || ln.From.Whole || ln.From.Path != "header.X-Context" {
+		t.Errorf("a call of the test sent the header: %s from %s %s whole=%v (%s); want the call kept as where the value came from, a part", ln.Kind, ln.From.Mock, ln.From.Path, ln.From.Whole, ln.Why)
+	}
+}
+
+// A client test's incoming request holding a value only in another form (a
+// line of its base64 text) is set aside as no copy (follows.refutePart) only
+// where nothing shows the two moved together in record's full round: where
+// F's text holds the value F saw inside a longer line, the two drifted
+// together by their words (coDrifted), and the request stays where the value
+// came from (a part, which the learn steps refuse to bind); where F's text
+// holds neither, the place is set aside and the word rule judges the value,
+// naming the request.
+func TestAnIncomingPartThatDriftedWithTheValueStaysItsPlace(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	call := time.Date(2026, 10, 31, 9, 50, 25, 300e6, time.UTC)
+	fCall := call.Add(FullRoundLead)
+	w := &Window{Rec: Span{From: call.Add(-5 * time.Millisecond), To: call}, F: Span{From: fCall.Add(-5 * time.Millisecond), To: fCall.Add(time.Millisecond)}}
+	const p = "body.docs.msgs.0.app.ref"
+	shape := func(v string) Shape {
+		return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: v}}}
+	}
+	b64 := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
+	gave := func(fText string) Earlier {
+		req := func(name string, at time.Time, v string) IncomingRequest {
+			return IncomingRequest{Name: name, At: at, Parts: []models.TestRequestPart{
+				{Name: "url", Recorded: "http://localhost:8080/v1/apps"},
+				{Name: "header.X-Ids", Recorded: v},
+			}}
+		}
+		return IncomingGiven("TestAuthorizationDirectives", []IncomingRequest{req("post-query-11", call.Add(-time.Second), b64("abc123\nk-1"))}, []IncomingRequest{req("", fCall.Add(-time.Second), b64(fText))}, true, call)
+	}
+	learn := func(e Earlier) Learned {
+		return ClassifyFollowing(clientTestCache(), []string{p}, shape("def456"), shape("abc123"), call, []Earlier{e}, nil, nil, w, nil)[0]
+	}
+	if ln := learn(gave("def456 x\nk-2")); !ln.From.Incoming || ln.From.Whole || ln.From.Path != "header.X-Ids" {
+		t.Errorf("F's text holds the value inside a longer line: %s from %s whole=%v (%s); want the request kept as where the value came from, a part", ln.Kind, ln.From.Path, ln.From.Whole, ln.Why)
+	}
+	if ln := learn(gave("zzz999\nk-2")); ln.Kind != KindUnaccounted || ln.From.Path != "" || !strings.Contains(ln.Why, "in incoming request post-query-11 of test TestAuthorizationDirectives at header.X-Ids") {
+		t.Errorf("F's text holds neither: %s from %s (%s); want the request set aside and the value refused naming it", ln.Kind, ln.From.Path, ln.Why)
+	}
+}

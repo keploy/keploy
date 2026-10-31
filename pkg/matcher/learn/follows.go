@@ -121,8 +121,10 @@ type follows struct {
 	refutedOf map[string]bool
 	// aside, where the search for the value's source went past a leaf that
 	// held its recorded value whole and that F saw hold another value
-	// (refuteSeen), names the first such leaf: what a value learned as noise
-	// or refused as an echo says of it.
+	// (refuteSeen), or a client test's incoming request that held it in
+	// another form F saw hold another value (refutePart), names the first
+	// such leaf: what a value learned as noise or refused as an echo says of
+	// it.
 	aside string
 	// moved, where the word rule let a word of the value go at a place F
 	// gave the application another value at that the value took none of the
@@ -304,7 +306,9 @@ const maxRefutedNamed = 8
 //
 // Everywhere else the place stays where the value came from, as before: fol
 // nil (the rule's absence), a part of the value (a part that drifted with it
-// moved with it in both runs: sources), a leaf F saw hold the value F saw,
+// moved with it in both runs: sources; a client test's incoming request that
+// held it in another form is read by refutePart), a leaf F saw hold the
+// value F saw,
 // and an instant its protocol types, whose text and the value's can write
 // one moment in two ways (dc.instantSource reads its moments). A place set
 // aside whose recorded times keploy cannot read, or that the recording
@@ -320,6 +324,35 @@ func (f *follows) refuteSeen(e Earlier, s Seen, whole bool, v *valueDrift) bool 
 			saw = ", where record's full round saw the application send another value than the value's"
 		}
 		f.aside = "its recorded value stands whole in " + placeAt(seenPlace(e, s, true)) + saw + ": a copy moves with its source, so the value is no copy of it"
+	}
+	f.source(e.Mock)
+	return true
+}
+
+// refutePart reports whether s, a leaf of a client test's incoming requests
+// (Earlier.Incoming; ev, what F saw drift there, nil for an instant its
+// protocol types) that holds v's recorded value only in another form
+// (heldInAnotherForm: whole in a line of another reading, or a clock read
+// whole in a token's base64 claims), is no place the value came from: in
+// record's full round that form of s's live value does not hold the value F
+// saw, and the two drifted together in no other way (coDrifted). A copy
+// moves with its source, as refuteSeen reads a whole one: a token the
+// harness sends with every request of the test holds the second its session
+// was signed in (auth_time), and a read of the application's clock in that
+// second as recorded, in another second than the token's in F, is no copy
+// of it. The search goes on past it, named as refuteSeen names a whole one,
+// and the value is then judged as a read of the clock, or followed from a
+// place F does see hold it (the token's auth_time claim where the two
+// seconds agree in both runs).
+//
+// The incoming requests alone are read so: a call's place found in another
+// form stays where the value came from, as before (sources).
+func (f *follows) refutePart(e Earlier, s Seen, whole bool, ev, v *valueDrift) bool {
+	if f == nil || whole || !e.Incoming || ev == nil || !heldInAnotherForm(ev, v, false) || heldInAnotherForm(ev, v, true) || coDrifted(ev, v) {
+		return false
+	}
+	if f.aside == "" {
+		f.aside = "its recorded value stands in another form inside " + placeAt(seenPlace(e, s, false)) + ", where record's full round gave the application a value that does not hold the value's in that form: a copy moves with its source, so the value is no copy of it"
 	}
 	f.source(e.Mock)
 	return true

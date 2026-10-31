@@ -618,11 +618,11 @@ func (s *setDerived) driftOf(rec, live string, lead bool) *valueDrift {
 // form, its words, its pieces and their words, its ids' words and its
 // instants.
 func driftBytes(d *valueDrift) int64 {
-	n := int64(unsafe.Sizeof(*d)) + int64(len(d.rec)+len(d.live)+len(d.decRec)+len(d.decLive)+len(d.encodedRec)+len(d.unparsed))
+	n := int64(unsafe.Sizeof(*d)) + int64(len(d.rec)+len(d.live)+len(d.decRec)+len(d.decLive)+len(d.encodedRec)+len(d.encodedLive)+len(d.unparsed))
 	for _, f := range d.forms {
 		n += headerBytes + int64(len(f[0])+len(f[1]))
 	}
-	for _, ws := range [][]map[string]bool{d.lost, d.gained, d.movedRec, d.movedLive, d.recTok, d.liveTok, {d.clock.rec, d.clock.live, d.wholes}} {
+	for _, ws := range [][]map[string]bool{d.lost, d.gained, d.movedRec, d.movedLive, d.recTok, d.liveTok, {d.clock.rec, d.clock.live, d.wholes, d.liveWholes}} {
 		for _, w := range ws {
 			n += wordsBytes(w)
 		}

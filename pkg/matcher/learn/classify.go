@@ -2618,14 +2618,15 @@ type valueDrift struct {
 	// begin (Window.begun), where the word rule lets every word of its runs
 	// go (clockChanged).
 	begun bool
-	// encodedRec is the text the recorded value's encoded runs decode to
-	// (b64Text), "" when none.
-	encodedRec string
+	// encodedRec and encodedLive are the text the recorded and the live
+	// value's encoded runs decode to (b64Text), "" when none.
+	encodedRec, encodedLive string
 	// unparsed says what of its drift the declared readings cannot read
 	// (unparsed).
 	unparsed string
-	// wholes are the value whole, recorded, in each declared form.
-	wholes map[string]bool
+	// wholes are the value whole, recorded, in each declared form that
+	// drifted; liveWholes the same of the live value.
+	wholes, liveWholes map[string]bool
 	// The value's instants (instants.go, readInstants): instants are those
 	// of its forms that changed; recKeys and liveKeys the moments its forms
 	// hold, recorded and live, and recMoments and liveMoments those moments
@@ -2952,7 +2953,7 @@ func newDrift(rec, live string, w *Window, lead bool, call time.Time, zone *time
 		merge(dclock)
 	}
 	forms, encoded := formsOf(rec, live, d.decRec, d.decLive, d.clock)
-	d.encodedRec = encoded[0]
+	d.encodedRec, d.encodedLive = encoded[0], encoded[1]
 	// The clock reads of every other form (the first is the decoded value,
 	// read above).
 	for _, f := range forms[1:] {
@@ -2989,22 +2990,7 @@ func newDrift(rec, live string, w *Window, lead bool, call time.Time, zone *time
 	// The value whole in each form (each line of its decoded text) that
 	// drifted: the same value whole in another place, in any reading, is
 	// followed. A line both sides hold (a JWT's header) did not drift.
-	liveLines := map[string]bool{}
-	for _, f := range forms {
-		for _, w := range strings.Split(f[1], "\n") {
-			liveLines[w] = true
-		}
-	}
-	for _, f := range forms {
-		for _, w := range strings.Split(f[0], "\n") {
-			if w != "" && !liveLines[w] {
-				if d.wholes == nil {
-					d.wholes = map[string]bool{}
-				}
-				d.wholes[w] = true
-			}
-		}
-	}
+	d.wholes, d.liveWholes = driftedLines(forms, 0), driftedLines(forms, 1)
 	for _, word := range readings {
 		lost, gained := map[string]bool{}, map[string]bool{}
 		recTok, liveTok := map[string]bool{}, map[string]bool{}
@@ -3154,18 +3140,35 @@ func sources(e, v *valueDrift) (found, whole bool) {
 	if e.rec == v.rec {
 		return true, true
 	}
-	// The same value whole in another reading (decoded, a base64 run's
-	// text): it flowed, and cannot be bound there.
-	for w := range v.wholes {
-		if e.wholes[w] {
-			return true, false
-		}
-	}
-	// A whole clock read standing whole in the other's base64 text (a
-	// JWT's iat): a whole repeated value, as in a payload.
-	if e.clock.whole && v.b64Holds(e) || v.clock.whole && e.b64Holds(v) {
+	if heldInAnotherForm(e, v, false) {
 		return true, false
 	}
+	return coDrifted(e, v), false
+}
+
+// heldInAnotherForm reports whether one of e and v holds the other's value
+// whole in another reading, recorded (live false) or as record's full round
+// saw them (live true): the same value whole in a line of another reading
+// (decoded, a base64 run's text), which flowed and cannot be bound there; or
+// a whole clock read standing whole in the other's base64 text (a JWT's
+// iat), a whole repeated value, as in a payload. Recorded, it reads one run
+// alone (sources); F's twin is what refutePart asks of a place found so.
+func heldInAnotherForm(e, v *valueDrift, live bool) bool {
+	ew, vw := e.wholes, v.wholes
+	if live {
+		ew, vw = e.liveWholes, v.liveWholes
+	}
+	for w := range vw {
+		if ew[w] {
+			return true
+		}
+	}
+	return e.clock.whole && v.b64Holds(e, live) || v.clock.whole && e.b64Holds(v, live)
+}
+
+// coDrifted reports whether e and v drifted together (sources' co-drift):
+// a moment, a word, a piece or the value whole, in both runs alike.
+func coDrifted(e, v *valueDrift) bool {
 	drifted := func(p run, rec, live string) bool {
 		return ContainsToken(rec, p.rec) && ContainsToken(live, p.live) && !ContainsToken(live, p.rec) && !ContainsToken(rec, p.live)
 	}
@@ -3178,7 +3181,7 @@ func sources(e, v *valueDrift) (found, whole bool) {
 	if !v.clock.whole && !e.clock.whole {
 		whole := run{v.rec, v.live}
 		if e.holdsMomentOf(v) || drifted(whole, e.rec, e.live) || v.decoded && drifted(run{v.decRec, v.decLive}, e.rec, e.live) || e.decoded && drifted(whole, e.decRec, e.decLive) {
-			return true, false
+			return true
 		}
 	}
 	for i := range readings {
@@ -3196,20 +3199,20 @@ func sources(e, v *valueDrift) (found, whole bool) {
 			}
 		}
 		if lost && gained {
-			return true, false
+			return true
 		}
 	}
 	for i, p := range v.pieces {
 		if !isClock(v.pieceWords[i], v.clock, e.clock) && (drifted(p, e.rec, e.live) || e.decoded && drifted(p, e.decRec, e.decLive)) {
-			return true, false
+			return true
 		}
 	}
 	for i, p := range e.pieces {
 		if !isClock(e.pieceWords[i], e.clock, v.clock) && (drifted(p, v.rec, v.live) || v.decoded && drifted(p, v.decRec, v.decLive)) {
-			return true, false
+			return true
 		}
 	}
-	return false, false
+	return false
 }
 
 // appeared is the earlier place of the test's recording the drifted value
@@ -3237,7 +3240,10 @@ func appeared(dc *DriftCache, recorded, now string, at time.Time, served []Earli
 // served as recorded (Seen.Live) is no place either way: it did not drift.
 // A leaf that held the recorded value whole is the value's source only where
 // it held the value F saw too: one F saw hold another value is set aside the
-// same way, and named so (follows.refuteSeen).
+// same way, and named so (follows.refuteSeen); and so is a client test's
+// incoming request that held it only in another form (a clock read whole in
+// a token's claims) where F saw that form hold another value
+// (follows.refutePart).
 func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, raw []Raw, fol *follows) (Place, bool) {
 	recorded := v.rec
 	// The place is where the value was sent whole, not where it was answered
@@ -3258,14 +3264,16 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 				continue
 			}
 			var ok, whole bool
+			var ev *valueDrift
 			if s.Leaf.Type == Instant {
 				// An instant its protocol types has no words: what v drifted
 				// with there is its moments (dc.instantSource).
 				ok, whole = dc.instantSource(s, v), s.Leaf.Value == recorded
 			} else {
-				ok, whole = sources(dc.of(s.Leaf.Value, s.Live), v)
+				ev = dc.of(s.Leaf.Value, s.Live)
+				ok, whole = sources(ev, v)
 			}
-			if !ok || fol.refuteSeen(e, s, whole, v) {
+			if !ok || fol.refuteSeen(e, s, whole, v) || fol.refutePart(e, s, whole, ev, v) {
 				continue
 			}
 			if r := placeRank(e, s, whole); r < rank {
@@ -4461,12 +4469,40 @@ var clockSpans = func(text string) [][]int {
 
 // b64Holds reports whether the text d's recorded encoded runs decode to
 // (a JWT's claims) holds the recorded value of o whole, as it stands
-// (containsWholeClock).
-func (d *valueDrift) b64Holds(o *valueDrift) bool {
+// (containsWholeClock); live: whether the text d's live runs decode to holds
+// o's live value so.
+func (d *valueDrift) b64Holds(o *valueDrift, live bool) bool {
+	if live {
+		return d.encodedLive != "" && (containsWholeClock(d.encodedLive, o.live) || o.decoded && containsWholeClock(d.encodedLive, o.decLive))
+	}
 	if d.encodedRec == "" {
 		return false
 	}
 	return containsWholeClock(d.encodedRec, o.rec) || o.decoded && containsWholeClock(d.encodedRec, o.decRec)
+}
+
+// driftedLines are the lines of the forms' side side (0 recorded, 1 live)
+// that no form's other side holds: the value whole in each form, nil when
+// none.
+func driftedLines(forms [][2]string, side int) map[string]bool {
+	other := map[string]bool{}
+	for _, f := range forms {
+		for _, w := range strings.Split(f[1-side], "\n") {
+			other[w] = true
+		}
+	}
+	var out map[string]bool
+	for _, f := range forms {
+		for _, w := range strings.Split(f[side], "\n") {
+			if w != "" && !other[w] {
+				if out == nil {
+					out = map[string]bool{}
+				}
+				out[w] = true
+			}
+		}
+	}
+	return out
 }
 
 // ReadBack is where a value of a recorded answer was written earlier in this
