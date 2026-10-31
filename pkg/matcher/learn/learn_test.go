@@ -1819,11 +1819,12 @@ func array(s Shape, paths ...string) Shape {
 
 // TestPairNamesTheRecordingAMissIsClosestTo: a request that differs from every
 // recording of its key in more than values is a miss naming the recording it
-// is closest to, never merely the first. Read in the round F of a T2 replay:
-// an app's delete event, written to the audit collection every event of the
-// app is written to, missed with "app.appLevelAssertions's kind differs"
-// against an earlier config-update event of another operation, while the
-// delete event's own recording, differing in one field, went unnamed.
+// is closest to, never merely the first. Seen replaying a recording right
+// after it was made: an app's delete event, written to the audit collection
+// every event of the app is written to, missed with "app.appLevelAssertions's
+// kind differs" against an earlier config-update event of another operation,
+// while the delete event's own recording, differing in one field, went
+// unnamed.
 func TestPairNamesTheRecordingAMissIsClosestTo(t *testing.T) {
 	live := body(t, "k", `{"event":"DeleteApp","version":4,"app":{"id":"a","name":"n"},"delta":{"deleted":true}}`)
 	update := array(body(t, "k", `{"event":"SystemConfigUpdate","version":3,"app":{"id":"a","name":"n","assertions":[{"k":"x"}]},"delta":{"assertions":[{"k":"x"}]}}`),
@@ -1835,7 +1836,7 @@ func TestPairNamesTheRecordingAMissIsClosestTo(t *testing.T) {
 		if r.Outcome != Miss || r.Reason != models.MissRequestChanged || r.Index != 1 {
 			t.Fatalf("%+v", r)
 		}
-		if r.Diff.Structural != "body.delta.assertions's kind (an array or a document) differs" ||
+		if r.Diff.Structural != "body.delta.assertions is missing" ||
 			r.Why != "it differs from the closest recorded call in more than values: body.delta.assertions is missing" {
 			t.Fatalf("structural %q, why %q", r.Diff.Structural, r.Why)
 		}
@@ -1900,9 +1901,9 @@ func withFixed(s Shape, name, value string) Shape {
 }
 
 // distance is how many places live differs from rec in more than values,
-// as a miss counts them (compare), and how many leaves drifted.
+// as a miss counts them (missPlaces), and how many leaves drifted.
 func distance(live, rec Shape, known Known) (structural, drifted int) {
-	d, places := compare(live, rec, known, true)
+	d, places := missPlaces(live, rec, known)
 	return len(places), len(d.Drift)
 }
 
@@ -1926,13 +1927,14 @@ func TestDistance(t *testing.T) {
 	}{
 		{"same", array(body(t, "k", `{"id":"a","n":1,"opt":"x","l":[1]}`), "body.l"), nil, 0, 0},
 		{"values drifted", array(body(t, "k", `{"id":"b","n":2,"opt":"x","l":[1]}`), "body.l"), nil, 0, 2},
-		// body.l's kind, body.l[0] missing, body.l.0 added, body.n's type, body.new added, body.opt missing
-		{"every place counts, past the first", body(t, "k", `{"id":"b","n":"1","new":1,"l":{"0":1}}`), nil, 6, 1},
+		// body.l became a document, body.n a string, body.new added, body.opt missing
+		{"every place counts, past the first", body(t, "k", `{"id":"b","n":"1","new":1,"l":{"0":1}}`), nil, 4, 1},
 		{"a field missing whole is one place, however many leaves and fixed parts it holds", array(body(t, "k", `{"id":"a","n":1,"opt":"x","l":[1],"big":{"a":1,"b":[1,2,3]}}`), "body.l", "body.big.b"), nil, 1, 0},
 		{"a leaf the live side lacks", array(body(t, "k", `{"id":"a","n":1,"l":[1]}`), "body.l"), nil, 1, 0},
 		{"every fixed part not shared", withFixed(body(t, "k", `{"id":"a","n":1,"opt":"x","l":[1]}`), "media type", "text/plain"), nil, 2, 0},
 		{"noise that may be absent is no place", array(body(t, "k", `{"id":"a","n":1,"l":[1]}`), "body.l"), declared{"body.opt": true}, 0, 0},
 		{"known noise keeps its type", array(body(t, "k", `{"id":7,"n":1,"opt":"x","l":[1]}`), "body.l"), known{"body.id": true}, 1, 0},
+		{"known noise is never missing", array(body(t, "k", `{"id":"a","n":1,"l":[1]}`), "body.l"), known{"body.opt": true}, 1, 0},
 		{"a drift no path names alone", array(body(t, "k", `{"id":"a","n":1,"opt":"x","l":[1],"a.b":2}`), "body.l"), nil, 1, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1955,13 +1957,13 @@ func TestDistance(t *testing.T) {
 		name, live, rec string
 		places          []string
 	}{
-		{"a scalar that became a document is one place each way", `{"x":{"a":1,"b":2,"c":3}}`, `{"x":1}`,
-			[]string{"body.x is missing", "body.x is not in the recording"}},
+		{"a scalar that became a document is one place, said as the change", `{"x":{"a":1,"b":2,"c":3}}`, `{"x":1}`,
+			[]string{"body.x was a number, is a document"}},
 		{"keys holding a dot are never cut into a field neither side has", `{"a":1}`, `{"a":1,"z.b":1,"z.c":1}`,
 			[]string{"body.z.b is missing", "body.z.c is missing"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, places := compare(body(t, "k", tc.live), body(t, "k", tc.rec), nil, true); !reflect.DeepEqual(places, tc.places) {
+			if _, places := missPlaces(body(t, "k", tc.live), body(t, "k", tc.rec), nil); !reflect.DeepEqual(places, tc.places) {
 				t.Fatalf("places %q, want %q", places, tc.places)
 			}
 		})
@@ -1973,15 +1975,227 @@ func TestDistance(t *testing.T) {
 		}
 	})
 	t.Run("a body's keys are a place only when nothing else is", func(t *testing.T) {
-		_, places := compare(withKeys(t, body(t, "k", `{"a":1}`)), withKeys(t, body(t, "k", `{"a":1,"y":2}`)), nil, true)
+		_, places := missPlaces(withKeys(t, body(t, "k", `{"a":1}`)), withKeys(t, body(t, "k", `{"a":1,"y":2}`)), nil)
 		if !reflect.DeepEqual(places, []string{"body.y is missing"}) {
 			t.Fatalf("places %q", places)
 		}
 		rec := withKeys(t, body(t, "k", `{"a":1}`))
 		rec.Leaves["body{keys}"] = Leaf{Path: "body{keys}", Type: Keys, Value: "b", Unnamed: true}
 		live := withKeys(t, body(t, "k", `{"a":1}`))
-		if _, places := compare(live, rec, nil, true); len(places) != 1 || !strings.Contains(places[0], "no path names it alone") {
+		if _, places := missPlaces(live, rec, nil); len(places) != 1 || !strings.Contains(places[0], "no path names it alone") {
 			t.Fatalf("places %q", places)
+		}
+		if _, places := missPlaces(withFixed(live, "media type", "text/plain"), rec, nil); !reflect.DeepEqual(places, []string{"media type differs"}) {
+			t.Fatalf("beside a fixed part: places %q", places)
+		}
+	})
+}
+
+// flat builds a shape the way a protocol that joins an array's elements
+// with '.' and walks a typed scalar as a document does (the Mongo adapter):
+// leaves by path (a leading '!': unnamed) as type and value ("n:1"), the
+// fixed parts and the kinds it names.
+func flat(fixed, kinds map[string]string, leaves ...string) Shape {
+	s := Shape{Key: "k", Fixed: map[string]string{}, Leaves: map[string]Leaf{}, Kinds: kinds}
+	for n, v := range fixed {
+		s.Fixed[n] = v
+	}
+	for i := 0; i+1 < len(leaves); i += 2 {
+		p, unnamed := strings.CutPrefix(leaves[i], "!")
+		tv := strings.SplitN(leaves[i+1], ":", 2)
+		s.Leaves[p] = Leaf{Path: p, Noise: p, Type: Type(tv[0][0]), Value: tv[1], Unnamed: unnamed}
+	}
+	return s
+}
+
+// TestMissPlacesSayAKindChangeOnce: a value whose kind changed is one place,
+// worded as the change, however its leaves and fixed parts show it, so a
+// miss never says a field is missing and not in the recording at once, and
+// a re-typed value counts as one place, as a field added or removed does.
+func TestMissPlacesSayAKindChangeOnce(t *testing.T) {
+	arrayKind := map[string]string{"body.l's kind (an array or a document)": "array"}
+	for _, tc := range []struct {
+		name      string
+		live, rec Shape
+		known     Known
+		places    []string
+	}{
+		{"a number that became a document", body(t, "k", `{"a":{"b":1}}`), body(t, "k", `{"a":1}`), nil,
+			[]string{"body.a was a number, is a document"}},
+		{"a document that became a number", body(t, "k", `{"a":1}`), body(t, "k", `{"a":{"b":1,"c":2}}`), nil,
+			[]string{"body.a was a document, is a number"}},
+		{"a document that became an array", body(t, "k", `{"a":[1]}`), body(t, "k", `{"a":{"0":1}}`), nil,
+			[]string{"body.a was a document, is an array"}},
+		{"an array that became a document, its kind a fixed part", body(t, "k", `{"l":{"0":1}}`), array(body(t, "k", `{"l":[1]}`), "body.l"), nil,
+			[]string{"body.l was an array, is a document"}},
+		{"an empty array that became an empty document", body(t, "k", `{"a":{}}`), body(t, "k", `{"a":[]}`), nil,
+			[]string{"body.a was an empty array, is an empty document"}},
+		{"a number that became a string", body(t, "k", `{"n":"1"}`), body(t, "k", `{"n":1}`), nil,
+			[]string{"body.n was a number, is a string"}},
+		{"a field added to an empty document", body(t, "k", `{"a":{"b":1,"c":2}}`), body(t, "k", `{"a":{}}`), nil,
+			[]string{"body.a was an empty document, is a document"}},
+		{"the last field of a document removed", body(t, "k", `{"a":{}}`), body(t, "k", `{"a":{"b":1}}`), nil,
+			[]string{"body.a was a document, is an empty document"}},
+		{"an empty document filled only with noise", body(t, "k", `{"a":{"b":1}}`), body(t, "k", `{"a":{}}`), declared{"body.a.b": true},
+			[]string{"body.a was an empty document, is a document"}},
+		{"a document emptied of its noise", body(t, "k", `{"a":{}}`), body(t, "k", `{"a":{"b":1}}`), declared{"body.a.b": true},
+			[]string{"body.a was a document, is an empty document"}},
+		{"a kind change inside a field the other side lacks is that field", body(t, "k", `{"x":1}`), body(t, "k", `{"x":1,"a":{"b":[1]}}`), nil,
+			[]string{"body.a is missing"}},
+		{"a typed scalar that became another, as its adapter names them",
+			flat(nil, map[string]string{"body.k": "a 64-bit integer"}, "body.k.$numberLong", "s:1"),
+			flat(nil, map[string]string{"body.k": "a 32-bit integer"}, "body.k.$numberInt", "s:1"), nil,
+			[]string{"body.k was a 32-bit integer, is a 64-bit integer"}},
+		{"a typed scalar that became a string",
+			flat(nil, nil, "body.k", "s:1"),
+			flat(nil, map[string]string{"body.k": "a 32-bit integer"}, "body.k.$numberInt", "s:1"), nil,
+			[]string{"body.k was a 32-bit integer, is a string"}},
+		{"an array its elements joined with '.' that became a document",
+			flat(nil, nil, "body.l.a", "n:1"),
+			flat(arrayKind, map[string]string{"body.l": "an array"}, "body.l.0", "n:1"), nil,
+			[]string{"body.l was an array, is a document"}},
+		{"an array that became a document of the same leaves: only a fixed part differs",
+			flat(nil, nil, "body.l.0", "s:x"),
+			flat(arrayKind, map[string]string{"body.l": "an array"}, "body.l.0", "s:x"), nil,
+			[]string{"body.l was an array, is a document"}},
+		{"an array its elements joined with '.', in the request only",
+			flat(arrayKind, map[string]string{"body.l": "an array"}, "body.l.0", "s:x"),
+			flat(nil, nil, "body.l.0", "s:x"), nil,
+			[]string{"body.l was a document, is an array"}},
+		{"a fixed part of a path whose kind did not change is said by its name",
+			flat(map[string]string{"body.l's kind (an array or a document)": "array", `body.l's dotted key "a.b"`: "dotted"}, map[string]string{"body.l": "an array"}, "body.l.0", "s:x"),
+			flat(arrayKind, map[string]string{"body.l": "an array"}, "body.l.0", "s:x"), nil,
+			[]string{`body.l's dotted key "a.b" differs`}},
+		{"a fixed part named after no path whose kind changed is said by its name",
+			withFixed(flat(nil, map[string]string{"body.k": "a 64-bit integer"}, "body.k.$numberInt", "s:1"), "media type", "text/plain"),
+			flat(nil, map[string]string{"body.k": "a 32-bit integer"}, "body.k.$numberInt", "s:1"), nil,
+			[]string{"media type differs"}},
+		{"a key holding a dot whose value changed type", body(t, "k", `{"d.ot":"1"}`), body(t, "k", `{"d.ot":1}`), nil,
+			[]string{"body.d.ot was a number, is a string"}},
+		{"a value beside a key holding a dot under its path is the value's kind", body(t, "k", `{"a":1,"a.b":2}`), body(t, "k", `{"a":{"z":1},"a.b":2}`), nil,
+			[]string{"body.a was a document, is a number"}},
+		{"a dotted key beside an array is no document", body(t, "k", `{"a":[1],"a.b":2}`), body(t, "k", `{"a":[1,2]}`), nil,
+			[]string{"body.a.b is not in the recording", "body.a[1] is missing"}},
+		{"a dotted key added to an empty document is that one change", body(t, "k", `{"a":{"x.y":1}}`), body(t, "k", `{"a":{}}`), nil,
+			[]string{"body.a was an empty document, is a document"}},
+		{"a path only dotted keys are under holds what the other side adds under it", body(t, "k", `{"a":1}`), body(t, "k", `{"z.b":1}`), nil,
+			[]string{"body.a is not in the recording", "body.z.b is missing"}},
+		{"a document filled with noise is said in its path's order", body(t, "k", `{"a":{"n":1},"b":1}`), body(t, "k", `{"a":{},"b":1,"c":1}`), declared{"body.a.n": true},
+			[]string{"body.a was an empty document, is a document", "body.c is missing"}},
+		{"a leaf's type change the adapter's kinds name alike is said by its leaves",
+			flat(nil, map[string]string{"body.k": "a value"}, "body.k", "s:1"),
+			flat(nil, map[string]string{"body.k": "a value"}, "body.k", "n:1"), nil,
+			[]string{"body.k was a number, is a string"}},
+		{"an array that became a document, two of its fixed parts showing it",
+			flat(nil, nil, "body.l.0", "s:x"),
+			flat(map[string]string{"body.l's kind (an array or a document)": "array", `body.l's dotted key "a.b"`: "dotted"}, map[string]string{"body.l": "an array"}, "body.l.0", "s:x"), nil,
+			[]string{"body.l was an array, is a document"}},
+		{"a fixed part of a path the other side holds only under dotted keys is said by its name",
+			flat(nil, nil, "!body.l.x.y", "s:1"),
+			flat(arrayKind, map[string]string{"body.l": "an array"}, "body.l.0", "s:x"), nil,
+			[]string{"body.l's kind (an array or a document) differs", "body.l.0 is missing", "body.l.x.y is not in the recording"}},
+		{"a scalar that became a document of dotted keys and noise", body(t, "k", `{"x":1}`), body(t, "k", `{"x":{"a.b":1}}`), declared{"body.x.a.b": true},
+			[]string{"body.x was a document, is a number"}},
+		{"a dotted key at the root, a field of its first word on the other side", body(t, "k", `{"a":1}`), body(t, "k", `{"a.b":1}`), nil,
+			[]string{"body.a is not in the recording", "body.a.b is missing"}},
+		{"a dotted key beside a document emptied of its noise", body(t, "k", `{"a":{}}`), body(t, "k", `{"a":{"n":1},"a.b":1}`), declared{"body.a.n": true},
+			[]string{"body.a was a document, is an empty document", "body.a.b is missing"}},
+		{"a document of dotted keys that became a number is one place", body(t, "k", `{"a":1}`), body(t, "k", `{"a":{"x.y":1,"z":1}}`), nil,
+			[]string{"body.a was a document, is a number"}},
+		{"a missing document of dotted keys is one place", body(t, "k", `{"q":1}`), body(t, "k", `{"q":1,"a":{"x.y":1,"z":1}}`), nil,
+			[]string{"body.a is missing"}},
+		{"an array of documents of dotted keys that became a number", body(t, "k", `{"a":1}`), body(t, "k", `{"a":[{"x.y":1}]}`), nil,
+			[]string{"body.a was an array, is a number"}},
+		{"a body that became JSON is one place, its media type with it",
+			body(t, "k", `{"a":1}`), Shape{Key: "k", Fixed: map[string]string{"body": "text"}, Leaves: map[string]Leaf{}}, nil,
+			[]string{"body is not in the recording"}},
+		{"a kind the adapter names alike on both sides is no change",
+			flat(nil, map[string]string{"body.k": "a 32-bit integer"}, "body.k.$numberInt", "s:2"),
+			flat(nil, map[string]string{"body.k": "a 32-bit integer"}, "body.k.$numberInt", "s:1"), nil,
+			nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, places := missPlaces(tc.live, tc.rec, tc.known)
+			if !reflect.DeepEqual(places, tc.places) {
+				t.Fatalf("places %q, want %q", places, tc.places)
+			}
+			if c := Compare(tc.live, tc.rec, tc.known); (c.Structural == "") != (len(places) == 0) {
+				t.Fatalf("Compare's structural %q disagrees with places %q", c.Structural, places)
+			}
+			if len(places) > 0 && d.Structural != places[0] {
+				t.Fatalf("structural %q, want the first place %q", d.Structural, places[0])
+			}
+		})
+	}
+}
+
+// TestMissPlacesReadAPathSpelledBothWaysAsADocument: a key holding '[' beside
+// a document's field spells its path as an array's and a document's; it is
+// read as the document, whichever leaf is read first: the key's '[' is its
+// own.
+func TestMissPlacesReadAPathSpelledBothWaysAsADocument(t *testing.T) {
+	for i := 0; i < 32; i++ {
+		_, places := missPlaces(body(t, "k", `{"a":{"y":1}}`), body(t, "k", `{"a":{"x":1},"a[0]":1}`), nil)
+		if !reflect.DeepEqual(places, []string{"body.a.x is missing", "body.a.y is not in the recording", "body.a[0] is missing"}) {
+			t.Fatalf("places %q", places)
+		}
+	}
+}
+
+// TestMissPlacesReadAPathTwoValuesSpellAlike: a key "a.b" beside a holding
+// b spell one path; the place a miss names for it is the same whichever is
+// read first.
+func TestMissPlacesReadAPathTwoValuesSpellAlike(t *testing.T) {
+	for i := 0; i < 32; i++ {
+		if _, places := missPlaces(body(t, "k", `{"q":1}`), body(t, "k", `{"q":1,"a":{"b":1},"a.b":1}`), nil); !reflect.DeepEqual(places, []string{"body.a.b is missing"}) {
+			t.Fatalf("places %q", places)
+		}
+	}
+}
+
+// TestPairCountsEachPlaceOnce: the places a miss counts are uniform, so
+// the recording it is closest to is never passed over for how its
+// differences are spelled.
+func TestPairCountsEachPlaceOnce(t *testing.T) {
+	const why = "it differs from the closest recorded call in more than values: "
+	t.Run("the call's own recording, one value re-typed, over one lacking two fields", func(t *testing.T) {
+		live := body(t, "k", `{"id":"a","n":{"x":1},"p":1,"q":1}`)
+		r := Pair(live, []Candidate{
+			cand(body(t, "k", `{"id":"a","n":{"x":1}}`), true),
+			cand(body(t, "k", `{"id":"a","n":1,"p":1,"q":1}`), true),
+		})
+		if r.Outcome != Miss || r.Index != 1 || r.Why != why+"body.n was a number, is a document" || r.Diff.Structural != "body.n was a number, is a document" {
+			t.Fatalf("%+v", r)
+		}
+	})
+	t.Run("drift past the first place decides between recordings as far", func(t *testing.T) {
+		live := body(t, "k", `{"a":1,"new":1,"z":5}`)
+		r := Pair(live, []Candidate{
+			cand(body(t, "k", `{"a":1,"z":9}`), true),
+			cand(body(t, "k", `{"a":1,"z":5}`), true),
+		})
+		if r.Outcome != Miss || r.Index != 1 || len(r.Diff.Drift) != 0 {
+			t.Fatalf("%+v", r)
+		}
+		r = Pair(live, []Candidate{cand(body(t, "k", `{"a":1,"z":9}`), true)})
+		if r.Index != 0 || !reflect.DeepEqual(r.Diff.Drift, []string{"body.z"}) {
+			t.Fatalf("the whole reading's drift: %+v", r)
+		}
+		// Each read whole: the first drifted in one value past body.new,
+		// the second in two.
+		live = body(t, "k", `{"a":1,"new":1,"y":1,"z":5}`)
+		r = Pair(live, []Candidate{
+			cand(body(t, "k", `{"a":1,"y":1,"z":9}`), true),
+			cand(body(t, "k", `{"a":1,"y":2,"z":9}`), true),
+		})
+		if r.Outcome != Miss || r.Index != 0 {
+			t.Fatalf("%+v", r)
+		}
+	})
+	t.Run("fixed parts are named before the leaves", func(t *testing.T) {
+		r := Pair(withFixed(body(t, "k", `{"a":1}`), "media type", "text/plain"), []Candidate{cand(body(t, "k", `{"a":1,"b":1}`), true)})
+		if r.Why != why+"media type differs; also body.b is missing" {
+			t.Fatalf("why %q", r.Why)
 		}
 	})
 }

@@ -31,7 +31,9 @@ package learn
 
 import (
 	"fmt"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -94,6 +96,15 @@ type Shape struct {
 	// Body is the decoded JSON body (numbers as json.Number), for the order
 	// rule. nil when the body is not JSON.
 	Body interface{}
+	// Kinds name, by path, the kind of a value its leaves' paths do not
+	// tell, in a miss's words ("an array", "a 64-bit integer"): a protocol
+	// that joins an array's elements with '.', as a document's fields, or
+	// walks a typed scalar as the document it is encoded as. A path its
+	// leaves are not under is never named. Kinds only name: a miss says a
+	// value at such a path changed kind as one place (missPlaces); what
+	// pairs is decided by the leaves and fixed parts alone. nil when the
+	// leaves tell every kind.
+	Kinds map[string]string
 }
 
 // Known says which leaves a comparison excuses: noise keploy.yml declares,
@@ -152,40 +163,42 @@ func insideAny(path string, arrays []string) bool {
 	return false
 }
 
-// Compare says how live differs from rec, excusing what known excuses.
+// Compare says how live differs from rec, excusing what known excuses. It
+// stops at the first place they differ in more than values, which
+// Diff.Structural names; missPlaces reads on past it.
 func Compare(live, rec Shape, known Known) Diff {
-	d, _ := compare(live, rec, known, false)
-	return d
-}
-
-// compare is Compare, which stops at the first place live differs from rec
-// in more than values (Diff.Structural names it). With all it reads on past
-// it, and places are then every such place, as a miss names them: each
-// field on one side only once, however many leaves and fixed parts it holds
-// (fieldPlace, within), each change of type, each fixed part not shared
-// that no such field holds, and each drift no path names alone; first the
-// fixed parts, then the leaves by path. The shadow of a field on one side
-// only in a body's keys (a Keys leaf) is a place only when nothing else is.
-// Drift is then every drifted leaf, and Reordered is left empty (the order
-// rule reads only a request that differs in values alone). places is empty
-// exactly when Structural is "". Without all, places holds the first place
-// at most.
-func compare(live, rec Shape, known Known, all bool) (d Diff, places []string) {
 	if known == nil {
 		known = None
 	}
-	structural := func(why string) bool {
-		if d.Structural == "" {
-			d.Structural = why
+	var d Diff
+	if names := fixedDiffering(live.Fixed, rec.Fixed, false); len(names) > 0 {
+		d.Structural = names[0] + " differs"
+		return d
+	}
+	for _, p := range leafPaths(live, rec) {
+		switch c, _, _ := leafChange(p, live, rec, known); c {
+		case leafSame:
+			continue
+		case leafOnlyLive:
+			d.Structural = p + " is not in the recording"
+		case leafOnlyRec:
+			d.Structural = p + " is missing"
+		case leafRetyped:
+			d.Structural = p + " changed type"
+		case leafUnnamedDrift:
+			d.Structural = p + " drifted, and no path names it alone"
+		case leafDrifted:
+			d.Drift = append(d.Drift, p)
+			continue
 		}
-		places = append(places, why)
-		return !all
+		return d
 	}
-	fixed := fixedDiffering(live.Fixed, rec.Fixed, all)
-	if !all && len(fixed) > 0 {
-		structural(fixed[0] + " differs")
-		return d, places
-	}
+	d.Reordered = reorderedArrays(rec.Body, live.Body, known)
+	return d
+}
+
+// leafPaths are the paths of both shapes' leaves, sorted, each once.
+func leafPaths(live, rec Shape) []string {
 	paths := make([]string, 0, len(rec.Leaves)+len(live.Leaves))
 	for p := range rec.Leaves {
 		paths = append(paths, p)
@@ -196,141 +209,350 @@ func compare(live, rec Shape, known Known, all bool) (d Diff, places []string) {
 		}
 	}
 	sort.Strings(paths)
-	// With all: the fields on one side only, by path, each with the place
-	// that names it; each side's containers (fieldPlace); a body's keys
-	// that drifted.
-	var fields []string
-	var fieldWhy map[string]string
-	var liveHas, recHas map[string]bool
-	var keys []string
-	var leafPlaces []string
-	for _, p := range paths {
-		r, inRec := rec.Leaves[p]
-		l, inLive := live.Leaves[p]
-		ref := r
-		if !inRec {
-			ref = l
+	return paths
+}
+
+// leafDiff is how one leaf differs, as Compare and missPlaces read it alike.
+type leafDiff byte
+
+const (
+	leafSame         leafDiff = iota // equal, or excused
+	leafDrifted                      // its value drifted
+	leafOnlyLive                     // not in the recording
+	leafOnlyRec                      // missing from the request
+	leafRetyped                      // its type changed
+	leafUnnamedDrift                 // drifted where no path names it alone
+)
+
+// leafChange is how the leaf at p differs between live and rec, excusing
+// what known excuses: an untyped excuse lets it drift, change type or be
+// missing from either side; a typed one lets it drift only.
+func leafChange(p string, live, rec Shape, known Known) (c leafDiff, l, r Leaf) {
+	r, inRec := rec.Leaves[p]
+	l, inLive := live.Leaves[p]
+	ref := r
+	if !inRec {
+		ref = l
+	}
+	excused, typed := known.Excused(ref)
+	switch {
+	case !inRec || !inLive:
+		if excused && !typed {
+			return leafSame, l, r
 		}
-		excused, typed := known.Excused(ref)
-		switch {
-		case !inRec || !inLive:
-			if excused && !typed {
-				continue
-			}
-			why, lacking, lacks := " is missing", live.Leaves, &liveHas
-			if !inRec {
-				why, lacking, lacks = " is not in the recording", rec.Leaves, &recHas
-			}
-			if !all {
-				structural(p + why)
-				return d, places
-			}
-			if d.Structural == "" {
-				d.Structural = p + why
-			}
-			f := p
-			if !ref.Unnamed {
-				if *lacks == nil {
-					*lacks = containersOf(lacking)
-				}
-				f = fieldPlace(p, *lacks)
-			}
-			if fieldWhy == nil {
-				fieldWhy = map[string]string{}
-			}
-			if _, seen := fieldWhy[f+why]; !seen {
-				fieldWhy[f+why] = f + why
-				fields = append(fields, f)
-				leafPlaces = append(leafPlaces, f+why)
-			}
+		if !inRec {
+			return leafOnlyLive, l, r
+		}
+		return leafOnlyRec, l, r
+	case l.Type != r.Type:
+		if excused && !typed {
+			return leafSame, l, r
+		}
+		return leafRetyped, l, r
+	case l.Value == r.Value || excused:
+		return leafSame, l, r
+	case r.Unnamed:
+		return leafUnnamedDrift, l, r
+	}
+	return leafDrifted, l, r
+}
+
+// missPlaces is how live differs from rec read whole, for a miss to name:
+// places are every place they differ in more than values, as the leaves
+// and fixed parts Compare reads show them, each named once:
+//   - a field on one side only, at the outermost path holding it that the
+//     other side holds nothing at ("body.a is missing"), however many
+//     leaves and fixed parts it holds;
+//   - a value whose kind changed, at the outermost path holding it whose
+//     kind differs (kindsOf), worded as the change ("body.a was a
+//     document, is an array"), however its leaves and fixed parts show it:
+//     a scalar that became a document, a document that became an array or
+//     empty, a number that became a string, one typed scalar that became
+//     another (as the adapter's Kinds name them);
+//   - a fixed part not shared that no such place holds, by its name, or,
+//     named after a path whose kind differs as the adapter's Kinds name
+//     it, as that change (a Mongo field holding an array one side, a
+//     document the other);
+//   - a drift no path names alone.
+//
+// First the fixed parts, then the leaves by path. The shadow of a field on
+// one side only in a body's keys (a Keys leaf) is a place only when nothing
+// else is. Diff.Structural is the first place, Drift every drifted leaf, and
+// Reordered empty (the order rule reads only a request that differs in
+// values alone). places is empty exactly when Compare's Structural is "":
+// both read each leaf and fixed part alike (leafChange, fixedDiffering),
+// and each leaf or fixed part that differs is a place or inside one.
+func missPlaces(live, rec Shape, known Known) (d Diff, places []string) {
+	if known == nil {
+		known = None
+	}
+	recKinds, liveKinds := kindsOf(rec), kindsOf(live)
+	// held are the paths the field and kind places are at: a fixed part
+	// named after one is theirs. said is every place named, once.
+	var held, keys []string
+	said := map[string]bool{}
+	say := func(at, why string) {
+		held = append(held, at)
+		if !said[why] {
+			said[why] = true
+			places = append(places, why)
+		}
+	}
+	var leafPlaces []string
+	for _, p := range leafPaths(live, rec) {
+		c, l, r := leafChange(p, live, rec, known)
+		switch c {
+		case leafSame:
 			continue
-		case l.Type != r.Type:
-			if excused && !typed {
-				continue
-			}
-			if !all {
-				structural(p + " changed type")
-				return d, places
-			}
-			if d.Structural == "" {
-				d.Structural = p + " changed type"
-			}
-			leafPlaces = append(leafPlaces, p+" changed type")
+		case leafDrifted:
+			d.Drift = append(d.Drift, p)
 			continue
-		case l.Value == r.Value || excused:
-			continue
-		case r.Unnamed:
+		case leafUnnamedDrift:
 			why := p + " drifted, and no path names it alone"
-			if !all {
-				structural(why)
-				return d, places
-			}
-			if d.Structural == "" {
-				d.Structural = why
-			}
 			if r.Type == Keys {
 				keys = append(keys, why)
 			} else {
-				leafPlaces = append(leafPlaces, why)
+				say(p, why)
 			}
 			continue
 		}
-		d.Drift = append(d.Drift, p)
-	}
-	for _, name := range fixed {
-		if !withinAny(name, fields) {
-			places = append(places, name+" differs")
+		at, why, ok := placeOf(p, c, recKinds, liveKinds)
+		if !ok {
+			// Both sides hold every path down to p alike (Kinds name p
+			// alike, or a path's kind is not known): p's own change.
+			at, why = p, p+" is not in the recording"
+			switch c {
+			case leafOnlyRec:
+				why = p + " is missing"
+			case leafRetyped:
+				why = p + " was " + kindNames[r.Type] + ", is " + kindNames[l.Type]
+			}
 		}
+		say(at, why)
 	}
-	if len(fixed) > 0 {
-		d.Structural = fixed[0] + " differs"
+	leafPlaces, places = places, nil
+	var kindPaths []string
+	for _, name := range fixedDiffering(live.Fixed, rec.Fixed, true) {
+		if withinAny(name, held) {
+			continue
+		}
+		why := name + " differs"
+		if kindPaths == nil {
+			kindPaths = kindsNamed(rec, live)
+		}
+		if at, kindWhy, ok := kindChangeHolding(name, kindPaths, recKinds, liveKinds); ok {
+			// The other fixed parts named after at are this place too.
+			held, why = append(held, at), kindWhy
+		}
+		places = append(places, why)
 	}
 	places = append(places, leafPlaces...)
 	if len(places) == 0 {
 		places = keys
 	}
-	if d.Structural == "" {
-		d.Reordered = reorderedArrays(rec.Body, live.Body, known)
+	if len(places) > 0 {
+		d.Structural = places[0]
 	}
 	return d, places
 }
 
-// containersOf is every path that holds a leaf of leaves: a leaf's path cut
-// where an object key or an array position begins ("a", "a.b" and "a.b[0]"
-// of "a.b[0].c"; "a" and "a.0" of "a.0.c").
-func containersOf(leaves map[string]Leaf) map[string]bool {
-	out := make(map[string]bool, len(leaves))
-	for p := range leaves {
+// kindNames name a leaf's type as a miss says what a value was and is.
+var kindNames = map[Type]string{
+	String: "a string", Number: "a number", Bool: "a boolean", Null: "null",
+	EmptyObj: "an empty document", EmptyArray: "an empty array", Keys: "keys", Instant: "an instant",
+}
+
+// docKind and arrayKind are the kinds of a path that holds leaves.
+const (
+	docKind   = "a document"
+	arrayKind = "an array"
+)
+
+// bodyRoot is the path a Shape's decoded Body is at (JSONLeaves' root).
+const bodyRoot = "body"
+
+// kindsOf is the kind of every path of s that holds a value: what s.Kinds
+// names there; else, in a decoded Body, the kind of the value at each of its
+// paths, spelled as JSONLeaves spells them (so a key holding '.', '[' or ']'
+// is one step, and only its own path is held); else a leaf's, by its type
+// (kindNames); else, for a path other leaves are under, a document or an
+// array as their paths go on from it ('.' or '['; a document when both
+// do), held with no kind ("") when only unnamed leaves are under it.
+func kindsOf(s Shape) kinds {
+	out := make(map[string]string, 2*len(s.Leaves))
+	var parent map[string]string
+	inBody := func(p string) bool {
+		return s.Body != nil && (p == bodyRoot || strings.HasPrefix(p, bodyRoot+".") || strings.HasPrefix(p, bodyRoot+"["))
+	}
+	for p, l := range s.Leaves {
+		if inBody(p) {
+			continue
+		}
 		for i := 1; i < len(p); i++ {
-			if p[i] == '.' || p[i] == '[' {
-				out[p[:i]] = true
+			switch {
+			case p[i] != '.' && p[i] != '[':
+			case l.Unnamed:
+				if _, ok := out[p[:i]]; !ok {
+					out[p[:i]] = ""
+				}
+			case p[i] == '.':
+				out[p[:i]] = docKind
+			case out[p[:i]] != docKind:
+				out[p[:i]] = arrayKind
 			}
 		}
 	}
-	return out
-}
-
-// fieldPlace is where a leaf the other side lacks is named: the outermost
-// path holding it that holds nothing on the other side (has: containersOf
-// the other side's leaves), so that a field on one side only is one place
-// however many leaves it holds, and a value that is a document on one side
-// and a scalar on the other is one place each way; the leaf's own path when
-// the other side holds leaves under every path above it.
-func fieldPlace(p string, has map[string]bool) string {
-	for i := 1; i < len(p); i++ {
-		if (p[i] == '.' || p[i] == '[') && !has[p[:i]] {
-			return p[:i]
+	for p, l := range s.Leaves {
+		if !inBody(p) {
+			out[p] = kindNames[l.Type]
 		}
 	}
-	return p
+	if s.Body != nil {
+		parent = map[string]string{}
+		bodyKinds(bodyRoot, "", s.Body, out, parent)
+	}
+	for p, k := range s.Kinds {
+		out[p] = k
+	}
+	return kinds{of: out, parent: parent}
 }
 
-// withinAny reports whether the fixed part name is one of a field of
-// fields: named after a path in it (the field's path, then "'s", '.' or
-// '['), as an adapter names what the leaves of a path do not tell (a field
-// holding an array, a dotted key).
-func withinAny(name string, fields []string) bool {
-	for _, f := range fields {
+// kinds are one side's kindsOf: the kind at each path it holds (of), and,
+// for a decoded Body's paths, the path each is directly in (parent).
+type kinds struct {
+	of, parent map[string]string
+}
+
+// pathsTo are the paths holding the leaf at p, outermost first, p last:
+// in a decoded Body, the paths it is in, step by step; elsewhere p cut
+// where a key or a position begins.
+func (k kinds) pathsTo(p string) []string {
+	if _, ok := k.parent[p]; ok {
+		out := []string{p}
+		for q := k.parent[p]; q != ""; q = k.parent[q] {
+			out = append(out, q)
+		}
+		slices.Reverse(out)
+		return out
+	}
+	var out []string
+	for i := 1; i < len(p); i++ {
+		if p[i] == '.' || p[i] == '[' {
+			out = append(out, p[:i])
+		}
+	}
+	return append(out, p)
+}
+
+// bodyKinds adds the kind of the decoded JSON value v at path (in the path
+// up), and of every value in it, to out, and the path each is in to parent.
+// Two values one path spells (a key "a.b" beside a holding b) of other kinds
+// are held with no kind (""), whichever is read first.
+func bodyKinds(path, up string, v interface{}, out, parent map[string]string) {
+	if prev, ok := parent[path]; ok && prev < up {
+		// Two values spell path: it is in the outer one's path, whichever
+		// is read first.
+		up = prev
+	}
+	parent[path] = up
+	k := ""
+	switch t := v.(type) {
+	case map[string]interface{}:
+		k = kindNames[EmptyObj]
+		if len(t) > 0 {
+			k = docKind
+		}
+		for key, child := range t {
+			bodyKinds(path+"."+key, path, child, out, parent)
+		}
+	case []interface{}:
+		k = kindNames[EmptyArray]
+		if len(t) > 0 {
+			k = arrayKind
+		}
+		for i, child := range t {
+			bodyKinds(path+"["+strconv.Itoa(i)+"]", path, child, out, parent)
+		}
+	default:
+		typ, _ := scalar(t)
+		k = kindNames[typ]
+	}
+	if prev, ok := out[path]; ok && prev != k {
+		k = ""
+	}
+	out[path] = k
+}
+
+// placeOf is where a leaf at p that is on one side only, or changed type
+// (c), is named, and how (rec and live: kindsOf each side): at the
+// outermost path holding it (pathsTo, on its own side), p included, that
+// the other side holds nothing at (a field on one side only) or holds as
+// another kind (a kind changed). A path held with no kind (one only
+// unnamed leaves are under, or two values of other kinds spell) is passed
+// over: nothing says what it is. ok is false when both sides hold every
+// path down to p alike.
+func placeOf(p string, c leafDiff, rec, live kinds) (at, why string, ok bool) {
+	own := rec
+	if c == leafOnlyLive {
+		own = live
+	}
+	for _, q := range own.pathsTo(p) {
+		rk, inRec := rec.of[q]
+		lk, inLive := live.of[q]
+		switch {
+		case q != p && ((inRec && rk == "") || (inLive && lk == "")):
+			continue
+		case !inRec:
+			return q, q + " is not in the recording", true
+		case !inLive:
+			return q, q + " is missing", true
+		case rk != "" && lk != "" && rk != lk:
+			return q, q + " was " + rk + ", is " + lk, true
+		}
+	}
+	return "", "", false
+}
+
+// kindsNamed are the paths either shape's Kinds name, sorted.
+func kindsNamed(rec, live Shape) []string {
+	paths := make([]string, 0, len(rec.Kinds)+len(live.Kinds))
+	for p := range rec.Kinds {
+		paths = append(paths, p)
+	}
+	for p := range live.Kinds {
+		if _, dup := rec.Kinds[p]; !dup {
+			paths = append(paths, p)
+		}
+	}
+	sort.Strings(paths)
+	return paths
+}
+
+// kindChangeHolding is the kind change a fixed part not shared is named as
+// (name: the fixed part's name): at the outermost of paths (kindsNamed)
+// that the name is named after (withinAny) and that both sides hold as
+// different kinds.
+func kindChangeHolding(name string, paths []string, recKinds, liveKinds kinds) (at, why string, ok bool) {
+	for _, q := range paths {
+		rk, inRec := recKinds.of[q]
+		lk, inLive := liveKinds.of[q]
+		if inRec && inLive && rk != "" && lk != "" && rk != lk && withinAny(name, []string{q}) {
+			return q, q + " was " + rk + ", is " + lk, true
+		}
+	}
+	return "", "", false
+}
+
+// withinAny reports whether name is named after one of paths: the path
+// itself (a body's media type, named "body"), or the path then "'s", '.' or
+// '[' (a fixed part an adapter names after a path, as what the leaves of
+// the path do not tell: a field holding an array, a dotted key; a path
+// inside it).
+func withinAny(name string, paths []string) bool {
+	for _, f := range paths {
+		if name == f {
+			return true
+		}
 		if len(name) > len(f) && strings.HasPrefix(name, f) && strings.ContainsRune("'.[", rune(name[len(f)])) {
 			return true
 		}
@@ -438,8 +660,9 @@ type Result struct {
 //     some candidate had its key, unmocked_call when none did. A request
 //     that differs from every pairable candidate in more than values names
 //     the one closest to it (the fewest places that differ in more than
-//     values, as compare counts them, then the fewest drifted values, then
-//     recorded order), and those places. When the
+//     values, as missPlaces counts them, then the fewest drifted values,
+//     then recorded order), and those places; its Diff is that whole
+//     reading (missPlaces), Structural its first place. When the
 //     closest candidate is one the order rule refused and nothing else
 //     drifted, it is unstable_order, and nothing is learned from that
 //     array.
@@ -452,7 +675,7 @@ func Pair(live Shape, cands []Candidate) Result {
 	}
 	var pairable []scored
 	// far are the pairable candidates that differ in more than values, by
-	// their place in cands, with their Diff.
+	// their place in cands, with Compare's Diff.
 	type farCand struct {
 		i int
 		d Diff
@@ -502,9 +725,15 @@ func Pair(live Shape, cands []Candidate) Result {
 		best, bestDrift := -1, 0
 		var bestPlaces []string
 		for _, f := range far {
-			d, places := compare(live, cands[f.i].Shape, cands[f.i].Known, true)
+			d, places := missPlaces(live, cands[f.i].Shape, cands[f.i].Known)
+			if len(places) == 0 {
+				// missPlaces reads each leaf and fixed part as Compare
+				// does, so it finds the place Compare stopped at; should
+				// the two ever part, the miss still says that place.
+				d.Structural, places = f.d.Structural, []string{f.d.Structural}
+			}
 			if n := len(places); closest.Index < 0 || n < best || (n == best && len(d.Drift) < bestDrift) {
-				closest.Index, closest.Diff, best, bestDrift, bestPlaces = f.i, f.d, n, len(d.Drift), places
+				closest.Index, closest.Diff, best, bestDrift, bestPlaces = f.i, d, n, len(d.Drift), places
 			}
 		}
 		if closest.Index >= 0 {
@@ -561,7 +790,7 @@ const maxAlso = 3
 
 // alsoPlaces is what a miss says of the places past the first that its
 // request differs from its closest recording in more than values (places,
-// as compare names them): up to maxAlso of them by name, then how many
+// as missPlaces names them): up to maxAlso of them by name, then how many
 // more.
 func alsoPlaces(places []string) string {
 	if len(places) < 2 {
