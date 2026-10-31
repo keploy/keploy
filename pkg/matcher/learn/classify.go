@@ -1609,6 +1609,10 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 				// a replay passes it only as the clock plus that offset.
 				if why != "" {
 					off, cutWhy, ok := dc.textClockOffset(r, l, v, w, resp)
+					// The same instant inside a text (wordClockOffset).
+					if !ok && cutWhy == "" {
+						off, cutWhy, ok = dc.wordClockOffset(r, l, v, w, resp)
+					}
 					if ok {
 						return off
 					}
@@ -1728,6 +1732,15 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// A time of day whole in both runs, which no window holds (it names
 		// no day), is a read modulo a day all the same, never noise: every
 		// replay checks it in its call's span (textTodRead).
+		//
+		// One rule for the instant whole and inside a text: a text that
+		// holds an instant among other words (a query's literal "run_at >
+		// '<now - 1m>'", a note's "due <now - 3h>"), learned as noise of
+		// its changed words, is refused in a call with a window where an
+		// instant of it that changed is a read neither that window holds in
+		// both runs nor the lead moved (textOutsideWindowWhy), as the
+		// instant whole is (outsideWindowWhy), naming where it stands:
+		// noise there would let any value pass at every replay.
 		if ln.Kind == KindNoise && ln.Read == nil {
 			if read := dc.textTodRead(r.Value, l.Value, w, at); read != nil {
 				if w == nil && !dc.appClock {
@@ -1744,6 +1757,8 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 				default:
 					ln.Kind, ln.Why = KindUnaccounted, outsideWindowWhy
 				}
+			} else if why := dc.textOutsideWindowWhy(dc.ofIn(r.Value, l.Value, w, at), w); why != "" {
+				ln.Kind, ln.Why = KindUnaccounted, why
 			}
 		}
 		// A read whose two runs wrote it in two layouts (an ISO text, then

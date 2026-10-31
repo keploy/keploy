@@ -170,3 +170,160 @@ func TestAZonedDatetimeIsJudgedByTheClocksRulesInEveryProtocol(t *testing.T) {
 		}
 	}
 }
+
+// An instant inside a longer text is judged by the clock's rules as the same
+// instant whole is, in each protocol's learn and in every zone ("+05:30",
+// "-03:30", "Z", "+00:00", Postgres's "+00"): a query's literal, a word of a
+// note. In keploy test a poll of now - 1m or now - 3h, one instant or two
+// in one text, is refused, saying which instant its call's window does not
+// hold, never learned as noise that would let any value pass at every
+// replay (and never as a run of the base64 alphabet). In keploy mock's
+// client tests a poll of now - 60s inside a text is learned as the clock -
+// 1m, as the instant whole is, at the word the instant stands at: a replay
+// checks that word is the clock - 1m in its call and compares the rest of
+// the text.
+func TestAnInstantInsideATextIsJudgedAsTheInstantWhole(t *testing.T) {
+	call := time.Date(2026, 10, 31, 10, 52, 15, 438_000_000, time.UTC)
+	began := call.Add(-time.Second)
+	callF := call.Add(73*time.Second + 600*time.Millisecond)
+	beganF := began.Add(72 * time.Second)
+	w := (&Window{Rec: Span{From: call.Add(-100 * time.Millisecond), To: call, Began: began}, F: Span{From: callF.Add(-100 * time.Millisecond), To: callF, Began: beganF}}).ComparesOffsets()
+	given := func(dc *DriftCache, p string, live, rec Shape) Learned {
+		return ClassifyGiven(dc, []string{p}, live, rec, call, nil, nil, nil, w, nil)[0]
+	}
+	iso := func(z rowZone, at time.Time) string { return at.In(z.loc).Format(z.iso) }
+	pg := func(z rowZone, at time.Time) string { return pgText(at.In(z.loc)) }
+	type protocol struct {
+		name, path string
+		instant    func(z rowZone, at time.Time) string
+		text       func(instant string) string
+		classify   func(dc *DriftCache, p string, live, rec Shape) Learned
+	}
+	protocols := []protocol{
+		{"HTTP", "body.note", iso, func(s string) string { return "jobs due before " + s + ", page 2" }, given},
+		{"Postgres", "Req.query.text", pg, func(s string) string { return "SELECT id FROM jobs WHERE run_at > '" + s + "' LIMIT 10" }, given},
+		{"Mongo", "body.cmd.filter.note", iso, func(s string) string { return "dirty<=" + s + ";shard=7" }, func(dc *DriftCache, p string, live, rec Shape) Learned {
+			return ClassifyFollowing(dc, []string{p}, live, rec, call, nil, nil, nil, w, nil)[0]
+		}},
+	}
+	const notHeld = "that its call's window on the application's clock does not hold in both runs"
+	for _, pr := range protocols {
+		learn := func(dc *DriftCache, value func(at time.Time) string) Learned {
+			shape := func(at time.Time) Shape {
+				return Shape{Leaves: map[string]Leaf{pr.path: {Path: pr.path, Noise: pr.path, Type: String, Value: value(at)}}}
+			}
+			return pr.classify(dc, pr.path, shape(callF), shape(call))
+		}
+		for _, z := range zonedRows {
+			whole := func(ago time.Duration) func(at time.Time) string {
+				return func(at time.Time) string { return pr.instant(z, at.Add(-ago)) }
+			}
+			inText := func(ago time.Duration) func(at time.Time) string {
+				return func(at time.Time) string { return pr.text(pr.instant(z, at.Add(-ago))) }
+			}
+			t.Run(pr.name+" "+z.name, func(t *testing.T) {
+				// keploy test: the text gets the instant whole's outcome. A
+				// poll, one instant or two in one text, is refused, naming
+				// where the instant stands; the call's own read, one the
+				// lead moved, and a time of day (read modulo a day) are not.
+				lead := func(at time.Time) time.Time {
+					if at.Equal(call) {
+						return call.Add(-30 * time.Second)
+					}
+					return call.Add(-30*time.Second + FullRoundLead)
+				}
+				tod := func(at time.Time) string { return at.Add(-time.Minute).In(z.loc).Format("15:04:05") }
+				for _, c := range []struct {
+					what    string
+					instant func(at time.Time) string
+					refused bool
+					text    func(at time.Time) string
+				}{
+					{"now - 1m", whole(time.Minute), true, nil},
+					{"now - 3h", whole(3 * time.Hour), true, nil},
+					{"two instants, now - 3h and now", whole(3 * time.Hour), true, func(at time.Time) string {
+						return pr.text(pr.instant(z, at.Add(-3*time.Hour)) + "' AND '" + pr.instant(z, at))
+					}},
+					{"the call's own read", whole(0), false, nil},
+					{"a read the lead moved", func(at time.Time) string { return pr.instant(z, lead(at)) }, false, nil},
+					{"a time of day", tod, false, nil},
+					{"a wall clock of no zone, the call's own read in the application's zone", func(at time.Time) string { return at.In(z.loc).Format("2006-01-02 15:04:05") }, false, nil},
+				} {
+					text := c.text
+					if text == nil {
+						text = func(at time.Time) string { return pr.text(c.instant(at)) }
+					}
+					inZone := func() *DriftCache {
+						dc := clockedDrifts()
+						dc.zone = z.loc
+						return dc
+					}
+					wl, kt := learn(inZone(), c.instant), learn(inZone(), text)
+					if !c.refused {
+						if wl.Kind != KindClockRead {
+							t.Fatalf("keploy test, %s whole (%q): learned %s: %q; the row wants a read of the clock", c.what, wl.Recorded.Value, wl.Kind, wl.Why)
+						}
+						if kt.Kind == KindUnaccounted {
+							t.Errorf("keploy test, %s in a text (%q): refused %q; want not refused, as the instant whole is not", c.what, kt.Recorded.Value, kt.Why)
+						}
+						continue
+					}
+					if wl.Kind != KindUnaccounted || wl.Why != outsideWindowWhy {
+						t.Fatalf("keploy test, %s whole (%q): learned %s: %q; the row wants it refused as no read its window holds", c.what, wl.Recorded.Value, wl.Kind, wl.Why)
+					}
+					if kt.Kind != KindUnaccounted || !strings.Contains(kt.Why, notHeld) || !strings.Contains(kt.Why, "noise there would let any value pass at every replay") {
+						t.Errorf("keploy test, %s in a text (%q): learned %s: %q; want refused as an instant its call's window does not hold", c.what, kt.Recorded.Value, kt.Kind, kt.Why)
+					}
+					if !strings.HasPrefix(kt.Why, "it holds an instant (its characters ") {
+						t.Errorf("keploy test, %s in a text: %q names no place of the instant", c.what, kt.Why)
+					}
+				}
+				// keploy mock's client tests: a poll of now - 60s and of now -
+				// 3h inside a text gets the outcome the instant whole gets.
+				for _, ago := range []time.Duration{time.Minute, 3 * time.Hour} {
+					wl, tl := learn(clientTestCacheIn(z.loc), whole(ago)), learn(clientTestCacheIn(z.loc), inText(ago))
+					if tl.Kind != wl.Kind {
+						t.Fatalf("a client test's poll of now - %v: learned %s whole (%s), %s inside a text (%q: %s); want alike", ago, wl.Kind, wl.Why, tl.Kind, tl.Recorded.Value, tl.Why)
+					}
+					if wl.Kind == KindClockOffset && (tl.Offset == nil || tl.Offset.Min != wl.Offset.Min || tl.Offset.Max != wl.Offset.Max || tl.Offset.Word.IsZero()) {
+						t.Fatalf("a client test's poll of now - %v: whole %v, inside a text %v; want the same offset, at the instant's word", ago, wl.Offset, tl.Offset)
+					}
+				}
+				poll := learn(clientTestCacheIn(z.loc), inText(time.Minute))
+				if poll.Kind != KindClockOffset || poll.Offset == nil || poll.Offset.Min > -time.Minute || poll.Offset.Max < -time.Minute {
+					t.Fatalf("a client test's poll of now - 60s in a text (%q) learned %s (%v): %s; want the clock - 1m", poll.Recorded.Value, poll.Kind, poll.Offset, poll.Why)
+				}
+				replay := call.Add(3 * time.Hour)
+				s := Span{From: replay.Add(-100 * time.Millisecond), To: replay, Zone: z.loc, Own: true, Began: replay.Add(-time.Second)}
+				leaf := func(v string) Leaf { return Leaf{Path: pr.path, Noise: pr.path, Type: String, Value: v} }
+				if ok, why := CheckClockRead(pr.path, *poll.Offset, leaf(pr.text(pr.instant(z, replay.Add(-time.Minute)))), s, true); !ok {
+					t.Errorf("a replay's poll of now - 60s in the text: refused (%s); want passed", why)
+				}
+				if ok, _ := CheckClockRead(pr.path, *poll.Offset, leaf(pr.text(pr.instant(z, replay.Add(-2*time.Minute)))), s, true); ok {
+					t.Errorf("a replay's poll of now - 120s in the text: passed; want refused")
+				}
+				if ok, _ := CheckClockRead(pr.path, *poll.Offset, leaf(strings.Replace(pr.text(pr.instant(z, replay.Add(-time.Minute))), "jobs", "users", 1)+"!"), s, true); ok {
+					t.Errorf("a replay's text that changed around the poll: passed; want refused")
+				}
+			})
+		}
+	}
+}
+
+// A run of the base64 alphabet that changed, glued to the start of an
+// instant ("new+york/" before "2026-10-31"), is read apart from the instant
+// as one glued to its end is, and refused where it does not decode, as it
+// is with no instant beside it; before the instant was read apart, the
+// date's dashes made the run hold a '-' and it was let go.
+func TestAChangedRunGluedToAnInstantsStartIsRefused(t *testing.T) {
+	const want = "it changed in a run of the base64 alphabet that does not decode"
+	for _, c := range []struct{ what, rec, live string }{
+		{"a date", "/search/new+york/2026-10-31", "/search/los+gato/2026-10-31"},
+		{"an aware datetime", "/search/new+york/2026-10-31T16:20:13+05:30", "/search/los+gato/2026-10-31T16:20:13+05:30"},
+		{"no instant", "/search/new+york/", "/search/los+gato/"},
+	} {
+		if why := unparsed(c.rec, c.live, clockSet{}); why != want {
+			t.Errorf("%s (%q -> %q): %q; want %q", c.what, c.rec, c.live, why, want)
+		}
+	}
+}

@@ -965,6 +965,34 @@ func (dc *DriftCache) clockOffset(ln Learned, off models.ClockOffset, enc time.D
 	return ln
 }
 
+// wordClockOffset is textClockOffset of a text that holds an instant among
+// other words, in keploy mock's client tests: where the one instant of it
+// that changed is the only thing that changed, the text around it the same
+// in both runs (changedClockWord: a poll's "dirty<=<now - 60s>;shard=7", a
+// query's literal), that instant, read alone as textClockOffset reads one
+// whole, is learned as the clock plus that offset at the word it stands at
+// (models.ClockOffset.Word): a replay checks the word is the clock plus the
+// offset in its call, and compares the rest of the text by its length and
+// SHA-256. One rule for the instant whole and inside a text. ok and cutWhy
+// are textClockOffset's; ok is false too where no one instant is all that
+// changed, and the client test's refusal stands.
+func (dc *DriftCache) wordClockOffset(r, l Leaf, v *valueDrift, w *Window, resp []Leaf) (got Learned, cutWhy string, ok bool) {
+	before, rw, lw, after, found := changedClockWord(r.Value, l.Value, nil)
+	if !found || before == "" && after == "" {
+		return Learned{}, "", false
+	}
+	wr, wl := r, l
+	wr.Value, wl.Value = rw, lw
+	got, cutWhy, ok = dc.textClockOffset(wr, wl, v, w, resp)
+	if !ok {
+		return Learned{}, cutWhy, false
+	}
+	got.Recorded, got.Live = r, l
+	got.Offset.Word = models.ClockWordOf(r.Value, len(before), len(r.Value)-len(after))
+	got.Why = clockOffsetEvidence(fieldName(r), *got.Offset)
+	return got, "", true
+}
+
 // textClockOffset is classifyRead's reading, in keploy mock's client tests,
 // of a drifted text (r as recorded, l as record's full round saw it, v what
 // changed) that its call's window w holds as no plain read of the

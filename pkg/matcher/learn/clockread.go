@@ -54,7 +54,46 @@ const noAppClockWhy = "nothing shows it is a read of the application's clock: ke
 // not hold it in both runs, and the lead did not show it a read of the clock
 // (read after "<field> changed, and "). A call with no window learns it as a
 // plain read of the clock instead (Learned.Read), which a replay checks.
-const outsideWindowWhy = "it is one instant whole that its call's window on the application's clock does not hold in both runs, a clock read before its call's window or no plain read of the clock, and it did not move by the lead that record's full round runs ahead of the recording: nothing shows it is a read of the application's clock made for its call, which a replay would check in the call's window, and noise there would let any value pass at every replay, so keploy refuses it. If the field is a time the application reads from its own clock, declare it noise in keploy.yml, and keploy stops comparing it"
+const outsideWindowWhy = "it is one instant whole " + outsideWindowRest
+
+// outsideWindowRest is what outsideWindowWhy and textOutsideWindowWhy say
+// after naming the instant.
+const outsideWindowRest = "that its call's window on the application's clock does not hold in both runs, a clock read before its call's window or no plain read of the clock, and it did not move by the lead that record's full round runs ahead of the recording: nothing shows it is a read of the application's clock made for its call, which a replay would check in the call's window, and noise there would let any value pass at every replay, so keploy refuses it. If the field is a time the application reads from its own clock, declare it noise in keploy.yml, and keploy stops comparing it"
+
+// textOutsideWindowWhy is why a drifted text v that holds an instant among
+// other words is refused in a call whose window w does not hold one of its
+// instants that changed (driftedInstants: one that names its moment, not a
+// time of day, which names no day and lies in no window) in both runs, in
+// either zone the application's clock may write (Window.holdsRead), and
+// the lead did not move (clockSet.reads, which holds the window's own reads
+// too): the rule an instant whole is refused by (outsideWindowWhy), read
+// after "<field> changed, and ", naming where the first such instant stands
+// in the recorded text (partOf), never what it holds. "" where every one is
+// such a read, or where the call has no window (the instant whole is a
+// plain read of the clock there).
+func (dc *DriftCache) textOutsideWindowWhy(v *valueDrift, w *Window) string {
+	if w == nil {
+		return ""
+	}
+	read := map[int64]bool{}
+	for _, r := range v.clock.reads {
+		read[r.At.UnixNano()] = true
+	}
+	for _, p := range v.instants {
+		if p.rec.key.day || p.live.key.day || read[p.rec.key.at] || w.holdsRead(p.rec, p.live, dc.zone) {
+			continue
+		}
+		part := ""
+		for _, sp := range instantSpans(v.rec) {
+			if sp.keyed && sp.key == p.rec.key {
+				part = v.rec[sp.start:sp.end]
+				break
+			}
+		}
+		return "it holds an instant (" + partOf(v.rec, part) + ") " + outsideWindowRest
+	}
+	return ""
+}
 
 // windowHolds reports whether w, the window of the call that carries v, holds a
 // read of the application's clock in both runs at one of the instants v

@@ -336,13 +336,27 @@ func (w *Window) sinceBegin() *Window {
 // changed, where more than one did, where the one that did is no read in w,
 // or where the text around it changed too: then no one word of the text is
 // the read, and the text is no read of the clock plus a text that stayed.
+func clockWordIn(rec, live string, w *Window) (before, rw, lw, after string, ok bool) {
+	if w == nil {
+		return "", "", "", "", false
+	}
+	return changedClockWord(rec, live, w.holds)
+}
+
+// changedClockWord finds the one instant that changed in a text, recorded
+// as rec and seen in record's full round as live, as clockWordIn does,
+// where held, when not nil, says the two are what the caller reads (a read
+// in a window: clockWordIn); nil takes the instant whatever it is (a read
+// plus an offset, wordClockOffset). ok is false where no instant changed,
+// where more than one did, where held refuses the one that did, or where
+// the text around it changed too.
 //
 // It reads the layouts over the bytes that differ and a bounded
 // neighbourhood of them, never over a whole text, and its outcome is the
 // one a reading of both whole texts gives (clockWordWindow): its cost is
 // that of finding where two texts differ, whatever their length.
-func clockWordIn(rec, live string, w *Window) (before, rw, lw, after string, ok bool) {
-	if w == nil || rec == live {
+func changedClockWord(rec, live string, held func(lay clockLayout, rs, ls string) bool) (before, rw, lw, after string, ok bool) {
+	if rec == live {
 		return "", "", "", "", false
 	}
 	q, er, el, near := clockWordWindow(rec, live)
@@ -368,7 +382,7 @@ func clockWordIn(rec, live string, w *Window) (before, rw, lw, after string, ok 
 				return "", "", "", "", false
 			}
 			before, rw, lw, after = rec[:rm[j][0]], rs, ls, rec[rm[j][1]:]
-			if live[:lm[j][0]] != before || live[lm[j][1]:] != after || !w.holds(lay, rs, ls) {
+			if live[:lm[j][0]] != before || live[lm[j][1]:] != after || held != nil && !held(lay, rs, ls) {
 				return "", "", "", "", false
 			}
 			ok = true
