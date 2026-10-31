@@ -963,13 +963,16 @@ func (o Order) ServedView(m *models.Mock, r Raw) Raw {
 	var recorded, unread, ok bool
 	var loads []func() (*models.Mock, error)
 	o.t.mu.Lock()
-	older := o.olderTestLocked(id)
+	older, before := o.olderTestLocked(id), o.beforeTestLocked(id)
 	if unstated {
 		recorded, _, loads, unread, ok = o.viewsLocked(id)
 	}
 	o.t.mu.Unlock()
 	if older {
 		r = r.ServedInAnOlderTest()
+	}
+	if before {
+		r = r.ServedBeforeTheTest()
 	}
 	switch {
 	case !unstated, !ok:
@@ -1041,6 +1044,25 @@ func (o Order) viewsLocked(id string) (recorded bool, keys []int, loads []func()
 func viewRaw(m *models.Mock, load func() (*models.Mock, error)) Raw {
 	return Raw{mock: m.Name, at: m.Spec.ReqTimestampMock, answered: m.Spec.ResTimestampMock, served: true, call: callOf(m),
 		src: &rawSource{name: m.Name, load: load}}
+}
+
+// beforeTestLocked reports whether every serve of the mock of identity id the
+// read saw was made before the running test began (numbered below testFrom:
+// at the set's start-up, between tests, or in an older test), each in an
+// order keploy can tell (Order.told), and there was one. false where no test
+// had begun in the set (testFrom 0). The caller holds t.mu.
+func (o Order) beforeTestLocked(id string) bool {
+	n := o.serves[id]
+	k := sort.SearchInts(n, o.upTo+1)
+	if k == 0 || o.testFrom == 0 || n[k-1] >= o.testFrom {
+		return false
+	}
+	for _, s := range n[:k] {
+		if !o.told(s) {
+			return false
+		}
+	}
+	return true
 }
 
 // olderTestLocked reports whether F made every serve of the mock of
