@@ -14,6 +14,7 @@ import (
 	coreAgent "go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/models"
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
@@ -352,5 +353,90 @@ func TestWriteStopOutcomeCarriesWhatTheHooksCouldNotTrack(t *testing.T) {
 		if len(warned) != tc.warns {
 			t.Fatalf("%s: the agent logged %d line(s) at WARN or above, want %d: %+v", tc.name, len(warned), tc.warns, warned)
 		}
+	}
+}
+
+// settleHooks records the agent's end-of-run hook among the proxy's reads.
+type settleHooks struct {
+	AgentHook
+	calls *[]string
+	err   error
+	// final reports whether the agent's test windows were final (its
+	// FinalScopeWindows had closed the run) when the hook was called; it is
+	// recorded as that read having come first.
+	final func() bool
+}
+
+func (h *settleHooks) AfterTestRun(context.Context, string, []string, models.TestCoverage) error {
+	if h.final != nil && h.final() {
+		*h.calls = append(*h.calls, "FinalScopeWindows")
+	}
+	*h.calls = append(*h.calls, "AfterTestRun")
+	return h.err
+}
+
+// settleOrderProxy is an outcomeProxy that records its reads among the hooks'.
+type settleOrderProxy struct {
+	outcomeProxy
+	calls *[]string
+}
+
+func (p *settleOrderProxy) GetConsumedMocks(ctx context.Context) ([]models.MockState, error) {
+	*p.calls = append(*p.calls, "GetConsumedMocks")
+	return p.outcomeProxy.GetConsumedMocks(ctx)
+}
+
+// Under the proven switch an agent stopped under compose finishes its end of
+// the run (its hooks' AfterTestRun) before it reads what the replay served,
+// as the CLI has it do where it can reach it, and says in its account that it
+// did, or why it could not: the account is left either way, and the CLI does
+// not judge a run whose account lacks the word. Without the switch the hook is
+// not called and the account is encoded as before.
+func TestWriteStopOutcomeSettlesTheRunUnderTheSwitch(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		proven    bool
+		hookErr   error
+		wantCalls []string
+		want      models.MockOutcome
+	}{
+		{"off", false, nil, []string{"GetConsumedMocks"}, models.MockOutcome{}},
+		{"settled", true, nil, []string{"FinalScopeWindows", "AfterTestRun", "GetConsumedMocks"}, models.MockOutcome{Settled: true}},
+		{"hook failed", true, errors.New("keploy could not write the row of a program off the run's clock"), []string{"FinalScopeWindows", "AfterTestRun", "GetConsumedMocks"},
+			models.MockOutcome{SettleError: "keploy could not write the row of a program off the run's clock"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			sw := ""
+			if c.proven {
+				sw = "1"
+			}
+			t.Setenv(provenswitch.Env, sw)
+			var calls []string
+			prev := ActiveHooks
+			a := &Agent{Proxy: &settleOrderProxy{calls: &calls}, logger: zap.NewNop()}
+			ActiveHooks = &settleHooks{calls: &calls, err: c.hookErr, final: a.wireClosed}
+			t.Cleanup(func() { ActiveHooks = prev })
+			path := filepath.Join(t.TempDir(), "outcome.json")
+			if err := a.writeStopOutcome(context.Background(), path); err != nil {
+				t.Fatalf("writeStopOutcome: %v", err)
+			}
+			if !reflect.DeepEqual(calls, c.wantCalls) {
+				t.Fatalf("calls %v, want %v", calls, c.wantCalls)
+			}
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("no outcome left: %v", err)
+			}
+			var got models.MockOutcome
+			if err := json.Unmarshal(raw, &got); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got, c.want) {
+				t.Fatalf("left %+v, want %+v", got, c.want)
+			}
+			if !c.proven && string(raw) != `{"consumed":null,"missed":null}` {
+				t.Fatalf("the account without the switch is %s, want it encoded as before", raw)
+			}
+		})
 	}
 }

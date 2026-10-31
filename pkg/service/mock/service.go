@@ -65,6 +65,14 @@ type Instrumentation interface {
 	NotifyGracefulShutdown(ctx context.Context) error
 }
 
+// RunSettler is an optional Instrumentation extension, which
+// pkg/platform/http.AgentClient has: the agent's end-of-run hook. Under the
+// proven switch Replay calls it once the test command has exited, before it
+// reads what the agent served (settleRun).
+type RunSettler interface {
+	AfterTestRun(ctx context.Context, testRunID string, testSetIDs []string, coverage models.TestCoverage) error
+}
+
 // ScopeReader is an optional Instrumentation extension: the per-test scope
 // windows the wrapped runner reported through the agent's /agent/scope/* API
 // during a record session. Record uses it to write mappings.yaml so replay can

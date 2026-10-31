@@ -427,6 +427,15 @@ func (h *Hooks) AfterTestRun(ctx context.Context, testRunID string, testSetIDs [
 	}
 
 	if err := h.instrumentation.AfterTestRun(ctx, testRunID, testSetIDs, coverage); err != nil {
+		// Under the proven switch the agent's end of the run is part of the
+		// run's checks: an enterprise agent refuses it when it could not
+		// write the row of a program it saw off the run's clock. The error
+		// is the caller's (models.AgentRunUnfinishedError), so that it does
+		// not judge the run on checks the agent did not finish; the caller
+		// logs it.
+		if provenswitch.On() {
+			return models.AgentRunUnfinished(ctx, err)
+		}
 		utils.LogError(h.logger, err, "failed to call AfterTestRun hook")
 	}
 	return nil
