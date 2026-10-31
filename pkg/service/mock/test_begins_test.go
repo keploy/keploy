@@ -3,6 +3,7 @@ package mock
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -156,6 +157,38 @@ func TestPushTestBeginsSendsEachTestsRecordedRequests(t *testing.T) {
 	if !reflect.DeepEqual(p.in, want) {
 		t.Fatalf("pushed requests %+v, want %+v", p.in, want)
 	}
+	// Only the mapped cases are read, one at a time: never the whole set.
+	if db.loads != 0 || !reflect.DeepEqual(db.read, []string{"test-2", "test-1", "grpc-1", "gone-1"}) {
+		t.Fatalf("read the whole set %d times and the cases %v; want the mapped cases alone", db.loads, db.read)
+	}
+
+	// A case keploy cannot read binds nothing from any test's requests.
+	p.in = nil
+	broken := &mockService{logger: zap.NewNop(), instrumentation: p, mappingDB: setTableDB{mapping: mapping}, testDB: unreadableCase{db}}
+	if err := broken.pushTestBegins(context.Background(), "rec"); err != nil {
+		t.Fatal(err)
+	}
+	if p.in != nil {
+		t.Fatalf("a case that could not be read: pushed requests %+v", p.in)
+	}
+
+	// A test that mapped more cases than the bound keeps its earliest.
+	many := &memTestDB{}
+	var names []string
+	for i := 2*maxTestIncoming + 7; i >= 0; i-- {
+		n := fmt.Sprintf("test-%d", i)
+		names = append(names, n)
+		many.existing = append(many.existing, &models.TestCase{Name: n, Kind: models.HTTP, HTTPReq: models.HTTPReq{URL: "http://app/" + n, Timestamp: t0.Add(time.Duration(i) * time.Millisecond)}})
+	}
+	p.in = nil
+	bounded := &mockService{logger: zap.NewNop(), instrumentation: p, mappingDB: setTableDB{mapping: &models.Mapping{TestCases: []models.MappedTestCase{{ID: "pkg::TestMany", At: t0, Cases: names}}}}, testDB: many}
+	if err := bounded.pushTestBegins(context.Background(), "rec"); err != nil {
+		t.Fatal(err)
+	}
+	got := p.in["pkg::TestMany"]
+	if len(got) != maxTestIncoming || got[0].Case != "test-0" || got[maxTestIncoming-1].Case != fmt.Sprintf("test-%d", maxTestIncoming-1) {
+		t.Fatalf("a test of %d cases pushed %d, first %+v; want its earliest %d", len(names), len(got), got[:1], maxTestIncoming)
+	}
 
 	for name, m := range map[string]*mockService{
 		"no test-case store": {logger: zap.NewNop(), instrumentation: p, mappingDB: setTableDB{mapping: mapping}},
@@ -169,4 +202,14 @@ func TestPushTestBeginsSendsEachTestsRecordedRequests(t *testing.T) {
 			t.Fatalf("%s: pushed requests %+v", name, p.in)
 		}
 	}
+}
+
+// unreadableCase is a test-case store whose case test-1 cannot be read.
+type unreadableCase struct{ *memTestDB }
+
+func (u unreadableCase) GetTestCase(ctx context.Context, set, name string) (*models.TestCase, error) {
+	if name == "test-1" {
+		return nil, errors.New("permission denied")
+	}
+	return u.memTestDB.GetTestCase(ctx, set, name)
 }

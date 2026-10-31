@@ -35,6 +35,10 @@ type memTestDB struct {
 	deleted  []string
 	// presentAtInsert is how many old cases were still stored when the last new one was inserted.
 	presentAtInsert int
+	// loads counts reads of the whole set (GetTestCases); read names each
+	// case read alone (GetTestCase), in order.
+	loads int
+	read  []string
 }
 
 func (db *memTestDB) InsertTestCase(_ context.Context, tc *models.TestCase, _ string, _ bool) error {
@@ -46,7 +50,22 @@ func (db *memTestDB) InsertTestCase(_ context.Context, tc *models.TestCase, _ st
 }
 
 func (db *memTestDB) GetTestCases(context.Context, string) ([]*models.TestCase, error) {
+	db.mu.Lock()
+	db.loads++
+	db.mu.Unlock()
 	return db.existing, nil
+}
+
+func (db *memTestDB) GetTestCase(_ context.Context, _ string, name string) (*models.TestCase, error) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	db.read = append(db.read, name)
+	for _, tc := range db.existing {
+		if tc.Name == name {
+			return tc, nil
+		}
+	}
+	return nil, fmt.Errorf("test case %q: %w", name, fs.ErrNotExist)
 }
 
 func (db *memTestDB) DeleteTests(_ context.Context, _ string, ids []string) error {

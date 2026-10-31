@@ -198,6 +198,9 @@ type IncomingReader interface {
 type TestDB interface {
 	InsertTestCase(ctx context.Context, tc *models.TestCase, testSetID string, enableLog bool) error
 	GetTestCases(ctx context.Context, testSetID string) ([]*models.TestCase, error)
+	// GetTestCase reads one test case of the set by name; one the store
+	// does not hold is an error that wraps fs.ErrNotExist.
+	GetTestCase(ctx context.Context, testSetID, name string) (*models.TestCase, error)
 	DeleteTests(ctx context.Context, testSetID string, testCaseIDs []string) error
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"maps"
 	"os"
 	"os/exec"
@@ -1539,56 +1540,55 @@ func testReal(mapping *models.Mapping) map[string][]string {
 const maxTestIncoming = 256
 
 // testIncoming is, by test ID, the requests the application was sent while
-// each test of mapping was open in its recording (MappedTestCase.Cases, read
-// from the set's test cases), earliest first, at most maxTestIncoming: their
-// URLs and headers (models.TestIncoming). In a client test the agent reads
-// them as the test's given place (learn.IncomingGiven). A recording that kept
-// no test case, or whose test cases keploy cannot read, gives none: no value
-// is then bound from a test's incoming requests, and none is refused for it.
+// each test of mapping was open in its recording (MappedTestCase.Cases, each
+// read from the set's test cases by name), earliest first, at most
+// maxTestIncoming: their URLs and headers (models.TestIncoming). In a client
+// test the agent reads them as the test's given place (learn.IncomingGiven).
+// Only the mapped cases are read, one at a time, and only their request's
+// head is kept, never a body or the whole set at once. A case the store does
+// not hold, or of another kind, is left out. A recording that kept no test
+// case, or a case keploy cannot read, gives none: no value is then bound
+// from a test's incoming requests, and none is refused for it.
 func (m *mockService) testIncoming(ctx context.Context, name string, mapping *models.Mapping) map[string][]models.TestIncoming {
 	if mapping == nil || m.testDB == nil {
 		return nil
 	}
-	wanted := false
-	for _, tc := range mapping.TestCases {
-		wanted = wanted || len(tc.Cases) > 0
-	}
-	if !wanted {
-		return nil
-	}
-	tcs, err := m.testDB.GetTestCases(ctx, name)
-	if err != nil {
-		m.logger.Warn("keploy could not read the requests each test sent the application in its recording, so it binds no value from them",
-			zap.String("mock-set", name), zap.Error(err))
-		return nil
-	}
-	byName := make(map[string]*models.TestCase, len(tcs))
-	for _, tc := range tcs {
-		if tc != nil && tc.Kind == models.HTTP {
-			byName[tc.Name] = tc
+	earliest := func(reqs []models.TestIncoming) []models.TestIncoming {
+		sort.SliceStable(reqs, func(i, j int) bool { return reqs[i].At.Before(reqs[j].At) })
+		if len(reqs) > maxTestIncoming {
+			reqs = reqs[:maxTestIncoming:maxTestIncoming]
 		}
+		return reqs
 	}
 	var out map[string][]models.TestIncoming
 	for _, mt := range mapping.TestCases {
 		var reqs []models.TestIncoming
 		for _, c := range mt.Cases {
-			tc, ok := byName[c]
-			if !ok {
+			tc, err := m.testDB.GetTestCase(ctx, name, c)
+			switch {
+			case errors.Is(err, fs.ErrNotExist):
+				continue
+			case err != nil:
+				m.logger.Warn("keploy could not read the requests each test sent the application in its recording, so it binds no value from them",
+					zap.String("mock-set", name), zap.String("test-case", c), zap.Error(err))
+				return nil
+			case tc == nil || tc.Kind != models.HTTP:
 				continue
 			}
 			reqs = append(reqs, models.TestIncoming{Case: tc.Name, At: tc.HTTPReq.Timestamp, URL: tc.HTTPReq.URL, Header: tc.HTTPReq.Header})
+			if len(reqs) >= 2*maxTestIncoming {
+				// Keep the earliest as they come: a test's heads stay
+				// bounded however many cases it mapped.
+				reqs = append(make([]models.TestIncoming, 0, 2*maxTestIncoming), earliest(reqs)...)
+			}
 		}
 		if len(reqs) == 0 {
 			continue
 		}
-		sort.SliceStable(reqs, func(i, j int) bool { return reqs[i].At.Before(reqs[j].At) })
-		if len(reqs) > maxTestIncoming {
-			reqs = reqs[:maxTestIncoming]
-		}
 		if out == nil {
 			out = map[string][]models.TestIncoming{}
 		}
-		out[mt.ID] = reqs
+		out[mt.ID] = earliest(reqs)
 	}
 	return out
 }
