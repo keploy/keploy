@@ -193,6 +193,12 @@ type CaseMapper interface {
 	UpsertCases(ctx context.Context, testSetID string, byTest map[string]models.MappedTestCase, startup []models.MockEntry, suites []models.SuiteSpan) error
 }
 
+// WorkerMapper writes a set's worker scope (models.Mapping.Worker) whole,
+// keeping every other section of its mappings.
+type WorkerMapper interface {
+	UpsertWorker(ctx context.Context, testSetID string, worker []models.MockEntry) error
+}
+
 type BootMapper interface {
 	UpsertBoots(ctx context.Context, testSetID string, boots []models.BootSpec) error
 }
