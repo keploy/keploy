@@ -727,14 +727,23 @@ func clockOffsetOf(r, l typedInstant, w *Window, zone *time.Location) (models.Cl
 // than the lead, against the recording's), or of milliseconds a whole
 // second apart (an OAuth grant's expires_at = now + 30d, one recording in
 // a thousand), show it; a fast call's never do (FullRoundLead keeps its gap
-// off every step). Where no offset at the step holds both (a look-back
-// within one step of its read, which at the step stands on both sides of
-// it: a poll's dirtyAt <= now - 2s, its two values a whole minute apart),
-// the offset the values' own cut puts in both runs, checked at that cut,
-// never refused for the step it might have been cut to (founder decision,
-// 2026-10-27: a cut is checked, never refused): an application that cut its
-// value to the step and added an offset of no whole number of it then fails
-// a replay by where its read fell, a false red, never a false green.
+// off every step). A look-back is the exception: where the values' own cut
+// puts one in both runs, it is read there, never at the step, which would
+// name a whole step up to a step from the application's look-back and pass
+// a dropped one (fail closed: a cut is accepted up to one cut stale, no
+// more); at a cut of a second or coarser, only where that offset reads in
+// its cut's unit, as a writer that does not cut shows it (else it is the
+// step's writer's, read at the step). Where no offset at the step holds
+// both (a look-back within one step of its read, which at the step stands
+// on both sides of it: a poll's dirtyAt <= now - 2s, its two values a whole
+// minute apart), the offset the values' own cut puts in both runs, checked
+// at that cut, never refused for the step it might have been cut to
+// (founder decision, 2026-10-27: a cut is checked, never refused). An
+// application that cut its value to the step and subtracted a look-back of
+// no whole number of it, where its own cut's offset holds both runs too
+// (both runs read within about a second of one phase of their minutes),
+// then fails a replay by where its read falls, a false red, never a false
+// green.
 //
 // A cut coarser than a minute (an hour, a day), which a zone's offset
 // moves, is learned as any other, checked at the cut (founder decision,
@@ -783,17 +792,38 @@ func offsetReading(r, l typedInstant, w *Window, zone *time.Location) (models.Cl
 		// for its whole cut, within one cut of the span on either side)
 		// passes either, and never turns on which it is (founder decision,
 		// 2026-10-27: a cut is checked, never refused).
-		if so, sok := offsetAt(r, l, w, step); sok {
+		//
+		// A look-back the values' own cut puts in both runs is read there,
+		// never at the step: at the step it would stand for the whole step
+		// it names, which lies up to a step from the application's own
+		// look-back, and a replay widens that by one step on either side,
+		// so a look-back dropped or changed by up to two steps (a seconds
+		// writer's now - 90s named clock - 1m; a milliseconds writer's
+		// now - 2s named at the second) would pass at every read, where a
+		// cut is accepted up to one cut stale and no more. At a
+		// millisecond's cut such a look-back reads below a second or in
+		// seconds at no cut, which clockOffset refuses, as main does every
+		// such look-back whatever its values' gap. At a cut of a second or
+		// coarser, a writer that does not cut shows its look-back in that
+		// cut's unit (now - 90s: clock - 1m30s at the second), so one that
+		// reads finer (Fine: a minute's start less 103 s, both runs' reads
+		// at one phase of their minutes to within a window) is the step's
+		// writer's, read at the step, never refused (founder decision,
+		// 2026-10-27: a cut is checked, never refused).
+		own := ok && o.Max <= 0 && (cut < time.Second || !o.Fine())
+		if so, sok := offsetAt(r, l, w, step); sok && !own {
 			return so, gap.Abs(), true
 		}
 		// No offset at the step holds both runs (a look-back within one
-		// step of its read stands on both sides of it there), but the
-		// values' own cut puts one in both: that offset, checked at that
-		// cut, never refused for the step it might have been cut to
-		// (founder decision, 2026-10-27: a cut is checked, never refused).
-		// An application that cut its value to the step and added an
-		// offset of no whole number of it fails a replay by where its read
-		// fell, a false red, never a false green.
+		// step of its read stands on both sides of it there), or the
+		// values' own cut puts a look-back in both: that offset, checked
+		// at that cut, never refused for the step it might have been cut
+		// to (founder decision, 2026-10-27: a cut is checked, never
+		// refused). An application that cut its value to the step and
+		// added an offset of no whole number of it (cut_m(now) - 103s,
+		// both runs' reads within about a second of one phase of their
+		// minutes) fails a replay by where its read falls, a false red,
+		// never a false green.
 	}
 	if !ok {
 		return models.ClockOffset{}, 0, false
@@ -845,14 +875,23 @@ func offsetAt(r, l typedInstant, w *Window, res time.Duration) (models.ClockOffs
 // thousand), and the step's check holds both, so the offset is learned
 // there, never refused (founder decision, 2026-10-27: a cut is checked,
 // never refused), at the cost a cut's check states: a value up to one cut
-// stale or ahead passes. "" where no gap set the cut, or where it set none
+// stale or ahead passes. A look-back is read at the step only where no
+// offset at its values' own cut holds both runs as one that does not cut
+// would (offsetReading), so its line names only the application that cut
+// its value to the step and subtracted a look-back of no whole number of
+// it, and says the offset named is the whole step its value stands at,
+// never the look-back subtracted. "" where no gap set the cut, or where it set none
 // coarser than enc, the resolution the values' encoding writes.
 func gapCutWhy(off models.ClockOffset, enc, gap time.Duration) string {
 	if gap <= 0 || off.Res <= enc {
 		return ""
 	}
 	c := models.ShortDuration(off.Res)
-	return ". Its two values stand " + models.ShortDuration(gap) + " apart, a whole number of " + c + ": an application that cuts its value to " + c + " and adds a time to live that is no whole number of it writes such values, and so, by chance, can one that does not cut, so keploy reads the offset at the cut of " + c + ", coarser than the " + models.ShortDuration(enc) + " the values' encoding writes, which holds both: a replay checks the value as standing for its whole " + c + ", within one " + c + " of its call's window plus the offset on either side, so a value up to " + c + " stale or ahead passes"
+	writes := "adds a time to live that is no whole number of it writes such values, and so, by chance, can one that does not cut, so keploy reads the offset at the cut of " + c + ", coarser than the " + models.ShortDuration(enc) + " the values' encoding writes, which holds both"
+	if off.Max <= 0 {
+		writes = "subtracts a look-back that is no whole number of it writes such values, and no offset at the values' own cut holds both runs as the look-back of an application that does not cut would, so keploy reads the offset at the cut of " + c + ", coarser than the " + models.ShortDuration(enc) + " the values' encoding writes: the offset named is the whole " + c + " such a value stands at from the read, never the look-back the application subtracts"
+	}
+	return ". Its two values stand " + models.ShortDuration(gap) + " apart, a whole number of " + c + ": an application that cuts its value to " + c + " and " + writes + ": a replay checks the value as standing for its whole " + c + ", within one " + c + " of its call's window plus the offset on either side, so a value up to " + c + " stale or ahead passes"
 }
 
 // sharedGrain is the granularity a and b share: the greatest duration both
@@ -1125,7 +1164,7 @@ func clockOffsetSeen(path string, off models.ClockOffset) string {
 // (cutOffsetsNamed: the whole cuts its range holds, models.ClockOffset's
 // CutOffsets) and what that check admits (models.ClockOffset.Holds), in any
 // window: as a date cut to a day admits yesterday, a time to live changed
-// by one cut can pass, by where the replay's read falls in its cut, and one
+// by one cut passes at every read, and one
 // changed by more only where the replay's call's window holds a turn of the
 // cut for each cut more, so in a window narrower than the cut one changed
 // by two passes only where a turn falls in it, and one changed by three or
@@ -1159,7 +1198,7 @@ func clockOffsetEvidenceCut(path string, off models.ClockOffset, cut string) str
 		if off.Max < 0 {
 			dir = "between the window's start and the application's read (a longer one) or between the read and its call (a shorter one)"
 		}
-		return head + "within one " + w + " of its call's window plus the offset, read as " + cutOffsetsNamed(off) + ", on either side, whatever the window's width, as a date cut to a day passes from yesterday: " + offsetNamed(off) + " changed by one " + w + " can pass there, by where the replay's read falls in its " + w + ", " + outside + "and one changed by more " + w + "s only where the replay's call's window holds a turn of the " + w + " for each " + w + " more, " + dir + ", so in a window narrower than the " + w + " one changed by two " + w + "s passes only where a turn of the " + w + " falls in it, and one changed by three " + w + "s or more fails" + on + tail
+		return head + "within one " + w + " of its call's window plus the offset, read as " + cutOffsetsNamed(off) + ", on either side, whatever the window's width, as a date cut to a day passes from yesterday: " + offsetNamed(off) + " changed by one " + w + " passes there at every read, " + outside + "and one changed by more " + w + "s only where the replay's call's window holds a turn of the " + w + " for each " + w + " more, " + dir + ", so in a window narrower than the " + w + " one changed by two " + w + "s passes only where a turn of the " + w + " falls in it, and one changed by three " + w + "s or more fails" + on + tail
 	}
 	return clockOffsetSeen(path, off) + ". A replay compares the offset: " + offsetNamed(off) + " changed by " + aUnit(off.Unit()) + " or more still fails; near a wall time the application's zone shows twice as its clocks go back (any zone's, where keploy knows none of the application's) a replay refuses the value, since an application that resolves that wall time to its first showing writes a value an hour early there (two hours in Antarctica/Troll); if the field is a time the application reads from its own clock with no rule, declare it noise in keploy.yml, and keploy stops comparing it"
 }

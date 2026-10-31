@@ -599,44 +599,49 @@ func TestAWholeSecondLookBackAtTheSecondsCutIsCheckedAtTheSecond(t *testing.T) {
 	}
 }
 
-// A look-back of no whole number of the step its two runs' values stand
-// apart (a seconds writer's lastSeen <= now - 75s, now - 90s or now - 5m30s
-// whose two values stand a whole minute apart, about one recording in
-// sixty; a milliseconds writer's now - 1500ms or now - 2.3s whose two values
-// stand a whole second apart, about one in a thousand) is learned at that
-// step (offsetReading), in keploy mock's client tests and, of milliseconds,
-// in keploy test too, and a replay checks it there widened by one step on
-// either side, as any offset checked at its cut: the application's
-// unchanged value passes at every phase of the step, whatever the phases of
-// the two recorded runs, never by where the replay's read falls. The cost,
-// stated in the learned line (a look-back changed by up to one step passes
-// there, by where the read falls in its step) and here: a plain read in
-// place of a look-back under two steps (now - 75s, now - 90s; now - 1500ms,
-// now - 2s at the second) passes at every phase; one of two steps or more
-// (now - 2m, now - 2m30s, now - 5m30s; now - 2.3s, now - 45.5s) fails at
-// every phase.
-func TestALookBackLearnedAtItsValuesStepPassesItsValueAtEveryPhase(t *testing.T) {
+// A look-back of a writer that does not cut, whose two runs' values stand a
+// whole step apart coarser than their own cut (a seconds writer's lastSeen
+// <= now - 75s, now - 90s, now - 2m30s, now - 5m30s or now - 2m with its
+// two values a whole minute apart, about one recording in sixty; a
+// milliseconds writer's now - 1500ms, now - 2.3s, now - 45.5s or now - 2s
+// with its two values a whole second apart, about one in a thousand), is
+// read at its values' own cut, never at that step (offsetReading): at the
+// step it would be named a whole step, up to a step from the application's
+// own look-back, and checked within one step of that on either side, so a
+// dropped look-back would pass at every read. Of seconds, in keploy mock's
+// client tests, it is learned at the second as the application's own
+// look-back (clock - 1m15s), and the learned line says so: the
+// application's unchanged value passes at every phase of the step, whatever
+// the phases of the two recorded runs, and a dropped look-back, or one
+// changed by half a step, fails at every phase. Of seconds in keploy test,
+// it is refused as on main. Of milliseconds, the offset reads below a
+// second or in seconds at no cut, and is refused in client tests as main
+// refuses every such look-back, whatever its values' gap, so no replay
+// passes a dropped one, and in keploy test it is never learned at the step
+// either. Recordings whose two values both show a whole step (their digits,
+// the cut a writer of the step makes too) are left to the cut their digits
+// show, checked there as any value cut to it.
+func TestALookBackOfAWriterThatDoesNotCutIsReadAtItsOwnCutNeverItsValuesStep(t *testing.T) {
 	ms, sec := time.Millisecond, time.Second
 	const p = "body.cmd.query.lastSeen.$lte"
 	for _, client := range []bool{true, false} {
 		for _, sh := range []struct {
-			name        string
-			back, step  time.Duration
-			enc         func(string, time.Time) Leaf
-			trunc       time.Duration
-			plainPasses bool
+			name       string
+			back, step time.Duration
+			enc        func(string, time.Time) Leaf
+			trunc      time.Duration
 		}{
-			{"seconds, now - 75s", 75 * sec, time.Minute, secondsText, sec, true},
-			{"seconds, now - 90s", 90 * sec, time.Minute, secondsText, sec, true},
-			{"seconds, now - 2m30s", 150 * sec, time.Minute, secondsText, sec, false},
-			{"seconds, now - 5m30s", 330 * sec, time.Minute, secondsText, sec, false},
-			{"seconds, now - 2m (whole)", 120 * sec, time.Minute, secondsText, sec, false},
-			{"milliseconds, now - 1500ms", 1500 * ms, sec, millisText, ms, true},
-			{"milliseconds, now - 2300ms", 2300 * ms, sec, millisText, ms, false},
-			{"milliseconds, now - 45.5s", 45500 * ms, sec, millisText, ms, false},
-			{"milliseconds, now - 2s (whole)", 2 * sec, sec, millisText, ms, true},
+			{"seconds, now - 75s", 75 * sec, time.Minute, secondsText, sec},
+			{"seconds, now - 90s", 90 * sec, time.Minute, secondsText, sec},
+			{"seconds, now - 2m30s", 150 * sec, time.Minute, secondsText, sec},
+			{"seconds, now - 5m30s", 330 * sec, time.Minute, secondsText, sec},
+			{"seconds, now - 2m (whole)", 120 * sec, time.Minute, secondsText, sec},
+			{"milliseconds, now - 1500ms", 1500 * ms, sec, millisText, ms},
+			{"milliseconds, now - 2300ms", 2300 * ms, sec, millisText, ms},
+			{"milliseconds, now - 45.5s", 45500 * ms, sec, millisText, ms},
+			{"milliseconds, now - 2s (whole)", 2 * sec, sec, millisText, ms},
 		} {
-			learned, replays := 0, 0
+			seen, learned, replays := 0, 0, 0
 			for rph := time.Duration(0); rph < sh.step; rph += sh.step / 10 {
 				rcall := time.Date(2026, 10, 31, 10, 42, 0, 680e6, time.UTC).Add(rph)
 				for d := -3 * sec; d <= sec; d += ms {
@@ -644,28 +649,40 @@ func TestALookBackLearnedAtItsValuesStepPassesItsValueAtEveryPhase(t *testing.T)
 					rread, fread := rcall.Add(-ms), fcall.Add(-ms)
 					rv, fv := rread.Add(-sh.back).Truncate(sh.trunc), fread.Add(-sh.back).Truncate(sh.trunc)
 					// Only recordings whose two values stand a whole step
-					// apart, every 97th millisecond of the full round's
-					// phase for a seconds writer.
-					if fv.Sub(rv)%sh.step != 0 || (sh.trunc == sec && d%(97*ms) != 0) {
+					// apart and do not both show it, every 97th millisecond
+					// of the full round's phase for a seconds writer.
+					if fv.Sub(rv)%sh.step != 0 || (sh.trunc == sec && d%(97*ms) != 0) || (rv.Truncate(sh.step).Equal(rv) && fv.Truncate(sh.step).Equal(fv)) {
 						continue
 					}
+					seen++
 					w := (&Window{Rec: Span{From: rcall.Add(-61 * ms), To: rcall}, F: Span{From: fcall.Add(-61 * ms), To: fcall}}).ComparesOffsets()
 					dc := clockedDrifts()
 					dc.clientTests = client
 					ln := ClassifyIn(dc, []string{p}, Shape{Leaves: map[string]Leaf{p: sh.enc(p, fv)}}, Shape{Leaves: map[string]Leaf{p: sh.enc(p, rv)}}, rcall, nil, nil, nil, w)[0]
 					o, ok := ln.Clock()
+					if ok && ln.Kind == KindClockOffset && o.Res >= sh.step {
+						t.Errorf("FALSE GREEN: %s (client tests %v): learned at its values' step, %+v (%s); want it read at its own cut", sh.name, client, o, ln.Why)
+						continue
+					}
+					if sh.trunc == ms {
+						if client && (ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "so keploy refuses an offset that reads in")) {
+							t.Errorf("%s (client tests): %s %+v (%s); want it refused as main refuses a look-back that reads below a second or in seconds at no cut", sh.name, ln.Kind, ln.Offset, ln.Why)
+						}
+						continue
+					}
 					if !ok || ln.Kind != KindClockOffset {
+						if client {
+							t.Errorf("FALSE RED: %s (client tests): %s (%s); want it learned at the second", sh.name, ln.Kind, ln.Why)
+						}
 						continue
 					}
 					learned++
-					if o.Res != sh.step {
-						t.Errorf("%s (client tests %v): learned %+v (%s); want it read at the step %s", sh.name, client, o, ln.Why, sh.step)
+					named := " = clock - " + models.ShortDuration(sh.back) + " ("
+					// At the second's cut where it reads in seconds; one
+					// that reads in whole minutes is compared at its unit.
+					if o.Res != sec || !strings.Contains(ln.Why, named) || strings.Contains(ln.Why, "stand apart") || !strings.Contains(ln.Why, ", cut to a second. ") && !strings.Contains(ln.Why, ". A replay compares the offset: a look-back changed by a minute or more still fails") {
+						t.Errorf("%s (client tests %v): learned %+v (%s); want %q at the second, the line saying so", sh.name, client, o, ln.Why, named)
 						continue
-					}
-					// Values whose digits show no cut of the step (each
-					// not a whole step) are never said to be cut to it.
-					if !rv.Truncate(sh.step).Equal(rv) && (strings.Contains(ln.Why, ", cut to "+aUnit(sh.step)) || !strings.Contains(ln.Why, ", checked at "+aUnit(sh.step)+"'s cut, the step its two values stand apart (their digits show no such cut)")) {
-						t.Errorf("%s (client tests %v): the learned line says its values are cut to %s, or not what set the cut: %s", sh.name, client, aUnit(sh.step), ln.Why)
 					}
 					for ph := time.Duration(0); ph < sh.step; ph += sh.step / 100 {
 						from := rcall.Add(72 * time.Hour).Truncate(sh.step).Add(ph)
@@ -675,21 +692,94 @@ func TestALookBackLearnedAtItsValuesStepPassesItsValueAtEveryPhase(t *testing.T)
 						if got, why := CheckClockRead(p, o, sh.enc(p, read.Add(-sh.back).Truncate(sh.trunc)), s, true); !got {
 							t.Errorf("FALSE RED: %s (client tests %v), learned %+v, a replay %s into its step: the application's unchanged value fails (%s)", sh.name, client, o, ph, why)
 						}
-						if got, _ := CheckClockRead(p, o, sh.enc(p, read.Truncate(sh.trunc)), s, true); got != sh.plainPasses {
-							t.Errorf("%s (client tests %v), learned %+v, a replay %s into its step: a plain read passes %v; want %v (the stated cost)", sh.name, client, o, ph, got, sh.plainPasses)
+						for _, alt := range []struct {
+							name string
+							at   time.Time
+						}{{"a dropped look-back", read}, {"a look-back half a step shorter", read.Add(-sh.back + sh.step/2)}, {"a look-back half a step longer", read.Add(-sh.back - sh.step/2)}} {
+							if got, _ := CheckClockRead(p, o, sh.enc(p, alt.at.Truncate(sh.trunc)), s, true); got {
+								t.Errorf("FALSE GREEN: %s (client tests %v), learned %+v, a replay %s into its step: %s passes", sh.name, client, o, ph, alt.name)
+							}
 						}
 					}
 				}
 			}
-			// Seconds in keploy test are refused as on main (no window
-			// there compares a look-back read in seconds); everywhere else
-			// the shape is learned.
-			if want := client || sh.trunc == ms; (learned > 0) != want {
-				t.Errorf("%s (client tests %v): %d recordings learned, want some %v", sh.name, client, learned, want)
+			if seen == 0 || (sh.trunc == sec && (learned > 0) != client) {
+				t.Errorf("%s (client tests %v): %d recordings a whole step apart, %d learned; want some, learned only in client tests", sh.name, client, seen, learned)
 			}
-			t.Logf("%s (client tests %v): %d recordings learned at the step, %d replays", sh.name, client, learned, replays)
+			t.Logf("%s (client tests %v): %d recordings a whole step apart, %d learned at the second, %d replays", sh.name, client, seen, learned, replays)
 		}
 	}
+}
+
+// The cost of reading a look-back at its values' own cut: an application
+// that cuts its read to the minute and subtracts a look-back of no whole
+// number of minutes (lastSeen <= its minute's start less 103 s, as epoch
+// seconds) writes two values a whole minute apart in every recording. Where
+// no offset at the second holds both runs, or the one that does reads finer
+// than a second, it is learned at the minute's step, never refused, the
+// line naming that writer, and a replay passes the application's value at
+// every phase. Where both runs read within about a second of one phase of
+// their minutes (a full round that read 0.5 s to 2.5 s sooner than its
+// lead, about one recording in sixty by the uniform seconds digit), an
+// offset at the second holds both, as a look-back of a writer that does
+// not cut would, and it is learned there: a replay then fails the
+// application's value wherever its read falls more than about a second
+// from that phase, at every replay that reads there, a false red, never a
+// false green, and a dropped look-back fails at every phase.
+func TestAMinuteCutLessALookBackIsCheckedAtTheMinuteOrFailsClosed(t *testing.T) {
+	ms, sec := time.Millisecond, time.Second
+	const p = "body.cmd.query.lastSeen.$lte"
+	value := func(read time.Time) time.Time { return read.Truncate(time.Minute).Add(-103 * sec) }
+	atStep, atSecond := 0, 0
+	for rph := time.Duration(0); rph < time.Minute; rph += 6 * sec {
+		rcall := time.Date(2026, 10, 31, 10, 42, 0, 680e6, time.UTC).Add(rph)
+		for d := -3 * sec; d <= sec; d += 37 * ms {
+			fcall := rcall.Add(FullRoundLead + d)
+			rv, fv := value(rcall.Add(-ms)), value(fcall.Add(-ms))
+			if rv.Equal(fv) {
+				continue
+			}
+			w := (&Window{Rec: Span{From: rcall.Add(-61 * ms), To: rcall}, F: Span{From: fcall.Add(-61 * ms), To: fcall}}).ComparesOffsets()
+			dc := clockedDrifts()
+			dc.clientTests = true
+			ln := ClassifyIn(dc, []string{p}, Shape{Leaves: map[string]Leaf{p: secondsText(p, fv)}}, Shape{Leaves: map[string]Leaf{p: secondsText(p, rv)}}, rcall, nil, nil, nil, w)[0]
+			o, ok := ln.Clock()
+			if !ok || ln.Kind != KindClockOffset {
+				t.Errorf("FALSE RED: a minute's start less 103 s, recorded %s into its minute, the full round %s from its lead: %s (%s); want it learned", rph, d, ln.Kind, ln.Why)
+				continue
+			}
+			fails, dropped := 0, 0
+			for ph := time.Duration(0); ph < time.Minute; ph += time.Minute / 100 {
+				from := rcall.Add(72 * time.Hour).Truncate(time.Minute).Add(ph)
+				s := Span{From: from, To: from.Add(61 * ms)}
+				read := s.To.Add(-ms)
+				if got, _ := CheckClockRead(p, o, secondsText(p, value(read)), s, true); !got {
+					fails++
+				}
+				if got, _ := CheckClockRead(p, o, secondsText(p, read.Truncate(time.Minute)), s, true); got {
+					dropped++
+				}
+			}
+			switch o.Res {
+			case time.Minute:
+				atStep++
+				if fails > 0 || !strings.Contains(ln.Why, ", checked at a minute's cut, the step its two values stand apart") || !strings.Contains(ln.Why, "subtracts a look-back that is no whole number of it") {
+					t.Errorf("recorded %s into its minute, the full round %s from its lead: learned %+v at the step, the application's value fails %d of 100 replays (%s); want none, the line naming the writer", rph, d, o, fails, ln.Why)
+				}
+			case sec:
+				atSecond++
+				if fails < 90 || dropped > 0 {
+					t.Errorf("recorded %s into its minute, the full round %s from its lead: learned %+v at the second, the application's value fails %d of 100 replays and a dropped look-back passes %d; want the stated false red (90 or more) and no false green", rph, d, o, fails, dropped)
+				}
+			default:
+				t.Errorf("recorded %s into its minute, the full round %s from its lead: learned %+v (%s); want the minute's step or the second", rph, d, o, ln.Why)
+			}
+		}
+	}
+	if atStep == 0 || atSecond == 0 {
+		t.Errorf("%d recordings learned at the minute's step, %d at the second; want both", atStep, atSecond)
+	}
+	t.Logf("%d recordings learned at the minute's step, %d at the second", atStep, atSecond)
 }
 
 // The look-back of TestAWholeSecondLookBackAtTheSecondsCutIsCheckedAtTheSecond

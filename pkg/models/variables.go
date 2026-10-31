@@ -185,9 +185,8 @@ func (r ClockRead) inOneSecond(o ClockRead) bool {
 // cut coarser than a millisecond is checked at the cut, never refused;
 // ruled for a day's cut and an hour's that reads in hours 2026-10-29, and
 // so a minute's and a second's): as yesterday's date passes a date cut to a
-// day, a time to live changed by one cut can pass there, by where the
-// replay's read falls in its cut, so a replay cannot tell thirty minutes
-// cut to the minute from thirty-one at every read.
+// day, a time to live changed by one cut passes there at every read, so a
+// replay cannot tell thirty minutes cut to the minute from thirty-one.
 // Holds checks a replay's value at Res where it is such a step coarser than
 // the value's own encoding (a cut), as standing for its whole cut, within
 // one Res of the call's span plus the offset on either side, as a plain
@@ -881,7 +880,7 @@ func (o ClockOffset) Fine() bool {
 // 2026-10-27: a clock read cut coarser than a millisecond is checked at the
 // cut, never refused; ruled for a day's cut and an hour's that reads in
 // hours 2026-10-29, and so a minute's and a second's): as yesterday's date
-// passes a date cut to a day, one changed by one cut can pass there, and
+// passes a date cut to a day, one changed by one cut passes there, and
 // one changed by more only where the replay's call's window holds a turn of
 // the cut for each cut more (Holds). Only a
 // Res of exactly one of those units, steps of models.CutOf: a Res no step
@@ -992,8 +991,8 @@ func (o ClockOffset) Within(spans ...time.Duration) bool {
 // unit holds three of (CoarseCut: a day's, or an hour's, a minute's or a
 // second's whose offset reads in that unit or a finer one), checked at its
 // cut, it holds whatever the window's width (Checkable), and the cut admits
-// as a date's admits yesterday: a time to live changed by one cut can
-// hold, by where the read falls in its cut, and one changed by k cuts more
+// as a date's admits yesterday: a time to live changed by one cut holds
+// at every read, and one changed by k cuts more
 // only where the call's window holds k turns of the cut, between the read
 // and the call (a longer one) or between the window's start and the read
 // (a shorter one), and of a look-back the other way round, a longer one
