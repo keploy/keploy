@@ -127,7 +127,7 @@ func (p *servingProxy) noteMiss(err error) {
 	if errors.As(err, &r) && r.MismatchReport() != nil {
 		rep := r.MismatchReport()
 		uc.ActualSummary, uc.Destination, uc.Differs = rep.ActualSummary, rep.Destination, rep.Differs
-		uc.ClosestMock = rep.ClosestMock
+		uc.ClosestMock, uc.PoolSpent, uc.SpentIn = rep.ClosestMock, rep.PoolSpent, rep.SpentIn
 		if !rep.At.IsZero() {
 			uc.At = rep.At
 		}
@@ -511,6 +511,94 @@ func TestWhatThePoolDoesNotServeInATest(t *testing.T) {
 		require.True(t, strings.HasPrefix(got[1], "502"), "a pool recording a test was served answered a later test: %s", got[1])
 		require.Equal(t, models.ScopeActionFail, e.Action)
 		require.Empty(t, windowOf(t, a, "o::TestB").Evidence.ServedAside)
+	})
+}
+
+// A call that is exactly a start-up or between-tests recording another call
+// of the replay already used misses, and its reason names the recording and
+// where it went (a call between tests, or a call in test X), never asking to
+// re-record a recording that exists: consumed between tests, then the
+// test's call; a per-test recording served in TestA, then TestB's call; a
+// session recording (reused between tests) served in TestA, then TestB's.
+func TestASpentPoolRecordingsMissNamesWhereItWent(t *testing.T) {
+	perTest := func(m *models.Mock) *models.Mock {
+		m.Spec.Metadata = map[string]string{"type": "mocks"}
+		m.TestModeInfo.Lifetime = models.LifetimePerTest
+		m.TestModeInfo.LifetimeDerived = true
+		return m
+	}
+	spent := func(t *testing.T, e models.ScopeEndResp, where string) {
+		t.Helper()
+		require.Equal(t, models.ScopeActionFail, e.Action)
+		require.Contains(t, e.Reason, "GET /janitor to 127.0.0.1:18093 had no answer left: its recording ")
+		require.Contains(t, e.Reason, "mock-0, made while no test was open, already answered "+where+".")
+		require.Contains(t, e.Reason, "keploy answers each such recording once")
+		require.NotContains(t, e.Reason, "re-record")
+		require.NotContains(t, e.Reason, "had no recorded answer")
+	}
+	t.Run("consumed between tests, then the test's call", func(t *testing.T) {
+		a, p := exactAgent(t,
+			[]*models.Mock{perTest(pingMock("mock-0", "/janitor", "j", t0)), pingMock("mock-1", "/a", "a", t0.Add(time.Second))},
+			map[string][]string{"o::TestA": {"mock-1"}}, map[string][]string{"o": {"mock-0"}})
+		code, _ := p.call(t, "/janitor")
+		require.Equal(t, 200, code)
+		got, e := runTest(t, a, p, "TestA", "/a", "/janitor")
+		require.Equal(t, "200 a", got[0])
+		require.True(t, strings.HasPrefix(got[1], "502"), got[1])
+		spent(t, e, "a call between tests")
+	})
+	t.Run("a per-test recording served in TestA, then TestB's call", func(t *testing.T) {
+		a, p := exactAgent(t,
+			[]*models.Mock{perTest(pingMock("mock-0", "/janitor", "j", t0)), pingMock("mock-1", "/a", "a", t0.Add(time.Second)), pingMock("mock-2", "/b", "b", t0.Add(2*time.Second))},
+			map[string][]string{"o::TestA": {"mock-1"}, "o::TestB": {"mock-2"}}, map[string][]string{"o": {"mock-0"}})
+		got, e := runTest(t, a, p, "TestA", "/a", "/janitor")
+		require.Equal(t, []string{"200 a", "200 j"}, got)
+		require.Empty(t, e.Action)
+		got, e = runTest(t, a, p, "TestB", "/b", "/janitor")
+		require.Equal(t, "200 b", got[0])
+		require.True(t, strings.HasPrefix(got[1], "502"), got[1])
+		spent(t, e, "a call in test o::TestA")
+	})
+	t.Run("a session recording served in TestA, then TestB's call", func(t *testing.T) {
+		a, p := exactAgent(t,
+			[]*models.Mock{pingMock("mock-0", "/janitor", "j", t0), pingMock("mock-1", "/a", "a", t0.Add(time.Second)), pingMock("mock-2", "/b", "b", t0.Add(2*time.Second))},
+			map[string][]string{"o::TestA": {"mock-1"}, "o::TestB": {"mock-2"}}, map[string][]string{"o": {"mock-0"}})
+		got, e := runTest(t, a, p, "TestA", "/a", "/janitor")
+		require.Equal(t, []string{"200 a", "200 j"}, got)
+		require.Empty(t, e.Action)
+		got, e = runTest(t, a, p, "TestB", "/b", "/janitor")
+		require.Equal(t, "200 b", got[0])
+		require.True(t, strings.HasPrefix(got[1], "502"), got[1])
+		spent(t, e, "a call in test o::TestA")
+		code, body := p.call(t, "/janitor")
+		require.Equal(t, 200, code, "the calls between tests stopped reusing a session recording a test was served")
+		require.Equal(t, "j", body)
+	})
+	t.Run("an earlier test's identical recording does not take the name", func(t *testing.T) {
+		a, p := exactAgent(t,
+			[]*models.Mock{perTest(pingMock("mock-0", "/janitor", "j", t0)), pingMock("mock-1", "/janitor", "own", t0.Add(time.Second)), pingMock("mock-2", "/b", "b", t0.Add(2*time.Second))},
+			map[string][]string{"o::TestA": {"mock-1"}, "o::TestB": {"mock-2"}}, map[string][]string{"o": {"mock-0"}})
+		code, _ := p.call(t, "/janitor")
+		require.Equal(t, 200, code)
+		got, e := runTest(t, a, p, "TestA", "/janitor")
+		require.Equal(t, []string{"200 own"}, got)
+		require.Empty(t, e.Action)
+		got, e = runTest(t, a, p, "TestB", "/b", "/janitor")
+		require.True(t, strings.HasPrefix(got[1], "502"), got[1])
+		spent(t, e, "a call between tests")
+		require.NotContains(t, e.Reason, "mock-1")
+	})
+	t.Run("a call the set never recorded still asks to re-record", func(t *testing.T) {
+		a, p := exactAgent(t,
+			[]*models.Mock{perTest(pingMock("mock-0", "/janitor", "j", t0)), pingMock("mock-1", "/a", "a", t0.Add(time.Second))},
+			map[string][]string{"o::TestA": {"mock-1"}}, map[string][]string{"o": {"mock-0"}})
+		code, _ := p.call(t, "/janitor")
+		require.Equal(t, 200, code)
+		_, e := runTest(t, a, p, "TestA", "/a", "/janitor", "/other")
+		require.Equal(t, models.ScopeActionFail, e.Action)
+		require.Contains(t, e.Reason, "already answered a call between tests")
+		require.Contains(t, e.Reason, "GET /other to 127.0.0.1:18093 had no recorded answer")
+		require.Contains(t, e.Reason, "If this is an intended change, re-record it")
 	})
 }
 

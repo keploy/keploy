@@ -460,9 +460,20 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				if n == 0 && report != nil && provenswitch.On() {
 					elsewhere, restaged = notOwnedRecording(reqCtx, input, db, h.newStrictNoise(headerNoise, bodyNoise, urlNoise), call)
 				}
-				if elsewhere != nil {
+				// A call that is a start-up or between-tests recording
+				// another call of the replay already used (each answers
+				// once) names that recording and where it went: the
+				// recording exists, so the miss never asks to record it.
+				spent, poolSpent := integrations.PoolSpend{}, false
+				if n == 0 && elsewhere == nil && report != nil && provenswitch.On() {
+					spent, poolSpent = spentPoolRecording(reqCtx, input, db, h.newStrictNoise(headerNoise, bodyNoise, urlNoise))
+				}
+				switch {
+				case elsewhere != nil:
 					markNotOwned(report, elsewhere)
-				} else if lmiss != nil {
+				case poolSpent:
+					markPoolSpent(report, spent)
+				case lmiss != nil:
 					lmiss.explain(report)
 				}
 				if restaged {
@@ -484,7 +495,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// record a test in between refilled the cache with the same
 				// call, which this replay, inside the cache's span there,
 				// never made, so its recording is what the call matches.
-				if n == 0 && report != nil && (elsewhere != nil || lmiss == nil || lmiss.res.Reason == models.MissUnmockedCall) {
+				if n == 0 && report != nil && !poolSpent && (elsewhere != nil || lmiss == nil || lmiss.res.Reason == models.MissUnmockedCall) {
 					if a, ok := repeatNoteOf(reqCtx, input, db, h.newStrictNoise(headerNoise, bodyNoise, urlNoise), n); ok {
 						markRepeat(report, a)
 					}

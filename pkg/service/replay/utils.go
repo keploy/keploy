@@ -1703,6 +1703,8 @@ func (tfs *TestFailureStore) AddUnmatchedCallForTest(testSetID string, testCaseI
 			FieldReasons:     call.FieldReasons,
 			VariablePlaces:   call.VariablePlaces,
 			NotOwned:         call.NotOwned,
+			PoolSpent:        call.PoolSpent,
+			SpentIn:          call.SpentIn,
 			Reason:           call.Reason,
 			Concurrent:       call.Concurrent,
 			Answer:           call.Answer,
