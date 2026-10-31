@@ -15,7 +15,11 @@ const notHandedOnWarning = "syncMock: a request the app served was not recorded:
 // the recording lacks it. The manager warns of the first and of every
 // sendDropSampleRate-th as they come, and the recording's summary reports the
 // session's count (routes/record.go), so a recording that lost test cases so
-// says how many rather than ending short without a word. Nil-safe.
+// says how many rather than ending short without a word. A recording's stop
+// ends no such context: it waits for each test case being built from before
+// it (BuildingTestCase, noted by the HTTP/1 ingress before its client can
+// have the whole answer), and a stop whose wait makes no progress gives up,
+// says so and fails the recording (the CLI's drain). Nil-safe.
 func (m *SyncMockManager) NoteNotHandedOn() {
 	if m == nil {
 		return

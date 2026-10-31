@@ -123,6 +123,44 @@ func takeCaptureSlot(ctx context.Context) (release func(), ok bool) {
 	}
 }
 
+// buildingNote notes the test case of the exchange in flight as being built
+// (syncMock BuildingTestCase): a recording's stop waits for it
+// (BacklogBefore). It is noted as the answer's end is found, before that end
+// is forwarded: from then on the client can have the whole answer, the test
+// that sent the request can end, and its recording's stop can ask what is
+// still to come. Noted only once the capture had a slot (or, in the
+// synchronous loop, once the write had returned), a stop that asked in
+// between heard "clear" and ended the stream, and the test case was left out
+// with no count and no word. A capture takes the note over (take); every
+// other way out of the exchange says it is done (end), after what the
+// exchange's loss is counted: the stop's drain cannot end before the count is
+// in.
+type buildingNote struct{ done func() }
+
+// note notes the test case, its response at resp, unless it already is.
+func (n *buildingNote) note(ctx context.Context, resp time.Time) {
+	if n.done == nil {
+		n.done = syncMock.FromContextOrGlobal(ctx).BuildingTestCase(resp)
+	}
+}
+
+// take hands the note over: the returned func says the test case is done.
+func (n *buildingNote) take() (done func()) {
+	done, n.done = n.done, nil
+	if done == nil {
+		return func() {}
+	}
+	return done
+}
+
+// end says the test case of the exchange in flight is done, if it was noted.
+func (n *buildingNote) end() { n.take()() }
+
+// answerWritten, when set (tests only), runs as the handler goes on once it
+// has written an answer whole to its client: the instant the client can have
+// it all and the handler has not yet decided its capture.
+var answerWritten func()
+
 func serializeCapturedRequest(req *http.Request, body []byte) ([]byte, error) {
 	clone := new(http.Request)
 	*clone = *req
@@ -221,6 +259,11 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		_ = upConn.Close()
 	}()
 
+	// building notes the exchange in flight's test case as being built from
+	// its answer's end (buildingNote). Deferred first, so it runs last: after
+	// countPause and the window's close.
+	var building buildingNote
+	defer building.end()
 	// win is the open window of the exchange in flight (syncMock.OpenWindow),
 	// from its request's first byte until its capture has decided it: the mock
 	// manager holds every mock it may own until then, however long it streams.
@@ -627,7 +670,11 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			// not a going the app should be told of.
 			endWatch()
 			if captureEligible && !reqCapture.Truncated() && !respCapture.Truncated() {
-				waitPastYield(win, endAt())
+				end := endAt()
+				// From here the client can have the whole answer: a stop
+				// waits for this test case (buildingNote).
+				building.note(ctx, end)
+				waitPastYield(win, end)
 			}
 		}
 		if resp.Body == nil || resp.Body == http.NoBody {
@@ -671,6 +718,9 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			return
 		}
 		resp.Body.Close() // Close explicitly.
+		if answerWritten != nil {
+			answerWritten()
+		}
 		if endWatch() {
 			// The client went before the answer's end, and the app was
 			// told (watchClient): the exchange is not one to record, and
@@ -765,6 +815,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			countPause()
 			win.Close()
 			win = nil
+			building.end()
 			if forceCloseMode || pressureCloseMode {
 				if requestCut {
 					// Its client may still be sending the body cut off.
@@ -798,9 +849,11 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		win = nil
 
 		// Being built until it is in the recorder's queue (or given up): a
-		// recording's stop waits for it (syncMock BacklogBefore). Noted
-		// here, as the response completes, not when the goroutine runs.
-		built := syncMock.FromContextOrGlobal(ctx).BuildingTestCase(capturedRespTS)
+		// recording's stop waits for it (syncMock BacklogBefore). Noted as
+		// the answer's end was found (waitPastEnd), before the client could
+		// have it; one whose end the write did not read is noted here.
+		building.note(ctx, capturedRespTS)
+		built := building.take()
 		pm.captures.Add(1)
 		go func() {
 			defer pm.captures.Done()
@@ -1152,6 +1205,11 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		return nil
 	}
 
+	// building notes the exchange in flight's test case as being built from
+	// its answer's end (buildingNote). Deferred first, so it runs last: after
+	// countCut and the window's close.
+	var building buildingNote
+	defer building.end()
 	// win is the open window of the exchange in flight (syncMock.OpenWindow),
 	// from its request's first byte until its capture has decided it: the mock
 	// manager holds every mock it may own until then, however long it streams.
@@ -1639,6 +1697,10 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 			}
 			// An exchange that is not recorded claims nothing: no wait.
 			if captureEligible && (reqCapture == nil || !reqCapture.Truncated()) && (respCapture == nil || !respCapture.Truncated()) {
+				// From here the client can have the whole answer: a stop
+				// waits for this test case (buildingNote), whether its
+				// capture waits for a slot or this goroutine for the CPU.
+				building.note(ctx, endAt)
 				waitPastYield(win, endAt)
 			}
 		}
@@ -1672,6 +1734,9 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		}
 		if resp.Body != nil {
 			_ = resp.Body.Close()
+		}
+		if answerWritten != nil {
+			answerWritten()
 		}
 		if endWatch() {
 			// The client went before the answer's end, and the app was
@@ -1712,11 +1777,16 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		// exchange the pause had not cost as its request came.
 		countCut()
 		if captureEligible && !reqTeeTruncated && !respTeeTruncated {
+			// Noted as the answer's end was found (markEnd), before the
+			// client could have it; one whose end the write did not read
+			// is noted here. A stop waits for it while it waits for a slot.
+			building.note(ctx, respTimestamp)
 			releaseCaptureSlot, ok := takeCaptureSlot(ctx)
 			if !ok {
 				// The ingress stopped before a slot came: the app served
 				// the exchange, and its test case is never made. Counted
-				// as one the capture could not hand on (conn.HandOn).
+				// as one the capture could not hand on (conn.HandOn),
+				// before the note's end (deferred) lets a stop go on.
 				syncMock.FromContextOrGlobal(ctx).NoteNotHandedOn()
 				return
 			}
@@ -1743,7 +1813,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 			// Being built until it is in the recorder's queue (or given
 			// up): a recording's stop waits for it (syncMock
 			// BacklogBefore).
-			built := syncMock.FromContextOrGlobal(ctx).BuildingTestCase(capturedRespTS)
+			built := building.take()
 			pm.captures.Add(1)
 			go func() {
 				defer pm.captures.Done()
@@ -1780,6 +1850,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		// Not captured: nothing will decide it.
 		win.Close()
 		win = nil
+		building.end()
 
 		// Honor close signals from either side.
 		if req.Close || resp.Close {
