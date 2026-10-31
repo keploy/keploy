@@ -1893,6 +1893,15 @@ func TestPairNamesTheRecordingAMissIsClosestTo(t *testing.T) {
 			t.Fatalf("%+v", r)
 		}
 	})
+	t.Run("a closer recording that answered a request of the test already is not named, whatever Pairable says", func(t *testing.T) {
+		answered := Candidate{Shape: twin, Known: None, Pairable: true, Spent: true}
+		if r := Pair(live, []Candidate{answered, cand(update, true)}); r.Outcome != Miss || r.Index != 1 {
+			t.Fatalf("%+v", r)
+		}
+		if r := Pair(live, []Candidate{answered}); r.Outcome != Miss || r.Index != -1 || r.Why != "it differs from every recorded call in more than values" {
+			t.Fatalf("%+v", r)
+		}
+	})
 }
 
 func withFixed(s Shape, name, value string) Shape {

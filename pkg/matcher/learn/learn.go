@@ -700,7 +700,10 @@ func Pair(live Shape, cands []Candidate) Result {
 			continue
 		}
 		if d.Structural != "" {
-			if c.Pairable {
+			// A spent candidate is never paired (Candidate.Spent), so it is
+			// never the closest a miss in more than values names either,
+			// whatever Pairable says.
+			if c.Pairable && !c.Spent {
 				far = append(far, farCand{i: i, d: d})
 			}
 			continue
