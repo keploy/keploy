@@ -1922,13 +1922,17 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// a value refused in its call's window is classified again in the
 		// window from each run's test begin to the call (Window.sinceBegin:
 		// an application that reads its clock once for a request and writes
-		// it at a later call). Only a plain read of the clock it learns
-		// there is taken (one instant whole in both runs, or a typed one),
-		// checked at every replay from its test's begin
-		// (models.SinceTestBegin); anything else it learns there (noise, a
-		// variable, an echo, a read plus an offset) is not, and the refusal
-		// stands: the wider window turns a refusal into a checked read,
-		// never into noise.
+		// it at a later call). A plain read of the clock it learns there is
+		// taken (one instant whole in both runs, or a typed one), checked
+		// at every replay from its test's begin (models.SinceTestBegin), and
+		// so is a read plus an offset whose values lie after the call in
+		// both runs (sinceTimeToLive: a time to live added to an early
+		// read, an OAuth grant's expires_at = now + 30 days with its now
+		// taken at its handler's start), where a replay can check it over
+		// that span; anything else it learns there (noise, a variable, an
+		// echo, a look-back, an offset no replay could check) is not, and
+		// the refusal stands: the wider window turns a refusal into a
+		// checked read, never into noise.
 		//
 		// So does a text whose one changed word is such a read (sinceWord:
 		// keploy mock's harness naming an app "[E2E] stop-<UnixNano>" by its
@@ -1956,10 +1960,25 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// some run: a value before its test's begin (a poll's dirtyAt <= now
 		// - 30s, a test begun a second before its poll), which only a
 		// look-back explains.
+		//
+		// So, by the same rule, is a value its call's window learns as the
+		// clock plus such an offset that lies after the call (a time to
+		// live added to an early read, cut to the second: clock +
+		// 29d23h59m57s, read three seconds before its call plus thirty
+		// days), where the window from each run's test begin holds it as
+		// the clock plus an offset in both runs (clock + 30d): that offset
+		// is learned since its test began (sinceTimeToLive), which holds
+		// the application's value however long its replay waited between
+		// its read and its call. The offset in the call's window measures
+		// that wait as much as the time to live, so a replay whose wait
+		// changed by a second would fail it or pass it by where its reads
+		// fell in their seconds: a verdict that turns on load.
 		if wb := w.sinceBegin(); wb != nil && (ln.Kind == KindUnaccounted || sinceFirst(ln)) {
 			if early := leaf(r, l, wb, 0); early.Kind == KindClockRead && early.Read != nil {
 				early.Read.Since = models.SinceTestBegin
 				ln = early
+			} else if ttl, ok := sinceTimeToLive(early, wb); ok {
+				ln = ttl
 			} else if word, ok := sinceWord(early, wb, leaf); ok && ln.Kind == KindUnaccounted {
 				ln = word
 			}
@@ -2161,6 +2180,23 @@ func sinceRead(ln Learned, r, l Leaf, wb *Window, skip skipRule, leaf func(r, l 
 // its cut, in any span). False for a nil wb.
 func sinceCheckable(off models.ClockOffset, wb *Window) bool {
 	return wb != nil && checkableIn(off, off.Res, wb)
+}
+
+// sinceTimeToLive is early, the reading of a value in wb (the window from
+// each run's test begin to its call), checked since its test began
+// (sinceTestBegin), where it is the clock plus an offset whose values lie
+// after the call in both runs (Min above zero: a time to live added to a
+// read made after the test began, clock + 30d), never a look-back: a value
+// before its call is a read since the test began only as a plain read
+// (classifyRead's rescue), and an offset below zero that wb holds would
+// pass a look-back changed by up to the test's span. ok is false for
+// anything else, and for an offset a replay could not check over that span
+// (sinceTestBegin).
+func sinceTimeToLive(early Learned, wb *Window) (Learned, bool) {
+	if early.Kind != KindClockOffset || early.Offset == nil || early.Offset.Min <= 0 {
+		return early, false
+	}
+	return sinceTestBegin(early, wb)
 }
 
 // sinceWord is wordRead of early in wb, a call's window from each run's

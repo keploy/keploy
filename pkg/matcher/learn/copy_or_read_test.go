@@ -517,14 +517,17 @@ func TestAClientTestLearnsAnOffsetOfAGivenInstantOneRunsOwnWindowHoldsAsAReadSin
 // The rescue above reads a value in one run's own window and the other's
 // window since its test began (Window.oneRunSinceBegin) only where the offset
 // rule refused it (Learned.byOffset). A value no given instant builds by an
-// offset, refused in its own call's window for another reason, that reads in
-// those windows as the clock plus one constant offset (a token's expiresAt,
-// thirty days after a read record's full round made half a second and a
-// second boundary before its call's window) stays refused: the window from
-// each run's test begin takes a plain read only, never a read plus an offset
-// (classifyRead's rule for a read made before its call's window), and the
-// rescue widens no refusal but the offset rule's. Where both runs' own
-// windows hold the read, it is learned as the clock plus thirty days.
+// offset, refused in its own call's window for another reason (a token's
+// expiresAt, thirty days after a read record's full round made half a second
+// and a second boundary before its call's window), is not taken by that
+// rescue, but by classifyRead's rule for a read made before its call's
+// window: the window from each run's test begin holds it as the clock plus
+// thirty days, a value after its call in both runs (a time to live added to
+// an early read: sinceTimeToLive), so it is learned as that offset since its
+// test began, never refused. A replay passes the application's value
+// whatever its wait between its read and its call, and fails a time to live
+// changed by a day. Where both runs' own windows hold the read, it is
+// learned as the clock plus thirty days in its call's window.
 func TestAClientTestKeepsAnExpiryNoOffsetRuleRefusedThatOneRunsOwnWindowHoldsRefused(t *testing.T) {
 	const p = "body.docs.msgs.0.token.expiresAt.$numberLong"
 	const month = 30 * 24 * time.Hour
@@ -554,8 +557,23 @@ func TestAClientTestKeepsAnExpiryNoOffsetRuleRefusedThatOneRunsOwnWindowHoldsRef
 	} else if o, ok := ln.Clock(); !ok || o.Plain() || o.Min > month || o.Max <= month {
 		t.Fatalf("both runs' own windows: Offset=%+v; want the clock plus thirty days", o)
 	}
-	if ln := learn(rec, slow); ln.Kind != KindUnaccounted || ln.byOffset {
-		t.Fatalf("one run's own window: %s Read=%+v Offset=%+v byOffset=%v (%s); want refused, by no offset rule", ln.Kind, ln.Read, ln.Offset, ln.byOffset, ln.Why)
+	ln := learn(rec, slow)
+	o, ok := ln.Clock()
+	if ln.Kind != KindClockOffset || !ok || o.Since != models.SinceTestBegin || o.Min > month || o.Max <= month {
+		t.Fatalf("one run's own window: %s Read=%+v Offset=%+v (%s); want the clock plus thirty days since its test began", ln.Kind, ln.Read, ln.Offset, ln.Why)
+	}
+	for _, wait := range []time.Duration{time.Millisecond, 488 * time.Millisecond, 3 * time.Second} {
+		x := copyOrReadRun{began: time.Date(2026, 11, 2, 9, 0, 1, 900_000_000, time.UTC), audited: time.Millisecond, insert: wait, audit: wait + time.Millisecond}
+		s := x.window(true)
+		if got, why := CheckClockRead(p, o, leaf(x), s, true); !got {
+			t.Fatalf("FALSE RED: a replay that read its clock %s before its call: %s", wait, why)
+		}
+		for _, d := range []time.Duration{-24 * time.Hour, 24 * time.Hour} {
+			changed := Leaf{Path: p, Noise: p, Type: Number, Value: secs(x.at(x.audited).Add(month + d))}
+			if got, _ := CheckClockRead(p, o, changed, s, true); got {
+				t.Fatalf("FALSE GREEN: a time to live changed by %s passes", d)
+			}
+		}
 	}
 }
 

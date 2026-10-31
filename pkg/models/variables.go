@@ -1603,7 +1603,10 @@ func WallNanos(t time.Time, loc *time.Location) int64 {
 // "clock reads no one offset holds (from 30m up to 0s)". A Zone of a wall
 // clock of no zone follows it: "clock, a wall clock of no zone in the
 // application's zone"; one of ZoneApart, or one this keploy does not read,
-// says so instead. It never decides anything.
+// says so instead. Of a read since its test began (SinceTestBegin), it
+// says so, and what that span lets pass: "clock, read after its test began
+// and before its call (a replay passes a read made anywhere in that span,
+// ...)". It never decides anything.
 func (o ClockOffset) String() string {
 	switch {
 	case o.Zone == ZoneApart:
@@ -1624,6 +1627,15 @@ func (o ClockOffset) String() string {
 	}
 	if o.Since == SinceTestBegin {
 		s += ", read after its test began and before its call"
+		// The limit of a read since its test began, stated where it is
+		// learned: the learn step cannot tell where in that span the
+		// application read its clock, so a replay passes a read anywhere
+		// in it.
+		if o.Plain() {
+			s += " (a replay passes a read made anywhere in that span, so a look-back the application shortened or dropped within it passes too)"
+		} else {
+			s += " (a replay passes a read made anywhere in that span plus the offset, so a time to live changed by less than that span passes too)"
+		}
 	}
 	switch o.AppZone {
 	case "":

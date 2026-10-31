@@ -726,6 +726,79 @@ func TestAnEarlyReadCutToTheSecondIsLearnedAsAReadSinceItsTestBegan(t *testing.T
 	}
 }
 
+// An application that reads its clock once, early in its test, and writes
+// that read plus a time to live, cut to the second (an OAuth grant's
+// expires_at = now + 30 days, its now taken at its handler's start), at a
+// call 2.5 to 9 seconds later: in its call's window it reads as clock +
+// 29d23h59m57s at the second, an offset that measures the wait as much as
+// the time to live, so a replay whose wait changed by a second would fail
+// it, or pass, by where its reads fell in their seconds. The window from
+// each run's test begin holds it as clock + 30d in both runs, and the value
+// lies after its call (a time to live, never a look-back), so it is learned
+// as that offset since its test began, in every recording (both runs'
+// phases over their second, record's full round 150 ms slower). A replay
+// checks it from its test's begin to its call: the application's value
+// passes at every phase whatever the replay's wait, up to a second shorter
+// or longer (and two shorter, three longer), and a time to live changed by
+// a minute, an hour or a day fails. One changed by less than the test's
+// span before its call passes (the line says so).
+func TestAnEarlyReadPlusATimeToLiveIsLearnedAsThatOffsetSinceItsTestBegan(t *testing.T) {
+	ms, sec := time.Millisecond, time.Second
+	const p = "body.documents[].expires_at"
+	const ttl = 30 * 24 * time.Hour
+	for _, gap := range []time.Duration{2500 * ms, 3 * sec, 9 * sec} {
+		for rph := time.Duration(0); rph < sec; rph += 100 * ms {
+			for fph := time.Duration(0); fph < sec; fph += 100 * ms {
+				rcall := time.Date(2026, 10, 31, 10, 42, 14, 0, time.UTC).Add(rph)
+				fcall := rcall.Add(FullRoundLead).Truncate(sec).Add(fph)
+				rread, fread := rcall.Add(-gap), fcall.Add(-gap-150*ms)
+				c := clockOffsetCall{call: rcall, read: rread, fcall: fcall, fread: fread}
+				w := (&Window{Rec: Span{From: rcall.Add(-50 * ms), To: rcall, Began: rread.Add(-500 * ms)}, F: Span{From: fcall.Add(-50 * ms), To: fcall, Began: fread.Add(-500 * ms)}}).ComparesOffsets()
+				ln := c.classifyClient(p, secondsText(p, rread.Add(ttl)), secondsText(p, fread.Add(ttl)), w)
+				o, ok := ln.Clock()
+				// Where the two runs' values stand a whole minute apart
+				// (record's full round read its clock 0.55 s to 2.55 s
+				// sooner after the lead than the recording did), the offset
+				// is read at the minute in its call's window (offsetReading:
+				// a writer that cuts to the minute and adds a time to live
+				// writes such values too), which a replay's wait passes as
+				// well, and a time to live changed by a minute can pass.
+				apart := (fread.Add(ttl).Unix()-rread.Add(ttl).Unix())%60 == 0
+				switch {
+				case apart:
+					if ln.Kind != KindClockOffset || !ok || o.Since != "" || o.Res != time.Minute || o.Min > ttl || o.Max < ttl-sec {
+						t.Fatalf("read %s before its call plus 30 days, phases %v and %v, values a minute apart: %s %v (%s); want clock + 30d at the minute in its call's window", gap, rph, fph, ln.Kind, o, ln.Why)
+					}
+				case ln.Kind != KindClockOffset || !ok || o.Since != models.SinceTestBegin || o.Unit() != 24*time.Hour || o.Min > ttl || o.Max < ttl-sec:
+					t.Fatalf("read %s before its call plus 30 days, phases %v and %v: %s %v (%s); want clock + 30d since its test began", gap, rph, fph, ln.Kind, o, ln.Why)
+				default:
+					if s := o.String(); !strings.HasPrefix(s, "clock + 30d") || !strings.Contains(s, "read after its test began and before its call") || !strings.Contains(s, "a time to live changed by less than that span passes too") {
+						t.Fatalf("read %s before its call plus 30 days: the learned line %q does not name the offset, its span and what that span lets pass", gap, s)
+					}
+				}
+				for _, extra := range []time.Duration{-2 * sec, -1 * sec, -500 * ms, -100 * ms, 0, 100 * ms, 500 * ms, 1 * sec, 3 * sec} {
+					for ph := time.Duration(0); ph < sec; ph += 50 * ms {
+						to := rcall.Add(72 * time.Hour).Truncate(sec).Add(ph)
+						read := to.Add(-gap - extra)
+						s := Span{From: to.Add(-50 * ms), To: to, Began: read.Add(-500 * ms)}
+						if got, why := CheckClockRead(p, o, secondsText(p, read.Add(ttl)), s, true); !got {
+							t.Fatalf("FALSE RED: read %s before its call plus 30 days, a replay %+v longer, %v into its second: %s", gap, extra, ph, why)
+						}
+						for _, d := range []time.Duration{-24 * time.Hour, -time.Hour, -time.Minute, time.Minute, time.Hour, 24 * time.Hour} {
+							if apart && d.Abs() == time.Minute {
+								continue
+							}
+							if got, _ := CheckClockRead(p, o, secondsText(p, read.Add(ttl+d)), s, true); got {
+								t.Fatalf("FALSE GREEN: read %s before its call, a replay %+v longer, %v into its second: a time to live changed by %s passes", gap, extra, ph, d)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
 // api-server's endpoint poll (dirtyAt <= now - 2s, firstDirtyAt <= now -
 // 30s, an epoch's seconds), read at its call, in a test begun a second
 // before it: each value lies before the test's begin in both runs, which no
@@ -760,6 +833,10 @@ func TestAPollsLookBackBeforeItsTestBeganIsLearnedAsTheOffset(t *testing.T) {
 			if row.since {
 				if ln.Kind != KindClockRead || !ok || !o.Plain() || o.Since != models.SinceTestBegin {
 					t.Fatalf("now - %s, begun %s before, phase %v: %s %+v (%s); want a read since its test began", row.back, row.began, rph, ln.Kind, ln.Offset, ln.Why)
+				}
+				// The limit it carries, stated in its learned line.
+				if s := o.String(); !strings.Contains(s, "a look-back the application shortened or dropped within it passes too") {
+					t.Fatalf("now - %s, begun %s before: the learned line %q does not say a dropped look-back passes", row.back, row.began, s)
 				}
 				continue
 			}
