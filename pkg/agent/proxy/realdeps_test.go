@@ -237,6 +237,33 @@ func TestSetRealDeps(t *testing.T) {
 	require.Nil(t, p.realList())
 }
 
+// An agent that binds no proxy listener (low latency) relays nothing: it
+// refuses a list that names anything (models.ErrNoRealRelay), so the run
+// fails instead of recording mock.real's destinations as any other call.
+// An empty list asks nothing of it.
+func TestSetRealDepsRefusesAListWithNoListener(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	ctx := context.Background()
+	real := []string{"localhost:5432"}
+
+	p := &Proxy{logger: zap.NewNop(), skipListener: true}
+	err := p.SetRealDeps(ctx, real)
+	require.ErrorIs(t, err, models.ErrNoRealRelay)
+	require.Contains(t, err.Error(), "low latency")
+	require.Nil(t, p.realList(), "a refused list installs nothing")
+	require.ErrorIs(t, p.KeepRealDeps(ctx, real), models.ErrNoRealRelay)
+	require.NoError(t, p.SetRealDeps(ctx, nil))
+	require.NoError(t, p.KeepRealDeps(ctx, nil))
+
+	// The agent's flag is set before StartProxy copies it to the proxy.
+	prev := agent.SkipProxyListener
+	t.Cleanup(func() { agent.SkipProxyListener = prev })
+	agent.SkipProxyListener = true
+	q := &Proxy{logger: zap.NewNop()}
+	require.ErrorIs(t, q.SetRealDeps(ctx, real), models.ErrNoRealRelay)
+	require.Nil(t, q.realList())
+}
+
 // A mock.real name's DNS questions are answered live by the upstream
 // resolver every time (never from the cache, never recorded), and the answer
 // names its address for the run.

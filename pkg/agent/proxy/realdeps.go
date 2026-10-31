@@ -69,7 +69,9 @@ func (st *realState) listedName(qname string) (string, bool) {
 // a name nothing resolves has no address to match). An empty list installs
 // none: nothing is real.
 //
-// A list keploy cannot read is an error, and nothing is installed.
+// A list keploy cannot read is an error, and nothing is installed. So is a
+// list that names anything when the agent binds no proxy listener (low
+// latency): models.ErrNoRealRelay.
 func (p *Proxy) SetRealDeps(ctx context.Context, raw []string) error {
 	if !provenswitch.On() {
 		return SetRealDepsErrNoSwitch
@@ -83,6 +85,12 @@ func (p *Proxy) SetRealDeps(ctx context.Context, raw []string) error {
 	list, err := realdeps.Parse(raw)
 	if err != nil {
 		return err
+	}
+	if !list.Empty() && (agent.SkipProxyListener || p.skipListener) {
+		// No connection passes through this proxy: it relays nothing, and a
+		// capture beside the app's path (low latency) would record the
+		// listed destinations as any other call.
+		return fmt.Errorf("%w: this agent binds no proxy listener (low latency), so mock.real's destinations (%s) would be recorded; record with --low-latency=false", models.ErrNoRealRelay, strings.Join(list.Labels(), ", "))
 	}
 	p.realTracker.Reset()
 	if list.Empty() {
