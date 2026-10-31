@@ -1,5 +1,10 @@
 package integrations
 
+import (
+	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
+)
+
 // ONE CALL MORE THAN THE OPEN TEST RECORDED, AND THE BACKGROUND (under the
 // proven switch, a set served by the background rules: S12Background).
 //
@@ -65,4 +70,47 @@ type BackgroundMember interface {
 func InBackground(db MockMemDb, name string) bool {
 	b, ok := db.(BackgroundMember)
 	return ok && b.InBackground(name)
+}
+
+// OwnRepeatRead is db, the store HoldToRound returned for call, as a call of
+// kind reads it: with the set's background hidden (HideBackground) when the
+// call repeats one of the open test's own recordings of kind that already
+// answered, and db itself otherwise. It is the one check every parser makes
+// before its matcher reads db, so no protocol lets the background answer a
+// call one more than the open test recorded.
+//
+// repeats is the parser's own reading of "the same call": whether the call,
+// as its matcher judges it (its noise, its bindings, its keys), matches one
+// of answered, the open test's recordings of kind that answered
+// (ExactConsumedReader), in the order they did. It never consumes and never
+// changes the connection's state. It is asked only under the proven switch,
+// on a set served by the background rules (S12BackgroundIn), from a store
+// that can hide the background, and only when the test answered a recording
+// of kind: a set served by today's rules shows a test no background, and a
+// call before the test's first answer repeats nothing.
+//
+// Config and session recordings (a handshake, a login, a heartbeat) are no
+// test's own, so they are never in answered and stay readable to the call
+// either way.
+func OwnRepeatRead(db MockMemDb, call CallRound, kind models.Kind, repeats func(answered []*models.Mock) bool) MockMemDb {
+	if !provenswitch.On() || !S12BackgroundIn(call, db) {
+		return db
+	}
+	if _, ok := db.(BackgroundHider); !ok {
+		return db
+	}
+	er, ok := db.(ExactConsumedReader)
+	if !ok {
+		return db
+	}
+	var answered []*models.Mock
+	for _, mk := range er.ConsumedTestMocks() {
+		if mk != nil && mk.Kind == kind {
+			answered = append(answered, mk)
+		}
+	}
+	if len(answered) == 0 || !repeats(answered) {
+		return db
+	}
+	return HideBackground(db)
 }
