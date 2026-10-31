@@ -236,6 +236,14 @@ func TestWhatAValueMadeFromAGivenLearnsAs(t *testing.T) {
 // sides at once (the live value still holds the recorded given: a part,
 // refused naming the given, never learned unchecked). A value that holds
 // the given on one side only learns as it does with no given.
+//
+// Its text is evidence only where it carries 32 bits (chanceBits), as a
+// word's is: ten digits glued are a part, nine are not. A shorter given
+// ("14") glued to other digits or letters learns as it does with no given
+// (it stands there by chance as often as by flowing: a stated limit, give a
+// distinctive value); one that drifted with the value as a word of it, the
+// recorded given in the recorded value and the given in the live one, is
+// still a part (co-drift).
 func TestWhereAGivensTextStandsInAValue(t *testing.T) {
 	recAt := time.Date(2026, 10, 22, 11, 14, 17, 0, time.UTC)
 	const p = "body.name"
@@ -247,8 +255,13 @@ func TestWhereAGivensTextStandsInAValue(t *testing.T) {
 		gRec, gLive       string
 		vRec, vLive, want string // want: "part" or "alone"
 	}{
-		{"<createdAt>/slot14, given 14", "14", "15", stamp(recAt) + "/slot14", stamp(live) + "/slot15", "part"},
-		{"<createdAt> n914, given 14", "14", "15", stamp(recAt) + " n914", stamp(live) + " n915", "part"},
+		{"<createdAt>/slot14, given 14", "14", "15", stamp(recAt) + "/slot14", stamp(live) + "/slot15", "alone"},
+		{"<createdAt> n914, given 14", "14", "15", stamp(recAt) + " n914", stamp(live) + " n915", "alone"},
+		{"slot 14 of 30, given 14", "14", "15", "slot 14 of 30", "slot 15 of 30", "part"},
+		{"app<10 digits>, given them", rec[:10], full[:10], "app" + rec[:10], "app" + full[:10], "part"},
+		{"app<9 digits>, given them", rec[:9], full[:9], "app" + rec[:9], "app" + full[:9], "alone"},
+		{"app<10 digits>, given them as recorded, 9 in record's full round", rec[:10], full[:9], "app" + rec[:10], "app" + full[:9], "alone"},
+		{"app<9 digits>, given them as recorded, 10 in record's full round", rec[:9], full[:10], "app" + rec[:9], "app" + full[:10], "alone"},
 		{"app-<nonce> whose live lost it", rec, full, "app-" + rec, "app-x9", "alone"},
 		{"app-x9 whose live gained it", rec, full, "app-x9", "app-" + full, "alone"},
 		{"percent-escaped, glued", "Acme Corp " + rec, "Acme Corp " + full, "q=Acme%20Corp%20" + rec + "x9", "q=Acme%20Corp%20" + full + "x9", "part"},
