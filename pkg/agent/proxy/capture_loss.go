@@ -154,6 +154,10 @@ type clientTLS struct {
 	// tgid is the client's process (its kernel tgid, the eBPF redirect's);
 	// 0 when unknown, which no call ever makes trusted.
 	tgid uint32
+	// nsPid is the same process in the agent's own PID namespace (the eBPF
+	// redirect's agentNsPid), 0 when it is outside it: what a build's gate
+	// reads the process by (process).
+	nsPid uint32
 
 	mu sync.Mutex
 	// began is the scope the handshake began in.
@@ -182,9 +186,15 @@ func (c *clientTLS) inScope() bool {
 }
 
 // withClientTLS is ctx carrying the events of the client-side handshakes made
-// under it by the process tgid (0: unknown), charged to dst (clientTLS).
-func (p *Proxy) withClientTLS(ctx context.Context, dst string, tgid uint32) context.Context {
-	return pTls.WithClientEvents(ctx, &clientTLS{p: p, ctx: ctx, dst: dst, tgid: tgid})
+// under it by the process proc (KernelPid 0: unknown), charged to dst
+// (clientTLS).
+func (p *Proxy) withClientTLS(ctx context.Context, dst string, proc Process) context.Context {
+	return pTls.WithClientEvents(ctx, &clientTLS{p: p, ctx: ctx, dst: dst, tgid: proc.KernelPid, nsPid: proc.Pid})
+}
+
+// srcProcess is the process that opened the connection o was stamped for.
+func srcProcess(o models.OutgoingOptions) Process {
+	return Process{Pid: o.SrcNsPid, KernelPid: o.SrcPid}
 }
 
 // caTrust is the client processes, by kernel tgid, that sent a call through
@@ -317,6 +327,9 @@ func (c *clientTLS) hungUp(how string) {
 	}
 }
 
+// process is the client's process, as a build's gate is told it.
+func (c *clientTLS) process() Process { return Process{Pid: c.nsPid, KernelPid: c.tgid} }
+
 // lossWhat is what a handshake c lost is charged as: its destination, and
 // what a build's gate knows of why its process failed it (OnClientTLS's
 // Why), so the test's reason names the process and the cause, not only the
@@ -324,7 +337,7 @@ func (c *clientTLS) hungUp(how string) {
 func (c *clientTLS) lossWhat() string {
 	what := "to " + c.dst
 	if g := OnClientTLS; g != nil && c.tgid != 0 {
-		if why := g.Why(c.tgid); why != "" {
+		if why := g.Why(c.process()); why != "" {
 			what += ": " + why
 		}
 	}
@@ -338,7 +351,7 @@ func (c *clientTLS) lossWhat() string {
 // once the gate returns.
 func (c *clientTLS) HandshakeBegin() {
 	if g := OnClientTLS; g != nil && c.tgid != 0 {
-		g.Ready(c.ctx, c.tgid, c.p.realOrPassthroughLabels(c.tgid))
+		g.Ready(c.ctx, c.process(), c.p.realOrPassthroughLabels(c.tgid))
 	}
 	now := c.p.testScopeNow()
 	c.mu.Lock()
@@ -367,13 +380,13 @@ func (c *clientTLS) SilentHangUp(err error) {
 
 // clientTLSHandler is pTls.HandleTLSConnection for a parser's TLS upgrader
 // on the record path (util.ConnTLSUpgrader: MySQL's SSLRequest, Postgres's)
-// on a connection to dstAddr from the process tgid: its handshake is charged
+// on a connection to dstAddr from the process proc: its handshake is charged
 // as every client-side handshake is (clientTLS), and its own error
 // (pTls.HandshakeCause) is returned, which the parsers above it tell a
 // client's EOF apart by identity with.
-func (p *Proxy) clientTLSHandler(dstAddr string, tgid uint32) util.ClientTLSHandlerFunc {
+func (p *Proxy) clientTLSHandler(dstAddr string, proc Process) util.ClientTLSHandlerFunc {
 	return func(ctx context.Context, logger *zap.Logger, conn net.Conn, backdate time.Time) (net.Conn, bool, error) {
-		c, isMTLS, err := pTls.HandleTLSConnection(p.withClientTLS(ctx, dstAddr, tgid), logger, conn, backdate)
+		c, isMTLS, err := pTls.HandleTLSConnection(p.withClientTLS(ctx, dstAddr, proc), logger, conn, backdate)
 		return c, isMTLS, pTls.HandshakeCause(err)
 	}
 }

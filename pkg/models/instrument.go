@@ -333,6 +333,13 @@ type OutgoingOptions struct {
 	// options and uses it to pick the worker's scoped mock view (per-PID
 	// scoping for parallel test runners). 0 ⇒ unknown ⇒ the global pool.
 	SrcPid uint32 `json:"-"`
+	// SrcNsPid is that process's PID in keploy's agent's own PID namespace
+	// (the eBPF redirect's agentNsPid), by which the agent reads it in its own
+	// /proc: the kernel's PID for an agent in the initial namespace, another
+	// number for one in a container's. 0 when the process is outside the
+	// agent's namespace or unknown. Runtime, per-connection: json:"-" like
+	// SrcPid.
+	SrcNsPid uint32 `json:"-"`
 	// NetNS names the network namespace THIS connection was made from, as an
 	// opaque token. It exists because some destination addresses name a
 	// different server in every network namespace: 127.0.0.0/8, ::1, link-local

@@ -1413,7 +1413,7 @@ func (p *Proxy) mockMySQLOutgoing(parserCtx context.Context, srcConn net.Conn, d
 
 	// The replayer makes the client's TLS handshake itself, on its
 	// SSLRequest: charged as the proxy's own client handshakes are.
-	reportCtx := p.withClientTLS(parserCtx, dstAddr, outgoingOpts.SrcPid)
+	reportCtx := p.withClientTLS(parserCtx, dstAddr, srcProcess(outgoingOpts))
 	mysqlDst := &models.ConditionalDstCfg{Addr: dstAddr}
 	err := mysqlMocker.MockOutgoing(reportCtx, srcConn, mysqlDst, p.scopedFor(outgoingOpts.SrcPid, m), outgoingOpts)
 	p.countParserPanic(err, integrations.MYSQL, dstAddr)
@@ -2768,6 +2768,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// copy so the mock-serve and record-capture paths can attribute the call to
 	// the test worker that made it (per-PID scoping). 0 when unavailable.
 	outgoingOpts.SrcPid = destInfo.KernelPid
+	outgoingOpts.SrcNsPid = destInfo.AgentNsPid
 	if p.mockMode {
 		starts.Default.Note(fmt.Sprint(clientConnID), outgoingOpts.SrcPid, time.Now())
 	}
@@ -3091,7 +3092,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			// Built HERE, in handleConnection scope, so it holds pointers to
 			// the real srcConn/dstConn variables the deferred close uses —
 			// not to copies. See recordMySQLOutgoing's doc comment.
-			mysqlUpgrader := util.NewConnTLSUpgrader(&srcConn, &dstConn, p.logger, p.clientTLSHandler(dstAddr, outgoingOpts.SrcPid))
+			mysqlUpgrader := util.NewConnTLSUpgrader(&srcConn, &dstConn, p.logger, p.clientTLSHandler(dstAddr, srcProcess(outgoingOpts)))
 			return p.recordMySQLOutgoing(parserCtx, srcConn, dstConn, rule.MC,
 				parserErrGrp, mysqlLogger, clientConnID, destConnID, outgoingOpts, mysqlUpgrader)
 		}
@@ -3405,7 +3406,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		var tlsSrcConn net.Conn
 		// What the handshake, and the client just after it, lose is charged
 		// to the destination (clientTLS).
-		hsCtx = p.withClientTLS(hsCtx, dstAddr, outgoingOpts.SrcPid)
+		hsCtx = p.withClientTLS(hsCtx, dstAddr, srcProcess(outgoingOpts))
 		tlsSrcConn, isMTLS, err = pTls.HandleTLSConnection(hsCtx, p.logger, srcConn, rule.Backdate)
 		probeProxy(p.logger, "tls-handshake-done", clientConnID,
 			zap.Int("srcPort", sourcePort),
@@ -3855,7 +3856,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			if parserType == integrations.MYSQL ||
 				parserType == integrations.POSTGRES_V2 ||
 				parserType == integrations.POSTGRES_V3 {
-				upgrader = util.NewConnTLSUpgrader(&srcConn, &dstConn, p.logger, p.clientTLSHandler(dstAddr, outgoingOpts.SrcPid))
+				upgrader = util.NewConnTLSUpgrader(&srcConn, &dstConn, p.logger, p.clientTLSHandler(dstAddr, srcProcess(outgoingOpts)))
 			}
 			session := p.buildRecordSession(srcConn, dstConn, rule.MC, parserErrGrp, logger, clientConnID, destConnID, outgoingOpts, upgrader)
 			err := matchedParser.RecordOutgoing(parserCtx, session)
@@ -3888,7 +3889,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			// band (Postgres's, on an SSLRequest), has it charged as the
 			// proxy's own client handshakes are, and a build's client TLS
 			// gate readied for it (withClientTLS), as mockMySQLOutgoing's.
-			testCtx = p.withClientTLS(testCtx, dstAddr, srcPid)
+			testCtx = p.withClientTLS(testCtx, dstAddr, srcProcess(outgoingOpts))
 			// A test's end tells this connection's requests apart only if its
 			// parser answers before it reads again, or marks what it holds
 			// (inflight.go).

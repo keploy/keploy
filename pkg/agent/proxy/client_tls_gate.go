@@ -7,10 +7,12 @@ import "context"
 // (handleConnection's, the opportunistic upgrade's, the relay's, a record
 // upgrader's, and the one a replayer makes itself in band: MySQL's and
 // Postgres's, on an SSLRequest, through the context MockOutgoing is given),
-// each told through its clientTLS. kernelPID
-// is the client's process as the kernel's initial PID namespace numbers it
-// (the eBPF redirect's, models.OutgoingOptions.SrcPid); the proxy calls
-// neither method for a connection whose process it does not know (0).
+// each told through its clientTLS. p is the client's process: its KernelPid
+// as the kernel's initial PID namespace numbers it (the eBPF redirect's,
+// models.OutgoingOptions.SrcPid), and its Pid in the agent's own PID
+// namespace (SrcNsPid), by which an agent in a container's namespace reads it
+// in its /proc; Pid is 0 for a process outside that namespace. The proxy calls
+// neither method for a connection whose process it does not know (KernelPid 0).
 type ClientTLSGate interface {
 	// Ready returns once keploy's proxy may answer the process's handshake,
 	// its certificate next: a build that must prepare the process first
@@ -30,11 +32,11 @@ type ClientTLSGate interface {
 	// TLS handshakes unprepared, so a pinned one is charged as a capture loss
 	// with a Why that names the destination, not silently mocked with
 	// verification off.
-	Ready(ctx context.Context, kernelPID uint32, realOrPassthrough []string)
+	Ready(ctx context.Context, p Process, realOrPassthrough []string)
 	// Why is what the build knows of why a handshake of the process failed
 	// (the pin bypass could not attach to it, and why), for the capture loss
 	// the failure is charged as; "" when it knows nothing.
-	Why(kernelPID uint32) string
+	Why(p Process) string
 }
 
 // OnClientTLS, when a build sets it, is consulted on each TLS handshake

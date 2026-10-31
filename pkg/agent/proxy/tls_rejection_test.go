@@ -164,38 +164,44 @@ func (c readCounting) Read(b []byte) (int, error) {
 type gateSpy struct {
 	read  *atomic.Int64
 	mu    sync.Mutex
-	ready []uint32
+	ready []Process
 	seen  []int64
 	real  [][]string
 	why   string
 }
 
-func (g *gateSpy) Ready(_ context.Context, pid uint32, realOrPassthrough []string) {
+func (g *gateSpy) Ready(_ context.Context, p Process, realOrPassthrough []string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	g.ready = append(g.ready, pid)
+	g.ready = append(g.ready, p)
 	g.seen = append(g.seen, g.read.Load())
 	g.real = append(g.real, realOrPassthrough)
 }
 
-func (g *gateSpy) Why(uint32) string { return g.why }
+func (g *gateSpy) Why(Process) string { return g.why }
 
 // keploy's proxy consults a build's TLS gate (OnClientTLS) on each handshake
 // it makes with a process it knows: Ready before it answers the client, so
 // what the gate does (keploy's TLS pin bypass) is in place before the client
 // checks keploy's certificate; and Why in the capture loss a failed handshake
-// is charged as, so the test's reason names the process and the cause. A
-// connection whose process the proxy does not know consults neither.
+// is charged as, so the test's reason names the process and the cause. The
+// gate is told the process by its kernel PID and by its PID in the agent's
+// own namespace (0 outside it), so an agent in a container's PID namespace
+// can read it in its /proc. A connection whose process the proxy does not
+// know consults neither.
 func TestAClientTLSGateIsReadyBeforeKeployAnswersAndSaysWhyAHandshakeFailed(t *testing.T) {
 	const why = "process 4242 (probe): keploy's TLS pin bypass could not attach to it: operation not permitted"
 	for _, tc := range []struct {
 		name  string
 		pid   uint32
-		ready []uint32
+		nsPid uint32
+		ready []Process
 		what  string
 	}{
-		{"a process keploy knows", 4242, []uint32{4242}, "to 127.0.0.1:8443: " + why},
-		{"a process keploy does not know", 0, nil, "to 127.0.0.1:8443"},
+		{"a process keploy knows", 4242, 4242, []Process{{Pid: 4242, KernelPid: 4242}}, "to 127.0.0.1:8443: " + why},
+		{"a process in the agent's container's PID namespace", 4242, 17, []Process{{Pid: 17, KernelPid: 4242}}, "to 127.0.0.1:8443: " + why},
+		{"a process outside the agent's PID namespace", 4242, 0, []Process{{KernelPid: 4242}}, "to 127.0.0.1:8443: " + why},
+		{"a process keploy does not know", 0, 0, nil, "to 127.0.0.1:8443"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			read := &atomic.Int64{}
@@ -205,6 +211,7 @@ func TestAClientTLSGateIsReadyBeforeKeployAnswersAndSaysWhyAHandshakeFailed(t *t
 			t.Cleanup(func() { OnClientTLS = prev })
 			dest := ipv4Dest(t, "127.0.0.1:8443")
 			dest.KernelPid = tc.pid
+			dest.AgentNsPid = tc.nsPid
 			app, src := acceptedConn(t)
 			p := &Proxy{logger: zap.NewNop(), DestInfo: fakeDestInfo{dest: dest}, mysqlPorts: newMysqlPortRegistry()}
 			p.BeginTestErrorCapture()
@@ -258,12 +265,12 @@ type blockingGate struct {
 	once    sync.Once
 }
 
-func (g *blockingGate) Ready(context.Context, uint32, []string) {
+func (g *blockingGate) Ready(context.Context, Process, []string) {
 	g.once.Do(func() { close(g.entered) })
 	<-g.release
 }
 
-func (g *blockingGate) Why(uint32) string { return "" }
+func (g *blockingGate) Why(Process) string { return "" }
 
 // keploy's proxy answers a client's handshake only once the gate's Ready has
 // returned: the pin bypass it readies must be in place before the client
@@ -357,6 +364,7 @@ func TestAReplayersInBandTLSHandshakeIsReadiedAndChargedAsAnyOther(t *testing.T)
 	p := replayProxyTo(t, dst, models.OutgoingOptions{})
 	dest := ipv4Dest(t, dst)
 	dest.KernelPid = 4242
+	dest.AgentNsPid = 17
 	p.DestInfo = fakeDestInfo{dest: dest}
 	p.BeginTestErrorCapture()
 	p.errChannel = make(chan error, 8)
@@ -390,8 +398,8 @@ func TestAReplayersInBandTLSHandshakeIsReadiedAndChargedAsAnyOther(t *testing.T)
 	g.mu.Lock()
 	ready, seen := g.ready, g.seen
 	g.mu.Unlock()
-	if fmt.Sprint(ready) != "[4242]" {
-		t.Fatalf("the gate was asked to make ready %v for a replayer's in-band handshake, want [4242]", ready)
+	if want := fmt.Sprint([]Process{{Pid: 17, KernelPid: 4242}}); fmt.Sprint(ready) != want {
+		t.Fatalf("the gate was asked to make ready %v for a replayer's in-band handshake, want %s (the process by its PID in the agent's namespace too)", ready, want)
 	}
 	if seen[0] != 0 {
 		t.Fatalf("the gate's Ready came after the client had read %d byte(s) of keploy's TLS answer, want before it", seen[0])
@@ -520,7 +528,7 @@ func TestARecordUpgradersHandshakeIsChargedAndItsErrorIsItsOwn(t *testing.T) {
 	}()
 	p := &Proxy{logger: zap.NewNop()}
 	p.BeginTestErrorCapture() // a test is running: an abandon is charged within it
-	_, _, err := p.clientTLSHandler("10.0.0.5:3306", 0)(context.Background(), zap.NewNop(), src, time.Time{})
+	_, _, err := p.clientTLSHandler("10.0.0.5:3306", Process{})(context.Background(), zap.NewNop(), src, time.Time{})
 	if err != io.EOF {
 		t.Fatalf("the upgrader's handshake returned %v (%T), want io.EOF itself", err, err)
 	}
@@ -541,7 +549,7 @@ func TestARecordUpgradersClientSilentSinceItsHandshakeAbandonedIt(t *testing.T) 
 	}()
 	p := &Proxy{logger: zap.NewNop()}
 	p.BeginTestErrorCapture() // a test is running: an abandon is charged within it
-	conn, _, err := p.clientTLSHandler("10.0.0.5:5432", 0)(context.Background(), zap.NewNop(), src, time.Time{})
+	conn, _, err := p.clientTLSHandler("10.0.0.5:5432", Process{})(context.Background(), zap.NewNop(), src, time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -609,7 +617,7 @@ func TestAFailedClientTLSUpgradeIsChargedAsAnyClientHandshake(t *testing.T) {
 			}, src, connseq.NewUpstream(dst))
 			// As recordViaSupervisor runs it: what the relay's client-side
 			// handshakes lose is charged to the destination.
-			ctx, cancel := context.WithCancel(p.withClientTLS(context.Background(), remoteOf(dst), 0))
+			ctx, cancel := context.WithCancel(p.withClientTLS(context.Background(), remoteOf(dst), Process{}))
 			ran := make(chan struct{})
 			go func() { defer close(ran); _ = r.Run(ctx) }()
 			t.Cleanup(func() { cancel(); _ = app.Close(); _ = upstream.Close(); <-ran })
