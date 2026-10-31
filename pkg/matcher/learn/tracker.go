@@ -609,6 +609,24 @@ func (t *Tracker) IncomingValue(place string) (value, why string) {
 	return IncomingValueAt(t.in.live, place)
 }
 
+// IncomingValueFrom is IncomingValue of the tracker on ctx, whatever the
+// state of the learn step: a replay's read of this run's incoming requests,
+// as ClockSpanFrom is its read of the clock. Once a test set's learn step has
+// ended (SetLearnEnded: record's full round's retry cycles), TrackerFrom
+// gives no tracker, since nothing is learned there. Those cycles still serve
+// each call, and the agent still keeps each test's incoming requests
+// (Incoming), so a variable the test's harness gave the application is read
+// there as in the first cycle. Read through TrackerFrom, every such call was
+// refused as if keploy had not seen the incoming requests. A ctx with no
+// tracker reads as IncomingValue's nil tracker.
+func IncomingValueFrom(ctx context.Context, place string) (value, why string) {
+	var t *Tracker
+	if ctx != nil {
+		t, _ = ctx.Value(trackerKey{}).(*Tracker)
+	}
+	return t.IncomingValue(place)
+}
+
 // Begin starts the next test now (BeginAt).
 func (t *Tracker) Begin() { t.BeginAt(time.Now()) }
 

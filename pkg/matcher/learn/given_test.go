@@ -1520,6 +1520,35 @@ func TestTrackerReadsTheValueAClientTestsIncomingRequestsHold(t *testing.T) {
 	read(nilTracker, "", incomingUncaptured)
 }
 
+// A replay reads the incoming requests' value through the tracker on its
+// context whatever the learn step's state: in record's full round's retry
+// cycles, where the learn step has ended and TrackerFrom gives no tracker,
+// the call still reads this run's value. A context with no tracker reads
+// none, saying keploy did not see them.
+func TestAReplayReadsTheIncomingRequestsAfterTheLearnStepEnded(t *testing.T) {
+	const place = "header.Authorization{jwt}.auth_time"
+	in := func(authTime string) IncomingRequest {
+		return IncomingRequest{At: time.Now(), Parts: []models.TestRequestPart{{Name: "header.Authorization", Recorded: harnessToken(authTime, "j-"+authTime)}}}
+	}
+	tr := NewTracker()
+	tr.SetClientTests(true)
+	tr.SetIncomingSeen(true)
+	tr.GiveIncoming("TestRun", []IncomingRequest{in("1793373215")})
+	tr.Begin()
+	tr.Incoming(in("1793387031"))
+	tr.SetLearnEnded(true)
+	ctx := WithTracker(context.Background(), tr)
+	if TrackerFrom(ctx) != nil {
+		t.Fatal("the learn step ended, and TrackerFrom still gives the tracker")
+	}
+	if v, why := IncomingValueFrom(ctx, place); v != "1793387031" || why != "" {
+		t.Fatalf("read %q (%q) after the learn step ended, want this run's 1793387031", v, why)
+	}
+	if v, why := IncomingValueFrom(context.Background(), place); v != "" || why != incomingUncaptured {
+		t.Fatalf("no tracker: read %q (%q), want none, keploy did not see them", v, why)
+	}
+}
+
 // One part of a test's incoming requests is one variable of the test,
 // whichever parser's call carries it (an HTTP call and a Mongo call name it
 // alike), never the name of a variable a call binds at a place of that

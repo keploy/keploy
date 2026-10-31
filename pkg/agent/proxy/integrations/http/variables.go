@@ -660,7 +660,11 @@ func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *mo
 	if table == nil {
 		return nil, &varProblem{mock: m.Name, why: "this keploy's mock store keeps no variables, so it cannot follow them", next: "run the keploy agent of this keploy version"}
 	}
-	return holdVariables(m, decls, liveAt, table, learn.TrackerFrom(ctx).IncomingValue, refuse)
+	// This run's incoming requests are read whatever the learn step's state
+	// (learn.IncomingValueFrom): a retry cycle of record's full round, where
+	// it has ended, serves the call as the first cycle did.
+	incoming := func(place string) (string, string) { return learn.IncomingValueFrom(ctx, place) }
+	return holdVariables(m, decls, liveAt, table, incoming, refuse)
 }
 
 // holdVariables checks the variables of m on a call that fits its recording
@@ -668,7 +672,7 @@ func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *mo
 // it binds, or the evidence why they do not hold, or neither when the call is
 // another test's. incoming reads a variable its test harness gave the
 // application (varDecl.incoming) in this run's incoming requests of the
-// open test (learn.Tracker.IncomingValue).
+// open test (learn.IncomingValueFrom).
 func holdVariables(m *models.Mock, decls []varDecl, liveAt map[string]held, table *variables.Table, incoming func(place string) (string, string), refuse func(string) (*varHit, *varProblem)) (*varHit, *varProblem) {
 	// 2. The variables hold.
 	hit := &varHit{mock: m, decls: decls, local: map[string]variables.Binding{}, saw: map[string]string{}}
