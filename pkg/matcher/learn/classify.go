@@ -3263,7 +3263,10 @@ func appeared(dc *DriftCache, recorded, now string, at time.Time, served []Earli
 // it held the value F saw too: one F saw hold another value is set aside the
 // same way, and named so (follows.refuteSeen). A value the test gave keploy
 // (Earlier.Gave) is a place by its text alone, whole or as a part
-// (sourcesBy), and read by no later rule.
+// (sourcesBy), and read by no later rule: never set aside by what record's
+// full round sent where it stands (refuteSeen), so a call that carried the
+// given whole when recorded and another value in the full round stays the
+// given's, refused naming it, never learned as noise.
 func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, raw []Raw, fol *follows) (Place, bool) {
 	recorded := v.rec
 	// The place is where the value was sent whole, not where it was answered
@@ -3293,7 +3296,7 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 			default:
 				ok, whole = sources(dc.of(s.Leaf.Value, s.Live), v)
 			}
-			if !ok || fol.refuteSeen(e, s, whole, v) {
+			if !ok || !e.Gave && fol.refuteSeen(e, s, whole, v) {
 				continue
 			}
 			if r := placeRank(e, s, whole); r < rank {

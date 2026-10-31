@@ -290,6 +290,39 @@ func TestWhereAGivensTextStandsInAValue(t *testing.T) {
 	}
 }
 
+// A call that carried the given whole when recorded, but another value in
+// record's full round than the test gave then, stays the given's under the
+// follows rules too (ClassifyFollowing, Mongo's learn): a given is a place
+// by its text alone, never set aside as a copy that did not move with its
+// source (refuteSeen), so the call is refused naming the given, never
+// learned as noise that no replay checks.
+func TestAGivenTheFullRoundDidNotPassOnStaysTheGivens(t *testing.T) {
+	recAt := time.Date(2026, 10, 22, 11, 14, 17, 0, time.UTC)
+	at := recAt.Add(300 * time.Millisecond)
+	const p = "body.name"
+	const n1, n2 = "1761131656960000000", "1761225360000000001"
+	shape := func(v string) Shape {
+		return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: v}}}
+	}
+	gave := []Earlier{TestGiven("test o::TestApps", "given:a", n1, n2)}
+	for form, vLive := range map[string]string{
+		"an unrelated value":       "app-cached-0001",
+		"the recorded given glued": n1 + "x",
+	} {
+		if alone := ClassifyFollowing(NewDriftCache(), []string{p}, shape(vLive), shape(n1), at, nil, nil, nil, nil, nil)[0]; alone.Kind != KindNoise {
+			t.Fatalf("%s with no given: %s; the row needs a value that learns as noise without the given", form, alone.Kind)
+		}
+		for name, got := range map[string]Learned{
+			"ClassifyIn":        ClassifyIn(NewDriftCache(), []string{p}, shape(vLive), shape(n1), at, gave, nil, nil, nil)[0],
+			"ClassifyFollowing": ClassifyFollowing(NewDriftCache(), []string{p}, shape(vLive), shape(n1), at, gave, nil, nil, nil, nil)[0],
+		} {
+			if got.Kind != KindVariable || !got.From.Gave || got.From.Path != "given:a" || !got.From.Whole {
+				t.Errorf("%s, full round sent %s: %s from %+v (%s); want given:a's whole place", name, form, got.Kind, got.From, got.Why)
+			}
+		}
+	}
+}
+
 // Stated limit: a given whose text the application's clock read in the same
 // call equals (a bare Unix-seconds stamp, or one in a reference) cannot be
 // told from that read by its text, and is taken as the given's. Give a
