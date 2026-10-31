@@ -5473,6 +5473,140 @@ func TestLearnMatchAValueTheHarnessGaveIsFollowedFromTheTestsIncomingRequests(t 
 	}
 }
 
+// The token the application mints for a call from the harness's session (an
+// agent's bearer token) moves three claims at each run: auth_time, the value
+// the harness gave the application; exp, the second the token was minted on
+// the application's clock plus 900; and jti, a fresh id nothing else holds.
+// Each is learned at its own place: a variable read in the test's incoming
+// requests, a read of the clock plus that offset, and noise. Every other
+// claim is still compared. A replay answers a token minted in its own call's
+// window with this run's auth_time and a fresh jti. It refuses one whose exp
+// is off the offset or is the recorded one, whose auth_time is not this
+// run's, or whose role changed. keploy.yml's noise on the Authorization
+// header excuses the whole token, the exp claim's read of the clock with it.
+func TestLearnMatchAMintedTokensMovingClaimsAreEachLearnedAtTheirOwnPlace(t *testing.T) {
+	const hs = `{"alg":"HS256","typ":"JWT"}`
+	const exp = "header.authorization{jwt}.exp"
+	session := func(at string) map[string]string {
+		return map[string]string{"Authorization": bearerJWT(hs, `{"sid":"e2e-go-session","role":"admin","auth_time":`+at+`}`, "U0lHTg")}
+	}
+	agent := func(role, at string, minted time.Time, jti, sig string) map[string]string {
+		claims := `{"sub":"u-1","role":"` + role + `","auth_time":` + at + `,"exp":` + strconv.FormatInt(minted.Unix()+900, 10) + `,"jti":"` + jti + `"}`
+		return map[string]string{"Authorization": bearerJWT(hs, claims, sig)}
+	}
+	recBegin := learnAt.Add(time.Second)
+	recMinted := learnAt.Add(1400 * time.Millisecond)
+	lookup := learnRecorded("mock-0", 1300*time.Millisecond, "GET", "/v1/session", "", nil, `{"user":"u-1"}`)
+	run := learnRecorded("mock-1", 1450*time.Millisecond, "POST", "/run/r-1", `{}`, agent("agent", "1793373215", recMinted, "6f1c2a9e-4b7d-4e21-9a3f-1d2c3b4a5e6f", "QUFBQUFB"), `{"ok":true}`)
+
+	// conn is a run of the client test that began at began: the harness sent
+	// the application its session (auth_time at) 100 ms on, the application
+	// looked the session up 200 ms after that, then minted the agent's token
+	// and sent the run.
+	conn := func(began time.Time, at string, learnEnded bool) context.Context {
+		tr := learn.NewTracker()
+		tr.SetClientTests(true)
+		tr.SetAppClock(func(r time.Time) (time.Time, bool) { return r, true })
+		tr.SetIncomingSeen(true)
+		if !learnEnded {
+			tr.RecordedBegin(recBegin)
+		}
+		tr.GiveIncoming("TestGenerateOnClient", []learn.IncomingRequest{learn.IncomingHTTP("test-1", recBegin.Add(100*time.Millisecond), "http://app/v1/generate", session("1793373215"))})
+		tr.BeginAt(began)
+		tr.Incoming(learn.IncomingHTTP("", began.Add(100*time.Millisecond), "http://app/v1/generate", session(at)))
+		tr.ServedMockAt(lookup, began.Add(300*time.Millisecond))
+		tr.ServedMockAsRecorded(lookup)
+		if learnEnded {
+			tr.SetLearnEnded(true)
+		}
+		return learn.WithTracker(context.Background(), tr)
+	}
+
+	h, n, opts := learnOn(t)
+	began := learnAt.Add(10 * time.Minute)
+	in := live("POST", "/run/r-1", `{}`, agent("agent", "1793387031", began.Add(400*time.Millisecond), "0b9d8c7a-1e2f-4a3b-8c5d-6e7f8091a2b3", "QkJCQkJC"))
+	in.arrived = began.Add(450 * time.Millisecond)
+	db := &learnDb{perTest: []*models.Mock{lookup, run}}
+	served, miss, err := h.learnMatch(conn(began, "1793387031", false), in, db, n, opts)
+	if err != nil || served == nil || miss != nil || len(db.consumed) != 1 {
+		why := ""
+		if miss != nil {
+			why = miss.res.Why
+		}
+		t.Fatalf("served %v miss %q err %v", served != nil, why, err)
+	}
+	spec := db.consumed[0].Spec
+	want := models.MockVariables{"auth_time": {Recorded: "1793373215", Use: []string{"header.authorization{jwt}.auth_time"}, Incoming: "header.Authorization{jwt}.auth_time"}}
+	if got := spec.Learned(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("variables %+v, want %+v", got, want)
+	}
+	if o, ok := spec.Clocks[exp]; !ok || len(spec.Clocks) != 1 || o.Min > 900*time.Second || o.Max < 900*time.Second || o.Max-o.Min > 2*time.Second {
+		t.Fatalf("clocks %+v: want %s alone, a read of the clock plus 900 s", spec.Clocks, exp)
+	}
+	if _, jti := spec.ReqBodyNoise["header.authorization{jwt}.jti"]; !jti || len(spec.ReqBodyNoise) != 1 {
+		t.Fatalf("noise %v: want the jti claim alone", spec.ReqBodyNoise)
+	}
+
+	// The replay 90 s later: the harness gives this run's session, and the
+	// application mints the agent's token 400 ms into the test.
+	replay := began.Add(90 * time.Second)
+	minted := replay.Add(400 * time.Millisecond)
+	const fresh, sig = "9a8b7c6d-5e4f-4a3b-9c2d-1e0f9a8b7c6d", "Q0NDQ0ND"
+	authNoise := map[string][]string{"Authorization": {}}
+	for _, c := range []struct {
+		name, role, at string
+		exp            time.Time
+		noise          map[string][]string
+		ok             bool
+		differ         string
+	}{
+		{"minted in its call's window", "agent", "1793390000", minted, nil, true, ""},
+		{"an exp a minute on", "agent", "1793390000", minted.Add(time.Minute), nil, false, exp},
+		{"the recorded exp", "agent", "1793390000", recMinted, nil, false, exp},
+		{"the recorded auth_time", "agent", "1793373215", minted, nil, false, ""},
+		{"the role changed", "admin", "1793390000", minted, nil, false, "header.authorization{jwt}.role"},
+		{"keploy.yml's noise on the header, an exp a minute on", "agent", "1793390000", minted.Add(time.Minute), authNoise, true, ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			ctx := conn(replay, "1793390000", true)
+			call := live("POST", "/run/r-1", `{}`, agent(c.role, c.at, c.exp, fresh, sig))
+			call.arrived = replay.Add(450 * time.Millisecond)
+			mocks := learnedOnto([]*models.Mock{lookup, run}, db.consumed)
+			ok, _, diag, err := newHTTP().match(ctx, call, &varDb{perTest: mocks}, c.noise, nil, nil, true, false, false, true, true)
+			if err != nil {
+				t.Fatalf("match: %v", err)
+			}
+			var v varProblem
+			if diag != nil && diag.variable != nil {
+				v = *diag.variable
+			}
+			if ok != c.ok {
+				t.Fatalf("answered %v, want %v (variable %+v)", ok, c.ok, v)
+			}
+			if c.at != "1793390000" && (v.name != "auth_time" || v.actual != c.at) {
+				t.Fatalf("refused with variable %+v; want auth_time, not this run's", v)
+			}
+			if c.differ == "" {
+				return
+			}
+			// The field that refuses it, as the variables' check reads the
+			// call: this run's auth_time put back as recorded.
+			back := live("POST", "/run/r-1", `{}`, agent(c.role, "1793373215", c.exp, fresh, sig))
+			back.arrived = call.arrived
+			h := newHTTP()
+			var names []string
+			why := ""
+			for _, f := range strictDiff(ctx, back, liveDestination(ctx, back), mocks[1], h.newStrictNoise(c.noise, nil, nil)) {
+				names = append(names, f.shape)
+				why = f.why
+			}
+			if len(names) != 1 || names[0] != c.differ || c.differ == exp && !strings.HasPrefix(why, exp+" was learned as ") {
+				t.Fatalf("differs %v (%q); want it refused naming %s alone", names, why, c.differ)
+			}
+		})
+	}
+}
+
 // A token the harness gave the application, which the application forwards
 // whole, is followed whole as one variable of the incoming requests' header:
 // a replay reads the whole token there, so its signature's bytes are

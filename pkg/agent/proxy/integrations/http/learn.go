@@ -1685,9 +1685,15 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 			// earlier places streamed them. In keploy mock's client tests
 			// every call's are, a test's own too: there the lead shows no
 			// read of the application's clock (learn.DriftCache.ClientTests).
+			// The window compares offsets (learn.Window.ComparesOffsets):
+			// the learn step runs only under the proven switch, where every
+			// replay checks MockSpec.Clocks in its call's window, plus the
+			// learned offset (strictKnown.clockDiffs), so a read of the
+			// clock plus a constant offset (a token's exp, the mint's second
+			// plus 900) is learned as that offset, never refused.
 			var w *learn.Window
 			if !own || tracker.ClientTests() {
-				w = tracker.CallWindowFrom(prev.At(), m, input.arrived)
+				w = tracker.CallWindowFrom(prev.At(), m, input.arrived).ComparesOffsets()
 			}
 			learned := learn.ClassifyGiven(tracker.DriftsOf(ctx), res.Diff.Drift, liveShape, c.Shape, m.Spec.ReqTimestampMock, earlier, raw, classifiedAnswer(answered), w, givenEarlier(m, set, served, given, earlier, order))
 			plan, why := learnPlan(tracker, test, answered, c.Shape, own, learned, earlier, givenBindings(mockDb))

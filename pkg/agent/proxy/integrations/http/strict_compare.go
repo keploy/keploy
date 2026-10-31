@@ -241,8 +241,14 @@ func (k strictKnown) clockDiffs(ctx context.Context, input *req) []strictField {
 
 // userNoiseAt reports whether keploy.yml's noise reaches place, in the learn
 // step's dialect, holding value: its header names, a url pattern that
-// matches in a path segment or a query value, and its request-body paths.
+// matches in a path segment or a query value, and its request-body paths. A
+// claim of a token a header holds ("header.authorization{jwt}.exp") is the
+// header's: keploy.yml's noise on the header leaves the whole token
+// uncompared (headerDiffs), so it excuses the claim's read of the clock too.
 func (k strictKnown) userNoiseAt(place, value string) bool {
+	if token, ok := learn.ClaimOf(place); ok && strings.HasPrefix(token, "header.") {
+		place = token
+	}
 	switch {
 	case strings.HasPrefix(place, "header."):
 		return k.n.header[strings.TrimPrefix(place, "header.")]
