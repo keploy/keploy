@@ -226,6 +226,97 @@ func TestStartupMocks(t *testing.T) {
 	require.Equal(t, []models.MockEntry{{Name: "mock-0"}, {Name: "mock-2", Key: "orders"}, {Name: "mock-4", Key: "users"}}, startupMocks(windows, mocks, claims))
 }
 
+// keploy decides no call's owner: a call a test's window holds is that
+// test's, and every other one is the set's. Under the proven switch the set
+// scope is split as mappings.yaml lists it: startup: before the first test
+// began (and the protocol-phase and app-start calls, wherever they fell),
+// worker: between or after the tests, in recorded order, each with its
+// claim's key. Without a window every call is startup:'s.
+func TestSetScopeMocks(t *testing.T) {
+	at := func(ms int) time.Time { return runnerT0.Add(time.Duration(ms) * time.Millisecond) }
+	windows := []models.ScopeWindow{
+		{Name: "orders/e2e.TestB", Start: at(150), End: at(200)},
+		{Name: "orders/e2e.TestA", Start: at(0), End: at(100)},
+	}
+	mocks := []capturedMock{
+		{name: "mock-0", kind: string(models.Postgres), ts: at(-5)},
+		{name: "mock-1", ts: at(20)},
+		{name: "mock-2", ts: at(60), boot: true},
+		{name: "mock-3", kind: string(models.HTTP), ts: at(120)},
+		{name: "mock-4", ts: at(130), protocol: true},
+		{name: "mock-5", ts: at(170)},
+		{name: "mock-6", kind: string(models.Mongo), ts: at(250)},
+	}
+	startup, worker := setScopeMocks(windows, mocks, nil)
+	require.Equal(t, []models.MockEntry{{Name: "mock-0", Kind: string(models.Postgres)}, {Name: "mock-2"}, {Name: "mock-4"}}, startup)
+	require.Equal(t, []models.MockEntry{{Name: "mock-3", Kind: string(models.HTTP)}, {Name: "mock-6", Kind: string(models.Mongo)}}, worker)
+
+	startup, worker = setScopeMocks(nil, mocks, nil)
+	require.Len(t, startup, len(mocks))
+	require.Empty(t, worker)
+
+	claims := []models.ScopeWindow{{Claim: "orders", Start: at(-1)}, {Claim: "users", Start: at(200)}}
+	_, worker = setScopeMocks(windows, mocks, claims)
+	require.Equal(t, []models.MockEntry{{Name: "mock-3", Kind: string(models.HTTP), Key: "orders"}, {Name: "mock-6", Kind: string(models.Mongo), Key: "users"}}, worker)
+}
+
+// Under the proven switch keploy mock record writes the whole contract into
+// mappings.yaml: each test's own calls in its list, what came before the
+// first test in startup:, and what came between or after the tests in
+// worker:, so a reader who finds a test's call is the app's own work moves
+// it to worker: by hand. Without the switch every call outside every window
+// stays in startup:, as before. Mutation: drop the worker write
+// (upsertWorker) or the split (setScopeMocks), and the proven row fails.
+func TestMockRecordListsCallsOutsideEveryWindowAsTheSets(t *testing.T) {
+	for _, proven := range []bool{true, false} {
+		t.Run(fmt.Sprintf("proven=%v", proven), func(t *testing.T) {
+			if proven {
+				t.Setenv(provenswitch.Env, "1")
+				judgedBuild(t)
+			} else {
+				t.Setenv(provenswitch.Env, "")
+			}
+			dir := t.TempDir()
+			a, b := mark("orders::TestA", 0, 10*time.Millisecond), mark("orders::TestB", 20*time.Millisecond, 30*time.Millisecond)
+			a.Outcome, b.Outcome = models.ScopeOutcomePassed, models.ScopeOutcomePassed
+			instr := &runnerInstr{composeInstr: newInstr(t, agentUpFromSetup, false, models.AppError{}), windows: []models.ScopeWindow{a, b}}
+			instr.mocks = []*models.Mock{
+				mockAt("mock-0", runnerT0.Add(-5*time.Millisecond)),
+				mockAt("mock-1", runnerT0.Add(5*time.Millisecond)),
+				mockAt("mock-2", runnerT0.Add(15*time.Millisecond)),
+				mockAt("mock-3", runnerT0.Add(25*time.Millisecond)),
+				mockAt("mock-4", runnerT0.Add(40*time.Millisecond)),
+			}
+			cfg := instrConfig(instr.composeInstr, utils.Native, "go test -json ./...")
+			cfg.Path = dir
+			utils.ErrCode = 0
+			t.Cleanup(func() { utils.ErrCode = 0 })
+			svc := New(zap.NewNop(), instr, mockdb.New(zap.NewNop(), dir, ""), mapdb.New(zap.NewNop(), dir, ""), nil, nil, cfg)
+			require.NoError(t, svc.Record(context.Background()))
+			set := (&mockService{config: cfg}).setName()
+			mapping, err := mapdb.New(zap.NewNop(), dir, "").GetMapping(context.Background(), set)
+			require.NoError(t, err)
+			require.NotNil(t, mapping)
+			own := map[string][]string{}
+			for _, tc := range mapping.TestCases {
+				own[tc.ID] = tc.MockNames()
+			}
+			require.Equal(t, map[string][]string{"orders::TestA": {"mock-1"}, "orders::TestB": {"mock-3"}}, own)
+			var worker []string
+			for _, e := range mapping.Worker {
+				worker = append(worker, e.Name)
+			}
+			if !proven {
+				require.Equal(t, []string{"mock-0", "mock-2", "mock-4"}, mapping.StartupMockNames())
+				require.Empty(t, worker)
+				return
+			}
+			require.Equal(t, []string{"mock-0"}, mapping.StartupMockNames(), "only what came before the first test is startup:")
+			require.Equal(t, []string{"mock-2", "mock-4"}, worker, "what came between and after the tests is worker:")
+		})
+	}
+}
+
 func TestClaimKeyAt(t *testing.T) {
 	at := func(ms int) time.Time { return runnerT0.Add(time.Duration(ms) * time.Millisecond) }
 	claims := []models.ScopeWindow{{Claim: "a", Start: at(0)}, {Claim: "b", Start: at(10)}}
