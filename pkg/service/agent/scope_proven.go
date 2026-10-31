@@ -1036,9 +1036,10 @@ func (a *Agent) ProvenEnd(ctx context.Context, req models.ScopeReq) (models.Scop
 	}
 	ev, outcome, err := a.closeOpen(ctx, id, outcome, at, "")
 	if err != nil {
-		// A test keploy could not read is unread on its window (its
-		// verdict is keploy's not-judged); a failure to end it is the run's
-		// refusal already (endTest).
+		// A replayed test keploy could not read is unread on its window
+		// (its verdict is keploy's not-judged); a failure to end it is the
+		// run's refusal already (endTest). A record answers this only for
+		// a test it could not end.
 		return models.ScopeEndResp{}, scopeErr(http.StatusInternalServerError, models.ScopeErrInternal,
 			"keploy could not judge "+id+": "+err.Error(), "check the agent's log; the test is counted failed")
 	}
@@ -1083,17 +1084,19 @@ func (a *Agent) failOpen(ctx context.Context, id string, why string) {
 	a.logger.Warn("a test is counted failed: "+why, zap.String("test", id))
 }
 
-// endTest records a test's outcome and evidence and closes its window. A
-// read that failed is an error, and the test is recorded failed with it: a
-// test keploy could not judge never passes. A test that skipped itself is
-// not failed for the recorded calls it then never made.
+// endTest records a test's outcome and evidence and closes its window. In a
+// replay, a read that failed is an error, and the test is recorded failed
+// with it: a test keploy could not judge never passes. In a record, a test
+// keploy could not settle is not judged, on its window, and keeps its own
+// outcome; only a failure to end it is an error. A test that skipped itself
+// is not failed for the recorded calls it then never made.
 func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, why string) (*models.ScopeEvidence, string, error) {
 	var ev *models.ScopeEvidence
 	var readErr error
 	// The test's calls are settled before it is judged (settle_proven.go):
 	// a call it made that the proxy has not yet taken or answered is its
 	// own, whatever the load. One keploy cannot settle leaves the test
-	// unjudged, and failed.
+	// unjudged: failed in a replay, its own outcome in a record.
 	settleErr := a.settledSince(ctx, a.replaying(), id)
 	// The mock.real destinations the test used, and the connections keploy
 	// could neither capture nor relay as real while it was open: in a record
@@ -1159,20 +1162,30 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, w
 	}
 	if settleErr != nil {
 		note := "keploy could not tell that every call of " + id + " reached it: " + settleErr.Error()
-		if why == "" {
-			why = note
-		} else {
-			why += "; " + note
-		}
-		if readErr == nil {
-			readErr = settleErr
-		}
 		// Unsettled, what the test did cannot all have been read: it has
 		// no verdict of its own.
 		if ev == nil {
 			ev = &models.ScopeEvidence{}
 		}
 		ev.Unread = true
+		if a.replaying() {
+			if why == "" {
+				why = note
+			} else {
+				why += "; " + note
+			}
+			if readErr == nil {
+				readErr = settleErr
+			}
+		} else {
+			// A record never fails a test for what keploy could not
+			// capture (design v14 §5.3): the window says the test is not
+			// judged, and why, for judging to read; the test's outcome is
+			// its own against real infra, and its end is answered ok, as
+			// for a capture loss (chargeCaptureLosses). Only a test keploy
+			// could not end is an error.
+			ev.Reason = strings.TrimSpace("keploy: " + note + ". " + strings.TrimPrefix(ev.Reason, "keploy: "))
+		}
 	}
 	if why != "" {
 		if ev == nil {

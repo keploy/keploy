@@ -2569,3 +2569,61 @@ func TestStoringASetNotesItsDestinationsOnlyUnderTheSwitch(t *testing.T) {
 		}
 	}
 }
+
+// A record never fails a test for what keploy could not capture (design v14
+// §5.3): an end whose capture keploy cannot settle (a low-latency capture
+// that lost events) is answered ok, so the test's harness does not fail the
+// user's test against real infra, and its window says the test is not
+// judged, and why, keeping the outcome the test reported. The next test is
+// judged as usual.
+func TestARecordsEndKeployCannotSettleIsAnsweredOkAndNotJudged(t *testing.T) {
+	a, _ := wireAgent(t, models.MODE_RECORD)
+	claimSelf(t, a)
+	cs := &fakeCaptureSettler{err: errors.New("the capture lost 3 events")}
+	withCaptureSettler(t, cs)
+	ctx := context.Background()
+	for _, c := range []struct{ name, outcome string }{
+		{"TestThatPassed", models.ScopeOutcomePassed},
+		{"TestThatFailed", models.ScopeOutcomeFailed},
+	} {
+		_, serr := a.ProvenBegin(ctx, begin(c.name))
+		require.Nil(t, serr)
+		e, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: c.name, Outcome: c.outcome})
+		require.Nil(t, serr, "a record answers ok when it could only not settle the test")
+		require.Equal(t, models.ScopeEndResp{V: models.ScopeProtocolVersion, Status: "ok"}, e)
+	}
+	cs.err = nil
+	e := endPassed(t, a, "TestNext")
+	require.Empty(t, e.Action)
+	for name, outcome := range map[string]string{"TestThatPassed": models.ScopeOutcomePassed, "TestThatFailed": models.ScopeOutcomeFailed} {
+		w := windowOf(t, a, "o::"+name)
+		require.Equal(t, outcome, w.Outcome, "the test's outcome is its own")
+		require.NotNil(t, w.Evidence)
+		require.True(t, w.Evidence.Unread, "not judged")
+		require.Contains(t, w.Evidence.Reason, "keploy could not tell that every call of o::"+name+" reached it")
+		require.Contains(t, w.Evidence.Reason, "the capture lost 3 events")
+	}
+	w := windowOf(t, a, "o::TestNext")
+	require.Equal(t, models.ScopeOutcomePassed, w.Outcome)
+	require.True(t, w.Evidence == nil || !w.Evidence.Unread, "the next test is judged: %+v", w.Evidence)
+	require.EqualValues(t, 3, cs.settles.Load())
+}
+
+// So is a record whose test's calls keploy's proxy cannot count: the end is
+// answered ok and the test is not judged. (A replay fails it:
+// TestAnEndThatCannotCountFailsTheTest.)
+func TestARecordsEndTheProxyCannotSettleIsAnsweredOkAndNotJudged(t *testing.T) {
+	a, _ := wireAgent(t, models.MODE_RECORD)
+	claimSelf(t, a)
+	ctx := context.Background()
+	_, serr := a.ProvenBegin(ctx, begin("TestA"))
+	require.Nil(t, serr)
+	a.Hooks.(*countHooks).err = models.ErrProxyConnsUnsupported
+	e, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", Outcome: models.ScopeOutcomePassed})
+	require.Nil(t, serr)
+	require.Empty(t, e.Action)
+	w := windowOf(t, a, "o::TestA")
+	require.Equal(t, models.ScopeOutcomePassed, w.Outcome)
+	require.True(t, w.Evidence.Unread)
+	require.Contains(t, w.Evidence.Reason, "keploy could not tell that every call of o::TestA reached it")
+}

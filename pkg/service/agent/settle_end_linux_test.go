@@ -523,8 +523,9 @@ func TestADropInATestWhoseEndFailedIsTheGaps(t *testing.T) {
 			require.Nil(t, serr)
 			drop()
 			setErr(models.ErrProxyConnsUnsupported)
-			_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", Outcome: models.ScopeOutcomePassed})
-			require.NotNil(t, serr, "TestA's end could not settle")
+			e, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", Outcome: models.ScopeOutcomePassed})
+			require.Nil(t, serr, "TestA's end could not settle: a record answers it ok, not judged on its window")
+			require.Empty(t, e.Action)
 			setErr(nil)
 			drop()
 			want := models.CaptureLosses{{Kind: models.CaptureLossListenerDropped, Count: 2}}
