@@ -2614,7 +2614,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		for testCase := range frames.Incoming {
 			r.frameProgress.Add(1)
 			if r.config.Record.DetectPII {
-				r.warnPIIDetections(testCase)
+				r.warnPIIDetections(testCase, newTestSetID)
 			}
 
 			// Skip curl generation for either form data requests or large body (>1MB)
@@ -3684,9 +3684,21 @@ func (r *Recorder) createConfigWithMetadata(ctx context.Context, testSetID strin
 	r.logger.Info("Created test-set config file with metadata")
 }
 
-func (r *Recorder) warnPIIDetections(testCase *models.TestCase) {
+func (r *Recorder) warnPIIDetections(testCase *models.TestCase, testSetID string) {
 	if testCase == nil {
 		return
+	}
+
+	// The scan runs before the insert that names the test case, so a recording
+	// usually has only the call to go by. The query string is left out because
+	// it can hold the very values being reported.
+	label := strings.TrimSpace(testCase.Name)
+	if label == "" {
+		target, _, _ := strings.Cut(testCase.HTTPReq.URL, "?")
+		label = strings.TrimSpace(string(testCase.HTTPReq.Method) + " " + target)
+	}
+	if label == "" {
+		label = "unknown-test-case"
 	}
 
 	detections := make([]pii.Detection, 0)
@@ -3694,25 +3706,27 @@ func (r *Recorder) warnPIIDetections(testCase *models.TestCase) {
 	detections = append(detections, pii.DetectHeaders(testCase.HTTPReq.URLParams, "request.url_param")...)
 	detections = append(detections, pii.DetectValue("request.url", testCase.HTTPReq.URL)...)
 
-	// Scan request body; prefer the inline body but fall back to noting
-	// offloaded bodies so the user is aware PII scanning was skipped.
+	// Bodies over 1 MB can't be scanned once they have left the test case, so
+	// say so instead of reporting nothing. A request body is only moved to an
+	// asset file at insert, so here it is normally still inline.
 	reqBody := testCase.HTTPReq.Body
 	if reqBody == "" && testCase.HTTPReq.BodyRef.Path != "" {
 		r.logger.Warn(fmt.Sprintf(
-			"Potential PII in %s request body was offloaded (>1 MB) and could not be scanned in-memory. "+
-				"Review the asset file at %s manually or add redaction rules in the keploy config.",
-			testCase.Name, testCase.HTTPReq.BodyRef.Path,
+			"The request body of %s was not scanned for PII because it was offloaded (over 1 MB). "+
+				"Review the asset file at %s manually.",
+			label, testCase.HTTPReq.BodyRef.Path,
 		))
 	}
 	detections = append(detections, pii.DetectBody(reqBody, "request.body")...)
 
 	detections = append(detections, pii.DetectHeaders(testCase.HTTPResp.Header, "response.header")...)
-	detections = append(detections, pii.DetectBody(testCase.HTTPResp.Body, "response.body")...)
-
-	testCaseName := testCase.Name
-	if strings.TrimSpace(testCaseName) == "" {
-		testCaseName = "unknown-test-case"
+	if testCase.HTTPResp.BodySkipped {
+		r.logger.Warn(fmt.Sprintf(
+			"The response body of %s (%d bytes) was not scanned for PII: bodies over 1 MB are not kept during recording.",
+			label, testCase.HTTPResp.BodySize,
+		))
 	}
+	detections = append(detections, pii.DetectBody(testCase.HTTPResp.Body, "response.body")...)
 
 	if len(detections) > 0 {
 		fields := make([]string, 0, len(detections))
@@ -3721,10 +3735,13 @@ func (r *Recorder) warnPIIDetections(testCase *models.TestCase) {
 		}
 		r.logger.Warn(fmt.Sprintf(
 			"Potential PII detected in %s (%d field(s)): %s. "+
-				"Consider adding redaction rules in the keploy config or removing sensitive values before recording.",
-			testCaseName,
+				"Review test set %s before sharing it. `keploy sanitize -t %s` replaces values it detects as secrets, "+
+				"such as API keys and tokens; it does not detect emails, phone numbers, card numbers or SSNs, so remove those by hand.",
+			label,
 			len(detections),
 			strings.Join(fields, ", "),
+			testSetID,
+			testSetID,
 		))
 	}
 }

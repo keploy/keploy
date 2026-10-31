@@ -1920,13 +1920,16 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				}
 			}
 
-			detectPII, err := cmd.Flags().GetBool("detect-pii")
-			if err != nil {
-				errMsg := "failed to get the detect-pii flag"
-				utils.LogError(c.logger, err, errMsg)
-				return errors.New(errMsg)
+			// Only an explicit flag overrides record.detectPII from keploy.yml.
+			if cmd.Flags().Changed("detect-pii") {
+				detectPII, err := cmd.Flags().GetBool("detect-pii")
+				if err != nil {
+					errMsg := "failed to get the detect-pii flag"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
+				}
+				c.cfg.Record.DetectPII = detectPII
 			}
-			c.cfg.Record.DetectPII = detectPII
 
 			enableSampling, err := cmd.Flags().GetInt("enable-sampling")
 			if err != nil {

@@ -3,6 +3,7 @@ package pii
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"regexp"
 	"sort"
 	"strconv"
@@ -35,6 +36,9 @@ var piiFieldNames = map[string]struct{}{
 	"passport":        {},
 }
 
+// maxPIIFieldNameWords is the longest entry in piiFieldNames, in words.
+const maxPIIFieldNameWords = 3
+
 type Detection struct {
 	Field       string
 	PatternType string
@@ -57,8 +61,19 @@ func DetectBody(body string, source string) []Detection {
 		return nil
 	}
 
+	// UseNumber keeps a JSON number's digits as sent. Decoded to a float64, a
+	// 16-digit card number prints as 4.111111111111111e+15 and no pattern
+	// matches it.
+	decoder := json.NewDecoder(strings.NewReader(body))
+	decoder.UseNumber()
+
 	var payload interface{}
-	if err := json.Unmarshal([]byte(body), &payload); err != nil {
+	if err := decoder.Decode(&payload); err != nil {
+		return DetectValue(source, body)
+	}
+	// Decode stops after the first value, so text after it means the body is
+	// not a JSON document.
+	if _, err := decoder.Token(); err != io.EOF {
 		return DetectValue(source, body)
 	}
 
@@ -116,39 +131,64 @@ func detectJSON(value interface{}, path string) []Detection {
 	case string:
 		detections = append(detections, DetectValue(path, v)...)
 	default:
-		// Non-string JSON values (numbers, booleans, etc.) are converted to
-		// strings so that regex-based patterns (SSN, credit card, etc.) can
-		// still match their textual representation.
+		// Non-string JSON values (json.Number, booleans, etc.) are converted
+		// to strings so that regex-based patterns (phone, credit card, etc.)
+		// can still match their textual representation.
 		detections = append(detections, DetectValue(path, fmt.Sprint(v))...)
 	}
 	return dedupeDetections(detections)
 }
 
+// isPIIFieldName reports whether field, a dotted path such as
+// "request.body.user.creditCard", holds a word or run of adjacent words that
+// is listed in piiFieldNames.
 func isPIIFieldName(field string) bool {
-	// Insert a separator before each uppercase letter so that camelCase keys
-	// like "creditCard" or "socialSecurity" are split into their component
-	// words (e.g. "credit_card", "social_security") before lookup.
-	var expanded strings.Builder
-	for i, r := range field {
-		if r >= 'A' && r <= 'Z' && i > 0 {
-			expanded.WriteByte('_')
-		}
-		expanded.WriteRune(r)
-	}
-	parts := strings.FieldsFunc(strings.ToLower(expanded.String()), func(r rune) bool {
-		switch r {
-		case '.', '_', '-', '[', ']':
-			return true
-		default:
-			return false
-		}
-	})
-	for _, part := range parts {
-		if _, ok := piiFieldNames[part]; ok {
-			return true
+	parts := splitFieldName(field)
+	for i := range parts {
+		for n := 1; n <= maxPIIFieldNameWords && i+n <= len(parts); n++ {
+			if _, ok := piiFieldNames[strings.Join(parts[i:i+n], "_")]; ok {
+				return true
+			}
 		}
 	}
 	return false
+}
+
+// splitFieldName splits field into lowercase words at path and word
+// delimiters and at camelCase boundaries, keeping an acronym in one piece:
+// "userSSNValue" becomes "user", "ssn", "value".
+func splitFieldName(field string) []string {
+	isLower := func(r rune) bool { return r >= 'a' && r <= 'z' }
+	isUpper := func(r rune) bool { return r >= 'A' && r <= 'Z' }
+	isDigit := func(r rune) bool { return r >= '0' && r <= '9' }
+
+	runes := []rune(field)
+	parts := make([]string, 0, 4)
+	var word strings.Builder
+	flush := func() {
+		if word.Len() > 0 {
+			parts = append(parts, strings.ToLower(word.String()))
+			word.Reset()
+		}
+	}
+
+	for i, r := range runes {
+		switch r {
+		case '.', '_', '-', '[', ']':
+			flush()
+			continue
+		}
+		if word.Len() > 0 && isUpper(r) {
+			prev := runes[i-1]
+			nextIsLower := i+1 < len(runes) && isLower(runes[i+1])
+			if isLower(prev) || isDigit(prev) || (isUpper(prev) && nextIsLower) {
+				flush()
+			}
+		}
+		word.WriteRune(r)
+	}
+	flush()
+	return parts
 }
 
 func hasPhone(value string) bool {
@@ -158,8 +198,9 @@ func hasPhone(value string) bool {
 		if len(digits) < 10 || len(digits) > 15 {
 			continue
 		}
-		// Avoid plain numeric IDs as phone numbers.
-		if !strings.ContainsAny(match, "+-(). ") && len(digits) == 10 {
+		// Avoid plain numeric IDs and Unix timestamps in seconds or
+		// milliseconds as phone numbers.
+		if !strings.ContainsAny(match, "+-(). ") && (len(digits) == 10 || len(digits) == 13) {
 			continue
 		}
 		return true
