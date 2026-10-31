@@ -28,6 +28,33 @@ func TestAGivensVariableNamesItsRepeats(t *testing.T) {
 	require.True(t, IsGivenVariable("given:app#2"))
 	require.False(t, IsGivenVariable("app"))
 	require.False(t, IsGivenVariable("givenapp"))
+	for _, ok := range []string{"given:app", "given:app#2", "given:app#13", GivenVariable(strings.Repeat("x", MaxGivenName), 2)} {
+		require.True(t, ValidGivenVariable(ok), ok)
+	}
+	for _, bad := range []string{"", "app", "given:", "given:alice@x.com", "given:app#", "given:app#1", "given:app#02", "given:app#x", "given:app#2#3", "given:app#-2"} {
+		require.False(t, ValidGivenVariable(bad), bad)
+	}
+}
+
+// A variable miss's evidence names a given only when it is one: a variables
+// block edited by hand can hold any name, which then stays out with the
+// learned variables' names.
+func TestSanitizedMissNamesOnlyAValidGiven(t *testing.T) {
+	miss := func(given string) UnmatchedCall {
+		return UnmatchedCall{Protocol: "HTTP", MatchPhase: MatchPhaseVariable, ClosestMock: "mock-1", Given: given,
+			NextSteps:  "the application sent another value at body.name than " + given + ", the value the test gave",
+			FieldDiffs: []MockFieldDiff{{Path: "body.name", Kind: DiffKindVariable, Expected: "app-9", Actual: "app-8"}}}.Sanitized()
+	}
+	ok := miss("given:app#2")
+	require.Equal(t, "given:app#2", ok.Given)
+	require.True(t, strings.HasPrefix(ok.NextSteps, "the application sent another value at body than given:app#2, the value the test gave"), ok.NextSteps)
+	bad := miss("given:alice@x.com")
+	require.Empty(t, bad.Given)
+	require.NotContains(t, bad.NextSteps, "alice")
+	require.True(t, strings.HasPrefix(bad.NextSteps, "a test variable did not hold in mock-1"), bad.NextSteps)
+	// Only a variable miss names a given: another phase keeps no Given.
+	other := UnmatchedCall{Protocol: "HTTP", MatchPhase: "body_mismatch", Given: "given:app"}.Sanitized()
+	require.Empty(t, other.Given)
 }
 
 // A given's variable name is a key of the mock's variables (MockSpec.Variables),

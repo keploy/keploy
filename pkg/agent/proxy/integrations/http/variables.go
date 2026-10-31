@@ -346,6 +346,11 @@ type varProblem struct {
 	actual   string
 	why      string
 	next     string
+	// given is name when the problem is a given's own: the call carried
+	// another value than the test gave, or a value of another JSON type, or
+	// this run's test did not give it before the call. The miss names it
+	// (MockMismatchReport.Given).
+	given string
 }
 
 func (p *varProblem) diff() string {
@@ -524,6 +529,9 @@ func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *mo
 					why:  fmt.Sprintf("variable %s at %s: the call sent %s where the recording has %s, a value of another JSON type", d.name, vp.raw, l.raw, r.raw),
 					next: "the application changed the type of the value it sends at " + vp.raw + ": if that is intended, re-record the test; otherwise fix the application",
 				}
+				if models.IsGivenVariable(d.name) {
+					typeChange.given = d.name
+				}
 			}
 			if asRecorded, ok = asRecorded.putBack(vp.place, r); !ok {
 				return nil, nil
@@ -632,7 +640,7 @@ func holdVariables(m *models.Mock, decls []varDecl, liveAt map[string]held, tabl
 			if models.IsGivenVariable(d.name) {
 				// No call binds a given: the test gives it.
 				return nil, &varProblem{
-					mock: m.Name, name: d.name, place: place, actual: sent,
+					mock: m.Name, name: d.name, place: place, actual: sent, given: d.name,
 					why:  fmt.Sprintf("the recording's test gave %s, which this call carries at %s; this run's test did not give it before this call", d.name, place),
 					next: fmt.Sprintf("give %s in the test before the application makes this call, as the test did when it was recorded; if the test no longer gives it, re-record the test", d.name),
 				}
@@ -705,9 +713,9 @@ func holdsAt(mock string, d varDecl, places []varPlace, want, boundMock, boundPl
 				where = " (" + boundPlace + ")"
 			}
 			return &varProblem{
-				mock: mock, name: d.name, place: vp.raw, kind: models.DiffKindVariable, expected: want, actual: l.value,
+				mock: mock, name: d.name, place: vp.raw, kind: models.DiffKindVariable, expected: want, actual: l.value, given: d.name,
 				why:  fmt.Sprintf("the test gave %s = %q%s, and this call %s %q at %s: the application did not pass on the value the test gave", d.name, want, where, verb, l.value, vp.raw),
-				next: fmt.Sprintf("the application sent another value at %s than the one the test gave it: fix the application; if the call no longer carries the test's value, re-record the test", vp.raw),
+				next: fmt.Sprintf("the application sent another value at %s than %s, the value the test gave: fix the application; if the call no longer carries the test's value, re-record the test", vp.raw, d.name),
 			}
 		}
 		return &varProblem{
@@ -1056,6 +1064,7 @@ func variableMismatchReport(request *http.Request, liveBody []byte, dest, actual
 		b = b.WithRenderedRequests(renderMockRequest(closest.Spec.HTTPReq, closest.Noise), renderLiveRequest(request, liveBody, closest.Noise))
 	}
 	r := b.Build()
+	r.Given = p.given
 	// The problem's own place, the path places the closest mock and the
 	// mocks on this call's route declare, and the segments that hold a value
 	// the test bound (routePathPlaces) hold the application's values: the
