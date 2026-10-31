@@ -266,9 +266,8 @@ func jobsServed(id, n string, live Raw) []Raw {
 // the value took a word of what F gave there (a copy), or the place
 // gained nothing, or F's view of it is missing, lacks the field, or holds
 // the value F saw, it stays where the value came from (a variable), or the
-// word is refused: fail closed. ClassifyGiven refuses a short word at a
-// place F gave another value at (movedWithIt: the place changed with the
-// value), and learns one F gave as recorded there as the rule does.
+// word is refused: fail closed. ClassifyGiven reads a short word as the
+// rule does (follows.reads): co-variation disproven, learned as varying.
 func TestAWordAtAPlaceTheFullRoundGaveAnotherValueAtIsNoCopyWhereTheValueTookNoneOfIt(t *testing.T) {
 	const (
 		moved   = "where record's full round gave the application another value, which the value took none of the words of: a copy moves with its source"
@@ -351,14 +350,10 @@ func TestAWordAtAPlaceTheFullRoundGaveAnotherValueAtIsNoCopyWhereTheValueTookNon
 			continue
 		}
 		// The words here are short (under chanceBits): keploy test reads
-		// them by the rule (follows.reads), but a place F gave another
-		// value at changed with the value: evidence there (movedWithIt).
+		// them by the rule (follows.reads), a place F gave another value
+		// at that the value took no word of too.
 		given := classifyG(t, tc.recorded, tc.live, tc.earlier, tc.raw, nil)
 		switch {
-		case strings.Contains(tc.why, moved):
-			if given.Kind != KindUnaccounted || !strings.Contains(given.Why, movedWithIt) {
-				t.Errorf("FALSE GREEN? ClassifyGiven, %s: %s (%q), want it refused: the place changed with the value", tc.name, given.Kind, given.Why)
-			}
 		case given.Kind != KindNoise || given.Why != got.Why:
 			t.Errorf("ClassifyGiven, %s: %s (%q), want noise as under the rule (%q)", tc.name, given.Kind, given.Why, got.Why)
 		}

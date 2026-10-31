@@ -736,6 +736,13 @@ type givenWords struct {
 	// which servedWhy searches as the call's own places say (keep).
 	gave [][]string
 	view answerLists
+	// viewed: F served it changed and gave the one view of it keploy reads
+	// (a Raw's ServedLive, or the set's one view: statedWords); moved are
+	// the fields that view gives otherwise than the recording (movedFields),
+	// which ClassifyGiven reads as F's value where the recording gave a word
+	// (follows.excusedGiven, movedAt).
+	viewed bool
+	moved  []movedField
 	// answered, conn and pos are the recording's (Raw), first and last F's
 	// serves of it: where the rule lets a word of it go, they place it in
 	// the order the recording and F gave the application the value's
@@ -784,6 +791,7 @@ func (dc *DriftCache) wordsOf(x Raw) givenWords {
 	if x.Live() {
 		lv := dc.viewListsOf(*x.live)
 		g.gave, g.view = lv.gave, lv.answerLists
+		g.viewed, g.moved = true, dc.movedFields(x)
 	}
 	return g
 }
@@ -1001,9 +1009,12 @@ func (g GivenPlaces) Read() bool { return g.read }
 func (g GivenPlaces) Span() (first, last int) { return g.first, g.last }
 
 // ServedIn is g as F served its mock first at the first and last at the last
-// of its serves in the set (Raw.ServedIn).
+// of its serves in the set (Raw.ServedIn), its words too: where the word
+// rule lets one of them go, they place it among the value's candidate
+// sources (follows.followed), which a serve numbered 0 leaves unplaced.
 func (g GivenPlaces) ServedIn(first, last int) GivenPlaces {
 	g.first, g.last = first, last
+	g.words.first, g.words.last = first, last
 	return g
 }
 
@@ -1059,6 +1070,10 @@ type setPlaces struct {
 type viewLists struct {
 	answerLists
 	gave [][]string
+	// moved are the fields the view gives otherwise than its recording
+	// (movedFields), movedRead whether keploy could read them (viewWords).
+	moved     []movedField
+	movedRead bool
 }
 
 // viewListsOf is the viewLists of lv, a view F gave of a recording, every
@@ -1133,6 +1148,7 @@ func (o Order) statedWords(m *models.Mock, w givenWords, answers bool) givenWord
 		}
 		if !recorded && len(loads) == 1 {
 			w.gave, w.view = words.gave, words.answerLists
+			w.viewed, w.moved = words.movedRead, words.moved
 			return w
 		}
 		views = append(views, words.answerLists)
@@ -1166,7 +1182,15 @@ func (c *setPlaces) viewWords(m *models.Mock, id string, k int, load func() (*mo
 	if !ok {
 		return viewLists{}, false
 	}
-	words := NewDriftCache().viewListsOf(*lv)
+	dc := NewDriftCache()
+	words := dc.viewListsOf(*lv)
+	// The fields the view gives otherwise than the recording, read back
+	// once for the set beside the view: none where it cannot be read back
+	// (movedRead false: the word rule reads no value of F's there).
+	if x, err := ReadRaw(m, true); err == nil && x.isRead() {
+		x.live = lv
+		words.moved, words.movedRead = dc.movedFields(x), true
+	}
 	if c != nil {
 		c.mu.Lock()
 		c.views[key] = words

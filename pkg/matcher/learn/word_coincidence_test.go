@@ -70,6 +70,13 @@ func TestAShortWordIsChanceOnlyWhereBothRunsShowItsPlaceDidNotMoveWithTheValue(t
 	alike := func(mock string, startUp bool, l Leaf) []Earlier {
 		return served(mock, startUp, l, l.Value, time.Millisecond)
 	}
+	// What an earlier test's call sent (its request: an insert's _id), as
+	// recorded and as F's application sent it (live).
+	sent := func(mock string, l Leaf, live string) []Earlier {
+		e := served(mock, false, l, live, time.Millisecond)
+		e[0].Seen[0].Side = Request
+		return e
+	}
 	own := func(e []Earlier) []Earlier {
 		e[0].Run = false
 		return e
@@ -106,7 +113,19 @@ func TestAShortWordIsChanceOnlyWhereBothRunsShowItsPlaceDidNotMoveWithTheValue(t
 			// start-up's wire header (TestStaffBlockAnOAuthClient).
 			{"a start-up's header holds a word of one character of a token", "mock-0", "kepreq_" + tokRec, "kepreq_" + tokLive, alike("mock-0", true, text("spec.responses[0].message.response_flags", "n"))},
 			{"a count beside another test's equal count, given alike", "mock-231", "46", "4499", alike("mock-231", false, text("body.count", "46"))},
+			// Co-variation disproven: the place moved too, to a value the
+			// value took no word of (an earlier test's random id beside the
+			// call's own, each made afresh in F).
+			{"given: an earlier test's id F gave another id at, which the value took no word of", "mock-231", rec, live, served("mock-231", false, text("body.cursor.firstBatch.0._id", other), "c0ffee00-1234-4321-abcd-0000000000ff", time.Millisecond)},
+			// The same the other way about: F's application sent, in an
+			// earlier test's insert, an id that holds a group of the value
+			// as F saw it, where the recording sent an id the recorded value
+			// took no word of (TestStopGeneration's eventsV2 _id).
+			{"given: an earlier test's insert F sent an id holding a group of the fresh id at", "mock-694", rec, live, sent("mock-694", text("body.docs.msgs.0._id", "b0fd3b58-3ff5-4a1a-a1b2-c3d4e5f60718"), "c1d2e3f4-5a6b-4b8a-8e9f-a0b1c2d3e4f5")},
 		} {
+			if strings.HasPrefix(r.what, "given: ") && name == "ClassifyFollowing" {
+				continue // it keeps its reading of a place that moved
+			}
 			got := c(r.earlier, r.rec, r.live)
 			if got.Kind != KindNoise || !strings.Contains(got.Why, r.mock) || !strings.HasSuffix(got.Why, "keploy learns it as varying") {
 				t.Errorf("%s: disproven: %s: %s (%q); want noise naming %s", name, r.what, got.Kind, got.Why, r.mock)
@@ -121,11 +140,13 @@ func TestAShortWordIsChanceOnlyWhereBothRunsShowItsPlaceDidNotMoveWithTheValue(t
 			{"shown: an earlier test's counter drifted with the id that holds it", "mock-231", "order-17", "order-18", served("mock-231", false, text("body.value.seq", "17"), "18", time.Millisecond)},
 			{"shown: an earlier test's status drifted with the value", "mock-231", "no", "ok", served("mock-231", false, text("body.status", "no"), "ok", time.Millisecond)},
 			{"shown: the call's own test's count drifted with the value", "mock-231", "40", "2081", own(served("mock-231", false, text("body.count", "40"), "2081", time.Millisecond))},
-			// The place changed with the value, though not to F's value:
-			// keploy test reads it as evidence (movedWithIt), where
-			// ClassifyFollowing sets it aside (refuteSeen).
+			// The call's own test sent o-1 and the value was o-1: a variable
+			// of it, refused where F's value is not the one the test sent.
 			{"given: shown: an earlier call's order id drifted to another value than the value's", "mock-231", "o-1", "o-5", own(served("mock-231", false, text("body.order", "o-1"), "o-9", time.Millisecond))},
-			{"given: shown: an earlier test's id F gave another id at", "mock-231", rec, live, served("mock-231", false, text("body.cursor.firstBatch.0._id", other), "c0ffee00-1234-4321-abcd-0000000000ff", time.Millisecond)},
+			// Shown the other way about: F gave the value's new word at a
+			// place whose recorded word the recorded value holds.
+			{"given: shown: an earlier test's field F gave the fresh word at, whose recorded word the recorded value holds", "mock-231", "k-17", "k-18", served("mock-231", false, text("body.seq", "k"), "18", time.Millisecond)},
+			{"given: shown: an earlier test's insert F sent the fresh count at, where the recording sent the recorded one", "mock-694", "17", "18", sent("mock-694", text("body.docs.msgs.0.n", "17"), "18")},
 			// Unknown: refused.
 			{"unknown: no answer time", "mock-231", rec, live, served("mock-231", false, text("body.cursor.firstBatch.0._id", other), other, 0)},
 			{"unknown: answered at the call", "mock-231", rec, live, served("mock-231", false, text("body.cursor.firstBatch.0._id", other), other, 2*time.Second)},
@@ -186,7 +207,14 @@ func TestAShortWordOfAPayloadIsChanceOnlyWhereBothRunsShowItDidNotMoveWithTheVal
 			{"another test's cell holds five digits, F gave them alike", "29782", "41377", another(viewed("29782", "29782"))},
 			{"another test's id holds the recorded id's group, served as recorded", rec, live, another(asRecorded(other))},
 			{"the call's own test's id holds the recorded id's group, served as recorded", rec, live, own(asRecorded(other))},
+			// Disproven: F gave another id there, which the value took no
+			// word of.
+			{"given: another test's id F gave another id at", rec, live, another(viewed(other, "c0ffee00-1234-4321-abcd-0000000000ff"))},
+			{"given: another test's id F gave another id at, the value's word F's", rec, live, another(viewed("c0ffee00-1234-4b8a-abcd-0000000000ff", "b0fd3b58-3ff5-4a1a-a1b2-c3d4e5f60718"))},
 		} {
+			if strings.HasPrefix(row.what, "given: ") && name == "ClassifyFollowing" {
+				continue // it keeps its reading of a place that moved
+			}
 			if got := run(row.rec, row.live, row.raw, nil); got.Kind != KindNoise || !strings.Contains(got.Why, "mock-6") {
 				t.Errorf("%s: disproven: %s (%q recorded, %q in F): %s (%q); want noise naming mock-6", name, row.what, row.rec, row.live, got.Kind, got.Why)
 			}
@@ -201,7 +229,6 @@ func TestAShortWordOfAPayloadIsChanceOnlyWhereBothRunsShowItDidNotMoveWithTheVal
 			{"shown: another test's cell F gave the fresh value at", "40", "2081", another(viewed("40", "2081")), nil},
 			{"shown: the call's own test's cell F gave the fresh value at", "40", "2081", own(viewed("40", "2081")), nil},
 			{"shown: another test's id F gave the fresh group at", rec, live, another(viewed("x-48d1", "q-7e6d-z")), nil},
-			{"given: shown: another test's id F gave another id at", rec, live, another(viewed(other, "c0ffee00-1234-4321-abcd-0000000000ff")), nil},
 			// Unknown.
 			{"unknown: another test's cell served with no view", "40", "2081", another(cell("40")), nil},
 			{"unknown: another test's id served with no view", rec, live, another(cell(other)), nil},
@@ -242,6 +269,52 @@ func TestWordBitsBoundsAChanceWord(t *testing.T) {
 	} {
 		if got := wordBits(row.word) < chanceBits; got != row.chance {
 			t.Errorf("%q: %.1f bits, chance=%v; want chance=%v", row.word, wordBits(row.word), got, row.chance)
+		}
+	}
+}
+
+// The set's recordings (Order.GivenPlaces) read F's value at the field the
+// same way: an older test's row, told with the one view F gave of it (the
+// set reads its moved fields once, beside its words: viewWords). Where F
+// gave another id there, which the value took no word of, the short word
+// the recorded value shares with the recorded id is chance under keploy
+// test; where F's id holds a word of the value F saw, it is refused.
+// ClassifyFollowing keeps its reading: the set's recordings give it no
+// field both runs gave alike, so it refuses.
+func TestASetRecordingFGaveAnotherIdAtIsReadAtItsField(t *testing.T) {
+	const path = "bind.$8"
+	rec := Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: chanceValRec}}}
+	live := Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: chanceValLive}}}
+	m := jobsMock(chanceSrcRec, "5")
+	for _, c := range []struct {
+		name, viewID string
+		noise        bool
+	}{
+		{"F gave another id there, which the value took no word of", "e1f2a3b4-c5d6-4e7f-8a9b-9f8e7d6c5b4a", true},
+		{"F gave an id there that holds a word of the value F saw", "e1f2a3b4-c5d6-4e7f-dddd-9f8e7d6c5b4a", false},
+	} {
+		tr := NewTracker()
+		tr.Begin()
+		tr.ServedMock(m)
+		tr.ServedMockLive(m, "a", func() (*models.Mock, error) { return jobsMock(c.viewID, "9"), nil })
+		tr.End()
+		tr.Begin()
+		tr.End()
+		tr.Begin()
+		o := tr.Placed().Order
+		given := func() ([]GivenPlaces, error) {
+			g, err := o.GivenPlaces(m)
+			return []GivenPlaces{g}, err
+		}
+		got := ClassifyGiven(clockedDrifts(), []string{path}, live, rec, eRecAt, nil, nil, nil, nil, given)[0]
+		switch {
+		case c.noise && (got.Kind != KindNoise || !strings.Contains(got.Why, "stands in mock-6, where record's full round gave the application another value, which the value took none of the words of")):
+			t.Errorf("%s: %s (%q); want noise naming mock-6", c.name, got.Kind, got.Why)
+		case !c.noise && (got.Kind == KindNoise || !strings.Contains(got.Why, "mock-6")):
+			t.Errorf("FALSE GREEN? %s: %s (%q); want refused naming mock-6", c.name, got.Kind, got.Why)
+		}
+		if f := ClassifyFollowing(clockedDrifts(), []string{path}, live, rec, eRecAt, nil, nil, nil, nil, given)[0]; f.Kind == KindNoise {
+			t.Errorf("%s: ClassifyFollowing: noise (%q); want its reading kept (refused)", c.name, f.Why)
 		}
 	}
 }

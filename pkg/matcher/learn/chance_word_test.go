@@ -27,6 +27,7 @@ func TestAChanceWordOfAnotherTestsAnswerIsLearnedAsVarying(t *testing.T) {
 		chance  = "5c0e9a7b-1f2d-48d1-9a3b-c4d5e6f70812" // the call's random appId: "48d1" by chance
 		other   = "0c1d2e3f-4a5b-4c7d-8e9f-a0b1c2d3e4f5" // the call's appId in the other run
 		movedID = "e1f2a3b4-c5d6-4e7f-8a9b-0c1d2e3f4a5b" // what a view gave at the message id instead
+		freshID = "e1f2a3b4-c5d6-4e7f-8a9b-9f8e7d6c5b4a" // the same, sharing no word with the value
 	)
 	before := r1Insert.Add(-time.Minute)
 	src := func(id string, req, res time.Time) *models.Mock {
@@ -59,17 +60,23 @@ func TestAChanceWordOfAnotherTestsAnswerIsLearnedAsVarying(t *testing.T) {
 		raw       func(dc *DriftCache, m *models.Mock) Raw
 		rec, live string
 		want      string // "" noise under ClassifyFollowing
+		// given is what ClassifyGiven says where it reads F's value at the
+		// field (excusedGiven, movedAt) and the rule does not: "noise" where
+		// F gave another value there that the value took no word of.
+		given string
 	}{
-		{"the recorded id's group, served as recorded", okSrc, asRecorded, chance, other, ""},
-		{"the id's group F saw, served as recorded", okSrc, asRecorded, other, chance, ""},
-		{"served changed, its view giving the word at the same field", okSrc, viewOf(bodyMoved), chance, other, ""},
-		{"the id's group F saw, served changed, its view giving the word at the same field", okSrc, viewOf(bodyMoved), other, chance, ""},
-		{"two groups of the id in one answer, served as recorded", src("bb7ed9ee-1f2d-48d1-982f-b54b2b73982f", before, before.Add(time.Second)), asRecorded, chance, other, ""},
-		{"served changed with no view", okSrc, noView, chance, other, "record's full round did not give the application that word there before the call"},
-		{"served changed, its view giving the word at another field too (a header the recording's lacks it at)", okSrc, viewOf(elsewhere), chance, other, "record's full round did not give the application that word there before the call"},
-		{"served changed, its view giving another id there", okSrc, viewOf(src(movedID, before, before.Add(time.Second))), chance, other, "record's full round did not give the application that word there before the call"},
-		{"answered at the call", src(srcID, before, r1Insert), asRecorded, chance, other, "the recording did not give the application that word there before the call"},
-		{"no answer time", src(srcID, before, time.Time{}), asRecorded, chance, other, "keploy cannot read when the recording answered mock-31"},
+		{"the recorded id's group, served as recorded", okSrc, asRecorded, chance, other, "", ""},
+		{"the id's group F saw, served as recorded", okSrc, asRecorded, other, chance, "", ""},
+		{"served changed, its view giving the word at the same field", okSrc, viewOf(bodyMoved), chance, other, "", ""},
+		{"the id's group F saw, served changed, its view giving the word at the same field", okSrc, viewOf(bodyMoved), other, chance, "", ""},
+		{"two groups of the id in one answer, served as recorded", src("bb7ed9ee-1f2d-48d1-982f-b54b2b73982f", before, before.Add(time.Second)), asRecorded, chance, other, "", ""},
+		{"served changed with no view", okSrc, noView, chance, other, "record's full round did not give the application that word there before the call", ""},
+		{"served changed, its view giving the word at another field too (a header the recording's lacks it at)", okSrc, viewOf(elsewhere), chance, other, "record's full round did not give the application that word there before the call", "record's full round gave the application that word at spec.resp.header.X-Amzn-Requestid, where the recording did not"},
+		// movedID holds 0c1d2e3f, the first group of the value F saw.
+		{"served changed, its view giving another id there that holds a word the value took", okSrc, viewOf(src(movedID, before, before.Add(time.Second))), chance, other, "record's full round did not give the application that word there before the call", "record's full round gave the application another value there, and it holds a word the value took"},
+		{"served changed, its view giving another id there", okSrc, viewOf(src(freshID, before, before.Add(time.Second))), chance, other, "record's full round did not give the application that word there before the call", "noise"},
+		{"answered at the call", src(srcID, before, r1Insert), asRecorded, chance, other, "the recording did not give the application that word there before the call", ""},
+		{"no answer time", src(srcID, before, time.Time{}), asRecorded, chance, other, "keploy cannot read when the recording answered mock-31", ""},
 	} {
 		for _, viaSet := range []bool{false, true} {
 			for _, follow := range []bool{false, true} {
@@ -89,6 +96,14 @@ func TestAChanceWordOfAnotherTestsAnswerIsLearnedAsVarying(t *testing.T) {
 				}
 				refused := "appears in mock-31, a recording record's full round gave the application before the call that is another test's"
 				switch {
+				case !follow && row.given == "noise":
+					if ln.Kind != KindNoise || !strings.Contains(ln.Why, "stands in mock-31, where record's full round gave the application another value, which the value took none of the words of: a copy moves with its source") {
+						t.Errorf("%s (set %v): %s (%s); want noise: F gave another value there", row.name, viaSet, ln.Kind, ln.Why)
+					}
+				case !follow && row.given != "":
+					if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, refused) || !strings.Contains(ln.Why, row.given) {
+						t.Errorf("%s (set %v, keploy test): %s (%s); want it refused: %s", row.name, viaSet, ln.Kind, ln.Why, row.given)
+					}
 				case row.want == "":
 					// The noise names its evidence (learning is legible): the
 					// word, where both runs gave it, which value lacks it, and

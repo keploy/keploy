@@ -22,7 +22,8 @@ import (
 // field the recording lacks, a recorded value that took a word of what the
 // recording gave there (in any case) or holds the word too, a place that
 // lost no word, one answered at the call or with no answer time. keploy test
-// (ClassifyGiven) refuses it as before. Nothing reads the id's shape.
+// (ClassifyGiven) reads it alike: a 4-hex word is under chanceBits
+// (follows.reads). Nothing reads the id's shape.
 func TestAChanceWordOfWhatTheFullRoundGaveIsLearnedAsVarying(t *testing.T) {
 	const p = "body.appId"
 	const (
@@ -101,18 +102,16 @@ func TestAChanceWordOfWhatTheFullRoundGaveIsLearnedAsVarying(t *testing.T) {
 			}
 			ln := classify(dc, []string{p}, strLeaf(p, row.live), strLeaf(p, row.rec), r1Insert, nil, []Raw{x}, nil, nil, nil)[0]
 			refused := "where the recording did not give the application that word"
+			// keploy test reads these short words (4 hex digits, under
+			// chanceBits) by the rule too (follows.reads).
 			switch {
-			case follow && row.want == "":
+			case row.want == "":
 				if ln.Kind != KindNoise || !strings.Contains(ln.Why, "where the recording gave the application another value, which the recorded value took none of the words of") {
-					t.Errorf("%s: %s (%s); want noise naming why", row.name, ln.Kind, ln.Why)
-				}
-			case follow:
-				if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, refused) || !strings.Contains(ln.Why, row.want) {
-					t.Errorf("%s: %s (%s); want it refused: %s", row.name, ln.Kind, ln.Why, row.want)
+					t.Errorf("%s (follow %v): %s (%s); want noise naming why", row.name, follow, ln.Kind, ln.Why)
 				}
 			default:
-				if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, refused) {
-					t.Errorf("%s, keploy test: %s (%s); want it refused as before", row.name, ln.Kind, ln.Why)
+				if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, refused) || !strings.Contains(ln.Why, row.want) {
+					t.Errorf("%s (follow %v): %s (%s); want it refused: %s", row.name, follow, ln.Kind, ln.Why, row.want)
 				}
 			}
 		}
