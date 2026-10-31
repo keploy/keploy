@@ -2020,7 +2020,7 @@ func TestAClientTestLearnsItsAuditReadAnEarlierAnswersClockNameRoundsToAsARead(t
 		// application was given, from the app's createdAt, which in F held
 		// another second than the audit where the insert crossed one.
 		v := dc.ofIn(rec, live, w, r0.Add(254*ms))
-		from, ok := dc.echoServed(dc.echoedIn(v, r0.Add(254*ms), earlier, nil), rec, earlier, nil)
+		from, ok := dc.echoServed(dc.echoedIn(v, r0.Add(254*ms), earlier, nil), rec, earlier, nil, nil)
 		if !ok || from.Mock != "mock-968" || from.Path != "body.docs.msgs.0.app.createdAt.$numberLong" || (from.Live != live) != tc.createdApart {
 			t.Fatalf("%s: the echo took %+v (found %v); want mock-968's app.createdAt, holding another second than %s in F: %v", tc.name, from, ok, live, tc.createdApart)
 		}
@@ -2105,6 +2105,7 @@ func TestAnEarlierClockReadFSawSendAnotherMomentIsNoSourceOfTheValue(t *testing.
 	source := "its recorded value was sent in mock-18 at " + expires + ", the test set's start-up's call, where keploy learned it as a read of the application's clock"
 	echo := "the moment its recorded value was recorded with stands in mock-18 at " + expires + ", where keploy learned a read of the application's clock and record's full round saw the application send another moment than the value's: a copy moves with its source, so the value is no copy of it; but the call's recorded answer holds it, an echo keploy cannot answer beside a source it set aside"
 	pick := "while the moment it was recorded with stands in mock-18 at " + expires + ", where keploy learned a read of the application's clock and record's full round saw the application send another moment than the value's, so the value is no copy of it (a copy moves with its source), and no other earlier place is its source"
+	word := "appears in the test set's start-up, in mock-18 at " + expires + ", which did not drift with it"
 	for _, c := range []struct {
 		name                              string
 		own, answer, wide, copied, noView bool
@@ -2120,10 +2121,16 @@ func TestAnEarlierClockReadFSawSendAnotherMomentIsNoSourceOfTheValue(t *testing.
 		// text: the poll sends a text that holds its epoch seconds as one
 		// word among others; shard: another word of it changed too.
 		text, shard bool
-		ago         time.Duration
-		kind        Kind
-		from, why   string
-		since       bool
+		// noPick: no answer the test was given holds the second F's poll
+		// names (mock-1070), so the echo has no evidence of a pick.
+		noPick    bool
+		ago       time.Duration
+		kind      Kind
+		from, why string
+		since     bool
+		// underGiven: the outcome under HTTP's and Postgres's learn
+		// (ClassifyGiven), where it is not Mongo's (learnRules).
+		underGiven *ruleOutcome
 	}{
 		{name: "(d) the start-up's read", kind: KindUnaccounted, why: judged},
 		{name: "(a) the start-up's read, the poll's window two seconds wide", wide: true, kind: KindClockRead},
@@ -2131,25 +2138,25 @@ func TestAnEarlierClockReadFSawSendAnotherMomentIsNoSourceOfTheValue(t *testing.
 		{name: "(d) the start-up's read and an answer of its second", answer: true, kind: KindUnaccounted, why: judged},
 		{name: "the test's own read, its test begun before it", own: true, kind: KindClockRead, since: true},
 		{name: "(c) the start-up's read, copied", copied: true, kind: KindUnaccounted, why: source},
-		{name: "(c) the start-up's read, copied, the poll's window two seconds wide", copied: true, wide: true, kind: KindClockRead, since: true},
+		{name: "(c) the start-up's read, copied, the poll's window two seconds wide", copied: true, wide: true, kind: KindClockRead, since: true, underGiven: ownSpan},
 		{name: "(c) the test's own read, copied", own: true, copied: true, kind: KindVariable, from: "mock-18"},
 		{name: "(c) the start-up's read and a read the test made that F saw no value at", noView: true, kind: KindVariable, from: "mock-1050"},
 		{name: "(d) the start-up's read in milliseconds", millis: true, kind: KindUnaccounted, why: judged},
 		{name: "(a) the start-up's read in milliseconds, the poll's window two seconds wide", millis: true, wide: true, kind: KindClockRead},
 		{name: "the start-up's read in milliseconds, the poll's window two seconds wide, the call's answer echoing the poll", millis: true, wide: true, echo: true, kind: KindUnaccounted, why: echo},
 		{name: "(c) the start-up's read in milliseconds, copied in seconds", millis: true, copied: true, kind: KindUnaccounted, why: source},
-		{name: "(c) the start-up's read in milliseconds, copied in seconds, the poll's window two seconds wide", millis: true, copied: true, wide: true, kind: KindClockRead, since: true},
+		{name: "(c) the start-up's read in milliseconds, copied in seconds, the poll's window two seconds wide", millis: true, copied: true, wide: true, kind: KindClockRead, since: true, underGiven: ownSpan},
 		{name: "(c) the test's own read in milliseconds, copied in seconds", own: true, millis: true, copied: true, kind: KindVariable, from: "mock-18"},
 		{name: "keploy test: the start-up's read", keployRun: true, kind: KindUnaccounted, why: pick},
 		{name: "keploy test: the start-up's read, the poll's window two seconds wide", keployRun: true, wide: true, kind: KindUnaccounted, why: pick},
 		{name: "(d) the start-up's read as a time of day", tod: true, kind: KindUnaccounted, why: judged},
 		{name: "(c) the start-up's read as a time of day, copied", tod: true, copied: true, kind: KindUnaccounted, why: source},
-		{name: "(c) the start-up's read as a time of day, copied, the poll's window two seconds wide", tod: true, copied: true, wide: true, kind: KindClockRead, since: true},
+		{name: "(c) the start-up's read as a time of day, copied, the poll's window two seconds wide", tod: true, copied: true, wide: true, kind: KindClockRead, since: true, underGiven: ownSpan},
 		{name: "(c) the test's own read as a time of day, copied", own: true, tod: true, copied: true, kind: KindVariable, from: "mock-18"},
 		{name: "(c) the start-up's read as a base64 text of epoch milliseconds, copied", b64: true, copied: true, kind: KindUnaccounted, why: source},
-		{name: "(c) the start-up's read as a base64 text of epoch milliseconds, copied, the window wide", b64: true, wide: true, copied: true, kind: KindClockRead, since: true},
+		{name: "(c) the start-up's read as a base64 text of epoch milliseconds, copied, the window wide", b64: true, wide: true, copied: true, kind: KindClockRead, since: true, underGiven: ownSpan},
 		{name: "(c) the test's own read as a base64 text of epoch milliseconds, copied", b64: true, own: true, copied: true, kind: KindVariable, from: "mock-18"},
-		{name: "(c) the test's own read as a base64 text of epoch milliseconds, copied, the window wide", b64: true, own: true, wide: true, copied: true, kind: KindClockRead, since: true},
+		{name: "(c) the test's own read as a base64 text of epoch milliseconds, copied, the window wide", b64: true, own: true, wide: true, copied: true, kind: KindClockRead, since: true, underGiven: ownCopy},
 		{name: "(d) the start-up's read, the poll a text holding its seconds as one word", text: true, kind: KindUnaccounted, why: judgedText},
 		{name: "(a) the start-up's read, the poll a text holding its seconds as one word, its window two seconds wide", text: true, wide: true, kind: KindClockRead},
 		{name: "the test's own read, its test begun before it, the poll a text holding its seconds as one word", text: true, own: true, kind: KindClockRead, since: true},
@@ -2161,119 +2168,138 @@ func TestAnEarlierClockReadFSawSendAnotherMomentIsNoSourceOfTheValue(t *testing.
 		{name: "(c) the start-up's read, copied as one word of a text, its window two seconds wide", text: true, copied: true, wide: true, kind: KindUnaccounted, why: source},
 		{name: "(c) the test's own read, copied as one word of a text", text: true, own: true, copied: true, kind: KindVariable, from: "mock-18"},
 		{name: "keploy test: the start-up's read, the poll a text holding its seconds as one word, its window two seconds wide", text: true, keployRun: true, wide: true, kind: KindUnaccounted, why: pick},
+		// No answer the test was given holds the second F's poll names: the
+		// echo has no evidence of a pick, and the search that takes an
+		// earlier place holding the value whole sets the read aside alone
+		// (apartReads), naming it in what is learned past it.
+		{name: "the start-up's read, no answer in F's second", noPick: true, kind: KindUnaccounted, why: word},
+		{name: "(a) the start-up's read, no answer in F's second, the poll's window two seconds wide", noPick: true, wide: true, kind: KindClockRead},
+		{name: "the test's own read, its test begun before it, no answer in F's second", noPick: true, own: true, kind: KindClockRead, since: true},
+		{name: "keploy test: the start-up's read, no answer in F's second, the poll's window two seconds wide", noPick: true, keployRun: true, wide: true, kind: KindClockRead},
+		{name: "(c) the start-up's read, copied, no answer in F's second", noPick: true, copied: true, kind: KindUnaccounted, why: source},
+		{name: "(c) the start-up's read, copied, no answer in F's second, the poll's window two seconds wide", noPick: true, copied: true, wide: true, kind: KindClockRead, since: true, underGiven: ownSpan},
+		{name: "(c) the test's own read, copied, no answer in F's second", noPick: true, own: true, copied: true, kind: KindVariable, from: "mock-18"},
 	} {
-		t.Run(c.name, func(t *testing.T) {
-			// The poll's offset back from its now: two seconds, or a
-			// minute; the start-up read the clock in the second the poll's
-			// value names, at its own lead in F (another second).
-			ago := 2 * time.Second
-			if c.ago != 0 {
-				ago = c.ago
-			}
-			read := call.Add(-ago).Truncate(time.Second).Add(305 * time.Millisecond)
-			readF := read.Add(70*time.Second + 900*time.Millisecond)
-			b, bF := began, beganF
-			if c.own {
-				// The test began before the read: its own earlier call.
-				b, bF = read.Add(-time.Second), readF.Add(-time.Second)
-			}
-			// What F saw the read send: its own second, or, of a copy, the
-			// second F saw in the poll's value.
-			live := readF
-			if c.copied {
-				live = callF.Add(-ago).Truncate(time.Second).Add(305 * time.Millisecond)
-			}
-			readLeaf, readLive := num(expires, read), secs(live)
-			switch {
-			case c.millis:
-				readLeaf.Value, readLive = millis(read), millis(live)
-			case c.b64:
-				enc := func(at time.Time) string {
-					return base64.StdEncoding.EncodeToString([]byte("at=" + millis(at) + ";v=1"))
+		for _, rule := range learnRules {
+			t.Run(rule.name+": "+c.name, func(t *testing.T) {
+				c := c
+				if c.underGiven != nil && !rule.copyRule {
+					c.kind, c.from, c.why, c.since = c.underGiven.kind, c.underGiven.from, c.underGiven.why, c.underGiven.since
 				}
-				readLeaf, readLive = Leaf{Path: expires, Noise: expires, Type: String, Value: enc(read)}, enc(live)
-			case c.tod:
-				readLeaf, readLive = timeOfDay(expires, read), timeOfDay(expires, live).Value
-			}
-			tr := NewTracker()
-			tr.SetClientTests(!c.keployRun)
-			if c.own {
-				tr.Begin()
-			}
-			n, _, _, _ := tr.Test()
-			tr.Served(n, Earlier{Mock: "mock-18", At: read, Own: c.own, Payload: payload("mock-18", read), Seen: []Seen{
-				{Side: Request, Leaf: readLeaf, Live: readLive, Place: expires, Clock: true},
-			}})
-			if !c.own {
-				tr.Begin()
-			}
-			n, _, _, _ = tr.Test()
-			if c.answer {
-				// A document the test was given, created in the second the
-				// start-up read the clock in (F: another second).
-				at := call.Add(-800 * time.Millisecond)
-				tr.Served(n, Earlier{Mock: "mock-16", At: at, Own: true, Payload: payload("mock-16", at), Seen: []Seen{
-					{Side: Response, Leaf: ms(created, read.Add(-150*time.Millisecond)), Live: ms(created, readF.Add(-150*time.Millisecond)).Value, Place: created},
-				}})
-			}
-			if c.noView {
-				at := call.Add(-700 * time.Millisecond)
-				tr.Served(n, Earlier{Mock: "mock-1050", At: at, Own: true, Payload: payload("mock-1050", at), Seen: []Seen{
-					{Side: Request, Leaf: num(active, read), Place: active, Clock: true},
-				}})
-			}
-			// An answer the test was given half a second before the poll: a
-			// stamp that F gave in the second F's dirtyAt names.
-			at := call.Add(-500 * time.Millisecond)
-			tr.Served(n, Earlier{Mock: "mock-1070", At: at, Own: true, Payload: payload("mock-1070", at), Seen: []Seen{
-				{Side: Response, Leaf: ms(stamp, at), Live: ms(stamp, callF.Add(-ago+200*time.Millisecond)).Value, Place: stamp},
-			}})
-			_, earlier, _, _ := tr.Test()
-			gap := 100 * time.Millisecond
-			if c.wide {
-				gap = 2 * time.Second
-			}
-			w := (&Window{Rec: Span{From: call.Add(-gap), To: call, Began: b}, F: Span{From: callF.Add(-gap), To: callF, Began: bF}}).ComparesOffsets()
-			shape := func(at time.Time) Shape { return Shape{Leaves: map[string]Leaf{dirty: num(dirty, at)}} }
-			if c.text {
-				shape = func(at time.Time) Shape {
-					shard := "7"
-					if c.shard && at.After(call) {
-						shard = "8"
+				// The poll's offset back from its now: two seconds, or a
+				// minute; the start-up read the clock in the second the poll's
+				// value names, at its own lead in F (another second).
+				ago := 2 * time.Second
+				if c.ago != 0 {
+					ago = c.ago
+				}
+				read := call.Add(-ago).Truncate(time.Second).Add(305 * time.Millisecond)
+				readF := read.Add(70*time.Second + 900*time.Millisecond)
+				b, bF := began, beganF
+				if c.own {
+					// The test began before the read: its own earlier call.
+					b, bF = read.Add(-time.Second), readF.Add(-time.Second)
+				}
+				// What F saw the read send: its own second, or, of a copy, the
+				// second F saw in the poll's value.
+				live := readF
+				if c.copied {
+					live = callF.Add(-ago).Truncate(time.Second).Add(305 * time.Millisecond)
+				}
+				readLeaf, readLive := num(expires, read), secs(live)
+				switch {
+				case c.millis:
+					readLeaf.Value, readLive = millis(read), millis(live)
+				case c.b64:
+					enc := func(at time.Time) string {
+						return base64.StdEncoding.EncodeToString([]byte("at=" + millis(at) + ";v=1"))
 					}
-					return Shape{Leaves: map[string]Leaf{dirty: {Path: filter, Noise: filter, Type: String, Value: "dirty<=" + secs(at) + ";shard=" + shard}}}
+					readLeaf, readLive = Leaf{Path: expires, Noise: expires, Type: String, Value: enc(read)}, enc(live)
+				case c.tod:
+					readLeaf, readLive = timeOfDay(expires, read), timeOfDay(expires, live).Value
 				}
-			}
-			var resp []Leaf
-			if c.echo {
-				resp = []Leaf{num(echoed, call.Add(-ago))}
-			}
-			dc := clientTestCache()
-			if c.keployRun {
-				dc = clockedDrifts()
-			}
-			ln := ClassifyFollowing(dc, []string{dirty}, shape(callF.Add(-ago)), shape(call.Add(-ago)), call, earlier, nil, resp, w, nil)[0]
-			since := ln.Read != nil && ln.Read.Since == models.SinceTestBegin
-			if ln.Kind != c.kind || ln.From.Mock != c.from || !strings.Contains(ln.Why, c.why) || since != c.since || len(ln.Echo) != 0 {
-				t.Fatalf("dirtyAt learned %s from %q (since its test began: %v): %s\nwant %s from %q (since: %v), its reason holding %q", ln.Kind, ln.From.Mock, since, ln.Why, c.kind, c.from, c.since, c.why)
-			}
-			if c.kind == KindClockOffset && (ln.Offset == nil || ln.Offset.Min > -time.Minute || ln.Offset.Max < -time.Minute) {
-				t.Fatalf("dirtyAt learned as the clock plus %+v; want the clock - 1m", ln.Offset)
-			}
-			// A text is learned as the read of its one changed word alone,
-			// the rest of it still compared (Read.Word).
-			if c.text && c.kind == KindClockRead && (ln.Read == nil || ln.Read.Word.IsZero()) {
-				t.Fatalf("dirtyAt's text learned as %+v; want the read of its one changed word", ln.Read)
-			}
-			if (c.why == judged || c.why == judgedText || c.why == apartWordWhy) && (!strings.HasPrefix(ln.Why, apart) || strings.Contains(ln.Why, source) || ln.Bindable) {
-				t.Fatalf("dirtyAt's refusal does not lead with the read F set aside, names it as its source, or binds the value (bindable: %v): %s", ln.Bindable, ln.Why)
-			}
-			// A read or an offset learned past the read set aside names it
-			// (Learned.Refuted); one learned past a copy names none.
-			if (c.kind == KindClockRead || c.kind == KindClockOffset) && strings.Contains(ln.Refuted, aside) == c.copied {
-				t.Fatalf("dirtyAt learned past %q; want the read set aside named: %v", ln.Refuted, !c.copied)
-			}
-		})
+				tr := NewTracker()
+				tr.SetClientTests(!c.keployRun)
+				if c.own {
+					tr.Begin()
+				}
+				n, _, _, _ := tr.Test()
+				tr.Served(n, Earlier{Mock: "mock-18", At: read, Own: c.own, Payload: payload("mock-18", read), Seen: []Seen{
+					{Side: Request, Leaf: readLeaf, Live: readLive, Place: expires, Clock: true},
+				}})
+				if !c.own {
+					tr.Begin()
+				}
+				n, _, _, _ = tr.Test()
+				if c.answer {
+					// A document the test was given, created in the second the
+					// start-up read the clock in (F: another second).
+					at := call.Add(-800 * time.Millisecond)
+					tr.Served(n, Earlier{Mock: "mock-16", At: at, Own: true, Payload: payload("mock-16", at), Seen: []Seen{
+						{Side: Response, Leaf: ms(created, read.Add(-150*time.Millisecond)), Live: ms(created, readF.Add(-150*time.Millisecond)).Value, Place: created},
+					}})
+				}
+				if c.noView {
+					at := call.Add(-700 * time.Millisecond)
+					tr.Served(n, Earlier{Mock: "mock-1050", At: at, Own: true, Payload: payload("mock-1050", at), Seen: []Seen{
+						{Side: Request, Leaf: num(active, read), Place: active, Clock: true},
+					}})
+				}
+				// An answer the test was given half a second before the poll: a
+				// stamp that F gave in the second F's dirtyAt names.
+				if !c.noPick {
+					at := call.Add(-500 * time.Millisecond)
+					tr.Served(n, Earlier{Mock: "mock-1070", At: at, Own: true, Payload: payload("mock-1070", at), Seen: []Seen{
+						{Side: Response, Leaf: ms(stamp, at), Live: ms(stamp, callF.Add(-ago+200*time.Millisecond)).Value, Place: stamp},
+					}})
+				}
+				_, earlier, _, _ := tr.Test()
+				gap := 100 * time.Millisecond
+				if c.wide {
+					gap = 2 * time.Second
+				}
+				w := (&Window{Rec: Span{From: call.Add(-gap), To: call, Began: b}, F: Span{From: callF.Add(-gap), To: callF, Began: bF}}).ComparesOffsets()
+				shape := func(at time.Time) Shape { return Shape{Leaves: map[string]Leaf{dirty: num(dirty, at)}} }
+				if c.text {
+					shape = func(at time.Time) Shape {
+						shard := "7"
+						if c.shard && at.After(call) {
+							shard = "8"
+						}
+						return Shape{Leaves: map[string]Leaf{dirty: {Path: filter, Noise: filter, Type: String, Value: "dirty<=" + secs(at) + ";shard=" + shard}}}
+					}
+				}
+				var resp []Leaf
+				if c.echo {
+					resp = []Leaf{num(echoed, call.Add(-ago))}
+				}
+				dc := clientTestCache()
+				if c.keployRun {
+					dc = clockedDrifts()
+				}
+				ln := rule.classify(dc, []string{dirty}, shape(callF.Add(-ago)), shape(call.Add(-ago)), call, earlier, nil, resp, w, nil)[0]
+				since := ln.Read != nil && ln.Read.Since == models.SinceTestBegin
+				if ln.Kind != c.kind || ln.From.Mock != c.from || !strings.Contains(ln.Why, c.why) || since != c.since || len(ln.Echo) != 0 {
+					t.Fatalf("dirtyAt learned %s from %q (since its test began: %v): %s\nwant %s from %q (since: %v), its reason holding %q", ln.Kind, ln.From.Mock, since, ln.Why, c.kind, c.from, c.since, c.why)
+				}
+				if c.kind == KindClockOffset && (ln.Offset == nil || ln.Offset.Min > -time.Minute || ln.Offset.Max < -time.Minute) {
+					t.Fatalf("dirtyAt learned as the clock plus %+v; want the clock - 1m", ln.Offset)
+				}
+				// A text is learned as the read of its one changed word alone,
+				// the rest of it still compared (Read.Word).
+				if c.text && c.kind == KindClockRead && (ln.Read == nil || ln.Read.Word.IsZero()) {
+					t.Fatalf("dirtyAt's text learned as %+v; want the read of its one changed word", ln.Read)
+				}
+				if (c.why == judged || c.why == judgedText || c.why == apartWordWhy) && (!strings.HasPrefix(ln.Why, apart) || strings.Contains(ln.Why, source) || ln.Bindable) {
+					t.Fatalf("dirtyAt's refusal does not lead with the read F set aside, names it as its source, or binds the value (bindable: %v): %s", ln.Bindable, ln.Why)
+				}
+				// A read or an offset learned past the read set aside names it
+				// (Learned.Refuted); one learned past a copy names none.
+				if (c.kind == KindClockRead || c.kind == KindClockOffset) && strings.Contains(ln.Refuted, aside) == c.copied {
+					t.Fatalf("dirtyAt learned past %q; want the read set aside named: %v", ln.Refuted, !c.copied)
+				}
+			})
+		}
 	}
 }
 
@@ -2304,7 +2330,8 @@ func TestAReadFSetAsideLiftsTheRefusalOfAPickAlone(t *testing.T) {
 	began := time.Date(2026, 10, 31, 10, 52, 14, 430_000_000, time.UTC)
 	call := time.Date(2026, 10, 31, 10, 52, 15, 438_000_000, time.UTC)
 	beganF, callF := began.Add(72*time.Second), call.Add(73*time.Second+600*time.Millisecond)
-	learn := func(ago time.Duration, wide, withRead bool) Learned {
+	type classify = func(dc *DriftCache, drift []string, live, rec Shape, at time.Time, earlier []Earlier, raw []Raw, resp []Leaf, w *Window, given GivenEarlier) []Learned
+	learn := func(cl classify, ago time.Duration, wide, withRead bool) Learned {
 		read := call.Add(-ago).Truncate(time.Second).Add(305 * time.Millisecond)
 		readF := read.Add(70*time.Second + 900*time.Millisecond)
 		tr := NewTracker()
@@ -2328,7 +2355,7 @@ func TestAReadFSetAsideLiftsTheRefusalOfAPickAlone(t *testing.T) {
 		}
 		w := (&Window{Rec: Span{From: call.Add(-gap), To: call, Began: began}, F: Span{From: callF.Add(-gap), To: callF, Began: beganF}}).ComparesOffsets()
 		shape := func(at time.Time) Shape { return Shape{Leaves: map[string]Leaf{dirty: zoned(at)}} }
-		return ClassifyFollowing(clientTestCacheIn(ist), []string{dirty}, shape(callF.Add(-ago)), shape(call.Add(-ago)), call, earlier, nil, nil, w, nil)[0]
+		return cl(clientTestCacheIn(ist), []string{dirty}, shape(callF.Add(-ago)), shape(call.Add(-ago)), call, earlier, nil, nil, w, nil)[0]
 	}
 	for _, c := range []struct {
 		name string
@@ -2339,12 +2366,14 @@ func TestAReadFSetAsideLiftsTheRefusalOfAPickAlone(t *testing.T) {
 		{"a poll of now-60s", time.Minute, false},
 		{"a poll of now-60s, its window two seconds wide", time.Minute, true},
 	} {
-		t.Run(c.name, func(t *testing.T) {
-			alone, beside := learn(c.ago, c.wide, false), learn(c.ago, c.wide, true)
-			if alone.Kind != KindUnaccounted || beside.Kind != alone.Kind || beside.Why != alone.Why {
-				t.Fatalf("dirtyAt learned %s beside the start-up's read set aside (%s), %s without it (%s); want both refused alike", beside.Kind, beside.Why, alone.Kind, alone.Why)
-			}
-		})
+		for _, rule := range learnRules {
+			t.Run(rule.name+": "+c.name, func(t *testing.T) {
+				alone, beside := learn(rule.classify, c.ago, c.wide, false), learn(rule.classify, c.ago, c.wide, true)
+				if alone.Kind != KindUnaccounted || beside.Kind != alone.Kind || beside.Why != alone.Why {
+					t.Fatalf("dirtyAt learned %s beside the start-up's read set aside (%s), %s without it (%s); want both refused alike", beside.Kind, beside.Why, alone.Kind, alone.Why)
+				}
+			})
+		}
 	}
 }
 
@@ -2422,6 +2451,9 @@ func TestAnEarlierTypedClockReadFSawSendAnotherMomentIsNoSourceOfTheInstant(t *t
 		kind      Kind
 		from, why string
 		since     bool
+		// underGiven: the outcome under HTTP's and Postgres's learn
+		// (ClassifyGiven), where it is not Mongo's (learnRules).
+		underGiven *ruleOutcome
 	}{
 		{name: "(d) the start-up's read", kind: KindUnaccounted, why: judged},
 		{name: "(a) the start-up's read, the poll's window three seconds wide", wide: true, kind: KindClockRead},
@@ -2444,13 +2476,13 @@ func TestAnEarlierTypedClockReadFSawSendAnotherMomentIsNoSourceOfTheInstant(t *t
 		{name: "(c) the test's own read as epoch seconds, copied", number: true, own: true, copied: true, kind: KindVariable, from: "mock-18"},
 		{name: "(c) the test's own read as epoch seconds, copied, the window three seconds wide", number: true, own: true, wide: true, copied: true, kind: KindVariable, from: "mock-18"},
 		{name: "(c) the start-up's read as epoch seconds, copied, no answer in F's second", number: true, noPick: true, copied: true, kind: KindUnaccounted, why: source},
-		{name: "(c) the start-up's read as epoch seconds, copied, the window three seconds wide, no answer in F's second", number: true, wide: true, noPick: true, copied: true, kind: KindClockRead, since: true},
+		{name: "(c) the start-up's read as epoch seconds, copied, the window three seconds wide, no answer in F's second", number: true, wide: true, noPick: true, copied: true, kind: KindClockRead, since: true, underGiven: ownSpan},
 		{name: "(c) the test's own read as epoch seconds, copied, no answer in F's second", number: true, own: true, noPick: true, copied: true, kind: KindVariable, from: "mock-18"},
-		{name: "(c) the test's own read as epoch seconds, copied, the window three seconds wide, no answer in F's second", number: true, own: true, wide: true, noPick: true, copied: true, kind: KindClockRead, since: true},
+		{name: "(c) the test's own read as epoch seconds, copied, the window three seconds wide, no answer in F's second", number: true, own: true, wide: true, noPick: true, copied: true, kind: KindClockRead, since: true, underGiven: ownCopy},
 		{name: "(c) the start-up's read as a base64 text, copied", b64: true, noPick: true, copied: true, kind: KindUnaccounted, why: source},
-		{name: "(c) the start-up's read as a base64 text, copied, the window three seconds wide", b64: true, wide: true, noPick: true, copied: true, kind: KindClockRead, since: true},
+		{name: "(c) the start-up's read as a base64 text, copied, the window three seconds wide", b64: true, wide: true, noPick: true, copied: true, kind: KindClockRead, since: true, underGiven: ownSpan},
 		{name: "(c) the test's own read as a base64 text, copied", b64: true, own: true, noPick: true, copied: true, kind: KindVariable, from: "mock-18"},
-		{name: "(c) the test's own read as a base64 text, copied, the window three seconds wide", b64: true, own: true, wide: true, noPick: true, copied: true, kind: KindClockRead, since: true},
+		{name: "(c) the test's own read as a base64 text, copied, the window three seconds wide", b64: true, own: true, wide: true, noPick: true, copied: true, kind: KindClockRead, since: true, underGiven: ownCopy},
 		{name: "(c) the start-up's read as a base64 text to the millisecond, copied", b64ms: true, copied: true, kind: KindUnaccounted, why: source},
 		{name: "(c) the start-up's read as a base64 text to the millisecond, copied, the window three seconds wide", b64ms: true, wide: true, copied: true, kind: KindUnaccounted, why: source},
 		{name: "(c) the test's own read as a base64 text to the millisecond, copied", b64ms: true, own: true, copied: true, kind: KindVariable, from: "mock-18"},
@@ -2460,130 +2492,170 @@ func TestAnEarlierTypedClockReadFSawSendAnotherMomentIsNoSourceOfTheInstant(t *t
 		{name: "(c) the test's own read as a time of day to the millisecond, the poll to the second, copied", todms: true, own: true, noPick: true, copied: true, kind: KindVariable, from: "mock-18"},
 		{name: "(c) the test's own read as a time of day to the millisecond, the poll to the second, copied, the window three seconds wide", todms: true, own: true, wide: true, noPick: true, copied: true, kind: KindVariable, from: "mock-18"},
 	} {
-		t.Run(c.name, func(t *testing.T) {
-			ago := 2 * time.Second
-			if c.ago != 0 {
-				ago = c.ago
-			}
-			read := call.Add(-ago).Truncate(time.Second).Add(305 * time.Millisecond)
-			readF := read.Add(70*time.Second + 900*time.Millisecond)
-			callF, beganF := callF, beganF
-			if c.full != 0 {
-				callF, beganF = call.Add(c.full), beganF.Add(call.Add(c.full).Sub(callF))
-			}
-			b, bF := began, beganF
-			if c.own {
-				b, bF = read.Add(-time.Second), readF.Add(-time.Second)
-			}
-			live := readF
-			if c.copied {
-				live = callF.Add(-ago)
-			}
-			tr := NewTracker()
-			tr.SetClientTests(!c.keployRun)
-			if c.own {
-				tr.Begin()
-			}
-			n, _, _, _ := tr.Test()
-			readLeaf, pollLeaf := date, date
-			b64 := func(p, layout string, at time.Time) Leaf {
-				return Leaf{Path: p, Noise: p, Type: String, Value: base64.StdEncoding.EncodeToString([]byte("at=" + at.UTC().Format(layout) + ";v=1"))}
-			}
-			todOf := func(res time.Duration) func(p string, at time.Time) Leaf {
-				return func(p string, at time.Time) Leaf {
-					return TimeOfDayLeaf(p, p, time.Duration(clockOfDay(at.Truncate(time.Second))), res)
+		for _, rule := range learnRules {
+			t.Run(rule.name+": "+c.name, func(t *testing.T) {
+				c := c
+				if c.underGiven != nil && !rule.copyRule {
+					c.kind, c.from, c.why, c.since = c.underGiven.kind, c.underGiven.from, c.underGiven.why, c.underGiven.since
 				}
-			}
-			switch {
-			case c.form:
-				readLeaf = second
-			case c.tod:
-				readLeaf = func(p string, at time.Time) Leaf {
-					return TimeOfDayLeaf(p, p, time.Duration(clockOfDay(at)), time.Millisecond)
+				ago := 2 * time.Second
+				if c.ago != 0 {
+					ago = c.ago
 				}
-			case c.number:
-				readLeaf = func(p string, at time.Time) Leaf {
-					return Leaf{Path: p, Noise: p, Type: Number, Value: strconv.FormatInt(at.Unix(), 10)}
+				read := call.Add(-ago).Truncate(time.Second).Add(305 * time.Millisecond)
+				readF := read.Add(70*time.Second + 900*time.Millisecond)
+				callF, beganF := callF, beganF
+				if c.full != 0 {
+					callF, beganF = call.Add(c.full), beganF.Add(call.Add(c.full).Sub(callF))
 				}
-			case c.b64:
-				readLeaf = func(p string, at time.Time) Leaf { return b64(p, "2006-01-02T15:04:05.000Z", at.Truncate(time.Second)) }
-			case c.b64ms:
-				readLeaf = func(p string, at time.Time) Leaf { return b64(p, "2006-01-02T15:04:05.000Z", at) }
-			case c.todms:
-				readLeaf, pollLeaf = todOf(time.Millisecond), todOf(time.Second)
-			}
-			tr.Served(n, Earlier{Mock: "mock-18", At: read, Own: c.own, Payload: payload("mock-18", read), Seen: []Seen{
-				{Side: Request, Leaf: readLeaf(expires, read), Live: readLeaf(expires, live).Value, Place: expires, Clock: true},
-			}})
-			if !c.own {
-				tr.Begin()
-			}
-			n, _, _, _ = tr.Test()
-			if c.given {
-				at := call.Add(-800 * time.Millisecond)
-				tr.Served(n, Earlier{Mock: "mock-16", At: at, Own: true, Payload: payload("mock-16", at), Seen: []Seen{
-					{Side: Response, Leaf: ms(created, read.Add(-150*time.Millisecond)), Live: ms(created, readF.Add(-150*time.Millisecond)).Value, Place: created},
+				b, bF := began, beganF
+				if c.own {
+					b, bF = read.Add(-time.Second), readF.Add(-time.Second)
+				}
+				live := readF
+				if c.copied {
+					live = callF.Add(-ago)
+				}
+				tr := NewTracker()
+				tr.SetClientTests(!c.keployRun)
+				if c.own {
+					tr.Begin()
+				}
+				n, _, _, _ := tr.Test()
+				readLeaf, pollLeaf := date, date
+				b64 := func(p, layout string, at time.Time) Leaf {
+					return Leaf{Path: p, Noise: p, Type: String, Value: base64.StdEncoding.EncodeToString([]byte("at=" + at.UTC().Format(layout) + ";v=1"))}
+				}
+				todOf := func(res time.Duration) func(p string, at time.Time) Leaf {
+					return func(p string, at time.Time) Leaf {
+						return TimeOfDayLeaf(p, p, time.Duration(clockOfDay(at.Truncate(time.Second))), res)
+					}
+				}
+				switch {
+				case c.form:
+					readLeaf = second
+				case c.tod:
+					readLeaf = func(p string, at time.Time) Leaf {
+						return TimeOfDayLeaf(p, p, time.Duration(clockOfDay(at)), time.Millisecond)
+					}
+				case c.number:
+					readLeaf = func(p string, at time.Time) Leaf {
+						return Leaf{Path: p, Noise: p, Type: Number, Value: strconv.FormatInt(at.Unix(), 10)}
+					}
+				case c.b64:
+					readLeaf = func(p string, at time.Time) Leaf { return b64(p, "2006-01-02T15:04:05.000Z", at.Truncate(time.Second)) }
+				case c.b64ms:
+					readLeaf = func(p string, at time.Time) Leaf { return b64(p, "2006-01-02T15:04:05.000Z", at) }
+				case c.todms:
+					readLeaf, pollLeaf = todOf(time.Millisecond), todOf(time.Second)
+				}
+				tr.Served(n, Earlier{Mock: "mock-18", At: read, Own: c.own, Payload: payload("mock-18", read), Seen: []Seen{
+					{Side: Request, Leaf: readLeaf(expires, read), Live: readLeaf(expires, live).Value, Place: expires, Clock: true},
 				}})
-			}
-			if c.noView {
-				// A read to the millisecond in the start-up's second: only
-				// the echo, which reads the poll's second in it, takes it.
-				at := call.Add(-700 * time.Millisecond)
-				tr.Served(n, Earlier{Mock: "mock-1050", At: at, Own: true, Payload: payload("mock-1050", at), Seen: []Seen{
-					{Side: Request, Leaf: ms(active, read.Add(400*time.Millisecond)), Place: active, Clock: true},
-				}})
-			}
-			if !c.noPick {
-				at := call.Add(-500 * time.Millisecond)
-				tr.Served(n, Earlier{Mock: "mock-1070", At: at, Own: true, Payload: payload("mock-1070", at), Seen: []Seen{
-					{Side: Response, Leaf: ms(stamp, at), Live: ms(stamp, callF.Add(-ago+200*time.Millisecond)).Value, Place: stamp},
-				}})
-			}
-			_, earlier, _, _ := tr.Test()
-			// A $date names its millisecond: the poll's now-2s cut to the
-			// second is read as made up to three seconds before its call.
-			gap := 100 * time.Millisecond
-			if c.wide {
-				gap = 3 * time.Second
-			}
-			w := (&Window{Rec: Span{From: call.Add(-gap), To: call, Began: b}, F: Span{From: callF.Add(-gap), To: callF, Began: bF}}).ComparesOffsets()
-			shape := func(at time.Time) Shape { return Shape{Leaves: map[string]Leaf{dirty: pollLeaf(dirty, at)}} }
-			var resp []Leaf
-			if c.answer {
-				resp = []Leaf{date(echoed, call.Add(-ago))}
-			}
-			dc := clientTestCache()
-			if c.keployRun {
-				dc = clockedDrifts()
-			}
-			ln := ClassifyFollowing(dc, []string{dirty}, shape(callF.Add(-ago)), shape(call.Add(-ago)), call, earlier, nil, resp, w, nil)[0]
-			since := ln.Read != nil && ln.Read.Since == models.SinceTestBegin
-			if ln.Kind != c.kind || ln.From.Mock != c.from || !strings.Contains(ln.Why, c.why) || since != c.since {
-				t.Fatalf("dirtyAt learned %s from %q (since its test began: %v): %s\nwant %s from %q (since: %v), its reason holding %q", ln.Kind, ln.From.Mock, since, ln.Why, c.kind, c.from, c.since, c.why)
-			}
-			if c.kind == KindClockOffset && (ln.Offset == nil || ln.Offset.Min > -time.Minute || ln.Offset.Max < -time.Minute) {
-				t.Fatalf("dirtyAt learned as the clock plus %+v; want the clock - 1m", ln.Offset)
-			}
-			if c.form {
-				// The search that follows an equal instant takes the copy
-				// itself, F's view of the read holding the poll's moment in
-				// another form (seenHoldsInstant), before the echo does.
-				r, l := date(dirty, call.Add(-ago)), date(dirty, callF.Add(-ago))
-				rt, _ := readTyped(r)
-				lt, _ := readTyped(l)
-				ap := &apartReads{on: true}
-				if from, ok := dc.instantServedFrom(r, l, rt.moment(rt.res), lt.moment(lt.res), earlier, ap); !ok || from.Mock != "mock-18" || ap.at != "" {
-					t.Fatalf("the exact search took %+v (found %v) and set aside %q; want the copy at mock-18, nothing set aside", from, ok, ap.at)
+				if !c.own {
+					tr.Begin()
 				}
-			}
-			if (c.why == judged || c.why == ambiguous) && (!strings.HasPrefix(ln.Why, apart) || strings.Contains(ln.Why, source)) {
-				t.Fatalf("dirtyAt's refusal does not lead with the read F set aside, or names it as its source: %s", ln.Why)
-			}
-			// A read or an offset learned past the read set aside names it
-			// (Learned.Refuted); one learned past a copy names none.
-			if (c.kind == KindClockRead || c.kind == KindClockOffset) && strings.Contains(ln.Refuted, aside) == c.copied {
-				t.Fatalf("dirtyAt learned past %q; want the read set aside named: %v", ln.Refuted, !c.copied)
-			}
-		})
+				n, _, _, _ = tr.Test()
+				if c.given {
+					at := call.Add(-800 * time.Millisecond)
+					tr.Served(n, Earlier{Mock: "mock-16", At: at, Own: true, Payload: payload("mock-16", at), Seen: []Seen{
+						{Side: Response, Leaf: ms(created, read.Add(-150*time.Millisecond)), Live: ms(created, readF.Add(-150*time.Millisecond)).Value, Place: created},
+					}})
+				}
+				if c.noView {
+					// A read to the millisecond in the start-up's second: only
+					// the echo, which reads the poll's second in it, takes it.
+					at := call.Add(-700 * time.Millisecond)
+					tr.Served(n, Earlier{Mock: "mock-1050", At: at, Own: true, Payload: payload("mock-1050", at), Seen: []Seen{
+						{Side: Request, Leaf: ms(active, read.Add(400*time.Millisecond)), Place: active, Clock: true},
+					}})
+				}
+				if !c.noPick {
+					at := call.Add(-500 * time.Millisecond)
+					tr.Served(n, Earlier{Mock: "mock-1070", At: at, Own: true, Payload: payload("mock-1070", at), Seen: []Seen{
+						{Side: Response, Leaf: ms(stamp, at), Live: ms(stamp, callF.Add(-ago+200*time.Millisecond)).Value, Place: stamp},
+					}})
+				}
+				_, earlier, _, _ := tr.Test()
+				// A $date names its millisecond: the poll's now-2s cut to the
+				// second is read as made up to three seconds before its call.
+				gap := 100 * time.Millisecond
+				if c.wide {
+					gap = 3 * time.Second
+				}
+				w := (&Window{Rec: Span{From: call.Add(-gap), To: call, Began: b}, F: Span{From: callF.Add(-gap), To: callF, Began: bF}}).ComparesOffsets()
+				shape := func(at time.Time) Shape { return Shape{Leaves: map[string]Leaf{dirty: pollLeaf(dirty, at)}} }
+				var resp []Leaf
+				if c.answer {
+					resp = []Leaf{date(echoed, call.Add(-ago))}
+				}
+				dc := clientTestCache()
+				if c.keployRun {
+					dc = clockedDrifts()
+				}
+				ln := rule.classify(dc, []string{dirty}, shape(callF.Add(-ago)), shape(call.Add(-ago)), call, earlier, nil, resp, w, nil)[0]
+				since := ln.Read != nil && ln.Read.Since == models.SinceTestBegin
+				if ln.Kind != c.kind || ln.From.Mock != c.from || !strings.Contains(ln.Why, c.why) || since != c.since {
+					t.Fatalf("dirtyAt learned %s from %q (since its test began: %v): %s\nwant %s from %q (since: %v), its reason holding %q", ln.Kind, ln.From.Mock, since, ln.Why, c.kind, c.from, c.since, c.why)
+				}
+				if c.kind == KindClockOffset && (ln.Offset == nil || ln.Offset.Min > -time.Minute || ln.Offset.Max < -time.Minute) {
+					t.Fatalf("dirtyAt learned as the clock plus %+v; want the clock - 1m", ln.Offset)
+				}
+				if c.form {
+					// The search that follows an equal instant takes the copy
+					// itself, F's view of the read holding the poll's moment in
+					// another form (seenHoldsInstant), before the echo does.
+					r, l := date(dirty, call.Add(-ago)), date(dirty, callF.Add(-ago))
+					rt, _ := readTyped(r)
+					lt, _ := readTyped(l)
+					ap := &apartReads{}
+					if from, ok := dc.instantServedFrom(r, l, rt.moment(rt.res), lt.moment(lt.res), earlier, ap); !ok || from.Mock != "mock-18" || ap.at != "" {
+						t.Fatalf("the exact search took %+v (found %v) and set aside %q; want the copy at mock-18, nothing set aside", from, ok, ap.at)
+					}
+				}
+				if (c.why == judged || c.why == ambiguous) && (!strings.HasPrefix(ln.Why, apart) || strings.Contains(ln.Why, source)) {
+					t.Fatalf("dirtyAt's refusal does not lead with the read F set aside, or names it as its source: %s", ln.Why)
+				}
+				// A read or an offset learned past the read set aside names it
+				// (Learned.Refuted); one learned past a copy names none.
+				if (c.kind == KindClockRead || c.kind == KindClockOffset) && strings.Contains(ln.Refuted, aside) == c.copied {
+					t.Fatalf("dirtyAt learned past %q; want the read set aside named: %v", ln.Refuted, !c.copied)
+				}
+			})
+		}
 	}
 }
+
+// learnRules are the learn steps a row runs under: Mongo's, under the rule a
+// copy follows its source (ClassifyFollowing), and HTTP's and Postgres's
+// (ClassifyGiven), which F's refutation of an earlier read of the
+// application's clock as a value's source reaches alike.
+var learnRules = []struct {
+	name     string
+	classify func(dc *DriftCache, drift []string, live, rec Shape, at time.Time, earlier []Earlier, raw []Raw, resp []Leaf, w *Window, given GivenEarlier) []Learned
+	// copyRule: the step reads under the rule a copy follows its source.
+	copyRule bool
+}{
+	{"Mongo (ClassifyFollowing)", ClassifyFollowing, true},
+	{"HTTP and Postgres (ClassifyGiven)", ClassifyGiven, false},
+}
+
+// ruleOutcome is what a row learns under a learn step other than the one its
+// row states (learnRules).
+type ruleOutcome struct {
+	kind      Kind
+	from, why string
+	since     bool
+}
+
+// A copy of an earlier read of the application's clock (F saw the read send
+// the value's moment too) that one run's window holds since its test began
+// is learned so under the rule a copy follows its source alone (Mongo's:
+// classifyRead's re-read of a copy, follow); HTTP and Postgres learn it as
+// before: a read its own call's window holds (ownSpan), or the test's own
+// read's variable (ownCopy), checked so at every replay. That rule, not the
+// read F refutes as the value's source, is what tells them apart.
+var (
+	ownSpan = &ruleOutcome{kind: KindClockRead}
+	ownCopy = &ruleOutcome{kind: KindVariable, from: "mock-18"}
+)

@@ -476,10 +476,8 @@ func instantUnread(r, l Leaf) string {
 // its words. unread is why a place earlier than the call could not be read
 // (requestUnread: the test case's own request, or the run's places past
 // their bound; "" when each was): then the echo could not read it, and the
-// instant is never noise or an echo. follow: under the rule a copy follows
-// its source (ClassifyFollowing), where a request's read of the
-// application's clock is set aside as its source (apartReads).
-func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier, raw []Raw, resp []Leaf, w *Window, unread string, places func() *offsetPlaces, skip skipRule, follow bool) Learned {
+// instant is never noise or an echo.
+func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier, raw []Raw, resp []Leaf, w *Window, unread string, places func() *offsetPlaces, skip skipRule) Learned {
 	ln := Learned{Kind: KindNoise, Recorded: r, Live: l}
 	rt, okR := readTyped(r)
 	lt, okL := readTyped(l)
@@ -497,8 +495,8 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 	// recording shows. skipOffset, as one no moved place builds by an offset
 	// (classifyRead's offset of a given instant its own window holds).
 	//
-	// Under the rule a copy follows its source (follow), no search takes a
-	// request's read of the application's clock that held the moment the
+	// Under every learn step (Mongo's, HTTP's, Postgres's), no search takes
+	// a request's read of the application's clock that held the moment the
 	// instant was recorded with and that F saw send another moment than the
 	// instant's (apartReads: a copy moves with its source), as the text's
 	// echo takes none (echoServed): api-server's endpoint poll, dirtyAt <=
@@ -511,7 +509,7 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 	// naming the read set aside, where neither holds, and where the call's
 	// answer echoes it. A read F saw send the instant's moment too is a
 	// copy, followed as before.
-	ap := &apartReads{on: follow}
+	ap := &apartReads{}
 	if skip&skipSource == 0 {
 		if from, ok := dc.instantServedFrom(r, l, rec, live, served, ap); ok {
 			ln.Kind, ln.From = KindVariable, from
@@ -1348,25 +1346,30 @@ func (dc *DriftCache) instantServedFrom(r, l Leaf, rec, live moment, served []Ea
 	return best, rank < 7
 }
 
-// apartReads sets aside, under the rule a copy follows its source (on:
-// ClassifyFollowing), a request's read of the application's clock (Seen.Clock:
-// the learn step learned a plain read there) that held the moment a typed
-// instant was recorded with and that F saw send another moment there than
-// the instant's: a copy moves with its source, so the instant is no copy of
-// it, as the text's echo sets one aside (echoServed, follows.refuteEcho). at
-// names the first such read; the instant's reading names it (classifyInstant).
-// A read F saw no value at stays a place, as a copy does.
+// apartReads sets aside, under every learn step (ClassifyFollowing's and
+// ClassifyGiven's alike: Mongo's, HTTP's and Postgres's), a request's read of
+// the application's clock (Seen.Clock: the learn step learned a plain read
+// there) that held the moment a drifted value was recorded with and that F
+// saw send another moment there than the value's: a copy moves with its
+// source, so the value is no copy of it. A typed instant's searches set one
+// aside (classifyInstant), and so does the echo of any other value
+// (echoServed). at names the first such read; the value's reading names it.
+// A read F saw no value at stays a place, as a copy does. A nil one sets
+// nothing aside (appeared, outside a call's learn step).
 type apartReads struct {
-	on bool
 	at string
+	// picked: the echo's refusal of the value as a possible pick named at
+	// (unaccounted, pickApartUnaccounted), the one refusal the read set
+	// aside lifts (classifyRead's leaf).
+	picked bool
 }
 
 // refute reports whether s, a leaf of e (an exchange F served before the
-// call) holding the moment the instant was recorded with, is such a read,
-// heldF whether F's view of it held the moment F saw in the instant; the
+// call) holding the moment the value was recorded with, is such a read,
+// heldF whether F's view of it held the moment F saw in the value; the
 // first is named (at).
 func (a *apartReads) refute(e Earlier, s Seen, heldF bool) bool {
-	if !a.on || !s.Clock || s.Live == "" || heldF {
+	if a == nil || !s.Clock || s.Live == "" || heldF {
 		return false
 	}
 	if a.at == "" {
@@ -1379,7 +1382,7 @@ func (a *apartReads) refute(e Earlier, s Seen, heldF bool) bool {
 // past a read set aside (at) is refused, naming that read before the refusal
 // and its advice (apartJudgedWhy); "" where none was set aside.
 func (a *apartReads) judgedWhy() string {
-	if a.at == "" {
+	if a == nil || a.at == "" {
 		return ""
 	}
 	return apartJudgedWhy(a.at) + "; "
@@ -1389,7 +1392,7 @@ func (a *apartReads) judgedWhy() string {
 // what an instant learned past it as a read of the clock or as the clock
 // plus an offset names (Learned.Refuted); "" where none was set aside.
 func (a *apartReads) refuted() string {
-	if a.at == "" {
+	if a == nil || a.at == "" {
 		return ""
 	}
 	return apartAsideWhy(a.at)

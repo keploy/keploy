@@ -874,14 +874,13 @@ type Learned struct {
 	// holds a value: it names a part of one by where it stands.
 	Why string
 	// Refuted, of a value learned as noise, as a read of the clock or as
-	// the clock plus an offset past sources the search for it set aside
-	// under the rule a copy follows its source (ClassifyFollowing:
-	// follows.refute, a place F gave the application that the value moved
-	// apart from; follows.refuteEcho and an instant's apartReads, a
+	// the clock plus an offset past sources the search for it set aside (a
 	// request's read of the application's clock that held the moment the
 	// value was recorded with and that F saw send another moment than the
-	// value's), names them and why each is none (follows.refutedAll,
-	// apartAsideWhy); "" otherwise. Noise's Why names the first too; a read
+	// value's, under every learn step: apartReads; and, under the rule a
+	// copy follows its source, ClassifyFollowing, follows.refute, a place F
+	// gave the application that the value moved apart from), names them and
+	// why each is none (follows.refutedAll, apartAsideWhy); "" otherwise. Noise's Why names the first too; a read
 	// of the clock's does not (its Why is the refusal of a caller whose
 	// replay checks no read), nor does an offset's (its evidence), so a
 	// caller that learns either names them from here where it says what it
@@ -1527,15 +1526,19 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 			return Learned{Kind: KindUnaccounted, Recorded: r, Live: l, Why: unreadRaw}
 		}
 		if r.Type == Instant || l.Type == Instant {
-			return dc.classifyInstant(r, l, at, served, raw, resp, w, unreadReq, places, skip, follow)
+			return dc.classifyInstant(r, l, at, served, raw, resp, w, unreadReq, places, skip)
 		}
 		ln := Learned{Kind: KindNoise, Recorded: r, Live: l}
 		var fol *follows
 		if follow {
 			fol = &follows{dc: dc, rec: r.Value, live: l.Value, at: at, served: served, raw: raw, places: places}
 		}
+		// ap: a request's read of the application's clock the echo sets
+		// aside as no source of the value, under every learn step
+		// (echoServed, apartReads).
+		ap := &apartReads{}
 		if r.Value != "" {
-			if from, ok := appearedIn(dc, dc.ofIn(r.Value, l.Value, w, at), at, served, raw, fol); ok && skip&skipSource == 0 {
+			if from, ok := appearedIn(dc, dc.ofIn(r.Value, l.Value, w, at), at, served, raw, fol, ap); ok && skip&skipSource == 0 {
 				ln.Kind, ln.From = KindVariable, from
 				if from.Side == "" || from.Echo {
 					ln.Why = evidence(dc.ofIn(r.Value, l.Value, w, at), from)
@@ -1569,17 +1572,17 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 				// any lead or window excuses its words (offset.go).
 				why = offsetWhy(m)
 				offWhy = why
-			} else if why = unaccounted(dc, v, at, served, raw, fol); why != "" {
+			} else if why = unaccounted(dc, v, at, served, raw, fol, ap); why != "" {
 				sourced = true
 				// Refused as a possible pick whose recorded moment stands
 				// only at a read of the clock F saw send another moment
-				// (follows.apart, pickApartUnaccounted): set aside as its
+				// (apartReads, pickApartUnaccounted): set aside as its
 				// source, and no other place refuted. unaccounted gives that
 				// refusal before the word rule reads a word (refused), so
 				// refused is "" here; the guard keeps a refusal of the word
 				// rule from ever being lifted with it.
-				if fol != nil && fol.apart != "" && fol.refused == "" && v.unparsed == "" {
-					apart = fol.apart
+				if ap.picked && (fol == nil || fol.refused == "") && v.unparsed == "" {
+					apart = ap.at
 				}
 				if fol != nil && fol.refused != "" {
 					why += "; " + fol.refused
@@ -1660,7 +1663,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 				if why != "" {
 					off, cutWhy, ok := dc.textClockOffset(r, l, v, w, resp)
 					if ok {
-						off.Refuted = fol.refutedAll()
+						off.Refuted = fol.refutedAll(ap)
 						return off
 					}
 					if cutWhy != "" {
@@ -1732,6 +1735,14 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		if asideOnly && ln.Kind == KindEcho {
 			ln.Kind, ln.Why, ln.Echo = KindUnaccounted, fol.aside+"; but the call's recorded answer holds it, an echo keploy cannot answer beside a source it set aside", nil
 		}
+		// So is one beside a request's read of the application's clock the
+		// echo set aside, under every learn step (apartReads; under the rule
+		// a copy follows its source, follows.refuteEcho's aside refused it
+		// above): an echo is answered, never checked, so the call's answer
+		// echoing a value whose read F refuted is never answered unchecked.
+		if ap.at != "" && ln.Kind == KindEcho {
+			ln.Kind, ln.Why, ln.Echo = KindUnaccounted, apartAsideWhy(ap.at)+"; but the call's recorded answer holds it, an echo keploy cannot answer beside a source it set aside", nil
+		}
 		// A time of day whole (textTimeOfDay), which names no day, is a
 		// read modulo a day (textTodRead), checked so at every replay.
 		//
@@ -1746,7 +1757,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// as before. A value its window holds shows no offset.
 		if v := dc.ofIn(r.Value, l.Value, w, at); ln.Kind == KindNoise && v.clock.whole {
 			if off, _, ok := dc.textClockOffset(r, l, v, w, resp); ok {
-				off.Refuted = fol.refutedAll()
+				off.Refuted = fol.refutedAll(ap)
 				return off
 			}
 			ln.Read = textClockReadIn(r.Value, l.Value, dc.zone)
@@ -1831,7 +1842,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 			}
 		}
 		if ln.Kind == KindNoise || ln.Kind == KindClockRead {
-			ln.Refuted = fol.refutedAll()
+			ln.Refuted = fol.refutedAll(ap)
 		}
 		// A text left noise past a read set aside as its source is taken
 		// only as the read of its one changed word (clientWord).
@@ -3227,7 +3238,7 @@ func sources(e, v *valueDrift) (found, whole bool) {
 // raw mock served before or recorded before at (of which F saw no live
 // value).
 func appeared(dc *DriftCache, recorded, now string, at time.Time, served []Earlier, raw []Raw) (Place, bool) {
-	return appearedIn(dc, dc.of(recorded, now), at, served, raw, nil)
+	return appearedIn(dc, dc.of(recorded, now), at, served, raw, nil, nil)
 }
 
 // appearedIn is appeared of the drifted value v, read in its call's window.
@@ -3247,7 +3258,7 @@ func appeared(dc *DriftCache, recorded, now string, at time.Time, served []Earli
 // A leaf that held the recorded value whole is the value's source only where
 // it held the value F saw too: one F saw hold another value is set aside the
 // same way, and named so (follows.refuteSeen).
-func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, raw []Raw, fol *follows) (Place, bool) {
+func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, raw []Raw, fol *follows, ap *apartReads) (Place, bool) {
 	recorded := v.rec
 	// The place is where the value was sent whole, not where it was answered
 	// or sent inside a longer value (a variable is bound where the
@@ -3272,7 +3283,21 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 			} else {
 				ok, whole = sources(dc.of(s.Leaf.Value, s.Live), v)
 			}
-			if !ok || fol.refuteSeen(e, s, whole, v) {
+			if !ok {
+				continue
+			}
+			// A request's read of the application's clock that held the
+			// recorded value whole and that F saw send another value than
+			// the value's is no source of it, under every learn step, and is
+			// named so (apartReads), as the typed searches set one aside
+			// (instantServedFrom); the echo reads the value past it. Under
+			// the rule a copy follows its source it is a leaf set aside too
+			// (refuteSeen), as any whole leaf F saw hold another value.
+			if whole && s.Leaf.Type != Instant && ap.refute(e, s, s.Live == v.live) {
+				fol.refuteSeen(e, s, whole, v)
+				continue
+			}
+			if fol.refuteSeen(e, s, whole, v) {
 				continue
 			}
 			if r := placeRank(e, s, whole); r < rank {
@@ -3298,7 +3323,7 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 	// window excuses a word of it. An exchange F served leaf by leaf first,
 	// then a raw mock (below).
 	echoed := dc.echoedIn(v, at, served, raw)
-	if from, ok := dc.echoServed(echoed, recorded, served, fol); ok {
+	if from, ok := dc.echoServed(echoed, recorded, served, fol, ap); ok {
 		return from, true
 	}
 	// Of a mock with no live view, F cannot tell whether a place drifted:
@@ -3473,14 +3498,16 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 // (echoedIn, holdsRecorded): the first by placeRank. ok is false when none
 // does.
 //
-// Under the rule a copy follows its source (fol non-nil), a request's place
-// the learn step learned a plain read of the application's clock at
-// (Seen.Clock) is that source only where what F saw the application send
-// there (Seen.Live) holds the moment F saw in the value too, in every form,
-// as it holds the recorded one: a copy moves with its source, and a read F
-// saw send another moment than the value's is no place the value came from
-// (a poll's dirtyAt <= now-2s whose recorded second is the second the set's
-// start-up read the clock in). It is set aside and named (follows.refuteEcho),
+// Under every learn step (ap non-nil: ClassifyFollowing's and ClassifyGiven's
+// alike), a request's place the learn step learned a plain read of the
+// application's clock at (Seen.Clock) is that source only where what F saw
+// the application send there (Seen.Live) holds the moment F saw in the value
+// too, in every form, as it holds the recorded one: a copy moves with its
+// source, and a read F saw send another moment than the value's is no place
+// the value came from (a poll's dirtyAt <= now-2s whose recorded second is
+// the second the set's start-up read the clock in). It is set aside and
+// named (apartReads.refute; under the rule a copy follows its source, fol
+// orders a value left noise beside it too: follows.refuteEcho),
 // and then the recorded moment is shown to be a second the application read
 // its clock in, so a place holding it that F saw hold another moment than the
 // value's (an answer of that second) is no evidence of a pick either: only a
@@ -3491,7 +3518,7 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 // read F set aside. A read F saw send the value's moment (a copy) stays the
 // source, as before, and so does one F saw no value at, ranked as before
 // among such places (placeRank).
-func (dc *DriftCache) echoServed(echoed []echoMatch, recorded string, served []Earlier, fol *follows) (Place, bool) {
+func (dc *DriftCache) echoServed(echoed []echoMatch, recorded string, served []Earlier, fol *follows, ap *apartReads) (Place, bool) {
 	if len(echoed) == 0 {
 		return Place{}, false
 	}
@@ -3504,7 +3531,7 @@ func (dc *DriftCache) echoServed(echoed []echoMatch, recorded string, served []E
 				continue
 			}
 			withF := s.Live != "" && (dc.holdsLive(s.Live, echoed) || dc.holdsLive(dc.rawExtra(s.Live), echoed) || seenHoldsLive(s.Leaf, s.Live, echoed))
-			if fol != nil && s.Clock && s.Live != "" && !withF {
+			if ap.refute(e, s, withF) {
 				fol.refuteEcho(e, s)
 				aside = true
 				continue

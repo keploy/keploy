@@ -119,12 +119,6 @@ type follows struct {
 	// why (refutedAll); refutedOf are the mocks of all of them.
 	refutes   []refutedPlace
 	refutedOf map[string]bool
-	// apart, where the echo went past a request's read of the application's
-	// clock that held the moment the value was recorded with and that F saw
-	// send another moment than the value's (refuteEcho), names the first
-	// such place: what a value then refused as a possible pick says of it
-	// (pickApartUnaccounted).
-	apart string
 	// aside, where the search for the value's source went past a leaf that
 	// held its recorded value whole and that F saw hold another value
 	// (refuteSeen), names the first such leaf: what a value learned as noise
@@ -257,20 +251,15 @@ type refutedPlace struct {
 
 // refutedAll names every place the search for the value's source went past,
 // what a value learned past them names (Learned.Refuted): the request's read
-// of the application's clock the echo set aside (follows.refuteEcho: apart,
-// apartAsideWhy) first, as the search went past it first; then the mocks it
-// went past (follows.refute), the first two more after the first with why,
+// of the application's clock the echo set aside (ap, apartReads.refuted)
+// first, as the search went past it first, under every learn step (f nil:
+// ClassifyGiven's); then, under the rule a copy follows its source, the mocks
+// it went past (follows.refute), the first two more after the first with why,
 // then the rest by name, the first maxRefutedNamed of them and how many
 // more. "" where it went past none.
-func (f *follows) refutedAll() string {
-	if f == nil {
-		return ""
-	}
-	apart := ""
-	if f.apart != "" {
-		apart = apartAsideWhy(f.apart)
-	}
-	if f.refuted == "" {
+func (f *follows) refutedAll(ap *apartReads) string {
+	apart := ap.refuted()
+	if f == nil || f.refuted == "" {
 		return apart
 	}
 	var b strings.Builder
@@ -344,22 +333,22 @@ func (f *follows) refuteSeen(e Earlier, s Seen, whole bool, v *valueDrift) bool 
 	return true
 }
 
-// refuteEcho sets s, a leaf of e (an exchange F served before the call), aside
-// as no place the value came from, as refuteSeen does a leaf that held the
-// value whole: the echo found the moment the value was recorded with there,
-// at a request's read of the application's clock, and F saw the application
-// send another moment there than the one F saw in the value (echoServed).
-// The first such place is named (apart, and aside where nothing set it), and
-// the place is a candidate source (sources): a value then refused as a
-// possible pick names it (unaccounted), and one learned as noise is ordered,
-// as beside a leaf refuteSeen sets aside.
+// refuteEcho is what the rule a copy follows its source keeps of s, a leaf of
+// e (an exchange F served before the call) the echo set aside as no place the
+// value came from (apartReads.refute, echoServed), as refuteSeen keeps of a
+// leaf that held the value whole: the echo found the moment the value was
+// recorded with there, at a request's read of the application's clock, and F
+// saw the application send another moment there than the one F saw in the
+// value. The first such leaf is named (aside, where nothing set it), and the
+// place is a candidate source (sources): a value learned as noise is
+// ordered, as beside a leaf refuteSeen sets aside. A nil f (ClassifyGiven)
+// keeps nothing: the read set aside is named by apartReads alone.
 func (f *follows) refuteEcho(e Earlier, s Seen) {
-	at := placeAt(seenPlace(e, s, false))
-	if f.apart == "" {
-		f.apart = at
+	if f == nil {
+		return
 	}
 	if f.aside == "" {
-		f.aside = apartAsideWhy(at)
+		f.aside = apartAsideWhy(placeAt(seenPlace(e, s, false)))
 	}
 	f.source(e.Mock)
 }
@@ -367,7 +356,7 @@ func (f *follows) refuteEcho(e Earlier, s Seen) {
 // apartAsideWhy says that at, a request's read of the application's clock
 // that held the moment a value was recorded with, was set aside as its
 // source: F saw the application send another moment there than the value's
-// (follows.refuteEcho, apartReads).
+// (apartReads).
 func apartAsideWhy(at string) string {
 	return "the moment its recorded value was recorded with stands in " + at + ", where keploy learned a read of the application's clock and record's full round saw the application send another moment than the value's: a copy moves with its source, so the value is no copy of it"
 }

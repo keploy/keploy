@@ -93,3 +93,62 @@ func TestARunTokenTheClientSignedInTheSecondAnEarlierTestReadTheClockIsNotFollow
 		t.Fatalf("test A's recording is not served at a replay: %+v", diag)
 	}
 }
+
+// A poll the test sends a second after its own call stamped a read of the
+// clock (lastUsedAt, learned as that read), whose recorded value, now-2s cut
+// to the second, names the second that read was made in, while record's full
+// round, slower, saw the poll name another second than the read's: a copy
+// moves with its source, so the read is no source of the poll's value, and
+// the poll is the call's own read of the clock, as Mongo's learn judges it.
+// HTTP's learn bound it to the earlier call's read as a variable instead,
+// which every replay whose two calls the clock moves between fails, and
+// which puts a variable and a read of the clock at one place, which HTTP's
+// replay refuses. It is learned as a read of the clock its window holds in
+// both runs, checked at every replay, and nothing binds at the earlier
+// call's read.
+func TestAPollInTheSecondAnEarlierCallReadTheClockThatTheFullRoundRefutesIsLearnedAsItsOwnRead(t *testing.T) {
+	lead := learn.FullRoundLead
+	h, n, opts := learnOn(t)
+	tr := learn.NewTracker()
+	tr.SetClientTests(true)
+	tr.SetAppClock(func(r time.Time) (time.Time, bool) { return r, true })
+	tr.NewSet()
+	ctx := learn.WithTracker(context.Background(), tr)
+	boot := learnRecorded("mock-0", 0, "GET", "/v1/health", "", nil, `{}`)
+	tr.ServedMockAt(boot, learnAt.Add(lead))
+	tr.ServedMockAsRecorded(boot)
+	tr.RecordedBegin(learnAt.Add(1050 * time.Millisecond))
+	tr.BeginAt(learnAt.Add(lead + 1050*time.Millisecond))
+	stamp := func(at time.Time) string { return `{"data":{"lastUsedAt":` + strconv.FormatInt(at.Unix(), 10) + `}}` }
+	recA := learnRecorded("mock-a", 1100*time.Millisecond, "PUT", "/v1/secret/data/pat/e2e-go-key", stamp(learnAt.Add(1100*time.Millisecond)), nil, `{}`)
+	cpA := *recA
+	a := &learnDb{perTest: []*models.Mock{&cpA}}
+	in := live("PUT", "/v1/secret/data/pat/e2e-go-key", stamp(learnAt.Add(lead+1100*time.Millisecond)), nil)
+	in.arrived = learnAt.Add(lead + 1100*time.Millisecond)
+	if served, miss, err := h.learnMatch(ctx, in, a, n, opts); err != nil || served == nil || miss != nil || !learnedClockRead(a.consumed[0].Spec, "body.data.lastUsedAt") {
+		t.Fatalf("the PUT: served %v miss %+v err %v; want lastUsedAt learned as a read of the clock", served, miss, err)
+	}
+	// The poll: dirtyBefore = now-2s, cut to the second. Recorded at 3.2 s,
+	// it names the PUT's second (1 s); in F, at 4.1 s, it names 2 s past
+	// F's start, a second after F's PUT.
+	poll := func(now time.Time) string {
+		return `{"dirtyBefore":` + strconv.FormatInt(now.Add(-2*time.Second).Unix(), 10) + `}`
+	}
+	recP := learnRecorded("mock-1", 3200*time.Millisecond, "POST", "/v1/endpoints/claim", poll(learnAt.Add(3200*time.Millisecond)), nil, `{"claimed":[]}`)
+	cpP := *recP
+	db := &learnDb{perTest: []*models.Mock{&cpP}}
+	in = live("POST", "/v1/endpoints/claim", poll(learnAt.Add(lead+4100*time.Millisecond)), nil)
+	in.arrived = learnAt.Add(lead + 4100*time.Millisecond)
+	served, miss, err := h.learnMatch(ctx, in, db, n, opts)
+	if err != nil || served == nil || miss != nil {
+		t.Fatalf("the poll: served %v miss %+v err %v; want it learned", served != nil, miss, err)
+	}
+	if !learnedClockRead(db.consumed[0].Spec, "body.dirtyBefore") {
+		t.Fatalf("the poll's dirtyBefore learned as %+v, noise %v; want a read of the clock, no noise", db.consumed[0].Spec.Clocks, db.consumed[0].Spec.ReqBodyNoise)
+	}
+	tr.End()
+	recs := learnedOntoTaking([]*models.Mock{recA, recP}, append(append([]models.Mock{}, a.consumed...), db.consumed...), map[string]string{"mock-a": "TestA", "mock-1": "TestA"})
+	if len(recs[0].Spec.Variables) != 0 || len(recs[1].Spec.Variables) != 0 {
+		t.Fatalf("the PUT binds %+v, the poll %+v; want nothing bound at the PUT's read", recs[0].Spec.Variables, recs[1].Spec.Variables)
+	}
+}
