@@ -3,6 +3,7 @@ package mock
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -266,5 +267,131 @@ func TestPersistLearnedGivesTheRunsVariableAnEarlierTestsOwnPlace(t *testing.T) 
 		if strings.Contains(c.String, "o-1") {
 			t.Fatalf("the line's %s carries the value: %q", c.Key, c.String)
 		}
+	}
+}
+
+// settleInstr is outcomeInstr with the agent's end-of-run hook (RunSettler),
+// which records each call in order and fails when told to.
+type settleInstr struct {
+	outcomeInstr
+	calls *[]string
+	err   error
+}
+
+func (s settleInstr) AfterTestRun(_ context.Context, _ string, sets []string, _ models.TestCoverage) error {
+	*s.calls = append(*s.calls, "AfterTestRun "+strings.Join(sets, ","))
+	return s.err
+}
+
+func (s settleInstr) GetConsumedMocks(ctx context.Context) ([]models.MockState, error) {
+	*s.calls = append(*s.calls, "GetConsumedMocks")
+	return s.outcomeInstr.GetConsumedMocks(ctx)
+}
+
+// composeSettleInstr is a compose agent that left account (or none, err) as
+// it stopped, and that the CLI must not call: it is gone.
+type composeSettleInstr struct {
+	settleInstr
+	account models.MockOutcome
+	err     error
+}
+
+func (c composeSettleInstr) ComposeAgentOutcome() (models.MockOutcome, error) {
+	return c.account, c.err
+}
+
+// Under docker compose the agent is stopped with the project, before the
+// CLI could call its end-of-run hook: under the proven switch it settles as
+// it stops, and says so in its account. An account that does not say it
+// settled (its hook failed, or the agent predates this keploy) is a run the
+// agent did not finish: what it served is unread, and the run fails as
+// keploy's, naming the cause. An agent that left no account (killed, or
+// crashed) is unread whole. Without the switch the account is read as it
+// is, settled or not, as before. The CLI never calls the stopped agent.
+func TestAComposeReplayIsJudgedOnlyOnAnAccountTheAgentSettled(t *testing.T) {
+	served := []models.MockState{{Name: "mock-0"}}
+	for _, c := range []struct {
+		name         string
+		proven       bool
+		account      models.MockOutcome
+		err          error
+		wantConsumed int
+		wantSettle   string
+	}{
+		{"off, unsettled", false, models.MockOutcome{Consumed: served}, nil, 1, ""},
+		{"settled", true, models.MockOutcome{Consumed: served, Settled: true}, nil, 1, ""},
+		{"hook failed", true, models.MockOutcome{Consumed: served, SettleError: "keploy could not write the row of a program off the run's clock"}, nil, -1,
+			"keploy's agent did not finish checking the run's tests as it stopped: keploy could not write the row of a program off the run's clock"},
+		{"no word", true, models.MockOutcome{Consumed: served}, nil, -1,
+			"keploy's agent did not finish checking the run's tests as it stopped: its account of the replay does not say it did (an agent older than this keploy)"},
+		{"killed", true, models.MockOutcome{}, errors.New("keploy did not read the keploy-agent container before it was removed"), -1, ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			sw := ""
+			if c.proven {
+				sw = "1"
+			}
+			t.Setenv(provenswitch.Env, sw)
+			var calls []string
+			cfg := &config.Config{CommandType: string(utils.DockerCompose)}
+			cfg.Mock.Name = "s"
+			instr := composeSettleInstr{settleInstr: settleInstr{outcomeInstr: outcomeInstr{consumed: served}, calls: &calls}, account: c.account, err: c.err}
+			m := &mockService{config: cfg, mockDB: &learnedStore{}, logger: zap.NewNop(), instrumentation: instr}
+			counts := m.reportOutcome(context.Background(), 1, replayDetail{set: "s"}, func() bool { return false })
+			if len(calls) != 0 {
+				t.Fatalf("called the stopped agent: %v", calls)
+			}
+			if counts.consumed != c.wantConsumed {
+				t.Fatalf("consumed %d, want %d", counts.consumed, c.wantConsumed)
+			}
+			got := ""
+			if counts.settleErr != nil {
+				got = counts.settleErr.Error()
+			}
+			if got != c.wantSettle {
+				t.Fatalf("settleErr %q, want %q", got, c.wantSettle)
+			}
+			if c.err != nil && counts.missed != -1 {
+				t.Fatalf("missed %d for an account never left, want unread (-1)", counts.missed)
+			}
+		})
+	}
+}
+
+// Under the proven switch the replay's end calls the agent's end-of-run hook
+// (AfterTestRun) once the test command has exited, before it reads what the
+// agent served: the agent finishes what it still does for the run's tests
+// first, as the row of a process the last test reached that an enterprise
+// agent judges after the test's end. A hook that fails leaves what was
+// served unread, so no test is judged on it. Without the switch it is not
+// called, as before.
+func TestTheReplaysEndSettlesTheAgentBeforeItReadsTheOutcome(t *testing.T) {
+	for _, c := range []struct {
+		proven bool
+		err    error
+		want   []string
+	}{
+		{false, nil, []string{"GetConsumedMocks"}},
+		{true, nil, []string{"AfterTestRun s", "GetConsumedMocks"}},
+		{true, errors.New("agent gone"), []string{"AfterTestRun s"}},
+	} {
+		t.Run(fmt.Sprintf("proven=%v err=%v", c.proven, c.err), func(t *testing.T) {
+			sw := ""
+			if c.proven {
+				sw = "1"
+			}
+			t.Setenv(provenswitch.Env, sw)
+			var calls []string
+			cfg := &config.Config{}
+			cfg.Mock.Name = "s"
+			m := &mockService{config: cfg, mockDB: &learnedStore{}, logger: zap.NewNop(), instrumentation: settleInstr{outcomeInstr: outcomeInstr{consumed: []models.MockState{{Name: "mock-0"}}}, calls: &calls, err: c.err}}
+			counts := m.reportOutcome(context.Background(), 1, replayDetail{set: "s"}, func() bool { return false })
+			if !reflect.DeepEqual(calls, c.want) {
+				t.Fatalf("calls %v, want %v", calls, c.want)
+			}
+			if want := map[bool]int{true: -1, false: 1}[c.err != nil]; counts.consumed != want {
+				t.Fatalf("consumed %d, want %d", counts.consumed, want)
+			}
+		})
 	}
 }
