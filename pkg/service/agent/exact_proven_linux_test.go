@@ -1108,6 +1108,64 @@ func TestCallsBeforeAKeptTestAfterAQuarantinedOneFailNoTest(t *testing.T) {
 	}
 }
 
+// api-server's pinned replay of a committed keploy.lock, TestUnauthenticated's
+// shape (1 replay in 8 failed it on keploy v3.8.97): the application's PAT
+// janitor makes its calls as the application starts, before any test began,
+// and every test before the first kept one is quarantined, so none opens a
+// window. The first kept test still passes: a call made before the set's first
+// served test is the application's start-up, charged to no test, and the
+// set's report says each once, with when it was made. A call the first kept
+// test makes that nothing answers still fails it, naming neither.
+func TestStartUpCallsBeforeTheFirstKeptTestFailNoTest(t *testing.T) {
+	for _, own := range []bool{false, true} {
+		t.Run(map[bool]string{false: "the first kept test passes", true: "its own miss still fails it"}[own], func(t *testing.T) {
+			a, rp := exactAgent(t,
+				[]*models.Mock{pingMock("mock-1", "/pat", "pat", t0), pingMock("mock-2", "/q", "q", t0.Add(time.Second)), pingMock("mock-3", "/k", "k", t0.Add(2*time.Second))},
+				map[string][]string{"o::TestQ1": {"mock-1"}, "o::TestQ2": {"mock-2"}, "o::TestK": {"mock-3"}}, map[string][]string{})
+			ctx := context.Background()
+			require.NoError(t, a.SetScopeSkips(ctx, map[string]string{"o::TestQ1": "flaky/request_changed", "o::TestQ2": "keploy/unmocked_call"}, nil))
+			// As the application starts, before any test began: the janitor's
+			// insert, which no recording holds, and its PAT read, whose one
+			// recording is the quarantined TestQ1's.
+			for _, path := range []string{"/janitor", "/pat"} {
+				code, _ := rp.call(t, path)
+				require.Equal(t, 502, code)
+			}
+			for _, q := range []string{"TestQ1", "TestQ2"} {
+				b, serr := a.ProvenBegin(ctx, begin(q))
+				require.Nil(t, serr)
+				require.Equal(t, models.ScopeActionSkip, b.Action)
+			}
+			paths := []string{"/k"}
+			if own {
+				paths = append(paths, "/own")
+			}
+			got, e := runTest(t, a, rp, "TestK", paths...)
+			require.Equal(t, "200 k", got[0])
+			if own {
+				require.Equal(t, models.ScopeActionFail, e.Action)
+				require.Contains(t, e.Reason, "GET /own to 127.0.0.1:18093 had no recorded answer")
+				require.NotContains(t, e.Reason, "/janitor")
+				require.NotContains(t, e.Reason, "/pat")
+				require.NotContains(t, e.Reason, "before this one began")
+			} else {
+				require.Empty(t, e.Action, e.Reason)
+				ev := windowOf(t, a, "o::TestK").Evidence
+				if ev != nil {
+					require.Empty(t, ev.Misses, "a start-up call is no miss of the first kept test's")
+				}
+			}
+			bg := backgroundCharged(a)
+			require.Len(t, bg, 2)
+			for i, path := range []string{"/janitor", "/pat"} {
+				require.Contains(t, bg[i].ActualSummary, path)
+				require.False(t, bg[i].At.IsZero(), "a background miss says when it was made")
+				require.False(t, bg[i].CountsAgainstTest())
+			}
+		})
+	}
+}
+
 // TestNonExistentApp's full shape in api-server's acceptance run 3: the
 // quarantined test before the kept one filled a cache at record (vault's PAT
 // read), so at replay, with it set aside, the kept test makes that call in
