@@ -67,7 +67,7 @@ func TestWithinValueIn(t *testing.T) {
 
 // A request value the test sent earlier whole, at a variable place, that a
 // later call holds as one part of a longer value ("APP:" before the app id
-// it minted, as api-server's role-binding find on resourceKey): a variable
+// it minted, as a find on a binding's resource key holds it): a variable
 // bound at the earlier place and used here inside the longer value, the
 // constant text beside it still compared. Two places, a part of a word, or
 // text beside it that changed too are no such part, and the place says why.

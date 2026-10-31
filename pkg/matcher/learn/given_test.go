@@ -1583,9 +1583,9 @@ func harnessGave(signed, live, call time.Time) Earlier {
 // application carries into the token it mints for its agent) is followed from
 // the test's incoming requests, wherever else the same second stands: an
 // earlier test's or the set's start-up's call that sent it as a read of the
-// clock (T2 rev2: mock-199's lastUsedAt), the test's own call that did, the
-// run's call or another test's (founder 10-31: never bind across tests or
-// from a clock read). keploy cannot tell those from a copy; the test's own
+// clock (a lastUsedAt it stamped), the test's own call that did, the run's
+// call or another test's (never bound across tests or from a read of the
+// clock). keploy cannot tell those from a copy; the test's own
 // given place holds it in the test. Only a call of the test that sent it
 // whole and is no read of the clock comes before it, the earlier place
 // keploy binds a variable at. Where the incoming requests hold another
@@ -1681,15 +1681,14 @@ func TestACallThatUsesAnIncomingVariableIsNoPlaceOfItsOwn(t *testing.T) {
 	}
 }
 
-// S4 (T2 mv2s1 round-F.log:1591, a must-stay-refused row): a client test's
-// insert holds app.createdAt, a read of the clock keploy missed, whose
-// recorded second stands in the previous test's aggregate (mock-2864,
-// expiration $gt that second, another read of the clock). The test's incoming
+// A row that must stay refused: a client test's insert holds app.createdAt,
+// a read of the clock keploy missed, whose recorded second stands in the
+// previous test's aggregate (expiration $gt that second, another read of
+// the clock). The test's incoming
 // requests hold another second (the harness's token). The value is never
 // followed from the incoming requests or bound at the other test's place,
 // whether that place is a payload or a call served leaf by leaf, and never
-// learned as noise: it stays refused (its wording is
-// clock-read-refusal-legible's).
+// learned as noise: it stays refused.
 func TestAnotherTestsSameSecondStaysRefusedBesideTheIncomingRequests(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	read := time.Date(2026, 10, 30, 19, 10, 53, 400e6, time.UTC)
@@ -1702,9 +1701,9 @@ func TestAnotherTestsSameSecondStaysRefusedBesideTheIncomingRequests(t *testing.
 		return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: Number, Value: v}}}
 	}
 	gave := harnessGave(read.Add(-22*time.Second), read.Add(FullRoundLead-22*time.Second), call)
-	payload := Raw{rRead: true, mock: "mock-2864", at: read.Add(-300 * time.Millisecond), served: true,
+	payload := Raw{rRead: true, mock: "mock-71", at: read.Add(-300 * time.Millisecond), served: true,
 		rText: `{"aggregate":"refresh_tokens","pipeline":[{"$match":{"expiration":{"$gt":` + epoch(read) + `}}}]}`}.OfAnotherTest()
-	leafed := Earlier{Mock: "mock-2864", At: read.Add(-300 * time.Millisecond), Seen: []Seen{{Side: Request, Leaf: Leaf{Path: "body.pipeline.0.$match.expiration.$gt", Type: String, Value: "gt:" + epoch(read)}, Live: "gt:" + epoch(read.Add(FullRoundLead)), Place: "body.pipeline.0.$match.expiration.$gt"}}}
+	leafed := Earlier{Mock: "mock-71", At: read.Add(-300 * time.Millisecond), Seen: []Seen{{Side: Request, Leaf: Leaf{Path: "body.pipeline.0.$match.expiration.$gt", Type: String, Value: "gt:" + epoch(read)}, Live: "gt:" + epoch(read.Add(FullRoundLead)), Place: "body.pipeline.0.$match.expiration.$gt"}}}
 	for name, row := range map[string]struct {
 		earlier []Earlier
 		raw     []Raw
