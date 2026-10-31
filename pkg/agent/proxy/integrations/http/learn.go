@@ -2374,8 +2374,10 @@ func earlierAnswers(earlier []learn.Earlier, mock string, r learn.Leaf) []string
 
 // jwtHeaders sorts the headers among learned that hold a JWT in both runs
 // (learn.ReadJWT): followed whole (whole), where the token is a value of the
-// test case's or a variable of the test sent whole at an earlier call of it,
-// which a replay puts back whole, claims and signature alike; else decided by
+// test case's, a variable of the test sent whole at an earlier call of it, or
+// one a client test's harness gave the application whole (an incoming
+// request's header, learn.IncomingGiven), which a replay puts back or reads
+// whole, claims and signature alike; else decided by
 // its claims (byClaims), where the token's own learning (noise on it whole, a
 // read of the clock in it, a refusal naming one word of it) is none: each
 // claim that moved is learned at its own place ("<header>{jwt}.<claim>"),
@@ -2398,7 +2400,12 @@ func jwtHeaders(learned []learn.Learned, given []variables.Binding) (byClaims, w
 		}
 		from := l.From
 		_, gave := givenFor(r, l.Live, given)
-		if gave || l.Kind == learn.KindVariable && from.Side == learn.Request && !from.Given && from.Var != "" && (from.Whole || from.Within.Set()) {
+		earlierCall := !from.Given && from.Var != "" && (from.Whole || from.Within.Set())
+		// A token a client test's harness gave the application, carried on
+		// whole: a replay reads it whole in this run's incoming requests,
+		// signature too, so its bytes are compared, never its form alone.
+		forwarded := from.Given && from.Incoming && from.Whole
+		if gave || l.Kind == learn.KindVariable && from.Side == learn.Request && (earlierCall || forwarded) {
 			whole[r.Path] = true
 			continue
 		}

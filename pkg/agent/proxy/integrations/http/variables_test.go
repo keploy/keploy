@@ -2280,6 +2280,44 @@ func TestVariables_AValueTheHarnessGaveIsReadFromTheTestsIncomingRequests(t *tes
 	}
 }
 
+// A token the harness gave the application and the application forwards
+// whole is read whole in the test's incoming requests: the call answers only
+// where it carries this run's token byte for byte. One with the same claims
+// signed differently is refused.
+func TestVariables_AForwardedTokenIsComparedByItsBytes(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	const hs = `{"alg":"HS256","typ":"JWT"}`
+	token := func(at, sig string) string {
+		return bearerJWT(hs, `{"sid":"e2e-go-session","role":"admin","auth_time":`+at+`}`, sig)
+	}
+	recorded := func() *varDb {
+		m := at(varMock("mock-0", "POST", "http://jobs/run/r-1", `{}`, 200, `{"ok":true}`,
+			models.MockVariables{"Authorization": {Recorded: token("1793373215", "QUFBQUFB"), Use: []string{"header.authorization"}, Incoming: "header.Authorization"}}), 1)
+		m.Spec.HTTPReq.Header["Authorization"] = token("1793373215", "QUFBQUFB")
+		return &varDb{perTest: []*models.Mock{m}}
+	}
+	call := func(tok string) *req {
+		r := liveReq("POST", "http://jobs/run/r-1", `{}`)
+		r.header.Set("Authorization", tok)
+		return r
+	}
+	tr := learn.NewTracker()
+	tr.SetClientTests(true)
+	tr.SetIncomingSeen(true)
+	tr.GiveIncoming("TestForwardOnClient", []learn.IncomingRequest{learn.IncomingHTTP("test-1", recordedAt, "http://app/v1/generate", map[string]string{"Authorization": token("1793373215", "QUFBQUFB")})})
+	tr.Begin()
+	tr.Incoming(learn.IncomingHTTP("", time.Now(), "http://app/v1/generate", map[string]string{"Authorization": token("1793387031", "QkJCQkJC")}))
+	ctx := learn.WithTracker(context.Background(), tr)
+	h := newHTTP()
+
+	if ok, stub, diag := matchVarIn(t, ctx, h, recorded(), call(token("1793387031", "QkJCQkJC"))); !ok || stub.Name != "mock-0" {
+		t.Fatalf("the call forwarding this run's token should be answered: ok=%v stub=%v diag=%+v", ok, stub, diag)
+	}
+	if ok, stub, _ := matchVarIn(t, ctx, h, recorded(), call(token("1793387031", "Q0NDQ0ND"))); ok {
+		t.Fatalf("a token with this run's claims but another signature was answered by %v", stub.Name)
+	}
+}
+
 // A variable read in the test's incoming requests names no call's bind
 // place: one that does is a declaration keploy cannot follow.
 func TestVariables_AnIncomingVariableWithABindIsRefused(t *testing.T) {

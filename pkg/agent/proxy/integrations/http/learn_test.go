@@ -5473,6 +5473,39 @@ func TestLearnMatchAValueTheHarnessGaveIsFollowedFromTheTestsIncomingRequests(t 
 	}
 }
 
+// A token the harness gave the application, which the application forwards
+// whole, is followed whole as one variable of the incoming requests' header:
+// a replay reads the whole token there, so its signature's bytes are
+// compared too, never its claims and form alone.
+func TestLearnMatchATokenTheHarnessGaveForwardedWholeIsFollowedWhole(t *testing.T) {
+	h, n, opts := learnOn(t)
+	const hs = `{"alg":"HS256","typ":"JWT"}`
+	session := func(at, sig string) map[string]string {
+		return map[string]string{"Authorization": bearerJWT(hs, `{"sid":"e2e-go-session","role":"admin","auth_time":`+at+`}`, sig)}
+	}
+	recorded := session("1793373215", "QUFBQUFB")
+	tr := learn.NewTracker()
+	tr.SetClientTests(true)
+	tr.SetIncomingSeen(true)
+	tr.GiveIncoming("TestForwardOnClient", []learn.IncomingRequest{learn.IncomingHTTP("test-1", learnAt.Add(-time.Second), "http://app/v1/generate", recorded)})
+	tr.Begin()
+	tr.Incoming(learn.IncomingHTTP("", time.Now(), "http://app/v1/generate", session("1793387031", "QkJCQkJC")))
+	ctx := learn.WithTracker(context.Background(), tr)
+	db := &learnDb{perTest: []*models.Mock{learnRecorded("mock-0", 0, "POST", "/run/r-1", `{}`, recorded, `{"ok":true}`)}}
+	served, miss, _ := h.learnMatch(ctx, live("POST", "/run/r-1", `{}`, session("1793387031", "QkJCQkJC")), db, n, opts)
+	if served == nil || miss != nil {
+		t.Fatalf("served %v miss %+v", served, miss)
+	}
+	got := db.consumed[0].Spec.Learned()
+	want := models.MockVariables{"Authorization": {Recorded: recorded["Authorization"], Use: []string{"header.authorization"}, Incoming: "header.Authorization"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("variables %+v, want %+v: the forwarded token followed whole", got, want)
+	}
+	if len(db.consumed[0].Spec.ReqBodyNoise) != 0 {
+		t.Fatalf("noise %v", db.consumed[0].Spec.ReqBodyNoise)
+	}
+}
+
 // A value the harness gave the application whole, which a call holds as one
 // part of a longer value ("tenant:<id>"), is read in the incoming requests
 // and used at that part, the text around it still compared.
