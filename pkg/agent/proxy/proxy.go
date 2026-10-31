@@ -2886,7 +2886,11 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		}
 	}()
 
-	served, outside, err := p.serveTreeListener(parserCtx, srcConn, destInfo, dstAddr, fmt.Sprint(clientConnID))
+	// With the proxy's life (ctx), not the connection's: what the live
+	// handler starts may outlive the connection (LiveHandler). While
+	// serveTreeListener runs, parserCtx ends only as ctx does: no parser has
+	// joined parserErrGrp yet, and its cancel is the deferred one above.
+	served, outside, err := p.serveTreeListener(withLifeOf(ctx, parserCtx), srcConn, destInfo, dstAddr, fmt.Sprint(clientConnID))
 	if served {
 		return err
 	}
@@ -6217,7 +6221,43 @@ func refusedLocally(err error) bool {
 	return host == "localhost" || (ip != nil && ip.IsLoopback())
 }
 
+// LiveHandler serves a test's call to the app it started (the ingress's
+// ServeLive), recording it as a test case, and returns once conn ends. ctx
+// carries the connection's values and lives as the proxy does, not as the
+// connection does: a test case is built after its exchange, off the
+// forwarding path, and so may still be in the making when conn has ended.
 type LiveHandler func(ctx context.Context, conn net.Conn, upstream string, port uint16)
+
+// connValues is a context with the values of a connection's context and the
+// life of another, longer one (Done, Err, Deadline): what the proxy hands the
+// live handler (LiveHandler), with the proxy's life. The connection's own
+// context is cancelled as its handler returns, and the test case of a
+// connection's last exchange, built after it, was dropped by that cancel
+// whenever it came first: half the live calls of a client that closes each
+// connection after one exchange (Connection: close) were recorded as
+// nothing. conn descends from life, so a key conn lacks life lacks too, but
+// for the one context.WithoutCancel hides: the context package's own, by
+// which a context derived from this one, and context.Cause, find the cancel
+// they belong to. That one is life's, read from life: a derived context is
+// life's child and ends as life does, with life's cause, and the
+// connection's cancel is never taken for this context's.
+type connValues struct {
+	context.Context
+	values context.Context
+}
+
+func (c connValues) Value(key any) any {
+	if v := c.values.Value(key); v != nil {
+		return v
+	}
+	return c.Context.Value(key)
+}
+
+// withLifeOf is conn's values with life's cancellation (connValues). conn
+// must descend from life.
+func withLifeOf(life, conn context.Context) context.Context {
+	return connValues{Context: life, values: context.WithoutCancel(conn)}
+}
 
 func (p *Proxy) SetLiveHandler(h LiveHandler) {
 	p.live = h
@@ -6337,7 +6377,8 @@ func (p *Proxy) closeDependencyConns() {
 // tree to that listener (served). Under the proven switch, a call it leaves
 // to the mock path that is addressed to this machine comes back as outside,
 // its mocked-local row (without its test), for the caller to list once it
-// knows the call is recorded or mocked.
+// knows the call is recorded or mocked. ctx is the one the live handler is
+// handed (LiveHandler): the connection's values with the proxy's life.
 func (p *Proxy) serveTreeListener(ctx context.Context, srcConn net.Conn, dest *agent.NetworkAddress, dstAddr string, conn string) (served bool, outside *models.MockedRow, err error) {
 	if !p.mockMode || p.IsDocker || p.appPID == 0 {
 		return false, nil, nil
