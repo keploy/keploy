@@ -198,6 +198,14 @@ type Tracker struct {
 	// was given: in a client test a call's window in the recording starts
 	// there where no earlier recorded call bounds it (CallWindowFrom).
 	recBegan, nextRecBegan time.Time
+	// The running client test's incoming requests (IncomingGiven): its name
+	// and those of its window as recorded (GiveIncoming, taken by BeginAt
+	// from next), those the application was sent in this run while it ran
+	// (Incoming), and whether the agent sees this run's (SetIncomingSeen).
+	// in is nil where keploy mock gave the test none: then it has no such
+	// place.
+	in, nextIn *incomingOf
+	inSeen     bool
 	// appZone is the zone the application writes a wall clock of no zone
 	// in, beside UTC (SetAppZone); nil: UTC alone. Every DriftCache the
 	// tracker makes reads it (DriftCache.zone).
@@ -252,6 +260,7 @@ func (t *Tracker) NewSetAt(at time.Time) {
 	say := t.closeUnread()
 	t.open, t.began = false, false
 	t.beganAt, t.recBegan, t.nextRecBegan = time.Time{}, time.Time{}, time.Time{}
+	t.in, t.nextIn = nil, nil
 	t.setBegan = at
 	t.mu.Unlock()
 	say()
@@ -507,6 +516,67 @@ func (t *Tracker) RecordedBegin(at time.Time) {
 	t.mu.Unlock()
 }
 
+// incomingOf is a client test's incoming requests (Tracker.in).
+type incomingOf struct {
+	test           string
+	recorded, live []IncomingRequest
+	// place is the place they make (IncomingGiven), read once until the
+	// next request comes (Incoming).
+	place *Earlier
+}
+
+// maxLiveIncoming bounds the incoming requests of one test the tracker keeps
+// (Incoming): past it a request is not kept, and the test's place reads
+// those before it.
+const maxLiveIncoming = 256
+
+// GiveIncoming gives the next client test (test, its name), before it
+// begins (BeginAt takes it, as it takes RecordedBegin's), the requests its
+// window holds as keploy mock recorded them: its incoming requests'
+// recorded side (IncomingGiven). A test given none has no such place.
+func (t *Tracker) GiveIncoming(test string, recorded []IncomingRequest) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	t.nextIn = &incomingOf{test: test, recorded: append([]IncomingRequest(nil), recorded...)}
+	t.mu.Unlock()
+}
+
+// SetIncomingSeen says whether the agent sees the application's incoming
+// requests in this run (keploy mock's record-requests): where it does not,
+// a client test's incoming requests are a place that could not be read
+// (incomingUncaptured), and no variable is bound there. The agent sets it
+// once, before any test.
+func (t *Tracker) SetIncomingSeen(on bool) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	t.inSeen = on
+	if t.in != nil {
+		t.in.place = nil
+	}
+	t.mu.Unlock()
+}
+
+// Incoming notes a request the application was sent now, its URL and
+// headers (r): the running client test's, where one is open and keploy mock
+// gave it its recorded requests (GiveIncoming). One sent while no test is
+// open is no test's, and is dropped: a test's place holds only its own
+// window's requests.
+func (t *Tracker) Incoming(r IncomingRequest) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if !t.open || t.in == nil || len(t.in.live) >= maxLiveIncoming {
+		return
+	}
+	t.in.live, t.in.place = append(t.in.live, r), nil
+}
+
 // Begin starts the next test now (BeginAt).
 func (t *Tracker) Begin() { t.BeginAt(time.Now()) }
 
@@ -565,6 +635,7 @@ func (t *Tracker) beginAt(at time.Time) func() {
 	t.open, t.began = true, true
 	t.beganAt = at
 	t.recBegan, t.nextRecBegan = t.nextRecBegan, time.Time{}
+	t.in, t.nextIn = t.nextIn, nil
 	t.testFrom = t.seq + 1
 	return say
 }
@@ -735,6 +806,13 @@ func (t *Tracker) Placed() Placed {
 	earlier := make([]Earlier, 0, len(t.run)+len(t.served)+1)
 	if t.given != nil {
 		earlier = append(earlier, *t.given)
+	}
+	if t.in != nil && t.clientTests {
+		if t.in.place == nil {
+			e := IncomingGiven(t.in.test, t.in.recorded, t.in.live, t.inSeen, time.Time{})
+			t.in.place = &e
+		}
+		earlier = append(earlier, *t.in.place)
 	}
 	earlier = append(append(earlier, t.run...), t.served...)
 	return Placed{

@@ -141,6 +141,11 @@ func GivenRequest(req *models.TestRequest) Earlier {
 			}
 		case part.Name == "body":
 			e.Seen = append(e.Seen, jsonSeen(part.Recorded, part.Sent)...)
+		case strings.HasPrefix(part.Name, "header."):
+			// A header holding a JWT: its claims, ahead of the header whole,
+			// each a leaf of its own (JWT.Leaves), so a value a claim holds
+			// whole is found whole there and a reason names the claim.
+			e.Seen = append(e.Seen, jwtSeen(part.Name, part.Recorded, part.Sent)...)
 		case part.Name == "binary":
 			// A body of a text media type keploy keeps as the base64 of
 			// its bytes (models.HTTPReq.Binary): read as the text its bytes
@@ -424,6 +429,32 @@ func paramName(part string) (string, bool) {
 	return "", false
 }
 
+// jwtSeen are the claims of the JWT a header part (place) holds as recorded
+// (ReadJWT), each as recorded and as sent ("<place>{jwt}.<claim>"), by path:
+// "" as sent where the sent value holds no token or not that claim. None
+// where the recorded value holds no token.
+func jwtSeen(place, recorded, sent string) []Seen {
+	rj, ok := ReadJWT(recorded)
+	if !ok {
+		return nil
+	}
+	rec, live := map[string]Leaf{}, map[string]Leaf{}
+	rj.Leaves(place, rec)
+	if lj, ok := ReadJWT(sent); ok {
+		lj.Leaves(place, live)
+	}
+	paths := make([]string, 0, len(rec))
+	for p := range rec {
+		paths = append(paths, p)
+	}
+	sort.Strings(paths)
+	out := make([]Seen, 0, len(paths))
+	for _, p := range paths {
+		out = append(out, Seen{Side: Request, Leaf: rec[p], Live: live[p].Value})
+	}
+	return out
+}
+
 // jsonSeen are the leaves of a JSON body, recorded and as sent, by path, and
 // its object keys (KeysLeaf) after them; none for a body that is not JSON.
 func jsonSeen(recorded, sent string) []Seen {
@@ -468,6 +499,11 @@ func requestUnread(served []Earlier) string {
 	for _, e := range served {
 		switch {
 		case e.Unread == "":
+		case e.Incoming:
+			// A client test's incoming requests keploy could not read
+			// (IncomingGiven) give no place, and refuse nothing by
+			// themselves: a client test's own rules stand
+			// (SetClientTests), as where keploy reads none.
 		case e.Given:
 			return unreadRequestWhy(e.Unread)
 		default:

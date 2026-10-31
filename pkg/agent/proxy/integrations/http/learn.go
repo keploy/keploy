@@ -2149,6 +2149,11 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 				// The test case's own request (learn.Earlier.Given): what
 				// the application was given, which no variable binds at.
 				why := r.Path + " carries a value the test case's own request holds (" + from.Mock + " at " + from.Path + "), which keploy cannot follow into a call yet"
+				if from.Incoming {
+					// A client test's incoming requests (learn.IncomingGiven):
+					// what its harness gave the application.
+					why = r.Path + " carries a value the test's harness gave the application (" + from.Mock + " at " + from.Path + "), which keploy cannot follow into a call yet"
+				}
 				if l.Why != "" {
 					why += "; " + l.Why
 				}

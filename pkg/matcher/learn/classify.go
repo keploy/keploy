@@ -105,6 +105,13 @@ type Earlier struct {
 	// application's clock, the next of the slots it lists). Nothing binds a
 	// variable there, and nothing is read back from it.
 	Given bool
+	// Incoming, of a Given place: the place is no keploy test case's request
+	// but the requests the application was sent in a client test's window
+	// (keploy mock's, IncomingGiven), each part's one value in all of them
+	// as recorded (Leaf) and in this run (Live). A harness gives them: a
+	// replay reads the same part of the live requests of the test's window,
+	// so a variable may be bound there.
+	Incoming bool
 	// Unread, of a Given place, says why the test case's request could not
 	// be read (none was sent with the test case, or keploy cannot read its
 	// kind); of a Run place, that the run keeps no more of the set's tests'
@@ -759,6 +766,9 @@ type Place struct {
 	// call of the test: nothing binds a variable there, and a value found
 	// there is refused.
 	Given bool
+	// Incoming, of a Given place: a client test's incoming requests
+	// (Earlier.Incoming), whose part a replay reads again in this run's.
+	Incoming bool
 	// Name is the variable already at Var (Seen.Name), "" for none.
 	Name string
 	// Clock: the learn step learned the leaf as a plain read of the
@@ -3662,7 +3672,7 @@ func placeRank(e Earlier, s Seen, whole bool) int {
 // seenPlace is the place s of e is.
 func seenPlace(e Earlier, s Seen, whole bool) Place {
 	return Place{Mock: e.Mock, Side: s.Side, Path: s.Leaf.Path, Noise: s.Leaf.Noise,
-		Var: s.Place, Live: s.Live, Whole: whole, Own: e.Own, Run: e.Run, Given: e.Given, Name: s.Name, Clock: s.Clock,
+		Var: s.Place, Live: s.Live, Whole: whole, Own: e.Own, Run: e.Run, Given: e.Given, Incoming: e.Incoming, Name: s.Name, Clock: s.Clock,
 		InStartUp: e.StartUp, givenWhole: s.Side == Response && whole}
 }
 

@@ -1217,3 +1217,194 @@ func TestAWordGluedInARequestBodyOfNoDeclaredTypeIsRefused(t *testing.T) {
 
 // jsonType is a test case's request's Content-Type part declaring JSON.
 var jsonType = models.TestRequestPart{Name: "header.Content-Type", Recorded: "application/json", Sent: "application/json"}
+
+// harnessToken is a bearer JWT a test harness signs for its session: its
+// auth_time (the harness's clock read when it signed it), a jti per token.
+func harnessToken(authTime, jti string) string {
+	return "Bearer " + testJWT(`{"alg":"HS256","typ":"JWT"}`, `{"sub":"u-1","sid":"e2e-go-session","auth_time":`+authTime+`,"jti":"`+jti+`"}`, "c2lnbmF0dXJlLW9uZQ")
+}
+
+// A header holding a JWT is read for its claims too, each a leaf of its own
+// ahead of the header whole, as recorded and as sent: a value a claim holds
+// whole is found there whole, and a reason names the claim. A header holding
+// no token adds none.
+func TestATokenTheTestRequestHoldsIsReadForItsClaims(t *testing.T) {
+	g := GivenRequest(&models.TestRequest{Test: "test-1", Parts: []models.TestRequestPart{
+		{Name: "header.Authorization", Recorded: harnessToken("1793373215", "j-1"), Sent: harnessToken("1793387031", "j-2")},
+		{Name: "header.X-Trace", Recorded: "t-1", Sent: "t-1"},
+	}})
+	at := map[string]int{}
+	for i, s := range g.Seen {
+		at[s.Leaf.Path] = i
+	}
+	claim := g.Seen[at["header.Authorization{jwt}.auth_time"]]
+	if claim.Leaf.Value != "1793373215" || claim.Live != "1793387031" {
+		t.Fatalf("auth_time read as %q -> %q in %+v", claim.Leaf.Value, claim.Live, g.Seen)
+	}
+	if i, ok := at["header.Authorization{jwt}.jti"]; !ok || g.Seen[i].Live != "j-2" || at["header.Authorization{jwt}.auth_time"] > at["header.Authorization"] {
+		t.Errorf("claims not read ahead of the header whole: %+v", g.Seen)
+	}
+	for p := range at {
+		if strings.HasPrefix(p, "header.X-Trace{jwt}") {
+			t.Errorf("a header holding no token read for claims: %s", p)
+		}
+	}
+	// A call's token carries the claim on: a variable of the request's
+	// claim, found whole.
+	const p = "header.authorization{jwt}.auth_time"
+	shape := func(v string) Shape {
+		return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: Number, Value: v}}}
+	}
+	call := time.Date(2026, 10, 31, 1, 2, 3, 0, time.UTC)
+	if ln := ClassifyIn(clockedDrifts(), []string{p}, shape("1793387031"), shape("1793373215"), call, []Earlier{g}, nil, nil, nil)[0]; ln.Kind != KindVariable || !ln.From.Given || ln.From.Incoming || ln.From.Path != "header.Authorization{jwt}.auth_time" || !ln.From.Whole {
+		t.Errorf("a claim the request gave: %s from %+v (%s); want a variable of the request's claim", ln.Kind, ln.From, ln.Why)
+	}
+}
+
+// A client test's incoming requests, read in its window before the call, are
+// its given place: a part each of them that holds it holds one value of, as
+// recorded and in this run (the harness's auth_time in the token it signed),
+// named by the first recorded request that sent it. A part two requests hold
+// two values of (a jti per token, a request id) is no place; nor is a request
+// recorded after the call, nor another test's. A call's token that carries
+// the claim on is a variable of the incoming requests' claim.
+func TestAClientTestsIncomingRequestsAreItsGivenPlace(t *testing.T) {
+	t0 := time.Date(2026, 10, 31, 1, 2, 0, 0, time.UTC)
+	req := func(name string, at time.Time, authTime, jti, id string) IncomingRequest {
+		return IncomingRequest{Name: name, At: at, Parts: []models.TestRequestPart{
+			{Name: "url", Recorded: "http://localhost:8080/v1/apps/" + id},
+			{Name: "header.Authorization", Recorded: harnessToken(authTime, jti)},
+			{Name: "header.X-Request-Id", Recorded: "rq-" + id},
+		}}
+	}
+	recorded := []IncomingRequest{
+		req("test-9", t0.Add(40*time.Second), "1793373999", "j-9", "9"), // after the call
+		req("test-4", t0.Add(2*time.Second), "1793373215", "j-4", "4"),
+		req("test-3", t0.Add(time.Second), "1793373215", "j-3", "3"),
+	}
+	live := []IncomingRequest{req("", t0, "1793387031", "j-a", "a"), req("", t0, "1793387031", "j-b", "b")}
+	call := t0.Add(5 * time.Second)
+	e := IncomingGiven("TestRun", recorded, live, true, call)
+	if e.Unread != "" || !e.Given || !e.Incoming || e.Mock != "incoming request test-3 of test TestRun" || !e.At.Equal(t0.Add(time.Second)) {
+		t.Fatalf("place %+v", e)
+	}
+	seen := map[string]Seen{}
+	for _, s := range e.Seen {
+		seen[s.Leaf.Path] = s
+	}
+	if s := seen["header.Authorization{jwt}.auth_time"]; s.Leaf.Value != "1793373215" || s.Live != "1793387031" {
+		t.Errorf("auth_time read as %q -> %q in %+v", s.Leaf.Value, s.Live, e.Seen)
+	}
+	for _, p := range []string{"header.Authorization{jwt}.jti", "header.X-Request-Id", "url.path.2", "header.Authorization"} {
+		if _, ok := seen[p]; ok {
+			t.Errorf("%s, two values among the requests, kept as a place: %+v", p, seen[p])
+		}
+	}
+	if _, ok := seen["header.Authorization{jwt}.sid"]; !ok {
+		t.Errorf("sid, one value in each, not kept: %+v", e.Seen)
+	}
+	const p = "header.authorization{jwt}.auth_time"
+	shape := func(v string) Shape {
+		return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: Number, Value: v}}}
+	}
+	ln := ClassifyIn(clientTestCache(), []string{p}, shape("1793387031"), shape("1793373215"), call, []Earlier{e}, nil, nil, nil)[0]
+	if ln.Kind != KindVariable || !ln.From.Given || !ln.From.Incoming || ln.From.Mock != "incoming request test-3 of test TestRun" || ln.From.Path != "header.Authorization{jwt}.auth_time" || !ln.From.Whole {
+		t.Errorf("the harness's auth_time carried on: %s from %+v (%s); want a variable of the incoming requests' claim", ln.Kind, ln.From, ln.Why)
+	}
+	// Two values of auth_time among the recorded requests: no place holds it.
+	split := append([]IncomingRequest(nil), recorded...)
+	split[1] = req("test-4", t0.Add(2*time.Second), "1793373216", "j-4", "4")
+	if e := IncomingGiven("TestRun", split, live, true, call); hasSeen(e, "header.Authorization{jwt}.auth_time") {
+		t.Errorf("auth_time, two values as recorded, kept: %+v", e.Seen)
+	}
+	// None recorded before the call, none seen in this run, or this run's
+	// not seen at all: no place, and it refuses nothing by itself.
+	for name, e := range map[string]Earlier{
+		"none recorded before": IncomingGiven("TestRun", recorded[:1], live, true, call),
+		"none in this run":     IncomingGiven("TestRun", recorded, nil, true, call),
+		"not seen":             IncomingGiven("TestRun", recorded, live, false, call),
+	} {
+		if e.Unread == "" || len(e.Seen) != 0 || !e.Incoming {
+			t.Errorf("%s: %+v; want a place that could not be read", name, e)
+		}
+		if why := requestUnread([]Earlier{e}); why != "" {
+			t.Errorf("%s: refuses every change (%s)", name, why)
+		}
+		if ln := ClassifyIn(clientTestCache(), []string{p}, shape("1793387031"), shape("1793373215"), call, []Earlier{e}, nil, nil, nil)[0]; ln.Kind == KindVariable {
+			t.Errorf("%s: followed as a variable from %+v", name, ln.From)
+		}
+	}
+	if e := IncomingGiven("TestRun", recorded, live, false, call); e.Unread != incomingUncaptured {
+		t.Errorf("not seen: %q", e.Unread)
+	}
+}
+
+// hasSeen reports whether e holds a leaf at path.
+func hasSeen(e Earlier, path string) bool {
+	for _, s := range e.Seen {
+		if s.Leaf.Path == path {
+			return true
+		}
+	}
+	return false
+}
+
+// The tracker gives a client test (SetClientTests) its incoming requests as a
+// place: those keploy mock recorded in its window (GiveIncoming, taken as
+// the test begins), with those the application was sent while it ran
+// (Incoming). A request sent while no test is open is no test's; the next
+// test begins with none of the last one's; a test keploy mock gave no
+// recorded requests, or a tracker of keploy test's tests, has no such place.
+func TestTrackerGivesAClientTestItsIncomingRequests(t *testing.T) {
+	t0 := time.Date(2026, 10, 31, 1, 2, 0, 0, time.UTC)
+	in := func(name, authTime string) IncomingRequest {
+		return IncomingRequest{Name: name, At: t0, Parts: []models.TestRequestPart{{Name: "header.Authorization", Recorded: harnessToken(authTime, "j-"+name)}}}
+	}
+	incoming := func(tr *Tracker) (Earlier, bool) {
+		_, earlier, _, _ := tr.Test()
+		for _, e := range earlier {
+			if e.Incoming {
+				return e, true
+			}
+		}
+		return Earlier{}, false
+	}
+	tr := NewTracker()
+	tr.SetClientTests(true)
+	tr.SetIncomingSeen(true)
+	tr.Incoming(in("", "1793387031")) // before any test: no test's
+	tr.GiveIncoming("TestRun", []IncomingRequest{in("test-3", "1793373215")})
+	tr.Begin()
+	if e, ok := incoming(tr); !ok || e.Unread == "" {
+		t.Fatalf("no request in this run yet: %+v, %v; want a place that could not be read", e, ok)
+	}
+	tr.Incoming(in("", "1793387031"))
+	e, ok := incoming(tr)
+	if !ok || e.Unread != "" || e.Mock != "incoming request test-3 of test TestRun" || !hasSeen(e, "header.Authorization{jwt}.auth_time") {
+		t.Fatalf("the test's place: %+v, %v", e, ok)
+	}
+	tr.End()
+	tr.Incoming(in("", "1793387032")) // between tests: dropped
+	tr.Begin()
+	if e, ok := incoming(tr); ok {
+		t.Fatalf("a test keploy mock gave no recorded requests has a place: %+v", e)
+	}
+	tr.GiveIncoming("TestNext", []IncomingRequest{in("test-7", "1793373215")})
+	tr.Begin()
+	if e, ok := incoming(tr); !ok || e.Unread == "" || len(e.Seen) != 0 {
+		t.Fatalf("the next test holds the last one's requests: %+v", e)
+	}
+	tr.SetIncomingSeen(false)
+	tr.Incoming(in("", "1793387031"))
+	if e, ok := incoming(tr); !ok || e.Unread != incomingUncaptured {
+		t.Fatalf("this run's not seen: %+v", e)
+	}
+	server := NewTracker()
+	server.SetIncomingSeen(true)
+	server.GiveIncoming("test-1", []IncomingRequest{in("test-1", "1793373215")})
+	server.Begin()
+	server.Incoming(in("", "1793387031"))
+	if e, ok := incoming(server); ok {
+		t.Fatalf("keploy test's tests have a place of incoming requests: %+v", e)
+	}
+}
