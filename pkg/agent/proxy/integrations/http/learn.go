@@ -2145,15 +2145,55 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 		case learn.KindVariable:
 			from := l.From
 			switch {
+			case from.Given && from.Incoming:
+				// A client test's incoming requests (learn.IncomingGiven):
+				// what its harness gave the application. Followed as a
+				// variable of the test read there (MockVariable.Incoming):
+				// a replay reads its value in the requests the application
+				// was sent in this run in the test's window, and this call
+				// must carry it. No call binds it.
+				gave := r.Path + " carries a value the test's harness gave the application (" + from.Mock + " at " + from.Path + ")"
+				use, placeable := learn.VarPlace(r, jsonReq)
+				switch {
+				case !placeable:
+					return p, gave + ", at a place keploy cannot follow a variable to (a form or multipart field)"
+				case !own:
+					return p, gave + ", and only a test's own calls carry its variables"
+				case !from.Whole && !from.Within.Set():
+					why := gave + ", inside a longer value or at a place keploy cannot bind it"
+					if from.NotWithin != "" {
+						why += " (" + from.NotWithin + ")"
+					}
+					if l.Why != "" {
+						why += "; " + l.Why
+					}
+					return p, why
+				}
+				recorded, live, ok := l.Carried()
+				if !ok || !variables.SameValue(from.Live, live, r.Type == learn.Number) {
+					return p, r.Path + " does not hold the value the test's harness gave the application at " + from.Path + ", which it held when recorded"
+				}
+				name, ok := tracker.Name(test, incomingVarKey, from.Path, reserved)
+				if !ok {
+					return p, "the test ended before " + r.Path + " was learned"
+				}
+				v := p.vars[name]
+				v.Recorded, v.Use, v.Incoming = recorded, appendNew(v.Use, use), from.Path
+				if from.Within.Set() {
+					v.Within = models.MergeParts(v.Within, []models.VariablePart{{Place: use, Before: from.Within.Before, After: from.Within.After}})
+					at, parts := answerParts(r, recorded, respLeavesOf(m))
+					v.Answer = appendNew(v.Answer, at...)
+					v.Within = models.MergeParts(v.Within, parts)
+				} else {
+					v.Answer = appendNew(v.Answer, answers(l, respLeavesOf(m))...)
+				}
+				p.vars[name] = v
+				p.values[name] = variables.Binding{Name: name, Value: from.Live, Recorded: recorded, Mock: from.Mock, Place: from.Path, Given: true}
+				continue
 			case from.Given:
 				// The test case's own request (learn.Earlier.Given): what
 				// the application was given, which no variable binds at.
 				why := r.Path + " carries a value the test case's own request holds (" + from.Mock + " at " + from.Path + "), which keploy cannot follow into a call yet"
-				if from.Incoming {
-					// A client test's incoming requests (learn.IncomingGiven):
-					// what its harness gave the application.
-					why = r.Path + " carries a value the test's harness gave the application (" + from.Mock + " at " + from.Path + "), which keploy cannot follow into a call yet"
-				}
 				if l.Why != "" {
 					why += "; " + l.Why
 				}
@@ -2281,6 +2321,11 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 	}
 	return p, ""
 }
+
+// incomingVarKey is the place a variable read in a client test's incoming
+// requests is named under (learn.Tracker.Name): one part of them is one
+// variable in the test, whichever of its requests first held it.
+const incomingVarKey = "the test's incoming requests"
 
 // givenBindings are the values the running test case's request gave
 // (variables.Binding.Given), as keploy test bound them for the test: none

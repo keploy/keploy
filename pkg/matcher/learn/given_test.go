@@ -1413,3 +1413,62 @@ func TestTrackerGivesAClientTestItsIncomingRequests(t *testing.T) {
 		t.Fatalf("keploy test's tests have a place of incoming requests: %+v", e)
 	}
 }
+
+// A replay reads a variable the harness gave the application in the open
+// client test's incoming requests of this run: one value where each request
+// that holds the part holds one, else why there is none, never a guess.
+func TestTrackerReadsTheValueAClientTestsIncomingRequestsHold(t *testing.T) {
+	t0 := time.Date(2026, 10, 31, 1, 2, 0, 0, time.UTC)
+	const place = "header.Authorization{jwt}.auth_time"
+	in := func(authTime string) IncomingRequest {
+		return IncomingRequest{At: t0, Parts: []models.TestRequestPart{{Name: "header.Authorization", Recorded: harnessToken(authTime, "j-"+authTime)}}}
+	}
+	other := IncomingRequest{At: t0, Parts: []models.TestRequestPart{{Name: "url", Recorded: "http://app/healthz"}}}
+	client := func(seen bool) *Tracker {
+		tr := NewTracker()
+		tr.SetClientTests(true)
+		tr.SetIncomingSeen(seen)
+		tr.GiveIncoming("TestRun", []IncomingRequest{in("1793373215")})
+		tr.Begin()
+		return tr
+	}
+	read := func(tr *Tracker, want, why string) {
+		t.Helper()
+		v, w := tr.IncomingValue(place)
+		if v != want || !strings.Contains(w, why) || why == "" && w != "" {
+			t.Fatalf("read %q (%q), want %q (%q)", v, w, want, why)
+		}
+	}
+	tr := client(true)
+	read(tr, "", "the application was sent no incoming request in this test before this call")
+	tr.Incoming(other)
+	read(tr, "", "none of the incoming requests the application was sent in this test before this call holds "+place)
+	tr.Incoming(in("1793387031"))
+	tr.Incoming(in("1793387031"))
+	read(tr, "1793387031", "")
+	tr.Incoming(in("1793387099"))
+	read(tr, "", "two of the incoming requests the application was sent in this test before this call hold two values at "+place)
+	tr.End()
+	read(tr, "", "no test is open")
+
+	unseen := client(false)
+	unseen.Incoming(in("1793387031"))
+	read(unseen, "", incomingUncaptured)
+
+	none := NewTracker()
+	none.SetClientTests(true)
+	none.SetIncomingSeen(true)
+	none.Begin()
+	none.Incoming(in("1793387031"))
+	read(none, "", "keploy mock gave the agent no incoming request of this test's recording")
+
+	server := NewTracker()
+	server.SetIncomingSeen(true)
+	server.GiveIncoming("test-1", []IncomingRequest{in("1793373215")})
+	server.Begin()
+	server.Incoming(in("1793387031"))
+	read(server, "", "the open test is a test case's")
+
+	var nilTracker *Tracker
+	read(nilTracker, "", incomingUncaptured)
+}

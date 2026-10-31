@@ -581,6 +581,33 @@ func (t *Tracker) Incoming(r IncomingRequest) {
 	t.in.live, t.in.place = append(t.in.live, r), nil
 }
 
+// IncomingValue is the value the open client test's incoming requests hold
+// at place in this run, as the agent saw them so far (IncomingValueAt): a
+// replay's read of a variable its test harness gave the application
+// (models.MockVariable.Incoming). why says why there is none, failing
+// closed: the agent does not see the application's incoming requests
+// (incomingUncaptured), the tests are no client tests (SetClientTests), no
+// test is open, or keploy mock gave the open test no recorded request (then
+// the agent keeps none of its live ones).
+func (t *Tracker) IncomingValue(place string) (value, why string) {
+	if t == nil {
+		return "", incomingUncaptured
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	switch {
+	case !t.inSeen:
+		return "", incomingUncaptured
+	case !t.clientTests:
+		return "", "the open test is a test case's, whose request keploy reads, not a test harness's"
+	case !t.open:
+		return "", "no test is open, and only a test's own incoming requests hold its harness's values"
+	case t.in == nil:
+		return "", "keploy mock gave the agent no incoming request of this test's recording (it holds no test case, or keploy mock read none), so the agent keeps none of this run's"
+	}
+	return IncomingValueAt(t.in.live, place)
+}
+
 // Begin starts the next test now (BeginAt).
 func (t *Tracker) Begin() { t.BeginAt(time.Now()) }
 

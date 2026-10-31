@@ -181,6 +181,9 @@ func MergeVariable(a, b models.MockVariable) models.MockVariable {
 	a.Use = unionSorted(a.Use, b.Use)
 	a.Answer = unionSorted(a.Answer, b.Answer)
 	a.Within = models.MergeParts(a.Within, b.Within)
+	if a.Incoming == "" {
+		a.Incoming = b.Incoming
+	}
 	return a
 }
 

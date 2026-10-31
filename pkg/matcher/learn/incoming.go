@@ -129,6 +129,37 @@ func IncomingGiven(test string, recorded, live []IncomingRequest, seen bool, cal
 	return e
 }
 
+// IncomingValueAt is the value the requests live (those the application was
+// sent in this run in a client test's window, before a call) hold at place,
+// a leaf path IncomingGiven names ("header.authorization{jwt}.auth_time"):
+// a replay's read of a variable the learn step found there
+// (models.MockVariable.Incoming). Each request is read as IncomingGiven
+// reads it, so the two read one part alike. why says why there is none:
+// no request was sent, none holds the part, or two hold two values of it
+// (keploy cannot tell which one the call carries). A value is never
+// guessed.
+func IncomingValueAt(live []IncomingRequest, place string) (value, why string) {
+	if len(live) == 0 {
+		return "", "the application was sent no incoming request in this test before this call"
+	}
+	held := false
+	for _, r := range live {
+		leaves, _, _ := incomingLeaves([]IncomingRequest{r})
+		l, ok := leaves[place]
+		if !ok {
+			continue
+		}
+		if held && l.Value != value {
+			return "", "two of the incoming requests the application was sent in this test before this call hold two values at " + place + ", so keploy cannot tell which one the call carries"
+		}
+		value, held = l.Value, true
+	}
+	if !held {
+		return "", "none of the incoming requests the application was sent in this test before this call holds " + place
+	}
+	return value, ""
+}
+
 // incomingLeaves are the leaves the requests reqs (one side's) hold each
 // one value of: a leaf's path to the leaf, the paths in the order the first
 // request holding each lists them, and the index of that request. A path

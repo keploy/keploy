@@ -79,6 +79,10 @@ type varDecl struct {
 	bind   *varPlace
 	use    []varPlace
 	answer []varPlace
+	// incoming: the part of the test's incoming requests the variable's
+	// value is read at in this run (models.MockVariable.Incoming), "" for
+	// a variable a call or the test case binds.
+	incoming string
 }
 
 // requestPlaces is the variable's bind place (first) and uses.
@@ -162,7 +166,10 @@ func readDecls(m *models.Mock) ([]varDecl, string) {
 		if mv.Recorded == "" {
 			return nil, fmt.Sprintf("variable %s has no recorded value", name)
 		}
-		d := varDecl{name: name, recorded: mv.Recorded, echo: mv.Echo, clock: mv.Clock}
+		d := varDecl{name: name, recorded: mv.Recorded, echo: mv.Echo, clock: mv.Clock, incoming: mv.Incoming}
+		if d.incoming != "" && (mv.Bind != "" || mv.Echo) {
+			return nil, fmt.Sprintf("variable %s is read from the test's incoming requests at %s and names a call's bind place too: no call binds a value the test's harness gave", name, d.incoming)
+		}
 		if mv.Bind != "" {
 			p, why := parse(name, "bind", mv.Bind, false)
 			if why != "" {
@@ -653,14 +660,16 @@ func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *mo
 	if table == nil {
 		return nil, &varProblem{mock: m.Name, why: "this keploy's mock store keeps no variables, so it cannot follow them", next: "run the keploy agent of this keploy version"}
 	}
-	return holdVariables(m, decls, liveAt, table, refuse)
+	return holdVariables(m, decls, liveAt, table, learn.TrackerFrom(ctx).IncomingValue, refuse)
 }
 
 // holdVariables checks the variables of m on a call that fits its recording
 // (liveAt holds the call's values at m's places): it returns the hit and what
 // it binds, or the evidence why they do not hold, or neither when the call is
-// another test's.
-func holdVariables(m *models.Mock, decls []varDecl, liveAt map[string]held, table *variables.Table, refuse func(string) (*varHit, *varProblem)) (*varHit, *varProblem) {
+// another test's. incoming reads a variable its test harness gave the
+// application (varDecl.incoming) in this run's incoming requests of the
+// open test (learn.Tracker.IncomingValue).
+func holdVariables(m *models.Mock, decls []varDecl, liveAt map[string]held, table *variables.Table, incoming func(place string) (string, string), refuse func(string) (*varHit, *varProblem)) (*varHit, *varProblem) {
 	// 2. The variables hold.
 	hit := &varHit{mock: m, decls: decls, local: map[string]variables.Binding{}, saw: map[string]string{}}
 	taken := map[string]variables.Binding{} // this call's new bindings, by name
@@ -675,6 +684,30 @@ func holdVariables(m *models.Mock, decls []varDecl, liveAt map[string]held, tabl
 				return nil, p
 			}
 			hit.local[d.name] = variables.Binding{Name: d.name, Value: v.value, Recorded: d.recorded, Mock: m.Name, Place: d.bind.raw}
+			continue
+		}
+		if d.incoming != "" {
+			// What the test's harness gave the application, read where the
+			// learn step found it, in the requests the application was sent
+			// in this test before this call: this call's alone, never a
+			// binding of the test's, and never another test's value.
+			v, why := incoming(d.incoming)
+			if why != "" {
+				place, sent := d.incoming, ""
+				if len(d.use) > 0 {
+					place, sent = d.use[0].raw, liveAt[d.use[0].place.String()].value
+				}
+				return nil, &varProblem{
+					mock: m.Name, name: d.name, place: place, actual: sent,
+					why:  fmt.Sprintf("variable %s is the value the test's harness gave the application at %s of its incoming requests, and %s", d.name, d.incoming, why),
+					next: "where the agent did not see the application's incoming requests, run keploy mock with record-requests on; otherwise the harness no longer sends the application that value as it did when the test was recorded: re-record the test",
+				}
+			}
+			if p := holdsAt(m.Name, d, places, v, "the test's incoming requests", d.incoming, liveAt); p != nil {
+				return nil, p
+			}
+			hit.saw[d.name] = v
+			hit.local[d.name] = variables.Binding{Name: d.name, Value: v, Recorded: d.recorded, Mock: "the test's incoming requests", Place: d.incoming, Given: true}
 			continue
 		}
 		if bound, ok := table.Lookup(d.name); ok {

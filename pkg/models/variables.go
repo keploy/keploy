@@ -89,6 +89,18 @@ type MockVariable struct {
 	// place not listed holds the value whole. A replay that reads no Within
 	// compares such a place whole, and refuses the call.
 	Within []VariablePart `json:"within,omitempty" yaml:"within,omitempty" bson:"within,omitempty"`
+	// Incoming is, for a variable of a keploy mock client test that its
+	// test harness gave the application, the part of the test's incoming
+	// requests that holds its value, as the learn step names it
+	// (learn.IncomingGiven: "header.authorization{jwt}.auth_time", a claim
+	// of the bearer token the harness signed): a replay reads the variable's
+	// value there, in the requests the application was sent in this run in
+	// the test's window before the call, each of them that holds that part
+	// holding one value (learn.Tracker.IncomingValue), and nowhere else. It
+	// has no Bind: no call of the test binds it. Only the learn step sets
+	// it. A replay that reads no Incoming finds the variable unbound and
+	// refuses the call.
+	Incoming string `json:"incoming,omitempty" yaml:"incoming,omitempty" bson:"incoming,omitempty"`
 }
 
 // VariablePart is a place that holds a variable's value as one part of a
@@ -1733,6 +1745,9 @@ func MergeVariables(a, b MockVariables) MockVariables {
 		cur.Answer = appendNewPlaces(cur.Answer, v.Answer...)
 		cur.Within = MergeParts(cur.Within, v.Within)
 		cur.Echo = cur.Echo && v.Echo
+		if cur.Incoming == "" {
+			cur.Incoming = v.Incoming
+		}
 		out[name] = cur
 	}
 	return out

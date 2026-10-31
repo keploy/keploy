@@ -5391,3 +5391,67 @@ func TestLearnMatchFollowsAVariableIntoAJWTClaim(t *testing.T) {
 		t.Fatalf("refused with %s", why)
 	}
 }
+
+// A value a client test's harness gave the application (the auth_time claim
+// of the bearer token it signed for its session), carried into a claim of
+// the token the application mints from it, is a variable read in the test's
+// incoming requests (models.MockVariable.Incoming): used at the claim's own
+// place, bound at no call, every other claim still compared.
+func TestLearnMatchAValueTheHarnessGaveIsFollowedFromTheTestsIncomingRequests(t *testing.T) {
+	h, n, opts := learnOn(t)
+	const hs = `{"alg":"HS256","typ":"JWT"}`
+	session := func(at string) map[string]string {
+		return map[string]string{"Authorization": bearerJWT(hs, `{"sid":"e2e-go-session","role":"admin","auth_time":`+at+`}`, "U0lHTg")}
+	}
+	agent := func(at, sig string) map[string]string {
+		return map[string]string{"Authorization": bearerJWT(hs, `{"sub":"u-1","role":"agent","auth_time":`+at+`}`, sig)}
+	}
+	tr := learn.NewTracker()
+	tr.SetClientTests(true)
+	tr.SetIncomingSeen(true)
+	tr.GiveIncoming("TestGenerateOnClient", []learn.IncomingRequest{learn.IncomingHTTP("test-1", learnAt.Add(-time.Second), "http://app/v1/generate", session("1793373215"))})
+	tr.Begin()
+	tr.Incoming(learn.IncomingHTTP("", time.Now(), "http://app/v1/generate", session("1793387031")))
+	ctx := learn.WithTracker(context.Background(), tr)
+	db := &learnDb{perTest: []*models.Mock{learnRecorded("mock-0", 0, "POST", "/run/r-1", `{}`, agent("1793373215", "QUFBQUFB"), `{"ok":true}`)}}
+	served, miss, _ := h.learnMatch(ctx, live("POST", "/run/r-1", `{}`, agent("1793387031", "QkJCQkJC")), db, n, opts)
+	if served == nil || miss != nil {
+		t.Fatalf("served %v miss %+v", served, miss)
+	}
+	got := db.consumed[0].Spec.Learned()
+	want := models.MockVariables{"auth_time": {Recorded: "1793373215", Use: []string{"header.authorization{jwt}.auth_time"}, Incoming: "header.Authorization{jwt}.auth_time"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("variables %+v, want %+v", got, want)
+	}
+	if binds := db.consumed[0].Spec.LearnedBinds(); len(binds) != 0 {
+		t.Fatalf("binds %+v: no call binds what the harness gave", binds)
+	}
+	if len(db.consumed[0].Spec.ReqBodyNoise) != 0 {
+		t.Fatalf("noise %v: every other claim is still compared", db.consumed[0].Spec.ReqBodyNoise)
+	}
+}
+
+// A value the harness gave the application whole, which a call holds as one
+// part of a longer value ("tenant:<id>"), is read in the incoming requests
+// and used at that part, the text around it still compared.
+func TestLearnMatchAValueTheHarnessGaveIsFollowedInsideALongerValue(t *testing.T) {
+	h, n, opts := learnOn(t)
+	tr := learn.NewTracker()
+	tr.SetClientTests(true)
+	tr.SetIncomingSeen(true)
+	tr.GiveIncoming("TestTenantOnClient", []learn.IncomingRequest{learn.IncomingHTTP("test-1", learnAt.Add(-time.Second), "http://app/v1/x", map[string]string{"X-Tenant": "tn-4f1a9c"})})
+	tr.Begin()
+	tr.Incoming(learn.IncomingHTTP("", time.Now(), "http://app/v1/x", map[string]string{"X-Tenant": "tn-77d0e2"}))
+	ctx := learn.WithTracker(context.Background(), tr)
+	db := &learnDb{perTest: []*models.Mock{learnRecorded("mock-0", 0, "POST", "/v1/keys", `{"key":"tenant:tn-4f1a9c"}`, nil, `{"ok":true}`)}}
+	served, miss, _ := h.learnMatch(ctx, live("POST", "/v1/keys", `{"key":"tenant:tn-77d0e2"}`, nil), db, n, opts)
+	if served == nil || miss != nil {
+		t.Fatalf("served %v miss %+v", served, miss)
+	}
+	got := db.consumed[0].Spec.Learned()
+	want := models.MockVariables{"X-Tenant": {Recorded: "tn-4f1a9c", Use: []string{"body.key"}, Incoming: "header.X-Tenant",
+		Within: []models.VariablePart{{Place: "body.key", Before: "tenant:"}}}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("variables %+v, want %+v", got, want)
+	}
+}

@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/variables"
@@ -2210,5 +2211,80 @@ func TestAPlaceLearnedAsOneThingIsServed(t *testing.T) {
 		if ok != row.want {
 			t.Errorf("%s: served %v (%+v); want %v", row.name, ok, diag, row.want)
 		}
+	}
+}
+
+// A variable the test's harness gave the application (MockVariable.Incoming)
+// is read in the requests the application was sent in this run in the test's
+// window, before the call: the call must carry that value, and every other
+// claim of its token is still compared. Where the agent did not see the
+// incoming requests, or they hold two values there, the call is refused
+// with the reason: a value is never guessed.
+func TestVariables_AValueTheHarnessGaveIsReadFromTheTestsIncomingRequests(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	const hs = `{"alg":"HS256","typ":"JWT"}`
+	const place = "header.Authorization{jwt}.auth_time"
+	session := func(at string) map[string]string {
+		return map[string]string{"Authorization": bearerJWT(hs, `{"sid":"e2e-go-session","auth_time":`+at+`}`, "U0lHTg")}
+	}
+	agent := func(role, at, sig string) string {
+		return bearerJWT(hs, `{"sub":"u-1","role":"`+role+`","auth_time":`+at+`}`, sig)
+	}
+	recorded := func() *varDb {
+		m := at(varMock("mock-0", "POST", "http://jobs/run/r-1", `{}`, 200, `{"ok":true}`,
+			models.MockVariables{"auth_time": {Recorded: "1793373215", Use: []string{"header.authorization{jwt}.auth_time"}, Incoming: place}}), 1)
+		m.Spec.HTTPReq.Header["Authorization"] = agent("agent", "1793373215", "QUFBQUFB")
+		return &varDb{perTest: []*models.Mock{m}}
+	}
+	call := func(token string) *req {
+		r := liveReq("POST", "http://jobs/run/r-1", `{}`)
+		r.header.Set("Authorization", token)
+		return r
+	}
+	tracker := func(seen bool, liveAt ...string) context.Context {
+		tr := learn.NewTracker()
+		tr.SetClientTests(true)
+		tr.SetIncomingSeen(seen)
+		tr.GiveIncoming("TestGenerateOnClient", []learn.IncomingRequest{learn.IncomingHTTP("test-1", recordedAt, "http://app/v1/generate", session("1793373215"))})
+		tr.Begin()
+		for _, v := range liveAt {
+			tr.Incoming(learn.IncomingHTTP("", time.Now(), "http://app/v1/generate", session(v)))
+		}
+		return learn.WithTracker(context.Background(), tr)
+	}
+	h := newHTTP()
+
+	ok, stub, diag := matchVarIn(t, tracker(true, "1793387031"), h, recorded(), call(agent("agent", "1793387031", "QkJCQkJC")))
+	if !ok || stub.Name != "mock-0" {
+		t.Fatalf("the call carrying this run's auth_time should be answered: ok=%v stub=%v diag=%+v", ok, stub, diag)
+	}
+
+	ok, _, diag = matchVarIn(t, tracker(true, "1793387031"), h, recorded(), call(agent("agent", "1793390000", "QkJCQkJC")))
+	if p := wantProblem(t, ok, diag, `variable auth_time is "1793387031" in this test (taken at the test's incoming requests `+place+`)`); p.actual != "1793390000" {
+		t.Fatalf("evidence %+v: the call's own value", p)
+	}
+
+	ok, _, diag = matchVarIn(t, tracker(false, "1793387031"), h, recorded(), call(agent("agent", "1793387031", "QkJCQkJC")))
+	wantProblem(t, ok, diag, "keploy did not see the application's incoming requests in this run")
+
+	ok, _, diag = matchVarIn(t, tracker(true, "1793387031", "1793388000"), h, recorded(), call(agent("agent", "1793387031", "QkJCQkJC")))
+	wantProblem(t, ok, diag, "two of the incoming requests the application was sent in this test before this call hold two values at "+place)
+
+	ok, _, diag = matchVarIn(t, tracker(true), h, recorded(), call(agent("agent", "1793387031", "QkJCQkJC")))
+	wantProblem(t, ok, diag, "the application was sent no incoming request in this test before this call")
+
+	// Fail closed: a claim that must not move changed. The auth_time read
+	// in the incoming requests excuses nothing else in the token.
+	if ok, stub, _ := matchVarIn(t, tracker(true, "1793387031"), h, recorded(), call(agent("admin", "1793387031", "QkJCQkJC"))); ok {
+		t.Fatalf("a call whose token changed its role was answered by %v", stub.Name)
+	}
+}
+
+// A variable read in the test's incoming requests names no call's bind
+// place: one that does is a declaration keploy cannot follow.
+func TestVariables_AnIncomingVariableWithABindIsRefused(t *testing.T) {
+	m := varMock("mock-0", "GET", "http://store/x", "", 200, `{}`, models.MockVariables{"v": {Recorded: "1", Bind: "url.path[0]", Incoming: "url"}})
+	if _, bad := readDecls(m); !strings.Contains(bad, "variable v is read from the test's incoming requests at url and names a call's bind place too") {
+		t.Fatalf("readDecls said %q", bad)
 	}
 }

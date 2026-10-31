@@ -3234,10 +3234,12 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 				if s.Leaf.Type == Instant && !whole {
 					best.givenWhole = s.Side == Response && dc.instantWhole(s.Leaf, recorded)
 				}
-				// A call that sent the value whole at a variable place, which
-				// the drifted value holds inside a longer one: bound there,
-				// used here as one part of the longer value (Within).
-				if !whole && s.Side == Request && s.Place != "" && s.Leaf.Type == String {
+				// A call that sent the value whole at a variable place, or a
+				// client test's incoming request that held it whole (read
+				// there again in a replay: Earlier.Incoming), which the
+				// drifted value holds inside a longer one: bound or read
+				// there, used here as one part of the longer value (Within).
+				if !whole && s.Side == Request && (s.Place != "" || e.Incoming) && s.Leaf.Type == String {
 					best.Within, best.NotWithin = partFrom(v.rec, v.live, s.Leaf.Value, s.Live)
 				}
 			}
