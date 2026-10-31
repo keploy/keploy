@@ -4,8 +4,10 @@ import "context"
 
 // ClientTLSGate is a build's part in the TLS handshakes keploy's proxy makes
 // as the server of the application's processes: every MITM handshake
-// (handleConnection's, the opportunistic upgrade's, the relay's, the MySQL
-// replayer's, a record upgrader's), each told through its clientTLS. kernelPID
+// (handleConnection's, the opportunistic upgrade's, the relay's, a record
+// upgrader's, and the one a replayer makes itself in band: MySQL's and
+// Postgres's, on an SSLRequest, through the context MockOutgoing is given),
+// each told through its clientTLS. kernelPID
 // is the client's process as the kernel's initial PID namespace numbers it
 // (the eBPF redirect's, models.OutgoingOptions.SrcPid); the proxy calls
 // neither method for a connection whose process it does not know (0).

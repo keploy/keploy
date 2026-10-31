@@ -33,7 +33,7 @@ import (
 // the order of events, not by a timer.
 func (p *Proxy) CaptureLosses() models.CaptureLosses {
 	for _, h := range p.caTrust.settle() {
-		p.losses.Add(models.CaptureLossTLSAbandoned, "to "+h.dst)
+		p.losses.Add(models.CaptureLossTLSAbandoned, h.what)
 	}
 	return p.losses.Snapshot()
 }
@@ -211,11 +211,14 @@ type caTrust struct {
 }
 
 // heldHangUp is a hang-up caTrust holds: by the process tgid, in the scope
-// its handshake began and ended in, on a connection to dst.
+// its handshake began and ended in, on a connection to dst; what is the loss
+// it is charged as if no call cancels it (clientTLS.lossWhat, read as it hung
+// up: the destination, and a build's gate's why for the process).
 type heldHangUp struct {
 	tgid  uint32
 	scope testScope
 	dst   string
+	what  string
 }
 
 // hangUpVerdict is what caTrust.hangUp makes of a hang-up.
@@ -232,13 +235,13 @@ const (
 )
 
 // hangUp is a hang-up by the process tgid in scope, on a connection to dst,
-// under the proven switch: a cancel when the process sent a call through
+// charged as what if it is a loss, under the proven switch: a cancel when the process sent a call through
 // keploy's certificate in this run; held when it has not, until a call of
 // the process in the same scope cancels it (noteCall) or the next read of
 // the counts charges it (settle). It is charged now when the process is
 // unknown (0: no process, which no call makes trusted), and without the
 // switch, as before, whatever the process sent.
-func (t *caTrust) hangUp(tgid uint32, scope testScope, dst string) hangUpVerdict {
+func (t *caTrust) hangUp(tgid uint32, scope testScope, dst, what string) hangUpVerdict {
 	if tgid == 0 || !provenswitch.On() {
 		return hangUpCharged
 	}
@@ -247,7 +250,7 @@ func (t *caTrust) hangUp(tgid uint32, scope testScope, dst string) hangUpVerdict
 	if _, ok := t.trusted[tgid]; ok {
 		return hangUpCancelled
 	}
-	t.held = append(t.held, heldHangUp{tgid: tgid, scope: scope, dst: dst})
+	t.held = append(t.held, heldHangUp{tgid: tgid, scope: scope, dst: dst, what: what})
 	return hangUpHeld
 }
 
@@ -301,7 +304,8 @@ func (c *clientTLS) hungUp(how string) {
 	c.mu.Lock()
 	began := c.began
 	c.mu.Unlock()
-	switch c.p.caTrust.hangUp(c.tgid, began, c.dst) {
+	what := c.lossWhat()
+	switch c.p.caTrust.hangUp(c.tgid, began, c.dst, what) {
 	case hangUpCancelled:
 		c.p.logger.Debug("a client process that sent a call through keploy's certificate in this run "+how+": a cancel, not a capture loss",
 			zap.Uint32("tgid", c.tgid), zap.String("destination", c.dst))
@@ -309,7 +313,7 @@ func (c *clientTLS) hungUp(how string) {
 		c.p.logger.Debug("a client process that has not sent a call through keploy's certificate yet "+how+": a cancel if it sends one in this test, a capture loss otherwise",
 			zap.Uint32("tgid", c.tgid), zap.String("destination", c.dst))
 	default:
-		c.p.losses.Add(models.CaptureLossTLSAbandoned, c.lossWhat())
+		c.p.losses.Add(models.CaptureLossTLSAbandoned, what)
 	}
 }
 

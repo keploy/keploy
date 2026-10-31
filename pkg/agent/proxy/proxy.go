@@ -3884,6 +3884,11 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			// each miss and answer it takes (UnmatchedCall.Source).
 			srcPid := outgoingOpts.SrcPid
 			testCtx := models.WithMockMismatchReporter(parserCtx, func(err error) { p.sendMockNotFoundErrorFrom(err, srcPid, dstCfg) })
+			// A replayer that makes the client's TLS handshake itself, in
+			// band (Postgres's, on an SSLRequest), has it charged as the
+			// proxy's own client handshakes are, and a build's client TLS
+			// gate readied for it (withClientTLS), as mockMySQLOutgoing's.
+			testCtx = p.withClientTLS(testCtx, dstAddr, srcPid)
 			// A test's end tells this connection's requests apart only if its
 			// parser answers before it reads again, or marks what it holds
 			// (inflight.go).

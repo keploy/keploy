@@ -21,6 +21,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/containerkey"
 	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
 	"go.keploy.io/server/v3/pkg/agent/proxy/directive"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/relay"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
@@ -246,6 +247,183 @@ func TestAClientTLSGateIsReadyBeforeKeployAnswersAndSaysWhyAHandshakeFailed(t *t
 				t.Fatalf("charged %+v, want one tls_handshake_failed %q", l, tc.what)
 			}
 		})
+	}
+}
+
+// blockingGate is a build's TLS gate whose Ready holds until release is
+// closed, closing entered as it begins.
+type blockingGate struct {
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (g *blockingGate) Ready(context.Context, uint32, []string) {
+	g.once.Do(func() { close(g.entered) })
+	<-g.release
+}
+
+func (g *blockingGate) Why(uint32) string { return "" }
+
+// keploy's proxy answers a client's handshake only once the gate's Ready has
+// returned: the pin bypass it readies must be in place before the client
+// checks keploy's certificate. A proxy that ran Ready beside the handshake
+// (on a goroutine of its own) would race the attach, and its first answer
+// would reach the client while Ready still held.
+//
+// An absence is seen only over a window: such a proxy's server flight is on
+// the client's socket within microseconds of the hello it reads; a loaded box
+// may make the window miss it, and never fails a proxy that waits.
+func TestTheProxyAnswersAClientOnlyOnceTheGatesReadyReturned(t *testing.T) {
+	g := &blockingGate{entered: make(chan struct{}), release: make(chan struct{})}
+	prev := OnClientTLS
+	OnClientTLS = g
+	t.Cleanup(func() { OnClientTLS = prev })
+	released := false
+	t.Cleanup(func() {
+		if !released {
+			close(g.release)
+		}
+	})
+	p := replayProxyTo(t, "127.0.0.1:8443", models.OutgoingOptions{})
+	dest := ipv4Dest(t, "127.0.0.1:8443")
+	dest.KernelPid = 4242
+	p.DestInfo = fakeDestInfo{dest: dest}
+	p.BeginTestErrorCapture()
+	app, src := acceptedConn(t)
+	read := &atomic.Int64{}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		// It rejects keploy's certificate (its own roots only), once it
+		// gets it.
+		_ = tls.Client(readCounting{Conn: app, n: read}, &tls.Config{ServerName: "dep.example"}).Handshake()
+		_ = app.Close()
+	}()
+	hc := make(chan error, 1)
+	go func() { hc <- p.handleConnection(context.Background(), src) }()
+	awaitEvent(t, g.entered, "the gate's Ready for the client's handshake")
+	time.Sleep(time.Second)
+	if n := read.Load(); n != 0 {
+		t.Fatalf("the client read %d byte(s) of keploy's answer while the gate's Ready still held, want none before it returns", n)
+	}
+	released = true
+	close(g.release)
+	awaitEvent(t, done, "the client's handshake ending once Ready returned")
+	if read.Load() == 0 {
+		t.Fatal("the client read nothing of keploy's answer once Ready returned")
+	}
+	select {
+	case <-hc:
+	case <-time.After(30 * time.Second):
+		t.Fatal("handleConnection did not return after the client left")
+	}
+}
+
+// pgSSLReplayer is a replayer that makes the client's TLS handshake itself,
+// in band, as integrations' Postgres v3 replayer does on an SSLRequest: it
+// answers 'S' and calls pTls.HandleTLSConnection with the context
+// MockOutgoing was given.
+type pgSSLReplayer struct{ integrations.Integrations }
+
+func (pgSSLReplayer) MatchType(_ context.Context, b []byte) bool {
+	return isPostgresSSLRequestPrefix(b)
+}
+
+func (pgSSLReplayer) MockOutgoing(ctx context.Context, src net.Conn, _ *models.ConditionalDstCfg, _ integrations.MockMemDb, _ models.OutgoingOptions) error {
+	req := make([]byte, 8)
+	if _, err := io.ReadFull(src, req); err != nil {
+		return err
+	}
+	if _, err := src.Write([]byte{'S'}); err != nil {
+		return err
+	}
+	_, _, err := pTls.HandleTLSConnection(ctx, zap.NewNop(), src, time.Time{})
+	return err
+}
+
+// A replayer's own in-band TLS handshake (Postgres's, on an SSLRequest) is
+// one keploy's proxy makes as the client's server like any other: the gate
+// readies the client's process before it, and a failed one is charged as a
+// capture loss that says why, not left as the client's opaque TLS error.
+func TestAReplayersInBandTLSHandshakeIsReadiedAndChargedAsAnyOther(t *testing.T) {
+	const why = "process 4242 (app): keploy's TLS pin bypass could not attach to it: operation not permitted"
+	const dst = "127.0.0.1:5432"
+	read := &atomic.Int64{}
+	g := &gateSpy{read: read, why: why}
+	prev := OnClientTLS
+	OnClientTLS = g
+	t.Cleanup(func() { OnClientTLS = prev })
+	p := replayProxyTo(t, dst, models.OutgoingOptions{})
+	dest := ipv4Dest(t, dst)
+	dest.KernelPid = 4242
+	p.DestInfo = fakeDestInfo{dest: dest}
+	p.BeginTestErrorCapture()
+	p.errChannel = make(chan error, 8)
+	p.Integrations = map[integrations.IntegrationType]integrations.Integrations{integrations.POSTGRES_V3: pgSSLReplayer{}}
+	p.integrationsPriority = []ParserPriority{{Priority: 1, ParserType: integrations.POSTGRES_V3}}
+	app, src := acceptedConn(t)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer app.Close()
+		if _, err := app.Write([]byte{0x00, 0x00, 0x00, 0x08, 0x04, 0xd2, 0x16, 0x2f}); err != nil {
+			t.Errorf("SSLRequest: %v", err)
+			return
+		}
+		s := make([]byte, 1)
+		if _, err := io.ReadFull(app, s); err != nil || s[0] != 'S' {
+			t.Errorf("the replayer answered the SSLRequest %q (%v), want 'S'", s, err)
+			return
+		}
+		// A client that pins its own roots rejects keploy's certificate.
+		_ = tls.Client(readCounting{Conn: app, n: read}, &tls.Config{ServerName: "db.example"}).Handshake()
+	}()
+	hc := make(chan error, 1)
+	go func() { hc <- p.handleConnection(context.Background(), src) }()
+	awaitEvent(t, done, "the client's in-band handshake ending")
+	select {
+	case <-hc:
+	case <-time.After(30 * time.Second):
+		t.Fatal("handleConnection did not return after the client left")
+	}
+	g.mu.Lock()
+	ready, seen := g.ready, g.seen
+	g.mu.Unlock()
+	if fmt.Sprint(ready) != "[4242]" {
+		t.Fatalf("the gate was asked to make ready %v for a replayer's in-band handshake, want [4242]", ready)
+	}
+	if seen[0] != 0 {
+		t.Fatalf("the gate's Ready came after the client had read %d byte(s) of keploy's TLS answer, want before it", seen[0])
+	}
+	l := p.losses.Snapshot()
+	if want := "to " + dst + ": " + why; len(l) != 1 || l[0].Kind != models.CaptureLossTLSAbort || l[0].What != want {
+		t.Fatalf("charged %+v, want one tls_handshake_failed %q", l, want)
+	}
+}
+
+// Under the proven switch, the only mode the native gate runs in, a client
+// that hangs up silent on keploy's certificate (Node.js, curl, libcurl:
+// caTrust) is held, and charged at the next read of the counts. That charge
+// says why, as a failed handshake's does: the gate's why for the process,
+// read as it hung up.
+func TestAHeldHangUpIsChargedWithTheGatesWhy(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	const why = "process 4242 (node): not a Go program, so keploy's TLS pin bypass cannot ready it"
+	g := &gateSpy{read: &atomic.Int64{}, why: why}
+	prev := OnClientTLS
+	OnClientTLS = g
+	t.Cleanup(func() { OnClientTLS = prev })
+	p := &Proxy{logger: zap.NewNop()}
+	c := &clientTLS{p: p, ctx: context.Background(), dst: "10.0.0.1:443", tgid: 4242}
+	c.HandshakeBegin()
+	c.HandshakeFailed(&pTls.HandshakeError{Err: io.EOF, CertificateSent: true})
+	if l := p.losses.Snapshot(); len(l) != 0 {
+		t.Fatalf("charged %+v at the hang-up, want it held until the counts are read", l)
+	}
+	l := p.CaptureLosses()
+	if want := "to 10.0.0.1:443: " + why; len(l) != 1 || l[0].Kind != models.CaptureLossTLSAbandoned || l[0].What != want {
+		t.Fatalf("charged %+v, want one held tls hang-up %q", l, want)
 	}
 }
 
