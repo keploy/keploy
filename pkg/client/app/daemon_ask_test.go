@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -176,18 +177,36 @@ func TestTheComposeGraceEndsAtTheUpsReturnWhileTheDaemonFailsItsReads(t *testing
 // has stopped, which the down after the grace hastens. The grace's watcher of
 // the up ends with the grace; one that ended only at the up's return held the
 // grace's end, and the teardown after it, on the slowest service.
+//
+// The row counts, and does not time, that the grace is through on the app's
+// exit: the watcher looks at the up once a tick, and a grace that cancels its
+// watcher as it ends lets at most 2 looks follow its log of the exit (one in
+// flight, and one on a tick already pending when the watcher sees the end).
+// A grace that joined its watcher before cancelling it was held to its whole
+// budget after the app's exit, a look every tick until then.
 func TestTheComposeGraceEndsOnTheAppsExitWhileTheUpStillRuns(t *testing.T) {
+	const exited = "app container stopped gracefully; tearing down the rest of the compose stack"
 	core, logs := observer.New(zap.DebugLevel)
 	a := &App{logger: zap.New(core), docker: &slowDaemon{Client: exitedApp()}, container: "app"}
+	var looksAfterExit atomic.Int32
+	upReturned := func() bool {
+		if logs.FilterMessage(exited).Len() > 0 {
+			looksAfterExit.Add(1)
+		}
+		return false
+	}
 	done := make(chan struct{})
-	go func() { a.composeAppGrace(func() bool { return false }); close(done) }()
+	go func() { a.composeAppGrace(upReturned); close(done) }()
 	select {
 	case <-done:
 	case <-time.After(time.Minute):
 		t.Fatal("the grace did not return after the app had exited: its watcher of compose's up held it")
 	}
-	if logs.FilterMessage("app container stopped gracefully; tearing down the rest of the compose stack").Len() != 1 {
+	if logs.FilterMessage(exited).Len() != 1 {
 		t.Fatal("the grace did not end on the app's exit")
+	}
+	if n := looksAfterExit.Load(); n > 2 {
+		t.Fatalf("the grace's watcher looked at compose's up %d times after the app had exited, want at most 2: the grace was held past the app's exit", n)
 	}
 }
 
