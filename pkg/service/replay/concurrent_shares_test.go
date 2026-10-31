@@ -433,8 +433,10 @@ func TestSettleSharesAmbiguousClasses(t *testing.T) {
 	})
 }
 
-// A conflict (the learn step paired a call of a with a recording b answered
-// with) charges b too, in either order, and the recording goes to b.
+// A conflict (the learn step found a call of a closest to a recording b
+// answered with) charges b too, in either order, and the recording goes to
+// b. The charge says both calls are closest to it, true of a call paired
+// with it and of one apart from it in more than values alike.
 func TestSettleSharesChargesAConflictsClaimant(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	registerShareKeys(t)
@@ -455,7 +457,8 @@ func TestSettleSharesChargesAConflictsClaimant(t *testing.T) {
 		if charged := s.settle(t); !reflect.DeepEqual(charged, []string{"b"}) {
 			t.Fatalf("order %v: charged %v; want b, the claimant (a has its own miss)", order, charged)
 		}
-		if c := s.resultOf("b").FailureInfo.UnmatchedCalls; len(c) != 1 || c[0].Concurrent.Case != models.ConcurrentCaseConflict || c[0].Concurrent.Claimant != "a" {
+		if c := s.resultOf("b").FailureInfo.UnmatchedCalls; len(c) != 1 || c[0].Concurrent.Case != models.ConcurrentCaseConflict || c[0].Concurrent.Claimant != "a" ||
+			!strings.HasPrefix(c[0].NextSteps, "its call and a's are both closest to c, recorded once while both were open") {
 			t.Fatalf("order %v: b's charge %+v", order, c)
 		}
 		got, _ := s.p.setShares(models.TestSetStatusFailed)
