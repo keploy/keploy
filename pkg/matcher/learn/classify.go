@@ -2163,13 +2163,15 @@ func sinceFirst(ln Learned) bool {
 // took between its read and its call. Anything else wb learns declines the
 // rescue (ok false), as an offset no replay could check does
 // (sinceTestBegin), whatever the test's length: the verdict never turns on
-// how long the test ran at learn. So does a look-back, in its call's window
-// or in wb (lookBack: an offset whose values lie before the call, as
+// how long the test ran at learn. So does a look-back in its call's window
+// (lookBack: an offset whose values lie before the call, as
 // sinceTimeToLive declines one): checked from its test's begin, it would
 // pass one the application changed by up to the test's span, so the
 // explanation the first classification learned stands (a copy of an
 // earlier place, which the run's rule refuses where that place is an
-// earlier test's read of the clock: clockSourceWhy).
+// earlier test's read of the clock: clockSourceWhy). wb never reads a
+// look-back where ln is none: an offset checked at its cut that is no
+// look-back lies after its call in both runs, so after every read in wb.
 func sinceRead(ln Learned, r, l Leaf, wb *Window, skip skipRule, leaf func(r, l Leaf, w *Window, skip skipRule) Learned) (Learned, bool) {
 	if lookBack(ln) {
 		return ln, false
@@ -2181,7 +2183,7 @@ func sinceRead(ln Learned, r, l Leaf, wb *Window, skip skipRule, leaf func(r, l 
 		return ln, false
 	}
 	early := leaf(r, l, wb, skip)
-	if early.Kind != KindClockRead && (early.Kind != KindClockOffset || lookBack(early)) {
+	if early.Kind != KindClockRead && early.Kind != KindClockOffset {
 		return ln, false
 	}
 	return sinceTestBegin(early, wb)
