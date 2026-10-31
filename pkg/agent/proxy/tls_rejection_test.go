@@ -165,14 +165,16 @@ type gateSpy struct {
 	mu    sync.Mutex
 	ready []uint32
 	seen  []int64
+	real  [][]string
 	why   string
 }
 
-func (g *gateSpy) Ready(_ context.Context, pid uint32) {
+func (g *gateSpy) Ready(_ context.Context, pid uint32, realOrPassthrough []string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.ready = append(g.ready, pid)
 	g.seen = append(g.seen, g.read.Load())
+	g.real = append(g.real, realOrPassthrough)
 }
 
 func (g *gateSpy) Why(uint32) string { return g.why }
@@ -222,7 +224,7 @@ func TestAClientTLSGateIsReadyBeforeKeployAnswersAndSaysWhyAHandshakeFailed(t *t
 			}
 			<-done
 			g.mu.Lock()
-			ready, seen := g.ready, g.seen
+			ready, seen, real := g.ready, g.seen, g.real
 			g.mu.Unlock()
 			if fmt.Sprint(ready) != fmt.Sprint(tc.ready) {
 				t.Fatalf("the gate was asked to make ready %v, want %v", ready, tc.ready)
@@ -232,12 +234,39 @@ func TestAClientTLSGateIsReadyBeforeKeployAnswersAndSaysWhyAHandshakeFailed(t *t
 					t.Fatalf("the gate's Ready for process %d came after the client had read %d byte(s) of keploy's answer, want before it", ready[i], n)
 				}
 			}
+			// This run reaches only keploy's mocks, so the gate is free to
+			// ready the process: it is told no real destination.
+			for i, r := range real {
+				if len(r) != 0 {
+					t.Fatalf("the gate's Ready for process %d was told real destinations %v, want none", ready[i], r)
+				}
+			}
 			l := p.losses.Snapshot()
 			if len(l) != 1 || l[0].Kind != models.CaptureLossTLSAbort || l[0].What != tc.what {
 				t.Fatalf("charged %+v, want one tls_handshake_failed %q", l, tc.what)
 			}
 		})
 	}
+}
+
+// The labels a client TLS gate reads to refuse turning a process's
+// certificate checks off while it still talks to a real server: the run's
+// mock.real list, or a marker for global pass-through, and none when the run
+// reaches only keploy's mocks (realOrPassthroughLabels).
+func TestRealOrPassthroughLabelsTellsAGateWhatTheRunReachesLive(t *testing.T) {
+	t.Run("only keploy's mocks", func(t *testing.T) {
+		p := &Proxy{logger: zap.NewNop()}
+		if got := p.realOrPassthroughLabels(); len(got) != 0 {
+			t.Fatalf("a run with no real destination gave the gate %v, want none", got)
+		}
+	})
+	t.Run("global pass-through", func(t *testing.T) {
+		p := &Proxy{logger: zap.NewNop(), GlobalPassthrough: true}
+		got := p.realOrPassthroughLabels()
+		if len(got) != 1 || got[0] != "every destination (global pass-through)" {
+			t.Fatalf("a global-pass-through run gave the gate %v, want the pass-through marker", got)
+		}
+	})
 }
 
 // keploy's own stop cuts handshakes short: no loss of a test's.

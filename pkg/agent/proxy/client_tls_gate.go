@@ -15,7 +15,18 @@ type ClientTLSGate interface {
 	// (keploy's TLS pin bypass, which has to be in place before the client
 	// checks keploy's certificate) does so here, and returns when that is
 	// done, when it cannot be done, or when ctx ends.
-	Ready(ctx context.Context, kernelPID uint32)
+	//
+	// realOrPassthrough is the run's mock.real / pass-through destinations: the
+	// peers the proxy relays this process's connections to live, whose real
+	// certificates the process still checks itself. It is empty when the run
+	// reaches only keploy's own mocks. A gate that readies the process by
+	// turning its certificate checks off (keploy's TLS pin bypass) must not do
+	// so when this is non-empty — the same process-wide switch would stop the
+	// process verifying those real servers too — and should leave the process's
+	// TLS handshakes unprepared, so a pinned one is charged as a capture loss
+	// with a Why that names the destination, not silently mocked with
+	// verification off.
+	Ready(ctx context.Context, kernelPID uint32, realOrPassthrough []string)
 	// Why is what the build knows of why a handshake of the process failed
 	// (the pin bypass could not attach to it, and why), for the capture loss
 	// the failure is charged as; "" when it knows nothing.

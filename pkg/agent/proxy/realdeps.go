@@ -130,6 +130,24 @@ func (p *Proxy) KeepRealDeps(ctx context.Context, raw []string) error {
 // and the run's verdict.
 func (p *Proxy) RealTracker() *realdeps.Tracker { return &p.realTracker }
 
+// realOrPassthroughLabels is the destinations this run reaches live rather
+// than mocking: its mock.real entries (realState.list labels), and a marker
+// when every connection is passed through (GlobalPassthrough). It is empty
+// when the run reaches only keploy's mocks. A client TLS gate reads it to
+// refuse turning a process's certificate checks off while the process still
+// talks to a real server (ClientTLSGate.Ready); the empty slice frees it to
+// prepare the process.
+func (p *Proxy) realOrPassthroughLabels() []string {
+	if p.GlobalPassthrough {
+		return []string{"every destination (global pass-through)"}
+	}
+	st := p.realList()
+	if st == nil {
+		return nil
+	}
+	return st.list.Labels()
+}
+
 // realList is the run's list when one is installed and the switch is on.
 func (p *Proxy) realList() *realState {
 	if !provenswitch.On() {
