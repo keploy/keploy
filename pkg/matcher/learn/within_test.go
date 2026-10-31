@@ -54,6 +54,9 @@ func TestAnswerPartNeedsADistinctiveValue(t *testing.T) {
 		{name: "a UUID in a path", value: "cf5d2c03-50e1-48ee-96e7-6e4eec946178", answer: "apps/cf5d2c03-50e1-48ee-96e7-6e4eec946178/settings", want: Within{Before: "apps/", After: "/settings"}, ok: true},
 		{name: "eight characters", value: "tn-4f1a9", answer: "tenants/tn-4f1a9", want: Within{Before: "tenants/"}, ok: true},
 		{name: "seven characters", value: "tn-4f1a", answer: "tenants/tn-4f1a", kept: "shorter than 8 characters"},
+		// Characters, not bytes: four CJK characters are twelve bytes.
+		{name: "four CJK characters", value: "订单编号", answer: "orders/订单编号/items", kept: "shorter than 8 characters"},
+		{name: "eight CJK characters", value: "订单编号甲乙丙丁", answer: "orders/订单编号甲乙丙丁/items", want: Within{Before: "orders/", After: "/items"}, ok: true},
 		{name: "page 1 of 3", value: "1", answer: "page 1 of 3", kept: "shorter than 8 characters"},
 		{name: "all digits", value: "48213977", answer: "orders/48213977/items", kept: "all digits"},
 		{name: "whole and short", value: "1", answer: "1", ok: true},

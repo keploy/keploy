@@ -26,12 +26,14 @@ import (
 //
 // Bounds. Only the requests of the test's own window count, never another
 // test's or the set's start-up's; as recorded, only those sent before the
-// call's recorded instant; in this run, those the application was sent
-// before the call. A part two requests of a side hold two values of is no
-// place (keploy cannot tell which request the value came from); nor is a
-// part one side alone holds. Only a request's URL and headers are read (a
-// header's JWT claims too), never its body, which the application reads
-// after keploy hands it on. Where the agent did not see this run's incoming
+// call's recorded instant or at it (the clock cannot order a request and a
+// call recorded at one instant, and that request may be the one the call
+// serves); in this run, those the application was sent before the call. A
+// part two requests of a side hold two values of is no place (keploy cannot
+// tell which request the value came from); nor is a part one side alone
+// holds. Only a request's URL and headers are read (a header's JWT claims
+// too), never its body, which the application reads after keploy hands it
+// on. Where the agent did not see this run's incoming
 // requests (record-requests off, or no incoming stream), or the test sent
 // none before the call in either run, the place could not be read
 // (Earlier.Unread): it gives no place, so no variable is bound there, and
@@ -78,15 +80,15 @@ const incomingUncaptured = "keploy did not see the application's incoming reques
 
 // IncomingGiven is the given place (Earlier.Given, Earlier.Incoming) of a
 // client test (test, its name) at a call recorded at callAt: the parts of
-// the recorded requests of its window sent before callAt (recorded), each
-// with its value in the requests the application was sent in this run
-// before the call (live; seen false where the agent did not see this run's
-// requests). Each request is read as GivenRequest reads a test case's
-// request (its URL's path segments and query values, its headers and the
-// claims of a JWT one holds), its URL and headers alone. A leaf is kept
-// where every request of a side that holds it holds one value, on both
-// sides; the place is named by the first recorded request (the earliest)
-// that holds a kept leaf. See the section above for the bounds.
+// the recorded requests of its window sent before callAt or at it
+// (recorded; see the bounds above), each with its value in the requests
+// the application was sent in this run before the call (live; seen false
+// where the agent did not see this run's requests). Each request is read
+// as GivenRequest reads a test case's request (its URL's path segments and
+// query values, its headers and the claims of a JWT one holds), its URL and
+// headers alone. A leaf is kept where every request of a side that holds it
+// holds one value, on both sides; the place is named by the first recorded
+// request (the earliest) that holds a kept leaf.
 func IncomingGiven(test string, recorded, live []IncomingRequest, seen bool, callAt time.Time) Earlier {
 	e := Earlier{Mock: incomingPlace(test, ""), Given: true, Incoming: true}
 	if !seen {
@@ -137,7 +139,8 @@ func IncomingGiven(test string, recorded, live []IncomingRequest, seen bool, cal
 // call's instant). A read's places are shared by every call that reads it
 // (a round's, exact_round), and each call's recorded instant cuts the
 // recorded requests at its own place (at): a request recorded after the
-// call never gives it a value, nor splits one it holds. Each cut is read
+// call never gives it a value, nor splits one it holds; one recorded at
+// the call's own instant does (see the bounds above). Each cut is read
 // once per read.
 type incomingRead struct {
 	test           string
@@ -185,8 +188,9 @@ func sortIncoming(reqs []IncomingRequest) []IncomingRequest {
 
 // incomingAt is earlier with a client test's incoming requests (an Earlier
 // a Tracker read made, Earlier.in) read as the call recorded at at had them
-// (incomingRead.at): only those recorded before it. earlier itself is never
-// changed (a round's calls share it).
+// (incomingRead.at): only those recorded before it or at its instant (see
+// the bounds above). earlier itself is never changed (a round's calls share
+// it).
 func incomingAt(earlier []Earlier, at time.Time) []Earlier {
 	if at.IsZero() {
 		return earlier

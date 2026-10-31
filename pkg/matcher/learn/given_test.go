@@ -1459,6 +1459,22 @@ func TestACallReadsTheIncomingRequestsRecordedBeforeIt(t *testing.T) {
 	if ln := ClassifyIn(clientTestCache(), []string{p}, shape("1793387031"), shape("1793373999"), late, placed, nil, nil, nil)[0]; ln.Kind == KindVariable {
 		t.Errorf("a call after both requests, whose auth_time is split: followed from %+v", ln.From)
 	}
+	// A call recorded at test-3's very instant reads test-3: the clock
+	// cannot order the two, and test-3 may be the request the call serves.
+	// One recorded a nanosecond earlier reads no request.
+	if ln := ClassifyIn(clientTestCache(), []string{p}, shape("1793387031"), shape("1793373215"), t0, placed, nil, nil, nil)[0]; ln.Kind != KindVariable || ln.From.Mock != "incoming request test-3 of test TestRun" {
+		t.Errorf("a call at test-3's own instant: %s from %+v (%s); want the variable of test-3's claim", ln.Kind, ln.From, ln.Why)
+	}
+	if ln := ClassifyIn(clientTestCache(), []string{p}, shape("1793387031"), shape("1793373215"), t0.Add(-time.Nanosecond), placed, nil, nil, nil)[0]; ln.Kind == KindVariable {
+		t.Errorf("a call recorded before every request: followed from %+v", ln.From)
+	}
+	live := []IncomingRequest{in("", time.Now(), "1793387031")}
+	if e := IncomingGiven("TestRun", []IncomingRequest{in("test-3", t0, "1793373215")}, live, true, t0); !hasSeen(e, "header.Authorization{jwt}.auth_time") {
+		t.Errorf("IncomingGiven at the request's own instant: %+v; want its claim read", e)
+	}
+	if e := IncomingGiven("TestRun", []IncomingRequest{in("test-3", t0, "1793373215")}, live, true, t0.Add(-time.Nanosecond)); hasSeen(e, "header.Authorization{jwt}.auth_time") {
+		t.Errorf("IncomingGiven a nanosecond before the request: %+v; want no claim read", e)
+	}
 }
 
 // A replay reads a variable the harness gave the application in the open
