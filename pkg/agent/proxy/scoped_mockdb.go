@@ -445,6 +445,28 @@ func (s *scopedMockDb) HoldToRound(call integrations.CallRound) (integrations.Mo
 	return &c, restaged
 }
 
+// HideBackground implements integrations.BackgroundHider: this view over the
+// store HideBackground returned for it, a held store being one call's, as
+// HoldToRound's copy is.
+func (s *scopedMockDb) HideBackground() integrations.MockMemDb {
+	inner := integrations.HideBackground(s.MockMemDb)
+	if inner == s.MockMemDb {
+		return s
+	}
+	c := *s
+	c.MockMemDb = inner
+	return &c
+}
+
+var _ integrations.BackgroundHider = (*scopedMockDb)(nil)
+
+// InBackground implements integrations.BackgroundMember: the store's.
+func (s *scopedMockDb) InBackground(name string) bool {
+	return integrations.InBackground(s.MockMemDb, name)
+}
+
+var _ integrations.BackgroundMember = (*scopedMockDb)(nil)
+
 // Unheld implements integrations.UnheldTeller: the store's, so a view over
 // the fail-closed store HoldToRound made says why its call read nothing.
 func (s *scopedMockDb) Unheld() string { return integrations.UnheldWhy(s.MockMemDb) }

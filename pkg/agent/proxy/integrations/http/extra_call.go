@@ -28,17 +28,7 @@ func (h *HTTP) extraCall(ctx context.Context, input *req, mockDb integrations.Mo
 	if len(answered) == 0 {
 		return 0
 	}
-	// The test's bindings, on a copy: a mock that declares a variable is
-	// matched as it was answered, and the dry match binds nothing.
-	vars := variableTable(mockDb)
-	dry := func(mocks []*models.Mock) bool {
-		v := vars
-		if v != nil {
-			v = v.Clone()
-		}
-		matched, mk, _, err := h.match(ctx, input, answeredOnly{MockMemDb: mockDb, mocks: mocks, vars: v}, headerNoise, bodyNoise, urlNoise, autoURLDynamic, schemaNoiseDetection, schemaNoiseStrict, false, mockCorrelation)
-		return err == nil && matched && mk != nil && mk.Spec.HTTPReq != nil
-	}
+	dry := h.answeredMatch(ctx, input, mockDb, headerNoise, bodyNoise, urlNoise, autoURLDynamic, schemaNoiseDetection, schemaNoiseStrict, mockCorrelation)
 	if !dry(answered) {
 		return 0
 	}
@@ -52,6 +42,49 @@ func (h *HTTP) extraCall(ctx context.Context, input *req, mockDb integrations.Mo
 		}
 	}
 	return max(n, 1)
+}
+
+// answeredMatch is the dry match extraCall and repeatsOwn read a request
+// against some of the open test's answered mocks with: whether the request
+// matches one of mocks, as the matcher judges it, on a view that holds only
+// them and that no match can consume, with the test's bindings on a copy (a
+// mock that declares a variable is matched as it was answered, and the dry
+// match binds nothing).
+func (h *HTTP) answeredMatch(ctx context.Context, input *req, mockDb integrations.MockMemDb, headerNoise, bodyNoise map[string][]string, urlNoise []string, autoURLDynamic, schemaNoiseDetection, schemaNoiseStrict, mockCorrelation bool) func(mocks []*models.Mock) bool {
+	vars := variableTable(mockDb)
+	return func(mocks []*models.Mock) bool {
+		v := vars
+		if v != nil {
+			v = v.Clone()
+		}
+		matched, mk, _, err := h.match(ctx, input, answeredOnly{MockMemDb: mockDb, mocks: mocks, vars: v}, headerNoise, bodyNoise, urlNoise, autoURLDynamic, schemaNoiseDetection, schemaNoiseStrict, false, mockCorrelation)
+		return err == nil && matched && mk != nil && mk.Spec.HTTPReq != nil
+	}
+}
+
+// repeatsOwn reports whether the request, read on mockDb (the store held to
+// call), is a call one of the open test's own recordings already answered,
+// as the matcher judges it (extraCall's reading), in a set served by the
+// background rules (integrations.S12BackgroundIn): one call more than the
+// test recorded of it, unless the test recorded it again. The background
+// never answers such a call (integrations.HideBackground): answered by a
+// copy the application made between tests or from a worker, a duplicate of a
+// recorded call would pass. False with no test open, when the test's own
+// answered nothing yet, and for a set served by today's rules, whose view
+// shows a test no background.
+func (h *HTTP) repeatsOwn(ctx context.Context, input *req, mockDb integrations.MockMemDb, call integrations.CallRound, headerNoise, bodyNoise map[string][]string, urlNoise []string, autoURLDynamic, schemaNoiseDetection, schemaNoiseStrict, mockCorrelation bool) bool {
+	if !provenswitch.On() || !integrations.S12BackgroundIn(call, mockDb) {
+		return false
+	}
+	er, ok := mockDb.(integrations.ExactConsumedReader)
+	if !ok {
+		return false
+	}
+	answered := FilterHTTPMocks(er.ConsumedTestMocks())
+	if len(answered) == 0 {
+		return false
+	}
+	return h.answeredMatch(ctx, input, mockDb, headerNoise, bodyNoise, urlNoise, autoURLDynamic, schemaNoiseDetection, schemaNoiseStrict, mockCorrelation)(answered)
 }
 
 // answeredDiag widens the diagnosis of a miss, under exact serving (the
