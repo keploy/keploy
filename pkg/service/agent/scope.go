@@ -8,6 +8,7 @@ import (
 	"time"
 
 	httpparser "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
+	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/agent/starts"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -206,11 +207,13 @@ func (a *Agent) openWindow(name string, pid int, at time.Time) {
 		// new process's on its pid (failLostScope).
 		proc = procStartTime(pid)
 	}
+	start := boundaryTime(at)
 	a.scopeMu.Lock()
 	if a.workerOpen == nil {
 		a.workerOpen = make(map[scopeKey]time.Time)
 	}
-	a.workerOpen[k] = boundaryTime(at)
+	a.workerOpen[k] = start
+	a.recordScopeLocked(k, start)
 	if proc != "" {
 		if a.openProc == nil {
 			a.openProc = make(map[scopeKey]string)
@@ -265,7 +268,45 @@ func (a *Agent) withdrawWindow(name string, pid int) {
 	delete(a.workerOpen, k)
 	delete(a.openProc, k)
 	delete(a.scopeMeta, k)
+	a.abandonScopeLocked(k)
 	a.scopeMu.Unlock()
+}
+
+// recordScopeLocked opens, in a recording under the proven switch, the test
+// scope of the window k opened at start on the recording's mock manager
+// (syncMock.TestScope): keploy mock record's tests make calls and answer
+// none of keploy's, so no recorder opens a window for them, and without it
+// a recorder that asks what test a call was made in (the Generic recorder's
+// preambleHold) is told none, and states a connection made wholly inside a
+// test its preamble, served to every test. A window k already had leaves
+// its scope abandoned: its begin was replaced. Nothing with the switch off,
+// or in a replay. Caller holds scopeMu.
+func (a *Agent) recordScopeLocked(k scopeKey, start time.Time) {
+	a.abandonScopeLocked(k)
+	if !provenswitch.On() || (a.config != nil && a.config.Agent.Mode == models.MODE_TEST) {
+		return
+	}
+	mgr := a.spanMgr
+	if mgr == nil {
+		mgr = syncMock.Get()
+	}
+	s := mgr.BeginTestScope(start)
+	if s == nil {
+		return
+	}
+	if a.openScopes == nil {
+		a.openScopes = make(map[scopeKey]*syncMock.TestScope)
+	}
+	a.openScopes[k] = s
+}
+
+// abandonScopeLocked takes k's test scope, if it has one, out of the open
+// ones with no span noted: its window is no test's. Caller holds scopeMu.
+func (a *Agent) abandonScopeLocked(k scopeKey) {
+	if s, ok := a.openScopes[k]; ok {
+		s.Abandon()
+		delete(a.openScopes, k)
+	}
 }
 
 // closeWindow turns a started test into a window once it says it ended, and
@@ -275,14 +316,18 @@ func (a *Agent) closeWindow(name string, pid int, at time.Time) bool {
 	k := scopeKey{pid: uint32(pid), name: name}
 	start, ok := a.workerOpen[k]
 	if ok {
+		end := boundaryTime(at)
 		delete(a.workerOpen, k)
 		delete(a.openProc, k)
+		// Its span is the window's.
+		a.openScopes[k].End(end)
+		delete(a.openScopes, k)
 		meta := a.scopeMeta[k]
 		ev := meta.evidence
 		if len(meta.unread) > 0 {
 			ev = withUnread(ev, meta.unread)
 		}
-		a.scopeWindows = append(a.scopeWindows, models.ScopeWindow{Name: name, Start: start, End: boundaryTime(at), PID: uint32(pid), Dir: meta.dir, Suite: meta.suite, Outcome: meta.outcome, Evidence: ev, Real: meta.real})
+		a.scopeWindows = append(a.scopeWindows, models.ScopeWindow{Name: name, Start: start, End: end, PID: uint32(pid), Dir: meta.dir, Suite: meta.suite, Outcome: meta.outcome, Evidence: ev, Real: meta.real})
 		delete(a.scopeMeta, k)
 	}
 	a.scopeMu.Unlock()
@@ -501,12 +546,18 @@ func (a *Agent) NoteScopeOutcome(name string, pid int, outcome string) {
 // no extent and the ScopeOutcomeGated verdict, so the replay's outcome and
 // receipt say it was gated rather than that it never appeared.
 func (a *Agent) NoteScopeGated(name string, pid int, at time.Time) {
+	a.noteScopeNotRun(name, pid, at, models.ScopeOutcomeGated)
+}
+
+// noteScopeNotRun is NoteScopeGated with the verdict that says why:
+// ScopeOutcomeGated, or ScopeOutcomeUnmet for a test whose need was not met.
+func (a *Agent) noteScopeNotRun(name string, pid int, at time.Time, outcome string) {
 	if name == "" {
 		return
 	}
 	t := boundaryTime(at)
 	a.scopeMu.Lock()
-	a.scopeWindows = append(a.scopeWindows, models.ScopeWindow{Name: name, Start: t, End: t, PID: uint32(pid), Outcome: models.ScopeOutcomeGated})
+	a.scopeWindows = append(a.scopeWindows, models.ScopeWindow{Name: name, Start: t, End: t, PID: uint32(pid), Outcome: outcome})
 	if a.gatedScopes == nil {
 		a.gatedScopes = make(map[scopeKey]struct{})
 	}

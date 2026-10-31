@@ -4959,17 +4959,18 @@ func (a *AgentClient) PushScopeGate(ctx context.Context, run []string, reason st
 }
 
 // PushScopeSkips hands the agent the proven model's gate: the tests to skip,
-// by ID, each with its reason; an empty map skips nothing. Made again on a
-// restarted agent, like the scope gate. Any answer but 200 is a failure: a
-// replay that cannot skip what CI skips refuses.
-func (a *AgentClient) PushScopeSkips(ctx context.Context, skip map[string]string) (retErr error) {
+// by ID, each with its reason, and the tests each test needs to have begun
+// before it (models.ScopeGateReq.Needs); an empty map skips nothing. Made
+// again on a restarted agent, like the scope gate. Any answer but 200 is a
+// failure: a replay that cannot skip what CI skips refuses.
+func (a *AgentClient) PushScopeSkips(ctx context.Context, skip map[string]string, needs map[string][]models.ScopeNeed) (retErr error) {
 	defer func() {
 		if retErr == nil && a.session().recording() {
-			recorded := maps.Clone(skip)
-			a.session().record(stepScopeGate, func(c context.Context) error { return a.PushScopeSkips(c, recorded) })
+			recorded, recordedNeeds := maps.Clone(skip), maps.Clone(needs)
+			a.session().record(stepScopeGate, func(c context.Context) error { return a.PushScopeSkips(c, recorded, recordedNeeds) })
 		}
 	}()
-	body, err := json.Marshal(models.ScopeGateReq{Skip: skip})
+	body, err := json.Marshal(models.ScopeGateReq{Skip: skip, Needs: needs})
 	if err != nil {
 		return fmt.Errorf("failed to marshal the tests to skip: %w", err)
 	}
@@ -4994,8 +4995,8 @@ func (a *AgentClient) PushScopeSkips(ctx context.Context, skip map[string]string
 	if err := json.Unmarshal(answer, &ack); err != nil || ack.V != models.ScopeProtocolVersion {
 		return fmt.Errorf("the agent did not acknowledge the tests to skip (answer %q): it predates keploy's scope protocol v1, or runs without KEPLOY_PROVEN=1", string(answer))
 	}
-	if ack.Skips != len(skip) {
-		return fmt.Errorf("the agent applies %d of the %d tests to skip", ack.Skips, len(skip))
+	if ack.Skips != len(skip) || ack.Needs != len(needs) {
+		return fmt.Errorf("the agent applies %d of the %d tests to skip, and the needs of %d of the %d tests that need another", ack.Skips, len(skip), ack.Needs, len(needs))
 	}
 	return nil
 }

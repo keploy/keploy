@@ -24,6 +24,7 @@ import (
 	"go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/variables"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -1712,11 +1713,15 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 				continue
 			}
 			for _, l := range learned {
+				// A variable names the earlier call it was sent in, and
+				// whether that call was the set's (an earlier test's or the
+				// start-up's): its evidence, never its value.
 				h.Logger.Info("learned a field that changed between record and replay",
-					zap.String("mock", m.Name), zap.String("field", l.Recorded.Path), zap.String("as", string(l.Kind)))
+					zap.String("mock", m.Name), zap.String("field", l.Recorded.Path), zap.String("as", string(l.Kind)),
+					zap.String("type", string(l.Recorded.Type)), zap.String("fromMock", l.From.Mock), zap.String("fromField", l.From.Path), zap.Bool("fromSet", l.From.Run))
 			}
 			if e, ok := n.servedExchange(tracker.Drifts(), m, answered, c.Shape, recordedParts(m), liveShape, input, live, out, own, h.learnedView(m, plan)); ok {
-				tracker.Served(test, e)
+				tracker.Served(test, learn.Named(e, plan.vars, plan.clocks))
 			}
 			return out, nil, nil
 		}
@@ -2042,8 +2047,8 @@ type pairing struct {
 // variableUse is the place of the call's request where keploy uses l, a
 // variable Classify found, or why keploy cannot follow it into the call
 // (learnPlan; own: the call is one of the test's own): it is bound at a
-// request place of one of the test's own HTTP mocks that held the value
-// whole, and used here, at a place a variable can stand at, with the value
+// request place of one of the test's own HTTP mocks, or under the proven
+// switch of the run's (from.Run), that held the value whole, and used here, at a place a variable can stand at, with the value
 // it had there.
 func variableUse(l learn.Learned, own, jsonReq bool) (string, string) {
 	r, from := l.Recorded, l.From
@@ -2059,7 +2064,11 @@ func variableUse(l learn.Learned, own, jsonReq bool) (string, string) {
 		why = r.Path + " carries a value " + from.Mock + " answered earlier in the test at " + from.Path + ", which keploy cannot follow from an answer"
 	case !from.Whole || from.Var == "":
 		why = r.Path + " carries a value " + from.Mock + " sent earlier in the test at " + from.Path + ", inside a longer value or at a place keploy cannot bind it"
-	case !own || !from.Own:
+	case !own || !from.Own && (!from.Run || !provenswitch.On()):
+		// A value the run made, sent by the set's start-up or an earlier
+		// test's own call (from.Run), is the run's variable: bound there,
+		// used here, under the proven switch; without it only a test's own
+		// calls carry its variables.
 		return "", r.Path + " carries a value " + from.Mock + " sent earlier, and only a test's own calls carry its variables"
 	}
 	if why != "" {
@@ -2174,7 +2183,7 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 			if why != "" {
 				return p, why
 			}
-			name, ok := tracker.Name(test, from.Mock, from.Var, reserved)
+			name, ok := tracker.PlaceName(test, from, reserved)
 			if !ok {
 				return p, "the test ended before " + r.Path + " was learned"
 			}

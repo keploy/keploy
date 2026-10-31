@@ -23,10 +23,12 @@ type Binding = models.VariableBinding
 //
 // With KeepRun, a value bound before the set's first scope began (the run's
 // start-up, before its first test) is the run's: every scope of the set sees
-// it, until NewSet. What is bound once a scope began, in it or in the gap
-// after it, is that scope's, forgotten when the next begins. A scope begins
-// in the step that makes its mocks live (StartOpening), so no call its mocks
-// answer binds in the run's. A table whose
+// it, until NewSet. So is a run's variable (models.RunVariable) bound in a
+// scope: an earlier test's call binds it for the tests after it. Every other
+// value bound once a scope began, in it or in the gap after it, is that
+// scope's, forgotten when the next begins. A scope begins in the step that
+// makes its mocks live (StartOpening), so no call its mocks answer binds in
+// the start-up's. A table whose
 // scope is the next test's, begun early, reads the run's (ReadRunOf); the
 // run's are bound beside its scope's (Beside), as its are beside the run's,
 // so the first test, which carries both in, holds no two variables recorded
@@ -284,10 +286,12 @@ func (t *Table) ReadRunOf(from *Table) {
 	}
 }
 
-// put binds b in the scope, or the run's when none has begun and the table
-// keeps the run's (KeepRun). t is locked (lock).
+// put binds b in the scope, or the run's where the table keeps the run's
+// (KeepRun) and b is one: bound before any scope began (the start-up's), or
+// a run's variable (models.RunVariable) an earlier test's call binds for the
+// tests after it. t is locked (lock).
 func (t *Table) put(b Binding) {
-	if !t.began && t.keepRun {
+	if t.keepRun && (!t.began || models.RunVariable(b.Name)) {
 		if t.run == nil {
 			t.run = make(map[string]Binding)
 		}
@@ -424,7 +428,7 @@ func (t *Table) start(given, carried []Binding) {
 	}
 	for _, b := range carried {
 		if _, dup := t.vals[b.Name]; !dup {
-			t.vals[b.Name] = b
+			t.put(b)
 		}
 	}
 }

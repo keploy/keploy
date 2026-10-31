@@ -542,6 +542,25 @@ func clockPairsAfter(lay clockLayout, rec string, er int, s string, extra [][]in
 	return true
 }
 
+// oneRunSinceBegin is w with one run's half from its test's begin
+// (Span.sinceBegin) and the other's as w has it, each way round: the
+// windows that hold a read of the clock the application made for the call
+// in one run and earlier in its test in the other. A full round that ran
+// slower than the recording (or faster) shows so a read made at the start
+// of a handler several calls before the call: in the recording those calls
+// took a millisecond and the call's own window holds the read; in the full
+// round they took most of a second, and only the window since the test
+// began does. Either way one run shows it a read made for the call, so its
+// learning does not hang on the full round's speed. nil where either run
+// knows no begin; each window holds all w holds.
+func (w *Window) oneRunSinceBegin() []*Window {
+	wb := w.sinceBegin()
+	if wb == nil {
+		return nil
+	}
+	return []*Window{{Rec: w.Rec, F: wb.F, offsets: w.offsets}, {Rec: wb.Rec, F: w.F, offsets: w.offsets}}
+}
+
 // holds reports whether t, an instant read at resolution res, is a read of
 // the clock within s: t stands for the unit [t, t+res) its read was made in
 // (a value in seconds is the second its read was made in), and some instant

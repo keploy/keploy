@@ -16,6 +16,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 // Side is the half of an exchange a value is in.
@@ -54,6 +55,12 @@ type Seen struct {
 	// in: AnswerStamp, instants.go rule 3), which no value came from. Its
 	// words are searched for nothing; the echo reads it as it stands.
 	Stamp bool
+	// Clock: the learn step learned the leaf, a request's, as a plain read
+	// of the application's clock (a zero offset, models.ClockOffset.Plain,
+	// as MockSpec.Clocks holds it: Named). A later test's call that carries
+	// its value but does not hold it as its own read of the clock is
+	// refused, never followed (classifyRead, clockSourceWhy).
+	Clock bool
 	// Undeclared: the leaf is a test case's request body, or a leaf of it,
 	// one side of which declares no media type (no Content-Type) and is
 	// read as text by its bytes (plainText, GivenRequest); both sides are
@@ -79,7 +86,9 @@ type Earlier struct {
 	// Own: the mock is one of the test's own, not the pool's. Only a test's
 	// own mocks carry its variables.
 	Own bool
-	// Run: served while no test was open (Tracker.Served): a variable bound
+	// Run: served while no test was open (Tracker.Served), or the request
+	// leaves of an earlier test's own call that carried a value the run
+	// made, those alone (Tracker's ranCalls; StartUp false): a variable bound
 	// at it is the run's, which every later test uses (Tracker.RunName).
 	Run bool
 	// StartUp: served before the set's first test began (Tracker.Served),
@@ -98,8 +107,10 @@ type Earlier struct {
 	Given bool
 	// Unread, of a Given place, says why the test case's request could not
 	// be read (none was sent with the test case, or keploy cannot read its
-	// kind): it has no Seen, and every value that changed is refused
-	// (ClassifyIn), never learned as noise or an echo.
+	// kind); of a Run place, that the run keeps no more of the set's tests'
+	// places, past its bound (Tracker.keepRun), the reason itself. It has
+	// no Seen, and every value that changed is refused (ClassifyIn,
+	// requestUnread), never learned as noise or an echo.
 	Unread string
 	Seen   []Seen
 	// noTime: the exchange's recorded time keploy cannot read (At was the
@@ -150,6 +161,18 @@ type toldOf struct {
 	order Order
 	mock  *models.Mock
 }
+
+// ofEarlierTest: e is a place an earlier test of the set left the run
+// (ranCalls): the request leaves of its call that drifted, and nothing else.
+// It has no answer, payload or view to read, which is no fault of keploy's.
+func (e Earlier) ofEarlierTest() bool { return e.Run && !e.StartUp }
+
+// alwaysEarlier: e is earlier than every call of the test it is read for,
+// whatever its recorded time says: the test case's own request (Given), or a
+// place an earlier test left the run (ofEarlierTest), which ended before this
+// test began. Its time splits no reading (leafedAfterCall, leafedAtCall),
+// nor does one keploy cannot read, the call's own instant (timedEarlier).
+func (e Earlier) alwaysEarlier() bool { return e.Given || e.ofEarlierTest() }
 
 // servedAsRecorded reports whether e's adapter said F served it as recorded
 // (AsRecorded) and every leaf it saw bears it out: a Seen whose live value
@@ -691,7 +714,8 @@ type Place struct {
 	Whole bool
 	// Own: the mock is one of the test's own (Earlier.Own).
 	Own bool
-	// Run: the mock was served while no test was open (Earlier.Run).
+	// Run: the mock was served while no test was open, or in an earlier
+	// test of the set (Earlier.Run).
 	Run bool
 	// Given: the place is the test case's own request (Earlier.Given), no
 	// call of the test: nothing binds a variable there, and a value found
@@ -699,6 +723,12 @@ type Place struct {
 	Given bool
 	// Name is the variable already at Var (Seen.Name), "" for none.
 	Name string
+	// Clock: the learn step learned the leaf as a plain read of the
+	// application's clock (Seen.Clock).
+	Clock bool
+	// InStartUp: the mock was served in the test set's start-up, before its
+	// first test began (Earlier.StartUp). Only the wording reads it.
+	InStartUp bool
 	// Field, of a place found in a raw mock's payload, is the field of its
 	// spec that holds what was found, as the mock file names it
 	// (rawField.describe; "" when it stands across two); Held is what was
@@ -1049,7 +1079,7 @@ func leafedAfterCall(earlier []Earlier, raw []Raw, at time.Time) ([]Earlier, []R
 	var kept []Earlier
 	var moved []Raw
 	for i, e := range earlier {
-		if e.Given || !e.At.After(at) {
+		if e.alwaysEarlier() || !e.At.After(at) {
 			if moved != nil {
 				kept = append(kept, e)
 			}
@@ -1133,7 +1163,7 @@ func timedRaw(raw []Raw, at time.Time) []Raw {
 // there is none, and earlier is then returned as it is.
 func leafedAtCall(earlier []Earlier, at time.Time) (kept []Earlier, late []Raw) {
 	for i, e := range earlier {
-		if e.Given || !e.At.Equal(at) {
+		if e.alwaysEarlier() || !e.At.Equal(at) {
 			if late != nil {
 				kept = append(kept, e)
 			}
@@ -1498,7 +1528,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 			v := dc.ofIn(r.Value, l.Value, w, at)
 			why, sourced := "", false
 			if unreadReq != "" {
-				why = unreadRequestWhy(unreadReq)
+				why = unreadReq
 			} else if where, asRecorded := dc.requestHolds(lostMoments(v), v.liveMoments, served); where != "" {
 				why = requestHoldsWhy(where, asRecorded)
 			} else if m, ok := offsetOfValue(v, places); ok && skip&skipOffset == 0 {
@@ -1731,6 +1761,89 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		}
 		return ln
 	}
+	// clientWord is ln, a text w learns as noise, learned instead as the read
+	// of its one changed word in w, in keploy mock's client tests
+	// (wordRead), the word read by rd.
+	clientWord := func(ln Learned, w *Window, rd func(r, l Leaf, w *Window, skip skipRule) Learned) Learned {
+		if dc.clientTests {
+			if word, ok := wordRead(ln, w, rd); ok {
+				return word
+			}
+		}
+		return ln
+	}
+	// ofRun is ln, the reading of (r, l) in w, under the run's rule: the
+	// run's variable (Place.Run: a value the set's start-up or an earlier
+	// test sent) that, read as a value no earlier place is the source of and
+	// no moved place builds by an offset, is a plain read of the clock its
+	// own call's window holds in both runs, the whole value or one word of it
+	// (clientWord, the word read by the leaf alone), is learned as that read,
+	// checked in that window at every replay, never as the variable (founder,
+	// 2026-10-30). Its own call holds it by the rules the leaf learns its own
+	// reads by (DriftCache.readsOwn): an instant its window holds, a time of
+	// day its window holds modulo a day, and any read in a call keploy knows
+	// no window of, which the leaf learns in its call's own span. Where that window
+	// does not hold it, one that holds it in one run's own window and since
+	// its test began in the other (Window.oneRunSinceBegin, the copy rule's
+	// windows below: a full round slower than the recording) learns it as
+	// that read since its test began. The earlier call held the same value
+	// in both runs, so it is a read of the clock in the same second as well,
+	// and two calls that read one clock in one second are a coincidence, not
+	// dataflow. As the variable, a replay whose clock crosses a second
+	// between the two calls would fail the later one, and the earlier call's
+	// place would carry a variable and a clock read at once, which the HTTP
+	// replay refuses for every test, the earlier one's included. Of an
+	// earlier place no clock read was learned at, a copy neither run's own
+	// call's window holds (sent a minute later) stays the variable, and so
+	// does one the re-read learns as anything but that read: an id minted
+	// that second with a random word in it is refused read without its
+	// source (the word drifted alike in both calls, which only dataflow
+	// explains). Only the whole value, or its one changed word, read as the
+	// clock is the clock's.
+	//
+	// Whose earlier place is itself a plain read of the clock (Place.Clock:
+	// the earlier call's learn step learned it so), a copy the re-read does
+	// not learn as this call's read is refused (clockSourceWhy), never
+	// followed, wherever its call stands: keploy cannot tell a copy of that
+	// read from a read of the clock made in the same second where keploy
+	// does not see it (a token the test's client holds, minted at that
+	// second; a value this call made the same second, which its answer
+	// echoes), and followed, the earlier place would carry a variable and a
+	// clock read at once, which the HTTP replay refuses for every test, the
+	// earlier one's included, and a replay whose two reads cross a second
+	// would fail the later test.
+	//
+	// Without the proven switch the run's rule is not applied: a value the
+	// set's start-up sent stays its variable, which every plan refuses at a
+	// test's call (only a test's own calls carry its variables), as before
+	// the run's variables (provenswitch).
+	ofRun := func(ln Learned, r, l Leaf, w *Window) Learned {
+		if ln.Kind != KindVariable || !ln.From.Run || !provenswitch.On() {
+			return ln
+		}
+		for i, ow := range append([]*Window{w}, w.oneRunSinceBegin()...) {
+			if !dc.readsOwn(r, l, ow, at) {
+				continue
+			}
+			if own := clientWord(leaf(r, l, ow, skipBoth), ow, leaf); own.Kind == KindClockRead {
+				if i > 0 {
+					own, _ = sinceTestBegin(own)
+				}
+				return own
+			}
+		}
+		if ln.From.Clock {
+			ln.Kind, ln.From, ln.Why = KindUnaccounted, Place{}, clockSourceWhy(ln.From)
+		}
+		return ln
+	}
+	// read is leaf under the run's rule (ofRun), the reading every word of a
+	// text read alone in the call's window takes (wordRead), as the whole
+	// value takes it below: a word an earlier test's call sent is the later
+	// call's own read where a window of that call holds it so, and refused
+	// where none does and the earlier call's learn step read it from the
+	// clock, never left the noise of the text.
+	read := func(r, l Leaf, w *Window, skip skipRule) Learned { return ofRun(leaf(r, l, w, skip), r, l, w) }
 	for _, p := range drift {
 		r, l := rec.Leaves[p], live.Leaves[p]
 		ln := leaf(r, l, w, 0)
@@ -1744,11 +1857,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// replay, and the rest of the text is still compared. A text whose
 		// changed word is no read of the clock in the window, or one more of
 		// whose bytes changed, stays the noise the window learned.
-		if dc.clientTests {
-			if word, ok := wordRead(ln, w, leaf); ok {
-				ln = word
-			}
-		}
+		ln = clientWord(ln, w, read)
 		// A read made before its call's window: in keploy mock's client
 		// tests (the only calls whose window knows each run's test begin),
 		// a value refused in its call's window is classified again in the
@@ -1786,9 +1895,14 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// call sent, which held it in both runs) that, read as a value no
 		// earlier place is the source of and no moved place builds by an
 		// offset, is a read of the clock, or of the clock plus one constant
-		// offset, its call's window holds in both runs (sinceTestBegin), is
-		// learned as that read since its test began (models.SinceTestBegin),
-		// never as the variable. Both explanations hold in the rounds, and
+		// offset, that its call's window holds in one run and the window
+		// since its test began holds in the other (Window.oneRunSinceBegin,
+		// sinceTestBegin), is learned as that read since its test began
+		// (models.SinceTestBegin), never as the variable. One run's own
+		// window is enough: a full round that ran slower than the recording
+		// (or faster) opens the call's window after a read the application
+		// made several calls before, and the learning must not hang on how
+		// fast the full round ran. Both explanations hold in the rounds, and
 		// that read holds under both: the earlier place's read was made
 		// after the test began too, and the application makes it again at
 		// replay. Learned as a variable, a full round that made the two reads in one second
@@ -1799,7 +1913,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// also an offset of a start-up stamp the application was given (the
 		// rule below) holds as that read under all three explanations, and
 		// read with the rule, it would stay the variable by the same
-		// timing. A copy its own window does not hold stays the variable
+		// timing. A copy neither run's own window holds stays the variable
 		// (the copy alone explains it), and so does anything else learned
 		// as a value with no source (noise, an echo, a refusal). So does a whole copy of what an earlier
 		// answer gave the application (Place.givenWhole: a dependency's
@@ -1809,11 +1923,16 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// since the test began refuses. A part of an answer held by chance
 		// (a word of a login's cookie) and a copy of what the application
 		// sent are no such place.
-		if wb := w.sinceBegin(); follow && ln.Kind == KindVariable && wb != nil && !ln.From.givenWhole {
-			if own, ok := sinceTestBegin(leaf(r, l, w, skipBoth)); ok {
-				ln = own
+		if follow && ln.Kind == KindVariable && !ln.From.givenWhole {
+			for _, ow := range w.oneRunSinceBegin() {
+				if own, ok := sinceTestBegin(leaf(r, l, ow, skipBoth)); ok {
+					ln = own
+					break
+				}
 			}
 		}
+		// The run's variable, under the run's rule (ofRun).
+		ln = ofRun(ln, r, l, w)
 		// A value built by an offset on what the application was given that
 		// is a read in its own call's window too: under the rule a copy
 		// follows its source (follow), in keploy mock's client tests (the
@@ -1855,6 +1974,20 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		out = append(out, ln)
 	}
 	return out
+}
+
+// clockSourceWhy is why a value an earlier call of the run sent at from (the
+// run's place, Place.Run: the test set's start-up's call, or an earlier
+// test's), which that call's learn step learned as a plain read of the
+// application's clock (Place.Clock), is refused in a later call that does not
+// hold it as its own read of the clock. It names the earlier call and the
+// place, never the value.
+func clockSourceWhy(from Place) string {
+	whose := "an earlier test's call"
+	if from.InStartUp {
+		whose = "the test set's start-up's call"
+	}
+	return "its recorded value was sent in " + placeAt(from) + ", " + whose + ", where keploy learned it as a read of the application's clock, and this call does not hold it as its own read of the clock. keploy cannot tell a copy of that read from a read of the clock made in the same second where keploy does not see it (a token the test's client holds, minted at that second, or a value this call made that second, which its answer echoes), so it follows neither. If the field is a time the application reads from its own clock, declare it noise in keploy.yml, and keploy stops comparing it"
 }
 
 // sinceTestBegin is ln, a value its own call's window holds as a read of the
@@ -2217,32 +2350,40 @@ func movedWords(rec, live []string) (movedRec, movedLive []string) {
 	return movedRec, movedLive
 }
 
-// isClock reports whether p (what a value held when recorded, and in F)
-// drifted only with F's clock: each ASCII word of it that changed (that the
-// other side does not hold) is a part of a clock read that moved by the
-// lead, in either value (cs), and one did.
-func isClock(p run, cs ...clockSet) bool {
-	r, l := tokensBy(p.rec, isWord), tokensBy(p.live, isWord)
-	changed := false
-	for w := range r {
-		if l[w] {
-			continue
+// isClock reports whether a piece whose changed words are changed
+// (changedWords) drifted only with F's clock: each of them is a part of a
+// clock read that moved by the lead, in either value (cs), and one changed.
+func isClock(changed [2][]string, cs ...clockSet) bool {
+	for side, words := range changed {
+		for _, w := range words {
+			if !clockSide(w, side == 0, cs) {
+				return false
+			}
 		}
-		changed = true
-		if !clockSide(w, true, cs) {
-			return false
+	}
+	return len(changed[0])+len(changed[1]) > 0
+}
+
+// changedWords are the ASCII words of p (what a value held when recorded,
+// and in F) that the other side does not hold, recorded [0] and live [1]:
+// what isClock reads of a piece, read once as its drift is built, never once
+// per place it is compared with.
+func changedWords(p run) (out [2][]string) {
+	r, l := tokensBy(p.rec, isWord), tokensBy(p.live, isWord)
+	for w := range r {
+		if !l[w] {
+			out[0] = append(out[0], w)
 		}
 	}
 	for w := range l {
-		if r[w] {
-			continue
-		}
-		changed = true
-		if !clockSide(w, false, cs) {
-			return false
+		if !r[w] {
+			out[1] = append(out[1], w)
 		}
 	}
-	return changed
+	// In order: the same piece's words are the same, read by any test.
+	sort.Strings(out[0])
+	sort.Strings(out[1])
+	return out
 }
 
 // clockSide reports whether word w is a clock word of one of cs, on its
@@ -2336,6 +2477,8 @@ type valueDrift struct {
 	// held in another order, or once more, is one.
 	movedRec, movedLive []map[string]bool
 	pieces              []run
+	// pieceWords are each piece's changed words (changedWords), by piece.
+	pieceWords [][2][]string
 	// idParts are the words of the finer readings (isWord, wordByte) the
 	// value holds, recorded [0] and live [1], only inside ids (idByte
 	// words) that changed whole: an id the other side does not hold, of
@@ -2650,7 +2793,26 @@ func (dc *DriftCache) ofIn(rec, live string, w *Window, call time.Time) *valueDr
 		return d
 	}
 	lead := !dc.clientTests
-	d = &valueDrift{rec: rec, live: live, clock: clockAt(rec, live, w, lead, call, dc.zone), begun: w != nil && w.begun}
+	if w == nil && at == 0 {
+		// Bounded by no call: the same for every test of the set, and in
+		// every zone (driftOf).
+		d = dc.set.driftOf(rec, live, lead)
+	} else {
+		d = newDrift(rec, live, w, lead, call, dc.zone)
+	}
+	dc.mu.Lock()
+	dc.m[k] = d
+	dc.mu.Unlock()
+	return d
+}
+
+// newDrift is what the drifted value (rec, live) changed (ofIn), read with
+// the lead where lead holds, in w (nil: by the lead alone), the call
+// recorded at call (zero: not known), in zone. It depends on these alone, and
+// nothing changes it once built: the set's tests share one bounded by no call
+// (driftOf).
+func newDrift(rec, live string, w *Window, lead bool, call time.Time, zone *time.Location) *valueDrift {
+	d := &valueDrift{rec: rec, live: live, clock: clockAt(rec, live, w, lead, call, zone), begun: w != nil && w.begun}
 	d.decRec, d.decLive = unescaped(rec), unescaped(live)
 	d.decoded = d.decRec != rec || d.decLive != live
 	// A value with escapes is read raw and decoded: a '%' or '\' may be
@@ -2666,7 +2828,7 @@ func (dc *DriftCache) ofIn(rec, live string, w *Window, call time.Time) *valueDr
 	}
 	var dclock clockSet
 	if d.decoded {
-		dclock = clockAt(d.decRec, d.decLive, w, lead, call, dc.zone)
+		dclock = clockAt(d.decRec, d.decLive, w, lead, call, zone)
 		merge(dclock)
 	}
 	forms, encoded := formsOf(rec, live, d.decRec, d.decLive, d.clock)
@@ -2674,7 +2836,7 @@ func (dc *DriftCache) ofIn(rec, live string, w *Window, call time.Time) *valueDr
 	// The clock reads of every other form (the first is the decoded value,
 	// read above).
 	for _, f := range forms[1:] {
-		merge(clockAt(f[0], f[1], w, lead, call, dc.zone))
+		merge(clockAt(f[0], f[1], w, lead, call, zone))
 	}
 	if d.decoded {
 		forms = append([][2]string{{rec, live}}, forms...)
@@ -2760,11 +2922,11 @@ func (dc *DriftCache) ofIn(rec, live string, w *Window, call time.Time) *valueDr
 	for _, f := range forms {
 		d.pieces = append(d.pieces, pieces(f[0], f[1])...)
 	}
+	for _, p := range d.pieces {
+		d.pieceWords = append(d.pieceWords, changedWords(p))
+	}
 	// Its instants (instants.go).
 	d.readInstants()
-	dc.mu.Lock()
-	dc.m[k] = d
-	dc.mu.Unlock()
 	return d
 }
 
@@ -2919,13 +3081,13 @@ func sources(e, v *valueDrift) (found, whole bool) {
 			return true, false
 		}
 	}
-	for _, p := range v.pieces {
-		if !isClock(p, v.clock, e.clock) && (drifted(p, e.rec, e.live) || e.decoded && drifted(p, e.decRec, e.decLive)) {
+	for i, p := range v.pieces {
+		if !isClock(v.pieceWords[i], v.clock, e.clock) && (drifted(p, e.rec, e.live) || e.decoded && drifted(p, e.decRec, e.decLive)) {
 			return true, false
 		}
 	}
-	for _, p := range e.pieces {
-		if !isClock(p, e.clock, v.clock) && (drifted(p, v.rec, v.live) || v.decoded && drifted(p, v.decRec, v.decLive)) {
+	for i, p := range e.pieces {
+		if !isClock(e.pieceWords[i], e.clock, v.clock) && (drifted(p, v.rec, v.live) || v.decoded && drifted(p, v.decRec, v.decLive)) {
 			return true, false
 		}
 	}
@@ -3040,8 +3202,8 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 			}
 		}
 	}
-	for _, p := range v.pieces {
-		if p.rec != recorded && !isClock(p, v.clock) {
+	for i, p := range v.pieces {
+		if p.rec != recorded && !isClock(v.pieceWords[i], v.clock) {
 			searched = append(searched, p.rec)
 		}
 	}
@@ -3401,8 +3563,14 @@ func partOf(value, part string) string {
 // placeRank orders the places a value may have come from (appearedIn): the
 // request that sent it whole first, the test's own call before the run's,
 // the run's before another's; then the same inside a longer value; then an
-// answer, or the test case's own request, the earlier first.
+// answer, or the test case's own request, the earlier first. A place that
+// uses the run's variable (Seen.Name) is none (7): its value came from the
+// run's place that binds it, which a later call uses too, never a second
+// variable bound at the use.
 func placeRank(e Earlier, s Seen, whole bool) int {
+	if models.RunVariable(s.Name) {
+		return 7
+	}
 	// The test case's own request is what the application was given, as an
 	// answer is: a call that sent the value, where it can be bound, is
 	// named before it.
@@ -3425,8 +3593,8 @@ func placeRank(e Earlier, s Seen, whole bool) int {
 // seenPlace is the place s of e is.
 func seenPlace(e Earlier, s Seen, whole bool) Place {
 	return Place{Mock: e.Mock, Side: s.Side, Path: s.Leaf.Path, Noise: s.Leaf.Noise,
-		Var: s.Place, Live: s.Live, Whole: whole, Own: e.Own, Run: e.Run, Given: e.Given, Name: s.Name,
-		givenWhole: s.Side == Response && whole, sent: s.Side == Request && !e.Given}
+		Var: s.Place, Live: s.Live, Whole: whole, Own: e.Own, Run: e.Run, Given: e.Given, Name: s.Name, Clock: s.Clock,
+		InStartUp: e.StartUp, givenWhole: s.Side == Response && whole, sent: s.Side == Request && !e.Given}
 }
 
 // echoedIn are v's changed instants the echo takes for a copy of what the
@@ -4242,11 +4410,13 @@ func ReadBack(r Leaf, record string, earlier []Earlier) (Place, bool) {
 
 // Named is e with each request place that holds one of vars (as its bind or
 // a use) naming that variable (Seen.Name), the first by name when two hold
-// one place. An echo is not named: it is its call's alone, and a later call
-// that reads its value back binds it there as a variable of the test
-// (ReadBack). e's own Seen is left as it was: the result holds a copy, with
-// no name at any other place.
-func Named(e Earlier, vars models.MockVariables) Earlier {
+// one place, and each request leaf clocks (the call's learn step's clock
+// reads, by leaf path, as MockSpec.Clocks keys them) holds as a plain read
+// marked so (Seen.Clock). An echo is not named: it is its call's alone, and
+// a later call that reads its value back binds it there as a variable of the
+// test (ReadBack). e's own Seen is left as it was: the result holds a copy,
+// with no name or mark at any other place.
+func Named(e Earlier, vars models.MockVariables, clocks map[string]models.ClockOffset) Earlier {
 	names := make([]string, 0, len(vars))
 	for name := range vars {
 		names = append(names, name)
@@ -4273,6 +4443,8 @@ func Named(e Earlier, vars models.MockVariables) Earlier {
 		if s.Side == Request && s.Place != "" {
 			e.Seen[i].Name = at[s.Place]
 		}
+		o, clock := clocks[s.Leaf.Path]
+		e.Seen[i].Clock = s.Side == Request && clock && o.Plain()
 	}
 	return e
 }

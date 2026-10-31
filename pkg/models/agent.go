@@ -147,13 +147,18 @@ type ScopeReq struct {
 	Project string `json:"project,omitempty"`
 }
 
-// The verdicts a harness reports in ScopeReq.Outcome, and ScopeOutcomeGated,
-// which the agent records for a test the replay told not to run.
+// The verdicts a harness reports in ScopeReq.Outcome, and the two the agent
+// records for a test the replay told not to run: ScopeOutcomeGated, which the
+// gate's list (ScopeGateReq.Run or Skip) skipped, and ScopeOutcomeUnmet,
+// skipped because a test it needs (ScopeGateReq.Needs) had not begun before
+// it in this replay. An unmet test's run says nothing of it: the run that
+// selects the test it needs runs it.
 const (
 	ScopeOutcomePassed  = "passed"
 	ScopeOutcomeFailed  = "failed"
 	ScopeOutcomeSkipped = "skipped"
 	ScopeOutcomeGated   = "gated"
+	ScopeOutcomeUnmet   = "unmet"
 )
 
 // maxScopeOutcome bounds a verdict a harness sends; anything longer is not one.
@@ -214,6 +219,20 @@ type ScopeGateReq struct {
 	// deny list: every test it does not name runs. Read under the proven
 	// switch, where it replaces Run.
 	Skip map[string]string `json:"skip,omitempty"`
+	// Needs, read with Skip, holds a test to tests that must run before it:
+	// at its begin, the first ScopeNeed whose Test has not begun earlier in
+	// this replay skips it with that need's Reason. Its call holds a value
+	// their calls send in the same run (a run's variable), so it cannot run
+	// without them.
+	Needs map[string][]ScopeNeed `json:"needs,omitempty"`
+}
+
+// ScopeNeed is one test a replayed test needs to have begun before it
+// (ScopeGateReq.Needs), and the reason its harness skips it with when that
+// test has not.
+type ScopeNeed struct {
+	Test   string `json:"test"`
+	Reason string `json:"reason"`
 }
 
 // ScopeWindow is one recorded per-test scope: the agent-clock interval during

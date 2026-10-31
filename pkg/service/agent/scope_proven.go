@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -58,16 +59,19 @@ type provenWire struct {
 	// open is the open test's ID, "" when none is.
 	open string
 	// skip is the gate: test ID -> the reason its harness skips it with.
-	skip map[string]string
+	// needs holds a test to the tests that must begin before it
+	// (models.ScopeGateReq.Needs), and began is every test opened since the
+	// session began, gated ones aside: none of them is handed aside from
+	// then on (serveNotBegunBefore).
+	skip  map[string]string
+	needs map[string][]models.ScopeNeed
+	began map[string]bool
 	// asideHanded is the tests whose recordings the set's replay has handed
-	// the proxy to serve aside (serveAside): a skipped test's at its own
-	// skipped begin, and a skipped or kept test's that the replay had not
-	// begun at the begin of a test recorded after it (serveNotBegunBefore).
-	// SetScopeSkips starts it over with the set.
+	// the proxy to serve aside (serveAside): a gated test's (skip, or needs
+	// unmet) at its own gated begin, and a skipped or kept test's that the
+	// replay had not begun at the begin of a test recorded after it
+	// (serveNotBegunBefore). SetScopeSkips starts it over with the set.
 	asideHanded map[string]bool
-	// begun is the tests the session began, skipped ones aside: none of
-	// them is handed aside from then on (serveNotBegunBefore).
-	begun map[string]bool
 	// charged holds the misses the ends drained from the proxy, until the
 	// CLI's own end-of-run read (GetMockErrors) collects them, so charging a
 	// miss to a test never hides it from the run's totals.
@@ -714,14 +718,11 @@ func (a *Agent) NoteRefusal(r models.RunRefusal) {
 }
 
 // SetScopeSkips installs the proven gate: the tests a replay skips, by ID,
-// with their reasons. nil skips nothing.
-func (a *Agent) SetScopeSkips(_ context.Context, skip map[string]string) error {
-	cp := make(map[string]string, len(skip))
-	for id, reason := range skip {
-		cp[id] = reason
-	}
+// with their reasons, and the tests that must begin before each test that
+// needs them. nil skips nothing.
+func (a *Agent) SetScopeSkips(_ context.Context, skip map[string]string, needs map[string][]models.ScopeNeed) error {
 	a.provenMu.Lock()
-	a.proven.skip = cp
+	a.proven.skip, a.proven.needs = maps.Clone(skip), maps.Clone(needs)
 	a.proven.asideHanded = nil
 	a.provenMu.Unlock()
 	return nil
@@ -776,7 +777,7 @@ func (a *Agent) serveNotBegunBefore(id string) {
 		return
 	}
 	consider := func(s string) {
-		if s == id || a.proven.begun[s] || a.proven.asideHanded[s] {
+		if s == id || a.proven.began[s] || a.proven.asideHanded[s] {
 			return
 		}
 		if st, ok := recordedAt(s, begins, starts); ok && st.Before(at) {
@@ -866,13 +867,21 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 			"run them one at a time: start parallel tests with keploytest.Parallel and subtests with keploytest.Run (keploy mock codemod go writes them); parallel test workers arrive in a later keploy release")
 	}
 	reason, gated := a.proven.skip[id]
+	outcome := models.ScopeOutcomeGated
+	// A test whose call holds a value an earlier test's call sends runs
+	// only after that test began in this replay.
+	for _, n := range a.proven.needs[id] {
+		if !gated && !a.proven.began[n.Test] {
+			reason, gated, outcome = n.Reason, true, models.ScopeOutcomeUnmet
+		}
+	}
 	dir := a.proven.dir
 	a.provenMu.Unlock()
 	if a.replaying() {
 		a.serveNotBegunBefore(id)
 	}
 	if a.replaying() && gated {
-		a.NoteScopeGated(id, 0, at)
+		a.noteScopeNotRun(id, 0, at, outcome)
 		if a.handAside(id) {
 			a.serveAside(id)
 		}
@@ -970,10 +979,10 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 	}
 	a.provenMu.Lock()
 	a.proven.open = id
-	if a.proven.begun == nil {
-		a.proven.begun = map[string]bool{}
+	if a.proven.began == nil {
+		a.proven.began = map[string]bool{}
 	}
-	a.proven.begun[id] = true
+	a.proven.began[id] = true
 	a.provenMu.Unlock()
 	a.noteBegunInOrder(id)
 	// The test is a scope of its own from here (containerkey); closeOpen
@@ -1740,6 +1749,7 @@ func (a *Agent) abandonWindow(id string) {
 	k := scopeKey{pid: 0, name: id}
 	delete(a.workerOpen, k)
 	delete(a.scopeMeta, k)
+	a.abandonScopeLocked(k)
 	a.scopeMu.Unlock()
 }
 

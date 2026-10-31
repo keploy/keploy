@@ -336,8 +336,8 @@ func (a *Agent) HandleScopeGate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("invalid scope-gate request: %v", err), http.StatusBadRequest)
 		return
 	}
-	// Under the proven switch the skip map is the gate, and every push
-	// replaces it: one without a map skips nothing. The answer acknowledges
+	// Under the proven switch the skip map and its needs are the gate, and
+	// every push replaces them: one without a map skips nothing. The answer acknowledges
 	// it with the wire's version, so a CLI never takes an agent that ignored
 	// the list for one that applies it. A run list is not part of it.
 	switch {
@@ -350,7 +350,7 @@ func (a *Agent) HandleScopeGate(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	case proven:
-		if err := p.SetScopeSkips(r.Context(), req.Skip); err != nil {
+		if err := p.SetScopeSkips(r.Context(), req.Skip, req.Needs); err != nil {
 			writeScopeError(w, r, &models.ScopeError{Status: http.StatusInternalServerError, Code: models.ScopeErrInternal, Message: err.Error()})
 			return
 		}
@@ -361,9 +361,9 @@ func (a *Agent) HandleScopeGate(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		render.Status(r, http.StatusOK)
-		render.JSON(w, r, models.ScopeGateResp{V: models.ScopeProtocolVersion, Status: "ok", Skips: len(req.Skip)})
+		render.JSON(w, r, models.ScopeGateResp{V: models.ScopeProtocolVersion, Status: "ok", Skips: len(req.Skip), Needs: len(req.Needs)})
 		return
-	case len(req.Skip) > 0:
+	case len(req.Skip) > 0 || len(req.Needs) > 0:
 		writeScopeError(w, r, &models.ScopeError{
 			Status:  http.StatusUnprocessableEntity,
 			Code:    models.ScopeErrUpgradeIntegration,

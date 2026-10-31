@@ -1488,13 +1488,6 @@ func (v *exactView) handedOf(i int) string {
 	return ""
 }
 
-// isHanded reports whether owned position i is one of the open test's own
-// recordings, or of a pool view's ahead, that the replay handed aside before
-// its test began.
-func (v *exactView) isHanded(i int) bool {
-	return v.handedOf(i) != ""
-}
-
 // notOwn reports whether owned position i is no recording of the open test's
 // own mapping: a shared one, or a set-aside test's. Neither is required of
 // the test, carried into it, or in flight into it.

@@ -640,7 +640,7 @@ func TestASetAsideCopyAnswersACallBeyondTheTestsOwnCount(t *testing.T) {
 				map[string][]string{"o::TestQ": {"aside-key", "aside-id", "aside-key-again", "aside-used"}, "o::TestK": {"own-key", "mock-k"}},
 				map[string][]string{})
 			ctx := context.Background()
-			require.NoError(t, a.SetScopeSkips(ctx, map[string]string{"o::TestQ": "flaky/request_changed"}))
+			require.NoError(t, a.SetScopeSkips(ctx, map[string]string{"o::TestQ": "flaky/request_changed"}, nil))
 			b, serr := a.ProvenBegin(ctx, begin("TestQ"))
 			require.Nil(t, serr)
 			require.Equal(t, models.ScopeActionSkip, b.Action)
@@ -1075,7 +1075,7 @@ func TestCallsBeforeAKeptTestAfterAQuarantinedOneFailNoTest(t *testing.T) {
 				[]*models.Mock{pingMock("mock-1", "/pat", "pat", t0), pingMock("mock-2", "/k", "k", t0.Add(time.Second))},
 				map[string][]string{"o::TestQ": {"mock-1"}, "o::TestK": {"mock-2"}}, map[string][]string{})
 			ctx := context.Background()
-			require.NoError(t, a.SetScopeSkips(ctx, map[string]string{"o::TestQ": "flaky/request_changed"}))
+			require.NoError(t, a.SetScopeSkips(ctx, map[string]string{"o::TestQ": "flaky/request_changed"}, nil))
 			b, serr := a.ProvenBegin(ctx, begin("TestQ"))
 			require.Nil(t, serr)
 			require.Equal(t, models.ScopeActionSkip, b.Action)
@@ -1130,7 +1130,7 @@ func TestASetAsideTestsRecordingAnswersTheCallAfterIt(t *testing.T) {
 				[]*models.Mock{pingMock("mock-1", "/pat", "pat", t0), pingMock("mock-2", "/k", "k", t0.Add(time.Second)), pingMock("mock-3", "/l", "l", t0.Add(2*time.Second))},
 				map[string][]string{"o::TestQ": {"mock-1"}, "o::TestK": {"mock-2"}, "o::TestL": {"mock-3"}}, map[string][]string{})
 			ctx := context.Background()
-			require.NoError(t, a.SetScopeSkips(ctx, map[string]string{"o::TestQ": "flaky/request_changed"}))
+			require.NoError(t, a.SetScopeSkips(ctx, map[string]string{"o::TestQ": "flaky/request_changed"}, nil))
 			b, serr := a.ProvenBegin(ctx, begin("TestQ"))
 			require.Nil(t, serr)
 			require.Equal(t, models.ScopeActionSkip, b.Action)
@@ -1184,7 +1184,7 @@ func TestASkippedTestNoBeginServesTheTestsRecordedAfterIt(t *testing.T) {
 				{TestCase: "o::TestK", Start: t0.Add(time.Second), End: t0.Add(1500 * time.Millisecond)},
 				{TestCase: "o::TestZ", Start: t0.Add(3 * time.Second), End: t0.Add(3500 * time.Millisecond)},
 			}))
-			require.NoError(t, a.SetScopeSkips(ctx, map[string]string{tc.skipped: "manual/the first use's owner"}))
+			require.NoError(t, a.SetScopeSkips(ctx, map[string]string{tc.skipped: "manual/the first use's owner"}, nil))
 			if !tc.served {
 				// TestQ, kept, runs first and makes its own call: a test
 				// the run began hands nothing to the tests after it.
@@ -1335,7 +1335,7 @@ func TestATestsOwnRecordingAnswersBeforeASetAsideOne(t *testing.T) {
 		[]*models.Mock{pingMock("mock-1", "/pat", "aside", t0), pingMock("mock-2", "/pat", "own", t0.Add(time.Second))},
 		map[string][]string{"o::TestQ": {"mock-1"}, "o::TestK": {"mock-2"}}, map[string][]string{})
 	ctx := context.Background()
-	require.NoError(t, a.SetScopeSkips(ctx, map[string]string{"o::TestQ": "flaky/request_changed"}))
+	require.NoError(t, a.SetScopeSkips(ctx, map[string]string{"o::TestQ": "flaky/request_changed"}, nil))
 	_, serr := a.ProvenBegin(ctx, begin("TestQ"))
 	require.Nil(t, serr)
 	got, e := runTest(t, a, rp, "TestK", "/pat")
@@ -1350,7 +1350,7 @@ func TestATestsOwnRecordingAnswersBeforeASetAsideOne(t *testing.T) {
 	a2, rp2 := exactAgent(t,
 		[]*models.Mock{pingMock("mock-1", "/pat", "aside", t0), pingMock("mock-2", "/pat", "own", t0.Add(time.Second))},
 		map[string][]string{"o::TestQ": {"mock-1"}, "o::TestK": {"mock-2"}}, map[string][]string{})
-	require.NoError(t, a2.SetScopeSkips(ctx, map[string]string{"o::TestQ": "flaky/request_changed"}))
+	require.NoError(t, a2.SetScopeSkips(ctx, map[string]string{"o::TestQ": "flaky/request_changed"}, nil))
 	_, serr = a2.ProvenBegin(ctx, begin("TestQ"))
 	require.Nil(t, serr)
 	_, e = runTest(t, a2, rp2, "TestK")

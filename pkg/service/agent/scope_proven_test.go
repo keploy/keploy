@@ -547,7 +547,7 @@ func TestAReplayedListedTestIsSkippedWithItsReason(t *testing.T) {
 	ctx := context.Background()
 	_, serr := a.ClaimInstance(ctx, models.InstanceReq{Key: "orders"}, os.Getpid())
 	require.Nil(t, serr)
-	require.NoError(t, a.SetScopeSkips(ctx, map[string]string{"orders::TestToken": "flaky: replay_only"}))
+	require.NoError(t, a.SetScopeSkips(ctx, map[string]string{"orders::TestToken": "flaky: replay_only"}, nil))
 
 	b, serr := a.ProvenBegin(ctx, begin("TestToken"))
 	require.Nil(t, serr)
@@ -561,11 +561,84 @@ func TestAReplayedListedTestIsSkippedWithItsReason(t *testing.T) {
 	require.Equal(t, models.ScopeOutcomeGated, windowOf(t, a, "orders::TestToken").Outcome)
 }
 
+// A test whose call holds a value an earlier test's call sends runs only
+// once that test began in this replay: begun first, it is skipped with the
+// need's reason (a replay that selects it alone, or runs it first), and,
+// once the test it needs began, in any test process of the run, it runs. A
+// test that needs one the gate skipped is skipped too: that test never
+// began. A test that needs none runs, and a record never skips.
+func TestATestThatNeedsAnotherRunsOnlyAfterItBegan(t *testing.T) {
+	a, _ := wireAgent(t, models.MODE_TEST)
+	ctx := context.Background()
+	claimSelf(t, a)
+	why := "keploy: set aside: o::TestUse uses a value o::TestMake sends (run-body.id, 24 characters)"
+	require.NoError(t, a.SetScopeSkips(ctx, map[string]string{"o::TestGated": "listed"}, map[string][]models.ScopeNeed{
+		"o::TestUse":     {{Test: "o::TestMake", Reason: why}},
+		"o::TestGated":   {{Test: "o::TestNever", Reason: "never"}},
+		"o::TestOfGated": {{Test: "o::TestMake", Reason: "make"}, {Test: "o::TestGated", Reason: "gated"}, {Test: "o::TestNever", Reason: "never"}},
+	}))
+	run := func(name string) models.ScopeBeginResp {
+		t.Helper()
+		b, serr := a.ProvenBegin(ctx, begin(name))
+		require.Nil(t, serr)
+		if b.Action == "" {
+			_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: name, Outcome: "passed"})
+			require.Nil(t, serr)
+		}
+		return b
+	}
+	require.Equal(t, models.ScopeBeginResp{V: 1, Status: "ok", Action: models.ScopeActionSkip, Reason: why}, run("TestUse"), "begun before the test it needs")
+	require.Empty(t, run("TestFree").Action, "a test that needs none runs")
+	require.Empty(t, run("TestMake").Action)
+	require.Equal(t, "listed", run("TestGated").Reason, "the list's reason comes first")
+
+	_, serr := a.ClaimInstance(ctx, models.InstanceReq{Key: "o"}, os.Getpid())
+	require.Nil(t, serr)
+	require.Empty(t, run("TestUse").Action, "the test it needs began earlier in the run")
+	b := run("TestOfGated")
+	require.Equal(t, models.ScopeActionSkip, b.Action)
+	require.Equal(t, "gated", b.Reason, "a test the gate skipped never began, and the first need not met is the one named")
+	require.Equal(t, models.ScopeOutcomeUnmet, windowOf(t, a, "o::TestOfGated").Outcome, "a need not met is not the list's skip")
+	require.Equal(t, models.ScopeOutcomeGated, windowOf(t, a, "o::TestGated").Outcome, "the list's skip")
+
+	r, _ := wireAgent(t, models.MODE_RECORD)
+	claimSelf(t, r)
+	require.NoError(t, r.SetScopeSkips(ctx, nil, map[string][]models.ScopeNeed{"o::TestUse": {{Test: "o::TestMake", Reason: why}}}))
+	b, serr = r.ProvenBegin(ctx, begin("TestUse"))
+	require.Nil(t, serr)
+	require.Empty(t, b.Action, "a record never skips")
+}
+
+// A new session forgets which tests began in the last: a test that needs one
+// only the last session ran is set aside again until it begins in this one.
+func TestANewSessionForgetsWhichTestsBegan(t *testing.T) {
+	a, _ := wireAgent(t, models.MODE_TEST)
+	ctx := context.Background()
+	why := "keploy: set aside: o::TestUse uses a value o::TestMake sends (run-body.id, 24 characters)"
+	session := func() {
+		t.Helper()
+		claimSelf(t, a)
+		require.NoError(t, a.SetScopeSkips(ctx, nil, map[string][]models.ScopeNeed{"o::TestUse": {{Test: "o::TestMake", Reason: why}}}))
+	}
+	session()
+	b, serr := a.ProvenBegin(ctx, begin("TestMake"))
+	require.Nil(t, serr)
+	require.Empty(t, b.Action)
+	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestMake", Outcome: "passed"})
+	require.Nil(t, serr)
+
+	require.NoError(t, a.resetSession(ctx))
+	session()
+	b, serr = a.ProvenBegin(ctx, begin("TestUse"))
+	require.Nil(t, serr)
+	require.Equal(t, models.ScopeBeginResp{V: 1, Status: "ok", Action: models.ScopeActionSkip, Reason: why}, b, "TestMake began in the last session, not this one")
+}
+
 func TestARecordNeverSkips(t *testing.T) {
 	a, _ := wireAgent(t, models.MODE_RECORD)
 	ctx := context.Background()
 	claimSelf(t, a)
-	require.NoError(t, a.SetScopeSkips(ctx, map[string]string{"o::TestToken": "listed"}))
+	require.NoError(t, a.SetScopeSkips(ctx, map[string]string{"o::TestToken": "listed"}, nil))
 	b, serr := a.ProvenBegin(ctx, begin("TestToken"))
 	require.Nil(t, serr)
 	require.Empty(t, b.Action)
@@ -1135,7 +1208,7 @@ func TestAMappedMockThatIsNotLoadedIsAnError(t *testing.T) {
 func TestTheWireResetsWithTheSession(t *testing.T) {
 	a, _ := wireAgent(t, models.MODE_TEST)
 	ctx := context.Background()
-	require.NoError(t, a.SetScopeSkips(ctx, map[string]string{"o::TestA": "listed"}))
+	require.NoError(t, a.SetScopeSkips(ctx, map[string]string{"o::TestA": "listed"}, nil))
 	claimSelf(t, a)
 	_, serr := a.ProvenBegin(ctx, begin("TestB"))
 	require.Nil(t, serr)

@@ -4,6 +4,7 @@ import (
 	"strconv"
 	"strings"
 
+	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/templates"
 	"go.keploy.io/server/v3/pkg/variables"
 )
@@ -105,7 +106,7 @@ func jsonSegs(s string) ([]templates.PathSeg, bool) {
 
 // varName is the name a variable first found at place gets: the place's last
 // key, header or query name, or "path<n>" for a URL segment, in letters,
-// digits, '_' and '-'.
+// digits, '_' and '-'; "var-" before one a run's name would begin with.
 func varName(place string) string {
 	p, err := variables.Parse(place)
 	base := ""
@@ -131,6 +132,11 @@ func varName(place string) string {
 	}, base)
 	if base == "" {
 		base = "var"
+	}
+	// A run's name (models.RunVariable) is the set's, which a replay keeps
+	// past the test: a test's own variable never takes it.
+	if models.RunVariable(base) {
+		base = "var-" + base
 	}
 	return base
 }

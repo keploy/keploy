@@ -197,3 +197,103 @@ func TestAWindowEndedIsNotNotedATestCase(t *testing.T) {
 		t.Fatalf("an ended window was noted a test case: %+v", mgr.testSpans)
 	}
 }
+
+// A test scope (keploy mock record's tests, which open no window) is waited
+// on as an open window is: a mock requested at or after its begin may be its
+// test's, not final, until it leaves the open ones; Changed fires then. Ended,
+// its span [begin, end] is a test case's, final; abandoned, it is none.
+func TestTestSpanAtWaitsForATestScopeToEnd(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	t0 := time.Unix(5000, 0)
+	sec := func(n int) time.Time { return t0.Add(time.Duration(n) * time.Second) }
+	for _, ended := range []bool{true, false} {
+		mgr := New(zap.NewNop())
+		s := mgr.BeginTestScope(t0)
+		if _, ok := mgr.TestSpanAt(sec(-1)); ok {
+			t.Fatal("a scope begun after t holds t")
+		}
+		span, ok := mgr.TestSpanAt(sec(1))
+		if !ok || span.Final() || !span.Start.Equal(t0) || !span.End.IsZero() {
+			t.Fatalf("an open scope: %+v %v, want it, not final", span, ok)
+		}
+		if again, _ := mgr.TestSpanAt(sec(2)); again.Changed() != span.Changed() {
+			t.Fatal("two waits on one scope got two channels")
+		}
+		if ended {
+			s.End(sec(3))
+		} else {
+			s.Abandon()
+		}
+		if !closed(span.Changed()) {
+			t.Fatal("Changed did not fire as the scope left the open ones")
+		}
+		s.End(sec(9)) // once: a second leave notes nothing
+		got, ok := mgr.TestSpanAt(sec(1))
+		if !ended {
+			if ok || len(mgr.testSpans) != 0 {
+				t.Fatalf("an abandoned scope holds t: %+v, spans %+v", got, mgr.testSpans)
+			}
+			continue
+		}
+		if !ok || !got.Final() || !got.Start.Equal(t0) || !got.End.Equal(sec(3)) {
+			t.Fatalf("an ended scope's span: %+v %v, want [%v, %v], final", got, ok, t0, sec(3))
+		}
+		if _, ok := mgr.TestSpanAt(sec(4)); ok {
+			t.Fatal("a test ended before t holds t")
+		}
+		if len(mgr.scopes) != 0 || len(mgr.testSpans) != 1 {
+			t.Fatalf("after its end: %d scopes open, spans %+v; want none, one", len(mgr.scopes), mgr.testSpans)
+		}
+	}
+}
+
+// Of an open window and an open scope, the earlier-started is waited on (the
+// window on a tie), and either waits for a test case that began with or after
+// it; a test case that began before both and holds t is the owner.
+func TestTestSpanAtTakesTheEarlierOfAWindowAndAScope(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	t0 := time.Unix(5000, 0)
+	sec := func(n int) time.Time { return t0.Add(time.Duration(n) * time.Second) }
+	mgr := New(zap.NewNop())
+	w := mgr.OpenWindow(sec(1), nil)
+	s := mgr.BeginTestScope(sec(2))
+	span, ok := mgr.TestSpanAt(sec(3))
+	if !ok || !span.Start.Equal(sec(1)) || span.Final() {
+		t.Fatalf("got %+v %v, want the window's wait (begun first)", span, ok)
+	}
+	w.Close()
+	span, ok = mgr.TestSpanAt(sec(3))
+	if !ok || !span.Start.Equal(sec(2)) || span.Final() {
+		t.Fatalf("got %+v %v, want the scope's wait", span, ok)
+	}
+	tie := mgr.OpenWindow(sec(2), nil)
+	if got, _ := mgr.TestSpanAt(sec(3)); got.Changed() == span.Changed() {
+		t.Fatal("a window and a scope begun at once: the scope was waited on, not the window")
+	}
+	tie.Close()
+	s.End(sec(5))
+	mgr.BeginTestScope(sec(4))
+	if got, ok := mgr.TestSpanAt(sec(4)); !ok || !got.Final() || !got.Start.Equal(sec(2)) || !got.End.Equal(sec(5)) {
+		t.Fatalf("got %+v %v, want the ended test's span [2s, 5s]: it began before the open scope", got, ok)
+	}
+}
+
+// With the switch off no scope opens, and nothing is noted.
+func TestTestScopesAreNotOpenedWithTheSwitchOff(t *testing.T) {
+	t.Setenv(provenswitch.Env, "")
+	t0 := time.Unix(5000, 0)
+	mgr := New(zap.NewNop())
+	s := mgr.BeginTestScope(t0)
+	if s != nil {
+		t.Fatal("a scope opened with the switch off")
+	}
+	s.End(t0.Add(time.Second))
+	s.Abandon()
+	if _, ok := mgr.TestSpanAt(t0); ok || mgr.testSpans != nil || mgr.scopes != nil {
+		t.Fatalf("with the switch off: spans %+v, scopes %+v", mgr.testSpans, mgr.scopes)
+	}
+	var nilMgr *SyncMockManager
+	if nilMgr.BeginTestScope(t0) != nil || mgr.BeginTestScope(time.Time{}) != nil {
+		t.Fatal("a nil manager, or a zero begin, opened a scope")
+	}
+}
