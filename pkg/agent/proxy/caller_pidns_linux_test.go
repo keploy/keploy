@@ -123,9 +123,11 @@ func TestACallWhoseCallerTheAgentCannotNameIsCountedAndSaid(t *testing.T) {
 	lives := liveCounter(p)
 	port := pingServer(t)
 	dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: noProcess(t)}
-	const calls = 3
-	before := syncMock.Get().UnnamedCallers() // the manager outlives this test
-	for range calls {
+	// callTreeAs makes each call on a connection of its own: the agent
+	// counts connections, as it relays them unread.
+	const conns = 3
+	before := syncMock.Get().UnnamedCallerConns() // the manager outlives this test
+	for range conns {
 		if served, got, row := callTreeAs(t, p, dest); !served || got != "pong" || row != nil {
 			t.Fatalf("a call from a process the agent cannot name must still be relayed to the listener: served=%v answer=%q row=%+v", served, got, row)
 		}
@@ -133,8 +135,8 @@ func TestACallWhoseCallerTheAgentCannotNameIsCountedAndSaid(t *testing.T) {
 	if n := lives.Load(); n != 0 {
 		t.Fatalf("a call whose caller the agent cannot name went to the live handler %d times", n)
 	}
-	if got := syncMock.Get().UnnamedCallers() - before; got != calls {
-		t.Fatalf("the recording's manager counted %d calls from unnamed callers, want %d", got, calls)
+	if got := syncMock.Get().UnnamedCallerConns() - before; got != conns {
+		t.Fatalf("the recording's manager counted %d connections from unnamed callers, want %d", got, conns)
 	}
 	first := logs.FilterMessage(unnamedCallerWarning).All()
 	if len(first) != 1 || first[0].Level != zapcore.WarnLevel || first[0].ContextMap()["caller_kernel_pid"] != dest.KernelPid {
@@ -145,7 +147,7 @@ func TestACallWhoseCallerTheAgentCannotNameIsCountedAndSaid(t *testing.T) {
 	}
 	_ = p.SetGracefulShutdown(context.Background())
 	_ = p.SetGracefulShutdown(context.Background())
-	if got := count(); len(got) != 1 || got[0].Level != zapcore.WarnLevel || got[0].ContextMap()["calls"] != int64(calls) {
-		t.Fatalf("want one WARN count of %d calls when the run ends, said once however often it is asked, got %+v", calls, got)
+	if got := count(); len(got) != 1 || got[0].Level != zapcore.WarnLevel || got[0].ContextMap()["connections"] != int64(conns) {
+		t.Fatalf("want one WARN count of %d connections when the run ends, said once however often it is asked, got %+v", conns, got)
 	}
 }

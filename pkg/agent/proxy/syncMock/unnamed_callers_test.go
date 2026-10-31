@@ -6,20 +6,20 @@ import (
 	"go.uber.org/zap"
 )
 
-// Every call the proxy could not name the caller of is counted on the manager,
-// for the session's summary and end marker; a nil manager counts nothing and
-// does not panic.
-func TestEveryCallFromAnUnnamedCallerIsCounted(t *testing.T) {
+// Every connection the proxy could not name the caller of is counted on the
+// manager, for the session's summary and end marker; a nil manager counts
+// nothing and does not panic.
+func TestEveryConnectionFromAnUnnamedCallerIsCounted(t *testing.T) {
 	m := New(zap.NewNop())
 	for i := 0; i < 3; i++ {
-		m.NoteUnnamedCaller()
+		m.NoteUnnamedCallerConn()
 	}
-	if got := m.UnnamedCallers(); got != 3 {
-		t.Fatalf("the manager counted %d calls from unnamed callers, want 3", got)
+	if got := m.UnnamedCallerConns(); got != 3 {
+		t.Fatalf("the manager counted %d connections from unnamed callers, want 3", got)
 	}
 	var none *SyncMockManager
-	none.NoteUnnamedCaller()
-	if got := none.UnnamedCallers(); got != 0 {
+	none.NoteUnnamedCallerConn()
+	if got := none.UnnamedCallerConns(); got != 0 {
 		t.Fatalf("a nil manager reports %d, want 0", got)
 	}
 }
