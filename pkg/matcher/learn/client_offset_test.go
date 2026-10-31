@@ -107,12 +107,21 @@ func TestAClientTestsOffsetIsRefusedWhereNoComparedOffsetReads(t *testing.T) {
 			t.Errorf("%s: %s %+v (%s); want refused: %s", name, ln.Kind, ln.Offset, ln.Why, why)
 		}
 	}
-	millis := clientTestWhy("its characters 1 to 13", true)
-	refused("no replay compares an offset", c.classifyClient(p, millisText(p, rec), millisText(p, live), c.w), millis)
-	refused("a read two seconds before the window", c.classifyClient(p, millisText(p, c.call.Add(-2*time.Second+30*time.Minute)), millisText(p, c.fcall.Add(-2*time.Second-5*ms+30*time.Minute)), c.w.ComparesOffsets()), millis)
-	// The same as its protocol types it: the client test's refusal too.
+	// An offset the learn step refused: the client test's refusal names it
+	// and why (B2 of the review of ccdc38fa4: learning legible), and never
+	// binds it (S1: a clock read left unchecked).
+	named := func(name string, ln Learned, why string) {
+		t.Helper()
+		if !offsetRefused(ln, p, why) {
+			t.Errorf("%s: %s %+v bindable=%v (%s); want refused, naming the offset and %q, never bound", name, ln.Kind, ln.Offset, ln.Bindable, ln.Why, why)
+		}
+	}
+	const fine = "but the offset reads in seconds and its values at a resolution of 1ms"
+	named("no replay compares an offset", c.classifyClient(p, millisText(p, rec), millisText(p, live), c.w), "this protocol's replay does not compare such an offset yet")
+	named("a read two seconds before the window", c.classifyClient(p, millisText(p, c.call.Add(-2*time.Second+30*time.Minute)), millisText(p, c.fcall.Add(-2*time.Second-5*ms+30*time.Minute)), c.w.ComparesOffsets()), fine)
+	// The same as its protocol types it: named too.
 	typed := func(at time.Time) Leaf { return InstantLeaf(p, p, at.Truncate(ms), ms) }
-	refused("a typed read two seconds before the window", c.classifyClient(p, typed(c.call.Add(-2*time.Second+30*time.Minute)), typed(c.fcall.Add(-2*time.Second-5*ms+30*time.Minute)), c.w.ComparesOffsets()), clientTestWhy("", true))
+	named("a typed read two seconds before the window", c.classifyClient(p, typed(c.call.Add(-2*time.Second+30*time.Minute)), typed(c.fcall.Add(-2*time.Second-5*ms+30*time.Minute)), c.w.ComparesOffsets()), fine)
 
 	wall := func(t time.Time) Leaf {
 		return Leaf{Path: p, Noise: p, Type: String, Value: t.Format("2006-01-02 15:04:05.000")}
@@ -140,7 +149,18 @@ func TestAClientTestsOffsetIsRefusedWhereNoComparedOffsetReads(t *testing.T) {
 	}
 
 	answer := millisText("body.cursor.firstBatch[].expires_at", rec)
-	refused("the call's answer holds it", c.classifyClient(p, millisText(p, rec), millisText(p, live), c.w.ComparesOffsets(), answer), millis)
+	named("the call's answer holds it", c.classifyClient(p, millisText(p, rec), millisText(p, live), c.w.ComparesOffsets(), answer), "the call's recorded answer holds the moment it was recorded with")
+}
+
+// offsetRefused reports whether ln is keploy mock's client test's refusal of
+// an instant its call's window holds as a read of the clock plus an offset
+// the learn step refused for why (a phrase of clockOffset's reason): it
+// names the field, the offset and that reason, with the client test's own
+// correction (clientOffsetRefusedWhy), never only that no clock read
+// matched it, and it is never bound (Learned.Bindable): bound, every replay
+// would bind it and compare nothing.
+func offsetRefused(ln Learned, p, why string) bool {
+	return ln.Kind == KindUnaccounted && ln.Offset == nil && ln.Read == nil && !ln.Bindable && strings.HasPrefix(ln.Why, p+" = clock") && strings.Contains(ln.Why, why) && strings.HasSuffix(ln.Why, ". If your test supplies this value, have it supply the same value in every run, and keploy keeps comparing it")
 }
 
 // A cutoff keploy mock's client test sends (a login code's lookup, createdAt
@@ -216,16 +236,24 @@ func TestAClientTestsClockLessAnOffsetIsRefusedWhereNoOneOffsetReads(t *testing.
 		{"the call's answer holds it", c.read.Add(-min2), c.fread.Add(-min2), c.w.ComparesOffsets(), []Leaf{millisText("body.cursor.firstBatch[].createdAt", c.read.Add(-min2))}},
 		{"no replay compares an offset", c.read.Add(-min2), c.fread.Add(-min2), c.w, nil},
 	} {
+		// Where the window shows one offset the learn step refused, the
+		// refusal names it and why; where it shows none, the client test's.
+		why := map[string]string{
+			"a read two seconds before the window": "but the offset reads in seconds and its values at a resolution of 1ms",
+			"the call's answer holds it":           "the call's recorded answer holds the moment it was recorded with",
+			"no replay compares an offset":         "this protocol's replay does not compare such an offset yet",
+		}[tc.name]
 		ln := c.classifyClient(q, millisText(q, tc.rec), millisText(q, tc.live), tc.w, tc.resp...)
-		if ln.Kind != KindUnaccounted || ln.Offset != nil || ln.Read != nil || ln.Why != millis {
-			t.Errorf("%s: %s %+v (%s); want refused: %s", tc.name, ln.Kind, ln.Offset, ln.Why, millis)
+		if why != "" && !offsetRefused(ln, q, why) || why == "" && (ln.Kind != KindUnaccounted || ln.Offset != nil || ln.Read != nil || ln.Why != millis) {
+			t.Errorf("%s: %s %+v (%s); want refused: %s", tc.name, ln.Kind, ln.Offset, ln.Why, map[bool]string{true: why, false: millis}[why != ""])
 		}
 		typed := func(at time.Time) Leaf { return InstantLeaf(q, q, at.Truncate(ms), ms) }
 		if tc.resp != nil {
 			continue
 		}
-		if ln := c.classifyClient(q, typed(tc.rec), typed(tc.live), tc.w); ln.Kind != KindUnaccounted || ln.Offset != nil || ln.Read != nil || ln.Why != clientTestWhy("", true) {
-			t.Errorf("%s, a $date: %s %+v (%s); want refused: %s", tc.name, ln.Kind, ln.Offset, ln.Why, clientTestWhy("", true))
+		ln = c.classifyClient(q, typed(tc.rec), typed(tc.live), tc.w)
+		if why != "" && !offsetRefused(ln, q, why) || why == "" && (ln.Kind != KindUnaccounted || ln.Offset != nil || ln.Read != nil || ln.Why != clientTestWhy("", true)) {
+			t.Errorf("%s, a $date: %s %+v (%s); want refused: %s", tc.name, ln.Kind, ln.Offset, ln.Why, map[bool]string{true: why, false: clientTestWhy("", true)}[why != ""])
 		}
 	}
 }
@@ -462,21 +490,29 @@ func secondsText(p string, t time.Time) Leaf {
 	return Leaf{Path: p, Noise: p, Type: String, Value: strconv.FormatInt(t.Unix(), 10)}
 }
 
-// api-server's endpoint claim loop, polled in keploy mock's client test
-// TestGenerateTestSuitesOnClient, queries ptw_endpoints for dirtyAt <= now
-// - 2s or firstDirtyAt <= now - 30s, each an epoch's seconds: a read of the
-// application's clock cut to the second, less a look-back that reads in
-// seconds. A cut is checked at the cut, never refused (founder decision,
-// 2026-10-27: a clock read cut coarser than a millisecond): each is learned as that
-// look-back at the second, never refused as an offset that reads in
-// seconds, and its line names the cut. A replay checks it at the second:
-// the read less the look-back, cut down, holds wherever the replay's read
-// falls in its second; one changed by three seconds or more never does,
-// nor does a plain read of the clock, and a replay whose window with the
-// look-back's range is a second or more refuses the value, naming why. The
-// same look-back written in milliseconds (an application that does not cut)
-// stays refused: there a read made two seconds before its call's window
-// shows it too (TestAClientTestsOffsetIsRefusedWhereNoComparedOffsetReads).
+// api-server's endpoint poll (dirtyAt <= now - 2s, firstDirtyAt <= now -
+// 30s, written as an epoch's seconds: an application that cuts its look-back
+// to the second; founder decision, 2026-10-27: a clock read cut coarser
+// than a millisecond is checked at the cut, never refused): each is learned
+// as that look-back at the second, its line naming the cut, the offset a
+// replay checks (read as clock - 2s) and the fall-back exception. A replay
+// checks the value at the second against the call's window less exactly
+// that look-back, widened by one second on either side, in any window: the
+// read less the look-back holds at every read, and so does one a second
+// longer or shorter (the cut's stated cost); one changed by k seconds more
+// holds only where the replay's window holds k-1 turns of the second
+// between the application's read and its call (shorter) or the window's
+// start (longer). So a plain read in place of clock - 2s fails at every
+// replay whose application reads its clock at its call (api-server's poll,
+// its windows 61, 75 and 131 ms as recorded), and in a window it reads
+// inside, only where a turn of the second falls between that read and the
+// call; a 4 s look-back only where one falls between the window's start
+// and the read; one changed by three seconds or more never, in a window
+// narrower than a second. No window refuses the right value: 700 ms and
+// 2 s wide, it holds. The same look-back written in milliseconds (an
+// application that does not cut) stays refused: there a read made two
+// seconds before its call's window shows it too
+// (TestAClientTestsOffsetIsRefusedWhereNoComparedOffsetReads).
 func TestAWholeSecondLookBackAtTheSecondsCutIsCheckedAtTheSecond(t *testing.T) {
 	c := newClockOffsetCall()
 	ms, sec := time.Millisecond, time.Second
@@ -500,116 +536,133 @@ func TestAWholeSecondLookBackAtTheSecondsCutIsCheckedAtTheSecond(t *testing.T) {
 			t.Errorf("FALSE RED: clock - %s cut to the second (%s -> %s): %s %+v (%s); want the look-back %+v", tc.back, rec.Value, live.Value, ln.Kind, ln.Offset, ln.Why, tc.want)
 			continue
 		}
-		if !strings.Contains(ln.Why, " = clock - "+models.ShortDuration(tc.back)+" (") || !strings.Contains(ln.Why, ", cut to a second. A replay checks the offset at the second") {
-			t.Errorf("clock - %s: the learned line does not name the look-back and its cut: %s", tc.back, ln.Why)
+		named := "clock - " + models.ShortDuration(tc.back)
+		for _, part := range []string{" = " + named + " (", ", cut to a second. A replay checks the offset at the second", ", read as " + named + ", on either side, whatever the window's width", "near a wall time the application's zone shows twice as its clocks go back a replay refuses the value"} {
+			if !strings.Contains(ln.Why, part) {
+				t.Errorf("%s: the learned line does not say %q: %s", named, part, ln.Why)
+			}
 		}
 		o, ok := ln.Clock()
 		if !ok {
-			t.Fatalf("clock - %s: %s (%s): no clock to check", tc.back, ln.Kind, ln.Why)
+			t.Fatalf("%s: %s (%s): no clock to check", named, ln.Kind, ln.Why)
 		}
-		// A replay two days on, its window 50 ms wide, its read 20 ms into
-		// it, the window started at each 10 ms of a second.
+		// A replay two days on, its window started at each 10 ms of a
+		// second: 50 ms wide, its read 20 ms in; api-server's poll's windows
+		// as recorded, its read at the call; 700 ms and 2 s wide.
 		base := c.call.Add(48 * time.Hour).Truncate(sec)
-		for step := time.Duration(0); step < sec; step += 10 * ms {
-			from := base.Add(step)
-			s, read := Span{From: from, To: from.Add(50 * ms)}, from.Add(20*ms)
-			type row struct {
-				name string
-				at   time.Time
-				ok   bool
-			}
-			rows := []row{
-				{"the read less the look-back", read.Add(-tc.back), true},
-				{"a look-back three seconds longer", read.Add(-tc.back - 3*sec), false},
-				{"a look-back three seconds shorter", read.Add(-tc.back + 3*sec), false},
-			}
-			// A plain read is a look-back changed by all of it: by three
-			// seconds or more, it never holds.
-			if tc.back >= 3*sec {
-				rows = append(rows, row{"a plain read", read, false})
-			}
-			for _, row := range rows {
-				if got, why := CheckClockRead(tc.p, o, secondsText(tc.p, row.at), s, true); got != row.ok {
-					t.Errorf("%s: clock - %s, a replay's read %s into its second, %s: %v (%s); want %v", map[bool]string{true: "FALSE RED", false: "FALSE GREEN"}[row.ok], tc.back, read.Sub(read.Truncate(sec)), row.name, got, why, row.ok)
+		for _, win := range []struct{ width, read time.Duration }{{50 * ms, 20 * ms}, {61 * ms, 61 * ms}, {75 * ms, 75 * ms}, {131 * ms, 131 * ms}, {700 * ms, 350 * ms}, {2 * sec, sec}} {
+			for step := time.Duration(0); step < sec; step += 10 * ms {
+				from := base.Add(step)
+				s, read := Span{From: from, To: from.Add(win.width)}, from.Add(win.read)
+				// Turns of the second between the read and the call, and
+				// between the window's start and the read.
+				after, before := s.To.Truncate(sec).Sub(read.Truncate(sec))/sec, read.Truncate(sec).Sub(from.Truncate(sec))/sec
+				type row struct {
+					name string
+					at   time.Time
+					ok   bool
+				}
+				rows := []row{
+					{"the read less the look-back", read.Add(-tc.back), true},
+					{"a look-back a second shorter", read.Add(-tc.back + sec), true},
+					{"a look-back a second longer", read.Add(-tc.back - sec), true},
+					{"a look-back two seconds shorter", read.Add(-tc.back + 2*sec), after >= 1},
+					{"a look-back two seconds longer", read.Add(-tc.back - 2*sec), before >= 1},
+					{"a look-back three seconds shorter", read.Add(-tc.back + 3*sec), after >= 2},
+					{"a look-back three seconds longer", read.Add(-tc.back - 3*sec), before >= 2},
+					{"a plain read", read, time.Duration(after) >= tc.back/sec-1},
+				}
+				for _, row := range rows {
+					if got, why := CheckClockRead(tc.p, o, secondsText(tc.p, row.at), s, true); got != row.ok {
+						t.Errorf("%s: %s, a replay's window %s wide, %s into its second, its read %s in, %s: %v (%s); want %v", map[bool]string{true: "FALSE RED", false: "FALSE GREEN"}[row.ok], named, win.width, step, win.read, row.name, got, why, row.ok)
+					}
 				}
 			}
-		}
-		// A replay whose window with the look-back's range is a second or
-		// more could not tell a look-back changed by seconds: refused,
-		// naming the cut, never passed unchecked.
-		wide := Span{From: base, To: base.Add(700 * ms)}
-		if got, why := CheckClockRead(tc.p, o, secondsText(tc.p, base.Add(-tc.back)), wide, true); got || !strings.Contains(why, "which a replay checks at the second it is cut to against its call's window, but this call's window (700ms) with the offset's range is no narrower than the second") {
-			t.Errorf("clock - %s, a replay's window 700 ms wide: %v (%s); want refused naming the second", tc.back, got, why)
 		}
 	}
 }
 
 // The look-back of TestAWholeSecondLookBackAtTheSecondsCutIsCheckedAtTheSecond
 // (dirtyAt <= now - 2s, cut to the second), and a deadline at clock + 30s
-// cut to the second, where record's full round's call ran in a wider window: the learn step learns it at the second only
-// where a replay as wide as each run's window could check it there
-// (models.ClockOffset.Checkable: the window and the offset's range together
-// narrower than the second). F's window 200 ms wide puts the look-back from
-// 2.155 s up to 1.492 s back (663 ms), which with either window stays under
-// the second: learned. 300 ms wide puts it up to 1.392 s back (763 ms),
-// which with that window is a second or more: refused, never learned as a
-// check every replay that wide fails, which the offset's own check there
-// shows. The deadline reads the same 155 ms before and 508 ms or 608 ms
-// after thirty seconds. In keploy test the deadline's refusal names the
-// window and the cut; as an epoch's seconds in keploy mock's client test,
-// the client test's refusal stands (textClockOffset), as for every offset
-// clockOffset refuses, and keploy test's lead shows a look-back as a plain
-// read, which its fixture's caller checks none of.
-func TestAWholeSecondLookBackIsRefusedWhereItsCallsWindowIsTooWideToCheckItAtTheSecond(t *testing.T) {
+// cut to the second, where one run's call ran in a wider window: learned at
+// the second whatever the window (founder decision, 2026-10-27: a clock
+// read cut coarser than a millisecond is checked at the cut, never
+// refused), as the one whole second its range holds, which the line names
+// (read as clock - 2s, clock + 30s): F's window 200 ms wide puts the
+// look-back from 2.155 s up to 1.492 s back; 300 ms or 700 ms wide, or the
+// recording's 300 ms wide (its window across a turn of the second, F's
+// not), the range is wider, and still holds the one whole second. A replay
+// 300 ms or 2 s wide holds the right value at every phase: no window, at
+// learn or at replay, refuses it.
+func TestAWholeSecondLookBackIsLearnedWhateverItsCallsWindow(t *testing.T) {
 	const p = "body.cmd.query.$and[].$or[].dirtyAt.$lte"
 	c := newClockOffsetCall()
 	ms, sec := time.Millisecond, time.Second
-	window := func(fw time.Duration) *Window {
-		return (&Window{Rec: Span{From: c.call.Add(-50 * ms), To: c.call}, F: Span{From: c.fcall.Add(-fw), To: c.fcall}}).ComparesOffsets()
+	window := func(rw, fw time.Duration) *Window {
+		return (&Window{Rec: Span{From: c.call.Add(-rw), To: c.call}, F: Span{From: c.fcall.Add(-fw), To: c.fcall}}).ComparesOffsets()
 	}
 	for _, form := range []struct {
 		name   string
 		d      time.Duration
 		learn  func(rec, live time.Time, w *Window) Learned
 		layout string
-		named  bool
+		named  string
 	}{
 		{"a look-back as an epoch's seconds in a client test", -2 * sec, func(rec, live time.Time, w *Window) Learned {
 			return c.classifyClient(p, secondsText(p, rec), secondsText(p, live), w)
-		}, "epoch-s", false},
+		}, "epoch-s", "clock - 2s"},
 		{"a deadline typed to the second in keploy test", 30 * sec, func(rec, live time.Time, w *Window) Learned {
 			return c.classify(p, rec.Truncate(sec), live.Truncate(sec), sec, w)
-		}, models.LayoutTyped, true},
+		}, models.LayoutTyped, "clock + 30s"},
 	} {
 		t.Run(form.name, func(t *testing.T) {
 			rec, live := c.read.Add(form.d), c.fread.Add(form.d)
 			want := models.ClockOffset{Min: form.d - 155*ms, Max: form.d + 508*ms, Res: sec, Layout: form.layout}
-			if ln := form.learn(rec, live, window(200*ms)); ln.Kind != KindClockOffset || ln.Offset == nil || *ln.Offset != want {
-				t.Fatalf("FALSE RED: F's window 200 ms wide: %s %+v (%s); want the look-back %+v", ln.Kind, ln.Offset, ln.Why, want)
-			}
-			ln := form.learn(rec, live, window(300*ms))
-			if ln.Kind != KindUnaccounted || ln.Offset != nil || !strings.Contains(ln.Why, "declare it noise in keploy.yml") {
-				t.Fatalf("F's window 300 ms wide: %s %+v (%s); want refused", ln.Kind, ln.Offset, ln.Why)
-			}
-			if form.named && (!strings.Contains(ln.Why, p+" = ") || !strings.Contains(ln.Why, "a replay checks it at the second it is cut to against its call's window, and its call's window (300ms) with the offset's range is no narrower than the second")) {
-				t.Fatalf("F's window 300 ms wide: %s; want the reason to name the field, the window and the second", ln.Why)
-			}
-			// The offset learned there would be refused by every replay that
-			// wide, whatever it carried: a certain false red.
-			o := models.ClockOffset{Min: form.d - 155*ms, Max: form.d + 608*ms, Res: sec, Layout: form.layout}
-			if !o.Narrow() {
-				t.Fatalf("precondition: %+v is narrower than the second", o)
+			if ln := form.learn(rec, live, window(50*ms, 200*ms)); ln.Kind != KindClockOffset || ln.Offset == nil || *ln.Offset != want {
+				t.Fatalf("FALSE RED: F's window 200 ms wide: %s %+v (%s); want %+v", ln.Kind, ln.Offset, ln.Why, want)
 			}
 			base := c.call.Add(48 * time.Hour).Truncate(sec)
-			s := Span{From: base, To: base.Add(300 * ms)}
-			at := base.Add(100*ms + form.d)
-			lf := secondsText(p, at)
-			if form.named {
-				lf = InstantLeaf(p, p, at.Truncate(sec), sec)
-			}
-			if got, why := CheckClockRead(p, o, lf, s, true); got || !strings.Contains(why, "no narrower than the second") {
-				t.Fatalf("a replay 300 ms wide: %v (%s); want refused for its window", got, why)
+			for _, ws := range []struct{ rw, fw time.Duration }{{50 * ms, 300 * ms}, {50 * ms, 700 * ms}, {300 * ms, 50 * ms}} {
+				ln := form.learn(rec, live, window(ws.rw, ws.fw))
+				if ln.Kind != KindClockOffset || ln.Offset == nil || !strings.Contains(ln.Why, ", read as "+form.named+", on either side, whatever the window's width") {
+					t.Errorf("FALSE RED: windows %s and %s wide: %s %+v (%s); want learned, read as %s", ws.rw, ws.fw, ln.Kind, ln.Offset, ln.Why, form.named)
+					continue
+				}
+				for _, width := range []time.Duration{300 * ms, 2 * sec} {
+					for step := time.Duration(0); step < sec; step += 50 * ms {
+						from := base.Add(step)
+						at := from.Add(width/2 + form.d)
+						lf := secondsText(p, at)
+						if form.layout == models.LayoutTyped {
+							lf = InstantLeaf(p, p, at.Truncate(sec), sec)
+						}
+						if got, why := CheckClockRead(p, *ln.Offset, lf, Span{From: from, To: from.Add(width)}, true); !got {
+							t.Errorf("FALSE RED: learned in windows %s and %s wide, a replay %s wide %s into its second: %v (%s)", ws.rw, ws.fw, width, step, got, why)
+						}
+					}
+				}
 			}
 		})
+	}
+}
+
+// An offset checked against its unit (not cut: clock + 30m at the
+// millisecond) is refused where either run's call's window, with its range
+// and three of its resolution, is its unit or more (checkableIn reads both
+// runs' windows: a replay as wide would refuse it whatever it carried),
+// the reason naming that window.
+func TestAnOffsetIsRefusedWhereEitherRunsWindowIsTooWideForItsUnit(t *testing.T) {
+	const p = "body.expiresAt"
+	c := newClockOffsetCall()
+	ms := time.Millisecond
+	for _, ws := range []struct {
+		name   string
+		rw, fw time.Duration
+	}{{"the recording's window a minute and a second wide", 61 * time.Second, 50 * ms}, {"record's full round's window a minute and a second wide", 50 * ms, 61 * time.Second}} {
+		w := (&Window{Rec: Span{From: c.call.Add(-ws.rw), To: c.call}, F: Span{From: c.fcall.Add(-ws.fw), To: c.fcall}}).ComparesOffsets()
+		ln := c.classify(p, c.read.Add(30*time.Minute).Truncate(ms), c.fread.Add(30*time.Minute).Truncate(ms), ms, w)
+		if ln.Kind != KindUnaccounted || ln.Offset != nil || !strings.Contains(ln.Why, "its call's window (1m1s) with the offset's range and three of its cut is no narrower than the minute the offset reads in") {
+			t.Errorf("%s: %s %+v (%s); want refused, naming the window", ws.name, ln.Kind, ln.Offset, ln.Why)
+		}
 	}
 }

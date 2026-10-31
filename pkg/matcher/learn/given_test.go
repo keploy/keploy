@@ -824,6 +824,12 @@ func TestAClientTestLearnsAChangedInstantOnlyWhereItsWindowShowsARead(t *testing
 				if !noiseOrRead(ln) {
 					t.Fatalf("%q -> %q: %s (%s); want noise", tc.rec, tc.live, ln.Kind, ln.Why)
 				}
+			} else if off := map[string]string{"the harness's now plus two hours, zoned": "this protocol's replay does not compare such an offset yet"}[tc.name]; off != "" {
+				// Its window holds it as the clock plus two hours, which
+				// this window's replay does not compare: named so.
+				if !offsetRefused(ln, p, off) {
+					t.Fatalf("%q -> %q: %s (%s); want it refused naming the offset and %q", tc.rec, tc.live, ln.Kind, ln.Why, off)
+				}
 			} else if ln.Kind != KindUnaccounted || !clientTestRefusal(ln.Why, tc.part, tc.w != nil, tc.rec, tc.live) {
 				t.Fatalf("%q -> %q: %s (%s); want it refused, naming %s, saying keploy saw no read of the app's clock that matched it, and quoting no value", tc.rec, tc.live, ln.Kind, ln.Why, tc.part)
 			}

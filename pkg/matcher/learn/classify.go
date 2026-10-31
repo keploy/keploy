@@ -1608,12 +1608,12 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 				// go at (follows.followed, which orders noise) is needed:
 				// a replay passes it only as the clock plus that offset.
 				if why != "" {
-					off, cutWhy, ok := dc.textClockOffset(r, l, v, w, resp)
+					off, refusedWhy, ok := dc.textClockOffset(r, l, v, w, resp)
 					if ok {
 						return off
 					}
-					if cutWhy != "" {
-						why = clientCutAmbiguousWhy(cutWhy)
+					if refusedWhy != "" {
+						why = clientOffsetRefusedWhy(refusedWhy)
 					}
 					// The test's value, first sent here (Learned.Bindable):
 					// no source, no echo, no word of it at an earlier place
@@ -1621,9 +1621,13 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 					// the call's own answer (echoedPart), and no word the
 					// word rule let go in record's full round (follows), so
 					// no order of places is needed either. Never where the
-					// value may be a clock read at a cut keploy cannot tell
-					// (cutWhy): that stays refused.
-					bindable = cutWhy == "" && ln.Kind == KindNoise && skip&skipSource == 0 && echoedPart(dc, v, resp) == "" &&
+					// window holds the value as a read of the clock plus an
+					// offset the learn step refused (refusedWhy: an offset
+					// that reads in less than a second, a cut keploy cannot
+					// tell): bound, every replay would bind it and never
+					// compare it, a clock read left unchecked, so it stays
+					// refused.
+					bindable = refusedWhy == "" && ln.Kind == KindNoise && skip&skipSource == 0 && echoedPart(dc, v, resp) == "" &&
 						(fol == nil || fol.first == "" && fol.refuted == "")
 				}
 			}
@@ -2063,16 +2067,21 @@ func clockSourceWhy(from Place) string {
 // other ln (noise, a variable, an echo, a refusal), which those rules leave
 // as the first classification learned it, and for an offset a replay could
 // not check in wb, each run's span from its test's begin to the call
-// (checkableIn), which a replay checks it in: a look-back cut to the second
-// (clock + 719h59m58s at the second: a value read two seconds before its
-// call's window, thirty days on) over a test two seconds long or more,
-// which every replay would refuse.
+// (sinceCheckable), which a replay checks it in: of one checked at its
+// cut, a span that with the offset's range is the cut or more. That
+// offset was bounded in its call's window, not since its test began, so
+// over a longer span it no longer stands for the read: a look-back cut to
+// the second (clock + 719h59m58s at the second: a value read two seconds
+// before its call's window, thirty days on) over a test two seconds long
+// or more. The explanation the first classification learned stands there
+// (the offset rule's refusal, a variable of an earlier call): a rescue
+// declined, never a refusal of its own.
 func sinceTestBegin(ln Learned, wb *Window) (Learned, bool) {
 	switch {
 	case ln.Kind == KindClockRead && ln.Read != nil:
 		ln.Read.Since = models.SinceTestBegin
 	case ln.Kind == KindClockOffset && ln.Offset != nil:
-		if !checkableIn(*ln.Offset, ln.Offset.Res, wb) {
+		if !sinceCheckable(*ln.Offset, wb) {
 			return ln, false
 		}
 		ln.Offset.Since = models.SinceTestBegin
@@ -2080,6 +2089,28 @@ func sinceTestBegin(ln Learned, wb *Window) (Learned, bool) {
 		return ln, false
 	}
 	return ln, true
+}
+
+// sinceCheckable reports whether sinceTestBegin may check off, an offset
+// bounded in its call's window, from each run's test begin to its call
+// (wb): where a replay could check it there (checkableIn), and, of one
+// checked at its cut (models.ClockOffset.CoarseChecked, which a replay
+// checks in any window), where each run's span and off's range together
+// are narrower than the cut, so the one cut it names still stands for the
+// read the span holds. False for a nil wb.
+func sinceCheckable(off models.ClockOffset, wb *Window) bool {
+	if wb == nil || !checkableIn(off, off.Res, wb) {
+		return false
+	}
+	if !off.CoarseChecked(off.Res) {
+		return true
+	}
+	for _, s := range []Span{wb.Rec, wb.F} {
+		if s.To.Sub(s.From)+off.Max-off.Min >= off.Res {
+			return false
+		}
+	}
+	return true
 }
 
 // sinceWord is wordRead of early in wb, a call's window from each run's

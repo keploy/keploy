@@ -142,13 +142,14 @@ func (r ClockRead) inOneSecond(o ClockRead) bool {
 // sees must be a read made in its own call's window plus such an offset
 // (Holds), so a time to live changed by its Unit or more still fails (of one
 // cut to a day, or to an hour, a minute or a second that reads in that unit
-// or a finer one, by three cuts or more, with the exceptions Checkable
-// states: CoarseCut). Min and Max are
-// what the two runs' windows bound the offset to, never a tolerance, and
-// the learn step learns one only where they, with Res, are narrower than
-// the unit the offset reads in (Unit, Within), or, of such a cut, where
-// their width alone is narrower than the cut (Narrow): thirty minutes
-// bounded to a few milliseconds, never to a few minutes. The offset is
+// or a finer one, by more cuts than the replay's call's window holds turns
+// of the cut, plus one, with the exceptions Holds states: CoarseCut). Min
+// and Max are what the two runs' windows bound the offset to, never a
+// tolerance, and the learn step learns one only where they, with Res, are
+// narrower than the unit the offset reads in (Unit, Within), or of such a
+// cut, whatever their width (Narrow), a replay checking it against the
+// whole cuts they hold (CutOffsets): thirty minutes bounded to a few
+// milliseconds, never to a few minutes. The offset is
 // signed and never zero (signed): above zero for a value the application
 // builds after its read (Min above zero: an expiry), below zero for one it
 // builds before it (Max below zero: createdAt >= now - 2m), never a range
@@ -176,16 +177,17 @@ func (r ClockRead) inOneSecond(o ClockRead) bool {
 // day's unit holds its width and three hours). An offset cut to a day, or
 // to an hour, a minute or a second where it reads in that unit or a finer
 // one (clock + 2h at the hour, clock + 30m at the minute, clock - 2s at
-// the second), which no unit holds three of (CoarseCut), is learned where
-// its width is narrower than the cut (Narrow) and checked at the cut
-// (Checkable), refused only where its width is the cut or more, never for
-// the three cuts no unit holds (founder decision, 2026-10-27: a clock read
+// the second), which no unit holds three of (CoarseCut), is learned
+// whatever its width (Narrow) and checked at the cut against the whole
+// cuts its range holds (CutOffsets: the one it names), in any window
+// (Checkable), never refused for its width, its window's or the three cuts
+// no unit holds (founder decision, 2026-10-27: a clock read
 // cut coarser than a millisecond is checked at the cut, never refused;
 // ruled for a day's cut and an hour's that reads in hours 2026-10-29, and
 // so a minute's and a second's): as yesterday's date passes a date cut to a
-// day, a time to live changed by less than two cuts can pass there, by
-// where the replay's read falls in its cut, so a replay cannot tell thirty
-// minutes cut to the minute from thirty-one at every read.
+// day, a time to live changed by one cut can pass there, by where the
+// replay's read falls in its cut, so a replay cannot tell thirty minutes
+// cut to the minute from thirty-one at every read.
 // Holds checks a replay's value at Res where it is such a step coarser than
 // the value's own encoding (a cut), as standing for its whole cut, within
 // one Res of the call's span plus the offset on either side, as a plain
@@ -768,41 +770,56 @@ func (o ClockOffset) CheckedAt(res time.Duration) time.Duration {
 // written at res, in a call's window from from to to (Holds): the window,
 // o's width and three of the coarser of the resolution it checks the value
 // at (CheckedAt) and o.Res are narrower than o's Unit (Within), so a time
-// to live changed by a unit cannot hold. Of an offset cut to a unit that
-// no unit holds three of (CoarseCut: a day's cut, or an hour's, a
-// minute's or a second's that reads in that unit or a finer one: clock +
-// 2h at the hour, clock - 2s at the second), the window and o's width
-// narrower than the cut: a cut is checked at the cut all the same (founder
-// decision, 2026-10-27: a clock read cut coarser than a millisecond is
-// checked at the cut, never refused; ruled for a day's cut and an hour's
-// that reads in hours 2026-10-29, and so a minute's and a second's), as a
-// date cut to a day is, so a time to live changed by less than two cuts can hold, by where
-// the replay's read falls in its cut (one changed by one cut at every read where the value is the
-// read plus the offset cut down to the cut; where the application adds time
-// after its cut, only at some), one changed by two holds only where the
-// replay's read falls within the window and o's width of the cut's turn,
-// and one changed by three or more never does, but for a day a
-// daylight-saving turn shortens to 23 hours, still one day (holdsRead):
-// there three days can hold where the window and o's width are within an
-// hour of the day, a call some 23 hours long (a stated limit). Where the zone
-// the value is read in shows a wall time twice as its clocks go back, Holds
-// holds nothing near that turn, at any cut finer than a day (FallBack). A
-// Plain o is always checkable.
+// to live changed by a unit cannot hold. An offset cut to a unit that no
+// unit holds three of, checked at that cut (CoarseChecked: a day's cut, or
+// an hour's, a minute's or a second's that reads in that unit or a finer
+// one: clock + 2h at the hour, clock - 2s at the second), is checkable in
+// any window (founder decision, 2026-10-27: a clock read cut coarser than
+// a millisecond is checked at the cut, never refused; ruled for a day's cut
+// and an hour's that reads in hours 2026-10-29, and so a minute's and a
+// second's): Holds checks it against the whole cuts its range holds
+// (CutOffsets: the one it names, clock - 2s), never against its range, so
+// neither the window nor o's width decides whether a replay checks it,
+// and a verdict never turns on how long the call took. A Plain o is always
+// checkable.
 func (o ClockOffset) Checkable(res time.Duration, from, to time.Time) bool {
-	if o.Plain() {
+	if o.Plain() || o.CoarseChecked(res) {
 		return true
 	}
 	m := max(o.CheckedAt(res), o.Res)
-	if o.CoarseChecked(res) {
-		return to.Sub(from) < m && o.Max-o.Min < m-to.Sub(from)
-	}
 	return o.Within(to.Sub(from), o.Max-o.Min, m, m, m)
 }
 
+// CutOffsets are the offsets a replay checks a value of o, an offset cut to
+// a unit that no unit holds three of (CoarseCut), against (Holds): the
+// whole cuts (multiples of o.Res) from Min up to, not including, Max, lo
+// the least and hi the greatest. Each run's range is its window's width
+// and one cut wide (a value v cut to c stands for reads from v up to v
+// plus c), and holds the one whole cut the application adds (dirtyAt <=
+// now - 2s at the second: -2s, lo == hi, the offset String names) unless
+// both runs' windows held a turn of the cut, where it may hold the next one
+// too. A range that holds no whole cut, of an offset that reads in a finer
+// unit (a cut hour plus 90 minutes), is narrower than the cut: lo and hi
+// are Min and Max. The offset the application adds lies within one cut of
+// lo to hi, so a check of the call's window plus lo to hi, widened by one
+// cut on either side, holds every value it writes, cut down or rounded,
+// wherever its read falls (Holds).
+func (o ClockOffset) CutOffsets() (lo, hi time.Duration) {
+	if o.Res <= 0 {
+		return o.Min, o.Max
+	}
+	lo = ceilTo(o.Min, o.Res)
+	if lo >= o.Max {
+		return o.Min, o.Max
+	}
+	return lo, ceilTo(o.Max, o.Res) - o.Res
+}
+
 // CoarseChecked reports whether a replay checks a value of o written at res
-// at its cut alone (Checkable's cut branch): o is cut to a unit that no
-// unit holds three of (CoarseCut) and Holds checks the value at that cut
-// (CheckedAt(res) is o.Res). A value whose encoding writes a step coarser
+// at its cut alone, against the whole cuts its range holds (CutOffsets),
+// in any window (Checkable): o is cut to a unit that no unit holds three
+// of (CoarseCut) and Holds checks the value at that cut (CheckedAt(res) is
+// o.Res). A value whose encoding writes a step coarser
 // than the cut (two days; or a day, of an offset cut to the hour; or a
 // minute, of one cut to the second; no encoding of an instant keploy reads
 // does) is checked at its own resolution,
@@ -814,16 +831,14 @@ func (o ClockOffset) CoarseChecked(res time.Duration) bool {
 // Narrow reports whether the learn step can learn o, an offset it found
 // (learn's clockOffset): o's width and three of its Res are narrower than
 // its Unit (Within), so a replay can tell a time to live changed by a unit,
-// or, of an o cut to a unit that no unit holds three of (CoarseCut: a
-// day's, or an hour's, a minute's or a second's that reads in that unit or
-// a finer one), its width alone is narrower than the cut: a replay checks it
-// at the cut, as standing for its whole cut, within one cut of its window
-// plus the offset on either side (Holds, Checkable).
+// or o is cut to a unit that no unit holds three of (CoarseCut: a day's,
+// or an hour's, a minute's or a second's that reads in that unit or a finer
+// one), whatever its width: a replay checks it at the cut against the whole
+// cuts its range holds (CutOffsets, Holds), never refused for its width
+// (founder decision, 2026-10-27: a clock read cut coarser than a
+// millisecond is checked at the cut, never refused).
 func (o ClockOffset) Narrow() bool {
-	if o.CoarseCut() {
-		return o.Max-o.Min < o.Res
-	}
-	return o.Within(o.Max-o.Min, o.Res, o.Res, o.Res)
+	return o.CoarseCut() || o.Within(o.Max-o.Min, o.Res, o.Res, o.Res)
 }
 
 // Fine reports whether o reads in a unit the learn step never learns an
@@ -858,14 +873,16 @@ func (o ClockOffset) Fine() bool {
 // wide reads in minutes; clock + 30m cut to the minute; a poll's dirtyAt <=
 // now - 2s written as an epoch's seconds; of clock + 1d cut to the hour, or
 // clock - 2m cut to the second, the coarser unit holds three cuts and
-// Within decides). The learn step learns it where its width is narrower
-// than the cut (Narrow), and a replay checks it at the cut (Checkable),
+// Within decides). The learn step learns it whatever its width (Narrow),
+// and a replay checks it at the cut against the whole cuts its range holds
+// (CutOffsets: clock - 2s, never its range) in any window (Checkable),
 // never refusing it for the three cuts no unit holds (founder decision,
 // 2026-10-27: a clock read cut coarser than a millisecond is checked at the
 // cut, never refused; ruled for a day's cut and an hour's that reads in
-// hours 2026-10-29, and so a minute's and a second's): as
-// yesterday's date passes a date cut to a day, one changed by less than two
-// cuts can pass there, by where the replay's read falls in its cut. Only a
+// hours 2026-10-29, and so a minute's and a second's): as yesterday's date
+// passes a date cut to a day, one changed by one cut can pass there, and
+// one changed by more only where the replay's call's window holds a turn of
+// the cut for each cut more (Holds). Only a
 // Res of exactly one of those units, steps of models.CutOf: a Res no step
 // is (96 hours, a hand-edited mock's), or a decimal step between units (10
 // ms, 100 ms), is no such cut, and its sums count three of it against the
@@ -928,12 +945,13 @@ func ceilTo(d, u time.Duration) time.Duration {
 
 // Within reports whether spans, each at least zero, add up to less than o's
 // Unit. The learn step learns o, other than one cut to a unit that no unit
-// holds three of (CoarseCut, which Narrow and Checkable decide
-// alone), only where its width and three of its resolution do
+// holds three of (CoarseCut, which it learns whatever its width and a
+// replay checks against the whole cuts its range holds: CutOffsets), only
+// where its width and three of its resolution do
 // (o.Within(o.Max-o.Min, o.Res, o.Res, o.Res)), so it holds one multiple of
 // its unit, the one String names; Holds asks the same of the replay's
 // window with them, at the resolution it checks the value at (of a value it
-// checks at that cut, Checkable asks instead: CoarseChecked),
+// checks at that cut, none: CoarseChecked),
 // so a time to live changed by a unit or more never holds there, however the
 // replay's read falls in its window: a value checked at a cut c is held
 // from the start of the cut that holds the earliest read plus Min, less c,
@@ -958,10 +976,12 @@ func (o ClockOffset) Within(spans ...time.Duration) bool {
 // offset, a plain read of the clock), a read made there itself (holdsRead).
 // Of any other o, a read of the clock plus an offset, then cut, is a clock
 // read (2026-10-28): at is checked as a plain read of the span from
-// from+o.Min to to+o.Max, at c, the cut o.Res where it is one coarser than
-// res (CheckedAt), else res: it holds within one c of that span on either
-// side (holdsRead: from the start of the c that holds from+o.Min, less c, up
-// to to+o.Max plus c), so a value a read in the window plus the offset
+// from+o.Min to to+o.Max (of an o checked at its cut, CoarseChecked, from
+// from+lo to to+hi, the whole cuts its range holds: CutOffsets), at c, the
+// cut o.Res where it is one coarser than res (CheckedAt), else res: it
+// holds within one c of that span on either side (holdsRead: from the start
+// of the c that holds its start, less c, up to its end plus c), so a value
+// a read in the window plus the offset
 // writes holds wherever the read fell in its cut, cut down or rounded, and
 // so does one up to one cut stale or ahead; one more than a cut past either
 // side never does, however the replay's read falls. It holds nothing where
@@ -969,12 +989,17 @@ func (o ClockOffset) Within(spans ...time.Duration) bool {
 // o's Unit or more (Within): there a value whose time to live changed by a
 // unit could hold, and the replay fails closed. Of a cut to a unit that no
 // unit holds three of (CoarseCut: a day's, or an hour's, a minute's or a
-// second's whose offset reads in that unit or a finer one), where the
-// window and o's width add up to the cut or more (Checkable); where they
-// are narrower, the cut admits as a date's admits yesterday: a time to live
-// changed by less than two cuts can hold, by where the read falls in its
-// cut, one changed by two only near the cut's turn, and one changed by
-// three or more never, but for the 23-hour day (Checkable). Nor, at any cut
+// second's whose offset reads in that unit or a finer one), checked at its
+// cut, it holds whatever the window's width (Checkable), and the cut admits
+// as a date's admits yesterday: a time to live changed by one cut can
+// hold, by where the read falls in its cut, and one changed by k cuts more
+// only where the call's window holds k turns of the cut, between the read
+// and the window's end (a longer one) or its start (a shorter one): of
+// clock - 2s at the second in a window narrower than a second, a plain read
+// (changed by two) holds only where a turn of the second falls between the
+// application's read and its call, and a look-back changed by three seconds
+// or more never does; but for the 23-hour day, which holds three days where
+// the window is within an hour of a day. Nor, at any cut
 // finer than a day, where the call's window or that span meets the wall
 // time at's zone shows twice as its clocks go back (FallBack): an
 // application that resolves that wall time to its first showing writes a
@@ -1012,7 +1037,11 @@ func (o ClockOffset) Holds(at time.Time, res time.Duration, from, to time.Time) 
 		return false
 	}
 	c := o.CheckedAt(res)
-	return ClockOffset{Res: c}.holdsRead(at, c, from.Add(o.Min), to.Add(o.Max))
+	lo, hi := o.Min, o.Max
+	if o.CoarseChecked(res) {
+		lo, hi = o.CutOffsets()
+	}
+	return ClockOffset{Res: c}.holdsRead(at, c, from.Add(lo), to.Add(hi))
 }
 
 // FallBack is the turn at which loc's clocks go back, and by how much, that

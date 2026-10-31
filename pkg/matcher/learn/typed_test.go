@@ -1496,8 +1496,8 @@ func TestAClientTestsClockOffsetIsLearnedAsInAnyTest(t *testing.T) {
 		t.Errorf("a client test: %s %+v (%s); want as in any test: %s %+v (%s)", ln.Kind, ln.Offset, ln.Why, want.Kind, want.Offset, want.Why)
 	}
 	// Not compared at replay: refused, the client test's reason standing.
-	if ln := classifyZoned(nil, true, p, rec, live, c.call, c.w); ln.Kind != KindUnaccounted || ln.Why != clientTestWhy("", true) {
-		t.Errorf("a client test, not compared: %s (%s); want refused: %s", ln.Kind, ln.Why, clientTestWhy("", true))
+	if ln := classifyZoned(nil, true, p, rec, live, c.call, c.w); !offsetRefused(ln, p, "this protocol's replay does not compare such an offset yet") {
+		t.Errorf("a client test, not compared: %s (%s); want refused naming the offset and why", ln.Kind, ln.Why)
 	}
 }
 
@@ -1713,13 +1713,13 @@ func TestAnOffsetCutCoarserThanItsEncodingIsCheckedAtTheCut(t *testing.T) {
 	// than the second (the second outside the windows: from 44.845s up to
 	// 45.368s), the line naming the cut, and a replay holds the read plus
 	// the time to live cut down at every read in a second, three seconds
-	// more or less at none; refused as too wide where its range is not (the
-	// windows the second turns in: from 44.845s up to 46.008s), the reason
-	// naming the second.
+	// more or less at none; where its range is not (the windows the second
+	// turns in: from 44.845s up to 46.008s), learned all the same, checked
+	// against both whole seconds it holds (founder decision: never refused).
 	for _, ttl := range []time.Duration{45 * sec, 90 * sec} {
 		ln := c.classify(p, c.call.Add(-145*ms).Truncate(sec).Add(ttl), c.fcall.Add(-682*ms).Truncate(sec).Add(ttl), ms, turn)
-		if ln.Kind != KindUnaccounted || ln.Offset != nil || !strings.Contains(ln.Why, "but the range is not narrower than the second the value is cut to, so a replay checking it at the second could not tell a time to live changed by seconds from it") {
-			t.Errorf("FALSE GREEN? %s cut to the second, its range a second and more: %s %+v (%s); want refused as too wide at the second", ttl, ln.Kind, ln.Offset, ln.Why)
+		if both := ", read as clock plus each whole second from " + models.ShortDuration(ttl) + " to " + models.ShortDuration(ttl+sec) + ", on either side, whatever the window's width"; ln.Kind != KindClockOffset || ln.Offset == nil || ln.Offset.Res != sec || !strings.Contains(ln.Why, both) {
+			t.Errorf("FALSE RED: %s cut to the second, its range a second and more: %s %+v (%s); want learned at the second, checked against both whole seconds its range holds (%q)", ttl, ln.Kind, ln.Offset, ln.Why, both)
 		}
 		want := models.ClockOffset{Min: ttl - 155*ms, Max: ttl + 368*ms, Res: sec, Layout: models.LayoutTyped}
 		ln = c.classify(p, c.read.Truncate(sec).Add(ttl), c.fread.Truncate(sec).Add(ttl), ms, w)
@@ -1759,13 +1759,13 @@ func TestAnOffsetCutCoarserThanItsEncodingIsCheckedAtTheCut(t *testing.T) {
 	// its window from 11:14:59.900, its read at 11:15:00.005; F's call at
 	// 11:16:00.070, from 11:15:59.950, its read at 11:16:00.010. Bounded at
 	// the minute both values show, from 29m59.98s up to 31m0.05s: no
-	// narrower than the minute it is cut to, refused as too wide, the
-	// reason saying the values' cut set the resolution, not their encoding.
+	// narrower than the minute it is cut to, learned all the same (never
+	// refused for its width), checked against both whole minutes it holds.
 	minute := clockOffsetCall{call: time.Date(2026, 10, 26, 11, 15, 0, 20e6, time.UTC), fcall: time.Date(2026, 10, 26, 11, 16, 0, 70e6, time.UTC)}
 	minute.w = (&Window{Rec: Span{From: minute.call.Add(-120 * ms), To: minute.call}, F: Span{From: minute.fcall.Add(-120 * ms), To: minute.fcall}}).ComparesOffsets()
 	ln = minute.classify(p, minute.call.Add(-15*ms).Truncate(time.Minute).Add(30*time.Minute), minute.fcall.Add(-60*ms).Truncate(time.Minute).Add(30*time.Minute), ms, minute.w)
-	if want := p + " = clock plus an offset from 29m59.98s to 31m0.05s at a resolution of 1m (the cut both runs' values show, coarser than the 1ms their encoding writes): "; ln.Kind != KindUnaccounted || ln.Offset != nil || !strings.HasPrefix(ln.Why, want) || !strings.Contains(ln.Why, "but the range is not narrower than the minute the value is cut to, so a replay checking it at the minute could not tell a time to live changed by minutes from it") {
-		t.Errorf("FALSE GREEN? thirty minutes cut to the minute, the minute inside both windows: %s %+v (%s); want refused with the reason %q...", ln.Kind, ln.Offset, ln.Why, want)
+	if want := p + " = clock plus an offset from 29m59.98s to 31m0.05s: "; ln.Kind != KindClockOffset || ln.Offset == nil || ln.Offset.Res != time.Minute || !strings.HasPrefix(ln.Why, want) || !strings.Contains(ln.Why, ", cut to a minute. A replay checks the offset at the minute, as standing for its whole minute, within one minute of its call's window plus the offset, read as clock plus each whole minute from 30m to 31m, on either side") {
+		t.Errorf("FALSE RED: thirty minutes cut to the minute, the minute inside both windows: %s %+v (%s); want learned at the minute with the line %q..., checked against both whole minutes", ln.Kind, ln.Offset, ln.Why, want)
 	}
 
 	// An hour cut to the minute, in the same windows: from 59m59.98s up to
@@ -1822,10 +1822,11 @@ func TestAnOffsetCutCoarserThanItsEncodingIsCheckedAtTheCut(t *testing.T) {
 	// one at the minute too, so keploy cannot tell at which cut a replay
 	// must check them. The minute's check holds both, so the offset is
 	// read there (offsetReading), where a range of offsets about a minute
-	// and a half wide is no narrower than the minute, which no unit holds
-	// three of (models.ClockOffset.CoarseCut): refused as too wide, naming
-	// the range at the minute (clockOffset); a narrower one would be
-	// checked at the minute.
+	// and a half wide, at a cut no unit holds three of
+	// (models.ClockOffset.CoarseCut), is learned all the same, never refused
+	// for its width, and checked at the minute against the whole minutes it
+	// holds (CutOffsets): the read plus the time to live, cut then added,
+	// holds at every read of a replay.
 	for _, row := range []struct {
 		ttl  time.Duration
 		read time.Time
@@ -1838,8 +1839,18 @@ func TestAnOffsetCutCoarserThanItsEncodingIsCheckedAtTheCut(t *testing.T) {
 		mc := clockOffsetCall{call: row.read.Add(600 * ms), fcall: fread.Add(600 * ms)}
 		mc.w = (&Window{Rec: Span{From: row.read.Add(-28 * sec), To: mc.call}, F: Span{From: fread.Add(-29 * sec), To: mc.fcall}}).ComparesOffsets()
 		ln := mc.classify(p, row.read.Truncate(time.Minute).Add(row.ttl), fread.Truncate(time.Minute).Add(row.ttl), sec, mc.w)
-		if !strings.Contains(ln.Why, "at a resolution of 1m (the cut both runs' values show") || ln.Kind != KindUnaccounted || ln.Offset != nil || !strings.Contains(ln.Why, "but the range is not narrower than the minute the value is cut to, so a replay checking it at the minute could not tell a time to live changed by minutes from it, and keploy refuses it") {
-			t.Errorf("FALSE GREEN? a minute cut plus %s at a second's encoding: %s %+v (%s); want refused as too wide at the minute", row.ttl, ln.Kind, ln.Offset, ln.Why)
+		if ln.Kind != KindClockOffset || ln.Offset == nil || ln.Offset.Res != time.Minute || !strings.Contains(ln.Why, ", cut to a minute. A replay checks the offset at the minute") {
+			t.Errorf("FALSE RED: a minute cut plus %s at a second's encoding: %s %+v (%s); want learned at the minute, never refused for its width", row.ttl, ln.Kind, ln.Offset, ln.Why)
+			continue
+		}
+		// The read plus the time to live, cut then added, holds at every
+		// read of a replay's 50 ms window.
+		for step := time.Duration(0); step < time.Minute; step += 7 * sec {
+			from := row.read.Add(48 * time.Hour).Truncate(time.Minute).Add(step)
+			read := from.Add(20 * ms)
+			if got, why := CheckClockRead(p, *ln.Offset, InstantLeaf(p, p, read.Truncate(time.Minute).Add(row.ttl), sec), Span{From: from, To: from.Add(50 * ms)}, true); !got {
+				t.Errorf("FALSE RED: a minute cut plus %s, a replay %s into its minute: %v (%s)", row.ttl, step, got, why)
+			}
 		}
 	}
 	// Two millisecond values the application does not cut that stand a
@@ -1990,8 +2001,9 @@ func TestAnExpiryOfThirtyDaysWithItsMillisecondsZeroedIsKeptAndCheckedAtTheSecon
 // apart, so it is read at the hour: offsetReading), even where windows over
 // an hour wide put one offset in both runs' bounds: thirty minutes would
 // read the hour cut finer than it is, and a time to live changed by an hour
-// could hold; the hour's range is no narrower than the hour, so none is
-// learned (models.ClockOffset.Narrow). A value that did not move (its text
+// could hold; at the hour, one is learned whatever its width, checked
+// against the whole hours its range holds (models.ClockOffset.Narrow,
+// CutOffsets). A value that did not move (its text
 // drifted, not its moment) shows none either. Two values cut to the minute
 // that share two minutes, more than FullRoundLead, show one, at the minute.
 func TestACutCoarserThanTheLeadShowsNoOffset(t *testing.T) {
@@ -2008,8 +2020,8 @@ func TestACutCoarserThanTheLeadShowsNoOffset(t *testing.T) {
 	if g := sharedGrain(r.at, l.at); g != 30*time.Minute {
 		t.Fatalf("precondition: the two values share %s, want thirty minutes", g)
 	}
-	if o, ok := clockOffsetOf(r, l, w, nil); ok && (o.Res != time.Hour || o.Narrow()) {
-		t.Errorf("FALSE GREEN? an hour cut on a zone's half hour: %+v (%s); want no offset finer than the hour, and none narrow enough to learn", o, o)
+	if o, ok := clockOffsetOf(r, l, w, nil); ok && (o.Res != time.Hour || !o.CoarseCut() || !o.Narrow()) {
+		t.Errorf("FALSE GREEN? an hour cut on a zone's half hour: %+v (%s); want no offset finer than the hour, any learned checked at the hour", o, o)
 	}
 	if o, ok := clockOffsetOf(r, r, w, nil); ok {
 		t.Errorf("a value that did not move: %+v; want no offset", o)
@@ -2026,8 +2038,8 @@ func TestACutCoarserThanTheLeadShowsNoOffset(t *testing.T) {
 	if g := sharedGrain(r.at, l.at); g != 30*time.Minute {
 		t.Fatalf("precondition: an hour cut plus ninety minutes shares %s, want thirty minutes", g)
 	}
-	if o, ok := clockOffsetOf(r, l, w, nil); ok && (o.Res != time.Hour || o.Narrow()) {
-		t.Errorf("FALSE GREEN? an hour cut plus ninety minutes: %+v (%s); want no offset finer than the hour, and none narrow enough to learn", o, o)
+	if o, ok := clockOffsetOf(r, l, w, nil); ok && (o.Res != time.Hour || !o.CoarseCut() || !o.Narrow()) {
+		t.Errorf("FALSE GREEN? an hour cut plus ninety minutes: %+v (%s); want no offset finer than the hour, any learned checked at the hour", o, o)
 	}
 	// The recording reads at 12:02:58.5, F FullRoundLead later, past two
 	// minutes' turns: 14:02 and 14:04, two hours on, share two minutes.

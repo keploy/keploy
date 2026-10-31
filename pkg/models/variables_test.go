@@ -312,17 +312,22 @@ func TestAClockOffsetHoldsOnlyWhereItsWindowIsNarrowerThanItsUnit(t *testing.T) 
 }
 
 // An offset cut to a day (founder decision, 2026-10-27: a cut is checked at
-// the cut; ruled for a day's cut 2026-10-29) is learned where its width is
-// narrower than the day (Narrow), though no unit holds three days, and a
-// replay checks it at the day where its window and the offset's width are
-// narrower than the day (Checkable), within one day of the window plus the
-// offset on either side: thirty days, at every read in the widest such
-// window, holds the read plus thirty days and the value one day stale or
-// ahead (as yesterday's date passes a date cut to a day), never three days
-// off; a window a nanosecond wider holds nothing. Cut to an hour, an
-// offset that reads in days still counts three cuts against the unit (a day
-// cut to the hour is learned by Within, its width under 21 hours), and one
-// that reads in hours is checked at the hour, as a day's cut is at the day
+// the cut, never refused; ruled for a day's cut 2026-10-29) is learned
+// whatever its width (Narrow), though no unit holds three days, and a
+// replay checks it at the day in any window (Checkable), against the whole
+// days its range holds (CutOffsets: thirty days), within one day of the
+// window plus that offset on either side: at every read in a window
+// narrower than a day, the read plus thirty days and the value one day
+// stale or ahead hold (as yesterday's date passes a date cut to a day);
+// two days off only where the window holds a turn of the day between the
+// read and its end (ahead) or its start (stale); three days off never. A
+// window three days wide holds the read plus thirty days at every read: no
+// window refuses the right value. A range that holds two whole days (both
+// runs' windows held a turn of the day) is checked against both. Cut to an
+// hour, an offset that reads in days still counts three cuts against the
+// unit (a day cut to the hour is learned by Within, its width under 21
+// hours), and one that reads in hours is checked at the hour, as a day's
+// cut is at the day
 // (TestAClockOffsetCutToAnHourThatReadsInHoursIsCheckedAtTheHour).
 func TestAClockOffsetCutToADayIsCheckedAtTheDay(t *testing.T) {
 	ms, day := time.Millisecond, 24*time.Hour
@@ -330,46 +335,81 @@ func TestAClockOffsetCutToADayIsCheckedAtTheDay(t *testing.T) {
 	if !o.CoarseCut() || !o.Narrow() || o.Unit() != day {
 		t.Fatalf("thirty days at the day: CoarseCut %v, Narrow %v, Unit %s; want a day's cut, learned, reading in days", o.CoarseCut(), o.Narrow(), o.Unit())
 	}
-	from := time.Date(2026, 11, 2, 6, 0, 0, 0, time.UTC)
-	widest := day - (o.Max - o.Min) - 1
-	to := from.Add(widest)
-	if !o.Checkable(ms, from, to) || o.Checkable(ms, from, to.Add(1)) {
-		t.Errorf("Checkable: want the widest window with the offset's width within the day, a nanosecond more not")
+	if lo, hi := o.CutOffsets(); lo != 30*day || hi != 30*day {
+		t.Fatalf("thirty days at the day: CutOffsets %s to %s, want thirty days", lo, hi)
 	}
-	for _, read := range []time.Time{from, from.Add(widest / 2), to} {
-		v := read.Add(30 * day).Truncate(day)
-		for _, row := range []struct {
-			name string
-			at   time.Time
-			want bool
-		}{
-			{"the read plus thirty days, cut to the day", v, true},
-			{"one day stale", v.Add(-day), true},
-			{"one day ahead", v.Add(day), true},
-			{"three days stale", v.Add(-3 * day), false},
-			{"three days ahead", v.Add(3 * day), false},
-		} {
-			if got := o.Holds(row.at, ms, from, to); got != row.want {
-				t.Errorf("a read at %s, %s: held %v, want %v", read.Sub(from), row.name, got, row.want)
+	for _, w := range []struct {
+		name     string
+		from, to time.Time
+	}{
+		{"a window of 17 hours inside a day", time.Date(2026, 11, 2, 6, 0, 0, 0, time.UTC), time.Date(2026, 11, 2, 23, 0, 0, 0, time.UTC)},
+		{"a window of 12 hours across midnight", time.Date(2026, 11, 2, 18, 0, 0, 0, time.UTC), time.Date(2026, 11, 3, 6, 0, 0, 0, time.UTC)},
+	} {
+		if !o.Checkable(ms, w.from, w.to) {
+			t.Errorf("%s: not Checkable, want checkable in any window", w.name)
+		}
+		for _, read := range []time.Time{w.from, w.from.Add(w.to.Sub(w.from) / 2), w.to} {
+			v := read.Add(30 * day).Truncate(day)
+			turnAfter, turnBefore := !read.Truncate(day).Equal(w.to.Truncate(day)), !w.from.Truncate(day).Equal(read.Truncate(day))
+			for _, row := range []struct {
+				name string
+				at   time.Time
+				want bool
+			}{
+				{"the read plus thirty days, cut to the day", v, true},
+				{"one day stale", v.Add(-day), true},
+				{"one day ahead", v.Add(day), true},
+				{"two days stale", v.Add(-2 * day), turnBefore},
+				{"two days ahead", v.Add(2 * day), turnAfter},
+				{"three days stale", v.Add(-3 * day), false},
+				{"three days ahead", v.Add(3 * day), false},
+			} {
+				if got := o.Holds(row.at, ms, w.from, w.to); got != row.want {
+					t.Errorf("%s, a read at %s, %s: held %v, want %v", w.name, read.Sub(w.from), row.name, got, row.want)
+				}
 			}
 		}
 	}
-	if o.Holds(from.Add(30*day).Truncate(day), ms, from, to.Add(1)) {
-		t.Errorf("a window a nanosecond wider, with the offset's width the day: held, want nothing held")
+	// No window refuses the right value: three days wide, every read's
+	// value holds.
+	from := time.Date(2026, 11, 2, 6, 0, 0, 0, time.UTC)
+	wide := from.Add(3 * day)
+	for read := from; !read.After(wide); read = read.Add(6 * time.Hour) {
+		if !o.Holds(read.Add(30*day).Truncate(day), ms, from, wide) {
+			t.Errorf("FALSE RED: a window three days wide, a read at %s: the read plus thirty days not held", read.Sub(from))
+		}
 	}
 	for _, c := range []struct {
-		name string
-		o    ClockOffset
-		want bool
+		name   string
+		o      ClockOffset
+		want   bool
+		lo, hi time.Duration
 	}{
-		{"thirty days at the day, its width a day", ClockOffset{Min: 30 * day, Max: 31 * day, Res: day}, false},
-		{"thirty days at the day, its width just under a day", ClockOffset{Min: 30 * day, Max: 31*day - 1, Res: day}, true},
-		{"a day at the hour", ClockOffset{Min: day - 31*time.Second, Max: day + 30*time.Second, Res: time.Hour}, true},
-		{"a day at the hour, its width 21 hours", ClockOffset{Min: 12 * time.Hour, Max: 33 * time.Hour, Res: time.Hour}, false},
-		{"two hours at the hour", ClockOffset{Min: 2*time.Hour - 31*time.Second, Max: 2*time.Hour + 30*time.Second, Res: time.Hour}, true},
+		{"thirty days at the day, its width a day", ClockOffset{Min: 30 * day, Max: 31 * day, Res: day}, true, 30 * day, 30 * day},
+		{"thirty days at the day, its width just under a day", ClockOffset{Min: 30 * day, Max: 31*day - 1, Res: day}, true, 30 * day, 30 * day},
+		{"thirty or thirty-one days at the day, its width a day and two nanoseconds", ClockOffset{Min: 30*day - 1, Max: 31*day + 1, Res: day}, true, 30 * day, 31 * day},
+		{"a day at the hour", ClockOffset{Min: day - 31*time.Second, Max: day + 30*time.Second, Res: time.Hour}, true, 0, 0},
+		{"a day at the hour, its width 21 hours", ClockOffset{Min: 12 * time.Hour, Max: 33 * time.Hour, Res: time.Hour}, false, 0, 0},
+		{"two hours at the hour", ClockOffset{Min: 2*time.Hour - 31*time.Second, Max: 2*time.Hour + 30*time.Second, Res: time.Hour}, true, 2 * time.Hour, 2 * time.Hour},
 	} {
 		if got := c.o.Narrow(); got != c.want {
 			t.Errorf("Narrow of %s: %v, want %v", c.name, got, c.want)
+		}
+		if lo, hi := c.o.CutOffsets(); c.o.CoarseCut() && (lo != c.lo || hi != c.hi) {
+			t.Errorf("CutOffsets of %s: %s to %s, want %s to %s", c.name, lo, hi, c.lo, c.hi)
+		}
+	}
+	// Thirty or thirty-one days: checked against both, within a day of
+	// each.
+	both := ClockOffset{Min: 30*day - 1, Max: 31*day + 1, Res: day}
+	at := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	for _, row := range []struct {
+		name string
+		d    time.Duration
+		want bool
+	}{{"twenty-nine days", 29 * day, true}, {"thirty-two days", 32 * day, true}, {"twenty-eight days", 28 * day, false}, {"thirty-three days", 33 * day, false}} {
+		if got := both.Holds(at.Add(row.d).Truncate(day), ms, at, at.Add(time.Second)); got != row.want {
+			t.Errorf("thirty or thirty-one days, a value %s on: held %v, want %v", row.name, got, row.want)
 		}
 	}
 	// A Res of no step (96 hours, a hand-edited mock's) is no day's cut: a
@@ -394,54 +434,56 @@ func TestAClockOffsetCutToADayIsCheckedAtTheDay(t *testing.T) {
 // An offset cut to an hour that reads in hours (clock + 2h, the hour cut
 // down: Go's Truncate) is checked at the hour as a day's cut is at the day
 // (founder decision, 2026-10-27; ruled for an hour's cut 2026-10-29): the
-// learn step learns it where its width is narrower than the hour (Narrow),
-// though no unit holds three hours, and a replay checks it where its window
-// and the offset's width are narrower than the hour (Checkable), within one
-// hour of the window plus the offset on either side. At every read in the
-// widest such window it holds the read plus two hours and the value one
-// hour stale or ahead (the stated cost: a time to live changed by one hour
-// is not caught), never three hours off; two hours off holds only where the
-// read falls within the window and the width of the hour's turn, and is
-// refused at a read away from it. A window a nanosecond wider holds nothing.
-// An hour's cut that reads in minutes (a cut hour plus 90 minutes, or any
-// time to live of no whole number of hours) is checked so too; one that
-// reads in days is not (Within decides it, three hours against the day),
-// nor is a Res of two hours, which is no step. So is a minute's cut that
-// reads in minutes (clock + 30m at the minute) and a second's that reads in
-// seconds (a poll's dirtyAt <= now - 2s, an epoch's seconds), each where
-// its width is narrower than the cut; one at the second that reads in
-// minutes is not (Within decides it), nor is one at 100 ms (a decimal step
-// between units, no unit's cut).
+// learn step learns it whatever its width (Narrow), though no unit holds
+// three hours, and a replay checks it in any window (Checkable) against the
+// whole hours its range holds (CutOffsets: two hours), within one hour of
+// the window plus that offset on either side. At every read it holds the
+// read plus two hours and the value one hour stale or ahead (the stated
+// cost: a time to live changed by one hour is not caught); two hours off
+// only where the window holds a turn of the hour between the read and its
+// end (ahead) or its start (stale); three hours off never, in a window
+// narrower than the hour. A window three hours wide holds the right value
+// at every read. An hour's cut that reads in minutes (a cut hour plus 90
+// minutes, or any time to live of no whole number of hours) is checked so
+// too, against its range, which holds no whole hour; one that reads in days
+// is not (Within decides it, three hours against the day), nor is a Res of
+// two hours, which is no step. So is a minute's cut that reads in minutes
+// (clock + 30m at the minute) and a second's that reads in seconds (a
+// poll's dirtyAt <= now - 2s, an epoch's seconds), whatever its width; one
+// at the second that reads in minutes is not (Within decides it), nor is
+// one at 100 ms (a decimal step between units, no unit's cut).
 func TestAClockOffsetCutToAnHourThatReadsInHoursIsCheckedAtTheHour(t *testing.T) {
 	ms, hour := time.Millisecond, time.Hour
 	o := ClockOffset{Min: 2*hour - 62*time.Second, Max: 2*hour + 30*time.Second, Res: hour}
 	if !o.CoarseCut() || !o.Narrow() || o.Unit() != hour || !o.CoarseChecked(ms) || !o.CoarseChecked(hour) || o.CoarseChecked(2*hour) {
 		t.Fatalf("two hours at the hour: CoarseCut %v, Narrow %v, Unit %s; want an hour's cut, learned, reading in hours, checked at the hour for a value written at an hour or finer", o.CoarseCut(), o.Narrow(), o.Unit())
 	}
-	from := time.Date(2026, 11, 2, 6, 10, 0, 0, time.UTC)
-	widest := hour - (o.Max - o.Min) - 1
-	to := from.Add(widest)
-	if !o.Checkable(ms, from, to) || o.Checkable(ms, from, to.Add(1)) {
-		t.Errorf("Checkable: want the widest window with the offset's width within the hour, a nanosecond more not")
-	}
-	for _, read := range []time.Time{from, from.Add(widest / 2), to} {
-		v := read.Add(2 * hour).Truncate(hour)
-		lo, hi := from.Add(o.Min).Truncate(hour).Add(-hour), to.Add(o.Max).Add(hour)
-		for _, row := range []struct {
-			name string
-			at   time.Time
-			want bool
-		}{
-			{"the read plus two hours, cut to the hour", v, true},
-			{"one hour stale", v.Add(-hour), true},
-			{"one hour ahead", v.Add(hour), true},
-			{"two hours stale", v.Add(-2 * hour), !v.Add(-2 * hour).Before(lo)},
-			{"two hours ahead", v.Add(2 * hour), !v.Add(2 * hour).After(hi)},
-			{"three hours stale", v.Add(-3 * hour), false},
-			{"three hours ahead", v.Add(3 * hour), false},
-		} {
-			if got := o.Holds(row.at, ms, from, to); got != row.want {
-				t.Errorf("a read at %s, %s: held %v, want %v", read.Sub(from), row.name, got, row.want)
+	for _, w := range []struct {
+		name     string
+		from, to time.Time
+	}{
+		{"a window of 49 minutes inside an hour", time.Date(2026, 11, 2, 6, 10, 0, 0, time.UTC), time.Date(2026, 11, 2, 6, 59, 0, 0, time.UTC)},
+		{"a window of 40 minutes across 07:00", time.Date(2026, 11, 2, 6, 40, 0, 0, time.UTC), time.Date(2026, 11, 2, 7, 20, 0, 0, time.UTC)},
+	} {
+		for _, read := range []time.Time{w.from, w.from.Add(w.to.Sub(w.from) / 2), w.to} {
+			v := read.Add(2 * hour).Truncate(hour)
+			turnAfter, turnBefore := !read.Truncate(hour).Equal(w.to.Truncate(hour)), !w.from.Truncate(hour).Equal(read.Truncate(hour))
+			for _, row := range []struct {
+				name string
+				at   time.Time
+				want bool
+			}{
+				{"the read plus two hours, cut to the hour", v, true},
+				{"one hour stale", v.Add(-hour), true},
+				{"one hour ahead", v.Add(hour), true},
+				{"two hours stale", v.Add(-2 * hour), turnBefore},
+				{"two hours ahead", v.Add(2 * hour), turnAfter},
+				{"three hours stale", v.Add(-3 * hour), false},
+				{"three hours ahead", v.Add(3 * hour), false},
+			} {
+				if got := o.Holds(row.at, ms, w.from, w.to); got != row.want {
+					t.Errorf("%s, a read at %s, %s: held %v, want %v", w.name, read.Sub(w.from), row.name, got, row.want)
+				}
 			}
 		}
 	}
@@ -452,30 +494,41 @@ func TestAClockOffsetCutToAnHourThatReadsInHoursIsCheckedAtTheHour(t *testing.T)
 	if !o.Holds(v.Add(-hour), ms, at, at.Add(time.Second)) || o.Holds(v.Add(-2*hour), ms, at, at.Add(time.Second)) || o.Holds(v.Add(2*hour), ms, at, at.Add(time.Second)) {
 		t.Errorf("a call at 06:30: want one hour stale held, two hours off either way not")
 	}
-	if o.Holds(from.Add(2*hour).Truncate(hour), ms, from, to.Add(1)) {
-		t.Errorf("a window a nanosecond wider, with the offset's width the hour: held, want nothing held")
+	// No window refuses the right value: three hours wide, every read's
+	// value holds.
+	from := time.Date(2026, 11, 2, 6, 10, 0, 0, time.UTC)
+	for read := from; !read.After(from.Add(3 * hour)); read = read.Add(10 * time.Minute) {
+		if !o.Checkable(ms, from, from.Add(3*hour)) || !o.Holds(read.Add(2*hour).Truncate(hour), ms, from, from.Add(3*hour)) {
+			t.Errorf("FALSE RED: a window three hours wide, a read at %s: the read plus two hours not held", read.Sub(from))
+		}
 	}
+	sec := time.Second
 	for _, c := range []struct {
 		name   string
 		o      ClockOffset
 		coarse bool
 		narrow bool
+		lo, hi time.Duration
 	}{
-		{"two hours at the hour, its width an hour", ClockOffset{Min: 2 * hour, Max: 3 * hour, Res: hour}, true, false},
-		{"two hours at the hour, its width just under an hour", ClockOffset{Min: 2 * hour, Max: 3*hour - 1, Res: hour}, true, true},
-		{"a cut hour plus 90 minutes, reading in minutes", ClockOffset{Min: 90*time.Minute - 31*time.Second, Max: 90*time.Minute + 31*time.Second, Res: hour}, true, true},
-		{"a look-back of two hours at the hour", ClockOffset{Min: -2*hour - 30*time.Second, Max: -2*hour + 31*time.Second, Res: hour}, true, true},
-		{"a day at the hour", ClockOffset{Min: 24*hour - 31*time.Second, Max: 24*hour + 30*time.Second, Res: hour}, false, true},
-		{"two hours at two hours (no step)", ClockOffset{Min: 2*hour - 31*time.Second, Max: 2*hour + 30*time.Second, Res: 2 * hour}, false, false},
-		{"thirty minutes at the minute, its width a minute and a second", ClockOffset{Min: 30*time.Minute - 31*time.Second, Max: 30*time.Minute + 30*time.Second, Res: time.Minute}, true, false},
-		{"thirty minutes at the minute, its width just under a minute", ClockOffset{Min: 30*time.Minute - 30*time.Second, Max: 30*time.Minute + 30*time.Second - 1, Res: time.Minute}, true, true},
-		{"a look-back of two seconds at the second", ClockOffset{Min: -2*time.Second - 155*ms, Max: -2*time.Second + 368*ms, Res: time.Second}, true, true},
-		{"a look-back of two seconds at the second, its width a second", ClockOffset{Min: -2*time.Second - 500*ms, Max: -time.Second - 500*ms, Res: time.Second}, true, false},
-		{"a look-back of two minutes at the second", ClockOffset{Min: -2*time.Minute - 155*ms, Max: -2*time.Minute + 368*ms, Res: time.Second}, false, true},
-		{"forty-five seconds at 100 ms", ClockOffset{Min: 45*time.Second - 155*ms, Max: 45*time.Second + 368*ms, Res: 100 * ms}, false, true},
+		{"two hours at the hour, its width an hour", ClockOffset{Min: 2 * hour, Max: 3 * hour, Res: hour}, true, true, 2 * hour, 2 * hour},
+		{"two hours at the hour, its width just under an hour", ClockOffset{Min: 2 * hour, Max: 3*hour - 1, Res: hour}, true, true, 2 * hour, 2 * hour},
+		{"a cut hour plus 90 minutes, reading in minutes", ClockOffset{Min: 90*time.Minute - 31*sec, Max: 90*time.Minute + 31*sec, Res: hour}, true, true, 90*time.Minute - 31*sec, 90*time.Minute + 31*sec},
+		{"a look-back of two hours at the hour", ClockOffset{Min: -2*hour - 30*sec, Max: -2*hour + 31*sec, Res: hour}, true, true, -2 * hour, -2 * hour},
+		{"a day at the hour", ClockOffset{Min: 24*hour - 31*sec, Max: 24*hour + 30*sec, Res: hour}, false, true, 0, 0},
+		{"two hours at two hours (no step)", ClockOffset{Min: 2*hour - 31*sec, Max: 2*hour + 30*sec, Res: 2 * hour}, false, false, 0, 0},
+		{"thirty minutes at the minute, its width a minute and a second", ClockOffset{Min: 30*time.Minute - 31*sec, Max: 30*time.Minute + 30*sec, Res: time.Minute}, true, true, 30 * time.Minute, 30 * time.Minute},
+		{"thirty minutes at the minute, its width just under a minute", ClockOffset{Min: 30*time.Minute - 30*sec, Max: 30*time.Minute + 30*sec - 1, Res: time.Minute}, true, true, 30 * time.Minute, 30 * time.Minute},
+		{"a look-back of two seconds at the second", ClockOffset{Min: -2*sec - 155*ms, Max: -2*sec + 368*ms, Res: sec}, true, true, -2 * sec, -2 * sec},
+		{"a look-back of two seconds at the second, its width a second", ClockOffset{Min: -2*sec - 500*ms, Max: -sec - 500*ms, Res: sec}, true, true, -2 * sec, -2 * sec},
+		{"a look-back of two or three seconds at the second, both runs' windows across a turn", ClockOffset{Min: -3*sec - 100*ms, Max: -sec - 900*ms, Res: sec}, true, true, -3 * sec, -2 * sec},
+		{"a look-back of two minutes at the second", ClockOffset{Min: -2*time.Minute - 155*ms, Max: -2*time.Minute + 368*ms, Res: sec}, false, true, 0, 0},
+		{"forty-five seconds at 100 ms", ClockOffset{Min: 45*sec - 155*ms, Max: 45*sec + 368*ms, Res: 100 * ms}, false, true, 0, 0},
 	} {
 		if got, n := c.o.CoarseCut(), c.o.Narrow(); got != c.coarse || n != c.narrow {
 			t.Errorf("%s: CoarseCut %v, Narrow %v; want %v, %v", c.name, got, n, c.coarse, c.narrow)
+		}
+		if lo, hi := c.o.CutOffsets(); c.coarse && (lo != c.lo || hi != c.hi) {
+			t.Errorf("CutOffsets of %s: %s to %s, want %s to %s", c.name, lo, hi, c.lo, c.hi)
 		}
 	}
 }

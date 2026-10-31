@@ -955,11 +955,12 @@ func TestAnOffsetCutToAnHourInTheApplicationsZoneIsLearnedAndCheckedThere(t *tes
 // cut and then six hours added, one day stale is refused at a read after
 // 18:00 IST, as the rows of its shape decide); a millisecond past either edge
 // never does, nor does a value three days off; one two days off passes only
-// where the replay's read falls within its window and the offset's range of
-// the IST
-// day's turn, and is refused, naming the day's cut and its zone, at a read
-// away from it. A call whose windows, with the offset's range, are no
-// narrower than the day is refused, at learn and at replay, saying so.
+// where the replay's window holds a turn of the IST day between its read
+// and its end (ahead) or its start (stale), and is refused, naming the
+// day's cut and its zone, elsewhere. A call whose windows, with the
+// offset's range, are no narrower than the day is learned all the same, at
+// learn and at replay (founder decision: checked at the cut, never
+// refused), against the whole days its range holds.
 func TestAnOffsetCutToADayIsLearnedAndCheckedAtTheDay(t *testing.T) {
 	ist, err := time.LoadLocation("Asia/Kolkata")
 	if err != nil {
@@ -981,11 +982,11 @@ func TestAnOffsetCutToADayIsLearnedAndCheckedAtTheDay(t *testing.T) {
 	call := time.Date(2026, 10, 26, 18, 29, 59, 50e6, time.UTC)
 	ln := learn(ist, call, 30*day, 100*ms)
 	o := ln.Offset
-	if ln.Kind != KindClockOffset || o == nil || o.Res != day || o.AppZone != "+05:30" || o.Min > 30*day || o.Max <= 30*day || !strings.HasPrefix(ln.Why, p+" = clock + 30d (") || !strings.Contains(ln.Why, "cut to a day. A replay checks the offset at the day, read in the zone the value shows a whole day in, else the application's,") || !strings.Contains(ln.Why, "a time to live changed by less than two days can pass there, by where the replay's read falls in its day,") || !strings.Contains(ln.Why, "within its call's window and the offset's range ("+models.ShortDuration(o.Max-o.Min)+") of the day's turn") {
+	if ln.Kind != KindClockOffset || o == nil || o.Res != day || o.AppZone != "+05:30" || o.Min > 30*day || o.Max <= 30*day || !strings.HasPrefix(ln.Why, p+" = clock + 30d (") || !strings.Contains(ln.Why, "cut to a day. A replay checks the offset at the day, read in the zone the value shows a whole day in, else the application's,") || !strings.Contains(ln.Why, "read as clock + 30d, on either side, whatever the window's width") || !strings.Contains(ln.Why, "a time to live changed by one day can pass there, by where the replay's read falls in its day,") || !strings.Contains(ln.Why, "and one changed by more days only where the replay's call's window holds a turn of the day for each day more") {
 		t.Fatalf("FALSE RED: thirty days on, cut to the IST day, learned in IST: %s %+v (%s); want clock + 30d at the day, naming +05:30, not refused for the three days no unit holds", ln.Kind, o, ln.Why)
 	}
-	if w := learn(ist, call, 30*day, 25*time.Hour); w.Kind != KindUnaccounted || w.Offset != nil || !strings.Contains(w.Why, "the range is not narrower than the day the value is cut to") {
-		t.Errorf("thirty days on, cut to the IST day, a call's windows 25 hours open: %s %+v (%s); want refused, its range no narrower than the day", w.Kind, w.Offset, w.Why)
+	if w := learn(ist, call, 30*day, 25*time.Hour); w.Kind != KindClockOffset || w.Offset == nil || !strings.Contains(w.Why, "read as clock plus each whole day from 30d to 31d, on either side") {
+		t.Errorf("FALSE RED: thirty days on, cut to the IST day, a call's windows 25 hours open: %s %+v (%s); want learned at the day, never refused for its width, checked against both whole days its range holds", w.Kind, w.Offset, w.Why)
 	}
 	// Thirty days and six hours on the IST day's start (06:00 IST, 00:30Z)
 	// shows no whole day in any zone: learned at the day (the gap's), and a
@@ -1005,7 +1006,10 @@ func TestAnOffsetCutToADayIsLearnedAndCheckedAtTheDay(t *testing.T) {
 		from := base.Add(time.Duration(rng.Int63n(int64(10 * day)))).Truncate(ms)
 		to := from.Add(time.Duration(rng.Int63n(int64(10 * time.Minute)))).Truncate(ms)
 		read := from.Add(time.Duration(rng.Int63n(int64(to.Sub(from)) + 1))).Truncate(ms)
-		lo, hi := cutIn(from.Add(o.Min)).Add(-day), to.Add(o.Max).Add(day).Truncate(ms)
+		// The span a replay checks: its window plus the whole days the offset's
+		// range holds (models.ClockOffset.CutOffsets), widened by one cut.
+		clo, chi := o.CutOffsets()
+		lo, hi := cutIn(from.Add(clo)).Add(-day), to.Add(chi).Add(day).Truncate(ms)
 		v := cutIn(read).Add(ttl)
 		type row struct {
 			name string
@@ -1064,14 +1068,14 @@ func TestAnOffsetCutToADayIsLearnedAndCheckedAtTheDay(t *testing.T) {
 			t.Errorf("FALSE GREEN: clock + 30d at the IST day, %s off, read at 11:30 IST: %v (%s); want refused, naming the day's cut and its zone", models.ShortDuration(off), ok, why)
 		}
 	}
-	// A replay window that, with the offset's range, is no narrower than the
-	// day holds nothing, saying why; one a nanosecond narrower is checked.
-	widest := day - (o.Max - o.Min) - 1
-	if ok, why := CheckClockRead(p, *o, InstantLeaf(p, p, v, ms), Span{From: at, To: at.Add(widest), Zone: ist, Own: true}, true); !ok {
-		t.Errorf("FALSE RED: clock + 30d at the IST day, a window just narrower than the day with the offset's range: refused (%s)", why)
-	}
-	if ok, why := CheckClockRead(p, *o, InstantLeaf(p, p, v, ms), Span{From: at, To: at.Add(widest + 1), Zone: ist, Own: true}, true); ok || !strings.Contains(why, "with the offset's range is no narrower than the day, so keploy could not tell a time to live changed by days") {
-		t.Errorf("clock + 30d at the IST day, a window that with the offset's range is the day: %v (%s); want refused, saying the window is too wide", ok, why)
+	// No replay window refuses the right value (founder decision: checked
+	// at the cut, never refused): one as wide as the day with the offset's
+	// range, and one three days wide, hold the read at the window's start
+	// plus the offset.
+	for _, wide := range []time.Duration{day - (o.Max - o.Min), 3 * day} {
+		if ok, why := CheckClockRead(p, *o, InstantLeaf(p, p, v, ms), Span{From: at, To: at.Add(wide), Zone: ist, Own: true}, true); !ok {
+			t.Errorf("FALSE RED: clock + 30d at the IST day, a window %s wide: refused (%s)", wide, why)
+		}
 	}
 }
 
@@ -1086,12 +1090,14 @@ func TestAnOffsetCutToADayIsLearnedAndCheckedAtTheDay(t *testing.T) {
 // stale or ahead (the stated cost: a time to live of two hours changed by
 // one is not caught); a millisecond past either edge never does, nor does a
 // value three hours off; one two hours off passes only where the replay's
-// read falls within its window and the offset's range of the IST hour's
-// turn, and is refused, naming the hour's cut and its zone, at a read away
-// from it. Cut and then twenty minutes added, the value shows no whole hour
-// in any zone and is learned at the hour all the same (the gap's). A call
-// whose windows, with the offset's range, are no narrower than the hour is
-// refused, at learn and at replay, saying so.
+// window holds a turn of the IST hour between its read and its end (ahead)
+// or its start (stale), and is refused, naming the hour's cut and its zone,
+// elsewhere. Cut and then twenty minutes added, the value shows no whole
+// hour in any zone and is learned at the hour all the same (the gap's). A
+// call whose windows, with the offset's range, are no narrower than the
+// hour is learned all the same, at learn and at replay (founder decision:
+// checked at the cut, never refused), against the whole hours its range
+// holds.
 func TestAnOffsetCutToAnHourThatReadsInHoursIsLearnedAndCheckedAtTheHour(t *testing.T) {
 	ist, err := time.LoadLocation("Asia/Kolkata")
 	if err != nil {
@@ -1115,11 +1121,11 @@ func TestAnOffsetCutToAnHourThatReadsInHoursIsLearnedAndCheckedAtTheHour(t *test
 	call := time.Date(2026, 10, 26, 10, 29, 59, 50e6, time.UTC)
 	ln := learn(call, 2*hour, 100*ms)
 	o := ln.Offset
-	if ln.Kind != KindClockOffset || o == nil || o.Res != hour || o.AppZone != "+05:30" || o.Min > 2*hour || o.Max <= 2*hour || !strings.HasPrefix(ln.Why, p+" = clock + 2h (") || !strings.Contains(ln.Why, "cut to an hour. A replay checks the offset at the hour, read in the zone the value shows a whole hour in, else the application's,") || !strings.Contains(ln.Why, "a time to live changed by less than two hours can pass there, by where the replay's read falls in its hour,") || !strings.Contains(ln.Why, "falls in its hour, one changed by two hours fails unless") || !strings.Contains(ln.Why, "within its call's window and the offset's range ("+models.ShortDuration(o.Max-o.Min)+") of the hour's turn, and one changed by three hours or more fails, and near an hour the application's zone shows twice as its clocks go back a replay refuses the value (an application that cuts to that hour's first showing writes a value up to two hours early there); if the field") {
+	if ln.Kind != KindClockOffset || o == nil || o.Res != hour || o.AppZone != "+05:30" || o.Min > 2*hour || o.Max <= 2*hour || !strings.HasPrefix(ln.Why, p+" = clock + 2h (") || !strings.Contains(ln.Why, "cut to an hour. A replay checks the offset at the hour, read in the zone the value shows a whole hour in, else the application's,") || !strings.Contains(ln.Why, "read as clock + 2h, on either side, whatever the window's width") || !strings.Contains(ln.Why, "a time to live changed by one hour can pass there, by where the replay's read falls in its hour,") || !strings.Contains(ln.Why, "falls in its hour, and one changed by more hours only where") || !strings.Contains(ln.Why, "so in a window narrower than the hour one changed by two hours passes only where a turn of the hour falls in it, and one changed by three hours or more fails, and near an hour the application's zone shows twice as its clocks go back a replay refuses the value (an application that cuts to that hour's first showing writes a value up to two hours early there); if the field") {
 		t.Fatalf("FALSE RED: two hours on, cut to the IST hour, learned in IST: %s %+v (%s); want clock + 2h at the hour, naming +05:30, not refused for the three hours no unit holds", ln.Kind, o, ln.Why)
 	}
-	if w := learn(call, 2*hour, 61*time.Minute); w.Kind != KindUnaccounted || w.Offset != nil || !strings.Contains(w.Why, "the range is not narrower than the hour the value is cut to, so a replay checking it at the hour could not tell a time to live changed by hours from it") {
-		t.Errorf("two hours on, cut to the IST hour, a call's windows 61 minutes open: %s %+v (%s); want refused, its range no narrower than the hour", w.Kind, w.Offset, w.Why)
+	if w := learn(call, 2*hour, 61*time.Minute); w.Kind != KindClockOffset || w.Offset == nil || !strings.Contains(w.Why, "read as clock plus each whole hour from 2h to 3h, on either side") {
+		t.Errorf("FALSE RED: two hours on, cut to the IST hour, a call's windows 61 minutes open: %s %+v (%s); want learned at the hour, never refused for its width, checked against both whole hours its range holds", w.Kind, w.Offset, w.Why)
 	}
 	// Two hours and twenty minutes on the IST hour's start (xx:50 UTC, xx:20
 	// IST) shows no whole hour in any zone: learned at the hour (the gap's),
@@ -1139,7 +1145,10 @@ func TestAnOffsetCutToAnHourThatReadsInHoursIsLearnedAndCheckedAtTheHour(t *test
 		from := base.Add(time.Duration(rng.Int63n(int64(5 * 24 * hour)))).Truncate(ms)
 		to := from.Add(time.Duration(rng.Int63n(int64(10 * time.Minute)))).Truncate(ms)
 		read := from.Add(time.Duration(rng.Int63n(int64(to.Sub(from)) + 1))).Truncate(ms)
-		lo, hi := cutIn(from.Add(o.Min)).Add(-hour), to.Add(o.Max).Add(hour).Truncate(ms)
+		// The span a replay checks: its window plus the whole hours the offset's
+		// range holds (models.ClockOffset.CutOffsets), widened by one cut.
+		clo, chi := o.CutOffsets()
+		lo, hi := cutIn(from.Add(clo)).Add(-hour), to.Add(chi).Add(hour).Truncate(ms)
 		v := cutIn(read).Add(ttl)
 		type row struct {
 			name string
@@ -1194,14 +1203,14 @@ func TestAnOffsetCutToAnHourThatReadsInHoursIsLearnedAndCheckedAtTheHour(t *test
 			t.Errorf("FALSE GREEN: clock + 2h at the IST hour, %s off, read at 10:30 IST: %v (%s); want refused, naming the hour's cut and its zone", models.ShortDuration(off), ok, why)
 		}
 	}
-	// A replay window that, with the offset's range, is no narrower than the
-	// hour holds nothing, saying why; one a nanosecond narrower is checked.
-	widest := hour - (o.Max - o.Min) - 1
-	if ok, why := CheckClockRead(p, *o, InstantLeaf(p, p, v, ms), Span{From: at, To: at.Add(widest), Zone: ist, Own: true}, true); !ok {
-		t.Errorf("FALSE RED: clock + 2h at the IST hour, a window just narrower than the hour with the offset's range: refused (%s)", why)
-	}
-	if ok, why := CheckClockRead(p, *o, InstantLeaf(p, p, v, ms), Span{From: at, To: at.Add(widest + 1), Zone: ist, Own: true}, true); ok || !strings.Contains(why, "with the offset's range is no narrower than the hour, so keploy could not tell a time to live changed by hours") {
-		t.Errorf("clock + 2h at the IST hour, a window that with the offset's range is the hour: %v (%s); want refused, saying the window is too wide", ok, why)
+	// No replay window refuses the right value (founder decision: checked
+	// at the cut, never refused): one as wide as the hour with the offset's
+	// range, and one three hours wide, hold the read at the window's start
+	// plus the offset.
+	for _, wide := range []time.Duration{hour - (o.Max - o.Min), 3 * hour} {
+		if ok, why := CheckClockRead(p, *o, InstantLeaf(p, p, v, ms), Span{From: at, To: at.Add(wide), Zone: ist, Own: true}, true); !ok {
+			t.Errorf("FALSE RED: clock + 2h at the IST hour, a window %s wide: refused (%s)", wide, why)
+		}
 	}
 }
 
