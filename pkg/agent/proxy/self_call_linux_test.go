@@ -50,7 +50,7 @@ func TestServeTreeListenerKeepsRecordedDepOnMockPath(t *testing.T) {
 	}
 
 	p := selfCallProxy()
-	dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: uint32(os.Getpid())}
+	dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: uint32(os.Getpid()), AgentNsPid: uint32(os.Getpid())}
 	_, srv := net.Pipe()
 	defer srv.Close()
 	served, _, err := p.serveTreeListener(context.Background(), srv, dest, fmt.Sprintf("127.0.0.1:%d", port), "1")
@@ -85,7 +85,7 @@ func TestServeTreeListenerPassesSelfCallToRealHandler(t *testing.T) {
 	}()
 
 	p := selfCallProxy()
-	dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: uint32(os.Getpid())}
+	dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: uint32(os.Getpid()), AgentNsPid: uint32(os.Getpid())}
 	cli, srv := net.Pipe()
 	defer cli.Close()
 
@@ -124,7 +124,7 @@ func TestServeTreeListenerClosesDownUnrecordedLocalPort(t *testing.T) {
 	port := uint32(mustPort(t, testnet.RefusedAddr(t, "tcp")))
 
 	p := selfCallProxy()
-	dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: uint32(os.Getpid())}
+	dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: uint32(os.Getpid()), AgentNsPid: uint32(os.Getpid())}
 	_, srv := net.Pipe()
 	defer srv.Close()
 	served, _, err := p.serveTreeListener(context.Background(), srv, dest, fmt.Sprintf("127.0.0.1:%d", port), "1")
@@ -158,7 +158,7 @@ func TestServeTreeListenerListsAStoppedLocalPortTheStoreSeeds(t *testing.T) {
 			serve := func(addr string) (bool, *models.MockedRow) {
 				t.Helper()
 				port := uint32(mustPort(t, addr))
-				dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: uint32(os.Getpid())}
+				dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: uint32(os.Getpid()), AgentNsPid: uint32(os.Getpid())}
 				_, srv := net.Pipe()
 				t.Cleanup(func() { _ = srv.Close() })
 				served, outside, err := p.serveTreeListener(context.Background(), srv, dest, addr, "1")
@@ -211,7 +211,7 @@ func TestServeTreeListenerSaysTheFirstAndCountsTheRest(t *testing.T) {
 			}
 		}()
 		port := uint32(l.Addr().(*net.TCPAddr).Port)
-		dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: uint32(os.Getpid())}
+		dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: uint32(os.Getpid()), AgentNsPid: uint32(os.Getpid())}
 		cli, srv := net.Pipe()
 		defer srv.Close()
 		_ = cli.Close()
@@ -301,7 +301,7 @@ func TestServeTreeListenerTellsTheBuildTheOwner(t *testing.T) {
 	}()
 
 	p := selfCallProxy()
-	dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: uint32(os.Getpid())}
+	dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: uint32(os.Getpid()), AgentNsPid: uint32(os.Getpid())}
 	cli, srv := net.Pipe()
 	defer cli.Close()
 	done := make(chan struct{})

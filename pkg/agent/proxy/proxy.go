@@ -463,6 +463,13 @@ type Proxy struct {
 	selfCalls       atomic.Int64
 	selfCallOwners  sync.Map // owner pid -> struct{}
 	selfCallsLogged atomic.Int64
+	// unnamedCalls counts the calls to a listener of the run's own tree whose
+	// caller the agent could not name in its PID namespace (callerOf),
+	// so that it could not tell whether a test made them: the first is
+	// logged at WARN as it comes, and the total when the run ends
+	// (logSelfCalls). unnamedCallsLogged is the total last logged.
+	unnamedCalls       atomic.Int64
+	unnamedCallsLogged atomic.Int64
 
 	// dnsCache is a TTL-expiring, size-bounded LRU cache for DNS responses.
 	dnsCache *expirable.LRU[string, dnsCacheEntry]
@@ -6264,6 +6271,7 @@ func (p *Proxy) trackTree(conn net.Conn, owner int) func() {
 // logged at INFO, and only when the count has moved since it last did:
 // SetGracefulShutdown, which calls it, may be called more than once.
 func (p *Proxy) logSelfCalls() {
+	p.logUnnamedCalls()
 	n := p.selfCalls.Load()
 	if n < 2 {
 		return
@@ -6285,6 +6293,33 @@ func (p *Proxy) logSelfCalls() {
 	p.logger.Info("self-calls passed through to the run's own listeners; the real handler answered them, not a mock",
 		zap.Int64("calls", n), zap.Int("processes", processes),
 		zap.String("reason", models.ReasonLoopbackOutsideRun))
+}
+
+// unnamedCallerWarning is what the agent says of a call to a listener of the
+// run's own tree whose caller it cannot name in its PID namespace.
+const unnamedCallerWarning = "a call to the run's own listener came from a process keploy cannot name in its PID namespace, so keploy cannot tell whether a test made it: it was passed to the listener and NOT recorded as a test case"
+
+// logUnnamedCalls logs, when the run ends, how many calls to the run's own
+// listeners came from a process the agent could not name (callerOf),
+// when there was more than the one already logged as it came, and only when
+// the count has moved since it last did.
+func (p *Proxy) logUnnamedCalls() {
+	n := p.unnamedCalls.Load()
+	if n < 2 {
+		return
+	}
+	for {
+		last := p.unnamedCallsLogged.Load()
+		if n <= last {
+			return
+		}
+		if p.unnamedCallsLogged.CompareAndSwap(last, n) {
+			break
+		}
+	}
+	p.logger.Warn("calls to the run's own listeners came from processes keploy cannot name in its PID namespace; none of them was recorded as a test case",
+		zap.Int64("calls", n),
+		zap.String("next_step", "run keploy in the PID namespace of the app's tests, or in the host's (--pid=host, or hostPID in Kubernetes)"))
 }
 
 func (p *Proxy) closeDependencyConns() {
@@ -6370,7 +6405,7 @@ func (p *Proxy) serveTreeListener(ctx context.Context, srcConn net.Conn, dest *a
 		p.logger.Debug("the destination is a port the recording called as an outside dependency; serving it as mocks", zap.String("destination", dstAddr), zap.Int("owner", owner))
 		return false, nil, nil
 	}
-	caller := int(dest.KernelPid)
+	caller, unnamed := callerOf(dest)
 	// A mock.real destination (proven switch only) that the tree's listener
 	// serves is reached through it: counted as a relay to the destination
 	// would be (treeRealConn), or the run, whose recordings list it, fails
@@ -6403,12 +6438,27 @@ func (p *Proxy) serveTreeListener(ctx context.Context, srcConn net.Conn, dest *a
 	if p.selfCalls.Add(1) == 1 {
 		p.logger.Info("self-call passed through to the run's own listener; the real handler answers it, not a mock",
 			zap.String("destination", dstAddr), zap.Int("owner", owner), zap.Int("caller", caller),
+			zap.Uint32("caller_kernel_pid", dest.KernelPid),
 			zap.String("reason", models.ReasonLoopbackOutsideRun),
 			zap.String("note", "further self-calls are logged at debug, and counted at the end of a run that finishes"))
 	} else {
 		p.logger.Debug("self-call passed through to the run's own listener; the real handler answers it, not a mock",
 			zap.String("destination", dstAddr), zap.Int("owner", owner), zap.Int("caller", caller),
+			zap.Uint32("caller_kernel_pid", dest.KernelPid),
 			zap.String("reason", models.ReasonLoopbackOutsideRun))
+	}
+	if p.live != nil && unnamed {
+		// A test's call to the app it started is recorded as a test case
+		// (the live handler), and only a test's: a call whose caller the
+		// agent cannot name may be one, so it is counted and said, not
+		// passed through in silence.
+		if p.unnamedCalls.Add(1) == 1 {
+			p.logger.Warn(unnamedCallerWarning,
+				zap.String("destination", dstAddr), zap.Int("owner", owner),
+				zap.Uint32("caller_kernel_pid", dest.KernelPid),
+				zap.String("next_step", "run keploy in the PID namespace of the app's tests, or in the host's (--pid=host, or hostPID in Kubernetes)"),
+				zap.String("note", "further such calls are counted at the end of a run that finishes"))
+		}
 	}
 	if p.live != nil && caller != owner && descends(owner, caller) {
 		if isReal {
