@@ -241,6 +241,88 @@ func TestWhatASetAsideTestDoesNotServe(t *testing.T) {
 	}
 }
 
+// What a test handed aside on disk (ServeExactAsideOnDisk) does not serve,
+// as with its resident recordings: one that places or binds variables, a
+// protocol-phase one, and one whose destination keploy now reaches for real
+// (keep). And a test handed both resident and on disk offers its recordings
+// in recorded order, wherever each is kept: of two exact copies of one call
+// recorded with different answers, the earlier answers first.
+func TestWhatATestHandedAsideOnDiskDoesNotServe(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	disk, err := newDiskMocks(zap.NewNop(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = disk.Close() })
+	item := func(name string, at time.Duration, body string) *models.Mock {
+		mk := &models.Mock{Version: models.GetVersion(), Name: name, Kind: models.HTTP,
+			Spec: models.MockSpec{
+				HTTPReq:          &models.HTTPReq{Method: "GET", URL: "http://api/item"},
+				HTTPResp:         &models.HTTPResp{StatusCode: 200, Body: body},
+				ReqTimestampMock: exactT0.Add(at), ResTimestampMock: exactT0.Add(at + time.Millisecond),
+			}}
+		mk.TestModeInfo.Lifetime = models.LifetimePerTest
+		return mk
+	}
+	vars := item("vars", 1*time.Second, "v")
+	vars.Spec.Variables = models.MockVariables{"v": models.MockVariable{Recorded: "kiwi", Bind: "body.item"}}
+	phase := item("phase", 2*time.Second, "p")
+	phase.Spec.Metadata = map[string]string{"type": "config"}
+	if !phase.IsProtocolPhase() {
+		t.Fatal("the fixture's phase recording is not protocol-phase")
+	}
+	toReal := item("real", 3*time.Second, "r")
+	early := item("early", 4*time.Second, "first")
+	late := item("late", 5*time.Second, "second")
+	for _, mk := range []*models.Mock{vars, phase, toReal, early} {
+		if err := disk.Add(mk); err != nil {
+			t.Fatal(err)
+		}
+	}
+	disk.Finalize()
+	own := exactMock("own", time.Hour, models.LifetimeSession)
+	mm := stagedManager(t, nil, []*models.Mock{own})
+	mm.SetRecordingSource(disk.RangeKeys)
+	// As the agent hands a test: its resident recordings, then those on disk.
+	mm.ServeExactAside("Q", []*models.Mock{late})
+	mm.ServeExactAsideOnDisk("Q", []string{"vars", "phase", "real", "early"}, func(mk *models.Mock) bool { return mk.Name != "real" })
+	mm.ServeExactTest("T", []*models.Mock{own})
+	var got []string
+	mm.RangeSetAside(models.HTTP, httpint.RequestKeysOf("GET", "/item", "", true), func(b []*models.Mock) bool {
+		got = append(got, asideNames(b)...)
+		return true
+	})
+	if !slices.Equal(got, []string{"early<Q", "late<Q"}) {
+		t.Fatalf("offered %v; want early<Q then late<Q: no variable, protocol-phase or now-real recording, and in recorded order", got)
+	}
+}
+
+// One set-aside copy answers one call of a test, even when two of the
+// test's calls were offered it before either was answered (two connections
+// of the app making the same call at once): the claim is the test's either
+// way, so what the view was served aside (exactView.asideServed) refuses the
+// second, and the set's calls of that shape never exceed what it recorded.
+func TestASetAsideCopyOfferedToTwoCallsOfATestAnswersOne(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	aside := exactMock("aside", 0, models.LifetimeSession)
+	mm := stagedManager(t, nil, []*models.Mock{aside})
+	mm.ServeExactAside("Q", []*models.Mock{aside})
+	mm.ServeExactTest("T", nil)
+	first, second := setAsideOf(mm, models.HTTP), setAsideOf(mm, models.HTTP)
+	if a, b := asideNames(first), asideNames(second); !slices.Equal(a, []string{"aside<Q"}) || !slices.Equal(b, a) {
+		t.Fatalf("offered %v, then %v: want the copy offered to both calls", a, b)
+	}
+	if !mm.MarkMockAsUsed(*first[0]) {
+		t.Fatal("the first call was not answered by the set-aside copy")
+	}
+	if mm.MarkMockAsUsed(*second[0]) {
+		t.Fatal("one set-aside copy answered a second call of the same test")
+	}
+	if _, served, _ := mm.ExactTestServedAside(); !slices.Equal(served, []string{"aside served from Q (set aside)"}) {
+		t.Fatalf("served aside %v; want the copy once", served)
+	}
+}
+
 // A set-aside recording whose request holds a read of the application's
 // clock the learn step learned (MockSpec.Clocks) is offered to the tests
 // after it, unlike one that places or binds variables: a clock read's value
