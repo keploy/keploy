@@ -13,6 +13,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 )
 
@@ -1457,12 +1458,13 @@ func (m *MockManager) SetPoolNames(names []string) {
 // SetRecordingTimes sets where the teardown bound (teardownAfter) reads the
 // staged set's recordings the trees do not hold: src visits every recording
 // the agent keeps on disk, staged or not, with its name, its request and
-// answer times and whether it is protocol-phase, decoding none
+// answer times, whether it is protocol-phase and its clock
+// (models.Origin.Clock, "" for none), decoding none
 // (DiskMocks.RangeTimes); nil for none, when every one is in the trees.
 // keploy mock replay's staging reads no test's own recording (each test
 // reads its own as it opens), and the bound is the latest of them: from the
 // trees alone it is told by none. The agent sets it as it stages a set.
-func (m *MockManager) SetRecordingTimes(src func(visit func(name string, req, res time.Time, protocolPhase bool) bool) error) {
+func (m *MockManager) SetRecordingTimes(src func(visit func(name string, req, res time.Time, protocolPhase bool, clock string) bool) error) {
 	m.exact.times.Store(&recordingTimes{src: src})
 }
 
@@ -1470,7 +1472,7 @@ func (m *MockManager) SetRecordingTimes(src func(visit func(name string, req, re
 // recordings the trees do not hold (SetRecordingTimes). A new one is stored
 // on every set, so the bound cached under an older one is read again.
 type recordingTimes struct {
-	src func(visit func(name string, req, res time.Time, protocolPhase bool) bool) error
+	src func(visit func(name string, req, res time.Time, protocolPhase bool, clock string) bool) error
 }
 
 // SetPoolOwners installs, of the replay's scope table, the key of the test
@@ -2346,14 +2348,17 @@ func (v *exactView) afterTests(fired bool) bool { return v.test == "" && fired }
 // of a teardown recording. A set whose tests' place nothing tells gets none,
 // and such a call misses.
 func (m *MockManager) teardown(key string, startup []*models.Mock) []*models.Mock {
-	after := m.teardownAfter(key)
-	if after == nil {
+	on := m.teardownBy(key)
+	if on == nil {
 		return nil
 	}
 	viewNarrowed.Add(uint64(len(startup)))
 	var out []*models.Mock
 	for _, mk := range startup {
-		if mk != nil && mk.TestModeInfo.Lifetime == models.LifetimePerTest && after(mk.Spec.ReqTimestampMock) {
+		if mk == nil || mk.TestModeInfo.Lifetime != models.LifetimePerTest {
+			continue
+		}
+		if after := on(mockClock(mk)); after != nil && after(mk.Spec.ReqTimestampMock) {
 			out = append(out, mk)
 		}
 	}
@@ -2401,11 +2406,55 @@ func (m *MockManager) teardown(key string, startup []*models.Mock) []*models.Moc
 // after the last test, and in a later process's start-up: a call made there
 // may be answered by a teardown recording, and the teardown's own call then
 // misses, failing closed.
-func (m *MockManager) teardownAfter(key string) func(time.Time) bool {
+//
+// Under keploy mock replay the bound is per clock (models.Origin.Clock), as
+// fakeconn.SetClockID's contract orders stamps: only two on one clock may be
+// ordered against each other. A set may hold recordings of several record
+// runs, each on its own clock: a partial record keeps the tests it did not
+// record anew, with the pool of the run that recorded them, beside the tests
+// it did. Of a recording on a clock, the bound is the latest recording on
+// that clock and on none; a recording on another clock is no bound of it.
+// So a newer run's test, though recorded later, never moves an older run's
+// call after its own last test (a Go mongo-driver's endSessions) out of the
+// teardown, and that call is answered. A recording on no clock ("", an
+// untrusted stamp) is bounded by every recording, whatever its clock, as
+// before, and bounds every one: an untrusted time widens the bound, failing
+// closed. One record run stamps its recordings on one clock (the proxy's, or
+// proxyless capture's ktime, which has no relay) or on none, so the bound of
+// a set recorded in one run is the whole set's, as it was. Its limits: a
+// clock none of whose tests' recordings remain (every test of that run was
+// recorded anew) tells no teardown of it, and its call after the last test
+// misses (fail closed); and where the test recorded anew was its run's last,
+// that run's pool calls made between its previous test and it are after
+// every recording left on its clock, so they are its teardown too. keploy
+// test's staging (the recorded windows alone) reads no clock: it never
+// stages two record runs' recordings as one set.
+func (m *MockManager) teardownAfter(key, clock string) func(time.Time) bool {
+	on := m.teardownBy(key)
+	if on == nil {
+		return nil
+	}
+	return on(clock)
+}
+
+// mockClock is mk's clock (models.Origin.Clock) as the teardown bound reads
+// it: "" for none, and for every mock without the proven switch, which uses
+// no origin (models.Origin): there every recording bounds every other, as
+// before.
+func mockClock(mk *models.Mock) string {
+	if mk.Origin == nil || !provenswitch.On() {
+		return ""
+	}
+	return mk.Origin.Clock
+}
+
+// teardownBy is teardownAfter of every clock at once: the bound of a
+// recording on a clock, nil when nothing tells a teardown of any.
+func (m *MockManager) teardownBy(key string) func(clock string) func(time.Time) bool {
 	pool := m.exact.poolNames.Load()
 	if pool == nil {
 		if s := m.testWindows.Load(); s.Len() > 0 {
-			return s.After
+			return func(string) func(time.Time) bool { return s.After }
 		}
 		return nil
 	}
@@ -2420,9 +2469,9 @@ func (m *MockManager) teardownAfter(key string) func(time.Time) bool {
 	rev := m.StagingGeneration()
 	times := m.exact.times.Load()
 	if c := m.exact.teardownLast.Load(); c != nil && c.rev == rev && c.pool == pool && c.owners == owners && c.times == times && c.key == key {
-		return c.after()
+		return c.on()
 	}
-	var last time.Time
+	b := &teardownBound{rev: rev, pool: pool, owners: owners, times: times, key: key}
 	// bounds reports whether a recording named name bounds key's process.
 	bounds := func(name string, protocolPhase bool) bool {
 		if _, inPool := (*pool)[name]; inPool || protocolPhase {
@@ -2435,27 +2484,20 @@ func (m *MockManager) teardownAfter(key string) func(time.Time) bool {
 		}
 		return true
 	}
-	later := func(ts ...time.Time) {
-		for _, at := range ts {
-			if at.After(last) {
-				last = at
-			}
-		}
-	}
 	m.treesMu.RLock()
 	trees := []*TreeDb{m.filtered, m.unfiltered, m.startup}
 	m.treesMu.RUnlock()
 	for _, tree := range trees {
 		for _, mk := range m.treeValues(tree, "") {
 			if bounds(mk.Name, mk.IsProtocolPhase()) {
-				later(mk.Spec.ReqTimestampMock, mk.Spec.ResTimestampMock)
+				b.add(mockClock(mk), mk.Spec.ReqTimestampMock, mk.Spec.ResTimestampMock)
 			}
 		}
 	}
 	if times != nil && times.src != nil {
-		err := times.src(func(name string, req, res time.Time, protocolPhase bool) bool {
+		err := times.src(func(name string, req, res time.Time, protocolPhase bool, clock string) bool {
 			if bounds(name, protocolPhase) {
-				later(req, res)
+				b.add(clock, req, res)
 			}
 			return true
 		})
@@ -2466,35 +2508,75 @@ func (m *MockManager) teardownAfter(key string) func(time.Time) bool {
 			return nil
 		}
 	}
-	b := &teardownBound{rev: rev, pool: pool, owners: owners, times: times, key: key, last: last}
 	m.exact.teardownLast.Store(b)
-	return b.after()
+	return b.on()
 }
 
-// teardownBound is teardownAfter's bound for keploy mock replay (last: the
-// latest request or answer of a data-plane recording of the set outside the
-// pool that bounds key's process), as the trees stood at generation rev
-// (MockManager.StagingGeneration) under the scope table pool and owners,
-// with the set's recordings on disk read from times: the per-test reads
-// after the tests read it once per staging generation, not every recording
-// at every read. An exact serve moves Revision but
+// teardownBound is teardownAfter's bound for keploy mock replay: the latest
+// request or answer of the data-plane recordings of the set outside the pool
+// that bound key's process, of every clock (last), of those on no clock
+// (unclocked) and of those on each clock (clocks), as the trees stood at
+// generation rev (MockManager.StagingGeneration) under the scope table pool
+// and owners, with the set's recordings on disk read from times: the
+// per-test reads after the tests read it once per staging generation, not
+// every recording at every read. An exact serve moves Revision but
 // not the staging generation: exact serving hides what it serves rather
 // than deleting it from the trees, so the bound stands.
 type teardownBound struct {
-	rev    uint64
-	pool   *map[string]struct{}
-	owners *map[string]string
-	times  *recordingTimes
-	key    string
-	last   time.Time
+	rev       uint64
+	pool      *map[string]struct{}
+	owners    *map[string]string
+	times     *recordingTimes
+	key       string
+	last      time.Time
+	unclocked time.Time
+	clocks    map[string]time.Time
 }
 
-// after is the bound's teardownAfter: nil for a zero last.
-func (b *teardownBound) after() func(time.Time) bool {
+// add moves the bound to ts, of a recording on clock, where they are later.
+func (b *teardownBound) add(clock string, ts ...time.Time) {
+	for _, at := range ts {
+		if at.After(b.last) {
+			b.last = at
+		}
+		if clock == "" {
+			if at.After(b.unclocked) {
+				b.unclocked = at
+			}
+			continue
+		}
+		if at.After(b.clocks[clock]) {
+			if b.clocks == nil {
+				b.clocks = make(map[string]time.Time)
+			}
+			b.clocks[clock] = at
+		}
+	}
+}
+
+// on is the bound's teardownBy: nil when no recording bounds key's process.
+func (b *teardownBound) on() func(clock string) func(time.Time) bool {
 	if b.last.IsZero() {
 		return nil
 	}
-	return b.last.Before
+	return b.after
+}
+
+// after is the bound of a recording on clock: the latest recording on that
+// clock or on none, and of one on no clock, the latest of every clock; nil
+// for a zero bound.
+func (b *teardownBound) after(clock string) func(time.Time) bool {
+	last := b.last
+	if clock != "" {
+		last = b.clocks[clock]
+		if b.unclocked.After(last) {
+			last = b.unclocked
+		}
+	}
+	if last.IsZero() {
+		return nil
+	}
+	return last.Before
 }
 
 // exactPerTest is v's per-test read of staged, of kind (exactView.perTest),

@@ -640,10 +640,11 @@ type RecordedOfKindSetter interface {
 // reads, beside what is staged, the times of the set's recordings the agent
 // keeps on disk: a test's own are staged only as it opens, and the bound is
 // the latest of them. SetRecordingTimes sets where (src visits every on-disk
-// mock with its name, request and answer times and whether it is
-// protocol-phase, decoding none; nil for none).
+// mock with its name, request and answer times, whether it is
+// protocol-phase and its clock (models.Origin.Clock), decoding none; nil for
+// none).
 type RecordingTimesSetter interface {
-	SetRecordingTimes(src func(visit func(name string, req, res time.Time, protocolPhase bool) bool) error) error
+	SetRecordingTimes(src func(visit func(name string, req, res time.Time, protocolPhase bool, clock string) bool) error) error
 }
 
 // RecordingSourceSetter is implemented by a proxy whose miss diagnosis under
