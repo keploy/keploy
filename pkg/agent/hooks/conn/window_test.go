@@ -54,9 +54,16 @@ func givenUpWindow(t *testing.T) (*syncMock.SyncMockManager, *syncMock.Window) {
 // why it was given up), and a prune over its whole span would drop the mocks
 // of every request that ran beside it and is not decided yet, such as a gRPC
 // call, which opens no window. What nothing claims goes at the stale cutoff,
-// as ever.
+// as ever. The loss is told as the capture finds it (Window.LeftOut, as
+// Keep tells it): counted (KeptRequestsLeftOut, which warns of it) and on the
+// session's tally (tcs_left_out_in_flight), never left out without a word.
 func TestCaptureSynchronousLeavesOutAGivenUpRequest(t *testing.T) {
 	mgr, w := givenUpWindow(t)
+	session := mgr.OpenLossTally()
+	defer session.Close()
+	if n := mgr.KeptRequestsLeftOut(); n != 0 {
+		t.Fatalf("%d requests counted as left out before the capture found its window given up", n)
+	}
 	out := make(chan *models.Mock, 16)
 	mgr.SetOutputChannel(out)
 	reqAt := time.Now().Add(-time.Second)
@@ -73,6 +80,12 @@ func TestCaptureSynchronousLeavesOutAGivenUpRequest(t *testing.T) {
 	case tc := <-tcChan:
 		t.Fatalf("a given-up request was recorded: %s", tc.HTTPReq.URL)
 	default:
+	}
+	if n := mgr.KeptRequestsLeftOut(); n != 1 {
+		t.Fatalf("the given-up request was left out and %d were counted as left out, want 1: a loss without a count or a warning", n)
+	}
+	if n := session.LeftOut(); n != 1 {
+		t.Fatalf("the session's tally has %d requests left out, want the given-up one: its summary would say tcs_left_out_in_flight %d", n, n)
 	}
 	w.Close() // as the ingress does once the hook has returned
 	if n := mgr.OpenWindows(); n != 0 {
