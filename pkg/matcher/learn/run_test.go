@@ -361,6 +361,52 @@ func TestNamedLeavesTheExchangeItWasGiven(t *testing.T) {
 	}
 }
 
+// Named gives a place where its variable is used as one part of a longer
+// value (the variable's Within) that part (Seen.Part): what the place carries
+// of the variable is the value read out at it (Carried), never the longer
+// leaf; a place that holds it whole has none. Such a place is no source of a
+// later value (placeRank), and a read back from it names the variable with
+// the part (ReadBack).
+func TestNamedGivesAUseInsideALongerValueItsPart(t *testing.T) {
+	at := time.Unix(1700000000, 0)
+	e := Earlier{Mock: "mock-2", At: at, Own: true, Seen: []Seen{
+		{Side: Request, Place: "body.key", Leaf: Leaf{Path: "body.key", Type: String, Value: "APP:rec-1d2e3f4a"}, Live: "APP:live-5b6c7d8e", Written: true, Record: "keys/1"},
+		{Side: Request, Place: "body.id", Leaf: Leaf{Path: "body.id", Type: String, Value: "rec-1d2e3f4a"}, Live: "live-5b6c7d8e"},
+	}}
+	vars := models.MockVariables{"id": {Recorded: "rec-1d2e3f4a", Use: []string{"body.key", "body.id"}, Within: []models.VariablePart{{Place: "body.key", Before: "APP:"}, {Place: "body.key", Answer: true, Before: "x"}}}}
+	named := Named(e, vars, nil)
+	part, whole := named.Seen[0], named.Seen[1]
+	if part.Name != "id" || part.Part != (Within{Before: "APP:"}) || whole.Name != "id" || whole.Part.Set() {
+		t.Fatalf("Named gave %+v and %+v; want id at both, the part \"APP:\" at body.key alone", part, whole)
+	}
+	if rec, live, ok := part.Carried(); !ok || rec != "rec-1d2e3f4a" || live != "live-5b6c7d8e" {
+		t.Fatalf("the part's place carries %q, %q, %v; want the id as recorded and live", rec, live, ok)
+	}
+	if rec, live, ok := whole.Carried(); !ok || rec != "rec-1d2e3f4a" || live != "live-5b6c7d8e" {
+		t.Fatalf("the whole place carries %q, %q, %v; want its leaf", rec, live, ok)
+	}
+	if _, _, ok := (Seen{Name: "id", Part: Within{Before: "APP:"}, Leaf: Leaf{Value: "APP:rec-1d2e3f4a"}, Live: "ORG:live-5b6c7d8e"}).Carried(); ok {
+		t.Fatalf("a live leaf with other text around the value carries one")
+	}
+	if _, _, ok := (Seen{Leaf: Leaf{Value: "x"}, Live: "y"}).Carried(); ok {
+		t.Fatalf("a place that names no variable carries one")
+	}
+	if r := placeRank(named, part, true); r != placeNone {
+		t.Fatalf("the part's place ranks %d as the source of a later value; want none", r)
+	}
+	if r := placeRank(named, whole, true); r != 0 {
+		t.Fatalf("the whole place ranks %d; want the test's own call first", r)
+	}
+	again := Named(named, models.MockVariables{"id": {Use: []string{"body.key"}}}, nil)
+	if again.Seen[0].Part.Set() {
+		t.Fatalf("Named kept a stale part: %+v", again.Seen[0])
+	}
+	from, ok := ReadBack(Leaf{Path: "body.cursor.key", Type: String, Value: "APP:rec-1d2e3f4a"}, "keys/1", []Earlier{named})
+	if !ok || from.Name != "id" || from.Part != (Within{Before: "APP:"}) || from.Live != "APP:live-5b6c7d8e" {
+		t.Fatalf("a read back of the part's place is %+v, %v; want id named with the part \"APP:\"", from, ok)
+	}
+}
+
 // Named marks a request leaf its call's learn step learned as a plain read of
 // the clock (Seen.Clock), by the leaf's path as MockSpec.Clocks keys it: not
 // a read plus an offset, not an answer's leaf at the same path, not a leaf

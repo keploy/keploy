@@ -50,6 +50,14 @@ type Seen struct {
 	// Name is the variable the learn step put at Place (bound or used
 	// there), "" for none (Named).
 	Name string
+	// Part, of a place Name's variable is used at as one part of a longer
+	// value (models.MockVariable.Within: "APP:" before an app id), is the
+	// constant text beside it there; the zero Within where Name holds the
+	// leaf whole, or names none (Named). The leaf's value is then not the
+	// variable's: what it carries of it is read out at that part (Carried),
+	// and a later value that holds the longer leaf came from the variable's
+	// own place, with that text around it (placeRank).
+	Part Within
 	// Incoming: Name is a variable read in the test's incoming requests
 	// (models.MockVariable.Incoming), used here (Named): its value came
 	// from them, never from this place (placeRank).
@@ -780,6 +788,11 @@ type Place struct {
 	Incoming bool
 	// Name is the variable already at Var (Seen.Name), "" for none.
 	Name string
+	// Part, where Name is used at Var as one part of the leaf (Seen.Part),
+	// is the constant text beside it there: the leaf's value is then that
+	// text around Name's value, never Name's value. The zero Within where
+	// Name holds the leaf whole, or names none.
+	Part Within
 	// Clock: the learn step learned the leaf as a plain read of the
 	// application's clock (Seen.Clock).
 	Clock bool
@@ -3677,7 +3690,12 @@ func partOf(value, part string) string {
 // uses the run's variable (Seen.Name), or a variable read in the test's
 // incoming requests (Seen.Incoming), is none (placeNone): its value came
 // from the run's place that binds it, or from those requests, which a later
-// call uses too, never a second variable bound at the use.
+// call uses too, never a second variable bound at the use. So is a place
+// that uses a variable as one part of a longer value (Seen.Part: "APP:"
+// before an app id): its value is that variable's with constant text around
+// it, so a later call that carries it holds the variable inside it, found at
+// the variable's own place with that text beside it, never a second
+// variable bound at the use (a replay reads one value at a place).
 //
 // A client test's incoming requests holding the value whole (Earlier.
 // Incoming: what its harness gave the application in the test's window,
@@ -3692,7 +3710,7 @@ func partOf(value, part string) string {
 // the test's own window holds anyway: the test's own given place is the
 // one that holds it in the test.
 func placeRank(e Earlier, s Seen, whole bool) int {
-	if models.RunVariable(s.Name) || s.Incoming {
+	if models.RunVariable(s.Name) || s.Incoming || s.Part.Set() {
 		return placeNone
 	}
 	if e.Incoming && whole {
@@ -3730,7 +3748,7 @@ const placeNone = 9
 // seenPlace is the place s of e is.
 func seenPlace(e Earlier, s Seen, whole bool) Place {
 	return Place{Mock: e.Mock, Side: s.Side, Path: s.Leaf.Path, Noise: s.Leaf.Noise,
-		Var: s.Place, Live: s.Live, Whole: whole, Own: e.Own, Run: e.Run, Given: e.Given, Incoming: e.Incoming, Name: s.Name, Clock: s.Clock,
+		Var: s.Place, Live: s.Live, Whole: whole, Own: e.Own, Run: e.Run, Given: e.Given, Incoming: e.Incoming, Name: s.Name, Part: s.Part, Clock: s.Clock,
 		InStartUp: e.StartUp, givenWhole: s.Side == Response && whole}
 }
 
@@ -4466,6 +4484,11 @@ func (d *valueDrift) b64Holds(o *valueDrift) bool {
 // stored) is then answered with what this run wrote there: r's place is an
 // answer place of the variable bound at that earlier place.
 //
+// The place names the variable the write's place holds already (Name, as
+// Named put it), and the part it holds it at where the write used it as one
+// part of the value it stored (Part): the read then answers that variable
+// inside the same text.
+//
 // What decides is the evidence alone: the write drifted, the adapter marked
 // the place Written, and the read names the record it wrote. A value is read
 // back whatever its length, script or type (the request place's type is not
@@ -4511,7 +4534,7 @@ func ReadBack(r Leaf, record string, earlier []Earlier) (Place, bool) {
 				continue
 			}
 			first = Place{Mock: e.Mock, Side: Request, Path: s.Leaf.Path, Noise: s.Leaf.Noise,
-				Var: s.Place, Live: s.Live, Whole: true, Own: e.Own, Run: e.Run, Name: s.Name}
+				Var: s.Place, Live: s.Live, Whole: true, Own: e.Own, Run: e.Run, Name: s.Name, Part: s.Part}
 			found = true
 		}
 	}
@@ -4525,10 +4548,12 @@ func ReadBack(r Leaf, record string, earlier []Earlier) (Place, bool) {
 
 // Named is e with each request place that holds one of vars (as its bind or
 // a use) naming that variable (Seen.Name), the first by name when two hold
-// one place, marked where that variable is read in the test's incoming
-// requests (Seen.Incoming), and each request leaf clocks (the call's learn step's clock
-// reads, by leaf path, as MockSpec.Clocks keys them) holds as a plain read
-// marked so (Seen.Clock). An echo is not named: it is its call's alone, and
+// one place, with the part it holds it at where a use holds it as one part
+// of a longer value (Seen.Part, from the variable's Within), marked where
+// that variable is read in the test's incoming requests (Seen.Incoming), and
+// each request leaf clocks (the call's learn step's clock reads, by leaf
+// path, as MockSpec.Clocks keys them) holds as a plain read marked so
+// (Seen.Clock). An echo is not named: it is its call's alone, and
 // a later call that reads its value back binds it there as a variable of the
 // test (ReadBack). e's own Seen is left as it was: the result holds a copy,
 // with no name or mark at any other place.
@@ -4555,10 +4580,14 @@ func Named(e Earlier, vars models.MockVariables, clocks map[string]models.ClockO
 	}
 	e.Seen = append([]Seen(nil), e.Seen...)
 	for i, s := range e.Seen {
-		e.Seen[i].Name, e.Seen[i].Incoming = "", false
+		e.Seen[i].Name, e.Seen[i].Incoming, e.Seen[i].Part = "", false, Within{}
 		if s.Side == Request && s.Place != "" {
-			e.Seen[i].Name = at[s.Place]
-			e.Seen[i].Incoming = e.Seen[i].Name != "" && vars[e.Seen[i].Name].Incoming != ""
+			name := at[s.Place]
+			e.Seen[i].Name = name
+			e.Seen[i].Incoming = name != "" && vars[name].Incoming != ""
+			if p, ok := vars[name].PartAt(s.Place, false); name != "" && ok {
+				e.Seen[i].Part = Within{Before: p.Before, After: p.After}
+			}
 		}
 		o, clock := clocks[s.Leaf.Path]
 		e.Seen[i].Clock = s.Side == Request && clock && o.Plain()

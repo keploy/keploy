@@ -1629,7 +1629,7 @@ func (t *Tracker) keepRun(places []Earlier) {
 func runPlaceBytes(e Earlier) int64 {
 	n := int64(unsafe.Sizeof(e)) + int64(len(e.Mock)+len(e.Payload.rText))
 	for _, s := range e.Seen {
-		n += int64(unsafe.Sizeof(s)) + int64(len(s.Leaf.Path)+len(s.Leaf.Noise)+len(s.Leaf.Value)+len(s.Live)+len(s.Place)+len(s.Record)+len(s.Name))
+		n += int64(unsafe.Sizeof(s)) + int64(len(s.Leaf.Path)+len(s.Leaf.Noise)+len(s.Leaf.Value)+len(s.Live)+len(s.Place)+len(s.Record)+len(s.Name)+len(s.Part.Before)+len(s.Part.After))
 	}
 	return n
 }

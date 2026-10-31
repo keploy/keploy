@@ -127,6 +127,23 @@ func (l Learned) Carried() (rec, live string, ok bool) {
 	return rec, live, okRec && okLive
 }
 
+// Carried is the value s's variable (Seen.Name) has at s's place, as
+// recorded and as F saw it: the leaf's whole values where the variable holds
+// the leaf whole, else the values read out of each at its part (Seen.Part).
+// ok is false where s names no variable, or a leaf is not the part's text
+// around a value.
+func (s Seen) Carried() (rec, live string, ok bool) {
+	if s.Name == "" {
+		return "", "", false
+	}
+	if !s.Part.Set() {
+		return s.Leaf.Value, s.Live, true
+	}
+	rec, okRec := s.Part.ValueIn(s.Leaf.Value)
+	live, okLive := s.Part.ValueIn(s.Live)
+	return rec, live, okRec && okLive
+}
+
 // AnswerPart is how an answer leaf a holds the recorded value of r (a
 // variable's recorded value, r's type): whole (ok, the zero Within), or as
 // one part of a longer string, by PartWithin's bound, where the value is
