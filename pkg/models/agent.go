@@ -1048,6 +1048,10 @@ type StreamEndSummary struct {
 	// NotHandedOn: test cases of requests the app served that never reached
 	// the stream: the agent's ingress stopped first.
 	NotHandedOn uint64 `json:"tcs_not_handed_on,omitempty"`
+	// UnnamedCallers: calls to a listener of the run's own process tree whose
+	// caller the agent could not name in its PID namespace, so it could not
+	// tell whether a test made them: none was recorded as a test case.
+	UnnamedCallers uint64 `json:"calls_from_unnamed_callers,omitempty"`
 	// Unsettled: test cases saved before the agent had parsed all the
 	// traffic they overlap.
 	Unsettled int `json:"tcs_released_unsettled"`

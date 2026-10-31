@@ -539,6 +539,11 @@ func (a *AgentClient) sayAgentSummary(s models.StreamEndSummary) {
 		a.logger.Warn("the keploy agent lost some test cases: the app served their requests, and the agent's ingress stopped before their test cases reached the recording",
 			zap.Uint64("test_cases", s.NotHandedOn))
 	}
+	if s.UnnamedCallers > 0 {
+		a.logger.Warn("the keploy agent recorded no test case for some calls to the app: it could not name their callers in its PID namespace, so it could not tell whether a test made them",
+			zap.Uint64("calls", s.UnnamedCallers),
+			zap.String("next_step", "run keploy in the PID namespace of the app's tests, or in the host's (--pid=host, or hostPID in Kubernetes)"))
+	}
 	if s.Unsettled > 0 {
 		a.logger.Warn("the keploy agent saved some test cases before it had parsed all the traffic they overlap; if a connection's parser failed on it afterwards, they lack mocks",
 			zap.Int("test_cases", s.Unsettled))

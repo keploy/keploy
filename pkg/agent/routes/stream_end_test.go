@@ -121,8 +121,10 @@ func TestFrameStreamsEndWithTheirMarkerOnRequest(t *testing.T) {
 		// A request a pause cost before this session, and one the ingress
 		// read during a pause before it: not its own.
 		syncmgr.Get().NoteNotRecordedUnderPressure("10.0.0.9:5009 -> 127.0.0.1:8080")
-		// A test case an earlier session's ingress could not hand on.
+		// A test case an earlier session's ingress could not hand on, and a
+		// call of an earlier session whose caller the agent could not name.
 		syncmgr.Get().NoteNotHandedOn()
+		syncmgr.Get().NoteUnnamedCaller()
 		endPause := memoryguard.SetRecordingPausedForTest(true)
 		memoryguard.IngressRequest()
 		endPause()
@@ -141,6 +143,10 @@ func TestFrameStreamsEndWithTheirMarkerOnRequest(t *testing.T) {
 		// stopped first.
 		syncmgr.Get().NoteNotHandedOn()
 		syncmgr.Get().NoteNotHandedOn()
+		// Two calls to the app this session whose callers the agent could
+		// not name in its PID namespace.
+		syncmgr.Get().NoteUnnamedCaller()
+		syncmgr.Get().NoteUnnamedCaller()
 		// The ingress requests of this session: one before its pause, two
 		// during it, one after.
 		memoryguard.IngressRequest()
@@ -190,6 +196,13 @@ func TestFrameStreamsEndWithTheirMarkerOnRequest(t *testing.T) {
 		if sum.NotHandedOn != 2 {
 			t.Fatalf("the marker says %d test cases were not handed on, want this session's 2", sum.NotHandedOn)
 		}
+		if sum.UnnamedCallers != 2 {
+			t.Fatalf("the marker says %d calls came from unnamed callers, want this session's 2", sum.UnnamedCallers)
+		}
+		// Counted after the marker was written: the agent's summary says
+		// what the marker said (the counts are read once), not more.
+		syncmgr.Get().NoteNotHandedOn()
+		syncmgr.Get().NoteUnnamedCaller()
 		if _, err := mr.NextPart(); err != io.EOF {
 			t.Fatalf("the stream did not end after its marker: %v", err)
 		}
@@ -211,6 +224,7 @@ func TestFrameStreamsEndWithTheirMarkerOnRequest(t *testing.T) {
 			"requests_during_pauses":          2,
 			"requests_before_first_pause":     1,
 			"tcs_not_handed_on":               2,
+			"calls_from_unnamed_callers":      2,
 		} {
 			if got := sumLine[name]; got != want {
 				t.Errorf("the summary says %s=%v, want %d", name, got, want)
@@ -222,6 +236,9 @@ func TestFrameStreamsEndWithTheirMarkerOnRequest(t *testing.T) {
 		}
 		if got := fields(notHandedOnSaid)["test_cases"]; got != uint64(2) {
 			t.Errorf("the warning of test cases not handed on says %v, want 2", got)
+		}
+		if got := fields(unnamedCallersSaid)["calls"]; got != uint64(2) {
+			t.Errorf("the warning of calls from unnamed callers says %v, want 2", got)
 		}
 		if got, want := fmt.Sprint(warn["connections_most"]), "[10.0.0.1:5000 -> 127.0.0.1:8080 (2) 10.0.0.2:5001 -> 127.0.0.1:8080 (1)]"; got != want {
 			t.Errorf("the warning names the connections %s, want %s", got, want)

@@ -510,6 +510,10 @@ type SyncMockManager struct {
 	// whose test case never reached the recording's queue: the ingress
 	// stopped first (NoteNotHandedOn).
 	notHandedOn atomic.Uint64
+	// unnamedCallers counts the calls to a listener of the run's own process
+	// tree whose caller the agent could not name in its PID namespace, so
+	// that none of them was recorded as a test case (NoteUnnamedCaller).
+	unnamedCallers atomic.Uint64
 
 	// outChanClosedDrops counts mocks that were already counted in
 	// totalAdded (they passed the pressure gate) but were then dropped

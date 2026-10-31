@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/agent"
+	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -111,7 +112,8 @@ func TestUnderTheSwitchACallToItsOwnListenerIsNotListedWhateverTheKernelNumbersI
 // test's call to the app it started: the agent cannot tell, so it relays the
 // call to the listener, records no test case, and says so: at WARN for the
 // first as it comes, and the count at WARN when the run ends, never a silent
-// 0 cases.
+// 0 cases. Each is also counted on the recording's manager, whose session
+// summary and stream end marker say the session's count.
 func TestACallWhoseCallerTheAgentCannotNameIsCountedAndSaid(t *testing.T) {
 	recorded.forget()
 	t.Cleanup(recorded.forget)
@@ -122,6 +124,7 @@ func TestACallWhoseCallerTheAgentCannotNameIsCountedAndSaid(t *testing.T) {
 	port := pingServer(t)
 	dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: noProcess(t)}
 	const calls = 3
+	before := syncMock.Get().UnnamedCallers() // the manager outlives this test
 	for range calls {
 		if served, got, row := callTreeAs(t, p, dest); !served || got != "pong" || row != nil {
 			t.Fatalf("a call from a process the agent cannot name must still be relayed to the listener: served=%v answer=%q row=%+v", served, got, row)
@@ -129,6 +132,9 @@ func TestACallWhoseCallerTheAgentCannotNameIsCountedAndSaid(t *testing.T) {
 	}
 	if n := lives.Load(); n != 0 {
 		t.Fatalf("a call whose caller the agent cannot name went to the live handler %d times", n)
+	}
+	if got := syncMock.Get().UnnamedCallers() - before; got != calls {
+		t.Fatalf("the recording's manager counted %d calls from unnamed callers, want %d", got, calls)
 	}
 	first := logs.FilterMessage(unnamedCallerWarning).All()
 	if len(first) != 1 || first[0].Level != zapcore.WarnLevel || first[0].ContextMap()["caller_kernel_pid"] != dest.KernelPid {

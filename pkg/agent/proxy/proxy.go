@@ -6492,7 +6492,11 @@ func (p *Proxy) serveTreeListener(ctx context.Context, srcConn net.Conn, dest *a
 		// A test's call to the app it started is recorded as a test case
 		// (the live handler), and only a test's: a call whose caller the
 		// agent cannot name may be one, so it is counted and said, not
-		// passed through in silence.
+		// passed through in silence: over the agent's life here (the
+		// first warned of, the total logged as the run ends), and on the
+		// recording's manager, whose session summary and stream end
+		// marker report the session's count.
+		syncMock.FromContextOrGlobal(ctx).NoteUnnamedCaller()
 		if p.unnamedCalls.Add(1) == 1 {
 			p.logger.Warn(unnamedCallerWarning,
 				zap.String("destination", dstAddr), zap.Int("owner", owner),
