@@ -2084,18 +2084,6 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 	for _, g := range given {
 		reserved[g.Name] = true
 	}
-	answers := func(l learn.Learned, from []learn.Leaf) []string {
-		var out []string
-		for _, a := range from {
-			if !learn.WholeEcho(l.Recorded, a) {
-				continue
-			}
-			if place, ok := learn.VarPlace(a, true); ok {
-				out = append(out, place)
-			}
-		}
-		return out
-	}
 	echoed := map[string]string{} // recorded value -> its echo variable
 	byClaims, whole := jwtHeaders(learned, given)
 	for _, l := range learned {
@@ -2129,7 +2117,9 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 			}
 			v := p.vars[g.Name]
 			v.Recorded, v.Use = g.Recorded, appendNew(v.Use, place)
-			v.Answer = appendNew(v.Answer, answers(l, respLeavesOf(m))...)
+			at, parts := answerParts(r, r.Value, respLeavesOf(m))
+			v.Answer = appendNew(v.Answer, at...)
+			v.Within = models.MergeParts(v.Within, parts)
 			p.vars[g.Name] = v
 			p.values[g.Name] = g
 			continue
@@ -2187,12 +2177,10 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 				v.Recorded, v.Use, v.Incoming = recorded, appendNew(v.Use, use), from.Path
 				if from.Within.Set() {
 					v.Within = models.MergeParts(v.Within, []models.VariablePart{{Place: use, Before: from.Within.Before, After: from.Within.After}})
-					at, parts := answerParts(r, recorded, respLeavesOf(m))
-					v.Answer = appendNew(v.Answer, at...)
-					v.Within = models.MergeParts(v.Within, parts)
-				} else {
-					v.Answer = appendNew(v.Answer, answers(l, respLeavesOf(m))...)
 				}
+				at, parts := answerParts(r, recorded, respLeavesOf(m))
+				v.Answer = appendNew(v.Answer, at...)
+				v.Within = models.MergeParts(v.Within, parts)
 				p.vars[name] = v
 				p.values[name] = variables.Binding{Name: name, Value: from.Live, Recorded: recorded, Mock: from.Mock, Place: from.Path, Given: true}
 				continue
@@ -2251,12 +2239,10 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 			v.Recorded, v.Use = recorded, appendNew(v.Use, use)
 			if from.Within.Set() {
 				v.Within = models.MergeParts(v.Within, []models.VariablePart{{Place: use, Before: from.Within.Before, After: from.Within.After}})
-				at, parts := answerParts(r, recorded, respLeavesOf(m))
-				v.Answer = appendNew(v.Answer, at...)
-				v.Within = models.MergeParts(v.Within, parts)
-			} else {
-				v.Answer = appendNew(v.Answer, answers(l, respLeavesOf(m))...)
 			}
+			at, parts := answerParts(r, recorded, respLeavesOf(m))
+			v.Answer = appendNew(v.Answer, at...)
+			v.Within = models.MergeParts(v.Within, parts)
 			p.vars[name] = v
 			b := p.binds[from.Mock]
 			if b == nil {
@@ -2274,7 +2260,9 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 			bv.Clock = tracker.Drifts().ClockReads(recorded, from.Live)
 			rv := r
 			rv.Value = recorded
-			bv.Answer = appendNew(bv.Answer, earlierAnswers(earlier, from.Mock, rv)...)
+			bat, bparts := earlierAnswers(earlier, from.Mock, rv)
+			bv.Answer = appendNew(bv.Answer, bat...)
+			bv.Within = models.MergeParts(bv.Within, bparts)
 			b[name] = bv
 			p.values[name] = variables.Binding{Name: name, Value: from.Live, Recorded: recorded, Mock: from.Mock, Place: from.Var}
 
@@ -2286,12 +2274,23 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 			if !ok {
 				return p, r.Path + " is echoed in the answer, at a place keploy cannot bind it (a form or multipart field)"
 			}
-			at := answers(l, l.Echo)
+			// The answer echoes it whole, or as one part of a longer
+			// string (learn.AnswerPart): a replay answers each such place
+			// with this run's value, inside the text it was recorded with.
+			at, parts := answerParts(r, r.Value, l.Echo)
 			if len(at) == 0 {
 				// Echoes names every place the answer holds it; none is
 				// one keploy can answer with this run's value.
 				if e := l.Echo[0]; e.Type != learn.Keys && (learn.WholeEcho(r, e) || e.Unnamed && e.Value == r.Value) {
 					return p, r.Path + " is echoed in the answer whole only at " + l.Echo[0].Path + ", a place keploy cannot answer with this run's value"
+				}
+				for _, e := range l.Echo {
+					if e.Type != learn.String || e.Unnamed || r.Type != learn.String {
+						continue
+					}
+					if _, why := learn.PartWithin(e.Value, r.Value); why != "" {
+						return p, r.Path + " is echoed in the answer only inside a longer value at " + e.Path + ", where " + why + "; keploy cannot answer it with this run's value"
+					}
 				}
 				return p, r.Path + " is echoed in the answer only inside a longer value, in another form or at a key (" + l.Echo[0].Path + "), which keploy cannot answer with this run's value"
 			}
@@ -2311,7 +2310,7 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 				return p, "the test ended before " + r.Path + " was learned"
 			}
 			echoed[r.Value] = name
-			p.vars[name] = models.MockVariable{Recorded: r.Value, Bind: place, Answer: at, Echo: true}
+			p.vars[name] = models.MockVariable{Recorded: r.Value, Bind: place, Answer: at, Within: parts, Echo: true}
 			p.values[name] = variables.Binding{Name: name, Value: l.Live.Value, Recorded: r.Value, Mock: m.Name, Place: place}
 
 		default:
@@ -2362,20 +2361,31 @@ func givenFor(r, live learn.Leaf, given []variables.Binding) (variables.Binding,
 func respLeavesOf(m *models.Mock) []learn.Leaf { return respLeaves(m.Spec.HTTPResp) }
 
 // earlierAnswers are the answer places of the earlier mock that hold r's
-// recorded value whole: where a variable bound in its request is answered.
-func earlierAnswers(earlier []learn.Earlier, mock string, r learn.Leaf) []string {
-	var out []string
+// recorded value whole, or as one part of a longer string (learn.AnswerPart,
+// with that part): where a variable bound in its request is answered, with
+// this run's value inside the text it was recorded with.
+func earlierAnswers(earlier []learn.Earlier, mock string, r learn.Leaf) ([]string, []models.VariablePart) {
+	var at []string
+	var parts []models.VariablePart
 	for _, e := range earlier {
 		if e.Mock != mock {
 			continue
 		}
 		for _, s := range e.Seen {
-			if s.Side == learn.Response && s.Place != "" && learn.WholeEcho(r, s.Leaf) {
-				out = appendNew(out, s.Place)
+			if s.Side != learn.Response || s.Place == "" {
+				continue
+			}
+			w, ok := learn.AnswerPart(r, s.Leaf)
+			if !ok {
+				continue
+			}
+			at = appendNew(at, s.Place)
+			if w.Set() {
+				parts = models.MergeParts(parts, []models.VariablePart{{Place: s.Place, Answer: true, Before: w.Before, After: w.After}})
 			}
 		}
 	}
-	return out
+	return at, parts
 }
 
 // jwtHeaders sorts the headers among learned that hold a JWT in both runs

@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -185,7 +186,7 @@ func TestLearnMatchStaticNoiseHeadersAreNotLearned(t *testing.T) {
 
 // A value the answer echoes is a variable of the call alone: bound at the
 // request, answered with this run's value where the recording holds it whole
-// (a mention inside a longer text is served as recorded), never noise.
+// and where it holds it as one part of a longer text ("k-1 ok"), never noise.
 func TestLearnMatchLearnsAnEchoAsAVariableOfItsCall(t *testing.T) {
 	h, n, opts := learnOn(t)
 	db := &learnDb{perTest: []*models.Mock{learnRecorded("mock-0", 0, "POST", "/v1/charges", `{"key":"k-1","amount":5}`, nil, `{"id":"ch_1","idempotency_key":"k-1","amount":5,"note":"k-1 ok"}`)}}
@@ -193,10 +194,11 @@ func TestLearnMatchLearnsAnEchoAsAVariableOfItsCall(t *testing.T) {
 	if err != nil || miss != nil || served == nil {
 		t.Fatalf("served %v miss %+v err %v", served, miss, err)
 	}
-	if served.Spec.HTTPResp.Body != `{"id":"ch_1","idempotency_key":"k-2","amount":5,"note":"k-1 ok"}` {
-		t.Fatalf("served %s: this run's value is answered where the recorded one was echoed whole", served.Spec.HTTPResp.Body)
+	if served.Spec.HTTPResp.Body != `{"id":"ch_1","idempotency_key":"k-2","amount":5,"note":"k-2 ok"}` {
+		t.Fatalf("served %s: this run's value is answered where the recorded one was echoed, whole or inside a longer text", served.Spec.HTTPResp.Body)
 	}
-	want := models.MockVariables{"key": {Recorded: "k-1", Bind: "body.key", Answer: []string{"body.idempotency_key"}, Echo: true}}
+	want := models.MockVariables{"key": {Recorded: "k-1", Bind: "body.key", Answer: []string{"body.idempotency_key", "body.note"}, Echo: true,
+		Within: []models.VariablePart{{Place: "body.note", Answer: true, After: " ok"}}}}
 	if got := db.consumed[0].Spec.Learned(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("variables %+v, want %+v", got, want)
 	}
@@ -204,11 +206,11 @@ func TestLearnMatchLearnsAnEchoAsAVariableOfItsCall(t *testing.T) {
 		t.Fatalf("an echo is not noise: %v", db.consumed[0].Spec.ReqBodyNoise)
 	}
 
-	// Echoed only inside a longer text, it cannot be answered: refused,
-	// never learned as noise.
-	db = &learnDb{perTest: []*models.Mock{learnRecorded("mock-0", 0, "POST", "/v1/charges", `{"key":"k-1"}`, nil, `{"note":"k-1 ok"}`)}}
+	// Echoed only inside a longer text where it stands twice, it cannot be
+	// answered: refused, naming why, never learned as noise.
+	db = &learnDb{perTest: []*models.Mock{learnRecorded("mock-0", 0, "POST", "/v1/charges", `{"key":"k-1"}`, nil, `{"note":"k-1 ok, k-1 kept"}`)}}
 	served, miss, _ = h.learnMatch(context.Background(), live("POST", "/v1/charges", `{"key":"k-2"}`, nil), db, n, opts)
-	if served != nil || miss == nil || miss.res.Reason != models.MissRequestChanged || !strings.Contains(miss.res.Why, "only inside a longer value") {
+	if served != nil || miss == nil || miss.res.Reason != models.MissRequestChanged || !strings.Contains(miss.res.Why, "only inside a longer value") || !strings.Contains(miss.res.Why, "stands in it at 2 places") {
 		t.Fatalf("served %v miss %+v", served, miss)
 	}
 	if len(db.perTest) != 1 {
@@ -5710,5 +5712,194 @@ func TestLearnMatchATokenWhoseFormChangedIsRefused(t *testing.T) {
 		if want := c.name == "the recording's form"; (served != nil) != want || (miss == nil) != want {
 			t.Fatalf("%s: served %v miss %+v, want served %v", c.name, served != nil, miss, want)
 		}
+	}
+}
+
+// A variable bound whole that a call's answer holds inside a longer string
+// ("apps/<id>/settings") is answered there with this run's value, inside
+// the text it was recorded with: the variable's use place, its bind mock's
+// answer and an echo alike. Only a value standing once, whole between
+// characters that are not letters or digits or at an end, is such a part:
+// standing twice, inside a word, or a number inside text, the answer keeps
+// its recorded text there; an echo held only so is refused, naming why.
+func TestLearnMatchAnswersAVariableInsideALongerAnswer(t *testing.T) {
+	h, n, opts := learnOn(t)
+	type round struct {
+		ctx context.Context
+		db  *learnDb
+	}
+	setup := func(createAns, findKey, findAns string) round {
+		tr := learn.NewTracker()
+		tr.Begin()
+		db := &learnDb{perTest: []*models.Mock{
+			learnRecorded("mock-0", 0, "POST", "/v1/apps", `{"app":"a-1"}`, nil, createAns),
+			learnRecorded("mock-1", time.Second, "POST", "/v1/bindings/find", `{"key":`+findKey+`}`, nil, findAns),
+		}, observe: tr.ServedMock}
+		ctx := learn.WithTracker(context.Background(), tr)
+		if served, miss, _ := h.learnMatch(ctx, live("POST", "/v1/apps", `{"app":"a-9"}`, nil), db, n, opts); served == nil || miss != nil {
+			t.Fatalf("the create is paired: %+v", miss)
+		}
+		return round{ctx, db}
+	}
+	part := func(v models.MockVariable, place string) (models.VariablePart, bool) { return v.PartAt(place, true) }
+	has := func(list []string, s string) bool { return slices.Contains(list, s) }
+
+	// The use place's answer: whole at body.key, inside a longer string at
+	// body.link.
+	r := setup(`{}`, `"a-1"`, `{"key":"a-1","link":"apps/a-1/settings"}`)
+	served, miss, err := h.learnMatch(r.ctx, live("POST", "/v1/bindings/find", `{"key":"a-9"}`, nil), r.db, n, opts)
+	if err != nil || miss != nil || served == nil {
+		t.Fatalf("served %v miss %+v err %v", served, miss, err)
+	}
+	if served.Spec.HTTPResp.Body != `{"key":"a-9","link":"apps/a-9/settings"}` {
+		t.Fatalf("served %s: the answer holds this run's value, whole and inside the recorded text", served.Spec.HTTPResp.Body)
+	}
+	use := r.db.consumed[1].Spec.Learned()
+	var name string
+	for k := range use {
+		name = k
+	}
+	v := use[name]
+	if len(use) != 1 || v.Recorded != "a-1" || !has(v.Answer, "body.key") || !has(v.Answer, "body.link") || len(v.Within) != 1 {
+		t.Fatalf("variables %+v: one, answered whole at body.key and as a part at body.link", use)
+	}
+	if p, ok := part(v, "body.link"); !ok || p.Before != "apps/" || p.After != "/settings" {
+		t.Fatalf("the part at body.link: %+v %v", p, ok)
+	}
+	if _, ok := part(v, "body.key"); ok {
+		t.Fatal("body.key holds the value whole: no part")
+	}
+
+	// The replay answers this run's value there; without the part it
+	// cannot render the answer place and refuses, never serving the
+	// recorded id.
+	written := func(within bool) []*models.Mock {
+		m0 := learnRecorded("mock-0", 0, "POST", "/v1/apps", `{"app":"a-1"}`, nil, `{}`)
+		m1 := learnRecorded("mock-1", time.Second, "POST", "/v1/bindings/find", `{"key":"a-1"}`, nil, `{"key":"a-1","link":"apps/a-1/settings"}`)
+		m0.Spec.Variables = models.MockVariables{name: {Recorded: "a-1", Bind: "body.app"}}
+		w := v
+		if !within {
+			w.Within = nil
+		}
+		m1.Spec.Variables = models.MockVariables{name: w}
+		return []*models.Mock{m0, m1}
+	}
+	ci := &varDb{perTest: written(true)}
+	if ok, _, diag := matchVar(t, h, ci, live("POST", "/v1/apps", `{"app":"a-55"}`, nil)); !ok {
+		t.Fatalf("the create in CI: %+v", diag)
+	}
+	ok, stub, diag := matchVar(t, h, ci, live("POST", "/v1/bindings/find", `{"key":"a-55"}`, nil))
+	if !ok || stub.Spec.HTTPResp.Body != `{"key":"a-55","link":"apps/a-55/settings"}` {
+		t.Fatalf("the find in CI: ok %v diag %+v", ok, diag)
+	}
+	ci = &varDb{perTest: written(false)}
+	if ok, _, _ := matchVar(t, h, ci, live("POST", "/v1/apps", `{"app":"a-55"}`, nil)); !ok {
+		t.Fatal("the create in CI")
+	}
+	if ok, stub, _ := matchVar(t, h, ci, live("POST", "/v1/bindings/find", `{"key":"a-55"}`, nil)); ok && strings.Contains(stub.Spec.HTTPResp.Body, "apps/a-1/") {
+		t.Fatal("without its part the answer place served the recorded id")
+	}
+
+	// The bounds: the answer keeps its recorded text at a place that holds
+	// the value twice, inside a word, or a number inside text.
+	for _, c := range []struct{ name, key, ans, liveKey, want string }{
+		{"two places", `"a-1"`, `{"key":"a-1","link":"a-1/a-1"}`, `"a-9"`, `{"key":"a-9","link":"a-1/a-1"}`},
+		{"a part of a word", `"a-1"`, `{"key":"a-1","link":"appsa-1"}`, `"a-9"`, `{"key":"a-9","link":"appsa-1"}`},
+	} {
+		r = setup(`{}`, c.key, c.ans)
+		served, miss, _ := h.learnMatch(r.ctx, live("POST", "/v1/bindings/find", `{"key":`+c.liveKey+`}`, nil), r.db, n, opts)
+		if served == nil || miss != nil {
+			t.Fatalf("%s: served %v miss %+v", c.name, served, miss)
+		}
+		if served.Spec.HTTPResp.Body != c.want {
+			t.Fatalf("%s: served %s, want %s", c.name, served.Spec.HTTPResp.Body, c.want)
+		}
+		for _, v := range r.db.consumed[1].Spec.Learned() {
+			if has(v.Answer, "body.link") || len(v.Within) != 0 {
+				t.Fatalf("%s: variable %+v answers body.link", c.name, v)
+			}
+		}
+	}
+	tr := learn.NewTracker()
+	tr.Begin()
+	db := &learnDb{perTest: []*models.Mock{
+		learnRecorded("mock-0", 0, "POST", "/v1/apps", `{"app":41}`, nil, `{}`),
+		learnRecorded("mock-1", time.Second, "POST", "/v1/bindings/find", `{"key":41}`, nil, `{"key":41,"link":"orders/41"}`),
+	}, observe: tr.ServedMock}
+	ctx := learn.WithTracker(context.Background(), tr)
+	if served, miss, _ := h.learnMatch(ctx, live("POST", "/v1/apps", `{"app":97}`, nil), db, n, opts); served == nil || miss != nil {
+		t.Fatalf("the numeric create is paired: %+v", miss)
+	}
+	served, miss, _ = h.learnMatch(ctx, live("POST", "/v1/bindings/find", `{"key":97}`, nil), db, n, opts)
+	if served == nil || miss != nil || served.Spec.HTTPResp.Body != `{"key":97,"link":"orders/41"}` {
+		t.Fatalf("a number inside text: served %v miss %+v", served, miss)
+	}
+
+	// The bind mock's own answer holds the value inside a longer string:
+	// the bind answers it there with the value it binds.
+	r = setup(`{"self":"apps/a-1"}`, `"a-1"`, `{}`)
+	if served, miss, _ := h.learnMatch(r.ctx, live("POST", "/v1/bindings/find", `{"key":"a-9"}`, nil), r.db, n, opts); served == nil || miss != nil {
+		t.Fatalf("the find after a create that answers its id inside a longer value: %+v", miss)
+	}
+	binds := r.db.consumed[1].Spec.LearnedBinds()["mock-0"]
+	if len(binds) != 1 {
+		t.Fatalf("binds %+v", r.db.consumed[1].Spec.LearnedBinds())
+	}
+	for _, bv := range binds {
+		if p, ok := part(bv, "body.self"); bv.Bind != "body.app" || !has(bv.Answer, "body.self") || !ok || p.Before != "apps/" || p.After != "" {
+			t.Fatalf("the bind %+v answers body.self as a part after apps/", bv)
+		}
+	}
+
+	// An echo the answer holds inside a longer string is an echo variable
+	// answered there; held twice, refused naming why.
+	echo := func(ans string) (*models.Mock, *learnMiss, *learnDb) {
+		tr := learn.NewTracker()
+		tr.Begin()
+		db := &learnDb{perTest: []*models.Mock{learnRecorded("mock-0", 0, "POST", "/v1/orders", `{"id":"A7K29QXMtq"}`, nil, ans)}, observe: tr.ServedMock}
+		served, miss, err := h.learnMatch(learn.WithTracker(context.Background(), tr), live("POST", "/v1/orders", `{"id":"Zq81Lm0Xwe"}`, nil), db, n, opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return served, miss, db
+	}
+	served, miss, edb := echo(`{"self":"orders/A7K29QXMtq/items","state":"new"}`)
+	if served == nil || miss != nil || served.Spec.HTTPResp.Body != `{"self":"orders/Zq81Lm0Xwe/items","state":"new"}` {
+		t.Fatalf("an echo inside a longer answer: served %v miss %+v", served, miss)
+	}
+	for _, ev := range edb.consumed[0].Spec.Learned() {
+		if p, ok := part(ev, "body.self"); !ev.Echo || ev.Bind != "body.id" || !ok || p.Before != "orders/" || p.After != "/items" {
+			t.Fatalf("the echo %+v answers body.self as a part", ev)
+		}
+	}
+	served, miss, _ = echo(`{"self":"A7K29QXMtq/A7K29QXMtq","state":"new"}`)
+	if served != nil || miss == nil || miss.res.Reason != models.MissRequestChanged || !strings.Contains(miss.res.Why, "stands in it at 2 places") {
+		t.Fatalf("an echo standing twice: served %v miss %+v", served, miss)
+	}
+
+	// A value the test case gave, and one the test's harness gave the
+	// application, answered inside a longer string alike.
+	gdb := &givenDb{learnDb: &learnDb{perTest: []*models.Mock{learnRecorded("mock-0", 0, "GET", "/v1/users/u-1", "", nil, `{"id":"u-1","self":"users/u-1/profile"}`)}}}
+	gdb.table.Start([]variables.Binding{{Name: "userId", Value: "u-9", Recorded: "u-1", Mock: "test case get-user-1", Place: "url.path[2]", Given: true}})
+	served, miss, _ = h.learnMatch(context.Background(), live("GET", "/v1/users/u-9", "", nil), gdb, n, opts)
+	if served == nil || miss != nil || served.Spec.HTTPResp.Body != `{"id":"u-9","self":"users/u-9/profile"}` {
+		t.Fatalf("the test case's value inside a longer answer: served %v miss %+v", served, miss)
+	}
+	if p, ok := part(gdb.consumed[0].Spec.Learned()["userId"], "body.self"); !ok || p.Before != "users/" || p.After != "/profile" {
+		t.Fatalf("the test case's value at body.self: %+v %v", p, ok)
+	}
+	tr = learn.NewTracker()
+	tr.SetClientTests(true)
+	tr.SetIncomingSeen(true)
+	tr.GiveIncoming("TestTenantOnClient", []learn.IncomingRequest{learn.IncomingHTTP("test-1", learnAt.Add(-time.Second), "http://app/v1/x", map[string]string{"X-Tenant": "tn-4f1a9c"})})
+	tr.Begin()
+	tr.Incoming(learn.IncomingHTTP("", time.Now(), "http://app/v1/x", map[string]string{"X-Tenant": "tn-77d0e2"}))
+	db = &learnDb{perTest: []*models.Mock{learnRecorded("mock-0", 0, "POST", "/v1/keys", `{"tenant":"tn-4f1a9c"}`, nil, `{"link":"tenants/tn-4f1a9c/keys"}`)}}
+	served, miss, _ = h.learnMatch(learn.WithTracker(context.Background(), tr), live("POST", "/v1/keys", `{"tenant":"tn-77d0e2"}`, nil), db, n, opts)
+	if served == nil || miss != nil || served.Spec.HTTPResp.Body != `{"link":"tenants/tn-77d0e2/keys"}` {
+		t.Fatalf("the harness's value inside a longer answer: served %v miss %+v", served, miss)
+	}
+	if p, ok := part(db.consumed[0].Spec.Learned()["X-Tenant"], "body.link"); !ok || p.Before != "tenants/" || p.After != "/keys" {
+		t.Fatalf("the harness's value at body.link: %+v %v", p, ok)
 	}
 }
