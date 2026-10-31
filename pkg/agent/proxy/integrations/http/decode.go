@@ -372,9 +372,10 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					// pool or worker recording answers a call one more than
 					// the test recorded, which then misses as such
 					// (extraCall), its background copy left unspent.
-					if h.repeatsOwn(reqCtx, input, db, call, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, false, opts.NoiseStrict(), true) {
-						db = integrations.HideBackground(db)
-					}
+					held := db
+					db = integrations.OwnRepeatRead(db, call, models.Kind(models.HTTP), func(answered []*models.Mock) bool {
+						return h.answeredMatch(reqCtx, input, held, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, false, opts.NoiseStrict(), true)(answered)
+					})
 					stub, err = h.learnedMatchOf(reqCtx, input, db, mockDb, h.newLearnNoise(opts, bodyNoise, urlNoise), opts)
 					ok = stub != nil
 				}

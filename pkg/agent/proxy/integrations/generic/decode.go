@@ -101,6 +101,14 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 			// another set, the request finds nothing of it to be answered
 			// with, nor compared with, and misses saying so.
 			db, _ := integrations.HoldToRound(mockDb, call)
+			// An exchange one of the open test's own recordings already
+			// answered, byte for byte (extraCall's reading), is read with the
+			// set's background hidden: no pool or worker recording answers an
+			// exchange one more than the test recorded, which then misses as
+			// such, its background copy left unspent.
+			db = integrations.OwnRepeatRead(db, call, models.GENERIC, func(answered []*models.Mock) bool {
+				return findExactMatch(answered, genericRequests, true) != -1
+			})
 			// bestMatchedIndx := 0
 			// fuzzy match gives the index for the best matched generic mock
 			matched, genericResponses, err := fuzzyMatch(ctx, logger, genericRequests, db)

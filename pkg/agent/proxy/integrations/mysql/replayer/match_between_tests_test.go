@@ -3,6 +3,7 @@ package replayer_test
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -492,5 +493,76 @@ func TestKeployMockReplayAnswersAnExecuteWithItsOwnParametersRecording(t *testin
 	}
 	if got := matchPayload(t, ctx, executeReq(7, "1"), side.mm, dctx); got != "rec-exec-1" {
 		t.Fatalf("the EXECUTE id=1 was answered with %s; want rec-exec-1", got)
+	}
+}
+
+// Under the proven switch, on a set served by the background rules, a command
+// identical to one the open test's own recording already answered is one
+// command more than the test recorded: the background never answers it,
+// though its pool (a recording made at start-up) or its worker scope (one a
+// worker made in an earlier test's window) holds a recording of it. It
+// misses as an extra call, recorded once, and the pool's recording stays the
+// background's: between tests it answers the command. Answered by the
+// background's copy, a test that ran a recorded write twice passed.
+func TestTheBackgroundNeverAnswersACommandOneMoreThanTheTestRecorded(t *testing.T) {
+	for _, scope := range []string{"pool", "worker"} {
+		t.Run(scope, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, "1")
+			s0, _ := diffWindow(0)
+			s1, _ := diffWindow(1)
+			prep, _, _ := betweenTestsRecording()
+			at := s0.Add(7 * time.Millisecond)
+			if scope == "pool" {
+				at = diffBase.Add(-500 * time.Microsecond)
+			}
+			bg := diffMock(scope+"-exec-1", "c1", []mysql.Request{executeReq(7, "1")}, at, models.LifetimePerTest, "mocks")
+			// other is the background's recording of the statement with other
+			// parameters: no call of the test's own, so it answers one.
+			other := diffMock(scope+"-exec-2", "c1", []mysql.Request{executeReq(7, "2")}, at.Add(time.Microsecond), models.LifetimePerTest, "mocks")
+			own := diffMock("t1-exec-1", "c1", []mysql.Request{executeReq(7, "1")}, s1.Add(time.Millisecond), models.LifetimePerTest, "mocks")
+			mm := proxy.NewMockManager(nil, nil, zap.NewNop())
+			defer mm.Close()
+			mm.SetMocksWithWindow(nil, []*models.Mock{prep, bg, other, own}, models.BaseTime, time.Now().Add(time.Hour))
+			seedWindows(mm, 2)
+			var pool []string
+			if scope == "pool" {
+				pool = []string{bg.Name, other.Name}
+				mm.ServeExactBackground(models.RecordedWithS12Routing, pool, nil)
+			} else {
+				mm.ServeExactBackground(models.RecordedWithS12Routing, nil, []string{bg.Name, other.Name})
+				mm.ServeExactWorker([]string{bg.Name, other.Name})
+			}
+			mm.ServeExactTest("T1", []*models.Mock{own})
+			if !mm.ExactServing() {
+				t.Fatal("precondition: test T1 is not served exactly")
+			}
+			ctx, dctx := betweenTestsConn()
+
+			if got := matchPayload(t, ctx, executeReq(7, "1"), mm, dctx); got != own.Name {
+				t.Fatalf("T1's EXECUTE id=1 was answered with %s; want its own %s", got, own.Name)
+			}
+			resp, ok, miss, err := replayer.MatchForTest(ctx, zap.NewNop(), executeReq(7, "1"), mm, dctx)
+			if ok || err != nil {
+				payload := ""
+				if resp != nil {
+					payload = resp.Payload
+				}
+				t.Fatalf("T1's second EXECUTE id=1, one more than it recorded, was answered with %q (err %v)", payload, err)
+			}
+			if !strings.Contains(miss, "extraCall:1") {
+				t.Fatalf("the second EXECUTE id=1 missed with %s; want an extra call, recorded once", miss)
+			}
+			if got := matchPayload(t, ctx, executeReq(7, "2"), mm, dctx); got != other.Name {
+				t.Fatalf("T1's EXECUTE id=2, a call it never recorded, was answered with %s; want the background's %s", got, other.Name)
+			}
+
+			if scope != "pool" {
+				return
+			}
+			mm.ServeExactPool(models.PoolKeyNone, pool)
+			if got := matchPayload(t, ctx, executeReq(7, "1"), mm, dctx); got != bg.Name {
+				t.Fatalf("the EXECUTE id=1 between tests was answered with %s; want the pool's %s", got, bg.Name)
+			}
+		})
 	}
 }
