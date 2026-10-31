@@ -5681,6 +5681,128 @@ func TestLearnMatchAMintedTokensMovingClaimsAreEachLearnedAtTheirOwnPlace(t *tes
 	}
 }
 
+// The application mints its token, then makes another call of the test (a
+// job's event insert) before it sends the token: the read of the clock the
+// token's exp is built on (the mint's second plus 900) is made before the
+// call's window, which starts where that other call was answered. The
+// recording made all three in one second, so the call's window held the
+// offset there; record's full round answered the other call a second
+// later, so its window held none, and the call was refused. Read from each
+// run's test begin to the call, as a plain read made before its call's
+// window is, exp is learned as a read of the clock plus 900 checked from
+// the running test's begin (models.SinceTestBegin): a replay answers a
+// token minted early in its test, and refuses one whose exp is off the
+// offset, is the recorded one, or was minted before its test began (a
+// token cached from an earlier test), and one whose role changed. A token
+// record's full round minted before its test began is refused at learn.
+func TestLearnMatchATokenMintedBeforeAnEarlierCallOfItsTestHasItsExpLearnedSinceTheTestBegan(t *testing.T) {
+	const hs = `{"alg":"HS256","typ":"JWT"}`
+	const exp = "header.authorization{jwt}.exp"
+	agent := func(role string, minted time.Time, jti string) map[string]string {
+		claims := `{"sub":"u-1","role":"` + role + `","exp":` + strconv.FormatInt(minted.Unix()+900, 10) + `,"jti":"` + jti + `"}`
+		return map[string]string{"Authorization": bearerJWT(hs, claims, "U0lHTg")}
+	}
+	// The recording: the test began at +1.0 s, the lookup at +1.3 s, the
+	// mint's read at +1.4 s, the event insert at +1.42 s and the run at
+	// +1.45 s, all in one second.
+	recBegin := learnAt.Add(time.Second)
+	recMinted := learnAt.Add(1400 * time.Millisecond)
+	lookup := learnRecorded("mock-0", 1300*time.Millisecond, "GET", "/v1/session", "", nil, `{"user":"u-1"}`)
+	insert := learnRecorded("mock-1", 1420*time.Millisecond, "POST", "/v1/events", `{"kind":"job"}`, nil, `{"ok":true}`)
+	run := learnRecorded("mock-2", 1450*time.Millisecond, "POST", "/run/r-1", `{}`, agent("agent", recMinted, "6f1c2a9e-4b7d-4e21-9a3f-1d2c3b4a5e6f"), `{"ok":true}`)
+
+	// conn is a run of the client test that began at began: the lookup
+	// answered 300 ms on, the token minted 400 ms on, and the event insert
+	// answered 1.5 s on, in the next second.
+	conn := func(began time.Time, learnEnded bool) context.Context {
+		tr := learn.NewTracker()
+		tr.SetClientTests(true)
+		tr.SetAppClock(func(r time.Time) (time.Time, bool) { return r, true })
+		if !learnEnded {
+			tr.RecordedBegin(recBegin)
+		}
+		tr.BeginAt(began)
+		tr.ServedMockAt(lookup, began.Add(300*time.Millisecond))
+		tr.ServedMockAsRecorded(lookup)
+		tr.ServedMockAt(insert, began.Add(1500*time.Millisecond))
+		tr.ServedMockAsRecorded(insert)
+		tr.SetLearnEnded(learnEnded)
+		return learn.WithTracker(context.Background(), tr)
+	}
+	learnRun := func(began, minted time.Time) (*learnDb, *learnMiss, error) {
+		h, n, opts := learnOn(t)
+		in := live("POST", "/run/r-1", `{}`, agent("agent", minted, "0b9d8c7a-1e2f-4a3b-8c5d-6e7f8091a2b3"))
+		in.arrived = began.Add(1550 * time.Millisecond)
+		db := &learnDb{perTest: []*models.Mock{lookup, insert, run}}
+		_, miss, err := h.learnMatch(conn(began, false), in, db, n, opts)
+		return db, miss, err
+	}
+
+	began := learnAt.Add(10 * time.Minute)
+	db, miss, err := learnRun(began, began.Add(400*time.Millisecond))
+	if err != nil || miss != nil || len(db.consumed) != 1 {
+		why := ""
+		if miss != nil {
+			why = miss.res.Why
+		}
+		t.Fatalf("consumed %d miss %q err %v", len(db.consumed), why, err)
+	}
+	spec := db.consumed[0].Spec
+	o, ok := spec.Clocks[exp]
+	if !ok || len(spec.Clocks) != 1 || o.Min > 900*time.Second || o.Max < 900*time.Second || o.Max-o.Min > 2*time.Second || o.Since != models.SinceTestBegin {
+		t.Fatalf("clocks %+v: want %s alone, a read of the clock plus 900 s checked since its test began", spec.Clocks, exp)
+	}
+	if _, jti := spec.ReqBodyNoise["header.authorization{jwt}.jti"]; !jti || len(spec.ReqBodyNoise) != 1 {
+		t.Fatalf("noise %v: want the jti claim alone", spec.ReqBodyNoise)
+	}
+
+	// Record's full round minted the token 5 s before its test began: no
+	// read since the test began holds it, and it stays refused.
+	if db, miss, err := learnRun(began, began.Add(-5*time.Second)); err != nil || miss == nil || len(db.consumed) != 0 || !strings.HasPrefix(miss.res.Why, exp+" changed") {
+		why := ""
+		if miss != nil {
+			why = miss.res.Why
+		}
+		t.Fatalf("minted before its test began: consumed %d miss %q err %v; want it refused naming %s", len(db.consumed), why, err, exp)
+	}
+
+	// The replay 90 s later, the same calls at the same offsets.
+	replay := began.Add(90 * time.Second)
+	minted := replay.Add(400 * time.Millisecond)
+	for _, c := range []struct {
+		name, role string
+		mint       time.Time
+		ok         bool
+		differ     string
+	}{
+		{"minted before the event insert", "agent", minted, true, ""},
+		{"an exp a minute on", "agent", minted.Add(time.Minute), false, exp},
+		{"the recorded exp", "agent", recMinted, false, exp},
+		// A replay checks a read at its cut, its span widened by one cut
+		// (a second here) on either side: 5 s is well outside it.
+		{"minted before its test began", "agent", replay.Add(-5 * time.Second), false, exp},
+		{"the role changed", "admin", minted, false, "header.authorization{jwt}.role"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			ctx := conn(replay, true)
+			call := live("POST", "/run/r-1", `{}`, agent(c.role, c.mint, "9a8b7c6d-5e4f-4a3b-9c2d-1e0f9a8b7c6d"))
+			call.arrived = replay.Add(1550 * time.Millisecond)
+			mocks := learnedOnto([]*models.Mock{lookup, insert, run}, db.consumed)
+			ok, _, _, err := newHTTP().match(ctx, call, &varDb{perTest: mocks}, nil, nil, nil, true, false, false, true, true)
+			if err != nil || ok != c.ok {
+				t.Fatalf("answered %v err %v, want %v", ok, err, c.ok)
+			}
+			var names []string
+			for _, f := range strictDiff(ctx, call, liveDestination(ctx, call), mocks[2], newHTTP().newStrictNoise(nil, nil, nil)) {
+				names = append(names, f.shape)
+			}
+			if c.differ == "" && len(names) != 0 || c.differ != "" && (len(names) != 1 || names[0] != c.differ) {
+				t.Fatalf("differs %v; want %q alone", names, c.differ)
+			}
+		})
+	}
+}
+
 // In keploy test a test's own call's window is read by the offset rule
 // (learn.Window.OffsetsOnly): a value the application builds on its clock
 // by a constant offset is learned as that offset and checked at every

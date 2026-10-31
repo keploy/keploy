@@ -145,6 +145,66 @@ func TestAClientTestLearnsAReadMadeBeforeItsCallsWindowAsAReadSinceItsTestBegan(
 	}
 }
 
+// A read of the clock plus a constant offset made after its test began and
+// before its call's window (a token's exp, the mint's second plus 900, or
+// an expiry 30 minutes on, where the application made another call of the
+// test before it sent the value) is learned in the window from each run's
+// test begin as that offset, checked at every replay from its test's begin
+// (models.SinceTestBegin), as a plain read made there is: as an epoch's
+// digits and as a typed instant of its protocol. It stays refused where no
+// replay compares an offset, where no begin is known, or where it was read
+// before its test began in either run.
+func TestAClientTestLearnsAnOffsetReadBeforeItsCallsWindowAsThatOffsetSinceItsTestBegan(t *testing.T) {
+	const p = "body.docs.msgs.{}.expires_at"
+	ms := time.Millisecond
+	type leafOf func(time.Time) Leaf
+	secs := func(at time.Time) Leaf {
+		return Leaf{Path: p, Noise: p, Type: String, Value: strconv.FormatInt(at.Unix()+900, 10)}
+	}
+	millis := func(at time.Time) Leaf {
+		return Leaf{Path: p, Noise: p, Type: String, Value: strconv.FormatInt(at.Add(30*time.Minute).UnixMilli(), 10)}
+	}
+	typed := func(at time.Time) Leaf { return InstantLeaf(p, p, at.Add(30*time.Minute).Truncate(ms), ms) }
+	classify := func(f leafOf, rec, live earlierReadRun, w *Window) Learned {
+		r, l := f(rec.read), f(live.read)
+		return ClassifyIn(clientTestCache(), []string{p}, Shape{Leaves: map[string]Leaf{p: l}}, Shape{Leaves: map[string]Leaf{p: r}}, rec.call, nil, nil, nil, w)[0]
+	}
+	w := earlierReadWindow(earlierRec, earlierF).ComparesOffsets()
+	noBegin := (&Window{Rec: Span{From: earlierRec.prev, To: earlierRec.call}, F: Span{From: earlierF.prev, To: earlierF.call}}).ComparesOffsets()
+	before := func(r earlierReadRun) earlierReadRun { r.read = r.began.Add(-5 * time.Second); return r }
+	for _, f := range []struct {
+		name string
+		of   leafOf
+		off  time.Duration
+	}{
+		{"an exp, epoch seconds plus 900", secs, 900 * time.Second},
+		{"an expiry's milliseconds, plus 30m", millis, 30 * time.Minute},
+		{"a typed expiry, plus 30m", typed, 30 * time.Minute},
+	} {
+		t.Run(f.name, func(t *testing.T) {
+			ln := classify(f.of, earlierRec, earlierF, w)
+			o, ok := ln.Clock()
+			if ln.Kind != KindClockOffset || !ok || o.Since != models.SinceTestBegin || o.Min > f.off || o.Max < f.off {
+				t.Fatalf("%s %+v (%s); want the clock plus %s, checked since its test began", ln.Kind, ln.Offset, ln.Why, f.off)
+			}
+			for _, c := range []struct {
+				name      string
+				rec, live earlierReadRun
+				w         *Window
+			}{
+				{"no replay compares an offset", earlierRec, earlierF, earlierReadWindow(earlierRec, earlierF)},
+				{"no begin known", earlierRec, earlierF, noBegin},
+				{"read before the recording's test began", before(earlierRec), earlierF, w},
+				{"read before full round's test began", earlierRec, before(earlierF), w},
+			} {
+				if ln := classify(f.of, c.rec, c.live, c.w); ln.Kind != KindUnaccounted || ln.Offset != nil || ln.Read != nil {
+					t.Errorf("%s: %s %+v (%s); want it refused", c.name, ln.Kind, ln.Offset, ln.Why)
+				}
+			}
+		})
+	}
+}
+
 // A replay checks a read learned since its test began (models.SinceTestBegin)
 // from where its test began on the application's clock (Span.Began) to its
 // call: a value read there passes, one read before the test began fails,

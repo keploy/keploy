@@ -1978,13 +1978,18 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// a value refused in its call's window is classified again in the
 		// window from each run's test begin to the call (Window.sinceBegin:
 		// an application that reads its clock once for a request and writes
-		// it at a later call). Only a plain read of the clock it learns
-		// there is taken (one instant whole in both runs, or a typed one),
-		// checked at every replay from its test's begin
-		// (models.SinceTestBegin); anything else it learns there (noise, a
-		// variable, an echo, a read plus an offset) is not, and the refusal
-		// stands: the wider window turns a refusal into a checked read,
-		// never into noise.
+		// it at a later call). Only a read of the clock it learns there is
+		// taken, checked at every replay from its test's begin
+		// (models.SinceTestBegin, sinceTestBegin): a plain read (one instant
+		// whole in both runs, or a typed one), or a read plus one constant
+		// offset that a replay compares (KindClockOffset: a token's exp, the
+		// mint's second plus 900, where the application minted the token,
+		// then made another call of the test, answered a second later in one
+		// run, before it sent the token). Anything else it learns there
+		// (noise, a variable, an echo) is not, and the refusal stands: the
+		// wider window turns a refusal into a checked read, never into
+		// noise. A value read before its test began in either run stays
+		// refused (a token cached from an earlier test).
 		//
 		// So does a text whose one changed word is such a read (sinceWord:
 		// keploy mock's harness naming an app "[E2E] stop-<UnixNano>" by its
@@ -1995,9 +2000,9 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// checked at every replay, and the rest of the text is still
 		// compared.
 		if wb := w.sinceBegin(); ln.Kind == KindUnaccounted && wb != nil {
-			if early := leaf(r, l, wb, 0); early.Kind == KindClockRead && early.Read != nil {
-				early.Read.Since = models.SinceTestBegin
-				ln = early
+			early := leaf(r, l, wb, 0)
+			if read, ok := sinceTestBegin(early); ok {
+				ln = read
 			} else if word, ok := sinceWord(early, wb, leaf); ok {
 				ln = word
 			}
@@ -2073,9 +2078,12 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// learning does not hang on how fast the full round ran (api-
 		// server's app.createdAt, read half a second and a second boundary
 		// before its audit in record's full round). Those windows take a
-		// plain read alone, as the window from each run's test begin does:
-		// a read plus an offset there spans half a second and a second
-		// boundary of offsets, which no replay could check tightly. A value
+		// plain read alone: where the offset rule refused the value, a read
+		// plus an offset there would be a third reading of a value two
+		// readings already explain, spanning half a second and a second
+		// boundary of offsets. (A value no offset rule refused is read in
+		// the window from each run's test begin above, which takes a read
+		// plus one constant offset too, checked since its test began.) A value
 		// neither run's own window holds stays refused (the offset alone
 		// explains it), and so does anything else the value reads as
 		// without the rule (noise, another refusal, the clock plus an

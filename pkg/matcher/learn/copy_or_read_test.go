@@ -517,15 +517,17 @@ func TestAClientTestLearnsAnOffsetOfAGivenInstantOneRunsOwnWindowHoldsAsAReadSin
 // The rescue above reads a value in one run's own window and the other's
 // window since its test began (Window.oneRunSinceBegin) only where the offset
 // rule refused it (Learned.byOffset). A value no given instant builds by an
-// offset, refused in its own call's window for another reason, that reads in
-// those windows as the clock plus one constant offset (a token's expiresAt,
-// thirty days after a read record's full round made half a second and a
-// second boundary before its call's window) stays refused: the window from
-// each run's test begin takes a plain read only, never a read plus an offset
-// (classifyRead's rule for a read made before its call's window), and the
-// rescue widens no refusal but the offset rule's. Where both runs' own
-// windows hold the read, it is learned as the clock plus thirty days.
-func TestAClientTestKeepsAnExpiryNoOffsetRuleRefusedThatOneRunsOwnWindowHoldsRefused(t *testing.T) {
+// offset, refused in its own call's window for another reason, that reads as
+// the clock plus one constant offset (a token's expiresAt, thirty days after
+// a read record's full round made half a second and a second boundary before
+// its call's window) is no refusal the rescue widens. classifyRead's rule for
+// a read made before its call's window learns it instead: in the window from
+// each run's test begin it is the clock plus thirty days, checked at every
+// replay from its test's begin (models.SinceTestBegin), never noise and never
+// by the offset rule. Before, that rule took a plain read alone, and the
+// expiry was refused. Where both runs' own windows hold the read, it is
+// learned as the clock plus thirty days, checked from its call's window.
+func TestAClientTestLearnsAnExpiryNoOffsetRuleRefusedThatOneRunsOwnWindowHoldsSinceItsTestBegan(t *testing.T) {
 	const p = "body.docs.msgs.0.token.expiresAt.$numberLong"
 	const month = 30 * 24 * time.Hour
 	secs := func(t time.Time) string { return strconv.FormatInt(t.Unix(), 10) }
@@ -551,11 +553,13 @@ func TestAClientTestKeepsAnExpiryNoOffsetRuleRefusedThatOneRunsOwnWindowHoldsRef
 	}
 	if ln := learn(rec, fast); ln.Kind != KindClockOffset {
 		t.Fatalf("both runs' own windows: %s Offset=%+v (%s); want the clock plus thirty days", ln.Kind, ln.Offset, ln.Why)
-	} else if o, ok := ln.Clock(); !ok || o.Plain() || o.Min > month || o.Max <= month {
-		t.Fatalf("both runs' own windows: Offset=%+v; want the clock plus thirty days", o)
+	} else if o, ok := ln.Clock(); !ok || o.Plain() || o.Min > month || o.Max <= month || o.Since != "" {
+		t.Fatalf("both runs' own windows: Offset=%+v; want the clock plus thirty days, checked from its call's window", o)
 	}
-	if ln := learn(rec, slow); ln.Kind != KindUnaccounted || ln.byOffset {
-		t.Fatalf("one run's own window: %s Read=%+v Offset=%+v byOffset=%v (%s); want refused, by no offset rule", ln.Kind, ln.Read, ln.Offset, ln.byOffset, ln.Why)
+	if ln := learn(rec, slow); ln.Kind != KindClockOffset || ln.byOffset {
+		t.Fatalf("one run's own window: %s Read=%+v Offset=%+v byOffset=%v (%s); want the clock plus thirty days since its test began", ln.Kind, ln.Read, ln.Offset, ln.byOffset, ln.Why)
+	} else if o, ok := ln.Clock(); !ok || o.Plain() || o.Min > month || o.Max <= month || o.Since != models.SinceTestBegin {
+		t.Fatalf("one run's own window: Offset=%+v; want the clock plus thirty days, checked since its test began", o)
 	}
 }
 
