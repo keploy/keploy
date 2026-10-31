@@ -1127,7 +1127,13 @@ func clockOffsetSeen(path string, off models.ClockOffset) string {
 // by two passes only where a turn falls in it, and one changed by three or
 // more never does, on a day of 24 hours; at a finer cut, a replay refuses
 // the value near a wall time the application's zone shows twice
-// (cutExceptions).
+// (cutExceptions). A look-back at a second's or a minute's cut
+// (models.ClockOffset.CutLookBack) is checked from the start of the cut
+// that holds the window's start plus it, never a cut lower, so one made
+// longer passes only where the window holds a turn of the cut for each cut
+// longer, between its start and the read, and the line says what that
+// costs: a value read before the call's window fails where a turn of the
+// cut falls between that read and the window's start.
 func clockOffsetEvidence(path string, off models.ClockOffset) string {
 	if off.CoarseCut() {
 		w := unitWord(off.Res)
@@ -1136,7 +1142,16 @@ func clockOffsetEvidence(path string, off models.ClockOffset) string {
 		if off.Res >= time.Hour {
 			in = ", read in the zone the value shows a whole " + w + " in, else the application's"
 		}
-		return clockOffsetSeen(path, off) + ", cut to " + aUnit(off.Res) + ". A replay checks the offset at the " + w + in + ", as standing for its whole " + w + ", within one " + w + " of its call's window plus the offset, read as " + cutOffsetsNamed(off) + ", on either side, whatever the window's width, as a date cut to a day passes from yesterday: " + offsetNamed(off) + " changed by one " + w + " can pass there, by where the replay's read falls in its " + w + ", " + outside + "and one changed by more " + w + "s only where the replay's call's window holds a turn of the " + w + " for each " + w + " more, between the application's read and its call (a longer one) or the window's start (a shorter one), so in a window narrower than the " + w + " one changed by two " + w + "s passes only where a turn of the " + w + " falls in it, and one changed by three " + w + "s or more fails" + on + "; if the field is a time the application reads from its own clock with no rule, declare it noise in keploy.yml, and keploy stops comparing it"
+		head := clockOffsetSeen(path, off) + ", cut to " + aUnit(off.Res) + ". A replay checks the offset at the " + w + in + ", as standing for its whole " + w + ", "
+		tail := "; if the field is a time the application reads from its own clock with no rule, declare it noise in keploy.yml, and keploy stops comparing it"
+		if off.CutLookBack() {
+			return head + "from the start of the " + w + " that holds its call's window's start plus the offset, read as " + cutOffsetsNamed(off) + ", up to one " + w + " after its call plus it, whatever the window's width: a look-back made one " + w + " shorter can pass there, by where the replay's read falls in its " + w + ", and one made shorter by more " + w + "s only where the replay's call's window holds a turn of the " + w + " for each " + w + " more between the application's read and its call; one made longer only where the window holds a turn of the " + w + " for each " + w + " longer between its start and the application's read, so in a window narrower than the " + w + " one made two " + w + "s shorter passes only where a turn of the " + w + " falls between the read and the call (never where the application reads its clock at its call), one made a " + w + " longer only where one falls between the window's start and the read, and one made two " + w + "s longer or more fails, as does a value the application read before its call's window (kept across an earlier call) where a turn of the " + w + " falls between that read and the window's start" + on + tail
+		}
+		dir := "between the application's read and its call (a longer one) or between the window's start and the read (a shorter one)"
+		if off.Max < 0 {
+			dir = "between the window's start and the application's read (a longer one) or between the read and its call (a shorter one)"
+		}
+		return head + "within one " + w + " of its call's window plus the offset, read as " + cutOffsetsNamed(off) + ", on either side, whatever the window's width, as a date cut to a day passes from yesterday: " + offsetNamed(off) + " changed by one " + w + " can pass there, by where the replay's read falls in its " + w + ", " + outside + "and one changed by more " + w + "s only where the replay's call's window holds a turn of the " + w + " for each " + w + " more, " + dir + ", so in a window narrower than the " + w + " one changed by two " + w + "s passes only where a turn of the " + w + " falls in it, and one changed by three " + w + "s or more fails" + on + tail
 	}
 	return clockOffsetSeen(path, off) + ". A replay compares the offset: " + offsetNamed(off) + " changed by " + aUnit(off.Unit()) + " or more still fails; near a wall time the application's zone shows twice as its clocks go back (any zone's, where keploy knows none of the application's) a replay refuses the value, since an application that resolves that wall time to its first showing writes a value an hour early there (two hours in Antarctica/Troll); if the field is a time the application reads from its own clock with no rule, declare it noise in keploy.yml, and keploy stops comparing it"
 }

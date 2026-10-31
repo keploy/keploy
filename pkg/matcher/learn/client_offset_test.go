@@ -497,19 +497,24 @@ func secondsText(p string, t time.Time) Leaf {
 // as that look-back at the second, its line naming the cut, the offset a
 // replay checks (read as clock - 2s) and the fall-back exception. A replay
 // checks the value at the second against the call's window less exactly
-// that look-back, widened by one second on either side, in any window: the
-// read less the look-back holds at every read, and so does one a second
-// longer or shorter (the cut's stated cost); one changed by k seconds more
-// holds only where the replay's window holds k-1 turns of the second
-// between the application's read and its call (shorter) or the window's
-// start (longer). So a plain read in place of clock - 2s fails at every
+// that look-back, from the start of the second that holds the window's
+// start less it up to one second after the call less it, in any window:
+// the read less the look-back holds at every read, and so does one a
+// second shorter (the cut's stated cost: a writer that rounds); one made
+// k seconds shorter holds only where the replay's window holds k-1 turns
+// of the second between the application's read and its call, and one made
+// k seconds longer only where it holds k turns between the window's start
+// and the read. So a plain read in place of clock - 2s fails at every
 // replay whose application reads its clock at its call (api-server's poll,
 // its windows 61, 75 and 131 ms as recorded), and in a window it reads
 // inside, only where a turn of the second falls between that read and the
-// call; a 4 s look-back only where one falls between the window's start
-// and the read; one changed by three seconds or more never, in a window
-// narrower than a second. No window refuses the right value: 700 ms and
-// 2 s wide, it holds. The same look-back written in milliseconds (an
+// call; a 4 s look-back only where two turns fall between the window's
+// start and the read (in a window 2 s wide), never in one narrower than a
+// second. The cost of that: a value of the right look-back that the
+// application read before its call's window passes only where no turn of
+// the second falls between that read and the window's start. No window
+// refuses the right value read in it: 700 ms and 2 s wide, it holds. The
+// same look-back written in milliseconds (an
 // application that does not cut) stays refused: there a read made two
 // seconds before its call's window shows it too
 // (TestAClientTestsOffsetIsRefusedWhereNoComparedOffsetReads).
@@ -537,7 +542,7 @@ func TestAWholeSecondLookBackAtTheSecondsCutIsCheckedAtTheSecond(t *testing.T) {
 			continue
 		}
 		named := "clock - " + models.ShortDuration(tc.back)
-		for _, part := range []string{" = " + named + " (", ", cut to a second. A replay checks the offset at the second", ", read as " + named + ", on either side, whatever the window's width", "near a wall time the application's zone shows twice as its clocks go back a replay refuses the value"} {
+		for _, part := range []string{" = " + named + " (", ", cut to a second. A replay checks the offset at the second", ", from the start of the second that holds its call's window's start plus the offset, read as " + named + ", up to one second after its call plus it, whatever the window's width", "one made two seconds longer or more fails, as does a value the application read before its call's window (kept across an earlier call) where a turn of the second falls between that read and the window's start", "near a wall time the application's zone shows twice as its clocks go back a replay refuses the value"} {
 			if !strings.Contains(ln.Why, part) {
 				t.Errorf("%s: the learned line does not say %q: %s", named, part, ln.Why)
 			}
@@ -565,12 +570,20 @@ func TestAWholeSecondLookBackAtTheSecondsCutIsCheckedAtTheSecond(t *testing.T) {
 				rows := []row{
 					{"the read less the look-back", read.Add(-tc.back), true},
 					{"a look-back a second shorter", read.Add(-tc.back + sec), true},
-					{"a look-back a second longer", read.Add(-tc.back - sec), true},
+					{"a look-back a second longer", read.Add(-tc.back - sec), before >= 1},
 					{"a look-back two seconds shorter", read.Add(-tc.back + 2*sec), after >= 1},
-					{"a look-back two seconds longer", read.Add(-tc.back - 2*sec), before >= 1},
+					{"a look-back two seconds longer", read.Add(-tc.back - 2*sec), before >= 2},
 					{"a look-back three seconds shorter", read.Add(-tc.back + 3*sec), after >= 2},
-					{"a look-back three seconds longer", read.Add(-tc.back - 3*sec), before >= 2},
+					{"a look-back three seconds longer", read.Add(-tc.back - 3*sec), before >= 3},
 					{"a plain read", read, time.Duration(after) >= tc.back/sec-1},
+				}
+				// The right look-back of a read made 100, 500 and 900 ms
+				// before the window (the application kept it across an
+				// earlier call): it holds only where no turn of the second
+				// falls between that read and the window's start.
+				for _, stale := range []time.Duration{100 * ms, 500 * ms, 900 * ms} {
+					early := from.Add(-stale)
+					rows = append(rows, row{"the look-back of a read " + stale.String() + " before the window", early.Add(-tc.back), early.Truncate(sec).Equal(from.Truncate(sec))})
 				}
 				for _, row := range rows {
 					if got, why := CheckClockRead(tc.p, o, secondsText(tc.p, row.at), s, true); got != row.ok {
@@ -624,7 +637,7 @@ func TestAWholeSecondLookBackIsLearnedWhateverItsCallsWindow(t *testing.T) {
 			base := c.call.Add(48 * time.Hour).Truncate(sec)
 			for _, ws := range []struct{ rw, fw time.Duration }{{50 * ms, 300 * ms}, {50 * ms, 700 * ms}, {300 * ms, 50 * ms}} {
 				ln := form.learn(rec, live, window(ws.rw, ws.fw))
-				if ln.Kind != KindClockOffset || ln.Offset == nil || !strings.Contains(ln.Why, ", read as "+form.named+", on either side, whatever the window's width") {
+				if ln.Kind != KindClockOffset || ln.Offset == nil || !strings.Contains(ln.Why, ", read as "+form.named+", ") || !strings.Contains(ln.Why, ", whatever the window's width") {
 					t.Errorf("FALSE RED: windows %s and %s wide: %s %+v (%s); want learned, read as %s", ws.rw, ws.fw, ln.Kind, ln.Offset, ln.Why, form.named)
 					continue
 				}

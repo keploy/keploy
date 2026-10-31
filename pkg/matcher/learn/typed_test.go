@@ -2055,6 +2055,33 @@ func TestACutCoarserThanTheLeadShowsNoOffset(t *testing.T) {
 	}
 }
 
+// An offset cut to a unit whose range holds no whole cut (a cut hour plus
+// 90 minutes, a cut minute less 90 seconds: the application cuts first and
+// offsets after) is read as its range, never as "each whole hour from" a
+// range that holds none, and is checked within one cut of it on either
+// side, a look-back too.
+func TestARangeHoldingNoWholeCutIsReadAsItsRange(t *testing.T) {
+	const p = "body.expiresAt"
+	sec := time.Second
+	for _, row := range []struct {
+		o     models.ClockOffset
+		named string
+	}{
+		{models.ClockOffset{Min: 89 * time.Minute, Max: 91 * time.Minute, Res: time.Hour}, "clock plus an offset from 1h29m to 1h31m"},
+		{models.ClockOffset{Min: -90*sec - 200*time.Millisecond, Max: -90*sec + 300*time.Millisecond, Res: time.Minute}, "clock plus an offset from -1m30.2s to -1m29.7s"},
+	} {
+		if !row.o.CoarseCut() || row.o.CutLookBack() {
+			t.Fatalf("precondition: %+v CoarseCut %v, CutLookBack %v; want a cut, no look-back at the cut", row.o, row.o.CoarseCut(), row.o.CutLookBack())
+		}
+		if got := cutOffsetsNamed(row.o); got != row.named {
+			t.Errorf("%+v reads as %q, want %q", row.o, got, row.named)
+		}
+		if why := clockOffsetEvidence(p, row.o); !strings.Contains(why, ", read as "+row.named+", on either side, whatever the window's width") {
+			t.Errorf("%+v: the learned line does not read it as its range, on either side: %s", row.o, why)
+		}
+	}
+}
+
 // N2 of the review of the cut's first fix: a reason says what set the
 // resolution it names.
 func TestAReasonSaysWhatSetTheResolution(t *testing.T) {
