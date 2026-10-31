@@ -38,11 +38,11 @@ import (
 //
 // A payload is read in the same forms (textForms). What these readings
 // cannot read whole is not learned as noise: a value whose drift sits in a
-// stray '%' or '\', in a run of the standard base64 alphabet that decodes
-// as neither base64 nor base32, or in text of a script with no spaces
-// between its words, is
-// refused (unparsed), as is a value with a changed word that appears
-// elsewhere in the test without having drifted with it (unaccounted). An
+// stray '%' or '\', in a run of the standard base64 alphabet outside an
+// instant (b64Runs) that decodes as neither base64 nor base32, or in text
+// of a script with no spaces between its words, is refused (unparsed), as
+// is a value with a changed word that appears elsewhere in the test
+// without having drifted with it (unaccounted). An
 // encoding these readings do not declare (base58 or base36, a compressed or
 // an encrypted value) is not read: a value that flowed into one reads as a
 // fresh token, and is learned as noise when no word of it appears earlier.
@@ -648,7 +648,13 @@ func isText(b []byte) bool {
 // unparsed says what of a drifted value, read in form (recorded, live),
 // the declared readings cannot read whole, where it drifted: "" when
 // nothing. clock are the value's clock words: a clock read the lead moved
-// ("41+00:00" of an aware datetime) is read, whatever runs it makes.
+// ("41+00:00" of an aware datetime) is read, whatever runs it makes. An
+// instant of the value is read as the instant it is, by the clock's rules,
+// whether or not it is such a read: its text makes no run of the base64
+// alphabet (b64Runs). An aware datetime whose zone has a '+' ("+05:30",
+// "+00:00", "+0530") is never refused for the run its last digits and the
+// zone make ("13+05" of "2026-10-31T16:20:13+05:30"), which decoded or not
+// by its length alone; one behind UTC ("-03:30") or written "Z" made none.
 func unparsed(rec, live string, clock clockSet) string {
 	if rec == live {
 		return ""
@@ -690,13 +696,27 @@ func unparsed(rec, live string, clock clockSet) string {
 	return ""
 }
 
-// b64Runs are the runs of the base64 alphabets in s, with their padding.
+// b64Runs are the runs of the base64 alphabets in s, with their padding,
+// outside its instants (instantSpans): an instant's text is a clock's
+// (its date's dashes, a zone's sign), whatever bytes beside it make a run
+// with it, and the clock's rules read it whole.
 func b64Runs(s string) map[string]bool {
 	out := map[string]bool{}
+	from := 0
+	for _, in := range instantSpans(s) {
+		b64RunsIn(s[from:in.start], out)
+		from = in.end
+	}
+	b64RunsIn(s[from:], out)
+	return out
+}
+
+// b64RunsIn adds the runs of the base64 alphabets in s, with their padding,
+// to out.
+func b64RunsIn(s string, out map[string]bool) {
 	for st, en, ok := nextB64Run(s, 0); ok; st, en, ok = nextB64Run(s, en) {
 		out[s[st:en]] = true
 	}
-	return out
 }
 
 // b64DecodeAny reports whether s decodes in any base64 variant, to text or

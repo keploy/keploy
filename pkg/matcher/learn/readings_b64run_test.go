@@ -24,6 +24,8 @@ var b64RunCorpus = []string{
 	"MZXW6YTBOI======", "mzxw6ytboi", "c2lnbmVk--ZGlnZXN0", "a_b-c/d+e", "/v1/users/41?at=100&x=y",
 	"héllo wörld ünïcode", "日本語のテキスト abc", "\xff\xfeab\xc3", "abc\x00def", "tab\there", "--__--++//",
 	`{"token":"tok-0c41b2","state":"eyJ1IjoxfQ=="}`, strings.Repeat("A", 5000) + "===", strings.Repeat("ab= ", 300),
+	"2026-10-31T16:20:13+05:30", "2026-10-31 16:20:13+05:30", "2026-10-31T16:20:13.305+05:30==", "sig=ab+cd 2026-10-31T16:20:13+05:30+ef+gh",
+	"at+1761909613+ab", "ab+cd2026-10-31T16:20:13+05:30",
 }
 
 // b64RunAlphabet weighs the random texts toward a run's edges: both
@@ -47,8 +49,10 @@ func b64RunTexts() []string {
 // The one-pass scan finds the runs of the base64 alphabets the pattern
 // [A-Za-z0-9+/_-]+={0,6} found, at the same spans, in the corpus and in
 // 20 000 random texts weighed toward a run's edges: each place the learn
-// step reads runs (b64Text's runs and its '.'-separated parts, b64Runs)
-// reads the runs it read before.
+// step reads runs (b64Text's runs and its '.'-separated parts) reads the
+// runs it read before; b64Runs reads those of the text outside its
+// instants (instantSpans), the pattern's runs of the text with each
+// instant's bytes blanked.
 func TestTheBase64RunScanFindsWhatThePatternFound(t *testing.T) {
 	for _, s := range b64RunTexts() {
 		var got [][]int
@@ -65,8 +69,14 @@ func TestTheBase64RunScanFindsWhatThePatternFound(t *testing.T) {
 				t.Fatalf("%q whole a run: the scan says %v, the pattern %v", s, got, want)
 			}
 		}
+		blanked := []byte(s)
+		for _, in := range instantSpans(s) {
+			for i := in.start; i < in.end; i++ {
+				blanked[i] = ' '
+			}
+		}
 		want := map[string]bool{}
-		for _, r := range b64RunPattern.FindAllString(s, -1) {
+		for _, r := range b64RunPattern.FindAllString(string(blanked), -1) {
 			want[r] = true
 		}
 		if got := b64Runs(s); !reflect.DeepEqual(got, want) {
