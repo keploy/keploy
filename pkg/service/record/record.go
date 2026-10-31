@@ -23,6 +23,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/telemetry"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/pkg/service/pii"
 	"go.keploy.io/server/v3/pkg/service/realclient"
 
 	"go.keploy.io/server/v3/utils"
@@ -2629,6 +2630,10 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	errGrp.Go(func() error {
 		for testCase := range frames.Incoming {
 			r.frameProgress.Add(1)
+			if r.config.Record.DetectPII {
+				r.warnPIIDetections(testCase, newTestSetID)
+			}
+
 			// Skip curl generation for either form data requests or large body (>1MB)
 			if len(testCase.HTTPReq.Body) <= 1*1024*1024 && len(testCase.HTTPReq.Form) == 0 {
 				testCase.Curl = pkg.MakeCurlCommand(testCase.HTTPReq)
@@ -3694,4 +3699,66 @@ func (r *Recorder) createConfigWithMetadata(ctx context.Context, testSetID strin
 	}
 
 	r.logger.Info("Created test-set config file with metadata")
+}
+
+func (r *Recorder) warnPIIDetections(testCase *models.TestCase, testSetID string) {
+	if testCase == nil {
+		return
+	}
+
+	// The scan runs before the insert that names the test case, so a recording
+	// usually has only the call to go by. The query string is left out because
+	// it can hold the very values being reported.
+	label := strings.TrimSpace(testCase.Name)
+	if label == "" {
+		target, _, _ := strings.Cut(testCase.HTTPReq.URL, "?")
+		label = strings.TrimSpace(string(testCase.HTTPReq.Method) + " " + target)
+	}
+	if label == "" {
+		label = "unknown-test-case"
+	}
+
+	detections := make([]pii.Detection, 0)
+	detections = append(detections, pii.DetectHeaders(testCase.HTTPReq.Header, "request.header")...)
+	detections = append(detections, pii.DetectHeaders(testCase.HTTPReq.URLParams, "request.url_param")...)
+	detections = append(detections, pii.DetectValue("request.url", testCase.HTTPReq.URL)...)
+
+	// Bodies over 1 MB can't be scanned once they have left the test case, so
+	// say so instead of reporting nothing. A request body is only moved to an
+	// asset file at insert, so here it is normally still inline.
+	reqBody := testCase.HTTPReq.Body
+	if reqBody == "" && testCase.HTTPReq.BodyRef.Path != "" {
+		r.logger.Warn(fmt.Sprintf(
+			"The request body of %s was not scanned for PII because it was offloaded (over 1 MB). "+
+				"Review the asset file at %s manually.",
+			label, testCase.HTTPReq.BodyRef.Path,
+		))
+	}
+	detections = append(detections, pii.DetectBody(reqBody, "request.body")...)
+
+	detections = append(detections, pii.DetectHeaders(testCase.HTTPResp.Header, "response.header")...)
+	if testCase.HTTPResp.BodySkipped {
+		r.logger.Warn(fmt.Sprintf(
+			"The response body of %s (%d bytes) was not scanned for PII: bodies over 1 MB are not kept during recording.",
+			label, testCase.HTTPResp.BodySize,
+		))
+	}
+	detections = append(detections, pii.DetectBody(testCase.HTTPResp.Body, "response.body")...)
+
+	if len(detections) > 0 {
+		fields := make([]string, 0, len(detections))
+		for _, d := range detections {
+			fields = append(fields, fmt.Sprintf("%s (%s)", d.Field, d.PatternType))
+		}
+		r.logger.Warn(fmt.Sprintf(
+			"Potential PII detected in %s (%d field(s)): %s. "+
+				"Review test set %s before sharing it. `keploy sanitize -t %s` replaces values it detects as secrets, "+
+				"such as API keys and tokens; it does not detect emails, phone numbers, card numbers or SSNs, so remove those by hand.",
+			label,
+			len(detections),
+			strings.Join(fields, ", "),
+			testSetID,
+			testSetID,
+		))
+	}
 }
