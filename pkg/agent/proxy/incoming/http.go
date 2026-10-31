@@ -161,6 +161,12 @@ func (n *buildingNote) end() { n.take()() }
 // it all and the handler has not yet decided its capture.
 var answerWritten func()
 
+// lossCounted, when set (tests only), runs as a way out of an exchange that
+// does not record it has counted what it lost, before the note's end
+// (buildingNote) lets a recording's stop go on: the instant a stop that asks
+// must still wait, and its summary must already hold the count.
+var lossCounted func()
+
 func serializeCapturedRequest(req *http.Request, body []byte) ([]byte, error) {
 	clone := new(http.Request)
 	*clone = *req
@@ -260,16 +266,14 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 	}()
 
 	// building notes the exchange in flight's test case as being built from
-	// its answer's end (buildingNote). Deferred first, so it runs last: after
-	// countPause and the window's close.
+	// its answer's end (buildingNote). A capture takes it over; any other way
+	// out ends it (leave).
 	var building buildingNote
-	defer building.end()
 	// win is the open window of the exchange in flight (syncMock.OpenWindow),
 	// from its request's first byte until its capture has decided it: the mock
 	// manager holds every mock it may own until then, however long it streams.
-	// A capture takes it over; any other way out ends it here.
+	// A capture takes it over; any other way out ends it (leave).
 	var win *syncMock.Window
-	defer func() { win.Close() }()
 	// countPause counts the exchange in flight as not recorded under the
 	// memory guard's pause (syncMock NoteNotRecordedUnderPressure), if the
 	// pause kept it from being recorded: once, however it ends. A pause read
@@ -278,11 +282,25 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 	// here): its client's going, an app that failed, a close under pressure.
 	// Counted only at the end it reached, a paused stream whose client hung
 	// up was missing from the count, and so from the recording's summary.
-	// Deferred after win's, so it runs before win.Close: the count is in
-	// before the window's close lets a stop's drain end and its summary read
-	// the count.
 	countPause := func() {}
-	defer func() { countPause() }()
+	// leave is every way out of the exchange in flight that does not hand it
+	// to a capture: the one that decides not to capture it, and the handler's
+	// return (deferred), whatever it returned on. In this order: the count is
+	// in before the window's close lets a stop's drain end and its summary
+	// read the count, and before the note's end lets a stop that asks hear
+	// nothing is to come. One func for both ways out, so the deferred one
+	// cannot drift from the order a row holds (lossCounted, with a pause the
+	// exchange is lost to). Run again, each step is a no-op.
+	leave := func() {
+		countPause()
+		if lossCounted != nil {
+			lossCounted()
+		}
+		win.Close()
+		win = nil
+		building.end()
+	}
+	defer leave()
 
 	// forceCloseMode: only sync mode needs the traditional HTTP parsing loop
 	// (strict one-at-a-time ordering with forced close). Sampling mode now
@@ -812,10 +830,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		}
 
 		if !shouldCapture {
-			countPause()
-			win.Close()
-			win = nil
-			building.end()
+			leave()
 			if forceCloseMode || pressureCloseMode {
 				if requestCut {
 					// Its client may still be sending the body cut off.
@@ -1788,6 +1803,9 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 				// as one the capture could not hand on (conn.HandOn),
 				// before the note's end (deferred) lets a stop go on.
 				syncMock.FromContextOrGlobal(ctx).NoteNotHandedOn()
+				if lossCounted != nil {
+					lossCounted()
+				}
 				return
 			}
 
