@@ -66,6 +66,30 @@ import (
 // view as it answers (exactView.asideServed), so a view holds only the
 // set-aside recordings its calls were served.
 
+// THE POOL IN A TEST: A START-UP OR BETWEEN-TESTS RECORDING WHOSE CALL LANDS
+// IN A TEST'S WINDOW (founder: serve, never require; start-up jobs that
+// outlive /healthz, timers). keploy mock replay serves a test its own
+// recordings and, while no test is open, its key's pool slice: what the
+// record's calls made outside every test. At replay such a call can land in
+// a test's window: a start-up job that outlives /healthz into the first
+// test, a timer whose tick now falls in a test. A call no recording of the
+// test answered is offered, after every handed test's, the pool slice's
+// data-plane recordings (RangeSetAside): served by exact match only,
+// unchecked and never required of the test it lands in, and named on its
+// evidence (models.ServedFromBackground's line), at most once in the
+// staging. One a call between tests consumes (a per-test recording, through
+// a delete door) has one ledger with the calls between tests
+// (outsideAnswers): one consumed between tests is offered to no test, and
+// one a test was served is spent for the staging, so it answers no later
+// call, between tests or in a test, and the calls of a shape across the set
+// never exceed what the set recorded. One the calls between tests reuse (a
+// session or connection recording, answered there as often as asked) still
+// answers there as before, and answers at most one call across the tests
+// (asideClaims). RestartExactKey gives the key's back, as it does the calls
+// between tests'. Under the background
+// rules the view shows the pool in a test already (exact_background.go):
+// none is offered aside there.
+
 // asideIndex is what the replay handed aside in the session
 // (ServeExactAside, ServeExactAsideOnDisk): the tests in hand order, and
 // which test each handed recording is, and whether it is read from disk.
@@ -224,14 +248,26 @@ type asideLoad struct {
 // (models.RequestKeys) are read, each test's as its turn comes, and none is
 // kept: a kind whose parser declares no keys, or a call that asks by none,
 // is offered the resident ones alone. None while no test is open.
+//
+// Last, after every handed test, it visits the pool slice's data-plane
+// recordings no call consumed in the staging (rangePoolAside: the pool in a
+// test, as the package comment says).
 func (m *MockManager) RangeSetAside(kind models.Kind, keys []string, visit func([]*models.Mock) bool) {
 	v := m.exactView()
 	if v == nil || v.test == "" || visit == nil {
 		return
 	}
+	if n, more := m.rangeHandedAside(v, kind, keys, visit); more {
+		m.rangePoolAside(v, kind, keys, n, visit)
+	}
+}
+
+// rangeHandedAside is RangeSetAside over the tests the replay handed aside:
+// n is how many copies it offered, and more is false when visit stopped it.
+func (m *MockManager) rangeHandedAside(v *exactView, kind models.Kind, keys []string, visit func([]*models.Mock) bool) (n int, more bool) {
 	tests := m.exact.aside.snapshot()
 	if len(tests) == 0 {
-		return
+		return 0, true
 	}
 	epoch := m.stagingEpoch.Load()
 	offered := func(name string) bool {
@@ -253,7 +289,6 @@ func (m *MockManager) RangeSetAside(kind models.Kind, keys []string, visit func(
 			return true
 		})
 	}
-	n := 0
 	for _, t := range tests {
 		var batch []*models.Mock
 		for _, mk := range t.resident {
@@ -283,9 +318,72 @@ func (m *MockManager) RangeSetAside(kind models.Kind, keys []string, visit func(
 			n++
 		}
 		if !visit(batch) {
-			return
+			return n, false
 		}
 	}
+	return n, true
+}
+
+// reusedBetweenTests reports whether the staged recording name is one a
+// call between tests answers without consuming it: a session or connection
+// one, which the parsers keep and update in place (the delete door is a
+// per-test recording's). Such a recording answers between tests as often as
+// asked; in a test it answers at most once in the staging (asideClaims).
+func reusedBetweenTests(st *outsideState, name string) bool {
+	if st == nil {
+		return false
+	}
+	mk := st.staged[name]
+	return mk != nil && (mk.TestModeInfo.Lifetime == models.LifetimeSession || mk.TestModeInfo.Lifetime == models.LifetimeConnection)
+}
+
+// rangePoolAside visits, for the open test of v, the data-plane recordings
+// of the pool slice served last (poolSlice) that no call consumed in the
+// staging (outsideAnswers) and that are servable aside, of kind and, when
+// keys are given and the kind declares its own, filed under one of them, in
+// recorded order, each a copy v.asideCopy files from
+// models.ServedFromBackground, numbered from n. None under the background
+// rules, which show the pool in a test (v.bg).
+func (m *MockManager) rangePoolAside(v *exactView, kind models.Kind, keys []string, n int, visit func([]*models.Mock) bool) {
+	slice := m.exact.poolSlice.Load()
+	if v.bg != nil || slice == nil || len(*slice) == 0 {
+		return
+	}
+	m.prepareOutside()
+	st := m.exact.outside.cur.Load()
+	if st == nil || st.epoch != m.stagingEpoch.Load() {
+		return
+	}
+	var batch []*models.Mock
+	for name := range *slice {
+		mk := st.staged[name]
+		if mk == nil || (kind != "" && mk.Kind != kind) || mk.IsAsync() || !servableAside(mk) {
+			continue
+		}
+		if _, own := v.index[name]; own {
+			continue
+		}
+		if _, spent := st.spent.Load(name); spent {
+			continue
+		}
+		if _, claimed := m.exact.asideClaims.claimant(st.epoch, name); claimed {
+			continue
+		}
+		if len(keys) > 0 {
+			if its := models.RequestKeys(mk); len(its) > 0 && !slices.ContainsFunc(its, func(k string) bool { return slices.Contains(keys, k) }) {
+				continue
+			}
+		}
+		batch = append(batch, mk)
+	}
+	if len(batch) == 0 {
+		return
+	}
+	inRecordedOrder(batch)
+	for i, mk := range batch {
+		batch[i] = v.asideCopy(mk, models.ServedFromBackground, n+i)
+	}
+	visit(batch)
 }
 
 // inRecordedOrder sorts mocks by request time, those with none first, as
@@ -332,11 +430,25 @@ type asideServe struct {
 // the outcome and the round as v.order's positions past v.owned), in one
 // step under the view's lock; a copy of another view, of no handed
 // recording, or one another test answered with, is refused.
+//
+// A copy of the pool (from models.ServedFromBackground) whose recording a
+// call between tests consumes is claimed in the staging's one ledger of the
+// calls outside every test instead (consumeOutside): the first consume of it
+// in the staging, wherever its call lands, spends it. One a call between
+// tests reuses (reusedBetweenTests) is claimed for the test as a set-aside
+// recording is, and answers between tests as before.
 func (m *MockManager) consumeAsideIn(v *exactView, mk *models.Mock, from string) (exactVerdict, <-chan struct{}, func()) {
 	if mk.TestModeInfo.ServedIn != v.gen {
 		return exactRefused, nil, nil
 	}
-	if h, ok := m.exact.aside.of(mk.Name); !ok || h.from != from {
+	pool := from == models.ServedFromBackground
+	if pool {
+		if slice := m.exact.poolSlice.Load(); v.bg != nil || slice == nil {
+			return exactRefused, nil, nil
+		} else if _, in := (*slice)[mk.Name]; !in {
+			return exactRefused, nil, nil
+		}
+	} else if h, ok := m.exact.aside.of(mk.Name); !ok || h.from != from {
 		return exactRefused, nil, nil
 	}
 	v.mu.Lock()
@@ -350,7 +462,12 @@ func (m *MockManager) consumeAsideIn(v *exactView, mk *models.Mock, from string)
 			return exactRefused, nil, nil
 		}
 	}
-	if !m.exact.asideClaims.claim(m.stagingEpoch.Load(), mk.Name, v.test) {
+	if pool && !reusedBetweenTests(m.exact.outside.cur.Load(), mk.Name) {
+		if m.consumeOutside(mk) != exactServed {
+			v.mu.Unlock()
+			return exactRefused, nil, nil
+		}
+	} else if !m.exact.asideClaims.claim(m.stagingEpoch.Load(), mk.Name, v.test) {
 		v.mu.Unlock()
 		return exactRefused, nil, nil
 	}

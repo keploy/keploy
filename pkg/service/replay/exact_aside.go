@@ -116,8 +116,8 @@ func (r *Replayer) namedServedAside(name string, served []string) []string {
 	if !provenswitch.On() || len(served) == 0 {
 		return nil
 	}
-	r.logger.Info("a call of this test case was answered by the recording of a test case the replay set aside: unchecked, it fails nothing",
+	r.logger.Info("a call of this test case was answered by the recording of a test case the replay set aside, or by one the set made outside every test: unchecked, it fails nothing",
 		zap.String("testcase", name), zap.Strings("served", served),
-		zap.String("next_step", "nothing to do: the set-aside test case made none of its calls, so this test case made one of them (a cache it filled at record); once that test case runs again, its own call is made in its own window"))
+		zap.String("next_step", "nothing to do: a set-aside test case made none of its calls, so this test case made one of them (a cache it filled at record); a start-up job or a timer made its call in this test case's window"))
 	return append([]string(nil), served...)
 }
