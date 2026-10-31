@@ -389,10 +389,14 @@ func TestAnotherTestsMockNeverAnswers(t *testing.T) {
 }
 
 // Between tests the key's pool slice answers, as often as asked; no test's
-// mock answers there, and inside a test no data-plane pool mock answers. The
-// miss between tests is the application's background work: charged to no
-// test, the next one included.
-func TestThePoolAnswersOnlyBetweenTests(t *testing.T) {
+// mock answers there. Inside a test a data-plane pool recording answers only
+// a call none of the test's own does, by exact match, unchecked, never
+// required, named on the test's evidence, and once in the staging: a
+// start-up job or a timer whose call lands in a test's window at replay
+// fails no test (founder: serve, never require). The miss between tests is
+// the application's background work: charged to no test, the next one
+// included. Before the pool answered in a test, /health failed TestA.
+func TestThePoolAnswersBetweenTestsAndOnceInATest(t *testing.T) {
 	a, p := exactAgent(t,
 		[]*models.Mock{pingMock("mock-1", "/health", "ok", t0), pingMock("mock-2", "/a", "a", t0.Add(time.Second))},
 		map[string][]string{"o::TestA": {"mock-2"}}, map[string][]string{"o": {"mock-1"}})
@@ -404,19 +408,110 @@ func TestThePoolAnswersOnlyBetweenTests(t *testing.T) {
 	code, _ := p.call(t, "/a")
 	require.Equal(t, 502, code, "a test's mock answered between tests")
 	got, e := runTest(t, a, p, "TestA", "/a", "/health")
-	require.Equal(t, "200 a", got[0])
-	require.True(t, strings.HasPrefix(got[1], "502"), "a data-plane pool mock answered inside a test: %s", got[1])
+	require.Equal(t, []string{"200 a", "200 ok"}, got, "the pool's recording of /health did not answer it inside TestA")
+	require.Empty(t, e.Action, "a pool recording served in a test failed it: %s", e.Reason)
+	// A recording the calls between tests reuse still answers there, and
+	// answers no second test.
+	code, body := p.call(t, "/health")
+	require.Equal(t, 200, code, "a reused pool recording a test was served answers between tests no more")
+	require.Equal(t, "ok", body)
+	got, e = runTest(t, a, p, "TestB", "/health")
+	require.True(t, strings.HasPrefix(got[0], "502"), "a pool recording answered a second test: %s", got[0])
 	require.Equal(t, models.ScopeActionFail, e.Action)
 	ev := windowOf(t, a, "o::TestA").Evidence
-	var kinds []string
-	for _, m := range ev.Misses {
-		kinds = append(kinds, m.Kind)
-	}
-	require.Equal(t, []string{models.MissInTest}, kinds, "the miss between tests is charged to no test")
+	require.Empty(t, ev.Misses, "a pool recording served in a test is a miss of it")
+	require.Equal(t, []string{models.ServedAsideLine("mock-1", models.ServedFromBackground)}, ev.ServedAside,
+		"the evidence names the pool recording the test was served")
+	require.Contains(t, ev.ServedAside[0], "start-up and between-tests recordings (background)")
 	bg := backgroundCharged(a)
 	require.Len(t, bg, 1)
 	require.Equal(t, models.MissOutsideTest, bg[0].Kind)
 	require.Contains(t, bg[0].ActualSummary, "/a")
+}
+
+// A start-up job that outlives /healthz makes its calls inside the first
+// kept test's window, after two quarantined tests (api-server's
+// TestUnauthenticated, 1 replay in 8): /janitor, whose only recording is the
+// set's start-up one (its pool), and /pat, whose recording is the
+// quarantined TestQ1's. Each is served aside, unchecked, and the kept test
+// passes, its evidence naming both. Before, /janitor got 502 and failed it
+// with "re-record it", though its recording exists.
+func TestAStartUpCallInsideTheFirstKeptTestsWindowIsServed(t *testing.T) {
+	a, rp := exactAgent(t,
+		[]*models.Mock{pingMock("mock-0", "/janitor", "j", t0.Add(-time.Second)), pingMock("mock-1", "/pat", "pat", t0), pingMock("mock-2", "/q", "q", t0.Add(time.Second)), pingMock("mock-3", "/k", "k", t0.Add(2*time.Second))},
+		map[string][]string{"o::TestQ1": {"mock-1"}, "o::TestQ2": {"mock-2"}, "o::TestK": {"mock-3"}}, map[string][]string{"o": {"mock-0"}})
+	ctx := context.Background()
+	require.NoError(t, a.SetScopeSkips(ctx, map[string]string{"o::TestQ1": "flaky/request_changed", "o::TestQ2": "keploy/unmocked_call"}, nil))
+	for _, q := range []string{"TestQ1", "TestQ2"} {
+		b, serr := a.ProvenBegin(ctx, begin(q))
+		require.Nil(t, serr)
+		require.Equal(t, models.ScopeActionSkip, b.Action)
+	}
+	got, e := runTest(t, a, rp, "TestK", "/k", "/janitor", "/pat")
+	require.Equal(t, []string{"200 k", "200 j", "200 pat"}, got)
+	require.Empty(t, e.Action, "TestK failed: %s", e.Reason)
+	ev := windowOf(t, a, "o::TestK").Evidence
+	require.Empty(t, ev.Misses)
+	require.Equal(t, []string{
+		models.ServedAsideLine("mock-0", models.ServedFromBackground),
+		models.ServedAsideLine("mock-1", "o::TestQ1"),
+	}, ev.ServedAside)
+}
+
+// What the pool does not serve in a test: a call that is not exactly a
+// pool recording (the job's call changed) still misses and fails the test;
+// a pool recording a call between tests consumed answers no test (one
+// ledger); and one a test was served answers no later test.
+func TestWhatThePoolDoesNotServeInATest(t *testing.T) {
+	perTest := func(m *models.Mock) *models.Mock {
+		m.Spec.Metadata = map[string]string{"type": "mocks"}
+		m.TestModeInfo.Lifetime = models.LifetimePerTest
+		m.TestModeInfo.LifetimeDerived = true
+		return m
+	}
+	t.Run("a call that is not exactly the recording misses", func(t *testing.T) {
+		a, p := exactAgent(t,
+			[]*models.Mock{pingMock("mock-0", "/janitor", "j", t0), pingMock("mock-1", "/a", "a", t0.Add(time.Second))},
+			map[string][]string{"o::TestA": {"mock-1"}}, map[string][]string{"o": {"mock-0"}})
+		code, _ := p.call(t, "/a")
+		require.Equal(t, 502, code)
+		got, e := runTest(t, a, p, "TestA", "/a", "/janitor/2")
+		require.Equal(t, "200 a", got[0])
+		require.True(t, strings.HasPrefix(got[1], "502"), got[1])
+		require.Equal(t, models.ScopeActionFail, e.Action)
+		require.Contains(t, e.Reason, "GET /janitor/{} to 127.0.0.1:18093 had no recorded answer (path differs)")
+		require.Empty(t, windowOf(t, a, "o::TestA").Evidence.ServedAside)
+	})
+	t.Run("consumed between tests, it answers no test", func(t *testing.T) {
+		a, p := exactAgent(t,
+			[]*models.Mock{perTest(pingMock("mock-0", "/janitor", "j", t0)), pingMock("mock-1", "/a", "a", t0.Add(time.Second))},
+			map[string][]string{"o::TestA": {"mock-1"}}, map[string][]string{"o": {"mock-0"}})
+		code, body := p.call(t, "/janitor")
+		require.Equal(t, 200, code)
+		require.Equal(t, "j", body)
+		code, _ = p.call(t, "/janitor")
+		require.Equal(t, 502, code, "a consumed pool recording answered twice between tests")
+		got, e := runTest(t, a, p, "TestA", "/a", "/janitor")
+		require.Equal(t, "200 a", got[0])
+		require.True(t, strings.HasPrefix(got[1], "502"), "a pool recording consumed between tests answered in a test: %s", got[1])
+		require.Equal(t, models.ScopeActionFail, e.Action)
+		require.Empty(t, windowOf(t, a, "o::TestA").Evidence.ServedAside)
+	})
+	t.Run("served in a test, it answers no later test", func(t *testing.T) {
+		a, p := exactAgent(t,
+			[]*models.Mock{perTest(pingMock("mock-0", "/janitor", "j", t0)), pingMock("mock-1", "/a", "a", t0.Add(time.Second)), pingMock("mock-2", "/b", "b", t0.Add(2*time.Second))},
+			map[string][]string{"o::TestA": {"mock-1"}, "o::TestB": {"mock-2"}}, map[string][]string{"o": {"mock-0"}})
+		got, e := runTest(t, a, p, "TestA", "/a", "/janitor", "/janitor")
+		require.Equal(t, "200 a", got[0])
+		require.Equal(t, "200 j", got[1])
+		require.True(t, strings.HasPrefix(got[2], "502"), "a pool recording answered twice in one test: %s", got[2])
+		require.Equal(t, models.ScopeActionFail, e.Action)
+		got, e = runTest(t, a, p, "TestB", "/b", "/janitor")
+		require.Equal(t, "200 b", got[0])
+		require.True(t, strings.HasPrefix(got[1], "502"), "a pool recording a test was served answered a later test: %s", got[1])
+		require.Equal(t, models.ScopeActionFail, e.Action)
+		require.Empty(t, windowOf(t, a, "o::TestB").Evidence.ServedAside)
+	})
 }
 
 // sqsEmpty is the answer enterprise SQS's parser writes for a ReceiveMessage
@@ -697,11 +792,12 @@ func TestOverlappingRecordedWindowsNeverReServe(t *testing.T) {
 	}
 }
 
-// Past its own recordings a test is never served another's, the pool's, or
-// its last again (keploy #4745's F20 scenarios under ConsumeExact): test2's
-// third identical call is an extra call; test3, which recorded no such call,
-// misses it, though the pool holds a recording made between tests; and the
-// pool answers it between tests.
+// Past its own recordings a test is never served another's or its last
+// again (keploy #4745's F20 scenarios under ConsumeExact); the set's
+// recording of the call made between tests answers test2's third identical
+// call, once in the staging (the pool in a test); test3, which recorded no
+// such call, misses it, since that copy answered already; and the pool
+// answers it between tests, where it is reused.
 func TestPastItsRecordingsATestIsServedNothingElse(t *testing.T) {
 	a, p := exactAgent(t,
 		[]*models.Mock{
@@ -715,10 +811,11 @@ func TestPastItsRecordingsATestIsServedNothingElse(t *testing.T) {
 	got, e := runTest(t, a, p, "test2", "/obj", "/obj", "/obj")
 	require.Equal(t, "200 test2-a", got[0], "test1 never ran; its recording is not test2's")
 	require.Equal(t, "200 test2-b", got[1])
-	require.True(t, strings.HasPrefix(got[2], "502"), "past its recordings test2 was served %s", got[2])
-	require.Equal(t, models.ScopeActionFail, e.Action)
-	require.Contains(t, e.Reason, "was called 3 times, recorded 2")
-	require.Equal(t, models.MissExtraCall, evidenceOf(t, a, "o::test2").Misses[0].Kind)
+	// Past its own, the set's recording of the call made between tests
+	// answers it once, unchecked and never required (the pool in a test).
+	require.Equal(t, "200 between", got[2], "past its recordings test2 was not served the pool's copy of the call")
+	require.Empty(t, e.Action, e.Reason)
+	require.Equal(t, []string{models.ServedAsideLine("between-tests", models.ServedFromBackground)}, evidenceOf(t, a, "o::test2").ServedAside)
 
 	got, e = runTest(t, a, p, "test3", "/obj")
 	require.True(t, strings.HasPrefix(got[0], "502"), "test3 recorded no such call and was served %s", got[0])
@@ -854,9 +951,12 @@ func TestKeployTestServesEachTestCaseExactlyItsOwnMocks(t *testing.T) {
 	require.Equal(t, []string{"200 first"}, got)
 	require.Empty(t, misses)
 
+	// A test case that owns nothing is answered no other test case's mock;
+	// the pool's recording of /health answers it once (the pool in a test).
 	got, misses = keployTestCase(t, a, p, "test-3", nil, "/ping", "/health")
-	require.True(t, strings.HasPrefix(got[0], "502") && strings.HasPrefix(got[1], "502"), "a test case that owns nothing was answered: %v", got)
-	require.Len(t, misses, 2)
+	require.True(t, strings.HasPrefix(got[0], "502"), "a test case that owns nothing was answered another's mock: %v", got)
+	require.Equal(t, "200 ok", got[1], "the pool's recording did not answer a test case's call")
+	require.Len(t, misses, 1)
 
 	for i := 0; i < 2; i++ {
 		code, body := p.call(t, "/health")
@@ -1103,6 +1203,64 @@ func TestCallsBeforeAKeptTestAfterAQuarantinedOneFailNoTest(t *testing.T) {
 			for i, path := range []string{"/tick", "/pat"} {
 				require.Contains(t, bg[i].ActualSummary, path)
 				require.False(t, bg[i].At.IsZero(), "a background miss says when it was made")
+			}
+		})
+	}
+}
+
+// api-server's pinned replay of a committed keploy.lock, TestUnauthenticated's
+// shape (1 replay in 8 failed it on keploy v3.8.97): the application's PAT
+// janitor makes its calls as the application starts, before any test began,
+// and every test before the first kept one is quarantined, so none opens a
+// window. The first kept test still passes: a call made before the set's first
+// served test is the application's start-up, charged to no test, and the
+// set's report says each once, with when it was made. A call the first kept
+// test makes that nothing answers still fails it, naming neither.
+func TestStartUpCallsBeforeTheFirstKeptTestFailNoTest(t *testing.T) {
+	for _, own := range []bool{false, true} {
+		t.Run(map[bool]string{false: "the first kept test passes", true: "its own miss still fails it"}[own], func(t *testing.T) {
+			a, rp := exactAgent(t,
+				[]*models.Mock{pingMock("mock-1", "/pat", "pat", t0), pingMock("mock-2", "/q", "q", t0.Add(time.Second)), pingMock("mock-3", "/k", "k", t0.Add(2*time.Second))},
+				map[string][]string{"o::TestQ1": {"mock-1"}, "o::TestQ2": {"mock-2"}, "o::TestK": {"mock-3"}}, map[string][]string{})
+			ctx := context.Background()
+			require.NoError(t, a.SetScopeSkips(ctx, map[string]string{"o::TestQ1": "flaky/request_changed", "o::TestQ2": "keploy/unmocked_call"}, nil))
+			// As the application starts, before any test began: the janitor's
+			// insert, which no recording holds, and its PAT read, whose one
+			// recording is the quarantined TestQ1's.
+			for _, path := range []string{"/janitor", "/pat"} {
+				code, _ := rp.call(t, path)
+				require.Equal(t, 502, code)
+			}
+			for _, q := range []string{"TestQ1", "TestQ2"} {
+				b, serr := a.ProvenBegin(ctx, begin(q))
+				require.Nil(t, serr)
+				require.Equal(t, models.ScopeActionSkip, b.Action)
+			}
+			paths := []string{"/k"}
+			if own {
+				paths = append(paths, "/own")
+			}
+			got, e := runTest(t, a, rp, "TestK", paths...)
+			require.Equal(t, "200 k", got[0])
+			if own {
+				require.Equal(t, models.ScopeActionFail, e.Action)
+				require.Contains(t, e.Reason, "GET /own to 127.0.0.1:18093 had no recorded answer")
+				require.NotContains(t, e.Reason, "/janitor")
+				require.NotContains(t, e.Reason, "/pat")
+				require.NotContains(t, e.Reason, "before this one began")
+			} else {
+				require.Empty(t, e.Action, e.Reason)
+				ev := windowOf(t, a, "o::TestK").Evidence
+				if ev != nil {
+					require.Empty(t, ev.Misses, "a start-up call is no miss of the first kept test's")
+				}
+			}
+			bg := backgroundCharged(a)
+			require.Len(t, bg, 2)
+			for i, path := range []string{"/janitor", "/pat"} {
+				require.Contains(t, bg[i].ActualSummary, path)
+				require.False(t, bg[i].At.IsZero(), "a background miss says when it was made")
+				require.False(t, bg[i].CountsAgainstTest())
 			}
 		})
 	}

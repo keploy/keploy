@@ -693,6 +693,7 @@ func (m *MockManager) ResetForReplaySession() {
 	// does, today's serve.
 	m.exact.bg.Store(nil)
 	m.exact.poolCursor.Store(nil)
+	m.exact.poolSlice.Store(nil)
 	m.SetRecordingSource(nil)
 	m.SetRecordedBefore(nil)
 	m.SetRecordedOfKind(nil)

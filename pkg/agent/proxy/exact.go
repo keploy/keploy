@@ -27,7 +27,11 @@ import (
 //     pool answers only protocol-phase requests (handshakes, session
 //     settings, DNS). One more request identical to one a test mock already
 //     answered finds no test mock: a miss (models.MissExtraCall), unless a
-//     worker-scope mock the run has reached (below) is that request.
+//     worker-scope mock the run has reached (below) is that request. A
+//     call none of the test's own answers is offered aside, unchecked and
+//     never required, the recordings of the tests the replay set aside and
+//     then the pool slice's data-plane ones (exact_aside.go: the pool in a
+//     test).
 //   - While no test is open, the current key's pool slice answers, with
 //     reuse or cursor-saturate as its mocks were recorded, beside the
 //     protocol-phase mocks. Its stateful cursors are the key's own.
@@ -356,6 +360,11 @@ type exactState struct {
 	// are the background's (BackgroundCursor) and, in a test, the worker
 	// scope's (SequenceView.Between).
 	poolCursor atomic.Pointer[string]
+	// poolSlice is the names of the pool slice the pool view installed last
+	// serves (its key's, poolCursor's): in a test, a call none of the test's
+	// recordings answers is offered them aside (RangeSetAside, the pool in a
+	// test).
+	poolSlice atomic.Pointer[map[string]struct{}]
 	// pairs says the session pairs (SetPairing); claimed, the recordings a
 	// pairing claimed in the current staging; ofKind, where the pairing
 	// reads recordings of a kind the trees do not hold.
@@ -1709,6 +1718,7 @@ func (m *MockManager) installExactWith(v *exactView, under func(r *roundState)) 
 	if v.test == "" {
 		key := v.poolKey
 		m.exact.poolCursor.Store(&key)
+		m.exact.poolSlice.Store(&v.pool)
 	}
 	w := m.exact.worker.Load()
 	if w != nil {
