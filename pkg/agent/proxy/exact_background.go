@@ -394,13 +394,14 @@ func (m *MockManager) BackgroundCursor() (integrations.MockCursor, bool) {
 }
 
 // InBackground implements integrations.BackgroundMember: name is one of the
-// background's recordings (its pool's or its worker scope's) of the set the
-// view in force serves by the background rules, and the view holds it as no
-// test's own (one judging moved into a test is that test's, as hidesName
-// reads it); false under today's rules and with exact serving off.
+// background's recordings, and the view in force holds it as no test's own
+// (one judging moved into a test is that test's, as hidesName reads it): the
+// pool's or the worker scope's of a set the view serves by the background
+// rules, or, in a test under any rules, one of the worker scope the run
+// reached (isWorker). False with exact serving off.
 func (m *MockManager) InBackground(name string) bool {
 	v := m.exactView()
-	if v == nil || !v.bg.has(name) {
+	if v == nil || !v.bg.has(name) && !(v.test != "" && v.isWorker(name)) {
 		return false
 	}
 	_, own := v.index[name]

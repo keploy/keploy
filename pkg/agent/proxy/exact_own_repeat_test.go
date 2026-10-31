@@ -1,14 +1,18 @@
 package proxy
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"io"
 	"net"
+	"net/http"
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/generic"
+	httpint "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
@@ -106,5 +110,92 @@ func TestTheBackgroundNeverAnswersAGenericExchangeOneMoreThanTheTestRecorded(t *
 	mm.ServeExactPool(models.PoolKeyNone, poolNames)
 	if got, miss := genericCall(t, mm, "PING"); got != "POOL" {
 		t.Fatalf("the PING between tests was answered %q (miss %+v); want the pool's POOL", got, miss)
+	}
+}
+
+// workerProbe is a recording of GET http://deps<path> made at at, answered
+// body, as seqCall records one.
+func workerProbe(name string, at time.Duration, path, body string) *models.Mock {
+	m := seqCall(name, at, body)
+	m.Spec.HTTPReq.URL = "http://deps" + path
+	return m
+}
+
+// httpMissCall sends GET path through the HTTP parser and returns the body
+// it was answered with, or, when it was answered no 200, the miss's report.
+func httpMissCall(t *testing.T, mm *MockManager, path string) (string, *models.MockMismatchReport) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), callDeadline)
+	defer cancel()
+	app, agentEnd := net.Pipe()
+	defer app.Close()
+	done := make(chan error, 1)
+	go func() {
+		err := httpint.New(zap.NewNop()).MockOutgoing(ctx, agentEnd, &models.ConditionalDstCfg{}, mm, models.OutgoingOptions{})
+		_ = agentEnd.Close()
+		done <- err
+	}()
+	if _, err := io.WriteString(app, "GET "+path+" HTTP/1.1\r\nHost: deps\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(app), nil)
+	if err == nil && resp.StatusCode == http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, int64(resp.ContentLength)))
+		_ = app.Close()
+		<-done
+		return string(body), nil
+	}
+	_ = app.Close()
+	err = <-done
+	var r interface {
+		MismatchReport() *models.MockMismatchReport
+	}
+	if !errors.As(err, &r) || r.MismatchReport() == nil {
+		t.Fatalf("GET %s was answered no 200, and its miss has no report: %v", path, err)
+	}
+	return "", r.MismatchReport()
+}
+
+// Under the proven switch, on a set served by today's rules (no background
+// rules) whose view shows a test the worker scope the run reached
+// (ServeExactWorker, models.Mapping.Worker), a request identical to one the
+// open test's own recording already answered is one call more than the test
+// recorded: the worker scope's identical recording never answers it. It
+// misses as an extra call, recorded once, and the worker scope's recording
+// stays unspent: between tests it answers the request. A request the test
+// never recorded is still answered by the worker scope. Answered by the
+// worker scope's copy, a test that made its recorded call twice passed.
+func TestTheWorkerScopeNeverAnswersARequestOneMoreThanTheTestRecorded(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	worker := workerProbe("mock-worker-x", time.Second, "/x", "worker")
+	other := workerProbe("mock-worker-y", 2*time.Second, "/y", "why")
+	own := workerProbe("mock-own-x", 4*time.Second, "/x", "own")
+	mm := stagedManager(t, nil, []*models.Mock{worker, other, own})
+	mm.SeedRecordedWindows([]models.TestWindow{{TestCase: "test-a", Start: exactT0.Add(3 * time.Second), End: exactT0.Add(5 * time.Second)}})
+	workerNames := []string{worker.Name, other.Name}
+	mm.ServeExactWorker(workerNames)
+	mm.ServeExactPool(models.PoolKeyNone, nil)
+	mm.ServeExactTest("test-a", []*models.Mock{roundMock(mm, own.Name)})
+	if !mm.ExactServing() || integrations.S12Background(mm) {
+		t.Fatal("precondition: test-a is not served exactly, by today's rules")
+	}
+
+	if got, miss := httpMissCall(t, mm, "/x"); got != "own" {
+		t.Fatalf("test-a's GET /x was answered %q (miss %+v); want its own", got, miss)
+	}
+	got, miss := httpMissCall(t, mm, "/x")
+	if got != "" {
+		t.Fatalf("test-a's second GET /x, one more than it recorded, was answered %q", got)
+	}
+	if miss.MissKind != models.MissExtraCall || miss.Recorded != 1 {
+		t.Fatalf("the second GET /x missed as %q, recorded %d; want %q, recorded 1", miss.MissKind, miss.Recorded, models.MissExtraCall)
+	}
+	if got, miss := httpMissCall(t, mm, "/y"); got != "why" {
+		t.Fatalf("test-a's GET /y, a request it never recorded, was answered %q (miss %+v); want the worker scope's", got, miss)
+	}
+
+	mm.ServeExactPool(models.PoolKeyNone, nil)
+	if got, miss := httpMissCall(t, mm, "/x"); got != "worker" {
+		t.Fatalf("the GET /x between tests was answered %q (miss %+v); want the worker scope's, unspent", got, miss)
 	}
 }
