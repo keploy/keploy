@@ -121,13 +121,16 @@ type exactView struct {
 	// and none is required of the test. "" for its own and its shared ones;
 	// nil for a view with none.
 	aside []string
-	// handed marks, by position in owned, the open test's own recordings
-	// the replay handed aside before the test began (ServeExactAside from
-	// this test: it had not begun when a test recorded after it did). Each
-	// answers once in the staging (asideClaims), for the first test to make
-	// its call, this one or a later one served it aside: the owner's own
-	// copy counts against that one claim. nil for a view with none.
-	handed []bool
+	// handed names, by position in owned, the test whose own recording
+	// each one is that the replay handed aside before that test began
+	// (ServeExactAside from it: it had not begun when a test recorded after
+	// it did): the open test's own, or, on a pool view, its ahead's (the next
+	// test's calls in flight before its begin). Each answers once in the
+	// staging (asideClaims), for the first call it answers, the owner's
+	// own, in flight before its begin or in its window, or a later test's
+	// served it aside: the owner's copy counts against that one claim, taken
+	// as it answers. "" for one not handed; nil for a view with none.
+	handed []string
 	// asideClaims is the manager's claims on the set-aside recordings.
 	asideClaims *exactClaims
 	// bg is the set's background under the background rules (ServeExactBackground)
@@ -497,6 +500,19 @@ func (c *exactClaims) release(epoch uint64, test string) {
 	by := c.in(epoch)
 	for n, t := range by {
 		if t == test {
+			delete(by, n)
+		}
+	}
+}
+
+// releaseExcept is release but for the names keep: claims test holds that
+// still stand.
+func (c *exactClaims) releaseExcept(epoch uint64, test string, keep map[string]bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	by := c.in(epoch)
+	for n, t := range by {
+		if t == test && !keep[n] {
 			delete(by, n)
 		}
 	}
@@ -1338,7 +1354,10 @@ func (m *MockManager) serveExactTest(test string, owned, cands []*models.Mock, b
 			v.stamp = m.exact.stampTest(m.openTestEpoch.Load(), test)
 			epoch := m.stagingEpoch.Load()
 			m.exact.claims.release(epoch, test)
-			m.exact.asideClaims.release(epoch, test)
+			// What the pool view's ahead answered in flight before this
+			// begin and carried in keeps its claim: it is this test's one
+			// answer, taken as it answered (exactView.handed).
+			m.exact.asideClaims.releaseExcept(epoch, test, v.carried)
 			m.reopenLocked(v)
 			m.exact.begun.add(epoch, owned)
 			m.exact.fired.Store(true)
@@ -1440,10 +1459,22 @@ func (v *exactView) asideOf(i int) string {
 	return ""
 }
 
+// handedOf is the test whose own recording owned position i is, when the
+// replay handed it aside before that test began (exactView.handed): the
+// open test, or the next one a pool view's ahead is in flight into. "" for
+// one not handed.
+func (v *exactView) handedOf(i int) string {
+	if i < len(v.handed) {
+		return v.handed[i]
+	}
+	return ""
+}
+
 // isHanded reports whether owned position i is one of the open test's own
-// recordings the replay handed aside before the test began.
+// recordings, or of a pool view's ahead, that the replay handed aside before
+// its test began.
 func (v *exactView) isHanded(i int) bool {
-	return i < len(v.handed) && v.handed[i]
+	return v.handedOf(i) != ""
 }
 
 // notOwn reports whether owned position i is no recording of the open test's
@@ -1467,8 +1498,8 @@ func (v *exactView) takenByOther(i int) bool {
 	if v.epoch == nil {
 		return false
 	}
-	if v.isHanded(i) {
-		return v.asideClaims.takenByOther(v.epoch.Load(), v.owned[i].Name, v.test)
+	if owner := v.handedOf(i); owner != "" {
+		return v.asideClaims.takenByOther(v.epoch.Load(), v.owned[i].Name, owner)
 	}
 	return v.isCand(i) && v.claims.takenByOther(v.epoch.Load(), v.owned[i].Name, v.test)
 }
@@ -1595,6 +1626,11 @@ func (m *MockManager) ServeExactPool(key string, names []string, ahead ...*model
 		v.gen = m.exact.gen.Add(1)
 		v.index = make(map[string]int, len(ahead))
 		v.addOwned(ahead)
+		// The next test's own recordings the replay handed aside before
+		// it began answer once in the staging, in flight too: claimed as
+		// they answer, for that test (exactView.handed).
+		v.markHanded(m.setAsideRecordings())
+		v.asideClaims = &m.exact.asideClaims
 		v.consumed = make([]bool, len(v.owned))
 		v.served = make([]*models.Mock, len(v.owned))
 		for _, a := range answered {
@@ -2809,9 +2845,18 @@ func (m *MockManager) exactConsumeIn(v *exactView, mk *models.Mock, evicts bool)
 				return exactRefused, nil, nil
 			}
 			// So does a set-aside test's recording: for the first later
-			// test to make its call. The test's own copy of one the replay
-			// handed aside before it began is that same one answer.
-			if (v.asideOf(i) != "" || v.isHanded(i)) && !m.exact.asideClaims.claim(m.stagingEpoch.Load(), mk.Name, v.test) {
+			// test to make its call. The owner's own copy of one the replay
+			// handed aside before it began is that same one answer, claimed
+			// as it answers, in its window or in flight before its begin (a
+			// pool view's ahead): the claim and the consume are one step
+			// under the view's lock, so no begin, hand-aside or other
+			// test's consume lands between them.
+			if owner := v.handedOf(i); owner != "" {
+				if !m.exact.asideClaims.claim(m.stagingEpoch.Load(), mk.Name, owner) {
+					v.mu.Unlock()
+					return exactRefused, nil, nil
+				}
+			} else if v.asideOf(i) != "" && !m.exact.asideClaims.claim(m.stagingEpoch.Load(), mk.Name, v.test) {
 				v.mu.Unlock()
 				return exactRefused, nil, nil
 			}
