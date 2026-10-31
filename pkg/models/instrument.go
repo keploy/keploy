@@ -103,11 +103,13 @@ type OutgoingOptions struct {
 	Rules         []BypassRule
 	MongoPassword string
 	TLSPrivateKey string
-	Synchronous   bool
 	// TODO: role of SQLDelay should be mentioned in the comments.
 	SQLDelay time.Duration // This is the same as Application delay.
-	Mocking  bool          // used to enable/disable mocking
-	SwapIDs  bool
+	// Synchronous sits with Mocking and SwapIDs, in one word: the word it
+	// took alone before SQLDelay holds LearnTests.
+	Synchronous bool
+	Mocking     bool // used to enable/disable mocking
+	SwapIDs     bool
 	// OnMiss selects what the proxy does in MODE_TEST when no recorded mock
 	// matches an outgoing call: "" / "fail" (deterministic hard miss, the
 	// default), "passthrough" (dial the real upstream, don't persist), or
@@ -229,6 +231,17 @@ type OutgoingOptions struct {
 	// (MockManager.ArmSetFence). Like Learn it sits in the padding after the
 	// TLS switches.
 	StartsTestSet bool `json:"StartsTestSet,omitempty"`
+	// LearnTests, when not nil, are the tests whose recordings the round
+	// learns onto (config.Test.LearnTests: the tests a record has just
+	// recorded anew). A test outside it keeps an earlier record's recording
+	// (a partial record, or a test that failed against real infra), so it
+	// holds that record's times: run after a test recorded later, it is no
+	// test begun out of its recorded order, and its own recording learns
+	// nothing (pkg/service/agent keepRecordedOrder, holdLearn). nil: every
+	// test's recording learns (a CLI from before it). Never omitted, so an
+	// empty list (no test learns) is not read as nil. A map, one word: a
+	// Session holds these options by value (supervisor.Session).
+	LearnTests map[string]bool `json:"LearnTests"`
 	// MysqlPorts lists destination ports that the proxy should treat as
 	// MySQL (or wire-compatible variants like TiDB) — i.e. dial the
 	// upstream eagerly on connection accept so the server's Initial

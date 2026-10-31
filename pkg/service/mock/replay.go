@@ -284,6 +284,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		DisableMockCorrelation:    m.config.Test.DisableMockCorrelation,
 		Learn:                     m.learning(),
 		LearnPool:                 m.learningPool(),
+		LearnTests:                m.learningTests(),
 	}); err != nil {
 		if parent.Err() != nil {
 			// The user's Ctrl+C. An errgroup-derived cancel is NOT that: the

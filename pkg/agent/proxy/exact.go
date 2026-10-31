@@ -329,6 +329,10 @@ type exactState struct {
 	// cycle of record's full round, served and judged, learns nothing and
 	// pairs nothing.
 	learnEnded atomic.Bool
+	// learnHeld says the learn step is held while a test whose recording
+	// the round does not learn onto is open (SetLearnHeld): it pairs nothing
+	// and learns nothing until the hold is released.
+	learnHeld atomic.Bool
 	// kept is what keploy record keeps of the set's first-cycle learning,
 	// put on the staged recordings its retry cycles are served
 	// (SetKeptLearning).
