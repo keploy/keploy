@@ -24,6 +24,15 @@ var EbpfProxyPortOverride uint32
 // servers and session management still operate normally.
 var SkipProxyListener bool
 
+// ProcessTargetsOwned says that a downstream capture owns
+// target_namespace_pids for this agent: it puts the recorded application's
+// processes there itself. The linux hooks then attach neither sys_enter_socket
+// nor k_sock_create, which add every process of the agent's PID namespace that
+// starts after the recording (the whole host for an agent in the host's PID
+// namespace), as for DaemonSet and per-container targeting. Set before the
+// hooks load.
+var ProcessTargetsOwned bool
+
 // AgentInfoCustomizer is called after the base AgentInfo has been
 // populated but before it is written to the eBPF map. Downstream
 // builds can use this to set the extensible Flags slot on AgentInfo,

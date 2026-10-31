@@ -430,9 +430,17 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	// sys_enter_socket would auto-register EVERY process in the pod's PID ns
 	// (both target and sibling containers, keyed by host TGID), leaking sibling
 	// traffic past the cgroup targeting — the same pollution the DS skip prevents.
-	if os.Getenv("KEPLOY_DAEMONSET_ENABLED") == "true" || os.Getenv("KEPLOY_TARGET_CONTAINERS") != "" {
+	// A downstream capture that seeds the application's processes into
+	// target_namespace_pids itself (agent.ProcessTargetsOwned) is the same
+	// again: on an agent in the host's PID namespace the tracepoint would add
+	// every process the host starts during the recording, and the capture would
+	// read and drop all of their traffic.
+	switch processTargetsOwner() {
+	case processTargetsByDaemonSet:
 		h.logger.Info("daemonset/targeting mode: skipping sys_enter_socket PID auto-registration (target_namespace_pids is owned/scoped externally)")
-	} else {
+	case processTargetsByCapture:
+		h.logger.Debug("the capture puts the application's processes in target_namespace_pids itself: not attaching sys_enter_socket, which would add every new process of this PID namespace")
+	default:
 		// A perf-event attach locks the kernel's tracing event_mutex
 		// (perf_trace_init), which every other tracer's attach and detach on
 		// the host holds too: watched like the load.

@@ -141,6 +141,14 @@ func SetSkipProxyListener(skip bool) {
 	coreAgent.SkipProxyListener = skip
 }
 
+// SetProcessTargetsOwned says whether a downstream capture owns the agent's
+// target_namespace_pids (coreAgent.ProcessTargetsOwned): when it does, the
+// linux hooks do not add every new process of the agent's PID namespace there.
+// Call it before the hooks load.
+func SetProcessTargetsOwned(owned bool) {
+	coreAgent.ProcessTargetsOwned = owned
+}
+
 // CaptureSettler settles a capture that reads the application's calls beside
 // its path rather than in it (a downstream build's low-latency capture, with
 // no keploy proxy for the calls to wait on). Under the proven switch a

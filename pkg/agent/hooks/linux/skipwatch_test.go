@@ -14,6 +14,7 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 	"golang.org/x/sys/unix"
 
+	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/hooks/structs"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -259,6 +260,37 @@ func TestTheKernelClassifiesOnlyWhereTheAgentAttachedTheSocketHook(t *testing.T)
 	}
 	if got := classifyFlag(other, true); got != other|structs.FlagClassifies {
 		t.Errorf("with sys_enter_socket: flags %#x, want %#x", got, other|structs.FlagClassifies)
+	}
+}
+
+// The hooks leave target_namespace_pids to DaemonSet mode, to per-container
+// targeting, and to a capture that says it puts the application's processes
+// there itself (agent.ProcessTargetsOwned); everywhere else they classify
+// processes with sys_enter_socket. A capture's claim does not take the map from
+// DaemonSet mode.
+func TestTheHooksLeaveTheTargetPIDsToTheirOwner(t *testing.T) {
+	was := agent.ProcessTargetsOwned
+	t.Cleanup(func() { agent.ProcessTargetsOwned = was })
+	for _, c := range []struct {
+		name      string
+		daemonSet string
+		targets   string
+		owned     bool
+		want      string
+	}{
+		{"the hooks classify", "", "", false, ""},
+		{"DaemonSet", "true", "", false, processTargetsByDaemonSet},
+		{"per-container targeting", "", "app", false, processTargetsByDaemonSet},
+		{"a capture that seeds the app's processes", "", "", true, processTargetsByCapture},
+		{"DaemonSet and a capture's claim", "true", "", true, processTargetsByDaemonSet},
+		{"a DaemonSet value other than true", "1", "", false, ""},
+	} {
+		t.Setenv("KEPLOY_DAEMONSET_ENABLED", c.daemonSet)
+		t.Setenv("KEPLOY_TARGET_CONTAINERS", c.targets)
+		agent.ProcessTargetsOwned = c.owned
+		if got := processTargetsOwner(); got != c.want {
+			t.Errorf("%s: owner %q, want %q", c.name, got, c.want)
+		}
 	}
 }
 

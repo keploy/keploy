@@ -19,6 +19,7 @@ import (
 	"go.uber.org/zap"
 	"golang.org/x/sys/unix"
 
+	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/hooks/structs"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -773,4 +774,31 @@ func classifyFlag(flags uint32, classifies bool) uint32 {
 		flags |= structs.FlagClassifies
 	}
 	return flags
+}
+
+// Who owns target_namespace_pids, where these hooks do not classify processes
+// themselves (processTargetsOwner).
+const (
+	// processTargetsByDaemonSet: DaemonSet mode or per-container targeting,
+	// which put exactly the recorded containers' processes there.
+	processTargetsByDaemonSet = "daemonset"
+	// processTargetsByCapture: a downstream capture that puts the recorded
+	// application's processes there itself (agent.ProcessTargetsOwned).
+	processTargetsByCapture = "capture"
+)
+
+// processTargetsOwner is what owns target_namespace_pids instead of these
+// hooks' sys_enter_socket and k_sock_create, or "" where the hooks classify
+// processes themselves. Either of the other owners would see the tracepoint add
+// processes it does not record: every process the agent's PID namespace starts
+// during the recording, which for an agent in the host's PID namespace is every
+// process the host starts.
+func processTargetsOwner() string {
+	switch {
+	case os.Getenv("KEPLOY_DAEMONSET_ENABLED") == "true" || os.Getenv("KEPLOY_TARGET_CONTAINERS") != "":
+		return processTargetsByDaemonSet
+	case agent.ProcessTargetsOwned:
+		return processTargetsByCapture
+	}
+	return ""
 }
