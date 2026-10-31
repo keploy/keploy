@@ -1491,6 +1491,10 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 	// those F gave earlier in the set (given), which no other rule reads.
 	all := raw
 	raw = ownPlaces(raw)
+	// The moments the call's earlier places hold (echoedIn), read once for
+	// the call: every leaf and window of every value it classifies holds
+	// its moments against the same places.
+	var eh earlierHeld
 	var op *offsetPlaces
 	places := func() *offsetPlaces {
 		if op == nil {
@@ -1529,7 +1533,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 			fol = &follows{dc: dc, rec: r.Value, live: l.Value, at: at, served: served, raw: raw, places: places}
 		}
 		if r.Value != "" {
-			if from, ok := appearedIn(dc, dc.ofIn(r.Value, l.Value, w, at), at, served, raw, fol); ok && skip&skipSource == 0 {
+			if from, ok := appearedIn(dc, dc.ofIn(r.Value, l.Value, w, at), at, served, raw, fol, &eh); ok && skip&skipSource == 0 {
 				ln.Kind, ln.From = KindVariable, from
 				if from.Side == "" || from.Echo {
 					ln.Why = evidence(dc.ofIn(r.Value, l.Value, w, at), from)
@@ -1559,7 +1563,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 				// any lead or window excuses its words (offset.go).
 				why = offsetWhy(m)
 				offWhy = why
-			} else if why = unaccounted(dc, v, at, served, raw, fol); why != "" {
+			} else if why = unaccounted(dc, v, at, served, raw, fol, &eh); why != "" {
 				sourced = true
 				if fol != nil && fol.refused != "" {
 					why += "; " + fol.refused
@@ -3164,7 +3168,7 @@ func sources(e, v *valueDrift) (found, whole bool) {
 // raw mock served before or recorded before at (of which F saw no live
 // value).
 func appeared(dc *DriftCache, recorded, now string, at time.Time, served []Earlier, raw []Raw) (Place, bool) {
-	return appearedIn(dc, dc.of(recorded, now), at, served, raw, nil)
+	return appearedIn(dc, dc.of(recorded, now), at, served, raw, nil, nil)
 }
 
 // appearedIn is appeared of the drifted value v, read in its call's window.
@@ -3184,7 +3188,7 @@ func appeared(dc *DriftCache, recorded, now string, at time.Time, served []Earli
 // A leaf that held the recorded value whole is the value's source only where
 // it held the value F saw too: one F saw hold another value is set aside the
 // same way, and named so (follows.refuteSeen).
-func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, raw []Raw, fol *follows) (Place, bool) {
+func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, raw []Raw, fol *follows, eh *earlierHeld) (Place, bool) {
 	recorded := v.rec
 	// The place is where the value was sent whole, not where it was answered
 	// or sent inside a longer value (a variable is bound where the
@@ -3234,7 +3238,7 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 	// moment v was recorded with is where it came from, before any lead or
 	// window excuses a word of it. An exchange F served leaf by leaf first,
 	// then a raw mock (below).
-	echoed := dc.echoedIn(v, at, served, raw)
+	echoed := dc.echoedIn(v, at, served, raw, eh)
 	if from, ok := dc.echoServed(echoed, recorded, served); ok {
 		return from, true
 	}
@@ -3671,11 +3675,36 @@ func seenPlace(e Earlier, s Seen, whole bool) Place {
 // test or recorded before at (raw), in every form, and every value of an
 // exchange F served earlier (served), on either side, as recorded and as F
 // served it (an answer's), in every form. nil when none.
-func (dc *DriftCache) echoedIn(v *valueDrift, at time.Time, served []Earlier, raw []Raw) []echoMatch {
+// eh, where not nil, holds the moments of these earlier places, read once
+// for the call.
+func (dc *DriftCache) echoedIn(v *valueDrift, at time.Time, served []Earlier, raw []Raw, eh *earlierHeld) []echoMatch {
 	if len(v.instants) == 0 {
 		return nil
 	}
-	return echoedInstants(v, dc.earlierMoments(at, served, raw), dc.recordedMoments(at, served, raw))
+	if eh == nil {
+		eh = &earlierHeld{}
+	}
+	held, recorded := eh.of(dc, at, served, raw)
+	return echoedInstants(v, held, recorded)
+}
+
+// earlierHeld are the moments a call's earlier places hold (earlierMoments,
+// recordedMoments), read the first time a value of the call is held against
+// them (echoedIn) and kept for the call's other values, leaves and windows:
+// every one of them reads the same places (the call's at, served and raw),
+// and none changes what they hold. Each is read by one call alone.
+type earlierHeld struct {
+	held, recorded *heldMoments
+}
+
+// of are the moments the earlier places of a call recorded at at hold
+// (earlierMoments) and those their recordings hold (recordedMoments), read
+// once.
+func (eh *earlierHeld) of(dc *DriftCache, at time.Time, served []Earlier, raw []Raw) (held, recorded *heldMoments) {
+	if eh.held == nil {
+		eh.held, eh.recorded = dc.earlierMoments(at, served, raw), dc.recordedMoments(at, served, raw)
+	}
+	return eh.held, eh.recorded
 }
 
 // earlierMoments are the moments the earlier places of a call recorded at
