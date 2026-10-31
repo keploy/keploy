@@ -858,11 +858,11 @@ func nonASCIIRuns(s string) []string {
 // place holds the moment it was recorded with (else it is a variable of that
 // place, appearedIn), is refused before any lead or window excuses its words:
 // what F saw came from what F served, whatever moved it.
-func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, raw []Raw, fol *follows) string {
+func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, raw []Raw, fol *follows, eh *earlierHeld) string {
 	if v.unparsed != "" {
 		return v.unparsed
 	}
-	if echoed := dc.echoedIn(v, at, served, raw); len(echoed) > 0 {
+	if echoed := dc.echoedIn(v, at, served, raw, eh); len(echoed) > 0 {
 		where := dc.heldAt(echoed, at, served, raw)
 		if where == "" {
 			where = "earlier in the test"

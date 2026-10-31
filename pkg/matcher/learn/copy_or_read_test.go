@@ -2,6 +2,7 @@ package learn
 
 import (
 	"net/url"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -2019,7 +2020,15 @@ func TestAClientTestLearnsItsAuditReadAnEarlierAnswersClockNameRoundsToAsARead(t
 		// application was given, from the app's createdAt, which in F held
 		// another second than the audit where the insert crossed one.
 		v := dc.ofIn(rec, live, w, r0.Add(254*ms))
-		from, ok := dc.echoServed(dc.echoedIn(v, r0.Add(254*ms), earlier, nil), rec, earlier)
+		from, ok := dc.echoServed(dc.echoedIn(v, r0.Add(254*ms), earlier, nil, nil), rec, earlier)
+		// The call's earlier places read once (earlierHeld) are what the
+		// echo reads of them each time it reads them anew.
+		var eh earlierHeld
+		for i := 0; i < 2; i++ {
+			if got, want := dc.echoedIn(v, r0.Add(254*ms), earlier, nil, &eh), dc.echoedIn(v, r0.Add(254*ms), earlier, nil, nil); !reflect.DeepEqual(got, want) {
+				t.Fatalf("%s: read %d of the call's earlier moments: the echo took %+v; read anew, %+v", tc.name, i+1, got, want)
+			}
+		}
 		if !ok || from.Mock != "mock-968" || from.Path != "body.docs.msgs.0.app.createdAt.$numberLong" || (from.Live != live) != tc.createdApart {
 			t.Fatalf("%s: the echo took %+v (found %v); want mock-968's app.createdAt, holding another second than %s in F: %v", tc.name, from, ok, live, tc.createdApart)
 		}
