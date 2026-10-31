@@ -88,7 +88,7 @@ type Hooks struct {
 	agentRegistrationMap  *ebpf.Map
 	redirectProxyMap      *ebpf.Map
 
-	// eBPF C shared objectsobjects
+	// eBPF C shared objects
 	// ebpf objects and events
 	socket      link.Link
 	processExit link.Link
