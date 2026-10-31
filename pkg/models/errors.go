@@ -339,6 +339,15 @@ type MockMismatchReport struct {
 	// similarity): likely one another test recorded, which the replay names
 	// (UnmatchedCall.RecordedIn).
 	NotOwned bool
+	// PoolSpent says, under the proven switch, the call is ClosestMock, a
+	// recording the set made while no test was open (its start-up and
+	// between-tests calls, keploy mock replay's pool slice) that already
+	// answered another call of this replay, each answering at most one:
+	// a call between tests when SpentIn is empty, else a call in the test
+	// SpentIn names. The recording exists; the application made the call
+	// more often than the record did (UnmatchedCall.PoolSpent).
+	PoolSpent bool
+	SpentIn   string
 	// Reason is why the call missed, when the learn step decided it
 	// (UnmatchedCall.Reason): only in record's full round.
 	Reason string

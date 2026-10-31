@@ -1862,11 +1862,21 @@ func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*model
 			extra[extraKey(m)]++
 		}
 	}
+	// A call that is a start-up or between-tests recording another call
+	// already used (models.UnmatchedCall.PoolSpent) has a recording: it
+	// says which and where it went, and if every miss is one, the reason
+	// never asks to re-record the test.
+	onlySpent := len(ev.Misses) > 0 && len(ev.Unconsumed) == 0
 	for _, m := range ev.Misses {
+		onlySpent = onlySpent && m.PoolSpent
+		noAnswer := " had no recorded answer" + missDiffersText(m)
+		if m.PoolSpent {
+			noAnswer = " had no answer left" + poolSpentText(m, mocks)
+		}
 		if before(m) {
 			// Where it was made is not known: a miss is filed by the view
 			// served when it is filed, which may be after its own test.
-			what = append(what, missText(m)+", made before this one began, had no recorded answer"+missDiffersText(m))
+			what = append(what, missText(m)+", made before this one began,"+noAnswer)
 			continue
 		}
 		switch m.Kind {
@@ -1878,12 +1888,12 @@ func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*model
 			}
 		case models.MissOutsideTest:
 			if !beganAt.IsZero() && !m.At.IsZero() {
-				what = append(what, missText(m)+", made as this test ended, had no recorded answer"+missDiffersText(m))
+				what = append(what, missText(m)+", made as this test ended,"+noAnswer)
 				continue
 			}
-			what = append(what, missText(m)+", made outside every test before this one began, had no recorded answer"+missDiffersText(m))
+			what = append(what, missText(m)+", made outside every test before this one began,"+noAnswer)
 		default:
-			what = append(what, missText(m)+" had no recorded answer"+missDiffersText(m))
+			what = append(what, missText(m)+noAnswer)
 		}
 	}
 	unmade := append([]string(nil), ev.Unconsumed...)
@@ -1919,8 +1929,25 @@ func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*model
 	} else {
 		head += " "
 	}
+	if onlySpent {
+		// Each call has a recording, which another call used: recording
+		// again is not what the miss asks.
+		return fmt.Sprintf("%sThe application made a call it makes on its own (start-up or background work) more often than when it was recorded, and keploy answers each such recording once.\n"+
+			"If it is flaky, not broken: keploy mock quarantine %s --reason \"<why>\".", head, shellQuote(id))
+	}
 	return fmt.Sprintf("%sIf this is an intended change, re-record it: keploy mock record -c \"<your command, selecting %s>\".\n"+
 		"If it is flaky, not broken: keploy mock quarantine %s --reason \"<why>\".", head, id, shellQuote(id))
+}
+
+// poolSpentText is what a reason says of a call that is a start-up or
+// between-tests recording another call already used
+// (models.UnmatchedCall.PoolSpent): the recording, and where it went.
+func poolSpentText(m models.UnmatchedCall, mocks map[string]*models.Mock) string {
+	where := "a call between tests"
+	if m.SpentIn != "" {
+		where = "a call in test " + m.SpentIn
+	}
+	return ": its recording " + mockText(m.ClosestMock, mocks[m.ClosestMock]) + ", made while no test was open, already answered " + where
 }
 
 // missWhys are, for a failed test's reason, why its calls missed, in the

@@ -98,7 +98,7 @@ func TestAnEntryAtARecordingsAddressIsItsOnlyWhileItNamesIt(t *testing.T) {
 	other := learnRecorded("other", 0, "GET", "/v1/other", "", nil, `{}`)
 	m := learnRecorded("mock-0", 0, "GET", "/v1/items", "", nil, `{}`)
 	addr := uintptr(unsafe.Pointer(m))
-	stale := &parsedRecording{mock: weak.Make(other), req: m.Spec.HTTPReq, gen: containerkey.Default.RecordedGeneration(), parts: parseRecordedParts(other)}
+	stale := &parsedRecording{mock: weak.Make(other), req: weak.Make(m.Spec.HTTPReq), gen: containerkey.Default.RecordedGeneration(), parts: parseRecordedParts(other)}
 	parsedRecordings.Store(addr, stale)
 	if p := recordedParts(m); p.path != "/v1/items" {
 		t.Fatalf("read %q through another mock's entry, want /v1/items", p.path)
@@ -130,6 +130,31 @@ func TestAParsedRecordingsEntryGoesWithTheRecording(t *testing.T) {
 	}
 	if held() {
 		t.Fatal("the entry of a recording the collector freed is still held")
+	}
+}
+
+// A recording's entry holds neither its recorded request nor the request's
+// body: the collection that frees the recording frees them, whether or not
+// the cleanup that drops the entry has run. That cleanup runs on the
+// runtime's cleanup goroutines after the collection, and what an entry held
+// went only at a collection after it: keploy mock replay held a closed test's
+// request bodies beside the next test's whenever the cleanups ran late (a
+// loaded box). One collection, no wait: the row reads no cleanup's timing.
+func TestAParsedRecordingsEntryHoldsNeitherItsRequestNorItsBody(t *testing.T) {
+	const size = 1 << 20
+	req, body := func() (weak.Pointer[models.HTTPReq], weak.Pointer[byte]) {
+		m := learnRecorded("gone", 0, "POST", "/v1/upload", strings.Repeat("b", size), nil, `{}`)
+		if p := recordedParts(m); len(p.body) != size || unsafe.SliceData(p.body) != unsafe.StringData(m.Spec.HTTPReq.Body) {
+			t.Fatalf("the parts read a body of %d bytes that is not the recording's own (recorded %d)", len(p.body), size)
+		}
+		return weak.Make(m.Spec.HTTPReq), weak.Make(unsafe.StringData(m.Spec.HTTPReq.Body))
+	}()
+	runtime.GC()
+	if req.Value() != nil {
+		t.Error("the collection that freed the recording left its recorded request: its parsed entry holds it until the entry's cleanup and another collection")
+	}
+	if body.Value() != nil {
+		t.Error("the collection that freed the recording left its request body: its parsed entry holds it until the entry's cleanup and another collection")
 	}
 }
 

@@ -654,6 +654,13 @@ type UnmatchedCall struct {
 	// NotOwned mirrors MockMismatchReport.NotOwned: the call is ClosestMock,
 	// a recording the test does not own.
 	NotOwned bool `json:"not_owned,omitempty" yaml:"not_owned,omitempty"`
+	// PoolSpent and SpentIn mirror MockMismatchReport's: the call is
+	// ClosestMock, a start-up or between-tests recording another call of
+	// the replay already used, between tests (SpentIn empty) or in the test
+	// SpentIn names. A reason names that, and never asks to re-record a
+	// recording that exists.
+	PoolSpent bool   `json:"pool_spent,omitempty" yaml:"pool_spent,omitempty"`
+	SpentIn   string `json:"spent_in,omitempty" yaml:"spent_in,omitempty"`
 	// RecordedIn names, under the proven switch, the other test of the set
 	// that owns the recording a NotOwned call is (ClosestMock): the call is
 	// likely one that test recorded, such as a later exchange of a connection

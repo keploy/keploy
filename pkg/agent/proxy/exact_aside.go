@@ -389,6 +389,62 @@ func (m *MockManager) rangePoolAside(v *exactView, kind models.Kind, keys []stri
 	visit(batch)
 }
 
+var _ integrations.SpentPoolReader = (*MockManager)(nil)
+
+// SpentPool implements integrations.SpentPoolReader: of the pool slice
+// served last (poolSlice), the data-plane recordings of kind (filed under
+// one of keys, when keys are given and the kind declares its own) that a
+// call used up in the staging, in recorded order, each with where it went:
+// one consumed through the staging's one ledger of the calls outside every
+// test (outsideState.spent, a per-test recording's, between tests or in a
+// test: the test its call was in, "" between tests), or one a test claimed
+// (asideClaims: a session or connection recording, which the calls between
+// tests still reuse). A miss on a call that is exactly one of them names
+// it and where it went (integrations.MarkPoolSpent). None without exact
+// serving, and none once the staging moved.
+func (m *MockManager) SpentPool(kind models.Kind, keys []string) []integrations.PoolSpend {
+	slice := m.exact.poolSlice.Load()
+	if m.exactView() == nil || slice == nil || len(*slice) == 0 {
+		return nil
+	}
+	m.prepareOutside()
+	st := m.exact.outside.cur.Load()
+	if st == nil || st.epoch != m.stagingEpoch.Load() {
+		return nil
+	}
+	var spent []*models.Mock
+	where := map[string]string{}
+	for name := range *slice {
+		mk := st.staged[name]
+		if mk == nil || (kind != "" && mk.Kind != kind) || mk.IsAsync() {
+			continue
+		}
+		in, used := "", false
+		if w, ok := st.spent.Load(name); ok {
+			in, _ = w.(string)
+			used = true
+		} else if t, ok := m.exact.asideClaims.claimant(st.epoch, name); ok {
+			in, used = t, true
+		}
+		if !used {
+			continue
+		}
+		if len(keys) > 0 {
+			if its := models.RequestKeys(mk); len(its) > 0 && !slices.ContainsFunc(its, func(k string) bool { return slices.Contains(keys, k) }) {
+				continue
+			}
+		}
+		spent = append(spent, mk)
+		where[name] = in
+	}
+	inRecordedOrder(spent)
+	out := make([]integrations.PoolSpend, 0, len(spent))
+	for _, mk := range spent {
+		out = append(out, integrations.PoolSpend{Mock: mk, In: where[mk.Name]})
+	}
+	return out
+}
+
 // inRecordedOrder sorts mocks by request time, those with none first, as
 // the agent orders a test's recordings.
 func inRecordedOrder(mocks []*models.Mock) {
@@ -466,7 +522,7 @@ func (m *MockManager) consumeAsideIn(v *exactView, mk *models.Mock, from string)
 		}
 	}
 	if pool && !reusedBetweenTests(m.exact.outside.cur.Load(), mk.Name) {
-		if m.consumeOutside(mk) != exactServed {
+		if m.consumeOutside(mk, v.test) != exactServed {
 			v.mu.Unlock()
 			return exactRefused, nil, nil
 		}

@@ -653,7 +653,9 @@ type outsideState struct {
 	// staged is, by name, every staged recording of the staging, read under
 	// the staging lock: a consume is checked against it.
 	staged map[string]*models.Mock
-	// spent holds the names consumed: the first consume of one wins.
+	// spent holds the names consumed, each with the test whose window its
+	// call was in ("" between tests; SpentPool names it): the first
+	// consume of one wins.
 	spent sync.Map
 	// unstaged holds the names of the recordings a door named that staged
 	// does not hold, once each is said (MockManager.servedAsNamed).
@@ -737,8 +739,10 @@ func (m *MockManager) RestartExactKey(key string, names []string) {
 // recording another call consumed since it was read is refused, and so is
 // one that is not the staging's own (read before the staging landed, under
 // a name the staging stages too or none it stages) and any consume while a
-// staging lands: the parser reads again. It takes no tree lock.
-func (m *MockManager) consumeOutside(mk *models.Mock) exactVerdict {
+// staging lands: the parser reads again. in is the test whose window the
+// call was in, "" between tests, kept with the spend for a later miss on
+// the recording to name (SpentPool). It takes no tree lock.
+func (m *MockManager) consumeOutside(mk *models.Mock, in string) exactVerdict {
 	st := m.exact.outside.cur.Load()
 	if st == nil || st.epoch != m.stagingEpoch.Load() {
 		return exactRefused
@@ -748,7 +752,7 @@ func (m *MockManager) consumeOutside(mk *models.Mock) exactVerdict {
 		!staged.Spec.ResTimestampMock.Equal(mk.Spec.ResTimestampMock) {
 		return exactRefused
 	}
-	if _, taken := st.spent.LoadOrStore(mk.Name, true); taken {
+	if _, taken := st.spent.LoadOrStore(mk.Name, in); taken {
 		return exactRefused
 	}
 	return exactServed
@@ -2926,7 +2930,7 @@ func (m *MockManager) exactConsumeIn(v *exactView, mk *models.Mock, evicts bool)
 			v.mu.Unlock()
 			return exactRefused, wait, nil
 		}
-		verdict := m.consumeOutside(mk)
+		verdict := m.consumeOutside(mk, v.test)
 		v.mu.Unlock()
 		if verdict != exactServed {
 			return verdict, nil, nil
