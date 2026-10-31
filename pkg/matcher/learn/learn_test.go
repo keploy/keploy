@@ -469,8 +469,12 @@ func TestVarPlaces(t *testing.T) {
 		// A claim of the token a header holds (JWT.Leaves), in any body.
 		{Leaf{Path: "header.authorization{jwt}.auth_time"}, false, "header.authorization{jwt}.auth_time"},
 		{Leaf{Path: "header.cookie{session}{jwt}.auth_time"}, false, "header.cookie{session}{jwt}.auth_time"},
-		{Leaf{Path: "header.cookie{session}"}, false, ""},
+		// One cookie's value (CookieLeaves); a name no cookie can have
+		// (the fixed part's) names none.
+		{Leaf{Path: "header.cookie{csrf}"}, false, "header.cookie{csrf}"},
 		{Leaf{Path: "header.cookie{other cookies}"}, false, ""},
+		{Leaf{Path: "header.cookie{a=b}"}, false, ""},
+		{Leaf{Path: "header.x-pref{csrf}"}, false, ""},
 		{Leaf{Path: "header.authorization{jwt}.ctx[1].id"}, false, "header.authorization{jwt}.ctx[1].id"},
 		{Leaf{Path: "header.{jwt}.sub"}, false, ""},          // no header
 		{Leaf{Path: "header.authorization{jwt}"}, false, ""}, // no claim

@@ -1279,8 +1279,9 @@ func TestStrictComparesAJWTByItsClaims(t *testing.T) {
 // A JWT a cookie holds is compared by what it says, at its cookie's place
 // ("header.cookie{<cookie>}{jwt}.<claim>"), as a header's whole token is:
 // a claim learned there moves, a role that changes is refused. Every other
-// cookie, the cookies' names and their order are compared as recorded, and
-// noise on the Cookie header whole excuses no claim.
+// cookie is compared as recorded at its own place ("header.cookie{<cookie>}")
+// but one learned there, the cookies' names and their order always, and
+// noise on the Cookie header whole excuses no claim and no cookie.
 func TestStrictComparesACookiesJWTByItsClaims(t *testing.T) {
 	const hs = `{"alg":"HS256","typ":"JWT"}`
 	claims := func(role, jti string) string {
@@ -1306,7 +1307,12 @@ func TestStrictComparesACookiesJWTByItsClaims(t *testing.T) {
 		{"an unlearned claim moved", cookie("dark", tok("admin", "j-2", sigB)), nil, false, "header.cookie{session}{jwt}.jti"},
 		{"the role changed", cookie("dark", tok("viewer", "j-2", sigB)), learned, false, "header.cookie{session}{jwt}.role"},
 		{"the role changed, noise on the header whole", cookie("dark", tok("viewer", "j-1", sigA)), wholeNoise, false, "header.cookie{session}{jwt}.role"},
-		{"another cookie changed", cookie("light", tok("admin", "j-2", sigB)), learned, false, "header.cookie{other cookies}"},
+		{"another cookie changed", cookie("light", tok("admin", "j-2", sigB)), learned, false, "header.cookie{theme}"},
+		{"another cookie changed, learned at its place", cookie("light", tok("admin", "j-2", sigB)), map[string][]string{"header.cookie{session}{jwt}.jti": {}, "header.cookie{theme}": {}}, true, ""},
+		{"another cookie changed, noise on the header whole", cookie("light", tok("admin", "j-1", sigA)), wholeNoise, false, "header.cookie{theme}"},
+		{"another cookie changed, another learned at its place", cookie("light", tok("admin", "j-1", sigA)), map[string][]string{"header.cookie{lang}": {}}, false, "header.cookie{theme}"},
+		{"a cookie less", "theme=dark; session=" + tok("admin", "j-2", sigB), learned, false, "header.cookie{other cookies}"},
+		{"the cookies in another order", "session=" + tok("admin", "j-2", sigB) + "; theme=dark; lang=en", learned, false, "header.cookie{other cookies}"},
 		{"a cookie more", cookie("dark", tok("admin", "j-2", sigB)) + "; debug=1", learned, false, "header.cookie{other cookies}"},
 		{"the token in another cookie", "theme=dark; sess=" + tok("admin", "j-2", sigB) + "; lang=en", learned, false, "header.cookie{other cookies}"},
 		{"no token", cookie("dark", "kep_opaque"), learned, false, "header.cookie{other cookies}"},
@@ -1337,9 +1343,12 @@ func TestUserNoiseOnTheCookieHeaderReachesItsTokensClaims(t *testing.T) {
 	if onCookie.userNoiseAt("header.authorization{jwt}.exp", "1793374115") {
 		t.Error("noise on Cookie reaches Authorization's claim")
 	}
+	if !onCookie.userNoiseAt("header.cookie{ts}", "1793374115") {
+		t.Error("noise on Cookie does not reach one of its cookies")
+	}
 	onAuth := strictKnown{n: strictNoise{header: map[string]bool{"authorization": true}}}
-	if onAuth.userNoiseAt("header.cookie{session}{jwt}.exp", "1793374115") {
-		t.Error("noise on Authorization reaches a cookie's claim")
+	if onAuth.userNoiseAt("header.cookie{session}{jwt}.exp", "1793374115") || onAuth.userNoiseAt("header.cookie{ts}", "1793374115") {
+		t.Error("noise on Authorization reaches a cookie or its claim")
 	}
 }
 

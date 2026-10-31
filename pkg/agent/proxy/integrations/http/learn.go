@@ -239,15 +239,17 @@ func (n learnNoise) shape(p httpParts, d string) learn.Shape {
 		// recorded (a fixed part). The strict comparison reads it so too
 		// (jwtDiffs).
 		// A Cookie header's cookies that hold one are read so too, each
-		// at its own place ("header.cookie{<cookie>}{jwt}.<claim>"), and
-		// the rest of the header (every other cookie, the names, their
-		// order) stays as recorded: a fixed part.
+		// at its own place ("header.cookie{<cookie>}{jwt}.<claim>"); each
+		// other cookie is then a leaf of its own ("header.cookie{<cookie>}",
+		// learn.CookieLeaves), and only the names and their order stay as
+		// recorded: a fixed part.
 		for _, h := range learn.HeaderJWTs("header."+k, v) {
 			h.JWT.Leaves(h.Place, s.Leaves)
 			s.Fixed[h.Place+learn.JWTMark] = h.JWT.Fixed()
 		}
-		if rest, ok := learn.CookiesBesideJWTs(v); ok && k == variables.CookieHeader {
-			s.Fixed["header."+k+otherCookies] = rest
+		if names, ok := learn.CookieNames(v); ok && k == variables.CookieHeader {
+			learn.CookieLeaves("header."+k, v, s.Leaves)
+			s.Fixed["header."+k+otherCookies] = names
 		}
 	}
 	switch {
@@ -2106,6 +2108,9 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 		if byClaims[r.Path] {
 			continue // decided by its claims, each its own leaf
 		}
+		if _, ok := learn.CookieOf(r.Path); ok && whole[learn.TokenHeader(r.Path)] {
+			continue // the header is followed whole, every cookie of it too
+		}
 		if c, ok := learn.ClaimOf(r.Path); ok {
 			if whole[learn.TokenHeader(c)] {
 				continue // the token is followed whole, claims and all
@@ -2414,10 +2419,10 @@ func earlierAnswers(earlier []learn.Earlier, mock string, r learn.Leaf) ([]strin
 	return at, parts, kept
 }
 
-// otherCookies is what a Cookie header's fixed part, beside the tokens its
-// cookies hold, is named under ("header.cookie{other cookies}"): every other
-// cookie, the names and their order, compared as recorded
-// (learn.CookiesBesideJWTs).
+// otherCookies is what a Cookie header's fixed part, beside the tokens and
+// the other cookies read apart in it, is named under
+// ("header.cookie{other cookies}"): the names and their order, compared as
+// recorded (learn.CookieNames).
 const otherCookies = "{other cookies}"
 
 // jwtHeaders sorts the headers among learned that hold a JWT in both runs

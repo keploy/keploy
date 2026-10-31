@@ -1421,9 +1421,11 @@ func TestLearnMatchAValueTheTestCaseGaveIsFollowedIntoAJWTClaim(t *testing.T) {
 }
 
 // The same, where the call sends its token in a cookie: the key is used at
-// the cookie's claim (header.cookie{<cookie>}{jwt}), every other claim and
-// every other cookie are still compared, and a call whose other cookie
-// changed is refused, named at the rest of the header.
+// the cookie's claim (header.cookie{<cookie>}{jwt}) and every other claim is
+// still compared. Another cookie that changed is learned at its own place
+// (header.cookie{<cookie>}), as any header value, and the claim is still
+// followed; a call whose cookies' names changed is refused, named at the
+// rest of the header.
 func TestLearnMatchAValueTheTestCaseGaveIsFollowedIntoACookiesJWTClaim(t *testing.T) {
 	h, n, opts := learnOn(t)
 	const hs = `{"alg":"HS256","typ":"JWT"}`
@@ -1448,8 +1450,79 @@ func TestLearnMatchAValueTheTestCaseGaveIsFollowedIntoACookiesJWTClaim(t *testin
 	}
 	db = start()
 	served, miss, _ = h.learnMatch(context.Background(), live("POST", "/run/r-1", `{}`, tok("light", "1793387031", "QkJCQkJC")), db, n, opts)
-	if served != nil || miss == nil || !strings.Contains(miss.res.Why, "header.cookie{other cookies}") {
+	if served == nil || miss != nil {
 		t.Fatalf("another cookie changed: served %v miss %+v", served, miss)
+	}
+	if want := (models.MockVariables{"authTime": {Recorded: "1793373215", Use: []string{"header.cookie{session}{jwt}.auth_time"}}}); !reflect.DeepEqual(db.consumed[0].Spec.Learned(), want) {
+		t.Fatalf("another cookie changed: variables %+v, want %+v", db.consumed[0].Spec.Learned(), want)
+	}
+	if want := (map[string][]string{"header.cookie{theme}": {}}); !reflect.DeepEqual(db.consumed[0].Spec.ReqBodyNoise, want) {
+		t.Fatalf("another cookie changed: noise %v, want %v (the other cookie at its own place alone)", db.consumed[0].Spec.ReqBodyNoise, want)
+	}
+	db = start()
+	added := tok("dark", "1793387031", "QkJCQkJC")
+	added["Cookie"] += "; lang=en"
+	served, miss, _ = h.learnMatch(context.Background(), live("POST", "/run/r-1", `{}`, added), db, n, opts)
+	if served != nil || miss == nil || !strings.Contains(miss.res.Why, "header.cookie{other cookies}") {
+		t.Fatalf("a cookie added: served %v miss %+v", served, miss)
+	}
+}
+
+// A cookie beside a JWT cookie that differs on every run (a CSRF token, a
+// load balancer's sticky cookie set afresh on every response) is learned at
+// its own place, whether the token is the same in both runs or a claim of it
+// moved too (a fresh jti, learned at its claim): the header is not learned
+// whole, so every other claim is still compared.
+func TestLearnMatchARandomCookieBesideAJWTCookieIsLearnedAtItsPlace(t *testing.T) {
+	enc := base64.RawURLEncoding.EncodeToString
+	jwt := func(jti string) string {
+		return enc([]byte(`{"alg":"HS256","typ":"JWT"}`)) + "." + enc([]byte(`{"sub":"u-1","role":"admin","jti":"`+jti+`"}`)) + ".QUFBQUFB"
+	}
+	const recJTI = "5f0c1d7e-0b6a-4c1e-9a55-2b7d8e9f0a11"
+	for name, c := range map[string]struct {
+		jti   string
+		noise map[string][]string
+	}{
+		"the same token":  {recJTI, map[string][]string{"header.cookie{csrf}": {}}},
+		"a fresh jti too": {"9c3b2a10-7d4e-4f5a-8b6c-1e2f3a4b5c6d", map[string][]string{"header.cookie{csrf}": {}, "header.cookie{session}{jwt}.jti": {}}},
+	} {
+		h, n, opts := learnOn(t)
+		db := &learnDb{perTest: []*models.Mock{learnRecorded("mock-0", 0, "POST", "/v1/orders", `{}`, map[string]string{"Cookie": "csrf=Zx81kQ0aP3c; session=" + jwt(recJTI)}, `{"ok":true}`)}}
+		served, miss, err := h.learnMatch(context.Background(), live("POST", "/v1/orders", `{}`, map[string]string{"Cookie": "csrf=Ab92LmQ7Rtw; session=" + jwt(c.jti)}), db, n, opts)
+		if err != nil || served == nil || miss != nil {
+			t.Fatalf("%s: served %v err %v miss %+v", name, served != nil, err, miss)
+		}
+		if got := db.consumed[0].Spec.ReqBodyNoise; !reflect.DeepEqual(got, c.noise) {
+			t.Fatalf("%s: noise %v, want %v", name, got, c.noise)
+		}
+		if l := db.consumed[0].Spec.Learned(); len(l) != 0 {
+			t.Fatalf("%s: variables %+v", name, l)
+		}
+	}
+}
+
+// A Cookie header the test case gave whole, carried on whole, where a cookie
+// beside the token changed too (the login answered a new CSRF cookie with
+// the new session): followed whole as the key's variable, which covers every
+// cookie of it as it covers the token's claims; nothing is learned apart.
+func TestLearnMatchAGivenWholeCookieHeaderWithAChangedOtherCookieIsFollowedWhole(t *testing.T) {
+	h, n, opts := learnOn(t)
+	enc := base64.RawURLEncoding.EncodeToString
+	cookie := func(csrf, at, sig string) string {
+		return "csrf=" + csrf + "; session=" + enc([]byte(`{"alg":"HS256","typ":"JWT"}`)) + "." + enc([]byte(`{"sub":"u-1","auth_time":`+at+`}`)) + "." + sig
+	}
+	rec, liveC := cookie("Zx81kQ0aP3c", "1793373215", "QUFBQUFB"), cookie("Ab92LmQ7Rtw", "1793387031", "QkJCQkJC")
+	db := &givenDb{learnDb: &learnDb{perTest: []*models.Mock{learnRecorded("mock-0", 0, "POST", "/run/r-1", `{}`, map[string]string{"Cookie": rec}, `{"ok":true}`)}}}
+	db.table.Start([]variables.Binding{{Name: "session", Value: liveC, Recorded: rec, Mock: "test case get-1", Place: "header.Cookie", Given: true}})
+	served, miss, _ := h.learnMatch(context.Background(), live("POST", "/run/r-1", `{}`, map[string]string{"Cookie": liveC}), db, n, opts)
+	if served == nil || miss != nil {
+		t.Fatalf("served %v miss %+v", served, miss)
+	}
+	if want := (models.MockVariables{"session": {Recorded: rec, Use: []string{"header.cookie"}}}); !reflect.DeepEqual(db.consumed[0].Spec.Learned(), want) {
+		t.Fatalf("variables %+v, want %+v", db.consumed[0].Spec.Learned(), want)
+	}
+	if len(db.consumed[0].Spec.ReqBodyNoise) != 0 {
+		t.Fatalf("noise %v: the whole header's variable covers its cookies", db.consumed[0].Spec.ReqBodyNoise)
 	}
 }
 
@@ -5957,6 +6030,40 @@ func TestLearnMatchATokenTheHarnessGaveForwardedWholeIsFollowedWhole(t *testing.
 	}
 	if len(db.consumed[0].Spec.ReqBodyNoise) != 0 {
 		t.Fatalf("noise %v", db.consumed[0].Spec.ReqBodyNoise)
+	}
+}
+
+// The same where the harness sends its token in a cookie beside a cookie
+// that changes on every run (a CSRF token), and the application forwards
+// the whole Cookie header: followed whole as one variable of the incoming
+// requests' header, which covers every cookie of it as it covers the
+// token's claims; nothing is learned apart.
+func TestLearnMatchACookieHeaderTheHarnessGaveForwardedWholeIsFollowedWhole(t *testing.T) {
+	h, n, opts := learnOn(t)
+	const hs = `{"alg":"HS256","typ":"JWT"}`
+	session := func(csrf, at, sig string) map[string]string {
+		return map[string]string{"Cookie": "csrf=" + csrf + "; session=" + strings.TrimPrefix(bearerJWT(hs, `{"sid":"e2e-go-session","role":"admin","auth_time":`+at+`}`, sig), "Bearer ")}
+	}
+	recorded, liveC := session("Zx81kQ0aP3c", "1793373215", "QUFBQUFB"), session("Ab92LmQ7Rtw", "1793387031", "QkJCQkJC")
+	tr := learn.NewTracker()
+	tr.SetClientTests(true)
+	tr.SetIncomingSeen(true)
+	tr.GiveIncoming("TestForwardOnClient", []learn.IncomingRequest{learn.IncomingHTTP("test-1", learnAt.Add(-time.Second), "http://app/v1/generate", recorded)})
+	tr.Begin()
+	tr.Incoming(learn.IncomingHTTP("", time.Now(), "http://app/v1/generate", liveC))
+	ctx := learn.WithTracker(context.Background(), tr)
+	db := &learnDb{perTest: []*models.Mock{learnRecorded("mock-0", 0, "POST", "/run/r-1", `{}`, recorded, `{"ok":true}`)}}
+	served, miss, _ := h.learnMatch(ctx, live("POST", "/run/r-1", `{}`, liveC), db, n, opts)
+	if served == nil || miss != nil {
+		t.Fatalf("served %v miss %+v", served, miss)
+	}
+	got := db.consumed[0].Spec.Learned()
+	want := models.MockVariables{"Cookie": {Recorded: recorded["Cookie"], Use: []string{"header.cookie"}, Incoming: "header.Cookie"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("variables %+v, want %+v: the forwarded header followed whole", got, want)
+	}
+	if len(db.consumed[0].Spec.ReqBodyNoise) != 0 {
+		t.Fatalf("noise %v: the whole header's variable covers its cookies", db.consumed[0].Spec.ReqBodyNoise)
 	}
 }
 

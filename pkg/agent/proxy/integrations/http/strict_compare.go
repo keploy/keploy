@@ -247,8 +247,10 @@ func (k strictKnown) clockDiffs(ctx context.Context, input *req) []strictField {
 // header's: keploy.yml's noise on the header leaves the whole token
 // uncompared (headerDiffs), so it excuses the claim's read of the clock too.
 func (k strictKnown) userNoiseAt(place, value string) bool {
-	if token, ok := learn.ClaimOf(place); ok && strings.HasPrefix(token, "header.") {
-		place = learn.TokenHeader(token)
+	if strings.HasPrefix(place, "header.") {
+		// A claim of a token a header holds, or one cookie of a Cookie
+		// header ("header.cookie{csrf}"): the header's.
+		place = learn.TokenHeader(place)
 	}
 	switch {
 	case strings.HasPrefix(place, "header."):
@@ -555,15 +557,16 @@ func (k strictKnown) jwtDiffs(path, rv string, rj learn.JWT, live []string) []st
 
 // cookieDiffs are the differences of a Cookie header's live lines from its
 // recorded value rv, whose cookies held hold a JWT (learn.HeaderJWTs): one
-// live line, the same as rv but for those tokens (every other cookie, the
-// names, their order: learn.CookiesBesideJWTs), and each token read by what
-// it says at its cookie's place (jwtDiffs: "header.cookie{<cookie>}{jwt}").
+// live line with the recorded names in their order (learn.CookieNames), each
+// token read by what it says at its cookie's place (jwtDiffs:
+// "header.cookie{<cookie>}{jwt}"), and each other cookie as recorded but one
+// the learn step learned at its own place ("header.cookie{<cookie>}").
 func (k strictKnown) cookieDiffs(path, rv string, held []learn.HeldJWT, live []string) []strictField {
 	lv := strings.Join(live, ",")
-	rest, _ := learn.CookiesBesideJWTs(rv)
-	lrest, ok := learn.CookiesBesideJWTs(lv)
-	if len(live) != 1 || !ok || lrest != rest {
-		return []strictField{field(valueDiff(path+otherCookies, rest, lrest))}
+	names, _ := learn.CookieNames(rv)
+	lnames, ok := learn.CookieNames(lv)
+	if len(live) != 1 || !ok || lnames != names {
+		return []strictField{field(valueDiff(path+otherCookies, names, lnames))}
 	}
 	var out []strictField
 	for _, h := range held {
@@ -574,6 +577,23 @@ func (k strictKnown) cookieDiffs(path, rv string, held []learn.HeldJWT, live []s
 			continue
 		}
 		out = append(out, k.jwtDiffs(h.Place, rtok, h.JWT, []string{ltok})...)
+	}
+	rl, ll := map[string]learn.Leaf{}, map[string]learn.Leaf{}
+	learn.CookieLeaves(path, rv, rl)
+	learn.CookieLeaves(path, lv, ll)
+	places := make(map[string]bool, len(rl))
+	for p := range rl {
+		places[p] = true
+	}
+	for _, p := range sortedNames(places) {
+		if k.learnedAt(p, "") {
+			continue
+		}
+		// The names are the same in both (CookieNames), so the live
+		// line holds each recorded cookie.
+		if r, l := rl[p], ll[p]; r.Value != l.Value {
+			out = append(out, field(valueDiff(p, r.Value, l.Value)))
+		}
 	}
 	return out
 }

@@ -44,6 +44,10 @@ func VarPlace(l Leaf, jsonBody bool) (string, bool) {
 			}
 			return variables.Place{Part: variables.PartHeader, Name: header, Claim: claim, Cookie: cookie}.String(), true
 		}
+		if cookie, ok := CookieOf(l.Path); ok {
+			// One cookie's value of a Cookie header (CookieLeaves).
+			return variables.Place{Part: variables.PartHeader, Name: variables.CookieHeader, Cookie: cookie}.String(), true
+		}
 		if strings.ContainsRune(name, '{') {
 			// A token's place, or a part of a header, named with no claim
 			// ("header.authorization{jwt}"): a header's name holds no '{'.
@@ -80,6 +84,9 @@ func LeafPath(place string) (string, bool) {
 				cookie = "{" + p.Cookie + "}"
 			}
 			return "header." + strings.ToLower(p.Name) + cookie + JWTMark + leafSegs(p.Claim), true
+		}
+		if p.Cookie != "" {
+			return "header." + strings.ToLower(p.Name) + "{" + p.Cookie + "}", true
 		}
 		return "header." + strings.ToLower(p.Name), true
 	case variables.PartBody:
@@ -148,6 +155,10 @@ func varName(place string) string {
 			base = "path" + strconv.Itoa(p.Index)
 		case variables.PartQuery, variables.PartHeader:
 			base = p.Name
+			if p.Cookie != "" {
+				// A cookie, or its token's claim, by the cookie's name.
+				base = p.Cookie
+			}
 			// A token's claim is named by its claim's key.
 			for i := len(p.Claim) - 1; i >= 0; i-- {
 				if !p.Claim[i].IsIndex {

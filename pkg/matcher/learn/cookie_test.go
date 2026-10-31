@@ -17,10 +17,11 @@ func cookieToken(authTime, jti string) string {
 
 // A Cookie header's cookies that hold a JWT are read apart, each at its own
 // place ("header.<name>{<cookie>}"), its value replaced byte for byte in the
-// header; the rest of the header (every other cookie, the names, their
-// order) is what stays compared whole. A cookie two pairs name has no one
-// place, and a header keploy cannot read as pairs holds none; a header that
-// is no Cookie header is read whole, as before.
+// header; each other cookie is then a leaf of its own, and only the names and
+// their order stay compared whole. A cookie two pairs name has no one place,
+// and a header keploy cannot read as pairs (a name with a brace, which a
+// place could not name) holds none; a header that is no Cookie header is read
+// whole, as before.
 func TestACookieHeadersTokensAreReadApart(t *testing.T) {
 	tok := cookieToken("1793373215", "j-1")
 	v := "theme=dark;  jwt_token_staging= " + tok + " ; lang=en"
@@ -34,8 +35,25 @@ func TestACookieHeadersTokensAreReadApart(t *testing.T) {
 	if got, ok := WithCookieValue(v, "jwt_token_staging", "x.y.z"); !ok || got != "theme=dark;  jwt_token_staging= x.y.z ; lang=en" {
 		t.Errorf("with %q %v", got, ok)
 	}
-	if got, ok := CookiesBesideJWTs(v); !ok || got != "theme=dark;  jwt_token_staging= {jwt} ; lang=en" {
-		t.Errorf("beside %q %v", got, ok)
+	if got, ok := CookieNames(v); !ok || got != "theme={value};  jwt_token_staging= {jwt} ; lang={value}" {
+		t.Errorf("names %q %v", got, ok)
+	}
+	leaves := map[string]Leaf{}
+	CookieLeaves("header.cookie", v, leaves)
+	if len(leaves) != 2 || leaves["header.cookie{theme}"].Value != "dark" || leaves["header.cookie{lang}"].Value != "en" {
+		t.Errorf("leaves %+v", leaves)
+	}
+	for path, want := range map[string]string{"header.cookie{theme}": "theme", "header.Cookie{lang}": "lang", "header.cookie{s}{jwt}.sub": "", "header.cookie": "", "header.x-pref{a}": "", "header.cookie{}": ""} {
+		if got, ok := CookieOf(path); got != want || ok != (want != "") {
+			t.Errorf("CookieOf(%q) = %q %v, want %q", path, got, ok, want)
+		}
+	}
+	if place, ok := VarPlace(leaves["header.cookie{theme}"], false); !ok || place != "header.cookie{theme}" {
+		t.Errorf("place %q %v", place, ok)
+	} else if back, ok := LeafPath(place); !ok || back != "header.cookie{theme}" {
+		t.Errorf("leaf path %q %v", back, ok)
+	} else if p, err := variables.Parse(place); err != nil || p.Cookie != "theme" || len(p.Claim) != 0 || p.String() != place || varName(place) != "theme" {
+		t.Errorf("parsed %+v %v", p, err)
 	}
 	if TokenHeader(held[0].Place) != "header.Cookie" || TokenHeader("header.authorization") != "header.authorization" {
 		t.Errorf("token header %q", TokenHeader(held[0].Place))
@@ -44,15 +62,22 @@ func TestACookieHeadersTokensAreReadApart(t *testing.T) {
 		"a cookie two pairs name":   {"header.cookie", "s=" + tok + "; s=" + tok},
 		"a part that is no pair":    {"header.cookie", "theme; s=" + tok},
 		"a token after a scheme":    {"header.cookie", "s=Bearer " + tok},
-		"no Cookie header":          {"header.x-pref", "s=" + tok},
+		"no Cookie header":          {"header.x-pref", "s=" + tok + "; lang=en"},
 		"no token":                  {"header.cookie", "s=kep_opaque; lang=en"},
 		"a header's name and value": {"header.cookie", ""},
+		"a name with a brace":       {"header.cookie", "a{b=" + tok + "; lang=en"},
+		"a name closing a brace":    {"header.cookie", "lang=en; a}b=" + tok},
+		"a name with a space":       {"header.cookie", "other cookies=x; s=" + tok},
 	} {
 		if h := HeaderJWTs(c.place, c.v); len(h) != 0 {
 			t.Errorf("%s: read %+v", name, h)
 		}
-		if _, ok := CookiesBesideJWTs(c.v); ok && c.place == "header.cookie" {
-			t.Errorf("%s: a rest beside no token", name)
+		if _, ok := CookieNames(c.v); ok && c.place == "header.cookie" {
+			t.Errorf("%s: names beside no token", name)
+		}
+		leaves := map[string]Leaf{}
+		if CookieLeaves(c.place, c.v, leaves); len(leaves) != 0 {
+			t.Errorf("%s: cookies read apart %+v", name, leaves)
 		}
 	}
 	if _, ok := CookieValue("s=1; s=2", "s"); ok {

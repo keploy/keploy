@@ -141,6 +141,9 @@ func readDecls(m *models.Mock) ([]varDecl, string) {
 		if answer && p.Part != variables.PartBody && p.Part != variables.PartHeader {
 			return varPlace{}, fmt.Sprintf("the answer place %s of variable %s is not a place of a response (body.<path> or header.<name>)", raw, name)
 		}
+		if answer && p.Cookie != "" && len(p.Claim) == 0 {
+			return varPlace{}, fmt.Sprintf("the answer place %s of variable %s names a cookie of a request's Cookie header, which no response holds", raw, name)
+		}
 		if answer && len(p.Claim) > 0 {
 			// The application may check the token it is answered with,
 			// and keploy cannot sign one again.
@@ -328,6 +331,14 @@ func (v reqView) read(p variables.Place) (held, bool) {
 			}
 			return held{value: l.Value(claims), kind: l.Kind, raw: l.Raw(claims), body: true}, true
 		}
+		if p.Cookie != "" {
+			// One cookie's value of the Cookie header.
+			value, ok := learn.CookieValue(vals[0], p.Cookie)
+			if !ok {
+				return held{}, false
+			}
+			return held{value: value}, true
+		}
 		return held{value: vals[0]}, true
 	}
 	return held{}, false
@@ -387,6 +398,17 @@ func (v reqView) putBack(p variables.Place, rec held) (reqView, bool) {
 				if value, ok = learn.WithCookieValue(vals[0], p.Cookie, value); !ok {
 					return v, false
 				}
+			}
+		} else if p.Cookie != "" {
+			// The recorded value back in its cookie, every other byte of
+			// the header as the call sent it.
+			vals := v.header.Values(p.Name)
+			if len(vals) != 1 {
+				return v, false
+			}
+			var ok bool
+			if value, ok = learn.WithCookieValue(vals[0], p.Cookie, rec.value); !ok {
+				return v, false
 			}
 		}
 		h := v.header.Clone()

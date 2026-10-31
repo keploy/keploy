@@ -2438,3 +2438,45 @@ func TestVariables_APartAtAPlaceTheVariableDoesNotNameIsRefused(t *testing.T) {
 		wantProblem(t, ok, diag, "does not name the place")
 	}
 }
+
+// A variable at one cookie's value of a Cookie header (header.Cookie{sid})
+// reads that cookie's value alone, and a replay puts the recorded value back
+// there, every other byte of the header as the call sent it. A cookie two
+// pairs name, or one the header does not hold, has no value there. No
+// response holds a request's Cookie header, so no answer place names one.
+func TestVariables_ACookiesValueIsReadAndPutBackAtItsPlace(t *testing.T) {
+	p, err := variables.Parse("header.Cookie{sid}")
+	if err != nil || p.Cookie != "sid" || len(p.Claim) != 0 {
+		t.Fatalf("place %+v %v", p, err)
+	}
+	view := func(cookie string) reqView {
+		h := http.Header{}
+		h.Set("Cookie", cookie)
+		return reqView{method: "POST", header: h}
+	}
+	v := view("theme=dark; sid=s-live ; session=a.b.c")
+	got, ok := v.read(p)
+	if !ok || got.value != "s-live" {
+		t.Fatalf("read %+v %v", got, ok)
+	}
+	back, ok := v.putBack(p, held{value: "s-rec"})
+	if !ok || back.header.Get("Cookie") != "theme=dark; sid=s-rec ; session=a.b.c" {
+		t.Fatalf("put back %q %v", back.header.Get("Cookie"), ok)
+	}
+	if v.header.Get("Cookie") != "theme=dark; sid=s-live ; session=a.b.c" {
+		t.Fatalf("the live header changed: %q", v.header.Get("Cookie"))
+	}
+	for _, c := range []string{"sid=1; sid=2", "theme=dark", "theme"} {
+		if got, ok := view(c).read(p); ok {
+			t.Errorf("%q: read %+v", c, got)
+		}
+		if _, ok := view(c).putBack(p, held{value: "s-rec"}); ok {
+			t.Errorf("%q: put back", c)
+		}
+	}
+	m := varMock("mock-0", "POST", "http://jobs/run/r-1", `{}`, 200, `{"sid":"s-rec"}`,
+		models.MockVariables{"sid": {Recorded: "s-rec", Use: []string{"header.cookie{sid}"}, Answer: []string{"header.Cookie{sid}"}}})
+	if _, why := readDecls(m); !strings.Contains(why, "names a cookie of a request's Cookie header") {
+		t.Fatalf("an answer place at a cookie: %q", why)
+	}
+}

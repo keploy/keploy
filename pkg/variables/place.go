@@ -58,10 +58,11 @@ const (
 const JWTMark = "{jwt}"
 
 // CookieHeader is the header whose cookies a place may name one of
-// (Place.Cookie): header.Cookie{<cookie>}{jwt}.<claim path>, a claim of the
-// JSON Web Token the cookie's value is (RFC 6265 §4.2: "<name>=<value>"
-// pairs joined by "; "). A cookie's name is a token, which holds no '{' or
-// '}', so the braces end it.
+// (Place.Cookie): header.Cookie{<cookie>}, the cookie's value, or
+// header.Cookie{<cookie>}{jwt}.<claim path>, a claim of the JSON Web Token
+// the cookie's value is (RFC 6265 §4.2: "<name>=<value>" pairs joined by
+// "; "). A cookie's name is a token, which holds no '{' or '}', so the
+// braces end it.
 const CookieHeader = "cookie"
 
 // Place is where in a call a variable's value is.
@@ -77,9 +78,9 @@ type Place struct {
 	// Claim is the JSON path of a claim of the JSON Web Token a PartHeader
 	// place's header holds (JWTMark), nil for the header's whole value.
 	Claim []templates.PathSeg
-	// Cookie is, for a claim of a Cookie header's place, the cookie whose
-	// value the token is (CookieHeader), "" where the header's whole value
-	// is the token.
+	// Cookie is, for a Cookie header's place, the cookie whose value it
+	// names (CookieHeader): the value itself, or with Claim a claim of the
+	// token that value is; "" for the header's whole value.
 	Cookie string
 }
 
@@ -102,6 +103,7 @@ var ErrPlace = errors.New("not a variable place")
 //	header.X-Request-Id   the value of a header (any case)
 //	header.Authorization{jwt}.sub
 //	                      a claim of the JSON Web Token the header holds
+//	header.Cookie{csrf}   the value of the cookie csrf
 //	header.Cookie{session}{jwt}.sub
 //	                      a claim of the JSON Web Token the cookie session holds
 func Parse(s string) (Place, error) {
@@ -126,14 +128,19 @@ func Parse(s string) (Place, error) {
 		name := s[len(headerPrefix):]
 		cookie := ""
 		if n := len(CookieHeader); len(name) > n && strings.EqualFold(name[:n], CookieHeader) && name[n] == '{' {
-			// A cookie's name, where its closing brace is followed by the
-			// token's mark: "Cookie{jwt}.sub" is a claim of the header's
-			// whole value, "Cookie{jwt}{jwt}.sub" one of cookie jwt's.
-			if end := strings.IndexByte(name[n:], '}'); end > 0 && strings.HasPrefix(name[n+end+1:], JWTMark) {
+			// A cookie's name, where its closing brace ends the place (the
+			// cookie's value) or is followed by the token's mark:
+			// "Cookie{jwt}.sub" is a claim of the header's whole value,
+			// "Cookie{jwt}{jwt}.sub" one of cookie jwt's, and "Cookie{jwt}"
+			// cookie jwt's value.
+			if end := strings.IndexByte(name[n:], '}'); end > 0 && (n+end+1 == len(name) || strings.HasPrefix(name[n+end+1:], JWTMark)) {
 				if cookie = name[n+1 : n+end]; cookie == "" || strings.ContainsAny(cookie, "{=; ") {
 					return Place{}, fmt.Errorf("%w: %q names no cookie between { and }", ErrPlace, s)
 				}
 				name = name[:n] + name[n+end+1:]
+				if len(name) == n {
+					return Place{Part: PartHeader, Name: name, Cookie: cookie}, nil
+				}
 			}
 		}
 		i := strings.Index(name, JWTMark)
@@ -168,6 +175,9 @@ func (p Place) String() string {
 				name += "{" + p.Cookie + "}"
 			}
 			return headerPrefix + name + JWTMark + formatJSONPath(p.Claim)
+		}
+		if p.Cookie != "" {
+			return headerPrefix + p.Name + "{" + p.Cookie + "}"
 		}
 		return headerPrefix + p.Name
 	}
