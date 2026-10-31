@@ -153,10 +153,15 @@ type Tracker struct {
 	// appClockRun is the real instant from which the app's clock has run as
 	// one to a real instant (SetAppClockRun), nil where the hooks tell none.
 	appClockRun func(time.Time) (time.Time, bool)
-	// servedAt are the real instants the store served the running set's
-	// data-plane mocks at, in order (ServedMockAt): when the app's calls the
-	// replay answered reached keploy. NewSet forgets them.
-	servedAt []time.Time
+	// servedAt are the store's serves of the running set's data-plane mocks,
+	// in the order of the real instants it served them at (servedIn), each
+	// with the instant its call reached keploy. NewSet forgets them.
+	servedAt []servedInstant
+	// serveAt is the real instant each of the running set's serves was made
+	// at, by number (serveAt[n-1] of the n-th, ServedMockAt's at): what an
+	// Order cut at a call's arrival (Order.ArrivedAt) reads. NewSet forgets
+	// it.
+	serveAt []time.Time
 	// given is the running test case's own request (Give), an earlier place
 	// the learn step reads as any other (Earlier.Given); nil until it is
 	// given, and for a test no keploy test case opened (keploy mock's).
@@ -247,7 +252,7 @@ func (t *Tracker) NewSetAt(at time.Time) {
 	t.run, t.runNames, t.runTaken, t.setTaken = nil, nil, nil, nil
 	t.names, t.taken = nil, nil
 	t.answered, t.drifts = nil, t.newDrifts()
-	t.servedAt = nil
+	t.servedAt, t.serveAt = nil, nil
 	t.given = nil
 	say := t.closeUnread()
 	t.open, t.began = false, false
@@ -748,30 +753,37 @@ func (t *Tracker) Placed() Placed {
 // orderLocked is the order of the set's serves as a read now sees it
 // (Placed.Order). t.mu is held.
 func (t *Tracker) orderLocked() Order {
-	return Order{t: t, serves: t.serves, asRecorded: t.asRecorded, lives: t.lives, upTo: t.seq, testFrom: t.testFrom, outside: t.outsideSeq, places: t.places, flights: t.flights, handshakes: t.handshakes, set: t.setEpoch, landings: t.landings, flying: t.flying}
+	return Order{t: t, serves: t.serves, asRecorded: t.asRecorded, lives: t.lives, upTo: t.seq, testFrom: t.testFrom, outside: t.outsideSeq, places: t.places, flights: t.flights, handshakes: t.handshakes, set: t.setEpoch, landings: t.landings, flying: t.flying, serveAt: t.serveAt[:len(t.serveAt):len(t.serveAt)]}
 }
 
 // ServedMock notes a mock any parser served in the running test: an earlier
 // place of the test's recording, whatever its kind, for Classify (Raw); and,
-// a data-plane one, a call of the app's that reached keploy now
-// (CallWindow).
+// a data-plane one, a call of the app's that reached keploy now and was
+// answered now (CallWindow).
 func (t *Tracker) ServedMock(m *models.Mock) { t.ServedMockAt(m, time.Now()) }
 
-// ServedMockAt is ServedMock of a mock served at the real instant at.
-func (t *Tracker) ServedMockAt(m *models.Mock, at time.Time) { t.servedIn(m, at, nil, serveKind{}) }
+// ServedMockAt is ServedMock of a mock served, to a call that reached keploy,
+// at the real instant at.
+func (t *Tracker) ServedMockAt(m *models.Mock, at time.Time) { t.servedIn(m, at, at, nil, serveKind{}) }
 
 // ServedMockIn is ServedMock of a mock served in the request in, as the
 // parser that served it said (integrations.ServingIn): the serve is that
 // request's whatever other requests are aloft (Flight); in NoRequest, no
 // request's; in one a request caused (Flight.LiftCaused), that one's. A nil
-// in is ServedMock.
+// in is ServedMock. The serve is made now, and its call reached keploy when
+// in lifted (Flight.Lift; now where in is no request of the application's):
+// a store's consume door tells it after the parser's learn step decided the
+// call, so the call is a later one's previous call from its arrival, as
+// record's is from its request (PreviousCall), not from the consume.
 func (t *Tracker) ServedMockIn(m *models.Mock, in *Flight) {
-	t.servedIn(m, time.Now(), in, serveKind{})
+	now := time.Now()
+	t.servedIn(m, now, in.arrivedBy(t, now), in, serveKind{})
 }
 
-// ServedMockAtIn is ServedMockIn of a mock served at the real instant at.
+// ServedMockAtIn is ServedMockIn of a mock served, to a call that reached
+// keploy, at the real instant at.
 func (t *Tracker) ServedMockAtIn(m *models.Mock, at time.Time, in *Flight) {
-	t.servedIn(m, at, in, serveKind{})
+	t.servedIn(m, at, at, in, serveKind{})
 }
 
 // ServedHandshakeIn is ServedMock of a handshake m, a protocol phase, that
@@ -795,21 +807,37 @@ func (t *Tracker) ServedMockAtIn(m *models.Mock, at time.Time, in *Flight) {
 // lifted (Order.Of: 0, 0). A data-plane m is numbered and placed so too, and
 // makes no request a serve: tell those with ServedMockIn.
 func (t *Tracker) ServedHandshakeIn(m *models.Mock, chosen, in *Flight) {
-	t.servedIn(m, time.Now(), in, serveKind{handshake: true, placed: chosen == in})
+	now := time.Now()
+	t.servedIn(m, now, in.arrivedBy(t, now), in, serveKind{handshake: true, placed: chosen == in})
 }
 
-// servedIn is ServedMockAt of a serve made in the request in (nil: not
-// said), told as k says (serveKind).
-func (t *Tracker) servedIn(m *models.Mock, at time.Time, in *Flight, k serveKind) {
+// servedInstant is a data-plane serve of the store's (servedIn): made at the
+// real instant at, to a call that reached keploy at from (no later than at).
+// upTo is the latest from of it and of every serve made before it.
+type servedInstant struct {
+	at, from, upTo time.Time
+}
+
+// servedIn is ServedMockAt of a serve made at the real instant at, to a call
+// that reached keploy at from, in the request in (nil: not said), told as k
+// says (serveKind).
+func (t *Tracker) servedIn(m *models.Mock, at, from time.Time, in *Flight, k serveKind) {
 	if t == nil || m == nil {
 		return
 	}
 	t.mu.Lock()
 	if !m.IsProtocolPhase() {
-		i := sort.Search(len(t.servedAt), func(i int) bool { return t.servedAt[i].After(at) })
-		t.servedAt = append(t.servedAt, time.Time{})
+		i := sort.Search(len(t.servedAt), func(i int) bool { return t.servedAt[i].at.After(at) })
+		t.servedAt = append(t.servedAt, servedInstant{})
 		copy(t.servedAt[i+1:], t.servedAt[i:])
-		t.servedAt[i] = at
+		t.servedAt[i] = servedInstant{at: at, from: from}
+		for j := i; j < len(t.servedAt); j++ {
+			up := t.servedAt[j].from
+			if j > 0 && t.servedAt[j-1].upTo.After(up) {
+				up = t.servedAt[j-1].upTo
+			}
+			t.servedAt[j].upTo = up
+		}
 	}
 	id := MockID(m)
 	if t.serves == nil {
@@ -820,6 +848,7 @@ func (t *Tracker) servedIn(m *models.Mock, at time.Time, in *Flight, k serveKind
 	}
 	t.seq++
 	t.serves[id] = append(t.serves[id], t.seq)
+	t.serveAt = append(t.serveAt, at)
 	if !t.open {
 		if t.outsideSeq == nil {
 			t.outsideSeq = map[int]bool{}
@@ -890,6 +919,45 @@ type Order struct {
 	set      uint64
 	landings uint64
 	flying   bool
+	// serveAt is the real instant of each serve numbered up to upTo
+	// (Tracker.serveAt), and arrival the instant the call the read is for
+	// reached keploy (ArrivedAt; zero: not said).
+	serveAt []time.Time
+	arrival time.Time
+}
+
+// ArrivedAt is o for the call that reached keploy at the real instant
+// arrival: ServedView marks a recording every serve of which o saw was made
+// after arrival (Raw.servedAfter), which F had not served when the call
+// reached keploy, however soon after it F served it and the call's learn
+// step read the tracker. The rule a recording F had not served before the
+// call reads it so (follows.notServed), so that its verdict does not hang
+// on how long the call waited for its learn step: a sibling served in that
+// wait, which grows with load, leaves it as it was. A zero arrival is o.
+func (o Order) ArrivedAt(arrival time.Time) Order {
+	o.arrival = arrival
+	return o
+}
+
+// servedAfterLocked reports whether every serve of the mock of identity id
+// that o saw was made after o's arrival (ArrivedAt), and there was one: no
+// arrival said, a serve of an instant not kept, or one made at or before the
+// arrival, says it was served before the call. o.t.mu is held.
+func (o Order) servedAfterLocked(id string) bool {
+	if o.arrival.IsZero() {
+		return false
+	}
+	n := o.serves[id]
+	k := sort.SearchInts(n, o.upTo+1)
+	if k == 0 {
+		return false
+	}
+	for _, s := range n[:k] {
+		if s < 1 || s > len(o.serveAt) || !o.serveAt[s-1].After(o.arrival) {
+			return false
+		}
+	}
+	return true
 }
 
 // Of is where F served m in the set, in one sequence across its start-up,
@@ -963,7 +1031,7 @@ func (o Order) ServedView(m *models.Mock, r Raw) Raw {
 	var recorded, unread, ok bool
 	var loads []func() (*models.Mock, error)
 	o.t.mu.Lock()
-	older, before := o.olderTestLocked(id), o.beforeTestLocked(id)
+	older, before, after := o.olderTestLocked(id), o.beforeTestLocked(id), o.servedAfterLocked(id)
 	if unstated {
 		recorded, _, loads, unread, ok = o.viewsLocked(id)
 	}
@@ -974,6 +1042,7 @@ func (o Order) ServedView(m *models.Mock, r Raw) Raw {
 	if before {
 		r = r.ServedBeforeTheTest()
 	}
+	r.servedAfter = after
 	switch {
 	case !unstated, !ok:
 		return r
@@ -1814,8 +1883,11 @@ func (t *Tracker) LiveSpan(arrival time.Time) (Span, bool) {
 
 // liveClock is what the tracker knows, at one moment, of this run's clock
 // before a call that reached keploy at a real instant: how to read the
-// app's clock, the previous data-plane serve before the call, the running
-// set's begin, and in a client test the running test's begin.
+// app's clock, the previous data-plane call before it (prev: the latest
+// instant a call the store served before it reached keploy, as record's
+// previous call is the latest one answered before the call was sent,
+// PreviousCall), the running set's begin, and in a client test the running
+// test's begin.
 type liveClock struct {
 	clock            func(time.Time) (time.Time, bool)
 	run              func(time.Time) (time.Time, bool)
@@ -1830,9 +1902,9 @@ func (t *Tracker) liveClockAt(arrival time.Time) (liveClock, time.Time) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	lc := liveClock{clock: t.appClock, run: t.appClockRun, client: t.clientTests, set: t.setBegan, began: t.beganAt, zone: t.appZone}
-	i := sort.Search(len(t.servedAt), func(i int) bool { return !t.servedAt[i].Before(arrival) })
+	i := sort.Search(len(t.servedAt), func(i int) bool { return !t.servedAt[i].at.Before(arrival) })
 	if i > 0 {
-		lc.prev = t.servedAt[i-1]
+		lc.prev = t.servedAt[i-1].upTo
 	}
 	return lc, t.recBegan
 }
