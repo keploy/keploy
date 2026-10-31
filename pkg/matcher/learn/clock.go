@@ -299,6 +299,14 @@ type Span struct {
 	// step named (CheckClockRead). false where Zone is the agent's own.
 	Own   bool
 	Began time.Time
+	// Recorded is the running set's recorded range, from its first
+	// recorded request to its last recorded answer, which the agent gives
+	// once, as it stages the set's recordings (Tracker.SetRecordedRange).
+	// RecordedKnown is false until it does, and from the next set's begin
+	// (NewSetAt): a rule that bounds a value by it (a pool recording's
+	// clock read near its clock, http and Mongo pool_clock.go) refuses then.
+	Recorded      time.Duration
+	RecordedKnown bool
 }
 
 // sinceBegin is s from the running test's begin (Began) to its call: false

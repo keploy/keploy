@@ -3815,3 +3815,77 @@ func TestAVariableCallPastItsRecordingsIsAnsweredNothingBetweenTests(t *testing.
 		}
 	}
 }
+
+// The staged set's recorded range reads what the trees hold and the times the
+// agent keeps on disk: from the earliest request to the latest answer, a
+// test's own recording (on disk, never staged) included. The proxy gives it to
+// the learn tracker, whose spans carry it (StageRecordedRange); a disk that
+// cannot be read gives none, and says why.
+func TestTheSetsRecordedRangeReadsTheTreesAndTheDisk(t *testing.T) {
+	boot := exactMongo("boot", time.Second, models.LifetimePerTest)
+	gap := exactMongo("gap", 2*time.Second, models.LifetimePerTest)
+	owned := exactMongo("owned", 9*time.Minute, models.LifetimePerTest)
+	owned.Spec.ResTimestampMock = owned.Spec.ReqTimestampMock.Add(3 * time.Second)
+	disk, err := NewDiskMocks(zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = disk.Close() })
+	for _, mk := range []*models.Mock{boot, gap, owned} {
+		if err := disk.Add(mk); err != nil {
+			t.Fatal(err)
+		}
+	}
+	disk.Finalize()
+	latest := func(ms ...*models.Mock) time.Time {
+		var l time.Time
+		for _, m := range ms {
+			for _, at := range []time.Time{m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock} {
+				if at.After(l) {
+					l = at
+				}
+			}
+		}
+		return l
+	}
+	mm := stagedManager(t, []*models.Mock{boot, gap}, nil)
+	first, last, err := mm.RecordedRange()
+	if err != nil || !first.Equal(boot.Spec.ReqTimestampMock) || !last.Equal(latest(boot, gap)) {
+		t.Fatalf("the trees alone: %v to %v (%v); want %v to %v", first, last, err, boot.Spec.ReqTimestampMock, latest(boot, gap))
+	}
+	mm.SetRecordingTimes(disk.RangeTimes)
+	first, last, err = mm.RecordedRange()
+	if err != nil || !first.Equal(boot.Spec.ReqTimestampMock) || !last.Equal(owned.Spec.ResTimestampMock) {
+		t.Fatalf("with the disk: %v to %v (%v); want %v to the test's own answer %v", first, last, err, boot.Spec.ReqTimestampMock, owned.Spec.ResTimestampMock)
+	}
+
+	p := &Proxy{logger: zap.NewNop(), learnTracker: learn.NewTracker()}
+	p.setMockManager(mm)
+	p.learnTracker.SetAppClock(func(r time.Time) (time.Time, bool) { return r, true })
+	ctx := learn.WithTracker(context.Background(), p.learnTracker)
+	served := time.Date(2026, 10, 31, 14, 37, 29, 0, time.UTC)
+	span := func() learn.Span {
+		t.Helper()
+		p.learnTracker.ServedMockAt(boot, served)
+		s, ok := learn.ClockSpanFrom(ctx, served.Add(time.Second))
+		if !ok {
+			t.Fatal("no span")
+		}
+		return s
+	}
+	if err := p.StageRecordedRange(); err != nil {
+		t.Fatalf("StageRecordedRange: %v", err)
+	}
+	if s := span(); !s.RecordedKnown || s.Recorded != owned.Spec.ResTimestampMock.Sub(boot.Spec.ReqTimestampMock) {
+		t.Fatalf("the span carries %v (known %v); want the set's range", s.Recorded, s.RecordedKnown)
+	}
+	mm.SetRecordingTimes(func(func(string, time.Time, time.Time, bool) bool) error {
+		return errors.New("the disk store is closed")
+	})
+	if err := p.StageRecordedRange(); err == nil || !strings.Contains(err.Error(), "the disk store is closed") {
+		t.Fatalf("StageRecordedRange over an unreadable disk: %v; want its error", err)
+	}
+	if s := span(); s.RecordedKnown {
+		t.Fatalf("over an unreadable disk the span carries %v; want no range", s.Recorded)
+	}
+}

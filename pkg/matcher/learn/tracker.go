@@ -198,6 +198,11 @@ type Tracker struct {
 	// was given: in a client test a call's window in the recording starts
 	// there where no earlier recorded call bounds it (CallWindowFrom).
 	recBegan, nextRecBegan time.Time
+	// recorded is the running set's recorded range (SetRecordedRange), and
+	// recordedKnown whether the agent gave it since the set began: LiveSpan
+	// carries both (Span.Recorded).
+	recorded      time.Duration
+	recordedKnown bool
 	// appZone is the zone the application writes a wall clock of no zone
 	// in, beside UTC (SetAppZone); nil: UTC alone. Every DriftCache the
 	// tracker makes reads it (DriftCache.zone).
@@ -253,8 +258,27 @@ func (t *Tracker) NewSetAt(at time.Time) {
 	t.open, t.began = false, false
 	t.beganAt, t.recBegan, t.nextRecBegan = time.Time{}, time.Time{}, time.Time{}
 	t.setBegan = at
+	t.recorded, t.recordedKnown = 0, false
 	t.mu.Unlock()
 	say()
+}
+
+// SetRecordedRange gives the running set's recorded range, from first, its
+// earliest recorded request, to last, its latest recorded answer: the agent
+// gives it once, as it stages the set's recordings, and every call's span
+// carries it (LiveSpan, Span.Recorded) until the next set begins. A zero
+// instant, or a last before first, gives none: the range stays unknown.
+func (t *Tracker) SetRecordedRange(first, last time.Time) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if first.IsZero() || last.IsZero() || last.Before(first) {
+		t.recorded, t.recordedKnown = 0, false
+		return
+	}
+	t.recorded, t.recordedKnown = last.Sub(first), true
 }
 
 // closeAwaiting ends the running test's wait for its request (awaiting):
@@ -1808,6 +1832,7 @@ func (t *Tracker) LiveSpan(arrival time.Time) (Span, bool) {
 	s, ok := lc.span(arrival)
 	if ok {
 		s.Zone = lc.zone
+		s.Recorded, s.RecordedKnown = lc.recorded, lc.recordedKnown
 	}
 	return s, ok
 }
@@ -1822,6 +1847,8 @@ type liveClock struct {
 	prev, set, began time.Time
 	client           bool
 	zone             *time.Location
+	recorded         time.Duration
+	recordedKnown    bool
 }
 
 // liveClockAt is the tracker's liveClock before arrival, and the running
@@ -1829,7 +1856,7 @@ type liveClock struct {
 func (t *Tracker) liveClockAt(arrival time.Time) (liveClock, time.Time) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	lc := liveClock{clock: t.appClock, run: t.appClockRun, client: t.clientTests, set: t.setBegan, began: t.beganAt, zone: t.appZone}
+	lc := liveClock{clock: t.appClock, run: t.appClockRun, client: t.clientTests, set: t.setBegan, began: t.beganAt, zone: t.appZone, recorded: t.recorded, recordedKnown: t.recordedKnown}
 	i := sort.Search(len(t.servedAt), func(i int) bool { return !t.servedAt[i].Before(arrival) })
 	if i > 0 {
 		lc.prev = t.servedAt[i-1]

@@ -1567,6 +1567,44 @@ func (m *MockManager) SetRecordingTimes(src func(visit func(name string, req, re
 	m.exact.times.Store(&recordingTimes{src: src})
 }
 
+// RecordedRange is the staged set's recorded range: first, the earliest
+// request, and last, the latest answer, of every recording the trees hold
+// and of those the agent keeps on disk (SetRecordingTimes), protocol-phase
+// ones too (the set's clock ran through them). Zero instants are no time.
+// err is the on-disk read's: the range is then not known.
+func (m *MockManager) RecordedRange() (first, last time.Time, err error) {
+	at := func(ts ...time.Time) {
+		for _, t := range ts {
+			if t.IsZero() {
+				continue
+			}
+			if first.IsZero() || t.Before(first) {
+				first = t
+			}
+			if t.After(last) {
+				last = t
+			}
+		}
+	}
+	m.treesMu.RLock()
+	trees := []*TreeDb{m.filtered, m.unfiltered, m.startup}
+	m.treesMu.RUnlock()
+	for _, tree := range trees {
+		for _, mk := range m.treeValues(tree, "") {
+			at(mk.Spec.ReqTimestampMock, mk.Spec.ResTimestampMock)
+		}
+	}
+	if times := m.exact.times.Load(); times != nil && times.src != nil {
+		if err := times.src(func(_ string, req, res time.Time, _ bool) bool {
+			at(req, res)
+			return true
+		}); err != nil {
+			return time.Time{}, time.Time{}, err
+		}
+	}
+	return first, last, nil
+}
+
 // recordingTimes is where the teardown bound reads the times of the set's
 // recordings the trees do not hold (SetRecordingTimes). A new one is stored
 // on every set, so the bound cached under an older one is read again.

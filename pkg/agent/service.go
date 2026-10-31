@@ -646,6 +646,18 @@ type RecordingTimesSetter interface {
 	SetRecordingTimes(src func(visit func(name string, req, res time.Time, protocolPhase bool) bool) error) error
 }
 
+// RecordedRangeStager is implemented by a proxy whose parsers bound a pool
+// recording's clock read by the staged set's recorded range (learn.Span's
+// Recorded: a value read as an instant must lie near the clock on each side,
+// so a counter or an id in the epoch range never counts as a clock).
+// StageRecordedRange reads the range once, from the set's first recorded
+// request to its last recorded answer, of what is staged and of the times the
+// agent keeps on disk (SetRecordingTimes, set first), and gives it to the
+// learn tracker the parsers read.
+type RecordedRangeStager interface {
+	StageRecordedRange() error
+}
+
 // RecordingSourceSetter is implemented by a proxy whose miss diagnosis under
 // exact serving (a call that is a recording made elsewhere) can read, beside
 // what is staged, the set's recordings the agent keeps on disk: a test's own

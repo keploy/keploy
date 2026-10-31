@@ -5013,6 +5013,28 @@ func (p *Proxy) SetRecordingTimes(src func(visit func(name string, req, res time
 
 var _ agent.RecordingTimesSetter = (*Proxy)(nil)
 
+// StageRecordedRange implements agent.RecordedRangeStager: the staged set's
+// recorded range (MockManager.RecordedRange) goes to the learn tracker the
+// parsers read it from (learn.Tracker.SetRecordedRange, learn.Span's
+// Recorded). A range that cannot be read is given as none: the rules that
+// bound a value by it refuse. With no mock manager there is no set
+// (errNoMockManager).
+func (p *Proxy) StageRecordedRange() error {
+	m := p.getMockManager()
+	if m == nil {
+		return errNoMockManager
+	}
+	first, last, err := m.RecordedRange()
+	if err != nil {
+		p.learnTracker.SetRecordedRange(time.Time{}, time.Time{})
+		return fmt.Errorf("read the test set's recorded range: %w", err)
+	}
+	p.learnTracker.SetRecordedRange(first, last)
+	return nil
+}
+
+var _ agent.RecordedRangeStager = (*Proxy)(nil)
+
 // SetRecordedBefore implements agent.RecordedBeforeSetter (exact.go).
 func (p *Proxy) SetRecordedBefore(src func(t time.Time, visit func(*models.Mock) bool) error) error {
 	m := p.getMockManager()

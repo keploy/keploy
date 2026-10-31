@@ -1838,3 +1838,50 @@ func TestADateOfNoZoneOnADayWithNoMidnightIsThatDaysFirstInstant(t *testing.T) {
 		}
 	}
 }
+
+// The set's recorded range the agent gives as it stages the set
+// (SetRecordedRange) rides on every call's span (ClockSpanFrom, LiveSpan)
+// until the next set begins (NewSetAt); a zero instant, or a last before
+// first, gives none. A span with no range says so (RecordedKnown false):
+// the parsers' pool clock rule then reads no field as the clock.
+func TestTheSetsRecordedRangeRidesOnTheSpan(t *testing.T) {
+	served := time.Date(2026, 10, 31, 14, 37, 29, 0, time.UTC)
+	first := served.Add(-10 * time.Minute)
+	tr := NewTracker()
+	tr.SetAppClock(func(r time.Time) (time.Time, bool) { return r, true })
+	ctx := WithTracker(context.Background(), tr)
+	span := func(what string) Span {
+		t.Helper()
+		tr.ServedMockAt(&models.Mock{Name: "earlier", Kind: models.HTTP}, served)
+		s, ok := ClockSpanFrom(ctx, served.Add(time.Second))
+		if !ok {
+			t.Fatalf("%s: no span", what)
+		}
+		return s
+	}
+	if s := span("before any range"); s.RecordedKnown || s.Recorded != 0 {
+		t.Fatalf("before the agent gave a range the span carries %v (known %v); want none", s.Recorded, s.RecordedKnown)
+	}
+	tr.SetRecordedRange(first, served.Add(-time.Minute))
+	if s := span("given"); !s.RecordedKnown || s.Recorded != 9*time.Minute {
+		t.Fatalf("the span carries %v (known %v); want the set's nine minutes", s.Recorded, s.RecordedKnown)
+	}
+	tr.NewSetAt(served.Add(-time.Hour))
+	if s := span("the next set"); s.RecordedKnown {
+		t.Fatalf("the next set's span carries the previous set's range %v", s.Recorded)
+	}
+	for _, c := range []struct {
+		name        string
+		first, last time.Time
+	}{
+		{"a zero first", time.Time{}, served},
+		{"a zero last", first, time.Time{}},
+		{"a last before first", served, first},
+	} {
+		tr.SetRecordedRange(first, served)
+		tr.SetRecordedRange(c.first, c.last)
+		if s := span(c.name); s.RecordedKnown {
+			t.Fatalf("%s: the span carries %v; want no range", c.name, s.Recorded)
+		}
+	}
+}

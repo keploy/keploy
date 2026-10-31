@@ -19,7 +19,7 @@ import (
 //
 // An application's timer can carry its clock in what it sends: a poll's
 // "?since=<now - 60 s>", a heartbeat's {"at": <now>}, a lease that expires
-// "now + 3 days". Its recordings made while no test was open (the set's
+// "now + 5 minutes". Its recordings made while no test was open (the set's
 // start-up and between-tests recordings, the pool a test's window is offered
 // last: integrations.FromPool) learned no clock read, as the learn step
 // pairs nothing onto them while a test's view is shown, so a tick the replay
@@ -37,17 +37,34 @@ import (
 // value, a header value, a path segment) whose instant moved, between the
 // recording and the call, by one and the same amount, the gap between the
 // two calls' clocks: each field keeps the recording's own offset from its
-// read ("since" stays sixty seconds before the call's clock, an expiry three
-// days after it), and the call's read is no earlier than its span on the
+// read ("since" stays sixty seconds before the call's clock, an expiry five
+// minutes after it), and the call's read is no earlier than its span on the
 // application's clock (learn.ClockSpanFrom) allows, given that the
-// recording's read came no later than the recorded call. It is served as the
-// exact pool copy is: unchecked, never required, once (the store's
+// recording's read came no later than the recorded call. Every such field
+// must also lie near the clock on each side: the recording's value within T
+// of the recorded call's time, the call's within T of its span on the
+// application's clock, T being the set's recorded range (from its first
+// recorded request to its last recorded answer, which the agent reads once
+// as it stages the set: learn.Span's Recorded) plus the call's span. So a
+// counter or an id in the epoch range that happens to move by the shared
+// amount is never read as the clock (an HTTP field is a number or a text,
+// so the bound reads every one); where the set's range is not known, no
+// field is read as the clock. It is served as the exact pool copy is: unchecked, never required, once (the store's
 // consumption ledger), never to a call one more than the test's own
 // recordings (repeatsOwn reads the same rule), and named on the test's
 // evidence as the set's background. A recording that declares variable
 // places is not read by this rule.
 //
-// Stated limits. The recording's read has no earlier bound here (a replay
+// The rule reads no provenance of a field (whether the app made it from its
+// clock or carried it from an earlier answer): a value the app carries from
+// a recorded answer is served back unchanged at replay, so it never differs,
+// and a field that differs must move by the one amount every other field
+// moved by, near both clocks.
+//
+// Stated limits. An offset larger than T (a "since an hour ago" bound in a
+// two-minute set) is not read as the clock: that tick misses, as before this
+// rule (a set-aside, never a false green). The recording's read has no
+// earlier bound here (a replay
 // does not hold the set's previous recorded call), so an offset that grew by
 // the same amount in every clock field at once passes; one field's offset
 // changed against another's does not. A field read whole as the call's clock
@@ -114,7 +131,7 @@ func clockMoved(ctx context.Context, c clockCall, m *models.Mock, n strictNoise)
 			fields = append(fields, clockField(p).shape)
 		}
 	}
-	if len(drifts) == 0 || !movedTogether(drifts, c.span.From.Sub(m.Spec.ReqTimestampMock)) {
+	if len(drifts) == 0 || !movedTogether(drifts, c.span.From.Sub(m.Spec.ReqTimestampMock)) || !nearTheClocks(drifts, m.Spec.ReqTimestampMock, c.span) {
 		return nil, false
 	}
 	sort.Strings(fields)
@@ -167,6 +184,28 @@ func movedTogether(drifts []movedPlace, least time.Duration) bool {
 		first = false
 	}
 	return !first && lo < hi && hi > least
+}
+
+// nearTheClocks reports whether every drift lies near the clock on each
+// side: its recorded instant within T of recorded (the recorded call's
+// time), its live one within T of the call's span on the application's
+// clock (span.From to span.To), T being the set's recorded range plus the
+// span (Span.Recorded). False where the set's range is not known: a value
+// bounded by no range would pass as the clock wherever it lies.
+func nearTheClocks(drifts []movedPlace, recorded time.Time, span learn.Span) bool {
+	if !span.RecordedKnown || span.To.Before(span.From) {
+		return false
+	}
+	tol := span.Recorded + span.To.Sub(span.From)
+	for _, d := range drifts {
+		if gap := d.rec.Sub(recorded); gap > tol || gap < -tol {
+			return false
+		}
+		if d.live.Before(span.From.Add(-tol)) || d.live.After(span.To.Add(tol)) {
+			return false
+		}
+	}
+	return true
 }
 
 // epochInstant reads s as seconds (ten digits, with or without a fraction,

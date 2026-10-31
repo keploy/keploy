@@ -181,7 +181,8 @@ func covers(staged map[string]bool, pool map[string][]string) bool {
 // recordings of tests not begun yet; and under keploy mock replay a test
 // process's teardown (the calls after its own last test) is bounded by its
 // tests' recordings, which no staging reads. A set kept all resident sets
-// none: its trees hold every recording.
+// none: its trees hold every recording. It then gives the set's recorded
+// range to the proxy's parsers (StageRecordedRange).
 func (a *Agent) readUnstagedFromDisk() error {
 	if rs, ok := a.Proxy.(coreAgent.RecordingSourceSetter); ok {
 		if err := rs.SetRecordingSource(a.diskRecordingSource()); err != nil {
@@ -201,6 +202,17 @@ func (a *Agent) readUnstagedFromDisk() error {
 	if rt, ok := a.Proxy.(coreAgent.RecordingTimesSetter); ok {
 		if err := rt.SetRecordingTimes(a.diskRecordingTimes()); err != nil {
 			return fmt.Errorf("set the test set's recording times: %w", err)
+		}
+	}
+	// With the on-disk times set, the set's recorded range is read once,
+	// here, where both stagings (keploy mock replay's and keploy test's)
+	// stage the set: the parsers bound a pool recording's clock read by it.
+	// A range that cannot be read is given as none, which only refuses that
+	// rule (its calls miss, as before it): the staging goes on.
+	if rr, ok := a.Proxy.(coreAgent.RecordedRangeStager); ok {
+		if err := rr.StageRecordedRange(); err != nil {
+			a.logger.Warn("keploy could not read the test set's recorded range, so no call of this set is answered by a recording made while no test was open whose clock reads moved with the call's clock: such a call misses and its test is set aside with its reason",
+				zap.Error(err), zap.String("next_step", "nothing to do for this run; if it repeats, report it with this line"))
 		}
 	}
 	return nil
