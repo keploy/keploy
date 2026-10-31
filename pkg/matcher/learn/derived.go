@@ -3,8 +3,13 @@ package learn
 import (
 	"container/list"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
+	"unsafe"
+
+	"go.keploy.io/server/v3/pkg/models"
 )
 
 // setDerived keeps, for the running test set, what the learn step derives
@@ -59,6 +64,12 @@ import (
 //     on api-server's round, and its instants' reads (instantSpans) 75%
 //     before the test that timed out.
 //
+//   - drifts: what each value an earlier place holds drifted, bounded by no
+//     call (driftOf), kept as held is. Every later test reads each place of
+//     the run's (an earlier test's call) as a source of each changed value
+//     of its calls, so without them each test built every earlier place's
+//     drift again at its first call: 410 MB and 310 ms at 20 000 places.
+//
 // The budget is the set's, not a tier's: a tier of a fixed size below the
 // set's working set kept a part of each recording and read the rest anew on
 // every call. On api-server's round (15 589 recordings) the held and forms
@@ -88,6 +99,7 @@ type setDerived struct {
 	held   tier[heldParts]
 	words  tier[wordParts]
 	forms  tier[formParts]
+	drifts tier[driftPart]
 	// reading are the parts being read (derive), by recording and part:
 	// closed when read.
 	reading map[readingKey]chan struct{}
@@ -111,7 +123,13 @@ type setDerived struct {
 	// offsets are the set's places the offset rule reads, by place and
 	// moment (offsetIndex), within offsetBudget: its handlers share them.
 	offsets *offsetIndex
+	// run is the bytes the tracker's run keeps of the set's tests' places
+	// (Tracker.keepRun), on budget (keepRun).
+	run int64
 }
+
+// driftPart is what setDerived keeps of one drift (drifts).
+type driftPart struct{ d *valueDrift }
 
 // heldParts are what setDerived keeps of a recording for the set (held).
 type heldParts struct {
@@ -168,6 +186,8 @@ const (
 	_
 	partKeys
 	partDecoded // by whether the stamps are blanked: partDecoded<<1
+	_
+	partDrift
 )
 
 // byKeep is p, a part kept by keep, for keep.
@@ -448,7 +468,7 @@ const (
 // derivedBudget, formsBudget and heldBudget, where a row sets them (0 or
 // more), cap the words, forms and held tiers within the set's budget;
 // noCap, no cap of a tier's own, in keploy itself.
-var derivedBudget, formsBudget, heldBudget int64 = noCap, noCap, noCap
+var derivedBudget, formsBudget, heldBudget, driftBudget int64 = noCap, noCap, noCap, noCap
 
 const noCap = -1
 
@@ -474,7 +494,7 @@ func wordsBytes(words map[string]bool) int64 {
 
 func newSetDerived() *setDerived {
 	b := &budget{limit: setBudget()}
-	s := &setDerived{budget: b, held: newTier[heldParts](heldBudget, b, false), words: newTier[wordParts](derivedBudget, b, true), forms: newTier[formParts](formsBudget, b, false), reading: map[readingKey]chan struct{}{}, reads: map[readTally]int{}, warming: map[string]chan struct{}{}, offsets: newOffsetIndex(offsetBudget)}
+	s := &setDerived{budget: b, held: newTier[heldParts](heldBudget, b, false), words: newTier[wordParts](derivedBudget, b, true), forms: newTier[formParts](formsBudget, b, false), drifts: newTier[driftPart](driftBudget, b, false), reading: map[readingKey]chan struct{}{}, reads: map[readTally]int{}, warming: map[string]chan struct{}{}, offsets: newOffsetIndex(offsetBudget)}
 	s.bodies = newSetBodyStore(&s.mu, b, bodyBudget)
 	// The words go first: a recording's words are read again from its
 	// payload, where one let go is decoded again (a JSON encode and decode
@@ -501,6 +521,7 @@ func (s *setDerived) drop() {
 	s.held.drop()
 	s.words.drop()
 	s.forms.drop()
+	s.drifts.drop()
 	s.bodies.kept.drop()
 	s.bodies.over = true
 }
@@ -523,7 +544,105 @@ func (s *setDerived) keepsPayloads() bool {
 func (s *setDerived) usedBytes() int64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.held.used + s.words.used + s.forms.used + s.bodies.kept.used
+	return s.held.used + s.words.used + s.forms.used + s.drifts.used + s.bodies.kept.used
+}
+
+// keepRun counts size bytes more of the run's places (Tracker.keepRun) on
+// the set's budget, and reports whether they are within the run's share of
+// it (runCap); past it, it counts none. The run has the first claim on its
+// share: the tiers that let go (words, payloads) make room for it
+// (budget.letGo), and those that do not keep no more once the set is past
+// its budget. So a set whose never-let-go tiers filled its budget at its
+// staging (WarmSet) still keeps its tests' values, and holds an eighth more
+// than its budget at most; a run with no room at all would refuse every
+// value a later test sent.
+func (s *setDerived) keepRun(size int64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.run+size > s.budget.limit/runShare {
+		return false
+	}
+	s.run += size
+	s.budget.used += size
+	if need := s.budget.used - s.budget.limit; need > 0 && s.budget.letGo != nil {
+		s.budget.letGo(need)
+	}
+	return true
+}
+
+// runCap is the run's share of the set's budget (keepRun), for its reason.
+func (s *setDerived) runCap() int64 { return s.budget.limit / runShare }
+
+// runShare: the run keeps its places within an eighth of the set's budget
+// (keepRun): 8 MiB at the least budget, 512 MiB at the most.
+const runShare = 8
+
+// driftOf is what the drifted value (rec, live) changed, read with the lead
+// where lead holds, bounded by no call (newDrift), kept for the set (drifts)
+// where s is a tracker's. It reads no zone: of a call not known, a clock read
+// is bounded by none (readNoLaterThan), the only rule that reads the zone, so
+// such a drift is the same in every zone (TestADriftBoundedByNoCallIsTheSameInEveryZone).
+func (s *setDerived) driftOf(rec, live string, lead bool) *valueDrift {
+	read := func(bool) *valueDrift { return newDrift(rec, live, nil, lead, time.Time{}, nil) }
+	if s == nil {
+		return read(false)
+	}
+	// The lead and the value's two sides, the recorded one by its length:
+	// no two drifts share an id.
+	id := make([]byte, 0, len(rec)+len(live)+32)
+	id = strconv.AppendBool(id, lead)
+	id = strconv.AppendInt(append(id, ' '), int64(len(rec)), 10)
+	id = append(append(append(id, ' '), rec...), live...)
+	// Two handlers that build one drift at once each build it, as a test's
+	// own cache does (DriftCache.ofIn): it is no recording's part to wait
+	// for (derive), and either is the drift.
+	var d *valueDrift
+	s.mu.Lock()
+	if sl := s.drifts.find(string(id), partDrift); sl != nil {
+		d = sl.p.d
+	}
+	s.mu.Unlock()
+	if d != nil {
+		return d
+	}
+	d = read(true)
+	s.mu.Lock()
+	if s.drifts.room() {
+		s.drifts.keep(string(id), partDrift, driftBytes(d), func(e *driftPart) { e.d = d })
+	}
+	s.mu.Unlock()
+	return d
+}
+
+// driftBytes is about what drift d holds (newDrift): its texts in each
+// form, its words, its pieces and their words, its ids' words and its
+// instants.
+func driftBytes(d *valueDrift) int64 {
+	n := int64(unsafe.Sizeof(*d)) + int64(len(d.rec)+len(d.live)+len(d.decRec)+len(d.decLive)+len(d.encodedRec)+len(d.unparsed))
+	for _, f := range d.forms {
+		n += headerBytes + int64(len(f[0])+len(f[1]))
+	}
+	for _, ws := range [][]map[string]bool{d.lost, d.gained, d.movedRec, d.movedLive, d.recTok, d.liveTok, {d.clock.rec, d.clock.live, d.wholes}} {
+		for _, w := range ws {
+			n += wordsBytes(w)
+		}
+	}
+	for i, p := range d.pieces {
+		n += headerBytes + int64(len(p.rec)+len(p.live))
+		for _, side := range d.pieceWords[i] {
+			for _, w := range side {
+				n += wordBytes + int64(len(w))
+			}
+		}
+	}
+	for _, side := range d.idParts {
+		for w, others := range side {
+			n += wordBytes + int64(len(w)) + wordsBytes(others)
+		}
+	}
+	n += int64(len(d.clock.reads))*int64(unsafe.Sizeof(models.ClockRead{})) + int64(len(d.instants))*int64(unsafe.Sizeof(driftedInstant{}))
+	n += int64(len(d.recKeys)+len(d.liveKeys))*(wordBytes+int64(unsafe.Sizeof(instantKey{}))) + momentBytes*int64(len(d.recMoments)+len(d.liveMoments))
+	return n
 }
 
 // keptBytes is the bytes setDerived counts as kept of the set's words and

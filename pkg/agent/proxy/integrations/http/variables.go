@@ -627,9 +627,15 @@ func holdVariables(m *models.Mock, decls []varDecl, liveAt map[string]held, tabl
 			} else {
 				place = d.answer[0].raw
 			}
+			why := fmt.Sprintf("variable %s is used at %s before the call that binds it was made in this test", d.name, place)
+			if models.RunVariable(d.name) {
+				// The test set's variable: bound by the start-up's call or
+				// an earlier test's, which this replay did not make first.
+				why = fmt.Sprintf("variable %s is used at %s, and the call that binds it, made by the test set's start-up or an earlier test, was not made before it in this replay", d.name, place)
+			}
 			return nil, &varProblem{
 				mock: m.Name, name: d.name, place: place, actual: sent,
-				why:  fmt.Sprintf("variable %s is used at %s before the call that binds it was made in this test", d.name, place),
+				why:  why,
 				next: fmt.Sprintf("the call that first carries variable %s was not made, or not before this one: if the application now makes its calls in another order or no longer makes that call, re-record the test", d.name),
 			}
 		}

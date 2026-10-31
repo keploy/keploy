@@ -15,6 +15,7 @@ import (
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/api/types/network"
+	"github.com/docker/docker/errdefs"
 	"go.keploy.io/server/v3/pkg/platform/docker"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
@@ -267,7 +268,7 @@ func (r *inspectRecorder) ContainerInspect(_ context.Context, name string) (cont
 	if info, ok := r.inspects[name]; ok {
 		return info, nil
 	}
-	return container.InspectResponse{}, errors.New("no such container")
+	return container.InspectResponse{}, errdefs.NotFound(errors.New("no such container"))
 }
 
 func (r *inspectRecorder) askedAbout(name string) bool {

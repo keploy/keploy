@@ -1,11 +1,11 @@
-package recorder
+package utils
 
 import (
 	intgUtils "go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 )
 
-// clientAuthData is the recorded form of a packet of authentication data the
+// ClientAuthData is the recorded form of a packet of authentication data the
 // client sends after its HandshakeResponse41, of type typ: an
 // AuthSwitchResponse, or the password of a caching_sha2_password full
 // authentication (in clear over TLS, RSA-encrypted without it). It keeps the
@@ -20,11 +20,13 @@ import (
 // of it. Replay needs none of it either: it checks such a packet by its type
 // and its sequence id only (replayer/conn.go), and answers with the recorded
 // verdict whatever the client sent. Its length is kept so that the recorded
-// header and payload still agree.
+// header and payload still agree. Replay states its serve of such a packet in
+// the same form (replayer.servedHandshake), so a packet of the recorded length
+// reads as the recorded one.
 //
 // The bytes the client sent are forwarded to the server as they are: this is
 // only what is recorded of them.
-func clientAuthData(pkt mysql.Packet, typ string) mysql.Request {
+func ClientAuthData(pkt mysql.Packet, typ string) mysql.Request {
 	header := pkt.Header
 	return mysql.Request{PacketBundle: mysql.PacketBundle{
 		Header:  &mysql.PacketInfo{Header: &header, Type: typ},

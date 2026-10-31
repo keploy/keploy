@@ -526,6 +526,11 @@ func (a *AgentClient) readIncoming(ctx context.Context, res *http.Response, tcCh
 	return a.readIncomingJSON(ctx, res, tcChan)
 }
 
+// unnamedCallerConnsSaid is what the client says of the session's connections
+// to the app whose callers the agent could not name
+// (models.StreamEndSummary.UnnamedCallerConns).
+const unnamedCallerConnsSaid = "the keploy agent recorded no test case for the calls some connections to the app carried: it could not name their callers in its PID namespace, so it could not tell whether a test made them"
+
 // sayAgentSummary says, in this client's own log, what the agent's summary of
 // the session says it lost (models.StreamEndSummary): for an agent this client
 // did not start (docker compose's, kubelet's), whose own log reaches the user
@@ -534,6 +539,15 @@ func (a *AgentClient) sayAgentSummary(s models.StreamEndSummary) {
 	if s.LeftOutInFlight > 0 {
 		a.logger.Warn("the keploy agent left some test cases out of the recording: each stayed in flight (a slow endpoint, a long poll, a stream) while mocks it may have made had to be let go",
 			zap.Uint64("test_cases", s.LeftOutInFlight))
+	}
+	if s.NotHandedOn > 0 {
+		a.logger.Warn("the keploy agent lost some test cases: the app served their requests, and the agent's ingress stopped before their test cases reached the recording",
+			zap.Uint64("test_cases", s.NotHandedOn))
+	}
+	if s.UnnamedCallerConns > 0 {
+		a.logger.Warn(unnamedCallerConnsSaid,
+			zap.Uint64("connections", s.UnnamedCallerConns),
+			zap.String("next_step", "run keploy in the PID namespace of the app's tests, or in the host's (--pid=host, or hostPID in Kubernetes)"))
 	}
 	if s.Unsettled > 0 {
 		a.logger.Warn("the keploy agent saved some test cases before it had parsed all the traffic they overlap; if a connection's parser failed on it afterwards, they lack mocks",
@@ -2250,10 +2264,10 @@ func (a *AgentClient) StopComposeApp(ctx context.Context) (string, error) {
 
 // StartComposeApp starts the app's container of a docker compose stack again
 // after StopComposeApp (app.App.StartComposeApp, P101-c).
-func (a *AgentClient) StartComposeApp(ctx context.Context) (bool, error) {
+func (a *AgentClient) StartComposeApp(ctx context.Context) (models.ComposeAppStart, error) {
 	app, err := a.getApp()
 	if err != nil {
-		return false, err
+		return models.ComposeAppUnread, err
 	}
 	return app.StartComposeApp(ctx)
 }
@@ -4980,17 +4994,18 @@ func (a *AgentClient) PushScopeGate(ctx context.Context, run []string, reason st
 }
 
 // PushScopeSkips hands the agent the proven model's gate: the tests to skip,
-// by ID, each with its reason; an empty map skips nothing. Made again on a
-// restarted agent, like the scope gate. Any answer but 200 is a failure: a
-// replay that cannot skip what CI skips refuses.
-func (a *AgentClient) PushScopeSkips(ctx context.Context, skip map[string]string) (retErr error) {
+// by ID, each with its reason, and the tests each test needs to have begun
+// before it (models.ScopeGateReq.Needs); an empty map skips nothing. Made
+// again on a restarted agent, like the scope gate. Any answer but 200 is a
+// failure: a replay that cannot skip what CI skips refuses.
+func (a *AgentClient) PushScopeSkips(ctx context.Context, skip map[string]string, needs map[string][]models.ScopeNeed) (retErr error) {
 	defer func() {
 		if retErr == nil && a.session().recording() {
-			recorded := maps.Clone(skip)
-			a.session().record(stepScopeGate, func(c context.Context) error { return a.PushScopeSkips(c, recorded) })
+			recorded, recordedNeeds := maps.Clone(skip), maps.Clone(needs)
+			a.session().record(stepScopeGate, func(c context.Context) error { return a.PushScopeSkips(c, recorded, recordedNeeds) })
 		}
 	}()
-	body, err := json.Marshal(models.ScopeGateReq{Skip: skip})
+	body, err := json.Marshal(models.ScopeGateReq{Skip: skip, Needs: needs})
 	if err != nil {
 		return fmt.Errorf("failed to marshal the tests to skip: %w", err)
 	}
@@ -5015,8 +5030,8 @@ func (a *AgentClient) PushScopeSkips(ctx context.Context, skip map[string]string
 	if err := json.Unmarshal(answer, &ack); err != nil || ack.V != models.ScopeProtocolVersion {
 		return fmt.Errorf("the agent did not acknowledge the tests to skip (answer %q): it predates keploy's scope protocol v1, or runs without KEPLOY_PROVEN=1", string(answer))
 	}
-	if ack.Skips != len(skip) {
-		return fmt.Errorf("the agent applies %d of the %d tests to skip", ack.Skips, len(skip))
+	if ack.Skips != len(skip) || ack.Needs != len(needs) {
+		return fmt.Errorf("the agent applies %d of the %d tests to skip, and the needs of %d of the %d tests that need another", ack.Skips, len(skip), ack.Needs, len(needs))
 	}
 	return nil
 }

@@ -11,6 +11,8 @@ import (
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // readsInstr is the harness's agent, which answers every filter that opens a
@@ -410,5 +412,53 @@ func TestKeptLearningIsWhatTheRoundKeeps(t *testing.T) {
 		if len(st.ReqBodyNoise) == 0 && len(st.Clocks) == 0 {
 			t.Fatalf("keptLearning changed what was consumed: %s lost its learning", name)
 		}
+	}
+}
+
+// The learning keploy record keeps of a set (readLearning, which it
+// persists) and what its retry cycles are served (keptLearning) give each
+// recording place one variable: where a later test binds the run's variable
+// at an earlier test's call that carries the earlier test's own there, the
+// run's takes it in every state of that test (learn.RunTakesPlaces), a mock
+// read as learned in the one test that consumed it. A mock two tests
+// consumed is read as of none, and keeps its names. The kept set says so,
+// naming the tests' calls and fields, never the value.
+func TestTheKeptLearningGivesTheRunsVariableAnEarlierTestsOwnPlace(t *testing.T) {
+	v := func(bind string, use ...string) models.MockVariable {
+		return models.MockVariable{Recorded: "o-1", Bind: bind, Use: use}
+	}
+	consumed := map[string]models.MockState{
+		"mock-0": {Name: "mock-0"},
+		"mock-1": {Name: "mock-1", Variables: models.MockVariables{"order": v("", "path1")}, Binds: map[string]models.MockVariables{"mock-0": {"order": v("body.order")}}},
+		"mock-2": {Name: "mock-2", Variables: models.MockVariables{"run-order": v("", "path1")}, Binds: map[string]models.MockVariables{"mock-0": {"run-order": v("body.order")}}},
+	}
+	consumers := map[string][]string{"mock-0": {"test-b"}, "mock-1": {"test-b"}, "mock-2": {"test-c"}}
+	want := map[string]models.MockState{"mock-0": consumed["mock-0"], "mock-2": consumed["mock-2"],
+		"mock-1": {Name: "mock-1", Variables: models.MockVariables{"run-order": v("", "path1")}, Binds: map[string]models.MockVariables{"mock-0": {"run-order": v("body.order")}}}}
+	core, logs := observer.New(zap.InfoLevel)
+	r := &Replayer{logger: zap.New(core)}
+	if got := r.keptLearning(consumed, consumers); !reflect.DeepEqual(got, want) {
+		t.Fatalf("the retry cycles are served %+v; want %+v", got, want)
+	}
+	kept, notKept, from := r.readLearning("s", consumed, consumers)
+	if !reflect.DeepEqual(kept, want) || notKept != nil || from != nil {
+		t.Fatalf("the round keeps %+v (%v, %v); want %+v", kept, notKept, from, want)
+	}
+	lines := logs.FilterMessageSnippet("own variable as the test set's").All()
+	if len(lines) != 1 {
+		t.Fatalf("logged %d lines of the run's variable taking test B's place; want one", len(lines))
+	}
+	f := lines[0].ContextMap()
+	if f["test"] != "test-b" || f["variable"] != "order" || f["setVariable"] != "run-order" || f["mock"] != "mock-0" || f["field"] != "body.order" {
+		t.Fatalf("the line says %v; want test B's variable, the run's, and B's call and field", f)
+	}
+	for _, c := range lines[0].Context {
+		if strings.Contains(c.String, "o-1") {
+			t.Fatalf("the line's %s carries the value: %q", c.Key, c.String)
+		}
+	}
+	consumers["mock-1"] = []string{"test-b", "test-c"}
+	if got := r.keptLearning(consumed, consumers); !reflect.DeepEqual(got["mock-1"], consumed["mock-1"]) {
+		t.Fatalf("a mock two tests consumed became %+v; want its names kept", got["mock-1"])
 	}
 }

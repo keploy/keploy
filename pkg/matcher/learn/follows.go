@@ -1142,7 +1142,7 @@ func servedOrder(earlier []Earlier, raw []Raw, source func(mock string) bool) (o
 		switch {
 		case e.Given:
 			order = append(order, "the test case's request")
-		case e.Payload.Read():
+		case e.Payload.Read(), e.Payload.ordered:
 			add(e.Mock, e.Payload.first, e.Payload.last)
 		default:
 			add(e.Mock, 0, 0)

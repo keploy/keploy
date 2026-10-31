@@ -12,6 +12,7 @@ import (
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/api/types/network"
+	"github.com/docker/docker/errdefs"
 	"go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -392,7 +393,7 @@ func (d *labelDocker) ContainerInspect(ctx context.Context, name string) (contai
 	}
 	p, ok := d.projects[name]
 	if !ok {
-		return container.InspectResponse{}, errors.New("no such container")
+		return container.InspectResponse{}, errdefs.NotFound(errors.New("no such container"))
 	}
 	return container.InspectResponse{Config: &container.Config{Labels: map[string]string{"com.docker.compose.project": p}}}, nil
 }
@@ -435,14 +436,29 @@ func TestComposeDownProject(t *testing.T) {
 			t.Fatalf("project %q; want %q", got, "x")
 		}
 	})
-	// A saturated daemon takes the app's inspect's whole bound: the agent's
-	// inspect gets its own, and still tells the project.
-	t.Run("the app's inspect runs out", func(t *testing.T) {
+	// A saturated daemon never answers the app's inspect: keploy's bound on
+	// no answer (its runnable time, here shortened) ends that read, and the
+	// agent's inspect still tells the project.
+	t.Run("the app's inspect is never answered", func(t *testing.T) {
 		t.Setenv("COMPOSE_PROJECT_NAME", "")
+		stallBudget(t, 300*time.Millisecond)
 		d := &labelDocker{projects: map[string]string{"keploy-v3": "orderflow"}, slow: "user-app"}
 		a := &App{logger: zap.NewNop(), docker: d, cmd: "docker compose up", container: "user-app", keployContainer: "keploy-v3"}
 		if got := a.composeDownProject(context.Background()); got != "orderflow" {
 			t.Fatalf("project %q; want orderflow, from the agent's label", got)
+		}
+	})
+	// A loaded daemon fails its first reads of the labels: keploy asks
+	// again, and the project is the app's label. With a 2 s budget per read,
+	// a failed read was taken for no label, and the project the command
+	// names (-p other here; with none, the cwd's default, a stack the user
+	// runs) was taken down instead.
+	t.Run("the daemon fails its first reads", func(t *testing.T) {
+		t.Setenv("COMPOSE_PROJECT_NAME", "")
+		d := &slowDaemon{Client: &labelDocker{projects: map[string]string{"user-app": "orderflow"}}, failInspects: 5}
+		a := &App{logger: zap.NewNop(), docker: d, cmd: "docker compose -p other up", container: "user-app", keployContainer: "keploy-v3"}
+		if got := a.composeDownProject(context.Background()); got != "orderflow" {
+			t.Fatalf("project %q; want orderflow, the app's label, once the daemon answers", got)
 		}
 	})
 }

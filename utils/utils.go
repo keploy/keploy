@@ -38,6 +38,7 @@ import (
 	"github.com/spf13/viper"
 	"go.keploy.io/server/v3/pkg/models"
 	keployLog "go.keploy.io/server/v3/utils/log"
+	"go.keploy.io/server/v3/utils/plaintcp"
 	"go.uber.org/zap"
 	"helm.sh/helm/v3/pkg/strvals"
 )
@@ -1384,6 +1385,9 @@ func parseEphemeralPortRange(content string) (lo, hi uint32, ok bool) {
 // window rather than closing it — nothing short of passing the listener itself
 // closes it — but the port no longer competes with every other bind(0) on the
 // host.
+//
+// Its probe listeners are plain TCP, never Go's default MPTCP: for as long as
+// one is open it listens on every interface.
 func GetAvailablePort() (uint32, error) {
 	if _, ephemeralHi, known := ephemeralPortRange(); known && ephemeralHi < 65535 {
 		lo := ephemeralHi + 1
@@ -1398,7 +1402,7 @@ func GetAvailablePort() (uint32, error) {
 		}
 		for i := uint32(0); i < span; i++ {
 			port := lo + ((start - lo + i) % span)
-			ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+			ln, err := plaintcp.Listen(context.Background(), "tcp", fmt.Sprintf(":%d", port))
 			if err != nil {
 				continue
 			}
@@ -1416,7 +1420,7 @@ func GetAvailablePort() (uint32, error) {
 	// is taken, or the range reaches 65535 leaving no space. Fall back to the
 	// OS assignment rather than failing: a port that may race is strictly
 	// better than no port at all, and this is the historical behaviour.
-	listener, err := net.Listen("tcp", ":0")
+	listener, err := plaintcp.Listen(context.Background(), "tcp", ":0")
 	if err != nil {
 		return 0, fmt.Errorf("failed to find available port: %w", err)
 	}
@@ -1426,9 +1430,10 @@ func GetAvailablePort() (uint32, error) {
 	return uint32(addr.Port), nil
 }
 
-// isPortAvailable checks if a specific port is available on the system
+// isPortAvailable checks if a specific port is available on the system, with
+// a plain TCP probe listener (as GetAvailablePort's).
 func isPortAvailable(port uint32) bool {
-	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+	listener, err := plaintcp.Listen(context.Background(), "tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
 		return false
 	}

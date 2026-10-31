@@ -225,3 +225,46 @@ func TestARoundsEndKeepsWhatWasLearnedOnlyFromAClientTestsReader(t *testing.T) {
 		})
 	}
 }
+
+// A value test B binds for itself and a later test C sends again is one
+// variable at one place on the recordings keploy mock writes: the run's,
+// which C binds at B's call, in the place of B's own, B's read reading it
+// too (learn.RunTakesPlaces, each mock by its test's mapping). The record
+// says so, naming the tests' calls and fields, never the value.
+func TestPersistLearnedGivesTheRunsVariableAnEarlierTestsOwnPlace(t *testing.T) {
+	store := &learnedStore{}
+	core, logs := observer.New(zap.InfoLevel)
+	m := &mockService{config: &config.Config{}, mockDB: store, logger: zap.New(core)}
+	v := func(bind string, use ...string) models.MockVariable {
+		return models.MockVariable{Recorded: "o-1", Bind: bind, Use: use}
+	}
+	consumed := []models.MockState{
+		{Name: "mock-0"},
+		{Name: "mock-1", Variables: models.MockVariables{"order": v("", "path1")}, Binds: map[string]models.MockVariables{"mock-0": {"order": v("body.order")}}},
+		{Name: "mock-2", Variables: models.MockVariables{"run-order": v("", "path1")}, Binds: map[string]models.MockVariables{"mock-0": {"run-order": v("body.order")}}},
+	}
+	expected := map[string][]models.MockEntry{"o::B": {{Name: "mock-0"}, {Name: "mock-1"}}, "o::C": {{Name: "mock-2"}}}
+	if _, _, err := m.persistLearned(context.Background(), "s", consumed, nil, expected); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.got["mock-1"]; !reflect.DeepEqual(got.Variables, models.MockVariables{"run-order": v("", "path1")}) ||
+		!reflect.DeepEqual(got.Binds, map[string]models.MockVariables{"mock-0": {"run-order": v("body.order")}}) {
+		t.Fatalf("test B's read is written %+v; want it to read the run's variable, bound at its create", got)
+	}
+	if got := store.got["mock-2"]; !reflect.DeepEqual(got, consumed[2]) {
+		t.Fatalf("test C's read is written %+v; want it as learned", got)
+	}
+	lines := logs.FilterMessageSnippet("own variable as the test set's").All()
+	if len(lines) != 1 {
+		t.Fatalf("logged %d lines of the run's variable taking test B's place; want one", len(lines))
+	}
+	f := lines[0].ContextMap()
+	if f["test"] != "o::B" || f["variable"] != "order" || f["setVariable"] != "run-order" || f["mock"] != "mock-0" || f["field"] != "body.order" {
+		t.Fatalf("the line says %v; want test B's variable, the run's, and B's call and field", f)
+	}
+	for _, c := range lines[0].Context {
+		if strings.Contains(c.String, "o-1") {
+			t.Fatalf("the line's %s carries the value: %q", c.Key, c.String)
+		}
+	}
+}

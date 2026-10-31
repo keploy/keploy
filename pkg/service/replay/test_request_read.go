@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -199,6 +200,11 @@ func withoutUnreadLearning(consumed map[string]models.MockState, consumers map[s
 // each of those tests whose own request was read, the tests whose requests
 // were not read that consumed its mocks (withoutUnreadLearning).
 func (r *Replayer) readLearning(testSetID string, consumed map[string]models.MockState, consumers map[string][]string) (kept map[string]models.MockState, notKept, from map[string][]string) {
+	consumed, taken := runTakesPlaces(consumed, consumers)
+	for _, t := range taken {
+		r.logger.Info("keploy follows a test's own variable as the test set's: a later test sends the value it sent",
+			zap.String("testSetID", testSetID), zap.String("test", t.Test), zap.String("variable", t.Own), zap.String("setVariable", t.Run), zap.String("mock", t.Mock), zap.String("field", t.Place))
+	}
 	unread := r.requestsUnread.set()
 	if unread == nil {
 		return consumed, nil, nil
@@ -221,11 +227,24 @@ func (r *Replayer) readLearning(testSetID string, consumed map[string]models.Moc
 // (withoutUnreadLearning). The set's retry cycles are served it
 // (serveFirstCycleLearned) before readLearning says what is not kept.
 func (r *Replayer) keptLearning(consumed map[string]models.MockState, consumers map[string][]string) map[string]models.MockState {
-	kept := r.exact.stripUnresolved(consumed)
+	kept, _ := runTakesPlaces(r.exact.stripUnresolved(consumed), consumers)
 	if unread := r.requestsUnread.set(); unread != nil {
 		kept, _, _, _ = withoutUnreadLearning(kept, consumers, unread)
 	}
 	return kept
+}
+
+// runTakesPlaces is consumed with the run's variable in the place of each
+// earlier test's own one bound or used where the run's is bound
+// (learn.RunTakesPlaces), a mock's state read as learned in the one test
+// that consumed it (consumers).
+func runTakesPlaces(consumed map[string]models.MockState, consumers map[string][]string) (map[string]models.MockState, []learn.Taken) {
+	return learn.RunTakesPlaces(consumed, func(mock string) string {
+		if c := consumers[mock]; len(c) == 1 {
+			return c[0]
+		}
+		return ""
+	})
 }
 
 // learningNotKept is why a test's learning was not kept, naming what, and

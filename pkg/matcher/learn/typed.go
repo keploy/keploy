@@ -473,9 +473,10 @@ func instantUnread(r, l Leaf) string {
 // classifyInstant is ClassifyIn's reading of a drifted leaf its protocol
 // types as one instant (r as recorded, l as F saw it: Instant leaves), in its
 // call's window w, as the header of this file says: the instant whole, never
-// its words. unread says why the test case's own request could not be read
-// (requestUnread; "" when it was, or no test case's request applies): then
-// the echo could not read it, and the instant is never noise or an echo.
+// its words. unread is why a place earlier than the call could not be read
+// (requestUnread: the test case's own request, or the run's places past
+// their bound; "" when each was): then the echo could not read it, and the
+// instant is never noise or an echo.
 func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier, raw []Raw, resp []Leaf, w *Window, unread string, places func() *offsetPlaces, skip skipRule) Learned {
 	ln := Learned{Kind: KindNoise, Recorded: r, Live: l}
 	rt, okR := readTyped(r)
@@ -528,7 +529,7 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 	// Built on a moved place by an offset (offset.go), before any provenance
 	// excuses it.
 	if m, ok := places().offsetFrom([]driftedInstant{{rec: rec, live: live}}); ok && skip&skipOffset == 0 {
-		ln.Kind, ln.Why = KindUnaccounted, offsetWhy(m)
+		ln.Kind, ln.Why, ln.byOffset = KindUnaccounted, offsetWhy(m), true
 		return ln
 	}
 	// A copy of what F gave the application in another test or in a
@@ -623,7 +624,7 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 	// Noise, or an echo, only where the echo could read the test case's own
 	// request, where the moment F saw may stand.
 	if unread != "" {
-		ln.Kind, ln.Why = KindUnaccounted, unreadRequestWhy(unread)
+		ln.Kind, ln.Why = KindUnaccounted, unread
 		return ln
 	}
 	if echo := dc.instantEchoes(rec, resp); len(echo) > 0 {
@@ -955,7 +956,7 @@ func (dc *DriftCache) clockOffset(ln Learned, off models.ClockOffset, enc time.D
 	case !w.offsets:
 		ln.Kind, ln.Why = KindUnaccounted, clockOffsetUncomparedWhy(path, off)
 	case unread != "":
-		ln.Kind, ln.Why = KindUnaccounted, unreadRequestWhy(unread)
+		ln.Kind, ln.Why = KindUnaccounted, unread
 	case len(dc.instantEchoes(rec, resp)) > 0:
 		ln.Kind, ln.Why = KindUnaccounted, clockOffsetEchoedWhy(path, off)
 	default:

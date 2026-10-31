@@ -91,13 +91,21 @@ func pingServer(t *testing.T) uint32 {
 }
 
 // callTree sends "ping" through serveTreeListener to the loopback port as
-// the process caller, and reports whether the call was relayed and, if it
-// was, the listener's answer, else the mocked-local row it left to list. The
-// caller's end closes once it has the answer (the relay ends when both ends
-// have), or once serveTreeListener left the call to the mock path.
+// the process caller, which the kernel and the agent's PID namespace number
+// alike (an agent in the initial namespace), and reports whether the call was
+// relayed and, if it was, the listener's answer, else the mocked-local row it
+// left to list. The caller's end closes once it has the answer (the relay
+// ends when both ends have), or once serveTreeListener left the call to the
+// mock path.
 func callTree(t *testing.T, p *Proxy, port, caller uint32) (bool, string, *models.MockedRow) {
 	t.Helper()
-	dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: caller}
+	return callTreeAs(t, p, &agent.NetworkAddress{Version: 4, Port: port, KernelPid: caller, AgentNsPid: caller})
+}
+
+// callTreeAs is callTree from the caller dest names, by both its numbers.
+func callTreeAs(t *testing.T, p *Proxy, dest *agent.NetworkAddress) (bool, string, *models.MockedRow) {
+	t.Helper()
+	port := dest.Port
 	cli, srv := net.Pipe()
 	type result struct {
 		served  bool
@@ -253,7 +261,7 @@ func sendTree(ctx context.Context, t *testing.T, p *Proxy, port, caller uint32) 
 	}
 	done := make(chan result, 1)
 	go func() {
-		dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: caller}
+		dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: caller, AgentNsPid: caller}
 		served, _, err := p.serveTreeListener(ctx, srv, dest, fmt.Sprintf("127.0.0.1:%d", port), "7")
 		_ = srv.Close()
 		done <- result{served, err}
@@ -620,7 +628,7 @@ func TestUnderTheSwitchACallNothingAnswersAndNoRecordingHasIsNotListed(t *testin
 	if own == nil {
 		t.Skip("this machine has no IPv4 address but loopback")
 	}
-	dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: uint32(os.Getpid())}
+	dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: uint32(os.Getpid()), AgentNsPid: uint32(os.Getpid())}
 	_, srv := net.Pipe()
 	defer srv.Close()
 	served, outside, err := p.serveTreeListener(context.Background(), srv, dest, net.JoinHostPort(own.String(), fmt.Sprint(port)), "1")

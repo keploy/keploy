@@ -57,3 +57,12 @@ jobs:
       # macOS before this job.
       - name: Test connseq on darwin
         run: go test -count=1 ./pkg/agent/proxy/connseq/
+
+      # A native macOS run serves its app's callers as live calls too, so the
+      # proxy watches each caller for its hang-up there (util.WatchPeerEnd,
+      # peer_end_unix.go) and tells the app when the caller leaves mid-answer
+      # (incoming/client_watch.go). How a socket shows a FIN or a reset, and
+      # how a read deadline ends a peek, are the kernel's: these rows check
+      # them on darwin's own sockets, which a Linux runner cannot.
+      - name: Test the client hang-up watch on darwin
+        run: go test -count=1 ./pkg/agent/proxy/util/ ./pkg/agent/proxy/incoming/

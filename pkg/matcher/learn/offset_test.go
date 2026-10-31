@@ -110,8 +110,9 @@ func unreadPayload(m *models.Mock) Raw {
 // whose adapter gave no payload at all (the zero Raw), is a place the offset
 // rule and the word rule cannot search, never one they drop: an instant
 // built on it by an offset and a word copied from its answer are each
-// refused, naming it and why, never learned as noise. Its payload read from
-// its mock is searched, and refuses nothing for want of a reading.
+// refused, naming it and why, never learned as noise; so is a start-up
+// exchange given none. Its payload read from its mock is searched, and
+// refuses nothing for want of a reading.
 func TestAnUnreadLeafByLeafPayloadIsRefusedNamingIt(t *testing.T) {
 	receive, delivered := offReceives()
 	const p = "body.visible_after"
@@ -126,9 +127,16 @@ func TestAnUnreadLeafByLeafPayloadIsRefusedNamingIt(t *testing.T) {
 		{"an instant by an offset", strLeaf(p, offSent.Add(5*time.Minute).Format("2006-01-02T15:04Z07:00")), strLeaf(p, offGot.Add(5*time.Minute).Format("2006-01-02T15:04Z07:00"))},
 		{"a word", strLeaf(p, "slot-7"), strLeaf(p, "slot-9")},
 	} {
-		for _, payload := range []string{"unread", "none given", "read"} {
+		for _, c := range []struct {
+			payload string
+			startUp bool
+		}{{"unread", false}, {"none given", false}, {"none given", true}, {"read", false}} {
+			payload := c.payload
 			dc := clockedDrifts()
-			e := Earlier{Mock: delivered.Name, At: delivered.Spec.ReqTimestampMock}
+			// Served before the set's first test (StartUp), it is a place of
+			// the run's whole call, payload and all, unlike an earlier test's
+			// (ranCalls): one given no payload is refused all the same.
+			e := Earlier{Mock: delivered.Name, At: delivered.Spec.ReqTimestampMock, Run: c.startUp, StartUp: c.startUp}
 			switch payload {
 			case "unread":
 				e.Payload = unreadPayload(delivered)
@@ -138,7 +146,7 @@ func TestAnUnreadLeafByLeafPayloadIsRefusedNamingIt(t *testing.T) {
 			ln := ClassifyIn(dc, []string{p}, row.live, row.rec, r1Insert, []Earlier{e}, []Raw{dc.RawOf(receive, false)}, nil, nil)[0]
 			switch {
 			case payload != "read" && (ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, why[payload])):
-				t.Fatalf("%s, %s payload: %s (%s); want it refused, naming mock-11's payload as %s", row.name, payload, ln.Kind, ln.Why, payload)
+				t.Fatalf("%s, %s payload (start-up %v): %s (%s); want it refused, naming mock-11's payload as %s", row.name, payload, c.startUp, ln.Kind, ln.Why, payload)
 			case payload == "read" && strings.Contains(ln.Why, "mock-11, an exchange record's full round served the application leaf by leaf"):
 				t.Fatalf("%s, %s payload: %s (%s); want no unread place where the adapter gave a payload read from its mock", row.name, payload, ln.Kind, ln.Why)
 			}

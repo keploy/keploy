@@ -457,13 +457,20 @@ func jsonSeen(recorded, sent string) []Seen {
 	return out
 }
 
-// requestUnread says why the running test case's own request could not be
-// read (its Given place's Unread), "" when it was read, and when no test
-// case's request is among served (a call outside a test, a test keploy mock
-// opened).
+// requestUnread is why every value that changed is refused, never learned
+// as noise or an echo, where a place earlier than the call could not be read
+// (an Unread place among served): the running test case's own request
+// (Given, unreadRequestWhy), or the places of the run's past its bound
+// (Tracker.keepRun, whose reason it is). "" where each was read, and where
+// none is among served (a call outside a test, a test keploy mock opened, a
+// set whose run kept every place).
 func requestUnread(served []Earlier) string {
 	for _, e := range served {
-		if e.Given && e.Unread != "" {
+		switch {
+		case e.Unread == "":
+		case e.Given:
+			return unreadRequestWhy(e.Unread)
+		default:
 			return e.Unread
 		}
 	}

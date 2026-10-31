@@ -28,11 +28,12 @@ type skipPusher struct {
 	Instrumentation
 	pushed bool
 	skip   map[string]string
+	needs  map[string][]models.ScopeNeed
 	err    error
 }
 
-func (s *skipPusher) PushScopeSkips(_ context.Context, skip map[string]string) error {
-	s.pushed, s.skip = true, skip
+func (s *skipPusher) PushScopeSkips(_ context.Context, skip map[string]string, needs map[string][]models.ScopeNeed) error {
+	s.pushed, s.skip, s.needs = true, skip, needs
 	return s.err
 }
 
@@ -56,16 +57,20 @@ func TestPushScopeSkips(t *testing.T) {
 	require.False(t, p.pushed, "no source installed: nothing to push")
 
 	var asked ScopeGateRequest
-	RegisterScopeSkipSource(func(_ context.Context, req ScopeGateRequest) (map[string]string, error) {
+	needs := map[string][]models.ScopeNeed{"orders::TestUse": {{Test: "orders::TestMake", Reason: "r"}}}
+	RegisterScopeSkipSource(func(_ context.Context, req ScopeGateRequest) (map[string]string, map[string][]models.ScopeNeed, error) {
 		asked = req
-		return map[string]string{"orders::TestToken": "flaky: replay_only"}, nil
+		return map[string]string{"orders::TestToken": "flaky: replay_only"}, needs, nil
 	})
 	t.Cleanup(func() { RegisterScopeSkipSource(nil) })
 	require.NoError(t, m.pushScopeSkips(context.Background(), "t2-go", "d1"))
 	require.Equal(t, ScopeGateRequest{Set: "t2-go", MocksDigest: "d1", Path: m.config.Path}, asked)
 	require.Equal(t, map[string]string{"orders::TestToken": "flaky: replay_only"}, p.skip)
+	require.Equal(t, needs, p.needs, "the needs ride the same push")
 
-	RegisterScopeSkipSource(func(context.Context, ScopeGateRequest) (map[string]string, error) { return nil, nil })
+	RegisterScopeSkipSource(func(context.Context, ScopeGateRequest) (map[string]string, map[string][]models.ScopeNeed, error) {
+		return nil, nil, nil
+	})
 	require.NoError(t, m.pushScopeSkips(context.Background(), "t2-go", "d1"))
 	require.NotNil(t, p.skip, "an empty list is pushed, not left out")
 	require.Empty(t, p.skip)
@@ -76,20 +81,25 @@ func TestPushScopeSkipsRefuses(t *testing.T) {
 	provenOn(t)
 	p := &skipPusher{}
 	m := &mockService{logger: zap.NewNop(), instrumentation: p, config: &config.Config{}}
-	RegisterScopeSkipSource(func(context.Context, ScopeGateRequest) (map[string]string, error) {
-		return nil, errors.New("unreadable")
+	RegisterScopeSkipSource(func(context.Context, ScopeGateRequest) (map[string]string, map[string][]models.ScopeNeed, error) {
+		return nil, nil, errors.New("unreadable")
 	})
 	t.Cleanup(func() { RegisterScopeSkipSource(nil) })
 	require.ErrorContains(t, m.pushScopeSkips(context.Background(), "s", ""), "unreadable")
 
-	RegisterScopeSkipSource(func(context.Context, ScopeGateRequest) (map[string]string, error) {
-		return map[string]string{"a": "b"}, nil
+	RegisterScopeSkipSource(func(context.Context, ScopeGateRequest) (map[string]string, map[string][]models.ScopeNeed, error) {
+		return map[string]string{"a": "b"}, nil, nil
 	})
 	p.err = errors.New("refused")
 	require.ErrorContains(t, m.pushScopeSkips(context.Background(), "s", ""), "refused")
 
-	// An instrumentation without the capability cannot skip a listed test.
+	// An instrumentation without the capability cannot skip a listed test,
+	// nor one that needs a test that did not run before it.
 	m.instrumentation = &gatePusher{}
+	require.Error(t, m.pushScopeSkips(context.Background(), "s", ""))
+	RegisterScopeSkipSource(func(context.Context, ScopeGateRequest) (map[string]string, map[string][]models.ScopeNeed, error) {
+		return nil, map[string][]models.ScopeNeed{"s::B": {{Test: "s::A", Reason: "r"}}}, nil
+	})
 	require.Error(t, m.pushScopeSkips(context.Background(), "s", ""))
 }
 
@@ -98,9 +108,9 @@ func TestPushScopeSkipsNeedsTheSwitch(t *testing.T) {
 	t.Setenv(provenswitch.Env, "")
 	p := &skipPusher{}
 	m := &mockService{logger: zap.NewNop(), instrumentation: p, config: &config.Config{}}
-	RegisterScopeSkipSource(func(context.Context, ScopeGateRequest) (map[string]string, error) {
+	RegisterScopeSkipSource(func(context.Context, ScopeGateRequest) (map[string]string, map[string][]models.ScopeNeed, error) {
 		t.Fatal("read with the switch off")
-		return nil, nil
+		return nil, nil, nil
 	})
 	t.Cleanup(func() { RegisterScopeSkipSource(nil) })
 	require.NoError(t, m.pushScopeSkips(context.Background(), "s", ""))

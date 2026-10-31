@@ -26,7 +26,7 @@ import (
 // The requests a pause of the memory guard cost are said with their count and
 // the number of connections they came on.
 func TestTheClientSaysWhatTheSessionLostForAnAgentItDidNotStart(t *testing.T) {
-	sum := models.StreamEndSummary{TestCasesSent: 3, TestCasesSuppressed: 9, LeftOutInFlight: 2, Unsettled: 1, MassSuppressed: true,
+	sum := models.StreamEndSummary{TestCasesSent: 3, TestCasesSuppressed: 9, LeftOutInFlight: 2, NotHandedOn: 4, UnnamedCallerConns: 6, Unsettled: 1, MassSuppressed: true,
 		NotRecordedUnderPressure: models.PressureSkipSummary{Requests: 5, Connections: 2}}
 	const pauseSaid = "the keploy agent did not record some requests: it was short of memory when they came, and its memory guard had paused recording; each connection's requests after the pause are recorded"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -84,6 +84,8 @@ func TestTheClientSaysWhatTheSessionLostForAnAgentItDidNotStart(t *testing.T) {
 			"the keploy agent saved some test cases before it had parsed all the traffic they overlap; if a connection's parser failed on it afterwards, they lack mocks",
 			"the keploy agent left out a large share of this recording's test cases: it could not capture their mocks",
 			pauseSaid,
+			"the keploy agent lost some test cases: the app served their requests, and the agent's ingress stopped before their test cases reached the recording",
+			unnamedCallerConnsSaid,
 		}
 		for _, m := range want {
 			if !started && !said[m] {

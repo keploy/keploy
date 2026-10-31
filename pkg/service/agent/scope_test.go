@@ -9,7 +9,9 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/config"
+	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 )
 
@@ -72,6 +74,103 @@ func TestRecordScopesUseTheRunnerTimeWhenGiven(t *testing.T) {
 	require.Len(t, ws, 1)
 	require.True(t, ws[0].Start.Equal(start), "start %v", ws[0].Start)
 	require.True(t, ws[0].End.Equal(end), "end %v", ws[0].End)
+}
+
+// Under the proven switch, a recorded test's window is a test span for the
+// recorders while it is open and once it ended (syncMock.TestScope): keploy
+// mock record's tests open no window of the proxy's, and without it the
+// Generic recorder is told no test owns a call made inside one, so it states
+// a connection made wholly inside one test its preamble, served to every test
+// (a recorded call left unmade, or another test's request, passes). A window
+// withdrawn at its begin, or left open by a session reset, is no test's; a
+// replay, and the switch off, open none.
+func TestARecordedTestsWindowIsATestSpanForTheRecorders(t *testing.T) {
+	start := time.Date(2026, 9, 24, 10, 0, 0, 0, time.UTC)
+	end := start.Add(3 * time.Second)
+	mid := start.Add(time.Second)
+	ctx := context.Background()
+	newAgent := func(t *testing.T) *Agent {
+		a := newRecordAgent()
+		a.spanMgr = syncMock.New(zap.NewNop())
+		return a
+	}
+	t.Run("ended", func(t *testing.T) {
+		t.Setenv(provenswitch.Env, "1")
+		a := newAgent(t)
+		require.NoError(t, a.BeginScopeAt(ctx, "t", 0, start))
+		span, ok := a.spanMgr.TestSpanAt(mid)
+		require.True(t, ok, "a call made inside an open test is told no test")
+		require.False(t, span.Final())
+		require.True(t, span.Start.Equal(start))
+		require.NoError(t, a.EndScopeAt(ctx, "t", 0, end))
+		select {
+		case <-span.Changed():
+		default:
+			t.Fatal("the recorder waiting on the test was not told it ended")
+		}
+		span, ok = a.spanMgr.TestSpanAt(mid)
+		require.True(t, ok)
+		require.True(t, span.Final())
+		require.True(t, span.Start.Equal(start) && span.End.Equal(end), "span %v..%v, want the window's", span.Start, span.End)
+		_, ok = a.spanMgr.TestSpanAt(end.Add(time.Nanosecond))
+		require.False(t, ok, "a call after the test's end is the test's")
+		require.Empty(t, a.openScopes)
+	})
+	t.Run("withdrawn", func(t *testing.T) {
+		t.Setenv(provenswitch.Env, "1")
+		a := newAgent(t)
+		require.NoError(t, a.BeginScopeAt(ctx, "t", 0, start))
+		a.withdrawWindow("t", 0)
+		_, ok := a.spanMgr.TestSpanAt(mid)
+		require.False(t, ok, "a withdrawn test owns a call")
+		require.NoError(t, a.BeginScopeAt(ctx, "u", 0, start))
+		a.abandonWindow("u")
+		_, ok = a.spanMgr.TestSpanAt(mid)
+		require.False(t, ok, "an abandoned test owns a call")
+	})
+	t.Run("reset", func(t *testing.T) {
+		t.Setenv(provenswitch.Env, "1")
+		a := newAgent(t)
+		require.NoError(t, a.BeginScopeAt(ctx, "t", 0, start))
+		a.resetScopeState()
+		_, ok := a.spanMgr.TestSpanAt(mid)
+		require.False(t, ok, "a test the previous session left open owns a call")
+		require.NoError(t, a.EndScopeAt(ctx, "t", 0, end))
+		_, ok = a.spanMgr.TestSpanAt(mid)
+		require.False(t, ok)
+	})
+	t.Run("begun again", func(t *testing.T) {
+		t.Setenv(provenswitch.Env, "1")
+		a := newAgent(t)
+		require.NoError(t, a.BeginScopeAt(ctx, "t", 0, start))
+		require.NoError(t, a.BeginScopeAt(ctx, "t", 0, mid))
+		require.NoError(t, a.EndScopeAt(ctx, "t", 0, end))
+		_, ok := a.spanMgr.TestSpanAt(start)
+		require.False(t, ok, "the replaced begin's scope is still open, or became a test")
+		span, ok := a.spanMgr.TestSpanAt(mid)
+		require.True(t, ok && span.Final() && span.Start.Equal(mid) && span.End.Equal(end))
+	})
+	t.Run("replay", func(t *testing.T) {
+		t.Setenv(provenswitch.Env, "1")
+		cfg := &config.Config{}
+		cfg.Agent.Mode = models.MODE_TEST
+		a := &Agent{logger: zap.NewNop(), config: cfg, spanMgr: syncMock.New(zap.NewNop())}
+		a.openWindow("t", 0, start)
+		_, ok := a.spanMgr.TestSpanAt(mid)
+		require.False(t, ok, "a replayed test opened a recording's test scope")
+	})
+	t.Run("switch off", func(t *testing.T) {
+		t.Setenv(provenswitch.Env, "")
+		a := newAgent(t)
+		require.NoError(t, a.BeginScopeAt(ctx, "t", 0, start))
+		_, ok := a.spanMgr.TestSpanAt(mid)
+		require.False(t, ok)
+		require.NoError(t, a.EndScopeAt(ctx, "t", 0, end))
+		_, ok = a.spanMgr.TestSpanAt(mid)
+		require.False(t, ok, "a test span noted with the switch off")
+		require.Nil(t, a.openScopes)
+		require.Equal(t, []string{"t"}, windowNames(a), "the window itself is recorded as before")
+	})
 }
 
 // A fixture that posts no time still gets a window, stamped when the agent saw each call.
