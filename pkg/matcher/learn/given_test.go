@@ -1975,3 +1975,39 @@ func TestAnIncomingPartThatDriftedWithTheValueStaysItsPlace(t *testing.T) {
 		t.Errorf("F's text holds neither: %s from %s (%s); want the request set aside and the value refused naming it", ln.Kind, ln.From.Path, ln.Why)
 	}
 }
+
+// A client test's incoming request that held the value whole, which record's
+// full round saw hold the value F saw at the call too, is where the value
+// came from (refuteSeen keeps it), whatever a line of its recorded text that
+// F's lost: refutePart reads only a request that holds the value in another
+// form, never a whole one. Here the recorded value has a line ("k-1") its
+// live one lost, so the value is held in another form in the recording alone
+// (heldInAnotherForm) and the two did not drift together by their words
+// (coDrifted): read as a part, the request would be set aside as no copy.
+func TestAnIncomingRequestThatHeldTheValueWholeInBothRunsStaysItsPlace(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	call := time.Date(2026, 10, 31, 9, 50, 25, 300e6, time.UTC)
+	fCall := call.Add(FullRoundLead)
+	w := &Window{Rec: Span{From: call.Add(-5 * time.Millisecond), To: call}, F: Span{From: fCall.Add(-5 * time.Millisecond), To: fCall.Add(time.Millisecond)}}
+	const p = "body.docs.msgs.0.app.ref"
+	const rec, live = "abc123\nk-1", "abc123"
+	shape := func(v string) Shape {
+		return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: v}}}
+	}
+	req := func(name string, at time.Time, v string) IncomingRequest {
+		return IncomingRequest{Name: name, At: at, Parts: []models.TestRequestPart{
+			{Name: "url", Recorded: "http://localhost:8080/v1/apps"},
+			{Name: "header.X-Ids", Recorded: v},
+		}}
+	}
+	dc := clientTestCache()
+	v := dc.of(rec, live)
+	if !heldInAnotherForm(v, v, false) || heldInAnotherForm(v, v, true) || coDrifted(v, v) {
+		t.Fatalf("the row's value: held in another form recorded %v, live %v, co-drifted %v; want true, false, false", heldInAnotherForm(v, v, false), heldInAnotherForm(v, v, true), coDrifted(v, v))
+	}
+	e := IncomingGiven("TestAuthorizationDirectives", []IncomingRequest{req("post-query-11", call.Add(-time.Second), rec)}, []IncomingRequest{req("", fCall.Add(-time.Second), live)}, true, call)
+	ln := ClassifyFollowing(dc, []string{p}, shape(live), shape(rec), call, []Earlier{e}, nil, nil, w, nil)[0]
+	if !ln.From.Incoming || !ln.From.Whole || ln.From.Path != "header.X-Ids" {
+		t.Errorf("%s from %s whole=%v incoming=%v (%s); want the request kept as where the value came from, whole", ln.Kind, ln.From.Path, ln.From.Whole, ln.From.Incoming, ln.Why)
+	}
+}
