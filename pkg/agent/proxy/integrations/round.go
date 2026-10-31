@@ -600,11 +600,20 @@ func (s RoundSnapshot) InBackgroundPool(name string) bool {
 }
 
 // InBackground implements BackgroundMember: name is one of the background's
-// recordings (its pool's or its worker scope's) in a set served by the
-// background rules, and the view holds it as no test's own (Owner): one a
-// test owns (judging moved it into the test) is that test's.
+// recordings, and the view holds it as no test's own (Owner): one a test owns
+// (judging moved it into the test) is that test's. The background is the
+// pool's and the worker scope's recordings in a set served by the background
+// rules, and, in a test under any rules, the worker scope the run reached.
 func (s RoundSnapshot) InBackground(name string) bool {
-	if !s.Background || s.owners[name] != OwnerNone {
+	if s.owners[name] != OwnerNone {
+		return false
+	}
+	if s.Test != "" {
+		if _, ok := s.worker[name]; ok {
+			return true
+		}
+	}
+	if !s.Background {
 		return false
 	}
 	if _, ok := s.bgPool[name]; ok {

@@ -6,13 +6,12 @@ import (
 )
 
 // A CALL ONE MORE THAN THE OPEN TEST'S OWN RECORDINGS OF IT
-// (integrations.HideBackground; keploy #4745's F20, on the background rules'
-// view).
+// (integrations.HideBackground; keploy #4745's F20).
 //
-// Under the background rules the view shows a test the set's background
-// after the test's own recordings (exactView.shows): the pool's and the
-// reached worker scope's data-plane recordings, each answering once in the
-// staging. A parser that finds a call identical to one the open test's own
+// A view shows a test a background after the test's own recordings
+// (exactView.shows): under the background rules the pool's and the reached
+// worker scope's data-plane recordings, under any rules the reached worker
+// scope's (ServeExactWorker), each answering once in the staging. A parser that finds a call identical to one the open test's own
 // recordings already answered reads the call's held store with the
 // background hidden: none of its reads holds a background recording that is
 // not the open test's own, and its consume and spend doors refuse one. The
@@ -40,9 +39,10 @@ func (h *heldScope) hides(mk *models.Mock) bool {
 
 // hidesName reports whether h hides the recording named name: h's call is
 // one more than the open test's own recordings of it (HideBackground), a
-// test is open in the view in force, the set is served by the background
-// rules, and name is one of the background's recordings (the pool's or the
-// worker scope's) the open test does not own. A background recording a test
+// test is open in the view in force, and name is one of the background's
+// recordings the open test does not own: under the background rules the
+// pool's or the worker scope's, under any rules the reached worker scope's
+// (isWorker). A background recording a test
 // owns (one judging moved into it) is that test's own, and answers its call.
 // It reads the name alone, so every read and door of h, and a parser's index
 // that asks MockSpent by name, hide the same recordings: a protocol-phase or
@@ -53,7 +53,7 @@ func (h *heldScope) hidesName(name string) bool {
 		return false
 	}
 	v := h.exactView()
-	if v == nil || v.bg == nil || v.test == "" || !v.bg.has(name) {
+	if v == nil || v.test == "" || !v.bg.has(name) && !v.isWorker(name) {
 		return false
 	}
 	_, own := v.index[name]

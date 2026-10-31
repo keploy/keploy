@@ -1080,11 +1080,14 @@ func probe(t *testing.T, db integrations.MockMemDb) string {
 // kept set), whichever tests ran before it. Once its own are spent, the set's
 // worker scope answers the request: it belongs to no test, so it is walked by
 // placement from the set's start on, as between tests (a test that recorded
-// none of the request is answered the same). The proxy cannot tell a test's
-// call from the worker's, so a test's call past its own recordings takes the
-// worker scope's next reached recording, as main answers it. Then nothing,
-// never an earlier recording again. Each case runs through every pass that
-// walks the sequence (workerWalkPasses).
+// none of the request is answered the same). With the proven switch off, a
+// test's call past its own recordings takes the worker scope's next reached
+// recording. Under the switch, a call identical to one the test's own
+// recordings answered is one call more than the test recorded
+// (integrations.OwnRepeatRead): the worker scope never answers it, and its
+// recordings stay unspent for the request between tests. Then nothing, never
+// an earlier recording again. Each case runs through every pass that walks
+// the sequence (workerWalkPasses).
 func TestATestsOwnRecordingsAnswerInRecordOrderThenTheWorkerScope(t *testing.T) {
 	win := func(name string, from, to time.Duration) models.TestWindow {
 		return models.TestWindow{TestCase: name, Start: exactT0.Add(from), End: exactT0.Add(to)}
@@ -1143,8 +1146,18 @@ func TestATestsOwnRecordingsAnswerInRecordOrderThenTheWorkerScope(t *testing.T) 
 				mm.ServeExactPool("k", nil)
 				mm.ServeExactWorker([]string{"s0", "s1"})
 				mm.ServeExactTest("A", []*models.Mock{own})
-				if got := asks(mm, 4); !reflect.DeepEqual(got, []string{"mine", "false", "true", miss}) {
-					t.Fatalf("test A answered %v; want its own, then the worker scope's by placement, then nothing", got)
+				if pass.sw == "" {
+					if got := asks(mm, 4); !reflect.DeepEqual(got, []string{"mine", "false", "true", miss}) {
+						t.Fatalf("test A answered %v; want its own, then the worker scope's by placement, then nothing", got)
+					}
+					return
+				}
+				if got := asks(mm, 3); !reflect.DeepEqual(got, []string{"mine", miss, miss}) {
+					t.Fatalf("test A answered %v; want its own, then nothing: each call after it is one more than the test recorded", got)
+				}
+				mm.ServeExactPool("k", nil)
+				if got := asks(mm, 3); !reflect.DeepEqual(got, []string{"false", "true", miss}) {
+					t.Fatalf("between tests answered %v; want the worker scope's by placement, unspent by test A, then nothing", got)
 				}
 			})
 			t.Run("a test that recorded none", func(t *testing.T) {
@@ -3732,10 +3745,13 @@ func timedServe(t *testing.T, mm integrations.MockMemDb) (string, time.Duration)
 }
 
 // In the variable pass, with a request id bound per call (each call sends a
-// new one) or one id, a test's call is answered the test's own recording,
-// then the worker scope's (by placement: it belongs to no test), then
-// nothing, never a spent recording again though its variable no longer holds
-// for the next call.
+// new one), a test's call is answered the test's own recording, then the
+// worker scope's (by placement: it belongs to no test), then nothing, never a
+// spent recording again though its variable no longer holds for the next
+// call. With one id, each call after the test's own is the call its own
+// recording answered, one more than the test recorded
+// (integrations.OwnRepeatRead): the worker scope never answers it, and its
+// recording answers the call between tests.
 func TestAVariableCallWithANewIdEachCallIsAnsweredItsOwnThenTheWorkerScope(t *testing.T) {
 	t.Setenv("KEPLOY_PROVEN", "1")
 	rec := func(name string, at time.Duration, body string) *models.Mock {
@@ -3747,9 +3763,12 @@ func TestAVariableCallWithANewIdEachCallIsAnsweredItsOwnThenTheWorkerScope(t *te
 	for _, c := range []struct {
 		name string
 		ids  []string
+		want []string
+		// between is what the call is answered once test A ends.
+		between string
 	}{
-		{"a new id each call", []string{"r1", "r2", "r3"}},
-		{"one id", []string{"rec", "rec", "rec"}},
+		{"a new id each call", []string{"r1", "r2", "r3"}, []string{"mine", "start", "no answer"}, "no answer"},
+		{"one id", []string{"rec", "rec", "rec"}, []string{"mine", "no answer", "no answer"}, "start"},
 	} {
 		own := rec("a0", 3500*time.Millisecond, "mine")
 		mm := stagedManager(t, nil, []*models.Mock{rec("s1", 2*time.Second, "start"), own})
@@ -3758,17 +3777,23 @@ func TestAVariableCallWithANewIdEachCallIsAnsweredItsOwnThenTheWorkerScope(t *te
 		mm.ServeExactPool("k", nil)
 		mm.ServeExactWorker([]string{"s1"})
 		mm.ServeExactTest("A", []*models.Mock{own})
-		var got []string
-		for _, id := range c.ids {
+		ask := func(id string) string {
 			resp, body := learnServe(t, httpint.New(zap.NewNop()), mm, context.Background(), models.OutgoingOptions{}, "GET /probe HTTP/1.1\r\nHost: deps\r\nX-Req-Id: "+id+"\r\n\r\n")
 			if resp == nil || resp.StatusCode != http.StatusOK {
-				got = append(got, "no answer")
-				continue
+				return "no answer"
 			}
-			got = append(got, string(body))
+			return string(body)
 		}
-		if want := []string{"mine", "start", "no answer"}; !reflect.DeepEqual(got, want) {
-			t.Fatalf("%s: test A answered %v; want %v (its own recording, then the worker scope's, then nothing)", c.name, got, want)
+		var got []string
+		for _, id := range c.ids {
+			got = append(got, ask(id))
+		}
+		if !reflect.DeepEqual(got, c.want) {
+			t.Fatalf("%s: test A answered %v; want %v", c.name, got, c.want)
+		}
+		mm.ServeExactPool("k", nil)
+		if got := ask("r9"); got != c.between {
+			t.Fatalf("%s: between tests the call was answered %q; want %q", c.name, got, c.between)
 		}
 	}
 }

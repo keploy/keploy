@@ -26,8 +26,10 @@ import (
 //     mapping) answer, each at most one request, in recorded order, and the
 //     pool answers only protocol-phase requests (handshakes, session
 //     settings, DNS). One more request identical to one a test mock already
-//     answered finds no test mock: a miss (models.MissExtraCall), unless a
-//     worker-scope mock the run has reached (below) is that request.
+//     answered finds no test mock: a miss (models.MissExtraCall). Under the
+//     proven switch no worker-scope mock (below) answers it either
+//     (integrations.OwnRepeatRead); with the switch off, one the run has
+//     reached that is that request does.
 //   - While no test is open, the current key's pool slice answers, with
 //     reuse or cursor-saturate as its mocks were recorded, beside the
 //     protocol-phase mocks. Its stateful cursors are the key's own.
