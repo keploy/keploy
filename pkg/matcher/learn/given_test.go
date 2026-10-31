@@ -1416,6 +1416,51 @@ func TestTrackerGivesAClientTestItsIncomingRequests(t *testing.T) {
 	}
 }
 
+// A call reads a client test's incoming requests as they were recorded
+// before its own recorded instant, though the tracker's read is shared by
+// the calls of a round: a request recorded after the call (the test signing
+// in again as another user) neither gives the call a value nor splits the
+// part the earlier requests hold one value of. A call recorded after both
+// reads the part split, and is refused.
+func TestACallReadsTheIncomingRequestsRecordedBeforeIt(t *testing.T) {
+	t0 := time.Date(2026, 10, 31, 1, 2, 0, 0, time.UTC)
+	in := func(name string, at time.Time, authTime string) IncomingRequest {
+		return IncomingRequest{Name: name, At: at, Parts: []models.TestRequestPart{{Name: "header.Authorization", Recorded: harnessToken(authTime, "j-"+name)}}}
+	}
+	tr := NewTracker()
+	tr.SetClientTests(true)
+	tr.SetIncomingSeen(true)
+	// Given out of order: the read orders them by when they were sent.
+	tr.GiveIncoming("TestRun", []IncomingRequest{in("test-4", t0.Add(20*time.Second), "1793373999"), in("test-3", t0, "1793373215")})
+	tr.Begin()
+	tr.Incoming(in("", time.Now(), "1793387031"))
+	var placed []Earlier
+	for _, e := range tr.Placed().Earlier {
+		if e.Incoming {
+			placed = append(placed, e)
+		}
+	}
+	if len(placed) != 1 || hasSeen(placed[0], "header.Authorization{jwt}.auth_time") {
+		t.Fatalf("the read with no call holds every recorded request, whose auth_time is split: %+v", placed)
+	}
+	const p = "header.authorization{jwt}.auth_time"
+	shape := func(v string) Shape {
+		return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: Number, Value: v}}}
+	}
+	call := t0.Add(10 * time.Second)
+	ln := ClassifyIn(clientTestCache(), []string{p}, shape("1793387031"), shape("1793373215"), call, placed, nil, nil, nil)[0]
+	if ln.Kind != KindVariable || !ln.From.Incoming || ln.From.Mock != "incoming request test-3 of test TestRun" || ln.From.Path != "header.Authorization{jwt}.auth_time" {
+		t.Errorf("a call between the two requests: %s from %+v (%s); want the variable of test-3's claim", ln.Kind, ln.From, ln.Why)
+	}
+	if placed[0].in == nil || hasSeen(placed[0], "header.Authorization{jwt}.auth_time") {
+		t.Errorf("the call's cut changed the read it shares with the round: %+v", placed[0])
+	}
+	late := t0.Add(30 * time.Second)
+	if ln := ClassifyIn(clientTestCache(), []string{p}, shape("1793387031"), shape("1793373999"), late, placed, nil, nil, nil)[0]; ln.Kind == KindVariable {
+		t.Errorf("a call after both requests, whose auth_time is split: followed from %+v", ln.From)
+	}
+}
+
 // A replay reads a variable the harness gave the application in the open
 // client test's incoming requests of this run: one value where each request
 // that holds the part holds one, else why there is none, never a guess.

@@ -124,6 +124,11 @@ type Earlier struct {
 	// requestUnread), never learned as noise or an echo.
 	Unread string
 	Seen   []Seen
+	// in, of an Incoming place a Tracker read made (Tracker.Placed), is
+	// that read's requests: each call reads them cut at its own recorded
+	// instant (incomingAt), so a request recorded after it is no place of
+	// it.
+	in *incomingRead
 	// noTime: the exchange's recorded time keploy cannot read (At was the
 	// zero time), read as one made at the call's own instant
 	// (timedEarlier), and named so.
@@ -1045,6 +1050,7 @@ func classifyGiven(dc *DriftCache, drift []string, live, rec Shape, at time.Time
 		dc = NewDriftCache()
 	}
 	given = givenOnce(given)
+	earlier = incomingAt(earlier, at)
 	earlier = timedEarlier(earlier, at)
 	raw = timedRaw(raw, at)
 	earlier, raw = leafedAfterCall(earlier, raw, at)

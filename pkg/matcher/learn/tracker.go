@@ -520,9 +520,10 @@ func (t *Tracker) RecordedBegin(at time.Time) {
 type incomingOf struct {
 	test           string
 	recorded, live []IncomingRequest
-	// place is the place they make (IncomingGiven), read once until the
-	// next request comes (Incoming).
-	place *Earlier
+	// read is the place they make (IncomingGiven) as of the last request
+	// that came (Incoming), each call cutting it at its own recorded
+	// instant (incomingRead): read once until the next request comes.
+	read *incomingRead
 }
 
 // maxLiveIncoming bounds the incoming requests of one test the tracker keeps
@@ -542,7 +543,7 @@ func (t *Tracker) GiveIncoming(test string, recorded []IncomingRequest) {
 	t.mu.Lock()
 	t.nextIn = nil
 	if len(recorded) > 0 {
-		t.nextIn = &incomingOf{test: test, recorded: append([]IncomingRequest(nil), recorded...)}
+		t.nextIn = &incomingOf{test: test, recorded: sortIncoming(recorded)}
 	}
 	t.mu.Unlock()
 }
@@ -559,7 +560,7 @@ func (t *Tracker) SetIncomingSeen(on bool) {
 	t.mu.Lock()
 	t.inSeen = on
 	if t.in != nil {
-		t.in.place = nil
+		t.in.read = nil
 	}
 	t.mu.Unlock()
 }
@@ -578,7 +579,7 @@ func (t *Tracker) Incoming(r IncomingRequest) {
 	if !t.open || t.in == nil || len(t.in.live) >= maxLiveIncoming {
 		return
 	}
-	t.in.live, t.in.place = append(t.in.live, r), nil
+	t.in.live, t.in.read = append(t.in.live, r), nil
 }
 
 // IncomingValue is the value the open client test's incoming requests hold
@@ -839,11 +840,12 @@ func (t *Tracker) Placed() Placed {
 		earlier = append(earlier, *t.given)
 	}
 	if t.in != nil && t.clientTests {
-		if t.in.place == nil {
-			e := IncomingGiven(t.in.test, t.in.recorded, t.in.live, t.inSeen, time.Time{})
-			t.in.place = &e
+		if t.in.read == nil {
+			t.in.read = newIncomingRead(t.in.test, t.in.recorded, t.in.live, t.inSeen)
 		}
-		earlier = append(earlier, *t.in.place)
+		// Every recorded request, until a call cuts it at its own
+		// recorded instant (incomingAt).
+		earlier = append(earlier, t.in.read.at(time.Time{}))
 	}
 	earlier = append(append(earlier, t.run...), t.served...)
 	return Placed{

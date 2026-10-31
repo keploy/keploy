@@ -3,6 +3,7 @@ package learn
 import (
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -127,6 +128,83 @@ func IncomingGiven(test string, recorded, live []IncomingRequest, seen bool, cal
 	}
 	e.Mock, e.At = incomingPlace(test, before[first].Name), before[first].At
 	return e
+}
+
+// incomingRead is a client test's incoming requests as one read of the
+// tracker saw them (Tracker.Placed): the test's name, its recorded requests
+// in the order they were sent, the live ones the application was sent so
+// far, and whether the agent sees them (IncomingGiven's arguments, but the
+// call's instant). A read's places are shared by every call that reads it
+// (a round's, exact_round), and each call's recorded instant cuts the
+// recorded requests at its own place (at): a request recorded after the
+// call never gives it a value, nor splits one it holds. Each cut is read
+// once per read.
+type incomingRead struct {
+	test           string
+	recorded, live []IncomingRequest
+	seen           bool
+
+	mu    sync.Mutex
+	byCut map[int]Earlier
+}
+
+// newIncomingRead is the read of test's recorded and live requests (recorded
+// already in the order they were sent, sortIncoming).
+func newIncomingRead(test string, recorded, live []IncomingRequest, seen bool) *incomingRead {
+	return &incomingRead{test: test, recorded: recorded, live: live[:len(live):len(live)], seen: seen}
+}
+
+// at is the place (IncomingGiven) at a call recorded at callAt; the zero
+// callAt reads every recorded request.
+func (r *incomingRead) at(callAt time.Time) Earlier {
+	cut := len(r.recorded)
+	if !callAt.IsZero() {
+		cut = sort.Search(len(r.recorded), func(i int) bool { return r.recorded[i].At.After(callAt) })
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if e, ok := r.byCut[cut]; ok {
+		return e
+	}
+	e := IncomingGiven(r.test, r.recorded[:cut], r.live, r.seen, time.Time{})
+	e.in = r
+	if r.byCut == nil {
+		r.byCut = map[int]Earlier{}
+	}
+	r.byCut[cut] = e
+	return e
+}
+
+// sortIncoming is reqs in the order they were sent, those sent at one
+// instant in the order given (as IncomingGiven orders them).
+func sortIncoming(reqs []IncomingRequest) []IncomingRequest {
+	out := append([]IncomingRequest(nil), reqs...)
+	sort.SliceStable(out, func(i, j int) bool { return out[i].At.Before(out[j].At) })
+	return out
+}
+
+// incomingAt is earlier with a client test's incoming requests (an Earlier
+// a Tracker read made, Earlier.in) read as the call recorded at at had them
+// (incomingRead.at): only those recorded before it. earlier itself is never
+// changed (a round's calls share it).
+func incomingAt(earlier []Earlier, at time.Time) []Earlier {
+	if at.IsZero() {
+		return earlier
+	}
+	var out []Earlier
+	for i, e := range earlier {
+		if e.in == nil {
+			continue
+		}
+		if out == nil {
+			out = append([]Earlier(nil), earlier...)
+		}
+		out[i] = e.in.at(at)
+	}
+	if out == nil {
+		return earlier
+	}
+	return out
 }
 
 // IncomingValueAt is the value the requests live (those the application was
