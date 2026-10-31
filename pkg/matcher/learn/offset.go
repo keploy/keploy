@@ -275,10 +275,11 @@ func (dc *DriftCache) offsetPlacesOf(at time.Time, served []Earlier, raw []Raw, 
 			if mv := e.servedMoves(); len(mv) > 0 {
 				moves = append(moves, moved{mock: e.Mock, call: x.call, at: e.At, first: x.first, last: x.last, moves: mv})
 			}
-		} else if op.unread == "" {
+		} else if op.unread == "" && !e.ofEarlierTest() {
 			// What RawOf could not read, and an exchange that came with no
 			// payload at all, is no place the rule can search: a value
-			// built on its answer would pass as the lead's move.
+			// built on its answer would pass as the lead's move. An earlier
+			// test's place keeps no payload, by design (ranCalls).
 			op.unread = payloadUnread(*e)
 		}
 	}

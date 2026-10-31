@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -58,7 +59,12 @@ type provenWire struct {
 	// open is the open test's ID, "" when none is.
 	open string
 	// skip is the gate: test ID -> the reason its harness skips it with.
-	skip map[string]string
+	// needs holds a test to the tests that must begin before it
+	// (models.ScopeGateReq.Needs), and began is every test opened since the
+	// session began.
+	skip  map[string]string
+	needs map[string][]models.ScopeNeed
+	began map[string]bool
 	// charged holds the misses the ends drained from the proxy, until the
 	// CLI's own end-of-run read (GetMockErrors) collects them, so charging a
 	// miss to a test never hides it from the run's totals.
@@ -670,14 +676,11 @@ func (a *Agent) NoteRefusal(r models.RunRefusal) {
 }
 
 // SetScopeSkips installs the proven gate: the tests a replay skips, by ID,
-// with their reasons. nil skips nothing.
-func (a *Agent) SetScopeSkips(_ context.Context, skip map[string]string) error {
-	cp := make(map[string]string, len(skip))
-	for id, reason := range skip {
-		cp[id] = reason
-	}
+// with their reasons, and the tests that must begin before each test that
+// needs them. nil skips nothing.
+func (a *Agent) SetScopeSkips(_ context.Context, skip map[string]string, needs map[string][]models.ScopeNeed) error {
 	a.provenMu.Lock()
-	a.proven.skip = cp
+	a.proven.skip, a.proven.needs = maps.Clone(skip), maps.Clone(needs)
 	a.provenMu.Unlock()
 	return nil
 }
@@ -731,10 +734,18 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 			"run them one at a time: start parallel tests with keploytest.Parallel and subtests with keploytest.Run (keploy mock codemod go writes them); parallel test workers arrive in a later keploy release")
 	}
 	reason, gated := a.proven.skip[id]
+	outcome := models.ScopeOutcomeGated
+	// A test whose call holds a value an earlier test's call sends runs
+	// only after that test began in this replay.
+	for _, n := range a.proven.needs[id] {
+		if !gated && !a.proven.began[n.Test] {
+			reason, gated, outcome = n.Reason, true, models.ScopeOutcomeUnmet
+		}
+	}
 	dir := a.proven.dir
 	a.provenMu.Unlock()
 	if a.replaying() && gated {
-		a.NoteScopeGated(id, 0, at)
+		a.noteScopeNotRun(id, 0, at, outcome)
 		return models.ScopeBeginResp{V: models.ScopeProtocolVersion, Status: "ok", Action: models.ScopeActionSkip, Reason: reason}, nil
 	}
 
@@ -829,6 +840,10 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 	}
 	a.provenMu.Lock()
 	a.proven.open = id
+	if a.proven.began == nil {
+		a.proven.began = map[string]bool{}
+	}
+	a.proven.began[id] = true
 	a.provenMu.Unlock()
 	a.noteBegunInOrder(id)
 	// The test is a scope of its own from here (containerkey); closeOpen

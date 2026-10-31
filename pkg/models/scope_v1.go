@@ -59,11 +59,12 @@ type ScopeEndResp struct {
 }
 
 // ScopeGateResp acknowledges POST /agent/replay/gate under the wire: the agent
-// applies Skips skip-list entries.
+// applies Skips skip-list entries and the Needs of Needs tests.
 type ScopeGateResp struct {
 	V      int    `json:"v"`
 	Status string `json:"status"`
 	Skips  int    `json:"skips"`
+	Needs  int    `json:"needs"`
 }
 
 // ScopeActionFail is the ScopeEndResp.Action telling a harness to fail the test.

@@ -2,6 +2,7 @@ package http
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -111,5 +112,75 @@ func TestASameSecondClockReadOfAnEarlierCallIsNoSourceWhereThatCallMovedApart(t 
 				t.Fatalf("served %v miss %+v; want it refused, naming mock-17", got != nil, miss)
 			}
 		})
+	}
+}
+
+// A value test A's call sent where its learn step learned a plain read of the
+// clock (a vault PUT's lastUsedAt), which test B's call sends in the same
+// second, is B's own read of the clock where nothing else explains it, and
+// refused where B's answer echoes it (B's POST stamps createdAt with its own
+// clock and its answer gives it back): keploy cannot tell that from a copy.
+// Either way nothing binds the run's variable at A's clock read, so A's
+// recording is still served at a replay: followed, A's place would carry a
+// variable and a clock read at once, which the HTTP replay refuses for test A
+// too, in every replay.
+func TestLearnMatchASameSecondEchoedCopyOfAnEarlierTestsClockReadLeavesItServed(t *testing.T) {
+	lead := learn.FullRoundLead
+	for _, echoed := range []bool{false, true} {
+		h, n, opts := learnOn(t)
+		// keploy mock's client tests: each test's first call has a window
+		// from its begin, in the recording and in F, on F's clock.
+		tr := learn.NewTracker()
+		tr.SetClientTests(true)
+		tr.SetAppClock(func(r time.Time) (time.Time, bool) { return r, true })
+		tr.NewSet()
+		ctx := learn.WithTracker(context.Background(), tr)
+		boot := learnRecorded("mock-0", 0, "GET", "/v1/health", "", nil, `{}`)
+		tr.ServedMockAt(boot, learnAt.Add(lead))
+		tr.ServedMockAsRecorded(boot)
+		tr.RecordedBegin(learnAt.Add(time.Second))
+		tr.BeginAt(learnAt.Add(lead + time.Second))
+		recA := learnRecorded("mock-a", 1100*time.Millisecond, "PUT", "/v1/secret/tokens", `{"data":{"lastUsedAt":1791972001}}`, nil, `{}`)
+		cpA := *recA
+		a := &learnDb{perTest: []*models.Mock{&cpA}}
+		in := live("PUT", "/v1/secret/tokens", `{"data":{"lastUsedAt":1791972062}}`, nil)
+		in.arrived = learnAt.Add(lead + 1100*time.Millisecond)
+		if served, miss, err := h.learnMatch(ctx, in, a, n, opts); err != nil || served == nil || miss != nil || !learnedClockRead(a.consumed[0].Spec, "body.data.lastUsedAt") {
+			t.Fatalf("echoed %v: test A's call: served %v miss %+v err %v; want lastUsedAt learned as a read of the clock", echoed, served, miss, err)
+		}
+		tr.End()
+		tr.RecordedBegin(learnAt.Add(1300 * time.Millisecond))
+		tr.BeginAt(learnAt.Add(lead + 1300*time.Millisecond))
+		answer := `{}`
+		if echoed {
+			answer = `{"app":{"createdAt":1791972001}}`
+		}
+		recB := learnRecorded("mock-1", 1400*time.Millisecond, "POST", "/v1/apps", `{"createdAt":1791972001}`, nil, answer)
+		cpB := *recB
+		db := &learnDb{perTest: []*models.Mock{&cpB}}
+		in = live("POST", "/v1/apps", `{"createdAt":1791972062}`, nil)
+		in.arrived = learnAt.Add(lead + 1400*time.Millisecond)
+		served, miss, err := h.learnMatch(ctx, in, db, n, opts)
+		const why = "body.createdAt changed, and its recorded value was sent in mock-a at body.data.lastUsedAt, an earlier test's call, where keploy learned it as a read of the application's clock, and this call does not hold it as its own read of the clock"
+		switch {
+		case err != nil:
+			t.Fatal(err)
+		case echoed && (served != nil || miss == nil || !strings.Contains(miss.res.Why, why) || strings.Contains(miss.res.Why, "179197200")):
+			t.Fatalf("echoed: test B served %v miss %+v; want it refused: %s, never the value", served != nil, miss, why)
+		case !echoed && (served == nil || !learnedClockRead(db.consumed[0].Spec, "body.createdAt")):
+			t.Fatalf("test B served %v miss %+v; want createdAt learned as its own read of the clock", served != nil, miss)
+		}
+		// What the replay serves: the learned blocks onto the recordings,
+		// after the run's variables take their places (learn.RunTakesPlaces).
+		recs := learnedOntoTaking([]*models.Mock{recA, recB}, append(append([]models.Mock{}, a.consumed...), db.consumed...), map[string]string{"mock-a": "TestA", "mock-1": "TestB"})
+		if len(recs[0].Spec.Variables) != 0 {
+			t.Fatalf("echoed %v: test A's PUT binds %+v; want nothing bound at its clock read", echoed, recs[0].Spec.Variables)
+		}
+		base := learnAt.Add(time.Hour)
+		r := live("PUT", "/v1/secret/tokens", `{"data":{"lastUsedAt":`+strconv.FormatInt(base.Unix(), 10)+`}}`, nil)
+		r.arrived = base.Add(100 * time.Millisecond)
+		if ok, _, diag := matchVarIn(t, clockConn(true, base), newHTTP(), &varDb{perTest: []*models.Mock{recs[0]}}, r); !ok {
+			t.Fatalf("echoed %v: test A's recording is not served at a replay: %+v", echoed, diag)
+		}
 	}
 }

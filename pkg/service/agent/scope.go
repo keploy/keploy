@@ -546,12 +546,18 @@ func (a *Agent) NoteScopeOutcome(name string, pid int, outcome string) {
 // no extent and the ScopeOutcomeGated verdict, so the replay's outcome and
 // receipt say it was gated rather than that it never appeared.
 func (a *Agent) NoteScopeGated(name string, pid int, at time.Time) {
+	a.noteScopeNotRun(name, pid, at, models.ScopeOutcomeGated)
+}
+
+// noteScopeNotRun is NoteScopeGated with the verdict that says why:
+// ScopeOutcomeGated, or ScopeOutcomeUnmet for a test whose need was not met.
+func (a *Agent) noteScopeNotRun(name string, pid int, at time.Time, outcome string) {
 	if name == "" {
 		return
 	}
 	t := boundaryTime(at)
 	a.scopeMu.Lock()
-	a.scopeWindows = append(a.scopeWindows, models.ScopeWindow{Name: name, Start: t, End: t, PID: uint32(pid), Outcome: models.ScopeOutcomeGated})
+	a.scopeWindows = append(a.scopeWindows, models.ScopeWindow{Name: name, Start: t, End: t, PID: uint32(pid), Outcome: outcome})
 	if a.gatedScopes == nil {
 		a.gatedScopes = make(map[scopeKey]struct{})
 	}

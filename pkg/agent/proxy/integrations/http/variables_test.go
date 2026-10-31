@@ -2171,3 +2171,44 @@ func TestVariables_AClockReadBesideAVariableIsCheckedInItsCallsWindow(t *testing
 		wantProblem(t, ok, diag, "learned both as variable first")
 	})
 }
+
+// A vault PUT whose body.data.lastUsedAt the learn step learned as a read of
+// the clock alone (two calls that read one clock in one second: no run's
+// variable) is served in its test's window, and its read checked there: an
+// hour off is no match. Learned as the run's variable alone (a later test
+// copied it where its own clock did not explain it), it is served too. A
+// place learned as both (a createdAt that is the app's clock and that a
+// later call carries) is refused: the HTTP replay cannot hold one value to
+// both yet, so it fails closed. That is a stated limit; the Mongo replay
+// checks both.
+func TestAPlaceLearnedAsOneThingIsServed(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	base := time.Date(2026, 10, 30, 5, 8, 52, 0, time.UTC)
+	rec := strconv.FormatInt(base.Unix(), 10)
+	body := func(v string) string {
+		return `{"data":{"_id":"e2e-go-key","lastUsedAt":` + v + `},"options":{"cas":1}}`
+	}
+	clock := map[string]models.ClockOffset{"body.data.lastUsedAt": {Res: time.Second, Layout: "epoch-s"}}
+	variable := models.MockVariables{"run-lastUsedAt": bindV(rec, "body.data.lastUsedAt")}
+	for _, row := range []struct {
+		name   string
+		clocks map[string]models.ClockOffset
+		vars   models.MockVariables
+		live   time.Time
+		want   bool
+	}{
+		{"the clock read alone", clock, nil, base, true},
+		{"the clock read alone, an hour off", clock, nil, base.Add(time.Hour), false},
+		{"the variable alone", nil, variable, base, true},
+		{"both: refused, a stated limit", clock, variable, base, false},
+	} {
+		m := varMock("mock-195", "PUT", "http://store/v1/secret/data/pat", body(rec), 200, `{"data":{"version":2}}`, row.vars)
+		m.Spec.Clocks = row.clocks
+		r := liveReq("PUT", "/v1/secret/data/pat", body(strconv.FormatInt(row.live.Unix(), 10)))
+		r.arrived = base.Add(100 * time.Millisecond)
+		ok, _, diag := matchVarIn(t, clockConn(true, base), newHTTP(), &varDb{perTest: []*models.Mock{at(m, 1)}}, r)
+		if ok != row.want {
+			t.Errorf("%s: served %v (%+v); want %v", row.name, ok, diag, row.want)
+		}
+	}
+}

@@ -24,6 +24,7 @@ import (
 	"go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/variables"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -1712,11 +1713,15 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 				continue
 			}
 			for _, l := range learned {
+				// A variable names the earlier call it was sent in, and
+				// whether that call was the set's (an earlier test's or the
+				// start-up's): its evidence, never its value.
 				h.Logger.Info("learned a field that changed between record and replay",
-					zap.String("mock", m.Name), zap.String("field", l.Recorded.Path), zap.String("as", string(l.Kind)))
+					zap.String("mock", m.Name), zap.String("field", l.Recorded.Path), zap.String("as", string(l.Kind)),
+					zap.String("type", string(l.Recorded.Type)), zap.String("fromMock", l.From.Mock), zap.String("fromField", l.From.Path), zap.Bool("fromSet", l.From.Run))
 			}
 			if e, ok := n.servedExchange(tracker.Drifts(), m, answered, c.Shape, recordedParts(m), liveShape, input, live, out, own, h.learnedView(m, plan)); ok {
-				tracker.Served(test, e)
+				tracker.Served(test, learn.Named(e, plan.vars, plan.clocks))
 			}
 			return out, nil, nil
 		}
@@ -2138,7 +2143,11 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 					why += "; " + l.Why
 				}
 				return p, why
-			case !own || !from.Own:
+			case !own || !from.Own && (!from.Run || !provenswitch.On()):
+				// A value the run made, sent by the set's start-up or an
+				// earlier test's own call (from.Run), is the run's variable:
+				// bound there, used here, under the proven switch; without
+				// it only a test's own calls carry its variables.
 				return p, r.Path + " carries a value " + from.Mock + " sent earlier, and only a test's own calls carry its variables"
 			}
 			use, ok := learn.VarPlace(r, jsonReq)
@@ -2148,7 +2157,7 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 			if !variables.SameValue(from.Live, l.Live.Value, r.Type == learn.Number) {
 				return p, r.Path + " does not hold the value the test sent at " + from.Var + " of " + from.Mock + ", which it held when recorded"
 			}
-			name, ok := tracker.Name(test, from.Mock, from.Var, reserved)
+			name, ok := tracker.PlaceName(test, from, reserved)
 			if !ok {
 				return p, "the test ended before " + r.Path + " was learned"
 			}
