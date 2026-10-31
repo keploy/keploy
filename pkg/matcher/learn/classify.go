@@ -3231,6 +3231,12 @@ func sources(e, v *valueDrift) (found, whole bool) {
 // of the application's clock. A fraction of one of v's instants is no part
 // ("14" of "11:14:17"): a short given beside the application's clock read
 // names no value that flowed.
+//
+// Its text is evidence so only where it carries chanceBits (wordBits), as
+// recorded and as given, as a word's is: a shorter given ("14", "ab12")
+// stands inside a value by chance. It is a part then only where it drifted
+// with v as any place's words do (the co-drift below), and a value that
+// holds it glued to other letters or digits learns as it does with no given.
 func sourcesBy(e, v *valueDrift, gave bool) (found, whole bool) {
 	if e.rec == v.rec {
 		return true, true
@@ -3250,7 +3256,7 @@ func sourcesBy(e, v *valueDrift, gave bool) (found, whole bool) {
 	drifted := func(p run, rec, live string) bool {
 		return ContainsToken(rec, p.rec) && ContainsToken(live, p.live) && !ContainsToken(live, p.rec) && !ContainsToken(rec, p.live)
 	}
-	if gave && (gaveDrifted(e.rec, e.live, v.rec, v.live) || v.decoded && gaveDrifted(e.rec, e.live, v.decRec, v.decLive)) {
+	if gave && wordBits(e.rec) >= chanceBits && wordBits(e.live) >= chanceBits && (gaveDrifted(e.rec, e.live, v.rec, v.live) || v.decoded && gaveDrifted(e.rec, e.live, v.decRec, v.decLive)) {
 		return true, false
 	}
 	// v drifted with e also where e held a moment of v's that changed both
@@ -3300,8 +3306,8 @@ func sourcesBy(e, v *valueDrift, gave bool) (found, whole bool) {
 // as it gave it in record's full round, never the same: appearedIn skips a
 // given that did not move) drifted inside a value (vRec as recorded, vLive
 // as F saw it): its recorded text in vRec and its live text in vLive
-// (gaveIn). Either text also on the other side ("<live>,<rec>", a short
-// given's chance match) still makes the value a part of the given: refused,
+// (gaveIn). Either text also on the other side ("<live>,<rec>", a list
+// that holds both) still makes the value a part of the given: refused,
 // naming it, a red that is safe, never a value learned unchecked.
 func gaveDrifted(rec, live, vRec, vLive string) bool {
 	return gaveIn(vRec, rec) && gaveIn(vLive, live)

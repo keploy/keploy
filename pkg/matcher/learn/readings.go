@@ -4,6 +4,7 @@ import (
 	"encoding/base32"
 	"encoding/base64"
 	"encoding/hex"
+	"math"
 	"regexp"
 	"sort"
 	"strconv"
@@ -1204,6 +1205,50 @@ func (v *valueDrift) eachChanged(find func(i int, t string, recorded bool) strin
 		}
 	}
 	return ""
+}
+
+// chanceBits is the fewest bits (wordBits) a word of what a value changed
+// carries for its text to be evidence of where the value came from
+// (eachChanged). A shorter word stands in a real set by chance: in
+// api-server's set of 7186 UUIDs, 83% of the 4096 values of a v4 UUID's
+// third group, so a freshly minted UUID shares a 4-hex group with the set
+// nine times in ten. One of 32 bits (8 hex digits, 10 decimal ones, 6
+// letters and digits of both cases) does so about once in four billion.
+const chanceBits = 32
+
+// wordBits is about how many bits t carries by its alphabet: its length
+// times log2 of the sizes of the classes of characters it holds (digits 10,
+// lower-case letters 26, upper-case 26); one holding any other byte ("-",
+// "_", a byte beyond ASCII) counts 8 bits for each of its bytes. Nothing
+// reads its shape.
+func wordBits(t string) float64 {
+	size := 0
+	var digit, lower, upper bool
+	for i := 0; i < len(t); i++ {
+		switch c := t[i]; {
+		case c >= '0' && c <= '9':
+			digit = true
+		case c >= 'a' && c <= 'z':
+			lower = true
+		case c >= 'A' && c <= 'Z':
+			upper = true
+		default:
+			return 8 * float64(len(t))
+		}
+	}
+	if digit {
+		size += 10
+	}
+	if lower {
+		size += 26
+	}
+	if upper {
+		size += 26
+	}
+	if size == 0 {
+		return 0
+	}
+	return float64(len(t)) * math.Log2(float64(size))
 }
 
 // gluedIn reports whether a declared form of a place's value (ed), as
