@@ -160,3 +160,100 @@ func TestAStartUpReadOfTheClockStaysFollowedWhereTheUnservedRuleDoesNotReach(t *
 		t.Errorf("FALSE GREEN? keploy test, the call's window an hour from F's second: %s read %v (%q); want never noise, and as with no such recording: %s read %v", got.Kind, got.Read, got.Why, base.Kind, base.Read)
 	}
 }
+
+// dbg-b (T2 round F on keploy main + the fix above, runs/s2): the branch
+// janitor's find (mock-18) reached keploy at 14:58:09.9868 on the app's
+// clock, and the store's consume door told its serve 22 ms later, after the
+// learn step, at :10.0089. The notifications janitor's distinct (mock-23),
+// sent next on the same connection with its own read of :09, had an F window
+// from that consume, [:10.0089, :10.0111], which holds no read of :09, and
+// integrations refused it. Record's half of the window starts at the
+// previous call's request (PreviousCall), so F's starts where the previous
+// call reached keploy (its request's lift), not where the store consumed it.
+func TestALaterCallsWindowStartsWhereTheCallBeforeItReachedKeploy(t *testing.T) {
+	find := &models.Mock{Name: "mock-18", Kind: models.Mongo}
+	tr := NewTracker()
+	fA := tr.Lift()
+	lifted := time.Now()
+	time.Sleep(2 * time.Millisecond) // the learn step, before the consume door
+	tr.ServedMockIn(find, fA)
+	fA.Land()
+	arrived := time.Now() // the distinct reaches keploy
+	// The app's second turns between the find's lift and its consume.
+	turn := time.Date(2026, 10, 31, 14, 58, 10, 0, time.UTC)
+	offset := turn.Sub(lifted.Add(time.Millisecond))
+	tr.SetAppClock(func(r time.Time) (time.Time, bool) { return r.Add(offset), true })
+	s, ok := tr.LiveSpan(arrived)
+	if !ok {
+		t.Fatal("no span for the distinct")
+	}
+	// The distinct sent the second :09, read beside the find's.
+	if !s.From.Before(turn) || s.To.Before(turn) {
+		t.Fatalf("the distinct's span %s .. %s holds no instant of the second :09 its read sent; want it from the find's lift", s.From.UTC().Format("15:04:05.000000"), s.To.UTC().Format("15:04:05.000000"))
+	}
+	if s.From.After(lifted.Add(offset)) {
+		t.Fatalf("the distinct's span starts at %s, after the find reached keploy (%s)", s.From.UTC().Format("15:04:05.000000"), lifted.Add(offset).UTC().Format("15:04:05.000000"))
+	}
+}
+
+// The bound is record's previous call mirrored: the latest instant a call
+// reached keploy among those the store served before this call reached it.
+// A call aloft across this one's arrival and served after it is another
+// flow's (PreviousCall: answered after the call was sent), so its lift does
+// not bound this call, whichever was lifted first; of two served before, the
+// later arrival bounds it, whichever was served last; and a serve told in no
+// request of the application's is bounded where it was made, as before.
+func TestALaterCallsWindowStartsAtTheLatestArrivalServedBeforeIt(t *testing.T) {
+	m := func(n string) *models.Mock { return &models.Mock{Name: n, Kind: models.Mongo} }
+	identity := func(r time.Time) (time.Time, bool) { return r, true }
+
+	t.Run("a call served after this one arrived does not bound it", func(t *testing.T) {
+		tr := NewTracker()
+		tr.SetAppClock(identity)
+		before := time.Now().Add(-time.Second)
+		tr.ServedMockAt(m("mock-10"), before)
+		fS := tr.Lift() // aloft on another connection
+		time.Sleep(time.Millisecond)
+		arrived := time.Now()
+		time.Sleep(time.Millisecond)
+		tr.ServedMockIn(m("mock-11"), fS) // served after the call arrived
+		s, ok := tr.LiveSpan(arrived)
+		if !ok || !s.From.Equal(before) {
+			t.Fatalf("span from %s (ok %v); want from the serve made before the call arrived, %s", s.From, ok, before)
+		}
+	})
+
+	t.Run("of two served before, the later arrival bounds it", func(t *testing.T) {
+		tr := NewTracker()
+		tr.SetAppClock(identity)
+		fX := tr.Lift()
+		xLifted := time.Now()
+		time.Sleep(time.Millisecond)
+		fY := tr.Lift()
+		yLifted := time.Now()
+		time.Sleep(time.Millisecond)
+		tr.ServedMockIn(m("mock-21"), fY)
+		time.Sleep(time.Millisecond)
+		tr.ServedMockIn(m("mock-20"), fX) // served last, lifted first
+		fX.Land()
+		fY.Land()
+		time.Sleep(time.Millisecond)
+		s, ok := tr.LiveSpan(time.Now())
+		if !ok || s.From.After(yLifted) || !s.From.After(xLifted) {
+			t.Fatalf("span from %s (ok %v); want from the later lift, after %s and no later than %s", s.From, ok, xLifted, yLifted)
+		}
+	})
+
+	t.Run("a serve told in no request is bounded where it was made", func(t *testing.T) {
+		tr := NewTracker()
+		tr.SetAppClock(identity)
+		tr.Lift() // a request aloft that the push is not
+		made := time.Now()
+		tr.ServedMockIn(m("mock-30"), NoRequest())
+		time.Sleep(time.Millisecond)
+		s, ok := tr.LiveSpan(time.Now())
+		if !ok || s.From.Before(made) {
+			t.Fatalf("span from %s (ok %v); want from the push's serve, no earlier than %s", s.From, ok, made)
+		}
+	})
+}
