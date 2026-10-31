@@ -685,6 +685,14 @@ type LearnEndSetter interface {
 	SetLearnEnded(ended bool) error
 }
 
+// LearnHolder is implemented by a proxy whose learn step can be held for a
+// while and released, unlike LearnEndSetter's end, which lasts for the set:
+// the agent holds it while a test of record's full round whose recording the
+// round does not learn onto is open (models.OutgoingOptions.LearnTests).
+type LearnHolder interface {
+	SetLearnHeld(held bool) error
+}
+
 // KeptLearningSetter is implemented by a proxy that serves a test set's
 // retry cycles the staged recordings (the pool's, the worker scope's) with
 // what keploy record keeps of the set's first-cycle learning on them

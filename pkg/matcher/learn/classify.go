@@ -1020,6 +1020,9 @@ func classifyGiven(dc *DriftCache, drift []string, live, rec Shape, at time.Time
 	if dc == nil {
 		dc = NewDriftCache()
 	}
+	if dc.held != nil && dc.held.Load() {
+		return heldLearned(drift, live, rec)
+	}
 	given = givenOnce(given)
 	earlier = timedEarlier(earlier, at)
 	raw = timedRaw(raw, at)
@@ -2607,6 +2610,25 @@ type DriftCache struct {
 	// call's window could show a read is refused at learn (noAppClockWhy),
 	// never learned as a read that only a replay refuses.
 	appClock bool
+	// held is the tracker's hold of the learn step (Tracker.SetLearnHeld),
+	// read at each classification: while it is set every changed value is
+	// refused (heldWhy). nil (a cache made otherwise, NewDriftCache): never
+	// held.
+	held *atomic.Bool
+}
+
+// heldWhy is why a changed value is not learned while the learn step is held
+// (Tracker.SetLearnHeld).
+const heldWhy = "keploy record's full round learns nothing while a test that keeps its recording from an earlier record is open (a test this record did not record anew): what this call changed is learned onto no recording, which the record would not keep. If the test fails on it, record that test in this run too"
+
+// heldLearned is every changed leaf of drift refused as the learn step is
+// held (heldWhy).
+func heldLearned(drift []string, live, rec Shape) []Learned {
+	out := make([]Learned, 0, len(drift))
+	for _, p := range drift {
+		out = append(out, Learned{Kind: KindUnaccounted, Recorded: rec.Leaves[p], Live: live.Leaves[p], Why: heldWhy})
+	}
+	return out
 }
 
 // driftState is what one test's DriftCaches keep, shared by each zone it

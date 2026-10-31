@@ -205,6 +205,10 @@ type Tracker struct {
 	// learnEnded says the running test set's learn step has ended
 	// (SetLearnEnded): TrackerFrom then gives no tracker.
 	learnEnded atomic.Bool
+	// learnHeld says the learn step is held (SetLearnHeld): every
+	// DriftCache the tracker makes reads it (DriftCache.held), and while it
+	// is set the classification refuses every changed value.
+	learnHeld atomic.Bool
 }
 
 // NewTracker makes a tracker with no test open.
@@ -405,6 +409,7 @@ func (t *Tracker) AwaitRequest(ctx context.Context) error {
 func (t *Tracker) newDrifts() *DriftCache {
 	dc := NewDriftCache()
 	dc.clientTests, dc.zone, dc.appClock, dc.set = t.clientTests, t.appZone, t.appClock != nil, t.derived
+	dc.held = &t.learnHeld
 	if t.drifts != nil { // none yet as NewTracker makes the first
 		dc.zoneName, dc.zoneNoName = t.drifts.zoneName, t.drifts.zoneNoName
 	}
@@ -1938,9 +1943,9 @@ func WithTracker(ctx context.Context, t *Tracker) context.Context {
 
 // TrackerFrom is the tracker on ctx, nil when there is none, and nil once the
 // test set's learn step has ended (SetLearnEnded): a parser's learn step runs
-// only with a tracker, so one that reads it per request decides no request of
-// a cycle the learn step does not learn in, and the request is served as
-// keploy test serves it.
+// only with a tracker, so one that reads it per request decides no request
+// of a cycle the learn step does not learn in, and the request is served as
+// keploy test serves it. A held learn step (SetLearnHeld) still gives it.
 func TrackerFrom(ctx context.Context) *Tracker {
 	t, _ := ctx.Value(trackerKey{}).(*Tracker)
 	if t.LearnEnded() {
@@ -1968,6 +1973,30 @@ func (t *Tracker) SetLearnEnded(ended bool) {
 // (SetLearnEnded); false on a nil tracker.
 func (t *Tracker) LearnEnded() bool {
 	return t != nil && t.learnEnded.Load()
+}
+
+// SetLearnHeld holds the learn step, or releases it. The agent holds it while
+// a test of record's full round that keeps its recording from an earlier
+// record is open (the proxy's MockManager.SetLearnHeld): what that test's
+// calls change in must be learned onto no recording, its own or the pool's,
+// as the record keeps none of it. Unlike an ended learn step it still runs:
+// every parser's learn step decides the test's requests, serves what is
+// exactly a recording, and states what it served (Served, ServedMockAsRecorded,
+// ServedMockLive), as for any test, so a later test of the round reads what
+// F gave the application there; only the classification refuses every
+// changed value while it is held (DriftCache.held, heldWhy), so a call that
+// changed misses. Releasing it takes the learn step back up; a new session
+// releases it. A no-op on a nil tracker.
+func (t *Tracker) SetLearnHeld(held bool) {
+	if t != nil {
+		t.learnHeld.Store(held)
+	}
+}
+
+// LearnHeld reports whether the learn step is held (SetLearnHeld); false on
+// a nil tracker.
+func (t *Tracker) LearnHeld() bool {
+	return t != nil && t.learnHeld.Load()
 }
 
 // SetAt is the test number the running set began at (NewSet): it moves at

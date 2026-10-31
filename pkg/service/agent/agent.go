@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -742,9 +743,11 @@ func (a *Agent) MockOutgoing(ctx context.Context, opts models.OutgoingOptions) e
 		return err
 	}
 	// Whether the session runs the learn step, which its tests' begins keep
-	// to their recorded order (keepRecordedOrder).
+	// to their recorded order (keepRecordedOrder), and onto which tests'
+	// recordings (learnsOnto).
 	a.provenMu.Lock()
 	a.proven.order.learn = opts.Learn
+	a.proven.order.tests = maps.Clone(opts.LearnTests)
 	a.provenMu.Unlock()
 
 	err := a.Proxy.Mock(ctx, opts)

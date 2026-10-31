@@ -116,3 +116,115 @@ func TestAnOutOfOrderBeginEndsLearningSoALaterRecordedTestsLateCallMisses(t *tes
 		})
 	}
 }
+
+// keploy mock record's full round of a record that keeps test-1's recording
+// from an earlier record (a partial record that did not run it, or test-1
+// failed against real infra): test-2, recorded anew and so later than
+// test-1's kept recording, runs first, and ends with its call still in
+// flight. test-1's begin is in the order the round learns in (only the
+// fresh tests order it), but the agent holds the learn step while test-1 is
+// open (pkg/service/agent holdLearn; Proxy.SetLearnHeld): the round keeps no
+// learning on test-1's recording, so nothing may be paired with it or
+// learned onto it. test-2's late call, exactly its recording mock-own2,
+// misses rather than being paired with test-1's mock-own1 and its item
+// learned onto it (a false green), and so does test-1's own call that
+// differs from its recording; its own call as recorded is answered. The
+// hold serves the recordings as they are (it is no end: no kept-learning
+// overlay), and its release takes the learn step back up: test-3, recorded
+// anew, pairs its call that carries test-4's item with its own recording
+// and learns it. The hold does not end the learn step: test-1's call as
+// recorded is served by it and stated as served as recorded, as in any test,
+// so test-3's learn step reads what F gave the application there. Before,
+// the hold stood every learn step down, test-1's call was served by the
+// replay's matcher with no view stated, and test-3's changed item was
+// refused as a word that may stand in mock-own1 (a false red in every
+// partial record whose later fresh test had a value to learn).
+func TestAKeptTestsHeldLearnStepPairsNothingAndItsReleaseLearnsAgain(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	p := startedDrainProxyLogging(t, 100, zap.NewNop())
+	p.learnTracker = learn.NewTracker()
+	now := time.Now()
+	pool := r3Mock("mock-pool", now.Add(100*time.Millisecond), "POST", "/orders", `{"item":"apple"}`, `{"order":0}`)
+	own1 := r3Mock("mock-own1", now.Add(700*time.Millisecond), "POST", "/orders", `{"item":"pear"}`, `{"order":1}`)
+	own2 := r3Mock("mock-own2", now.Add(1500*time.Millisecond), "POST", "/orders", `{"item":"plum"}`, `{"order":2}`)
+	own3 := r3Mock("mock-own3", now.Add(2500*time.Millisecond), "POST", "/orders", `{"item":"fig"}`, `{"order":3}`)
+	own4 := r3Mock("mock-own4", now.Add(3500*time.Millisecond), "POST", "/orders", `{"item":"kiwi"}`, `{"order":4}`)
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	mm.SeedRecordedWindows([]models.TestWindow{
+		{TestCase: "test-1", Start: now.Add(500 * time.Millisecond), End: own1.Spec.ResTimestampMock},
+		{TestCase: "test-2", Start: now.Add(time.Second), End: own2.Spec.ResTimestampMock},
+		{TestCase: "test-3", Start: now.Add(2 * time.Second), End: own3.Spec.ResTimestampMock},
+		{TestCase: "test-4", Start: now.Add(3 * time.Second), End: own4.Spec.ResTimestampMock},
+	})
+	mm.SetMocksWithWindow([]*models.Mock{pool, own1, own2, own3, own4}, nil, models.BaseTime, now.Add(time.Hour))
+	p.setMockManager(mm)
+	t.Cleanup(func() { p.setMockManager(nil) })
+	mm.SetPoolNames([]string{"mock-pool"})
+	mm.ServeExactPool(models.PoolKeyNone, []string{"mock-pool"})
+	end := func() {
+		mm.ServeExactPool(models.PoolKeyNone, []string{"mock-pool"})
+		if _, err := p.GetMockErrors(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mm.ServeExactTest("test-2", []*models.Mock{roundMock(mm, "mock-own2")})
+	p.ContinueTestErrorCapture()
+	end()
+
+	if err := p.SetLearnHeld(true); err != nil {
+		t.Fatal(err)
+	}
+	if !mm.LearnHeld() || !p.learnTracker.LearnHeld() || mm.LearnEnded() || p.learnTracker.LearnEnded() {
+		t.Fatal("holding the learn step did not hold it, or ended it")
+	}
+	if mm.exact.learnEnded.Load() || mm.exact.kept.cur.Load() != nil {
+		t.Fatal("holding the learn step ended it: the set's recordings would be served through the kept-learning overlay")
+	}
+	mm.ServeExactTest("test-1", []*models.Mock{roundMock(mm, "mock-own1")})
+	p.ContinueTestErrorCapture()
+	code, got, learned, misses := elsewhereSent(t, p, mm, `{"item":"plum"}`)
+	if _, ok := learned["mock-own1"]; ok || got == `{"order":1}` {
+		t.Fatalf("FALSE GREEN: test-2's late call (exactly mock-own2) was paired with kept test-1's mock-own1: answered %d %s, learned %v", code, got, learned)
+	}
+	if code == http.StatusOK || len(misses) == 0 {
+		t.Fatalf("answered %d %s with misses %v; want a miss", code, got, misses)
+	}
+	code, got, learned, misses = elsewhereSent(t, p, mm, `{"item":"quince"}`)
+	if code == http.StatusOK || len(learned) > 0 || len(misses) == 0 {
+		t.Fatalf("FALSE GREEN: kept test-1's call that differs from its recording got %d %s, learned %v (misses %v); want a miss, nothing learned", code, got, learned, misses)
+	}
+	if code, got := r3Send(t, p, mm, models.OutgoingOptions{Learn: true, LearnPool: true}, roundPost(`{"item":"pear"}`)); code != http.StatusOK || got != `{"order":1}` {
+		t.Fatalf("kept test-1's own call as recorded got %d %s", code, got)
+	}
+	end()
+
+	if err := p.SetLearnHeld(false); err != nil {
+		t.Fatal(err)
+	}
+	if mm.LearnHeld() || p.learnTracker.LearnHeld() {
+		t.Fatal("the hold's release did not take the learn step back up")
+	}
+	// test-3's call carries the item test-4 was recorded with (a value that
+	// drifted onto the next test's): paired with test-3's own recording,
+	// and its item learned onto it, as in recorded order.
+	mm.ServeExactTest("test-3", []*models.Mock{roundMock(mm, "mock-own3")})
+	p.ContinueTestErrorCapture()
+	code, got, learned, _ = elsewhereSent(t, p, mm, `{"item":"kiwi"}`)
+	if _, ok := learned["mock-own3"]; code != http.StatusOK || got != `{"order":3}` || !ok {
+		t.Fatalf("fresh test-3's call that differs from its recording got %d %s, learned %v; want it answered from mock-own3 with its item learned", code, got, learned)
+	}
+}
+
+// A proxy with no mock manager has no learn step to hold: a hold is
+// refused, a release is not (it releases the tracker's), and a session's
+// start releases a hold (Proxy.Mock) as it takes an ended learn step back up.
+func TestAProxyHoldsItsLearnStepOnlyWithAMockManager(t *testing.T) {
+	p := &Proxy{learnTracker: learn.NewTracker()}
+	if err := p.SetLearnHeld(true); err == nil {
+		t.Fatal("a proxy with no mock manager held its learn step")
+	}
+	p.learnTracker.SetLearnHeld(true)
+	if err := p.SetLearnHeld(false); err != nil || p.learnTracker.LearnHeld() {
+		t.Fatalf("a release with no mock manager: %v, tracker still held %v", err, p.learnTracker.LearnHeld())
+	}
+}

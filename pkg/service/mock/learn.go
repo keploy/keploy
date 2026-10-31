@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"sort"
 	"strconv"
 	"strings"
@@ -27,6 +28,16 @@ func (m *mockService) learning() bool {
 // a full record, which replaces the pool (config.Test.LearnPool).
 func (m *mockService) learningPool() bool {
 	return m.learning() && m.config.Test.LearnPool
+}
+
+// learningTests are, for the agent, the tests whose recordings the learn step
+// learns onto (config.Test.LearnTests, learnsOnto): nil when it learns onto
+// every test's, or does not run.
+func (m *mockService) learningTests() map[string]bool {
+	if !m.learning() || m.config.Test.LearnTests == nil {
+		return nil
+	}
+	return maps.Clone(m.config.Test.LearnTests)
 }
 
 // keepLearned writes what record's full round learned onto the set's mocks
