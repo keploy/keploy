@@ -3659,9 +3659,11 @@ func TestInServeOrderNumbersTheLeafedPayloadsByTheServedMocks(t *testing.T) {
 // the call's window (the receive served before it, its arrival, on the app's
 // clock) it is a clock read, learned as noise, whether the boot took 2 s or
 // 30 s longer; read by the lead alone (no app clock, or a test's own call,
-// which is read so: F sets each test's clock), nothing shows it is one, and
-// the minute and second that changed are words of the receive's Date header,
-// a value that may have flowed from the receive: refused, naming it.
+// which is read so: F sets each test's clock; its window is read by the
+// offset rule alone, learn.Window.OffsetsOnly, and a value it holds shows
+// no offset), nothing shows it is one, and the minute and second that
+// changed are words of the receive's Date header, a value that may have
+// flowed from the receive: refused, naming it.
 func TestLearnMatchAStartUpClockReadIsReadInItsCallsWindow(t *testing.T) {
 	iso := func(t time.Time) string { return t.Format("2006-01-02T15:04:05.000Z07:00") }
 	recRead := learnAt.Add(3 * time.Millisecond)
@@ -3700,9 +3702,8 @@ func TestLearnMatchAStartUpClockReadIsReadInItsCallsWindow(t *testing.T) {
 					tr.Begin()
 				}
 				offset := learn.FullRoundLead + tc.boot - 40*time.Second
-				read := 0
 				if tc.clock {
-					tr.SetAppClock(func(real time.Time) (time.Time, bool) { read++; return real.Add(offset), true })
+					tr.SetAppClock(func(real time.Time) (time.Time, bool) { return real.Add(offset), true })
 				}
 				served := learnAt.Add(40 * time.Second) // when F's replay served the receive
 				tr.ServedMockAt(receive, served)
@@ -3711,9 +3712,6 @@ func TestLearnMatchAStartUpClockReadIsReadInItsCallsWindow(t *testing.T) {
 				got, miss, err := h.learnMatch(learn.WithTracker(context.Background(), tr), in, db, n, opts)
 				if err != nil {
 					t.Fatal(err)
-				}
-				if tc.own && read != 0 {
-					t.Fatalf("a test's own call read its window (the app's clock %d times)", read)
 				}
 				if !tc.noise {
 					if got != nil || miss == nil || !strings.Contains(miss.res.Why, "earlier") || !strings.Contains(miss.res.Why, "mock-0") {
@@ -5624,6 +5622,130 @@ func TestLearnMatchAMintedTokensMovingClaimsAreEachLearnedAtTheirOwnPlace(t *tes
 			}
 			if len(names) != 1 || names[0] != c.differ || c.differ == exp && !strings.HasPrefix(why, exp+" was learned as ") {
 				t.Fatalf("differs %v (%q); want it refused naming %s alone", names, why, c.differ)
+			}
+		})
+	}
+}
+
+// In keploy test a test's own call's window is read by the offset rule
+// (learn.Window.OffsetsOnly): a value the application builds on its clock
+// by a constant offset is learned as that offset and checked at every
+// replay in its call's span. An exp, the mint's second plus 900, in the
+// body or as a claim of the call's token, and a cutoff 2 minutes back are
+// each answered when made in the replay's call, and refused a minute off or
+// as recorded. A token's role that changed stays refused. A plain read is
+// learned as before. Before, each was learned as a plain read, which no
+// replay's span holds: every replay refused it.
+func TestLearnMatchAnOwnCallsReadOfTheClockPlusAnOffsetInKeployTest(t *testing.T) {
+	const hs = `{"alg":"HS256","typ":"JWT"}`
+	const claim = "header.authorization{jwt}.exp"
+	for _, c := range []struct {
+		name, place string
+		off         int64
+		token       bool
+	}{
+		{"an exp in the body", "body.exp", 900, false},
+		{"a cutoff in the body", "body.exp", -120, false},
+		{"a plain read in the body", "body.exp", 0, false},
+		{"a token's exp claim", claim, 900, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			body := func(minted time.Time) string {
+				if c.token {
+					return `{}`
+				}
+				return `{"exp":` + strconv.FormatInt(minted.Unix()+c.off, 10) + `}`
+			}
+			header := func(role string, minted time.Time, jti string) map[string]string {
+				if !c.token {
+					return nil
+				}
+				claims := `{"sub":"u-1","role":"` + role + `","exp":` + strconv.FormatInt(minted.Unix()+c.off, 10) + `,"jti":"` + jti + `"}`
+				return map[string]string{"Authorization": bearerJWT(hs, claims, "U0lHTg")}
+			}
+			// The recording: the lookup at +1.3 s, the mint's read at +1.4 s,
+			// its call at +1.45 s; record's full round the same, moved by
+			// FullRoundLead.
+			recMint := learnAt.Add(1400 * time.Millisecond)
+			lookup := learnRecorded("mock-0", 1300*time.Millisecond, "GET", "/v1/session", "", nil, `{"user":"u-1"}`)
+			mint := learnRecorded("mock-1", 1450*time.Millisecond, "POST", "/v1/mint", body(recMint), header("agent", recMint, "6f1c2a9e-4b7d-4e21-9a3f-1d2c3b4a5e6f"), `{"ok":true}`)
+			at := func(began time.Time, learnEnded bool) context.Context {
+				tr := clockedTracker()
+				tr.BeginAt(began)
+				tr.ServedMockAt(lookup, began.Add(300*time.Millisecond))
+				tr.ServedMockAsRecorded(lookup)
+				tr.SetLearnEnded(learnEnded)
+				return learn.WithTracker(context.Background(), tr)
+			}
+			h, n, opts := learnOn(t)
+			fBegin := learnAt.Add(time.Second + learn.FullRoundLead)
+			fMint := recMint.Add(learn.FullRoundLead)
+			in := live("POST", "/v1/mint", body(fMint), header("agent", fMint, "0b9d8c7a-1e2f-4a3b-8c5d-6e7f8091a2b3"))
+			in.arrived = fBegin.Add(450 * time.Millisecond)
+			db := &learnDb{perTest: []*models.Mock{lookup, mint}}
+			served, miss, err := h.learnMatch(at(fBegin, false), in, db, n, opts)
+			if err != nil || served == nil || miss != nil || len(db.consumed) != 1 {
+				why := ""
+				if miss != nil {
+					why = miss.res.Why
+				}
+				t.Fatalf("served %v miss %q err %v", served != nil, why, err)
+			}
+			spec := db.consumed[0].Spec
+			o, ok := spec.Clocks[c.place]
+			switch {
+			case !ok || len(spec.Clocks) != 1:
+				t.Fatalf("clocks %+v: want %s alone", spec.Clocks, c.place)
+			case c.off == 0 && !o.Plain():
+				t.Fatalf("%s learned as %s: want the plain read, as before", c.place, o)
+			case c.off != 0 && (o.Min > time.Duration(c.off)*time.Second || o.Max < time.Duration(c.off)*time.Second || o.Max-o.Min > 2*time.Second):
+				t.Fatalf("%s learned as %s: want the clock plus %d s", c.place, o, c.off)
+			}
+			if c.token {
+				if _, jti := spec.ReqBodyNoise["header.authorization{jwt}.jti"]; !jti || len(spec.ReqBodyNoise) != 1 {
+					t.Fatalf("noise %v: want the jti claim alone", spec.ReqBodyNoise)
+				}
+			}
+
+			// The replay 10 minutes on, the mint 400 ms into its test.
+			replay := fBegin.Add(10 * time.Minute)
+			minted := replay.Add(400 * time.Millisecond)
+			legs := []struct {
+				name   string
+				role   string
+				mint   time.Time
+				ok     bool
+				differ string
+			}{
+				{"made in its call", "agent", minted, true, ""},
+				{"a minute on", "agent", minted.Add(time.Minute), false, c.place},
+				{"as recorded", "agent", recMint, false, c.place},
+			}
+			if c.token {
+				legs = append(legs, struct {
+					name   string
+					role   string
+					mint   time.Time
+					ok     bool
+					differ string
+				}{"the role changed", "admin", minted, false, "header.authorization{jwt}.role"})
+			}
+			for _, l := range legs {
+				ctx := at(replay, true)
+				call := live("POST", "/v1/mint", body(l.mint), header(l.role, l.mint, "9a8b7c6d-5e4f-4a3b-9c2d-1e0f9a8b7c6d"))
+				call.arrived = replay.Add(450 * time.Millisecond)
+				mocks := learnedOnto([]*models.Mock{lookup, mint}, db.consumed)
+				ok, _, _, err := newHTTP().match(ctx, call, &varDb{perTest: mocks}, nil, nil, nil, true, false, false, true, true)
+				if err != nil || ok != l.ok {
+					t.Fatalf("%s: answered %v err %v, want %v", l.name, ok, err, l.ok)
+				}
+				var names []string
+				for _, f := range strictDiff(ctx, call, liveDestination(ctx, call), mocks[1], newHTTP().newStrictNoise(nil, nil, nil)) {
+					names = append(names, f.shape)
+				}
+				if l.differ == "" && len(names) != 0 || l.differ != "" && (len(names) != 1 || names[0] != l.differ) {
+					t.Fatalf("%s: differs %v; want %q alone", l.name, names, l.differ)
+				}
 			}
 		})
 	}

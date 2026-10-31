@@ -242,6 +242,8 @@ type Window struct {
 	// offsets: the caller's replay compares a read of the clock plus a
 	// constant offset (ComparesOffsets).
 	offsets bool
+	// offsetsOnly: w is read by the offset rule alone (OffsetsOnly).
+	offsetsOnly bool
 	// begun: w is a call's window read from each run's test begin
 	// (sinceBegin), the reading in which the word rule lets go every word
 	// of a text's runs (valueDrift.clockChanged), since only sinceWord
@@ -263,6 +265,45 @@ func (w *Window) ComparesOffsets() *Window {
 	c := *w
 	c.offsets = true
 	return &c
+}
+
+// OffsetsOnly is w, comparing offsets (ComparesOffsets), for a call whose
+// plain reads of the clock the lead shows (a test's own call in keploy
+// test): the offset rule alone reads it, to learn a read of the clock plus
+// a constant offset (a token's exp, the mint's second plus 900; a cutoff,
+// createdAt >= now - 2m), which no plain read holds: the lead shows such a
+// value moved as a read does, yet a replay checks a plain read in its
+// call's span, where the offset puts it never. Every other rule reads the
+// call as one with no window (classifyRead), so a plain read is learned by
+// the lead alone, as before, and a value its window holds shows no offset.
+// nil for a nil w.
+func (w *Window) OffsetsOnly() *Window {
+	c := w.ComparesOffsets()
+	if c != nil {
+		c.offsetsOnly = true
+	}
+	return c
+}
+
+// splitOffsets is w as classifyRead reads it: plain, the window every rule
+// reads, and offsets, the window the offset rule reads where plain is nil
+// (offsetsFor). An OffsetsOnly window is offsets alone; any other is plain
+// alone, the offset rule reading it as every rule does.
+func (w *Window) splitOffsets() (plain, offsets *Window) {
+	if w != nil && w.offsetsOnly {
+		return nil, w
+	}
+	return w, nil
+}
+
+// offsetsFor is the window the offset rule reads for a leaf read in w: w
+// itself, or, where w is nil, offsets (splitOffsets: an OffsetsOnly
+// window's, nil for any other call).
+func offsetsFor(w, offsets *Window) *Window {
+	if w != nil {
+		return w
+	}
+	return offsets
 }
 
 // Span is one run's part of a Window: From, when its previous data-plane

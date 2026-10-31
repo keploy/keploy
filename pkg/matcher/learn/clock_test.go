@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math/rand"
 	"net/http"
+	"reflect"
 	"regexp/syntax"
 	"strconv"
 	"strings"
@@ -654,5 +655,56 @@ func TestAClockWordWindowIsCutWhereNoInstantRunsAcross(t *testing.T) {
 	}
 	if parted < 500 {
 		t.Fatalf("%d of 3000 text pairs were read in part; the row reads too few", parted)
+	}
+}
+
+// A test's own call in keploy test has its window read by the offset rule
+// alone (Window.OffsetsOnly): a value at the clock plus a constant offset
+// (an expiry 30 minutes on, a cutoff 2 minutes back), typed or as an epoch's
+// milliseconds, is learned as that offset, as a window that compares
+// offsets learns it, where with no window the lead shows it no read made in
+// its call's window. Every other value is learned exactly as with no window,
+// by the lead alone: a plain read in the window, one made 2 s before it
+// (an offset finer than a second), and a constant that changed. A nil
+// window stays nil.
+func TestAnOffsetsOnlyWindowIsReadByTheOffsetRuleAlone(t *testing.T) {
+	const p = "body.expiresAt"
+	c := newClockOffsetCall()
+	ms := time.Millisecond
+	only := c.w.OffsetsOnly()
+	if (*Window)(nil).OffsetsOnly() != nil {
+		t.Fatal("a nil window's OffsetsOnly is not nil")
+	}
+	typedMs := func(p string, t time.Time) Leaf { return InstantLeaf(p, p, t.Truncate(ms), ms) }
+	in := func(leaf func(string, time.Time) Leaf, rec, live time.Time, w *Window) Learned {
+		return ClassifyIn(clockedDrifts(), []string{p}, Shape{Leaves: map[string]Leaf{p: leaf(p, live)}}, Shape{Leaves: map[string]Leaf{p: leaf(p, rec)}}, c.call, nil, nil, nil, w)[0]
+	}
+	for _, form := range []struct {
+		name string
+		leaf func(string, time.Time) Leaf
+	}{{"typed", typedMs}, {"epoch millis text", millisText}} {
+		for _, off := range []time.Duration{30 * time.Minute, -2 * time.Minute} {
+			rec, live := c.read.Add(off), c.fread.Add(off)
+			got, want := in(form.leaf, rec, live, only), in(form.leaf, rec, live, c.w.ComparesOffsets())
+			if got.Kind != KindClockOffset || got.Offset == nil || !reflect.DeepEqual(got, want) {
+				t.Errorf("%s at clock %+v: %s (%s); want the clock offset a comparing window learns: %s (%s)", form.name, off, got.Kind, got.Why, want.Kind, want.Why)
+			}
+			if none := in(form.leaf, rec, live, nil); none.Kind == KindClockOffset {
+				t.Errorf("%s at clock %+v: with no window learned %s (%s); the offset needs the window", form.name, off, none.Kind, none.Why)
+			}
+		}
+		for _, v := range []struct {
+			name      string
+			rec, live time.Time
+		}{
+			{"a plain read in the window", c.read, c.fread},
+			{"a read 2 s before the window", c.call.Add(-2 * time.Second), c.fcall.Add(-2*time.Second - 5*ms)},
+			{"a constant that changed", time.Date(2025, 1, 1, 0, 0, 0, 123e6, time.UTC), time.Date(2025, 3, 7, 5, 6, 7, 456e6, time.UTC)},
+		} {
+			got, want := in(form.leaf, v.rec, v.live, only), in(form.leaf, v.rec, v.live, nil)
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("%s, %s: %s (%s) %+v; want it learned as with no window: %s (%s) %+v", form.name, v.name, got.Kind, got.Why, got.Read, want.Kind, want.Why, want.Read)
+			}
+		}
 	}
 }

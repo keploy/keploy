@@ -473,11 +473,13 @@ func instantUnread(r, l Leaf) string {
 // classifyInstant is ClassifyIn's reading of a drifted leaf its protocol
 // types as one instant (r as recorded, l as F saw it: Instant leaves), in its
 // call's window w, as the header of this file says: the instant whole, never
-// its words. unread is why a place earlier than the call could not be read
+// its words. offsets is the window the offset rule reads (offsetsFor: w, or
+// a test's own call's OffsetsOnly window in keploy test, where w is nil).
+// unread is why a place earlier than the call could not be read
 // (requestUnread: the test case's own request, or the run's places past
 // their bound; "" when each was): then the echo could not read it, and the
 // instant is never noise or an echo.
-func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier, raw []Raw, resp []Leaf, w *Window, unread string, places func() *offsetPlaces, skip skipRule) Learned {
+func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier, raw []Raw, resp []Leaf, w, offsets *Window, unread string, places func() *offsetPlaces, skip skipRule) Learned {
 	ln := Learned{Kind: KindNoise, Recorded: r, Live: l}
 	rt, okR := readTyped(r)
 	lt, okL := readTyped(l)
@@ -560,10 +562,10 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 	// window shows no offset coarser than a second (clockOffset refuses
 	// it), as a read the application made earlier stands from the window by
 	// how long ago it was made.
-	off, cutWhy, offset := offsetReading(fieldName(ln.Recorded), rt, lt, w, dc.zone)
+	off, cutWhy, offset := offsetReading(fieldName(ln.Recorded), rt, lt, offsets, dc.zone)
 	var tried Learned
 	if offset {
-		if tried = dc.clockOffset(ln, off, max(rt.res, lt.res), w, unread, rec, resp); tried.Kind == KindClockOffset {
+		if tried = dc.clockOffset(ln, off, max(rt.res, lt.res), offsets, unread, rec, resp); tried.Kind == KindClockOffset {
 			return tried
 		}
 	}

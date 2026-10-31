@@ -1502,6 +1502,10 @@ const (
 // classifyRead is classifyGiven of raw as handed: each Raw read as the one
 // place it is.
 func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time, earlier []Earlier, raw []Raw, resp []Leaf, w *Window, given GivenEarlier, follow bool) []Learned {
+	// An OffsetsOnly window (a test's own call in keploy test) is read by
+	// the offset rule alone (offsetsFor); every other rule reads the call
+	// as one with no window.
+	w, offsets := w.splitOffsets()
 	served := append([]Earlier(nil), earlier...)
 	sort.SliceStable(served, func(i, j int) bool { return served[i].At.Before(served[j].At) })
 	if len(drift) > 0 {
@@ -1545,7 +1549,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 			return Learned{Kind: KindUnaccounted, Recorded: r, Live: l, Why: unreadRaw}
 		}
 		if r.Type == Instant || l.Type == Instant {
-			return dc.classifyInstant(r, l, at, served, raw, resp, w, unreadReq, places, skip)
+			return dc.classifyInstant(r, l, at, served, raw, resp, w, offsetsFor(w, offsets), unreadReq, places, skip)
 		}
 		ln := Learned{Kind: KindNoise, Recorded: r, Live: l}
 		var fol *follows
@@ -1721,7 +1725,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// every replay in its call's span; only otherwise the plain read,
 		// as before. A value its window holds shows no offset.
 		if v := dc.ofIn(r.Value, l.Value, w, at); ln.Kind == KindNoise && v.clock.whole {
-			if off, _, ok := dc.textClockOffset(r, l, v, w, resp); ok {
+			if off, _, ok := dc.textClockOffset(r, l, v, offsetsFor(w, offsets), resp); ok {
 				return off
 			}
 			ln.Read = textClockReadIn(r.Value, l.Value, dc.zone)
@@ -1758,6 +1762,16 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// A time of day whole in both runs, which no window holds (it names
 		// no day), is a read modulo a day all the same, never noise: every
 		// replay checks it in its call's span (textTodRead).
+		//
+		// An instant that names its moment is tried as a read of the clock
+		// plus a constant offset first (textClockOffset), in the window the
+		// offset rule reads (offsetsFor: a test's own call's in keploy test
+		// too, Window.OffsetsOnly): a token's exp, the mint's second plus
+		// 900, is later than its call, so the lead shows no read of it, and
+		// a plain read is one no replay's span holds. Where the offset rule
+		// learns one, that offset, checked at every replay in its call's
+		// span; only otherwise the plain read or the refusal, as before. A
+		// value its window holds shows no offset.
 		if ln.Kind == KindNoise && ln.Read == nil {
 			if read := dc.textTodRead(r.Value, l.Value, w, at); read != nil {
 				if w == nil && !dc.appClock {
@@ -1766,6 +1780,9 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 					ln.Read = read
 				}
 			} else if read := textClockReadIn(r.Value, l.Value, dc.zone); read != nil {
+				if off, _, ok := dc.textClockOffset(r, l, dc.ofIn(r.Value, l.Value, w, at), offsetsFor(w, offsets), resp); ok {
+					return off
+				}
 				switch {
 				case w == nil && !dc.appClock:
 					ln.Kind, ln.Why = KindUnaccounted, noAppClockWhy
