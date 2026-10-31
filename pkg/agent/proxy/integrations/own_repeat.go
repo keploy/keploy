@@ -121,13 +121,10 @@ func OwnRepeatRead(db MockMemDb, call CallRound, kind models.Kind, repeats func(
 // ShowsBackgroundIn reports whether the view call's first read found showed a
 // test a background that is no test's own: the set's under the background
 // rules (S12BackgroundIn), or, under any rules, the worker scope the run
-// reached (SequenceView.Worker, set only in a test's view that shows one).
-// Either answers a call the open test makes after its own recordings, and
-// neither may answer one call more than the test recorded (OwnRepeatRead).
+// reached (CallRound.ShowsWorker: SequenceView.Worker, set only in a test's
+// view that shows one, or a snapshot's read of such a view). Either answers
+// a call the open test makes after its own recordings, and neither may
+// answer one call more than the test recorded (OwnRepeatRead).
 func ShowsBackgroundIn(call CallRound, db MockMemDb) bool {
-	if S12BackgroundIn(call, db) {
-		return true
-	}
-	sv, ok := call.Sequence()
-	return ok && sv.Worker != nil
+	return S12BackgroundIn(call, db) || call.ShowsWorker()
 }

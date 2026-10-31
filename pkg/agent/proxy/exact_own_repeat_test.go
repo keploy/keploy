@@ -199,3 +199,53 @@ func TestTheWorkerScopeNeverAnswersARequestOneMoreThanTheTestRecorded(t *testing
 		t.Fatalf("the GET /x between tests was answered %q (miss %+v); want the worker scope's, unspent", got, miss)
 	}
 }
+
+// A call decided on a snapshot's read of the round (RoundSnapshot.CallRound:
+// a call that waited for the store to open its test, and caught up) is held
+// to the worker scope's rule as a call MarkCallRound marked is: in a test's
+// view that shows a worker scope, under today's rules, both say the view
+// shows the test a background (integrations.ShowsBackgroundIn), so neither
+// lets the worker scope answer a call one more than the test recorded. A
+// test's view with no worker scope, and the view between tests, show none.
+// Before, the snapshot's CallRound kept no sequence view and said none, and
+// a caught-up Mongo find one more than its test recorded was answered by the
+// worker scope's copy of it.
+func TestASnapshotsCallRoundShowsTheWorkerScopeAsTheMarkDoes(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	worker := workerProbe("mock-worker-x", time.Second, "/x", "worker")
+	own := workerProbe("mock-own-x", 4*time.Second, "/x", "own")
+	for _, tc := range []struct {
+		what    string
+		workers []string
+		test    bool
+		want    bool
+	}{
+		{"a test's view with a worker scope", []string{worker.Name}, true, true},
+		{"a test's view with no worker scope", nil, true, false},
+		{"the view between tests", []string{worker.Name}, false, false},
+	} {
+		t.Run(tc.what, func(t *testing.T) {
+			mm := stagedManager(t, nil, []*models.Mock{worker, own})
+			mm.SeedRecordedWindows([]models.TestWindow{{TestCase: "test-a", Start: exactT0.Add(3 * time.Second), End: exactT0.Add(5 * time.Second)}})
+			if tc.workers != nil {
+				mm.ServeExactWorker(tc.workers)
+			}
+			mm.ServeExactPool(models.PoolKeyNone, nil)
+			if tc.test {
+				mm.ServeExactTest("test-a", []*models.Mock{roundMock(mm, own.Name)})
+			}
+			if !mm.ExactServing() || integrations.S12Background(mm) {
+				t.Fatal("precondition: the set is not served exactly, by today's rules")
+			}
+			snap, ok := mm.RoundSnapshot(integrations.RoundQuery{Kind: models.HTTP})
+			if !ok {
+				t.Fatal("precondition: the store reads no round")
+			}
+			marked := integrations.ShowsBackgroundIn(integrations.MarkCallRound(mm), mm)
+			snapped := integrations.ShowsBackgroundIn(snap.CallRound(), mm)
+			if marked != tc.want || snapped != tc.want {
+				t.Fatalf("the view shows a background: marked %v, from the snapshot %v; want %v for both", marked, snapped, tc.want)
+			}
+		})
+	}
+}
