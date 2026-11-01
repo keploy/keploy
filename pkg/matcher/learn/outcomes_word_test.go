@@ -999,3 +999,48 @@ func TestOutcomeAnIdInsideAnEncodedSecretIsNotPrinted(t *testing.T) {
 		t.Fatalf("the line prints a secret's value: %s", d.Line)
 	}
 }
+
+// oCarried is an earlier call of the test that sent r at field, round F
+// sending f there, its request recorded before the call and answered after
+// answered, served at round F's serve first.
+func oCarried(mock, field, r, f string, before, answered time.Duration, first int) Earlier {
+	m := &models.Mock{Name: mock, Spec: models.MockSpec{ReqTimestampMock: oAt.Add(-before), ResTimestampMock: oAt.Add(-before + answered)}}
+	return Earlier{Mock: mock, At: oAt.Add(-before), Own: true, Payload: RawOf(m, true).ServedAs(first),
+		Seen: []Seen{{Side: Request, Leaf: oText(field, r), Live: f, Place: field}}}
+}
+
+// Serve order tells which candidate the application took a word from only
+// where the candidates disagree. Where every candidate holds the recorded
+// word in the recording and round F's word in round F, each gives the same
+// pair: an id the application sent on two calls that were in flight
+// together, or that round F served in another order, is bound at the
+// earliest, as main binds it, and replay checks it there. Where a candidate
+// disagrees (it kept the recorded word), the order still decides, and the
+// word stays refused.
+func TestOutcomeAWordEveryCandidateShowsIsBoundWhateverTheirOrder(t *testing.T) {
+	const r, f = "78b0ada8", "46a13c03"
+	first := oCarried("mock-1", "body.docs.0.appId", r, f, 2*time.Second, time.Second, 1)
+	second := oCarried("mock-2", "body.filter.appId", r, f, 1500*time.Millisecond, 100*time.Millisecond, 2)
+	swapped := oCarried("mock-2", "body.filter.appId", r, f, 1500*time.Millisecond, 100*time.Millisecond, 1)
+	answeredFirst := oCarried("mock-1", "body.docs.0.appId", r, f, 2*time.Second, 100*time.Millisecond, 2)
+	again := first
+	again.Payload = first.Payload.ServedIn(1, 3)
+	for _, tc := range []struct {
+		name    string
+		earlier []Earlier
+	}{
+		{"their requests were in flight together", []Earlier{first, second}},
+		{"round F served them in another order", []Earlier{answeredFirst, swapped}},
+		{"round F served one of them twice", []Earlier{again, second}},
+	} {
+		d := oWord(t, Decide(oInput("body.cmd.filter.appId", "id "+r, "id "+f, tc.earlier, nil)), r, f)
+		if d.Outcome != OutcomeValue || d.From.Mock != tc.earlier[0].Mock {
+			t.Errorf("%s: %s; want a Value bound at the earliest place", tc.name, oDescribe([]Decision{d}))
+		}
+	}
+	// One candidate kept the recorded word: it is no copy of the pair, so
+	// which of them the application had last still matters.
+	kept := oCarried("mock-3", "body.note", r, r, 1800*time.Millisecond, 100*time.Millisecond, 3)
+	d := oWord(t, Decide(oInput("body.cmd.filter.appId", "id "+r, "id "+f, []Earlier{first, second, kept}, nil)), r, f)
+	oRefused(t, "a candidate that kept the recorded word, in flight with the others", d, RefusalUnknown, "in flight together")
+}
