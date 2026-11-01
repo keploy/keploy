@@ -1176,7 +1176,8 @@ type LearnElsewhere interface {
 	// test's verdict reads it. One pairing per recording per round: false
 	// when a call of the round taught m already, and a parser then reads m
 	// as spent (a tie moves to the next recording). False too when the
-	// session does not learn, or m is no candidate.
+	// session does not learn, or m is no candidate and no idle answer of
+	// the set's background (models.IsIdleAnswer) its calls have not consumed.
 	LearnElsewhere(m *models.Mock, clocks map[string]models.ClockOffset) bool
 }
 
