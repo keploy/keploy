@@ -481,6 +481,16 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 		}
 	}
 	if len(answers) > 0 {
+		// An answer recorded after the call that round F gave the
+		// application before it, holding F's moment, is a second source:
+		// the bind would be a guess between the two.
+		for _, h := range hs {
+			if p := h.p; p.side == Response && !p.given && p.fGave && p.state == stateNotBefore && h.hl {
+				return dc.refuse(path, at, n, r, l, RefusalUnknown,
+					"round F's moment stands in "+p.name+", which round F gave before the call but which was recorded after it, beside "+answers[0].name+": two sources", []string{p.name, answers[0].name},
+					Edit{Kind: EditReRecord}, dc.wordNoise(path, n))
+			}
+		}
 		return dc.bound(path, at, n, r, l, answers, "an answer given before the call holds it: the dependency's value")
 	}
 
