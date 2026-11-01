@@ -114,7 +114,7 @@ type decider struct {
 	opDone bool
 	// encoded is the leaf's inDecodedForm, read once and only where a word
 	// of it would be learned fresh.
-	encoded func() (why, place string)
+	encoded func() (string, *evPlace)
 }
 
 // decideWords decides every changed word of in, and the field each
@@ -232,7 +232,7 @@ func (dc *decider) leafText(path string, at variables.Address, rec, live string)
 	var out []Decision
 	between := textReading{Rec: rec, Live: live}
 	rds := readLeaf(dc.in.Drifts, at, rec, live)
-	dc.encoded = sync.OnceValues(func() (string, string) { return dc.inDecodedForm(rds) })
+	dc.encoded = sync.OnceValues(func() (string, *evPlace) { return dc.inDecodedForm(rds) })
 	for _, rd := range rds {
 		if len(between.Separators) == 0 {
 			between = rd
@@ -266,6 +266,9 @@ func betweenWords(rd textReading) string {
 // text decides the changed words of rd, one text the leaf at bare opens;
 // whole reports a refusal of the field whole, which ends the leaf.
 func (dc *decider) text(path string, bare variables.Address, rec, live string, rd textReading) ([]Decision, bool) {
+	if d, ok := dc.oneToken(path, bare, rec, live, rd); ok {
+		return []Decision{d}, true
+	}
 	if rd.ChangedShape {
 		why := "a word was added or dropped"
 		if slices.ContainsFunc(rd.Separators, func(sc sepChange) bool { return len(sc.Tokens) == 0 }) {
@@ -290,6 +293,57 @@ func (dc *decider) text(path string, bare variables.Address, rec, live string, r
 		}
 	}
 	return out, false
+}
+
+// tokenBits is the fewest bits (wordBits) the changed part of a URL-safe
+// base64 token carries in each run for keploy to read it as one random
+// value, about eleven characters: a short id whose separator changed
+// ("order-17_x" to "order-42-x") is no such token.
+const tokenBits = 64
+
+// oneToken decides a field that is one URL-safe base64 token in each run
+// and whose '-' and '_' moved. They are letters of that alphabet there, not
+// separators, so the runs' words do not pair and replay could never write
+// them: the token is one value, read as a word whole. A word of 32 bits or
+// more that an earlier place holds, where no place shows the whole token,
+// may be carried inside it, so it is left to the word rules. ok is false
+// where the field is no such token.
+func (dc *decider) oneToken(path string, bare variables.Address, rec, live string, rd textReading) (Decision, bool) {
+	paired := !rd.ChangedShape && len(rd.Separators) == 0 && !slices.ContainsFunc(rd.Words, func(w readWord) bool { return w.RecIdx < 0 || w.LiveIdx < 0 })
+	if paired || len(rd.Instants) > 0 || len(bare.Steps) > 0 || !randomToken(rec, live) {
+		return Decision{}, false
+	}
+	whole := readWord{At: bare, Rec: rec, Live: live, Tokens: []wholeToken{{Kind: tokenB64, Rec: rec, Live: live}}}
+	shown := slices.ContainsFunc(dc.ps, func(p evPlace) bool { return tokenShown(p, whole) })
+	for _, w := range rd.Words {
+		for _, p := range dc.ps {
+			if !shown && (wordBits(w.Rec) >= chanceBits && evHolds(p.t.rec, w.Rec) || wordBits(w.Live) >= chanceBits && evHolds(p.t.live, w.Live)) {
+				return Decision{}, false
+			}
+		}
+	}
+	return dc.word(path, bare, rec, live, rec, whole), true
+}
+
+// randomToken reports whether rec and live are each one run of the URL-safe
+// base64 alphabet whose changed part, past what they share at each end,
+// carries tokenBits in both.
+func randomToken(rec, live string) bool {
+	urlSafe := func(r rune) bool {
+		return r == '-' || r == '_' || r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z'
+	}
+	if strings.IndexFunc(rec, func(r rune) bool { return !urlSafe(r) }) >= 0 || strings.IndexFunc(live, func(r rune) bool { return !urlSafe(r) }) >= 0 {
+		return false
+	}
+	head := 0
+	for head < min(len(rec), len(live)) && rec[head] == live[head] {
+		head++
+	}
+	r, l := rec[head:], live[head:]
+	for len(r) > 0 && len(l) > 0 && r[len(r)-1] == l[len(l)-1] {
+		r, l = r[:len(r)-1], l[:len(l)-1]
+	}
+	return wordBits(r) >= tokenBits && wordBits(l) >= tokenBits
 }
 
 // unpaired decides a text where a word was added or dropped: refused whole
@@ -473,8 +527,12 @@ func (dc *decider) word(path string, bare variables.Address, rec, live, text str
 			"the value "+p.name+" sent in "+scopeName(p)+"; keploy binds only within a test and the start-up", names(outside),
 			Edit{Kind: EditMoveToMocks, Mock: p.mock}, Edit{Kind: EditMoveToStartup, Mock: p.mock}, dc.wordNoise(path, n))
 	}
-	if why, place := dc.encoded(); why != "" {
-		return dc.refuse(path, at, n, w.Rec, w.Live, RefusalUnknown, why, []string{place}, Edit{Kind: EditReRecord}, dc.fieldNoise(path))
+	if why, p := dc.encoded(); p != nil {
+		if p.otherTest && !dc.allScope {
+			return dc.refuse(path, at, n, w.Rec, w.Live, RefusalAnotherScope, why+", sent in "+scopeName(*p)+"; keploy binds only within a test and the start-up", []string{p.name},
+				Edit{Kind: EditMoveToMocks, Mock: p.mock}, Edit{Kind: EditMoveToStartup, Mock: p.mock}, dc.fieldNoise(path))
+		}
+		return dc.refuse(path, at, n, w.Rec, w.Live, RefusalUnknown, why, []string{p.name}, Edit{Kind: EditReRecord}, dc.fieldNoise(path))
 	}
 	if d, ok := dc.atWord(path, bare, n, w, rec, live); !ok {
 		return d
@@ -497,7 +555,7 @@ func (dc *decider) word(path string, bare variables.Address, rec, live, text str
 }
 
 // inDecodedForm is why no word of a leaf may be learned fresh, and the place
-// that says so: an earlier place in the call's scope holds a word of 32 bits
+// that says so: an earlier place holds a word of 32 bits
 // or more in each run, and only the decoded forms of the leaf's texts hold
 // it. That is an id carried inside an encoding the reader opens no step for
 // (base64 wrapped between other text, base32, 0x hex, a signed message):
@@ -505,26 +563,23 @@ func (dc *decider) word(path string, bare variables.Address, rec, live, text str
 // words of the encoded text would go unchecked at their first call. A place
 // that may hold them in round F (evidenceAt) refuses as well: one rule
 // across forms. It binds nothing.
-func (dc *decider) inDecodedForm(rds []textReading) (why, place string) {
+func (dc *decider) inDecodedForm(rds []textReading) (string, *evPlace) {
 	for _, rd := range rds {
 		rs, fs := decodedOnly(dc.in.Drifts, rd.Rec, rd.Live), decodedOnly(dc.in.Drifts, rd.Live, rd.Rec)
 		for _, p := range dc.ps {
-			if p.otherTest && !dc.allScope {
-				continue
-			}
 			for _, r := range rs {
 				if !evHolds(p.t.rec, r) {
 					continue
 				}
 				for _, f := range fs {
 					if ev, read := evidenceAt(p, r, f); read && (ev == evShown || ev == evUnknown) {
-						return p.name + " held " + strconv.Quote(r) + " and " + strconv.Quote(f) + " may be round F's there: this value carries it in a decoded form, where keploy binds no word", p.name
+						return p.name + " held " + strconv.Quote(r) + " and " + strconv.Quote(f) + " may be round F's there: this value carries it in a decoded form, where keploy binds no word", &p
 					}
 				}
 			}
 		}
 	}
-	return "", ""
+	return "", nil
 }
 
 // decodedOnly are the words of 32 bits or more that s's declared forms hold
