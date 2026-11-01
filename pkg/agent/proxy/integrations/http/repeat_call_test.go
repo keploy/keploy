@@ -458,9 +458,9 @@ func TestARepeatNoteJoinsANotOwnedMissAndLeavesAnExtraCall(t *testing.T) {
 
 // A call one more than the test recorded names the test's own recording it
 // repeats (ExtraOf): of the answered recordings it matches on its own, the
-// first to answer, never one of another call that answered before it. A
-// mappings edit marks that recording `repeat: any`. Any other miss names
-// none.
+// first to answer, never one of another call that answered before it: the
+// copy a failure names as made more often than recorded. Any other miss
+// names none.
 func TestAnExtraCallNamesTheRecordingItRepeats(t *testing.T) {
 	const addr, host = "127.0.0.1:8099", "localhost:8099"
 	const path = "/cluster?name=default"
@@ -503,10 +503,10 @@ func TestAnExtraCallDifferingOnlyInANoisedHeaderNamesItsCopy(t *testing.T) {
 // An extra call is diagnosed against the copy it repeats, never against the
 // live pool's closest other recording: the call does not differ from its
 // copy, so the miss names that copy as its closest with no difference, and
-// its next step says the call was made more often than recorded and names
-// the mark (`repeat: any`) that answers a read the application repeats,
+// its next step names that copy and both counts (made at least twice,
+// recorded once) and says to fix the application's race or re-record,
 // never "Request structure changed". A call the test never recorded keeps
-// the pool's closest and its difference.
+// the pool's closest and its difference, with no copy and no counts.
 func TestAnExtraCallNamesItsCopyNotThePoolsClosest(t *testing.T) {
 	const addr, host = "127.0.0.1:8099", "localhost:8099"
 	const path = "/cluster?name=local-test"
@@ -524,12 +524,12 @@ func TestAnExtraCallNamesItsCopyNotThePoolsClosest(t *testing.T) {
 	if !strings.Contains(r.ClosestMockReq, "name=local-test") {
 		t.Fatalf("the extra read's closest request is %q; want mock-77's", r.ClosestMockReq)
 	}
-	if strings.Contains(r.NextSteps, "Request structure changed") || !strings.Contains(r.NextSteps, "mock-77 `repeat: any`") || !strings.Contains(r.NextSteps, "recorded it 1 time") {
-		t.Fatalf("the extra read's next step is %q; want it to say how often the test recorded it and name the mark on mock-77", r.NextSteps)
+	if strings.Contains(r.NextSteps, "Request structure changed") || !strings.Contains(r.NextSteps, "identical to mock-77") || !strings.Contains(r.NextSteps, "made it at least 2 times") || !strings.Contains(r.NextSteps, "recorded it 1 time") || !strings.Contains(r.NextSteps, "fix the race") || strings.Contains(r.NextSteps, "repeat:") {
+		t.Fatalf("the extra read's next step is %q; want it to name mock-77, both counts (made at least 2, recorded 1) and the race to fix, and no mark", r.NextSteps)
 	}
 	r = missReport(t, gateDb{earlierDb: pool, consumed: []*models.Mock{onHost("mock-1", "/cluster?name=other", host)}}, addr, host, path, models.OutgoingOptions{})
-	if r.MissKind == models.MissExtraCall || r.ClosestMock != "mock-74" || len(r.Differs) == 0 || strings.Contains(r.NextSteps, "repeat: any") {
-		t.Fatalf("a call the test never recorded is kind %q, closest %q, differs %v, next step %q; want no extra call, mock-74 with its difference and no mark", r.MissKind, r.ClosestMock, r.Differs, r.NextSteps)
+	if r.MissKind == models.MissExtraCall || r.ClosestMock != "mock-74" || len(r.Differs) == 0 || strings.Contains(r.NextSteps, "identical to") || strings.Contains(r.NextSteps, "made it at least") {
+		t.Fatalf("a call the test never recorded is kind %q, closest %q, differs %v, next step %q; want no extra call, mock-74 with its difference and no copy or counts", r.MissKind, r.ClosestMock, r.Differs, r.NextSteps)
 	}
 }
 

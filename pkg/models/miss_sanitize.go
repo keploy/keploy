@@ -10,7 +10,7 @@ import (
 // Sanitized is m as evidence keeps it: the protocol, the
 // destination, how far the matcher got, the closest recorded mock's name,
 // for an extra call the name of the test's own recording it repeats
-// (ExtraOf, the recording a mappings edit marks `repeat: any`), the
+// (ExtraOf: which copy the application made more often than recorded), the
 // matcher's next step, when it happened, why it missed (the learn step's
 // reason, in record's full round), how an answered call was answered and the
 // process that made the call (UnmatchedCall.Answer, Source: names,

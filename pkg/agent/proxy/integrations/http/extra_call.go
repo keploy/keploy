@@ -63,9 +63,9 @@ func (h *HTTP) extraCallOf(ctx context.Context, input *req, mockDb integrations.
 // mock, with no field named as differing, since none does: the live pool's
 // closest is another recording (of answered and left every read), whose
 // differences say nothing of this call, and a reader that took them for the
-// call's would re-record a call that did not change. The next step says how
-// often the test recorded the call and names the mark that answers a read
-// the application repeats on its own timing (mismatch.ExtraCallNextSteps).
+// call's would re-record a call that did not change. The next step names
+// the copy, how often the test recorded the call and how often the
+// application made it (mismatch.ExtraCallNextSteps).
 func markExtraCall(report *models.MockMismatchReport, of *models.Mock, recorded int) {
 	report.ClosestMock = of.Name
 	report.FieldDiffs, report.Differs, report.FieldReasons, report.Diff = nil, nil, nil, ""

@@ -539,9 +539,8 @@ type UnmatchedCall struct {
 	// Kind is where the call was made, under the proven switch (MissInTest,
 	// MissExtraCall, MissOutsideTest); empty without it. Recorded is, for an
 	// extra call, how many times the test recorded that call, and ExtraOf
-	// the test's own recording it repeats (MockMismatchReport.ExtraOf): the
-	// recording a mappings edit marks `repeat: any` when the read may be
-	// made any number of times.
+	// the test's own recording it repeats (MockMismatchReport.ExtraOf): which
+	// copy the application made more often than the test recorded it.
 	Kind     string `json:"kind,omitempty" yaml:"kind,omitempty"`
 	Recorded int    `json:"recorded,omitempty" yaml:"recorded,omitempty"`
 	ExtraOf  string `json:"extra_of,omitempty" yaml:"extra_of,omitempty"`
