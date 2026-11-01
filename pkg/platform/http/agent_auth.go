@@ -75,7 +75,7 @@ func ownConnections(rt http.RoundTripper) http.RoundTripper {
 // cancelled, and keploy's read of what a run did failed so ("failed to get
 // scope windows ...: context canceled") after a run that passed. That is a
 // net/http race (golang/go#82547): once it is fixed in the Go keploy builds
-// with, these requests can go back on the shared pool.
+// with, these requests can go back on the client's pool (agentPool).
 func (a *AgentClient) ownConnection() http.Client {
 	client := a.client
 	client.Transport = ownConnections(client.Transport)
@@ -83,17 +83,40 @@ func (a *AgentClient) ownConnection() http.Client {
 }
 
 // agentHTTPClient returns the client the AgentClient uses to reach its agent,
-// carrying the token when one is in play for this session.
+// carrying the token when one is in play for this session. Its connections
+// are a pool of its own (agentPool).
 func agentHTTPClient(token string) http.Client {
 	var c http.Client
-	var base http.RoundTripper
+	base := agentPool()
 	if token != "" {
-		base = &bearerTransport{token: token}
+		base = &bearerTransport{token: token, base: base}
 	}
 	// Every answer is noted for which agent process gave it
 	// (agent_instance.go), with or without a token.
 	c.Transport = &instanceTransport{base: base}
 	return c
+}
+
+// agentPool is a pool of connections for one AgentClient alone: a clone of
+// http.DefaultTransport, with its proxy, dial and idle settings, but none of
+// its connections. Any other client on the default pool (enterprise's own
+// client to the same agent, a library in the same process) can cancel a
+// request the agent answers with no body just as the transport puts its
+// connection back in the pool, and the cancel then closes that connection
+// under the request that took it next (golang/go#82547, see ownConnection):
+// on the shared pool that was keploy's read of what a run did ("failed to
+// get scope windows ...: context canceled"). On a pool of its own the next
+// request on one of these connections is the AgentClient's own, and its own
+// cancellable bodiless requests are on connections of their own. Its idle
+// connections close as the default pool's do, at its IdleConnTimeout, so a
+// client dropped holds none past it. A default transport that something
+// replaced with a RoundTripper of its own is used as it is: there is no pool
+// in it to copy.
+func agentPool() http.RoundTripper {
+	if t, ok := http.DefaultTransport.(*http.Transport); ok {
+		return t.Clone()
+	}
+	return http.DefaultTransport
 }
 
 // tokenInCommand matches the control-plane token wherever it appears as an
