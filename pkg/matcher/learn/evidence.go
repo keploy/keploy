@@ -667,12 +667,6 @@ func setEvidence(g givenWords, r, f string, at time.Time) (ev wordEvidence, chan
 	return evNone, false
 }
 
-// fUnread reports whether keploy cannot read round F's side of g: never
-// served, or served with no one view it can read (a place's fUnstated).
-func (g givenWords) fUnread() bool {
-	return g.unstated || g.unread || len(g.view.words) == 0 && len(g.same) == 0
-}
-
 // gluedAt reports whether p, a body that declares no media type, holds R's
 // or F's word glued to the bytes around it, in any form it declares (main's
 // gluedIn): keploy cannot tell its words from the bytes that frame them.
