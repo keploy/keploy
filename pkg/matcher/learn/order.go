@@ -811,9 +811,13 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	}
 
 	// 8. The test's own value (client tests): no earlier place holds it in
-	// either run, its answer does not echo it, and its cut is not ambiguous.
+	// either run, its answer does not echo it, its cut is not ambiguous,
+	// and, where the runs know their test's begin, it was made before it.
+	late := ""
 	if dc.in.Drifts != nil && dc.in.Drifts.clientTests && len(hs) == 0 && cutWhy == "" && dc.instantEchoed(c) == "" {
-		return dc.learned(path, at, n, r, l, OutcomeFresh, "the test's own value: no place before the call holds it; bound at its first call", nil)
+		if late = madeSinceBegin(dc.in.Window, c, zone); late == "" {
+			return dc.learned(path, at, n, r, l, OutcomeFresh, "the test's own value: no place before the call holds it; bound at its first call", nil)
+		}
 	}
 	why := "a time its call's window does not hold in both runs, that no answer gave and no request of this scope sent"
 	if dc.in.Window == nil {
@@ -822,6 +826,9 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	}
 	if cutWhy != "" {
 		why += " (" + cutWhy + ")"
+	}
+	if late != "" {
+		why += "; nor the test's own value, made before it began: " + late
 	}
 	var outside, sentIn []string
 	for _, h := range hs {
@@ -834,6 +841,42 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 		why += " [but " + strings.Join(sentIn, ", ") + " did]"
 	}
 	return dc.refuse(path, at, n, r, l, RefusalNoClockRead, why, outside, dc.wordNoise(path, n), Edit{Kind: EditReRecord})
+}
+
+// madeSinceBegin is why c, a changed instant of a client test's call that
+// no earlier place holds, may have been made after its test began in a
+// run (DESIGN step 8: the test's own value is one made before the begin;
+// one made later is a read of the clock, which steps 5 and 7 learn where a
+// window holds it, plus an offset, or a value the test gave): "" where a run
+// knows no begin (the test's own value, as a test of no begin makes it),
+// where c is no moment (a number matched by its text), or where each
+// run's moment, its whole cut, lies before its run's begin, read as UTC
+// and, for a wall clock of no zone, in the application's zone too. A time
+// of day names no day, so no begin.
+func madeSinceBegin(w *Window, c changedInstant, zone *time.Location) string {
+	wb := w.sinceBegin()
+	if wb == nil || c.rm == nil || c.lm == nil {
+		return ""
+	}
+	for _, run := range []struct {
+		name  string
+		began time.Time
+		m     moment
+	}{{"the recorded one", wb.Rec.From, *c.rm}, {"round F's", wb.F.From, *c.lm}} {
+		if run.m.key.day {
+			return run.name + " is a time of day, which names no day"
+		}
+		at := []time.Time{time.Unix(0, run.m.key.at)}
+		if !run.m.zoned && zone != nil {
+			at = append(at, wallIn(run.m.key.at, zone))
+		}
+		for _, t := range at {
+			if t.Add(max(run.m.res, time.Nanosecond)).After(run.began) {
+				return run.name + " lies past its test's begin"
+			}
+		}
+	}
+	return ""
 }
 
 // offsetGuard is main's refusal of a read plus an offset its call's window
