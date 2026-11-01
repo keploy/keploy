@@ -34,7 +34,7 @@ func TestOutcomeAWordOfAPathIsJudgedByItsPlaces(t *testing.T) {
 // A source served between tests (no test open, after the start-up) is in no
 // scope the call binds in: refused, naming the place and the mappings edit
 // that would let it bind (move it to the test's mocks: or to startup:), or
-// noise at the word (D2). keploy never moves a mock itself.
+// noise at the word. keploy never moves a mock itself.
 func TestOutcomeASourceBetweenTestsIsRefusedNamingTheEdit(t *testing.T) {
 	between := oServed("mock-21", true, false, Response, oText("body.token", "tok-9a1"), "tok-9b2", time.Millisecond)
 	d := oWord(t, Decide(oInput("header.Authorization", "Bearer tok-9a1", "Bearer tok-9b2", between, nil)), "9a1", "9b2")
@@ -97,7 +97,7 @@ func TestOutcomeAWorkerSourceIsRefusedNamingTheEdit(t *testing.T) {
 // A place before the call that keploy could not read (the test case's own
 // request, or the run's places past its budget) refuses every change of the
 // call, even one a readable place would bind: stricter than main, which
-// binds a source it found before it reads the unread request (New 1). A
+// binds a source it found before it reads the unread request. A
 // client test has no test-case request, and that is not unread.
 func TestOutcomeAnUnreadPlaceRefusesEveryChange(t *testing.T) {
 	src := oServed("mock-22", false, false, Response, oText("body.id", "o-41"), "o-42", time.Millisecond)
@@ -126,7 +126,7 @@ func TestOutcomeAnUnreadPlaceRefusesEveryChange(t *testing.T) {
 
 // An answer round F served only after the call reached keploy (#5018's
 // arrival cut) is no place before the call in F: a word it would explain is
-// refused as unknown, never fresh and never bound to it (New 3 at learn
+// refused as unknown, never fresh and never bound to it (at learn
 // level).
 func TestOutcomeAnAnswerServedAfterTheCallArrivedIsNoSource(t *testing.T) {
 	late := oAnswer("mock-23", 100*time.Millisecond, "82").ServedAs(1).ServedAsRecorded()

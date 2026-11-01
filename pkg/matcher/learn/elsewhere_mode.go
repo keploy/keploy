@@ -2,7 +2,7 @@ package learn
 
 import "strings"
 
-// Mode Elsewhere (DESIGN §3b, the timer rule): a call that landed in another
+// Mode Elsewhere (the timer rule): a call that landed in another
 // window than its recording's may teach its recording Clock words only, for
 // learning only. Every earlier place of the run is in scope, for sources and
 // for conflicts. The call's result is kept only where every changed word is

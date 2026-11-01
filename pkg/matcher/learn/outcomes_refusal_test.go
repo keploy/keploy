@@ -18,7 +18,7 @@ func rfBase(kind RefusalKind, why string, places []string, edits ...Edit) Refusa
 		Recorded: "slot-17", Full: "slot-18", Why: why, Places: places, Edits: edits}
 }
 
-// Each of the nine kinds prints §5's line: the call, the word, both values,
+// Each of the nine kinds prints its line: the call, the word, both values,
 // the kind's clause, the places (at most three), and its edits in words a
 // person or an LLM acts on; and ParseRefusal reads the same Refusal back.
 func TestOutcomeRefusalLinesNameTheWordAndTheirEdits(t *testing.T) {

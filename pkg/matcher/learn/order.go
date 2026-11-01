@@ -9,7 +9,7 @@ import (
 	"go.keploy.io/server/v3/pkg/variables"
 )
 
-// The order (DESIGN §3): every changed word of a call, read by the one
+// The order: every changed word of a call, read by the one
 // reader, is decided here. A word that is not an instant is a Value bound at
 // the earliest source of the call's scope or the start-up; refused where a
 // place disproves it by its text or leaves it unknown, or where its only
@@ -144,7 +144,7 @@ func evHolds(x *readerIndex, text, w string) bool {
 	return h
 }
 
-// word decides one changed word that is no instant (DESIGN §3, any other
+// word decides one changed word that is no instant (any other
 // word).
 func (dc *decider) word(path string, at variables.Address, rec, live string, w readWord) Decision {
 	n := w.RecIdx
@@ -244,7 +244,7 @@ func (dc *decider) atWord(path string, at variables.Address, n int, w readWord, 
 }
 
 // tokenShown reports whether p shows a whole token around w: one place
-// holds that whole token in each run (DESIGN §1).
+// holds that whole token in each run.
 func tokenShown(x *readerIndex, p evPlace, w readWord) bool {
 	if p.state != stateBefore || p.rec == p.live {
 		return false
@@ -299,9 +299,9 @@ type changedInstant struct {
 }
 
 // holds is what text, one run's text at p, holds of w (that run's word)
-// and m (its moment): a test's given by its text alone (M1), any other
+// and m (its moment): a test's given by its text alone, any other
 // place by its text or by moment. fine: the hold is at a cut finer than a
-// millisecond, or by the exact text of a number that does not parse (P1).
+// millisecond, or by the exact text of a number that does not parse.
 func (dc *decider) holds(p evPlace, text, w string, m *moment, byText bool) (held, fine, read bool) {
 	h, ok := dc.x.holdsWord(text, w)
 	if !ok {
@@ -323,7 +323,7 @@ func (dc *decider) holds(p evPlace, text, w string, m *moment, byText bool) (hel
 	return h, h && fineCut(m.res), true
 }
 
-// instant decides one changed instant by DESIGN §3's order: a conflict at
+// instant decides one changed instant by the one order: a conflict at
 // a fine cut (0), a pick (1), a given's text, one templated slot of the
 // test case's request (2), an answer (3), a fine copy (4), a Clock its
 // call's window holds (5), a coarse copy (6), a client test's own value
@@ -370,7 +370,7 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	// request as sent, which does not show it; (iii) the recorded moment
 	// stands at an answer whose state in round F keploy cannot tell; (ii)
 	// the recorded moment stands in the test case's request by a cut rule
-	// that gives no moment F saw in it as sent. Never at a given (M1).
+	// that gives no moment F saw in it as sent. Never at a given.
 	for _, h := range hs {
 		p := h.p
 		if p.gave || !(p.side == Response || request(p)) {
@@ -606,7 +606,7 @@ func (dc *decider) bound(path string, at variables.Address, n int, r, l string, 
 
 // copied is a Value bound at the earliest of src, a copy's sources; a later
 // one its own call learned as a read of the clock is a second, separate
-// read, and the word is refused naming both (H2).
+// read, and the word is refused naming both.
 func (dc *decider) copied(path string, at variables.Address, n int, r, l string, src []evPlace, rule string) Decision {
 	first := src[0]
 	for _, p := range src[1:] {

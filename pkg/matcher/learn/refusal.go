@@ -6,7 +6,7 @@ import (
 	"unicode/utf8"
 )
 
-// A refused word's line (DESIGN §5) is one line a person, an LLM or a tool
+// A refused word's line is one line a person, an LLM or a tool
 // reads:
 //
 //	<test> <mock> <field>[ word <n>]: recorded "<r>", round F "<f>": refused (<kind>): <why>. Places: <p>, <p>, <p>. Edits: <edit>; or <edit>.

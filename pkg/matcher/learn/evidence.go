@@ -7,7 +7,7 @@ import (
 	"go.keploy.io/server/v3/pkg/variables"
 )
 
-// Evidence at a place (DESIGN §2). A place is something the application
+// Evidence at a place. A place is something the application
 // sent or got that may come before the call: a request it sent, an answer,
 // the test case's request (a given). Each run's state there is before (sent
 // or answered before the call reached keploy), not before, or unknown. Only
@@ -52,10 +52,10 @@ type evPlace struct {
 	otherTest bool
 	scope     string
 	// leaf: an earlier exchange's leaf, which names its place (FromAt).
-	leaf Leaf
-	at        time.Time
-	state     placeState
-	why       string
+	leaf  Leaf
+	at    time.Time
+	state placeState
+	why   string
 	// fUnstated: the adapter does not state what round F's answer held
 	// here, so its F side shows and disproves nothing.
 	fUnstated bool
@@ -73,7 +73,7 @@ const (
 
 // placesOf lists in's places before the call and each one's state, and the
 // first place keploy could not read ("" where it read every one): every
-// change of the call is then refused (DESIGN §2, New 1).
+// change of the call is then refused.
 func placesOf(in Input) (ps []evPlace, unread string) {
 	for _, e := range in.Earlier {
 		if e.Unread != "" {
@@ -191,7 +191,7 @@ func rawState(in Input, r Raw) (placeState, string) {
 
 // orderUnknown marks every candidate place unknown where the recording and
 // round F gave the application their answers in another order, or either
-// order cannot be told (DESIGN §2, B3; follows.go's recordedOrder).
+// order cannot be told (follows.go's recordedOrder).
 func orderUnknown(in Input, ps []evPlace, cand map[string]bool) {
 	if len(cand) < 2 {
 		return
@@ -219,7 +219,7 @@ func orderUnknown(in Input, ps []evPlace, cand map[string]bool) {
 }
 
 // evidenceAt is what p shows of the changed word r (R) to f (F): the
-// table of DESIGN §2, read through x. read is false where p's text lay
+// evidence table, read through x. read is false where p's text lay
 // past the call's budget.
 func evidenceAt(x *readerIndex, p evPlace, r, f string) (ev wordEvidence, read bool) {
 	hr, okR := x.holdsWord(p.rec, r)
@@ -266,7 +266,7 @@ func evidenceAt(x *readerIndex, p evPlace, r, f string) (ev wordEvidence, read b
 
 // countsByText reports whether a disproving place counts the word by its
 // text: 32 bits or more (wordBits), alone or as a whole token around it
-// the place also holds whole (DESIGN §1, founder B).
+// the place also holds whole: an unchanged place that holds only one of the two words is chance.
 func countsByText(x *readerIndex, p evPlace, w readWord) bool {
 	if wordBits(w.Rec) >= 32 || wordBits(w.Live) >= 32 {
 		return true
@@ -283,7 +283,7 @@ func countsByText(x *readerIndex, p evPlace, w readWord) bool {
 }
 
 // heldWhole reports whether p, a place F moved, held the recorded value's
-// whole token around w in R (DESIGN §2, B5: a conflict in the call's scope
+// whole token around w in R (a conflict in the call's scope
 // or the start-up).
 func heldWhole(x *readerIndex, p evPlace, w readWord, rec string) bool {
 	if p.rec == p.live {
