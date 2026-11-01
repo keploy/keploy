@@ -388,11 +388,11 @@ func evHolds(t *readerText, w string) bool {
 // be the very value the recording gave ("50", "user-12").
 const unreadFloorBits = 11
 
-// pieceOfAnId reports whether w is under the floor and another changed word of
-// its text carries chance bits in both runs ("k" of "k-Rq7Lm2Xv9Tp4Wn8Zc"): the
-// text is one value, and w a piece of it.
+// pieceOfAnId reports whether w is under chanceBits and another changed word of
+// its text carries them in both runs ("08c8" of a UUID, "k" of
+// "k-Rq7Lm2Xv9Tp4Wn8Zc"): the text is one value, and w a piece of it.
 func pieceOfAnId(rd textReading, w readWord) bool {
-	return wordBits(w.Rec) < unreadFloorBits && wordBits(w.Live) < unreadFloorBits && slices.ContainsFunc(rd.Words, func(o readWord) bool {
+	return wordBits(w.Rec) < chanceBits && wordBits(w.Live) < chanceBits && slices.ContainsFunc(rd.Words, func(o readWord) bool {
 		return wordBits(o.Rec) >= chanceBits && wordBits(o.Live) >= chanceBits
 	})
 }
@@ -404,30 +404,32 @@ func (dc *decider) neverServed(mock string) bool {
 
 // word decides one changed word that is no instant (any other word), at
 // its address (w.At) in text, the text the leaf at bare opens to. piece:
-// pieceOfAnId.
+// pieceOfAnId; under unreadFloorBits it is floor.
 func (dc *decider) word(path string, bare variables.Address, rec, live, text string, w readWord, piece bool) Decision {
 	at, n := w.At, w.At.Word
 	ps := append([]evPlace(nil), dc.ps...)
 	cand := map[string]bool{}
+	floor := piece && wordBits(w.Rec) < unreadFloorBits && wordBits(w.Live) < unreadFloorBits
 	// moved: why a place that shows the word shows it at another field.
-	// agree: every candidate shows R's word in R and F's in F at one field.
-	// Each then gives the same pair, so serve order, which tells which
-	// candidate the application had last, cannot change what is bound, and
-	// replay checks the bound value at the earliest place.
+	// shown: a candidate shows R's word in R and F's in F at one field. That
+	// proves the link, so serve order, which tells which candidate the
+	// application had last, decides only where no place shows it: a candidate
+	// that kept the recorded word is not where F's word came from, and replay
+	// checks the bound value, so a wrong bind goes red.
 	moved := make([]string, len(ps))
-	agree := true
+	shown := false
 	for i, p := range ps {
-		ev, _ := evidenceAt(p, w.Rec, w.Live)
+		ev, _ := evidenceAt(p, w.Rec, w.Live, piece)
 		if ev == evNone {
 			continue
 		}
 		cand[p.mock] = true
 		if ev == evShown {
 			moved[i] = movedField(p, w.Rec, w.Live)
+			shown = shown || moved[i] == ""
 		}
-		agree = agree && ev == evShown && moved[i] == ""
 	}
-	if !agree {
+	if !shown {
 		orderUnknown(dc.in, ps, cand)
 	}
 	swapUnknown(dc.in, ps, w)
@@ -436,8 +438,8 @@ func (dc *decider) word(path string, bare variables.Address, rec, live, text str
 	// recordings round F never served, which say nothing of a piece.
 	var src, outside, conflict, unknown, aside, unserved []evPlace
 	for i, p := range ps {
-		ev, read := evidenceAt(p, w.Rec, w.Live)
-		if piece && ev == evUnknown && p.fUnstated && !p.fGave {
+		ev, read := evidenceAt(p, w.Rec, w.Live, piece)
+		if floor && ev == evUnknown && p.fUnstated && !p.fGave {
 			unserved = append(unserved, p)
 			continue
 		}
@@ -481,7 +483,7 @@ func (dc *decider) word(path string, bare variables.Address, rec, live, text str
 	}
 	for _, g := range dc.outside().words {
 		p := evPlace{name: g.mock, mock: g.mock, otherTest: true, scope: "another test, or after this call", at: g.at}
-		ev, changed := setEvidence(g, w.Rec, w.Live, dc.in.At)
+		ev, changed := setEvidence(g, w.Rec, w.Live, dc.in.At, piece)
 		if changed {
 			p.live = withoutMark + w.Live
 		}
@@ -489,7 +491,7 @@ func (dc *decider) word(path string, bare variables.Address, rec, live, text str
 		case evShown:
 			outside = append(outside, p)
 		case evUnknown:
-			if piece && dc.neverServed(g.mock) {
+			if floor && dc.neverServed(g.mock) {
 				unserved = append(unserved, p)
 				break
 			}
@@ -578,7 +580,7 @@ func (dc *decider) inDecodedForm(rds []textReading) (string, *evPlace) {
 					continue
 				}
 				for _, f := range fs {
-					if ev, read := evidenceAt(p, r, f); read && (ev == evShown || ev == evUnknown) {
+					if ev, read := evidenceAt(p, r, f, false); read && (ev == evShown || ev == evUnknown) {
 						return p.name + " held " + strconv.Quote(r) + " and " + strconv.Quote(f) + " may be round F's there: this value carries it in a decoded form, where keploy binds no word", &p
 					}
 				}
@@ -808,22 +810,40 @@ func (dc *decider) holds(p evPlace, t *readerText, w string, m *moment, byText b
 // the application's zone too (inZone).
 func (dc *decider) coarserOnly(t *readerText, w string, m moment) bool {
 	text, ok := t.textNow()
+	return ok && !strings.Contains(text, w) && dc.namedBy(t, m, func(h, m moment) bool {
+		return h.key == m.key || cuts(h, m, func(c cutRule) bool { return !c.finer })
+	}) == 0
+}
+
+// cutOfFinerOnly reports whether t, which holds w (moment m), holds it only
+// as m's cut of a finer instant: no word of it is w, and no instant of it
+// is m. A second read beside a UnixNano in a name: no variable can hold
+// that text, and two reads of one coarse cut say nothing of each other.
+func (dc *decider) cutOfFinerOnly(t *readerText, w string, m moment) bool {
+	h, ok := t.holdsWord(w)
+	return ok && !h && dc.namedBy(t, m, func(h, m moment) bool { return h.key == m.key }) == 0
+}
+
+// namedBy counts the instants of t that name m, or m in the application's
+// zone (inZone), by the rule by; 1 where keploy could not read them.
+func (dc *decider) namedBy(t *readerText, m moment, by func(h, m moment) bool) int {
 	spans, read := t.spansOf()
-	if !ok || !read || strings.Contains(text, w) {
-		return false
+	if !read {
+		return 1
 	}
 	ms := []moment{m}
 	if z, ok := dc.inZone(m); ok {
 		ms = append(ms, z)
 	}
+	n := 0
 	for _, sp := range spans {
 		for _, m := range ms {
-			if h := sp.moment(); sp.keyed && (h.key == m.key || cuts(h, m, func(c cutRule) bool { return !c.finer })) {
-				return false
+			if sp.keyed && by(sp.moment(), m) {
+				n++
 			}
 		}
 	}
-	return true
+	return n
 }
 
 // instant decides one changed instant by the one order: a conflict at
@@ -937,7 +957,16 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 		p := h.p
 		return p.side == Response && !p.given && inScope(p) && p.state == stateBefore && h.hr && !h.coarseR && (p.fUnstated || h.hl)
 	})
-	if len(answers) > 0 {
+	// An answer that holds it only as a coarse cut of a finer instant is no
+	// source keploy can bind, and where the call's own window holds the
+	// read, it is that read (5), as main reads it.
+	cutOnly := len(heldWhere(hs, func(h instantHold) bool {
+		p := h.p
+		return p.side == Response && !p.given && inScope(p) && p.state == stateBefore && h.hr && !h.coarseR && (p.fUnstated || h.hl) && !h.fr &&
+			c.rm != nil && dc.cutOfFinerOnly(p.t.rec, r, *c.rm)
+	})) == len(answers)
+	ownRead := cutOnly && c.rm != nil && c.lm != nil && dc.in.Window.holdsRead(*c.rm, *c.lm, dc.dr.zone)
+	if len(answers) > 0 && !ownRead {
 		// An answer recorded after the call that round F gave the
 		// application before it, holding F's moment, is a second source:
 		// the bind would be a guess between the two.
@@ -1055,8 +1084,13 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	}
 
 	// 6. Coarse copy: as 4, a millisecond or coarser; no window condition.
-	if coarse := copies(false); len(coarse) > 0 {
-		return dc.copied(path, at, n, c, coarse, ": the same moment, at a millisecond or coarser, was sent before the call in both runs and its own window does not hold it: one read, copied")
+	// Two sends that are each their call's read of the clock say nothing of
+	// this one: two reads of one coarse cut. It goes on to step 7, whose
+	// check goes red where it was no read, and stays refused where 7 declines.
+	coarse := copies(false)
+	const copiedWhy = ": the same moment, at a millisecond or coarser, was sent before the call in both runs and its own window does not hold it: one read, copied"
+	if len(coarse) > 0 && !twoClockReads(coarse) {
+		return dc.copied(path, at, n, c, coarse, copiedWhy)
 	}
 
 	// 7. Since begin (client tests): a read the window from each run's
@@ -1085,6 +1119,10 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 				}
 			}
 		}
+	}
+
+	if len(coarse) > 0 {
+		return dc.copied(path, at, n, c, coarse, copiedWhy)
 	}
 
 	// 8. The test's own value (client tests): no earlier place holds it in
@@ -1319,6 +1357,13 @@ func answeredAt(echo []variables.Address, rec string) string {
 		return ""
 	}
 	return "; answered at " + addrList(echo) + ", where the call's answer holds " + strconv.Quote(rec) + " whole as recorded"
+}
+
+// twoClockReads reports whether the earliest of src and a later one were
+// each learned as their call's read of the clock.
+func twoClockReads(src []evPlace) bool {
+	first := earliest(src)
+	return first.clock && slices.ContainsFunc(src, func(p evPlace) bool { return p.clock && p.name != first.name })
 }
 
 // copied is a Value bound at the earliest of src, a copy's sources; a later

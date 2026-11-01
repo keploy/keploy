@@ -390,7 +390,7 @@ func swapUnknown(in Input, ps []evPlace, w readWord) {
 // evidenceAt is what p shows of the changed word r (R) to f (F): the
 // evidence table, read through x. read is false where p's text lay
 // past the call's budget.
-func evidenceAt(p evPlace, r, f string) (ev wordEvidence, read bool) {
+func evidenceAt(p evPlace, r, f string, piece bool) (ev wordEvidence, read bool) {
 	hr, okR := p.t.rec.holdsWord(r)
 	hf, okF := p.t.live.holdsWord(f)
 	if !okR || !okF {
@@ -412,8 +412,10 @@ func evidenceAt(p evPlace, r, f string) (ev wordEvidence, read bool) {
 		return evNone, true
 	case p.state != stateBefore:
 		return evUnknown, true
-	case same && hr && hf:
+	case same && hr && hf && !piece:
 		// Unchanged: one text holds both, so neither run's shows the change.
+		// A piece of a longer value (pieceOfAnId) is chance there: the
+		// value's long words judge the place.
 		return evUnknown, true
 	case same:
 		return evDisproven, true
@@ -434,16 +436,16 @@ func evidenceAt(p evPlace, r, f string) (ev wordEvidence, read bool) {
 // (main reads a recording field by field). "" where one field holds both.
 func movedField(p evPlace, r, f string) string {
 	same, read := inOneField(p.t.rec, r, p.t.live, f)
-	at, _ := p.t.live.fieldsWith(f)
 	switch {
 	case !read:
 		return "past the call's budget"
 	case same:
 		return ""
-	case len(at) == 0:
-		return "its view holds " + strconv.Quote(f) + " at no one field"
 	}
-	return "its view gave " + strconv.Quote(f) + " at " + at[0].path + ", not at a field whose recorded text holds " + strconv.Quote(r)
+	if at, _ := p.t.live.fieldsWith(f); len(at) > 0 {
+		return "its view gave " + strconv.Quote(f) + " at " + at[0].path + ", not at a field whose recorded text holds " + strconv.Quote(r)
+	}
+	return "its view holds " + strconv.Quote(f) + " at no one field"
 }
 
 // countsByText reports whether a disproving place counts the word by its
@@ -622,7 +624,7 @@ func (dc *decider) echoedOutside(c changedInstant) (mock string, ok bool) {
 // It shows or disproves only where it is before the call in both runs, as a
 // recording handed to the call is (rawState): one with no answer time, or
 // recorded or answered at the call's own instant, is unknown there.
-func setEvidence(g givenWords, r, f string, at time.Time) (ev wordEvidence, changed bool) {
+func setEvidence(g givenWords, r, f string, at time.Time, piece bool) (ev wordEvidence, changed bool) {
 	// A recording made after the call gave R's application nothing before
 	// it: R's word there decides nothing (F's still does).
 	hr := listsHold(g.answerLists, r) && (g.noTime || !g.at.After(at))
@@ -655,7 +657,7 @@ func setEvidence(g givenWords, r, f string, at time.Time) (ev wordEvidence, chan
 		switch {
 		case !hr && !hf:
 			return evNone, false
-		case !before || hr && hf:
+		case !before || hr && hf && !piece:
 			return evUnknown, false
 		}
 		return evDisproven, false
