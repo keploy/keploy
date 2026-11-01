@@ -467,6 +467,87 @@ func TestOutcomeAnExchangeAtTheCallsOwnInstantIsReadBothWays(t *testing.T) {
 	}
 }
 
+// A recording made a second after the call gave R's application nothing
+// before it, so R's word there decides nothing, however the recording is
+// handed in (an exchange of the test, a start-up recording, a set entry):
+// only what round F gave there counts. Served as recorded, or with a view
+// that holds no word of the value, it holds no source of F's value, and the
+// value is made anew each run. A view that holds F's value, one keploy
+// cannot read, or none told, still refuses it, naming the recording.
+func TestOutcomeARecordingMadeAfterTheCallDecidesNothingByItsRecordedWord(t *testing.T) {
+	const path = "bind.$8"
+	rec := Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: "82"}}}
+	live := Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: "6c7d"}}}
+	after := eRecAt.Add(time.Second)
+	m := jobsMock("82", "5")
+	m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock = after, after.Add(time.Millisecond)
+	view := func(id string) func() (*models.Mock, error) {
+		return func() (*models.Mock, error) {
+			v := jobsMock(id, "9")
+			v.Spec.ReqTimestampMock, v.Spec.ResTimestampMock = m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock
+			return v, nil
+		}
+	}
+	for _, c := range []struct {
+		name    string
+		tell    func(tr *Tracker)
+		refused bool
+	}{
+		{"told nothing", func(*Tracker) {}, true},
+		{"told as recorded", func(tr *Tracker) { tr.ServedMockAsRecorded(m) }, false},
+		{"told a view with no word of the value", func(tr *Tracker) { tr.ServedMockLive(m, "a", view(chanceSrcRec)) }, false},
+		{"told a view that holds F's value", func(tr *Tracker) { tr.ServedMockLive(m, "a", view("6c7d")) }, true},
+		{"told a view keploy cannot read", func(tr *Tracker) {
+			tr.ServedMockLive(m, "a", func() (*models.Mock, error) { return nil, errors.New("gone") })
+		}, true},
+	} {
+		tr := NewTracker()
+		tr.Begin()
+		tr.ServedMock(m)
+		tr.Served(tr.Placed().Test, Earlier{Mock: m.Name, At: m.Spec.ReqTimestampMock, Own: true, Payload: RawOf(m, true),
+			Seen: []Seen{{Side: Response, Leaf: Leaf{Path: "row.0.n", Type: String, Value: "5"}, Live: "5"}}})
+		c.tell(tr)
+		pl := tr.Placed()
+		in := Input{Drifts: clockedDrifts(), Drift: []string{path}, Live: live, Rec: rec, At: eRecAt, Arrived: eRecAt,
+			Earlier: InServeOrder(pl.Earlier, []*models.Mock{m}, pl.Order), Raw: eStartup(), Test: "test-2", Mock: "mock-300",
+			Caps: Caps{BindAtWord: true, AnswerAtWord: true, FViewStated: true}}
+		d := oWord(t, Decide(in), "82", "6c7d")
+		if !c.refused {
+			if d.Outcome != OutcomeFresh {
+				t.Errorf("FALSE RED: an exchange recorded after the call, %s: %s; want a value made anew", c.name, oDescribe([]Decision{d}))
+			}
+			continue
+		}
+		oRefused(t, "an exchange recorded after the call, "+c.name, d, RefusalUnknown, m.Name)
+	}
+	rows := []models.PostgresV3Cells{{{Value: "82"}, {Value: "5"}}}
+	late := ePg("mock-5", -time.Second, "SELECT id, n FROM jobs", rows, "SELECT 1").ServedAs(6)
+	for _, c := range []struct {
+		name    string
+		raw     Raw
+		refused bool
+	}{
+		{"served at the start-up with no view told", late, true},
+		{"served at the start-up as recorded", late.ServedAsRecorded(), false},
+		{"served at the start-up with a view that holds no word of the value",
+			late.ServedLive(ePg("mock-5", -time.Second, "SELECT id, n FROM jobs", []models.PostgresV3Cells{{{Value: chanceSrcRec}, {Value: "9"}}}, "SELECT 1")), false},
+		{"served at the start-up with a view that holds F's value",
+			late.ServedLive(ePg("mock-5", -time.Second, "SELECT id, n FROM jobs", []models.PostgresV3Cells{{{Value: "6c7d"}, {Value: "9"}}}, "SELECT 1")), true},
+	} {
+		in := Input{Drifts: clockedDrifts(), Drift: []string{path}, Live: live, Rec: rec, At: eRecAt, Arrived: eRecAt,
+			Raw: append(eStartup(), c.raw), Test: "test-2", Mock: "mock-300",
+			Caps: Caps{BindAtWord: true, AnswerAtWord: true, FViewStated: true}}
+		d := oWord(t, Decide(in), "82", "6c7d")
+		if !c.refused {
+			if d.Outcome != OutcomeFresh {
+				t.Errorf("FALSE RED: a start-up recording made after the call, %s: %s; want a value made anew", c.name, oDescribe([]Decision{d}))
+			}
+			continue
+		}
+		oRefused(t, "a start-up recording made after the call, "+c.name, d, RefusalUnknown, "mock-5")
+	}
+}
+
 // An answer of the call's own test holds the changed minute by its text (step 3), but
 // a second place may be where it came from: a recording of the set F gave
 // in an earlier test that was recorded after the call, or at its own
