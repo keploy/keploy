@@ -3,6 +3,7 @@ package proxy
 import (
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -472,12 +473,13 @@ func TestAMarkTheViewPassesOfARecordingNoStagingHoldsIsSaidOnce(t *testing.T) {
 		if len(st) != 1 || !st[0].LearnedAfterEnd {
 			t.Fatalf("consume %d: %+v; want it to say it learned after the end", i+1, st)
 		}
+		// Said by the first consume, which takes its test's verdict away,
+		// and by no consume after it.
+		if said := unstagedWarns(logs); len(said) != 1 || said[0].ContextMap()["mock"] != "ghost" {
+			t.Fatalf("after consume %d, the Warns %v; want one, naming ghost", i+1, said)
+		}
 	}
 	wantTold(t, "both consumes", told, "ghost", "ghost")
-	said := unstagedWarns(logs)
-	if len(said) != 1 || said[0].ContextMap()["mock"] != "ghost" {
-		t.Fatalf("the Warns %v; want one, naming ghost", said)
-	}
 }
 
 // A mark's tier reads the staging its door prepared before the round lock. A
@@ -529,10 +531,16 @@ func TestAMarkTheStagingMovedUnderIsRefusedAndReadAgain(t *testing.T) {
 			if st := mm.GetConsumedMocks(); len(st) != 0 {
 				t.Fatalf("the refused mark was flagged: %+v", st)
 			}
+			if n := mm.SessionMockHitCounts()["session"]; n != 0 {
+				t.Fatalf("the refused mark was counted as %d match(es), want 0", n)
+			}
 			if !mm.MarkMockAsUsed(c) {
 				t.Fatal("the mark read again did not go through")
 			}
 			wantTold(t, "the mark read again", told, "session")
+			if n := mm.SessionMockHitCounts()["session"]; n != 1 {
+				t.Fatalf("the mark read again was counted as %d match(es), want 1", n)
+			}
 			st := mm.GetConsumedMocks()
 			if len(st) != 1 || !st[0].LearnedAfterEnd {
 				t.Fatalf("the mark read again: %+v; want it to say it learned after the end", st)
@@ -579,6 +587,136 @@ func TestAPanicInATierLeavesTheStoreServing(t *testing.T) {
 		t.Fatal("the store is wedged: the round lock outlived the panic")
 	}
 	wantTold(t, "the panic told nothing, the door after it one serve", told, "other")
+}
+
+// The served observer runs holding the round lock too, and it is the learn
+// tracker's code. One that panics (recovered with the parser's connection)
+// must let the lock go as a tier's panic does: a snapshot and the next mark
+// go through, and the observer is told of that one. At main the lock outlived
+// the observer's panic and wedged the store.
+func TestAPanickingServedObserverLeavesTheStoreServing(t *testing.T) {
+	m := exactMock("session", 0, models.LifetimeSession)
+	other := exactMock("other", time.Second, models.LifetimeSession)
+	mm := stagedManager(t, nil, []*models.Mock{m, other})
+	mm.ServeExactPool("k", []string{"session", "other"})
+	var panicked atomic.Bool
+	var told atomic.Int64
+	mm.SetServedObserver(func(*models.Mock) {
+		if panicked.CompareAndSwap(false, true) {
+			panic("observer bug")
+		}
+		told.Add(1)
+	})
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("precondition: the observer did not panic")
+			}
+		}()
+		mm.MarkMockAsUsed(*m)
+	}()
+	done := make(chan bool, 1)
+	go func() {
+		mm.RoundSnapshot(integrations.RoundQuery{Kind: models.HTTP})
+		done <- mm.MarkMockAsUsed(*other)
+	}()
+	select {
+	case ok := <-done:
+		if !ok {
+			t.Fatal("the mark after the panic did not go through")
+		}
+	case <-time.After(time.Minute):
+		mm.exact.round.mu.Unlock() // lets the goroutine and the cleanup go
+		<-done
+		t.Fatal("the store is wedged: the round lock outlived the observer's panic")
+	}
+	if n := told.Load(); n != 1 {
+		t.Fatalf("told %d serve(s) after the panic, want 1", n)
+	}
+}
+
+// A mark the view passes while the learn step runs (record's first cycle:
+// every parser that consumes a reusable recording through MarkMockAsUsed)
+// goes through, told once, and says it learned nothing after the end,
+// whatever its copy learned: nothing has ended.
+func TestAMarkWhileTheLearnStepRunsGoesThrough(t *testing.T) {
+	provenswitch.Pin(true)
+	t.Cleanup(provenswitch.Unpin)
+	m := exactMock("session", 0, models.LifetimeSession)
+	mm := stagedManager(t, nil, []*models.Mock{m})
+	mm.ServeExactPool("k", []string{"session"})
+	told := toldNames(mm)
+	c := *m
+	c.TestModeInfo.StagedSet = 0
+	c.Spec.ReqBodyNoise = map[string][]string{"body.at": {}}
+	if !mm.MarkMockAsUsed(c) {
+		t.Fatal("a mark the view passes was refused while the learn step runs")
+	}
+	wantTold(t, "the mark", told, "session")
+	if st := mm.GetConsumedMocks(); len(st) != 1 || st[0].LearnedAfterEnd {
+		t.Fatalf("the mark: %+v; want one, that learned nothing after the end", st)
+	}
+}
+
+// Once the staging's outside answers are built, a mark after the learn step
+// ended takes no staging lock before its round step, so it waits behind no
+// staging that lands (swapMu held): in a retry cycle a parser marks every
+// reusable recording it answers from, one consume at a time.
+func TestAMarkAfterTheLearnStepEndedWaitsBehindNoLandingStaging(t *testing.T) {
+	provenswitch.Pin(true)
+	t.Cleanup(provenswitch.Unpin)
+	m := exactMock("session", 0, models.LifetimeSession)
+	mm := stagedManager(t, nil, []*models.Mock{m})
+	mm.ServeExactPool("k", []string{"session"})
+	mm.SetLearnEnded(true)
+	told := toldNames(mm)
+	if !mm.MarkMockAsUsed(*m) {
+		t.Fatal("precondition: the first mark did not go through")
+	}
+	mm.swapMu.Lock()
+	done := make(chan bool, 1)
+	go func() { done <- mm.MarkMockAsUsed(*m) }()
+	select {
+	case ok := <-done:
+		mm.swapMu.Unlock()
+		if !ok {
+			t.Fatal("the mark, its staging's outside answers built, was refused")
+		}
+	case <-time.After(time.Minute):
+		mm.swapMu.Unlock()
+		<-done
+		t.Fatal("the mark waited for the staging lock with its staging's outside answers built")
+	}
+	wantTold(t, "both marks", told, "session", "session")
+}
+
+// A named read (a delete door's spend: noteExactSpent) builds the staging's
+// outside answers, then reads them. A staging that lands between the two
+// leaves no base to read the copy against: every noise path it carries is
+// read as learned after the end (fail closed: its tests get no verdict), and
+// a Warn naming the recording says so.
+func TestANamedReadAStagingLandedUnderIsReadAsLearnedAndSaid(t *testing.T) {
+	provenswitch.Pin(true)
+	t.Cleanup(provenswitch.Unpin)
+	core, logs := observer.New(zapcore.WarnLevel)
+	m := exactMock("session", 0, models.LifetimeSession)
+	m.Spec.ReqBodyNoise = map[string][]string{"body.at": {}}
+	mm := stagedManagerLogged(t, zap.New(core), nil, []*models.Mock{m})
+	mm.SetLearnEnded(true)
+	c := *m
+	if mm.learnedAfterEndNamed(&c) {
+		t.Fatal("precondition: a copy carrying only the recording's noise was read as learned beyond it")
+	}
+	mm.exact.outside.onPrepared = func() {
+		mm.exact.outside.onPrepared = nil
+		mm.SetMocksWithWindow(nil, []*models.Mock{m}, models.BaseTime, time.Now())
+	}
+	if !mm.learnedAfterEndNamed(&c) {
+		t.Fatal("read with no staging's base, the copy's noise path was read as learned before the end")
+	}
+	if said := unstagedWarns(logs); len(said) != 1 || said[0].ContextMap()["mock"] != "session" {
+		t.Fatalf("the Warns %v; want one, naming session", said)
+	}
 }
 
 // DeleteFilteredMock's fall to the start-up tier calls this door saying not to
