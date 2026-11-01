@@ -754,6 +754,16 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	// as isolated (below).
 	// Under the proven switch, a capture-loss count that could not be read
 	// is the same verdict as a lost PID-map count, said as what it is.
+	// Each count that could not be read is also kept on the receipt as
+	// data (Receipt.ProcessTrackingUnread, CallCaptureUnread), whatever
+	// reason its isolation note keeps.
+	var trackingUnread, captureUnread string
+	if pidCheck.unreadable != nil {
+		trackingUnread = models.CaptureUnverified(pidCheck.unreadable)
+	}
+	if lostErr != nil {
+		captureUnread = models.CaptureLossesUnverified(lostErr)
+	}
 	lossesUnread := false
 	if pidCheck.unreadable == nil && lostErr != nil && captureIncomplete == "" {
 		pidCheck.unreadable, lossesUnread = lostErr, true
@@ -880,6 +890,9 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		CannotCapture:   lostNotJudged,
 		UnchargedMisses: counts.uncharged,
 		Report:          replayReport,
+
+		ProcessTrackingUnread: trackingUnread,
+		CallCaptureUnread:     captureUnread,
 	})
 	writeTestsReceipt(m.logger, m.config.Path, TestsReceipt{
 		Set:           name,

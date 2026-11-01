@@ -270,6 +270,14 @@ func TestReplayWhoseUntrackedCountIsLostIsUnverified(t *testing.T) {
 			if !tc.wantIsolated && !strings.HasPrefix(r.IsolationNote, "capture unverified") {
 				t.Errorf("receipt isolationNote %q does not say the capture is unverified", r.IsolationNote)
 			}
+			// The count lost is on the receipt as data too, also with the
+			// proven switch off; a count read, or never kept, is not.
+			if lost := !tc.wantIsolated; lost != strings.Contains(r.ProcessTrackingUnread, "could not read whether the agent tracked every process") {
+				t.Errorf("receipt processTrackingUnread %q; want it to say the count was not read: %v", r.ProcessTrackingUnread, lost)
+			}
+			if r.CallCaptureUnread != "" {
+				t.Errorf("receipt callCaptureUnread %q, with the switch off, where nothing reads that count", r.CallCaptureUnread)
+			}
 		})
 	}
 }

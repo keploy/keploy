@@ -2208,7 +2208,15 @@ func (v *exactView) shows(mk *models.Mock) bool {
 // inBackgroundPool reports whether mk, consumed in an open test, is one of
 // the pool's data-plane recordings the background rules show there.
 func (v *exactView) inBackgroundPool(mk *models.Mock) bool {
-	return v.test != "" && v.bg.inPool(mk.Name) && !mk.IsProtocolPhase() && !mk.IsAsync()
+	return v.test != "" && v.spendsAsPool(mk)
+}
+
+// spendsAsPool reports whether mk is one of the pool's data-plane recordings
+// under the background rules, in a test or between tests: one answers at
+// most one call in the staging, through whichever door a parser consumes it
+// (exactConsumeIn). An async lane's recording keeps today's rules.
+func (v *exactView) spendsAsPool(mk *models.Mock) bool {
+	return v.bg.inPool(mk.Name) && !mk.IsProtocolPhase() && !mk.IsAsync()
 }
 
 // isWorker reports whether name is one of the set's worker-scope mocks the
@@ -2695,6 +2703,8 @@ const (
 // DeleteStartupMock): a staged mock the view shows is then spent, and the
 // staged trees keep it. A data-plane recording consumed with no test open is
 // spent for the staging (consumeOutside); any other, until the view changes.
+// One of the worker scope's, and under the background rules one of the
+// pool's, is spent for the staging through a door that does not evict too.
 //
 // A consume that finds its view closed (a begin or an end replacing it) is no
 // refusal: it waits until the replacing view is installed and the revisions
@@ -2722,7 +2732,7 @@ func (m *MockManager) exactConsumeAt(mk *models.Mock, evicts bool, g *roundGuard
 		(*f)(mk.Name)
 	}
 	return settleInForce(m, exactRefused, func(v *exactView) (exactVerdict, <-chan struct{}) {
-		if v != nil && mk != nil && (evicts || v.isWorker(mk.Name)) {
+		if v != nil && mk != nil && (evicts || v.isWorker(mk.Name) || v.spendsAsPool(mk)) {
 			if _, own := v.index[mk.Name]; !own {
 				// What a spend reads (consumeOutside), and the staged
 				// recording its take names (stagedRecording), before the
@@ -2838,16 +2848,21 @@ func (m *MockManager) exactConsumeIn(v *exactView, mk *models.Mock, evicts bool)
 	// One of the worker scope's answers at most one request in the staging,
 	// as a test's own mock does in its test, through whichever door a parser
 	// consumes it: a parser that keeps a session mock it serves (HTTP's
-	// MarkMockAsUsed) spends it too.
+	// MarkMockAsUsed) spends it too. So does one of the pool's under the
+	// background rules, in a test or between tests: a parser that consumes
+	// only through a door that never evicts (MarkMockAsUsed: enterprise
+	// Redis and Aerospike; UpdateUnFilteredMock: keploy's Generic) would
+	// else have one pool recording answer every identical call of the set.
 	worker := v.isWorker(mk.Name) && !mk.IsProtocolPhase()
-	if !evicts && !worker {
+	if !evicts && !worker && !v.spendsAsPool(mk) {
 		return exactPass, nil, nil
 	}
 	// A data-plane recording consumed through a delete door with no test
 	// open, and one of the worker scope's whether a test is open or not, is
 	// spent for the staging: it answers at most one request in the set. So
-	// is one of the pool's a test consumes under the background rules:
-	// the background is the set's, whoever's call it answers.
+	// is one of the pool's a test consumes under the background rules,
+	// through any door: the background is the set's, whoever's call it
+	// answers.
 	if (v.test == "" || worker || v.inBackgroundPool(mk)) && !mk.IsProtocolPhase() {
 		// The view's closed check and the spend are one step: no begin or
 		// end lands between them.
