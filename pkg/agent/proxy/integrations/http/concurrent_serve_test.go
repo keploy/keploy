@@ -13,11 +13,12 @@ import (
 // HTTP call made after another goroutine's calls that keploy served after
 // the read (learn.Span.TestFrom): the test's begin moved the app's clock to
 // its recorded .933485 (enterprise's run clock, the run told), the handler
-// read it 0.6 ms later and wrote .934 at a cut of a millisecond, and its
-// call reached keploy after a consumer's two calls served 1.3 ms and 3.9 ms
-// after the move. The call is answered; a value read before the test's
-// begin (the previous test's, on the moved clock) is refused, naming the
-// field.
+// read it after the move and wrote .934 at a cut of a millisecond, and its
+// call reached keploy after a consumer's two calls were served (the row's
+// times after the move, the read at 0.6 ms and the serves at 1.3 ms and
+// 3.5 ms, are illustrative: the logs fix the order only). The call is
+// answered; a value read before the test's begin (the previous test's, on
+// the moved clock) is refused, naming the field.
 func TestStrictChecksAClockReadMadeBeforeAnotherGoroutinesServe(t *testing.T) {
 	base := time.Date(2026, 10, 31, 8, 54, 6, 986_000_000, time.UTC)
 	recBegin := time.Date(2026, 10, 31, 8, 53, 33, 933_485_077, time.UTC)
@@ -49,7 +50,7 @@ func TestStrictChecksAClockReadMadeBeforeAnotherGoroutinesServe(t *testing.T) {
 		tr.ServedMockAt(httpMock("previous", "GET", "/v1/account"), base.Add(-25*time.Millisecond))
 		tr.BeginAt(base.Add(-100 * time.Microsecond))
 		tr.ServedMockAt(httpMock("consumer-1", "GET", "/v1/events"), moveTo.Add(1300*time.Microsecond))
-		tr.ServedMockAt(httpMock("consumer-2", "POST", "/v1/events"), moveTo.Add(3900*time.Microsecond))
+		tr.ServedMockAt(httpMock("consumer-2", "POST", "/v1/events"), moveTo.Add(3500*time.Microsecond))
 		tr.SetLearnEnded(true)
 		return learn.WithTracker(context.Background(), tr)
 	}
