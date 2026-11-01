@@ -783,3 +783,20 @@ func TestOutcomeAReadMinusADebounceIsTheCallsClockBeforeACoarseCopy(t *testing.T
 	in.Mode = ModeOwn
 	iValue(t, "the same read where the clock reading finds no offset", oWord(t, Decide(in), rec, live), "mock-299")
 }
+
+// A read plus a time to live (a lease until now + 30 min, in epoch
+// milliseconds) its call's window holds in both runs is a Clock with that
+// offset, and its line names the offset: the window alone holds the read,
+// not the value (integrations' background_clockread_test.go:303).
+func TestOutcomeAClockWithATimeToLiveNamesItsOffset(t *testing.T) {
+	const p = "body.docs.0.lease_until.$date.$numberLong"
+	rAt := oAt.Add(12 * time.Millisecond)
+	fAt := oAt.Add(time.Minute + 270*time.Millisecond)
+	rec, live := iEpochMs(rAt.Add(30*time.Minute-5*time.Millisecond)), iEpochMs(fAt.Add(30*time.Minute-5*time.Millisecond))
+	in := iCall(p, Number, rec, live, rAt, fAt, iWin(rAt, fAt, 20*time.Millisecond).ComparesOffsets(), nil, nil)
+	d := oWord(t, Decide(in), rec, live)
+	iClock(t, "a lease of 30 minutes", d)
+	if d.Clock == nil || d.Clock.Min > 30*time.Minute || d.Clock.Max < 30*time.Minute || !strings.Contains(d.Line, "clock + 30m") {
+		t.Errorf("a lease of 30 minutes: %s, line %q; want a Clock at + 30m whose line names it", oDescribe([]Decision{d}), d.Line)
+	}
+}
