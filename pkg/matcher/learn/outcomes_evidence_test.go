@@ -402,3 +402,120 @@ func TestOutcomeALateExchangeWithNoViewStatedLeavesAWordUnknown(t *testing.T) {
 		oRefused(t, "a late exchange with no view stated", d, "unknown", m.Name)
 	}
 }
+
+// An exchange served leaf by leaf whose request was recorded at the call's
+// own instant may have come before the call or after it, so the call is
+// read both ways, as main reads it: as an earlier place of the test, and
+// as a recording F gave before the call, where only what its adapter said F
+// gave there counts. A word either reading refuses is refused: told
+// nothing, told a view that holds F's new value, or told a view keploy
+// cannot read. Told as recorded, or a view with no word of the value, the
+// value is made anew each run.
+func TestOutcomeAnExchangeAtTheCallsOwnInstantIsReadBothWays(t *testing.T) {
+	const path = "bind.$8"
+	rec := Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: "82"}}}
+	live := Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: "6c7d"}}}
+	m := jobsMock(chanceSrcRec, "5")
+	m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock = eRecAt, eRecAt.Add(time.Millisecond)
+	view := func(id string) func() (*models.Mock, error) {
+		return func() (*models.Mock, error) {
+			v := jobsMock(id, "9")
+			v.Spec.ReqTimestampMock, v.Spec.ResTimestampMock = m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock
+			return v, nil
+		}
+	}
+	for _, c := range []struct {
+		name    string
+		tell    func(tr *Tracker)
+		refused bool
+	}{
+		{"told nothing", func(*Tracker) {}, true},
+		{"told as recorded", func(tr *Tracker) { tr.ServedMockAsRecorded(m) }, false},
+		{"told a view with no word of the value", func(tr *Tracker) { tr.ServedMockLive(m, "a", view(chanceSrcRec)) }, false},
+		{"told a view that holds F's value", func(tr *Tracker) { tr.ServedMockLive(m, "a", view("6c7d")) }, true},
+		{"told a view keploy cannot read", func(tr *Tracker) {
+			tr.ServedMockLive(m, "a", func() (*models.Mock, error) { return nil, errors.New("gone") })
+		}, true},
+	} {
+		tr := NewTracker()
+		tr.Begin()
+		tr.ServedMock(m)
+		tr.Served(tr.Placed().Test, Earlier{Mock: m.Name, At: m.Spec.ReqTimestampMock, Own: true, Payload: RawOf(m, true),
+			Seen: []Seen{{Side: Response, Leaf: Leaf{Path: "row.0.n", Type: String, Value: "5"}, Live: "5"}}})
+		c.tell(tr)
+		pl := tr.Placed()
+		in := Input{Drifts: clockedDrifts(), Drift: []string{path}, Live: live, Rec: rec, At: eRecAt, Arrived: eRecAt,
+			Earlier: InServeOrder(pl.Earlier, []*models.Mock{m}, pl.Order), Raw: eStartup(), Test: "test-2", Mock: "mock-300",
+			Caps: Caps{BindAtWord: true, AnswerAtWord: true, FViewStated: true}}
+		d := oWord(t, Decide(in), "82", "6c7d")
+		if !c.refused {
+			if d.Outcome != OutcomeFresh {
+				t.Errorf("FALSE RED: an exchange at the call's own instant, %s: %s; want a value made anew", c.name, oDescribe([]Decision{d}))
+			}
+			continue
+		}
+		oRefused(t, "an exchange at the call's own instant, "+c.name, d, RefusalUnknown, m.Name)
+	}
+}
+
+// An answer of the call's own test holds the changed minute (step 3), but
+// a second place may be where it came from: a recording of the set F gave
+// in an earlier test that was recorded after the call, or at its own
+// instant, whose answer names F's minute (or, at its own instant, R's);
+// or another test's answer given before the call whose view in round F
+// keploy cannot tell, which names R's minute. The bind would be a guess
+// between the two: refused, naming the second place. A recording made after
+// the call that holds only R's minute is none: the own answer binds.
+func TestOutcomeAnAnswersInstantBesideASecondPossibleSourceIsRefused(t *testing.T) {
+	const p = "body.sent_at"
+	at := r1Insert
+	recT := at.Truncate(time.Second)
+	const minute = "2006-01-02T15:04Z07:00"
+	rec, live := recT.Format(minute), recT.Add(time.Minute).Format(minute)
+	base := recT.Truncate(time.Minute)
+	own := RawOf(sentAtReceive("mock-42", at.Add(-time.Minute), base.Add(45*time.Second).Format(time.RFC3339)), true).ServedAs(3)
+	call := func(raw []Raw, set ...Raw) Input {
+		in := Input{Drifts: clockedDrifts(), Drift: []string{p}, Live: strLeaf(p, live), Rec: strLeaf(p, rec), At: at, Arrived: at,
+			Raw: append(raw, own), Test: "test-2", Mock: "mock-300",
+			Caps: Caps{BindAtWord: true, AnswerAtWord: true, FViewStated: true}}
+		if len(set) > 0 {
+			in.Given = func() ([]GivenPlaces, error) {
+				var gs []GivenPlaces
+				for _, x := range set {
+					gs = append(gs, PlacesOf(x))
+				}
+				return gs, nil
+			}
+		}
+		return in
+	}
+	for _, when := range []struct {
+		what string
+		at   time.Time
+	}{{"recorded after the call", at.Add(3 * time.Minute)}, {"recorded at the call's own instant", at}} {
+		for _, sent := range []struct {
+			what    string
+			off     time.Duration
+			refused bool
+		}{
+			{"F's minute alone", 65 * time.Second, true},
+			{"rounds to F's minute", 40 * time.Second, true},
+			{"the recorded minute alone", 10 * time.Second, when.at.Equal(at)},
+		} {
+			nb := RawOf(sentAtReceive("mock-44", when.at, base.Add(sent.off).Format(time.RFC3339)), true).ServedAs(1)
+			d := oWord(t, Decide(call(nil, nb)), rec, live)
+			what := "a set recording " + when.what + ", " + sent.what
+			if sent.refused {
+				oRefused(t, what, d, RefusalUnknown, "mock-44", "mock-42")
+				continue
+			}
+			iValue(t, what, d, "mock-42")
+		}
+	}
+	nb := RawOf(sentAtReceive("mock-43", at.Add(-2*time.Minute), base.Add(10*time.Second).Format(time.RFC3339)), true).ServedAs(1)
+	oRefused(t, "another test's answer, view not stated, handed as a recording", oWord(t, Decide(call([]Raw{nb.OfAnotherTest()})), rec, live), RefusalUnknown, "mock-43", "mock-42")
+	oRefused(t, "another test's answer, view not stated, in the set", oWord(t, Decide(call(nil, nb)), rec, live), RefusalUnknown, "mock-43", "mock-42")
+	asRec := nb.ServedAsRecorded()
+	iValue(t, "another test's answer served as recorded, handed as a recording", oWord(t, Decide(call([]Raw{asRec.OfAnotherTest()})), rec, live), "mock-42")
+	iValue(t, "another test's answer served as recorded, in the set", oWord(t, Decide(call(nil, asRec)), rec, live), "mock-42")
+}

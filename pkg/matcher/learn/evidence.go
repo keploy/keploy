@@ -523,6 +523,52 @@ func (dc *decider) drifts() *DriftCache {
 	return NewDriftCache()
 }
 
+// setSecondSource names a recording of the set (Input.Given), which round
+// F gave the application in an earlier test, that may be where the moment
+// of c came from beside an answer of the call's scope, and says how it
+// stands there: one recorded at or after the call, or at a time keploy
+// cannot read, whose answer as F gave it (its view, else as recorded: the
+// fail-closed side where the view is not stated) names F's moment by a cut
+// that does not name R's; one recorded at the call's own instant, or at no
+// readable time, whose answer names R's moment so (R may have had it before
+// the call); and one recorded before the call whose view in round F keploy
+// cannot tell, whose answer names R's moment so. "" where none does.
+func (dc *decider) setSecondSource(c changedInstant) (mock, why string) {
+	if c.rm == nil || c.lm == nil {
+		return "", ""
+	}
+	names := func(ms []givenMoment, m, other moment) bool {
+		for _, v := range ms {
+			if namesMomentApart(v.m, m, other, nil) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, g := range dc.set {
+		atCall := g.at.IsZero() || g.words.noTime || g.at.Equal(dc.in.At)
+		when := "after it"
+		if atCall {
+			when = "at its own instant or at a time keploy cannot read"
+		}
+		ms := g.fView
+		if len(ms) == 0 {
+			ms = g.answer
+		}
+		switch {
+		case !atCall && g.at.Before(dc.in.At):
+			if (g.words.unstated || g.words.unread) && names(g.answer, *c.rm, *c.lm) {
+				return g.mock, "the recorded moment stands in " + g.mock + ", another test's answer given before the call, whose view in round F keploy cannot tell"
+			}
+		case names(ms, *c.lm, *c.rm):
+			return g.mock, "round F's moment stands in " + g.mock + ", which round F gave before the call but which was recorded " + when
+		case atCall && names(g.answer, *c.rm, *c.lm):
+			return g.mock, "the recorded moment stands in " + g.mock + ", recorded " + when + ", which the recording may have given before the call"
+		}
+	}
+	return "", ""
+}
+
 // echoedOutside names the recording outside the call's scope whose answer,
 // as round F gave it before the call, holds the changed instant c: round F's
 // moment, or the recorded one where it was recorded before the call, by a
