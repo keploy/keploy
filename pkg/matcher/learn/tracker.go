@@ -157,6 +157,12 @@ type Tracker struct {
 	// in the order of the real instants it served them at (servedIn), each
 	// with the instant its call reached keploy. NewSet forgets them.
 	servedAt []servedInstant
+	// serveOwner, when set, says whether a recording is the open test's own
+	// (its mapping) or the start-up's, as the store's view in force holds
+	// it (SetServeOwner): each serve is filed so as it is made, and a call
+	// checked against such a recording reads its span from those serves
+	// (LiveSpanOf).
+	serveOwner atomic.Pointer[func(*models.Mock) bool]
 	// serveAt is the real instant each of the running set's serves was made
 	// at, by number (serveAt[n-1] of the n-th, ServedMockAt's at): what an
 	// Order cut at a call's arrival (Order.ArrivedAt) reads. NewSet forgets
@@ -847,9 +853,14 @@ func (t *Tracker) ServedHandshakeIn(m *models.Mock, chosen, in *Flight) {
 
 // servedInstant is a data-plane serve of the store's (servedIn): made at the
 // real instant at, to a call that reached keploy at from (no later than at).
-// upTo is the latest from of it and of every serve made before it.
+// upTo is the latest from of it and of every serve made before it. mine says
+// the store served the open test's own recording or the start-up's
+// (SetServeOwner), and mineUpTo is the latest from of those serves among it
+// and every serve made before it (zero for none).
 type servedInstant struct {
 	at, from, upTo time.Time
+	mine           bool
+	mineUpTo       time.Time
 }
 
 // servedIn is ServedMockAt of a serve made at the real instant at, to a call
@@ -859,18 +870,33 @@ func (t *Tracker) servedIn(m *models.Mock, at, from time.Time, in *Flight, k ser
 	if t == nil || m == nil {
 		return
 	}
+	// Read before the tracker's lock: the store tells a serve holding its
+	// round lock, and its owner reads only the view in force, which no
+	// install replaces under that lock, so it is the view that served m.
+	mine := false
+	if f := t.serveOwner.Load(); f != nil && !m.IsProtocolPhase() {
+		mine = (*f)(m)
+	}
 	t.mu.Lock()
 	if !m.IsProtocolPhase() {
 		i := sort.Search(len(t.servedAt), func(i int) bool { return t.servedAt[i].at.After(at) })
 		t.servedAt = append(t.servedAt, servedInstant{})
 		copy(t.servedAt[i+1:], t.servedAt[i:])
-		t.servedAt[i] = servedInstant{at: at, from: from}
+		t.servedAt[i] = servedInstant{at: at, from: from, mine: mine}
 		for j := i; j < len(t.servedAt); j++ {
-			up := t.servedAt[j].from
-			if j > 0 && t.servedAt[j-1].upTo.After(up) {
-				up = t.servedAt[j-1].upTo
+			up, mineUp := t.servedAt[j].from, time.Time{}
+			if t.servedAt[j].mine {
+				mineUp = up
 			}
-			t.servedAt[j].upTo = up
+			if j > 0 {
+				if t.servedAt[j-1].upTo.After(up) {
+					up = t.servedAt[j-1].upTo
+				}
+				if t.servedAt[j-1].mineUpTo.After(mineUp) {
+					mineUp = t.servedAt[j-1].mineUpTo
+				}
+			}
+			t.servedAt[j].upTo, t.servedAt[j].mineUpTo = up, mineUp
 		}
 	}
 	id := MockID(m)
@@ -1961,14 +1987,99 @@ type liveClock struct {
 // liveClockAt is the tracker's liveClock before arrival, and the running
 // test's recorded begin (RecordedBegin), read under one lock.
 func (t *Tracker) liveClockAt(arrival time.Time) (liveClock, time.Time) {
+	return t.liveClockAtOf(arrival, false)
+}
+
+// liveClockAtOf is liveClockAt; for a call checked against the open test's
+// own recording or the start-up's (own), its previous serve is the later of
+// the latest serve of any flow made before the test began (main's previous
+// serve for the test's first call: the floor) and the latest serve before
+// arrival filed as the test's own or the start-up's (servedInstant.mine).
+// A serve of any other recording made after the test began (a worker:
+// scope's, the background's, the pool's) is the application's work beside
+// the test, not the call before the test's clock read, and starts no span
+// of it. With no test open it is liveClockAt's.
+func (t *Tracker) liveClockAtOf(arrival time.Time, own bool) (liveClock, time.Time) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	lc := liveClock{clock: t.appClock, run: t.appClockRun, client: t.clientTests, set: t.setBegan, began: t.beganAt, zone: t.appZone}
 	i := sort.Search(len(t.servedAt), func(i int) bool { return !t.servedAt[i].at.Before(arrival) })
 	if i > 0 {
 		lc.prev = t.servedAt[i-1].upTo
+		if own && t.open && !t.beganAt.IsZero() {
+			k := sort.Search(i, func(k int) bool { return !t.servedAt[k].at.Before(t.beganAt) })
+			floor := time.Time{}
+			if k > 0 {
+				floor = t.servedAt[k-1].upTo
+			}
+			if m := t.servedAt[i-1].mineUpTo; m.After(floor) {
+				floor = m
+			}
+			lc.prev = floor
+		}
 	}
 	return lc, t.recBegan
+}
+
+// SetServeOwner makes f say whether a recording is the open test's own (its
+// mapping) or the start-up's, as the store's view in force holds it (nil:
+// none, every serve is any flow's and every span LiveSpan's). The store
+// tells a serve holding its round lock (ServedMock and its forms), and the
+// tracker asks f then, before its own lock: f must read only the view in
+// force, never take a lock the store holds while it serves, and never call
+// back into the tracker.
+func (t *Tracker) SetServeOwner(f func(*models.Mock) bool) {
+	if t == nil {
+		return
+	}
+	if f == nil {
+		t.serveOwner.Store(nil)
+		return
+	}
+	t.serveOwner.Store(&f)
+}
+
+// LiveSpanOf is LiveSpan for a call that judging or a replay checks against
+// the recording rec. Where rec is the open test's own recording or the
+// start-up's (SetServeOwner), the span starts at the latest serve before
+// arrival of the test's own recordings or the start-up's, and never before
+// the latest serve of any flow made before the test began (liveClockAtOf):
+// a worker: or background serve that lands between the test's clock read
+// and its send does not put the read before its span, and a read the
+// application kept from an earlier test is still before it, as LiveSpan
+// has it. Any other recording (a worker: scope's, the background's, the
+// pool's), and every call while no test is open, keeps LiveSpan's span
+// from any flow's serve. Record's learn step reads its windows from any
+// flow's serve (CallWindowFrom), never from this.
+func (t *Tracker) LiveSpanOf(arrival time.Time, rec *models.Mock) (Span, bool) {
+	if t == nil {
+		return Span{}, false
+	}
+	own := false
+	if f := t.serveOwner.Load(); f != nil && rec != nil {
+		own = (*f)(rec)
+	}
+	lc, _ := t.liveClockAtOf(arrival, own)
+	s, ok := lc.span(arrival)
+	if ok {
+		s.Zone = lc.zone
+	}
+	return s, ok
+}
+
+// ClockSpanOf is ClockSpanFrom for a call checked against the recording rec
+// (LiveSpanOf), by the tracker on ctx, in the zone of the process that made
+// the call where the agent read it.
+func ClockSpanOf(ctx context.Context, arrival time.Time, rec *models.Mock) (Span, bool) {
+	if ctx == nil {
+		return Span{}, false
+	}
+	t, _ := ctx.Value(trackerKey{}).(*Tracker)
+	s, ok := t.LiveSpanOf(arrival, rec)
+	if z, has := procZoneFrom(ctx); ok && has && z.Loc != nil {
+		s.Zone, s.Own = z.Loc, true
+	}
+	return s, ok
 }
 
 // span is this run's span to arrival (LiveSpan): from the previous serve,

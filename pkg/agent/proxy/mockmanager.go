@@ -108,6 +108,14 @@ type MockManager struct {
 	// by treesMu. An entry whose mock DeleteStartupMock removed stays until the
 	// next staging; every swap and remove is pointer-checked, so it is inert.
 	startupKeys map[*models.Mock]models.TestModeInfo
+	// startupNames is the names of the set's start-up recordings the startup
+	// tree holds: a staging's startup-init mocks (recorded before the first
+	// test window) and its explicit startup slice, never the initial
+	// staging's copy of the whole pool. Rebuilt with the tree and read with
+	// no lock (ServedAsOwnOrStartup, which runs while a serve holds the round
+	// lock). A name DeleteStartupMock removed stays until the next staging:
+	// that recording is never served again.
+	startupNames atomic.Pointer[map[string]struct{}]
 	// startupShared is set while the startup tier may hold the session tier's
 	// own mocks — after a staging that filed them in both (see mirrorStartup)
 	// — and clear otherwise, so session updates pay for mirroring only then.
@@ -1864,9 +1872,25 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 		// parser that is refused reads the new pool on its next try.
 		m.dropPreviousSetConsumes()
 	}
+	// The initial staging files every recording in the startup tier, so its
+	// startup-init slice names none as the start-up's (startupNames).
+	startupNames := make(map[string]struct{}, len(newStartupKeys))
+	if !isInitialStaging {
+		for _, mk := range startupInit {
+			if mk != nil && mk.Name != "" {
+				startupNames[mk.Name] = struct{}{}
+			}
+		}
+	}
+	for _, mk := range explicitStartup {
+		if mk != nil && mk.Name != "" {
+			startupNames[mk.Name] = struct{}{}
+		}
+	}
 	m.treesMu.Lock()
 	m.startup = newStartup
 	m.startupKeys = newStartupKeys
+	m.startupNames.Store(&startupNames)
 	// Initial staging files the session pool in the startup tier too; an
 	// explicit startup slice may share mocks with it as well.
 	m.startupShared.Store(isInitialStaging || len(explicitStartup) > 0)
@@ -4438,6 +4462,30 @@ func (m *MockManager) SetServedObserver(f func(*models.Mock)) {
 		return
 	}
 	m.servedObserver.Store(&f)
+}
+
+// ServedAsOwnOrStartup reports whether mk is the open test's own recording in
+// the view in force (one its view holds as its own: its mapping's, in flight
+// into it, shared with it; never its worker: scope's or the background
+// pool's; and none while a pool view, which is no test's, is in force, even
+// one holding the next test's recordings ahead) or one of the set's start-up
+// recordings (startupNames). The learn
+// tracker files each serve so (learn.Tracker.SetServeOwner), and judging and
+// a replay check a call against such a recording in a span those serves
+// start (learn.Tracker.LiveSpanOf). It runs while a serve holds the round
+// lock and reads the view and the names atomically: it takes no lock and
+// never calls back into the manager.
+func (m *MockManager) ServedAsOwnOrStartup(mk *models.Mock) bool {
+	if m == nil || mk == nil || mk.Name == "" {
+		return false
+	}
+	if names := m.startupNames.Load(); names != nil {
+		if _, ok := (*names)[mk.Name]; ok {
+			return true
+		}
+	}
+	v := m.exactView()
+	return v != nil && v.test != "" && v.holds(mk.Name) && !v.isWorker(mk.Name) && !v.bg.has(mk.Name)
 }
 
 // SetServedInObserver sets the observer told, instead of the served
