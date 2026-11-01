@@ -970,6 +970,23 @@ func TestOutcomeASeparatorChangedBesideAWordGoesRedAtReplay(t *testing.T) {
 	}
 }
 
+// A recording served as recorded before the call holds round F's new word
+// and not the recorded one: a conflict, whose line says what stood there.
+// It must not say the recorded word stood whole at a recording it never was
+// in.
+func TestOutcomeAConflictNamesTheWordThatStoodAtTheRecording(t *testing.T) {
+	const r, f = "fq9915ab", "kd7730cd"
+	x := oAnswer("mock-31", 2*time.Second, f).ServedAs(3).ServedAsRecorded().OfAnotherTest()
+	in := oInput("body.ref", r, f, nil, nil)
+	in.Given = func() ([]GivenPlaces, error) { return []GivenPlaces{PlacesOf(x)}, nil }
+	ds := Decide(in)
+	d := oWord(t, ds, r, f)
+	oRefused(t, "F's word at a recording served as recorded", d, RefusalConflict, "mock-31", f)
+	if d.Refusal != nil && strings.Contains(d.Refusal.Why, strconv.Quote(r)+" stood whole") {
+		t.Fatalf("the line says %q stood at a recording that never held it: %s", r, d.Refusal.Why)
+	}
+}
+
 // A secret's field prints neither value of an id its decoded form carries,
 // though the line quotes words the field's own value does not hold as
 // written.

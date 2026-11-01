@@ -390,6 +390,9 @@ func (dc *decider) word(path string, bare variables.Address, rec, live, text str
 			p.why = setUnknownWhy(g, dc.in.At)
 			unknown = append(unknown, p)
 		case evDisproven:
+			if !listsHold(g.answerLists, w.Rec) {
+				p.why = strconv.Quote(w.Live) + " stood whole at " + p.name + ", served as recorded, where " + strconv.Quote(w.Rec) + " never stood: the value did not follow"
+			}
 			if wordBits(w.Rec) >= 32 || wordBits(w.Live) >= 32 {
 				conflict = append(conflict, p)
 			} else {
@@ -416,7 +419,7 @@ func (dc *decider) word(path string, bare variables.Address, rec, live, text str
 	case len(conflict) > 0:
 		p := conflict[0]
 		return dc.refuse(path, at, n, w.Rec, w.Live, RefusalConflict,
-			strconv.Quote(w.Rec)+" stood whole at "+p.name+"; round F gave "+gaveAt(p, w.Live)+" there and the value did not follow", names(conflict),
+			cmp.Or(p.why, strconv.Quote(w.Rec)+" stood whole at "+p.name+"; round F gave "+gaveAt(p, w.Live)+" there and the value did not follow"), names(conflict),
 			Edit{Kind: EditFixApp}, dc.fieldNoise(path), Edit{Kind: EditGive, Name: lastSegment(path)})
 	case len(unknown) > 0:
 		p := unknown[0]
