@@ -472,9 +472,7 @@ func walkJSON(text string, several bool, yield func(path string, key bool, leaf 
 			return false
 		}
 		t, open := tok.(json.Delim)
-		if s, isText := tok.(string); isText {
-			yield(string(path), false, s)
-		} else if tok != nil && !open {
+		if tok != nil && !open { // a string, a json.Number or a bool, written as textFields writes it
 			yield(string(path), false, fmt.Sprint(tok))
 		}
 		if !open {
