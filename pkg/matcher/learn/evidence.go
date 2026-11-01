@@ -523,12 +523,24 @@ func (dc *decider) drifts() *DriftCache {
 // as round F gave it before the call, holds the changed instant c: round F's
 // moment, or the recorded one where it was recorded before the call, by a
 // cut that does not name the other run's too. ok where main's echo of those
-// places (echoedElsewhere) refuses c, mock "" where no one recording names
-// it alone. An instant there is a copy of what F gave the application, or a
-// pick from it, never a read of the clock.
+// places (echoedElsewhere) refuses c, or where round F's view of a recording
+// of the set (GivenPlaces.fView: what F's serve of it was told to give)
+// holds F's moment so; mock "" where no one recording names it alone. An
+// instant there is a copy of what F gave the application, or a pick from
+// it, never a read of the clock.
 func (dc *decider) echoedOutside(c changedInstant) (mock string, ok bool) {
+	if c.rm == nil || c.lm == nil {
+		return "", false
+	}
+	for _, g := range dc.set {
+		for _, v := range g.fView {
+			if namesMomentApart(v.m, *c.lm, *c.rm, nil) {
+				return g.mock, true
+			}
+		}
+	}
 	op := dc.outside()
-	if op == nil || len(op.answers) == 0 || c.rm == nil || c.lm == nil {
+	if op == nil || len(op.answers) == 0 {
 		return "", false
 	}
 	pair := []driftedInstant{{rec: *c.rm, live: *c.lm}}
