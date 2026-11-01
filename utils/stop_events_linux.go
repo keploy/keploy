@@ -119,11 +119,17 @@ func MarkExit(procs []Reached) ExitMark {
 		}
 		m.Fds += n
 		m.FilesUnsettled = m.FilesUnsettled || !settled
-		if !readThreadsIO("/proc", p.PID, m.IO) {
+		if !threadsIO(p.PID, m.IO) {
 			m.IOPartial = true
 		}
 	}
 	return m
+}
+
+// threadsIO is readThreadsIO of a process in this host's /proc, as MarkExit
+// reads it: a test makes it read a /proc of its own.
+var threadsIO = func(pid int, io map[int]uint64) (whole bool) {
+	return readThreadsIO("/proc", pid, io)
 }
 
 // readThreadsIO puts into io the storage I/O each thread of process pid has

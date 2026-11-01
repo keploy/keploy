@@ -200,10 +200,17 @@ func TestAStopDoesNotJudgeAnAppWaitingOnAChildHeldOffTheCPU(t *testing.T) {
 			exitLooked.Store(&looked)
 			defer exitLooked.Store(nil)
 			dir := starvetest.MemDir(t)
-			// Its loop runs builtins alone, so the trap's child is the
-			// one process it starts; both its loops end with the test,
-			// however it ends (ShellSpin).
-			pid, reaped := readyLeader(t, dir, `trap 'sh -c "`+starvetest.ShellSpin("[ ! -e release ]")+`"; exit 0' INT; touch ready; `+starvetest.ShellSpin(""))
+			// It makes ready with a builtin and loops with builtins alone,
+			// so the trap's child is the one process it starts; both its
+			// loops end with the test, however it ends (ShellSpin). It is
+			// held only once it has no child: one it had before the hold
+			// (a `touch ready` not yet reaped as it was held) would be
+			// taken for the trap's.
+			pid, reaped := readyLeader(t, dir, `trap 'sh -c "`+starvetest.ShellSpin("[ ! -e release ]")+`"; exit 0' INT; : > ready; `+starvetest.ShellSpin(""))
+			task := "/proc/" + strconv.Itoa(pid) + "/task/" + strconv.Itoa(pid)
+			for kids, _ := threadChildren(task); len(kids) > 0; kids, _ = threadChildren(task) {
+				time.Sleep(time.Millisecond)
+			}
 			hold := starvetest.StartHold(t)
 			hold.Take(t, pid)
 			type stopped struct {
@@ -229,7 +236,6 @@ func TestAStopDoesNotJudgeAnAppWaitingOnAChildHeldOffTheCPU(t *testing.T) {
 					}
 				}
 			}
-			task := "/proc/" + strconv.Itoa(pid) + "/task/" + strconv.Itoa(pid)
 			interrupted := time.Now()
 			var child int
 			for child == 0 {
@@ -881,7 +887,9 @@ func TestMarkExitCountsAProcessWhoseMainThreadExited(t *testing.T) {
 // others', so that one that ends takes none of the mark from them
 // (ExitRatchet). Where the threads could not be listed whole (a count of
 // them no listing makes up), it says so, and the mark of one the listing
-// left out is kept (ExitMark.IOPartial).
+// left out is kept (ExitMark.IOPartial). MarkExit, of this test's process,
+// reads its threads' I/O from the fake /proc (threadsIO): its IO is theirs,
+// and it is IOPartial only where their listing was not whole.
 func TestReadThreadsIOReadsEachThreadsOwnCount(t *testing.T) {
 	type proc = struct {
 		state   byte
@@ -908,6 +916,21 @@ func TestReadThreadsIOReadsEachThreadsOwnCount(t *testing.T) {
 	if !maps.Equal(got, want) {
 		t.Fatalf("read %v; want %v: each thread's own count, by its tid, and not the process's", got, want)
 	}
+	read := threadsIO
+	t.Cleanup(func() { threadsIO = read })
+	threadsIO = func(_ int, io map[int]uint64) bool { return readThreadsIO(root, 900, io) }
+	self, ok := ReadProcStat(os.Getpid())
+	if !ok {
+		t.Fatal("premise: this test's stat could not be read")
+	}
+	marked := func(partial bool) {
+		t.Helper()
+		m := MarkExit([]Reached{{PID: os.Getpid(), Start: self.StartTime}})
+		if m.IOPartial != partial || !maps.Equal(m.IO, want) {
+			t.Fatalf("MarkExit read %+v; want IO %v, its threads' in the fake /proc, and IOPartial %v", m, want, partial)
+		}
+	}
+	marked(false)
 	// Its stat counts a third thread that no listing shows.
 	stat, err := os.ReadFile(filepath.Join(root, "900", "stat"))
 	if err != nil {
@@ -925,6 +948,7 @@ func TestReadThreadsIOReadsEachThreadsOwnCount(t *testing.T) {
 	if !maps.Equal(got, want) {
 		t.Fatalf("read %v from a listing not whole; want %v, the threads it showed", got, want)
 	}
+	marked(true)
 }
 
 func TestTheExitRatchetTakesOnlyProgress(t *testing.T) {
@@ -1317,13 +1341,19 @@ func TestStorageIOItsChildDidIsNoProgressOfAnApp(t *testing.T) {
 				readSaid()
 			}
 			said("held")
-			// Held in the kernel from here until it is killed.
+			// Held in the kernel, until it is killed, once it has its
+			// vfork's child (its only one: the reader is reaped before
+			// "held") and then reads D: a wait in the kernel before that
+			// (a page fault, the lock the vfork takes to copy its memory)
+			// is short, and may be over by MarkExit's read.
+			app := "/proc/" + strconv.Itoa(cmd.Process.Pid) + "/task/" + strconv.Itoa(cmd.Process.Pid)
 			for {
+				kids, _ := threadChildren(app)
 				st, ok := ReadProcStat(cmd.Process.Pid)
 				if !ok {
 					t.Fatal("the app is gone before it was read in the kernel")
 				}
-				if st.State == 'D' {
+				if len(kids) > 0 && st.State == 'D' {
 					break
 				}
 				time.Sleep(time.Millisecond)

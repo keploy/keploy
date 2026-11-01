@@ -429,10 +429,50 @@ func TestSpinEndsWithItsTestAlone(t *testing.T) {
 	}
 }
 
-// A hold lets the processes it held run on the CPUs they could before: one
-// let go alone (Holding.Let) at once, while the hold holds the rest; the
-// rest as it is released; and one a held process started (Holding.TakeChild),
-// held from its start, as that process could before the hold.
+// policyRestoreRequiredEnv, set to 1, fails TestAHoldLetsItsProcessesRunAsBefore
+// where the kernel would not give a thread at the idle policy its policy
+// back (policyGivenBack), instead of checking its CPUs alone: go-test.yaml
+// sets it in its run as root, where the kernel does.
+const policyRestoreRequiredEnv = "KEPLOY_TEST_POLICY_RESTORE_REQUIRED"
+
+// policyGivenBack reports whether the kernel gives a thread at the idle
+// policy back the policy it had, as a hold lets it go: from the idle policy
+// an unprivileged one gets back only what RLIMIT_NICE allows (by default,
+// nothing), one with CAP_SYS_NICE all. A process of the test's, started for
+// that, is asked.
+func policyGivenBack(t *testing.T) bool {
+	t.Helper()
+	cmd := exec.Command("sleep", "600")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
+	was, err := unix.SchedGetAttr(cmd.Process.Pid, 0)
+	if err != nil {
+		t.Fatalf("read the policy of process %d: %v", cmd.Process.Pid, err)
+	}
+	idle := unix.SchedAttr{Size: unix.SizeofSchedAttr, Policy: unix.SCHED_IDLE}
+	if err := unix.SchedSetAttr(cmd.Process.Pid, &idle, 0); err != nil {
+		t.Skipf("cannot set process %d to the idle policy: %v", cmd.Process.Pid, err)
+	}
+	err = unix.SchedSetAttr(cmd.Process.Pid, was, 0)
+	if err == nil {
+		return true
+	}
+	if os.Getenv(policyRestoreRequiredEnv) == "1" {
+		t.Fatalf("the kernel gives a thread at the idle policy no policy back (%v), and %s=1", err, policyRestoreRequiredEnv)
+	}
+	t.Logf("the kernel gives a thread at the idle policy no policy back (%v): only the CPUs a hold gives back are checked", err)
+	return false
+}
+
+// A hold lets the processes it held run as they could before: on the CPUs
+// they could run on, and at the policy and nice they had, where the kernel
+// gives that back (policyGivenBack). One let go alone (Holding.Let) at
+// once, while the hold holds the rest; the rest as it is released; and one
+// a held process started (Holding.TakeChild), held from its start, as that
+// process could before the hold.
 func TestAHoldLetsItsProcessesRunAsBefore(t *testing.T) {
 	TakesACPU(t)
 	var could unix.CPUSet
@@ -442,6 +482,7 @@ func TestAHoldLetsItsProcessesRunAsBefore(t *testing.T) {
 	if could.Count() < 2 {
 		t.Skip("this process may run on one CPU: a hold moves no process off others")
 	}
+	back := policyGivenBack(t)
 	// The parent starts its child once a line comes on its stdin, and
 	// says the child's pid.
 	start := func(command string) (*exec.Cmd, io.WriteCloser, *bufio.Scanner) {
@@ -461,27 +502,53 @@ func TestAHoldLetsItsProcessesRunAsBefore(t *testing.T) {
 		t.Cleanup(func() { _ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); _ = cmd.Wait() })
 		return cmd, stdin, bufio.NewScanner(stdout)
 	}
-	alone, _, _ := start("exec sleep 600")
-	parent, goOn, said := start("read line; sleep 600 & echo $!; wait")
-	h := StartHold(t)
-	h.Take(t, alone.Process.Pid, parent.Process.Pid)
-	cpus := func(pid int) unix.CPUSet {
+	type sched struct {
+		cpus   unix.CPUSet
+		policy uint32
+		nice   int32
+	}
+	schedOf := func(pid int) sched {
 		t.Helper()
-		var set unix.CPUSet
-		if err := unix.SchedGetaffinity(pid, &set); err != nil {
+		var s sched
+		if err := unix.SchedGetaffinity(pid, &s.cpus); err != nil {
 			t.Fatalf("read the CPUs of process %d: %v", pid, err)
 		}
-		return set
+		attr, err := unix.SchedGetAttr(pid, 0)
+		if err != nil {
+			t.Fatalf("read the policy of process %d: %v", pid, err)
+		}
+		s.policy, s.nice = attr.Policy, attr.Nice
+		return s
 	}
-	if got := cpus(alone.Process.Pid); got != h.cpu {
-		t.Fatalf("a held process may run on CPUs %v; want the hold's, %v", cpuList(got), cpuList(h.cpu))
+	// asBefore fails the test where process pid does not run as was:
+	// on was's CPUs, and at its policy and nice where the kernel gives
+	// them back.
+	asBefore := func(what string, pid int, was sched) {
+		t.Helper()
+		got := schedOf(pid)
+		if got.cpus != was.cpus {
+			t.Fatalf("%s may run on CPUs %v; want %v, as before the hold", what, cpuList(got.cpus), cpuList(was.cpus))
+		}
+		if back && (got.policy != was.policy || got.nice != was.nice) {
+			t.Fatalf("%s runs at policy %d, nice %d; want policy %d, nice %d, as before the hold", what, got.policy, got.nice, was.policy, was.nice)
+		}
+	}
+	alone, _, _ := start("exec sleep 600")
+	parent, goOn, said := start("read line; sleep 600 & echo $!; wait")
+	aloneWas, parentWas := schedOf(alone.Process.Pid), schedOf(parent.Process.Pid)
+	if aloneWas.cpus != could || parentWas.cpus != could {
+		t.Fatalf("premise: the test's processes may run on CPUs %v and %v, not this process's, %v", cpuList(aloneWas.cpus), cpuList(parentWas.cpus), cpuList(could))
+	}
+	h := StartHold(t)
+	h.Take(t, alone.Process.Pid, parent.Process.Pid)
+	held := sched{cpus: h.cpu, policy: unix.SCHED_IDLE}
+	if got := schedOf(alone.Process.Pid); got.cpus != held.cpus || got.policy != held.policy {
+		t.Fatalf("a held process may run on CPUs %v at policy %d; want the hold's, %v at the idle policy", cpuList(got.cpus), got.policy, cpuList(h.cpu))
 	}
 	h.Let(alone.Process.Pid)
-	if got := cpus(alone.Process.Pid); got != could {
-		t.Fatalf("a process let go may run on CPUs %v; want %v, as before the hold", cpuList(got), cpuList(could))
-	}
-	if got := cpus(parent.Process.Pid); got != h.cpu {
-		t.Fatalf("a held process, another let go, may run on CPUs %v; want the hold's, %v", cpuList(got), cpuList(h.cpu))
+	asBefore("a process let go", alone.Process.Pid, aloneWas)
+	if got := schedOf(parent.Process.Pid); got.cpus != held.cpus || got.policy != held.policy {
+		t.Fatalf("a held process, another let go, may run on CPUs %v at policy %d; want the hold's, %v at the idle policy", cpuList(got.cpus), got.policy, cpuList(h.cpu))
 	}
 	if _, err := io.WriteString(goOn, "go\n"); err != nil {
 		t.Fatal(err)
@@ -495,9 +562,69 @@ func TestAHoldLetsItsProcessesRunAsBefore(t *testing.T) {
 	}
 	h.TakeChild(t, child, parent.Process.Pid)
 	h.Release()
-	for what, pid := range map[string]int{"a held process": parent.Process.Pid, "its child, held from its start": child, "one let go before": alone.Process.Pid} {
-		if got := cpus(pid); got != could {
-			t.Fatalf("%s may run on CPUs %v once the hold is released; want %v, as before the hold", what, cpuList(got), cpuList(could))
-		}
+	asBefore("a held process, once the hold is released,", parent.Process.Pid, parentWas)
+	asBefore("its child, held from its start, once the hold is released,", child, parentWas)
+	asBefore("one let go before, once the hold is released,", alone.Process.Pid, aloneWas)
+}
+
+// takeChildEnv, set to 1, has TestTakeChildHelper take, as one started
+// held, a child its parent started before the hold.
+const takeChildEnv = "KEPLOY_TEST_TAKE_CHILD"
+
+// TestTakeChildHelper is not a test: with takeChildEnv set it holds a
+// process whose child was started before the hold, then takes the child as
+// one the held process started (Holding.TakeChild), which fails it; it says
+// "taken" where that did not.
+func TestTakeChildHelper(t *testing.T) {
+	if os.Getenv(takeChildEnv) != "1" {
+		t.Skip("a process of TestTakeChildRefusesAChildNotStartedHeld")
+	}
+	cmd := exec.Command("sh", "-c", "sleep 600 & echo $!; wait")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	said := bufio.NewScanner(stdout)
+	if !said.Scan() {
+		t.Fatalf("the parent ended before it said its child's pid (%v)", said.Err())
+	}
+	child, err := strconv.Atoi(said.Text())
+	if err != nil {
+		t.Fatalf("the parent said %q, not its child's pid", said.Text())
+	}
+	t.Cleanup(func() { _ = syscall.Kill(child, syscall.SIGKILL); _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	h := StartHold(t)
+	h.Take(t, cmd.Process.Pid)
+	h.TakeChild(t, child, cmd.Process.Pid)
+	fmt.Println("taken")
+}
+
+// TakeChild takes only a child that was started held: one its parent
+// started before the hold ran free from its start, and a stop that judges
+// it from then would judge time it ran free, so TakeChild fails the test
+// (TestTakeChildHelper) rather than take it as held.
+func TestTakeChildRefusesAChildNotStartedHeld(t *testing.T) {
+	TakesACPU(t)
+	cmd := exec.Command(os.Args[0], "-test.run=^TestTakeChildHelper$", "-test.v")
+	cmd.Env = append(os.Environ(), takeChildEnv+"=1")
+	// Its group, killed whole: its parent and child too.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
+	var out bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &out
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) })
+	err := cmd.Wait()
+	said := out.String()
+	if strings.Contains(said, "--- SKIP: TestTakeChildHelper") {
+		t.Skipf("the helper skipped: %s", said)
+	}
+	if err == nil || strings.Contains(said, "\ntaken\n") || !strings.Contains(said, "is not held") || !strings.Contains(said, "it ran free from its start") {
+		t.Fatalf("TakeChild of a child started before its parent was held ended %v; want it to fail the test, as not held:\n%s", err, said)
 	}
 }
