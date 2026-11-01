@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 )
@@ -72,14 +73,17 @@ var ErrAddress = errors.New("not a word address")
 // ParseAddress reads a word address. A string with no step and no word reads
 // as Parse reads it, with Word -1; so does one Parse reads whole whose '|'
 // or '#' does not start a step or a word (a name written before the escape).
+// So a mistyped step reads as part of a name no call holds: it fails at
+// replay (nothing there to bind or check), not here. On an error, Word -1.
 func ParseAddress(s string) (Address, error) {
 	a, err := parseAddress(s)
 	if err != nil {
 		if p, perr := Parse(s); perr == nil {
 			return Address{Place: p, Word: -1}, nil
 		}
+		return Address{Word: -1}, err
 	}
-	return a, err
+	return a, nil
 }
 
 func parseAddress(s string) (Address, error) {
@@ -333,9 +337,9 @@ func Decode(st Step, text string) (string, bool) {
 	case st == StepJSON:
 		d := json.NewDecoder(strings.NewReader(text))
 		d.UseNumber()
-		var x interface{}
-		if d.Decode(&x) != nil || d.More() {
-			return "", false
+		var x, more interface{}
+		if d.Decode(&x) != nil || d.Decode(&more) != io.EOF {
+			return "", false // not one JSON value alone
 		}
 		switch x := x.(type) {
 		case string:
@@ -366,27 +370,6 @@ func Decode(st Step, text string) (string, bool) {
 		if lo, hi, ok := cookieValue(text, string(st[len(cookiePrefix):])); ok {
 			return text[lo:hi], true
 		}
-	}
-	return "", false
-}
-
-// Encode is text encoded by the step st alone: pct escapes every byte but
-// letters, digits and "-._~"; b64 pads, b64url does not; json writes a
-// string literal; a cookie value is itself where it is one. ok is false
-// for a JWT claim (it cannot be signed) and a text a cookie value cannot
-// hold.
-func Encode(st Step, text string) (string, bool) {
-	switch {
-	case st == StepPct:
-		return pctEncode(text), true
-	case st == StepB64:
-		return base64.StdEncoding.EncodeToString([]byte(text)), true
-	case st == StepB64URL:
-		return base64.RawURLEncoding.EncodeToString([]byte(text)), true
-	case st == StepJSON:
-		return jsonString(text, false)
-	case strings.HasPrefix(string(st), cookiePrefix):
-		return text, cookieSafe(text)
 	}
 	return "", false
 }

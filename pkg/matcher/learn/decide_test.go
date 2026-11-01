@@ -17,6 +17,11 @@ var declaredDecideBy, declaredClockInWindow, declaredClockSinceBegin = decideBy,
 // TestReplayAndLearnShareOneWordRule (TY3): variables.Words, the word rule
 // replay reads, finds the runs learn's isWord finds.
 func TestReplayAndLearnShareOneWordRule(t *testing.T) {
+	for c := 0; c < 256; c++ {
+		if s := string([]byte{byte(c)}); (len(variables.Words(s)) == 1) != isWord(byte(c)) {
+			t.Errorf("byte %#x: replay's word rule and learn's isWord (%v) differ", c, isWord(byte(c)))
+		}
+	}
 	runs := func(s string) [][2]int {
 		var out [][2]int
 		for i := 0; i < len(s); i++ {
@@ -68,8 +73,8 @@ func TestDecideWithNoOrderRefusesEveryChangedWord(t *testing.T) {
 	in := Input{
 		Test: "test-1", Mock: "mock-3",
 		Rec:   Shape{Leaves: leaves("body.id", "order-17-a-5", "body.sep", "a-b", "header.date", "2026-11-01T10:00:00Z", "body.more", "a b", "body.mix", "a-17"), Body: map[string]interface{}{}},
-		Live:  Shape{Leaves: leaves("body.id", "order-42-a-6", "body.sep", "a_b", "header.date", "2026-11-01T10:00:05Z", "body.more", "a b c", "body.mix", "a_42"), Body: map[string]interface{}{}},
-		Drift: []string{"body.id", "body.sep", "header.date", "body.more", "body.gone", "body.mix"},
+		Live:  Shape{Leaves: leaves("body.id", "order-42-a-6", "body.sep", "a_b", "header.date", "2026-11-01T10:00:05Z", "body.more", "a b c", "body.mix", "a_42", "body.added", "new"), Body: map[string]interface{}{}},
+		Drift: []string{"body.id", "body.sep", "header.date", "body.more", "body.gone", "body.mix", "body.added"},
 	}
 	ds := Decide(in)
 	type got struct {
@@ -98,6 +103,7 @@ func TestDecideWithNoOrderRefusesEveryChangedWord(t *testing.T) {
 		{"body.more", "body.more", "a b", "a b c", -1},
 		{"body.gone", "", "", "", -1},
 		{"body.mix", "body.mix", "a-17", "a_42", -1},
+		{"body.added", "body.added", "", "new", -1},
 	}
 	if !reflect.DeepEqual(gots, want) {
 		t.Errorf("Decide refused\n%+v\nwant\n%+v", gots, want)

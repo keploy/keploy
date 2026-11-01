@@ -1290,11 +1290,11 @@ func (o ClockOffset) signed() bool {
 // same in either order and however a place's learnings are grouped, so a
 // recording paired many times keeps one answer whatever order its
 // pairings came in. Two at different Steps meet as StepApart (Empty). Why
-// is o's, or p's where o has none: nothing replays it, so the order only
-// picks which learned line a reader sees.
+// is the lesser of the two that are set (nothing replays it): one learned
+// line, whatever the order.
 func (o ClockOffset) Meet(p ClockOffset) ClockOffset {
 	m := ClockOffset{Min: max(o.Min, p.Min), Max: min(o.Max, p.Max), Res: max(o.Res, p.Res), Zone: meetZones(o.Zone, p.Zone), Layout: meetLayouts(o.Layout, p.Layout), Since: meetSince(o.Since, p.Since), Why: o.Why, Step: o.Step}
-	if m.Why == "" {
+	if m.Why == "" || p.Why != "" && p.Why < m.Why {
 		m.Why = p.Why
 	}
 	if o.Step != p.Step {

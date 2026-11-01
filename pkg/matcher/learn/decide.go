@@ -263,8 +263,12 @@ var (
 func refuseAll(in Input) []Decision {
 	var out []Decision
 	for _, path := range in.Drift {
-		rec, live := in.Rec.Leaves[path], in.Live.Leaves[path]
+		rec, inRec := in.Rec.Leaves[path]
+		live := in.Live.Leaves[path]
 		at := in.AddressOf(rec, false)
+		if !inRec { // a leaf only round F has: its place is round F's
+			at = in.AddressOf(live, false)
+		}
 		n := len(out)
 		if rw, lw := variables.Words(rec.Value), variables.Words(live.Value); rec.Type != Instant && live.Type != Instant && len(rw) == len(lw) && apart(rec.Value, rw) == apart(live.Value, lw) {
 			for i := range rw {

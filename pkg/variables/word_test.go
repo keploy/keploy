@@ -71,8 +71,8 @@ func TestAWordAddressReadsAsItIsWritten(t *testing.T) {
 	}
 
 	for _, s := range []string{"url.path[2]|nope", "url.path[2]#x", "url.path[2]#01", "header.", "url.path[2]|jwt.", "body"} {
-		if a, err := ParseAddress(s); err == nil {
-			t.Errorf("ParseAddress(%q) = %+v, want an error", s, a)
+		if a, err := ParseAddress(s); err == nil || a.Word != -1 {
+			t.Errorf("ParseAddress(%q) = %+v, %v; want an error and word -1 (the whole value)", s, a, err)
 		}
 	}
 	// A word or a step of no place names nothing, and prints as Place{} does.
@@ -142,6 +142,9 @@ func TestAWordIsReadAndReplacedThroughItsSteps(t *testing.T) {
 		{"b=1", []Step{Cookie("a")}, -1},
 		{"not.a.jwt!", []Step{JWTClaim("sub")}, -1},
 		{`{"a":1}`, []Step{StepJSON}, -1},
+		{`"abc"}`, []Step{StepJSON}, -1},
+		{`"abc" "d"`, []Step{StepJSON}, -1},
+		{`1]`, []Step{StepJSON}, -1},
 		{"a-b", nil, 2},
 		{"", []Step{StepB64}, -1},
 	} {
@@ -154,20 +157,4 @@ func TestAWordIsReadAndReplacedThroughItsSteps(t *testing.T) {
 		}
 	}
 
-	for _, st := range []Step{StepPct, StepJSON, StepB64, StepB64URL} {
-		e, ok := Encode(st, "abc-17")
-		d, dok := Decode(st, e)
-		if !ok || !dok || d != "abc-17" {
-			t.Errorf("Encode then Decode through %s: %q %v then %q %v", st, e, ok, d, dok)
-		}
-	}
-	if e, ok := Encode(JWTClaim("sub"), "x"); ok {
-		t.Errorf("Encode of a JWT claim = %q; want a refusal", e)
-	}
-	if e, ok := Encode(Cookie("c"), "abc-17"); !ok || e != "abc-17" {
-		t.Errorf("Encode of a cookie value = %q, %v", e, ok)
-	}
-	if e, ok := Encode(Cookie("c"), "a;b"); ok {
-		t.Errorf("Encode of a cookie value holding ; = %q; want a refusal", e)
-	}
 }

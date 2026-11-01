@@ -82,7 +82,8 @@ var ErrPlace = errors.New("not a variable place")
 // them, before another '\' or at its end as \\ (escapeName); any other
 // '\' is itself. A JSON key holding '|' or '#' is quoted, as one holding '.'.
 // A name written before the escape reads as it did, but for a "\|", "\#"
-// or "\\" in it, which no header name holds (none is a token byte).
+// or "\\" in it: no header name holds one ('\' is not a token byte), and a
+// query name that did now reads with that '\' dropped.
 func Parse(s string) (Place, error) {
 	switch {
 	case s == bodyPrefix:

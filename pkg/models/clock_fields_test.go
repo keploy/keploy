@@ -89,7 +89,7 @@ func TestClockFieldsRoundTripAndLeaveOldFilesAlone(t *testing.T) {
 	}
 }
 
-// TestClockFieldsMeetAndHold (TY5): Meet keeps the first Why, meets two
+// TestClockFieldsMeetAndHold (TY5): Meet keeps one Why in either order, meets two
 // Steps as StepApart (Empty); Holds of a Step above zero is holdsStep's,
 // which holds nothing until a keploy reads it; Valid reads a decoded Form.
 func TestClockFieldsMeetAndHold(t *testing.T) {
@@ -102,7 +102,7 @@ func TestClockFieldsMeetAndHold(t *testing.T) {
 		empty    bool
 		inString string
 	}{
-		{"the first why", ClockOffset{Res: 1, Why: "a"}, ClockOffset{Res: 1, Why: "b"}, "a", 0, false, ""},
+		{"one why", ClockOffset{Res: 1, Why: "b"}, ClockOffset{Res: 1, Why: "a"}, "a", 0, false, ""},
 		{"the why there is", ClockOffset{Res: 1}, ClockOffset{Res: 1, Why: "b"}, "b", 0, false, ""},
 		{"one step", ClockOffset{Res: 1, Step: time.Hour}, ClockOffset{Res: 1, Step: time.Hour}, "", time.Hour, false, "cut to 1h0m0s before the offset"},
 		{"two steps", ClockOffset{Res: 1, Step: time.Hour}, ClockOffset{Res: 1}, "", StepApart, true, "no one step"},
@@ -112,7 +112,7 @@ func TestClockFieldsMeetAndHold(t *testing.T) {
 		if m.Why != c.why || m.Step != c.step || m.Empty() != c.empty || !strings.Contains(m.String(), c.inString) {
 			t.Errorf("%s: %+v (%s)", c.name, m, m)
 		}
-		if n := c.b.Meet(c.a); n.Step != m.Step || n.Empty() != m.Empty() {
+		if n := c.b.Meet(c.a); n.Step != m.Step || n.Empty() != m.Empty() || n.Why != m.Why {
 			t.Errorf("%s: the meet's step depends on its order: %+v and %+v", c.name, m, n)
 		}
 	}
