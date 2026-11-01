@@ -374,7 +374,7 @@ func TestAReplayersInBandTLSHandshakeIsReadiedAndChargedAsAnyOther(t *testing.T)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		defer app.Close()
+		defer func() { _ = app.Close() }()
 		if _, err := app.Write([]byte{0x00, 0x00, 0x00, 0x08, 0x04, 0xd2, 0x16, 0x2f}); err != nil {
 			t.Errorf("SSLRequest: %v", err)
 			return
