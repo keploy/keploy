@@ -55,11 +55,17 @@
 #     keploy in it, fails the install and installs nothing, not even the part
 #     of keploy that was extracted.
 #   - --oss as root puts the release's keploy in /usr/local/bin with sudo,
-#     from its private temp directory.
+#     from its private temp directory; when sudo refuses, the install fails.
+#   - the same holds for the Linux arm64 and the macOS (Apple Silicon)
+#     release, which the uname stub drives on any Linux.
 #   - an error page from the installer URL is never sourced.
-#   - an unsupported architecture or OS, and Windows, fail the --oss install.
+#   - an unsupported architecture or OS, and Windows, fail the --oss install,
+#     with -isCI too, before anything is downloaded.
 #   - a failed install returns, never exits: the shell it was sourced into
-#     lives on, and the temp directory is still removed.
+#     lives on, and the temp directory is still removed. Sourced under
+#     `set -eo pipefail` (a CI step's shell) the shell exits on the failure,
+#     as it should, but only after the temp directory is removed; and an
+#     install that succeeds still does.
 #   - job control is as it was: on in an interactive shell, off in a CI step.
 #   - keploy.sh leaves no status variable set in the caller's shell.
 #   - no case touches a path outside its own directories, or runs sudo for
@@ -243,7 +249,9 @@ CALLERS_ENT="the caller's own keploy-enterprise.sh"
 # case_env array. case_sudo_root lets sudo mkdir and mv run, mapped into
 # $root_dir; case_home_blocked makes ~/.keploy a file, so nothing can be put
 # in ~/.keploy/bin; case_pty sources keploy.sh from an interactive shell on a
-# terminal. Leaves $work, $out, $log, $scratch, $root_dir and $rc.
+# terminal; case_errexit sources it under `set -eo pipefail`, the shell of a
+# GitHub Actions `shell: bash` step. Leaves $work, $out, $log, $scratch,
+# $root_dir and $rc.
 install() {
   local dir="$tmp/$run_shell-$1"
   shift
@@ -268,14 +276,15 @@ install() {
   else
     cp "$installer" "$work/install.sh"
   fi
-  local runner
+  local runner body=$BODY
+  [ -z "$case_errexit" ] || body="set -eo pipefail; $BODY"
   if [ -n "$case_pty" ]; then
     local cmd flags=(-f)
     [ "$run_shell" = bash ] && flags=(--norc --noprofile)
-    printf -v cmd '%q ' "$run_shell" "${flags[@]}" -i -c "$BODY" install "$src" "$@"
+    printf -v cmd '%q ' "$run_shell" "${flags[@]}" -i -c "$body" install "$src" "$@"
     runner=(timeout 120 script -qec "$cmd" /dev/null)
   else
-    runner=("$run_shell" -c "$BODY" install "$src" "$@")
+    runner=("$run_shell" -c "$body" install "$src" "$@")
   fi
   (
     cd "$work" || exit 1
@@ -290,6 +299,7 @@ install() {
   case_sudo_root=""
   case_home_blocked=""
   case_pty=""
+  case_errexit=""
 }
 # What the inner shell runs: it sources keploy.sh the way users do, then logs
 # that it lived on (an `exit` in keploy.sh would have closed it) with the
@@ -303,6 +313,7 @@ case_in_repo=""
 case_sudo_root=""
 case_home_blocked=""
 case_pty=""
+case_errexit=""
 # Files of someone else's in each case's TMPDIR, named like the ones the --oss
 # route downloads and extracts.
 THEIRS="keploy keploy.tar.gz LICENSE README.md READMEes-Es.md"
@@ -367,6 +378,7 @@ job_control() {
 no_status_left() { [ "$(after_source ent_status)" = unset ] && [ "$(after_source oss_status)" = unset ]; }
 release_keploy_ran() { grep -qF "the release's keploy ran: example" "$log"; }
 release_keploy_did_not_run() { ! grep -qF "the release's keploy ran" "$log"; }
+fetched() { grep -qF -- "/$1" "$log"; } # <release tarball name>
 ent_ran_with() { grep -qF "ent-installer ran from $work with: $1" "$log"; }
 ent_did_not_run() { ! grep -q '^ent-installer ' "$log"; }
 callers_install_not_run() { ! grep -qF "the caller's own install.sh ran" "$log"; }
@@ -465,6 +477,15 @@ suite() {
   check "nothing outside its own directories is touched, and sudo runs only mkdir and mv" stayed_inside
   check "the repo's install.sh and keploy-enterprise.sh are kept unchanged, and nothing is added" callers_dir_untouched callers
 
+  echo "== --oss as root (-isCI), from a repo root, and sudo refuses"
+  case_in_repo=1
+  install oss-root-refused --oss -isCI
+  check "the install fails" test "$rc" -ne 0
+  check "it says so" said "Failed to move the keploy binary"
+  check "nothing is installed, and no keploy runs" eval 'nothing_installed && release_keploy_did_not_run'
+  check "the private temp directory is still removed, and the temp directory is otherwise as it was" tmp_left_as_it_was
+  check "the repo's install.sh and keploy-enterprise.sh are kept unchanged, and nothing is added" callers_dir_untouched callers
+
   echo "== --oss, the download fails"
   case_env=(FAKE_RELEASE_DOWNLOAD_FAIL=1)
   install oss-download-fails --oss -noRoot
@@ -472,6 +493,7 @@ suite() {
   check "nothing is installed, and no keploy runs" eval 'nothing_installed && release_keploy_did_not_run'
   check "the private temp directory is still removed, and the temp directory is otherwise as it was" tmp_left_as_it_was
   check "nothing outside its own directories is touched, and sudo is not run" stayed_inside
+  check "no status variable is left set in the caller's shell" no_status_left
 
   echo "== --oss, the download is not a tarball"
   case_env=(FAKE_RELEASE_TARBALL="$tmp/corrupt.tar.gz")
@@ -507,22 +529,114 @@ suite() {
   check "the private temp directory is still removed, and the temp directory is otherwise as it was" tmp_left_as_it_was
   check "nothing outside its own directories is touched, and sudo is not run" stayed_inside
 
-  local row name what env args said_what
+  echo "== --oss on Linux arm64"
+  case_env=(FAKE_UNAME_M=aarch64)
+  install oss-arm64 --oss -noRoot
+  [ "$rc" -eq 0 ] || show_output
+  check "the install succeeds" test "$rc" -eq 0
+  check "it downloads the Linux arm64 release" fetched keploy_linux_arm64.tar.gz
+  check "the release's keploy is installed in ~/.keploy/bin, and keploy example runs it" eval 'installed && release_keploy_ran'
+  check "the download and extraction used a private temp directory, removed afterwards; the other files there are kept unchanged" used_private_dir_and_cleaned_up release-download-to keploy.tar.gz
+  check "nothing outside its own directories is touched, and sudo is not run" stayed_inside
+
+  echo "== --oss on Linux arm64, the download is cut off partway through keploy"
+  case_env=(FAKE_UNAME_M=aarch64 FAKE_RELEASE_TARBALL="$tmp/truncated.tar.gz")
+  install oss-arm64-cut-off --oss -noRoot
+  check "the install fails" test "$rc" -ne 0
+  check "the part of keploy that was extracted is not installed, and no keploy runs" eval 'nothing_installed && release_keploy_did_not_run'
+  check "the private temp directory is still removed, and the temp directory is otherwise as it was" tmp_left_as_it_was
+
+  # macOS installs without root whatever the flags say, so these run without
+  # -noRoot.
+  echo "== --oss on macOS (Apple Silicon)"
+  case_env=(FAKE_UNAME_S=Darwin FAKE_UNAME_M=arm64)
+  install oss-macos --oss
+  [ "$rc" -eq 0 ] || show_output
+  check "the install succeeds" test "$rc" -eq 0
+  check "it downloads the macOS arm64 release" fetched keploy_darwin_arm64.tar.gz
+  check "the release's keploy is installed in ~/.keploy/bin, and keploy example runs it" eval 'installed && release_keploy_ran'
+  check "the download and extraction used a private temp directory, removed afterwards; the other files there are kept unchanged" used_private_dir_and_cleaned_up release-download-to keploy.tar.gz
+  check "nothing outside its own directories is touched, and sudo is not run" stayed_inside
+
+  echo "== --oss on macOS, the download is cut off partway through keploy"
+  case_env=(FAKE_UNAME_S=Darwin FAKE_UNAME_M=arm64 FAKE_RELEASE_TARBALL="$tmp/truncated.tar.gz")
+  install oss-macos-cut-off --oss
+  check "the install fails" test "$rc" -ne 0
+  check "the part of keploy that was extracted is not installed, and no keploy runs" eval 'nothing_installed && release_keploy_did_not_run'
+  check "the private temp directory is still removed, and the temp directory is otherwise as it was" tmp_left_as_it_was
+
+  echo "== --oss on macOS, ~/.keploy is a file, so keploy cannot be put in ~/.keploy/bin"
+  case_env=(FAKE_UNAME_S=Darwin FAKE_UNAME_M=arm64)
+  case_home_blocked=1
+  install oss-macos-cannot-place --oss
+  check "the install fails" test "$rc" -ne 0
+  check "the shell it was sourced into lives on: keploy.sh returns, never exits" lived_on
+  check "no keploy runs" release_keploy_did_not_run
+  check "the private temp directory is still removed, and the temp directory is otherwise as it was" tmp_left_as_it_was
+
+  local row name what env args said_what argv
   for row in \
     "oss-riscv64|an unsupported architecture|FAKE_UNAME_M=riscv64|-noRoot|Unsupported architecture: riscv64" \
     "oss-riscv64-ci|an unsupported architecture, with -isCI|FAKE_UNAME_M=riscv64|-isCI|Unsupported architecture: riscv64" \
     "oss-windows|Windows, from Git Bash|FAKE_UNAME_S=MINGW64_NT-10.0-19045|-noRoot|no native Windows support" \
-    "oss-freebsd|an OS it has no build for|FAKE_UNAME_S=FreeBSD|-noRoot|Unknown OS"; do
+    "oss-windows-ci|Windows, from Git Bash, with -isCI|FAKE_UNAME_S=MINGW64_NT-10.0-19045|-isCI|no native Windows support" \
+    "oss-windows-ci-noroot|Windows, from Git Bash, with -isCI -noRoot|FAKE_UNAME_S=MINGW64_NT-10.0-19045|-isCI -noRoot|no native Windows support" \
+    "oss-freebsd|an OS it has no build for|FAKE_UNAME_S=FreeBSD|-noRoot|Unknown OS" \
+    "oss-freebsd-ci|an OS it has no build for, with -isCI|FAKE_UNAME_S=FreeBSD|-isCI|Unknown OS"; do
     IFS='|' read -r name what env args said_what <<< "$row"
+    read -r -a argv <<< "$args"
     echo "== --oss on $what"
     case_env=("$env")
-    install "$name" --oss "$args"
+    install "$name" --oss "${argv[@]}"
     check "the install fails" test "$rc" -ne 0
     check "it says why" said "$said_what"
     check "nothing is downloaded or installed, and no keploy runs" eval 'nothing_downloaded && nothing_installed && release_keploy_did_not_run'
     check "the private temp directory is still removed, and the temp directory is otherwise as it was" tmp_left_as_it_was
     check "nothing outside its own directories is touched, and sudo is not run" stayed_inside
   done
+
+  # A CI step's shell: GitHub Actions runs `shell: bash` as
+  # `bash --noprofile --norc -eo pipefail {0}`, and GitLab runs its script
+  # under `set -e` too. A failure there exits the shell as soon as keploy.sh
+  # returns it, which is right, but keploy.sh must have removed its temp
+  # directory by then.
+  for row in \
+    "errexit-ent-refuses|the other installer refuses|FAKE_ENT_STATUS=1|-noRoot" \
+    "errexit-oss-download-fails|--oss, the download fails|FAKE_RELEASE_DOWNLOAD_FAIL=1|--oss -noRoot" \
+    "errexit-oss-cut-off|--oss, the download is cut off partway through keploy|FAKE_RELEASE_TARBALL=$tmp/truncated.tar.gz|--oss -noRoot" \
+    "errexit-oss-riscv64|--oss on an unsupported architecture|FAKE_UNAME_M=riscv64|--oss -noRoot"; do
+    IFS='|' read -r name what env args <<< "$row"
+    read -r -a argv <<< "$args"
+    echo "== under set -eo pipefail: $what, from a repo root"
+    case_in_repo=1
+    case_errexit=1
+    case_env=("$env")
+    install "$name" "${argv[@]}"
+    check "the install fails" test "$rc" -ne 0
+    check "nothing is installed, and no keploy runs" eval 'nothing_installed && release_keploy_did_not_run'
+    check "the private temp directory is still removed, and the temp directory is otherwise as it was" tmp_left_as_it_was
+    check "the repo's install.sh and keploy-enterprise.sh are kept unchanged, and nothing is added" callers_dir_untouched callers
+  done
+
+  echo "== under set -eo pipefail: from a repo root"
+  case_in_repo=1
+  case_errexit=1
+  install errexit-in-repo -noRoot
+  [ "$rc" -eq 0 ] || show_output
+  check "the install succeeds" test "$rc" -eq 0
+  check "the other installer runs, with the caller's arguments" ent_run_with_args
+  check "the download used a private temp directory, removed afterwards" used_private_dir_and_cleaned_up download-to install.sh
+  check "the shell lives on, with no status variable left set" eval 'lived_on && no_status_left'
+
+  echo "== under set -eo pipefail: --oss from a repo root"
+  case_in_repo=1
+  case_errexit=1
+  install errexit-oss-in-repo --oss -noRoot
+  [ "$rc" -eq 0 ] || show_output
+  check "the install succeeds" test "$rc" -eq 0
+  check "the release's keploy is installed in ~/.keploy/bin, and keploy example runs it" eval 'installed && release_keploy_ran'
+  check "the download and extraction used a private temp directory, removed afterwards; the other files there are kept unchanged" used_private_dir_and_cleaned_up release-download-to keploy.tar.gz
+  check "the shell lives on, with no status variable left set" eval 'lived_on && no_status_left'
 }
 ent_run_with_args() { ent_ran_with "-noRoot"; }
 

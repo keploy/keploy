@@ -440,33 +440,15 @@ installKeploy (){
 
 
     ARCH=$(uname -m)
-    
     OS_NAME="$(uname -s)"
-    if [ "$OS_NAME" = "Darwin" ]; then
-        NO_ROOT=true
-    fi
 
-
-    if [ "$IS_CI" = false ]; then
-        OS_NAME="$(uname -s)"
-        if [ "$OS_NAME" = "Darwin" ]; then
-            install_keploy_darwin
-            return
-        elif [ "$OS_NAME" = "Linux" ]; then
-             if [ "$NO_ROOT" = false ]; then
-                if ! mountpoint -q /sys/kernel/debug; then
-                    sudo mount -t debugfs debugfs /sys/kernel/debug
-                fi
-            fi
-            if [ "$ARCH" = "x86_64" ]; then
-                install_keploy_amd
-            elif [ "$ARCH" = "aarch64" ]; then
-                install_keploy_arm
-            else
-                echo "Unsupported architecture: $ARCH"
-                return 1
-            fi
-        elif [[ "$OS_NAME" == MINGW32_NT* ]] || [[ "$OS_NAME" == MINGW64_NT* ]] || [[ "$OS_NAME" == MSYS_NT* ]] || [[ "$OS_NAME" == CYGWIN_NT* ]]; then
+    # The OS is checked before the -isCI split, so that -isCI cannot skip it:
+    # Git Bash, MSYS and Cygwin report x86_64, and would otherwise download
+    # the Linux build.
+    case "$OS_NAME" in
+        Linux|Darwin)
+        ;;
+        MINGW32_NT*|MINGW64_NT*|MSYS_NT*|CYGWIN_NT*)
             # The --oss build intercepts with eBPF and therefore has no native
             # Windows backend -- DefaultNativeCommandSupported in
             # cli/provider/hooks.go accepts linux only, so `keploy record -c ...`
@@ -486,8 +468,33 @@ installKeploy (){
             echo "platform. Download keploy_windows_amd64 from the releases page first:"
             echo "  https://github.com/keploy/keploy/releases"
             return 1
-        else
+        ;;
+        *)
             echo "Unknown OS, install Linux to run Keploy"
+            return 1
+        ;;
+    esac
+    if [ "$OS_NAME" = "Darwin" ]; then
+        NO_ROOT=true
+    fi
+
+
+    if [ "$IS_CI" = false ]; then
+        if [ "$OS_NAME" = "Darwin" ]; then
+            install_keploy_darwin
+            return
+        fi
+        if [ "$NO_ROOT" = false ]; then
+            if ! mountpoint -q /sys/kernel/debug; then
+                sudo mount -t debugfs debugfs /sys/kernel/debug
+            fi
+        fi
+        if [ "$ARCH" = "x86_64" ]; then
+            install_keploy_amd
+        elif [ "$ARCH" = "aarch64" ]; then
+            install_keploy_arm
+        else
+            echo "Unsupported architecture: $ARCH"
             return 1
         fi
     else
@@ -531,8 +538,13 @@ if [ "$USE_OSS" = false ]; then
     }
     # --fail: a 404 page must not be sourced as the installer.
     if curl --fail --silent --show-error --location -o "$keploy_installer_dir/install.sh" https://keploy.io/ent/install.sh; then
-        source "$keploy_installer_dir/install.sh" "$@"
-        ent_status=$?
+        # Inside an `if`, so that under `set -e` (a CI step's shell) a
+        # refusal still reaches the rm below instead of exiting first.
+        if source "$keploy_installer_dir/install.sh" "$@"; then
+            ent_status=0
+        else
+            ent_status=$?
+        fi
     else
         echo "Error: could not download the Keploy installer from https://keploy.io/ent/install.sh." >&2
         ent_status=1
@@ -549,18 +561,23 @@ if [ "$USE_OSS" = false ]; then
 fi
 
 # The release is downloaded and extracted in a mktemp directory of this run's
-# own, removed when the install is done or has failed. This used to work at
-# fixed /tmp paths: it extracted over /tmp/keploy, /tmp/LICENSE and
-# /tmp/README.md, then removed /tmp/LICENSE, /tmp/README.md and
-# /tmp/READMEes-Es.md with sudo, whoever they belonged to; and when a download
+# own, removed when the install is done or has failed, `set -e` or not. This
+# used to work at fixed /tmp paths: it extracted over /tmp/keploy,
+# /tmp/LICENSE and /tmp/README.md, then removed /tmp/LICENSE, /tmp/README.md
+# and /tmp/READMEes-Es.md with sudo, whoever they belonged to; and when a download
 # or extraction failed, a /tmp/keploy already there (an earlier download,
 # another user's file) was what got moved into /usr/local/bin.
 keploy_tmp_dir=$(mktemp -d) || {
     echo "Error: could not create a temporary directory to download Keploy into." >&2
     return 1 2>/dev/null || exit 1
 }
-installKeploy "$@"
-oss_status=$?
+# Inside an `if`, so that under `set -e` (a CI step's shell) a failed
+# install still reaches the rm below instead of exiting first.
+if installKeploy "$@"; then
+    oss_status=0
+else
+    oss_status=$?
+fi
 rm -rf "$keploy_tmp_dir"
 unset keploy_tmp_dir
 if [ "$oss_status" -ne 0 ]; then
