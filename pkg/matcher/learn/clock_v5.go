@@ -159,7 +159,7 @@ func offsetV5(r, l typedInstant, w *Window, zone *time.Location) (o models.Clock
 		switch lo, hi := o.CutOffsets(); {
 		case !ok:
 			o, ok, near = n, true, "a read with no look-back"
-		case o.Max <= 0 && hi-lo >= 2*cut:
+		case hi-lo >= 2*cut:
 			o, near = n, "more whole "+unitWord(cut)+"s of look-back"
 		}
 	}
@@ -186,7 +186,9 @@ func offsetV5(r, l typedInstant, w *Window, zone *time.Location) (o models.Clock
 // coarser), from the read of each run's clock nearest its call: the offsets
 // from the greatest of v less each run's call (Min) up to one cut above it,
 // so the one whole cut they hold is the latest one both runs' windows put
-// a read in. ok only where that is a look-back in both runs. A window
+// a read in. ok only where they hold one and it is a look-back in both
+// runs: one run's wide window beside the other's narrow one may leave no
+// whole cut, and no read nearest its call stands there. A window
 // narrower than its cut holds that cut, or it and the next (a turn of the
 // cut in both runs); a wider one (the window runs from the previous call,
 // so load or an idle poll widens it) holds more, or a read with no
@@ -202,12 +204,12 @@ func offsetV5(r, l typedInstant, w *Window, zone *time.Location) (o models.Clock
 func nearestCall(r, l typedInstant, w *Window, cut time.Duration) (models.ClockOffset, bool) {
 	rlo, rhi, rok := offsetBounds(r.at, cut, w.Rec)
 	llo, lhi, lok := offsetBounds(l.at, cut, w.F)
-	if cut < time.Second || !rok || !lok || rlo >= 0 || llo >= 0 {
+	if cut < time.Second || !rok || !lok {
 		return models.ClockOffset{}, false
 	}
 	lo := max(rlo, llo)
 	o := models.ClockOffset{Min: lo, Max: min(lo+cut, rhi, lhi), Res: cut, Layout: models.LayoutTyped, Step: cut}
-	return o, o.Min < o.Max && o.Max < 0
+	return o, o.Max < 0 && o.Unit() >= cut
 }
 
 // nearLine is the sentence a line of o, read by nearestCall where its
