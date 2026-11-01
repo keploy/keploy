@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"go.keploy.io/server/v3/pkg/models"
 )
 
 // Rows for the lines keploy prints: each of the nine refusal kinds' line
@@ -147,5 +149,20 @@ func TestOutcomeLearnedLinesSayWhatWhereWhyAndTheUndo(t *testing.T) {
 				t.Errorf("%s: line %q; want it to say %q", c.what, d.Line, s)
 			}
 		}
+	}
+}
+
+// A variable a call binds at another recording keeps its why through the
+// fold (FoldLearned, MergeVariable), as one it declares at its own does
+// (models.MergeVariables): the target's file says why it is a variable.
+func TestOutcomeAVariableBoundAtAnotherRecordingKeepsItsWhy(t *testing.T) {
+	const why = "a value mock-1's answer gave and mock-2 sent back: one value, checked at every use"
+	_, binds := FoldLearned(map[string]models.MockState{"mock-2": {Name: "mock-2",
+		Binds: map[string]models.MockVariables{"mock-1": {"v1": {Bind: "body.id", Recorded: "ab12", Why: why}}}}})
+	if got := binds["mock-1"]["v1"].Why; got != why {
+		t.Errorf("the variable mock-2 binds at mock-1 says why %q; want %q", got, why)
+	}
+	if got := MergeVariable(models.MockVariable{Bind: "body.id", Recorded: "ab12", Why: why}, models.MockVariable{Use: []string{"body.ref"}, Why: "another"}).Why; got != why {
+		t.Errorf("two declarations of one variable say why %q; want the first's, %q", got, why)
 	}
 }
