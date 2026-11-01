@@ -425,6 +425,113 @@ func TestAClientThatLeftBeforeTheAnswersEndLeavesNoNoteForAStop(t *testing.T) {
 	}
 }
 
+// A client that takes an answer's headers and closes without reading its
+// body (Go's http.Get and a Body.Close: a client that wanted only the status)
+// went after the answer's end when the app wrote the answer whole at once:
+// the end arrived with the headers, before the client could have them. The
+// exchange is the app's answer to its request and is recorded. The client's
+// close was judged against where the ingress had got to in forwarding the
+// answer, and the ingress forwards the headers before it reads the body on:
+// whenever the watch saw the close before the ingress read the body (often
+// on a loaded host), the exchange was not recorded, "its client closed its
+// side of the connection before the app's answer ended", and a test the user
+// made went missing. The ingress is held here between the headers and the
+// body until the app has been told of the close, as a loaded host holds it.
+func TestAClientThatLeavesOnceTheAnswerArrivedWholeIsRecorded(t *testing.T) {
+	for _, synchronous := range []bool{false, true} {
+		t.Run(fmt.Sprintf("synchronous %v", synchronous), func(t *testing.T) {
+			const body = `{"name":"whoami","served_at":1}`
+			appLn, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = appLn.Close() })
+			told := make(chan struct{})
+			go func() {
+				c, err := appLn.Accept()
+				if err != nil {
+					return
+				}
+				defer func() { _ = c.Close() }()
+				br := bufio.NewReader(c)
+				if _, err := http.ReadRequest(br); err != nil {
+					return
+				}
+				// The whole answer in one write, as a Go server writes a
+				// small one.
+				_, _ = fmt.Fprintf(c, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", len(body), body)
+				// The app reads on until it is told its client went.
+				_, _ = io.Copy(io.Discard, br)
+				close(told)
+			}()
+			left := make(chan struct{})
+			saved := bodyReading
+			bodyReading = func(int) {
+				for _, c := range []chan struct{}{left, told} {
+					select {
+					case <-c:
+					case <-never(t):
+						t.Error("the client did not go, or the app was not told of it")
+						return
+					}
+				}
+			}
+			t.Cleanup(func() { bodyReading = saved })
+
+			cfg := &config.Config{}
+			cfg.Agent.MockMode = true
+			cfg.Agent.RecordRequests = true
+			cfg.Agent.Synchronous = synchronous
+			pm := New(zap.NewNop(), nil, cfg)
+			mgr := syncMock.New(zap.NewNop())
+			mgr.SetFirstRequestSignaled()
+			t.Cleanup(mgr.AddWatermark(quietCapture{}))
+			ctx, cancel := context.WithCancel(syncMock.NewContext(context.Background(), mgr))
+
+			client, proxied := tcpPairForWatch(t)
+			served := make(chan struct{})
+			go func() {
+				defer close(served)
+				defer func() { _ = proxied.Close() }()
+				pm.ServeLive(ctx, proxied, appLn.Addr().String(), 8083)
+			}()
+			t.Cleanup(func() {
+				cancel()
+				_ = client.Close()
+				<-served
+			})
+			if _, err := client.Write([]byte("GET /whoami HTTP/1.1\r\nHost: api\r\n\r\n")); err != nil {
+				t.Fatal(err)
+			}
+			// The headers, and no more: the body is not yet forwarded.
+			br := bufio.NewReader(client)
+			for {
+				line, err := br.ReadString('\n')
+				if err != nil {
+					t.Fatalf("the answer's headers: %v", err)
+				}
+				if line == "\r\n" {
+					break
+				}
+			}
+			_ = client.Close()
+			close(left)
+			select {
+			case <-served:
+			case <-never(t):
+				t.Fatal("the exchange did not end once its client went")
+			}
+			pm.captures.Wait()
+			if n := len(pm.tcChan); n != 1 {
+				t.Fatalf("%d test cases reached the queue from an exchange whose app answered whole before its client went, want 1", n)
+			}
+			if tc := <-pm.tcChan; tc.HTTPResp.Body != body {
+				t.Fatalf("the recorded answer's body is %q, want the app's %q", tc.HTTPResp.Body, body)
+			}
+		})
+	}
+}
+
 // A way out of an exchange that does not record it counts what it lost, and
 // only then ends the exchange's note (buildingNote): a recording's stop that
 // asks in between still waits, and the summary it then reads holds the count.
