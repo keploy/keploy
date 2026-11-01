@@ -255,9 +255,9 @@ check_test_report() {
     for report_file in "${reports[@]}"; do
         # Top-level report fields. status:/success:/failure: appear before the
         # per-test 'tests:' list, so head -1 reads the report-level value.
-        test_status=$(grep 'status:' "$report_file"  | head -n 1 | awk '{print $2}')
-        fail_count=$(grep 'failure:' "$report_file"  | head -n 1 | awk '{print $2}')
-        succ_count=$(grep 'success:' "$report_file"  | head -n 1 | awk '{print $2}')
+        test_status=$(grep 'status:' "$report_file"  | sed -n 1p | awk '{print $2}')
+        fail_count=$(grep 'failure:' "$report_file"  | sed -n 1p | awk '{print $2}')
+        succ_count=$(grep 'success:' "$report_file"  | sed -n 1p | awk '{print $2}')
         [[ "$fail_count" =~ ^[0-9]+$ ]] || fail_count=0
         [[ "$succ_count" =~ ^[0-9]+$ ]] || succ_count=0
         echo "$(basename "$report_file"): status=${test_status:-<none>} success=$succ_count failure=$fail_count"
