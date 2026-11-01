@@ -880,6 +880,17 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	sort.SliceStable(hs, func(i, j int) bool { return hs[i].rank < hs[j].rank })
 	before := func(p evPlace) bool { return p.state == stateBefore && !p.fUnstated }
 	request := func(p evPlace) bool { return p.given && !p.gave }
+	// A copied text or number is a source by its text (3, 4, 6), one rule
+	// across protocols: a variable holds one text, so a place that holds the
+	// same moment only in another form (epoch milliseconds beside a date and
+	// time) is no place to bind it. A typed instant is held by its moment.
+	asText := func(t *readerText, w string) bool {
+		held, _, _ := dc.holds(evPlace{gave: true}, t, w, nil, false)
+		return held
+	}
+	byText := func(h instantHold) bool {
+		return !c.text || asText(h.p.t.rec, r) && (h.p.fUnstated || asText(h.p.t.live, l))
+	}
 
 	// 0. Conflict: a place before in both runs that held R's value whole
 	// at a fine cut (or by the text of a number that does not parse), or a
@@ -963,7 +974,7 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	copies := func(fine bool) []evPlace {
 		return heldWhere(hs, func(h instantHold) bool {
 			p := h.p
-			if p.side != Request || p.given || !inScope(p) || !before(p) || !h.hr || !h.hl || (h.fr && h.fl) != fine {
+			if p.side != Request || p.given || !inScope(p) || !before(p) || !h.hr || !h.hl || (h.fr && h.fl) != fine || !byText(h) {
 				return false
 			}
 			rf, _, _ := dc.holds(p, p.t.live, r, c.rm, c.byText)
@@ -977,7 +988,7 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	// holds F's or is not stated.
 	answer := func(h instantHold) bool {
 		p := h.p
-		return p.side == Response && !p.given && inScope(p) && p.state == stateBefore && h.hr && !h.coarseR && (p.fUnstated || h.hl)
+		return p.side == Response && !p.given && inScope(p) && p.state == stateBefore && h.hr && !h.coarseR && (p.fUnstated || h.hl) && byText(h)
 	}
 	answers := heldWhere(hs, answer)
 	// An answer that holds it only as a coarse cut of a finer instant is no
@@ -1117,16 +1128,11 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	// this one: two reads of one coarse cut, which share it only as the
 	// runs' timing falls. It goes on to step 7, whose check goes red where it
 	// was no read, and stays refused where 7 declines.
-	// A variable holds one text, so a place that holds the moment in another
-	// form (a second inside a nanosecond's text) is no place to bind it: the
-	// places with its text come first, and with none it goes on to step 7 too.
+	// A typed instant's places that hold its text come first, and with none
+	// it goes on to step 7 too; a text or number is held by its text alone.
 	coarse := copies(false)
 	const copiedWhy = ": the same moment, at a millisecond or coarser, was sent before the call in both runs and its own window does not hold it: one read, copied"
-	sameText := slices.DeleteFunc(slices.Clone(coarse), func(p evPlace) bool {
-		hr, _, _ := dc.holds(evPlace{gave: true}, p.t.rec, r, nil, false)
-		hl, _, _ := dc.holds(evPlace{gave: true}, p.t.live, l, nil, false)
-		return !hr || !hl
-	})
+	sameText := slices.DeleteFunc(slices.Clone(coarse), func(p evPlace) bool { return !asText(p.t.rec, r) || !asText(p.t.live, l) })
 	if len(sameText) > 0 && !earliest(sameText).clock {
 		return dc.copied(path, at, n, c, sameText, copiedWhy)
 	}
@@ -1188,9 +1194,11 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	// The places whose recorded text held the recorded value and that are
 	// no source in round F are named with why (main named the recording
 	// round F never served): a person reads where the value came from.
-	var outside, sentIn, heldAt []string
+	var outside, sentIn, heldAt, otherForm []string
 	for _, h := range hs {
 		switch p := h.p; {
+		case h.hr && (h.hl || p.fUnstated) && inScope(p) && p.state == stateBefore && !byText(h) && len(otherForm) < maxLinePlaces:
+			otherForm = append(otherForm, p.name)
 		case h.hr && h.hl && p.otherTest && !dc.allScope:
 			if len(outside) < maxLinePlaces {
 				outside = append(outside, p.name)
@@ -1211,7 +1219,10 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	if len(outside) > 0 {
 		why += " [but " + strings.Join(sentIn, ", ") + " did]"
 	}
-	return dc.refuse(path, at, n, r, l, RefusalNoClockRead, why, append(outside, heldAt...), dc.wordNoise(path, n), Edit{Kind: EditReRecord})
+	if len(otherForm) > 0 {
+		why += "; " + strings.Join(otherForm, ", ") + " held the moment only in another form, which no variable holds as this text"
+	}
+	return dc.refuse(path, at, n, r, l, RefusalNoClockRead, why, append(append(outside, heldAt...), otherForm...), dc.wordNoise(path, n), Edit{Kind: EditReRecord})
 }
 
 // madeSinceBegin is why c, a changed instant of a client test's call that

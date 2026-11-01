@@ -334,12 +334,14 @@ func TestOutcomeAWordGluedInABodyOfNoDeclaredTypeIsUnknown(t *testing.T) {
 }
 
 // An answer before the call in both runs (mock-42, round F's view not
-// stated) holds the changed minute by a cut, and an exchange recorded after
+// stated) holds the changed minute by its text, and an exchange recorded after
 // the call (mock-44), which round F gave the application before it, holds
 // round F's minute: binding the instant to mock-42 is then a guess between
 // two sources, so it is refused, naming mock-44, as main refuses it
 // (offset_test.go:2054). Without mock-44 holding round F's minute (it holds
-// the recorded minute alone), mock-42 binds it.
+// the recorded minute alone), mock-42 binds it. An answer that holds the
+// minute only inside a time of it (11:14:45), which main binds by a cut, is
+// no source a variable could hold: refused, naming it.
 func TestOutcomeAnAnswersInstantBesideALaterRecordingFGaveIsRefused(t *testing.T) {
 	const p = "body.sent_at"
 	at := r1Insert
@@ -347,7 +349,7 @@ func TestOutcomeAnAnswersInstantBesideALaterRecordingFGaveIsRefused(t *testing.T
 	const minute = "2006-01-02T15:04Z07:00"
 	rec, live := recT.Format(minute), recT.Add(time.Minute).Format(minute)
 	base := recT.Truncate(time.Minute)
-	own := RawOf(sentAtReceive("mock-42", at.Add(-time.Second), base.Add(45*time.Second).Format(time.RFC3339)), true).ServedAs(2)
+	own := RawOf(sentAtReceive("mock-42", at.Add(-time.Second), base.Format(minute)), true).ServedAs(2)
 	call := func(earlier []Earlier, raw []Raw) Input {
 		return Input{Drifts: clockedDrifts(), Drift: []string{p}, Live: strLeaf(p, live), Rec: strLeaf(p, rec), At: at, Arrived: at,
 			Earlier: earlier, Raw: append(raw, own), Test: "test-2", Mock: "mock-300",
@@ -376,6 +378,8 @@ func TestOutcomeAnAnswersInstantBesideALaterRecordingFGaveIsRefused(t *testing.T
 	}
 	alone := sentAtReceive("mock-44", at.Add(30*time.Second), base.Add(10*time.Second).Format(time.RFC3339))
 	iValue(t, "the recorded minute alone at the later recording", oWord(t, Decide(call([]Earlier{leafedOf(alone, true, 1)}, nil)), rec, live), "mock-42")
+	own = RawOf(sentAtReceive("mock-42", at.Add(-time.Second), base.Add(45*time.Second).Format(time.RFC3339)), true).ServedAs(2)
+	oRefused(t, "an answer holding the minute inside a time of it", oWord(t, Decide(call(nil, nil)), rec, live), RefusalNoClockRead, "mock-42", "another form")
 }
 
 // An exchange served leaf by leaf whose request was recorded after the call,
@@ -460,7 +464,7 @@ func TestOutcomeAnExchangeAtTheCallsOwnInstantIsReadBothWays(t *testing.T) {
 	}
 }
 
-// An answer of the call's own test holds the changed minute (step 3), but
+// An answer of the call's own test holds the changed minute by its text (step 3), but
 // a second place may be where it came from: a recording of the set F gave
 // in an earlier test that was recorded after the call, or at its own
 // instant, whose answer names F's minute (or, at its own instant, R's);
@@ -475,7 +479,7 @@ func TestOutcomeAnAnswersInstantBesideASecondPossibleSourceIsRefused(t *testing.
 	const minute = "2006-01-02T15:04Z07:00"
 	rec, live := recT.Format(minute), recT.Add(time.Minute).Format(minute)
 	base := recT.Truncate(time.Minute)
-	own := RawOf(sentAtReceive("mock-42", at.Add(-time.Minute), base.Add(45*time.Second).Format(time.RFC3339)), true).ServedAs(3)
+	own := RawOf(sentAtReceive("mock-42", at.Add(-time.Minute), base.Format(minute)), true).ServedAs(3)
 	call := func(raw []Raw, set ...Raw) Input {
 		in := Input{Drifts: clockedDrifts(), Drift: []string{p}, Live: strLeaf(p, live), Rec: strLeaf(p, rec), At: at, Arrived: at,
 			Raw: append(raw, own), Test: "test-2", Mock: "mock-300",

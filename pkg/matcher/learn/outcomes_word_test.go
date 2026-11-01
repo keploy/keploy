@@ -1090,6 +1090,18 @@ func TestOutcomeAPieceOfAnIdAtAnUnchangedPlaceHoldingBothWordsIsChance(t *testin
 	oRefused(t, "the whole recorded id at an unchanged place that holds the group too", d, RefusalConflict, "mock-47")
 	d = oWord(t, Decide(oInput("body.slot", "08c8", "b054", both, nil)), r, f)
 	oRefused(t, "a word that is the field's whole value", d, RefusalUnknown, "mock-45")
+	// The same at a place of the start-up, sent unchanged in both runs.
+	for _, side := range []Side{Request, Response} {
+		boot := func(mock, text string) []Earlier {
+			return oServed(mock, true, true, side, oText("body.note", text), text, time.Second)
+		}
+		d = oWord(t, Decide(oInput("body._id", rec, live, boot("mock-48", "pool 08c8 and b054 ready"), nil)), r, f)
+		if d.Outcome != OutcomeFresh {
+			t.Errorf("a 16-bit group at an unchanged start-up %v holding both: %s; want fresh", side, oDescribe([]Decision{d}))
+		}
+		d = oWord(t, Decide(oInput("body._id", rec, live, boot("mock-49", "pool a1b2c3d4 and e5f60718 ready"), nil)), r8, f8)
+		oRefused(t, "the 32-bit group at an unchanged start-up place holding both", d, RefusalUnknown, "mock-49")
+	}
 }
 
 // A field that is one URL-safe base64 token in each run, whose '-' and '_'
