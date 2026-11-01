@@ -72,9 +72,22 @@ type wireTimeConn struct {
 	// the stream (io.EOF) as one more, before the reader has any of it.
 	read    atomic.Int64
 	eofRead atomic.Bool
+	// limit, when bounded, is the most Read takes (counted as read): past
+	// it, Read returns errPastArrived (readTo). Its reader's alone.
+	bounded bool
+	limit   int64
 }
 
 func (c *wireTimeConn) Read(p []byte) (int, error) {
+	if c.bounded {
+		left := c.limit - c.read.Load()
+		if left <= 0 {
+			return 0, errPastArrived
+		}
+		if int64(len(p)) > left {
+			p = p[:left]
+		}
+	}
 	n, err := c.Conn.Read(p)
 	if n > 0 {
 		c.lastReadNano.Store(clockNow().UnixNano())
@@ -86,13 +99,59 @@ func (c *wireTimeConn) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// Arrived is what has been read from the conn: its bytes, and its close
-// (io.EOF) as one more. It may be read from any goroutine. What arrives is
-// read only as it is taken, so it is also what has been taken (Taken).
-func (c *wireTimeConn) Arrived() int64 { return c.read.Load() }
+// Arrived is what has arrived from the conn: its bytes, those read and then
+// those its socket holds unread, and its close (io.EOF) as one more once
+// read. It may be read from any goroutine. Read in that order, it can only
+// fall short: a byte read from the socket in between is counted in neither.
+func (c *wireTimeConn) Arrived() int64 {
+	n := c.read.Load()
+	return n + proxyutil.UnreadBytes(c.Conn)
+}
 
-// Taken is Arrived: the conn is read only as its reader takes it.
+// Taken is what has been read from the conn, counted as Arrived counts: the
+// conn is read only as its reader takes it.
 func (c *wireTimeConn) Taken() int64 { return c.read.Load() }
+
+// readTo bounds what Read takes from here at limit, counted as Taken counts:
+// past it, Read returns errPastArrived. What Arrived counted has arrived, so a
+// Read within a limit it gave does not wait on the app. Called by the reader.
+func (c *wireTimeConn) readTo(limit int64) { c.bounded, c.limit = true, limit }
+
+// clientWriter is the client's connection as an answer is forwarded to it,
+// keeping the first write's error: a forward that failed on the client's
+// side (it went), not on the app's (a read of the answer).
+type clientWriter struct {
+	io.Writer
+	err error
+}
+
+func (w *clientWriter) Write(p []byte) (int, error) {
+	n, err := w.Writer.Write(p)
+	if err != nil && w.err == nil {
+		w.err = err
+	}
+	return n, err
+}
+
+// writeAnswer writes resp to w as resp.Write does, but leaves its body open:
+// the write closes the body it was given, and a response body's close reads
+// the rest of it past what reads it here (its capture, endWaitBody). What a
+// failed write did not take is read on, or not, by the caller
+// (finishAnswer), which closes the body.
+func writeAnswer(resp *http.Response, w io.Writer) error {
+	body, ok := resp.Body.(*endWaitBody)
+	if !ok {
+		return resp.Write(w)
+	}
+	resp.Body = openBody{body}
+	defer func() { resp.Body = body }()
+	return resp.Write(w)
+}
+
+// openBody is a body whose close is left to its owner (writeAnswer).
+type openBody struct{ io.Reader }
+
+func (openBody) Close() error { return nil }
 
 // LastReadTime returns the time of the most recent non-empty Read on
 // the wrapped conn, or the zero time if no bytes have been read yet.
@@ -384,20 +443,39 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 	// The client is watched for its end while the app holds a whole request
 	// of it (watchClient); endWatch ends the watch that runs, if one does,
 	// and reports whether the client ended the exchange.
-	watch, clientEnded := noClientEnd, false
+	var watch *clientWatch
+	clientEnded := false
 	appConn := func() net.Conn { return upConn }
 	// endWatchAt is endWatch once the answer's end is found: answerEnd is
 	// where it ended in what arrived from the app (upAhead's count), so a
 	// client that went once it had arrived did not end the exchange.
 	endWatchAt := func(answerEnd int64) bool {
-		if watch(answerEnd) {
+		if watch.endedBefore(answerEnd) {
 			clientEnded = true
 		}
-		watch = noClientEnd
+		watch = nil
 		return clientEnded
 	}
 	endWatch := func() bool { return endWatchAt(-1) }
 	defer endWatch()
+	// finishAnswer reads body on to its end, not forwarded, once the forward
+	// to the client failed before the answer's end was found: up to what of
+	// it the app had sent before it could learn its client had gone. That is
+	// what had arrived when the watch saw the going (it read the count before
+	// it told the app), or, the going not seen, what has arrived by now: the
+	// watch halted, the app is told nothing until its connection is closed.
+	// What had arrived is with keploy or in the app connection's socket, so
+	// reading to it does not wait on the app. Its end found there (the body's
+	// atEnd gives the verdict), the answer is the app's whole answer to the
+	// request.
+	finishAnswer := func(body io.Reader) {
+		went, arrived := watch.halt()
+		if !went {
+			arrived = upAhead.Arrived()
+		}
+		upAhead.readTo(arrived)
+		_, _ = io.Copy(io.Discard, body)
+	}
 
 	for {
 		// iterStart is the loop entry time, captured BEFORE ReadRequest
@@ -702,12 +780,14 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			}
 			return headersAt
 		}
+		answerEnded := false
 		waitPastEnd := func() {
 			// The answer's end is read from the app: what the client does
 			// from here (it closes the connection once it has the end) is
 			// not a going the app should be told of. It ended where the
 			// reads from the app have got to, less what is read but not yet
 			// taken: a going seen once that had arrived came after it.
+			answerEnded = true
 			endWatchAt(upAhead.Taken() - int64(upstreamReader.Buffered()))
 			if captureEligible && !reqCapture.Truncated() && !respCapture.Truncated() {
 				end := endAt()
@@ -723,7 +803,20 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			resp.Body = &endWaitBody{ReadCloser: resp.Body, left: resp.ContentLength, atEnd: waitPastEnd}
 		}
 
-		if err := resp.Write(clientConn); err != nil {
+		forward := &clientWriter{Writer: clientConn}
+		if err := writeAnswer(resp, forward); err != nil {
+			// A forward the client's side failed (it went) before the
+			// answer's end was found reads on to the end what of the
+			// answer is the app's (finishAnswer): an answer whose end had
+			// arrived before its client went is the app's answer to the
+			// request, whatever the client took of it, and is recorded.
+			if forward.err != nil && !answerEnded {
+				finishAnswer(resp.Body)
+			}
+			// The body's close error is dropped: what was read of it is
+			// in the capture, and the upstream connection is closed as the
+			// handler returns.
+			_ = resp.Body.Close()
 			if endWatch() {
 				// The client went before the answer's end, and the app was
 				// told (watchClient): the write failed on the client's
@@ -733,44 +826,52 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 				// pause had kept from it. What the pause cost the
 				// exchange, that or a body's capture it cut, is counted as
 				// the handler returns (countPause): a capture cut before
-				// the client went is told and counted, both true. The
-				// body's close error is dropped: the client is gone and the
-				// exchange is not recorded, so it changes neither, and the
-				// upstream connection is closed as the handler returns.
-				_ = resp.Body.Close()
+				// the client went is told and counted, both true.
 				if captureEligible && captureEnabled {
 					tellClientLeft(logger, req)
 				}
 				return
 			}
-			if pressureCloseMode && isIngressExpectedCloseErr(err) {
-				logger.Debug("HTTP/1 ingress client connection closed while finishing close-under-pressure path", zap.Error(err))
-				resp.Body.Close()
+			if forward.err == nil || !answerEnded {
+				switch {
+				case forward.err != nil && captureEligible && captureEnabled && ctx.Err() == nil:
+					// The client went before the answer's end had
+					// arrived, unseen by the watch (or not watched): the
+					// app is told as its connection is closed.
+					tellClientLeft(logger, req)
+				case pressureCloseMode && isIngressExpectedCloseErr(err):
+					logger.Debug("HTTP/1 ingress client connection closed while finishing close-under-pressure path", zap.Error(err))
+				default:
+					logger.Error("Failed to forward response to client. The client may have closed the connection before the response was fully written.",
+						zap.Error(err),
+						zap.Int64("response_bytes_seen", respCapture.Total()),
+						zap.Bool("response_capture_truncated", respCapture.Truncated()),
+						zap.Duration("exchange_duration", time.Since(reqTimestamp)),
+					)
+				}
 				return
 			}
-			logger.Error("Failed to forward response to client. The client may have closed the connection before the response was fully written.",
-				zap.Error(err),
-				zap.Int64("response_bytes_seen", respCapture.Total()),
-				zap.Bool("response_capture_truncated", respCapture.Truncated()),
-				zap.Duration("exchange_duration", time.Since(reqTimestamp)),
-			)
-			resp.Body.Close()
-			return
-		}
-		resp.Body.Close() // Close explicitly.
-		if answerWritten != nil {
-			answerWritten()
-		}
-		if endWatch() {
-			// The client went before the answer's end, and the app was
-			// told (watchClient): the exchange is not one to record, and
-			// the connection carries nothing after it. Told only for one
-			// that could have been recorded, and what the pause cost it
-			// counted as the handler returns, as above.
-			if captureEligible && captureEnabled {
-				tellClientLeft(logger, req)
+			// The answer's end was found, and its client did not end it:
+			// the capture holds the whole answer, recorded below. The
+			// connection carries nothing after it (this loop closes it once
+			// the exchange is done).
+			logger.Debug("The client went once the app's answer had arrived whole; recording the exchange", zap.Error(err))
+		} else {
+			resp.Body.Close() // Close explicitly.
+			if answerWritten != nil {
+				answerWritten()
 			}
-			return
+			if endWatch() {
+				// The client went before the answer's end, and the app was
+				// told (watchClient): the exchange is not one to record,
+				// and the connection carries nothing after it. Told only
+				// for one that could have been recorded, and what the pause
+				// cost it counted as the handler returns, as above.
+				if captureEligible && captureEnabled {
+					tellClientLeft(logger, req)
+				}
+				return
+			}
 		}
 
 		// The response's time is its LAST byte's: when that byte arrived from
@@ -1135,7 +1236,8 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 	// The client is watched for its end while the app holds a whole request
 	// of it (watchClient); endWatch ends the watch that runs, if one does,
 	// and reports whether the client ended the exchange.
-	watch, clientEnded := noClientEnd, false
+	var watch *clientWatch
+	clientEnded := false
 	appConn := func() net.Conn {
 		if h := upConnHolder.Load(); h != nil {
 			return h.c
@@ -1146,14 +1248,26 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 	// where it ended in what was read from the app (upWire's count), so a
 	// client that went once it had arrived did not end the exchange.
 	endWatchAt := func(answerEnd int64) bool {
-		if watch(answerEnd) {
+		if watch.endedBefore(answerEnd) {
 			clientEnded = true
 		}
-		watch = noClientEnd
+		watch = nil
 		return clientEnded
 	}
 	endWatch := func() bool { return endWatchAt(-1) }
 	defer endWatch()
+	// finishAnswer reads body on to its end, not forwarded, once the forward
+	// to the client failed before the answer's end was found, up to what of
+	// it the app had sent before it could learn its client had gone, as the
+	// synchronous loop's does.
+	finishAnswer := func(body io.Reader) {
+		went, arrived := watch.halt()
+		if !went {
+			arrived = upWire.Arrived()
+		}
+		upWire.readTo(arrived)
+		_, _ = io.Copy(io.Discard, body)
+	}
 	// t == nil → caller (sampling-bypass path) wants MSG_PEEK protection
 	// without capture. Suppress capture for this connection's lifetime.
 	// connCapture is the connection's capture; whether one exchange of it is
@@ -1753,7 +1867,18 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 			markEnd()
 		}
 
-		if err := resp.Write(clientConn); err != nil {
+		// clientGone: the forward failed on the client's side once the
+		// answer's end was found, which its client did not end: recorded,
+		// and the connection carries nothing after it.
+		clientGone := false
+		forward := &clientWriter{Writer: clientConn}
+		if err := writeAnswer(resp, forward); err != nil {
+			// A forward the client's side failed before the answer's end
+			// was found reads on to the end what of the answer is the
+			// app's (finishAnswer), as the synchronous loop's does.
+			if forward.err != nil && !ended && hasBody {
+				finishAnswer(resp.Body)
+			}
 			if resp.Body != nil {
 				_ = resp.Body.Close()
 			}
@@ -1772,25 +1897,37 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 				}
 				return
 			}
-			logger.Debug("Failed to forward response to client", zap.Error(err))
-			return
-		}
-		if resp.Body != nil {
-			_ = resp.Body.Close()
-		}
-		if answerWritten != nil {
-			answerWritten()
-		}
-		if endWatch() {
-			// The client went before the answer's end, and the app was
-			// told (watchClient): the exchange is not one to record, and
-			// the connection carries nothing after it. Told only for one
-			// that could have been recorded, and a cut capture counted as
-			// the handler returns, as above.
-			if captureEnabled {
-				tellClientLeft(logger, req)
+			if forward.err == nil || !ended {
+				if forward.err != nil && captureEnabled && ctx.Err() == nil {
+					// The client went before the answer's end had
+					// arrived, unseen by the watch (or not watched): the
+					// app is told as its connection is closed.
+					tellClientLeft(logger, req)
+				} else {
+					logger.Debug("Failed to forward response to client", zap.Error(err))
+				}
+				return
 			}
-			return
+			logger.Debug("The client went once the app's answer had arrived whole; recording the exchange", zap.Error(err))
+			clientGone = true
+		} else {
+			if resp.Body != nil {
+				_ = resp.Body.Close()
+			}
+			if answerWritten != nil {
+				answerWritten()
+			}
+			if endWatch() {
+				// The client went before the answer's end, and the app was
+				// told (watchClient): the exchange is not one to record,
+				// and the connection carries nothing after it. Told only
+				// for one that could have been recorded, and a cut capture
+				// counted as the handler returns, as above.
+				if captureEnabled {
+					tellClientLeft(logger, req)
+				}
+				return
+			}
 		}
 
 		// The window invariant (reqTimestamp <= an egress call's time <=
@@ -1898,8 +2035,8 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		win = nil
 		building.end()
 
-		// Honor close signals from either side.
-		if req.Close || resp.Close {
+		// Honor close signals from either side, and a client gone.
+		if req.Close || resp.Close || clientGone {
 			if !requestWhole {
 				// Its client may still be sending the body cut off.
 				if releaseSlot != nil {

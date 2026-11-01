@@ -131,24 +131,23 @@ func waitPastYield(win *syncMock.Window, at time.Time) {
 // at the length) before any read found the end.
 type endWaitBody struct {
 	io.ReadCloser
-	left    int64 // what is left of a known length; -1 when unknown
-	atEnd   func()
-	ended   bool
-	started bool
+	left  int64 // what is left of a known length; -1 when unknown
+	atEnd func()
+	ended bool
+	reads int // the reads made of it so far
 }
 
-// bodyReading, when set (tests only), runs before an answer's body is first
-// read on its way to the client: the instant its headers are with the client
-// and its end is not yet found.
-var bodyReading func()
+// bodyReading, when set (tests only), runs before each read of an answer's
+// body, given how many were made before it: before the first, the instant
+// its headers are with the client and its end is not yet found; before a
+// later one, the instant what the reads before it brought has been forwarded.
+var bodyReading func(nth int)
 
 func (b *endWaitBody) Read(p []byte) (int, error) {
-	if !b.started {
-		b.started = true
-		if bodyReading != nil {
-			bodyReading()
-		}
+	if bodyReading != nil {
+		bodyReading(b.reads)
 	}
+	b.reads++
 	n, err := b.ReadCloser.Read(p)
 	if b.left >= 0 {
 		b.left -= int64(n)

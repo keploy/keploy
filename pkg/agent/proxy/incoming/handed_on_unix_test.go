@@ -466,7 +466,7 @@ func TestAClientThatLeavesOnceTheAnswerArrivedWholeIsRecorded(t *testing.T) {
 			}()
 			left := make(chan struct{})
 			saved := bodyReading
-			bodyReading = func() {
+			bodyReading = func(int) {
 				for _, c := range []chan struct{}{left, told} {
 					select {
 					case <-c:

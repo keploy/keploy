@@ -7,6 +7,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	proxyutil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 )
 
 // aheadReader reads a connection as fast as the app sends on it, ahead of its
@@ -48,6 +50,10 @@ type aheadReader struct {
 	errAt   time.Time
 	closed  bool
 	eofRead bool // Read has returned io.EOF, counted in taken
+	// limit, when bounded, is the most Read takes (counted as taken): past
+	// it, Read returns errPastArrived (readTo).
+	bounded bool
+	limit   int64
 }
 
 // aheadPiece is what one or more reads brought, and when the last of them did.
@@ -173,6 +179,15 @@ func (a *aheadReader) charge(p *aheadPiece, cost int64) {
 func (a *aheadReader) Read(p []byte) (int, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.bounded {
+		left := a.limit - a.taken.Load()
+		if left <= 0 {
+			return 0, errPastArrived
+		}
+		if int64(len(p)) > left {
+			p = p[:left]
+		}
+	}
 	for len(a.queue) == 0 && a.err == nil && !a.closed {
 		a.cond.Wait()
 	}
@@ -206,9 +221,24 @@ func (a *aheadReader) Read(p []byte) (int, error) {
 	return 0, a.err
 }
 
-// Arrived is what has arrived from the connection: its bytes, and its close
-// (io.EOF) as one more. It may be read from any goroutine.
-func (a *aheadReader) Arrived() int64 { return a.arrived.Load() }
+// Arrived is what has arrived from the connection: its bytes, those read and
+// then those its socket holds unread, and its close (io.EOF) as one more once
+// read. It may be read from any goroutine. Read in that order, it can only
+// fall short: a byte read from the socket in between is counted in neither.
+func (a *aheadReader) Arrived() int64 {
+	n := a.arrived.Load()
+	return n + proxyutil.UnreadBytes(a.conn)
+}
+
+// readTo bounds what Read takes from here at limit, counted as Taken counts:
+// past it, Read returns errPastArrived. What Arrived counted has arrived, so a
+// Read within a limit it gave does not wait on the app. Called by the
+// consumer.
+func (a *aheadReader) readTo(limit int64) {
+	a.mu.Lock()
+	a.bounded, a.limit = true, limit
+	a.mu.Unlock()
+}
 
 // Taken is what the consumer has taken by Read, counted as Arrived counts.
 func (a *aheadReader) Taken() int64 { return a.taken.Load() }

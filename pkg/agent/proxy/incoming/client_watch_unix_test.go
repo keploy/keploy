@@ -165,7 +165,7 @@ func TestAClientThatCannotBeWatchedIsToldOnce(t *testing.T) {
 	unwatched.Delete(fmt.Sprintf("%T", c)) // a run before this one (-count) told it
 	for i := 0; i < 2; i++ {
 		stop := watchClient(logger, c, bufio.NewReader(c), func() net.Conn { return nil }, nothingArrived)
-		if stop(-1) {
+		if stop.endedBefore(-1) {
 			t.Fatal("an unwatched client reported an end")
 		}
 	}
@@ -216,7 +216,7 @@ func TestAClientEndsTheExchangeOnlyBeforeTheAnswersEndArrived(t *testing.T) {
 			}
 			// What arrives after the going was seen counts for nothing.
 			arrived.Add(1000)
-			if ended := stop(tc.end); ended != tc.want {
+			if ended := stop.endedBefore(tc.end); ended != tc.want {
 				t.Fatalf("with %d arrived as the client went and the answer's end at %d, stop reported an end %v, want %v", tc.arrived, tc.end, ended, tc.want)
 			}
 		})
@@ -250,10 +250,10 @@ func TestAWatchedClientsHangUpIsHeldUntilToldOn(t *testing.T) {
 					t.Fatalf("the app read %d %v, want the client's going", n, err)
 				}
 			}
-			if ended := stop(-1); ended != leaves {
+			if ended := stop.endedBefore(-1); ended != leaves {
 				t.Fatalf("stop reported an end %v, want %v", ended, leaves)
 			}
-			_ = stop(-1)
+			_ = stop.endedBefore(-1)
 			want := 0
 			if leaves {
 				want = 1
@@ -278,7 +278,7 @@ func TestAnUnwatchedKeptConnHoldsNoHangUp(t *testing.T) {
 	if held, released, told := c.counts(); held != 1 || released != 1 || told != 0 {
 		t.Fatalf("an unwatched client: held %d, released %d, told %d; want held and released at once, nothing told", held, released, told)
 	}
-	if stop(-1) {
+	if stop.endedBefore(-1) {
 		t.Fatal("an unwatched client reported an end")
 	}
 	if held, released, told := c.counts(); held != 1 || released != 1 || told != 0 {
