@@ -135,7 +135,13 @@ func TestAUDPDNSServerSettlesAsBoundWhenListening(t *testing.T) {
 // is true of a failed bind too: it does not say the server stopped serving,
 // since it never served, and it carries the bind's error.
 func TestADNSServerThatCannotBindSettlesWithItsError(t *testing.T) {
-	held, err := net.Listen("tcp", "127.0.0.1:0") // no SO_REUSEPORT: the server cannot share it
+	// Held on every address, as the server binds its port. Held on 127.0.0.1
+	// alone, the port does not stop the server on macOS: there a bind on every
+	// address succeeds beside a socket bound to one address when the new socket
+	// sets SO_REUSEADDR (Go sets it on every listener) or SO_REUSEPORT (the
+	// server sets it), so serve serves and never returns. Linux refuses that
+	// bind either way.
+	held, err := net.Listen("tcp", ":0") // no SO_REUSEPORT: the server cannot share it
 	if err != nil {
 		t.Fatal(err)
 	}
