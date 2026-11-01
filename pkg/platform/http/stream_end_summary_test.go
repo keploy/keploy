@@ -26,7 +26,7 @@ import (
 // The requests a pause of the memory guard cost are said with their count and
 // the number of connections they came on.
 func TestTheClientSaysWhatTheSessionLostForAnAgentItDidNotStart(t *testing.T) {
-	sum := models.StreamEndSummary{TestCasesSent: 3, TestCasesSuppressed: 9, LeftOutInFlight: 2, NotHandedOn: 4, UnnamedCallerConns: 6, Unsettled: 1, MassSuppressed: true,
+	sum := models.StreamEndSummary{TestCasesSent: 3, TestCasesSuppressed: 9, LeftOutInFlight: 2, NotHandedOn: 4, UnnamedCallerConns: 6, TLSRelayedConns: 7, Unsettled: 1, MassSuppressed: true,
 		NotRecordedUnderPressure: models.PressureSkipSummary{Requests: 5, Connections: 2}}
 	const pauseSaid = "the keploy agent did not record some requests: it was short of memory when they came, and its memory guard had paused recording; each connection's requests after the pause are recorded"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -72,6 +72,11 @@ func TestTheClientSaysWhatTheSessionLostForAnAgentItDidNotStart(t *testing.T) {
 		said := map[string]bool{}
 		for _, e := range logs.All() {
 			said[e.Message] = true
+			if e.Message == tlsRelayedConnsSaid {
+				if f := e.ContextMap(); f["connections"] != uint64(7) || f["next_step"] == nil {
+					t.Fatalf("the TLS connections relayed unread were said as %v, want 7 connections and a next step", f)
+				}
+			}
 			if e.Message == pauseSaid {
 				f := e.ContextMap()
 				if f["requests"] != uint64(5) || f["connections"] != int64(2) {
@@ -86,6 +91,7 @@ func TestTheClientSaysWhatTheSessionLostForAnAgentItDidNotStart(t *testing.T) {
 			pauseSaid,
 			"the keploy agent lost some test cases: the app served their requests, and the agent's ingress stopped before their test cases reached the recording",
 			unnamedCallerConnsSaid,
+			tlsRelayedConnsSaid,
 		}
 		for _, m := range want {
 			if !started && !said[m] {
