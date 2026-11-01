@@ -1,10 +1,7 @@
 package proxy
 
 import (
-	"fmt"
 	"net"
-	"os"
-	"strings"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
@@ -48,7 +45,7 @@ func (p *Proxy) topologySink() TopologySink {
 func localListener(owner int, dstAddr string, port uint32) *models.MockedRow {
 	row := &models.MockedRow{Addr: dstAddr, Port: uint16(port)}
 	if owner > 0 {
-		row.PID, row.Exe = owner, programOf(owner)
+		row.PID, row.Exe = owner, ProgramOf(owner)
 	}
 	return row
 }
@@ -83,7 +80,7 @@ func (p *Proxy) liveConn(conn net.Conn, owner int, port uint32) net.Conn {
 	if s == nil {
 		return conn
 	}
-	return &liveReader{Conn: conn, sink: s, row: models.LiveRow{Exe: programOf(owner), Port: uint16(port)}}
+	return &liveReader{Conn: conn, sink: s, row: models.LiveRow{Exe: ProgramOf(owner), Port: uint16(port)}}
 }
 
 // liveReader is a caller's connection that reports each read of its bytes as
@@ -113,16 +110,3 @@ func (c *liveReader) CloseWrite() error {
 // live call's conn (util.WatchPeerEnd, watching the caller for its hang-up)
 // looks through it.
 func (c *liveReader) NetConn() net.Conn { return c.Conn }
-
-// programOf is the program process pid runs: its executable, else its
-// command name; "" when neither can be read.
-func programOf(pid int) string {
-	if p, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", pid)); err == nil {
-		return strings.TrimSuffix(p, " (deleted)")
-	}
-	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid))
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(b))
-}
