@@ -623,3 +623,24 @@ func TestReaderFieldsOfARecordingHoldItsWordsWhereTheyStand(t *testing.T) {
 		}
 	}
 }
+
+// The index keeps an answer only where it and its text fit what is left of
+// the call's cap: a text that fits alone, whose words do not, keeps none,
+// and the index never holds past its cap.
+func TestReaderIndexKeepsNoAnswerPastItsCap(t *testing.T) {
+	defer func(b int64) { readerBudget = b }(readerBudget)
+	var sb strings.Builder
+	for i := 0; i < 64; i++ {
+		fmt.Fprintf(&sb, "w%d ", i)
+	}
+	text := sb.String()
+	readerBudget = int64(len(text)) + headerBytes + 1
+	x := newReaderIndex(nil)
+	tt := x.text(text)
+	if held, read := tt.holdsWord("w17"); !held || !read {
+		t.Fatalf("held %v read %v; want held", held, read)
+	}
+	if x.used > x.budget || tt.e.tokensKept {
+		t.Errorf("the index keeps %d bytes (words kept %v) within a cap of %d", x.used, tt.e.tokensKept, x.budget)
+	}
+}
