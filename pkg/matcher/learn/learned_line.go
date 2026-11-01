@@ -1,6 +1,7 @@
 package learn
 
 import (
+	"cmp"
 	"strconv"
 	"strings"
 
@@ -33,6 +34,13 @@ type learnedWord struct {
 	From string
 }
 
+// outcomeSays is what a learned line says of each outcome.
+var outcomeSays = map[WordOutcome]string{
+	OutcomeClock: "a clock read, checked in its call's span",
+	OutcomeValue: "a value bound at its source, checked at every later use",
+	OutcomeFresh: "a value made anew each run, bound at its first call and checked at every later use",
+}
+
 // learnedLine is l's one line (see above).
 func learnedLine(l learnedWord) string {
 	var b strings.Builder
@@ -42,16 +50,7 @@ func learnedLine(l learnedWord) string {
 		rec, full, rule = masked, masked, hidden(rule)
 	}
 	b.WriteString(recordedMark + strconv.Quote(rec) + roundFMark + strconv.Quote(full) + ": learned ")
-	switch l.Outcome {
-	case OutcomeClock:
-		b.WriteString("a clock read, checked in its call's span")
-	case OutcomeValue:
-		b.WriteString("a value bound at its source, checked at every later use")
-	case OutcomeFresh:
-		b.WriteString("a value made anew each run, bound at its first call and checked at every later use")
-	default:
-		b.WriteString("nothing")
-	}
+	b.WriteString(cmp.Or(outcomeSays[l.Outcome], "nothing"))
 	if rule != "" {
 		b.WriteString(": " + rule)
 	}
