@@ -838,6 +838,31 @@ func (dc *decider) namedBy(t *readerText, m moment, by func(h, m moment) bool) i
 	if !read {
 		return 1
 	}
+	return dc.named(spans, m, by)
+}
+
+// wholeNames reports whether a field of t (a JSON value's leaf, a
+// recording's field, or the text whole) is, whole, an instant that names m
+// by the rule by (a SentAt, not a UnixNano inside a name); true where
+// keploy could not read t.
+func (dc *decider) wholeNames(t *readerText, m moment, by func(h, m moment) bool) bool {
+	s, fields, ok := t.read()
+	n := 0
+	eachField(s, fields, func(_ fieldAt, f string) {
+		var whole []instant
+		for _, sp := range dc.dr.spansOf(f) {
+			if sp.start == 0 && sp.end == len(f) {
+				whole = append(whole, sp)
+			}
+		}
+		n += dc.named(whole, m, by)
+	})
+	return !ok || n > 0
+}
+
+// named counts the spans that name m, or m in the application's zone
+// (inZone), by the rule by.
+func (dc *decider) named(spans []instant, m moment, by func(h, m moment) bool) int {
 	ms := []moment{m}
 	if z, ok := dc.inZone(m); ok {
 		ms = append(ms, z)
@@ -926,11 +951,14 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 				"the recorded moment stands in "+p.name+", whose state in round F keploy cannot tell ("+note+")", []string{p.name},
 				Edit{Kind: EditReRecord}, dc.wordNoise(path, n))
 		}
-		// A place that holds F's moment only as a cut of a finer instant (a
-		// second inside a UnixNano name) gave no value to pick, as at step 3.
-		cut := c.lm != nil && dc.cutOfFinerOnly(p.t.live, l, *c.lm) && dc.namedBy(p.t.live, *c.lm, func(h, m moment) bool {
+		// A place that holds F's moment only as a cut of a finer instant
+		// inside a longer text (a second of a UnixNano in a name) gave no
+		// value to pick, as at step 3. One whose field is that instant
+		// whole (a SentAt) did: an application cuts a time it received.
+		cutOf := func(h, m moment) bool {
 			return h.res < m.res && m.res > 0 && h.key.at-h.key.at%int64(m.res) == m.key.at
-		}) > 0
+		}
+		cut := c.lm != nil && dc.cutOfFinerOnly(p.t.live, l, *c.lm) && dc.namedBy(p.t.live, *c.lm, cutOf) > 0 && !dc.wholeNames(p.t.live, *c.lm, cutOf)
 		switch {
 		case before(p) && h.hl && !cut && (!h.hr || p.same()):
 			why := "round F's moment stands unchanged in " + p.name
@@ -940,7 +968,9 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 			return dc.refuse(path, at, n, r, l, RefusalPick, why, []string{p.name}, dc.wordNoise(path, n))
 		// An answer recorded after the call that round F gave before it:
 		// in round F the value may be a pick from it, as main reads it.
-		case p.fGave && p.state == stateNotBefore && p.side == Response && h.hl && !h.hr && !cut:
+		// The recorded application never read it, so R's moment standing
+		// there too (by another cut) says nothing.
+		case p.fGave && p.state == stateNotBefore && p.side == Response && h.hl && !cut:
 			return dc.refuse(path, at, n, r, l, RefusalPick, "round F's moment stands in "+p.name+", which round F gave before the call but which was recorded after it", []string{p.name}, dc.wordNoise(path, n))
 		case p.side == Response && p.state == stateUnknown && (h.hr || h.hl):
 			return untold(p.why)

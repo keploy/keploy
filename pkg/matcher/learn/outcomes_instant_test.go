@@ -1282,35 +1282,50 @@ func TestOutcomeAMillisecondCopyIsBoundToItsSource(t *testing.T) {
 }
 
 // An answer recorded after the call that round F gave the application
-// before it, holding round F's moment and not the recorded one: in round F
-// the value may be a pick from it, so it is refused naming it, as main
-// refuses it, never read as the call's clock read. Where F never gave it,
-// or it holds F's minute only as a cut of a finer instant (no pick, as at
-// the answer step), the call's window reads the clock.
+// before it, holding round F's moment: in round F the value may be a pick
+// from it, so it is refused naming it, as main refuses it, never read as
+// the call's clock read. So is one whose whole field is a finer instant F's
+// minute is a cut of (a SentAt, cut or rounded to the minute), and one that
+// holds the recorded minute too, by another cut: it was recorded after the
+// call, so the recorded application never read it. Where F never gave it,
+// or it holds F's minute only as a cut of a finer instant inside a longer
+// text (a UnixNano in a name: no pick, as at the answer step), the call's
+// window reads the clock.
 func TestOutcomeAMomentALaterRecordingGaveBeforeTheCallIsAPick(t *testing.T) {
 	const p = "body.sent_at"
 	minute := func(t time.Time) string { return t.UTC().Format("2006-01-02T15:04Z07:00") }
-	rAt, fAt := oAt.Add(30*time.Second), oAt.Add(time.Hour+61*time.Second)
-	rec, live := minute(rAt), minute(fAt)
-	w := iWin(rAt, fAt, 100*time.Millisecond)
-	// mock-0 was recorded 15 s after the call.
-	later := func(word string) Raw { return oAnswer("mock-0", -45*time.Second, word) }
-	fMinute := fAt.Truncate(time.Minute)
-	for _, tc := range []struct {
-		what string
-		raw  Raw
-		pick bool
+	for _, at := range []struct {
+		what     string
+		rAt, fAt time.Time
 	}{
-		{"round F's minute, given before the call", later(live).WithServed(true).ServedAsRecorded(), true},
-		{"round F's minute at its first second, given before the call", later(fMinute.Format(time.RFC3339)).WithServed(true).ServedAsRecorded(), true},
-		{"round F's minute as a cut of a later second, given before the call", later(fMinute.Add(5 * time.Second).Format(time.RFC3339)).WithServed(true).ServedAsRecorded(), false},
-		{"round F's minute, never given", later(live), false},
+		{"an hour apart", oAt.Add(30 * time.Second), oAt.Add(time.Hour + 61*time.Second)},
+		{"in the next minute", oAt.Add(time.Hour + 57*time.Second), oAt.Add(time.Hour + 61*time.Second)},
 	} {
-		d := oWord(t, Decide(iCall(p, String, rec, live, rAt, fAt, w, nil, []Raw{tc.raw})), rec, live)
-		if tc.pick {
-			oRefused(t, tc.what, d, "pick", "mock-0")
-		} else {
-			iClock(t, tc.what, d)
+		rAt, fAt := at.rAt, at.fAt
+		rec, live := minute(rAt), minute(fAt)
+		w := iWin(rAt, fAt, 100*time.Millisecond)
+		// mock-0 was recorded 15 s after the call.
+		later := func(word string) Raw { return oAnswer("mock-0", oAt.Sub(rAt.Add(15*time.Second)), word) }
+		fMinute := fAt.Truncate(time.Minute)
+		for _, tc := range []struct {
+			what string
+			raw  Raw
+			pick bool
+		}{
+			{"round F's minute, given before the call", later(live).WithServed(true).ServedAsRecorded(), true},
+			{"round F's minute at its first second, given before the call", later(fMinute.Format(time.RFC3339)).WithServed(true).ServedAsRecorded(), true},
+			{"round F's minute as a cut of a later second, given before the call", later(fMinute.Add(5 * time.Second).Format(time.RFC3339)).WithServed(true).ServedAsRecorded(), true},
+			{"round F's minute as a second before it, rounded, given before the call", later(fMinute.Add(-20 * time.Second).Format(time.RFC3339)).WithServed(true).ServedAsRecorded(), true},
+			{"round F's minute as a cut of a UnixNano in a name, given before the call", later("app-crud-" + iEpochNs(fMinute.Add(5*time.Second+123))).WithServed(true).ServedAsRecorded(), false},
+			{"round F's minute, never given", later(live), false},
+		} {
+			what := at.what + ": " + tc.what
+			d := oWord(t, Decide(iCall(p, String, rec, live, rAt, fAt, w, nil, []Raw{tc.raw})), rec, live)
+			if tc.pick {
+				oRefused(t, what, d, "pick", "mock-0")
+			} else {
+				iClock(t, what, d)
+			}
 		}
 	}
 }
