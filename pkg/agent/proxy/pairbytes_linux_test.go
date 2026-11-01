@@ -7,8 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
+	"net/netip"
+	"os"
 	"runtime"
+	"slices"
+	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -353,6 +359,97 @@ func readAndSettle(t *testing.T, p *Proxy, reader net.Conn, n uint64) {
 	}
 }
 
+// movedTo waits until the kernel's own table of sockets lists the
+// application's socket of pc in the state want, and checks that the lookup's
+// first read after that finds it there. It fails, naming what it saw, if the
+// table lists the socket in a state outside passing (the states it moves
+// through on its way) or no longer lists it, and if the lookup misses the
+// socket or reads it in another state.
+//
+// The table (/proc/net/tcp and tcp6) is read apart from sock_diag and the
+// code under test: the kernel moves the socket on its own, so a lookup that
+// never reads want cannot keep the wait going. want is a state the socket
+// stays in, so once the table lists it there, the lookup reads it there.
+// Before 6.11 the kernel listed a timewait socket a step before it took the
+// socket's reference, and a lookup in that step misses the socket, so the
+// table must list it with its reference.
+//
+// The table is read under each chain's lock, and a socket moves to the
+// timewait table under that lock, so the table lists it all the way. But a
+// read of the table restarts its walk at each page it fills, and a socket
+// that moves in its chain at a restart can be left out of that read. So a
+// socket is no longer listed when two reads running leave it out: a socket
+// the kernel destroyed (with no timewait socket for it, TCPTimeWaitOverflow)
+// is left out of every read.
+func movedTo(t *testing.T, ds *diagSock, pc *pairedConn, want uint8, passing ...uint8) {
+	t.Helper()
+	for missed := 0; ; runtime.Gosched() {
+		state, refs, listed := kernelTCPState(t, pc.app, pc.proxy)
+		if !listed {
+			if missed++; missed == 2 {
+				t.Fatalf("the kernel's own table no longer lists the application's socket %s -> %s, on its way to TCP state %d", pc.app, pc.proxy, want)
+			}
+			continue
+		}
+		missed = 0
+		if state == want && refs > 0 {
+			break
+		}
+		if state != want && !slices.Contains(passing, state) {
+			t.Fatalf("the kernel's own table lists the application's socket %s -> %s in TCP state %d, on its way to %d; want one of %v first", pc.app, pc.proxy, state, want, passing)
+		}
+	}
+	if got, err := ds.lookup(pc.app, pc.proxy); err != nil || got.state != want {
+		t.Fatalf("lookup of the application's socket %s -> %s, once the kernel lists it in TCP state %d = TCP state %d, %v; want %d", pc.app, pc.proxy, want, got.state, err, want)
+	}
+}
+
+// kernelTCPState is the TCP state the kernel's own table of sockets
+// (/proc/net/tcp and tcp6) lists the socket from local to remote in, the
+// references held to it, and whether the table lists it. Ends are compared
+// unmapped: the table lists an IPv4 socket with IPv4 ends.
+func kernelTCPState(t *testing.T, local, remote netip.AddrPort) (uint8, int, bool) {
+	t.Helper()
+	local = netip.AddrPortFrom(local.Addr().Unmap(), local.Port())
+	remote = netip.AddrPortFrom(remote.Addr().Unmap(), remote.Port())
+	for _, table := range []string{"/proc/net/tcp", "/proc/net/tcp6"} {
+		b, err := os.ReadFile(table)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue // no IPv6 here
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		// sl local_address rem_address st tx_queue:rx_queue tr:tm->when
+		// retrnsmt uid timeout inode ref pointer ...
+		for _, line := range strings.Split(string(b), "\n")[1:] {
+			f := strings.Fields(line)
+			if len(f) < 11 || procAddrPort(f[1]) != local || procAddrPort(f[2]) != remote {
+				continue
+			}
+			state, serr := strconv.ParseUint(f[3], 16, 8)
+			refs, rerr := strconv.Atoi(f[10])
+			if serr != nil || rerr != nil {
+				t.Fatalf("%s: %q", table, line)
+			}
+			return uint8(state), refs, true
+		}
+	}
+	return 0, 0, false
+}
+
+// procAddrPort is an address:port as /proc/net/tcp and tcp6 list it, both in
+// hex, the address in 32-bit words of host byte order (procIP), unmapped.
+func procAddrPort(h string) netip.AddrPort {
+	ip, port, _ := strings.Cut(h, ":")
+	n, err := strconv.ParseUint(port, 16, 16)
+	a, ok := netip.AddrFromSlice(procIP(ip))
+	if err != nil || !ok {
+		return netip.AddrPort{}
+	}
+	return netip.AddrPortFrom(a.Unmap(), uint16(n))
+}
+
 // An application socket on its way to closed is read by the wait, bound to a
 // device or not: how much it wrote, never gone. For a socket bound to a
 // device that is the dump's answer, so the dump has to ask for each closing
@@ -400,17 +497,9 @@ func TestAClosingApplicationSocketIsReadNotGone(t *testing.T) {
 				if err := proxySide.CloseWrite(); err != nil {
 					t.Fatal(err)
 				}
-				// The FIN moves it when the host gets to deliver it, and it
-				// stays where the kernel keeps it, so a lookup finds it
-				// throughout.
-				got, err := ds.lookup(pc.app, pc.proxy)
-				for err == nil && got.state == tcpFinWait1 {
-					runtime.Gosched()
-					got, err = ds.lookup(pc.app, pc.proxy)
-				}
-				if err != nil || got.state != tcpClosing {
-					t.Fatalf("lookup of the application's socket %s -> %s after the proxy's FIN = TCP state %d, %v; want CLOSING", pc.app, pc.proxy, got.state, err)
-				}
+				// The proxy's FIN moves it to CLOSING when the host gets to
+				// deliver the FIN, and the bytes hold it there.
+				movedTo(t, ds, pc, tcpClosing, tcpFinWait1)
 				wantFINCounted(t, p, ds, pc, tcpClosing, n)
 				readAndSettle(t, p, reader, n)
 			})
@@ -435,31 +524,19 @@ func TestAClosingApplicationSocketIsReadNotGone(t *testing.T) {
 				p := &Proxy{logger: zap.NewNop()}
 				app, proxySide, _ := heldPairBound(t, p, 1, tc.network, tc.addr, "", tc.dev)
 				pc, ds := closingPair(t, p, proxySide)
-				// Found while it stays put, so the read below waits on a
-				// socket the lookup can see, not on a lookup that cannot.
-				if _, err := ds.lookup(pc.app, pc.proxy); err != nil {
-					t.Fatalf("lookup of the application's socket %s -> %s: %v", pc.app, pc.proxy, err)
-				}
 				if err := app.Close(); err != nil {
 					t.Fatal(err)
 				}
 				if err := proxySide.CloseWrite(); err != nil {
 					t.Fatal(err)
 				}
-				// Here the socket does move: the kernel swaps it for a
-				// timewait socket, and a lookup can catch the swap and read
-				// it closed, or not find it. So FIN_WAIT2 is only a state it
-				// passes through, and TIME_WAIT is where it stays.
-				for {
-					got, err := ds.lookup(pc.app, pc.proxy)
-					if err == nil && got.state == tcpTimeWait {
-						break
-					}
-					if err != nil && !errors.Is(err, errNoSocket) {
-						t.Fatal(err)
-					}
-					runtime.Gosched()
-				}
+				// Here the socket does move: on its way the kernel swaps it
+				// for a timewait socket, in FIN_WAIT2 or TIME_WAIT, which
+				// stays in TIME_WAIT for 60 s. The exact lookup, which takes
+				// no lock, can catch the swap and miss the socket or read it
+				// closed, so the case reads TIME_WAIT once the kernel's own
+				// table lists it there.
+				movedTo(t, ds, pc, tcpTimeWait, tcpFinWait1, tcpFinWait2, tcpClosing)
 				if tg, err := p.pairTarget(ds, pc); err != nil || tg != nil {
 					t.Fatalf("pairTarget in TIME_WAIT = %+v, %v; want nothing to wait for", tg, err)
 				}
