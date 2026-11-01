@@ -9,7 +9,9 @@ import (
 
 // Sanitized is m as evidence keeps it: the protocol, the
 // destination, how far the matcher got, the closest recorded mock's name,
-// the matcher's next step, when it happened, why it missed (the learn step's
+// for an extra call the name of the test's own recording it repeats
+// (ExtraOf, the recording a mappings edit marks `repeat: any`), the
+// matcher's next step, when it happened, why it missed (the learn step's
 // reason, in record's full round), how an answered call was answered and the
 // process that made the call (UnmatchedCall.Answer, Source: names,
 // no value), and the call's shape
@@ -28,7 +30,7 @@ import (
 func (m UnmatchedCall) Sanitized() UnmatchedCall {
 	out := UnmatchedCall{Protocol: m.Protocol, Destination: m.Destination, LiveDestination: m.LiveDestination, MatchPhase: m.MatchPhase,
 		ClosestMock: m.ClosestMock, NextSteps: m.SanitizedNextStep(), At: m.At, ActualSummary: MissShape(m), Differs: FieldShapes(m.Differs), FieldReasons: FieldReasonShapes(m.FieldReasons),
-		Kind: m.Kind, Recorded: m.Recorded, NotOwned: m.NotOwned, Reason: m.Reason, Concurrent: m.Concurrent.Clone(),
+		Kind: m.Kind, Recorded: m.Recorded, ExtraOf: m.ExtraOf, NotOwned: m.NotOwned, Reason: m.Reason, Concurrent: m.Concurrent.Clone(),
 		// An answered call stays one (UnmatchedCall.Answer): how it was
 		// answered and by which process, no value.
 		Answer: m.Answer, Drift: m.Drift, Reused: m.Reused, WriteKind: m.WriteKind, Source: m.Source, RecordedIn: m.RecordedIn, ChargedTo: m.ChargedTo,

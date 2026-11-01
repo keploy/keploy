@@ -1385,6 +1385,12 @@ func TestSanitizedMissKeepsTheShapeAndTheAdvice(t *testing.T) {
 	require.Equal(t, "mock-7", m.ClosestMock)
 	require.Equal(t, "Re-record mocks if the SQL query has changed.", m.NextSteps)
 	require.Empty(t, m.Diff)
+
+	// An extra call keeps the recording it repeats: a name, no value. The
+	// mappings edit that marks the read `repeat: any` reads it here.
+	extra := sanitizedMiss(models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "GET /cluster?name=local-test", Kind: models.MissExtraCall, Recorded: 1, ExtraOf: "mock-77"})
+	require.Equal(t, "mock-77", extra.ExtraOf, "the recording an extra call repeats was dropped")
+	require.Equal(t, 1, extra.Recorded)
 	require.Empty(t, m.ClosestMockReq)
 	require.Empty(t, m.ReceivedReq)
 

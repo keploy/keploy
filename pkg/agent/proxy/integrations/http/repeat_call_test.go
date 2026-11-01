@@ -477,6 +477,29 @@ func TestAnExtraCallNamesTheRecordingItRepeats(t *testing.T) {
 	}
 }
 
+// A repeat that differs from its recording only in a header keploy.yml
+// declares noise is still the same call, as the matcher judges it: the miss
+// names the recording it repeats. A header the user did not declare noise
+// makes it another call, which names none.
+func TestAnExtraCallDifferingOnlyInANoisedHeaderNamesItsCopy(t *testing.T) {
+	const addr, host = "127.0.0.1:8099", "localhost:8099"
+	const path = "/cluster?name=local-test"
+	t.Setenv(provenswitch.Env, "1")
+	rec := onHost("mock-77", path, host)
+	rec.Spec.HTTPReq.Header["X-Session"] = "recorded-1"
+	db := gateDb{earlierDb: earlierDb{mockMemDb: &mockMemDb{}}, consumed: []*models.Mock{rec}}
+	raw := "GET " + path + " HTTP/1.1\r\nHost: " + host + "\r\nAccept: application/json\r\nX-Session: live-2\r\n\r\n"
+	noised := models.OutgoingOptions{NoiseConfig: map[string]map[string][]string{"header": {"X-Session": {}}}}
+	r := missReportOf(t, db, addr, raw, noised)
+	if r.MissKind != models.MissExtraCall || r.Recorded != 1 || r.ExtraOf != "mock-77" {
+		t.Fatalf("a second read differing only in a noised header is kind %q (recorded %d) of %q; want extra_call, recorded once, of mock-77", r.MissKind, r.Recorded, r.ExtraOf)
+	}
+	r = missReportOf(t, db, addr, raw, models.OutgoingOptions{})
+	if r.MissKind == models.MissExtraCall || r.ExtraOf != "" {
+		t.Fatalf("a read differing in a header no noise covers is kind %q of %q; want no extra call and no recording it repeats", r.MissKind, r.ExtraOf)
+	}
+}
+
 // perTestDb is earlierDb whose per-test read shows perTest, or fails with
 // readErr; spent are the recordings it reports spent (integrations.
 // SpentReader), and others those it tells are not the open test's own
