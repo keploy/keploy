@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -57,7 +59,12 @@ type provenWire struct {
 	// open is the open test's ID, "" when none is.
 	open string
 	// skip is the gate: test ID -> the reason its harness skips it with.
-	skip map[string]string
+	// needs holds a test to the tests that must begin before it
+	// (models.ScopeGateReq.Needs), and began is every test opened since the
+	// session began.
+	skip  map[string]string
+	needs map[string][]models.ScopeNeed
+	began map[string]bool
 	// charged holds the misses the ends drained from the proxy, until the
 	// CLI's own end-of-run read (GetMockErrors) collects them, so charging a
 	// miss to a test never hides it from the run's totals.
@@ -78,8 +85,17 @@ type provenWire struct {
 	// models.ScopeTableReq.Pool); nil until the CLI sent one.
 	pool map[string][]string
 	// staged: the replay's mocks are staged on the proxy, which serves them
-	// exactly (exact_proven.go). Once per session.
+	// exactly (exact_proven.go). Once per session, and again when the CLI
+	// sends a pool slice naming a recording the staging did not read.
 	staged bool
+	// stagedPool is every pool name the staging read (stageForExactServing):
+	// a pool slice naming another is served only once it is staged.
+	stagedPool map[string]bool
+	// firstRecorded is when the set's earliest recorded test began
+	// (SetRecordedWindows): the staging reads, of the on-disk store, what was
+	// recorded before it, and the pool by name. Zero when the CLI sent no
+	// window.
+	firstRecorded time.Time
 	// servedSince is when exact serving began serving the open test
 	// (serveTestExactly): a miss made before it is no call of the test's.
 	servedSince time.Time
@@ -131,6 +147,41 @@ type provenWire struct {
 	// gone, charged no test with: the run's (UnchargedCaptureLosses).
 	scopeTests    map[uint64]scopeTest
 	unreadOutside models.CaptureLosses
+	// order is, in a session that runs the learn step, the recorded order of
+	// its tests and how far the session's begins went in it
+	// (keepRecordedOrder).
+	order recordedOrder
+}
+
+// recordedOrder is what keeps a session's learn step to tests begun in their
+// recorded order (keepRecordedOrder). learn: the session runs the learn step
+// (models.OutgoingOptions.Learn: keploy mock record's full round). starts is,
+// by test ID, where each test's recorded window starts (the scope table's
+// windows, SetRecordedWindows; a window no test names, merged, is no test's):
+// the order of a test with no recorded begin (recordedStart). latest is the
+// latest recorded start among the tests the session began, and latestTest
+// the test that began there. ended: a test began out of that order, and the
+// session's learn step was ended for the rest of the session. tests, when
+// not nil, are the tests whose recordings the round learns onto
+// (models.OutgoingOptions.LearnTests, learnsOnto); held is the open test the
+// learn step is held for (holdLearn), "" when none is. A new session starts
+// a new order (resetSession).
+type recordedOrder struct {
+	learn      bool
+	starts     map[string]time.Time
+	latest     time.Time
+	latestTest string
+	ended      bool
+	tests      map[string]bool
+	held       string
+}
+
+// learnsOnto reports whether the round learns onto test id's recording:
+// every test's when the session was given no list (an older CLI), else
+// only a listed test's. An ID is matched whole, as the CLI keeps what was
+// learned (mock's learnsOnto).
+func (o recordedOrder) learnsOnto(id string) bool {
+	return o.tests == nil || o.tests[id]
 }
 
 // scopeTest is one attempt of a test: its ID, and its window's start, which
@@ -335,8 +386,9 @@ func (a *Agent) ClaimInstance(ctx context.Context, req models.InstanceReq, calle
 	// whose read failed is not made, so its retry reads them again.
 	if prev != me && a.replaying() && a.Proxy != nil {
 		misses, err := a.Proxy.GetMockErrors(ctx)
-		// What was read is the run's whether or not the read was whole.
-		a.charge(misses)
+		// What was read is the run's whether or not the read was whole, and
+		// no test's.
+		a.charge(misses, "")
 		if err != nil {
 			return models.InstanceResp{}, scopeErr(http.StatusInternalServerError, models.ScopeErrInternal,
 				"keploy could not read the calls made before this test process started: "+err.Error(), "check the agent's log")
@@ -407,20 +459,255 @@ func (a *Agent) SetScopePool(ctx context.Context, pool map[string][]string) erro
 	}
 	a.provenMu.Lock()
 	a.proven.pool = cp
+	// A slice naming a recording the staging did not read (it reads the
+	// pool by name) stages the set again before it is served: a name not
+	// staged would serve nothing.
+	if a.proven.staged && !covers(a.proven.stagedPool, cp) {
+		a.proven.staged = false
+	}
 	a.provenMu.Unlock()
-	// Whose a mock is, for the learn steps: keploy mock replay sends no
-	// recorded test windows, and the table's pool slices are what says a
-	// mock was recorded while no test was open.
+	// Whose a mock is, for the learn steps: the table's pool slices are what
+	// says a mock was recorded while no test was open (the recorded test
+	// windows the table sends, SetRecordedWindows, end at each test's last
+	// recording, not at its scope's end). Whose tests list each, by key,
+	// bounds each test process's teardown.
 	if ps, ok := a.Proxy.(coreAgent.PoolNamesSetter); ok {
 		var names []string
 		for _, slice := range cp {
 			names = append(names, slice...)
 		}
-		if err := ps.SetPoolNames(names); err != nil {
+		a.scopeMu.Lock()
+		owners := teardownOwners(a.scopeTable, cp)
+		a.scopeMu.Unlock()
+		if err := ps.SetPoolNames(names, owners); err != nil {
 			return err
 		}
 	}
 	return a.applyPool(ctx)
+}
+
+// teardownOwners is, of a replay's scope table (test ID -> the mocks it
+// lists) and its pool slices (key -> names), the key of the test process
+// whose tests list each mock: a test's key is its ID's path
+// (models.TestIDPath) where that path is a pool slice's key, which it is for
+// a test whose harness names no test file (the agent builds the ID from the
+// claim's key then). A mock that a test of no such key lists (its ID names
+// its test file, or its process recorded no pool call), or that tests of two
+// keys list, is "": it bounds every process's teardown, failing closed. A
+// file path is never a key, which names a directory.
+func teardownOwners(table, pool map[string][]string) map[string]string {
+	keys := make(map[string]bool, len(pool))
+	for k := range pool {
+		if k != "" && k != models.PoolKeyNone {
+			keys[k] = true
+		}
+	}
+	out := map[string]string{}
+	for id, names := range table {
+		key := models.TestIDPath(id)
+		if !keys[key] {
+			key = ""
+		}
+		for _, n := range names {
+			if prev, ok := out[n]; ok && prev != key {
+				out[n] = ""
+				continue
+			}
+			out[n] = key
+		}
+	}
+	return out
+}
+
+// SetRecordedWindows installs, for a replay, the recorded window of every
+// test of its set (models.ScopeTableReq.Windows): the learn step reads a
+// recording inside another test's window as that test's, not as an earlier
+// place of the paired one (integrations.TestWindows). The scope table sends
+// them before the pool slices, whose serving may stage the set: seeded at a
+// set boundary they are installed by that staging, else at once. None
+// leaves the set none.
+//
+// The windows also say the order the set's tests were recorded in, which
+// the session's learn step needs its tests begun in (keepRecordedOrder), for
+// a test the recording gives no begin (recordedStart).
+func (a *Agent) SetRecordedWindows(_ context.Context, ws []models.TestWindow) error {
+	starts := make(map[string]time.Time, len(ws))
+	var first time.Time
+	for _, w := range ws {
+		if w.TestCase != "" {
+			starts[w.TestCase] = w.Start
+		}
+		if !w.Start.IsZero() && (first.IsZero() || w.Start.Before(first)) {
+			first = w.Start
+		}
+	}
+	a.provenMu.Lock()
+	a.proven.order.starts = starts
+	a.proven.firstRecorded = first
+	a.provenMu.Unlock()
+	if seeder, ok := a.Proxy.(coreAgent.RecordedWindowsSeeder); ok {
+		seeder.SeedRecordedWindows(slices.Clone(ws))
+	}
+	return nil
+}
+
+// keepRecordedOrder ends the session's learn step, for the rest of the
+// session, when test id begins out of its recorded order: when it did not
+// begin in its recording after every test the session already began
+// (recordedStart; the same test begun again included: go test -count=N,
+// gotestsum --rerun-fails, or tests run in another order than recorded,
+// those of a merged window included). It is called at id's begin, before
+// anything is settled or opened.
+//
+// The learn step reads a recording made after the open test's recorded
+// window as no earlier place of the test's (integrations.TestWindows): a
+// call that exactly repeats a later-recorded test's recording is then not
+// looked up there, and stays paired with the open test's own recording. In
+// recorded order such a call is a late call of a test still to come, which
+// cannot be. Out of it, it is a late call of a test that already ran (the
+// later-recorded one ran first), and what it differs in would be learned
+// onto the open test's recording as noise: a false green. Ended, the learn
+// step pairs nothing and learns nothing more (Proxy.SetLearnEnded, as keploy
+// test ends it for a set's retry cycles), so such a call misses, and so does
+// any call of the rest of the session that needed something learned.
+// What was learned before stays.
+//
+// A test the recording has no place for (not recorded: no begin, no
+// window) neither ends it nor moves the order. Nor does a test whose
+// recording the round does not learn onto (learnsOnto): it keeps an earlier
+// record's recording, a partial record's test it did not run or one that
+// failed against real infra, so its times are that record's, and a test
+// recorded later in this record may well run before it. Its own recording
+// learns nothing while it is open (holdLearn), so no late call of the test
+// that ran first can be learned onto it, and the tests after it keep the
+// order of the tests that learn. A proxy that cannot end the learn step
+// refuses the begin: its learn step would pair and learn out of the
+// recorded order.
+func (a *Agent) keepRecordedOrder(id string) *models.ScopeError {
+	a.provenMu.Lock()
+	o := a.proven.order
+	a.provenMu.Unlock()
+	if !o.learn || o.ended || o.latestTest == "" || !o.learnsOnto(id) {
+		return nil
+	}
+	if start, known := a.recordedStart(id, o.starts); !known || start.After(o.latest) {
+		return nil
+	}
+	le, ok := a.Proxy.(coreAgent.LearnEndSetter)
+	if !ok {
+		return scopeErr(http.StatusInternalServerError, models.ScopeErrInternal,
+			"keploy cannot judge "+id+": it began out of the order the set's tests were recorded in, and this keploy agent cannot stop its learn step for the rest of the round", "run the keploy agent of this keploy version")
+	}
+	if err := le.SetLearnEnded(true); err != nil {
+		return scopeErr(http.StatusInternalServerError, models.ScopeErrInternal,
+			"keploy cannot judge "+id+": it began out of the order the set's tests were recorded in, and keploy could not stop its learn step for the rest of the round: "+err.Error(), "check the agent's log")
+	}
+	a.provenMu.Lock()
+	a.proven.order.ended = true
+	a.provenMu.Unlock()
+	a.logger.Warn("keploy stopped record's full round from learning for the rest of the round: a test began after a test recorded later than it (or began again), so a late call of the test that ran first could be paired with this test's own recording and what it differs in learned as noise; what was learned before stays, and a later call that needed learning misses",
+		zap.String("test", id),
+		zap.String("after", o.latestTest),
+		zap.String("next_step", "run keploy mock record with a test command that runs each test once, in one order: no -count above 1, no --rerun-fails, no -shuffle"))
+	return nil
+}
+
+// noteBegunInOrder moves the session's recorded order (keepRecordedOrder)
+// to test id, which began: to its recorded start (recordedStart), when that
+// is the latest begun. A test whose recording the round does not learn
+// onto moves nothing (learnsOnto).
+func (a *Agent) noteBegunInOrder(id string) {
+	a.provenMu.Lock()
+	starts := a.proven.order.starts
+	learns := a.proven.order.learnsOnto(id)
+	a.provenMu.Unlock()
+	if !learns {
+		return
+	}
+	start, known := a.recordedStart(id, starts)
+	if !known {
+		return
+	}
+	a.provenMu.Lock()
+	defer a.provenMu.Unlock()
+	o := &a.proven.order
+	if o.latestTest == "" || !start.Before(o.latest) {
+		o.latest, o.latestTest = start, id
+	}
+}
+
+// holdLearn holds the session's learn step while test id is open, when the
+// session runs it (record's full round) and id's recording is one the round
+// does not learn onto (learnsOnto: a test that keeps an earlier record's
+// recording). The round keeps nothing it would learn on such a recording
+// (the CLI's learnsOnto), so learned in memory it would judge the test on
+// learning no later replay has: a test that passes only here. And its times
+// are the earlier record's, so a late call of a test recorded later that ran
+// before it would be paired with its recording (keepRecordedOrder). Held,
+// the learn step pairs nothing and learns nothing, and the test is judged on
+// its recording as a later replay serves it; the test's close releases it
+// (releaseLearn). It is called at id's begin, before anything is settled or
+// opened. A proxy that cannot hold it refuses the begin.
+func (a *Agent) holdLearn(id string) *models.ScopeError {
+	a.provenMu.Lock()
+	o := a.proven.order
+	a.provenMu.Unlock()
+	if !o.learn || o.learnsOnto(id) {
+		return nil
+	}
+	lh, ok := a.Proxy.(coreAgent.LearnHolder)
+	if !ok {
+		return scopeErr(http.StatusInternalServerError, models.ScopeErrInternal,
+			"keploy cannot judge "+id+": record's full round does not learn onto its recording, kept from an earlier record, and this keploy agent cannot hold its learn step while the test runs", "run the keploy agent of this keploy version")
+	}
+	if err := lh.SetLearnHeld(true); err != nil {
+		return scopeErr(http.StatusInternalServerError, models.ScopeErrInternal,
+			"keploy cannot judge "+id+": record's full round does not learn onto its recording, kept from an earlier record, and keploy could not hold its learn step while the test runs: "+err.Error(), "check the agent's log")
+	}
+	a.provenMu.Lock()
+	a.proven.order.held = id
+	a.provenMu.Unlock()
+	a.logger.Debug("keploy runs this test without learning: its recording is kept from an earlier record, which this round does not learn onto", zap.String("test", id))
+	return nil
+}
+
+// releaseLearn releases the learn step holdLearn held for test id, which
+// closed or did not begin; a no-op when it holds none for id.
+func (a *Agent) releaseLearn(id string) {
+	a.provenMu.Lock()
+	held := a.proven.order.held == id && id != ""
+	if held {
+		a.proven.order.held = ""
+	}
+	a.provenMu.Unlock()
+	if !held {
+		return
+	}
+	lh, ok := a.Proxy.(coreAgent.LearnHolder)
+	if !ok {
+		return
+	}
+	if err := lh.SetLearnHeld(false); err != nil {
+		a.logger.Warn("keploy could not take record's full round's learn step back up after a test it held it for; the tests after it learn nothing", zap.String("test", id), zap.Error(err))
+	}
+}
+
+// recordedStart is when test id began in the recording the session replays,
+// which orders its begins (keepRecordedOrder): its recorded begin
+// (SetTestBegins, which keploy mock replay sends for every test of the set
+// under the proven switch, a test whose window was merged into one no test
+// names included), else the start of its own recorded window (starts, from
+// SetRecordedWindows: a test the recording gives no begin). known is false
+// for a test with neither: one that was not recorded.
+func (a *Agent) recordedStart(id string, starts map[string]time.Time) (start time.Time, known bool) {
+	a.scopeMu.Lock()
+	began := a.testBegins[id]
+	a.scopeMu.Unlock()
+	if !began.IsZero() {
+		return began, true
+	}
+	start, known = starts[id]
+	return start, known
 }
 
 // applyPool serves the current key's pool slice exactly (servePoolExactly),
@@ -470,14 +757,11 @@ func (a *Agent) NoteRefusal(r models.RunRefusal) {
 }
 
 // SetScopeSkips installs the proven gate: the tests a replay skips, by ID,
-// with their reasons. nil skips nothing.
-func (a *Agent) SetScopeSkips(_ context.Context, skip map[string]string) error {
-	cp := make(map[string]string, len(skip))
-	for id, reason := range skip {
-		cp[id] = reason
-	}
+// with their reasons, and the tests that must begin before each test that
+// needs them. nil skips nothing.
+func (a *Agent) SetScopeSkips(_ context.Context, skip map[string]string, needs map[string][]models.ScopeNeed) error {
 	a.provenMu.Lock()
-	a.proven.skip = cp
+	a.proven.skip, a.proven.needs = maps.Clone(skip), maps.Clone(needs)
 	a.provenMu.Unlock()
 	return nil
 }
@@ -531,10 +815,18 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 			"run them one at a time: start parallel tests with keploytest.Parallel and subtests with keploytest.Run (keploy mock codemod go writes them); parallel test workers arrive in a later keploy release")
 	}
 	reason, gated := a.proven.skip[id]
+	outcome := models.ScopeOutcomeGated
+	// A test whose call holds a value an earlier test's call sends runs
+	// only after that test began in this replay.
+	for _, n := range a.proven.needs[id] {
+		if !gated && !a.proven.began[n.Test] {
+			reason, gated, outcome = n.Reason, true, models.ScopeOutcomeUnmet
+		}
+	}
 	dir := a.proven.dir
 	a.provenMu.Unlock()
 	if a.replaying() && gated {
-		a.NoteScopeGated(id, 0, at)
+		a.noteScopeNotRun(id, 0, at, outcome)
 		return models.ScopeBeginResp{V: models.ScopeProtocolVersion, Status: "ok", Action: models.ScopeActionSkip, Reason: reason}, nil
 	}
 
@@ -552,7 +844,24 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 				"keploy cannot judge "+id+": this keploy agent's proxy cannot keep each test's misses apart", "run the keploy agent of this keploy version")
 		}
 		capture = c
+		// In record's full round, a test begun out of its recorded order
+		// ends the round's learn step before anything is settled or opened,
+		// and one whose recording the round does not learn onto holds it
+		// until its close.
+		if serr := a.keepRecordedOrder(id); serr != nil {
+			return models.ScopeBeginResp{}, serr
+		}
+		if serr := a.holdLearn(id); serr != nil {
+			return models.ScopeBeginResp{}, serr
+		}
 	}
+	// A begin that fails from here releases what holdLearn held.
+	begun := false
+	defer func() {
+		if !begun {
+			a.releaseLearn(id)
+		}
+	}()
 	// The previous test's calls are settled first (settleBegin): they are
 	// never this test's. Calls made since its end are this test's or
 	// background work, and do not hold the begin.
@@ -595,7 +904,9 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 			// reads its window on the app's clock from the tracker's begin
 			// (learn.Tracker.CallWindowFrom), and a begin stamped before the
 			// move would give the test's first call a span the clock did not
-			// run as one, so no window. It opens before the test's view is
+			// run as one, so no window (unless the hooks tell where the
+			// clock's run began, AppClockRunReader: then it starts at the
+			// move). It opens before the test's view is
 			// installed, as keploy test's loops open it: a tracker that
 			// began after the view was installed would file what the view
 			// served before it as the previous test's, so the store's
@@ -622,7 +933,12 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 	}
 	a.provenMu.Lock()
 	a.proven.open = id
+	if a.proven.began == nil {
+		a.proven.began = map[string]bool{}
+	}
+	a.proven.began[id] = true
 	a.provenMu.Unlock()
+	a.noteBegunInOrder(id)
 	// The test is a scope of its own from here (containerkey); closeOpen
 	// goes back to the run's however the test closes.
 	containerkey.Default.BeginTest()
@@ -633,6 +949,7 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 	}
 	a.proven.scopeTests[scope] = scopeTest{id: id, start: boundaryTime(at)} // its window's start (BeginScopeAt)
 	a.provenMu.Unlock()
+	begun = true
 	return models.ScopeBeginResp{V: models.ScopeProtocolVersion, Status: "ok"}, nil
 }
 
@@ -749,6 +1066,9 @@ func (a *Agent) closeOpen(ctx context.Context, id, outcome string, at time.Time,
 			// Connections from here on are the run's again, in a scope of
 			// their own until the next test (containerkey).
 			containerkey.Default.EndTest()
+			// The learn step it held, if any, is taken back up: calls from
+			// here are the next test's.
+			a.releaseLearn(id)
 		}
 	}()
 	return a.endTest(ctx, id, outcome, at, why)
@@ -826,6 +1146,17 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, w
 	}
 	// Before why: why goes in front of whatever reason the evidence gives.
 	ev, outcome = a.chargeCaptureLosses(ctx, id, ev, outcome, readErr == nil, beganAt)
+	// A value the test gave that its recording does not hold checks
+	// nothing, and the call that carries it misses as a plain call, or
+	// leaves the recorded one unmade: said first, with the step that fixes
+	// it. After the losses, whose text writes the evidence's again. Misses
+	// and unmade calls are read in a replay only (testEvidence, above): a
+	// record has none, so the note is a replay's.
+	if readErr == nil && ev != nil && (len(ev.Misses) > 0 || len(ev.Unconsumed) > 0) {
+		if note := a.givensNotRecorded(id); note != "" {
+			ev.Reason = "keploy: " + note + ". " + strings.TrimPrefix(ev.Reason, "keploy: ")
+		}
+	}
 	if settleErr != nil {
 		note := "keploy could not tell that every call of " + id + " reached it: " + settleErr.Error()
 		if why == "" {
@@ -1078,7 +1409,7 @@ func (a *Agent) testEvidence(ctx context.Context, id string, unmade bool) (*mode
 	ev := &models.ScopeEvidence{}
 	misses, err := a.Proxy.GetMockErrors(ctx)
 	// Misses a read returned with its error are this test's all the same.
-	a.charge(misses)
+	a.charge(misses, id)
 	for _, m := range misses {
 		if !m.CountsAgainstTest() {
 			continue
@@ -1260,6 +1591,7 @@ func (a *Agent) abandonWindow(id string) {
 	k := scopeKey{pid: 0, name: id}
 	delete(a.workerOpen, k)
 	delete(a.scopeMeta, k)
+	a.abandonScopeLocked(k)
 	a.scopeMu.Unlock()
 }
 
@@ -1294,80 +1626,30 @@ func (a *Agent) reapOpenTest(ctx context.Context) error {
 	return nil
 }
 
-// sanitizedMiss is a miss as evidence keeps it: the protocol, the
-// destination, how far the matcher got, the closest recorded mock's name,
-// the matcher's next step, when it happened, why it missed (the learn step's
-// reason, in record's full round), how an answered call was answered and the
-// process that made the call (models.UnmatchedCall.Answer, Source: names,
-// no value), and the call's shape
-// (models.MissShape): for HTTP and gRPC the method and the target's shape,
-// for SQL the statement with its literals written "?". No body, no bound
-// parameter, no SQL literal, no query value, and no path segment that looks
-// like a value (models.PathShape says which do) or that a test variable's
-// place on the call names (VariablePlaces: one the miss names, one the
-// closest mock or a mock on the call's route declares, or one that holds a
-// value the test bound). The next step is the matcher's own fixed advice
-// (nextStepOf).
-func sanitizedMiss(m models.UnmatchedCall) models.UnmatchedCall {
-	out := models.UnmatchedCall{Protocol: m.Protocol, Destination: m.Destination, LiveDestination: m.LiveDestination, MatchPhase: m.MatchPhase,
-		ClosestMock: m.ClosestMock, NextSteps: nextStepOf(m), At: m.At, ActualSummary: models.MissShape(m), Differs: models.FieldShapes(m.Differs),
-		Kind: m.Kind, Recorded: m.Recorded, NotOwned: m.NotOwned, Reason: m.Reason, Concurrent: m.Concurrent.Clone(),
-		// An answered call stays one (models.UnmatchedCall.Answer): how it was
-		// answered and by which process, no value.
-		Answer: m.Answer, Drift: m.Drift, Reused: m.Reused, WriteKind: m.WriteKind, Source: m.Source, RecordedIn: m.RecordedIn,
-		Repeat: m.Repeat.Clone()}
-	// A variable's path places name segments, not values: kept, so a shape
-	// of this miss (models.MissShape) still writes them {}. Any other place
-	// can name a JSON key that is a value.
-	for _, p := range m.VariablePlaces {
-		if models.IsPathPlace(p) {
-			out.VariablePlaces = append(out.VariablePlaces, p)
-		}
-	}
-	if m.MatchPhase == models.MatchPhaseVariable {
-		// A test variable did not hold, or the closest mock's variables could
-		// not be followed. The part of the call it is in is kept: a URL path
-		// segment by its position, a header or query parameter by its name.
-		// A body place is kept as "body" alone, since a JSON key can be a
-		// value the app sent (a map keyed by an email). No value is kept.
-		for _, d := range m.FieldDiffs {
-			path := d.Path
-			if strings.HasPrefix(path, "body.") || strings.HasPrefix(path, "body[") {
-				path = "body"
-			}
-			out.FieldDiffs = append(out.FieldDiffs, models.MockFieldDiff{Path: path, Kind: d.Kind})
-		}
-		out.NextSteps = "a test variable did not hold in " + m.ClosestMock + " (the call sent another value than the one the test bound, a value of another type, or a value before the call that binds it), or that mock's variables cannot be followed: fix the application, or re-record the test with 'keploy mock record' if that is intended"
-	}
-	return out
-}
+// sanitizedMiss is a miss as evidence keeps it (models.UnmatchedCall.Sanitized).
+func sanitizedMiss(m models.UnmatchedCall) models.UnmatchedCall { return m.Sanitized() }
 
-// nextStepOf is a miss's next step as evidence keeps it. Every matcher
-// writes fixed advice, but one lists the fields that differed, and a map's
-// keys can be values (an email, a user ID): a next step that names any of
-// the miss's field paths is replaced by fixed advice that counts them.
-func nextStepOf(m models.UnmatchedCall) string {
-	for _, d := range m.FieldDiffs {
-		if d.Path == "" {
-			continue
-		}
-		if strings.Contains(m.NextSteps, d.Path) || strings.Contains(m.NextSteps, strings.TrimPrefix(d.Path, "body.")) {
-			return fmt.Sprintf("%d field(s) of the call differ from the recording; if the change is expected, re-record the mock set with 'keploy mock record'", len(m.FieldDiffs))
-		}
-	}
-	return m.NextSteps
-}
+// nextStepOf is a miss's next step as evidence keeps it
+// (models.UnmatchedCall.Sanitized).
+func nextStepOf(m models.UnmatchedCall) string { return m.SanitizedNextStep() }
 
 // charge keeps misses drained from the proxy for the CLI's end-of-run read,
 // as evidence keeps them (no value the app sent): they are counted, and
 // named in the run's summary, but no full request piles up across a run.
-func (a *Agent) charge(misses []models.UnmatchedCall) {
+// test is the test whose end drained them, "" for none (the claim's read of
+// the calls made before the test process started): each miss that counts
+// against a test is that test's, as its evidence lists it, and says so
+// (models.UnmatchedCall.ChargedTo); every other is charged to no test.
+func (a *Agent) charge(misses []models.UnmatchedCall, test string) {
 	if len(misses) == 0 {
 		return
 	}
 	kept := make([]models.UnmatchedCall, len(misses))
 	for i, m := range misses {
 		kept[i] = sanitizedMiss(a.asRecorded(m))
+		if test != "" && m.CountsAgainstTest() {
+			kept[i].ChargedTo = test
+		}
 	}
 	a.provenMu.Lock()
 	a.proven.charged = append(a.proven.charged, kept...)
@@ -1425,7 +1707,7 @@ func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*model
 		if before(m) {
 			// Where it was made is not known: a miss is filed by the view
 			// served when it is filed, which may be after its own test.
-			what = append(what, missText(m)+", made before this one began, had no recorded answer"+differsText(models.FieldShapes(m.Differs)))
+			what = append(what, missText(m)+", made before this one began, had no recorded answer"+missDiffersText(m))
 			continue
 		}
 		switch m.Kind {
@@ -1437,12 +1719,12 @@ func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*model
 			}
 		case models.MissOutsideTest:
 			if !beganAt.IsZero() && !m.At.IsZero() {
-				what = append(what, missText(m)+", made as this test ended, had no recorded answer"+differsText(models.FieldShapes(m.Differs)))
+				what = append(what, missText(m)+", made as this test ended, had no recorded answer"+missDiffersText(m))
 				continue
 			}
-			what = append(what, missText(m)+", made outside every test before this one began, had no recorded answer"+differsText(models.FieldShapes(m.Differs)))
+			what = append(what, missText(m)+", made outside every test before this one began, had no recorded answer"+missDiffersText(m))
 		default:
-			what = append(what, missText(m)+" had no recorded answer"+differsText(models.FieldShapes(m.Differs)))
+			what = append(what, missText(m)+" had no recorded answer"+missDiffersText(m))
 		}
 	}
 	unmade := append([]string(nil), ev.Unconsumed...)
@@ -1470,8 +1752,50 @@ func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*model
 		// change, and nothing the test did needs re-recording or quarantine.
 		return "keploy: " + strings.Join(what, "; ") + "."
 	}
-	return fmt.Sprintf("keploy: %s. If this is an intended change, re-record it: keploy mock record -c \"<your command, selecting %s>\".\n"+
-		"If it is flaky, not broken: keploy mock quarantine %s --reason \"<why>\".", strings.Join(what, "; "), id, shellQuote(id))
+	head := "keploy: " + strings.Join(what, "; ") + "."
+	if whys := missWhys(ev.Misses, before, most); len(whys) > 0 {
+		// The learn step's reasons, one line each, before what to do: they
+		// are what tells an intended change from a flaky one.
+		head += "\n" + strings.Join(whys, "\n") + "\n"
+	} else {
+		head += " "
+	}
+	return fmt.Sprintf("%sIf this is an intended change, re-record it: keploy mock record -c \"<your command, selecting %s>\".\n"+
+		"If it is flaky, not broken: keploy mock quarantine %s --reason \"<why>\".", head, id, shellQuote(id))
+}
+
+// missWhys are, for a failed test's reason, why its calls missed, in the
+// learn step's words (record's full round, where a miss has a Reason): one
+// line per call, "<call> missed (<reason>): <next step>", each said once,
+// at most most of them and a count of the rest. A miss made before the test
+// began is no call of the test's (before), and is not explained here. The
+// next step is evidence's (nextStepOf): no value of the call.
+func missWhys(misses []models.UnmatchedCall, before func(models.UnmatchedCall) bool, most int) []string {
+	var out []string
+	seen := map[string]bool{}
+	more := 0
+	for _, m := range misses {
+		if m.Reason == "" || before(m) {
+			continue
+		}
+		line := missText(m) + " missed (" + m.Reason + ")"
+		if next := strings.TrimSpace(m.NextSteps); next != "" {
+			line += ": " + next
+		}
+		if seen[line] {
+			continue
+		}
+		seen[line] = true
+		if len(out) == most {
+			more++
+			continue
+		}
+		out = append(out, line)
+	}
+	if more > 0 {
+		out = append(out, fmt.Sprintf("and %d more call(s) missed for a reason the learn step gave", more))
+	}
+	return out
 }
 
 // shellQuote quotes s for a POSIX shell unless it is made of characters a
@@ -1509,6 +1833,26 @@ func missText(m models.UnmatchedCall) string {
 		}
 	}
 	return s
+}
+
+// missDiffersText is what a reason says of the fields m differs in
+// (differsText), with why a replay refused each it refused for a reason of
+// its own (models.UnmatchedCall.FieldReasons: a learned read of the
+// application's clock the call does not carry): " (body.since differs:
+// body.since was learned as ...)". Neither names a value.
+func missDiffersText(m models.UnmatchedCall) string {
+	t := differsText(models.FieldShapes(m.Differs))
+	var whys []string
+	for _, r := range models.FieldReasonShapes(m.FieldReasons) {
+		whys = append(whys, r.Why)
+	}
+	switch {
+	case len(whys) == 0:
+		return t
+	case t == "":
+		return " (" + strings.Join(whys, "; ") + ")"
+	}
+	return strings.TrimSuffix(t, ")") + ": " + strings.Join(whys, "; ") + ")"
 }
 
 // differsText names, for a miss's reason, the fields in which the call

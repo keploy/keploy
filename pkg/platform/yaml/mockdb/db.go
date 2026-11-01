@@ -25,7 +25,6 @@ import (
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.keploy.io/server/v3/utils/pathsafe"
-	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 )
 
@@ -111,8 +110,9 @@ type MockYaml struct {
 	// original re-record bug (gobLifecycleInit only makes the lock).
 	//
 	// The lock is a one-slot channel, not a mutex, so Close can stop
-	// waiting for it: an insert on the overflow path holds it while it
-	// writes, and on a stuck disk waits for as long as the disk does.
+	// waiting for it: an insert that found the queue full holds it while
+	// it waits for room, and on a stuck disk waits for as long as the disk
+	// does.
 	gobLifecycle     chan struct{}
 	gobLifecycleInit sync.Once
 	gobRunning       bool
@@ -137,50 +137,90 @@ type MockYaml struct {
 	// instead of silently losing the tail of mocks.gob on a disk-full
 	// or permission-change shutdown.
 	gobFlushErr error
-	// gobProgress moves with every mock the writer encodes and every byte
-	// the file takes: Close waits for the writer for as long as it moves
-	// (gobStallAfter), so a slow disk is waited for and a stuck one is not.
-	gobProgress atomic.Uint64
-	// gobQueued and gobEncoded count the session's mocks handed to the
-	// writer and those it encoded (or failed to): what a Close that gives up
-	// on a stuck writer says was not written.
-	gobQueued, gobEncoded atomic.Uint64
+	// gobFileW is the file the writer writes to as its buffer hands bytes
+	// on: it says which encoded mocks the file has taken whole (gobWritten).
+	// Guarded by gobMu, as every write to the file is.
+	gobFileW *gobFileWriter
+	// gobQueued counts the session's mocks handed to the store (queued for
+	// the writer), and gobWritten those the mock file took whole: Close
+	// says how many of them were not written, read without the writer's
+	// locks, which a stuck writer holds.
+	gobQueued, gobWritten atomic.Uint64
 	// gobPathSeen is gobFilePath, for a Close that cannot take gobMu.
 	gobPathSeen atomic.Value
+	// gobSets holds the sets (setFileKey) an insert found to write in gob,
+	// so the gob hot path looks at a set's files once, not on every insert.
+	// Forgotten at Close and when a set's files are deleted.
+	gobSets sync.Map
 }
 
-// gobStallAfter is how long the gob writer may go without progress
-// (MockYaml.gobProgress) before Close stops waiting for it and says what it
-// had not written. A var so tests need not wait it out.
-var gobStallAfter = 30 * time.Second
-
-// progressWriter is the gob file as the writer's buffer writes to it: each
-// write is handed on in pieces of at most progressChunk, and the bytes the
-// file took counted in n, so a write a slow disk takes long over is progress
-// while it goes, not only once it returns.
-type progressWriter struct {
+// gobFileWriter is the gob file as the writer's buffer writes to it. Each
+// write is handed on in pieces of at most progressChunk, and every mock whose
+// encoded bytes the file has then taken whole is counted in written: a mock
+// is written once its last byte is, so a write a slow disk takes long over
+// counts the mocks it lands while it goes, and a write that never returns
+// leaves the mocks it holds counted as not written. Used under gobMu only.
+type gobFileWriter struct {
 	w io.Writer
-	n *atomic.Uint64
+	// took is how many bytes the file took; ends, oldest first, the stream
+	// offset each encoded mock not yet taken whole ends at.
+	took    uint64
+	ends    []uint64
+	written *atomic.Uint64
 }
 
 const progressChunk = 32 << 10
 
-func (p progressWriter) Write(b []byte) (int, error) {
+// gobFileOf is what the writer writes a gob file through: the file itself.
+// Tests stand a disk that is stuck, or fails, in its place.
+var gobFileOf = func(f *os.File) io.Writer { return f }
+
+// closeGobFile is how the writer closes a gob file it has finished: the
+// file's own Close. Tests stand a file whose close fails (a write back the OS
+// reports only then) in its place.
+var closeGobFile = func(f *os.File) error { return f.Close() }
+
+// closeMockFile is how appendMock closes the yaml or json mock file it
+// appended to: the file's own Close. Tests stand a file whose close fails in
+// its place.
+var closeMockFile = func(f *os.File) error { return f.Close() }
+
+func (f *gobFileWriter) Write(b []byte) (int, error) {
 	written := 0
 	for len(b) > 0 {
 		chunk := b
 		if len(chunk) > progressChunk {
 			chunk = chunk[:progressChunk]
 		}
-		n, err := p.w.Write(chunk)
+		n, err := f.w.Write(chunk)
 		written += n
-		p.n.Add(uint64(n))
+		f.took += uint64(n)
+		f.settle()
 		if err != nil {
 			return written, err
 		}
 		b = b[n:]
 	}
 	return written, nil
+}
+
+// encoded says a mock was encoded: its bytes end at the stream's offset end
+// (the file took + what the buffer holds).
+func (f *gobFileWriter) encoded(end uint64) {
+	f.ends = append(f.ends, end)
+	f.settle()
+}
+
+// settle counts the mocks the file has taken whole.
+func (f *gobFileWriter) settle() {
+	i := 0
+	for i < len(f.ends) && f.ends[i] <= f.took {
+		i++
+	}
+	if i > 0 {
+		f.written.Add(uint64(i))
+		f.ends = f.ends[i:]
+	}
 }
 
 // prunedMockInfo is the structured per-mock entry logged when
@@ -471,8 +511,10 @@ func (ys *MockYaml) updateMocksGob(ctx context.Context, testSetID, gobPath strin
 	// ys.gobBufw / ys.gobEnc; rewriting the file out from under it
 	// would corrupt the next Encode. Close drains the queue and
 	// resets lifecycle state; the next InsertMock restarts a fresh
-	// writer via the inline init in insertMockGob.
-	if err := ys.Close(); err != nil {
+	// writer via the inline init in insertMockGob. It waits for the writer
+	// until the caller's ctx ends: a disk that is stuck is the caller's to
+	// give up on (CloseUnless).
+	if err := ys.CloseUnless(ctx.Done()); err != nil {
 		utils.LogError(ys.Logger, err, "failed to quiesce async gob writer before pruning; check disk space and writer state", zap.String("path", gobPath))
 		return err
 	}
@@ -661,8 +703,8 @@ func (ys *MockYaml) persistLearned(ctx context.Context, testSetID string, mockSt
 	gobPath := filepath.Join(path, mockFileName+".gob")
 	if _, err := os.Stat(gobPath); err == nil {
 		// Quiesce any in-flight async gob writer before the rewrite —
-		// same reasoning as updateMocksGob.
-		if err := ys.Close(); err != nil {
+		// same reasoning, and the same end at ctx, as updateMocksGob.
+		if err := ys.CloseUnless(ctx.Done()); err != nil {
 			utils.LogError(ys.Logger, err, "failed to quiesce async gob writer before noise persistence", zap.String("path", gobPath))
 			return nil, err
 		}
@@ -810,10 +852,15 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 	if mockFileName == "" {
 		mockFileName = "mocks"
 	}
-	// gob is the binary record-time format (async writer, ~28% CPU win
-	// over yaml). When selected it is mutually exclusive with yaml/json,
-	// so it gets to short-circuit before the format-detection block.
-	if ys.useGobFormat() {
+	// An insert writes to the mock file the set already has, in that file's
+	// format; only a set with none takes the configured format (insertFormat).
+	// gob is the binary record-time format (async writer, ~28% CPU win over
+	// yaml).
+	useGob, effFormat, err := ys.insertFormat(ctx, mockPath, mockFileName)
+	if err != nil {
+		return err
+	}
+	if useGob {
 		// gob writes the struct as it is, with no per-kind encoder to refuse
 		// a connection failure the readers would skip (see
 		// connFailureSchemaOf), so refuse it here.
@@ -833,15 +880,6 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 		return ys.insertMockGob(ctx, mock, mockPath, mockFileName)
 	}
 
-	// Resolve the effective mock-file format: if a mocks file in either
-	// format already exists, append to THAT file in ITS format (don't create
-	// a parallel file in the other format). Only when no mocks file exists
-	// yet do we use the configured StorageFormat for a fresh file.
-	effFormat := ys.Format
-	if existsAny, detected, statErr := yaml.FileExistsAny(ctx, ys.Logger, mockPath, mockFileName, ys.Format); statErr == nil && existsAny {
-		effFormat = detected
-	}
-
 	buf := getDocBuffer()
 	defer putDocBuffer(buf)
 	if err := ys.appendMock(ctx, mock, mockPath, mockFileName, effFormat, buf); err != nil {
@@ -859,9 +897,72 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 	return nil
 }
 
+// ErrMixedMockFiles is an insert into a set that holds both a mocks.gob and a
+// YAML or NDJSON mock file. The readers read the mocks.gob alone, so a mock
+// added to either file would be lost or would hide the other file's mocks:
+// the insert is refused, never written to one of them.
+var ErrMixedMockFiles = errors.New("the test set holds a gob mock file and a text mock file")
+
+// setFileKey names a set's mock files without their extension.
+func setFileKey(mockPath, mockFileName string) string {
+	return filepath.Join(mockPath, mockFileName)
+}
+
+// insertFormat is where an insert into the set at mockPath writes: to the mock
+// file the set already has, in that file's format (useGob for a mocks.gob,
+// else the text format of its mocks.yaml or mocks.json), and only for a set
+// with none, in the configured format. An insert used to take the configured
+// format alone, while the readers read a mocks.gob whenever there is one: a
+// mock added under a yaml config to a set recorded in gob went to a mocks.yaml
+// the readers never read, and one added under a gob config to a set recorded
+// in yaml began a mocks.gob that hid the set's mocks.yaml.
+//
+// A set found to write in gob is remembered (gobSets), so the gob hot path
+// looks at the set's files once. A text set is looked at on every insert, as
+// the yaml writer always did, which opens its file on every insert anyway.
+func (ys *MockYaml) insertFormat(ctx context.Context, mockPath, mockFileName string) (useGob bool, text yaml.Format, err error) {
+	key := setFileKey(mockPath, mockFileName)
+	if _, ok := ys.gobSets.Load(key); ok {
+		return true, "", nil
+	}
+	gobPath := key + ".gob"
+	hasGob := false
+	if _, serr := os.Stat(gobPath); serr == nil {
+		hasGob = true
+	} else if !os.IsNotExist(serr) {
+		return false, "", fmt.Errorf("check for the set's gob mock file %s before adding a mock to the set: %w", gobPath, serr)
+	}
+	hasText, detected, terr := yaml.FileExistsAny(ctx, ys.Logger, mockPath, mockFileName, ys.Format)
+	if terr != nil {
+		return false, "", fmt.Errorf("check for the set's mock file in %s before adding a mock to it: %w", mockPath, terr)
+	}
+	switch {
+	case hasGob && hasText:
+		textPath := key + "." + detected.FileExtension()
+		return false, "", fmt.Errorf("%w: %s and %s; keploy reads only %s, so the mock was not added to either: keep the one that holds the set (move the other out of the set) and run again: %w",
+			ErrMixedMockFiles, gobPath, textPath, filepath.Base(gobPath), models.ErrMocksNotWritten)
+	case hasText:
+		return false, detected, nil
+	case hasGob || ys.useGobFormat():
+		ys.gobSets.Store(key, struct{}{})
+		return true, "", nil
+	}
+	return false, ys.Format, nil
+}
+
+// textMockFileBeside is the set's YAML or NDJSON mock file when it has one
+// beside its mocks.gob, which the readers then do not read; empty otherwise.
+func (ys *MockYaml) textMockFileBeside(ctx context.Context, path, mockFileName string) string {
+	exists, detected, err := yaml.FileExistsAny(ctx, zap.NewNop(), path, mockFileName, ys.Format)
+	if err != nil || !exists {
+		return ""
+	}
+	return filepath.Join(path, mockFileName+"."+detected.FileExtension())
+}
+
 // appendMock appends mock's document to the mocks file in effFormat, under the
 // file's lock. The document is made in buf, and buf is what is written.
-func (ys *MockYaml) appendMock(ctx context.Context, mock *models.Mock, mockPath, mockFileName string, effFormat yaml.Format, buf *bytes.Buffer) error {
+func (ys *MockYaml) appendMock(ctx context.Context, mock *models.Mock, mockPath, mockFileName string, effFormat yaml.Format, buf *bytes.Buffer) (err error) {
 	lock := getMockFileLock(mockFileLockKey(mockPath, mockFileName, effFormat))
 	lock.Lock()
 	defer lock.Unlock()
@@ -888,7 +989,16 @@ func (ys *MockYaml) appendMock(ctx context.Context, mock *models.Mock, mockPath,
 	if err != nil {
 		return fmt.Errorf("failed to open mock file for append: %w", err)
 	}
-	defer file.Close()
+	// The file's close error is the mock's: a write the file system refuses
+	// only as the file closes (NFS, a quota, some FUSE mounts) may have left
+	// the mock out, and an insert that returned nil would have the recording
+	// look complete. It runs after the deferred flush below. An error already
+	// returned is kept.
+	defer func() {
+		if cerr := closeMockFile(file); cerr != nil && err == nil {
+			err = fmt.Errorf("the mock file failed as it was closed: %w", cerr)
+		}
+	}()
 
 	writer := bufio.NewWriter(file)
 	// Belt-and-braces: always flush the bufio writer before file.Close,
@@ -1024,9 +1134,10 @@ func (ys *MockYaml) appendMock(ctx context.Context, mock *models.Mock, mockPath,
 }
 
 // insertMockGob enqueues the mock for async encoding. One background
-// goroutine owns the open file + encoder; parsers never block on
-// disk. Queue-full falls back to synchronous write so mocks are never
-// dropped — tracked via gobOverflows for observability.
+// goroutine owns the open file + encoder; parsers never block on disk
+// while the queue has room. An insert that finds it full waits for room,
+// in its turn, so mocks are never dropped or reordered; gobOverflows
+// counts those inserts for observability.
 //
 // The writer-alive check and the channel send run under the same
 // lifecycle lock Close uses. This makes the "is the writer still
@@ -1070,29 +1181,36 @@ func (ys *MockYaml) insertMockGob(ctx context.Context, mock *models.Mock, mockPa
 	gobMock.TestModeInfo.Lifetime = zeroLifetime
 	gobMock.TestModeInfo.LifetimeDerived = false
 	job := gobWriteJob{mock: gobMock, testSetPath: mockPath, filename: mockFileName}
+	// Counted before the send, so the writer never counts it as written
+	// before it is counted as handed over; taken back if it is not sent.
+	ys.gobQueued.Add(1)
 	select {
 	case ys.gobQueue <- job:
-		ys.gobQueued.Add(1)
 		ys.unlockLifecycle()
 		return nil
 	case <-ctx.Done():
+		ys.gobQueued.Add(^uint64(0))
 		ys.unlockLifecycle()
 		return ctx.Err()
 	default:
-		ys.gobOverflows.Add(1)
-		// Keep the lifecycle lock held across the sync fallback. If we
-		// released it here, a concurrent Close() could flush+close the
-		// writer (setting gobFile=nil), and then gobWriteSync's
-		// gobWriteOne would call gobReopenLocked — which TRUNCATES
-		// the gob file with O_TRUNC — destroying everything written
-		// earlier in the session. Serializing the sync fallback
-		// against Close() is the cost of the "no dropped mocks"
-		// guarantee on the overflow path; it only kicks in when the
-		// 4096-slot queue is already full, which is already a
-		// degraded-throughput mode.
-		err := ys.gobWriteSync(ctx, mock, mockPath, mockFileName)
+	}
+	// The queue is full: the disk is slower than the capture. The insert
+	// waits for room, in its turn, as the writer writes. It used to write
+	// its mock itself, ahead of the thousands queued before it: out of order
+	// in its file, and, for another test set's, the writer then reopened
+	// (truncated) the first set's file under the mocks it had written there.
+	// The lifecycle lock stays held while it waits, so Close cannot stop the
+	// writer under it; a Close told to stop (CloseUnless) does not wait
+	// behind it.
+	ys.gobOverflows.Add(1)
+	select {
+	case ys.gobQueue <- job:
 		ys.unlockLifecycle()
-		return err
+		return nil
+	case <-ctx.Done():
+		ys.gobQueued.Add(^uint64(0))
+		ys.unlockLifecycle()
+		return ctx.Err()
 	}
 }
 
@@ -1178,60 +1296,182 @@ func persisted(mock *models.Mock) *models.Mock {
 func (ys *MockYaml) gobWriteOne(job gobWriteJob) error {
 	ys.gobMu.Lock()
 	defer ys.gobMu.Unlock()
-	defer func() {
-		// Progress first: whoever sees a mock counted as encoded sees its
-		// progress.
-		ys.gobProgress.Add(1)
-		ys.gobEncoded.Add(1)
-	}()
-	want := filepath.Join(job.testSetPath, job.filename+".gob")
+	return ys.gobEncodeLocked(job.mock, job.testSetPath, job.filename)
+}
+
+// gobEncodeLocked encodes mock into the gob file of its test set, opening it
+// first when the writer is on another (or none), and counts it as encoded
+// at the offset its bytes end at: it is written once the file has taken
+// them (gobFileWriter). A mock that fails here is never counted as written.
+func (ys *MockYaml) gobEncodeLocked(mock *models.Mock, mockPath, mockFileName string) error {
+	want := filepath.Join(mockPath, mockFileName+".gob")
 	if ys.gobFilePath != want || ys.gobFile == nil {
-		if err := ys.gobReopenLocked(job.testSetPath, job.filename); err != nil {
+		if err := ys.gobReopenLocked(mockPath, mockFileName); err != nil {
 			return err
 		}
 	}
-	return ys.gobEnc.Encode(persisted(job.mock))
+	if err := ys.gobEnc.Encode(persisted(mock)); err != nil {
+		return err
+	}
+	ys.gobFileW.encoded(ys.gobFileW.took + uint64(ys.gobBufw.Buffered()))
+	return nil
 }
 
 func (ys *MockYaml) gobReopenLocked(mockPath, mockFileName string) error {
 	if ys.gobFile != nil {
-		_ = ys.gobBufw.Flush()
-		_ = ys.gobFile.Close()
-		ys.gobFile = nil
-		ys.gobBufw = nil
-		ys.gobEnc = nil
+		// The file the writer leaves is finished as at Close: what it could
+		// not take is said (gobFlushErr), and its mocks not written stay
+		// counted as such (gobQueued less gobWritten).
+		ys.gobFinishFileLocked()
 	}
 	if err := os.MkdirAll(mockPath, 0o777); err != nil {
 		return fmt.Errorf("mkdir mock dir: %w", err)
 	}
 	filePath := filepath.Join(mockPath, mockFileName+".gob")
-	// Truncate on every open. A gob stream's type table lives in the
-	// encoder; reusing a file across multiple encoder sessions (e.g.
-	// re-record cycles, or a switch-back to an earlier test-set's
-	// file) would embed a second type table mid-file and the reader's
-	// single gob.Decoder would fail with "duplicate type" / garbage.
-	// Each gob session therefore owns its file exclusively: the first
-	// write truncates any prior content and the file carries exactly
-	// one continuous gob stream until Close. Callers that need
-	// append-like semantics must use yaml (the default format).
-	f, err := os.OpenFile(filePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o666)
+	// A file holds one gob stream: its type table lives in the encoder that
+	// began it, so a new encoder cannot write on after it (the reader's one
+	// decoder fails at the second type table). A file that already holds
+	// mocks is therefore kept by carrying them over (gobCarryOverLocked):
+	// the writer begins its stream in a file beside it, encodes the file's
+	// mocks into it first, and puts it in the file's place before it writes
+	// any mock of its own. The file is replaced whole or not at all.
+	//
+	// The writer used to open the file with O_TRUNC, on the idea that each
+	// writer owns its file. A writer that adds to a set it did not begin
+	// (keploy mock replay --on-miss record) or comes back to a set it left
+	// (another test set's mocks in between, a Close in between) then wiped
+	// the mocks the set held: the recorded set was gone.
+	carry, err := gobFileHoldsData(filePath)
 	if err != nil {
-		return fmt.Errorf("open gob mock file for overwrite: %w", err)
+		return err
+	}
+	open := filePath
+	var f *os.File
+	if carry {
+		f, err = createTempBeside(filePath, ".append.*.tmp")
+		if err != nil {
+			return fmt.Errorf("start a gob stream beside %s to add to it: %w", filePath, err)
+		}
+		open = f.Name()
+	} else if f, err = os.OpenFile(filePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o666); err != nil {
+		return fmt.Errorf("open gob mock file: %w", err)
 	}
 	ys.gobFile = f
+	ys.gobFileW = &gobFileWriter{w: gobFileOf(f), written: &ys.gobWritten}
 	// 256 KB buffer holds dozens of mocks before a syscall; bufio
 	// autoflushes at fill. Shutdown drains explicitly.
-	ys.gobBufw = bufio.NewWriterSize(progressWriter{w: f, n: &ys.gobProgress}, 256*1024)
+	ys.gobBufw = bufio.NewWriterSize(ys.gobFileW, 256*1024)
 	if _, werr := ys.gobBufw.WriteString(gobMockMagic); werr != nil {
-		_ = f.Close()
-		ys.gobFile = nil
-		ys.gobBufw = nil
+		ys.gobAbandonLocked(open, carry)
 		return fmt.Errorf("write gob magic: %w", werr)
 	}
 	ys.gobEnc = gob.NewEncoder(ys.gobBufw)
+	if carry {
+		if cerr := ys.gobCarryOverLocked(filePath, open); cerr != nil {
+			ys.gobAbandonLocked(open, true)
+			return fmt.Errorf("%s was left as it was, and the mock not added to it: its mocks could not be carried into the stream the writer adds to it in: %w", filePath, cerr)
+		}
+	}
 	ys.gobFilePath = filePath
 	ys.gobPathSeen.Store(filePath)
 	return nil
+}
+
+// gobFileHoldsData says whether path is a file with something in it, which
+// a writer opening it must keep. An absent or empty file holds nothing.
+func gobFileHoldsData(path string) (bool, error) {
+	info, err := os.Stat(path)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("stat gob mock file: %w", err)
+	}
+	return info.Size() > 0, nil
+}
+
+// createTempBeside creates a temp file in path's directory, named after it
+// with pattern, with path's permissions (os.CreateTemp alone makes it 0600,
+// which would narrow the file it replaces).
+func createTempBeside(path, pattern string) (*os.File, error) {
+	mode := os.FileMode(0o644)
+	if info, err := os.Stat(path); err == nil {
+		mode = info.Mode().Perm()
+	}
+	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+pattern)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.Chmod(f.Name(), mode); err != nil {
+		_ = f.Close()
+		_ = os.Remove(f.Name())
+		return nil, err
+	}
+	return f, nil
+}
+
+// gobCarryOverLocked encodes the mocks the gob file at filePath holds into
+// the writer's new stream, which begins in the temp file tmpPath, and puts
+// that file in filePath's place; the writer then writes on in filePath. The
+// mocks are written to the disk before the replace, so a stop at any point
+// leaves filePath whole: as it was, or with every mock it held. A tail the
+// file was cut in (an interrupted write) is a mock no reader can read; it is
+// not carried, which is said. Any other read error keeps the file as it was.
+func (ys *MockYaml) gobCarryOverLocked(filePath, tmpPath string) error {
+	carried := 0
+	cut, err := forEachGobMockCut(filePath, func(m *models.Mock) error {
+		carried++
+		return ys.gobEnc.Encode(m)
+	})
+	if err != nil {
+		return err
+	}
+	if err := ys.gobBufw.Flush(); err != nil {
+		return fmt.Errorf("write the carried mocks: %w", err)
+	}
+	if err := ys.gobFile.Sync(); err != nil {
+		return fmt.Errorf("sync the carried mocks: %w", err)
+	}
+	// Closed before the replace, and filePath opened again after it: a file
+	// held open cannot be renamed on Windows. The encoder and its offsets go
+	// on in the reopened file, which is the same stream.
+	if err := ys.gobFile.Close(); err != nil {
+		ys.gobFile = nil
+		return fmt.Errorf("close the carried mocks: %w", err)
+	}
+	ys.gobFile = nil
+	if err := replaceFile(ys.Logger, tmpPath, filePath); err != nil {
+		return fmt.Errorf("put the carried mocks in place: %w", err)
+	}
+	f, err := os.OpenFile(filePath, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		// The file is whole, with every mock it held; the writer cannot add
+		// to it.
+		return fmt.Errorf("open it to add to it: %w", err)
+	}
+	ys.gobFile = f
+	ys.gobFileW.w = gobFileOf(f)
+	if cut {
+		ys.Logger.Warn("the gob mock file ended part-way through a mock (an interrupted write): that mock could not be read and is not kept; the mocks before it are, and new mocks are added after them",
+			zap.String("mock_file", filePath), zap.Int("mocks_kept", carried))
+	}
+	return nil
+}
+
+// gobAbandonLocked drops a stream the writer could not begin: its file is
+// closed, and removed when it is the temp file a carry-over began in
+// (temp), so the file the writer meant to add to stays as it was.
+func (ys *MockYaml) gobAbandonLocked(path string, temp bool) {
+	if ys.gobFile != nil {
+		_ = ys.gobFile.Close()
+	}
+	if temp {
+		_ = os.Remove(path)
+	}
+	ys.gobFile = nil
+	ys.gobBufw = nil
+	ys.gobFileW = nil
+	ys.gobEnc = nil
 }
 
 // gobFlushAndClose finalizes the on-disk gob stream. Flush and Close
@@ -1244,50 +1484,30 @@ func (ys *MockYaml) gobReopenLocked(mockPath, mockFileName string) error {
 func (ys *MockYaml) gobFlushAndClose() error {
 	ys.gobMu.Lock()
 	defer ys.gobMu.Unlock()
+	ys.gobFinishFileLocked()
+	return ys.gobFlushErr
+}
+
+// gobFinishFileLocked flushes and closes the writer's file and leaves the
+// writer with none. Its errors join gobFlushErr, with any encode/write errors
+// the writer already had, rather than overwriting them: a successful final
+// flush after earlier drops would otherwise mask the mid-session failures,
+// and a file left for another test set's lost its tail with nothing said.
+func (ys *MockYaml) gobFinishFileLocked() {
 	var flushErr, closeErr error
 	if ys.gobBufw != nil {
 		flushErr = ys.gobBufw.Flush()
 	}
 	if ys.gobFile != nil {
-		closeErr = ys.gobFile.Close()
+		closeErr = closeGobFile(ys.gobFile)
+	}
+	if err := errors.Join(flushErr, closeErr); err != nil {
+		ys.gobFlushErr = errors.Join(ys.gobFlushErr, fmt.Errorf("finishing %s: %w", ys.gobFilePath, err))
 	}
 	ys.gobFile = nil
 	ys.gobBufw = nil
+	ys.gobFileW = nil
 	ys.gobEnc = nil
-	combined := errors.Join(flushErr, closeErr)
-	// Join with any encode/write errors that gobWriterLoop or
-	// drainAndClose already accumulated, rather than overwriting
-	// them. Otherwise a successful final flush after earlier drops
-	// would mask the real mid-session failures and Close() would
-	// return nil on a partially-lost session.
-	ys.gobFlushErr = errors.Join(ys.gobFlushErr, combined)
-	return ys.gobFlushErr
-}
-
-// gobWriteSync is the sync fallback when the async queue is full.
-// Reuses the async writer's open file + encoder under the mutex so
-// the type-table in the running gob stream stays consistent — the
-// reader uses a single gob.Decoder for the whole file, and creating
-// a fresh encoder here would emit a second type-table that the
-// / reader cannot resume across.
-func (ys *MockYaml) gobWriteSync(ctx context.Context, mock *models.Mock, mockPath, mockFileName string) error {
-	ys.gobMu.Lock()
-	defer ys.gobMu.Unlock()
-	if ctx.Err() != nil {
-		return ctx.Err()
-	}
-	want := filepath.Join(mockPath, mockFileName+".gob")
-	if ys.gobFilePath != want || ys.gobFile == nil {
-		if err := ys.gobReopenLocked(mockPath, mockFileName); err != nil {
-			return err
-		}
-	}
-	if err := ys.gobEnc.Encode(persisted(mock)); err != nil {
-		return fmt.Errorf("failed to encode mock gob: %w", err)
-	}
-	// Flush immediately so the "sync" semantics hold — by the time
-	// this returns, bytes are in the OS buffer, not just the bufio.
-	return ys.gobBufw.Flush()
 }
 
 // Close drains the async gob writer and flushes the file. Safe to
@@ -1298,21 +1518,26 @@ func (ys *MockYaml) gobWriteSync(ctx context.Context, mock *models.Mock, mockPat
 // Recorder.Start on the same mockDB instance) work without dropping
 // mocks.
 //
-// It waits for the writer for as long as the writer makes progress (a mock
-// encoded, bytes the file took), however long a slow disk takes: it used to
-// give up after a fixed 5 s, and a recording that ended then lost every mock
-// the writer had not written yet, with only a log line to say so. A writer
-// that makes no progress for gobStallAfter is stuck; Close then says how
-// many of the session's mocks were not written, as models.ErrMocksNotWritten
-// (a capture loss), and a later Close waits for it again. That holds for the
-// wait for the writer's lifecycle lock too, which an insert on the overflow
-// path holds while it writes.
+// It waits for the writer for as long as it has mocks to write, however long
+// a slow disk takes, and only that: no clock decides that a disk is stuck. It
+// used to give up after a fixed 5 s, and then once the writer had made no
+// progress for 30 s; a recording on a loaded box or a slow disk then lost
+// the mocks the writer had not written yet. A disk that fails a write says
+// so (the write returns its error), and Close returns it, with how many of
+// the session's mocks were not written, as models.ErrMocksNotWritten (a
+// capture loss). A write that never returns is a disk only the caller can
+// give up on: CloseUnless's stop.
 func (ys *MockYaml) Close() error { return ys.CloseUnless(nil) }
 
-// CloseUnless is Close that also stops waiting once stop is closed (a user's
-// second interrupt): the mocks not written yet are then
-// models.ErrMocksNotWritten, as for a stuck writer.
+// CloseUnless is Close that stops waiting once stop is closed (a user's
+// second interrupt, a caller giving up on a disk that is stuck): the
+// session's mocks not written yet are then models.ErrMocksNotWritten, said
+// with how many they are, and a later Close waits for them again. That holds
+// for the wait for the writer's lifecycle lock too, which an insert that
+// found the queue full holds while it waits for room.
 func (ys *MockYaml) CloseUnless(stop <-chan struct{}) error {
+	// The next session looks at its sets' files again (insertFormat).
+	ys.gobSets.Clear()
 	// Hold the lifecycle lock for the entire teardown. While we wait
 	// for the writer goroutine to drain, no concurrent InsertMock
 	// can start a new writer — ys.gobRunning stays true and
@@ -1322,7 +1547,7 @@ func (ys *MockYaml) CloseUnless(stop <-chan struct{}) error {
 	// the first Close completes, so close(gobStop) is never called
 	// twice.
 	if !ys.whileWriting(ys.lifecycle(), nil, stop) {
-		return ys.notWritten(stop)
+		return ys.notWritten()
 	}
 	defer ys.unlockLifecycle()
 	if !ys.gobRunning {
@@ -1340,14 +1565,17 @@ func (ys *MockYaml) CloseUnless(stop <-chan struct{}) error {
 		// Leave gobRunning=true + gobStopClosed=true so a retry of
 		// Close enters this function, skips the already-closed stop,
 		// and just waits on gobDone again.
-		return ys.notWritten(stop)
+		return ys.notWritten()
 	}
 	ys.gobRunning = false
 	ys.gobStopClosed = false
+	// The writer has ended: every mock it did not write is said, from the
+	// counts, before they start again for the next session.
+	queued, left := ys.gobQueued.Load(), ys.MocksLeft()
 	ys.gobQueued.Store(0)
-	ys.gobEncoded.Store(0)
+	ys.gobWritten.Store(0)
 	// Operator visibility: if the async queue filled up during the
-	// session and the sync fallback fired, report the count so disk
+	// session and inserts waited for room, report the count so disk
 	// stalls / undersized queues are caught at post-run review
 	// instead of requiring the user to notice slower rps.
 	// Swap the overflow counter to zero atomically so re-record cycles
@@ -1355,7 +1583,7 @@ func (ys *MockYaml) CloseUnless(stop <-chan struct{}) error {
 	// overflows again on their own Close.
 	if overflows := ys.gobOverflows.Swap(0); overflows > 0 {
 		if ys.Logger != nil {
-			ys.Logger.Info("gob mock writer: synchronous fallback fired during session (queue was full)",
+			ys.Logger.Info("gob mock writer: inserts waited for room in its queue during the session (the disk was slower than the capture)",
 				zap.Uint64("overflowedMocks", overflows),
 				zap.Int("queueCapacity", cap(ys.gobQueue)),
 				zap.String("hint", "queue capacity is the hard-coded channel size inlined in insertMockGob's writer-init block; raise it in code if disk/encoding is the bottleneck"))
@@ -1369,67 +1597,63 @@ func (ys *MockYaml) CloseUnless(stop <-chan struct{}) error {
 	flushErr := ys.gobFlushErr
 	ys.gobFlushErr = nil
 	ys.gobMu.Unlock()
-	if flushErr != nil {
-		return fmt.Errorf("%w: gob writer flush/close during shutdown: %w", models.ErrMocksNotWritten, flushErr)
+	switch {
+	case left > 0:
+		if flushErr == nil {
+			flushErr = errors.New("the gob mock writer ended without writing them")
+		}
+		return fmt.Errorf("%w: %d of the %d mocks handed to the gob mock writer were not written: %w",
+			models.ErrMocksNotWritten, left, queued, flushErr)
+	case flushErr != nil:
+		// The file took every mock, then failed as it was closed (a write
+		// back the OS reports only then): what it took may not be on disk.
+		return fmt.Errorf("%w: the %d mocks handed to the gob mock writer were written, but the mock file failed as it was closed, so they may not be on disk: %w",
+			models.ErrMocksNotWritten, queued, flushErr)
 	}
 	return nil
 }
 
-// whileWriting waits, for as long as the gob writer makes progress
-// (gobProgress) and stop is not closed, to take lock (a send; nil: none) or
-// for done to close (nil: none). It reports whether it got what it waited for.
+// whileWriting waits to take lock (a send; nil: none) or for done to close
+// (nil: none), until stop closes. It reports whether it got what it waited
+// for. It has no bound of its own: the writer is waited for for as long as
+// it writes, and a disk that is stuck is given up on by the caller (stop).
 func (ys *MockYaml) whileWriting(lock chan struct{}, done, stop <-chan struct{}) bool {
-	m := stall.NewMeter(nil, gobStallAfter)
-	defer m.Stop()
-	last := ys.gobProgress.Load()
-	for {
-		// What it waits for wins over a stop that came with it.
-		select {
-		case lock <- struct{}{}:
-			return true
-		case <-done:
-			return true
-		default:
-		}
-		select {
-		case lock <- struct{}{}:
-			return true
-		case <-done:
-			return true
-		case <-stop:
-			return false
-		case <-m.Wait():
-			if p := ys.gobProgress.Load(); p != last {
-				last = p
-				m.Reset()
-			} else if m.Expired() {
-				return false
-			}
-		}
+	// What it waits for wins over a stop that came with it.
+	select {
+	case lock <- struct{}{}:
+		return true
+	case <-done:
+		return true
+	default:
+	}
+	select {
+	case lock <- struct{}{}:
+		return true
+	case <-done:
+		return true
+	case <-stop:
+		return false
 	}
 }
 
 // notWritten is what a Close that stopped waiting for the gob writer says:
-// how many of the session's mocks it had not written, as
-// models.ErrMocksNotWritten. Read without the writer's locks, which a stuck
-// writer holds.
-func (ys *MockYaml) notWritten(stop <-chan struct{}) error {
-	why := fmt.Sprintf("the gob mock writer made no progress for %s", gobStallAfter)
-	select {
-	case <-stop:
-		why = "the stop was asked to end now"
-	default:
-	}
-	queued := ys.gobQueued.Load()
-	return fmt.Errorf("%w: %s; %d of the %d mocks handed to it were not encoded, and what it encoded since its last write to %s may not be on disk",
-		models.ErrMocksNotWritten, why, ys.MocksLeft(), queued, ys.gobFilePathSnapshot())
+// how many of the session's mocks the mock file had not taken when the stop
+// came, as models.ErrMocksNotWritten. Read without the writer's locks, which
+// a stuck writer holds.
+func (ys *MockYaml) notWritten() error {
+	return fmt.Errorf("%w: the stop was asked to end now; %d of the %d mocks handed to the gob mock writer were not written to %s",
+		models.ErrMocksNotWritten, ys.MocksLeft(), ys.gobQueued.Load(), ys.gobFilePathSnapshot())
 }
 
-// MocksLeft is how many of the session's mocks the gob writer has yet to
-// encode.
+// MocksLeft is how many of the session's mocks the mock file has yet to take
+// whole: those the gob writer has yet to encode, those it encoded that are
+// still in its buffer or in a write the disk has not taken yet, and those it
+// could not write.
 func (ys *MockYaml) MocksLeft() uint64 {
-	queued, encoded := ys.gobQueued.Load(), ys.gobEncoded.Load()
-	return queued - min(encoded, queued)
+	// Written first: a mock counted as written was queued before.
+	written := ys.gobWritten.Load()
+	queued := ys.gobQueued.Load()
+	return queued - min(written, queued)
 }
 
 // gobFilePathSnapshot is the gob file the writer last opened. Read without
@@ -1508,6 +1732,24 @@ func (ys *MockYaml) IndexTestSetMocks(ctx context.Context, testSetID string, aft
 
 var _ pkg.TestSetMockIndexReader = (*MockYaml)(nil)
 
+// WalkTestSetMocks hands visit every mock of the test set's mock file, one at a
+// time as it is decoded, with the pools IndexTestSetMocks returns it in
+// (AllPerTest, AllSession): a mocks.gob mock by mock, a yaml or json file
+// document by document. Nothing keeps a mock once visit returns, so a reader
+// that keeps a few fields of each holds one decoded mock at a time, never the
+// set. visit must not keep m. The documents the decoders skip are not visited,
+// and the warnings a read of the file logs (a cut file, a skipped document,
+// requirements no mock meets) are left to the replay's own read of it.
+func (ys *MockYaml) WalkTestSetMocks(ctx context.Context, testSetID string, visit func(m *models.Mock, perTest, session bool)) error {
+	if visit == nil {
+		return nil
+	}
+	_, err := ys.readMockPoolsVisiting(ctx, testSetID, time.Time{}, time.Time{}, nil, nil, poolAllPerTest|poolAllSession, visit)
+	return err
+}
+
+var _ pkg.TestSetMockWalker = (*MockYaml)(nil)
+
 // mockPools selects the pools readMockPools builds.
 type mockPools uint8
 
@@ -1542,6 +1784,10 @@ type mockRouter struct {
 	// allPerTest is every per-test candidate, pruned or not, in file order,
 	// when poolAllPerTest is wanted.
 	allPerTest []*models.Mock
+	// visit, when set, is handed each mock as it is routed, with the pools
+	// AllPerTest and AllSession would hold it in, instead of any list keeping
+	// it (WalkTestSetMocks).
+	visit func(m *models.Mock, perTest, session bool)
 }
 
 // pruned reports whether the mapping prune drops the mock: it is mapped to a
@@ -1594,6 +1840,10 @@ func (r *mockRouter) route(mock *models.Mock, fromGob bool) {
 	// lifetime, so one of session or connection lifetime is a candidate for
 	// both pools there. The YAML reader does not.
 	inPerTest := lifetime == models.LifetimePerTest || (fromGob && mock.Kind == models.PostgresV2)
+	if r.visit != nil {
+		r.visit(mock, inPerTest, inSession)
+		return
+	}
 	toPerTest := inPerTest && !pruned && r.want&poolPerTest != 0
 	toSession := inSession && (r.want&poolAllSession != 0 || (!pruned && r.want&poolSession != 0))
 	if inPerTest && r.want&poolAllPerTest != 0 {
@@ -1697,6 +1947,15 @@ func (r *mockRouter) sessionPools(ctx context.Context, logger *zap.Logger, after
 // The mapping prune drops a mock that is mapped to a specific test this run
 // does not need; Filtered and Unfiltered apply it.
 func (ys *MockYaml) readMockPools(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool, want mockPools) (models.TestSetMocks, error) {
+	return ys.readMockPoolsVisiting(ctx, testSetID, afterTime, beforeTime, mocksThatHaveMappings, mocksWeNeed, want, nil)
+}
+
+// readMockPoolsVisiting is readMockPools that, given visit, hands it each mock
+// as it is decoded (mockRouter.visit) and builds no pool: what it returns then
+// lists only the documents the decoders skipped. A visiting read logs
+// nothing: what the replay's own read of the file logs is not logged again
+// (WalkTestSetMocks), and a read or decode error is returned to its caller.
+func (ys *MockYaml) readMockPoolsVisiting(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool, want mockPools, visit func(m *models.Mock, perTest, session bool)) (models.TestSetMocks, error) {
 	var out models.TestSetMocks
 	r := &mockRouter{
 		want:                  want,
@@ -1704,6 +1963,10 @@ func (ys *MockYaml) readMockPools(ctx context.Context, testSetID string, afterTi
 		mocksWeNeed:           mocksWeNeed,
 		perTest:               make([]*models.Mock, 0),
 		session:               make([]*models.Mock, 0),
+		visit:                 visit,
+	}
+	if visit != nil {
+		want &^= payloadsOnDisk
 	}
 
 	mockFileName := "mocks"
@@ -1721,33 +1984,50 @@ func (ys *MockYaml) readMockPools(ctx context.Context, testSetID string, afterTi
 	// short-circuit and return before the auto-detect reader runs.
 	gobPath := filepath.Join(path, mockFileName+".gob")
 	if _, err := os.Stat(gobPath); err == nil {
-		mocks, cut, err := readGobMocksCut(gobPath)
-		if err != nil {
-			return models.TestSetMocks{}, err
-		}
 		logger := ys.Logger.With(zap.String("mock_file", gobPath))
-		if cut {
-			logger.Warn("the mock file ends part-way through its last mock, probably because a write was interrupted (the recorder stopped, or the disk filled), and that mock was not read",
-				zap.String("next_step", "re-record the test set"))
+		if visit != nil {
+			logger = zap.NewNop()
+		}
+		// A set with a text mock file beside its mocks.gob was left so by an
+		// older keploy (an insert now refuses to add to such a set): the
+		// text file's mocks are not read, which is said, never left silent.
+		if text := ys.textMockFileBeside(ctx, path, mockFileName); text != "" {
+			logger.Warn("the test set holds two mock files and only the gob one is read: the mocks in the other are not served",
+				zap.String("not_read", text),
+				zap.String("next_step", "keep the file that holds the set and move the other out of the test set"))
 		}
 		connFailures := 0
 		var deps models.MockDepsCheck
-		for _, mock := range mocks {
+		// One mock at a time: a visiting read keeps none of them.
+		cut, err := forEachGobMockCut(gobPath, func(mock *models.Mock) error {
 			if mock.Kind == models.ConnectionFailure {
 				// gob has no per-kind decoder: a connection failure is
 				// validated here, as DecodeMocks and DecodeMocksJSON validate
 				// theirs.
 				if !connFailureSupported(mock, logger, false) {
 					addSkipped(&out, mock.Name, mock.Kind)
-					continue
+					return nil
 				}
 				connFailures++
 			}
 			r.route(mock, true)
-			// After routing, which derives the mock's lifetime unless the
-			// mapping prune drops it first: its links are then read without
-			// deriving it again on a copy.
-			deps.Add(mock)
+			if visit == nil {
+				// After routing, which derives the mock's lifetime unless the
+				// mapping prune drops it first: its links are then read
+				// without deriving it again on a copy.
+				deps.Add(mock)
+			}
+			return nil
+		})
+		if err != nil {
+			return models.TestSetMocks{}, err
+		}
+		if visit != nil {
+			return out, nil
+		}
+		if cut {
+			logger.Warn("the mock file ends part-way through its last mock, probably because a write was interrupted (the recorder stopped, or the disk filled), and that mock was not read",
+				zap.String("next_step", "re-record the test set"))
 		}
 		warnConnFailuresNotReplayed(logger, testSetID, connFailures)
 		warnUnmetRequirements(logger, testSetID, gobPath, deps.Unmet())
@@ -1780,6 +2060,9 @@ func (ys *MockYaml) readMockPools(ctx context.Context, testSetID string, afterTi
 	reader, err := yaml.NewMockReaderAny(ctx, ys.Logger, path, mockFileName, ys.Format)
 	if err != nil {
 		if os.IsNotExist(err) || errors.Is(err, os.ErrNotExist) {
+			if visit != nil {
+				return out, nil
+			}
 			// No mocks file in either format — nothing to replay. Use the
 			// lax (strict=false) filter to mirror the gob branch above and
 			// the agent-level filter; strictness is decided downstream.
@@ -1789,6 +2072,9 @@ func (ys *MockYaml) readMockPools(ctx context.Context, testSetID string, afterTi
 			r.sessionPools(ctx, ys.Logger, afterTime, beforeTime, &out)
 			out.AllPerTest = r.allPerTest
 			return out, nil
+		}
+		if visit != nil {
+			return models.TestSetMocks{}, err
 		}
 		msg := "failed to read the mocks from config file"
 		if want&poolPerTest != 0 {
@@ -1802,6 +2088,11 @@ func (ys *MockYaml) readMockPools(ctx context.Context, testSetID string, afterTi
 	// The decoders' skip ERRORs name the mock, and mock names repeat in every
 	// test set, so they say which file.
 	logger := ys.Logger.With(zap.String("mock_file", reader.Path()))
+	if visit != nil {
+		// One document at a time, payload and all, kept by no one: no
+		// payload source, no index (src stays nil).
+		logger = zap.NewNop()
+	}
 	var src *payloadSource
 	if want&payloadsOnDisk != 0 {
 		if src, err = newPayloadSource(reader); err != nil {
@@ -1846,6 +2137,9 @@ func (ys *MockYaml) readMockPools(ctx context.Context, testSetID string, afterTi
 			builder.finish(probe, hasContent, connFailures, unmet)
 		}
 	}
+	if visit != nil {
+		return out, nil
+	}
 	warnConnFailuresNotReplayed(logger, testSetID, connFailures)
 	warnUnmetRequirements(logger, testSetID, reader.Path(), unmet)
 	return ys.finishMockPools(ctx, r, want, hasContent, path, afterTime, beforeTime, out)
@@ -1882,7 +2176,9 @@ func (ys *MockYaml) decodeMockDocs(reader *yaml.MockReader, logger *zap.Logger, 
 			if readerIsJSON {
 				msg = "failed to decode the config mocks from json doc"
 			}
-			utils.LogError(ys.Logger, decodeErr, msg, zap.String("session", filepath.Base(path)))
+			// logger, not ys.Logger: a visiting read's is a Nop one, its
+			// error returned to its caller (readMockPoolsVisiting).
+			utils.LogError(logger, decodeErr, msg, zap.String("session", filepath.Base(path)))
 			return nil, false, 0, fmt.Errorf("failed to decode the mocks in %s: %w", reader.Path(), decodeErr)
 		}
 		var skipped *skippedEntry
@@ -1895,7 +2191,9 @@ func (ys *MockYaml) decodeMockDocs(reader *yaml.MockReader, logger *zap.Logger, 
 				connFailures++
 			}
 			r.route(mock, false)
-			deps.Add(mock) // after routing, as the gob reader
+			if r.visit == nil {
+				deps.Add(mock) // after routing, as the gob reader
+			}
 			if src != nil {
 				// Last: routing and the links read the payload.
 				mock.LeavePayloadOnDisk(src, models.PayloadAt{Offset: doc.off, Length: doc.n, Name: mock.Name})
@@ -2007,6 +2305,8 @@ func (ys *MockYaml) DeleteMocksForSet(ctx context.Context, testSetID string) err
 	if ys.MockName != "" {
 		mockFileName = ys.MockName
 	}
+	// The set's next insert takes the configured format again (insertFormat).
+	ys.gobSets.Delete(setFileKey(filepath.Join(ys.MockPath, testSetID), mockFileName))
 
 	// Refuse any testSetID that could escape the configured mocks
 	// directory. The test-set layout is "<MockPath>/<testSetID>/mocks.*",
@@ -2090,7 +2390,6 @@ func (ys *MockYaml) mockFileVariants(setDir string) []string {
 // one. An empty staging set is refused, so a bug upstream can never blank the
 // target.
 func (ys *MockYaml) PromoteStagedSet(ctx context.Context, stagingID, targetID string) error {
-	_ = ctx
 	for _, id := range []string{stagingID, targetID} {
 		if err := pathsafe.ValidateSingleSegment(id, false); err != nil {
 			return fmt.Errorf("rejecting PromoteStagedSet: testSetID %q must be a non-empty single-segment name (no separators, no drive/volume prefix, not '.' or '..'): %w", id, err)
@@ -2099,8 +2398,10 @@ func (ys *MockYaml) PromoteStagedSet(ctx context.Context, stagingID, targetID st
 
 	// Finalize any open (gob) writer so staging's file is complete on disk before
 	// it is moved. No-op for yaml/json, whose writes are synchronous. A flush
-	// error means the staged recording is incomplete — do not promote it.
-	if err := ys.Close(); err != nil {
+	// error means the staged recording is incomplete — do not promote it. It
+	// waits for the writer until ctx ends: on a disk that is stuck, the
+	// caller's give-up is then a counted failure, and the target is kept.
+	if err := ys.CloseUnless(ctx.Done()); err != nil {
 		return fmt.Errorf("not promoting staged set %q: finalizing its mock file failed, so %q is left untouched: %w", stagingID, targetID, err)
 	}
 
@@ -2180,12 +2481,13 @@ func (ys *MockYaml) PromoteStagedSet(ctx context.Context, stagingID, targetID st
 // never promoted over stays intact. Also called before capture to clear any
 // staging directory a previously-crashed run left behind.
 func (ys *MockYaml) DiscardStagedSet(ctx context.Context, stagingID string) error {
-	_ = ctx
 	if err := pathsafe.ValidateSingleSegment(stagingID, false); err != nil {
 		return fmt.Errorf("rejecting DiscardStagedSet: testSetID %q must be a non-empty single-segment name (no separators, no drive/volume prefix, not '.' or '..'): %w", stagingID, err)
 	}
-	// Release any open (gob) writer handle before removing the directory.
-	if err := ys.Close(); err != nil {
+	// Release any open (gob) writer handle before removing the directory,
+	// waiting for the writer until ctx ends: a disk that is stuck must not
+	// hold a discard the caller has given up on.
+	if err := ys.CloseUnless(ctx.Done()); err != nil {
 		ys.Logger.Debug("discardStagedSet: closing the mock writer reported an error; removing the staging dir anyway", zap.Error(err))
 	}
 	stagingDir := filepath.Join(ys.MockPath, stagingID)

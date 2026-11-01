@@ -101,11 +101,12 @@ func (h *Hooks) ProxyConnPair(rc syscall.RawConn) (agent.ProxyConnPairing, error
 	p := agent.ProxyConnPairing{Seq: v.Seq, AppSeq: v.AppSeq}
 	if v.AppSeq != 0 {
 		p.Dst = &agent.NetworkAddress{
-			Version:   v.Dst.IPVersion,
-			IPv4Addr:  v.Dst.DestIP4,
-			IPv6Addr:  v.Dst.DestIP6,
-			Port:      v.Dst.DestPort,
-			KernelPid: v.Dst.KernelPid,
+			Version:    v.Dst.IPVersion,
+			IPv4Addr:   v.Dst.DestIP4,
+			IPv6Addr:   v.Dst.DestIP6,
+			Port:       v.Dst.DestPort,
+			KernelPid:  v.Dst.KernelPid,
+			AgentNsPid: v.Dst.AgentNsPid,
 		}
 	}
 	return p, nil

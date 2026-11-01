@@ -1226,6 +1226,15 @@ func TestUnderTheSwitchALostProcessTaintsEverySetItLivesInto(t *testing.T) {
 				return h
 			}
 		}
+		// composeUnread is a compose stack's harness whose next set's start
+		// gets no answer of the app's container from the daemon: it cannot
+		// tell whether its app is a new one.
+		composeUnread := func(t *testing.T) *prRun {
+			c := &composeInstr{unread: true}
+			h := composeHarness(t, c)
+			h.replayer.instrumentation = &composeLossInstr{composeInstr: c, loss: &prLossInstr{prInstr: h.instr, answers: answers}}
+			return h
+		}
 		leftADaemon := func(t *testing.T) *prRun {
 			h := plain(t)
 			h.instr.leftRunning = "daemons keploy cannot see (pids [41])"
@@ -1244,6 +1253,9 @@ func TestUnderTheSwitchALostProcessTaintsEverySetItLivesInto(t *testing.T) {
 			{"a compose stack's app started again for the next set", compose(nil), true, false, false, ""},
 			// The stop's failure leaves the first set unjudged too.
 			{"a compose stack's app whose stop failed", compose(errors.New("keploy could not interrupt the application's container: context deadline exceeded")), true, false, true, "keploy found the application's container still running when it started it for this test-set"},
+			// A start the daemon never answered of the container keeps the
+			// losses, and says so; it found no container running.
+			{"a compose stack's app whose start could not read its container", composeUnread, true, false, true, "keploy could not read the application's container from the docker daemon when it started it for this test-set"},
 			{"started anew for each set", plain, false, false, false, ""},
 			{"started anew, but its stop left a daemon running", leftADaemon, false, false, true, "the stop of the application at test-set test-set-0's end left running daemons keploy cannot see (pids [41])"},
 		} {
@@ -1360,15 +1372,15 @@ type composeStartsInstr struct {
 	failStarts int
 }
 
-func (c *composeStartsInstr) StartComposeApp(context.Context) (bool, error) {
+func (c *composeStartsInstr) StartComposeApp(context.Context) (models.ComposeAppStart, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.starts++
 	if c.starts <= c.failStarts {
 		c.now = c.lost
-		return false, errors.New(`keploy could not start the application's container "app" again: context deadline exceeded`)
+		return models.ComposeAppUnread, errors.New(`keploy could not start the application's container "app" again: context deadline exceeded`)
 	}
-	return false, nil
+	return models.ComposeAppFoundRunning, nil
 }
 
 func (c *composeStartsInstr) GetCaptureLosses(context.Context) (models.CaptureLosses, error) {

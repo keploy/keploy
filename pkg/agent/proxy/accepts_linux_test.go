@@ -26,6 +26,7 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils/plaintcp/plaintcptest"
 )
 
 // fakeCounter stands in for the hooks (agent.ListenerCounter): its mark notes
@@ -477,19 +478,14 @@ func TestAStopAsARoundTakesAKeptConnectionClosesIt(t *testing.T) {
 	}
 }
 
-// Not counted (the switch off): the proxy listens exactly as it always did,
-// net.Listen, MPTCP wherever the kernel (and GODEBUG) has it, makes no canary
-// connection, and says its counts are unknown.
-func TestUncountedTheProxyListensAsBefore(t *testing.T) {
+// Not counted (the switch off): the proxy listens unmarked, plain TCP as the
+// counted one (never Go's default MPTCP: it listens on every interface),
+// makes no canary connection, and says its counts are unknown.
+func TestUncountedTheProxyListensPlainTCPAndCountsNothing(t *testing.T) {
 	p, _ := startListening(t, nil)
-	ref, err := net.Listen("tcp", ":0") // what net.Listen makes here
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ref.Close()
-	if got, want := protocolOf(t, p.Listener), protocolOf(t, ref); got != want {
-		t.Fatalf("the uncounted proxy listens with protocol %d, want net.Listen's %d", got, want)
-	}
+	// A subtest, so that where the check cannot tell (it skips) the rest
+	// still runs.
+	t.Run("plain TCP", func(t *testing.T) { plaintcptest.RequirePlainTCP(t, p.Listener) })
 	if _, err := p.Accepted(); !errors.Is(err, models.ErrProxyConnsUnsupported) {
 		t.Fatalf("Accepted() uncounted: %v, want ErrProxyConnsUnsupported", err)
 	}

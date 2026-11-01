@@ -7,12 +7,14 @@
 #
 # Both ways. Steps 1-5 run without the proven switch: the record and replay
 # today's users run, on their default (the flip deletes them with the switch,
-# as this build refuses every replay under it). Steps 6-8 run under
+# as this build refuses every replay under it). Steps 6-9 run under
 # KEPLOY_PROVEN=1, which the flip makes the default: the record keeps each
 # test's mocks and begin under the test's ID, and this build, which does not
 # judge each test (keploy enterprise does), refuses the replay before it runs
 # the test command; a TLS client's hang-ups are charged only for a process
-# that sends no call through keploy's certificate in the same test. The
+# that sends no call through keploy's certificate in the same test; a client
+# that hangs up on a quiet streaming answer from an app the test command
+# started ends its call, and its test's end does not wait on it. The
 # suite's harness speaks scope protocol v1 both ways (keploy_v1.py,
 # conftest_v1.py); without the switch it sends the worker's
 # pid, as today's workers do, and the record and the gated replay run again
@@ -272,6 +274,53 @@ grep -q "verified nothing" nothing.log || { echo "FAIL: keploy did not say the r
 sudo -E env PATH="$PATH" "$REPLAY_BIN" mock replay -c "python3 -m pytest -q -p no:cacheprovider test_api.py" --name e2e --on-miss fail --disable-tele >/dev/null 2>&1
 RC=$?
 [ "$RC" -eq 0 ] || { echo "FAIL: a replay that served the recorded calls must still pass, got $RC"; FAIL=1; }
+
+echo "== 2e. --on-miss record over a gob set keeps the recorded calls and adds the captured one =="
+# The gob writer used to truncate the set it added to: the replay said it had
+# appended the call, exited 0, and left an empty mocks.gob that no longer loads.
+cat > test_new.py <<PY
+from client import get
+def test_new(): assert get("/new/7")["path"]=="/new/7"
+PY
+start_dep
+sudo -E env PATH="$PATH" KEPLOY_MOCK_FORMAT=gob "$RECORD_BIN" mock record -c "python3 -m pytest -q -p no:cacheprovider test_api.py" --name e2e-gob --disable-tele 2>&1 | tee rec-gob.log
+RC=${PIPESTATUS[0]}
+[ "$RC" -eq 0 ] || { echo "FAIL: the gob record should pass (exit 0), got $RC"; FAIL=1; }
+sudo -E env PATH="$PATH" KEPLOY_MOCK_FORMAT=gob "$REPLAY_BIN" mock replay -c "python3 -m pytest -q -p no:cacheprovider test_api.py test_new.py" --name e2e-gob --on-miss record --disable-tele 2>&1 | tee onmiss-gob.log
+RC=${PIPESTATUS[0]}
+stop_dep
+[ "$RC" -eq 0 ] || { echo "FAIL: --on-miss record that added the captured call should pass (exit 0), got $RC"; FAIL=1; }
+grep -q "appended new dependency calls" onmiss-gob.log || { echo "FAIL: --on-miss record did not add the captured call to the gob set"; FAIL=1; }
+sudo -E env PATH="$PATH" KEPLOY_MOCK_FORMAT=gob "$REPLAY_BIN" mock replay -c "python3 -m pytest -q -p no:cacheprovider test_api.py test_new.py" --name e2e-gob --on-miss fail --disable-tele 2>&1 | tee rep-gob.log
+RC=${PIPESTATUS[0]}
+[ "$RC" -eq 0 ] && grep -q "4 passed" rep-gob.log ||
+  { echo "FAIL: the gob set should serve the 3 recorded calls and the captured one (exit 0, 4 passed), got $RC"; FAIL=1; }
+grep -qx 'loaded: 4' keploy/e2e-gob/last-replay.yaml ||
+  { echo "FAIL: want the gob set to hold 4 mocks, the receipt says: $(grep '^loaded:' keploy/e2e-gob/last-replay.yaml)"; FAIL=1; }
+[ -s keploy/e2e-gob/mocks.gob ] && [ ! -e keploy/e2e-gob/mocks.yaml ] ||
+  { echo "FAIL: want the set in one mocks.gob, got: $(ls keploy/e2e-gob)"; FAIL=1; }
+
+echo "== 2f. --on-miss record that cannot add the captured call fails the run =="
+# A set with a mocks.gob and a mocks.yaml (an older keploy's --on-miss record
+# left such sets) is refused, naming both files: the run used to exit 0, and a
+# CI job that ran it to grow the set went green while the set did not grow.
+sudo cp -r keploy/e2e-gob keploy/e2e-mixed && sudo cp keploy/e2e/mocks.yaml keploy/e2e-mixed/mocks.yaml
+sudo cp keploy/e2e-mixed/mocks.gob mixed-before.gob && sudo cp keploy/e2e-mixed/mocks.yaml mixed-before.yaml
+cat > test_new2.py <<PY
+from client import get
+def test_new2(): assert get("/fresh/8")["path"]=="/fresh/8"
+PY
+start_dep
+sudo -E env PATH="$PATH" "$REPLAY_BIN" mock replay -c "python3 -m pytest -q -p no:cacheprovider test_api.py test_new2.py" --name e2e-mixed --on-miss record --disable-tele 2>&1 | tee onmiss-mixed.log
+RC=${PIPESTATUS[0]}
+stop_dep
+grep -q "4 passed" onmiss-mixed.log || { echo "FAIL: the tests should pass (4 passed), so that the run fails on the refused call alone"; FAIL=1; }
+[ "$RC" -ne 0 ] && grep -qx 'failedBy: keploy' keploy/e2e-mixed/last-replay.yaml ||
+  { echo "FAIL: --on-miss record whose captured call the set refused should fail the run as keploy's, got exit $RC, receipt $(grep '^failedBy:' keploy/e2e-mixed/last-replay.yaml)"; FAIL=1; }
+grep -q "e2e-mixed/mocks.gob and .*e2e-mixed/mocks.yaml" onmiss-mixed.log || { echo "FAIL: the refusal should name both of the set's mock files"; FAIL=1; }
+! grep -q "appended new dependency calls" onmiss-mixed.log || { echo "FAIL: a refused call was said to be appended"; FAIL=1; }
+sudo cmp -s mixed-before.gob keploy/e2e-mixed/mocks.gob && sudo cmp -s mixed-before.yaml keploy/e2e-mixed/mocks.yaml ||
+  { echo "FAIL: a refused set's mock files changed"; FAIL=1; }
 
 echo "== 3. exit-code propagation: a failing runner must fail keploy =="
 cat > test_fail.py <<PY
@@ -586,6 +635,182 @@ MOCKS=$(grep -c '^kind: Http' keploy/e2e-tls/mocks.yaml 2>/dev/null)
 HUNG=$(grep -o 'a client hung up on [0-9]* TLS handshake(s)' rec-tls.log | sort -u)
 [ "$HUNG" = "a client hung up on 1 TLS handshake(s)" ] ||
   { echo "FAIL: want only the rejecting process's hang-up charged (a client hung up on 1 TLS handshake(s)), got: ${HUNG:-none}"; FAIL=1; }
+
+echo "== 9. under the proven switch, a client that hangs up on a quiet streaming answer ends its call, and its test's end does not wait on it =="
+# A test's client follows a stream of a job's events, or a long poll, from an
+# app the test command started, and hangs up while the app sends nothing (no
+# heartbeat). keploy relays the call to the app live. Without keploy the app
+# would see its client go; keploy must tell it, and the test's end must not
+# wait on an exchange its client left. Before, keploy read only the app while
+# it relayed the answer: the app never learned its client went, the call's
+# connection held the test's end, and keploy's agent gave up on it ("made no
+# progress settling the test's calls"), so the test was not judged.
+# In a record a call's connection holds its test's end only while bytes its
+# client sent are untaken, so the lane makes the failing run's shape: once
+# its client has hung up, the app sends one more event, keploy relays it, and
+# the client's kernel resets keploy's side (the client's FIN is then counted
+# as a byte its handler never read). streamapp.py, a child of pytest (so its
+# calls are live, not mocked):
+#   /events  one NDJSON event, then nothing; it watches its socket for its
+#            client's going, as a Go server's request context does
+#   /poll    the answer's headers, then nothing; deaf: it never looks at its
+#            client again
+# Each sends one more event on its own signal (SIGUSR1, SIGUSR2). Stopped
+# (SIGTERM), the app says, for each call, whether it was told its client went:
+# "told PATH" once its socket held the end (read by /events, or found waiting
+# unread at the stop), else "not told PATH".
+# test_stream.py: test_events_hang_up and test_poll_hang_up each read what the
+# app sent, hang up, and signal the app; test_app_stops stops it, which ends
+# the deaf app's call. Each test's end must pass with no give-up, the app must
+# have been told of both hang-ups, and each exchange is told at Info as not
+# recorded.
+STREAM_PORT=18996
+cat > streamapp.py <<'PY'
+import http.server, json, os, select, signal, socket, socketserver, sys, threading
+PORT, LOG = int(sys.argv[1]), sys.argv[2]
+lock, streams = threading.Lock(), {}
+def say(line):
+    with lock:
+        with open(LOG, "a") as f:
+            f.write(line + "\n")
+def told(sock):
+    with lock:
+        path = streams.pop(sock, None)
+    if path:
+        say("told " + path)
+more = {}
+for sig in (signal.SIGUSR1, signal.SIGUSR2):
+    r, w = os.pipe()
+    more[sig] = r
+    signal.signal(sig, lambda *_, w=w: os.write(w, b"x"))
+def stop(*_):
+    with lock:
+        held = list(streams.items())
+    for sock, path in held:
+        try:
+            r, _, _ = select.select([sock], [], [], 0)
+            if r and sock.recv(1, socket.MSG_PEEK) == b"":
+                told(sock)
+        except OSError:
+            told(sock)
+    with lock:
+        left = list(streams.values())
+    for path in left:
+        say("not told " + path)
+    os._exit(0)
+signal.signal(signal.SIGTERM, stop)
+def event(w, n):
+    line = json.dumps({"seq": n}).encode() + b"\n"
+    try:
+        w.write(b"%x\r\n%s\r\n" % (len(line), line))
+        w.flush()
+    except OSError:
+        pass
+class H(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-ndjson")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        with lock:
+            streams[self.connection] = self.path
+        if self.path == "/events":
+            event(self.wfile, 1)
+            sig = more[signal.SIGUSR1]
+            while True:
+                r, _, _ = select.select([self.connection, sig], [], [])
+                if sig in r:
+                    os.read(sig, 1)
+                    event(self.wfile, 2)
+                if self.connection in r:
+                    try:
+                        b = self.connection.recv(1)
+                    except OSError:
+                        b = b""
+                    if not b:
+                        break
+            told(self.connection)
+            self.close_connection = True
+            return
+        self.wfile.flush()
+        sig = more[signal.SIGUSR2]
+        select.select([sig], [], [])
+        os.read(sig, 1)
+        event(self.wfile, 2)
+        threading.Event().wait()
+    def log_message(self, *a): pass
+class S(socketserver.ThreadingTCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+with S(("127.0.0.1", PORT), H) as s:
+    with open("streamapp.pid", "w") as f:
+        f.write(str(os.getpid()))
+    print("ready", flush=True)
+    s.serve_forever()
+PY
+cat > test_stream.py <<PY
+import signal, socket, subprocess, sys
+import pytest
+PORT = $STREAM_PORT
+
+@pytest.fixture(scope="module")
+def app():
+    p = subprocess.Popen([sys.executable, "streamapp.py", str(PORT), "streamapp.log"],
+                         stdout=subprocess.PIPE, text=True)
+    try:
+        assert p.stdout.readline().strip() == "ready"
+        yield p
+    finally:
+        p.terminate()
+        p.wait()
+
+def hang_up(app, path, until, sig):
+    # Reads the answer until it ends with until, hangs up on it, and has the
+    # app send one more event.
+    s = socket.create_connection(("127.0.0.1", PORT))
+    s.sendall(("GET %s HTTP/1.1\r\nHost: localhost\r\n\r\n" % path).encode())
+    data = b""
+    while not data.endswith(until):
+        b = s.recv(65536)
+        assert b, data
+        data += b
+    s.close()
+    app.send_signal(sig)
+    return data
+
+def test_events_hang_up(app):
+    data = hang_up(app, "/events", b'{"seq": 1}\n\r\n', signal.SIGUSR1)
+    assert data.startswith(b"HTTP/1.1 200"), data
+
+def test_poll_hang_up(app):
+    data = hang_up(app, "/poll", b"\r\n\r\n", signal.SIGUSR2)
+    assert data.startswith(b"HTTP/1.1 200"), data
+
+def test_app_stops(app):
+    app.terminate()
+    assert app.wait() is not None
+PY
+: > streamapp.log
+rm -f streamapp.pid
+sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$RECORD_BIN" mock record -c "python3 -m pytest -q -p no:cacheprovider test_stream.py" --name e2e-stream --disable-tele 2>&1 | tee rec-stream.log
+RC=${PIPESTATUS[0]}
+# The app is pytest's, which stopped it; stop it here too if pytest did not.
+APP_PID=$(cat streamapp.pid 2>/dev/null)
+[ -n "$APP_PID" ] && grep -qs streamapp.py "/proc/$APP_PID/cmdline" && sudo kill "$APP_PID"
+# "3 passed in": a test keploy fails at its end is an error at its teardown
+# ("3 passed, 2 errors in").
+[ "$RC" -eq 0 ] && grep -q "3 passed in" rec-stream.log ||
+  { echo "FAIL: a client's hang-up on a quiet streaming answer should leave its test judged (exit 0, 3 passed), got $RC"; FAIL=1; }
+GAVE=$(grep -c "made no progress settling" rec-stream.log)
+[ "$GAVE" -eq 0 ] || { echo "FAIL: keploy's agent gave up settling a test's calls ($GAVE line(s)): the client's hang-up held the test's end"; FAIL=1; }
+echo "the app's log:"; cat streamapp.log
+for P in /events /poll; do
+  grep -qx "told $P" streamapp.log ||
+    { echo "FAIL: the app was never told its $P client went: keploy did not pass on the client's hang-up"; FAIL=1; }
+  grep -q "Not recording this request as a test case: its client closed.*\"url\": \"$P\"" rec-stream.log ||
+    { echo "FAIL: keploy did not say it left $P's exchange unrecorded because its client closed"; FAIL=1; }
+done
 fi
 
 if [ "$FAIL" -eq 0 ]; then echo "MOCK E2E: PASSED"; else echo "MOCK E2E: FAILED"; fi

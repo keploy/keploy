@@ -43,6 +43,16 @@ type carryOverAttribution struct {
 	// them: an entry for a test this run did not map would replace that test's
 	// recorded mapping with this one mock.
 	mapped map[string]struct{}
+	// consumedSome holds the tests mapConsumed was given at least one
+	// consumed mock for that is their own: not the startup section's, and not
+	// a flagged mock another test owns by the release rule. In any call (a
+	// RetryPassing cycle calls it again): a test once in it stays.
+	consumedSome map[string]struct{}
+	// caughtOthers holds the tests mapConsumed was given a flagged mock for
+	// that another test owns by the release rule (a carry-over the running
+	// test's drain caught), in any call. A mapped test in neither set
+	// consumed nothing but startup traffic, if anything (consumedNothing).
+	caughtOthers map[string]struct{}
 	// early holds, by owning test, the flagged mocks consumed while that test
 	// was not mapped yet: a carry-over SEND the app published before its own
 	// test ran (the lookahead lets it land up to a few windows early). They
@@ -62,11 +72,54 @@ type carryOverAttribution struct {
 
 func newCarryOverAttribution(testCases []*models.TestCase) *carryOverAttribution {
 	return &carryOverAttribution{
-		sched:   models.NewWindowSchedule(recordedTestWindows(testCases)),
-		mapped:  make(map[string]struct{}),
-		early:   make(map[string][]models.MockState),
-		bootEnd: firstRecordedTestStart(testCases),
+		sched:        models.NewWindowSchedule(recordedTestWindows(testCases)),
+		mapped:       make(map[string]struct{}),
+		consumedSome: make(map[string]struct{}),
+		caughtOthers: make(map[string]struct{}),
+		early:        make(map[string][]models.MockState),
+		bootEnd:      firstRecordedTestStart(testCases),
 	}
+}
+
+// consumedNothing names the tests whose consumption mapConsumed was given and
+// that consumed nothing, or only the startup section's mocks: no mock of
+// their own, and no flagged mock another test owns. Only these may get an
+// entry with no mock (addConsumedNothingEntries). A test whose drain caught
+// only startup traffic (a boot consumer still fetching, a flagged mock
+// released before the first test) is one: the section, in the same file,
+// lists those mocks, and a replay that loads by name serves them to every
+// test. A test that consumed an unflagged mock its window filter dropped (one
+// recorded in another test's window, or in none) keeps what record gave it,
+// as before; so does one that caught another test's flagged mock
+// (caughtOnlyOthers).
+func (a *carryOverAttribution) consumedNothing() map[string]struct{} {
+	out := make(map[string]struct{}, len(a.mapped))
+	for id := range a.mapped {
+		_, some := a.consumedSome[id]
+		_, others := a.caughtOthers[id]
+		if !some && !others {
+			out[id] = struct{}{}
+		}
+	}
+	return out
+}
+
+// caughtOnlyOthers names the mapped tests whose every consumed mock was the
+// startup section's or a flagged mock another test owns, at least one of them
+// the latter: a carry-over (a pushed message, a send the app published early
+// or late) the test's drain caught, which the release rule gives to the test
+// whose window recorded it. Its owner's entry lists it, as it always has. The
+// run did not establish what the catching test itself needs, so it gets no
+// entry: a file that exists keeps its recorded one, and a new file is created
+// without one, as before (RunTestSet does not hold the file for it).
+func (a *carryOverAttribution) caughtOnlyOthers() map[string]struct{} {
+	out := make(map[string]struct{}, len(a.caughtOthers))
+	for id := range a.caughtOthers {
+		if _, some := a.consumedSome[id]; !some {
+			out[id] = struct{}{}
+		}
+	}
+	return out
 }
 
 // bootBand is the per-test mocks of consumed, caught by the drain of the
@@ -244,6 +297,9 @@ func (a *carryOverAttribution) mapConsumed(mapping *models.Mapping, running stri
 	own := make([]models.MockState, 0, len(consumed))
 	var startup []models.MockState
 	byOwner := map[int][]models.MockState{}
+	// othersFlagged counts the flagged mocks of consumed that another test
+	// owns by the release rule: its, not the running test's consumption.
+	othersFlagged := 0
 	for _, st := range consumed {
 		idx, ok := a.releaseIndex(st)
 		switch {
@@ -253,6 +309,9 @@ func (a *carryOverAttribution) mapConsumed(mapping *models.Mapping, running stri
 			startup = append(startup, st)
 		default:
 			owner := a.sched.Window(idx).TestCase
+			if owner != running {
+				othersFlagged++
+			}
 			if _, mapped := a.mapped[owner]; !mapped {
 				// Its test is not in the mappings yet: hold it for that test,
 				// and leave it to the running test's window filter as well,
@@ -272,6 +331,15 @@ func (a *carryOverAttribution) mapConsumed(mapping *models.Mapping, running stri
 	if boot := a.bootBand(own, running); len(boot) > 0 {
 		startup = append(startup, boot...)
 		a.bootListed = true
+	}
+	// startup and the flagged mocks other tests own are parts of consumed,
+	// apart, each mock once (bootBand takes no flagged mock): a consumed mock
+	// outside both is the running test's own (consumedNothing).
+	if len(consumed) > len(startup)+othersFlagged {
+		a.consumedSome[running] = struct{}{}
+	}
+	if othersFlagged > 0 {
+		a.caughtOthers[running] = struct{}{}
 	}
 	upsertActualTestMockMapping(mapping, running, own, tcReq, tcResp)
 	// A call in flight when the running test began (sent in the gap before
@@ -297,6 +365,92 @@ func (a *carryOverAttribution) mapConsumed(mapping *models.Mapping, running stri
 		upsertActualTestMockMapping(mapping, a.sched.Window(idx).TestCase, byOwner[idx], time.Time{}, time.Time{})
 	}
 	addStartupMocks(mapping, startup)
+}
+
+// mapDrained attributes, by the release rule, the flagged mocks of a drain no
+// test's mapping reads (a connection reset's check, the set's end): each goes
+// to the entry of the test whose window recorded it, or, that test not mapped
+// yet, is held for it (early), as mapConsumed does with a test's own drain.
+// So a test whose carry-over (a publish it made after it answered, a send it
+// made early) landed in such a drain consumed it all the same, and is not
+// taken for one that consumed nothing. A mock its owner's entry already lists
+// is not listed again. Every other mock of the drain is left out of the
+// mapping, as before.
+func (a *carryOverAttribution) mapDrained(mapping *models.Mapping, consumed []models.MockState) {
+	if a == nil || mapping == nil {
+		return
+	}
+	listed := map[string]map[string]bool{}
+	for _, tc := range mapping.TestCases {
+		for _, m := range tc.Mocks {
+			if listed[tc.ID] == nil {
+				listed[tc.ID] = map[string]bool{}
+			}
+			listed[tc.ID][m.Name] = true
+		}
+	}
+	byOwner := map[int][]models.MockState{}
+	for _, st := range consumed {
+		idx, ok := a.releaseIndex(st)
+		if !ok || idx < 0 {
+			continue
+		}
+		owner := a.sched.Window(idx).TestCase
+		if _, mapped := a.mapped[owner]; !mapped {
+			a.early[owner] = append(a.early[owner], st)
+			continue
+		}
+		if listed[owner][st.Name] {
+			continue
+		}
+		if listed[owner] == nil {
+			listed[owner] = map[string]bool{}
+		}
+		listed[owner][st.Name] = true
+		byOwner[idx] = append(byOwner[idx], st)
+	}
+	owners := make([]int, 0, len(byOwner))
+	for idx := range byOwner {
+		owners = append(owners, idx)
+	}
+	sort.Ints(owners)
+	for _, idx := range owners {
+		upsertActualTestMockMapping(mapping, a.sched.Window(idx).TestCase, byOwner[idx], time.Time{}, time.Time{})
+	}
+}
+
+// unattributedCarryOverOwners names the tests whose recording holds a
+// carry-over mock (mockDisplayInfo.carryOver) that the run attributed to no one:
+// mapping, as this run builds it, lists it in no test's entry and not in the
+// startup section. A read that took it does not count unless it placed it: a
+// publish consumed while its own window was the agent's current one comes
+// unflagged, and a later test's window filter, or the read at the set's end,
+// places it nowhere. Each is named under the test the release rule gives its
+// place to (its window, or the gap after it); one placed before every window
+// is the startup section's, set-level, and names no test.
+func (a *carryOverAttribution) unattributedCarryOverOwners(lookup map[string]mockDisplayInfo, mapping *models.Mapping) map[string]struct{} {
+	out := map[string]struct{}{}
+	if a == nil || a.sched.Len() == 0 || mapping == nil {
+		return out
+	}
+	listed := map[string]bool{}
+	for _, tc := range mapping.TestCases {
+		for _, m := range tc.Mocks {
+			listed[m.Name] = true
+		}
+	}
+	for _, m := range mapping.Startup {
+		listed[m.Name] = true
+	}
+	for name, info := range lookup {
+		if !info.carryOver || info.place.IsZero() || listed[name] {
+			continue
+		}
+		if idx := a.sched.ReleaseIndex(info.place); idx >= 0 {
+			out[a.sched.Window(idx).TestCase] = struct{}{}
+		}
+	}
+	return out
 }
 
 // inFlightAnsweredLate is the unflagged per-test mocks of consumed that were in

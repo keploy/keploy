@@ -365,8 +365,8 @@ func TestHoldStartsWithTheFirstSessionThatDials(t *testing.T) {
 }
 
 func TestDecideHandshakeRefusesALoopbackPortNothingOwnsInMockMode(t *testing.T) {
-	recorded.reset()
-	t.Cleanup(recorded.reset)
+	recorded.forget()
+	t.Cleanup(recorded.forget)
 	addr, _ := listenCounting(t)
 	free := testnet.RefusedAddr(t, "tcp")
 

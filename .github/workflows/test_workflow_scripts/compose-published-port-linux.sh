@@ -35,7 +35,7 @@ FAIL=0
 # Names of this run's own: two runs on one runner never share a container.
 ID=$$
 APP="pp-app-$ID"
-free_port() { python3 -c 'import socket; s = socket.socket(); s.bind(("", 0)); print(s.getsockname()[1])'; }
+source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/free-port.sh"
 
 # Tear down only this run's project and container, by name. Never a blanket
 # prune.
@@ -131,10 +131,10 @@ record() {
   sudo -E env PATH="$PATH" "$RECORD_BIN" record -c "docker compose up" --container-name "$APP" \
     --disable-tele --disable-ansi > "$log" 2>&1 &
   pid=$!
-  # Once the app listens, keploy's agent moves its socket and listens on its
-  # port itself (ingress forwarding); a call before that is reset, so the
-  # calls wait for it.
-  if await "$log" "$pid" "APP LISTENING" 1 && await "$log" "$pid" "Started ingress forwarding" 1; then
+  # The calls go as soon as the app says it listens, as a user's would: keploy
+  # holds the app's port from its bind until its own forwarder listens there,
+  # so a call in between is answered and recorded, not reset.
+  if await "$log" "$pid" "APP LISTENING" 1; then
     for p in /hello/one /hello/two; do
       if curl -fsS -o /dev/null --max-time 10 "http://127.0.0.1:$hp$p"; then
         made=$((made + 1))
@@ -174,7 +174,7 @@ replay() {
 redirect_line() { echo "app port 8080 is published on host port $1; sending these tests there"; }
 
 echo "== 1. published on another host port =="
-HP=$(free_port)
+HP=$(free_port) || exit 1
 compose 8080 "$HP:8080"
 record remapped "$HP"
 if grep -q "cannot be replayed" remapped-record.log; then
@@ -194,7 +194,7 @@ for leg in "remapped-off" "remapped-on KEPLOY_PROVEN=1"; do
 done
 
 echo "== 2. published as itself =="
-P=$(free_port)
+P=$(free_port) || exit 1
 compose "$P" "$P:$P"
 record same "$P"
 replay same
@@ -205,8 +205,8 @@ if grep -q "sending these tests there" same-test.log; then
 fi
 
 echo "== 3. published on two host ports =="
-HP1=$(free_port)
-HP2=$(free_port)
+HP1=$(free_port) || exit 1
+HP2=$(free_port "$HP1") || exit 1
 compose 8080 "$HP1:8080" "$HP2:8080"
 record two "$HP1"
 replay two

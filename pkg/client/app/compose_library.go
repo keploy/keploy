@@ -77,6 +77,7 @@ func (a *App) newLibraryComposeStack(ctx context.Context) (composeStack, error) 
 		Content:     a.composeContent,
 		ProjectName: projectName,
 		WorkingDir:  projectDir,
+		EnvFiles:    composeEnvFiles(a.cmd),
 	})
 }
 
@@ -193,26 +194,10 @@ func cascadeName(c api.Cascade) string {
 	return "unknown"
 }
 
-// composeGraceThenDown is the in-process port of cmdCancel's compose branch.
-//
-// The grace is wall-clock-bounded, not iteration-counted: a saturated daemon
-// must not let the per-tick inspect sum past the teardown budget. It ends early
-// as soon as the app container has exited, because at that point the coverage
-// flush is done (Go has written GOCOVERDIR, Java its jacoco .exec) and there is
-// no reason to keep waiting on the slower sibling services.
+// composeGraceThenDown is the in-process port of cmdCancel's compose branch:
+// the app's grace (composeAppGrace), then the down.
 func (a *App) composeGraceThenDown(composeDown func()) {
-	graceDeadline := time.Now().Add(graceBudget)
-	for time.Now().Before(graceDeadline) {
-		time.Sleep(500 * time.Millisecond)
-
-		ictx, icancel := context.WithTimeout(context.Background(), dockerInspectBudget)
-		info, ierr := a.docker.ContainerInspect(ictx, a.container)
-		icancel()
-		if ierr == nil && (info.State.Status == "exited" || info.State.Status == "dead") {
-			a.logger.Debug("app container stopped gracefully; tearing down the rest of the compose stack")
-			break
-		}
-	}
+	a.composeAppGrace(nil)
 	composeDown()
 }
 

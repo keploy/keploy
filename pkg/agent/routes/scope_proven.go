@@ -14,8 +14,8 @@ import (
 )
 
 // The proven model's single-worker integration wire (models.ScopeProtocolVersion,
-// design v14 §6.1): POST /agent/instance, and /agent/scope/begin|end answered
-// with a version, a skip or a fail. Served only under the proven switch, by a
+// design v14 §6.1): POST /agent/instance, /agent/scope/begin|end answered
+// with a version, a skip or a fail, and /agent/scope/given. Served only under the proven switch, by a
 // service that implements provenScope; otherwise the scope API answers as
 // before.
 
@@ -23,7 +23,7 @@ type provenScope interface {
 	ClaimInstance(ctx context.Context, req models.InstanceReq, caller int) (models.InstanceResp, *models.ScopeError)
 	ProvenBegin(ctx context.Context, req models.ScopeReq) (models.ScopeBeginResp, *models.ScopeError)
 	ProvenEnd(ctx context.Context, req models.ScopeReq) (models.ScopeEndResp, *models.ScopeError)
-	SetScopeSkips(ctx context.Context, skip map[string]string) error
+	SetScopeSkips(ctx context.Context, skip map[string]string, needs map[string][]models.ScopeNeed) error
 }
 
 // refusalNoter records what the wire refused (agent.Agent.NoteRefusal).
@@ -176,6 +176,52 @@ func (a *Agent) provenEnd(w http.ResponseWriter, r *http.Request, p provenScope,
 		default:
 			writeScopeError(w, r, serr)
 		}
+		return
+	}
+	render.Status(r, http.StatusOK)
+	render.JSON(w, r, resp)
+}
+
+// provenGiver is the service's side of POST /agent/scope/given: a value the
+// open test gave the application (models.GivenReq).
+type provenGiver interface {
+	ProvenGive(ctx context.Context, req models.GivenReq) (models.GivenResp, *models.ScopeError)
+}
+
+// HandleScopeGiven takes a value the open test gave the application
+// (models.GivenReq): keploy holds it as a given variable of the test
+// (models.GivenPrefix), which the learn step follows into the calls that
+// carry it and each replay checks. Served only under the proven switch;
+// otherwise the plain 404 the path had before it existed. Every refusal is
+// the run's to name, as a begin's is.
+func (a *Agent) HandleScopeGiven(w http.ResponseWriter, r *http.Request) {
+	if _, ok := a.proven(); !ok {
+		http.NotFound(w, r)
+		return
+	}
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
+		return
+	}
+	g, ok := a.svc.(provenGiver)
+	if !ok {
+		a.refuse(w, r, &models.ScopeError{
+			Status:  http.StatusNotImplemented,
+			Code:    models.ScopeErrInternal,
+			Message: "this keploy agent cannot take a value a test gave",
+			Remedy:  "run the keploy agent of this keploy version",
+		})
+		return
+	}
+	var req models.GivenReq
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxScopeBody)).Decode(&req); err != nil {
+		a.refuse(w, r, scopeBodyErr("given", err))
+		return
+	}
+	resp, serr := g.ProvenGive(r.Context(), req)
+	if serr != nil {
+		a.refuse(w, r, serr)
 		return
 	}
 	render.Status(r, http.StatusOK)

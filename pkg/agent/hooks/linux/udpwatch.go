@@ -41,16 +41,18 @@ import (
 
 // udpDest mirrors struct dest_info_t.
 type udpDest struct {
-	IPVersion uint32
-	IP4       uint32
-	IP6       [4]uint32
-	Port      uint32
-	KernelPid uint32
+	IPVersion  uint32
+	IP4        uint32
+	IP6        [4]uint32
+	Port       uint32
+	KernelPid  uint32
+	AgentNsPid uint32
+	_          uint32
 }
 
 // udpReplyEventSize is struct udp_reply_event's size: a report of any other
 // size is one keploy cannot read.
-const udpReplyEventSize = 48
+const udpReplyEventSize = 56
 
 // udpReplyEvent mirrors struct udp_reply_event (k_udp.h).
 type udpReplyEvent struct {

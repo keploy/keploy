@@ -34,6 +34,10 @@ env:
   # SHA via the repo var if a feat branch needs to carry a cross-repo
   # change.
   INTEGRATION_REF: ${{ vars.INTEGRATION_REF || 'main' }}
+  # Every run under the proven switch (KEPLOY_PROVEN=1) runs the agent's exact
+  # view in verify mode (see mock_linux.yml); runs without the switch are
+  # unchanged. Called workflows set it themselves: they do not inherit this.
+  KEPLOY_EXACT_VIEW_VERIFY: '1'
 
 jobs:
   # -------------------------------------------------------------------

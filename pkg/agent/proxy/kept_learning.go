@@ -79,7 +79,8 @@ func (f *filedBases) base(epoch uint64, name string) *models.Mock {
 // out, does not: variables or binds a learn step learned on it
 // (MockSpec.Learned, LearnedBinds; a recording the store hands out carries
 // none), a noise path or a noise pattern base lacks (an empty pattern list
-// ignores the whole field), or a variable base lacks. No parser in the tree
+// ignores the whole field), a variable base lacks, or a clock read base
+// lacks or holds with another offset (MockSpec.Clocks). No parser in the tree
 // reaches three of these today, and they have no row: a new pattern on a
 // noise path base holds, a whole-field noise over base's patterns (every
 // noise merge keeps the keys and patterns it holds), and learned binds with
@@ -93,8 +94,9 @@ func learnsBeyond(base, caller *models.Mock) bool {
 	}
 	var noise map[string][]string
 	var vars models.MockVariables
+	var clocks map[string]models.ClockOffset
 	if base != nil {
-		noise, vars = base.Spec.ReqBodyNoise, base.Spec.Variables
+		noise, vars, clocks = base.Spec.ReqBodyNoise, base.Spec.Variables, base.Spec.Clocks
 	}
 	for path, patterns := range caller.Spec.ReqBodyNoise {
 		had, ok := noise[path]
@@ -115,6 +117,11 @@ func learnsBeyond(base, caller *models.Mock) bool {
 	}
 	for name := range caller.Spec.Variables {
 		if _, ok := vars[name]; !ok {
+			return true
+		}
+	}
+	for path, o := range caller.Spec.Clocks {
+		if had, ok := clocks[path]; !ok || had != o {
 			return true
 		}
 	}
@@ -191,12 +198,14 @@ func (m *MockManager) warnUnstaged(name string) {
 }
 
 // asStaged is mk, a copy a matcher filed over the staged recording base,
-// with base's noise and variables and none of what the learn step learned on
-// the copy: the rest of the copy (its place in the trees) is mk's.
+// with base's noise, variables and clock reads and none of what the learn
+// step learned on the copy: the rest of the copy (its place in the trees) is
+// mk's.
 func asStaged(mk, base *models.Mock) *models.Mock {
 	c := mk.ShallowCopy()
 	c.Spec.ReqBodyNoise = base.Spec.ReqBodyNoise
 	c.Spec.Variables = base.Spec.Variables
+	c.Spec.Clocks = base.Spec.Clocks
 	c.Spec.SetLearned(base.Spec.Learned(), base.Spec.LearnedBinds())
 	return c
 }

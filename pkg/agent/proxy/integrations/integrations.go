@@ -555,6 +555,9 @@ type CallRound struct {
 	// (WithSequence), seqOK whether the store keeps one.
 	seq   SequenceView
 	seqOK bool
+	// worker is whether the read's view showed a test the worker scope
+	// (WithSequence's Worker, InWorkerView): ShowsBackgroundIn.
+	worker bool
 }
 
 // NewCallRound is a store's CallRound of staging epoch, held telling, by
@@ -578,8 +581,24 @@ func (c CallRound) Held(name string) bool { return c.held != nil && c.held(name)
 // installed after the read.
 func (c CallRound) WithSequence(sv SequenceView) CallRound {
 	c.seq, c.seqOK = sv, true
+	c.worker = c.worker || sv.Worker != nil
 	return c
 }
+
+// InWorkerView is c, of a read whose view showed a test the worker scope
+// when shows is true: a test's view with a worker scope, under any rules. A
+// store that reads its round in one snapshot (RoundSnapshot.CallRound),
+// which keeps no sequence view, says so here, so a call decided on such a
+// read (a call that waited for the store to open its test) is held to the
+// worker scope's rule as one marked by MarkCallRound is (ShowsBackgroundIn).
+func (c CallRound) InWorkerView(shows bool) CallRound {
+	c.worker = c.worker || shows
+	return c
+}
+
+// ShowsWorker reports whether c's read found a test's view that showed the
+// worker scope (WithSequence, InWorkerView).
+func (c CallRound) ShowsWorker() bool { return c.worker }
 
 // Sequence is the sequence view of the view c was read in (WithSequence):
 // false for a store that keeps none, and for a read made with exact serving
@@ -1184,6 +1203,16 @@ type SessionWindowReader interface {
 // once, at package level.
 type MockIndex struct {
 	Keys func(*models.Mock) []string
+	// OwnedKeys, when set, gives the open test's own mocks their keys under
+	// exact serving, in place of Keys: the mocks a SessionKeyReader's walk
+	// reads ahead of the staged ones. Under exact serving the per-test tier
+	// (GetPerTestMocksInWindow) leads with every one of those mocks, in that
+	// walk's order. A matcher that walks the per-test tier whole before each
+	// keyed walk has read them all there already, so it files them only
+	// under the keys it looks up without that read, and a test that owns
+	// thousands of mocks has none of their other keys computed. The same
+	// rules as for Keys hold.
+	OwnedKeys func(*models.Mock) []string
 }
 
 // SessionKeyReader is an optional MockMemDb extension: the GetSessionMocks
@@ -1198,6 +1227,22 @@ type SessionKeyReader interface {
 	// back into the store; the walk then sees the tier as it is by the time
 	// it gets there, as successive reads would.
 	RangeSessionMocksWithKey(ix *MockIndex, key string, fn func(*models.Mock) bool) error
+}
+
+// PerTestRanger is an optional MockMemDb extension: the
+// GetPerTestMocksInWindow read handed one mock at a time, in its order, until
+// the caller stops. Under exact serving the open test's own unanswered mocks
+// come first, read a few at a time, and the tier only after them: a matcher
+// that stops at the test's next recording reads neither the mocks the test
+// answered nor the rest of the tier, so a test that owns many recordings
+// costs each call the same as one that owns few.
+type PerTestRanger interface {
+	// RangePerTestMocksInWindow calls fn with each mock
+	// GetPerTestMocksInWindow would return, in its order, until fn
+	// returns false. fn is called without the store's locks held, so it
+	// may call back into the store; the walk then sees the tier as it is
+	// by the time it gets there, as successive reads would.
+	RangePerTestMocksInWindow(fn func(*models.Mock) bool) error
 }
 
 // MockReader is the read-only facet of MockMemDb. Parsers that need

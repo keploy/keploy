@@ -302,9 +302,10 @@ func (r *Report) printSummary(reports map[string]*models.TestReport) error {
 	if obsolete > 0 {
 		fmt.Fprintf(r.out, "\tTotal test obsolete: %d\n", obsolete)
 	}
-	// Tests keploy quarantined, with their reasons. Only a run under the
-	// proven switch writes a reason (TestResult.SkipReason), so a report
-	// without one prints exactly what it printed before.
+	// Tests keploy quarantined, with their reasons. Only a run whose caller
+	// skipped a test for a reason writes one (TestResult.SkipReason: the
+	// proven switch's gate, or a cloud replay skipping a test with no mapping
+	// entry), so a report without one prints exactly what it printed before.
 	quarantined := quarantinedTests(reports)
 	if len(quarantined) > 0 {
 		fmt.Fprintf(r.out, "\tTotal test quarantined: %d\n", len(quarantined))
@@ -1258,6 +1259,12 @@ func renderUnmatchedCalls(sb *strings.Builder, test models.TestResult) {
 			}
 		} else if uc.Diff != "" {
 			sb.WriteString(fmt.Sprintf("    diff: %s\n", uc.Diff))
+		}
+		// Why the replay refused a field for a reason of its own (a learned
+		// read of the application's clock the call does not carry): the
+		// field and why, which names no value (models.FieldReason).
+		for _, r := range uc.FieldReasons {
+			fmt.Fprintf(sb, "    refused %s: %s\n", r.Field, r.Why)
 		}
 		if uc.NextSteps != "" {
 			sb.WriteString(fmt.Sprintf("    next steps: %s\n", uc.NextSteps))

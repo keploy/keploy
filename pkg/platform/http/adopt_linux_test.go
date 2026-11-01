@@ -10,6 +10,7 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/client/app"
 	"go.keploy.io/server/v3/pkg/models"
+	"io"
 	"math"
 	"os"
 	"os/exec"
@@ -150,7 +151,7 @@ func TestOwnProcessLeftoverHelper(t *testing.T) {
 	// The app and its child ignore SIGHUP, as a daemon does: the hangup the
 	// kernel sends a process group orphaned with members stopped does not end
 	// them, so only a kill does.
-	client := newRunClient(fmt.Sprintf("trap '' HUP; sleep 600 & echo $! > %s; echo $$ > %s; while :; do sleep 0.01; done",
+	client := newRunClient(fmt.Sprintf("trap '' HUP; sleep 600 & echo $! > %s; echo $$ > %s; while kill -0 \"$DAEMON_OWNER\"; do sleep 0.01; done",
 		filepath.Join(dir, "child.pid"), filepath.Join(dir, "app.pid")))
 	ran := make(chan struct{})
 	go func() {
@@ -384,7 +385,8 @@ func TestTheSweepSignalsNoProcessOtherThanTheOneItFound(t *testing.T) {
 // daemonize starts command (sh -c) in a session of its own from a child that
 // exits at once, as pg_ctl start does, and returns its pid once that child
 // has exited: the daemon is orphaned, and reparented by then. The daemon is
-// killed when the test ends, if it is still there.
+// killed when the test ends, if it is still there. A daemon that loops loops
+// only while the process that started it runs (ownerEnv).
 func daemonize(t *testing.T, command string, args ...string) int {
 	t.Helper()
 	pid, err := startDaemon(command, args...)
@@ -395,9 +397,30 @@ func daemonize(t *testing.T, command string, args ...string) int {
 	return pid
 }
 
+// ownerEnv names, in the environment of every process these tests start, the
+// pid of the test process that started it: set in this process's own
+// environment as it starts (init), it is inherited by each daemon a test
+// starts (startDaemon), each application keploy runs for a test, and each
+// script those start. A test's own process (inOwnProcess) runs init again, so
+// there the owner is that process. Every one of them that loops with no end
+// of its own loops `while kill -0 "$DAEMON_OWNER"`, in its TERM trap too: one
+// whose test process was killed, its cleanups never run (a test's own
+// process ends on its parent-death SIGKILL, whatever ended the test binary),
+// ends with it, not looping on with no one to kill it. The check is a
+// builtin's kill(2): it opens no file and starts no process, so a process's
+// descriptors and children are as the test has them.
+const ownerEnv = "DAEMON_OWNER"
+
+func init() {
+	if err := os.Setenv(ownerEnv, strconv.Itoa(os.Getpid())); err != nil {
+		panic(err)
+	}
+}
+
 // startDaemon is daemonize's work, safe off the test's goroutine.
 func startDaemon(command string, args ...string) (int, error) {
-	out, err := exec.Command("/bin/sh", append([]string{"-c", `setsid /bin/sh -c "$0" sh "$@" >/dev/null 2>&1 </dev/null & echo $!`, command}, args...)...).Output()
+	cmd := exec.Command("/bin/sh", append([]string{"-c", `setsid /bin/sh -c "$0" sh "$@" >/dev/null 2>&1 </dev/null & echo $!`, command}, args...)...)
+	out, err := cmd.Output()
 	if err != nil {
 		return 0, fmt.Errorf("the daemonizer: %w", err)
 	}
@@ -577,13 +600,13 @@ func TestAdoptedDaemonsEndWithTheApplication(t *testing.T) {
 	ready := func(name string) string { return filepath.Join(dir, name+".ready") }
 	polite := daemonize(t, `: > "$1"; exec sleep 120`, ready("polite"))
 	deaf := daemonize(t, `trap '' TERM; : > "$1"; exec sleep 120`, ready("deaf"))
-	busy := daemonize(t, `trap '' TERM; : > "$1"; while :; do sleep 0.01; done`, ready("busy"))
+	busy := daemonize(t, `trap '' TERM; : > "$1"; while kill -0 "$DAEMON_OWNER"; do sleep 0.01; done`, ready("busy"))
 	// One that opens and closes a file over and over (a retry loop, a DNS
 	// lookup): a count that rises and falls back is no progress.
-	churn := daemonize(t, `trap '' TERM; : > "$1"; while :; do exec 3</dev/null; sleep 0.05; exec 3<&-; sleep 0.05; done`, ready("churn"))
+	churn := daemonize(t, `trap '' TERM; : > "$1"; while kill -0 "$DAEMON_OWNER"; do exec 3</dev/null; sleep 0.05; exec 3<&-; sleep 0.05; done`, ready("churn"))
 	slow := daemonize(t, `exec 3</dev/null 4</dev/null 5</dev/null 6</dev/null 7</dev/null 8</dev/null 9</dev/null
 trap 'for fd in 3 4 5 6 7 8 9; do eval "exec $fd<&-"; sleep 0.3; done; echo done > "$2"; exit 0' TERM
-: > "$1"; while :; do sleep 0.01; done`, ready("slow"), done)
+: > "$1"; while kill -0 "$DAEMON_OWNER"; do sleep 0.01; done`, ready("slow"), done)
 	for _, name := range []string{"polite", "deaf", "busy", "churn", "slow"} {
 		await(t, name+" ready", func() bool { _, err := os.Stat(ready(name)); return err == nil })
 	}
@@ -719,7 +742,7 @@ func TestARunSaysTheSetEndKilledWhatTheAppLeftStopping(t *testing.T) {
 		cfg.Agent.AgentURI = "http://127.0.0.1:1/agent"
 		client := New(zap.NewNop(), nil, cfg)
 		client.apps.Store(uint64(0), app.NewApp(zap.NewNop(),
-			`sh -c 'trap "while :; do sleep 1; done" TERM; touch `+ready+`; while :; do sleep 1; done' & wait`, nil,
+			deafApp(ready), nil,
 			models.SetupOptions{CommandType: string(utils.Native)}))
 		ctx, cancel := context.WithCancelCause(context.Background())
 		done := make(chan models.AppError, 1)
@@ -741,7 +764,12 @@ func TestARunSaysTheSetEndKilledWhatTheAppLeftStopping(t *testing.T) {
 // and closes a file over and over, ignoring the request to stop, moves it at
 // most once (its first look below where the stop found it is a file fewer,
 // utils.ExitRatchet), not at each of the dozens of closes it makes, and is
-// killed on the stall bound.
+// killed on the stall bound. Where the kernel will not compare its files, the
+// stop counts its descriptors and says so, once: its churn of fd 3, and of
+// the fd 10 dash saves it to, then reads as up to two closes below the
+// reading that set the mark, and moves the teardown at most twice, bounded.
+// KEPLOY_TEST_KCMP_REQUIRED=1 (go-test.yaml's run of it as root) fails it
+// there instead, so the comparison runs in CI.
 func TestADaemonThatOnlyChurnsMovesNoTeardown(t *testing.T) {
 	if !inOwnProcess(t) {
 		return
@@ -753,30 +781,210 @@ func TestADaemonThatOnlyChurnsMovesNoTeardown(t *testing.T) {
 	defer stop()
 	stopCheck, stopStallChecks = 20*time.Millisecond, 25
 	ready := filepath.Join(t.TempDir(), "ready")
-	// No child of its own: one that ended would be a step (a process of it
-	// gone).
-	churn := daemonize(t, `trap '' TERM; : > "$1"; while :; do exec 3</dev/null; exec 3<&-; done`, ready)
+	churn := daemonize(t, churningDaemon, ready)
 	await(t, "the daemon ready", func() bool { _, err := os.Stat(ready); return err == nil })
+	// Whether the kernel compares the daemon's files: its fd 0 asked of
+	// itself (kcmp's KCMP_FILE, 0).
+	_, _, refused := unix.Syscall6(unix.SYS_KCMP, uintptr(churn), uintptr(churn), 0, 0, 0, 0)
 	scope := &utils.TeardownScope{}
-	core, logs := observer.New(zapcore.InfoLevel)
-	done := make(chan struct{})
-	go func() { stopAdopted(zap.New(core), nil, scope); close(done) }()
-	// Read as the stop decides to kill it: what the kill does after (the
-	// kernel freeing what it held) is not the daemon's way out.
-	var before uint64
-	await(t, "the stall kill", func() bool {
-		if logs.FilterMessageSnippet("made no progress on its way out after it was asked to stop; killing it").Len() == 0 {
-			return false
+	// Read as the stop decides to kill it, on the stop's own goroutine as it
+	// says so: what the kill does after (the kernel freeing what it held, the
+	// stop's next look finding the daemon gone, a move) is not the daemon's
+	// way out. Read later, once the test saw the kill in the log, the count
+	// can take that look in too: on a loaded box the stop gets to it first.
+	before, uncompared := atomic.Int64{}, atomic.Int64{}
+	before.Store(-1)
+	core, _ := observer.New(zapcore.InfoLevel)
+	logger := zap.New(core, zap.Hooks(func(e zapcore.Entry) error {
+		if strings.Contains(e.Message, "made no progress on its way out after it was asked to stop; killing it") {
+			before.CompareAndSwap(-1, int64(scope.Moves()))
 		}
-		before = scope.Moves()
-		return true
-	})
-	<-done
+		if strings.Contains(e.Message, "counts the open files of the processes it stops as their descriptors") {
+			uncompared.Add(1)
+		}
+		return nil
+	}))
+	stopAdopted(logger, nil, scope)
 	if parentIs(churn, os.Getpid()) {
 		t.Fatal("the churning daemon outlived its stop")
 	}
-	if before > 1 {
-		t.Fatalf("a daemon that only churned moved the run's teardown %d times before its kill", before)
+	switch n, said := before.Load(), uncompared.Load(); {
+	case n < 0:
+		t.Fatal("the stop did not kill the churning daemon on its stall")
+	case said > 1:
+		t.Fatalf("the stop said %d times that it counts the daemon's descriptors; want once", said)
+	case (refused != 0) != (said == 1):
+		t.Fatalf("the kernel's answer to a comparison of the daemon's files was %v, and the stop said %d times that it counts its descriptors; want once where it refuses, else never", refused, said)
+	case said == 1 && os.Getenv("KEPLOY_TEST_KCMP_REQUIRED") == "1":
+		t.Fatal("KEPLOY_TEST_KCMP_REQUIRED=1, but the kernel would not compare the daemon's files: the stop counted its descriptors")
+	case said == 1 && n > 2:
+		t.Fatalf("a daemon that only churned, its descriptors counted, moved the run's teardown %d times before its kill; want at most 2", n)
+	case said == 1:
+		t.Logf("the kernel would not compare the daemon's files: the stop counted its descriptors, and moved the run's teardown %d times", n)
+	case n > 1:
+		t.Fatalf("a daemon that only churned moved the run's teardown %d times before its kill", n)
+	}
+}
+
+// deafApp is an application that does not stop when asked: a shell that
+// waits on the one it started in the background, which catches a TERM and
+// loops on, until it is killed or until the test process that started it is
+// gone (ownerEnv). It writes its pid to file ready once it runs.
+func deafApp(ready string) string {
+	return `sh -c 'trap : TERM; echo $$ > ` + ready + `; while kill -0 "$DAEMON_OWNER"; do sleep 1; done' & wait`
+}
+
+// churningDaemon is the daemon TestADaemonThatOnlyChurnsMovesNoTeardown
+// stops: it ignores the request to stop and opens and closes a file over and
+// over, with no pause, until it is killed, or until the process that started
+// it is gone (ownerEnv); it creates file $1 once it runs. No child of
+// its own: one that ended would be a step (a process of it gone).
+const churningDaemon = `trap '' TERM; : > "$1"; while kill -0 "$DAEMON_OWNER"; do exec 3</dev/null; exec 3<&-; done`
+
+// killedDirEnv names the directory TestOwnProcessKilledHelper writes in.
+const killedDirEnv = "KEPLOY_TEST_KILLED_DIR"
+
+// TestOwnProcessKilledHelper is not a test: with killedDirEnv set it is a
+// test's own process (inOwnProcess) that adopts as keploy does, starts the
+// churning daemon (churningDaemon) as TestADaemonThatOnlyChurnsMovesNoTeardown
+// does, runs an application that does not stop when asked (deafApp) as keploy
+// does, writes the pid and start time of the daemon and of the app's looping
+// shell once they run, and then waits on its input, to be killed.
+func TestOwnProcessKilledHelper(t *testing.T) {
+	dir := os.Getenv(killedDirEnv)
+	if dir == "" {
+		t.Skip("a process of TestADaemonEndsWithTheProcessThatStartedIt")
+	}
+	if !inOwnProcess(t) {
+		return
+	}
+	stop, err := startAdopting(zap.NewNop())
+	if err != nil {
+		t.Fatalf("startAdopting: %v", err)
+	}
+	defer stop()
+	ready := filepath.Join(dir, "ready")
+	pid := daemonize(t, churningDaemon, ready)
+	await(t, "the daemon ready", func() bool { _, err := os.Stat(ready); return err == nil })
+	p, ok := utils.ProcOf(pid)
+	if !ok {
+		t.Fatalf("the daemon (%d) was gone once it ran", pid)
+	}
+	appReady := filepath.Join(dir, "app")
+	client := newRunClient(deafApp(appReady))
+	ran := make(chan struct{})
+	go func() {
+		defer close(ran)
+		_ = client.Run(context.Background(), models.RunOptions{})
+	}()
+	var b []byte
+	for {
+		if b, err = os.ReadFile(appReady); err == nil && bytes.HasSuffix(b, []byte("\n")) {
+			break
+		}
+		select {
+		case <-ran:
+			t.Fatal("the run ended before its app wrote its pid")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	appPid, err := strconv.Atoi(string(bytes.TrimSpace(b)))
+	if err != nil {
+		t.Fatalf("the app wrote %q, not its pid", b)
+	}
+	a, ok := utils.ProcOf(appPid)
+	if !ok {
+		t.Fatalf("the app (%d) was gone once it ran", appPid)
+	}
+	// Written whole, then named: the test reads none half written.
+	said := filepath.Join(dir, "daemon")
+	if err := os.WriteFile(said+".tmp", fmt.Appendf(nil, "%d %d %d %d\n", p.PID, p.Start, a.PID, a.Start), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(said+".tmp", said); err != nil {
+		t.Fatal(err)
+	}
+	// Until it is killed. Should the test that started it end first, its
+	// input ends with it, and its cleanups kill the daemon.
+	_, _ = io.Copy(io.Discard, os.Stdin)
+}
+
+// A daemon a test starts, and an application keploy runs for it, end with the
+// test process that started them, however that process ends. A test's own
+// process (inOwnProcess) ends on a SIGKILL, its parent-death signal, as the
+// test binary ends, whatever ended it: a TERM from a job's stop on a CI or
+// test machine, which the binary does not wait out, or its timeout. So
+// killed, it runs none of its cleanups (daemonize's kill of the daemon, the
+// kill of what it still runs), and the churning daemon, which ignores a TERM
+// and loops with no pause, was left spinning a CPU, until it was killed by
+// hand; an app that does not stop when asked was left looping too.
+func TestADaemonEndsWithTheProcessThatStartedIt(t *testing.T) {
+	if err := goUsesPidfds(); err != nil {
+		t.Skipf("keploy adopts nothing here: %v", err)
+	}
+	dir := t.TempDir()
+	out, err := os.Create(filepath.Join(dir, "out"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = out.Close() })
+	cmd := exec.Command(os.Args[0], "-test.run=^TestOwnProcessKilledHelper$", "-test.v", "-test.count=1")
+	cmd.Env = append(os.Environ(), adoptHelperEnv+"=TestOwnProcessKilledHelper", killedDirEnv+"="+dir)
+	cmd.Stdout, cmd.Stderr = out, out
+	in, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	var waitErr error
+	ended := make(chan struct{})
+	go func() {
+		waitErr = cmd.Wait()
+		close(ended)
+	}()
+	// Should the test fail before its kill, the helper's input ends: it
+	// runs its cleanups, and the test waits for its end.
+	t.Cleanup(func() {
+		_ = in.Close()
+		<-ended
+	})
+	var b []byte
+	for {
+		if b, err = os.ReadFile(filepath.Join(dir, "daemon")); err == nil {
+			break
+		}
+		select {
+		case <-ended:
+			said, _ := os.ReadFile(out.Name())
+			t.Fatalf("the helper ended (%v) before it said its daemon:\n%s", waitErr, said)
+		case <-time.After(time.Millisecond):
+		}
+	}
+	var p, a utils.Reached
+	if _, err := fmt.Sscanf(string(b), "%d %d %d %d", &p.PID, &p.Start, &a.PID, &a.Start); err != nil {
+		t.Fatalf("the helper said %q, not two pids and starts", b)
+	}
+	for _, q := range []utils.Reached{p, a} {
+		t.Cleanup(func() {
+			if now, ok := utils.ProcOf(q.PID); ok && now == q {
+				_ = syscall.Kill(q.PID, syscall.SIGKILL)
+			}
+		})
+	}
+	if err := cmd.Process.Signal(syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	<-ended
+	for _, q := range []struct {
+		what string
+		p    utils.Reached
+	}{{"the churning daemon", p}, {"the app that does not stop when asked", a}} {
+		await(t, "the end of "+q.what+", the process that started it killed", func() bool {
+			now, ok := utils.ProcOf(q.p.PID)
+			return !ok || now != q.p
+		})
 	}
 }
 
@@ -911,7 +1119,7 @@ func TestAChildADaemonForksOnItsWayOutIsSaidLeftRunning(t *testing.T) {
 	script := filepath.Join(dir, "d.sh")
 	if err := os.WriteFile(script, []byte(`trap 'sh -c "echo \$\$ > $1; exec sleep 300" & sleep 0.3; exit 0' TERM
 : > "$1.ready"
-while :; do sleep 0.05; done
+while kill -0 "$DAEMON_OWNER"; do sleep 0.05; done
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -996,8 +1204,14 @@ func TestAStopsReadNeverMissesADaemonWhileOthersAreReaped(t *testing.T) {
 	me := os.Getpid()
 	// Spawners whose children are orphaned to this process and exit soon
 	// after, reaped by its reaper.
+	var spawners []utils.Reached
 	for i := 0; i < 3; i++ {
-		daemonize(t, `while :; do (sleep 0.02 &); (sleep 0.04 &); sleep 0.004; done`)
+		pid := daemonize(t, `while kill -0 "$DAEMON_OWNER"; do (sleep 0.02 &); (sleep 0.04 &); sleep 0.004; done`)
+		p, ok := utils.ProcOf(pid)
+		if !ok {
+			t.Fatalf("spawner %d ended as it started", pid)
+		}
+		spawners = append(spawners, p)
 	}
 	var live []int
 	t.Cleanup(func() {
@@ -1046,6 +1260,14 @@ func TestAStopsReadNeverMissesADaemonWhileOthersAreReaped(t *testing.T) {
 	}
 	if misses > 0 {
 		t.Fatalf("%d of %d reads missed a daemon that was keploy's child for the whole read (%d daemons in all): a stop that read its daemons then would neither stop it nor say it left it running", misses, reads, len(missed))
+	}
+	// Each spawner still running as this process's child (its pid not
+	// reused) ran for every read: none of the reads went without the reaps
+	// they race.
+	for _, p := range spawners {
+		if now, ok := utils.ProcOf(p.PID); !ok || now != p || !parentIs(p.PID, me) {
+			t.Fatalf("spawner %d ended before the reads did: the reads after it raced no reap of its orphans", p.PID)
+		}
 	}
 }
 
@@ -1127,7 +1349,7 @@ func TestAReadOfTheChildrenSettlesOrSaysItCannotTell(t *testing.T) {
 
 // The scan of /proc reads each listed process's stat: one that is gone by
 // then (its directory, or its stat, no longer there; a task being reaped,
-// state X, or Z with its parent and group gone) is no child; one that is
+// state X, or its parent and group gone, in any state) is no child; one that is
 // this process's child, a zombie or not, is, and one whose stat says Z is a
 // zombie only where none of its threads runs (its main thread may have
 // exited while another runs on); a stat that cannot be read otherwise is the
@@ -1176,6 +1398,14 @@ func TestTheScanOfProcSaysWhatItCouldNotRead(t *testing.T) {
 		t.Fatal(err)
 	}
 	stat(111, fmt.Sprintf(released, 111))
+	// A process released between the kernel's read of its state and of its
+	// parent and group: it still reads as running, sleeping or on storage
+	// (the first as a box read one, PF_EXITING set).
+	stat(113, "113 (update-ca-certi) R 0 -1 -1 0 -1 4227404 3601 67036 0 0 0 6 52 11 20 0 0 0 7217377 2748416 196 0 1 1 0 0\n")
+	stat(114, "114 (sh) S 0 -1 -1 0 -1 4227404 100 0 0 0 0 0 0 0 20 0 1 0 7217378 0 0\n")
+	stat(115, "115 (sh) D 0 -1 -1 0 -1 4227404 100 0 0 0 0 0 0 0 20 0 1 0 7217379 0 0\n")
+	// The line keploy#4999's CI read, as the reap race row reaped a sleep.
+	stat(33119, "33119 (sleep) S 0 -1 -1 0 -1 4227084 87 0 0 0 0 0 0 0 20 0 0 0 51682 0 0 0 0 0 0 0 0 0 0 0 0 1 0 0 17 3 0 0 0 0 0 0 0 0 0 0 0 0 0\n")
 	if err := os.MkdirAll(filepath.Join(root, "104"), 0o755); err != nil { // gone: no stat
 		t.Fatal(err)
 	}
@@ -1282,6 +1512,97 @@ func TestAStopWhoseReadNeverSettlesSaysItCannotTell(t *testing.T) {
 	}
 }
 
+// A stop of the daemons whose first look compared their files, and whose
+// later looks could not (a daemon ran a program keploy's user may not read,
+// or changed its credentials), says that it counts descriptors at the first
+// of those later looks, naming the daemon, and not again at the next, as the
+// app's own stop does (utils' TestAStopSaysItCountsDescriptorsFromTheLookThatDid).
+func TestTheDaemonsStopSaysItCountsDescriptorsFromTheLookThatDid(t *testing.T) {
+	if !inOwnProcess(t) {
+		return
+	}
+	stop, err := startAdopting(zap.NewNop())
+	if err != nil {
+		t.Fatalf("startAdopting: %v", err)
+	}
+	defer stop()
+	stopCheck, stopStallChecks = 20*time.Millisecond, 50
+	dir := t.TempDir()
+	ready, release := filepath.Join(dir, "ready"), filepath.Join(dir, "release")
+	if err := unix.Mkfifo(release, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Held open by the test, so the daemon's open of it never blocks, and
+	// its read ends at the test's write, or at EOF once the test is gone.
+	fifo, err := os.OpenFile(release, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = fifo.Close() })
+	// On TERM it waits for the test (a builtin's read: it starts nothing
+	// the stop would read as the daemon's), then exits.
+	pid := daemonize(t, `trap 'read x <"$2"; exit 0' TERM; : > "$1"; while kill -0 "$DAEMON_OWNER"; do sleep 0.05; done`, ready, release)
+	await(t, "the daemon adopted", func() bool { return parentIs(pid, os.Getpid()) })
+	await(t, "the daemon ready", func() bool { _, err := os.Stat(ready); return err == nil })
+	// Each descriptor is a file of its own, until the kernel refuses.
+	compared := func(_, a, b int) (int, error) {
+		switch {
+		case a < b:
+			return 1, nil
+		case a > b:
+			return 2, nil
+		}
+		return 0, nil
+	}
+	refused := func(int, int, int) (int, error) { return 0, syscall.EPERM }
+	t.Cleanup(utils.SetFilesComparedForTest(compared))
+	var said atomic.Int64
+	core, logs := observer.New(zapcore.InfoLevel)
+	logger := zap.New(core, zap.Hooks(func(e zapcore.Entry) error {
+		if strings.Contains(e.Message, "counts the open files of the processes it stops as their descriptors") {
+			said.Add(1)
+		}
+		return nil
+	}))
+	// The stop's first look compares; the kernel refuses from the loop's
+	// first look on, and the daemon exits once the loop has looked twice.
+	// Each count is taken as the loop is about to look again: what the
+	// looks before said.
+	var looks atomic.Int32
+	atFirst, atSecond := atomic.Int64{}, atomic.Int64{}
+	looked := func() {
+		switch looks.Add(1) {
+		case 1:
+			atFirst.Store(said.Load())
+			utils.SetFilesComparedForTest(refused)
+		case 2:
+			atSecond.Store(said.Load())
+			_, _ = fifo.WriteString("go\n")
+		}
+	}
+	stopLooked.Store(&looked)
+	defer stopLooked.Store(nil)
+	if _, left := stopAdopted(logger, nil, nil); left != "" {
+		t.Fatalf("left %q; want nothing: the daemon exited", left)
+	}
+	if parentIs(pid, os.Getpid()) {
+		t.Fatalf("premise: daemon %d was not stopped", pid)
+	}
+	if n := looks.Load(); n < 2 {
+		t.Fatalf("the stop looked %d times after its first look; want 2", n)
+	}
+	if n := atFirst.Load(); n != 0 {
+		t.Fatalf("a stop whose first look compared the daemon's files said %d times that it counts descriptors; want never", n)
+	}
+	if n := atSecond.Load(); n != 1 {
+		t.Fatalf("a stop whose look counted the daemon's descriptors had said so %d times by its next look; want once, at that look", n)
+	}
+	if all := logs.FilterMessageSnippet("as their descriptors").All(); len(all) != 1 ||
+		!strings.Contains(fmt.Sprint(all[0].ContextMap()["error"]), "process "+strconv.Itoa(pid)+"'s descriptors: operation not permitted") {
+		t.Fatalf("a stop whose later looks counted the daemon's descriptors said so %d times (%v); want once, naming daemon %d and why", len(all), all, pid)
+	}
+}
+
 // A stop whose second read, once its daemons are stopped, cannot tell its
 // own children from what they started on their way out (its fds unreadable
 // by then) says so: what the daemons started may run on.
@@ -1297,7 +1618,7 @@ func TestAStopThatCannotTellItsOwnOnceItsDaemonsStoppedSaysSo(t *testing.T) {
 	stopCheck, stopStallChecks = 20*time.Millisecond, 50
 	ready := filepath.Join(t.TempDir(), "ready")
 	// Its way out takes a few of the stop's checks.
-	pid := daemonize(t, `trap 'sleep 0.3; exit 0' TERM; : > "$1"; while :; do sleep 0.05; done`, ready)
+	pid := daemonize(t, `trap 'sleep 0.3; exit 0' TERM; : > "$1"; while kill -0 "$DAEMON_OWNER"; do sleep 0.05; done`, ready)
 	await(t, "the daemon ready", func() bool { _, err := os.Stat(ready); return err == nil })
 	var restore func()
 	looked := func() {

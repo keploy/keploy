@@ -2,6 +2,7 @@ package models
 
 import (
 	"errors"
+	"slices"
 	"strings"
 	"time"
 )
@@ -471,6 +472,28 @@ type MatchedCall struct {
 	Summary  string `json:"summary,omitempty" yaml:"summary,omitempty"`   // e.g. "GET /posts?id=1", "DNS dep-service", "MongoDB find"
 }
 
+// FieldReason is a field a replay refused a call in, as a reason names it
+// (no part that may be a value: FieldShape), and why it refused it, which
+// names no value either (MockMismatchReport.FieldReasons).
+type FieldReason struct {
+	Field string `json:"field" yaml:"field"`
+	Why   string `json:"why" yaml:"why"`
+}
+
+// FieldReasonShapes are rs whose field is its own shape (FieldShape), once
+// each, for a reason that names them: a reason of a field that may name a
+// value is left out, as its why may quote that field.
+func FieldReasonShapes(rs []FieldReason) []FieldReason {
+	var out []FieldReason
+	for _, r := range rs {
+		if r.Field == "" || r.Why == "" || FieldShape(r.Field) != r.Field || slices.Contains(out, r) {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
 // UnmatchedCall represents an outgoing call during replay that had no matching mock.
 type UnmatchedCall struct {
 	Protocol      string `json:"protocol" yaml:"protocol"`
@@ -508,6 +531,9 @@ type UnmatchedCall struct {
 	// VariablePlaces mirrors MockMismatchReport.VariablePlaces: the URL path
 	// places of a test variable on this call, under the proven switch only.
 	VariablePlaces []string `json:"variable_places,omitempty" yaml:"variable_places,omitempty"`
+	// Given mirrors MockMismatchReport.Given: the given a variable miss is
+	// about, by its name, never its value.
+	Given string `json:"given,omitempty" yaml:"given,omitempty"`
 	// At is when the call missed, so a client can tell which test made it.
 	At time.Time `json:"at,omitzero" yaml:"at,omitempty"`
 	// Kind is where the call was made, under the proven switch (MissInTest,
@@ -521,9 +547,21 @@ type UnmatchedCall struct {
 	// no test's: the replay fails the set with it, naming the call, and
 	// charges no test (the read of the set's first test carries it).
 	BeforeSet bool `json:"before_set,omitempty" yaml:"before_set,omitempty"`
+	// ChargedTo names, under the proven switch, the test whose end charged
+	// the call to it: the call counts against that test (CountsAgainstTest)
+	// and that test's evidence lists it. Empty for a call no test was
+	// charged with: one made before the test process claimed the run, one
+	// outside every test that no test's end read (after the last test's,
+	// say), and every call without the switch. keploy mock's receipt lists
+	// those of them that count against a test (Receipt.UnchargedMisses).
+	ChargedTo string `json:"charged_to,omitempty" yaml:"charged_to,omitempty"`
 	// Differs mirrors MockMismatchReport.Differs: the names of the fields in
 	// which the call differs from its closest recording, without values.
 	Differs []string `json:"differs,omitempty" yaml:"differs,omitempty"`
+	// FieldReasons mirrors MockMismatchReport.FieldReasons: of the fields
+	// in Differs, those a replay refused for a reason of its own, and why,
+	// without values.
+	FieldReasons []FieldReason `json:"field_reasons,omitempty" yaml:"field_reasons,omitempty"`
 	// NotOwned mirrors MockMismatchReport.NotOwned: the call is ClosestMock,
 	// a recording the test does not own.
 	NotOwned bool `json:"not_owned,omitempty" yaml:"not_owned,omitempty"`
@@ -763,6 +801,16 @@ type MockOutcome struct {
 	// counts" (an older agent, or hooks without PID maps), which a nil
 	// PIDMapRefusals alone cannot.
 	PIDMapRefusalsError string `json:"pidMapRefusalsError,omitempty"`
+	// Settled says that, under the proven switch, the agent finished its end
+	// of the run (its hooks' AfterTestRun) before it read this account, as
+	// the CLI has it do where it can still reach the agent: an enterprise
+	// agent then writes the row of each process of the run it saw off the
+	// run's clock, the last test's among them. SettleError is why it could
+	// not. A CLI under the switch reads an account without Settled (an agent
+	// that failed it, or an older one) as a run the agent did not finish,
+	// and does not judge it. Without the switch neither is set.
+	Settled     bool   `json:"settled,omitempty"`
+	SettleError string `json:"settleError,omitempty"`
 }
 
 // MockSummaryFromSpec builds a protocol-generic summary string from a mock's spec.

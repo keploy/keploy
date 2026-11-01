@@ -109,6 +109,14 @@ type App struct {
 	// made once those containers are gone (the stale-agent probe before the
 	// next up).
 	composeProjectSeen atomic.Pointer[string]
+	// composeChildOut keeps the tails of keploy's own compose stack when it
+	// runs as a `docker compose` child (no compose library in this build):
+	// the last Up's, set before its child starts (composeChildTee), and
+	// dropped with the document it ran (setComposeSource).
+	composeChildOut atomic.Pointer[docker.ComposeChildOutput]
+	// composeChildWarned: composeChildTee has said that it keeps none of the
+	// document's output; once per document, reset with it (setComposeSource).
+	composeChildWarned atomic.Bool
 	// teardown is the teardown scope of the run that set the app up or ran
 	// it last (utils.TeardownScopeOf of Setup's or Run's context): each step
 	// keploy sees its stop take -- the app's processes or container on
@@ -516,35 +524,92 @@ func (a *App) RecentLogs(ctx context.Context) string {
 }
 
 func (a *App) waitTillExit() {
-	// Bounded overall (waitTillExitBudget) AND per-inspect (dockerInspectBudget)
-	// so a saturated daemon can't wedge this on the teardown goroutine — an
-	// unbounded ContainerInspect here would also block the select so even the
-	// overall timeout couldn't fire. Only reached on the non-compose docker path.
-	timeout := time.NewTimer(waitTillExitBudget)
+	// Bounded overall (waitTillExitBudget), its reads of the container
+	// included, so a saturated daemon can't wedge this on the teardown
+	// goroutine. Each read asks the daemon again when it fails, until it
+	// answers or the wait's bound ends (inspectContainer): with a 2 s budget
+	// per read, a loaded daemon's slow answer ended the wait at once, the
+	// container still running. Only reached on the non-compose docker path.
+	ctx, cancel := context.WithTimeout(context.Background(), waitTillExitBudget)
+	defer cancel()
 	logTicker := time.NewTicker(1 * time.Second)
 	defer logTicker.Stop()
-	defer timeout.Stop()
 
 	containerID := a.container
 	for {
 		select {
 		case <-logTicker.C:
-			// Inspect the container status (bounded; see the note above)
-			ictx, icancel := context.WithTimeout(context.Background(), dockerInspectBudget)
-			containerJSON, err := a.docker.ContainerInspect(ictx, containerID)
-			icancel()
-			if err != nil {
-				a.logger.Debug("failed to inspect container", zap.String("containerID", containerID), zap.Error(err))
+			info, read, gone := a.inspectContainer(ctx, containerID, fmt.Sprintf("container %q (with no answer, keploy stops waiting for it to exit)", containerID))
+			if gone {
+				a.logger.Debug("the container is gone", zap.String("containerID", containerID))
+				return
+			}
+			if !read {
+				a.logger.Debug("timeout waiting for the container to stop", zap.String("containerID", containerID))
 				return
 			}
 
-			a.logger.Debug("container status", zap.String("status", containerJSON.State.Status), zap.String("containerName", a.container))
+			a.logger.Debug("container status", zap.String("status", info.State.Status), zap.String("containerName", a.container))
 			// Check if container is stopped or dead
-			if containerJSON.State.Status == "exited" || containerJSON.State.Status == "dead" {
+			if info.State.Status == "exited" || info.State.Status == "dead" {
 				return
 			}
-		case <-timeout.C:
+		case <-ctx.Done():
 			a.logger.Debug("timeout waiting for the container to stop", zap.String("containerID", containerID))
+			return
+		}
+	}
+}
+
+// composeGraceTick is the pace at which composeAppGrace looks at the app's
+// container and at compose's up: a walking pace, not a bound.
+const composeGraceTick = 500 * time.Millisecond
+
+// composeAppGrace gives the app's container keploy interrupted graceBudget to
+// exit: its coverage flush is done once it has (Go has written GOCOVERDIR,
+// Java its jacoco .exec), with no reason to keep waiting on the slower
+// sibling services. It ends early once upReturned (set) says compose's up has
+// returned, all services stopped, or the daemon says the container exited.
+// The grace is wall-clock-bounded; its reads end only on the daemon's answer
+// or the grace's end (inspectContainer): with a 2 s budget per read, a loaded
+// daemon's slow answers never came in time, and an app that had exited at
+// once was given the whole grace, and then some. The up's return ends the
+// grace while a read waits on the daemon too: it is watched beside the reads,
+// not between them, so a daemon that fails every read does not hold a grace
+// whose up has returned.
+func (a *App) composeAppGrace(upReturned func() bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), graceBudget)
+	defer cancel()
+	if upReturned != nil {
+		watched := make(chan struct{})
+		defer func() { cancel(); <-watched }()
+		go func() {
+			defer close(watched)
+			tick := time.NewTicker(composeGraceTick)
+			defer tick.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-tick.C:
+				}
+				if upReturned() {
+					a.logger.Debug("docker compose process exited")
+					cancel()
+					return
+				}
+			}
+		}()
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(composeGraceTick):
+		}
+		info, read, _ := a.inspectContainer(ctx, a.container, fmt.Sprintf("the application's container %q (with no answer, keploy gives it the rest of its grace)", a.container))
+		if read && (info.State.Status == "exited" || info.State.Status == "dead") {
+			a.logger.Debug("app container stopped gracefully; tearing down the rest of the compose stack")
 			return
 		}
 	}
@@ -556,6 +621,10 @@ func (a *App) recentAppLogs(ctx context.Context) string {
 	}
 	if ctx == nil {
 		ctx = context.Background()
+	}
+
+	if len(a.composeContent) > 0 {
+		return a.recentAppOutput()
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -602,6 +671,87 @@ func (a *App) recentAppLogs(ctx context.Context) string {
 	}
 
 	return trimRecentAppLogs(combined, 20)
+}
+
+// recentAppOutput is recentAppLogs for keploy's own compose stack (in-memory
+// compose content), in-process or run as a `docker compose` child: the app
+// container's tail as keploy took it from what compose attached to
+// (docker.ServiceOutputTail), cut, and never `docker logs`. So the stack's
+// containers need no log driver that stores what they print on the docker
+// host's disk, and the answer comes after compose has removed the container.
+// The tail is of the stack's project and of its last Up alone (one test
+// set), as `docker logs` of that Up's container was; with no stack built or
+// started, nothing ran and there is none.
+func (a *App) recentAppOutput() string {
+	project := a.composeOutputProject()
+	if project == "" {
+		return ""
+	}
+	var tail []byte
+	if a.composeService != "" {
+		tail = docker.ServiceOutputTail(project, a.composeService)
+	} else if a.container != "" {
+		tail = docker.AppOutputTail(project, a.container)
+	}
+	return trimRecentAppLogs(string(tail), 20)
+}
+
+// composeOutputProject is the compose project the tails of keploy's own
+// stack are kept under: the library's project when this build drives the
+// stack in-process, else the project of the last `docker compose` child
+// keploy started for it (composeChildTee); "" when there is none.
+func (a *App) composeOutputProject() string {
+	if a.useComposeLibrary() {
+		a.composeRunnerMu.Lock()
+		r := a.composeRunnerVal
+		a.composeRunnerMu.Unlock()
+		if r == nil {
+			return ""
+		}
+		return r.ProjectName()
+	}
+	return a.composeChildOut.Load().Project()
+}
+
+// executeCommand runs runCmd once as a child process (utils.ExecuteCommand),
+// with keploy's own compose document on its stdin when there is one, and that
+// document's containers' output kept in their tails (composeChildTee).
+func (a *App) executeCommand(ctx context.Context, runCmd string, runEnv []string, cancel func(*exec.Cmd) func() error) utils.CmdError {
+	return utils.ExecuteCommand(ctx, a.logger, runCmd, a.kind, cancel, 25*time.Second, a.composeContent, runEnv, a.composeChildTee(ctx)...)
+}
+
+// composeChildTee is the output tee for the `docker compose` child that runs
+// keploy's own compose stack in a build without the compose library: it
+// starts a new run of the project's tails (one per Up, as the library's Up
+// does) and keeps each container's lines there, cut, from what compose prints
+// (docker.ComposeChildOutput). The project is the one the child's compose
+// takes: the command's -p, else its COMPOSE_PROJECT_NAME assignment, else
+// keploy's environment or an env file's (the command's --env-file, else the
+// project's .env), the document's name: or the project directory's name. None
+// for any other command, which keeps `docker logs`; and none when keploy's
+// loader cannot load the document (the library path refuses it alike), when
+// the app's recent output is then empty, said once per document. The loader
+// sees keploy's environment and the env files compose reads, not what only
+// the shell gives the child: an assignment in the command (`DB_PASS=x docker
+// compose up`) or a flag value the shell expands (`--env-file $HOME/x.env`).
+func (a *App) composeChildTee(ctx context.Context) []utils.ExecOption {
+	if len(a.composeContent) == 0 || a.useComposeLibrary() {
+		return nil
+	}
+	projectName, projectDir := composeProjectScope(a.cmd)
+	if projectName == "" {
+		projectName = normalizeComposeProjectName(composeProjectEnvAssignment(a.cmd))
+	}
+	out, err := docker.StartComposeChildOutput(ctx, a.composeContent, projectName, projectDir, composeEnvFiles(a.cmd))
+	a.composeChildOut.Store(out)
+	if err != nil {
+		if a.composeChildWarned.CompareAndSwap(false, true) {
+			a.logger.Warn("keploy could not load the compose document it runs, so it keeps none of its containers' output, and an app crash will show no recent output. Keploy reads its own environment and the env files compose reads (--env-file, COMPOSE_ENV_FILES, the project's .env), not an assignment in the command (DB_PASS=x docker compose up) or a flag value the shell expands: export such a variable or put it in an env file, and write an --env-file path out in full",
+				zap.Error(err))
+		}
+		return nil
+	}
+	return []utils.ExecOption{utils.WithOutputTee(out.Stream)}
 }
 
 func (a *App) logTargetContainer(ctx context.Context) string {
@@ -869,9 +1019,10 @@ var composeDownStall = stall.HangBudget
 // container, or on keploy's agent's; else the project compose itself takes,
 // as the compose command names it (-p), or as COMPOSE_PROJECT_NAME does, set
 // in the command (which only the shell a `docker compose` command runs in
-// reads) or in keploy's environment; "" when none tells it. Each inspect has
-// its own bound (dockerInspectBudget): one a saturated daemon took the whole
-// of does not leave the next none.
+// reads) or in keploy's environment; "" when none tells it. Each label is
+// read on the daemon's answer, however slow (composeProjectLabelAnswered):
+// with a 2 s budget, a loaded daemon's slow reads named no project, and the
+// down took the one compose takes from the cwd, a stack the user runs.
 func (a *App) composeDownProject(ctx context.Context) string {
 	if a.useComposeLibrary() {
 		a.composeRunnerMu.Lock()
@@ -883,14 +1034,11 @@ func (a *App) composeDownProject(ctx context.Context) string {
 			}
 		}
 	}
-	appCtx, appCancel := context.WithTimeout(ctx, dockerInspectBudget)
-	defer appCancel()
-	if p := a.composeProjectLabel(appCtx); p != "" {
+	const unanswered = "keploy names the project by what the command says"
+	if p := a.composeProjectLabelAnswered(ctx, a.container, unanswered); p != "" {
 		return p
 	}
-	agentCtx, agentCancel := context.WithTimeout(ctx, dockerInspectBudget)
-	defer agentCancel()
-	if p := a.composeProjectLabelOf(agentCtx, a.keployContainer); p != "" {
+	if p := a.composeProjectLabelAnswered(ctx, a.keployContainer, unanswered); p != "" {
 		return p
 	}
 	// Read off the labels by an earlier down, when the containers that bore
@@ -943,13 +1091,19 @@ func composeProjectEnvAssignment(cmd string) string {
 	return ""
 }
 
-// composeProjectLabelOf is the compose project label on container name, ""
-// when it has none or cannot be read.
-func (a *App) composeProjectLabelOf(ctx context.Context, name string) string {
+// composeProjectLabelAnswered is the compose project label on container
+// name, as the daemon says it: asked again when a read fails (askDaemon),
+// until the daemon answers, says it has no such container, ctx ends, or
+// keploy's runnable-time bound on no answer passes. "" when it has none, or
+// the daemon never said; unanswered, in the log, says what keploy then does.
+func (a *App) composeProjectLabelAnswered(ctx context.Context, name, unanswered string) string {
 	if name == "" {
 		return ""
 	}
-	info, err := a.docker.ContainerInspect(ctx, name)
+	info, err := askDaemon(ctx, a.logger, fmt.Sprintf("the compose project label of container %q (with no answer, %s)", name, unanswered),
+		func(ctx context.Context) (container.InspectResponse, error) {
+			return a.docker.ContainerInspect(ctx, name)
+		})
 	if err != nil || info.Config == nil {
 		return ""
 	}
@@ -1156,6 +1310,8 @@ func (a *App) setComposeSource(file string, content []byte, compose *docker.Comp
 	a.composeRunnerMu.Lock()
 	a.composeRunnerVal = nil
 	a.composeRunnerMu.Unlock()
+	a.composeChildOut.Store(nil)
+	a.composeChildWarned.Store(false)
 }
 
 // composeServiceNames returns the service keys of a parsed compose document.
@@ -1293,12 +1449,12 @@ func (a *App) forceRemoveContainers(ids []string) {
 // its own, at the down's end or at keploy's cut of a down that made no
 // progress (composeDownStall). The docker calls around it are each bounded,
 // so the rest of a compose teardown (run()'s cmdCancel) returns well inside
-// 30s even when the daemon is saturated: the grace loop (graceBudget + up to
-// one last-iteration overshoot of sleep+inspect ≈ 2.5s, since the deadline is
-// checked at the loop top), and, once the down ends, 2×forceRemoveBudget +
-// 2×projectSweepBudget + reapBarrierBudget + projectSweepBudget (the network
-// sweep) ≈ (5+2.5) + 2×2 + 2×2 + 3 + 2 ≈ 20.5s with every single call timed
-// out, the drain's bound starting again at the down's end. The margin
+// 30s even when the daemon is saturated: the grace loop (graceBudget, its
+// reads of the app's container included: composeAppGrace), and, once the
+// down ends, 2×forceRemoveBudget + 2×projectSweepBudget + reapBarrierBudget +
+// projectSweepBudget (the network sweep) ≈ 5 + 2×2 + 2×2 + 3 + 2 ≈ 18s with
+// every single call timed out, the drain's bound starting again at the down's
+// end. The margin
 // matters more than it looks: reaching the SIGKILL is not the end of the
 // drain — os/exec only starts its WaitDelay once Cancel returns, and
 // record.go gates the post-record mock rewrite on the drain NOT having timed
@@ -1306,7 +1462,7 @@ func (a *App) forceRemoveContainers(ids []string) {
 //
 // The sweeps' downSucceeded gate buys nothing here, and it is worth being
 // explicit about that rather than counting it twice: a daemon slow enough to
-// time out the grace inspect and both force-removes is a daemon whose down
+// leave the grace's reads unanswered and time out both force-removes is a daemon whose down
 // has likely failed, so in the worst case the gate is open. It exists to keep
 // the sweeps off the HEALTHY path, not to bound the bad one; waitTillExit is
 // then skipped on the compose path and the ctx-cancelled run returns before
@@ -1321,12 +1477,11 @@ const (
 	// cut-short `down` did not reach: the `compose ps` that lists its
 	// containers, the single `docker rm -f` that removes them, and the network
 	// sweep's list and removals.
-	projectSweepBudget  = 2 * time.Second
-	forceRemoveBudget   = 2 * time.Second // each `docker rm -f` in the teardown drain path
-	reapBarrierBudget   = 3 * time.Second // waitContainersRemoved poll
-	graceBudget         = 5 * time.Second // cmdCancel coverage-flush grace
-	waitTillExitBudget  = 8 * time.Second // non-compose post-cancel container wait
-	dockerInspectBudget = 2 * time.Second // any single teardown ContainerInspect
+	projectSweepBudget = 2 * time.Second
+	forceRemoveBudget  = 2 * time.Second // each `docker rm -f` in the teardown drain path
+	reapBarrierBudget  = 3 * time.Second // waitContainersRemoved poll
+	graceBudget        = 5 * time.Second // cmdCancel coverage-flush grace
+	waitTillExitBudget = 8 * time.Second // non-compose post-cancel container wait
 	// preRunRemoveBudget bounds the startup-time force-remove of a leftover
 	// --name container before a docker-run. Unlike the teardown force-remove it
 	// is NOT in the SIGINT drain path, so under a SATURATED docker daemon it
@@ -1555,8 +1710,14 @@ func (a *App) composeAgentContainerIDs(ctx context.Context) []string {
 // shell-out, which is what keploy did before the library existed and is always
 // available on a laptop.
 func (a *App) useComposeLibrary() bool {
-	return len(a.composeContent) > 0 && docker.ComposeLibrarySupported
+	return len(a.composeContent) > 0 && composeLibrarySupported
 }
+
+// composeLibrarySupported is docker.ComposeLibrarySupported. It is a variable
+// only so a row can take the library path's decisions (recentAppLogs reading
+// the attach tail) in a build without -tags composelib, which is how OSS CI
+// builds; production never sets it.
+var composeLibrarySupported = docker.ComposeLibrarySupported
 
 // parseComposePSIDs extracts the container ids from `docker compose ps -aq`
 // output: one id per line, ignoring blank lines and surrounding whitespace.
@@ -2239,29 +2400,9 @@ func (a *App) run(ctx context.Context) models.AppError {
 				// up` returns promptly instead of blocking on the slow agent. The
 				// run()-deferred ComposeDown then becomes an idempotent no-op.
 				if a.kind == utils.DockerCompose {
-					// Wall-clock-bounded grace (not iteration×inspect): a saturated
-					// daemon must not let the per-tick inspect sum past the teardown
-					// budget. Break as soon as the compose process or the app
-					// container has exited (coverage flush done).
-					graceDeadline := time.Now().Add(graceBudget)
-					for time.Now().Before(graceDeadline) {
-						time.Sleep(500 * time.Millisecond)
-						// `docker compose up` already returned (all services stopped).
-						if err := cmd.Process.Signal(syscall.Signal(0)); err != nil {
-							a.logger.Debug("docker compose process exited")
-							break
-						}
-						// App container has exited -> its coverage flush is done; no
-						// need to keep waiting on the slower sibling services. Bound the
-						// inspect so a saturated daemon can't stall the grace loop.
-						ictx, icancel := context.WithTimeout(context.Background(), dockerInspectBudget)
-						info, ierr := a.docker.ContainerInspect(ictx, a.container)
-						icancel()
-						if ierr == nil && (info.State.Status == "exited" || info.State.Status == "dead") {
-							a.logger.Debug("app container stopped gracefully; tearing down the rest of the compose stack")
-							break
-						}
-					}
+					// A grace bounded by the wall clock, its reads by the
+					// daemon's answers (composeAppGrace).
+					a.composeAppGrace(func() bool { return cmd.Process.Signal(syscall.Signal(0)) != nil })
 					composeDown()
 					return utils.SendSignal(a.logger, -cmd.Process.Pid, syscall.SIGKILL)
 				}
@@ -2316,7 +2457,7 @@ func (a *App) run(ctx context.Context) models.AppError {
 		if a.useComposeLibrary() {
 			return a.runComposeInProcess(ctx, composeDown)
 		}
-		return utils.ExecuteCommand(ctx, a.logger, runCmd, a.kind, cmdCancel, 25*time.Second, a.composeContent, runEnv)
+		return a.executeCommand(ctx, runCmd, runEnv, cmdCancel)
 	}
 
 	var err error
@@ -2527,17 +2668,16 @@ func composeCommand(ctx context.Context, args ...string) *exec.Cmd {
 // app; so is a kill that failed other than for a container it saw gone or
 // stopped.
 func (a *App) stopDockerRun(cmd *exec.Cmd, setEnd bool) (killed bool, err error) {
-	// seen: an inspect in this stop found the container.
+	// seen: an inspect in this stop found the container. Each read asks the
+	// daemon again when it fails, until it answers or ctx (the grace, in it)
+	// ends (inspectContainer): with a 2 s budget per read, a loaded daemon's
+	// slow answers never came within the grace, and a container that had
+	// exited at once was killed, the kill said.
 	seen := false
-	gone := func() bool {
-		ictx, icancel := context.WithTimeout(context.Background(), dockerInspectBudget)
-		info, err := a.docker.ContainerInspect(ictx, a.container)
-		icancel()
-		if err != nil {
-			return setEnd && seen && errdefs.IsNotFound(err)
-		}
-		if info.ContainerJSONBase == nil || info.State == nil {
-			return false
+	gone := func(ctx context.Context) bool {
+		info, read, notFound := a.inspectContainer(ctx, a.container, fmt.Sprintf("the application's container %q (with no answer, keploy takes it for one still running)", a.container))
+		if !read {
+			return setEnd && seen && notFound
 		}
 		seen = true
 		switch info.State.Status {
@@ -2548,9 +2688,15 @@ func (a *App) stopDockerRun(cmd *exec.Cmd, setEnd bool) (killed bool, err error)
 		}
 		return false
 	}
-	graceDeadline := time.Now().Add(graceBudget)
-	for time.Now().Before(graceDeadline) {
-		time.Sleep(1 * time.Second)
+	grace, graceCancel := context.WithTimeout(context.Background(), graceBudget)
+	defer graceCancel()
+graceLoop:
+	for {
+		select {
+		case <-grace.Done():
+			break graceLoop
+		case <-time.After(1 * time.Second):
+		}
 
 		// Check if the 'docker run' command has exited
 		if err := cmd.Process.Signal(syscall.Signal(0)); err != nil {
@@ -2560,13 +2706,12 @@ func (a *App) stopDockerRun(cmd *exec.Cmd, setEnd bool) (killed bool, err error)
 
 		// Check the actual container status via Docker API
 		// This handles cases where 'docker run' is dead but container is alive.
-		// Bound the inspect so a saturated daemon can't stall the grace loop.
-		if gone() {
+		if gone(grace) {
 			a.logger.Debug("container stopped gracefully")
 			return false, nil
 		}
 	}
-	if setEnd && gone() {
+	if setEnd && gone(context.Background()) {
 		a.logger.Debug("container stopped gracefully")
 		return false, nil
 	}

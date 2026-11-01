@@ -76,6 +76,10 @@ type replayCase struct {
 	// losses: the agent counts what it could not capture (GET
 	// /agent/capturelosses).
 	losses *lossCounter
+	// captured: the calls the agent captured on miss (--on-miss record),
+	// which the mock store refuses with insertErr when it is set.
+	captured  []*models.Mock
+	insertErr error
 }
 
 // replayIn runs one replay against a real keploy/ directory in a temp repo
@@ -141,7 +145,13 @@ func replayIn(t *testing.T, c replayCase) (string, int, *observer.ObservedLogs) 
 	if c.losses != nil {
 		run = lossReplayInstr{instr, c.losses}
 	}
+	if c.captured != nil {
+		run = missCaptureInstr{instr, c.captured}
+	}
 	var store MockDB = stubMockDB{}
+	if c.insertErr != nil {
+		store = refusingMockDB{err: c.insertErr}
+	}
 	if c.mapped && provenswitch.On() {
 		// Under the switch the mapping must name mocks the recording has.
 		store = named("mock-0")
@@ -922,8 +932,10 @@ func TestCountTests(t *testing.T) {
 		{Name: "d", Outcome: models.ScopeOutcomeGated},
 		{Name: "e"},
 		{Name: "f", Outcome: "flaky"},
+		{Name: "g", Outcome: models.ScopeOutcomeUnmet},
 	}, "not yet proven")
-	require.Equal(t, &TestCounts{Passed: 1, Failed: 1, Skipped: 1, Gated: 1, GateReason: "not yet proven", NoVerdict: 2}, got)
+	// A test whose need was not met was told not to run, as a gated one.
+	require.Equal(t, &TestCounts{Passed: 1, Failed: 1, Skipped: 1, Gated: 2, GateReason: "not yet proven", NoVerdict: 2}, got)
 	require.Empty(t, countTests([]TestReceipt{{Name: "a", Outcome: models.ScopeOutcomePassed}}, "unused").GateReason,
 		"a reason is recorded only when something was gated")
 }

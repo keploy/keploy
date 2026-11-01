@@ -2,15 +2,20 @@ package http
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/netip"
+	"regexp"
+	"slices"
 	"sort"
 	"strings"
+	"sync/atomic"
 
 	"go.keploy.io/server/v3/pkg/agent/containerkey"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mismatch"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap"
 )
 
 // Strict HTTP matching under the proven switch (design v14 row S1; §9's
@@ -212,15 +217,27 @@ func sameDestinationMocks(live destination, mocks []*models.Mock) []*models.Mock
 // report says was compared.
 func (h *HTTP) strictServe(ctx context.Context, input *req, pool, comparedPool []*models.Mock, mockDb integrations.MockMemDb, n strictNoise, statefulMocks bool) (served *models.Mock, diag *matchDiag, retry bool, err error) {
 	live := liveDestination(ctx, input)
-	fits, near, err := strictCompare(ctx, input, live, pool, n)
+	fits, err := strictFits(ctx, input, live, pool, n)
 	if err != nil {
 		return nil, nil, false, err
 	}
-	closest, closestDiffs, routeMatched := near.mock, near.diffs, near.route
 	if len(fits) == 0 {
+		// A miss: every recording is compared, for the closest.
+		_, near, err := strictCompare(ctx, input, live, pool, n)
+		if err != nil {
+			return nil, nil, false, err
+		}
+		closest, closestDiffs, routeMatched := near.mock, near.diffs, near.route
 		phase := models.MatchPhaseStrict
 		if !routeMatched {
 			phase = models.MatchPhaseSchema
+		}
+		for _, f := range closestDiffs {
+			if f.why != "" {
+				// A read of the application's clock the closest recording
+				// learned that this call does not hold: why, legibly.
+				h.Logger.Warn("a learned read of the application's clock does not hold", zap.String("mock", closest.Name), zap.String("field", f.shape), zap.String("reason", f.why))
+			}
 		}
 		diag = &matchDiag{phase: phase, candidates: len(comparedPool), pool: comparedPool, live: &live, closest: closest, differs: closestDiffs}
 		if closest != nil && routeMatched {
@@ -228,14 +245,28 @@ func (h *HTTP) strictServe(ctx context.Context, input *req, pool, comparedPool [
 		}
 		return nil, diag, false, nil
 	}
+	served, answered, retry, err := h.strictServeFits(ctx, input, live, fits, ownedBy(ctx), mockDb, n, statefulMocks)
+	if answered != nil {
+		return nil, &matchDiag{phase: models.MatchPhaseExhausted, candidates: len(comparedPool), pool: comparedPool, live: &live, answered: answered}, false, nil
+	}
+	return served, nil, retry, err
+}
+
+// strictServeFits serves the live request with the first of fits, the
+// recordings that are this very call in the pool's order, or with each in
+// turn for a request recorded several times (strictCursorPick), own telling
+// whose each is. answered is a stateful walk's miss (every recording of it
+// has answered); retry is true when another connection took the recording
+// first.
+func (h *HTTP) strictServeFits(ctx context.Context, input *req, live destination, fits []*models.Mock, own func(*models.Mock) bool, mockDb integrations.MockMemDb, n strictNoise, statefulMocks bool) (served *models.Mock, answered *answeredSequence, retry bool, err error) {
 	// A stateful walk is fixed by every recording the store stages that is
 	// this very call, those spent included (servedWalk).
 	member := func(m *models.Mock) bool {
-		return !hasVariables(m) && string(m.Spec.HTTPReq.Method) == input.method && len(strictDiff(input, live, m, n)) == 0
+		return !hasVariables(m) && string(m.Spec.HTTPReq.Method) == input.method && len(strictDiff(ctx, input, live, m, n)) == 0
 	}
-	picked, commit, answered := h.strictCursorPick(fits, ownedBy(ctx), mockDb, statefulMocks, member)
+	picked, commit, answered := h.strictCursorPick(fits, own, mockDb, statefulMocks, member)
 	if answered != nil {
-		return nil, &matchDiag{phase: models.MatchPhaseExhausted, candidates: len(comparedPool), pool: comparedPool, live: &live, answered: answered}, false, nil
+		return nil, answered, false, nil
 	}
 	served, claimed, err := h.claim(ctx, picked, mockDb, nil, nil)
 	if err != nil {
@@ -268,6 +299,106 @@ func (c nearest) closerThan(o nearest) bool {
 	return c.mock != nil && ((c.route && !o.route) || (c.route == o.route && len(c.diffs) < len(o.diffs)))
 }
 
+// strictFits are the recordings of pool that are this very call (strictDiff),
+// in pool's order: strictCompare's fits, with only the recordings that may be
+// the call (strictSieve) compared, so a call that is one recording of a large
+// pool compares that one, not the pool. In the exact view's verify mode
+// (integrations.ExactViewVerify) every recording is compared too, and a
+// difference panics.
+func strictFits(ctx context.Context, input *req, live destination, pool []*models.Mock, n strictNoise) ([]*models.Mock, error) {
+	sieve := newStrictSieve(input, n)
+	strictVisits.Add(int64(len(pool)))
+	var fits []*models.Mock
+	for _, m := range pool {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if sieve.mayBe(m) && len(strictDiff(ctx, input, live, m, n)) == 0 {
+			fits = append(fits, m)
+		}
+	}
+	if integrations.ExactViewVerify.Load() {
+		all, _, err := strictCompare(ctx, input, live, pool, n)
+		if err != nil {
+			return nil, err
+		}
+		if !slices.Equal(all, fits) {
+			panic(fmt.Sprintf("exact view verify: strict fits of %s %s: sieved %v, compared %v", input.method, sieve.path, strictNames(fits), strictNames(all)))
+		}
+	}
+	return fits, nil
+}
+
+// strictNames are the names of mocks, for a verify mode's panic.
+func strictNames(mocks []*models.Mock) []string {
+	out := make([]string, len(mocks))
+	for i, m := range mocks {
+		out[i] = m.Name
+	}
+	return out
+}
+
+// strictSieve tells, from a recording's method and path alone, that it is not
+// the live call (mayBe false), where strictDiff would find its method or its
+// path differ. It never says so of a recording in which strictDiff finds no
+// difference.
+type strictSieve struct {
+	method, path string
+	// masked is the live path, keploy.yml's url noise masked, as pathDiffs
+	// splits it.
+	masked string
+	url    []*regexp.Regexp
+}
+
+func newStrictSieve(input *req, n strictNoise) strictSieve {
+	s := strictSieve{method: input.method, url: n.url}
+	if input.url != nil {
+		s.path = input.url.Path
+	}
+	s.masked = strings.TrimPrefix(maskURLNoise(s.path, n.url), "/")
+	return s
+}
+
+// mayBe reports whether m may be the live call. A recording of another method
+// is not (strictDiff's "method"), nor one that recorded no request. Nor is
+// one whose path, keploy.yml's url noise masked, is not the live one's, unless
+// the mock learned a place of its URL (pathDiffs then lets a learned segment
+// differ): pathDiffs compares the masked paths' segments, and two paths that
+// split into the same segments are the same string.
+func (s strictSieve) mayBe(m *models.Mock) bool {
+	r := m.Spec.HTTPReq
+	if r == nil || string(r.Method) != s.method {
+		return false
+	}
+	path, _ := recordedStrictURL(m)
+	if path == s.path || learnsURL(m) {
+		return true
+	}
+	return strings.TrimPrefix(maskURLNoise(path, s.url), "/") == s.masked
+}
+
+// learnsURL reports whether m learned a place of its URL or a read of the
+// clock at one: a key of its learned noise or of its clocks that names a URL
+// place or a container of one (learnedAt), read wide: any key that begins
+// with "url".
+func learnsURL(m *models.Mock) bool {
+	for k := range m.Spec.ReqBodyNoise {
+		if strings.HasPrefix(k, "url") {
+			return true
+		}
+	}
+	for k := range clocksOf(m) {
+		if strings.HasPrefix(k, "url") {
+			return true
+		}
+	}
+	return false
+}
+
+// strictDiffs counts strictDiff's comparisons: what the rows count to see
+// that a call compares only the recordings that may be it.
+var strictDiffs atomic.Int64
+
 // strictCompare compares the live request with each recording of pool, in
 // order (strictDiff): fits are those that are this very call, and near is
 // the closest of the others (closerThan), its mock nil when there is none.
@@ -276,7 +407,7 @@ func strictCompare(ctx context.Context, input *req, live destination, pool []*mo
 		if ctx.Err() != nil {
 			return nil, nearest{}, ctx.Err()
 		}
-		d := strictDiff(input, live, m, n)
+		d := strictDiff(ctx, input, live, m, n)
 		if len(d) == 0 {
 			fits = append(fits, m)
 			continue
@@ -463,8 +594,22 @@ func strictMismatchReport(request *http.Request, liveBody []byte, dest, actualKe
 		).Build()
 	if r != nil {
 		r.Differs = differs
+		r.FieldReasons = reasonsOf(diag.differs)
 	}
 	return r
+}
+
+// reasonsOf are, of fields, those refused for a reason of their own (a
+// learned read of the application's clock the call does not carry:
+// clockDiffs), each named by its shape, with that reason, once.
+func reasonsOf(fields []strictField) []models.FieldReason {
+	var out []models.FieldReason
+	for _, f := range fields {
+		if r := (models.FieldReason{Field: f.shape, Why: f.why}); f.shape != "" && f.why != "" && !slices.Contains(out, r) {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // differsOf is the names of the fields that differ, as a reason names them

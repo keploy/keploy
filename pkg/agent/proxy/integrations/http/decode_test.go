@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strconv"
 	"strings"
@@ -16,10 +17,13 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/async"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/identity"
+	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/pkg/platform/yaml/mockdb"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest"
@@ -35,6 +39,9 @@ type readWatchedConn struct {
 	inFlight atomic.Int32
 	answered atomic.Bool
 	reading  chan struct{}
+	// waitSize is the buffer size of the first read that started once the
+	// connection had been written to.
+	waitSize atomic.Int32
 }
 
 func (c *readWatchedConn) Write(p []byte) (int, error) {
@@ -47,12 +54,167 @@ func (c *readWatchedConn) Read(p []byte) (int, error) {
 	c.inFlight.Add(1)
 	defer c.inFlight.Add(-1)
 	if c.answered.Load() {
+		c.waitSize.CompareAndSwap(0, int32(len(p)))
 		select {
 		case c.reading <- struct{}{}:
 		default:
 		}
 	}
 	return c.Conn.Read(p)
+}
+
+// A replay waits for a keep-alive connection's next request on a small read
+// (pUtil.WaitReadSize, as the old loop read): the read holds its buffer for as
+// long as the connection is idle, which for a client's pool is hours. The
+// rest of the request is read on by its framing (readRequestHead).
+func TestDecodeHTTPWaitsForTheNextRequestOnASmallRead(t *testing.T) {
+	app, proxy := tcpPair(t)
+	conn := &readWatchedConn{Conn: proxy, reading: make(chan struct{}, 1)}
+	h := &HTTP{Logger: zap.NewNop()}
+	rec := recorded("u", "/u", nil, "")
+	rec.Spec.HTTPReq.ProtoMajor, rec.Spec.HTTPReq.ProtoMinor = 1, 1
+	ctx, cancel := context.WithCancel(context.Background())
+	returned := make(chan error, 1)
+	go func() {
+		returned <- h.decodeHTTP(ctx, []byte("POST /u HTTP/1.1\r\nHost: api.example\r\nContent-Length: 0\r\n\r\n"), conn, nil,
+			&mockMemDb{mocks: []*models.Mock{rec}, updateUnFilteredReturn: true}, models.OutgoingOptions{})
+	}()
+	t.Cleanup(func() { cancel(); <-returned })
+	// The bounds below only turn a hang into a failure.
+	if got := readUntil(app, "\r\n\r\n", time.Minute); !strings.HasPrefix(got, "HTTP/1.1 200") {
+		t.Fatalf("the request was answered %q, want the mock's 200", got)
+	}
+	select {
+	case <-conn.reading: // waiting for the next request
+	case <-time.After(time.Minute):
+		t.Fatal("decodeHTTP did not read on for the next request")
+	}
+	if got := conn.waitSize.Load(); got != pUtil.WaitReadSize {
+		t.Fatalf("decodeHTTP waits for the next request on a %d-byte read, want pUtil.WaitReadSize (%d)", got, pUtil.WaitReadSize)
+	}
+}
+
+// A replay reads a POST whose body is many reads long (100 KiB: past one
+// 32 KiB read, and a multiple of 1 KiB, the sizes the relay's reads changed at)
+// whole, by its framing, matches it with its recording and answers it, and
+// reads the connection's next call cleanly after it: a body read short would
+// leave its tail to be parsed as the next request.
+func TestDecodeHTTPReplaysAPostLongerThanARead(t *testing.T) {
+	var b strings.Builder
+	for i := 0; b.Len() < 100<<10; i++ {
+		b.WriteString(strconv.Itoa(i))
+		b.WriteByte(',')
+	}
+	body := b.String()[:100<<10]
+	big := recorded("big", "/big", nil, body)
+	next := recorded("next", "/next", nil, "small")
+	next.Spec.HTTPResp.Body = `{"next":true}`
+	for _, m := range []*models.Mock{big, next} {
+		m.Spec.HTTPReq.ProtoMajor, m.Spec.HTTPReq.ProtoMinor = 1, 1
+	}
+	app, proxy := tcpPair(t)
+	h := &HTTP{Logger: zap.NewNop()}
+	head := "POST /big HTTP/1.1\r\nHost: api.example\r\nContent-Length: " + strconv.Itoa(len(body)) + "\r\n\r\n"
+	// The proxy's first read: the head and the body's first KiB. The rest
+	// comes on the connection.
+	first := head + body[:1<<10]
+	ctx, cancel := context.WithCancel(context.Background())
+	returned := make(chan error, 1)
+	go func() {
+		returned <- h.decodeHTTP(ctx, []byte(first), proxy, nil,
+			&mockMemDb{mocks: []*models.Mock{big, next}, updateUnFilteredReturn: true}, models.OutgoingOptions{})
+	}()
+	t.Cleanup(func() { cancel(); <-returned })
+	go func() { _, _ = app.Write([]byte(body[1<<10:])) }()
+	// The bounds below only turn a hang into a failure.
+	if got := readUntil(app, `{"ok":true}`, time.Minute); !strings.HasPrefix(got, "HTTP/1.1 200") || !strings.HasSuffix(got, `{"ok":true}`) {
+		t.Fatalf("the 100 KiB POST was answered %q, want its recording's 200", got)
+	}
+	if _, err := app.Write([]byte("POST /next HTTP/1.1\r\nHost: api.example\r\nContent-Length: 5\r\n\r\nsmall")); err != nil {
+		t.Fatal(err)
+	}
+	if got := readUntil(app, `{"next":true}`, time.Minute); !strings.HasPrefix(got, "HTTP/1.1 200") || !strings.HasSuffix(got, `{"next":true}`) {
+		t.Fatalf("the call after the 100 KiB POST was answered %q, want its recording's 200", got)
+	}
+}
+
+// Every other path of a replay that serves a call and keeps the connection
+// for the next waits for that request on a small read too (pUtil.WaitReadSize):
+// a call a bypassRule passes through, one a pass-through egress rule answers,
+// an async lane's keep-alive, and a miss passed through on-miss. Each row is
+// red with its wait back on a 32 KiB read.
+func TestDecodeHTTPWaitsForTheNextRequestOnASmallReadOnEachPath(t *testing.T) {
+	dep := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("real " + r.URL.Path))
+	}))
+	t.Cleanup(dep.Close)
+	depAddr := strings.TrimPrefix(dep.URL, "http://")
+	depPort, _ := strconv.Atoi(depAddr[strings.LastIndex(depAddr, ":")+1:])
+	for _, tc := range []struct {
+		name  string
+		call  string
+		dst   *models.ConditionalDstCfg
+		opts  models.OutgoingOptions
+		setup func(t *testing.T, h *HTTP)
+	}{
+		{
+			name: "a call a bypassRule passes through",
+			call: "GET /a HTTP/1.1\r\nHost: dep.internal\r\n\r\n",
+			dst:  &models.ConditionalDstCfg{Addr: depAddr, Port: uint(depPort)},
+			opts: models.OutgoingOptions{Rules: []models.BypassRule{{Host: `^dep\.internal$`}}},
+		},
+		{
+			name: "a call a pass-through egress rule answers",
+			call: "POST /x HTTP/1.1\r\nHost: app\r\nContent-Length: 0\r\n\r\n",
+			dst:  &models.ConditionalDstCfg{Addr: "127.0.0.1:9999", Port: 9999},
+			opts: models.OutgoingOptions{PassThroughPorts: []models.PassThroughRule{{Port: 9999, Mode: models.PassThroughSkip}}},
+			setup: func(t *testing.T, _ *HTTP) {
+				t.Setenv(provenswitch.Env, "1") // the switch reads the user's rules
+			},
+		},
+		{
+			name: "an async lane's keep-alive",
+			call: "GET /w HTTP/1.1\r\nHost: cfg.local\r\n\r\n",
+			setup: func(t *testing.T, h *HTTP) {
+				h.SetAsyncEngine(async.NewEngine(zap.NewNop(),
+					[]models.AsyncLane{{Name: "w", Type: "http", Match: map[string]string{"pathRegex": "^/w$"}}},
+					map[string]async.AsyncParser{"http": h}))
+			},
+		},
+		{
+			name: "a miss passed through on-miss",
+			call: "GET /m HTTP/1.1\r\nHost: dep.local\r\n\r\n",
+			dst:  &models.ConditionalDstCfg{Addr: depAddr, Port: uint(depPort)},
+			opts: models.OutgoingOptions{OnMiss: models.MissPassthrough},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			app, proxy := tcpPair(t)
+			conn := &readWatchedConn{Conn: proxy, reading: make(chan struct{}, 1)}
+			h := &HTTP{Logger: zap.NewNop()}
+			if tc.setup != nil {
+				tc.setup(t, h)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			returned := make(chan error, 1)
+			go func() { returned <- h.decodeHTTP(ctx, []byte(tc.call), conn, tc.dst, &mockMemDb{}, tc.opts) }()
+			t.Cleanup(func() { cancel(); <-returned })
+			// The bounds below only turn a hang into a failure.
+			if got := readUntil(app, "\r\n\r\n", time.Minute); !strings.HasPrefix(got, "HTTP/1.1 2") {
+				t.Fatalf("the call was answered %q, want a 2xx (an async keep-alive is a 204)", got)
+			}
+			select {
+			case <-conn.reading: // waiting for the next request
+			case err := <-returned:
+				t.Fatalf("decodeHTTP returned %v after the call, want it waiting for the next", err)
+			case <-time.After(time.Minute):
+				t.Fatal("decodeHTTP did not read on for the next request")
+			}
+			if got := conn.waitSize.Load(); got != pUtil.WaitReadSize {
+				t.Fatalf("decodeHTTP waits for the next request on a %d-byte read, want pUtil.WaitReadSize (%d)", got, pUtil.WaitReadSize)
+			}
+		})
+	}
 }
 
 // A replay whose context ends while decodeHTTP waits for the client's next

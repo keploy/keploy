@@ -389,7 +389,7 @@ func (h *HTTP) encodeHTTP(ctx context.Context, reqBuf []byte, clientConn, destCo
 			probeHTTP(ctx, h.Logger, "encode-next-req-read-start")
 			nextReqStart := time.Now()
 
-			finalReq, err = pUtil.ReadBytes(ctx, h.Logger, clientConn)
+			finalReq, err = pUtil.ReadBytesWaiting(ctx, h.Logger, clientConn)
 			probeHTTP(ctx, h.Logger, "encode-next-req-read-done",
 				zap.Int64("dur_ns", time.Since(nextReqStart).Nanoseconds()),
 				zap.Int("reqLen", len(finalReq)),

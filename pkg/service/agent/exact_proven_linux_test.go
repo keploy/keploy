@@ -103,6 +103,7 @@ func (p *servingProxy) noteMiss(err error) {
 	if errors.As(err, &r) && r.MismatchReport() != nil {
 		rep := r.MismatchReport()
 		uc.ActualSummary, uc.Destination, uc.Differs = rep.ActualSummary, rep.Destination, rep.Differs
+		uc.ClosestMock = rep.ClosestMock
 		if !rep.At.IsZero() {
 			uc.At = rep.At
 		}
@@ -550,7 +551,7 @@ func TestASkippedTestsRecordingNeverShiftsToTheNextTest(t *testing.T) {
 	a, p := exactAgent(t,
 		[]*models.Mock{pingMock("mock-1", "/n", "skipped", t0), pingMock("mock-2", "/n", "next", t0.Add(time.Second))},
 		map[string][]string{"o::TestSkipped": {"mock-1"}, "o::TestNext": {"mock-2"}}, map[string][]string{})
-	require.NoError(t, a.SetScopeSkips(context.Background(), map[string]string{"o::TestSkipped": "flaky: replay_only"}))
+	require.NoError(t, a.SetScopeSkips(context.Background(), map[string]string{"o::TestSkipped": "flaky: replay_only"}, nil))
 	b, serr := a.ProvenBegin(context.Background(), begin("TestSkipped"))
 	require.Nil(t, serr)
 	require.Equal(t, models.ScopeActionSkip, b.Action)

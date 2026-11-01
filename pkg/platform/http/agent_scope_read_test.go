@@ -5,9 +5,12 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 )
@@ -76,20 +79,73 @@ func TestAgentClient_PushProvenTable(t *testing.T) {
 	defer srv.Close()
 	a := &AgentClient{logger: zap.NewNop(), client: http.Client{}, conf: &config.Config{Agent: config.Agent{AgentURI: srv.URL}}}
 	ctx := context.Background()
-	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {"mock-3"}}, map[string][]string{"o": {"mock-1"}}); err != nil {
+	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {"mock-3"}}, map[string][]string{"o": {"mock-1"}}, nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {}}, nil); err != nil {
+	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {}}, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{`{"mappings":{"o::TestA":["mock-3"]},"pool":{"o":["mock-1"]}}`, `{"mappings":{"o::TestA":[]},"pool":{}}`}
-	if len(bodies) != 2 || bodies[0] != want[0] || bodies[1] != want[1] {
+	// The recorded test windows go with them, in the same request.
+	t0 := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {}}, nil, []models.TestWindow{{TestCase: "o::TestA", Start: t0, End: t0.Add(time.Second)}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	// The values each test gave when it was recorded ride the same request.
+	given := map[string][]models.GivenValue{"o::TestA": {{Name: "given:nonce", Value: "1761", Source: "a_test.go:9"}}}
+	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {"mock-3"}}, nil, nil, given); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		`{"mappings":{"o::TestA":["mock-3"]},"pool":{"o":["mock-1"]}}`,
+		`{"mappings":{"o::TestA":[]},"pool":{}}`,
+		`{"mappings":{"o::TestA":[]},"pool":{},"windows":[{"testCase":"o::TestA","start":"2026-01-02T03:04:05Z","end":"2026-01-02T03:04:06Z"}]}`,
+		`{"mappings":{"o::TestA":["mock-3"]},"pool":{},"given":{"o::TestA":[{"name":"given:nonce","value":"1761","source":"a_test.go:9"}]}}`,
+	}
+	if !slices.Equal(bodies, want) {
 		t.Fatalf("posted %q, want %q", bodies, want)
 	}
 	for _, s := range []int{http.StatusNotFound, http.StatusNotImplemented, http.StatusInternalServerError} {
 		status = s
-		if err := a.PushProvenTable(ctx, nil, nil); err == nil {
+		if err := a.PushProvenTable(ctx, nil, nil, nil, nil); err == nil {
 			t.Fatalf("status %d: want an error", s)
 		}
+	}
+}
+
+// A restarted agent is handed the table again (the session's scope-table
+// step), the recorded test windows and the values each test gave when it was
+// recorded with it, as they were pushed: without the windows its learn step
+// would read every earlier recording of the set as the paired one's place
+// again, and without the givens every given of the replay would bind with no
+// recorded value, and nothing would say so.
+func TestAgentClient_PushProvenTableIsReappliedWithItsWindows(t *testing.T) {
+	var bodies []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/scope/table" {
+			http.NotFound(w, r)
+			return
+		}
+		b, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(b))
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { sessions.Delete(srv.URL) })
+	a := &AgentClient{logger: zap.NewNop(), client: http.Client{}, conf: &config.Config{Agent: config.Agent{AgentURI: srv.URL}}}
+	a.session().configure(true)
+	t0 := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	windows := []models.TestWindow{{TestCase: "o::TestA", Start: t0, End: t0.Add(time.Second)}}
+	given := map[string][]models.GivenValue{"o::TestA": {{Name: "given:nonce", Value: "1761", Source: "a_test.go:9"}}}
+	if err := a.PushProvenTable(context.Background(), map[string][]string{"o::TestA": {"mock-3"}}, map[string][]string{"o": {"mock-1"}}, windows, given); err != nil {
+		t.Fatal(err)
+	}
+	windows[0].TestCase = "o::Changed" // the caller's slice is its own
+	given["o::TestA"] = nil            // and so is its map
+	if err := a.session().reapply(context.Background(), zap.NewNop()); err != nil {
+		t.Fatal(err)
+	}
+	want := `{"mappings":{"o::TestA":["mock-3"]},"pool":{"o":["mock-1"]},"windows":[{"testCase":"o::TestA","start":"2026-01-02T03:04:05Z","end":"2026-01-02T03:04:06Z"}],"given":{"o::TestA":[{"name":"given:nonce","value":"1761","source":"a_test.go:9"}]}}`
+	if !slices.Equal(bodies, []string{want, want}) {
+		t.Fatalf("posted %q, want the table, its windows and its givens twice: %q", bodies, want)
 	}
 }

@@ -4,7 +4,11 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
+
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 // A copy follows its source (founder decision, 2026-10-24; the recording is
@@ -53,11 +57,25 @@ import (
 //     connections are refused.
 //
 // Otherwise the value is refused, the reason naming which of these failed.
-// Nothing is read from a value's shape. Everything else the classifier
+// Nothing is read from a value's shape. The same holds of a word the rule
+// finds in the answer of a recording F gave the application before the call
+// that no earlier place of the call's own test is (another recorded test's,
+// or one F gave earlier in the set: givenWhy, excusedGiven): a group of a
+// random id that another test's random id holds by chance is let go where
+// the recording gave that answer strictly before the call, F gave the word
+// at the same fields, the two values do not both hold it, no word that
+// changed of the value that lacks it, but for a read of the clock, stands
+// in any place the rule reads (that answer or
+// another, or an earlier place of the call's own test: tookElsewhere), and
+// the order holds; keploy still follows no value of another test's, and a
+// value that moved with such a word stays refused. And it holds the other way about: a
+// word of the value F saw that F gave the application at fields of an
+// earlier payload it served changed, where the recording gave another value
+// that the recorded value took none of the words of (excusedLive), is let
+// go on the same terms. Everything else the classifier
 // refuses (an offset, an instant, a glued word of an undeclared body, a word
-// of another test's or of a recording made after the call, an echo in the
-// answer) stays refused: the rule reads the word rule's plain matches of the
-// call's own earlier places alone.
+// of a recording made after the call, an echo in the answer) stays refused:
+// the rule reads the word rule's plain matches alone.
 //
 // A connection's recorded start-up (isStartUp) is no place the rule reads
 // where the start-ups differ (swapHolds: its backend pid and secret key, a
@@ -98,11 +116,50 @@ type follows struct {
 	// value learned as noise says of it (followed).
 	at      time.Time
 	refuted string
+	// refutes are the further mocks the search went past so after the
+	// first (refuted), each once, in the order it went past them, with
+	// why (refutedAll); refutedOf are the mocks of all of them.
+	refutes   []refutedPlace
+	refutedOf map[string]bool
+	// aside, where the search for the value's source went past a leaf that
+	// held its recorded value whole and that F saw hold another value
+	// (refuteSeen), names the first such leaf: what a value learned as noise
+	// or refused as an echo says of it.
+	aside string
+	// moved, where the word rule let a word of the value go at a place F
+	// gave the application another value at that the value took none of the
+	// words of (movedAway), names the first such place: what a value learned
+	// as noise says of it, where no place was refuted.
+	moved string
+	// chance, where the word rule let a word of the value go at a recording
+	// both runs gave the application that word at before the call, and no
+	// word that changed of the value lacking it (but for a read of the
+	// clock) stands in any place the rule reads
+	// (excusedGiven), names the first such word and why it stands there by
+	// chance: what a value learned as noise says of it, where no place was
+	// refuted and none moved.
+	chance string
 	// sources are the mocks of the places the word rule let a word of the
 	// value go at (excused), and of the place the search for its source went
 	// past (refute): the value's candidate sources, the only places whose
 	// order the rule reads (followed).
 	sources map[string]bool
+	// given are the recordings F gave the application earlier in the set
+	// (GivenEarlier) that the word rule let a word of the value go at
+	// (excusedGiven): candidate sources no Raw handed to the call stands
+	// for, ordered with the rest (followed).
+	given []Raw
+	// served, raw and places are the places the word rule reads for the
+	// call (unaccounted, givenWhy): its own test's earlier places and the
+	// recordings F gave the application elsewhere before it. took caches,
+	// by the side of the value that lacks a word let go (0 as recorded, 1
+	// as F saw it), where a word of that side stands in one of them
+	// (tookElsewhere); tookRead says it was read.
+	served   []Earlier
+	raw      []Raw
+	places   func() *offsetPlaces
+	took     [2]string
+	tookRead [2]bool
 }
 
 // source notes mock as a candidate source of the value (follows.sources).
@@ -125,8 +182,36 @@ func (f *follows) source(mock string) {
 // the place stays where the value came from. A start-up's word a swap can
 // change is never handed here (appearedIn refuses a value found there:
 // swapHolds).
-func (f *follows) refute(x Raw, texts [2]string, v *valueDrift, p Place) bool {
-	if f == nil || !x.AsRecorded() {
+//
+// A place of a payload F served changed and gave its view of (ServedLive)
+// is set aside so too where, at every field of it holding the word, F gave
+// the application that word, or another value that the value took none of
+// the words of (liveAt, movedAway), and no text F gave there holds the
+// value F saw: the value did not move with what F gave in its place.
+func (f *follows) refute(x Raw, texts [2]string, keep bool, v *valueDrift, p Place) bool {
+	if f == nil {
+		return false
+	}
+	gave := ", which record's full round sent and gave the application as recorded, byte for byte, while the value changed"
+	switch {
+	case x.AsRecorded():
+	case x.Live():
+		// Searched unblanked: a stamp or clock read F gave there that holds
+		// the value F saw keeps the place too.
+		for _, text := range [2]string{x.live.payload().text, f.dc.rawExtra(x.live.payload().text)} {
+			if ContainsToken(text, v.live) || v.decoded && ContainsToken(text, v.decLive) {
+				return false
+			}
+		}
+		switch fv, _ := f.dc.liveAt(x, texts[0], keep, v, func(own string) bool { return holdsToken(own, p.Held) }); fv {
+		case fSame:
+			gave = ", where record's full round gave the application that word as recorded, while the value changed"
+		case fMoved:
+			gave = ", where record's full round gave the application another value, which the value took none of the words of"
+		default:
+			return false
+		}
+	default:
 		return false
 	}
 	if before, untimed := recordedGave(x.recordedAt(), x.answered, f.at, x.mock); !before || untimed != "" {
@@ -137,13 +222,11 @@ func (f *follows) refute(x Raw, texts [2]string, v *valueDrift, p Place) bool {
 			return false
 		}
 	}
-	if f.refuted == "" {
-		found := "its recorded value stands whole in " + placeAt(p)
-		if p.Held != v.rec && p.Held != v.decRec {
-			found = "a part of its recorded value (" + partOf(v.rec, p.Held) + ") stands in " + placeAt(p)
-		}
-		f.refuted = found + ", which record's full round sent and gave the application as recorded, byte for byte, while the value changed: a copy moves with its source, so the value is no copy of it"
+	found := "its recorded value stands whole in " + placeAt(p)
+	if p.Held != v.rec && p.Held != v.decRec {
+		found = "a part of its recorded value (" + partOf(v.rec, p.Held) + ") stands in " + placeAt(p)
 	}
+	f.wentPast(x.mock, found+gave+": a copy moves with its source, so the value is no copy of it")
 	// The word rule reads the same word at the same place on the same terms
 	// and notes it there too (excusedRaw); a source set aside is noted here
 	// as well, so it is ordered should the two searches ever part.
@@ -151,12 +234,185 @@ func (f *follows) refute(x Raw, texts [2]string, v *valueDrift, p Place) bool {
 	return true
 }
 
+// notServed reports whether p, a place in x's request that holds whole the
+// read of the clock v was recorded with (appearedIn: one instant, only in
+// what the application sent there, sentOnly), is no place the value came
+// from because record's full round had not served x before the call
+// (Raw.Served false, or every serve of it made after the call reached
+// keploy: Order.ArrivedAt, Raw.servedAfter): in that round the application
+// sent the call before x's own call was answered, or x's call missed or was not made. The
+// recording sending x first is then no dataflow either: two reads of the
+// clock in one second are a coincidence (api-server's start-up janitors,
+// each reading its clock on its own connection, sent in the order the
+// network gave them, which the two rounds need not share). So the search
+// goes on past it, and the value is read as it is with no such recording
+// (the call's own read of the clock, checked at every replay, where no other
+// place holds it); the place is named (refuted). It is no candidate source
+// whose order the rule reads (sources, followed): F gave the application
+// nothing there before the call, so the recording's order and F's would
+// always differ by it, and a recording that sent x first, then the call (F
+// sending them the other way round), would be refused for an order no
+// dataflow made.
+//
+// Everywhere else the place stays where the value came from, as before: the
+// proven switch off (the rule's absence, as for the run's rule and the
+// start-up rule, classifyRead), a place F served (refute reads it),
+// an instant an answer gave the application (followed whole, a founder
+// decision: the caller hands only a sent one), a word of a connection's
+// start-up a swap can change (startUpWhy; no start-up holds a request's
+// field, so a swap's word is never a sent one either), and a place whose
+// searched texts hold the value F saw too. That last check is defensive: the
+// echo of what F gave (echoRaw) reads a recorded text holding F's value
+// before the search reaches this rule, and no row reaches it.
+func (f *follows) notServed(x Raw, texts [2]string, v *valueDrift, p Place) bool {
+	if f == nil || x.served && !x.servedAfter || !provenswitch.On() {
+		return false
+	}
+	for _, text := range texts {
+		if ContainsToken(text, v.live) || v.decoded && ContainsToken(text, v.decLive) {
+			return false
+		}
+	}
+	f.wentPast(x.mock, "its recorded value stands whole in "+placeAt(p)+", which the application sent there and record's full round had not served before this call: in that round the application sent this call first, and two reads of the clock in one second are a coincidence, not dataflow, so the value is no copy of it")
+	return true
+}
+
+// wentPast names mock, a place the search for the value's source went past,
+// and why (refuted, refutes), once.
+func (f *follows) wentPast(mock, why string) {
+	if f.refuted != "" && f.refutedOf[mock] {
+		return
+	}
+	if f.refuted == "" {
+		f.refuted = why
+	} else {
+		f.refutes = append(f.refutes, refutedPlace{mock, why})
+	}
+	if f.refutedOf == nil {
+		f.refutedOf = map[string]bool{}
+	}
+	f.refutedOf[mock] = true
+}
+
+// refutedPlace is a mock the search for a value's source went past
+// (follows.refute), and why.
+type refutedPlace struct {
+	mock, why string
+}
+
+// refutedAll names every mock the search for the value's source went past
+// (follows.refute), what a value learned past them names (Learned.Refuted):
+// the first two more after the first with why, then the rest by name, the
+// first maxRefutedNamed of them and how many more. "" where it went past
+// none.
+func (f *follows) refutedAll() string {
+	if f == nil || f.refuted == "" {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString(f.refuted)
+	for i, r := range f.refutes {
+		if i == 2 {
+			rest := f.refutes[i:]
+			b.WriteString("; and so are ")
+			b.WriteString(strconv.Itoa(len(rest)))
+			b.WriteString(" more recordings (")
+			for k, x := range rest {
+				if k == maxRefutedNamed {
+					b.WriteString(", …")
+					break
+				}
+				if k > 0 {
+					b.WriteString(", ")
+				}
+				b.WriteString(x.mock)
+			}
+			b.WriteString(")")
+			break
+		}
+		b.WriteString("; ")
+		b.WriteString(r.why)
+	}
+	return b.String()
+}
+
+// maxRefutedNamed is how many of the further mocks the search went past
+// refutedAll names after the ones it says why of.
+const maxRefutedNamed = 8
+
+// refuteSeen reports whether s, a leaf of e, an exchange F served before the
+// call, that held v's recorded value whole (whole), is no place the value came
+// from: an earlier place is a later value's source only where it held that
+// value in both runs, and F saw it hold another value than the one F saw at
+// v's place (Seen.Live). A copy moves with its source, so the search goes on
+// past it; the first such place is named (aside), and the place is a
+// candidate source (sources). A value then learned as noise, which no replay
+// checks, is noise only where the recording and F gave the application its
+// candidate sources in the same order (followed), and an echo of the call's
+// answer is refused, both naming the place; a value learned as a read of the
+// clock is checked against its call's clock at every replay, which no order
+// of its sources changes (classifyRead).
+//
+// Everywhere else the place stays where the value came from, as before: fol
+// nil (the rule's absence), a part of the value (a part that drifted with it
+// moved with it in both runs: sources), a leaf F saw hold the value F saw,
+// and an instant its protocol types, whose text and the value's can write
+// one moment in two ways (dc.instantSource reads its moments). A place set
+// aside whose recorded times keploy cannot read, or that the recording
+// answered at the call's own instant, is ordered all the same: a value
+// learned as noise is then refused, naming it (followed).
+func (f *follows) refuteSeen(e Earlier, s Seen, whole bool, v *valueDrift) bool {
+	if f == nil || !whole || s.Leaf.Type == Instant || s.Live == v.live {
+		return false
+	}
+	if f.aside == "" {
+		saw := ", where record's full round gave the application another value than the value's"
+		if s.Side == Request && !e.Given {
+			saw = ", where record's full round saw the application send another value than the value's"
+		}
+		f.aside = "its recorded value stands whole in " + placeAt(seenPlace(e, s, true)) + saw + ": a copy moves with its source, so the value is no copy of it"
+	}
+	f.source(e.Mock)
+	return true
+}
+
+// fView is what record's full round shows it gave the application at a
+// place holding a word of a drifted value, before the call.
+type fView int
+
+const (
+	// fNone: F gave the application nothing there that keploy sees (a
+	// recording F did not serve, or served changed with no view of it, or a
+	// view that lacks the place).
+	fNone fView = iota
+	// fSame: F gave the application the word there.
+	fSame
+	// fMoved: F gave the application another value there, which the value
+	// took none of the words of (movedAway).
+	fMoved
+	// fFollowed: F gave the application another value there, which the
+	// value took a word of, or drifted with, or which gained no word the
+	// recorded one lacked (movedAway says which).
+	fFollowed
+	// fElsewhere: F gave the application the word at a field of the
+	// payload whose recorded text lacks it, or that the recording lacks.
+	fElsewhere
+	// fSent: the word stands in what F's application sent there (its
+	// request), which it made itself, or in a payload whose request and
+	// answer keploy cannot tell apart (recordedThere).
+	fSent
+)
+
 // excused reports whether the word rule may pass over word t of the value,
-// found at a place whose reason there is why: recGave, whether the
-// recording gave the application t there before the call; fGave, whether
-// record's full round did; untimed, of a place the recording gave, says why
-// keploy cannot tell when it did ("" where it can).
-func (f *follows) excused(t string, recGave, fGave bool, untimed, why string) bool {
+// found at a place (stands: the word and where it stands, as a reason names
+// them) whose reason there is why: recGave, whether the recording gave the
+// application t there before the call; fv, what record's full round gave
+// there (followed: of fFollowed, why the value follows it; of fElsewhere,
+// where); untimed, of a place the recording gave, says why keploy cannot
+// tell when it did ("" where it can); took, where the value that lacks t
+// holds a word of a place the word rule reads, says where (tookElsewhere: ""
+// where it holds none, or the rule reads no such evidence there).
+func (f *follows) excused(t string, recGave bool, fv fView, followed, untimed, why, stands, took string) bool {
 	if f == nil {
 		return false
 	}
@@ -165,26 +421,237 @@ func (f *follows) excused(t string, recGave, fGave bool, untimed, why string) bo
 		f.refused = untimed + ", so the recording cannot show the value does not follow that word"
 	case !recGave:
 		f.refused = "the recording did not give the application that word there before the call, so it cannot show the value does not follow it"
-	case !fGave:
+	case fv == fNone:
 		f.refused = "record's full round did not give the application that word there before the call, so it cannot show the value does not follow it"
+	case fv == fFollowed:
+		f.refused = "record's full round gave the application another value there, " + followed + ", so it cannot show the value does not follow it"
+	case fv == fElsewhere:
+		f.refused = "record's full round gave the application that word at " + followed + ", where the recording did not, so it cannot show the value does not follow it"
 	case f.dc.holdsWord(f.rec, t) && f.dc.holdsWord(f.live, t):
 		f.refused = "the recorded value and the value record's full round saw both hold that word, and both gave it there, so neither shows the value does not follow it"
+	case took != "":
+		f.refused = took + ", so each value may be a copy of a word its run picked from what both runs gave (one of two answers, or two places of one, by an order neither run shows), and the recording cannot show the value does not follow that word"
 	default:
 		if f.first == "" {
 			f.first = why
+		}
+		if fv == fMoved && f.moved == "" {
+			f.moved = stands + ", where record's full round gave the application another value, which the value took none of the words of: a copy moves with its source, so the value is no copy of it"
 		}
 		return true
 	}
 	return false
 }
 
-// excusedSeen is excused of word t, found in reading i at a leaf of an
-// exchange record's full round served before the call (e), whose recorded
-// and served text ed reads: the recording gave the application the leaf's
-// recorded text there where it recorded e's answer strictly before the call
-// (recordedGave; the test case's own request: before every call of the
-// test), and F gave it what it served there (Seen.Live).
-func (f *follows) excusedSeen(e Earlier, ed *valueDrift, i int, t string, at time.Time, why string) bool {
+// tookElsewhere says where a word of what the drifted value v changed, on
+// the side of it that lacks word t (as recorded, where the recorded value
+// lacks t; as F saw it, where that value does), stands in a place the word
+// rule reads (excusedGiven), "" where none does: a leaf of an exchange F
+// served earlier in the call's own test (as the recording, or F, gave it,
+// as unaccounted reads it), an earlier recording of its own test (its
+// payload, or F's view of it on the side F saw), or a recording F gave the
+// application before the call that no earlier place of its own test is
+// (its answer as either run gave it: inAnswer). Such a value is no value
+// made beside the word without taking any: it may be a copy of a word its
+// run picked from what both runs gave (one of two answers, or two places of
+// one, by an order neither run shows: a map's iteration, a concurrent
+// consumer), and the word the other value holds shows nothing. Stamps are
+// read as the word rule reads them (stampsEchoed); a clock word is no word
+// (eachChanged). Where both values hold t, neither lacks it, and excused
+// refuses it already.
+func (f *follows) tookElsewhere(v *valueDrift, t string) string {
+	side := 0
+	switch {
+	case !f.dc.holdsWord(f.rec, t):
+	case !f.dc.holdsWord(f.live, t):
+		side = 1
+	default:
+		return ""
+	}
+	if f.tookRead[side] {
+		return f.took[side]
+	}
+	recorded := side == 0
+	const lacks = "the value that lacks that word holds a word of a place both runs gave the application before the call: "
+	keep := f.dc.stampsEchoed(v, f.served, f.raw)
+	var op *offsetPlaces
+	if f.places != nil {
+		op = f.places()
+	}
+	f.took[side] = v.eachChanged(func(i int, w string, rec bool) string {
+		if rec != recorded {
+			return ""
+		}
+		for _, e := range f.served {
+			for _, s := range e.Seen {
+				if stamped(s) && !keep || s.Leaf.Type == Instant {
+					continue
+				}
+				if ed := f.dc.of(s.Leaf.Value, s.Live); recorded && ed.recTok[i][w] || !recorded && ed.liveTok[i][w] {
+					return lacks + v.wordOf(w, recorded) + " stands in " + e.Mock + " at " + s.Leaf.Path
+				}
+			}
+		}
+		for _, x := range f.raw {
+			if !x.earlierThan(f.at) {
+				continue
+			}
+			for _, y := range []Raw{x, f.liveOf(x, recorded)} {
+				if y.isRead() && f.dc.searchedTokens(y, keep)[i][w] {
+					if fd, _ := f.dc.fieldOf(y, f.dc.searched(y, keep), w); fd != "" {
+						return lacks + v.wordOf(w, recorded) + " stands in " + x.mock + " at " + fd
+					}
+					return lacks + v.wordOf(w, recorded) + " stands in " + x.mock + "'s payload"
+				}
+			}
+		}
+		if op != nil {
+			for _, g := range op.words {
+				if as := g.inAnswer(i, w); as != "" {
+					return lacks + v.wordOf(w, recorded) + " stands in " + g.mock + "'s answer " + as
+				}
+			}
+		}
+		return ""
+	})
+	f.tookRead[side] = true
+	return f.took[side]
+}
+
+// liveOf is what F gave the application at x, as tookElsewhere reads the
+// side of a value F saw: x's view (ServedLive) where F gave one, an unread
+// Raw otherwise (x's own text, read beside it, stands for a payload F served
+// as recorded); nothing of the recorded side.
+func (f *follows) liveOf(x Raw, recorded bool) Raw {
+	if recorded || !x.Live() {
+		return Raw{}
+	}
+	return *x.live
+}
+
+// movedAway says why a place F gave the application another value at than
+// recorded (ed: the recorded value there and the one F gave) does not show
+// the drifted value v no copy of it, "" where it does: the place gained a
+// word in F (a value to copy), v as F saw it holds none of the words the
+// place gained, in any reading or form, not even inside a longer word, nor
+// does the place hold, inside a longer word, a word v gained, and the two
+// did not drift together (sources). A copy moves with its source. A place
+// that gained no word (one dropped, nothing new) shows nothing, and neither
+// does one whose words v took: there it stays where the value may have come
+// from (fail closed). Only finding more stops it: no word's shape is read.
+func movedAway(ed, v *valueDrift) string {
+	if ed.rec == ed.live {
+		return "and it is the value recorded there"
+	}
+	gained := false
+	for i := range ed.gained {
+		for w := range ed.gained[i] {
+			gained = true
+			if strings.Contains(v.live, w) || v.decoded && strings.Contains(v.decLive, w) || inForms(v.forms, w) {
+				return "and the value took a word of it"
+			}
+		}
+	}
+	if !gained {
+		return "which holds no word the recorded one lacked"
+	}
+	for i := range v.gained {
+		for w := range v.gained[i] {
+			if inForms(ed.forms, w) {
+				return "and it holds a word the value took"
+			}
+		}
+	}
+	if found, _ := sources(ed, v); found {
+		return "and the value drifted with it"
+	}
+	return ""
+}
+
+// inForms reports whether w stands anywhere in the live side of forms (a
+// value's declared forms, valueDrift.forms), inside a longer word too.
+func inForms(forms [][2]string, w string) bool {
+	for _, f := range forms {
+		if strings.Contains(f[1], w) {
+			return true
+		}
+	}
+	return false
+}
+
+// liveAt is what record's full round gave the application, by its view of x
+// (ServedLive), at the fields of x's payload that hold what in finds (text:
+// x's recorded text as searched; keep: its stamps searched as any text, as
+// the view's are then): fSame where every such field of the view, by its
+// path, holds it too; fMoved where F gave another value at one or more of
+// them, which v took none of the words of (movedAway), and the same at the
+// rest; fFollowed where v took a word of one, or drifted with it (followed
+// says which); fElsewhere where a field of the view holds it whose recorded
+// field lacks it, or that the recording lacks (followed names the field);
+// fNone where x has no view, where no one recorded field holds it (it
+// stands across two), or where the view lacks a field holding it. Fields
+// are read one by one, the view's as well as the recording's, so what F
+// gave at another field than the recording did is never read as moved.
+func (dc *DriftCache) liveAt(x Raw, text string, keep bool, v *valueDrift, in func(own string) bool) (view fView, followed string) {
+	if !x.Live() {
+		return fNone, ""
+	}
+	liveText := dc.searched(*x.live, keep)[0]
+	xfields := x.payload().fields
+	at := func(fields []rawField, text string, f rawField) (string, bool) {
+		for _, g := range fields {
+			if g.path == f.path && g.key == f.key {
+				if g.end <= len(text) {
+					return text[g.start:g.end], true
+				}
+				return "", false
+			}
+		}
+		return "", false
+	}
+	for _, g := range x.live.payload().fields {
+		if g.end > len(liveText) || !in(liveText[g.start:g.end]) {
+			continue
+		}
+		if own, ok := at(xfields, text, g); !ok || !in(own) {
+			return fElsewhere, g.describe()
+		}
+	}
+	view = fSame
+	held := false
+	for _, f := range xfields {
+		if f.end > len(text) || !in(text[f.start:f.end]) {
+			continue
+		}
+		held = true
+		lv, ok := at(x.live.payload().fields, liveText, f)
+		if !ok {
+			return fNone, ""
+		}
+		if in(lv) {
+			continue
+		}
+		if why := movedAway(dc.of(text[f.start:f.end], lv), v); why != "" {
+			view, followed = fFollowed, why
+		} else if view == fSame {
+			view = fMoved
+		}
+	}
+	if !held {
+		return fNone, ""
+	}
+	return view, followed
+}
+
+// excusedSeen is excused of word t of the drifted value v, found in reading
+// i at a leaf (path) of an exchange record's full round served before the
+// call (e), whose recorded and served text ed reads: the recording gave the
+// application the leaf's recorded text there where it recorded e's answer
+// strictly before the call (recordedGave; the test case's own request:
+// before every call of the test), and F gave it what it served there
+// (Seen.Live): t where that holds it, else another value, which v took none
+// of the words of or did (movedAway).
+func (f *follows) excusedSeen(e Earlier, ed, v *valueDrift, i int, t string, at time.Time, why, path string) bool {
 	if f == nil {
 		return false
 	}
@@ -192,30 +659,286 @@ func (f *follows) excusedSeen(e Earlier, ed *valueDrift, i int, t string, at tim
 	if !e.Given {
 		before, untimed = recordedGave(e.recordedAt(), e.Payload.answered, at, e.Mock)
 	}
-	if !f.excused(t, before && ed.recTok[i][t], ed.liveTok[i][t], untimed, why) {
+	fv, followed := fNone, ""
+	switch {
+	case ed.liveTok[i][t]:
+		fv = fSame
+	case ed.rec != ed.live:
+		fv = fMoved
+		if followed = movedAway(ed, v); followed != "" {
+			fv = fFollowed
+		}
+	}
+	if !f.excused(t, before && ed.recTok[i][t], fv, followed, untimed, why, v.wordOf(t, v.recTok[i][t])+" stands in "+e.Mock+" at "+path, "") {
 		return false
 	}
 	f.source(e.Mock)
 	return true
 }
 
-// excusedRaw is excused of word t, found in reading i in x's payload: the
-// recording gave the application the payload where it recorded x's answer
-// strictly before the call (recordedGave), and F gave it where it served x
-// unchanged (Raw.AsRecorded: a payload F served changed, F may have given
-// another word there, which keploy does not see). A payload's clock stamps
-// are read blanked: F may have stamped its own there, so a word that stands
-// only in one is no word both gave.
-func (f *follows) excusedRaw(x Raw, i int, t string, at time.Time, why string) bool {
+// excusedRaw is excused of word t of the drifted value v, found in reading i
+// in x's payload (at place, as a reason names it): the recording gave the
+// application the payload where it recorded x's answer strictly before the
+// call (recordedGave), and F gave it where it served x unchanged
+// (Raw.AsRecorded), or, of a payload F served changed and gave its view of
+// (ServedLive), field by field as the view shows (liveAt): t, or another
+// value v took none of the words of. A payload F served changed with no
+// view, F may have given another word there, which keploy does not see. A
+// payload's clock stamps are read blanked: F may have stamped its own
+// there, so a word that stands only in one is no word both gave.
+func (f *follows) excusedRaw(x Raw, v *valueDrift, i int, t string, at time.Time, why, place string) bool {
 	if f == nil {
 		return false
 	}
 	before, untimed := recordedGave(x.recordedAt(), x.answered, at, x.mock)
 	held := f.dc.searchedTokens(x, false)[i][t]
-	if !f.excused(t, before && held, x.AsRecorded() && held, untimed, why) {
+	fv, followed := fNone, ""
+	switch {
+	case !held:
+	case x.AsRecorded():
+		fv = fSame
+	case x.Live():
+		fv, followed = f.dc.liveAt(x, f.dc.searched(x, false)[0], false, v, func(own string) bool { return f.dc.rawTokens(own)[i][t] })
+	}
+	if !f.excused(t, before && held, fv, followed, untimed, why, v.wordOf(t, v.recTok[i][t])+" stands in "+place, "") {
 		return false
 	}
 	f.source(x.mock)
+	return true
+}
+
+// excusedLive is excusedRaw the other way about, of word t the drifted
+// value v holds as F saw it (in reading i), found in what F gave the
+// application in x's payload, served changed (its view, ServedLive), and in
+// no text the recording gave there (at place, as a reason names it): the
+// recording gave the application x's payload where it recorded x's answer
+// strictly before the call (recordedGave), and at every field of the view
+// holding t (by path) it gave another value, which the recorded value took
+// none of the words of (recordedThere, movedFrom); the recorded value lacks t.
+// That is fMoved's evidence with the two runs' roles swapped: a copy moves
+// with its source, so a value that took nothing of what the recording gave
+// there, while F gave t there, is no copy of it; and the recorded value
+// took no word of the payload anywhere (recordedTook): a value that copies
+// a word of a payload by where it stands there follows it to another field
+// where F gave its words elsewhere. Only an answer the
+// application was given is read: a word of the request it sent there, which
+// it made itself, shows nothing. A view that gives t at a field of the
+// request, or at a field the recording lacks, a field the recorded value took a word of or
+// drifted with, one that lost no word in F, a payload the recording gave at
+// or after the call, or whose times keploy cannot read, shows nothing, and
+// the word stays refused, naming why.
+func (f *follows) excusedLive(x Raw, v *valueDrift, i int, t string, at time.Time, why, place string) bool {
+	if f == nil {
+		return false
+	}
+	before, untimed := recordedGave(x.recordedAt(), x.answered, at, x.mock)
+	view, followed := f.dc.recordedThere(x, v, func(own string) bool { return f.dc.rawTokens(own)[i][t] })
+	took := f.dc.recordedTook(x, v)
+	switch {
+	case untimed != "":
+		f.refused = untimed + ", so the recording cannot show the value does not follow that word"
+		return false
+	case !before:
+		f.refused = "the recording did not give the application that payload before the call, so it cannot show the value does not follow that word"
+		return false
+	case view == fNone:
+		f.refused = "no one field of what record's full round gave there holds that word, so the recording cannot show the value does not follow it"
+		return false
+	case view == fElsewhere:
+		f.refused = "record's full round gave the application that word at " + followed + ", which the recording lacks, so it cannot show the value does not follow it"
+		return false
+	case view == fSent:
+		f.refused = "the word stands at " + followed + ", in what the application sent there and not in an answer it was given, so the recording cannot show the value does not follow it"
+		return false
+	case view == fFollowed:
+		f.refused = "the recording gave the application another value there, " + followed + ", so it cannot show the value does not follow it"
+		return false
+	case took != "":
+		f.refused = took + ", so the value may have followed that payload's words to wherever record's full round gave them, and the recording cannot show it does not follow that word"
+		return false
+	case f.dc.holdsWord(f.rec, t):
+		f.refused = "the recorded value holds that word too, so it cannot show the value does not follow it"
+		return false
+	}
+	if f.first == "" {
+		f.first = why
+	}
+	if f.moved == "" {
+		f.moved = v.wordOf(t, false) + " stands in " + place + ", where the recording gave the application another value, which the recorded value took none of the words of: a copy moves with its source, so the value is no copy of it"
+	}
+	f.source(x.mock)
+	return true
+}
+
+// recordedThere is liveAt the other way about: what the recording gave the
+// application at the fields of x's view (ServedLive) that hold what in
+// finds, where the recording's text holds it nowhere (excusedLive). fSent
+// where such a field is no field of its answer (the request the
+// application sent, which it made itself: no word the recording gave it;
+// or of a kind whose spec holds its request and answer in one field, which
+// has no answer apart: answerApart), followed naming the field; fMoved
+// where the recording gave another value at every such field (by path),
+// which the recorded value took none of the words of (movedFrom);
+// fFollowed where it took a word of one, or drifted with it, or one lost no
+// word in F (followed says which); fElsewhere where a field holding it is
+// one the recording lacks (followed names the field); fNone where x has no
+// view or no one field of the view holds it (it stands across two). Texts
+// are read as excusedRaw reads them: stamps and protocol-phase clock reads
+// blanked.
+func (dc *DriftCache) recordedThere(x Raw, v *valueDrift, in func(own string) bool) (view fView, followed string) {
+	if !x.Live() {
+		return fNone, ""
+	}
+	text := dc.searched(x, false)[0]
+	liveText := dc.searched(*x.live, false)[0]
+	view = fNone
+	for _, g := range x.live.payload().fields {
+		if g.end > len(liveText) || !in(liveText[g.start:g.end]) {
+			continue
+		}
+		if !answerPath(g.path) {
+			return fSent, g.describe()
+		}
+		own, ok := fieldText(x.payload().fields, text, g)
+		if !ok {
+			return fElsewhere, g.describe()
+		}
+		if why := movedFrom(dc.of(own, liveText[g.start:g.end]), v); why != "" {
+			return fFollowed, why
+		}
+		view = fMoved
+	}
+	return view, ""
+}
+
+// recordedTook says where a word of what the drifted value v changed, as
+// recorded (eachChanged), stands in x's payload as the recording gave it,
+// stamps searched as any text, "" where none does: the recording gave the
+// application that payload and the recorded value took a word of it (at
+// whatever field). A value that copies a word of a payload by where it
+// stands there (the id of a row F gave in another order) took a word of it
+// in both runs, at another field in each, so a word of what F gave there
+// the recording lacks shows nothing (excusedLive).
+func (dc *DriftCache) recordedTook(x Raw, v *valueDrift) string {
+	tokens := dc.searchedTokens(x, true)
+	return v.eachChanged(func(i int, w string, recorded bool) string {
+		if !recorded || i >= len(tokens) || !tokens[i][w] {
+			return ""
+		}
+		if f, _ := dc.fieldOf(x, dc.searched(x, true), w); f != "" {
+			return v.wordOf(w, true) + " stands in " + x.mock + " at " + f + ", as the recording gave it"
+		}
+		return v.wordOf(w, true) + " stands in " + x.mock + "'s payload, as the recording gave it"
+	})
+}
+
+// fieldText is the text of the field of fields (in text) at f's path,
+// false where there is none or it runs past text.
+func fieldText(fields []rawField, text string, f rawField) (string, bool) {
+	for _, g := range fields {
+		if g.path == f.path && g.key == f.key {
+			if g.end <= len(text) {
+				return text[g.start:g.end], true
+			}
+			return "", false
+		}
+	}
+	return "", false
+}
+
+// movedFrom is movedAway the other way about: why a place the recording
+// gave the application another value at than F gave (ed: the recorded value
+// there and the one F gave, which holds a word of the drifted value v as F
+// saw it) does not show v no copy of it, "" where it does: the place lost a
+// word in F (a value the recording could have copied), v as recorded holds
+// none of the words the place lost, in any reading or form, not even inside
+// a longer word, nor does the place as recorded hold, inside a longer word,
+// a word v lost, and the two did not drift together (sources). A place that
+// lost no word shows nothing, and neither does one whose words the
+// recorded value took: there it stays where the value may have come from
+// (fail closed). Only finding more stops it: no word's shape is read.
+func movedFrom(ed, v *valueDrift) string {
+	lost := false
+	for i := range ed.lost {
+		for w := range ed.lost[i] {
+			lost = true
+			if strings.Contains(v.rec, w) || v.decoded && strings.Contains(v.decRec, w) || gluedIn(v, w, true) {
+				return "and the recorded value took a word of it"
+			}
+		}
+	}
+	if !lost {
+		return "which holds no word record's full round's lacks"
+	}
+	for i := range v.lost {
+		for w := range v.lost[i] {
+			if gluedIn(ed, w, true) {
+				return "and it holds a word the recorded value lost"
+			}
+		}
+	}
+	if found, _ := sources(ed, v); found {
+		return "and the value drifted with it"
+	}
+	return ""
+}
+
+// excusedGiven is excused of word t of the drifted value v, found in reading
+// i in the answer of a recording F gave the application before the call
+// that no earlier place of the call's own test is (g: another recorded
+// test's, or one F gave earlier in the running set), whose reason there is
+// why (givenWhy): the recording gave the application g's answer strictly
+// before the call (recordedGave), and F gave it t at the fields the
+// recording gave it at (givenWords.same: g served unchanged, or its view
+// showing t there). Both runs then gave the application that word there, and
+// one of the two values lacks it (excused), and no word that changed of
+// that value (but for a read of the clock) stands in any place the word
+// rule reads, g's payload or another, as the recording or F gave it
+// (tookElsewhere): the value was made beside the word without
+// taking it, and an application that copied it would have copied it in
+// both runs. That is what tells a word a
+// value holds by chance (a group of a random id that another test's random
+// id holds too) from a copy, never the word's shape. A field is a whole
+// payload field (an HTTP body), so a view giving the same ids in another
+// order gives each id's words at the same field in both runs: a value that
+// copied the first id holds one id in each run, and the value lacking t
+// holds the other id's words, so it stays refused. A recording F served changed with no view, a
+// view that gives the word at another field or not at all, one the recording
+// answered at or after the call, or whose times keploy cannot read, shows
+// nothing, and the word stays refused, naming why.
+func (f *follows) excusedGiven(g givenWords, v *valueDrift, i int, t string, at time.Time, why string) bool {
+	if f == nil {
+		return false
+	}
+	gat := g.at
+	if g.noTime {
+		gat = time.Time{}
+	}
+	before, untimed := recordedGave(gat, g.answered, at, g.mock)
+	fv, took := fNone, ""
+	if g.sameHolds(i, t) {
+		fv, took = fSame, f.tookElsewhere(v, t)
+	}
+	stands := v.wordOf(t, v.recTok[i][t]) + " stands in " + g.mock
+	if !f.excused(t, before, fv, "", untimed, why, stands, took) {
+		return false
+	}
+	if f.chance == "" {
+		lacks := "the value record's full round saw"
+		if !v.recTok[i][t] {
+			lacks = "the recorded value"
+		}
+		f.chance = stands + ", which the recording and record's full round both gave the application at the same fields before the call, and " + lacks + " lacks that word, and no word of it that changed, but for a read of the clock, stands in any place either run gave the application before the call: an application that copied the word would have copied it in both runs, so the value holds it by chance"
+	}
+	f.source(g.mock)
+	if g.set {
+		for _, x := range f.given {
+			if x.mock == g.mock && x.at.Equal(g.at) {
+				return true
+			}
+		}
+		f.given = append(f.given, Raw{mock: g.mock, at: g.at, noTime: g.noTime, answered: g.answered, conn: g.conn, pos: g.pos, served: true, rRead: true, first: g.first, last: g.last})
+	}
 	return true
 }
 
@@ -259,6 +982,7 @@ func (dc *DriftCache) holdsWord(value, t string) bool {
 // set); only the sources among them are ordered.
 func (fol *follows) followed(ln Learned, at time.Time, earlier []Earlier, raw []Raw) Learned {
 	source := func(mock string) bool { return fol.sources[mock] }
+	raw = append(raw[:len(raw):len(raw)], fol.given...)
 	rec, untoldRec := recordedOrder(at, earlier, raw, source)
 	f, untoldF := servedOrder(earlier, raw, source)
 	why := ""
@@ -274,16 +998,20 @@ func (fol *follows) followed(ln Learned, at time.Time, earlier []Earlier, raw []
 	}
 	if why != "" {
 		lead := fol.first
-		// No call reaches this today, and no row does: refute sets a source
-		// aside only where F served it as recorded, the recording gave it
-		// before the call and F's value is not in it, and the word rule
-		// then reads the same word at the same place on the same terms
-		// (excused), so it lets the word go there and sets first before a
-		// value is learned as noise. Should the two searches ever part, the
-		// refusal still names the source set aside (fail closed), and the
-		// echo's refusal in classifyRead does the same.
+		// refute sets a source aside only where F served it as recorded, the
+		// recording gave it before the call and F's value is not in it, and
+		// the word rule then reads the same word at the same place on the
+		// same terms (excused), so it lets the word go there and sets first
+		// before a value is learned as noise. A leaf refuteSeen sets aside
+		// leaves first unset where the value's words there are a clock
+		// read's, which the word rule never reads (aside). Either way the
+		// refusal names the source set aside (fail closed), and the echo's
+		// refusal in classifyRead does the same.
 		if lead == "" {
 			lead = fol.refuted
+		}
+		if lead == "" {
+			lead = fol.aside
 		}
 		ln.Kind, ln.Why, ln.Echo = KindUnaccounted, lead+"; "+why+", so keploy cannot tell a copy from a varying value", nil
 	}
@@ -465,7 +1193,7 @@ func servedOrder(earlier []Earlier, raw []Raw, source func(mock string) bool) (o
 		switch {
 		case e.Given:
 			order = append(order, "the test case's request")
-		case e.Payload.Read():
+		case e.Payload.Read(), e.Payload.ordered:
 			add(e.Mock, e.Payload.first, e.Payload.last)
 		default:
 			add(e.Mock, 0, 0)
