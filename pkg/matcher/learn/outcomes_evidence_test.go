@@ -622,3 +622,55 @@ func TestOutcomeASecondAnotherTestsAnswerAlsoHoldsIsTheCallsOwnRead(t *testing.T
 		oRefused(t, "a microsecond "+c.what+" holds", oWord(t, Decide(iCall(p, String, rec, live, oAt, fAt, own, nil, []Raw{c.x})), rec, live), "another-scope", "mock-1200")
 	}
 }
+
+// A start-up answer round F served as recorded, asked in a session of its
+// own (every driver opens one, so the request changed): a fresh id's 12-bit
+// group stands in one of its seeded ids by chance, about once in 38. At the
+// field that holds the word the place is unchanged, so the piece is chance
+// and the id fresh, whichever run's id holds it; a word that counts by its
+// text there is a conflict. Where round F's answer holds round F's word and
+// the recording's holds none, or gave round F's id whole, it is refused.
+func TestOutcomeAPieceAStartUpsAnswerHoldsInASessionOfItsOwnIsChance(t *testing.T) {
+	const (
+		recSID, liveSID = "5Xa0KmL0RxqLFfFyLtYhPw", "w6Hg1H8rSmm44V0Mn3o7Jg"
+		seeded, other   = "bb7ed9ee-670e-48d1-982f-b54b2b73982f", "0f1e2d3c-5b6a-4978-8a9b-cdef01234567"
+		plain, holding  = "1111aaaa-2222-4333-9444-444455556666", "9999cccc-7777-48d1-8888-000011112222"
+		long            = "bb7ed9ee-7777-4abc-8888-000011112222"
+	)
+	ans := func(sid string, ids ...string) Raw {
+		rows := make([]models.PostgresV3Cells, 0, len(ids))
+		for _, id := range ids {
+			rows = append(rows, models.PostgresV3Cells{{Value: id}})
+		}
+		return oPg("mock-0", 2*time.Second, "SELECT _id FROM suites /* session "+sid+" */", rows, "SELECT 2")
+	}
+	call := func(rec, live string, boot Raw) []Decision {
+		return Decide(oInput("body.cmd.documents.0._id", rec, live, nil, []Raw{boot}))
+	}
+	asRecorded := func(sid string) Raw {
+		return ans(recSID, seeded, other).ServedAs(1).ServedLive(ans(sid, seeded, other))
+	}
+	for _, c := range []struct {
+		what, rec, live, sid string
+	}{
+		{"round F's id holds the piece, asked in the recorded session", plain, holding, recSID},
+		{"round F's id holds the piece, asked in a session of its own", plain, holding, liveSID},
+		{"the recorded id holds the piece, round F's own session", holding, plain, liveSID},
+	} {
+		r, f := "4333", "48d1"
+		if c.rec == holding {
+			r, f = f, r
+		}
+		d := oWord(t, call(c.rec, c.live, asRecorded(c.sid)), r, f)
+		if d.Outcome != OutcomeFresh {
+			t.Errorf("%s: %s; want fresh, a 12-bit piece at the start-up's answer as recorded is chance", c.what, oDescribe([]Decision{d}))
+		}
+	}
+	oRefused(t, "round F's 32-bit word at the answer as recorded, its own session", oWord(t, call(plain, long, asRecorded(liveSID)), "1111aaaa", "bb7ed9ee"), RefusalConflict, "mock-0")
+	onlyF := ans(recSID, other).ServedAs(1).ServedLive(ans(liveSID, other, "c0de0000-1111-48d1-8222-333344445555"))
+	oRefused(t, "round F's answer holds round F's word, the recording's none", oWord(t, call(plain, holding, onlyF), "4333", "48d1"), RefusalUnknown, "mock-0")
+	whole := ans(recSID, seeded, other).ServedAs(1).ServedLive(ans(liveSID, holding, other))
+	if d := call(plain, holding, whole); len(d) == 0 || d[0].Outcome != OutcomeRefused {
+		t.Errorf("FALSE GREEN? round F's answer gave round F's id whole: %s; want refused", oDescribe(d))
+	}
+}
