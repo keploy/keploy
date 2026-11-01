@@ -1637,3 +1637,84 @@ func TestMergeVariablesKeepsAWhy(t *testing.T) {
 		}
 	}
 }
+
+// An offset learned at a Step holds by holdsAtStep, which this keploy
+// registers, and nothing by the declared default (a keploy that reads no
+// Step: fail closed). holdsAtStep applies Holds' own guards first (a window
+// with no start or that ends before it starts, a res of none, a range
+// around zero, a Step below Res, a value coarser than the remainder it is
+// locked to). Read at its values' own second (Step is Res), clock - 2s is
+// checked against that whole second, whatever its range's width; the same
+// offset with no Step (an old recording) checks as before: too fine for its
+// unit, it is not Narrow and holds nothing.
+func TestAnOffsetLearnedAtAStepHoldsByItsStepAndItsGuards(t *testing.T) {
+	sec := time.Second
+	from := time.Date(2026, 10, 28, 9, 30, 15, 400e6, time.UTC)
+	to := from.Add(61 * time.Millisecond)
+	read := to.Truncate(time.Minute).Add(-103 * sec)
+	lock := ClockOffset{Min: -103 * sec, Max: -102 * sec, Res: sec, Layout: LayoutTyped, Step: time.Minute}
+	if !lock.Holds(read, sec, from, to) {
+		t.Fatal("FALSE RED: the cutter's value does not hold at its phase")
+	}
+	defer func(f func(ClockOffset, time.Time, time.Duration, time.Time, time.Time) bool) { holdsStep = f }(holdsStep)
+	holdsStep = declaredHoldsStep
+	if lock.Holds(read, sec, from, to) {
+		t.Error("FALSE GREEN: a Step holds with no keploy to read it")
+	}
+	holdsStep = ClockOffset.holdsAtStep
+	unsigned := lock
+	unsigned.Min, unsigned.Max = -sec, sec
+	below := lock
+	below.Step = sec / 2
+	for _, c := range []struct {
+		name     string
+		o        ClockOffset
+		res      time.Duration
+		from, to time.Time
+	}{
+		{"a window with no start", lock, sec, time.Time{}, to},
+		{"a window that ends before it starts", lock, sec, to, from},
+		{"a res of none", lock, 0, from, to},
+		{"a range around zero", unsigned, sec, from, to},
+		{"a Step below its Res", below, sec, from, to},
+		{"a value written coarser than its remainder", lock, time.Minute, from, to},
+	} {
+		if c.o.Holds(read, c.res, c.from, c.to) {
+			t.Errorf("FALSE GREEN: %s holds", c.name)
+		}
+	}
+	for _, d := range []time.Duration{73 * sec, 133 * sec} {
+		if lock.Holds(to.Truncate(time.Minute).Add(-d), sec, from, to) {
+			t.Errorf("FALSE GREEN: a look-back of %s holds", d)
+		}
+	}
+	if lock.Holds(to.Truncate(sec), sec, from, to) {
+		t.Error("FALSE GREEN: a dropped look-back holds")
+	}
+
+	own := ClockOffset{Min: -2*sec - 61*time.Millisecond, Max: -sec - 400*time.Millisecond, Res: sec, Layout: LayoutTyped, Step: sec}
+	if lo, hi := own.CutOffsets(); lo != -2*sec || hi != -2*sec || !own.Narrow() || own.Fine() {
+		t.Fatalf("clock - 2s at the second: cuts %s to %s, Narrow %v, Fine %v", lo, hi, own.Narrow(), own.Fine())
+	}
+	for phase := time.Duration(0); phase < sec; phase += 50 * time.Millisecond {
+		f := from.Truncate(sec).Add(phase)
+		tt := f.Add(61 * time.Millisecond)
+		if !own.Holds(tt.Truncate(sec).Add(-2*sec), sec, f, tt) {
+			t.Errorf("FALSE RED: clock - 2s at %s into its second", phase)
+		}
+		if own.Holds(tt.Truncate(sec).Add(-5*sec), sec, f, tt) || own.Holds(tt.Truncate(sec), sec, f, tt) {
+			t.Errorf("FALSE GREEN: clock - 5s or a plain read at %s into its second", phase)
+		}
+	}
+	old := own
+	old.Step = 0
+	if old.Narrow() || !old.Fine() || old.Holds(to.Truncate(sec).Add(-2*sec), sec, from, to) || old.CoarseCut() {
+		t.Errorf("an old recording's clock - 2s at the second reads unlike main: Narrow %v, Fine %v, CoarseCut %v", old.Narrow(), old.Fine(), old.CoarseCut())
+	}
+	if m := own.Meet(ClockOffset{Min: -2 * sec, Max: -sec, Res: time.Millisecond, Layout: LayoutTyped, Step: time.Millisecond}); m.Step != sec || m.Empty() {
+		t.Errorf("two offsets read at their own cuts meet as %+v, want at the coarser", m)
+	}
+	if m := own.Meet(lock); m.Step != StepApart {
+		t.Errorf("an own cut and a phase lock meet as %+v, want StepApart", m)
+	}
+}
