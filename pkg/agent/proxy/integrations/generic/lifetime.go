@@ -58,10 +58,25 @@ func notOwnedExchange(reqBuffs [][]byte, mockDb integrations.MockMemDb, call int
 	if !ok {
 		return "", false
 	}
-	return sf.FindStagedNotOwned(models.GENERIC, call, func(mk *models.Mock) bool {
+	return sf.FindStagedNotOwned(models.GENERIC, call, exchangeOf(reqBuffs))
+}
+
+// namedAgainExchange is, under keploy mock replay, for a request
+// notOwnedExchange named none for, the recorded exchange this request is
+// which an earlier refused request of the replay was already named as
+// (integrations.NamedAgain): a recording answers one call at most. ""
+// under any other replay, and when there is none.
+func namedAgainExchange(reqBuffs [][]byte, mockDb integrations.MockMemDb, call integrations.CallRound) string {
+	return integrations.NamedAgain(mockDb, models.GENERIC, call, nil, exchangeOf(reqBuffs))
+}
+
+// exchangeOf is the lookups' match (notOwnedExchange, namedAgainExchange):
+// a per-test exchange that is reqBuffs, byte for byte.
+func exchangeOf(reqBuffs [][]byte) func(*models.Mock) bool {
+	return func(mk *models.Mock) bool {
 		return mk.Spec.Metadata[models.MetadataLifetimeKey] == models.MetadataLifetimePerTest &&
 			findExactMatch([]*models.Mock{mk}, reqBuffs, true) == 0
-	})
+	}
 }
 
 // restagedExchangeNote is what a miss says when the replay staged a test set

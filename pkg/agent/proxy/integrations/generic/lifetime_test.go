@@ -130,6 +130,9 @@ type exactStore struct {
 	// (integrations.CallRound.InRouting, InListing).
 	unrouted string
 	listed   map[string][]string
+	// named are the exchanges an earlier miss was named as: the lookup
+	// names none of them again (FindNamedAgain does).
+	named map[string]bool
 }
 
 func (s exactStore) MarkCallRound() integrations.CallRound {
@@ -150,11 +153,23 @@ func (s exactStore) FindStagedNotOwned(_ models.Kind, call integrations.CallRoun
 		return "", false
 	}
 	for _, m := range s.staged {
-		if !s.own[m.Name] && match(m) {
+		if !s.own[m.Name] && !s.named[m.Name] && match(m) {
 			return m.Name, false
 		}
 	}
 	return "", false
+}
+
+func (s exactStore) FindNamedAgain(_ models.Kind, call integrations.CallRound, _ []string, match func(*models.Mock) bool) string {
+	if !s.exact || !call.Read() {
+		return ""
+	}
+	for _, m := range s.staged {
+		if !s.own[m.Name] && s.named[m.Name] && match(m) {
+			return m.Name
+		}
+	}
+	return ""
 }
 func (s exactStore) GetSessionMocks() ([]*models.Mock, error)         { return nil, nil }
 func (s exactStore) GetPerTestMocksInWindow() ([]*models.Mock, error) { return nil, nil }
@@ -261,6 +276,35 @@ func TestUnderKeployMockAMissOnAnExchangeTheTestDoesNotOwnIsTheMappingEdit(t *te
 		store.unrouted = why
 		if r := missReport(t, store, "AUTH step2"); !strings.Contains(r.NextSteps, "Likely, at replay this test made the call on a connection it opened itself") || strings.Contains(r.NextSteps, "keploy mock does not decide") {
 			t.Errorf("unrouted %q: keploy test's miss is not record's: %q", why, r.NextSteps)
+		}
+	}
+}
+
+// Under keploy mock replay, an exchange an earlier miss was already named as
+// (the lookup names none for it) is named again, with worker:'s limit: a
+// recording answers one call at most, so the mapping edit the earlier miss
+// was told answers one of the two. Under keploy test, for either side that
+// lacks proven routing, the miss keeps its words.
+func TestUnderKeployMockAnExchangeNamedBeforeIsNamedWithWorkersLimit(t *testing.T) {
+	m := exchange("mock-auth-x", "AUTH step2")
+	m.Spec.Metadata = map[string]string{"type": "config", models.MetadataLifetimeKey: models.MetadataLifetimePerTest}
+	store := exactStore{exact: true, staged: []*models.Mock{m}, unrouted: models.UnroutedUnstaged, listed: map[string][]string{"mock-auth-x": {"o::TestA"}}, named: map[string]bool{"mock-auth-x": true}}
+	r := missReport(t, store, "AUTH step2")
+	if r.NotOwned {
+		t.Fatalf("an exchange named before was named not-owned again: %+v", r)
+	}
+	for _, want := range []string{
+		"This call, made between tests, is mock-auth-x, which mappings.yaml lists for o::TestA, again:",
+		"so moving mock-auth-x to worker: answers one of these calls, never both.",
+	} {
+		if !strings.Contains(r.NextSteps, want) {
+			t.Errorf("keploy mock's miss does not say %q: %q", want, r.NextSteps)
+		}
+	}
+	for _, why := range []string{models.UnroutedUnmarked, models.UnroutedNotEnabled, ""} {
+		store.unrouted = why
+		if r := missReport(t, store, "AUTH step2"); strings.Contains(r.NextSteps, "again:") || strings.Contains(r.NextSteps, "keploy mock") {
+			t.Errorf("unrouted %q: keploy test's miss says keploy mock's words: %q", why, r.NextSteps)
 		}
 	}
 }

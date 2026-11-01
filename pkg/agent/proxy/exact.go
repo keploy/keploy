@@ -589,6 +589,13 @@ func (s *stagingNames) has(epoch uint64, name string) bool {
 	return ok && s.epoch == epoch
 }
 
+// any reports whether the set of staging epoch holds a name.
+func (s *stagingNames) any(epoch uint64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.names) > 0 && s.epoch == epoch
+}
+
 // StagedOwnerBegun reports whether name, a staged mock, is owned by a test
 // that has begun in the current staging (integrations.BegunOwnerReader): a
 // call made after its test began, where that test's view no longer shows it,
@@ -974,6 +981,82 @@ func (m *MockManager) findNotOwned(kind models.Kind, call integrations.CallRound
 	}
 	return found, false
 }
+
+// FindNamedAgain is, under exact serving, the name of the first recording of
+// kind, in the order findNotOwned tries them (the trees, then with keys the
+// recordings kept on disk under them), that an earlier miss of call's staging
+// was named as, that the open view neither holds nor shows, that call's first
+// read did not hold, that no call of the set consumed, and that match
+// accepts (integrations.NamedAgainFinder); "" for none, and once the replay
+// staged another set. A parser asks it of a call findNotOwned named nothing
+// for: each recording is named for one miss at most, as it answers one call
+// at most, so this call is one more than the recordings made elsewhere hold.
+// Nothing is claimed, served or handed out; with nothing named in the
+// staging no recording is read.
+func (m *MockManager) FindNamedAgain(kind models.Kind, call integrations.CallRound, keys []string, match func(*models.Mock) bool) string {
+	v := m.exactView()
+	if v == nil || match == nil || !call.Read() {
+		return ""
+	}
+	epoch := call.Epoch()
+	moved := func() bool { return m.stagingEpoch.Load() != epoch }
+	if moved() || !m.exact.named.any(epoch) {
+		return ""
+	}
+	again := func(mk *models.Mock) bool {
+		if mk == nil || mk.Kind != kind || !m.exact.named.has(epoch, mk.Name) {
+			return false
+		}
+		if _, own := v.index[mk.Name]; own || call.Held(mk.Name) {
+			return false
+		}
+		return !v.shows(mk) && !m.consumedInSet(mk.Name) && match(mk)
+	}
+	m.treesMu.RLock()
+	trees := []*TreeDb{m.filtered, m.unfiltered, m.startup}
+	m.treesMu.RUnlock()
+	narrow := len(keys) > 0 && models.HasRequestKeys(kind)
+	found := ""
+	for _, t := range trees {
+		var values []*models.Mock
+		if narrow {
+			values = t.keyedValues(requestKeyIndex, keys, kind)
+		} else {
+			values = m.treeValues(t, kind)
+		}
+		for _, mk := range values {
+			if again(mk) {
+				found = mk.Name
+				break
+			}
+		}
+		if found != "" {
+			break
+		}
+	}
+	if found == "" && len(keys) > 0 {
+		m.rangeRecorded(kind, keys, func(name string, load func() (*models.Mock, error)) bool {
+			if !m.exact.named.has(epoch, name) {
+				return true
+			}
+			mk, err := load()
+			if err != nil {
+				return true
+			}
+			if again(mk) {
+				found = mk.Name
+				return false
+			}
+			return true
+		})
+	}
+	if moved() {
+		return ""
+	}
+	return found
+}
+
+var _ integrations.NamedAgainFinder = (*MockManager)(nil)
 
 // RecordingSource visits, of the test set staged, every recorded mock of kind
 // indexed under any of keys (models.RequestKeys) that the agent keeps out of

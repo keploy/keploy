@@ -521,6 +521,20 @@ type StagedKeyFinder interface {
 	FindStagedNotOwnedByKeys(kind models.Kind, call CallRound, keys []string, match func(*models.Mock) bool) (name string, restaged bool)
 }
 
+// NamedAgainFinder is an optional StagedFinder extension: for a call the
+// lookup named no recording for, the name of the first recording of kind,
+// in the order StagedFinder looks, that match accepts and that an earlier
+// miss of call's staging was already named as, which the open view does not
+// show and no call of the set consumed; "" for none, and once the replay
+// staged another set. A recording is named for one miss at most, as it
+// answers one call at most, so such a call is one more than the recordings
+// made elsewhere hold. With keys it also reads the recordings kept on disk
+// under them (StagedKeyFinder). For a miss's words only: nothing is claimed,
+// served or handed out. A parser asks it through NamedAgain.
+type NamedAgainFinder interface {
+	FindNamedAgain(kind models.Kind, call CallRound, keys []string, match func(*models.Mock) bool) string
+}
+
 // CallRound is where a call's first read of the store found it made: the
 // staging it was in (WindowPacer.StagingEpoch) and the recordings, by name,
 // that read's view held as its own (the open test's, in flight into it,

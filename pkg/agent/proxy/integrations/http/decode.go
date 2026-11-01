@@ -457,9 +457,20 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				if n == 0 && report != nil && provenswitch.On() {
 					elsewhere, restaged = notOwnedRecording(reqCtx, input, db, h.newStrictNoise(headerNoise, bodyNoise, urlNoise), call)
 				}
-				if elsewhere != nil {
+				// Under keploy mock replay, a call no recording made elsewhere
+				// was named for may be one an earlier refused call was named
+				// as: the mapping edit that miss was told answers one of the
+				// two at most, which the miss says.
+				again := ""
+				if elsewhere == nil && !restaged && n == 0 && report != nil && provenswitch.On() {
+					again = namedAgainRecording(reqCtx, input, db, h.newStrictNoise(headerNoise, bodyNoise, urlNoise), call)
+				}
+				switch {
+				case elsewhere != nil:
 					markNotOwned(report, elsewhere, call)
-				} else if lmiss != nil {
+				case again != "":
+					report.NextSteps = integrations.NotOwnedAgainMappingEdit(again, call)
+				case lmiss != nil:
 					lmiss.explain(report)
 				}
 				if restaged {

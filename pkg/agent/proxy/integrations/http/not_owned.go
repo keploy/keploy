@@ -41,12 +41,7 @@ func notOwnedRecording(ctx context.Context, input *req, mockDb integrations.Mock
 	name := ""
 	switch f := mockDb.(type) {
 	case integrations.StagedKeyFinder:
-		path := ""
-		if input.url != nil {
-			path = input.url.Path
-		}
-		target := strings.Join(input.header.Values(amzTargetHeader), ",")
-		name, restaged = f.FindStagedNotOwnedByKeys(models.HTTP, call, RequestKeysOf(input.method, path, target, n.loose()), match)
+		name, restaged = f.FindStagedNotOwnedByKeys(models.HTTP, call, requestKeysOfCall(input, n), match)
 	case integrations.StagedFinder:
 		name, restaged = f.FindStagedNotOwned(models.HTTP, call, match)
 	}
@@ -54,6 +49,30 @@ func notOwnedRecording(ctx context.Context, input *req, mockDb integrations.Mock
 		return nil, restaged
 	}
 	return accepted, false
+}
+
+// namedAgainRecording is, under keploy mock replay, for a request
+// notOwnedRecording named no recording for, the recording that is this very
+// call (the strict comparison, strictDiff) which an earlier refused call of
+// the replay was already named as (integrations.NamedAgain): the
+// application made the call again, and a recording answers one call at most.
+// "" under any other replay, and when there is none.
+func namedAgainRecording(ctx context.Context, input *req, mockDb integrations.MockMemDb, n strictNoise, call integrations.CallRound) string {
+	live := liveDestination(ctx, input)
+	return integrations.NamedAgain(mockDb, models.HTTP, call, requestKeysOfCall(input, n), func(m *models.Mock) bool {
+		return m.Spec.HTTPReq != nil && len(strictDiff(ctx, input, live, m, n)) == 0
+	})
+}
+
+// requestKeysOfCall is the request keys input asks the agent's disk store by
+// (RequestKeysOf), with n's noise.
+func requestKeysOfCall(input *req, n strictNoise) []string {
+	path := ""
+	if input.url != nil {
+		path = input.url.Path
+	}
+	target := strings.Join(input.header.Values(amzTargetHeader), ",")
+	return RequestKeysOf(input.method, path, target, n.loose())
 }
 
 // restagedNote is what a miss says when the replay staged a test set again

@@ -106,50 +106,108 @@ func routedMiss(t *testing.T, p *servingProxy, path string) (int, *models.MockMi
 }
 
 // routedMockSession is one keploy mock replay session as its CLI drives the
-// agent: the recordings, the table (o::TestA lists mock-1, o::TestB mock-2)
-// and its pool, then the run's claim.
+// agent: the recordings, the table (o::TestA lists mock-1, o::TestB mock-2,
+// mock-3 and mock-4) and its pool, then the run's claim.
 func routedMockSession(t *testing.T, a *Agent, mocks []*models.Mock) {
 	t.Helper()
 	ctx := context.Background()
 	require.NoError(t, a.StoreMocks(ctx, nil, mocks))
-	require.NoError(t, a.SetScopeTable(ctx, map[string][]string{"o::TestA": {"mock-1"}, "o::TestB": {"mock-2"}}))
+	require.NoError(t, a.SetScopeTable(ctx, map[string][]string{"o::TestA": {"mock-1"}, "o::TestB": {"mock-2", "mock-3", "mock-4"}}))
 	require.NoError(t, a.SetScopePool(ctx, map[string][]string{"o": {}}))
 	claimSelf(t, a)
 }
 
+// requireMappingEdit is a refused call's miss that names name as a
+// recording made elsewhere, made where made says, with the mapping edit out
+// of o::TestB's list, never record's judging nor a record again.
+func requireMappingEdit(t *testing.T, code int, rep *models.MockMismatchReport, made, name, at string) {
+	t.Helper()
+	require.NotEqual(t, nethttp.StatusOK, code, at)
+	require.NotNil(t, rep, at)
+	require.True(t, rep.NotOwned, "%s: not named not-owned: %+v", at, rep)
+	require.Equal(t, name, rep.ClosestMock, at)
+	require.True(t, strings.HasPrefix(rep.NextSteps, "This call, made "+made+", is "+name+", which mappings.yaml lists for o::TestB."), "%s: %q", at, rep.NextSteps)
+	require.Contains(t, rep.NextSteps, "move "+name+" out of o::TestB's list to worker: in mappings.yaml", at)
+	require.NotContains(t, rep.NextSteps, "record again", at)
+	require.NotContains(t, rep.NextSteps, "Re-record", at)
+	require.NotContains(t, rep.NextSteps, "judging", at)
+}
+
 // keploy mock replay end to end (the agent's wire, the real mock manager and
-// the real HTTP parser): TestA makes TestB's call. Its miss is the mapping
-// edit, naming both the window it was made in (o::TestA's) and the test whose
-// list holds its recording (o::TestB), never record's judging nor a record
-// again. A second session (MockOutgoing resets the proxy's session) is told
-// again: the agent says it once per session, never once per agent. (Between
-// tests the agent holds no test's recording staged, so none is named there;
-// the HTTP parser's rows word that case.)
+// the real HTTP parser): calls made outside the window of the test whose list
+// holds their recording (o::TestB's). Each miss is the mapping edit, naming
+// where the call was made and the test whose list holds its recording, never
+// record's judging nor a record again: between tests before any test (mock-3),
+// in o::TestA's window (mock-2), and between tests after o::TestA (mock-4).
+// A second session (MockOutgoing resets the proxy's session) is told again:
+// the agent says it once per session, never once per agent.
 func TestKeployMockReplaysMissIsTheMappingEditInEverySession(t *testing.T) {
 	a, _ := wireAgent(t, models.MODE_TEST)
 	p := &routingProxy{newServingProxy()}
 	a.Proxy = p
-	mocks := []*models.Mock{pingMock("mock-1", "/a", "a", t0), pingMock("mock-2", "/b", "b", t0.Add(time.Second))}
+	mocks := []*models.Mock{
+		pingMock("mock-1", "/a", "a", t0), pingMock("mock-2", "/b", "b", t0.Add(time.Second)),
+		pingMock("mock-3", "/c", "c", t0.Add(2*time.Second)), pingMock("mock-4", "/d", "d", t0.Add(3*time.Second)),
+	}
 	ctx := context.Background()
 	check := func(session string) {
+		code, rep := routedMiss(t, p.servingProxy, "/c")
+		requireMappingEdit(t, code, rep, "between tests", "mock-3", session+", before any test")
 		_, serr := a.ProvenBegin(ctx, begin("TestA"))
 		require.Nil(t, serr)
-		code, rep := routedMiss(t, p.servingProxy, "/b")
+		code, rep = routedMiss(t, p.servingProxy, "/b")
 		_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", CanSkip: true, Outcome: models.ScopeOutcomePassed})
 		require.Nil(t, serr)
-		require.NotEqual(t, nethttp.StatusOK, code, session)
-		require.NotNil(t, rep, session)
-		require.True(t, rep.NotOwned, "%s: not named not-owned: %+v", session, rep)
-		require.True(t, strings.HasPrefix(rep.NextSteps, "This call, made in o::TestA's window, is mock-2, which mappings.yaml lists for o::TestB."), "%s: %q", session, rep.NextSteps)
-		require.Contains(t, rep.NextSteps, "move mock-2 out of o::TestB's list to worker: in mappings.yaml", session)
-		require.NotContains(t, rep.NextSteps, "record again", session)
-		require.NotContains(t, rep.NextSteps, "judging", session)
+		requireMappingEdit(t, code, rep, "in o::TestA's window", "mock-2", session+", in o::TestA's window")
+		code, rep = routedMiss(t, p.servingProxy, "/d")
+		requireMappingEdit(t, code, rep, "between tests", "mock-4", session+", after o::TestA")
 	}
 	routedMockSession(t, a, mocks)
 	check("session 1")
 	require.NoError(t, a.MockOutgoing(ctx, models.OutgoingOptions{}))
 	routedMockSession(t, a, mocks)
 	check("session 2")
+}
+
+// keploy mock replay end to end: the application makes TestB's call twice
+// between tests, once before o::TestA and once after it. The first miss is
+// the mapping edit for mock-2. The second finds no recording left to name (a
+// recording is named for one miss at most, as it answers one call at most):
+// it names mock-2 again, with worker:'s limit (moving mock-2 there answers
+// one of the two calls, never both), never the "no recorded mocks ...
+// Re-record" of a set that holds no recording of the call, nor record's
+// judging. A third, in o::TestA's window, says the same of its window.
+func TestKeployMockReplaysSecondCallBetweenTestsNamesWorkersLimit(t *testing.T) {
+	a, _ := wireAgent(t, models.MODE_TEST)
+	p := &routingProxy{newServingProxy()}
+	a.Proxy = p
+	ctx := context.Background()
+	routedMockSession(t, a, []*models.Mock{pingMock("mock-1", "/a", "a", t0), pingMock("mock-2", "/b", "b", t0.Add(time.Second))})
+	code, rep := routedMiss(t, p.servingProxy, "/b")
+	requireMappingEdit(t, code, rep, "between tests", "mock-2", "the first call")
+	_, serr := a.ProvenBegin(ctx, begin("TestA"))
+	require.Nil(t, serr)
+	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", CanSkip: true, Outcome: models.ScopeOutcomePassed})
+	require.Nil(t, serr)
+	again := func(made, at string) {
+		t.Helper()
+		code, rep := routedMiss(t, p.servingProxy, "/b")
+		require.NotEqual(t, nethttp.StatusOK, code, at)
+		require.NotNil(t, rep, at)
+		require.False(t, rep.NotOwned, "%s: a recording is named not-owned for one miss at most: %+v", at, rep)
+		require.True(t, strings.HasPrefix(rep.NextSteps, "This call, made "+made+", is mock-2, which mappings.yaml lists for o::TestB, again: an earlier call this replay made outside mock-2's window was already named as it."), "%s: %q", at, rep.NextSteps)
+		require.Contains(t, rep.NextSteps, "so moving mock-2 to worker: answers one of these calls, never both.", at)
+		require.Contains(t, rep.NextSteps, "'keploy mock record'", at)
+		for _, never := range []string{"No recorded mocks", "Re-record", "record again", "judging", "'keploy record'"} {
+			require.NotContains(t, rep.NextSteps, never, at)
+		}
+	}
+	again("between tests", "the second call, after o::TestA")
+	_, serr = a.ProvenBegin(ctx, begin("TestA"))
+	require.Nil(t, serr)
+	again("in o::TestA's window", "the third call, in o::TestA's window")
+	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", CanSkip: true, Outcome: models.ScopeOutcomePassed})
+	require.Nil(t, serr)
 }
 
 // keploy test end to end: a set staged with each reason the replay can send
@@ -176,6 +234,15 @@ func TestKeployTestsMissIsNeverTheMappingEdit(t *testing.T) {
 			require.True(t, rep.NotOwned, "%+v", rep)
 			require.Contains(t, rep.NextSteps, "keploy record's judging")
 			require.NotContains(t, rep.NextSteps, "keploy mock does not decide")
+			// The same call again names no recording (record's judging
+			// moves each recording a miss names), and keeps keploy test's
+			// words: never keploy mock's worker: limit.
+			code, rep = routedMiss(t, p.servingProxy, "/b")
+			require.NotEqual(t, nethttp.StatusOK, code)
+			require.NotNil(t, rep)
+			require.False(t, rep.NotOwned, "%+v", rep)
+			require.NotContains(t, rep.NextSteps, "again:")
+			require.NotContains(t, rep.NextSteps, "worker:")
 		})
 	}
 }

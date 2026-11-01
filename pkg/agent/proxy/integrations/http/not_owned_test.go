@@ -392,3 +392,45 @@ func TestKeployMocksMappingEditNamesTheTestsItsRecordingIsListedFor(t *testing.T
 		t.Fatalf("an unmarked keploy test set was told %q", r.NextSteps)
 	}
 }
+
+// keploy mock replay's miss on a call that is a recording an earlier miss was
+// already named as (integrations.NotOwnedAgainMappingEdit) names where the
+// call was made, the tests whose lists hold the recording as the first read
+// found them, and worker:'s limit: moving it there answers one of the calls,
+// never both. It never claims a listing it was not handed.
+func TestKeployMocksNamedAgainMissNamesWorkersLimit(t *testing.T) {
+	for _, tc := range []struct {
+		name, test string
+		listed     map[string][]string
+		lead       string
+	}{
+		{"one test, in a window", "o::TestB", map[string][]string{"mock-3": {"o::TestA"}},
+			"This call, made in o::TestB's window, is mock-3, which mappings.yaml lists for o::TestA, again:"},
+		{"two tests, between tests", "", map[string][]string{"mock-3": {"o::TestA", "o::TestC"}},
+			"This call, made between tests, is mock-3, which mappings.yaml lists for o::TestA and o::TestC, again:"},
+		{"no test", "", map[string][]string{"mock-1": {"o::TestB"}},
+			"This call, made between tests, is mock-3, which mappings.yaml lists for no test, again:"},
+		{"no listing", "o::TestB", nil,
+			"This call, made in o::TestB's window, is mock-3, again:"},
+	} {
+		call := integrations.NewCallRound(1, nil).InRouting(models.UnroutedUnstaged).InListing(tc.listed).WithSequence(integrations.SequenceView{Test: tc.test})
+		got := integrations.NotOwnedAgainMappingEdit("mock-3", call)
+		if !strings.HasPrefix(got, tc.lead) {
+			t.Errorf("%s: the miss says %q; want it to begin %q", tc.name, got, tc.lead)
+		}
+		for _, want := range []string{
+			"an earlier call this replay made outside mock-3's window was already named as it.",
+			"A recording answers one call at most, under worker: as in a test's list, so moving mock-3 to worker: answers one of these calls, never both.",
+			"'keploy mock record'",
+		} {
+			if !strings.Contains(got, want) {
+				t.Errorf("%s: the miss does not say %q: %q", tc.name, want, got)
+			}
+		}
+		for _, never := range []string{"record again", "judging", "'keploy record'", "Re-record"} {
+			if strings.Contains(got, never) {
+				t.Errorf("%s: the miss says %q: %q", tc.name, never, got)
+			}
+		}
+	}
+}
