@@ -7,8 +7,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	proxyutil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 )
 
 // aheadReader reads a connection as fast as the app sends on it, ahead of its
@@ -33,14 +31,12 @@ import (
 type aheadReader struct {
 	conn     net.Conn
 	lastNano atomic.Int64
-	// arrived is what has arrived from the app, counted as bytes with the
-	// close that ends the stream (io.EOF) as one more: counted before the
-	// consumer can take any of it, so a count read anywhere holds all the
-	// consumer has taken. taken is what the consumer has taken, counted
-	// alike. Where an answer ends in the stream is taken less what the
-	// consumer's buffer still holds (watchClient).
-	arrived atomic.Int64
-	taken   atomic.Int64
+	// taken is what the consumer has taken, counted as bytes with the
+	// close that ends the stream (io.EOF) as one more, as the conn's
+	// Arrived counts what has arrived (drainConn). Where an answer ends in
+	// the stream is taken less what the consumer's buffer still holds
+	// (watchClient).
+	taken atomic.Int64
 
 	mu      sync.Mutex
 	cond    *sync.Cond
@@ -126,13 +122,9 @@ func (a *aheadReader) run() {
 
 		a.mu.Lock()
 		if n > 0 && !a.closed {
-			a.arrived.Add(int64(n))
 			a.queueLocked(buf[:n], at)
 		}
 		if err != nil {
-			if errors.Is(err, io.EOF) && !a.closed {
-				a.arrived.Add(1)
-			}
 			a.err, a.errAt = err, at
 		}
 		a.cond.Broadcast()
@@ -221,19 +213,10 @@ func (a *aheadReader) Read(p []byte) (int, error) {
 	return 0, a.err
 }
 
-// Arrived is what has arrived from the connection: its bytes, those read and
-// then those its socket holds unread, and its close (io.EOF) as one more once
-// read. It may be read from any goroutine. Read in that order, it can only
-// fall short: a byte read from the socket in between is counted in neither.
-func (a *aheadReader) Arrived() int64 {
-	n := a.arrived.Load()
-	return n + proxyutil.UnreadBytes(a.conn)
-}
-
 // readTo bounds what Read takes from here at limit, counted as Taken counts:
-// past it, Read returns errPastArrived. What Arrived counted has arrived, so a
-// Read within a limit it gave does not wait on the app. Called by the
-// consumer.
+// past it, Read returns errPastArrived. What the conn's Arrived counted has
+// arrived, so a Read within a limit it gave does not wait on the app. Called
+// by the consumer.
 func (a *aheadReader) readTo(limit int64) {
 	a.mu.Lock()
 	a.bounded, a.limit = true, limit

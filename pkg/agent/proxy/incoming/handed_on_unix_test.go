@@ -452,7 +452,7 @@ func TestAClientThatLeavesOnceTheAnswerArrivedWholeIsRecorded(t *testing.T) {
 				if err != nil {
 					return
 				}
-				defer c.Close()
+				defer func() { _ = c.Close() }()
 				br := bufio.NewReader(c)
 				if _, err := http.ReadRequest(br); err != nil {
 					return

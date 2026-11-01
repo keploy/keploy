@@ -29,24 +29,26 @@ import (
 //
 // Whether the client went before the answer's end is decided by what had
 // arrived from the app when its going was seen, not by how far the ingress
-// had forwarded the answer: arrived counts what the app's side has brought,
-// its bytes (those keploy has read, and then those still unread in the app
-// connection's socket) and its close as one more once keploy has read it,
-// and is read as the going is seen, before the app is told of it;
-// endedBefore is given where the answer ended in that count (answerEnd), or
-// -1 while its end is not found. Read in that order, it can only undercount:
-// a byte the reads move out of the socket in between is in neither. A client
-// that went once the answer's end had arrived did not end the exchange: the
-// app sent that end before it could learn of the going, so the answer is the
-// app's answer to the request, whatever the client then took of it, and is
-// recorded even when forwarding the rest of it to the gone client fails (the
-// ingress reads on to its end, finishAnswer). A client that
-// takes the headers and closes without reading the body (Go's http.Get and a
-// Body.Close, a client that wanted only the status) does that as soon as
-// the ingress forwards the headers, which it does before it reads the body
-// on: an answer the app wrote whole at once, its end in the read that brought
-// its headers, was not recorded whenever the watch saw the close before the
-// ingress read the body, which a loaded host makes often.
+// had forwarded the answer: arrived drains the app's side and counts what it
+// has brought (drainConn), as the going is seen and before the app is told of
+// it. The drain reads into keploy what the app connection's socket holds,
+// without waiting, and with it what the app wrote that waited in its own send
+// queue, held there by keploy's receive window, up to drainMax; the count is
+// the kernel's of what the socket has received, its bytes read or not and its
+// close as one more (TCP_INFO), taken at once, so it can only undercount,
+// and counts nothing the app sent once told. endedBefore is given where the
+// answer ended in that count (answerEnd), or -1 while its end is not found.
+// A client that went once the answer's end had arrived did not end the
+// exchange: the app sent that end before it could learn of the going, so the
+// answer is the app's answer to the request, whatever the client then took
+// of it, and is recorded even when forwarding the rest of it to the gone
+// client fails (the ingress reads on to its end, finishAnswer). A client
+// that takes the headers and closes without reading the body (Go's http.Get
+// and a Body.Close, a client that wanted only the status) does that as soon
+// as the ingress forwards the headers, which it does before it reads the
+// body on: an answer the app wrote whole at once, its end in the read that
+// brought its headers, was not recorded whenever the watch saw the close
+// before the ingress read the body, which a loaded host makes often.
 //
 // The watch only peeks at the client's socket: what the client sends next
 // (a request it pipelined) stays for the next read, and ends the watch. A

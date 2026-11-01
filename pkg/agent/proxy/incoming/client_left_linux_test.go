@@ -32,37 +32,69 @@ import (
 // way the exchange is recorded, and not told as one its client ended. The
 // client goes once the whole answer has reached the ingress: in its socket
 // (the app's side has acknowledged it), and in the synchronous loop read by
-// its read-ahead, which then reads nothing as the going is seen (a count
-// taken while a read moves bytes out of the socket falls short of them;
-// arrived says so). The ingress is held
-// before its first body read until the client has gone and the app has been
-// told, and before its second until the client's reset of the first is back,
-// so the forward fails at its second write.
+// its read-ahead. The ingress is held before its first body read until the
+// client has gone and the app has been told, and before its second until the
+// client's reset of the first is back, so the forward fails at its second
+// write.
+//
+// Two more ways the answer is with the app's side as the client goes. In one
+// the app wrote it whole but much of it waits in the app's own send queue,
+// held there by keploy's receive window (the zero-copy loop reads the app
+// only as it forwards; the read-ahead stops at its bound, lowered here): no
+// count of keploy's sees those bytes, and before the drain the exchange was
+// told as ended by its client. The watch drains the app's side before it
+// tells the app (drainConn), so the whole answer is read. In the other the
+// client resets its connection: the watch closes the app's connection (an
+// app is told of a reset by a close), and what its socket held unread would
+// be lost with it, but the drain has read it first.
 func TestAnAnswerThatArrivedWholeIsRecordedThoughItsForwardFails(t *testing.T) {
+	type answerCase struct {
+		size int
+		// queued: the app's send queue still holds part of the answer as
+		// the client goes. reset: the client resets its connection.
+		queued, reset bool
+	}
+	cases := []answerCase{{size: 8 << 10}, {size: 64 << 10}, {size: 512 << 10, queued: true}, {size: 64 << 10, reset: true}, {size: 512 << 10, queued: true, reset: true}}
 	for _, synchronous := range []bool{false, true} {
-		for _, size := range []int{8 << 10, 64 << 10} {
-			t.Run(fmt.Sprintf("synchronous %v, %d KB", synchronous, size>>10), func(t *testing.T) {
+		for _, tc := range cases {
+			size := tc.size
+			t.Run(fmt.Sprintf("synchronous %v, %d KB, queued %v, reset %v", synchronous, size>>10, tc.queued, tc.reset), func(t *testing.T) {
+				if tc.queued {
+					saved := aheadMax
+					aheadMax = 16 << 10
+					t.Cleanup(func() { aheadMax = saved })
+				}
 				body := strings.Repeat("w", size)
 				answer := fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: %d\r\n\r\n%s", len(body), body)
 				appLn := listenForApp(t)
 				sent, told := make(chan struct{}), make(chan struct{})
+				var unsent atomic.Int64
 				go func() {
 					c, err := appLn.Accept()
 					if err != nil {
 						return
 					}
-					defer c.Close()
+					defer func() { _ = c.Close() }()
 					br := bufio.NewReader(c)
 					if _, err := http.ReadRequest(br); err != nil {
 						return
 					}
 					_, _ = io.WriteString(c, answer)
-					waitAcked(t, c)
+					if tc.queued {
+						unsent.Store(int64(unsentBy(t, c)))
+					} else {
+						waitAcked(t, c)
+					}
 					close(sent)
 					_, _ = io.Copy(io.Discard, br)
 					close(told)
 				}()
-				readAll := readAhead(t, synchronous, len(answer))
+				readAll := make(chan struct{})
+				if tc.queued {
+					close(readAll)
+				} else {
+					readAll = readAhead(t, synchronous, len(answer))
+				}
 
 				left := make(chan struct{})
 				var proxied net.Conn
@@ -87,6 +119,14 @@ func TestAnAnswerThatArrivedWholeIsRecordedThoughItsForwardFails(t *testing.T) {
 				pm, client, served, logs := serveOneGET(t, synchronous, appLn, &proxied)
 				readHeaders(t, bufio.NewReader(client))
 				waitFor(t, "the app's answer did not reach the ingress", sent, readAll)
+				if tc.queued && unsent.Load() == 0 {
+					t.Fatal("the app's send queue held none of its answer as its client went: this case tests nothing")
+				}
+				if tc.reset {
+					if err := client.(*net.TCPConn).SetLinger(0); err != nil {
+						t.Fatal(err)
+					}
+				}
 				_ = client.Close()
 				close(left)
 				tcs, toldLeft := queuedOnceGone(t, pm, served, logs)
@@ -121,7 +161,7 @@ func TestACloseDelimitedAnswerTheAppEndsOnlyOnceToldIsNotRecorded(t *testing.T) 
 				if err != nil {
 					return
 				}
-				defer c.Close()
+				defer func() { _ = c.Close() }()
 				br := bufio.NewReader(c)
 				if _, err := http.ReadRequest(br); err != nil {
 					return
@@ -160,53 +200,64 @@ func TestACloseDelimitedAnswerTheAppEndsOnlyOnceToldIsNotRecorded(t *testing.T) 
 // request: its close had arrived, a part of what had come from the app when
 // the client went, so the client did not end it. Recorded. The synchronous
 // loop reads the app ahead of its client, and has read the close by then.
-// (The zero-copy loop reads the app only as it forwards: a close it has not
-// read is not counted, as a byte in the socket is, and such an answer is not
-// recorded, and is told.)
+// The zero-copy loop reads the app only as it forwards: the close is in its
+// socket, unread, and is counted all the same (TCP_INFO counts the close the
+// socket has received; SIOCINQ counted bytes only, and such an answer was
+// not recorded, and was told).
 func TestACloseDelimitedAnswerWhoseCloseCameBeforeItsClientWentIsRecorded(t *testing.T) {
-	const body = "the whole answer"
-	appLn := listenForApp(t)
-	told := make(chan struct{})
-	go func() {
-		c, err := appLn.Accept()
-		if err != nil {
-			return
-		}
-		defer c.Close()
-		br := bufio.NewReader(c)
-		if _, err := http.ReadRequest(br); err != nil {
-			return
-		}
-		_, _ = fmt.Fprintf(c, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n%s", body)
-		_ = c.(*net.TCPConn).CloseWrite() // the answer's end
-		_, _ = io.Copy(io.Discard, br)
-		close(told)
-	}()
-	closeRead := make(chan struct{})
-	var once sync.Once
-	seen := func(_ int, err error) {
-		if errors.Is(err, io.EOF) {
-			once.Do(func() { close(closeRead) })
-		}
-	}
-	aheadReadSeen.Store(&seen)
-	t.Cleanup(func() { aheadReadSeen.Store(nil) })
-	holdBodyReads(t, func(nth int) {
-		if nth == 0 {
-			waitFor(t, "the client did not go, or the app was not told of it", told)
-		}
-	})
+	for _, synchronous := range []bool{false, true} {
+		t.Run(fmt.Sprintf("synchronous %v", synchronous), func(t *testing.T) {
+			const body = "the whole answer"
+			appLn := listenForApp(t)
+			acked, told := make(chan struct{}), make(chan struct{})
+			go func() {
+				c, err := appLn.Accept()
+				if err != nil {
+					return
+				}
+				defer func() { _ = c.Close() }()
+				br := bufio.NewReader(c)
+				if _, err := http.ReadRequest(br); err != nil {
+					return
+				}
+				_, _ = fmt.Fprintf(c, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n%s", body)
+				_ = c.(*net.TCPConn).CloseWrite() // the answer's end
+				waitAcked(t, c)                   // its close is in the ingress's socket
+				close(acked)
+				_, _ = io.Copy(io.Discard, br)
+				close(told)
+			}()
+			closeRead := make(chan struct{})
+			if synchronous {
+				var once sync.Once
+				seen := func(_ int, err error) {
+					if errors.Is(err, io.EOF) {
+						once.Do(func() { close(closeRead) })
+					}
+				}
+				aheadReadSeen.Store(&seen)
+				t.Cleanup(func() { aheadReadSeen.Store(nil) })
+			} else {
+				close(closeRead)
+			}
+			holdBodyReads(t, func(nth int) {
+				if nth == 0 {
+					waitFor(t, "the client did not go, or the app was not told of it", told)
+				}
+			})
 
-	pm, client, served, logs := serveOneGET(t, true, appLn, nil)
-	readHeaders(t, bufio.NewReader(client))
-	waitFor(t, "the app's close never reached the ingress", closeRead)
-	_ = client.Close()
-	tcs, toldLeft := queuedOnceGone(t, pm, served, logs)
-	if len(tcs) != 1 || toldLeft != 0 {
-		t.Fatalf("%d test cases reached the queue from an exchange whose close-delimited answer ended before its client went, and %d were told as ended by their client; want 1 and 0", len(tcs), toldLeft)
-	}
-	if got := tcs[0].HTTPResp.Body; got != body {
-		t.Fatalf("the recorded answer's body is %q, want %q", got, body)
+			pm, client, served, logs := serveOneGET(t, synchronous, appLn, nil)
+			readHeaders(t, bufio.NewReader(client))
+			waitFor(t, "the app's close never reached the ingress", acked, closeRead)
+			_ = client.Close()
+			tcs, toldLeft := queuedOnceGone(t, pm, served, logs)
+			if len(tcs) != 1 || toldLeft != 0 {
+				t.Fatalf("%d test cases reached the queue from an exchange whose close-delimited answer ended before its client went, and %d were told as ended by their client; want 1 and 0", len(tcs), toldLeft)
+			}
+			if got := tcs[0].HTTPResp.Body; got != body {
+				t.Fatalf("the recorded answer's body is %q, want %q", got, body)
+			}
+		})
 	}
 }
 
@@ -240,7 +291,7 @@ func TestWhatTheAppSentPastItsAnswerDoesNotMoveTheAnswersEnd(t *testing.T) {
 				if err != nil {
 					return
 				}
-				defer c.Close()
+				defer func() { _ = c.Close() }()
 				br := bufio.NewReader(c)
 				if _, err := http.ReadRequest(br); err != nil {
 					return
@@ -421,6 +472,23 @@ func unsentOrUnacked(t *testing.T, conn net.Conn) int {
 	var ierr error
 	if err := rc.Control(func(fd uintptr) { n, ierr = unix.IoctlGetInt(int(fd), unix.SIOCOUTQ) }); err != nil || ierr != nil {
 		t.Errorf("SIOCOUTQ: %v %v", err, ierr)
+		return 0
+	}
+	return n
+}
+
+// unsentBy is what conn holds in its send queue that it has not sent yet
+// (SIOCOUTQNSD).
+func unsentBy(t *testing.T, conn net.Conn) int {
+	rc, err := conn.(syscall.Conn).SyscallConn()
+	if err != nil {
+		t.Error(err)
+		return 0
+	}
+	var n int
+	var ierr error
+	if err := rc.Control(func(fd uintptr) { n, ierr = unix.IoctlGetInt(int(fd), unix.SIOCOUTQNSD) }); err != nil || ierr != nil {
+		t.Errorf("SIOCOUTQNSD: %v %v", err, ierr)
 		return 0
 	}
 	return n

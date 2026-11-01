@@ -99,22 +99,14 @@ func (c *wireTimeConn) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// Arrived is what has arrived from the conn: its bytes, those read and then
-// those its socket holds unread, and its close (io.EOF) as one more once
-// read. It may be read from any goroutine. Read in that order, it can only
-// fall short: a byte read from the socket in between is counted in neither.
-func (c *wireTimeConn) Arrived() int64 {
-	n := c.read.Load()
-	return n + proxyutil.UnreadBytes(c.Conn)
-}
-
-// Taken is what has been read from the conn, counted as Arrived counts: the
-// conn is read only as its reader takes it.
+// Taken is what has been read from the conn, counted as the app's side counts
+// what has arrived (drainConn's Arrived).
 func (c *wireTimeConn) Taken() int64 { return c.read.Load() }
 
 // readTo bounds what Read takes from here at limit, counted as Taken counts:
-// past it, Read returns errPastArrived. What Arrived counted has arrived, so a
-// Read within a limit it gave does not wait on the app. Called by the reader.
+// past it, Read returns errPastArrived. What the app's side counted as
+// arrived has, so a Read within a limit it gave does not wait on the app.
+// Called by the reader.
 func (c *wireTimeConn) readTo(limit int64) { c.bounded, c.limit = true, limit }
 
 // clientWriter is the client's connection as an answer is forwarded to it,
@@ -437,7 +429,11 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 	// it arrives: the arrival of a response's last byte (or of the close that
 	// ends its body) is where its exchange's window ends (respTimestamp
 	// below), however slow its client.
-	upAhead := newAheadReader(upConn)
+	// upSide is drained as a client's going is seen (watchClient's arrived),
+	// and counts what has arrived from the app.
+	upSide := newDrainConn(upConn)
+	defer upSide.release() // once upAhead is closed: nothing takes it after
+	upAhead := newAheadReader(upSide)
 	defer upAhead.Close() // before upConn's close, which ends its read
 	upstreamReader := bufio.NewReader(upAhead)
 	// The client is watched for its end while the app holds a whole request
@@ -461,17 +457,18 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 	// finishAnswer reads body on to its end, not forwarded, once the forward
 	// to the client failed before the answer's end was found: up to what of
 	// it the app had sent before it could learn its client had gone. That is
-	// what had arrived when the watch saw the going (it read the count before
-	// it told the app), or, the going not seen, what has arrived by now: the
-	// watch halted, the app is told nothing until its connection is closed.
-	// What had arrived is with keploy or in the app connection's socket, so
-	// reading to it does not wait on the app. Its end found there (the body's
-	// atEnd gives the verdict), the answer is the app's whole answer to the
-	// request.
+	// what had arrived when the watch saw the going (it drained the app's
+	// side and counted before it told the app), or, the going not seen, what
+	// has arrived by now, drained alike: the watch halted, the app is told
+	// nothing until its connection is closed. What had arrived is with keploy
+	// (the drain's, kept through the close the watch makes on a client's
+	// reset) or in the app connection's socket, so reading to it does not
+	// wait on the app. Its end found there (the body's atEnd gives the
+	// verdict), the answer is the app's whole answer to the request.
 	finishAnswer := func(body io.Reader) {
 		went, arrived := watch.halt()
 		if !went {
-			arrived = upAhead.Arrived()
+			arrived = upSide.drainArrived()
 		}
 		upAhead.readTo(arrived)
 		_, _ = io.Copy(io.Discard, body)
@@ -656,7 +653,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 				return
 			}
 			req.Body.Close() // Close explicitly to avoid defer leak in loop.
-			watch = watchClient(logger, clientConn, clientReader, appConn, upAhead.Arrived)
+			watch = watchClient(logger, clientConn, clientReader, appConn, upSide.drainArrived)
 		}
 
 		resp, _, err := readFinalResponse(upstreamReader, req, clientConn)
@@ -704,7 +701,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		} else if relay != nil {
 			// The body that waited for the 100 is all read: the app holds
 			// the whole request now.
-			watch = watchClient(logger, clientConn, clientReader, appConn, upAhead.Arrived)
+			watch = watchClient(logger, clientConn, clientReader, appConn, upSide.drainArrived)
 		}
 
 		// Response modifications for sync/sampling modes. appResp is the
@@ -1231,7 +1228,11 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 	clientReader := bufio.NewReader(wireConn)
 	// The app's side is stamped as it is read: when the bytes that end a
 	// response arrived from the app is where its exchange's window ends.
-	upWire := &wireTimeConn{Conn: upConn}
+	// upSide is drained as a client's going is seen (watchClient's arrived),
+	// and counts what has arrived from the app.
+	upSide := newDrainConn(upConn)
+	defer func() { upSide.release() }()
+	upWire := &wireTimeConn{Conn: upSide}
 	upstreamReader := bufio.NewReader(upWire)
 	// The client is watched for its end while the app holds a whole request
 	// of it (watchClient); endWatch ends the watch that runs, if one does,
@@ -1263,7 +1264,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 	finishAnswer := func(body io.Reader) {
 		went, arrived := watch.halt()
 		if !went {
-			arrived = upWire.Arrived()
+			arrived = upSide.drainArrived()
 		}
 		upWire.readTo(arrived)
 		_, _ = io.Copy(io.Discard, body)
@@ -1354,7 +1355,9 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 			return err
 		}
 		upConn = newConn
-		upWire = &wireTimeConn{Conn: upConn}
+		upSide.release()
+		upSide = newDrainConn(upConn)
+		upWire = &wireTimeConn{Conn: upSide}
 		upstreamReader = bufio.NewReader(upWire)
 		upConnHolder.Store(&connHolder{c: newConn})
 		return nil
@@ -1686,7 +1689,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 			_ = req.Body.Close()
 		}
 		if relay == nil {
-			watch = watchClient(logger, clientConn, clientReader, appConn, upWire.Arrived)
+			watch = watchClient(logger, clientConn, clientReader, appConn, upSide.drainArrived)
 		}
 
 		// Read response. Empty-response on idempotent methods is also
@@ -1745,7 +1748,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 				if req.Body != nil {
 					_ = req.Body.Close()
 				}
-				watch = watchClient(logger, clientConn, clientReader, appConn, upWire.Arrived)
+				watch = watchClient(logger, clientConn, clientReader, appConn, upSide.drainArrived)
 				resp, _, err = readFinalResponse(upstreamReader, req, clientConn)
 				if err != nil && endWatch() {
 					logger.Debug("The client ended the connection before the app answered its request; the app was told as the client's going would have told it", zap.Error(err))
@@ -1796,7 +1799,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		} else if relay != nil {
 			// The body that waited for the 100 is all read: the app holds
 			// the whole request now.
-			watch = watchClient(logger, clientConn, clientReader, appConn, upWire.Arrived)
+			watch = watchClient(logger, clientConn, clientReader, appConn, upSide.drainArrived)
 		}
 
 		captureEligible = captureEnabled && requestWhole
