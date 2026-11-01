@@ -70,3 +70,37 @@ func TestKeployTestServesAMarkedRecordingForEveryIdenticalReadOfItsTestCase(t *t
 	require.Equal(t, []string{"c1", "miss"}, got, "test-2 marks nothing: its recording answers once")
 	require.Equal(t, 1, misses)
 }
+
+// A `repeat: any` a person put on a write refuses the test's begin under the
+// switch, naming the test, the recording and the call, on both paths: keploy
+// mock replay's scope table and the call that opens a keploy test case. The
+// same test with the mark on its read only begins and serves it again.
+func TestAMarkOnAWriteRefusesItsTestOnEveryPath(t *testing.T) {
+	post := pingMock("mock-2", "/session/activity", "ok", t0.Add(1))
+	post.Spec.HTTPReq.Method = "POST"
+	mocks := []*models.Mock{pingMock("mock-1", "/cluster", "c1", t0), post}
+	table := map[string][]string{"o::TestCluster": {"mock-1", "mock-2"}}
+
+	a, _ := exactAgent(t, mocks, table, map[string][]string{})
+	require.NoError(t, a.SetScopeRepeat(context.Background(), map[string][]string{"o::TestCluster": {"mock-1", "mock-2"}}))
+	_, serr := a.ProvenBegin(context.Background(), begin("TestCluster"))
+	require.NotNil(t, serr, "a marked write began its test")
+	require.Contains(t, serr.Message, `"mock-2" (POST http://127.0.0.1:18093/session/activity)`)
+	require.Contains(t, serr.Message, "only on a read")
+
+	a, p := exactAgent(t, mocks, table, map[string][]string{})
+	require.NoError(t, a.SetScopeRepeat(context.Background(), map[string][]string{"o::TestCluster": {"mock-1"}}))
+	_, serr = a.ProvenBegin(context.Background(), begin("TestCluster"))
+	require.Nil(t, serr)
+	code, body := p.call(t, "/cluster")
+	require.Equal(t, 200, code)
+	require.Equal(t, "c1", strings.TrimSpace(body))
+	code, _ = p.call(t, "/cluster")
+	require.Equal(t, 200, code, "the marked read answers again")
+
+	k, _ := keployTestAgent(t, mocks, nil)
+	err := k.UpdateMockParams(context.Background(), models.MockFilterParams{Exact: &models.ExactServing{Test: "test-1", Owned: []string{"mock-1", "mock-2"}, Repeat: []string{"mock-2"}}})
+	var w *models.RepeatOnWriteError
+	require.ErrorAs(t, err, &w)
+	require.Equal(t, "mock-2", w.Mock)
+}

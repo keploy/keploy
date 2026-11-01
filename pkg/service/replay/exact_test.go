@@ -529,3 +529,29 @@ func TestAnExactPlanCarriesEachTestsRepeatMarks(t *testing.T) {
 		t.Fatalf("test-2 marks nothing, the plan says %v", got)
 	}
 }
+
+// keploy test, end to end under the switch: a mark a test's mappings.yaml
+// entry carries reaches the call that opens that test case
+// (ExactServing.Repeat), read from the file the run reads; a test case
+// that marks none opens with none.
+func TestUnderTheSwitchATestCaseOpensWithItsRepeatMarks(t *testing.T) {
+	setSwitch(t, true)
+	h := newPartialRunHarness(t, 2, 0)
+	pinWindows(h)
+	h.mocks.filtered = []*models.Mock{{Name: "mock-a", Kind: models.HTTP}, {Name: "mock-b", Kind: models.HTTP}}
+	entries := mongoEntries("mock-a", "mock-b")
+	entries[0].Repeat = models.MockEntryRepeatAny
+	mappingFile(t, h, map[string][]models.MockEntry{"test-1": entries})
+	h.run(t)
+	h.instr.mu.Lock()
+	defer h.instr.mu.Unlock()
+	opened := map[string][]string{}
+	for _, p := range h.instr.allParams {
+		if p.Exact != nil && p.Exact.Test != "" {
+			opened[p.Exact.Test] = append([]string{}, p.Exact.Repeat...)
+		}
+	}
+	if want := map[string][]string{"test-1": {"mock-a"}, "test-2": {}}; !reflect.DeepEqual(opened, want) {
+		t.Fatalf("the test cases opened with marks %v; want %v", opened, want)
+	}
+}

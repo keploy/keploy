@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	httpint "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
 	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
@@ -159,5 +160,30 @@ func TestAMarkedWriteIsHonouredAsWritten(t *testing.T) {
 		if consumed, unconsumed, misses := repeatOutcome(t, p, mm); misses != 0 || len(unconsumed) != 0 || !slices.Equal(consumed, []string{"mock-save"}) {
 			t.Fatalf("%d writes: consumed %v, unconsumed %v, misses %d; want the marked write answered, nothing left, no miss", writes, consumed, unconsumed, misses)
 		}
+	}
+}
+
+// A marked recording's repeat answers file no new take: the take log holds
+// its first answer only, once, however many identical reads the test makes,
+// so the round's readers count it consumed once, as its outcome does.
+func TestAMarkedRecordingsRepeatAnswersFileNoNewTake(t *testing.T) {
+	at := time.Now().Add(time.Second)
+	p, mm := repeatRun(t, []*models.Mock{r3Mock("mock-cluster", at, "GET", "/cluster?name=c1", "", `{"name":"c1"}`)}, "mock-cluster")
+	h := httpint.New(zap.NewNop())
+	for j := 0; j < 3; j++ {
+		if code, _ := r3SendVia(t, context.Background(), h, p, mm, models.OutgoingOptions{}, httpGet("/cluster?name=c1")); code != http.StatusOK {
+			t.Fatalf("read %d got %d", j+1, code)
+		}
+	}
+	mm.exact.round.mu.Lock()
+	var takes int
+	for _, tk := range mm.logLocked().takes {
+		if tk.Mock != nil && tk.Mock.Name == "mock-cluster" && tk.How == integrations.TakeConsumed {
+			takes++
+		}
+	}
+	mm.exact.round.mu.Unlock()
+	if takes != 1 {
+		t.Fatalf("three reads of the marked recording filed %d consumed takes; want its first answer's only", takes)
 	}
 }

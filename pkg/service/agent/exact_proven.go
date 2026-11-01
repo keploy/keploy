@@ -316,7 +316,11 @@ func (a *Agent) serveTestExactly(ctx context.Context, id string) error {
 		a.scopeMu.Lock()
 		repeat := a.scopeRepeat[id]
 		a.scopeMu.Unlock()
-		owned = a.notReal(id, markRepeat(testMocks(names, mocks), repeat))
+		marked, err := markRepeat(id, testMocks(names, mocks), repeat)
+		if err != nil {
+			return err
+		}
+		owned = a.notReal(id, marked)
 	}
 	// What the store refused of the test's mapping serves nothing; its end
 	// counts each as a recorded call the test did not make.
@@ -369,13 +373,21 @@ func (a *Agent) SetScopeRepeat(_ context.Context, repeat map[string][]string) er
 	return nil
 }
 
-// markRepeat is owned with each mock repeat names marked
+// markRepeat is owned, test's own mocks, with each mock repeat names marked
 // (models.TestModeInfo.Repeat) on a copy of its own: exact serving requires it
 // of the test once and answers every identical request of the test with it
-// again once it has. The others are owned's own.
-func markRepeat(owned []*models.Mock, repeat []string) []*models.Mock {
+// again once it has. The others are owned's own. Under the proven switch a
+// mark on a recording that is no read refuses the test's begin, naming it
+// (models.RepeatOnWrite): a person wrote it, and serving it once would
+// guess what they meant as much as serving it at any count would.
+func markRepeat(test string, owned []*models.Mock, repeat []string) ([]*models.Mock, error) {
 	if len(repeat) == 0 {
-		return owned
+		return owned, nil
+	}
+	if provenswitch.On() {
+		if err := models.RepeatOnWrite(test, owned, repeat); err != nil {
+			return nil, err
+		}
 	}
 	out := make([]*models.Mock, len(owned))
 	for i, mk := range owned {
@@ -386,7 +398,7 @@ func markRepeat(owned []*models.Mock, repeat []string) []*models.Mock {
 		}
 		out[i] = mk
 	}
-	return out
+	return out, nil
 }
 
 // testMocks is the test mocks among a test's mapped names: the data-plane
@@ -579,7 +591,9 @@ func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFi
 			if err != nil {
 				return fmt.Errorf("serve %s its own mocks: %w", ex.Test, err)
 			}
-			owned = markRepeat(testMocks(ex.Owned, mocks), ex.Repeat)
+			if owned, err = markRepeat(ex.Test, testMocks(ex.Owned, mocks), ex.Repeat); err != nil {
+				return err
+			}
 		}
 		a.scopeMu.Lock()
 		if a.testBegun == nil {

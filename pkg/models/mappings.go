@@ -89,7 +89,10 @@ type MockEntry struct {
 	// once it has answered, its recorded answer is served for every
 	// identical request the test makes, at any count. Every other recording
 	// is served as before. keploy never sets it; it reads and keeps it, and
-	// refuses any other value (RepeatMarkError). Empty on every other entry.
+	// under the proven switch refuses any other value (RepeatMarkError), the
+	// mark on a recording that is no read (RepeatOnWrite: an HTTP GET, HEAD
+	// or OPTIONS only), and the mark on a set-wide list's entry
+	// (RepeatOutsideTestError). Empty on every other entry.
 	Repeat string `json:"repeat,omitempty" yaml:"repeat,omitempty" bson:"repeat,omitempty"`
 }
 
@@ -140,6 +143,107 @@ func (tc *MappedTestCase) repeatMarkRefusal() error {
 		}
 	}
 	return nil
+}
+
+// RepeatableRead reports whether m is a call keploy knows to be a read, the
+// only kind a `repeat: any` mark may serve again (MockEntry.Repeat): an HTTP
+// GET, HEAD or OPTIONS. No other call is one: an HTTP write, and every call
+// of another protocol, whose parser does not tell a read from a write. A
+// write answered again at any count would pass a test that makes it once
+// more than recorded, which exact serving exists to catch. A nil m is none.
+func RepeatableRead(m *Mock) bool {
+	if m == nil || m.Kind != HTTP || m.Spec.HTTPReq == nil {
+		return false
+	}
+	switch strings.ToUpper(string(m.Spec.HTTPReq.Method)) {
+	case "GET", "HEAD", "OPTIONS":
+		return true
+	}
+	return false
+}
+
+// errRepeatOnWrite is a test entry that marks `repeat: any` a recording that
+// is no read keploy knows (RepeatableRead), under the proven switch.
+const errRepeatOnWrite = "test %q in mappings marks recording %q (%s) `repeat: any`, and keploy serves the mark only on a read (an HTTP GET, HEAD or OPTIONS): a write answered again at any count would pass a test that makes it once more than recorded. Delete the line to serve the recording once"
+
+// RepeatOnWriteError is the refusal of a test entry that marks `repeat: any`
+// a recording that is no read (errRepeatOnWrite): Call says what it is.
+type RepeatOnWriteError struct{ Test, Mock, Call string }
+
+func (e *RepeatOnWriteError) Error() string {
+	return fmt.Sprintf(errRepeatOnWrite, e.Test, e.Mock, e.Call)
+}
+
+// RepeatOnWrite is the refusal of the first of test's recordings, owned, its
+// mappings entry marks `repeat: any` (marked) that is no read
+// (RepeatableRead); nil when every marked one is a read. A marked name owned
+// does not hold refuses nothing: it serves nothing.
+func RepeatOnWrite(test string, owned []*Mock, marked []string) error {
+	for _, m := range owned {
+		if m == nil || !slices.Contains(marked, m.Name) || RepeatableRead(m) {
+			continue
+		}
+		call := string(m.Kind)
+		if m.Kind == HTTP && m.Spec.HTTPReq != nil {
+			call = string(m.Spec.HTTPReq.Method) + " " + m.Spec.HTTPReq.URL
+		}
+		return &RepeatOnWriteError{Test: test, Mock: m.Name, Call: call}
+	}
+	return nil
+}
+
+// errRepeatOutsideTest is an entry of a set-wide list (startup:, runner:,
+// worker:, shared:) that carries a repeat mark, under the proven switch: the
+// mark is read on a test's own list only, and each of those recordings is
+// served at most once, so it would be dropped unseen.
+const errRepeatOutsideTest = "mappings mark %s entry %q `repeat: %s`, and keploy reads the mark only on a test's own list (each %s recording is served at most once): delete the line"
+
+// RepeatOutsideTestError is the refusal of a set-wide list's entry that
+// carries a repeat mark (errRepeatOutsideTest).
+type RepeatOutsideTestError struct{ List, Mock, Value string }
+
+func (e *RepeatOutsideTestError) Error() string {
+	return fmt.Sprintf(errRepeatOutsideTest, e.List+":", e.Mock, e.Value, e.List+":")
+}
+
+// repeatOutsideTestRefusal is the refusal of m's first set-wide entry that
+// carries a repeat mark, under the proven switch; nil when none does.
+func (m *Mapping) repeatOutsideTestRefusal() error {
+	if !provenswitch.On() {
+		return nil
+	}
+	for _, l := range []struct {
+		name    string
+		entries []MockEntry
+	}{{"startup", m.Startup}, {"runner", m.Runner}, {"worker", m.Worker}, {"shared", m.Shared}} {
+		for _, e := range l.entries {
+			if e.Repeat != "" {
+				return &RepeatOutsideTestError{List: l.name, Mock: e.Name, Value: e.Repeat}
+			}
+		}
+	}
+	return nil
+}
+
+// mappingDoc is Mapping without its methods, which its unmarshalers decode.
+type mappingDoc Mapping
+
+// UnmarshalYAML reads m as its fields say, then refuses a set-wide entry
+// that carries a repeat mark under the proven switch
+// (repeatOutsideTestRefusal).
+func (m *Mapping) UnmarshalYAML(node *yaml.Node) error {
+	if err := node.Decode((*mappingDoc)(m)); err != nil {
+		return err
+	}
+	return m.repeatOutsideTestRefusal()
+}
+
+// UnmarshalJSON is UnmarshalYAML for JSON.
+func (m *Mapping) UnmarshalJSON(data []byte) error {
+	if err := json.Unmarshal(data, (*mappingDoc)(m)); err != nil {
+		return err
+	}
+	return m.repeatOutsideTestRefusal()
 }
 
 // RecordedWithS12Routing is the Mapping.RecordedWith mark of a test set keploy
