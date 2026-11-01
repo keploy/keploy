@@ -884,7 +884,7 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	// and, where the runs know their test's begin, it was made before it.
 	late := ""
 	if dc.in.Drifts != nil && dc.in.Drifts.clientTests && len(hs) == 0 && cutWhy == "" && dc.instantEchoed(c) == "" {
-		if late = madeSinceBegin(dc.in.Window, c, zone); late == "" {
+		if late = madeSinceBegin(dc.in.Window, dc.in.RecBegan, c, zone); late == "" {
 			return dc.learned(path, at, n, r, l, OutcomeFresh, "the test's own value: no place before the call holds it; bound at its first call", nil)
 		}
 	}
@@ -932,22 +932,30 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 // no earlier place holds, may have been made after its test began in a
 // run (step 8 of the instant order: the test's own value is one made before the begin;
 // one made later is a read of the clock, which steps 5 and 7 learn where a
-// window holds it, plus an offset, or a value the test gave): "" where a run
-// knows no begin (the test's own value, as a test of no begin makes it),
-// where c is no moment (a number matched by its text), or where each
-// run's moment, its whole cut, lies before its run's begin, read as UTC
-// and, for a wall clock of no zone, in the application's zone too. A time
-// of day names no day, so no begin.
-func madeSinceBegin(w *Window, c changedInstant, zone *time.Location) string {
-	wb := w.sinceBegin()
-	if wb == nil || c.rm == nil || c.lm == nil {
+// window holds it, plus an offset, or a value the test gave). Each run's
+// begin is its window's; with no window from the begin (a call that
+// carries no app clock), the recording's is recBegan and round F's is
+// unknown. "" where no run knows its begin (the test's own value, as a
+// test of no begin makes it), where c is no moment (a number matched by
+// its text), or where each run's moment that knows its begin, its whole
+// cut, lies before it, read as UTC and, for a wall clock of no zone, in
+// the application's zone too. A time of day names no day, so no begin.
+func madeSinceBegin(w *Window, recBegan time.Time, c changedInstant, zone *time.Location) string {
+	if c.rm == nil || c.lm == nil {
 		return ""
 	}
-	for _, run := range []struct {
+	type run struct {
 		name  string
 		began time.Time
 		m     moment
-	}{{"the recorded one", wb.Rec.From, *c.rm}, {"round F's", wb.F.From, *c.lm}} {
+	}
+	runs := []run{{"the recorded one", recBegan, *c.rm}}
+	if wb := w.sinceBegin(); wb != nil {
+		runs = []run{{"the recorded one", wb.Rec.From, *c.rm}, {"round F's", wb.F.From, *c.lm}}
+	} else if recBegan.IsZero() {
+		return ""
+	}
+	for _, run := range runs {
 		if run.m.key.day {
 			return run.name + " is a time of day, which names no day"
 		}
