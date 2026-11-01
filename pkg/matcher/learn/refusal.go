@@ -75,12 +75,9 @@ func refusedClause(k RefusalKind) string {
 func refusalFoot(r Refusal) string {
 	r.Places = r.Places[:min(len(r.Places), maxLinePlaces)]
 	s := placesPart(r.Places)
-	for i, e := range r.Edits {
-		if i == 0 {
-			s += ". Edits: " + editWords(e)
-		} else {
-			s += editSep + editWords(e)
-		}
+	sep := ". Edits: "
+	for _, e := range r.Edits {
+		s, sep = s+sep+editWords(e), editSep
 	}
 	r.Recorded, r.Full, r.Why = "", "", ""
 	js, _ := json.Marshal(r) // a struct of strings and ints always marshals
