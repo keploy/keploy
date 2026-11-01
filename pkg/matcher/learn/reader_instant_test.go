@@ -360,6 +360,22 @@ func TestReaderIndexHoldsAnInstantInEveryFormMainReads(t *testing.T) {
 	}
 }
 
+// A place that holds a moment at a fine cut holds it fine, whatever
+// coarser cut it holds it at besides, before or after: "at <instant> on
+// <its day>" holds the instant fine, never only at the day's cut, which
+// would hide a fine-cut copy.
+func TestReaderIndexHoldsAMomentAtItsFinestCut(t *testing.T) {
+	r := "2026-10-31T10:50:13.305123Z"
+	m := readText(r, "2026-10-31T10:51:27.905456Z").Instants[0].Rec
+	for _, place := range []string{"at " + r + " on 2026-10-31", "on 2026-10-31 at " + r} {
+		for _, x := range []*readerIndex{newReaderIndex(nil), newReaderIndex(NewDriftCache())} {
+			if held, fine, read := x.text(place).holdsMoment(*m); !held || !fine || !read {
+				t.Errorf("%q: held %v fine %v read %v; want held fine", place, held, fine, read)
+			}
+		}
+	}
+}
+
 // An instant whose word count changes between the runs is one instant read
 // whole in each run: a zero fraction dropped (RFC3339Nano, Java's
 // Instant.toString), or a ' ' to 'T' with a zone added. Its moved words are

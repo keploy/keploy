@@ -279,6 +279,9 @@ func TestReaderOpensFromTheAdaptersAddress(t *testing.T) {
 	} {
 		rds := readLeaf(nil, mustAt(t, c.at), c.rec, c.live)
 		readsBack(t, c.rec, c.live, rds)
+		if len(rds) == 0 {
+			t.Errorf("%s: no reading; the leaf changed", c.name)
+		}
 		if c.want != nil {
 			if got := leafChanges(rds); !sameStrings(got, c.want) {
 				t.Errorf("%s: %q; want %q", c.name, got, c.want)
