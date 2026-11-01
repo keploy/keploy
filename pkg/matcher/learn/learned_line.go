@@ -26,7 +26,8 @@ type learnedWord struct {
 	// Places are the evidence places, "mock-N <path>" each; three print.
 	Places []string
 	// From is, in the timer rule (ModeElsewhere), where round F's call
-	// landed: "<TestB>'s window" or "between tests"; "" otherwise.
+	// landed (Landed.String): "<TestB>'s window" or "between tests"; ""
+	// otherwise.
 	From string
 }
 

@@ -33,7 +33,7 @@ func elsewhere(in Input, ds []Decision, fields []string) []Decision {
 	}
 	g := ds[guard]
 	gField := fields[guard]
-	stop := "round F's call landed in another window, which teaches clock reads only; " +
+	stop := "round F's call landed in " + in.Landed.String() + ", which teaches clock reads only; " +
 		wordWhere(in.Test, in.Mock, gField, g.At.Word) + " is " + outcomeWords(g)
 	edit := Edit{Kind: EditNoiseAtWord, Mock: in.Mock, Field: gField, Word: g.At.Word}
 	if g.At.Word < 0 {
