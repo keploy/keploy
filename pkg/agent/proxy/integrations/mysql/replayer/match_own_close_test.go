@@ -66,8 +66,8 @@ func TestACloseOneMoreThanTheTestRecordedCountsOnlyTheTestsOwnClose(t *testing.T
 	if ok || err != nil {
 		t.Fatalf("T1's second CLOSE of statement A, one more than it recorded, was answered (ok=%v err=%v)", ok, err)
 	}
-	if !strings.Contains(miss, "extraCall:1}") {
-		t.Fatalf("the second CLOSE of statement A missed with %s; want an extra call, recorded once", miss)
+	if !strings.Contains(miss, "extraCall:1 extraOf:t1-close-a}") {
+		t.Fatalf("the second CLOSE of statement A missed with %s; want an extra call, recorded once, repeating the test's own CLOSE t1-close-a", miss)
 	}
 }
 

@@ -706,4 +706,9 @@ func TestACommandOneMoreThanTheTestRecordedIsReportedAsAnExtraCall(t *testing.T)
 		t.Fatalf("the report says kind %q, recorded %d (background spent %v); want %q, 1, the background unspent: one call more than the test recorded",
 			rep.MissKind, rep.Recorded, mm.MockSpent(bg.Name), models.MissExtraCall)
 	}
+	// The report names the test's own recording the command repeats
+	// (extra_of), as the HTTP and generic reports do: never the pool's.
+	if rep := r.MismatchReport(); rep.ExtraOf != own.Name {
+		t.Fatalf("the report names %q as the recording the command repeats; want the test's own %q", rep.ExtraOf, own.Name)
+	}
 }
