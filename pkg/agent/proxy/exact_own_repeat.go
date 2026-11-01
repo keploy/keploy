@@ -18,8 +18,9 @@ import (
 // the open test's own reaches (refuses): the background is about to answer
 // the call. A call the test's own recordings answer never asks it. When the
 // call is one of the test's own, that door refuses, and from then on none of
-// the store's reads holds a background recording that is not the open test's
-// own, and its consume and spend doors refuse one (hides). The call, matched
+// the store's reads (but KindBackground's, which no call is answered from)
+// holds a background recording that is not the open test's own, and its
+// consume and spend doors refuse one (hides). The call, matched
 // again, finds the test's own recordings not yet answered, if any, and
 // otherwise misses as one call more than the test recorded
 // (models.MissExtraCall), whatever the background holds of it: a duplicate

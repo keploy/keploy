@@ -951,7 +951,8 @@ type heldScope struct {
 	// calls (HideBackgroundWhen), until a door or HidesBackground asks it.
 	owns func() bool
 	// hideBg says the call is one of them (HidesBackground): the set's
-	// background is in none of h's reads and its doors refuse it (hides).
+	// background is in none of h's reads but KindBackground's, and its doors
+	// refuse it (hides).
 	hideBg bool
 }
 
@@ -1129,12 +1130,16 @@ func (h *heldScope) SpentBackground(kind models.Kind) []*models.Mock {
 	return h.heldOf(h.MockManager.SpentBackground(kind))
 }
 
+// KindBackground is the manager's, what h hides kept: no parser reads it
+// from a call's held store (answering by kind reads the round,
+// integrations.SnapshotRound), and SpendByKind's door refuses a recording h
+// hides all the same.
 func (h *heldScope) KindBackground(kind models.Kind) (unused, spent []*models.Mock) {
 	unused, spent = h.MockManager.KindBackground(kind)
 	if h.moved() {
 		return nil, nil
 	}
-	return h.unhidden(unused), h.unhidden(spent)
+	return unused, spent
 }
 
 func (h *heldScope) PairingCandidates(kind models.Kind) []*models.Mock {
