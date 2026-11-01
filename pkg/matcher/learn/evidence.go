@@ -488,12 +488,7 @@ func nothingNew(p evPlace) bool {
 	for _, w := range variables.Words(rec) {
 		had[rec[w[0]:w[1]]] = true
 	}
-	for _, w := range variables.Words(live) {
-		if !had[live[w[0]:w[1]]] {
-			return false
-		}
-	}
-	return true
+	return !slices.ContainsFunc(variables.Words(live), func(w [2]int) bool { return !had[live[w[0]:w[1]]] })
 }
 
 // The recordings round F gave the application before the call that are

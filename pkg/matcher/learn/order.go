@@ -970,17 +970,16 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	// 3. Answer: an answer of the call's scope or the start-up, given
 	// before the call in both runs, holds R's value, and F's text there
 	// holds F's or is not stated.
-	answers := heldWhere(hs, func(h instantHold) bool {
+	answer := func(h instantHold) bool {
 		p := h.p
 		return p.side == Response && !p.given && inScope(p) && p.state == stateBefore && h.hr && !h.coarseR && (p.fUnstated || h.hl)
-	})
+	}
+	answers := heldWhere(hs, answer)
 	// An answer that holds it only as a coarse cut of a finer instant is no
 	// source keploy can bind, and where the call's own window holds the
 	// read, it is that read (5), as main reads it.
 	cutOnly := len(heldWhere(hs, func(h instantHold) bool {
-		p := h.p
-		return p.side == Response && !p.given && inScope(p) && p.state == stateBefore && h.hr && !h.coarseR && (p.fUnstated || h.hl) && !h.fr &&
-			c.rm != nil && dc.cutOfFinerOnly(p.t.rec, r, *c.rm)
+		return answer(h) && !h.fr && c.rm != nil && dc.cutOfFinerOnly(h.p.t.rec, r, *c.rm)
 	})) == len(answers)
 	ownRead := cutOnly && c.rm != nil && c.lm != nil && dc.in.Window.holdsRead(*c.rm, *c.lm, dc.dr.zone)
 	if len(answers) > 0 && !ownRead {
