@@ -75,6 +75,9 @@ type evPlace struct {
 	// (Raw.ServedChanged); one that holds F's word leaves it unknown.
 	fUnstated, fMay bool
 	views           []*Raw
+	// fGave: round F gave the application this place before the call
+	// reached keploy, whenever it was recorded.
+	fGave bool
 }
 
 // placeText is one place's text in each run, and each view round F served
@@ -169,7 +172,7 @@ func placesOf(in Input) (ps []evPlace, unread string) {
 				name: e.Mock + " " + path, mock: e.Mock, path: path,
 				rec: s.Leaf.Value, live: s.Live, side: s.Side, leaf: s.Leaf,
 				given: e.Given, gave: e.Gave, undeclared: s.Undeclared, clock: s.Clock, startUp: startUp, otherTest: other, scope: scope,
-				at: e.At, state: st, why: why,
+				at: e.At, state: st, why: why, fGave: !e.Payload.servedAfter,
 			})
 			if s.Side == Response && st == stateBefore && e.Payload.isRead() {
 				p := &ps[len(ps)-1]
@@ -215,6 +218,7 @@ func placesOf(in Input) (ps []evPlace, unread string) {
 			startUp: startUp, otherTest: other, scope: scope,
 			at: r.at, state: st, why: why, fUnstated: fUnstated, raw: i + 1,
 			fMay: fUnstated && len(views) == 0 && r.served && !r.servedAfter, views: views,
+			fGave: r.served && !r.servedAfter,
 		})
 	}
 	return ps, unread
