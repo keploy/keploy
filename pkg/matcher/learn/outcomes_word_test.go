@@ -110,6 +110,11 @@ func oRefused(t *testing.T, what string, d Decision, kind RefusalKind, names ...
 		t.Errorf("%s: %s; want refused %q", what, oDescribe([]Decision{d}), kind)
 		return
 	}
+	// A line a person reads says each reason once, in one pair of
+	// parentheses.
+	if strings.Contains(d.Refusal.Why, "( (") || strings.Contains(d.Refusal.Why, "))") {
+		t.Errorf("%s: refused %q; its reason nests its parentheses", what, d.Refusal.Why)
+	}
 	for _, n := range names {
 		if !strings.Contains(d.Refusal.Why, n) && !strings.Contains(d.Line, n) {
 			t.Errorf("%s: refused %q (%q, line %q); want it to name %s", what, kind, d.Refusal.Why, d.Line, n)
@@ -306,5 +311,58 @@ func TestOutcomeABodylessRecordNamesItsPlacesThroughItsAdapter(t *testing.T) {
 	if d.Outcome != OutcomeValue || d.At.String() != "body.cmd.filter._id#1" || d.FromAt.String() != "body.documents[0]._id#1" {
 		t.Errorf("o-41 to o-42 bound to an earlier answer, a record with no Body: %s at %q from %q; want a Value at body.cmd.filter._id#1 from body.documents[0]._id#1",
 			oDescribe([]Decision{d}), d.At.String(), d.FromAt.String())
+	}
+}
+
+// A word that stands in a connection's start-up where a swap of start-ups
+// can change it (a backend pid, a secret key, a server parameter set per
+// pool) is unknown, refused naming the start-up: keploy gives each
+// connection a recorded start-up by the order the connections open in, not
+// by what each sent, so round F's connection may have got another's, and the
+// word F sent may be a copy of it (follows_test.go:819, :937). So is the pid
+// of the one start-up a set recorded: a pid is each connection's own. A word
+// every start-up carries alike (the protocol's 3.0) is no swap's: an
+// unchanged place that holds only one of the two words is chance, fresh.
+func TestOutcomeAWordInAStartUpKeployMaySwapIsUnknown(t *testing.T) {
+	const p = "bind.$8"
+	served := func(ms ...*models.Mock) []Raw {
+		var raw []Raw
+		for i, m := range ms {
+			raw = append(raw, RawOf(m, false).ServedAs(i+1).ServedAsRecorded())
+		}
+		return raw
+	}
+	call := func(rec, live string, raw []Raw) []Decision {
+		in := oInput(p, rec, live, nil, raw)
+		in.At, in.Arrived = eRecAt, eRecAt
+		return Decide(in)
+	}
+	pool := func(name string, before time.Duration, pid int32, app string) *models.Mock {
+		m := eLaneSession(name, before, pid)
+		m.Spec.PostgresV3.Session.ParameterStatus["application_name"] = app
+		return m
+	}
+	two := served(eLaneSession("mock-hs-81", 900*time.Millisecond, 81), eLaneSession("mock-hs-82", 850*time.Millisecond, 82))
+	for _, tc := range []struct {
+		what, rec, live, r, f string
+		raw                   []Raw
+	}{
+		{"the backend pid", "81", "82", "81", "82", two},
+		{"the pid inside a longer value", "conn-81", "conn-82", "81", "82", two},
+		{"the secret key", "7081", "7082", "7081", "7082", two},
+		{"an application_name set per pool", "flyway", "hikari", "flyway", "hikari",
+			served(pool("mock-hs-81", 900*time.Millisecond, 81, "flyway"), pool("mock-hs-82", 850*time.Millisecond, 82, "hikari"))},
+		{"the pid of the one start-up recorded", "81", "82", "81", "82", served(eLaneSession("mock-hs-81", 900*time.Millisecond, 81))},
+	} {
+		d := oWord(t, call(tc.rec, tc.live, tc.raw), tc.r, tc.f)
+		oRefused(t, tc.what+", copied from a start-up", d, RefusalUnknown, "mock-hs-81", "a connection start-up keploy may swap")
+	}
+	if d := oWord(t, call("3", "12", two), "3", "12"); d.Outcome != OutcomeFresh {
+		t.Errorf("3 at record, a word every start-up carries alike: %s; want fresh (chance)", oDescribe([]Decision{d}))
+	}
+	// A recorded word no start-up holds is no swap's, whatever round F's
+	// word is (33 at record, a start-up's pid 82 in F): chance, fresh.
+	if d := oWord(t, call("33", "82", two), "33", "82"); d.Outcome != OutcomeFresh {
+		t.Errorf("33 at record, a start-up's pid in F: %s; want fresh (chance)", oDescribe([]Decision{d}))
 	}
 }
