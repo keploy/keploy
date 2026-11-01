@@ -62,17 +62,24 @@ func decideBoth(in Input, allScope bool) ([]Decision, []string) {
 // recordings made after the call (as) refuses, or learns otherwise,
 // refused.
 func bothWays(in Input, ds []Decision, fields []string, as []Decision, afields []string) []Decision {
-	key := func(f string, n int) string { return f + "\x00" + strconv.Itoa(n) }
+	// A word is keyed by its field, its steps and its index: two texts one
+	// leaf opens to number their words each from 0.
+	key := func(f string, a variables.Address) string {
+		for _, st := range a.Steps {
+			f += "|" + string(st)
+		}
+		return f + "\x00" + strconv.Itoa(a.Word)
+	}
 	late := make(map[string]Decision, len(as))
 	for i, a := range as {
-		late[key(afields[i], a.At.Word)] = a
+		late[key(afields[i], a.At)] = a
 	}
 	dc := &decider{in: in}
 	names := [...]string{"refused", "a read of the clock", "a value bound to an earlier place", "a value made anew each run"}
 	for i, d := range ds {
-		a, ok := late[key(fields[i], d.At.Word)]
+		a, ok := late[key(fields[i], d.At)]
 		if !ok {
-			a, ok = late[key(fields[i], -1)]
+			a, ok = late[key(fields[i], variables.Address{Word: -1})]
 		}
 		switch {
 		case !ok || d.Outcome == OutcomeRefused || a.Outcome == d.Outcome && a.Outcome != OutcomeRefused:
@@ -192,14 +199,51 @@ func (dc *decider) leaf(path, unread string) []Decision {
 		}
 		return []Decision{dc.instant(path, at, -1, changedInstant{r: rec.Value, l: live.Value, ri: r, li: l, rm: iw.Rec, lm: iw.Live})}
 	}
-	return dc.text(path, at, rec.Value, live.Value)
+	return dc.leafText(path, at, rec.Value, live.Value)
 }
 
-// text decides the changed words of one drifted text.
-func (dc *decider) text(path string, at variables.Address, rec, live string) []Decision {
-	rd := readTextIn(dc.in.Drifts, rec, live)
+// leafText decides the changed words of a drifted text leaf, recorded rec
+// and live in round F: opened first by the steps its adapter names at its
+// place (at.Steps), then by each step the reader takes (readLeaf: percent
+// escapes, a JSON string, base64, a JWT's claims, a cookie's pairs), and
+// read word by word in each text opened, so an encoded instant is read as
+// the instant it is. A step of the adapter's that does not open both runs,
+// or opens them to one text (only the encoding changed), refuses the field
+// whole as written, at its place with no step. A refusal of the field
+// whole (bare: its place, no step) ends it, as written.
+func (dc *decider) leafText(path string, at variables.Address, rec, live string) []Decision {
+	bare := variables.Address{Place: at.Place, Word: -1}
+	r, rok := at.WordOf(rec)
+	f, fok := at.WordOf(live)
+	switch {
+	case len(at.Steps) == 0:
+	case !rok || !fok:
+		return []Decision{dc.cannotCheck(path, bare, -1, rec, live, "a decode step its adapter names here ("+at.String()+") does not open both runs")}
+	case r == f:
+		return []Decision{dc.cannotCheck(path, bare, -1, rec, live, "only its encoding changed")}
+	}
+	var out []Decision
+	for _, rd := range readLeaf(dc.in.Drifts, at.Place, r, f) {
+		rd.At.Steps = append(append([]variables.Step(nil), at.Steps...), rd.At.Steps...)
+		for i := range rd.Words {
+			rd.Words[i].At.Steps = rd.At.Steps
+		}
+		ds, whole := dc.text(path, bare, rec, live, rd)
+		if out = append(out, ds...); whole {
+			return out
+		}
+	}
+	if len(out) == 0 && rec != live {
+		out = append(out, dc.cannotCheck(path, bare, -1, rec, live, "only what separates its words changed"))
+	}
+	return out
+}
+
+// text decides the changed words of rd, one text the leaf at bare opens;
+// whole reports a refusal of the field whole, which ends the leaf.
+func (dc *decider) text(path string, bare variables.Address, rec, live string, rd textReading) ([]Decision, bool) {
 	if rd.ChangedShape {
-		return []Decision{dc.refuse(path, at, -1, rec, live, RefusalChangedShape, "a word was added or dropped", nil, dc.fieldNoise(path))}
+		return []Decision{dc.refuse(path, bare, -1, rec, live, RefusalChangedShape, "a word was added or dropped", nil, dc.fieldNoise(path))}, true
 	}
 	var out []Decision
 	done := map[*instantWord]bool{}
@@ -210,17 +254,14 @@ func (dc *decider) text(path string, at variables.Address, rec, live string) []D
 				continue
 			}
 			done[w.Instant] = true
-			out = append(out, dc.textInstant(path, at, rec, live, w))
+			out = append(out, dc.textInstant(path, bare, rec, live, rd, w))
 		case w.RecIdx < 0 || w.LiveIdx < 0:
-			return append(out, dc.unpaired(path, at, rec, live, rd))
+			return append(out, dc.unpaired(path, bare, rec, live, rd)), true
 		default:
-			out = append(out, dc.word(path, at, rec, live, w))
+			out = append(out, dc.word(path, bare, rec, live, rd.Rec, w))
 		}
 	}
-	if len(out) == 0 && rec != live {
-		out = append(out, dc.cannotCheck(path, at, -1, rec, live, "only what separates its words changed"))
-	}
-	return out
+	return out, false
 }
 
 // unpaired decides a text where a word was added or dropped: refused whole
@@ -252,10 +293,10 @@ func evHolds(t *readerText, w string) bool {
 	return h
 }
 
-// word decides one changed word that is no instant (any other
-// word).
-func (dc *decider) word(path string, at variables.Address, rec, live string, w readWord) Decision {
-	n := w.RecIdx
+// word decides one changed word that is no instant (any other word), at
+// its address (w.At) in text, the text the leaf at bare opens to.
+func (dc *decider) word(path string, bare variables.Address, rec, live, text string, w readWord) Decision {
+	at, n := w.At, w.At.Word
 	ps := append([]evPlace(nil), dc.ps...)
 	cand := map[string]bool{}
 	for _, p := range ps {
@@ -287,7 +328,7 @@ func (dc *decider) word(path string, at variables.Address, rec, live string, w r
 				outside = append(outside, p)
 			}
 		case evDisproven:
-			if p.gave || countsByText(p, w) || (dc.allScope || !p.otherTest) && heldWhole(p, w, rec) {
+			if p.gave || countsByText(p, w) || (dc.allScope || !p.otherTest) && heldWhole(p, w, text) {
 				conflict = append(conflict, p)
 			}
 		case evUnknown:
@@ -320,7 +361,7 @@ func (dc *decider) word(path string, at variables.Address, rec, live string, w r
 				first = p
 			}
 		}
-		if d, ok := dc.atWord(path, at, n, w, rec, live); !ok {
+		if d, ok := dc.atWord(path, bare, n, w, rec, live); !ok {
 			return d
 		}
 		d := dc.learned(path, at, n, w.Rec, w.Live, OutcomeValue, "bound to "+first.name+", the earliest place before the call that shows it in both runs", names(src))
@@ -350,17 +391,17 @@ func (dc *decider) word(path string, at variables.Address, rec, live string, w r
 			"the value "+p.name+" sent in "+scopeName(p)+"; keploy binds only within a test and the start-up", names(outside),
 			Edit{Kind: EditMoveToMocks, Mock: p.mock}, Edit{Kind: EditMoveToStartup, Mock: p.mock}, dc.wordNoise(path, n))
 	}
-	if d, ok := dc.atWord(path, at, n, w, rec, live); !ok {
+	if d, ok := dc.atWord(path, bare, n, w, rec, live); !ok {
 		return d
 	}
 	d := dc.learned(path, at, n, w.Rec, w.Live, OutcomeFresh, "no place before the call shows it; bound at its first call", nil)
 	d.Echo = dc.echoes(w.Rec)
 	if len(d.Echo) > 0 && !dc.in.Caps.AnswerAtWord {
-		return dc.cannotCheck(path, at, -1, rec, live, "the adapter cannot answer a word inside its answer yet")
+		return dc.cannotCheck(path, bare, -1, rec, live, "the adapter cannot answer a word inside its answer yet")
 	}
 	for i, a := range d.Echo {
 		if a.Place.Part == 0 {
-			return dc.cannotCheck(path, at, -1, rec, live, "its recorded answer echoes it at "+dc.echoPath(w.Rec, i)+", a place keploy cannot name to the adapter yet")
+			return dc.cannotCheck(path, bare, -1, rec, live, "its recorded answer echoes it at "+dc.echoPath(w.Rec, i)+", a place keploy cannot name to the adapter yet")
 		}
 	}
 	return d
@@ -391,20 +432,21 @@ func tokenShown(p evPlace, w readWord) bool {
 	return false
 }
 
-// textInstant decides an instant the changed words of a text are part of;
-// a number that does not parse as one is matched by its exact text.
-func (dc *decider) textInstant(path string, at variables.Address, rec, live string, w readWord) Decision {
+// textInstant decides an instant the changed words of rd, a text the leaf
+// at bare opens to, are part of, at its first word's address (w.At); a
+// number that does not parse as one is matched by its exact text.
+func (dc *decider) textInstant(path string, bare variables.Address, rec, live string, rd textReading, w readWord) Decision {
 	iw := w.Instant
 	if iw.RecAt[0] < 0 || iw.LiveAt[0] < 0 || (iw.Rec == nil || iw.Live == nil) && !iw.ByText {
-		return dc.cannotCheck(path, at, -1, rec, live, "keploy cannot read this instant in both runs")
+		return dc.cannotCheck(path, bare, -1, rec, live, "keploy cannot read this instant in both runs")
 	}
-	c := changedInstant{r: rec[iw.RecAt[0]:iw.RecAt[1]], l: live[iw.LiveAt[0]:iw.LiveAt[1]], byText: iw.ByText, text: true}
+	c := changedInstant{r: rd.Rec[iw.RecAt[0]:iw.RecAt[1]], l: rd.Live[iw.LiveAt[0]:iw.LiveAt[1]], byText: iw.ByText, text: true}
 	if iw.Rec != nil && iw.Live != nil && !iw.ByText {
 		c.rm, c.lm = iw.Rec, iw.Live
 		c.ri = typedInstant{at: time.Unix(0, iw.Rec.key.at).UTC(), res: iw.Rec.res, names: namesMoment}
 		c.li = typedInstant{at: time.Unix(0, iw.Live.key.at).UTC(), res: iw.Live.res, names: namesMoment}
 	}
-	return dc.instant(path, at, w.RecIdx, c)
+	return dc.instant(path, w.At, w.At.Word, c)
 }
 
 // instantHold is what one earlier place holds of a changed instant: R's
@@ -458,10 +500,44 @@ func (dc *decider) holds(p evPlace, t *readerText, w string, m *moment, byText b
 	if !ok {
 		return false, false, false
 	}
+	// Held as written only at a coarse cut, or not at all: a text with
+	// escapes is read as it opens (the date alone of a percent-encoded
+	// time is no hold of that time), and its other decoded forms add what
+	// they hold.
+	if !fm {
+		if hf, ff, opened, ok := formsHold(t, w, *m); ok && (opened || hf) {
+			hm, fm = hf, ff
+		}
+	}
 	if hm {
 		return true, fm, true
 	}
 	return h, h && fineCut(m.res), true
+}
+
+// formsHold is what t's decoded forms (decodeForms: its escapes read, its
+// quoted-printable form, its encoded runs' text) hold of the instant w
+// (moment m), by its text or by moment; opened: its escapes read change it.
+// An earlier place that sent the instant percent-encoded holds it once
+// opened, as the call's own leaf is read opened (leafText). Read now and
+// kept by no one, as the reader's index reads a word past its budget.
+func formsHold(t *readerText, w string, m moment) (held, fine, opened, read bool) {
+	text, ok := t.textNow()
+	if !ok {
+		return false, false, false, false
+	}
+	d := decodeForms(text)
+	for _, f := range [...]string{d.dec, d.q, d.b} {
+		if f != "" && strings.Contains(f, w) {
+			held, fine = true, fine || fineCut(m.res)
+		}
+		for _, sp := range instantSpans(f) {
+			if h, fn := byMoment(sp.moment(), m); sp.keyed && h {
+				held, fine = true, fine || fn
+			}
+		}
+	}
+	return held, fine, d.hasDec, true
 }
 
 // coarserOnly reports whether t, which holds w (moment m), holds it only
