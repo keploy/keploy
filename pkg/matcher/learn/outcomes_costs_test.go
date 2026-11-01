@@ -456,20 +456,36 @@ func TestOutcomeCostAShortWordAtAMovedEarlierPlaceIsChance(t *testing.T) {
 }
 
 // A word round F's view of an earlier recording gave at another field than
-// the one whose recorded text holds the recorded word (follows_test.go:326,
-// main refuses it): keploy reads a recording and F's view of it each whole,
-// not yet field by field, so it binds the word there today. Replay serves
-// that recording as recorded, so the bind checks the recorded value: a red
-// only, never a false green. Its line says what keploy read, each run's
-// text whole, and never that one place shows the word in both runs. When
-// the reader gives a recording's words per field, this row is refused.
-func TestOutcomeAWordFsViewMovedToAnotherFieldIsBoundWithoutClaimingBothRuns(t *testing.T) {
-	raw := append(eStartup(), eRow("48d1", "6c7d", "aaaa").ServedAs(6).ServedLive(eRow("9998", "9999", "6c7d")))
-	d := oWord(t, Decide(costF("k-48d1", "k-6c7d", nil, raw, nil)), "48d1", "6c7d")
-	if d.Outcome != OutcomeValue || d.From.Mock != "mock-6" {
-		t.Errorf("k-48d1 to k-6c7d, F's view moved the word to another column: %s; pinned: a Value from mock-6 (a red only)", oDescribe([]Decision{d}))
-	}
-	if strings.Contains(d.Line, "both runs") || !strings.Contains(d.Line, `holds "48d1" as recorded and "6c7d" as round F gave it, each run's text read whole, not field by field`) {
-		t.Errorf("the line of a word read in two texts whole claims more than keploy read: %q", d.Line)
+// the one whose recorded text holds the recorded word (follows_test.go:326
+// and its subcases; main refuses each): a recording is read field by field,
+// so a place shows a word in both runs only where one field holds the
+// recorded word as recorded and round F's word in F's view. One that moved
+// column, stood at two, or moved to a row F's view grew is refused as
+// unknown, naming the field F gave it at; one that stayed is bound there,
+// and its line says the place shows it in both runs.
+func TestOutcomeAWordFsViewMovedToAnotherFieldIsRefused(t *testing.T) {
+	for _, c := range []struct {
+		what  string
+		r, f  Raw
+		moved string
+	}{
+		{"moved to another column", eRow("48d1", "6c7d", "aaaa"), eRow("9998", "9999", "6c7d"), "rows[0][2]"},
+		{"given at two columns, neither the recorded one", eRow("48d1", "6c7d", "aaaa"), eRow("9999", "6c7d", "6c7d"), "rows[0][1]"},
+		{"moved to a row F's view grew", eRows([]models.PostgresV3Cells{{{Value: "48d1"}, {Value: "6c7d"}}}),
+			eRows([]models.PostgresV3Cells{{{Value: "9999"}, {Value: "6c7d"}}, {{Value: "6c7d"}, {Value: "1"}}}), "rows[0][1]"},
+		{"stayed at its column", eRow("48d1", "x", "y"), eRow("6c7d", "x", "y"), ""},
+	} {
+		raw := append(eStartup(), c.r.ServedAs(6).ServedLive(c.f))
+		d := oWord(t, Decide(costF("k-48d1", "k-6c7d", nil, raw, nil)), "48d1", "6c7d")
+		if c.moved == "" {
+			if d.Outcome != OutcomeValue || d.From.Mock != "mock-6" || !strings.Contains(d.Line, "shows it in both runs") {
+				t.Errorf("k-48d1 to k-6c7d, %s: %s; want a Value from mock-6 that shows it in both runs", c.what, oDescribe([]Decision{d}))
+			}
+			continue
+		}
+		costRefused(t, "k-48d1 to k-6c7d, F's view "+c.what, d, costUnknown, "mock-6")
+		if d.Refusal != nil && !strings.Contains(d.Refusal.Why, c.moved) {
+			t.Errorf("k-48d1 to k-6c7d, %s: why %q does not name the field F gave it at (%s)", c.what, d.Refusal.Why, c.moved)
+		}
 	}
 }
