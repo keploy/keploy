@@ -29,8 +29,10 @@ func (pm *IngressProxyManager) SetStopping(stopping bool) { pm.stopping.Store(st
 
 // logAppDialFailure logs a failed dial, or redial, to the app the ingress
 // forwards to: at DEBUG when the app refused it while the recording is
-// stopping (see above), or when keploy itself ended the dial (its context
-// canceled: the forwarder or the agent stopping), else at ERROR.
+// stopping (see above), when keploy itself ended the dial (its context
+// canceled: the forwarder or the agent stopping), or when the call's client
+// went while the call waited for the app to listen (nothing was sent on to
+// the app: dialApp), else at ERROR.
 func (pm *IngressProxyManager) logAppDialFailure(logger *zap.Logger, msg string, err error, fields ...zap.Field) {
 	fields = append(fields, zap.Error(err))
 	if pm.stopping.Load() && isConnRefused(err) {
@@ -41,6 +43,11 @@ func (pm *IngressProxyManager) logAppDialFailure(logger *zap.Logger, msg string,
 	if errors.Is(err, context.Canceled) {
 		logger.Debug(msg, append(fields,
 			zap.String("why", "keploy stopped serving the application's port while it dialed the app"))...)
+		return
+	}
+	if errors.Is(err, errClientLeft) {
+		logger.Debug(msg, append(fields,
+			zap.String("why", "the call's client went while keploy waited for the application to listen"))...)
 		return
 	}
 	logger.Error(msg, fields...)
