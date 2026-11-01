@@ -406,11 +406,17 @@ func (dc *decider) word(path string, bare variables.Address, rec, live, text str
 	if d, ok := dc.atWord(path, bare, n, w, rec, live); !ok {
 		return d
 	}
-	d := dc.learned(path, at, n, w.Rec, w.Live, OutcomeFresh, "no place before the call shows it; bound at its first call", nil)
 	echo, unnamed := dc.echoes(w.Rec)
 	if r, no := dc.unanswerable(path, bare, rec, live, echo, unnamed); no {
 		return r
 	}
+	rule := "no place before the call shows it; bound at its first call"
+	if len(echo) > 0 {
+		// The answer rewritten at replay is part of what keploy learned:
+		// the line names it, as a Value's read-back line does.
+		rule += "; answered at " + addrList(echo) + ", where the call's answer holds " + strconv.Quote(w.Rec) + " as recorded"
+	}
+	d := dc.learned(path, at, n, w.Rec, w.Live, OutcomeFresh, rule, nil)
 	d.Echo = echo
 	return d
 }
@@ -867,7 +873,7 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 
 // madeSinceBegin is why c, a changed instant of a client test's call that
 // no earlier place holds, may have been made after its test began in a
-// run (DESIGN step 8: the test's own value is one made before the begin;
+// run (step 8 of the instant order: the test's own value is one made before the begin;
 // one made later is a read of the clock, which steps 5 and 7 learn where a
 // window holds it, plus an offset, or a value the test gave): "" where a run
 // knows no begin (the test's own value, as a test of no begin makes it),
