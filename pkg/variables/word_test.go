@@ -234,3 +234,40 @@ func TestAWordIsReadAndReplacedThroughItsSteps(t *testing.T) {
 	}
 
 }
+
+// ReadPlace reads a place the recording holds as written whole, and else as
+// a word address.
+func TestReadPlace(t *testing.T) {
+	holds := func(names ...string) func(Place) bool {
+		return func(p Place) bool {
+			for _, n := range names {
+				if p.String() == n {
+					return true
+				}
+			}
+			return false
+		}
+	}
+	for _, c := range []struct {
+		s, want string
+		held    []string
+	}{
+		{s: "body.a#0", held: []string{`body["a#0"]`}, want: `body["a#0"]`},
+		{s: "body.a#0", held: []string{"body.a"}, want: "body.a#0"},
+		{s: "body.a#0", held: []string{`body["a#0"]`, "body.a"}, want: `body["a#0"]`},
+		{s: "body.a#0", want: "body.a#0"},
+		{s: "url.query.page#2", held: []string{`url.query.page\#2`}, want: `url.query.page\#2`},
+		{s: "url.query.a|json", held: []string{`url.query.a\|json`}, want: `url.query.a\|json`},
+		{s: "url.query.a|json", held: []string{"url.query.a"}, want: "url.query.a|json"},
+		{s: "url.path[1]#1", held: []string{"url.path[1]"}, want: "url.path[1]#1"},
+		{s: "header.X", held: []string{"header.X"}, want: "header.X"},
+	} {
+		a, err := ReadPlace(c.s, holds(c.held...))
+		if err != nil || a.String() != c.want {
+			t.Errorf("ReadPlace(%q) holding %v = %q, %v; want %q", c.s, c.held, a.String(), err, c.want)
+		}
+	}
+	if _, err := ReadPlace("nowhere", holds()); err == nil {
+		t.Error("a string of no place read")
+	}
+}

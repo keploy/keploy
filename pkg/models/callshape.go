@@ -678,10 +678,14 @@ func holePathPlaces(shape string, places []string) string {
 }
 
 // pathPlaceIndex is the segment a place "url.path[<n>]" names, read as a
-// variable's place is read (a number from 0, without leading zeros); a place
-// past url.path[9999] is ignored.
+// variable's place is read (a number from 0, without leading zeros), or a
+// word of it ("url.path[<n>]#<w>", after any "|<step>": a word address,
+// variables.ParseAddress); a place past url.path[9999] is ignored.
 func pathPlaceIndex(place string) (int, bool) {
 	const prefix = "url.path["
+	if i := strings.IndexByte(place, ']'); i >= 0 && i+1 < len(place) && (place[i+1] == '#' || place[i+1] == '|') {
+		place = place[:i+1]
+	}
 	if !strings.HasPrefix(place, prefix) || !strings.HasSuffix(place, "]") {
 		return 0, false
 	}
