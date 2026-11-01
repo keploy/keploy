@@ -514,7 +514,8 @@ func TestADNSServersBindIsAStageOfTheAgentsStart(t *testing.T) {
 		})
 	}
 	t.Run("tcp cannot bind", func(t *testing.T) {
-		held, err := net.Listen("tcp", "127.0.0.1:0") // no SO_REUSEPORT: the server cannot share it
+		// On every address, as the server binds (TestADNSServerThatCannotBindSettlesWithItsError says why).
+		held, err := net.Listen("tcp", ":0") // no SO_REUSEPORT: the server cannot share it
 		if err != nil {
 			t.Fatal(err)
 		}
