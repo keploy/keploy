@@ -335,11 +335,8 @@ func (dc *decider) oneToken(path string, bare variables.Address, rec, live strin
 // script keploy does not split into words, inside base64 JSON).
 func randomToken(rec, live string) bool {
 	const urlSafe = "-_0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
-	if len(rec) != len(live) || strings.Trim(rec, urlSafe) != "" || strings.Trim(live, urlSafe) != "" {
-		return false
-	}
 	hexGroups := func(s string) bool { return strings.Trim(strings.ToLower(s), "-_0123456789abcdef") == "" }
-	if hexGroups(rec) || hexGroups(live) {
+	if len(rec) != len(live) || strings.Trim(rec, urlSafe) != "" || strings.Trim(live, urlSafe) != "" || hexGroups(rec) || hexGroups(live) {
 		return false
 	}
 	head := 0
@@ -662,11 +659,10 @@ func (dc *decider) textInstant(path string, bare variables.Address, rec, live st
 // value in R's text (hr), F's in F's (hl), each by moment or by its exact
 // text, and whether that hold is at a fine cut (fr, fl).
 type instantHold struct {
-	p              evPlace
-	hr, hl, fr, fl bool
+	p evPlace
 	// coarseR: R's text holds R's value only as an instant of a coarser
 	// unit (a day, an hour) that the value, cut to it, is (coarserOnly).
-	coarseR bool
+	hr, hl, fr, fl, coarseR bool
 	// rank orders the places that name a value: by its exact text (0),
 	// else by the finest cut that gives it (its unit in nanoseconds).
 	rank int64
@@ -706,13 +702,12 @@ type changedInstant struct {
 	r, l   string
 	ri, li typedInstant
 	rm, lm *moment
-	byText bool
 	// text: an instant in a text, whose layout the Clock keeps; word, where
 	// it stands in the leaf's recorded text (clockWordOf); noWord, why a
 	// Clock there is no check a replay makes.
-	text   bool
-	word   models.ClockWord
-	noWord string
+	byText, text bool
+	word         models.ClockWord
+	noWord       string
 	// echo is where the call's answer reads the word back (readBack, whole
 	// values too), valueEcho the same for a Value (the text whole is the
 	// adapter's echo), unnamed the first such place keploy cannot name, rec
@@ -839,12 +834,7 @@ func (dc *decider) wholeNames(t *readerText, m moment, by func(h, m moment) bool
 	s, fields, ok := t.read()
 	n := 0
 	eachField(s, fields, func(_ fieldAt, f string) {
-		var whole []instant
-		for _, sp := range dc.dr.spansOf(f) {
-			if sp.start == 0 && sp.end == len(f) {
-				whole = append(whole, sp)
-			}
-		}
+		whole := slices.DeleteFunc(slices.Clone(dc.dr.spansOf(f)), func(sp instant) bool { return sp.start != 0 || sp.end != len(f) })
 		n += dc.named(whole, m, by)
 	})
 	return !ok || n > 0
