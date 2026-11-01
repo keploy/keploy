@@ -31,13 +31,28 @@ func startGroupLeader(t *testing.T, argv ...string) (*exec.Cmd, <-chan struct{})
 	return cmd, reaped
 }
 
-// awaitReaped fails t unless the process behind reaped exits; the bound only
-// turns a hang into a failure.
+// beforeTheDeadline fires a quarter of the way to the test binary's
+// deadline, and never with none: a wait it bounds fails only for what never
+// happens, however long a loaded host takes, and still says what before the
+// binary's own panic.
+func beforeTheDeadline(t *testing.T) <-chan time.Time {
+	t.Helper()
+	dl, ok := t.Deadline()
+	if !ok {
+		return nil
+	}
+	timer := time.NewTimer(time.Until(dl) / 4)
+	t.Cleanup(func() { timer.Stop() })
+	return timer.C
+}
+
+// awaitReaped fails t unless the process behind reaped exits; the bound
+// (beforeTheDeadline) only turns a hang into a failure.
 func awaitReaped(t *testing.T, what string, reaped <-chan struct{}) {
 	t.Helper()
 	select {
 	case <-reaped:
-	case <-time.After(time.Minute):
+	case <-beforeTheDeadline(t):
 		t.Fatalf("%s outlived the stop", what)
 	}
 }

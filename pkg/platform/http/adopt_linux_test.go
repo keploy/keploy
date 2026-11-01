@@ -453,15 +453,32 @@ func startDaemon(command string, args ...string) (int, error) {
 	return pid, nil
 }
 
-// await waits until cond holds; the bound only turns a hang into a failure.
+// beforeTheDeadline fires a quarter of the way to the test binary's
+// deadline, and never with none: a wait it bounds fails only for what never
+// happens, however long a loaded host takes, and still says what before the
+// binary's own panic.
+func beforeTheDeadline(t *testing.T) <-chan time.Time {
+	t.Helper()
+	dl, ok := t.Deadline()
+	if !ok {
+		return nil
+	}
+	timer := time.NewTimer(time.Until(dl) / 4)
+	t.Cleanup(func() { timer.Stop() })
+	return timer.C
+}
+
+// await waits until cond holds; its bound (beforeTheDeadline) only turns a
+// hang into a failure.
 func await(t *testing.T, what string, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(time.Minute)
+	expired := beforeTheDeadline(t)
 	for !cond() {
-		if time.Now().After(deadline) {
+		select {
+		case <-expired:
 			t.Fatalf("%s did not happen", what)
+		case <-time.After(10 * time.Millisecond):
 		}
-		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -574,7 +591,7 @@ func TestNoReapIsCountedAndAnUnreadableFdTableReapsNothing(t *testing.T) {
 	go func() { reapAll(zap.NewNop()); close(done) }()
 	select {
 	case <-done:
-	case <-time.After(time.Minute): // the bound only turns a spin into a failure
+	case <-beforeTheDeadline(t): // the bound only turns a spin into a failure
 		t.Fatal("the reaper kept scanning for a child it could not reap yet")
 	}
 	waitAdopted = real

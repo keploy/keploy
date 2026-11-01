@@ -2603,12 +2603,14 @@ func TestAStopsStepsOutMoveTheRunsTeardown(t *testing.T) {
 : > ready
 while [ ! -e step ]; do sleep 0.01; done; exec 3<&-
 while [ ! -e go ]; do sleep 0.01; done`)
-	for deadline := time.Now().Add(time.Minute); ; time.Sleep(10 * time.Millisecond) {
+	for expired := beforeTheDeadline(t); ; {
 		if _, err := os.Stat(filepath.Join(dir, "ready")); err == nil {
 			break
 		}
-		if time.Now().After(deadline) {
+		select {
+		case <-expired:
 			t.Fatal("the app did not start")
+		case <-time.After(10 * time.Millisecond):
 		}
 	}
 	p, ok := ProcOf(cmd.Process.Pid)
@@ -2621,13 +2623,14 @@ while [ ! -e go ]; do sleep 0.01; done`)
 		end, _ := WaitExitByEvents(zap.NewNop(), make(chan struct{}), []Reached{p}, scope)
 		ended <- end
 	}()
-	// awaitLooks waits until the stop has looked at the app n times; the
-	// test's own timeout is its only bound.
+	// awaitLooks waits until the stop has looked at the app n times.
 	awaitLooks := func(n uint64, when string) {
-		for looks.Load() < n {
+		for expired := beforeTheDeadline(t); looks.Load() < n; {
 			select {
 			case end := <-ended:
 				t.Fatalf("the wait ended %v %s", end, when)
+			case <-expired:
+				t.Fatalf("the stop looked at the app %d times, never %d", looks.Load(), n)
 			case <-time.After(10 * time.Millisecond):
 			}
 		}
@@ -2637,7 +2640,7 @@ while [ ! -e go ]; do sleep 0.01; done`)
 		t.Fatal(err)
 	}
 	fd3 := filepath.Join("/proc", strconv.Itoa(p.PID), "fd", "3")
-	for {
+	for expired := beforeTheDeadline(t); ; {
 		if _, err := os.Lstat(fd3); errors.Is(err, fs.ErrNotExist) {
 			break
 		}
@@ -2646,6 +2649,8 @@ while [ ! -e go ]; do sleep 0.01; done`)
 			t.Fatalf("the wait ended %v before the app's step", end)
 		case <-reaped:
 			t.Fatal("the app exited before its step")
+		case <-expired:
+			t.Fatal("the app did not take its step")
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
@@ -2663,7 +2668,7 @@ while [ ! -e go ]; do sleep 0.01; done`)
 		if end != StopExited {
 			t.Fatalf("the wait ended %v, want StopExited", end)
 		}
-	case <-time.After(time.Minute):
+	case <-beforeTheDeadline(t):
 		t.Fatal("the wait did not end with the app's exit")
 	}
 	awaitReaped(t, "the app", reaped)
