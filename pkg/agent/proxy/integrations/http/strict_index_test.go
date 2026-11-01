@@ -1002,7 +1002,7 @@ func (d *landingGenDb) take(names ...string) func() {
 	return func() {
 		for _, name := range names {
 			for _, m := range d.perTest {
-				if m.Name == name && d.genDb.DeleteFilteredMock(*m) {
+				if m.Name == name && d.DeleteFilteredMock(*m) {
 					d.took = name
 					return
 				}
@@ -1031,7 +1031,7 @@ func (d *landingVarDb) take(names ...string) func() {
 	return func() {
 		for _, name := range names {
 			for _, m := range d.perTest {
-				if m.Name == name && d.varDb.DeleteFilteredMock(*m) {
+				if m.Name == name && d.DeleteFilteredMock(*m) {
 					d.took = name
 					return
 				}
