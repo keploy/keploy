@@ -232,7 +232,7 @@ func TestTheProxysCloseThenTheApplicationsUnacknowledgedFINIsNoLoss(t *testing.T
 	// The FIN reaches the orphan, retransmitted if need be: only a reset
 	// (which nothing here sends) would end it first.
 	for {
-		d, err := lookupTCP(remote, local)
+		d, err := lookupTCPOrdered(remote, local)
 		if err != nil {
 			t.Fatalf("the proxy's orphaned socket went before the application's FIN reached it: %v", err)
 		}
@@ -269,11 +269,12 @@ func TestTheProxysCloseThenTheApplicationsUnacknowledgedFINIsNoLoss(t *testing.T
 // past TCP_TIMEWAIT_LEN), which takes no bucket; the gone one is made gone
 // (TCP_LINGER2 -1: the kernel destroys it as it reaches FIN_WAIT2).
 func TestAProxysCloseOneFINShortIsJudgedByItsOrphan(t *testing.T) {
-	// closedPairOn closes the proxy's side of a pair held by p, as
+	// closedPairWith closes the proxy's side of a pair held by p, as
 	// application connection appSeq, after it read the 10 bytes the
-	// application wrote; linger2, when not 0, is the TCP_LINGER2 (seconds)
-	// of the proxy's socket, set before the close.
-	closedPairOn := func(t *testing.T, p *Proxy, appSeq uint64, linger2 int) (*pairedConn, *net.TCPConn, proxySide) {
+	// application wrote, with closeIt, given the proxy's socket and its
+	// tracked conn; linger2, when not 0, is the TCP_LINGER2 (seconds) of the
+	// proxy's socket, set before the close.
+	closedPairWith := func(t *testing.T, p *Proxy, appSeq uint64, linger2 int, closeIt func(t *testing.T, proxySide *net.TCPConn, reader net.Conn)) (*pairedConn, *net.TCPConn, proxySide) {
 		t.Helper()
 		app, proxySide, reader := heldPairOn(t, p, appSeq, "tcp4", "127.0.0.1:0")
 		if linger2 != 0 {
@@ -292,7 +293,7 @@ func TestAProxysCloseOneFINShortIsJudgedByItsOrphan(t *testing.T) {
 		if _, err := io.ReadFull(reader, make([]byte, 10)); err != nil {
 			t.Fatal(err)
 		}
-		_ = reader.Close()
+		closeIt(t, proxySide, reader)
 		if _, err := app.Read(make([]byte, 1)); err != io.EOF {
 			t.Fatalf("the application's read after the proxy's close: %v, want EOF", err)
 		}
@@ -308,11 +309,29 @@ func TestAProxysCloseOneFINShortIsJudgedByItsOrphan(t *testing.T) {
 		}
 		return pc, app, ps
 	}
+	// closedPairOn is closedPairWith closing the proxy's side as the proxy
+	// does: its tracked conn's close.
+	closedPairOn := func(t *testing.T, p *Proxy, appSeq uint64, linger2 int) (*pairedConn, *net.TCPConn, proxySide) {
+		t.Helper()
+		return closedPairWith(t, p, appSeq, linger2, func(_ *testing.T, _ *net.TCPConn, reader net.Conn) { _ = reader.Close() })
+	}
 	// closedPair is closedPairOn on a proxy of its own.
 	closedPair := func(t *testing.T, linger2 int) (*Proxy, *pairedConn, *net.TCPConn, proxySide) {
 		t.Helper()
 		p := &Proxy{logger: zap.NewNop()}
 		pc, app, ps := closedPairOn(t, p, 1, linger2)
+		return p, pc, app, ps
+	}
+	// closedPairInTimewait is closedPair with the proxy's orphan a timewait
+	// socket in FIN_WAIT2 as its tracked conn's close returns, or gone with no
+	// timewait bucket left (closeIntoTimewait): moved on no timer, so a wait
+	// that needs it there never waits on the kernel's fin timer.
+	closedPairInTimewait := func(t *testing.T) (*Proxy, *pairedConn, *net.TCPConn, proxySide) {
+		t.Helper()
+		p := &Proxy{logger: zap.NewNop()}
+		pc, app, ps := closedPairWith(t, p, 1, 0, func(t *testing.T, proxySide *net.TCPConn, reader net.Conn) {
+			closeIntoTimewait(t, proxySide, reader.Close)
+		})
 		return p, pc, app, ps
 	}
 	// oneShortUnknown: one short, the FIN counted, is unknown, and charges
@@ -342,14 +361,40 @@ func TestAProxysCloseOneFINShortIsJudgedByItsOrphan(t *testing.T) {
 	t.Run("its orphan took the FIN", func(t *testing.T) {
 		p, pc, app, ps := closedPair(t, 0)
 		_ = app.Close()
-		if orphanIn(t, pc, tcpTimeWait) {
-			// No timewait bucket was left for it: the kernel destroyed
-			// it, and a gone orphan tells the FIN from a refused byte no
-			// more than any other gone one does.
-			oneShortUnknown(t, p, pc, ps, "the orphan is gone, which says nothing of the FIN")
-			return
+		gone := orphanIn(t, pc, tcpTimeWait)
+		tg := &pairTarget{pc: pc, want: ps.received + 1, finCounted: true}
+		ok, err := p.pairReached(tg)
+		if gone {
+			// Read again, after the wait's answer (goneStill). Gone
+			// still: no timewait bucket was left for it, the kernel
+			// destroyed it, and a gone orphan tells the FIN from a refused
+			// byte no more than any other gone one does.
+			d, rerr := lookupTCPOrdered(pc.proxy, pc.app)
+			if errors.Is(rerr, errNoSocket) {
+				if ok || !errors.Is(err, models.ErrProxyConnsUnsupported) {
+					t.Fatalf("one short = %v, %v; want unknown (%v): the orphan is gone, which says nothing of the FIN", ok, err, models.ErrProxyConnsUnsupported)
+				}
+				if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 0 {
+					t.Fatalf("one short: %d app_bytes_lost charged, want none (unknown)", l)
+				}
+				return
+			}
+			if rerr != nil || (d.state != tcpFinWait2 && d.state != tcpTimeWait) {
+				t.Fatalf("the proxy's orphaned socket, read again after the wait = state %d, %v; want FIN_WAIT2 or TIME_WAIT, or gone as orphanIn read it", d.state, rerr)
+			}
+			// Found: before 6.11 orphanIn read it in the step of its move
+			// to the timewait table, and the wait, which read after, found
+			// it there. The orphan moves as it is acknowledged, so the FIN
+			// can still be on its way: the wait then waits on it, and is
+			// asked again once the orphan has it.
+			if !ok && err == nil && tg.orphan == tcpFinWait2 {
+				t.Log("the wait waited on the orphan in FIN_WAIT2, the FIN still on its way: asked again once the orphan took it")
+				if orphanIn(t, pc, tcpTimeWait) {
+					t.Fatal("the proxy's orphaned socket, a timewait socket in FIN_WAIT2, went as it took the FIN; want TIME_WAIT")
+				}
+				ok, err = p.pairReached(tg)
+			}
 		}
-		ok, err := p.pairReached(&pairTarget{pc: pc, want: ps.received + 1, finCounted: true})
 		if !ok || err != nil {
 			t.Fatalf("pairReached = %v, %v; want settled", ok, err)
 		}
@@ -378,6 +423,56 @@ func TestAProxysCloseOneFINShortIsJudgedByItsOrphan(t *testing.T) {
 		}
 		twoShortLoss(t, p, pc, ps)
 	})
+
+	// An exact lookup made as the orphan moves to the timewait table (as it
+	// is acknowledged in FIN_WAIT1, or takes the FIN) can miss it, or find
+	// it closed, while it is there: neither is the orphan gone, nor a byte
+	// refused. The wait reads it again, ordered against the move.
+	for _, m := range []struct {
+		name string
+		s    diagTCP
+		err  error
+	}{{"missed", diagTCP{}, errNoSocket}, {"found closed", diagTCP{state: tcpClose}, nil}} {
+		t.Run("its orphan took the FIN, an exact lookup "+m.name+" as it moved", func(t *testing.T) {
+			p, pc, app, ps := closedPair(t, 0)
+			_ = app.Close()
+			if orphanIn(t, pc, tcpTimeWait) {
+				t.Skip(orphanGoneAtItsMove)
+			}
+			asked := exactLookupSays(t, m.s, m.err)
+			ok, err := p.pairReached(&pairTarget{pc: pc, want: ps.received + 1, finCounted: true})
+			if asked() == 0 {
+				t.Fatal("the wait read the orphan without the exact lookup this row makes miss: its read is not the ordered one (lookupOrphan)")
+			}
+			if !ok || err != nil {
+				t.Fatalf("pairReached = %v, %v; want settled: the orphan took the FIN, in TIME_WAIT", ok, err)
+			}
+			if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 0 {
+				t.Fatalf("%d app_bytes_lost charged, want none: the orphan took the FIN, so it refused nothing", l)
+			}
+		})
+		t.Run("its orphan still waits for a FIN, an exact lookup "+m.name+" as it moved", func(t *testing.T) {
+			// The orphan is a timewait socket in FIN_WAIT2, moved there by
+			// the proxy's close, where the wait's ordered read must find
+			// it.
+			p, pc, _, ps := closedPairInTimewait(t)
+			if orphanInTimewait(t, pc, tcpFinWait2) {
+				t.Skip(noTimewaitBucket)
+			}
+			asked := exactLookupSays(t, m.s, m.err)
+			tg := &pairTarget{pc: pc, want: ps.received + 1, finCounted: true}
+			ok, err := p.pairReached(tg)
+			if asked() == 0 {
+				t.Fatal("the wait read the orphan without the exact lookup this row makes miss: its read is not the ordered one (lookupOrphan)")
+			}
+			if ok || err != nil || tg.orphan != tcpFinWait2 {
+				t.Fatalf("one short = %v, %v, orphan %d; want waited on (not reached, no error), its orphan in FIN_WAIT2", ok, err, tg.orphan)
+			}
+			if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 0 {
+				t.Fatalf("%d app_bytes_lost charged, want none", l)
+			}
+		})
+	}
 
 	t.Run("its orphan unreadable, one short is unknown", func(t *testing.T) {
 		p, pc, _, ps := closedPair(t, 120)
@@ -424,7 +519,7 @@ func TestAProxysCloseOneFINShortIsJudgedByItsOrphan(t *testing.T) {
 		gone := orphanIn(t, pc, tcpTimeWait)
 		clk.Pass()
 		err := <-done
-		if gone {
+		if gone && goneStill(t, pc) {
 			// No timewait bucket was left for it (TCPTimeWaitOverflow).
 			if !errors.Is(err, models.ErrProxyConnsUnsupported) || !strings.Contains(err.Error(), "is gone") {
 				t.Fatalf("the wait = %v; want unknown: the kernel destroyed the orphan as it took the FIN, which says nothing of the FIN", err)
@@ -523,15 +618,24 @@ func TestAProxysCloseOneFINShortIsJudgedByItsOrphan(t *testing.T) {
 		clk.Advance(orphanFINBudget - stall.Tick)
 		awaitLook(t, clk, done, "short of its budget")
 		_ = app2.Close() // the second orphan's FIN
-		if orphanIn(t, pc2, tcpTimeWait) {
-			clk.Pass()
-			if err := <-done; !errors.Is(err, models.ErrProxyConnsUnsupported) || !strings.Contains(err.Error(), "is gone") {
+		gone := orphanIn(t, pc2, tcpTimeWait)
+		clk.Pass()
+		// The second orphan is a full socket in FIN_WAIT2 (its TCP_LINGER2
+		// is over the timewait length), and it moves to the timewait table
+		// as it takes the FIN: the wait's look finds it in TIME_WAIT, or
+		// gone. Before 6.11, orphanIn can read it gone in the step of that
+		// move, and the wait, which looks after, finds it there: the wait
+		// looking again, having answered nothing, says the orphan was
+		// there.
+		if answered, err := answerOrLook(clk, done); answered {
+			if !gone {
+				t.Fatalf("the wait answered (%v) as the second orphan took its FIN", err)
+			}
+			if !errors.Is(err, models.ErrProxyConnsUnsupported) || !strings.Contains(err.Error(), "is gone") {
 				t.Fatalf("the wait = %v; want unknown: the kernel destroyed the second orphan as it took the FIN (no timewait bucket)", err)
 			}
 			return
 		}
-		clk.Pass()
-		awaitLook(t, clk, done, "as the second orphan took its FIN")
 		clk.Advance(orphanFINBudget - stall.Tick)
 		awaitLook(t, clk, done, "short of the budget that began at the second orphan's FIN")
 		clk.Advance(stall.Tick)
@@ -831,6 +935,20 @@ func awaitLook(t *testing.T, clk *stall.ManualClock, done <-chan error, why stri
 	}
 }
 
+// answerOrLook waits until the wait answers, and returns true and its
+// answer, or until it waits on clk again, having looked, and returns false.
+func answerOrLook(clk *stall.ManualClock, done <-chan error) (bool, error) {
+	for clk.Pending() == 0 {
+		select {
+		case err := <-done:
+			return true, err
+		default:
+			runtime.Gosched()
+		}
+	}
+	return false, nil
+}
+
 // pairedConnOf is p's paired connection appSeq.
 func pairedConnOf(t *testing.T, p *Proxy, appSeq uint64) *pairedConn {
 	t.Helper()
@@ -847,22 +965,62 @@ func pairedConnOf(t *testing.T, p *Proxy, appSeq uint64) *pairedConn {
 
 // orphanIn waits until the proxy's orphaned socket of pc is in state, and
 // reports false, or until the kernel has destroyed it, and reports true. With
-// state 0 it waits for the latter only.
+// state 0 it waits for the latter only. It reads the orphan as the wait does
+// (lookupOrdered): a lookup that misses it as it moves to the timewait table
+// is not it gone.
 func orphanIn(t *testing.T, pc *pairedConn, state uint8) (gone bool) {
 	t.Helper()
+	return orphanUntil(t, pc, func(d diagTCP) bool { return state != 0 && d.state == state })
+}
+
+// orphanInTimewait is orphanIn for the orphan as a timewait socket in state,
+// one with no tcp_info (timewaitIn): a read of the full socket in FIN_WAIT2,
+// made before the kernel ran the close that moves it (closedPairInTimewait),
+// is not it.
+func orphanInTimewait(t *testing.T, pc *pairedConn, state uint8) (gone bool) {
+	t.Helper()
+	return orphanUntil(t, pc, func(d diagTCP) bool { return d.state == state && d.info == nil })
+}
+
+// orphanUntil is orphanIn with the orphan's read matched by want.
+func orphanUntil(t *testing.T, pc *pairedConn, want func(diagTCP) bool) (gone bool) {
+	t.Helper()
 	for {
-		d, err := lookupTCP(pc.proxy, pc.app)
+		d, err := lookupTCPOrdered(pc.proxy, pc.app)
 		if errors.Is(err, errNoSocket) {
 			return true
 		}
 		if err != nil {
 			t.Fatalf("the proxy's orphaned socket: %v", err)
 		}
-		if state != 0 && d.state == state {
+		if want(d) {
 			return false
 		}
 		runtime.Gosched()
 	}
+}
+
+// goneStill reads the proxy's orphaned socket of pc once more, after the
+// wait has answered, when orphanIn found it gone, and reports whether it is
+// gone still. Before 6.11 the kernel let go of a chain's lock a step before
+// a timewait socket in it could be taken, and a read in that step, ordered
+// or not, misses it (lookupOrdered). A socket the kernel destroyed never
+// comes back, and a timewait socket stays for 60 s, so a read after the
+// wait's answer (the wait read after orphanIn) tells which orphanIn's miss
+// was: the timewait socket found, the orphan took the FIN, and the wait must
+// have settled; gone again, the kernel destroyed it. (Only a step that lasts
+// from orphanIn's read through the wait's own read, which then answers
+// unknown, as the wait does in it, fails here.)
+func goneStill(t *testing.T, pc *pairedConn) bool {
+	t.Helper()
+	d, err := lookupTCPOrdered(pc.proxy, pc.app)
+	if errors.Is(err, errNoSocket) {
+		return true
+	}
+	if err != nil || d.state != tcpTimeWait {
+		t.Fatalf("the proxy's orphaned socket, read again after the wait = state %d, %v; want TIME_WAIT, or gone as orphanIn read it", d.state, err)
+	}
+	return false
 }
 
 // An orphan's own move is the wait moving: the proxy's orphan in FIN_WAIT1
@@ -931,15 +1089,20 @@ func TestAnOrphansMoveRestartsTheBytesWaitsBudget(t *testing.T) {
 	if err := arc.Control(func(fd uintptr) { serr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_DETACH_FILTER, 0) }); err != nil || serr != nil {
 		t.Fatalf("detach the application's filter: %v %v", err, serr)
 	}
-	if orphanIn(t, pc, tcpFinWait2) {
-		// Its orphan or memory limits took it as it moved: judged gone.
-		clk.Pass()
-		if err := <-done; !errors.Is(err, models.ErrProxyConnsUnsupported) || !strings.Contains(err.Error(), "is gone") {
-			t.Fatalf("the wait = %v; want unknown: the kernel destroyed the orphan", err)
-		}
-		return
-	}
+	gone := orphanIn(t, pc, tcpFinWait2)
 	clk.Pass()
+	if gone {
+		// Its orphan or memory limits took it as it moved: judged gone. Or,
+		// before 6.11, orphanIn read it in the step after its chain's unlock
+		// (goneStill), and the wait, which reads after, finds it in
+		// FIN_WAIT2 and looks again: the orphan was not gone.
+		if answered, err := answerOrLook(clk, done); answered {
+			if !errors.Is(err, models.ErrProxyConnsUnsupported) || !strings.Contains(err.Error(), "is gone") {
+				t.Fatalf("the wait = %v; want unknown: the kernel destroyed the orphan", err)
+			}
+			return
+		}
+	}
 	awaitLook(t, clk, done, "as the orphan moved to FIN_WAIT2")
 	if p.PairedBytesProgress() == before {
 		t.Error("PairedBytesProgress did not move with the orphan: the agent's watchdog would see the wait stalled")
@@ -947,10 +1110,10 @@ func TestAnOrphansMoveRestartsTheBytesWaitsBudget(t *testing.T) {
 	clk.Advance(orphanFINBudget - stall.Tick)
 	awaitLook(t, clk, done, "short of the budget that began at the orphan's move")
 	_ = app.Close() // the FIN
-	gone := orphanIn(t, pc, tcpTimeWait)
+	gone = orphanIn(t, pc, tcpTimeWait)
 	clk.Pass()
 	err = <-done
-	if gone {
+	if gone && goneStill(t, pc) {
 		if !errors.Is(err, models.ErrProxyConnsUnsupported) || !strings.Contains(err.Error(), "is gone") {
 			t.Fatalf("the wait = %v; want unknown: the kernel destroyed the orphan as it took the FIN (no timewait bucket)", err)
 		}
@@ -1035,7 +1198,23 @@ func TestAFINStillOnItsWayToAClosedConnectionIsWaitedFor(t *testing.T) {
 	if err := unix.SetsockoptInt(dfd, unix.SOL_SOCKET, unix.SO_DETACH_FILTER, 0); err != nil {
 		t.Fatalf("detach the proxy's filter: %v", err)
 	}
-	gone := orphanIn(t, pc, tcpTimeWait) // the FIN, sent again, is taken
+	// The FIN, sent again, is taken. The kernel moves the proxy's socket to
+	// its timewait socket (or, with no timewait bucket left, destroys it),
+	// and only then closes the socket the dup holds: once that reads CLOSE,
+	// the move is done, and a read of the pair finds the timewait socket or
+	// nothing (before 6.11 even an ordered read could miss a timewait
+	// socket in the step after its chain's unlock, see lookupOrdered).
+	for {
+		info, err := unix.GetsockoptTCPInfo(dfd, unix.IPPROTO_TCP, unix.TCP_INFO)
+		if err != nil {
+			t.Fatalf("the proxy's socket after the filter went: %v", err)
+		}
+		if info.State == tcpClose {
+			break
+		}
+		runtime.Gosched()
+	}
+	gone := orphanIn(t, pc, tcpTimeWait)
 	clk.Pass()
 	err = <-done
 	if gone {
