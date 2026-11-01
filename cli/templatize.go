@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v3/config"
@@ -31,13 +32,13 @@ keploy templatize                              # every test set`,
 			svc, err := serviceFactory.GetService(ctx, cmd.Name())
 			if err != nil {
 				utils.LogError(logger, err, "failed to get service", zap.String("command", cmd.Name()))
-				return nil
+				return err
 			}
 			var tools toolsSvc.Service
 			var ok bool
 			if tools, ok = svc.(toolsSvc.Service); !ok {
 				utils.LogError(logger, nil, "service doesn't satisfy tools service interface")
-				return nil
+				return fmt.Errorf("service doesn't satisfy tools service interface")
 			}
 			// Templatize logged what stopped it, and named the sets it did
 			// not reach; the error makes the command exit non-zero.
