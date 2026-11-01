@@ -555,6 +555,9 @@ type CallRound struct {
 	// (WithSequence), seqOK whether the store keeps one.
 	seq   SequenceView
 	seqOK bool
+	// worker is whether the read's view showed a test the worker scope
+	// (WithSequence's Worker, InWorkerView): ShowsBackgroundIn.
+	worker bool
 }
 
 // NewCallRound is a store's CallRound of staging epoch, held telling, by
@@ -578,8 +581,24 @@ func (c CallRound) Held(name string) bool { return c.held != nil && c.held(name)
 // installed after the read.
 func (c CallRound) WithSequence(sv SequenceView) CallRound {
 	c.seq, c.seqOK = sv, true
+	c.worker = c.worker || sv.Worker != nil
 	return c
 }
+
+// InWorkerView is c, of a read whose view showed a test the worker scope
+// when shows is true: a test's view with a worker scope, under any rules. A
+// store that reads its round in one snapshot (RoundSnapshot.CallRound),
+// which keeps no sequence view, says so here, so a call decided on such a
+// read (a call that waited for the store to open its test) is held to the
+// worker scope's rule as one marked by MarkCallRound is (ShowsBackgroundIn).
+func (c CallRound) InWorkerView(shows bool) CallRound {
+	c.worker = c.worker || shows
+	return c
+}
+
+// ShowsWorker reports whether c's read found a test's view that showed the
+// worker scope (WithSequence, InWorkerView).
+func (c CallRound) ShowsWorker() bool { return c.worker }
 
 // Sequence is the sequence view of the view c was read in (WithSequence):
 // false for a store that keeps none, and for a read made with exact serving

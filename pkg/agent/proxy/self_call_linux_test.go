@@ -50,7 +50,7 @@ func TestServeTreeListenerKeepsRecordedDepOnMockPath(t *testing.T) {
 	}
 
 	p := selfCallProxy()
-	dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: uint32(os.Getpid())}
+	dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: uint32(os.Getpid()), AgentNsPid: uint32(os.Getpid())}
 	_, srv := net.Pipe()
 	defer srv.Close()
 	served, _, err := p.serveTreeListener(context.Background(), srv, dest, fmt.Sprintf("127.0.0.1:%d", port), "1")
@@ -85,7 +85,7 @@ func TestServeTreeListenerPassesSelfCallToRealHandler(t *testing.T) {
 	}()
 
 	p := selfCallProxy()
-	dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: uint32(os.Getpid())}
+	dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: uint32(os.Getpid()), AgentNsPid: uint32(os.Getpid())}
 	cli, srv := net.Pipe()
 	defer cli.Close()
 
@@ -124,7 +124,7 @@ func TestServeTreeListenerClosesDownUnrecordedLocalPort(t *testing.T) {
 	port := uint32(mustPort(t, testnet.RefusedAddr(t, "tcp")))
 
 	p := selfCallProxy()
-	dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: uint32(os.Getpid())}
+	dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: uint32(os.Getpid()), AgentNsPid: uint32(os.Getpid())}
 	_, srv := net.Pipe()
 	defer srv.Close()
 	served, _, err := p.serveTreeListener(context.Background(), srv, dest, fmt.Sprintf("127.0.0.1:%d", port), "1")
@@ -158,7 +158,7 @@ func TestServeTreeListenerListsAStoppedLocalPortTheStoreSeeds(t *testing.T) {
 			serve := func(addr string) (bool, *models.MockedRow) {
 				t.Helper()
 				port := uint32(mustPort(t, addr))
-				dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: uint32(os.Getpid())}
+				dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: uint32(os.Getpid()), AgentNsPid: uint32(os.Getpid())}
 				_, srv := net.Pipe()
 				t.Cleanup(func() { _ = srv.Close() })
 				served, outside, err := p.serveTreeListener(context.Background(), srv, dest, addr, "1")
@@ -211,7 +211,7 @@ func TestServeTreeListenerSaysTheFirstAndCountsTheRest(t *testing.T) {
 			}
 		}()
 		port := uint32(l.Addr().(*net.TCPAddr).Port)
-		dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: uint32(os.Getpid())}
+		dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: uint32(os.Getpid()), AgentNsPid: uint32(os.Getpid())}
 		cli, srv := net.Pipe()
 		defer srv.Close()
 		_ = cli.Close()
@@ -275,15 +275,16 @@ func TestServeTreeListenerSaysTheFirstAndCountsTheRest(t *testing.T) {
 }
 
 // Under the proven switch, serveTreeListener tells OnProcess the owner of a
-// listener of the run's own tree a connection is addressed to.
+// listener of the run's own tree a connection is addressed to, by its number
+// in the agent's /proc (where it found it), with no kernel PID.
 func TestServeTreeListenerTellsTheBuildTheOwner(t *testing.T) {
 	recorded.forget()
 	t.Cleanup(recorded.forget)
 	prev := OnProcess
 	t.Cleanup(func() { OnProcess = prev })
 	t.Setenv("KEPLOY_PROVEN", "1")
-	seen := make(chan uint32, 4)
-	OnProcess = func(pid uint32) { seen <- pid }
+	seen := make(chan Process, 4)
+	OnProcess = func(p Process) { seen <- p }
 
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -300,7 +301,7 @@ func TestServeTreeListenerTellsTheBuildTheOwner(t *testing.T) {
 	}()
 
 	p := selfCallProxy()
-	dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: uint32(os.Getpid())}
+	dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: uint32(os.Getpid()), AgentNsPid: uint32(os.Getpid())}
 	cli, srv := net.Pipe()
 	defer cli.Close()
 	done := make(chan struct{})
@@ -308,8 +309,8 @@ func TestServeTreeListenerTellsTheBuildTheOwner(t *testing.T) {
 		_, _, _ = p.serveTreeListener(context.Background(), srv, dest, fmt.Sprintf("127.0.0.1:%d", port), "1")
 		close(done)
 	}()
-	if pid := awaitEvent(t, seen, "OnProcess being told the listener's owner"); pid != uint32(os.Getpid()) {
-		t.Fatalf("OnProcess was told %d, want the listener's owner %d", pid, os.Getpid())
+	if got, want := awaitEvent(t, seen, "OnProcess being told the listener's owner"), (Process{Pid: uint32(os.Getpid())}); got != want {
+		t.Fatalf("OnProcess was told %+v, want the listener's owner %+v", got, want)
 	}
 	_ = cli.Close()
 	<-done

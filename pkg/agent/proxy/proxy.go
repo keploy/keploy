@@ -463,6 +463,15 @@ type Proxy struct {
 	selfCalls       atomic.Int64
 	selfCallOwners  sync.Map // owner pid -> struct{}
 	selfCallsLogged atomic.Int64
+	// unnamedConns counts the connections to a listener of the run's own
+	// tree whose caller the agent could not name in its PID namespace
+	// (callerOf), so that it could not tell whether a test made the calls
+	// they carried. The relay does not read those calls, so a connection
+	// counts once however many it carries. The first is logged at WARN as
+	// it comes, and the total when the run ends (logSelfCalls).
+	// unnamedConnsLogged is the total last logged.
+	unnamedConns       atomic.Int64
+	unnamedConnsLogged atomic.Int64
 
 	// dnsCache is a TTL-expiring, size-bounded LRU cache for DNS responses.
 	dnsCache *expirable.LRU[string, dnsCacheEntry]
@@ -1404,7 +1413,7 @@ func (p *Proxy) mockMySQLOutgoing(parserCtx context.Context, srcConn net.Conn, d
 
 	// The replayer makes the client's TLS handshake itself, on its
 	// SSLRequest: charged as the proxy's own client handshakes are.
-	reportCtx := p.withClientTLS(parserCtx, dstAddr, outgoingOpts.SrcPid)
+	reportCtx := p.withClientTLS(parserCtx, dstAddr, srcProcess(outgoingOpts))
 	mysqlDst := &models.ConditionalDstCfg{Addr: dstAddr}
 	err := mysqlMocker.MockOutgoing(reportCtx, srcConn, mysqlDst, p.scopedFor(outgoingOpts.SrcPid, m), outgoingOpts)
 	p.countParserPanic(err, integrations.MYSQL, dstAddr)
@@ -2695,7 +2704,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			return err
 		}
 	}
-	seeProcess(destInfo.KernelPid)
+	seeProcess(Process{Pid: destInfo.AgentNsPid, KernelPid: destInfo.KernelPid})
 
 	var dstAddr string
 
@@ -2759,6 +2768,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// copy so the mock-serve and record-capture paths can attribute the call to
 	// the test worker that made it (per-PID scoping). 0 when unavailable.
 	outgoingOpts.SrcPid = destInfo.KernelPid
+	outgoingOpts.SrcNsPid = destInfo.AgentNsPid
 	if p.mockMode {
 		starts.Default.Note(fmt.Sprint(clientConnID), outgoingOpts.SrcPid, time.Now())
 	}
@@ -2879,7 +2889,11 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		}
 	}()
 
-	served, outside, err := p.serveTreeListener(parserCtx, srcConn, destInfo, dstAddr, fmt.Sprint(clientConnID))
+	// With the proxy's life (ctx), not the connection's: what the live
+	// handler starts may outlive the connection (LiveHandler). While
+	// serveTreeListener runs, parserCtx ends only as ctx does: no parser has
+	// joined parserErrGrp yet, and its cancel is the deferred one above.
+	served, outside, err := p.serveTreeListener(withLifeOf(ctx, parserCtx), srcConn, destInfo, dstAddr, fmt.Sprint(clientConnID))
 	if served {
 		return err
 	}
@@ -3078,7 +3092,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			// Built HERE, in handleConnection scope, so it holds pointers to
 			// the real srcConn/dstConn variables the deferred close uses —
 			// not to copies. See recordMySQLOutgoing's doc comment.
-			mysqlUpgrader := util.NewConnTLSUpgrader(&srcConn, &dstConn, p.logger, p.clientTLSHandler(dstAddr, outgoingOpts.SrcPid))
+			mysqlUpgrader := util.NewConnTLSUpgrader(&srcConn, &dstConn, p.logger, p.clientTLSHandler(dstAddr, srcProcess(outgoingOpts)))
 			return p.recordMySQLOutgoing(parserCtx, srcConn, dstConn, rule.MC,
 				parserErrGrp, mysqlLogger, clientConnID, destConnID, outgoingOpts, mysqlUpgrader)
 		}
@@ -3392,7 +3406,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		var tlsSrcConn net.Conn
 		// What the handshake, and the client just after it, lose is charged
 		// to the destination (clientTLS).
-		hsCtx = p.withClientTLS(hsCtx, dstAddr, outgoingOpts.SrcPid)
+		hsCtx = p.withClientTLS(hsCtx, dstAddr, srcProcess(outgoingOpts))
 		tlsSrcConn, isMTLS, err = pTls.HandleTLSConnection(hsCtx, p.logger, srcConn, rule.Backdate)
 		probeProxy(p.logger, "tls-handshake-done", clientConnID,
 			zap.Int("srcPort", sourcePort),
@@ -3842,7 +3856,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			if parserType == integrations.MYSQL ||
 				parserType == integrations.POSTGRES_V2 ||
 				parserType == integrations.POSTGRES_V3 {
-				upgrader = util.NewConnTLSUpgrader(&srcConn, &dstConn, p.logger, p.clientTLSHandler(dstAddr, outgoingOpts.SrcPid))
+				upgrader = util.NewConnTLSUpgrader(&srcConn, &dstConn, p.logger, p.clientTLSHandler(dstAddr, srcProcess(outgoingOpts)))
 			}
 			session := p.buildRecordSession(srcConn, dstConn, rule.MC, parserErrGrp, logger, clientConnID, destConnID, outgoingOpts, upgrader)
 			err := matchedParser.RecordOutgoing(parserCtx, session)
@@ -3871,6 +3885,11 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			// each miss and answer it takes (UnmatchedCall.Source).
 			srcPid := outgoingOpts.SrcPid
 			testCtx := models.WithMockMismatchReporter(parserCtx, func(err error) { p.sendMockNotFoundErrorFrom(err, srcPid, dstCfg) })
+			// A replayer that makes the client's TLS handshake itself, in
+			// band (Postgres's, on an SSLRequest), has it charged as the
+			// proxy's own client handshakes are, and a build's client TLS
+			// gate readied for it (withClientTLS), as mockMySQLOutgoing's.
+			testCtx = p.withClientTLS(testCtx, dstAddr, srcProcess(outgoingOpts))
 			// A test's end tells this connection's requests apart only if its
 			// parser answers before it reads again, or marks what it holds
 			// (inflight.go).
@@ -4458,6 +4477,10 @@ func (p *Proxy) Mock(ctx context.Context, opts models.OutgoingOptions) error {
 		// a set's later cycle (SetLearnEnded).
 		p.getMockManager().SetLearnEnded(false)
 		p.learnTracker.SetLearnEnded(false)
+		// Nor is it held: a test that held it belongs to the previous
+		// session (SetLearnHeld).
+		p.getMockManager().SetLearnHeld(false)
+		p.learnTracker.SetLearnHeld(false)
 	}
 
 	// Drop any per-worker scopes from a prior session so a crashed worker that
@@ -4758,6 +4781,25 @@ func (p *Proxy) OpenExactTest(test string, owned []*models.Mock, given []models.
 	return p.openExact(func(m *MockManager) { m.OpenExactTest(test, owned, given) })
 }
 
+// GiveExactTest implements agent.ExactTestGiver (MockManager.GiveExactTest).
+// Under the proven switch the learn step also holds the value as an earlier
+// place of the test's calls (learn.Tracker.GiveValue), so a value made from
+// it (a part, a pick by the clock) is refused naming the given, never learned
+// as noise.
+func (p *Proxy) GiveExactTest(test string, b models.VariableBinding) error {
+	m := p.getMockManager()
+	if m == nil {
+		return errNoMockManager
+	}
+	if err := m.GiveExactTest(test, b); err != nil {
+		return err
+	}
+	if provenswitch.On() {
+		p.learnTracker.GiveValue(learn.TestGiven(b.Mock, b.Name, b.Recorded, b.Value))
+	}
+	return nil
+}
+
 // openExact opens a test under exact serving on the mock manager (open).
 func (p *Proxy) openExact(open func(*MockManager)) error {
 	m := p.getMockManager()
@@ -4936,7 +4978,7 @@ func (p *Proxy) SetRecordedOfKind(src func(kind models.Kind, visit func(name str
 var _ agent.RecordedOfKindSetter = (*Proxy)(nil)
 
 // SetRecordingTimes implements agent.RecordingTimesSetter (exact.go).
-func (p *Proxy) SetRecordingTimes(src func(visit func(name string, req, res time.Time, protocolPhase bool) bool) error) error {
+func (p *Proxy) SetRecordingTimes(src func(visit func(name string, req, res time.Time, protocolPhase bool, clock string) bool) error) error {
 	m := p.getMockManager()
 	if m == nil {
 		return errNoMockManager
@@ -5048,6 +5090,27 @@ func (p *Proxy) SetLearnEnded(ended bool) error {
 }
 
 var _ agent.LearnEndSetter = (*Proxy)(nil)
+
+// SetLearnHeld implements agent.LearnHolder: the mock store holds the learn
+// step (MockManager.SetLearnHeld), and so does the learn tracker the parsers
+// find on their connection's context (learn.Tracker.SetLearnHeld). With no
+// mock manager there is no learn step to release; one to hold is refused
+// (errNoMockManager).
+func (p *Proxy) SetLearnHeld(held bool) error {
+	m := p.getMockManager()
+	if m == nil {
+		if held {
+			return errNoMockManager
+		}
+		p.learnTracker.SetLearnHeld(false)
+		return nil
+	}
+	m.SetLearnHeld(held)
+	p.learnTracker.SetLearnHeld(held)
+	return nil
+}
+
+var _ agent.LearnHolder = (*Proxy)(nil)
 
 // SetKeptLearning implements agent.KeptLearningSetter: the mock store puts
 // what keploy record keeps of the set's first-cycle learning on the staged
@@ -5836,6 +5899,7 @@ func (p *Proxy) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 					Differs:          parserErr.MismatchReport.Differs,
 					FieldReasons:     parserErr.MismatchReport.FieldReasons,
 					VariablePlaces:   parserErr.MismatchReport.VariablePlaces,
+					Given:            parserErr.MismatchReport.Given,
 					NotOwned:         parserErr.MismatchReport.NotOwned,
 					// Why the call missed, when record's full round's learn
 					// step decided it: judging's evidence.
@@ -6210,7 +6274,43 @@ func refusedLocally(err error) bool {
 	return host == "localhost" || (ip != nil && ip.IsLoopback())
 }
 
+// LiveHandler serves a test's call to the app it started (the ingress's
+// ServeLive), recording it as a test case, and returns once conn ends. ctx
+// carries the connection's values and lives as the proxy does, not as the
+// connection does: a test case is built after its exchange, off the
+// forwarding path, and so may still be in the making when conn has ended.
 type LiveHandler func(ctx context.Context, conn net.Conn, upstream string, port uint16)
+
+// connValues is a context with the values of a connection's context and the
+// life of another, longer one (Done, Err, Deadline): what the proxy hands the
+// live handler (LiveHandler), with the proxy's life. The connection's own
+// context is cancelled as its handler returns, and the test case of a
+// connection's last exchange, built after it, was dropped by that cancel
+// whenever it came first: half the live calls of a client that closes each
+// connection after one exchange (Connection: close) were recorded as
+// nothing. conn descends from life, so a key conn lacks life lacks too, but
+// for the one context.WithoutCancel hides: the context package's own, by
+// which a context derived from this one, and context.Cause, find the cancel
+// they belong to. That one is life's, read from life: a derived context is
+// life's child and ends as life does, with life's cause, and the
+// connection's cancel is never taken for this context's.
+type connValues struct {
+	context.Context
+	values context.Context
+}
+
+func (c connValues) Value(key any) any {
+	if v := c.values.Value(key); v != nil {
+		return v
+	}
+	return c.Context.Value(key)
+}
+
+// withLifeOf is conn's values with life's cancellation (connValues). conn
+// must descend from life.
+func withLifeOf(life, conn context.Context) context.Context {
+	return connValues{Context: life, values: context.WithoutCancel(conn)}
+}
 
 func (p *Proxy) SetLiveHandler(h LiveHandler) {
 	p.live = h
@@ -6264,6 +6364,7 @@ func (p *Proxy) trackTree(conn net.Conn, owner int) func() {
 // logged at INFO, and only when the count has moved since it last did:
 // SetGracefulShutdown, which calls it, may be called more than once.
 func (p *Proxy) logSelfCalls() {
+	p.logUnnamedConns()
 	n := p.selfCalls.Load()
 	if n < 2 {
 		return
@@ -6287,6 +6388,33 @@ func (p *Proxy) logSelfCalls() {
 		zap.String("reason", models.ReasonLoopbackOutsideRun))
 }
 
+// unnamedCallerWarning is what the agent says of a connection to a listener
+// of the run's own tree whose caller it cannot name in its PID namespace.
+const unnamedCallerWarning = "a connection to the run's own listener came from a process keploy cannot name in its PID namespace, so keploy cannot tell whether a test made its calls: it was passed to the listener and NONE of its calls was recorded as a test case"
+
+// logUnnamedConns logs, when the run ends, how many connections to the run's
+// own listeners came from a process the agent could not name (callerOf),
+// when there was more than the one already logged as it came, and only when
+// the count has moved since it last did.
+func (p *Proxy) logUnnamedConns() {
+	n := p.unnamedConns.Load()
+	if n < 2 {
+		return
+	}
+	for {
+		last := p.unnamedConnsLogged.Load()
+		if n <= last {
+			return
+		}
+		if p.unnamedConnsLogged.CompareAndSwap(last, n) {
+			break
+		}
+	}
+	p.logger.Warn("connections to the run's own listeners came from processes keploy cannot name in its PID namespace; none of the calls they carried was recorded as a test case",
+		zap.Int64("connections", n),
+		zap.String("next_step", "run keploy in the PID namespace of the app's tests, or in the host's (--pid=host, or hostPID in Kubernetes)"))
+}
+
 func (p *Proxy) closeDependencyConns() {
 	p.treeMu.Lock()
 	defer p.treeMu.Unlock()
@@ -6302,7 +6430,8 @@ func (p *Proxy) closeDependencyConns() {
 // tree to that listener (served). Under the proven switch, a call it leaves
 // to the mock path that is addressed to this machine comes back as outside,
 // its mocked-local row (without its test), for the caller to list once it
-// knows the call is recorded or mocked.
+// knows the call is recorded or mocked. ctx is the one the live handler is
+// handed (LiveHandler): the connection's values with the proxy's life.
 func (p *Proxy) serveTreeListener(ctx context.Context, srcConn net.Conn, dest *agent.NetworkAddress, dstAddr string, conn string) (served bool, outside *models.MockedRow, err error) {
 	if !p.mockMode || p.IsDocker || p.appPID == 0 {
 		return false, nil, nil
@@ -6352,7 +6481,7 @@ func (p *Proxy) serveTreeListener(ctx context.Context, srcConn net.Conn, dest *a
 		}
 		return false, outside, nil
 	}
-	seeProcess(pidToUint32(owner))
+	seeProcess(Process{Pid: pidToUint32(owner)})
 	if !proven && starts.Default.Dependency(pidToUint32(owner)) {
 		p.logger.Debug("the destination is a dependency the tests started; recording and serving it as mocks", zap.String("destination", dstAddr), zap.Int("owner", owner))
 		starts.Default.Child(conn)
@@ -6370,7 +6499,7 @@ func (p *Proxy) serveTreeListener(ctx context.Context, srcConn net.Conn, dest *a
 		p.logger.Debug("the destination is a port the recording called as an outside dependency; serving it as mocks", zap.String("destination", dstAddr), zap.Int("owner", owner))
 		return false, nil, nil
 	}
-	caller := int(dest.KernelPid)
+	caller, unnamed := callerOf(dest)
 	// A mock.real destination (proven switch only) that the tree's listener
 	// serves is reached through it: counted as a relay to the destination
 	// would be (treeRealConn), or the run, whose recordings list it, fails
@@ -6403,12 +6532,32 @@ func (p *Proxy) serveTreeListener(ctx context.Context, srcConn net.Conn, dest *a
 	if p.selfCalls.Add(1) == 1 {
 		p.logger.Info("self-call passed through to the run's own listener; the real handler answers it, not a mock",
 			zap.String("destination", dstAddr), zap.Int("owner", owner), zap.Int("caller", caller),
+			zap.Uint32("caller_kernel_pid", dest.KernelPid),
 			zap.String("reason", models.ReasonLoopbackOutsideRun),
 			zap.String("note", "further self-calls are logged at debug, and counted at the end of a run that finishes"))
 	} else {
 		p.logger.Debug("self-call passed through to the run's own listener; the real handler answers it, not a mock",
 			zap.String("destination", dstAddr), zap.Int("owner", owner), zap.Int("caller", caller),
+			zap.Uint32("caller_kernel_pid", dest.KernelPid),
 			zap.String("reason", models.ReasonLoopbackOutsideRun))
+	}
+	if p.live != nil && unnamed {
+		// A test's call to the app it started is recorded as a test case
+		// (the live handler), and only a test's: a connection whose caller
+		// the agent cannot name may carry such calls, so it is counted and
+		// said, not passed through in silence: over the agent's life here
+		// (the first warned of, the total logged as the run ends), and on
+		// the recording's manager, whose session summary and stream end
+		// marker report the session's count. Connections, not calls: this
+		// relays them unread.
+		syncMock.FromContextOrGlobal(ctx).NoteUnnamedCallerConn()
+		if p.unnamedConns.Add(1) == 1 {
+			p.logger.Warn(unnamedCallerWarning,
+				zap.String("destination", dstAddr), zap.Int("owner", owner),
+				zap.Uint32("caller_kernel_pid", dest.KernelPid),
+				zap.String("next_step", "run keploy in the PID namespace of the app's tests, or in the host's (--pid=host, or hostPID in Kubernetes)"),
+				zap.String("note", "further such connections are counted at the end of a run that finishes"))
+		}
 	}
 	if p.live != nil && caller != owner && descends(owner, caller) {
 		if isReal {

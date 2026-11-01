@@ -249,6 +249,21 @@ func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	if provenswitch.On() && req.Sets == nil {
+		// The values each test gave when it was recorded: a replay's given
+		// is bound with its recorded value. An agent that cannot take them
+		// says so when the recording has any: its givens would check
+		// nothing.
+		if s, ok := a.svc.(scopeGivenSetter); ok {
+			if err := s.SetScopeGiven(r.Context(), req.Given); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		} else if len(req.Given) > 0 {
+			http.Error(w, "this keploy agent cannot take the values the tests gave when they were recorded", http.StatusNotImplemented)
+			return
+		}
+	}
 	if s, ok := a.svc.(scopeTableSetter); ok && req.Sets == nil {
 		if err := s.SetScopeTable(r.Context(), req.Mappings); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -285,6 +300,12 @@ func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 	}
 	render.Status(r, http.StatusOK)
 	render.JSON(w, r, map[string]string{"status": "ok"})
+}
+
+// scopeGivenSetter installs the values each test gave when it was recorded
+// (proven wire, models.ScopeTableReq.Given).
+type scopeGivenSetter interface {
+	SetScopeGiven(ctx context.Context, given map[string][]models.GivenValue) error
 }
 
 // scopePoolSetter installs each key's pool slice (proven wire).

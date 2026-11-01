@@ -625,7 +625,7 @@ func TestVariables_ABindRefusedOverWhatTheCheckReadIsAMiss(t *testing.T) {
 		hit := &varHit{mock: m, binds: []variables.Binding{{Name: "polled", Value: "V", Recorded: "r-2", Mock: "mock-2", Place: "body.at"}},
 			local: map[string]variables.Binding{}, table: &tb, gen: tb.Gen(), saw: c.saw}
 		consumed := false
-		served, problem, retry, err := newHTTP().serveVariablesBy(hit, func(*models.Mock) bool { consumed = true; return true })
+		served, problem, retry, err := newHTTP().serveVariablesBy(hit, nil, func(*models.Mock) bool { consumed = true; return true })
 		if err != nil || served != nil || consumed {
 			t.Fatalf("%s: served %v, consumed %v, err %v", c.name, served, consumed, err)
 		}

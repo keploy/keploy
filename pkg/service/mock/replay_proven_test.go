@@ -350,6 +350,14 @@ func replayErr(t *testing.T, instr *composeInstr, cmdType utils.CmdType) error {
 // replayErrOnMiss is replayErr with --on-miss onMiss ("" for fail).
 func replayErrOnMiss(t *testing.T, instr *composeInstr, cmdType utils.CmdType, onMiss string) error {
 	t.Helper()
+	return replayThrough(t, instr, instr, cmdType, onMiss)
+}
+
+// replayThrough is replayErrOnMiss with the replay's agent client through,
+// which wraps instr (it adds an optional extension instr does not have), and
+// each of opts applied to the replay's config.
+func replayThrough(t *testing.T, instr *composeInstr, through Instrumentation, cmdType utils.CmdType, onMiss string, opts ...func(*config.Config)) error {
+	t.Helper()
 	repo := t.TempDir()
 	t.Chdir(repo)
 	keployDir := filepath.Join(repo, "keploy")
@@ -363,9 +371,81 @@ func replayErrOnMiss(t *testing.T, instr *composeInstr, cmdType utils.CmdType, o
 	if onMiss != "" {
 		cfg.Mock.OnMiss = onMiss
 	}
+	for _, o := range opts {
+		o(cfg)
+	}
 	utils.ErrCode = 0
 	t.Cleanup(func() { utils.ErrCode = 0 })
-	return New(zap.NewNop(), instr, named("mock-0"), mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background())
+	return New(zap.NewNop(), through, named("mock-0"), mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background())
+}
+
+// settlingInstr is composeInstr with the agent's end-of-run hook
+// (RunSettler), which fails with err.
+type settlingInstr struct {
+	*composeInstr
+	err   error
+	calls int
+}
+
+func (s *settlingInstr) AfterTestRun(context.Context, string, []string, models.TestCoverage) error {
+	s.calls++
+	return s.err
+}
+
+// Under the switch the agent's end-of-run hook failing -- it refused, as an
+// enterprise agent that could not write the row of a program off the run's
+// clock does, or the agent was gone -- leaves the run's tests unchecked and
+// what it served unread: keploy did not complete the run, whatever the test
+// command did. The receipt says keploy failed it and names the cause, so a
+// verdict reads the run as not judged; the test command's own exit is kept,
+// a failing one's code included. In record's full round (learning), the
+// learn step that could not read what was served is not what the receipt
+// blames. Without the switch the hook is not called, and the run is the test
+// command's, as before.
+func TestAReplayWhoseAgentDidNotFinishItsEndIsKeploysFailure(t *testing.T) {
+	cause := errors.New("the agent could not write the row of /usr/bin/curl (pid 41), a program off the run's clock: no space left on device")
+	said := "keploy's agent did not finish checking the run's tests: " + cause.Error()
+	for _, c := range []struct {
+		proven     bool
+		learn      bool
+		runner     models.AppError
+		wantExit   int
+		wantRunner int
+	}{
+		{true, false, models.AppError{AppErrorType: models.ErrAppStopped}, utils.ExitKeployError, 0},
+		{true, false, models.AppError{AppErrorType: models.ErrCommandError, ExitCode: 3}, 3, 3},
+		{true, true, models.AppError{AppErrorType: models.ErrCommandError, ExitCode: 3}, 3, 3},
+		{false, false, models.AppError{AppErrorType: models.ErrAppStopped}, 0, 0},
+	} {
+		t.Run(fmt.Sprintf("proven=%v learn=%v runner=%d", c.proven, c.learn, c.wantRunner), func(t *testing.T) {
+			if c.proven {
+				provenOn(t)
+			} else {
+				t.Setenv(provenswitch.Env, "")
+			}
+			instr := newInstr(t, agentUpFromSetup, false, c.runner)
+			settler := &settlingInstr{composeInstr: instr, err: cause}
+			err := replayThrough(t, instr, settler, utils.Native, "", func(cfg *config.Config) { cfg.Test.Learn = c.learn })
+			wd, werr := os.Getwd() // replayThrough ran it in its repo
+			require.NoError(t, werr)
+			r := mustReceipt(t, filepath.Join(wd, "keploy"))
+			require.Equal(t, c.wantExit, r.ExitCode)
+			require.Equal(t, c.wantRunner, r.RunnerExitCode, "the test command's own exit was not kept")
+			if !c.proven {
+				require.NoError(t, err)
+				require.Zero(t, settler.calls, "the end-of-run hook was called with the switch off")
+				require.Empty(t, r.FailedBy)
+				require.Equal(t, 1, r.Consumed)
+				return
+			}
+			require.Equal(t, 1, settler.calls, "the end-of-run hook was not called once")
+			require.EqualError(t, err, "keploy did not complete the run: "+said)
+			require.Equal(t, FailedByKeploy, r.FailedBy, "a run whose agent did not finish its end was judged")
+			require.Equal(t, said, r.Error)
+			require.False(t, r.Isolated)
+			require.Equal(t, -1, r.Consumed, "what the agent served was read from an agent that did not finish")
+		})
+	}
 }
 
 // Under the switch what each test did is keploy's verdict: a replay that

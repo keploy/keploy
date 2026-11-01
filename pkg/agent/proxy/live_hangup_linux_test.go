@@ -619,7 +619,7 @@ func serveTreeCall(t *testing.T, synchronous, real bool, h http.Handler) (lc *li
 	}
 	lc.app, lc.proxy = acceptedPair(t, lc.tr)
 	port := uint32(ln.Addr().(*net.TCPAddr).Port)
-	dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: uint32(os.Getppid())}
+	dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: uint32(os.Getppid()), AgentNsPid: uint32(os.Getppid())}
 	go func() {
 		defer close(lc.served)
 		defer func() { _ = lc.proxy.Close() }() // as handleConnection does once it returns

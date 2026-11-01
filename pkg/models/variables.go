@@ -80,6 +80,11 @@ type MockVariable struct {
 	// regression. Each is still asserted at every one of its places. Only the
 	// learn step sets it, with a Bind; none for any other variable.
 	Clock []ClockRead `json:"clock,omitempty" yaml:"clock,omitempty" bson:"clock,omitempty"`
+	// Why is, for a variable the learn step wrote, why it is one and how to
+	// undo it, for a person or a tool reading the mock (the legibility
+	// rule). Only given variables (GivenPrefix) carry one for now
+	// (learn.GivenWhy). Nothing replays it.
+	Why string `json:"why,omitempty" yaml:"why,omitempty" bson:"why,omitempty"`
 }
 
 // ClockRead is one clock read a recorded value holds, as the learn step read
@@ -1644,6 +1649,9 @@ func MergeVariables(a, b MockVariables) MockVariables {
 		cur.Use = appendNewPlaces(cur.Use, v.Use...)
 		cur.Answer = appendNewPlaces(cur.Answer, v.Answer...)
 		cur.Echo = cur.Echo && v.Echo
+		if cur.Why == "" {
+			cur.Why = v.Why
+		}
 		out[name] = cur
 	}
 	return out

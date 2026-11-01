@@ -272,6 +272,7 @@ type RoundSnapshot struct {
 	worker    map[string]struct{}
 	pool      map[string]struct{}
 	bgPool    map[string]struct{}
+	bgWorker  map[string]struct{}
 	windows   *models.WindowSchedule
 	poolNames *map[string]struct{}
 	winStart  time.Time
@@ -286,8 +287,10 @@ type RoundParts struct {
 	Owners    map[string]RoundOwner
 	Claimants map[string]string
 	// Worker, Pool and BackgroundPool are the view's worker scope, its pool
-	// slice and the background pool, by name; never written once read.
-	Worker, Pool, BackgroundPool map[string]struct{}
+	// slice and the background pool, by name; BackgroundWorker the
+	// background's worker scope (the reached workers' recordings); never
+	// written once read.
+	Worker, Pool, BackgroundPool, BackgroundWorker map[string]struct{}
 	// Windows is the staging's recorded test windows; PoolNames the
 	// replay's scope table (nil until sent); WindowStart and WindowEnd the
 	// current test window.
@@ -305,7 +308,7 @@ type RoundParts struct {
 // WithParts is s answering from p (a store's, read with s).
 func (s RoundSnapshot) WithParts(p RoundParts) RoundSnapshot {
 	s.owners, s.claimants = p.Owners, p.Claimants
-	s.worker, s.pool, s.bgPool = p.Worker, p.Pool, p.BackgroundPool
+	s.worker, s.pool, s.bgPool, s.bgWorker = p.Worker, p.Pool, p.BackgroundPool, p.BackgroundWorker
 	s.windows, s.poolNames = p.Windows, p.PoolNames
 	s.winStart, s.winEnd = p.WindowStart, p.WindowEnd
 	s.viewGen = p.ViewGen
@@ -471,14 +474,17 @@ func (s RoundSnapshot) CallRound() CallRound {
 	if s.SetUnstaged() {
 		return NewCallRound(s.At.Epoch, HoldsEvery).ReadAt(s.At).InStaging(true).InView(false, s.Background)
 	}
+	// A test's view with a worker scope shows it the worker scope, as the
+	// store's MarkCallRound says (its sequence view's Worker).
+	worker := s.Test != "" && len(s.worker) > 0
 	if s.TrackerAhead() {
-		return NewCallRound(s.At.Epoch, HoldsEvery).ReadAt(s.At).InStaging(s.Staging).InView(s.Test != "", s.Background)
+		return NewCallRound(s.At.Epoch, HoldsEvery).ReadAt(s.At).InStaging(s.Staging).InView(s.Test != "", s.Background).InWorkerView(worker)
 	}
 	owners, ended := s.owners, s.endedOwn
 	return NewCallRound(s.At.Epoch, func(name string) bool {
 		_, own := ended[name]
 		return own || owners[name] != OwnerNone
-	}).ReadAt(s.At).InStaging(s.Staging).InView(s.Test != "", s.Background)
+	}).ReadAt(s.At).InStaging(s.Staging).InView(s.Test != "", s.Background).InWorkerView(worker)
 }
 
 // HoldsEvery holds every recording as a call's own (NewCallRound): the mark
@@ -596,11 +602,36 @@ func (s RoundSnapshot) InBackgroundPool(name string) bool {
 	return ok
 }
 
+// InBackground implements BackgroundMember: name is one of the background's
+// recordings, and the view holds it as no test's own (Owner): one a test owns
+// (judging moved it into the test) is that test's. The background is the
+// pool's and the worker scope's recordings in a set served by the background
+// rules, and, in a test under any rules, the worker scope the run reached.
+func (s RoundSnapshot) InBackground(name string) bool {
+	if s.owners[name] != OwnerNone {
+		return false
+	}
+	if s.Test != "" {
+		if _, ok := s.worker[name]; ok {
+			return true
+		}
+	}
+	if !s.Background {
+		return false
+	}
+	if _, ok := s.bgPool[name]; ok {
+		return true
+	}
+	_, ok := s.bgWorker[name]
+	return ok
+}
+
 var (
-	_ TestWindows    = RoundSnapshot{}
-	_ InFlightOwner  = RoundSnapshot{}
-	_ TestOwner      = RoundSnapshot{}
-	_ PoolMembership = RoundSnapshot{}
+	_ TestWindows      = RoundSnapshot{}
+	_ InFlightOwner    = RoundSnapshot{}
+	_ TestOwner        = RoundSnapshot{}
+	_ PoolMembership   = RoundSnapshot{}
+	_ BackgroundMember = RoundSnapshot{}
 )
 
 // ExactBackground reports whether, at the snapshot, the background

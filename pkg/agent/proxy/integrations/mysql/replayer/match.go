@@ -353,6 +353,12 @@ type matchOptions struct {
 	// bodiesBuilt, when set, counts the live request bodies the command
 	// builds (strictGate.liveRequestBody).
 	bodiesBuilt *int
+	// probed, when set, makes the match a dry one (ownRepeats): the scan picks
+	// the recording that would answer the command, and the match stops there
+	// and writes it to *probed (nil when no recording would), before any
+	// synthesized answer, consume, noise learning, prepared-statement
+	// bookkeeping or served event.
+	probed **models.Mock
 	// eagerBody builds the live request body before the scan, whether or not
 	// strict enforcement or detection reads it, as the matcher did before it
 	// built the body on first read: the reference a test checks that the
@@ -380,6 +386,20 @@ type matchOptions struct {
 func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext, noiseEngine *schemanoise.Engine, userBodyNoise map[string][]string) (*mysql.Response, bool, *mockMiss, error) {
 	call := integrations.MarkCallRound(mockDb)
 	db, restaged := integrations.HoldToRound(mockDb, call)
+	// A command one of the open test's own recordings is, answered or not,
+	// as the matcher judges it (ownRepeats), is matched with the set's
+	// background hidden (integrations.OwnRepeatRead) once the background is
+	// about to answer it: no pool or worker recording answers a command one
+	// more than the test recorded, which then misses as such, its background
+	// copy left unspent, even when two of them are run at once (the store
+	// refuses the copy, and the retry below reads it hidden). A command the
+	// test's own recordings answer never asks.
+	var own []*models.Mock
+	held := db
+	db = integrations.OwnRepeatRead(db, call, func() bool {
+		own = ownCommands.Of(held, commandType(req.PacketBundle))
+		return len(ownRepeats(ctx, req, held, own, decodeCtx, noiseEngine, userBodyNoise, 1)) > 0
+	})
 	var opts matchOptions
 	resp, ok, miss, err := matchCommandWith(ctx, logger, req, db, decodeCtx, noiseEngine, userBodyNoise, opts)
 	// A consume the store refused (integrations.ConsumeRefused: under exact
@@ -404,6 +424,15 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 		opts.refused[refused.mock] = struct{}{}
 		resp, ok, miss, err = matchCommandWith(ctx, logger, req, db, decodeCtx, noiseEngine, userBodyNoise, opts)
 	}
+	// A command that missed before the background could answer it asks now
+	// whether it is one of the open test's own (integrations.OwnRepeat): one
+	// is matched again as it reads the store, with the background hidden, so
+	// its miss is diagnosed as one command more than the test recorded, never
+	// against the background.
+	hidden := miss != nil && integrations.OwnRepeat(db)
+	if hidden && err == nil {
+		resp, ok, miss, err = matchCommandWith(ctx, logger, req, db, decodeCtx, noiseEngine, userBodyNoise, opts)
+	}
 	// A store that marked the command's round but could not hold it read
 	// nothing for it (integrations.HoldToRound fails closed): the miss says
 	// why.
@@ -422,6 +451,11 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 	}
 	if miss != nil {
 		miss.call = call
+		// One command more than the open test recorded: its own recordings
+		// of it answered, and the background was hidden from it.
+		if !miss.restaged && hidden {
+			miss.extraCall = len(ownRepeats(ctx, req, held, own, decodeCtx, noiseEngine, userBodyNoise, 0))
+		}
 	}
 	return resp, ok, miss, err
 }
@@ -1962,6 +1996,13 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 	}
 	if len(lost) > 0 && matchedMock != nil {
 		return nil, false, unknownStatementsMiss(lost, matchedMock, mysqlCandidates), nil
+	}
+
+	if opts.probed != nil {
+		if matchedResp != nil {
+			*opts.probed = matchedMock
+		}
+		return nil, false, nil, nil
 	}
 
 	if matchedResp == nil {

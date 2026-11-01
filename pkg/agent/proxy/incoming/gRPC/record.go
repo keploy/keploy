@@ -142,13 +142,13 @@ func RecordIncoming(ctx context.Context, logger *zap.Logger, clientConn, destCon
 	// Parse client→app frames (requests)
 	go func() {
 		defer parseWg.Done()
-		parseFramesFromChan(ctx, logger, clientFrameCh, sm, false, parsed)
+		parseFramesFromChan(logger, clientFrameCh, sm, false, parsed)
 	}()
 
 	// Parse app→client frames (responses)
 	go func() {
 		defer parseWg.Done()
-		parseFramesFromChan(ctx, logger, destFrameCh, sm, true, parsed)
+		parseFramesFromChan(logger, destFrameCh, sm, true, parsed)
 	}()
 
 	parseWg.Wait()
@@ -395,9 +395,21 @@ func (s *endScanner) scan(b []byte) []int {
 // that: the frame is stamped with the time of the chunk that completes it
 // (HandleFrame), whose own note covers it. Held instead, it would keep a stop
 // waiting on a client that stopped reading mid-response, whose next chunk is
-// never forwarded. When the parser stops, what it never takes is released as
-// it comes (drainFrameChunks).
-func parseFramesFromChan(ctx context.Context, logger *zap.Logger, ch <-chan frameChunk, sm *pkg.DefaultStreamManager, isOutgoing bool, parsed func(built []func())) {
+// never forwarded. When the parser gives up on the stream (bytes that are not
+// HTTP/2), what it never takes is released as it comes (drainFrameChunks).
+//
+// It reads until ch closes, past its ingress's stop too. The stop closes both
+// connections (RecordIncoming), so the forwarders end and close their
+// channels at once; what they teed before that is the app's traffic, a call
+// it served among it. A parser that left at the stop dropped that backlog
+// unread: a call whose response the forwarder had read, and was handing to
+// its parser as the stop came (on a loaded host it can be descheduled there),
+// was neither recorded nor counted. Read to the end, each call complete in it
+// is built, and its capture hands it on or counts it (conn.HandOn). A call
+// whose request or response the forwarders had not wholly read when the stop
+// closed the connections is cut off: its client sees its connection close,
+// not the app's answer. No test case is built of it, and no count says it.
+func parseFramesFromChan(logger *zap.Logger, ch <-chan frameChunk, sm *pkg.DefaultStreamManager, isOutgoing bool, parsed func(built []func())) {
 	var buffer []byte
 	prefaceRead := isOutgoing
 	// One reader for all of the direction's frames: a header block split
@@ -418,19 +430,7 @@ func parseFramesFromChan(ctx context.Context, logger *zap.Logger, ch <-chan fram
 		}
 	}
 
-	for {
-		var chunk frameChunk
-		select {
-		case <-ctx.Done():
-			drainFrameChunks(ch)
-			return
-		case next, ok := <-ch:
-			if !ok {
-				return
-			}
-			chunk = next
-		}
-
+	for chunk := range ch {
 		if len(chunk.data) == 0 {
 			release(chunk.built)
 			continue

@@ -345,6 +345,12 @@ type MappedTestCase struct {
 	// the verdict fails when CI never reaches one. Written and read only
 	// under the proven switch; empty in recordings made without it.
 	Real []string `json:"real,omitempty" yaml:"real,omitempty" bson:"real,omitempty"`
+	// Given is the values the test gave while it was open in its recording
+	// (POST /agent/scope/given), in the order it gave them: each replay
+	// binds the value the test gives then with the recorded one (design
+	// given-api §3). Written and read only under the proven switch; empty in
+	// recordings made without it.
+	Given []GivenValue `json:"given,omitempty" yaml:"given,omitempty" bson:"given,omitempty"`
 }
 
 type persistedTestFormat struct {
@@ -363,8 +369,9 @@ type persistedTestFormat struct {
 // persistedTestFormat, which also picks the shape an entry is read in.
 type writtenTestFormat struct {
 	persistedTestFormat `yaml:",inline"`
-	At                  time.Time `json:"at,omitzero" yaml:"at,omitempty"`
-	Real                []string  `json:"real,omitempty" yaml:"real,omitempty"`
+	At                  time.Time    `json:"at,omitzero" yaml:"at,omitempty"`
+	Real                []string     `json:"real,omitempty" yaml:"real,omitempty"`
+	Given               []GivenValue `json:"given,omitempty" yaml:"given,omitempty"`
 }
 
 type structuredTestFormat struct {
@@ -379,11 +386,11 @@ type stringSliceTestFormat struct {
 }
 
 func (tc MappedTestCase) MarshalYAML() (interface{}, error) {
-	return writtenTestFormat{persistedTestFormat: tc.persistedFormat(), At: tc.At, Real: tc.Real}, nil
+	return writtenTestFormat{persistedTestFormat: tc.persistedFormat(), At: tc.At, Real: tc.Real, Given: tc.Given}, nil
 }
 
 func (tc MappedTestCase) MarshalJSON() ([]byte, error) {
-	return json.Marshal(writtenTestFormat{persistedTestFormat: tc.persistedFormat(), At: tc.At, Real: tc.Real})
+	return json.Marshal(writtenTestFormat{persistedTestFormat: tc.persistedFormat(), At: tc.At, Real: tc.Real, Given: tc.Given})
 }
 
 // errRecordedBegin is a test entry whose at: is not a time.
@@ -440,6 +447,40 @@ func recordedRealJSON(data []byte) ([]string, error) {
 	return r.Real, nil
 }
 
+// errRecordedGiven is a test entry whose given: is not a list of givens.
+const errRecordedGiven = "a test's given values (given) are not a list of name, value and source: %w"
+
+// recordedGivenYAML is a test entry's given: under the proven switch. One
+// that is not a list of givens is an error, never a reason to read the entry
+// without it: its replay would bind each given with no recorded value, and
+// check none. With the switch off given: is not read.
+func recordedGivenYAML(node *yaml.Node) ([]GivenValue, error) {
+	if !provenswitch.On() || !nodeHasField(node, "given") {
+		return nil, nil
+	}
+	var g struct {
+		Given []GivenValue `yaml:"given"`
+	}
+	if err := node.Decode(&g); err != nil {
+		return nil, fmt.Errorf(errRecordedGiven, err)
+	}
+	return g.Given, nil
+}
+
+// recordedGivenJSON is recordedGivenYAML for a JSON entry.
+func recordedGivenJSON(data []byte) ([]GivenValue, error) {
+	if !provenswitch.On() || !jsonContainsField(data, "given") {
+		return nil, nil
+	}
+	var g struct {
+		Given []GivenValue `json:"given"`
+	}
+	if err := json.Unmarshal(data, &g); err != nil {
+		return nil, fmt.Errorf(errRecordedGiven, err)
+	}
+	return g.Given, nil
+}
+
 // recordedBeginJSON is recordedBeginYAML for a JSON entry.
 func recordedBeginJSON(data []byte) (time.Time, error) {
 	if !provenswitch.On() || !jsonContainsField(data, "at") {
@@ -481,10 +522,14 @@ func (tc *MappedTestCase) UnmarshalYAML(node *yaml.Node) error {
 	if err != nil {
 		return err
 	}
+	gv, err := recordedGivenYAML(node)
+	if err != nil {
+		return err
+	}
 	if err := tc.unmarshalYAMLEntry(node); err != nil {
 		return err
 	}
-	tc.At, tc.Real = at, rl
+	tc.At, tc.Real, tc.Given = at, rl, gv
 	return nil
 }
 
@@ -568,10 +613,14 @@ func (tc *MappedTestCase) UnmarshalJSON(data []byte) error {
 	if err != nil {
 		return err
 	}
+	gv, err := recordedGivenJSON(data)
+	if err != nil {
+		return err
+	}
 	if err := tc.unmarshalJSONEntry(data); err != nil {
 		return err
 	}
-	tc.At, tc.Real = at, rl
+	tc.At, tc.Real, tc.Given = at, rl, gv
 	return nil
 }
 

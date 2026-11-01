@@ -11,8 +11,22 @@ import (
 	"strconv"
 	"strings"
 
+	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/utils"
 )
+
+// callerOf is the process that made a redirected connection, by its number in
+// the agent's own PID namespace, the one the agent's /proc (listenerOwner,
+// descends) names processes by: the eBPF redirect's AgentNsPid. The kernel's
+// number (KernelPid) names another process, or none, there when the agent
+// runs in a PID namespace of its own (keploy in a container without the
+// host's PID namespace), so a test's call to an app it started never
+// descended from it and was never recorded as a test case. unnamed is true
+// when the kernel named the caller but not in the agent's namespace: a
+// process outside it, which the agent cannot place in the run's tree.
+func callerOf(dest *agent.NetworkAddress) (caller int, unnamed bool) {
+	return int(dest.AgentNsPid), dest.AgentNsPid == 0 && dest.KernelPid != 0
+}
 
 func listenerOwner(ip net.IP, port uint32) (int, bool) {
 	inodes := listenInodes(ip, port)
