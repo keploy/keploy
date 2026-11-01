@@ -868,6 +868,26 @@ func TestOutcomeAnOffsetNearAWallTimeShownTwiceIsRefused(t *testing.T) {
 	}
 }
 
+// A clock read its protocol types keeps that layout, plain or with an
+// offset, so a replay that writes it in another form (a text) is checked
+// and fails, never passes as any form.
+func TestOutcomeATypedClockReadKeepsItsTypedLayout(t *testing.T) {
+	const p = "body.dirtyAt"
+	ms := time.Millisecond
+	call := time.Date(2026, 10, 26, 10, 0, 7, 300e6, time.UTC)
+	fcall := call.Add(FullRoundLead)
+	w := (&Window{Rec: Span{From: call.Add(-100 * ms), To: call}, F: Span{From: fcall.Add(-100 * ms), To: fcall}}).ComparesOffsets()
+	for name, off := range map[string]time.Duration{"plain": 0, "plus two hours": 2 * time.Hour} {
+		leaf := func(at time.Time) Shape { return Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, at.Add(off), ms)}} }
+		ds := Decide(Input{Drifts: oDrifts(), Drift: []string{p}, Live: leaf(fcall.Add(-30 * ms)), Rec: leaf(call.Add(-30 * ms)),
+			At: call, Arrived: fcall, Window: w, Test: "test-2", Mock: "mock-300",
+			Caps: Caps{BindAtWord: true, AnswerAtWord: true, FViewStated: true}})
+		if len(ds) != 1 || ds[0].Outcome != OutcomeClock || ds[0].Clock == nil || ds[0].Clock.Layout != models.LayoutTyped {
+			t.Errorf("a typed clock read, %s: %s; want a Clock in layout %q", name, oDescribe(ds), models.LayoutTyped)
+		}
+	}
+}
+
 // A call that carries no app clock (no window: the adapter read none) is
 // refused naming that cause, never in the words of a window that does not
 // hold the time; a window that does not hold it keeps those words.
