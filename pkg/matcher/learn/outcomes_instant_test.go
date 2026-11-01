@@ -356,7 +356,9 @@ func TestOutcomeASecondReadBesideAFinerInstantInAnAnswerIsAClock(t *testing.T) {
 	}
 	call := func(w *Window, raw []Raw) Input { return iCall(p, String, sec(rAt), sec(fAt), rAt, fAt, w, nil, raw) }
 	iClock(t, "the second its own window holds", oWord(t, Decide(call(iWin(rAt, fAt, 100*time.Millisecond), ans(name(rAt), name(fAt)))), sec(rAt), sec(fAt)))
-	far := iWin(rAt.Add(5*time.Second), fAt.Add(5*time.Second), 100*time.Millisecond)
+	// 5 s after the read in the recording, 8 s in round F: neither the
+	// window nor one look-back in both runs holds it.
+	far := iWin(rAt.Add(5*time.Second), fAt.Add(8*time.Second), 100*time.Millisecond)
 	d := oWord(t, Decide(call(far, ans(name(rAt), name(fAt)))), sec(rAt), sec(fAt))
 	oRefused(t, "a second its window does not hold", d, RefusalNoClockRead, "mock-1624", "another form")
 	far.Rec.Began, far.F.Began = rAt.Add(-time.Second), fAt.Add(-time.Second)
@@ -528,7 +530,9 @@ func TestOutcomeACopiedTextOrNumberIsASourceByItsText(t *testing.T) {
 	const p = "body.at"
 	rAt := oAt.Add(2 * time.Hour)
 	fAt := rAt.Add(time.Hour)
-	rT, fT := rAt.Add(-3*time.Second).Truncate(time.Microsecond), fAt.Add(-3*time.Second).Truncate(time.Microsecond)
+	// Each read under a second before its call: a plain read wherever a
+	// window holds it.
+	rT, fT := rAt.Add(-700*time.Millisecond).Truncate(time.Microsecond), fAt.Add(-640*time.Millisecond).Truncate(time.Microsecond)
 	sec := func(t time.Time) string { return strconv.FormatInt(t.Unix(), 10) }
 	sent := func(r, f string) []Earlier {
 		return []Earlier{iSent("mock-1", rAt.Add(-5*time.Second), "body.since", String, r, f)}
@@ -837,9 +841,11 @@ func TestOutcomeASecondInsideANanosecondNameIsNoCopyToBind(t *testing.T) {
 	r0 := oAt.Add(6300 * time.Millisecond)
 	rAt := r0.Add(900 * time.Millisecond)
 	f0 := oAt.Add(61*time.Second + 14800*time.Millisecond)
-	fAt := f0.Add(1400 * time.Millisecond)
+	fAt := f0.Add(2400 * time.Millisecond)
 	w := iWin(rAt, fAt, 100*time.Millisecond)
 	w.Rec.Began, w.F.Began = r0, f0
+	// The second stands 1.2 s before its call in the recording and 2.2 s in
+	// round F: no one look-back holds it in both runs.
 	rec, live := secs(r0.Add(100*time.Millisecond)), secs(f0.Add(200*time.Millisecond))
 	name := iSent("mock-502", rAt.Add(-300*time.Millisecond), "body.cmd.query.app.name", String, nanos(r0.Add(90*time.Millisecond)), nanos(f0.Add(190*time.Millisecond)))
 	in := iCall(p, Number, rec, live, rAt, fAt, w, []Earlier{name}, nil)
