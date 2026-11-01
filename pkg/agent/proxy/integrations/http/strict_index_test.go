@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -918,5 +919,343 @@ func TestACallThroughTheSharedIndexComparesOnlyTheOwnRecordingsOfItsPath(t *test
 		}
 	}); v != 2 {
 		t.Fatalf("a learned call placed %d recordings; want 2 (own-151 in each read)", v)
+	}
+}
+
+// landings is what other calls do while the call under test runs, keyed by
+// the call's reads of what the store reports spent (MockSpent and
+// SpentReader.Spent, each one point): the change at point p lands just after
+// the p-th read answered, as another call's consume, or a test's end, lands
+// between two reads of a call that runs beside it.
+type landings struct {
+	at     map[int]func()
+	points int
+	took   string
+}
+
+func (l *landings) point() {
+	l.points++
+	if f := l.at[l.points]; f != nil {
+		f()
+	}
+}
+
+// sweep is the store's landings (landingDb).
+func (l *landings) sweep() *landings { return l }
+
+// landingDb is a store under landings: take is another call's consume of
+// the first of names the store still holds, end a test's end, which moves
+// the staging generation and installs a view that reports nothing of the
+// last one spent.
+type landingDb interface {
+	integrations.MockMemDb
+	sweep() *landings
+	take(names ...string) func()
+	end()
+}
+
+// landingGenDb is ownGenDb under landings.
+type landingGenDb struct {
+	*ownGenDb
+	landings
+}
+
+func (d *landingGenDb) MockSpent(name string) bool {
+	spent := d.ownGenDb.MockSpent(name)
+	d.point()
+	return spent
+}
+
+func (d *landingGenDb) Spent(*models.Mock) bool {
+	d.point()
+	return false
+}
+
+func (d *landingGenDb) take(names ...string) func() {
+	return func() {
+		for _, name := range names {
+			for _, m := range d.perTest {
+				if m.Name == name && d.genDb.DeleteFilteredMock(*m) {
+					d.took = name
+					return
+				}
+			}
+		}
+	}
+}
+
+func (d *landingGenDb) end() { d.gen, d.spent = d.gen+1, map[string]bool{} }
+
+// landingVarDb is genVarDb under landings.
+type landingVarDb struct {
+	*genVarDb
+	landings
+}
+
+func (d *landingVarDb) MockSpent(name string) bool {
+	spent := d.genVarDb.MockSpent(name)
+	d.point()
+	return spent
+}
+
+func (d *landingVarDb) Spent(*models.Mock) bool {
+	d.point()
+	return false
+}
+
+func (d *landingVarDb) take(names ...string) func() {
+	return func() {
+		for _, name := range names {
+			for _, m := range d.perTest {
+				if m.Name == name && d.varDb.DeleteFilteredMock(*m) {
+					d.took = name
+					return
+				}
+			}
+		}
+	}
+}
+
+func (d *landingVarDb) end() { d.gen, d.consumed = d.gen+1, map[string]bool{} }
+
+// strictTwins are two per-test recordings of one GET /item/77?size=small,
+// the call recorded twice, beside strictItems' ten.
+func strictTwins() []*models.Mock {
+	mocks := strictItems("mock", 10)
+	for i := 0; i < 2; i++ {
+		m := onHost(fmt.Sprintf("twin-%d", i), "/item/77?size=small", strictIxHost)
+		m.TestModeInfo.Lifetime = models.LifetimePerTest
+		mocks = append(mocks, answered(m, time.Duration(100+i)*time.Millisecond, 200, `{"id":77}`))
+	}
+	return mocks
+}
+
+// bindTwins are two per-test recordings of one POST /orders that binds
+// orderId (orderBind), the call recorded twice, beside strictItems' ten.
+func bindTwins() []*models.Mock {
+	mocks := strictItems("mock", 10)
+	for i := 0; i < 2; i++ {
+		m := orderBind()
+		m.Name = fmt.Sprintf("twin-%d", i)
+		mocks = append(mocks, m)
+	}
+	return mocks
+}
+
+// landingRun is call in verify mode, with what verify mode panicked with, if
+// it did.
+func landingRun(call func() *models.Mock) (served *models.Mock, panicked any) {
+	integrations.ExactViewVerify.Store(true)
+	defer func() {
+		integrations.ExactViewVerify.Store(false)
+		panicked = recover()
+	}()
+	return call(), nil
+}
+
+// strictLanding is a parser whose strict index the generation's first two
+// calls of db built, and its call of the strict twins' request.
+func strictLanding(t *testing.T) func(db landingDb) func() *models.Mock {
+	return func(db landingDb) func() *models.Mock {
+		h := newHTTP()
+		strictMatchOf(t, h, strictCall(0), db, db, nil)
+		strictMatchOf(t, h, strictCall(1), db, db, nil)
+		return func() *models.Mock { return strictMatchOf(t, h, strictCall(77), db, db, nil) }
+	}
+}
+
+// varLanding is strictLanding of the bind twins' request.
+func varLanding(t *testing.T) func(db landingDb) func() *models.Mock {
+	return func(db landingDb) func() *models.Mock {
+		h := newHTTP()
+		strictMatchOf(t, h, strictCall(0), db, db, nil)
+		strictMatchOf(t, h, strictCall(1), db, db, nil)
+		return func() *models.Mock {
+			return strictMatchOf(t, h, liveReq("POST", "http://"+strictIxHost+"/orders", `{"id":"ord-live-9"}`), db, db, nil)
+		}
+	}
+}
+
+// newStrictLandingDb and newVarLandingDb are the twins' stores.
+func newStrictLandingDb() landingDb {
+	return &landingGenDb{ownGenDb: newOwnGenDb(strictTwins(), nil)}
+}
+
+func newVarLandingDb() landingDb {
+	return &landingVarDb{genVarDb: &genVarDb{varDb: &varDb{perTest: bindTwins()}, gen: 1}}
+}
+
+// sweepLandings runs, on a fresh store of newDb, the call prepare readies
+// (after the generation's first calls built its index), once for each point
+// at which another call's consume of one of the twins (the first the store
+// still holds, of either order) can land, and with end, once for each later
+// point at which the test's end can land too. check is handed each run's
+// answer, with the twin the other call took, when no test ended.
+func sweepLandings(t *testing.T, newDb func() landingDb, prepare func(landingDb) func() *models.Mock, withEnd bool, check func(served *models.Mock, took string)) {
+	t.Helper()
+	runs := 0
+	for _, order := range [][]string{{"twin-0", "twin-1"}, {"twin-1", "twin-0"}} {
+		for at := 1; ; at++ {
+			swept := false
+			for end := at + 1; ; end++ {
+				db := newDb()
+				call := prepare(db)
+				l := db.sweep()
+				l.at = map[int]func(){at: db.take(order...)}
+				if withEnd {
+					l.at[end] = db.end
+				}
+				served, panicked := landingRun(call)
+				if panicked != nil {
+					t.Fatalf("%v: another call's consume at point %d (test end at %d: %v) of %d made verify mode panic: %v", order, at, end, withEnd, l.points, panicked)
+				}
+				if l.points < at {
+					break
+				}
+				runs++
+				swept = true
+				if !withEnd {
+					check(served, l.took)
+					break
+				}
+				if l.points < end {
+					break
+				}
+			}
+			if !swept {
+				break
+			}
+		}
+	}
+	if runs < 10 {
+		t.Fatalf("swept %d landings; want a call that reads what is spent at ten points at least", runs)
+	}
+}
+
+// otherTwin fails t unless served is the twin the other call did not take.
+func otherTwin(t *testing.T) func(served *models.Mock, took string) {
+	return func(served *models.Mock, took string) {
+		t.Helper()
+		if served == nil || !strings.HasPrefix(served.Name, "twin-") || served.Name == took {
+			t.Fatalf("served %v while another call took %s; want the other twin", served, took)
+		}
+	}
+}
+
+// Two calls of one request the test recorded twice run at once, under
+// verify mode: the other call's consume of a twin may land between any two
+// of this call's reads of what the store reports spent, among them the
+// verify's own reads after its read of the store. The verify drops a twin
+// it reads spent from both what the index found and what the read found, or
+// from neither, so a consume that lands between its reads is no difference
+// of the index, and no panic; the call is answered with the other twin.
+func TestAConsumeLandingInAStrictCallsVerifyIsNoDifference(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	verifyOff(t)
+	sweepLandings(t, newStrictLandingDb, strictLanding(t), false, otherTwin(t))
+}
+
+// So too of the variable pass's verify: the other call's consume of a
+// recording that binds a variable, landing between any two of a call's
+// reads of what is spent, is no difference of the index.
+func TestAConsumeLandingInAVariableCallsVerifyIsNoDifference(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	verifyOff(t)
+	sweepLandings(t, newVarLandingDb, varLanding(t), false, otherTwin(t))
+}
+
+// A test that ends while a call verifies (its staging generation moved, and
+// the view that reads what is spent is the next one's) leaves nothing to
+// compare: the verify compares only what it read while the call's
+// generation held, from its read of the store to its last read of what is
+// spent, whatever another call consumed before.
+func TestATestEndLandingInACallsVerifyIsNotCompared(t *testing.T) {
+	_, _, _ = learnOn(t)
+	verifyOff(t)
+	sweepLandings(t, newStrictLandingDb, strictLanding(t), true, nil)
+	sweepLandings(t, newVarLandingDb, varLanding(t), true, nil)
+	sweepLandings(t, newLearnLandingDb, learnLanding(t), true, nil)
+}
+
+// lockedGenDb is ownGenDb that calls may read and consume at once, as they
+// do the manager: each read and consume holds one lock.
+type lockedGenDb struct {
+	*ownGenDb
+	mu sync.Mutex
+}
+
+func (d *lockedGenDb) GetPerTestMocksInWindow() ([]*models.Mock, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.ownGenDb.GetPerTestMocksInWindow()
+}
+
+func (d *lockedGenDb) GetSessionMocks() ([]*models.Mock, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.ownGenDb.GetSessionMocks()
+}
+
+func (d *lockedGenDb) DeleteFilteredMock(m models.Mock) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.ownGenDb.DeleteFilteredMock(m)
+}
+
+func (d *lockedGenDb) MockSpent(name string) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.ownGenDb.MockSpent(name)
+}
+
+// Two calls of one request the test recorded twice, made at once through
+// one parser's strict index in verify mode, many times over: each call is
+// answered with a twin of its own, and verify mode never panics. (It
+// panicked in about one run of a hundred, more under -race: its two reads of
+// a twin's account straddled the other call's consume.) Under -race the
+// row is also the verify path's race check.
+func TestTwoIdenticalCallsAtOnceAreAnsweredInVerifyMode(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	verifyOff(t)
+	integrations.ExactViewVerify.Store(true)
+	runs := 2000
+	if raceOn {
+		runs = 500
+	}
+	for run := 0; run < runs; run++ {
+		h, db := newHTTP(), &lockedGenDb{ownGenDb: newOwnGenDb(strictTwins(), nil)}
+		strictMatchOf(t, h, strictCall(0), db, db, nil)
+		strictMatchOf(t, h, strictCall(1), db, db, nil)
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		served, failed := make([]*models.Mock, 2), make([]any, 2)
+		for i := range served {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				defer func() {
+					if p := recover(); p != nil {
+						failed[i] = p
+					}
+				}()
+				<-start
+				ok, stub, _, err := h.matchOf(context.Background(), strictCall(77), db, db, nil, nil, nil, true, false, false, true, true)
+				if err != nil {
+					failed[i] = err
+				} else if ok {
+					served[i] = stub
+				}
+			}()
+		}
+		close(start)
+		wg.Wait()
+		for i := range served {
+			if failed[i] != nil {
+				t.Fatalf("run %d: call %d failed: %v", run, i, failed[i])
+			}
+		}
+		if served[0] == nil || served[1] == nil || served[0].Name == served[1].Name {
+			t.Fatalf("run %d: served %v and %v; want a twin each", run, served[0], served[1])
+		}
 	}
 }
