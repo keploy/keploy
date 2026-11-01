@@ -1108,7 +1108,10 @@ func TestOutcomeAReadMinusADebounceIsTheCallsClockBeforeACoarseCopy(t *testing.T
 // two seconds back. The reading is asked first, so a debounce is learned with
 // its offset: learned plain, the application fails nearly every replay and a
 // dropped look-back passes. Where the reading finds nothing, the window's
-// plain read stands.
+// plain read stands. Where the reading refuses the call's cut (a millisecond
+// value a second or more before its call in both runs, as a consumer's
+// processed_at read a second before its insert is), its refusal stands: the
+// window's plain read is not tried in its place.
 func TestOutcomeTheReadingIsAskedBeforeAWideWindowsPlainRead(t *testing.T) {
 	const p = "body.filter.dirtyAt.$lte"
 	rAt := oAt.Add(400 * time.Millisecond)
@@ -1136,6 +1139,10 @@ func TestOutcomeTheReadingIsAskedBeforeAWideWindowsPlainRead(t *testing.T) {
 	if d.Clock != nil && (d.Clock.Min != 0 || d.Clock.Max != 0) {
 		t.Errorf("the Clock's offset is %v..%v; want none where the reading finds none", d.Clock.Min, d.Clock.Max)
 	}
+	clockInWindow = func(string, typedInstant, typedInstant, *Window, *time.Location) (models.ClockOffset, string, bool) {
+		return models.ClockOffset{}, "the stub reading's refusal", false
+	}
+	oRefused(t, "the same read where the reading refuses its cut", oWord(t, Decide(in), rec, live), RefusalNoClockRead, "the stub reading's refusal")
 }
 
 // api-server's worker claims a job at a second that, under load, is also the
