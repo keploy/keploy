@@ -644,3 +644,28 @@ func TestReaderIndexKeepsNoAnswerPastItsCap(t *testing.T) {
 		t.Errorf("the index keeps %d bytes (words kept %v) within a cap of %d", x.used, tt.e.tokensKept, x.budget)
 	}
 }
+
+// Where the set's tiers that let go keep its budget full, the index has
+// the set let go of what it is past (budget.letGo: the words, then the
+// payloads, each read again where asked for) before it keeps an answer,
+// as a tier keeps one: the index keeps its answer within the set's one
+// budget, and the set has let go of what that needed.
+func TestReaderIndexHasTheSetLetGoToKeep(t *testing.T) {
+	defer func(b, r int64) { learnBudget, readerBudget = b, r }(learnBudget, readerBudget)
+	learnBudget, readerBudget = 1<<20, 0
+	text := "id 7f3c " + strings.Repeat("word ", 20000)
+	dc := NewDriftCache()
+	dc.set = newSetDerived()
+	b := dc.set.budget
+	b.used = b.limit - 1<<10
+	var freed int64
+	b.letGo = func(need int64) { freed += need; b.used -= need }
+	x := newReaderIndex(dc)
+	if held, read := x.text(text).holdsWord("7f3c"); !held || !read {
+		t.Fatalf("held %v read %v; want the word held", held, read)
+	}
+	if x.used <= 0 || freed <= 0 || b.used > b.limit {
+		t.Fatalf("the index keeps %d bytes, the set let go of %d and counts %d of %d: want the set to let go of what the index's answer needs, and the index to keep it within the set's budget", x.used, freed, b.used, b.limit)
+	}
+	x.release()
+}
