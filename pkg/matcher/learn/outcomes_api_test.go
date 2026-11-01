@@ -1,6 +1,7 @@
 package learn
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -61,6 +62,67 @@ func TestOutcomeAPIAnOwnInsertsIdBesideAOneCharacterStartUpPlaceIsFresh(t *testi
 	mock0 := oPg("mock-0", 5*time.Second, "SELECT flags FROM hello", []models.PostgresV3Cells{{{Value: "6"}}}, "SELECT 1")
 	d := oWord(t, Decide(apiCall(p, recID, liveID, oAt.Add(FullRoundLead), nil, nil, []Raw{mock0})), recID, liveID)
 	costFresh(t, "an own insert's id beside a 1-character start-up place", d)
+}
+
+// Row 18 at its real shape: an own insert's _id, a base64url text whose first
+// word is one character, beside a start-up recording F never served whose
+// flags hold that character at a field of their own. F's side of that place
+// is unread, and a word under the floor says nothing there: fresh, its line
+// stating the floor and naming the place. From the floor up the same place
+// stays refused, wherever it stands: handed to the call or in the set.
+func TestOutcomeAPIAWordUnderTheFloorAtAnUnreadPlaceIsNoEvidence(t *testing.T) {
+	const p = "body.documents[0]._id"
+	flags := func(v string) Raw {
+		return oPg("mock-0", 5*time.Second, "SELECT flags FROM settings", []models.PostgresV3Cells{{{Value: v}}}, "SELECT 1")
+	}
+	fAt := oAt.Add(FullRoundLead)
+	for _, tc := range []struct {
+		what, r, f string
+		bits       string
+		fresh      bool
+	}{
+		{"one letter", "k", "z", "4.7", true},
+		{"two letters and digits", "k7", "z4", "10.3", true},
+		{"three digits", "417", "902", "10.0", true},
+		{"three hex digits", "a1f", "c3e", "12", false},
+		{"three letters", "kqz", "pwy", "14.1", false},
+		{"a UUID's 4-hex word", "a1f3", "c2e4", "16", false},
+	} {
+		rec, live := tc.r+"-Rq7Lm2Xv9Tp4Wn8Zc", tc.f+"-Hy3Jd6Fs1Gq5Kw0Pe"
+		given := apiCall(p, rec, live, fAt, nil, nil, nil)
+		x := flags(tc.r).ServedAs(3)
+		given.Given = func() ([]GivenPlaces, error) { return []GivenPlaces{PlacesOf(x)}, nil }
+		for name, in := range map[string]Input{
+			"never served, handed to the call":         apiCall(p, rec, live, fAt, nil, nil, []Raw{flags(tc.r)}),
+			"served, its view not stated, to the call": apiCall(p, rec, live, fAt, nil, nil, []Raw{x}),
+			"among the set's recordings":               given,
+		} {
+			d := oWord(t, Decide(in), tc.r, tc.f)
+			what := tc.what + " (" + tc.bits + " bits) " + name
+			if !tc.fresh {
+				costRefused(t, what, d, costUnknown, "mock-0")
+				continue
+			}
+			costFresh(t, what, d)
+			if !strings.Contains(d.Line, "under 11 bits") || !strings.Contains(d.Line, "mock-0") {
+				t.Errorf("%s: the line %q does not state the floor and name the place", what, d.Line)
+			}
+		}
+	}
+}
+
+// A word under the floor is no evidence only where keploy cannot read the
+// place. Where it can, a place that holds it still says what it says.
+func TestOutcomeAPIAWordUnderTheFloorAtAPlaceKeployReadsStillCounts(t *testing.T) {
+	const p = "body.documents[0]._id"
+	const rec, live = "k-Rq7Lm2Xv9Tp4Wn8Zc", "z-Hy3Jd6Fs1Gq5Kw0Pe"
+	fAt := oAt.Add(FullRoundLead)
+	both := oAnswer("mock-5", time.Second, "k").ServedAs(1).ServedLive(oAnswer("mock-5", time.Second, "z"))
+	if d := oWord(t, Decide(apiCall(p, rec, live, fAt, nil, nil, []Raw{both})), "k", "z"); d.Outcome != OutcomeValue {
+		t.Errorf("a place that shows the word in both runs: %s; want bound there", oDescribe([]Decision{d}))
+	}
+	onlyF := oAnswer("mock-5", time.Second, "q").ServedAs(1).ServedLive(oAnswer("mock-5", time.Second, "z"))
+	costRefused(t, "a place only F's run took the word at", oWord(t, Decide(apiCall(p, rec, live, fAt, nil, nil, []Raw{onlyF})), "k", "z"), costUnknown, "mock-5")
 }
 
 // temp_login_codes' authTime (rows 26, 27: insert temp_login_codes,
