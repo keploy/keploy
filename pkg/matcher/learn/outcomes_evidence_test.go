@@ -519,3 +519,37 @@ func TestOutcomeAnAnswersInstantBesideASecondPossibleSourceIsRefused(t *testing.
 	iValue(t, "another test's answer served as recorded, handed as a recording", oWord(t, Decide(call([]Raw{asRec.OfAnotherTest()})), rec, live), "mock-42")
 	iValue(t, "another test's answer served as recorded, in the set", oWord(t, Decide(call(nil, asRec)), rec, live), "mock-42")
 }
+
+// A place keploy could not read names itself and why in the refusal's line:
+// the store's error where a recording could not be loaded, the reason a
+// place past the budget gives, and a name where the place carries none (a
+// recording of the test, the run's values, the test case's request), never
+// an empty one.
+func TestOutcomeAnUnreadPlaceNamesItselfAndWhy(t *testing.T) {
+	before := oAt.Add(-time.Second)
+	for _, tc := range []struct {
+		what    string
+		earlier []Earlier
+		raw     []Raw
+		names   []string
+	}{
+		{"a recording the store could not load", nil, []Raw{{mock: "mock-7", unread: "disk mocks: store closed"}},
+			[]string{"keploy could not read mock-7 (disk mocks: store closed)"}},
+		{"an unnamed recording the store could not load", nil, []Raw{{unread: "disk mocks: store closed"}},
+			[]string{"keploy could not read a recording of the test (disk mocks: store closed)"}},
+		{"a recording never read from its mock", nil, []Raw{{mock: "mock-8"}},
+			[]string{"keploy could not read mock-8 (it was not read from its mock, learn.RawOf)"}},
+		{"the run past its budget", []Earlier{{Run: true, At: before, Unread: "the run keeps no more of the set's places past 64 KiB"}}, nil,
+			[]string{"keploy could not read the run's values (the run keeps no more of the set's places past 64 KiB)"}},
+		{"an unnamed test case's request", []Earlier{{Given: true, At: before, Unread: "none was sent"}}, nil,
+			[]string{"keploy could not read the test case's request (none was sent)"}},
+		{"a named earlier recording", []Earlier{{Mock: "mock-9", At: before, Unread: "disk mocks: store closed"}}, nil,
+			[]string{"keploy could not read mock-9 (disk mocks: store closed)"}},
+	} {
+		d := oWord(t, Decide(oInput("url.path", "/v1/orders/z-5", "/v1/orders/z-6", tc.earlier, tc.raw)), "5", "6")
+		oRefused(t, tc.what, d, "unread", tc.names...)
+		if d.Refusal != nil && strings.Contains(d.Refusal.Why, "read  (") {
+			t.Errorf("%s: refused %q; it names no place", tc.what, d.Refusal.Why)
+		}
+	}
+}
