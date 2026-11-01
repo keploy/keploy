@@ -15,6 +15,7 @@ import (
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent/containerkey"
+	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
 
@@ -46,52 +47,92 @@ var requestsOnAnOwnConnection = map[string]func(ctx context.Context, a *AgentCli
 // connection pooled, the next request holding it, the cancel -- happens in that
 // order on every run. Without a connection of its own the read below fails as
 // the run's last read did: "failed to get scope windows ...: context canceled",
-// with its own context never cancelled.
+// with its own context never cancelled. Each request is made on the client
+// with no token and on one with the session's token (agentHTTPClient).
 func TestACancelledRequestLeavesTheNextRequestAlone(t *testing.T) {
 	for name, ask := range requestsOnAnOwnConnection {
-		t.Run(name, func(t *testing.T) {
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.Path == "/scope/windows" {
-					_, _ = w.Write([]byte("[]"))
-					return
+		for _, token := range []string{"", "session-token"} {
+			sub := name
+			if token != "" {
+				sub += ", with a token"
+			}
+			t.Run(sub, func(t *testing.T) {
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path == "/scope/windows" {
+						_, _ = w.Write([]byte("[]"))
+						return
+					}
+					w.WriteHeader(http.StatusNoContent)
+				}))
+				defer srv.Close()
+				a := &AgentClient{logger: zap.NewNop(), client: agentHTTPClient(token), conf: &config.Config{Agent: config.Agent{AgentURI: srv.URL}}}
+
+				askCtx, cancelAsk := context.WithCancel(context.Background())
+				defer cancelAsk()
+				var pooled atomic.Bool
+				read := make(chan error, 1)
+				trace := &httptrace.ClientTrace{PutIdleConn: func(err error) {
+					if err != nil || !pooled.CompareAndSwap(false, true) {
+						return
+					}
+					tookConn := make(chan struct{})
+					var took sync.Once
+					readCtx := httptrace.WithClientTrace(context.Background(), &httptrace.ClientTrace{
+						GotConn: func(httptrace.GotConnInfo) { took.Do(func() { close(tookConn) }) },
+					})
+					ended := make(chan error, 1)
+					go func() {
+						_, err := a.GetScopeWindows(readCtx)
+						ended <- err
+					}()
+					<-tookConn
+					cancelAsk()
+					// The read has no answer while the transport is held here:
+					// it ends only when the cancel closes the connection.
+					read <- <-ended
+				}}
+				ask(httptrace.WithClientTrace(askCtx, trace), a, srv.URL)
+				if !pooled.Load() {
+					cancelAsk()
+					_, err := a.GetScopeWindows(context.Background())
+					read <- err
 				}
+				if err := <-read; err != nil {
+					t.Fatalf("the request after it failed with its cancel, on a context nothing cancelled: %v", err)
+				}
+			})
+		}
+	}
+}
+
+// A request on a connection of its own is still the client's (ownConnection):
+// it carries the session's token, and its answer is noted for the agent
+// process that gave it (agent_instance.go), as production's client does. A
+// connection of its own that dropped them reached a tokened agent without its
+// token: refused (401), the ask to end a round's streams ended them on keploy's
+// side, losing what was still on its way.
+func TestAnOwnConnectionKeepsTheClientsTokenAndNote(t *testing.T) {
+	for name, ask := range requestsOnAnOwnConnection {
+		t.Run(name, func(t *testing.T) {
+			var auth atomic.Value
+			auth.Store("")
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				auth.Store(r.Header.Get("Authorization"))
+				w.Header().Set(models.AgentInstanceHeader, "proc-1")
 				w.WriteHeader(http.StatusNoContent)
 			}))
 			defer srv.Close()
-			a := &AgentClient{logger: zap.NewNop(), client: agentHTTPClient(""), conf: &config.Config{Agent: config.Agent{AgentURI: srv.URL}}}
-
-			askCtx, cancelAsk := context.WithCancel(context.Background())
-			defer cancelAsk()
-			var pooled atomic.Bool
-			read := make(chan error, 1)
-			trace := &httptrace.ClientTrace{PutIdleConn: func(err error) {
-				if err != nil || !pooled.CompareAndSwap(false, true) {
-					return
-				}
-				tookConn := make(chan struct{})
-				var took sync.Once
-				readCtx := httptrace.WithClientTrace(context.Background(), &httptrace.ClientTrace{
-					GotConn: func(httptrace.GotConnInfo) { took.Do(func() { close(tookConn) }) },
-				})
-				ended := make(chan error, 1)
-				go func() {
-					_, err := a.GetScopeWindows(readCtx)
-					ended <- err
-				}()
-				<-tookConn
-				cancelAsk()
-				// The read has no answer while the transport is held here:
-				// it ends only when the cancel closes the connection.
-				read <- <-ended
-			}}
-			ask(httptrace.WithClientTrace(askCtx, trace), a, srv.URL)
-			if !pooled.Load() {
-				cancelAsk()
-				_, err := a.GetScopeWindows(context.Background())
-				read <- err
+			a := &AgentClient{logger: zap.NewNop(), client: agentHTTPClient("session-token"), conf: &config.Config{Agent: config.Agent{AgentURI: srv.URL}}}
+			ask(context.Background(), a, srv.URL)
+			if got := auth.Load().(string); got != "Bearer session-token" {
+				t.Fatalf("the agent saw Authorization %q: the session's token did not ride this request", got)
 			}
-			if err := <-read; err != nil {
-				t.Fatalf("the request after it failed with its cancel, on a context nothing cancelled: %v", err)
+			s := instancesAt(strings.TrimPrefix(srv.URL, "http://"))
+			s.mu.Lock()
+			latest := s.latest
+			s.mu.Unlock()
+			if latest != "proc-1" {
+				t.Fatalf("the agent process noted last is %q, want proc-1: this request's answer was not noted", latest)
 			}
 		})
 	}
