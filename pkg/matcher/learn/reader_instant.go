@@ -1,6 +1,12 @@
 package learn
 
-import "time"
+import (
+	"strings"
+	"time"
+
+	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
+)
 
 // The reader's instants (D3). An instant is judged whole, never word by
 // word:
@@ -162,4 +168,59 @@ func byMoment(held, m moment) (ok, fine bool) {
 		return false, false
 	}
 	return true, fineCut(time.Duration(finest))
+}
+
+// viewAnswerMoments are the instants of lv's answer, a view F gave the
+// application of a recording (Raw.viewOf), read as the recording's answer
+// is (readAnswerMoments: GivenPlaces.answer), each name a copy: kept by the
+// set with the view's words (viewLists.moments), so that it reads the view
+// once. Under the proven switch only: nil with it off, where nothing reads
+// them.
+func viewAnswerMoments(lv Raw) []givenMoment {
+	if !provenswitch.On() {
+		return nil
+	}
+	out := NewDriftCache().readAnswerMoments(lv)
+	for i := range out {
+		a := &out[i]
+		a.mock, a.where = strings.Clone(a.mock), strings.Clone(a.where)
+	}
+	return out
+}
+
+// viewMoments are round F's view of the instants of m's recording, which F
+// gave the application earlier in the set (GivenPlaces.fView): the instants
+// of each different view the serves of it the read saw were told with
+// (Order.viewsLocked, ServedMockLive), as the set keeps them
+// (setPlaces.viewWords), each standing where the recording does in time (w:
+// when it was recorded, Raw.late, Raw.noTime), as its answer's are read
+// (GivenPlaces.answer). None where every serve was told as recorded (F gave
+// the recording itself: answer), where m's recording holds no answer
+// (answers), and where keploy cannot tell what F gave there (w.unstated,
+// w.unread: its words say so, and their reader refuses); none with the
+// proven switch off. unread is w.unread, or true where a view its words
+// were read from cannot be read again (fail closed).
+func (o Order) viewMoments(m *models.Mock, w givenWords, answers bool) (moments []givenMoment, unread bool) {
+	if !provenswitch.On() || o.t == nil || !answers || w.unstated || w.unread {
+		return nil, w.unread
+	}
+	id := MockID(m)
+	o.t.mu.Lock()
+	_, keys, loads, viewUnread, ok := o.viewsLocked(id)
+	o.t.mu.Unlock()
+	if !ok || viewUnread {
+		// statedWords read the same statements: w says so.
+		return nil, w.unread
+	}
+	for k, load := range loads {
+		v, read := o.places.viewWords(m, id, keys[k], load)
+		if !read {
+			return nil, true
+		}
+		for _, a := range v.moments {
+			a.at, a.late, a.noTime = w.at, w.late, w.noTime
+			moments = append(moments, a)
+		}
+	}
+	return moments, false
 }

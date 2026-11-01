@@ -1,9 +1,14 @@
 package learn
 
 import (
+	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 // instantOfWord is the instant the reader reads at the first changed word
@@ -157,4 +162,137 @@ func TestReaderByMoment(t *testing.T) {
 	if !held || !fine || !readOK {
 		t.Errorf("a place holding the nanosecond read: held %v fine %v read %v", held, fine, readOK)
 	}
+}
+
+// Round F's view of a recording it gave the application earlier in the set
+// (Tracker.ServedMockLive: a view told for a serve the read saw) is kept as
+// instants, read as the recording's answer is (GivenPlaces.answer), so that
+// a changed instant that copies what F gave there is judged as at any other
+// place. Only under the proven switch; nothing where F gave the recording
+// as recorded, where keploy cannot tell what F gave (its words say so), or
+// with the switch off. The set reads each view once, however many calls
+// read the recording.
+func TestReaderKeepsRoundFsViewOfASetRecordingsInstants(t *testing.T) {
+	const (
+		recAt   = "2026-10-20T10:00:00.123456Z"
+		viewAt  = "2026-10-20T10:00:05.654321Z"
+		otherAt = "2026-10-20T10:00:09.111111Z"
+	)
+	momentOf := func(s string) moment {
+		t.Helper()
+		sp := NewDriftCache().spansOf(s)
+		if len(sp) != 1 || !sp[0].keyed {
+			t.Fatalf("%q reads as %d instants; want one", s, len(sp))
+		}
+		return sp[0].moment()
+	}
+	keysOf := func(ms []givenMoment) []instantKey {
+		var out []instantKey
+		for _, g := range ms {
+			if !slices.Contains(out, g.m.key) {
+				out = append(out, g.m.key)
+			}
+		}
+		return out
+	}
+	m := jobsMock(recAt, "5")
+	loads := map[string]int{}
+	view := func(id string) func() (*models.Mock, error) {
+		return func() (*models.Mock, error) { loads[id]++; return jobsMock(id, "9"), nil }
+	}
+	for _, c := range []struct {
+		name   string
+		proven string
+		tell   func(tr *Tracker)
+		want   []string // the instants of fView, in order
+	}{
+		{"told with a view", "1", func(tr *Tracker) { tr.ServedMockLive(m, "a", view(viewAt)) }, []string{viewAt}},
+		{"told with a view, the switch off", "0", func(tr *Tracker) { tr.ServedMockLive(m, "a", view(viewAt)) }, nil},
+		{"told as recorded", "1", func(tr *Tracker) { tr.ServedMockAsRecorded(m) }, nil},
+		{"told nothing", "1", func(*Tracker) {}, nil},
+		{"told with a view that cannot be read", "1", func(tr *Tracker) {
+			tr.ServedMockLive(m, "a", func() (*models.Mock, error) { return nil, errors.New("gone") })
+		}, nil},
+		{"told as recorded, then with a view", "1", func(tr *Tracker) {
+			tr.ServedMockAsRecorded(m)
+			tr.ServedMock(m)
+			tr.ServedMockLive(m, "a", view(viewAt))
+		}, []string{viewAt}},
+		{"told with two views", "1", func(tr *Tracker) {
+			tr.ServedMockLive(m, "a", view(viewAt))
+			tr.ServedMock(m)
+			tr.ServedMockLive(m, "b", view(otherAt))
+		}, []string{viewAt, otherAt}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, c.proven)
+			clear(loads)
+			tr := NewTracker()
+			tr.Begin()
+			tr.ServedMock(m)
+			c.tell(tr)
+			tr.End()
+			tr.Begin()
+			tr.End()
+			tr.Begin()
+			o := tr.Placed().Order
+			for _, read := range []string{"first read", "cached read"} {
+				g, err := o.GivenPlaces(m)
+				if err != nil {
+					t.Fatalf("%s: %v", read, err)
+				}
+				// Each instant may be read in more than one form of its
+				// field (readAnswerMoments): compare the instants named.
+				if got := keysOf(g.answer); len(got) != 1 || got[0] != momentOf(recAt).key {
+					t.Errorf("%s: the recording's answer names %d instants; want its own one, as recorded", read, len(got))
+				}
+				got := keysOf(g.fView)
+				if len(got) != len(c.want) {
+					t.Fatalf("%s: round F's view names %d instants (%+v); want %d", read, len(got), g.fView, len(c.want))
+				}
+				for k, want := range c.want {
+					if got[k] != momentOf(want).key {
+						t.Errorf("%s: view instant %d is not %s", read, k, want)
+					}
+				}
+				for _, v := range g.fView {
+					if v.mock != m.Name || !strings.HasPrefix(v.where, m.Name+" at ") || !v.at.Equal(m.Spec.ReqTimestampMock) {
+						t.Errorf("%s: a view instant stands at %q of %q recorded %v; want mock-6's field, recorded when mock-6 was", read, v.where, v.mock, v.at)
+					}
+				}
+			}
+			for id, n := range loads {
+				if n != 1 {
+					t.Errorf("the view %s was read %d times over two reads of one set; want once", id, n)
+				}
+			}
+		})
+	}
+	// A view its words were read from that cannot be read again for its
+	// instants (an order keeping no set's places reads each view anew) is
+	// one keploy cannot tell: its words say unread, the fail-closed side.
+	t.Run("a view read for its words and not again", func(t *testing.T) {
+		t.Setenv(provenswitch.Env, "1")
+		tr := NewTracker()
+		tr.Begin()
+		tr.ServedMock(m)
+		reads := 0
+		tr.ServedMockLive(m, "a", func() (*models.Mock, error) {
+			if reads++; reads > 1 {
+				return nil, errors.New("gone")
+			}
+			return jobsMock(viewAt, "9"), nil
+		})
+		tr.End()
+		tr.Begin()
+		o := tr.Placed().Order
+		o.places = nil
+		g, err := o.GivenPlaces(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !g.words.unread || len(g.fView) != 0 {
+			t.Errorf("words unread %v, %d view instants; want unread and none", g.words.unread, len(g.fView))
+		}
+	})
 }
