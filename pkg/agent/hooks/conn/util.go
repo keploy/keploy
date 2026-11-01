@@ -65,7 +65,10 @@ var CaptureHook CaptureFunc = Capture
 // An empty schemaKey means "no fingerprint" and disables cross-pod judgement
 // for this test case. Enterprise sets this when --static-dedup is enabled;
 // nil means no dedup.
-var GRPCCaptureHook func(req *models.GrpcReq, resp *models.GrpcResp) (isDuplicate bool, schemaKey string)
+//
+// appPort is the port of the app that answered: two containers of one pod
+// can serve the same call with the same shape, and are two apps.
+var GRPCCaptureHook func(req *models.GrpcReq, resp *models.GrpcResp, appPort uint16) (isDuplicate bool, schemaKey string)
 
 // MaxTestCaseSize is the maximum combined size of HTTP/gRPC request and response (5MB)
 const MaxTestCaseSize = 5 * 1024 * 1024 // 5 MB
@@ -718,7 +721,7 @@ func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCas
 	var isDuplicate bool
 	var schemaKey string
 	if GRPCCaptureHook != nil && !oversized {
-		isDuplicate, schemaKey = GRPCCaptureHook(http2Stream.GRPCReq, http2Stream.GRPCResp)
+		isDuplicate, schemaKey = GRPCCaptureHook(http2Stream.GRPCReq, http2Stream.GRPCResp, appPort)
 	}
 
 	// Bin buffered outgoing mocks into this stream's window before any early

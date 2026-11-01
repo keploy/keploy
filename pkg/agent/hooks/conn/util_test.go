@@ -265,9 +265,18 @@ func TestCaptureGRPC_SchemaKeyStamping(t *testing.T) {
 	const key = "GRPC|/svc.Users/Get|0|11|22"
 
 	t.Run("hook stamps schema key on kept test case", func(t *testing.T) {
-		GRPCCaptureHook = func(_ *models.GrpcReq, _ *models.GrpcResp) (bool, string) {
+		var gotPort uint16
+		GRPCCaptureHook = func(_ *models.GrpcReq, _ *models.GrpcResp, appPort uint16) (bool, string) {
+			gotPort = appPort
 			return false, key
 		}
+		defer func() {
+			// The hook keys the call by its app too: two containers of a pod
+			// serving one method are two apps.
+			if gotPort != 9090 {
+				t.Fatalf("the hook got app port %d, want 9090", gotPort)
+			}
+		}()
 		tChan := make(chan *models.TestCase, 1)
 		CaptureGRPC(context.Background(), zap.NewNop(), tChan, newStream(), 9090, false, false)
 		select {
@@ -281,7 +290,7 @@ func TestCaptureGRPC_SchemaKeyStamping(t *testing.T) {
 	})
 
 	t.Run("duplicate verdict drops the capture", func(t *testing.T) {
-		GRPCCaptureHook = func(_ *models.GrpcReq, _ *models.GrpcResp) (bool, string) {
+		GRPCCaptureHook = func(_ *models.GrpcReq, _ *models.GrpcResp, _ uint16) (bool, string) {
 			return true, key
 		}
 		tChan := make(chan *models.TestCase, 1)
@@ -314,7 +323,7 @@ func TestCaptureGRPC_OversizedCallIsJudgedBeforeTheHook(t *testing.T) {
 	origHook := GRPCCaptureHook
 	defer func() { GRPCCaptureHook = origHook }()
 	hookCalls := 0
-	GRPCCaptureHook = func(_ *models.GrpcReq, _ *models.GrpcResp) (bool, string) {
+	GRPCCaptureHook = func(_ *models.GrpcReq, _ *models.GrpcResp, _ uint16) (bool, string) {
 		hookCalls++
 		return false, ""
 	}
