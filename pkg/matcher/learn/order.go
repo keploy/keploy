@@ -1073,10 +1073,11 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	var cutWhy, guardWhy string
 	inWindow := false
 	if c.rm != nil && c.lm != nil {
-		if dc.in.Window.holdsRead(*c.rm, *c.lm, zone) {
-			off, inWindow = models.ClockOffset{Res: max(c.rm.res, c.lm.res)}, true
+		// The reading goes first: a wide window also holds a look-back as a
+		// plain read, and learned plain it fails nearly every replay.
+		if off, cutWhy, inWindow = clockInWindow(path, c.ri, c.li, dc.in.Window, zone); !inWindow && dc.in.Window.holdsRead(*c.rm, *c.lm, zone) {
+			off, cutWhy, inWindow = models.ClockOffset{Res: max(c.rm.res, c.lm.res)}, "", true
 		} else {
-			off, cutWhy, inWindow = clockInWindow(path, c.ri, c.li, dc.in.Window, zone)
 			if inWindow {
 				if g, uncompared := dc.offsetGuard(path, off, max(c.rm.res, c.lm.res), dc.in.Window); uncompared && copies(false) == nil {
 					return dc.refuse(path, at, n, r, l, RefusalCannotCheck, g, nil, dc.fieldNoise(path))
