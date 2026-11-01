@@ -506,3 +506,42 @@ func TestOutcomeAPercentEncodedInstantIsReadAsTheInstantItOpensTo(t *testing.T) 
 	d = oWord(t, ds, iMicro(rRead), iMicro(fRead))
 	oRefused(t, "a percent-encoded microsecond mock-1 sent encoded and F moved", d, "conflict", "mock-1")
 }
+
+// A read of now minus a debounce, in Unix seconds, two seconds after an
+// earlier send of the same second (a reconciler's claim, dirtyAt <= now-2s,
+// beside the mark that set dirtyAt = now): the call's own read, decided
+// before a coarse copy, in both modes. Bound to the mark, a replay would go
+// red whenever the two reads fall in different seconds. The offset is the
+// clock reading's; a stub reading stands in for it (main's reading refuses
+// a look-back cut to the second as too wide to check; the later clock
+// reading learns it). Where the reading finds no offset, the copy still
+// binds.
+func TestOutcomeAReadMinusADebounceIsTheCallsClockBeforeACoarseCopy(t *testing.T) {
+	const p = "body.filter.dirtyAt.$lte"
+	rAt := oAt.Add(400 * time.Millisecond)
+	fAt := oAt.Add(2*time.Hour + 17*time.Minute + 23*time.Second + 150*time.Millisecond)
+	secs := func(t time.Time) string { return strconv.FormatInt(t.Unix(), 10) }
+	rec, live := secs(rAt.Add(-2*time.Second)), secs(fAt.Add(-2*time.Second))
+	mark := iSent("mock-299", rAt.Add(-2*time.Second+100*time.Millisecond), "body.updates.0.u.$set.dirtyAt", Number, rec, live)
+	in := iCall(p, Number, rec, live, rAt, fAt, iWin(rAt, fAt, 30*time.Millisecond).ComparesOffsets(), []Earlier{mark}, nil)
+	in.Landed = Landed{Where: LandedBetween}
+	defer func(f func(string, typedInstant, typedInstant, *Window, *time.Location) (models.ClockOffset, string, bool)) {
+		clockInWindow = f
+	}(clockInWindow)
+	clockInWindow = func(string, typedInstant, typedInstant, *Window, *time.Location) (models.ClockOffset, string, bool) {
+		return models.ClockOffset{Min: -2010 * time.Millisecond, Max: -1990 * time.Millisecond, Res: time.Millisecond}, "", true
+	}
+	for _, mode := range []Mode{ModeOwn, ModeElsewhere} {
+		in.Mode = mode
+		d := oWord(t, Decide(in), rec, live)
+		iClock(t, "now minus two seconds beside a mark of the same second", d)
+		if d.Clock != nil && (d.Clock.Min > -2*time.Second || d.Clock.Max < -2*time.Second) {
+			t.Errorf("mode %v: the Clock's offset is %v..%v; want the reading's, around -2s", mode, d.Clock.Min, d.Clock.Max)
+		}
+	}
+	clockInWindow = func(string, typedInstant, typedInstant, *Window, *time.Location) (models.ClockOffset, string, bool) {
+		return models.ClockOffset{}, "", false
+	}
+	in.Mode = ModeOwn
+	iValue(t, "the same read where the clock reading finds no offset", oWord(t, Decide(in), rec, live), "mock-299")
+}

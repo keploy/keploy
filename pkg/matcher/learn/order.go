@@ -564,9 +564,8 @@ func coarserOnly(t *readerText, w string, m moment) bool {
 // instant decides one changed instant by the one order: a conflict at
 // a fine cut (0), a pick (1), a given's text, one templated slot of the
 // test case's request (2), an answer (3), a fine copy (4), a Clock its
-// call's window holds (5), a coarse copy (6), a client test's own value
-// (8); else refused. A read since the test began (7) is not read here:
-// such a word stays refused, failing closed.
+// call's window holds (5), a coarse copy (6), a read since its test began
+// (7), a client test's own value (8); else refused.
 func (dc *decider) instant(path string, at variables.Address, n int, c changedInstant) Decision {
 	r, l := c.r, c.l
 	var hs []instantHold
@@ -749,8 +748,17 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 			Edit{Kind: EditMoveToMocks, Mock: m}, Edit{Kind: EditMoveToStartup, Mock: m}, dc.wordNoise(path, n))
 	}
 
-	// 5. Clock: the call's own window holds it, as a plain read; or, where
-	// no earlier send of the scope holds it as a copy (6), plus an offset.
+	// 5. Clock: the call's own window holds it, as a plain read or plus an
+	// offset. Read before a coarse copy (6): a read of now minus a debounce
+	// beside an earlier send of the same second (a claim's dirtyAt <= now-2s
+	// two seconds after the mark that set dirtyAt = now) is the call's own
+	// read, and bound to the send it would go red when the two cross a cut.
+	// Step 5 gives a Clock only where a replay can check it: where the
+	// reading finds no offset, refuses the one it finds, or finds one this
+	// protocol's replay does not compare, a coarse copy is still tried (a
+	// millisecond read carried to a later send its window does not hold);
+	// with none, an offset it does not compare is refused as one keploy
+	// cannot check.
 	var zone *time.Location
 	if dc.in.Drifts != nil {
 		zone = dc.in.Drifts.zone
@@ -761,10 +769,10 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	if c.rm != nil && c.lm != nil {
 		if dc.in.Window.holdsRead(*c.rm, *c.lm, zone) {
 			off, inWindow = models.ClockOffset{Res: max(c.rm.res, c.lm.res)}, true
-		} else if copies(false) == nil {
+		} else {
 			off, cutWhy, inWindow = clockInWindow(path, c.ri, c.li, dc.in.Window, zone)
 			if inWindow {
-				if g, uncompared := dc.offsetGuard(path, off, max(c.rm.res, c.lm.res)); uncompared {
+				if g, uncompared := dc.offsetGuard(path, off, max(c.rm.res, c.lm.res)); uncompared && copies(false) == nil {
 					return dc.refuse(path, at, n, r, l, RefusalCannotCheck, g, nil, dc.fieldNoise(path))
 				} else if g != "" {
 					off, cutWhy, inWindow = models.ClockOffset{}, g, false
