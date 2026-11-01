@@ -3482,22 +3482,14 @@ func (m *MockManager) updateUnFilteredMock(old *models.Mock, new *models.Mock, g
 	if served == nil {
 		served = old
 	}
-	if m.exactView() == nil {
-		if g.checks() {
-			g.refuse("exact serving is off")
-			return false
-		}
-		m.observeServed(new, g.flight())
-	} else {
-		// Under exact serving the served observer is told in the step that
-		// settles the consume, holding the round lock (exactConsumeAt).
-		switch m.exactConsumeAt(served, false, g, func() { m.observeServed(new, g.flight()) }) {
-		case exactServed:
-			return true
-		case exactRefused:
-			return false
-		}
-	}
+	return m.consumeAt(served, false, g,
+		func() bool { return m.updateUnFilteredTier(old, new) },
+		func() { m.observeServed(new, g.flight()) })
+}
+
+// updateUnFilteredTier files new over old in the session tier, and reports
+// whether it was consumed. It may run holding the round lock (consumeAt).
+func (m *MockManager) updateUnFilteredTier(old *models.Mock, new *models.Mock) bool {
 	if old != nil && m.stalePooled(old) {
 		return false
 	}
@@ -3638,12 +3630,12 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 // deleteFilteredMock is DeleteFilteredMock, settled under exact serving only
 // while the store is at g's round when g is set (WithinRound).
 func (m *MockManager) deleteFilteredMock(mock models.Mock, g *roundGuard) bool {
-	switch m.exactConsumeValueAt(mock, true, g, true) {
-	case exactServed:
-		return true
-	case exactRefused:
-		return false
-	}
+	return m.consumeValueAt(mock, true, g, true, m.deleteFilteredTier)
+}
+
+// deleteFilteredTier takes mock out of its tier, the per-test one first, and
+// reports whether it was consumed.
+func (m *MockManager) deleteFilteredTier(mock models.Mock) bool {
 	if m.stalePooled(&mock) {
 		return false
 	}
@@ -3788,12 +3780,12 @@ func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
 // deleteUnFilteredMock is DeleteUnFilteredMock, settled under exact serving
 // only while the store is at g's round when g is set (WithinRound).
 func (m *MockManager) deleteUnFilteredMock(mock models.Mock, g *roundGuard) bool {
-	switch m.exactConsumeValueAt(mock, true, g, true) {
-	case exactServed:
-		return true
-	case exactRefused:
-		return false
-	}
+	return m.consumeValueAt(mock, true, g, true, m.deleteUnFilteredTier)
+}
+
+// deleteUnFilteredTier takes mock out of the session tier, and reports
+// whether it was consumed.
+func (m *MockManager) deleteUnFilteredTier(mock models.Mock) bool {
 	if m.stalePooled(&mock) {
 		return false
 	}
@@ -3902,12 +3894,12 @@ func (m *MockManager) deleteStartupMock(mock models.Mock, g *roundGuard, observe
 		// The observer is told of no unnamed mock.
 		return false
 	}
-	switch m.exactConsumeValueAt(mock, true, g, observe) {
-	case exactServed:
-		return true
-	case exactRefused:
-		return false
-	}
+	return m.consumeValueAt(mock, true, g, observe, m.deleteStartupTier)
+}
+
+// deleteStartupTier takes mock out of the startup tier, and reports whether
+// it was consumed.
+func (m *MockManager) deleteStartupTier(mock models.Mock) bool {
 	if m.stalePooled(&mock) {
 		return false
 	}
@@ -4212,12 +4204,18 @@ func (m *MockManager) markMockAsUsed(mock models.Mock, g *roundGuard) bool {
 		// The observer is told of no unnamed mock.
 		return false
 	}
-	switch m.exactConsumeValueAt(mock, false, g, true) {
-	case exactServed:
-		return true
-	case exactRefused:
-		return false
-	}
+	// Read before the door: it reads the staging under swapMu, which nothing
+	// holding the round lock takes, and the tier may run holding it.
+	learned := m.learnedAfterEndNamed(&mock)
+	return m.consumeValueAt(mock, false, g, true, func(mk models.Mock) bool {
+		return m.markUsedTier(mk, learned)
+	})
+}
+
+// markUsedTier records mock's use, learned its MockState.LearnedAfterEnd, and
+// reports whether it was consumed. It may run holding the round lock
+// (consumeAt).
+func (m *MockManager) markUsedTier(mock models.Mock, learned bool) bool {
 	if m.stalePooled(&mock) {
 		return false
 	}
@@ -4246,7 +4244,7 @@ func (m *MockManager) markMockAsUsed(mock models.Mock, g *roundGuard) bool {
 		Binds:     bindsOf(mock.Spec),
 		// Learning the consume carries beyond what exact serving handed
 		// the parser out, once the set's learn step ended.
-		LearnedAfterEnd: m.learnedAfterEndNamed(&mock),
+		LearnedAfterEnd: learned,
 		// A registered kind's per-test mock consumed outside the current
 		// window (a server push delivered late) belongs to its own window.
 		CarryOver: m.consumedOutOfWindow(mock),
@@ -4485,18 +4483,16 @@ func (m *MockManager) SetTrackerSetAt(f func() uint64) {
 	m.trackerSetAt.Store(&f)
 }
 
-// observeServed tells the served observer of mock before a parser's claim
-// takes it out of the pool, so a request reading the pool and then the
-// observer's record never finds it in neither (the learn step's earlier
-// places). A claim that then fails was another connection's serve of the
-// same mock: the observer is told of a mock that was served either way.
-// Under exact serving it is told once the view settled the consume as a
-// serve, in the step that takes it and holding the round lock
-// (exactConsumeAt), and never of a consume the view refused: nothing served
-// that one. There the take comes first, so only a reader that reads both
-// under that lock (RoundSnapshot) never finds the mock in neither; no reader
-// reads them without it, and none may. in is the request it is served in, as
-// its parser said (nil: not said).
+// observeServed tells the served observer of mock, a consume that went
+// through: its consume door calls it only once the consume succeeded
+// (consumeAt), never for one the view or the tier refused, since nothing
+// served that one. A parser asks again after a refusal, and the learn tracker
+// numbers every serve it hears in F's order of the set, so one told early
+// reads as a serve the application never got. Under exact serving it is told
+// in the step that settles the consume, holding the round lock, with the take
+// before it, so only a reader that reads both under that lock (RoundSnapshot)
+// never finds the mock in neither; no reader reads them without it, and none
+// may. in is the request it is served in, as its parser said (nil: not said).
 //
 // With an observer (the served-in observer for a said request, else the
 // served observer), the serve is then filed in the open test's view

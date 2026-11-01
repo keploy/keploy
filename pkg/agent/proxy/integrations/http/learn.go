@@ -1991,11 +1991,13 @@ type learnRead struct {
 // and what the test's own answered, of one instant, and a claim is taken
 // only while the round is still at it (integrations.WithinRound). From any
 // other store, the reads one after another: the scope first, then the
-// tracker, so a mock a concurrent call consumed before the scope was read is
-// gone from the scope, and in the tracker's account (the store tells it
-// first: MockManager.observeServed). From a snapshot it reads the pass's
-// mark too (learnRead.call): the call's, of its first pass and of a pass
-// whose round the call caught up with (learnMatchIn).
+// tracker. Those two reads are not one instant: a store tells the tracker of
+// a consume once it went through (MockManager.observeServed), so a mock a
+// concurrent call is consuming as they run can be in neither. The agent
+// serves every proven replay under exact serving, from before it stages a
+// mock, so no replay reads this way. From a snapshot it reads the pass's mark
+// too (learnRead.call): the call's, of its first pass and of a pass whose
+// round the call caught up with (learnMatchIn).
 func (h *HTTP) readLearnPass(mockDb integrations.MockMemDb, tracker *learn.Tracker, live httpParts, liveShape learn.Shape, n learnNoise, pool bool) (learnRead, error) {
 	rev := storeRevision(mockDb)
 	if snap, ok := integrations.SnapshotRound(mockDb, integrations.RoundQuery{Tracker: tracker}); ok {
