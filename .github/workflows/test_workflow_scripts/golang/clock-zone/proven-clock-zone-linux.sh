@@ -345,7 +345,7 @@ build_images() {
         # names.
         cid="$(sudo docker create "$img")" || return 1
         ok=0
-        sudo docker cp "$cid:/etc/localtime" - | tar -tvf - | grep -q "^l.* localtime -> /usr/share/zoneinfo/$link\$" && ok=1
+        sudo docker cp "$cid:/etc/localtime" - | tar -tvf - | grep "^l.* localtime -> /usr/share/zoneinfo/$link\$" >/dev/null && ok=1
         sudo docker rm "$cid" >/dev/null
         [ "$ok" = 1 ] || { echo "::error::$img's /etc/localtime is no link to /usr/share/zoneinfo/$link"; return 1; }
     done

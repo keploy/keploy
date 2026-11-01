@@ -77,7 +77,7 @@ trap die ERR
 # honest against binaries older than both changes.
 mysql_auto_detect_supported() {
   local bin="$1"
-  "$bin" config defaults 2>/dev/null | grep -q "disableMysqlAutoDetect" && return 0
+  "$bin" config defaults 2>/dev/null | grep "disableMysqlAutoDetect" >/dev/null && return 0
   local probe_dir rc=1
   probe_dir=$(mktemp -d)
   # No guard here: probe_dir is a fresh mktemp, so there is never a config in
@@ -138,7 +138,7 @@ assert_no_mysql_ports_config() {
 
   # 2. The generated config.
   if [[ -f keploy.yml ]]; then
-    if grep -E "^\s*mysqlPorts:" keploy.yml | grep -q "${port}"; then
+    if grep -E "^\s*mysqlPorts:" keploy.yml | grep "${port}" >/dev/null; then
       echo "::error::keploy.yml lists ${port} in mysqlPorts — this test no longer exercises auto-detection"
       exit 1
     fi
@@ -480,7 +480,7 @@ section "Assert the mocks were served on the listed port"
 # effect it still talks to :${MYSQL_PORT}, which IS in the recorded set, and
 # every test passes. Require keploy's verdict that a connection to
 # :${DRIFT_PORT} is MySQL because the port is listed.
-if ! grep "mysql probe result" test_logs_drift.txt | grep "\"destPort\": ${DRIFT_PORT}" | grep -q '"reason": "configured-port"'; then
+if ! grep "mysql probe result" test_logs_drift.txt | grep "\"destPort\": ${DRIFT_PORT}" | grep '"reason": "configured-port"' >/dev/null; then
   if reports_all_passed "$PRE_DRIFT_RUN_DIR"; then
     echo "::error::every test passed but keploy judged no connection to :${DRIFT_PORT}, which means the"
     echo "::error::application was still talking to :${MYSQL_PORT} — the file:./application.properties"

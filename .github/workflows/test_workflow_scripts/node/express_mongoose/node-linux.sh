@@ -145,7 +145,7 @@ do_record_iteration() {
   # Ensure at least one test was produced for this iteration.
   # Match any *.yaml under a tests/ dir so we are agnostic to the testcase
   # naming scheme (legacy "test-N.yaml" or descriptive slugs).
-  if ! find ./keploy -type f -path '*/tests/*.yaml' -print -quit 2>/dev/null | grep -q .; then
+  if ! find ./keploy -type f -path '*/tests/*.yaml' -print -quit 2>/dev/null | grep . >/dev/null; then
     echo "::error::No tests produced in iteration $i"
     cat "${app_name}.txt" || true
     exit 1

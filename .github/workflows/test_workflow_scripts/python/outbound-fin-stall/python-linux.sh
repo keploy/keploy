@@ -83,7 +83,7 @@ upstream_pid=$!
 # idle bookkeeping.
 ready=0
 for i in $(seq 1 20); do
-    if ss -tln | awk '{print $4}' | grep -q ":9090$"; then
+    if ss -tln | awk '{print $4}' | grep ":9090$" >/dev/null; then
         echo "upstream listening after $((i))s"
         ready=1
         break

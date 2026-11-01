@@ -77,7 +77,7 @@ drive_requests() {
     local port=${1:-8095}
     local up=0
     for _ in $(seq 1 90); do
-        if docker logs "$NAME" 2>&1 | grep -q 'self-check passed'; then
+        if docker logs "$NAME" 2>&1 | grep 'self-check passed' >/dev/null; then
             up=1
             break
         fi
@@ -123,12 +123,12 @@ if [ "$(grep -c "$warn" record_logs.txt)" -ne 1 ]; then
     echo "::error::want exactly one record-time warning for port 8096, got $(grep -c "$warn" record_logs.txt)"
     fail=1
 fi
-if ! grep "$warn" record_logs.txt | grep -q -- 'Publish it: add -p 8096:8096 to the docker command'; then
+if ! grep "$warn" record_logs.txt | grep -- 'Publish it: add -p 8096:8096 to the docker command' >/dev/null; then
     echo "::error::the record-time warning does not give the fix (-p 8096:8096)"
     fail=1
 fi
 # The agent saw the app listen on 0.0.0.0:8096, so publishing is the whole fix.
-if grep "$warn" record_logs.txt | grep -q 'does not reach a socket on 127.0.0.1'; then
+if grep "$warn" record_logs.txt | grep 'does not reach a socket on 127.0.0.1' >/dev/null; then
     echo "::error::the 8096 warning could not tell where the app listens"
     fail=1
 fi
@@ -137,11 +137,11 @@ if [ "$(grep -c "$warn97" record_logs.txt)" -ne 1 ]; then
     echo "::error::want exactly one record-time warning for the loopback-only port 8097, got $(grep -c "$warn97" record_logs.txt)"
     fail=1
 fi
-if ! grep "$warn97" record_logs.txt | grep -q 'the app listens on port 8097 only on 127.0.0.1 inside the container'; then
+if ! grep "$warn97" record_logs.txt | grep 'the app listens on port 8097 only on 127.0.0.1 inside the container' >/dev/null; then
     echo "::error::the 8097 warning does not say the app listens only on 127.0.0.1"
     fail=1
 fi
-if grep "$warn97" record_logs.txt | grep -q 'Publish it'; then
+if grep "$warn97" record_logs.txt | grep 'Publish it' >/dev/null; then
     echo "::error::the 8097 warning advises publishing a port that is published and still unreachable"
     fail=1
 fi
@@ -200,7 +200,7 @@ for id in $failed_ids; do
         fail=1
     fi
     # Not re-sent: a reset there comes back on every try.
-    if grep "re-sending" test_logs.txt | grep -qF "\"testCaseID\": \"$id\""; then
+    if grep "re-sending" test_logs.txt | grep -F "\"testCaseID\": \"$id\"" >/dev/null; then
         echo "::error::test $id on the unreachable $port was re-sent"
         fail=1
     fi
@@ -213,7 +213,7 @@ for id in $passed_ids; do
     fi
 done
 for port in 8096 8097; do
-    if ! echo "$failed_ports" | grep -qw "$port"; then
+    if ! echo "$failed_ports" | grep -w "$port" >/dev/null; then
         echo "::error::no test on port $port failed; want tests on 8095 passing and on 8096 and 8097 failing"
         fail=1
     fi
@@ -281,7 +281,7 @@ remap_replay() {
     # at all. The probe is an OPTIONS, so a router answers it without running
     # a GET handler; this app has no do_OPTIONS, so http.server answers it 501.
     first95=$(grep -m1 -F '[app:8095] "' "$log")
-    if ! printf '%s\n' "$first95" | grep -qF '"OPTIONS /keploy/__readiness_probe__ '; then
+    if ! printf '%s\n' "$first95" | grep -F '"OPTIONS /keploy/__readiness_probe__ ' >/dev/null; then
         echo "::error::$name: the first request the app served on 8095 was not the readiness gate's HTTP probe: ${first95:-it served none}"
         fail=1
     fi

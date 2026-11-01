@@ -285,7 +285,7 @@ else
     wait "$REC_PID"
     rc=$?
     [ "$rc" -ne 0 ] || fail "eleven: keploy record refused the ports but exited 0"
-    grep -a "do not fit" record-eleven.log | grep -aqF "instead: $DEP." ||
+    grep -a "do not fit" record-eleven.log | grep -aF "instead: $DEP." >/dev/null ||
         { fail "eleven: keploy record stopped without naming port $DEP as the one that does not fit"; tail -n 5 record-eleven.log; }
 fi
 REC_PID=""
@@ -378,7 +378,7 @@ for leg in rawhost greethost; do
         ! grep -qs '^kind: Generic' keploy/test-set-0/mocks.yaml ||
             { fail "$leg: keploy record recorded the plain TCP calls a bypassRule with a host for port $RAW passes through"; show_mocks; }
         n="$(grep -acF "$RAW_WARN" "record-$leg.log")"
-        [ "$n" -eq 1 ] && grep -a "$RAW_WARN" "record-$leg.log" | grep -aqF "{host: \"raw.internal\", path: \"\", port: $RAW}" ||
+        [ "$n" -eq 1 ] && grep -a "$RAW_WARN" "record-$leg.log" | grep -aF "{host: \"raw.internal\", path: \"\", port: $RAW}" >/dev/null ||
             fail "$leg: keploy record warned $n times that the rule passes port $RAW's connections through, want once, naming the rule"
         stop_srv "$TEL_PID"
         TEL_PID=""
@@ -487,7 +487,7 @@ else
     wait "$REC_PID"
     rc=$?
     [ "$rc" -ne 0 ] || fail "badregex: keploy record refused the rule but exited 0"
-    grep -aF "{host: \"*.example.com\", path: \"\", port: $DEP}" record-badregex.log | grep -aqF "missing argument to repetition operator" ||
+    grep -aF "{host: \"*.example.com\", path: \"\", port: $DEP}" record-badregex.log | grep -aF "missing argument to repetition operator" >/dev/null ||
         { fail "badregex: keploy record stopped without naming the rule and its pattern's error"; tail -n 5 record-badregex.log; }
 fi
 REC_PID=""
