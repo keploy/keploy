@@ -538,6 +538,27 @@ func clockWordOf(rec, live string, rd textReading, iw *instantWord) (word models
 	return models.ClockWordOf(rec, rs, re), ""
 }
 
+// zone is the application's zone where keploy knows it (DriftCache.zone).
+func (dc *decider) zone() *time.Location {
+	if dc.in.Drifts == nil {
+		return nil
+	}
+	return dc.in.Drifts.zone
+}
+
+// inZone is m, a wall clock of no zone, read in the application's zone, as
+// main's echo reads it too (a pick from a timetable written in UTC); false
+// for any other moment, or where keploy knows no zone.
+func (dc *decider) inZone(m moment) (moment, bool) {
+	zone := dc.zone()
+	if m.zoned || m.key.day || zone == nil {
+		return m, false
+	}
+	at := wallIn(m.key.at, zone)
+	_, off := at.Zone()
+	return moment{key: instantKey{at: at.UnixNano()}, wall: m.wall, res: m.res, zone: int64(off) * int64(time.Second), zoned: true, typed: m.typed}, true
+}
+
 // holds is what t, one run's text at p, holds of w (that run's word)
 // and m (its moment): a test's given by its text alone, any other
 // place by its text or by moment. fine: the hold is at a cut finer than a
@@ -562,6 +583,11 @@ func (dc *decider) holds(p evPlace, t *readerText, w string, m *moment, byText b
 	hm, fm, ok := t.holdsMoment(*m)
 	if !ok {
 		return false, false, false
+	}
+	if z, zok := dc.inZone(*m); !hm && zok {
+		if hm, fm, ok = t.holdsMoment(z); !ok {
+			return false, false, false
+		}
 	}
 	// Held as written only at a coarse cut, or not at all: a text with
 	// escapes is read as it opens (the date alone of a percent-encoded
@@ -608,16 +634,23 @@ func formsHold(t *readerText, w string, m moment) (held, fine, opened, read bool
 // rule: a served date beside the application's own time of day). Such a
 // place gives none of m's part below that unit, where its change lies, so
 // it is no answer's source: bound to it, a replay would check the date
-// alone and pass any time of that day.
-func coarserOnly(t *readerText, w string, m moment) bool {
+// alone and pass any time of that day. A wall clock of no zone is read in
+// the application's zone too (inZone).
+func (dc *decider) coarserOnly(t *readerText, w string, m moment) bool {
 	text, ok := t.textNow()
 	spans, read := t.spansOf()
 	if !ok || !read || strings.Contains(text, w) {
 		return false
 	}
+	ms := []moment{m}
+	if z, ok := dc.inZone(m); ok {
+		ms = append(ms, z)
+	}
 	for _, sp := range spans {
-		if h := sp.moment(); sp.keyed && (h.key == m.key || cuts(h, m, func(c cutRule) bool { return !c.finer })) {
-			return false
+		for _, m := range ms {
+			if h := sp.moment(); sp.keyed && (h.key == m.key || cuts(h, m, func(c cutRule) bool { return !c.finer })) {
+				return false
+			}
 		}
 	}
 	return true
@@ -638,7 +671,7 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 			return dc.refuse(path, at, n, r, l, RefusalUnread, "keploy could not read the run's values past their budget, which came before this call", nil, Edit{Kind: EditReRecord}, dc.fieldNoise(path))
 		}
 		if hr || hl {
-			hs = append(hs, instantHold{p: p, hr: hr, hl: hl, fr: fr, fl: fl, coarseR: hr && c.rm != nil && coarserOnly(p.t.rec, r, *c.rm),
+			hs = append(hs, instantHold{p: p, hr: hr, hl: hl, fr: fr, fl: fl, coarseR: hr && c.rm != nil && dc.coarserOnly(p.t.rec, r, *c.rm),
 				rank: min(dc.rank(p.t.rec, r, c.rm, hr), dc.rank(p.t.live, l, c.lm, hl))})
 		}
 	}
@@ -821,10 +854,7 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	// millisecond read carried to a later send its window does not hold);
 	// with none, an offset it does not compare is refused as one keploy
 	// cannot check.
-	var zone *time.Location
-	if dc.in.Drifts != nil {
-		zone = dc.in.Drifts.zone
-	}
+	zone := dc.zone()
 	// cutWhy: the reading's own refusal of a cut, which keeps steps 7 and
 	// 8 from reading the value; guardWhy: the offset guard's refusal of the
 	// window plus an offset, which refuses that reading alone, so the value
