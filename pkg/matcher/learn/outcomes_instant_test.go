@@ -81,23 +81,53 @@ func iValue(t *testing.T, what string, d Decision, mock string) {
 
 // A background call's look-back ("dirtyAt <= now-2s", a $numberLong of
 // milliseconds) that round F made at another phase of its second than the
-// recording did: the call's window holds it 2 s back in both runs, so it is
-// a Clock at -2 s, never a word made anew each run.
-func TestOutcomeALookBackReadAtAnotherPhaseIsAClock(t *testing.T) {
+// recording did: the call's window holds it 2 s back in both runs, but the
+// offset reads in seconds at a millisecond's resolution, so it is refused
+// as main refuses it (a read made outside the call's window, seconds before
+// or after it, shows such an offset too, and a replay holds nothing of it:
+// a Clock there could never pass), whether or not the replay compares
+// offsets, with either clock reading registered. Never a word made anew
+// each run, never a Value.
+func TestOutcomeALookBackReadAtAnotherPhaseInMillisecondsIsRefused(t *testing.T) {
 	const p = "body.filter.dirtyAt.$lte"
 	rAt := oAt.Add(300 * time.Millisecond)
 	fAt := oAt.Add(time.Hour + 800*time.Millisecond)
 	rec, live := iEpochMs(rAt.Add(-2*time.Second-5*time.Millisecond)), iEpochMs(fAt.Add(-2*time.Second-7*time.Millisecond))
-	// Mongo's replay compares an offset (Window.ComparesOffsets); one that
-	// does not refuses it as one it cannot check.
-	in := iCall(p, Number, rec, live, rAt, fAt, iWin(rAt, fAt, 20*time.Millisecond).ComparesOffsets(), nil, nil)
+	for _, w := range []*Window{iWin(rAt, fAt, 20*time.Millisecond).ComparesOffsets(), iWin(rAt, fAt, 20*time.Millisecond)} {
+		d := oWord(t, Decide(iCall(p, Number, rec, live, rAt, fAt, w, nil, nil)), rec, live)
+		oRefused(t, "dirtyAt <= now-2s in milliseconds at another phase", d, "no-clock-read")
+		if d.Refusal != nil && !strings.Contains(d.Refusal.Why, "the offset reads in seconds") {
+			t.Errorf("dirtyAt <= now-2s in milliseconds: %q; want main's reason, that the offset reads in seconds", d.Refusal.Why)
+		}
+	}
+}
+
+// The same look-back written as Unix seconds ("dirtyAt <= now-2s" cut to
+// the second, read at another phase of its second in each run, the runs
+// no whole minute apart) is a Clock at -2 s where the registered clock
+// reading judges its offset's unit (it writes the offset's line: a replay
+// checks it at the cut). Main's reading leaves that to its caller, whose
+// rule refuses every offset that reads in a second, as main does. Never a
+// word made anew each run, never a Value.
+func TestOutcomeALookBackReadAtAnotherPhaseInSecondsIsAClock(t *testing.T) {
+	const p = "body.filter.dirtyAt.$lte"
+	rAt := oAt.Add(300 * time.Millisecond)
+	fAt := oAt.Add(2*time.Hour + 17*time.Minute + 23*time.Second + 800*time.Millisecond)
+	secs := func(t time.Time) string { return strconv.FormatInt(t.Unix(), 10) }
+	rec, live := secs(rAt.Add(-2*time.Second)), secs(fAt.Add(-2*time.Second))
+	w := iWin(rAt, fAt, 20*time.Millisecond).ComparesOffsets()
+	in := iCall(p, Number, rec, live, rAt, fAt, w, nil, nil)
 	d := oWord(t, Decide(in), rec, live)
-	iClock(t, "dirtyAt <= now-2s at another phase", d)
-	in.Window = iWin(rAt, fAt, 20*time.Millisecond)
-	oRefused(t, "dirtyAt <= now-2s where the replay compares no offset", oWord(t, Decide(in), rec, live), "cannot-check")
-	in.Window = iWin(rAt, fAt, 20*time.Millisecond).ComparesOffsets()
-	if d.Outcome == OutcomeClock && d.Clock != nil && (d.Clock.Min > -2*time.Second || d.Clock.Max < -2*time.Second) {
-		t.Errorf("dirtyAt <= now-2s: the Clock's offset [%v, %v]; want it to hold -2s", d.Clock.Min, d.Clock.Max)
+	at := func(t time.Time) typedInstant {
+		return typedInstant{at: time.Unix(t.Unix(), 0).UTC(), res: time.Second, names: namesMoment}
+	}
+	if off, _, ok := clockInWindow(p, at(rAt.Add(-2*time.Second)), at(fAt.Add(-2*time.Second)), w, nil); ok && off.Why == "" {
+		oRefused(t, "dirtyAt <= now-2s in seconds, main's reading", d, "no-clock-read")
+		return
+	}
+	iClock(t, "dirtyAt <= now-2s in seconds at another phase", d)
+	if d.Clock != nil && (d.Clock.Min > -2*time.Second || d.Clock.Max < -2*time.Second) {
+		t.Errorf("dirtyAt <= now-2s in seconds: the Clock's offset [%v, %v]; want it to hold -2s", d.Clock.Min, d.Clock.Max)
 	}
 }
 
@@ -589,10 +619,11 @@ func TestOutcomeAPercentEncodedInstantIsReadAsTheInstantItOpensTo(t *testing.T) 
 // beside the mark that set dirtyAt = now): the call's own read, decided
 // before a coarse copy, in both modes. Bound to the mark, a replay would go
 // red whenever the two reads fall in different seconds. The offset is the
-// clock reading's; a stub reading stands in for it (main's reading refuses
-// a look-back cut to the second as too wide to check; the later clock
-// reading learns it). Where the reading finds no offset, the copy still
-// binds.
+// clock reading's; a stub reading that judged its unit (it writes the
+// offset's line) stands in for it (main's reading leaves the unit to its
+// caller, whose rule refuses an offset that reads in a second; the later
+// clock reading learns it). Where the reading finds no offset, the copy
+// still binds.
 func TestOutcomeAReadMinusADebounceIsTheCallsClockBeforeACoarseCopy(t *testing.T) {
 	const p = "body.filter.dirtyAt.$lte"
 	rAt := oAt.Add(400 * time.Millisecond)
@@ -606,7 +637,7 @@ func TestOutcomeAReadMinusADebounceIsTheCallsClockBeforeACoarseCopy(t *testing.T
 		clockInWindow = f
 	}(clockInWindow)
 	clockInWindow = func(string, typedInstant, typedInstant, *Window, *time.Location) (models.ClockOffset, string, bool) {
-		return models.ClockOffset{Min: -2010 * time.Millisecond, Max: -1990 * time.Millisecond, Res: time.Millisecond}, "", true
+		return models.ClockOffset{Min: -2010 * time.Millisecond, Max: -1990 * time.Millisecond, Res: time.Millisecond, Why: "the stub reading's line"}, "", true
 	}
 	for _, mode := range []Mode{ModeOwn, ModeElsewhere} {
 		in.Mode = mode
