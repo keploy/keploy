@@ -35,7 +35,8 @@ func startGroupLeader(t *testing.T, argv ...string) (*exec.Cmd, <-chan struct{})
 // deadline, and never with none: a wait it bounds fails only when it takes
 // over a quarter of the time the binary has left, far longer than a loaded
 // host takes for what does happen, and says what it waited on before the
-// binary's own panic.
+// binary's own panic. go test always gives the binary a deadline; a binary
+// run directly has one only with -test.timeout, as CI's direct runs pass.
 func beforeTheDeadline(t *testing.T) <-chan time.Time {
 	t.Helper()
 	dl, ok := t.Deadline()

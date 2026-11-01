@@ -200,7 +200,10 @@ jobs:
       # whether or not the one before it passed or built (a leg's failure is
       # in its output, not the shell's -e and pipefail), so one run says both
       # answers; each PASS line is grepped at the end, so a row that fails,
-      # does not build or vanishes fails the step.
+      # does not build or vanishes fails the step. Each run passes
+      # -test.timeout, as go test does: a test binary run with none has no
+      # deadline, and these rows bound their waits by the test's deadline, so a
+      # hang fails naming what it waited on instead of running to the job's end.
       - name: Open-file rows as the runner user and as root
         if: success() || failure()
         shell: bash
@@ -211,12 +214,12 @@ jobs:
           go test -c -o /tmp/http.test ./pkg/platform/http/ || failed=1
           cd utils
           rows='^(TestMarkExitCountsOpenFilesNotDescriptors|TestAChildReapedBeforeItsFilesAreComparedIsNoRefusal|TestAReadThroughExitingThreadsNeverSettlesLow)$'
-          /tmp/utils.test -test.count=1 -test.v -test.run "$rows" | tee /tmp/utils-runner.out || true
-          sudo env KEPLOY_TEST_KCMP_REQUIRED=1 /tmp/utils.test -test.count=1 -test.v -test.run "$rows" | tee /tmp/utils-root.out || true
+          /tmp/utils.test -test.count=1 -test.v -test.timeout=10m -test.run "$rows" | tee /tmp/utils-runner.out || true
+          sudo env KEPLOY_TEST_KCMP_REQUIRED=1 /tmp/utils.test -test.count=1 -test.v -test.timeout=10m -test.run "$rows" | tee /tmp/utils-root.out || true
           # The churning daemon's stop, which reads its files the same way.
           cd ../pkg/platform/http
-          /tmp/http.test -test.count=1 -test.v -test.run '^TestADaemonThatOnlyChurnsMovesNoTeardown$' | tee /tmp/http-runner.out || true
-          sudo env KEPLOY_TEST_KCMP_REQUIRED=1 /tmp/http.test -test.count=1 -test.v -test.run '^TestADaemonThatOnlyChurnsMovesNoTeardown$' | tee /tmp/http-root.out || true
+          /tmp/http.test -test.count=1 -test.v -test.timeout=10m -test.run '^TestADaemonThatOnlyChurnsMovesNoTeardown$' | tee /tmp/http-runner.out || true
+          sudo env KEPLOY_TEST_KCMP_REQUIRED=1 /tmp/http.test -test.count=1 -test.v -test.timeout=10m -test.run '^TestADaemonThatOnlyChurnsMovesNoTeardown$' | tee /tmp/http-root.out || true
           for leg in {utils-runner,utils-root}:{TestMarkExitCountsOpenFilesNotDescriptors,TestAChildReapedBeforeItsFilesAreComparedIsNoRefusal,TestAReadThroughExitingThreadsNeverSettlesLow} \
             http-runner:TestADaemonThatOnlyChurnsMovesNoTeardown http-root:TestADaemonThatOnlyChurnsMovesNoTeardown; do
             out=/tmp/${leg%%:*}.out

@@ -74,10 +74,11 @@ func inOwnProcess(t *testing.T) bool {
 // ownProcessArgs runs test name alone in a copy of this test binary, with a
 // timeout of its own: three quarters of the time left to this binary's. So
 // the bounds of the copy's waits (beforeTheDeadline) have a deadline to come
-// before, and they, or the copy's own timeout panic, say what it waited on
-// while this binary still reads its output, instead of this binary's timeout
-// ending both and saying only that it ran out. With no timeout here, the
-// copy has none either.
+// before, and they say what it waited on while this binary still reads its
+// output, instead of this binary's timeout ending both and saying only that
+// it ran out. (The copy's own timeout panic runs no cleanups, so its output
+// ends only once nothing it started still holds it.) With no timeout here,
+// the copy has none either.
 func ownProcessArgs(t *testing.T, name string) []string {
 	args := []string{"-test.run=^" + name + "$", "-test.v", "-test.count=1"}
 	if dl, ok := t.Deadline(); ok {
@@ -475,7 +476,8 @@ func startDaemon(command string, args ...string) (int, error) {
 // deadline, and never with none: a wait it bounds fails only when it takes
 // over a quarter of the time the binary has left, far longer than a loaded
 // host takes for what does happen, and says what it waited on before the
-// binary's own panic.
+// binary's own panic. go test always gives the binary a deadline; a binary
+// run directly has one only with -test.timeout, as CI's direct runs pass.
 func beforeTheDeadline(t *testing.T) <-chan time.Time {
 	t.Helper()
 	dl, ok := t.Deadline()
