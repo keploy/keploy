@@ -2137,6 +2137,12 @@ func (lc liveClock) window(prevRec, recBegan time.Time, paired *models.Mock, arr
 // The span carries the tracker's zone (SetAppZone, the agent's own;
 // Span.Zone), which ClockSpanFrom replaces by the zone of the call's own
 // process where the agent read it.
+//
+// Where a serve made after the running test began starts the span, the
+// span also carries where the test began on the app's clock (Span.TestFrom,
+// liveClock.testFrom): another goroutine's call can be served between a
+// read of the clock and the call that carries it, so the replay's check
+// passes a value that holds from the test's begin too (CheckClockRead).
 func (t *Tracker) LiveSpan(arrival time.Time) (Span, bool) {
 	if t == nil {
 		return Span{}, false
@@ -2145,6 +2151,7 @@ func (t *Tracker) LiveSpan(arrival time.Time) (Span, bool) {
 	s, ok := lc.span(arrival)
 	if ok {
 		s.Zone = lc.zone
+		s.TestFrom = lc.testFrom(s.From, arrival)
 	}
 	return s, ok
 }
@@ -2160,7 +2167,7 @@ type liveClock struct {
 	clock            func(time.Time) (time.Time, bool)
 	run              func(time.Time) (time.Time, bool)
 	prev, set, began time.Time
-	client           bool
+	client, open     bool
 	zone             *time.Location
 }
 
@@ -2188,7 +2195,7 @@ func (t *Tracker) liveClockAt(arrival time.Time, sibling Siblings) (liveClock, t
 func (t *Tracker) liveClockAtOf(arrival time.Time, own bool, sibling Siblings) (liveClock, time.Time) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	lc := liveClock{clock: t.appClock, run: t.appClockRun, client: t.clientTests, set: t.setBegan, began: t.beganAt, zone: t.appZone}
+	lc := liveClock{clock: t.appClock, run: t.appClockRun, client: t.clientTests, open: t.open, set: t.setBegan, began: t.beganAt, zone: t.appZone}
 	i := sort.Search(len(t.servedAt), func(i int) bool { return !t.servedAt[i].at.Before(arrival) })
 	lc.prev = t.latestFromLocked(i, false, sibling)
 	if i > 0 && own && t.open && !t.beganAt.IsZero() {
@@ -2333,6 +2340,32 @@ func (lc liveClock) span(arrival time.Time) (Span, bool) {
 		}
 	}
 	return f, ok
+}
+
+// testFrom is where the running test began on the app's clock (Span.
+// TestFrom), or where the app's clock's run to arrival began after it
+// (runFrom), where that is before from, the start of the call's span to
+// arrival: a serve made after the test began started it. Zero where no test
+// is open, where the test began after arrival (a call of the previous test
+// checked late), where the app's clock did not run as one from there to
+// arrival, and in a server test where the hooks tell no run (the clock may
+// have left and come back to the same offset since the test began, as
+// setBound reads a set's begin). The app reads its clock for a call of the
+// test after the test began: a server test's request reaches the app after
+// keploy opened the test, and a client test's harness acts after its
+// begin. Whether the read came after another call keploy served since, it
+// cannot tell: the application's other goroutines (a queue's consumer)
+// make calls of their own beside the test's, whose serves fall between a
+// read and the call that carries it.
+func (lc liveClock) testFrom(from, arrival time.Time) time.Time {
+	if !lc.open || lc.began.IsZero() || (!lc.client && lc.run == nil) {
+		return time.Time{}
+	}
+	b, ok := lc.from(lc.runFrom(lc.began, arrival), arrival)
+	if !ok || !b.From.Before(from) {
+		return time.Time{}
+	}
+	return b.From
 }
 
 // setBound is the bound a span to arrival starts from: the previous serve;
