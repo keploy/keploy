@@ -19,9 +19,10 @@ import (
 // four ways, and only for such a set:
 //
 //   - In a test, the view shows the pool's data-plane recordings too, after
-//     the open test's own and the worker scope (exactView.shows, keep). One a
-//     parser consumes through a delete door is spent for the staging, as one
-//     consumed outside every test is.
+//     the open test's own and the worker scope (exactView.shows, keep). One
+//     of them, unless an async lane's, is spent for the staging through
+//     whichever door a parser consumes it (exactConsumeIn), in a test or
+//     between tests.
 //   - The worker scope the view shows is ordered by its places: the earlier
 //     place first, and within one place a delivering answer before an idle
 //     one, in recorded order (ServeExactWorker's order, which the agent
