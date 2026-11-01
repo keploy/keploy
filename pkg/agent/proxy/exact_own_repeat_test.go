@@ -31,10 +31,10 @@ func ownRepeatExchange(name, req, resp string, at time.Time) *models.Mock {
 	}}
 }
 
-// genericCall sends req on a new connection through the generic parser and
-// returns the four bytes it was answered with, or the miss's report when it
-// was answered nothing.
-func genericCall(t *testing.T, mm *MockManager, req string) (string, *models.MockMismatchReport) {
+// genericCall sends req on a new connection through the generic parser,
+// served from mm, and returns the four bytes it was answered with, or the
+// miss's report when it was answered nothing.
+func genericCall(t *testing.T, mm integrations.MockMemDb, req string) (string, *models.MockMismatchReport) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), callDeadline)
 	defer cancel()
@@ -112,6 +112,47 @@ func TestTheBackgroundNeverAnswersAGenericExchangeOneMoreThanTheTestRecorded(t *
 	mm.ServeExactPool(models.PoolKeyNone, poolNames)
 	if got, miss := genericCall(t, mm, "PING"); got != "POOL" {
 		t.Fatalf("the PING between tests was answered %q (miss %+v); want the pool's POOL", got, miss)
+	}
+}
+
+// A connection the proxy wrapped in a scoped view (scopedMockDb) before exact
+// serving began keeps that view for its life (scopedFor decides once per
+// connection). Its calls keep the held store's own-call decision through the
+// view: an exchange identical to one the open test's own recording already
+// answered misses as an extra call, recorded once, and the pool's recording
+// of it stays unspent. Without the view passing the decision on, the pool
+// answered the exchange on such a connection.
+func TestAScopedConnectionKeepsTheBackgroundOffAnExchangeOneMoreThanTheTestRecorded(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	now := time.Now()
+	start := now.Add(time.Second)
+	pool := ownRepeatExchange("mock-pool-ping", "PING", "POOL", now)
+	own := ownRepeatExchange("mock-own-ping", "PING", "OWN1", start.Add(100*time.Millisecond))
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	mm.SeedRecordedWindows([]models.TestWindow{{TestCase: "test-0", Start: start, End: start.Add(900 * time.Millisecond)}})
+	mm.SetMocksWithWindow([]*models.Mock{own}, []*models.Mock{pool}, models.BaseTime, now.Add(time.Hour))
+	poolNames := []string{pool.Name}
+	mm.ServeExactBackground(models.RecordedWithS12Routing, poolNames, nil)
+	mm.ServeExactPool(models.PoolKeyNone, poolNames)
+	mm.ServeExactTest("test-0", []*models.Mock{roundMock(mm, own.Name)})
+	if !mm.ExactServing() {
+		t.Fatal("precondition: test-0 is not served exactly")
+	}
+	scoped := &scopedMockDb{MockMemDb: mm}
+
+	if got, miss := genericCall(t, scoped, "PING"); got != "OWN1" {
+		t.Fatalf("test-0's PING was answered %q (miss %+v); want its own OWN1", got, miss)
+	}
+	got, miss := genericCall(t, scoped, "PING")
+	if got != "" {
+		t.Fatalf("test-0's second PING on a scoped connection, one more than it recorded, was answered %q", got)
+	}
+	if miss.MissKind != models.MissExtraCall || miss.Recorded != 1 {
+		t.Fatalf("the second PING missed as %q, recorded %d; want %q, recorded 1", miss.MissKind, miss.Recorded, models.MissExtraCall)
+	}
+	if mm.MockSpent(pool.Name) {
+		t.Fatal("the pool's PING was spent by a call it did not answer")
 	}
 }
 
