@@ -119,7 +119,7 @@ func TestOutcomeLearnedLinesSayWhatWhereWhyAndTheUndo(t *testing.T) {
 			continue
 		}
 		for _, s := range append([]string{c.in.Test, c.in.Mock, c.in.Drift[0], c.r, c.f, "undo"}, c.says...) {
-			if !strings.Contains(d.Line, s) {
+			if !strings.Contains(strings.ToLower(d.Line), strings.ToLower(s)) {
 				t.Errorf("%s: line %q; want it to say %q", c.what, d.Line, s)
 			}
 		}

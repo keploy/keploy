@@ -36,6 +36,15 @@ type evPlace struct {
 	rec, live        string
 	side             Side
 	given, startUp   bool
+	// gave: a value the test gave keploy (#5016), read by its text alone,
+	// never by a moment; given without gave is the test case's request.
+	gave bool
+	// clock: the earlier call learned this place as its own read of the
+	// application's clock: a separate read, never a copy of another.
+	clock bool
+	// raw is the index in Input.Raw plus one of a recording's place; 0 for
+	// any other.
+	raw int
 	// otherTest: an earlier test's place, or one served between tests:
 	// outside the call's scope (Mode Own reads it only to name the edit).
 	otherTest bool
@@ -77,7 +86,7 @@ func placesOf(in Input) (ps []evPlace, unread string) {
 			ps = append(ps, evPlace{
 				name: e.Mock + " " + path, mock: e.Mock, path: path,
 				rec: s.Leaf.Value, live: s.Live, side: s.Side,
-				given: e.Given, startUp: e.StartUp, otherTest: e.ofEarlierTest(),
+				given: e.Given, gave: e.Gave, clock: s.Clock, startUp: e.StartUp, otherTest: e.ofEarlierTest(),
 				at: e.At, state: st, why: why,
 			})
 			if s.Side == Response && st == stateBefore && e.Payload.isRead() {
@@ -93,7 +102,7 @@ func placesOf(in Input) (ps []evPlace, unread string) {
 			}
 		}
 	}
-	for _, r := range in.Raw {
+	for i, r := range in.Raw {
 		if !r.Read() {
 			if unread == "" {
 				unread = r.Mock() + " (keploy could not read its recording)"
@@ -113,7 +122,7 @@ func placesOf(in Input) (ps []evPlace, unread string) {
 		ps = append(ps, evPlace{
 			name: r.Mock(), mock: r.Mock(), rec: r.Text(), live: live, side: Response,
 			startUp: r.beforeTest && !r.olderTest, otherTest: r.olderTest,
-			at: r.at, state: st, why: why, fUnstated: unstated || !in.Caps.FViewStated,
+			at: r.at, state: st, why: why, fUnstated: unstated || !in.Caps.FViewStated, raw: i + 1,
 		})
 	}
 	return ps, unread
@@ -256,6 +265,12 @@ func heldWhole(x *readerIndex, p evPlace, w readWord, rec string) bool {
 	}
 	if held, _ := x.holdsToken(p.rec, tokenID, rec); held {
 		return true
+	}
+	// A word that is a whole token of its own (no ID byte beside it).
+	if len(w.Tokens) == 0 {
+		if held, _ := x.holdsToken(p.rec, tokenID, w.Rec); held {
+			return true
+		}
 	}
 	for _, t := range w.Tokens {
 		if held, _ := x.holdsToken(p.rec, t.Kind, t.Rec); held {

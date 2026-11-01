@@ -1,5 +1,7 @@
 package learn
 
+import "strings"
+
 // Mode Elsewhere (DESIGN §3b, the timer rule): a call that landed in another
 // window than its recording's may teach its recording Clock words only, for
 // learning only. Every earlier place of the run is in scope, for sources and
@@ -57,9 +59,17 @@ func elsewhere(in Input, ds []Decision, fields []string) []Decision {
 func outcomeWords(d Decision) string {
 	switch d.Outcome {
 	case OutcomeValue:
-		return "a value an earlier place sent"
+		return "a value an earlier place sent (" + strings.TrimSpace(d.From.Mock+" "+d.From.Path) + ")"
 	case OutcomeFresh:
-		return "a value made anew each run (noise at it in keploy.yml lets its clock reads learn)"
+		why := "a value made anew each run"
+		if len(d.Echo) > 0 {
+			var at []string
+			for _, a := range d.Echo {
+				at = append(at, a.String())
+			}
+			why += ", which the call's recorded answer echoes at " + strings.Join(at, ", ")
+		}
+		return why + " (noise at it in keploy.yml lets its clock reads learn)"
 	}
 	if d.Refusal != nil {
 		return "refused (" + string(d.Refusal.Kind) + "): " + d.Refusal.Why
