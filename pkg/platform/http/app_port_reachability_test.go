@@ -768,13 +768,14 @@ func TestUnreachableAppPortAnswersAHostPortPublishedSeveralTimesTheSameWay(t *te
 // an app still starting, and get the app's answer once it listens, not fail at
 // once as a port the host can never reach.
 func TestARefusalAtAHostPortPublishedToTheAppsPortIsReSent(t *testing.T) {
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	hostPort := strconv.Itoa(l.Addr().(*net.TCPAddr).Port)
-	if err := l.Close(); err != nil {
-		t.Fatal(err)
+	// The app's port, refused until the app listens on it, and held all along
+	// (heldLoopbackPort): released and bound again, it was another's to take
+	// in between on a busy host, and the app could not listen on it.
+	held, listen := heldLoopbackPort(t)
+	hostPort := strconv.Itoa(held)
+	if l, err := net.Listen("tcp", "127.0.0.1:"+hostPort); err == nil {
+		_ = l.Close()
+		t.Fatalf("another socket could bind the app's port %s before the app listened: the test does not hold it", hostPort)
 	}
 
 	// The app finishes starting while keploy asks the agent where it listens:
@@ -788,7 +789,7 @@ func TestARefusalAtAHostPortPublishedToTheAppsPortIsReSent(t *testing.T) {
 	})
 	agent := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		startOnce.Do(func() {
-			ln, err := net.Listen("tcp", "127.0.0.1:"+hostPort)
+			ln, err := listen()
 			if err != nil {
 				t.Errorf("the app could not listen on %s: %v", hostPort, err)
 				return
