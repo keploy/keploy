@@ -15,7 +15,7 @@ import (
 
 // Rows for what the one entry costs against main's learning: each row is a
 // row of main's tests, read on the same inputs, cited by file:line. Some
-// flip, as approved (an unchanged place holding one of the two words is
+// flip on purpose (an unchanged place holding one of the two words is
 // chance; a start-up sibling's second is the call's own read); some stay as
 // main pins them; some are refused where main binds (stricter, a red only).
 // Rows main pins that the evidence, instant and word files already hold are
@@ -87,7 +87,7 @@ var (
 
 // An unchanged place that holds only one of the two words is chance where
 // the word is short (under 32 bits): the word is made anew each run, fresh
-// (founder rule B; approved flips given_test.go:195, :228, run_test.go:751).
+// (on purpose, unlike main at given_test.go:195, :228, run_test.go:751).
 // One of 32 bits or more there is a conflict, and a place that holds both
 // words leaves it unknown (pinned: given_test.go:192, :193, :194, :223).
 func TestOutcomeCostAnUnchangedPlaceHoldingOneShortWordIsChance(t *testing.T) {
@@ -126,7 +126,7 @@ func TestOutcomeCostAnUnchangedPlaceHoldingOneShortWordIsChance(t *testing.T) {
 		oWord(t, Decide(costCall(clockedDrifts(), p, "morning", "evening", costAt, query, nil, nil, nil)), "morning", "evening"), costConflict, "url.query.shift")
 
 	// Leaves an earlier exchange served unchanged, one holding the changed
-	// word (approved flip, learn_test.go:1816 "served leaves"): four hex
+	// word (unlike main on purpose, learn_test.go:1816 "served leaves"): four hex
 	// letters there are chance, fresh; eight are refused, naming the leaf.
 	served := func(a, b string) []Earlier {
 		return []Earlier{{Mock: "mock-1", At: costAt.Add(-time.Second), Seen: []Seen{
@@ -145,7 +145,7 @@ func TestOutcomeCostAnUnchangedPlaceHoldingOneShortWordIsChance(t *testing.T) {
 // byte (VARCHAR(50)), 7 in F, the call's recorded answer echoing 50: the
 // unchanged place holds one short word, chance, so the value is fresh, its
 // echo named where the adapter names its answer's cells (Input.PlaceOf);
-// refused where it names none or cannot answer a word (approved flip,
+// refused where it names none or cannot answer a word (unlike main on purpose,
 // follows_test.go:407-411).
 func TestOutcomeCostAValueItsAnswerEchoesBesideAChancePlaceIsFresh(t *testing.T) {
 	raw := append(eStartup(), eHistory(eRecAt.Add(-150*time.Millisecond), 6, true))
@@ -162,6 +162,9 @@ func TestOutcomeCostAValueItsAnswerEchoesBesideAChancePlaceIsFresh(t *testing.T)
 	costFresh(t, "50 echoed in its answer beside VARCHAR(50) sent unchanged", d)
 	if len(d.Echo) != 1 || d.Echo[0].Place.Part == 0 {
 		t.Errorf("50 echoed in its answer: %s, Echo %v; want the answer's place named", oDescribe([]Decision{d}), d.Echo)
+	} else if want := "answered at " + d.Echo[0].String() + ", where the call's answer holds \"50\" as recorded"; !strings.Contains(d.Line, want) {
+		// The answer rewritten at replay is learned too: its line says where.
+		t.Errorf("50 echoed in its answer: line %q; want it to name the answer place (%q)", d.Line, want)
 	}
 	costRefused(t, "50 echoed at an answer place its adapter names not", oWord(t, Decide(costF("50", "7", nil, raw, resp)), "50", "7"), []RefusalKind{"cannot-check"})
 	in.Caps.AnswerAtWord = false
@@ -236,7 +239,7 @@ func costFind(sent, answer string, before, answered time.Duration) Raw {
 // janitor's find of the same second: a Clock its own window holds, never a
 // Value of the find (pinned: startup_same_second_test.go:33-102, whether F
 // had served the find or not, the find in flight or answered before; the
-// approved flips :134, :136 read F's served find the same way, one cut
+// flips at :134, :136 (on purpose) read F's served find the same way, one cut
 // looser than main). Where the find's answer gave the instant in flight
 // (:135), step 3 does not take it: a Clock or refused. A client test whose
 // window is an hour from F's second (:159-162): the begin's Clock or
@@ -419,7 +422,7 @@ func TestOutcomeCostThePlacesKeepNoRecordingsText(t *testing.T) {
 // which round F moved to a word that shares nothing with F's new one, is
 // chance: the place shows the value did not follow it, so the word is made
 // anew each run, fresh (http learn_test.go:2829, :2853 on main refuse it;
-// DESIGN's evidence table, a changed place disproven). A word of 32 bits or
+// a changed place disproves it). A word of 32 bits or
 // more there is a conflict, and so is the start-up's place that held the
 // value's whole recorded token; an earlier test's is out of the call's
 // scope, so that one is chance too.
