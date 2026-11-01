@@ -39,7 +39,7 @@ func eLease(rAt, fAt time.Time, rid, fid string, earlier []Earlier) Input {
 	return Input{
 		Drifts: oDrifts(), Drift: drift,
 		Live: shape(fAt, fid), Rec: shape(rAt, rid),
-		At: rAt, Arrived: fAt, Earlier: earlier, Window: iWin(rAt, fAt, 50*time.Millisecond),
+		At: rAt, Arrived: fAt, Earlier: earlier, Window: iWin(rAt, fAt, 50*time.Millisecond).ComparesOffsets(),
 		Test: "test-4", Mock: "mock-90", Mode: ModeElsewhere, Landed: Landed{Where: LandedOther, Test: "test-5"},
 		Caps: Caps{BindAtWord: true, AnswerAtWord: true, FViewStated: true},
 	}
