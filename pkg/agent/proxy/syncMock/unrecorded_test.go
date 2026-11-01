@@ -1,6 +1,8 @@
 package manager
 
 import (
+	"bytes"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -394,19 +396,106 @@ func TestUnrecordedConnRunningIsSetOnceItsSpanIsOpen(t *testing.T) {
 }
 
 // A Note that saw no span open, and then waited at start's lock behind the
-// one that opened it, opens none of its own: one connection has one span and
-// one follower at a time. start is called here as that Note calls it.
+// start that is opening one, opens none of its own: one connection has one
+// span and one follower at a time. The second start comes inside the first
+// open, under the lock with running still clear, as a Note that read running
+// clear just then calls it, and the open returns only once it waits at the
+// lock.
 func TestUnrecordedConnAStartBehindAnOpenSpanOpensNone(t *testing.T) {
 	t.Parallel()
 	l := &spanLog{}
-	u := NewUnrecordedConn(l.open, time.Hour, time.Hour)
+	var u *UnrecordedConn
+	var second sync.WaitGroup
+	u = NewUnrecordedConn(func(start time.Time) func() {
+		closeSpan := l.open(start)
+		if o, _ := l.counts(); o == 1 {
+			second.Add(1)
+			go func() { defer second.Done(); startBehindTheOpen(u) }()
+			waitUntil(t, "the second start waiting at the lock", func() bool {
+				o, _ := l.counts()
+				return o > 1 || parkedAtSpanMu("startBehindTheOpen")
+			})
+			if o, _ := l.counts(); o > 1 {
+				t.Errorf("opens=%d inside the first open: the second start took no lock", o)
+			}
+		}
+		return closeSpan
+	}, time.Hour, time.Hour)
 	u.Stop(time.Now())
-	u.start(time.Now())
+	second.Wait()
 	if o, _ := l.counts(); o != 1 {
-		t.Fatalf("opens=%d, want 1: a second span and a second follower for one connection", o)
+		t.Fatalf("opens=%d, want 1: a start that waited at the lock behind the open opened a second span and a second follower", o)
 	}
 	u.End()
 	waitUntil(t, "End closes it", func() bool { _, c := l.counts(); return c == 1 })
+}
+
+// The idle close holds start's lock until the span is closed: a Note that
+// finds running cleared, the close begun and not over, opens the next span
+// only once it is. So a connection has one span open at a time. The first
+// span's close is held here until that Note waits at the lock.
+func TestUnrecordedConnTheNextSpanOpensOnceTheIdleCloseIsOver(t *testing.T) {
+	t.Parallel()
+	l := &spanLog{}
+	var overlap atomic.Int32
+	closing, release := make(chan struct{}), make(chan struct{})
+	checks := checkedConn(t, func(start time.Time) func() {
+		if o, c := l.counts(); o != c {
+			overlap.Add(1)
+		}
+		closeSpan := l.open(start)
+		if o, _ := l.counts(); o == 1 {
+			return func() { close(closing); <-release; closeSpan() }
+		}
+		return closeSpan
+	})
+	u := checks.u
+	u.Stop(time.Now())
+	checks.idle()
+	waitUntil(t, "the idle close begins", func() bool {
+		select {
+		case <-closing:
+			return true
+		default:
+			return false
+		}
+	})
+	var note sync.WaitGroup
+	note.Add(1)
+	go func() { defer note.Done(); noteDuringTheClose(u) }()
+	waitUntil(t, "the Note waiting at the lock", func() bool {
+		o, _ := l.counts()
+		return o > 1 || parkedAtSpanMu("noteDuringTheClose")
+	})
+	close(release)
+	note.Wait()
+	if overlap.Load() != 0 {
+		t.Fatalf("the next span opened while the idle close of the last one was not over: two spans open for one connection")
+	}
+	if o, c := l.counts(); o != 2 || c != 1 {
+		t.Fatalf("opens=%d closes=%d, want 2 and 1: the resumed traffic opened no span, or the first did not close", o, c)
+	}
+	u.End()
+	waitUntil(t, "End closes the second span", func() bool { _, c := l.counts(); return c == 2 })
+}
+
+// startBehindTheOpen and noteDuringTheClose name, in a goroutine's stack, the
+// call a test waits to see at start's lock (parkedAtSpanMu).
+func startBehindTheOpen(u *UnrecordedConn) { u.start(time.Now()) }
+
+func noteDuringTheClose(u *UnrecordedConn) { u.Note(time.Now()) }
+
+// parkedAtSpanMu reports whether the goroutine running caller is parked in
+// sync.Mutex.Lock in UnrecordedConn.start: it waits at start's lock.
+func parkedAtSpanMu(caller string) bool {
+	buf := make([]byte, 1<<20)
+	n := runtime.Stack(buf, true)
+	for _, g := range bytes.Split(buf[:n], []byte("\n\n")) {
+		if bytes.Contains(g, []byte("[sync.Mutex.Lock")) && bytes.Contains(g, []byte("(*UnrecordedConn).start(")) && bytes.Contains(g, []byte("."+caller+"(")) {
+			return true
+		}
+	}
+	return false
 }
 
 // A span still open is never evicted to make room for spans long closed: a
