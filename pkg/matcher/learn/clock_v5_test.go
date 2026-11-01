@@ -877,3 +877,77 @@ func TestAnEarlyReadLookBackOfAWriterThatDoesNotCutNeverPassesADroppedLookBack(t
 		}
 	}
 }
+
+// A client test's read in Unix seconds made just after its test began, a
+// second before its call's window in both runs (api-server's audit: the
+// application reads its clock, makes other calls, then sends the audit):
+// the window plus an offset of 1.1 s to 1.2 s holds it, Fine at the second
+// (no whole second), refused in a keploy test. In a client test the window
+// from each run's test begin holds it as a plain read, which the order's
+// step 7 checks from the test's begin: the reading refuses nothing there,
+// so the read is not kept from step 7. A whole-second look-back at the
+// second is the application's rule and no such case, and a look-back in
+// milliseconds stays refused in client tests
+// (TestALookBackOfAWriterThatDoesNotCutIsReadAtItsOwnCut).
+func TestAFineOffsetOfAReadSinceItsTestBeganIsLeftToItsBegin(t *testing.T) {
+	sec, ms := time.Second, time.Millisecond
+	at := time.Date(2026, 10, 31, 9, 0, 0, 0, time.UTC)
+	r0, f0 := at.Add(6300*ms), at.Add(75800*ms)
+	rec, f := v5Call(r0.Add(900*ms), 100*ms, 0), v5Call(f0.Add(1400*ms), 100*ms, 0)
+	rv, lv := r0.Add(ms).Truncate(sec), f0.Add(100*ms).Truncate(sec)
+	for _, client := range []bool{false, true} {
+		rs, fs := Span{From: rec.from, To: rec.to}, Span{From: f.from, To: f.to}
+		if client {
+			rs.Began, fs.Began = r0, f0
+		}
+		o, why, ok := clockInWindow("body.auditedAt", v5Instant(rv, sec), v5Instant(lv, sec), (&Window{Rec: rs, F: fs}).ComparesOffsets(), nil)
+		switch {
+		case ok:
+			t.Errorf("FALSE GREEN: client tests %v: %+v; want no Clock of the call's window", client, o)
+		case client && why != "":
+			t.Errorf("client tests: the reading refused %q, which keeps the order's step 7 from reading it since its test began", why)
+		case !client && !strings.Contains(why, "so keploy refuses an offset that reads in a second or finer"):
+			t.Errorf("keploy test: %q; want main's refusal of an offset that reads in a second or finer", why)
+		}
+	}
+}
+
+// The same read where its two runs show a whole second (clock - 1s at the
+// second): a protocol whose replay compares offsets learns that Clock, and
+// its replay fails where the application's wait changes by more than a
+// second (the own cut's stated cost); one whose replay compares none could
+// only refuse it, though the window from each run's test begin holds the
+// value as a plain read it can check, so the reading leaves it to the
+// order's step 7. In a keploy test, with no begin, the offset stands and
+// the order's guard refuses it as one this protocol does not compare.
+func TestAnOffsetAReplayCannotCompareOfAReadSinceItsTestBeganIsLeftToItsBegin(t *testing.T) {
+	sec, ms := time.Second, time.Millisecond
+	at := time.Date(2026, 10, 31, 9, 0, 0, 0, time.UTC)
+	r0, f0 := at.Add(6300*ms), at.Add(75800*ms)
+	rec, f := v5Call(r0.Add(900*ms), 100*ms, 0), v5Call(f0.Add(1400*ms), 100*ms, 0)
+	rv, lv := r0.Add(ms).Truncate(sec), f0.Add(300*ms).Truncate(sec)
+	for _, row := range []struct {
+		name             string
+		client, compares bool
+		want             bool
+	}{
+		{"client test, compared", true, true, true},
+		{"client test, not compared", true, false, false},
+		{"keploy test, compared", false, true, true},
+		{"keploy test, not compared", false, false, true},
+	} {
+		w := &Window{Rec: Span{From: rec.from, To: rec.to}, F: Span{From: f.from, To: f.to}}
+		if row.client {
+			w.Rec.Began, w.F.Began = r0, f0
+		}
+		if row.compares {
+			w = w.ComparesOffsets()
+		}
+		o, why, ok := clockInWindow("body.auditedAt", v5Instant(rv, sec), v5Instant(lv, sec), w, nil)
+		if why != "" || ok != row.want {
+			t.Errorf("%s: %+v %q %v; want Clock %v and no refusal", row.name, o, why, ok, row.want)
+		} else if lo, hi := o.CutOffsets(); ok && (lo != -sec || hi != -sec) {
+			t.Errorf("%s: %+v, CutOffsets %s..%s; want clock - 1s", row.name, o, lo, hi)
+		}
+	}
+}

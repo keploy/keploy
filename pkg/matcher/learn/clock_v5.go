@@ -56,7 +56,15 @@ func init() {
 //
 // It refuses what main's clockOffset refuses for its unit (Fine: an offset
 // that reads in a second or finer, but one cut to the second; why) and for
-// a window that no replay of its width could check (Checkable). The other
+// a window that no replay of its width could check (Checkable). An offset
+// Fine at a cut of a second or coarser holds no whole cut, so no application
+// that cuts its read and adds a whole cut wrote it: where the window from
+// each run's test begin holds the value as a plain read (heldSinceBegin) it
+// is left to the order's step 7, which a refusal here would keep from
+// reading it; so is any offset of a cut that coarse that this protocol's
+// replay does not compare (Window.ComparesOffsets), which the order could
+// only refuse. A look-back Fine at a finer cut stays refused: read from the
+// test's begin it would pass a dropped look-back. The other
 // guards (one no replay compares, one too wide to narrow, one near a wall
 // time shown twice) are the order's, as for any reading.
 //
@@ -92,6 +100,8 @@ func offsetInWindow(path string, r, l typedInstant, w *Window, zone *time.Locati
 		}
 	}
 	switch {
+	case (o.Fine() || !w.offsets) && o.Res >= time.Second && heldSinceBegin(r, l, w, enc):
+		return models.ClockOffset{}, "", false
 	case o.Fine():
 		return models.ClockOffset{}, fineV5Why(path, o), false
 	case !checkable:
@@ -103,6 +113,14 @@ func offsetInWindow(path string, r, l typedInstant, w *Window, zone *time.Locati
 	}
 	o.Why = lineV5(path, o, enc, gap, nearLine(o, w, near))
 	return o, "", true
+}
+
+// heldSinceBegin reports whether the window from each run's test begin to
+// its call (Window.sinceBegin: client tests) holds r and l, written at
+// enc, as plain reads of the clock.
+func heldSinceBegin(r, l typedInstant, w *Window, enc time.Duration) bool {
+	wb := w.sinceBegin()
+	return wb != nil && wb.Rec.holds(r.at, enc) && wb.F.holds(l.at, enc)
 }
 
 // sinceBeginV5 is clockSinceBegin: ln, a Clock the order's step 7 found in
