@@ -272,7 +272,7 @@ func TestAMinuteCutLookBackLearnedAtItsStepIsLockedToItsPhase(t *testing.T) {
 		if got, why := v5Check(p, o, recText, cutter(s.From.Add(-500*ms)), s); !got {
 			t.Errorf("FALSE RED: phases %v, a read 500 ms before a window that starts 300 ms into its minute: %s", ph, why)
 		}
-		for _, part := range []string{"read cut to 1m0s before the offset", "A replay passes a value only where it is a whole 1m of its call's window", "a look-back dropped, or changed by part of 1m, fails at every read", "fails a replay wherever its value's remainder within 1m moves (a false red), and passes one where that remainder lands on the learned one, about one read in 60, whatever its look-back"} {
+		for _, part := range []string{"read cut to 1m0s before the offset", "A replay passes a value only where it is a whole 1m of its call's window (within 1s on either side) plus an offset from -1m43s to -1m42s", "a look-back dropped, or changed by part of 1m, fails at every read", "fails a replay wherever its value's remainder within 1m moves (a false red), and passes one where that remainder lands on the learned one, about one read in 60, whatever its look-back"} {
 			if !strings.Contains(o.Why, part) {
 				t.Errorf("the line does not say %q: %s", part, o.Why)
 			}
@@ -1132,7 +1132,7 @@ func TestAMillisecondsLookBackIsRefusedInEveryWindowAsAQuietOneRefusesIt(t *test
 
 // A time to live under a minute at the second is refused, as main refuses
 // it, where its call's window is as wide as its cut: every whole second the
-// range holds stands for it, so a replay would pass one changed by the
+// range holds stands for it, and a replay would pass one changed by the
 // window's width at every read, where a narrow window's check tells it
 // from one changed by two seconds. One of a minute or longer is read at its
 // cut and the line says how far a changed one passes, truly.
@@ -1163,7 +1163,7 @@ func TestATimeToLiveInAWindowAsWideAsItsCutIsRefusedUnderAMinute(t *testing.T) {
 		}
 		lo, hi := o.CutOffsets()
 		sh := models.ShortDuration
-		if want := "a time to live from " + sh(lo-sec) + " to " + sh(hi+sec) + " passes at every read"; !strings.Contains(o.Why, want) || !strings.Contains(o.Why, "each whole second from "+sh(lo)+" to "+sh(hi)) {
+		if want := "a time to live from " + sh(lo-sec) + " to " + sh(hi+sec) + " passes at every read"; !strings.Contains(o.Why, want) || !strings.Contains(o.Why, "each whole second from "+sh(lo)+" to "+sh(hi)) || !strings.Contains(o.Why, "one a second further out passes only where a turn of the second falls in it, and one two seconds further out or more fails") {
 			t.Errorf("clock + 90s in a window 3.2s wide: the line does not say %q: %s", want, o.Why)
 		}
 		text := strconv.FormatInt(rv.Unix(), 10)
