@@ -470,3 +470,39 @@ func TestOutcomeACallWithNoAppClockSaysSo(t *testing.T) {
 		}
 	}
 }
+
+// An instant written percent-encoded ("10%3A00%3A00.123456Z", a link's
+// query in a body) is read as the instant it opens to, not as the plain
+// words "3A00" and "3A01" beside it: read in its call's window in both runs
+// it is a Clock, named through the step that opens it. Sent before the call
+// at the test's earlier place, also encoded, where round F moved it while
+// the call sent a third value, it stopped following: a conflict at a fine
+// cut, refused.
+func TestOutcomeAPercentEncodedInstantIsReadAsTheInstantItOpensTo(t *testing.T) {
+	const p = "body.next"
+	pct := func(t time.Time) string { return strings.ReplaceAll(iMicro(t), ":", "%3A") }
+	link := func(t time.Time) string { return "/v1/events?since=" + pct(t) }
+	rAt := oAt
+	fAt := oAt.Add(61 * time.Second)
+	rRead, fRead := rAt.Add(-300*time.Millisecond), fAt.Add(-200*time.Millisecond)
+	named := func(l Leaf, answer bool) (string, bool) { return VarPlace(l, true) }
+	in := iCall(p, String, link(rRead), link(fRead), rAt, fAt, iWin(rAt, fAt, 900*time.Millisecond), nil, nil)
+	in.PlaceOf = named
+	ds := Decide(in)
+	d := oWord(t, ds, iMicro(rRead), iMicro(fRead))
+	iClock(t, "a percent-encoded microsecond read in its window", d)
+	if !strings.Contains(d.At.String(), "|pct") {
+		t.Errorf("a percent-encoded instant: At %q; want it named through the pct step", d.At)
+	}
+	sent := []Earlier{iSent("mock-1", rAt.Add(-250*time.Millisecond), "body.cursor", String, pct(rRead), pct(fAt.Add(-400*time.Millisecond)))}
+	in = iCall(p, String, link(rRead), link(fRead), rAt, fAt, iWin(rAt, fAt, 900*time.Millisecond), sent, nil)
+	in.PlaceOf = named
+	ds = Decide(in)
+	for _, d := range ds {
+		if d.Outcome != OutcomeRefused {
+			t.Errorf("FALSE GREEN? a percent-encoded microsecond mock-1 sent encoded and F moved: %s; want every change refused", oDescribe(ds))
+		}
+	}
+	d = oWord(t, ds, iMicro(rRead), iMicro(fRead))
+	oRefused(t, "a percent-encoded microsecond mock-1 sent encoded and F moved", d, "conflict", "mock-1")
+}
