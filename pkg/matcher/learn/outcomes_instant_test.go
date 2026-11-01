@@ -322,3 +322,34 @@ func TestOutcomeAClientTestsOwnValueIsFreshAtItsFirstSend(t *testing.T) {
 	in.Earlier = []Earlier{iSent("mock-1", rAt.Add(-250*time.Millisecond), "body.document.name", String, rec, live)}
 	iValue(t, "the client test's own value, sent again", oWord(t, Decide(in), recN, liveN), "mock-1")
 }
+
+// A client test's read of the clock made earlier in the test than its call's
+// own window, after the test began in both runs (2 s before the call in the
+// recording, 3 s in round F: no one offset), that no earlier place holds: a
+// Clock checked from the test's begin (models.SinceTestBegin). The same
+// read in a keploy test, whose calls are not read from a begin, is refused:
+// no clock read, never fresh.
+func TestOutcomeAClientTestsReadSinceItsBeginIsAClock(t *testing.T) {
+	const p = "body.cmd.query.dueBefore"
+	rAt, fAt := oAt, oAt.Add(61*time.Second+337*time.Millisecond)
+	rec, live := iMs(rAt.Add(-2130*time.Millisecond)), iMs(fAt.Add(-3410*time.Millisecond))
+	w := iWin(rAt, fAt, 50*time.Millisecond)
+	w.Rec.Began, w.F.Began = rAt.Add(-5*time.Second), fAt.Add(-5*time.Second)
+	in := iCall(p, String, rec, live, rAt, fAt, w, nil, nil)
+	in.Drifts = oClientDrifts()
+	d := oWord(t, Decide(in), rec, live)
+	iClock(t, "a client test's read 2 s and 3 s before its call, after its begin", d)
+	if d.Clock != nil && d.Clock.Since != models.SinceTestBegin {
+		t.Errorf("a client test's read since its begin: checked since %v; want since the test began", d.Clock.Since)
+	}
+	// Began after the read in round F: the window from the begin does not
+	// hold it.
+	late := *w
+	late.F.Began = fAt.Add(-3 * time.Second)
+	in.Window = &late
+	if d := oWord(t, Decide(in), rec, live); d.Outcome == OutcomeClock || d.Outcome == OutcomeValue {
+		t.Errorf("a client test's read before round F's begin: %s; want no Clock and no Value", oDescribe([]Decision{d}))
+	}
+	in.Drifts, in.Window = oDrifts(), w
+	oRefused(t, "a keploy test's read 2 s and 3 s before its call", oWord(t, Decide(in), rec, live), "no-clock-read")
+}

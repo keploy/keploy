@@ -476,27 +476,22 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 		}
 	}
 	if inWindow {
-		if echo := dc.instantEchoed(c); echo != "" {
-			return dc.cannotCheck(path, at, n, r, l, "keploy cannot check a clock read its own call's recorded answer holds ("+echo+"): it would serve that answer's recorded moment")
-		}
-		if c.text {
-			lay := models.ClockOffset{Layout: clockTextLayout(r)}.MeetLayout(clockTextLayout(l))
-			if lay == "" || lay == models.LayoutApart {
-				return dc.cannotCheck(path, at, n, r, l, "its two runs write it in different layouts")
-			}
-			off.Layout = lay
-		}
-		d := dc.learned(path, at, n, r, l, OutcomeClock, "a read of the application's clock its call's window holds in both runs", nil)
-		if off.Why == "" {
-			off.Why = d.Line
-		}
-		d.Clock = &off
-		return d
+		return dc.clock(path, at, n, c, off, "a read of the application's clock its call's window holds in both runs")
 	}
 
 	// 6. Coarse copy: as 4, a millisecond or coarser; no window condition.
 	if coarse := copies(false); len(coarse) > 0 {
 		return dc.copied(path, at, n, r, l, coarse, "the same moment, at a millisecond or coarser, was sent before the call in both runs and its own window does not hold it: one read, copied")
+	}
+
+	// 7. Since begin (client tests): a plain read the window from each
+	// run's test begin to the call holds, checked from the test's begin.
+	if dc.in.Drifts != nil && dc.in.Drifts.clientTests && c.rm != nil && c.lm != nil && cutWhy == "" {
+		if wb := dc.in.Window.sinceBegin(); wb != nil && wb.holdsRead(*c.rm, *c.lm, zone) {
+			if ln, ok := clockSinceBegin(Learned{Kind: KindClockOffset, Offset: &models.ClockOffset{Res: max(c.rm.res, c.lm.res)}}); ok && ln.Offset != nil {
+				return dc.clock(path, at, n, c, *ln.Offset, "a read of the application's clock made since its test began in both runs, before its call's window")
+			}
+		}
 	}
 
 	// 8. The test's own value (client tests): no earlier place holds it in
@@ -568,6 +563,30 @@ func (dc *decider) swappable(p evPlace, c changedInstant) bool {
 		h, _, _ := dc.holds(evPlace{}, own, c.r, c.rm, c.byText)
 		return h
 	})
+}
+
+// clock is c learned as a read of the application's clock with its check
+// off, the rule naming the window that holds it: refused where the call's
+// own recorded answer holds it (replay would serve that answer's recorded
+// moment) or its two runs write it in different layouts.
+func (dc *decider) clock(path string, at variables.Address, n int, c changedInstant, off models.ClockOffset, rule string) Decision {
+	r, l := c.r, c.l
+	if echo := dc.instantEchoed(c); echo != "" {
+		return dc.cannotCheck(path, at, n, r, l, "keploy cannot check a clock read its own call's recorded answer holds ("+echo+"): it would serve that answer's recorded moment")
+	}
+	if c.text {
+		lay := models.ClockOffset{Layout: clockTextLayout(r)}.MeetLayout(clockTextLayout(l))
+		if lay == "" || lay == models.LayoutApart {
+			return dc.cannotCheck(path, at, n, r, l, "its two runs write it in different layouts")
+		}
+		off.Layout = lay
+	}
+	d := dc.learned(path, at, n, r, l, OutcomeClock, rule, nil)
+	if off.Why == "" {
+		off.Why = d.Line
+	}
+	d.Clock = &off
+	return d
 }
 
 // bound is a Value bound at the earliest of src.
