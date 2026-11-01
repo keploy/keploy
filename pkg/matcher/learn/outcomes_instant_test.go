@@ -510,10 +510,45 @@ func TestOutcomeACallWithNoAppClockSaysSo(t *testing.T) {
 	}
 }
 
+// A read of the clock that is one word of a longer text ("evt-<seconds>")
+// is a Clock carrying where it stands in the recorded text: its bytes, and
+// the length and hash of the text on each side (models.ClockOffset.Word), so
+// a replay reads that word alone as the clock and compares the rest, for
+// every adapter alike. A read that is its text whole carries none. Where
+// the text around it changed too, the sides a replay compares are not the
+// same in both runs: refused as one keploy cannot check.
+func TestOutcomeAClockReadInsideATextCarriesItsWord(t *testing.T) {
+	rAt, fAt := oAt, oAt.Add(61*time.Second)
+	rRead, fRead := rAt.Add(-300*time.Millisecond), fAt.Add(-200*time.Millisecond)
+	secs := func(t time.Time) string { return strconv.FormatInt(t.Unix(), 10) }
+	decide := func(rec, live string) Decision {
+		in := iCall("body.ref", String, rec, live, rAt, fAt, iWin(rAt, fAt, 900*time.Millisecond), nil, nil)
+		return oWord(t, Decide(in), secs(rRead), secs(fRead))
+	}
+	rec := "evt-" + secs(rRead)
+	d := decide(rec, "evt-"+secs(fRead))
+	iClock(t, "a read of the clock after evt-", d)
+	if want := models.ClockWordOf(rec, len("evt-"), len(rec)); d.Clock != nil && d.Clock.Word != want {
+		t.Errorf("a read of the clock after evt-: word %+v; want %+v", d.Clock.Word, want)
+	}
+	d = decide(secs(rRead), secs(fRead))
+	iClock(t, "a read of the clock, the text whole", d)
+	if d.Clock != nil && !d.Clock.Word.IsZero() {
+		t.Errorf("a read of the clock, the text whole: word %+v; want none", d.Clock.Word)
+	}
+	d = decide("evt-"+secs(rRead)+"-7", "evt-"+secs(fRead)+"-8")
+	oRefused(t, "a read of the clock in evt-<seconds>-<n>, n changed too", d, "cannot-check")
+	if d.Refusal != nil && !strings.Contains(d.Refusal.Why, "the text around it changed too") {
+		t.Errorf("a read of the clock whose text changed around it: %q; want it to say so", d.Refusal.Why)
+	}
+}
+
 // An instant written percent-encoded ("10%3A00%3A00.123456Z", a link's
 // query in a body) is read as the instant it opens to, not as the plain
 // words "3A00" and "3A01" beside it: read in its call's window in both runs
-// it is a Clock, named through the step that opens it. Sent before the call
+// it is a read of the clock, named through the step that opens it, which no
+// replay checks in an opened text yet: refused as one keploy cannot check,
+// naming why. Sent before the call
 // at the test's earlier place, also encoded, where round F moved it while
 // the call sent a third value, it stopped following: a conflict at a fine
 // cut, refused.
@@ -529,7 +564,10 @@ func TestOutcomeAPercentEncodedInstantIsReadAsTheInstantItOpensTo(t *testing.T) 
 	in.PlaceOf = named
 	ds := Decide(in)
 	d := oWord(t, ds, iMicro(rRead), iMicro(fRead))
-	iClock(t, "a percent-encoded microsecond read in its window", d)
+	oRefused(t, "a percent-encoded microsecond read in its window", d, "cannot-check")
+	if d.Refusal != nil && !strings.Contains(d.Refusal.Why, "a part of the text keploy opened") {
+		t.Errorf("a percent-encoded read in its window: %q; want it to name the opened text", d.Refusal.Why)
+	}
 	if !strings.Contains(d.At.String(), "|pct") {
 		t.Errorf("a percent-encoded instant: At %q; want it named through the pct step", d.At)
 	}
