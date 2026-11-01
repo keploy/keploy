@@ -50,6 +50,11 @@ jobs:
       # utils or pkg/platform/http on a developer's machine pins no CPU.
       # This lane is where they run.
       KEPLOY_TEST_CPU_HOLD: "1"
+      # utils' tests of a stop's storage I/O read a file from storage, out of
+      # the page cache; where no read reaches storage (both test dirs in
+      # memory) they skip. This runner's disks take them: with this set they
+      # fail instead.
+      KEPLOY_TEST_STORAGE_IO_REQUIRED: "1"
       KEPLOY_TEST_MYSQL_ADDR: "127.0.0.1:3306"
       KEPLOY_TEST_MYSQL_USER: root
       KEPLOY_TEST_MYSQL_PASS: rootpass
@@ -218,6 +223,23 @@ jobs:
             grep -q -- "^--- PASS: ${leg#*:} " "$out" || { echo "${leg#*:} did not pass in $out"; failed=1; }
           done
           exit "$failed"
+
+      # internal/starvetest's hold gives the threads it let go their policy
+      # back, where the kernel lets it: from the idle policy, the runner user
+      # gets back only what RLIMIT_NICE allows (nothing, by default), so its
+      # run checks their CPUs alone. Run as root with
+      # KEPLOY_TEST_POLICY_RESTORE_REQUIRED=1, which fails it where the
+      # kernel would not, so the policy given back is checked on every PR.
+      - name: Hold row as root
+        if: success() || failure()
+        shell: bash
+        run: |
+          set -o pipefail
+          rm -f /tmp/starvetest.test
+          go test -c -o /tmp/starvetest.test ./internal/starvetest/
+          cd internal/starvetest
+          sudo env KEPLOY_TEST_CPU_HOLD=1 KEPLOY_TEST_POLICY_RESTORE_REQUIRED=1 /tmp/starvetest.test -test.count=1 -test.v -test.run '^TestAHoldLetsItsProcessesRunAsBefore$' | tee /tmp/starvetest-root.out
+          grep -q -- '^--- PASS: TestAHoldLetsItsProcessesRunAsBefore ' /tmp/starvetest-root.out
 
       # The hooks package's root tests skip in the run above, which is the
       # runner user's: TestTheHooksLoadOnThisKernel loads the agent's eBPF
