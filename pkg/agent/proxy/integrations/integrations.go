@@ -1143,7 +1143,7 @@ func ClaimPairing(db MockMemDb, m *models.Mock) bool {
 
 // LearnElsewhere is record's full round learning a recording's clock reads
 // from a call of the same shape made in another window than the
-// recording's, for learning only (founder, 2026-11-01). A timer fires
+// recording's, for learning only. A timer fires
 // wherever the clock puts it: its call, recorded in one test's window, lands
 // in another's in the full round, and the learn step, which pairs a call
 // only with the open test's recordings or the pool's, would teach its
@@ -1169,9 +1169,9 @@ type LearnElsewhere interface {
 	LearnElsewhereCandidates(kind models.Kind, keys []string) []*models.Mock
 	// LearnElsewhere keeps the clock reads a call learned onto m for
 	// record's full round to write onto the recording, as it writes what a
-	// consumed recording learned. Clock reads alone (the founder approved
-	// "carries its clock reads"): a leaf the call changed that is no read
-	// of the clock is never learned across windows as noise, a looser rule.
+	// consumed recording learned. Clock reads alone: a leaf the call changed
+	// that is no read of the clock is never learned across windows as noise,
+	// a looser rule.
 	// It consumes, claims and answers nothing: m stays its owner's, and no
 	// test's verdict reads it. One pairing per recording per round: false
 	// when a call of the round taught m already, and a parser then reads m

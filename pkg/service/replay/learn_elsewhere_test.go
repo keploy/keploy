@@ -143,6 +143,31 @@ func TestWhatAWindowWhoseRequestWasUnreadTaughtIsNotKept(t *testing.T) {
 	}
 }
 
+// What the learn step learned for a test whose request the agent did not read
+// is not kept (readLearning), but the test's own pairing happened: the state
+// stays, emptied, so what another window taught that recording is voided as
+// on any recording a call of the round consumed.
+func TestARecordingAnUnreadTestConsumedStillVoidsWhatAnotherWindowTaughtIt(t *testing.T) {
+	minute := models.ClockOffset{Min: -time.Minute, Max: -time.Minute, Res: time.Millisecond}
+	store := &addingStore{}
+	core, logs := observer.New(zap.InfoLevel)
+	r := &Replayer{logger: zap.New(core), mockDB: store}
+	r.requestsUnread.note("test-1", "v3.0.0")
+	kept, _, _ := r.readLearning("s", map[string]models.MockState{
+		"own-mock": {Name: "own-mock", Clocks: map[string]models.ClockOffset{"lease_at": minute}},
+	}, map[string][]string{"own-mock": {"test-1"}})
+	elsewhere := []models.MockState{{Name: "own-mock", Clocks: map[string]models.ClockOffset{"dirty_at": minute}, TaughtIn: []models.TeachingWindow{{Test: "test-2"}}}}
+	if err := r.persistLearned(context.Background(), "s", kept, elsewhere, map[string]string{"own-mock": "test-1"}, &models.Mapping{}); err != nil {
+		t.Fatal(err)
+	}
+	if own := store.persisted["own-mock"]; len(own.Clocks) != 0 {
+		t.Fatalf("the recording was written %+v; want nothing: its test's learning is not kept, and another window's is voided", own)
+	}
+	if void := logs.FilterMessageSnippet("voided what a call made in another window taught").AllUntimed(); len(void) != 1 || void[0].ContextMap()["mock"] != "own-mock" {
+		t.Fatalf("the voided lines %+v; want own-mock's", void)
+	}
+}
+
 // The record names a recording another window taught under the test whose
 // recording it is, by the set's recorded mapping: no test consumed it, so
 // the run's own mapping lists it nowhere, and it is never said as the set's

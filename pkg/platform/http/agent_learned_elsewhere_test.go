@@ -40,8 +40,12 @@ func (s *learnedSvc) LearnedElsewhere(ctx context.Context) ([]models.MockState, 
 // answers an empty list.
 func TestWhatTheAgentLearnedAcrossWindowsReachesTheCLI(t *testing.T) {
 	learned := []models.MockState{{
-		Name:     "mock-9",
-		Clocks:   map[string]models.ClockOffset{"claimed_at": {Min: -time.Minute, Max: -time.Minute, Res: time.Millisecond}},
+		Name: "mock-9",
+		Clocks: map[string]models.ClockOffset{"claimed_at": {
+			Min: -time.Minute, Max: time.Minute, Res: time.Millisecond, Zone: "+05:30", Layout: "rfc3339", AppZone: "Asia/Kolkata",
+			Since: models.SinceTestBegin, Word: models.ClockWordOf("stop-1793336961102639022", len("stop-"), len("stop-1793336961102639022")),
+			Why: "claimed_at reads the clock", Step: time.Hour,
+		}},
 		TaughtIn: []models.TeachingWindow{{Test: "test-2", At: time.Date(2026, 11, 1, 9, 0, 0, 0, time.UTC)}, {At: time.Date(2026, 11, 1, 9, 0, 2, 0, time.UTC)}},
 	}}
 	for _, c := range []struct {
