@@ -267,7 +267,7 @@ func TestUnderKeployMockAMissOnAnExchangeTheTestDoesNotOwnIsTheMappingEdit(t *te
 			t.Errorf("keploy mock's miss does not say %q: %q", want, r.NextSteps)
 		}
 	}
-	for _, never := range []string{"record again", "Likely, at replay"} {
+	for _, never := range []string{"record again", "Likely, at replay", "'keploy mock record'"} {
 		if strings.Contains(r.NextSteps, never) {
 			t.Errorf("keploy mock's miss says %q: %q", never, r.NextSteps)
 		}

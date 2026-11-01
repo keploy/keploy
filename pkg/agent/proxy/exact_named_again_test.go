@@ -12,9 +12,11 @@ import (
 // (FindNamedAgain): each is named for one miss at most, as it answers one
 // call at most, so such a call is one more than the recordings made
 // elsewhere hold. It names nothing until a miss was named, never a
-// recording no miss was named as, the open test's own, one a call consumed,
-// nor one of a staging the call was not made in; identical calls name the
-// first in recorded order. Nothing is claimed: asked twice, it names the same.
+// recording no miss was named as, the open test's own, one the call's read
+// held as its test's own (though that test ended before the miss was
+// decided), one a call consumed, nor one of a staging the call was not made
+// in; identical calls name the first in recorded order. Nothing is claimed:
+// asked twice, it names the same.
 func TestFindNamedAgainNamesTheRecordingAnEarlierMissWasNamedAs(t *testing.T) {
 	own := httpCall("own", 0, "/orders")
 	other := httpCall("other", time.Second, "/delete")
@@ -62,6 +64,14 @@ func TestFindNamedAgainNamesTheRecordingAnEarlierMissWasNamedAs(t *testing.T) {
 	mm.ServeExactTest("T1", []*models.Mock{own})
 	if got := again(byName("own")); got != "" {
 		t.Errorf("in T1 its own recording was named again: %q", got)
+	}
+	// A call T1's read held own for, decided after T1 ended: the view the
+	// call is decided in does not hold own, but the call's read did, so it
+	// is never named again there either.
+	held := mm.MarkCallRound()
+	mm.ServeExactPool("k", nil)
+	if got := mm.FindNamedAgain(models.HTTP, held, nil, byName("own")); got != "" {
+		t.Errorf("a call whose read held own as T1's own, decided after T1 ended, named it again: %q", got)
 	}
 
 	// Named, then consumed by its test: never named again after.
