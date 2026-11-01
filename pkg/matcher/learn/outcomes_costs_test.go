@@ -124,6 +124,21 @@ func TestOutcomeCostAnUnchangedPlaceHoldingOneShortWordIsChance(t *testing.T) {
 	query := []Earlier{GivenRequest(&models.TestRequest{Test: "test-1", Parts: []models.TestRequestPart{{Name: "url", Recorded: "http://h/book?shift=morning", Sent: "http://h/book?shift=morning"}}})}
 	costRefused(t, "morning to evening, the query sent morning unchanged: 33 bits (given_test.go:223)",
 		oWord(t, Decide(costCall(clockedDrifts(), p, "morning", "evening", costAt, query, nil, nil, nil)), "morning", "evening"), costConflict, "url.query.shift")
+
+	// Leaves an earlier exchange served unchanged, one holding the changed
+	// word (approved flip, learn_test.go:1816 "served leaves"): four hex
+	// letters there are chance, fresh; eight are refused, naming the leaf.
+	served := func(a, b string) []Earlier {
+		return []Earlier{{Mock: "mock-1", At: costAt.Add(-time.Second), Seen: []Seen{
+			{Side: Response, Leaf: Leaf{Path: "body.a", Noise: "body.a", Type: String, Value: a}, Live: a},
+			{Side: Response, Leaf: Leaf{Path: "body.b", Noise: "body.b", Type: String, Value: b}, Live: b},
+		}}}
+	}
+	costFresh(t, "aaa1 to bbb2 beside a leaf served aaa1 unchanged (learn_test.go:1816)",
+		oWord(t, Decide(costCall(clockedDrifts(), "body.ref", "x-aaa1-ccc3", "x-bbb2-ddd4", costAt, served("ccc3", "aaa1"), nil, nil, nil)), "aaa1", "bbb2"))
+	costRefused(t, "aaaaaaa1 to bbbbbbb2 beside a leaf served aaaaaaa1 unchanged",
+		oWord(t, Decide(costCall(clockedDrifts(), "body.ref", "x-aaaaaaa1-ccccccc3", "x-bbbbbbb2-ddddddd4", costAt, served("ccccccc3", "aaaaaaa1"), nil, nil, nil)), "aaaaaaa1", "bbbbbbb2"),
+		costConflict, "mock-1", "body.b")
 }
 
 // Flyway's execution_time recorded 50 beside a CREATE TABLE F sent byte for
