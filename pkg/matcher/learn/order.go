@@ -2,6 +2,7 @@ package learn
 
 import (
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -63,6 +64,7 @@ func decideWords(in Input, allScope bool) ([]Decision, []string) {
 			fields = append(fields, path)
 		}
 	}
+	dc.oneValue(out, fields)
 	if dc.x.unread() {
 		// A run past its budget: every change of the call is refused.
 		for i, d := range out {
@@ -72,6 +74,43 @@ func decideWords(in Input, allScope bool) ([]Decision, []string) {
 		}
 	}
 	return out, fields
+}
+
+// oneValue makes one new value the call sent at several places one
+// variable: bound at its first place, made anew each run, and used at the
+// others, each use naming the first in its line, so a replay that sends
+// the places apart misses. A value recorded at several places that round F
+// sent as two different new values is two reads keploy cannot tell apart:
+// each such place is refused, naming the first.
+func (dc *decider) oneValue(out []Decision, fields []string) {
+	first := map[string]int{}
+	name := func(i int) string {
+		if w := out[i].At.Word; w >= 0 {
+			return dc.in.Mock + " " + fields[i] + " word " + strconv.Itoa(w)
+		}
+		return dc.in.Mock + " " + fields[i]
+	}
+	for i, d := range out {
+		j, ok := first[d.Recorded]
+		switch {
+		case d.Outcome != OutcomeFresh:
+		case !ok:
+			first[d.Recorded] = i
+		case out[j].Outcome == OutcomeFresh && out[j].Full == d.Full:
+			out[i] = dc.learned(fields[i], d.At, d.At.Word, d.Recorded, d.Full, OutcomeValue,
+				"used the value bound at "+name(j)+", made anew in this call and sent at both places in both runs", []string{name(j)})
+			out[i].From = Place{Mock: dc.in.Mock, Side: Request, Path: fields[j], Live: d.Full, Whole: out[j].At.Word < 0}
+			out[i].FromAt = out[j].At
+		default:
+			why := "the recorded value stands at " + name(j) + " and " + name(i) + ", and round F sent " + strconv.Quote(out[j].Full) + " and " + strconv.Quote(d.Full) + " there: two values, and keploy cannot tell which one the recording's is"
+			for _, k := range []int{j, i} {
+				if out[k].Outcome == OutcomeFresh {
+					out[k] = dc.refuse(fields[k], out[k].At, out[k].At.Word, out[k].Recorded, out[k].Full, RefusalTwoSources, why,
+						[]string{name(j), name(i)}, dc.wordNoise(fields[k], out[k].At.Word))
+				}
+			}
+		}
+	}
 }
 
 // leaf decides the changed words of the drifted leaf at path.
