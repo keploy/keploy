@@ -1066,6 +1066,9 @@ func TestReaderEachFieldPathsOfStreamsAndNames(t *testing.T) {
 	}
 }
 
+// maxJSONDepth is encoding/json's limit on nesting, which its Token keeps.
+const maxJSONDepth = 10000
+
 // walkJSON reads text only where it is wholly JSON values: a value cut short,
 // followed by text, or nested deeper than encoding/json reads has no leaf, so
 // the field stays whole, as a body that is no JSON does. A field that holds

@@ -361,10 +361,6 @@ type fieldAt struct {
 	key  bool
 }
 
-// maxJSONDepth is encoding/json's own limit on nesting: a text nested deeper
-// is no JSON to it, nor to walkJSON, whose open containers it bounds.
-const maxJSONDepth = 10000
-
 // fieldViewCost is what building a field view holds at its peak, in times
 // its text: 5 to 14 on JSON answers, up to 38 on one long string of short words. A
 // view is built only where that much is left of the budget, so what it holds
@@ -462,14 +458,15 @@ func eachField(s string, fields []rawField, yield func(fieldAt, string)) {
 // as an array's element is (NDJSON, a streaming API's body). A repeated key's
 // values all stand at that key; a null is no leaf. It gives how many values
 // text holds, none where text is not wholly JSON values or nests deeper than
-// encoding/json reads.
+// encoding/json reads (its Token refuses past its depth, which bounds the
+// walk's recursion).
 func walkJSON(text string, several bool, yield func(path string, key bool, leaf string)) (values int) {
 	d := json.NewDecoder(strings.NewReader(text))
 	d.UseNumber()
 	var path []byte
 	index := func(i int) { path = append(strconv.AppendInt(append(path, '['), int64(i), 10), ']') }
-	var walk func(depth int) bool
-	walk = func(depth int) bool {
+	var walk func() bool
+	walk = func() bool {
 		tok, err := d.Token()
 		if err != nil {
 			return false
@@ -480,8 +477,8 @@ func walkJSON(text string, several bool, yield func(path string, key bool, leaf 
 		} else if tok != nil && !open {
 			yield(string(path), false, fmt.Sprint(tok))
 		}
-		if !open || depth > maxJSONDepth {
-			return !open
+		if !open {
+			return true
 		}
 		base := len(path)
 		for i := 0; d.More(); i++ {
@@ -497,7 +494,7 @@ func walkJSON(text string, several bool, yield func(path string, key bool, leaf 
 				path = append(path, name...)
 				yield(string(path), true, name)
 			}
-			if !walk(depth + 1) {
+			if !walk() {
 				return false
 			}
 			path = path[:base]
@@ -509,7 +506,7 @@ func walkJSON(text string, several bool, yield func(path string, key bool, leaf 
 		if path = path[:0]; several {
 			index(values)
 		}
-		if !walk(1) {
+		if !walk() {
 			return 0
 		}
 	}
