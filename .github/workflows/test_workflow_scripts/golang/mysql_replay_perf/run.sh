@@ -269,7 +269,7 @@ check_for_fatal() {
 parse_replay_seconds() {
     local log="$1"
     local first last s e
-    first="$(grep -a 'testcase id' "$log" 2>/dev/null | head -n 1 | sed -E 's/.*Keploy: ([^ ]+).*/\1/')"
+    first="$(grep -a 'testcase id' "$log" 2>/dev/null | sed -n 1p | sed -E 's/.*Keploy: ([^ ]+).*/\1/')"
     last="$(grep -a 'testcase id' "$log" 2>/dev/null | tail -n 1 | sed -E 's/.*Keploy: ([^ ]+).*/\1/')"
     if [ -n "$first" ] && [ -n "$last" ]; then
         s="$(date -d "$first" +%s.%N 2>/dev/null || true)"
@@ -388,7 +388,7 @@ check_recorded_tests
 # Assert the recording produced a mappings.yaml — otherwise replay silently falls
 # back to the full-corpus scan and the ratio below reflects the slow path, not the
 # path users get. Non-fatal (report-only lane), but loud so it can't mislead.
-MAPPINGS_FILE="$(find keploy -name mappings.yaml 2>/dev/null | head -1)"
+MAPPINGS_FILE="$(find keploy -name mappings.yaml 2>/dev/null | sed -n 1p)"
 if [ -n "$MAPPINGS_FILE" ]; then
     echo "OK: recording produced $MAPPINGS_FILE ($(wc -l < "$MAPPINGS_FILE") lines) — replay will narrow the pool per test."
 else

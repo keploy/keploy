@@ -84,12 +84,12 @@ else
 fi
 if grep -q 'ERROR' "$WORK/record.log"; then
   echo "::error::keploy record logged errors:"
-  grep 'ERROR' "$WORK/record.log" | head -20
+  grep 'ERROR' "$WORK/record.log" | sed -n 1,20p
   fail=1
 fi
 if grep -q 'WARNING: DATA RACE' "$WORK/record.log"; then
   echo "::error::keploy record reported a data race"
-  grep -A30 'WARNING: DATA RACE' "$WORK/record.log" | head -60
+  grep -A30 'WARNING: DATA RACE' "$WORK/record.log" | sed -n 1,60p
   fail=1
 fi
 exit $fail

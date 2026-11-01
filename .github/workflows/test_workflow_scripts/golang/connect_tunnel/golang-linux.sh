@@ -566,7 +566,7 @@ if [ "$both_build" = true ]; then
         [ -e "$report_file" ] || { echo "No report files found!"; all_passed=false; break; }
 
         test_set_name=$(basename "$report_file" -report.yaml)
-        test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
+        test_status=$(grep 'status:' "$report_file" | sed -n 1p | awk '{print $2}')
 
         echo "Status for ${test_set_name}: $test_status"
         if [ "$test_status" != "PASSED" ]; then

@@ -279,7 +279,7 @@ elif [ "$afterdns" != "50" ]; then
   fail=1
 elif grep -q 'Untracked connection' "$WORK/record.log"; then
   echo "::error::keploy record could not route a connection after the TCP DNS ones:"
-  grep 'Untracked connection' "$WORK/record.log" | head -5
+  grep 'Untracked connection' "$WORK/record.log" | sed -n 1,5p
   fail=1
 else
   echo "ok: $tcpdns TCP DNS connections, then 50/50 calls answered and routed"
@@ -307,14 +307,14 @@ else
 fi
 if grep -q 'ERROR' "$WORK/record.log"; then
   echo "::error::keploy record logged errors:"
-  grep 'ERROR' "$WORK/record.log" | head -20
+  grep 'ERROR' "$WORK/record.log" | sed -n 1,20p
   fail=1
 fi
 # The amd64 PR build is race-enabled: a race in the hold is a failure even when the
 # application's results look right.
 if grep -q 'WARNING: DATA RACE' "$WORK/record.log"; then
   echo "::error::keploy record reported a data race"
-  grep -A30 'WARNING: DATA RACE' "$WORK/record.log" | head -60
+  grep -A30 'WARNING: DATA RACE' "$WORK/record.log" | sed -n 1,60p
   fail=1
 fi
 exit $fail

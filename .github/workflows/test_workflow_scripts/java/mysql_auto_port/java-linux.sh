@@ -499,7 +499,7 @@ if ! grep "mysql probe result" test_logs_drift.txt | grep "\"destPort\": ${DRIFT
   tail -n 120 test_logs_drift.txt
   exit 1
 fi
-grep "mysql probe result" test_logs_drift.txt | grep "\"destPort\": ${DRIFT_PORT}" | head -n 3
+grep "mysql probe result" test_logs_drift.txt | grep "\"destPort\": ${DRIFT_PORT}" | sed -n 1,3p
 endsec
 
 check_reports "drifted endpoint :${DRIFT_PORT}" "$DRIFT_RC" "$PRE_DRIFT_RUN_DIR"
