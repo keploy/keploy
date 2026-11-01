@@ -70,6 +70,8 @@ func (processClock) After(d time.Duration) (<-chan time.Time, func() bool) {
 	return t.C, t.Stop
 }
 
+func (processClock) owed() time.Duration { return proc.owed() }
+
 // proc samples the process while it is held (Process).
 var proc = &sampler{src: realSource{}, tick: Tick}
 
@@ -92,6 +94,19 @@ var proc = &sampler{src: realSource{}, tick: Tick}
 // whole interval when it has a CPU limit: CFS hands out the quota in per-CPU
 // slices, so the sampler can wake on time while another thread is throttled.
 // Hence the scaling.
+//
+// Nor does it show that on an overloaded host: it shows that the sampler ran.
+// The sampler sleeps between samples, and the kernel runs a thread that
+// slept soon after it wakes, while a thread that has been working waits its
+// turn behind the other work on its CPU. A process that used 27 ms of CPU in
+// 1.15 s, a thread of it queued for 167 ms, had 13 samples on time, and they
+// counted 146 ms: its parser, working through a chunk, was abandoned as gone.
+// So on-time samples pay for the time a thread of the process waited for a
+// CPU (readWaits): the most any one thread waited, as what a stall waits on
+// is one goroutine, on one thread at a time. Late samples have paid already:
+// they count what the process ran. A stall about to be judged reads the waits
+// first (Meter.Expired). What that cannot see is the wait in progress, which
+// the kernel adds up when it ends: one turn behind the work on a CPU.
 type sampler struct {
 	src  source
 	tick time.Duration
@@ -105,13 +120,26 @@ type sampler struct {
 	lastWall time.Time
 	lastCPU  time.Duration
 	cpuOK    bool
+	// The last read of the threads' waits (readWaits), what on-time samples
+	// counted that no wait has taken, and what they have yet to pay for.
+	waitWall time.Time
+	onTime   time.Duration
+	waitOwed time.Duration
 }
 
+// heldEvery is how often the sampler reads how long the process's threads
+// waited for a CPU: a read opens a file per thread, so not at every sample. A
+// stall about to be judged does not wait for it (Meter.Expired).
+const heldEvery = time.Second
+
 // source is what the sampler reads: the wall clock, the process's CPU time,
-// and its CPU limit.
+// its CPU limit, and how long its threads waited for a CPU.
 type source interface {
 	now() (wall time.Time, cpu time.Duration, ok bool)
 	cpuLimit() (cpus float64, ok bool)
+	// heldOff is the most any one thread of the process waited for a CPU
+	// since the last call, 0 where that cannot be read.
+	heldOff() time.Duration
 }
 
 // acquire adds a user, starting the sampling with the first, and returns the
@@ -121,6 +149,15 @@ func (s *sampler) acquire() func() {
 	s.users++
 	if s.users == 1 {
 		s.lastWall, s.lastCPU, s.cpuOK = s.src.now()
+		// What the threads waited while nobody held the clock is not owed,
+		// and what they waited a moment ago hardly matters: a stall of one
+		// burst of work after another comes here every burst, and pays for
+		// no read of the threads unless heldEvery has passed.
+		if s.lastWall.Sub(s.waitWall) >= heldEvery {
+			s.src.heldOff()
+			s.waitWall = s.lastWall
+		}
+		s.onTime, s.waitOwed = 0, 0
 		s.stop, s.done = make(chan struct{}), make(chan struct{})
 		go s.run(s.stop, s.done)
 	}
@@ -171,8 +208,45 @@ func (s *sampler) sample() {
 	if l, ok := s.src.cpuLimit(); ok && l > 0 && l < 1 {
 		share = l
 	}
-	s.ran.Add(int64(accrue(max(wall.Sub(s.lastWall), 0), cpu-s.lastCPU, s.cpuOK && cpuOK, s.tick, share)))
+	iv, ok := max(wall.Sub(s.lastWall), 0), s.cpuOK && cpuOK
+	got := accrue(iv, cpu-s.lastCPU, ok, s.tick, share)
+	if !late(iv, ok, s.tick) {
+		s.onTime += got
+		pay := min(got, s.waitOwed)
+		s.waitOwed -= pay
+		got -= pay
+	}
+	s.ran.Add(int64(got))
 	s.lastWall, s.lastCPU, s.cpuOK = wall, cpu, cpuOK
+	if wall.Sub(s.waitWall) >= heldEvery {
+		s.readWaits()
+	}
+}
+
+// readWaits adds to what on-time samples owe the time the process's threads
+// waited for a CPU since the last read. A wait is only owed out of what
+// on-time samples counted and no wait has yet taken, of the last heldEvery:
+// the rest of it was never counted, so what is owed stays within a read's
+// worth of time, and a stall that is real goes on counting when the host
+// quietens. Called with mu held.
+func (s *sampler) readWaits() {
+	took := min(s.src.heldOff(), s.onTime)
+	s.waitOwed += took
+	s.onTime, s.waitWall = min(s.onTime-took, heldEvery), s.lastWall
+}
+
+// owed reads the waits, and says what on-time samples owe as of now: time on
+// the clock that the process could not run. It reads them only if a sample
+// came since the last read: the clock has not moved since then, and stalls
+// at their verdict on every connection of a starved process must not read
+// every thread at each of their looks, with the CPU it lacks.
+func (s *sampler) owed() time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.lastWall.After(s.waitWall) {
+		s.readWaits()
+	}
+	return s.waitOwed
 }
 
 // accrue is what a process could run in an interval iv between two samples
@@ -180,11 +254,16 @@ func (s *sampler) sample() {
 // had), at share of a CPU at most (see sampler).
 func accrue(iv, cpu time.Duration, cpuOK bool, tick time.Duration, share float64) time.Duration {
 	could := time.Duration(float64(iv) * share)
-	if iv <= 2*tick || !cpuOK {
-		// On time (or no CPU clock to tell).
+	if !late(iv, cpuOK, tick) {
 		return could
 	}
 	return min(could, max(cpu, 0))
+}
+
+// late says whether a sample shows the process was held off the CPU: it came
+// more than two ticks after the last, and there is a CPU clock to tell by.
+func late(iv time.Duration, cpuOK bool, tick time.Duration) bool {
+	return iv > 2*tick && cpuOK
 }
 
 // realSource is the process's own clocks.
@@ -194,6 +273,11 @@ func (realSource) now() (time.Time, time.Duration, bool) {
 	cpu, ok := ProcessCPUTime()
 	return time.Now(), cpu, ok
 }
+
+// procWaits is the process's threads' waits; the sampler's lock guards it.
+var procWaits threadWaits
+
+func (realSource) heldOff() time.Duration { return procWaits.longest() }
 
 // cpuLimit is ProcessCPULimit, read at most once per cpuLimitRefresh: reading
 // the cgroup files at every sample would cost a starved process the CPU it
@@ -273,8 +357,15 @@ func (m *Meter) Stalled() time.Duration {
 }
 
 // Expired reports whether the process has had the whole grace to run since
-// the stall began.
-func (m *Meter) Expired() bool { return m.Stalled() >= m.grace }
+// the stall began. A clock that knows of time on it the process could not run
+// (the process clock: sampler.owed) is asked at the verdict, not before it.
+func (m *Meter) Expired() bool {
+	if m.Stalled() < m.grace {
+		return false
+	}
+	c, ok := m.clk.(interface{ owed() time.Duration })
+	return !ok || m.Stalled()-c.owed() >= m.grace
+}
 
 // Grace is the stall's bound.
 func (m *Meter) Grace() time.Duration { return m.grace }
