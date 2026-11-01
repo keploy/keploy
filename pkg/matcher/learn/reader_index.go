@@ -355,23 +355,36 @@ func heldBy(s, w string, word func(byte) bool) bool {
 }
 
 // holdsToken reports whether the text holds tok whole, as a token of its
-// kind: an idByte token (any declared form), or a base64 run, no byte of
-// the base64 alphabets or its padding on either side; read as holdsWord.
+// kind: an idByte token (any declared form), or a base64 run that stands
+// whole (wholeB64Spans, the rule tokenSpans cuts it by); read as holdsWord.
 func (t *readerText) holdsToken(kind tokenKind, tok string) (held, read bool) {
 	if kind == tokenID {
 		return t.wordIn(tok, len(readings)-1)
 	}
-	// A base64 token (tokenSpans cuts it as nextB64Run does) is held
-	// exactly where it is one of the text's whole runs.
 	runs, ok := t.runsOf()
 	return runs[tok], ok
 }
 
-// wholeB64Runs are s's base64 runs whole, each with all the padding after it,
-// that no byte of the base64 alphabets follows: the tokens holdsToken finds
-// in s, no byte of the alphabets or padding on either side.
+// wholeB64Runs are s's base64 runs that stand whole (wholeB64Spans): the
+// tokens holdsToken finds in s.
 func wholeB64Runs(s string) map[string]bool {
 	runs := map[string]bool{}
+	for _, sp := range wholeB64Spans(s) {
+		runs[s[sp[0]:sp[1]]] = true
+	}
+	return runs
+}
+
+// wholeB64Spans are s's base64 runs that stand whole, as s[start:end] each,
+// in order: a run of the base64 alphabets, standard or URL-safe, that no
+// byte of them comes right before, with all the padding ('=') after it,
+// that no byte of them follows. It is the one rule the reader cuts a base64
+// token by (tokenSpans) and finds one in a text by (holdsToken), so every
+// token it cuts is held by its own text: a run a byte of the alphabets
+// follows past its padding (`tok=` of `tok=ab+cd/ef==`) is none, and its
+// words are judged one by one.
+func wholeB64Spans(s string) [][2]int {
+	var out [][2]int
 	for i := 0; i < len(s); {
 		if !isB64Byte(s[i]) {
 			i++
@@ -386,11 +399,11 @@ func wholeB64Runs(s string) map[string]bool {
 			k++
 		}
 		if k == len(s) || !isB64Byte(s[k]) {
-			runs[s[i:k]] = true
+			out = append(out, [2]int{i, k})
 		}
 		i = k
 	}
-	return runs
+	return out
 }
 
 // holdsMoment reports whether an instant of the text names m by moment

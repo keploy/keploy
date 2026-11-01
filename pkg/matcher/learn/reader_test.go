@@ -506,3 +506,35 @@ func TestReaderIndexKeepsOnTheSetsOneBudget(t *testing.T) {
 		t.Fatalf("the set's budget has 1 KiB left; the index keeps %d bytes and the set counts %d of %d: want nothing kept past the set's one budget", y.used, full.set.budget.used, full.set.budget.limit)
 	}
 }
+
+// The reader cuts a base64 token (tokenSpans) by the one rule it finds a
+// token in a text by (holdsToken): a run of the base64 alphabets with all
+// the padding after it, that no byte of the alphabets follows. So every
+// base64 token it lists is held whole by its own text, and a run that a
+// byte of the alphabets follows past its padding (`tok=` of
+// `tok=ab+cd/ef==`) is no token: its words are judged one by one.
+func TestReaderCutsABase64TokenAsItFindsOne(t *testing.T) {
+	for _, c := range []struct {
+		text string
+		want []string
+	}{
+		{"abc==def", []string{"def"}},
+		{"x=abc+/def==;y", []string{"abc+/def==", "y"}},
+		{"QUJD=======x", []string{"x"}},
+		{"tok=ab+cd/ef==", []string{"ab+cd/ef=="}},
+		{"a-b_c", []string{"a-b_c"}},
+	} {
+		var got []string
+		x := newReaderIndex(nil).text(c.text)
+		for _, sp := range tokenSpans(c.text, instantSpans(c.text)).b64 {
+			tok := c.text[sp[0]:sp[1]]
+			got = append(got, tok)
+			if held, read := x.holdsToken(tokenB64, tok); !held || !read {
+				t.Errorf("%q: the reader lists the base64 token %q, which its own text does not hold whole (held %v read %v)", c.text, tok, held, read)
+			}
+		}
+		if fmt.Sprint(got) != fmt.Sprint(c.want) {
+			t.Errorf("%q: base64 tokens %q, want %q", c.text, got, c.want)
+		}
+	}
+}

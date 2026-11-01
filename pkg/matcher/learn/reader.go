@@ -26,12 +26,12 @@ import (
 //     there, or is fresh or refused (the caller decides). A stretch only
 //     one run has ("a,b" to "a,b,c") is a changed shape.
 //   - A whole token is main's idByte token (classify.go), or a base64 run
-//     (readings.go's nextB64Run) outside the text's instants: a zone's sign
-//     glued to an instant's seconds ("13+05" of "…16:20:13+05:30") is the
-//     instant's, never a run. The reader lists the whole tokens around each
-//     changed word (and around a stretch) in both runs; one binds as one
-//     value only where one place holds it whole in each run (the index's
-//     holdsToken).
+//     that stands whole (wholeB64Spans) outside the text's instants: a
+//     zone's sign glued to an instant's seconds ("13+05" of
+//     "…16:20:13+05:30") is the instant's, never a run. The reader lists
+//     the whole tokens around each changed word (and around a stretch) in
+//     both runs; one binds as one value only where one place holds it
+//     whole in each run (the index's holdsToken).
 //   - Every changed word carries its bits (wordBits) and, where it is part
 //     of an instant in either run, that instant read whole
 //     (reader_instant.go).
@@ -305,7 +305,7 @@ func bytesOf(spans [][2]int, r [2]int) [2]int { return [2]int{spans[r[0]][0], sp
 type wholeTokenSpans struct{ id, b64 [][2]int }
 
 // tokenSpans are s's whole tokens: its idByte runs, and its base64 runs
-// (nextB64Run) outside its instants (spans).
+// that stand whole (wholeB64Spans) outside its instants (spans).
 func tokenSpans(s string, spans []instant) wholeTokenSpans {
 	var t wholeTokenSpans
 	for i := 0; i < len(s); {
@@ -322,13 +322,8 @@ func tokenSpans(s string, spans []instant) wholeTokenSpans {
 	}
 	from := 0
 	gap := func(to int) {
-		for at := from; at < to; {
-			start, end, ok := nextB64Run(s[:to], at)
-			if !ok {
-				return
-			}
-			t.b64 = append(t.b64, [2]int{start, end})
-			at = end
+		for _, sp := range wholeB64Spans(s[from:to]) {
+			t.b64 = append(t.b64, [2]int{from + sp[0], from + sp[1]})
 		}
 	}
 	for _, in := range spans {
