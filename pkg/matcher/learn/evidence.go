@@ -57,8 +57,13 @@ type evPlace struct {
 	state placeState
 	why   string
 	// fUnstated: the adapter does not state what round F's answer held
-	// here, so its F side shows and disproves nothing.
-	fUnstated bool
+	// here, so its F side shows and disproves nothing. fMay: round F served
+	// it before the call and no view of what it gave there is stated or
+	// read, so it may hold round F's new word: unknown for every word.
+	// views: the texts of the views round F's serves gave where they
+	// differ (Raw.ServedChanged); one that holds F's word leaves it unknown.
+	fUnstated, fMay bool
+	views           []string
 }
 
 // wordEvidence is what one place shows of a changed word.
@@ -119,17 +124,27 @@ func placesOf(in Input) (ps []evPlace, unread string) {
 		// F's text there: the view F served, or the recording where F
 		// served it as recorded; else not stated, and it shows nothing.
 		live, unstated := r.Text(), true
+		var views []string
 		switch {
 		case r.live != nil:
 			live, unstated = r.live.Text(), false
 		case r.AsRecorded():
 			unstated = false
+		case r.unseen:
+			for _, v := range r.views {
+				views = append(views, v.Text())
+			}
 		}
-		startUp, other, scope := inScope(in, r.Mock(), r.beforeTest && !r.olderTest, r.olderTest)
+		fUnstated := unstated || !in.Caps.FViewStated
+		// Another test's recording, or one recorded after the call
+		// (OfAnotherTest), is outside the call's scope.
+		other := r.olderTest || r.elsewhere
+		startUp, other, scope := inScope(in, r.Mock(), r.beforeTest && !other, other)
 		ps = append(ps, evPlace{
 			name: r.Mock(), mock: r.Mock(), rec: r.Text(), live: live, side: Response,
 			startUp: startUp, otherTest: other, scope: scope,
-			at: r.at, state: st, why: why, fUnstated: unstated || !in.Caps.FViewStated, raw: i + 1,
+			at: r.at, state: st, why: why, fUnstated: fUnstated, raw: i + 1,
+			fMay: fUnstated && len(views) == 0 && r.served && !r.servedAfter, views: views,
 		})
 	}
 	return ps, unread
@@ -270,8 +285,13 @@ func evidenceAt(x *readerIndex, p evPlace, r, f string) (ev wordEvidence, read b
 		return evNone, false
 	}
 	if p.fUnstated {
-		if hr || hf {
+		if hr || hf || p.fMay {
 			return evUnknown, true
+		}
+		for _, v := range p.views {
+			if h, _ := x.holdsWord(v, f); h {
+				return evUnknown, true
+			}
 		}
 		return evNone, true
 	}
@@ -360,4 +380,126 @@ func nothingNew(rec, live string) bool {
 		}
 	}
 	return true
+}
+
+// The recordings round F gave the application before the call that are
+// outside its scope: another test's, or one recorded after the call
+// (Raw.OfAnotherTest), and those the set read once (Input.Given). keploy
+// keeps their answers' words, not their text, so each is judged by its
+// words, as the evidence table judges a place. In Mode Own each lies
+// outside the call's scope: a word it shows is refused naming the edit.
+
+// setUnread names the first of the set's recordings keploy could not read
+// back ("" where it read every one, or the call has none): every change of
+// the call is then refused.
+func setUnread(in Input) ([]GivenPlaces, string) {
+	if in.Given == nil {
+		return nil, ""
+	}
+	set, err := in.Given()
+	if err != nil {
+		return nil, "the recordings round F gave earlier in the test set: " + err.Error()
+	}
+	for _, g := range set {
+		if !g.read {
+			return nil, g.mock + ", a recording round F gave earlier in the test set"
+		}
+	}
+	return set, ""
+}
+
+// setWords are the words of each recording outside the call's scope that
+// round F gave before it, read once for the call, as main's word rule reads
+// them (offsetPlacesOf: the set's and raw's, each recording once).
+func (dc *decider) setWords() []givenWords {
+	if !dc.swDone {
+		dc.swDone = true
+		elsewhere := len(dc.set) > 0
+		for _, r := range dc.in.Raw {
+			elsewhere = elsewhere || r.elsewhere
+		}
+		if elsewhere {
+			d := dc.in.Drifts
+			if d == nil {
+				d = NewDriftCache()
+			}
+			dc.sw = d.offsetPlacesOf(dc.in.At, dc.in.Earlier, dc.in.Raw, dc.set).words
+		}
+	}
+	return dc.sw
+}
+
+// setEvidence is what g shows of the changed word r (R) to f (F), and
+// whether round F changed it: the evidence table, read by words. Its
+// recorded words count for R only where it was recorded before the call.
+func setEvidence(g givenWords, r, f string, at time.Time) (ev wordEvidence, changed bool) {
+	hr := listsHold(g.answerLists, r)
+	before := !g.at.After(at)
+	switch {
+	case g.unstated || g.unread:
+		// Round F served it and keploy cannot tell what it gave there.
+		return evUnknown, true
+	case len(g.views) > 0:
+		for _, v := range g.views {
+			if listsHold(v, f) {
+				return evUnknown, true
+			}
+		}
+		if hr {
+			return evUnknown, true
+		}
+		return evNone, true
+	case len(g.view.words) > 0:
+		hf := listsHold(g.view, f)
+		switch {
+		case !hr && !hf:
+			return evNone, true
+		case !before || !viewNew(g):
+			return evUnknown, true
+		case hr && hf:
+			return evShown, true
+		case hr:
+			return evDisproven, true
+		}
+		return evUnknown, true
+	case len(g.same) > 0:
+		// Served as recorded: unchanged.
+		hf := listsHold(g.answerLists, f)
+		switch {
+		case !hr && !hf:
+			return evNone, false
+		case !before || hr && hf:
+			return evUnknown, false
+		}
+		return evDisproven, false
+	}
+	// Not served: round F gave nothing there (B4: never a source).
+	if hr {
+		return evUnknown, false
+	}
+	return evNone, false
+}
+
+// listsHold reports whether l holds the word t in any reading, stamps read
+// as any text (the side that finds more, so fails closed).
+func listsHold(l answerLists, t string) bool {
+	for i := 0; i < len(l.words) || i < len(l.stamped); i++ {
+		if l.holds(i, t, true) {
+			return true
+		}
+	}
+	return false
+}
+
+// viewNew reports whether round F's view of g holds a word its recording
+// does not: F gave something new there.
+func viewNew(g givenWords) bool {
+	for i, list := range g.view.words {
+		for _, t := range list {
+			if !g.answerLists.holds(i, t, true) {
+				return true
+			}
+		}
+	}
+	return false
 }

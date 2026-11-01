@@ -1,6 +1,7 @@
 package learn
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -144,4 +145,65 @@ func TestOutcomeAWordOnlyFsPlaceTookIsRefused(t *testing.T) {
 	gave := oServed("mock-24", false, false, Response, oText("body.port", "5150"), "16", time.Millisecond)
 	d := oWord(t, Decide(oInput("body.slot", "slot-82", "slot-16", gave, nil)), "82", "16")
 	oRefused(t, `"82" to "16" beside 5150 served as 16`, d, "unknown", "mock-24")
+}
+
+// A recording another test's call, or a call recorded after this one, was
+// answered with (round F served it before the call; Raw.OfAnotherTest, or
+// one the set read once: Input.Given) is a place outside the call's scope.
+// A word copied from it is refused, naming the mappings.yaml edit: never
+// bound to it and never made anew each run. Where keploy cannot read the
+// set's recordings back, every change of the call is refused.
+func TestOutcomeAWordFromAnotherTestsRecordingIsRefusedNamingTheEdit(t *testing.T) {
+	other := func() Raw {
+		x := oAnswer("mock-31", 2*time.Second, "rk7302").ServedAs(3)
+		return x.ServedLive(oAnswer("mock-31", 2*time.Second, "fq9915"))
+	}
+	const rec, live = "job rk7302 ready", "job fq9915 ready"
+	in := oInput("body.note", rec, live, nil, []Raw{other().OfAnotherTest()})
+	oRefused(t, "a word copied from another test's recording", oWord(t, Decide(in), "rk7302", "fq9915"), "another-scope", "mock-31")
+
+	in = oInput("body.note", rec, live, nil, nil)
+	in.Given = func() ([]GivenPlaces, error) { return []GivenPlaces{PlacesOf(other())}, nil }
+	oRefused(t, "a word copied from a recording the set gave before the call", oWord(t, Decide(in), "rk7302", "fq9915"), "another-scope", "mock-31")
+
+	in.Given = func() ([]GivenPlaces, error) { return nil, errors.New("mock-31 is gone") }
+	oRefused(t, "the set's recordings unread", oWord(t, Decide(in), "rk7302", "fq9915"), "unread", "mock-31 is gone")
+
+	// A word no recording of the set holds is made anew each run.
+	in.Given = func() ([]GivenPlaces, error) { return []GivenPlaces{PlacesOf(other())}, nil }
+	in.Rec, in.Live = oShape("body.note", "job ab1234 ready"), oShape("body.note", "job cd5678 ready")
+	if d := oWord(t, Decide(in), "ab1234", "cd5678"); d.Outcome != OutcomeFresh {
+		t.Errorf("a word no recording of the set holds: %s; want fresh", oDescribe([]Decision{d}))
+	}
+}
+
+// A recording of the call's own scope round F served before the call,
+// whose adapter did not say what F gave there (no view stated, not as
+// recorded), may hold round F's new word: unknown, refused, never fresh
+// (main refuses it too). So is one F served changed where one of its views
+// holds that word. Not served, served as recorded, or served with views
+// that hold neither word, it shows nothing, and the word is made anew.
+func TestOutcomeARecordingFServedWithNoViewStatedLeavesTheWordUnknown(t *testing.T) {
+	mk := func() Raw { return oAnswer("mock-32", time.Second, "ok") }
+	view := func(w string) Raw { return oAnswer("mock-32", time.Second, w) }
+	for _, c := range []struct {
+		what    string
+		x       Raw
+		refused bool
+	}{
+		{"served, no view stated", mk().ServedAs(3), true},
+		{"served changed, one view holds F's word", mk().ServedAs(3).ServedChanged(view("ok"), view("fq9915")), true},
+		{"served changed, a view keploy could not read", mk().ServedAs(3).ServedChanged(), true},
+		{"not served", mk().WithServed(false), false},
+		{"served as recorded", mk().ServedAs(3).ServedAsRecorded(), false},
+		{"served changed, no view holds either word", mk().ServedAs(3).ServedChanged(view("ok"), view("no")), false},
+	} {
+		d := oWord(t, Decide(oInput("body.note", "job rk7302 ready", "job fq9915 ready", nil, []Raw{c.x})), "rk7302", "fq9915")
+		switch {
+		case c.refused:
+			oRefused(t, c.what, d, "unknown", "mock-32")
+		case d.Outcome != OutcomeFresh:
+			t.Errorf("%s: %s; want fresh", c.what, oDescribe([]Decision{d}))
+		}
+	}
 }
