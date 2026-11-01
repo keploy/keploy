@@ -1173,8 +1173,10 @@ type LearnElsewhere interface {
 	// "carries its clock reads"): a leaf the call changed that is no read
 	// of the clock is never learned across windows as noise, a looser rule.
 	// It consumes, claims and answers nothing: m stays its owner's, and no
-	// test's verdict reads it. False when the session does not learn, or m
-	// is no candidate.
+	// test's verdict reads it. One pairing per recording per round: false
+	// when a call of the round taught m already, and a parser then reads m
+	// as spent (a tie moves to the next recording). False too when the
+	// session does not learn, or m is no candidate.
 	LearnElsewhere(m *models.Mock, clocks map[string]models.ClockOffset) bool
 }
 
