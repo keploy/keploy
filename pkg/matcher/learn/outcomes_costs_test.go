@@ -1,7 +1,10 @@
 package learn
 
 import (
+	"fmt"
+	"runtime"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -354,4 +357,44 @@ func TestOutcomeCostAGivenIsReadByItsText(t *testing.T) {
 	beside := alone
 	beside.Earlier = []Earlier{TestGiven("test o::TestApps", "given:nonce", nonceRec, nonceFull)}
 	iClock(t, "the app's clock read beside a given nonce", oWord(t, Decide(beside), created, fcreated))
+}
+
+// The places a call reads keep each earlier recording, never its text: a
+// text is read only when a question needs it, so a call that asks about
+// many large recordings holds one at a time. Kept as strings, 64
+// recordings of 1 MiB held 64 MiB for the whole call, past the set's
+// bounded store of payloads.
+func TestOutcomeCostThePlacesKeepNoRecordingsText(t *testing.T) {
+	defer func(b int64) { bodyBudget = b }(bodyBudget)
+	bodyBudget = 1 << 20
+	const n, size = 64, 1 << 20
+	mocks := make([]*models.Mock, n)
+	for i := range mocks {
+		mocks[i] = getAnswer(fmt.Sprintf("mock-%d", i), "http://api/items/"+strconv.Itoa(i), `{"note":"`+fmt.Sprintf("%07d ", i)+strings.Repeat("a", size)+`"}`, eRecAt.Add(-time.Duration(n-i)*time.Second))
+	}
+	tr := NewTracker()
+	tr.NewSet()
+	tr.Begin()
+	defer tr.End()
+	dc := tr.Drifts()
+	in := costCall(dc, "bind.$8", "0000001", "0000002", eRecAt, nil, lazyOf(dc, mocks), nil, nil)
+	heap := func() uint64 {
+		runtime.GC()
+		var st runtime.MemStats
+		runtime.ReadMemStats(&st)
+		return st.HeapAlloc
+	}
+	before := heap()
+	ps, unread := placesOf(in)
+	grew := int64(heap()) - int64(before)
+	runtime.KeepAlive(ps)
+	if unread != "" || len(ps) != n {
+		t.Fatalf("%d places, unread %q: want %d read places", len(ps), unread, n)
+	}
+	if grew > 8<<20 {
+		t.Errorf("the call's places hold %d MiB after %d recordings of 1 MiB were read: they keep the texts", grew>>20, n)
+	}
+	if got := ps[1].recText(); !strings.Contains(got, "0000001 ") {
+		t.Errorf("a place's text, read when asked, is not its recording's (%d bytes)", len(got))
+	}
 }

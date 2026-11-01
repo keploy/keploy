@@ -131,8 +131,8 @@ func (dc *decider) unpaired(path string, at variables.Address, rec, live string,
 	var held []evPlace
 	for _, p := range dc.ps {
 		for _, w := range rd.Words {
-			hr := w.Rec != "" && evHolds(dc.x, p.rec, w.Rec)
-			hl := w.Live != "" && evHolds(dc.x, p.live, w.Live)
+			hr := w.Rec != "" && evHolds(dc.x, p.recText(), w.Rec)
+			hl := w.Live != "" && evHolds(dc.x, p.liveText(), w.Live)
 			if hr || hl {
 				held = append(held, p)
 				break
@@ -277,12 +277,12 @@ func (dc *decider) atWord(path string, at variables.Address, n int, w readWord, 
 // tokenShown reports whether p shows a whole token around w: one place
 // holds that whole token in each run.
 func tokenShown(x *readerIndex, p evPlace, w readWord) bool {
-	if p.state != stateBefore || p.rec == p.live {
+	if p.state != stateBefore || p.same() {
 		return false
 	}
 	for _, t := range w.Tokens {
-		hr, _ := x.holdsToken(p.rec, t.Kind, t.Rec)
-		hl, _ := x.holdsToken(p.live, t.Kind, t.Live)
+		hr, _ := x.holdsToken(p.recText(), t.Kind, t.Rec)
+		hl, _ := x.holdsToken(p.liveText(), t.Kind, t.Live)
 		if hr && hl {
 			return true
 		}
@@ -364,13 +364,13 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	r, l := c.r, c.l
 	var hs []instantHold
 	for _, p := range dc.ps {
-		hr, fr, okR := dc.holds(p, p.rec, r, c.rm, c.byText)
-		hl, fl, okL := dc.holds(p, p.live, l, c.lm, c.byText)
+		hr, fr, okR := dc.holds(p, p.recText(), r, c.rm, c.byText)
+		hl, fl, okL := dc.holds(p, p.liveText(), l, c.lm, c.byText)
 		if !okR || !okL {
 			return dc.refuse(path, at, n, r, l, RefusalUnread, "keploy could not read the run's values past their budget, which came before this call", nil, Edit{Kind: EditReRecord}, dc.fieldNoise(path))
 		}
 		if hr || hl {
-			hs = append(hs, instantHold{p: p, hr: hr, hl: hl, fr: fr, fl: fl, rank: min(dc.rank(p.rec, r, c.rm, hr), dc.rank(p.live, l, c.lm, hl))})
+			hs = append(hs, instantHold{p: p, hr: hr, hl: hl, fr: fr, fl: fl, rank: min(dc.rank(p.recText(), r, c.rm, hr), dc.rank(p.liveText(), l, c.lm, hl))})
 		}
 	}
 	// A place that holds a value by its exact text is named before one
@@ -408,9 +408,9 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 			continue
 		}
 		switch {
-		case before(p) && h.hl && !(h.hr && p.rec != p.live):
+		case before(p) && h.hl && !(h.hr && !p.same()):
 			why := "round F's moment stands unchanged in " + p.name
-			if p.rec != p.live {
+			if !p.same() {
 				why = "round F's moment stands in " + p.name + ", which does not show it"
 			}
 			return dc.refuse(path, at, n, r, l, RefusalPick, why, []string{p.name}, dc.wordNoise(path, n))
@@ -445,7 +445,7 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 		case !before(h.p) || !h.hr || !h.hl:
 		case h.p.gave:
 			gave = append(gave, h.p)
-		case request(h.p) && h.p.rec != h.p.live:
+		case request(h.p) && !h.p.same():
 			slots = append(slots, h.p)
 		}
 	}
@@ -794,13 +794,13 @@ func names(ps []evPlace) []string {
 
 // gaveAt is what round F gave at p, in a line's words.
 func gaveAt(p evPlace, f string) string {
-	if p.rec == p.live {
+	if p.same() {
 		return "the same text"
 	}
-	if len(p.live) > 40 {
-		return "a value without " + f
+	if l := p.liveText(); len(l) <= 40 {
+		return l
 	}
-	return p.live
+	return "a value without " + f
 }
 
 // scopeName names p's scope outside the call for a line.

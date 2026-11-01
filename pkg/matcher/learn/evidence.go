@@ -33,8 +33,14 @@ const (
 // state and, where unknown, why.
 type evPlace struct {
 	name, mock, path string
-	rec, live        string
-	side             Side
+	// rec and live are a leaf's value in each run. A recording's place
+	// keeps its Raws instead (src: the recording; fSrc: what round F gave
+	// there, its view or src) and reads their texts only when a question
+	// asks (recText, liveText), never keeping one: a call that asks about
+	// many large recordings holds one at a time, not all of them.
+	rec, live string
+	src, fSrc *Raw
+	side      Side
 	given, startUp   bool
 	// gave: a value the test gave keploy (#5016), read by its text alone,
 	// never by a moment; given without gave is the test case's request.
@@ -60,10 +66,30 @@ type evPlace struct {
 	// here, so its F side shows and disproves nothing. fMay: round F served
 	// it before the call and no view of what it gave there is stated or
 	// read, so it may hold round F's new word: unknown for every word.
-	// views: the texts of the views round F's serves gave where they
-	// differ (Raw.ServedChanged); one that holds F's word leaves it unknown.
+	// views: the views round F's serves gave where they differ
+	// (Raw.ServedChanged); one that holds F's word leaves it unknown.
 	fUnstated, fMay bool
-	views           []string
+	views           []*Raw
+}
+
+// recText and liveText are p's text in each run, a recording's read now.
+func (p evPlace) recText() string {
+	if p.src != nil {
+		return p.src.Text()
+	}
+	return p.rec
+}
+
+func (p evPlace) liveText() string {
+	if p.fSrc != nil {
+		return p.fSrc.Text()
+	}
+	return p.live
+}
+
+// same reports whether round F gave p as recorded.
+func (p evPlace) same() bool {
+	return p.src != nil && p.src == p.fSrc || p.recText() == p.liveText()
 }
 
 // wordEvidence is what one place shows of a changed word.
@@ -123,17 +149,16 @@ func placesOf(in Input) (ps []evPlace, unread string) {
 		st, why := rawState(in, r)
 		// F's text there: the view F served, or the recording where F
 		// served it as recorded; else not stated, and it shows nothing.
-		live, unstated := r.Text(), true
-		var views []string
+		src := &in.Raw[i]
+		live, unstated := src, true
+		var views []*Raw
 		switch {
 		case r.live != nil:
-			live, unstated = r.live.Text(), false
+			live, unstated = r.live, false
 		case r.AsRecorded():
 			unstated = false
 		case r.unseen:
-			for _, v := range r.views {
-				views = append(views, v.Text())
-			}
+			views = r.views
 		}
 		fUnstated := unstated || !in.Caps.FViewStated
 		// Another test's recording, or one recorded after the call
@@ -141,7 +166,7 @@ func placesOf(in Input) (ps []evPlace, unread string) {
 		other := r.olderTest || r.elsewhere
 		startUp, other, scope := inScope(in, r.Mock(), r.beforeTest && !other, other)
 		ps = append(ps, evPlace{
-			name: r.Mock(), mock: r.Mock(), rec: r.Text(), live: live, side: Response,
+			name: r.Mock(), mock: r.Mock(), src: src, fSrc: live, side: Response,
 			startUp: startUp, otherTest: other, scope: scope,
 			at: r.at, state: st, why: why, fUnstated: fUnstated, raw: i + 1,
 			fMay: fUnstated && len(views) == 0 && r.served && !r.servedAfter, views: views,
@@ -266,7 +291,7 @@ func swapUnknown(in Input, x *readerIndex, ps []evPlace, w readWord) {
 	}
 	for i := range ps {
 		p := &ps[i]
-		if p.raw == 0 || p.state != stateBefore || !evHolds(x, p.rec, w.Rec) {
+		if p.raw == 0 || p.state != stateBefore || !evHolds(x, p.recText(), w.Rec) {
 			continue
 		}
 		if r := in.Raw[p.raw-1]; r.swapHolds(r.payload().text, in.Raw, holds) {
@@ -279,8 +304,8 @@ func swapUnknown(in Input, x *readerIndex, ps []evPlace, w readWord) {
 // evidence table, read through x. read is false where p's text lay
 // past the call's budget.
 func evidenceAt(x *readerIndex, p evPlace, r, f string) (ev wordEvidence, read bool) {
-	hr, okR := x.holdsWord(p.rec, r)
-	hf, okF := x.holdsWord(p.live, f)
+	hr, okR := x.holdsWord(p.recText(), r)
+	hf, okF := x.holdsWord(p.liveText(), f)
 	if !okR || !okF {
 		return evNone, false
 	}
@@ -289,13 +314,13 @@ func evidenceAt(x *readerIndex, p evPlace, r, f string) (ev wordEvidence, read b
 			return evUnknown, true
 		}
 		for _, v := range p.views {
-			if h, _ := x.holdsWord(v, f); h {
+			if h, _ := x.holdsWord(v.Text(), f); h {
 				return evUnknown, true
 			}
 		}
 		return evNone, true
 	}
-	if p.rec == p.live {
+	if p.same() {
 		// Unchanged: one text holds R's word, F's word, both or neither.
 		if !hr && !hf {
 			return evNone, true
@@ -317,10 +342,10 @@ func evidenceAt(x *readerIndex, p evPlace, r, f string) (ev wordEvidence, read b
 	switch {
 	case hr && hf:
 		return evShown, true
-	case nothingNew(p.rec, p.live):
+	case nothingNew(p.recText(), p.liveText()):
 		// F gave nothing new there: every word of F's text stood in R's.
 		return evUnknown, true
-	case hr && !strings.Contains(p.live, f):
+	case hr && !strings.Contains(p.liveText(), f):
 		return evDisproven, true
 	}
 	return evUnknown, true
@@ -334,10 +359,10 @@ func countsByText(x *readerIndex, p evPlace, w readWord) bool {
 		return true
 	}
 	for _, t := range w.Tokens {
-		if held, _ := x.holdsToken(p.rec, t.Kind, t.Rec); held && wordBits(t.Rec) >= 32 {
+		if held, _ := x.holdsToken(p.recText(), t.Kind, t.Rec); held && wordBits(t.Rec) >= 32 {
 			return true
 		}
-		if held, _ := x.holdsToken(p.live, t.Kind, t.Live); held && wordBits(t.Live) >= 32 {
+		if held, _ := x.holdsToken(p.liveText(), t.Kind, t.Live); held && wordBits(t.Live) >= 32 {
 			return true
 		}
 	}
@@ -348,20 +373,20 @@ func countsByText(x *readerIndex, p evPlace, w readWord) bool {
 // whole token around w in R (a conflict in the call's scope
 // or the start-up).
 func heldWhole(x *readerIndex, p evPlace, w readWord, rec string) bool {
-	if p.rec == p.live {
+	if p.same() {
 		return false
 	}
-	if held, _ := x.holdsToken(p.rec, tokenID, rec); held {
+	if held, _ := x.holdsToken(p.recText(), tokenID, rec); held {
 		return true
 	}
 	// A word that is a whole token of its own (no ID byte beside it).
 	if len(w.Tokens) == 0 {
-		if held, _ := x.holdsToken(p.rec, tokenID, w.Rec); held {
+		if held, _ := x.holdsToken(p.recText(), tokenID, w.Rec); held {
 			return true
 		}
 	}
 	for _, t := range w.Tokens {
-		if held, _ := x.holdsToken(p.rec, t.Kind, t.Rec); held {
+		if held, _ := x.holdsToken(p.recText(), t.Kind, t.Rec); held {
 			return true
 		}
 	}
