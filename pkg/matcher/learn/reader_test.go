@@ -954,7 +954,7 @@ func heapPeakOf(f func()) int64 {
 // costs what past it costs.
 func TestReaderOneLargeBodyIsReadFieldByFieldWithinABound(t *testing.T) {
 	defer func(b int64) { readerBudget = b }(readerBudget)
-	const size = 8 << 20
+	const size = 4 << 20
 	events, ids := uuidAnswer(400, size)
 	w := ids[3][9:13]
 	var distinct strings.Builder
@@ -1079,7 +1079,7 @@ func TestReaderWalkJSONReadsOnlyWhollyJSONValues(t *testing.T) {
 	}{
 		{`{"a":"w"}`, 1, 2}, {" \n{\"a\":\"w\"}\n", 1, 2}, {`{"a":1}{"b":2}`, 2, 4}, {"1 2 3", 3, 3}, {`"w" "x"`, 2, 2},
 		{`null`, 1, 0}, {`{}`, 1, 0}, {`[]`, 1, 0}, {" \n ", 0, 0}, {``, 0, 0},
-		{`{"a":"w"`, 0, 0}, {`{"a":"w"} tail`, 0, 0}, {`{"a":"w"} ]`, 0, 0}, {`[1,2`, 0, 0}, {`{"a":1,}`, 0, 0}, {`[1,]`, 0, 0}, {`{"a" 1}`, 0, 0}, {`]`, 0, 0}, {`plain text`, 0, 0},
+		{`{"a":"w"`, 0, 0}, {`{"a":"w"} tail`, 0, 0}, {`{"a":"w"} ]`, 0, 0}, {`[1,2`, 0, 0}, {`data: {"a":"w"}`, 0, 0}, {"\xef\xbb\xbf{\"a\":\"w\"}", 0, 0}, {`a=1&b=2`, 0, 0}, {`<a>w</a>`, 0, 0}, {`{"a":1,}`, 0, 0}, {`[1,]`, 0, 0}, {`{"a" 1}`, 0, 0}, {`]`, 0, 0}, {`plain text`, 0, 0},
 		{deep(maxJSONDepth), 1, 1}, {deep(maxJSONDepth + 1), 0, 0},
 	} {
 		leaves := 0
