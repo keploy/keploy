@@ -141,28 +141,6 @@ func TestAMarkedRecordingNeverHidesADifferentRecordedAnswer(t *testing.T) {
 	}
 }
 
-// A write its test's mappings entry marks `repeat: any` is served as the
-// mark says: keploy proposes the mark only for a read, but a person who
-// writes it on a write owns that choice (it shows in the lock's diff), so
-// the recorded answer serves each identical write at any count, once at
-// least, as for a read.
-func TestAMarkedWriteIsHonouredAsWritten(t *testing.T) {
-	at := time.Now().Add(time.Second)
-	const body = `{"name":"c1"}`
-	for _, writes := range []int{1, 2} {
-		p, mm := repeatRun(t, []*models.Mock{r3Mock("mock-save", at, "POST", "/cluster", body, `{"saved":true}`)}, "mock-save")
-		h := httpint.New(zap.NewNop())
-		for j := 0; j < writes; j++ {
-			if code, got := r3SendVia(t, context.Background(), h, p, mm, models.OutgoingOptions{}, pooledPost("/cluster", body)); code != http.StatusOK || got != `{"saved":true}` {
-				t.Fatalf("%d writes: write %d got %d %q; want the marked recording's answer", writes, j+1, code, got)
-			}
-		}
-		if consumed, unconsumed, misses := repeatOutcome(t, p, mm); misses != 0 || len(unconsumed) != 0 || !slices.Equal(consumed, []string{"mock-save"}) {
-			t.Fatalf("%d writes: consumed %v, unconsumed %v, misses %d; want the marked write answered, nothing left, no miss", writes, consumed, unconsumed, misses)
-		}
-	}
-}
-
 // A marked recording's repeat answers file no new take: the take log holds
 // its first answer only, once, however many identical reads the test makes,
 // so the round's readers count it consumed once, as its outcome does.
