@@ -1,6 +1,7 @@
 package learn
 
 import (
+	"encoding/json"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -9,7 +10,7 @@ import (
 // A refused word's line is one line a person, an LLM or a tool
 // reads:
 //
-//	<test> <mock> <field>[ word <n>]: recorded "<r>", round F "<f>": refused (<kind>): <why>. Places: <p>, <p>, <p>. Edits: <edit>; or <edit>.
+//	<test> <mock> <field>[ word <n>]: recorded "<r>", round F "<f>": refused (<kind>): <why>. Places: <p>, <p>, <p>. Edits: <edit>; or <edit>. edits=[{"kind":...}]
 //
 // The values are always quoted (strconv.Quote), so a value with quotes,
 // colons or newlines stays on one line and reads back as it was. A name
@@ -18,7 +19,10 @@ import (
 // unless it holds a section's start (". Places: ", ". Edits: "), a control
 // byte or a leading quote. At most three places are printed; the edits are
 // likeliest first, each in the words of the edit to make (keploy never
-// makes it). ParseRefusal reads every such line back to its Refusal.
+// makes it). The line ends with the same edits in one fixed form, a JSON
+// array of {kind, mock, field, word, name} (lineEdit) after "edits=", for a
+// tool to read without parsing the words. ParseRefusal reads every such
+// line back to its Refusal.
 
 // maxLinePlaces is the most places a line names.
 const maxLinePlaces = 3
@@ -32,7 +36,17 @@ const (
 	editsMark    = ". Edits: "
 	editSep      = "; or "
 	placeSep     = ", "
+	editsTail    = " edits="
 )
+
+// lineEdit is an Edit in the line's fixed form.
+type lineEdit struct {
+	Kind  EditKind `json:"kind"`
+	Mock  string   `json:"mock,omitempty"`
+	Field string   `json:"field,omitempty"`
+	Name  string   `json:"name,omitempty"`
+	Word  int      `json:"word,omitempty"`
+}
 
 // editForms is each edit's words. %m is the mock, %f the field, %w the
 // word, %n a given's name; each kind carries only the fields its words
@@ -96,7 +110,12 @@ func RefusalLine(r Refusal) string {
 			b.WriteString(editWords(e))
 		}
 	}
-	b.WriteString(".")
+	tail := make([]lineEdit, len(r.Edits))
+	for i, e := range r.Edits {
+		tail[i] = lineEdit(e)
+	}
+	js, _ := json.Marshal(tail) // a slice of strings and ints always marshals
+	b.WriteString("." + editsTail + string(js))
 	return b.String()
 }
 
@@ -149,7 +168,7 @@ func lineName(s string) string {
 
 // plainWhy reports whether why prints bare: it reads back whole.
 func plainWhy(why string) bool {
-	return utf8.ValidString(why) && !hasControl(why) && !strings.HasPrefix(why, `"`) &&
+	return why != "" && utf8.ValidString(why) && !hasControl(why) && !strings.HasPrefix(why, `"`) &&
 		!strings.Contains(why, placesMark) && !strings.Contains(why, editsMark)
 }
 
@@ -170,216 +189,98 @@ func hasControl(s string) bool {
 
 // ParseRefusal reads a refused word's line back to its Refusal; ok false
 // where line is not one (a learned line, an edit of no known kind, text).
-// A line printed with more than three places reads back with three.
+// A line printed with more than three places reads back with three. It
+// takes the edits from the line's fixed tail, reads the head, and keeps
+// the result only where printing it gives the line again, so a line it
+// misreads is no refusal (fail closed).
 func ParseRefusal(line string) (Refusal, bool) {
-	var r Refusal
-	p := lineReader{s: line}
-	var ok bool
-	if r.Test, ok = p.name(); !ok || !p.lit(" ") {
-		return Refusal{}, false
-	}
-	if r.Mock, ok = p.name(); !ok || !p.lit(" ") {
-		return Refusal{}, false
-	}
-	if r.Field, ok = p.name(); !ok {
-		return Refusal{}, false
-	}
-	r.Word = -1
-	if p.lit(" word ") {
-		if r.Word, ok = p.number(); !ok {
-			return Refusal{}, false
+	// The tail is the last "edits=" whose rest is a JSON array; an earlier
+	// one inside a quoted value never parses to the line's end.
+	for end := len(line); end > 0; {
+		if end = strings.LastIndex(line[:end], editsTail); end < 0 {
+			break
+		}
+		var tail []lineEdit
+		if json.Unmarshal([]byte(line[end+len(editsTail):]), &tail) != nil {
+			continue
+		}
+		r, ok := parseHead(line[:end])
+		for _, e := range tail {
+			_, known := editForms[e.Kind]
+			ok = ok && known
+			r.Edits = append(r.Edits, Edit(e))
+		}
+		if ok && RefusalLine(r) == line {
+			return r, true
 		}
 	}
-	if !p.lit(recordedMark) {
-		return Refusal{}, false
-	}
-	if r.Recorded, ok = p.quoted(); !ok || !p.lit(roundFMark) {
-		return Refusal{}, false
-	}
-	if r.Full, ok = p.quoted(); !ok || !p.lit(refusedMark) {
-		return Refusal{}, false
-	}
-	end := strings.IndexAny(p.rest(), ",)")
-	if end < 0 {
-		return Refusal{}, false
-	}
-	r.Kind = RefusalKind(p.rest()[:end])
-	p.i += end
-	if !refusalKinds[r.Kind] || p.lit(limitMark) != (r.Kind == RefusalCannotCheck) || !p.lit("): ") {
-		return Refusal{}, false
-	}
-	if strings.HasPrefix(p.rest(), `"`) {
-		if r.Why, ok = p.quoted(); !ok {
-			return Refusal{}, false
-		}
-	} else {
-		rest := p.rest()
-		end := len(rest) - 1
-		for _, m := range []string{placesMark, editsMark} {
-			if j := strings.Index(rest, m); j >= 0 && j < end {
-				end = j
-			}
-		}
-		if end < 0 {
-			return Refusal{}, false
-		}
-		r.Why = rest[:end]
-		p.i += end
-	}
-	if p.lit(placesMark) {
-		for {
-			pl, ok := p.place()
-			if !ok {
-				return Refusal{}, false
-			}
-			r.Places = append(r.Places, pl)
-			if !p.lit(placeSep) {
-				break
-			}
-		}
-	}
-	if p.lit(editsMark) {
-		for {
-			e, ok := p.edit()
-			if !ok {
-				return Refusal{}, false
-			}
-			r.Edits = append(r.Edits, e)
-			if !p.lit(editSep) {
-				break
-			}
-		}
-	}
-	if p.rest() != "." {
-		return Refusal{}, false
-	}
-	return r, true
+	return Refusal{}, false
 }
 
-// lineReader reads a line from i on.
+// parseHead reads the line before its tail: the word, both values, the
+// kind, the why and the places. The words of the edits are skipped: the
+// tail holds them.
+func parseHead(s string) (Refusal, bool) {
+	r := Refusal{Word: -1}
+	p := lineReader{s: strings.TrimSuffix(s, "."), ok: strings.HasSuffix(s, ".")}
+	r.Test, r.Mock = p.text(" "), p.lit(" ").text(" ")
+	r.Field = p.lit(" ").text(" ", ":")
+	if p.ok && strings.HasPrefix(p.s, " word ") {
+		w, err := strconv.Atoi(p.lit(" word ").text(":"))
+		r.Word, p.ok = w, p.ok && err == nil
+	}
+	r.Recorded = p.lit(recordedMark).text(",")
+	r.Full = p.lit(roundFMark).text(":")
+	r.Kind = RefusalKind(p.lit(refusedMark).text(",", ")"))
+	if r.Kind == RefusalCannotCheck {
+		p.lit(limitMark)
+	}
+	r.Why = p.lit("): ").text(placesMark, editsMark)
+	if p.ok && strings.HasPrefix(p.s, placesMark) {
+		for r.Places = []string{p.lit(placesMark).text(placeSep, editsMark)}; p.ok && strings.HasPrefix(p.s, placeSep); {
+			r.Places = append(r.Places, p.lit(placeSep).text(placeSep, editsMark))
+		}
+	}
+	if p.ok && strings.HasPrefix(p.s, editsMark) {
+		p.s = ""
+	}
+	return r, p.ok && p.s == "" && refusalKinds[r.Kind]
+}
+
+// lineReader reads s from the front; ok turns false at the first piece
+// that is not there, and every later read then gives nothing.
 type lineReader struct {
-	s string
-	i int
+	s  string
+	ok bool
 }
 
-func (p *lineReader) rest() string { return p.s[p.i:] }
-
-// lit consumes lit where the rest starts with it.
-func (p *lineReader) lit(lit string) bool {
-	if !strings.HasPrefix(p.rest(), lit) {
-		return false
+// lit consumes lit where s starts with it.
+func (p *lineReader) lit(lit string) *lineReader {
+	p.ok = p.ok && strings.HasPrefix(p.s, lit)
+	if p.ok {
+		p.s = p.s[len(lit):]
 	}
-	p.i += len(lit)
-	return true
+	return p
 }
 
-// quoted consumes one Go-quoted string.
-func (p *lineReader) quoted() (string, bool) {
-	q, err := strconv.QuotedPrefix(p.rest())
-	if err != nil {
-		return "", false
+// text consumes one Go-quoted string, or bare text up to the first stop
+// (or s's end), as lineName, plainWhy and plainPlace print it.
+func (p *lineReader) text(stops ...string) string {
+	if !p.ok {
+		return ""
 	}
-	s, err := strconv.Unquote(q)
-	if err != nil {
-		return "", false
+	if q, err := strconv.QuotedPrefix(p.s); err == nil && strings.HasPrefix(p.s, `"`) {
+		v, _ := strconv.Unquote(q)
+		p.s = p.s[len(q):]
+		return v
 	}
-	p.i += len(q)
-	return s, true
-}
-
-// name consumes a name as lineName prints it.
-func (p *lineReader) name() (string, bool) {
-	if strings.HasPrefix(p.rest(), `"`) {
-		return p.quoted()
-	}
-	end := strings.IndexAny(p.rest(), " :;,\"")
-	if end < 0 {
-		end = len(p.rest())
-	}
-	if end == 0 {
-		return "", false
-	}
-	s := p.rest()[:end]
-	p.i += end
-	return s, true
-}
-
-// number consumes a non-negative decimal.
-func (p *lineReader) number() (int, bool) {
-	end := 0
-	for end < len(p.rest()) && p.rest()[end] >= '0' && p.rest()[end] <= '9' {
-		end++
-	}
-	n, err := strconv.Atoi(p.rest()[:end])
-	if err != nil {
-		return 0, false
-	}
-	p.i += end
-	return n, true
-}
-
-// place consumes a place as RefusalLine prints it: bare up to the next
-// place, the edits or the line's end.
-func (p *lineReader) place() (string, bool) {
-	if strings.HasPrefix(p.rest(), `"`) {
-		return p.quoted()
-	}
-	rest := p.rest()
-	end := len(rest) - 1
-	for _, m := range []string{placeSep, editsMark} {
-		if j := strings.Index(rest, m); j >= 0 && j < end {
+	end := len(p.s)
+	for _, st := range stops {
+		if j := strings.Index(p.s, st); j >= 0 && j < end {
 			end = j
 		}
 	}
-	if end <= 0 {
-		return "", false
-	}
-	p.i += end
-	return rest[:end], true
-}
-
-// edit consumes one edit in its kind's words: the first form whose words
-// and names read whole there.
-func (p *lineReader) edit() (Edit, bool) {
-	for kind, form := range editForms {
-		q := *p
-		e, ok := q.form(kind, form)
-		if ok && (strings.HasPrefix(q.rest(), editSep) || q.rest() == ".") {
-			*p = q
-			return e, true
-		}
-	}
-	return Edit{}, false
-}
-
-// form reads one edit of kind in form's words.
-func (p *lineReader) form(kind EditKind, form string) (Edit, bool) {
-	e := Edit{Kind: kind}
-	if kind == EditNoiseAtField {
-		e.Word = -1
-	}
-	for i := 0; i < len(form); i++ {
-		if form[i] != '%' || i+1 == len(form) {
-			if !p.lit(form[i : i+1]) {
-				return Edit{}, false
-			}
-			continue
-		}
-		i++
-		var ok bool
-		switch form[i] {
-		case 'm':
-			e.Mock, ok = p.name()
-		case 'f':
-			e.Field, ok = p.name()
-		case 'w':
-			e.Word, ok = p.number()
-		case 'n':
-			e.Name, ok = p.quoted()
-		}
-		if !ok {
-			return Edit{}, false
-		}
-	}
-	return e, true
+	v := p.s[:end]
+	p.s, p.ok = p.s[end:], end > 0
+	return v
 }
