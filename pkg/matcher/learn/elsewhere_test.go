@@ -8,7 +8,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 )
 
-// One pairing per recording per round, and its own one wins (DESIGN T4): a
+// One pairing per recording per round, and its own one wins: a
 // recording a call of the round consumed keeps what its own pairing learned
 // alone, and what a call made in another window taught it is voided, never
 // merged, whichever came first (the agent pairs no consumed recording across
