@@ -180,11 +180,10 @@ type exactView struct {
 	// heard is every mock a parser was served while the view was installed,
 	// as the served observer was told of it (observeServed): of any lifetime
 	// (the test's own, a protocol-phase or reusable one, one spent through a
-	// delete door, a worker-scope one), through any door, one the view
-	// passed whose tier claim then failed included (another connection's
-	// serve of it), once each by identity (learn.MockID, heardIDs), in the
-	// order they came. A consume the view refused is not one
-	// (exactConsumeAt): nothing served it. Kept only while there is an
+	// delete door, a worker-scope one), through any door, once each by
+	// identity (learn.MockID, heardIDs), in the order they came. A consume
+	// the view or the tier refused is not one (exactConsumeAt): nothing
+	// served it. Kept only while there is an
 	// observer (the proven switch), and read only of a test view
 	// (ServedInOpenTest).
 	heard    []*models.Mock
@@ -2711,23 +2710,52 @@ const (
 // moved, and is settled against that one (closedWait), as one that came a
 // moment later would be.
 func (m *MockManager) exactConsume(mk *models.Mock, evicts bool) exactVerdict {
-	return m.exactConsumeAt(mk, evicts, nil, nil)
+	return m.exactConsumeAt(mk, evicts, nil, nil, nil)
+}
+
+// consumeAt is the one way through a consume door, and the one place that
+// tells the served observer (observe, when not nil): only of a consume that
+// went through, the view settling it as a serve or, passed to mk's tier, tier
+// taking it. tier reports whether it did. With exact serving off the tier
+// alone decides, and with g nothing is settled, since no round is read
+// without it.
+func (m *MockManager) consumeAt(mk *models.Mock, evicts bool, g *roundGuard, tier func() bool, observe func()) bool {
+	if m.exactView() != nil {
+		return m.exactConsumeAt(mk, evicts, g, tier, observe) != exactRefused
+	}
+	if g.checks() {
+		g.refuse("exact serving is off")
+		return false
+	}
+	if !tier() {
+		return false
+	}
+	if observe != nil {
+		observe()
+	}
+	return true
 }
 
 // exactConsumeAt is exactConsume that tells the served observer (observe,
 // when not nil, once) in the step that settles the consume, once it settled
-// as a serve (exactServed, or exactPass: the tier it passes to claims it
-// next), and, with g, settles it only while the store is still at g's round
-// (roundGuard): a consume decided on a snapshot never lands in another
-// staging, view or learn test. A consume the view refuses (exactRefused: a
-// mock it does not show now, one that answered already, another test's
-// claim) tells the observer nothing, as one refused for g's round does:
-// nothing served the mock, so the learn tracker neither numbers it nor
-// counts its request as a serve (learn.Flight), and the open test's account
-// (ServedInOpenTest) does not hold it. Each settle holds the round lock
-// (exact_round.go), as every snapshot does, so a snapshot sees a consume,
-// its take and the observer's account of it all, or none of them.
-func (m *MockManager) exactConsumeAt(mk *models.Mock, evicts bool, g *roundGuard, observe func()) exactVerdict {
+// as a serve (exactServed, or exactPass and tier, when not nil, took it from
+// its tier in that step), and, with g, settles it only while the store is
+// still at g's round (roundGuard): a consume decided on a snapshot never
+// lands in another staging, view or learn test. A consume refused (exactRefused:
+// a mock the view does not show now, one that answered already, another test's
+// claim, one the tier refused) tells the observer nothing, as one refused for
+// g's round does: nothing served the mock, so the learn tracker neither
+// numbers it nor counts its request as a serve (learn.Flight), and the open
+// test's account (ServedInOpenTest) does not hold it. Each settle holds the
+// round lock (exact_round.go), as every snapshot does, so a snapshot sees a
+// consume, its take and the observer's account of it all, or none of them.
+//
+// tier runs at most once, holding the round lock, so it takes no lock that
+// must come before it (swapMu). Only UpdateUnFilteredMock's and
+// MarkMockAsUsed's tiers do: a view never passes a delete door's consume
+// (exactConsumeIn settles those itself), so a delete tier, which reads the
+// staging under swapMu, runs only with exact serving off.
+func (m *MockManager) exactConsumeAt(mk *models.Mock, evicts bool, g *roundGuard, tier func() bool, observe func()) exactVerdict {
 	if f := m.exact.round.onConsume.Load(); f != nil && mk != nil {
 		(*f)(mk.Name)
 	}
@@ -2749,10 +2777,15 @@ func (m *MockManager) exactConsumeAt(mk *models.Mock, evicts bool, g *roundGuard
 			return exactRefused, wait
 		}
 		verdict, wait, after := m.exactConsumeIn(v, mk, evicts)
-		// Told once the view decided, in this step, that it is a serve,
-		// still holding the round lock: never of a consume it refused. One
-		// that found this view closed (wait) is told once, as it settles as
-		// a serve in the view that replaces it.
+		// One the view passes is its tier's to take, in this step: a tier
+		// that refuses it refuses the consume.
+		if wait == nil && verdict == exactPass && tier != nil && !tier() {
+			verdict = exactRefused
+		}
+		// Told once the consume went through, in this step, still holding
+		// the round lock: never of one refused. One that found this view
+		// closed (wait) is told once, as it settles as a serve in the view
+		// that replaces it.
 		if wait == nil && verdict != exactRefused && observe != nil {
 			observe()
 			observe = nil
@@ -2934,31 +2967,30 @@ func (m *MockManager) waitReplaced(wait <-chan struct{}) {
 	<-wait
 }
 
-// exactConsumeValueAt is exactConsumeAt for a door that takes the mock by
-// value, which tells the served observer of a copy of its own when observe
-// is set: first, with exact serving off; in the step that settles the
-// consume, holding the round lock, under it. Its copy is made only under
-// exact serving: a door taking the mock's address would move every
-// consume's mock to the heap, switch on or off. With g, exact serving off
-// refuses the consume, telling the observer nothing: no round is read
-// without it.
-func (m *MockManager) exactConsumeValueAt(mock models.Mock, evicts bool, g *roundGuard, observe bool) exactVerdict {
-	if m.exactView() == nil {
-		if g.checks() {
-			g.refuse("exact serving is off")
-			return exactRefused
-		}
+// consumeValueAt is consumeAt for a door that takes the mock by value, which
+// tells the served observer of a copy of its own when observe is set. Its copy
+// is made only under exact serving: a door taking the mock's address would
+// move every consume's mock to the heap, switch on or off.
+func (m *MockManager) consumeValueAt(mock models.Mock, evicts bool, g *roundGuard, observe bool, tier func(models.Mock) bool) bool {
+	if m.exactView() != nil {
+		mk := mock
+		var tell func()
 		if observe {
-			m.observeServedCopy(mock, g.flight())
+			tell = func() { m.observeServedCopy(mk, g.flight()) }
 		}
-		return exactPass
+		return m.exactConsumeAt(&mk, evicts, g, func() bool { return tier(mk) }, tell) != exactRefused
 	}
-	mk := mock
-	var tell func()
+	if g.checks() {
+		g.refuse("exact serving is off")
+		return false
+	}
+	if !tier(mock) {
+		return false
+	}
 	if observe {
-		tell = func() { m.observeServedCopy(mk, g.flight()) }
+		m.observeServedCopy(mock, g.flight())
 	}
-	return m.exactConsumeAt(&mk, evicts, g, tell)
+	return true
 }
 
 // dataPlaneTyped is MockState.DataPlane for mk: a test mock whose type tag

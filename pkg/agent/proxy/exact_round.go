@@ -21,9 +21,9 @@ import (
 // part of it holding the same lock, so it reads them of one instant:
 //
 //   - a consume's or a spend's settle, every delete door's,
-//     UpdateUnFilteredMock's and MarkMockAsUsed's, with the served
-//     observer told of it in the same step (exactConsumeAt), and a spend by
-//     kind (spendByKindAt);
+//     UpdateUnFilteredMock's and MarkMockAsUsed's, with the tier's take of
+//     one the view passes and the served observer told of it in the same
+//     step (exactConsumeAt), and a spend by kind (spendByKindAt);
 //   - a pairing's claim (claimPairingAt);
 //   - a view's install, with the claims a retried test gives back, the
 //     mocks of the tests begun, and the ahead answers it carries or voids
@@ -35,14 +35,17 @@ import (
 //   - a staging's new epoch (bumpStagingEpoch).
 //
 // Lock order: swapMu (read) before the round lock; the round lock before a
-// view's mu and the leaves (claims, staging names, the tracker, treesMu read,
-// a tree's, the disk store's). Nothing holding it takes swapMu, a variables
-// table's lock or a consume door: prepareOutside, which takes swapMu, runs
-// before it. A view install that begins variables takes the variables' lock
-// and then this one (variables.Table.StartOpening runs the install).
+// view's mu and the leaves (claims, staging names, the tracker, mirrorMu,
+// treesMu, a tree's, consumedMu, hitMu, windowMu read, the disk store's).
+// Nothing holding it takes swapMu, a variables table's lock or a consume door:
+// prepareOutside, which takes swapMu, runs before it. A view install that
+// begins variables takes the variables' lock and then this one
+// (variables.Table.StartOpening runs the install).
 //
 // What the replay drains (flagMockAsUsed), the revisions and the window
-// signal move after it, as before: a parser that keeps an index reads again.
+// signal move after a view's own serve, as before: a parser that keeps an
+// index reads again. A consume the view passes goes through its tier inside
+// the step, since the tier decides whether it is a serve at all.
 
 // roundState is the round's state that changes holding mu alone.
 type roundState struct {
