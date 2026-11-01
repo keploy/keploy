@@ -131,7 +131,7 @@ func TestKeployMockKeepsWhatItsAgentLearnedOnlyFromAClientTestsReader(t *testing
 			store := &learnedStore{}
 			core, logs := observer.New(zap.WarnLevel)
 			m := &mockService{config: &config.Config{}, mockDB: store, logger: zap.New(core), instrumentation: tc.instr}
-			byTest, _, err := m.keepLearned(context.Background(), "s", consumed, nil, flows, expected)
+			byTest, _, err := m.keepLearned(context.Background(), "s", consumed, nil, nil, flows, expected)
 			if tc.kept {
 				if err != nil {
 					t.Fatal(err)
@@ -151,7 +151,7 @@ func TestKeployMockKeepsWhatItsAgentLearnedOnlyFromAClientTestsReader(t *testing
 				t.Fatalf("logs %v; want the round to say it kept nothing, and %q", logs.All(), tc.why)
 			}
 			// Nothing learned: nothing lost, and the round completes.
-			if _, _, err := m.keepLearned(context.Background(), "s", []models.MockState{{Name: "mock-1"}}, nil, flows, expected); err != nil {
+			if _, _, err := m.keepLearned(context.Background(), "s", []models.MockState{{Name: "mock-1"}}, nil, nil, flows, expected); err != nil {
 				t.Fatalf("nothing learned: %v", err)
 			}
 			// Each kind of learning, alone, is learning not kept: a variable,
@@ -166,14 +166,14 @@ func TestKeployMockKeepsWhatItsAgentLearnedOnlyFromAClientTestsReader(t *testing
 				{models.MockState{Name: "mock-1", Binds: map[string]models.MockVariables{"mock-0": {"id": {Recorded: "1", Bind: "body.id"}}}}, "mock-1 id (bound at mock-0)"},
 				{models.MockState{Name: "mock-1", Clocks: map[string]models.ClockOffset{"body.since": {Res: time.Millisecond}}}, "mock-1 body.since (clock)"},
 			} {
-				if _, _, err := m.keepLearned(context.Background(), "s", []models.MockState{only.learned}, nil, flows, expected); err == nil || !strings.Contains(err.Error(), "keploy kept nothing its agent learned in record's full round ("+only.said+"): ") {
+				if _, _, err := m.keepLearned(context.Background(), "s", []models.MockState{only.learned}, nil, nil, flows, expected); err == nil || !strings.Contains(err.Error(), "keploy kept nothing its agent learned in record's full round ("+only.said+"): ") {
 					t.Fatalf("only %s learned: err %v; want the round failed, naming it", only.said, err)
 				}
 			}
 		})
 	}
 	m := &mockService{config: &config.Config{}, mockDB: &learnedStore{}, logger: zap.NewNop(), instrumentation: clientTestsInstr{reads: true}}
-	if _, _, err := m.keepLearned(context.Background(), "s", consumed, errors.New("agent gone"), flows, expected); err == nil {
+	if _, _, err := m.keepLearned(context.Background(), "s", consumed, errors.New("agent gone"), nil, flows, expected); err == nil {
 		t.Fatal("a round whose consumed mocks could not be read kept what was learned")
 	}
 }
@@ -469,5 +469,62 @@ func TestMockReplayHandsTheAgentTheTestsItLearnsOnto(t *testing.T) {
 				require.False(t, cfg.Test.LearnTests["o::Other"], "the agent was handed the config's own map")
 			}
 		})
+	}
+}
+
+// What record's full round's learn step taught a recording from a call made
+// in another window than its own (the agent's LearnedElsewhere) is written
+// onto the recording beside what consumed recordings learned, merged with a
+// consumed recording's own: a timer's recording no test consumed carries its
+// clock reads. It is no consumption: no test's flow holds it, it is said
+// apart (on mocks no test consumed), the consumed states are not changed,
+// and a recording of a test the round does not learn onto keeps nothing.
+func TestKeployMockWritesWhatACallInAnotherWindowTaughtOntoTheRecording(t *testing.T) {
+	minute := models.ClockOffset{Min: -time.Minute, Max: -time.Minute, Res: time.Millisecond}
+	consumed := []models.MockState{{Name: "mock-1", ReqBodyNoise: map[string][]string{"body.ts": {}}}}
+	elsewhere := []models.MockState{
+		{Name: "mock-9", Clocks: map[string]models.ClockOffset{"claimed_at": minute}},
+		{Name: "mock-1", Clocks: map[string]models.ClockOffset{"dirty_at": minute}},
+	}
+	flows := []FlowMocks{{Flow: "o::A", Consumed: []models.MockState{{Name: "mock-1"}}}}
+	expected := map[string][]models.MockEntry{"o::A": {{Name: "mock-1"}}, "o::B": {{Name: "mock-9"}}}
+	store := &learnedStore{}
+	m := &mockService{config: &config.Config{}, mockDB: store, logger: zap.NewNop(), instrumentation: clientTestsInstr{reads: true}}
+	byTest, rest, err := m.keepLearned(context.Background(), "s", consumed, nil, elsewhere, flows, expected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := store.got["mock-9"].Clocks["claimed_at"]; !ok {
+		t.Fatalf("the timer's recording no test consumed was written %+v; want its claimed_at clock read", store.got["mock-9"])
+	}
+	one := store.got["mock-1"]
+	if _, ok := one.Clocks["dirty_at"]; !ok {
+		t.Fatalf("a consumed recording a call in another window taught was written %+v; want its dirty_at clock read", one)
+	}
+	if _, ok := one.ReqBodyNoise["body.ts"]; !ok {
+		t.Fatalf("a consumed recording lost its own learning: %+v", one)
+	}
+	if !reflect.DeepEqual(byTest, map[string][]string{"o::A": {"mock-1 body.ts (noise)"}}) || !reflect.DeepEqual(rest, []string{"mock-9 body.ts (noise)"}) {
+		t.Fatalf("by test %v, on mocks no test consumed %v; want mock-9 said apart, under no test", byTest, rest)
+	}
+	if len(consumed) != 1 || consumed[0].Clocks != nil || len(flows[0].Consumed) != 1 {
+		t.Fatalf("the consumed states changed: %+v, flows %+v", consumed, flows)
+	}
+
+	// A test the round does not learn onto keeps its recording as it is.
+	m.config.Test.LearnTests = map[string]bool{"o::A": true}
+	store.got = nil
+	if _, _, err := m.keepLearned(context.Background(), "s", consumed, nil, elsewhere, flows, expected); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := store.got["mock-9"]; ok {
+		t.Fatalf("a recording of a test the round does not learn onto was written: %+v", store.got["mock-9"])
+	}
+
+	// An agent that does not read client tests keeps none of it, and says so.
+	m.config.Test.LearnTests = nil
+	m.instrumentation = clientTestsInstr{reads: false}
+	if _, _, err := m.keepLearned(context.Background(), "s", nil, nil, elsewhere[:1], nil, expected); err == nil || !strings.Contains(err.Error(), "mock-9 claimed_at") {
+		t.Fatalf("err %v; want the round failed, naming mock-9's clock read it did not keep", err)
 	}
 }

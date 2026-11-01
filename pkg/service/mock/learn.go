@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -49,11 +50,15 @@ func (m *mockService) learningTests() map[string]bool {
 // was not kept and why: the round's tests ran on what was learned, and the
 // recording, kept without it, compares every field. One that learned nothing
 // lost nothing. consumedErr is why the agent's consumed mocks could not be
-// read: then what was learned cannot be read either.
-func (m *mockService) keepLearned(ctx context.Context, set string, consumed []models.MockState, consumedErr error, flows []FlowMocks, expected map[string][]models.MockEntry) (map[string][]string, []string, error) {
+// read: then what was learned cannot be read either. elsewhere is what the
+// learn step taught recordings from calls made in other windows than
+// theirs, for learning only (the agent's LearnedElsewhere): it is written
+// onto the recordings with the rest, and no test's flow holds it.
+func (m *mockService) keepLearned(ctx context.Context, set string, consumed []models.MockState, consumedErr error, elsewhere []models.MockState, flows []FlowMocks, expected map[string][]models.MockEntry) (map[string][]string, []string, error) {
 	if consumedErr != nil {
 		return nil, nil, fmt.Errorf("what the learn step learned could not be read from keploy's agent: %w", consumedErr)
 	}
+	consumed = withLearnedElsewhere(consumed, elsewhere)
 	if !m.clientTestsRead() {
 		notKept := m.learnedOnto(consumed, expected)
 		if len(notKept) == 0 {
@@ -70,6 +75,43 @@ func (m *mockService) keepLearned(ctx context.Context, set string, consumed []mo
 		return nil, nil, fmt.Errorf("keploy kept nothing its agent learned in record's full round (%s): %s, so a value the harness gave the application may have been learned as noise, and the round's tests ran on it; %s", firstFields(notKept, 10), didNotSay, clientTestsRemedy())
 	}
 	return m.persistLearned(ctx, set, consumed, flows, expected)
+}
+
+// withLearnedElsewhere is consumed with elsewhere's learning (noise, clock
+// reads) merged onto the state of the recording each names, as the agent
+// merges a recording's consumed states (flagMockAsUsed), and a state of its
+// own for a recording no call consumed. consumed is not changed. It is read
+// for what is written onto the recordings alone: which test used which
+// recording (attributeMocks) reads the consumed states as the agent sent
+// them.
+func withLearnedElsewhere(consumed, elsewhere []models.MockState) []models.MockState {
+	if len(elsewhere) == 0 {
+		return consumed
+	}
+	out := slices.Clone(consumed)
+	at := make(map[string]int, len(out))
+	for i, st := range out {
+		at[st.Name] = i
+	}
+	for _, e := range elsewhere {
+		if e.Name == "" {
+			continue
+		}
+		learned := models.MockState{Name: e.Name, Kind: e.Kind, ReqBodyNoise: e.ReqBodyNoise, Clocks: e.Clocks}
+		i, ok := at[e.Name]
+		if !ok {
+			at[e.Name] = len(out)
+			out = append(out, learned)
+			continue
+		}
+		st := out[i]
+		st.Clocks = models.MergeClocks(st.Clocks, learned.Clocks)
+		if len(learned.ReqBodyNoise) > 0 {
+			st.ReqBodyNoise = learn.MergeReqBodyNoise(st.ReqBodyNoise, learned.ReqBodyNoise)
+		}
+		out[i] = st
+	}
+	return out
 }
 
 // clientTestsRemedy is what to do about a round whose agent did not say it

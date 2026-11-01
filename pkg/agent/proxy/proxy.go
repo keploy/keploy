@@ -5162,9 +5162,10 @@ func (p *Proxy) ExactTestOutcome() (string, []string, []string, bool) {
 }
 
 var (
-	_ agent.ExactServer        = (*Proxy)(nil)
-	_ agent.ExactTestOpener    = (*Proxy)(nil)
-	_ agent.WindowedTestOpener = (*Proxy)(nil)
+	_ agent.ExactServer            = (*Proxy)(nil)
+	_ agent.ExactTestOpener        = (*Proxy)(nil)
+	_ agent.WindowedTestOpener     = (*Proxy)(nil)
+	_ agent.LearnedElsewhereReader = (*Proxy)(nil)
 )
 
 // GetConsumedMocks returns the consumed filtered mocks.
@@ -5195,6 +5196,18 @@ func (p *Proxy) GetPersistentConsumed() map[string]models.MockState {
 		return nil
 	}
 	return m.GetPersistentConsumed()
+}
+
+// LearnedElsewhere forwards what the mock manager's learn step taught
+// recordings from calls made in other windows than theirs
+// (MockManager.LearnedElsewhere; implements coreAgent.LearnedElsewhereReader).
+// nil when no manager.
+func (p *Proxy) LearnedElsewhere() []models.MockState {
+	m := p.getMockManager()
+	if m == nil {
+		return nil
+	}
+	return m.LearnedElsewhere()
 }
 
 // testErrorAccumulator collects errors during an active test case.

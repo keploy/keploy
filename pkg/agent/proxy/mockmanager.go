@@ -156,6 +156,11 @@ type MockManager struct {
 	// its OWN consumption history instead of a copy the client re-sends every
 	// testcase. Read only when MockFilterParams.AgentOwnsConsumed is set.
 	consumedPersistent map[string]models.MockState
+	// learnedElsewhere is what record's full round learned onto recordings
+	// from calls made in other windows than theirs (LearnElsewhere), by
+	// name: never consumption, so never in consumedList or
+	// consumedPersistent. Reset as a new test set is staged.
+	learnedElsewhere map[string]models.MockState
 	// servedCount counts, per mock name, every time the mock answered a
 	// request this session, reset with consumedPersistent. A mock that may
 	// answer more than once keeps its first-use timestamp and its usage in
@@ -4930,6 +4935,9 @@ func (m *MockManager) dropPreviousSetConsumes() {
 	if m.consumedPersistent != nil {
 		m.consumedPersistent = make(map[string]models.MockState)
 	}
+	// What the previous set's calls taught its recordings is not this
+	// set's: recordings' names restart in each set.
+	m.learnedElsewhere = nil
 	m.consumedMu.Unlock()
 	m.bootTakenMu.Lock()
 	m.bootTaken = nil
