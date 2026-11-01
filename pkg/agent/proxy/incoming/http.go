@@ -322,7 +322,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 	actualPort := appPort
 
 	// Dial Upstream
-	upConn, err := dialIngressTarget(ctx, finalAppAddr, ingressTargetListenTimeout)
+	upConn, err := pm.dialApp(ctx, finalAppAddr)
 	if err != nil {
 		pm.logAppDialFailure(logger, "Failed to connect to upstream application. Verify the application is listening on the resolved address.",
 			err, zap.String("final_app_addr", finalAppAddr))
