@@ -573,3 +573,31 @@ func TestOutcomeAnAnswerKeyThatIsTheRequestsWholeTextIsRefused(t *testing.T) {
 		t.Errorf("an answer key holding the request inside a longer text: %s, echo %v; want fresh, served as recorded", oDescribe([]Decision{d}), d.Echo)
 	}
 }
+
+// A request's number sent as text (Mongo's {"$numberInt":"3"}) that the
+// call's answer holds whole as a number (a BSON timestamp's ordinal, 3)
+// reads the request back, as a field of its own type does: main finds it
+// whatever the two leaves' scalar types (WholeEcho; integrations' mongo
+// learn_test.go TestLearn_AnAnswersTimestampOrdinalIsTheNumberItHolds).
+// Learned fresh with that answer served as recorded, replay would hand the
+// application the old 3 beside its new 2. Named, it is answered there; at a
+// place keploy cannot name, refused. A number holding another value is no
+// read-back.
+func TestOutcomeAReadBackOfAnotherScalarTypeIsAnsweredThere(t *testing.T) {
+	call := func(a Leaf) Decision {
+		in := oInput("body.filter.retry", "3", "2", nil, nil)
+		in.PlaceOf = func(l Leaf, answer bool) (string, bool) { return VarPlace(l, true) }
+		in.Resp = []Leaf{a}
+		return oWord(t, Decide(in), "3", "2")
+	}
+	for _, typ := range []Type{Number, String} {
+		d := call(Leaf{Path: "body.seen.i", Noise: "body.seen.i", Type: typ, Value: "3"})
+		if d.Outcome != OutcomeFresh || len(d.Echo) != 1 || d.Echo[0].String() != "body.seen.i#0" {
+			t.Errorf("a %c answer holding the request's whole text: %s, echo %v; want fresh, answered at body.seen.i#0", typ, oDescribe([]Decision{d}), d.Echo)
+		}
+	}
+	oRefused(t, "a number read back at a place keploy cannot name", call(Leaf{Path: "body.seen.i", Type: Number, Value: "3", Unnamed: true}), RefusalCannotCheck, "body.seen.i")
+	if d := call(Leaf{Path: "body.seen.i", Noise: "body.seen.i", Type: Number, Value: "33"}); d.Outcome != OutcomeFresh || len(d.Echo) > 0 {
+		t.Errorf("a number holding another value: %s, echo %v; want fresh, served as recorded", oDescribe([]Decision{d}), d.Echo)
+	}
+}
