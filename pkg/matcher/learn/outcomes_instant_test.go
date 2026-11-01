@@ -1040,6 +1040,29 @@ func TestOutcomeTheReadingIsAskedBeforeAWideWindowsPlainRead(t *testing.T) {
 	}
 }
 
+// api-server's worker claims a job at a second that, under load, is also the
+// second of a UnixNano in an app's name an earlier answer gave. The answer
+// holds round F's second only as a cut of that finer instant: no application
+// picks a second out of a name, and no variable could hold that text. It is
+// no pick, and the call's window holds the read: a Clock, whose check goes
+// red if it was a pick. An answer that gives the second itself stays a pick.
+func TestOutcomeASecondInsideAnAnswersNanosecondNameIsNoPick(t *testing.T) {
+	const p = "body.updates.0.u.$set.claimedAt"
+	secs := func(t time.Time) string { return strconv.FormatInt(t.Unix(), 10) }
+	rAt := oAt.Add(400 * time.Millisecond)
+	fAt := oAt.Add(time.Hour + 300*time.Millisecond)
+	rec, live := secs(rAt.Add(-5*time.Millisecond)), secs(fAt.Add(-5*time.Millisecond))
+	answer := func(v string) Earlier {
+		return Earlier{Mock: "mock-223", At: rAt.Add(-200 * time.Millisecond), Own: true,
+			Seen: []Seen{{Side: Response, Leaf: oText("resp.0.0.cursor.firstBatch.0.app.name", v), Live: v}}}
+	}
+	name := "[E2E] app-crud-" + strconv.FormatInt(fAt.Add(-150*time.Millisecond).UnixNano(), 10)
+	in := iCall(p, Number, rec, live, rAt, fAt, iWin(rAt, fAt, 30*time.Millisecond), []Earlier{answer(name)}, nil)
+	iClock(t, "a second inside an answer's nanosecond name", oWord(t, Decide(in), rec, live))
+	in = iCall(p, Number, rec, live, rAt, fAt, iWin(rAt, fAt, 30*time.Millisecond), []Earlier{answer(live)}, nil)
+	oRefused(t, "an answer that gives round F's second itself", oWord(t, Decide(in), rec, live), "pick", "mock-223")
+}
+
 // A read plus a time to live (a lease until now + 30 min, in epoch
 // milliseconds) its call's window holds in both runs is a Clock with that
 // offset, and its line names the offset: the window alone holds the read,
