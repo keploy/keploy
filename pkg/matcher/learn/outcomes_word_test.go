@@ -883,18 +883,22 @@ func TestOutcomeAShortIdInsideAnEncodingIsChance(t *testing.T) {
 	}
 }
 
-// An id another test sent is out of the call's scope: this rule reads only
-// the call's scope, and the encoded value's words stay fresh, as they do
-// with no place at all.
-func TestOutcomeAnIdAnotherTestSentInsideAnEncodingIsNotThisRule(t *testing.T) {
+// An id another test sent, inside an encoding, is refused as the plain word
+// is there: keploy binds only within a test and the start-up, and the line
+// names the mappings edit.
+func TestOutcomeAnIdAnotherTestSentInsideAnEncodingIsRefusedNamingTheEdit(t *testing.T) {
 	const r, f = "rAHcEraS7Qx1", "Zq81Lm0XpVb4"
 	enc := oEncoded()["a signed message"]
 	sent := oSent(r, f)
 	sent[0].Own, sent[0].Run = false, true
 	ds := Decide(oInput("body.blob", enc(r), enc(f), sent, nil))
+	if len(ds) == 0 {
+		t.Fatal("no decision")
+	}
 	for _, d := range ds {
-		if d.Outcome != OutcomeFresh {
-			t.Errorf("want fresh: %s", oDescribe(ds))
+		oRefused(t, "another test's id in an encoding", d, RefusalAnotherScope, "mock-0", r)
+		if !oEdits(d.Refusal, EditMoveToMocks, EditMoveToStartup, EditNoiseAtField) {
+			t.Errorf("no mappings edit to act on: %+v", d.Refusal)
 		}
 	}
 }
@@ -945,7 +949,7 @@ func TestOutcomeASeparatorChangedBesideAWordGoesRedAtReplay(t *testing.T) {
 		{name: "fresh", rec: "a-17", live: "a_42", rendered: "a-42"},
 		{name: "bound", rec: "a-17", live: "a_42", rendered: "a-42", earlier: oSent("17", "42")},
 		{name: "fresh, the separator after the word", rec: "order-17_x", live: "order-42-x", rendered: "order-42_x"},
-		{name: "fresh, every word of a token", rec: "Sfl-KxwRJ_SMe", live: "Q1x_Yp-9vTq", rendered: "Q1x-Yp_9vTq"},
+		{name: "fresh, every word of a token too short to read as one value", rec: "Sfl-KxwRJ_SMe", live: "Q1x_Yp-9vTq", rendered: "Q1x-Yp_9vTq"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ds := Decide(oInput("body.ref", tc.rec, tc.live, tc.earlier, nil))
@@ -1043,4 +1047,38 @@ func TestOutcomeAWordEveryCandidateShowsIsBoundWhateverTheirOrder(t *testing.T) 
 	kept := oCarried("mock-3", "body.note", r, r, 1800*time.Millisecond, 100*time.Millisecond, 3)
 	d := oWord(t, Decide(oInput("body.cmd.filter.appId", "id "+r, "id "+f, []Earlier{first, second, kept}, nil)), r, f)
 	oRefused(t, "a candidate that kept the recorded word, in flight with the others", d, RefusalUnknown, "in flight together")
+}
+
+// A field that is one URL-safe base64 token in each run, whose '-' and '_'
+// stand elsewhere in round F: those are letters of the token, so its words
+// do not pair, and word by word replay could never write it. It is one value:
+// fresh at its first send, and bound where an earlier place shows it whole.
+// A short id whose separator changed is no such token, and a word an earlier
+// place holds may be carried inside it: the word rules read those.
+func TestOutcomeAWholeURLSafeTokenIsOneValue(t *testing.T) {
+	const (
+		same  = "Sfl-KxwRJ_SMeKKF2QT4fwpMeJf36POk6yJV_adQssw"
+		other = "Q1x_Yp-9vTq3LmN0Rr4sWkHd2cJ7aBfE5gUoZ_iXyPq"
+		rec   = "kepreq_9fsSK78UnjdjTSFj51vJvm_CkQdnzdp6aRCUCH0PP5g"
+		live  = "kepreq_WWEEXXKJO_kzw3aZ8Wxfl5wsJUE3V7QGpBKzyTlYA_0"
+	)
+	for _, tc := range []struct{ name, r, f string }{
+		{"as many words in each run", same, other},
+		{"a word more in round F, beside a kept prefix", rec, live},
+	} {
+		ds := Decide(oInput("body.docs.msgs.0._id", tc.r, tc.f, nil, nil))
+		if len(ds) != 1 || ds[0].Outcome != OutcomeFresh || ds[0].At.Word != -1 || ds[0].Recorded != tc.r || ds[0].Full != tc.f {
+			t.Errorf("%s: %s; want one fresh value, the field whole", tc.name, oDescribe(ds))
+		}
+	}
+	d := Decide(oInput("body.cmd.query._id", rec, live, oSent(rec, live), nil))
+	if len(d) != 1 || d[0].Outcome != OutcomeValue || d[0].From.Mock != "mock-0" {
+		t.Errorf("a later send: %s; want a Value bound at the first send", oDescribe(d))
+	}
+	if ds := Decide(oInput("body.ref", "9fsSK78UnjdjTSFj_x", "WWEEXXKJOkzw3aZ8_x-y", oSent("9fsSK78UnjdjTSFj", "WWEEXXKJOkzw3aZ8"), nil)); len(ds) == 0 || ds[0].Outcome != OutcomeRefused {
+		t.Errorf("an id an earlier call sent, carried inside the token: %s; want refused", oDescribe(ds))
+	}
+	if ds := Decide(oInput("body.ref", "a-17", "a_42", nil, nil)); len(ds) != 1 || ds[0].At.Word < 0 {
+		t.Errorf("a short id: %s; want its word, not the field whole", oDescribe(ds))
+	}
 }
