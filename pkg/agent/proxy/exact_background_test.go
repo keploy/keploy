@@ -751,7 +751,8 @@ func TestKindBackgroundIgnoresPlace(t *testing.T) {
 	equalNames(t, "the spent background", mm.SpentBackground(models.HTTP), "w-later")
 
 	// Its place reached, a window reads it: the by-kind answer between
-	// tests spent it for the calls outside every test only. Main's row hid
+	// tests listed it spent for the by-kind answers outside every window
+	// only (the other doors still read it there). Main's row hid
 	// it here, so whether a window was answered depended on how many calls
 	// landed between tests. It answers one window's call, then nothing.
 	mm.ServeExactWorker([]string{"w-boot", "w-later"})
@@ -787,7 +788,7 @@ func TestKindBackgroundIgnoresPlace(t *testing.T) {
 // A by-kind spend of a worker recording is the view's its call was read in,
 // as a consume door's is (TestAWorkerSpendFollowsTheViewTheCallWasReadIn): a
 // call read between tests whose spend lands after the next test opened
-// spends it for the calls between tests only, and a test's call whose spend
+// spends nothing a window reads, and a test's call whose spend
 // lands after its end spends it for the windows. Settled in the view in
 // force, the first hid the recording from the test's window and the second
 // let a later window be answered it again, as the commit landed before or
