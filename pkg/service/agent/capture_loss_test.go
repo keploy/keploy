@@ -321,6 +321,72 @@ func TestATLSAbortFailsTheReplayedTest(t *testing.T) {
 	require.Contains(t, e.Reason, "1 TLS handshake(s) with keploy's proxy failed")
 }
 
+// One connection's lost bytes are charged to one test: the test the loss
+// landed in. A test that ran clean after it is not failed with it, and is not
+// set aside: keploy answered 502 Connection: close on a read the test had no
+// recording for, one such connection's loss failed that test and the next,
+// which made no failing call, and the read's move was never seen. One between
+// two tests is the next test's, as a miss between tests is. The run's count
+// holds each loss once.
+func TestLostBytesAreChargedToOneTest(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mode models.Mode
+		// fails: the test charged fails (a replay); a record keeps the
+		// evidence on the window alone.
+		fails bool
+	}{
+		{"replay", models.MODE_TEST, true},
+		{"record", models.MODE_RECORD, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, p := wireAgent(t, tc.mode)
+			lp := lossProxy{wireProxy: p}
+			a.Proxy = lp
+			a.proven.losses = a.markCaptureLosses(context.Background())
+			claimSelf(t, a)
+			lost := func(n uint64) {
+				lp.losses = models.CaptureLosses{{Kind: models.CaptureLossAppBytesLost, Count: n, What: "from [::ffff:127.0.0.1]:50912"}}
+				a.Proxy = lp
+			}
+			charged := func(name string, want bool) {
+				t.Helper()
+				w := windowOf(t, a, "o::"+name)
+				var got models.CaptureLosses
+				if want {
+					got = models.CaptureLosses{{Kind: models.CaptureLossAppBytesLost, Count: 1, What: "from [::ffff:127.0.0.1]:50912"}}
+				}
+				if w.Evidence == nil {
+					require.False(t, want, "%s holds no evidence", name)
+					return
+				}
+				require.Equal(t, got, w.Evidence.CaptureIncomplete, name)
+			}
+			action := ""
+			if tc.fails {
+				action = models.ScopeActionFail
+			}
+			ctx := context.Background()
+			_, serr := a.ProvenBegin(ctx, begin("TestNext"))
+			require.Nil(t, serr)
+			lost(1)
+			e, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: "TestNext", Outcome: "failed"})
+			require.Nil(t, serr)
+			require.Equal(t, action, e.Action, "the test the loss landed in")
+			require.Empty(t, endPassed(t, a, "TestLast").Action, "a later test is not charged with it")
+
+			lost(2) // between two tests
+			require.Equal(t, action, endPassed(t, a, "TestAfter").Action, "a loss between tests is the next test's")
+			require.Empty(t, endPassed(t, a, "TestEnd").Action)
+
+			charged("TestNext", true)
+			charged("TestLast", false)
+			charged("TestAfter", true)
+			charged("TestEnd", false)
+		})
+	}
+}
+
 // A TLS client's rejection of keploy's certificate is the test's it happened
 // in, not a taint of every later test: the client's other calls are captured,
 // or rejected, on their own. One between two tests is the next test's, as a
