@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"go.keploy.io/server/v3/pkg/models"
 )
 
 // Rows for the evidence at a place (Decide): which earlier places count,
@@ -206,4 +208,43 @@ func TestOutcomeARecordingFServedWithNoViewStatedLeavesTheWordUnknown(t *testing
 			t.Errorf("%s: %s; want fresh", c.what, oDescribe([]Decision{d}))
 		}
 	}
+}
+
+// An instant that stands in an answer outside the call's scope, given
+// before the call in both runs (another test's recording, or one recorded
+// before the call that the set keeps elsewhere), and that its call's window
+// holds too: a source outside the scope, refused naming the edit as a
+// word's is, never a read of the clock. On main the first binds to the
+// other test's answer and the second is a Clock: both stricter here. The
+// call's own test's answer binds it. The set's recordings keep their
+// instants as recorded, not round F's view of them, so an instant only F's
+// serve of one holds is a Clock, as on main (it goes red at replay where
+// the application copies it, never green).
+func TestOutcomeAnInstantAnAnswerOutsideTheScopeGaveIsRefusedNamingTheEdit(t *testing.T) {
+	const p = "body.seenAt"
+	fAt := oAt.Add(time.Hour)
+	rRead, fRead := oAt.Add(-40*time.Millisecond), fAt.Add(-40*time.Millisecond)
+	rec, live := iMs(rRead), iMs(fRead)
+	ans := func(v string) Raw {
+		return oPg("mock-41", 30*time.Millisecond, "SELECT now()", []models.PostgresV3Cells{{{Value: v}}}, "SELECT 1")
+	}
+	served := func() Raw { return ans(rec).ServedAs(3).ServedLive(ans(live)) }
+	call := func(raw []Raw) Input {
+		return iCall(p, String, rec, live, oAt, fAt, iWin(oAt, fAt, 100*time.Millisecond), nil, raw)
+	}
+	for _, c := range []struct {
+		what string
+		x    Raw
+	}{
+		{"another test's answer", served().ServedInAnOlderTest()},
+		{"a recording outside the test", served().OfAnotherTest()},
+		{"a recording outside the test, F's view not stated", ans(rec).ServedAs(3).OfAnotherTest()},
+	} {
+		oRefused(t, "an instant "+c.what+" gave", oWord(t, Decide(call([]Raw{c.x})), rec, live), "another-scope", "mock-41")
+	}
+	iValue(t, "an instant the test's own answer gave", oWord(t, Decide(call([]Raw{served()})), rec, live), "mock-41")
+
+	in := call(nil)
+	in.Given = func() ([]GivenPlaces, error) { return []GivenPlaces{PlacesOf(served())}, nil }
+	iClock(t, "an instant a recording of the set gave, read as recorded", oWord(t, Decide(in), rec, live))
 }
