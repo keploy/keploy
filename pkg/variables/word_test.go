@@ -65,6 +65,17 @@ func TestAWordAddressReadsAsItIsWritten(t *testing.T) {
 			t.Errorf("%+v prints %q, which reads as %+v %v and %+v %v", p, s, q, err, a, aerr)
 		}
 	}
+	// A name ending in '\' keeps it before a step or a word.
+	for _, a := range []Address{
+		{Place: Place{Part: PartQuery, Name: `a\`}, Steps: []Step{StepB64}, Word: 2},
+		{Place: Place{Part: PartHeader, Name: `X\`}, Word: 0},
+		{Place: Place{Part: PartHeader, Name: "Authorization"}, Steps: []Step{JWTClaim(`e\`), StepPct}, Word: 1},
+		{Place: Place{Part: PartHeader, Name: "Cookie"}, Steps: []Step{Cookie(`s\`)}, Word: 0},
+	} {
+		if b, err := ParseAddress(a.String()); err != nil || !reflect.DeepEqual(a, b) {
+			t.Errorf("%+v prints %q, which reads as %+v, %v", a, a.String(), b, err)
+		}
+	}
 	// One written before the escape reads as it did.
 	if a, err := ParseAddress("header.X|Y"); err != nil || a.Place.Name != "X|Y" || a.Word != -1 {
 		t.Errorf("an unescaped name reads as %+v, %v", a, err)
@@ -80,7 +91,7 @@ func TestAWordAddressReadsAsItIsWritten(t *testing.T) {
 		}
 	}
 
-	for _, s := range []string{"url.path[2]|nope", "url.path[2]#x", "url.path[2]#01", "header.", "url.path[2]|jwt.", "body"} {
+	for _, s := range []string{"url.path[2]|nope", "url.path[2]#x", "url.path[2]#01", "header.", "url.path[2]|jwt.", "url.path[2]|cookie.", "body"} {
 		if a, err := ParseAddress(s); err == nil || a.Word != -1 {
 			t.Errorf("ParseAddress(%q) = %+v, %v; want an error and word -1 (the whole value)", s, a, err)
 		}
@@ -141,6 +152,11 @@ func TestAWordIsReadAndReplacedThroughItsSteps(t *testing.T) {
 		{"a cookie value with a quote", "sid=abc-17", []Step{Cookie("sid")}, -1, "abc-17", `a"b`, ""},
 		{"a cookie value with a comma", "sid=abc-17", []Step{Cookie("sid")}, -1, "abc-17", "a,b", ""},
 		{"a cookie value with a backslash", "sid=abc-17", []Step{Cookie("sid")}, -1, "abc-17", `a\b`, ""},
+		{"a cookie value with a DEL", "sid=abc-17", []Step{Cookie("sid")}, -1, "abc-17", "a\x7fb", ""},
+		{"a cookie value with a control byte", "sid=abc-17", []Step{Cookie("sid")}, -1, "abc-17", "a\x01b", ""},
+		// Blanks before a cookie's ';' are not its value.
+		{"a cookie word before blanks", "sid=abc-17 ; b=2", []Step{Cookie("sid")}, 1, "17", "42", "sid=abc-42 ; b=2"},
+		{"a cookie value before blanks", "sid=abc-17\t; b=2", []Step{Cookie("sid")}, -1, "abc-17", "x9", "sid=x9\t; b=2"},
 	} {
 		a := Address{Place: q, Steps: c.steps, Word: c.word}
 		got, ok := a.WordOf(c.leaf)
@@ -165,6 +181,9 @@ func TestAWordIsReadAndReplacedThroughItsSteps(t *testing.T) {
 		word  int
 	}{
 		{"%zz", []Step{StepPct}, -1},
+		{"a%2", []Step{StepPct}, -1},
+		{"a%", []Step{StepPct}, -1},
+		{"a%2", []Step{StepPct}, 0},
 		{"a=1; a=2", []Step{Cookie("a")}, -1},
 		{"b=1", []Step{Cookie("a")}, -1},
 		{"not.a.jwt!", []Step{JWTClaim("sub")}, -1},

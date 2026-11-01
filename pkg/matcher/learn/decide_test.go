@@ -73,10 +73,14 @@ func TestDecideWithNoOrderRefusesEveryChangedWord(t *testing.T) {
 	}
 	in := Input{
 		Test: "test-1", Mock: "mock-3",
-		Rec:   Shape{Leaves: leaves("body.id", "order-17-a-5", "body.sep", "a-b", "header.date", "2026-11-01T10:00:00Z", "body.more", "a b", "body.mix", "a-17", "body.nul", "a\x00\x00b"), Body: map[string]interface{}{}},
-		Live:  Shape{Leaves: leaves("body.id", "order-42-a-6", "body.sep", "a_b", "header.date", "2026-11-01T10:00:05Z", "body.more", "a b c", "body.mix", "a_42", "body.added", "new", "body.nul", "\x00c\x00d"), Body: map[string]interface{}{}},
-		Drift: []string{"body.id", "body.sep", "header.date", "body.more", "body.gone", "body.mix", "body.added", "body.nul"},
+		Rec:   Shape{Leaves: leaves("body.id", "order-17-a-5", "body.sep", "a-b", "header.date", "2026-11-01T10:00:00Z", "body.more", "a b", "body.mix", "a-17", "body.nul", "a\x00\x00b", "body.tail", "a-17", "body.when", "17-a"), Body: map[string]interface{}{}},
+		Live:  Shape{Leaves: leaves("body.id", "order-42-a-6", "body.sep", "a_b", "header.date", "2026-11-01T10:00:05Z", "body.more", "a b c", "body.mix", "a_42", "body.added", "new", "body.nul", "\x00c\x00d", "body.tail", "a-42-", "body.when", "42-a"), Body: map[string]interface{}{}},
+		Drift: []string{"body.id", "body.sep", "header.date", "body.more", "body.gone", "body.mix", "body.added", "body.nul", "body.tail", "body.when"},
 	}
+	// Typed an instant in the full round alone: still not split into words.
+	when := in.Live.Leaves["body.when"]
+	when.Type = Instant
+	in.Live.Leaves["body.when"] = when
 	ds := Decide(in)
 	type got struct {
 		field, at, r, f string
@@ -88,8 +92,12 @@ func TestDecideWithNoOrderRefusesEveryChangedWord(t *testing.T) {
 			t.Fatalf("Decide gave %+v; want a refusal alone", d)
 		}
 		r := d.Refusal
-		if r.Kind != RefusalCannotCheck || r.Test != "test-1" || r.Mock != "mock-3" || r.Recorded != d.Recorded || r.Full != d.Full || len(r.Edits) != 1 || r.Edits[0].Kind != EditNoiseAtField {
+		if r.Kind != RefusalCannotCheck || r.Test != "test-1" || r.Mock != "mock-3" || r.Recorded != d.Recorded || r.Full != d.Full || len(r.Edits) != 1 {
 			t.Errorf("refusal %+v", r)
+		}
+		// A word's edit is noise at its whole field, never at the word.
+		if want := (Edit{Kind: EditNoiseAtField, Mock: "mock-3", Field: r.Field, Word: -1}); len(r.Edits) == 1 && r.Edits[0] != want {
+			t.Errorf("%s word %d: edit %+v, want %+v", r.Field, r.Word, r.Edits[0], want)
 		}
 		if !strings.HasPrefix(d.Line, "test-1 mock-3 "+r.Field) || !strings.Contains(d.Line, "keploy cannot check") || !strings.Contains(d.Line, "keploy's limit") {
 			t.Errorf("line %q", d.Line)
@@ -106,6 +114,8 @@ func TestDecideWithNoOrderRefusesEveryChangedWord(t *testing.T) {
 		{"body.mix", "body.mix", "a-17", "a_42", -1},
 		{"body.added", "body.added", "", "new", -1},
 		{"body.nul", "body.nul", "a\x00\x00b", "\x00c\x00d", -1},
+		{"body.tail", "body.tail", "a-17", "a-42-", -1},
+		{"body.when", "body.when", "17-a", "42-a", -1},
 	}
 	if !reflect.DeepEqual(gots, want) {
 		t.Errorf("Decide refused\n%+v\nwant\n%+v", gots, want)
@@ -204,6 +214,7 @@ func TestABodylessShapeNamesItsPlacesByTheAdapter(t *testing.T) {
 		return out
 	}
 	withB64 := func(l Leaf, a bool) (string, bool) { s, ok := VarPlace(l, true); return s + "|b64", ok }
+	withJSON := func(l Leaf, a bool) (string, bool) { s, ok := VarPlace(l, true); return s + "|json", ok }
 	for _, c := range []struct {
 		name    string
 		placeOf func(Leaf, bool) (string, bool)
@@ -218,6 +229,10 @@ func TestABodylessShapeNamesItsPlacesByTheAdapter(t *testing.T) {
 		{"opened, the words do not pair", withB64, b64("order-17"), b64("order-17-x"), []got{{"body.name|b64", "order-17", "order-17-x", -1}}},
 		{"a word the adapter names is the leaf whole", func(l Leaf, a bool) (string, bool) { s, ok := withB64(l, a); return s + "#3", ok }, b64("order-17"), b64("order-42"), []got{{"body.name|b64#1", "17", "42", 1}}},
 		{"a place that does not parse", func(Leaf, bool) (string, bool) { return "body", true }, "order-17", "order-42", []got{{"", "17", "42", 1}}},
+		{"a place in another dialect", func(Leaf, bool) (string, bool) { return "filter.name", true }, "order-17", "order-42", []got{{"", "17", "42", 1}}},
+		// Only the encoding changed: the field as written, so the line shows it.
+		{"padded against raw base64 of one text", withB64, b64("order-17"), strings.TrimRight(b64("order-17"), "="), []got{{"body.name", "b3JkZXItMTc=", "b3JkZXItMTc", -1}}},
+		{"a JSON escape against the plain byte", withJSON, `"order\u002d17"`, `"order-17"`, []got{{"body.name", `"order\u002d17"`, `"order-17"`, -1}}},
 	} {
 		if g := at(c.placeOf, c.r, c.f); !reflect.DeepEqual(g, c.want) {
 			t.Errorf("%s: %+v, want %+v", c.name, g, c.want)

@@ -192,12 +192,14 @@ type Input struct {
 
 // AddressOf is the address of l, a leaf of the call's request (answer
 // false) or of its answer, with word -1 (the whole leaf). in.PlaceOf names
-// the place where the adapter set it: a shape with no Body (Mongo) names its
-// places in its own path dialect, and may add steps that decode the leaf
-// (`|b64`). Else VarPlace names it: a request leaf as JSON only where the
-// request's body is, an answer leaf as JSON (Resp holds a JSON answer's
-// leaves). The zero Address (Word -1) where neither names a place that
-// parses. Every order builds each Decision's At and Echo here, and its
+// the place where the adapter set it (a shape with no Body, as Mongo's): a
+// word address in Place's grammar (body.<path>, url.path[<n>],
+// url.query.<name> or header.<name>), then any steps that decode the leaf
+// (`|b64`). A string in any other form names no place. Else VarPlace names
+// it: a request leaf as JSON only where the request's body is, an answer
+// leaf as JSON (Resp holds a JSON answer's leaves). The zero Address (Word
+// -1) where neither names a place that parses: its words are refused with
+// no address. Every order builds each Decision's At and Echo here, and its
 // FromAt from the earlier answer's leaf (answer true).
 func (in Input) AddressOf(l Leaf, answer bool) variables.Address {
 	place := func(l Leaf, answer bool) (string, bool) { return VarPlace(l, answer || in.Rec.Body != nil) }
@@ -254,8 +256,9 @@ var (
 // Both values are opened through the steps of the leaf's address, and their
 // words split there: each word of a leaf whose words pair by position, else
 // the opened text whole (a word added or dropped, a separator changed, a
-// typed instant). Where a step does not open a side, the field is refused
-// whole as written, at its place with no step.
+// typed instant). Where a step does not open a side, or both open to one
+// text (only the encoding changed), the field is refused whole as written,
+// at its place with no step, so its line shows what changed.
 func refuseAll(in Input) []Decision {
 	var out []Decision
 	for _, path := range in.Drift {
@@ -267,11 +270,12 @@ func refuseAll(in Input) []Decision {
 		}
 		r, rok := at.WordOf(rec.Value)
 		f, fok := at.WordOf(live.Value)
-		if !rok || !fok {
+		opened := rok && fok && r != f
+		if !opened {
 			at.Steps, r, f = nil, rec.Value, live.Value
 		}
 		n := len(out)
-		if rw, lw := variables.Words(r), variables.Words(f); rok && fok && rec.Type != Instant && live.Type != Instant && len(rw) == len(lw) && slices.Equal(apart(r, rw), apart(f, lw)) {
+		if rw, lw := variables.Words(r), variables.Words(f); opened && rec.Type != Instant && live.Type != Instant && len(rw) == len(lw) && slices.Equal(apart(r, rw), apart(f, lw)) {
 			for i := range rw {
 				if a, b := r[rw[i][0]:rw[i][1]], f[lw[i][0]:lw[i][1]]; a != b {
 					out = append(out, cannotCheck(in, path, at, i, a, b))
