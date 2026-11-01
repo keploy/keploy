@@ -601,3 +601,28 @@ func TestOutcomeAReadBackOfAnotherScalarTypeIsAnsweredThere(t *testing.T) {
 		t.Errorf("a number holding another value: %s, echo %v; want fresh, served as recorded", oDescribe([]Decision{d}), d.Echo)
 	}
 }
+
+// A fresh word's line names the earlier place it set aside as its source
+// (learning legible; main's line named it): the test's earlier find answered
+// "blue-17" in both runs, and the call sends "red-42" where the recording
+// sent "blue-17". A copy moves with its source, so the find is no source:
+// each changed word is fresh, and its line says the find held the recorded
+// word and round F gave it unchanged there. With no such find the line names
+// nothing set aside. (Integrations' mongo learn_test.go
+// TestLearn_NoiseLearnedPastASourceSetAsideNamesItOnTheLearnLine.)
+func TestOutcomeAFreshWordNamesThePlaceItSetAside(t *testing.T) {
+	for _, withFind := range []bool{true, false} {
+		var earlier []Earlier
+		if withFind {
+			earlier = oServed("mock-0", false, false, Response, oText("body.tag", "blue-17"), "blue-17", time.Millisecond)
+		}
+		ds := Decide(oInput("body.note", "blue-17", "red-42", earlier, nil))
+		for _, w := range [][2]string{{"blue", "red"}, {"17", "42"}} {
+			d := oWord(t, ds, w[0], w[1])
+			named := strings.Contains(d.Line, "mock-0") && strings.Contains(d.Line, "set aside")
+			if d.Outcome != OutcomeFresh || named != withFind {
+				t.Errorf("the earlier find %v, %s to %s: %s, line %q; want fresh, naming mock-0 set aside: %v", withFind, w[0], w[1], oDescribe([]Decision{d}), d.Line, withFind)
+			}
+		}
+	}
+}
