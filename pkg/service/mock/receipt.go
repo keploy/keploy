@@ -324,11 +324,11 @@ type LearnedElsewhere struct {
 	// Mock is the recording.
 	Mock string `yaml:"mock" json:"mock"`
 	// Owner is the test whose mapping lists the recording, "" for the set's
-	// start-up and pool. No call of its own taught it what Fields says.
+	// start-up and pool. No call of the round consumed it: what a call in
+	// another window taught a recording its own pairing took is voided.
 	Owner string `yaml:"owner,omitempty" json:"owner,omitempty"`
 	// Fields are what was written onto the recording at the places such
-	// calls taught, each as "<path> (<clock read>)". One a call of the
-	// recording's own test taught too is on that test's line as well.
+	// calls taught, each as "<path> (<clock read>)".
 	Fields []string `yaml:"fields" json:"fields"`
 	// TaughtIn are the windows those calls came in, in time order: the test
 	// open when they came, "" between tests or where keploy no longer knew
