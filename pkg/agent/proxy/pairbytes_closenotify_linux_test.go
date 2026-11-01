@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"net/netip"
 	"runtime"
 	"sync"
 	"testing"
@@ -357,5 +358,118 @@ func TestADeadlineSetDuringTheClosesReadIsNoEndOfIt(t *testing.T) {
 	}
 	if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 0 {
 		t.Fatalf("app_bytes_lost = %d, want 0: a deadline another reader set ended the close's read", l)
+	}
+}
+
+// A TLS client that meets keploy's close -- it reads the answer keploy closed
+// after (a 502 with Connection: close), then closes, its close_notify first --
+// writes that close_notify after keploy's close: no capture loss. The proxy's
+// orphan answers it with a reset, as the client's own close does with
+// keploy's close_notify unread, so a wait finds the client's socket gone, or,
+// read before that, the close_notify counted as written. Neither is charged,
+// and neither is unknown. Both were, for HTTPS dependencies, with no load
+// needed.
+func TestATLSClientsCloseNotifyAfterTheProxysCloseIsNoLoss(t *testing.T) {
+	for _, v := range tlsVersions {
+		t.Run(v.name, func(t *testing.T) {
+			p, app, _, _, srv, cli := tlsHeldPair(t, v.version)
+			pc := pairedConnOf(t, p, 1)
+			_ = srv.Close() // keploy's close_notify, then its close
+			w := pc.wroteAtClose.Load()
+			at := pc.atClose.Load()
+			if w == nil || at == nil || w.want != at.received {
+				t.Fatalf("the close's reads: written %+v, received %+v; want all the client wrote received", w, at)
+			}
+			_ = cli.Close() // the client's close_notify, then its close
+			// What a wait reads of the client's socket before the reset:
+			// the close_notify record and the FIN.
+			target := &pairTarget{pc: pc, want: w.want + 25, finCounted: true}
+			if reached, err := p.pairReached(target); err != nil || !reached {
+				t.Fatalf("pairReached = %v, %v, want settled", reached, err)
+			}
+			if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 0 {
+				t.Fatalf("%d app_bytes_lost charged for the client's close_notify, want none", l)
+			}
+			a, pr := mustAddrPort(t, app.LocalAddr()), mustAddrPort(t, app.RemoteAddr())
+			for {
+				if _, err := lookupTCP(a, pr); errors.Is(err, errNoSocket) {
+					break
+				}
+				runtime.Gosched()
+			}
+			if err := p.WaitPairedBytes(context.Background(), 1); err != nil {
+				t.Fatalf("WaitPairedBytes with the client's socket reset: %v, want settled", err)
+			}
+			if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 0 {
+				t.Fatalf("%d app_bytes_lost charged, want none", l)
+			}
+		})
+	}
+}
+
+// Bytes a TLS client wrote before keploy's close that are still on their way
+// as it begins -- the close's read of the client's socket counts them, the
+// proxy's side has not received them -- are read through the TLS layer as
+// unread ones are: a close_notify is no loss, and the read waits for it; data
+// is a loss. A fixture on loopback cannot hold bytes on their way on demand,
+// so the close's read is made to count 24 more than were written, and the
+// client writes them once the close has begun.
+func TestATLSClientsBytesOnTheirWayAtTheProxysCloseAreReadThrough(t *testing.T) {
+	for _, v := range tlsVersions {
+		for _, data := range []bool{false, true} {
+			name := v.name + ", its close_notify"
+			if data {
+				name = v.name + ", data"
+			}
+			t.Run(name, func(t *testing.T) {
+				p, _, _, _, srv, cli := tlsHeldPair(t, v.version)
+				pc := pairedConnOf(t, p, 1)
+				was := lookupWritten
+				lookupWritten = func(ds *diagSock, a, b netip.AddrPort) (diagTCP, error) {
+					d, err := was(ds, a, b)
+					if err == nil && d.info != nil {
+						d.wqueue += 24
+					}
+					return d, err
+				}
+				t.Cleanup(func() { lookupWritten = was })
+				closed := make(chan struct{})
+				go func() {
+					defer close(closed)
+					_ = srv.Close()
+				}()
+				for pc.atClose.Load() == nil {
+					runtime.Gosched()
+				}
+				lookupWritten = was
+				if data {
+					if _, err := cli.Write([]byte("publish 2\n")); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					if _, err := io.ReadAll(cli); err != nil { // keploy's close_notify
+						t.Fatal(err)
+					}
+					_ = cli.Close() // its own close_notify, then its FIN
+				}
+				<-closed
+				want := uint64(0)
+				if data {
+					want = 1
+				}
+				if l := lossesOf(p, models.CaptureLossAppBytesLost); l != want {
+					t.Fatalf("app_bytes_lost = %d at the proxy's close, want %d", l, want)
+				}
+				if data {
+					return
+				}
+				if err := p.WaitPairedBytes(context.Background(), 1); err != nil {
+					t.Fatalf("WaitPairedBytes: %v, want settled: the bytes on their way were the client's close_notify", err)
+				}
+				if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 0 {
+					t.Fatalf("%d app_bytes_lost charged, want none", l)
+				}
+			})
+		}
 	}
 }
