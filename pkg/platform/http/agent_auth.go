@@ -73,7 +73,9 @@ func ownConnections(rt http.RoundTripper) http.RoundTripper {
 // waiting and close that connection under the next request, which took it from
 // the pool: that one fails with this request's cancel, on a context nothing
 // cancelled, and keploy's read of what a run did failed so ("failed to get
-// scope windows ...: context canceled") after a run that passed.
+// scope windows ...: context canceled") after a run that passed. That is a
+// net/http race (golang/go#82547): once it is fixed in the Go keploy builds
+// with, these requests can go back on the shared pool.
 func (a *AgentClient) ownConnection() http.Client {
 	client := a.client
 	client.Transport = ownConnections(client.Transport)
