@@ -61,7 +61,11 @@ type RecordHooks interface {
 	AfterMockInsert(ctx context.Context, info *MockContext) error
 	// AfterRecordingComplete runs once, after the whole test set is persisted.
 	// Used for cross-artifact passes that need every test case and mock on disk
-	// (e.g. the Basic-Auth re-key correlation).
+	// (e.g. the Basic-Auth re-key correlation). Its context has no deadline:
+	// the hook bounds its own work by what it counts, never by a clock. The
+	// context ends only when the user stops the pass at a second interrupt
+	// (cause ErrHookStoppedNow); a hook stops then, and says what it leaves
+	// undone (RunAfterRecordingHook).
 	AfterRecordingComplete(ctx context.Context, info *RecordingCompleteContext) error
 }
 

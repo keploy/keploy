@@ -313,6 +313,10 @@ type hookSpy struct {
 	mu       sync.Mutex
 	calls    []string
 	complete []rec.RecordingCompleteContext
+	// stoppable says, for each AfterRecordingComplete, whether its context
+	// can end (a second interrupt stops the pass through it) and has no
+	// deadline.
+	stoppable []bool
 }
 
 func (h *hookSpy) add(s string) {
@@ -341,10 +345,12 @@ func (h *hookSpy) AfterMockInsert(_ context.Context, info *rec.MockContext) erro
 	return nil
 }
 
-func (h *hookSpy) AfterRecordingComplete(_ context.Context, info *rec.RecordingCompleteContext) error {
+func (h *hookSpy) AfterRecordingComplete(ctx context.Context, info *rec.RecordingCompleteContext) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.complete = append(h.complete, *info)
+	_, hasDeadline := ctx.Deadline()
+	h.stoppable = append(h.stoppable, ctx.Done() != nil && !hasDeadline && ctx.Err() == nil)
 	return nil
 }
 
@@ -366,6 +372,10 @@ func TestRecordPassesCasesAndMocksThroughTheHooks(t *testing.T) {
 	require.ElementsMatch(t, []string{"before-case set test-1", "after-case set test-1", "before-mock set.keploy-staging mock-0", "after-mock set.keploy-staging mock-0"}, hooks.calls)
 	require.Less(t, slices.Index(hooks.calls, "before-case set test-1"), slices.Index(hooks.calls, "after-case set test-1"))
 	require.Equal(t, []rec.RecordingCompleteContext{{TestSetID: "set", Path: cfg.Path}}, hooks.complete)
+	// The post-record pass runs as keploy record's does
+	// (rec.RunAfterRecordingHook): live, with no deadline, and under a
+	// context a second interrupt can end, so a long pass can be stopped.
+	require.Equal(t, []bool{true}, hooks.stoppable, "the hook's context is live, has no deadline, and can be ended")
 	_, err := os.Stat(filepath.Join(dir, "set", "mappings.yaml"))
 	require.NoError(t, err, "the hook ran after the mappings were written")
 }
