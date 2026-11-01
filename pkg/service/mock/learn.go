@@ -52,8 +52,9 @@ func (m *mockService) learningTests() map[string]bool {
 // lost nothing. consumedErr is why the agent's consumed mocks could not be
 // read: then what was learned cannot be read either. elsewhere is what the
 // learn step taught recordings from calls made in other windows than
-// theirs, for learning only (the agent's LearnedElsewhere): it is written
-// onto the recordings with the rest, and no test's flow holds it.
+// theirs, for learning only (the agent's LearnedElsewhere): its clock reads
+// alone are written onto the recordings with the rest (withLearnedElsewhere),
+// and no test's flow holds them.
 func (m *mockService) keepLearned(ctx context.Context, set string, consumed []models.MockState, consumedErr error, elsewhere []models.MockState, flows []FlowMocks, expected map[string][]models.MockEntry) (map[string][]string, []string, error) {
 	if consumedErr != nil {
 		return nil, nil, fmt.Errorf("what the learn step learned could not be read from keploy's agent: %w", consumedErr)
@@ -77,13 +78,15 @@ func (m *mockService) keepLearned(ctx context.Context, set string, consumed []mo
 	return m.persistLearned(ctx, set, consumed, flows, expected)
 }
 
-// withLearnedElsewhere is consumed with elsewhere's learning (noise, clock
-// reads) merged onto the state of the recording each names, as the agent
-// merges a recording's consumed states (flagMockAsUsed), and a state of its
-// own for a recording no call consumed. consumed is not changed. It is read
-// for what is written onto the recordings alone: which test used which
-// recording (attributeMocks) reads the consumed states as the agent sent
-// them.
+// withLearnedElsewhere is consumed with elsewhere's clock reads merged onto
+// the state of the recording each names, as the agent merges a recording's
+// consumed states (flagMockAsUsed), and a state of its own for a recording
+// no call consumed. Clock reads alone: anything else a state of elsewhere
+// carries (noise, variables) is never written onto a recording from a call
+// made in another window, whatever the agent sent. consumed is not changed.
+// It is read for what is written onto the recordings alone: which test used
+// which recording (attributeMocks) reads the consumed states as the agent
+// sent them.
 func withLearnedElsewhere(consumed, elsewhere []models.MockState) []models.MockState {
 	if len(elsewhere) == 0 {
 		return consumed
@@ -94,22 +97,16 @@ func withLearnedElsewhere(consumed, elsewhere []models.MockState) []models.MockS
 		at[st.Name] = i
 	}
 	for _, e := range elsewhere {
-		if e.Name == "" {
+		if e.Name == "" || len(e.Clocks) == 0 {
 			continue
 		}
-		learned := models.MockState{Name: e.Name, Kind: e.Kind, ReqBodyNoise: e.ReqBodyNoise, Clocks: e.Clocks}
 		i, ok := at[e.Name]
 		if !ok {
 			at[e.Name] = len(out)
-			out = append(out, learned)
+			out = append(out, models.MockState{Name: e.Name, Kind: e.Kind, Clocks: e.Clocks})
 			continue
 		}
-		st := out[i]
-		st.Clocks = models.MergeClocks(st.Clocks, learned.Clocks)
-		if len(learned.ReqBodyNoise) > 0 {
-			st.ReqBodyNoise = learn.MergeReqBodyNoise(st.ReqBodyNoise, learned.ReqBodyNoise)
-		}
-		out[i] = st
+		out[i].Clocks = models.MergeClocks(out[i].Clocks, e.Clocks)
 	}
 	return out
 }

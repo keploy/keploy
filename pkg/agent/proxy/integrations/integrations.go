@@ -1126,15 +1126,17 @@ func ClaimPairing(db MockMemDb, m *models.Mock) bool {
 	return false
 }
 
-// LearnElsewhere is record's full round learning a recording's changing
-// fields from a call of the same shape made in another window than the
+// LearnElsewhere is record's full round learning a recording's clock reads
+// from a call of the same shape made in another window than the
 // recording's, for learning only (founder, 2026-11-01). A timer fires
 // wherever the clock puts it: its call, recorded in one test's window, lands
 // in another's in the full round, and the learn step, which pairs a call
 // only with the open test's recordings or the pool's, would teach its
 // recording nothing. A parser's learn step that misses such a call pairs it
 // by its drift pairing's rule and guards with one of these candidates and
-// hands what it learned to LearnElsewhere. An optional MockMemDb
+// hands the clock reads it learned to LearnElsewhere. Mongo's learn step
+// is the one that does today; HTTP's does not, a stated limit (a timer's
+// HTTP call learns nothing across windows). An optional MockMemDb
 // capability: the agent's MockManager implements it, and every MockMemDb
 // wrapper must forward it.
 type LearnElsewhere interface {
@@ -1146,12 +1148,15 @@ type LearnElsewhere interface {
 	// round's learn step under the proven switch, whatever rules serve the
 	// set; nil otherwise.
 	LearnElsewhereCandidates(kind models.Kind) []*models.Mock
-	// LearnElsewhere keeps what a call learned onto m (noise, clock reads)
-	// for record's full round to write onto the recording, as it writes
-	// what a consumed recording learned. It consumes, claims and answers
-	// nothing: m stays its owner's, and no test's verdict reads it. False
-	// when the session does not learn, or m is no candidate.
-	LearnElsewhere(m *models.Mock, noise map[string][]string, clocks map[string]models.ClockOffset) bool
+	// LearnElsewhere keeps the clock reads a call learned onto m for
+	// record's full round to write onto the recording, as it writes what a
+	// consumed recording learned. Clock reads alone (the founder approved
+	// "carries its clock reads"): a leaf the call changed that is no read
+	// of the clock is never learned across windows as noise, a looser rule.
+	// It consumes, claims and answers nothing: m stays its owner's, and no
+	// test's verdict reads it. False when the session does not learn, or m
+	// is no candidate.
+	LearnElsewhere(m *models.Mock, clocks map[string]models.ClockOffset) bool
 }
 
 // LearnElsewhereCandidates is db's LearnElsewhereCandidates of kind; nil when
@@ -1165,9 +1170,9 @@ func LearnElsewhereCandidates(db MockMemDb, kind models.Kind) []*models.Mock {
 
 // LearnElsewhereOnto is db's LearnElsewhere; false when db does not implement
 // it.
-func LearnElsewhereOnto(db MockMemDb, m *models.Mock, noise map[string][]string, clocks map[string]models.ClockOffset) bool {
+func LearnElsewhereOnto(db MockMemDb, m *models.Mock, clocks map[string]models.ClockOffset) bool {
 	if l, ok := db.(LearnElsewhere); ok {
-		return l.LearnElsewhere(m, noise, clocks)
+		return l.LearnElsewhere(m, clocks)
 	}
 	return false
 }

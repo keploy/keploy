@@ -63,7 +63,7 @@ func TestLearnElsewhereIsOffOutsideTheLearnStep(t *testing.T) {
 		if c := mm.LearnElsewhereCandidates(models.HTTP); c != nil {
 			t.Fatalf("%s: candidates %v", why, exactNames(c))
 		}
-		if mm.LearnElsewhere(ms["other"], nil, clocks) {
+		if mm.LearnElsewhere(ms["other"], clocks) {
 			t.Fatalf("%s: a call taught another test's recording", why)
 		}
 	}
@@ -95,14 +95,17 @@ func TestLearnElsewhereIsNoConsumption(t *testing.T) {
 	mm.SetPairing(true)
 	mm.ServeExactTest("T1", []*models.Mock{ms["own"]})
 	minute := models.ClockOffset{Min: -time.Minute, Max: -time.Minute, Res: time.Millisecond}
-	if !mm.LearnElsewhere(ms["other"], nil, map[string]models.ClockOffset{"claimed_at": minute}) {
+	if !mm.LearnElsewhere(ms["other"], map[string]models.ClockOffset{"claimed_at": minute}) {
 		t.Fatal("another test's unconsumed recording was taught nothing")
 	}
-	if !mm.LearnElsewhere(ms["other"], map[string][]string{"_id": nil}, map[string]models.ClockOffset{"dirty_at": {Res: time.Millisecond}}) {
+	if !mm.LearnElsewhere(ms["other"], map[string]models.ClockOffset{"dirty_at": {Res: time.Millisecond}}) {
 		t.Fatal("a second call taught the recording nothing")
 	}
+	if mm.LearnElsewhere(ms["other"], nil) {
+		t.Fatal("a call that taught no clock read was kept")
+	}
 	for _, name := range []string{"own", "w-boot", "pool"} {
-		if mm.LearnElsewhere(ms[name], nil, map[string]models.ClockOffset{"claimed_at": minute}) {
+		if mm.LearnElsewhere(ms[name], map[string]models.ClockOffset{"claimed_at": minute}) {
 			t.Fatalf("%s, no other test's recording, was taught", name)
 		}
 	}
@@ -121,9 +124,6 @@ func TestLearnElsewhereIsNoConsumption(t *testing.T) {
 	}
 	if _, ok := got[0].Clocks["dirty_at"]; !ok {
 		t.Fatalf("the second call's clock read was lost: %v", got[0].Clocks)
-	}
-	if _, ok := got[0].ReqBodyNoise["_id"]; !ok {
-		t.Fatalf("the second call's noise was lost: %v", got[0].ReqBodyNoise)
 	}
 	// Its owner still consumes it.
 	mm.ServeExactTest("T2", []*models.Mock{ms["other"]})

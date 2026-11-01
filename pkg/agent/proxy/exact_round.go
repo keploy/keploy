@@ -1188,6 +1188,6 @@ func (h *heldScope) LearnElsewhereCandidates(kind models.Kind) []*models.Mock {
 	return h.heldOf(h.MockManager.LearnElsewhereCandidates(kind))
 }
 
-func (h *heldScope) LearnElsewhere(mk *models.Mock, noise map[string][]string, clocks map[string]models.ClockOffset) bool {
-	return h.learnElsewhereAt(mk, noise, clocks, &h.g)
+func (h *heldScope) LearnElsewhere(mk *models.Mock, clocks map[string]models.ClockOffset) bool {
+	return h.learnElsewhereAt(mk, clocks, &h.g)
 }

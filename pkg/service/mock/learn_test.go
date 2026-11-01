@@ -511,6 +511,29 @@ func TestKeployMockWritesWhatACallInAnotherWindowTaughtOntoTheRecording(t *testi
 		t.Fatalf("the consumed states changed: %+v, flows %+v", consumed, flows)
 	}
 
+	// Clock reads alone: what a call made in another window carried as
+	// noise, or a variable, is never written, whatever the agent sent (an
+	// agent built before the rule was narrowed sends noise too), and a
+	// state with no clock read writes nothing.
+	store.got = nil
+	loose := []models.MockState{
+		{Name: "mock-9", Clocks: map[string]models.ClockOffset{"claimed_at": minute}, ReqBodyNoise: map[string][]string{"body._id": {}}},
+		{Name: "mock-1", ReqBodyNoise: map[string][]string{"body.lease": {}}, Variables: models.MockVariables{"id": {Recorded: "1", Bind: "body.id"}}},
+		{Name: "mock-7", ReqBodyNoise: map[string][]string{"body._id": {}}},
+	}
+	if _, _, err := m.keepLearned(context.Background(), "s", consumed, nil, loose, flows, expected); err != nil {
+		t.Fatal(err)
+	}
+	if nine := store.got["mock-9"]; len(nine.ReqBodyNoise) != 0 || len(nine.Clocks) != 1 {
+		t.Fatalf("mock-9 was written %+v; want its claimed_at clock read alone", nine)
+	}
+	if one := store.got["mock-1"]; !reflect.DeepEqual(one.ReqBodyNoise, map[string][]string{"body.ts": {}}) || len(one.Variables) != 0 {
+		t.Fatalf("mock-1 was written %+v; want its own noise alone", one)
+	}
+	if _, ok := store.got["mock-7"]; ok {
+		t.Fatalf("a recording another window's call taught only noise was written: %+v", store.got["mock-7"])
+	}
+
 	// A test the round does not learn onto keeps its recording as it is.
 	m.config.Test.LearnTests = map[string]bool{"o::A": true}
 	store.got = nil
