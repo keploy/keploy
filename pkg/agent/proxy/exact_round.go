@@ -635,6 +635,7 @@ func (m *MockManager) RoundSnapshot(q integrations.RoundQuery) (integrations.Rou
 		Ahead:      v.test == "" && len(v.owned) > 0,
 		Fired:      m.exact.fired.Load(),
 		Background: v.bg != nil,
+		Unrouted:   v.unrouted,
 		Staging:    v.staging,
 		Taken:      l.takes[:n:n],
 	}

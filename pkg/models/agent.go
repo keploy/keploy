@@ -617,7 +617,33 @@ type ExactServing struct {
 	// (replay.RegisterS12Serving); empty for today's. An agent that predates
 	// it ignores it, and serves by today's rules: never looser.
 	Background string `json:"background,omitempty"`
+	// Unrouted says, on the staging call of a set whose background is not
+	// served by the background rules (Background empty) under the proven
+	// switch, why: UnroutedUnmarked or UnroutedNotEnabled. The agent hands it
+	// to the proxy, whose parsers name, on a call they refuse in the set,
+	// which side lacks proven routing: the record (no mark) or this replay
+	// (the mark, not enabled). Empty from a replay that predates it, and
+	// then a refused call names both. An agent that predates it ignores it.
+	Unrouted string `json:"unrouted,omitempty"`
 }
+
+// Why a test set's background is not served by the background rules
+// (ExactServing.Unrouted, integrations.CallRound.Unrouted):
+//
+//   - UnroutedUnmarked: the set's mappings.yaml carries no recordedWith:
+//     RecordedWithS12Routing (the record lacks it).
+//   - UnroutedNotEnabled: the set carries the mark, and this replay does not
+//     enable proven routing (replay.RegisterS12Serving: the replay lacks it).
+//   - UnroutedUnstaged: no test set was staged under exact serving: keploy
+//     mock replay's, which stages its recordings per session, never a set.
+//     keploy mock marks no set and routes none (the test framework owns test
+//     scope: a call made outside its recording's window is a mapping edit,
+//     worker: or startup:). The proxy says it; no replay sends it.
+const (
+	UnroutedUnmarked   = "unmarked"
+	UnroutedNotEnabled = "not-enabled"
+	UnroutedUnstaged   = "unstaged"
+)
 
 // ExactConcurrentHeader is the /storemocks response header in which an agent
 // with the proven switch on says it serves a test case the recordings it

@@ -119,6 +119,10 @@ type exactView struct {
 	// bg is the set's background under the background rules (ServeExactBackground)
 	// when the view was installed; nil for today's rules.
 	bg *backgroundState
+	// unrouted is, when bg is nil, why the set is not served by the
+	// background rules as the view was installed (MockManager.unroutedNow):
+	// a call the view refuses names it (integrations.CallRound.Unrouted).
+	unrouted string
 	// staging is whether the view was installed while a set's mocks were
 	// being staged (StageExactBackground until ServeExactBackground): a miss
 	// it refuses says so (stagingMissNote).
@@ -312,6 +316,12 @@ type exactState struct {
 	// bg is the staged set's background under the background rules
 	// (ServeExactBackground), nil for today's (exact_background.go).
 	bg atomic.Pointer[backgroundState]
+	// unrouted is why the staged set's background is not served by the
+	// background rules (StageExactUnrouted, models.ExactServing.Unrouted):
+	// "" while the replay said none; nil while no set is staged under
+	// exact serving (keploy mock replay's), read as models.UnroutedUnstaged
+	// (exact_background.go).
+	unrouted atomic.Pointer[string]
 	// shared numbers the test views' shared parts (exactView.shared); held
 	// under the round lock.
 	shared sharedViews
@@ -766,7 +776,7 @@ func (m *MockManager) MarkCallRound() integrations.CallRound {
 		// (integrations.RoundSnapshot.SetUnstaged): the call the staging
 		// note describes, outside every test, its miss naming none made
 		// elsewhere.
-		return integrations.NewCallRound(at.Epoch, integrations.HoldsEvery).ReadAt(at).InStaging(true).InView(false, v.bg != nil).WithSequence(m.sequenceViewOf(v))
+		return integrations.NewCallRound(at.Epoch, integrations.HoldsEvery).ReadAt(at).InStaging(true).InView(false, v.bg != nil).InRouting(v.unrouted).WithSequence(m.sequenceViewOf(v))
 	}
 	held := v.holds
 	switch {
@@ -779,7 +789,7 @@ func (m *MockManager) MarkCallRound() integrations.CallRound {
 	case ended != nil:
 		held = func(name string) bool { return v.holds(name) || ended.holds(name) }
 	}
-	return integrations.NewCallRound(at.Epoch, held).ReadAt(at).InStaging(v.staging).InView(v.test != "", v.bg != nil).WithSequence(m.sequenceViewOf(v))
+	return integrations.NewCallRound(at.Epoch, held).ReadAt(at).InStaging(v.staging).InView(v.test != "", v.bg != nil).InRouting(v.unrouted).WithSequence(m.sequenceViewOf(v))
 }
 
 // endedName is the test of v, the view the store ended while the learn
@@ -1639,6 +1649,8 @@ func (m *MockManager) installExactWith(v *exactView, under func(r *roundState)) 
 		if w != nil {
 			v.workerOrder = w.order
 		}
+	} else {
+		v.unrouted = m.unroutedNow()
 	}
 	// The generation moves, and the learn tracker's open test is bound to a
 	// test's view, before the view is visible: holding the round lock, which

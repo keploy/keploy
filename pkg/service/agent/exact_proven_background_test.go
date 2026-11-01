@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -322,6 +323,65 @@ func TestTheS12StagingTellsTheProxyItsRulesAndReachesANoSiblingRecording(t *test
 			}
 			if len(workers) == 0 || !reflect.DeepEqual(workers[len(workers)-1], tc.reached) {
 				t.Fatalf("the proxy was told the worker scopes %v; want the last %v", workers, tc.reached)
+			}
+		})
+	}
+}
+
+// unroutedExactProxy is a backgroundExactProxy that names why a set is not
+// served by the background rules (coreAgent.ExactUnroutedStager): it keeps
+// each reason it is told in rules, as "unrouted:" and the reason, with how
+// many views were installed before it ("@" and the count).
+type unroutedExactProxy struct {
+	backgroundExactProxy
+}
+
+func (p *unroutedExactProxy) StageExactUnrouted(why string) error {
+	p.rules = append(p.rules, fmt.Sprintf("unrouted:%s@%d", why, len(p.views)))
+	return nil
+}
+
+// A set staged under today's rules has the proxy told why its background is
+// not routed (models.ExactServing.Unrouted) right after its staging opens,
+// before the staging installs any view, so a call refused in any view of the
+// set names which side lacks proven routing: the record (no mark) or the
+// replay (the mark, not enabled); a replay that says no reason hands "". A
+// set staged under the background rules is told no reason, whatever the
+// replay sent.
+func TestTheStagingTellsTheProxyWhyTheSetIsNotRouted(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		rules     string
+		unrouted  string
+		wantRules []string
+	}{
+		{"unmarked", "", models.UnroutedUnmarked, []string{"stage:", "unrouted:" + models.UnroutedUnmarked + "@0", "||"}},
+		{"marked, not enabled", "", models.UnroutedNotEnabled, []string{"stage:", "unrouted:" + models.UnroutedNotEnabled + "@0", "||"}},
+		{"a replay that says no reason", "", "", []string{"stage:", "unrouted:@0", "||"}},
+		{"the background rules", models.RecordedWithS12Routing, models.UnroutedUnmarked,
+			[]string{"stage:" + models.RecordedWithS12Routing, models.RecordedWithS12Routing + "|boot-config|w-delete"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("KEPLOY_PROVEN", "1")
+			t.Setenv("KEPLOY_STRICT_MOCK_WINDOW", "1")
+			p := &unroutedExactProxy{}
+			a := diskAgent(t, p,
+				stageMock("boot-config", "/config", stageT0.Add(-20*time.Second)),
+				stageMock("test-a", "/q", stageT0.Add(time.Second)),
+				stageMock("w-delete", "/delete", stageT0.Add(30*time.Second)))
+			err := a.UpdateMockParams(context.Background(), models.MockFilterParams{
+				AfterTime:              models.BaseTime,
+				BeforeTime:             stageT0.Add(2 * time.Hour),
+				FirstRecordedTestStart: stageT0,
+				StrictMockWindow:       true,
+				Exact: &models.ExactServing{Stage: true, Pool: []string{"boot-config"}, Background: tc.rules, Unrouted: tc.unrouted,
+					Worker: []models.MockEntry{{Name: "w-delete"}}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(p.rules, tc.wantRules) {
+				t.Fatalf("the proxy was told %q; want %q", p.rules, tc.wantRules)
 			}
 		})
 	}

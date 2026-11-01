@@ -410,7 +410,7 @@ func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFi
 		// background names no recording until its mocks are staged), so a
 		// call one of them refuses is never told the set was recorded
 		// without proven routing.
-		if err := a.stageBackgroundExactly(es, a.stagingRules(ex)); err != nil {
+		if err := a.stageBackgroundExactly(es, a.stagingRules(ex), ex.Unrouted); err != nil {
 			return err
 		}
 		if err := a.serveWorkerExactly(es); err != nil {
@@ -916,14 +916,23 @@ func (a *Agent) stagingRules(ex *models.ExactServing) string {
 // stageBackgroundExactly opens a set's staging in the proxy under rules
 // (coreAgent.ExactBackgroundServer.StageExactBackground), before the staging
 // installs any view: the previous set's background goes, and every view of
-// the staging reads the set's rules. A proxy that cannot serve the background
-// rules serves every set by today's, and needs nothing.
-func (a *Agent) stageBackgroundExactly(es coreAgent.ExactServer, rules string) error {
+// the staging reads the set's rules. Under today's rules it hands the proxy
+// unrouted too (models.ExactServing.Unrouted, coreAgent.ExactUnroutedStager),
+// why the set is not served by the background rules, for a call its parsers
+// refuse to name which side lacks proven routing. A proxy that cannot serve
+// the background rules serves every set by today's, and needs nothing.
+func (a *Agent) stageBackgroundExactly(es coreAgent.ExactServer, rules, unrouted string) error {
 	bs, ok := es.(coreAgent.ExactBackgroundServer)
 	if !ok {
 		return nil
 	}
-	return bs.StageExactBackground(rules)
+	if err := bs.StageExactBackground(rules); err != nil {
+		return err
+	}
+	if us, ok := es.(coreAgent.ExactUnroutedStager); ok && rules != models.RecordedWithS12Routing {
+		return us.StageExactUnrouted(unrouted)
+	}
+	return nil
 }
 
 // serveBackgroundExactly tells the proxy the rules the staged set's background

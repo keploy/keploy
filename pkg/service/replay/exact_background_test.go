@@ -68,21 +68,26 @@ func enableS12(t *testing.T, on *bool) {
 // not require its worker scope answered. Replayed with no func registered, or
 // one that says no, or unmarked, or marked only with marks this keploy does
 // not know, it keeps today's rules: its staging names none, and a
-// worker-scope call never made fails it (audit B3, C2).
+// worker-scope call never made fails it (audit B3, C2). Its staging names
+// instead which side lacks proven routing (models.ExactServing.Unrouted):
+// the record, for a set without the mark; this replay, for a marked set it
+// does not enable it for. A routed set's names none.
 func TestUnderTheSwitchOnlyAMarkedAndEnabledSetDropsTheWorkerScopesEnd(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
 		recordedWith []string
 		enabled      *bool
 		rules        string
+		unrouted     string
 		want         models.TestSetStatus
 	}{
-		{"marked and enabled", []string{models.RecordedWithS12Routing}, new(true), models.RecordedWithS12Routing, models.TestSetStatusPassed},
-		{"marked among others and enabled", []string{"later-feature", models.RecordedWithS12Routing}, new(true), models.RecordedWithS12Routing, models.TestSetStatusPassed},
-		{"marked, none registered", []string{models.RecordedWithS12Routing}, nil, "", models.TestSetStatusFailed},
-		{"marked, registered off", []string{models.RecordedWithS12Routing}, new(false), "", models.TestSetStatusFailed},
-		{"enabled, not marked", nil, new(true), "", models.TestSetStatusFailed},
-		{"enabled, an unknown mark only", []string{"s13-something"}, new(true), "", models.TestSetStatusFailed},
+		{"marked and enabled", []string{models.RecordedWithS12Routing}, new(true), models.RecordedWithS12Routing, "", models.TestSetStatusPassed},
+		{"marked among others and enabled", []string{"later-feature", models.RecordedWithS12Routing}, new(true), models.RecordedWithS12Routing, "", models.TestSetStatusPassed},
+		{"marked, none registered", []string{models.RecordedWithS12Routing}, nil, "", models.UnroutedNotEnabled, models.TestSetStatusFailed},
+		{"marked, registered off", []string{models.RecordedWithS12Routing}, new(false), "", models.UnroutedNotEnabled, models.TestSetStatusFailed},
+		{"enabled, not marked", nil, new(true), "", models.UnroutedUnmarked, models.TestSetStatusFailed},
+		{"enabled, an unknown mark only", []string{"s13-something"}, new(true), "", models.UnroutedUnmarked, models.TestSetStatusFailed},
+		{"not marked, none registered", nil, nil, "", models.UnroutedUnmarked, models.TestSetStatusFailed},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			setSwitch(t, true)
@@ -102,6 +107,9 @@ func TestUnderTheSwitchOnlyAMarkedAndEnabledSetDropsTheWorkerScopesEnd(t *testin
 			}
 			if rules, ok := stagedBackground(h); !ok || rules != tc.rules {
 				t.Fatalf("the staging named background rules %q (staged %v); want %q", rules, ok, tc.rules)
+			}
+			if ex, _ := stagedExact(h); ex.Unrouted != tc.unrouted {
+				t.Fatalf("the staging said the set is not routed because %q; want %q", ex.Unrouted, tc.unrouted)
 			}
 			// Under background serving the boot call never made is said, not
 			// required.
@@ -123,16 +131,17 @@ func TestUnderTheSwitchOnlyAMarkedAndEnabledSetDropsTheWorkerScopesEnd(t *testin
 
 // Under the switch, every set's calls are matched exactly; a set no
 // proven-routing record marked (no recordedWith: s12-routing, or only marks
-// this keploy does not know) also had its varying fields never learned, and
+// this keploy does not know) also has its background calls not routed, and
 // the replay says so once for the set: which set, what it carries, that its
-// calls are matched exactly and its varying fields were never learned, so a
-// call carrying a new value of one is refused, and how to record it
-// again so that they are (under the switch with this build when it enables
-// proven routing; with keploy enterprise when it does not), in the line itself
-// and in full in its next step. It never says the set is served by today's
-// rules. A marked set says nothing
-// of the kind, and neither does a replay without the switch.
-func TestUnderTheSwitchAnUnmarkedSetSaysOnceItsCallsAreMatchedExactlyAndItsVaryingFieldsWereNeverLearned(t *testing.T) {
+// calls are matched exactly and its background calls are answered exactly and
+// required by its end, and how to record it again so that they are routed
+// (under the switch with this build when it enables proven routing; with
+// keploy enterprise when it does not), in the line itself and in full in its
+// next step. It never says the set's varying fields were never learned: a
+// record's learn step learns them, mark or no mark. It never says the set is
+// served by today's rules. A marked set says nothing of the kind, and neither
+// does a replay without the switch.
+func TestUnderTheSwitchAnUnmarkedSetSaysOnceItsCallsAreMatchedExactlyAndItsBackgroundIsNotRouted(t *testing.T) {
 	const line = "this test set was recorded without proven routing"
 	for _, tc := range []struct {
 		name         string
@@ -171,12 +180,15 @@ func TestUnderTheSwitchAnUnmarkedSetSaysOnceItsCallsAreMatchedExactlyAndItsVaryi
 				return
 			}
 			e := said[0]
-			if !strings.Contains(e.Message, "its calls are matched exactly") || !strings.Contains(e.Message, "its varying fields (those that vary between runs) were never learned, so a call whose value of one differs from its recording is refused") || !strings.Contains(e.Message, "recordedWith: "+models.RecordedWithS12Routing) {
-				t.Fatalf("the line does not say the set's calls are matched exactly and its varying fields were never learned, so they are refused, for want of the mark: %q", e.Message)
+			if !strings.Contains(e.Message, "its calls are matched exactly") || !strings.Contains(e.Message, "its background calls are not routed: every recorded background call is answered exactly and required by the set's end") || !strings.Contains(e.Message, "recordedWith: "+models.RecordedWithS12Routing) {
+				t.Fatalf("the line does not say the set's calls are matched exactly and its background calls not routed, for want of the mark: %q", e.Message)
+			}
+			if strings.Contains(e.Message, "learn") {
+				t.Fatalf("the line says something of learning, which the mark does not decide: %q", e.Message)
 			}
 			// The line itself says how to correct it, as its next step does
 			// in full.
-			if fix := "to correct it, record the test set again with KEPLOY_PROVEN=1"; !strings.Contains(e.Message, fix) || strings.Contains(tc.next, "enterprise") != strings.Contains(e.Message, "using keploy enterprise to learn them") {
+			if fix := "to have them routed, record the test set again with KEPLOY_PROVEN=1"; !strings.Contains(e.Message, fix) || strings.Contains(tc.next, "enterprise") != strings.HasSuffix(e.Message, "using keploy enterprise") {
 				t.Fatalf("the line does not say how to correct it (%q, %s): %q", fix, tc.next, e.Message)
 			}
 			fields := e.ContextMap()
@@ -188,8 +200,8 @@ func TestUnderTheSwitchAnUnmarkedSetSaysOnceItsCallsAreMatchedExactlyAndItsVaryi
 				t.Fatalf("the line says the set carries %v; want %v", fields["recordedWith"], tc.recordedWith)
 			}
 			next, _ := fields["next_step"].(string)
-			if !strings.Contains(next, "record the test set again with KEPLOY_PROVEN=1") || !strings.Contains(next, tc.next) || !strings.Contains(next, "learns") {
-				t.Fatalf("the line's next step %q does not say to record the set again under the switch %s, which learns its varying fields", next, tc.next)
+			if !strings.Contains(next, "record the test set again with KEPLOY_PROVEN=1") || !strings.Contains(next, tc.next) || !strings.Contains(next, "routes") || strings.Contains(next, "learn") {
+				t.Fatalf("the line's next step %q does not say to record the set again under the switch %s, which routes its background calls (and nothing of learning)", next, tc.next)
 			}
 			if strings.Contains(e.Message+next, "today's rules") {
 				t.Fatalf("the line says the set is served by today's rules: %q (next step %q)", e.Message, next)

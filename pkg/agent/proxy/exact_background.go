@@ -81,11 +81,36 @@ func (b *backgroundState) inPool(name string) bool {
 // mocks were being staged (exactMissStaging). It installs no view itself.
 func (m *MockManager) StageExactBackground(rules string) {
 	m.exact.staging.Store(true)
+	// A set is staged: until the replay says why its background is not
+	// routed (StageExactUnrouted), it says neither side.
+	none := ""
+	m.exact.unrouted.Store(&none)
 	if rules == models.RecordedWithS12Routing && provenswitch.On() {
 		m.exact.bg.Store(&backgroundState{settling: true})
 		return
 	}
 	m.exact.bg.Store(nil)
+}
+
+// StageExactUnrouted says why the set whose staging StageExactBackground just
+// opened under today's rules is not served by the background rules
+// (models.ExactServing.Unrouted): every view the staging installs from now on
+// reads it, and a call one of them refuses names it
+// (integrations.CallRound.Unrouted). The agent calls it before the staging
+// installs any view.
+func (m *MockManager) StageExactUnrouted(why string) {
+	m.exact.unrouted.Store(&why)
+}
+
+// unroutedNow is why the staged set is not served by the background rules
+// (StageExactUnrouted): "" when the replay said none, and
+// models.UnroutedUnstaged while no set is staged under exact serving, as in
+// keploy mock replay, which stages its recordings per session, never a set.
+func (m *MockManager) unroutedNow() string {
+	if p := m.exact.unrouted.Load(); p != nil {
+		return *p
+	}
+	return models.UnroutedUnstaged
 }
 
 // ServeExactBackground sets the rules the staged set's background is served

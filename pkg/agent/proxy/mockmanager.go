@@ -689,6 +689,7 @@ func (m *MockManager) ResetForReplaySession() {
 	// session's staging names its own (ServeExactBackground), and until it
 	// does, today's serve.
 	m.exact.bg.Store(nil)
+	m.exact.unrouted.Store(nil)
 	m.exact.poolCursor.Store(nil)
 	m.SetRecordingSource(nil)
 	m.SetRecordedBefore(nil)

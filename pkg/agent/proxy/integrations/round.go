@@ -241,6 +241,8 @@ type RoundSnapshot struct {
 	Open bool
 	// Background: the set is served by the background rules.
 	Background bool
+	// Unrouted: when it is not, why (CallRound.Unrouted).
+	Unrouted string
 	// Staging: the store's view is one the replay serves while it stages a
 	// set's mocks, where no recording answers a call (CallRound.Staging).
 	Staging bool
@@ -472,19 +474,19 @@ func (s RoundSnapshot) Owner(m *models.Mock) RoundOwner {
 // names none, and pairs none, which only fails closed.
 func (s RoundSnapshot) CallRound() CallRound {
 	if s.SetUnstaged() {
-		return NewCallRound(s.At.Epoch, HoldsEvery).ReadAt(s.At).InStaging(true).InView(false, s.Background)
+		return NewCallRound(s.At.Epoch, HoldsEvery).ReadAt(s.At).InStaging(true).InView(false, s.Background).InRouting(s.Unrouted)
 	}
 	// A test's view with a worker scope shows it the worker scope, as the
 	// store's MarkCallRound says (its sequence view's Worker).
 	worker := s.Test != "" && len(s.worker) > 0
 	if s.TrackerAhead() {
-		return NewCallRound(s.At.Epoch, HoldsEvery).ReadAt(s.At).InStaging(s.Staging).InView(s.Test != "", s.Background).InWorkerView(worker)
+		return NewCallRound(s.At.Epoch, HoldsEvery).ReadAt(s.At).InStaging(s.Staging).InView(s.Test != "", s.Background).InRouting(s.Unrouted).InWorkerView(worker)
 	}
 	owners, ended := s.owners, s.endedOwn
 	return NewCallRound(s.At.Epoch, func(name string) bool {
 		_, own := ended[name]
 		return own || owners[name] != OwnerNone
-	}).ReadAt(s.At).InStaging(s.Staging).InView(s.Test != "", s.Background).InWorkerView(worker)
+	}).ReadAt(s.At).InStaging(s.Staging).InView(s.Test != "", s.Background).InRouting(s.Unrouted).InWorkerView(worker)
 }
 
 // HoldsEvery holds every recording as a call's own (NewCallRound): the mark

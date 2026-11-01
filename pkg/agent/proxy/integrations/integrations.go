@@ -558,6 +558,9 @@ type CallRound struct {
 	// worker is whether the read's view showed a test the worker scope
 	// (WithSequence's Worker, InWorkerView): ShowsBackgroundIn.
 	worker bool
+	// unrouted is why the read's view's set was not served by proven
+	// routing (InRouting): Unrouted.
+	unrouted string
 }
 
 // NewCallRound is a store's CallRound of staging epoch, held telling, by
@@ -705,6 +708,31 @@ func (c CallRound) InTest() bool { return c.inTest }
 // Background reports whether c's read found its set served by proven routing
 // (S12Background of the store then).
 func (c CallRound) Background() bool { return c.background }
+
+// InRouting is c, of a read whose view's set was not served by proven
+// routing for the reason unrouted (models.ExactServing.Unrouted:
+// models.UnroutedUnmarked, models.UnroutedNotEnabled, models.UnroutedUnstaged,
+// or "" when the replay did not say). A store sets it as it marks the call,
+// from the view it read, with InView.
+func (c CallRound) InRouting(unrouted string) CallRound {
+	c.unrouted = unrouted
+	return c
+}
+
+// Unrouted is why c's read found its set not served by proven routing, for
+// a parser to name, on the call's miss, which side lacks it: the record
+// (models.UnroutedUnmarked: the set's mappings.yaml carries no mark), this
+// replay (models.UnroutedNotEnabled: the mark, not enabled), or neither, the
+// replay having staged no set (models.UnroutedUnstaged: keploy mock replay,
+// which marks no set and routes none). "" for a set served by proven
+// routing (Background), for the zero CallRound, and when the replay did not
+// say why: a parser then names both sides.
+func (c CallRound) Unrouted() string {
+	if c.background {
+		return ""
+	}
+	return c.unrouted
+}
 
 // S12BackgroundIn is S12Background as the call marked call found it: the
 // view its first read found (CallRound.Background), never the one serving

@@ -2178,9 +2178,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// mapping states it (models.Mapping.Groups, Shared).
 		var conc *setConcurrency
 		// s12Background: background serving serves the set (s12Serves), from its
-		// mappings.yaml's mark. returnedMoves: the drift moves given back to
+		// mappings.yaml's mark; unrouted: why it does not, when it does not.
+		// returnedMoves: the drift moves given back to
 		// an owner this run runs (returnStaleMoves).
 		var s12Background bool
+		var unrouted string
 		var returnedMoves map[string]string
 		if r.exactServing() {
 			// Under the proven switch the mapping decides what each test
@@ -2189,7 +2191,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			if expectedTestMockMappings, workerScope, conc, recordedWith, windowsWhy, err = r.provenMappingsOf(ctx, testSetID); err != nil {
 				return nil, nil, err
 			}
-			s12Background = r.s12Serves(testSetID, recordedWith)
+			s12Background, unrouted = r.s12Serves(testSetID, recordedWith)
 			useMappingBased = true
 			fromWindows = len(expectedTestMockMappings) == 0
 			// A drift move whose owner this run runs goes back to the owner
@@ -2299,7 +2301,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// or an agent that does not say it serves them, keeps the
 			// recorded ownership whole.
 			expectedTestMockMappings = r.planShares(testSetID, expectedTestMockMappings)
-			r.exact.background = s12Background
+			r.exact.background, r.exact.unrouted = s12Background, unrouted
 			r.exact.returned = returnedMoves
 			// The set's start is reached only when keploy starts its
 			// application for it: an application kept alive from an earlier
@@ -7430,6 +7432,8 @@ func (r *Replayer) SendMockFilterParamsToAgent(ctx context.Context, expectedMock
 		params.Exact = &models.ExactServing{Stage: true, Pool: append([]string(nil), r.exact.pool...), Worker: r.exact.staged()}
 		if r.exact.background {
 			params.Exact.Background = models.RecordedWithS12Routing
+		} else {
+			params.Exact.Unrouted = r.exact.unrouted
 		}
 	}
 

@@ -4964,6 +4964,19 @@ func (p *Proxy) ServeExactBackground(rules string, pool, worker []string) error 
 
 var _ agent.ExactBackgroundServer = (*Proxy)(nil)
 
+// StageExactUnrouted implements agent.ExactUnroutedStager
+// (exact_background.go).
+func (p *Proxy) StageExactUnrouted(why string) error {
+	m := p.getMockManager()
+	if m == nil {
+		return errNoMockManager
+	}
+	m.StageExactUnrouted(why)
+	return nil
+}
+
+var _ agent.ExactUnroutedStager = (*Proxy)(nil)
+
 // SetRecordedOfKind implements agent.RecordedOfKindSetter
 // (exact_background.go).
 func (p *Proxy) SetRecordedOfKind(src func(kind models.Kind, visit func(name string, load func() (*models.Mock, error)) bool) error) error {

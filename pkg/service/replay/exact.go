@@ -103,6 +103,10 @@ type exactPlan struct {
 	// staging says so to the agent, and its end does not require its worker
 	// scope answered (unansweredWorker).
 	background bool
+	// unrouted is, for a set background serving does not serve, why
+	// (s12Serves): its staging hands it to the agent
+	// (models.ExactServing.Unrouted).
+	unrouted string
 	// returned is, by mock, the owner a drift move's recording was given
 	// back to (returnStaleMoves): its quarantine no longer applies.
 	returned map[string]string
@@ -313,40 +317,43 @@ func (r *Replayer) provenMappingsOf(ctx context.Context, testSetID string) (map[
 // proven-routing record's mark (recordedWith holds models.RecordedWithS12Routing) and a
 // registered func enables it (S12Serving). A set without the mark, and a
 // marked set this build does not enable it for, has every recorded
-// background call answered exactly and required by its end; for a set
-// without the mark that is said once per set (the caller asks once, as the
-// set's mocks load), with what it means under the switch.
-func (r *Replayer) s12Serves(testSetID string, recordedWith []string) bool {
+// background call answered exactly and required by its end; unrouted then
+// says which side lacks proven routing (models.UnroutedUnmarked: the record;
+// models.UnroutedNotEnabled: this replay), for the set's staging to hand the
+// agent (models.ExactServing.Unrouted), whose parsers name it on a call they
+// refuse. Each is said once per set (the caller asks once, as the set's
+// mocks load), with what it means under the switch.
+func (r *Replayer) s12Serves(testSetID string, recordedWith []string) (serves bool, unrouted string) {
 	if !(&models.Mapping{RecordedWith: recordedWith}).WasRecordedWith(models.RecordedWithS12Routing) {
 		r.sayRecordedWithoutRouting(testSetID, recordedWith)
-		return false
+		return false, models.UnroutedUnmarked
 	}
 	if S12Serving() {
-		return true
+		return true, ""
 	}
 	r.logger.Info("this test set was recorded under proven routing (mappings.yaml recordedWith: "+models.RecordedWithS12Routing+"), which this keploy does not enable: its worker scope and pool are served as a set recorded without proven routing, every recorded background call answered exactly and required by the set's end ("+provenswitch.Env+"=1)",
 		zap.String("testSetID", testSetID),
 		zap.String("next_step", "replay it with the keploy build that recorded it (keploy enterprise), whose judging proven routing rests on"))
-	return false
+	return false, models.UnroutedNotEnabled
 }
 
 // sayRecordedWithoutRouting says, in one line, that testSetID, which no
 // proven-routing record marked (models.RecordedWithS12Routing: a set recorded
 // before proven routing, with --sync or mapping off, or by a keploy build with
 // no judging), is matched exactly under the proven switch, as every set is,
-// with every recorded background call required by the set's end; that its
-// fields that vary between runs were never learned, since only a
-// proven-routing record learns them, so a call whose value of one differs
-// from its recording is refused; and how to correct it: record the set again
-// so that they are.
+// with its background calls not routed: every recorded background call is
+// answered exactly and required by the set's end; and how to have them
+// routed: record the set again so that it carries the mark. It does not say
+// the set's varying fields were never learned: whether a record learned a
+// field rests on its learn step (config.Test.Learn), not on the mark.
 func (r *Replayer) sayRecordedWithoutRouting(testSetID string, recordedWith []string) {
 	fix := "record the test set again with " + provenswitch.Env + "=1"
-	next := fix + ", without --sync and with mapping on: that recording learns its varying fields, routes its background calls and marks its mappings.yaml recordedWith: " + models.RecordedWithS12Routing
+	next := fix + ", without --sync and with mapping on: that recording routes its background calls and marks its mappings.yaml recordedWith: " + models.RecordedWithS12Routing
 	if !S12Serving() {
 		fix += " using keploy enterprise"
-		next = fix + ", whose judging learns a set's varying fields and routes its background calls: this keploy build marks no set it records"
+		next = fix + ", whose judging routes a set's background calls and marks the set: this keploy build marks no set it records"
 	}
-	r.logger.Info("this test set was recorded without proven routing (its mappings.yaml does not carry recordedWith: "+models.RecordedWithS12Routing+"): under "+provenswitch.Env+"=1 its calls are matched exactly, every recorded background call required by the set's end, and its varying fields (those that vary between runs) were never learned, so a call whose value of one differs from its recording is refused; to correct it, "+fix+" to learn them",
+	r.logger.Info("this test set was recorded without proven routing (its mappings.yaml does not carry recordedWith: "+models.RecordedWithS12Routing+"): under "+provenswitch.Env+"=1 its calls are matched exactly, and its background calls are not routed: every recorded background call is answered exactly and required by the set's end; to have them routed, "+fix,
 		zap.String("testSetID", testSetID),
 		zap.Strings("recordedWith", recordedWith),
 		zap.String("next_step", next))

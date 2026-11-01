@@ -626,6 +626,18 @@ type ExactBackgroundServer interface {
 	ServeExactBackground(rules string, pool, worker []string) error
 }
 
+// ExactUnroutedStager is implemented by a proxy that names, on a call its
+// parsers refuse in a set staged under today's rules, why the set is not
+// served by the background rules (models.ExactServing.Unrouted:
+// models.UnroutedUnmarked, models.UnroutedNotEnabled; "" from a replay that
+// does not say). The agent calls StageExactUnrouted right after
+// StageExactBackground opens such a set's staging, before the staging
+// installs any view, so every view of the staging reads it. A proxy that
+// does not implement it names neither side.
+type ExactUnroutedStager interface {
+	StageExactUnrouted(why string) error
+}
+
 // RecordedOfKindSetter is implemented by a proxy whose pairing (record's full
 // round) reads, beside what is staged, the set's recordings of
 // a kind the agent keeps on disk: a test's own are staged only as it opens.
