@@ -205,10 +205,10 @@ func (dc *decider) leaf(path, unread string) []Decision {
 
 // leafText decides the changed words of a drifted text leaf, recorded rec
 // and live in round F: opened first by the steps its adapter names at its
-// place (at.Steps), then by each step the reader takes (readLeaf: percent
-// escapes, a JSON string, base64, a JWT's claims, a cookie's pairs), and
-// read word by word in each text opened, so an encoded instant is read as
-// the instant it is. A step of the adapter's that does not open both runs,
+// place (at.Steps, which readLeaf opens), then by each step the reader
+// takes (readLeaf: percent escapes, a JSON string, base64, a JWT's claims,
+// a cookie's pairs), and read word by word in each text opened, so an
+// encoded instant is read as the instant it is. A step of the adapter's that does not open both runs,
 // or opens them to one text (only the encoding changed), refuses the field
 // whole as written, at its place with no step. A refusal of the field
 // whole (bare: its place, no step) ends it, as written.
@@ -224,11 +224,7 @@ func (dc *decider) leafText(path string, at variables.Address, rec, live string)
 		return []Decision{dc.cannotCheck(path, bare, -1, rec, live, "only its encoding changed")}
 	}
 	var out []Decision
-	for _, rd := range readLeaf(dc.in.Drifts, at.Place, r, f) {
-		rd.At.Steps = append(append([]variables.Step(nil), at.Steps...), rd.At.Steps...)
-		for i := range rd.Words {
-			rd.Words[i].At.Steps = rd.At.Steps
-		}
+	for _, rd := range readLeaf(dc.in.Drifts, at, rec, live) {
 		ds, whole := dc.text(path, bare, rec, live, rd)
 		if out = append(out, ds...); whole {
 			return out
