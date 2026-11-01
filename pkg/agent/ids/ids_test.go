@@ -32,3 +32,26 @@ func TestAConflictingPairDropsTheIDInsteadOfGuessing(t *testing.T) {
 		t.Fatalf("two recorded ids claiming one new id are both dropped: %v", got)
 	}
 }
+
+// Restore undoes Rewrite: a call carrying an id this run made is matched as
+// the recording's call; a pair the map banned (one id seen with two) is never
+// restored.
+func TestRestore(t *testing.T) {
+	m := &Map{}
+	if got := m.Restore(`{"_id":"6adba2fb728c417969374a1e"}`); got != `{"_id":"6adba2fb728c417969374a1e"}` {
+		t.Fatalf("an empty map changed %s", got)
+	}
+	m.Add("65f0aaaaaaaaaaaaaaaaaaaa", "6adba2fb728c417969374a1e")
+	live := `{"find":"c","filter":{"_id":{"$oid":"6adba2fb728c417969374a1e"}}}`
+	want := `{"find":"c","filter":{"_id":{"$oid":"65f0aaaaaaaaaaaaaaaaaaaa"}}}`
+	if got := m.Restore(live); got != want {
+		t.Fatalf("Restore = %s, want %s", got, want)
+	}
+	if got := m.Rewrite(m.Restore(live)); got != live {
+		t.Fatalf("Rewrite(Restore(s)) = %s, want %s", got, live)
+	}
+	m.Add("65f0aaaaaaaaaaaaaaaaaaaa", "6adba2fb728c417969374a1f") // the recorded id again, with another
+	if got := m.Restore(live); got != live {
+		t.Fatalf("a banned pair was restored: %s", got)
+	}
+}
