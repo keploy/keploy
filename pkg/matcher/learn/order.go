@@ -407,10 +407,7 @@ func (dc *decider) word(path string, bare variables.Address, rec, live, text str
 		if r, no := dc.unanswerable(path, bare, rec, live, echo, unnamed); no {
 			return r
 		}
-		if len(echo) > 0 {
-			rule += "; answered at " + addrList(echo) + ", where the call's answer holds " + strconv.Quote(rec) + " whole as recorded"
-		}
-		d := dc.learned(path, at, n, w.Rec, w.Live, OutcomeValue, rule, names(src))
+		d := dc.learned(path, at, n, w.Rec, w.Live, OutcomeValue, rule+answeredAt(echo, rec), names(src))
 		d.From = Place{Mock: first.mock, Side: first.side, Path: first.path, Live: w.Live, Run: first.startUp || first.otherTest, InStartUp: first.startUp}
 		d.FromAt = dc.fromAt(first, w.Rec)
 		d.Echo = echo
@@ -451,12 +448,7 @@ func (dc *decider) word(path string, bare variables.Address, rec, live, text str
 		rule = "no place before the call shows it (" + p.name + " held " + strconv.Quote(w.Rec) + " and round F gave " + gaveAt(p, w.Live) +
 			" there: set aside, as a copy moves with its source); bound at its first call"
 	}
-	if len(echo) > 0 {
-		// The answer rewritten at replay is part of what keploy learned:
-		// the line names it, as a Value's read-back line does.
-		rule += "; answered at " + addrList(echo) + ", where the call's answer holds " + strconv.Quote(rec) + " whole as recorded"
-	}
-	d := dc.learned(path, at, n, w.Rec, w.Live, OutcomeFresh, rule, names(aside))
+	d := dc.learned(path, at, n, w.Rec, w.Live, OutcomeFresh, rule+answeredAt(echo, rec), names(aside))
 	d.Echo = echo
 	return d
 }
@@ -508,7 +500,13 @@ func (dc *decider) textInstant(path string, bare variables.Address, rec, live st
 		c.ri = typedInstant{at: time.Unix(0, iw.Rec.key.at).UTC(), res: iw.Rec.res, names: namesMoment}
 		c.li = typedInstant{at: time.Unix(0, iw.Live.key.at).UTC(), res: iw.Live.res, names: namesMoment}
 	}
-	return dc.instant(path, w.At, w.At.Word, c)
+	c.echo, c.unnamed = dc.readBack(path, w.At, w, rec, true)
+	c.rec, c.wholeText = rec, w.Rec == rec
+	d := dc.instant(path, w.At, w.At.Word, c)
+	if r, no := dc.unanswerable(path, bare, rec, live, d.Echo, c.unnamed); no && len(d.Echo) > 0 {
+		return r
+	}
+	return d
 }
 
 // instantHold is what one earlier place holds of a changed instant: R's
@@ -539,6 +537,17 @@ type changedInstant struct {
 	text   bool
 	word   models.ClockWord
 	noWord string
+	// echo is where the call's answer reads the word back (readBack, whole
+	// values too), unnamed the first such place keploy cannot name, rec the
+	// leaf's recorded text; wholeText: the instant is that text whole, whose
+	// Value the adapter's echo answers.
+	echo      []variables.Address
+	unnamed   string
+	rec       string
+	wholeText bool
+	// aside names the earlier places that held R's value where F's does
+	// not stand: a Clock's line says it set them aside.
+	aside []string
 }
 
 // clockWordOf is where iw, an instant rd reads, stands in rec, its leaf's
@@ -699,6 +708,11 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 				rank: min(dc.rank(p.t.rec, r, c.rm, hr), dc.rank(p.t.live, l, c.lm, hl))})
 		}
 	}
+	for _, h := range hs {
+		if h.hr && !h.hl && len(c.aside) < maxLinePlaces {
+			c.aside = append(c.aside, h.p.name)
+		}
+	}
 	// A place that holds a value by its exact text is named before one
 	// that holds it by a cut, and a finer cut before a coarser one.
 	sort.SliceStable(hs, func(i, j int) bool { return hs[i].rank < hs[j].rank })
@@ -776,12 +790,12 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 		}
 	}
 	if len(gave) > 0 {
-		return dc.bound(path, at, n, r, l, gave, "a value the test gave keploy, which the call sends as given in both runs")
+		return dc.bound(path, at, n, c, gave, "a value the test gave keploy, which the call sends as given in both runs")
 	}
 	switch len(slots) {
 	case 0:
 	case 1:
-		return dc.bound(path, at, n, r, l, slots, "the test case's request holds it, templated, in both runs")
+		return dc.bound(path, at, n, c, slots, "the test case's request holds it, templated, in both runs")
 	default:
 		return dc.refuse(path, at, n, r, l, RefusalTwoSources,
 			"the same moment was sent at "+slots[0].name+" and "+slots[1].name+", two separate reads", names(slots), dc.wordNoise(path, n))
@@ -818,7 +832,7 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 			return dc.refuse(path, at, n, r, l, RefusalUnknown, why+", beside "+answers[0].name+": two sources", []string{late, answers[0].name},
 				Edit{Kind: EditReRecord}, dc.wordNoise(path, n))
 		}
-		return dc.bound(path, at, n, r, l, answers, "an answer given before the call holds it: the dependency's value")
+		return dc.bound(path, at, n, c, answers, "an answer given before the call holds it: the dependency's value")
 	}
 
 	// 4. and 6. A copy: requests of the call's scope or the start-up, sent
@@ -840,7 +854,7 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 		return out
 	}
 	if fine := copies(true); len(fine) > 0 {
-		return dc.copied(path, at, n, r, l, fine, "the same moment, at a cut finer than a millisecond, was sent before the call in both runs: one read, copied")
+		return dc.copied(path, at, n, c, fine, "the same moment, at a cut finer than a millisecond, was sent before the call in both runs: one read, copied")
 	}
 
 	// An answer outside the call's scope that would bind it at step 3 were
@@ -907,7 +921,7 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 
 	// 6. Coarse copy: as 4, a millisecond or coarser; no window condition.
 	if coarse := copies(false); len(coarse) > 0 {
-		return dc.copied(path, at, n, r, l, coarse, "the same moment, at a millisecond or coarser, was sent before the call in both runs and its own window does not hold it: one read, copied")
+		return dc.copied(path, at, n, c, coarse, "the same moment, at a millisecond or coarser, was sent before the call in both runs and its own window does not hold it: one read, copied")
 	}
 
 	// 7. Since begin (client tests): a read the window from each run's
@@ -944,7 +958,9 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	late := ""
 	if dc.in.Drifts != nil && dc.in.Drifts.clientTests && len(hs) == 0 && cutWhy == "" && dc.instantEchoed(c) == "" {
 		if late = madeSinceBegin(dc.in.Window, dc.in.RecBegan, c, zone); late == "" {
-			return dc.learned(path, at, n, r, l, OutcomeFresh, "the test's own value: no place before the call holds it; bound at its first call", nil)
+			d := dc.learned(path, at, n, r, l, OutcomeFresh, "the test's own value: no place before the call holds it; bound at its first call"+answeredAt(c.echo, c.rec), nil)
+			d.Echo = c.echo
+			return d
 		}
 	}
 	why := "a time its call's window does not hold in both runs, that no answer gave and no request of this scope sent"
@@ -1136,7 +1152,10 @@ func (dc *decider) clock(path string, at variables.Address, n int, c changedInst
 		// The window holds the read; the value is the read plus this.
 		rule += ", stored as " + models.ClockOffset{Min: off.Min, Max: off.Max, Res: off.Res}.String()
 	}
-	d := dc.learned(path, at, n, r, l, OutcomeClock, rule, nil)
+	if len(c.aside) > 0 {
+		rule += "; set aside: " + strings.Join(c.aside, ", ") + " held the recorded value and round F's value does not stand there"
+	}
+	d := dc.learned(path, at, n, r, l, OutcomeClock, rule, c.aside)
 	if off.Why == "" {
 		off.Why = d.Line
 	}
@@ -1146,23 +1165,38 @@ func (dc *decider) clock(path string, at variables.Address, n int, c changedInst
 
 // bound is a Value bound at the earliest of src; From says Run where that
 // place is the start-up's or an earlier test's (the run's variable).
-func (dc *decider) bound(path string, at variables.Address, n int, r, l string, src []evPlace, rule string) Decision {
+func (dc *decider) bound(path string, at variables.Address, n int, c changedInstant, src []evPlace, rule string) Decision {
 	first := src[0]
 	for _, p := range src[1:] {
 		if p.at.Before(first.at) {
 			first = p
 		}
 	}
-	d := dc.learned(path, at, n, r, l, OutcomeValue, "bound to "+first.name+": "+rule, names(src))
-	d.From = Place{Mock: first.mock, Side: first.side, Path: first.path, Live: l, Run: first.startUp || first.otherTest, InStartUp: first.startUp}
-	d.FromAt = dc.fromAt(first, r)
+	var echo []variables.Address
+	if !c.wholeText {
+		echo = c.echo
+	}
+	d := dc.learned(path, at, n, c.r, c.l, OutcomeValue, "bound to "+first.name+": "+rule+answeredAt(echo, c.rec), names(src))
+	d.From = Place{Mock: first.mock, Side: first.side, Path: first.path, Live: c.l, Run: first.startUp || first.otherTest, InStartUp: first.startUp}
+	d.FromAt = dc.fromAt(first, c.r)
+	d.Echo = echo
 	return d
+}
+
+// answeredAt is the end of a word's rule that names where its call's answer
+// reads it back (the answer rewritten at replay is part of what keploy
+// learned), rec the request leaf's recorded text; "" where it reads none.
+func answeredAt(echo []variables.Address, rec string) string {
+	if len(echo) == 0 {
+		return ""
+	}
+	return "; answered at " + addrList(echo) + ", where the call's answer holds " + strconv.Quote(rec) + " whole as recorded"
 }
 
 // copied is a Value bound at the earliest of src, a copy's sources; a later
 // one its own call learned as a read of the clock is a second, separate
 // read, and the word is refused naming both.
-func (dc *decider) copied(path string, at variables.Address, n int, r, l string, src []evPlace, rule string) Decision {
+func (dc *decider) copied(path string, at variables.Address, n int, c changedInstant, src []evPlace, rule string) Decision {
 	first := src[0]
 	for _, p := range src[1:] {
 		if p.at.Before(first.at) {
@@ -1171,11 +1205,11 @@ func (dc *decider) copied(path string, at variables.Address, n int, r, l string,
 	}
 	for _, p := range src {
 		if p.clock && p.name != first.name {
-			return dc.refuse(path, at, n, r, l, RefusalTwoSources,
+			return dc.refuse(path, at, n, c.r, c.l, RefusalTwoSources,
 				"the same moment was sent at "+first.name+" and "+p.name+", two separate reads", []string{first.name, p.name}, dc.wordNoise(path, n))
 		}
 	}
-	return dc.bound(path, at, n, r, l, src, rule)
+	return dc.bound(path, at, n, c, src, rule)
 }
 
 // instantEchoed is the first leaf of the call's recorded answer that holds
