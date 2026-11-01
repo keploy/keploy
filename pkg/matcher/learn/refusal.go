@@ -86,14 +86,11 @@ func refusalFoot(r Refusal) string {
 
 // placesPart is a line's places, at most three.
 func placesPart(ps []string) string {
-	if len(ps) == 0 {
-		return ""
-	}
-	out := make([]string, 0, maxLinePlaces)
+	s, sep := "", ". Places: "
 	for _, p := range ps[:min(len(ps), maxLinePlaces)] {
-		out = append(out, printed(p))
+		s, sep = s+sep+printed(p), ", "
 	}
-	return ". Places: " + strings.Join(out, ", ")
+	return s
 }
 
 // wordWhere is "[<test> ]<mock> <field>[ word <n>]", each name bare or quoted.

@@ -2,6 +2,7 @@ package learn
 
 import (
 	"cmp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -78,14 +79,9 @@ const withoutMark = "a value without "
 
 // secretAt reports whether field, or one of places, names a secret.
 func secretAt(field string, places []string) bool {
-	for _, s := range append([]string{field}, places...) {
-		for _, seg := range strings.FieldsFunc(s, func(r rune) bool { return r == '.' || r == ' ' }) {
-			if secretname.Name(seg) {
-				return true
-			}
-		}
-	}
-	return false
+	return slices.ContainsFunc(append([]string{field}, places...), func(s string) bool {
+		return slices.ContainsFunc(strings.FieldsFunc(s, func(r rune) bool { return r == '.' || r == ' ' }), secretname.Name)
+	})
 }
 
 // hidden is s with each quoted value in it printed as "***"; from a quote
