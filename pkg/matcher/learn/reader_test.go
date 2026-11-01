@@ -2,9 +2,14 @@ package learn
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"reflect"
 	"runtime"
+	"runtime/debug"
+	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -434,8 +439,7 @@ func TestReaderTextOfARecordingPinsNothingPastTheBudget(t *testing.T) {
 	}{
 		{"a word", func() { last.holdsWord("zzz") }},
 		{"a base64 run", func() { last.holdsToken(tokenB64, "QUJDREVGR0g") }},
-		{"a word's fields", func() { last.fieldsWith("zzz") }},
-		{"a held word's fields", func() { last.fieldsWith(id(n - 1)) }},
+		{"a word's fields", func() { last.fieldsWith(id(n - 1)) }},
 		{"an instant", func() { last.holdsMoment(moment{}) }},
 		{"its instants", func() { last.spansOf() }},
 	} {
@@ -731,24 +735,6 @@ func TestReaderFieldsOfAStreamedBodyAreItsValuesFields(t *testing.T) {
 	}
 }
 
-// fieldsWith reads a field's words only of a text that holds the word
-// (holdsWord): a recording that lacks it has no field with it, and the
-// index builds no field view for that question.
-func TestReaderFieldsWithOfAWordTheTextLacksBuildsNoView(t *testing.T) {
-	body, ids := uuidAnswer(40, 16<<10)
-	x := newReaderIndex(NewDriftCache())
-	r := x.textOf(RawOf(getAnswer("mock-1", "http://api/items/1", body, eRecAt), false))
-	if at, read := r.fieldsWith("zzzz9"); len(at) != 0 || !read {
-		t.Errorf("a word the recording lacks: at %v read %v; want no field, read", at, read)
-	}
-	if r.e != nil && r.e.fields.ok {
-		t.Errorf("the index built the field view for a word the recording lacks")
-	}
-	if at, read := r.fieldsWith(ids[3][9:13]); len(at) == 0 || !read || !r.e.fields.ok {
-		t.Errorf("a word the recording holds: at %v read %v, view kept %v; want its fields, the view kept", at, read, r.e != nil && r.e.fields.ok)
-	}
-}
-
 // The index counts a text it keeps once, however many of its answers it
 // keeps: the entry keeps the text with the first answer it keeps.
 func TestReaderIndexCountsAKeptTextOnce(t *testing.T) {
@@ -786,25 +772,22 @@ func TestReaderReleaseLetsGoOfEveryAnswer(t *testing.T) {
 
 // BenchmarkReaderFieldsWith498KB asks fieldsWith once per call on
 // api-server's 498 KB answer shape, within the budget (the field view built
-// and kept) and past it (a scan of the recording's fields), for a word the
-// answer holds and one it lacks.
+// and kept) and past it (a scan of the recording's fields).
 func BenchmarkReaderFieldsWith498KB(b *testing.B) {
 	body, ids := uuidAnswer(400, 498<<10)
 	rec := RawOf(getAnswer("mock-1", "http://api/items/1", body, eRecAt), false)
 	for _, c := range []struct {
 		name   string
 		budget int64
-		word   string
-		held   bool
-	}{{"within/held", 0, ids[3][9:13], true}, {"within/lacked", 0, "zzzz9", false}, {"past/held", 1, ids[3][9:13], true}, {"past/lacked", 1, "zzzz9", false}} {
+	}{{"within", 0}, {"past", 1}} {
 		b.Run(c.name, func(b *testing.B) {
 			defer func(v int64) { readerBudget = v }(readerBudget)
 			readerBudget = c.budget
 			var peak uint64
 			for i := 0; i < b.N; i++ {
 				x := newReaderIndex(NewDriftCache())
-				if at, read := x.textOf(rec).fieldsWith(c.word); (len(at) > 0) != c.held || !read {
-					b.Fatalf("%q: at %v read %v", c.word, at, read)
+				if at, read := x.textOf(rec).fieldsWith(ids[3][9:13]); len(at) == 0 || !read {
+					b.Fatalf("at %v read %v", at, read)
 				}
 				x.release()
 				var ms runtime.MemStats
@@ -813,5 +796,307 @@ func BenchmarkReaderFieldsWith498KB(b *testing.B) {
 			}
 			b.ReportMetric(float64(peak)/(1<<20), "heapMiB")
 		})
+	}
+}
+
+// A word that moved between a JSON body's fields or a stream's records is not at one place, whatever opens the body:
+// blanks before the first value, or a first value that is no object or array.
+func TestReaderAMovedWordInAnyJSONBodyIsNotAtOnePlace(t *testing.T) {
+	defer func(b int64) { readerBudget = b }(readerBudget)
+	const w = "ord7Kq2Xw9"
+	answer := func(body string) Raw { return RawOf(getAnswer("mock-1", "http://api/items/1", body, eRecAt), false) }
+	obj := func(a, b string) string { return `{"a":"` + a + `","b":"` + b + `"}` }
+	nd := func(a, b string) string { return `{"a":"` + a + `"}` + "\n" + `{"a":"` + b + `"}` + "\n" }
+	for _, c := range []struct{ name, rec, moved string }{
+		{"an object after a newline", "\n" + obj(w, "x"), "\n" + obj("x", w)},
+		{"an object after spaces", "  " + obj(w, "x"), "  " + obj("x", w)},
+		{"records after a newline", "\n" + nd(w, "x"), "\n" + nd("x", w)},
+		{"a stream of strings", `"` + w + `"` + "\n" + `"x"` + "\n", `"x"` + "\n" + `"` + w + `"` + "\n"},
+		{"a stream opening with a number", "1\n" + nd(w, "x"), "1\n" + nd("x", w)},
+	} {
+		for _, budget := range []int64{0, 1} {
+			readerBudget = budget
+			x := newReaderIndex(nil)
+			if same, read := inOneField(x.textOf(answer(c.rec)), w, x.textOf(answer(c.moved)), w); same || !read {
+				t.Errorf("budget %d, %s: in one field %v read %v; want a word that moved not at one place", budget, c.name, same, read)
+			}
+		}
+	}
+}
+
+// What the index keeps answers as a scan past the budget does: fieldsWith in every reading and form, over bodies that
+// JSON, a stream and a body that is no JSON.
+func TestReaderFieldsKeptEqualTheScan(t *testing.T) {
+	defer func(b int64) { readerBudget = b }(readerBudget)
+	b64 := base64.StdEncoding.EncodeToString([]byte("id ord7Kq2Xw9 ok"))
+	bodies := []string{
+		`{"a":"ord7Kq2Xw9"}` + "\n" + `{"a":"x","b":"` + b64 + `"}` + "\n",
+		`{"a":"ORD7KQ2XW9","b":"p%20ord7Kq2Xw9"}` + "\n" + `[1,2,{"c":"cart_42-a"}]`,
+		`[{"a":"ord7Kq2Xw9"},{"a":"a\nord7Kq2Xw9"}]`,
+		`{"a":"x"} trailing ord7Kq2Xw9`,
+		`{"a":"x&ord7Kq2Xw9","n":1234567890123}`,
+		`{"a":"%2520ord7Kq2Xw9"}`, `{}`, `[]`, `{"ord7Kq2Xw9":null}`,
+	}
+	words := []string{"ord7Kq2Xw9", "ORD7KQ2XW9", "ord7kq2xw9", "x", "a", "1234567890123", "cart_42", "cart", "42", "cart_42-a", "zzz", "", "1", "items"}
+	for _, body := range bodies {
+		rec := RawOf(getAnswer("mock-1", "http://api/items/1", body, eRecAt), false)
+		for _, w := range words {
+			var got [2]string
+			for k, budget := range []int64{0, 1} {
+				readerBudget = budget
+				x := newReaderIndex(NewDriftCache())
+				f, read := x.textOf(rec).fieldsWith(w)
+				got[k] = fmt.Sprint(f, read)
+			}
+			if got[0] != got[1] {
+				t.Errorf("body %q word %q: kept %s, past the budget %s", body, w, got[0], got[1])
+			}
+		}
+	}
+}
+
+// A recording keploy could not read has no field and says so, on either side of inOneField.
+func TestReaderFieldsOfAnUnreadRecordingAreUnread(t *testing.T) {
+	const w = "ord7Kq2Xw9"
+	x := newReaderIndex(nil)
+	rec, un := func() *readerText {
+		return x.textOf(RawOf(getAnswer("mock-1", "http://api/items/1", `{"a":"`+w+`"}`, eRecAt), false))
+	}, func() *readerText { return x.textOf(Raw{mock: "mock-unread"}) }
+	if at, read := un().fieldsWith(w); read || len(at) != 0 {
+		t.Errorf("fieldsWith of an unread recording: at %v read %v; want unread", at, read)
+	}
+	if same, read := inOneField(rec(), w, un(), w); same || read {
+		t.Errorf("F's view unread: in one field %v read %v; want unread", same, read)
+	}
+	if same, read := inOneField(un(), w, rec(), w); same || read {
+		t.Errorf("the recording unread: in one field %v read %v; want unread", same, read)
+	}
+}
+
+// release lets go of every kind of answer, not only the words.
+func TestReaderReleaseClearsEveryKindOfAnswer(t *testing.T) {
+	const w = "ord7Kq2Xw9"
+	x := newReaderIndex(NewDriftCache())
+	tt := x.textOf(RawOf(getAnswer("mock-1", "http://api/items/1", `{"a":"`+w+` 2026-10-31T10:50:13Z"}`, eRecAt), false))
+	tt.holdsWord(w)
+	tt.fieldsWith(w)
+	tt.holdsToken(tokenB64, "zzzzzzzz")
+	tt.spansOf()
+	tt.holdsMoment(moment{})
+	if e := tt.e; !e.tokens.ok || !e.fields.ok || !e.runs.ok || !e.spans.ok || !e.formSpans.ok {
+		t.Fatalf("fixture: kept %+v", e)
+	}
+	x.release()
+	if !reflect.DeepEqual(*tt.e, readerEntry{n: tt.e.n}) {
+		t.Errorf("after release the handle's entry keeps %+v; want nothing", *tt.e)
+	}
+}
+
+// A number in a JSON body stands at its field, digits as recorded. A float64 would stand at no field.
+func TestReaderANumberInAJSONBodyStandsAtItsField(t *testing.T) {
+	const w = "1730371813123"
+	rec := RawOf(getAnswer("mock-1", "http://api/items/1", `{"a":`+w+`,"b":"x"}`, eRecAt), false)
+	x := newReaderIndex(nil)
+	if at, read := x.textOf(rec).fieldsWith(w); len(at) != 1 || !read || !strings.HasSuffix(at[0].path, ".a") {
+		t.Errorf("%q is at %v (read %v); want the one field a", w, at, read)
+	}
+}
+
+// The field view counts on the budget: the PR's "kept on the same budget".
+func TestReaderTheFieldViewCountsOnTheBudget(t *testing.T) {
+	body, ids := uuidAnswer(40, 16<<10)
+	x := newReaderIndex(NewDriftCache())
+	tt := x.textOf(RawOf(getAnswer("mock-1", "http://api/items/1", body, eRecAt), false))
+	w := ids[3][9:13]
+	tt.holdsWord(w)
+	before := x.used
+	if at, read := tt.fieldsWith(w); len(at) == 0 || !read || !tt.e.fields.ok {
+		t.Fatalf("at %v read %v; want the view kept", at, read)
+	}
+	if grew, least := x.used-before, int64(len(tt.e.fields.v.at))*headerBytes; grew < least {
+		t.Errorf("keeping a view of %d fields counted %d bytes; want at least %d", len(tt.e.fields.v.at), grew, least)
+	}
+}
+
+// heapPeakOf is the most the heap held above what it held before f, at a low
+// GOGC, so what it reads is close to what f keeps live, not garbage waiting
+// for a collection.
+func heapPeakOf(f func()) int64 {
+	defer debug.SetGCPercent(debug.SetGCPercent(10))
+	runtime.GC()
+	var start runtime.MemStats
+	runtime.ReadMemStats(&start)
+	var peak atomic.Uint64
+	stop, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			var m runtime.MemStats
+			runtime.ReadMemStats(&m)
+			peak.Store(max(peak.Load(), m.HeapAlloc))
+			select {
+			case <-stop:
+				return
+			case <-time.After(time.Millisecond):
+			}
+		}
+	}()
+	f()
+	close(stop)
+	<-done
+	return int64(peak.Load()) - int64(start.HeapAlloc)
+}
+
+// One large JSON answer is read for its fields within a few times its size,
+// many small fields or one long string alike: no tree of it and no rewritten
+// copy. Past the budget a question keeps nothing. Within it the field view is
+// built only where its peak has room, so a budget that has none for the body
+// costs what past it costs.
+func TestReaderOneLargeBodyIsReadFieldByFieldWithinABound(t *testing.T) {
+	defer func(b int64) { readerBudget = b }(readerBudget)
+	const size = 8 << 20
+	events, ids := uuidAnswer(400, size)
+	w := ids[3][9:13]
+	var distinct strings.Builder
+	distinct.WriteString(`{"blob":"` + w + `"`)
+	for i := 0; distinct.Len() < size; i++ {
+		fmt.Fprintf(&distinct, `,"k%d":"v%08x"`, i, i*2654435761)
+	}
+	distinct.WriteString(`}`)
+	for _, c := range []struct{ name, body string }{
+		{"many small fields", events},
+		{"many distinct words", distinct.String()},
+		{"one long string", `{"blob":"` + w + ` ` + strings.Repeat("word ", size/5) + `"}`},
+	} {
+		rec := RawOf(getAnswer("mock-1", "http://api/items/1", c.body, eRecAt), false)
+		text, _ := newReaderIndex(nil).textOf(rec).textNow()
+		room := fieldViewCost * int64(len(text))
+		for _, b := range []struct{ budget, bound int64 }{{1, 8 * size}, {room - 1, 8 * size}, {room, room}} {
+			readerBudget = b.budget
+			var at []fieldAt
+			peak := heapPeakOf(func() {
+				x := newReaderIndex(NewDriftCache())
+				defer x.release()
+				at, _ = x.textOf(rec).fieldsWith(w)
+			})
+			t.Logf("%s, budget %d: peak %.1f MiB above start (%.1fx the body), %d fields", c.name, b.budget, float64(peak)/(1<<20), float64(peak)/float64(len(c.body)), len(at))
+			if len(at) == 0 {
+				t.Errorf("%s, budget %d: %q stands at no field", c.name, b.budget, w)
+			}
+			if peak > b.bound {
+				t.Errorf("%s, budget %d: one question held %d bytes above start; want at most %d", c.name, b.budget, peak, b.bound)
+			}
+		}
+	}
+}
+
+// A view is built only where what building it holds has room in the budget:
+// past that the question is answered by a scan that keeps nothing, and the
+// same as the view answers.
+func TestReaderAFieldViewIsBuiltOnlyWhereItHasRoom(t *testing.T) {
+	defer func(b int64) { readerBudget = b }(readerBudget)
+	body, ids := uuidAnswer(40, 64<<10)
+	w := ids[3][9:13]
+	rec := RawOf(getAnswer("mock-1", "http://api/items/1", body, eRecAt), false)
+	text, _ := newReaderIndex(nil).textOf(rec).textNow()
+	room := fieldViewCost * int64(len(text))
+	answers := map[bool][]fieldAt{}
+	for _, c := range []struct {
+		budget int64
+		view   bool
+	}{{room - 1, false}, {room, true}} {
+		readerBudget = c.budget
+		x := newReaderIndex(NewDriftCache())
+		r := x.textOf(rec)
+		at, read := r.fieldsWith(w)
+		if !read || len(at) == 0 || r.e.fields.ok != c.view {
+			t.Errorf("budget %d: at %d fields read %v, view kept %v; want the view kept %v", c.budget, len(at), read, r.e.fields.ok, c.view)
+		}
+		if !c.view && x.used != 0 {
+			t.Errorf("budget %d: no view, %d bytes kept; want none", c.budget, x.used)
+		}
+		answers[c.view] = at
+	}
+	if !reflect.DeepEqual(answers[false], answers[true]) {
+		t.Errorf("the scan answers %v, the view %v", answers[false], answers[true])
+	}
+}
+
+// walkJSON stands each key and scalar at the path textFields gives it: a body
+// read field by field shares its paths with a recording split by textFields.
+func TestReaderWalkJSONGivesTextFieldsPaths(t *testing.T) {
+	for _, body := range []string{
+		`{"a":"x","b":{"c":[1,{"d":true},[2,[false]]],"e":null},"":{"":"y"},"f":[],"g":{}}`,
+		`[{"a":1},[2],"s",null,1.50,-0,1e3]`,
+		`"a string"`, `12345678901234567890`, `true`,
+		`{"a.b":"dotted","c[0]":"bracket","esc\"aped":"q\né"}`,
+	} {
+		d := json.NewDecoder(strings.NewReader(body))
+		d.UseNumber()
+		var v any
+		if err := d.Decode(&v); err != nil {
+			t.Fatalf("fixture %q: %v", body, err)
+		}
+		doc, fields := textFields(v)
+		var want, got []string
+		for _, f := range fields {
+			want = append(want, fmt.Sprint(f.path, "|", f.key, "|", doc[f.start:f.end]))
+		}
+		values := walkJSON(body, false, func(path string, key bool, leaf string) {
+			got = append(got, fmt.Sprint(path, "|", key, "|", leaf))
+		})
+		slices.Sort(want)
+		slices.Sort(got)
+		if !reflect.DeepEqual(got, want) || values != 1 {
+			t.Errorf("%q: %d values\n got %q\nwant %q", body, values, got, want)
+		}
+	}
+}
+
+// A stream's values stand below their indices, a text of one value at its
+// own path, and a field that is a name is never read as JSON.
+func TestReaderEachFieldPathsOfStreamsAndNames(t *testing.T) {
+	var got []string
+	seen := func(f fieldAt, text string) { got = append(got, fmt.Sprint(f.path, "|", f.key, "|", text)) }
+	stream := `{"a":"x"}` + "\n" + `"y"` + "\n" + `[1]`
+	eachField(stream+`{"k":"v"}`, []rawField{{start: 0, end: len(stream), path: "body"}, {start: len(stream), end: len(stream) + 9, path: "name", key: true}}, seen)
+	want := []string{"body.[0].a|true|a", "body.[0].a|false|x", "body.[1]|false|y", "body.[2][0]|false|1", `name|true|{"k":"v"}`}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("fields\n got %q\nwant %q", got, want)
+	}
+}
+
+// walkJSON reads text only where it is wholly JSON values: a value cut short,
+// followed by text, or nested deeper than encoding/json reads has no leaf, so
+// the field stays whole, as a body that is no JSON does. A field that holds
+// nothing JSON gives a leaf (a null, blanks, an empty object) is one field
+// too, so its text is still read.
+func TestReaderWalkJSONReadsOnlyWhollyJSONValues(t *testing.T) {
+	deep := func(n int) string { return strings.Repeat("[", n) + `"w"` + strings.Repeat("]", n) }
+	for _, c := range []struct {
+		text           string
+		values, leaves int
+	}{
+		{`{"a":"w"}`, 1, 2}, {" \n{\"a\":\"w\"}\n", 1, 2}, {`{"a":1}{"b":2}`, 2, 4}, {"1 2 3", 3, 3}, {`"w" "x"`, 2, 2},
+		{`null`, 1, 0}, {`{}`, 1, 0}, {`[]`, 1, 0}, {" \n ", 0, 0}, {``, 0, 0},
+		{`{"a":"w"`, 0, 0}, {`{"a":"w"} tail`, 0, 0}, {`{"a":"w"} ]`, 0, 0}, {`[1,2`, 0, 0}, {`{"a":1,}`, 0, 0}, {`[1,]`, 0, 0}, {`{"a" 1}`, 0, 0}, {`]`, 0, 0}, {`plain text`, 0, 0},
+		{deep(maxJSONDepth), 1, 1}, {deep(maxJSONDepth + 1), 0, 0},
+	} {
+		leaves := 0
+		if values := walkJSON(c.text, false, func(string, bool, string) { leaves++ }); values != c.values || (values > 0 && leaves != c.leaves) {
+			t.Errorf("%.40q: %d values, %d leaves; want %d and %d", c.text, values, leaves, c.values, c.leaves)
+		}
+	}
+	const w = "ord7Kq2Xw9"
+	for _, c := range []struct{ name, body, word, suffix string }{
+		{"a value cut short", `{"a":"` + w + `"`, w, "body"},
+		{"nested past the limit", deep(maxJSONDepth+1) + w, w, "body"},
+		{"a null", `null`, "null", "body"},
+		{"a field holding the word null", `{"a":"null"}`, "null", ".a"},
+	} {
+		rec := RawOf(getAnswer("mock-1", "http://api/items/1", c.body, eRecAt), false)
+		if at, read := newReaderIndex(nil).textOf(rec).fieldsWith(c.word); len(at) != 1 || !read || !strings.HasSuffix(at[0].path, c.suffix) {
+			t.Errorf("%s: %q is at %v (read %v); want one field ending %q", c.name, c.word, at, read, c.suffix)
+		}
 	}
 }
