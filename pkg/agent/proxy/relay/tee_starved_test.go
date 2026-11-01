@@ -36,7 +36,9 @@ func TestTee_StarvedProcessIsNotAStalledConsumer(t *testing.T) {
 	switch mode := os.Getenv(starvedChildEnv); {
 	case mode == "":
 	case mode == "hog":
-		for {
+		// A busy process beside the consumer: it spins on its CPU until the
+		// parent kills it.
+		for { //nolint:staticcheck // SA5002: spinning is this child's whole job
 		}
 	case strings.HasPrefix(mode, crowdedMode):
 		cpu, err := strconv.Atoi(strings.TrimPrefix(mode, crowdedMode))
