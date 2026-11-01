@@ -492,7 +492,8 @@ func mongoAnswerMock(name string, sec int64, sectionBytes int) *models.Mock {
 // log reports SpilledResponses, and CI's strict mock-window replay of
 // http-pokeapi requires it to be non-zero, so that phase fails, rather than
 // passing without serving one, if the store stops keeping responses apart.
-// An answer under responseSpillMinBytes stays with its mock, HTTP or Mongo.
+// An HTTP answer under responseSpillMinBytes stays with its mock; a Mongo
+// answer is kept apart at any size, so a window open decodes none.
 func TestSpilledResponsesCountsTheResponsesKeptApart(t *testing.T) {
 	base := time.Unix(1_700_000_000, 0).UTC()
 	big := bigMockAt("big", base, responseSpillMinBytes)
@@ -508,8 +509,8 @@ func TestSpilledResponsesCountsTheResponsesKeptApart(t *testing.T) {
 		if got := d.Len(); got != 5 {
 			t.Fatalf("budget %d: precondition: %d mocks stored, want 5", budget, got)
 		}
-		if got := d.SpilledResponses(); got != 2 {
-			t.Fatalf("budget %d: SpilledResponses = %d, want 2 (the %d-byte HTTP body and the big Mongo answer)", budget, got, responseSpillMinBytes)
+		if got := d.SpilledResponses(); got != 3 {
+			t.Fatalf("budget %d: SpilledResponses = %d, want 3 (the %d-byte HTTP body and both Mongo answers)", budget, got, responseSpillMinBytes)
 		}
 		win, err := d.LoadWindow(base, base.Add(time.Minute))
 		if err != nil {
@@ -520,7 +521,7 @@ func TestSpilledResponsesCountsTheResponsesKeptApart(t *testing.T) {
 		}
 		for _, m := range win {
 			elided := m.Spec.HTTPResp == nil && len(m.Spec.MongoResponses) == 0 && m.HasSpilledResponse()
-			if want := m.Name == "big" || m.Name == "mongo"; elided != want {
+			if want := m.Name == "big" || m.Name == "mongo" || m.Name == "small-mongo"; elided != want {
 				t.Fatalf("budget %d: mock %s: response kept apart = %v, want %v", budget, m.Name, elided, want)
 			}
 		}
