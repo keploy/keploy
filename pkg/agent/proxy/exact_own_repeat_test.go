@@ -576,3 +576,130 @@ func TestTwoIdenticalExchangesAtOnceOfAnExchangeTheTestRecordedOnceAnswerOnlyOne
 		t.Fatalf("the PING between tests was answered %q (miss %+v); want the pool's POOL, unspent", got, miss)
 	}
 }
+
+// Under the proven switch, a call's held store that decided the call is one
+// of the open test's own calls (HideBackgroundWhen, its decision true) hides
+// the background at every door and walk a parser reaches it by: each consume
+// door (DeleteUnFilteredMock, DeleteStartupMock) and the by-kind spend
+// (SpendByKind) refuse a background recording the open test does not own and
+// leave it unspent, and each walk (RangePerTestMocksInWindow,
+// RangeSessionMocksWithKey) skips it; each still reaches the open test's own
+// recording. Decided the other way, each door and walk reaches the
+// background recording: the refusal is the decision's. The background here is
+// the pool (a recording made between tests, in the reusable tiers) and the
+// reached worker scope (a recording a worker made inside the test's window,
+// in the per-test tier).
+func TestACallDecidedTheTestsOwnIsRefusedTheBackgroundAtEveryDoorAndWalk(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	type staged struct {
+		mm                *MockManager
+		own, pool, worker *models.Mock
+	}
+	stage := func(t *testing.T) staged {
+		t.Helper()
+		now := time.Now()
+		start := now.Add(time.Second)
+		pool := ownRepeatExchange("mock-pool-ping", "PING", "POOL", now)
+		worker := ownRepeatExchange("mock-worker-ping", "PING", "WRKR", start.Add(50*time.Millisecond))
+		own := ownRepeatExchange("mock-own-ping", "PING", "OWN1", start.Add(100*time.Millisecond))
+		mm := NewMockManager(nil, nil, zap.NewNop())
+		t.Cleanup(mm.Close)
+		mm.SeedRecordedWindows([]models.TestWindow{{TestCase: "test-0", Start: start, End: start.Add(900 * time.Millisecond)}})
+		// Staged in the test's window, the worker's recording is in the
+		// per-test tier, the pool's in the reusable ones.
+		mm.SetMocksWithWindow([]*models.Mock{worker, own}, []*models.Mock{pool}, start, start.Add(900*time.Millisecond))
+		mm.ServeExactBackground(models.RecordedWithS12Routing, []string{pool.Name}, []string{worker.Name})
+		mm.ServeExactWorker([]string{worker.Name})
+		mm.ServeExactPool(models.PoolKeyNone, []string{pool.Name})
+		mm.ServeExactTest("test-0", []*models.Mock{roundMock(mm, own.Name)})
+		if !mm.ExactServing() || !integrations.S12Background(mm) {
+			t.Fatal("precondition: test-0 is not served exactly, by the background rules")
+		}
+		return staged{mm: mm, own: roundMock(mm, own.Name), pool: roundMock(mm, pool.Name), worker: roundMock(mm, worker.Name)}
+	}
+	walked := func(names []string, name string) bool {
+		for _, n := range names {
+			if n == name {
+				return true
+			}
+		}
+		return false
+	}
+	oneKey := &integrations.MockIndex{Keys: func(*models.Mock) []string { return []string{"PING"} }}
+	cases := []struct {
+		door string
+		// bg is the background recording the door or walk reaches.
+		bg func(s staged) *models.Mock
+		// reach is whether the door settles mk, or the walk gives mk.
+		reach func(t *testing.T, db integrations.MockMemDb, mk *models.Mock) bool
+		// settles says the door spends what it reaches: a refused one
+		// stays unspent.
+		settles bool
+		// ownToo says the door reaches the open test's own recording.
+		ownToo bool
+	}{
+		{"DeleteUnFilteredMock", func(s staged) *models.Mock { return s.pool },
+			func(_ *testing.T, db integrations.MockMemDb, mk *models.Mock) bool {
+				return db.DeleteUnFilteredMock(*mk)
+			}, true, true},
+		{"DeleteStartupMock", func(s staged) *models.Mock { return s.pool },
+			func(_ *testing.T, db integrations.MockMemDb, mk *models.Mock) bool { return db.DeleteStartupMock(*mk) }, true, true},
+		// By kind a test's own recording is never spent: it is no background
+		// recording.
+		{"SpendByKind", func(s staged) *models.Mock { return s.pool },
+			func(_ *testing.T, db integrations.MockMemDb, mk *models.Mock) bool {
+				return db.(integrations.ByKindBackground).SpendByKind(mk)
+			}, true, false},
+		{"RangePerTestMocksInWindow", func(s staged) *models.Mock { return s.worker },
+			func(t *testing.T, db integrations.MockMemDb, mk *models.Mock) bool {
+				var names []string
+				if err := db.(integrations.PerTestRanger).RangePerTestMocksInWindow(func(m *models.Mock) bool {
+					names = append(names, m.Name)
+					return true
+				}); err != nil {
+					t.Fatal(err)
+				}
+				return walked(names, mk.Name)
+			}, false, true},
+		{"RangeSessionMocksWithKey", func(s staged) *models.Mock { return s.pool },
+			func(t *testing.T, db integrations.MockMemDb, mk *models.Mock) bool {
+				var names []string
+				if err := db.(integrations.SessionKeyReader).RangeSessionMocksWithKey(oneKey, "PING", func(m *models.Mock) bool {
+					names = append(names, m.Name)
+					return true
+				}); err != nil {
+					t.Fatal(err)
+				}
+				return walked(names, mk.Name)
+			}, false, true},
+	}
+	for _, c := range cases {
+		t.Run(c.door, func(t *testing.T) {
+			for _, owns := range []bool{false, true} {
+				s := stage(t)
+				bg := c.bg(s)
+				if bg == nil || s.own == nil {
+					t.Fatal("precondition: a recording was not staged")
+				}
+				held, _ := s.mm.HoldToRound(s.mm.MarkCallRound())
+				hider := held.(integrations.BackgroundHider)
+				decided := owns
+				held = hider.HideBackgroundWhen(func() bool { return decided })
+				if !c.settles && hider.HidesBackground() != owns {
+					// A walk hides what a door's decision hid: no walk
+					// asks the decision itself.
+					t.Fatalf("owns %v: the held store's decision is not its call's", owns)
+				}
+				if got := c.reach(t, held, bg); got == owns {
+					t.Fatalf("owns %v: %s reached the background's %s: %v; want %v", owns, c.door, bg.Name, got, !owns)
+				}
+				if c.settles && owns && s.mm.MockSpent(bg.Name) {
+					t.Fatalf("%s refused the background's %s and spent it", c.door, bg.Name)
+				}
+				if c.ownToo && !c.reach(t, held, s.own) {
+					t.Fatalf("owns %v: %s does not reach the open test's own %s", owns, c.door, s.own.Name)
+				}
+			}
+		})
+	}
+}
