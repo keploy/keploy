@@ -687,6 +687,13 @@ func (dc *decider) inAView(p evPlace, c changedInstant) bool {
 	})
 }
 
+// clockCarriedWhy is why step 5 of the instant order reads o, the offset
+// the reading found at path, as no read of the clock: place, a call of
+// another test, sent the same moment before this call in both runs.
+func clockCarriedWhy(path string, o models.ClockOffset, place string) string {
+	return path + " = " + o.String() + " in both runs, but " + place + " sent that moment before this call in both runs: the offset is the gap between the two calls, which a replay moves, so keploy reads it as that call's value carried, never a read of this call's clock"
+}
+
 // heldWhere is the place of each of hs that keep keeps, in order.
 func heldWhere(hs []instantHold, keep func(instantHold) bool) []evPlace {
 	var out []evPlace
@@ -1101,7 +1108,7 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	if c.rm != nil && c.lm != nil {
 		// The reading goes first: a wide window also holds a look-back as a
 		// plain read, and learned plain it fails nearly every replay.
-		if off, cutWhy, inWindow = clockInWindow(path, c.ri, c.li, dc.in.Window, zone); !inWindow && dc.in.Window.holdsRead(*c.rm, *c.lm, zone) {
+		if off, cutWhy, inWindow = clockInWindow(path, c.ri, c.li, dc.in.Window, zone); !inWindow && cutWhy == "" && dc.in.Window.holdsRead(*c.rm, *c.lm, zone) {
 			off, cutWhy, inWindow = models.ClockOffset{Res: max(c.rm.res, c.lm.res)}, "", true
 		} else {
 			if inWindow {
@@ -1114,6 +1121,19 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 					off, cutWhy, guardWhy, inWindow = models.ClockOffset{}, "", g, false
 				}
 			}
+		}
+	}
+	// A look-back or a time to live whose moment a call of another test sent
+	// before this call in both runs is that call's value carried: its offset
+	// is the gap between the two calls, which a replay moves, so it is no
+	// read of this call's clock. It is refused naming that call, as a source
+	// outside the scope is (keploy binds only within a test and the
+	// start-up); a plain read its own window holds stays a read.
+	if inWindow && !off.Plain() {
+		if carried := heldWhere(hs, func(h instantHold) bool {
+			return h.hr && h.hl && h.p.otherTest && !dc.allScope && before(h.p)
+		}); len(carried) > 0 {
+			off, cutWhy, inWindow = models.ClockOffset{}, clockCarriedWhy(path, off, carried[0].name), false
 		}
 	}
 	if inWindow {
