@@ -53,11 +53,12 @@ func (h *Hooks) GetForConn(_ context.Context, app netip.AddrPort) (*agent.Networ
 		return nil, err
 	}
 	return &agent.NetworkAddress{
-		Version:   d.IPVersion,
-		IPv4Addr:  d.DestIP4,
-		IPv6Addr:  d.DestIP6,
-		Port:      d.DestPort,
-		KernelPid: d.KernelPid,
+		Version:    d.IPVersion,
+		IPv4Addr:   d.DestIP4,
+		IPv6Addr:   d.DestIP6,
+		Port:       d.DestPort,
+		KernelPid:  d.KernelPid,
+		AgentNsPid: d.AgentNsPid,
 	}, nil
 }
 

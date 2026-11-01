@@ -115,12 +115,31 @@ func TestFrameStreamsEndWithTheirMarkerOnRequest(t *testing.T) {
 	t.Run("test cases", func(t *testing.T) {
 		syncmgr.Get().SetWatermark(nil) // no hold: test cases go at once
 		svc := streamsSvc{tc: make(chan *models.TestCase, 4), mocks: make(chan *models.Mock), maps: make(chan models.TestMockMapping)}
-		core, logs := observer.New(zapcore.InfoLevel)
+		core, logs := observer.New(zapcore.DebugLevel)
+		// Counted after the marker went out and before the session's
+		// summary, which the handler defers, reads them: the handler logs
+		// the marker's flush on its own goroutine, and this hook runs there.
+		// The summary must say what the marker said (the counts are read
+		// once), not these too.
+		var markerSeen int
+		core = zapcore.RegisterHooks(core, func(e zapcore.Entry) error {
+			if e.Message == streamEndMarkerSent {
+				markerSeen++
+				syncmgr.Get().NoteNotHandedOn()
+				syncmgr.Get().NoteUnnamedCallerConn()
+			}
+			return nil
+		})
 		a := &Agent{logger: zap.New(core), svc: svc}
 		tok := rand.Text() // its own each run: a token ended stays ended
 		// A request a pause cost before this session, and one the ingress
 		// read during a pause before it: not its own.
 		syncmgr.Get().NoteNotRecordedUnderPressure("10.0.0.9:5009 -> 127.0.0.1:8080")
+		// A test case an earlier session's ingress could not hand on, and a
+		// connection of an earlier session whose caller the agent could not
+		// name.
+		syncmgr.Get().NoteNotHandedOn()
+		syncmgr.Get().NoteUnnamedCallerConn()
 		endPause := memoryguard.SetRecordingPausedForTest(true)
 		memoryguard.IngressRequest()
 		endPause()
@@ -135,6 +154,14 @@ func TestFrameStreamsEndWithTheirMarkerOnRequest(t *testing.T) {
 		for _, c := range []string{"10.0.0.1:5000 -> 127.0.0.1:8080", "10.0.0.1:5000 -> 127.0.0.1:8080", "10.0.0.2:5001 -> 127.0.0.1:8080"} {
 			syncmgr.Get().NoteNotRecordedUnderPressure(c)
 		}
+		// Two test cases this session's ingress could not hand on: it
+		// stopped first.
+		syncmgr.Get().NoteNotHandedOn()
+		syncmgr.Get().NoteNotHandedOn()
+		// Two connections to the app this session whose callers the agent
+		// could not name in its PID namespace.
+		syncmgr.Get().NoteUnnamedCallerConn()
+		syncmgr.Get().NoteUnnamedCallerConn()
 		// The ingress requests of this session: one before its pause, two
 		// during it, one after.
 		memoryguard.IngressRequest()
@@ -181,6 +208,12 @@ func TestFrameStreamsEndWithTheirMarkerOnRequest(t *testing.T) {
 		if want := (models.PressureSkipSummary{Requests: 3, Connections: 2}); sum.NotRecordedUnderPressure != want {
 			t.Fatalf("the marker says a pause cost %+v, want %+v", sum.NotRecordedUnderPressure, want)
 		}
+		if sum.NotHandedOn != 2 {
+			t.Fatalf("the marker says %d test cases were not handed on, want this session's 2", sum.NotHandedOn)
+		}
+		if sum.UnnamedCallerConns != 2 {
+			t.Fatalf("the marker says %d connections came from unnamed callers, want this session's 2", sum.UnnamedCallerConns)
+		}
 		if _, err := mr.NextPart(); err != io.EOF {
 			t.Fatalf("the stream did not end after its marker: %v", err)
 		}
@@ -196,11 +229,16 @@ func TestFrameStreamsEndWithTheirMarkerOnRequest(t *testing.T) {
 			return got[0].ContextMap()
 		}
 		done() // the handler has returned, its summary said
+		if markerSeen != 1 {
+			t.Fatalf("the agent logged the marker's flush %d times, want once", markerSeen)
+		}
 		sumLine := fields("agent: recording complete")
 		for name, want := range map[string]uint64{
-			"tcs_not_recorded_under_pressure": 3,
-			"requests_during_pauses":          2,
-			"requests_before_first_pause":     1,
+			"tcs_not_recorded_under_pressure":  3,
+			"requests_during_pauses":           2,
+			"requests_before_first_pause":      1,
+			"tcs_not_handed_on":                2,
+			"connections_from_unnamed_callers": 2,
 		} {
 			if got := sumLine[name]; got != want {
 				t.Errorf("the summary says %s=%v, want %d", name, got, want)
@@ -209,6 +247,12 @@ func TestFrameStreamsEndWithTheirMarkerOnRequest(t *testing.T) {
 		warn := fields("agent: some requests were not recorded: the agent was short of memory when they came, and the memory guard had paused recording; each connection's requests after the pause are recorded")
 		if got := fmt.Sprint(warn["requests"], " ", warn["requests_during_pauses"], " ", warn["connections"]); got != "3 2 2" {
 			t.Errorf("the warning says requests, requests_during_pauses, connections = %s, want 3 2 2", got)
+		}
+		if got := fields(notHandedOnSaid)["test_cases"]; got != uint64(2) {
+			t.Errorf("the warning of test cases not handed on says %v, want 2", got)
+		}
+		if got := fields(unnamedCallerConnsSaid)["connections"]; got != uint64(2) {
+			t.Errorf("the warning of connections from unnamed callers says %v, want 2", got)
 		}
 		if got, want := fmt.Sprint(warn["connections_most"]), "[10.0.0.1:5000 -> 127.0.0.1:8080 (2) 10.0.0.2:5001 -> 127.0.0.1:8080 (1)]"; got != want {
 			t.Errorf("the warning names the connections %s, want %s", got, want)

@@ -441,6 +441,11 @@ func (p *Proxy) pairReached(t *pairTarget) (bool, error) {
 // reset that destroys it, and a close with bytes unread resets at once, so one
 // that took the FIN refused nothing: every byte the application wrote before
 // its FIN had arrived before the proxy closed.
+//
+// The orphan moves to the kernel's timewait table as it is acknowledged in
+// FIN_WAIT1 or takes the FIN, and an exact lookup made as it moves can miss
+// it, or find it closed, while it is there: it is gone only once a read
+// ordered against that move agrees (lookupOrdered).
 func orphanTookFIN(pc *pairedConn) (diagTCP, bool, error) {
 	d, err := lookupOrphan(pc.proxy, pc.app)
 	if err != nil {
@@ -449,9 +454,9 @@ func orphanTookFIN(pc *pairedConn) (diagTCP, bool, error) {
 	return d, d.state == tcpTimeWait || d.state == tcpClosing || d.state == tcpLastAck, nil
 }
 
-// lookupOrphan is how orphanTookFIN reads the orphan (lookupTCP); a test
-// replaces it to make the read fail.
-var lookupOrphan = lookupTCP
+// lookupOrphan is how orphanTookFIN reads the orphan (lookupTCPOrdered); a
+// test replaces it to make the read fail.
+var lookupOrphan = lookupTCPOrdered
 
 // side is the proxy's side of pc: read from its socket while the proxy holds
 // it, or as it was when the proxy closed it (closed).

@@ -858,11 +858,11 @@ func nonASCIIRuns(s string) []string {
 // place holds the moment it was recorded with (else it is a variable of that
 // place, appearedIn), is refused before any lead or window excuses its words:
 // what F saw came from what F served, whatever moved it.
-func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, raw []Raw, fol *follows) string {
+func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, raw []Raw, fol *follows, eh *earlierHeld) string {
 	if v.unparsed != "" {
 		return v.unparsed
 	}
-	if echoed := dc.echoedIn(v, at, served, raw); len(echoed) > 0 {
+	if echoed := dc.echoedIn(v, at, served, raw, eh); len(echoed) > 0 {
 		where := dc.heldAt(echoed, at, served, raw)
 		if where == "" {
 			where = "earlier in the test"
@@ -875,14 +875,17 @@ func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, 
 	return v.eachChanged(func(i int, t string, recorded bool) string {
 		for _, e := range served {
 			// The run's exchange (Earlier.Run) is an earlier place of every
-			// test of the set: the set's start-up's. The test case's own
+			// test of the set: the set's start-up's, or an earlier test's
+			// call (not StartUp). The test case's own
 			// request (Earlier.Given) is the test's earliest place. Another
 			// exchange of the start-up (Earlier.StartUp) is an earlier place
 			// of a call made at the start-up too, when no test runs.
 			where := "earlier in the test"
 			switch {
-			case e.Run:
+			case e.Run && e.StartUp:
 				where = "in the test set's start-up"
+			case e.Run:
+				where = "in an earlier test of the set"
 			case e.Given:
 				where = "in what the test case gave the application"
 			case e.StartUp:

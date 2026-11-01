@@ -839,3 +839,52 @@ func TestTable_TwoClockReadsTheLearnStepMarkedMayShareALiveValue(t *testing.T) {
 		}
 	}
 }
+
+// A run's variable (models.RunVariable) an earlier test's call binds is the
+// set's: every later scope reads it, and a later test's call that binds it
+// with another value is refused, as at the start-up's. A test's own variable
+// bound beside it goes with its scope; a table that keeps no run's (KeepRun:
+// the switch is off, or the start-up is not served exactly) forgets both at
+// the next scope, as before; a new set forgets it. One carried into a scope
+// (StartCarrying: bound by the test's calls in flight) is the set's too.
+func TestTable_ARunsVariableAnEarlierTestBindsIsTheSets(t *testing.T) {
+	run := Binding{Name: models.RunVariablePrefix + "order", Value: "o-9", Recorded: "o-1", Mock: "mock-a", Place: "body.order"}
+	own := Binding{Name: "order", Value: "o-9", Recorded: "o-1", Mock: "mock-a", Place: "body.order"}
+	for _, keepRun := range []bool{true, false} {
+		var tb Table
+		if keepRun {
+			tb.KeepRun()
+		}
+		tb.Start(nil)
+		if _, _, _, ok := tb.BindAll(tb.Gen(), []Binding{run, own}); !ok {
+			t.Fatalf("keepRun %v: test A could not bind its call's value", keepRun)
+		}
+		tb.Start(nil)
+		if b, ok := tb.Lookup(run.Name); ok != keepRun || ok && b.Value != run.Value {
+			t.Fatalf("keepRun %v: test B reads %s as %+v (%v)", keepRun, run.Name, b, ok)
+		}
+		if _, ok := tb.Lookup(own.Name); ok {
+			t.Fatalf("keepRun %v: test A's own variable outlived test B's start", keepRun)
+		}
+		if !keepRun {
+			continue
+		}
+		other := run
+		other.Value = "o-7"
+		if _, with, _, ok := tb.BindAll(tb.Gen(), []Binding{other}); ok || with.Value != run.Value {
+			t.Fatalf("test B bound %s anew to another value: ok %v, collides with %+v", run.Name, ok, with)
+		}
+		tb.NewSet()
+		if _, ok := tb.Lookup(run.Name); ok {
+			t.Fatal("the run's variable an earlier test bound outlived its set")
+		}
+	}
+	var tb Table
+	tb.KeepRun()
+	tb.Start(nil)
+	tb.StartCarrying(nil, []Binding{run})
+	tb.Start(nil)
+	if b, ok := tb.Lookup(run.Name); !ok || b.Value != run.Value {
+		t.Fatalf("a run's variable carried into a test is forgotten at the next: %+v (%v)", b, ok)
+	}
+}

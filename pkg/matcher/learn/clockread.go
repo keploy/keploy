@@ -464,9 +464,7 @@ func (dc *DriftCache) todZone(rtod, ltod, rres, lres time.Duration, w *Window, c
 	if ru.Equal(rz) {
 		return models.ZoneEither
 	}
-	in := func(loc *time.Location) bool {
-		return w != nil && w.Rec.holds(todAtOrBefore(rtod, w.Rec.To, loc), rres) && w.F.holds(todAtOrBefore(ltod, w.F.To, loc), lres)
-	}
+	in := func(loc *time.Location) bool { return w.holdsTod(rtod, ltod, rres, lres, loc) }
 	switch utc, app := in(time.UTC), in(dc.zone); {
 	case utc && app:
 		return models.ZoneEither
@@ -506,6 +504,34 @@ func (dc *DriftCache) todRead(rtod, ltod, rres, lres time.Duration, rlay, llay s
 		Zone:   dc.todZone(rtod, ltod, rres, lres, w, call),
 		Layout: models.ClockOffset{Layout: rlay}.MeetLayout(llay),
 	}
+}
+
+// holdsTod reports whether w (nil: none) holds rtod and ltod, a time of day
+// as recorded and as record's full round saw it, at their encodings'
+// resolutions (rres, lres), as reads of their runs' clocks in loc modulo a
+// day: the instant each names last, no later than its span's end
+// (todAtOrBefore), lies in that span, as a replay reads one in its call's
+// span (todReadIn).
+func (w *Window) holdsTod(rtod, ltod, rres, lres time.Duration, loc *time.Location) bool {
+	return w != nil && w.Rec.holds(todAtOrBefore(rtod, w.Rec.To, loc), rres) && w.F.holds(todAtOrBefore(ltod, w.F.To, loc), lres)
+}
+
+// readsOwn reports whether a value recorded as r and seen in record's full
+// round as l, in the call recorded at call, may be that call's own read of
+// the clock in w, a window of it, by the rules the leaf learns such a read
+// by: w holds an instant of it in both runs (windowHolds); it is one time of
+// day whole that w holds modulo a day (holdsTod), in UTC or in the
+// application's zone, as todZone reads one; or keploy knows no window of the
+// call (w nil), and the leaf learns a read of the clock there in its call's
+// own span, which every replay checks. Whether it is a read, and of which
+// form and zone, the leaf decides.
+func (dc *DriftCache) readsOwn(r, l Leaf, w *Window, call time.Time) bool {
+	if w == nil || dc.windowHolds(dc.ofIn(r.Value, l.Value, w, call), w) {
+		return true
+	}
+	rtod, rres, _, rok := timeOfDayOf(r)
+	ltod, lres, _, lok := timeOfDayOf(l)
+	return rok && lok && (w.holdsTod(rtod, ltod, rres, lres, time.UTC) || dc.zone != nil && w.holdsTod(rtod, ltod, rres, lres, dc.zone))
 }
 
 // clockReadOf reads l, a leaf of a replay's call, as the instant a clock

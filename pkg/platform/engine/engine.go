@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 
+	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
 
@@ -138,9 +139,8 @@ func Active() Runtime {
 // drive.
 func Unsupported(name string) error {
 	if name == Podman {
-		return fmt.Errorf("this keploy build cannot record or test applications that run in Podman. " +
-			"Keploy from keploy.io (free with an account) can: " +
-			"curl --silent -O -L https://keploy.io/install.sh && source install.sh")
+		return fmt.Errorf("this keploy build cannot record or test applications that run in Podman. "+
+			"Keploy from keploy.io (free with an account) can: %s", models.InstallCommand)
 	}
 	return fmt.Errorf("container engine %q is not supported", name)
 }

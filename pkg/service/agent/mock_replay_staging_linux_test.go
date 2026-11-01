@@ -65,7 +65,7 @@ func (p *diskServingProxy) SetPoolNames(names []string, owners map[string]string
 	return nil
 }
 
-func (p *diskServingProxy) SetRecordingTimes(src func(visit func(name string, req, res time.Time, protocolPhase bool) bool) error) error {
+func (p *diskServingProxy) SetRecordingTimes(src func(visit func(name string, req, res time.Time, protocolPhase bool, clock string) bool) error) error {
 	p.mm.SetRecordingTimes(src)
 	return nil
 }
@@ -552,6 +552,62 @@ func TestMockReplayAnswersTheCallAfterTheLastTest(t *testing.T) {
 	require.True(t, p.mm.DeleteFilteredMock(*late), "the recording made after the last test did not answer the call after it")
 	require.Empty(t, perTestNames(t, p, models.HTTP), "the call after the last test, made once more, is shown the recording that answered it")
 	require.False(t, p.mm.DeleteFilteredMock(*late), "FALSE GREEN: the call after the last test, made once more, was answered again")
+}
+
+// A partial record keeps the tests it did not record anew (TestA, TestC),
+// with the start-up and pool of the run that recorded them, beside the test
+// it did (TestB), recorded later by another agent run on another clock. After
+// the replay's last test the call the older run's application made after its
+// own last test (a Go mongo-driver's endSessions at client.Disconnect) is
+// shown and answered, and its call between two tests is not: a recording on
+// another clock is no bound of it (fakeconn.SetClockID). Before, the newer
+// run's test bounded it, the call missed, and the whole replay after a
+// partial record failed while that record had judged it green. The clocks
+// travel with the mocks as the CLI streams them to the agent.
+func TestMockReplayAnswersAnOlderRunsCallAfterTheLastTest(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	a, p := diskReplayAgent(t)
+	on := func(clock string, m *models.Mock) *models.Mock {
+		m.Origin = &models.Origin{Clock: clock}
+		return m
+	}
+	const s, l = "proxy:5555", "proxy:1111"
+	storeOnDisk(t, a,
+		on(s, ownMock("boot", "/boot", "boot", t0.Add(-time.Second))),
+		on(s, ownMock("mock-a", "/a", "a", t0.Add(time.Second))),
+		on(s, ownMock("mock-a2", "/a2", "a2", t0.Add(1500*time.Millisecond))),
+		on(s, ownMock("gap", "/gap", "gap", t0.Add(2500*time.Millisecond))),
+		on(s, ownMock("mock-c", "/c", "c", t0.Add(4*time.Second))),
+		on(s, ownMock("late", "/late", "late", t0.Add(5*time.Second))),
+		// TestB, recorded anew a minute later by another run.
+		on(l, ownMock("mock-b", "/b", "b", t0.Add(60*time.Second))))
+	ctx := context.Background()
+	require.NoError(t, a.SetScopeTable(ctx, map[string][]string{
+		"o::TestA": {"mock-a", "mock-a2"},
+		"o::TestB": {"mock-b"},
+		"o::TestC": {"mock-c"},
+	}))
+	require.NoError(t, a.SetRecordedWindows(ctx, []models.TestWindow{
+		{TestCase: "o::TestA", Start: t0.Add(900 * time.Millisecond), End: t0.Add(2 * time.Second), Clock: s},
+		{TestCase: "o::TestB", Start: t0.Add(59900 * time.Millisecond), End: t0.Add(61 * time.Second), Clock: l},
+		{TestCase: "o::TestC", Start: t0.Add(3900 * time.Millisecond), End: t0.Add(4500 * time.Millisecond), Clock: s},
+	}))
+	require.NoError(t, a.SetScopePool(ctx, map[string][]string{"o": {"boot", "gap", "late"}}))
+	claimSelf(t, a)
+	got, e := runTest(t, a, p.servingProxy, "TestA", "/a", "/a2")
+	require.Equal(t, []string{"200 a", "200 a2"}, got)
+	require.Empty(t, e.Action, e.Reason)
+	got, e = runTest(t, a, p.servingProxy, "TestB", "/b")
+	require.Equal(t, []string{"200 b"}, got)
+	require.Empty(t, e.Action, e.Reason)
+	// TestC runs after TestB, though recorded before it.
+	got, e = runTest(t, a, p.servingProxy, "TestC", "/c")
+	require.Equal(t, []string{"200 c"}, got)
+	require.Empty(t, e.Action, e.Reason)
+	require.Equal(t, []string{"late"}, perTestNames(t, p, models.HTTP),
+		"after the last test a per-test read does not show the older run's recording made after its own last test: the newer run's test, on another clock, bounded it")
+	late := ownMock("late", "/late", "late", t0.Add(5*time.Second))
+	require.True(t, p.mm.DeleteFilteredMock(*late), "the older run's recording of the call after its last test did not answer it")
 }
 
 // A recording made between two tests is never the set's teardown, though the

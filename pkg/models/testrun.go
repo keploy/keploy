@@ -531,6 +531,9 @@ type UnmatchedCall struct {
 	// VariablePlaces mirrors MockMismatchReport.VariablePlaces: the URL path
 	// places of a test variable on this call, under the proven switch only.
 	VariablePlaces []string `json:"variable_places,omitempty" yaml:"variable_places,omitempty"`
+	// Given mirrors MockMismatchReport.Given: the given a variable miss is
+	// about, by its name, never its value.
+	Given string `json:"given,omitempty" yaml:"given,omitempty"`
 	// At is when the call missed, so a client can tell which test made it.
 	At time.Time `json:"at,omitzero" yaml:"at,omitempty"`
 	// Kind is where the call was made, under the proven switch (MissInTest,
@@ -798,6 +801,16 @@ type MockOutcome struct {
 	// counts" (an older agent, or hooks without PID maps), which a nil
 	// PIDMapRefusals alone cannot.
 	PIDMapRefusalsError string `json:"pidMapRefusalsError,omitempty"`
+	// Settled says that, under the proven switch, the agent finished its end
+	// of the run (its hooks' AfterTestRun) before it read this account, as
+	// the CLI has it do where it can still reach the agent: an enterprise
+	// agent then writes the row of each process of the run it saw off the
+	// run's clock, the last test's among them. SettleError is why it could
+	// not. A CLI under the switch reads an account without Settled (an agent
+	// that failed it, or an older one) as a run the agent did not finish,
+	// and does not judge it. Without the switch neither is set.
+	Settled     bool   `json:"settled,omitempty"`
+	SettleError string `json:"settleError,omitempty"`
 }
 
 // MockSummaryFromSpec builds a protocol-generic summary string from a mock's spec.

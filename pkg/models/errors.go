@@ -1,6 +1,7 @@
 package models
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -293,6 +294,13 @@ type MockMismatchReport struct {
 	// which the miss's shape writes {} (MissShape); the summary then names
 	// the path escaped, as a place counts segments.
 	VariablePlaces []string
+	// Given is, under the proven switch, the given (GivenVariable) a
+	// variable miss is about: the call carried another value than the one the
+	// test gave, or a value of another JSON type, or this run's test did not
+	// give the value before the call. It is the test's own name for a value
+	// it chose, never a value, and the miss's evidence names it
+	// (UnmatchedCall.Sanitized). Set by the HTTP matcher's variable check.
+	Given string
 	// NotOwned says, under the proven switch, the call is ClosestMock, a
 	// recording the open test does not own (byte for byte, or at the per-test
 	// similarity): likely one another test recorded, which the replay names
@@ -471,3 +479,29 @@ func NewMockMismatchError(err error, report *MockMismatchReport) error {
 // 46-hour production recording that way. Errors wrapped with this sentinel are
 // skipped and counted; everything else stays fatal.
 var ErrMockEncode = errors.New("mock encode failure")
+
+// AgentRunUnfinishedError says keploy's agent did not finish its end of a run
+// (its after-test-run hook failed, or the agent was gone) under the proven
+// switch: as an enterprise agent's does when it could not write the row of a
+// program it saw off the run's clock. The run's checks are then incomplete,
+// and a caller does not judge the run on them. Err is the agent's own error.
+type AgentRunUnfinishedError struct {
+	Err error
+}
+
+func (e *AgentRunUnfinishedError) Error() string {
+	return "keploy's agent did not finish checking the run's tests: " + e.Err.Error()
+}
+
+func (e *AgentRunUnfinishedError) Unwrap() error { return e.Err }
+
+// AgentRunUnfinished is err, the failure of the agent's after-test-run hook
+// called under ctx, as an AgentRunUnfinishedError: with ctx's cancel cause
+// beside it, since a call the run's own cancel ended (the agent died) says
+// only "canceled".
+func AgentRunUnfinished(ctx context.Context, err error) error {
+	if cause := context.Cause(ctx); cause != nil && !errors.Is(err, cause) {
+		err = fmt.Errorf("%w (%v)", err, cause)
+	}
+	return &AgentRunUnfinishedError{Err: err}
+}

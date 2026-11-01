@@ -202,8 +202,10 @@ type TestCounts struct {
 	Passed  int `yaml:"passed" json:"passed"`
 	Failed  int `yaml:"failed" json:"failed"`
 	Skipped int `yaml:"skipped" json:"skipped"`
-	// Gated tests were told not to run this replay, for GateReason. A run
-	// with gated tests proved nothing about them.
+	// Gated tests were told not to run this replay, for GateReason, or
+	// because a test they need had not begun before them
+	// (models.ScopeOutcomeUnmet). A run with gated tests proved nothing
+	// about them.
 	Gated      int    `yaml:"gated" json:"gated"`
 	GateReason string `yaml:"gateReason,omitempty" json:"gateReason,omitempty"`
 	// NoVerdict tests did not run this replay, or ran with a harness that
@@ -230,7 +232,7 @@ func countTests(tests []TestReceipt, gateReason string) *TestCounts {
 			c.Failed++
 		case models.ScopeOutcomeSkipped:
 			c.Skipped++
-		case models.ScopeOutcomeGated:
+		case models.ScopeOutcomeGated, models.ScopeOutcomeUnmet:
 			c.Gated++
 		default:
 			c.NoVerdict++

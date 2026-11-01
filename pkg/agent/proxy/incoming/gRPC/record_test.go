@@ -47,7 +47,7 @@ func TestParseFramesFromChanUsesChunkTimestamps(t *testing.T) {
 		timestamp: requestAt,
 	}
 	close(clientCh)
-	parseFramesFromChan(context.Background(), logger, clientCh, sm, false, func([]func()) {})
+	parseFramesFromChan(logger, clientCh, sm, false, func([]func()) {})
 
 	destCh := make(chan frameChunk, 1)
 	destCh <- frameChunk{
@@ -67,7 +67,7 @@ func TestParseFramesFromChanUsesChunkTimestamps(t *testing.T) {
 		timestamp: responseAt,
 	}
 	close(destCh)
-	parseFramesFromChan(context.Background(), logger, destCh, sm, true, func([]func()) {})
+	parseFramesFromChan(logger, destCh, sm, true, func([]func()) {})
 
 	streams := sm.GetCompleteStreams()
 	require.Len(t, streams, 1)
@@ -106,7 +106,7 @@ func TestParseFramesFromChanPutsACallInAPauseByItsChunksReadFlag(t *testing.T) {
 	parserDone := make(chan struct{})
 	go func() {
 		defer close(parserDone)
-		parseFramesFromChan(context.Background(), logger, clientCh, sm, false, func([]func()) { chunkParsed <- struct{}{} })
+		parseFramesFromChan(logger, clientCh, sm, false, func([]func()) { chunkParsed <- struct{}{} })
 	}()
 	// Call 1: read while paused; parsed with the pause over.
 	clientCh <- frameChunk{data: append([]byte(http2.ClientPreface), request(1)...), timestamp: time.Unix(200, 0), paused: true}
@@ -122,7 +122,7 @@ func TestParseFramesFromChanPutsACallInAPauseByItsChunksReadFlag(t *testing.T) {
 	destCh := make(chan frameChunk, 1)
 	destCh <- frameChunk{data: append(response(1), response(3)...), timestamp: time.Unix(202, 0)}
 	close(destCh)
-	parseFramesFromChan(context.Background(), logger, destCh, sm, true, func([]func()) {})
+	parseFramesFromChan(logger, destCh, sm, true, func([]func()) {})
 
 	got := map[uint32]bool{}
 	for _, s := range sm.GetCompleteStreams() {
@@ -372,6 +372,9 @@ type grpcIngress struct {
 	// stop is the recording's stop, as a CLI asks about it: one time, the
 	// same at every look, after every call the test makes.
 	stop time.Time
+	// stopIngress ends the ingress's context, as its forwarder for the app's
+	// port, or the agent, stopping does.
+	stopIngress context.CancelFunc
 }
 
 func startGRPCIngress(t *testing.T) *grpcIngress {
@@ -387,6 +390,7 @@ func startGRPCIngressOn(t *testing.T, wrap func(net.Conn) net.Conn) *grpcIngress
 		stop: time.Now().Add(time.Hour)}
 	remove := g.m.AddWatermark(caughtUp{})
 	ctx, cancel := context.WithCancel(syncMock.NewContext(context.Background(), g.m))
+	g.stopIngress = cancel
 	var cliProxy, appProxy net.Conn
 	g.cliApp, cliProxy = net.Pipe()
 	appProxy, g.appApp = net.Pipe()
@@ -504,7 +508,7 @@ func TestParseFramesFromChan_ReleasesEachChunkOnce(t *testing.T) {
 		}
 		close(ch)
 		sm := pkg.NewStreamManager(zap.NewNop())
-		parseFramesFromChan(context.Background(), zap.NewNop(), ch, sm, false, func(done []func()) {
+		parseFramesFromChan(zap.NewNop(), ch, sm, false, func(done []func()) {
 			viaEmitter = true
 			for _, d := range done {
 				d()
@@ -560,7 +564,7 @@ func TestParseFramesFromChan_AParserThatGivesUpLetsGoAtOnce(t *testing.T) {
 			parserDone := make(chan struct{})
 			go func() {
 				defer close(parserDone)
-				parseFramesFromChan(context.Background(), zap.NewNop(), ch, pkg.NewStreamManager(zap.NewNop()), false, func(done []func()) {
+				parseFramesFromChan(zap.NewNop(), ch, pkg.NewStreamManager(zap.NewNop()), false, func(done []func()) {
 					for _, d := range done {
 						d()
 					}
@@ -1457,6 +1461,48 @@ func (c *heldAfterEndConn) Write(p []byte) (int, error) {
 		<-c.gate
 	}
 	return n, err
+}
+
+// A call whose response the forwarder has read when its ingress stops, and
+// hands to its parser only after the stop (the forwarder descheduled between
+// its write to the client and its tee, as on a loaded host), is a call the app
+// served: it is built, and its capture hands it on or counts it (conn.HandOn,
+// the recording's tcs_not_handed_on). A parser that left at the stop let go of
+// it unread and nothing counted it: the recording ended a test case short and
+// said nothing. Each round stops its ingress while the forwarder is held
+// there, with nothing reading the test-case channel, so the call is counted.
+// A parser that leaves at the stop loses the call in every round in which it
+// sees the stop before the chunk, and in half of the others (Go's select).
+func TestRecordIncoming_ACallReadBeforeItsIngressStopsIsBuiltAndCounted(t *testing.T) {
+	const rounds = 20
+	for i := 0; i < rounds; i++ {
+		gate := make(chan struct{})
+		req, resp := pingCall(t)
+		g := startGRPCIngressOn(t, func(c net.Conn) net.Conn {
+			return &heldAfterEndConn{Conn: c, end: resp[:len(resp)-1], gate: gate}
+		})
+		go func() { _, _ = g.cliApp.Write(req) }()
+		_, err := io.ReadFull(g.appApp, make([]byte, len(req)))
+		require.NoError(t, err)
+		go func() { _, _ = g.appApp.Write(resp) }()
+		// The client has all of the response but its trailers' last byte:
+		// the forwarder has read the whole of it, and is held before it hands
+		// the read to its parser.
+		_, err = io.ReadFull(g.cliApp, make([]byte, len(resp)-1))
+		require.NoError(t, err)
+		g.stopIngress()
+		// Time for a parser that leaves at the stop to see it first; what
+		// the row asserts does not depend on it.
+		time.Sleep(5 * time.Millisecond)
+		close(gate)
+		select {
+		case <-g.recorded:
+		case <-time.After(30 * time.Second):
+			t.Fatalf("round %d: the ingress never returned after its stop", i)
+		}
+		require.Equal(t, uint64(1), g.m.NotHandedOn(),
+			"round %d: the call the app served, read before its ingress stopped, was neither handed on nor counted", i)
+	}
 }
 
 // echoCall is one unary call on stream id, without the connection preface: its

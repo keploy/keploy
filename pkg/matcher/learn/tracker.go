@@ -7,8 +7,10 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unsafe"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 // Tracker keeps, for the test that is running, the mocks F has served in it
@@ -131,12 +133,16 @@ type Tracker struct {
 	taken map[string]bool
 	// run are the exchanges the learn step served before the first test
 	// began (the start-up's) that carried a value the run made (one that
-	// drifted from its recording): an earlier place of every test of the set
-	// (Run). runNames are the variables bound at them, by mock and place, and
+	// drifted from its recording), and, under the proven switch, the calls
+	// of each test of the set that did, kept as its next begins (ranCalls):
+	// an earlier place of every later test of the set (Run). runNames are
+	// the variables bound at them, by mock and place, and
 	// runTaken their names, which no test's variable takes. setTaken are the
 	// names every test of the set has taken so far, which no run's variable
 	// takes: a run's variable is named when a test first uses it, after
-	// earlier tests named their own.
+	// earlier tests named their own. run is kept within its share of the
+	// set's budget (keepRun): from the first place past it, the run keeps
+	// no more, and its last place says so (Earlier.Unread).
 	run      []Earlier
 	runNames map[string]string
 	runTaken map[string]bool
@@ -147,15 +153,26 @@ type Tracker struct {
 	// appClockRun is the real instant from which the app's clock has run as
 	// one to a real instant (SetAppClockRun), nil where the hooks tell none.
 	appClockRun func(time.Time) (time.Time, bool)
-	// servedAt are the real instants the store served the running set's
-	// data-plane mocks at, in order (ServedMockAt): when the app's calls the
-	// replay answered reached keploy. NewSet forgets them.
-	servedAt []time.Time
+	// servedAt are the store's serves of the running set's data-plane mocks,
+	// in the order of the real instants it served them at (servedIn), each
+	// with the instant its call reached keploy. NewSet forgets them.
+	servedAt []servedInstant
+	// serveAt is the real instant each of the running set's serves was made
+	// at, by number (serveAt[n-1] of the n-th, ServedMockAt's at): what an
+	// Order cut at a call's arrival (Order.ArrivedAt) reads. NewSet forgets
+	// it.
+	serveAt []time.Time
 	// given is the running test case's own request (Give), an earlier place
 	// the learn step reads as any other (Earlier.Given); nil until it is
 	// given, and for a test no keploy test case opened (keploy mock's).
 	// Begin forgets it.
 	given *Earlier
+	// gave are the values the running test gave keploy so far (GiveValue),
+	// in the order it gave them: earlier places of its calls after its
+	// request (Earlier.Gave). The agent bounds how many a test gives
+	// (service/agent.MaxGivensPerTest) and how long each is; Begin and NewSet
+	// forget them, so a test's givens live only while it runs.
+	gave []Earlier
 	// awaiting is open while the running test awaits its test case's request
 	// (BeginAwaiting, Await): a call that reads the test's places then
 	// (Places) waits (AwaitRequest) until Give brings the request, or the
@@ -199,6 +216,10 @@ type Tracker struct {
 	// learnEnded says the running test set's learn step has ended
 	// (SetLearnEnded): TrackerFrom then gives no tracker.
 	learnEnded atomic.Bool
+	// learnHeld says the learn step is held (SetLearnHeld): every
+	// DriftCache the tracker makes reads it (DriftCache.held), and while it
+	// is set the classification refuses every changed value.
+	learnHeld atomic.Bool
 }
 
 // NewTracker makes a tracker with no test open.
@@ -241,8 +262,8 @@ func (t *Tracker) NewSetAt(at time.Time) {
 	t.run, t.runNames, t.runTaken, t.setTaken = nil, nil, nil, nil
 	t.names, t.taken = nil, nil
 	t.answered, t.drifts = nil, t.newDrifts()
-	t.servedAt = nil
-	t.given = nil
+	t.servedAt, t.serveAt = nil, nil
+	t.given, t.gave = nil, nil
 	say := t.closeUnread()
 	t.open, t.began = false, false
 	t.beganAt, t.recBegan, t.nextRecBegan = time.Time{}, time.Time{}, time.Time{}
@@ -399,6 +420,7 @@ func (t *Tracker) AwaitRequest(ctx context.Context) error {
 func (t *Tracker) newDrifts() *DriftCache {
 	dc := NewDriftCache()
 	dc.clientTests, dc.zone, dc.appClock, dc.set = t.clientTests, t.appZone, t.appClock != nil, t.derived
+	dc.held = &t.learnHeld
 	if t.drifts != nil { // none yet as NewTracker makes the first
 		dc.zoneName, dc.zoneNoName = t.drifts.zoneName, t.drifts.zoneNoName
 	}
@@ -547,12 +569,15 @@ func (t *Tracker) BeginAwaitingAt(at time.Time) {
 func (t *Tracker) beginAt(at time.Time) func() {
 	say := t.closeUnread()
 	t.epoch++
+	if provenswitch.On() {
+		t.keepRun(ranCalls(t.served, t.orderLocked()))
+	}
 	t.served = nil
 	t.before, t.mocks, t.kept = t.mocks, nil, nil
 	t.answered = nil
 	t.drifts = t.newDrifts()
 	t.names, t.taken = nil, nil
-	t.given = nil
+	t.given, t.gave = nil, nil
 	t.open, t.began = true, true
 	t.beganAt = at
 	t.recBegan, t.nextRecBegan = t.nextRecBegan, time.Time{}
@@ -616,6 +641,29 @@ func (t *Tracker) Give(e Earlier) {
 	t.mu.Unlock()
 }
 
+// GiveValue makes e (TestGiven: a value the running test gave keploy) an
+// earlier place of the test's calls from now until the next test begins,
+// after its test case's request (Earlier.Gave): a call that carries a value
+// made from it (a part of its text, it in another reading) finds it there,
+// and the learn step refuses it naming the given, never learns it as noise.
+// No moment it names is a place (withoutGave): a read of the application's
+// own clock learns as it does with no given. A value carried whole is the
+// given's variable, which the test's variable table binds
+// (variables.Binding.Given). One given while no test is open is tied to no
+// test's calls, and dropped.
+func (t *Tracker) GiveValue(e Earlier) {
+	if t == nil || len(e.Seen) == 0 {
+		return
+	}
+	e.Given, e.Gave = true, true
+	e.Seen = append([]Seen(nil), e.Seen...)
+	t.mu.Lock()
+	if t.open {
+		t.gave = append(t.gave, e)
+	}
+	t.mu.Unlock()
+}
+
 // End ends the running test: until the next Begin no test is open, and a
 // request belongs to no test's own mocks. A test that still awaited its
 // request closes without it: the calls waiting for it read the test's places
@@ -654,9 +702,9 @@ func (t *Tracker) Begun() bool {
 }
 
 // Test is the running test's number, its earlier places: its test case's
-// own request first (Give), then what the learn step served in it so
-// far, leaf by leaf; every mock any parser served in it so far
-// (ServedMock), and the mocks served before it began: those served since the
+// own request first (Give), the values it gave keploy (GiveValue), then
+// what the learn step served in it so far, leaf by leaf; every mock any
+// parser served in it so far (ServedMock), and the mocks served before it began: those served since the
 // previous test began (see Tracker.before), and every one served while no
 // test was open (see Tracker.outside), each once. A request reads it once
 // its scope is read, and hands the number back to Served. It never waits:
@@ -723,40 +771,53 @@ func (t *Tracker) Placed() Placed {
 			before = append(before, m)
 		}
 	}
-	earlier := make([]Earlier, 0, len(t.run)+len(t.served)+1)
+	earlier := make([]Earlier, 0, len(t.gave)+len(t.run)+len(t.served)+1)
 	if t.given != nil {
 		earlier = append(earlier, *t.given)
 	}
-	earlier = append(append(earlier, t.run...), t.served...)
+	earlier = append(append(append(earlier, t.gave...), t.run...), t.served...)
 	return Placed{
 		Test: t.epoch, Earlier: earlier, Served: append([]*models.Mock(nil), t.mocks...), Before: before, Awaiting: t.awaiting != nil,
 		Open: t.open, Begun: t.began, SetAt: t.setEpoch,
 		Set:   t.set[:len(t.set):len(t.set)],
-		Order: Order{t: t, serves: t.serves, asRecorded: t.asRecorded, lives: t.lives, upTo: t.seq, testFrom: t.testFrom, outside: t.outsideSeq, places: t.places, flights: t.flights, handshakes: t.handshakes, set: t.setEpoch, landings: t.landings, flying: t.flying},
+		Order: t.orderLocked(),
 	}
+}
+
+// orderLocked is the order of the set's serves as a read now sees it
+// (Placed.Order). t.mu is held.
+func (t *Tracker) orderLocked() Order {
+	return Order{t: t, serves: t.serves, asRecorded: t.asRecorded, lives: t.lives, upTo: t.seq, testFrom: t.testFrom, outside: t.outsideSeq, places: t.places, flights: t.flights, handshakes: t.handshakes, set: t.setEpoch, landings: t.landings, flying: t.flying, serveAt: t.serveAt[:len(t.serveAt):len(t.serveAt)]}
 }
 
 // ServedMock notes a mock any parser served in the running test: an earlier
 // place of the test's recording, whatever its kind, for Classify (Raw); and,
-// a data-plane one, a call of the app's that reached keploy now
-// (CallWindow).
+// a data-plane one, a call of the app's that reached keploy now and was
+// answered now (CallWindow).
 func (t *Tracker) ServedMock(m *models.Mock) { t.ServedMockAt(m, time.Now()) }
 
-// ServedMockAt is ServedMock of a mock served at the real instant at.
-func (t *Tracker) ServedMockAt(m *models.Mock, at time.Time) { t.servedIn(m, at, nil, serveKind{}) }
+// ServedMockAt is ServedMock of a mock served, to a call that reached keploy,
+// at the real instant at.
+func (t *Tracker) ServedMockAt(m *models.Mock, at time.Time) { t.servedIn(m, at, at, nil, serveKind{}) }
 
 // ServedMockIn is ServedMock of a mock served in the request in, as the
 // parser that served it said (integrations.ServingIn): the serve is that
 // request's whatever other requests are aloft (Flight); in NoRequest, no
 // request's; in one a request caused (Flight.LiftCaused), that one's. A nil
-// in is ServedMock.
+// in is ServedMock. The serve is made now, and its call reached keploy when
+// in lifted (Flight.Lift; now where in is no request of the application's):
+// a store's consume door tells it after the parser's learn step decided the
+// call, so the call is a later one's previous call from its arrival, as
+// record's is from its request (PreviousCall), not from the consume.
 func (t *Tracker) ServedMockIn(m *models.Mock, in *Flight) {
-	t.servedIn(m, time.Now(), in, serveKind{})
+	now := time.Now()
+	t.servedIn(m, now, in.arrivedBy(t, now), in, serveKind{})
 }
 
-// ServedMockAtIn is ServedMockIn of a mock served at the real instant at.
+// ServedMockAtIn is ServedMockIn of a mock served, to a call that reached
+// keploy, at the real instant at.
 func (t *Tracker) ServedMockAtIn(m *models.Mock, at time.Time, in *Flight) {
-	t.servedIn(m, at, in, serveKind{})
+	t.servedIn(m, at, at, in, serveKind{})
 }
 
 // ServedHandshakeIn is ServedMock of a handshake m, a protocol phase, that
@@ -780,21 +841,37 @@ func (t *Tracker) ServedMockAtIn(m *models.Mock, at time.Time, in *Flight) {
 // lifted (Order.Of: 0, 0). A data-plane m is numbered and placed so too, and
 // makes no request a serve: tell those with ServedMockIn.
 func (t *Tracker) ServedHandshakeIn(m *models.Mock, chosen, in *Flight) {
-	t.servedIn(m, time.Now(), in, serveKind{handshake: true, placed: chosen == in})
+	now := time.Now()
+	t.servedIn(m, now, in.arrivedBy(t, now), in, serveKind{handshake: true, placed: chosen == in})
 }
 
-// servedIn is ServedMockAt of a serve made in the request in (nil: not
-// said), told as k says (serveKind).
-func (t *Tracker) servedIn(m *models.Mock, at time.Time, in *Flight, k serveKind) {
+// servedInstant is a data-plane serve of the store's (servedIn): made at the
+// real instant at, to a call that reached keploy at from (no later than at).
+// upTo is the latest from of it and of every serve made before it.
+type servedInstant struct {
+	at, from, upTo time.Time
+}
+
+// servedIn is ServedMockAt of a serve made at the real instant at, to a call
+// that reached keploy at from, in the request in (nil: not said), told as k
+// says (serveKind).
+func (t *Tracker) servedIn(m *models.Mock, at, from time.Time, in *Flight, k serveKind) {
 	if t == nil || m == nil {
 		return
 	}
 	t.mu.Lock()
 	if !m.IsProtocolPhase() {
-		i := sort.Search(len(t.servedAt), func(i int) bool { return t.servedAt[i].After(at) })
-		t.servedAt = append(t.servedAt, time.Time{})
+		i := sort.Search(len(t.servedAt), func(i int) bool { return t.servedAt[i].at.After(at) })
+		t.servedAt = append(t.servedAt, servedInstant{})
 		copy(t.servedAt[i+1:], t.servedAt[i:])
-		t.servedAt[i] = at
+		t.servedAt[i] = servedInstant{at: at, from: from}
+		for j := i; j < len(t.servedAt); j++ {
+			up := t.servedAt[j].from
+			if j > 0 && t.servedAt[j-1].upTo.After(up) {
+				up = t.servedAt[j-1].upTo
+			}
+			t.servedAt[j].upTo = up
+		}
 	}
 	id := MockID(m)
 	if t.serves == nil {
@@ -805,6 +882,7 @@ func (t *Tracker) servedIn(m *models.Mock, at time.Time, in *Flight, k serveKind
 	}
 	t.seq++
 	t.serves[id] = append(t.serves[id], t.seq)
+	t.serveAt = append(t.serveAt, at)
 	if !t.open {
 		if t.outsideSeq == nil {
 			t.outsideSeq = map[int]bool{}
@@ -875,6 +953,45 @@ type Order struct {
 	set      uint64
 	landings uint64
 	flying   bool
+	// serveAt is the real instant of each serve numbered up to upTo
+	// (Tracker.serveAt), and arrival the instant the call the read is for
+	// reached keploy (ArrivedAt; zero: not said).
+	serveAt []time.Time
+	arrival time.Time
+}
+
+// ArrivedAt is o for the call that reached keploy at the real instant
+// arrival: ServedView marks a recording every serve of which o saw was made
+// after arrival (Raw.servedAfter), which F had not served when the call
+// reached keploy, however soon after it F served it and the call's learn
+// step read the tracker. The rule a recording F had not served before the
+// call reads it so (follows.notServed), so that its verdict does not hang
+// on how long the call waited for its learn step: a sibling served in that
+// wait, which grows with load, leaves it as it was. A zero arrival is o.
+func (o Order) ArrivedAt(arrival time.Time) Order {
+	o.arrival = arrival
+	return o
+}
+
+// servedAfterLocked reports whether every serve of the mock of identity id
+// that o saw was made after o's arrival (ArrivedAt), and there was one: no
+// arrival said, a serve of an instant not kept, or one made at or before the
+// arrival, says it was served before the call. o.t.mu is held.
+func (o Order) servedAfterLocked(id string) bool {
+	if o.arrival.IsZero() {
+		return false
+	}
+	n := o.serves[id]
+	k := sort.SearchInts(n, o.upTo+1)
+	if k == 0 {
+		return false
+	}
+	for _, s := range n[:k] {
+		if s < 1 || s > len(o.serveAt) || !o.serveAt[s-1].After(o.arrival) {
+			return false
+		}
+	}
+	return true
 }
 
 // Of is where F served m in the set, in one sequence across its start-up,
@@ -948,7 +1065,7 @@ func (o Order) ServedView(m *models.Mock, r Raw) Raw {
 	var recorded, unread, ok bool
 	var loads []func() (*models.Mock, error)
 	o.t.mu.Lock()
-	older := o.olderTestLocked(id)
+	older, before, after := o.olderTestLocked(id), o.beforeTestLocked(id), o.servedAfterLocked(id)
 	if unstated {
 		recorded, _, loads, unread, ok = o.viewsLocked(id)
 	}
@@ -956,6 +1073,10 @@ func (o Order) ServedView(m *models.Mock, r Raw) Raw {
 	if older {
 		r = r.ServedInAnOlderTest()
 	}
+	if before {
+		r = r.ServedBeforeTheTest()
+	}
+	r.servedAfter = after
 	switch {
 	case !unstated, !ok:
 		return r
@@ -1026,6 +1147,25 @@ func (o Order) viewsLocked(id string) (recorded bool, keys []int, loads []func()
 func viewRaw(m *models.Mock, load func() (*models.Mock, error)) Raw {
 	return Raw{mock: m.Name, at: m.Spec.ReqTimestampMock, answered: m.Spec.ResTimestampMock, served: true, call: callOf(m),
 		src: &rawSource{name: m.Name, load: load}}
+}
+
+// beforeTestLocked reports whether every serve of the mock of identity id the
+// read saw was made before the running test began (numbered below testFrom:
+// at the set's start-up, between tests, or in an older test), each in an
+// order keploy can tell (Order.told), and there was one. false where no test
+// had begun in the set (testFrom 0). The caller holds t.mu.
+func (o Order) beforeTestLocked(id string) bool {
+	n := o.serves[id]
+	k := sort.SearchInts(n, o.upTo+1)
+	if k == 0 || o.testFrom == 0 || n[k-1] >= o.testFrom {
+		return false
+	}
+	for _, s := range n[:k] {
+		if !o.told(s) {
+			return false
+		}
+	}
+	return true
 }
 
 // olderTestLocked reports whether F made every serve of the mock of
@@ -1184,7 +1324,10 @@ func (t *Tracker) Unanswer(n uint64, name string) {
 
 // Served adds a mock F served to test number n's history, until the next test
 // begins: a request of that test answered after it ended, or between it and
-// the next, lands there too, and the next Begin forgets it. Served before the
+// the next, lands there too, and the next Begin forgets it, but for the
+// test's own calls that carried a value the run made, which it keeps as the
+// run's under the proven switch (ranCalls), one told after the next test
+// began among them. Served before the
 // set's first test began (the start-up's), it is the run's when it carried a
 // value the run made (Earlier.Run): an earlier place of every test of the
 // set. Either way it is the start-up's (Earlier.StartUp). A set has no
@@ -1212,10 +1355,22 @@ func (t *Tracker) Served(n uint64, e Earlier) {
 	e.StartUp = !t.open && !t.began
 	switch {
 	case t.epoch != n:
+		// An earlier test's call of the set told after the next began is
+		// the run's as one told in time is (ranCalls); the start-up's and a
+		// previous set's are nobody's. It keeps no number of F's serves
+		// (an Order of no tracker numbers none): the order now numbers the
+		// serves of the tests after its own too, and F's serve of it may
+		// itself be numbered after its test ended, so no count read now is
+		// the one its test's end saw. A later call's copy rule then cannot
+		// tell where F served it among other served sources, and refuses
+		// (servedOrder).
+		if n > t.setEpoch && provenswitch.On() {
+			t.keepRun(ranCalls([]Earlier{e}, Order{}))
+		}
 	case e.StartUp && e.Own:
 	case e.StartUp && drifted(e):
 		e.Run = true
-		t.run = append(t.run, e)
+		t.keepRun([]Earlier{e})
 	default:
 		t.served = append(t.served, e)
 	}
@@ -1336,11 +1491,128 @@ func (t *Tracker) statedLocked(id string) {
 // its recording's at some place a variable can hold.
 func drifted(e Earlier) bool {
 	for _, s := range e.Seen {
-		if s.Side == Request && s.Place != "" && s.Live != "" && s.Live != s.Leaf.Value {
+		if driftedLeaf(s) {
 			return true
 		}
 	}
 	return false
+}
+
+// driftedLeaf: s is a request leaf the application sent with another value
+// than its recording's, a value the run made.
+func driftedLeaf(s Seen) bool {
+	return s.Side == Request && s.Place != "" && s.Live != "" && s.Live != s.Leaf.Value
+}
+
+// ranCalls are the run's exchanges the ended test's own calls (served)
+// leave to the tests after it in the set: of each call whose request carried
+// a value the run made, those request leaves alone (driftedLeaf), as an
+// exchange of the run's (Earlier.Run, no longer Own). A later test's call
+// that sends such a value is read with the same rule as one its own earlier
+// call sent, and binds it by the run's name (RunName) where the earlier
+// test's call sent it: a value one test made and a later one reuses is
+// followed, never learned as noise. Of the rest of the call only where its
+// recording stands in the orders the rules read is kept (Raw.orderOf: when
+// the recording asked and answered, where it carried the request, F's serves
+// of it), which a later call's copy rule reads to tell whether the recording
+// gave the application that answer before the call, and where F served it
+// among the other earlier answers (recordedGave, servedOrder): without them,
+// every value a later call holds that one of those leaves held in the
+// recording would be refused as one keploy cannot tell from a copy. Nothing
+// else (its other leaves, its answer's text, its view) is kept, so a word of
+// a leaf that did not drift is no earlier place of a later test, and the set
+// holds the values its tests made, not their calls. A call of the pool's (not Own)
+// carries no test's variable, and leaves none; nor does one that carried no
+// value the run made, which the later test reads as another test's recording
+// (Raw).
+func ranCalls(served []Earlier, o Order) []Earlier {
+	var out []Earlier
+	for _, e := range served {
+		var seen []Seen
+		for _, s := range e.Seen {
+			if e.Own && driftedLeaf(s) {
+				seen = append(seen, s)
+			}
+		}
+		if seen != nil {
+			out = append(out, Earlier{Mock: e.Mock, At: e.At, Run: true, Seen: seen, noTime: e.noTime, Payload: o.orderOf(e.Payload)})
+		}
+	}
+	return out
+}
+
+// orderOf is x as the place an earlier test's call left the run keeps it
+// (ranCalls): where its recording stands in the orders the rules read, its
+// mock, when its request and its answer were recorded, where its request was
+// carried, and F's serves of it as o numbers them (Order.ofLocked: those
+// told by the next test's begin, where the call was told in its own test;
+// none where o is of no tracker, a call told after its test ended), with no
+// word of its text, its identity or a view (Raw.ordered). A number x carries
+// is not kept: only o numbers it. A payload of no mock stays the zero Raw: an
+// exchange that came with none gives no order either. Its text is never
+// loaded here. o's tracker's lock is held.
+func (o Order) orderOf(x Raw) Raw {
+	if x.mock == "" {
+		return Raw{}
+	}
+	r := Raw{mock: x.mock, at: x.at, served: x.served, answered: x.answered, conn: x.conn, pos: x.pos, noTime: x.noTime, ordered: true}
+	if o.t == nil {
+		return r
+	}
+	// The name first: the set's names are its mocks' (one each), so the
+	// scan builds no key and allocates nothing for a mock of another name.
+	for _, m := range o.t.set {
+		if m == nil || m.Name != x.mock || !m.Spec.ReqTimestampMock.Equal(x.at) {
+			continue
+		}
+		if first, last := o.ofLocked(MockID(m)); first > 0 {
+			r = r.ServedIn(first, last)
+		}
+		break
+	}
+	return r
+}
+
+// keepRun adds places to the run's (run), each within the run's share of
+// the set's budget (setDerived.keepRun), so a set whose tests send large
+// values (a generated document, an upload) holds a bounded part of them, not
+// all of them. From the first place past it the run keeps no more: in its
+// stead one place of no leaves says so (Earlier.Unread, runFullWhy), and
+// every value that changed in a later call of the set is then refused
+// rather than learned as noise or an echo (requestUnread): it may have come
+// from a place the run no longer keeps, and keploy cannot tell. That place
+// is an earlier test's (not StartUp), which no recorded time moves past a
+// call (alwaysEarlier). A value a kept place holds is followed as before.
+// t.mu is held.
+func (t *Tracker) keepRun(places []Earlier) {
+	for _, e := range places {
+		if n := len(t.run); n > 0 && t.run[n-1].Unread != "" {
+			return
+		}
+		if !t.derived.keepRun(runPlaceBytes(e)) {
+			e = Earlier{Mock: e.Mock, At: e.At, Run: true, Unread: runFullWhy(e.Mock, t.derived.runCap())}
+		}
+		t.run = append(t.run, e)
+	}
+}
+
+// runPlaceBytes is what the run counts of a place it keeps (keepRun): the
+// exchange and its leaves, with their text. The start-up's exchange, kept
+// whole, keeps its recording too (Payload): its text where it holds it
+// (RawOf), none where the set's store does, which lets it go (LazyRawOf).
+func runPlaceBytes(e Earlier) int64 {
+	n := int64(unsafe.Sizeof(e)) + int64(len(e.Mock)+len(e.Payload.rText))
+	for _, s := range e.Seen {
+		n += int64(unsafe.Sizeof(s)) + int64(len(s.Leaf.Path)+len(s.Leaf.Noise)+len(s.Leaf.Value)+len(s.Live)+len(s.Place)+len(s.Record)+len(s.Name))
+	}
+	return n
+}
+
+// runFullWhy is why a value that changed is refused once the run keeps no
+// more places (keepRun), from mock's call on, past limit bytes: it names the
+// call and the bound, never a value, and how to correct it.
+func runFullWhy(mock string, limit int64) string {
+	return "keploy keeps the values each test of a set sends, for the tests after it, within " + strconv.FormatInt(limit>>10, 10) + " KiB, and the set's tests sent more from " + mock + "'s call on: the value may have come from one it no longer keeps, and keploy cannot tell. Split the test set, or give the keploy agent more memory"
 }
 
 // Name is the name of test number n's variable bound at place of mock: the
@@ -1385,14 +1657,15 @@ func (t *Tracker) Name(n uint64, mock, place string, reserved map[string]bool) (
 	return name, true
 }
 
-// runPrefix begins the name of a run's variable: "run-session". A test's
-// variable is named by its place alone, so a run's name, given once for the
-// whole set when a test first uses the value, collides with none in any
-// later test. A test case's template keys are the test's own, and hold no
+// runPrefix begins the name of a run's variable: "run-session"
+// (models.RunVariablePrefix). A test's variable is named by its place alone,
+// never with it (varName), so a run's name, given once for the whole set
+// when a test first uses the value, collides with none in any later test.
+// A test case's template keys are the test's own, and hold no
 // '-' (templates.IsKey): none is a run's name. One given from elsewhere that
 // is cannot be renamed in its test, since the run's name is the set's (its
 // start-up's bind carries it): the place is refused there (RunName).
-const runPrefix = "run-"
+const runPrefix = models.RunVariablePrefix
 
 // RunName names, for a request of test number n (its start-up's included),
 // the variable bound at place of mock, an exchange of the run (Earlier.Run):
@@ -1427,6 +1700,16 @@ func (t *Tracker) RunName(n uint64, mock, place string, reserved map[string]bool
 	name := t.free(runPrefix+varName(place), reserved, t.setTaken)
 	t.runNames[key], t.runTaken[name] = name, true
 	return name, true
+}
+
+// PlaceName names, for a request of test number n, the variable bound at
+// p, the earlier place a value came from: the run's variable (RunName) at
+// an exchange of the run (Place.Run), the test's own (Name) at any other.
+func (t *Tracker) PlaceName(n uint64, p Place, reserved map[string]bool) (string, bool) {
+	if p.Run {
+		return t.RunName(n, p.Mock, p.Var, reserved)
+	}
+	return t.Name(n, p.Mock, p.Var, reserved)
 }
 
 // free is a name beginning with base that none of reserved, the run's names
@@ -1634,8 +1917,11 @@ func (t *Tracker) LiveSpan(arrival time.Time) (Span, bool) {
 
 // liveClock is what the tracker knows, at one moment, of this run's clock
 // before a call that reached keploy at a real instant: how to read the
-// app's clock, the previous data-plane serve before the call, the running
-// set's begin, and in a client test the running test's begin.
+// app's clock, the previous data-plane call before it (prev: the latest
+// instant a call the store served before it reached keploy, as record's
+// previous call is the latest one answered before the call was sent,
+// PreviousCall), the running set's begin, and in a client test the running
+// test's begin.
 type liveClock struct {
 	clock            func(time.Time) (time.Time, bool)
 	run              func(time.Time) (time.Time, bool)
@@ -1650,9 +1936,9 @@ func (t *Tracker) liveClockAt(arrival time.Time) (liveClock, time.Time) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	lc := liveClock{clock: t.appClock, run: t.appClockRun, client: t.clientTests, set: t.setBegan, began: t.beganAt, zone: t.appZone}
-	i := sort.Search(len(t.servedAt), func(i int) bool { return !t.servedAt[i].Before(arrival) })
+	i := sort.Search(len(t.servedAt), func(i int) bool { return !t.servedAt[i].at.Before(arrival) })
 	if i > 0 {
-		lc.prev = t.servedAt[i-1]
+		lc.prev = t.servedAt[i-1].upTo
 	}
 	return lc, t.recBegan
 }
@@ -1758,9 +2044,9 @@ func WithTracker(ctx context.Context, t *Tracker) context.Context {
 
 // TrackerFrom is the tracker on ctx, nil when there is none, and nil once the
 // test set's learn step has ended (SetLearnEnded): a parser's learn step runs
-// only with a tracker, so one that reads it per request decides no request of
-// a cycle the learn step does not learn in, and the request is served as
-// keploy test serves it.
+// only with a tracker, so one that reads it per request decides no request
+// of a cycle the learn step does not learn in, and the request is served as
+// keploy test serves it. A held learn step (SetLearnHeld) still gives it.
 func TrackerFrom(ctx context.Context) *Tracker {
 	t, _ := ctx.Value(trackerKey{}).(*Tracker)
 	if t.LearnEnded() {
@@ -1788,6 +2074,30 @@ func (t *Tracker) SetLearnEnded(ended bool) {
 // (SetLearnEnded); false on a nil tracker.
 func (t *Tracker) LearnEnded() bool {
 	return t != nil && t.learnEnded.Load()
+}
+
+// SetLearnHeld holds the learn step, or releases it. The agent holds it while
+// a test of record's full round that keeps its recording from an earlier
+// record is open (the proxy's MockManager.SetLearnHeld): what that test's
+// calls change in must be learned onto no recording, its own or the pool's,
+// as the record keeps none of it. Unlike an ended learn step it still runs:
+// every parser's learn step decides the test's requests, serves what is
+// exactly a recording, and states what it served (Served, ServedMockAsRecorded,
+// ServedMockLive), as for any test, so a later test of the round reads what
+// F gave the application there; only the classification refuses every
+// changed value while it is held (DriftCache.held, heldWhy), so a call that
+// changed misses. Releasing it takes the learn step back up; a new session
+// releases it. A no-op on a nil tracker.
+func (t *Tracker) SetLearnHeld(held bool) {
+	if t != nil {
+		t.learnHeld.Store(held)
+	}
+}
+
+// LearnHeld reports whether the learn step is held (SetLearnHeld); false on
+// a nil tracker.
+func (t *Tracker) LearnHeld() bool {
+	return t != nil && t.learnHeld.Load()
 }
 
 // SetAt is the test number the running set began at (NewSet): it moves at
@@ -1832,8 +2142,10 @@ func (t *Tracker) State() (number uint64, open, began bool) {
 // (lateOf), never as one whose view no adapter stated. One said as recorded
 // that its leaves do not bear out stays one whose view no adapter stated
 // (fail closed). A copy: earlier is the round's. Nothing is numbered where
-// no payload was read. Every learn step numbers them by it, so a payload
-// reads the same in each.
+// no payload was read: the place an earlier test's call told in its own
+// test left the run keeps the numbers its serves had when the next test
+// began, and one told later keeps none (ranCalls, Raw.ordered).
+// Every learn step numbers them by it, so a payload reads the same in each.
 func InServeOrder(earlier []Earlier, mocks []*models.Mock, order Order) []Earlier {
 	read := false
 	for _, e := range earlier {

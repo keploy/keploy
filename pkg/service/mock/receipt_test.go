@@ -943,8 +943,10 @@ func TestCountTests(t *testing.T) {
 		{Name: "d", Outcome: models.ScopeOutcomeGated},
 		{Name: "e"},
 		{Name: "f", Outcome: "flaky"},
+		{Name: "g", Outcome: models.ScopeOutcomeUnmet},
 	}, "not yet proven")
-	require.Equal(t, &TestCounts{Passed: 1, Failed: 1, Skipped: 1, Gated: 1, GateReason: "not yet proven", NoVerdict: 2}, got)
+	// A test whose need was not met was told not to run, as a gated one.
+	require.Equal(t, &TestCounts{Passed: 1, Failed: 1, Skipped: 1, Gated: 2, GateReason: "not yet proven", NoVerdict: 2}, got)
 	require.Empty(t, countTests([]TestReceipt{{Name: "a", Outcome: models.ScopeOutcomePassed}}, "unused").GateReason,
 		"a reason is recorded only when something was gated")
 }

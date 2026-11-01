@@ -849,7 +849,9 @@ func TestATimeOfDayIsAClockReadWhereTheLeadMovedIt(t *testing.T) {
 		t.Errorf("moved by an hour: %s (%s); want it refused: %s", ln.Kind, ln.Why, instantNotClock)
 	}
 	for _, w := range []*Window{nil, {Rec: Span{From: read.Add(-time.Second), To: call}, F: Span{From: read.Add(FullRoundLead), To: read.Add(FullRoundLead + time.Second)}}} {
-		if ln := classifyZoned(nil, true, p, tod(read), tod(read.Add(FullRoundLead+37*time.Millisecond)), call, w); ln.Kind != KindUnaccounted || ln.Why != timeOfDayClientTestWhy {
+		// The reason, read literally (not against its own constant): it ends with
+		// the one-line keploytest.Given call, then the noise alternative.
+		if ln := classifyZoned(nil, true, p, tod(read), tod(read.Add(FullRoundLead+37*time.Millisecond)), call, w); ln.Kind != KindUnaccounted || ln.Why != timeOfDayClientTestWhy || !strings.Contains(ln.Why, "keploytest.Given(t, ") || !strings.HasSuffix(ln.Why, ". If your test supplies this value, "+clientGiveWhy+"; if the application reads it from its own clock, declare it noise in keploy.yml, and keploy stops comparing it") {
 			t.Errorf("a client test's, moved by the lead (window %v): %s (%s); want it refused: %s", w != nil, ln.Kind, ln.Why, timeOfDayClientTestWhy)
 		}
 	}

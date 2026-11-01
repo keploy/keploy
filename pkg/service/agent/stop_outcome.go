@@ -11,6 +11,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/models"
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 )
 
@@ -113,6 +114,22 @@ func (a *Agent) readStopOutcome(ctx context.Context) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to read what each test of this replay did: %w", err)
 	}
+	// Under the proven switch the agent then finishes its end of the run
+	// (its hooks' AfterTestRun), as the CLI has it do where it can still
+	// reach the agent (the mock service's settleRun), before the reads the
+	// verdict rests on: an enterprise agent writes the row of each process
+	// of the run it saw off the run's clock, the last test's among them.
+	// The account says whether it did (MockOutcome.Settled): a CLI under
+	// the switch does not judge a run without that word.
+	settled, settleErr := false, ""
+	if provenswitch.On() {
+		if err := ActiveHooks.AfterTestRun(ctx, "", nil, models.TestCoverage{}); err != nil {
+			settleErr = err.Error()
+			a.logger.Warn("keploy's agent did not finish checking the replay's tests as it stopped, so keploy will not judge them", zap.Error(err))
+		} else {
+			settled = true
+		}
+	}
 	consumed, err := a.GetConsumedMocks(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read the mocks this replay served: %w", err)
@@ -126,7 +143,7 @@ func (a *Agent) readStopOutcome(ctx context.Context) ([]byte, error) {
 	} else if err != nil {
 		return nil, fmt.Errorf("failed to read the calls this replay could not match: %w", err)
 	}
-	outcome := models.MockOutcome{Consumed: consumed, Missed: missed, Windows: windows, MissedUnread: missedUnread}
+	outcome := models.MockOutcome{Consumed: consumed, Missed: missed, Windows: windows, MissedUnread: missedUnread, Settled: settled, SettleError: settleErr}
 	// Nor whether its hooks could track every process. Hooks that never count
 	// leave both fields out, which the CLI reads as "unknown" and lets pass.
 	// A count that could not be read leaves its error instead: completeness

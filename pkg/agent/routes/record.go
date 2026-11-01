@@ -81,6 +81,23 @@ const massSuppressionPercent = 25
 // requests a pause of the memory guard cost names, those with the most first.
 const maxNamedPressureConns = 8
 
+// notHandedOnSaid is the summary's warning of a session's test cases that
+// never reached its stream because the ingress that served their requests
+// stopped first (syncMock NoteNotHandedOn).
+const notHandedOnSaid = "agent: some test cases were lost: the app served their requests, and the ingress stopped (the agent, or its forwarder for the app's port, was stopping) before their test cases reached the recording"
+
+// unnamedCallerConnsSaid is the summary's warning of a session's connections
+// to a listener of the run's own process tree whose callers the agent could
+// not name in its PID namespace (syncMock NoteUnnamedCallerConn): it could not
+// tell whether a test made the calls they carried, and recorded none as a
+// test case. It counts connections: the proxy relays them unread.
+const unnamedCallerConnsSaid = "agent: the calls some connections to the app carried were not recorded as test cases: keploy could not name their callers in its PID namespace, so it could not tell whether a test made them"
+
+// streamEndMarkerSent is what the agent logs (debug) once an incoming
+// stream's end marker is flushed, with the counts it carried: the session's
+// summary, deferred, follows it and says the same counts (sessionLost).
+const streamEndMarkerSent = "agent: incoming stream ended with its marker"
+
 // massSuppressed reports whether a session that sent sent test cases and
 // suppressed suppressed of them suppressed a large share
 // (massSuppressionPercent): its summary says so at WARN.
@@ -142,6 +159,9 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		// per test. See pkg/agent/routes/scope.go.
 		r.Post("/scope/begin", a.HandleScopeBegin)
 		r.Post("/scope/end", a.HandleScopeEnd)
+		// A value the open test gave the application (scope_proven.go).
+		// Any method: with the proven switch off the plain 404.
+		r.HandleFunc("/scope/given", a.HandleScopeGiven)
 		r.Get("/scope/windows", a.HandleScopeWindows)
 		r.Post("/scope/table", a.HandleScopeTable)
 		r.Post("/replay/gate", a.HandleScopeGate)
@@ -564,6 +584,30 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	// The requests the ingress did not record because the memory guard had
 	// paused recording (NoteNotRecordedUnderPressure), counted the same way.
 	notRecordedBefore := syncmgr.Get().NotRecordedUnderPressure()
+	// The requests the ingress served and was recording whose test cases
+	// never reached this stream's queue because the ingress stopped first
+	// (NoteNotHandedOn), counted the same way.
+	notHandedOnBefore := syncmgr.Get().NotHandedOn()
+	// The connections to a listener of the run's own process tree whose
+	// callers the agent could not name in its PID namespace, none of whose
+	// calls was recorded as a test case (NoteUnnamedCallerConn), counted the
+	// same way.
+	unnamedBefore := syncmgr.Get().UnnamedCallerConns()
+	// sessionLost reads, once, what this session lost to its ingress stopping
+	// (NoteNotHandedOn) and to callers the agent could not name
+	// (NoteUnnamedCallerConn): the end marker, the summary and its warnings say
+	// the same counts, whichever of them reads first. The handler's own
+	// goroutine calls it (the marker, and the summary it defers).
+	var lostRead bool
+	var notHandedOnLost, unnamedLost uint64
+	sessionLost := func() (notHandedOn, unnamed uint64) {
+		if !lostRead {
+			lostRead = true
+			notHandedOnLost = syncmgr.Get().NotHandedOn() - notHandedOnBefore
+			unnamedLost = syncmgr.Get().UnnamedCallerConns() - unnamedBefore
+		}
+		return notHandedOnLost, unnamedLost
+	}
 	// The ingress requests that come during the memory guard's pauses, from
 	// here: counted by the order of events (the request count read at each
 	// pause's start and end), apart from what the capture then decided, so
@@ -842,6 +886,24 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 				zap.Int("connections", notRecorded.Connections()),
 				zap.Strings("connections_most", notRecorded.Most(maxNamedPressureConns)))
 		}
+		// Read once (sessionLost): the warnings, the summary and the end
+		// marker say the same.
+		notHandedOn, unnamedConns := sessionLost()
+		if notHandedOn > 0 {
+			// The app served each, and the ingress stopped before its test
+			// case reached this stream: the manager warns of the first and
+			// every 1024th as they come; this is the session's count.
+			a.logger.Warn(notHandedOnSaid,
+				zap.Uint64("test_cases", notHandedOn))
+		}
+		if unnamedConns > 0 {
+			// Each was passed to the app's listener and none of its calls
+			// recorded: the proxy warned of the agent's first as it came;
+			// this is the session's count.
+			a.logger.Warn(unnamedCallerConnsSaid,
+				zap.Uint64("connections", unnamedConns),
+				zap.String("next_step", "run keploy in the PID namespace of the app's tests, or in the host's (--pid=host, or hostPID in Kubernetes)"))
+		}
 		if tcsUnsettled > 0 {
 			// The capture's parsers ran more than the hold's bound
 			// behind: these were checked against what was known then.
@@ -912,6 +974,12 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 			zap.Int("tcs_dropped_capacity", syncmgr.Get().DroppedTCCount()),
 			zap.Int("tcs_released_unsettled", tcsUnsettled),
 			zap.Uint64("tcs_left_out_in_flight", leftOutInFlight),
+			// Served by the app and never handed to this stream: the
+			// ingress that served them stopped first (the WARN above).
+			zap.Uint64("tcs_not_handed_on", notHandedOn),
+			// Calls to the app none of which was recorded: the agent could
+			// not name their callers (the WARN above).
+			zap.Uint64("connections_from_unnamed_callers", unnamedConns),
 			// Held for their verdicts when the stream ended, and not sent
 			// (the hold's Drain). A client ends its stream holding none from
 			// before its stop unless its drain gave up, which it says: these
@@ -975,6 +1043,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 				streamWriteFailed(a.logger, r, "failed to end the incoming stream with its marker", err)
 				return
 			}
+			notHandedOn, unnamedConns := sessionLost()
 			if err := json.NewEncoder(part).Encode(models.StreamEndSummary{
 				TestCasesSent:       tcsSentSoFar,
 				TestCasesSuppressed: tcsSuppressedSoFar,
@@ -983,13 +1052,19 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 					n := syncmgr.Get().NotRecordedUnderPressure().Since(notRecordedBefore)
 					return models.PressureSkipSummary{Requests: n.Total, Connections: n.Connections()}
 				}(),
-				Unsettled:      tcsUnsettled,
-				MassSuppressed: massSuppressed(tcsSentSoFar, tcsSuppressedSoFar),
+				NotHandedOn:        notHandedOn,
+				UnnamedCallerConns: unnamedConns,
+				Unsettled:          tcsUnsettled,
+				MassSuppressed:     massSuppressed(tcsSentSoFar, tcsSuppressedSoFar),
 			}); err != nil {
 				streamWriteFailed(a.logger, r, "failed to end the incoming stream with its marker", err)
 				return
 			}
 			flusher.Flush()
+			a.logger.Debug(streamEndMarkerSent,
+				zap.Int("tcs_sent_to_cli", tcsSentSoFar),
+				zap.Uint64("tcs_not_handed_on", notHandedOn),
+				zap.Uint64("connections_from_unnamed_callers", unnamedConns))
 			endedBy = "end"
 			return
 		case <-tickC:

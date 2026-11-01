@@ -1099,3 +1099,38 @@ func TestASpendInAnOpenViewDoesNotWait(t *testing.T) {
 		t.Fatal("a spend in an open view was refused")
 	}
 }
+
+// A background recording judging moved into the open test (one the test's
+// mapping names, though it was recorded in the pool or by a worker) is the
+// test's own: InBackground reads it as no background recording, so the
+// checks that hide the background from a call one more than the test
+// recorded (the HTTP learn step, Postgres' Hidden, Mongo's learn claim) never
+// hide the test's own recording from it, nor read it as the background's.
+// The rest of the background stays the background.
+func TestARecordingJudgingMovedIntoTheTestIsNotTheBackgrounds(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	mk := func(name string) *models.Mock {
+		return &models.Mock{Name: name, Kind: models.HTTP, Spec: models.MockSpec{Metadata: map[string]string{"type": "mocks"}}}
+	}
+	moved, bg := mk("moved-1"), mk("bg-1")
+	for _, scope := range []string{"the pool", "the worker scope"} {
+		t.Run(scope, func(t *testing.T) {
+			mm := NewMockManager(nil, nil, zap.NewNop())
+			t.Cleanup(mm.Close)
+			mm.SetMocksWithWindow(nil, []*models.Mock{moved, bg}, models.BaseTime, time.Now().Add(time.Hour))
+			names := []string{moved.Name, bg.Name}
+			if scope == "the pool" {
+				mm.ServeExactBackground(models.RecordedWithS12Routing, names, nil)
+			} else {
+				mm.ServeExactWorker(names)
+			}
+			mm.ServeExactTest("T1", []*models.Mock{moved})
+			if !mm.ExactServing() {
+				t.Fatal("precondition: T1 is not served exactly")
+			}
+			if mm.InBackground(moved.Name) || !mm.InBackground(bg.Name) {
+				t.Fatalf("InBackground: the recording moved into T1 %v, the background's %v; want false, true", mm.InBackground(moved.Name), mm.InBackground(bg.Name))
+			}
+		})
+	}
+}
