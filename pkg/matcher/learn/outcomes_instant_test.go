@@ -330,8 +330,8 @@ func TestOutcomeACoarseReadBesideTwoClockReadsIsReadSinceItsBegin(t *testing.T) 
 // coarse cut say nothing of each other. Where the call's own window holds
 // the read it is a Clock, as main reads it, and so is a client test's read
 // since its begin (an app's updatedAt beside the UnixNano in the app's name
-// an answer read back). Where neither holds it, the answer stays the source
-// named, and a value the answer holds by its text stays a Value.
+// an answer read back). Where neither holds it, it is refused, naming the
+// answer, and a value the answer holds by its text stays a Value.
 func TestOutcomeASecondReadBesideAFinerInstantInAnAnswerIsAClock(t *testing.T) {
 	const p = "body.created_at"
 	rAt, fAt := oAt.Truncate(time.Second).Add(700*time.Millisecond), oAt.Truncate(time.Second).Add(102*time.Second+700*time.Millisecond)
@@ -345,9 +345,7 @@ func TestOutcomeASecondReadBesideAFinerInstantInAnAnswerIsAClock(t *testing.T) {
 	iClock(t, "the second its own window holds", oWord(t, Decide(call(iWin(rAt, fAt, 100*time.Millisecond), ans(name(rAt), name(fAt)))), sec(rAt), sec(fAt)))
 	far := iWin(rAt.Add(5*time.Second), fAt.Add(5*time.Second), 100*time.Millisecond)
 	d := oWord(t, Decide(call(far, ans(name(rAt), name(fAt)))), sec(rAt), sec(fAt))
-	if d.Outcome != OutcomeValue || d.From.Mock != "mock-1624" {
-		t.Errorf("a second its window does not hold: %s; want the Value bound to the answer", oDescribe([]Decision{d}))
-	}
+	oRefused(t, "a second its window does not hold", d, RefusalNoClockRead, "mock-1624", "another form")
 	far.Rec.Began, far.F.Began = rAt.Add(-time.Second), fAt.Add(-time.Second)
 	in := call(far, ans(name(rAt), name(fAt)))
 	in.Drifts = oClientDrifts()
@@ -487,20 +485,72 @@ func TestOutcomeAServedDateIsNoSourceOfTheTimeOfDayBesideIt(t *testing.T) {
 // A request sent before the call that held the recorded minute and, in round
 // F, grew to hold that minute and F's ("since R" to "since R until F"): it
 // did not move with the value, so the value is no copy of it. Where it moved
-// ("since R" to "since F") it is (instants_test.go:1507).
+// ("since R" to "since F") it is, by its text. The same minute sent as epoch
+// milliseconds, which main binds (instants_test.go:1507), is no copy: a
+// variable holds one text, and the refusal names the send.
 func TestOutcomeASendThatHoldsBothRunsMomentsIsNoCopy(t *testing.T) {
 	const p = "body.at"
 	rAt := time.Date(2026, 10, 22, 11, 20, 0, 0, time.UTC)
 	rec, live := "2026-10-22T11:14:00Z", "2026-10-22T11:15:00Z"
-	sent := func(f string) []Earlier {
-		return []Earlier{iSent("mock-1", rAt.Add(-time.Second), "body.range", String, "since 1792667640000", f)}
+	sent := func(r, f string) []Earlier {
+		return []Earlier{iSent("mock-1", rAt.Add(-time.Second), "body.range", String, r, f)}
 	}
-	d := oWord(t, Decide(iCall(p, String, rec, live, rAt, rAt, nil, sent("since 1792667700000"), nil)), rec, live)
+	d := oWord(t, Decide(iCall(p, String, rec, live, rAt, rAt, nil, sent("since "+rec, "since "+live), nil)), rec, live)
 	iValue(t, "a send that moved with the value", d, "mock-1")
-	d = oWord(t, Decide(iCall(p, String, rec, live, rAt, rAt, nil, sent("since 1792667640000 until 1792667700000"), nil)), rec, live)
+	d = oWord(t, Decide(iCall(p, String, rec, live, rAt, rAt, nil, sent("since "+rec, "since "+rec+" until "+live), nil)), rec, live)
 	if d.Outcome == OutcomeValue {
 		t.Errorf("a send that holds both runs' moments in F bound the value: %s", oDescribe([]Decision{d}))
 	}
+	d = oWord(t, Decide(iCall(p, String, rec, live, rAt, rAt, nil, sent("since 1792667640000", "since 1792667700000"), nil)), rec, live)
+	oRefused(t, "the same minute sent as epoch milliseconds", d, RefusalNoClockRead, "mock-1", "another form")
+}
+
+// A copied text or number is a source by its text at each step that binds
+// one: an answer (3), a fine copy (4), a coarse copy (6). One rule across
+// protocols: a variable holds one text, so a place that holds only the same
+// moment in another form is no place to bind it, and the refusal names it;
+// where the call's own window holds the read, it is that read. A typed
+// instant is held by its moment.
+func TestOutcomeACopiedTextOrNumberIsASourceByItsText(t *testing.T) {
+	const p = "body.at"
+	rAt := oAt.Add(2 * time.Hour)
+	fAt := rAt.Add(time.Hour)
+	rT, fT := rAt.Add(-3*time.Second).Truncate(time.Microsecond), fAt.Add(-3*time.Second).Truncate(time.Microsecond)
+	sec := func(t time.Time) string { return strconv.FormatInt(t.Unix(), 10) }
+	sent := func(r, f string) []Earlier {
+		return []Earlier{iSent("mock-1", rAt.Add(-5*time.Second), "body.since", String, r, f)}
+	}
+	for _, c := range []struct {
+		what, rec, live string
+		typ             Type
+		w               *Window
+		earlier         []Earlier
+		raw             []Raw
+		value           bool
+	}{
+		{"an answer with its text", iMs(rT), iMs(fT), String, nil, nil, []Raw{oAnswer("mock-7", 4*time.Second, iMs(rT)).ServedAs(1)}, true},
+		{"an answer with the moment as epoch milliseconds", iMs(rT), iMs(fT), String, nil, nil, []Raw{oAnswer("mock-7", 4*time.Second, iEpochMs(rT)).ServedAs(1)}, false},
+		{"a fine send with its text", iMicro(rT), iMicro(fT), String, nil, sent("at "+iMicro(rT), "at "+iMicro(fT)), nil, true},
+		{"a fine send as epoch nanoseconds", iMicro(rT), iMicro(fT), String, nil, sent("at "+iEpochNs(rT), "at "+iEpochNs(fT)), nil, false},
+		{"a number with its text", sec(rT), sec(fT), Number, nil, sent("since "+sec(rT), "since "+sec(fT)), nil, true},
+		{"a number sent as a date and time", sec(rT), sec(fT), Number, nil, sent("since "+rT.UTC().Format(time.RFC3339), "since "+fT.UTC().Format(time.RFC3339)), nil, false},
+	} {
+		d := oWord(t, Decide(iCall(p, c.typ, c.rec, c.live, rAt, fAt, c.w, c.earlier, c.raw)), c.rec, c.live)
+		mock := "mock-1"
+		if c.raw != nil {
+			mock = "mock-7"
+		}
+		if c.value {
+			iValue(t, c.what, d, mock)
+			continue
+		}
+		oRefused(t, c.what, d, RefusalNoClockRead, mock, "another form")
+	}
+	// Where the call's own window holds the read, a place in another form
+	// leaves it that read.
+	at := []Raw{oAnswer("mock-7", 4*time.Second, iEpochMs(rT)).ServedAs(1)}
+	d := oWord(t, Decide(iCall(p, String, iMs(rT), iMs(fT), rAt, fAt, iWin(rAt, fAt, 4*time.Second), nil, at)), iMs(rT), iMs(fT))
+	iClock(t, "an answer in another form, the window holding the read", d)
 }
 
 // A number of an instant's length that does not parse as one (a 10-digit
@@ -766,7 +816,7 @@ func TestOutcomeAClientTestsReadARefusedOffsetBeforeItsWindowIsAClockSinceItsBeg
 // The value goes on to the read since the test began, and its check goes red
 // where it was no read. A place that holds the same text still binds, and it
 // binds ahead of an earlier place in another form. With no begin to read
-// from, the copy stands, and the adapter refuses it.
+// from, it is refused, naming the name.
 func TestOutcomeASecondInsideANanosecondNameIsNoCopyToBind(t *testing.T) {
 	const p = "body.docs.msgs.0.app.createdAt"
 	secs := func(t time.Time) string { return strconv.FormatInt(t.Unix(), 10) }
@@ -793,7 +843,7 @@ func TestOutcomeASecondInsideANanosecondNameIsNoCopyToBind(t *testing.T) {
 	noBegin := iWin(rAt, fAt, 100*time.Millisecond)
 	in = iCall(p, Number, rec, live, rAt, fAt, noBegin, []Earlier{name}, nil)
 	in.Drifts = oClientDrifts()
-	iValue(t, "no begin to read from", oWord(t, Decide(in), rec, live), "mock-502")
+	oRefused(t, "no begin to read from", oWord(t, Decide(in), rec, live), RefusalNoClockRead, "mock-502", "another form")
 }
 
 // A client test's token expiry, a read the application made earlier in its
