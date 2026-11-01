@@ -366,3 +366,47 @@ func TestOutcomeAWordInAStartUpKeployMaySwapIsUnknown(t *testing.T) {
 		t.Errorf("33 at record, a start-up's pid in F: %s; want fresh (chance)", oDescribe([]Decision{d}))
 	}
 }
+
+// One new value the call sent at several places (an update's filter and its
+// $set, a suite id at several fields of one insert) is one variable: bound
+// at its first place, made anew each run, and used at the others, each use
+// naming the first in its line, so a replay that sends the places apart
+// misses. A value recorded at several places that round F sent as two
+// different new values is two reads keploy cannot tell apart: each place is
+// refused, naming the other.
+func TestOutcomeOneNewValueAtSeveralPlacesOfACallIsOneVariable(t *testing.T) {
+	const r = "6721a9f0c3d4e5f60718293a"
+	shape := func(vs ...string) Shape {
+		s := Shape{Leaves: map[string]Leaf{}}
+		for i, p := range []string{"q.id", "u.set.id", "u.set.owner"} {
+			s.Leaves[p] = Leaf{Path: p, Noise: p, Type: String, Value: vs[i]}
+		}
+		return s
+	}
+	call := func(f1, f2 string) Input {
+		in := oInput("q.id", r, f1, nil, nil)
+		in.Drift = []string{"q.id", "u.set.id", "u.set.owner"}
+		in.Rec, in.Live = shape(r, r, "user-"+r), shape(f1, f2, "user-"+f2)
+		in.PlaceOf = func(l Leaf, _ bool) (string, bool) { return "body." + l.Path, true }
+		return in
+	}
+	const f = "6721b2c4d5e6f708192a3b4c"
+	ds := Decide(call(f, f))
+	if len(ds) != 3 {
+		t.Fatalf("want three decided words, got %s", oDescribe(ds))
+	}
+	if ds[0].Outcome != OutcomeFresh {
+		t.Errorf("the first place: %s; want a value made anew, bound there", oDescribe(ds[:1]))
+	}
+	for _, d := range ds[1:] {
+		if d.Outcome != OutcomeValue || d.From.Mock != "mock-300" || d.FromAt.String() != "body.q.id#0" || !strings.Contains(d.Line, "mock-300 q.id") {
+			t.Errorf("a later place of the same new value: %s (from %s at %+v); want a Value used from the call's own first place, its line naming mock-300 q.id", oDescribe([]Decision{d}), d.From.Mock, d.FromAt)
+		}
+	}
+	const f2 = "6721c3d5e6f708192a3b4c5d"
+	ds = Decide(call(f, f2))
+	for i, d := range ds[:2] {
+		other := []string{"mock-300 u.set.id", "mock-300 q.id"}[i]
+		oRefused(t, "one recorded value round F sent as two new values", d, "two-sources", other)
+	}
+}
