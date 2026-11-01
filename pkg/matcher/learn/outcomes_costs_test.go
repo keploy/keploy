@@ -386,6 +386,7 @@ func TestOutcomeCostThePlacesKeepNoRecordingsText(t *testing.T) {
 	}
 	before := heap()
 	ps, unread := placesOf(in)
+	ps = withTexts(newReaderIndex(dc), ps)
 	grew := int64(heap()) - int64(before)
 	runtime.KeepAlive(ps)
 	if unread != "" || len(ps) != n {
@@ -394,7 +395,7 @@ func TestOutcomeCostThePlacesKeepNoRecordingsText(t *testing.T) {
 	if grew > 8<<20 {
 		t.Errorf("the call's places hold %d MiB after %d recordings of 1 MiB were read: they keep the texts", grew>>20, n)
 	}
-	if got := ps[1].recText(); !strings.Contains(got, "0000001 ") {
+	if got, _ := ps[1].t.rec.textNow(); !strings.Contains(got, "0000001 ") {
 		t.Errorf("a place's text, read when asked, is not its recording's (%d bytes)", len(got))
 	}
 }

@@ -53,7 +53,8 @@ func decideWords(in Input, allScope bool) ([]Decision, []string) {
 	if unread == "" {
 		unread = setUnread
 	}
-	dc := &decider{in: in, ps: ps, x: newReaderIndex(in.Drifts), allScope: allScope, set: set}
+	x := newReaderIndex(in.Drifts)
+	dc := &decider{in: in, ps: withTexts(x, ps), x: x, allScope: allScope, set: set}
 	var out []Decision
 	var fields []string // fields[i] is the field out[i] decides
 	for _, path := range in.Drift {
@@ -131,8 +132,8 @@ func (dc *decider) unpaired(path string, at variables.Address, rec, live string,
 	var held []evPlace
 	for _, p := range dc.ps {
 		for _, w := range rd.Words {
-			hr := w.Rec != "" && evHolds(dc.x, p.recText(), w.Rec)
-			hl := w.Live != "" && evHolds(dc.x, p.liveText(), w.Live)
+			hr := w.Rec != "" && evHolds(p.t.rec, w.Rec)
+			hl := w.Live != "" && evHolds(p.t.live, w.Live)
 			if hr || hl {
 				held = append(held, p)
 				break
@@ -147,9 +148,9 @@ func (dc *decider) unpaired(path string, at variables.Address, rec, live string,
 		Edit{Kind: EditReRecord}, dc.fieldNoise(path))
 }
 
-// evHolds reports whether text holds the word w, read or not.
-func evHolds(x *readerIndex, text, w string) bool {
-	h, _ := x.holdsWord(text, w)
+// evHolds reports whether t holds the word w, read or not.
+func evHolds(t *readerText, w string) bool {
+	h, _ := t.holdsWord(w)
 	return h
 }
 
@@ -160,21 +161,21 @@ func (dc *decider) word(path string, at variables.Address, rec, live string, w r
 	ps := append([]evPlace(nil), dc.ps...)
 	cand := map[string]bool{}
 	for _, p := range ps {
-		if ev, _ := evidenceAt(dc.x, p, w.Rec, w.Live); ev != evNone {
+		if ev, _ := evidenceAt(p, w.Rec, w.Live); ev != evNone {
 			cand[p.mock] = true
 		}
 	}
 	orderUnknown(dc.in, ps, cand)
-	swapUnknown(dc.in, dc.x, ps, w)
+	swapUnknown(dc.in, ps, w)
 	var src, outside, conflict, unknown []evPlace
 	for _, p := range ps {
-		ev, read := evidenceAt(dc.x, p, w.Rec, w.Live)
+		ev, read := evidenceAt(p, w.Rec, w.Live)
 		if !read {
 			unknown = append(unknown, evPlace{name: p.name, why: "past the call's budget"})
 			continue
 		}
 		if ev == evNone || ev == evDisproven {
-			if tokenShown(dc.x, p, w) {
+			if tokenShown(p, w) {
 				ev = evShown
 			}
 		}
@@ -186,7 +187,7 @@ func (dc *decider) word(path string, at variables.Address, rec, live string, w r
 				outside = append(outside, p)
 			}
 		case evDisproven:
-			if p.gave || countsByText(dc.x, p, w) || (dc.allScope || !p.otherTest) && heldWhole(dc.x, p, w, rec) {
+			if p.gave || countsByText(p, w) || (dc.allScope || !p.otherTest) && heldWhole(p, w, rec) {
 				conflict = append(conflict, p)
 			}
 		case evUnknown:
@@ -276,13 +277,13 @@ func (dc *decider) atWord(path string, at variables.Address, n int, w readWord, 
 
 // tokenShown reports whether p shows a whole token around w: one place
 // holds that whole token in each run.
-func tokenShown(x *readerIndex, p evPlace, w readWord) bool {
+func tokenShown(p evPlace, w readWord) bool {
 	if p.state != stateBefore || p.same() {
 		return false
 	}
 	for _, t := range w.Tokens {
-		hr, _ := x.holdsToken(p.recText(), t.Kind, t.Rec)
-		hl, _ := x.holdsToken(p.liveText(), t.Kind, t.Live)
+		hr, _ := p.t.rec.holdsToken(t.Kind, t.Rec)
+		hl, _ := p.t.live.holdsToken(t.Kind, t.Live)
 		if hr && hl {
 			return true
 		}
@@ -329,22 +330,28 @@ type changedInstant struct {
 	text bool
 }
 
-// holds is what text, one run's text at p, holds of w (that run's word)
+// holds is what t, one run's text at p, holds of w (that run's word)
 // and m (its moment): a test's given by its text alone, any other
 // place by its text or by moment. fine: the hold is at a cut finer than a
 // millisecond, or by the exact text of a number that does not parse.
-func (dc *decider) holds(p evPlace, text, w string, m *moment, byText bool) (held, fine, read bool) {
-	h, ok := dc.x.holdsWord(text, w)
+func (dc *decider) holds(p evPlace, t *readerText, w string, m *moment, byText bool) (held, fine, read bool) {
+	h, ok := t.holdsWord(w)
 	if !ok {
 		return false, false, false
 	}
 	// An instant of several words (a date and a time) stands in a text
 	// as those words in order.
-	h = h || len(variables.Words(w)) > 1 && strings.Contains(text, w)
+	if !h && len(variables.Words(w)) > 1 {
+		text, ok := t.textNow()
+		if !ok {
+			return false, false, false
+		}
+		h = strings.Contains(text, w)
+	}
 	if m == nil || p.gave {
 		return h, h && byText, true
 	}
-	hm, fm, ok := dc.x.holdsMoment(text, *m)
+	hm, fm, ok := t.holdsMoment(*m)
 	if !ok {
 		return false, false, false
 	}
@@ -364,13 +371,13 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	r, l := c.r, c.l
 	var hs []instantHold
 	for _, p := range dc.ps {
-		hr, fr, okR := dc.holds(p, p.recText(), r, c.rm, c.byText)
-		hl, fl, okL := dc.holds(p, p.liveText(), l, c.lm, c.byText)
+		hr, fr, okR := dc.holds(p, p.t.rec, r, c.rm, c.byText)
+		hl, fl, okL := dc.holds(p, p.t.live, l, c.lm, c.byText)
 		if !okR || !okL {
 			return dc.refuse(path, at, n, r, l, RefusalUnread, "keploy could not read the run's values past their budget, which came before this call", nil, Edit{Kind: EditReRecord}, dc.fieldNoise(path))
 		}
 		if hr || hl {
-			hs = append(hs, instantHold{p: p, hr: hr, hl: hl, fr: fr, fl: fl, rank: min(dc.rank(p.recText(), r, c.rm, hr), dc.rank(p.liveText(), l, c.lm, hl))})
+			hs = append(hs, instantHold{p: p, hr: hr, hl: hl, fr: fr, fl: fl, rank: min(dc.rank(p.t.rec, r, c.rm, hr), dc.rank(p.t.live, l, c.lm, hl))})
 		}
 	}
 	// A place that holds a value by its exact text is named before one
@@ -604,21 +611,21 @@ func (dc *decider) offsetGuard(path string, off models.ClockOffset, enc time.Dur
 	return drifts.offsetFallBackWhy(path, off, enc, w), false
 }
 
-// rank is how closely text names w (its moment m): 0 by its exact text,
+// rank is how closely t names w (its moment m): 0 by its exact text,
 // else the unit of the finest cut that gives it; the most where held is
 // false or no cut does.
-func (dc *decider) rank(text, w string, m *moment, held bool) int64 {
+func (dc *decider) rank(t *readerText, w string, m *moment, held bool) int64 {
 	const none = int64(1) << 62
 	if !held {
 		return none
 	}
-	if h, _, _ := dc.holds(evPlace{gave: true}, text, w, nil, false); h {
+	if h, _, _ := dc.holds(evPlace{gave: true}, t, w, nil, false); h {
 		return 0
 	}
 	if m == nil {
 		return none
 	}
-	spans, ok := dc.x.text(text).spansOf()
+	spans, ok := t.spansOf()
 	if !ok {
 		return none
 	}
@@ -648,7 +655,7 @@ func (dc *decider) swappable(p evPlace, c changedInstant) bool {
 	}
 	x := dc.in.Raw[p.raw-1]
 	return x.swapHolds(x.payload().text, dc.in.Raw, func(own string) bool {
-		h, _, _ := dc.holds(evPlace{}, own, c.r, c.rm, c.byText)
+		h, _, _ := dc.holds(evPlace{}, dc.x.text(own), c.r, c.rm, c.byText)
 		return h
 	})
 }
@@ -715,7 +722,7 @@ func (dc *decider) copied(path string, at variables.Address, n int, r, l string,
 func (dc *decider) instantEchoed(c changedInstant) string {
 	for _, a := range dc.in.Resp {
 		p := evPlace{}
-		if h, _, _ := dc.holds(p, a.Value, c.r, c.rm, c.byText); h {
+		if h, _, _ := dc.holds(p, dc.x.text(a.Value), c.r, c.rm, c.byText); h {
 			return a.Path
 		}
 	}

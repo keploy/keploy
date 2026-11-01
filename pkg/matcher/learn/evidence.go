@@ -35,11 +35,12 @@ type evPlace struct {
 	name, mock, path string
 	// rec and live are a leaf's value in each run. A recording's place
 	// keeps its Raws instead (src: the recording; fSrc: what round F gave
-	// there, its view or src) and reads their texts only when a question
-	// asks (recText, liveText), never keeping one: a call that asks about
-	// many large recordings holds one at a time, not all of them.
+	// there, its view or src), never their texts. t is how the call's index
+	// reads each run's text (withTexts): a handle per text, so a question
+	// reads a recording only where the index has not answered it yet.
 	rec, live      string
 	src, fSrc      *Raw
+	t              *placeText
 	side           Side
 	given, startUp bool
 	// gave: a value the test gave keploy (#5016), read by its text alone,
@@ -72,24 +73,64 @@ type evPlace struct {
 	views           []*Raw
 }
 
-// recText and liveText are p's text in each run, a recording's read now.
-func (p evPlace) recText() string {
-	if p.src != nil {
-		return p.src.Text()
-	}
-	return p.rec
+// placeText is one place's text in each run, and each view round F served
+// there, as the call's index reads them (readerIndex.textOf for a
+// recording): made once per place and shared by its copies, so the index
+// finds each text's entry once, and the place keeps no recording's text.
+// same: whether round F gave the place as recorded (0: not asked yet).
+type placeText struct {
+	rec, live *readerText
+	views     []*readerText
+	same      int8
 }
 
+// withTexts gives each of ps the handles its texts are read by, in x.
+func withTexts(x *readerIndex, ps []evPlace) []evPlace {
+	for i := range ps {
+		p := &ps[i]
+		t := &placeText{rec: x.text(p.rec), live: x.text(p.live)}
+		if p.src != nil {
+			t.rec = x.textOf(*p.src)
+			t.live = t.rec
+			if p.fSrc != p.src {
+				t.live = x.textOf(*p.fSrc)
+			}
+		}
+		for _, v := range p.views {
+			t.views = append(t.views, x.textOf(*v))
+		}
+		p.t = t
+	}
+	return ps
+}
+
+// liveText is round F's text at p, read now where p is a recording; "" where
+// keploy could not read it.
 func (p evPlace) liveText() string {
-	if p.fSrc != nil {
-		return p.fSrc.Text()
+	if p.t == nil {
+		return p.live
 	}
-	return p.live
+	s, _ := p.t.live.textNow()
+	return s
 }
 
-// same reports whether round F gave p as recorded.
+// same reports whether round F gave p as recorded; a text keploy could not
+// read is not (and the index refuses the call: fail closed).
 func (p evPlace) same() bool {
-	return p.src != nil && p.src == p.fSrc || p.recText() == p.liveText()
+	switch {
+	case p.src != nil && p.src == p.fSrc:
+		return true
+	case p.t == nil:
+		return p.rec == p.live
+	case p.t.same == 0:
+		r, okR := p.t.rec.textNow()
+		l, okL := p.t.live.textNow()
+		p.t.same = -1
+		if okR && okL && r == l {
+			p.t.same = 1
+		}
+	}
+	return p.t.same > 0
 }
 
 // wordEvidence is what one place shows of a changed word.
@@ -277,7 +318,7 @@ const (
 // start-up carries alike is no swap's, and reads as any recording's. Only
 // a place whose recorded text holds the word is asked: swapHolds reads a
 // match it finds in no one field as a swap's.
-func swapUnknown(in Input, x *readerIndex, ps []evPlace, w readWord) {
+func swapUnknown(in Input, ps []evPlace, w readWord) {
 	holds := func(own string) bool {
 		if holdsToken(own, w.Rec) {
 			return true
@@ -291,7 +332,7 @@ func swapUnknown(in Input, x *readerIndex, ps []evPlace, w readWord) {
 	}
 	for i := range ps {
 		p := &ps[i]
-		if p.raw == 0 || p.state != stateBefore || !evHolds(x, p.recText(), w.Rec) {
+		if p.raw == 0 || p.state != stateBefore || !evHolds(p.t.rec, w.Rec) {
 			continue
 		}
 		if r := in.Raw[p.raw-1]; r.swapHolds(r.payload().text, in.Raw, holds) {
@@ -303,9 +344,9 @@ func swapUnknown(in Input, x *readerIndex, ps []evPlace, w readWord) {
 // evidenceAt is what p shows of the changed word r (R) to f (F): the
 // evidence table, read through x. read is false where p's text lay
 // past the call's budget.
-func evidenceAt(x *readerIndex, p evPlace, r, f string) (ev wordEvidence, read bool) {
-	hr, okR := x.holdsWord(p.recText(), r)
-	hf, okF := x.holdsWord(p.liveText(), f)
+func evidenceAt(p evPlace, r, f string) (ev wordEvidence, read bool) {
+	hr, okR := p.t.rec.holdsWord(r)
+	hf, okF := p.t.live.holdsWord(f)
 	if !okR || !okF {
 		return evNone, false
 	}
@@ -313,8 +354,8 @@ func evidenceAt(x *readerIndex, p evPlace, r, f string) (ev wordEvidence, read b
 		if hr || hf || p.fMay {
 			return evUnknown, true
 		}
-		for _, v := range p.views {
-			if h, _ := x.holdsWord(v.Text(), f); h {
+		for _, v := range p.t.views {
+			if h, _ := v.holdsWord(f); h {
 				return evUnknown, true
 			}
 		}
@@ -342,7 +383,7 @@ func evidenceAt(x *readerIndex, p evPlace, r, f string) (ev wordEvidence, read b
 	switch {
 	case hr && hf:
 		return evShown, true
-	case nothingNew(p.recText(), p.liveText()):
+	case nothingNew(p):
 		// F gave nothing new there: every word of F's text stood in R's.
 		return evUnknown, true
 	case hr && !strings.Contains(p.liveText(), f):
@@ -354,15 +395,15 @@ func evidenceAt(x *readerIndex, p evPlace, r, f string) (ev wordEvidence, read b
 // countsByText reports whether a disproving place counts the word by its
 // text: 32 bits or more (wordBits), alone or as a whole token around it
 // the place also holds whole: an unchanged place that holds only one of the two words is chance.
-func countsByText(x *readerIndex, p evPlace, w readWord) bool {
+func countsByText(p evPlace, w readWord) bool {
 	if wordBits(w.Rec) >= 32 || wordBits(w.Live) >= 32 {
 		return true
 	}
 	for _, t := range w.Tokens {
-		if held, _ := x.holdsToken(p.recText(), t.Kind, t.Rec); held && wordBits(t.Rec) >= 32 {
+		if held, _ := p.t.rec.holdsToken(t.Kind, t.Rec); held && wordBits(t.Rec) >= 32 {
 			return true
 		}
-		if held, _ := x.holdsToken(p.liveText(), t.Kind, t.Live); held && wordBits(t.Live) >= 32 {
+		if held, _ := p.t.live.holdsToken(t.Kind, t.Live); held && wordBits(t.Live) >= 32 {
 			return true
 		}
 	}
@@ -372,29 +413,35 @@ func countsByText(x *readerIndex, p evPlace, w readWord) bool {
 // heldWhole reports whether p, a place F moved, held the recorded value's
 // whole token around w in R (a conflict in the call's scope
 // or the start-up).
-func heldWhole(x *readerIndex, p evPlace, w readWord, rec string) bool {
+func heldWhole(p evPlace, w readWord, rec string) bool {
 	if p.same() {
 		return false
 	}
-	if held, _ := x.holdsToken(p.recText(), tokenID, rec); held {
+	if held, _ := p.t.rec.holdsToken(tokenID, rec); held {
 		return true
 	}
 	// A word that is a whole token of its own (no ID byte beside it).
 	if len(w.Tokens) == 0 {
-		if held, _ := x.holdsToken(p.recText(), tokenID, w.Rec); held {
+		if held, _ := p.t.rec.holdsToken(tokenID, w.Rec); held {
 			return true
 		}
 	}
 	for _, t := range w.Tokens {
-		if held, _ := x.holdsToken(p.recText(), t.Kind, t.Rec); held {
+		if held, _ := p.t.rec.holdsToken(t.Kind, t.Rec); held {
 			return true
 		}
 	}
 	return false
 }
 
-// nothingNew reports whether every word of live stands among rec's.
-func nothingNew(rec, live string) bool {
+// nothingNew reports whether every word of round F's text at p stands among
+// the recording's: true where keploy could not read one (it shows nothing).
+func nothingNew(p evPlace) bool {
+	rec, okR := p.t.rec.textNow()
+	live, okL := p.t.live.textNow()
+	if !okR || !okL {
+		return true
+	}
 	had := map[string]bool{}
 	for _, w := range variables.Words(rec) {
 		had[rec[w[0]:w[1]]] = true
