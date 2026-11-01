@@ -353,6 +353,36 @@ func TestOutcomeASecondReadBesideAFinerInstantInAnAnswerIsAClock(t *testing.T) {
 	}
 }
 
+// A UnixNano the application sent inside a name, that a later answer reads
+// back: the send comes first, so the value is bound there, as a word's is
+// bound at its earliest place, and not at the answer's word. An answer before
+// any send stays the source, as does one with no send.
+func TestOutcomeAFineValueAnAnswerReadsBackIsBoundAtItsSend(t *testing.T) {
+	const p = "body.delta.name"
+	rAt, fAt := oAt, oAt.Add(111*time.Second)
+	rec, live := "[E2E] x-"+iEpochNs(rAt.Add(-3*time.Second)), "[E2E] x-"+iEpochNs(fAt.Add(-3*time.Second))
+	r, f := iEpochNs(rAt.Add(-3*time.Second)), iEpochNs(fAt.Add(-3*time.Second))
+	send := func(at time.Time) []Earlier {
+		return []Earlier{iSent("mock-1760", at, "body.app.name", String, rec, live)}
+	}
+	ans := []Raw{oAnswer("mock-1768", time.Second, rec).ServedAs(1).ServedLive(oAnswer("mock-1768", time.Second, live))}
+	call := func(e []Earlier) Input {
+		return iCall(p, String, rec, live, rAt, fAt, iWin(rAt, fAt, 50*time.Millisecond), e, ans)
+	}
+	d := oWord(t, Decide(call(send(rAt.Add(-2*time.Second)))), r, f)
+	if d.Outcome != OutcomeValue || d.From.Mock != "mock-1760" {
+		t.Errorf("a send before the answer: %s; want the Value bound at the send", oDescribe([]Decision{d}))
+	}
+	d = oWord(t, Decide(call(send(rAt.Add(-500*time.Millisecond)))), r, f)
+	if d.Outcome != OutcomeValue || d.From.Mock != "mock-1768" {
+		t.Errorf("an answer before the send: %s; want the Value bound at the answer", oDescribe([]Decision{d}))
+	}
+	d = oWord(t, Decide(call(nil)), r, f)
+	if d.Outcome != OutcomeValue || d.From.Mock != "mock-1768" {
+		t.Errorf("no send: %s; want the Value bound at the answer", oDescribe([]Decision{d}))
+	}
+}
+
 // A 19-digit UnixNano (a fine cut) that stood whole at the test's earlier
 // send, which round F moved to another value while the call sent a third:
 // the value did not follow its place. A conflict, refused before any bind
