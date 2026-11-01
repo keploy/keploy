@@ -70,7 +70,7 @@ func (processClock) After(d time.Duration) (<-chan time.Time, func() bool) {
 	return t.C, t.Stop
 }
 
-func (processClock) owed() (time.Duration, bool, uint64) { return proc.owed() }
+func (processClock) owed() (time.Duration, uint64, uint64) { return proc.owed() }
 
 // proc samples the process while it is held (Process).
 var proc = &sampler{src: realSource{}, tick: Tick}
@@ -111,10 +111,15 @@ var proc = &sampler{src: realSource{}, tick: Tick}
 // neither runs nor waits on a run queue meanwhile; so a thread's wait is its
 // run delay and the steal of the CPU it is on. Neither shows while it lasts:
 // the kernel adds a wait to the run delay as it ends, and steal to the CPU's
-// at its first tick back. So a verdict is not drawn while a thread of the
-// process is held off right now (runnable, and not moved since the last
-// read), and is drawn at the look after the one that found it due, on a read
-// of the threads made since (Meter.Expired).
+// at its first tick back. So a thread held off right now (runnable, and not
+// moved since the last read) may be in a wait no read shows yet, and a
+// verdict waits for the threads that were held off when the stall was found
+// due to have had their turn: it is drawn at a later look, on a read of the
+// threads made since that finds none of them held off still (Meter.Expired).
+// A thread held off only from later on began to wait after the stall was due
+// and does not hold it back, so an overload that holds some thread of the
+// process off at every read does not hold a verdict off for ever: it comes
+// once the threads waiting when it was due get a CPU.
 type sampler struct {
 	src  source
 	tick time.Duration
@@ -130,12 +135,12 @@ type sampler struct {
 	cpuOK    bool
 	// The last read of the threads' waits (readWaits), what on-time samples
 	// counted that no wait has taken, and what they have yet to pay for;
-	// whether that read found a thread held off right now, and how many
-	// reads there have been.
+	// the read since which a thread that read found held off right now has
+	// been (the earliest, 0 if none is), and how many reads there have been.
 	waitWall time.Time
 	onTime   time.Duration
 	waitOwed time.Duration
-	heldNow  bool
+	heldFrom uint64
 	reads    uint64
 }
 
@@ -151,8 +156,9 @@ type source interface {
 	cpuLimit() (cpus float64, ok bool)
 	// heldOff is the most any one thread of the process was held off a CPU
 	// since the last call (its run delay, and the steal of its CPU), 0
-	// where that cannot be read; and whether a thread is held off now.
-	heldOff() (time.Duration, bool)
+	// where that cannot be read; and for how many calls in a row, this one
+	// included, the thread held off now the longest has been, 0 if none is.
+	heldOff() (time.Duration, uint64)
 }
 
 // acquire adds a user, starting the sampling with the first, and returns the
@@ -161,16 +167,7 @@ func (s *sampler) acquire() func() {
 	s.mu.Lock()
 	s.users++
 	if s.users == 1 {
-		s.lastWall, s.lastCPU, s.cpuOK = s.src.now()
-		// What the threads waited while nobody held the clock is not owed,
-		// and what they waited a moment ago hardly matters: a stall of one
-		// burst of work after another comes here every burst, and pays for
-		// no read of the threads unless heldEvery has passed.
-		if s.lastWall.Sub(s.waitWall) >= heldEvery {
-			s.src.heldOff()
-			s.waitWall = s.lastWall
-		}
-		s.onTime, s.waitOwed, s.heldNow = 0, 0, false
+		s.begin()
 		s.stop, s.done = make(chan struct{}), make(chan struct{})
 		go s.run(s.stop, s.done)
 	}
@@ -212,6 +209,21 @@ func (s *sampler) run(stop, done chan struct{}) {
 	}
 }
 
+// begin starts the sampling's accounts. Called with mu held.
+func (s *sampler) begin() {
+	s.lastWall, s.lastCPU, s.cpuOK = s.src.now()
+	// What the threads waited while nobody held the clock is not owed, and
+	// what they waited a moment ago hardly matters: a stall of one burst of
+	// work after another comes here every burst, and pays for no read of the
+	// threads unless heldEvery has passed.
+	if s.lastWall.Sub(s.waitWall) >= heldEvery {
+		s.src.heldOff()
+		s.waitWall = s.lastWall
+		s.reads++
+	}
+	s.onTime, s.waitOwed, s.heldFrom = 0, 0, 0
+}
+
 // sample adds what the process could run since the last sample.
 func (s *sampler) sample() {
 	s.mu.Lock()
@@ -243,27 +255,31 @@ func (s *sampler) sample() {
 // worth of time, and a stall that is real goes on counting when the host
 // quietens. Called with mu held.
 func (s *sampler) readWaits() {
-	held, now := s.src.heldOff()
+	held, heldFor := s.src.heldOff()
 	took := min(held, s.onTime)
 	s.waitOwed += took
 	s.onTime, s.waitWall = min(s.onTime-took, heldEvery), s.lastWall
-	s.heldNow = now
 	s.reads++
+	s.heldFrom = 0
+	if heldFor > 0 {
+		s.heldFrom = s.reads + 1 - min(heldFor, s.reads)
+	}
 }
 
 // owed reads the waits, and says what on-time samples owe as of now (time on
-// the clock that the process could not run), whether a thread is held off
-// right now, and which read that is. It reads them only if a sample came
+// the clock that the process could not run), the read since which a thread
+// held off right now has been (0: none is), and which read this is. It reads
+// them only if a sample came
 // since the last read: the clock has not moved since then, and stalls at
 // their verdict on every connection of a starved process must not read every
 // thread at each of their looks, with the CPU it lacks.
-func (s *sampler) owed() (owed time.Duration, heldNow bool, read uint64) {
+func (s *sampler) owed() (owed time.Duration, heldFrom, read uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.lastWall.After(s.waitWall) {
 		s.readWaits()
 	}
-	return s.waitOwed, s.heldNow, s.reads
+	return s.waitOwed, s.heldFrom, s.reads
 }
 
 // accrue is what a process could run in an interval iv between two samples
@@ -294,7 +310,7 @@ func (realSource) now() (time.Time, time.Duration, bool) {
 // procWaits is the process's threads' waits; the sampler's lock guards it.
 var procWaits threadWaits
 
-func (realSource) heldOff() (time.Duration, bool) { return procWaits.longest() }
+func (realSource) heldOff() (time.Duration, uint64) { return procWaits.longest() }
 
 // cpuLimit is ProcessCPULimit, read at most once per cpuLimitRefresh: reading
 // the cgroup files at every sample would cost a starved process the CPU it
@@ -381,32 +397,39 @@ func (m *Meter) Stalled() time.Duration {
 // (the process clock: sampler.owed) is asked at the verdict, not before it,
 // and the verdict waits for what it cannot know yet: the look that finds the
 // stall due only marks it, and a later look draws it, on a read of the
-// threads made since that finds none held off right now (sampler). So a
-// stall is acted on a look or two after it is due, once the process's
-// threads have had their turn.
+// threads made since that finds none of those held off when it was due held
+// off still (sampler). So a stall is acted on a look or two after it is due,
+// once the threads that were waiting then have had their turn.
 func (m *Meter) Expired() bool {
 	if m.Stalled() < m.grace {
 		m.due.Store(0)
 		return false
 	}
 	c, ok := m.clk.(interface {
-		owed() (time.Duration, bool, uint64)
+		owed() (time.Duration, uint64, uint64)
 	})
 	if !ok {
 		return true
 	}
-	owed, heldNow, read := c.owed()
+	owed, heldFrom, read := c.owed()
 	if m.Stalled()-owed < m.grace {
 		m.due.Store(0)
 		return false
 	}
-	if due := m.due.Load(); due == 0 || heldNow || read == due {
-		// Due at this look (or still held off, or no read since): look
-		// again on the next read.
+	due := m.due.Load()
+	if due == 0 {
+		// Due at this look: drawn at a later one.
 		m.due.Store(read)
 		return false
 	}
-	return true
+	// A thread first found held off at the read after the due one or before
+	// it may have been waiting when the stall was found due: it has not run
+	// since the read before that, and may have stopped just after it. Its
+	// wait shows once it has had its turn. A thread held off only from a
+	// later read on ran after the stall was due: what it waits now came
+	// after, and does not hold the verdict back, so an overload that holds
+	// some thread off at every read does not hold it off for ever.
+	return read != due && (heldFrom == 0 || heldFrom > due+1)
 }
 
 // Grace is the stall's bound.

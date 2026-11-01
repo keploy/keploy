@@ -32,6 +32,8 @@ const userHZ = 100
 type threadWaits struct {
 	last  map[string]threadStat // each thread at the last read
 	steal map[string]int64      // each CPU's steal at the last read, in USER_HZ ticks
+	reads uint64                // reads so far
+	held  map[string]uint64     // each thread held off at the last read: the read that first found it held, this time
 }
 
 // threadStat is a thread's account: its CPU time, run delay and times run
@@ -43,13 +45,15 @@ type threadStat struct {
 }
 
 // longest is the most any one thread was held off a CPU since the last call,
-// and whether a thread is held off now: runnable, and not moved since the last
-// call (no CPU time, no wait ended, not run). 0 and false where the threads
-// cannot be read (no /proc, a kernel without CONFIG_SCHED_INFO).
-func (w *threadWaits) longest() (time.Duration, bool) {
+// and whether a thread is held off now (runnable, and not moved since the
+// last call: no CPU time, no wait ended, not run): for how many calls in a
+// row, this one included, the one held off longest has been, 0 if none is.
+// 0 and 0 where the threads cannot be read (no /proc, a kernel without
+// CONFIG_SCHED_INFO).
+func (w *threadWaits) longest() (time.Duration, uint64) {
 	tasks, err := os.ReadDir(taskDir)
 	if err != nil {
-		return 0, false
+		return 0, 0
 	}
 	seen := make(map[string]threadStat, len(tasks))
 	for _, task := range tasks {
@@ -66,7 +70,9 @@ func (w *threadWaits) longest() (time.Duration, bool) {
 
 // account is longest's sum over the threads seen now and each CPU's steal,
 // against the last read; it keeps them for the next.
-func (w *threadWaits) account(seen map[string]threadStat, steal map[string]int64) (most time.Duration, held bool) {
+func (w *threadWaits) account(seen map[string]threadStat, steal map[string]int64) (most time.Duration, heldFor uint64) {
+	w.reads++
+	held := make(map[string]uint64)
 	for tid, st := range seen {
 		// A thread the last read did not see started since: all of its
 		// account is since then, and none of it is a wait in progress.
@@ -82,10 +88,17 @@ func (w *threadWaits) account(seen map[string]threadStat, steal map[string]int64
 			}
 		}
 		most = max(most, wait)
-		held = held || (known && !moved && st.runnable)
+		if known && !moved && st.runnable {
+			from, ok := w.held[tid]
+			if !ok {
+				from = w.reads
+			}
+			held[tid] = from
+			heldFor = max(heldFor, w.reads-from+1)
+		}
 	}
-	w.last, w.steal = seen, steal
-	return most, held
+	w.last, w.steal, w.held = seen, steal, held
+	return most, heldFor
 }
 
 // readThread reads a thread's account; false if it has exited or the kernel
