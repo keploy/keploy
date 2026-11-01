@@ -1148,12 +1148,25 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	// this one: two reads of one coarse cut, which share it only as the
 	// runs' timing falls. It goes on to step 7, whose check goes red where it
 	// was no read, and stays refused where 7 declines.
-	// A typed instant's places that hold its text come first, and with none
-	// it goes on to step 7 too; a text or number is held by its text alone.
+	// A cut of exactly a millisecond is no coarse cut: two reads do not
+	// share one as the runs' timing falls, so such a send stays a source.
+	// A typed instant's places that name its moment at its own cut come
+	// first (a BSON date's place holds its raw milliseconds, not the text
+	// its leaf writes), and with none it goes on to step 7 too; a text or
+	// number is held by its text alone.
 	coarse := copies(false)
 	const copiedWhy = ": the same moment, at a millisecond or coarser, was sent before the call in both runs and its own window does not hold it: one read, copied"
-	sameText := slices.DeleteFunc(slices.Clone(coarse), func(p evPlace) bool { return !asText(p.t.rec, r) || !asText(p.t.live, l) })
-	if len(sameText) > 0 && !earliest(sameText).clock {
+	exact := func(h, m moment) bool { return h.key == m.key && h.res == m.res }
+	sameText := slices.DeleteFunc(slices.Clone(coarse), func(p evPlace) bool {
+		if !c.text && c.rm != nil && c.lm != nil {
+			return dc.namedBy(p.t.rec, *c.rm, exact) == 0 || dc.namedBy(p.t.live, *c.lm, exact) == 0
+		}
+		return !asText(p.t.rec, r) || !asText(p.t.live, l)
+	})
+	clockSrc := func(src []evPlace) bool {
+		return earliest(src).clock && (c.rm == nil || c.lm == nil || max(c.rm.res, c.lm.res) > time.Millisecond)
+	}
+	if len(sameText) > 0 && !clockSrc(sameText) {
 		return dc.copied(path, at, n, c, sameText, copiedWhy)
 	}
 
@@ -1185,7 +1198,7 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 		}
 	}
 
-	if len(coarse) > 0 && (!earliest(coarse).clock || twoClockReads(coarse)) {
+	if len(coarse) > 0 && (!clockSrc(coarse) || twoClockReads(coarse)) {
 		return dc.copied(path, at, n, c, coarse, copiedWhy)
 	}
 
