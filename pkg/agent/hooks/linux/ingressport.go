@@ -15,6 +15,7 @@ import (
 	"go.uber.org/zap"
 
 	"go.keploy.io/server/v3/pkg/agent/hooks/structs"
+	"go.keploy.io/server/v3/utils/plaintcp"
 )
 
 // ingressHold holds an application's moved ports from inside its bind, so a
@@ -200,9 +201,7 @@ func (h *Hooks) loadIngressHold(cgroupPath string) (*ingressHold, error) {
 	// The park listener: plain TCP (a Go listener is MPTCP by default on a
 	// kernel with MPTCP, and a sockmap refuses one), dual-stack so one socket
 	// takes a moved port's IPv4 and IPv6 connections alike.
-	var lc net.ListenConfig
-	lc.SetMultipathTCP(false)
-	park, err := lc.Listen(context.Background(), "tcp", "[::]:0")
+	park, err := plaintcp.Listen(context.Background(), "tcp", "[::]:0")
 	if err != nil {
 		coll.Close()
 		return nil, fmt.Errorf("open the ingress park listener: %w", err)
