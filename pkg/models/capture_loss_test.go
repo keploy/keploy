@@ -148,8 +148,6 @@ func TestCaptureLossesTextShapesWhatItNames(t *testing.T) {
 	}
 }
 
-// Bytes written to a held connection that never reached the proxy are said in
-// their own words, with their count, never as an unnamed kind.
 // Bytes lost with a connection that ended are that connection's, charged to
 // one test: the test the count grew in, never a later one. The same counts,
 // with the test's mark past them, charge nothing, and a kind whose later calls
@@ -171,6 +169,8 @@ func TestAppBytesLostChargeOneTest(t *testing.T) {
 	}
 }
 
+// Bytes written to a held connection that never reached the proxy are said in
+// their own words, with their count, never as an unnamed kind.
 func TestCaptureLossesTextSaysAppBytesLost(t *testing.T) {
 	s := (CaptureLosses{{Kind: CaptureLossAppBytesLost, Count: 3, What: "from 127.0.0.1:40000"}}).Text()
 	for _, want := range []string{"capture incomplete: ", "on 3 connection(s)", "never reached the proxy", "(from 127.0.0.1:40000)"} {
