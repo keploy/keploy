@@ -54,7 +54,7 @@ Maîtrisez Keploy grâce à la **[Documentation Keploy](https://keploy.io/docs/)
 Intégrez Keploy en installant l'agent localement. Aucun changement de code n'est requis.
 
 ```shell
-curl --silent -O -L https://keploy.io/install.sh && source install.sh
+source /dev/stdin <<<"$(curl -fsSL https://keploy.io/install.sh)"
 ```
 
 ##  🎬 Enregistrer les cas de test
