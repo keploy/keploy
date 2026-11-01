@@ -212,8 +212,8 @@ func uuidAnswer(n, size int) (string, []string) {
 }
 
 // The index reads a 498 KB answer of about 400 UUIDs within its budget and
-// finds each id's 4-hex group as a word; past its budget it reads nothing
-// and says so.
+// finds each id's 4-hex group as a word; past its budget it still finds
+// them, reading the answer again, and keeps nothing of it.
 func TestReaderIndexBudget(t *testing.T) {
 	answer, ids := uuidAnswer(400, 498<<10)
 	x := newReaderIndex(nil)
@@ -235,14 +235,14 @@ func TestReaderIndexBudget(t *testing.T) {
 	defer func(b int64) { readerBudget = b }(readerBudget)
 	readerBudget = 4 << 10
 	small := newReaderIndex(nil)
-	if held, read := small.holdsWord(answer, strings.Split(ids[0], "-")[1]); held || read {
-		t.Errorf("past the budget: held %v read %v; want unread", held, read)
+	if held, read := small.holdsWord(answer, strings.Split(ids[0], "-")[1]); !held || !read {
+		t.Errorf("past the budget: held %v read %v; want held, as within it", held, read)
 	}
-	if !small.unread() {
-		t.Errorf("past the budget: the index does not report unread")
+	if small.unread() || small.used != 0 {
+		t.Errorf("past the budget: unread %v, %d bytes kept; want read, nothing kept", small.unread(), small.used)
 	}
-	if held, read := small.holdsWord("a short text 42", "42"); !held || !read {
-		t.Errorf("a text within what is left of the budget: held %v read %v", held, read)
+	if held, read := small.holdsWord("a short text 42", "42"); !held || !read || small.used == 0 {
+		t.Errorf("a text within what is left of the budget: held %v read %v, %d bytes kept", held, read, small.used)
 	}
 }
 
@@ -269,10 +269,64 @@ func BenchmarkReaderIndex498KB(b *testing.B) {
 	b.ReportMetric(float64(peak)/(1<<20), "heapMiB")
 }
 
+// RD8: past the budget a word is found by a scan of the text and its other
+// declared forms, exactly where main's word lists hold it, in each reading,
+// and no word list of the text is built: a recording past the budget costs
+// a scan per question, not a list of its every word.
+func TestReaderAWordPastTheBudgetIsScannedAsMainsListsHoldIt(t *testing.T) {
+	defer func(b int64, f func([]string) []map[string]bool) { readerBudget, tokensOfForms = b, f }(readerBudget, tokensOfForms)
+	texts := []string{
+		`{"id":"order-17","path":"uploads/17/a.png","q":"Order+17"}`,
+		`cart_42 and 43, caf\u00e9 é9 tok_a-b_c --x__`,
+		`{"jwt":"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.sig_-x"}`,
+		`a%2Fb%20c%3D17 dGVzdC12YWx1ZQ== x`,
+		`{"note":"{\"inner\":\"v-9\"}"} 17`,
+		`17`,
+		``,
+	}
+	lists := tokensOfForms
+	built := 0
+	tokensOfForms = func(f []string) []map[string]bool { built++; return lists(f) }
+	readerBudget = 1
+	for _, text := range texts {
+		want := lists(textForms(text))
+		words := map[string]bool{"": true, "zz": true, "17/a": true, "-": true, "a-b": true, "order-17": true}
+		for _, set := range want {
+			for w := range set {
+				words[w] = true
+				words[w[:len(w)/2]] = true
+			}
+		}
+		x := newReaderIndex(nil)
+		place := x.text(text)
+		for w := range words {
+			for r := range readings {
+				if held, read := place.wordIn(w, r); held != want[r][w] || !read {
+					t.Errorf("%q in %q, reading %d: held %v read %v; main's lists hold it: %v", w, text, r, held, read, want[r][w])
+				}
+			}
+			any := want[0][w] || want[1][w] || want[2][w]
+			if held, _ := place.holdsWord(w); held != any {
+				t.Errorf("%q in %q: holdsWord %v; main's lists hold it in some reading: %v", w, text, held, any)
+			}
+			if held, _ := place.holdsToken(tokenID, w); held != want[2][w] {
+				t.Errorf("%q in %q: an idByte token %v; main's idByte list holds it: %v", w, text, held, want[2][w])
+			}
+		}
+		if x.used != 0 || x.unread() {
+			t.Errorf("%q: %d bytes kept, unread %v; want nothing kept past the budget, and read", text, x.used, x.unread())
+		}
+	}
+	if built != 0 {
+		t.Errorf("past the budget the index built %d word lists; want a scan per question, and none", built)
+	}
+}
+
 // RD8: a call asking about many large earlier recordings, each handed over
 // and dropped in turn as keploy's store streams them, holds at once only
-// what fits its budget: a text past the budget is unread, and the index
-// keeps no byte of it.
+// what fits its budget and main's text cache (whose heap is about twice
+// what it counts, as set_budget_test.go allows): a text past the budget is
+// read, and answers as within it, and the index keeps no byte of it.
 func TestReaderIndexHoldsNoTextPastItsBudget(t *testing.T) {
 	defer func(b int64) { readerBudget = b }(readerBudget)
 	readerBudget = 1 << 20
@@ -287,16 +341,16 @@ func TestReaderIndexHoldsNoTextPastItsBudget(t *testing.T) {
 	before := heap()
 	for i := 0; i < n; i++ {
 		text := fmt.Sprintf("%07d ", i) + strings.Repeat("a", size-8)
-		if held, read := x.holdsWord(text, fmt.Sprintf("%07d", i)); held && !read {
-			t.Fatalf("recording %d: held but unread", i)
+		if held, read := x.holdsWord(text, fmt.Sprintf("%07d", i)); !held || !read {
+			t.Fatalf("recording %d: held %v read %v; want its own id held", i, held, read)
 		}
 	}
 	grew := int64(heap()) - int64(before)
 	runtime.KeepAlive(x)
-	if !x.unread() {
-		t.Fatalf("%d recordings of %d bytes against a %d byte budget: want unread", n, size, readerBudget)
+	if x.unread() || x.used > x.budget {
+		t.Fatalf("%d recordings of %d bytes against a %d byte budget: unread %v, %d bytes kept; want read, within the budget", n, size, readerBudget, x.unread(), x.used)
 	}
-	if grew > 8<<20 {
+	if grew > readerBudget+2*textBudget+8<<20 {
 		t.Fatalf("the index holds %d MiB after %d recordings of 1 MiB were asked about and dropped: it keeps texts past its %d MiB budget", grew>>20, n, readerBudget>>20)
 	}
 }
@@ -306,8 +360,8 @@ func TestReaderIndexHoldsNoTextPastItsBudget(t *testing.T) {
 // it, each read from the set's store and let go again, holds at once no more
 // than the index's budget and the one text it reads, however many handles
 // it keeps. A question the index answered within the budget is answered
-// again without reading the recording; past the budget it is unread, and so
-// is the text itself where it does not fit what is left of the budget.
+// again without reading the recording; past the budget it is read again
+// from the store, answers as within it, and is kept by no one.
 func TestReaderTextOfARecordingPinsNothingPastTheBudget(t *testing.T) {
 	defer func(b, r int64) { bodyBudget, readerBudget = b, r }(bodyBudget, readerBudget)
 	bodyBudget, readerBudget = 0, 5<<19
@@ -342,11 +396,11 @@ func TestReaderTextOfARecordingPinsNothingPastTheBudget(t *testing.T) {
 	}
 	grew := heap() - before
 	runtime.KeepAlive(places)
-	if grew > readerBudget+8<<20 {
+	if grew > readerBudget+2*textBudget+8<<20 {
 		t.Fatalf("the call holds %d MiB with a handle to each of %d recordings of 1 MiB: it keeps texts past its %d KiB budget", grew>>20, n, readerBudget>>10)
 	}
-	if !x.unread() {
-		t.Fatalf("%d recordings of 1 MiB against a %d KiB budget: want unread", n, readerBudget>>10)
+	if x.unread() || x.used > x.budget {
+		t.Fatalf("%d recordings of 1 MiB against a %d KiB budget: unread %v, %d bytes kept; want read, within the budget", n, readerBudget>>10, x.unread(), x.used)
 	}
 	if held, read := places[0].holdsWord(id(0)); !held || !read {
 		t.Fatalf("the first recording, within the budget: held %v read %v", held, read)
@@ -360,25 +414,25 @@ func TestReaderTextOfARecordingPinsNothingPastTheBudget(t *testing.T) {
 		t.Errorf("asking a recording within the budget again read it again (%d loads, want %d)", got, loads)
 	}
 	loads = dc.Loads()
-	if _, read := places[n-1].holdsWord(id(n - 1)); read {
-		t.Errorf("the last recording, past the budget, reads as read")
+	if held, read := places[n-1].holdsWord(id(n - 1)); !held || !read {
+		t.Errorf("the last recording, past the budget: held %v read %v; want its own id held", held, read)
 	}
-	if _, _, read := places[n-1].holdsMoment(moment{}); read {
-		t.Errorf("the last recording's instants, past the budget, read as read")
+	if _, _, read := places[n-1].holdsMoment(moment{}); !read {
+		t.Errorf("the last recording's instants, past the budget, read as unread")
 	}
-	if got := dc.Loads(); got != loads {
-		t.Errorf("asking a recording past the budget again loaded it again (%d loads, want %d)", got, loads)
+	if got := dc.Loads(); got <= loads {
+		t.Errorf("a recording past the budget answered without reading it again (%d loads, want more than %d): something keeps its text", got, loads)
 	}
 	if s, ok := places[0].textNow(); !ok || s != raws[0].Text() {
 		t.Errorf("the first recording's text: ok %v, the payload's %v", ok, s == raws[0].Text())
 	}
-	if _, ok := places[n-1].textNow(); ok {
-		t.Errorf("the last recording's text, larger than what is left of the budget, reads as read")
+	if s, ok := places[n-1].textNow(); !ok || s != raws[n-1].Text() {
+		t.Errorf("the last recording's text, past the budget: ok %v, the payload's %v", ok, s == raws[n-1].Text())
 	}
 	// A recording keploy could not read holds no word: unread, never
 	// "not held".
-	if _, read := x.textOf(Raw{mock: "mock-unread"}).holdsWord("w"); read {
-		t.Errorf("a recording keploy could not read reads as read")
+	if _, read := x.textOf(Raw{mock: "mock-unread"}).holdsWord("w"); read || !x.unread() {
+		t.Errorf("a recording keploy could not read: read %v, index unread %v", read, x.unread())
 	}
 }
 
