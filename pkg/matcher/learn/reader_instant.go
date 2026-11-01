@@ -81,15 +81,84 @@ func spanAt(spans []instant, at [2]int) int {
 	return -1
 }
 
+// spanPartners pairs R's instants (rSpans) with F's (lSpans): the two a
+// paired word lies in, and, in a stretch of unequal counts, the instants
+// R's moved words lie in with those F's lie in, by position, where they
+// are as many. An instant given two partners, or a paired word whose other
+// run's word lies in none, keeps no partner (-1).
+func (rd *textReading) spanPartners(rSpans, lSpans []instant) (rp, lp map[int]int) {
+	rp, lp = map[int]int{}, map[int]int{}
+	add := func(ri, li int) {
+		if v, ok := rp[ri]; ri >= 0 && (!ok || v == li) {
+			rp[ri] = li
+		} else if ri >= 0 {
+			rp[ri] = -1
+		}
+		if v, ok := lp[li]; li >= 0 && (!ok || v == ri) {
+			lp[li] = ri
+		} else if li >= 0 {
+			lp[li] = -1
+		}
+	}
+	for _, w := range rd.Words {
+		if w.RecIdx >= 0 && w.LiveIdx >= 0 {
+			add(spanAt(rSpans, w.RecAt), spanAt(lSpans, w.LiveAt))
+		}
+	}
+	for _, st := range rd.Stretches {
+		if st.Shape != stretchUnequal {
+			continue
+		}
+		rs := spansOfWords(rSpans, rd.RecWords, st.Rec)
+		ls := spansOfWords(lSpans, rd.LiveWords, st.Live)
+		if len(rs) != len(ls) {
+			continue
+		}
+		for k := range rs {
+			add(rs[k], ls[k])
+		}
+	}
+	return rp, lp
+}
+
+// spansOfWords are the instants of spans that the words [from, to) of a
+// run lie in, each once, in order.
+func spansOfWords(spans []instant, words [][2]int, r [2]int) []int {
+	var out []int
+	for i := r[0]; i < r[1]; i++ {
+		if k := spanAt(spans, words[i]); k >= 0 && (len(out) == 0 || out[len(out)-1] != k) {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+// partner is m[k] where k's partner names k back (the other map), -1
+// otherwise.
+func partner(m, back map[int]int, k int) int {
+	if v, ok := m[k]; ok && v >= 0 && back[v] == k {
+		return v
+	}
+	return -1
+}
+
 // readInstants sets each changed word's instant: the instant of rSpans and
 // of lSpans (instantSpans of each run) that holds it, one instantWord per
 // pair of them, and a number of an epoch's length in either run, parsed or
-// not.
+// not. A word only one run has takes its instant's partner in the other
+// run (spanPartners).
 func (rd *textReading) readInstants(rSpans, lSpans []instant) {
 	byPair := map[[2]int]*instantWord{}
+	rp, lp := rd.spanPartners(rSpans, lSpans)
 	for k := range rd.Words {
 		w := &rd.Words[k]
 		ri, li := spanAt(rSpans, w.RecAt), spanAt(lSpans, w.LiveAt)
+		if w.LiveIdx < 0 && ri >= 0 {
+			li = partner(rp, lp, ri)
+		}
+		if w.RecIdx < 0 && li >= 0 {
+			ri = partner(lp, rp, li)
+		}
 		num := epochDigits(w.Rec) || epochDigits(w.Live)
 		if ri < 0 && li < 0 && !num {
 			continue
