@@ -105,8 +105,10 @@ func TestUnderTheSwitchEachTestCaseIsServedExactly(t *testing.T) {
 				}
 				got = append(got, *p.Exact)
 			}
+			// The set carries no recordedWith: s12-routing, so its staging
+			// says the record lacks proven routing (models.ExactServing.Unrouted).
 			want := []models.ExactServing{
-				{Stage: true, Pool: []string{"mock-boot"}},
+				{Stage: true, Pool: []string{"mock-boot"}, Unrouted: models.UnroutedUnmarked},
 				{Test: "test-1", Owned: []string{"mock-a"}}, {},
 				{Test: "test-2"}, {},
 			}
