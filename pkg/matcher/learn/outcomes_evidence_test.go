@@ -2,6 +2,7 @@ package learn
 
 import (
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -221,12 +222,13 @@ func TestOutcomeARecordingFServedWithNoViewStatedLeavesTheWordUnknown(t *testing
 // recorded where round F gave it so; where F's serve of it was told with a
 // view of its own (kept under the proven switch), F's moment stands in what
 // F gave there, so the instant is refused naming the edit too, where main
-// learns a Clock.
+// learns a Clock. All at a cut finer than a millisecond: at one that coarse,
+// a moment its call's own window holds is that read (the row below).
 func TestOutcomeAnInstantAnAnswerOutsideTheScopeGaveIsRefusedNamingTheEdit(t *testing.T) {
 	const p = "body.seenAt"
 	fAt := oAt.Add(time.Hour)
-	rRead, fRead := oAt.Add(-40*time.Millisecond), fAt.Add(-40*time.Millisecond)
-	rec, live := iMs(rRead), iMs(fRead)
+	rRead, fRead := oAt.Add(-40*time.Millisecond+17*time.Microsecond), fAt.Add(-40*time.Millisecond+17*time.Microsecond)
+	rec, live := iMicro(rRead), iMicro(fRead)
 	ans := func(v string) Raw {
 		return oPg("mock-41", 30*time.Millisecond, "SELECT now()", []models.PostgresV3Cells{{{Value: v}}}, "SELECT 1")
 	}
@@ -568,5 +570,48 @@ func TestOutcomeAnExchangeWithNoLeafAndNoPayloadIsUnread(t *testing.T) {
 		e := Earlier{Mock: "mock-11", At: oAt.Add(-time.Second), Payload: payload}
 		d := oWord(t, Decide(iCall("body.slot", String, "slot-7", "slot-9", oAt, oAt, nil, []Earlier{e}, nil)), "7", "9")
 		oRefused(t, name, d, RefusalUnread, "mock-11")
+	}
+}
+
+// An audit's second, its call's own read of the clock, that an earlier
+// test's answer also holds: a fast recording ran several tests in one
+// second, so another test's document stamped in it is read back before the
+// call. That share flips with the runs' timing. At a millisecond or coarser,
+// where the call's own window holds the read, it is that read, a Clock;
+// where its window does not, or the answer holds the moment at a cut finer
+// than a millisecond (a pick from it, not two stamps in one cut), it stays
+// refused naming the edit.
+func TestOutcomeASecondAnotherTestsAnswerAlsoHoldsIsTheCallsOwnRead(t *testing.T) {
+	const p = "body.docs.msgs.0.auditedAt"
+	fAt := oAt.Add(time.Hour)
+	rRead, fRead := oAt.Add(-40*time.Millisecond), fAt.Add(-40*time.Millisecond)
+	sec := func(x time.Time) string { return strconv.FormatInt(x.Unix(), 10) }
+	ans := func(v string) Raw {
+		return oPg("mock-1200", 30*time.Millisecond, "SELECT created_at", []models.PostgresV3Cells{{{Value: v}}}, "SELECT 1")
+	}
+	forms := func(rec, live string) []struct {
+		what string
+		x    Raw
+	} {
+		served := func() Raw { return ans(rec).ServedAs(3).ServedLive(ans(live)) }
+		return []struct {
+			what string
+			x    Raw
+		}{
+			{"another test's answer", served().ServedInAnOlderTest()},
+			{"a recording outside the test", served().OfAnotherTest()},
+			{"a recording outside the test, F's view not stated", ans(rec).ServedAs(3).OfAnotherTest()},
+		}
+	}
+	own := iWin(oAt, fAt, 100*time.Millisecond)
+	far := iWin(oAt.Add(5*time.Second), fAt.Add(5*time.Second), 100*time.Millisecond)
+	rec, live := sec(rRead), sec(fRead)
+	for _, c := range forms(rec, live) {
+		iClock(t, "a second "+c.what+" also holds", oWord(t, Decide(iCall(p, Number, rec, live, oAt, fAt, own, nil, []Raw{c.x})), rec, live))
+		oRefused(t, "a second "+c.what+" holds, its window does not", oWord(t, Decide(iCall(p, Number, rec, live, oAt, fAt, far, nil, []Raw{c.x})), rec, live), "another-scope", "mock-1200")
+	}
+	rec, live = iMicro(rRead), iMicro(fRead)
+	for _, c := range forms(rec, live) {
+		oRefused(t, "a microsecond "+c.what+" holds", oWord(t, Decide(iCall(p, String, rec, live, oAt, fAt, own, nil, []Raw{c.x})), rec, live), "another-scope", "mock-1200")
 	}
 }
