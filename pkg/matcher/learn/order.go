@@ -368,7 +368,7 @@ func (dc *decider) word(path string, bare variables.Address, rec, live, text str
 			rule = "bound to " + first.name + ", the earliest place before the call that holds " + strconv.Quote(w.Rec) + " as recorded and " +
 				strconv.Quote(w.Live) + " as round F gave it, each run's text read whole, not field by field"
 		}
-		echo, unnamed := dc.readBack(path, at, w, rec)
+		echo, unnamed := dc.readBack(path, at, w, rec, false)
 		if r, no := dc.unanswerable(path, bare, rec, live, echo, unnamed); no {
 			return r
 		}
@@ -406,7 +406,7 @@ func (dc *decider) word(path string, bare variables.Address, rec, live, text str
 	if d, ok := dc.atWord(path, bare, n, w, rec, live); !ok {
 		return d
 	}
-	echo, unnamed := dc.echoes(w.Rec)
+	echo, unnamed := dc.readBack(path, at, w, rec, true)
 	if r, no := dc.unanswerable(path, bare, rec, live, echo, unnamed); no {
 		return r
 	}
@@ -414,7 +414,7 @@ func (dc *decider) word(path string, bare variables.Address, rec, live, text str
 	if len(echo) > 0 {
 		// The answer rewritten at replay is part of what keploy learned:
 		// the line names it, as a Value's read-back line does.
-		rule += "; answered at " + addrList(echo) + ", where the call's answer holds " + strconv.Quote(w.Rec) + " as recorded"
+		rule += "; answered at " + addrList(echo) + ", where the call's answer holds " + strconv.Quote(rec) + " whole as recorded"
 	}
 	d := dc.learned(path, at, n, w.Rec, w.Live, OutcomeFresh, rule, nil)
 	d.Echo = echo
@@ -1055,29 +1055,18 @@ func (dc *decider) instantEchoed(c changedInstant) string {
 	return ""
 }
 
-// echoes are the call's answer places that hold v (the recorded value),
-// each word of an answer leaf that is v.
-func (dc *decider) echoes(v string) ([]variables.Address, string) {
-	return dc.answerAt(func(l Leaf) (out []int) {
-		for i, w := range variables.Words(l.Value) {
-			if l.Value[w[0]:w[1]] == v {
-				out = append(out, i)
-			}
-		}
-		return out
-	})
-}
-
-// readBack is where the call's own answer reads back w, a word of a longer
-// value (the request leaf at path, recorded rec, at at's word, through no
-// decode step): the same word of every answer leaf whose recorded text is
-// rec whole (a find by a key its cursor echoes). A longer or shorter text
-// that holds the word is served as recorded: a word that short may stand
-// there by chance. A whole value's echo is the adapter's, as main answers
-// it.
-func (dc *decider) readBack(path string, at variables.Address, w readWord, rec string) ([]variables.Address, string) {
+// readBack is where the call's own answer reads back w, a word of the
+// request leaf at path (recorded rec, at at's word, through no decode
+// step): the same word of every answer leaf whose recorded text is rec
+// whole (a find by a key its cursor echoes). Every other answer text that
+// holds the word, longer or shorter (a count, a date whose minute it is),
+// is served as recorded: a word that short may stand there by chance, and
+// a test that reads it goes red at replay, never green by a rewrite. One
+// rule for a Value and a fresh word; withWhole: a fresh word's whole value
+// too (a Value's is the adapter's echo, as main answers it).
+func (dc *decider) readBack(path string, at variables.Address, w readWord, rec string, withWhole bool) ([]variables.Address, string) {
 	r := dc.in.Rec.Leaves[path]
-	if at.Word < 0 || len(at.Steps) > 0 || w.Rec == rec {
+	if at.Word < 0 || len(at.Steps) > 0 || w.Rec == rec && !withWhole {
 		return nil, ""
 	}
 	return dc.answerAt(func(l Leaf) []int {
