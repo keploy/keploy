@@ -706,7 +706,7 @@ func (p *Proxy) pairLost(pc *pairedConn, msg string, fields ...zap.Field) {
 	p.losses.Add(models.CaptureLossAppBytesLost, "from "+pc.app.String())
 	p.logger.Warn(msg, append([]zap.Field{
 		zap.String("from", pc.app.String()),
-		zap.String("next_step", "keploy cannot vouch for the calls of the test that was open (under the proven switch, it and every later test are not verified); check the agent's log for why the connection ended"),
+		zap.String("next_step", "keploy cannot vouch for the calls of the test that was open (under the proven switch, that test is not verified); check the agent's log for why the connection ended"),
 	}, fields...)...)
 }
 

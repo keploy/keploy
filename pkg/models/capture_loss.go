@@ -563,7 +563,11 @@ var ErrCaptureLossesUnsupported = errors.New("this agent cannot tell whether it 
 //     charged but for the one place listenerDropWhere names;
 //   - one call's bytes the capture skipped, could not read, or stopped
 //     recording (kernel_skipped_call, capture_unread,
-//     connection_unrecorded, counted for each piece the connection carries).
+//     connection_unrecorded, counted for each piece the connection carries);
+//   - bytes the application wrote to a connection that ended before they
+//     reached the proxy (app_bytes_lost), counted once for the connection:
+//     it is over, so no later call goes with it, and the application's next
+//     call, on another connection, is captured or lost on its own.
 //
 // One between two tests is the next test's, as a miss between tests is;
 // one before a test process's claim, or after the run's last test, is the
@@ -572,8 +576,8 @@ var ErrCaptureLossesUnsupported = errors.New("this agent cannot tell whether it 
 // (pid_map_refused, pid_map_refused_excluded, process_unclassified,
 // app_subtree_untracked); a connection keploy stopped parsing, failed
 // serving, or dropped bytes of, whose later calls may go with it
-// (starttls_failed, parser_stalled, parser_panicked, capture_dropped,
-// app_bytes_lost); a connection that never reached keploy's proxy whole, so
+// (starttls_failed, parser_stalled, parser_panicked, capture_dropped); a
+// connection that never reached keploy's proxy whole, so
 // that no call of it was read and which test made one cannot be told
 // (app_connection_lost, unpaired_connection); what keploy cannot capture at
 // all (unix_socket, unix_unseen, udp_reply); the kernel's count of skipped
@@ -581,7 +585,7 @@ var ErrCaptureLossesUnsupported = errors.New("this agent cannot tell whether it 
 // build does not know. (CaptureLossRealUncaptured is a test's own too, but never in the
 // agent's counts: the agent charges it to its test itself.)
 func (k CaptureLossKind) PerTest() bool {
-	return k == CaptureLossTLSAbort || k == CaptureLossTLSAbandoned || k == CaptureLossServerFirst || k == CaptureLossRefusedAtAccept || k == CaptureLossContainerUnread || k == CaptureLossListenerDropped || k == CaptureLossKernelSkipCall || k == CaptureLossUnread || k == CaptureLossUnrecorded
+	return k == CaptureLossTLSAbort || k == CaptureLossTLSAbandoned || k == CaptureLossServerFirst || k == CaptureLossRefusedAtAccept || k == CaptureLossContainerUnread || k == CaptureLossListenerDropped || k == CaptureLossKernelSkipCall || k == CaptureLossUnread || k == CaptureLossUnrecorded || k == CaptureLossAppBytesLost
 }
 
 // Charged is what a test is charged from l, the counts as it ends: each kind
