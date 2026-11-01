@@ -144,9 +144,14 @@ func TestAnAppHeldFromStartingIsWaitedForPastTheBudget(t *testing.T) {
 	if got := served.Load(); got != 1 {
 		t.Fatalf("the app served the test's request %d times; want 1, once it answered", got)
 	}
+	// Probes 2 and 4 of the 5 the app does not answer: one line every
+	// appSayEvery (2) unanswered probes, not once.
 	said := logs.FilterMessageSnippet("still waiting for the app to answer").All()
-	if len(said) == 0 {
-		t.Fatal("the held wait never said it still waits")
+	if len(said) < 2 {
+		t.Fatalf("the held wait said %d times that it still waits; want it said every 2 of the 5 unanswered probes", len(said))
+	}
+	if !strings.Contains(said[0].Message, "ServiceURL (--app-url)") {
+		t.Fatalf("the line that says it still waits does not name the ServiceURL as the other cause: %q", said[0].Message)
 	}
 	if f, ok := said[0].ContextMap()["lastProbeError"]; !ok || f == "" {
 		t.Fatalf("the line that says it still waits names no probe error: %v", said[0].ContextMap())

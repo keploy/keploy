@@ -1009,7 +1009,7 @@ func waitForApp(ctx context.Context, serviceURL string, timeout time.Duration, e
 			}
 			unanswered++
 			if ended != nil && unanswered%appSayEvery == 0 {
-				logger.Info("still waiting for the app to answer before running the test; its run has not ended (a compose stack may still be starting the app's dependencies)",
+				logger.Info("still waiting for the app to answer before running the test; its run has not ended: a compose stack may still be starting the app's dependencies, or the app listens elsewhere than the ServiceURL (--app-url) names",
 					zap.String("addr", addr), zap.Int("unansweredProbes", unanswered), zap.NamedError("lastProbeError", lastErr))
 			}
 		}
