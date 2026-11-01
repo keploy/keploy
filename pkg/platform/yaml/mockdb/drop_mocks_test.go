@@ -80,3 +80,25 @@ func TestDropMocks_NoNamesWritesNothing(t *testing.T) {
 		t.Fatalf("a set with no mock file: %v, %v; want nothing", dropped, err)
 	}
 }
+
+// A named connection failure is never deleted, in every format: the gob prune
+// asks the keep rule (yaml and json copy them through unread).
+func TestDropMocks_KeepsANamedConnectionFailure(t *testing.T) {
+	for _, format := range []string{"yaml", "json", "gob"} {
+		t.Run(format, func(t *testing.T) {
+			dir := t.TempDir()
+			writePruneFixture(t, dir, format, []*models.Mock{
+				cfMock(0, models.ConnFailurePhaseConnect, models.ConnFailureRefused),
+				dropTestMock(1, map[string]string{"type": "mocks", models.MetadataLifetimeKey: models.MetadataLifetimePerTest}),
+			}, "")
+			ys := NewWithFormat(zap.NewNop(), dir, "mocks", formatOf(format))
+			dropped, err := ys.DropMocks(context.Background(), pruneSet, []string{"mock-0", "mock-1"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(dropped, []string{"mock-1"}) {
+				t.Fatalf("DropMocks deleted %v; want only mock-1, never the connection failure mock-0", dropped)
+			}
+		})
+	}
+}

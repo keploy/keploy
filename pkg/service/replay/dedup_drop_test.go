@@ -83,6 +83,19 @@ func TestPlanDuplicateDrops(t *testing.T) {
 		t.Errorf("with m1 deleted, lines dropped = %v, want [d1]", got)
 	}
 
+	// A mock a kept test's line names stays, though this run only a duplicate
+	// consumed it: the kept test did not call it this time, and still needs it.
+	kept := duplicateDropIn{
+		dups:      []string{"d"},
+		consumers: map[string][]string{"mX": {"d"}},
+		consumed:  map[string]models.MockState{"mX": perTestMockState("mX")},
+		run:       &models.Mapping{TestCases: []models.MappedTestCase{{ID: "d", Mocks: mockEntries("mX")}}},
+		disk:      &models.Mapping{TestCases: []models.MappedTestCase{{ID: "k", Mocks: mockEntries("mX")}}},
+	}
+	if p := planDuplicateDrops(kept); len(p.mocks) != 0 || !reflect.DeepEqual(p.tests, []string{"d"}) {
+		t.Errorf("kept test's mock: delete %v, lines %v; want mX kept and d's line free to go", p.mocks, p.tests)
+	}
+
 	// A duplicate that keeps its line keeps every mock it names, and so the
 	// line of another duplicate that names one of them.
 	chain := duplicateDropIn{
