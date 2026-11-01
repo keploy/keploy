@@ -317,12 +317,12 @@ func (dc *decider) oneToken(path string, bare variables.Address, rec, live strin
 	}
 	whole := readWord{At: bare, Rec: rec, Live: live, Tokens: []wholeToken{{Kind: tokenB64, Rec: rec, Live: live}}}
 	shown := slices.ContainsFunc(dc.ps, func(p evPlace) bool { return tokenShown(p, whole) })
-	for _, w := range rd.Words {
-		for _, p := range dc.ps {
-			if !shown && (wordBits(w.Rec) >= chanceBits && evHolds(p.t.rec, w.Rec) || wordBits(w.Live) >= chanceBits && evHolds(p.t.live, w.Live)) {
-				return Decision{}, false
-			}
-		}
+	if !shown && slices.ContainsFunc(rd.Words, func(w readWord) bool {
+		return slices.ContainsFunc(dc.ps, func(p evPlace) bool {
+			return wordBits(w.Rec) >= chanceBits && evHolds(p.t.rec, w.Rec) || wordBits(w.Live) >= chanceBits && evHolds(p.t.live, w.Live)
+		})
+	}) {
+		return Decision{}, false
 	}
 	return dc.word(path, bare, rec, live, rec, whole, false), true
 }
@@ -357,14 +357,11 @@ func randomToken(rec, live string) bool {
 // as unknown where a place keploy reads holds a word of what changed (it
 // may be a source of part of it), else as a changed shape.
 func (dc *decider) unpaired(path string, at variables.Address, rec, live string, rd textReading) Decision {
-	var held []evPlace
-	for _, p := range dc.ps {
-		if slices.ContainsFunc(rd.Words, func(w readWord) bool {
+	held := slices.DeleteFunc(slices.Clone(dc.ps), func(p evPlace) bool {
+		return !slices.ContainsFunc(rd.Words, func(w readWord) bool {
 			return w.Rec != "" && evHolds(p.t.rec, w.Rec) || w.Live != "" && evHolds(p.t.live, w.Live)
-		}) {
-			held = append(held, p)
-		}
-	}
+		})
+	})
 	if len(held) == 0 {
 		return dc.refuse(path, at, -1, rec, live, RefusalChangedShape, "a word was added or dropped", nil, dc.fieldNoise(path))
 	}
@@ -522,12 +519,9 @@ func (dc *decider) word(path string, bare variables.Address, rec, live, text str
 			Edit{Kind: EditFixApp}, dc.fieldNoise(path), Edit{Kind: EditGive, Name: lastSegment(path)})
 	case len(unknown) > 0:
 		p := unknown[0]
-		why := p.why
-		switch {
-		case why == "" && (p.fMay || len(p.views) > 0):
+		why := cmp.Or(p.why, "both values hold it, or only part of a word")
+		if p.why == "" && (p.fMay || len(p.views) > 0) {
 			why = "round F served it and keploy cannot tell what it gave there"
-		case why == "":
-			why = "both values hold it, or only part of a word"
 		}
 		return dc.refuse(path, at, n, w.Rec, w.Live, RefusalUnknown,
 			"keploy cannot tell what round F gave at "+p.name+" before this call ("+why+")", names(unknown),
@@ -770,29 +764,25 @@ func (dc *decider) inZone(m moment) (moment, bool) {
 // millisecond, or by the exact text of a number that does not parse.
 func (dc *decider) holds(p evPlace, t *readerText, w string, m *moment, byText bool) (held, fine, read bool) {
 	h, ok := t.holdsWord(w)
-	if !ok {
-		return false, false, false
-	}
 	// An instant of several words (a date and a time) stands in a text
 	// as those words in order.
-	if !h && len(variables.Words(w)) > 1 {
-		text, ok := t.textNow()
-		if !ok {
-			return false, false, false
-		}
+	if ok && !h && len(variables.Words(w)) > 1 {
+		var text string
+		text, ok = t.textNow()
 		h = strings.Contains(text, w)
+	}
+	if !ok {
+		return false, false, false
 	}
 	if m == nil || p.gave {
 		return h, h && byText, true
 	}
 	hm, fm, ok := t.holdsMoment(*m)
+	if z, zok := dc.inZone(*m); ok && !hm && zok {
+		hm, fm, ok = t.holdsMoment(z)
+	}
 	if !ok {
 		return false, false, false
-	}
-	if z, zok := dc.inZone(*m); !hm && zok {
-		if hm, fm, ok = t.holdsMoment(z); !ok {
-			return false, false, false
-		}
 	}
 	// A text with escapes is read as it opens: as written, the date alone
 	// of a percent-encoded time reads as a coarse instant, no hold of that
@@ -979,12 +969,7 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 		}
 	}
 	if c.rm != nil && c.lm != nil {
-		var reqs []Earlier
-		for _, e := range dc.in.Earlier {
-			if e.Given && !e.Gave && e.Unread == "" {
-				reqs = append(reqs, e)
-			}
-		}
+		reqs := slices.DeleteFunc(slices.Clone(dc.in.Earlier), func(e Earlier) bool { return !e.Given || e.Gave || e.Unread != "" })
 		if where, _ := dc.dr.requestHolds([]moment{*c.rm}, []moment{*c.lm}, reqs); where != "" {
 			return dc.refuse(path, at, n, r, l, RefusalPick,
 				"the recorded moment stands in the test case at "+where+", and no cut there gives round F's", []string{where}, dc.wordNoise(path, n))
@@ -1144,16 +1129,14 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 		// plain read, and learned plain it fails nearly every replay.
 		if off, cutWhy, inWindow = clockInWindow(path, c.ri, c.li, dc.in.Window, zone); !inWindow && cutWhy == "" && dc.in.Window.holdsRead(*c.rm, *c.lm, zone) {
 			off, cutWhy, inWindow = models.ClockOffset{Res: max(c.rm.res, c.lm.res)}, "", true
-		} else {
-			if inWindow {
-				if g, uncompared := dc.offsetGuard(path, off, max(c.rm.res, c.lm.res), dc.in.Window); uncompared && copies(false) == nil {
-					if gaveRefusal != nil {
-						return *gaveRefusal
-					}
-					return dc.refuse(path, at, n, r, l, RefusalCannotCheck, g, nil, dc.fieldNoise(path))
-				} else if g != "" {
-					off, cutWhy, guardWhy, inWindow = models.ClockOffset{}, "", g, false
+		} else if inWindow {
+			if g, uncompared := dc.offsetGuard(path, off, max(c.rm.res, c.lm.res), dc.in.Window); uncompared && copies(false) == nil {
+				if gaveRefusal != nil {
+					return *gaveRefusal
 				}
+				return dc.refuse(path, at, n, r, l, RefusalCannotCheck, g, nil, dc.fieldNoise(path))
+			} else if g != "" {
+				off, cutWhy, guardWhy, inWindow = models.ClockOffset{}, "", g, false
 			}
 		}
 	}
@@ -1327,10 +1310,8 @@ func madeSinceBegin(w *Window, recBegan time.Time, c changedInstant, zone *time.
 		if !run.m.zoned && zone != nil {
 			at = append(at, wallIn(run.m.key.at, zone))
 		}
-		for _, t := range at {
-			if t.Add(max(run.m.res, time.Nanosecond)).After(run.began) {
-				return run.name + " lies past its test's begin"
-			}
+		if slices.ContainsFunc(at, func(t time.Time) bool { return t.Add(max(run.m.res, time.Nanosecond)).After(run.began) }) {
+			return run.name + " lies past its test's begin"
 		}
 	}
 	return ""
@@ -1497,11 +1478,9 @@ func twoClockReads(src []evPlace) bool {
 // read, and the word is refused naming both.
 func (dc *decider) copied(path string, at variables.Address, n int, c changedInstant, src []evPlace, rule string) Decision {
 	first := earliest(src)
-	for _, p := range src {
-		if p.clock && p.name != first.name {
-			return dc.refuse(path, at, n, c.r, c.l, RefusalTwoSources,
-				"the same moment was sent at "+first.name+" and "+p.name+", two separate reads", []string{first.name, p.name}, dc.wordNoise(path, n))
-		}
+	if i := slices.IndexFunc(src, func(p evPlace) bool { return p.clock && p.name != first.name }); i >= 0 {
+		return dc.refuse(path, at, n, c.r, c.l, RefusalTwoSources,
+			"the same moment was sent at "+first.name+" and "+src[i].name+", two separate reads", []string{first.name, src[i].name}, dc.wordNoise(path, n))
 	}
 	return dc.bound(path, at, n, c, src, rule)
 }
@@ -1510,8 +1489,7 @@ func (dc *decider) copied(path string, at variables.Address, n int, c changedIns
 // the recorded instant, by its text or its moment; "" where none does.
 func (dc *decider) instantEchoed(c changedInstant) string {
 	for _, a := range dc.in.Resp {
-		p := evPlace{}
-		if h, _, _ := dc.holds(p, dc.x.text(a.Value), c.r, c.rm, c.byText); h {
+		if h, _, _ := dc.holds(evPlace{}, dc.x.text(a.Value), c.r, c.rm, c.byText); h {
 			return a.Path
 		}
 	}
