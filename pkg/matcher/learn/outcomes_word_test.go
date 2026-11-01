@@ -1019,15 +1019,18 @@ func oCarried(mock, field, r, f string, before, answered time.Duration, first in
 		Seen: []Seen{{Side: Request, Leaf: oText(field, r), Live: f, Place: field}}}
 }
 
-// Serve order tells which candidate the application took a word from only
-// where the candidates disagree. Where every candidate holds the recorded
-// word in the recording and round F's word in round F, each gives the same
-// pair: an id the application sent on two calls that were in flight
-// together, or that round F served in another order, is bound at the
-// earliest, as main binds it, and replay checks it there. Where a candidate
-// disagrees (it kept the recorded word), the order still decides, and the
-// word stays refused.
-func TestOutcomeAWordEveryCandidateShowsIsBoundWhateverTheirOrder(t *testing.T) {
+// Serve order tells which candidate the application took a word from, and
+// that decides only where no place shows the pair. A place before the call
+// that holds the recorded word in the recording and round F's word in round
+// F, at one field, proves the link, in whatever order the others came: an
+// id the application sent on two calls that were in flight together, or
+// that round F served in another order, is bound at the earliest, as main
+// binds it. A candidate that kept the recorded word changes nothing: it is
+// not where F's word came from, and a wrong bind goes red at replay, which
+// checks the bound value at every use. With no place showing the pair the
+// order still decides, and the word stays refused
+// (TestOutcomeAWordCopiedFromAnswersGivenInAnotherOrderIsUnknown).
+func TestOutcomeAWordOnePlaceShowsIsBoundWhateverTheOrder(t *testing.T) {
 	const r, f = "78b0ada8", "46a13c03"
 	first := oCarried("mock-1", "body.docs.0.appId", r, f, 2*time.Second, time.Second, 1)
 	second := oCarried("mock-2", "body.filter.appId", r, f, 1500*time.Millisecond, 100*time.Millisecond, 2)
@@ -1035,6 +1038,7 @@ func TestOutcomeAWordEveryCandidateShowsIsBoundWhateverTheirOrder(t *testing.T) 
 	answeredFirst := oCarried("mock-1", "body.docs.0.appId", r, f, 2*time.Second, 100*time.Millisecond, 2)
 	again := first
 	again.Payload = first.Payload.ServedIn(1, 3)
+	kept := oCarried("mock-3", "body.note", r, r, 1800*time.Millisecond, 100*time.Millisecond, 3)
 	for _, tc := range []struct {
 		name    string
 		earlier []Earlier
@@ -1042,17 +1046,50 @@ func TestOutcomeAWordEveryCandidateShowsIsBoundWhateverTheirOrder(t *testing.T) 
 		{"their requests were in flight together", []Earlier{first, second}},
 		{"round F served them in another order", []Earlier{answeredFirst, swapped}},
 		{"round F served one of them twice", []Earlier{again, second}},
+		{"a candidate kept the recorded word, in flight with the others", []Earlier{first, second, kept}},
+		{"a candidate kept the recorded word, round F served them in another order", []Earlier{answeredFirst, swapped, kept}},
 	} {
 		d := oWord(t, Decide(oInput("body.cmd.filter.appId", "id "+r, "id "+f, tc.earlier, nil)), r, f)
 		if d.Outcome != OutcomeValue || d.From.Mock != tc.earlier[0].Mock {
 			t.Errorf("%s: %s; want a Value bound at the earliest place", tc.name, oDescribe([]Decision{d}))
 		}
 	}
-	// One candidate kept the recorded word: it is no copy of the pair, so
-	// which of them the application had last still matters.
-	kept := oCarried("mock-3", "body.note", r, r, 1800*time.Millisecond, 100*time.Millisecond, 3)
-	d := oWord(t, Decide(oInput("body.cmd.filter.appId", "id "+r, "id "+f, []Earlier{first, second, kept}, nil)), r, f)
-	oRefused(t, "a candidate that kept the recorded word, in flight with the others", d, RefusalUnknown, "in flight together")
+	// No place shows the pair: which candidate the application had last
+	// is all that could tie the word to one, and keploy cannot tell it.
+	d := oWord(t, Decide(oInput("body.cmd.filter.appId", "id "+r, "id "+f, []Earlier{kept, oCarried("mock-4", "body.note", r, r, 1800*time.Millisecond, 100*time.Millisecond, 3)}, nil)), r, f)
+	oRefused(t, "only candidates that kept the recorded word, in flight together", d, RefusalUnknown, "at one instant")
+}
+
+// A fresh UUID's 16-bit group, beside its 32-bit group that changed too,
+// where an unchanged place holds both runs' groups: short hex stands all
+// over a set, so the place says nothing of a piece of one value, and the
+// word is fresh. The value's 32-bit and 48-bit groups still judge the place.
+// A place that holds the whole recorded id is a conflict. A word that is the
+// field's whole value is no piece: a request that lists both stays unknown
+// (TestOutcomeCostAnUnchangedPlaceHoldingOneShortWordIsChance).
+func TestOutcomeAPieceOfAnIdAtAnUnchangedPlaceHoldingBothWordsIsChance(t *testing.T) {
+	const (
+		rec, live = "a1b2c3d4-08c8-4e5f-9a0b-c1d2e3f40516", "e5f60718-b054-4c6d-8e9f-a0b1c2d3e4f5"
+		r, f      = "08c8", "b054"
+	)
+	holds := func(mock, text string) Earlier {
+		return oCarried(mock, "body.note", text, text, 2*time.Second, time.Second, 1)
+	}
+	both := []Earlier{holds("mock-45", "pool 08c8 and b054 ready")}
+	d := oWord(t, Decide(oInput("body._id", rec, live, both, nil)), r, f)
+	if d.Outcome != OutcomeFresh {
+		t.Errorf("a 16-bit group at an unchanged place holding both: %s; want fresh", oDescribe([]Decision{d}))
+	}
+	if !strings.Contains(d.Line, "mock-45") {
+		t.Errorf("a 16-bit group set aside at mock-45: the line must name it: %q", d.Line)
+	}
+	const r8, f8 = "a1b2c3d4", "e5f60718"
+	d = oWord(t, Decide(oInput("body._id", rec, live, []Earlier{holds("mock-46", "pool a1b2c3d4 and e5f60718 ready")}, nil)), r8, f8)
+	oRefused(t, "the 32-bit group at an unchanged place holding both", d, RefusalUnknown, "mock-46")
+	d = oWord(t, Decide(oInput("body._id", rec, live, []Earlier{holds("mock-47", "owner "+rec+" and b054")}, nil)), r, f)
+	oRefused(t, "the whole recorded id at an unchanged place that holds the group too", d, RefusalConflict, "mock-47")
+	d = oWord(t, Decide(oInput("body.slot", "08c8", "b054", both, nil)), r, f)
+	oRefused(t, "a word that is the field's whole value", d, RefusalUnknown, "mock-45")
 }
 
 // A field that is one URL-safe base64 token in each run, whose '-' and '_'

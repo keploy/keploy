@@ -289,6 +289,70 @@ func TestOutcomeAReReadBesideACarriedReadIsTwoSources(t *testing.T) {
 	oRefused(t, "a carried read beside a re-read of the same millisecond", d, "two-sources", "mock-4", "mock-7")
 }
 
+// Two earlier sends that hold a client test's second, each its own call's
+// read of the clock, beside a value its own window does not hold: two reads
+// of one coarse cut say nothing of this one. It goes on to the read since
+// the test began, whose check goes red where the value was no read of the
+// clock, never green. Where that window does not hold it either, the two
+// reads stay the refusal, naming both. In a keploy test, whose calls are not
+// read from a begin, too.
+func TestOutcomeACoarseReadBesideTwoClockReadsIsReadSinceItsBegin(t *testing.T) {
+	const p = "body.app.createdAt"
+	rAt, fAt := oAt.Add(300*time.Millisecond), oAt.Add(time.Hour+320*time.Millisecond)
+	read, fRead := oAt.Add(-200*time.Millisecond), oAt.Add(time.Hour-205*time.Millisecond)
+	rec, live := iMs(read), iMs(fRead)
+	clockRead := func(mock, path string, at time.Time) Earlier {
+		e := iSent(mock, at, path, String, rec, live)
+		e.Seen[0].Clock = true
+		return e
+	}
+	lease, audit := clockRead("mock-196", "body.lease_until", oAt.Add(-150*time.Millisecond)), clockRead("mock-305", "body.auditedAt", oAt.Add(-120*time.Millisecond))
+	w := iWin(rAt, fAt, 50*time.Millisecond)
+	w.Rec.Began, w.F.Began = oAt.Add(-5*time.Second), fAt.Add(-5*time.Second)
+	in := iCall(p, String, rec, live, rAt, fAt, w, []Earlier{lease, audit}, nil)
+	in.Drifts = oClientDrifts()
+	d := oWord(t, Decide(in), rec, live)
+	iClock(t, "a client test's millisecond beside two clock reads of that millisecond", d)
+	if d.Clock != nil && d.Clock.Since != models.SinceTestBegin {
+		t.Errorf("checked since %v; want since the test began", d.Clock.Since)
+	}
+	late := *w
+	late.F.Began = fAt
+	in.Window = &late
+	oRefused(t, "round F's begin came after the read", oWord(t, Decide(in), rec, live), "two-sources", "mock-196", "mock-305")
+	in.Drifts, in.Window = oDrifts(), w
+	oRefused(t, "a keploy test", oWord(t, Decide(in), rec, live), "two-sources", "mock-196", "mock-305")
+}
+
+// A read of the second beside an answer that holds a finer instant of that
+// second inside a longer text ("[E2E] x-<UnixNano>"): a variable holds one
+// text, so the answer is no source keploy can bind, and two reads of one
+// coarse cut say nothing of each other. Where the call's own window holds
+// the read it is a Clock, as main reads it. Where it does not, the answer
+// stays the source named, and a value the answer holds by its text stays a
+// Value.
+func TestOutcomeASecondReadBesideAFinerInstantInAnAnswerIsAClock(t *testing.T) {
+	const p = "body.created_at"
+	rAt, fAt := oAt.Truncate(time.Second).Add(700*time.Millisecond), oAt.Truncate(time.Second).Add(102*time.Second+700*time.Millisecond)
+	before := oAt.Sub(rAt.Add(-300 * time.Millisecond))
+	name := func(x time.Time) string { return "[E2E] x-" + iEpochNs(x.Add(-300*time.Millisecond)) }
+	sec := func(x time.Time) string { return strconv.FormatInt(x.Unix(), 10) }
+	ans := func(r, f string) []Raw {
+		return []Raw{oAnswer("mock-1624", before, r).ServedAs(1).ServedLive(oAnswer("mock-1624", before, f))}
+	}
+	call := func(w *Window, raw []Raw) Input { return iCall(p, String, sec(rAt), sec(fAt), rAt, fAt, w, nil, raw) }
+	iClock(t, "the second its own window holds", oWord(t, Decide(call(iWin(rAt, fAt, 100*time.Millisecond), ans(name(rAt), name(fAt)))), sec(rAt), sec(fAt)))
+	far := iWin(rAt.Add(5*time.Second), fAt.Add(5*time.Second), 100*time.Millisecond)
+	d := oWord(t, Decide(call(far, ans(name(rAt), name(fAt)))), sec(rAt), sec(fAt))
+	if d.Outcome != OutcomeValue || d.From.Mock != "mock-1624" {
+		t.Errorf("a second its window does not hold: %s; want the Value bound to the answer", oDescribe([]Decision{d}))
+	}
+	d = oWord(t, Decide(call(iWin(rAt, fAt, 100*time.Millisecond), ans("x-"+sec(rAt), "x-"+sec(fAt)))), sec(rAt), sec(fAt))
+	if d.Outcome != OutcomeValue || d.From.Mock != "mock-1624" {
+		t.Errorf("a second the answer holds by its text: %s; want the Value bound to the answer", oDescribe([]Decision{d}))
+	}
+}
+
 // A 19-digit UnixNano (a fine cut) that stood whole at the test's earlier
 // send, which round F moved to another value while the call sent a third:
 // the value did not follow its place. A conflict, refused before any bind
