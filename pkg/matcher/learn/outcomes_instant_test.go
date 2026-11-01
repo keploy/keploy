@@ -385,6 +385,69 @@ func TestOutcomeANumberThatDoesNotParseIsMatchedByItsText(t *testing.T) {
 	oRefused(t, "an unparsed 10-digit number F moved at mock-1", d, "conflict", "mock-1")
 }
 
+// An epoch instant one run sent where the other run sent a number that is
+// no time (an audit stamp round F replaced with 8357, or the other way
+// round) is no instant in one run: keploy cannot check it, as a typed
+// instant leaf of one run only is refused, and it is never bound fresh. The
+// same holds inside a longer text. Two numbers neither of which reads as an
+// instant keep their exact-text reading (the row above).
+func TestOutcomeAnInstantRoundFReplacedWithANumberThatIsNoTimeIsRefused(t *testing.T) {
+	const p = "body.auditedAt"
+	rAt, fAt := oAt, oAt.Add(61*time.Second)
+	w := iWin(rAt, fAt, 50*time.Millisecond)
+	w.Rec.Began, w.F.Began = rAt.Add(-5*time.Second), fAt.Add(-5*time.Second)
+	recS := strconv.FormatInt(rAt.Add(-4*time.Millisecond).Unix(), 10)
+	liveS := strconv.FormatInt(fAt.Add(-4*time.Millisecond).Unix(), 10)
+	for _, c := range []struct {
+		what, rec, live string
+		typ             Type
+		client          bool
+	}{
+		{"the recorded instant, a number in round F, in a client test", recS, "8357", Number, true},
+		{"the recorded instant, a number in round F", recS, "8357", Number, false},
+		{"a number when recorded, an instant in round F", "8357", liveS, Number, true},
+		{"the recorded instant, a number in round F, inside a text", "evt-" + recS, "evt-8357", String, true},
+	} {
+		in := iCall(p, c.typ, c.rec, c.live, rAt, fAt, w, nil, nil)
+		if c.client {
+			in.Drifts = oClientDrifts()
+		}
+		ds := Decide(in)
+		if len(ds) != 1 {
+			t.Errorf("%s: %s; want one refusal", c.what, oDescribe(ds))
+			continue
+		}
+		oRefused(t, c.what, ds[0], RefusalCannotCheck)
+		if r := ds[0].Refusal; r != nil && !strings.Contains(r.Why, "one run's value here is no instant") {
+			t.Errorf("%s: refused %q; want it to say one run's value here is no instant", c.what, r.Why)
+		}
+	}
+}
+
+// A time no window of the call's holds, whose recorded value an earlier
+// recording held where round F never served it before the call (its call
+// missed), is refused as no read of the clock, and the refusal names that
+// recording and why it is no source, as main's did ("its source recording
+// was never served in this round before this call"): a person reads where
+// the value came from.
+func TestOutcomeANoClockReadRefusalNamesTheRecordingThatHeldTheValue(t *testing.T) {
+	const p = "body.since"
+	rAt, fAt := oAt, oAt.Add(61*time.Second)
+	rec, live := iMs(rAt.Add(-time.Second)), iMs(fAt.Add(-time.Second))
+	unserved := RawOf(&models.Mock{Name: "mock-1", Kind: models.HTTP, Spec: models.MockSpec{
+		ReqTimestampMock: rAt.Add(-time.Second),
+		ResTimestampMock: rAt.Add(-time.Second + time.Millisecond),
+		HTTPReq:          &models.HTTPReq{Method: "POST", URL: "http://api/ticks", Body: `{"tick":"` + rec + `"}`},
+		HTTPResp:         &models.HTTPResp{StatusCode: 201},
+	}}, false)
+	in := iCall(p, String, rec, live, rAt, fAt, iWin(rAt, fAt, 50*time.Millisecond), nil, []Raw{unserved})
+	d := oWord(t, Decide(in), rec, live)
+	oRefused(t, "a time whose recorded value an unserved recording held", d, "no-clock-read", "mock-1")
+	if r := d.Refusal; r != nil && !strings.Contains(r.Why, "the recorded value stood at mock-1, which round F did not give or send before this call") {
+		t.Errorf("refused %q; want it to name mock-1, where the recorded value stood, and why it is no source", r.Why)
+	}
+}
+
 // A client test's own UnixNano that no earlier place holds in either run,
 // with no begin: the test's own value, a fresh Value at the call that first
 // sends it (client_bind_test.go:23-74, step 8). A later send of it binds to
@@ -472,6 +535,34 @@ func TestOutcomeAClientTestsReadSinceItsBeginIsAClock(t *testing.T) {
 	}
 	in.Drifts, in.Window = oDrifts(), w
 	oRefused(t, "a keploy test's read 2 s and 3 s before its call", oWord(t, Decide(in), rec, live), "no-clock-read")
+}
+
+// A client test's read in Unix seconds made just after its test began, a
+// second before its call's window in both runs (api-server's audit: the app
+// reads its clock, makes other calls, then sends the audit): the window
+// plus an offset of about a second holds it, an offset main refuses as one
+// that reads in a second. That refusal is of the window's reading alone:
+// the read is still checked from the test's begin (step 7), as main learned
+// it, and is a Clock since the test began.
+func TestOutcomeAClientTestsReadARefusedOffsetBeforeItsWindowIsAClockSinceItsBegin(t *testing.T) {
+	const p = "body.auditedAt"
+	secs := func(t time.Time) string { return strconv.FormatInt(t.Unix(), 10) }
+	r0 := oAt.Add(6300 * time.Millisecond)
+	rAt := r0.Add(900 * time.Millisecond)
+	f0 := oAt.Add(61*time.Second + 14800*time.Millisecond)
+	fAt := f0.Add(1400 * time.Millisecond)
+	w := iWin(rAt, fAt, 100*time.Millisecond)
+	w.Rec.Began, w.F.Began = r0, f0
+	for _, read := range []time.Duration{100 * time.Millisecond, 300 * time.Millisecond} {
+		rec, live := secs(r0.Add(time.Millisecond)), secs(f0.Add(read))
+		in := iCall(p, Number, rec, live, rAt, fAt, w, nil, nil)
+		in.Drifts = oClientDrifts()
+		d := oWord(t, Decide(in), rec, live)
+		iClock(t, "a client test's read a second before its call's window", d)
+		if d.Clock != nil && d.Clock.Since != models.SinceTestBegin {
+			t.Errorf("read %v after round F's begin: %+v; want a read since the test began", read, *d.Clock)
+		}
+	}
 }
 
 // A client test's token expiry, a read the application made earlier in its
