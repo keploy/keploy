@@ -1,6 +1,9 @@
 package learn
 
-import "strings"
+import (
+	"hash/maphash"
+	"strings"
+)
 
 // The reader's index (DESIGN §1, M5): what the places before a call hold
 // of its changed words, read lazily, per changed word, for one Decide call.
@@ -25,42 +28,61 @@ func readerBudgetBytes() int64 {
 	return setBudget() / 4
 }
 
-// readerIndex is one Decide call's index: each text asked about, the
-// bytes what it read of them takes, and how many reads it left undone past
-// the budget.
+// readerIndex is one Decide call's index: what it kept of each text asked
+// about, by the text's hash, the bytes that takes, and how many reads it
+// left undone past the budget.
 type readerIndex struct {
 	dc           *DriftCache
 	budget, used int64
-	texts        map[string]*readerText
+	seed         maphash.Seed
+	texts        map[uint64][]*readerEntry
 	unreadTexts  int
 }
 
-// readerText is one text as the call's index holds it. Finding it hashes
-// the text, so a caller asks text once per place and keeps it: a 498 KB
-// answer hashed per word costs more than reading it.
+// readerEntry is what the index keeps of one text: its words and instants,
+// each once read within the budget, and then the text itself (counted in
+// the budget) to tell it from another text of its hash. A text that lay past
+// the budget keeps no byte of itself, only that it did, so a call that asks
+// about many large recordings holds at once only what fits the budget: the
+// caller's handle holds the text while it asks, and nothing here holds it
+// after. A later text of the same hash and length is read as that one
+// (unread, where it lay past: fail closed).
+type readerEntry struct {
+	n                       int
+	text                    string
+	tokens                  []map[string]bool
+	spans                   []instant
+	tokensAsked, spansAsked bool
+}
+
+// readerText is one text as a caller asks the index about it: the text,
+// which the caller holds while it asks, and the index's entry for it.
+// Finding it hashes the text, so a caller asks text once per place and
+// keeps the handle: a 498 KB answer hashed per word costs more than reading
+// it.
 type readerText struct {
-	x           *readerIndex
-	text        string
-	tokens      []map[string]bool
-	spans       []instant
-	tokensAsked bool
-	spansAsked  bool
+	x    *readerIndex
+	text string
+	e    *readerEntry
 }
 
 // newReaderIndex is an empty index for one call, reading through dc's
 // caches (nil: none).
 func newReaderIndex(dc *DriftCache) *readerIndex {
-	return &readerIndex{dc: dc, budget: readerBudgetBytes(), texts: map[string]*readerText{}}
+	return &readerIndex{dc: dc, budget: readerBudgetBytes(), seed: maphash.MakeSeed(), texts: map[uint64][]*readerEntry{}}
 }
 
 // text is s as the index holds it, read lazily.
 func (x *readerIndex) text(s string) *readerText {
-	if t, ok := x.texts[s]; ok {
-		return t
+	h := maphash.String(x.seed, s)
+	for _, e := range x.texts[h] {
+		if e.n == len(s) && (e.text == s || e.text == "") {
+			return &readerText{x: x, text: s, e: e}
+		}
 	}
-	t := &readerText{x: x, text: s}
-	x.texts[s] = t
-	return t
+	e := &readerEntry{n: len(s)}
+	x.texts[h] = append(x.texts[h], e)
+	return &readerText{x: x, text: s, e: e}
 }
 
 // fits reports whether n more bytes fit the budget, counting a read that
@@ -73,13 +95,21 @@ func (x *readerIndex) fits(n int64) bool {
 	return true
 }
 
+// keep counts n bytes read of t within the budget, the text's own among
+// them, and keeps the text to tell it by.
+func (t *readerText) keep(n int64) {
+	t.x.used += n
+	t.e.text = t.text
+}
+
 // tokensOf are the text's words in every declared form, by reading
 // (isWord, wordByte, idByte), read once for the call; ok false where they
 // lie past the budget. A text whose copy alone passes what is left is not
 // read at all.
 func (t *readerText) tokensOf() ([]map[string]bool, bool) {
-	if !t.tokensAsked {
-		t.tokensAsked = true
+	e := t.e
+	if !e.tokensAsked {
+		e.tokensAsked = true
 		x := t.x
 		if !x.fits(int64(len(t.text)) + headerBytes) {
 			return nil, false
@@ -89,20 +119,21 @@ func (t *readerText) tokensOf() ([]map[string]bool, bool) {
 		if !x.fits(n) {
 			return nil, false
 		}
-		x.used += n
-		t.tokens = tok
-		if t.tokens == nil {
-			t.tokens = []map[string]bool{}
+		t.keep(n)
+		e.tokens = tok
+		if e.tokens == nil {
+			e.tokens = []map[string]bool{}
 		}
 	}
-	return t.tokens, t.tokens != nil
+	return e.tokens, e.tokens != nil
 }
 
 // spansOf are the text's instants (instantSpans), read once for the call;
 // ok false where they lie past the budget.
 func (t *readerText) spansOf() ([]instant, bool) {
-	if !t.spansAsked {
-		t.spansAsked = true
+	e := t.e
+	if !e.spansAsked {
+		e.spansAsked = true
 		x := t.x
 		if !x.fits(int64(len(t.text)) + headerBytes) {
 			return nil, false
@@ -112,13 +143,13 @@ func (t *readerText) spansOf() ([]instant, bool) {
 		if !x.fits(n) {
 			return nil, false
 		}
-		x.used += n
-		t.spans = s
-		if t.spans == nil {
-			t.spans = []instant{}
+		t.keep(n)
+		e.spans = s
+		if e.spans == nil {
+			e.spans = []instant{}
 		}
 	}
-	return t.spans, t.spans != nil
+	return e.spans, e.spans != nil
 }
 
 // holdsWord reports whether the text holds w as a word in any of main's
