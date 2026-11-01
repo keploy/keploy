@@ -166,14 +166,19 @@ func oText(path, v string) Leaf { return Leaf{Path: path, Noise: path, Type: Str
 // oPg is a Postgres start-up recording made before before oAt, answering
 // rows a millisecond after its request.
 func oPg(name string, before time.Duration, sql string, rows []models.PostgresV3Cells, tag string) Raw {
-	return RawOf(&models.Mock{Name: name, Kind: models.PostgresV3, Spec: models.MockSpec{
+	return RawOf(oPgMock(name, before, sql, rows, tag), false)
+}
+
+// oPgMock is oPg's recording.
+func oPgMock(name string, before time.Duration, sql string, rows []models.PostgresV3Cells, tag string) *models.Mock {
+	return &models.Mock{Name: name, Kind: models.PostgresV3, Spec: models.MockSpec{
 		ReqTimestampMock: oAt.Add(-before),
 		ResTimestampMock: oAt.Add(-before + time.Millisecond),
 		PostgresV3: &models.PostgresV3Spec{Type: models.PostgresV3TypeQuery, Query: &models.PostgresV3QuerySpec{
 			SQLNormalized: sql,
 			Response:      &models.PostgresV3Response{Rows: rows, CommandComplete: tag},
 		}},
-	}}, false)
+	}}
 }
 
 // oAnswer is a start-up recording answering one row, word.
