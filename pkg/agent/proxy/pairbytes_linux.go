@@ -45,10 +45,11 @@ type pairTarget struct {
 	// seen is the most the proxy's side was seen to have received: more is
 	// progress, for the watchdog.
 	seen uint64
-	// orphan is, while the wait waits for the proxy's orphaned socket of
-	// a connection it closed one FIN short to take that FIN (pairReached),
-	// the orphan's state at the last look (FIN_WAIT1, FIN_WAIT2); 0 when
-	// it does not.
+	// orphan is, while the wait waits for the proxy's socket of a
+	// connection it closed one FIN short to take that FIN (pairReached),
+	// the socket's state at the last look (FIN_WAIT1, FIN_WAIT2, or
+	// ESTABLISHED for a close that has not reached the kernel); 0 when it
+	// does not.
 	orphan uint8
 }
 
@@ -288,6 +289,8 @@ func (o *orphanLooks) close() {
 // tcpStateName names the TCP states a bytes wait reports.
 func tcpStateName(s uint8) string {
 	switch s {
+	case tcpEstablished:
+		return "ESTABLISHED"
 	case tcpFinWait1:
 		return "FIN_WAIT1"
 	case tcpFinWait2:
@@ -403,25 +406,42 @@ func (p *Proxy) pairReached(t *pairTarget) (bool, error) {
 		// destroys it. Nothing of the proxy's wakes the wait for either,
 		// so it looks at the orphan again (waitPairTargets), and a change
 		// of its state is the wait moving.
-		// One short with the orphan gone says no more: the kernel destroys
-		// an orphan it has no timewait bucket for, or no room for under its
-		// orphan and memory limits, without a refusal (TCPTimeWaitOverflow,
-		// TCPAbortOnMemory), as it destroys one that refused a byte.
+		// One short with the orphan gone says no more of itself: the kernel
+		// destroys an orphan it has no timewait bucket for, or no room for
+		// under its orphan and memory limits, without a refusal
+		// (TCPTimeWaitOverflow, TCPAbortOnMemory), as it destroys one that
+		// refused a byte, and one that took the FIN before its close (from
+		// CLOSE_WAIT to LAST_ACK) goes as its own FIN is acknowledged. The
+		// application's socket tells that last one (appFINAcknowledged).
 		// One short with the orphan unreadable (sock_diag failing) says
 		// nothing either. Otherwise what arrives now is answered with a
 		// reset: a loss.
 		// Without the FIN counted, one short is a byte of data, which an
 		// orphan refuses: a loss, whatever its state.
+		//
+		// The close may not have reached the kernel yet: the descriptor is
+		// marked closing, which is what side reads as closed, before its
+		// last reference goes and the close(2) runs, and a loaded host can
+		// hold a thread in that gap. The socket is then no orphan. One FIN
+		// short, a socket in CLOSE_WAIT took that FIN in sequence, after
+		// every byte counted as the close began, so nothing was refused;
+		// one still ESTABLISHED waits for it as an orphan does. More short
+		// than that, the bytes went with the close: nothing reads the
+		// descriptor again, and the close tosses them.
 		d, took, err := orphanTookFIN(pc)
 		oneShort := t.finCounted && t.want-ps.received == 1
 		switch {
 		case took:
 			return true, nil
+		case err == nil && oneShort && d.state == tcpCloseWait:
+			return true, nil
+		case errors.Is(err, errNoSocket) && oneShort && appFINAcknowledged(pc):
+			return true, nil
 		case errors.Is(err, errNoSocket) && oneShort:
 			return false, fmt.Errorf("%w: the proxy closed its side of a connection from %s one FIN short of what the application wrote, and its orphaned socket is gone: the kernel destroys one it has no room for, or one that refused a byte, alike", models.ErrProxyConnsUnsupported, pc.app)
 		case err != nil && oneShort:
 			return false, fmt.Errorf("%w: the proxy closed its side of a connection from %s one FIN short of what the application wrote, and its orphaned socket, which tells that FIN from a byte it refused, cannot be read: %v", models.ErrProxyConnsUnsupported, pc.app, err)
-		case err == nil && oneShort && (d.state == tcpFinWait1 || d.state == tcpFinWait2):
+		case err == nil && oneShort && (d.state == tcpEstablished || d.state == tcpFinWait1 || d.state == tcpFinWait2):
 			if t.orphan != d.state {
 				t.orphan = d.state
 				p.paired.progress.Add(1)
@@ -454,8 +474,19 @@ func orphanTookFIN(pc *pairedConn) (diagTCP, bool, error) {
 	return d, d.state == tcpTimeWait || d.state == tcpClosing || d.state == tcpLastAck, nil
 }
 
-// lookupOrphan is how orphanTookFIN reads the orphan (lookupTCPOrdered); a
-// test replaces it to make the read fail.
+// appFINAcknowledged says whether the application's socket of pc shows its FIN
+// acknowledged: TIME_WAIT, which it reaches only on an ACK of that FIN. The
+// proxy's socket acknowledges a FIN only in sequence, after every byte before
+// it, and a socket that refused a byte answers with a reset, which destroys the
+// application's, so nothing was refused. It reads the socket as orphanTookFIN
+// does: a socket moving to the timewait table is no miss.
+func appFINAcknowledged(pc *pairedConn) bool {
+	d, err := lookupOrphan(pc.app, pc.proxy)
+	return err == nil && d.state == tcpTimeWait
+}
+
+// lookupOrphan is how orphanTookFIN and appFINAcknowledged read the socket
+// (lookupTCPOrdered); a test replaces it to make the read fail.
 var lookupOrphan = lookupTCPOrdered
 
 // side is the proxy's side of pc: read from its socket while the proxy holds

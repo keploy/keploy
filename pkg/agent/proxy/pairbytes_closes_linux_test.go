@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 
 	"go.uber.org/zap"
@@ -247,6 +248,257 @@ func TestTheProxysCloseThenTheApplicationsUnacknowledgedFINIsNoLoss(t *testing.T
 	if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 0 {
 		t.Fatalf("%d app_bytes_lost charged, want none: every byte the application wrote, and its FIN, reached the proxy", l)
 	}
+}
+
+// closeBegunNotDone begins the proxy's close of a pair held by a new Proxy,
+// after it read the 10 bytes the application wrote, and leaves it short of the
+// kernel: the close is read (atClose), the descriptor is marked closing, so
+// the wait reads the proxy's side as closed, but the close(2) has not run. A
+// reference a stalled goroutine holds is what holds it here, as one more step
+// of Close's own on a loaded host does: an epoll removal, a thread not given a
+// CPU. let lets the close finish.
+func closeBegunNotDone(t *testing.T) (p *Proxy, pc *pairedConn, app *net.TCPConn, at proxySide, let func()) {
+	t.Helper()
+	p, app, proxySide, reader := heldPair(t, "tcp4", "127.0.0.1:0")
+	if _, err := app.Write([]byte("publish 1\n")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadFull(reader, make([]byte, 10)); err != nil {
+		t.Fatal(err)
+	}
+	pc = pairedConnOf(t, p, 1)
+	rc, err := proxySide.SyscallConn()
+	if err != nil {
+		t.Fatal(err)
+	}
+	held, release := make(chan struct{}), make(chan struct{})
+	refDone := make(chan struct{})
+	go func() {
+		defer close(refDone)
+		_ = rc.Read(func(uintptr) bool {
+			close(held)
+			<-release
+			return true
+		})
+	}()
+	<-held
+	closeDone := make(chan struct{})
+	go func() {
+		defer close(closeDone)
+		_ = reader.Close()
+	}()
+	for !errors.Is(readProxySide(proxySide).err, net.ErrClosed) {
+		runtime.Gosched()
+	}
+	var once sync.Once
+	let = func() {
+		once.Do(func() {
+			close(release)
+			<-refDone
+			<-closeDone
+		})
+	}
+	t.Cleanup(let)
+	at, closed := pc.side()
+	if !closed || at.state != tcpEstablished {
+		t.Fatalf("the proxy's side as its close began: %+v closed %v, want the close's own read of an established socket", at, closed)
+	}
+	if d, err := lookupTCP(pc.proxy, pc.app); err != nil || d.state != tcpEstablished {
+		t.Fatalf("the proxy's socket before its close reached the kernel: %+v %v, want it established", d, err)
+	}
+	return p, pc, app, at, let
+}
+
+// proxySocketIn waits until the proxy's socket of pc shows state.
+func proxySocketIn(t *testing.T, pc *pairedConn, state uint8) {
+	t.Helper()
+	for {
+		d, err := lookupTCP(pc.proxy, pc.app)
+		if err != nil {
+			t.Fatalf("the proxy's socket: %v", err)
+		}
+		if d.state == state {
+			return
+		}
+		runtime.Gosched()
+	}
+}
+
+// The proxy answered, began closing the connection, and the application's FIN
+// came in before the close reached the kernel. What was written counts that
+// FIN, which the close's own read of the proxy's side, made before it, does
+// not, so the wait is one FIN short, and the socket it finds is no orphan: it
+// took the FIN in sequence (CLOSE_WAIT), so nothing was refused. No test ends
+// up charged with bytes nobody lost (a 502 Connection: close that the
+// application closed on at once, under load: mock-pins-e2e's first-use row).
+func TestAFINTakenBeforeTheProxysCloseReachedTheKernelIsNoLoss(t *testing.T) {
+	p, pc, app, at, let := closeBegunNotDone(t)
+	_ = app.Close()
+	proxySocketIn(t, pc, tcpCloseWait)
+	target := &pairTarget{pc: pc, want: at.received + 1, finCounted: true}
+	reached, err := p.pairReached(target)
+	if err != nil || !reached {
+		t.Fatalf("pairReached = %v, %v, want settled: the proxy's socket took the application's FIN in sequence", reached, err)
+	}
+	if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 0 {
+		t.Fatalf("%d app_bytes_lost charged, want none: every byte the application wrote, and its FIN, reached the proxy", l)
+	}
+	let()
+}
+
+// The same close, read only once it reached the kernel: the socket that took
+// the FIN closed from CLOSE_WAIT to LAST_ACK and went as the application
+// acknowledged its own FIN, so no orphan is left to tell. The application's
+// socket, in TIME_WAIT, tells: its FIN was acknowledged, so nothing was refused.
+func TestAnOrphanGoneAfterItTookTheFINIsToldByTheApplicationsSocket(t *testing.T) {
+	p, pc, app, at, let := closeBegunNotDone(t)
+	_ = app.Close()
+	proxySocketIn(t, pc, tcpCloseWait)
+	let()
+	if gone := orphanIn(t, pc, 0); !gone {
+		t.Fatal("the proxy's socket stayed after it took the application's FIN and closed")
+	}
+	target := &pairTarget{pc: pc, want: at.received + 1, finCounted: true}
+	d, err := lookupTCPOrdered(pc.app, pc.proxy)
+	if errors.Is(err, errNoSocket) {
+		// TIME_WAIT takes a bucket from the network namespace's budget,
+		// which a loaded runner's earlier connections can have used up:
+		// with neither socket left nothing tells, and the wait says so.
+		if _, err := p.pairReached(target); !errors.Is(err, models.ErrProxyConnsUnsupported) {
+			t.Fatalf("pairReached with neither socket left: %v, want unknown", err)
+		}
+		return
+	}
+	if err != nil || d.state != tcpTimeWait {
+		t.Fatalf("the application's socket: %+v %v, want TIME_WAIT", d, err)
+	}
+	if reached, err := p.pairReached(target); err != nil || !reached {
+		t.Fatalf("pairReached = %v, %v, want settled: the application's FIN was acknowledged", reached, err)
+	}
+	if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 0 {
+		t.Fatalf("%d app_bytes_lost charged, want none", l)
+	}
+	// That FIN speaks for itself alone: bytes short of it stay a loss.
+	target = &pairTarget{pc: pc, want: at.received + 2, finCounted: true}
+	if reached, err := p.pairReached(target); err != nil || !reached {
+		t.Fatalf("pairReached two short = %v, %v, want settled as a loss", reached, err)
+	}
+	if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 1 {
+		t.Fatalf("two short: %d app_bytes_lost charged, want 1", l)
+	}
+}
+
+// An orphan gone with the application's socket showing no acknowledged FIN
+// says nothing: the kernel destroys one it has no room for as it destroys one
+// that refused a byte. Only an acknowledged FIN speaks for the bytes before it.
+func TestAnOrphanGoneWithTheApplicationsFINUnacknowledgedIsUnknown(t *testing.T) {
+	p, app, _, reader := heldPair(t, "tcp4", "127.0.0.1:0")
+	if _, err := app.Write([]byte("publish 1\n")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadFull(reader, make([]byte, 10)); err != nil {
+		t.Fatal(err)
+	}
+	_ = reader.Close()
+	if _, err := app.Read(make([]byte, 1)); err != io.EOF {
+		t.Fatalf("the application's read after the proxy's close: %v, want EOF", err)
+	}
+	pc := pairedConnOf(t, p, 1)
+	ps, closed := pc.side()
+	if !closed {
+		t.Fatal("the proxy's side is not closed")
+	}
+	was := lookupOrphan
+	lookupOrphan = func(local, remote netip.AddrPort) (diagTCP, error) {
+		if local == pc.proxy {
+			return diagTCP{}, errNoSocket
+		}
+		return was(local, remote)
+	}
+	t.Cleanup(func() { lookupOrphan = was })
+	_, err := p.pairReached(&pairTarget{pc: pc, want: ps.received + 1, finCounted: true})
+	if !errors.Is(err, models.ErrProxyConnsUnsupported) || !strings.Contains(err.Error(), "is gone") {
+		t.Fatalf("pairReached: %v, want unknown: the application's socket, in CLOSE_WAIT, says nothing of its FIN", err)
+	}
+	if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 0 {
+		t.Fatalf("%d app_bytes_lost charged, want none", l)
+	}
+}
+
+// The same close with the application's FIN still on its way: the socket, not
+// yet an orphan, still ESTABLISHED, will take it or refuse a byte in its turn.
+// The wait waits, as it does for an orphan one FIN short, and settles when the
+// FIN comes in. It charges nothing on the way.
+func TestAFINOnItsWayToACloseNotYetInTheKernelIsWaitedFor(t *testing.T) {
+	p, pc, app, at, let := closeBegunNotDone(t)
+	target := &pairTarget{pc: pc, want: at.received + 1, finCounted: true}
+	reached, err := p.pairReached(target)
+	if err != nil || reached {
+		t.Fatalf("pairReached = %v, %v, want a wait: the FIN is on its way", reached, err)
+	}
+	if target.orphan != tcpEstablished {
+		t.Fatalf("the wait looks for state %d, want the socket's own, ESTABLISHED", target.orphan)
+	}
+	if got := orphansUnmoved([]*pairTarget{target}).Error(); !strings.Contains(got, "ESTABLISHED") {
+		t.Fatalf("a wait that ends on it says %q, want the socket's state named", got)
+	}
+	if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 0 {
+		t.Fatalf("%d app_bytes_lost charged while the FIN was on its way, want none", l)
+	}
+	_ = app.Close()
+	proxySocketIn(t, pc, tcpCloseWait)
+	if reached, err := p.pairReached(target); err != nil || !reached {
+		t.Fatalf("pairReached after the FIN = %v, %v, want settled", reached, err)
+	}
+	if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 0 {
+		t.Fatalf("%d app_bytes_lost charged, want none", l)
+	}
+	let()
+}
+
+// A close that has not reached the kernel loses bytes all the same: nothing
+// reads the descriptor again, so bytes that come in now go with the close. The
+// FIN taken after them says nothing for them, one byte short with no FIN
+// counted (a byte of data, the wait's count of what was written having no FIN
+// in it) as two short with one: each is a loss.
+func TestBytesThatMissedTheCloseAreALossBeforeItReachesTheKernel(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		short      uint64
+		finCounted bool
+	}{
+		{"two short with the FIN", 2, true},
+		{"one short with no FIN counted", 1, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, pc, app, at, let := closeBegunNotDone(t)
+			if _, err := app.Write([]byte("x")); err != nil {
+				t.Fatal(err)
+			}
+			_ = app.Close()
+			proxySocketIn(t, pc, tcpCloseWait)
+			target := &pairTarget{pc: pc, want: at.received + tc.short, finCounted: tc.finCounted}
+			if reached, err := p.pairReached(target); err != nil || !reached {
+				t.Fatalf("pairReached = %v, %v, want settled as a loss", reached, err)
+			}
+			if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 1 {
+				t.Fatalf("%d app_bytes_lost charged, want 1: the byte went with the close", l)
+			}
+			let()
+		})
+	}
+	// Bytes short with the socket still ESTABLISHED are no FIN on its way.
+	t.Run("two short before anything came in", func(t *testing.T) {
+		p, pc, _, at, let := closeBegunNotDone(t)
+		target := &pairTarget{pc: pc, want: at.received + 2, finCounted: true}
+		if reached, err := p.pairReached(target); err != nil || !reached {
+			t.Fatalf("pairReached = %v, %v, want settled as a loss", reached, err)
+		}
+		if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 1 {
+			t.Fatalf("%d app_bytes_lost charged, want 1", l)
+		}
+		let()
+	})
 }
 
 // pairReached on a connection the proxy closed one short of what the
