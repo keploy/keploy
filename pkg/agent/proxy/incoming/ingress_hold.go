@@ -94,14 +94,15 @@ func (pm *IngressProxyManager) yieldIngressPort(orig uint16) {
 // the park only before the port's forwarder listens (it then takes them);
 // IPv6 ones (an app bound to :: takes both families) for the whole run, as
 // keploy's forwarder listens on IPv4 only: without the hold they were
-// refused. So they are counted apart.
+// refused. So they are counted apart, and the IPv6 line says where they
+// went: an app that listens on IPv6 only does not answer them there.
 func (pm *IngressProxyManager) logIngressHoldEnd() {
 	if parked := pm.parkedServed.Load(); parked > 0 {
 		pm.logger.Info("keploy served calls to the application's port that arrived before its forwarder listened, by holding the port from the application's bind",
 			zap.Uint64("count", parked))
 	}
 	if parked := pm.parkedServedV6.Load(); parked > 0 {
-		pm.logger.Info("keploy served IPv6 calls to the application's port, which its IPv4 forwarder cannot take, by holding the port from the application's bind",
+		pm.logger.Info("keploy held IPv6 calls to the application's port, which its IPv4 forwarder cannot take, from the application's bind, and passed each to the application on 127.0.0.1",
 			zap.Uint64("count", parked))
 	}
 	if pm.portHolder == nil {

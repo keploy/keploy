@@ -620,8 +620,8 @@ func TestTheEndCountsTheHoldsIPv6CallsApart(t *testing.T) {
 	}
 	pm.logIngressHoldEnd()
 	for snippet, want := range map[string]uint64{
-		"that arrived before its forwarder listened":  1,
-		"served IPv6 calls to the application's port": 1,
+		"that arrived before its forwarder listened": 1,
+		"held IPv6 calls to the application's port":  1,
 	} {
 		l := logs.FilterMessageSnippet(snippet).All()
 		if len(l) != 1 || l[0].ContextMap()["count"] != want {
