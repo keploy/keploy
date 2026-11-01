@@ -47,20 +47,20 @@ permissions:
 
 jobs:
   apt-install:
-    # Ten ubuntu containers that fetch the package lists once or more each
+    # Eleven ubuntu containers that fetch the package lists once or more each
     # (through the stub, which asks the real mirror for each list only the
     # first time), one that builds the test repository, and two with no
-    # network. About six minutes of a run are waits the cases are made of:
-    # against the stub, the 45 s limits of two controls, four slices of 20 s
+    # network. About seven minutes of a run are waits the cases are made of:
+    # against the stub, the 45 s limits of two controls, seven slices of 20 s
     # and two budgets of 90 s; in each of the two offline containers, under a
     # minute of slices and budgets of 1 to 8 s. The fetching and installing
     # comes on top, and how long that takes on a runner is in the job's own
     # history, not here.
     #
     # Each networked case is capped at 300 s and prints its log as soon as it
-    # has failed. Ten of them at the cap are 50 minutes, so this limit lets a
-    # run in which every one of them hangs end by itself, with every log.
-    timeout-minutes: 60
+    # has failed. Eleven of them at the cap are 55 minutes, so this limit lets
+    # a run in which every one of them hangs end by itself, with every log.
+    timeout-minutes: 65
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

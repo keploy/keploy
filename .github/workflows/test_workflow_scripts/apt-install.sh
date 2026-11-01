@@ -115,7 +115,11 @@
 # fetched (36.7 MB against apt's own "Fetched 36.3 MB" in an ubuntu:22.04
 # container) when nothing else downloads during the update. Bytes something
 # else receives meanwhile count for the mirror, which can keep a slow mirror
-# in front, never send a fast one back.
+# in front. Each interface is counted on its own, over the interfaces there
+# both when the slice began and when it ended: one that goes away in between
+# takes its own bytes out of the count and no others. A fast mirror is sent
+# back only when the interface apt fetched through is itself gone or new by
+# the end of the slice, and then apt's own connection broke as well.
 #
 # Stopping the update loses little. apt asks again for a list it has part or
 # all of from where it stopped (a Range request, which another mirror honours
@@ -534,17 +538,54 @@ apt_for() {
   return "$rc"
 }
 
-# The bytes this machine has received, over every interface but lo; see THE
-# PACKAGE LISTS. A name can touch its first number ("eth0:123"), so the colon
-# splits too. %.0f, as in bytes_under.
-received() {
-  awk 'NR > 2 { sub(/^[ \t]+/, ""); split($0, f, /[: \t]+/); if (f[1] != "lo") sum += f[2] }
-    END { printf "%.0f\n", sum }' /proc/net/dev
+# The bytes each interface but lo has received so far, as name:bytes on one
+# line; see THE PACKAGE LISTS. A name can touch its first number
+# ("eth0:123"), so the colon splits too. No interface name holds a colon or a
+# space.
+net_counts() {
+  awk 'NR > 2 { sub(/^[ \t]+/, ""); split($0, f, /[: \t]+/)
+      if (f[1] != "lo") { printf "%s%s:%s", sep, f[1], f[2]; sep = " " } }
+    END { print "" }' /proc/net/dev
 }
 
-# slice_bytes update|download: what a slice of either is judged by, the bytes
-# received for the update and those in apt's archive cache for the download.
-slice_bytes() { if [ "$1" = update ]; then received; else bytes_under "$archives"; fi; }
+# received_between <net_counts> <net_counts>: the bytes received from the
+# first to the second, interface by interface, over the interfaces in both.
+# Each interface's own difference counts, and none counts below 0. So an
+# interface that goes away in between (a container's veth, a Docker network)
+# takes only its own bytes out of the count, and not those of the interface
+# apt fetched through, as a sum over all of them would. %.0f, as in
+# bytes_under.
+received_between() {
+  awk -v was="$1" -v now="$2" 'BEGIN {
+    n = split(was, w, " ")
+    for (i = 1; i <= n; i++) { split(w[i], p, ":"); before[p[1]] = p[2] + 0 }
+    n = split(now, w, " ")
+    for (i = 1; i <= n; i++) {
+      split(w[i], p, ":")
+      if ((p[1] in before) && p[2] + 0 > before[p[1]]) sum += p[2] - before[p[1]]
+    }
+    printf "%.0f\n", sum
+  }'
+}
+
+# slice_mark update|download: what a slice of either is measured from, the
+# interfaces' counts for the update and the bytes in apt's archive cache for
+# the download.
+slice_mark() { if [ "$1" = update ]; then net_counts; else bytes_under "$archives"; fi; }
+
+# slice_got update|download <mark> <mark>: what a slice fetched, from the mark
+# before it to the one after it. The download's can be fewer than none: apt
+# begins a .deb anew when the copy it is offered is not the one it has part
+# of. That slice counts as having fetched nothing.
+slice_got() {
+  if [ "$1" = update ]; then
+    received_between "$2" "$3"
+  elif [ "$3" -gt "$2" ]; then
+    echo $(($3 - $2))
+  else
+    echo 0
+  fi
+}
 
 # in_slices update|download <apt-get argument ...>
 # Runs `apt-get update` or the download within $budget, $slice at a time while
@@ -554,7 +595,7 @@ slice_bytes() { if [ "$1" = update ]; then received; else bytes_under "$archives
 in_slices() {
   local kind="$1" began=$SECONDS had now got=0 all=0 took left run rc front next to_fetch still said slices="" did
   shift
-  had="$(slice_bytes "$kind")"
+  had="$(slice_mark "$kind")"
   while :; do
     left=$((began + budget - SECONDS))
     # Out of time, or apt was stopped and there is no other mirror to put in
@@ -588,14 +629,13 @@ in_slices() {
     took=$((SECONDS - took))
     if [ "$took" -lt 1 ]; then took=1; fi
     front="$(front_mirror)"
-    # The next slice is measured from the bytes there are now, which can be
-    # fewer than there were: apt begins a .deb anew when the copy it is
+    # The next slice is measured from what there is now, which can be fewer
+    # bytes than there were: apt begins a .deb anew when the copy it is
     # offered is not the one it has part of. Measured from the old, higher
     # count, the slices after that would seem to fetch nothing, and a fast
     # mirror would be left for a slow one.
-    now="$(slice_bytes "$kind")"
-    got=$((now - had))
-    if [ "$got" -lt 0 ]; then got=0; fi
+    now="$(slice_mark "$kind")"
+    got="$(slice_got "$kind" "$had" "$now")"
     had=$now
     all=$((all + got))
     slices+="${slices:+; }$front $(human "$got") in $took s ($(human $((got / took)))/s)"
