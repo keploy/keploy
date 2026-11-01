@@ -68,6 +68,10 @@ type strictNoise struct {
 	// url is keploy.yml's url noise: what a pattern matches in the path or
 	// a query value is not compared.
 	url []*regexp.Regexp
+	// notLearned are leaf paths where noise learned onto the mock
+	// (MockSpec.ReqBodyNoise) is not applied: the leaves of the mock's
+	// variables, for the variable pass's comparison (fitsRecording).
+	notLearned map[string]bool
 }
 
 func (h *HTTP) newStrictNoise(headerNoise, bodyNoise map[string][]string, urlNoise []string) strictNoise {
@@ -107,7 +111,7 @@ func (k strictKnown) learnedAt(exact, legacy string) bool {
 	if _, clock := k.clocks[exact]; clock {
 		return true
 	}
-	if len(k.learned) == 0 {
+	if len(k.learned) == 0 || k.n.notLearned[exact] {
 		return false
 	}
 	if _, ok := k.learned[exact]; ok {

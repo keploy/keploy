@@ -123,7 +123,8 @@ func splitVariableMocks(pool []*models.Mock) (withVars, rest []*models.Mock) {
 }
 
 // readDecls reads m's variables, by name, or says why one cannot be followed.
-// A place is read against m's recorded request (variables.ReadPlace). An answer
+// A place is read against m's recorded request (variables.ReadPlace,
+// variables.InRequest: as the learn step reads it, learn.VariableLeafPath). An answer
 // place is read again against the recorded response, which may not be loaded
 // yet, where it is answered (renderAnswers): here only its part counts, which
 // every reading of it gives alike.
@@ -133,15 +134,7 @@ func readDecls(m *models.Mock) ([]varDecl, string) {
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	var rec reqView
-	recorded := false
-	if m.Spec.HTTPReq != nil {
-		rec, recorded = recordedView(m.Spec.HTTPReq)
-	}
-	inRequest := func(p variables.Place) bool {
-		_, ok := rec.leaf(p)
-		return recorded && ok
-	}
+	inRequest := variables.InRequest(m.Spec.HTTPReq)
 	parse := func(name, role, raw string, answer bool) (varPlace, string) {
 		a, err := variables.ReadPlace(raw, inRequest)
 		if err != nil {
@@ -347,11 +340,11 @@ func (v reqView) putBackAt(vp varPlace, rec held) (reqView, bool) {
 	}
 	text := held{value: out}
 	if vp.place.Part == variables.PartBody {
-		raw, err := json.Marshal(out)
-		if err != nil {
+		raw, ok := variables.SpliceJSONString(cur.raw, out)
+		if !ok {
 			return v, false
 		}
-		text.raw = string(raw)
+		text.raw = raw
 	}
 	return v.putBack(vp.place, text)
 }
@@ -566,6 +559,12 @@ func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *mo
 	// The variables' places, read on both sides; then the recorded values put
 	// back into the live call.
 	liveAt := map[string]held{}
+	// varLeaves are the leaf paths (learn.LeafPath) the variables' request
+	// places stand in, a word's field included: a variable's place is never
+	// noise (learn.MergeLearned drops learned noise there), so learned noise
+	// at one is not applied below, nor by the comparison with the
+	// recording; the bytes of a field outside a variable's word are compared.
+	varLeaves := map[string]bool{}
 	asRecorded := live
 	var typeChange *varProblem
 	clocks := clocksOf(m)
@@ -600,17 +599,29 @@ func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *mo
 			}
 			l, ok := live.read(vp)
 			if !ok {
-				return nil, nil // the call has no such place: it is not this mock's call
+				lf, isLeaf := live.leaf(vp.place)
+				rf, _ := rec.leaf(vp.place)
+				if vp.whole() || !isLeaf || !lf.body || lf.kind == rf.kind {
+					return nil, nil // the call has no such place: it is not this mock's call
+				}
+				// A word place where the call sends a value of another
+				// JSON type than the recorded string: as at a whole place,
+				// the call is the mock's with that value's type changed,
+				// where the rest of it is the recording (its recorded
+				// field put back whole). Mongo's replay says so of both.
+				if typeChange == nil {
+					typeChange = typeChanged(m.Name, d.name, vp.raw, rf.raw, lf.raw)
+				}
+				if asRecorded, ok = asRecorded.putBack(vp.place, rf); !ok {
+					return nil, nil
+				}
+				if leaf, ok := learn.LeafPath(vp.place.String()); ok {
+					varLeaves[leaf] = true
+				}
+				continue
 			}
 			if l.body && l.kind != r.kind && typeChange == nil {
-				typeChange = &varProblem{
-					mock: m.Name, name: d.name, place: vp.raw, kind: models.DiffKindTypeChanged, expected: r.raw, actual: l.raw,
-					why:  fmt.Sprintf("variable %s at %s: the call sent %s where the recording has %s, a value of another JSON type", d.name, vp.raw, l.raw, r.raw),
-					next: "the application changed the type of the value it sends at " + vp.raw + ": if that is intended, re-record the test; otherwise fix the application",
-				}
-				if models.IsGivenVariable(d.name) {
-					typeChange.given = d.name
-				}
+				typeChange = typeChanged(m.Name, d.name, vp.raw, r.raw, l.raw)
 			}
 			if asRecorded, ok = asRecorded.putBackAt(vp, r); !ok {
 				if vp.whole() {
@@ -619,6 +630,9 @@ func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *mo
 				return refuse(fmt.Sprintf("keploy cannot put variable %s's recorded value %q back at %s in this call, so it cannot compare the rest of the call with the recording", d.name, r.value, vp.raw))
 			}
 			liveAt[vp.key()] = l
+			if leaf, ok := learn.LeafPath(vp.place.String()); ok {
+				varLeaves[leaf] = true
+			}
 		}
 	}
 
@@ -635,7 +649,7 @@ func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *mo
 		if err != nil {
 			continue
 		}
-		if _, isVar := liveAt[place.String()]; isVar {
+		if varLeaves[k] {
 			continue
 		}
 		if _, clock := clocks[k]; clock {
@@ -657,7 +671,7 @@ func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *mo
 	}
 
 	// 1. The call, with the recorded values put back, is the recording.
-	if !h.fitsRecording(ctx, asRecorded.asReq(input), m, headerNoise, userBodyNoise, urlNoise) {
+	if !h.fitsRecording(ctx, asRecorded.asReq(input), m, headerNoise, userBodyNoise, urlNoise, varLeaves) {
 		return nil, nil
 	}
 	if typeChange != nil {
@@ -667,6 +681,20 @@ func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *mo
 		return nil, &varProblem{mock: m.Name, why: "this keploy's mock store keeps no variables, so it cannot follow them", next: "run the keploy agent of this keploy version"}
 	}
 	return holdVariables(m, decls, liveAt, table, refuse)
+}
+
+// typeChanged is the evidence of a call that sent actual, a value of another
+// JSON type, where mock's recording holds expected at variable name's place.
+func typeChanged(mock, name, place, expected, actual string) *varProblem {
+	p := &varProblem{
+		mock: mock, name: name, place: place, kind: models.DiffKindTypeChanged, expected: expected, actual: actual,
+		why:  fmt.Sprintf("variable %s at %s: the call sent %s where the recording has %s, a value of another JSON type", name, place, actual, expected),
+		next: "the application changed the type of the value it sends at " + place + ": if that is intended, re-record the test; otherwise fix the application",
+	}
+	if models.IsGivenVariable(name) {
+		p.given = name
+	}
+	return p
 }
 
 // holdVariables checks the variables of m on a call that fits its recording
@@ -853,8 +881,10 @@ func sameRoute(live, rec reqView, m *models.Mock) bool {
 // body field by field. Known noise widens only this comparison: the
 // variables are checked at their places apart from it, so a noise entry over
 // a variable's place never excuses a wrong value there.
-func (h *HTTP) fitsRecording(ctx context.Context, asRecorded *req, m *models.Mock, headerNoise, userBodyNoise map[string][]string, urlNoise []string) bool {
-	return len(strictDiff(ctx, asRecorded, liveDestination(ctx, asRecorded), m, h.newStrictNoise(headerNoise, userBodyNoise, urlNoise))) == 0
+func (h *HTTP) fitsRecording(ctx context.Context, asRecorded *req, m *models.Mock, headerNoise, userBodyNoise map[string][]string, urlNoise []string, varLeaves map[string]bool) bool {
+	n := h.newStrictNoise(headerNoise, userBodyNoise, urlNoise)
+	n.notLearned = varLeaves
+	return len(strictDiff(ctx, asRecorded, liveDestination(ctx, asRecorded), m, n)) == 0
 }
 
 // pickHit chooses the hit that answers: the first of hits, and among the
@@ -1214,11 +1244,12 @@ func answerWords(resp *models.HTTPResp, header map[string]string, changed map[st
 			changed[strings.ToLower(t.key)] = true
 			continue
 		}
-		raw, err := json.Marshal(t.text)
-		if err != nil {
+		// Every recorded byte outside the words is kept as recorded.
+		raw, ok := variables.SpliceJSONString(t.leaf.Raw(resp.Body), t.text)
+		if !ok {
 			return nil, t.puts[0], "keploy cannot write it as JSON"
 		}
-		edits = append(edits, variables.Edit{Start: t.leaf.Start, End: t.leaf.End, Raw: string(raw)})
+		edits = append(edits, variables.Edit{Start: t.leaf.Start, End: t.leaf.End, Raw: raw})
 	}
 	return edits, wordPut{}, ""
 }

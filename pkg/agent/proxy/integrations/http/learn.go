@@ -1853,10 +1853,11 @@ func elsewhereCounts(own bool, windows integrations.TestWindows) func(*models.Mo
 	}
 }
 
-// variablePlaces is the leaf paths (learn.LeafPath) of m's variables'
-// request places, each bind and use (models.MockVariable): where a call of m
-// holds a value the application makes anew each run. err names a place keploy
-// cannot read.
+// variablePlaces is the leaf paths (learn.VariableLeafPath) of m's
+// variables' request places, each bind and use (models.MockVariable): where
+// a call of m holds a value the application makes anew each run. A word of a
+// field names the field's leaf, the whole of which is then excused. err
+// names a place keploy cannot read.
 func variablePlaces(m *models.Mock) (map[string]bool, error) {
 	names := make([]string, 0, len(m.Spec.Variables))
 	for name := range m.Spec.Variables {
@@ -1871,7 +1872,7 @@ func variablePlaces(m *models.Mock) (map[string]bool, error) {
 			places = append(places, v.Bind)
 		}
 		for _, p := range places {
-			path, ok := learn.LeafPath(p)
+			path, ok := learn.VariableLeafPath(m, p)
 			if !ok {
 				return nil, &unreadPlace{mock: m.Name, variable: name, place: p}
 			}

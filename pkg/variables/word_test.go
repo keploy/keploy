@@ -271,3 +271,25 @@ func TestReadPlace(t *testing.T) {
 		t.Error("a string of no place read")
 	}
 }
+
+// A string literal rewritten to hold another word keeps every byte outside
+// the change as recorded: its escapes, HTML characters escaped or not, and
+// non-ASCII letters, written or escaped.
+func TestSpliceJSONStringKeepsTheRecordedBytes(t *testing.T) {
+	for _, c := range []struct{ raw, next, want string }{
+		{raw: `"<b>hello appRec7</b> & café x"`, next: "<b>hello appLive9</b> & café x", want: `"<b>hello appLive9</b> & café x"`},
+		{raw: `"<b>hello appRec7</b> & caf\u00e9"`, next: "<b>hello appLive9</b> & café", want: `"<b>hello appLive9</b> & caf\u00e9"`},
+		{raw: `"\u003cb\u003ehello appRec7\u003c/b\u003e \u0026 caf\u00e9"`, next: "<b>hello appLive9</b> & café", want: `"\u003cb\u003ehello appLive9\u003c/b\u003e \u0026 caf\u00e9"`},
+		{raw: `"a\"q\" appRec7 \ud83d\ude00 z"`, next: "a\"q\" appLive9 😀 z", want: `"a\"q\" appLive9 \ud83d\ude00 z"`},
+		{raw: `"\u003c appRec7"`, next: "< x<y", want: `"\u003c x\u003cy"`},
+		{raw: `"appRec7"`, next: "appRec7", want: `"appRec7"`},
+		{raw: `"é"`, next: "ê", want: `"ê"`},
+		{raw: `"x\u00e9"`, next: "xê", want: `"xê"`},
+		{raw: "\"bad \xff appRec7\"", next: "bad \ufffd appLive9", want: `"bad � appLive9"`},
+	} {
+		got, ok := SpliceJSONString(c.raw, c.next)
+		if !ok || got != c.want {
+			t.Errorf("SpliceJSONString(%s, %q) = %s, %v; want %s", c.raw, c.next, got, ok, c.want)
+		}
+	}
+}

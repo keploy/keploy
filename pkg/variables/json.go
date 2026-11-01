@@ -7,7 +7,10 @@ import (
 	"math/big"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
+	"unicode/utf16"
+	"unicode/utf8"
 
 	"go.keploy.io/server/v3/pkg/templates"
 )
@@ -335,4 +338,103 @@ func sameUnder(r, l any, path string, n Noise) bool {
 		return SameValue(num.String(), ls, true)
 	}
 	return r == l
+}
+
+// SpliceJSONString is raw, a JSON string literal, rewritten to hold next:
+// every byte of raw before and after the text that changes is kept as
+// recorded (its escapes, its '<' or "\u003c", its non-ASCII letters), and
+// only the changed text is encoded, in raw's style (HTML escapes where raw
+// shows one). Where raw is no string literal, or keploy cannot keep its
+// bytes (an invalid UTF-8 byte in it), next is encoded whole. ok is false
+// where next cannot be written as JSON.
+func SpliceJSONString(raw, next string) (string, bool) {
+	html := strings.Contains(raw, `\u003c`) || strings.Contains(raw, `\u003e`) || strings.Contains(raw, `\u0026`)
+	var inner string
+	if json.Unmarshal([]byte(raw), &inner) != nil || len(raw) < 2 || raw[0] != '"' {
+		return jsonString(next, html)
+	}
+	// units are where each unit of raw (one character as written, an
+	// escape, or a surrogate pair) starts, in raw and in what it decodes
+	// to; the last is raw's closing quote and len(inner).
+	type unit struct{ raw, dec int }
+	units := make([]unit, 0, len(raw))
+	dec := 0
+	for i := 1; i < len(raw)-1; {
+		units = append(units, unit{i, dec})
+		n, d := jsonUnit(raw[i : len(raw)-1])
+		if n == 0 {
+			return jsonString(next, html)
+		}
+		i, dec = i+n, dec+d
+	}
+	if dec != len(inner) {
+		return jsonString(next, html)
+	}
+	units = append(units, unit{len(raw) - 1, dec})
+	p := 0
+	for p < len(inner) && p < len(next) && inner[p] == next[p] {
+		p++
+	}
+	q := 0
+	for q < len(inner)-p && q < len(next)-p && inner[len(inner)-1-q] == next[len(next)-1-q] {
+		q++
+	}
+	// The kept bytes end and begin at units' bounds.
+	lo := 0
+	for lo+1 < len(units) && units[lo+1].dec <= p {
+		lo++
+	}
+	hi := len(units) - 1
+	for hi > 0 && units[hi-1].dec >= len(inner)-q {
+		hi--
+	}
+	if hi < lo {
+		hi = lo
+	}
+	mid, ok := jsonString(next[units[lo].dec:len(next)-(len(inner)-units[hi].dec)], html)
+	if !ok {
+		return "", false
+	}
+	out := raw[:units[lo].raw] + mid[1:len(mid)-1] + raw[units[hi].raw:]
+	var got string
+	if json.Unmarshal([]byte(out), &got) != nil || got != next {
+		return jsonString(next, html)
+	}
+	return out, true
+}
+
+// jsonUnit is the length of the unit s begins with in a JSON string
+// literal's text (a character as written, an escape, or a surrogate pair's
+// two escapes), and the length of what it decodes to; 0 where s begins with
+// no unit encoding/json decodes byte for byte.
+func jsonUnit(s string) (n, dec int) {
+	switch c := s[0]; {
+	case c == '\\' && len(s) >= 6 && s[1] == 'u':
+		r, err := strconv.ParseUint(s[2:6], 16, 32)
+		if err != nil {
+			return 0, 0
+		}
+		if utf16.IsSurrogate(rune(r)) {
+			if len(s) >= 12 && s[6] == '\\' && s[7] == 'u' {
+				if r2, err := strconv.ParseUint(s[8:12], 16, 32); err == nil {
+					if p := utf16.DecodeRune(rune(r), rune(r2)); p != utf8.RuneError {
+						return 12, utf8.RuneLen(p)
+					}
+				}
+			}
+			return 6, utf8.RuneLen(utf8.RuneError)
+		}
+		return 6, utf8.RuneLen(rune(r))
+	case c == '\\' && len(s) >= 2:
+		return 2, 1
+	case c == '\\' || c == '"':
+		return 0, 0
+	case c < utf8.RuneSelf:
+		return 1, 1
+	}
+	r, size := utf8.DecodeRuneInString(s)
+	if r == utf8.RuneError && size == 1 {
+		return 0, 0 // an invalid byte decodes to U+FFFD: no byte kept as written
+	}
+	return size, size
 }

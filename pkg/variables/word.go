@@ -99,8 +99,16 @@ func ParseAddress(s string) (Address, error) {
 // word address there: a Mongo call that copies one word of a field an HTTP
 // call sent binds its variable at that word of the HTTP recording. A place
 // the recording holds neither way reads as ParseAddress reads it, and its
-// reader finds no value there.
+// reader finds no value there. A place with no '#' and no '|' reads one way
+// only, and holds is not asked.
 func ReadPlace(s string, holds func(Place) bool) (Address, error) {
+	if !strings.ContainsAny(s, "#|") {
+		p, err := Parse(s)
+		if err != nil {
+			return Address{}, err
+		}
+		return Address{Place: p, Word: -1}, nil
+	}
 	if p, err := Parse(s); err == nil && holds(p) {
 		return Address{Place: p, Word: -1}, nil
 	}

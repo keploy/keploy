@@ -1,10 +1,12 @@
 package http
 
 import (
+	"strings"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/pkg/variables"
 )
 
 // Rows for a variable place that names a word of a value (variables.ParseAddress):
@@ -167,27 +169,33 @@ func TestVariables_APlaceTheRecordingHoldsAsWrittenIsWhole(t *testing.T) {
 	}
 }
 
-// A word is a word of a string, as Mongo's replay reads one: a field the
-// call sends as a number, a boolean or null is no place of it, so the call is
-// not the mock's (a miss the strict matcher diffs), whatever word it names.
-func TestVariables_AWordOfAFieldOfAnotherTypeIsNoPlace(t *testing.T) {
+// A word is a word of a string. A call that sends a number, a boolean or
+// null where the recording holds the string a word place names, and is the
+// recording otherwise, is the mock's with that value's type changed: the
+// same evidence as at a whole place (a variable_mismatch the miss report
+// shows), as Mongo's replay gives of both, and nothing is bound.
+func TestVariables_AWordOfAFieldOfAnotherTypeIsATypeChange(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	h := newHTTP()
-	db := &varDb{perTest: []*models.Mock{
-		at(varMock("mock-1", "PUT", "http://store/secrets/app", `{"data":{"lastUsedAt":"1730000000"}}`, 204, `{}`,
-			models.MockVariables{"createdAt": bindV("1730000000", "body.data.lastUsedAt#0")}), 1),
-	}}
-	for _, sent := range []string{`1730000555`, `true`, `null`} {
-		ok, stub, diag := matchVar(t, h, db, liveReq("PUT", "/secrets/app", `{"data":{"lastUsedAt":`+sent+`}}`))
-		if ok {
-			t.Fatalf("%s at a word's string was answered by %s", sent, stub.Name)
+	for _, bind := range []string{"body.data.lastUsedAt", "body.data.lastUsedAt#0"} {
+		db := &varDb{perTest: []*models.Mock{
+			at(varMock("mock-1", "PUT", "http://store/secrets/app", `{"data":{"lastUsedAt":"1730000000"},"x":"rec"}`, 204, `{}`,
+				models.MockVariables{"createdAt": bindV("1730000000", bind)}), 1),
+		}}
+		for _, sent := range []string{`1730000555`, `true`, `null`} {
+			ok, _, diag := matchVar(t, h, db, liveReq("PUT", "/secrets/app", `{"data":{"lastUsedAt":`+sent+`},"x":"rec"}`))
+			p := wantProblem(t, ok, diag, "the call sent "+sent+` where the recording has "1730000000", a value of another JSON type`)
+			if p.kind != models.DiffKindTypeChanged || p.place != bind {
+				t.Fatalf("%s at %s: evidence %+v; want a type change at the place", sent, bind, p)
+			}
+			// The rest of the call is still compared.
+			if ok, _, diag := matchVar(t, h, db, liveReq("PUT", "/secrets/app", `{"data":{"lastUsedAt":`+sent+`},"x":"other"}`)); ok || diag != nil && diag.variable != nil {
+				t.Fatalf("%s at %s with another field changed: served %v, evidence %+v; want a plain miss", sent, bind, ok, diag)
+			}
 		}
-		if diag != nil && diag.variable != nil {
-			t.Fatalf("%s at a word's string: want a miss of no variable, got the variable evidence %q", sent, diag.variable.why)
+		if _, bound := db.table.Lookup("createdAt"); bound {
+			t.Fatal("createdAt was bound at a value of another type")
 		}
-	}
-	if _, bound := db.table.Lookup("createdAt"); bound {
-		t.Fatal("createdAt was bound at a value of another type")
 	}
 }
 
@@ -309,5 +317,189 @@ func TestVariables_AWordAnswerKeployCannotWriteIsRefused(t *testing.T) {
 			ok, _, diag := matchVar(t, h, db, liveReq("POST", "/apps", `{"a":"1730000555","b":"`+b+`"}`))
 			wantProblem(t, ok, diag, c.why)
 		})
+	}
+}
+
+// The learn step reads a mock's variable places as the replay does
+// (learn.VariableLeafPath): a word address is a place it can read (no
+// unreadPlace, which would make every call of the operation miss and warn
+// that a valid place be corrected), and it names its field's leaf. The check
+// that a call is exactly another test's recording (exactlyElsewhere) then
+// excuses that field, and a segment word files the recording under the
+// learned request key (variableKeyed). A place the recording holds as
+// written names its own leaf.
+func TestVariables_TheLearnStepReadsAWordAtItsField(t *testing.T) {
+	for _, c := range []struct {
+		name, url, body string
+		v               models.MockVariable
+		leaf            string
+		keyed           bool
+	}{
+		{name: "segment word", url: "http://store/apps/app-appRec7", v: useV("appRec7", []string{"url.path[1]#1"}), leaf: "url.path.1", keyed: true},
+		{name: "body word", url: "http://store/secrets/app", body: `{"data":{"note":"made by appRec7 at boot"}}`, v: bindV("appRec7", "body.data.note#2"), leaf: "body.data.note"},
+		{name: "query word", url: "http://store/apps?ref=by+appRec7", v: bindV("appRec7", "url.query.ref#1"), leaf: "url.query.ref"},
+		{name: "cookie", url: "http://store/apps", v: bindV("appRec7", "header.Cookie|cookie.uid"), leaf: "header.cookie"},
+		{name: "legacy key", url: "http://store/secrets/app", body: `{"a#0":"appRec7","a":"x appRec7"}`, v: bindV("appRec7", "body.a#0"), leaf: "body.a#0"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			m := varMock("mock-1", "PUT", c.url, c.body, 204, `{}`, models.MockVariables{"appId": c.v})
+			m.Spec.HTTPReq.Header["Cookie"] = "uid=appRec7; theme=dark"
+			places, err := variablePlaces(m)
+			if err != nil {
+				t.Fatalf("the learn step cannot read the place: %v", err)
+			}
+			if len(places) != 1 || !places[c.leaf] {
+				t.Fatalf("places %v; want the leaf %s alone", places, c.leaf)
+			}
+			if got := variableKeyed(m, 2); got != c.keyed {
+				t.Fatalf("filed under the learned key: %v, want %v", got, c.keyed)
+			}
+		})
+	}
+}
+
+// Learned noise at the field a word variable stands in is not applied at
+// replay, as MergeLearned no longer writes it: a variable's place is never
+// noise. The rest of the field is compared: a call that changes another word
+// of it is not the mock's call; one that changes the word alone binds it.
+func TestVariables_NoiseAtAWordedFieldLeavesTheRestCompared(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := newHTTP()
+	m := wordedCreate()[0]
+	m.Spec.ReqBodyNoise = map[string][]string{"body.data.note": nil}
+	db := &varDb{perTest: []*models.Mock{m}}
+	if ok, _, _ := matchVar(t, h, db, liveReq("PUT", "/secrets/app", `{"data":{"note":"made by appLive9 at noon"}}`)); ok {
+		t.Fatal("served a call that changes the field outside the variable's word")
+	}
+	ok, _, diag := matchVar(t, h, db, liveReq("PUT", "/secrets/app", `{"data":{"note":"made by appLive9 at boot"}}`))
+	if !ok {
+		t.Fatalf("not served: %+v", diag)
+	}
+	if b, bound := db.table.Lookup("appId"); !bound || b.Value != "appLive9" {
+		t.Fatalf("bound %+v, want appLive9", b)
+	}
+}
+
+// Whether a recorded request holds a place (variables.InRequest, which reads
+// a mock's variable places for its replay and its learn step) is what the
+// replay reads there (recordedView): one value at a segment, a query name, a
+// header or a body path.
+func TestVariables_TheRecordingHoldsWhatTheReplayReads(t *testing.T) {
+	r := &models.HTTPReq{
+		Method: "PUT",
+		URL:    "http://store/apps/a%2Fb/x?ref=one&two=1&two=2&page%231=p",
+		Header: map[string]string{"X-App": "v", "x-other": "w"},
+		Body:   `{"a":{"b":[1,"x"]},"a#0":"y","n":null}`,
+	}
+	holds := variables.InRequest(r)
+	rec, _ := recordedView(r)
+	for _, s := range []string{"url.path[0]", "url.path[1]", "url.path[2]", "url.path[3]", "url.query.ref", "url.query.two", `url.query.page\#1`, "url.query.none",
+		"header.X-App", "header.x-app", "header.X-Other", "header.None", `body.a.b[1]`, `body.a.b[2]`, "body.a", `body["a#0"]`, "body.n", "body.none"} {
+		p, err := variables.Parse(s)
+		if err != nil {
+			t.Fatalf("%s: %v", s, err)
+		}
+		_, want := rec.leaf(p)
+		if got := holds(p); got != want {
+			t.Errorf("%s: InRequest holds it %v, the replay reads it %v", s, got, want)
+		}
+	}
+	if variables.InRequest(nil)(variables.Place{Part: variables.PartBody}) {
+		t.Error("no request holds a place")
+	}
+}
+
+// A word answer whose live value is no one word is refused, never served
+// with the word dropped or the value split.
+func TestVariables_AWordAnswerOfAValueThatIsNoWordIsRefused(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := newHTTP()
+	m := varMock("mock-1", "POST", "http://store/apps", `{"a":"appRec7"}`, 201, `{"msg":"hello appRec7"}`,
+		models.MockVariables{"a": bindV("appRec7", "body.a", "body.msg#1")})
+	db := &varDb{perTest: []*models.Mock{at(m, 1)}}
+	ok, stub, diag := matchVar(t, h, db, liveReq("POST", "/apps", `{"a":"app Live9"}`))
+	if ok {
+		t.Fatalf("served %s", stub.Spec.HTTPResp.Body)
+	}
+	wantProblem(t, ok, diag, `the value "app Live9" cannot stand at that word`)
+}
+
+// Words of two body strings are each written into their own string.
+func TestVariables_WordAnswersInTwoBodyStrings(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := newHTTP()
+	m := varMock("mock-1", "POST", "http://store/apps", `{"a":"appRec7"}`, 201, `{"x":"hello appRec7","y":"bye appRec7"}`,
+		models.MockVariables{"a": bindV("appRec7", "body.a", "body.x#1", "body.y#1")})
+	db := &varDb{perTest: []*models.Mock{at(m, 1)}}
+	ok, stub, diag := matchVar(t, h, db, liveReq("POST", "/apps", `{"a":"appLive9"}`))
+	if !ok {
+		t.Fatalf("not served: %+v", diag)
+	}
+	if want := `{"x":"hello appLive9","y":"bye appLive9"}`; stub.Spec.HTTPResp.Body != want {
+		t.Fatalf("answered %s, want %s", stub.Spec.HTTPResp.Body, want)
+	}
+}
+
+// An echo bound at a word of a request text is the word the call sends, and
+// answers it.
+func TestVariables_AnEchoAtAWord(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := newHTTP()
+	v := bindV("reqRec7", "body.note#1", "body.id")
+	v.Echo = true
+	m := varMock("mock-1", "POST", "http://store/apps", `{"note":"req reqRec7"}`, 201, `{"id":"reqRec7"}`, models.MockVariables{"rid": v})
+	db := &varDb{perTest: []*models.Mock{at(m, 1)}}
+	ok, stub, diag := matchVar(t, h, db, liveReq("POST", "/apps", `{"note":"req reqLive9"}`))
+	if !ok {
+		t.Fatalf("not served: %+v", diag)
+	}
+	if want := `{"id":"reqLive9"}`; stub.Spec.HTTPResp.Body != want {
+		t.Fatalf("answered %s, want %s", stub.Spec.HTTPResp.Body, want)
+	}
+}
+
+// A digest header a variable's word is answered in holds that word: it is
+// not recomputed over the body (its note is dropped from the served copy).
+func TestVariables_ADigestHeaderAWordIsAnsweredInIsNotRecomputed(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := newHTTP()
+	m := at(varMock("mock-1", "POST", "http://store/orders", `{"tag":"tagRec7"}`, 201, `{"id":"r1"}`,
+		models.MockVariables{"tag": bindV("tagRec7", "body.tag", "header.ETag#1")}), 1)
+	m.Spec.HTTPResp.Header["ETag"] = `W/"tagRec7"`
+	m.Spec.Metadata = map[string]string{models.MetadataBodyDigestsKey: "etag=etag/md5/s"}
+	db := &varDb{perTest: []*models.Mock{m}}
+	ok, stub, diag := matchVar(t, h, db, liveReq("POST", "/orders", `{"tag":"tagLive9"}`))
+	if !ok {
+		t.Fatalf("not served: %+v", diag)
+	}
+	if _, noted := stub.Spec.Metadata[models.MetadataBodyDigestsKey]; noted {
+		t.Fatalf("the served copy still notes the ETag as a digest: %v", stub.Spec.Metadata)
+	}
+	raw, err := h.buildMockResponseBytes(stub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "Etag: W/\"tagLive9\"\r\n") && !strings.Contains(string(raw), "ETag: W/\"tagLive9\"\r\n") {
+		t.Fatalf("served %q; want the ETag holding the live word", raw)
+	}
+}
+
+// A word answer keeps every recorded byte of the text outside the word:
+// HTML characters as recorded (escaped or not) and non-ASCII letters.
+func TestVariables_AWordAnswerKeepsTheRestOfTheTextAsRecorded(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := newHTTP()
+	esc := strings.NewReplacer("<", `\u003c`, ">", `\u003e`, "&", `\u0026`, "é", `\u00e9`)
+	for _, resp := range []string{`{"msg":"<b>hello appRec7</b> & café"}`, esc.Replace(`{"msg":"<b>hello appRec7</b> & café"}`)} {
+		m := varMock("mock-1", "PUT", "http://store/secrets/app", `{"note":"a<b & café appRec7 \"q\""}`, 200, resp,
+			models.MockVariables{"appId": bindV("appRec7", "body.note#3", "body.msg#2")})
+		db := &varDb{perTest: []*models.Mock{at(m, 1)}}
+		ok, stub, diag := matchVar(t, h, db, liveReq("PUT", "/secrets/app", `{"note":"a<b & café appLive9 \"q\""}`))
+		if !ok {
+			t.Fatalf("not served: %+v", diag)
+		}
+		if want := strings.Replace(resp, "appRec7", "appLive9", 1); stub.Spec.HTTPResp.Body != want {
+			t.Fatalf("answered %s, want %s", stub.Spec.HTTPResp.Body, want)
+		}
 	}
 }
