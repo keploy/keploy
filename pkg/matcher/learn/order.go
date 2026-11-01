@@ -1098,9 +1098,10 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	}
 
 	// 6. Coarse copy: as 4, a millisecond or coarser; no window condition.
-	// Two sends that are each their call's read of the clock say nothing of
-	// this one: two reads of one coarse cut. It goes on to step 7, whose
-	// check goes red where it was no read, and stays refused where 7 declines.
+	// A send that is itself its call's read of the clock says nothing of
+	// this one: two reads of one coarse cut, which share it only as the
+	// runs' timing falls. It goes on to step 7, whose check goes red where it
+	// was no read, and stays refused where 7 declines.
 	// A variable holds one text, so a place that holds the moment in another
 	// form (a second inside a nanosecond's text) is no place to bind it: the
 	// places with its text come first, and with none it goes on to step 7 too.
@@ -1111,7 +1112,7 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 		hl, _, _ := dc.holds(evPlace{gave: true}, p.t.live, l, nil, false)
 		return !hr || !hl
 	})
-	if len(sameText) > 0 && !twoClockReads(sameText) {
+	if len(sameText) > 0 && !earliest(sameText).clock {
 		return dc.copied(path, at, n, c, sameText, copiedWhy)
 	}
 
@@ -1143,7 +1144,7 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 		}
 	}
 
-	if len(coarse) > 0 {
+	if len(coarse) > 0 && (!earliest(coarse).clock || twoClockReads(coarse)) {
 		return dc.copied(path, at, n, c, coarse, copiedWhy)
 	}
 
