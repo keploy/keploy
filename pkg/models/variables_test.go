@@ -1691,6 +1691,18 @@ func TestAnOffsetLearnedAtAStepHoldsByItsStepAndItsGuards(t *testing.T) {
 	if !fine.Fine() || !fine.Checkable(time.Millisecond, from, to) || fine.Holds(to.Add(-2030*time.Millisecond), time.Millisecond, from, to) {
 		t.Errorf("FALSE GREEN: an offset Fine for its unit (Fine %v, Checkable %v) holds", fine.Fine(), fine.Checkable(time.Millisecond, from, to))
 	}
+	// clock + 30m at the second, read at its own cut: a replay window of 90 s
+	// is wider than the minute its offset reads in, so it is not Checkable
+	// there and holds nothing, though the application's value lies in the
+	// window plus the offset; a window of 61 ms checks it.
+	ttl := ClockOffset{Min: 30*time.Minute - 461*time.Millisecond, Max: 30*time.Minute + 600*time.Millisecond, Res: sec, Layout: LayoutTyped, Step: sec}
+	wide := from.Add(90 * sec)
+	if !ttl.Holds(to.Add(30*time.Minute).Truncate(sec), sec, from, to) {
+		t.Error("FALSE RED: clock + 30m at the second does not hold in a 61 ms window")
+	}
+	if ttl.Fine() || ttl.Checkable(sec, from, wide) || ttl.Holds(from.Add(45*sec+30*time.Minute).Truncate(sec), sec, from, wide) {
+		t.Errorf("FALSE GREEN: clock + 30m at the second holds in a 90 s window (Fine %v, Checkable %v)", ttl.Fine(), ttl.Checkable(sec, from, wide))
+	}
 	for _, d := range []time.Duration{73 * sec, 133 * sec} {
 		if lock.Holds(to.Truncate(time.Minute).Add(-d), sec, from, to) {
 			t.Errorf("FALSE GREEN: a look-back of %s holds", d)
