@@ -397,6 +397,28 @@ func daemonize(t *testing.T, command string, args ...string) int {
 	return pid
 }
 
+// daemonExitingAdopted daemonizes a daemon that exits once it is adopted,
+// and returns its pid then. One that exits at once may exit before the
+// child that started it does, which then reaps it itself (dash does, at its
+// next command): it is never adopted, and a test that waits for it to be
+// (a zombie of this process, the reaper's reap of it) waits for ever. This
+// one holds its fifo open for read until it is written, which the test does
+// once daemonize returned: its starter has exited, and it is adopted.
+func daemonExitingAdopted(t *testing.T) int {
+	t.Helper()
+	fifo := filepath.Join(t.TempDir(), "exit")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pid := daemonize(t, `exec cat "$1"`, fifo)
+	f, err := os.OpenFile(fifo, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close() // cat reads EOF and exits
+	return pid
+}
+
 // ownerEnv names, in the environment of every process these tests start, the
 // pid of the test process that started it: set in this process's own
 // environment as it starts (init), it is inherited by each daemon a test
@@ -540,7 +562,7 @@ func TestNoReapIsCountedAndAnUnreadableFdTableReapsNothing(t *testing.T) {
 	if err := unix.Prctl(unix.PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0); err != nil {
 		t.Fatal(err)
 	}
-	pid := daemonize(t, "exit 0")
+	pid := daemonExitingAdopted(t)
 	await(t, "the daemon exiting, adopted", func() bool { return zombieOf(pid, os.Getpid()) })
 
 	real := waitAdopted
@@ -1660,7 +1682,7 @@ func TestAZombieNotReapedYetIsNothingLeftRunning(t *testing.T) {
 		t.Fatalf("startAdopting: %v", err)
 	}
 	defer stop()
-	pid := daemonize(t, "exit 0")
+	pid := daemonExitingAdopted(t)
 	await(t, "the daemon exited, adopted", func() bool { return zombieOf(pid, os.Getpid()) })
 	if _, left := stopAdopted(zap.NewNop(), nil, nil); left != "" {
 		t.Fatalf("left %q; want nothing: daemon %d exited, a zombie not reaped yet", left, pid)
@@ -1690,7 +1712,7 @@ func TestTheReaperReapsUnderTheLockAReadOfTheChildrenHolds(t *testing.T) {
 		t.Fatalf("startAdopting: %v", err)
 	}
 	defer stop()
-	pid := daemonize(t, "exit 0")
+	pid := daemonExitingAdopted(t)
 	await(t, "the daemon reaped", func() bool { _, ok := utils.ReadProcStat(pid); return !ok })
 	if held.Load() == 0 || free.Load() != 0 {
 		t.Fatalf("%d reaps under the lock, %d without it; want every one under it", held.Load(), free.Load())
@@ -1801,7 +1823,7 @@ func TestAReaperThatStopsLeavesEveryStopSayingItCannotTell(t *testing.T) {
 		t.Fatalf("startAdopting: %v", err)
 	}
 	defer stop()
-	daemonize(t, "exit 0") // adopted as it exits: the reaper's first reap
+	daemonExitingAdopted(t) // adopted, then exits: the reaper's first reap
 	await(t, "the reaper stopped", func() bool { return !adopting.Load() })
 	_, left := stopAdopted(zap.NewNop(), nil, nil)
 	if !strings.Contains(left, "keploy cannot tell whether its processes ended (it could not adopt them: keploy stopped reaping the daemons it adopts)") {
