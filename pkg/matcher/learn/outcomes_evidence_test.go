@@ -553,3 +553,20 @@ func TestOutcomeAnUnreadPlaceNamesItselfAndWhy(t *testing.T) {
 		}
 	}
 }
+
+// An exchange round F served before the call that comes with no leaf and no
+// payload keploy read (its adapter gave none, or keploy could not read it
+// from its mock) is a place keploy cannot search, never one it drops: a word
+// changed beside it is refused naming it, never made anew each run
+// (offset_test.go:146 on main).
+func TestOutcomeAnExchangeWithNoLeafAndNoPayloadIsUnread(t *testing.T) {
+	m := &models.Mock{Name: "mock-11", Kind: models.HTTP, Spec: models.MockSpec{
+		HTTPReq:  &models.HTTPReq{Method: "GET", URL: "/slots"},
+		HTTPResp: &models.HTTPResp{StatusCode: 200, Body: `{"slot":"slot-7"}`},
+	}}
+	for name, payload := range map[string]Raw{"none given": {}, "unread": unreadPayload(m)} {
+		e := Earlier{Mock: "mock-11", At: oAt.Add(-time.Second), Payload: payload}
+		d := oWord(t, Decide(iCall("body.slot", String, "slot-7", "slot-9", oAt, oAt, nil, []Earlier{e}, nil)), "7", "9")
+		oRefused(t, name, d, RefusalUnread, "mock-11")
+	}
+}
