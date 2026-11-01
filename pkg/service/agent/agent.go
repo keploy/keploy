@@ -192,15 +192,17 @@ type Agent struct {
 	workerOpen   map[scopeKey]time.Time // record: (worker PID, test name) -> begin time (agent clock)
 	scopeWindows []models.ScopeWindow   // record: closed per-test windows
 	scopeMeta    map[scopeKey]scopeMeta
-	scopeTable   map[string][]string  // replay: test name -> mock names (from mappings.yaml)
-	testBegins   map[string]time.Time // replay: test name -> when it began in its recording (SetTestBegins)
-	testReal     map[string][]string  // replay: test name -> the mock.real destinations its recording lists (SetTestBegins)
-	testPool     []string             // keploy test, proven switch: the set's pool, served between test cases (exact_proven.go)
-	testWorker   []models.MockEntry   // keploy test, proven switch: the set's worker scope, each mock with its place (exact_proven.go)
-	testBegun    map[string]bool      // keploy test, proven switch: the set's test cases begun since its staging (exact_proven.go)
-	testBegunAt  map[string]int       // keploy test, proven switch: each begun test case's place in the order they began (exact_proven.go)
-	testBg       *testBackground      // keploy test, proven switch: the set's background under the background rules, nil for today's (exact_proven.go)
-	loadedMocks  int                  // replay: count of mocks stored, for /agent/mock/stats
+	givenBytes   int                            // record, proven switch: the bytes of the values the session's tests gave, held with their windows (MaxGivenBytesPerRecord)
+	scopeTable   map[string][]string            // replay: test name -> mock names (from mappings.yaml)
+	testBegins   map[string]time.Time           // replay: test name -> when it began in its recording (SetTestBegins)
+	testReal     map[string][]string            // replay: test name -> the mock.real destinations its recording lists (SetTestBegins)
+	testGiven    map[string][]models.GivenValue // replay, proven switch: test ID -> the values it gave when recorded; replaced with the scope table (SetScopeGiven)
+	testPool     []string                       // keploy test, proven switch: the set's pool, served between test cases (exact_proven.go)
+	testWorker   []models.MockEntry             // keploy test, proven switch: the set's worker scope, each mock with its place (exact_proven.go)
+	testBegun    map[string]bool                // keploy test, proven switch: the set's test cases begun since its staging (exact_proven.go)
+	testBegunAt  map[string]int                 // keploy test, proven switch: each begun test case's place in the order they began (exact_proven.go)
+	testBg       *testBackground                // keploy test, proven switch: the set's background under the background rules, nil for today's (exact_proven.go)
+	loadedMocks  int                            // replay: count of mocks stored, for /agent/mock/stats
 	// replay: the tests allowed to run (SetScopeGate); nil = every test runs.
 	// Cleared by resetScopeState.
 	gateRun    map[string]struct{}
@@ -663,6 +665,7 @@ func (a *Agent) resetScopeState() {
 	a.openScopes = nil
 	a.scopeWindows = nil
 	a.scopeMeta = nil
+	a.givenBytes = 0
 	// A gate belongs to the replay that installed it; the CLI installs this
 	// session's after the reset.
 	a.gateRun, a.gateReason, a.gateWarned = nil, "", false

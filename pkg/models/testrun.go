@@ -531,6 +531,9 @@ type UnmatchedCall struct {
 	// VariablePlaces mirrors MockMismatchReport.VariablePlaces: the URL path
 	// places of a test variable on this call, under the proven switch only.
 	VariablePlaces []string `json:"variable_places,omitempty" yaml:"variable_places,omitempty"`
+	// Given mirrors MockMismatchReport.Given: the given a variable miss is
+	// about, by its name, never its value.
+	Given string `json:"given,omitempty" yaml:"given,omitempty"`
 	// At is when the call missed, so a client can tell which test made it.
 	At time.Time `json:"at,omitzero" yaml:"at,omitempty"`
 	// Kind is where the call was made, under the proven switch (MissInTest,

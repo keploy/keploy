@@ -111,7 +111,15 @@ type Earlier struct {
 	// no Seen, and every value that changed is refused (ClassifyIn,
 	// requestUnread), never learned as noise or an echo.
 	Unread string
-	Seen   []Seen
+	// Gave, of a Given place, says it is a value the running test gave keploy
+	// (POST /agent/scope/given; TestGiven) rather than its test case's
+	// request: one Seen, at the given's variable name (Leaf.Path), as
+	// recorded and as the test gave it in record's full round (Live). Only
+	// the rule that finds a value whole or as a part of its text reads it
+	// (withoutGave): never a moment it names, so a read of the application's
+	// own clock learns as it does with no given.
+	Gave bool
+	Seen []Seen
 	// noTime: the exchange's recorded time keploy cannot read (At was the
 	// zero time), read as one made at the call's own instant
 	// (timedEarlier), and named so.
@@ -754,6 +762,9 @@ type Place struct {
 	// call of the test: nothing binds a variable there, and a value found
 	// there is refused.
 	Given bool
+	// Gave: the Given place is a value the test gave keploy (Earlier.Gave),
+	// named by its variable (Path).
+	Gave bool
 	// Name is the variable already at Var (Seen.Name), "" for none.
 	Name string
 	// Clock: the learn step learned the leaf as a plain read of the
@@ -1480,8 +1491,14 @@ const (
 // classifyRead is classifyGiven of raw as handed: each Raw read as the one
 // place it is.
 func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time, earlier []Earlier, raw []Raw, resp []Leaf, w *Window, given GivenEarlier, follow bool) []Learned {
-	served := append([]Earlier(nil), earlier...)
-	sort.SliceStable(served, func(i, j int) bool { return served[i].At.Before(served[j].At) })
+	placed := append([]Earlier(nil), earlier...)
+	sort.SliceStable(placed, func(i, j int) bool { return placed[i].At.Before(placed[j].At) })
+	// A value the test gave keploy (Earlier.Gave) is read by the rule that
+	// finds a value whole or as a part (appearedIn, instantServedFrom) and
+	// by no other: no moment, instant, offset, echo or order rule reads it,
+	// so a value of the application's own clock learns as it does with no
+	// given (withoutGave).
+	served := withoutGave(placed)
 	if len(drift) > 0 {
 		dc.warm(raw)
 	}
@@ -1527,7 +1544,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 			return Learned{Kind: KindUnaccounted, Recorded: r, Live: l, Why: unreadRaw}
 		}
 		if r.Type == Instant || l.Type == Instant {
-			return dc.classifyInstant(r, l, at, served, raw, resp, w, unreadReq, places, skip)
+			return dc.classifyInstant(r, l, at, placed, raw, resp, w, unreadReq, places, skip)
 		}
 		ln := Learned{Kind: KindNoise, Recorded: r, Live: l}
 		var fol *follows
@@ -1535,7 +1552,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 			fol = &follows{dc: dc, rec: r.Value, live: l.Value, at: at, served: served, raw: raw, places: places}
 		}
 		if r.Value != "" {
-			if from, ok := appearedIn(dc, dc.ofIn(r.Value, l.Value, w, at), at, served, raw, fol, &eh); ok && skip&skipSource == 0 {
+			if from, ok := appearedIn(dc, dc.ofIn(r.Value, l.Value, w, at), at, placed, raw, fol, &eh); ok && skip&skipSource == 0 {
 				ln.Kind, ln.From = KindVariable, from
 				if from.Side == "" || from.Echo {
 					ln.Why = evidence(dc.ofIn(r.Value, l.Value, w, at), from)
@@ -3223,6 +3240,20 @@ func hexValue(h string) uint32 {
 // minute share their time group). Every other shared changed word is a value
 // that flowed.
 func sources(e, v *valueDrift) (found, whole bool) {
+	return sourcesBy(e, v, false)
+}
+
+// sourcesBy is sources, where gave says e is a value the test gave keploy
+// (Earlier.Gave): a source only by its text, whole or as a part, never by a
+// moment it names (holdsMomentOf), which a read of the application's own
+// clock in the same second names by coincidence. Its exact text inside v,
+// recorded and live, glued to letters or digits too, is a part however it
+// moved (gaveDrifted): the test chose it, so its moving by the lead (a nonce
+// of the test's clock, which F runs as the application's) makes it no read
+// of the application's clock. A fraction of one of v's instants is no part
+// ("14" of "11:14:17"): a short given beside the application's clock read
+// names no value that flowed.
+func sourcesBy(e, v *valueDrift, gave bool) (found, whole bool) {
 	if e.rec == v.rec {
 		return true, true
 	}
@@ -3241,6 +3272,9 @@ func sources(e, v *valueDrift) (found, whole bool) {
 	drifted := func(p run, rec, live string) bool {
 		return ContainsToken(rec, p.rec) && ContainsToken(live, p.live) && !ContainsToken(live, p.rec) && !ContainsToken(rec, p.live)
 	}
+	if gave && (gaveDrifted(e.rec, e.live, v.rec, v.live) || v.decoded && gaveDrifted(e.rec, e.live, v.decRec, v.decLive)) {
+		return true, false
+	}
 	// v drifted with e also where e held a moment of v's that changed both
 	// ways, in any layout (instants.go, rule 1), or v's text whole, recorded
 	// and live; its words co-drift below as any value's do. This only finds
@@ -3249,7 +3283,7 @@ func sources(e, v *valueDrift) (found, whole bool) {
 	// moment drift alike whatever made them.
 	if !v.clock.whole && !e.clock.whole {
 		whole := run{v.rec, v.live}
-		if e.holdsMomentOf(v) || drifted(whole, e.rec, e.live) || v.decoded && drifted(run{v.decRec, v.decLive}, e.rec, e.live) || e.decoded && drifted(whole, e.decRec, e.decLive) {
+		if !gave && e.holdsMomentOf(v) || drifted(whole, e.rec, e.live) || v.decoded && drifted(run{v.decRec, v.decLive}, e.rec, e.live) || e.decoded && drifted(whole, e.decRec, e.decLive) {
 			return true, false
 		}
 	}
@@ -3284,6 +3318,56 @@ func sources(e, v *valueDrift) (found, whole bool) {
 	return false, false
 }
 
+// gaveDrifted reports whether a value the test gave (rec as recorded, live
+// as it gave it in record's full round, never the same: appearedIn skips a
+// given that did not move) drifted inside a value (vRec as recorded, vLive
+// as F saw it): its recorded text in vRec and its live text in vLive
+// (gaveIn). Either text also on the other side ("<live>,<rec>", a short
+// given's chance match) still makes the value a part of the given: refused,
+// naming it, a red that is safe, never a value learned unchecked.
+func gaveDrifted(rec, live, vRec, vLive string) bool {
+	return gaveIn(vRec, rec) && gaveIn(vLive, live)
+}
+
+// gaveIn reports whether s holds g, a value the test gave, by its exact text
+// at any position, glued to letters or digits or between words, where it
+// cuts none of s's instants (instantSpans): each instant of s it overlaps,
+// it holds whole. The whole of an instant it can be ("<unix s>" of
+// "rep-<unix s>"), never a fraction of one.
+func gaveIn(s, g string) bool {
+	if g == "" {
+		return false
+	}
+	var spans []instant
+	read := false
+	for i := 0; i <= len(s)-len(g); {
+		j := strings.Index(s[i:], g)
+		if j < 0 {
+			return false
+		}
+		start := i + j
+		if !read {
+			spans, read = instantSpans(s), true
+		}
+		if !cutsInstant(spans, start, start+len(g)) {
+			return true
+		}
+		i = start + 1
+	}
+	return false
+}
+
+// cutsInstant reports whether the text [start, end) holds a fraction of one
+// of spans: it overlaps the instant and does not hold it whole.
+func cutsInstant(spans []instant, start, end int) bool {
+	for _, sp := range spans {
+		if sp.start < end && start < sp.end && (start > sp.start || end < sp.end) {
+			return true
+		}
+	}
+	return false
+}
+
 // appeared is the earlier place of the test's recording the drifted value
 // (recorded, now) came from: a leaf of an HTTP mock F served before (every
 // one of them came earlier in the test) that F saw drift (sources), else a
@@ -3309,7 +3393,12 @@ func appeared(dc *DriftCache, recorded, now string, at time.Time, served []Earli
 // served as recorded (Seen.Live) is no place either way: it did not drift.
 // A leaf that held the recorded value whole is the value's source only where
 // it held the value F saw too: one F saw hold another value is set aside the
-// same way, and named so (follows.refuteSeen).
+// same way, and named so (follows.refuteSeen). A value the test gave keploy
+// (Earlier.Gave) is a place by its text alone, whole or as a part
+// (sourcesBy), and read by no later rule: never set aside by what record's
+// full round sent where it stands (refuteSeen), so a call that carried the
+// given whole when recorded and another value in the full round stays the
+// given's, refused naming it, never learned as noise.
 func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, raw []Raw, fol *follows, eh *earlierHeld) (Place, bool) {
 	recorded := v.rec
 	// The place is where the value was sent whole, not where it was answered
@@ -3328,14 +3417,18 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 				continue
 			}
 			var ok, whole bool
-			if s.Leaf.Type == Instant {
+			switch {
+			case e.Gave:
+				// A value the test gave: whole, or a part of its text only.
+				ok, whole = sourcesBy(dc.of(s.Leaf.Value, s.Live), v, true)
+			case s.Leaf.Type == Instant:
 				// An instant its protocol types has no words: what v drifted
 				// with there is its moments (dc.instantSource).
 				ok, whole = dc.instantSource(s, v), s.Leaf.Value == recorded
-			} else {
+			default:
 				ok, whole = sources(dc.of(s.Leaf.Value, s.Live), v)
 			}
-			if !ok || fol.refuteSeen(e, s, whole, v) {
+			if !ok || !e.Gave && fol.refuteSeen(e, s, whole, v) {
 				continue
 			}
 			if r := placeRank(e, s, whole); r < rank {
@@ -3355,6 +3448,8 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 	if rank < 7 {
 		return best, true
 	}
+	// No other rule reads a value the test gave (classifyRead).
+	served = withoutGave(served)
 	// The echo (instants.go): where an earlier place holds the moment F saw
 	// in v (a pick from served data, by its clock), a place that holds the
 	// moment v was recorded with is where it came from, before any lead or
@@ -3785,10 +3880,29 @@ func placeRank(e Earlier, s Seen, whole bool) int {
 	return r
 }
 
+// withoutGave is earlier without the values the test gave keploy
+// (Earlier.Gave), earlier itself where it holds none: what every rule but
+// the one that finds a value whole or as a part reads (classifyRead).
+func withoutGave(earlier []Earlier) []Earlier {
+	for i, e := range earlier {
+		if !e.Gave {
+			continue
+		}
+		out := append(make([]Earlier, 0, len(earlier)-1), earlier[:i]...)
+		for _, e := range earlier[i+1:] {
+			if !e.Gave {
+				out = append(out, e)
+			}
+		}
+		return out
+	}
+	return earlier
+}
+
 // seenPlace is the place s of e is.
 func seenPlace(e Earlier, s Seen, whole bool) Place {
 	return Place{Mock: e.Mock, Side: s.Side, Path: s.Leaf.Path, Noise: s.Leaf.Noise,
-		Var: s.Place, Live: s.Live, Whole: whole, Own: e.Own, Run: e.Run, Given: e.Given, Name: s.Name, Clock: s.Clock,
+		Var: s.Place, Live: s.Live, Whole: whole, Own: e.Own, Run: e.Run, Given: e.Given, Gave: e.Gave, Name: s.Name, Clock: s.Clock,
 		InStartUp: e.StartUp, givenWhole: s.Side == Response && whole}
 }
 

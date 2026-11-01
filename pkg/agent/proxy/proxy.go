@@ -4775,6 +4775,25 @@ func (p *Proxy) OpenExactTest(test string, owned []*models.Mock, given []models.
 	return p.openExact(func(m *MockManager) { m.OpenExactTest(test, owned, given) })
 }
 
+// GiveExactTest implements agent.ExactTestGiver (MockManager.GiveExactTest).
+// Under the proven switch the learn step also holds the value as an earlier
+// place of the test's calls (learn.Tracker.GiveValue), so a value made from
+// it (a part, a pick by the clock) is refused naming the given, never learned
+// as noise.
+func (p *Proxy) GiveExactTest(test string, b models.VariableBinding) error {
+	m := p.getMockManager()
+	if m == nil {
+		return errNoMockManager
+	}
+	if err := m.GiveExactTest(test, b); err != nil {
+		return err
+	}
+	if provenswitch.On() {
+		p.learnTracker.GiveValue(learn.TestGiven(b.Mock, b.Name, b.Recorded, b.Value))
+	}
+	return nil
+}
+
 // openExact opens a test under exact serving on the mock manager (open).
 func (p *Proxy) openExact(open func(*MockManager)) error {
 	m := p.getMockManager()
@@ -5874,6 +5893,7 @@ func (p *Proxy) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 					Differs:          parserErr.MismatchReport.Differs,
 					FieldReasons:     parserErr.MismatchReport.FieldReasons,
 					VariablePlaces:   parserErr.MismatchReport.VariablePlaces,
+					Given:            parserErr.MismatchReport.Given,
 					NotOwned:         parserErr.MismatchReport.NotOwned,
 					// Why the call missed, when record's full round's learn
 					// step decided it: judging's evidence.

@@ -729,6 +729,15 @@ type ExactTestOpener interface {
 	OpenExactTest(test string, owned []*models.Mock, given []models.VariableBinding) error
 }
 
+// ExactTestGiver is an optional ExactServer capability of a proxy that keeps
+// the test variables a replay binds: GiveExactTest binds b, a value the open
+// test gave (POST /agent/scope/given), as a given variable of test's scope
+// (variables.Table.Give). It refuses when test is not the test served, or
+// when b's name is bound already.
+type ExactTestGiver interface {
+	GiveExactTest(test string, b models.VariableBinding) error
+}
+
 // AppClockSetter is an optional proxy capability: SetAppClock hands the
 // proxy how to read the app's clock at a real instant, as the agent's hooks
 // move it (a time-freeze; false where they cannot tell), so that the

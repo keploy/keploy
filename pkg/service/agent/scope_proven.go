@@ -1146,6 +1146,17 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, w
 	}
 	// Before why: why goes in front of whatever reason the evidence gives.
 	ev, outcome = a.chargeCaptureLosses(ctx, id, ev, outcome, readErr == nil, beganAt)
+	// A value the test gave that its recording does not hold checks
+	// nothing, and the call that carries it misses as a plain call, or
+	// leaves the recorded one unmade: said first, with the step that fixes
+	// it. After the losses, whose text writes the evidence's again. Misses
+	// and unmade calls are read in a replay only (testEvidence, above): a
+	// record has none, so the note is a replay's.
+	if readErr == nil && ev != nil && (len(ev.Misses) > 0 || len(ev.Unconsumed) > 0) {
+		if note := a.givensNotRecorded(id); note != "" {
+			ev.Reason = "keploy: " + note + ". " + strings.TrimPrefix(ev.Reason, "keploy: ")
+		}
+	}
 	if settleErr != nil {
 		note := "keploy could not tell that every call of " + id + " reached it: " + settleErr.Error()
 		if why == "" {

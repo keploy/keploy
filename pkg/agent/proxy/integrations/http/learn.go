@@ -2061,10 +2061,11 @@ type pairing struct {
 //     answered where the recorded answer holds the value whole. Leaves of
 //     this call that drifted from the same recorded value are one variable.
 //   - A value the test case's request gave (given: its template keys, which
-//     keploy test binds for the test, #4789) is that key's variable, used
-//     here under the key's name with no bind, whatever else Classify found:
-//     the test case is earlier than any call it makes. Its name is the key's
-//     alone in the test: no other variable takes it.
+//     keploy test binds for the test, #4789), or the test gave keploy (a
+//     given, models.GivenPrefix), is that key's variable, used here under the
+//     key's name with no bind, whatever else Classify found: the test case is
+//     earlier than any call it makes. Its name is the key's alone in the
+//     test: no other variable takes it. A given's says why (learn.GivenWhy).
 func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Shape, own bool, learned []learn.Learned, earlier []learn.Earlier, given []variables.Binding) (pairing, string) {
 	p := pairing{noise: map[string][]string{}, vars: models.MockVariables{}, binds: map[string]models.MockVariables{}, values: map[string]variables.Binding{}}
 	jsonReq := rec.Fixed["body"] == "json"
@@ -2092,13 +2093,17 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 			place, placeable := learn.VarPlace(r, jsonReq)
 			switch {
 			case !placeable:
-				return p, r.Path + " carries the test case's " + g.Name + " at a place keploy cannot follow a variable to (a form or multipart field)"
+				return p, r.Path + " carries " + learn.GivenNamed(g.Name) + " at a place keploy cannot follow a variable to (a form or multipart field)"
 			case !own:
-				return p, r.Path + " carries the test case's " + g.Name + ", and only a test's own calls carry its variables"
+				return p, r.Path + " carries " + learn.GivenNamed(g.Name) + ", and only a test's own calls carry its variables"
 			}
 			v := p.vars[g.Name]
 			v.Recorded, v.Use = g.Recorded, appendNew(v.Use, place)
 			v.Answer = appendNew(v.Answer, answers(l, respLeavesOf(m))...)
+			if models.IsGivenVariable(g.Name) {
+				// A value the test gave says where, and how to undo it.
+				v.Why = learn.GivenWhy(g.Name, g.Place, g.Recorded, g.Value)
+			}
 			p.vars[g.Name] = v
 			p.values[g.Name] = g
 			continue
@@ -2120,6 +2125,20 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 		case learn.KindVariable:
 			from := l.From
 			switch {
+			case from.Given && from.Gave:
+				// A value made from one the test gave keploy
+				// (learn.Earlier.Gave): keploy follows a given only whole.
+				// One that was the given whole when recorded, but not
+				// what the test gave in record's full round (givenFor), is
+				// a given the application did not pass on there.
+				why := learn.GivenDerivedWhy(r.Path, from.Path, givenSource(given, from.Path))
+				if from.Whole {
+					why = learn.GivenNotPassedOnWhy(r.Path, from.Path, givenSource(given, from.Path))
+				}
+				if l.Why != "" {
+					why += "; " + l.Why
+				}
+				return p, why
 			case from.Given:
 				// The test case's own request (learn.Earlier.Given): what
 				// the application was given, which no variable binds at.
@@ -2251,6 +2270,17 @@ func givenBindings(mockDb integrations.MockMemDb) []variables.Binding {
 		}
 	}
 	return out
+}
+
+// givenSource is where the test gave the given named name (its binding's
+// Place, file:line), "" when the table holds none of that name.
+func givenSource(given []variables.Binding, name string) string {
+	for _, g := range given {
+		if g.Name == name {
+			return g.Place
+		}
+	}
+	return ""
 }
 
 // givenFor is the given value the drifted leaf carries: the key's value

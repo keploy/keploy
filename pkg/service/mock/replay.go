@@ -1183,6 +1183,25 @@ func (m *mockService) pushScopeTable(ctx context.Context, name string, filtered,
 	return nil
 }
 
+// recordedGivens is, by test ID, the values each test of mp gave when it was
+// recorded (models.MappedTestCase.Given): nil when none gave any.
+func recordedGivens(mp *models.Mapping) map[string][]models.GivenValue {
+	if mp == nil {
+		return nil
+	}
+	var out map[string][]models.GivenValue
+	for _, tc := range mp.TestCases {
+		if len(tc.Given) == 0 {
+			continue
+		}
+		if out == nil {
+			out = make(map[string][]models.GivenValue)
+		}
+		out[tc.ID] = tc.Given
+	}
+	return out
+}
+
 // pushProvenTable hands the agent, under the proven switch, what each test
 // owns and each key's pool slice (design v14 §5.2): the one view the agent
 // serves a replay from. A test owns exactly the mocks its mapping lists (the
@@ -1192,7 +1211,8 @@ func (m *mockService) pushScopeTable(ctx context.Context, name string, filtered,
 // test lists is the pool's: under the key it was recorded with (mappings'
 // startup:), else models.PoolKeyNone. A mapping that cannot be read, or that
 // names a mock the recording does not have, refuses, and so does an agent
-// that refuses the table: nothing is served from a whole pool instead.
+// that refuses the table: nothing is served from a whole pool instead. The
+// values each test gave when it was recorded go in the same request.
 func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded, decoded []*models.Mock) error {
 	refuse := func(why string) error {
 		return fmt.Errorf("keploy cannot judge each test of mock set %q: %s; record it again with keploy mock record", name, why)
@@ -1247,7 +1267,7 @@ func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded, 
 			zap.String("mock-set", name),
 			zap.String("next_step", "record the set again with this keploy: keploy mock record writes mappings.yaml"))
 	}
-	if err := pp.PushProvenTable(ctx, table, pool, windows); err != nil {
+	if err := pp.PushProvenTable(ctx, table, pool, windows, recordedGivens(mp)); err != nil {
 		return refuse("its agent refused the per-test table: " + err.Error())
 	}
 	m.mockOwners = models.MockOwners(table)

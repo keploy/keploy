@@ -672,5 +672,5 @@ func clientTestWhy(part string, windowed bool) string {
 		what = "keploy saw no read of the app's clock for its call" + which
 		seen = ", and saw none for this call: keploy's clock hooks did not report the application's clock, or no earlier call and no begin of the test bounds the read"
 	}
-	return what + ": keploy mock's test harness gives the application its inputs, which keploy does not see, so keploy learns a changed instant as noise only where it lies, in the recording and in record's full round, within its call's window on the application's clock as keploy's clock hooks report it" + seen + ". If your test supplies this value, have it supply the same value in every run, and keploy keeps comparing it; if the application reads it from its own clock, declare it noise in keploy.yml, and keploy stops comparing it"
+	return what + ": keploy mock's test harness gives the application its inputs, which keploy does not see, so keploy learns a changed instant as noise only where it lies, in the recording and in record's full round, within its call's window on the application's clock as keploy's clock hooks report it" + seen + ". If your test supplies this value, " + clientGiveWhy + "; if the application reads it from its own clock, declare it noise in keploy.yml, and keploy stops comparing it"
 }

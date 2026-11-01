@@ -327,7 +327,12 @@ func (a *Agent) closeWindow(name string, pid int, at time.Time) bool {
 		if len(meta.unread) > 0 {
 			ev = withUnread(ev, meta.unread)
 		}
-		a.scopeWindows = append(a.scopeWindows, models.ScopeWindow{Name: name, Start: start, End: end, PID: uint32(pid), Dir: meta.dir, Suite: meta.suite, Outcome: meta.outcome, Evidence: ev, Real: meta.real})
+		// A replay's givens end with their test (ProvenGive): only a
+		// record's window keeps them, for the test's mapping.
+		if a.replaying() {
+			meta.given = nil
+		}
+		a.scopeWindows = append(a.scopeWindows, models.ScopeWindow{Name: name, Start: start, End: end, PID: uint32(pid), Dir: meta.dir, Suite: meta.suite, Outcome: meta.outcome, Evidence: ev, Real: meta.real, Given: meta.given})
 		delete(a.scopeMeta, k)
 	}
 	a.scopeMu.Unlock()
@@ -502,6 +507,8 @@ type scopeMeta struct {
 	evidence *models.ScopeEvidence
 	// real are the mock.real destinations the test used while open.
 	real []models.RealUse
+	// given are the values the test gave while open, in order (ProvenGive).
+	given []models.GivenValue
 	// unread is what the test was charged while open with mocks of its
 	// whose container the Docker daemon did not answer the read of
 	// (unreadMock): its window says so as it closes.
