@@ -1,7 +1,10 @@
 package learn
 
 import (
+	"crypto/sha1"
+	"encoding/base32"
 	"encoding/base64"
+	"encoding/hex"
 	"reflect"
 	"strconv"
 	"strings"
@@ -765,5 +768,217 @@ func TestOutcomeTheTrackerGivesItsTestsRecordedBegin(t *testing.T) {
 	var none *Tracker
 	if got := none.RecBegan(); !got.IsZero() {
 		t.Errorf("no tracker: RecBegan %v", got)
+	}
+}
+
+// oEncoded are the encodings the reader does not open as a step, each
+// carrying id inside a longer value: what round F must not learn fresh when
+// an earlier call shows the id in both runs.
+func oEncoded() map[string]func(id string) string {
+	b64 := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
+	wrap := func(e string, width int, nl string) string {
+		var sb strings.Builder
+		for len(e) > width {
+			sb.WriteString(e[:width] + nl)
+			e = e[width:]
+		}
+		return sb.String() + e + nl
+	}
+	doc := func(id string) string { return `{"note":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx","ref":"` + id + `","v":1}` }
+	digest := func(s string) string {
+		sum := sha1.Sum([]byte(s))
+		return hex.EncodeToString(sum[:])
+	}
+	return map[string]func(string) string{
+		"wrapped base64 and a line of text": func(id string) string { return wrap(b64(doc(id)), 60, "\n") + "sent by worker 3\n" },
+		"wrapped base64 after a key":        func(id string) string { return "data=" + wrap(b64(doc(id)), 60, "\n") },
+		"indented wrapped base64":           func(id string) string { return "<blob>\n    " + wrap(b64(doc(id)), 64, "\n    ") + "</blob>" },
+		"wrapped base64 with escaped CRLFs": func(id string) string { return `{"blob":"` + wrap(b64(doc(id)), 76, `\r\n`) + `"}` },
+		"a signed message": func(id string) string {
+			d := b64(`{"_rails":{"message":"` + id + `","exp":null,"pur":"x"}}`)
+			return d + "--" + digest(d)
+		},
+		"padded base32": func(id string) string { return base32.StdEncoding.EncodeToString([]byte(id + "-" + id)) },
+		"0x hex":        func(id string) string { return "0x" + hex.EncodeToString([]byte(id)) },
+		"base64 glued between a prefix and a digest": func(id string) string {
+			d := base64.RawURLEncoding.EncodeToString([]byte(doc(id)))
+			return "v1_" + d + "--" + digest(d)
+		},
+	}
+}
+
+// oSent is an earlier call of the test that sent r, round F sending f.
+func oSent(r, f string) []Earlier {
+	return []Earlier{{Mock: "mock-0", At: oAt.Add(-time.Second), Own: true, Seen: []Seen{
+		{Side: Request, Leaf: oText("body.user", r), Live: f, Place: "body.user"},
+	}}}
+}
+
+// An id an earlier call sent, carried inside an encoding keploy cannot bind a
+// word in, is the value that moved: no word of the encoded text may be
+// learned fresh, or the first call would go unchecked. Refused, and the
+// refusal names the place, the value and what to do.
+func TestOutcomeAnIdInsideAnEncodingTheReaderDoesNotOpenIsRefused(t *testing.T) {
+	const r, f = "rAHcEraS7Qx1", "Zq81Lm0XpVb4"
+	for name, enc := range oEncoded() {
+		t.Run(name, func(t *testing.T) {
+			ds := Decide(oInput("body.blob", enc(r), enc(f), oSent(r, f), nil))
+			if len(ds) == 0 {
+				t.Fatal("no decision")
+			}
+			for _, d := range ds {
+				oRefused(t, name, d, RefusalUnknown, "mock-0", r)
+				if !oEdits(d.Refusal, EditReRecord, EditNoiseAtField) {
+					t.Errorf("no edit to act on: %+v", d.Refusal)
+				}
+			}
+		})
+	}
+}
+
+// The base64 of a whole value, wrapped or not, is an encoding the reader
+// does open: the id binds to its place inside it.
+func TestOutcomeAnIdInsideWholeWrappedBase64Binds(t *testing.T) {
+	const r, f = "rAHcEraS7Qx1", "Zq81Lm0XpVb4"
+	enc := func(id string) string {
+		e := base64.StdEncoding.EncodeToString([]byte(`{"note":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx","ref":"` + id + `","v":1}`))
+		return e[:60] + "\n" + e[60:] + "\n"
+	}
+	ds := Decide(oInput("body.blob", enc(r), enc(f), oSent(r, f), nil))
+	if d := oWord(t, ds, r, f); d.Outcome != OutcomeValue || d.From.Mock != "mock-0" {
+		t.Fatalf("want a value of mock-0: %s", oDescribe(ds))
+	}
+}
+
+// The same value with nothing earlier to explain it stays what it is: a
+// value made anew each run, checked at every later use.
+func TestOutcomeAnEncodedValueNoPlaceHoldsTheWordsOfStaysFresh(t *testing.T) {
+	for name, enc := range oEncoded() {
+		t.Run(name, func(t *testing.T) {
+			ds := Decide(oInput("body.blob", enc("rAHcEraS7Qx1"), enc("Zq81Lm0XpVb4"), oSent("unrelated", "unrelated"), nil))
+			for _, d := range ds {
+				if d.Outcome != OutcomeFresh {
+					t.Errorf("want fresh: %s", oDescribe(ds))
+				}
+			}
+		})
+	}
+}
+
+// Only a value of 32 bits or more says anything: a shorter one in both runs
+// is chance, as at any other place (rule B).
+func TestOutcomeAShortIdInsideAnEncodingIsChance(t *testing.T) {
+	enc := oEncoded()["a signed message"]
+	const r, f = "a1b2c3", "d4e5f6" // 24 bits
+	ds := Decide(oInput("body.blob", enc(r), enc(f), oSent(r, f), nil))
+	for _, d := range ds {
+		if d.Outcome != OutcomeFresh {
+			t.Errorf("want fresh: %s", oDescribe(ds))
+		}
+	}
+	const r32, f32 = "a1b2c3d4", "e5f6a7b8" // 32 bits, the bound
+	ds = Decide(oInput("body.blob", enc(r32), enc(f32), oSent(r32, f32), nil))
+	for _, d := range ds {
+		oRefused(t, "32 bits", d, RefusalUnknown, "mock-0")
+	}
+}
+
+// An id another test sent is out of the call's scope: this rule reads only
+// the call's scope, and the encoded value's words stay fresh, as they do
+// with no place at all.
+func TestOutcomeAnIdAnotherTestSentInsideAnEncodingIsNotThisRule(t *testing.T) {
+	const r, f = "rAHcEraS7Qx1", "Zq81Lm0XpVb4"
+	enc := oEncoded()["a signed message"]
+	sent := oSent(r, f)
+	sent[0].Own, sent[0].Run = false, true
+	ds := Decide(oInput("body.blob", enc(r), enc(f), sent, nil))
+	for _, d := range ds {
+		if d.Outcome != OutcomeFresh {
+			t.Errorf("want fresh: %s", oDescribe(ds))
+		}
+	}
+}
+
+// A place that kept its value says nothing: the id did not move there, so
+// the encoded value's change is not its copy.
+func TestOutcomeAnIdThatStayedAtItsPlaceSaysNothingOfAnEncodedValue(t *testing.T) {
+	const r, f = "rAHcEraS7Qx1", "Zq81Lm0XpVb4"
+	enc := oEncoded()["a signed message"]
+	ds := Decide(oInput("body.blob", enc(r), enc(f), oSent(r, r), nil))
+	for _, d := range ds {
+		if d.Outcome != OutcomeFresh {
+			t.Errorf("want fresh: %s", oDescribe(ds))
+		}
+	}
+}
+
+// An encoding the reader does open keeps its word-level answer: the id binds
+// to its place, and the fresh nonce beside it stays fresh, the id in the
+// value's decoded form being read there, not hidden.
+func TestOutcomeAWordOfAnOpenedEncodingKeepsItsAnswerBesideAnId(t *testing.T) {
+	const r, f = "rAHcEraS7Qx1", "Zq81Lm0XpVb4"
+	const rn, fn = "Hq6Ys0Bc5DkW", "Tn2Pj9Vm3LsX"
+	enc := func(id, nonce string) string {
+		return base64.StdEncoding.EncodeToString([]byte("id=" + id + " nonce=" + nonce))
+	}
+	ds := Decide(oInput("body.blob", enc(r, rn), enc(f, fn), oSent(r, f), nil))
+	if d := oWord(t, ds, r, f); d.Outcome != OutcomeValue {
+		t.Fatalf("the id: %s", oDescribe(ds))
+	}
+	if d := oWord(t, ds, rn, fn); d.Outcome != OutcomeFresh {
+		t.Fatalf("the nonce: %s", oDescribe(ds))
+	}
+}
+
+// A separator that changed beside a changed word, inside one whole token
+// ("a-17" to "a_42"). Replay writes the word into the recorded text and
+// compares the text whole (Address.ReplaceWord, as an adapter's replay
+// does), so the recorded separator stands, the application's request differs
+// and replay goes red. Whichever way the word is learned, the rendered
+// request must never equal what the application sent: that would be a green
+// that checked nothing of the change.
+func TestOutcomeASeparatorChangedBesideAWordGoesRedAtReplay(t *testing.T) {
+	for _, tc := range []struct {
+		name, rec, live, rendered string
+		earlier                   []Earlier
+	}{
+		{name: "fresh", rec: "a-17", live: "a_42", rendered: "a-42"},
+		{name: "bound", rec: "a-17", live: "a_42", rendered: "a-42", earlier: oSent("17", "42")},
+		{name: "fresh, the separator after the word", rec: "order-17_x", live: "order-42-x", rendered: "order-42_x"},
+		{name: "fresh, every word of a token", rec: "Sfl-KxwRJ_SMe", live: "Q1x_Yp-9vTq", rendered: "Q1x-Yp_9vTq"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ds := Decide(oInput("body.ref", tc.rec, tc.live, tc.earlier, nil))
+			text := tc.rec
+			for _, d := range ds {
+				if d.Outcome == OutcomeRefused {
+					t.Fatalf("want it learned, its red pinned here: %s", oDescribe(ds))
+				}
+				out, ok := d.At.ReplaceWord(text, d.Full)
+				if !ok {
+					t.Fatalf("replay cannot write %q at %+v in %q", d.Full, d.At, text)
+				}
+				text = out
+			}
+			if text == tc.live {
+				t.Fatalf("FALSE GREEN: replay renders the changed separator: %s", oDescribe(ds))
+			}
+			if text != tc.rendered {
+				t.Fatalf("rendered %q, want %q: %s", text, tc.rendered, oDescribe(ds))
+			}
+		})
+	}
+}
+
+// A secret's field prints neither value of an id its decoded form carries,
+// though the line quotes words the field's own value does not hold as
+// written.
+func TestOutcomeAnIdInsideAnEncodedSecretIsNotPrinted(t *testing.T) {
+	const r, f = "rAHcEraS7Qx1", "Zq81Lm0XpVb4"
+	enc := oEncoded()["a signed message"]
+	d := Decide(oInput("body.token", enc(r), enc(f), oSent(r, f), nil))[0]
+	oRefused(t, "an encoded secret", d, RefusalUnknown, "mock-0")
+	if strings.Contains(d.Line, r) || strings.Contains(d.Line, f) {
+		t.Fatalf("the line prints a secret's value: %s", d.Line)
 	}
 }
