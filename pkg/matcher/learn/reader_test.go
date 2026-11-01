@@ -468,3 +468,41 @@ func TestReaderWholeBase64RunsAreTheScansTokens(t *testing.T) {
 		}
 	}
 }
+
+// A call's index keeps its answers on the set's one budget, the one its
+// tiers keep within (setBudget), never on a budget beside it: what it keeps
+// is counted there while the call runs, it keeps none of what the set has
+// no room for once the tiers that let go (words, payloads) have let go of
+// theirs, and it gives all of it back when the call is over (release). Its
+// answers are the same kept or not.
+func TestReaderIndexKeepsOnTheSetsOneBudget(t *testing.T) {
+	defer func(b, r int64) { learnBudget, readerBudget = b, r }(learnBudget, readerBudget)
+	learnBudget, readerBudget = 1<<20, 0
+	text := "id 7f3c " + strings.Repeat("word ", 20000)
+
+	dc := NewDriftCache()
+	dc.set = newSetDerived()
+	x := newReaderIndex(dc)
+	if held, read := x.text(text).holdsWord("7f3c"); !held || !read {
+		t.Fatalf("held %v read %v; want the word held", held, read)
+	}
+	if x.used <= 0 || dc.set.budget.used != x.used {
+		t.Fatalf("the index keeps %d bytes; the set's budget counts %d: want what the index keeps counted on the set's budget", x.used, dc.set.budget.used)
+	}
+	x.release()
+	if dc.set.budget.used != 0 {
+		t.Fatalf("the call is over and the set's budget still counts %d bytes of its index", dc.set.budget.used)
+	}
+
+	// The set's tiers that let none go keep all but 1 KiB of its budget.
+	full := NewDriftCache()
+	full.set = newSetDerived()
+	full.set.budget.used = full.set.budget.limit - 1<<10
+	y := newReaderIndex(full)
+	if held, read := y.text(text).holdsWord("7f3c"); !held || !read {
+		t.Fatalf("past the set's budget: held %v read %v; want the word held, as within it", held, read)
+	}
+	if y.used != 0 || full.set.budget.used > full.set.budget.limit {
+		t.Fatalf("the set's budget has 1 KiB left; the index keeps %d bytes and the set counts %d of %d: want nothing kept past the set's one budget", y.used, full.set.budget.used, full.set.budget.limit)
+	}
+}

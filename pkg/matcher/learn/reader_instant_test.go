@@ -1,7 +1,9 @@
 package learn
 
 import (
+	"encoding/base64"
 	"errors"
+	"net/url"
 	"slices"
 	"strings"
 	"testing"
@@ -295,4 +297,29 @@ func TestReaderKeepsRoundFsViewOfASetRecordingsInstants(t *testing.T) {
 			t.Errorf("words unread %v, %d view instants; want unread and none", g.words.unread, len(g.fView))
 		}
 	})
+}
+
+// An earlier place holds an instant in any form main reads it in: its text
+// and its declared forms (holdsExact(text) || holdsExact(rawExtra(text))),
+// so a percent-encoded query, a base64url cursor or a base64 copy holds a
+// recorded µs instant at its fine cut, as the plain text does.
+func TestReaderIndexHoldsAnInstantInEveryFormMainReads(t *testing.T) {
+	r := "2026-10-31T10:50:13.305123+05:30"
+	m := readText(r, "2026-10-31T10:51:27.905456+05:30").Instants[0].Rec
+	dc := NewDriftCache()
+	for _, place := range []string{
+		"ok " + r,
+		"/jobs?since=" + url.QueryEscape(r) + "&page=2",
+		`{"next":"` + base64.RawURLEncoding.EncodeToString([]byte(`{"since":"`+r+`","page":2}`)) + `"}`,
+		`{"c":"` + base64.StdEncoding.EncodeToString([]byte(r)) + `"}`,
+	} {
+		if !dc.holdsExact(place, *m) && !dc.holdsExact(dc.rawExtra(place), *m) {
+			t.Fatalf("%q: main does not hold the moment: the row reads nothing", place)
+		}
+		for _, x := range []*readerIndex{newReaderIndex(nil), newReaderIndex(dc)} {
+			if held, fine, read := x.text(place).holdsMoment(*m); !held || !fine || !read {
+				t.Errorf("%q: main holds the moment exactly; the reader's index held %v fine %v read %v", place, held, fine, read)
+			}
+		}
+	}
 }
