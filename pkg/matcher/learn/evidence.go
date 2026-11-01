@@ -2,6 +2,7 @@ package learn
 
 import (
 	"cmp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -452,6 +453,24 @@ func evidenceAt(p evPlace, r, f string) (ev wordEvidence, read bool) {
 		return evDisproven, true
 	}
 	return evUnknown, true
+}
+
+// movedField is why p does not show r and f in both runs though its texts
+// hold them: no one field holds r in the recording and f in round F's view
+// (inOneField), so F gave the word at another field than the recorded one
+// (main reads a recording field by field). "" where one field holds both.
+func movedField(p evPlace, r, f string) string {
+	same, read := inOneField(p.t.rec, r, p.t.live, f)
+	at, _ := p.t.live.fieldsWith(f)
+	switch {
+	case !read:
+		return "past the call's budget"
+	case same:
+		return ""
+	case len(at) == 0:
+		return "its view holds " + strconv.Quote(f) + " at no one field"
+	}
+	return "its view gave " + strconv.Quote(f) + " at " + at[0].path + ", not at a field whose recorded text holds " + strconv.Quote(r)
 }
 
 // countsByText reports whether a disproving place counts the word by its
