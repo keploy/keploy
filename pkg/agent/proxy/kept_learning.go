@@ -192,6 +192,9 @@ func (m *MockManager) learnedAfterEndAt(found, caller *models.Mock) bool {
 // take.
 func (m *MockManager) servedAsNamed(caller *models.Mock) *models.Mock {
 	m.prepareOutside()
+	if f := m.exact.outside.onPrepared; f != nil {
+		f()
+	}
 	st := m.outsideNow()
 	if st == nil {
 		m.warnUnstaged(caller.Name)

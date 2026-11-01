@@ -589,6 +589,10 @@ type outsideAnswers struct {
 	// under swapMu, never the other way round.
 	mu  sync.Mutex
 	cur atomic.Pointer[outsideState]
+	// onPrepared is a test seam, nil outside tests: it runs as a named read
+	// (MockManager.servedAsNamed) has prepared the outside answers and is
+	// about to read them. A test lands a staging between the two with it.
+	onPrepared func()
 }
 
 // outsideState is outsideAnswers for one staging.
@@ -617,8 +621,16 @@ func (o *outsideAnswers) hidden(name string, epoch uint64) bool {
 
 // prepareOutside builds the outside answers of the current staging, once: the
 // staged recordings by name, read with the staging lock held, so no staging
-// is ever half read. It runs before any view's lock is taken.
+// is ever half read. It runs before any view's lock is taken. Once they are
+// built, every door after the learn step ended calls it (a mark, a spend):
+// it takes no lock then, and waits behind no staging that lands. A door
+// that finds them built just as a staging lands is a door a moment earlier:
+// what it consumes is checked against the epoch it was built for
+// (outsideNow, consumeOutside).
 func (m *MockManager) prepareOutside() {
+	if m.outsideNow() != nil {
+		return
+	}
 	m.swapMu.RLock()
 	defer m.swapMu.RUnlock()
 	o := &m.exact.outside
