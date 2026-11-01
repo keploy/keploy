@@ -100,7 +100,7 @@ func TestOutcomeElsewhereLearnsATimersClockWords(t *testing.T) {
 	}
 }
 
-// RT6: a word an earlier place of the run sent (a Value anywhere), a pick, an
+// A word an earlier place of the run sent (a Value anywhere), a pick, an
 // echo, a conflict: nothing is learned.
 func TestOutcomeElsewhereLearnsNothingBesideAValueAnEarlierPlaceSent(t *testing.T) {
 	sent := []Earlier{{Mock: "mock-12", At: eRAt.Add(-3 * time.Second), Run: true,
@@ -122,7 +122,7 @@ func TestOutcomeElsewhereLearnsNothingBesideAValueAnEarlierPlaceSent(t *testing.
 	eNothing(t, "a bucket another test held whole, F moved", Decide(eLease(eRAt, eFAt, "pat-janitor:968290", "pat-janitor:968291", held)), "mock-15")
 }
 
-// RT12: a janitor-like insert tied with another flow's recording; its word
+// A janitor-like insert tied with another flow's recording; its word
 // "pat" against "session" is made anew each run (no source, chance only):
 // nothing learned, and no noise written. The line says what would let the
 // rule learn its clock reads.
@@ -131,7 +131,7 @@ func TestOutcomeElsewhereLearnsNothingWhereAWordIsFresh(t *testing.T) {
 	eNothing(t, `"session" against "pat"`, ds, "made anew each run", "keploy.yml")
 }
 
-// RT13: a timer whose only change that is no clock read is a 6-digit bucket
+// A timer whose only change that is no clock read is a 6-digit bucket
 // (no instant): nothing is learned, and the line prints the noise edit. With
 // that word declared noise in keploy.yml, its clock reads learn.
 func TestOutcomeElsewhereLearnsAClocksWordsOnlyWhereTheBucketIsDeclared(t *testing.T) {
@@ -160,9 +160,9 @@ func TestOutcomeElsewhereLearnsAClocksWordsOnlyWhereTheBucketIsDeclared(t *testi
 	}
 }
 
-// RT14: a clock word another test's earlier request held whole at a fine
+// A clock word another test's earlier request held whole at a fine
 // cut, which round F moved: a conflict at an earlier place of the run,
-// nothing learned (C4-N1: conflicts read every earlier place too).
+// nothing learned (conflicts read every earlier place too).
 func TestOutcomeElsewhereLearnsNothingBesideAFineConflictAnywhere(t *testing.T) {
 	const p = "body.filter.since"
 	rec, live := iMicro(eRAt.Add(-3*time.Millisecond)), iMicro(eFAt.Add(-4*time.Millisecond))

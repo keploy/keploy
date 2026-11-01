@@ -150,10 +150,10 @@ func TestOutcomeCostAValueItsAnswerEchoesBesideAChancePlaceIsFresh(t *testing.T)
 	costRefused(t, "50 echoed in its answer, an adapter that cannot answer a word", oWord(t, Decide(in), "50", "7"), []RefusalKind{"cannot-check"})
 }
 
-// Pinned by §2's table (no flip): a word both values hold at a place
+// Pinned by the evidence table (no flip): a word both values hold at a place
 // (follows_test.go:178), a word only F's view of a changed place holds
 // (:300), a leaf F gave nothing new at (:324), and a candidate F did not
-// serve between two it served in order (:479, B4).
+// serve between two it served in order (:479).
 func TestOutcomeCostTheEvidenceTablesPinnedRowsStayRefused(t *testing.T) {
 	before := eRecAt.Add(-50 * time.Millisecond)
 	d := oWord(t, Decide(costF("82 1", "4 1 1", nil, eStartup(), nil)), "82", "4")
@@ -280,7 +280,7 @@ func TestOutcomeCostAReadWholeInASwappableStartUpIsRefused(t *testing.T) {
 	costRefused(t, "a read whole in a start-up keploy may swap", d, []RefusalKind{"pick"}, "mock-hs-81")
 }
 
-// Pinned (H3): one slot names both moments by two rules (given_test.go:701):
+// Pinned: one slot names both moments by two rules (given_test.go:701):
 // a minute read in its window beside it is refused, naming the slot.
 func TestOutcomeCostASlotNamingBothMomentsIsAPick(t *testing.T) {
 	w := &Window{Rec: Span{From: costAt.Add(-time.Minute), To: costAt.Add(time.Minute)}, F: Span{From: costAt.Add(-time.Minute), To: costAt.Add(3 * time.Minute)}}
@@ -288,7 +288,7 @@ func TestOutcomeCostASlotNamingBothMomentsIsAPick(t *testing.T) {
 	costRefused(t, "a minute read beside a slot of both moments", oWord(t, Decide(in), "11:14", "11:15"), []RefusalKind{"pick"}, "body.slots[0]")
 }
 
-// Pinned (New 1): where the test case's request could not be read (none
+// Pinned: where the test case's request could not be read (none
 // sent, or of a kind keploy reads no request of), every change is refused
 // as unread, an instant or not, echoed in its answer or not
 // (given_test.go:203-207, :240-260; typed_test.go:2088-2091). A clock plus

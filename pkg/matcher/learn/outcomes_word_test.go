@@ -259,7 +259,7 @@ func TestOutcomeTheTestsOwnValueThatStoppedFollowingItsSourceIsAConflict(t *test
 // A word inside a longer token is a word: the "17" of "order-17", the "42" of
 // "cart_42". It is judged by the places that hold it, never fresh because the
 // token as a whole stands nowhere (90457abcd word_coincidence_test.go:140,
-// :148, :154; CRITIQUE row 6).
+// :148, :154).
 func TestOutcomeAWordInsideATokenIsJudgedByItsPlaces(t *testing.T) {
 	const p = "body.ref"
 	seq := func(run bool, r, f string) []Earlier {
