@@ -21,6 +21,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent"
 	grpc "go.keploy.io/server/v3/pkg/agent/proxy/incoming/gRPC"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
+	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -96,6 +97,10 @@ type IngressProxyManager struct {
 	// port's forwarder and the park share (portSem). Guarded by semMu.
 	semMu    sync.Mutex
 	portSems map[uint16]chan struct{}
+
+	// tlsRelayed holds the app ports (uint16) a TLS connection was relayed
+	// to unread (relayTLS), each said once at WARN.
+	tlsRelayed sync.Map
 
 	// relocated maps an app port whose bind the record hooks moved (keploy's
 	// ingress forwarder then holds the port) to the port the app was moved
@@ -647,6 +652,10 @@ func (pm *IngressProxyManager) handleConnection(ctx context.Context, clientConn 
 		utils.LogError(logger, err, "error reading initial bytes from client connection")
 		return
 	}
+	if pTls.IsTLSHandshake(preface) {
+		pm.relayTLS(ctx, clientConn, preface, newAppAddr, logger, appPort)
+		return
+	}
 	if bytes.HasPrefix(preface, []byte(clientPreface)) {
 		finalAppAddr := pm.getActualDestination(ctx, clientConn, newAppAddr, logger)
 
@@ -674,6 +683,38 @@ func (pm *IngressProxyManager) handleConnection(ctx context.Context, clientConn 
 	} else {
 		pm.handleHttp1Connection(ctx, newReplayConn(preface, clientConn), newAppAddr, logger, t, sem, appPort)
 	}
+}
+
+// tlsRelayedWarning is what the ingress says, once per app port, of a TLS
+// connection it relayed to the app unread (relayTLS).
+const tlsRelayedWarning = "a TLS connection to the app was relayed to it unread, so the app's own certificate answers its client: keploy records the app's plain HTTP and gRPC calls as test cases, and NONE of the calls on a TLS connection was recorded"
+
+// relayTLS relays a connection whose client opened with a TLS ClientHello
+// (preface, read from clientConn) to the app, both ways, unread: the app's
+// TLS answers it, with the app's own certificate, as it would without
+// keploy. Read as an HTTP/1 request, the ClientHello was answered with a
+// plain-text 400, and the client failed ("http: server gave HTTP response to
+// HTTPS client"). Nothing on the connection is recorded: its calls are
+// encrypted. The first such connection to each app port is said at WARN, the
+// rest at Debug.
+func (pm *IngressProxyManager) relayTLS(ctx context.Context, clientConn net.Conn, preface []byte, newAppAddr string, logger *zap.Logger, appPort uint16) {
+	finalAppAddr := pm.getActualDestination(ctx, clientConn, newAppAddr, logger)
+	upConn, err := dialIngressTarget(ctx, finalAppAddr, ingressTargetListenTimeout)
+	if err != nil {
+		pm.logAppDialFailure(logger, "Failed to connect to the application to relay a TLS connection to it. Verify that the application is listening on the resolved address and port.",
+			err, zap.String("final_app_addr", finalAppAddr))
+		return
+	}
+	defer func() {
+		_ = upConn.Close()
+	}()
+	if _, said := pm.tlsRelayed.LoadOrStore(appPort, struct{}{}); !said {
+		logger.Warn(tlsRelayedWarning, zap.Uint16("port", appPort),
+			zap.String("note", "further TLS connections to this port are logged at debug"))
+	} else {
+		logger.Debug(tlsRelayedWarning, zap.Uint16("port", appPort))
+	}
+	util.RelayRawPassthrough(newReplayConn(preface, clientConn), upConn)
 }
 
 type replayConn struct {
