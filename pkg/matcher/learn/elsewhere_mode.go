@@ -41,7 +41,7 @@ func elsewhere(in Input, ds []Decision, fields []string) []Decision {
 	}
 	out := make([]Decision, 0, len(ds))
 	for i, d := range ds {
-		kind := RefusalUnknown
+		kind := RefusalLandedElsewhere
 		if d.Refusal != nil {
 			kind = d.Refusal.Kind
 		}

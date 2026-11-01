@@ -860,3 +860,24 @@ func TestOutcomeAClockWithATimeToLiveNamesItsOffset(t *testing.T) {
 		t.Errorf("a lease of 30 minutes: %s, line %q; want a Clock at + 30m whose line names it", oDescribe([]Decision{d}), d.Line)
 	}
 }
+
+// A read of the clock learned past a place that held the recorded moment
+// names that place, set aside as its source, as a fresh word's line does: a
+// person reads what keploy ruled out.
+func TestOutcomeAClockLineNamesThePlaceSetAside(t *testing.T) {
+	const p = "body.since"
+	rAt, fAt := oAt, oAt.Add(61*time.Second)
+	rec, live := iMs(rAt.Add(-time.Second)), iMs(fAt.Add(-time.Second))
+	unserved := RawOf(&models.Mock{Name: "mock-645", Kind: models.HTTP, Spec: models.MockSpec{
+		ReqTimestampMock: rAt.Add(-time.Second),
+		ResTimestampMock: rAt.Add(-time.Second + time.Millisecond),
+		HTTPReq:          &models.HTTPReq{Method: "POST", URL: "http://api/ticks", Body: `{"tick":"` + rec + `"}`},
+		HTTPResp:         &models.HTTPResp{StatusCode: 201},
+	}}, false)
+	in := iCall(p, String, rec, live, rAt, fAt, iWin(rAt, fAt, 2*time.Second), nil, []Raw{unserved})
+	d := oWord(t, Decide(in), rec, live)
+	iClock(t, "a read beside a recording that held the recorded moment", d)
+	if !strings.Contains(d.Line, "set aside: mock-645 held the recorded value and round F's value does not stand there") {
+		t.Errorf("the clock line %q; want it to name mock-645, set aside", d.Line)
+	}
+}

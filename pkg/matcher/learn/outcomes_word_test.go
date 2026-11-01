@@ -2,6 +2,8 @@ package learn
 
 import (
 	"encoding/base64"
+	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -638,5 +640,130 @@ func TestOutcomeAValueBoundAtTheStartUpIsTheRuns(t *testing.T) {
 		if d.Outcome != OutcomeValue || d.From.Mock != "mock-0" || d.From.Run != startUp {
 			t.Errorf("bound at the start-up %v: %s, from %+v; want a value bound to mock-0, Run %v", startUp, oDescribe([]Decision{d}), d.From, startUp)
 		}
+	}
+}
+
+// A variable bound at a word of a leaf is named at that word: a later answer
+// that holds the leaf whole is answered at the same word, so the tracker
+// tells which words of an earlier request leaf hold a variable of the test,
+// with each word in both runs (a find by id answering the name the test made
+// and first sent in a distinct). A word no variable holds, another test's
+// variable and a live text of other words name nothing.
+func TestOutcomeAVariableBoundAtAWordIsNamedAtThatWord(t *testing.T) {
+	tr := NewTracker()
+	tr.Begin()
+	n := tr.Epoch()
+	const place = "body.cmd.filter.name"
+	name, ok := tr.Name(n, "mock-201", place+"#3", nil)
+	if !ok {
+		t.Fatal("the tracker named no variable")
+	}
+	seen := Seen{Side: Request, Leaf: oText(place, "[E2E] app-crud-1793224420036884439"), Live: "[E2E] app-crud-1793311234567890123", Place: place}
+	want := []BoundWord{{Name: name, Word: 3, Recorded: "1793224420036884439", Live: "1793311234567890123"}}
+	if got := tr.BoundWords(n, "mock-201", seen); !reflect.DeepEqual(got, want) {
+		t.Fatalf("FALSE RED: the words of the first send: %+v; want %+v", got, want)
+	}
+	for what, got := range map[string][]BoundWord{
+		"another exchange's leaf":       tr.BoundWords(n, "mock-202", seen),
+		"another place":                 tr.BoundWords(n, "mock-201", Seen{Side: Request, Leaf: seen.Leaf, Live: seen.Live, Place: "body.cmd.key"}),
+		"a place of its answer":         tr.BoundWords(n, "mock-201", Seen{Side: Response, Leaf: seen.Leaf, Live: seen.Live, Place: place}),
+		"a live text of other words":    tr.BoundWords(n, "mock-201", Seen{Side: Request, Leaf: seen.Leaf, Live: "1793311234567890123", Place: place}),
+		"a test that is not the runner": tr.BoundWords(n+1, "mock-201", seen),
+	} {
+		if len(got) != 0 {
+			t.Errorf("%s: %+v; want no variable", what, got)
+		}
+	}
+	tr.Begin()
+	if got := tr.BoundWords(tr.Epoch(), "mock-201", seen); len(got) != 0 {
+		t.Errorf("the next test: %+v; variables are named per test", got)
+	}
+	var none *Tracker
+	if got := none.BoundWords(n, "mock-201", seen); got != nil {
+		t.Errorf("no tracker: %+v", got)
+	}
+}
+
+// A run's variable (a place of the start-up) keeps its word across the set.
+func TestOutcomeARunVariableBoundAtAWordIsNamedInEveryTest(t *testing.T) {
+	tr := NewTracker()
+	tr.Begin()
+	const place = "body.session"
+	name, ok := tr.RunName(tr.Epoch(), "mock-1", place+"#1", nil)
+	if !ok {
+		t.Fatal("the tracker named no run variable")
+	}
+	tr.Begin()
+	seen := Seen{Side: Request, Leaf: oText(place, "sess-0b1e"), Live: "sess-77c4", Place: place}
+	want := []BoundWord{{Name: name, Word: 1, Recorded: "0b1e", Live: "77c4"}}
+	if got := tr.BoundWords(tr.Epoch(), "mock-1", seen); !reflect.DeepEqual(got, want) {
+		t.Errorf("a run's variable in a later test: %+v; want %+v", got, want)
+	}
+}
+
+// A word read as an instant, copied from an earlier send, is read back as
+// any Value is: a find by a name that holds a run number, whose cursor holds
+// the name whole, is answered at the same word; one its adapter cannot
+// answer there, or at a place keploy cannot name, is refused.
+func TestOutcomeAnInstantWordCopiedFromASendIsAnsweredWhereItsAnswerHoldsItWhole(t *testing.T) {
+	const rec, live = "[E2E] app-crud-1793224420036884439", "[E2E] app-crud-1793311234567890123"
+	const rw, lw = "1793224420036884439", "1793311234567890123"
+	src := oServed("mock-insert", false, false, Request, oText("body.documents[0].name", rec), live, time.Millisecond)
+	in := func() Input {
+		in := oInput("body.cmd.filter.name", rec, live, src, nil)
+		in.PlaceOf = func(l Leaf, answer bool) (string, bool) { return VarPlace(l, true) }
+		in.Resp = []Leaf{oText("body.cursor.firstBatch[0].name", rec), oText("body.cursor.firstBatch[0].title", "created "+rec)}
+		return in
+	}
+	d := oWord(t, Decide(in()), rw, lw)
+	want := "body.cursor.firstBatch[0].name#3"
+	if d.Outcome != OutcomeValue || len(d.Echo) != 1 || d.Echo[0].String() != want ||
+		!strings.Contains(d.Line, "answered at "+want+", where the call's answer holds "+strconv.Quote(rec)+" whole as recorded") {
+		t.Errorf("FALSE RED: a find by a name holding a run number: %s, echo %v, line %q; want a Value answered at %s", oDescribe([]Decision{d}), d.Echo, d.Line, want)
+	}
+	noWord := in()
+	noWord.Caps.AnswerAtWord = false
+	oRefused(t, "an instant's read-back an adapter cannot answer at its word", oWord(t, Decide(noWord), rw, lw), RefusalCannotCheck, "cannot answer a word")
+	unnamed := in()
+	unnamed.Resp = append(unnamed.Resp, Leaf{Path: "body.cursor.firstBatch[1].name", Type: String, Value: rec, Unnamed: true})
+	oRefused(t, "an instant's read-back at a place keploy cannot name", oWord(t, Decide(unnamed), rw, lw), RefusalCannotCheck, "cannot name")
+}
+
+// A word only a recording made after the call holds decides nothing: it gave
+// the recorded application nothing before the call, and round F's value does
+// not stand there, so the value is made anew each run. One that round F's
+// value stands in, or one recorded at the call's own instant, stays refused.
+func TestOutcomeARecordedWordOnlyALaterRecordingHoldsIsFresh(t *testing.T) {
+	const p = "body.msg_id"
+	const rec, live = "k1b2e4d70", "k5d0e8a33"
+	held := func(id string, at time.Time) Raw {
+		m := receiveOf("mock-0", id, at)
+		return clockedDrifts().RawOf(m, true).ServedAs(3).ServedAsRecorded()
+	}
+	call := func(x Raw) Decision {
+		in := oInput(p, rec, live, nil, nil)
+		in.At, in.Arrived = r1Insert, r1Insert
+		in.Given = func() ([]GivenPlaces, error) { return []GivenPlaces{PlacesOf(x)}, nil }
+		return oWord(t, Decide(in), rec, live)
+	}
+	if d := call(held(rec, r1Insert.Add(30*time.Second))); d.Outcome != OutcomeFresh {
+		t.Errorf("FALSE RED: the recorded word in a recording made after the call: %s; want fresh", oDescribe([]Decision{d}))
+	}
+	oRefused(t, "round F's word in a recording made after the call", call(held(live, r1Insert.Add(30*time.Second))), RefusalUnknown, "mock-0")
+	oRefused(t, "the recorded word in a recording made at the call's own instant", call(held(rec, r1Insert)), RefusalUnknown, "mock-0")
+}
+
+// The tracker's recorded begin is what an adapter fills Input.RecBegan with.
+func TestOutcomeTheTrackerGivesItsTestsRecordedBegin(t *testing.T) {
+	tr := NewTracker()
+	began := oAt.Add(-time.Hour)
+	tr.RecordedBegin(began)
+	tr.Begin()
+	if got := tr.RecBegan(); !got.Equal(began) {
+		t.Errorf("RecBegan %v; want %v", got, began)
+	}
+	var none *Tracker
+	if got := none.RecBegan(); !got.IsZero() {
+		t.Errorf("no tracker: RecBegan %v", got)
 	}
 }

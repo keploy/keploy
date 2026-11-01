@@ -34,20 +34,21 @@ const (
 	OutcomeFresh
 )
 
-// RefusalKind is why a word is refused: one of the nine below.
+// RefusalKind is why a word is refused: one of the ten below.
 type RefusalKind string
 
-// The nine refusals.
+// The ten refusals.
 const (
-	RefusalPick         RefusalKind = "pick"
-	RefusalNoClockRead  RefusalKind = "no-clock-read"
-	RefusalTwoSources   RefusalKind = "two-sources"
-	RefusalConflict     RefusalKind = "conflict"
-	RefusalUnknown      RefusalKind = "unknown"
-	RefusalAnotherScope RefusalKind = "another-scope"
-	RefusalUnread       RefusalKind = "unread"
-	RefusalChangedShape RefusalKind = "changed-shape"
-	RefusalCannotCheck  RefusalKind = "cannot-check"
+	RefusalPick            RefusalKind = "pick"
+	RefusalNoClockRead     RefusalKind = "no-clock-read"
+	RefusalTwoSources      RefusalKind = "two-sources"
+	RefusalConflict        RefusalKind = "conflict"
+	RefusalUnknown         RefusalKind = "unknown"
+	RefusalAnotherScope    RefusalKind = "another-scope"
+	RefusalUnread          RefusalKind = "unread"
+	RefusalChangedShape    RefusalKind = "changed-shape"
+	RefusalCannotCheck     RefusalKind = "cannot-check"
+	RefusalLandedElsewhere RefusalKind = "landed-elsewhere"
 )
 
 // EditKind is an edit a person or a tool makes to accept a refused word.

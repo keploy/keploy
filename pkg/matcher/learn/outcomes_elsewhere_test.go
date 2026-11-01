@@ -176,3 +176,21 @@ func TestOutcomeElsewhereLearnsNothingBesideAFineConflictAnywhere(t *testing.T) 
 	in.Earlier = nil
 	iClock(t, "the same read, no earlier place", oWord(t, Decide(in), rec, live))
 }
+
+// A word the timer rule keeps nothing of, refused for that alone, carries a
+// kind of its own: an adapter tells it from a word that could not be read.
+func TestOutcomeElsewhereAWordItDoesNotKeepIsRefusedAsLandedElsewhere(t *testing.T) {
+	ds := Decide(eLease(eRAt, eFAt, "session-janitor:968290", "pat-janitor:968290", nil))
+	if len(ds) == 0 {
+		t.Fatal("no decision")
+	}
+	for _, d := range ds {
+		if d.Refusal == nil || d.Refusal.Kind != RefusalLandedElsewhere {
+			t.Errorf("%s; want refused as %s", oDescribe([]Decision{d}), RefusalLandedElsewhere)
+			continue
+		}
+		if r, ok := ParseRefusal(d.Line); !ok || r.Kind != RefusalLandedElsewhere {
+			t.Errorf("%q read back as %+v, %v", d.Line, r, ok)
+		}
+	}
+}

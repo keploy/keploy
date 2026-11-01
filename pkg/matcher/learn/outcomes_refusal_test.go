@@ -247,3 +247,29 @@ func TestOutcomeChangedTextOutsideTheWordsIsNamed(t *testing.T) {
 		t.Errorf("LEAK a password's changed text: %s, line %q", oDescribe([]Decision{d}), d.Line)
 	}
 }
+
+// A line of no test leaves the test out, reads back, and tells a field
+// named "word" from a word.
+func TestOutcomeALineOfNoTestLeavesItOut(t *testing.T) {
+	for _, r := range []Refusal{
+		{Kind: RefusalConflict, Mock: "mock-2", Field: "body.a", Word: 1, Recorded: "a", Full: "b", Why: "why"},
+		{Kind: RefusalConflict, Mock: "mock-2", Field: "body.a", Word: -1, Recorded: "a", Full: "b", Why: "why"},
+		{Kind: RefusalConflict, Mock: "mock-2", Field: "word", Word: 3, Recorded: "a", Full: "b", Why: "why"},
+		{Kind: RefusalConflict, Test: "test-1", Mock: "mock-2", Field: "word", Word: 3, Recorded: "a", Full: "b", Why: "why"},
+		{Kind: RefusalConflict, Test: "test-1", Mock: "mock-2", Field: "word", Word: -1, Recorded: "a", Full: "b", Why: "why"},
+		{Kind: RefusalConflict, Test: "test-1", Mock: "word", Field: "3", Word: -1, Recorded: "a", Full: "b", Why: "why"},
+	} {
+		line := RefusalLine(r)
+		if r.Test == "" && strings.HasPrefix(line, `""`) {
+			t.Errorf("%q starts with an empty test", line)
+		}
+		got, ok := ParseRefusal(line)
+		if !ok || got.Test != r.Test || got.Mock != r.Mock || got.Field != r.Field || got.Word != r.Word {
+			t.Errorf("%q read back as %+v, %v; want %+v", line, got, ok, r)
+		}
+	}
+	line := learnedLine(learnedWord{Mock: "mock-2", Field: "body.a", Word: 1, Recorded: "a", Full: "b", Outcome: OutcomeFresh})
+	if !strings.HasPrefix(line, "mock-2 body.a word 1: recorded ") {
+		t.Errorf("a learned line of no test: %q", line)
+	}
+}

@@ -685,7 +685,9 @@ func (dc *decider) echoedOutside(c changedInstant) (mock string, ok bool) {
 // recording handed to the call is (rawState): one with no answer time, or
 // recorded or answered at the call's own instant, is unknown there.
 func setEvidence(g givenWords, r, f string, at time.Time) (ev wordEvidence, changed bool) {
-	hr := listsHold(g.answerLists, r)
+	// A recording made after the call gave R's application nothing before
+	// it: R's word there decides nothing (F's still does).
+	hr := listsHold(g.answerLists, r) && (g.noTime || !g.at.After(at))
 	before := g.at.Before(at) && !g.noTime && !untimedAnswer(g.at, g.answered) && g.answered.Before(at)
 	switch {
 	case g.unstated || g.unread:
@@ -780,4 +782,56 @@ func viewNew(g givenWords) bool {
 		}
 	}
 	return false
+}
+
+// BoundWord is a variable of a test bound at one word of an earlier request
+// leaf: the word's index and its text in each run.
+type BoundWord struct {
+	Name           string
+	Word           int
+	Recorded, Live string
+}
+
+// BoundWords is each variable of test number n bound at a word of s, a
+// request leaf of mock, in word order: Name and RunName keep such a variable
+// under "<place>#<word>", which Named, reading whole places, never reaches.
+// An adapter answers a later answer leaf that holds s's recorded text whole
+// at the same words. Two runs' texts of different word counts name none: no
+// word of one is known to be the other's, and the answer stays as recorded.
+func (t *Tracker) BoundWords(n uint64, mock string, s Seen) []BoundWord {
+	if t == nil || s.Side != Request || s.Place == "" {
+		return nil
+	}
+	rec, live := variables.Words(s.Leaf.Value), variables.Words(s.Live)
+	if len(rec) != len(live) {
+		return nil
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	var out []BoundWord
+	for k := range rec {
+		key := mock + "\x00" + s.Place + "#" + strconv.Itoa(k)
+		name, ok := "", false
+		if n >= t.setEpoch {
+			name, ok = t.runNames[key]
+		}
+		if !ok && t.epoch == n {
+			name, ok = t.names[key]
+		}
+		if ok {
+			out = append(out, BoundWord{Name: name, Word: k, Recorded: s.Leaf.Value[rec[k][0]:rec[k][1]], Live: s.Live[live[k][0]:live[k][1]]})
+		}
+	}
+	return out
+}
+
+// RecBegan is the instant the running test began at in its recording
+// (RecordedBegin), zero where none was given: Input.RecBegan.
+func (t *Tracker) RecBegan() time.Time {
+	if t == nil {
+		return time.Time{}
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.recBegan
 }
