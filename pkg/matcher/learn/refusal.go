@@ -63,11 +63,11 @@ var editForms = map[EditKind]string{
 	EditNone:          "none, this is the guard",
 }
 
-// refusalKinds are the nine kinds, for reading a line back.
+// refusalKinds are the ten kinds, for reading a line back.
 var refusalKinds = map[RefusalKind]bool{
 	RefusalPick: true, RefusalNoClockRead: true, RefusalTwoSources: true, RefusalConflict: true,
 	RefusalUnknown: true, RefusalAnotherScope: true, RefusalUnread: true, RefusalChangedShape: true,
-	RefusalCannotCheck: true,
+	RefusalCannotCheck: true, RefusalLandedElsewhere: true,
 }
 
 // RefusalLine is r's one line (see above).
@@ -121,7 +121,10 @@ func RefusalLine(r Refusal) string {
 
 // wordWhere is "<test> <mock> <field>[ word <n>]", each name bare or quoted.
 func wordWhere(test, mock, field string, word int) string {
-	s := lineName(test) + " " + lineName(mock) + " " + lineName(field)
+	s := lineName(mock) + " " + lineName(field)
+	if test != "" {
+		s = lineName(test) + " " + s
+	}
 	if word >= 0 {
 		s += " word " + strconv.Itoa(word)
 	}
@@ -199,14 +202,29 @@ func ParseRefusal(line string) (Refusal, bool) {
 	return Refusal{}, false
 }
 
+// endsWhere reports whether s, what follows a line's second name, ends the
+// word's place: that name was the field, of a line of no test.
+func endsWhere(s string) bool {
+	if rest, ok := strings.CutPrefix(s, " word "); ok {
+		digits := len(rest) - len(strings.TrimLeft(rest, "0123456789"))
+		s = rest[digits:]
+		if digits == 0 {
+			return false
+		}
+	}
+	return strings.HasPrefix(s, recordedMark)
+}
+
 // parseHead reads the line before its tail: the word, both values, the
 // kind, the why and the places. The words of the edits are skipped: the
 // tail holds them.
 func parseHead(s string) (Refusal, bool) {
 	r := Refusal{Word: -1}
 	p := lineReader{s: strings.TrimSuffix(s, "."), ok: strings.HasSuffix(s, ".")}
-	r.Test, r.Mock = p.text(" "), p.lit(" ").text(" ")
-	r.Field = p.lit(" ").text(" ", ":")
+	r.Mock, r.Field = p.text(" "), p.lit(" ").text(" ", ":")
+	if !endsWhere(p.s) {
+		r.Test, r.Mock, r.Field = r.Mock, r.Field, p.lit(" ").text(" ", ":")
+	}
 	if p.ok && strings.HasPrefix(p.s, " word ") {
 		w, err := strconv.Atoi(p.lit(" word ").text(":"))
 		r.Word, p.ok = w, p.ok && err == nil
