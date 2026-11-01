@@ -82,6 +82,52 @@ func TestOpportunisticTLSIntercept_NonTLS_ReturnsBoundedWhenPeerIdle(t *testing.
 		"out the peer's whole read window)")
 }
 
+// stopBeforeTheArm is a connection whose first arming of a read deadline is
+// preceded by a stop: the cancel, then the expired-deadline poke, as
+// opportunisticTLSIntercept's cleanup and its non-TLS branch make one.
+type stopBeforeTheArm struct {
+	net.Conn
+	once sync.Once
+	stop func()
+}
+
+func (c *stopBeforeTheArm) SetReadDeadline(t time.Time) error {
+	if !t.IsZero() {
+		c.once.Do(c.stop)
+	}
+	return c.Conn.SetReadDeadline(t)
+}
+
+// A stop that lands just before the relay loop arms its read's deadline ends
+// the loop. That is where a loop that looked at its context first and armed
+// the deadline after had already looked: its fresh deadline overwrote the
+// stop's poke, and it parked a whole window. The test above sees that only
+// when a loaded host happens to land the stop there; here it is landed there
+// every run, and the window is longer than the test binary's deadline.
+func TestSniffAndRelayLoop_AStopJustBeforeTheArmEndsTheLoop(t *testing.T) {
+	from, fromPeer := net.Pipe()
+	defer from.Close()
+	defer fromPeer.Close()
+	to, toPeer := net.Pipe()
+	defer to.Close()
+	defer toPeer.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p := &Proxy{logger: testLogger(), peekChunkWindow: 24 * time.Hour}
+	conn := &stopBeforeTheArm{Conn: from, stop: func() {
+		cancel()
+		_ = from.SetReadDeadline(time.Now())
+	}}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		p.sniffAndRelayLoop(ctx, "dst", conn, to, make(chan sniffResult, 2))
+	}()
+	awaitEvent(t, done, "the relay loop ending after a stop that landed just before it armed its read "+
+		"(the loop's own deadline overwrote the stop's poke, and the loop waits out its whole window)")
+}
+
 // TestOpportunisticTLSIntercept_NonTLS_BudgetExhaustedWithIdlePeer_KeepsRelaying
 // pins the case the #4398 fix alone gets wrong.
 //
