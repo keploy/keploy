@@ -16,8 +16,10 @@ import (
 // still differ; otherwise the text is read as it is, its words judged one
 // by one, so a change only of escaping is read as the change it is.
 //
-//   - pct, json, b64 and b64url open the text whole: pct where either run
-//     holds a %XX escape; json where either run is a JSON string literal;
+//   - pct, json, b64 and b64url open the text whole, only where each run
+//     is so encoded: pct where both hold a %XX escape (a run with none is
+//     not encoded, and replay could not give it the other's escapes); json
+//     where both are a JSON string literal;
 //     b64 and b64url where both runs are of minEncodedRun bytes or more,
 //     not all digits, and decode to text (main's rule, readings.go: binary,
 //     a signature or a hash, is no text, and nothing is read in it). The
@@ -104,7 +106,7 @@ func withStep(at variables.Address, st variables.Step) variables.Address {
 func openWhole(st variables.Step, rec, live string) (string, string, bool) {
 	r, rok := variables.Decode(st, rec)
 	l, lok := variables.Decode(st, live)
-	if !rok || !lok || r == l || r == rec && l == live {
+	if !rok || !lok || r == l || r == rec || l == live {
 		return "", "", false
 	}
 	if st == variables.StepB64 || st == variables.StepB64URL {

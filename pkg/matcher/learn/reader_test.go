@@ -115,6 +115,47 @@ func TestReaderStretches(t *testing.T) {
 	}
 }
 
+// A separator that changed between paired words is listed with the whole
+// tokens that hold it and the words beside it: word by word, replay cannot
+// give the new separator. Where no whole token holds it, the text changed
+// shape. Separators that stayed, between words that changed, are none.
+func TestReaderSeparatorChanges(t *testing.T) {
+	for _, c := range []struct {
+		rec, live string
+		seps      []string // "rec>live" of each changed separator
+		token     string   // R's whole token around the first, "" for none
+		shape     bool
+	}{
+		{"a-17", "a_42", []string{"->_"}, "a-17", false},
+		{"x-1-y-2-z", "x-7-y-8-z", nil, "", false},
+		{"Sfl-KxwRJ_SMe", "Q1x_Yp-9vTq", []string{"->_", "_>-"}, "Sfl-KxwRJ_SMe", false},
+		{"v1.17", "v1,18", []string{".>,"}, "", true},
+		{"a 1", "a  1", []string{" >  "}, "", true},
+		{" a-1", "a-2", []string{" >"}, "", true},
+		{"--", "__", []string{"-->__"}, "--", false},
+		{"a,b", "a,b,c", nil, "", true},
+	} {
+		rd := readText(c.rec, c.live)
+		var got []string
+		for _, sc := range rd.Separators {
+			got = append(got, c.rec[sc.RecAt[0]:sc.RecAt[1]]+">"+c.live[sc.LiveAt[0]:sc.LiveAt[1]])
+		}
+		if !sameStrings(got, c.seps) || rd.ChangedShape != c.shape {
+			t.Errorf("%q -> %q: separators %q, shape changed %v; want %q, %v", c.rec, c.live, got, rd.ChangedShape, c.seps, c.shape)
+			continue
+		}
+		if len(rd.Separators) > 0 {
+			var tok string
+			if ts := rd.Separators[0].Tokens; len(ts) > 0 {
+				tok = ts[0].Rec
+			}
+			if tok != c.token {
+				t.Errorf("%q -> %q: the token around the separator %q; want %q", c.rec, c.live, tok, c.token)
+			}
+		}
+	}
+}
+
 // A changed JWT signature is one whole id token (its '.'s split the
 // token, its '-' and '_' do not), listed beside each of its changed words:
 // it binds whole where a place holds it whole in each run, its words one
