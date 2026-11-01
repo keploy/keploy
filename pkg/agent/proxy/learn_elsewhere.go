@@ -43,24 +43,12 @@ func (m *MockManager) learningElsewhere() (*exactView, uint64) {
 	return v, m.stagingEpoch.Load()
 }
 
-// LearnElsewhereCandidates is, while the session learns (learningElsewhere),
-// kind's data-plane recordings neither the view's own nor the background's
-// (under today's rules, which name none, the pool's are candidates too) that
-// the set's calls have not consumed and no pairing has claimed (pairable), in
-// recorded order: those the trees hold, then those the agent keeps on disk.
-// nil otherwise. A parser pairs a call with one only by its drift pairing's
-// guards, and the round writes what it learned onto a recording only of a
-// test it learns onto (or the pool's, in a full record).
-//
-// With keys, of a kind whose parser declares request keys
-// (models.HasRequestKeys), only the recordings filed under one of keys are
-// read: each tree's index for them (TreeDb.keyedValues), and on disk the
-// store's (RecordingSource), each decoded only once its name passed. Every
-// miss of the learn step asks, and a full round parks thousands of other
-// tests' recordings on disk: read by kind alone, each miss would decode
-// every one of them, though the parser compares the call only with
-// recordings of its operation, all of which its keys file. Without keys
-// (a call the parser keys none of), every recording of kind.
+// LearnElsewhereCandidates implements integrations.LearnElsewhere (pairable,
+// while learningElsewhere): those the trees hold, then those kept on disk.
+// Under keys it reads each tree's index and the disk store's, decoding a
+// recording only once its name passed: every miss of the learn step asks, a
+// full round parks thousands of other tests' recordings on disk, and the
+// parser compares a call only with recordings its keys file.
 func (m *MockManager) LearnElsewhereCandidates(kind models.Kind, keys []string) []*models.Mock {
 	v, epoch := m.learningElsewhere()
 	if v == nil {
@@ -72,21 +60,12 @@ func (m *MockManager) LearnElsewhereCandidates(kind models.Kind, keys []string) 
 	return m.pairableUnderKeys(v, epoch, kind, keys)
 }
 
-// LearnElsewhere keeps clocks, the clock reads a call made in another window
-// taught mk, for record's full round to write onto mk (LearnedElsewhere).
-// Clock reads alone: what such a call shows as noise is never kept
-// (integrations.LearnElsewhere). It consumes, claims and answers nothing.
-//
-// One pairing per recording per round: a recording a call of the round
-// taught already is taught nothing more, as a recording another call took
-// competes as spent. A timer that ticked more often than the recordings it
-// left then teaches each of them once: the parser reads a refused recording
-// as spent and pairs the call again, so a tie moves to the next recording
-// it drifts from alike, and a recording closest alone teaches no second
-// tick. Which call of the round teaches first decides only which recording
-// learns, never what a learned clock read accepts: each is checked at its
-// own recording's offset. False when the session does not learn, mk is no
-// candidate or was taught in the round, or there is nothing to keep.
+// LearnElsewhere implements integrations.LearnElsewhere. One pairing per
+// recording per round, so a timer that ticked more often than the recordings
+// it left teaches each of them once (the parser reads a refused recording as
+// spent and pairs again). Which call teaches first decides only which
+// recording learns, never what a learned clock read accepts: each is checked
+// at its own recording's offset.
 func (m *MockManager) LearnElsewhere(mk *models.Mock, clocks map[string]models.ClockOffset) bool {
 	return m.learnElsewhereAt(mk, clocks, nil, nil)
 }
@@ -174,18 +153,15 @@ func (m *MockManager) LearnedElsewhere() []models.MockState {
 	return out
 }
 
-// elsewhereOp is an operation learning-only pairings are counted by: a
-// parser's kind, and the operation as the parser says it.
+// elsewhereOp is what learning-only pairings are counted by.
 type elsewhereOp struct {
 	kind      models.Kind
 	operation string
 }
 
-// LearnElsewhereCounted counts a call a parser offered recordings of another
-// window for (integrations.LearnElsewhereCounter) into the current test
-// set's count: its operation, and what came of it. A read of the round's
-// learning says the count (LearnedElsewhere), and so does the next set's
-// staging, if no read did.
+// LearnElsewhereCounted implements integrations.LearnElsewhereCounter, into
+// the current test set's count: a read of the round's learning says it
+// (LearnedElsewhere), and so does the next set's staging if no read did.
 func (m *MockManager) LearnElsewhereCounted(kind models.Kind, operation, outcome string) {
 	m.consumedMu.Lock()
 	defer m.consumedMu.Unlock()
@@ -200,8 +176,6 @@ func (m *MockManager) LearnElsewhereCounted(kind models.Kind, operation, outcome
 	m.elsewhereCounted++
 }
 
-// elsewhereCountLine is the line that says the set's count of learning-only
-// pairings for one operation (sayElsewhereCounts).
 const elsewhereCountLine = "record's full round: calls made in another window than a recording of their operation, and what came of each"
 
 // unsaidElsewhereCounts is the set's whole count, the fields of one line per
@@ -229,8 +203,7 @@ func (m *MockManager) unsaidElsewhereCounts() [][]zap.Field {
 	return out
 }
 
-// sayElsewhereCounts logs lines (unsaidElsewhereCounts) at info, outside
-// consumedMu.
+// sayElsewhereCounts logs lines outside consumedMu.
 func (m *MockManager) sayElsewhereCounts(lines [][]zap.Field) {
 	if m.logger == nil {
 		return

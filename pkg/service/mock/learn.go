@@ -162,15 +162,9 @@ type learnedPersister interface {
 
 // persistLearned writes what the learn step learned onto the set's mocks, so
 // the recording the record commits carries it, says per test what was
-// learned (design §7.2 step 10), and returns it (learnedOut): by test, each
-// field as "<mock> <what mockdb's PersistLearned added>", what it wrote onto
-// mocks no test consumed (the set's start-up and pool), and what calls made
-// in other windows than their recordings' taught them (elsewhere's clock
-// reads, on recordings no call of the round consumed: learn.WithLearnedElsewhere),
-// each said with the test whose recording it is and the windows that taught
-// it. What such a call taught a recording the round consumed is voided, and
-// said so (learn.OwnPairingWins). With
-// config.Test.LearnTests set it writes only onto the mocks of those tests
+// learned (design §7.2 step 10), and returns it (learnedOut). What a call
+// in another window taught a recording the round consumed is voided, and
+// said so (learn.OwnPairingWins). With config.Test.LearnTests set it writes only onto the mocks of those tests
 // (and onto the pool's with LearnPool): a test the record did not record
 // again keeps its recording as it is. expected is each test's own mocks, by
 // its mapping.
@@ -273,22 +267,17 @@ func (m *mockService) persistLearned(ctx context.Context, set string, consumed, 
 	return out, nil
 }
 
-// taught is, by recording, what calls made in other windows than its own
-// taught it (the agent's LearnedElsewhere) that the round wrote onto it
-// (taughtFields).
+// taught is, by recording, what the round wrote onto it that calls made in
+// other windows taught it (taughtFields).
 type taught map[string]taughtMock
 
 type taughtMock struct {
-	// fields are the fields written of the paths such calls taught,
-	// as mockdb's PersistLearned said it added them.
 	fields []string
 	from   []models.TeachingWindow
 }
 
-// taughtFields is, of added (by recording, what the round wrote onto it),
-// the fields at the paths elsewhere taught each recording, with the
-// windows that taught it. elsewhere holds no recording a call of the round
-// consumed (learn.OwnPairingWins): no consumer learned what it says.
+// taughtFields is, of added, the fields at the paths elsewhere taught each
+// recording.
 func taughtFields(elsewhere []models.MockState, added map[string][]string) taught {
 	out := taught{}
 	for _, e := range elsewhere {
