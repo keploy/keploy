@@ -193,3 +193,42 @@ func TestAReadPlusAnOffsetIsCheckedInTheSpanFromTheLastServeFirst(t *testing.T) 
 		}
 	}
 }
+
+// The cost of the test's begin, pinned: keploy cannot tell which of the
+// application's goroutines made a call, so a serve made after the test
+// began bounds no read, the test's own earlier call's no more than another
+// goroutine's. A handler that read its clock as its test began and wrote
+// that value at its second call, after keploy served its first, passes
+// (a timestamp read once for a request); a value read before the test
+// began, or more than a cut after the call, is refused as before.
+func TestAReadEarlierInItsTestPassesAtALaterCallOfTheSameTest(t *testing.T) {
+	base := time.Date(2026, 10, 31, 9, 0, 0, 0, time.UTC)
+	began, served, arrival := base, base.Add(40*time.Millisecond), base.Add(45*time.Millisecond)
+	tr := NewTracker()
+	tr.SetAppClock(func(r time.Time) (time.Time, bool) { return r, true })
+	tr.SetAppClockRun(func(time.Time) (time.Time, bool) { return time.Time{}, true })
+	tr.NewSetAt(base.Add(-time.Second))
+	tr.BeginAt(began)
+	tr.ServedMockAt(&models.Mock{Name: "mock-1", Kind: models.Postgres}, served)
+	s, ok := tr.LiveSpan(arrival)
+	if !ok || !s.From.Equal(served) || !s.TestFrom.Equal(began) {
+		t.Fatalf("span = %+v,%v; want from the first call's serve, the test's begin carried", s, ok)
+	}
+	const p = "body.created"
+	read := models.ClockOffset{Res: time.Millisecond, Layout: models.LayoutTyped}
+	at := func(v time.Time) Leaf { return InstantLeaf(p, p, v, time.Millisecond) }
+	for _, c := range []struct {
+		what string
+		v    time.Time
+		ok   bool
+	}{
+		{"a read after the first call's serve", served.Add(2 * time.Millisecond), true},
+		{"a read as the test began, before the first call's serve", began.Add(time.Millisecond), true},
+		{"a read before the test began", began.Add(-5 * time.Millisecond), false},
+		{"a value more than a cut after the call", arrival.Add(2 * time.Millisecond), false},
+	} {
+		if ok, why := CheckClockRead(p, read, at(c.v), s, true); ok != c.ok {
+			t.Errorf("%s (%s): ok %v (%s); want %v", c.what, at(c.v).Value, ok, why, c.ok)
+		}
+	}
+}
