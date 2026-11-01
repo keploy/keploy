@@ -141,6 +141,24 @@ type Receipt struct {
 	// the app sent), with the process that made it. nil when the misses
 	// were not read, and with the switch off.
 	UnchargedMisses []UnchargedMiss `yaml:"unchargedMisses,omitempty" json:"unchargedMisses,omitempty"`
+	// ProcessTrackingUnread and CallCaptureUnread each say, when keploy
+	// asked for one of the agent's counts at the run's end and could not
+	// read it, what that leaves unproven and why it could not be read: the
+	// count of processes the agent could not track (its PID maps'
+	// refusals), and, under the proven switch, the count of calls it could
+	// not capture. Either one unread, nothing shows that no call reached a
+	// real dependency unmocked. Each is kept here whatever IsolationNote
+	// says: the note keeps one reason, so a run whose test command failed,
+	// whose calls matched nothing, whose agent refused a process or lost a
+	// call, or whose other count was unread too keeps that reason there.
+	//
+	// Each is empty when its count was read, or was never asked for (an
+	// agent that cannot count it, the switch off for capture losses, or a
+	// run keploy failed first). So an empty field proves nothing: a reader
+	// keys off FailedBy first, and never takes empty fields as proof that
+	// the run was isolated.
+	ProcessTrackingUnread string `yaml:"processTrackingUnread,omitempty" json:"processTrackingUnread,omitempty"`
+	CallCaptureUnread     string `yaml:"callCaptureUnread,omitempty" json:"callCaptureUnread,omitempty"`
 }
 
 // UnchargedMiss is a call no recorded mock answered that no test was charged
