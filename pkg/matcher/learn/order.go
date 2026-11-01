@@ -908,8 +908,13 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 				"the recorded moment stands in "+p.name+", whose state in round F keploy cannot tell ("+note+")", []string{p.name},
 				Edit{Kind: EditReRecord}, dc.wordNoise(path, n))
 		}
+		// A place that holds F's moment only as a cut of a finer instant (a
+		// second inside a UnixNano name) gave no value to pick, as at step 3.
+		cut := c.lm != nil && dc.cutOfFinerOnly(p.t.live, l, *c.lm) && dc.namedBy(p.t.live, *c.lm, func(h, m moment) bool {
+			return h.res < m.res && m.res > 0 && h.key.at-h.key.at%int64(m.res) == m.key.at
+		}) > 0
 		switch {
-		case before(p) && h.hl && (!h.hr || p.same()):
+		case before(p) && h.hl && !cut && (!h.hr || p.same()):
 			why := "round F's moment stands unchanged in " + p.name
 			if !p.same() {
 				why = "round F's moment stands in " + p.name + ", which does not show it"
