@@ -15,6 +15,7 @@ import (
 
 func init() {
 	clockInWindow = offsetInWindow
+	clockSinceBegin = sinceBeginV5
 }
 
 // offsetInWindow is the offset r and l, an instant as recorded and as F
@@ -51,20 +52,70 @@ func init() {
 // a window that no replay of its width could check (Checkable). The other
 // guards (one no replay compares, one too wide to narrow, one near a wall
 // time shown twice) are the order's, as for any reading.
+//
+// Since its test began (the 2026-10-31 ruling on a time to live):
+//   - A time to live (Min above zero) that its call's window holds at a
+//     cut of the second or the minute (CoarseCut: clock + 29d23h59m57s,
+//     read three seconds before its call plus thirty days), or refuses
+//     (Fine: clock + 29d23h59m56.3s to 56.9s; or not Checkable), measures
+//     how long the application waited between its read and its call as
+//     much as what it added, so a replay whose wait changed by two seconds
+//     would fail it or pass it by where its reads fell in their seconds,
+//     or no replay passes it. Where the window from each run's test begin
+//     to its call
+//     (Window.sinceBegin: client tests) holds it as the clock plus an
+//     offset in both runs (clock + 30d), that offset is learned instead,
+//     checked from the test's begin (models.SinceTestBegin): it holds the
+//     application's value however long the replay waited.
+//   - Read in that window itself (w.begun: the order's step 7, through
+//     clockSinceBegin), only a time to live is learned: a look-back checked
+//     from the test's begin would pass one changed by up to the test's span
+//     (and a dropped one), so it is declined, never refused: the order
+//     goes on as if there were no such read.
 func offsetInWindow(path string, r, l typedInstant, w *Window, zone *time.Location) (models.ClockOffset, string, bool) {
 	o, gap, ok := offsetV5(r, l, w, zone)
-	if !ok {
+	if !ok || w.begun && o.Min <= 0 {
 		return models.ClockOffset{}, "", false
 	}
 	enc := max(r.res, l.res)
+	checkable := o.Checkable(enc, w.Rec.From, w.Rec.To) && o.Checkable(enc, w.F.From, w.F.To)
+	if wb := w.sinceBegin(); wb != nil && o.Min > 0 && (o.Fine() || o.CoarseCut() || !checkable) {
+		if ob, _, bok := offsetInWindow(path, r, l, wb, zone); bok {
+			return ob, "", true
+		}
+	}
 	switch {
 	case o.Fine():
 		return models.ClockOffset{}, fineV5Why(path, o), false
-	case !o.Checkable(enc, w.Rec.From, w.Rec.To) || !o.Checkable(enc, w.F.From, w.F.To):
+	case !checkable:
 		return models.ClockOffset{}, clockSeenV5(path, o) + ", but a replay in a window as wide as its call's (" + models.ShortDuration(max(w.Rec.To.Sub(w.Rec.From), w.F.To.Sub(w.F.From))) + ") could not tell " + offsetNamed(o) + " changed by " + aUnit(o.Unit()) + " from it, so keploy refuses it" + noiseEdit, false
+	case w.begun:
+		o.Since = models.SinceTestBegin
+		o.Why = sinceLineV5(path, o)
+		return o, "", true
 	}
 	o.Why = lineV5(path, o, enc, gap)
 	return o, "", true
+}
+
+// sinceBeginV5 is clockSinceBegin: ln, a Clock the order's step 7 found in
+// the window from each run's test begin to its call, checked from its
+// test's begin (models.SinceTestBegin): a plain read, or the clock plus an
+// offset that lies after the call in both runs (a time to live added to an
+// early read, which offsetInWindow reads in that window). A look-back is
+// declined (ok false), as offsetInWindow declines one there: checked from
+// the test's begin it would pass a look-back changed by up to the test's
+// span. ok is false for anything else.
+func sinceBeginV5(ln Learned) (Learned, bool) {
+	switch {
+	case ln.Kind == KindClockRead && ln.Read != nil:
+		ln.Read.Since = models.SinceTestBegin
+	case ln.Kind == KindClockOffset && ln.Offset != nil && (ln.Offset.Plain() || ln.Offset.Min > 0):
+		ln.Offset.Since = models.SinceTestBegin
+	default:
+		return ln, false
+	}
+	return ln, true
 }
 
 // offsetV5 is offsetInWindow's reading, before its guards: the offset, with
@@ -195,4 +246,17 @@ func cutOffsetsV5(o models.ClockOffset, lo, hi time.Duration) string {
 		return "clock + " + models.ShortDuration(lo)
 	}
 	return "clock plus each whole " + unitWord(o.Res) + " from " + models.ShortDuration(lo) + " to " + models.ShortDuration(hi)
+}
+
+// sinceLineV5 is the Why of a time to live o learned in the window from
+// each run's test begin to its call (models.SinceTestBegin): what was
+// seen, and what a replay passes (models.ClockOffset.Holds from the test's
+// begin), truly.
+func sinceLineV5(path string, o models.ClockOffset) string {
+	c := models.ShortDuration(o.Res)
+	lo, hi := o.Min, o.Max
+	if o.CoarseChecked(o.Res) {
+		lo, hi = o.CutOffsets()
+	}
+	return path + " = " + o.String() + ": in the recording and in record's full round alike, it is a read of the application's clock made after its test began and before its call, plus a time to live, cut to " + aUnit(o.Res) + ". Its call's window alone shows an offset that measures how long the application waited between its read and its call as much as what it added, so keploy checks it from the test's begin: a replay passes a value from one " + c + " before the " + c + " that holds its test's begin plus " + models.ShortDuration(lo) + ", up to one " + c + " after its call plus " + models.ShortDuration(hi) + ", checked at " + c + ", however long the application waited between its read and its call; so a time to live changed by less than the test's span plus " + models.ShortDuration(hi-lo) + " can pass too, and one changed by more fails" + noiseEdit
 }
