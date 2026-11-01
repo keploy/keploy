@@ -132,6 +132,16 @@ func (a *Agent) stageForExactServing(ctx context.Context) (bool, error) {
 	a.provenMu.Lock()
 	a.proven.stagedPool = staged
 	a.provenMu.Unlock()
+	// The learn step reads the set's recordings now, in the background, not
+	// on its first drifted call's answer path: keploy mock's replay of
+	// record's full round stages its set here, before the test command
+	// runs, and never by keploy test's stage filter (serveKeployTestExactly).
+	// The proxy reads them only while the set's learn step is on.
+	if w, ok := a.Proxy.(coreAgent.LearnSetWarmer); ok {
+		if err := w.WarmLearnSet(); err != nil {
+			return false, fmt.Errorf("read the recording's mocks for the learn step: %w", err)
+		}
+	}
 	return true, nil
 }
 
@@ -197,10 +207,10 @@ func (a *Agent) readUnstagedFromDisk() error {
 }
 
 // diskRecordingTimes visits, of the set staged, every on-disk mock's name,
-// request and answer times and protocol phase (DiskMocks.RangeTimes), nil
+// request and answer times, protocol phase and clock (DiskMocks.RangeTimes), nil
 // when the set's mocks are all resident, and so all staged in the proxy's
 // trees.
-func (a *Agent) diskRecordingTimes() func(visit func(name string, req, res time.Time, protocolPhase bool) bool) error {
+func (a *Agent) diskRecordingTimes() func(visit func(name string, req, res time.Time, protocolPhase bool, clock string) bool) error {
 	disk := a.stagedDisk()
 	if disk == nil {
 		return nil
@@ -430,6 +440,13 @@ func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFi
 		// reads the on-disk store.
 		if err := a.readUnstagedFromDisk(); err != nil {
 			return err
+		}
+		// The learn step reads the set's recordings now, in the background,
+		// not on its first call's answer path (record's full round alone).
+		if w, ok := a.Proxy.(coreAgent.LearnSetWarmer); ok {
+			if err := w.WarmLearnSet(); err != nil {
+				return fmt.Errorf("read the test set's recordings for the learn step: %w", err)
+			}
 		}
 		bg := a.settleBackground(ex)
 		if _, can := es.(coreAgent.ExactBackgroundServer); bg != nil && !can {

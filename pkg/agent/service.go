@@ -640,10 +640,11 @@ type RecordedOfKindSetter interface {
 // reads, beside what is staged, the times of the set's recordings the agent
 // keeps on disk: a test's own are staged only as it opens, and the bound is
 // the latest of them. SetRecordingTimes sets where (src visits every on-disk
-// mock with its name, request and answer times and whether it is
-// protocol-phase, decoding none; nil for none).
+// mock with its name, request and answer times, whether it is
+// protocol-phase and its clock (models.Origin.Clock), decoding none; nil for
+// none).
 type RecordingTimesSetter interface {
-	SetRecordingTimes(src func(visit func(name string, req, res time.Time, protocolPhase bool) bool) error) error
+	SetRecordingTimes(src func(visit func(name string, req, res time.Time, protocolPhase bool, clock string) bool) error) error
 }
 
 // RecordingSourceSetter is implemented by a proxy whose miss diagnosis under
@@ -668,12 +669,29 @@ type RecordedBeforeSetter interface {
 	SetRecordedBefore(src func(t time.Time, visit func(*models.Mock) bool) error) error
 }
 
+// LearnSetWarmer is implemented by a proxy whose learn step reads the staged
+// set's recordings before its tests' calls do: WarmLearnSet, called once the
+// set is staged and its on-disk recordings are set (RecordedBeforeSetter),
+// starts that read in the background, in record's full round alone, and
+// returns at once. Nothing it reads is served.
+type LearnSetWarmer interface {
+	WarmLearnSet() error
+}
+
 // LearnEndSetter is implemented by a proxy whose learn step a keploy test
 // filter can end for the rest of a test set (models.MockFilterParams.
 // LearnEnded): SetLearnEnded says whether it has ended. The agent sets it from
 // every keploy test filter, before the filter's view goes live.
 type LearnEndSetter interface {
 	SetLearnEnded(ended bool) error
+}
+
+// LearnHolder is implemented by a proxy whose learn step can be held for a
+// while and released, unlike LearnEndSetter's end, which lasts for the set:
+// the agent holds it while a test of record's full round whose recording the
+// round does not learn onto is open (models.OutgoingOptions.LearnTests).
+type LearnHolder interface {
+	SetLearnHeld(held bool) error
 }
 
 // KeptLearningSetter is implemented by a proxy that serves a test set's
@@ -709,6 +727,15 @@ type ExactServer interface {
 // test of the set reads.
 type ExactTestOpener interface {
 	OpenExactTest(test string, owned []*models.Mock, given []models.VariableBinding) error
+}
+
+// ExactTestGiver is an optional ExactServer capability of a proxy that keeps
+// the test variables a replay binds: GiveExactTest binds b, a value the open
+// test gave (POST /agent/scope/given), as a given variable of test's scope
+// (variables.Table.Give). It refuses when test is not the test served, or
+// when b's name is bound already.
+type ExactTestGiver interface {
+	GiveExactTest(test string, b models.VariableBinding) error
 }
 
 // AppClockSetter is an optional proxy capability: SetAppClock hands the
@@ -902,6 +929,13 @@ type NetworkAddress struct {
 	// (per-PID scoping for parallel runners). 0 when unavailable (non-eBPF
 	// platforms / lookup miss) — callers must treat 0 as "unknown, no scope".
 	KernelPid uint32
+	// AgentNsPid is the same process's PID in the agent's own PID namespace,
+	// by which the agent finds it in its /proc (structs.DestInfo.AgentNsPid):
+	// KernelPid itself for an agent in the initial namespace, another number
+	// for one in a container. 0 when the eBPF redirect did not name it there:
+	// a process outside the agent's namespace (with KernelPid set), or none
+	// known (KernelPid 0 too).
+	AgentNsPid uint32
 }
 
 // Sessions provides a thread-safe store for Session objects, keyed by ID.

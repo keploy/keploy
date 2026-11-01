@@ -787,7 +787,7 @@ func TestReplayEpilogueReadsHaveNoDeadlineUnderTheSwitch(t *testing.T) {
 			inst := &deadlineInstr{}
 			m := &mockService{logger: zap.NewNop(), instrumentation: inst, config: &config.Config{}}
 			m.reportOutcome(context.Background(), 0, replayDetail{}, func() bool { return false })
-			m.persistCaptured(context.Background(), "set")
+			_ = m.persistCaptured(context.Background(), "set")
 			require.Equal(t, map[string]bool{"consumed": !on, "misses": !on, "captured": !on}, inst.deadlines)
 		})
 	}

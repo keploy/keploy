@@ -28,7 +28,7 @@ func ContainsToken(s, v string) bool { return tokenIndex(s, v) >= 0 }
 
 // tokenIndex is where s first holds v as a token (ContainsToken), -1 where
 // it does not.
-func tokenIndex(s, v string) int {
+var tokenIndex = func(s, v string) int {
 	if v == "" {
 		return -1
 	}

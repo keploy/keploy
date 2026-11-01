@@ -1,6 +1,8 @@
 package models
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"sort"
 	"strconv"
@@ -78,6 +80,11 @@ type MockVariable struct {
 	// regression. Each is still asserted at every one of its places. Only the
 	// learn step sets it, with a Bind; none for any other variable.
 	Clock []ClockRead `json:"clock,omitempty" yaml:"clock,omitempty" bson:"clock,omitempty"`
+	// Why is, for a variable the learn step wrote, why it is one and how to
+	// undo it, for a person or a tool reading the mock (the legibility
+	// rule). Only given variables (GivenPrefix) carry one for now
+	// (learn.GivenWhy). Nothing replays it.
+	Why string `json:"why,omitempty" yaml:"why,omitempty" bson:"why,omitempty"`
 }
 
 // ClockRead is one clock read a recorded value holds, as the learn step read
@@ -298,6 +305,146 @@ type ClockOffset struct {
 	// running test began on the application's clock refuses such a read, and
 	// one of a Since this keploy does not read holds nothing (SinceKnown).
 	Since string `json:"since,omitempty" yaml:"since,omitempty" bson:"since,omitempty"`
+	// Word, of a read that is one word of a longer text (keploy mock's
+	// client test naming an app "[E2E] stop-<UnixNano>" by its own clock
+	// read since the test began), is where that word stands in the text as
+	// recorded (ClockWord): a replay checks the value holds the recorded
+	// text's bytes before the word and after it (by their length and
+	// SHA-256) with one such read between them, so only the word is read as
+	// the clock and every other byte is still compared. Zero (IsZero) for a
+	// read that is its value whole, as every learning before Word was, and
+	// then omitted: an old file reads the same. A value, not a pointer, so
+	// two learnings of one read compare equal (==). A keploy that does not
+	// read Word checks the whole value as one read, which a text around the
+	// word is not, so it refuses it.
+	Word ClockWord `json:"word,omitzero" yaml:"word,omitempty" bson:"word,omitempty"`
+	// Why is the line the learn step wrote for the read: what, where, both
+	// values, the rule and the undo, for a person or a tool reading the mock.
+	// Nothing replays it. Meet keeps the lesser of two that are set, so one
+	// line in either order; after a Meet that narrows the offset, that line
+	// may quote the wider range one learning saw, until the learn step
+	// writes Why again from the met offset.
+	Why string `json:"why,omitempty" yaml:"why,omitempty" bson:"why,omitempty"`
+	// Step is the cut the application made its clock read to before it added
+	// the offset (a read cut to the hour, plus thirty days): a replay checks
+	// the offset from that cut of the call's span (holdsStep). 0 for none,
+	// as every learning before Step was, and then omitted: an old file reads
+	// the same. Two learnings of one place at two Steps meet as StepApart
+	// (Empty), which holds nothing.
+	Step time.Duration `json:"step,omitempty" yaml:"step,omitempty" bson:"step,omitempty"`
+}
+
+// StepApart is the Step of the Meet of two learnings of one place that saw
+// the application cut its read to two different steps: no one step holds
+// both, so it holds nothing (Empty).
+const StepApart time.Duration = -1
+
+// holdsStep is Holds of o, whose Step is above zero. Until a keploy reads
+// such a value, it holds nothing (fail closed).
+var holdsStep = func(o ClockOffset, at time.Time, res time.Duration, from, to time.Time) bool { return false }
+
+// ClockWord is where a read of the clock stands in a longer text
+// (ClockOffset.Word), as recorded: the word at bytes Start to End of the
+// text (End exclusive), After bytes of text after it, and the SHA-256, in
+// lower-case hex, of the text before it (its first Start bytes:
+// BeforeSHA256) and of the text after it (its last After bytes:
+// AfterSHA256). It holds no byte of the text, so what the learn step
+// writes is the same few bytes whatever the text's length, and nothing the
+// recording holds (which may be a secret) is copied into what was learned:
+// the recording holds the text, and "the word at bytes Start-End" names
+// where to read it there. A word read always has text on one side at
+// least (the learn step learns a read of a value whole otherwise), so the
+// zero ClockWord is a read whole. The word's own length may differ at a
+// replay (a time with a fraction cut of its trailing zeros), so a replay
+// reads its word between the first Start bytes and the last After bytes
+// of its value (WordOf); End only says where the recording's word ends.
+type ClockWord struct {
+	Start        int    `json:"start" yaml:"start" bson:"start"`
+	End          int    `json:"end" yaml:"end" bson:"end"`
+	After        int    `json:"after" yaml:"after" bson:"after"`
+	BeforeSHA256 string `json:"before_sha256" yaml:"before_sha256" bson:"before_sha256"`
+	AfterSHA256  string `json:"after_sha256" yaml:"after_sha256" bson:"after_sha256"`
+	// Form is the text the word stands in: "" the value as it is; Decoded
+	// (ClockWordDecoded) the value decoded once, its escapes read and its
+	// base64 runs decoded where they stand (a percent-encoded instant, one
+	// written with "\u002b" for its '+', one inside a base64 cursor), where
+	// the word and its sides are read, so the sides are compared as decoded
+	// text. Any other form is no place of a text (Valid). WordOf does not
+	// decode yet: the replay that reads Decoded lands before any learn step
+	// writes it, and until then nothing writes it. A Decoded word read raw
+	// fails its decoded sides' hashes, or, as the whole value, is the raw
+	// text checked whole, which the learned layout does not read.
+	Form string `json:"form,omitempty" yaml:"form,omitempty" bson:"form,omitempty"`
+}
+
+// ClockWordDecoded is the Form of a word read in its value decoded once.
+const ClockWordDecoded = "decoded"
+
+// ClockWordOf is the ClockWord of the word at bytes start to end (end
+// exclusive) of text, a value as recorded, 0 <= start < end <= len(text).
+func ClockWordOf(text string, start, end int) ClockWord {
+	return ClockWord{Start: start, End: end, After: len(text) - end, BeforeSHA256: textSHA256(text[:start]), AfterSHA256: textSHA256(text[end:])}
+}
+
+// IsZero reports whether w is no word: the read is its value whole. The
+// json, yaml and bson encoders omit a zero Word by it.
+func (w ClockWord) IsZero() bool { return w == ClockWord{} }
+
+// Valid reports whether w is a word a replay can check: a word of one byte
+// or more (Start < End), at bytes of a text (none negative), with text on
+// one side of it at least or read in the value's decoded form, both hashes
+// a SHA-256 in lower-case hex, in a form this keploy reads.
+// What a file holds otherwise (a hand edit, a cut copy) is no place of a
+// text, and a replay refuses the value there whatever it is.
+func (w ClockWord) Valid() bool {
+	return w.Start >= 0 && w.End > w.Start && w.After >= 0 && (w.Start > 0 || w.After > 0 || w.Form == ClockWordDecoded) && isSHA256Hex(w.BeforeSHA256) && isSHA256Hex(w.AfterSHA256) && (w.Form == "" || w.Form == ClockWordDecoded)
+}
+
+// WordOf is the word of live, a replay's text at a place learned as w (a
+// Valid one): live with its first w.Start bytes and its last w.After bytes
+// taken off, where those are the bytes the recorded text held before its
+// word and after it, compared by length and SHA-256, so every byte of
+// them is still compared. Otherwise changed says what is not as recorded:
+// "short" for a live too short to hold both apart (they would overlap, or
+// leave no word between them), else "before" or "after", the side of the
+// word whose bytes changed; changed is "" for a word.
+func (w ClockWord) WordOf(live string) (word, changed string) {
+	switch {
+	case len(live) <= w.Start+w.After:
+		return "", "short"
+	case textSHA256(live[:w.Start]) != w.BeforeSHA256:
+		return "", "before"
+	case textSHA256(live[len(live)-w.After:]) != w.AfterSHA256:
+		return "", "after"
+	}
+	return live[w.Start : len(live)-w.After], ""
+}
+
+// textSHA256 is the SHA-256 of s in lower-case hex.
+func textSHA256(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
+}
+
+// isSHA256Hex reports whether s is a SHA-256 in lower-case hex (textSHA256).
+func isSHA256Hex(s string) bool {
+	if len(s) != 2*sha256.Size {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// meetWord is the Word two learnings of one place read it at, a and b, and
+// whether they share one: both whole (zero), or both the same word of the
+// same text. A read whole and one inside a text, or two at different places
+// of a text, are two forms of the value: their Meet is LayoutApart (Empty).
+func meetWord(a, b ClockWord) (ClockWord, bool) {
+	return a, a == b
 }
 
 // AppZoneMatters reports whether what the learn step learned of o depends
@@ -815,7 +962,8 @@ func (o ClockOffset) Within(spans ...time.Duration) bool {
 
 // Holds reports whether at, a value written at resolution res (its own
 // encoding's), is a read of the clock made from from to to (a call's window
-// on the application's clock) plus an offset of o; of a Plain o (a zero
+// on the application's clock) plus an offset of o; of an o with a Step, as
+// holdsStep says (until a keploy reads one, nothing); of a Plain o (a zero
 // offset, a plain read of the clock), a read made there itself (holdsRead).
 // Of any other o, a read of the clock plus an offset, then cut, is a clock
 // read (2026-10-28): at is checked as a plain read of the span from
@@ -856,6 +1004,9 @@ func (o ClockOffset) Within(spans ...time.Duration) bool {
 func (o ClockOffset) Holds(at time.Time, res time.Duration, from, to time.Time) bool {
 	if !o.ZoneKnown() || !o.LayoutKnown() {
 		return false
+	}
+	if o.Step != 0 {
+		return o.Step > 0 && holdsStep(o, at, res, from, to)
 	}
 	if o.Plain() {
 		return o.holdsRead(at, res, from, to)
@@ -1134,7 +1285,8 @@ func (o ClockOffset) signed() bool {
 // (a Plain and one with an offset, or two offsets apart), that read it in
 // zones no one zone holds (UTC and the application's: ZoneApart,
 // meetZones), or that saw it written in different layouts (LayoutApart,
-// meetLayouts) meet as an Empty one, which holds nothing; ZoneEither meets
+// meetLayouts), whole at one and a word of a text at another, or at two
+// places of a text (meetWord), meet as an Empty one, which holds nothing; ZoneEither meets
 // UTC or the application's zone as that one, the zone both hold, and a
 // Layout of "" (learned before Layout was) meets another as that one. Two
 // that read the application's zone as two zones (AppZoneApart: two named
@@ -1144,9 +1296,24 @@ func (o ClockOffset) signed() bool {
 // hour in UTC, and refuses any other (learn's CheckClockRead). Meet is the
 // same in either order and however a place's learnings are grouped, so a
 // recording paired many times keeps one answer whatever order its
-// pairings came in.
+// pairings came in. Two at different Steps meet as StepApart (Empty). Why
+// is the lesser of the two that are set (nothing replays it): one learned
+// line, whatever the order.
 func (o ClockOffset) Meet(p ClockOffset) ClockOffset {
-	m := ClockOffset{Min: max(o.Min, p.Min), Max: min(o.Max, p.Max), Res: max(o.Res, p.Res), Zone: meetZones(o.Zone, p.Zone), Layout: meetLayouts(o.Layout, p.Layout), Since: meetSince(o.Since, p.Since)}
+	m := ClockOffset{Min: max(o.Min, p.Min), Max: min(o.Max, p.Max), Res: max(o.Res, p.Res), Zone: meetZones(o.Zone, p.Zone), Layout: meetLayouts(o.Layout, p.Layout), Since: meetSince(o.Since, p.Since), Why: o.Why, Step: o.Step}
+	if m.Why == "" || p.Why != "" && p.Why < m.Why {
+		m.Why = p.Why
+	}
+	if o.Step != p.Step {
+		m.Step = StepApart
+	}
+	// One read whole and one inside a text, or at two places of a text
+	// (meetWord), were written in two forms: no one layout holds both.
+	if word, ok := meetWord(o.Word, p.Word); ok {
+		m.Word = word
+	} else {
+		m.Layout = LayoutApart
+	}
 	// A learning whose value a replay reads in no zone of the application's
 	// (CutInAppZone: one cut to the minute or finer), that names none, says
 	// nothing of the zone a meet read in it holds: the other's reading says
@@ -1186,10 +1353,10 @@ func (o ClockOffset) Meet(p ClockOffset) ClockOffset {
 // no offset: a Max not above its Min, other than a Plain o's (a Plain and
 // an offset meet so, and so do two offsets apart, of one sign or of two);
 // that read it in zones no one zone holds (ZoneApart); or that saw it
-// written in different layouts (LayoutApart). Holds holds nothing for it,
-// and String says why.
+// written in different layouts (LayoutApart); or at different Steps
+// (StepApart). Holds holds nothing for it, and String says why.
 func (o ClockOffset) Empty() bool {
-	return !o.Plain() && o.Max <= o.Min || o.Zone == ZoneApart || o.Layout == LayoutApart
+	return !o.Plain() && o.Max <= o.Min || o.Zone == ZoneApart || o.Layout == LayoutApart || o.Step < 0
 }
 
 // MergeClocks is a and b, two sets of the places a call's learn steps
@@ -1391,8 +1558,17 @@ func (o ClockOffset) String() string {
 		return "clock read written in a layout this keploy does not read (" + strconv.Quote(o.Layout) + ")"
 	case !o.SinceKnown():
 		return "clock read from a start this keploy does not read (" + strconv.Quote(o.Since) + ")"
+	case o.Step < 0:
+		return "clock reads cut to no one step (one place learned as a read cut to different steps before its offset at different calls)"
 	}
 	s := o.offsetString() + o.zoneString() + o.layoutString()
+	if o.Step > 0 {
+		s += ", read cut to " + o.Step.String() + " before the offset"
+	}
+	if !o.Word.IsZero() {
+		// Where the word stands, never what the text holds.
+		s += ", as the word at bytes " + strconv.Itoa(o.Word.Start) + "-" + strconv.Itoa(o.Word.End) + " of the text as recorded, with " + strconv.Itoa(o.Word.After) + " bytes after it"
+	}
 	if o.Since == SinceTestBegin {
 		s += ", read after its test began and before its call"
 	}
@@ -1528,6 +1704,9 @@ func MergeVariables(a, b MockVariables) MockVariables {
 		cur.Use = appendNewPlaces(cur.Use, v.Use...)
 		cur.Answer = appendNewPlaces(cur.Answer, v.Answer...)
 		cur.Echo = cur.Echo && v.Echo
+		if cur.Why == "" {
+			cur.Why = v.Why
+		}
 		out[name] = cur
 	}
 	return out
@@ -1565,6 +1744,16 @@ func appendNewPlaces(list []string, vs ...string) []string {
 	}
 	return list
 }
+
+// RunVariablePrefix begins the name of a run's variable: one bound for the
+// whole test set, by its start-up or by an earlier test's call, which every
+// later test of the set reads (learn.Tracker.RunName). No test's own variable
+// is named with it, so a replay keeps a binding of such a name for the set
+// (variables.Table), and forgets every other one when the next test begins.
+const RunVariablePrefix = "run-"
+
+// RunVariable reports whether name is a run's variable's (RunVariablePrefix).
+func RunVariable(name string) bool { return strings.HasPrefix(name, RunVariablePrefix) }
 
 // TestVariablesResp is the answer of GET /agent/variables.
 type TestVariablesResp struct {

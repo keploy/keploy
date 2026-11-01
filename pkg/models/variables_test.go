@@ -1,6 +1,8 @@
 package models
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"reflect"
@@ -8,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"go.mongodb.org/mongo-driver/v2/bson"
 	"gopkg.in/yaml.v3"
 )
 
@@ -1534,5 +1537,103 @@ func TestAWallTimeShownTwiceHoldingAnHoursStartIsReadAtAnHoursCut(t *testing.T) 
 	}
 	if turn, _, l, met := o.FallBackAnywhereAcrossHour(hour, nt, nt.Add(time.Second)); met {
 		t.Errorf("FallBackAnywhereAcrossHour at %s met %s's turn at %s; want none of a zone whose wall time shown twice holds an hour's start", nt, l, turn)
+	}
+}
+
+// A read of the clock that is its value whole writes no Word in json, yaml
+// or bson, so a file learned before Word reads and writes the same; one
+// that is a word of a text keeps where the word stands through each (its
+// bytes, the bytes after it, and the SHA-256 of each side), never a byte of
+// the text, and two learnings of one word read compare equal (Word is a
+// value, not a pointer).
+func TestClockWordIsOmittedWholeAndKeptAsAWord(t *testing.T) {
+	const text = "[E2E] generate-stop-1793336961102639022"
+	whole := ClockOffset{Res: time.Nanosecond, Since: SinceTestBegin}
+	word := whole
+	word.Word = ClockWordOf(text, 20, len(text))
+	if word.Word.Start != 20 || word.Word.End != 39 || word.Word.After != 0 {
+		t.Fatalf("ClockWordOf = %+v; want the word at bytes 20-39 with none after it", word.Word)
+	}
+	if word.Word.BeforeSHA256 != sha256Of("[E2E] generate-stop-") || word.Word.AfterSHA256 != sha256Of("") || !word.Word.Valid() {
+		t.Fatalf("ClockWordOf hashes %+v; want the SHA-256 of each side in lower-case hex", word.Word)
+	}
+	type enc struct {
+		name      string
+		marshal   func(any) ([]byte, error)
+		unmarshal func([]byte, any) error
+	}
+	for _, e := range []enc{
+		{"json", json.Marshal, json.Unmarshal},
+		{"yaml", yaml.Marshal, yaml.Unmarshal},
+		{"bson", bson.Marshal, bson.Unmarshal},
+	} {
+		b, err := e.marshal(whole)
+		if err != nil {
+			t.Fatalf("%s: %v", e.name, err)
+		}
+		if strings.Contains(string(b), "word") {
+			t.Errorf("%s: a whole read wrote a word: %q", e.name, b)
+		}
+		b, err = e.marshal(word)
+		if err != nil {
+			t.Fatalf("%s: %v", e.name, err)
+		}
+		if strings.Contains(string(b), "generate") || strings.Contains(string(b), "E2E") {
+			t.Errorf("%s: a word read wrote the text around it: %q", e.name, b)
+		}
+		var back ClockOffset
+		if err := e.unmarshal(b, &back); err != nil {
+			t.Fatalf("%s: %v", e.name, err)
+		}
+		if back != word {
+			t.Errorf("%s: a word read came back as %+v, want %+v", e.name, back, word)
+		}
+	}
+	again := whole
+	again.Word = ClockWordOf(text, 20, len(text))
+	if again != word || !whole.Word.IsZero() || word.Word.IsZero() {
+		t.Errorf("two learnings of one word read compare apart, or IsZero is wrong")
+	}
+}
+
+// WordOf takes a replay's word from between the recorded text's sides,
+// compared by length and SHA-256: a word of another length between them is
+// still the word (a time cut of its trailing zeros), and a side changed in
+// one byte, its length kept, is named.
+func TestClockWordOfComparesEachSideByLengthAndHash(t *testing.T) {
+	w := ClockWordOf("job 2026-10-30T12:00:00.5Z queued", 4, 26)
+	for _, tc := range []struct{ live, word, changed string }{
+		{"job 2026-10-30T12:00:01.25Z queued", "2026-10-30T12:00:01.25Z", ""},
+		{"jab 2026-10-30T12:00:01.25Z queued", "", "before"},
+		{"job 2026-10-30T12:00:01.25Z queuee", "", "after"},
+		{"job  queued", "", "short"},
+		{"job queued", "", "short"},
+	} {
+		if word, changed := w.WordOf(tc.live); word != tc.word || changed != tc.changed {
+			t.Errorf("WordOf(%q) = %q, %q; want %q, %q", tc.live, word, changed, tc.word, tc.changed)
+		}
+	}
+}
+
+func sha256Of(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
+}
+
+// A variable's why (a given's: where the test gave it and how to undo it)
+// survives a merge: a's is kept, and one only b says is taken from b.
+func TestMergeVariablesKeepsAWhy(t *testing.T) {
+	for _, c := range []struct {
+		name, a, b, want string
+	}{
+		{"only b says why", "", "given by b", "given by b"},
+		{"only a says why", "given by a", "", "given by a"},
+		{"both say why", "given by a", "given by b", "given by a"},
+	} {
+		a := MockVariables{"given:nonce": {Recorded: "1", Use: []string{"body.name"}, Why: c.a}}
+		b := MockVariables{"given:nonce": {Recorded: "1", Use: []string{"url.query.n"}, Why: c.b}}
+		if got := MergeVariables(a, b)["given:nonce"]; got.Why != c.want || len(got.Use) != 2 {
+			t.Errorf("%s: merged why %q uses %v, want %q at both uses", c.name, got.Why, got.Use, c.want)
+		}
 	}
 }

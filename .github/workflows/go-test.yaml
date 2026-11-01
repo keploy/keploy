@@ -50,6 +50,11 @@ jobs:
       # utils or pkg/platform/http on a developer's machine pins no CPU.
       # This lane is where they run.
       KEPLOY_TEST_CPU_HOLD: "1"
+      # utils' tests of a stop's storage I/O read a file from storage, out of
+      # the page cache; where no read reaches storage (both test dirs in
+      # memory) they skip. This runner's disks take them: with this set they
+      # fail instead.
+      KEPLOY_TEST_STORAGE_IO_REQUIRED: "1"
       KEPLOY_TEST_MYSQL_ADDR: "127.0.0.1:3306"
       KEPLOY_TEST_MYSQL_USER: root
       KEPLOY_TEST_MYSQL_PASS: rootpass
@@ -133,6 +138,108 @@ jobs:
         env:
           KEPLOY_TEST_REAL_DOCKER: "1"
         run: go test ./...
+
+      # Most of the learn package's rows read a cache no tracker made, and
+      # payloads read whole, while keploy reads a set's caches (setDerived)
+      # and lazy payloads (LazyRawOf). Its TestMain runs every row in those
+      # shapes too: KEPLOY_LEARN_SET_EVERY_CACHE gives every NewDriftCache a
+      # set cache of its own, KEPLOY_LEARN_LAZY_EVERY_RAW makes every RawOf a
+      # lazy Raw read again at each use. A part of a recording the set keeps
+      # under another part's key, or a rule reading a payload past its
+      # accessor, passes the plain run above and fails one of these. Under
+      # the proven switch, as keploy's learn step runs (the plain run above
+      # has it off).
+      - name: Running Unit Tests (learn, every cache a set's, every payload lazy)
+        run: |
+          KEPLOY_PROVEN=1 KEPLOY_LEARN_SET_EVERY_CACHE=1 go test -count=1 ./pkg/matcher/learn/
+          KEPLOY_PROVEN=1 KEPLOY_LEARN_LAZY_EVERY_RAW=1 go test -count=1 ./pkg/matcher/learn/
+
+      # The learn step's tracker is told of serves and exchanges on the
+      # adapters' connection goroutines while other connections' calls read
+      # it (Placed, Order.ServedView, a late exchange's view), and one set's
+      # handlers read its caches at once (DriftCache, the set's derived data).
+      # A read outside the tracker's or the set's lock is a data race that a
+      # plain run passes. Race the rows of the tracker, of its Order and of
+      # the set's handlers, and the rows that wait on the tracker, not the
+      # whole package: under -race the package takes about 9 minutes on 12
+      # CPUs, these 27 rows about 25 seconds on 4 (the size of ubuntu-latest).
+      - name: Running Race Detector (learn tracker)
+        run: go test -race -count=1 -run '^Test(Tracker|Order)|DriftCache|Handlers|^TestACallInTheGapWaitsForTheRequest$|^TestAWindowClosedWithoutItsRequestIsSaid$' ./pkg/matcher/learn/
+
+      # The HTTP learn step's bound row holds its peak heap to the set's
+      # budget, a quarter of the agent's memory limit, at three limits. The
+      # plain run above takes the 256 MiB limit alone, which streams four
+      # times its budget; the 512 MiB and 1 GiB limits' legs run only with
+      # KEPLOY_LARGE_STREAM_MIB set, here, at the same 256 MiB stream, so the
+      # package's own run (and the Windows lane's) stays short. Each leg's
+      # PASS line is grepped, so a leg that skips or is renamed away fails
+      # the step.
+      - name: Running the HTTP learn bound row at its larger memory limits
+        shell: bash
+        run: |
+          set -o pipefail
+          KEPLOY_LARGE_STREAM_MIB=256 go test -count=1 -timeout 20m -v \
+            -run '^TestLearnMatchReadsTheRecordingsBeforeACallWithinTheSetsBudget$/^(512|1024)_MiB_limit_' \
+            ./pkg/agent/proxy/integrations/http/ | tee /tmp/http-learn-bound.out
+          for leg in 512_MiB_limit_on_disk 512_MiB_limit_staged 1024_MiB_limit_on_disk 1024_MiB_limit_staged; do
+            grep -q -- "--- PASS: TestLearnMatchReadsTheRecordingsBeforeACallWithinTheSetsBudget/$leg " /tmp/http-learn-bound.out ||
+              { echo "the bound row's $leg leg did not pass"; exit 1; }
+          done
+
+      # utils' TestMarkExitCountsOpenFilesNotDescriptors compares a child's
+      # descriptors with kcmp(2), which the kernel may refuse the runner user
+      # (another process's files need PTRACE_MODE_READ_REALCREDS). Where it
+      # refuses, the row holds keploy to counting each descriptor and saying
+      # why, and logs why the kernel refused: run here with -v so that reason
+      # is in the log, even where the unit run above failed. Run again as
+      # root with KEPLOY_TEST_KCMP_REQUIRED=1, which fails it where the kernel
+      # refuses, so the comparison itself runs on every PR. Beside it, the
+      # rows of a child reaped before its files are compared (required to
+      # compare as root too) and of a process read through threads that exit
+      # (it builds a C program; a runner with no cc fails the step). Each leg runs
+      # whether or not the one before it passed or built (a leg's failure is
+      # in its output, not the shell's -e and pipefail), so one run says both
+      # answers; each PASS line is grepped at the end, so a row that fails,
+      # does not build or vanishes fails the step.
+      - name: Open-file rows as the runner user and as root
+        if: success() || failure()
+        shell: bash
+        run: |
+          rm -f /tmp/utils.test /tmp/http.test
+          failed=0
+          go test -c -o /tmp/utils.test ./utils/ || failed=1
+          go test -c -o /tmp/http.test ./pkg/platform/http/ || failed=1
+          cd utils
+          rows='^(TestMarkExitCountsOpenFilesNotDescriptors|TestAChildReapedBeforeItsFilesAreComparedIsNoRefusal|TestAReadThroughExitingThreadsNeverSettlesLow)$'
+          /tmp/utils.test -test.count=1 -test.v -test.run "$rows" | tee /tmp/utils-runner.out || true
+          sudo env KEPLOY_TEST_KCMP_REQUIRED=1 /tmp/utils.test -test.count=1 -test.v -test.run "$rows" | tee /tmp/utils-root.out || true
+          # The churning daemon's stop, which reads its files the same way.
+          cd ../pkg/platform/http
+          /tmp/http.test -test.count=1 -test.v -test.run '^TestADaemonThatOnlyChurnsMovesNoTeardown$' | tee /tmp/http-runner.out || true
+          sudo env KEPLOY_TEST_KCMP_REQUIRED=1 /tmp/http.test -test.count=1 -test.v -test.run '^TestADaemonThatOnlyChurnsMovesNoTeardown$' | tee /tmp/http-root.out || true
+          for leg in {utils-runner,utils-root}:{TestMarkExitCountsOpenFilesNotDescriptors,TestAChildReapedBeforeItsFilesAreComparedIsNoRefusal,TestAReadThroughExitingThreadsNeverSettlesLow} \
+            http-runner:TestADaemonThatOnlyChurnsMovesNoTeardown http-root:TestADaemonThatOnlyChurnsMovesNoTeardown; do
+            out=/tmp/${leg%%:*}.out
+            grep -q -- "^--- PASS: ${leg#*:} " "$out" || { echo "${leg#*:} did not pass in $out"; failed=1; }
+          done
+          exit "$failed"
+
+      # internal/starvetest's hold gives the threads it let go their policy
+      # back, where the kernel lets it: from the idle policy, the runner user
+      # gets back only what RLIMIT_NICE allows (nothing, by default), so its
+      # run checks their CPUs alone. Run as root with
+      # KEPLOY_TEST_POLICY_RESTORE_REQUIRED=1, which fails it where the
+      # kernel would not, so the policy given back is checked on every PR.
+      - name: Hold row as root
+        if: success() || failure()
+        shell: bash
+        run: |
+          set -o pipefail
+          rm -f /tmp/starvetest.test
+          go test -c -o /tmp/starvetest.test ./internal/starvetest/
+          cd internal/starvetest
+          sudo env KEPLOY_TEST_CPU_HOLD=1 KEPLOY_TEST_POLICY_RESTORE_REQUIRED=1 /tmp/starvetest.test -test.count=1 -test.v -test.run '^TestAHoldLetsItsProcessesRunAsBefore$' | tee /tmp/starvetest-root.out
+          grep -q -- '^--- PASS: TestAHoldLetsItsProcessesRunAsBefore ' /tmp/starvetest-root.out
 
       # The hooks package's root tests skip in the run above, which is the
       # runner user's: TestTheHooksLoadOnThisKernel loads the agent's eBPF

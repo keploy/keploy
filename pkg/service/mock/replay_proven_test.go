@@ -28,11 +28,12 @@ type skipPusher struct {
 	Instrumentation
 	pushed bool
 	skip   map[string]string
+	needs  map[string][]models.ScopeNeed
 	err    error
 }
 
-func (s *skipPusher) PushScopeSkips(_ context.Context, skip map[string]string) error {
-	s.pushed, s.skip = true, skip
+func (s *skipPusher) PushScopeSkips(_ context.Context, skip map[string]string, needs map[string][]models.ScopeNeed) error {
+	s.pushed, s.skip, s.needs = true, skip, needs
 	return s.err
 }
 
@@ -56,16 +57,20 @@ func TestPushScopeSkips(t *testing.T) {
 	require.False(t, p.pushed, "no source installed: nothing to push")
 
 	var asked ScopeGateRequest
-	RegisterScopeSkipSource(func(_ context.Context, req ScopeGateRequest) (map[string]string, error) {
+	needs := map[string][]models.ScopeNeed{"orders::TestUse": {{Test: "orders::TestMake", Reason: "r"}}}
+	RegisterScopeSkipSource(func(_ context.Context, req ScopeGateRequest) (map[string]string, map[string][]models.ScopeNeed, error) {
 		asked = req
-		return map[string]string{"orders::TestToken": "flaky: replay_only"}, nil
+		return map[string]string{"orders::TestToken": "flaky: replay_only"}, needs, nil
 	})
 	t.Cleanup(func() { RegisterScopeSkipSource(nil) })
 	require.NoError(t, m.pushScopeSkips(context.Background(), "t2-go", "d1"))
 	require.Equal(t, ScopeGateRequest{Set: "t2-go", MocksDigest: "d1", Path: m.config.Path}, asked)
 	require.Equal(t, map[string]string{"orders::TestToken": "flaky: replay_only"}, p.skip)
+	require.Equal(t, needs, p.needs, "the needs ride the same push")
 
-	RegisterScopeSkipSource(func(context.Context, ScopeGateRequest) (map[string]string, error) { return nil, nil })
+	RegisterScopeSkipSource(func(context.Context, ScopeGateRequest) (map[string]string, map[string][]models.ScopeNeed, error) {
+		return nil, nil, nil
+	})
 	require.NoError(t, m.pushScopeSkips(context.Background(), "t2-go", "d1"))
 	require.NotNil(t, p.skip, "an empty list is pushed, not left out")
 	require.Empty(t, p.skip)
@@ -76,20 +81,25 @@ func TestPushScopeSkipsRefuses(t *testing.T) {
 	provenOn(t)
 	p := &skipPusher{}
 	m := &mockService{logger: zap.NewNop(), instrumentation: p, config: &config.Config{}}
-	RegisterScopeSkipSource(func(context.Context, ScopeGateRequest) (map[string]string, error) {
-		return nil, errors.New("unreadable")
+	RegisterScopeSkipSource(func(context.Context, ScopeGateRequest) (map[string]string, map[string][]models.ScopeNeed, error) {
+		return nil, nil, errors.New("unreadable")
 	})
 	t.Cleanup(func() { RegisterScopeSkipSource(nil) })
 	require.ErrorContains(t, m.pushScopeSkips(context.Background(), "s", ""), "unreadable")
 
-	RegisterScopeSkipSource(func(context.Context, ScopeGateRequest) (map[string]string, error) {
-		return map[string]string{"a": "b"}, nil
+	RegisterScopeSkipSource(func(context.Context, ScopeGateRequest) (map[string]string, map[string][]models.ScopeNeed, error) {
+		return map[string]string{"a": "b"}, nil, nil
 	})
 	p.err = errors.New("refused")
 	require.ErrorContains(t, m.pushScopeSkips(context.Background(), "s", ""), "refused")
 
-	// An instrumentation without the capability cannot skip a listed test.
+	// An instrumentation without the capability cannot skip a listed test,
+	// nor one that needs a test that did not run before it.
 	m.instrumentation = &gatePusher{}
+	require.Error(t, m.pushScopeSkips(context.Background(), "s", ""))
+	RegisterScopeSkipSource(func(context.Context, ScopeGateRequest) (map[string]string, map[string][]models.ScopeNeed, error) {
+		return nil, map[string][]models.ScopeNeed{"s::B": {{Test: "s::A", Reason: "r"}}}, nil
+	})
 	require.Error(t, m.pushScopeSkips(context.Background(), "s", ""))
 }
 
@@ -98,9 +108,9 @@ func TestPushScopeSkipsNeedsTheSwitch(t *testing.T) {
 	t.Setenv(provenswitch.Env, "")
 	p := &skipPusher{}
 	m := &mockService{logger: zap.NewNop(), instrumentation: p, config: &config.Config{}}
-	RegisterScopeSkipSource(func(context.Context, ScopeGateRequest) (map[string]string, error) {
+	RegisterScopeSkipSource(func(context.Context, ScopeGateRequest) (map[string]string, map[string][]models.ScopeNeed, error) {
 		t.Fatal("read with the switch off")
-		return nil, nil
+		return nil, nil, nil
 	})
 	t.Cleanup(func() { RegisterScopeSkipSource(nil) })
 	require.NoError(t, m.pushScopeSkips(context.Background(), "s", ""))
@@ -340,6 +350,14 @@ func replayErr(t *testing.T, instr *composeInstr, cmdType utils.CmdType) error {
 // replayErrOnMiss is replayErr with --on-miss onMiss ("" for fail).
 func replayErrOnMiss(t *testing.T, instr *composeInstr, cmdType utils.CmdType, onMiss string) error {
 	t.Helper()
+	return replayThrough(t, instr, instr, cmdType, onMiss)
+}
+
+// replayThrough is replayErrOnMiss with the replay's agent client through,
+// which wraps instr (it adds an optional extension instr does not have), and
+// each of opts applied to the replay's config.
+func replayThrough(t *testing.T, instr *composeInstr, through Instrumentation, cmdType utils.CmdType, onMiss string, opts ...func(*config.Config)) error {
+	t.Helper()
 	repo := t.TempDir()
 	t.Chdir(repo)
 	keployDir := filepath.Join(repo, "keploy")
@@ -353,9 +371,81 @@ func replayErrOnMiss(t *testing.T, instr *composeInstr, cmdType utils.CmdType, o
 	if onMiss != "" {
 		cfg.Mock.OnMiss = onMiss
 	}
+	for _, o := range opts {
+		o(cfg)
+	}
 	utils.ErrCode = 0
 	t.Cleanup(func() { utils.ErrCode = 0 })
-	return New(zap.NewNop(), instr, named("mock-0"), mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background())
+	return New(zap.NewNop(), through, named("mock-0"), mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background())
+}
+
+// settlingInstr is composeInstr with the agent's end-of-run hook
+// (RunSettler), which fails with err.
+type settlingInstr struct {
+	*composeInstr
+	err   error
+	calls int
+}
+
+func (s *settlingInstr) AfterTestRun(context.Context, string, []string, models.TestCoverage) error {
+	s.calls++
+	return s.err
+}
+
+// Under the switch the agent's end-of-run hook failing -- it refused, as an
+// enterprise agent that could not write the row of a program off the run's
+// clock does, or the agent was gone -- leaves the run's tests unchecked and
+// what it served unread: keploy did not complete the run, whatever the test
+// command did. The receipt says keploy failed it and names the cause, so a
+// verdict reads the run as not judged; the test command's own exit is kept,
+// a failing one's code included. In record's full round (learning), the
+// learn step that could not read what was served is not what the receipt
+// blames. Without the switch the hook is not called, and the run is the test
+// command's, as before.
+func TestAReplayWhoseAgentDidNotFinishItsEndIsKeploysFailure(t *testing.T) {
+	cause := errors.New("the agent could not write the row of /usr/bin/curl (pid 41), a program off the run's clock: no space left on device")
+	said := "keploy's agent did not finish checking the run's tests: " + cause.Error()
+	for _, c := range []struct {
+		proven     bool
+		learn      bool
+		runner     models.AppError
+		wantExit   int
+		wantRunner int
+	}{
+		{true, false, models.AppError{AppErrorType: models.ErrAppStopped}, utils.ExitKeployError, 0},
+		{true, false, models.AppError{AppErrorType: models.ErrCommandError, ExitCode: 3}, 3, 3},
+		{true, true, models.AppError{AppErrorType: models.ErrCommandError, ExitCode: 3}, 3, 3},
+		{false, false, models.AppError{AppErrorType: models.ErrAppStopped}, 0, 0},
+	} {
+		t.Run(fmt.Sprintf("proven=%v learn=%v runner=%d", c.proven, c.learn, c.wantRunner), func(t *testing.T) {
+			if c.proven {
+				provenOn(t)
+			} else {
+				t.Setenv(provenswitch.Env, "")
+			}
+			instr := newInstr(t, agentUpFromSetup, false, c.runner)
+			settler := &settlingInstr{composeInstr: instr, err: cause}
+			err := replayThrough(t, instr, settler, utils.Native, "", func(cfg *config.Config) { cfg.Test.Learn = c.learn })
+			wd, werr := os.Getwd() // replayThrough ran it in its repo
+			require.NoError(t, werr)
+			r := mustReceipt(t, filepath.Join(wd, "keploy"))
+			require.Equal(t, c.wantExit, r.ExitCode)
+			require.Equal(t, c.wantRunner, r.RunnerExitCode, "the test command's own exit was not kept")
+			if !c.proven {
+				require.NoError(t, err)
+				require.Zero(t, settler.calls, "the end-of-run hook was called with the switch off")
+				require.Empty(t, r.FailedBy)
+				require.Equal(t, 1, r.Consumed)
+				return
+			}
+			require.Equal(t, 1, settler.calls, "the end-of-run hook was not called once")
+			require.EqualError(t, err, "keploy did not complete the run: "+said)
+			require.Equal(t, FailedByKeploy, r.FailedBy, "a run whose agent did not finish its end was judged")
+			require.Equal(t, said, r.Error)
+			require.False(t, r.Isolated)
+			require.Equal(t, -1, r.Consumed, "what the agent served was read from an agent that did not finish")
+		})
+	}
 }
 
 // Under the switch what each test did is keploy's verdict: a replay that

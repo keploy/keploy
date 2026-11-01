@@ -840,7 +840,7 @@ func TestAnOffsetCutToAnHourInTheApplicationsZoneIsLearnedAndCheckedThere(t *tes
 		w := (&Window{Rec: Span{From: call.Add(-70 * time.Minute), To: call}, F: Span{From: fcall.Add(-70 * time.Minute), To: fcall}}).ComparesOffsets()
 		shape := func(at time.Time) Shape { return Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, at, ms)}} }
 		c := ClassifyIn(dc, []string{p}, shape(cutIn(ist, fcall, time.Hour).Add(day)), shape(cutIn(ist, call, time.Hour).Add(day)), call, nil, nil, nil, w)[0]
-		if c.Kind != KindUnaccounted || c.Offset != nil || !strings.Contains(c.Why, "a whole number of 1h") || !strings.HasSuffix(c.Why, ". If your test supplies this value, have it supply the same value in every run, and keploy keeps comparing it") || strings.Contains(c.Why, "no clock read by the app matched it") {
+		if c.Kind != KindUnaccounted || c.Offset != nil || !strings.Contains(c.Why, "a whole number of 1h") || !strings.HasSuffix(c.Why, ". If your test supplies this value, "+clientGiveWhy) || !strings.Contains(c.Why, "keploytest.Given(t, ") || strings.Contains(c.Why, "no clock read by the app matched it") {
 			t.Errorf("a client test's value a day on, cut to the IST hour, a slow call's windows, the zone unread: %s %+v (%s); want refused as ambiguous, naming the hour and how to correct it", c.Kind, c.Offset, c.Why)
 		}
 	}
@@ -1200,7 +1200,9 @@ func TestAnOffsetCutToAnHourThatReadsInHoursIsLearnedAndCheckedAtTheHour(t *test
 // UTC alone it shows a minute, at which one offset holds both runs too,
 // its gap a whole hour), so with the zone unread no offset is learned: the
 // client test's refusal names the two cuts and how to correct it, never
-// only that no clock read matched it. A quick call's gap is the hour (one
+// only that no clock read matched it, and the value is never bindable as
+// the test's own first-sent value (Learned.Bindable): a clock read at a
+// cut keploy cannot tell stays refused. A quick call's gap is the hour (one
 // offset holds both runs at no finer cut), learned naming no zone, as is
 // the "+05:30" text, which shows its hour whole in the offset it writes,
 // at either speed. A replay that cannot read the application's zone
@@ -1290,8 +1292,8 @@ func TestAClientTestsTextOffsetCutToAnHourIsLearnedInTheApplicationsZone(t *test
 	if slow := learn(ist, inUTC, 70*time.Minute); slow.Kind != KindClockOffset || slow.Offset == nil || slow.Offset.Res != time.Hour || slow.Offset.AppZone != "+05:30" {
 		t.Fatalf("FALSE RED: a client test's text written in UTC, a slow call's windows, learned in IST: %s %+v (%s); want clock + 1d at the IST hour, naming +05:30", slow.Kind, slow.Offset, slow.Why)
 	}
-	if slow := learn(nil, inUTC, 70*time.Minute); slow.Kind != KindUnaccounted || slow.Offset != nil || !strings.HasPrefix(slow.Why, p+" = clock + 1d") || !strings.Contains(slow.Why, "stand 1h apart, a whole number of 1h") || !strings.Contains(slow.Why, "keploy cannot tell at which cut a replay must check it, so it refuses it. Record the test again") || !strings.HasSuffix(slow.Why, ". If your test supplies this value, have it supply the same value in every run, and keploy keeps comparing it") || strings.Contains(slow.Why, "no clock read by the app matched it") {
-		t.Errorf("FALSE GREEN: a client test's text written in UTC, a slow call's windows, the zone unread: %s %+v (%s); want no offset learned, refused naming the two cuts and how to correct it", slow.Kind, slow.Offset, slow.Why)
+	if slow := learn(nil, inUTC, 70*time.Minute); slow.Kind != KindUnaccounted || slow.Bindable || slow.Offset != nil || !strings.HasPrefix(slow.Why, p+" = clock + 1d") || !strings.Contains(slow.Why, "stand 1h apart, a whole number of 1h") || !strings.Contains(slow.Why, "keploy cannot tell at which cut a replay must check it, so it refuses it. Record the test again") || !strings.HasSuffix(slow.Why, ". If your test supplies this value, "+clientGiveWhy) || strings.Contains(slow.Why, "no clock read by the app matched it") {
+		t.Errorf("FALSE GREEN: a client test's text written in UTC, a slow call's windows, the zone unread: %s %+v bindable=%v (%s); want no offset learned, refused naming the two cuts and how to correct it, never bound as the test's own value", slow.Kind, slow.Offset, slow.Bindable, slow.Why)
 	}
 	for _, row := range []struct {
 		name string

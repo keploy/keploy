@@ -14,14 +14,17 @@ import (
 // process that made the call (UnmatchedCall.Answer, Source: names,
 // no value), and the call's shape
 // (MissShape): for HTTP and gRPC the method and the target's shape,
-// for SQL the statement with its literals written "?". No body, no bound
+// for SQL the statement with its literals written "?", for MongoDB the
+// command, its namespace and its filter's keys. No body, no bound
 // parameter, no SQL literal, no query value, and no path segment that looks
 // like a value (PathShape says which do) or that a test variable's
 // place on the call names (VariablePlaces: one the miss names, one the
 // closest mock or a mock on the call's route declares, or one that holds a
 // value the test bound). The next step is the matcher's advice, or the
 // learn step's reason, with each field path it names in its shape
-// (SanitizedNextStep). ChargedTo stays: it names a test, no value.
+// (SanitizedNextStep); a variable miss's is keploy's own sentence, which
+// names a given (Given) and no learned variable. ChargedTo stays: it names a
+// test, no value.
 func (m UnmatchedCall) Sanitized() UnmatchedCall {
 	out := UnmatchedCall{Protocol: m.Protocol, Destination: m.Destination, LiveDestination: m.LiveDestination, MatchPhase: m.MatchPhase,
 		ClosestMock: m.ClosestMock, NextSteps: m.SanitizedNextStep(), At: m.At, ActualSummary: MissShape(m), Differs: FieldShapes(m.Differs), FieldReasons: FieldReasonShapes(m.FieldReasons),
@@ -52,8 +55,32 @@ func (m UnmatchedCall) Sanitized() UnmatchedCall {
 			out.FieldDiffs = append(out.FieldDiffs, MockFieldDiff{Path: path, Kind: d.Kind})
 		}
 		out.NextSteps = "a test variable did not hold in " + m.ClosestMock + " (the call sent another value than the one the test bound, a value of another type, or a value before the call that binds it), or that mock's variables cannot be followed: fix the application, or re-record the test with 'keploy mock record' if that is intended"
+		// A learned variable's name stays out, as its value does: it can be
+		// a JSON key that is a value. A given's is the test's own name for a
+		// value it chose (ValidGivenVariable), and is kept.
+		if ValidGivenVariable(m.Given) {
+			out.Given = m.Given
+			out.NextSteps = givenNextStep(m.Given, m.ClosestMock, out.FieldDiffs)
+		}
 	}
 	return out
+}
+
+// givenNextStep is the next step of a variable miss about the given g
+// (UnmatchedCall.Given) as evidence keeps it: the given's name and the
+// place's shape (diffs, as Sanitized keeps them), never a value. The place's
+// diff says which miss it is: the call carried another value than the test
+// gave, or a value of another JSON type; with none, this run's test did not
+// give the value before the call.
+func givenNextStep(g, mock string, diffs []MockFieldDiff) string {
+	const rerecord = "re-record the test with 'keploy mock record'"
+	switch {
+	case len(diffs) == 0:
+		return "the test gave " + g + " when " + mock + " was recorded, and this run's test did not give it before the application made this call: give it in the test before that call, or " + rerecord + " if the test no longer gives it"
+	case diffs[0].Kind == DiffKindTypeChanged:
+		return "the application sent " + g + ", the value the test gave, at " + diffs[0].Path + " as a value of another JSON type than " + mock + " holds there: fix the application, or " + rerecord + " if that is intended"
+	}
+	return "the application sent another value at " + diffs[0].Path + " than " + g + ", the value the test gave: fix the application, or " + rerecord + " if the call no longer carries the test's value"
 }
 
 // SanitizedNextStep is m's next step as evidence keeps it: the matcher's

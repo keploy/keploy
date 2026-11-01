@@ -457,13 +457,20 @@ func jsonSeen(recorded, sent string) []Seen {
 	return out
 }
 
-// requestUnread says why the running test case's own request could not be
-// read (its Given place's Unread), "" when it was read, and when no test
-// case's request is among served (a call outside a test, a test keploy mock
-// opened).
+// requestUnread is why every value that changed is refused, never learned
+// as noise or an echo, where a place earlier than the call could not be read
+// (an Unread place among served): the running test case's own request
+// (Given, unreadRequestWhy), or the places of the run's past its bound
+// (Tracker.keepRun, whose reason it is). "" where each was read, and where
+// none is among served (a call outside a test, a test keploy mock opened, a
+// set whose run kept every place).
 func requestUnread(served []Earlier) string {
 	for _, e := range served {
-		if e.Given && e.Unread != "" {
+		switch {
+		case e.Unread == "":
+		case e.Given:
+			return unreadRequestWhy(e.Unread)
+		default:
 			return e.Unread
 		}
 	}
@@ -665,5 +672,5 @@ func clientTestWhy(part string, windowed bool) string {
 		what = "keploy saw no read of the app's clock for its call" + which
 		seen = ", and saw none for this call: keploy's clock hooks did not report the application's clock, or no earlier call and no begin of the test bounds the read"
 	}
-	return what + ": keploy mock's test harness gives the application its inputs, which keploy does not see, so keploy learns a changed instant as noise only where it lies, in the recording and in record's full round, within its call's window on the application's clock as keploy's clock hooks report it" + seen + ". If your test supplies this value, have it supply the same value in every run, and keploy keeps comparing it; if the application reads it from its own clock, declare it noise in keploy.yml, and keploy stops comparing it"
+	return what + ": keploy mock's test harness gives the application its inputs, which keploy does not see, so keploy learns a changed instant as noise only where it lies, in the recording and in record's full round, within its call's window on the application's clock as keploy's clock hooks report it" + seen + ". If your test supplies this value, " + clientGiveWhy + "; if the application reads it from its own clock, declare it noise in keploy.yml, and keploy stops comparing it"
 }

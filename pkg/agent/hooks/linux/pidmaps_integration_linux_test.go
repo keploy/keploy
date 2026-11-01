@@ -50,6 +50,9 @@ func TestMain(m *testing.M) {
 	if mode := os.Getenv(readyHelperEnv); mode != "" {
 		os.Exit(runReadyHelper(mode))
 	}
+	if os.Getenv(ingressSockHelperEnv) == "1" {
+		os.Exit(runIngressSockHelper())
+	}
 	if os.Getenv(socketHelperEnv) == "1" {
 		fd, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM, 0)
 		if err != nil {

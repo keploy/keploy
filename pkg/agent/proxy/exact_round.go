@@ -4,6 +4,7 @@ import (
 	"context"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
@@ -79,6 +80,9 @@ type roundState struct {
 	// let the round lock go, before what it tells the replay
 	// (flagMockAsUsed).
 	onSettled func()
+	// onConsume is a test seam too (MockManager.OnConsume): it runs as a
+	// consume is about to be settled, no lock held.
+	onConsume atomic.Pointer[func(name string)]
 	// moveCh is closed, and dropped, as the round moves (bump, a staging,
 	// the manager's Close): a call waiting for the store to open the test
 	// the learn tracker began (AwaitRoundMove) wakes on it. Made by the
@@ -730,7 +734,7 @@ func (m *MockManager) RoundSnapshot(q integrations.RoundQuery) (integrations.Rou
 		}
 	}
 	if v.bg != nil {
-		parts.BackgroundPool = v.bg.pool
+		parts.BackgroundPool, parts.BackgroundWorker = v.bg.pool, v.bg.worker
 	}
 	m.windowMu.RLock()
 	parts.WindowStart, parts.WindowEnd = m.windowStart, m.windowEnd
@@ -943,6 +947,13 @@ type heldScope struct {
 	// (integrations.CallRound.Sequence), seqOK whether its mark kept one.
 	seq   integrations.SequenceView
 	seqOK bool
+	// owns is the call's decision whether it is one of the open test's own
+	// calls (HideBackgroundWhen), until a door or HidesBackground asks it.
+	owns func() bool
+	// hideBg says the call is one of them (HidesBackground): the set's
+	// background is in none of h's reads but KindBackground's, and its doors
+	// refuse it (hides).
+	hideBg bool
 }
 
 // SequenceView implements integrations.SequenceViewer: the sequence view of
@@ -1014,7 +1025,7 @@ func (h *heldScope) held(mocks []*models.Mock, err error) ([]*models.Mock, error
 	if h.moved() {
 		return nil, nil
 	}
-	return mocks, err
+	return h.unhidden(mocks), err
 }
 
 // heldOf is held for a read that returns no error.
@@ -1055,7 +1066,7 @@ func (h *heldScope) RangePerTestMocksInWindow(fn func(*models.Mock) bool) error 
 		return nil
 	}
 	return h.MockManager.RangePerTestMocksInWindow(func(mk *models.Mock) bool {
-		return !h.moved() && fn(mk)
+		return !h.moved() && (h.hides(mk) || fn(mk))
 	})
 }
 
@@ -1087,7 +1098,7 @@ func (h *heldScope) RangeSessionMocksWithKey(ix *integrations.MockIndex, key str
 		return nil
 	}
 	return h.MockManager.RangeSessionMocksWithKey(ix, key, func(mk *models.Mock) bool {
-		return !h.moved() && fn(mk)
+		return !h.moved() && (h.hides(mk) || fn(mk))
 	})
 }
 
@@ -1119,6 +1130,10 @@ func (h *heldScope) SpentBackground(kind models.Kind) []*models.Mock {
 	return h.heldOf(h.MockManager.SpentBackground(kind))
 }
 
+// KindBackground is the manager's, what h hides kept: no parser reads it
+// from a call's held store (answering by kind reads the round,
+// integrations.SnapshotRound), and SpendByKind's door refuses a recording h
+// hides all the same.
 func (h *heldScope) KindBackground(kind models.Kind) (unused, spent []*models.Mock) {
 	unused, spent = h.MockManager.KindBackground(kind)
 	if h.moved() {
@@ -1153,6 +1168,9 @@ func (h *heldScope) ExactTakenCandidates(kind models.Kind) []*models.Mock {
 }
 
 func (h *heldScope) SpendByKind(mk *models.Mock) bool {
+	if h.refuses(mk) {
+		return false
+	}
 	ok, _ := h.spendByKindAt(mk, &h.g)
 	return ok
 }

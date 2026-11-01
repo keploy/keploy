@@ -3,13 +3,18 @@ package mock
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/yaml/mapdb"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -221,6 +226,247 @@ func TestARoundsEndKeepsWhatWasLearnedOnlyFromAClientTestsReader(t *testing.T) {
 			}
 			if logs.FilterMessageSnippet("keploy kept nothing its agent learned").Len() != 1 {
 				t.Fatalf("logs %v; want the round to say it kept nothing", logs.All())
+			}
+		})
+	}
+}
+
+// A value test B binds for itself and a later test C sends again is one
+// variable at one place on the recordings keploy mock writes: the run's,
+// which C binds at B's call, in the place of B's own, B's read reading it
+// too (learn.RunTakesPlaces, each mock by its test's mapping). The record
+// says so, naming the tests' calls and fields, never the value.
+func TestPersistLearnedGivesTheRunsVariableAnEarlierTestsOwnPlace(t *testing.T) {
+	store := &learnedStore{}
+	core, logs := observer.New(zap.InfoLevel)
+	m := &mockService{config: &config.Config{}, mockDB: store, logger: zap.New(core)}
+	v := func(bind string, use ...string) models.MockVariable {
+		return models.MockVariable{Recorded: "o-1", Bind: bind, Use: use}
+	}
+	consumed := []models.MockState{
+		{Name: "mock-0"},
+		{Name: "mock-1", Variables: models.MockVariables{"order": v("", "path1")}, Binds: map[string]models.MockVariables{"mock-0": {"order": v("body.order")}}},
+		{Name: "mock-2", Variables: models.MockVariables{"run-order": v("", "path1")}, Binds: map[string]models.MockVariables{"mock-0": {"run-order": v("body.order")}}},
+	}
+	expected := map[string][]models.MockEntry{"o::B": {{Name: "mock-0"}, {Name: "mock-1"}}, "o::C": {{Name: "mock-2"}}}
+	if _, _, err := m.persistLearned(context.Background(), "s", consumed, nil, expected); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.got["mock-1"]; !reflect.DeepEqual(got.Variables, models.MockVariables{"run-order": v("", "path1")}) ||
+		!reflect.DeepEqual(got.Binds, map[string]models.MockVariables{"mock-0": {"run-order": v("body.order")}}) {
+		t.Fatalf("test B's read is written %+v; want it to read the run's variable, bound at its create", got)
+	}
+	if got := store.got["mock-2"]; !reflect.DeepEqual(got, consumed[2]) {
+		t.Fatalf("test C's read is written %+v; want it as learned", got)
+	}
+	lines := logs.FilterMessageSnippet("own variable as the test set's").All()
+	if len(lines) != 1 {
+		t.Fatalf("logged %d lines of the run's variable taking test B's place; want one", len(lines))
+	}
+	f := lines[0].ContextMap()
+	if f["test"] != "o::B" || f["variable"] != "order" || f["setVariable"] != "run-order" || f["mock"] != "mock-0" || f["field"] != "body.order" {
+		t.Fatalf("the line says %v; want test B's variable, the run's, and B's call and field", f)
+	}
+	for _, c := range lines[0].Context {
+		if strings.Contains(c.String, "o-1") {
+			t.Fatalf("the line's %s carries the value: %q", c.Key, c.String)
+		}
+	}
+}
+
+// settleInstr is outcomeInstr with the agent's end-of-run hook (RunSettler),
+// which records each call in order and fails when told to.
+type settleInstr struct {
+	outcomeInstr
+	calls *[]string
+	err   error
+}
+
+func (s settleInstr) AfterTestRun(_ context.Context, _ string, sets []string, _ models.TestCoverage) error {
+	*s.calls = append(*s.calls, "AfterTestRun "+strings.Join(sets, ","))
+	return s.err
+}
+
+func (s settleInstr) GetConsumedMocks(ctx context.Context) ([]models.MockState, error) {
+	*s.calls = append(*s.calls, "GetConsumedMocks")
+	return s.outcomeInstr.GetConsumedMocks(ctx)
+}
+
+// composeSettleInstr is a compose agent that left account (or none, err) as
+// it stopped, and that the CLI must not call: it is gone.
+type composeSettleInstr struct {
+	settleInstr
+	account models.MockOutcome
+	err     error
+}
+
+func (c composeSettleInstr) ComposeAgentOutcome() (models.MockOutcome, error) {
+	return c.account, c.err
+}
+
+// Under docker compose the agent is stopped with the project, before the
+// CLI could call its end-of-run hook: under the proven switch it settles as
+// it stops, and says so in its account. An account that does not say it
+// settled (its hook failed, or the agent predates this keploy) is a run the
+// agent did not finish: what it served is unread, and the run fails as
+// keploy's, naming the cause. An agent that left no account (killed, or
+// crashed) is unread whole. Without the switch the account is read as it
+// is, settled or not, as before. The CLI never calls the stopped agent.
+func TestAComposeReplayIsJudgedOnlyOnAnAccountTheAgentSettled(t *testing.T) {
+	served := []models.MockState{{Name: "mock-0"}}
+	for _, c := range []struct {
+		name         string
+		proven       bool
+		account      models.MockOutcome
+		err          error
+		wantConsumed int
+		wantSettle   string
+	}{
+		{"off, unsettled", false, models.MockOutcome{Consumed: served}, nil, 1, ""},
+		{"settled", true, models.MockOutcome{Consumed: served, Settled: true}, nil, 1, ""},
+		{"hook failed", true, models.MockOutcome{Consumed: served, SettleError: "keploy could not write the row of a program off the run's clock"}, nil, -1,
+			"keploy's agent did not finish checking the run's tests as it stopped: keploy could not write the row of a program off the run's clock"},
+		{"no word", true, models.MockOutcome{Consumed: served}, nil, -1,
+			"keploy's agent did not finish checking the run's tests as it stopped: its account of the replay does not say it did (an agent older than this keploy)"},
+		{"killed", true, models.MockOutcome{}, errors.New("keploy did not read the keploy-agent container before it was removed"), -1, ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			sw := ""
+			if c.proven {
+				sw = "1"
+			}
+			t.Setenv(provenswitch.Env, sw)
+			var calls []string
+			cfg := &config.Config{CommandType: string(utils.DockerCompose)}
+			cfg.Mock.Name = "s"
+			instr := composeSettleInstr{settleInstr: settleInstr{outcomeInstr: outcomeInstr{consumed: served}, calls: &calls}, account: c.account, err: c.err}
+			m := &mockService{config: cfg, mockDB: &learnedStore{}, logger: zap.NewNop(), instrumentation: instr}
+			counts := m.reportOutcome(context.Background(), 1, replayDetail{set: "s"}, func() bool { return false })
+			if len(calls) != 0 {
+				t.Fatalf("called the stopped agent: %v", calls)
+			}
+			if counts.consumed != c.wantConsumed {
+				t.Fatalf("consumed %d, want %d", counts.consumed, c.wantConsumed)
+			}
+			got := ""
+			if counts.settleErr != nil {
+				got = counts.settleErr.Error()
+			}
+			if got != c.wantSettle {
+				t.Fatalf("settleErr %q, want %q", got, c.wantSettle)
+			}
+			if c.err != nil && counts.missed != -1 {
+				t.Fatalf("missed %d for an account never left, want unread (-1)", counts.missed)
+			}
+		})
+	}
+}
+
+// Under the proven switch the replay's end calls the agent's end-of-run hook
+// (AfterTestRun) once the test command has exited, before it reads what the
+// agent served: the agent finishes what it still does for the run's tests
+// first, as the row of a process the last test reached that an enterprise
+// agent judges after the test's end. A hook that fails leaves what was
+// served unread, so no test is judged on it. Without the switch it is not
+// called, as before.
+func TestTheReplaysEndSettlesTheAgentBeforeItReadsTheOutcome(t *testing.T) {
+	for _, c := range []struct {
+		proven bool
+		err    error
+		want   []string
+	}{
+		{false, nil, []string{"GetConsumedMocks"}},
+		{true, nil, []string{"AfterTestRun s", "GetConsumedMocks"}},
+		{true, errors.New("agent gone"), []string{"AfterTestRun s"}},
+	} {
+		t.Run(fmt.Sprintf("proven=%v err=%v", c.proven, c.err), func(t *testing.T) {
+			sw := ""
+			if c.proven {
+				sw = "1"
+			}
+			t.Setenv(provenswitch.Env, sw)
+			var calls []string
+			cfg := &config.Config{}
+			cfg.Mock.Name = "s"
+			m := &mockService{config: cfg, mockDB: &learnedStore{}, logger: zap.NewNop(), instrumentation: settleInstr{outcomeInstr: outcomeInstr{consumed: []models.MockState{{Name: "mock-0"}}}, calls: &calls, err: c.err}}
+			counts := m.reportOutcome(context.Background(), 1, replayDetail{set: "s"}, func() bool { return false })
+			if !reflect.DeepEqual(calls, c.want) {
+				t.Fatalf("calls %v, want %v", calls, c.want)
+			}
+			if want := map[bool]int{true: -1, false: 1}[c.err != nil]; counts.consumed != want {
+				t.Fatalf("consumed %d, want %d", counts.consumed, want)
+			}
+		})
+	}
+}
+
+// outgoingInstr is the agent keploy mock replay starts, keeping the options
+// the replay handed MockOutgoing.
+type outgoingInstr struct {
+	*runnerInstr
+	got []models.OutgoingOptions
+}
+
+func (o *outgoingInstr) MockOutgoing(ctx context.Context, opts models.OutgoingOptions) error {
+	o.got = append(o.got, opts)
+	return o.runnerInstr.MockOutgoing(ctx, opts)
+}
+
+// keploy mock replay hands the agent the tests its learn step learns onto
+// (config.Test.LearnTests) while it learns, an empty list as an empty list,
+// and nil when it does not learn or learns onto every test. That one field is
+// what tells the agent a carried test neither ends nor moves the recorded
+// order (keepRecordedOrder): without it every test is fresh to the agent, and
+// a carried test run after a newer one stops the round's learning again.
+func TestMockReplayHandsTheAgentTheTestsItLearnsOnto(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		sw     bool
+		learn  bool
+		tests  map[string]bool
+		want   map[string]bool
+		wantOn bool
+	}{
+		{"learning onto the tests a record made anew", true, true, map[string]bool{"o::TestA": true}, map[string]bool{"o::TestA": true}, true},
+		{"learning onto no test", true, true, map[string]bool{}, map[string]bool{}, true},
+		{"learning onto every test", true, true, nil, nil, true},
+		{"not learning", true, false, map[string]bool{"o::TestA": true}, nil, false},
+		{"without the switch", false, true, map[string]bool{"o::TestA": true}, nil, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if c.sw {
+				provenOn(t)
+			} else {
+				t.Setenv(provenswitch.Env, "")
+			}
+			instr := &outgoingInstr{runnerInstr: newRunnerInstr(t)}
+			repo := t.TempDir()
+			t.Chdir(repo)
+			keployDir := filepath.Join(repo, "keploy")
+			require.NoError(t, os.MkdirAll(filepath.Join(keployDir, "set"), 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mocks.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: Http\nname: mock-0\n"), 0o644))
+			writeMapping(t, keployDir)
+			instr.consumedMocks = []models.MockState{{Name: "mock-0"}}
+			cfg := instrConfig(instr.composeInstr, utils.Native, "go test -p 1 -json ./...")
+			cfg.Path = keployDir
+			cfg.Mock.OnMiss = "fail"
+			cfg.Test.Learn = c.learn
+			cfg.Test.LearnTests = c.tests
+			utils.ErrCode = 0
+			t.Cleanup(func() { utils.ErrCode = 0 })
+			require.NoError(t, New(zap.NewNop(), instr, named("mock-0"), mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background()))
+
+			require.Len(t, instr.got, 1, "the replay did not put the agent in mock-serving mode once")
+			got := instr.got[0]
+			require.Equal(t, c.wantOn, got.Learn)
+			require.Equal(t, c.want == nil, got.LearnTests == nil, "learn tests %v, want %v", got.LearnTests, c.want)
+			require.Equal(t, len(c.want), len(got.LearnTests))
+			for name := range c.want {
+				require.True(t, got.LearnTests[name], "%s is not handed to the agent", name)
+			}
+			if c.tests != nil && got.LearnTests != nil {
+				got.LearnTests["o::Other"] = true
+				require.False(t, cfg.Test.LearnTests["o::Other"], "the agent was handed the config's own map")
 			}
 		})
 	}

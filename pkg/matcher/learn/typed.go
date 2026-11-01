@@ -16,7 +16,7 @@ import (
 // it. The decoder hands it to the learn step as an Instant leaf
 // (InstantLeaf), and ClassifyIn compares it as one instant
 // (classifyInstant), never word by word: a minute of it is no word an
-// unrelated recording can hold (a Mongo reply's requestId of 40, a version
+// unrelated recording can hold (a count of 40 in a Mongo reply, a version
 // in an SDK's User-Agent, SQS's API version 2012-11-05). Only a decoder's
 // type makes a leaf an instant. A string that reads as a date stays a
 // String, read word by word: no text's shape decides anything. Where the
@@ -433,7 +433,7 @@ const (
 // timeOfDayClientTestWhy is why a time of day (TimeOfDayLeaf) that changed
 // is refused in keploy mock's client tests: no window holds a time of day,
 // and the lead, the only rule that reads one, is not theirs.
-const timeOfDayClientTestWhy = "nothing shows it is a read of the application's clock: its protocol types it as a time of day, which keploy compares whole, and keploy mock's test harness gives the application its inputs, which keploy does not see, so keploy learns a changed instant as noise only where it lies within its call's window on the application's clock, and a time of day names no day, so no window holds it. If your test supplies this value, have it supply the same value in every run, and keploy keeps comparing it; if the application reads it from its own clock, declare it noise in keploy.yml, and keploy stops comparing it"
+const timeOfDayClientTestWhy = "nothing shows it is a read of the application's clock: its protocol types it as a time of day, which keploy compares whole, and keploy mock's test harness gives the application its inputs, which keploy does not see, so keploy learns a changed instant as noise only where it lies within its call's window on the application's clock, and a time of day names no day, so no window holds it. If your test supplies this value, " + clientGiveWhy + "; if the application reads it from its own clock, declare it noise in keploy.yml, and keploy stops comparing it"
 
 // what is what an Instant leaf of form n names, as a reason writes it.
 func (n instantNames) what() string {
@@ -473,9 +473,10 @@ func instantUnread(r, l Leaf) string {
 // classifyInstant is ClassifyIn's reading of a drifted leaf its protocol
 // types as one instant (r as recorded, l as F saw it: Instant leaves), in its
 // call's window w, as the header of this file says: the instant whole, never
-// its words. unread says why the test case's own request could not be read
-// (requestUnread; "" when it was, or no test case's request applies): then
-// the echo could not read it, and the instant is never noise or an echo.
+// its words. unread is why a place earlier than the call could not be read
+// (requestUnread: the test case's own request, or the run's places past
+// their bound; "" when each was): then the echo could not read it, and the
+// instant is never noise or an echo.
 func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier, raw []Raw, resp []Leaf, w *Window, unread string, places func() *offsetPlaces, skip skipRule) Learned {
 	ln := Learned{Kind: KindNoise, Recorded: r, Live: l}
 	rt, okR := readTyped(r)
@@ -497,6 +498,8 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 		ln.Kind, ln.From = KindVariable, from
 		return ln
 	}
+	// No other rule reads a value the test gave (classifyRead).
+	served = withoutGave(served)
 	// The echo, before any provenance excuses the instant.
 	if echoed := echoedPairs([]driftedInstant{{rec: rec, live: live}}, dc.earlierMoments(at, served, raw), dc.recordedMoments(at, served, raw)); len(echoed) > 0 {
 		if from, ok := dc.instantEchoFrom(r, echoed, at, served, raw); ok {
@@ -528,7 +531,7 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 	// Built on a moved place by an offset (offset.go), before any provenance
 	// excuses it.
 	if m, ok := places().offsetFrom([]driftedInstant{{rec: rec, live: live}}); ok && skip&skipOffset == 0 {
-		ln.Kind, ln.Why = KindUnaccounted, offsetWhy(m)
+		ln.Kind, ln.Why, ln.byOffset = KindUnaccounted, offsetWhy(m), true
 		return ln
 	}
 	// A copy of what F gave the application in another test or in a
@@ -623,7 +626,7 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 	// Noise, or an echo, only where the echo could read the test case's own
 	// request, where the moment F saw may stand.
 	if unread != "" {
-		ln.Kind, ln.Why = KindUnaccounted, unreadRequestWhy(unread)
+		ln.Kind, ln.Why = KindUnaccounted, unread
 		return ln
 	}
 	if echo := dc.instantEchoes(rec, resp); len(echo) > 0 {
@@ -955,7 +958,7 @@ func (dc *DriftCache) clockOffset(ln Learned, off models.ClockOffset, enc time.D
 	case !w.offsets:
 		ln.Kind, ln.Why = KindUnaccounted, clockOffsetUncomparedWhy(path, off)
 	case unread != "":
-		ln.Kind, ln.Why = KindUnaccounted, unreadRequestWhy(unread)
+		ln.Kind, ln.Why = KindUnaccounted, unread
 	case len(dc.instantEchoes(rec, resp)) > 0:
 		ln.Kind, ln.Why = KindUnaccounted, clockOffsetEchoedWhy(path, off)
 	default:
@@ -1016,7 +1019,7 @@ func (dc *DriftCache) textClockOffset(r, l Leaf, v *valueDrift, w *Window, resp 
 // read matched it (learning legible), and adds the client test's own
 // correction, for a value the test's harness supplies.
 func clientCutAmbiguousWhy(cutWhy string) string {
-	return cutWhy + ". If your test supplies this value, have it supply the same value in every run, and keploy keeps comparing it"
+	return cutWhy + ". If your test supplies this value, " + clientGiveWhy
 }
 
 // fieldName is the leaf's name as keploy.yml's noise writes it (Leaf.Noise:
@@ -1269,7 +1272,8 @@ func clockOffsetEchoedWhy(path string, off models.ClockOffset) string {
 // neither on its other side (it drifted with it, rule 1). Whole, of the
 // place, is its recorded text's being r's: where the value can be bound. The
 // test case's own request is such a place too, where keploy test sent a part
-// of it with template values (Earlier.Given): nothing binds there.
+// of it with template values (Earlier.Given): nothing binds there. A value
+// the test gave keploy (Earlier.Gave) is one only where its text is r's.
 func (dc *DriftCache) instantServedFrom(r Leaf, rec, live moment, served []Earlier) (Place, bool) {
 	var best Place
 	rank := 7
@@ -1279,6 +1283,11 @@ func (dc *DriftCache) instantServedFrom(r Leaf, rec, live moment, served []Earli
 				continue
 			}
 			whole := s.Leaf.Value == r.Value
+			if !whole && e.Gave {
+				// A value the test gave is the instant's place only where
+				// it is its text whole, never by a moment it names.
+				continue
+			}
 			exact := whole || dc.isInstant(s.Leaf.Value, rec) || seenIs(s.Leaf, s.Leaf.Value, rec)
 			if !exact && !dc.instantCoDrifted(s.Leaf.Value, s.Live, rec, live) {
 				continue
@@ -1445,12 +1454,13 @@ func (dc *DriftCache) instantEchoFrom(r Leaf, echoed []echoMatch, at time.Time, 
 		if !x.earlierThan(at) {
 			continue
 		}
-		for _, f := range x.fields {
-			if !f.key && dc.holdsRecorded(x.text[f.start:f.end], echoed) {
+		xb := x.payload()
+		for _, f := range xb.fields {
+			if !f.key && dc.holdsRecorded(xb.text[f.start:f.end], echoed) {
 				return Place{Mock: x.mock, Field: f.describe(), Echo: true, unserved: !x.served}, true
 			}
 		}
-		if dc.holdsRecorded(x.text, echoed) || dc.holdsRecorded(dc.rawExtra(x.text), echoed) {
+		if dc.holdsRecorded(xb.text, echoed) || dc.holdsRecorded(dc.rawExtra(xb.text), echoed) {
 			return Place{Mock: x.mock, Echo: true, unserved: !x.served}, true
 		}
 	}
@@ -1503,7 +1513,7 @@ func (dc *DriftCache) instantLeafFrom(r Leaf, rec moment, served []Earlier) (Pla
 // (copiedInBoth).
 func (dc *DriftCache) instantRawFrom(r Leaf, rec, live moment, at time.Time, raw []Raw) (Place, bool) {
 	for _, x := range raw {
-		if !x.earlierThan(at) {
+		if !x.earlierThan(at) || !dc.mayHoldInstant(x, rec) {
 			continue
 		}
 		texts := dc.searched(x, false)
@@ -1512,7 +1522,7 @@ func (dc *DriftCache) instantRawFrom(r Leaf, rec, live moment, at time.Time, raw
 		}
 		field, given, found := "", false, false
 		in := func(own string) bool { return dc.holdsExact(own, live) }
-		for _, f := range x.fields {
+		for _, f := range x.payload().fields {
 			if f.key || f.end > len(texts[0]) {
 				continue
 			}

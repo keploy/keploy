@@ -831,8 +831,9 @@ func (p *exactPlan) settleShares(results []models.TestResult, consumers map[stri
 		}
 	}
 
-	// A conflict (the learn step paired a call with a candidate another
-	// test answered with) charges that test too.
+	// A conflict (a call the learn step found closest to a candidate
+	// another test answered with: paired with it, or apart from it in more
+	// than values) charges that test too.
 	conflictTo := map[string]string{}
 	for _, r := range results {
 		for _, c := range r.FailureInfo.UnmatchedCalls {
@@ -840,7 +841,7 @@ func (p *exactPlan) settleShares(results []models.TestResult, consumers map[stri
 				continue
 			}
 			x := c.Concurrent.Claimant
-			why := "its call and " + r.TestCaseID + "'s both pair with " + c.ClosestMock + ", recorded once while both were open: one of them made a call it did not record"
+			why := "its call and " + r.TestCaseID + "'s are both closest to " + c.ClosestMock + ", recorded once while both were open: one of them made a call it did not record"
 			note := s.note(x, c.ClosestMock)
 			note.Claimant, note.Case = r.TestCaseID, models.ConcurrentCaseConflict
 			s.charge(x, s.call(c.ClosestMock, models.MissConcurrentConflict, note, why))

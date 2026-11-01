@@ -2,6 +2,7 @@ package learn
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"time"
 
@@ -463,9 +464,7 @@ func (dc *DriftCache) todZone(rtod, ltod, rres, lres time.Duration, w *Window, c
 	if ru.Equal(rz) {
 		return models.ZoneEither
 	}
-	in := func(loc *time.Location) bool {
-		return w != nil && w.Rec.holds(todAtOrBefore(rtod, w.Rec.To, loc), rres) && w.F.holds(todAtOrBefore(ltod, w.F.To, loc), lres)
-	}
+	in := func(loc *time.Location) bool { return w.holdsTod(rtod, ltod, rres, lres, loc) }
 	switch utc, app := in(time.UTC), in(dc.zone); {
 	case utc && app:
 		return models.ZoneEither
@@ -505,6 +504,34 @@ func (dc *DriftCache) todRead(rtod, ltod, rres, lres time.Duration, rlay, llay s
 		Zone:   dc.todZone(rtod, ltod, rres, lres, w, call),
 		Layout: models.ClockOffset{Layout: rlay}.MeetLayout(llay),
 	}
+}
+
+// holdsTod reports whether w (nil: none) holds rtod and ltod, a time of day
+// as recorded and as record's full round saw it, at their encodings'
+// resolutions (rres, lres), as reads of their runs' clocks in loc modulo a
+// day: the instant each names last, no later than its span's end
+// (todAtOrBefore), lies in that span, as a replay reads one in its call's
+// span (todReadIn).
+func (w *Window) holdsTod(rtod, ltod, rres, lres time.Duration, loc *time.Location) bool {
+	return w != nil && w.Rec.holds(todAtOrBefore(rtod, w.Rec.To, loc), rres) && w.F.holds(todAtOrBefore(ltod, w.F.To, loc), lres)
+}
+
+// readsOwn reports whether a value recorded as r and seen in record's full
+// round as l, in the call recorded at call, may be that call's own read of
+// the clock in w, a window of it, by the rules the leaf learns such a read
+// by: w holds an instant of it in both runs (windowHolds); it is one time of
+// day whole that w holds modulo a day (holdsTod), in UTC or in the
+// application's zone, as todZone reads one; or keploy knows no window of the
+// call (w nil), and the leaf learns a read of the clock there in its call's
+// own span, which every replay checks. Whether it is a read, and of which
+// form and zone, the leaf decides.
+func (dc *DriftCache) readsOwn(r, l Leaf, w *Window, call time.Time) bool {
+	if w == nil || dc.windowHolds(dc.ofIn(r.Value, l.Value, w, call), w) {
+		return true
+	}
+	rtod, rres, _, rok := timeOfDayOf(r)
+	ltod, lres, _, lok := timeOfDayOf(l)
+	return rok && lok && (w.holdsTod(rtod, ltod, rres, lres, time.UTC) || dc.zone != nil && w.holdsTod(rtod, ltod, rres, lres, dc.zone))
 }
 
 // clockReadOf reads l, a leaf of a replay's call, as the instant a clock
@@ -764,15 +791,85 @@ func spanOf(o models.ClockOffset, s Span) (Span, string) {
 // and so is one of a Zone this keploy does not read
 // (models.ClockOffset.ZoneKnown). It never
 // passes a value it could not check.
+//
+// An o that is one word of a longer text (models.ClockOffset.Word: a
+// client test's app named "[E2E] stop-<UnixNano>" by its own clock read
+// since its test began) checks live's text is the text the learn step saw
+// before that word, then the word, then the text it saw after it, the rest
+// of the text compared by its length and SHA-256 (the learned file holds
+// no byte of it), and reads the word alone as the read o is, as above
+// (wordIn). A refusal names where the word stands, never what the text
+// holds.
 func CheckClockRead(path string, o models.ClockOffset, live Leaf, s Span, known bool) (bool, string) {
 	if o.Empty() {
 		return false, path + " was learned at more than one call as " + o.String() + ": no one read of the application's clock explains them all, so keploy refuses the value whatever it is. Record the test again; if the field is a time the application reads from its own clock with no rule, declare it noise in keploy.yml, and keploy stops comparing it"
 	}
+	learned := learnedAs(path, o)
+	if o.Word.IsZero() {
+		return checkClockRead(o, live, s, known, learned)
+	}
+	word, why := wordIn(o.Word, live)
+	if why != "" {
+		return false, learned + why
+	}
+	o.Word = models.ClockWord{}
+	return checkClockRead(o, word, s, known, learned)
+}
+
+// learnedAs is how a refusal of a replay's value at path, a place the learn
+// step learned as o, a read of the clock, begins: "<path> was learned as
+// <o>, a read of the application's clock", plus "plus that offset" of a
+// read plus an offset. o's String names where a word read stands in its
+// text, never the text.
+func learnedAs(path string, o models.ClockOffset) string {
 	read := "a read of the application's clock"
 	if !o.Plain() {
 		read += " plus that offset"
 	}
-	learned := path + " was learned as " + o.String() + ", " + read
+	return path + " was learned as " + o.String() + ", " + read
+}
+
+// wordIn is the word of live, the leaf a replay's call carries at a place
+// the learn step learned a read of the clock at that is one word of a
+// longer text, w (models.ClockOffset.Word): live's text with the recorded
+// text's bytes before that word taken off its start and those after it off
+// its end, compared by length and SHA-256 (models.ClockWord.WordOf), as a
+// leaf of its own, the read CheckClockRead checks. Otherwise why the replay
+// refuses the value, read after "<path> was learned as <o>, a read of the
+// application's clock", which says which side of the word changed and
+// never quotes the text: live is no text (an instant its protocol types),
+// w is no place of a text (models.ClockWord.Valid), live is too short to
+// hold both sides apart with a word between them, or the bytes on one side
+// are not the recorded text's. So only the word is read as the clock, and
+// every other byte of the text is still compared.
+func wordIn(w models.ClockWord, live Leaf) (Leaf, string) {
+	if live.Type == Instant {
+		return Leaf{}, ", one word of a text, and the value this call carries is an instant its protocol types, no text: it changed"
+	}
+	if !w.Valid() {
+		return Leaf{}, ", one word of a text, at no place a text has (bytes " + strconv.Itoa(w.Start) + "-" + strconv.Itoa(w.End) + ", " + strconv.Itoa(w.After) + " after, and a SHA-256 of each side): keploy refuses the value whatever it is. Record the test again"
+	}
+	v, changed := w.WordOf(live.Value)
+	switch changed {
+	case "short":
+		return Leaf{}, ", one word of a text, and the text this call carries is too short to hold the " + strconv.Itoa(w.Start) + " bytes the learn step saw before that word and the " + strconv.Itoa(w.After) + " after it apart, with a word between them: it changed"
+	case "before":
+		return Leaf{}, ", one word of a text, and the text this call carries before that word is not the " + strconv.Itoa(w.Start) + " bytes the learn step saw there: it changed"
+	case "after":
+		return Leaf{}, ", one word of a text, and the text this call carries after that word is not the " + strconv.Itoa(w.After) + " bytes the learn step saw there: it changed"
+	}
+	word := live
+	word.Value = v
+	return word, ""
+}
+
+// checkClockRead is CheckClockRead of o, a read of the clock that is its
+// value whole, at live, its refusals read after learned (learnedAs).
+func checkClockRead(o models.ClockOffset, live Leaf, s Span, known bool, learned string) (bool, string) {
+	read := "a read of the application's clock"
+	if !o.Plain() {
+		read += " plus that offset"
+	}
 	if !o.ZoneKnown() {
 		return false, learned + ": keploy refuses the value whatever it is rather than read it in another zone. Record the test again with this keploy"
 	}

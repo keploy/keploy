@@ -37,16 +37,36 @@ const (
 	// and excluded_pids: k_sock_create runs only then. Never where something
 	// else owns those maps (DaemonSet, per-container targeting).
 	FlagClassifies uint32 = 1 << 4
+	// FlagIngressHold (bit 5; KEPLOY_FLAG_INGRESS_HOLD in
+	// headers/k_ingress_hold.h), set once the ingress hold's objects are
+	// attached (ingressport.go): the sk_lookup program, and the
+	// cgroup/sock_release program that takes a note back. The bind hooks
+	// then note each moved socket's family and address, and the lookup
+	// holds a moved port only where the application's own socket would
+	// have taken the connection. Unset, they note nothing, and the lookup
+	// holds nothing.
+	FlagIngressHold uint32 = 1 << 5
 )
 
 type BpfSpinLock struct{ Val uint32 }
 
+// DestInfo mirrors struct dest_info_t (keploy/ebpf k_structs.h): a
+// redirected connection's original destination and the process that made it.
 type DestInfo struct {
 	IPVersion uint32
 	DestIP4   uint32
 	DestIP6   [4]uint32
 	DestPort  uint32
+	// KernelPid is the connecting process's TGID, the kernel's (the initial
+	// PID namespace's).
 	KernelPid uint32
+	// AgentNsPid is that process's TGID in the agent's PID namespace, by
+	// which the agent finds it in its own /proc: the kernel finds it by the
+	// namespace's inode the agent registered (KeployAgentInode). Equal to
+	// KernelPid for an agent in the initial namespace; 0 for a process outside
+	// the agent's namespace, which the agent then cannot name.
+	AgentNsPid uint32
+	_          uint32 // dest_info_t's _pad: 8-byte sized
 }
 
 type ProxyInfo struct {

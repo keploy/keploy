@@ -7,6 +7,27 @@ name: Linux CI scripts
 # index is broken, which an ordinary run never shows. The tests make all three
 # happen on purpose, against a stub mirror. They run on every change to the
 # helper or its tests.
+#
+# Also here: free-port.sh, the port the compose lanes publish their app on,
+# whose window keeps clear of the port Docker's DNS server holds in every
+# container on a user-defined network. Its tests check that on Docker itself.
+#
+# And compose-proven-setend-linux.tests.sh: the lane "proven set-end stop
+# (docker_compose)"'s record() and await() against a fake keploy. A recording
+# that lacks a test case, as a failed request or keploy dropping one leaves it,
+# has to end with its log printed, not hold the lane until its job is
+# cancelled; and one that has them all has to pass, its test cases written as
+# the requests are answered or as keploy record stops. await() has to wait for
+# a log keploy makes after it begins, and fail once keploy exits with none.
+#
+# And keploy-installer.tests.sh: keploy.sh, served as https://keploy.io/install.sh,
+# on its default route (the hand-off to https://keploy.io/ent/install.sh) and
+# its --oss route, sourced under bash and zsh against a curl stub. Run from a
+# repo root that has its own install.sh, it must leave the caller's directory
+# alone: download into a temp directory of its own, never over ./install.sh,
+# never source a local install.sh in place of a failed download, and delete
+# nothing there. With --oss it must download and extract in a temp directory
+# of its own too, and touch no fixed /tmp path, nor anyone else's files.
 
 on:
   push:
@@ -15,11 +36,23 @@ on:
     paths:
       - '.github/workflows/test_workflow_scripts/apt-install.sh'
       - '.github/workflows/test_workflow_scripts/apt-install.tests.sh'
+      - '.github/workflows/test_workflow_scripts/free-port.sh'
+      - '.github/workflows/test_workflow_scripts/free-port.tests.sh'
+      - '.github/workflows/test_workflow_scripts/compose-proven-setend-linux.sh'
+      - '.github/workflows/test_workflow_scripts/compose-proven-setend-linux.tests.sh'
+      - 'keploy.sh'
+      - '.github/workflows/test_workflow_scripts/keploy-installer.tests.sh'
       - '.github/workflows/linux-ci-scripts.yml'
   pull_request:
     paths:
       - '.github/workflows/test_workflow_scripts/apt-install.sh'
       - '.github/workflows/test_workflow_scripts/apt-install.tests.sh'
+      - '.github/workflows/test_workflow_scripts/free-port.sh'
+      - '.github/workflows/test_workflow_scripts/free-port.tests.sh'
+      - '.github/workflows/test_workflow_scripts/compose-proven-setend-linux.sh'
+      - '.github/workflows/test_workflow_scripts/compose-proven-setend-linux.tests.sh'
+      - 'keploy.sh'
+      - '.github/workflows/test_workflow_scripts/keploy-installer.tests.sh'
       - '.github/workflows/linux-ci-scripts.yml'
 
 permissions:
@@ -27,19 +60,20 @@ permissions:
 
 jobs:
   apt-install:
-    # Seven ubuntu containers that fetch the package lists once each (through
-    # the stub, which asks the real mirror for each list only the first time),
-    # one that builds the test repository, and two with no network. About four
-    # minutes of a run are waits the cases are made of: against the stub, the
-    # 45 s limit of a control, two slices of 20 s and a budget of 90 s; in each
-    # of the two offline containers, half a minute of slices and budgets of 1
-    # to 8 s. The fetching and installing comes on top, and how long that takes
-    # on a runner is in the job's own history, not here.
+    # Eleven ubuntu containers that fetch the package lists once or more each
+    # (through the stub, which asks the real mirror for each list only the
+    # first time), one that builds the test repository, and two with no
+    # network. About seven minutes of a run are waits the cases are made of:
+    # against the stub, the 45 s limits of two controls, seven slices of 20 s
+    # and two budgets of 90 s; in each of the two offline containers, under a
+    # minute of slices and budgets of 1 to 8 s. The fetching and installing
+    # comes on top, and how long that takes on a runner is in the job's own
+    # history, not here.
     #
     # Each networked case is capped at 300 s and prints its log as soon as it
-    # has failed. Seven of them at the cap are 35 minutes, so this limit lets a
-    # run in which every one of them hangs end by itself, with every log.
-    timeout-minutes: 45
+    # has failed. Eleven of them at the cap are 55 minutes, so this limit lets
+    # a run in which every one of them hangs end by itself, with every log.
+    timeout-minutes: 65
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -109,3 +143,46 @@ jobs:
             echo "::error::apt's list cleanup kept the sentinel, so the check above proves nothing"
             exit 1
           fi
+
+  # Docker's DNS server listens in each container on a user-defined network
+  # on a port of the ephemeral range, so an app given a port the kernel picked
+  # could not bind it there (job 124142018005). The tests start one such
+  # container: its pull and start are most of a run.
+  free-port:
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test free-port.sh (its window and order, busy and skipped ports, host ranges, Docker's DNS port)
+        run: bash .github/workflows/test_workflow_scripts/free-port.tests.sh
+
+  compose-proven-setend:
+    # Six cases (four of record(), two of await()), a few seconds; each
+    # bounds the hang it tests for at 60 s, so all six hanging take 6 min,
+    # and the logs the script prints at its end still show.
+    timeout-minutes: 8
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test compose-proven-setend-linux.sh (a recording's test cases counted once keploy record has stopped; await on a log made late or never)
+        run: bash .github/workflows/test_workflow_scripts/compose-proven-setend-linux.tests.sh
+
+  installer:
+    # Thirty-two cases, under bash and under zsh; a few seconds. The one on a
+    # terminal (script(1), in bsdutils on ubuntu) bounds itself at 120 s per
+    # shell, so both hanging still leave the log time to show.
+    timeout-minutes: 8
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install zsh, which macOS users source the installer from
+        run: bash .github/workflows/test_workflow_scripts/apt-install.sh zsh
+
+      - name: Test keploy.sh (leaves the caller's directory alone; downloads into a temp directory of its own)
+        env:
+          REQUIRE_ZSH: '1'
+          REQUIRE_PTY: '1'
+        run: bash .github/workflows/test_workflow_scripts/keploy-installer.tests.sh

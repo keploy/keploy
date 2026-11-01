@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -191,15 +192,17 @@ type Agent struct {
 	workerOpen   map[scopeKey]time.Time // record: (worker PID, test name) -> begin time (agent clock)
 	scopeWindows []models.ScopeWindow   // record: closed per-test windows
 	scopeMeta    map[scopeKey]scopeMeta
-	scopeTable   map[string][]string  // replay: test name -> mock names (from mappings.yaml)
-	testBegins   map[string]time.Time // replay: test name -> when it began in its recording (SetTestBegins)
-	testReal     map[string][]string  // replay: test name -> the mock.real destinations its recording lists (SetTestBegins)
-	testPool     []string             // keploy test, proven switch: the set's pool, served between test cases (exact_proven.go)
-	testWorker   []models.MockEntry   // keploy test, proven switch: the set's worker scope, each mock with its place (exact_proven.go)
-	testBegun    map[string]bool      // keploy test, proven switch: the set's test cases begun since its staging (exact_proven.go)
-	testBegunAt  map[string]int       // keploy test, proven switch: each begun test case's place in the order they began (exact_proven.go)
-	testBg       *testBackground      // keploy test, proven switch: the set's background under the background rules, nil for today's (exact_proven.go)
-	loadedMocks  int                  // replay: count of mocks stored, for /agent/mock/stats
+	givenBytes   int                            // record, proven switch: the bytes of the values the session's tests gave, held with their windows (MaxGivenBytesPerRecord)
+	scopeTable   map[string][]string            // replay: test name -> mock names (from mappings.yaml)
+	testBegins   map[string]time.Time           // replay: test name -> when it began in its recording (SetTestBegins)
+	testReal     map[string][]string            // replay: test name -> the mock.real destinations its recording lists (SetTestBegins)
+	testGiven    map[string][]models.GivenValue // replay, proven switch: test ID -> the values it gave when recorded; replaced with the scope table (SetScopeGiven)
+	testPool     []string                       // keploy test, proven switch: the set's pool, served between test cases (exact_proven.go)
+	testWorker   []models.MockEntry             // keploy test, proven switch: the set's worker scope, each mock with its place (exact_proven.go)
+	testBegun    map[string]bool                // keploy test, proven switch: the set's test cases begun since its staging (exact_proven.go)
+	testBegunAt  map[string]int                 // keploy test, proven switch: each begun test case's place in the order they began (exact_proven.go)
+	testBg       *testBackground                // keploy test, proven switch: the set's background under the background rules, nil for today's (exact_proven.go)
+	loadedMocks  int                            // replay: count of mocks stored, for /agent/mock/stats
 	// replay: the tests allowed to run (SetScopeGate); nil = every test runs.
 	// Cleared by resetScopeState.
 	gateRun    map[string]struct{}
@@ -228,6 +231,14 @@ type Agent struct {
 	// replay, under the proven switch: the start time of the process that
 	// opened each window in workerOpen (procStartTime), where it is known.
 	openProc map[scopeKey]string
+
+	// record, under the proven switch: the test scope each window in
+	// workerOpen opened on the recording's mock manager (recordScope), which
+	// tells the recorders what test a call was made in while the test is
+	// open (syncMock.TestScope). spanMgr is that manager; nil is the
+	// package global's (syncMock.Get).
+	openScopes map[scopeKey]*syncMock.TestScope
+	spanMgr    *syncMock.SyncMockManager
 }
 
 func New(logger *zap.Logger, hook coreAgent.Hooks, proxy coreAgent.Proxy, client kdocker.Client, ip coreAgent.IncomingProxy, config *config.Config) *Agent {
@@ -647,8 +658,14 @@ const (
 func (a *Agent) resetScopeState() {
 	a.scopeMu.Lock()
 	a.workerOpen, a.openProc = nil, nil
+	// A test a previous session left open is no test case of this one.
+	for _, s := range a.openScopes {
+		s.Abandon()
+	}
+	a.openScopes = nil
 	a.scopeWindows = nil
 	a.scopeMeta = nil
+	a.givenBytes = 0
 	// A gate belongs to the replay that installed it; the CLI installs this
 	// session's after the reset.
 	a.gateRun, a.gateReason, a.gateWarned = nil, "", false
@@ -729,9 +746,11 @@ func (a *Agent) MockOutgoing(ctx context.Context, opts models.OutgoingOptions) e
 		return err
 	}
 	// Whether the session runs the learn step, which its tests' begins keep
-	// to their recorded order (keepRecordedOrder).
+	// to their recorded order (keepRecordedOrder), and onto which tests'
+	// recordings (learnsOnto).
 	a.provenMu.Lock()
 	a.proven.order.learn = opts.Learn
+	a.proven.order.tests = maps.Clone(opts.LearnTests)
 	a.provenMu.Unlock()
 
 	err := a.Proxy.Mock(ctx, opts)
@@ -1698,7 +1717,10 @@ func (a *Agent) seedStatementCatalog(storage *ClientMockStorage) {
 // starts: a non-default MySQL port would not be routed to the MySQL parser,
 // a default one (3306, 4000) the recording reached an HTTP or gRPC service at
 // would be greeted as MySQL, and a TLS client would not be offered h2 for a
-// destination recorded speaking HTTP/2. They are seeded once per store, when it is published, and
+// destination recorded speaking HTTP/2; and, under the proven switch, where
+// keploy mock replay stages so too (keploy #4970), a local dependency reached
+// only inside tests would not be a recorded port, so keploy mock would refuse
+// its connect while it is stopped. They are seeded once per store, when it is published, and
 // replace the previous store's; the proxy keeps them, and every staging
 // derives from them beside what it stages. A store with no on-disk store
 // seeds none: its per-test mocks are all resident, so its staging reaches

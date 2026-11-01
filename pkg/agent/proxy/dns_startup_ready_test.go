@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/utils/plaintcp/plaintcptest"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 	"golang.org/x/sync/errgroup"
@@ -109,6 +110,16 @@ func TestATCPDNSServerSettlesAsBoundOnlyAfterItIsBound(t *testing.T) {
 		t.Fatalf("port %d not accepting after the server settled as bound (it settled before the bind): %v", port, err)
 	}
 	_ = c.Close()
+}
+
+// The TCP DNS server listens on every interface, so its socket is plain TCP:
+// miekg/dns would bind it with Go's default, MPTCP.
+func TestTheTCPDNSServerListensPlainTCP(t *testing.T) {
+	s, _, _ := serveDNSOnFreePort(t, "tcp", nil)
+	if !s.bound {
+		t.Fatalf("the TCP DNS server did not bind: %v", s.err)
+	}
+	plaintcptest.RequirePlainTCP(t, s.srv.Listener)
 }
 
 func TestAUDPDNSServerSettlesAsBoundWhenListening(t *testing.T) {

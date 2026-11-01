@@ -4,8 +4,11 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
+
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 // A copy follows its source (founder decision, 2026-10-24; the recording is
@@ -113,6 +116,11 @@ type follows struct {
 	// value learned as noise says of it (followed).
 	at      time.Time
 	refuted string
+	// refutes are the further mocks the search went past so after the
+	// first (refuted), each once, in the order it went past them, with
+	// why (refutedAll); refutedOf are the mocks of all of them.
+	refutes   []refutedPlace
+	refutedOf map[string]bool
 	// aside, where the search for the value's source went past a leaf that
 	// held its recorded value whole and that F saw hold another value
 	// (refuteSeen), names the first such leaf: what a value learned as noise
@@ -190,7 +198,7 @@ func (f *follows) refute(x Raw, texts [2]string, keep bool, v *valueDrift, p Pla
 	case x.Live():
 		// Searched unblanked: a stamp or clock read F gave there that holds
 		// the value F saw keeps the place too.
-		for _, text := range [2]string{x.live.text, f.dc.rawExtra(x.live.text)} {
+		for _, text := range [2]string{x.live.payload().text, f.dc.rawExtra(x.live.payload().text)} {
 			if ContainsToken(text, v.live) || v.decoded && ContainsToken(text, v.decLive) {
 				return false
 			}
@@ -214,19 +222,123 @@ func (f *follows) refute(x Raw, texts [2]string, keep bool, v *valueDrift, p Pla
 			return false
 		}
 	}
-	if f.refuted == "" {
-		found := "its recorded value stands whole in " + placeAt(p)
-		if p.Held != v.rec && p.Held != v.decRec {
-			found = "a part of its recorded value (" + partOf(v.rec, p.Held) + ") stands in " + placeAt(p)
-		}
-		f.refuted = found + gave + ": a copy moves with its source, so the value is no copy of it"
+	found := "its recorded value stands whole in " + placeAt(p)
+	if p.Held != v.rec && p.Held != v.decRec {
+		found = "a part of its recorded value (" + partOf(v.rec, p.Held) + ") stands in " + placeAt(p)
 	}
+	f.wentPast(x.mock, found+gave+": a copy moves with its source, so the value is no copy of it")
 	// The word rule reads the same word at the same place on the same terms
 	// and notes it there too (excusedRaw); a source set aside is noted here
 	// as well, so it is ordered should the two searches ever part.
 	f.source(x.mock)
 	return true
 }
+
+// notServed reports whether p, a place in x's request that holds whole the
+// read of the clock v was recorded with (appearedIn: one instant, only in
+// what the application sent there, sentOnly), is no place the value came
+// from because record's full round had not served x before the call
+// (Raw.Served false, or every serve of it made after the call reached
+// keploy: Order.ArrivedAt, Raw.servedAfter): in that round the application
+// sent the call before x's own call was answered, or x's call missed or was not made. The
+// recording sending x first is then no dataflow either: two reads of the
+// clock in one second are a coincidence (api-server's start-up janitors,
+// each reading its clock on its own connection, sent in the order the
+// network gave them, which the two rounds need not share). So the search
+// goes on past it, and the value is read as it is with no such recording
+// (the call's own read of the clock, checked at every replay, where no other
+// place holds it); the place is named (refuted). It is no candidate source
+// whose order the rule reads (sources, followed): F gave the application
+// nothing there before the call, so the recording's order and F's would
+// always differ by it, and a recording that sent x first, then the call (F
+// sending them the other way round), would be refused for an order no
+// dataflow made.
+//
+// Everywhere else the place stays where the value came from, as before: the
+// proven switch off (the rule's absence, as for the run's rule and the
+// start-up rule, classifyRead), a place F served (refute reads it),
+// an instant an answer gave the application (followed whole, a founder
+// decision: the caller hands only a sent one), a word of a connection's
+// start-up a swap can change (startUpWhy; no start-up holds a request's
+// field, so a swap's word is never a sent one either), and a place whose
+// searched texts hold the value F saw too. That last check is defensive: the
+// echo of what F gave (echoRaw) reads a recorded text holding F's value
+// before the search reaches this rule, and no row reaches it.
+func (f *follows) notServed(x Raw, texts [2]string, v *valueDrift, p Place) bool {
+	if f == nil || x.served && !x.servedAfter || !provenswitch.On() {
+		return false
+	}
+	for _, text := range texts {
+		if ContainsToken(text, v.live) || v.decoded && ContainsToken(text, v.decLive) {
+			return false
+		}
+	}
+	f.wentPast(x.mock, "its recorded value stands whole in "+placeAt(p)+", which the application sent there and record's full round had not served before this call: in that round the application sent this call first, and two reads of the clock in one second are a coincidence, not dataflow, so the value is no copy of it")
+	return true
+}
+
+// wentPast names mock, a place the search for the value's source went past,
+// and why (refuted, refutes), once.
+func (f *follows) wentPast(mock, why string) {
+	if f.refuted != "" && f.refutedOf[mock] {
+		return
+	}
+	if f.refuted == "" {
+		f.refuted = why
+	} else {
+		f.refutes = append(f.refutes, refutedPlace{mock, why})
+	}
+	if f.refutedOf == nil {
+		f.refutedOf = map[string]bool{}
+	}
+	f.refutedOf[mock] = true
+}
+
+// refutedPlace is a mock the search for a value's source went past
+// (follows.refute), and why.
+type refutedPlace struct {
+	mock, why string
+}
+
+// refutedAll names every mock the search for the value's source went past
+// (follows.refute), what a value learned past them names (Learned.Refuted):
+// the first two more after the first with why, then the rest by name, the
+// first maxRefutedNamed of them and how many more. "" where it went past
+// none.
+func (f *follows) refutedAll() string {
+	if f == nil || f.refuted == "" {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString(f.refuted)
+	for i, r := range f.refutes {
+		if i == 2 {
+			rest := f.refutes[i:]
+			b.WriteString("; and so are ")
+			b.WriteString(strconv.Itoa(len(rest)))
+			b.WriteString(" more recordings (")
+			for k, x := range rest {
+				if k == maxRefutedNamed {
+					b.WriteString(", …")
+					break
+				}
+				if k > 0 {
+					b.WriteString(", ")
+				}
+				b.WriteString(x.mock)
+			}
+			b.WriteString(")")
+			break
+		}
+		b.WriteString("; ")
+		b.WriteString(r.why)
+	}
+	return b.String()
+}
+
+// maxRefutedNamed is how many of the further mocks the search went past
+// refutedAll names after the ones it says why of.
+const maxRefutedNamed = 8
 
 // refuteSeen reports whether s, a leaf of e, an exchange F served before the
 // call, that held v's recorded value whole (whole), is no place the value came
@@ -385,7 +497,7 @@ func (f *follows) tookElsewhere(v *valueDrift, t string) string {
 				continue
 			}
 			for _, y := range []Raw{x, f.liveOf(x, recorded)} {
-				if y.read && f.dc.searchedTokens(y, keep)[i][w] {
+				if y.isRead() && f.dc.searchedTokens(y, keep)[i][w] {
 					if fd, _ := f.dc.fieldOf(y, f.dc.searched(y, keep), w); fd != "" {
 						return lacks + v.wordOf(w, recorded) + " stands in " + x.mock + " at " + fd
 					}
@@ -485,6 +597,7 @@ func (dc *DriftCache) liveAt(x Raw, text string, keep bool, v *valueDrift, in fu
 		return fNone, ""
 	}
 	liveText := dc.searched(*x.live, keep)[0]
+	xfields := x.payload().fields
 	at := func(fields []rawField, text string, f rawField) (string, bool) {
 		for _, g := range fields {
 			if g.path == f.path && g.key == f.key {
@@ -496,22 +609,22 @@ func (dc *DriftCache) liveAt(x Raw, text string, keep bool, v *valueDrift, in fu
 		}
 		return "", false
 	}
-	for _, g := range x.live.fields {
+	for _, g := range x.live.payload().fields {
 		if g.end > len(liveText) || !in(liveText[g.start:g.end]) {
 			continue
 		}
-		if own, ok := at(x.fields, text, g); !ok || !in(own) {
+		if own, ok := at(xfields, text, g); !ok || !in(own) {
 			return fElsewhere, g.describe()
 		}
 	}
 	view = fSame
 	held := false
-	for _, f := range x.fields {
+	for _, f := range xfields {
 		if f.end > len(text) || !in(text[f.start:f.end]) {
 			continue
 		}
 		held = true
-		lv, ok := at(x.live.fields, liveText, f)
+		lv, ok := at(x.live.payload().fields, liveText, f)
 		if !ok {
 			return fNone, ""
 		}
@@ -679,14 +792,14 @@ func (dc *DriftCache) recordedThere(x Raw, v *valueDrift, in func(own string) bo
 	text := dc.searched(x, false)[0]
 	liveText := dc.searched(*x.live, false)[0]
 	view = fNone
-	for _, g := range x.live.fields {
+	for _, g := range x.live.payload().fields {
 		if g.end > len(liveText) || !in(liveText[g.start:g.end]) {
 			continue
 		}
 		if !answerPath(g.path) {
 			return fSent, g.describe()
 		}
-		own, ok := fieldText(x.fields, text, g)
+		own, ok := fieldText(x.payload().fields, text, g)
 		if !ok {
 			return fElsewhere, g.describe()
 		}
@@ -824,7 +937,7 @@ func (f *follows) excusedGiven(g givenWords, v *valueDrift, i int, t string, at 
 				return true
 			}
 		}
-		f.given = append(f.given, Raw{mock: g.mock, at: g.at, noTime: g.noTime, answered: g.answered, conn: g.conn, pos: g.pos, served: true, read: true, first: g.first, last: g.last})
+		f.given = append(f.given, Raw{mock: g.mock, at: g.at, noTime: g.noTime, answered: g.answered, conn: g.conn, pos: g.pos, served: true, rRead: true, first: g.first, last: g.last})
 	}
 	return true
 }
@@ -1080,7 +1193,7 @@ func servedOrder(earlier []Earlier, raw []Raw, source func(mock string) bool) (o
 		switch {
 		case e.Given:
 			order = append(order, "the test case's request")
-		case e.Payload.Read():
+		case e.Payload.Read(), e.Payload.ordered:
 			add(e.Mock, e.Payload.first, e.Payload.last)
 		default:
 			add(e.Mock, 0, 0)

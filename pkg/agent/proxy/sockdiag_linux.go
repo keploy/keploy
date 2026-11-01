@@ -3,6 +3,7 @@
 package proxy
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -80,6 +81,187 @@ func lookupTCP(local, remote netip.AddrPort) (diagTCP, error) {
 	return d.lookup(local, remote)
 }
 
+// lookupTCPOrdered is lookupOrdered on a socket of its own.
+func lookupTCPOrdered(local, remote netip.AddrPort) (diagTCP, error) {
+	d, err := openDiag()
+	if err != nil {
+		return diagTCP{}, err
+	}
+	defer d.close()
+	return d.lookupOrdered(local, remote)
+}
+
+// lookupOrdered is lookup for a socket that may be moving between the
+// kernel's tables, as a closing connection's does: a miss, or the socket
+// caught closed, is what the kernel holds only once a read ordered against
+// that move agrees (dumpOne).
+//
+// The exact lookup is lockless (__inet_lookup_established walks the socket's
+// hash chain under RCU while other CPUs change it, and gives up at a socket
+// whose last reference is going rather than walk again). A socket that
+// becomes a timewait socket (tcp_time_wait: an orphan acknowledged in
+// FIN_WAIT1, a socket taking its peer's FIN) is replaced in its chain and
+// then closed, and a lookup made as it moves can miss it, or find it closed,
+// while its timewait socket is in the chain; before 6.19 (6.12.63 in 6.12's
+// stable line) the chain held the timewait socket before it could be taken,
+// too. Neither is the socket gone. Either comes only once the move has
+// begun: the kernel unhashes a socket before it marks it closed. The kernel
+// changes a chain only under that chain's lock, which a dump takes to walk
+// it (inet_diag's dump of the established hash), so a dump made after the
+// miss walks the chain once the move is done: it finds the timewait socket,
+// and a socket it does not find is not in the hash. (The dump reads a
+// socket's state after it lets go of the lock, so one it walked to before a
+// move could read closed; one made after the move began walks to none.
+// Before 6.11 the kernel let go of the lock a step before it let the
+// timewait socket be taken, a gap no read from user space can close: a dump
+// in it answers gone, which a bytes wait reads as unknown, never as
+// settled.)
+func (d *diagSock) lookupOrdered(local, remote netip.AddrPort) (diagTCP, error) {
+	s, err := lookupExact(d, local, remote)
+	if (err == nil && s.state != tcpClose) || (err != nil && !errors.Is(err, errNoSocket)) {
+		return s, err
+	}
+	return d.dumpOne(local, remote)
+}
+
+// lookupExact is how lookupOrdered makes its exact lookup; a test replaces it
+// to miss as the kernel's lockless lookup can.
+var lookupExact = (*diagSock).lookup
+
+// dumpStates are the states dumpOne asks for: those of a socket in the
+// established hash, which is where the exact lookup finds one. With SYN_RECV
+// the kernel also gives request sockets (NEW_SYN_RECV), which are in that
+// hash too. Not a listener (a listener on the local port is never the
+// socket, and leaving it out skips the listening hash), nor a bound socket
+// that never connected (the bind hash, which 6.6 and later walk for it).
+const dumpStates = (1<<12 - 1) &^ (1 << tcpListen)
+
+// dumpBufLen is the largest message a dump sends: the kernel sizes a dump's
+// messages to the reader's largest read, up to 32 KiB (netlink_dump).
+const dumpBufLen = 32 << 10
+
+// dumpOne finds the TCP socket whose ends are local and remote by a dump of
+// the established hash, which walks each chain under its lock, filtered to
+// the two ports: errNoSocket when it is not in the hash. A dump keeps to one
+// address family, so an IPv4 pair is looked for among IPv4 sockets, then
+// among IPv6 ones connected over v4-mapped addresses, as the exact lookup
+// finds both.
+func (d *diagSock) dumpOne(local, remote netip.AddrPort) (diagTCP, error) {
+	local = netip.AddrPortFrom(local.Addr().Unmap(), local.Port())
+	remote = netip.AddrPortFrom(remote.Addr().Unmap(), remote.Port())
+	families := []uint8{unix.AF_INET6}
+	if local.Addr().Is4() && remote.Addr().Is4() {
+		families = []uint8{unix.AF_INET, unix.AF_INET6}
+	} else if local.Addr().Is4() != remote.Addr().Is4() {
+		return diagTCP{}, fmt.Errorf("mixed address families %s -> %s", local, remote)
+	}
+	for _, family := range families {
+		s, err := d.dumpFamily(family, local, remote)
+		if !errors.Is(err, errNoSocket) {
+			return s, err
+		}
+	}
+	return diagTCP{}, errNoSocket
+}
+
+// dumpFamily is dumpOne among the sockets of one address family.
+func (d *diagSock) dumpFamily(family uint8, local, remote netip.AddrPort) (diagTCP, error) {
+	d.seq++
+	req := diagRequest(d.seq, unix.NLM_F_REQUEST|unix.NLM_F_DUMP, family, dumpStates, local, remote)
+	if err := unix.Sendto(d.fd, req, 0, &unix.SockaddrNetlink{Family: unix.AF_NETLINK}); err != nil {
+		return diagTCP{}, fmt.Errorf("sock_diag dump request: %w", err)
+	}
+	want := make([]byte, 2*16)
+	putDiagAddr(want[:16], diagFamilyAddr(family, local.Addr()))
+	putDiagAddr(want[16:], diagFamilyAddr(family, remote.Addr()))
+	buf := make([]byte, dumpBufLen)
+	found, ferr := diagTCP{}, error(errNoSocket)
+	for {
+		var n int
+		var err error
+		for {
+			if n, _, err = unix.Recvfrom(d.fd, buf, 0); !errors.Is(err, unix.EINTR) {
+				break
+			}
+		}
+		if err != nil {
+			return diagTCP{}, fmt.Errorf("sock_diag dump: %w", err)
+		}
+		msgs, err := syscall.ParseNetlinkMessage(buf[:n])
+		if err != nil {
+			return diagTCP{}, fmt.Errorf("sock_diag dump: %w", err)
+		}
+		for _, m := range msgs {
+			if m.Header.Seq != d.seq {
+				continue // an earlier request's
+			}
+			switch m.Header.Type {
+			case unix.NLMSG_DONE:
+				if len(m.Data) >= 4 {
+					if errno := syscall.Errno(-int32(binary.NativeEndian.Uint32(m.Data))); errno != 0 {
+						return diagTCP{}, fmt.Errorf("sock_diag dump %s -> %s: %w", local, remote, errno)
+					}
+				}
+				return found, ferr
+			case unix.NLMSG_ERROR:
+				errno := syscall.EPROTO
+				if len(m.Data) >= 4 {
+					errno = syscall.Errno(-int32(binary.NativeEndian.Uint32(m.Data)))
+				}
+				return diagTCP{}, fmt.Errorf("sock_diag dump %s -> %s: %w", local, remote, errno)
+			case unix.SOCK_DIAG_BY_FAMILY:
+				b := m.Data
+				if len(b) < diagMsgLen || b[0] != family || !errors.Is(ferr, errNoSocket) {
+					continue
+				}
+				id := b[4 : 4+diagSockidLen]
+				if binary.BigEndian.Uint16(id[0:]) != local.Port() || binary.BigEndian.Uint16(id[2:]) != remote.Port() {
+					continue
+				}
+				if family == unix.AF_INET && (!bytes.Equal(id[4:8], want[:4]) || !bytes.Equal(id[20:24], want[16:20])) ||
+					family == unix.AF_INET6 && (!bytes.Equal(id[4:20], want[:16]) || !bytes.Equal(id[20:36], want[16:])) {
+					continue
+				}
+				found, ferr = parseDiagMsg(b)
+			}
+		}
+	}
+}
+
+// diagFamilyAddr is a as a socket of family carries it: an IPv4 address
+// v4-mapped in an IPv6 socket.
+func diagFamilyAddr(family uint8, a netip.Addr) netip.Addr {
+	if family == unix.AF_INET6 && a.Is4() {
+		return netip.AddrFrom16(a.As16())
+	}
+	return a
+}
+
+// diagRequest is a sock_diag request for TCP sockets of family in states
+// (a bit per TCP state) whose ends are local and remote, with their
+// tcp_info: an exact lookup with flags NLM_F_REQUEST, a dump (which filters
+// on the two ports alone) with NLM_F_DUMP too.
+func diagRequest(seq uint32, flags uint16, family uint8, states uint32, local, remote netip.AddrPort) []byte {
+	req := make([]byte, unix.NLMSG_HDRLEN+diagReqV2Len)
+	binary.NativeEndian.PutUint32(req[0:], uint32(len(req)))
+	binary.NativeEndian.PutUint16(req[4:], unix.SOCK_DIAG_BY_FAMILY)
+	binary.NativeEndian.PutUint16(req[6:], flags)
+	binary.NativeEndian.PutUint32(req[8:], seq)
+	r := req[unix.NLMSG_HDRLEN:]
+	r[0] = family
+	r[1] = unix.IPPROTO_TCP
+	r[2] = 1 << (diagInfo - 1) // idiag_ext: tcp_info
+	binary.NativeEndian.PutUint32(r[4:], states)
+	id := r[8 : 8+diagSockidLen]
+	binary.BigEndian.PutUint16(id[0:], local.Port())
+	binary.BigEndian.PutUint16(id[2:], remote.Port())
+	putDiagAddr(id[4:20], diagFamilyAddr(family, local.Addr()))
+	putDiagAddr(id[20:36], diagFamilyAddr(family, remote.Addr()))
+	binary.NativeEndian.PutUint32(id[diagCookieOff:], ^uint32(0)) // INET_DIAG_NOCOOKIE
+	binary.NativeEndian.PutUint32(id[diagCookieOff+4:], ^uint32(0))
+	return req
+}
+
 // lookup finds the TCP socket whose local end is local and remote end is
 // remote, by an exact sock_diag lookup in this network namespace, with its
 // tcp_info. An IPv4 pair also finds an IPv6 socket connected over
@@ -98,23 +280,7 @@ func (d *diagSock) lookup(local, remote netip.AddrPort) (diagTCP, error) {
 		return diagTCP{}, fmt.Errorf("mixed address families %s -> %s", local, remote)
 	}
 	d.seq++
-	req := make([]byte, unix.NLMSG_HDRLEN+diagReqV2Len)
-	binary.NativeEndian.PutUint32(req[0:], uint32(len(req)))
-	binary.NativeEndian.PutUint16(req[4:], unix.SOCK_DIAG_BY_FAMILY)
-	binary.NativeEndian.PutUint16(req[6:], unix.NLM_F_REQUEST)
-	binary.NativeEndian.PutUint32(req[8:], d.seq)
-	r := req[unix.NLMSG_HDRLEN:]
-	r[0] = family
-	r[1] = unix.IPPROTO_TCP
-	r[2] = 1 << (diagInfo - 1)                       // idiag_ext: tcp_info
-	binary.NativeEndian.PutUint32(r[4:], ^uint32(0)) // every state
-	id := r[8 : 8+diagSockidLen]
-	binary.BigEndian.PutUint16(id[0:], local.Port())
-	binary.BigEndian.PutUint16(id[2:], remote.Port())
-	putDiagAddr(id[4:20], local.Addr())
-	putDiagAddr(id[20:36], remote.Addr())
-	binary.NativeEndian.PutUint32(id[diagCookieOff:], ^uint32(0)) // INET_DIAG_NOCOOKIE
-	binary.NativeEndian.PutUint32(id[diagCookieOff+4:], ^uint32(0))
+	req := diagRequest(d.seq, unix.NLM_F_REQUEST, family, ^uint32(0), local, remote) // every state
 	if err := unix.Sendto(d.fd, req, 0, &unix.SockaddrNetlink{Family: unix.AF_NETLINK}); err != nil {
 		return diagTCP{}, fmt.Errorf("sock_diag request: %w", err)
 	}

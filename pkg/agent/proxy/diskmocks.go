@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"sort"
 	"sync"
@@ -48,8 +49,9 @@ type DiskMocks struct {
 	placed []diskEntry
 
 	// destinations is, for each recorded destination a mock on disk reached
-	// (destinationKey), the entry of the first one recorded
-	// (LoadDestinations). One entry per destination, resident.
+	// (destinationKey) and, under the proven switch, each port one reached
+	// (reachedPortKey), the entry of the first one recorded
+	// (LoadDestinations). One entry per destination and port, resident.
 	destinations map[string]diskEntry
 
 	// statements is the statement catalog: for each statement a mock on disk
@@ -77,6 +79,13 @@ type DiskMocks struct {
 	// (models.Mock.IsProtocolPhase at Add): few, so only those are listed
 	// (RangeTimes); kept under the proven switch only. nil while none is.
 	phase map[string]bool
+
+	// clockOf is, of each mock on disk on a clock (models.Origin.Clock), its
+	// clock's place in clocks (RangeTimes); a mock on none is not listed.
+	// One record run stamps its mocks on one clock, so clocks holds few.
+	// Kept under the proven switch only, nil while no mock is on a clock.
+	clockOf map[string]uint16
+	clocks  []string
 
 	// budget is how many bytes of records the store keeps in memory
 	// (residentBudgetBytes); the first records up to it stay there, in mem by
@@ -265,6 +274,7 @@ func (d *DiskMocks) Add(m *models.Mock) error {
 		} else {
 			delete(d.phase, m.Name)
 		}
+		d.noteClockLocked(m.Name, mockClock(m))
 	}
 	for _, k := range models.RequestKeys(m) {
 		if d.byKey == nil {
@@ -281,7 +291,18 @@ func (d *DiskMocks) Add(m *models.Mock) error {
 	if models.IsAnswerPlaced(m) {
 		d.placed = append(d.placed, e)
 	}
-	if k := destinationKey(m); k != "" {
+	// Under the proven switch the store also keeps the first mock of each
+	// port the recording reached (reachedPortKey), for the loopback rules
+	// keploy mock replay reads (recordedPorts.seed): its staging reads only
+	// what was recorded before the set's first test.
+	keys := []string{destinationKey(m)}
+	if provenswitch.On() {
+		keys = append(keys, reachedPortKey(m))
+	}
+	for _, k := range keys {
+		if k == "" {
+			continue
+		}
 		if first, ok := d.destinations[k]; !ok || e.reqTsNano < first.reqTsNano {
 			if d.destinations == nil {
 				d.destinations = make(map[string]diskEntry)
@@ -665,9 +686,11 @@ func (d *DiskMocks) LoadStatements() ([]*models.Mock, error) {
 }
 
 // LoadDestinations returns, in recorded order, the first mock on disk of
-// each recorded destination (destinationKey): what the recording says of its
-// destinations, bounded by how many it reached, for the proxy's destination
-// rules to read before any of them is staged (Proxy.SeedRecordedDestinations).
+// each recorded destination (destinationKey) and, under the proven switch, of
+// each port the recording reached (reachedPortKey), each mock once: what the
+// recording says of its destinations, bounded by how many it reached, for the
+// proxy's destination rules to read before any of them is staged
+// (Proxy.SeedRecordedDestinations).
 func (d *DiskMocks) LoadDestinations() ([]*models.Mock, error) {
 	d.mu.Lock()
 	if d.closed {
@@ -675,8 +698,13 @@ func (d *DiskMocks) LoadDestinations() ([]*models.Mock, error) {
 		return nil, fmt.Errorf("disk mocks: store closed")
 	}
 	sel := make([]diskEntry, 0, len(d.destinations))
+	seen := make(map[int64]bool, len(d.destinations))
 	for _, e := range d.destinations {
-		sel = append(sel, e)
+		// One mock may be the first of a destination and of a port.
+		if !seen[e.off] {
+			seen[e.off] = true
+			sel = append(sel, e)
+		}
 	}
 	d.mu.Unlock()
 	sort.Slice(sel, func(i, j int) bool {
@@ -785,26 +813,62 @@ func (d *DiskMocks) RangeKind(kind models.Kind, visit func(name string, load fun
 }
 
 // RangeTimes calls visit with every mock on disk, each once, in no order:
-// its name, its request and answer times, and whether it is protocol-phase
-// (models.Mock.IsProtocolPhase; told under the proven switch only, the only
-// one the teardown bound reads it under), until visit returns false. Nothing is
+// its name, its request and answer times, whether it is protocol-phase
+// (models.Mock.IsProtocolPhase) and its clock (models.Origin.Clock, "" for
+// none; both told under the proven switch only, the only one the teardown
+// bound reads them under), until visit returns false. Nothing is
 // decoded: the times are the store's own, kept as each mock was added. It
 // is what bounds a set's teardown under keploy mock replay
 // (MockManager.SetRecordingTimes): the latest recording of the set's tests,
 // which the staging does not read. visit runs under the store's lock, so it
 // must not call the store.
-func (d *DiskMocks) RangeTimes(visit func(name string, req, res time.Time, protocolPhase bool) bool) error {
+func (d *DiskMocks) RangeTimes(visit func(name string, req, res time.Time, protocolPhase bool, clock string) bool) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.closed {
 		return fmt.Errorf("disk mocks: store closed")
 	}
 	for name, e := range d.byName {
-		if !visit(name, time.Unix(0, e.reqTsNano), time.Unix(0, e.resTsNano), d.phase[name]) {
+		clock := ""
+		if i, ok := d.clockOf[name]; ok {
+			clock = d.clocks[i]
+		}
+		if !visit(name, time.Unix(0, e.reqTsNano), time.Unix(0, e.resTsNano), d.phase[name], clock) {
 			return nil
 		}
 	}
 	return nil
+}
+
+// noteClockLocked notes name's clock for RangeTimes, "" for none: a mock
+// added again under its name takes its latest clock. The store's lock is
+// held.
+func (d *DiskMocks) noteClockLocked(name, clock string) {
+	if clock == "" {
+		delete(d.clockOf, name)
+		return
+	}
+	i := -1
+	for j, c := range d.clocks {
+		if c == clock {
+			i = j
+			break
+		}
+	}
+	if i < 0 {
+		if len(d.clocks) > math.MaxUint16 {
+			// Never in practice (a record run names one clock); past it a
+			// mock reads as on no clock, which bounds every one: fail closed.
+			delete(d.clockOf, name)
+			return
+		}
+		i = len(d.clocks)
+		d.clocks = append(d.clocks, clock)
+	}
+	if d.clockOf == nil {
+		d.clockOf = make(map[string]uint16)
+	}
+	d.clockOf[name] = uint16(i)
 }
 
 // diskKey is the byKey index of kind and request key.

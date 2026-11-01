@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"math/rand/v2"
 	"reflect"
 	"strconv"
 	"strings"
@@ -152,7 +153,7 @@ func classifyProcessedAt(rec, live time.Time, typed bool, insert time.Time, w *W
 	dc := clockedDrifts()
 	var raw []Raw
 	for _, m := range mocks {
-		raw = append(raw, dc.RawOf(m, true))
+		raw = append(raw, dc.RawOf(m, true).ServedAsRecorded())
 	}
 	return ClassifyIn(dc, []string{p}, processedAt(live, typed), processedAt(rec, typed), insert, nil, raw, nil, w)[0]
 }
@@ -808,7 +809,7 @@ func TestAWordIsNeverFoundInAProtocolPhaseAnswersClockRead(t *testing.T) {
 	l := Shape{Leaves: map[string]Leaf{"body.batch": {Path: "body.batch", Noise: "body.batch", Type: String, Value: "batch-15"}}}
 	classify := func(receive *models.Mock, resp []Leaf) Learned {
 		dc := clockedDrifts()
-		return ClassifyIn(dc, []string{"body.batch"}, l, r, r1Insert, nil, []Raw{dc.RawOf(receive, true)}, resp, nil)[0]
+		return ClassifyIn(dc, []string{"body.batch"}, l, r, r1Insert, nil, []Raw{dc.RawOf(receive, true).ServedAsRecorded()}, resp, nil)[0]
 	}
 	if ln := classify(configReceive(""), nil); ln.Kind != KindNoise {
 		t.Fatalf("beside a config call's Date header: %s (from %q, %s); want noise", ln.Kind, ln.From.Mock, ln.Why)
@@ -845,18 +846,18 @@ func TestAWordIsNeverFoundInAProtocolPhaseAnswersClockRead(t *testing.T) {
 	late.Spec.HTTPResp.Header["Date"] = "Thu, 22 Oct 2026 11:15:16 GMT"
 	late.Spec.ResTimestampMock = time.Date(2026, 10, 22, 11, 15, 16, 900e6, time.UTC)
 	dc := clockedDrifts()
-	if ln := ClassifyIn(dc, []string{"body.batch"}, l, r13, r1Insert.Add(time.Minute), nil, []Raw{dc.RawOf(late, true)}, nil, nil)[0]; ln.Kind != KindNoise {
+	if ln := ClassifyIn(dc, []string{"body.batch"}, l, r13, r1Insert.Add(time.Minute), nil, []Raw{dc.RawOf(late, true).ServedAsRecorded()}, nil, nil)[0]; ln.Kind != KindNoise {
 		t.Fatalf("15, a word of a config call's Date: %s (%s); want noise", ln.Kind, ln.Why)
 	}
 	late.Spec.Metadata["type"] = "HTTP_CLIENT"
 	dc = clockedDrifts()
-	if ln := ClassifyIn(dc, []string{"body.batch"}, l, r13, r1Insert.Add(time.Minute), nil, []Raw{dc.RawOf(late, true)}, nil, nil)[0]; ln.Kind != KindNoise {
+	if ln := ClassifyIn(dc, []string{"body.batch"}, l, r13, r1Insert.Add(time.Minute), nil, []Raw{dc.RawOf(late, true).ServedAsRecorded()}, nil, nil)[0]; ln.Kind != KindNoise {
 		t.Fatalf("15, a word of a data-plane receive's Date, its stamp: %s (%s); want noise", ln.Kind, ln.Why)
 	}
 	// Answered before its Date header (its server's clock ahead): no stamp.
 	late.Spec.ResTimestampMock = time.Date(2026, 10, 22, 11, 15, 15, 900e6, time.UTC)
 	dc = clockedDrifts()
-	if ln := ClassifyIn(dc, []string{"body.batch"}, l, r13, r1Insert.Add(time.Minute), nil, []Raw{dc.RawOf(late, true)}, nil, nil)[0]; ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "in mock-4 at spec.resp.header.Date") || !strings.Contains(ln.Why, "declare it noise in keploy.yml") {
+	if ln := ClassifyIn(dc, []string{"body.batch"}, l, r13, r1Insert.Add(time.Minute), nil, []Raw{dc.RawOf(late, true).ServedAsRecorded()}, nil, nil)[0]; ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "in mock-4 at spec.resp.header.Date") || !strings.Contains(ln.Why, "declare it noise in keploy.yml") {
 		t.Fatalf("15, a word of a Date header after its answer: %s (%s); want refused, naming mock-4's spec.resp.header.Date and the fix", ln.Kind, ln.Why)
 	}
 }
@@ -1433,8 +1434,8 @@ func TestAnHTTPDateIsItsAnswersStampWithinItsSpan(t *testing.T) {
 	stamps := func(m *models.Mock) []string {
 		var out []string
 		r := RawOf(m, true)
-		for _, f := range r.stamps {
-			out = append(out, f.path+"="+r.text[f.start:f.end])
+		for _, f := range r.payload().stamps {
+			out = append(out, f.path+"="+r.payload().text[f.start:f.end])
 		}
 		return out
 	}
@@ -1477,20 +1478,20 @@ func TestARawsFieldsIndexItsText(t *testing.T) {
 		var sb strings.Builder
 		textOf(dropKeys(v, 0), &sb)
 		r := RawOf(m, true)
-		if r.text != sb.String() {
+		if r.payload().text != sb.String() {
 			t.Fatalf("%s: RawOf's text differs from textOf's", m.Name)
 		}
-		for _, f := range r.fields {
-			if f.start > f.end || f.end > len(r.text) || f.end < len(r.text) && r.text[f.end] != '\n' {
+		for _, f := range r.payload().fields {
+			if f.start > f.end || f.end > len(r.payload().text) || f.end < len(r.payload().text) && r.payload().text[f.end] != '\n' {
 				t.Fatalf("%s: field %s spans [%d, %d), no line of the text", m.Name, f.path, f.start, f.end)
 			}
 		}
 	}
 	r := RawOf(r1Receive(""), true)
 	var dates []string
-	for _, f := range r.fields {
+	for _, f := range r.payload().fields {
 		if strings.HasSuffix(f.path, ".Date") {
-			dates = append(dates, fmt.Sprintf("%s %v %s", f.path, f.key, r.text[f.start:f.end]))
+			dates = append(dates, fmt.Sprintf("%s %v %s", f.path, f.key, r.payload().text[f.start:f.end]))
 		}
 	}
 	if !reflect.DeepEqual(dates, []string{"Res.header.Date true Date", "Res.header.Date false Thu, 22 Oct 2026 11:14:16 GMT"}) {
@@ -1615,12 +1616,12 @@ func TestACoarserCopyOfAServedInstantIsTheEchos(t *testing.T) {
 		rec := Shape{Leaves: map[string]Leaf{p: tc.leaf(tc.cut(sent))}}
 		live := Shape{Leaves: map[string]Leaf{p: tc.leaf(tc.cut(got))}}
 		dc := clockedDrifts()
-		ln := ClassifyIn(dc, []string{p}, live, rec, r1Insert, nil, []Raw{dc.RawOf(receive, true), dc.RawOf(delivered, true)}, nil, nil)[0]
+		ln := ClassifyIn(dc, []string{p}, live, rec, r1Insert, nil, []Raw{dc.RawOf(receive, true).ServedAsRecorded(), dc.RawOf(delivered, true).ServedAsRecorded()}, nil, nil)[0]
 		if ln.Kind != KindVariable || ln.From.Mock != "mock-4" || !ln.From.Echo {
 			t.Errorf("%s (%q -> %q): %s from %+v (%s); want an echo's variable from mock-4", tc.name, rec.Leaves[p].Value, live.Leaves[p].Value, ln.Kind, ln.From, ln.Why)
 		}
 		dc = clockedDrifts()
-		ln = ClassifyIn(dc, []string{p}, live, rec, r1Insert, nil, []Raw{dc.RawOf(alone, true)}, nil, nil)[0]
+		ln = ClassifyIn(dc, []string{p}, live, rec, r1Insert, nil, []Raw{dc.RawOf(alone, true).ServedAsRecorded()}, nil, nil)[0]
 		if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "mock-11") {
 			t.Errorf("%s, mock-11 alone: %s (%s); want it refused, naming mock-11", tc.name, ln.Kind, ln.Why)
 		}
@@ -1638,7 +1639,7 @@ func TestACoarserCopyOfAServedInstantIsTheEchos(t *testing.T) {
 		return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: strconv.FormatInt(at.UnixMilli(), 10)}}}
 	}
 	dc := clockedDrifts()
-	if ln := ClassifyIn(dc, []string{p}, ms(got), ms(sent), r1Insert, nil, []Raw{dc.RawOf(coarse, true), dc.RawOf(coarser, true)}, nil, nil)[0]; !noiseIn(ln, nil) {
+	if ln := ClassifyIn(dc, []string{p}, ms(got), ms(sent), r1Insert, nil, []Raw{dc.RawOf(coarse, true).ServedAsRecorded(), dc.RawOf(coarser, true).ServedAsRecorded()}, nil, nil)[0]; !noiseIn(ln, nil) {
 		t.Errorf("milliseconds beside served seconds: %s from %+v (%s); want noise", ln.Kind, ln.From, ln.Why)
 	}
 	// An exact copy a formatter wrote dropping its fraction's trailing
@@ -1671,7 +1672,7 @@ func TestACoarserCopyOfAServedInstantIsTheEchos(t *testing.T) {
 			m.Spec.HTTPResp.Body = `{"Messages": [{"Body": "S12 message", "Attributes": ` + attrs(at) + `}]}`
 		}
 		dc = clockedDrifts()
-		if ln := ClassifyIn(dc, []string{p}, tc.shape(tc.got), tc.shape(rec), r1Insert, nil, []Raw{dc.RawOf(whole, true), dc.RawOf(other, true)}, nil, nil)[0]; ln.Kind != KindVariable || ln.From.Mock != "mock-4" || !ln.From.Echo {
+		if ln := ClassifyIn(dc, []string{p}, tc.shape(tc.got), tc.shape(rec), r1Insert, nil, []Raw{dc.RawOf(whole, true).ServedAsRecorded(), dc.RawOf(other, true).ServedAsRecorded()}, nil, nil)[0]; ln.Kind != KindVariable || ln.From.Mock != "mock-4" || !ln.From.Echo {
 			t.Errorf("an exact copy dropping trailing zeros, %s (%q -> %q): %s from %+v (%s); want an echo's variable from mock-4", tc.name, tc.shape(rec).Leaves[p].Value, tc.shape(tc.got).Leaves[p].Value, ln.Kind, ln.From, ln.Why)
 		}
 	}
@@ -1681,7 +1682,7 @@ func TestACoarserCopyOfAServedInstantIsTheEchos(t *testing.T) {
 		return Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, at, time.Millisecond)}}
 	}
 	dc = clockedDrifts()
-	if ln := ClassifyIn(dc, []string{p}, typedMs(got), typedMs(sent), r1Insert, nil, []Raw{dc.RawOf(coarse, true), dc.RawOf(coarser, true)}, nil, nil)[0]; !plainRead(ln) {
+	if ln := ClassifyIn(dc, []string{p}, typedMs(got), typedMs(sent), r1Insert, nil, []Raw{dc.RawOf(coarse, true).ServedAsRecorded(), dc.RawOf(coarser, true).ServedAsRecorded()}, nil, nil)[0]; !plainRead(ln) {
 		t.Errorf("typed milliseconds beside served seconds: %s from %+v (%s); want no copy: a plain read of the clock, with no call window, checked at replay", ln.Kind, ln.From, ln.Why)
 	}
 }
@@ -1884,7 +1885,7 @@ func TestACoarserCopyInTheApplicationsOwnZoneIsTheEchos(t *testing.T) {
 			return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: at.In(loc).Truncate(time.Second).Format("2006-01-02 15:04:05")}}}
 		}
 		dc := clockedDrifts()
-		ln := ClassifyIn(dc, []string{p}, dt(got), dt(sent), r1Insert, nil, []Raw{dc.RawOf(receive, true), dc.RawOf(delivered, true)}, nil, nil)[0]
+		ln := ClassifyIn(dc, []string{p}, dt(got), dt(sent), r1Insert, nil, []Raw{dc.RawOf(receive, true).ServedAsRecorded(), dc.RawOf(delivered, true).ServedAsRecorded()}, nil, nil)[0]
 		if ln.Kind != KindVariable || ln.From.Mock != "mock-4" || !ln.From.Echo {
 			t.Errorf("%s: %s from %+v (%s); want an echo's variable from mock-4", zone, ln.Kind, ln.From, ln.Why)
 		}
@@ -1892,7 +1893,7 @@ func TestACoarserCopyInTheApplicationsOwnZoneIsTheEchos(t *testing.T) {
 		// receives: no zone makes both moments theirs.
 		now := r1Insert.Add(-40 * time.Millisecond)
 		dc = clockedDrifts()
-		ln = ClassifyIn(dc, []string{p}, dt(now.Add(FullRoundLead)), dt(now), r1Insert, nil, []Raw{dc.RawOf(receive, true), dc.RawOf(delivered, true)}, nil, nil)[0]
+		ln = ClassifyIn(dc, []string{p}, dt(now.Add(FullRoundLead)), dt(now), r1Insert, nil, []Raw{dc.RawOf(receive, true).ServedAsRecorded(), dc.RawOf(delivered, true).ServedAsRecorded()}, nil, nil)[0]
 		if !noiseIn(ln, nil) {
 			t.Errorf("%s, a read of the clock: %s from %+v (%s); want noise", zone, ln.Kind, ln.From, ln.Why)
 		}
@@ -1908,7 +1909,7 @@ func TestACoarserCopyInTheApplicationsOwnZoneIsTheEchos(t *testing.T) {
 			return Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, time.Date(wall.Year(), wall.Month(), wall.Day(), wall.Hour(), wall.Minute(), wall.Second(), 0, time.UTC), time.Second)}}
 		}
 		dc = clockedDrifts()
-		ln = ClassifyIn(dc, []string{p}, typed(got), typed(sent), r1Insert, nil, []Raw{dc.RawOf(receive, false), dc.RawOf(delivered, true)}, nil, nil)[0]
+		ln = ClassifyIn(dc, []string{p}, typed(got), typed(sent), r1Insert, nil, []Raw{dc.RawOf(receive, false), dc.RawOf(delivered, true).ServedAsRecorded()}, nil, nil)[0]
 		_, off := sent.In(loc).Zone()
 		rel := (time.Duration(off) * time.Second).String() + " after"
 		if off < 0 {
@@ -2164,5 +2165,104 @@ func TestAWallClockOfNoZoneFitOnOneSideIsNoEcho(t *testing.T) {
 	ln := ClassifyIn(clockedDrifts(), []string{p}, dt("2026-10-22 16:46:16"), dt("2026-10-22 16:44:01"), at, served, nil, nil, nil)[0]
 	if !noiseIn(ln, nil) {
 		t.Errorf("a wall clock F's side alone fits: %s from %+v (%s); want noise", ln.Kind, ln.From, ln.Why)
+	}
+}
+
+// cutsNone turns a pair of instants away only where no rule of cuts names
+// one by the other: of instants of every resolution and zone, whole at each
+// unit, standing apart by a unit, by a zone, by a zone and a unit, or by
+// days, no pair it turns away is one cutsEach finds a rule for.
+func TestCutsNoneTurnsAwayOnlyPairsNoRuleNames(t *testing.T) {
+	rng := rand.New(rand.NewPCG(5016, 1))
+	base := time.Date(2026, 10, 31, 19, 12, 30, 432877056, time.UTC).UnixNano()
+	zones := []int64{0, int64(5*time.Hour + 30*time.Minute), int64(-10 * time.Hour), int64(14 * time.Hour),
+		int64(-12 * time.Hour), int64(45 * time.Minute), int64(time.Second), int64(17 * time.Second), int64(90 * time.Second)}
+	unit := func() int64 { return int64(precisionUnits[rng.IntN(len(precisionUnits))]) }
+	zone := func() int64 {
+		if rng.IntN(3) == 0 {
+			return int64(rng.IntN(105)-48) * int64(15*time.Minute)
+		}
+		return zones[rng.IntN(len(zones))]
+	}
+	near := func(u int64) int64 { return rng.Int64N(2*u+1) - u }
+	mk := func(at, z int64) moment {
+		return moment{key: instantKey{at: at}, wall: timeOfDay(at + z), res: precisionUnits[rng.IntN(len(precisionUnits))],
+			zone: z, zoned: rng.IntN(2) == 0, typed: rng.IntN(2) == 0}
+	}
+	var turned, named int
+	for i := 0; i < 400000; i++ {
+		mz, hz := zone(), zone()
+		at := base + near(int64(3*24*time.Hour))
+		if rng.IntN(4) != 0 {
+			// Whole at a unit, as m's zone writes it.
+			u := unit()
+			at -= ((at+mz)%u + u) % u
+		}
+		m := mk(at, mz)
+		var hat int64
+		switch rng.IntN(5) {
+		case 0:
+			hat = at
+		case 1:
+			hat = at + near(unit())
+		case 2:
+			hat = at - hz + near(unit())
+		case 3:
+			hat = at + mz + near(unit())
+		default:
+			hat = at + near(int64(3*24*time.Hour))
+		}
+		if rng.IntN(3) == 0 {
+			u := unit()
+			hat -= ((hat+hz)%u + u) % u
+		}
+		h := mk(hat, hz)
+		some := cutsEach(h, m, func(cutRule) bool { return true })
+		if some {
+			named++
+		}
+		if cutsNone(h, m) {
+			turned++
+			if some {
+				t.Fatalf("cutsNone turned away %+v of %+v, which cutsEach names", h, m)
+			}
+		}
+	}
+	if turned < 100000 || named < 10000 {
+		t.Fatalf("the pairs do not test cutsNone: it turned away %d, cutsEach named %d", turned, named)
+	}
+	t.Logf("turned away %d of 400000 pairs, cutsEach named %d", turned, named)
+}
+
+// BenchmarkCuts is what cutsNone saves where it matters: a drifted value's
+// moment, read now, held against every instant a set's earlier places hold
+// (4,096 of them, recorded at millisecond resolution over 10 minutes or 3
+// days, half in UTC and half at +05:30), by cuts and by cutsEach alone.
+func BenchmarkCuts(b *testing.B) {
+	base := time.Date(2026, 10, 31, 19, 12, 30, 432000000, time.UTC).UnixNano()
+	m := moment{key: instantKey{at: base}, wall: timeOfDay(base), res: time.Millisecond}
+	accept := func(cutRule) bool { return true }
+	for _, span := range []time.Duration{10 * time.Minute, 3 * 24 * time.Hour} {
+		held := make([]moment, 0, 4096)
+		for i := 0; i < 4096; i++ {
+			at := base - int64(span)*int64(i)/4096 - 7*int64(time.Millisecond)*int64(i%13)
+			z := int64(0)
+			if i%2 == 1 {
+				z = int64(5*time.Hour + 30*time.Minute)
+			}
+			held = append(held, moment{key: instantKey{at: at}, wall: timeOfDay(at + z), res: time.Millisecond, zone: z, zoned: true})
+		}
+		for _, by := range []struct {
+			name string
+			cut  func(held, m moment, visit func(cutRule) bool) bool
+		}{{"cuts", cuts}, {"cutsEach", cutsEach}} {
+			b.Run("span="+span.String()+"/"+by.name, func(b *testing.B) {
+				for i := 0; i < b.N; i++ {
+					for _, h := range held {
+						by.cut(h, m, accept)
+					}
+				}
+			})
+		}
 	}
 }

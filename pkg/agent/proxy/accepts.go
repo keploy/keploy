@@ -13,6 +13,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils/plaintcp"
 )
 
 // errListenerNotMarked is Accepted's answer while the proxy's listener is not
@@ -33,13 +34,13 @@ func (p *Proxy) SetListenerCounter(c agent.ListenerCounter) {
 	p.listenerCounter = c
 }
 
-// listen opens the proxy's listener at addr: with no counter, as it always
-// did, net.Listen, which Go makes MPTCP wherever the kernel has it; with one,
-// ListenMarked. A mark that fails leaves the listener unmarked, its counts
-// unknown, and the proxy listening all the same, with a WARN.
+// listen opens the proxy's listener at addr, plain TCP either way (never Go's
+// default MPTCP): with no counter, unmarked; with one, ListenMarked. A mark
+// that fails leaves the listener unmarked, its counts unknown, and the proxy
+// listening all the same, with a WARN.
 func (p *Proxy) listen(ctx context.Context, addr string) (net.Listener, error) {
 	if p.listenerCounter == nil {
-		return net.Listen("tcp", addr)
+		return plaintcp.Listen(context.Background(), "tcp", addr)
 	}
 	ln, markErr, err := ListenMarked(ctx, addr, p.listenerCounter.MarkProxyListener)
 	if err != nil {
@@ -369,7 +370,7 @@ func (p *Proxy) closeAccepts() {
 // marked; the listener is open all the same. err is listen's own failure.
 func ListenMarked(ctx context.Context, addr string, mark func(rc syscall.RawConn) error) (ln net.Listener, markErr error, err error) {
 	marked := false
-	lc := net.ListenConfig{Control: func(_, _ string, rc syscall.RawConn) error {
+	lc := plaintcp.Config(func(_, _ string, rc syscall.RawConn) error {
 		// One socket per listen; a second would be a listener the
 		// first's mark does not cover.
 		if marked || markErr != nil {
@@ -382,8 +383,7 @@ func ListenMarked(ctx context.Context, addr string, mark func(rc syscall.RawConn
 		}
 		marked = true
 		return nil
-	}}
-	lc.SetMultipathTCP(false)
+	})
 	ln, err = lc.Listen(ctx, "tcp", addr)
 	if err != nil {
 		return nil, nil, err

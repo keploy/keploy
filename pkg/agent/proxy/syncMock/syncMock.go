@@ -309,6 +309,9 @@ type SyncMockManager struct {
 	testSpans     []testSpan
 	testSpansNext int
 	spanWatch     map[*Window]chan struct{}
+	// scopes is, under the proven switch, the test scopes open now
+	// (BeginTestScope): tests whose recording opens no window. Guarded by mu.
+	scopes []*TestScope
 	// exchangeHolds is the exchanges parsers hold while they cannot yet tell
 	// what they are (HoldExchanges), each by its earliest request time in
 	// Unix nanoseconds; exchangeHoldsNext numbers them. holdsStopping is
@@ -503,6 +506,15 @@ type SyncMockManager struct {
 	// their warnings are rate-limited, so this is the one place each is
 	// counted.
 	leftOut atomic.Int64
+	// notHandedOn counts the requests an ingress served and was recording
+	// whose test case never reached the recording's queue: the ingress
+	// stopped first (NoteNotHandedOn).
+	notHandedOn atomic.Uint64
+	// unnamedCallerConns counts the connections to a listener of the run's
+	// own process tree whose caller the agent could not name in its PID
+	// namespace, so that none of the calls they carried was recorded as a
+	// test case (NoteUnnamedCallerConn).
+	unnamedCallerConns atomic.Uint64
 
 	// outChanClosedDrops counts mocks that were already counted in
 	// totalAdded (they passed the pressure gate) but were then dropped
@@ -1694,6 +1706,19 @@ func (m *SyncMockManager) recordDroppedTCFor(name string, epoch uint64) {
 	}
 }
 
+// RevokeTestCase leaves the test case named name out of the recording after
+// it was handed on: the synchronous capture hands a test case on before it
+// claims its request's window (Window.LeftOut), and when the window was given
+// up meanwhile, mocks the test case may own were let go. The deferred-orphan
+// path a capacity drop takes leaves it out: the recording's stream suppresses
+// it if it has not sent it yet (WasMockDroppedForTC), and a CLI that
+// negotiated the revoke deletes it at the end if it has (RevokedTests). A CLI
+// that did not (OutgoingOptions.SupportsDroppedRevoke false) keeps a test
+// case the stream had sent already, without those mocks. Nil-safe.
+func (m *SyncMockManager) RevokeTestCase(name string) {
+	m.recordDroppedTC(name)
+}
+
 // SetRevokeCapable enables (or disables) emission of RevokedTests control
 // frames for the deferred-orphan revoke protocol. The agent service calls it
 // from GetOutgoing with OutgoingOptions.SupportsDroppedRevoke, so emission is
@@ -2261,7 +2286,11 @@ func (c LossCause) String() string {
 //     given up: some mocks it may own were let go, so leave the test case
 //     out, and resolve nothing for it (it is no duplicate: a prune over its
 //     span would drop the mocks of the calls that ran beside it); the loss is
-//     counted and told.
+//     counted and told. A caller that hands its test case on to a queue that
+//     can be full (the synchronous capture, conn.Capture) asks LeftOut
+//     first, hands the test case on with the window still unclaimed, and
+//     only then Keeps it: a Keep false then means the test case went out
+//     without mocks it may own, and RevokeTestCase leaves it out.
 //   - a duplicate: Close BEFORE the prune, so its own window does not hold its
 //     own debris.
 //   - given up on (an early exit, a failed read): Close.
@@ -2446,6 +2475,25 @@ func (w *Window) LeftAtStop() bool {
 	w.m.mu.Lock()
 	defer w.m.mu.Unlock()
 	return w.givenUp && w.cause == LostToStop
+}
+
+// LeftOut reports whether the window was given up already, telling its loss
+// as Keep does when it was. Unlike Keep it claims nothing: a window it finds
+// open stays open and unclaimed, so the bound and memory pressure can still
+// give it up. The synchronous capture asks it before it hands its test case
+// on, and claims the window (Keep) only once the test case is in the
+// recording's queue: a claimed window pins the hold, and the queue can be
+// full for as long as the recording's stream is slow. False for a nil window.
+func (w *Window) LeftOut() bool {
+	if w == nil {
+		return false
+	}
+	w.m.mu.Lock()
+	givenUp := w.givenUp
+	w.m.mu.Unlock()
+	// Given up, the window is never claimed again: Keep reports false and
+	// tells the loss, once.
+	return givenUp && !w.Keep()
 }
 
 // Yield says that from at on, the window's request is no longer the only one in

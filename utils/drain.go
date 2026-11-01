@@ -126,17 +126,14 @@ func drainErrGroupProgress(clk stall.Clock, logger *zap.Logger, name string, g *
 	return werr, false
 }
 
-// WaitWhileProgressing waits for done for as long as progress() keeps changing,
-// and reports false once it has not changed for bound, in the time this
-// process could run (utils/stall) (true: done closed).
-func WaitWhileProgressing(done <-chan struct{}, bound time.Duration, progress func() uint64) bool {
-	return waitWhileProgressing(nil, done, bound, progress)
-}
-
-// waitWhileProgressing is WaitWhileProgressing on clk (nil: the process's own
-// runnable clock). It looks at progress every tenth of the bound, at most a
-// second (stall.CheckEvery) of wall time, before it looks at the stall: a change
-// starts the stall again.
+// waitWhileProgressing waits for done for as long as progress() keeps
+// changing, and reports false once it has not changed for bound, in the time
+// this process could run on clk (nil: the process's own runnable clock)
+// (true: done closed). It looks at progress every tenth of the bound, at most
+// a second (stall.CheckEvery) of wall time, before it looks at the stall: a
+// change starts the stall again. Only the teardown drain uses it: a consumer
+// that writes what a run captured is waited for until it ends
+// (pkg/service/mock waitConsumers), never cut off by a stall.
 func waitWhileProgressing(clk stall.Clock, done <-chan struct{}, bound time.Duration, progress func() uint64) bool {
 	m := stall.NewMeter(clk, bound)
 	defer m.Stop()

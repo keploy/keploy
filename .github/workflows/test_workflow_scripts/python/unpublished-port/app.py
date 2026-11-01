@@ -94,17 +94,13 @@ class Public(BaseHTTPRequestHandler):
 
 
 def self_check(port):
-    # Retried: under keploy record the port's ingress forwarder comes up a
-    # moment after the app's own listen() returns, and a call in that moment
-    # is refused. That is not what this fixture is about.
-    for attempt in range(40):
-        try:
-            call_echo({"warmup": True}, port)
-            return
-        except OSError as e:
-            print("[app] self-check of :%d attempt %d: %s" % (port, attempt + 1, e), flush=True)
-            time.sleep(0.25)
-    sys.exit("[app] self-check of :%d never succeeded" % port)
+    # One call, right after the app's own listen() returned: under keploy
+    # record, keploy holds the port from the app's bind until its ingress
+    # forwarder listens there, so a call this early is answered, not refused.
+    try:
+        call_echo({"warmup": True}, port)
+    except OSError as e:
+        sys.exit("[app] self-check of :%d, made as the app listens, failed: %s" % (port, e))
 
 
 if __name__ == "__main__":

@@ -2,12 +2,14 @@ package learn
 
 import (
 	"net/url"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.mongodb.org/mongo-driver/v2/x/mongo/driver/wiremessage"
 )
 
@@ -48,9 +50,11 @@ func (r copyOrReadRun) window(began bool) Span {
 // timing passes them; one whose audit holds a stamp no read since its test
 // began gives (a day before) misses.
 //
-// Where only the copy holds it stays the earlier call's variable: a copy its
-// own window does not hold (the app read createdAt two seconds before the
-// insert), or a call whose window knows no test begin a replay could check
+// One run's own window is enough, the other run's since its test began: a
+// full round slower than the recording (or faster) learns the same. Where
+// only the copy holds it stays the earlier call's variable: a copy neither
+// run's own window holds (the app read createdAt two seconds before the
+// insert in both), or a call whose window knows no test begin a replay could check
 // the read from (keploy test's). Under the rule's absence (ClassifyGiven: the
 // proven switch off) nothing changes. A typed instant its protocol writes to
 // the second (a SQL timestamp(0)) is read the same.
@@ -72,7 +76,6 @@ func TestAClientTestLearnsACopyOfAnEarlierReadItsOwnWindowHoldsAsAReadSinceItsTe
 		t.Fatal("the row needs one full round to read createdAt and auditedAt a second apart, the other in one second")
 	}
 	insertAt := rec.at(rec.insert)
-	insert := RawOf(&models.Mock{Name: "mock-app", Spec: models.MockSpec{ReqTimestampMock: insertAt, ResTimestampMock: insertAt.Add(time.Millisecond)}}, true)
 	// The audit's two places as recorded and as F saw them, and the insert's
 	// createdAt, in text (a BSON int64 of epoch seconds, as the Mongo parser
 	// hands it) or as a typed instant to the second.
@@ -85,20 +88,22 @@ func TestAClientTestLearnsACopyOfAnEarlierReadItsOwnWindowHoldsAsAReadSinceItsTe
 		{"epoch seconds", func(p string, at time.Time) Leaf { return Leaf{Path: p, Noise: p, Type: Number, Value: secs(at)} }, false},
 		{"a typed instant to the second", func(p string, at time.Time) Leaf { return InstantLeaf(p, p, at.Truncate(time.Second), time.Second) }, true},
 	}
-	learn := func(fm form, f copyOrReadRun, began, following bool) map[string]Learned {
-		earlier := []Earlier{{Mock: "mock-app", At: insertAt, Own: true, Payload: insert.ServedAs(1), Seen: []Seen{
-			{Side: Request, Leaf: fm.leaf("body.cmd.documents.0.createdAt", rec.at(rec.created)), Live: fm.leaf("body.cmd.documents.0.createdAt", f.at(f.created)).Value},
+	learn := func(fm form, r, f copyOrReadRun, began, following bool) map[string]Learned {
+		at := r.at(r.insert)
+		ins := RawOf(&models.Mock{Name: "mock-app", Spec: models.MockSpec{ReqTimestampMock: at, ResTimestampMock: at.Add(time.Millisecond)}}, true)
+		earlier := []Earlier{{Mock: "mock-app", At: at, Own: true, Payload: ins.ServedAs(1), Seen: []Seen{
+			{Side: Request, Leaf: fm.leaf("body.cmd.documents.0.createdAt", r.at(r.created)), Live: fm.leaf("body.cmd.documents.0.createdAt", f.at(f.created)).Value},
 		}}}
 		shape := func(r copyOrReadRun) Shape {
 			return Shape{Leaves: map[string]Leaf{created: fm.leaf(created, r.at(r.created)), audited: fm.leaf(audited, r.at(r.audited))}}
 		}
-		w := &Window{Rec: rec.window(began), F: f.window(began)}
+		w := &Window{Rec: r.window(began), F: f.window(began)}
 		classify := ClassifyGiven
 		if following {
 			classify = ClassifyFollowing
 		}
 		got := map[string]Learned{}
-		for _, ln := range classify(clientTestCache(), []string{created, audited}, shape(f), shape(rec), rec.at(rec.audit), earlier, nil, nil, w, nil) {
+		for _, ln := range classify(clientTestCache(), []string{created, audited}, shape(f), shape(r), r.at(r.audit), earlier, nil, nil, w, nil) {
 			got[ln.Recorded.Path] = ln
 		}
 		return got
@@ -120,7 +125,7 @@ func TestAClientTestLearnsACopyOfAnEarlierReadItsOwnWindowHoldsAsAReadSinceItsTe
 			apart bool
 		}{{"full round a second apart", apart, true}, {"full round in one second", one, false}} {
 			t.Run(fm.name+"/"+fr.name, func(t *testing.T) {
-				got := learn(fm, fr.f, true, true)
+				got := learn(fm, rec, fr.f, true, true)
 				// The copy its own window holds is a read since its test
 				// began in both timings. auditedAt, read a second past
 				// createdAt in F, is a plain read in its window in text,
@@ -158,21 +163,36 @@ func TestAClientTestLearnsACopyOfAnEarlierReadItsOwnWindowHoldsAsAReadSinceItsTe
 				}
 			})
 		}
+		// The app read createdAt two seconds before the insert: the
+		// audit's window holds no copy of it in that run (early), only the
+		// window since its test began does.
+		early, recEarly := one, rec
+		early.created, early.insert, early.audited, early.audit = 100*time.Millisecond, 2150*time.Millisecond, 2300*time.Millisecond, 2400*time.Millisecond
+		recEarly.insert, recEarly.audited, recEarly.audit = 2002*time.Millisecond, 2003*time.Millisecond, 2004*time.Millisecond
+		t.Run(fm.name+"/one run's own window holds it", func(t *testing.T) {
+			// A full round slower than the recording, or faster: the read
+			// since its test began, whichever run's window holds it.
+			for _, c := range []struct {
+				name string
+				r, f copyOrReadRun
+			}{{"the recording's", rec, early}, {"the full round's", recEarly, one}} {
+				ln := learn(fm, c.r, c.f, true, true)[created]
+				if o, ok := ln.Clock(); ln.Kind != KindClockRead || !ok || !o.Plain() || o.Since != models.SinceTestBegin || ln.From.Mock != "" {
+					t.Fatalf("only %s window: createdAt %s Read=%+v from %+v (%s); want a plain read of the clock since its test began, no variable", c.name, ln.Kind, ln.Read, ln.From, ln.Why)
+				}
+			}
+		})
 		t.Run(fm.name+"/only the copy holds", func(t *testing.T) {
-			// The app read createdAt two seconds before the insert: the
-			// audit's window holds no copy of it.
-			early := one
-			early.created, early.insert, early.audited, early.audit = 100*time.Millisecond, 2150*time.Millisecond, 2300*time.Millisecond, 2400*time.Millisecond
 			for _, c := range []struct {
 				name             string
-				f                copyOrReadRun
+				r, f             copyOrReadRun
 				began, following bool
 			}{
-				{"a copy its own window does not hold", early, true, true},
-				{"a call whose window knows no test begin", one, false, true},
-				{"the rule's absence (ClassifyGiven)", one, true, false},
+				{"a copy neither run's own window holds", recEarly, early, true, true},
+				{"a call whose window knows no test begin", rec, one, false, true},
+				{"the rule's absence (ClassifyGiven)", rec, one, true, false},
 			} {
-				got := learn(fm, c.f, c.began, c.following)
+				got := learn(fm, c.r, c.f, c.began, c.following)
 				if ln := got[created]; ln.Kind != KindVariable || ln.From.Mock != "mock-app" {
 					t.Fatalf("%s: createdAt %s Read=%+v from %+v (%s); want a variable of mock-app", c.name, ln.Kind, ln.Read, ln.From, ln.Why)
 				}
@@ -333,6 +353,268 @@ func TestAClientTestLearnsAnOffsetOfAGivenInstantItsOwnWindowHoldsAsAReadSinceIt
 	}
 }
 
+// A place the offset rule refuses (a start-up stamp, the recording's mock-3
+// and the one record's full round gave in its place, mock-11, each the same
+// gap before the value) that is a read of the clock made for its call in one
+// run and earlier in its test in the other is learned as a read of the clock
+// since its test began (models.SinceTestBegin), as the copy rule learns a
+// copy in those windows (Window.oneRunSinceBegin): api-server's create
+// handler reads an app's createdAt, updatedAt and auditedAt at its start; the
+// recording made the handler's calls in 5 ms, so the audit's own window held
+// them, while record's full round took half a second over them and crossed a
+// second, so only its window since the test began did. The offset rule
+// refused createdAt, and the test was set aside (api-server's
+// TestTestSuiteAssertionTypes, TestTestSuitePagination,
+// TestCITokensEndWithTheirServiceAccount, TestSavedBearerTokenIsSentTrimmed
+// and TestSlowStepFailsOnlyItself). The rescue read only the call's
+// own window in both runs, so the learning hung on how fast the full round
+// ran. It is read without the offset rule alone, every other rule as it
+// stands, in those windows too. An earlier test's insert recorded in the same
+// second (mock-12, whose own read in record's full round fell in another
+// second), which refuses the value read in its own window alone (a word that
+// did not drift with it), is a same-second coincidence there, not its source:
+// both legs are learned so, and a replay inside its test passes while one a
+// day before, or one holding the recorded value, misses. So is the value
+// whichever run's own window holds the read (a recording slower than record's
+// full round), and a typed instant as a number of seconds is (the offset rule
+// refuses each: classifyInstant, classifyRead).
+//
+// Where neither run's own window holds the read (read two seconds before the
+// call before it in both), where a window knows no test begin, under
+// ClassifyGiven (the proven switch off), and where an answer earlier in the
+// test that F served as recorded holds the recorded second (a source the
+// rescue's reading keeps), it stays refused, naming mock-3 and mock-11.
+func TestAClientTestLearnsAnOffsetOfAGivenInstantOneRunsOwnWindowHoldsAsAReadSinceItsTestBegan(t *testing.T) {
+	const p = "body.docs.msgs.0.app.createdAt.$numberLong"
+	const gap = 11484*time.Hour + 35*time.Minute + 49*time.Second
+	const offsetRule = "a value built on what the application was given by an offset moves so"
+	secs := func(t time.Time) string { return strconv.FormatInt(t.Unix(), 10) }
+	// The recording: begin, the read at its handler's start, the call
+	// before the audit (insert) and the audit, all within 6 ms.
+	rec := copyOrReadRun{began: time.Date(2026, 10, 30, 23, 3, 29, 548_000_000, time.UTC), audited: time.Millisecond, insert: 5400 * time.Microsecond, audit: 5800 * time.Microsecond}
+	// Record's full round: the read at its handler's start, then half a
+	// second of calls, crossing a second, before the call before the audit.
+	f := copyOrReadRun{began: time.Date(2026, 10, 30, 23, 4, 46, 796_000_000, time.UTC), audited: time.Millisecond, insert: 488 * time.Millisecond, audit: 489 * time.Millisecond}
+	stamp := func(name string, sent, at time.Time) *models.Mock {
+		m := r1Receive(`{"SentTimestamp": "` + strconv.FormatInt(sent.UnixMilli(), 10) + `"}`)
+		m.Name = name
+		m.Spec.HTTPResp.Header["Date"] = "Thu, 22 Oct 2026 03:02:51 GMT"
+		m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock = at, at.Add(200*time.Millisecond)
+		return m
+	}
+	type form = struct {
+		name string
+		leaf func(at time.Time) Leaf
+	}
+	// The form the offset rule refuses a typed instant in (classifyInstant)
+	// as well as a number of seconds.
+	forms := []form{
+		{"epoch seconds", func(at time.Time) Leaf { return Leaf{Path: p, Noise: p, Type: Number, Value: secs(at)} }},
+		{"a typed instant to the second", func(at time.Time) Leaf { return InstantLeaf(p, p, at.Truncate(time.Second), time.Second) }},
+	}
+	learn := func(fm form, r, f copyOrReadRun, began, following, earlierTest bool, more ...Raw) Learned {
+		dc := clientTestCache()
+		raw := []Raw{
+			dc.RawOf(stamp("mock-3", r.at(r.audited).Add(-gap), r.began.Add(-6*time.Minute)), true),
+			dc.RawOf(stamp("mock-11", f.at(f.audited).Add(-gap), r.began.Add(-5*time.Minute)), true),
+		}
+		raw = append(raw, more...)
+		var earlier []Earlier
+		if earlierTest {
+			// An earlier test's insert of its own app, recorded in the
+			// same second as this read; record's full round read its own
+			// clock for it two seconds before this test began.
+			earlier = []Earlier{{Mock: "mock-12", At: r.began.Add(-60 * time.Millisecond), Run: true, Seen: []Seen{{Side: Request, Leaf: fm.leaf(r.at(r.audited)), Live: secs(f.began.Add(-2 * time.Second)), Place: p}}}}
+		}
+		w := &Window{Rec: r.window(began), F: f.window(began)}
+		classify := ClassifyGiven
+		if following {
+			classify = ClassifyFollowing
+		}
+		shape := func(x copyOrReadRun) Shape { return Shape{Leaves: map[string]Leaf{p: fm.leaf(x.at(x.audited))}} }
+		return classify(dc, []string{p}, shape(f), shape(r), r.at(r.audit), earlier, raw, nil, w, nil)[0]
+	}
+	if secs(f.at(f.audited)) == secs(f.at(f.insert)) || secs(rec.at(rec.audited)) != secs(rec.at(rec.insert)) {
+		t.Fatal("fixture: the read must lie in the recording's own window and outside record's full round's")
+	}
+	type leg struct {
+		name        string
+		r, f        copyOrReadRun
+		earlierTest bool
+	}
+	legs := []leg{
+		{"the recording's own window", rec, f, false},
+		{"the recording's own window, an earlier test's same-second insert", rec, f, true},
+		// The recording ran as record's full round did, and the full
+		// round as fast as the recording: the other run's own window.
+		{"record's full round's own window", f, rec, false},
+	}
+	for i, fm := range forms {
+		for _, c := range legs {
+			if c.earlierTest && i > 0 {
+				// The earlier test's insert is the epoch-seconds form's.
+				continue
+			}
+			rec := c.r
+			t.Run(fm.name+", "+c.name, func(t *testing.T) {
+				ln := learn(fm, c.r, c.f, true, true, c.earlierTest)
+				o, ok := ln.Clock()
+				if ln.Kind != KindClockRead || !ok || !o.Plain() || o.Since != models.SinceTestBegin {
+					t.Fatalf("%s Read=%+v from %+v (%s); want a plain read of the clock checked since the test began", ln.Kind, ln.Read, ln.From, ln.Why)
+				}
+				x := copyOrReadRun{began: time.Date(2026, 10, 31, 9, 0, 0, 0, time.UTC), audited: time.Millisecond, insert: 300 * time.Millisecond, audit: 301 * time.Millisecond}
+				for _, r := range []struct {
+					name string
+					at   time.Time
+					want bool
+				}{
+					{"replay inside its test", x.at(x.audited), true},
+					{"replay with createdAt a day before its test", x.began.Add(-24 * time.Hour), false},
+					{"replay with the recorded createdAt", rec.at(rec.audited), false},
+				} {
+					if ok, why := CheckClockRead(p, o, fm.leaf(r.at), x.window(true), true); ok != r.want {
+						t.Fatalf("%s: CheckClockRead = %v (%s); want %v", r.name, ok, why, r.want)
+					}
+				}
+			})
+		}
+	}
+	early := func(x copyOrReadRun) copyOrReadRun {
+		x.insert, x.audit = x.audited+2*time.Second, x.audited+2100*time.Millisecond
+		return x
+	}
+	for _, fm := range forms {
+		for _, c := range []struct {
+			name             string
+			r, f             copyOrReadRun
+			began, following bool
+		}{
+			{"neither run's own window holds it", early(rec), early(f), true, true},
+			{"a call whose window knows no test begin", rec, f, false, true},
+			{"the rule's absence (ClassifyGiven)", rec, f, true, false},
+		} {
+			if ln := learn(fm, c.r, c.f, c.began, c.following, false); ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, offsetRule) || !strings.Contains(ln.Why, "mock-3") || !strings.Contains(ln.Why, "mock-11") {
+				t.Fatalf("%s, %s: %s Read=%+v (%s); want refused by the offset rule, naming mock-3 and mock-11", fm.name, c.name, ln.Kind, ln.Read, ln.Why)
+			}
+		}
+	}
+	// A dependency's answer earlier in the test, which F served as
+	// recorded, holding the recorded second whole: read without the offset
+	// rule in the recording's own window, the value is a copy of it there,
+	// not a read of the clock, and the rescue takes a read of the clock
+	// alone, so the value stays refused. Read without the source search too
+	// (as the copy rule reads a value already learned as a copy), it would
+	// be learned as a read since its test began, past a source no rule set
+	// aside.
+	held := r1Receive(`{"createdAt": "` + secs(rec.at(rec.audited)) + `"}`)
+	held.Name = "mock-h"
+	held.Spec.HTTPResp.Header["Date"] = "Thu, 22 Oct 2026 03:02:51 GMT"
+	held.Spec.ReqTimestampMock, held.Spec.ResTimestampMock = rec.at(3*time.Millisecond), rec.at(4*time.Millisecond)
+	if ln := learn(forms[0], rec, f, true, true, false, RawOf(held, true).ServedAs(3).ServedAsRecorded()); ln.Kind != KindUnaccounted || !ln.byOffset || !strings.Contains(ln.Why, offsetRule) || !strings.Contains(ln.Why, "mock-3") || !strings.Contains(ln.Why, "mock-11") {
+		t.Fatalf("an answer F served as recorded holds the recorded second: %s Read=%+v from %+v (%s); want refused by the offset rule, naming mock-3 and mock-11", ln.Kind, ln.Read, ln.From, ln.Why)
+	}
+}
+
+// The rescue above reads a value in one run's own window and the other's
+// window since its test began (Window.oneRunSinceBegin) only where the offset
+// rule refused it (Learned.byOffset). A value no given instant builds by an
+// offset, refused in its own call's window for another reason, that reads in
+// those windows as the clock plus one constant offset (a token's expiresAt,
+// thirty days after a read record's full round made half a second and a
+// second boundary before its call's window) stays refused: the window from
+// each run's test begin takes a plain read only, never a read plus an offset
+// (classifyRead's rule for a read made before its call's window), and the
+// rescue widens no refusal but the offset rule's. Where both runs' own
+// windows hold the read, it is learned as the clock plus thirty days.
+func TestAClientTestKeepsAnExpiryNoOffsetRuleRefusedThatOneRunsOwnWindowHoldsRefused(t *testing.T) {
+	const p = "body.docs.msgs.0.token.expiresAt.$numberLong"
+	const month = 30 * 24 * time.Hour
+	secs := func(t time.Time) string { return strconv.FormatInt(t.Unix(), 10) }
+	// The recording: begin, the read at its handler's start, the call
+	// before the insert and the insert, all within 6 ms.
+	rec := copyOrReadRun{began: time.Date(2026, 10, 30, 23, 3, 29, 548_000_000, time.UTC), audited: time.Millisecond, insert: 5400 * time.Microsecond, audit: 5800 * time.Microsecond}
+	// Record's full round: the read at its handler's start, then half a
+	// second of calls, crossing a second, before the call before the insert.
+	slow := copyOrReadRun{began: time.Date(2026, 10, 30, 23, 4, 46, 796_000_000, time.UTC), audited: time.Millisecond, insert: 488 * time.Millisecond, audit: 489 * time.Millisecond}
+	// One that ran as fast as the recording: its own window holds the read.
+	fast := copyOrReadRun{began: time.Date(2026, 10, 30, 23, 4, 46, 296_000_000, time.UTC), audited: time.Millisecond, insert: 5400 * time.Microsecond, audit: 5800 * time.Microsecond}
+	leaf := func(x copyOrReadRun) Leaf {
+		return Leaf{Path: p, Noise: p, Type: Number, Value: secs(x.at(x.audited).Add(month))}
+	}
+	learn := func(r, f copyOrReadRun) Learned {
+		dc := clientTestCache()
+		w := (&Window{Rec: r.window(true), F: f.window(true)}).ComparesOffsets()
+		shape := func(x copyOrReadRun) Shape { return Shape{Leaves: map[string]Leaf{p: leaf(x)}} }
+		return ClassifyFollowing(dc, []string{p}, shape(f), shape(r), r.at(r.audit), nil, nil, nil, w, nil)[0]
+	}
+	if secs(slow.at(slow.audited)) == secs(slow.at(slow.insert)) || secs(rec.at(rec.audited)) != secs(rec.at(rec.insert)) || secs(fast.at(fast.audited)) != secs(fast.at(fast.insert)) {
+		t.Fatal("fixture: the read must lie in the recording's and the fast round's own windows and outside the slow round's")
+	}
+	if ln := learn(rec, fast); ln.Kind != KindClockOffset {
+		t.Fatalf("both runs' own windows: %s Offset=%+v (%s); want the clock plus thirty days", ln.Kind, ln.Offset, ln.Why)
+	} else if o, ok := ln.Clock(); !ok || o.Plain() || o.Min > month || o.Max <= month {
+		t.Fatalf("both runs' own windows: Offset=%+v; want the clock plus thirty days", o)
+	}
+	if ln := learn(rec, slow); ln.Kind != KindUnaccounted || ln.byOffset {
+		t.Fatalf("one run's own window: %s Read=%+v Offset=%+v byOffset=%v (%s); want refused, by no offset rule", ln.Kind, ln.Read, ln.Offset, ln.byOffset, ln.Why)
+	}
+}
+
+// The rescue reads one run's own window and the other's since its test began
+// for a plain read of the clock alone. An expiry the offset rule refused
+// (mock-3 and mock-11, each the same gap before the value in its run) that
+// those windows hold as the clock plus thirty days, read in the slower run
+// half a second and a second boundary before its call's window, stays
+// refused by the offset rule: an offset read there spans that half second,
+// which no replay checks as tightly as the read itself. A guard row: read
+// without the offset rule in those windows, the value is refused today by
+// the search for its source too (F served mock-3 and mock-11 with no view an
+// adapter stated, and the windows show no plain read), so the rescue's own
+// restriction to a plain read is not what keeps it refused here.
+func TestAClientTestKeepsAnOffsetRefusedExpiryOnlyOneRunsOwnWindowHoldsRefused(t *testing.T) {
+	const p = "body.docs.msgs.0.token.expiresAt.$numberLong"
+	const month = 30 * 24 * time.Hour
+	const gap = 11484*time.Hour + 35*time.Minute + 49*time.Second
+	const offsetRule = "a value built on what the application was given by an offset moves so"
+	secs := func(t time.Time) string { return strconv.FormatInt(t.Unix(), 10) }
+	rec := copyOrReadRun{began: time.Date(2026, 10, 30, 23, 3, 29, 548_000_000, time.UTC), audited: time.Millisecond, insert: 5400 * time.Microsecond, audit: 5800 * time.Microsecond}
+	slow := copyOrReadRun{began: time.Date(2026, 10, 30, 23, 4, 46, 796_000_000, time.UTC), audited: time.Millisecond, insert: 488 * time.Millisecond, audit: 489 * time.Millisecond}
+	stamp := func(name string, sent, at time.Time) *models.Mock {
+		m := r1Receive(`{"SentTimestamp": "` + strconv.FormatInt(sent.UnixMilli(), 10) + `"}`)
+		m.Name = name
+		m.Spec.HTTPResp.Header["Date"] = "Thu, 22 Oct 2026 03:02:51 GMT"
+		m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock = at, at.Add(200*time.Millisecond)
+		return m
+	}
+	leaf := func(x copyOrReadRun) Leaf {
+		return Leaf{Path: p, Noise: p, Type: Number, Value: secs(x.at(x.audited).Add(month))}
+	}
+	learn := func(r, f copyOrReadRun) Learned {
+		dc := clientTestCache()
+		raw := []Raw{
+			dc.RawOf(stamp("mock-3", r.at(r.audited).Add(month-gap), r.began.Add(-6*time.Minute)), true),
+			dc.RawOf(stamp("mock-11", f.at(f.audited).Add(month-gap), r.began.Add(-5*time.Minute)), true),
+		}
+		w := (&Window{Rec: r.window(true), F: f.window(true)}).ComparesOffsets()
+		shape := func(x copyOrReadRun) Shape { return Shape{Leaves: map[string]Leaf{p: leaf(x)}} }
+		return ClassifyFollowing(dc, []string{p}, shape(f), shape(r), r.at(r.audit), nil, raw, nil, w, nil)[0]
+	}
+	if secs(slow.at(slow.audited)) == secs(slow.at(slow.insert)) || secs(rec.at(rec.audited)) != secs(rec.at(rec.insert)) {
+		t.Fatal("fixture: the read must lie in the recording's own window and outside the slow round's")
+	}
+	for _, c := range []struct {
+		name string
+		r, f copyOrReadRun
+	}{
+		{"the recording's own window", rec, slow},
+		{"record's full round's own window", slow, rec},
+	} {
+		if ln := learn(c.r, c.f); ln.Kind != KindUnaccounted || !ln.byOffset || !strings.Contains(ln.Why, offsetRule) || !strings.Contains(ln.Why, "mock-3") || !strings.Contains(ln.Why, "mock-11") {
+			t.Fatalf("%s alone: %s Read=%+v Offset=%+v (%s); want refused by the offset rule, naming mock-3 and mock-11", c.name, ln.Kind, ln.Read, ln.Offset, ln.Why)
+		}
+	}
+}
+
 // A place whose value copies an earlier read of the clock (the app's
 // createdAt its insert sent), is built by an offset on what the application
 // was given (a start-up recording's stamp 5m23s before it: the recording's
@@ -346,7 +628,8 @@ func TestAClientTestLearnsAnOffsetOfAGivenInstantItsOwnWindowHoldsAsAReadSinceIt
 // round that made them a second apart learned a read: a replay whose reads
 // land a second apart then missed, by the full round's timing. Replays of
 // either timing pass every place; an auditedAt a day before its test misses.
-// A copy its own window does not hold stays the insert's variable.
+// One run's own window is enough, the other run's since its test began; a
+// copy neither run's own window holds stays the insert's variable.
 func TestAClientTestLearnsACopyThatIsAlsoAnOffsetOfAGivenInstantAsAReadSinceItsTestBegan(t *testing.T) {
 	const (
 		src     = "body.cmd.documents.0.createdAt"
@@ -364,8 +647,6 @@ func TestAClientTestLearnsACopyThatIsAlsoAnOffsetOfAGivenInstantAsAReadSinceItsT
 	if secs(apart.at(apart.created)) == secs(apart.at(apart.audited)) || secs(one.at(one.created)) != secs(one.at(one.audited)) {
 		t.Fatal("the row needs one full round to read createdAt and auditedAt a second apart, the other in one second")
 	}
-	insertAt := rec.at(rec.insert)
-	insert := RawOf(&models.Mock{Name: "mock-app", Spec: models.MockSpec{ReqTimestampMock: insertAt, ResTimestampMock: insertAt.Add(time.Millisecond)}}, true)
 	stamp := func(name string, sent, at time.Time) *models.Mock {
 		m := r1Receive(`{"SentTimestamp": "` + strconv.FormatInt(sent.UnixMilli(), 10) + `"}`)
 		m.Name = name
@@ -374,20 +655,22 @@ func TestAClientTestLearnsACopyThatIsAlsoAnOffsetOfAGivenInstantAsAReadSinceItsT
 		return m
 	}
 	leaf := func(p string, at time.Time) Leaf { return Leaf{Path: p, Noise: p, Type: Number, Value: secs(at)} }
-	learn := func(f copyOrReadRun) map[string]Learned {
+	learn := func(r, f copyOrReadRun) map[string]Learned {
 		dc := clientTestCache()
-		earlier := []Earlier{{Mock: "mock-app", At: insertAt, Own: true, Payload: insert.ServedAs(1), Seen: []Seen{
-			{Side: Request, Leaf: leaf(src, rec.at(rec.created)), Live: leaf(src, f.at(f.created)).Value},
+		at := r.at(r.insert)
+		ins := RawOf(&models.Mock{Name: "mock-app", Spec: models.MockSpec{ReqTimestampMock: at, ResTimestampMock: at.Add(time.Millisecond)}}, true)
+		earlier := []Earlier{{Mock: "mock-app", At: at, Own: true, Payload: ins.ServedAs(1), Seen: []Seen{
+			{Side: Request, Leaf: leaf(src, r.at(r.created)), Live: leaf(src, f.at(f.created)).Value},
 		}}}
 		raw := []Raw{
-			dc.RawOf(stamp("mock-3", rec.at(rec.created).Add(-gap), rec.began.Add(-6*time.Minute)), true),
-			dc.RawOf(stamp("mock-11", f.at(f.created).Add(-gap), rec.began.Add(-5*time.Minute)), true),
+			dc.RawOf(stamp("mock-3", r.at(r.created).Add(-gap), r.began.Add(-6*time.Minute)), true),
+			dc.RawOf(stamp("mock-11", f.at(f.created).Add(-gap), r.began.Add(-5*time.Minute)), true),
 		}
 		shape := func(r copyOrReadRun) Shape {
 			return Shape{Leaves: map[string]Leaf{created: leaf(created, r.at(r.created)), audited: leaf(audited, r.at(r.audited))}}
 		}
 		got := map[string]Learned{}
-		for _, ln := range ClassifyFollowing(dc, []string{created, audited}, shape(f), shape(rec), rec.at(rec.audit), earlier, raw, nil, &Window{Rec: rec.window(true), F: f.window(true)}, nil) {
+		for _, ln := range ClassifyFollowing(dc, []string{created, audited}, shape(f), shape(r), r.at(r.audit), earlier, raw, nil, &Window{Rec: r.window(true), F: f.window(true)}, nil) {
 			got[ln.Recorded.Path] = ln
 		}
 		return got
@@ -400,7 +683,7 @@ func TestAClientTestLearnsACopyThatIsAlsoAnOffsetOfAGivenInstantAsAReadSinceItsT
 		f    copyOrReadRun
 	}{{"full round a second apart", apart}, {"full round in one second", one}} {
 		t.Run(fr.name, func(t *testing.T) {
-			got := learn(fr.f)
+			got := learn(rec, fr.f)
 			for _, p := range []string{created, audited} {
 				ln := got[p]
 				if o, ok := ln.Clock(); ln.Kind != KindClockRead || !ok || !o.Plain() || o.Since != models.SinceTestBegin || ln.From.Mock != "" {
@@ -427,11 +710,22 @@ func TestAClientTestLearnsACopyThatIsAlsoAnOffsetOfAGivenInstantAsAReadSinceItsT
 		})
 	}
 	// The app read createdAt two seconds before the insert: the audit's
-	// window holds no copy of it, and it stays the insert's variable.
-	early := one
+	// window holds no copy of it in that run. Where one run's own window
+	// holds it, it is the read since its test began; where neither does,
+	// it stays the insert's variable.
+	early, recEarly := one, rec
 	early.created, early.insert, early.audited, early.audit = 100*time.Millisecond, 2150*time.Millisecond, 2300*time.Millisecond, 2400*time.Millisecond
-	if ln := learn(early)[created]; ln.Kind != KindVariable || ln.From.Mock != "mock-app" {
-		t.Fatalf("a copy its own window does not hold: createdAt %s Read=%+v from %+v (%s); want a variable of mock-app", ln.Kind, ln.Read, ln.From, ln.Why)
+	recEarly.insert, recEarly.audited, recEarly.audit = 2002*time.Millisecond, 2003*time.Millisecond, 2004*time.Millisecond
+	for _, c := range []struct {
+		name string
+		r, f copyOrReadRun
+	}{{"only the recording's window holds it", rec, early}, {"only the full round's window holds it", recEarly, one}} {
+		if ln := learn(c.r, c.f)[created]; ln.Kind != KindClockRead || ln.Read == nil || ln.Read.Since != models.SinceTestBegin || ln.From.Mock != "" {
+			t.Fatalf("%s: createdAt %s Read=%+v from %+v (%s); want a read of the clock since its test began", c.name, ln.Kind, ln.Read, ln.From, ln.Why)
+		}
+	}
+	if ln := learn(recEarly, early)[created]; ln.Kind != KindVariable || ln.From.Mock != "mock-app" {
+		t.Fatalf("a copy neither run's own window holds: createdAt %s Read=%+v from %+v (%s); want a variable of mock-app", ln.Kind, ln.Read, ln.From, ln.Why)
 	}
 }
 
@@ -472,9 +766,11 @@ func TestAClientTestLearnsAnOffsetOfAGivenInstantThatIsItsOwnClockPlusAnOffsetAs
 	value := func(x copyOrReadRun) time.Time { return x.at(x.audited).Add(month) }
 	learn := func(fm fm, r, f copyOrReadRun, began, following bool) Learned {
 		dc := clientTestCache()
+		// Each served as recorded, as its adapter says (Raw.ServedAsRecorded):
+		// a serve no adapter stated refuses the value's new words.
 		raw := []Raw{
-			dc.RawOf(stamp("mock-3", value(r).Add(-gap), r.began.Add(-6*time.Minute)), true),
-			dc.RawOf(stamp("mock-11", value(f).Add(-gap), r.began.Add(-5*time.Minute)), true),
+			dc.RawOf(stamp("mock-3", value(r).Add(-gap), r.began.Add(-6*time.Minute)), true).ServedAsRecorded(),
+			dc.RawOf(stamp("mock-11", value(f).Add(-gap), r.began.Add(-5*time.Minute)), true).ServedAsRecorded(),
 		}
 		w := (&Window{Rec: r.window(began), F: f.window(began)}).ComparesOffsets()
 		classify := ClassifyGiven
@@ -664,7 +960,9 @@ func TestAClientTestLearnsAnExpiryALoginsCookieHoldsAWordOfAsTheClockPlusItsOffs
 		f := run{began: time.Date(2026, 10, 27, 17, 1, 19, 300_000_000, time.UTC)}
 		other := login("mock-1", rec.began.Add(900*time.Millisecond))
 		other.Spec.HTTPResp.Header["Set-Cookie"] = "refresh_token_staging=abc; Path=/; Expires=Tue, 01 Dec 2026 08:07:06 GMT; HttpOnly"
-		raw := []Raw{dc.RawOf(other, true), dc.RawOf(login("mock-9", f.began.Add(900*time.Millisecond)), true)}
+		// Each served as recorded, as its adapter says (Raw.ServedAsRecorded):
+		// a serve no adapter stated refuses the value's new words.
+		raw := []Raw{dc.RawOf(other, true).ServedAsRecorded(), dc.RawOf(login("mock-9", f.began.Add(900*time.Millisecond)), true).ServedAsRecorded()}
 		w := (&Window{Rec: span(rec, true), F: span(f, true)}).ComparesOffsets()
 		classify := ClassifyGiven
 		if following {
@@ -1557,6 +1855,186 @@ func TestAClientTestKeepsAWholeCopyOfAnAnswersSecondFieldHoldingTheStampAsThatAn
 					}
 				})
 			}
+		}
+	}
+}
+
+// A slow full round must not turn a read of the clock into a copy (founder,
+// 2026-10-30: two calls that read one clock in one second are a
+// coincidence, not dataflow). api-server's app create, as the T2 recording
+// shows it: the vault PUT that stamps the access token used reads the clock
+// right before its call (lastUsedAt, epoch seconds); the handler read its
+// clock at its start for the app's createdAt, and the audit insert sends that
+// several calls later, beside the PUT's value in the same second. In the
+// recording every call is a millisecond apart, so the audit's own window
+// (from the previous call) holds createdAt. Record's full round ran slow:
+// the calls between the handler's start and the audit took most of a
+// second, so the audit's window opens in the next second, and only the
+// window since the test began holds createdAt, as it does the audit's
+// auditedAt, which keploy reads there. Learned as a copy of the PUT's value,
+// the audit bound the PUT's place (a variable and a clock read at one
+// place), and a later test whose own copy fell in that second bound the
+// run's variable there, so the PUT, served aside to a later test, was a
+// miss. The same holds where the audit is a later test's call, and where a
+// later test's HTTP call carries it (the run's variable re-read in the same
+// windows). Each is learned as a read of the clock since its test began, so a replay that
+// reads the two a second apart passes, and the PUT's place keeps its clock
+// read alone.
+func TestASlowFullRoundLearnsASameSecondCopyAsAReadSinceItsTestBegan(t *testing.T) {
+	const (
+		lastUsed = "body.data.lastUsedAt"
+		created  = "body.docs.msgs.0.app.createdAt.$numberLong"
+	)
+	secs := func(t time.Time) string { return strconv.FormatInt(t.Unix(), 10) }
+	num := func(p string, at time.Time) Leaf { return Leaf{Path: p, Noise: p, Type: Number, Value: secs(at)} }
+	// put: the PUT's read and call; read: the handler's read of createdAt;
+	// prev and call: the audit's previous call and its own.
+	type run struct {
+		began, put, read, prev, call time.Time
+	}
+	recB := time.Date(2026, 10, 30, 11, 19, 15, 340_000_000, time.UTC)
+	rec := run{recB, recB.Add(14 * time.Millisecond), recB.Add(15 * time.Millisecond), recB.Add(21 * time.Millisecond), recB.Add(22 * time.Millisecond)}
+	fB := recB.Add(FullRoundLead).Truncate(time.Second).Add(185 * time.Millisecond)
+	slow := run{fB, fB.Add(100 * time.Millisecond), fB.Add(150 * time.Millisecond), fB.Add(900 * time.Millisecond), fB.Add(950 * time.Millisecond)}
+	if secs(slow.put) != secs(slow.read) || secs(slow.read) == secs(slow.prev) || secs(rec.read) != secs(rec.prev) {
+		t.Fatal("the row needs the slow round to read both in one second and open the audit's window in the next, and the recording to hold the read in that window")
+	}
+	// A full round as fast as the recording: the call's own window holds the
+	// read in both runs, and the HTTP call's read is checked in that window.
+	fast := run{fB, fB.Add(14 * time.Millisecond), fB.Add(15 * time.Millisecond), fB.Add(21 * time.Millisecond), fB.Add(22 * time.Millisecond)}
+	for _, c := range []struct {
+		name    string
+		ownTest bool
+		http    bool // an HTTP call: the source not followed (ClassifyIn), the run's variable re-read alone
+		f       run
+		since   string
+	}{
+		{"the audit in the PUT's test", true, false, slow, models.SinceTestBegin},
+		{"the audit in a later test", false, false, slow, models.SinceTestBegin},
+		{"an HTTP call in a later test", false, true, slow, models.SinceTestBegin},
+		{"an HTTP call in a later test, a fast full round", false, true, fast, ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if !c.ownTest {
+				// An earlier test's call is a place of the run, read
+				// under the run's rule, only under the proven switch.
+				t.Setenv(provenswitch.Env, "1")
+			}
+			put := RawOf(&models.Mock{Name: "mock-198", Spec: models.MockSpec{ReqTimestampMock: rec.put, ResTimestampMock: rec.put.Add(time.Millisecond)}}, true)
+			earlier := []Earlier{{Mock: "mock-198", At: rec.put, Own: c.ownTest, Run: !c.ownTest, Payload: put.ServedAs(1), Seen: []Seen{
+				{Side: Request, Leaf: num(lastUsed, rec.put), Live: secs(c.f.put), Place: lastUsed},
+			}}}
+			r, f := rec, c.f
+			if !c.ownTest {
+				// The later test began after the PUT, in its second.
+				r.began, f.began = rec.put.Add(2*time.Millisecond), c.f.put.Add(10*time.Millisecond)
+			}
+			w := &Window{Rec: Span{From: r.prev, To: r.call, Began: r.began}, F: Span{From: f.prev, To: f.call, Began: f.began}}
+			shape := func(at time.Time) Shape { return Shape{Leaves: map[string]Leaf{created: num(created, at)}} }
+			classify := func(dc *DriftCache, drift []string, live, rec Shape, at time.Time, earlier []Earlier, raw []Raw, resp []Leaf, w *Window) []Learned {
+				return ClassifyFollowing(dc, drift, live, rec, at, earlier, raw, resp, w, nil)
+			}
+			if c.http {
+				classify = ClassifyIn
+			}
+			ln := classify(clientTestCache(), []string{created}, shape(f.read), shape(r.read), r.call, earlier, nil, nil, w)[0]
+			if o, ok := ln.Clock(); ln.Kind != KindClockRead || !ok || !o.Plain() || o.Since != c.since || ln.From.Mock != "" {
+				t.Fatalf("createdAt, read the PUT's second, is %s Read=%+v from %+v (%s); want a read of the clock checked since %q, no copy of mock-198", ln.Kind, ln.Read, ln.From, ln.Why, c.since)
+			}
+		})
+	}
+}
+
+// A client test's own audit read whose moment record's full round saw is
+// named by an earlier answer the test was given, rounded or cut to the
+// second (the test's client named the app by its own clock, "[E2E]
+// generate-client-<UnixNano>", and a find answered that name back; it
+// registered a user the same way, and the user service echoed it), is
+// learned as a read of the clock since its test began, never as a variable
+// of the app's createdAt. The echo reads the answer's moment as what the
+// application was given and takes the recorded moment from the first place
+// that holds it, the app's insert's createdAt; but in record's full round
+// the app read createdAt a second earlier (a full round that crossed a
+// second inside the app's insert), so as a variable the audit never holds
+// what the test sent there and the test was set aside (api-server
+// TestGenerateTestSuitesOnClient: "auditedAt does not hold the value the
+// test sent at app.createdAt"). The audit's own window holds the read in
+// both runs, and the copy rule learns that read under both explanations.
+func TestAClientTestLearnsItsAuditReadAnEarlierAnswersClockNameRoundsToAsARead(t *testing.T) {
+	const p = "body.docs.msgs.0.auditedAt.$numberLong"
+	ms := time.Millisecond
+	secs := func(at time.Time) string { return strconv.FormatInt(at.Unix(), 10) }
+	nanos := func(at time.Time) string { return strconv.FormatInt(at.UnixNano(), 10) }
+	r0 := time.Date(2026, 10, 30, 19, 3, 52, 304_000_000, time.UTC)
+	for _, tc := range []struct {
+		name         string
+		f0           time.Time     // the app's clock as record's full round's test began
+		client       time.Duration // the test client's clock ahead of the app's
+		user, find   bool          // the user service's echo, the find's answer
+		createdApart bool          // createdAt read a second before the audit in F
+	}{
+		{"the name rounds up to the audit's second", time.Date(2026, 10, 30, 19, 5, 7, 760_000_000, time.UTC), 0, false, true, true},
+		{"the user's name rounds up to the audit's second", time.Date(2026, 10, 30, 19, 5, 7, 760_000_000, time.UTC), 0, true, false, true},
+		{"the app's insert crosses a second inside itself", time.Date(2026, 10, 30, 19, 5, 7, 980_000_000, time.UTC), 0, true, true, true},
+		{"the client's clock runs ahead of the app's", time.Date(2026, 10, 30, 19, 5, 7, 760_000_000, time.UTC), 300 * ms, true, true, true},
+		{"all in one second", time.Date(2026, 10, 30, 19, 5, 7, 300_000_000, time.UTC), 0, true, true, false},
+	} {
+		f0 := tc.f0
+		client := func(d time.Duration) time.Time { return f0.Add(tc.client + d) }
+		name := func(at time.Time) string { return "[E2E] generate-client-" + nanos(at) }
+		user := func(at time.Time) string { return "e2e-user-" + nanos(at) }
+		// The client names the app at +0.5 ms; the app reads createdAt at
+		// +5 ms and its audit's clock at +8 ms (+25 ms in F) and inserts
+		// both; the client registers its user at +10 ms; a find answers the
+		// app back at +242 ms; the app reads its clock for the next audit
+		// and sends it at +254 ms.
+		recName, fName := name(r0.Add(500*time.Microsecond)), name(client(500*time.Microsecond))
+		earlier := []Earlier{{Mock: "mock-968", At: r0.Add(9 * ms), Own: true, Seen: []Seen{
+			{Side: Request, Leaf: Leaf{Path: "body.docs.msgs.0.app.name", Type: String, Value: recName}, Live: fName},
+			{Side: Request, Leaf: Leaf{Path: "body.docs.msgs.0.app.createdAt.$numberLong", Type: Number, Value: secs(r0.Add(5 * ms))}, Live: secs(f0.Add(5 * ms))},
+			{Side: Request, Leaf: Leaf{Path: "body.docs.msgs.0.auditedAt.$numberLong", Type: Number, Value: secs(r0.Add(8 * ms))}, Live: secs(f0.Add(25 * ms))},
+			{Side: Request, Leaf: Leaf{Path: "body.docs.msgs.0.auditedAtNanos.$numberLong", Type: Number, Value: nanos(r0.Add(8 * ms))}, Live: nanos(f0.Add(25 * ms))},
+		}}}
+		if tc.user {
+			recUser, fUser := user(r0.Add(10*ms)), user(client(10*ms))
+			earlier = append(earlier, Earlier{Mock: "mock-970", At: r0.Add(70 * ms), Own: true, Seen: []Seen{
+				{Side: Request, Leaf: Leaf{Path: "body.username", Type: String, Value: recUser}, Live: fUser},
+				{Side: Response, Leaf: Leaf{Path: "body.username", Type: String, Value: recUser}, Live: fUser},
+			}})
+		}
+		if tc.find {
+			earlier = append(earlier, Earlier{Mock: "mock-971", At: r0.Add(242 * ms), Own: true, Seen: []Seen{
+				{Side: Response, Leaf: Leaf{Path: "body.cursor.firstBatch.0.app.name", Type: String, Value: recName}, Live: fName},
+			}})
+		}
+		w := &Window{
+			Rec: Span{From: r0.Add(249 * ms), To: r0.Add(254 * ms), Began: r0},
+			F:   Span{From: f0.Add(249 * ms), To: f0.Add(254 * ms), Began: f0},
+		}
+		rec, live := secs(r0.Add(254*ms)), secs(f0.Add(254*ms))
+		num := func(v string) Shape {
+			return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: Number, Value: v}}}
+		}
+		dc := clientTestCache()
+		// The shape: the echo takes the audit's moment for what the
+		// application was given, from the app's createdAt, which in F held
+		// another second than the audit where the insert crossed one.
+		v := dc.ofIn(rec, live, w, r0.Add(254*ms))
+		from, ok := dc.echoServed(dc.echoedIn(v, r0.Add(254*ms), earlier, nil, nil), rec, earlier)
+		// The call's earlier places read once (earlierHeld) are what the
+		// echo reads of them each time it reads them anew.
+		var eh earlierHeld
+		for i := 0; i < 2; i++ {
+			if got, want := dc.echoedIn(v, r0.Add(254*ms), earlier, nil, &eh), dc.echoedIn(v, r0.Add(254*ms), earlier, nil, nil); !reflect.DeepEqual(got, want) {
+				t.Fatalf("%s: read %d of the call's earlier moments: the echo took %+v; read anew, %+v", tc.name, i+1, got, want)
+			}
+		}
+		if !ok || from.Mock != "mock-968" || from.Path != "body.docs.msgs.0.app.createdAt.$numberLong" || (from.Live != live) != tc.createdApart {
+			t.Fatalf("%s: the echo took %+v (found %v); want mock-968's app.createdAt, holding another second than %s in F: %v", tc.name, from, ok, live, tc.createdApart)
+		}
+		ln := ClassifyFollowing(dc, []string{p}, num(live), num(rec), r0.Add(254*ms), earlier, nil, nil, w, nil)[0]
+		if ln.Kind != KindClockRead || ln.Read == nil || ln.Read.Since != models.SinceTestBegin || ln.From.Mock != "" {
+			t.Errorf("%s: %s from %+v (%s); want a read of the clock since its test began, no variable", tc.name, ln.Kind, ln.From, ln.Why)
 		}
 	}
 }
