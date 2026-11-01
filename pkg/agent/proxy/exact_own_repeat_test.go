@@ -201,6 +201,41 @@ func TestTheWorkerScopeNeverAnswersARequestOneMoreThanTheTestRecorded(t *testing
 	}
 }
 
+// A request one more than the test recorded that no background recording
+// is about to answer asks whether it is one of the test's own when it
+// misses (integrations.OwnRepeat), and is matched again with the background
+// hidden: its miss names no background recording as its closest, as when
+// the background holds a copy of it. The worker scope's GET /x/2 is never
+// compared with the test's second GET /x.
+func TestARequestOneMoreThanTheTestRecordedIsDiagnosedWithTheBackgroundHidden(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	near := workerProbe("mock-worker-x2", time.Second, "/x/2", "worker")
+	own := workerProbe("mock-own-x", 4*time.Second, "/x", "own")
+	mm := stagedManager(t, nil, []*models.Mock{near, own})
+	mm.SeedRecordedWindows([]models.TestWindow{{TestCase: "test-a", Start: exactT0.Add(3 * time.Second), End: exactT0.Add(5 * time.Second)}})
+	mm.ServeExactWorker([]string{near.Name})
+	mm.ServeExactPool(models.PoolKeyNone, nil)
+	mm.ServeExactTest("test-a", []*models.Mock{roundMock(mm, own.Name)})
+
+	if got, miss := httpMissCall(t, mm, "/x"); got != "own" {
+		t.Fatalf("test-a's GET /x was answered %q (miss %+v); want its own", got, miss)
+	}
+	got, miss := httpMissCall(t, mm, "/x")
+	if got != "" {
+		t.Fatalf("test-a's second GET /x, one more than it recorded, was answered %q", got)
+	}
+	if miss.MissKind != models.MissExtraCall || miss.Recorded != 1 {
+		t.Fatalf("the second GET /x missed as %q, recorded %d; want %q, recorded 1", miss.MissKind, miss.Recorded, models.MissExtraCall)
+	}
+	if miss.ClosestMock == near.Name || miss.CandidateCount != 0 {
+		t.Fatalf("the second GET /x was compared with the worker scope (closest %q, %d candidates); want no background recording compared", miss.ClosestMock, miss.CandidateCount)
+	}
+	mm.ServeExactPool(models.PoolKeyNone, nil)
+	if got, miss := httpMissCall(t, mm, "/x/2"); got != "worker" {
+		t.Fatalf("the GET /x/2 between tests was answered %q (miss %+v); want the worker scope's, unspent", got, miss)
+	}
+}
+
 // A call decided on a snapshot's read of the round (RoundSnapshot.CallRound:
 // a call that waited for the store to open its test, and caught up) is held
 // to the worker scope's rule as a call MarkCallRound marked is: in a test's
