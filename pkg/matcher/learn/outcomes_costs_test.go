@@ -377,6 +377,36 @@ func TestOutcomeCostAGivenIsReadByItsText(t *testing.T) {
 	iClock(t, "the app's clock read beside a given nonce", oWord(t, Decide(beside), created, fcreated))
 }
 
+// Pinned (#5016, test_given_forms_test.go:219, :279): a given's text glued
+// inside a word that changed with it (its recorded text in the recorded
+// word, its new text in round F's) is a part of the word: refused, naming
+// the given, never learned fresh. The chance rule does not apply: the test
+// gave it, so whether the word changed with it is always read, at any
+// length. A word that holds it on one side only learns as with no given.
+func TestOutcomeCostAGivenGluedInsideAWordIsAPart(t *testing.T) {
+	const rec, full = "1761131656960000000", "1761225360000000001"
+	for _, c := range []struct{ what, gr, gf, r, f string }{
+		{"app<nonce>", rec, full, "app" + rec, "app" + full},
+		{"<nonce>x9", rec, full, rec + "x9", full + "x9"},
+		{"slot14 -> slot15, given 14", "14", "15", "slot14", "slot15"},
+		{"seedAb12, given Ab12", "Ab12", "Cd34", "seedAb12", "seedCd34"},
+		{"app<10 digits>, 9 in round F", rec[:10], full[:9], "app" + rec[:10], "app" + full[:9]},
+	} {
+		gave := []Earlier{TestGiven("test o::TestApps", "given:name", c.gr, c.gf)}
+		in := costCall(NewDriftCache(), "body.name", c.r, c.f, costAt, gave, nil, nil, nil)
+		d := oWord(t, Decide(in), c.r, c.f)
+		oRefused(t, c.what+", made from the given", d, RefusalUnknown, "test o::TestApps")
+		if d.Refusal != nil && !strings.Contains(d.Refusal.Why, "the given stands inside the word in both runs") {
+			t.Errorf("%s, made from the given: %q; want it to say the given stands inside the word", c.what, d.Refusal.Why)
+		}
+	}
+	gave := []Earlier{TestGiven("test o::TestApps", "given:name", "14", "15")}
+	in := costCall(NewDriftCache(), "body.name", "slot14", "slot99", costAt, gave, nil, nil, nil)
+	if d := oWord(t, Decide(in), "slot14", "slot99"); d.Outcome != OutcomeFresh {
+		t.Errorf("slot14 -> slot99, given 14 -> 15: %s; want fresh, as with no given", oDescribe([]Decision{d}))
+	}
+}
+
 // The places a call reads keep each earlier recording, never its text: a
 // text is read only when a question needs it, so a call that asks about
 // many large recordings holds one at a time. Kept as strings, 64
