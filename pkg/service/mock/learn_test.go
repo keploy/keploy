@@ -501,7 +501,7 @@ func (s *mergingStore) PersistLearned(_ context.Context, _ string, states map[st
 // record says it apart, under the test whose recording it is, with the
 // windows that taught it and the evidence: never as the set's start-up and
 // pool's, nor on a consumer's line. A recording its own test's call
-// consumed keeps what that pairing learned alone (DESIGN T4): what another
+// consumed keeps what that pairing learned alone: what another
 // window taught it is voided, and the record says which evidence won.
 func TestKeployMockWritesWhatACallInAnotherWindowTaughtOntoTheRecording(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")

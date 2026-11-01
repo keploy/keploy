@@ -262,7 +262,7 @@ func TestLearnElsewhereTeachesARecordingOncePerRound(t *testing.T) {
 	}
 }
 
-// One pairing per recording per round, and its own one wins (DESIGN T4),
+// One pairing per recording per round, and its own one wins,
 // the other way round from the record's (the record voids a teaching its
 // own pairing followed): a recording its own test's call consumed first is
 // taught nothing by a later call of its shape in another window, and the
