@@ -52,8 +52,8 @@ func TestLearnElsewhereCandidatesAreOtherTestsUnconsumedRecordings(t *testing.T)
 
 // The learning-only candidates exist only while record's full round's learn
 // step runs under the proven switch: without Learn, once the learn step
-// ended or while it is held, and with the switch off, there are none, and
-// nothing is kept.
+// ended or while it is held, in a staging's view, and with the switch off,
+// there are none, and nothing is kept.
 func TestLearnElsewhereIsOffOutsideTheLearnStep(t *testing.T) {
 	mm, ms := s12Set(t)
 	mm.ServeExactBackground(models.RecordedWithS12Routing, []string{"pool"}, []string{"w-boot", "w-later"})
@@ -77,6 +77,15 @@ func TestLearnElsewhereIsOffOutsideTheLearnStep(t *testing.T) {
 	mm.SetLearnHeld(true)
 	off("the learn step held")
 	mm.SetLearnHeld(false)
+	// A view the next set's staging installs before it names the set's
+	// background: the trees may still hold the last set's recordings, whose
+	// names may be this set's.
+	mm.StageExactBackground(models.RecordedWithS12Routing)
+	mm.ServeExactTest("T1", []*models.Mock{ms["own"]})
+	off("a staging view")
+	mm.ServeExactBackground(models.RecordedWithS12Routing, []string{"pool"}, []string{"w-boot", "w-later"})
+	mm.ServeExactTest("T1", []*models.Mock{ms["own"]})
+	equalNames(t, "precondition: the candidates once the set's background is named", mm.LearnElsewhereCandidates(models.HTTP), "other")
 	t.Setenv(provenswitch.Env, "")
 	mm.SetPairing(true)
 	off("the switch off")
