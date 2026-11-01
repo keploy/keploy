@@ -812,7 +812,7 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 		} else {
 			off, cutWhy, inWindow = clockInWindow(path, c.ri, c.li, dc.in.Window, zone)
 			if inWindow {
-				if g, uncompared := dc.offsetGuard(path, off, max(c.rm.res, c.lm.res)); uncompared && copies(false) == nil {
+				if g, uncompared := dc.offsetGuard(path, off, max(c.rm.res, c.lm.res), dc.in.Window); uncompared && copies(false) == nil {
 					return dc.refuse(path, at, n, r, l, RefusalCannotCheck, g, nil, dc.fieldNoise(path))
 				} else if g != "" {
 					off, cutWhy, inWindow = models.ClockOffset{}, g, false
@@ -908,13 +908,18 @@ func madeSinceBegin(w *Window, c changedInstant, zone *time.Location) string {
 	return ""
 }
 
-// offsetGuard is main's refusal of a read plus an offset its call's window
-// holds (typed.go's clockOffset), whichever reading found the offset: one
-// keploy cannot narrow to one value, one a window meets a wall time shown
-// twice in (the application may resolve it to its first showing, an hour
-// early), and one the adapter's replay does not compare (uncompared:
-// keploy's limit, refused as one it cannot check). "" where none holds.
-func (dc *decider) offsetGuard(path string, off models.ClockOffset, enc time.Duration) (why string, uncompared bool) {
+// offsetGuard is main's refusal of a read plus an offset a window w holds
+// (typed.go's clockOffset), whichever reading found the offset: one keploy
+// cannot narrow to one value, one a window meets a wall time shown twice in
+// (the application may resolve it to its first showing, an hour early), and
+// one the adapter's replay does not compare (uncompared: keploy's limit,
+// refused as one it cannot check). An offset its reading wrote no line for
+// (main's reading, which leaves its unit to its caller) is refused too
+// where it reads in a second or finer, as main refuses it: an application
+// that cuts its value to that unit makes a time to live changed by one look
+// the same, and a replay holds nothing of it. A reading that writes its
+// offset's line has judged its unit itself. "" where none holds.
+func (dc *decider) offsetGuard(path string, off models.ClockOffset, enc time.Duration, w *Window) (why string, uncompared bool) {
 	if off.Min == 0 && off.Max == 0 {
 		return "", false
 	}
@@ -922,8 +927,9 @@ func (dc *decider) offsetGuard(path string, off models.ClockOffset, enc time.Dur
 	if drifts == nil {
 		drifts = &DriftCache{}
 	}
-	w := dc.in.Window
 	switch {
+	case off.Why == "" && off.Unit() <= time.Second:
+		return clockOffsetFineWhy(path, off), false
 	case !w.offsets:
 		return clockOffsetUncomparedWhy(path, off), true
 	case !off.Narrow():
