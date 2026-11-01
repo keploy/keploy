@@ -910,6 +910,20 @@ func TestAFineOffsetOfAReadSinceItsTestBeganIsLeftToItsBegin(t *testing.T) {
 			t.Errorf("keploy test: %q; want main's refusal of an offset that reads in a second or finer", why)
 		}
 	}
+	// One run's begin after its value: no read since the test began in
+	// that run, so the window's reading keeps its refusal.
+	for _, lateIn := range []string{"the recording", "round F"} {
+		rs, fs := Span{From: rec.from, To: rec.to, Began: r0}, Span{From: f.from, To: f.to, Began: f0}
+		if lateIn == "round F" {
+			fs.Began = lv.Add(sec)
+		} else {
+			rs.Began = rv.Add(sec)
+		}
+		o, why, ok := clockInWindow("body.auditedAt", v5Instant(rv, sec), v5Instant(lv, sec), (&Window{Rec: rs, F: fs}).ComparesOffsets(), nil)
+		if ok || !strings.Contains(why, "so keploy refuses an offset that reads in a second or finer") {
+			t.Errorf("a begin after the value in %s: %+v %q %v; want main's refusal, no read since the test began", lateIn, o, why, ok)
+		}
+	}
 }
 
 // The same read where its two runs show a whole second (clock - 1s at the
