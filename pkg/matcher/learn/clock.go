@@ -287,6 +287,17 @@ func (w *Window) ComparesOffsets() *Window {
 // later call), which the learn step learns only where both runs' spans from
 // their test's begin hold it (Window.sinceBegin), and a replay checks from
 // its own test's begin (models.SinceTestBegin), never from an earlier start.
+//
+// TestFrom is where the running test began on the app's clock, or where the
+// app's clock's run to the call began after it (SetAppClockRun), in a
+// replay's span (LiveSpan) whose From a serve made after the test began
+// set: zero otherwise, and in a Window's spans. Another goroutine of the
+// application (a queue's consumer beside the test's handler) can make a
+// call keploy serves between a read of the clock and the call that carries
+// the read, so a serve made after the test began bounds no read of the
+// call: a replay passes a value that holds in the span from TestFrom too
+// (CheckClockRead), and so never refuses a read made in the test because
+// of when keploy served another call.
 type Span struct {
 	From, To time.Time
 	Zone     *time.Location
@@ -294,8 +305,9 @@ type Span struct {
 	// ClockSpanFrom): the zone the application writes its clock in in this
 	// run, in which a replay checks a learned read whatever zone the learn
 	// step named (CheckClockRead). false where Zone is the agent's own.
-	Own   bool
-	Began time.Time
+	Own      bool
+	Began    time.Time
+	TestFrom time.Time
 }
 
 // sinceBegin is s from the running test's begin (Began) to its call: false

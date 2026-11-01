@@ -800,20 +800,42 @@ func spanOf(o models.ClockOffset, s Span) (Span, string) {
 // no byte of it), and reads the word alone as the read o is, as above
 // (wordIn). A refusal names where the word stands, never what the text
 // holds.
+//
+// Where a serve made after the running test began starts s (s.TestFrom,
+// Tracker.LiveSpan), a value s refuses passes where it holds in s from the
+// test's begin: another goroutine's call can be served between the read
+// and this call (a queue's consumer beside the test's handler, 2026-10-31),
+// so that serve bounds no read of this call. s is checked first, so a read
+// plus an offset checkable in s alone is checked there as before; a value
+// outside both is refused with s's reason.
 func CheckClockRead(path string, o models.ClockOffset, live Leaf, s Span, known bool) (bool, string) {
 	if o.Empty() {
 		return false, path + " was learned at more than one call as " + o.String() + ": no one read of the application's clock explains them all, so keploy refuses the value whatever it is. Record the test again; if the field is a time the application reads from its own clock with no rule, declare it noise in keploy.yml, and keploy stops comparing it"
 	}
 	learned := learnedAs(path, o)
-	if o.Word.IsZero() {
-		return checkClockRead(o, live, s, known, learned)
+	if !o.Word.IsZero() {
+		word, why := wordIn(o.Word, live)
+		if why != "" {
+			return false, learned + why
+		}
+		o.Word, live = models.ClockWord{}, word
 	}
-	word, why := wordIn(o.Word, live)
-	if why != "" {
-		return false, learned + why
+	ok, why := checkClockRead(o, live, s, known, learned)
+	if ok || s.TestFrom.IsZero() || !s.TestFrom.Before(s.From) {
+		return ok, why
 	}
-	o.Word = models.ClockWord{}
-	return checkClockRead(o, word, s, known, learned)
+	// A serve made after the test began started s (Span.TestFrom): another
+	// goroutine's call, served between the read and this call, bounds no
+	// read of this call, so a value that holds in the span from the test's
+	// begin passes. The span s, narrower, is checked first: a read plus an
+	// offset checkable in it may not be in the wider one (Checkable), and
+	// a value that holds in it holds in the test's span.
+	wide := s
+	wide.From, wide.TestFrom = s.TestFrom, time.Time{}
+	if ok, _ := checkClockRead(o, live, wide, known, learned); ok {
+		return true, ""
+	}
+	return false, why
 }
 
 // learnedAs is how a refusal of a replay's value at path, a place the learn
