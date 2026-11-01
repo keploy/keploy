@@ -64,8 +64,8 @@ func notOwnedExchange(reqBuffs [][]byte, mockDb integrations.MockMemDb, call int
 // namedAgainExchange is, under keploy mock replay, for a request
 // notOwnedExchange named none for, the recorded exchange this request is
 // which an earlier refused request of the replay was already named as
-// (integrations.NamedAgain): a recording answers one call at most. ""
-// under any other replay, and when there is none.
+// (integrations.NamedAgain). "" under any other replay, and when there is
+// none.
 func namedAgainExchange(reqBuffs [][]byte, mockDb integrations.MockMemDb, call integrations.CallRound) string {
 	return integrations.NamedAgain(mockDb, models.GENERIC, call, nil, exchangeOf(reqBuffs))
 }

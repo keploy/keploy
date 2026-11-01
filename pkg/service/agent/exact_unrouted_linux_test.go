@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	nethttp "net/http"
@@ -170,45 +171,98 @@ func TestKeployMockReplaysMissIsTheMappingEditInEverySession(t *testing.T) {
 	check("session 2")
 }
 
-// keploy mock replay end to end: the application makes TestB's call twice
-// between tests, once before o::TestA and once after it. The first miss is
-// the mapping edit for mock-2. The second finds no recording left to name (a
-// recording is named for one miss at most, as it answers one call at most):
-// it names mock-2 again, with worker:'s limit (moving mock-2 there answers
-// one of the two calls, never both), never the "no recorded mocks ...
-// Re-record" of a set that holds no recording of the call, nor record's
-// judging. A third, in o::TestA's window, says the same of its window.
-func TestKeployMockReplaysSecondCallBetweenTestsNamesWorkersLimit(t *testing.T) {
-	a, _ := wireAgent(t, models.MODE_TEST)
-	p := &routingProxy{newServingProxy()}
-	a.Proxy = p
-	ctx := context.Background()
-	routedMockSession(t, a, []*models.Mock{pingMock("mock-1", "/a", "a", t0), pingMock("mock-2", "/b", "b", t0.Add(time.Second))})
-	code, rep := routedMiss(t, p.servingProxy, "/b")
-	requireMappingEdit(t, code, rep, "between tests", "mock-2", "the first call")
-	_, serr := a.ProvenBegin(ctx, begin("TestA"))
-	require.Nil(t, serr)
-	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", CanSkip: true, Outcome: models.ScopeOutcomePassed})
-	require.Nil(t, serr)
-	again := func(made, at string) {
-		t.Helper()
-		code, rep := routedMiss(t, p.servingProxy, "/b")
-		require.NotEqual(t, nethttp.StatusOK, code, at)
-		require.NotNil(t, rep, at)
-		require.False(t, rep.NotOwned, "%s: a recording is named not-owned for one miss at most: %+v", at, rep)
-		require.True(t, strings.HasPrefix(rep.NextSteps, "This call, made "+made+", is mock-2, which mappings.yaml lists for o::TestB, again: an earlier call this replay made outside mock-2's window was already named as it."), "%s: %q", at, rep.NextSteps)
-		require.Contains(t, rep.NextSteps, "so moving mock-2 to worker: answers one of these calls, never both.", at)
+// The words of a call that is a recording an earlier call was already named
+// as (requireNamedAgain's), of worker:'s rule.
+const (
+	workerAnswersIt = "so moving mock-2 to worker: in mappings.yaml answers this call too."
+	workerLimit     = "This call and an earlier one were both made in test windows, so moving mock-2 to worker: answers one of these calls, never both."
+)
+
+// requireNamedAgain is a refused call's miss that names mock-2 again, made
+// where made says, with want's words of worker:'s rule: a record only with the
+// limit, never record's judging nor the "no recorded mocks ... Re-record" of a
+// set that holds no recording of the call.
+func requireNamedAgain(t *testing.T, code int, rep *models.MockMismatchReport, made, want, at string) {
+	t.Helper()
+	require.NotEqual(t, nethttp.StatusOK, code, at)
+	require.NotNil(t, rep, at)
+	require.False(t, rep.NotOwned, "%s: a recording is named not-owned for one miss at most: %+v", at, rep)
+	require.True(t, strings.HasPrefix(rep.NextSteps, "This call, made "+made+", is mock-2, which mappings.yaml lists for o::TestB, again: an earlier call this replay made outside mock-2's window was already named as it."), "%s: %q", at, rep.NextSteps)
+	require.Contains(t, rep.NextSteps, "Inside test windows a worker: recording answers at most once; outside every window it answers again by the start-up pool's rule", at)
+	require.Contains(t, rep.NextSteps, want, at)
+	never := []string{"No recorded mocks", "Re-record", "record again", "judging", "'keploy record'"}
+	if want == workerLimit {
 		require.Contains(t, rep.NextSteps, "'keploy mock record'", at)
-		for _, never := range []string{"No recorded mocks", "Re-record", "record again", "judging", "'keploy record'"} {
-			require.NotContains(t, rep.NextSteps, never, at)
-		}
+	} else {
+		never = append(never, "keploy mock record", "never both")
 	}
-	again("between tests", "the second call, after o::TestA")
-	_, serr = a.ProvenBegin(ctx, begin("TestA"))
-	require.Nil(t, serr)
-	again("in o::TestA's window", "the third call, in o::TestA's window")
-	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", CanSkip: true, Outcome: models.ScopeOutcomePassed})
-	require.Nil(t, serr)
+	for _, n := range never {
+		require.NotContains(t, rep.NextSteps, n, at)
+	}
+}
+
+// keploy mock replay end to end: the application makes TestB's call over and
+// over, outside TestB's window. The first miss is the mapping edit for
+// mock-2. Each later one finds no recording left to name, names mock-2 again,
+// and says what the edit does for it: inside test windows a worker: recording
+// answers at most once, and outside every window it answers again by the
+// start-up pool's rule, so the edit answers the call unless it and an earlier
+// call were both made in test windows. Only that shape tells a record. Each of
+// the four shapes of two calls, the same window twice, and three calls.
+func TestKeployMockReplaysCallMadeAgainSaysWhatWorkerAnswers(t *testing.T) {
+	const between = ""
+	for _, tc := range []struct {
+		name  string
+		calls []string // where each call is made: a test, or between
+		want  []string // each later call's words
+	}{
+		{"between tests, then between tests", []string{between, between}, []string{workerAnswersIt}},
+		{"in a window, then between tests", []string{"TestA", between}, []string{workerAnswersIt}},
+		{"between tests, then in a window", []string{between, "TestA"}, []string{workerAnswersIt}},
+		{"in a window, then in another", []string{"TestA", "TestC"}, []string{workerLimit}},
+		{"twice in one window", []string{"TestA", "TestA"}, []string{workerLimit}},
+		{"between tests, then in two windows", []string{between, "TestA", "TestC"}, []string{workerAnswersIt, workerLimit}},
+		{"in two windows, then between tests", []string{"TestA", "TestC", between}, []string{workerLimit, workerAnswersIt}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, _ := wireAgent(t, models.MODE_TEST)
+			p := &routingProxy{newServingProxy()}
+			a.Proxy = p
+			ctx := context.Background()
+			require.NoError(t, a.StoreMocks(ctx, nil, []*models.Mock{pingMock("mock-1", "/a", "a", t0), pingMock("mock-2", "/b", "b", t0.Add(time.Second)), pingMock("mock-3", "/c", "c", t0.Add(2*time.Second))}))
+			require.NoError(t, a.SetScopeTable(ctx, map[string][]string{"o::TestA": {"mock-1"}, "o::TestB": {"mock-2"}, "o::TestC": {"mock-3"}}))
+			require.NoError(t, a.SetScopePool(ctx, map[string][]string{"o": {}}))
+			claimSelf(t, a)
+			open := between
+			enter := func(where string) {
+				t.Helper()
+				if open != between && open != where {
+					_, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: open, CanSkip: true, Outcome: models.ScopeOutcomePassed})
+					require.Nil(t, serr)
+					open = between
+				}
+				if where != between && open == between {
+					_, serr := a.ProvenBegin(ctx, begin(where))
+					require.Nil(t, serr)
+					open = where
+				}
+			}
+			defer enter(between)
+			for i, where := range tc.calls {
+				enter(where)
+				made, at := "between tests", fmt.Sprintf("call %d", i+1)
+				if where != between {
+					made = "in o::" + where + "'s window"
+				}
+				code, rep := routedMiss(t, p.servingProxy, "/b")
+				if i == 0 {
+					requireMappingEdit(t, code, rep, made, "mock-2", at)
+					continue
+				}
+				requireNamedAgain(t, code, rep, made, tc.want[i-1], at)
+			}
+		})
+	}
 }
 
 // keploy mock replay end to end: two identical recordings, mock-1 listed for
@@ -314,14 +368,7 @@ func TestKeployMockReplaysCallAgainNamesTheRecordingKeptOnDisk(t *testing.T) {
 	code, rep := routedMiss(t, p.servingProxy, "/b")
 	requireMappingEdit(t, code, rep, "between tests", "mock-2", "the first call")
 	code, rep = routedMiss(t, p.servingProxy, "/b")
-	require.NotEqual(t, nethttp.StatusOK, code)
-	require.NotNil(t, rep)
-	require.False(t, rep.NotOwned, "a recording is named not-owned for one miss at most: %+v", rep)
-	require.True(t, strings.HasPrefix(rep.NextSteps, "This call, made between tests, is mock-2, which mappings.yaml lists for o::TestB, again:"), "%q", rep.NextSteps)
-	require.Contains(t, rep.NextSteps, "so moving mock-2 to worker: answers one of these calls, never both.")
-	for _, never := range []string{"No recorded mocks", "Re-record", "record again", "judging", "'keploy record'"} {
-		require.NotContains(t, rep.NextSteps, never)
-	}
+	requireNamedAgain(t, code, rep, "between tests", workerAnswersIt, "the second call")
 	require.Contains(t, take(), "mock-2", "the misses did not read mock-2 from the disk by the call's keys")
 }
 

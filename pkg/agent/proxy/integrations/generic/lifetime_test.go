@@ -133,6 +133,8 @@ type exactStore struct {
 	// named are the exchanges an earlier miss was named as: the lookup
 	// names none of them again (FindNamedAgain does).
 	named map[string]bool
+	// windowed is what CalledInWindows says.
+	windowed bool
 }
 
 func (s exactStore) MarkCallRound() integrations.CallRound {
@@ -171,8 +173,9 @@ func (s exactStore) FindNamedAgain(_ models.Kind, call integrations.CallRound, _
 	}
 	return ""
 }
-func (s exactStore) GetSessionMocks() ([]*models.Mock, error)         { return nil, nil }
-func (s exactStore) GetPerTestMocksInWindow() ([]*models.Mock, error) { return nil, nil }
+func (s exactStore) CalledInWindows(string, integrations.CallRound) bool { return s.windowed }
+func (s exactStore) GetSessionMocks() ([]*models.Mock, error)            { return nil, nil }
+func (s exactStore) GetPerTestMocksInWindow() ([]*models.Mock, error)    { return nil, nil }
 
 // Under exact serving, a request no mock answers that is a later exchange of
 // a connection the open test does not own is named, with what likely happened
@@ -281,11 +284,11 @@ func TestUnderKeployMockAMissOnAnExchangeTheTestDoesNotOwnIsTheMappingEdit(t *te
 }
 
 // Under keploy mock replay, an exchange an earlier miss was already named as
-// (the lookup names none for it) is named again, with worker:'s limit: a
-// recording answers one call at most, so the mapping edit the earlier miss
-// was told answers one of the two. Under keploy test, for either side that
-// lacks proven routing, the miss keeps its words.
-func TestUnderKeployMockAnExchangeNamedBeforeIsNamedWithWorkersLimit(t *testing.T) {
+// (the lookup names none for it) is named again with worker:'s rule: moving
+// it to worker: answers this exchange too, unless this one and an earlier one
+// were both made in test windows, which the store tells. Under keploy test,
+// for either side that lacks proven routing, the miss keeps its words.
+func TestUnderKeployMockAnExchangeNamedBeforeSaysWhatWorkerAnswers(t *testing.T) {
 	m := exchange("mock-auth-x", "AUTH step2")
 	m.Spec.Metadata = map[string]string{"type": "config", models.MetadataLifetimeKey: models.MetadataLifetimePerTest}
 	store := exactStore{exact: true, staged: []*models.Mock{m}, unrouted: models.UnroutedUnstaged, listed: map[string][]string{"mock-auth-x": {"o::TestA"}}, named: map[string]bool{"mock-auth-x": true}}
@@ -295,12 +298,20 @@ func TestUnderKeployMockAnExchangeNamedBeforeIsNamedWithWorkersLimit(t *testing.
 	}
 	for _, want := range []string{
 		"This call, made between tests, is mock-auth-x, which mappings.yaml lists for o::TestA, again:",
-		"so moving mock-auth-x to worker: answers one of these calls, never both.",
+		"so moving mock-auth-x to worker: in mappings.yaml answers this call too.",
 	} {
 		if !strings.Contains(r.NextSteps, want) {
 			t.Errorf("keploy mock's miss does not say %q: %q", want, r.NextSteps)
 		}
 	}
+	if strings.Contains(r.NextSteps, "keploy mock record") {
+		t.Errorf("keploy mock's miss names a record the move does not need: %q", r.NextSteps)
+	}
+	store.windowed = true
+	if r := missReport(t, store, "AUTH step2"); !strings.Contains(r.NextSteps, "so moving mock-auth-x to worker: answers one of these calls, never both.") || !strings.Contains(r.NextSteps, "'keploy mock record'") {
+		t.Errorf("two calls in test windows: keploy mock's miss does not name the limit: %q", r.NextSteps)
+	}
+	store.windowed = false
 	for _, why := range []string{models.UnroutedUnmarked, models.UnroutedNotEnabled, ""} {
 		store.unrouted = why
 		if r := missReport(t, store, "AUTH step2"); strings.Contains(r.NextSteps, "again:") || strings.Contains(r.NextSteps, "keploy mock") {

@@ -408,6 +408,17 @@ func (s *scopedMockDb) FindNamedAgain(kind models.Kind, call integrations.CallRo
 
 var _ integrations.NamedAgainFinder = (*scopedMockDb)(nil)
 
+// CalledInWindows forwards the store's (integrations.WindowCallFinder), false
+// from a store that has none.
+func (s *scopedMockDb) CalledInWindows(name string, call integrations.CallRound) bool {
+	if f, ok := s.MockMemDb.(integrations.WindowCallFinder); ok {
+		return f.CalledInWindows(name, call)
+	}
+	return false
+}
+
+var _ integrations.WindowCallFinder = (*scopedMockDb)(nil)
+
 // StagedOwnerBegun forwards the store's (integrations.BegunOwnerReader);
 // false from a store that cannot tell.
 func (s *scopedMockDb) StagedOwnerBegun(name string) bool {

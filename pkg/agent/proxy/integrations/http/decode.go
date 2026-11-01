@@ -459,8 +459,8 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				}
 				// Under keploy mock replay, a call no recording made elsewhere
 				// was named for may be one an earlier refused call was named
-				// as: the mapping edit that miss was told answers one of the
-				// two at most, which the miss says.
+				// as: the miss says what the mapping edit that miss was told
+				// does for this call (integrations.RepeatedCallSteps).
 				again := ""
 				if elsewhere == nil && !restaged && n == 0 && report != nil && provenswitch.On() {
 					again = namedAgainRecording(reqCtx, input, db, h.newStrictNoise(headerNoise, bodyNoise, urlNoise), call)
@@ -469,7 +469,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				case elsewhere != nil:
 					markNotOwned(report, elsewhere, call)
 				case again != "":
-					report.NextSteps = integrations.NotOwnedAgainMappingEdit(again, call)
+					report.NextSteps = integrations.NotOwnedAgainMappingEdit(db, again, call)
 				case lmiss != nil:
 					lmiss.explain(report)
 				}

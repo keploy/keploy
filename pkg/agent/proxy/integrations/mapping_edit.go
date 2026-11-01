@@ -85,10 +85,10 @@ func NotOwnedMappingEdit(name string, call CallRound) string {
 // models.UnroutedUnstaged), of a refused call the store named no recording
 // made elsewhere for, the recording that is the call which an earlier
 // refused call of the staging was already named as (NamedAgainFinder): the
-// application made the call again, and the mapping edit the earlier miss was
-// told answers one of the two at most. "" under any other replay, whose
-// misses keep their words, and from a store that cannot tell. keys and match
-// are what the parser asked the store's lookup with.
+// application made the call again, and RepeatedCallSteps says what the
+// mapping edit does for it. "" under any other replay, whose misses keep
+// their words, and from a store that cannot tell. keys and match are what the
+// parser asked the store's lookup with.
 func NamedAgain(mockDb MockMemDb, kind models.Kind, call CallRound, keys []string, match func(*models.Mock) bool) string {
 	if call.Unrouted() != models.UnroutedUnstaged {
 		return ""
@@ -102,13 +102,10 @@ func NamedAgain(mockDb MockMemDb, kind models.Kind, call CallRound, keys []strin
 
 // NotOwnedAgainMappingEdit is what a parser tells, under keploy mock replay,
 // of a refused call that is the recording name an earlier refused call was
-// already named as (NamedAgain): a recording answers one call at most, under
-// worker: as in a test's list, so the mapping edit the earlier miss was told
-// answers one of them, never this one too. The call is one more than the
-// mock set holds, which only a recording of each call answers. It names
-// where the call was made and, as NotOwnedMappingEdit does, the tests whose
-// lists hold name.
-func NotOwnedAgainMappingEdit(name string, call CallRound) string {
+// already named as (NamedAgain). It names where the call was made and, as
+// NotOwnedMappingEdit does, the tests whose lists hold name, then what the
+// mapping edit does for this call (RepeatedCallSteps).
+func NotOwnedAgainMappingEdit(mockDb MockMemDb, name string, call CallRound) string {
 	lists := ""
 	switch listed, known := call.ListedFor(name); {
 	case len(listed) > 0:
@@ -116,7 +113,25 @@ func NotOwnedAgainMappingEdit(name string, call CallRound) string {
 	case known:
 		lists = ", which mappings.yaml lists for no test"
 	}
-	return "This call, made " + madeWhere(call) + ", is " + name + lists + ", again: an earlier call this replay made outside " + name + "'s window was already named as it." +
-		" A recording answers one call at most, under worker: as in a test's list, so moving " + name + " to worker: answers one of these calls, never both." +
+	return "This call, made " + madeWhere(call) + ", is " + name + lists + ", again: an earlier call this replay made outside " + name + "'s window was already named as it. " +
+		RepeatedCallSteps(mockDb, name, call)
+}
+
+// RepeatedCallSteps is the next steps, under keploy mock replay, of a refused
+// call that is the recording name, which an earlier call of the staging was
+// named as or answered by. It says worker:'s rule, read from where the calls
+// were made: inside test windows a worker: recording answers at most once,
+// and outside every window it answers again by the start-up pool's rule, so
+// moving name to worker: answers this call too unless this call and an
+// earlier one were both made in test windows (WindowCallFinder). Only that
+// shape tells a record: the call is one more than the mock set holds, which
+// only a recording of each answers. A parser asks it once per call: asked of
+// a call in a window, the store counts that call.
+func RepeatedCallSteps(mockDb MockMemDb, name string, call CallRound) string {
+	const rule = "Inside test windows a worker: recording answers at most once; outside every window it answers again by the start-up pool's rule"
+	if f, ok := mockDb.(WindowCallFinder); !ok || !f.CalledInWindows(name, call) {
+		return rule + ", so moving " + name + " to worker: in mappings.yaml answers this call too."
+	}
+	return rule + ". This call and an earlier one were both made in test windows, so moving " + name + " to worker: answers one of these calls, never both." +
 		" The application made this call more times than the mock set holds it; if it should, the mock set needs a recording of each, which 'keploy mock record' makes."
 }

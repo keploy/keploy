@@ -55,8 +55,8 @@ func notOwnedRecording(ctx context.Context, input *req, mockDb integrations.Mock
 // notOwnedRecording named no recording for, the recording that is this very
 // call (the strict comparison, strictDiff) which an earlier refused call of
 // the replay was already named as (integrations.NamedAgain): the
-// application made the call again, and a recording answers one call at most.
-// "" under any other replay, and when there is none.
+// application made the call again. "" under any other replay, and when there
+// is none.
 func namedAgainRecording(ctx context.Context, input *req, mockDb integrations.MockMemDb, n strictNoise, call integrations.CallRound) string {
 	live := liveDestination(ctx, input)
 	return integrations.NamedAgain(mockDb, models.HTTP, call, requestKeysOfCall(input, n), func(m *models.Mock) bool {

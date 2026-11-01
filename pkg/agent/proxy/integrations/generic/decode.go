@@ -156,9 +156,10 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 					report.NextSteps = strings.TrimSpace(report.NextSteps + " " + restagedExchangeNote)
 				} else if again := namedAgainExchange(genericRequests, db, call); again != "" {
 					// Under keploy mock replay, an exchange an earlier
-					// refused request was already named as: the mapping edit
-					// that miss was told answers one of the two at most.
-					report.NextSteps = integrations.NotOwnedAgainMappingEdit(again, call)
+					// refused request was already named as: the miss says
+					// what the mapping edit that miss was told does for this
+					// call (integrations.RepeatedCallSteps).
+					report.NextSteps = integrations.NotOwnedAgainMappingEdit(db, again, call)
 				} else if why := integrations.UnheldWhy(db); why != "" {
 					// The store marked the request's round but could not
 					// hold it: its matcher read nothing (HoldToRound).

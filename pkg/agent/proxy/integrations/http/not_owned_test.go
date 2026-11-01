@@ -395,12 +395,24 @@ func TestKeployMocksMappingEditNamesTheTestsItsRecordingIsListedFor(t *testing.T
 	}
 }
 
+// windowCalls is a store that says, as integrations.WindowCallFinder does,
+// whether an earlier call in a test's window was the recording.
+type windowCalls struct {
+	integrations.MockMemDb
+	earlier bool
+}
+
+func (w windowCalls) CalledInWindows(string, integrations.CallRound) bool { return w.earlier }
+
 // keploy mock replay's miss on a call that is a recording an earlier miss was
 // already named as (integrations.NotOwnedAgainMappingEdit) names where the
 // call was made, the tests whose lists hold the recording as the first read
-// found them, and worker:'s limit: moving it there answers one of the calls,
-// never both. It never claims a listing it was not handed.
-func TestKeployMocksNamedAgainMissNamesWorkersLimit(t *testing.T) {
+// found them, and worker:'s rule. Moving the recording to worker: answers
+// this call too, which the miss says, unless this call and an earlier one
+// were both made in test windows: only that shape tells a record. It never
+// claims a listing it was not handed.
+func TestKeployMocksNamedAgainMissSaysWhatWorkerAnswers(t *testing.T) {
+	const rule = "Inside test windows a worker: recording answers at most once; outside every window it answers again by the start-up pool's rule"
 	for _, tc := range []struct {
 		name, test string
 		listed     map[string][]string
@@ -416,23 +428,35 @@ func TestKeployMocksNamedAgainMissNamesWorkersLimit(t *testing.T) {
 			"This call, made in o::TestB's window, is mock-3, again:"},
 	} {
 		call := integrations.NewCallRound(1, nil).InRouting(models.UnroutedUnstaged).InListing(tc.listed).WithSequence(integrations.SequenceView{Test: tc.test})
-		got := integrations.NotOwnedAgainMappingEdit("mock-3", call)
-		if !strings.HasPrefix(got, tc.lead) {
-			t.Errorf("%s: the miss says %q; want it to begin %q", tc.name, got, tc.lead)
-		}
-		for _, want := range []string{
-			"an earlier call this replay made outside mock-3's window was already named as it.",
-			"A recording answers one call at most, under worker: as in a test's list, so moving mock-3 to worker: answers one of these calls, never both.",
-			"'keploy mock record'",
-		} {
-			if !strings.Contains(got, want) {
-				t.Errorf("%s: the miss does not say %q: %q", tc.name, want, got)
+		for _, earlier := range []bool{false, true} {
+			got := integrations.NotOwnedAgainMappingEdit(windowCalls{earlier: earlier}, "mock-3", call)
+			if !strings.HasPrefix(got, tc.lead) {
+				t.Errorf("%s: the miss says %q; want it to begin %q", tc.name, got, tc.lead)
+			}
+			want := []string{"an earlier call this replay made outside mock-3's window was already named as it.", rule}
+			never := []string{"record again", "judging", "'keploy record'", "Re-record"}
+			if earlier {
+				want = append(want, "This call and an earlier one were both made in test windows, so moving mock-3 to worker: answers one of these calls, never both.", "which 'keploy mock record' makes.")
+				never = append(never, "answers this call too")
+			} else {
+				want = append(want, "so moving mock-3 to worker: in mappings.yaml answers this call too.")
+				never = append(never, "never both", "keploy mock record", "more times than the mock set holds")
+			}
+			for _, w := range want {
+				if !strings.Contains(got, w) {
+					t.Errorf("%s (earlier %v): the miss does not say %q: %q", tc.name, earlier, w, got)
+				}
+			}
+			for _, n := range never {
+				if strings.Contains(got, n) {
+					t.Errorf("%s (earlier %v): the miss says %q: %q", tc.name, earlier, n, got)
+				}
 			}
 		}
-		for _, never := range []string{"record again", "judging", "'keploy record'", "Re-record"} {
-			if strings.Contains(got, never) {
-				t.Errorf("%s: the miss says %q: %q", tc.name, never, got)
-			}
-		}
+	}
+	// A store that cannot tell says the rule and the move, never a record.
+	call := integrations.NewCallRound(1, nil).InRouting(models.UnroutedUnstaged).WithSequence(integrations.SequenceView{Test: "o::TestB"})
+	if got := integrations.NotOwnedAgainMappingEdit(nil, "mock-3", call); !strings.Contains(got, "answers this call too.") || strings.Contains(got, "keploy mock record") {
+		t.Errorf("a store that cannot tell: %q", got)
 	}
 }

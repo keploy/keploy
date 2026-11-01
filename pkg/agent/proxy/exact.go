@@ -834,8 +834,8 @@ func (v *exactView) holds(name string) bool {
 // order) that the open view does not show, that no call of the set has
 // consumed, that no earlier miss of the staging was named as, and that match
 // accepts (integrations.StagedFinder); "" for none. Each recording is named
-// for one miss at most, as it answers one call at most: two identical calls
-// made elsewhere name two recordings of it, in recorded order.
+// for one miss at most: two identical calls made elsewhere name two
+// recordings of it, in recorded order.
 // With a test open that is a mock the test does not own: another test's, or
 // a worker-scope mock (models.Mapping.Worker) whose place the run has not
 // reached. With none open, it is any test's. Such a miss is the call a
@@ -979,6 +979,10 @@ func (m *MockManager) findNotOwned(kind models.Kind, call integrations.CallRound
 		// next set before the miss is told: it is no longer call's round.
 		return "", true
 	}
+	if found != "" {
+		// A later call that is found reads where this one was made.
+		m.CalledInWindows(found, call)
+	}
 	return found, false
 }
 
@@ -989,8 +993,8 @@ func (m *MockManager) findNotOwned(kind models.Kind, call integrations.CallRound
 // read did not hold, that no call of the set consumed, and that match
 // accepts (integrations.NamedAgainFinder); "" for none, and once the replay
 // staged another set. A parser asks it of a call findNotOwned named nothing
-// for: each recording is named for one miss at most, as it answers one call
-// at most, so this call is one more than the recordings made elsewhere hold.
+// for: each recording is named for one miss at most, so this call is one more
+// than the recordings made elsewhere hold.
 // Nothing is claimed, served or handed out; with nothing named in the
 // staging no recording is read.
 func (m *MockManager) FindNamedAgain(kind models.Kind, call integrations.CallRound, keys []string, match func(*models.Mock) bool) string {

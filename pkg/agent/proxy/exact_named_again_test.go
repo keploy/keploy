@@ -9,9 +9,9 @@ import (
 
 // A call the lookup named no recording for (FindStagedNotOwned) is asked
 // whether it is a recording an earlier miss of the staging was named as
-// (FindNamedAgain): each is named for one miss at most, as it answers one
-// call at most, so such a call is one more than the recordings made
-// elsewhere hold. It names nothing until a miss was named, never a
+// (FindNamedAgain): each is named for one miss at most, so such a call is one
+// more than the recordings made elsewhere hold. It names nothing until a miss
+// was named, never a
 // recording no miss was named as, the open test's own, one the call's read
 // held as its test's own (though that test ended before the miss was
 // decided), one a call consumed, nor one of a staging the call was not made
@@ -125,5 +125,100 @@ func TestFindNamedAgainByKeysReadsTheRecordingSource(t *testing.T) {
 	}
 	if got := mm.FindNamedAgain(models.HTTP, mm.MarkCallRound(), keys, match); got != "t2-delete" {
 		t.Errorf("with keys the recording kept on disk was not named again: %q", got)
+	}
+}
+
+// CalledInWindows says whether an earlier call of the staging made in a test's
+// window was the recording: one it answered or one a miss named it for. It
+// counts the call it is asked of, in a window only, so the next call reads
+// it. A retry gives back what the test answered with. A call between tests
+// reads false, whatever was called before; so does a call of another staging,
+// and any replay but keploy mock's, which counts nothing.
+func TestCalledInWindowsReadsWhereTheEarlierCallsWereMade(t *testing.T) {
+	named := httpCall("named", time.Second, "/named")
+	asked := httpCall("asked", 2*time.Second, "/asked")
+	answered := httpCall("answered", 3*time.Second, "/answered")
+	pooled := httpCall("pooled", 4*time.Second, "/pooled")
+	all := []*models.Mock{named, asked, answered, pooled}
+	mm := stagedManager(t, nil, all)
+	mm.StageExactUnrouted(models.UnroutedUnstaged)
+	byName := func(name string) func(*models.Mock) bool {
+		return func(m *models.Mock) bool { return m.Name == name }
+	}
+	asks := func(name string) bool { return mm.CalledInWindows(name, mm.MarkCallRound()) }
+
+	// Between tests: false, and it counts nothing.
+	mm.ServeExactPool("k", nil)
+	if asks("asked") || asks("asked") {
+		t.Error("a call between tests read an earlier call in a window")
+	}
+	mm.ServeExactTest("T1", nil)
+	if asks("asked") {
+		t.Error("a call between tests was counted as one made in a window")
+	}
+	// Asked in a window, it counts that call.
+	if !asks("asked") {
+		t.Error("the second call in a window did not read the first")
+	}
+	if !(&scopedMockDb{MockMemDb: mm}).CalledInWindows("asked", mm.MarkCallRound()) {
+		t.Error("a scoped view does not forward it")
+	}
+	// A call the lookup named in a window counts; one it named between tests
+	// does not.
+	if got := stagedNotOwnedNow(mm, models.HTTP, byName("named")); got != "named" {
+		t.Fatalf("precondition: named was not named: %q", got)
+	}
+	if !asks("named") {
+		t.Error("a call named in a window was not counted")
+	}
+	mm.ServeExactPool("k", nil)
+	if asks("asked") {
+		t.Error("between tests a call read the calls made in windows")
+	}
+
+	// A recording that answered between tests does not count.
+	mm.ServeExactPool("k", []string{"pooled"})
+	if !mm.DeleteFilteredMock(*pooled) {
+		t.Fatal("the pool could not answer with its recording")
+	}
+	mm.ServeExactTest("T1b", nil)
+	if asks("pooled") {
+		t.Error("a recording that answered between tests counted as a call in a window")
+	}
+
+	// A recording a test's window answered counts, through its door, until
+	// the test opens again and gives it back.
+	mm.ServeExactTest("T2", []*models.Mock{answered})
+	if !mm.DeleteFilteredMock(*answered) {
+		t.Fatal("T2 could not consume its own recording")
+	}
+	mm.ServeExactTest("T3", nil)
+	if !asks("answered") {
+		t.Error("a recording that answered in a window did not count")
+	}
+	mm.ServeExactTest("T2", []*models.Mock{answered})
+	mm.ServeExactTest("T3", nil)
+	if asks("answered") {
+		t.Error("a recording its test's retry gave back still counts")
+	}
+
+	// A call of the previous staging, and the next staging's first.
+	call := mm.MarkCallRound()
+	mm.SetMocksWithWindow(nil, all, models.BaseTime, time.Now())
+	mm.StageExactUnrouted(models.UnroutedUnstaged)
+	mm.ServeExactPool("k", nil)
+	mm.ServeExactTest("T4", nil)
+	if mm.CalledInWindows("asked", call) || mm.CalledInWindows("asked", call) {
+		t.Error("a call of the previous staging read this one, or counted")
+	}
+	if asks("asked") {
+		t.Error("the next staging read the staging before's calls")
+	}
+
+	// keploy test's replay counts nothing.
+	mm.StageExactUnrouted(models.UnroutedUnmarked)
+	mm.ServeExactTest("T5", nil)
+	if asks("other") || asks("other") {
+		t.Error("a replay that is not keploy mock's counted a call")
 	}
 }

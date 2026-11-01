@@ -118,6 +118,11 @@ type roundLog struct {
 	// are the staging's claimed set's (exactClaimed).
 	ahead map[string]int
 	taken map[string]bool
+	// windowed is, of keploy mock replay's refused calls' words, the names
+	// of the recordings a call made in a test's window was, in the staging:
+	// answered by one and not given back since, or named for a refused one
+	// (MockManager.CalledInWindows).
+	windowed map[string]bool
 	// byTest is, by test, the entries of what its views answered in the
 	// staging that a view of it installed again gives back (reopenLocked):
 	// its own and the shared recordings it consumed, and the ahead answers
@@ -255,6 +260,7 @@ func (m *MockManager) takeLocked(t integrations.Take) int {
 	switch t.How {
 	case integrations.TakeRestored:
 		delete(l.taken, t.Mock.Name)
+		delete(l.windowed, t.Mock.Name)
 	case integrations.TakeCarried:
 		if t.Of >= 0 {
 			byTest(t.Test, t.Of)
@@ -264,6 +270,9 @@ func (m *MockManager) takeLocked(t integrations.Take) int {
 			l.taken = map[string]bool{}
 		}
 		l.taken[t.Mock.Name] = true
+		if t.Test != "" {
+			l.noteWindowed(t.Mock.Name)
+		}
 		switch {
 		case t.Ahead:
 			if l.ahead == nil {
@@ -276,6 +285,36 @@ func (m *MockManager) takeLocked(t integrations.Take) int {
 	}
 	return i
 }
+
+// noteWindowed says a call made in a test's window was name, holding the
+// round lock.
+func (l *roundLog) noteWindowed(name string) {
+	if l.windowed == nil {
+		l.windowed = map[string]bool{}
+	}
+	l.windowed[name] = true
+}
+
+// CalledInWindows implements integrations.WindowCallFinder: what the staging's
+// take log and the misses named so far say of name, read and written in one
+// step under the round lock. Under any replay but keploy mock's it says false
+// and counts nothing: no other replay's miss reads it.
+func (m *MockManager) CalledInWindows(name string, call integrations.CallRound) bool {
+	if !call.InTest() || call.Unrouted() != models.UnroutedUnstaged {
+		return false
+	}
+	m.lockRound()
+	defer m.exact.round.mu.Unlock()
+	l := m.logLocked()
+	if l.epoch != call.Epoch() {
+		return false
+	}
+	earlier := l.windowed[name]
+	l.noteWindowed(name)
+	return earlier
+}
+
+var _ integrations.WindowCallFinder = (*MockManager)(nil)
 
 // takenInStagingLocked reports whether name was consumed or spent in the
 // current staging (the take log), and not given back since, holding the

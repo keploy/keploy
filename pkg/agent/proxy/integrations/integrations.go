@@ -526,13 +526,25 @@ type StagedKeyFinder interface {
 // in the order StagedFinder looks, that match accepts and that an earlier
 // miss of call's staging was already named as, which the open view does not
 // show and no call of the set consumed; "" for none, and once the replay
-// staged another set. A recording is named for one miss at most, as it
-// answers one call at most, so such a call is one more than the recordings
-// made elsewhere hold. With keys it also reads the recordings kept on disk
-// under them (StagedKeyFinder). For a miss's words only: nothing is claimed,
-// served or handed out. A parser asks it through NamedAgain.
+// staged another set. A recording is named for one miss at most, so such a
+// call is one more than the recordings made elsewhere hold. With keys it also
+// reads the recordings kept on disk under them (StagedKeyFinder). For a
+// miss's words only: nothing is claimed, served or handed out. A parser asks
+// it through NamedAgain.
 type NamedAgainFinder interface {
 	FindNamedAgain(kind models.Kind, call CallRound, keys []string, match func(*models.Mock) bool) string
+}
+
+// WindowCallFinder is an optional MockMemDb extension under keploy mock
+// replay, for a miss's words only: whether an earlier call of call's staging,
+// made in a test's window, was the recording name: one it answered, or a
+// refused one a miss named it for. It is asked of a refused call that is
+// name; asked of one made in a window, it counts that call too, so the next
+// one reads it. False for a call made between tests, and of another staging.
+// Inside test windows a worker: recording answers at most once, so where it
+// says true the mapping edit cannot answer call too (RepeatedCallSteps).
+type WindowCallFinder interface {
+	CalledInWindows(name string, call CallRound) bool
 }
 
 // CallRound is where a call's first read of the store found it made: the
