@@ -115,6 +115,10 @@
 #   whole number of bytes a second is refused. With no list to reorder, or on
 #   a self-hosted runner, the download gets its budget in one piece and no
 #   file changes, and with no list the update does too.
+#   Last, the helper's received_between on counts written out: an interface
+#   gone by the second read takes only its own bytes out of the count, one
+#   new at it adds none, a counter that went back counts 0, and the reads
+#   may list the interfaces in any order.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -714,8 +718,10 @@ error_slices() {
 # 425 B/s against the stub's 256), and the HTTP headers. So it is at least
 # what the stub wrote and at most twice that and 2 kB. Each figure is as
 # exact as the helper's rounding: to 1 B under 1 kB, to 500 B under 1 MB. A
-# counter that reads nothing, or anything but what apt received in the slice,
-# is out of that band.
+# counter that reads nothing, or less than the stub wrote, or more than that
+# band, fails here. How the count treats an interface that goes away or
+# comes up in a slice, which no case here has, is pinned by the rewrite
+# case's received_between rows.
 pins_received() {
   local what="$1" slices="$2" case="$3" problems
   docker exec "$stub" python -c 'import sys, urllib.request
@@ -1288,6 +1294,17 @@ slow_run "no list" 1 3 hello
 # And with no mirror list the update, too, gets its budget in one piece.
 slow 99 0
 slow_run "no list, slow update" 1 3 hello
+
+# What an update slice received, from the helper itself under the awk of this
+# image, on two /proc/net/dev counts written out: a pure function of them. An
+# interface can go away or come up between the two reads (the veth of a
+# container, a Docker network), which no slice above has.
+eval "$(sed -n "/^received_between() {/,/^}/p" /h/apt-install.sh)"
+between() { echo "between [$1] [$2]: $(received_between "$1" "$2")"; }
+between "eth0:100 va:7210132" "eth0:432742"
+between "eth0:100" "eth0:600 xa:4326132"
+between "eth0:600" "eth0:100"
+between "eth0:100 wa:2000 docker0:50" "docker0:80 wa:2500 eth0:400"
 '
 
 L='mirror+file:/etc/apt/ubuntu-mirrors.txt'
@@ -1629,6 +1646,14 @@ for image in ubuntu:22.04 ubuntu:24.04; do
   fi
   expect "$log" "$image: no list: and the helper says there was no other mirror for it" \
     "^no list, slow update: ::error::apt-install\.sh: apt-get update was not done within 3 s \(exit 124\)\. Received 0 B in that time \(0 B/s\)\. apt reads no mirror list with a second Ubuntu mirror here, so there was no other mirror to try\.\$"
+
+  expect "$log" "$image: an interface gone by the second read takes only its own bytes out of the slice's count" \
+    '^between \[eth0:100 va:7210132\] \[eth0:432742\]: 432642$'
+  expect "$log" "$image: an interface new at the second read adds none of its bytes to it" \
+    '^between \[eth0:100\] \[eth0:600 xa:4326132\]: 500$'
+  expect "$log" "$image: a counter that went back counts 0, not less" '^between \[eth0:600\] \[eth0:100\]: 0$'
+  expect "$log" "$image: each interface is matched by name, in whatever order the reads list them" \
+    '^between \[eth0:100 wa:2000 docker0:50\] \[docker0:80 wa:2500 eth0:400\]: 830$'
   show_log_if_failed "$log" "$started"
 done
 

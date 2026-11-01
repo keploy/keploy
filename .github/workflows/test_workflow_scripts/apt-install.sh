@@ -118,8 +118,8 @@
 # in front. Each interface is counted on its own, over the interfaces there
 # both when the slice began and when it ended: one that goes away in between
 # takes its own bytes out of the count and no others. A fast mirror is sent
-# back only when the interface apt fetched through is itself gone or new by
-# the end of the slice, and then apt's own connection broke as well.
+# back only when the interface apt fetched through went away or came up during
+# the slice: then that interface's bytes are not counted.
 #
 # Stopping the update loses little. apt asks again for a list it has part or
 # all of from where it stopped (a Range request, which another mirror honours
