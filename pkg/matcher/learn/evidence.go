@@ -340,17 +340,9 @@ func orderUnknown(in Input, ps []evPlace, cand map[string]bool) {
 // servedAgain reports whether round F served a candidate of cand at two
 // numbered serves (servedOrder's span).
 func servedAgain(in Input, cand map[string]bool) bool {
-	for _, e := range in.Earlier {
-		if cand[e.Mock] && (e.Payload.Read() || e.Payload.ordered) && e.Payload.last != e.Payload.first {
-			return true
-		}
-	}
-	for _, x := range in.Raw {
-		if cand[x.mock] && x.served && x.last != x.first {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(in.Earlier, func(e Earlier) bool {
+		return cand[e.Mock] && (e.Payload.Read() || e.Payload.ordered) && e.Payload.last != e.Payload.first
+	}) || slices.ContainsFunc(in.Raw, func(x Raw) bool { return cand[x.mock] && x.served && x.last != x.first })
 }
 
 // Why a place's state in round F is unknown, as a refusal's line says it
@@ -397,23 +389,16 @@ func evidenceAt(p evPlace, r, f string, piece bool) (ev wordEvidence, read bool)
 		return evNone, false
 	}
 	if p.fUnstated {
-		if hr || hf || p.fMay {
+		if hr || hf || p.fMay || slices.ContainsFunc(p.t.views, func(v *readerText) bool { return evHolds(v, f) }) {
 			return evUnknown, true
-		}
-		for _, v := range p.t.views {
-			if h, _ := v.holdsWord(f); h {
-				return evUnknown, true
-			}
 		}
 		return evNone, true
 	}
 	switch same := p.same(); {
 	case !hr && !hf:
 		return evNone, true
-	case p.state != stateBefore:
-		return evUnknown, true
-	case same && hr && hf && !piece:
-		// Unchanged: one text holds both, so neither run's shows the change.
+	case p.state != stateBefore, same && hr && hf && !piece:
+		// The second, unchanged: one text holds both, so neither run's shows the change.
 		// A piece of a longer value (pieceOfAnId) is chance there: the
 		// value's long words judge the place.
 		return evUnknown, true
@@ -424,10 +409,8 @@ func evidenceAt(p evPlace, r, f string, piece bool) (ev wordEvidence, read bool)
 	case nothingNew(p):
 		// F gave nothing new there: every word of F's text stood in R's.
 		return evUnknown, true
-	case hr && !strings.Contains(p.liveText(), f):
-		return evDisproven, true
-	case !hr && unchangedFor(p, r, f):
-		// Changed elsewhere, as recorded for the word: a start-up answer
+	case hr && !strings.Contains(p.liveText(), f), !hr && unchangedFor(p, r, f):
+		// The second, changed elsewhere, as recorded for the word: a start-up answer
 		// served as recorded to a request of round F's own session.
 		return evDisproven, true
 	}
@@ -484,13 +467,10 @@ func tokenIn(t *readerText, kind tokenKind, tok string) bool {
 // whole token around w in R (a conflict in the call's scope
 // or the start-up).
 func heldWhole(p evPlace, w readWord, rec string) bool {
-	if p.same() {
-		return false
-	}
 	// No token around it: the word is a whole token of its own (no ID byte
 	// beside it).
-	return tokenIn(p.t.rec, tokenID, rec) || len(w.Tokens) == 0 && tokenIn(p.t.rec, tokenID, w.Rec) ||
-		slices.ContainsFunc(w.Tokens, func(t wholeToken) bool { return tokenIn(p.t.rec, t.Kind, t.Rec) })
+	return !p.same() && (tokenIn(p.t.rec, tokenID, rec) || len(w.Tokens) == 0 && tokenIn(p.t.rec, tokenID, w.Rec) ||
+		slices.ContainsFunc(w.Tokens, func(t wholeToken) bool { return tokenIn(p.t.rec, t.Kind, t.Rec) }))
 }
 
 // nothingNew reports whether every word of round F's text at p stands among
@@ -526,10 +506,8 @@ func setUnread(in Input) ([]GivenPlaces, string) {
 	if err != nil {
 		return nil, "the recordings round F gave earlier in the test set: " + err.Error()
 	}
-	for _, g := range set {
-		if !g.read {
-			return nil, g.mock + ", a recording round F gave earlier in the test set"
-		}
+	if i := slices.IndexFunc(set, func(g GivenPlaces) bool { return !g.read }); i >= 0 {
+		return nil, set[i].mock + ", a recording round F gave earlier in the test set"
 	}
 	return set, ""
 }
@@ -541,11 +519,7 @@ func setUnread(in Input) ([]GivenPlaces, string) {
 func (dc *decider) outside() *offsetPlaces {
 	if dc.op == nil {
 		dc.op = &offsetPlaces{}
-		elsewhere := len(dc.set) > 0
-		for _, r := range dc.in.Raw {
-			elsewhere = elsewhere || r.elsewhere
-		}
-		if elsewhere {
+		if len(dc.set) > 0 || slices.ContainsFunc(dc.in.Raw, func(r Raw) bool { return r.elsewhere }) {
 			dc.op = dc.dr.offsetPlacesOf(dc.in.At, dc.in.Earlier, dc.in.Raw, dc.set)
 		}
 	}
@@ -609,23 +583,18 @@ func (dc *decider) echoedOutside(c changedInstant) (mock string, ok bool) {
 	if c.rm == nil || c.lm == nil {
 		return "", false
 	}
-	for _, g := range dc.set {
-		if namesApart(g.fView, *c.lm, *c.rm) {
-			return g.mock, true
-		}
+	if i := slices.IndexFunc(dc.set, func(g GivenPlaces) bool { return namesApart(g.fView, *c.lm, *c.rm) }); i >= 0 {
+		return dc.set[i].mock, true
 	}
 	op := dc.outside()
-	if len(op.answers) == 0 {
-		return "", false
-	}
 	pair := []driftedInstant{{rec: *c.rm, live: *c.lm}}
-	if dc.dr.echoedElsewhere(pair, dc.in.At, dc.in.Earlier, dc.in.Raw, func() *offsetPlaces { return op }) == "" {
+	if len(op.answers) == 0 || dc.dr.echoedElsewhere(pair, dc.in.At, dc.in.Earlier, dc.in.Raw, func() *offsetPlaces { return op }) == "" {
 		return "", false
 	}
-	for _, g := range op.answers {
-		if namesMomentApart(g.m, *c.lm, *c.rm, nil) || !g.at.After(dc.in.At) && namesMomentApart(g.m, *c.rm, *c.lm, nil) {
-			return g.mock, true
-		}
+	if i := slices.IndexFunc(op.answers, func(g givenMoment) bool {
+		return namesMomentApart(g.m, *c.lm, *c.rm, nil) || !g.at.After(dc.in.At) && namesMomentApart(g.m, *c.rm, *c.lm, nil)
+	}); i >= 0 {
+		return op.answers[i].mock, true
 	}
 	return "", true
 }
