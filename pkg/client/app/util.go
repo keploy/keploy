@@ -126,9 +126,9 @@ func isRewritableComposeCommand(appCmd string) bool {
 // against its own working directory and derives the project directory from
 // it, so `make -C deploy up` would otherwise look for
 // deploy/docker-compose-tmp.yaml and find nothing.
-func composeLaunchPlan(appCmd, newComposeFile, appComposePath, appServiceName string) (newCmd, composeFileEnv string) {
+func composeLaunchPlan(appCmd, newComposeFile, appComposePath, appServiceName string, preferFailureAbort bool) (newCmd, composeFileEnv string) {
 	if isRewritableComposeCommand(appCmd) {
-		return modifyDockerComposeCommand(appCmd, newComposeFile, appComposePath, appServiceName), ""
+		return modifyDockerComposeCommand(appCmd, newComposeFile, appComposePath, appServiceName, preferFailureAbort), ""
 	}
 	abs, err := filepath.Abs(newComposeFile)
 	if err != nil {
@@ -137,7 +137,7 @@ func composeLaunchPlan(appCmd, newComposeFile, appComposePath, appServiceName st
 	return "", abs
 }
 
-func modifyDockerComposeCommand(appCmd, newComposeFile, appComposePath, appServiceName string) string {
+func modifyDockerComposeCommand(appCmd, newComposeFile, appComposePath, appServiceName string, preferFailureAbort bool) string {
 	// Ensure newComposeFile starts with ./
 	if !strings.HasPrefix(newComposeFile, "./") {
 		newComposeFile = "./" + newComposeFile
@@ -168,13 +168,13 @@ func modifyDockerComposeCommand(appCmd, newComposeFile, appComposePath, appServi
 				// Check if this file matches the appComposePath
 				if actualFile == appComposePath {
 					modifiedCmd = strings.Replace(appCmd, fullMatch, fmt.Sprintf("-f %s", newComposeFile), 1)
-					return ensureComposeExitOnAppFailure(modifiedCmd, appServiceName, false)
+					return ensureComposeExitOnAppFailure(modifiedCmd, appServiceName, preferFailureAbort)
 				}
 			}
 		}
 		// If no matching compose path found, return original command
 		modifiedCmd = appCmd
-		return ensureComposeExitOnAppFailure(modifiedCmd, appServiceName, false)
+		return ensureComposeExitOnAppFailure(modifiedCmd, appServiceName, preferFailureAbort)
 	}
 
 	// If the pattern doesn't exist, inject the new Compose file right before
@@ -182,11 +182,11 @@ func modifyDockerComposeCommand(appCmd, newComposeFile, appComposePath, appServi
 	// project named "upload", say) are not the subcommand.
 	if upAt, ok := composeUpOffset(appCmd, true); ok {
 		modifiedCmd = fmt.Sprintf("%s-f %s %s", appCmd[:upAt], newComposeFile, appCmd[upAt:])
-		return ensureComposeExitOnAppFailure(modifiedCmd, appServiceName, false)
+		return ensureComposeExitOnAppFailure(modifiedCmd, appServiceName, preferFailureAbort)
 	}
 
 	modifiedCmd = fmt.Sprintf("%s -f %s", appCmd, newComposeFile)
-	return ensureComposeExitOnAppFailure(modifiedCmd, appServiceName, false)
+	return ensureComposeExitOnAppFailure(modifiedCmd, appServiceName, preferFailureAbort)
 }
 
 func isDetachMode(logger *zap.Logger, command string, kind utils.CmdType) bool {
@@ -231,20 +231,22 @@ func ensureComposeExitOnAppFailure(appCmd, serviceName string, preferFailureAbor
 	if composeStopsTheApp() {
 		return withoutComposeAbortFlags(appCmd)
 	}
+
+	// keploy-app-gate exits 0 on release. --abort-on-container-exit would
+	// tear the stack down at that moment (#4894), so upgrade any existing
+	// exit abort to failure abort when a completion dependency is present.
+	if preferFailureAbort {
+		return preferComposeFailureAbort(appCmd, serviceName)
+	}
+
 	// If the user already passed one of these flags, don't touch the command.
 	if strings.Contains(appCmd, "--abort-on-container-exit") || strings.Contains(appCmd, "--abort-on-container-failure") || strings.Contains(appCmd, "--exit-code-from") {
 		return appCmd
 	}
 
-	// Arguments we want to inject.
-	var args []string
-	if preferFailureAbort {
-		args = []string{"--abort-on-container-failure"}
-	} else {
-		args = []string{"--abort-on-container-exit"}
-		if serviceName != "" {
-			args = append(args, "--exit-code-from", serviceName)
-		}
+	args := []string{"--abort-on-container-exit"}
+	if serviceName != "" {
+		args = append(args, "--exit-code-from", serviceName)
 	}
 
 	// Insert the flags immediately after the `up` subcommand, where it
@@ -258,6 +260,28 @@ func ensureComposeExitOnAppFailure(appCmd, serviceName string, preferFailureAbor
 	}
 
 	// Fallback: no explicit "up" token detected — do not append flags.
+	return appCmd
+}
+
+// preferComposeFailureAbort ensures appCmd aborts only on container failure,
+// not on every exit — required when keploy-app-gate completes successfully.
+// Existing --abort-on-container-exit / --exit-code-from are replaced; an
+// already-present --abort-on-container-failure is kept (exit/exit-code-from
+// stripped alongside it via withoutComposeAbortFlags + re-inject).
+func preferComposeFailureAbort(appCmd, _ string) string {
+	hasFailure := strings.Contains(appCmd, "--abort-on-container-failure")
+	hasExit := strings.Contains(appCmd, "--abort-on-container-exit") || strings.Contains(appCmd, "--exit-code-from")
+	if hasFailure && !hasExit {
+		return appCmd
+	}
+	out := appCmd
+	if hasFailure || hasExit {
+		out = withoutComposeAbortFlags(appCmd)
+	}
+	if upAt, ok := composeUpOffset(out, false); ok {
+		end := upAt + len("up")
+		return out[:end] + " --abort-on-container-failure" + out[end:]
+	}
 	return appCmd
 }
 

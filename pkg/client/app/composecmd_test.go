@@ -54,7 +54,7 @@ func TestComposeLaunchPlan(t *testing.T) {
 	const generated = "docker-compose-tmp.yaml"
 
 	t.Run("literal compose command is rewritten, no env", func(t *testing.T) {
-		newCmd, env := composeLaunchPlan("docker compose up", generated, "docker-compose.yml", "app")
+		newCmd, env := composeLaunchPlan("docker compose up", generated, "docker-compose.yml", "app", false)
 		if newCmd == "" {
 			t.Fatal("want the command rewritten, got none")
 		}
@@ -67,7 +67,7 @@ func TestComposeLaunchPlan(t *testing.T) {
 	})
 
 	t.Run("wrapper is left alone and gets an absolute env path", func(t *testing.T) {
-		newCmd, env := composeLaunchPlan("make up", generated, "docker-compose.yml", "app")
+		newCmd, env := composeLaunchPlan("make up", generated, "docker-compose.yml", "app", false)
 		if newCmd != "" {
 			t.Errorf("wrapper must not be rewritten, got %q — splicing compose flags into a "+
 				"wrapper produces a command it cannot parse", newCmd)
@@ -86,12 +86,66 @@ func TestComposeLaunchPlan(t *testing.T) {
 
 	t.Run("exactly one mechanism is chosen", func(t *testing.T) {
 		for _, cmd := range []string{"docker compose up", "docker-compose up", "make up", "./start.sh"} {
-			newCmd, env := composeLaunchPlan(cmd, generated, "docker-compose.yml", "app")
+			newCmd, env := composeLaunchPlan(cmd, generated, "docker-compose.yml", "app", false)
 			if (newCmd == "") == (env == "") {
 				t.Errorf("%q: want exactly one of rewrite/env, got newCmd=%q env=%q", cmd, newCmd, env)
 			}
 		}
 	})
+
+	t.Run("completion dependency uses abort-on-container-failure", func(t *testing.T) {
+		newCmd, _ := composeLaunchPlan("docker compose up", generated, "docker-compose.yml", "app", true)
+		if !strings.Contains(newCmd, "--abort-on-container-failure") {
+			t.Errorf("want --abort-on-container-failure so keploy-app-gate exiting 0 does not tear the stack down; got %q", newCmd)
+		}
+		if strings.Contains(newCmd, "--abort-on-container-exit") {
+			t.Errorf("must not inject --abort-on-container-exit with a completion dependency; got %q", newCmd)
+		}
+	})
+}
+
+// TestPreferFailureAbortUpgradesExistingExitAbort pins #4894: a user command
+// that already passes --abort-on-container-exit must be upgraded, or the
+// keploy-app-gate's successful exit tears the stack down.
+func TestPreferFailureAbortUpgradesExistingExitAbort(t *testing.T) {
+	cases := []struct {
+		in, wantSubstr string
+		wantExit       bool
+	}{
+		{
+			in:         "docker compose up --abort-on-container-exit --exit-code-from app",
+			wantSubstr: "--abort-on-container-failure",
+			wantExit:   false,
+		},
+		{
+			in:         "docker compose -f ./c.yaml up --abort-on-container-exit",
+			wantSubstr: "--abort-on-container-failure",
+			wantExit:   false,
+		},
+		{
+			in:         "docker compose up --abort-on-container-failure",
+			wantSubstr: "--abort-on-container-failure",
+			wantExit:   false,
+		},
+		{
+			in:         "docker compose up",
+			wantSubstr: "--abort-on-container-failure",
+			wantExit:   false,
+		},
+	}
+	for _, tc := range cases {
+		got := ensureComposeExitOnAppFailure(tc.in, "app", true)
+		if !strings.Contains(got, tc.wantSubstr) {
+			t.Errorf("%q → %q; want substring %q", tc.in, got, tc.wantSubstr)
+		}
+		if strings.Contains(got, "--abort-on-container-exit") != tc.wantExit {
+			t.Errorf("%q → %q; --abort-on-container-exit present=%v want=%v",
+				tc.in, got, strings.Contains(got, "--abort-on-container-exit"), tc.wantExit)
+		}
+		if strings.Contains(got, "--exit-code-from") {
+			t.Errorf("%q → %q; --exit-code-from must not remain with failure abort", tc.in, got)
+		}
+	}
 }
 
 // TestAgentTokenCommand: `sudo docker compose up` is a spelling keploy
@@ -217,11 +271,11 @@ func TestComposeCommandRewriteFindsTheUpSubcommand(t *testing.T) {
 		// A quoted file's name is one word, however many "up"s it holds.
 		`docker compose -f "my up dir/c.yaml" up`: `docker compose -f "my up dir/c.yaml" up --abort-on-container-exit --exit-code-from app`,
 	} {
-		if got := modifyDockerComposeCommand(cmd, tmp, "docker-compose.yml", "app"); got != want {
+		if got := modifyDockerComposeCommand(cmd, tmp, "docker-compose.yml", "app", false); got != want {
 			t.Errorf("%q:\n got  %q\n want %q", cmd, got, want)
 		}
 		if strings.HasPrefix(cmd, "docker") {
-			name, _ := composeProjectScope(modifyDockerComposeCommand(cmd, tmp, "docker-compose.yml", "app"))
+			name, _ := composeProjectScope(modifyDockerComposeCommand(cmd, tmp, "docker-compose.yml", "app", false))
 			if wantName, _ := composeProjectScope(cmd); name != wantName {
 				t.Errorf("%q: the rewritten command's project is %q, want %q", cmd, name, wantName)
 			}

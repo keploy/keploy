@@ -188,7 +188,7 @@ func (m *mockService) Record(ctx context.Context) error {
 	//    service inside the compose project keploy generates, so it does not
 	//    exist until the wrapped `docker compose up` runs. startComposeApp
 	//    brings the project up and waits for the agent to answer; the app
-	//    itself stays parked at the agent's healthcheck until step 5 releases
+	//    itself stays parked behind keploy-app-gate until step 5 releases
 	//    it, so nothing it does escapes the capture. Its exit is collected at
 	//    step 7 instead of being started there.
 	//
@@ -435,7 +435,7 @@ func (m *mockService) Record(ctx context.Context) error {
 		if parent.Err() != nil {
 			return nil
 		}
-		stopReason = "failed to release the app behind the keploy-agent healthcheck"
+		stopReason = "failed to release the app behind keploy-app-gate"
 		utils.LogError(m.logger, err, stopReason)
 		return fmt.Errorf("%s: %w", stopReason, err)
 	}

@@ -354,7 +354,11 @@ func (a *App) SetupCompose(ctx context.Context, extraArgs []string) error {
 	a.setComposeSource(newPath, nil, compose)
 	a.logger.Debug("Created new temporary docker-compose for keploy internal use", zap.String("path", newPath))
 
-	newCmd, composeFileEnv := composeLaunchPlan(a.cmd, newPath, serviceInfo.ComposePath, serviceInfo.AppServiceName)
+	// Completion dependencies (keploy-app-gate) require
+	// --abort-on-container-failure so a successful one-shot exit does not
+	// tear the stack down the way --abort-on-container-exit would.
+	preferFailureAbort := composeHasCompletionDependency(compose)
+	newCmd, composeFileEnv := composeLaunchPlan(a.cmd, newPath, serviceInfo.ComposePath, serviceInfo.AppServiceName, preferFailureAbort)
 
 	if newCmd != "" {
 		// Literal compose command: our file is spliced in, as before.
@@ -400,6 +404,15 @@ func (a *App) SetupCompose(ctx context.Context, extraArgs []string) error {
 		zap.String("if it sets its own project name", "keploy's teardown may not reach every container it started"),
 		zap.String("also", "--abort-on-container-exit cannot be added, so keploy will not exit on its own if the app container dies"),
 	)
+	// keploy-app-gate exits 0 when MakeAgentReady releases the app. A wrapper
+	// that itself passes --abort-on-container-exit will tear the stack down at
+	// that moment (#4894). Keploy cannot rewrite the wrapper, so say so here.
+	if preferFailureAbort && strings.Contains(a.cmd, "--abort-on-container-exit") {
+		a.logger.Warn(
+			"your command passes --abort-on-container-exit; with keploy-app-gate that aborts the stack when the gate releases the app — use --abort-on-container-failure instead",
+			zap.String("cmd", a.cmd),
+		)
+	}
 
 	return nil
 }
@@ -2000,10 +2013,13 @@ func isTransientComposeDependencyFailure(runErr error, errType utils.ErrType, ap
 }
 
 // isCrashedDependency reports whether a `docker compose ps` row is a service
-// the app depends on that crashed: neither the app nor keploy's agent, and
-// exited non-zero.
+// the app depends on that crashed: neither the app, keploy's agent, nor the
+// app-gate, and exited non-zero. The gate is keploy infrastructure (like the
+// agent); retrying a user dependency crash must not recreate it mid-release.
 func isCrashedDependency(appService string, s composeServiceState) bool {
-	return s.Service != appService && s.Service != keployAgentComposeService &&
+	return s.Service != appService &&
+		s.Service != keployAgentComposeService &&
+		s.Service != docker.KeployAppGateServiceName &&
 		s.State == "exited" && s.ExitCode != 0
 }
 

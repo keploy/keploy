@@ -17,16 +17,21 @@ import (
 	"go.uber.org/zap/zaptest"
 )
 
-// redirectAgentReadyFile rewrites the package-level agentReadyFilePath
-// to a sandboxed path under t.TempDir() so tests exercise the real
-// os.WriteFile path without clobbering /tmp/agent.ready on the host.
-// The original value is restored via t.Cleanup.
+// redirectAgentReadyFile rewrites the package-level ready/release paths
+// to a sandboxed dir under t.TempDir() so tests exercise the real
+// os.WriteFile path without clobbering host /tmp markers.
+// The original values are restored via t.Cleanup. Returns the ready-file path.
 func redirectAgentReadyFile(t *testing.T) string {
 	t.Helper()
-	orig := agentReadyFilePath
-	sandbox := filepath.Join(t.TempDir(), "agent.ready")
+	origReady, origRelease := agentReadyFilePath, agentReleaseFilePath
+	dir := t.TempDir()
+	sandbox := filepath.Join(dir, "agent.ready")
 	agentReadyFilePath = sandbox
-	t.Cleanup(func() { agentReadyFilePath = orig })
+	agentReleaseFilePath = filepath.Join(dir, "release.ready")
+	t.Cleanup(func() {
+		agentReadyFilePath = origReady
+		agentReleaseFilePath = origRelease
+	})
 	return sandbox
 }
 
