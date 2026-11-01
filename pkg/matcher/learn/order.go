@@ -457,6 +457,13 @@ func (dc *decider) textInstant(path string, bare variables.Address, rec, live st
 		return dc.cannotCheck(path, bare, -1, rec, live, "keploy cannot read this instant in both runs")
 	}
 	c := changedInstant{r: rd.Rec[iw.RecAt[0]:iw.RecAt[1]], l: rd.Live[iw.LiveAt[0]:iw.LiveAt[1]], byText: iw.ByText, text: true}
+	if (iw.Rec == nil) != (iw.Live == nil) {
+		// One run's word reads as an instant and the other's is a number
+		// that is no time (an audit stamp round F sent as 8357): as a typed
+		// instant leaf of one run only, keploy cannot check it, and it is
+		// never matched by its text or bound fresh.
+		return dc.cannotCheck(path, w.At, w.At.Word, c.r, c.l, "one run's value here is no instant")
+	}
 	c.word, c.noWord = clockWordOf(rec, live, rd, iw)
 	if iw.Rec != nil && iw.Live != nil && !iw.ByText {
 		c.rm, c.lm = iw.Rec, iw.Live
@@ -804,8 +811,13 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	if dc.in.Drifts != nil {
 		zone = dc.in.Drifts.zone
 	}
+	// cutWhy: the reading's own refusal of a cut, which keeps steps 7 and
+	// 8 from reading the value; guardWhy: the offset guard's refusal of the
+	// window plus an offset, which refuses that reading alone, so the value
+	// is still read from the test's begin (7) and as its own value (8), as
+	// main learned such a read since the test began.
 	var off models.ClockOffset
-	var cutWhy string
+	var cutWhy, guardWhy string
 	inWindow := false
 	if c.rm != nil && c.lm != nil {
 		if dc.in.Window.holdsRead(*c.rm, *c.lm, zone) {
@@ -816,7 +828,7 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 				if g, uncompared := dc.offsetGuard(path, off, max(c.rm.res, c.lm.res), dc.in.Window); uncompared && copies(false) == nil {
 					return dc.refuse(path, at, n, r, l, RefusalCannotCheck, g, nil, dc.fieldNoise(path))
 				} else if g != "" {
-					off, cutWhy, inWindow = models.ClockOffset{}, g, false
+					off, cutWhy, guardWhy, inWindow = models.ClockOffset{}, "", g, false
 				}
 			}
 		}
@@ -872,23 +884,39 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 		// The adapter read no app clock for the call: name that cause.
 		why = "a time no answer gave and no request of this scope sent; the call carries no app clock, so no window of its own can hold it"
 	}
-	if cutWhy != "" {
-		why += " (" + cutWhy + ")"
+	if cutWhy != "" || guardWhy != "" {
+		why += " (" + cutWhy + guardWhy + ")"
 	}
 	if late != "" {
 		why += "; nor the test's own value, made before it began: " + late
 	}
-	var outside, sentIn []string
+	// The places whose recorded text held the recorded value and that are
+	// no source in round F are named with why (main named the recording
+	// round F never served): a person reads where the value came from.
+	var outside, sentIn, heldAt []string
 	for _, h := range hs {
-		if h.hr && h.hl && h.p.otherTest && !dc.allScope && len(outside) < maxLinePlaces {
-			outside = append(outside, h.p.name)
-			sentIn = append(sentIn, h.p.name+" in "+scopeName(h.p))
+		switch p := h.p; {
+		case h.hr && h.hl && p.otherTest && !dc.allScope:
+			if len(outside) < maxLinePlaces {
+				outside = append(outside, p.name)
+				sentIn = append(sentIn, p.name+" in "+scopeName(p))
+			}
+		case h.hr && !h.hl && len(heldAt) < maxLinePlaces:
+			heldAt = append(heldAt, p.name)
+			switch p.state {
+			case stateNotBefore:
+				why += "; the recorded value stood at " + p.name + ", which round F did not give or send before this call"
+			case stateUnknown:
+				why += "; the recorded value stood at " + p.name + ", whose state in round F keploy cannot tell: " + p.why
+			default:
+				why += "; the recorded value stood at " + p.name + ", where round F's value is another"
+			}
 		}
 	}
 	if len(outside) > 0 {
 		why += " [but " + strings.Join(sentIn, ", ") + " did]"
 	}
-	return dc.refuse(path, at, n, r, l, RefusalNoClockRead, why, outside, dc.wordNoise(path, n), Edit{Kind: EditReRecord})
+	return dc.refuse(path, at, n, r, l, RefusalNoClockRead, why, append(outside, heldAt...), dc.wordNoise(path, n), Edit{Kind: EditReRecord})
 }
 
 // madeSinceBegin is why c, a changed instant of a client test's call that
