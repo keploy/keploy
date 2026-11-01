@@ -1504,8 +1504,14 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 			logger.Debug("Stale upstream pool entry detected (FIN in queue); redialing",
 				zap.String("upstream", upstreamAddr))
 			if err := redial(); err != nil {
-				if pm.mockMode {
-					logger.Debug("the app is not listening after a restart; closing the call as the app would", zap.String("upstream", upstreamAddr), zap.Error(err))
+				// The redial waits for an app that restarts (dialApp), so it
+				// ends without a connection only when keploy's context ends,
+				// the client goes, the recording stops, or the dial fails
+				// otherwise. keploy mock says that at DEBUG, but for an app
+				// that listens only where the ingress does not dial.
+				var elsewhere *appListensElsewhereError
+				if pm.mockMode && !errors.As(err, &elsewhere) {
+					logger.Debug("the redial of a stale pooled connection to the app ended without a connection; closing the call as the app would", zap.String("upstream", upstreamAddr), zap.Error(err))
 				} else {
 					pm.logAppDialFailure(logger, "Upstream redial after stale-detect failed. Verify the application is still listening on the resolved address and that the network path between the agent and upstream is healthy.",
 						err, zap.String("upstream", upstreamAddr))
