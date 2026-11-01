@@ -1,6 +1,7 @@
 package learn
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -445,6 +446,31 @@ func TestOutcomeANoClockReadRefusalNamesTheRecordingThatHeldTheValue(t *testing.
 	oRefused(t, "a time whose recorded value an unserved recording held", d, "no-clock-read", "mock-1")
 	if r := d.Refusal; r != nil && !strings.Contains(r.Why, "the recorded value stood at mock-1, which round F did not give or send before this call") {
 		t.Errorf("refused %q; want it to name mock-1, where the recorded value stood, and why it is no source", r.Why)
+	}
+}
+
+// A wall clock of no zone the application picked from a timetable an
+// answer gave before the call is that answer's value, whether the timetable
+// writes UTC or the application's offset: the wall clock is read in the
+// application's zone too, as main's echo reads it (typed_test.go:926), so
+// it is bound to the timetable, never the test's own value or a time no
+// answer gave. With no window, in a client test and a keploy test.
+func TestOutcomeAWallClockOfNoZonePickedFromATimetableInUTCIsItsValue(t *testing.T) {
+	const p = "args.0"
+	ist := time.FixedZone("IST", 5*3600+1800)
+	call := time.Date(2026, 10, 22, 5, 44, 20, 0, time.UTC)
+	recPick, livePick := time.Date(2026, 10, 22, 5, 44, 0, 0, time.UTC), time.Date(2026, 10, 22, 5, 45, 0, 0, time.UTC)
+	for tname, slots := range map[string][2]string{
+		"in UTC":             {"2026-10-22T05:44:00Z", "2026-10-22T05:45:00Z"},
+		"at the app's +5:30": {"2026-10-22T11:14:00+05:30", "2026-10-22T11:15:00+05:30"},
+	} {
+		tt := getAnswer("mock-2", "http://api/departures", `{"slots":[{"at":"`+slots[0]+`"},{"at":"`+slots[1]+`"}]}`, call.Add(-time.Second))
+		for _, client := range []bool{false, true} {
+			in := iCall(p, Instant, "", "", call, call.Add(FullRoundLead), nil, nil, []Raw{RawOf(tt, true)})
+			in.Rec.Leaves[p], in.Live.Leaves[p] = WallClockLeaf(p, p, recPick.In(ist), time.Minute), WallClockLeaf(p, p, livePick.In(ist), time.Minute)
+			in.Drifts.zone, in.Drifts.clientTests = ist, client
+			iValue(t, fmt.Sprintf("a wall clock in IST picked from a timetable %s, client test %v", tname, client), oWord(t, Decide(in), "2026-10-22T11:14", "2026-10-22T11:15"), "mock-2")
+		}
 	}
 }
 
