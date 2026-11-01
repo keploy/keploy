@@ -167,14 +167,18 @@ func (l Landed) String() string {
 // givens, which test and mock it is, the Mode, the adapter's Caps, the noise
 // keploy.yml declares (word -1: the whole field), each mock's scope in
 // mappings.yaml (nil: none known; read it through ScopeOf), where the full
-// round's call landed, and how the adapter names a leaf's place (nil:
-// VarPlace; read it through AddressOf).
+// round's call landed, how the adapter names a leaf's place (nil:
+// VarPlace; read it through AddressOf), and the instant a client test
+// began at in its recording (RecBegan: the tracker's recorded begin, zero
+// where none is known), which the test's own value must precede where no
+// window tells it.
 type Input struct {
 	Drifts    *DriftCache
 	Drift     []string
 	Live, Rec Shape
 	At        time.Time
 	Arrived   time.Time
+	RecBegan  time.Time
 	Earlier   []Earlier
 	Raw       []Raw
 	Resp      []Leaf
