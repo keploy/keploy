@@ -1716,16 +1716,13 @@ func TestAnOffsetLearnedAtAStepHoldsByItsStepAndItsGuards(t *testing.T) {
 	if lo, hi := own.CutOffsets(); lo != -2*sec || hi != -2*sec || !own.Narrow() || own.Fine() {
 		t.Fatalf("clock - 2s at the second: cuts %s to %s, Narrow %v, Fine %v", lo, hi, own.Narrow(), own.Fine())
 	}
-	// A plain read learned at a Step holds as a plain read only at its own
-	// cut; at a Step above its Res (no learn step writes one: a hand-edited
-	// file) it holds nothing, not even the read itself.
-	plain := ClockOffset{Res: sec, Layout: LayoutTyped, Step: sec}
-	if !plain.Holds(to.Truncate(sec), sec, from, to) {
-		t.Error("FALSE RED: a plain read at its own second does not hold the read")
-	}
-	plain.Step = time.Minute
-	if plain.Holds(to.Truncate(sec), sec, from, to) {
-		t.Error("FALSE GREEN: a plain read at a Step above its Res holds")
+	// No learn step writes a plain read at a Step (a hand-edited file): it
+	// holds nothing, not even the read itself.
+	for _, step := range []time.Duration{sec, time.Minute} {
+		plain := ClockOffset{Res: sec, Layout: LayoutTyped, Step: step}
+		if plain.Holds(to.Truncate(sec), sec, from, to) {
+			t.Errorf("FALSE GREEN: a plain read at a Step of %s holds", step)
+		}
 	}
 	// A range at its own cut wider than its unit (clock + 29d to 31d at the
 	// second: no cut no unit holds three of, nor a phase lock) is no narrow
@@ -1934,3 +1931,121 @@ a plain read at the second | CoarseChecked, Checkable(1s) = false true true true
 a plain read at the second | Holds(1s) = 0111110 1111110 1111110
 a plain read at the second | Meet(next), Meet(self) = clock reads no one offset holds (from 0s up to -1.4s), empty true, step 0s; clock
 `
+
+// A look-back one cut below its step has Max 0: its range ends at the whole
+// step and holds no value past it, so it is a look-back, and a replay holds
+// the application's value by the phase rule. Its guards hold nothing of any
+// other range at a step: one around zero, one above zero, one empty.
+func TestAPhaseLockUpToZeroHoldsAndItsGuardsHoldNothingElse(t *testing.T) {
+	sec := time.Second
+	lock := func(min, max time.Duration) ClockOffset {
+		return ClockOffset{Min: min, Max: max, Res: sec, Step: time.Minute, Layout: LayoutTyped}
+	}
+	to := time.Date(2026, 11, 1, 15, 21, 40, 0, time.UTC)
+	from := to.Add(-61 * time.Millisecond)
+	value := to.Truncate(time.Minute).Add(-sec)
+	if !lock(-sec, 0).Holds(value, sec, from, to) {
+		t.Errorf("the end of the last minute, Max 0: holds nothing; want the application's value")
+	}
+	if lock(-sec, 0).Holds(to.Truncate(sec), sec, from, to) {
+		t.Errorf("the end of the last minute, Max 0: holds a dropped look-back")
+	}
+	for name, o := range map[string]ClockOffset{
+		"a range around zero": lock(-sec, sec),
+		"a range above zero":  lock(sec, 2*sec),
+		"an empty range":      lock(-sec, -sec),
+		"a backward range":    lock(-sec, -2*sec),
+		"no range":            lock(0, 0),
+	} {
+		for ph := time.Duration(0); ph < time.Minute; ph += sec {
+			if v := to.Truncate(time.Minute).Add(ph); o.Holds(v, sec, from, to) {
+				t.Errorf("%s (%+v) holds %s; want nothing", name, o, v)
+			}
+		}
+	}
+	for name, o := range map[string]ClockOffset{
+		"a Step below its Res": {Min: -3 * time.Minute, Max: -2 * time.Minute, Res: time.Minute, Step: sec, Layout: LayoutTyped},
+		"a Step and no Res":    {Min: -3 * time.Minute, Max: -2 * time.Minute, Step: sec, Layout: LayoutTyped},
+	} {
+		for ph := -5 * time.Minute; ph < time.Minute; ph += sec {
+			if v := to.Add(ph); o.Holds(v, sec, from, to) {
+				t.Errorf("%s (%+v) holds %s; want nothing", name, o, v)
+			}
+		}
+	}
+	// One Res of slack after the window's end: a read at :59.9 written a
+	// second on stands in the next minute.
+	end := time.Date(2026, 11, 1, 15, 21, 59, 900e6, time.UTC)
+	if !lock(-103*sec, -102*sec).Holds(time.Date(2026, 11, 1, 15, 22, 0, 0, time.UTC).Add(-103*sec), sec, end.Add(-time.Millisecond), end) {
+		t.Errorf("a whole step one Res after the window's end: holds nothing; want its slack")
+	}
+	if !lock(-30*sec, -29*sec).Narrow() {
+		t.Errorf("a phase lock that reads in seconds is not Narrow: its range is one Res wide and its step's grid checks it")
+	}
+}
+
+// Two learnings of one place meet by the same rule in any order and any
+// grouping, and a phase lock (Step above Res) never turns into an offset
+// read at its values' own cut, which would drop the remainder it is locked
+// to. Two read at their own cuts meet at the coarser, as an offset learned
+// before Step meets.
+func TestMeetKeepsAPhaseLockAndIsTheSameInAnyOrder(t *testing.T) {
+	sec := time.Second
+	lock := ClockOffset{Min: -103 * sec, Max: -102 * sec, Res: sec, Step: time.Minute, Layout: LayoutTyped}
+	ownMin := ClockOffset{Min: -2 * time.Minute, Max: -time.Minute - 30*sec, Res: time.Minute, Step: time.Minute, Layout: LayoutTyped}
+	ownSec := ClockOffset{Min: -2 * time.Minute, Max: -time.Minute, Res: sec, Step: sec, Layout: LayoutTyped}
+	if m := lock.Meet(ownMin); m.Step != StepApart || !m.Empty() {
+		t.Errorf("a phase lock met with an offset at its step's own cut: %+v; want StepApart, which holds nothing", m)
+	}
+	if m := ownMin.Meet(lock); m.Step != StepApart || !m.Empty() {
+		t.Errorf("an offset at a step's own cut met with a phase lock: %+v; want StepApart, which holds nothing", m)
+	}
+	for _, m := range []ClockOffset{ownSec.Meet(ownMin), ownMin.Meet(ownSec)} {
+		if m.Step != time.Minute || m.Res != time.Minute {
+			t.Errorf("two read at their own cuts: %+v; want read at the coarser", m)
+		}
+	}
+	if m := lock.Meet(lock); m.Step != time.Minute || m.Res != sec || m.Empty() {
+		t.Errorf("a phase lock met with itself: %+v; want it kept", m)
+	}
+	pick := []ClockOffset{lock, ownMin, ownSec,
+		{Min: -3 * sec, Max: -2 * sec, Res: sec, Step: sec, Layout: LayoutTyped},
+		{Min: -3 * sec, Max: -sec, Res: sec, Layout: LayoutTyped},
+		{Min: -103 * sec, Max: -102 * sec, Res: time.Millisecond, Step: sec, Layout: LayoutTyped},
+		{Min: -time.Hour, Max: -sec, Res: time.Minute, Step: time.Hour, Layout: LayoutTyped}}
+	for _, a := range pick {
+		for _, b := range pick {
+			for _, c := range pick {
+				x, y, z := a.Meet(b).Meet(c), a.Meet(c).Meet(b), b.Meet(c).Meet(a)
+				if x.Step != y.Step || y.Step != z.Step || x.Res != y.Res || x.Min != y.Min || x.Max != z.Max {
+					t.Errorf("meet depends on its order: %+v, %+v, %+v: %+v, %+v, %+v", a, b, c, x, y, z)
+				}
+			}
+		}
+	}
+}
+
+// What a Clock's line names of its Step: a look-back's cut only where it is
+// above the values' own (read at its own cut, the offset says all of it),
+// and the limit of a read since its test began only of one learned at a
+// Step (one learned before Step reads as it did).
+func TestAClockOffsetsStringNamesItsStepAndItsSpan(t *testing.T) {
+	sec := time.Second
+	lock := ClockOffset{Min: -103 * sec, Max: -102 * sec, Res: sec, Step: time.Minute, Layout: LayoutTyped}
+	own := ClockOffset{Min: -2*sec - 61*time.Millisecond, Max: -sec - 400*time.Millisecond, Res: sec, Step: sec, Layout: LayoutTyped}
+	if got := lock.String(); !strings.Contains(got, ", read cut to 1m0s before the offset") {
+		t.Errorf("a phase lock: %q; want its step named", got)
+	}
+	if got := own.String(); strings.Contains(got, "read cut to") {
+		t.Errorf("an offset read at its own cut: %q; want no step named", got)
+	}
+	limit := "a replay passes a read made anywhere in that span plus the offset"
+	since := ClockOffset{Min: 29 * 24 * time.Hour, Max: 31 * 24 * time.Hour, Res: sec, Layout: LayoutTyped, Since: SinceTestBegin}
+	if got := since.String(); strings.Contains(got, limit) {
+		t.Errorf("a read since its test began learned before Step: %q; want it read as it did", got)
+	}
+	since.Step = sec
+	if got := since.String(); !strings.Contains(got, limit) {
+		t.Errorf("a read since its test began learned at a Step: %q; want its limit stated", got)
+	}
+}
