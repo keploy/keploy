@@ -19,10 +19,17 @@ import (
 // the hang from issue #4398: when the src side reports a non-TLS verdict
 // (here, by erroring out because the client closed its connection) while the
 // dst side is still idle inside sniffAndRelayLoop, opportunisticTLSIntercept
-// must still return in bounded time. Before the fix, the non-TLS branch
-// waited for the idle peer goroutine to exit *before* cancelling the context
-// that would tell it to stop, so this call hung indefinitely instead of
-// timing out after opportunisticPeekChunkTimeout.
+// must still return, and must not wait out the idle peer's read window
+// either. Before the #4398 fix, the non-TLS branch waited for the idle peer
+// goroutine to exit *before* cancelling the context that would tell it to
+// stop, so this call hung indefinitely.
+//
+// The peer's window here is longer than the test binary's deadline, so the
+// call returns only if the stop itself ended the peer's read: no wall clock
+// decides the verdict. With the 5 s window this test used to allow 2 s, and
+// on a loaded host the stop could land between the loop's context check and
+// its arming of a fresh deadline, which overwrote the poke and parked the
+// peer a whole window (about 1 run in 180 under -race on kernel 7.2).
 func TestOpportunisticTLSIntercept_NonTLS_ReturnsBoundedWhenPeerIdle(t *testing.T) {
 	// Silent upstream: accepts the dial but never writes or closes, so the
 	// dst-side sniffAndRelayLoop stays blocked in its read-timeout loop
@@ -44,7 +51,8 @@ func TestOpportunisticTLSIntercept_NonTLS_ReturnsBoundedWhenPeerIdle(t *testing.
 	srcConn, client := net.Pipe()
 	defer client.Close()
 
-	p := &Proxy{logger: testLogger()}
+	// A window no run reaches: an idle read ends only when the stop ends it.
+	p := &Proxy{logger: testLogger(), peekChunkWindow: 24 * time.Hour}
 
 	resCh := make(chan error, 1)
 	go func() {
@@ -61,24 +69,17 @@ func TestOpportunisticTLSIntercept_NonTLS_ReturnsBoundedWhenPeerIdle(t *testing.
 		t.Fatalf("client close: %v", err)
 	}
 
-	// Two properties in one bound. "Returns at all" is the #4398 fix
-	// (cancel before waiting). "Returns in well under
-	// opportunisticPeekChunkTimeout" is the error-path deadline poke: this
+	// Two properties in one wait. "Returns at all" is the #4398 fix (cancel
+	// before waiting). "Returns before the peer's window ends" is the stop's
+	// deadline poke reaching a peer parked in Read or about to arm one: this
 	// side already failed, so both connections are going to be closed
 	// regardless and there is no reason to hold two goroutines and two
-	// sockets for a further 5 s. Teardown is sub-millisecond in practice,
-	// so 2 s is ~1000x headroom while still failing if either property is
-	// lost.
-	const bound = 2 * time.Second
-	select {
-	case <-resCh:
-	case <-time.After(bound):
-		t.Fatalf("opportunisticTLSIntercept did not return within %s of the client closing "+
-			"while the peer side was idle. Either the non-TLS branch stopped cancelling the "+
-			"idle peer before waiting on it (#4398), or it stopped poking an expired read "+
-			"deadline on the error path and is now waiting out a full %s chunk timeout",
-			bound, opportunisticPeekChunkTimeout)
-	}
+	// sockets for a further window. The window outlasts the wait, so losing
+	// either property leaves the call blocked and awaitEvent fails the test.
+	_ = awaitEvent(t, resCh, "opportunisticTLSIntercept returning after the client closed while the peer "+
+		"side was idle (either the non-TLS branch stopped cancelling the idle peer before waiting on "+
+		"it (#4398), or its expired-deadline poke no longer ends the peer's read and the call waits "+
+		"out the peer's whole read window)")
 }
 
 // TestOpportunisticTLSIntercept_NonTLS_BudgetExhaustedWithIdlePeer_KeepsRelaying

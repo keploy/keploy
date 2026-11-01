@@ -160,13 +160,12 @@ func (p *Proxy) opportunisticTLSIntercept(ctx context.Context, srcConn net.Conn,
 			// and the next read — continuePlainRelay's io.Copy — gets them
 			// intact.
 			//
-			// The poke is best-effort, not a guarantee: a peer sitting
-			// between its loop-top ctx check and its own SetReadDeadline
-			// will overwrite this deadline with a fresh one and park
-			// anyway. It also only reaches a peer blocked in Read — one
-			// blocked in to.Write() is bounded by that call's own write
-			// deadline instead. Either way the wait is capped at one
-			// opportunisticPeekChunkTimeout rather than forever.
+			// The poke reaches every peer that is reading or about to:
+			// the loop arms its own deadline before it looks at ctx, so a
+			// peer that overwrites this poke with a fresh deadline sees
+			// the cancel next and leaves (see sniffAndRelayLoop). It does
+			// not reach a peer blocked in to.Write(); that one is bounded
+			// by the write's own deadline, one window at most.
 			cancelRelay()
 			_ = srcConn.SetReadDeadline(time.Now())
 			_ = dstConn.SetReadDeadline(time.Now())
@@ -241,6 +240,15 @@ const (
 	opportunisticDialTimeout = 10 * time.Second
 )
 
+// peekChunkTimeout is the relay loop's window: opportunisticPeekChunkTimeout
+// unless a test set its own (Proxy.peekChunkWindow).
+func (p *Proxy) peekChunkTimeout() time.Duration {
+	if p.peekChunkWindow > 0 {
+		return p.peekChunkWindow
+	}
+	return opportunisticPeekChunkTimeout
+}
+
 // sniffAndRelayLoop reads chunks from `from` and forwards each one
 // to `to` while peeking the first 5 bytes for the TLS handshake
 // pattern. Only the src side meaningfully detects TLS — the dst side
@@ -251,14 +259,25 @@ func (p *Proxy) sniffAndRelayLoop(ctx context.Context, side string, from, to net
 	buf := make([]byte, 8192)
 	relayed := 0
 
+	window := p.peekChunkTimeout()
 	for {
-		select {
-		case <-ctx.Done():
+		// Arm this read's deadline BEFORE looking at the context. A stop
+		// cancels the context first and then pokes an already-expired
+		// deadline (cleanup, and the non-TLS branch), and both deadline
+		// sets go through the connection's one lock, so they are ordered:
+		// armed before the poke, the poke replaces this deadline and the
+		// Read below returns at once; armed after it, the cancel came
+		// before this arm and the check below sees it. Either way the
+		// loop is out without a window spent. Looked at first and armed
+		// after, a stop landing between the two had its poke overwritten
+		// by this fresh deadline, and the loop parked a whole window: on a
+		// loaded host every such connection's close or hijack then waited
+		// out opportunisticPeekChunkTimeout.
+		_ = from.SetReadDeadline(time.Now().Add(window))
+		if ctx.Err() != nil {
+			_ = from.SetReadDeadline(time.Time{})
 			return
-		default:
 		}
-
-		_ = from.SetReadDeadline(time.Now().Add(opportunisticPeekChunkTimeout))
 		n, err := from.Read(buf)
 		_ = from.SetReadDeadline(time.Time{})
 
@@ -325,7 +344,7 @@ func (p *Proxy) sniffAndRelayLoop(ctx context.Context, side string, from, to net
 		written := 0
 		var werr error
 		for written < len(chunk) {
-			_ = to.SetWriteDeadline(time.Now().Add(opportunisticPeekChunkTimeout))
+			_ = to.SetWriteDeadline(time.Now().Add(window))
 			var wn int
 			wn, werr = to.Write(chunk[written:])
 			_ = to.SetWriteDeadline(time.Time{})
