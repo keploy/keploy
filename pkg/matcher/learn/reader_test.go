@@ -5,6 +5,9 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
+
+	"go.keploy.io/server/v3/pkg/models"
 )
 
 // changedPairs are the changed words of a reading, "rec>live" each, in
@@ -295,5 +298,119 @@ func TestReaderIndexHoldsNoTextPastItsBudget(t *testing.T) {
 	}
 	if grew > 8<<20 {
 		t.Fatalf("the index holds %d MiB after %d recordings of 1 MiB were asked about and dropped: it keeps texts past its %d MiB budget", grew>>20, n, readerBudget>>20)
+	}
+}
+
+// RD8: a place keeps its recording's handle in the call's index (textOf),
+// never the recording's text. A call that asks about every recording before
+// it, each read from the set's store and let go again, holds at once no more
+// than the index's budget and the one text it reads, however many handles
+// it keeps. A question the index answered within the budget is answered
+// again without reading the recording; past the budget it is unread, and so
+// is the text itself where it does not fit what is left of the budget.
+func TestReaderTextOfARecordingPinsNothingPastTheBudget(t *testing.T) {
+	defer func(b, r int64) { bodyBudget, readerBudget = b, r }(bodyBudget, readerBudget)
+	bodyBudget, readerBudget = 0, 5<<19
+	const n, size = 64, 1 << 20
+	tr := NewTracker()
+	tr.NewSet()
+	tr.Begin()
+	defer tr.End()
+	dc := tr.Drifts()
+	id := func(i int) string { return fmt.Sprintf("%07d", i) }
+	mocks := make([]*models.Mock, n)
+	raws := make([]Raw, n)
+	for i := range mocks {
+		body := `{"id":"` + id(i) + `","note":"` + strings.Repeat("w ", size/2) + `"}`
+		mocks[i] = getAnswer("mock-"+id(i), "http://api/items/"+id(i), body, eRecAt.Add(-time.Duration(n-i)*time.Second))
+		raws[i] = dc.LazyRawOf(mocks[i], false, nil)
+	}
+	heap := func() int64 {
+		runtime.GC()
+		var st runtime.MemStats
+		runtime.ReadMemStats(&st)
+		return int64(st.HeapAlloc)
+	}
+	x := newReaderIndex(dc)
+	before := heap()
+	places := make([]*readerText, n)
+	for i := range raws {
+		places[i] = x.textOf(raws[i])
+		if held, read := places[i].holdsWord(id(i)); read && !held {
+			t.Fatalf("recording %d: read, and its own id not held", i)
+		}
+	}
+	grew := heap() - before
+	runtime.KeepAlive(places)
+	if grew > readerBudget+8<<20 {
+		t.Fatalf("the call holds %d MiB with a handle to each of %d recordings of 1 MiB: it keeps texts past its %d KiB budget", grew>>20, n, readerBudget>>10)
+	}
+	if !x.unread() {
+		t.Fatalf("%d recordings of 1 MiB against a %d KiB budget: want unread", n, readerBudget>>10)
+	}
+	if held, read := places[0].holdsWord(id(0)); !held || !read {
+		t.Fatalf("the first recording, within the budget: held %v read %v", held, read)
+	}
+	loads := dc.Loads()
+	for _, w := range []string{id(0), "w", "zzz"} {
+		places[0].holdsWord(w)
+		places[0].holdsToken(tokenID, w)
+	}
+	if got := dc.Loads(); got != loads {
+		t.Errorf("asking a recording within the budget again read it again (%d loads, want %d)", got, loads)
+	}
+	loads = dc.Loads()
+	if _, read := places[n-1].holdsWord(id(n - 1)); read {
+		t.Errorf("the last recording, past the budget, reads as read")
+	}
+	if _, _, read := places[n-1].holdsMoment(moment{}); read {
+		t.Errorf("the last recording's instants, past the budget, read as read")
+	}
+	if got := dc.Loads(); got != loads {
+		t.Errorf("asking a recording past the budget again loaded it again (%d loads, want %d)", got, loads)
+	}
+	if s, ok := places[0].textNow(); !ok || s != raws[0].Text() {
+		t.Errorf("the first recording's text: ok %v, the payload's %v", ok, s == raws[0].Text())
+	}
+	if _, ok := places[n-1].textNow(); ok {
+		t.Errorf("the last recording's text, larger than what is left of the budget, reads as read")
+	}
+	// A recording keploy could not read holds no word: unread, never
+	// "not held".
+	if _, read := x.textOf(Raw{mock: "mock-unread"}).holdsWord("w"); read {
+		t.Errorf("a recording keploy could not read reads as read")
+	}
+}
+
+// A base64 token is held where it stands whole, no byte of the base64
+// alphabets or its padding on either side. The index reads a text's whole
+// runs once (wholeB64Runs) instead of scanning the text per token: each
+// base64 token (isB64Run, as tokenSpans cuts them) is held by the one
+// exactly where the scan holds it.
+func TestReaderWholeBase64RunsAreTheScansTokens(t *testing.T) {
+	scan := func(text, tok string) bool {
+		for i := 0; i+len(tok) <= len(text); i++ {
+			end := i + len(tok)
+			if text[i:end] == tok && (i == 0 || !isB64Byte(text[i-1])) && (end == len(text) || !isB64Byte(text[end]) && text[end] != '=') {
+				return true
+			}
+		}
+		return false
+	}
+	texts := []string{"ab=cd", "abc==x", "abc==", "x.abc=.y", "abc=def", "eyJh.c2ln_-+/==;", "a==b==", "==ab", "a-b_c+d/e", "q=1&r=Zm9v=="}
+	for _, text := range texts {
+		x := newReaderIndex(nil)
+		for i := 0; i < len(text); i++ {
+			for j := i + 1; j <= len(text); j++ {
+				tok := text[i:j]
+				if !isB64Run(tok) {
+					continue
+				}
+				held, read := x.text(text).holdsToken(tokenB64, tok)
+				if want := scan(text, tok); held != want || !read {
+					t.Errorf("%q in %q: held %v read %v, the scan holds it %v", tok, text, held, read, want)
+				}
+			}
+		}
 	}
 }
