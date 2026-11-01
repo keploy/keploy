@@ -854,7 +854,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			// the exchange is done).
 			logger.Debug("The client went once the app's answer had arrived whole; recording the exchange", zap.Error(err))
 		} else {
-			resp.Body.Close() // Close explicitly.
+			_ = resp.Body.Close() // Close explicitly.
 			if answerWritten != nil {
 				answerWritten()
 			}
