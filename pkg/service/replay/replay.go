@@ -2891,6 +2891,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		zap.String("testSetID", testSetID),
 		zap.Int("count", len(consumedMocks)),
 		zap.Any("mocks", consumedMocks))
+	// setupDrained names what the setup drain consumed (boot traffic, a
+	// readiness gate's call): none of it is a duplicate's to delete
+	// (dropDuplicates).
+	setupDrained := make(map[string]bool, len(consumedMocks))
+	for _, m := range consumedMocks {
+		setupDrained[m.Name] = true
+	}
 	// Partition the pre-first-test consumption. Everything drained here was
 	// consumed BEFORE any test fired, but it is not all the same tier:
 	//
@@ -6501,6 +6508,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 		r.logger.Warn("skipping mock pruning: this run's consumed-mock set is not trustworthy enough to delete against, so recorded mocks are preserved", fields...)
 	}
+	// droppedDuplicates: dynamic dedup's duplicates whose mocks and mapping
+	// lines this prune deleted (dropDuplicates); the mapping write holds them
+	// out of the passing tests.
+	var droppedDuplicates map[string]struct{}
 	if prune {
 		noisyTestCases := r.hookImpl.GetNoisyTestCaseNames(testSetID)
 		if len(noisyTestCases) > 0 {
@@ -6525,6 +6536,17 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		err = r.mockDB.UpdateMocks(runTestSetCtx, testSetID, passingTotalConsumedMocks, pruneBefore, startupCutoffTime)
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to delete unused mocks")
+		}
+		// Not when a test got no answer or what a test consumed was not read
+		// (a duplicate's mock may be another's), nor under the proven switch,
+		// under which only a record writes mappings.yaml.
+		if len(noAnswerTests) == 0 && len(consumptionUnread) == 0 && !provenswitch.On() {
+			droppedDuplicates = r.dropDuplicates(runTestSetCtx, testSetID, duplicateDropIn{
+				consumers: consumers,
+				consumed:  passingTotalConsumedMocks,
+				setup:     setupDrained,
+				run:       actualTestMockMappings,
+			})
 		}
 	} else if r.config.Test.NoiseDetection() && r.instrument && !provenswitch.On() {
 		// (Under the proven switch only record's full round writes what was
@@ -6639,8 +6661,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// leave every test of a set with one failure with no mapping at all, where
 	// a set recorded without a mappings.yaml gets one from its first replay
 	// (enterprise's auto-replay, for one).
-	passing := passingTests(testCaseResults, consumptionUnread, obsoleteShaped, passedMissShaped(testCaseResults, leftRecordedUnconsumed))
+	passing := passingTests(testCaseResults, consumptionUnread, obsoleteShaped, passedMissShaped(testCaseResults, leftRecordedUnconsumed), heldIDs(droppedDuplicates))
 	mappingDoc, keptRecorded := passingEntriesOf(actualTestMockMappings, passing)
+	// A dropped duplicate is gone, not a test left as recorded.
+	keptRecorded = withoutTests(keptRecorded, droppedDuplicates)
 	// Read only when instrumented, the run served mocks, and every read of
 	// what the application consumed succeeded: otherwise the agent was never
 	// asked what a test consumed, or (--mocking=false, a global passthrough)
