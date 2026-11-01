@@ -167,6 +167,7 @@ type Record struct {
 	// "sequential" preserves the legacy `test-N.yaml` numbering.
 	TestCaseNaming string `json:"testCaseNaming" yaml:"testCaseNaming" mapstructure:"testCaseNaming"`
 	Synchronous    bool   `json:"sync" yaml:"sync" mapstructure:"sync"`
+	DetectPII      bool   `json:"detectPII" yaml:"detectPII" mapstructure:"detectPII"`
 	EnableSampling int    `json:"enableSampling" yaml:"enableSampling"`
 	// ChannelBindingShim enables the SCRAM-SHA-256-PLUS channel-binding shim.
 	// The shim attaches eBPF uprobes to libcrypto's X509_digest and rewrites the
