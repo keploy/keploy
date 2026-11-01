@@ -128,21 +128,31 @@ func fuzzyMatch(ctx context.Context, logger *zap.Logger, reqBuff [][]byte, mockD
 // times the test recorded that exchange, 0 when it is not one or exact
 // serving is off.
 func extraCall(reqBuffs [][]byte, mockDb integrations.MockMemDb) int {
+	n, _ := extraCallOf(reqBuffs, mockDb)
+	return n
+}
+
+// extraCallOf is extraCall with the recording the exchange repeats: the
+// first of the test's answered exchanges it is
+// (models.MockMismatchReport.ExtraOf); "" when n is 0.
+func extraCallOf(reqBuffs [][]byte, mockDb integrations.MockMemDb) (n int, of string) {
 	answered := answeredExchanges(mockDb)
 	if len(answered) == 0 {
-		return 0
+		return 0, ""
 	}
 	idx := findExactMatch(answered, reqBuffs, true)
 	if idx == -1 {
-		return 0
+		return 0, ""
 	}
-	n := 0
 	for _, mk := range answered {
 		if sameRequests(mk.Spec.GenericRequests, answered[idx].Spec.GenericRequests) {
+			if n == 0 {
+				of = mk.Name
+			}
 			n++
 		}
 	}
-	return max(n, 1)
+	return max(n, 1), of
 }
 
 // answeredExchanges are, under exact serving (the proven switch), the open

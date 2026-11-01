@@ -38,6 +38,12 @@ func TestAnExchangeMoreThanRecordedIsAnExtraCall(t *testing.T) {
 	if n := extraCall([][]byte{[]byte("PING")}, db); n != 2 {
 		t.Fatalf("PING was recorded twice for the test, got %d", n)
 	}
+	if n, of := extraCallOf([][]byte{[]byte("PING")}, db); n != 2 || of != "mock-1" {
+		t.Fatalf("PING repeats mock-1, the first of its two recordings, got %d of %q", n, of)
+	}
+	if n, of := extraCallOf([][]byte{[]byte("GET k")}, db); n != 1 || of != "mock-3" {
+		t.Fatalf("GET k repeats mock-3, got %d of %q", n, of)
+	}
 	if n := extraCall([][]byte{[]byte("SET k v")}, db); n != 0 {
 		t.Fatalf("an exchange the test never recorded is an extra call: %d", n)
 	}

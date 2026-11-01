@@ -454,7 +454,9 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 		// One command more than the open test recorded: its own recordings
 		// of it answered, and the background was hidden from it.
 		if !miss.restaged && hidden {
-			miss.extraCall = len(ownRepeats(ctx, req, held, own, decodeCtx, noiseEngine, userBodyNoise, 0))
+			if reps := ownRepeats(ctx, req, held, own, decodeCtx, noiseEngine, userBodyNoise, 0); len(reps) > 0 {
+				miss.extraCall, miss.extraOf = len(reps), reps[0].Name
+			}
 		}
 	}
 	return resp, ok, miss, err

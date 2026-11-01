@@ -20,28 +20,39 @@ import (
 // that holds only them and that no match can consume, so one definition of
 // "the same call" serves both the answer and this verdict.
 func (h *HTTP) extraCall(ctx context.Context, input *req, mockDb integrations.MockMemDb, headerNoise, bodyNoise map[string][]string, urlNoise []string, autoURLDynamic, schemaNoiseDetection, schemaNoiseStrict, mockCorrelation bool) int {
+	n, _ := h.extraCallOf(ctx, input, mockDb, headerNoise, bodyNoise, urlNoise, autoURLDynamic, schemaNoiseDetection, schemaNoiseStrict, mockCorrelation)
+	return n
+}
+
+// extraCallOf is extraCall with the recording the call repeats: of the
+// test's answered mocks the call matches on its own, the first to answer
+// (models.MockMismatchReport.ExtraOf); "" when n is 0, and when the call
+// matched only the answered mocks together.
+func (h *HTTP) extraCallOf(ctx context.Context, input *req, mockDb integrations.MockMemDb, headerNoise, bodyNoise map[string][]string, urlNoise []string, autoURLDynamic, schemaNoiseDetection, schemaNoiseStrict, mockCorrelation bool) (n int, of string) {
 	er, ok := mockDb.(integrations.ExactConsumedReader)
 	if !ok {
-		return 0
+		return 0, ""
 	}
 	answered := FilterHTTPMocks(er.ConsumedTestMocks())
 	if len(answered) == 0 {
-		return 0
+		return 0, ""
 	}
 	dry := h.answeredMatch(ctx, input, mockDb, headerNoise, bodyNoise, urlNoise, autoURLDynamic, schemaNoiseDetection, schemaNoiseStrict, mockCorrelation)
 	if !dry(answered) {
-		return 0
+		return 0, ""
 	}
 	// How often the test recorded the call: each answered mock the call
 	// matches on its own (recordings of one call may differ where its
 	// variables sit).
-	n := 0
 	for _, a := range answered {
 		if dry([]*models.Mock{a}) {
+			if n == 0 {
+				of = a.Name
+			}
 			n++
 		}
 	}
-	return max(n, 1)
+	return max(n, 1), of
 }
 
 // ownCall reports whether the request is one of the open test's own calls
