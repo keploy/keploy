@@ -325,6 +325,37 @@ func TestOutcomeAnAnswersInstantBindsWhereFsViewIsNotStated(t *testing.T) {
 	oRefused(t, "an answer's instant with no answer time", d, "pick", "mock-7")
 }
 
+// Round F's moment stands in an answer of the call's test or the start-up,
+// recorded before the call, whose view in round F keploy cannot tell, and the
+// recorded moment does not stand there. F may have given it there, so the
+// value may be a copy of that answer, never surely a read of the clock:
+// unknown, as the word rule reads the same place. An unstated answer that
+// holds neither moment says nothing of an instant, and the window still reads
+// it as a clock read; one that holds the recorded moment is its source.
+func TestOutcomeFsMomentInAnAnswerOfNoStatedViewIsUnknown(t *testing.T) {
+	const p = "body.sentAt"
+	rAt := oAt.Add(300 * time.Millisecond)
+	fAt := oAt.Add(time.Hour + 300*time.Millisecond)
+	rec, live := iMs(rAt.Add(-50*time.Millisecond)), iMs(fAt.Add(-50*time.Millisecond))
+	ans := func(v string) Raw { return oAnswer("mock-7", 100*time.Millisecond, v) }
+	call := func(x Raw) Decision {
+		return oWord(t, Decide(iCall(p, String, rec, live, rAt, fAt, iWin(rAt, fAt, 60*time.Millisecond), nil, []Raw{x})), rec, live)
+	}
+	for _, c := range []struct {
+		what string
+		x    Raw
+	}{
+		{"served in the test, no view stated", ans(live).ServedAs(1)},
+		{"served at the start-up, no view stated", ans(live).ServedAs(1).ServedBeforeTheTest()},
+		{"served changed, one view holds F's moment", ans("ok").ServedAs(1).ServedChanged(ans("ok"), ans(live))},
+	} {
+		oRefused(t, c.what, call(c.x), RefusalUnknown, "mock-7")
+	}
+	iClock(t, "an unstated answer that holds neither moment", call(ans("ok").ServedAs(1)))
+	iClock(t, "served changed, no view holds either moment", call(ans("ok").ServedAs(1).ServedChanged(ans("ok"), ans("no"))))
+	iValue(t, "an unstated answer that holds the recorded moment", call(ans(rec).ServedAs(1)), "mock-7")
+}
+
 // An answer that holds only the date of a time the call sends (a timetable's
 // day, its times of day neither run's): the date reads as the recorded time
 // cut to a day, but the time of day the app wrote beside it is none of the
