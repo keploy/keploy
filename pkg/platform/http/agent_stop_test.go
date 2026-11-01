@@ -15,8 +15,10 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
 )
 
@@ -437,5 +439,38 @@ func TestRestoreFromContainerDoesNotWaitForeverForTheAgent(t *testing.T) {
 	}
 	if fake.callIndex("start:") < 0 {
 		t.Fatal("the user's container was not started again")
+	}
+}
+
+// A test command keploy mock record or replay ran that exited non-zero is the
+// tests' outcome, which keploy's verdict reads: it is said as the test
+// command's exit, not as "error while running the app". An app's error, and
+// a test command that failed in another way (it never started), stay errors.
+func TestATestCommandsExitIsNotAnAppError(t *testing.T) {
+	exit1 := models.AppError{AppErrorType: models.ErrUnExpected, Err: errors.New("exit status 1"), ExitCode: 1}
+	for _, tc := range []struct {
+		name        string
+		appErr      models.AppError
+		testCommand bool
+		want        string
+		level       zapcore.Level
+	}{
+		{"the test command exited 1", exit1, true, "the test command exited 1", zapcore.InfoLevel},
+		{"an app exited 1", exit1, false, "error while running the app", zapcore.ErrorLevel},
+		{"the test command did not start", models.AppError{AppErrorType: models.ErrCommandError, Err: errors.New("exec: not found"), ExitCode: -1}, true, "error while running the app", zapcore.ErrorLevel},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			core, logs := observer.New(zapcore.DebugLevel)
+			logAppExit(zap.New(core), tc.appErr, tc.testCommand)
+			all := logs.All()
+			if len(all) != 1 || all[0].Message != tc.want || all[0].Level != tc.level {
+				t.Fatalf("logged %v, want one %s line %q", all, tc.level, tc.want)
+			}
+		})
+	}
+	core, logs := observer.New(zapcore.DebugLevel)
+	logAppExit(zap.New(core), models.AppError{AppErrorType: models.ErrAppStopped}, true)
+	if logs.Len() != 0 {
+		t.Fatalf("a command that stopped cleanly was logged: %v", logs.All())
 	}
 }

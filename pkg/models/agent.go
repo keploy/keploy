@@ -219,6 +219,11 @@ type ScopeGateReq struct {
 	// deny list: every test it does not name runs. Read under the proven
 	// switch, where it replaces Run.
 	Skip map[string]string `json:"skip,omitempty"`
+	// Report is the file this replay's report is written to, as the
+	// project names it (keploy/reports/<run>/replay.yaml): the reason a
+	// failed test is given ends by naming it. Read under the proven switch;
+	// empty names none.
+	Report string `json:"report,omitempty"`
 	// Needs, read with Skip, holds a test to tests that must run before it:
 	// at its begin, the first ScopeNeed whose Test has not begun earlier in
 	// this replay skips it with that need's Reason. Its call holds a value

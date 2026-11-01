@@ -2091,6 +2091,21 @@ func (a *AgentClient) getUnchargedCaptureLosses(ctx context.Context) (models.Cap
 	return losses, nil
 }
 
+// logAppExit says how the command keploy ran ended, when it ended in error.
+// A test command (keploy mock record and replay) that exited non-zero is the
+// tests' outcome, which keploy's verdict reads: it is said as such, not as an
+// error of keploy's.
+func logAppExit(logger *zap.Logger, appErr models.AppError, testCommand bool) {
+	if appErr.Err == nil {
+		return
+	}
+	if testCommand && appErr.ExitCode > 0 && (appErr.AppErrorType == models.ErrUnExpected || appErr.AppErrorType == models.ErrCommandError) {
+		logger.Info(fmt.Sprintf("the test command exited %d", appErr.ExitCode))
+		return
+	}
+	utils.LogError(logger, appErr.Err, "error while running the app")
+}
+
 // captureLossStall is how long, in time keploy could run (utils/stall), a
 // read of the agent's capture losses may go with no answer before keploy
 // gives it up: stall.HangBudget, as for a read of a container's
@@ -2151,7 +2166,7 @@ func boundedAgentRead[T any](ctx context.Context, what string, read func(context
 	}
 }
 
-func (a *AgentClient) Run(ctx context.Context, _ models.RunOptions) (ret models.AppError) {
+func (a *AgentClient) Run(ctx context.Context, opts models.RunOptions) (ret models.AppError) {
 	// The agent's container this run is to create, under docker compose: a
 	// release that waits for it ends once the run is over without it
 	// (containerExited). Its end is noted last, once Run returns, whichever
@@ -2221,9 +2236,7 @@ func (a *AgentClient) Run(ctx context.Context, _ models.RunOptions) (ret models.
 				stopKilled = "keploy stopped the application at the recording's end, and " + why
 			}
 		}
-		if appErr.Err != nil {
-			utils.LogError(a.logger, appErr.Err, "error while running the app")
-		}
+		logAppExit(a.logger, appErr, opts.TestCommand)
 		if appErr.AppErrorType != models.ErrCtxCanceled && appErr != (models.AppError{}) {
 			appErrCh <- appErr
 		}
@@ -4974,17 +4987,19 @@ func (a *AgentClient) PushScopeGate(ctx context.Context, run []string, reason st
 
 // PushScopeSkips hands the agent the proven model's gate: the tests to skip,
 // by ID, each with its reason, and the tests each test needs to have begun
-// before it (models.ScopeGateReq.Needs); an empty map skips nothing. Made
-// again on a restarted agent, like the scope gate. Any answer but 200 is a
-// failure: a replay that cannot skip what CI skips refuses.
-func (a *AgentClient) PushScopeSkips(ctx context.Context, skip map[string]string, needs map[string][]models.ScopeNeed) (retErr error) {
+// before it (models.ScopeGateReq.Needs); an empty map skips nothing. report
+// is the file the replay writes its report to, which a failed test's reason
+// names ("" names none). Made again on a restarted agent, like the scope
+// gate. Any answer but 200 is a failure: a replay that cannot skip what CI
+// skips refuses.
+func (a *AgentClient) PushScopeSkips(ctx context.Context, skip map[string]string, needs map[string][]models.ScopeNeed, report string) (retErr error) {
 	defer func() {
 		if retErr == nil && a.session().recording() {
 			recorded, recordedNeeds := maps.Clone(skip), maps.Clone(needs)
-			a.session().record(stepScopeGate, func(c context.Context) error { return a.PushScopeSkips(c, recorded, recordedNeeds) })
+			a.session().record(stepScopeGate, func(c context.Context) error { return a.PushScopeSkips(c, recorded, recordedNeeds, report) })
 		}
 	}()
-	body, err := json.Marshal(models.ScopeGateReq{Skip: skip, Needs: needs})
+	body, err := json.Marshal(models.ScopeGateReq{Skip: skip, Needs: needs, Report: report})
 	if err != nil {
 		return fmt.Errorf("failed to marshal the tests to skip: %w", err)
 	}
@@ -5800,10 +5815,12 @@ func (a *AgentClient) TestVariables(ctx context.Context) ([]models.VariableBindi
 
 // startWithConsole starts an agent's cmd through start, its output going to
 // keploy's console through a utils.ChildConsole: so the agent's lines are cut
-// of the values the log redactor holds, when it holds any. Call the console's
-// Exited once cmd.Wait has returned.
+// of the values the log redactor holds, when it holds any, and under a run
+// log (keploy mock replay) its info lines go to the run's keploy.log, its
+// warnings and errors to the console (utils.SetAgentConsole). Call the
+// console's Exited once cmd.Wait has returned.
 func startWithConsole(cmd *exec.Cmd, start func(*exec.Cmd) error) (*utils.ChildConsole, error) {
-	console, err := utils.SetChildConsole(cmd)
+	console, err := utils.SetAgentConsole(cmd)
 	if err != nil {
 		return nil, err
 	}

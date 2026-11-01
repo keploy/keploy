@@ -330,6 +330,17 @@ func TestTheReplaySaysWhatItProved(t *testing.T) {
 	}
 }
 
+// A judged replay (the proven switch, in a build that judges replays) says
+// what it proved in its VERDICT, from keploy's evidence on each test: the log
+// line would only repeat it, vaguer.
+func TestAJudgedReplayLeavesWhatItProvedToTheVerdict(t *testing.T) {
+	provenOn(t)
+	_, _, logs := replayIn(t, replayCase{mapped: true, runExit: models.AppError{AppErrorType: models.ErrCommandError, ExitCode: 1}})
+	if n := logs.FilterMessageSnippet("did not prove the tests run with the dependencies off").Len(); n != 0 {
+		t.Fatalf("a judged replay said %d time(s) that it proved nothing", n)
+	}
+}
+
 // Coverage from a run that could reach real services is not offline coverage,
 // and the log must not say it is.
 func TestCoverageIsOnlyOfflineWhenIsolated(t *testing.T) {
@@ -1095,6 +1106,31 @@ func TestARunWithRowsAndNoTestLeavesNoPerTestFile(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, gotRec, "a record keploy refused leaves its file")
 	require.Equal(t, withRefusal.Live, gotRec.Live, "the rows ride with the refusal")
+}
+
+// last-replay.yaml says what each of its fields means, and names the report
+// the replay wrote, so an agent reading it needs no keploy docs to tell
+// gated from skipped, or where each failed test's calls are.
+func TestTheReceiptExplainsItselfAndNamesTheReport(t *testing.T) {
+	ReportReplayTo("keploy/reports/r1/replay.yaml")
+	t.Cleanup(func() { ReportReplayTo("") })
+	keployDir, _, _ := replayIn(t, replayCase{})
+	raw, err := os.ReadFile(filepath.Join(keployDir, "set", ReceiptFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(raw)
+	if !strings.HasPrefix(got, receiptHeader) {
+		t.Fatalf("last-replay.yaml opens with %q", got[:min(len(got), 200)])
+	}
+	for _, field := range []string{"report:", "exitCode:", "runnerExitCode:", "failedBy:", "missedData:", "isolated:", "mocksDigest:", "gated", "noVerdict"} {
+		if !strings.Contains(receiptHeader, field) {
+			t.Errorf("the header does not say what %s means", field)
+		}
+	}
+	if !strings.Contains(got, "\nreport: keploy/reports/r1/replay.yaml\n") {
+		t.Fatalf("last-replay.yaml does not name the report:\n%s", got)
+	}
 }
 
 // last-replay.yaml writes a bypassed destination as every other file of the

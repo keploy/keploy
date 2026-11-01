@@ -464,7 +464,7 @@ func (m *mockService) Record(ctx context.Context) error {
 	if composeAppExit != nil {
 		appErr = <-composeAppExit
 	} else {
-		appErr = m.instrumentation.Run(ctx, models.RunOptions{AppCommand: m.config.Command})
+		appErr = m.instrumentation.Run(ctx, models.RunOptions{AppCommand: m.config.Command, TestCommand: true})
 	}
 
 	// 8. Drain the trailing mocks, THEN stop capturing.

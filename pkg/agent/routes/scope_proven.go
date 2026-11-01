@@ -23,7 +23,7 @@ type provenScope interface {
 	ClaimInstance(ctx context.Context, req models.InstanceReq, caller int) (models.InstanceResp, *models.ScopeError)
 	ProvenBegin(ctx context.Context, req models.ScopeReq) (models.ScopeBeginResp, *models.ScopeError)
 	ProvenEnd(ctx context.Context, req models.ScopeReq) (models.ScopeEndResp, *models.ScopeError)
-	SetScopeSkips(ctx context.Context, skip map[string]string, needs map[string][]models.ScopeNeed) error
+	SetScopeSkips(ctx context.Context, skip map[string]string, needs map[string][]models.ScopeNeed, report string) error
 }
 
 // refusalNoter records what the wire refused (agent.Agent.NoteRefusal).

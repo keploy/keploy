@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 )
 
@@ -47,7 +48,12 @@ var Logo = `
 
 func PrintLogo(wr io.Writer, disableANSI bool) {
 	if os.Getenv("BINARY_TO_DOCKER") != "true" {
-		printKeployLogo(wr, disableANSI, Logo)
+		// Under the proven switch the run's output is read line by line,
+		// by an agent as often as a person: the art says nothing, and the
+		// version and the log's path below it are kept.
+		if !provenswitch.On() {
+			printKeployLogo(wr, disableANSI, Logo)
+		}
 		// print version to the same writer
 		// A console that cannot be written to does not end the run: the
 		// logo, the version and the `logs:` line are said to it as every
