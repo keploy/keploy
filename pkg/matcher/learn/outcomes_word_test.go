@@ -513,7 +513,7 @@ func TestOutcomeAnAdaptersStepsOpenAFieldBeforeItsWordsAreRead(t *testing.T) {
 // longer, different text ("batch-14" sent, "seen 14 times" or a date whose
 // minute is 14 answered) is fresh, and the answer is rewritten at that word
 // with this run's word, the line naming the place (main refuses it:
-// instants_test.go:838, clock_test.go:219). Pinned as it stands until the
+// instants_test.go:838). Pinned as it stands until the
 // open question is ruled: whether such an answer is served as recorded, as
 // a read-back is where the answer does not hold the request's text whole.
 func TestOutcomeAFreshWordInsideALongerAnswerTextIsAnsweredThere(t *testing.T) {
