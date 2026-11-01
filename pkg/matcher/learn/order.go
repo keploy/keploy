@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -111,6 +112,9 @@ type decider struct {
 	set    []GivenPlaces
 	op     *offsetPlaces
 	opDone bool
+	// encoded is the leaf's inDecodedForm, read once and only where a word
+	// of it would be learned fresh.
+	encoded func() (why, place string)
 }
 
 // decideWords decides every changed word of in, and the field each
@@ -227,7 +231,9 @@ func (dc *decider) leafText(path string, at variables.Address, rec, live string)
 	}
 	var out []Decision
 	between := textReading{Rec: rec, Live: live}
-	for _, rd := range readLeaf(dc.in.Drifts, at, rec, live) {
+	rds := readLeaf(dc.in.Drifts, at, rec, live)
+	dc.encoded = sync.OnceValues(func() (string, string) { return dc.inDecodedForm(rds) })
+	for _, rd := range rds {
 		if len(between.Separators) == 0 {
 			between = rd
 		}
@@ -430,6 +436,9 @@ func (dc *decider) word(path string, bare variables.Address, rec, live, text str
 			"the value "+p.name+" sent in "+scopeName(p)+"; keploy binds only within a test and the start-up", names(outside),
 			Edit{Kind: EditMoveToMocks, Mock: p.mock}, Edit{Kind: EditMoveToStartup, Mock: p.mock}, dc.wordNoise(path, n))
 	}
+	if why, place := dc.encoded(); why != "" {
+		return dc.refuse(path, at, n, w.Rec, w.Live, RefusalUnknown, why, []string{place}, Edit{Kind: EditReRecord}, dc.fieldNoise(path))
+	}
 	if d, ok := dc.atWord(path, bare, n, w, rec, live); !ok {
 		return d
 	}
@@ -446,6 +455,54 @@ func (dc *decider) word(path string, bare variables.Address, rec, live, text str
 	d := dc.learned(path, at, n, w.Rec, w.Live, OutcomeFresh, rule+answeredAt(echo, rec), names(aside))
 	d.Echo = echo
 	return d
+}
+
+// inDecodedForm is why no word of a leaf may be learned fresh, and the place
+// that says so: an earlier place in the call's scope holds a word of 32 bits
+// or more in each run, and only the decoded forms of the leaf's texts hold
+// it. That is an id carried inside an encoding the reader opens no step for
+// (base64 wrapped between other text, base32, 0x hex, a signed message):
+// keploy reads such forms at a place but binds no word in them, so the
+// words of the encoded text would go unchecked at their first call. A place
+// that may hold them in round F (evidenceAt) refuses as well: one rule
+// across forms. It binds nothing.
+func (dc *decider) inDecodedForm(rds []textReading) (why, place string) {
+	for _, rd := range rds {
+		rs, fs := decodedOnly(dc.in.Drifts, rd.Rec, rd.Live), decodedOnly(dc.in.Drifts, rd.Live, rd.Rec)
+		for _, p := range dc.ps {
+			if p.otherTest && !dc.allScope {
+				continue
+			}
+			for _, r := range rs {
+				if !evHolds(p.t.rec, r) {
+					continue
+				}
+				for _, f := range fs {
+					if ev, read := evidenceAt(p, r, f); read && (ev == evShown || ev == evUnknown) {
+						return p.name + " held " + strconv.Quote(r) + " and " + strconv.Quote(f) + " may be round F's there: this value carries it in a decoded form, where keploy binds no word", p.name
+					}
+				}
+			}
+		}
+	}
+	return "", ""
+}
+
+// decodedOnly are the words of 32 bits or more that s's declared forms hold
+// and s does not, in any case, in no form of other, sorted so a word as it
+// stands comes before its lower-cased form.
+func decodedOnly(dc *DriftCache, s, other string) []string {
+	var out []string
+	plain, others := tokensOfForms([]string{strings.ToLower(s)}), dc.rawTokens(other)
+	for i, set := range dc.rawTokens(s) {
+		for w := range set {
+			if wordBits(w) >= 32 && !plain[i][strings.ToLower(w)] && !others[i][w] {
+				out = append(out, w)
+			}
+		}
+	}
+	slices.Sort(out)
+	return slices.Compact(out)
 }
 
 // atWord refuses a word inside a longer value where the adapter cannot
