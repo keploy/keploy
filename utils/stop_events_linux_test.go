@@ -1439,7 +1439,7 @@ func evictFromCache(t *testing.T, file string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }() // read-only: a close error loses nothing
 	if err := unix.Fadvise(int(f.Fd()), 0, 0, unix.FADV_DONTNEED); err != nil {
 		t.Fatal(err)
 	}
