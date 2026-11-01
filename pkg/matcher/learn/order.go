@@ -655,6 +655,15 @@ type instantHold struct {
 	rank int64
 }
 
+// inAView reports whether a view round F served at p holds F's moment of c,
+// or could not be read (it may: fail closed).
+func (dc *decider) inAView(p evPlace, c changedInstant) bool {
+	return slices.ContainsFunc(p.t.views, func(v *readerText) bool {
+		h, _, ok := dc.holds(p, v, c.l, c.lm, c.byText)
+		return h || !ok
+	})
+}
+
 // heldWhere is the place of each of hs that keep keeps, in order.
 func heldWhere(hs []instantHold, keep func(instantHold) bool) []evPlace {
 	var out []evPlace
@@ -803,7 +812,11 @@ func (dc *decider) coarserOnly(t *readerText, w string, m moment) bool {
 // (7), a client test's own value (8); else refused.
 func (dc *decider) instant(path string, at variables.Address, n int, c changedInstant) Decision {
 	r, l := c.r, c.l
+	inScope := func(p evPlace) bool { return dc.allScope || !p.otherTest || p.given }
+	// untold: answers of the scope before the call, whose view in round F
+	// keploy cannot tell, that hold F's moment and not R's.
 	var hs []instantHold
+	var untold []evPlace
 	for _, p := range dc.ps {
 		hr, fr, okR := dc.holds(p, p.t.rec, r, c.rm, c.byText)
 		hl, fl, okL := dc.holds(p, p.t.live, l, c.lm, c.byText)
@@ -817,11 +830,13 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 		if hr && !hl && len(c.aside) < maxLinePlaces {
 			c.aside = append(c.aside, p.name)
 		}
+		if p.fUnstated && !hr && p.side == Response && !p.given && p.state == stateBefore && inScope(p) && (hl || dc.inAView(p, c)) {
+			untold = append(untold, p)
+		}
 	}
 	// A place that holds a value by its exact text is named before one
 	// that holds it by a cut, and a finer cut before a coarser one.
 	sort.SliceStable(hs, func(i, j int) bool { return hs[i].rank < hs[j].rank })
-	inScope := func(p evPlace) bool { return dc.allScope || !p.otherTest || p.given }
 	before := func(p evPlace) bool { return p.state == stateBefore && !p.fUnstated }
 	request := func(p evPlace) bool { return p.given && !p.gave }
 
@@ -967,6 +982,17 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 		return dc.refuse(path, at, n, r, l, RefusalAnotherScope,
 			"the moment stands in "+m+"'s answer, which round F gave before the call outside its scope: a copy or a pick from it, never a read of the clock; keploy binds only within a test and the start-up", []string{m},
 			Edit{Kind: EditMoveToMocks, Mock: m}, Edit{Kind: EditMoveToStartup, Mock: m}, dc.wordNoise(path, n))
+	}
+
+	// F may have given its moment at an answer whose view keploy cannot tell,
+	// and no source above names it: the value may be a copy of that answer,
+	// so no later step may read it as the clock or a coarse copy. Unknown,
+	// as the word rule reads the same place (evidenceAt).
+	if len(untold) > 0 {
+		p := untold[0]
+		return dc.refuse(path, at, n, r, l, RefusalUnknown,
+			"keploy cannot tell what round F gave at "+p.name+" before this call (round F's moment may stand there, and the recorded one does not)", names(untold),
+			Edit{Kind: EditReRecord}, dc.wordNoise(path, n))
 	}
 
 	// 5. Clock: the call's own window holds it, as a plain read or plus an
