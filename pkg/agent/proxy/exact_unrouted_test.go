@@ -2,8 +2,10 @@ package proxy
 
 import (
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
@@ -14,10 +16,12 @@ import (
 // through the store's mark, a scoped view's and a round snapshot alike:
 // the reason the replay staged the set with (StageExactUnrouted: the record
 // lacks the mark, or this replay does not enable it), "" when the replay
-// said none or the set is routed, and models.UnroutedUnstaged when exact
-// serving runs with no set staged at all (keploy mock replay's, also after a
-// session reset). A staging view reads its set's reason too, and a call
-// marked in one set keeps that set's reason once the next set is staged.
+// said none or the set is routed, and models.UnroutedUnstaged only when the
+// agent said it (keploy mock replay's session, again after a session reset).
+// A view nobody said a reason for reads "", keploy test's set boundary
+// included: a session reset forgets the reason and never reads as keploy mock
+// replay's. A staging view reads its set's reason too, and a call marked in
+// one set keeps that set's reason once the next set is staged.
 func TestACallsMarkSaysWhyItsSetIsNotRouted(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	stage := func(rules, why string, says bool) func(mm *MockManager) {
@@ -31,7 +35,12 @@ func TestACallsMarkSaysWhyItsSetIsNotRouted(t *testing.T) {
 			mm.ServeExactPool(models.PoolKeyNone, nil)
 		}
 	}
-	mockReplay := func(mm *MockManager) { mm.ServeExactPool(models.PoolKeyNone, nil) }
+	// keploy mock replay's session, as its agent serves it
+	// (servePoolExactly): told, before its first view.
+	mockReplay := func(mm *MockManager) {
+		mm.StageExactUnrouted(models.UnroutedUnstaged)
+		mm.ServeExactPool(models.PoolKeyNone, nil)
+	}
 	marks := map[string]func(mm *MockManager) integrations.CallRound{
 		"the store's mark": func(mm *MockManager) integrations.CallRound { return mm.MarkCallRound() },
 		"a scoped view's mark": func(mm *MockManager) integrations.CallRound {
@@ -50,7 +59,8 @@ func TestACallsMarkSaysWhyItsSetIsNotRouted(t *testing.T) {
 		before, under func(mm *MockManager)
 		want          string
 	}{
-		{"keploy mock replay: no set staged", mockReplay, nil, models.UnroutedUnstaged},
+		{"keploy mock replay: its agent says it", mockReplay, nil, models.UnroutedUnstaged},
+		{"a view nobody said a reason for", func(mm *MockManager) { mm.ServeExactPool(models.PoolKeyNone, nil) }, nil, ""},
 		{"a set without the mark", stage("", models.UnroutedUnmarked, true), nil, models.UnroutedUnmarked},
 		{"a marked set this replay does not route", stage("", models.UnroutedNotEnabled, true), nil, models.UnroutedNotEnabled},
 		{"a replay that says no reason", stage("", "", false), nil, ""},
@@ -61,8 +71,12 @@ func TestACallsMarkSaysWhyItsSetIsNotRouted(t *testing.T) {
 			mm.StageExactUnrouted(models.UnroutedUnmarked)
 			mm.ServeExactPool(models.PoolKeyNone, nil)
 		}, nil, models.UnroutedUnmarked},
-		{"keploy mock replay after a session reset", func(mm *MockManager) {
+		{"keploy test's set boundary: a session reset before the next set's staging", func(mm *MockManager) {
 			stage("", models.UnroutedUnmarked, true)(mm)
+			mm.ResetForReplaySession()
+		}, nil, ""},
+		{"keploy mock replay's next session, after a session reset", func(mm *MockManager) {
+			mockReplay(mm)
 			mm.ResetForReplaySession()
 			mockReplay(mm)
 		}, nil, models.UnroutedUnstaged},
@@ -87,5 +101,90 @@ func TestACallsMarkSaysWhyItsSetIsNotRouted(t *testing.T) {
 	}
 	if got := (integrations.CallRound{}).Unrouted(); got != "" {
 		t.Fatalf("the zero CallRound says %q; want none", got)
+	}
+}
+
+// keploy test's set boundary: the next set's MockOutgoing resets the session
+// (ResetForReplaySession) before its staging, while the previous set's
+// recordings are still staged. A call an application kept alive across sets
+// (compose, --keep-app-alive) makes in that gap is refused, and the not-owned
+// finder still names a previous set's recording for it. Its mark never reads
+// as keploy mock replay's (models.UnroutedUnstaged, whose miss tells the
+// mapping edit): nobody said a reason, so it reads "", and the miss names
+// both sides.
+func TestKeployTestsSetBoundaryNeverReadsAsKeployMockReplay(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	own := httpCall("own", 0, "/orders")
+	other := httpCall("other", time.Second, "/delete")
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	// Set 1's staging, as the agent does it for keploy test.
+	mm.StageExactBackground("")
+	mm.StageExactUnrouted(models.UnroutedUnmarked)
+	mm.ServeExactPool(models.PoolKeyNone, nil)
+	mm.SetMocksWithWindow(nil, []*models.Mock{own, other}, models.BaseTime, time.Now())
+	mm.ServeExactBackground("", nil, nil)
+	mm.ServeExactPool("k", nil)
+	mm.ServeExactTest("T1", []*models.Mock{own})
+	if got := mm.MarkCallRound().Unrouted(); got != models.UnroutedUnmarked {
+		t.Fatalf("precondition: a call in set 1 reads %q; want %q", got, models.UnroutedUnmarked)
+	}
+	mm.ResetForReplaySession()
+	call := mm.MarkCallRound()
+	name, _ := mm.FindStagedNotOwned(models.HTTP, call, func(m *models.Mock) bool { return m.Name == "other" })
+	if !call.Read() || name != "other" {
+		t.Fatalf("precondition: the gap's call (read %v) names %q; want the previous set's recording other", call.Read(), name)
+	}
+	if got := call.Unrouted(); got != "" {
+		t.Fatalf("keploy test's set boundary reads as not routed because %q; want none said", got)
+	}
+}
+
+// Through the learn tracker (record's full round) a call's mark and the
+// round's snapshot read why its set is not routed too. With the tracker ahead
+// of the store's view in the staged set (TrackerAhead: of its pool view, or
+// of test-1's view as test-2 begins), the call is the staged set's, and reads
+// the reason its view was installed with. Once the tracker began a test set
+// the store has not staged (SetUnstaged), the call is that next set's, whose
+// staging has said no reason yet: it reads none, never the set before's.
+func TestALearnRoundsCallReadsWhyItsOwnSetIsNotRouted(t *testing.T) {
+	test1 := func(p *Proxy, mm *MockManager) {
+		mm.ServeExactTest("test-1", []*models.Mock{roundMock(mm, "mock-own1")})
+		p.ContinueTestErrorCapture()
+		p.EndTestErrorCapture()
+	}
+	for _, tc := range []struct {
+		name  string
+		move  func(p *Proxy, mm *MockManager)
+		ahead bool
+		want  string
+	}{
+		{"the tracker ahead of the pool view", func(p *Proxy, _ *MockManager) { p.ContinueTestErrorCapture() }, true, models.UnroutedUnmarked},
+		{"the tracker ahead of test-1's view", func(p *Proxy, mm *MockManager) {
+			test1(p, mm)
+			p.ContinueTestErrorCapture()
+		}, true, models.UnroutedUnmarked},
+		{"the tracker in a test set the store has not staged", func(p *Proxy, mm *MockManager) {
+			test1(p, mm)
+			p.learnBoundary(func(t *learn.Tracker) { t.NewSet() })
+		}, false, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, mm := heldOrdersWith(t, false, zap.NewNop(), nil)
+			// The set's staging says it carries no mark, before its views.
+			mm.StageExactUnrouted(models.UnroutedUnmarked)
+			mm.ServeExactPool(models.PoolKeyNone, []string{"mock-pool"})
+			tc.move(p, mm)
+			snap, ok := mm.RoundSnapshot(integrations.RoundQuery{Tracker: p.learnTracker})
+			if !ok || snap.TrackerAhead() != tc.ahead || snap.SetUnstaged() == tc.ahead {
+				t.Fatalf("precondition: the snapshot reads %q, tracker ahead %v, set unstaged %v", snap.Boundary, snap.TrackerAhead(), snap.SetUnstaged())
+			}
+			if got := snap.CallRound().Unrouted(); got != tc.want {
+				t.Fatalf("the snapshot's call reads as not routed because %q; want %q", got, tc.want)
+			}
+			if got := mm.MarkCallRound().Unrouted(); got != tc.want {
+				t.Fatalf("the store's mark reads as not routed because %q; want %q", got, tc.want)
+			}
+		})
 	}
 }

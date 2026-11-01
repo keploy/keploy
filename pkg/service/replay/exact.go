@@ -365,6 +365,12 @@ func (r *Replayer) sayRecordedWithoutRouting(testSetID string, recordedWith []st
 // predates them, or that runs without the proven switch, serves by today's,
 // and the replay then keeps today's checks (its worker scope required by its
 // end), never looser than how the set was served. Said once, as a warning.
+//
+// A limit: the staging already went out asking for the background rules
+// (models.ExactServing.Background) and so with no Unrouted reason, so the
+// proxy's parsers name both sides on a call they refuse in such a set,
+// though the side that lacks proven routing is this replay's agent. The
+// warning above names it.
 func (r *Replayer) confirmBackground(asked string) {
 	if r.exact == nil || !r.exact.background {
 		return

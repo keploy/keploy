@@ -386,3 +386,56 @@ func TestTheStagingTellsTheProxyWhyTheSetIsNotRouted(t *testing.T) {
 		})
 	}
 }
+
+// unroutedWireProxy is a wireProxy that keeps each reason the agent says
+// what is staged is not routed for (coreAgent.ExactUnroutedStager), with how
+// many views (ServeExactPool, ServeExactTest) were installed before it ("@"
+// and the count).
+type unroutedWireProxy struct {
+	*wireProxy
+	views int
+	told  []string
+}
+
+func (p *unroutedWireProxy) ServeExactPool(key string, names []string) error {
+	p.views++
+	return p.wireProxy.ServeExactPool(key, names)
+}
+
+func (p *unroutedWireProxy) ServeExactTest(test string, own []*models.Mock) error {
+	p.views++
+	return p.wireProxy.ServeExactTest(test, own)
+}
+
+func (p *unroutedWireProxy) StageExactUnrouted(why string) error {
+	p.told = append(p.told, fmt.Sprintf("%s@%d", why, p.views))
+	return nil
+}
+
+// keploy mock replay's agent tells the proxy its session stages no test set
+// and routes none (models.UnroutedUnstaged) before the session's first view,
+// so a call the proxy's parsers refuse in any view of the session names the
+// mapping edit. The proxy never infers it from what is not staged (keploy
+// test's set boundary stages nothing too): only this says it, once per
+// staging of the session.
+func TestKeployMockReplayTellsTheProxyItStagesNoTestSet(t *testing.T) {
+	a, wp := wireAgent(t, models.MODE_TEST)
+	p := &unroutedWireProxy{wireProxy: wp}
+	a.Proxy = p
+	storeMocks(a, httpMock("mock-1", "GET", "http://h/pool"), httpMock("mock-2", "GET", "http://h/test-a"))
+	a.scopeTable = map[string][]string{"o::TestA": {"mock-2"}}
+	ctx := context.Background()
+	if err := a.SetScopePool(ctx, map[string][]string{"o": {"mock-1"}}); err != nil {
+		t.Fatal(err)
+	}
+	claimSelf(t, a)
+	if _, serr := a.ProvenBegin(ctx, begin("TestA")); serr != nil {
+		t.Fatal(serr)
+	}
+	if _, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", Outcome: "passed"}); serr != nil {
+		t.Fatal(serr)
+	}
+	if want := []string{models.UnroutedUnstaged + "@0"}; !reflect.DeepEqual(p.told, want) || p.views < 3 {
+		t.Fatalf("the proxy was told %q over %d views; want %q, before the session's first view", p.told, p.views, want)
+	}
+}

@@ -316,11 +316,12 @@ type exactState struct {
 	// bg is the staged set's background under the background rules
 	// (ServeExactBackground), nil for today's (exact_background.go).
 	bg atomic.Pointer[backgroundState]
-	// unrouted is why the staged set's background is not served by the
-	// background rules (StageExactUnrouted, models.ExactServing.Unrouted):
-	// "" while the replay said none; nil while no set is staged under
-	// exact serving (keploy mock replay's), read as models.UnroutedUnstaged
-	// (exact_background.go).
+	// unrouted is why what is staged is not served by the background rules,
+	// as the agent said it (StageExactUnrouted): the replay's reason for a
+	// keploy test set (models.ExactServing.Unrouted), or
+	// models.UnroutedUnstaged for keploy mock replay's session. nil since a
+	// session reset and until the agent says, read as "" (unroutedNow,
+	// exact_background.go).
 	unrouted atomic.Pointer[string]
 	// shared numbers the test views' shared parts (exactView.shared); held
 	// under the round lock.
@@ -775,8 +776,10 @@ func (m *MockManager) MarkCallRound() integrations.CallRound {
 		// The tracker began a test set the store has not staged
 		// (integrations.RoundSnapshot.SetUnstaged): the call the staging
 		// note describes, outside every test, its miss naming none made
-		// elsewhere.
-		return integrations.NewCallRound(at.Epoch, integrations.HoldsEvery).ReadAt(at).InStaging(true).InView(false, v.bg != nil).InRouting(v.unrouted).WithSequence(m.sequenceViewOf(v))
+		// elsewhere. It is the next set's call, whose staging has said no
+		// reason yet: it reads none (CallRound.Unrouted), never the set
+		// before's, which v was installed with.
+		return integrations.NewCallRound(at.Epoch, integrations.HoldsEvery).ReadAt(at).InStaging(true).InView(false, v.bg != nil).WithSequence(m.sequenceViewOf(v))
 	}
 	held := v.holds
 	switch {

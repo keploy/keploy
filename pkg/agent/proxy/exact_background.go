@@ -92,25 +92,31 @@ func (m *MockManager) StageExactBackground(rules string) {
 	m.exact.bg.Store(nil)
 }
 
-// StageExactUnrouted says why the set whose staging StageExactBackground just
-// opened under today's rules is not served by the background rules
-// (models.ExactServing.Unrouted): every view the staging installs from now on
-// reads it, and a call one of them refuses names it
-// (integrations.CallRound.Unrouted). The agent calls it before the staging
-// installs any view.
+// StageExactUnrouted says why what is staged is not served by the background
+// rules: for the set whose staging StageExactBackground just opened under
+// today's rules, the replay's reason (models.ExactServing.Unrouted); for
+// keploy mock replay's session, models.UnroutedUnstaged, which the agent says
+// as it serves the session (it stages no test set and routes none). Every
+// view installed from now on reads it, and a call one of them refuses names
+// it (integrations.CallRound.Unrouted). The agent calls it before the staging
+// installs any view; a session reset forgets it.
 func (m *MockManager) StageExactUnrouted(why string) {
 	m.exact.unrouted.Store(&why)
 }
 
-// unroutedNow is why the staged set is not served by the background rules
-// (StageExactUnrouted): "" when the replay said none, and
-// models.UnroutedUnstaged while no set is staged under exact serving, as in
-// keploy mock replay, which stages its recordings per session, never a set.
+// unroutedNow is why the staged set is not served by the background rules,
+// as the agent last said it (StageExactUnrouted): models.UnroutedUnmarked or
+// models.UnroutedNotEnabled from keploy test's staging,
+// models.UnroutedUnstaged from keploy mock replay's session. "" when nobody
+// said: a staging that said none, and the gap after a session reset
+// (ResetForReplaySession) until the next staging says, where a call the
+// previous set's recordings still name reads both sides. Never inferred from
+// what is not staged: keploy test's set boundary stages nothing too.
 func (m *MockManager) unroutedNow() string {
 	if p := m.exact.unrouted.Load(); p != nil {
 		return *p
 	}
-	return models.UnroutedUnstaged
+	return ""
 }
 
 // ServeExactBackground sets the rules the staged set's background is served

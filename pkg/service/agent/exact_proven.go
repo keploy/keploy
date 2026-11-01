@@ -69,6 +69,16 @@ func (a *Agent) servePoolExactly(ctx context.Context) error {
 		key = models.PoolKeyNone
 	}
 	if !staged {
+		// keploy mock replay stages no test set and routes none: the proxy
+		// is told so before the session's first view, so a call its parsers
+		// refuse names the mapping edit, never a side that lacks proven
+		// routing. A session reset forgets it; this serve, the session's
+		// first, says it again.
+		if us, ok := es.(coreAgent.ExactUnroutedStager); ok {
+			if err := us.StageExactUnrouted(models.UnroutedUnstaged); err != nil {
+				return err
+			}
+		}
 		if err := es.ServeExactPool(key, nil); err != nil {
 			return err
 		}

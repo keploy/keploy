@@ -448,7 +448,7 @@ func TestALearnStepReadsTheRoundOnceMoreAfterAnInstall(t *testing.T) {
 				if order == "the store opens test-2 as the call waits for its request" {
 					misses := heldMiss(t, p, mm, code, got, "in the round between tests, as keploy's learn tracker began the next test", "began a test")
 					for _, m := range misses {
-						if strings.Contains(m.NextSteps, "which keploy recorded where this replay did not make it") {
+						if m.NotOwned {
 							t.Fatalf("the moved miss of the pool's call names a recording made elsewhere: %s", m.NextSteps)
 						}
 					}
@@ -1155,7 +1155,7 @@ func TestALearnStepWaitsForTheStoreToOpenTheTestTheTrackerBegan(t *testing.T) {
 						done()
 						misses := roundMiss(t, p, mm, code, got, end.why)
 						for _, m := range misses {
-							if strings.Contains(m.NextSteps, "which keploy recorded where this replay did not make it") {
+							if m.NotOwned {
 								t.Fatalf("the moved miss of a call the tracker's test made names a recording made elsewhere: %s", m.NextSteps)
 							}
 						}
@@ -1276,7 +1276,7 @@ func TestARoundWaiterIsWokenByEveryMoveOfTheRound(t *testing.T) {
 				return
 			}
 			for _, m := range roundMiss(t, p, mm, code, got, mv.why) {
-				if strings.Contains(m.NextSteps, "which keploy recorded where this replay did not make it") {
+				if m.NotOwned {
 					t.Fatalf("the miss of a call woken by %s names a recording made elsewhere: %s", mv.name, m.NextSteps)
 				}
 			}
@@ -1313,7 +1313,7 @@ func roundOutcome(t *testing.T, p *Proxy, mm *MockManager, code int, got string)
 	}
 	told := []string{}
 	for _, m := range misses {
-		told = append(told, m.ClosestMock+" made elsewhere "+strconv.FormatBool(strings.Contains(m.NextSteps, "which keploy recorded where this replay did not make it")))
+		told = append(told, m.ClosestMock+" made elsewhere "+strconv.FormatBool(m.NotOwned))
 	}
 	return strconv.Itoa(code) + " " + got + ", learned onto " + strings.Join(learned, ",") + ", misses [" + strings.Join(told, "; ") + "]"
 }
@@ -1432,7 +1432,7 @@ func TestALearnStepCaughtUpWithTheStoreMarksTheCallInTheTestItOpened(t *testing.
 		}
 		told := []string{}
 		for _, m := range misses {
-			told = append(told, m.ClosestMock+" made elsewhere "+strconv.FormatBool(strings.Contains(m.NextSteps, "which keploy recorded where this replay did not make it")))
+			told = append(told, m.ClosestMock+" made elsewhere "+strconv.FormatBool(m.NotOwned))
 		}
 		return strconv.Itoa(code) + " " + got + ", misses [" + strings.Join(told, "; ") + "]"
 	}
@@ -1862,7 +1862,7 @@ func TestACallReadAsTheTrackerBeginsATestSetTheStoreHasNotStagedLearnsNothing(t 
 				if !strings.HasPrefix(m.NextSteps, stagingMissNote) || m.Kind != models.MissOutsideTest {
 					t.Errorf("the miss reads %s %q; want it %s, led by the staging note", m.Kind, m.NextSteps, models.MissOutsideTest)
 				}
-				if strings.Contains(m.NextSteps, "which keploy recorded where this replay did not make it") {
+				if m.NotOwned {
 					t.Fatalf("the miss names a recording made elsewhere: %s", m.NextSteps)
 				}
 			}
@@ -2114,7 +2114,7 @@ func TestABetweenTestsCallThatIsExactlyARecordingElsewhereLearnsNothingOntoThePo
 					if misses[0].Reason != "" || !strings.Contains(misses[0].NextSteps, why) || strings.Contains(misses[0].NextSteps, "Request structure changed") {
 						t.Fatalf("the miss of a call that is exactly mock-own1 once it answered test-1 reads %+v; want no reason, saying %q", misses[0], why)
 					}
-				} else if !strings.Contains(misses[0].NextSteps, "which keploy recorded where this replay did not make it") {
+				} else if !misses[0].NotOwned || misses[0].ClosestMock != tc.rec {
 					t.Fatalf("the miss of a call that is exactly %s reads %+v; want it named as made elsewhere", tc.rec, misses[0])
 				}
 			})

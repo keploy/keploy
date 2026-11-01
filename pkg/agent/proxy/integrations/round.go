@@ -241,7 +241,9 @@ type RoundSnapshot struct {
 	Open bool
 	// Background: the set is served by the background rules.
 	Background bool
-	// Unrouted: when it is not, why (CallRound.Unrouted).
+	// Unrouted: when it is not, why, as the view was installed with
+	// (CallRound.Unrouted): the staged set's reason, which a call of a set
+	// the store has not staged (SetUnstaged) never reads.
 	Unrouted string
 	// Staging: the store's view is one the replay serves while it stages a
 	// set's mocks, where no recording answers a call (CallRound.Staging).
@@ -474,7 +476,9 @@ func (s RoundSnapshot) Owner(m *models.Mock) RoundOwner {
 // names none, and pairs none, which only fails closed.
 func (s RoundSnapshot) CallRound() CallRound {
 	if s.SetUnstaged() {
-		return NewCallRound(s.At.Epoch, HoldsEvery).ReadAt(s.At).InStaging(true).InView(false, s.Background).InRouting(s.Unrouted)
+		// The next set's call: its staging has said no reason yet, so it
+		// reads none, never the set before's (Unrouted).
+		return NewCallRound(s.At.Epoch, HoldsEvery).ReadAt(s.At).InStaging(true).InView(false, s.Background)
 	}
 	// A test's view with a worker scope shows it the worker scope, as the
 	// store's MarkCallRound says (its sequence view's Worker).

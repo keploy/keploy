@@ -201,7 +201,8 @@ func markNotOwned(report *models.MockMismatchReport, m *models.Mock, call integr
 	report.ClosestMockReq = renderMockRequest(m.Spec.HTTPReq, m.Noise)
 	report.NextSteps = notOwnedNextSteps(m.Name)
 	if call.Unrouted() == models.UnroutedUnstaged {
-		report.NextSteps = notOwnedMappingEdit(m.Name)
+		sv, _ := call.Sequence()
+		report.NextSteps = notOwnedMappingEdit(m.Name, sv.Test)
 	}
 }
 
@@ -209,9 +210,17 @@ func markNotOwned(report *models.MockMismatchReport, m *models.Mock, call integr
 // view does not show means under keploy mock replay, which marks no set and
 // routes none: the test framework's begin and end set each test's window,
 // and a call made outside its recording's window is a mapping edit the
-// reader makes (worker:), as keploy mock replay's end says it.
-func notOwnedMappingEdit(name string) string {
-	return fmt.Sprintf("This request is %s, which the test set's mappings.yaml lists where this replay did not make it: for another test, whose window the call was recorded in, or in worker: from a place this replay had not reached. keploy mock does not decide whose a call is: each test's begin and end set its window. If the call is the application's own work (a queue consumer, a scheduler), move %s to worker: in mappings.yaml, which answers it in any test's window or between tests and requires it of none; if it is the test's own, the test made it outside the window it was recorded in.", name, name)
+// reader makes (worker:), as keploy mock replay's end says it. test is the
+// test whose window the call was made in, as its first read found it ("":
+// between tests). The test whose window it was recorded in is the one
+// mappings.yaml lists it for, which the proxy does not know: keploy mock
+// replay's receipt names it on the miss (recorded_in).
+func notOwnedMappingEdit(name, test string) string {
+	made := "between tests"
+	if test != "" {
+		made = "in " + test + "'s window"
+	}
+	return fmt.Sprintf("This call, made %s, is %s, which the test set's mappings.yaml lists where this replay did not make it: for another test, whose window it was recorded in (the receipt names it under recorded_in), or in worker: from a place this replay had not reached. keploy mock does not decide whose a call is: each test's begin and end set its window. If the call is the application's own work (a queue consumer, a scheduler), move %s to worker: in mappings.yaml, which answers it in any test's window or between tests and requires it of none; if it is the test's own, the test made it outside the window it was recorded in.", made, name, name)
 }
 
 // notOwnedNextSteps says what a miss on a call that is a recording the open

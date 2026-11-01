@@ -627,13 +627,15 @@ type ExactBackgroundServer interface {
 }
 
 // ExactUnroutedStager is implemented by a proxy that names, on a call its
-// parsers refuse in a set staged under today's rules, why the set is not
-// served by the background rules (models.ExactServing.Unrouted:
-// models.UnroutedUnmarked, models.UnroutedNotEnabled; "" from a replay that
-// does not say). The agent calls StageExactUnrouted right after
-// StageExactBackground opens such a set's staging, before the staging
-// installs any view, so every view of the staging reads it. A proxy that
-// does not implement it names neither side.
+// parsers refuse, why what is staged is not served by the background rules:
+// for a keploy test set staged under today's rules the replay's reason
+// (models.ExactServing.Unrouted: models.UnroutedUnmarked,
+// models.UnroutedNotEnabled; "" from a replay that does not say), which the
+// agent hands it right after StageExactBackground opens the set's staging;
+// for keploy mock replay's session models.UnroutedUnstaged, which the agent
+// says as it serves the session. Either comes before any view it installs
+// is, so every such view reads it. A proxy that does not implement it names
+// neither side.
 type ExactUnroutedStager interface {
 	StageExactUnrouted(why string) error
 }

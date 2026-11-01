@@ -129,7 +129,7 @@ func TestAMissOnACallMadeElsewhereNamesItsRecording(t *testing.T) {
 			}
 			continue
 		}
-		if !strings.Contains(r.NextSteps, "move other-test-delete to worker: in mappings.yaml") || strings.Contains(r.NextSteps, "judging") || strings.Contains(r.NextSteps, "record again") {
+		if !strings.Contains(r.NextSteps, "made between tests, is other-test-delete") || !strings.Contains(r.NextSteps, "move other-test-delete to worker: in mappings.yaml") || strings.Contains(r.NextSteps, "judging") || strings.Contains(r.NextSteps, "record again") {
 			t.Fatalf("keploy mock replay's miss does not say the mapping edit alone: %q", r.NextSteps)
 		}
 	}
@@ -319,5 +319,23 @@ func TestALookupIsAskedOfTheRoundTheCallWasMadeIn(t *testing.T) {
 	db.refuse = true
 	if got, _ := notOwnedRecording(ctx, call, db, n, at); got != nil || len(db.accepted) != 1 {
 		t.Fatalf("a recording whose name the store refused was named: %v (accepted %v)", got, db.accepted)
+	}
+}
+
+// keploy mock replay's mapping-edit miss names the test whose window the call
+// was made in, as the call's first read found it (its sequence view's test),
+// and says so between tests.
+func TestKeployMocksMappingEditNamesTheTestTheCallWasMadeIn(t *testing.T) {
+	m := onHost("mock-3", "/delete", "localhost:1")
+	for _, tc := range []struct{ test, want string }{
+		{"o::TestA", "This call, made in o::TestA's window, is mock-3"},
+		{"", "This call, made between tests, is mock-3"},
+	} {
+		r := &models.MockMismatchReport{}
+		call := integrations.NewCallRound(1, nil).InRouting(models.UnroutedUnstaged).WithSequence(integrations.SequenceView{Test: tc.test})
+		markNotOwned(r, m, call)
+		if !strings.HasPrefix(r.NextSteps, tc.want) {
+			t.Fatalf("in %q the miss says %q; want it to begin %q", tc.test, r.NextSteps, tc.want)
+		}
 	}
 }

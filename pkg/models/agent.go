@@ -634,11 +634,12 @@ type ExactServing struct {
 //     RecordedWithS12Routing (the record lacks it).
 //   - UnroutedNotEnabled: the set carries the mark, and this replay does not
 //     enable proven routing (replay.RegisterS12Serving: the replay lacks it).
-//   - UnroutedUnstaged: no test set was staged under exact serving: keploy
-//     mock replay's, which stages its recordings per session, never a set.
-//     keploy mock marks no set and routes none (the test framework owns test
-//     scope: a call made outside its recording's window is a mapping edit,
-//     worker: or startup:). The proxy says it; no replay sends it.
+//   - UnroutedUnstaged: keploy mock replay's session, which stages its
+//     recordings per session, never a test set, and marks and routes none
+//     (the test framework owns test scope: a call made outside its
+//     recording's window is a mapping edit, worker: or startup:). keploy
+//     mock replay's agent says it as it serves the session; no replay sends
+//     it, and nothing infers it from what is not staged.
 const (
 	UnroutedUnmarked   = "unmarked"
 	UnroutedNotEnabled = "not-enabled"

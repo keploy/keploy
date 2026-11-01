@@ -722,11 +722,12 @@ func (c CallRound) InRouting(unrouted string) CallRound {
 // Unrouted is why c's read found its set not served by proven routing, for
 // a parser to name, on the call's miss, which side lacks it: the record
 // (models.UnroutedUnmarked: the set's mappings.yaml carries no mark), this
-// replay (models.UnroutedNotEnabled: the mark, not enabled), or neither, the
-// replay having staged no set (models.UnroutedUnstaged: keploy mock replay,
-// which marks no set and routes none). "" for a set served by proven
-// routing (Background), for the zero CallRound, and when the replay did not
-// say why: a parser then names both sides.
+// replay (models.UnroutedNotEnabled: the mark, not enabled), or neither:
+// keploy mock replay, which marks no set and routes none, as its agent said
+// it (models.UnroutedUnstaged), never inferred from what is not staged. ""
+// for a set served by proven routing (Background), for the zero CallRound,
+// and when nobody said why (a replay that does not, or the gap after a
+// session reset before the next staging): a parser then names both sides.
 func (c CallRound) Unrouted() string {
 	if c.background {
 		return ""
