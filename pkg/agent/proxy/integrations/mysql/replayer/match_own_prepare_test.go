@@ -23,11 +23,14 @@ import (
 // PREPARE was taken for one more than the test recorded, and the
 // connection's recording was refused to it.
 //
-// keploy maps no connection-lifetime mock to a test (syncMock
-// attributedReusable, keploy mock record's dataPlane), so no test of a
+// keploy maps no PREPARE to a test: its recorder types it "connection", which
+// syncMock attributedReusable leaves to no window, and keploy mock record's
+// mapping lists no protocol-phase recording (dataPlane). So no test of a
 // recording keploy writes owns a PREPARE. The replay still owns every mapped
 // recording it holds, protocol phase included (newExactPlan), so a mapping
 // that lists a PREPARE under a test, as one written by hand may, reaches it.
+// keploy record does map a CLOSE to its test: that pass-over has its own row
+// (TestACloseOneMoreThanTheTestRecordedCountsOnlyTheTestsOwnClose).
 func TestAConnectionsPrepareIsNotOneOfTheTestsOwnPrepares(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	s1, _ := diffWindow(1)

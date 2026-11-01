@@ -69,6 +69,12 @@ func TestACommandOneMoreThanTheTestRecordedIsDiagnosedWithTheBackgroundHidden(t 
 			if strings.Contains(miss, other.Name) {
 				t.Fatalf("the second EXECUTE id=1 was diagnosed against the background's %s: %s", other.Name, miss)
 			}
+			// With the background hidden the scan compares two candidates;
+			// diagnosed against the background, it counted its recording
+			// too: three.
+			if !strings.Contains(miss, " candidateCount:2 ") {
+				t.Fatalf("the second EXECUTE id=1 counted other than 2 candidates: %s", miss)
+			}
 		})
 	}
 }
