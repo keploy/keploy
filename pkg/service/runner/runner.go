@@ -177,8 +177,10 @@ func (r *Runner) RunTest(ctx context.Context, opts RunTestOpts) *TestResult {
 	//    remains active for any startup-init traffic the app emits
 	//    before this step's narrower window kicks in. Matches replay's
 	//    ordering where the initial broad UpdateMockParams precedes
-	//    the first per-test one (replay.go:1047 / 1156 → 1433).
-	if err := waitForApp(ctx, opts.ServiceURL, 2*time.Minute, r.logger); err != nil {
+	//    the first per-test one (replay.go:1047 / 1156 → 1433). A caller
+	//    that started the app gives its end (opts.AppEnded): the wait then
+	//    has no budget and ends on the app's answer or its end.
+	if err := waitForApp(ctx, opts.ServiceURL, appWaitBudget, opts.AppEnded, r.logger); err != nil {
 		return &TestResult{Passed: false, Error: fmt.Sprintf("app not reachable: %v", err), Noise: tc.Noise}
 	}
 
@@ -814,8 +816,27 @@ func (r *Runner) checkMockMismatches(setup *testSetSetup, expected []MockRef, co
 	}
 }
 
+// appWaitBudget bounds the wait for an app whose caller gave no end of its run
+// (RunTestOpts.AppEnded nil). A variable for tests.
+var appWaitBudget = 2 * time.Minute
+
+// appProbeTick is how long the wait leaves between two probes the app did not
+// answer, and appSayEvery how many unanswered probes pass between the lines an
+// unbudgeted wait says it still waits with. Pacing only: neither is a verdict.
+// Variables for tests.
+var (
+	appProbeTick = 2 * time.Second
+	appSayEvery  = 30
+)
+
 // waitForApp blocks until the app at serviceURL responds to an HTTP
-// request, or the timeout elapses. TCP reachability is no longer
+// request. Given ended, the end of the app's run (RunTestOpts.AppEnded), it
+// has no budget: it also ends when ended closes, with an error that says the
+// app stopped before it answered, or when ctx ends. An app compose holds
+// from starting until a slow dependency is healthy is waited for however
+// long that takes (enterprise atg-with-mocks pipelines 13105 and 13112: the
+// two-minute budget ran out 8 s before compose started the app). With ended
+// nil it ends, too, once timeout has elapsed. TCP reachability is no longer
 // checked separately — the HTTP probe's underlying dial subsumes it
 // and catches the strictly larger set of not-ready conditions (see
 // below).
@@ -841,7 +862,7 @@ func (r *Runner) checkMockMismatches(setup *testSetSetup, expected []MockRef, co
 // and each of those conditions legitimately represents an app that
 // isn't yet ready to serve traffic end-to-end, which is the signal
 // we want during startup.
-func waitForApp(ctx context.Context, serviceURL string, timeout time.Duration, logger *zap.Logger) error {
+func waitForApp(ctx context.Context, serviceURL string, timeout time.Duration, ended <-chan struct{}, logger *zap.Logger) error {
 	parsed, err := url.Parse(serviceURL)
 	if err != nil || parsed.Host == "" {
 		return fmt.Errorf("invalid service URL %q: check the ServiceURL and ensure it includes a valid host", serviceURL)
@@ -868,8 +889,17 @@ func waitForApp(ctx context.Context, serviceURL string, timeout time.Duration, l
 	// attempt — including the very first — is cancelled when the
 	// budget runs out. Using the parent ctx for the probe while the
 	// outer select watches waitCtx would let a single slow probe run
-	// past the budget.
-	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	// past the budget. A wait given the app's end has no budget: its
+	// probes end with ctx alone.
+	var (
+		waitCtx context.Context
+		cancel  context.CancelFunc
+	)
+	if ended == nil {
+		waitCtx, cancel = context.WithTimeout(ctx, timeout)
+	} else {
+		waitCtx, cancel = context.WithCancel(ctx)
+	}
 	defer cancel()
 
 	probeClient := &http.Client{
@@ -946,16 +976,28 @@ func waitForApp(ctx context.Context, serviceURL string, timeout time.Duration, l
 		lastErr = err
 	}
 
-	ticker := time.NewTicker(2 * time.Second)
+	ticker := time.NewTicker(appProbeTick)
 	defer ticker.Stop()
 
+	// unanswered counts the probes the app has not answered: an unbudgeted
+	// wait says every appSayEvery of them that it still waits, and on what,
+	// so a run held by an app that does not come up says why it is held.
+	unanswered := 1
 	for {
 		select {
 		case <-waitCtx.Done():
+			if ctx.Err() != nil {
+				// The caller's ctx ended (a signal, the caller's own bound):
+				// no budget ran out.
+				return fmt.Errorf("stopped waiting for app at %s: %w", addr, ctx.Err())
+			}
 			if lastErr != nil {
 				return fmt.Errorf("timed out waiting for app at %s (last probe error: %v); check that the service is running and the ServiceURL is correct", addr, lastErr)
 			}
 			return fmt.Errorf("timed out waiting for app at %s; check that the service is running and the ServiceURL is correct", addr)
+		case <-ended:
+			// Never ready when ended is nil (a nil channel never receives).
+			return fmt.Errorf("the app's run ended before the app at %s answered (last probe error: %v); see the app's output for why it stopped", addr, lastErr)
 		case <-ticker.C:
 			if fatal, err := probe(); err == nil {
 				logger.Debug("app is reachable", zap.String("addr", addr))
@@ -964,6 +1006,11 @@ func waitForApp(ctx context.Context, serviceURL string, timeout time.Duration, l
 				return fmt.Errorf("failed to probe %s: %w", addr, err)
 			} else {
 				lastErr = err
+			}
+			unanswered++
+			if ended != nil && unanswered%appSayEvery == 0 {
+				logger.Info("still waiting for the app to answer before running the test; its run has not ended (a compose stack may still be starting the app's dependencies)",
+					zap.String("addr", addr), zap.Int("unansweredProbes", unanswered), zap.NamedError("lastProbeError", lastErr))
 			}
 		}
 	}
