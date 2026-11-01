@@ -346,6 +346,14 @@ func TestLearnElsewhereTeachesNoIdleAnswerACallConsumed(t *testing.T) {
 	if got := mm.LearnedElsewhere(); len(got) != 1 || got[0].Name != "w-boot" {
 		t.Fatalf("learned elsewhere %v; want w-boot alone", learnedNames(got))
 	}
+	// Between tests (the pool's view) too: the check needs no test open.
+	mm.ServeExactPool("", nil)
+	if mm.LearnElsewhere(ms["w-later"], minute) {
+		t.Fatal("a call between tests taught an idle answer a call of the set consumed")
+	}
+	if got := mm.LearnedElsewhere(); len(got) != 1 || got[0].Name != "w-boot" {
+		t.Fatalf("learned elsewhere %v between tests; want w-boot alone", learnedNames(got))
+	}
 }
 
 // What a call made in another window teaches a recording is that window's:

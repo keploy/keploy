@@ -140,9 +140,9 @@ type Taught struct {
 	// Mock is the recording.
 	Mock string `yaml:"mock" json:"mock"`
 	// Owner is the test whose mapping lists the recording, "" for none (the
-	// set's start-up and pool, or its worker scope: OwnerSaid). No call of the round consumed it: what a call in
-	// another window taught a recording its own pairing took is voided
-	// (OwnPairingWins).
+	// set's start-up and pool, or its worker scope: OwnerSaid). No call of
+	// the round consumed it: what a call in another window taught a
+	// recording its own pairing took is voided (OwnPairingWins).
 	Owner string `yaml:"owner,omitempty" json:"owner,omitempty"`
 	// Fields are what was written at the clock reads such calls taught, each
 	// as "<path> (<clock read>)".

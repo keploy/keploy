@@ -80,3 +80,26 @@ func TestWhatAWindowTaughtIsReadAsThatWindowsOrAnyWhenUnknown(t *testing.T) {
 		t.Fatalf("SayWindows said %q", got)
 	}
 }
+
+// A recording is said as its owner test's first, then as the set's worker
+// scope's when worker names it, else as the set's start-up and pool's: a
+// mapping that lists one recording under a test and under worker: says the
+// test, and a nil worker names no recording as the worker scope's.
+func TestOwnerSaidNamesTheOwnerTestFirst(t *testing.T) {
+	owner := map[string]string{"mock-1": "o::A"}
+	worker := func(name string) bool { return name == "mock-1" || name == "mock-w" }
+	for _, c := range []struct {
+		name   string
+		worker func(string) bool
+		want   string
+	}{
+		{"mock-1", worker, "o::A"},
+		{"mock-w", worker, "the set's worker scope"},
+		{"mock-p", worker, "the set's start-up and pool"},
+		{"mock-w", nil, "the set's start-up and pool"},
+	} {
+		if got := OwnerSaid(c.name, owner, c.worker); got != c.want {
+			t.Fatalf("OwnerSaid(%s) = %q; want %q", c.name, got, c.want)
+		}
+	}
+}
