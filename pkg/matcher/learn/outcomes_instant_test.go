@@ -1188,8 +1188,27 @@ func TestOutcomeAClockLineNamesThePlaceSetAside(t *testing.T) {
 	in := iCall(p, String, rec, live, rAt, fAt, iWin(rAt, fAt, 2*time.Second), nil, []Raw{unserved})
 	d := oWord(t, Decide(in), rec, live)
 	iClock(t, "a read beside a recording that held the recorded moment", d)
-	if !strings.Contains(d.Line, "set aside: mock-645 held the recorded value and round F's value does not stand there") {
+	const aside = "set aside: mock-645 held the recorded value and round F's value does not stand there"
+	if !strings.Contains(d.Line, aside) {
 		t.Errorf("the clock line %q; want it to name mock-645, set aside", d.Line)
+	}
+	if d.Clock != nil && !strings.Contains(d.Clock.Why, aside) {
+		t.Errorf("the clock's why %q; want it to name mock-645, set aside", d.Clock.Why)
+	}
+	// A clock reading that writes the offset's own line (a read plus a lead)
+	// keeps it, and the why a replay shows still names the place set aside
+	// (integrations' mongo InAClientTestARecordingAnOlderTestServed...).
+	defer func(f func(string, typedInstant, typedInstant, *Window, *time.Location) (models.ClockOffset, string, bool)) {
+		clockInWindow = f
+	}(clockInWindow)
+	clockInWindow = func(string, typedInstant, typedInstant, *Window, *time.Location) (models.ClockOffset, string, bool) {
+		return models.ClockOffset{Min: -1010 * time.Millisecond, Max: -990 * time.Millisecond, Res: time.Millisecond, Why: "the stub reading's line"}, "", true
+	}
+	in.Window = iWin(rAt, fAt, 2*time.Second).ComparesOffsets()
+	d = oWord(t, Decide(in), rec, live)
+	iClock(t, "a read a second back beside a recording that held the recorded moment", d)
+	if d.Clock != nil && (!strings.Contains(d.Clock.Why, "the stub reading's line") || !strings.Contains(d.Clock.Why, aside)) {
+		t.Errorf("the offset clock's why %q; want the reading's line, naming mock-645 set aside", d.Clock.Why)
 	}
 }
 

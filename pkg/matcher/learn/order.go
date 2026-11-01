@@ -1440,7 +1440,12 @@ func (dc *decider) clock(path string, at variables.Address, n int, c changedInst
 		rule += ", stored as " + models.ClockOffset{Min: off.Min, Max: off.Max, Res: off.Res}.String()
 	}
 	if len(c.aside) > 0 {
-		rule += "; set aside: " + strings.Join(c.aside, ", ") + " held the recorded value and round F's value does not stand there"
+		// A reading's own line (an offset's) names the places set aside too.
+		aside := "; set aside: " + strings.Join(c.aside, ", ") + " held the recorded value and round F's value does not stand there"
+		rule += aside
+		if off.Why != "" {
+			off.Why += aside
+		}
 	}
 	d := dc.learned(path, at, n, r, l, OutcomeClock, rule, c.aside)
 	if off.Why == "" {
