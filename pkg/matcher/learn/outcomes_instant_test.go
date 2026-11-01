@@ -218,6 +218,39 @@ func TestOutcomeAMicrosecondCopyBindsBeforeTheWindow(t *testing.T) {
 	}
 }
 
+// api-server's harness names an app "[E2E] app-crud-<UnixNano>" (19 digits,
+// a fine cut) after the test began, and sends it at a create and then at a
+// read. The read binds to the create's send (step 4), whether a worker poll
+// arrived between the clock read and the create (the create's window then
+// does not hold it) or not: load never decides between a checked Value and
+// an unchecked Clock (CHECK2's N2).
+func TestOutcomeANanosecondNameCarriedToALaterSendBindsToItsFirstSend(t *testing.T) {
+	const p = "body.name"
+	rAt, fAt := oAt.Add(40*time.Millisecond), oAt.Add(time.Hour+45*time.Millisecond)
+	made, fmade := oAt.Add(-30*time.Millisecond), oAt.Add(time.Hour-31*time.Millisecond)
+	rec, live := "[E2E] app-crud-"+iEpochNs(made), "[E2E] app-crud-"+iEpochNs(fmade)
+	create := []Earlier{iSent("mock-41", oAt.Add(-10*time.Millisecond), "body.name", String, rec, live)}
+	for _, w := range []*Window{iWin(rAt, fAt, 5*time.Millisecond), iWin(rAt, fAt, 100*time.Millisecond)} {
+		d := oWord(t, Decide(iCall(p, String, rec, live, rAt, fAt, w, create, nil)), iEpochNs(made), iEpochNs(fmade))
+		iValue(t, "a nanosecond name carried, window from "+w.Rec.From.Format("05.000"), d, "mock-41")
+	}
+}
+
+// A carried millisecond read (the call's own window does not hold it) that
+// two earlier sends of the test hold in both runs, one of them its own read
+// of the clock (learned a Clock there): two separate reads, so the word is
+// refused naming both, never bound to either (H2).
+func TestOutcomeAReReadBesideACarriedReadIsTwoSources(t *testing.T) {
+	const p = "body.since"
+	rAt, fAt := oAt.Add(300*time.Millisecond), oAt.Add(time.Hour+320*time.Millisecond)
+	rec, live := iMs(oAt.Add(-200*time.Millisecond)), iMs(oAt.Add(time.Hour-205*time.Millisecond))
+	carried := iSent("mock-4", oAt.Add(-150*time.Millisecond), "body.createdAt", String, rec, live)
+	reread := iSent("mock-7", oAt.Add(-120*time.Millisecond), "body.updatedAt", String, rec, live)
+	reread.Seen[0].Clock = true
+	d := oWord(t, Decide(iCall(p, String, rec, live, rAt, fAt, iWin(rAt, fAt, 50*time.Millisecond), []Earlier{carried, reread}, nil)), rec, live)
+	oRefused(t, "a carried read beside a re-read of the same millisecond", d, "two-sources", "mock-4", "mock-7")
+}
+
 // A 19-digit UnixNano (a fine cut) that stood whole at the test's earlier
 // send, which round F moved to another value while the call sent a third:
 // the value did not follow its place. A conflict, refused before any bind
