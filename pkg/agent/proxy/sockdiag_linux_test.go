@@ -428,9 +428,7 @@ func TestAnOrderedReadIsADumpNotASecondExactLookup(t *testing.T) {
 	}
 	defer func() { _ = s.Close() }()
 	local, remote := mustAddrPort(t, c.LocalAddr()), mustAddrPort(t, c.RemoteAddr())
-	if got, err := lookupTCP(local, remote); !errors.Is(err, errNoSocket) {
-		t.Fatalf("the kernel's exact lookup of a socket bound to lo = state %d, %v; want a miss, which this row is made of", got.state, err)
-	}
+	premiseExactMisses(t, local, remote)
 	if got, err := lookupTCPOrdered(local, remote); err != nil || got.state != tcpEstablished {
 		t.Fatalf("the ordered read once the kernel's exact lookup missed = state %d, %v; want ESTABLISHED, found by the dump", got.state, err)
 	}

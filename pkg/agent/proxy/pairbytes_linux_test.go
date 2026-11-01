@@ -34,6 +34,15 @@ func heldPair(t *testing.T, network, addr string) (p *Proxy, app, proxySide *net
 // heldPairOn is heldPair on p, paired as application connection appSeq.
 func heldPairOn(t *testing.T, p *Proxy, appSeq uint64, network, addr string) (app, proxySide *net.TCPConn, reader net.Conn) {
 	t.Helper()
+	return heldPairBound(t, p, appSeq, network, addr, "", "")
+}
+
+// heldPairBound is heldPairOn with the listener's socket bound to the device
+// listenDev, and the application's to the device appDev (SO_BINDTODEVICE),
+// each when named. The proxy's side, accepted from a listener bound to a
+// device, is bound to it too, as one accepted on a VRF's device is.
+func heldPairBound(t *testing.T, p *Proxy, appSeq uint64, network, addr, listenDev, appDev string) (app, proxySide *net.TCPConn, reader net.Conn) {
+	t.Helper()
 	lc := net.ListenConfig{Control: func(_, _ string, rc syscall.RawConn) error {
 		var serr error
 		if err := rc.Control(func(fd uintptr) {
@@ -42,6 +51,9 @@ func heldPairOn(t *testing.T, p *Proxy, appSeq uint64, network, addr string) (ap
 			// own, 64 KiB, would hold it shut until the persist timer).
 			if serr = unix.SetsockoptInt(int(fd), unix.IPPROTO_TCP, unix.TCP_MAXSEG, 1024); serr == nil {
 				serr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_RCVBUF, 16384)
+			}
+			if serr == nil && listenDev != "" {
+				serr = unix.BindToDevice(int(fd), listenDev)
 			}
 		}); err != nil {
 			return err
@@ -53,7 +65,8 @@ func heldPairOn(t *testing.T, p *Proxy, appSeq uint64, network, addr string) (ap
 		t.Skipf("no %s here: %v", network, err)
 	}
 	defer ln.Close()
-	c, err := net.Dial(network, ln.Addr().String())
+	d := net.Dialer{Control: boundTo(appDev)}
+	c, err := d.Dial(network, ln.Addr().String())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,10 +122,20 @@ func received(t *testing.T, c *net.TCPConn) uint64 {
 // waited for until every byte the application had written when the wait
 // began has reached the proxy's side, however long the bytes take; an idle
 // connection holds nothing back. Over IPv4 and IPv6.
+//
+// An application socket bound to a device (SO_BINDTODEVICE; a VRF's sockets
+// are bound to its device) is waited for alike: sock_diag's exact lookup,
+// asked with no device, never finds one, and the wait would read it as gone.
 func TestThePairedBytesAreWaitedForUntilTheyArrive(t *testing.T) {
-	for _, tc := range []struct{ network, addr string }{{"tcp4", "127.0.0.1:0"}, {"tcp6", "[::1]:0"}} {
-		t.Run(tc.network, func(t *testing.T) {
-			p, app, proxySide, reader := heldPair(t, tc.network, tc.addr)
+	for _, tc := range []struct{ name, network, addr, dev string }{
+		{"tcp4", "tcp4", "127.0.0.1:0", ""},
+		{"tcp6", "tcp6", "[::1]:0", ""},
+		{"tcp4 bound to lo", "tcp4", "127.0.0.1:0", "lo"},
+		{"tcp6 bound to lo", "tcp6", "[::1]:0", "lo"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &Proxy{logger: zap.NewNop()}
+			app, proxySide, reader := heldPairBound(t, p, 1, tc.network, tc.addr, "", tc.dev)
 			// Idle: nothing written, nothing to wait for.
 			if err := p.WaitPairedBytes(context.Background(), 1); err != nil {
 				t.Fatalf("WaitPairedBytes on an idle connection: %v", err)
@@ -234,15 +257,37 @@ func TestABytesWaitWithNoPairedConnectionNeedsNoCounts(t *testing.T) {
 }
 
 // The first paired connection proves the application's sockets are seen from
-// the proxy's network namespace: its application end is found.
+// the proxy's network namespace: its application end is found, bound to a
+// device or not.
 func TestAPairedConnectionProvesTheApplicationsSocketsSeen(t *testing.T) {
-	p, _, proxySide, _ := heldPair(t, "tcp4", "127.0.0.1:0")
-	if p.paired.visible.Load() {
-		t.Fatal("seen before any proof")
+	for name, dev := range map[string]string{"bound to none": "", "bound to lo": "lo"} {
+		t.Run(name, func(t *testing.T) {
+			p := &Proxy{logger: zap.NewNop()}
+			_, proxySide, _ := heldPairBound(t, p, 1, "tcp4", "127.0.0.1:0", "", dev)
+			if p.paired.visible.Load() {
+				t.Fatal("seen before any proof")
+			}
+			p.proveAppVisible(proxySide)
+			if !p.paired.visible.Load() {
+				t.Fatal("the application's end of a live paired connection was not found")
+			}
+		})
 	}
-	p.proveAppVisible(proxySide)
-	if !p.paired.visible.Load() {
-		t.Fatal("the application's end of a live paired connection was not found")
+}
+
+// boundTo is a dialler's or listener's Control that binds its socket to the
+// device dev (SO_BINDTODEVICE), or leaves it bound to none when dev is "".
+// Linux lets an unprivileged process bind a socket that is bound to none.
+func boundTo(dev string) func(_, _ string, rc syscall.RawConn) error {
+	return func(_, _ string, rc syscall.RawConn) error {
+		if dev == "" {
+			return nil
+		}
+		var serr error
+		if err := rc.Control(func(fd uintptr) { serr = unix.BindToDevice(int(fd), dev) }); err != nil {
+			return err
+		}
+		return serr
 	}
 }
 

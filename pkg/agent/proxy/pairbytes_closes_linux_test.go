@@ -148,33 +148,39 @@ func TestTheAcceptLoopReadsAPairedConnectionsCloseFirst(t *testing.T) {
 // The clean end settles: every byte arrived, the proxy closes, the
 // application closes after it (its FIN), and its socket is gone before the
 // handler's goroutine removed the connection: the proxy's orphan in TIME_WAIT
-// says the FIN arrived.
+// says the FIN arrived. Its orphan bound to a device (accepted from a
+// listener bound to one, or on a VRF's device) says so too.
 func TestTheProxysCloseThenTheApplicationsFINSettles(t *testing.T) {
-	p, app, _, reader := heldPair(t, "tcp4", "127.0.0.1:0")
-	if _, err := app.Write([]byte("publish 1\n")); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := io.ReadFull(reader, make([]byte, 10)); err != nil {
-		t.Fatal(err)
-	}
-	_ = reader.Close()
-	if _, err := app.Read(make([]byte, 1)); err != io.EOF {
-		t.Fatalf("the application's read after the proxy's close: %v, want EOF", err)
-	}
-	local, remote := mustAddrPort(t, app.LocalAddr()), mustAddrPort(t, app.RemoteAddr())
-	_ = app.Close()
-	for {
-		_, err := lookupTCP(local, remote)
-		if errors.Is(err, errNoSocket) {
-			break
-		}
-		runtime.Gosched()
-	}
-	if err := p.WaitPairedBytes(context.Background(), 1); err != nil {
-		t.Fatalf("WaitPairedBytes: %v, want settled", err)
-	}
-	if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 0 {
-		t.Fatalf("%d losses, want none", l)
+	for name, dev := range map[string]string{"bound to none": "", "bound to lo": "lo"} {
+		t.Run(name, func(t *testing.T) {
+			p := &Proxy{logger: zap.NewNop()}
+			app, _, reader := heldPairBound(t, p, 1, "tcp4", "127.0.0.1:0", dev, "")
+			if _, err := app.Write([]byte("publish 1\n")); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := io.ReadFull(reader, make([]byte, 10)); err != nil {
+				t.Fatal(err)
+			}
+			_ = reader.Close()
+			if _, err := app.Read(make([]byte, 1)); err != io.EOF {
+				t.Fatalf("the application's read after the proxy's close: %v, want EOF", err)
+			}
+			local, remote := mustAddrPort(t, app.LocalAddr()), mustAddrPort(t, app.RemoteAddr())
+			_ = app.Close()
+			for {
+				_, err := lookupTCP(local, remote)
+				if errors.Is(err, errNoSocket) {
+					break
+				}
+				runtime.Gosched()
+			}
+			if err := p.WaitPairedBytes(context.Background(), 1); err != nil {
+				t.Fatalf("WaitPairedBytes: %v, want settled", err)
+			}
+			if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 0 {
+				t.Fatalf("%d losses, want none", l)
+			}
+		})
 	}
 }
 
