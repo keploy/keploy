@@ -78,24 +78,47 @@ const (
 // as of the instant the test names, so whether the connection fell idle is the
 // test's to say, whatever a loaded host does to the time between two Notes.
 type idleChecks struct {
+	t     *testing.T
 	u     *UnrecordedConn
 	ticks chan time.Time
 }
 
-func checkedConn(open func(start time.Time) func()) *idleChecks {
+func checkedConn(t *testing.T, open func(start time.Time) func()) *idleChecks {
 	u := NewUnrecordedConn(open, testIdleGrace, testIdleCheck)
 	ticks := make(chan time.Time)
 	u.ticks = ticks
-	return &idleChecks{u: u, ticks: ticks}
+	return &idleChecks{t: t, u: u, ticks: ticks}
+}
+
+// check has the follower check as of at. With no follower left to take it
+// (the span was closed, and nothing opened another), it fails the test, by
+// the test binary's deadline as waitUntil does.
+func (c *idleChecks) check(at time.Time) {
+	c.t.Helper()
+	var expired <-chan time.Time
+	if dl, ok := c.t.Deadline(); ok {
+		timer := time.NewTimer(time.Until(dl) / 4)
+		defer timer.Stop()
+		expired = timer.C
+	}
+	select {
+	case c.ticks <- at:
+	case <-expired:
+		c.t.Fatalf("no follower took a check as of %v: the span was closed and none followed it", at)
+	}
 }
 
 // busySince checks as of a grace past `before`: the connection is busy then
 // only if bytes were seen at or after it.
-func (c *idleChecks) busySince(before time.Time) { c.ticks <- before.Add(testIdleGrace) }
+func (c *idleChecks) busySince(before time.Time) {
+	c.t.Helper()
+	c.check(before.Add(testIdleGrace))
+}
 
 // idle checks as of a grace past the connection's latest bytes: it fell idle.
 func (c *idleChecks) idle() {
-	c.ticks <- time.Unix(0, c.u.seen.Load()).Add(testIdleGrace + time.Nanosecond)
+	c.t.Helper()
+	c.check(time.Unix(0, c.u.seen.Load()).Add(testIdleGrace + time.Nanosecond))
 }
 
 // A stopped connection costs a test case only while the app uses it. These pin
@@ -156,7 +179,7 @@ func TestUnrecordedConnFollowsTraffic(t *testing.T) {
 	t.Run("a busy connection stays covered by one span", func(t *testing.T) {
 		t.Parallel()
 		l := &spanLog{}
-		checks := checkedConn(l.open)
+		checks := checkedConn(t, l.open)
 		u := checks.u
 		u.Stop(time.Now())
 		for i := 0; i < 20; i++ {
@@ -180,7 +203,7 @@ func TestUnrecordedConnFollowsTraffic(t *testing.T) {
 	t.Run("traffic that resumes reopens from its first byte", func(t *testing.T) {
 		t.Parallel()
 		l := &spanLog{}
-		checks := checkedConn(l.open)
+		checks := checkedConn(t, l.open)
 		u := checks.u
 		u.Stop(time.Now())
 		checks.idle()
@@ -251,7 +274,7 @@ func TestUnrecordedConnReopensFromTheFirstByteWhoeverRestartsIt(t *testing.T) {
 		l := &spanLog{}
 		closing, finish := make(chan struct{}), make(chan struct{})
 		var opened atomic.Int32
-		checks := checkedConn(func(start time.Time) func() {
+		checks := checkedConn(t, func(start time.Time) func() {
 			closeSpan := l.open(start)
 			if opened.Add(1) > 1 {
 				return closeSpan
@@ -350,7 +373,7 @@ func TestUnrecordedConnRunningIsSetOnceItsSpanIsOpen(t *testing.T) {
 	l := &spanLog{}
 	var early atomic.Int32
 	var checks *idleChecks
-	checks = checkedConn(func(start time.Time) func() {
+	checks = checkedConn(t, func(start time.Time) func() {
 		if checks.u.running.Load() {
 			early.Add(1)
 		}
