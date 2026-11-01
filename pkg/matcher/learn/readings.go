@@ -103,10 +103,11 @@ func b64Text(s string, clock map[string]bool) string { return b64Read(s, clock, 
 
 // b64Read is b64Text. A payload is mostly runs with nothing to split, and
 // reading them was half of the CPU of learning a big one, so it passes by
-// three reads whose answer it knows: the one part of a run with no '/' or
-// '.' is the run, its glued spans are none where it has no group of '-' or
-// '_', and no word is in an empty clock. everySplit makes those reads all
-// the same: only the row that holds b64Text to them sets it.
+// three reads whose answer it knows: the one part of a run with no '/' is
+// the run (no run holds a '.': nextB64Run ends one there), its glued spans
+// are none where it has no group of '-' or '_', and no word is in an empty
+// clock. everySplit makes those reads all the same: only the row that holds
+// b64Text to them sets it.
 func b64Read(s string, clock map[string]bool, everySplit bool) string {
 	var sb strings.Builder
 	seen := map[string]bool{}
@@ -134,7 +135,7 @@ func b64Read(s string, clock map[string]bool, everySplit bool) string {
 		}
 		tryRun := func(run string) bool {
 			whole := try(run)
-			if everySplit || strings.ContainsAny(run, "/.") {
+			if everySplit || strings.Contains(run, "/") {
 				for _, part := range strings.FieldsFunc(run, func(r rune) bool { return r == '/' || r == '.' }) {
 					try(part)
 				}
