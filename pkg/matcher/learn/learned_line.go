@@ -3,6 +3,8 @@ package learn
 import (
 	"strconv"
 	"strings"
+
+	"go.keploy.io/server/v3/pkg/secretname"
 )
 
 // A learned word's line says what keploy learned and where (test, mock,
@@ -35,7 +37,11 @@ type learnedWord struct {
 func learnedLine(l learnedWord) string {
 	var b strings.Builder
 	b.WriteString(wordWhere(l.Test, l.Mock, l.Field, l.Word))
-	b.WriteString(recordedMark + strconv.Quote(l.Recorded) + roundFMark + strconv.Quote(l.Full) + ": learned ")
+	rec, full, rule := l.Recorded, l.Full, l.Rule
+	if secretAt(l.Field, l.Places) {
+		rec, full, rule = masked, masked, hidden(rule)
+	}
+	b.WriteString(recordedMark + strconv.Quote(rec) + roundFMark + strconv.Quote(full) + ": learned ")
 	switch l.Outcome {
 	case OutcomeClock:
 		b.WriteString("a clock read, checked in its call's span")
@@ -46,8 +52,8 @@ func learnedLine(l learnedWord) string {
 	default:
 		b.WriteString("nothing")
 	}
-	if l.Rule != "" {
-		b.WriteString(": " + l.Rule)
+	if rule != "" {
+		b.WriteString(": " + rule)
 	}
 	if l.From != "" {
 		b.WriteString(", learned from round F's call in " + l.From + ", for learning only")
@@ -70,4 +76,55 @@ func learnedLine(l learnedWord) string {
 	}
 	b.WriteString(". Undo: " + editWords(undo) + editSep + editWords(Edit{Kind: EditReRecord}) + ".")
 	return b.String()
+}
+
+// A secret's values never print. Where a line's field, or a place it names,
+// names a secret by keploy's one rule for a name (secretname.Name, the rule
+// a container's fingerprint uses), read at each segment of the path
+// (body.user.password, header.Authorization; never createdAt), both values
+// print as "***", and so does every value its rule or reason quotes: those
+// quote every value they name (strconv.Quote), and nothing else. The
+// Decision keeps both values, which the adapter binds. The rule is broad
+// on purpose: a field named author or passenger prints "***" too.
+const masked = "***"
+
+// withoutMark begins a line's words for round F's text at a place that does
+// not hold its value, where keploy does not print that text (gaveAt).
+const withoutMark = "a value without "
+
+// secretAt reports whether field, or one of places, names a secret.
+func secretAt(field string, places []string) bool {
+	for _, s := range append([]string{field}, places...) {
+		for _, seg := range strings.FieldsFunc(s, func(r rune) bool { return r == '.' || r == ' ' }) {
+			if secretname.Name(seg) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// hidden is s with each quoted value in it printed as "***"; from a quote
+// that does not close on, all of it is (fail closed).
+func hidden(s string) string {
+	var b strings.Builder
+	for {
+		i := strings.IndexByte(s, '"')
+		if i < 0 {
+			return b.String() + s
+		}
+		b.WriteString(s[:i] + strconv.Quote(masked))
+		q, err := strconv.QuotedPrefix(s[i:])
+		if err != nil {
+			return b.String()
+		}
+		s = s[i+len(q):]
+	}
+}
+
+// hideSecrets prints rf's values as "***" where they are a secret's.
+func hideSecrets(rf *Refusal) {
+	if secretAt(rf.Field, rf.Places) {
+		rf.Recorded, rf.Full, rf.Why = masked, masked, hidden(rf.Why)
+	}
 }

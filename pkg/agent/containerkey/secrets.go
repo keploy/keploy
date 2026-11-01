@@ -5,14 +5,16 @@ import (
 	"regexp"
 	"strings"
 	"unicode"
+
+	"go.keploy.io/server/v3/pkg/secretname"
 )
 
 // A secret's value never counts in a fingerprint (Fingerprint). What names a
 // secret is keploy's sanitizer's rule for a field name (keploy's secret
-// detector's context keywords and sensitive keys): its segments, split at _,
-// -, . and the other non-letters and at camelCase, include a keyword
-// (secretWords), or the name holds a word no other name holds (secretParts:
-// PGPASSWORD, requirepass). And a value carries one if it holds a URL's
+// detector's context keywords and sensitive keys, secretname.Name): its
+// segments, split at _, -, . and the other non-letters and at camelCase,
+// include a keyword, or the name holds a word no other name holds
+// (PGPASSWORD, requirepass). And a value carries one if it holds a URL's
 // password or a key=value pair a secret's name keys (a JAAS configuration, a
 // connection string, a JVM property), or a word that names one followed by
 // its value (requirepass hunter2). A short flag's secret is told apart only
@@ -20,70 +22,6 @@ import (
 // -p<password>, a redis client's -a <password>; another program's (curl's
 // -u user:pw) counts as given: pass it in a variable or a long flag named
 // for it.
-
-// secretWords are the keywords a name's segments are compared with.
-var secretWords = map[string]bool{
-	"secret": true, "secrets": true, "token": true, "tokens": true, "key": true, "keys": true,
-	"password": true, "passwords": true, "pass": true, "passwd": true, "pwd": true, "pw": true,
-	"passphrase": true, "auth": true, "authorization": true, "credential": true, "credentials": true,
-	"cred": true, "creds": true, "hmac": true, "signature": true, "sig": true, "encrypt": true,
-	"cipher": true, "hash": true, "oauth": true, "apikey": true, "dsn": true, "pin": true,
-	"otp": true, "cvv": true, "ssn": true, "private": true, "jaas": true, "salt": true,
-	"pat": true, "jwt": true, "bearer": true, "cookie": true, "cookies": true,
-}
-
-// secretParts are words a name is a secret's for holding anywhere in it,
-// its separators left out (connection_string: connectionstring).
-var secretParts = []string{"password", "passwd", "pass", "secret", "token", "credential", "apikey", "passphrase", "privatekey", "privkey", "accesskey", "auth", "cookie", "connectionstring", "sessionid"}
-
-// secretName reports whether name names a secret.
-func secretName(name string) bool {
-	joined := strings.Map(func(r rune) rune {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) {
-			return unicode.ToLower(r)
-		}
-		return -1
-	}, name)
-	for _, p := range secretParts {
-		if strings.Contains(joined, p) {
-			return true
-		}
-	}
-	for _, seg := range nameSegments(name) {
-		if secretWords[seg] {
-			return true
-		}
-	}
-	return false
-}
-
-// nameSegments splits name, lowercased, at every non-letter-or-digit and at
-// each lower-to-upper change of case (clientSecret: client, secret).
-func nameSegments(name string) []string {
-	var segs []string
-	var cur []rune
-	flush := func() {
-		if len(cur) > 0 {
-			segs = append(segs, strings.ToLower(string(cur)))
-			cur = cur[:0]
-		}
-	}
-	var prev rune
-	for _, r := range name {
-		switch {
-		case !unicode.IsLetter(r) && !unicode.IsDigit(r):
-			flush()
-		case unicode.IsUpper(r) && unicode.IsLower(prev):
-			flush()
-			cur = append(cur, r)
-		default:
-			cur = append(cur, r)
-		}
-		prev = r
-	}
-	flush()
-	return segs
-}
 
 var (
 	// urlPassword is a URL whose user information has a password.
@@ -110,14 +48,14 @@ func carriesSecret(value string) bool {
 		return true
 	}
 	for _, m := range keyedValue.FindAllStringSubmatch(value, -1) {
-		if secretName(m[1]) {
+		if secretname.Name(m[1]) {
 			return true
 		}
 	}
 	words := strings.Fields(value)
 	for i, w := range words {
 		flag, _, _ := strings.Cut(w, "=")
-		if strings.HasPrefix(flag, "-") && secretName(flag) && (strings.Contains(w, "=") || i+1 < len(words)) {
+		if strings.HasPrefix(flag, "-") && secretname.Name(flag) && (strings.Contains(w, "=") || i+1 < len(words)) {
 			return true
 		}
 	}
@@ -154,7 +92,7 @@ func secretWordsOf(words []string) []bool {
 			marks[i] = true
 		case redisClients[program] && w == "-a" && i+1 < len(words):
 			marks[i+1] = true
-		case keyWord.MatchString(w) && secretName(w) && i+1 < len(words):
+		case keyWord.MatchString(w) && secretname.Name(w) && i+1 < len(words):
 			marks[i+1] = true
 		}
 	}
@@ -189,7 +127,7 @@ func redactEnv(env []string) []string {
 	out := make([]string, len(env))
 	for i, e := range env {
 		name, value, _ := strings.Cut(e, "=")
-		if secretName(name) || carriesSecret(value) {
+		if secretname.Name(name) || carriesSecret(value) {
 			e = name + "=" + redacted
 		}
 		out[i] = e
@@ -203,7 +141,7 @@ func redactLabels(labels map[string]string) map[string]string {
 	}
 	out := maps.Clone(labels)
 	for k, v := range out {
-		if secretName(k) || carriesSecret(v) {
+		if secretname.Name(k) || carriesSecret(v) {
 			out[k] = redacted
 		}
 	}
@@ -263,7 +201,7 @@ func redactArgs(args []string) []string {
 		// is the whole of what comes before the "=": an argument holding a
 		// command line ("--requirepass x --appendonly=yes") is one value,
 		// below.
-		if flag, _, ok := strings.Cut(a, "="); ok && strings.HasPrefix(flag, "-") && strings.IndexFunc(flag, unicode.IsSpace) < 0 && secretName(flag) {
+		if flag, _, ok := strings.Cut(a, "="); ok && strings.HasPrefix(flag, "-") && strings.IndexFunc(flag, unicode.IsSpace) < 0 && secretname.Name(flag) {
 			out[i] = flag + "=" + redacted
 			continue
 		}
@@ -273,7 +211,7 @@ func redactArgs(args []string) []string {
 		}
 		// The word after a flag named for a secret is its value, whatever
 		// it looks like (--password -x).
-		if i > 0 && strings.HasPrefix(args[i-1], "-") && !strings.Contains(args[i-1], "=") && secretName(args[i-1]) {
+		if i > 0 && strings.HasPrefix(args[i-1], "-") && !strings.Contains(args[i-1], "=") && secretname.Name(args[i-1]) {
 			out[i] = redacted
 		}
 	}

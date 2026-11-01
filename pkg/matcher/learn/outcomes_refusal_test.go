@@ -2,6 +2,7 @@ package learn
 
 import (
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -127,7 +128,7 @@ func TestOutcomeRefusalLinesReadBackWhatTheySay(t *testing.T) {
 func TestOutcomeLearnedLinesSayWhatWhereWhyAndTheUndo(t *testing.T) {
 	ms := time.Millisecond
 	fAt := oAt.Add(FullRoundLead)
-	src := oServed("mock-7", false, false, Response, oText("body.token", "tok-9a1c4e7b2d"), "tok-77f0e3a5c1", ms)
+	src := oServed("mock-7", false, false, Response, oText("body.order", "ord-9a1c4e7b2d"), "ord-77f0e3a5c1", ms)
 	clockIn := iCall("body.at", String, iMs(oAt.Add(-5*ms)), iMs(fAt.Add(-5*ms)), oAt, fAt, iWin(oAt, fAt, 50*ms), nil, nil)
 	for _, c := range []struct {
 		what, r, f string
@@ -135,7 +136,7 @@ func TestOutcomeLearnedLinesSayWhatWhereWhyAndTheUndo(t *testing.T) {
 		want       WordOutcome
 		says       []string
 	}{
-		{"a Value", "9a1c4e7b2d", "77f0e3a5c1", oInput("header.Authorization", "Bearer tok-9a1c4e7b2d", "Bearer tok-77f0e3a5c1", src, nil), OutcomeValue, []string{"mock-7", "body.token"}},
+		{"a Value", "9a1c4e7b2d", "77f0e3a5c1", oInput("header.X-Order", "Order ord-9a1c4e7b2d", "Order ord-77f0e3a5c1", src, nil), OutcomeValue, []string{"mock-7", "body.order"}},
 		{"a fresh value", "8c41f2", "e09b7d", oInput("body.ref", "ref-8c41f2", "ref-e09b7d", nil, nil), OutcomeFresh, []string{"first"}},
 		{"a Clock", iMs(oAt.Add(-5 * ms)), iMs(fAt.Add(-5 * ms)), clockIn, OutcomeClock, []string{"clock"}},
 	} {
@@ -164,5 +165,53 @@ func TestOutcomeAVariableBoundAtAnotherRecordingKeepsItsWhy(t *testing.T) {
 	}
 	if got := MergeVariable(models.MockVariable{Bind: "body.id", Recorded: "ab12", Why: why}, models.MockVariable{Use: []string{"body.ref"}, Why: "another"}).Why; got != why {
 		t.Errorf("two declarations of one variable say why %q; want the first's, %q", got, why)
+	}
+}
+
+// A secret's values never print. Where a line's field, or a place it names,
+// is a secret's by keploy's one rule for a name (the one its container
+// fingerprint uses: a token field, an Authorization header), both values
+// print as "***" in the line and in the refusal it carries, and so does every
+// value its reason quotes; the decision itself keeps both values, which the
+// adapter binds. Every other value prints in full (a createdAt).
+func TestOutcomeASecretsValuesPrintMasked(t *testing.T) {
+	ms := time.Millisecond
+	const r, f, other = "tk1a2b3c4d", "tk5e6f7g8h", "tk9z8y7x6w"
+	sentOwn := oServed("mock-0", false, false, Request, oText("body.session", r), other, ms)
+	gaveToken := oServed("mock-0", false, false, Response, oText("body.access_token", r), f, ms)
+	for _, c := range []struct {
+		what string
+		in   Input
+		want WordOutcome
+	}{
+		{"a token field made anew", oInput("body.token", r, f, nil, nil), OutcomeFresh},
+		{"an Authorization header whose value stopped following its source", oInput("header.Authorization", "Bearer "+r, "Bearer "+f, sentOwn, nil), OutcomeRefused},
+		{"a value bound at a token field", oInput("header.X-Ref", "ref "+r, "ref "+f, gaveToken, nil), OutcomeValue},
+	} {
+		d := oWord(t, Decide(c.in), r, f)
+		if d.Outcome != c.want {
+			t.Errorf("%s: %s; want %s", c.what, oDescribe([]Decision{d}), oOutcomeName(Decision{Outcome: c.want}))
+		}
+		if d.Recorded != r || d.Full != f {
+			t.Errorf("%s: the decision holds %q and %q; want both values, which the adapter binds", c.what, d.Recorded, d.Full)
+		}
+		said := d.Line
+		if d.Refusal != nil {
+			said += " " + d.Refusal.Recorded + " " + d.Refusal.Full + " " + d.Refusal.Why
+		}
+		for _, v := range []string{r, f, other} {
+			if strings.Contains(said, v) {
+				t.Errorf("LEAK %s: %q prints the value %q", c.what, said, v)
+			}
+		}
+		if !strings.Contains(d.Line, `recorded "***", round F "***"`) {
+			t.Errorf("%s: line %q; want both values printed as \"***\"", c.what, d.Line)
+		}
+	}
+	const rAt, fAt = "2026-10-31T08:00:00Z", "2026-10-31T08:30:00Z"
+	for _, d := range Decide(oInput("body.createdAt", rAt, fAt, nil, nil)) {
+		if strings.Contains(d.Line, "***") || !strings.Contains(d.Line, strconv.Quote(d.Recorded)) || !strings.Contains(d.Line, strconv.Quote(d.Full)) {
+			t.Errorf("a createdAt: line %q; want it to print %q and %q in full", d.Line, d.Recorded, d.Full)
+		}
 	}
 }
