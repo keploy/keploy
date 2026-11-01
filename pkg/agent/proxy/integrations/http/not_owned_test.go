@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -21,9 +22,13 @@ import (
 type stagedDb struct {
 	*mockMemDb
 	staged []*models.Mock
+	// unrouted is why the marked call's set is not routed (CallRound.Unrouted).
+	unrouted string
 }
 
-func (d stagedDb) MarkCallRound() integrations.CallRound { return integrations.NewCallRound(1, nil) }
+func (d stagedDb) MarkCallRound() integrations.CallRound {
+	return integrations.NewCallRound(1, nil).InRouting(d.unrouted)
+}
 
 // HoldToRound implements integrations.RoundHolder: d never stages again, so
 // it holds every call it marks as it is.
@@ -64,7 +69,7 @@ func TestNotOwnedRecordingIsTheCallMadeElsewhere(t *testing.T) {
 
 	r := &models.MockMismatchReport{ClosestMock: "visible", Differs: []string{"path"}, FieldDiffs: []models.MockFieldDiff{{Path: "path"}},
 		FieldReasons: []models.FieldReason{{Field: "body.since", Why: "body.since was learned as a read of the application's clock"}}}
-	markNotOwned(r, elsewhere)
+	markNotOwned(r, elsewhere, integrations.CallRound{})
 	if r.ClosestMock != elsewhere.Name || !r.NotOwned || r.Differs != nil || r.FieldDiffs != nil || r.FieldReasons != nil || r.ClosestMockReq == "" || r.NextSteps == "" {
 		t.Fatalf("the report of a call made elsewhere is %+v", r)
 	}
@@ -76,9 +81,9 @@ func TestNotOwnedRecordingIsTheCallMadeElsewhere(t *testing.T) {
 // off nothing is named so.
 func TestAMissOnACallMadeElsewhereNamesItsRecording(t *testing.T) {
 	const addr, host = "127.0.0.1:50001", "localhost:50001"
-	miss := func(t *testing.T) *models.MockMismatchReport {
+	miss := func(t *testing.T, unrouted string) *models.MockMismatchReport {
 		t.Helper()
-		db := stagedDb{mockMemDb: &mockMemDb{}, staged: []*models.Mock{onHost("other-test-delete", "/delete", host)}}
+		db := stagedDb{mockMemDb: &mockMemDb{}, staged: []*models.Mock{onHost("other-test-delete", "/delete", host)}, unrouted: unrouted}
 		var reported error
 		ctx := models.WithMockMismatchReporter(context.Background(), func(err error) { reported = err })
 		app, prox := net.Pipe()
@@ -110,11 +115,26 @@ func TestAMissOnACallMadeElsewhereNamesItsRecording(t *testing.T) {
 		return withReport.MismatchReport()
 	}
 	t.Setenv(provenswitch.Env, "1")
-	if r := miss(t); !r.NotOwned || r.ClosestMock != "other-test-delete" {
-		t.Fatalf("under the switch the miss names %q (not owned: %v), want other-test-delete", r.ClosestMock, r.NotOwned)
+	for _, unrouted := range []string{"", models.UnroutedUnmarked, models.UnroutedNotEnabled, models.UnroutedUnstaged} {
+		r := miss(t, unrouted)
+		if !r.NotOwned || r.ClosestMock != "other-test-delete" {
+			t.Fatalf("under the switch the miss names %q (not owned: %v), want other-test-delete", r.ClosestMock, r.NotOwned)
+		}
+		// keploy mock replay (no set staged) has no record's judging to
+		// move the recording: the miss says the mapping edit, and never to
+		// record again.
+		if unrouted != models.UnroutedUnstaged {
+			if r.NextSteps != notOwnedNextSteps("other-test-delete") {
+				t.Fatalf("a set staged by keploy test (%q) was told %q", unrouted, r.NextSteps)
+			}
+			continue
+		}
+		if !strings.Contains(r.NextSteps, "move other-test-delete to worker: in mappings.yaml") || strings.Contains(r.NextSteps, "judging") || strings.Contains(r.NextSteps, "record again") {
+			t.Fatalf("keploy mock replay's miss does not say the mapping edit alone: %q", r.NextSteps)
+		}
 	}
 	t.Setenv(provenswitch.Env, "")
-	if r := miss(t); r.NotOwned {
+	if r := miss(t, ""); r.NotOwned {
 		t.Fatalf("without the switch the miss is named not owned: %+v", r)
 	}
 }

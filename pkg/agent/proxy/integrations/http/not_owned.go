@@ -191,11 +191,27 @@ func init() {
 // markNotOwned makes report the miss of a call that is m, a recording the
 // open view does not show (notOwnedRecording): m is its closest mock, with no
 // field named as differing, since none does, and its rendered request is m's.
-func markNotOwned(report *models.MockMismatchReport, m *models.Mock) {
+// call is where the call's first read found it made: a call keploy mock
+// replay made (no set staged, models.UnroutedUnstaged) is told the mapping
+// edit (notOwnedMappingEdit), never record's judging, which keploy mock has
+// none of.
+func markNotOwned(report *models.MockMismatchReport, m *models.Mock, call integrations.CallRound) {
 	report.ClosestMock, report.NotOwned = m.Name, true
 	report.FieldDiffs, report.Differs, report.FieldReasons = nil, nil, nil
 	report.ClosestMockReq = renderMockRequest(m.Spec.HTTPReq, m.Noise)
 	report.NextSteps = notOwnedNextSteps(m.Name)
+	if call.Unrouted() == models.UnroutedUnstaged {
+		report.NextSteps = notOwnedMappingEdit(m.Name)
+	}
+}
+
+// notOwnedMappingEdit says what a miss on a call that is a recording the open
+// view does not show means under keploy mock replay, which marks no set and
+// routes none: the test framework's begin and end set each test's window,
+// and a call made outside its recording's window is a mapping edit the
+// reader makes (worker:), as keploy mock replay's end says it.
+func notOwnedMappingEdit(name string) string {
+	return fmt.Sprintf("This request is %s, which the test set's mappings.yaml lists where this replay did not make it: for another test, whose window the call was recorded in, or in worker: from a place this replay had not reached. keploy mock does not decide whose a call is: each test's begin and end set its window. If the call is the application's own work (a queue consumer, a scheduler), move %s to worker: in mappings.yaml, which answers it in any test's window or between tests and requires it of none; if it is the test's own, the test made it outside the window it was recorded in.", name, name)
 }
 
 // notOwnedNextSteps says what a miss on a call that is a recording the open
