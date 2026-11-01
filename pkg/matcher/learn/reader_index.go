@@ -133,13 +133,20 @@ func (x *readerIndex) claim(n int64) bool {
 }
 
 // release gives the set's budget back what the index keeps, once its call
-// is over (the caller's: defer x.release()), and lets go of it: the index
-// keeps nothing more, and a question asked after reads the text again.
+// is over (the caller's: defer x.release()), and lets go of it, every
+// entry's answers included, those a caller's handle still reaches: the
+// index keeps nothing more, and a question asked after, through any
+// handle, reads the text again.
 func (x *readerIndex) release() {
 	if s := x.set; s != nil && x.used > 0 {
 		s.mu.Lock()
 		s.budget.used -= x.used
 		s.mu.Unlock()
+	}
+	for _, es := range x.texts {
+		for _, e := range es {
+			*e = readerEntry{n: e.n}
+		}
 	}
 	x.used, x.budget = 0, 0
 	x.texts = map[uint64][]*readerEntry{}

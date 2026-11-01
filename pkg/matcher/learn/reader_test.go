@@ -663,6 +663,11 @@ func TestReaderIndexKeepsNoAnswerPastItsCap(t *testing.T) {
 	if x.used > x.budget || tt.e.tokens.ok {
 		t.Errorf("the index keeps %d bytes (words kept %v) within a cap of %d", x.used, tt.e.tokens.ok, x.budget)
 	}
+	// The entry is past the cap from then on: an answer that would fit
+	// alone (its instants: none) is built for the question and not kept.
+	if _, ok := tt.spansOf(); !ok || tt.e.spans.ok || x.used != 0 {
+		t.Errorf("after an answer that did not fit: instants kept %v, %d bytes kept; want none kept from then on", tt.e.spans.ok, x.used)
+	}
 }
 
 // Where the set's tiers that let go keep its budget full, the index has
@@ -740,6 +745,41 @@ func TestReaderFieldsWithOfAWordTheTextLacksBuildsNoView(t *testing.T) {
 	}
 	if at, read := r.fieldsWith(ids[3][9:13]); len(at) == 0 || !read || !r.e.fields.ok {
 		t.Errorf("a word the recording holds: at %v read %v, view kept %v; want its fields, the view kept", at, read, r.e != nil && r.e.fields.ok)
+	}
+}
+
+// The index counts a text it keeps once, however many of its answers it
+// keeps: the entry keeps the text with the first answer it keeps.
+func TestReaderIndexCountsAKeptTextOnce(t *testing.T) {
+	text := "id 7f3c " + strings.Repeat("word ", 20000)
+	x := newReaderIndex(NewDriftCache())
+	tt := x.text(text)
+	if held, read := tt.holdsWord("7f3c"); !held || !read {
+		t.Fatalf("held %v read %v; want held", held, read)
+	}
+	if _, ok := tt.spansOf(); !ok || tt.e.text != text || !tt.e.tokens.ok || !tt.e.spans.ok {
+		t.Fatalf("fixture: the entry keeps the text %v, its words %v, its instants %v", tt.e.text == text, tt.e.tokens.ok, tt.e.spans.ok)
+	}
+	if want := int64(len(text)) + tokensBytes(tt.e.tokens.v) + spansBytes(tt.e.spans.v); x.used != want {
+		t.Errorf("the index counts %d bytes; want %d: the text once, beside its two answers", x.used, want)
+	}
+}
+
+// release lets go of every answer the index keeps, those a caller's handle
+// still reaches included: a question asked after, through any handle, reads
+// the text again and keeps nothing.
+func TestReaderReleaseLetsGoOfEveryAnswer(t *testing.T) {
+	x := newReaderIndex(NewDriftCache())
+	tt := x.text("id 7f3c and more words")
+	if held, read := tt.holdsWord("7f3c"); !held || !read || !tt.e.tokens.ok {
+		t.Fatalf("held %v read %v, words kept %v; want held and kept", held, read, tt.e.tokens.ok)
+	}
+	x.release()
+	if tt.e.tokens.ok || tt.e.text != "" {
+		t.Errorf("after release the handle's entry keeps its words %v, its text %q; want nothing", tt.e.tokens.ok, tt.e.text)
+	}
+	if held, read := tt.holdsWord("7f3c"); !held || !read || tt.e.tokens.ok || x.used != 0 {
+		t.Errorf("asked after release: held %v read %v, words kept %v, %d bytes; want held, nothing kept", held, read, tt.e.tokens.ok, x.used)
 	}
 }
 
