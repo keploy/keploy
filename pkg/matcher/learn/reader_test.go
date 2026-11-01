@@ -689,3 +689,88 @@ func TestReaderIndexHasTheSetLetGoToKeep(t *testing.T) {
 	}
 	x.release()
 }
+
+// A body of several JSON values (NDJSON, a streaming API's answer) is read
+// value by value, each below its index as an array's element is: a word
+// that moved from one record of the stream to another is not at one place
+// in both runs. A body that is not wholly JSON values is one field, as
+// main reads a body that is no JSON.
+func TestReaderFieldsOfAStreamedBodyAreItsValuesFields(t *testing.T) {
+	defer func(b int64) { readerBudget = b }(readerBudget)
+	const w = "ord7Kq2Xw9"
+	answer := func(body string) Raw { return RawOf(getAnswer("mock-1", "http://api/items/1", body, eRecAt), false) }
+	rec := answer(`{"a":"` + w + `"}` + "\n" + `{"a":"x"}` + "\n")
+	moved := answer(`{"a":"x"}` + "\n" + `{"a":"` + w + `"}` + "\n")
+	stayed := answer(`{"a":"` + w + `"}` + "\n" + `{"a":"y"}` + "\n")
+	trailing := answer(`{"a":"` + w + `"} and then text`)
+	for _, budget := range []int64{0, 1} {
+		readerBudget = budget
+		x := newReaderIndex(nil)
+		r := x.textOf(rec)
+		if at, read := r.fieldsWith(w); len(at) != 1 || !read || !strings.HasSuffix(at[0].path, "[0].a") {
+			t.Errorf("budget %d: %q is at %v (read %v); want the one field [0].a", budget, w, at, read)
+		}
+		for _, c := range []struct {
+			what string
+			live Raw
+			want bool
+		}{{"moved to the second record", moved, false}, {"stayed in the first", stayed, true}} {
+			if same, read := inOneField(r, w, x.textOf(c.live), w); same != c.want || !read {
+				t.Errorf("budget %d, %s: in one field %v read %v; want %v", budget, c.what, same, read, c.want)
+			}
+		}
+		if at, read := x.textOf(trailing).fieldsWith(w); len(at) != 1 || !read || strings.Contains(at[0].path, "[") || strings.HasSuffix(at[0].path, ".a") {
+			t.Errorf("budget %d: a JSON value followed by text: %q is at %v (read %v); want the body whole", budget, w, at, read)
+		}
+	}
+}
+
+// fieldsWith reads a field's words only of a text that holds the word
+// (holdsWord): a recording that lacks it has no field with it, and the
+// index builds no field view for that question.
+func TestReaderFieldsWithOfAWordTheTextLacksBuildsNoView(t *testing.T) {
+	body, ids := uuidAnswer(40, 16<<10)
+	x := newReaderIndex(NewDriftCache())
+	r := x.textOf(RawOf(getAnswer("mock-1", "http://api/items/1", body, eRecAt), false))
+	if at, read := r.fieldsWith("zzzz9"); len(at) != 0 || !read {
+		t.Errorf("a word the recording lacks: at %v read %v; want no field, read", at, read)
+	}
+	if r.e != nil && r.e.fields.ok {
+		t.Errorf("the index built the field view for a word the recording lacks")
+	}
+	if at, read := r.fieldsWith(ids[3][9:13]); len(at) == 0 || !read || !r.e.fields.ok {
+		t.Errorf("a word the recording holds: at %v read %v, view kept %v; want its fields, the view kept", at, read, r.e != nil && r.e.fields.ok)
+	}
+}
+
+// BenchmarkReaderFieldsWith498KB asks fieldsWith once per call on
+// api-server's 498 KB answer shape, within the budget (the field view built
+// and kept) and past it (a scan of the recording's fields), for a word the
+// answer holds and one it lacks.
+func BenchmarkReaderFieldsWith498KB(b *testing.B) {
+	body, ids := uuidAnswer(400, 498<<10)
+	rec := RawOf(getAnswer("mock-1", "http://api/items/1", body, eRecAt), false)
+	for _, c := range []struct {
+		name   string
+		budget int64
+		word   string
+		held   bool
+	}{{"within/held", 0, ids[3][9:13], true}, {"within/lacked", 0, "zzzz9", false}, {"past/held", 1, ids[3][9:13], true}, {"past/lacked", 1, "zzzz9", false}} {
+		b.Run(c.name, func(b *testing.B) {
+			defer func(v int64) { readerBudget = v }(readerBudget)
+			readerBudget = c.budget
+			var peak uint64
+			for i := 0; i < b.N; i++ {
+				x := newReaderIndex(NewDriftCache())
+				if at, read := x.textOf(rec).fieldsWith(c.word); (len(at) > 0) != c.held || !read {
+					b.Fatalf("%q: at %v read %v", c.word, at, read)
+				}
+				x.release()
+				var ms runtime.MemStats
+				runtime.ReadMemStats(&ms)
+				peak = max(peak, ms.HeapInuse)
+			}
+			b.ReportMetric(float64(peak)/(1<<20), "heapMiB")
+		})
+	}
+}
