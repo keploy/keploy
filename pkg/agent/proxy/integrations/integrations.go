@@ -1180,6 +1180,26 @@ type LearnElsewhere interface {
 	LearnElsewhere(m *models.Mock, clocks map[string]models.ClockOffset) bool
 }
 
+// LearnElsewhereCounter is a store's count of record's full round's
+// learning-only pairings (LearnElsewhere): for each call a parser offered
+// LearnElsewhereCandidates for, the call's operation as the parser says it,
+// and what came of it (learned, or what stopped the pairing). The store
+// says the count by operation in the agent's log, which keploy mock record
+// prints with the round's. An optional MockMemDb capability beside
+// LearnElsewhere: the agent's MockManager implements it, and every
+// MockMemDb wrapper must forward it.
+type LearnElsewhereCounter interface {
+	LearnElsewhereCounted(kind models.Kind, operation, outcome string)
+}
+
+// CountLearnElsewhere is db's LearnElsewhereCounted; nothing when db does
+// not implement LearnElsewhereCounter.
+func CountLearnElsewhere(db MockMemDb, kind models.Kind, operation, outcome string) {
+	if c, ok := db.(LearnElsewhereCounter); ok {
+		c.LearnElsewhereCounted(kind, operation, outcome)
+	}
+}
+
 // LearnElsewhereCandidates is db's LearnElsewhereCandidates of kind under
 // keys; nil when db does not implement LearnElsewhere.
 func LearnElsewhereCandidates(db MockMemDb, kind models.Kind, keys []string) []*models.Mock {

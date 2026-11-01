@@ -1,13 +1,16 @@
 package proxy
 
 import (
+	"cmp"
 	"maps"
 	"slices"
 	"sort"
+	"strconv"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap"
 )
 
 // Record's full round learning a recording's clock reads from a call of its
@@ -152,10 +155,17 @@ func (m *MockManager) learnElsewhereLocked(mk *models.Mock, clocks map[string]mo
 // state per recording, by name, each with the window that taught it
 // (MockState.TaughtIn): the test open when the call came, "" between
 // tests, and when it taught. Not drained: each read is the set's whole.
+//
+// A read says the set's count of learning-only pairings by operation
+// (LearnElsewhereCounted) in the agent's log, once, and again only after
+// more calls were counted: keploy mock record reads the round's learning
+// as the round ends, and prints the agent's log with the round's.
 func (m *MockManager) LearnedElsewhere() []models.MockState {
 	m.consumedMu.Lock()
 	out := slices.Collect(maps.Values(m.learnedElsewhere))
+	unsaid := m.unsaidElsewhereCounts()
 	m.consumedMu.Unlock()
+	m.sayElsewhereCounts(unsaid)
 	for i := range out {
 		out[i].Clocks = maps.Clone(out[i].Clocks)
 		out[i].TaughtIn = slices.Clone(out[i].TaughtIn)
@@ -164,4 +174,73 @@ func (m *MockManager) LearnedElsewhere() []models.MockState {
 	return out
 }
 
-var _ integrations.LearnElsewhere = (*MockManager)(nil)
+// elsewhereOp is an operation learning-only pairings are counted by: a
+// parser's kind, and the operation as the parser says it.
+type elsewhereOp struct {
+	kind      models.Kind
+	operation string
+}
+
+// LearnElsewhereCounted counts a call a parser offered recordings of another
+// window for (integrations.LearnElsewhereCounter) into the current test
+// set's count: its operation, and what came of it. A read of the round's
+// learning says the count (LearnedElsewhere), and so does the next set's
+// staging, if no read did.
+func (m *MockManager) LearnElsewhereCounted(kind models.Kind, operation, outcome string) {
+	m.consumedMu.Lock()
+	defer m.consumedMu.Unlock()
+	op := elsewhereOp{kind: kind, operation: operation}
+	if m.elsewhereCounts[op] == nil {
+		if m.elsewhereCounts == nil {
+			m.elsewhereCounts = map[elsewhereOp]map[string]int{}
+		}
+		m.elsewhereCounts[op] = map[string]int{}
+	}
+	m.elsewhereCounts[op][outcome]++
+	m.elsewhereCounted++
+}
+
+// elsewhereCountLine is the line that says the set's count of learning-only
+// pairings for one operation (sayElsewhereCounts).
+const elsewhereCountLine = "record's full round: calls made in another window than a recording of their operation, and what came of each"
+
+// unsaidElsewhereCounts is the set's whole count, the fields of one line per
+// operation, sorted, when calls were counted since the log last said it,
+// and marks it said; nil otherwise. Caller holds consumedMu.
+func (m *MockManager) unsaidElsewhereCounts() [][]zap.Field {
+	if m.elsewhereCounted == m.elsewhereSaid {
+		return nil
+	}
+	m.elsewhereSaid = m.elsewhereCounted
+	ops := slices.SortedFunc(maps.Keys(m.elsewhereCounts), func(a, b elsewhereOp) int {
+		return cmp.Or(cmp.Compare(a.kind, b.kind), cmp.Compare(a.operation, b.operation))
+	})
+	out := make([][]zap.Field, 0, len(ops))
+	for _, op := range ops {
+		calls, said := 0, []string{}
+		for _, o := range slices.Sorted(maps.Keys(m.elsewhereCounts[op])) {
+			n := m.elsewhereCounts[op][o]
+			calls += n
+			said = append(said, o+": "+strconv.Itoa(n))
+		}
+		out = append(out, []zap.Field{zap.String("kind", string(op.kind)), zap.String("operation", op.operation),
+			zap.Int("calls", calls), zap.Strings("outcomes", said)})
+	}
+	return out
+}
+
+// sayElsewhereCounts logs lines (unsaidElsewhereCounts) at info, outside
+// consumedMu.
+func (m *MockManager) sayElsewhereCounts(lines [][]zap.Field) {
+	if m.logger == nil {
+		return
+	}
+	for _, fields := range lines {
+		m.logger.Info(elsewhereCountLine, fields...)
+	}
+}
+
+var (
+	_ integrations.LearnElsewhere        = (*MockManager)(nil)
+	_ integrations.LearnElsewhereCounter = (*MockManager)(nil)
+)

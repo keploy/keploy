@@ -334,10 +334,18 @@ func (s *scopedMockDb) LearnElsewhere(m *models.Mock, clocks map[string]models.C
 	return integrations.LearnElsewhereOnto(s.MockMemDb, m, clocks)
 }
 
+// LearnElsewhereCounted forwards a parser's count of a learning-only
+// pairing (integrations.LearnElsewhereCounter): nothing to a store that does
+// not count.
+func (s *scopedMockDb) LearnElsewhereCounted(kind models.Kind, operation, outcome string) {
+	integrations.CountLearnElsewhere(s.MockMemDb, kind, operation, outcome)
+}
+
 var (
-	_ integrations.ExactBackground = (*scopedMockDb)(nil)
-	_ integrations.Pairing         = (*scopedMockDb)(nil)
-	_ integrations.LearnElsewhere  = (*scopedMockDb)(nil)
+	_ integrations.ExactBackground       = (*scopedMockDb)(nil)
+	_ integrations.Pairing               = (*scopedMockDb)(nil)
+	_ integrations.LearnElsewhere        = (*scopedMockDb)(nil)
+	_ integrations.LearnElsewhereCounter = (*scopedMockDb)(nil)
 )
 
 // RoundSnapshot, WithinRound, ClaimPairingIn, SpendByKindIn and TakenLog

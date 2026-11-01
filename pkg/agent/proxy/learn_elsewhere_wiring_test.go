@@ -59,6 +59,10 @@ func TestTheViewsAParserReadsPassOnLearningAcrossWindows(t *testing.T) {
 				t.Fatalf("a call taught other nothing through %s", c.name)
 			}
 			learnedOther(t, mm, c.name)
+			integrations.CountLearnElsewhere(db, models.Mongo, "insert events in keploy", "learned its clock reads")
+			if got := mm.elsewhereCounts[elsewhereOp{models.Mongo, "insert events in keploy"}]["learned its clock reads"]; got != 1 {
+				t.Fatalf("a count made through %s reached the manager %d times; want once", c.name, got)
+			}
 		})
 	}
 
