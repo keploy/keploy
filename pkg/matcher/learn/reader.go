@@ -4,6 +4,8 @@ import (
 	"math"
 	"unicode"
 	"unicode/utf8"
+
+	"go.keploy.io/server/v3/pkg/variables"
 )
 
 // This file is learning's one reader of a drifted value (the proven
@@ -74,11 +76,13 @@ type wordStretch struct {
 	Tokens    []wholeToken
 }
 
-// readWord is one changed word: its text in each run ("" in a run that
-// has no partner for it), its index among that run's words (-1 where
-// none), its bytes, its stretch, the whole tokens around it longer than
-// it, its bits, and the instant it is part of (nil where none).
+// readWord is one changed word: its address (At, readLeaf's; the zero
+// Address from readText), its text in each run ("" in a run that has no
+// partner for it), its index among that run's words of its reading (-1
+// where none), its bytes there, its stretch, the whole tokens around it
+// longer than it, its bits, and the instant it is part of (nil where none).
 type readWord struct {
+	At                variables.Address
 	Rec, Live         string
 	RecIdx, LiveIdx   int
 	RecAt, LiveAt     [2]int
@@ -88,34 +92,20 @@ type readWord struct {
 	Instant           *instantWord
 }
 
-// textReading is what the reader reads of one drifted text: both texts,
+// textReading is what the reader reads of one drifted text: where it
+// stands (At names the text whole, Word -1; Off is how many words of R's
+// and F's text at those steps come before it, readLeaf's), both texts,
 // their words, the stretches, every changed word in order, the instants
 // those words are part of, and whether any stretch changed shape.
 type textReading struct {
+	At                  variables.Address
+	Off                 [2]int
 	Rec, Live           string
 	RecWords, LiveWords [][2]int
 	Stretches           []wordStretch
 	Words               []readWord
 	Instants            []*instantWord
 	ChangedShape        bool
-}
-
-// wordSpans are the words of s: its isWord runs, [start, end) each.
-func wordSpans(s string) [][2]int {
-	var out [][2]int
-	for i := 0; i < len(s); {
-		if !isWord(s[i]) {
-			i++
-			continue
-		}
-		j := i + 1
-		for j < len(s) && isWord(s[j]) {
-			j++
-		}
-		out = append(out, [2]int{i, j})
-		i = j
-	}
-	return out
 }
 
 // textsOf are the texts of spans in s.
@@ -194,7 +184,7 @@ func readText(rec, live string) textReading { return readTextIn(nil, rec, live) 
 // readTextIn is readText, its instants read through dc's text cache
 // (spansOf; nil reads them now).
 func readTextIn(dc *DriftCache, rec, live string) textReading {
-	rd := textReading{Rec: rec, Live: live, RecWords: wordSpans(rec), LiveWords: wordSpans(live)}
+	rd := textReading{Rec: rec, Live: live, RecWords: variables.Words(rec), LiveWords: variables.Words(live)}
 	if rec == live {
 		return rd
 	}

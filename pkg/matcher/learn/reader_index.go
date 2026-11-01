@@ -25,24 +25,45 @@ func readerBudgetBytes() int64 {
 	return setBudget() / 4
 }
 
-// readerIndex is one Decide call's index: what it has read of each text,
-// by the text (a nil entry: the text lay past the budget), the bytes that
-// takes, and how many texts it left unread.
+// readerIndex is one Decide call's index: each text asked about, the
+// bytes what it read of them takes, and how many reads it left undone past
+// the budget.
 type readerIndex struct {
 	dc           *DriftCache
 	budget, used int64
-	tokens       map[string][]map[string]bool
-	spans        map[string][]instant
+	texts        map[string]*readerText
 	unreadTexts  int
+}
+
+// readerText is one text as the call's index holds it. Finding it hashes
+// the text, so a caller asks text once per place and keeps it: a 498 KB
+// answer hashed per word costs more than reading it.
+type readerText struct {
+	x           *readerIndex
+	text        string
+	tokens      []map[string]bool
+	spans       []instant
+	tokensAsked bool
+	spansAsked  bool
 }
 
 // newReaderIndex is an empty index for one call, reading through dc's
 // caches (nil: none).
 func newReaderIndex(dc *DriftCache) *readerIndex {
-	return &readerIndex{dc: dc, budget: readerBudgetBytes(), tokens: map[string][]map[string]bool{}, spans: map[string][]instant{}}
+	return &readerIndex{dc: dc, budget: readerBudgetBytes(), texts: map[string]*readerText{}}
 }
 
-// fits reports whether n more bytes fit the budget, counting a text that
+// text is s as the index holds it, read lazily.
+func (x *readerIndex) text(s string) *readerText {
+	if t, ok := x.texts[s]; ok {
+		return t
+	}
+	t := &readerText{x: x, text: s}
+	x.texts[s] = t
+	return t
+}
+
+// fits reports whether n more bytes fit the budget, counting a read that
 // does not as unread.
 func (x *readerIndex) fits(n int64) bool {
 	if x.used+n > x.budget {
@@ -52,62 +73,63 @@ func (x *readerIndex) fits(n int64) bool {
 	return true
 }
 
-// tokensOf are text's words in every declared form, by reading (isWord,
-// wordByte, idByte), read once for the call; ok false where they lie past
-// the budget. A text whose copy alone passes what is left is not read at
-// all.
-func (x *readerIndex) tokensOf(text string) ([]map[string]bool, bool) {
-	if t, ok := x.tokens[text]; ok {
-		return t, t != nil
+// tokensOf are the text's words in every declared form, by reading
+// (isWord, wordByte, idByte), read once for the call; ok false where they
+// lie past the budget. A text whose copy alone passes what is left is not
+// read at all.
+func (t *readerText) tokensOf() ([]map[string]bool, bool) {
+	if !t.tokensAsked {
+		t.tokensAsked = true
+		x := t.x
+		if !x.fits(int64(len(t.text)) + headerBytes) {
+			return nil, false
+		}
+		tok := x.dc.rawTokens(t.text)
+		n := tokensBytes(tok) + int64(len(t.text))
+		if !x.fits(n) {
+			return nil, false
+		}
+		x.used += n
+		t.tokens = tok
+		if t.tokens == nil {
+			t.tokens = []map[string]bool{}
+		}
 	}
-	if !x.fits(int64(len(text)) + headerBytes) {
-		x.tokens[text] = nil
-		return nil, false
-	}
-	t := x.dc.rawTokens(text)
-	n := tokensBytes(t) + int64(len(text))
-	if !x.fits(n) {
-		x.tokens[text] = nil
-		return nil, false
-	}
-	x.used += n
-	x.tokens[text] = t
-	return t, true
+	return t.tokens, t.tokens != nil
 }
 
-// spansOf are text's instants (instantSpans), read once for the call; ok
-// false where they lie past the budget.
-func (x *readerIndex) spansOf(text string) ([]instant, bool) {
-	if s, ok := x.spans[text]; ok {
-		return s, s != nil
+// spansOf are the text's instants (instantSpans), read once for the call;
+// ok false where they lie past the budget.
+func (t *readerText) spansOf() ([]instant, bool) {
+	if !t.spansAsked {
+		t.spansAsked = true
+		x := t.x
+		if !x.fits(int64(len(t.text)) + headerBytes) {
+			return nil, false
+		}
+		s := x.dc.spansOf(t.text)
+		n := spansBytes(s) + int64(len(t.text))
+		if !x.fits(n) {
+			return nil, false
+		}
+		x.used += n
+		t.spans = s
+		if t.spans == nil {
+			t.spans = []instant{}
+		}
 	}
-	if !x.fits(int64(len(text)) + headerBytes) {
-		x.spans[text] = nil
-		return nil, false
-	}
-	s := x.dc.spansOf(text)
-	n := spansBytes(s) + int64(len(text))
-	if !x.fits(n) {
-		x.spans[text] = nil
-		return nil, false
-	}
-	x.used += n
-	if s == nil {
-		s = []instant{}
-	}
-	x.spans[text] = s
-	return s, true
+	return t.spans, t.spans != nil
 }
 
-// holdsWord reports whether text holds w as a word in any of main's
+// holdsWord reports whether the text holds w as a word in any of main's
 // readings (isWord, wordByte, idByte) and any declared form; read is false
-// where text lay past the budget (held is false then).
-func (x *readerIndex) holdsWord(text, w string) (held, read bool) {
-	t, ok := x.tokensOf(text)
+// where the text lay past the budget (held is false then).
+func (t *readerText) holdsWord(w string) (held, read bool) {
+	sets, ok := t.tokensOf()
 	if !ok {
 		return false, false
 	}
-	for _, set := range t {
+	for _, set := range sets {
 		if set[w] {
 			return true, true
 		}
@@ -115,20 +137,24 @@ func (x *readerIndex) holdsWord(text, w string) (held, read bool) {
 	return false, true
 }
 
-// holdsToken reports whether text holds tok whole, as a token of its kind:
-// an idByte token (any declared form), or a base64 run, no byte of the
-// base64 alphabets or its padding on either side; read as holdsWord.
-func (x *readerIndex) holdsToken(text string, kind tokenKind, tok string) (held, read bool) {
+// holdsToken reports whether the text holds tok whole, as a token of its
+// kind: an idByte token (any declared form), or a base64 run, no byte of
+// the base64 alphabets or its padding on either side; read as holdsWord.
+func (t *readerText) holdsToken(kind tokenKind, tok string) (held, read bool) {
 	if kind == tokenID {
-		t, ok := x.tokensOf(text)
+		sets, ok := t.tokensOf()
 		if !ok {
 			return false, false
 		}
-		return t[len(t)-1][tok], true
+		if len(sets) == 0 {
+			return false, true
+		}
+		return sets[len(sets)-1][tok], true
 	}
 	if tok == "" {
 		return false, true
 	}
+	text := t.text
 	for i := 0; i+len(tok) <= len(text); {
 		j := indexFrom(text, tok, i)
 		if j < 0 {
@@ -151,10 +177,10 @@ func indexFrom(s, v string, i int) int {
 	return -1
 }
 
-// holdsMoment reports whether an instant of text names m by moment
+// holdsMoment reports whether an instant of the text names m by moment
 // (byMoment), and whether one does so at a fine cut; read as holdsWord.
-func (x *readerIndex) holdsMoment(text string, m moment) (held, fine, read bool) {
-	spans, ok := x.spansOf(text)
+func (t *readerText) holdsMoment(m moment) (held, fine, read bool) {
+	spans, ok := t.spansOf()
 	if !ok {
 		return false, false, false
 	}
@@ -167,6 +193,18 @@ func (x *readerIndex) holdsMoment(text string, m moment) (held, fine, read bool)
 		}
 	}
 	return held, fine, true
+}
+
+// holdsWord, holdsToken and holdsMoment ask text once (readerText's); a
+// caller asking one place about many words keeps x.text(s) instead.
+func (x *readerIndex) holdsWord(text, w string) (held, read bool) { return x.text(text).holdsWord(w) }
+
+func (x *readerIndex) holdsToken(text string, kind tokenKind, tok string) (held, read bool) {
+	return x.text(text).holdsToken(kind, tok)
+}
+
+func (x *readerIndex) holdsMoment(text string, m moment) (held, fine, read bool) {
+	return x.text(text).holdsMoment(m)
 }
 
 // unread reports whether the call's index left a text unread: past its

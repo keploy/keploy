@@ -208,10 +208,10 @@ func BenchmarkReaderIndex498KB(b *testing.B) {
 	answer, ids := uuidAnswer(400, 498<<10)
 	var peak uint64
 	for i := 0; i < b.N; i++ {
-		x := newReaderIndex(NewDriftCache())
+		place := newReaderIndex(NewDriftCache()).text(answer)
 		for _, id := range ids {
 			for _, g := range strings.Split(id, "-") {
-				if held, read := x.holdsWord(answer, g); !held || !read {
+				if held, read := place.holdsWord(g); !held || !read {
 					b.Fatalf("%q: held %v read %v", g, held, read)
 				}
 			}
