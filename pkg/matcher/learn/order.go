@@ -1094,10 +1094,18 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	// Two sends that are each their call's read of the clock say nothing of
 	// this one: two reads of one coarse cut. It goes on to step 7, whose
 	// check goes red where it was no read, and stays refused where 7 declines.
+	// A variable holds one text, so a place that holds the moment in another
+	// form (a second inside a nanosecond's text) is no place to bind it: the
+	// places with its text come first, and with none it goes on to step 7 too.
 	coarse := copies(false)
 	const copiedWhy = ": the same moment, at a millisecond or coarser, was sent before the call in both runs and its own window does not hold it: one read, copied"
-	if len(coarse) > 0 && !twoClockReads(coarse) {
-		return dc.copied(path, at, n, c, coarse, copiedWhy)
+	sameText := slices.DeleteFunc(slices.Clone(coarse), func(p evPlace) bool {
+		hr, _, _ := dc.holds(evPlace{gave: true}, p.t.rec, r, nil, false)
+		hl, _, _ := dc.holds(evPlace{gave: true}, p.t.live, l, nil, false)
+		return !hr || !hl
+	})
+	if len(sameText) > 0 && !twoClockReads(sameText) {
+		return dc.copied(path, at, n, c, sameText, copiedWhy)
 	}
 
 	// 7. Since begin (client tests): a read the window from each run's
