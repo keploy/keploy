@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"net"
 	"testing"
 
@@ -13,18 +14,19 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 )
 
-// dialGoneApp has the ingress take a connection for an app that refuses it,
-// and returns the levels it logged the failed dial at.
+// dialGoneApp has the ingress take a connection for an app that has gone: it
+// listened at app, and refuses it now. It returns the levels the ingress
+// logged the failed dial at.
 func dialGoneApp(t *testing.T, pm *IngressProxyManager, logs *observer.ObservedLogs, app string) []zapcore.Level {
 	t.Helper()
-	// A done ctx ends the dial's retries at its first refusal; the dial and
-	// what the ingress logs of it are what they are otherwise.
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
+	// What a dial that connected to it left (dialApp): its refusal is then
+	// final, and the dial returns it at once, with nothing to end it but a
+	// context that does not end.
+	pm.listened.Store(app, struct{}{})
 	client, peer := net.Pipe()
 	defer peer.Close()
 	defer client.Close()
-	pm.handleHttp1Connection(ctx, client, app, pm.logger, make(chan *models.TestCase, 1), make(chan struct{}, 1), 8080)
+	pm.handleHttp1Connection(context.Background(), client, app, pm.logger, make(chan *models.TestCase, 1), make(chan struct{}, 1), 8080)
 	var got []zapcore.Level
 	for _, e := range logs.TakeAll() {
 		if e.Message == "Failed to connect to upstream application. Verify the application is listening on the resolved address." {
@@ -68,6 +70,27 @@ func TestIngressSaysOtherAppFailuresAtErrorWhileStopping(t *testing.T) {
 	pm.logAppDialFailure(pm.logger, "Failed to connect to upstream application.", context.DeadlineExceeded)
 	if all := logs.All(); len(all) != 1 || all[0].Level != zapcore.ErrorLevel {
 		t.Fatalf("a dial that timed out while stopping was logged as %v, want one ERROR", all)
+	}
+}
+
+// A dial keploy itself ended (the forwarder's or the agent's context
+// canceled while it dialed) is not the app failing: it is said at DEBUG,
+// whether or not the recording is stopping.
+func TestIngressSaysADialKeployEndedAtDebug(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := New(zap.NewNop(), nil, &config.Config{}).dialApp(ctx, testnet.RefusedAddr(t, "tcp"))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("a dial under a canceled context returned %v, want the context's end", err)
+	}
+	for _, stopping := range []bool{false, true} {
+		core, logs := observer.New(zapcore.DebugLevel)
+		pm := New(zap.New(core), nil, &config.Config{})
+		pm.SetStopping(stopping)
+		pm.logAppDialFailure(pm.logger, "Failed to connect to upstream application.", err)
+		if all := logs.All(); len(all) != 1 || all[0].Level != zapcore.DebugLevel {
+			t.Fatalf("stopping=%v: a dial keploy ended was logged as %v, want one DEBUG", stopping, all)
+		}
 	}
 }
 

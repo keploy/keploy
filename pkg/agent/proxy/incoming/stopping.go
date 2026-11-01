@@ -1,6 +1,9 @@
 package proxy
 
 import (
+	"context"
+	"errors"
+
 	"go.uber.org/zap"
 )
 
@@ -26,12 +29,18 @@ func (pm *IngressProxyManager) SetStopping(stopping bool) { pm.stopping.Store(st
 
 // logAppDialFailure logs a failed dial, or redial, to the app the ingress
 // forwards to: at DEBUG when the app refused it while the recording is
-// stopping (see above), else at ERROR.
+// stopping (see above), or when keploy itself ended the dial (its context
+// canceled: the forwarder or the agent stopping), else at ERROR.
 func (pm *IngressProxyManager) logAppDialFailure(logger *zap.Logger, msg string, err error, fields ...zap.Field) {
 	fields = append(fields, zap.Error(err))
 	if pm.stopping.Load() && isConnRefused(err) {
 		logger.Debug(msg, append(fields,
 			zap.String("why", "the recording is stopping, and its app refused the connection: expected once the recording has stopped the app it started"))...)
+		return
+	}
+	if errors.Is(err, context.Canceled) {
+		logger.Debug(msg, append(fields,
+			zap.String("why", "keploy stopped serving the application's port while it dialed the app"))...)
 		return
 	}
 	logger.Error(msg, fields...)
