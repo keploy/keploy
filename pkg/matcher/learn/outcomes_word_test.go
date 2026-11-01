@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -1080,5 +1081,31 @@ func TestOutcomeAWholeURLSafeTokenIsOneValue(t *testing.T) {
 	}
 	if ds := Decide(oInput("body.ref", "a-17", "a_42", nil, nil)); len(ds) != 1 || ds[0].At.Word < 0 {
 		t.Errorf("a short id: %s; want its word, not the field whole", oDescribe(ds))
+	}
+}
+
+// A field of the URL-safe alphabet is one token only where it reads as one
+// random value in both runs. Text keploy can name is none: a word beside a
+// UUID (one length in R, another in F), a UUID's hex groups reordered, and a
+// base64 text that decodes to a name of a script keploy does not split into
+// words, which may be an earlier value carried inside it.
+func TestOutcomeAFieldKeployCanNameIsNoToken(t *testing.T) {
+	const u1, u2 = "0c1d2e3f-4a5b-4c7d-8e9f-a0b1c2d3e4f5", "5c0e9a7b-1f2d-48d1-9a3b-c4d5e6f70812"
+	b64 := func(s string) string { return base64.RawURLEncoding.EncodeToString([]byte(s)) }
+	for _, tc := range []struct{ name, r, f string }{
+		{"a word before a UUID", "Thu-" + u1, u2},
+		{"a word after a UUID", u1 + "-Thu", u2},
+		{"F's value has the word", u1, u2 + "-Fri"},
+		{"a UUID's groups reordered", "48d1-0c1d2e3f-4a5b", "0c1d2e3f-4a5b-48d1"},
+		{"a name of another script in base64 JSON", b64(`{"name":"Иван Петров"}`), b64(`{"name":"Пётр Сидоров"}`)},
+		{"the same behind a kept prefix", "st_" + b64(`{"name":"Иван Петров"}`), "st_" + b64(`{"name":"Пётр Сидоров"}`)},
+	} {
+		ds := Decide(oInput("body.appId", tc.r, tc.f, nil, nil))
+		if slices.ContainsFunc(ds, func(d Decision) bool { return d.Outcome == OutcomeFresh && d.At.Word < 0 }) {
+			t.Errorf("FALSE GREEN? %s: %s; want no one fresh value", tc.name, oDescribe(ds))
+		}
+		if len(ds) == 0 || ds[0].Outcome != OutcomeRefused {
+			t.Errorf("%s: %s; want refused", tc.name, oDescribe(ds))
+		}
 	}
 }

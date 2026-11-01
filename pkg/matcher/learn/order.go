@@ -327,12 +327,19 @@ func (dc *decider) oneToken(path string, bare variables.Address, rec, live strin
 	return dc.word(path, bare, rec, live, rec, whole), true
 }
 
-// randomToken reports whether rec and live are each one run of the URL-safe
-// base64 alphabet whose changed part, past what they share at each end,
-// carries tokenBits in both.
+// randomToken reports whether rec and live are one value of one generator:
+// a run of the URL-safe base64 alphabet of one length in each run, whose
+// changed part, past what they share at each end, carries tokenBits in both.
+// Text keploy can name is no such value: hex groups (a UUID's, with or
+// without a word beside them) and a run that decodes to text (a name of a
+// script keploy does not split into words, inside base64 JSON).
 func randomToken(rec, live string) bool {
 	const urlSafe = "-_0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
-	if strings.Trim(rec, urlSafe) != "" || strings.Trim(live, urlSafe) != "" {
+	if len(rec) != len(live) || strings.Trim(rec, urlSafe) != "" || strings.Trim(live, urlSafe) != "" {
+		return false
+	}
+	hexGroups := func(s string) bool { return strings.Trim(strings.ToLower(s), "-_0123456789abcdef") == "" }
+	if hexGroups(rec) || hexGroups(live) {
 		return false
 	}
 	head := 0
@@ -343,7 +350,7 @@ func randomToken(rec, live string) bool {
 	for len(r) > 0 && len(l) > 0 && r[len(r)-1] == l[len(l)-1] {
 		r, l = r[:len(r)-1], l[:len(l)-1]
 	}
-	return wordBits(r) >= tokenBits && wordBits(l) >= tokenBits
+	return wordBits(r) >= tokenBits && wordBits(l) >= tokenBits && b64Text(rec, nil) == "" && b64Text(live, nil) == ""
 }
 
 // unpaired decides a text where a word was added or dropped: refused whole
