@@ -1931,6 +1931,14 @@ func (p *Proxy) setMockManager(m *MockManager) {
 		// Each staging stages the tracker's running set, though the set
 		// may have begun before m was made (Mock).
 		m.SetTrackerSetAt(p.learnTracker.SetAt)
+		// Each serve is filed as the open test's own or the start-up's, or
+		// as neither (a worker: scope's, the background's), as m's view in
+		// force says: a call checked against the test's own recording is
+		// read in a span only those serves start (learn.Tracker.LiveSpanOf).
+		p.learnTracker.SetServeOwner(m.ServedAsOwnOrStartup)
+	} else if provenswitch.On() {
+		// No manager serves: the tracker keeps no hold on the one it drops.
+		p.learnTracker.SetServeOwner(nil)
 	}
 	p.sessionMu.Lock()
 	prev := p.mockManager
