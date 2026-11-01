@@ -1726,6 +1726,17 @@ func TestAnOffsetLearnedAtAStepHoldsByItsStepAndItsGuards(t *testing.T) {
 			t.Errorf("FALSE GREEN: clock - 5s or a plain read at %s into its second", phase)
 		}
 	}
+	// Across Europe/Berlin's turn back (2026-10-25 01:00 UTC, 03:00 CEST to
+	// 02:00 CET), read in that zone, it holds nothing (FallBack), though the
+	// application's value lies in the window less 2 s.
+	berlin, err := time.LoadLocation("Europe/Berlin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bt := time.Date(2026, 10, 25, 1, 0, 0, 30e6, time.UTC)
+	if bf := bt.Add(-61 * time.Millisecond); own.Holds(bt.Truncate(sec).Add(-2*sec).In(berlin), sec, bf, bt) {
+		t.Error("FALSE GREEN: clock - 2s at the second holds across Berlin's turn back")
+	}
 	old := own
 	old.Step = 0
 	if old.Narrow() || !old.Fine() || old.Holds(to.Truncate(sec).Add(-2*sec), sec, from, to) || old.CoarseCut() {
