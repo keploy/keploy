@@ -1842,6 +1842,25 @@ func (p *Proxy) replayTargetHasHTTP2Mock(sniHost string, port uint32) bool {
 	})
 }
 
+// replayPreferH2For is the replay handshake's h2 decision for a connection to
+// port, asked by the MITM with the SNI of the client's hello. A hello without
+// SNI is scoped by the host the connection's CONNECT request named, if any.
+func (p *Proxy) replayPreferH2For(connectTarget string, port uint32) func(sni string) bool {
+	connectHost, _ := hostPortFromAuthority(connectTarget, "")
+	return func(sni string) bool {
+		host := sni
+		if host == "" {
+			host = connectHost
+		}
+		if !p.replayTargetHasHTTP2Mock(host, port) {
+			return false
+		}
+		p.logger.Debug("replay: advertising h2 ALPN (destination has Http2 mock)",
+			zap.String("sniHost", host), zap.Uint32("dstPort", port))
+		return true
+	}
+}
+
 // http2DestMatches reports whether a recorded Http2 destination (aHost:aPort,
 // aHost lower-cased) matches the connection destination sniHost:port. A
 // discriminator unknown on either side (missing port, missing SNI/host) is not
@@ -3370,15 +3389,14 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		// h2, or their recorded http/1.1 mocks would never match. Record and
 		// http/1.1-only recordings are unaffected (PreferH2 stays false).
 		//
-		// The destination is (sniHost, port). port (destInfo.Port) is always
-		// known. sniHost is only known pre-handshake when the connection made
-		// a CONNECT request — the CONNECT-tunnel / sidecar path (connect.go); on
-		// the transparent proxyless path the SNI only becomes available inside
-		// the handshake, so sniHost is empty here and scoping falls back to
-		// port-only (best-effort — see http2DestMatches). Port already
-		// disambiguates the common mixed-session case (services on different
-		// ports); same-port-different-host disambiguation only engages where
-		// sniHost is present.
+		// The destination is (host, port). port (destInfo.Port) is always
+		// known. The host is the SNI of the client's hello, so the check runs
+		// inside the handshake (WithPreferH2For), where the hello is read: on
+		// the transparent proxyless path that is the first point the host is
+		// known. Asked before it, with the port alone, every :443 destination
+		// was offered h2 once any :443 host had an Http2 mock (keploy #4713).
+		// A client that sends no SNI falls back to the host its CONNECT
+		// request named (connect.go), else to port-only (http2DestMatches).
 		//
 		// A client that sends no SNI gets a leaf named for what this
 		// connection itself says of its destination: the host its CONNECT
@@ -3387,17 +3405,12 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		// MITM on hsCtx, so nothing another connection left can name it.
 		hsCtx := withDstIPOf(pTls.WithConnectTarget(ctx, connectTargetHost), dstAddr)
 		if rule.Mode == models.MODE_TEST {
-			sniHost, _ := hostPortFromAuthority(connectTargetHost, "")
-			preferH2 := rule.OutgoingOptions.PreferH2
-			if !preferH2 {
-				preferH2 = p.replayTargetHasHTTP2Mock(sniHost, destInfo.Port)
-			}
-			if preferH2 {
-				// On hsCtx, not ctx: the destination IP set above must
-				// survive the hint.
+			// On hsCtx, not ctx: the destination IP set above must survive
+			// the hint.
+			if rule.OutgoingOptions.PreferH2 {
 				hsCtx = pTls.WithPreferH2(hsCtx)
-				p.logger.Debug("replay: advertising h2 ALPN (destination has Http2 mock)",
-					zap.String("sniHost", sniHost), zap.Uint32("dstPort", destInfo.Port))
+			} else {
+				hsCtx = pTls.WithPreferH2For(hsCtx, p.replayPreferH2For(connectTargetHost, destInfo.Port))
 			}
 		}
 		// Into its own variable, not srcConn: a failed handshake returns a
