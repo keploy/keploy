@@ -25,14 +25,12 @@ type learnedWord struct {
 	Recorded, Full    string
 	Outcome           WordOutcome
 	// Rule is the plain rule that gave it: for a Value its bind place, for
-	// a Clock its offset and window.
-	Rule string
+	// a Clock its offset and window. From is, in the timer rule
+	// (ModeElsewhere), where round F's call landed (Landed.String):
+	// "<TestB>'s window" or "between tests"; "" otherwise.
+	Rule, From string
 	// Places are the evidence places, "mock-N <path>" each; three print.
 	Places []string
-	// From is, in the timer rule (ModeElsewhere), where round F's call
-	// landed (Landed.String): "<TestB>'s window" or "between tests"; ""
-	// otherwise.
-	From string
 }
 
 // outcomeSays is what a learned line says of each outcome.

@@ -48,14 +48,12 @@ type evPlace struct {
 	given, startUp bool
 	// gave: a value the test gave keploy (#5016), read by its text alone,
 	// never by a moment; given without gave is the test case's request.
-	gave bool
 	// undeclared: a body of the test case's request that declares no media
 	// type, read by its bytes (Seen.Undeclared): a word glued to the bytes
 	// around it there may be one, and shows nothing (gluedAt).
-	undeclared bool
 	// clock: the earlier call learned this place as its own read of the
 	// application's clock: a separate read, never a copy of another.
-	clock bool
+	gave, undeclared, clock bool
 	// raw is the index in Input.Raw plus one of a recording's place; 0 for
 	// any other.
 	raw int
@@ -74,13 +72,12 @@ type evPlace struct {
 	// here, so its F side shows and disproves nothing. fMay: round F served
 	// it before the call and no view of what it gave there is stated or
 	// read, so it may hold round F's new word: unknown for every word.
-	// views: the views round F's serves gave where they differ
-	// (Raw.ServedChanged); one that holds F's word leaves it unknown.
-	fUnstated, fMay bool
-	views           []*Raw
 	// fGave: round F gave the application this place before the call
 	// reached keploy, whenever it was recorded.
-	fGave bool
+	// views: the views round F's serves gave where they differ
+	// (Raw.ServedChanged); one that holds F's word leaves it unknown.
+	fUnstated, fMay, fGave bool
+	views                  []*Raw
 }
 
 // placeText is one place's text in each run, and each view round F served
@@ -691,10 +688,8 @@ func listsHold(l answerLists, t string) bool {
 // does not: F gave something new there.
 func viewNew(g givenWords) bool {
 	for i, list := range g.view.words {
-		for _, t := range list {
-			if !g.holds(i, t, true) {
-				return true
-			}
+		if slices.ContainsFunc(list, func(t string) bool { return !g.holds(i, t, true) }) {
+			return true
 		}
 	}
 	return false
