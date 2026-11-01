@@ -506,6 +506,40 @@ func TestOutcomeAClientTestsValueMadeAfterItsBeginIsNotItsOwn(t *testing.T) {
 	}
 }
 
+// A client test's call that carries no app clock (no window) still knows
+// the instant its test began in the recording (Input.RecBegan): a time no
+// earlier place holds that the recording made at or after that begin is
+// no value the test made before it began, and is refused, naming the run
+// (integrations' Mongo and Postgres client rows with no app clock); one
+// made before it is fresh, and with no recorded begin it stays fresh.
+func TestOutcomeAClientTestsValueMadeAfterItsRecordedBeginWithNoClockIsRefused(t *testing.T) {
+	const p = "body.createdAt"
+	rAt, fAt := oAt, oAt.Add(61*time.Second)
+	decide := func(began time.Time, rec, live string) Decision {
+		in := iCall(p, String, rec, live, rAt, fAt, nil, nil, nil)
+		in.Drifts, in.RecBegan = oClientDrifts(), began
+		return oWord(t, Decide(in), rec, live)
+	}
+	began := rAt.Add(-5 * time.Second)
+	for _, c := range []struct{ what, rec, live string }{
+		{"1 s before its call", iMs(rAt.Add(-time.Second)), iMs(fAt.Add(-2 * time.Second))},
+		{"at its begin", iMs(began), iMs(fAt.Add(-5 * time.Second))},
+		{"an hour past its call", iMs(rAt.Add(time.Hour)), iMs(fAt.Add(time.Hour))},
+	} {
+		d := decide(began, c.rec, c.live)
+		oRefused(t, "a client test's time made "+c.what+" with no app clock", d, "no-clock-read")
+		if want := "nor the test's own value, made before it began: the recorded one lies past its test's begin"; d.Refusal != nil && !strings.Contains(d.Refusal.Why, want) {
+			t.Errorf("a client test's time made %s with no app clock: %q; want it to say %q", c.what, d.Refusal.Why, want)
+		}
+	}
+	if d := decide(began, iMs(rAt.Add(-time.Minute)), iMs(fAt.Add(time.Hour))); d.Outcome != OutcomeFresh {
+		t.Errorf("a client test's time made before its recorded begin with no app clock: %s; want fresh", oDescribe([]Decision{d}))
+	}
+	if d := decide(time.Time{}, iMs(rAt.Add(-time.Second)), iMs(fAt.Add(-2*time.Second))); d.Outcome != OutcomeFresh {
+		t.Errorf("a client test's time with no app clock and no recorded begin: %s; want fresh", oDescribe([]Decision{d}))
+	}
+}
+
 // A client test's read of the clock made earlier in the test than its call's
 // own window, after the test began in both runs (2 s before the call in the
 // recording, 3 s in round F: no one offset), that no earlier place holds: a
