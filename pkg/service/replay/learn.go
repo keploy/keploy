@@ -53,34 +53,20 @@ func (r *Replayer) persistLearned(ctx context.Context, testSetID string, consume
 	}
 	kept, voided := learn.OwnPairingWins(func(name string) bool { _, ok := consumed[name]; return ok }, elsewhere)
 	states := consumed
-	taughtIn := map[string][]models.TeachingWindow{}
 	if len(kept) > 0 {
-		states = maps.Clone(consumed)
+		states = make(map[string]models.MockState, len(consumed)+len(kept))
+		maps.Copy(states, consumed)
 		for _, st := range learn.WithLearnedElsewhere(nil, kept) {
 			states[st.Name] = st
-		}
-		for _, st := range kept {
-			taughtIn[st.Name] = append(taughtIn[st.Name], st.TaughtIn...)
 		}
 	}
 	added, err := p.PersistLearned(ctx, testSetID, states)
 	if err != nil {
 		return err
 	}
-	// What a recording no call consumed got was taught in other windows
-	// alone: said apart, never as its owner's or the pool's own.
-	taught := map[string][]string{}
-	for name := range taughtIn {
-		if len(added[name]) > 0 {
-			taught[name] = added[name]
-		}
-	}
-	if len(taught) > 0 {
-		added = maps.Clone(added)
-		for name := range taught {
-			delete(added, name)
-		}
-	}
+	// What a recording no call consumed got at the clock reads other
+	// windows taught it is said apart, never as its owner's or the pool's.
+	added, taught := learn.SplitTaught(added, kept, owner)
 	var by map[string]string
 	if len(consumerOf) > 0 {
 		by = consumerOf[0]
@@ -89,27 +75,8 @@ func (r *Replayer) persistLearned(ctx context.Context, testSetID string, consume
 		r.logger.Info("learned fields that changed between record and replay",
 			zap.String("testSetID", testSetID), zap.String("test", line.test), zap.Strings("fields", line.fields))
 	}
-	for _, name := range slices.Sorted(maps.Keys(taught)) {
-		ws := slices.Clone(taughtIn[name])
-		sort.SliceStable(ws, func(i, j int) bool { return ws[i].At.Before(ws[j].At) })
-		r.logger.Info("learned fields that changed between record and replay, from calls made in other windows than their recording's, for learning only",
-			zap.String("testSetID", testSetID), zap.String("mock", name), zap.String("test", orStartupAndPool(owner[name])), zap.Strings("fields", taught[name]),
-			zap.String("taughtIn", learn.SayWindows(ws)), zap.String("evidence", "a call of its shape in another window: no call of the round consumed the recording"))
-	}
-	for _, v := range voided {
-		r.logger.Info("kept what a recording's own pairing learned and voided what a call made in another window taught it: a call of the round consumed the recording, and its own pairing wins",
-			zap.String("testSetID", testSetID), zap.String("mock", v.Name), zap.String("test", orStartupAndPool(owner[v.Name])), zap.Strings("voided", slices.Sorted(maps.Keys(v.Clocks))),
-			zap.String("taughtIn", learn.SayWindows(v.TaughtIn)), zap.String("evidence", "its own pairing in the round"))
-	}
+	learn.SayLearnedElsewhere(r.logger, taught, voided, owner, zap.String("testSetID", testSetID))
 	return nil
-}
-
-// learnedElsewhereReader is an optional extension of Instrumentation: what
-// record's full round's learn step taught recordings from calls made in
-// other windows than theirs, for learning only (AgentClient's
-// GetLearnedElsewhere).
-type learnedElsewhereReader interface {
-	GetLearnedElsewhere(ctx context.Context) ([]models.MockState, error)
 }
 
 // learnedElsewhere is what the agent's learn step taught the set's
@@ -123,16 +90,7 @@ type learnedElsewhereReader interface {
 // when the read failed: none of it served a call or decides a verdict, so a
 // round that cannot read it keeps what its consumed recordings learned.
 func (r *Replayer) learnedElsewhere(ctx context.Context, testSetID string) []models.MockState {
-	reader, ok := r.instrumentation.(learnedElsewhereReader)
-	if !ok {
-		return nil
-	}
-	learned, err := reader.GetLearnedElsewhere(ctx)
-	if err != nil {
-		r.logger.Warn("keploy could not read what record's full round learned onto recordings from calls made in other windows than theirs; it keeps what their own calls taught them, and a recording only another window's call taught compares every field",
-			zap.String("testSetID", testSetID), zap.Error(err), zap.String("next_step", "record the test set again"))
-		return nil
-	}
+	learned := learn.ReadLearnedElsewhere(ctx, r.instrumentation, r.logger, zap.String("testSetID", testSetID))
 	unread := r.requestsUnread.set()
 	var out []models.MockState
 	for _, st := range learned {
@@ -157,15 +115,6 @@ func ownerOf(expected map[string][]models.MockEntry) map[string]string {
 		}
 	}
 	return out
-}
-
-// orStartupAndPool is test, or what the record calls the set's start-up and
-// pool when it is "".
-func orStartupAndPool(test string) string {
-	if test == "" {
-		return "the set's start-up and pool"
-	}
-	return test
 }
 
 // learnedLine is what the learn step learned for one test: each field as

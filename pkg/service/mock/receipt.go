@@ -321,27 +321,7 @@ type TestsReceipt struct {
 
 // LearnedElsewhere is what calls made in other windows than a recording's
 // taught it, as a record's receipt says it (TestsReceipt.LearnedElsewhere).
-type LearnedElsewhere struct {
-	// Mock is the recording.
-	Mock string `yaml:"mock" json:"mock"`
-	// Owner is the test whose mapping lists the recording, "" for the set's
-	// start-up and pool. No call of the round consumed it: what a call in
-	// another window taught a recording its own pairing took is voided.
-	Owner string `yaml:"owner,omitempty" json:"owner,omitempty"`
-	// Fields are what was written onto the recording at the places such
-	// calls taught, each as "<path> (<clock read>)".
-	Fields []string `yaml:"fields" json:"fields"`
-	// TaughtIn are the windows those calls came in, in time order: the test
-	// open when they came, "" between tests or where keploy no longer knew
-	// it, and when the last of each taught the recording.
-	TaughtIn []models.TeachingWindow `yaml:"taughtIn" json:"taughtIn"`
-}
-
-// Windows is l's windows as the record says them: "<test>'s window" or
-// "between tests", comma-separated.
-func (l LearnedElsewhere) Windows() string {
-	return learn.SayWindows(l.TaughtIn)
-}
+type LearnedElsewhere = learn.Taught
 
 // empty reports whether the run reported no test and keploy refused
 // nothing: such a run leaves no per-test file, whatever rows it saw. A

@@ -213,16 +213,13 @@ func (m *mockService) persistLearned(ctx context.Context, set string, consumed, 
 	if err != nil {
 		return learnedOut{}, fmt.Errorf("writing what the learn step learned onto keploy/%s: %w", set, err)
 	}
-	taught := taughtFields(elsewhere, added)
+	added, taught := learn.SplitTaught(added, elsewhere, owner)
 	byTest := map[string][]string{}
 	seen := map[string]bool{}
 	for _, f := range flows {
 		var fields []string
 		for _, st := range f.Consumed {
 			for _, a := range added[st.Name] {
-				if taught.only(st.Name, a) {
-					continue
-				}
 				fields = append(fields, st.Name+" "+a)
 			}
 			if len(added[st.Name]) > 0 {
@@ -240,9 +237,6 @@ func (m *mockService) persistLearned(ctx context.Context, set string, consumed, 
 			continue
 		}
 		for _, a := range as {
-			if taught.only(name, a) {
-				continue
-			}
 			rest = append(rest, name+" "+a)
 		}
 	}
@@ -250,97 +244,9 @@ func (m *mockService) persistLearned(ctx context.Context, set string, consumed, 
 		sort.Strings(rest)
 		m.logger.Info("learned fields that changed between record and replay, on mocks no test consumed", zap.Strings("fields", rest))
 	}
-	out := learnedOut{byTest: byTest, pool: rest, elsewhere: taught.said(owner)}
-	for _, e := range out.elsewhere {
-		m.logger.Info("learned fields that changed between record and replay, from calls made in other windows than their recording's, for learning only",
-			zap.String("mock", e.Mock), zap.String("test", orStartupAndPool(e.Owner)), zap.Strings("fields", e.Fields), zap.String("taughtIn", e.Windows()),
-			zap.String("evidence", "a call of its shape in another window: no call of the round consumed the recording"))
-	}
-	for _, v := range voided {
-		if !m.learnsOnto(owner[v.Name]) {
-			continue
-		}
-		m.logger.Info("kept what a recording's own pairing learned and voided what a call made in another window taught it: a call of the round consumed the recording, and its own pairing wins",
-			zap.String("mock", v.Name), zap.String("test", orStartupAndPool(owner[v.Name])), zap.Strings("voided", slices.Sorted(maps.Keys(v.Clocks))),
-			zap.String("taughtIn", learn.SayWindows(v.TaughtIn)), zap.String("evidence", "its own pairing in the round"))
-	}
-	return out, nil
-}
-
-// taught is, by recording, what the round wrote onto it that calls made in
-// other windows taught it (taughtFields).
-type taught map[string]taughtMock
-
-type taughtMock struct {
-	fields []string
-	from   []models.TeachingWindow
-}
-
-// taughtFields is, of added, the fields at the paths elsewhere taught each
-// recording.
-func taughtFields(elsewhere []models.MockState, added map[string][]string) taught {
-	out := taught{}
-	for _, e := range elsewhere {
-		if e.Name == "" || len(e.Clocks) == 0 || len(added[e.Name]) == 0 {
-			continue
-		}
-		t := taughtMock{from: e.TaughtIn}
-		for _, a := range added[e.Name] {
-			if fieldPath(a, e.Clocks) != "" {
-				t.fields = append(t.fields, a)
-			}
-		}
-		if len(t.fields) > 0 {
-			out[e.Name] = t
-		}
-	}
-	return out
-}
-
-// fieldPath is the path of clocks a field as mockdb's PersistLearned says
-// it ("<path> (<what>)") is at, "" for none.
-func fieldPath(field string, clocks map[string]models.ClockOffset) string {
-	path, _, ok := strings.Cut(field, " (")
-	if !ok {
-		return ""
-	}
-	if _, at := clocks[path]; !at {
-		return ""
-	}
-	return path
-}
-
-// only reports whether field, written onto mock, was taught by calls made
-// in other windows: no call of the round consumed mock.
-func (t taught) only(mock, field string) bool {
-	tm, ok := t[mock]
-	return ok && slices.Contains(tm.fields, field)
-}
-
-// said is t as the record's receipt says it (LearnedElsewhere), by
-// recording, each with its owner's name (owner, "" for the set's start-up
-// and pool) and the windows that taught it, in time order.
-func (t taught) said(owner map[string]string) []LearnedElsewhere {
-	out := make([]LearnedElsewhere, 0, len(t))
-	for _, mock := range slices.Sorted(maps.Keys(t)) {
-		tm := t[mock]
-		from := slices.Clone(tm.from)
-		sort.SliceStable(from, func(i, j int) bool { return from[i].At.Before(from[j].At) })
-		out = append(out, LearnedElsewhere{Mock: mock, Owner: owner[mock], Fields: slices.Clone(tm.fields), TaughtIn: from})
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
-}
-
-// orStartupAndPool is test, or what the record calls the set's start-up and
-// pool when it is "".
-func orStartupAndPool(test string) string {
-	if test == "" {
-		return "the set's start-up and pool"
-	}
-	return test
+	voided = slices.DeleteFunc(voided, func(v models.MockState) bool { return !m.learnsOnto(owner[v.Name]) })
+	learn.SayLearnedElsewhere(m.logger, taught, voided, owner)
+	return learnedOut{byTest: byTest, pool: rest, elsewhere: taught}, nil
 }
 
 // learnsOnto reports whether what the learn step learned is kept on a mock

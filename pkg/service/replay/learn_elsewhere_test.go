@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	agenthttp "go.keploy.io/server/v3/pkg/platform/http"
 	"go.uber.org/zap"
@@ -16,7 +17,7 @@ import (
 // keploy record's agent client says what the learn step taught across
 // windows: with no such read, keploy record's full round would write a
 // timer's recording with nothing learned, every row of the learning green.
-var _ learnedElsewhereReader = (*agenthttp.AgentClient)(nil)
+var _ learn.LearnedElsewhereReader = (*agenthttp.AgentClient)(nil)
 
 // elsewhereAgent is the harness's agent whose learn step taught recordings
 // from calls made in other windows than theirs (GetLearnedElsewhere); asked
@@ -36,7 +37,7 @@ func (e *elsewhereAgent) GetLearnedElsewhere(context.Context) ([]models.MockStat
 // SendTestCaseFilter is UpdateMockParams, answered as an agent whose learn
 // step took each test case's request (pkg.TestCaseFilterSender).
 func (e *elsewhereAgent) SendTestCaseFilter(ctx context.Context, p models.MockFilterParams) (bool, error) {
-	return true, e.prInstr.UpdateMockParams(ctx, p)
+	return true, e.UpdateMockParams(ctx, p)
 }
 
 // addingStore keeps what the learn step learned, and says it added each
@@ -172,5 +173,47 @@ func TestKeployRecordSaysWhatAnotherWindowTaughtUnderTheRecordingsOwner(t *testi
 	own := logs.FilterMessage("learned fields that changed between record and replay").AllUntimed()
 	if len(own) != 1 || own[0].ContextMap()["test"] != "test-2" {
 		t.Fatalf("the tests' own lines %+v; want test-2's alone", own)
+	}
+}
+
+// extraStore is addingStore that also says it added a field at a place no
+// clock read is, on the recording extra names, as a store that wrote more
+// than it was handed would.
+type extraStore struct {
+	addingStore
+	extra string
+}
+
+func (e *extraStore) PersistLearned(ctx context.Context, set string, states map[string]models.MockState) (map[string][]string, error) {
+	added, err := e.addingStore.PersistLearned(ctx, set, states)
+	if _, ok := states[e.extra]; ok {
+		added[e.extra] = append(added[e.extra], "docs.state (noise)")
+	}
+	return added, err
+}
+
+// Learning across windows teaches clock reads alone, so keploy record says
+// as taught by another window only what the store wrote at a clock read's
+// place, as keploy mock record does: anything else written onto the
+// recording is said as the recording's own, on the line of mocks no test
+// consumed, never as a call in another window's. A round that consumed
+// nothing (nil) says it as well.
+func TestKeployRecordSaysOnlyClockReadsAsTaughtByAnotherWindow(t *testing.T) {
+	minute := models.ClockOffset{Min: -time.Minute, Max: -time.Minute, Res: time.Millisecond}
+	store := &extraStore{extra: "timer-mock"}
+	core, logs := observer.New(zap.InfoLevel)
+	r := &Replayer{logger: zap.New(core), mockDB: store}
+	elsewhere := []models.MockState{{Name: "timer-mock", Clocks: map[string]models.ClockOffset{"claimed_at": minute}, TaughtIn: []models.TeachingWindow{{Test: "test-2"}}}}
+	if err := r.persistLearned(context.Background(), "s", nil, elsewhere, map[string]string{"timer-mock": "test-1"}, &models.Mapping{}); err != nil {
+		t.Fatal(err)
+	}
+	learned := logs.FilterMessageSnippet("from calls made in other windows").AllUntimed()
+	want := []interface{}{"claimed_at (" + minute.String() + ")"}
+	if len(learned) != 1 || !reflect.DeepEqual(learned[0].ContextMap()["fields"], want) {
+		t.Fatalf("the learned lines %+v; want timer-mock's clock read alone as taught in another window", learned)
+	}
+	own := logs.FilterMessage("learned fields that changed between record and replay").AllUntimed()
+	if len(own) != 1 || !reflect.DeepEqual(own[0].ContextMap()["fields"], []interface{}{"timer-mock docs.state (noise)"}) {
+		t.Fatalf("the own lines %+v; want the noise said as the recording's own", own)
 	}
 }
