@@ -398,3 +398,134 @@ func TestGetGitHubRelease_RefusesAnythingButARelease(t *testing.T) {
 		t.Errorf("getGitHubRelease = %+v, %v; want the release with its asset digest", got, err)
 	}
 }
+
+func TestReplacePort(t *testing.T) {
+	tests := []struct {
+		name       string
+		currentURL string
+		newPort    string
+		wantURL    string
+		wantErr    bool
+	}{
+		{
+			name:       "hostname contains matching port digits",
+			currentURL: "http://app80:80/api/v1",
+			newPort:    "8081",
+			wantURL:    "http://app80:8081/api/v1",
+			wantErr:    false,
+		},
+		{
+			name:       "ip contains matching port octet",
+			currentURL: "http://10.80.0.1:80/resource",
+			newPort:    "8080",
+			wantURL:    "http://10.80.0.1:8080/resource",
+			wantErr:    false,
+		},
+		{
+			name:       "no existing port",
+			currentURL: "http://localhost/api",
+			newPort:    "8080",
+			wantURL:    "http://localhost:8080/api",
+			wantErr:    false,
+		},
+		{
+			name:       "port with leading colon",
+			currentURL: "http://localhost:3000/api",
+			newPort:    ":8080",
+			wantURL:    "http://localhost:8080/api",
+			wantErr:    false,
+		},
+		{
+			name:       "bracketed ipv6 with port",
+			currentURL: "http://[::1]:80/api",
+			newPort:    "8080",
+			wantURL:    "http://[::1]:8080/api",
+			wantErr:    false,
+		},
+		{
+			name:       "bracketed ipv6 without port",
+			currentURL: "http://[::1]/api",
+			newPort:    "8080",
+			wantURL:    "http://[::1]:8080/api",
+			wantErr:    false,
+		},
+		{
+			name:       "empty port returns error",
+			currentURL: "http://localhost:8080",
+			newPort:    "",
+			wantURL:    "http://localhost:8080",
+			wantErr:    true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ReplacePort(tt.currentURL, tt.newPort)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("ReplacePort() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if got != tt.wantURL {
+				t.Errorf("ReplacePort() = %q, want %q", got, tt.wantURL)
+			}
+		})
+	}
+}
+
+func TestReplaceHost(t *testing.T) {
+	tests := []struct {
+		name       string
+		currentURL string
+		newHost    string
+		wantURL    string
+		wantErr    bool
+	}{
+		{
+			name:       "replace hostname with ipv6 preserves port with brackets",
+			currentURL: "http://localhost:8080/api",
+			newHost:    "::1",
+			wantURL:    "http://[::1]:8080/api",
+			wantErr:    false,
+		},
+		{
+			name:       "replace bracketed ipv6 with ipv4 removes brackets",
+			currentURL: "http://[::1]:8080/api",
+			newHost:    "127.0.0.1",
+			wantURL:    "http://127.0.0.1:8080/api",
+			wantErr:    false,
+		},
+		{
+			name:       "replace host without port with ipv6",
+			currentURL: "http://localhost/api",
+			newHost:    "::1",
+			wantURL:    "http://[::1]/api",
+			wantErr:    false,
+		},
+		{
+			name:       "replace host with bracketed ipv6 input",
+			currentURL: "http://localhost:8080/api",
+			newHost:    "[::1]",
+			wantURL:    "http://[::1]:8080/api",
+			wantErr:    false,
+		},
+		{
+			name:       "empty host returns error",
+			currentURL: "http://localhost:8080",
+			newHost:    "",
+			wantURL:    "http://localhost:8080",
+			wantErr:    true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ReplaceHost(tt.currentURL, tt.newHost)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("ReplaceHost() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if got != tt.wantURL {
+				t.Errorf("ReplaceHost() = %q, want %q", got, tt.wantURL)
+			}
+		})
+	}
+}
+
