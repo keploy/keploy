@@ -309,30 +309,41 @@ func TestReaderKeepsRoundFsViewOfASetRecordingsInstants(t *testing.T) {
 	// A view its words were read from that cannot be read again for its
 	// instants (an order keeping no set's places reads each view anew) is
 	// one keploy cannot tell: its words say unread, the fail-closed side.
-	t.Run("a view read for its words and not again", func(t *testing.T) {
-		t.Setenv(provenswitch.Env, "1")
-		tr := NewTracker()
-		tr.Begin()
-		tr.ServedMock(m)
-		reads := 0
-		tr.ServedMockLive(m, "a", func() (*models.Mock, error) {
-			if reads++; reads > 1 {
-				return nil, errors.New("gone")
-			}
-			return jobsMock(viewAt, "9"), nil
+	// With the switch off nothing reads a view's instants, so nothing
+	// reads it again: its words stay read, as without the reader.
+	for _, proven := range []string{"1", "0"} {
+		t.Run("a view read for its words and not again, switch "+proven, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, proven)
+			viewReadForItsWordsAndNotAgain(t, m, viewAt, proven == "1")
 		})
-		tr.End()
-		tr.Begin()
-		o := tr.Placed().Order
-		o.places = nil
-		g, err := o.GivenPlaces(m)
-		if err != nil {
-			t.Fatal(err)
+	}
+}
+
+// viewReadForItsWordsAndNotAgain tells m's set a view that reads once and
+// fails after, and checks its words read unread (want) and no view instant.
+func viewReadForItsWordsAndNotAgain(t *testing.T, m *models.Mock, viewAt string, want bool) {
+	t.Helper()
+	tr := NewTracker()
+	tr.Begin()
+	tr.ServedMock(m)
+	reads := 0
+	tr.ServedMockLive(m, "a", func() (*models.Mock, error) {
+		if reads++; reads > 1 {
+			return nil, errors.New("gone")
 		}
-		if !g.words.unread || len(g.fView) != 0 {
-			t.Errorf("words unread %v, %d view instants; want unread and none", g.words.unread, len(g.fView))
-		}
+		return jobsMock(viewAt, "9"), nil
 	})
+	tr.End()
+	tr.Begin()
+	o := tr.Placed().Order
+	o.places = nil
+	g, err := o.GivenPlaces(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g.words.unread != want || len(g.fView) != 0 {
+		t.Errorf("words unread %v, %d view instants; want unread %v and none", g.words.unread, len(g.fView), want)
+	}
 }
 
 // An earlier place holds an instant in any form main reads it in: its text
@@ -424,5 +435,52 @@ func TestReaderAnInstantWhoseWordCountChangesIsOneInstant(t *testing.T) {
 	}
 	if len(rd.Instants) < 2 {
 		t.Errorf("%d instants; want each run's own", len(rd.Instants))
+	}
+}
+
+// instantOf is the instant the reader reads at the changed word rec>live
+// of rd (a word only one run has: "" on the other side), failing where
+// rd lists no such word.
+func instantOf(t *testing.T, rd textReading, rec, live string) *instantWord {
+	t.Helper()
+	for _, w := range rd.Words {
+		if w.Rec == rec && w.Live == live {
+			return w.Instant
+		}
+	}
+	t.Fatalf("%q -> %q: no changed word %q>%q in %v", rd.Rec, rd.Live, rec, live, changedPairs(rd))
+	return nil
+}
+
+// An instant that two instants of the other run claim keeps no partner: a
+// word only one run has there reads no moment in the other run, whichever
+// instant claimed it first or last, and an instant whose partner names
+// another back takes none from it. R's 10:50:13.305 pairs with F's 10:51
+// by 50>51 and with F's 13:52 by its unequal stretch (305 and 52 9).
+func TestReaderAnInstantGivenTwoPartnersKeepsNone(t *testing.T) {
+	for _, c := range []struct{ rec, live, recOnly, liveOnly string }{
+		{"10:50:13.305", "10:51 13:52 9", "305", "52"},
+		{"10:51 13:52 9", "10:50:13.305", "52", "305"},
+	} {
+		rd := readText(c.rec, c.live)
+		for _, iw := range []*instantWord{instantOf(t, rd, c.recOnly, ""), instantOf(t, rd, "", c.liveOnly)} {
+			if iw == nil {
+				t.Errorf("%q -> %q: a one-sided word reads no instant; want its own run's", c.rec, c.live)
+			} else if iw.Rec != nil && iw.Live != nil || iw.RecAt[0] >= 0 && iw.LiveAt[0] >= 0 {
+				t.Errorf("%q -> %q: a one-sided word's instant pairs across runs: %+v", c.rec, c.live, iw)
+			}
+		}
+	}
+}
+
+// A word of an instant only one run has takes the partner the instant's
+// paired words give it: `10:50:13.305 x` to `10:51:13 x` pairs R's
+// instant with F's by 50>51 alone, and 305 reads that one instant, with a
+// moment in each run.
+func TestReaderAOneSidedWordOfAnInstantTakesItsPairedWordsPartner(t *testing.T) {
+	rd := readText("10:50:13.305 x", "10:51:13 x")
+	one, paired := instantOf(t, rd, "305", ""), instantOf(t, rd, "50", "51")
+	if one == nil || one != paired || one.Rec == nil || one.Live == nil {
+		t.Fatalf("305 reads %+v, 50>51 reads %+v; want the one instant, with a moment in each run", one, paired)
 	}
 }
