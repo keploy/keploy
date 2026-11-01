@@ -374,6 +374,45 @@ func TestOutcomeAClientTestsOwnValueIsFreshAtItsFirstSend(t *testing.T) {
 	iValue(t, "the client test's own value, sent again", oWord(t, Decide(in), recN, liveN), "mock-1")
 }
 
+// A client test's instant that no earlier place holds and its answer does
+// not echo is the test's own value only where it was made before the test
+// began: one past the begin in either run (an audit time an hour past its
+// call, as api-server's client test writes one) is a read of the clock no
+// window of keploy's holds, or a value the test gave, and is refused,
+// naming the run; one before each run's begin is fresh. A call whose runs
+// know no begin keeps the test's own value fresh, wherever it lies
+// (client_bind_test.go:23-74).
+func TestOutcomeAClientTestsValueMadeAfterItsBeginIsNotItsOwn(t *testing.T) {
+	const p = "body.auditedAt"
+	rAt, fAt := oAt, oAt.Add(61*time.Second)
+	w := iWin(rAt, fAt, 50*time.Millisecond)
+	w.Rec.Began, w.F.Began = rAt.Add(-5*time.Second), fAt.Add(-5*time.Second)
+	decide := func(w *Window, rec, live string) Decision {
+		in := iCall(p, String, rec, live, rAt, fAt, w, nil, nil)
+		in.Drifts = oClientDrifts()
+		return oWord(t, Decide(in), rec, live)
+	}
+	for _, c := range []struct {
+		what, rec, live, run string
+	}{
+		{"an hour past its call in both runs", iMs(rAt.Add(time.Hour)), iMs(fAt.Add(time.Hour + 7*time.Second)), "the recorded one lies past its test's begin"},
+		{"before the begin when recorded, an hour past its call in round F", iMs(rAt.Add(-time.Minute)), iMs(fAt.Add(time.Hour)), "round F's lies past its test's begin"},
+		{"4 s after its test began when recorded, an hour past its call in round F", iMs(rAt.Add(-4 * time.Second)), iMs(fAt.Add(time.Hour)), "the recorded one lies past its test's begin"},
+	} {
+		d := decide(w, c.rec, c.live)
+		oRefused(t, "a client test's time "+c.what, d, "no-clock-read")
+		if want := "nor the test's own value, made before it began: " + c.run; d.Refusal != nil && !strings.Contains(d.Refusal.Why, want) {
+			t.Errorf("a client test's time %s: %q; want it to say %q", c.what, d.Refusal.Why, want)
+		}
+	}
+	if d := decide(w, iMs(rAt.Add(-2*time.Minute)), iMs(fAt.Add(-3*time.Minute))); d.Outcome != OutcomeFresh {
+		t.Errorf("a client test's time made before its begin in both runs: %s; want fresh", oDescribe([]Decision{d}))
+	}
+	if d := decide(iWin(rAt, fAt, 50*time.Millisecond), iMs(rAt.Add(-time.Minute)), iMs(fAt.Add(time.Hour))); d.Outcome != OutcomeFresh {
+		t.Errorf("a client test's time an hour past its call in round F, no begin known: %s; want fresh", oDescribe([]Decision{d}))
+	}
+}
+
 // A client test's read of the clock made earlier in the test than its call's
 // own window, after the test began in both runs (2 s before the call in the
 // recording, 3 s in round F: no one offset), that no earlier place holds: a
