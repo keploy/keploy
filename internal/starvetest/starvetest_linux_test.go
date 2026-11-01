@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -425,5 +426,78 @@ func TestSpinEndsWithItsTestAlone(t *testing.T) {
 				t.Fatalf("released, Spin's process ended with %v, want 0", err)
 			}
 		})
+	}
+}
+
+// A hold lets the processes it held run on the CPUs they could before: one
+// let go alone (Holding.Let) at once, while the hold holds the rest; the
+// rest as it is released; and one a held process started (Holding.TakeChild),
+// held from its start, as that process could before the hold.
+func TestAHoldLetsItsProcessesRunAsBefore(t *testing.T) {
+	TakesACPU(t)
+	var could unix.CPUSet
+	if err := unix.SchedGetaffinity(0, &could); err != nil {
+		t.Fatal(err)
+	}
+	if could.Count() < 2 {
+		t.Skip("this process may run on one CPU: a hold moves no process off others")
+	}
+	// The parent starts its child once a line comes on its stdin, and
+	// says the child's pid.
+	start := func(command string) (*exec.Cmd, io.WriteCloser, *bufio.Scanner) {
+		cmd := exec.Command("sh", "-c", command)
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
+		stdin, err := cmd.StdinPipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		stdout, err := cmd.StdoutPipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); _ = cmd.Wait() })
+		return cmd, stdin, bufio.NewScanner(stdout)
+	}
+	alone, _, _ := start("exec sleep 600")
+	parent, goOn, said := start("read line; sleep 600 & echo $!; wait")
+	h := StartHold(t)
+	h.Take(t, alone.Process.Pid, parent.Process.Pid)
+	cpus := func(pid int) unix.CPUSet {
+		t.Helper()
+		var set unix.CPUSet
+		if err := unix.SchedGetaffinity(pid, &set); err != nil {
+			t.Fatalf("read the CPUs of process %d: %v", pid, err)
+		}
+		return set
+	}
+	if got := cpus(alone.Process.Pid); got != h.cpu {
+		t.Fatalf("a held process may run on CPUs %v; want the hold's, %v", cpuList(got), cpuList(h.cpu))
+	}
+	h.Let(alone.Process.Pid)
+	if got := cpus(alone.Process.Pid); got != could {
+		t.Fatalf("a process let go may run on CPUs %v; want %v, as before the hold", cpuList(got), cpuList(could))
+	}
+	if got := cpus(parent.Process.Pid); got != h.cpu {
+		t.Fatalf("a held process, another let go, may run on CPUs %v; want the hold's, %v", cpuList(got), cpuList(h.cpu))
+	}
+	if _, err := io.WriteString(goOn, "go\n"); err != nil {
+		t.Fatal(err)
+	}
+	if !said.Scan() {
+		t.Fatalf("the held process ended before it said its child's pid (%v)", said.Err())
+	}
+	child, err := strconv.Atoi(said.Text())
+	if err != nil {
+		t.Fatalf("the held process said %q, not its child's pid", said.Text())
+	}
+	h.TakeChild(t, child, parent.Process.Pid)
+	h.Release()
+	for what, pid := range map[string]int{"a held process": parent.Process.Pid, "its child, held from its start": child, "one let go before": alone.Process.Pid} {
+		if got := cpus(pid); got != could {
+			t.Fatalf("%s may run on CPUs %v once the hold is released; want %v, as before the hold", what, cpuList(got), cpuList(could))
+		}
 	}
 }

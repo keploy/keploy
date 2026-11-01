@@ -50,6 +50,11 @@ jobs:
       # utils or pkg/platform/http on a developer's machine pins no CPU.
       # This lane is where they run.
       KEPLOY_TEST_CPU_HOLD: "1"
+      # utils' tests of a stop's storage I/O read a file from storage, out of
+      # the page cache; where no read reaches storage (both test dirs in
+      # memory) they skip. This runner's disks take them: with this set they
+      # fail instead.
+      KEPLOY_TEST_STORAGE_IO_REQUIRED: "1"
       KEPLOY_TEST_MYSQL_ADDR: "127.0.0.1:3306"
       KEPLOY_TEST_MYSQL_USER: root
       KEPLOY_TEST_MYSQL_PASS: rootpass

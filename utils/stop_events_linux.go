@@ -119,7 +119,7 @@ func MarkExit(procs []Reached) ExitMark {
 		}
 		m.Fds += n
 		m.FilesUnsettled = m.FilesUnsettled || !settled
-		if !readThreadsIO(p.PID, m.IO) {
+		if !readThreadsIO("/proc", p.PID, m.IO) {
 			m.IOPartial = true
 		}
 	}
@@ -127,16 +127,16 @@ func MarkExit(procs []Reached) ExitMark {
 }
 
 // readThreadsIO puts into io the storage I/O each thread of process pid has
-// done itself (readStorageIO of /proc/<pid>/task/<tid>/io: 0 for one whose
+// done itself (readStorageIO of <root>/<pid>/task/<tid>/io: 0 for one whose
 // count cannot be read), by its tid, and reports whether its threads were
 // listed whole (taskIDs): where they were not, one that runs may be left
-// out. A process gone has no thread that runs.
-func readThreadsIO(pid int, io map[int]uint64) (whole bool) {
-	ids, whole, gone, err := taskIDs("/proc", pid)
+// out. A process gone has no thread that runs. root is /proc.
+func readThreadsIO(root string, pid int, io map[int]uint64) (whole bool) {
+	ids, whole, gone, err := taskIDs(root, pid)
 	if gone {
 		return true
 	}
-	dir := "/proc/" + strconv.Itoa(pid) + "/task/"
+	dir := root + "/" + strconv.Itoa(pid) + "/task/"
 	for _, id := range ids {
 		if tid, err := strconv.Atoi(id); err == nil {
 			io[tid] = readStorageIO(dir + id + "/io")
@@ -514,8 +514,9 @@ var processThreads = func(pid int) int {
 // (ExitMark.FilesUnsettled: descriptors that kept changing as they were
 // read) neither sets nor passes the open-file mark: a look that could not
 // tell the files apart is no evidence, and so a first look that counted too
-// many cannot make a later, true one look like progress. The stop of the daemons an app leaves behind
-// reads them so too (stopMembers, pkg/platform/http/adopt_linux.go).
+// many cannot make a later, true one look like progress. The stop of the
+// daemons an app leaves behind reads them so too (stopMembers,
+// pkg/platform/http/adopt_linux.go).
 type ExitRatchet struct {
 	best  ExitMark
 	set   bool
