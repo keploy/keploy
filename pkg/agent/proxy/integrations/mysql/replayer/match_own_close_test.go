@@ -1,12 +1,15 @@
 package replayer_test
 
 import (
+	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/replayer"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -28,9 +31,9 @@ import (
 // listed under it, and one made between tests, which no mapping lists, the
 // pool's. Both are connection recordings, so the dry match that counts the
 // test's own (ownRepeats) reads the pool's CLOSE too (GetConnectionMocks). It
-// finds the test's own CLOSE first, then the pool's, and passes the pool's
-// over (own_repeat.go). Counted as the test's own, the miss said the test
-// recorded the CLOSE twice.
+// finds the test's own CLOSE first, then the pool's, which ends the count
+// (own_repeat.go). Counted as the test's own, the miss said the test recorded
+// the CLOSE twice.
 func TestACloseOneMoreThanTheTestRecordedCountsOnlyTheTestsOwnClose(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	s1, _ := diffWindow(1)
@@ -65,5 +68,58 @@ func TestACloseOneMoreThanTheTestRecordedCountsOnlyTheTestsOwnClose(t *testing.T
 	}
 	if !strings.Contains(miss, "extraCall:1}") {
 		t.Fatalf("the second CLOSE of statement A missed with %s; want an extra call, recorded once", miss)
+	}
+}
+
+// Under the proven switch, on a set served by the background rules, a test
+// that owns a CLOSE of one statement closes another one, whose CLOSE the pool
+// holds: the pool's CLOSE answers it, as it does when the test owns no
+// CLOSE. Any recorded CLOSE matches a live one by its header alone, so the
+// test's CLOSE of statement A matches the live CLOSE of statement B too, at a
+// lower score than the pool's CLOSE of B. The own-call check (ownRepeats)
+// passed the pool's CLOSE over and found the test's, so it took the CLOSE for
+// one more than the test recorded: the background was hidden from it, it
+// missed as an extra call, and the miss closed the app's connection.
+func TestACloseOfAStatementThePoolClosedIsThePoolsThoughTheTestOwnsAnotherClose(t *testing.T) {
+	for _, ownsCloseA := range []bool{true, false} {
+		t.Run(fmt.Sprintf("test owns a CLOSE of A: %v", ownsCloseA), func(t *testing.T) {
+			t.Setenv(provenswitch.Env, "1")
+			s1, _ := diffWindow(1)
+			prepA := diffPrepareMock("conn-prep-a", "c1", diffQueryA, 7, diffBase.Add(-2*time.Millisecond))
+			prepB := diffPrepareMock("conn-prep-b", "c1", diffQueryB, 8, diffBase.Add(-time.Millisecond))
+			closeOf := func(name string, id uint32, at time.Time) *models.Mock {
+				mk := diffMock(name, "c1", []mysql.Request{closeReq(id)}, at, models.LifetimeConnection, "mocks")
+				mk.Spec.Metadata[models.MetadataLifetimeKey] = models.MetadataLifetimeConnection
+				return mk
+			}
+			ownA := closeOf("t1-close-a", 7, s1.Add(time.Millisecond))
+			poolB := closeOf("pool-close-b", 8, s1.Add(7*time.Millisecond))
+			all, own := []*models.Mock{prepA, prepB, poolB}, []*models.Mock(nil)
+			if ownsCloseA {
+				all, own = append(all, ownA), []*models.Mock{ownA}
+			}
+			mm := proxy.NewMockManager(nil, nil, zap.NewNop())
+			defer mm.Close()
+			mm.SetMocksWithWindow(nil, all, models.BaseTime, time.Now().Add(time.Hour))
+			seedWindows(mm, 3)
+			mm.ServeExactBackground(models.RecordedWithS12Routing, []string{prepA.Name, prepB.Name, poolB.Name}, nil)
+			mm.ServeExactTest("T1", own)
+			if !mm.ExactServing() {
+				t.Fatal("precondition: test T1 is not served exactly")
+			}
+			ctx := context.WithValue(context.Background(), models.ClientConnectionIDKey, "c1")
+			dctx := &wire.DecodeContext{PreparedStatements: map[uint32]*mysql.StmtPrepareOkPacket{}, StmtIDToQuery: btStatements, NextStmtID: 100}
+			if ownsCloseA {
+				if _, ok, miss, err := replayer.MatchForTest(ctx, zap.NewNop(), closeReq(7), mm, dctx); !ok || err != nil {
+					t.Fatalf("T1's CLOSE of statement A, which it recorded: ok=%v err=%v miss=%s", ok, err, miss)
+				}
+			}
+			if _, ok, miss, err := replayer.MatchForTest(ctx, zap.NewNop(), closeReq(8), mm, dctx); !ok || err != nil {
+				t.Fatalf("T1's CLOSE of statement B, which the pool holds and T1 never recorded, missed (ok=%v err=%v): %s", ok, err, miss)
+			}
+			if n := mm.ServedCounts()[poolB.Name]; n != 1 {
+				t.Fatalf("T1's CLOSE of statement B was answered, but the pool's CLOSE of B answered %d calls; want 1 (served: %v)", n, mm.ServedCounts())
+			}
+		})
 	}
 }

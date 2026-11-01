@@ -19,7 +19,7 @@ import (
 // call is one of the test's own (ownRepeats). The dry match that answers
 // reads the connection's prepared statements as the matcher does, and finds
 // the connection's recording of the statement: no recording of the test's,
-// so it is passed over (own_repeat.go). Counted as the test's own, the
+// so it ends the check (own_repeat.go). Counted as the test's own, the
 // PREPARE was taken for one more than the test recorded, and the
 // connection's recording was refused to it.
 //
