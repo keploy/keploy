@@ -336,19 +336,34 @@ func (dc *decider) word(path string, bare variables.Address, rec, live, text str
 	at, n := w.At, w.At.Word
 	ps := append([]evPlace(nil), dc.ps...)
 	cand := map[string]bool{}
-	for _, p := range ps {
-		if ev, _ := evidenceAt(p, w.Rec, w.Live); ev != evNone {
-			cand[p.mock] = true
+	// moved: why a place that shows the word shows it at another field.
+	// agree: every candidate shows R's word in R and F's in F at one field.
+	// Each then gives the same pair, so serve order, which tells which
+	// candidate the application had last, cannot change what is bound, and
+	// replay checks the bound value at the earliest place.
+	moved := make([]string, len(ps))
+	agree := true
+	for i, p := range ps {
+		ev, _ := evidenceAt(p, w.Rec, w.Live)
+		if ev == evNone {
+			continue
 		}
+		cand[p.mock] = true
+		if ev == evShown {
+			moved[i] = movedField(p, w.Rec, w.Live)
+		}
+		agree = agree && ev == evShown && moved[i] == ""
 	}
-	orderUnknown(dc.in, ps, cand)
+	if !agree {
+		orderUnknown(dc.in, ps, cand)
+	}
 	swapUnknown(dc.in, ps, w)
 	// aside: places that held R's word where F's did not follow, too
 	// little to be a conflict; a fresh word's line names them. unread:
 	// places keploy cannot read, which say nothing of a word this short.
 	var src, outside, conflict, unknown, aside, unread []evPlace
 	short := wordBits(w.Rec) < unreadFloorBits && wordBits(w.Live) < unreadFloorBits
-	for _, p := range ps {
+	for i, p := range ps {
 		ev, read := evidenceAt(p, w.Rec, w.Live)
 		if short && (!read || ev == evUnknown && p.fUnstated) {
 			unread = append(unread, p)
@@ -371,8 +386,8 @@ func (dc *decider) word(path string, bare variables.Address, rec, live, text str
 				ev, p.why = evUnknown, "the given stands inside the word in both runs, glued to the text around it: keploy binds a given only as a whole word"
 			}
 		case evShown:
-			if why := movedField(p, w.Rec, w.Live); why != "" {
-				ev, p.why = evUnknown, why
+			if moved[i] != "" {
+				ev, p.why = evUnknown, moved[i]
 			}
 		}
 		switch ev {
