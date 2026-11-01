@@ -3,8 +3,11 @@
 package utils
 
 import (
+	"bufio"
+	"crypto/rand"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -175,6 +178,10 @@ func TestAStopDoesNotJudgeAnAppHeldOffTheCPU(t *testing.T) {
 // times as often as a stall is judged on, spinning until the test releases
 // it, and had a fraction of the stall bound of CPU meanwhile, or the test
 // held nothing; let go, it ends, the app with it, and the stop says no kill.
+// The hold is started before the stop (starvetest.StartHold), so the child
+// is held once its pid is read: a stop judges it from its start, and one the
+// test held only after starting the hold's hogs ran free for that time and,
+// on a loaded runner, was killed for a stall before the test held it.
 func TestAStopDoesNotJudgeAnAppWaitingOnAChildHeldOffTheCPU(t *testing.T) {
 	starvetest.TakesACPU(t)
 	const bound = 300 * time.Millisecond
@@ -202,6 +209,7 @@ func TestAStopDoesNotJudgeAnAppWaitingOnAChildHeldOffTheCPU(t *testing.T) {
 		killed string
 		err    error
 	}
+	hold := starvetest.StartHold(t)
 	done := make(chan stopped, 1)
 	go func() {
 		killed, _, err := InterruptProcessTreeStop(zap.NewNop(), pid, syscall.SIGINT, nil)
@@ -222,7 +230,8 @@ func TestAStopDoesNotJudgeAnAppWaitingOnAChildHeldOffTheCPU(t *testing.T) {
 	case end := <-done:
 		t.Fatalf("the stop ended before the app's trap started its child: %q (%v)", end.killed, end.err)
 	}
-	release := starvetest.Hold(t, child)
+	hold.Take(t, child)
+	release := hold.Release
 	ranBefore, _ := starvetest.Ran(child)
 	var end stopped
 	ended := false
@@ -865,8 +874,23 @@ func TestTheExitRatchetTakesOnlyProgress(t *testing.T) {
 		{ExitMark{Running: 2, Threads: 4, Fds: 9}, true},
 		{ExitMark{Running: 1, Threads: 4, Fds: 9}, true},
 		{ExitMark{Running: 1, Threads: 3, Fds: 9}, true},
-		{ExitMark{Running: 1, Threads: 3, Fds: 9, IO: 100}, false},
-		{ExitMark{Running: 1, Threads: 3, Fds: 9, IO: 200, OnStorage: true}, true},
+		{ExitMark{Running: 1, Threads: 3, Fds: 9, IO: map[int]uint64{7: 100}}, false},
+		{ExitMark{Running: 1, Threads: 3, Fds: 9, IO: map[int]uint64{7: 200}, OnStorage: true}, true},
+		// Each thread's I/O is held against its own most: one that
+		// ends takes none of the mark from the others, and one not
+		// seen before has done none.
+		{ExitMark{Running: 1, Threads: 3, Fds: 9, IO: map[int]uint64{8: 50}, OnStorage: true}, true},
+		{ExitMark{Running: 1, Threads: 3, Fds: 9, IO: map[int]uint64{8: 50}, OnStorage: true}, false},
+		{ExitMark{Running: 1, Threads: 3, Fds: 9, IO: map[int]uint64{8: 60}, OnStorage: true}, true},
+		// A thread a partial listing leaves out keeps its most; one
+		// whose count could not be read (0) keeps it too.
+		{ExitMark{Running: 1, Threads: 3, Fds: 9, IO: map[int]uint64{9: 10}, IOPartial: true}, false},
+		{ExitMark{Running: 1, Threads: 3, Fds: 9, IO: map[int]uint64{8: 0, 9: 10}, OnStorage: true}, false},
+		{ExitMark{Running: 1, Threads: 3, Fds: 9, IO: map[int]uint64{8: 60, 9: 10}, OnStorage: true}, false},
+		// One a whole listing leaves out has ended: its tid, given
+		// again, names a thread whose I/O starts at none.
+		{ExitMark{Running: 1, Threads: 3, Fds: 9, IO: map[int]uint64{9: 10}}, false},
+		{ExitMark{Running: 1, Threads: 3, Fds: 9, IO: map[int]uint64{8: 5, 9: 10}, OnStorage: true}, true},
 	} {
 		if got := r.Advance(tc.m); got != tc.want {
 			t.Fatalf("%+v: progress %v, want %v", tc.m, got, tc.want)
@@ -1046,13 +1070,245 @@ func TestMarkExitCountsOpenFilesNotDescriptors(t *testing.T) {
 	r.Advance(m)
 	_ = cmd.Process.Signal(syscall.SIGUSR1)
 	awaitFile(t, closedDup, reaped)
-	if m := MarkExit(procs); m.Fds != 4 || m.FilesUnsettled || m.FilesUncompared != nil || r.Advance(m) {
-		t.Fatalf("closing a duplicate read as %+v (progress %v); want 4 open files, settled, compared, and no progress", m, r.Advance(m))
+	// The reading's progress is taken once: a second Advance of the same
+	// reading passes no mark, and would say none whatever the first said.
+	if m := MarkExit(procs); m.Fds != 4 || m.FilesUnsettled || m.FilesUncompared != nil {
+		t.Fatalf("closing a duplicate read as %+v; want 4 open files, settled, compared", m)
+	} else if r.Advance(m) {
+		t.Fatalf("closing a duplicate read as %+v: progress; want none", m)
 	}
 	_ = cmd.Process.Signal(syscall.SIGUSR2)
 	awaitFile(t, closedLast, reaped)
 	if m := MarkExit(procs); m.Fds != 3 || m.FilesUnsettled || m.FilesUncompared != nil || !r.Advance(m) {
 		t.Fatalf("closing a file's last descriptor read as %+v; want 3 open files, settled, compared, and progress", m)
+	}
+}
+
+// reapIOEnv has this test binary be, from its start, an app of
+// TestStorageIOItsChildDidIsNoProgressOfAnApp: "child" starts a child
+// ("reader") that reads the file reapIOFileEnv names from storage, kills and
+// reaps it once a line comes on its stdin and goes into the kernel; "self"
+// reads that file itself in between. It says "ready" (self), "held" as it
+// goes into the kernel, and the reader "read N", N the storage I/O its
+// process has done. It runs from init: the thread that goes into the kernel
+// is then its main one, whose state its stat shows (ExitMark.OnStorage). It
+// opens and closes no file between the line and the kernel (the child is
+// started with no pidfd and let go by a kill): its files are no progress.
+const (
+	reapIOEnv     = "KEPLOY_TEST_REAP_IO"
+	reapIOFileEnv = "KEPLOY_TEST_REAP_IO_FILE"
+)
+
+func init() {
+	mode := os.Getenv(reapIOEnv)
+	if mode == "" {
+		return
+	}
+	read := func() {
+		b, err := os.ReadFile(os.Getenv(reapIOFileEnv))
+		if err != nil || len(b) == 0 {
+			os.Exit(3)
+		}
+		fmt.Printf("read %d\n", readStorageIO("/proc/self/io"))
+	}
+	if mode == "reader" {
+		read()
+		for { // until its parent kills it
+			time.Sleep(time.Hour)
+		}
+	}
+	// No collection: one would wait for ever on the thread held in the
+	// kernel, which does not stop for it.
+	debug.SetGCPercent(-1)
+	child := 0
+	if mode == "child" {
+		// Its own mode left out: a process's first value of a name is
+		// the one it reads, and a reader that read "child" would start
+		// another, without end.
+		env := slices.DeleteFunc(os.Environ(), func(kv string) bool { return strings.HasPrefix(kv, reapIOEnv+"=") })
+		env = append(env, reapIOEnv+"=reader")
+		pid, err := syscall.ForkExec("/proc/self/exe", []string{os.Args[0]}, &syscall.ProcAttr{Env: env, Files: []uintptr{0, 1, 2}})
+		if err != nil {
+			os.Exit(3)
+		}
+		child = pid
+	} else {
+		fmt.Println("ready")
+	}
+	if _, err := bufio.NewReader(os.Stdin).ReadString('\n'); err != nil {
+		os.Exit(3)
+	}
+	if child > 0 {
+		var ws syscall.WaitStatus
+		if syscall.Kill(child, syscall.SIGKILL) != nil {
+			os.Exit(3)
+		}
+		if _, err := syscall.Wait4(child, &ws, 0, nil); err != nil {
+			os.Exit(3)
+		}
+	} else {
+		read()
+	}
+	fmt.Println("held")
+	holdInTheKernel()
+	os.Exit(0)
+}
+
+// A process is on its way out through storage by the storage I/O it does
+// itself, not by its children's: /proc/<pid>/io takes in the I/O of each
+// child a process reaps, so a shell looping on `sleep 1` beside a cold page
+// cache, read as it vforked the next (a vfork waits in the kernel, D, for
+// its child to exec), read as progress (TestMarkExitCountsOpenFilesNotDescriptors
+// failed so in CI). The app's child reads a file from storage before the
+// first reading; the app reaps it, goes into the kernel and is read again:
+// no progress. The app reading the file itself, between the two, is.
+func TestStorageIOItsChildDidIsNoProgressOfAnApp(t *testing.T) {
+	file := storageReadFile(t)
+	for _, tc := range []struct {
+		mode     string
+		progress bool
+	}{{"child", false}, {"self", true}} {
+		t.Run(tc.mode, func(t *testing.T) {
+			evictFromCache(t, file)
+			cmd := exec.Command("/proc/self/exe")
+			cmd.Env = append(os.Environ(), reapIOEnv+"="+tc.mode, reapIOFileEnv+"="+file)
+			cmd.Stderr = os.Stderr
+			stdin, err := cmd.StdinPipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			stdout, err := cmd.StdoutPipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			// A group of its own, killed whole, and by the kernel when
+			// the thread that started it ends (TestMarkExitCountsOpenFilesNotDescriptors).
+			runtime.LockOSThread()
+			t.Cleanup(runtime.UnlockOSThread)
+			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); _ = cmd.Wait() })
+			lines := bufio.NewScanner(stdout)
+			said := func(want string) string {
+				if !lines.Scan() {
+					t.Fatalf("the app ended before it said %q (%v)", want, lines.Err())
+				}
+				if !strings.HasPrefix(lines.Text(), want) {
+					t.Fatalf("the app said %q; want %q", lines.Text(), want)
+				}
+				return lines.Text()
+			}
+			readSaid := func() {
+				if n, err := strconv.ParseUint(strings.TrimPrefix(said("read "), "read "), 10, 64); err != nil || n == 0 {
+					t.Fatalf("premise: the reader of %s did no storage I/O (%d, %v)", file, n, err)
+				}
+			}
+			st, ok := ReadProcStat(cmd.Process.Pid)
+			if !ok {
+				t.Fatal("premise: the app's stat could not be read")
+			}
+			procs := []Reached{{PID: cmd.Process.Pid, Start: st.StartTime}}
+			if tc.mode == "child" {
+				readSaid()
+			} else {
+				said("ready")
+			}
+			var r ExitRatchet
+			whole := "/proc/" + strconv.Itoa(cmd.Process.Pid) + "/io"
+			first, firstWhole := MarkExit(procs), readStorageIO(whole)
+			r.Advance(first)
+			if _, err := io.WriteString(stdin, "go\n"); err != nil {
+				t.Fatal(err)
+			}
+			if tc.mode == "self" {
+				readSaid()
+			}
+			said("held")
+			// Held in the kernel from here until it is killed.
+			for {
+				st, ok := ReadProcStat(cmd.Process.Pid)
+				if !ok {
+					t.Fatal("the app is gone before it was read in the kernel")
+				}
+				if st.State == 'D' {
+					break
+				}
+				time.Sleep(time.Millisecond)
+			}
+			m := MarkExit(procs)
+			if !m.OnStorage {
+				t.Fatalf("premise: the app held in the kernel reads %+v, not in an uninterruptible sleep", m)
+			}
+			if got := r.Advance(m); got != tc.progress {
+				how := "reaped a child that read storage"
+				if tc.mode == "self" {
+					how = "read storage itself"
+				}
+				t.Fatalf("an app that %s, then went into the kernel, read %+v after %+v (its process's own count of its I/O, children's in: %d after %d): progress %v, want %v",
+					how, m, first, readStorageIO(whole), firstWhole, got, tc.progress)
+			}
+		})
+	}
+}
+
+// storageReadFile is a file of 1 MiB whose reads, once it is out of the
+// page cache (evictFromCache), go to storage: in t's temp dir, or, where
+// that is a memory file system (tmpfs), the package's own directory.
+func storageReadFile(t *testing.T) string {
+	data := make([]byte, 1<<20)
+	if _, err := rand.Read(data); err != nil { // no compression keeps it from storage
+		t.Fatal(err)
+	}
+	var tried []string
+	for _, dir := range []string{t.TempDir(), "."} {
+		f, err := os.CreateTemp(dir, "storage-read-")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Remove(f.Name()) })
+		_, err = f.Write(data)
+		if err == nil {
+			err = f.Sync()
+		}
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		evictFromCache(t, f.Name())
+		runtime.LockOSThread()
+		before := readStorageIO("/proc/thread-self/io")
+		_, err = os.ReadFile(f.Name())
+		after := readStorageIO("/proc/thread-self/io")
+		runtime.UnlockOSThread()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if after > before {
+			path, err := filepath.Abs(f.Name())
+			if err != nil {
+				t.Fatal(err)
+			}
+			return path
+		}
+		tried = append(tried, dir)
+	}
+	t.Fatalf("premise: reads of a file out of the page cache reach no storage in %v", tried)
+	return ""
+}
+
+// evictFromCache drops file's pages from the page cache (none maps it).
+func evictFromCache(t *testing.T, file string) {
+	f, err := os.Open(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err := unix.Fadvise(int(f.Fd()), 0, 0, unix.FADV_DONTNEED); err != nil {
+		t.Fatal(err)
 	}
 }
 

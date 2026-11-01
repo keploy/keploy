@@ -95,8 +95,35 @@ func TakesACPU(t *testing.T) {
 // at the test's cleanup), after which they run again. It skips the test where
 // the host is not one for it (TakesACPU), or the scheduler will not hold them
 // (no CPU to pin to, or the calls refused, as a sandbox may). Its hogs die
-// with this process, however it ends (see above).
+// with this process, however it ends (see above). It starts its hogs before
+// it holds pids, which run free meanwhile: a test whose process a stop judges
+// from its start starts the hold first (StartHold) and holds it once it is
+// known (Holding.Take).
 func Hold(t *testing.T, pids ...int) (release func()) {
+	t.Helper()
+	h := StartHold(t)
+	h.Take(t, pids...)
+	return h.Release
+}
+
+// Holding is a hold whose hogs hold its CPU: processes it takes are held off
+// the CPU once their threads are moved there, with no hog to start first.
+// Starting the hogs (each a process, started one after another) takes time,
+// the more on a loaded runner, all of it time a process a stop already
+// judges runs free: a stop judges a child an app starts as it stops from
+// that child's start, and one held only after a stall bound of that time is
+// killed before the test holds it.
+type Holding struct {
+	mu      sync.Mutex
+	cpu     unix.CPUSet
+	endHogs func()
+	held    []*heldProcess
+}
+
+// StartHold starts a hold, its hogs running, to take processes with
+// (Holding.Take) until it is released (Holding.Release; also run at the
+// test's cleanup). It skips the test as Hold does.
+func StartHold(t *testing.T) *Holding {
 	t.Helper()
 	TakesACPU(t)
 	if _, ok := Ran(os.Getpid()); !ok {
@@ -115,24 +142,10 @@ func Hold(t *testing.T, pids ...int) (release func()) {
 	if cpu < 0 {
 		t.Skip("this process may run on no CPU")
 	}
-	var one unix.CPUSet
-	one.Set(cpu)
-
-	var mu sync.Mutex
-	endHogs := func() {}
-	var held []*heldProcess
-	stop := func() {
-		mu.Lock()
-		defer mu.Unlock()
-		endHogs()
-		endHogs = func() {}
-		for _, p := range held {
-			p.let()
-		}
-		held = nil
-	}
-	t.Cleanup(stop)
-	end, err := startHogs(hogs, &one)
+	h := &Holding{endHogs: func() {}}
+	h.cpu.Set(cpu)
+	t.Cleanup(h.Release)
+	end, err := startHogs(hogs, &h.cpu)
 	if err != nil {
 		var refused pinRefused
 		if errors.As(err, &refused) {
@@ -140,17 +153,35 @@ func Hold(t *testing.T, pids ...int) (release func()) {
 		}
 		t.Fatal(err)
 	}
-	mu.Lock()
-	endHogs = end
-	mu.Unlock()
+	h.mu.Lock()
+	h.endHogs = end
+	h.mu.Unlock()
+	return h
+}
+
+// Take holds processes pids off the CPU, on the hold's, until it is
+// released.
+func (h *Holding) Take(t *testing.T, pids ...int) {
+	t.Helper()
 	for _, pid := range pids {
-		p := holdProcess(t, pid, &one)
-		mu.Lock()
-		held = append(held, p)
-		mu.Unlock()
+		p := holdProcess(t, pid, &h.cpu)
+		h.mu.Lock()
+		h.held = append(h.held, p)
+		h.mu.Unlock()
 	}
-	var once sync.Once
-	return func() { once.Do(stop) }
+}
+
+// Release ends the hold: its hogs end, and the processes it held run again
+// as they did before (idempotent).
+func (h *Holding) Release() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.endHogs()
+	h.endHogs = func() {}
+	for _, p := range h.held {
+		p.let()
+	}
+	h.held = nil
 }
 
 // pinRefused is a hog the kernel would not pin to the hold's CPU.
