@@ -169,6 +169,13 @@ type MockManager struct {
 	// name: never consumption, so never in consumedList or
 	// consumedPersistent. Reset as a new test set is staged.
 	learnedElsewhere map[string]models.MockState
+	// elsewhereCounts is the current test set's count of learning-only
+	// pairings, by operation, then outcome (LearnElsewhereCounted);
+	// elsewhereCounted is how many calls it counts, elsewhereSaid how many
+	// of them the log said (unsaidElsewhereCounts). Reset with
+	// learnedElsewhere.
+	elsewhereCounts                 map[elsewhereOp]map[string]int
+	elsewhereCounted, elsewhereSaid int
 	// servedCount counts, per mock name, every time the mock answered a
 	// request this session, reset with consumedPersistent. A mock that may
 	// answer more than once keeps its first-use timestamp and its usage in
@@ -4984,9 +4991,13 @@ func (m *MockManager) dropPreviousSetConsumes() {
 		m.consumedPersistent = make(map[string]models.MockState)
 	}
 	// What the previous set's calls taught its recordings is not this
-	// set's: recordings' names restart in each set.
+	// set's: recordings' names restart in each set. Its count is said
+	// first, if no read of the round's learning said it.
 	m.learnedElsewhere = nil
+	unsaid := m.unsaidElsewhereCounts()
+	m.elsewhereCounts, m.elsewhereCounted, m.elsewhereSaid = nil, 0, 0
 	m.consumedMu.Unlock()
+	m.sayElsewhereCounts(unsaid)
 	m.bootTakenMu.Lock()
 	m.bootTaken = nil
 	m.bootTakenMu.Unlock()

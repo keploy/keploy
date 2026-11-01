@@ -10,6 +10,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // learnedNames is the names LearnedElsewhere holds, in its order.
@@ -348,5 +349,60 @@ func TestLearnElsewhereNamesTheWindowThatTaughtIt(t *testing.T) {
 	}
 	if got := windowOf("o4"); len(got) != 1 || got[0].Test != "T4" {
 		t.Fatalf("taught in %+v; want T4's window", got)
+	}
+}
+
+// The set's count of learning-only pairings is said by operation, at info,
+// when the round's learning is read: each operation's calls and what came
+// of them, the set's whole. A read with nothing counted since says nothing
+// again; a later count is said whole at the next read. The next set's
+// staging says what no read said, and starts its own count.
+func TestLearnElsewhereCountIsSaidByOperationWhenTheRoundsLearningIsRead(t *testing.T) {
+	mm, _ := s12Set(t)
+	core, logs := observer.New(zap.InfoLevel)
+	mm.logger = zap.New(core)
+	said := func() []string {
+		var out []string
+		for _, e := range logs.TakeAll() {
+			if e.Message != elsewhereCountLine {
+				continue
+			}
+			c := e.ContextMap()
+			out = append(out, fmt.Sprint(c["kind"], " | ", c["operation"], " | ", c["calls"], " | ", c["outcomes"]))
+		}
+		return out
+	}
+	const tick, scan = "findAndModify ptw_endpoints in keploy", "find loadTestRun in keploy"
+	mm.LearnElsewhereCounted(models.Mongo, tick, "learned its clock reads")
+	mm.LearnElsewhereCounted(models.Mongo, tick, "one call more than recorded")
+	mm.LearnElsewhereCounted(models.Mongo, tick, "learned its clock reads")
+	mm.LearnElsewhereCounted(models.Mongo, scan, "changed beyond a read of the clock")
+	mm.LearnedElsewhere()
+	want := []string{
+		"Mongo | " + scan + " | 1 | [changed beyond a read of the clock: 1]",
+		"Mongo | " + tick + " | 3 | [learned its clock reads: 2 one call more than recorded: 1]",
+	}
+	if got := said(); !slices.Equal(got, want) {
+		t.Fatalf("said %q; want %q", got, want)
+	}
+	mm.LearnedElsewhere()
+	if got := said(); len(got) != 0 {
+		t.Fatalf("a read with nothing counted since said %q again", got)
+	}
+	mm.LearnElsewhereCounted(models.Mongo, scan, "changed beyond a read of the clock")
+	mm.LearnedElsewhere()
+	want[0] = "Mongo | " + scan + " | 2 | [changed beyond a read of the clock: 2]"
+	if got := said(); !slices.Equal(got, want) {
+		t.Fatalf("after a later count, said %q; want the set's whole %q", got, want)
+	}
+	mm.LearnElsewhereCounted(models.Mongo, scan, "read no clock")
+	mm.dropPreviousSetConsumes()
+	want[0] = "Mongo | " + scan + " | 3 | [changed beyond a read of the clock: 2 read no clock: 1]"
+	if got := said(); !slices.Equal(got, want) {
+		t.Fatalf("the next set's staging said %q; want what no read said, %q", got, want)
+	}
+	mm.LearnedElsewhere()
+	if got := said(); len(got) != 0 || mm.elsewhereCounts != nil {
+		t.Fatalf("a new set read %q, counting %v; want nothing of the previous set's", got, mm.elsewhereCounts)
 	}
 }
