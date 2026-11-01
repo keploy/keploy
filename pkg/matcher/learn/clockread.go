@@ -1178,6 +1178,22 @@ func checkReadIn(o models.ClockOffset, live Leaf, s Span, learned, read, hint st
 				in = ", read here in UTC"
 			}
 		}
+		if o.Step > o.Res {
+			// A phase-locked look-back's grid (models.ClockOffset
+			// holdsAtStep): a minute's or a finer step is one grid in every
+			// zone, read in UTC; an hour's or a day's is read in UTC and in
+			// the application's zone (s.Zone: its process's, else the one the
+			// learn step named), as the learn step reads it (phaseAt), and
+			// the value holds where either grid holds it.
+			var grid []time.Time
+			for _, at := range ats {
+				grid = append(grid, at.In(time.UTC))
+				if o.Step >= time.Hour && s.Zone != nil && s.Zone != time.UTC {
+					grid = append(grid, at.In(s.Zone))
+				}
+			}
+			ats = grid
+		}
 		// A read plus an offset fails closed near a wall time the
 		// application's zone shows twice as its clocks go back, at any cut
 		// finer than a day (models.ClockOffset.FallBack), read in that zone

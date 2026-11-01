@@ -1134,9 +1134,12 @@ func (o ClockOffset) Holds(at time.Time, res time.Duration, from, to time.Time) 
 //     too (a cut's cost), and one changed by two cuts or more only where
 //     the window holds a turn of the cut for each cut more;
 //   - Step above Res (a phase-locked look-back): at holds only where it
-//     is a whole Step of the call's span (cut to Step in UTC, from one Res
-//     before from up to one Res after to) plus an offset from Min up to,
-//     not including, Max: both runs' remainder within the step. A value
+//     is a whole Step of the call's span (cut to Step on the clock of at's
+//     zone, from one Res before from up to one Res after to) plus an
+//     offset from Min up to, not including, Max: both runs' remainder
+//     within the step. A minute's step or a finer one is one grid in every
+//     zone; an hour's or a day's is read in the zone at is in (learn's
+//     checkReadIn reads it in UTC and in the application's). A value
 //     written at an encoding coarser than Res cannot show that remainder
 //     and holds nothing.
 //
@@ -1162,12 +1165,14 @@ func (o ClockOffset) holdsAtStep(at time.Time, res time.Duration, from, to time.
 	case o.Step < o.Res || res > o.Res:
 		return false
 	}
-	first := ReadCut(from.Add(-o.Res), o.Step, time.UTC)
-	last := ReadCut(to.Add(o.Res), o.Step, time.UTC)
+	loc := at.Location()
+	first := ReadCut(from.Add(-o.Res), o.Step, loc)
+	last := ReadCut(to.Add(o.Res), o.Step, loc)
 	// The latest whole step that leaves at at Min or more past it, then
 	// each step before it while at stays below Max past it (Max - Min is
-	// one Res, or a few steps where two phases held both runs).
-	for k := ReadCut(at.Add(-o.Min), o.Step, time.UTC); at.Sub(k) < o.Max && !k.Before(first); k = k.Add(-o.Step) {
+	// one Res, or a few steps where two phases held both runs); a day's
+	// step before a day whose clocks change is the cut before, not 24 h.
+	for k := ReadCut(at.Add(-o.Min), o.Step, loc); at.Sub(k) < o.Max && !k.Before(first); k = ReadCut(k.Add(-1), o.Step, loc) {
 		if !k.After(last) {
 			return true
 		}

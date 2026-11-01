@@ -177,6 +177,126 @@ func TestAMinuteCutLookBackLearnedAtItsStepIsLockedToItsPhase(t *testing.T) {
 	}
 }
 
+// A client test whose runs know no test begin sends an expiry an hour
+// ahead (expires_at = now + 1h), read 300 ms before its call when recorded
+// and 200 ms before it in round F, outside the call's 61 ms window. Written
+// as an epoch's seconds, the read cut to the second, both runs hold one
+// offset in the call's window, and it is no Fine one: a Clock of an hour
+// at the second (the order's step 5), which a replay passes where the
+// application read its clock within about a second of its call, and fails
+// an hour and a minute, fifty-nine minutes, and the recorded value. Written
+// at the millisecond, the two waits show no one offset: no Clock and no
+// refusal, so the order's step 8 binds it as the test's own value, as
+// DESIGN pins (TestOutcomeAClientTestsValueMadeAfterItsBeginIsNotItsOwn's
+// case of no begin known). Read 300 ms before its call in both runs, it
+// shows one offset in a millisecond's unit (where the two values share
+// no coarser step): refused as Fine, as main refuses it.
+func TestAFutureInstantOfAClientTestWithNoBeginIsAClockWhereItsOffsetHolds(t *testing.T) {
+	sec, ms, min := time.Second, time.Millisecond, time.Minute
+	p := "body.expires_at"
+	base := time.Date(2026, 10, 26, 11, 14, 0, 0, time.UTC)
+	rec := v5Call(base.Add(400*ms), 61*ms, 300*ms)
+	f := v5Call(base.Add(3*min+17*sec+700*ms), 61*ms, 200*ms)
+	w := v5Window(rec, f)
+	if w.sinceBegin() != nil {
+		t.Fatal("the window knows a test begin")
+	}
+	exp := func(read time.Time) time.Time { return read.Add(time.Hour) }
+	o, why, ok := clockInWindow(p, v5Instant(exp(rec.read).Truncate(sec), sec), v5Instant(exp(f.read).Truncate(sec), sec), w, nil)
+	if !ok || o.Fine() || o.Step != sec || o.Min > time.Hour || o.Max <= time.Hour {
+		t.Fatalf("FALSE RED: an hour ahead at the second: %+v %q %v; want a Clock of clock + 1h at the second", o, why, ok)
+	}
+	recText := strconv.FormatInt(exp(rec.read).Truncate(sec).Unix(), 10)
+	for phase := time.Duration(0); phase < sec; phase += 100 * ms {
+		s := Span{From: base.Add(48*time.Hour + phase), To: base.Add(48*time.Hour + phase + 61*ms)}
+		for _, row := range []struct {
+			name string
+			at   time.Time
+			want bool
+		}{
+			{"the application's value, read 250 ms before its call", exp(s.To.Add(-250 * ms)).Truncate(sec), true},
+			{"the application's value, read in its window", exp(s.To.Add(-20 * ms)).Truncate(sec), true},
+			{"an hour and a minute ahead", exp(s.To).Add(min).Truncate(sec), false},
+			{"fifty-nine minutes ahead", exp(s.To).Add(-min).Truncate(sec), false},
+			{"the recorded value", exp(rec.read).Truncate(sec), false},
+		} {
+			if got, why := v5Check(p, o, recText, row.at, s); got != row.want {
+				t.Errorf("%s: a replay %s into its second, %s: %v (%s)", map[bool]string{true: "FALSE RED", false: "FALSE GREEN"}[row.want], phase, row.name, got, why)
+			}
+		}
+	}
+	if o, why, ok := clockInWindow(p, v5Instant(exp(rec.read), ms), v5Instant(exp(f.read), ms), w, nil); ok || why != "" {
+		t.Errorf("an hour ahead at the millisecond, waits of 300 and 200 ms: %+v %q %v; want no Clock and no refusal (step 8's fresh)", o, why, ok)
+	}
+	same := v5Call(base.Add(3*min+17*sec+437*ms), 61*ms, 300*ms)
+	if o, why, ok := clockInWindow(p, v5Instant(exp(rec.read), ms), v5Instant(exp(same.read), ms), v5Window(rec, same), nil); ok || !strings.Contains(why, "keploy refuses") {
+		t.Errorf("an hour ahead at the millisecond, both waits 300 ms: %+v %q %v; want refused as Fine", o, why, ok)
+	}
+}
+
+// An application in +05:30 that cuts its read to an hour, then looks back
+// ten minutes, writes its value at the second (an epoch's seconds): a Java
+// application cuts to its own zone's hour (truncatedTo), which starts at
+// half past an hour in UTC; a Go one cuts to UTC's (Truncate counts from
+// UTC). Recorded at 09:40 UTC and replayed an hour and five minutes later,
+// each is locked to its phase on its own grid: a replay passes the
+// application's value at every phase of the hour, with keploy reading the
+// application's zone from its process or from the learn step's name of it,
+// and fails a dropped look-back and one changed by seven minutes at every
+// phase. Read on UTC's grid alone, the zone's cutter is no Clock.
+func TestAnHourCutLookBackInAZoneOffTheHourIsLockedToItsZonesPhase(t *testing.T) {
+	sec, ms, min := time.Second, time.Millisecond, time.Minute
+	ist := time.FixedZone("+05:30", 5*3600+1800)
+	p := "body.cutoff.$lte"
+	base := time.Date(2026, 10, 26, 9, 40, 0, 0, time.UTC)
+	rec := v5Call(base, 61*ms, 20*ms)
+	f := v5Call(base.Add(time.Hour+5*min), 61*ms, 20*ms)
+	for _, c := range []struct {
+		name string
+		cut  func(time.Time) time.Time
+		want time.Duration
+	}{
+		{"its zone's hour (Java)", func(t time.Time) time.Time { return models.ReadCut(t, time.Hour, ist).Add(-10 * min).Truncate(sec) }, -10 * min},
+		{"UTC's hour (Go)", func(t time.Time) time.Time { return t.Truncate(time.Hour).Add(-10 * min) }, -10 * min},
+	} {
+		rv, lv := c.cut(rec.read), c.cut(f.read)
+		o, why, ok := clockInWindow(p, v5Instant(rv, sec), v5Instant(lv, sec), v5Window(rec, f), ist)
+		if !ok || o.Step != time.Hour || o.Min != c.want || o.Max != c.want+min || o.AppZone != "+05:30" {
+			t.Errorf("FALSE RED: a cut to %s less 10m: %+v %q %v; want clock - 10m locked to the hour, in +05:30", c.name, o, why, ok)
+			continue
+		}
+		recText := strconv.FormatInt(rv.Unix(), 10)
+		for _, zone := range []struct {
+			what string
+			s    Span
+		}{
+			{"read from its process", Span{Zone: ist, Own: true}},
+			{"named by the learn step", Span{}},
+		} {
+			for phase := time.Duration(0); phase < time.Hour; phase += 5*min + 7*sec {
+				s := zone.s
+				s.From = base.Add(48*time.Hour + phase)
+				s.To = s.From.Add(61 * ms)
+				read := s.To.Add(-20 * ms)
+				for _, row := range []struct {
+					name string
+					at   time.Time
+					want bool
+				}{
+					{"the application's value", c.cut(read), true},
+					{"a dropped look-back", read.Truncate(sec), false},
+					{"seven minutes shorter", c.cut(read).Add(7 * min), false},
+					{"seven minutes longer", c.cut(read).Add(-7 * min), false},
+				} {
+					if got, why := v5Check(p, o, recText, row.at, s); got != row.want {
+						t.Errorf("%s: a cut to %s, the zone %s, a replay %s into its hour, %s: %v (%s)", map[bool]string{true: "FALSE RED", false: "FALSE GREEN"}[row.want], c.name, zone.what, phase, row.name, got, why)
+					}
+				}
+			}
+		}
+	}
+}
+
 // A time to live added to a read the application made earlier in its test,
 // cut to the second (a token's expires_at = cut_s(now) + 30d, read a few
 // seconds before its call), is learned from the test's begin, never as the

@@ -136,14 +136,14 @@ func offsetV5(r, l typedInstant, w *Window, zone *time.Location) (o models.Clock
 	if step := models.CutOf(int64(g), enc, 24*time.Hour); step > cut {
 		so, sok := offsetAt(r, l, w, step)
 		switch {
-		case !sok || ownLookBack(o, ok, cut):
-		case so.Max > 0:
+		case ownLookBack(o, ok, cut):
+		case sok && so.Max > 0:
 			// A time to live: the step's check holds both the writer that
 			// cuts to the step and adds it, and one that does not cut.
 			so.Step = step
 			return so, g.Abs(), true
 		default:
-			if p, pok := phaseAt(r, l, w, step, cut); pok {
+			if p, pok := phaseAt(r, l, w, step, cut, zone); pok {
 				return p, g.Abs(), true
 			}
 		}
@@ -166,32 +166,51 @@ func ownLookBack(o models.ClockOffset, ok bool, cut time.Duration) bool {
 
 // phaseAt is the look-back r and l stand at from a read of each run's
 // clock in w cut to step, then less the offset (the phase lock): the
-// offsets v - k, k a whole step (in UTC) that some read in the run's window
-// cuts to, common to both runs. Their values stand a whole number of steps
+// offsets v - k, k a whole step that some read in the run's window cuts
+// to, common to both runs. Their values stand a whole number of steps
 // apart, so they share their remainder within the step and the offsets of
 // each run lie on one grid. Min is the least common offset and Max the
 // greatest plus cut, the values' own cut; ok only where both runs share one
 // and it lies below zero, a look-back in both.
-func phaseAt(r, l typedInstant, w *Window, step, cut time.Duration) (models.ClockOffset, bool) {
-	rlo, rhi, ok := phaseRange(r.at, w.Rec, step)
-	if !ok {
-		return models.ClockOffset{}, false
+//
+// A minute's step or a finer one is one grid in every zone (zones' offsets
+// are whole minutes). An hour's or a day's is not: an application in
+// +05:30 that cuts to its own hour (Java's truncatedTo) keeps one remainder
+// on its zone's grid, one in Go (Truncate counts from UTC) on UTC's. So
+// where keploy names the application's zone (zone), the grid is read in
+// UTC and in that zone, and AppZone names it, as a replay reads its value
+// on both grids (checkReadIn), as it reads a plain read's cut (cutZones);
+// where both hold a look-back, the shorter: right for any look-back
+// shorter than the two grids stand apart (thirty minutes for +05:30's
+// hour), which an application that subtracts more within the step may
+// write a false red of, where a replay reads in the other part of it.
+func phaseAt(r, l typedInstant, w *Window, step, cut time.Duration, zone *time.Location) (models.ClockOffset, bool) {
+	grids, name := []*time.Location{time.UTC}, ""
+	if step >= time.Hour && zone != nil {
+		if name = models.ZoneNameOf(zone, r.at); name != "" {
+			grids = append(grids, zone)
+		}
 	}
-	llo, lhi, ok := phaseRange(l.at, w.F, step)
-	if !ok {
-		return models.ClockOffset{}, false
+	var best models.ClockOffset
+	found := false
+	for _, g := range grids {
+		rlo, rhi, rok := phaseRange(r.at, w.Rec, step, g)
+		llo, lhi, lok := phaseRange(l.at, w.F, step, g)
+		o := models.ClockOffset{Min: max(rlo, llo), Max: min(rhi, lhi) + cut, Res: cut, Layout: models.LayoutTyped, Step: step, AppZone: name}
+		if rok && lok && o.Min < o.Max && o.Max <= 0 && (!found || o.Max > best.Max) {
+			best, found = o, true
+		}
 	}
-	o := models.ClockOffset{Min: max(rlo, llo), Max: min(rhi, lhi) + cut, Res: cut, Layout: models.LayoutTyped, Step: step}
-	return o, o.Min < o.Max && o.Max <= 0
+	return best, found
 }
 
-// phaseRange is the least and greatest of v less each whole step (in UTC)
-// that a read in s cuts to.
-func phaseRange(v time.Time, s Span, step time.Duration) (lo, hi time.Duration, ok bool) {
+// phaseRange is the least and greatest of v less each whole step (on
+// grid's clock) that a read in s cuts to.
+func phaseRange(v time.Time, s Span, step time.Duration, grid *time.Location) (lo, hi time.Duration, ok bool) {
 	if s.From.IsZero() || s.To.IsZero() || s.To.Before(s.From) || step <= 0 {
 		return 0, 0, false
 	}
-	first, last := models.ReadCut(s.From, step, time.UTC), models.ReadCut(s.To, step, time.UTC)
+	first, last := models.ReadCut(s.From, step, grid), models.ReadCut(s.To, step, grid)
 	return v.Sub(last), v.Sub(first), true
 }
 
