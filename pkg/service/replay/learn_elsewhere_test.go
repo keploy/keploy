@@ -201,6 +201,36 @@ func TestKeployRecordSaysWhatAnotherWindowTaughtUnderTheRecordingsOwner(t *testi
 	}
 }
 
+// A recording no test's mapping lists is said under the set's scope that
+// serves it: a worker-scope recording (an idle answer a poll taught across
+// windows) as the set's worker scope, on the learned line and the voided one
+// alike, and only a recording outside it as the set's start-up and pool's.
+func TestKeployRecordSaysAWorkerScopeRecordingUnderTheWorkerScope(t *testing.T) {
+	minute := map[string]models.ClockOffset{"dirty_at": {Min: -time.Minute, Max: -time.Minute, Res: time.Millisecond}}
+	core, logs := observer.New(zap.InfoLevel)
+	r := &Replayer{logger: zap.New(core), mockDB: &addingStore{}, exact: &exactPlan{worker: []models.MockEntry{{Name: "w-idle"}, {Name: "w-spent"}}}}
+	consumed := map[string]models.MockState{"w-spent": {Name: "w-spent"}}
+	elsewhere := []models.MockState{
+		{Name: "w-idle", Clocks: minute, TaughtIn: []models.TeachingWindow{{Test: "test-2"}}},
+		{Name: "pool-mock", Clocks: minute, TaughtIn: []models.TeachingWindow{{Test: "test-2"}}},
+		{Name: "w-spent", Clocks: minute, TaughtIn: []models.TeachingWindow{{Test: "test-2"}}},
+	}
+	if err := r.persistLearned(context.Background(), "s", consumed, elsewhere, ownerOf(nil), &models.Mapping{}); err != nil {
+		t.Fatal(err)
+	}
+	said := map[string]interface{}{}
+	for _, l := range logs.FilterMessageSnippet("call made in another window").AllUntimed() {
+		said[l.ContextMap()["mock"].(string)] = l.ContextMap()["test"]
+	}
+	for _, l := range logs.FilterMessageSnippet("calls made in other windows").AllUntimed() {
+		said[l.ContextMap()["mock"].(string)] = l.ContextMap()["test"]
+	}
+	want := map[string]interface{}{"w-idle": "the set's worker scope", "w-spent": "the set's worker scope", "pool-mock": "the set's start-up and pool"}
+	if !reflect.DeepEqual(said, want) {
+		t.Fatalf("said under %v; want %v", said, want)
+	}
+}
+
 // extraStore is addingStore that also says it added a field at a place no
 // clock read is, on the recording extra names, as a store that wrote more
 // than it was handed would.

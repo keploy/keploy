@@ -139,8 +139,8 @@ func ReadLearnedElsewhere(ctx context.Context, from any, logger *zap.Logger, fie
 type Taught struct {
 	// Mock is the recording.
 	Mock string `yaml:"mock" json:"mock"`
-	// Owner is the test whose mapping lists the recording, "" for the set's
-	// start-up and pool. No call of the round consumed it: what a call in
+	// Owner is the test whose mapping lists the recording, "" for none (the
+	// set's start-up and pool, or its worker scope: OwnerSaid). No call of the round consumed it: what a call in
 	// another window taught a recording its own pairing took is voided
 	// (OwnPairingWins).
 	Owner string `yaml:"owner,omitempty" json:"owner,omitempty"`
@@ -205,25 +205,31 @@ func SplitTaught(added map[string][]string, kept []models.MockState, owner map[s
 // SayLearnedElsewhere says, with fields, what calls made in other windows
 // taught recordings (taught), and what a recording's own pairing voided of
 // such teaching (voided, OwnPairingWins), each under the test whose
-// recording it is (owner).
-func SayLearnedElsewhere(logger *zap.Logger, taught []Taught, voided []models.MockState, owner map[string]string, fields ...zap.Field) {
+// recording it is (owner), or the set's scope that serves it (OwnerSaid:
+// worker names the set's worker-scope recordings, nil for a set with none).
+func SayLearnedElsewhere(logger *zap.Logger, taught []Taught, voided []models.MockState, owner map[string]string, worker func(name string) bool, fields ...zap.Field) {
 	for _, t := range taught {
 		logger.Info("learned fields that changed between record and replay, from calls made in other windows than their recording's, for learning only",
-			append(slices.Clip(fields), zap.String("mock", t.Mock), zap.String("test", OrStartupAndPool(t.Owner)), zap.Strings("fields", t.Fields),
+			append(slices.Clip(fields), zap.String("mock", t.Mock), zap.String("test", OwnerSaid(t.Mock, owner, worker)), zap.Strings("fields", t.Fields),
 				zap.String("taughtIn", t.Windows()), zap.String("evidence", "a call of its shape in another window: no call of the round consumed the recording"))...)
 	}
 	for _, v := range voided {
 		logger.Info("kept what a recording's own pairing learned and voided what a call made in another window taught it: a call of the round consumed the recording, and its own pairing wins",
-			append(slices.Clip(fields), zap.String("mock", v.Name), zap.String("test", OrStartupAndPool(owner[v.Name])), zap.Strings("voided", slices.Sorted(maps.Keys(v.Clocks))),
+			append(slices.Clip(fields), zap.String("mock", v.Name), zap.String("test", OwnerSaid(v.Name, owner, worker)), zap.Strings("voided", slices.Sorted(maps.Keys(v.Clocks))),
 				zap.String("taughtIn", SayWindows(v.TaughtIn)), zap.String("evidence", "its own pairing in the round"))...)
 	}
 }
 
-// OrStartupAndPool is test, or what the record calls the set's start-up and
-// pool when it is "".
-func OrStartupAndPool(test string) string {
-	if test == "" {
-		return "the set's start-up and pool"
+// OwnerSaid is, as the record says it, the test whose mapping lists the
+// recording name (owner), else the set's worker scope when worker names it
+// (an idle answer a poll taught across windows is one), else the set's
+// start-up and pool.
+func OwnerSaid(name string, owner map[string]string, worker func(name string) bool) string {
+	switch {
+	case owner[name] != "":
+		return owner[name]
+	case worker != nil && worker(name):
+		return "the set's worker scope"
 	}
-	return test
+	return "the set's start-up and pool"
 }
