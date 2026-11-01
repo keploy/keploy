@@ -53,14 +53,14 @@ func (m *mockService) learningTests() map[string]bool {
 // read: then what was learned cannot be read either. elsewhere is what the
 // learn step taught recordings from calls made in other windows than
 // theirs, for learning only (the agent's LearnedElsewhere): its clock reads
-// alone are written onto the recordings with the rest (withLearnedElsewhere),
+// alone are written onto the recordings with the rest (learn.WithLearnedElsewhere),
 // and no test's flow holds them.
 func (m *mockService) keepLearned(ctx context.Context, set string, consumed []models.MockState, consumedErr error, elsewhere []models.MockState, flows []FlowMocks, expected map[string][]models.MockEntry) (learnedOut, error) {
 	if consumedErr != nil {
 		return learnedOut{}, fmt.Errorf("what the learn step learned could not be read from keploy's agent: %w", consumedErr)
 	}
 	if !m.clientTestsRead() {
-		notKept := m.learnedOnto(withLearnedElsewhere(consumed, elsewhere), expected)
+		notKept := m.learnedOnto(learn.WithLearnedElsewhere(consumed, elsewhere), expected)
 		if len(notKept) == 0 {
 			return learnedOut{}, nil
 		}
@@ -87,71 +87,6 @@ type learnedOut struct {
 	byTest    map[string][]string
 	pool      []string
 	elsewhere []LearnedElsewhere
-}
-
-// withLearnedElsewhere is consumed with a state of its own for each
-// recording elsewhere taught that no call of the round consumed: its clock
-// reads alone, each ClockOffset as the agent sent it. Anything else a state
-// of elsewhere carries (noise, variables) is never written onto a recording
-// from a call made in another window, whatever the agent sent. A recording
-// a call of the round consumed keeps what its own pairing learned alone
-// (ownPairingWins): what another window taught it is voided, never merged.
-// Two states elsewhere sends for one recording (an agent that taught a
-// recording more than once a round) are merged, never overwritten.
-// consumed is not changed. It is read for what is written onto the
-// recordings alone: which test used which recording (attributeMocks) reads
-// the consumed states as the agent sent them.
-func withLearnedElsewhere(consumed, elsewhere []models.MockState) []models.MockState {
-	if len(elsewhere) == 0 {
-		return consumed
-	}
-	out := slices.Clone(consumed)
-	own := len(out)
-	at := make(map[string]int, len(out))
-	for i, st := range out {
-		at[st.Name] = i
-	}
-	for _, e := range elsewhere {
-		if e.Name == "" || len(e.Clocks) == 0 {
-			continue
-		}
-		i, ok := at[e.Name]
-		switch {
-		case !ok:
-			at[e.Name] = len(out)
-			out = append(out, models.MockState{Name: e.Name, Kind: e.Kind, Clocks: maps.Clone(e.Clocks)})
-		case i >= own:
-			out[i].Clocks = models.MergeClocks(out[i].Clocks, e.Clocks)
-		}
-	}
-	return out
-}
-
-// ownPairingWins splits elsewhere, what calls made in other windows than
-// their recordings' taught them (the agent's LearnedElsewhere), as DESIGN
-// T4 says: one pairing per recording per round, and its own one wins. A
-// recording a call of the round consumed was paired by the rules that serve
-// it (its own test's call, or the start-up and pool's), in its own window:
-// that is stronger evidence than a call of its shape in another window, so
-// what such a call taught it is voided, whichever came first. The agent
-// never pairs a consumed recording across windows (ownedElsewhere), so a
-// teaching beside a consumption came first. kept is the rest, in order.
-func ownPairingWins(consumed, elsewhere []models.MockState) (kept, voided []models.MockState) {
-	paired := make(map[string]bool, len(consumed))
-	for _, st := range consumed {
-		paired[st.Name] = true
-	}
-	for _, e := range elsewhere {
-		if e.Name == "" || len(e.Clocks) == 0 {
-			continue
-		}
-		if paired[e.Name] {
-			voided = append(voided, e)
-			continue
-		}
-		kept = append(kept, e)
-	}
-	return kept, voided
 }
 
 // clientTestsRemedy is what to do about a round whose agent did not say it
@@ -231,10 +166,10 @@ type learnedPersister interface {
 // field as "<mock> <what mockdb's PersistLearned added>", what it wrote onto
 // mocks no test consumed (the set's start-up and pool), and what calls made
 // in other windows than their recordings' taught them (elsewhere's clock
-// reads, on recordings no call of the round consumed: withLearnedElsewhere),
+// reads, on recordings no call of the round consumed: learn.WithLearnedElsewhere),
 // each said with the test whose recording it is and the windows that taught
 // it. What such a call taught a recording the round consumed is voided, and
-// said so (ownPairingWins). With
+// said so (learn.OwnPairingWins). With
 // config.Test.LearnTests set it writes only onto the mocks of those tests
 // (and onto the pool's with LearnPool): a test the record did not record
 // again keeps its recording as it is. expected is each test's own mocks, by
@@ -250,8 +185,12 @@ func (m *mockService) persistLearned(ctx context.Context, set string, consumed, 
 			owner[e.Name] = test
 		}
 	}
-	elsewhere, voided := ownPairingWins(consumed, elsewhere)
-	written := withLearnedElsewhere(consumed, elsewhere)
+	paired := make(map[string]bool, len(consumed))
+	for _, st := range consumed {
+		paired[st.Name] = true
+	}
+	elsewhere, voided := learn.OwnPairingWins(func(name string) bool { return paired[name] }, elsewhere)
+	written := learn.WithLearnedElsewhere(consumed, elsewhere)
 	all := make(map[string]models.MockState, len(written))
 	for _, st := range written {
 		all[st.Name] = st
@@ -329,7 +268,7 @@ func (m *mockService) persistLearned(ctx context.Context, set string, consumed, 
 		}
 		m.logger.Info("kept what a recording's own pairing learned and voided what a call made in another window taught it: a call of the round consumed the recording, and its own pairing wins",
 			zap.String("mock", v.Name), zap.String("test", orStartupAndPool(owner[v.Name])), zap.Strings("voided", slices.Sorted(maps.Keys(v.Clocks))),
-			zap.String("taughtIn", LearnedElsewhere{TaughtIn: v.TaughtIn}.Windows()), zap.String("evidence", "its own pairing in the round"))
+			zap.String("taughtIn", learn.SayWindows(v.TaughtIn)), zap.String("evidence", "its own pairing in the round"))
 	}
 	return out, nil
 }
@@ -349,7 +288,7 @@ type taughtMock struct {
 // taughtFields is, of added (by recording, what the round wrote onto it),
 // the fields at the paths elsewhere taught each recording, with the
 // windows that taught it. elsewhere holds no recording a call of the round
-// consumed (ownPairingWins): no consumer learned what it says.
+// consumed (learn.OwnPairingWins): no consumer learned what it says.
 func taughtFields(elsewhere []models.MockState, added map[string][]string) taught {
 	out := taught{}
 	for _, e := range elsewhere {
