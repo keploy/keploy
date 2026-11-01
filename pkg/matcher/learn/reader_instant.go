@@ -1,6 +1,7 @@
 package learn
 
 import (
+	"slices"
 	"strings"
 	"time"
 
@@ -31,12 +32,14 @@ import (
 // -1 where none), whether its protocol types it (Typed), whether it is a
 // number of an epoch's length in either run (Number), and whether such a
 // number is to be matched by its exact text (ByText: it does not parse in a
-// run that has it).
+// run that has it). Encoded: it stands inside a whole token's decoded form
+// (a base64 cursor glued after "cursor="), where no address names it: its
+// bytes are [-1, -1] in both runs and the caller refuses it (readEncoded).
 type instantWord struct {
-	Rec, Live             *moment
-	RecAt, LiveAt         [2]int
-	RecLayout, LiveLayout int
-	Typed, Number, ByText bool
+	Rec, Live                      *moment
+	RecAt, LiveAt                  [2]int
+	RecLayout, LiveLayout          int
+	Typed, Number, ByText, Encoded bool
 }
 
 // fineCut reports whether res, the cut of an instant, is fine: finer than
@@ -195,6 +198,79 @@ func (rd *textReading) readInstants(rSpans, lSpans []instant) {
 		}
 		w.Instant = iw
 	}
+}
+
+// readEncoded gives each changed word no instant holds, whose whole token
+// (rTok, lTok: an idByte token or a base64 run, around the word or, for a
+// word the other run has no partner for, its stretch) holds in its other
+// declared forms (rawExtra: its encoded runs' text, where main reads an
+// instant) an instant that differs between the runs, that instant:
+// Encoded, at no bytes, with each run's moment (nil where none differs).
+// No address names an instant there, so the caller refuses the word rather
+// than learn it fresh. A shape that changed is refused whole already.
+func (rd *textReading) readEncoded(dc *DriftCache, rTok, lTok wholeTokenSpans) {
+	byTok := map[[2]string]*instantWord{}
+	for k := range rd.Words {
+		w := &rd.Words[k]
+		st := rd.Stretches[w.Stretch]
+		if w.Instant != nil || st.Shape == stretchShapeChanged {
+			continue
+		}
+		r, l := w.RecAt, w.LiveAt
+		if r[0] < 0 {
+			r = bytesOf(rd.RecWords, st.Rec)
+		}
+		if l[0] < 0 {
+			l = bytesOf(rd.LiveWords, st.Live)
+		}
+		for _, sp := range [][2][][2]int{{rTok.id, lTok.id}, {rTok.b64, lTok.b64}} {
+			ra, rok := around(sp[0], r)
+			la, lok := around(sp[1], l)
+			if !rok || !lok {
+				continue
+			}
+			key := [2]string{rd.Rec[ra[0]:ra[1]], rd.Live[la[0]:la[1]]}
+			iw, ok := byTok[key]
+			if !ok {
+				iw = encodedInstant(dc, key[0], key[1])
+				byTok[key] = iw
+				if iw != nil {
+					rd.Instants = append(rd.Instants, iw)
+				}
+			}
+			if iw != nil {
+				w.Instant = iw
+				break
+			}
+		}
+	}
+}
+
+// encodedInstant is the instant rec's and live's other declared forms hold
+// that differs between them (the first instant of each that the other's
+// forms do not hold by its text), Encoded; nil where they hold the same
+// instants.
+func encodedInstant(dc *DriftCache, rec, live string) *instantWord {
+	re, le := dc.rawExtra(rec), dc.rawExtra(live)
+	rs, ls := dc.spansOf(re), dc.spansOf(le)
+	iw := &instantWord{Encoded: true, RecAt: [2]int{-1, -1}, LiveAt: [2]int{-1, -1}, RecLayout: -1, LiveLayout: -1}
+	pick := func(s string, spans []instant, other string, others []instant, at **moment, layout *int) {
+		for _, sp := range spans {
+			text := s[sp.start:sp.end]
+			if !sp.keyed || slices.ContainsFunc(others, func(o instant) bool { return other[o.start:o.end] == text }) {
+				continue
+			}
+			m := sp.moment()
+			*at, *layout = &m, sp.layout
+			return
+		}
+	}
+	pick(re, rs, le, ls, &iw.Rec, &iw.RecLayout)
+	pick(le, ls, re, rs, &iw.Live, &iw.LiveLayout)
+	if iw.Rec == nil && iw.Live == nil {
+		return nil
+	}
+	return iw
 }
 
 // readTypedPair reads a leaf its protocol types as one instant (readTyped),

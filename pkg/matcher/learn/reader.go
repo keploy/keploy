@@ -247,6 +247,7 @@ func readTextIn(dc *DriftCache, rec, live string) textReading {
 	}
 	rd.readSeparators(paired, rTok, lTok)
 	rd.readInstants(rSpans, lSpans)
+	rd.readEncoded(dc, rTok, lTok)
 	return rd
 }
 

@@ -1,10 +1,13 @@
 package learn
 
 import (
+	"encoding/base64"
 	"fmt"
 	"strings"
 	"testing"
 	"time"
+
+	"go.keploy.io/server/v3/pkg/variables"
 )
 
 // readerZones are the zones the reader's zoned rows write an aware
@@ -97,6 +100,75 @@ func TestReaderZonedDatetimeIsOneInstant(t *testing.T) {
 			}
 			if !found {
 				t.Errorf("%s, %s (%q -> %q): no base64 token %q among %q", z.name, c.what, c.rec, c.live, c.run, changedPairs(rd))
+			}
+		}
+	}
+}
+
+// An instant inside a base64 or base64url cursor that stands in a longer
+// text ("cursor=<base64 of JSON>", where no step opens the text whole and no
+// address names the instant) is no plain word: every changed word of the
+// cursor carries the instant main reads in its decoded form (rawExtra),
+// Encoded, at no bytes, with each run's moment, so the caller refuses it
+// rather than learn it fresh. A cursor whose instant stayed and whose page
+// changed carries none.
+func TestReaderAnInstantInsideACursorInALongerTextIsNoPlainWord(t *testing.T) {
+	rec := time.Date(2026, 10, 31, 10, 50, 13, 305_000_000, time.UTC)
+	live := rec.Add(73*time.Second + 600*time.Millisecond)
+	at := variables.Address{Place: variables.Place{Part: variables.PartHeader, Name: "X-Page"}, Word: -1}
+	for _, z := range readerZones {
+		for _, enc := range []struct {
+			name string
+			e    *base64.Encoding
+		}{{"base64", base64.StdEncoding}, {"base64url", base64.RawURLEncoding}} {
+			cur := func(at time.Time, page int) string {
+				return "cursor=" + enc.e.EncodeToString([]byte(fmt.Sprintf(`{"since":"%s","page":%d}`, at.In(z.loc).Format(z.iso), page)))
+			}
+			r, l := cur(rec, 2), cur(live, 2)
+			n := 0
+			for _, rd := range readLeaf(NewDriftCache(), at, r, l) {
+				for _, w := range rd.Words {
+					n++
+					iw := w.Instant
+					if iw == nil || !iw.Encoded || iw.RecAt[0] >= 0 || iw.LiveAt[0] >= 0 || iw.Rec == nil || iw.Live == nil ||
+						iw.Rec.key.at != rec.Truncate(iw.Rec.res).UnixNano() || iw.Live.key.at != live.Truncate(iw.Live.res).UnixNano() {
+						t.Errorf("%s in a %s cursor (%q -> %q): word %q>%q has instant %+v; want the cursor's instant, encoded, at each run's moment", z.name, enc.name, r, l, w.Rec, w.Live, iw)
+					}
+				}
+			}
+			if n == 0 {
+				t.Errorf("%s in a %s cursor (%q -> %q): no changed word", z.name, enc.name, r, l)
+			}
+			for _, rd := range readLeaf(NewDriftCache(), at, r, cur(rec, 3)) {
+				for _, w := range rd.Words {
+					if w.Instant != nil {
+						t.Errorf("%s in a %s cursor, only its page changed: word %q>%q has instant %+v", z.name, enc.name, w.Rec, w.Live, w.Instant)
+					}
+				}
+			}
+		}
+	}
+}
+
+// An instant at the microsecond in a base64 cursor glued after "cursor="
+// is no plain word either: main reads it in the text's declared forms
+// (rawExtra), and the reader hands every changed word of the cursor with
+// that instant.
+func TestReaderAnInstantInsideAnEmbeddedBase64CursorIsNotAPlainWord(t *testing.T) {
+	r, l := "2026-10-31T10:50:13.305123+05:30", "2026-10-31T10:51:27.905456+05:30"
+	cur := func(s string) string {
+		return "cursor=" + base64.StdEncoding.EncodeToString([]byte(`{"since":"`+s+`"}`))
+	}
+	rec, live := cur(r), cur(l)
+	dc := NewDriftCache()
+	if len(dc.spansOf(dc.rawExtra(rec))) == 0 {
+		t.Fatalf("fixture: main reads no instant in %q's declared forms", rec)
+	}
+	at := variables.Address{Place: variables.Place{Part: variables.PartHeader, Name: "X-Page"}, Word: -1}
+	for _, rd := range readLeaf(dc, at, rec, live) {
+		for _, w := range rd.Words {
+			if w.Instant == nil || !w.Instant.fine() {
+				t.Errorf("%q -> %q: changed word %q>%q at %s has instant %+v; want the cursor's, at a fine cut", rec, live, w.Rec, w.Live, w.At, w.Instant)
 			}
 		}
 	}
