@@ -65,6 +65,21 @@ func ownConnections(rt http.RoundTripper) http.RoundTripper {
 	}
 }
 
+// ownConnection is the agent's client with every request on a connection of
+// its own (ownConnections), for a request that can be cancelled before it is
+// answered, from outside the call that waits for it, when the agent answers
+// with no body. The transport puts a kept connection back in its pool before it
+// hands the request such an answer, so the cancel can find the request still
+// waiting and close that connection under the next request, which took it from
+// the pool: that one fails with this request's cancel, on a context nothing
+// cancelled, and keploy's read of what a run did failed so ("failed to get
+// scope windows ...: context canceled") after a run that passed.
+func (a *AgentClient) ownConnection() http.Client {
+	client := a.client
+	client.Transport = ownConnections(client.Transport)
+	return client
+}
+
 // agentHTTPClient returns the client the AgentClient uses to reach its agent,
 // carrying the token when one is in play for this session.
 func agentHTTPClient(token string) http.Client {
