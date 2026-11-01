@@ -176,13 +176,26 @@ func oAnswer(name string, before time.Duration, word string) Raw {
 
 // A copy by position from answers round F gave in another order than the
 // recording did: each candidate place's state in F is unknown, so the word
-// is refused, never fresh (follows_test.go:462-487, :605-665 on main). Where
-// F gave them in the recorded order, both places are unchanged and neither
-// holds the other run's word: chance, so the word is made anew each run.
+// is refused, never fresh (follows_test.go:462-487, :605-665 on main). One
+// candidate has such an order too where F served it twice and the
+// recording gave it once (follows_test.go:481). A recording whose answer
+// is stamped before its own request has no answer time keploy can read
+// (follows_test.go:553). Where F gave them in the recorded order, both
+// places are unchanged and neither holds the other run's word: chance, so
+// the word is made anew each run.
 func TestOutcomeAWordCopiedFromAnswersGivenInAnotherOrderIsUnknown(t *testing.T) {
 	const path = "bind.$8"
 	a := oAnswer("mock-a", 300*time.Millisecond, "7")
 	b := oAnswer("mock-b", 200*time.Millisecond, "82")
+	nine := oAnswer("mock-b", 200*time.Millisecond, "9")
+	backwards := RawOf(&models.Mock{Name: "mock-a", Kind: models.PostgresV3, Spec: models.MockSpec{
+		ReqTimestampMock: oAt.Add(-300 * time.Millisecond),
+		ResTimestampMock: oAt.Add(-400 * time.Millisecond),
+		PostgresV3: &models.PostgresV3Spec{Type: models.PostgresV3TypeQuery, Query: &models.PostgresV3QuerySpec{
+			SQLNormalized: "SELECT next_slot FROM mock-a",
+			Response:      &models.PostgresV3Response{Rows: []models.PostgresV3Cells{{{Value: "7"}}}, CommandComplete: "SELECT 1"},
+		}},
+	}}, false)
 	together := oAnswer("mock-b", 300*time.Millisecond, "82")
 	first := oAnswer("mock-9", 300*time.Millisecond, "7").SentOn("0", 9)
 	second := oAnswer("mock-10", 300*time.Millisecond, "82").SentOn("0", 10)
@@ -200,6 +213,8 @@ func TestOutcomeAWordCopiedFromAnswersGivenInAnotherOrderIsUnknown(t *testing.T)
 		{"one instant, a position unknown", []Raw{first.ServedAs(1).ServedAsRecorded(), second.SentOn("0", 0).ServedAs(2).ServedAsRecorded()}},
 		{"one instant, no connection", []Raw{first.ServedAs(1).ServedAsRecorded(), second.SentOn("", 10).ServedAs(2).ServedAsRecorded()}},
 		{"one instant, one position twice", []Raw{first.ServedAs(1).ServedAsRecorded(), second.SentOn("0", 9).ServedAs(2).ServedAsRecorded()}},
+		{"F served a twice, b between holds neither word", []Raw{a.ServedIn(1, 3).ServedAsRecorded(), nine.ServedAs(2).ServedAsRecorded()}},
+		{"a's answer stamped before its request", []Raw{backwards.ServedAs(1).ServedAsRecorded(), nine.ServedAs(2).ServedAsRecorded()}},
 	} {
 		d := oWord(t, Decide(oInput(path, "slot 82", "slot 7", nil, tc.raw)), "82", "7")
 		oRefused(t, tc.name, d, "unknown", "mock-")
@@ -212,6 +227,7 @@ func TestOutcomeAWordCopiedFromAnswersGivenInAnotherOrderIsUnknown(t *testing.T)
 	}{
 		{"F served a then b", []Raw{a.ServedAs(1).ServedAsRecorded(), b.ServedAs(2).ServedAsRecorded()}},
 		{"one write, F served it in the connection's order", []Raw{first.ServedAs(1).ServedAsRecorded(), second.ServedAs(2).ServedAsRecorded()}},
+		{"F served a once, b after it holds neither word", []Raw{a.ServedAs(1).ServedAsRecorded(), nine.ServedAs(2).ServedAsRecorded()}},
 	} {
 		if d := oWord(t, Decide(oInput(path, "slot 82", "slot 7", nil, tc.raw)), "82", "7"); d.Outcome != OutcomeFresh {
 			t.Errorf("%s: %s; want fresh (chance at both places)", tc.name, oDescribe([]Decision{d}))

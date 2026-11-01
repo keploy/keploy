@@ -186,7 +186,7 @@ func placesOf(in Input) (ps []evPlace, unread string) {
 			if s.Side == Response && st == stateBefore && e.Payload.isRead() {
 				p := &ps[len(ps)-1]
 				switch a := e.Payload.answered; {
-				case a.IsZero():
+				case untimedAnswer(e.At, a):
 					p.state, p.why = stateUnknown, noAnswerAt
 				case a.Equal(in.At):
 					p.state, p.why = stateUnknown, atCallWhy
@@ -296,7 +296,7 @@ func earlierState(in Input, e Earlier) (placeState, string) {
 // the application by F before the call reached keploy.
 func rawState(in Input, r Raw) (placeState, string) {
 	switch {
-	case r.noTime || r.answered.IsZero():
+	case r.noTime || untimedAnswer(r.at, r.answered):
 		return stateUnknown, noAnswerAt
 	case r.answered.Equal(in.At) || r.at.Equal(in.At):
 		return stateUnknown, atCallWhy
@@ -306,11 +306,21 @@ func rawState(in Input, r Raw) (placeState, string) {
 	return stateBefore, ""
 }
 
+// untimedAnswer: a recording's answer time keploy cannot read, none or one
+// before its own request was recorded (follows.go's recordedGave), so it
+// cannot place the answer before the call.
+func untimedAnswer(req, answered time.Time) bool {
+	return answered.IsZero() || answered.Before(req)
+}
+
 // orderUnknown marks every candidate place unknown where the recording and
 // round F gave the application their answers in another order, or either
-// order cannot be told (follows.go's recordedOrder).
+// order cannot be told (follows.go's recordedOrder). One candidate has an
+// order only where F served it more than once: the recording gave its one
+// answer once, so an application copying by position may have taken
+// another serve of it in F.
 func orderUnknown(in Input, ps []evPlace, cand map[string]bool) {
-	if len(cand) < 2 {
+	if len(cand) == 0 || len(cand) == 1 && !servedAgain(in, cand) {
 		return
 	}
 	source := func(mock string) bool { return cand[mock] }
@@ -335,13 +345,29 @@ func orderUnknown(in Input, ps []evPlace, cand map[string]bool) {
 	}
 }
 
+// servedAgain reports whether round F served a candidate of cand at two
+// numbered serves (servedOrder's span).
+func servedAgain(in Input, cand map[string]bool) bool {
+	for _, e := range in.Earlier {
+		if cand[e.Mock] && (e.Payload.Read() || e.Payload.ordered) && e.Payload.last != e.Payload.first {
+			return true
+		}
+	}
+	for _, x := range in.Raw {
+		if cand[x.mock] && x.served && x.last != x.first {
+			return true
+		}
+	}
+	return false
+}
+
 // Why a place's state in round F is unknown, as a refusal's line says it
 // in parentheses.
 const (
 	swapNote   = "a connection start-up keploy may swap"
 	atCallWhy  = "recorded at the call's own instant"
 	noTimeWhy  = "recorded at a time keploy cannot read"
-	noAnswerAt = "no answer time"
+	noAnswerAt = "no answer time keploy can read"
 )
 
 // swapUnknown marks unknown each place of ps, before the call in both runs,
@@ -641,7 +667,7 @@ func (dc *decider) echoedOutside(c changedInstant) (mock string, ok bool) {
 // recorded or answered at the call's own instant, is unknown there.
 func setEvidence(g givenWords, r, f string, at time.Time) (ev wordEvidence, changed bool) {
 	hr := listsHold(g.answerLists, r)
-	before := g.at.Before(at) && !g.noTime && !g.answered.IsZero() && g.answered.Before(at)
+	before := g.at.Before(at) && !g.noTime && !untimedAnswer(g.at, g.answered) && g.answered.Before(at)
 	switch {
 	case g.unstated || g.unread:
 		// Round F served it and keploy cannot tell what it gave there.
@@ -703,7 +729,7 @@ func (dc *decider) gluedAt(p evPlace, w readWord) bool {
 // keploy keeps only its words.
 func setUnknownWhy(g givenWords, at time.Time) string {
 	switch {
-	case g.noTime || g.answered.IsZero():
+	case g.noTime || untimedAnswer(g.at, g.answered):
 		return noAnswerAt
 	case g.at.Equal(at) || g.answered.Equal(at):
 		return atCallWhy
