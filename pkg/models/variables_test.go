@@ -1684,6 +1684,13 @@ func TestAnOffsetLearnedAtAStepHoldsByItsStepAndItsGuards(t *testing.T) {
 			t.Errorf("FALSE GREEN: %s holds", c.name)
 		}
 	}
+	// A range around zero read at its own cut (Step is Res) is no offset a
+	// learn step writes, neither a time to live nor a look-back: it holds
+	// nothing, not even a plain read of its window, which it would pass.
+	around := ClockOffset{Min: -sec, Max: sec, Res: sec, Layout: LayoutTyped, Step: sec}
+	if around.Fine() || !around.Checkable(sec, from, to) || around.Holds(from.Truncate(sec), sec, from, to) {
+		t.Errorf("FALSE GREEN: a range around zero at its own cut (Fine %v, Checkable %v) holds a plain read", around.Fine(), around.Checkable(sec, from, to))
+	}
 	// An offset Fine for its unit (clock - 2s at the millisecond, which the
 	// learn step refuses as reading in seconds) holds nothing, though a file
 	// may carry one and a window narrow enough checks it.
