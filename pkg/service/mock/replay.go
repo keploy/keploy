@@ -17,6 +17,7 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/ids"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/coverage/report"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -2078,7 +2079,7 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 					consumed, consumedErr = m.instrumentation.GetConsumedMocks(outcomeCtx)
 				}
 				if consumedErr == nil && m.learning() {
-					elsewhere = m.readLearnedElsewhere(outcomeCtx)
+					elsewhere = learn.ReadLearnedElsewhere(outcomeCtx, m.instrumentation, m.logger)
 				}
 				misses, missesErr = m.instrumentation.GetMockErrors(outcomeCtx)
 				if reader, ok := m.instrumentation.(idPairReader); ok {
@@ -2420,35 +2421,6 @@ func testReceipts(flows []FlowMocks, consumedKnown, missesKnown bool) []TestRece
 // compiling without it — the same discipline ConsumedStateReader uses.
 type idPairReader interface {
 	GetIDPairs(ctx context.Context) (map[string]string, error)
-}
-
-// learnedElsewhereReader is an optional extension of Instrumentation: what
-// record's full round's learn step taught recordings from calls made in
-// other windows than theirs, for learning only (AgentClient's
-// GetLearnedElsewhere).
-type learnedElsewhereReader interface {
-	GetLearnedElsewhere(ctx context.Context) ([]models.MockState, error)
-}
-
-// readLearnedElsewhere is what the agent's learn step taught recordings
-// from calls made in other windows than theirs (learnedElsewhereReader):
-// nil from an instrumentation that cannot say, and, said in a warning, when
-// the read failed. None of it served a call or decides a verdict, so a
-// round that cannot read it keeps only what its consumed recordings
-// learned, as before it.
-func (m *mockService) readLearnedElsewhere(ctx context.Context) []models.MockState {
-	r, ok := m.instrumentation.(learnedElsewhereReader)
-	if !ok {
-		return nil
-	}
-	learned, err := r.GetLearnedElsewhere(ctx)
-	if err != nil {
-		m.logger.Warn("keploy could not read what record's full round learned onto recordings from calls made in other windows than theirs; it keeps what their own calls taught them, and a recording only another window's call taught compares every field",
-			zap.Error(err),
-			zap.String("next_step", "record the test set again"))
-		return nil
-	}
-	return learned
 }
 
 type servedMockPoller interface {

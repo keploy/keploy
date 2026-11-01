@@ -607,3 +607,26 @@ func TestKeployMockWritesWhatACallInAnotherWindowTaughtOntoTheRecording(t *testi
 		t.Fatalf("err %v; want the round failed, naming mock-9's clock read it did not keep", err)
 	}
 }
+
+// Two teachings of one recording (the agent taught it in two windows) are
+// said as one: every clock read either taught, with both windows. None of
+// it is said as the set's start-up and pool's.
+func TestKeployMockSaysEveryTeachingOfARecordingAcrossWindows(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	minute := models.ClockOffset{Min: -time.Minute, Max: -time.Minute, Res: time.Millisecond}
+	began := time.Date(2026, 11, 1, 9, 0, 0, 0, time.UTC)
+	elsewhere := []models.MockState{
+		{Name: "mock-9", Clocks: map[string]models.ClockOffset{"claimed_at": minute}, TaughtIn: []models.TeachingWindow{{Test: "o::C", At: began}}},
+		{Name: "mock-9", Clocks: map[string]models.ClockOffset{"expires_at": minute}, TaughtIn: []models.TeachingWindow{{At: began.Add(time.Second)}}},
+	}
+	m := &mockService{config: &config.Config{}, mockDB: &mergingStore{}, logger: zap.NewNop(), instrumentation: clientTestsInstr{reads: true}}
+	out, err := m.keepLearned(context.Background(), "s", nil, nil, elsewhere, nil, map[string][]models.MockEntry{"o::B": {{Name: "mock-9"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock := " (" + minute.String() + ")"
+	want := []LearnedElsewhere{{Mock: "mock-9", Owner: "o::B", Fields: []string{"claimed_at" + clock, "expires_at" + clock}, TaughtIn: []models.TeachingWindow{{Test: "o::C", At: began}, {At: began.Add(time.Second)}}}}
+	if !reflect.DeepEqual(out.elsewhere, want) || out.pool != nil {
+		t.Fatalf("said as learned elsewhere %+v, on the pool %v; want %+v and nothing on the pool", out.elsewhere, out.pool, want)
+	}
+}
