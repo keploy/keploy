@@ -305,7 +305,9 @@ func (dc *decider) word(path string, bare variables.Address, rec, live, text str
 	}
 	orderUnknown(dc.in, ps, cand)
 	swapUnknown(dc.in, ps, w)
-	var src, outside, conflict, unknown []evPlace
+	// aside: places that held R's word where F's did not follow, too
+	// little to be a conflict; a fresh word's line names them.
+	var src, outside, conflict, unknown, aside []evPlace
 	for _, p := range ps {
 		ev, read := evidenceAt(p, w.Rec, w.Live)
 		if !read {
@@ -333,6 +335,8 @@ func (dc *decider) word(path string, bare variables.Address, rec, live, text str
 		case evDisproven:
 			if p.gave || countsByText(p, w) || (dc.allScope || !p.otherTest) && heldWhole(p, w, text) {
 				conflict = append(conflict, p)
+			} else {
+				aside = append(aside, p)
 			}
 		case evUnknown:
 			unknown = append(unknown, p)
@@ -353,6 +357,8 @@ func (dc *decider) word(path string, bare variables.Address, rec, live, text str
 		case evDisproven:
 			if wordBits(w.Rec) >= 32 || wordBits(w.Live) >= 32 {
 				conflict = append(conflict, p)
+			} else {
+				aside = append(aside, p)
 			}
 		}
 	}
@@ -411,12 +417,17 @@ func (dc *decider) word(path string, bare variables.Address, rec, live, text str
 		return r
 	}
 	rule := "no place before the call shows it; bound at its first call"
+	if len(aside) > 0 {
+		p := aside[0]
+		rule = "no place before the call shows it (" + p.name + " held " + strconv.Quote(w.Rec) + " and round F gave " + gaveAt(p, w.Live) +
+			" there: set aside, as a copy moves with its source); bound at its first call"
+	}
 	if len(echo) > 0 {
 		// The answer rewritten at replay is part of what keploy learned:
 		// the line names it, as a Value's read-back line does.
 		rule += "; answered at " + addrList(echo) + ", where the call's answer holds " + strconv.Quote(rec) + " whole as recorded"
 	}
-	d := dc.learned(path, at, n, w.Rec, w.Live, OutcomeFresh, rule, nil)
+	d := dc.learned(path, at, n, w.Rec, w.Live, OutcomeFresh, rule, names(aside))
 	d.Echo = echo
 	return d
 }
