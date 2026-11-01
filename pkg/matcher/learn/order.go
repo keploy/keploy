@@ -121,6 +121,7 @@ func decideWords(in Input, allScope bool) ([]Decision, []string) {
 		unread = setUnread
 	}
 	x := newReaderIndex(in.Drifts)
+	defer x.release() // what the index keeps goes back to the set's budget
 	dc := &decider{in: in, ps: withTexts(x, ps), x: x, allScope: allScope, set: set}
 	var out []Decision
 	var fields []string // fields[i] is the field out[i] decides
