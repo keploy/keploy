@@ -31,7 +31,9 @@ run_with_loader() {
     shift 2
     local cmd="$@"
     
-    # Disable job control
+    # Disable job control, noting whether it was on
+    local had_monitor=false
+    case $- in *m*) had_monitor=true ;; esac
     set +m 2>/dev/null || true
     
     # Execute command in background, redirect stdout only to suppress job messages
@@ -45,8 +47,11 @@ run_with_loader() {
     wait $cmd_pid 2>/dev/null
     local exit_code=$?
     
-    # Restore job control
-    set -m 2>/dev/null || true
+    # Restore job control only if it was on. In a shell without it (a
+    # non-interactive zsh, such as a CI step) `set -m` is a fatal error that
+    # aborts the whole sourced script, and in bash it switches job control on
+    # in the caller's shell.
+    if [ "$had_monitor" = true ]; then set -m 2>/dev/null || true; fi
     
     return $exit_code
 }
@@ -90,7 +95,9 @@ download_with_progress() {
     fi
 
 
-    # Disable job control notifications
+    # Disable job control notifications, noting whether job control was on
+    local had_monitor=false
+    case $- in *m*) had_monitor=true ;; esac
     set +m 2>/dev/null || true
 
 
@@ -145,8 +152,11 @@ download_with_progress() {
     fi
 
 
-    # Restore job control
-    set -m 2>/dev/null || true
+    # Restore job control only if it was on. In a shell without it (a
+    # non-interactive zsh, such as a CI step) `set -m` is a fatal error that
+    # aborts the whole sourced script, and in bash it switches job control on
+    # in the caller's shell.
+    if [ "$had_monitor" = true ]; then set -m 2>/dev/null || true; fi
 
 
     # Show cursor
@@ -195,57 +205,57 @@ installKeploy (){
     fi
 
 
+    # The release tarball was extracted into $keploy_tmp_dir (see the bottom of
+    # this script), so the binary is $keploy_tmp_dir/keploy on every platform.
+    # `return`, never `exit`: users source this script, and an `exit` closes
+    # their shell and skips the removal of that directory.
     move_keploy_binary() {
+        source_dir="$keploy_tmp_dir/keploy"
+        if [ ! -f "$source_dir" ]; then
+            echo "Error: $source_dir does not exist." >&2
+            return 1
+        fi
         # Check if NO_ROOT is set to true
         if [ "$NO_ROOT" = "true" ]; then
             # Move without sudo
             target_dir="$HOME/.keploy/bin"
-            source_dir="/tmp/keploy"  # Default source directory
 
 
             # Create the target directory in the user's home directory
-            mkdir -p "$target_dir"
-            if [ $? -ne 0 ]; then
-                echo "Error: Failed to create directory $target_dir"
-                exit 1
-            fi
-
-
-            # Check if the OS is macOS (Darwin) to set the correct source path
-            OS_NAME=$(uname)  # Get the operating system name
-            if [ "$OS_NAME" = "Darwin" ]; then
-                source_dir="/tmp/keploy/keploy"  # Set source directory to the binary inside the extracted folder
+            if ! mkdir -p "$target_dir"; then
+                echo "Error: Failed to create directory $target_dir" >&2
+                return 1
             fi
 
 
             # Move the keploy binary to the user's home directory bin
-            if [ -f "$source_dir" ]; then
-                mv "$source_dir" "$target_dir/keploy"
-                if [ $? -ne 0 ]; then
-                    echo "Error: Failed to move the keploy binary from $source_dir to $target_dir"
-                    exit 1
-                fi
-            else
-                echo "Error: $source_dir does not exist."
-                exit 1
+            if ! mv "$source_dir" "$target_dir/keploy"; then
+                echo "Error: Failed to move the keploy binary from $source_dir to $target_dir" >&2
+                return 1
             fi
 
 
             # Make sure the binary is executable
-            chmod +x "$target_dir/keploy"
-            if [ $? -ne 0 ]; then
-                echo "Error: Failed to make the keploy binary executable"
-                exit 1
+            if ! chmod +x "$target_dir/keploy"; then
+                echo "Error: Failed to make the keploy binary executable" >&2
+                return 1
             fi
         else
-            source_dir="/tmp/keploy"
-            OS_NAME=$(uname)  # Get the operating system name
-            if [ "$OS_NAME" = "Darwin" ]; then
-                source_dir="/tmp/keploy/keploy"  # Set source directory to the binary inside the extracted folder
+            if ! { sudo mkdir -p /usr/local/bin && sudo mv "$source_dir" /usr/local/bin/keploy; }; then
+                echo "Error: Failed to move the keploy binary from $source_dir to /usr/local/bin" >&2
+                return 1
             fi
-            sudo mkdir -p /usr/local/bin && sudo mv "$source_dir" /usr/local/bin/keploy
         fi
         set_alias
+    }
+
+
+    # The tarball holds the keploy binary next to LICENSE and README files.
+    # It is extracted into $keploy_tmp_dir, which only this run uses and which
+    # is removed afterwards, so nothing of anyone else's is overwritten or
+    # deleted and there is no stale binary left over from an earlier run.
+    extract_keploy_tarball() {
+        run_with_loader "Extracting binary..." "Extracted binary" "tar xzf \"\$keploy_tmp_dir/keploy.tar.gz\" -C \"\$keploy_tmp_dir\" && rm -f \"\$keploy_tmp_dir/keploy.tar.gz\""
     }
 
 
@@ -255,15 +265,9 @@ installKeploy (){
         else
             download_url="https://github.com/keploy/keploy/releases/latest/download/keploy_darwin_arm64.tar.gz"
         fi
-        # macOS tar does not support --overwrite option so we need to remove the directory first
-        # to avoid the "File exists" error
-        rm -rf /tmp/keploy
-        mkdir -p /tmp/keploy
-        
         # Download with progress. Stop on failure: extracting a tarball that
-        # is not there still prints "Extracted binary", and move_keploy_binary
-        # then `exit`s, which closes the shell when this script is sourced.
-        if ! download_with_progress "$download_url" "/tmp/keploy.tar.gz" "Downloading Keploy binary..." "Downloaded binary"; then
+        # is not there still prints "Extracted binary".
+        if ! download_with_progress "$download_url" "$keploy_tmp_dir/keploy.tar.gz" "Downloading Keploy binary..." "Downloaded binary"; then
             if [ "$version" != "latest" ]; then
                 # Releases before the Apple Silicon-only build shipped the macOS
                 # binary as a universal keploy_darwin_all.tar.gz; there is no
@@ -274,10 +278,8 @@ installKeploy (){
             return 1
         fi
         
-        # Extract with loader
-        run_with_loader "Extracting binary..." "Extracted binary" "tar xzf /tmp/keploy.tar.gz -C /tmp/keploy/ && rm -f /tmp/keploy.tar.gz"
-        
-        move_keploy_binary
+        extract_keploy_tarball || return 1
+        move_keploy_binary || return 1
         delete_keploy_alias
     }
 
@@ -290,11 +292,8 @@ installKeploy (){
         fi
         
         # Download with progress
-        download_with_progress "$download_url" "/tmp/keploy.tar.gz" "Downloading Keploy binary..." "Downloaded binary"
-        
-        # Extract with loader
-        run_with_loader "Extracting binary..." "Extracted binary" "tar xzf /tmp/keploy.tar.gz --overwrite -C /tmp && rm -f /tmp/keploy.tar.gz"
-        
+        download_with_progress "$download_url" "$keploy_tmp_dir/keploy.tar.gz" "Downloading Keploy binary..." "Downloaded binary" || return 1
+        extract_keploy_tarball || return 1
         move_keploy_binary
     }
 
@@ -308,11 +307,8 @@ installKeploy (){
         fi
         
         # Download with progress
-        download_with_progress "$download_url" "/tmp/keploy.tar.gz" "Downloading Keploy binary..." "Downloaded binary"
-        
-        # Extract with loader
-        run_with_loader "Extracting binary..." "Extracted binary" "tar xzf /tmp/keploy.tar.gz --overwrite -C /tmp && rm -f /tmp/keploy.tar.gz"
-        
+        download_with_progress "$download_url" "$keploy_tmp_dir/keploy.tar.gz" "Downloading Keploy binary..." "Downloaded binary" || return 1
+        extract_keploy_tarball || return 1
         move_keploy_binary
     }
 
@@ -424,22 +420,6 @@ installKeploy (){
     }
 
 
-    cleanup_tmp() {
-        # Remove extracted files /tmp directory
-        tmp_files=("LICENSE" "README.md" "READMEes-Es.md")
-        for file in "${tmp_files[@]}"; do
-            if [ -f "/tmp/$file" ]; then
-                if [ "$NO_ROOT" = "true" ]; then
-                    rm -rf "/tmp/$file"
-                else
-                    sudo rm -rf "/tmp/$file"
-                fi
-                
-            fi
-        done
-    }
-
-
     # The macOS release is Apple Silicon (arm64) only. Gate on the
     # hardware, not the shell: under Rosetta (Terminal set to "Open using
     # Rosetta", `arch -x86_64 zsh`, an Intel-Homebrew bash) uname -m says
@@ -450,7 +430,6 @@ installKeploy (){
     # of silently falling through to another installer.
     install_keploy_darwin() {
         if [ "$ARCH" = "arm64" ] || [ "$(sysctl -n hw.optional.arm64 2>/dev/null)" = "1" ]; then
-            cleanup_tmp
             install_keploy_darwin_arm64
             return
         fi
@@ -461,35 +440,15 @@ installKeploy (){
 
 
     ARCH=$(uname -m)
-    
     OS_NAME="$(uname -s)"
-    if [ "$OS_NAME" = "Darwin" ]; then
-        NO_ROOT=true
-    fi
 
-
-    if [ "$IS_CI" = false ]; then
-        OS_NAME="$(uname -s)"
-        if [ "$OS_NAME" = "Darwin" ]; then
-            install_keploy_darwin
-            return
-        elif [ "$OS_NAME" = "Linux" ]; then
-             if [ "$NO_ROOT" = false ]; then
-                if ! mountpoint -q /sys/kernel/debug; then
-                    sudo mount -t debugfs debugfs /sys/kernel/debug
-                fi
-            fi
-            if [ "$ARCH" = "x86_64" ]; then
-                cleanup_tmp
-                install_keploy_amd
-            elif [ "$ARCH" = "aarch64" ]; then
-                cleanup_tmp
-                install_keploy_arm
-            else
-                echo "Unsupported architecture: $ARCH"
-                return
-            fi
-        elif [[ "$OS_NAME" == MINGW32_NT* ]] || [[ "$OS_NAME" == MINGW64_NT* ]] || [[ "$OS_NAME" == MSYS_NT* ]] || [[ "$OS_NAME" == CYGWIN_NT* ]]; then
+    # The OS is checked before the -isCI split, so that -isCI cannot skip it:
+    # Git Bash, MSYS and Cygwin report x86_64, and would otherwise download
+    # the Linux build.
+    case "$OS_NAME" in
+        Linux|Darwin)
+        ;;
+        MINGW32_NT*|MINGW64_NT*|MSYS_NT*|CYGWIN_NT*)
             # The --oss build intercepts with eBPF and therefore has no native
             # Windows backend -- DefaultNativeCommandSupported in
             # cli/provider/hooks.go accepts linux only, so `keploy record -c ...`
@@ -508,22 +467,47 @@ installKeploy (){
             echo "This build also supports running your application in Docker on every"
             echo "platform. Download keploy_windows_amd64 from the releases page first:"
             echo "  https://github.com/keploy/keploy/releases"
-        else
+            return 1
+        ;;
+        *)
             echo "Unknown OS, install Linux to run Keploy"
+            return 1
+        ;;
+    esac
+    if [ "$OS_NAME" = "Darwin" ]; then
+        NO_ROOT=true
+    fi
+
+
+    if [ "$IS_CI" = false ]; then
+        if [ "$OS_NAME" = "Darwin" ]; then
+            install_keploy_darwin
+            return
+        fi
+        if [ "$NO_ROOT" = false ]; then
+            if ! mountpoint -q /sys/kernel/debug; then
+                sudo mount -t debugfs debugfs /sys/kernel/debug
+            fi
+        fi
+        if [ "$ARCH" = "x86_64" ]; then
+            install_keploy_amd
+        elif [ "$ARCH" = "aarch64" ]; then
+            install_keploy_arm
+        else
+            echo "Unsupported architecture: $ARCH"
+            return 1
         fi
     else
         if [ "$OS_NAME" = "Darwin" ]; then
             install_keploy_darwin
             return
         elif [ "$ARCH" = "x86_64" ]; then
-            cleanup_tmp
             install_keploy_amd
         elif [ "$ARCH" = "aarch64" ]; then
-            cleanup_tmp
             install_keploy_arm
         else
             echo "Unsupported architecture: $ARCH"
-            return
+            return 1
         fi
     fi
 }
@@ -539,30 +523,74 @@ for arg in "$@"; do
 done
 set -- "${forwarded_args[@]}"
 
+# This script deletes and writes nothing in the caller's working directory:
+# run from a repo root, an `install.sh` there is the repo's own file. It used
+# to download the installer below over ./install.sh, source whatever was
+# there, and `rm -rf keploy.sh install.sh` afterwards. Downloads go to a
+# mktemp directory of the installer's own, removed when it is done. (The
+# installer the default route hands off to deleted ./install.sh and
+# ./keploy-enterprise.sh too, until the release that stopped it.)
 if [ "$USE_OSS" = false ]; then
     echo "Installing Keploy"
-    curl --silent -O -L https://keploy.io/ent/install.sh
-    source install.sh "$@"
-    ent_status=$?
+    keploy_installer_dir=$(mktemp -d) || {
+        echo "Error: could not create a temporary directory to download the installer into." >&2
+        return 1 2>/dev/null || exit 1
+    }
+    # --fail: a 404 page must not be sourced as the installer.
+    if curl --fail --silent --show-error --location -o "$keploy_installer_dir/install.sh" https://keploy.io/ent/install.sh; then
+        # Inside an `if`, so that under `set -e` (a CI step's shell) a
+        # refusal still reaches the rm below instead of exiting first.
+        if source "$keploy_installer_dir/install.sh" "$@"; then
+            ent_status=0
+        else
+            ent_status=$?
+        fi
+    else
+        echo "Error: could not download the Keploy installer from https://keploy.io/ent/install.sh." >&2
+        ent_status=1
+    fi
+    rm -rf "$keploy_installer_dir"
+    unset keploy_installer_dir
     # Hand back whatever the enterprise installer returned: it refuses an
     # Intel Mac (and a bad -v) with status 1, and this is the default route
     # `curl ... install.sh && source install.sh` takes, so exiting 0 here
     # would turn that refusal into a green CI step with nothing installed.
-    return $ent_status 2>/dev/null || exit $ent_status
+    # eval expands the status first, so ent_status is not left set in the
+    # caller's shell.
+    eval "unset ent_status; return $ent_status 2>/dev/null || exit $ent_status"
 fi
 
-if ! installKeploy "$@"; then
+# The release is downloaded and extracted in a mktemp directory of this run's
+# own, removed when the install is done or has failed, `set -e` or not. This
+# used to work at fixed /tmp paths: it extracted over /tmp/keploy,
+# /tmp/LICENSE and /tmp/README.md, then removed /tmp/LICENSE, /tmp/README.md
+# and /tmp/READMEes-Es.md with sudo, whoever they belonged to; and when a download
+# or extraction failed, a /tmp/keploy already there (an earlier download,
+# another user's file) was what got moved into /usr/local/bin.
+keploy_tmp_dir=$(mktemp -d) || {
+    echo "Error: could not create a temporary directory to download Keploy into." >&2
+    return 1 2>/dev/null || exit 1
+}
+# Inside an `if`, so that under `set -e` (a CI step's shell) a failed
+# install still reaches the rm below instead of exiting first.
+if installKeploy "$@"; then
+    oss_status=0
+else
+    oss_status=$?
+fi
+rm -rf "$keploy_tmp_dir"
+unset keploy_tmp_dir
+if [ "$oss_status" -ne 0 ]; then
+    unset oss_status
     # Non-zero either way: `return` when sourced (never `exit`, which would
     # close the user's shell), `exit` when run as a script. Without this a
     # refused install -- an Intel Mac, a bad -v -- went on to run
     # `keploy example` against whatever keploy was already on PATH.
     return 1 2>/dev/null || exit 1
 fi
+unset oss_status
 
 
 if command -v keploy &> /dev/null; then
     keploy example
-    cleanup_tmp
-    rm -rf keploy.sh
-    rm -rf install.sh
 fi

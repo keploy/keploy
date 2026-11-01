@@ -19,6 +19,15 @@ name: Linux CI scripts
 # cancelled; and one that has them all has to pass, its test cases written as
 # the requests are answered or as keploy record stops. await() has to wait for
 # a log keploy makes after it begins, and fail once keploy exits with none.
+#
+# And keploy-installer.tests.sh: keploy.sh, served as https://keploy.io/install.sh,
+# on its default route (the hand-off to https://keploy.io/ent/install.sh) and
+# its --oss route, sourced under bash and zsh against a curl stub. Run from a
+# repo root that has its own install.sh, it must leave the caller's directory
+# alone: download into a temp directory of its own, never over ./install.sh,
+# never source a local install.sh in place of a failed download, and delete
+# nothing there. With --oss it must download and extract in a temp directory
+# of its own too, and touch no fixed /tmp path, nor anyone else's files.
 
 on:
   push:
@@ -31,6 +40,8 @@ on:
       - '.github/workflows/test_workflow_scripts/free-port.tests.sh'
       - '.github/workflows/test_workflow_scripts/compose-proven-setend-linux.sh'
       - '.github/workflows/test_workflow_scripts/compose-proven-setend-linux.tests.sh'
+      - 'keploy.sh'
+      - '.github/workflows/test_workflow_scripts/keploy-installer.tests.sh'
       - '.github/workflows/linux-ci-scripts.yml'
   pull_request:
     paths:
@@ -40,6 +51,8 @@ on:
       - '.github/workflows/test_workflow_scripts/free-port.tests.sh'
       - '.github/workflows/test_workflow_scripts/compose-proven-setend-linux.sh'
       - '.github/workflows/test_workflow_scripts/compose-proven-setend-linux.tests.sh'
+      - 'keploy.sh'
+      - '.github/workflows/test_workflow_scripts/keploy-installer.tests.sh'
       - '.github/workflows/linux-ci-scripts.yml'
 
 permissions:
@@ -155,3 +168,21 @@ jobs:
 
       - name: Test compose-proven-setend-linux.sh (a recording's test cases counted once keploy record has stopped; await on a log made late or never)
         run: bash .github/workflows/test_workflow_scripts/compose-proven-setend-linux.tests.sh
+
+  installer:
+    # Thirty-two cases, under bash and under zsh; a few seconds. The one on a
+    # terminal (script(1), in bsdutils on ubuntu) bounds itself at 120 s per
+    # shell, so both hanging still leave the log time to show.
+    timeout-minutes: 8
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install zsh, which macOS users source the installer from
+        run: bash .github/workflows/test_workflow_scripts/apt-install.sh zsh
+
+      - name: Test keploy.sh (leaves the caller's directory alone; downloads into a temp directory of its own)
+        env:
+          REQUIRE_ZSH: '1'
+          REQUIRE_PTY: '1'
+        run: bash .github/workflows/test_workflow_scripts/keploy-installer.tests.sh
