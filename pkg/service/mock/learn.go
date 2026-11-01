@@ -245,7 +245,8 @@ func (m *mockService) persistLearned(ctx context.Context, set string, consumed, 
 		m.logger.Info("learned fields that changed between record and replay, on mocks no test consumed", zap.Strings("fields", rest))
 	}
 	voided = slices.DeleteFunc(voided, func(v models.MockState) bool { return !m.learnsOnto(owner[v.Name]) })
-	learn.SayLearnedElsewhere(m.logger, taught, voided, owner)
+	// keploy mock record serves a worker: entry as the pool's (unknownBesideTests).
+	learn.SayLearnedElsewhere(m.logger, taught, voided, owner, nil)
 	return learnedOut{byTest: byTest, pool: rest, elsewhere: taught}, nil
 }
 

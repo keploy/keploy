@@ -40,8 +40,9 @@ type learnedPersister interface {
 //
 // elsewhere (learnedElsewhere) is written onto the recordings no call of
 // the round consumed and said apart, under owner's test (such a recording
-// is in no test's consumed list); on one the round consumed it is voided
-// and said so (learn.OwnPairingWins).
+// is in no test's consumed list), or the set's worker scope for one the
+// plan serves there (exactPlan.isWorker); on one the round consumed it is
+// voided and said so (learn.OwnPairingWins).
 //
 // consumerOf, when set, is the test that made each shared recording's call
 // (models.SetShares.Pins): what was learned on one is said under that test,
@@ -75,7 +76,7 @@ func (r *Replayer) persistLearned(ctx context.Context, testSetID string, consume
 		r.logger.Info("learned fields that changed between record and replay",
 			zap.String("testSetID", testSetID), zap.String("test", line.test), zap.Strings("fields", line.fields))
 	}
-	learn.SayLearnedElsewhere(r.logger, taught, voided, owner, zap.String("testSetID", testSetID))
+	learn.SayLearnedElsewhere(r.logger, taught, voided, owner, r.exact.isWorker, zap.String("testSetID", testSetID))
 	return nil
 }
 
