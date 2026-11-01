@@ -508,3 +508,23 @@ func TestOutcomeAnAdaptersStepsOpenAFieldBeforeItsWordsAreRead(t *testing.T) {
 		}
 	}
 }
+
+// A changed word with no source whose call's answer holds it inside a
+// longer, different text ("batch-14" sent, "seen 14 times" or a date whose
+// minute is 14 answered) is fresh, and the answer is rewritten at that word
+// with this run's word, the line naming the place (main refuses it:
+// instants_test.go:838, clock_test.go:219). Pinned as it stands until the
+// open question is ruled: whether such an answer is served as recorded, as
+// a read-back is where the answer does not hold the request's text whole.
+func TestOutcomeAFreshWordInsideALongerAnswerTextIsAnsweredThere(t *testing.T) {
+	for name, v := range map[string]string{"a count": "seen 14 times", "a date of its minute": "Thu, 22 Oct 2026 11:14:16 GMT"} {
+		in := oInput("body.batch", "batch-14", "batch-15", nil, nil)
+		in.PlaceOf = func(l Leaf, answer bool) (string, bool) { return VarPlace(l, true) }
+		in.Resp = []Leaf{oText("body.at", v)}
+		d := oWord(t, Decide(in), "14", "15")
+		if d.Outcome != OutcomeFresh || len(d.Echo) != 1 || !strings.Contains(d.Line, "answered at "+d.Echo[0].String()) {
+			t.Errorf("batch-14 to batch-15, the answer holding %s (%q): %s, echo %v, line %q; want fresh, answered at the word, its line naming it",
+				name, v, oDescribe([]Decision{d}), d.Echo, d.Line)
+		}
+	}
+}

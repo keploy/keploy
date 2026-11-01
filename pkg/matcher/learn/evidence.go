@@ -706,7 +706,7 @@ func setEvidence(g givenWords, r, f string, at time.Time) (ev wordEvidence, chan
 		}
 		return evDisproven, false
 	}
-	// Not served: round F gave nothing there (B4: never a source).
+	// Not served: round F gave nothing there (never a source).
 	if hr {
 		return evUnknown, false
 	}
