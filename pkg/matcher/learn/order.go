@@ -2,6 +2,7 @@ package learn
 
 import (
 	"cmp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1058,7 +1059,9 @@ func (dc *decider) instantEchoed(c changedInstant) string {
 // readBack is where the call's own answer reads back w, a word of the
 // request leaf at path (recorded rec, at at's word, through no decode
 // step): the same word of every answer leaf whose recorded text is rec
-// whole (a find by a key its cursor echoes). Every other answer text that
+// whole (a find by a key its cursor echoes), and every key of the answer's
+// objects that is rec whole (a lookup answered under its id), a place
+// keploy cannot name: refused. Every other answer text that
 // holds the word, longer or shorter (a count, a date whose minute it is),
 // is served as recorded: a word that short may stand there by chance, and
 // a test that reads it goes red at replay, never green by a rewrite. One
@@ -1070,7 +1073,7 @@ func (dc *decider) readBack(path string, at variables.Address, w readWord, rec s
 		return nil, ""
 	}
 	return dc.answerAt(func(l Leaf) []int {
-		if l.Type == r.Type && l.Value == rec {
+		if l.Type == r.Type && l.Value == rec || l.Type == Keys && slices.Contains(strings.Split(l.Value, "\n"), rec) {
 			return []int{at.Word}
 		}
 		return nil
