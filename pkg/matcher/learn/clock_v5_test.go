@@ -548,6 +548,10 @@ func TestALookBackIsNeverCheckedFromItsTestsBegin(t *testing.T) {
 	if ln, ok := clockSinceBegin(Learned{Kind: KindClockOffset, Offset: &back}); ok {
 		t.Errorf("FALSE GREEN: a look-back was taken since its test began: %+v", ln.Offset)
 	}
+	around := models.ClockOffset{Min: -sec, Max: sec, Res: sec, Step: sec, Layout: models.LayoutTyped}
+	if ln, ok := clockSinceBegin(Learned{Kind: KindClockOffset, Offset: &around}); ok {
+		t.Errorf("FALSE GREEN: an offset around zero, no time to live, was taken since its test began: %+v", ln.Offset)
+	}
 	for _, o := range []models.ClockOffset{{Res: sec}, {Min: 30 * 24 * time.Hour, Max: 30*24*time.Hour + 3*sec, Res: sec, Step: sec}} {
 		if ln, ok := clockSinceBegin(Learned{Kind: KindClockOffset, Offset: &o}); !ok || ln.Offset.Since != models.SinceTestBegin {
 			t.Errorf("FALSE RED: %+v was not taken since its test began", o)
@@ -681,8 +685,8 @@ func TestAMillisecondsSecondCutterIsLockedToItsPhaseOrRefused(t *testing.T) {
 				t.Errorf("FALSE RED: round F %s later in its second: refused (%s); want it locked to its phase", d, why)
 			}
 			continue
-		case !ok || o.Step != sec || o.Res != ms || o.Min != -1500*ms || o.Max != -1499*ms:
-			t.Errorf("round F %s later in its second: %+v %q %v; want clock - 1.5s locked to the second, or main's refusal", d, o, why, ok)
+		case !ok || o.Step != sec || o.Res != ms || o.Min != -1500*ms || o.Max != -1499*ms || !o.Narrow():
+			t.Errorf("round F %s later in its second: %+v %q %v (Narrow %v); want clock - 1.5s locked to the second, which the order's guard keeps, or main's refusal", d, o, why, ok, o.Narrow())
 			continue
 		}
 		locked++
@@ -1106,6 +1110,9 @@ func TestAMillisecondsLookBackIsRefusedInEveryWindowAsAQuietOneRefusesIt(t *test
 				if ws[0] > back && ws[1] > back && !strings.Contains(why, "also held a read with no look-back") {
 					t.Errorf("now - %s, windows %s and %s: the refusal does not say what the window held: %q", back, ws[0], ws[1], why)
 				}
+				if ws[0] < back && ws[1] < back && strings.Contains(why, "also held") {
+					t.Errorf("now - %s, windows %s and %s, neither holding a read with no look-back: the refusal says the window held more: %q", back, ws[0], ws[1], why)
+				}
 			}
 		}
 	}
@@ -1374,7 +1381,7 @@ func TestARangeHoldingNoWholeCutIsReadAsItsRange(t *testing.T) {
 			t.Errorf("%+v: CutOffsets %s..%s; want its range", row.o, lo, hi)
 		}
 		why := lineV5("body.expiresAt", row.o, sec, 0, "")
-		if !strings.Contains(why, "against "+row.o.Range()+", as standing for") || !strings.Contains(row.o.Range(), row.named) || !strings.Contains(why, "on either side, whatever the window's width") {
+		if !strings.Contains(why, "against "+row.o.Range()+", as standing for") || !strings.Contains(row.o.Range(), row.named) || !strings.Contains(why, "on either side, whatever the window's width") || !strings.Contains(why, "changed by one "+unitWord(row.o.Res)+" passes there at every read") {
 			t.Errorf("%+v: the learned line does not read it as its range, on either side: %s", row.o, why)
 		}
 	}
@@ -1437,6 +1444,50 @@ func TestATimeToLiveItsWindowCannotCheckIsReadFromItsTestsBegin(t *testing.T) {
 		if !strings.Contains(line, part) {
 			t.Errorf("a time to live at the hour since its test began: the line does not say %q: %s", part, line)
 		}
+	}
+}
+
+// A time to live in milliseconds read 3.03 s before its call (clock +
+// 30d), whose narrow window (61 ms) a replay could check, but which reads
+// in seconds there (clock + 29d23h59m57s): Fine, refused in a keploy test
+// with main's reason, and in a client test read from its test's begin,
+// where it is clock + 30d, never refused for its call's window.
+func TestAFineTimeToLiveItsWindowCouldCheckIsReadFromItsTestsBegin(t *testing.T) {
+	sec, ms, day := time.Second, time.Millisecond, 24*time.Hour
+	p := "body.expiresAt"
+	start := time.Date(2026, 11, 1, 15, 21, 40, 400e6, time.UTC)
+	rec, f := v5Call(start, 61*ms, 3030*ms), v5Call(start.Add(FullRoundLead), 61*ms, 3030*ms)
+	r, l := v5Instant(rec.read.Add(30*day), ms), v5Instant(f.read.Add(30*day), ms)
+	quiet := v5Window(rec, f)
+	if o, _, _, ok := offsetV5(r, l, quiet, nil); !ok || !o.Fine() || !o.Checkable(ms, quiet.Rec.From, quiet.Rec.To) || !o.Checkable(ms, quiet.F.From, quiet.F.To) {
+		t.Fatalf("precondition: %+v %v; want an offset Fine for its unit that its call's window could check", o, ok)
+	}
+	if o, why, ok := clockInWindow(p, r, l, quiet, nil); ok || !strings.Contains(why, "so keploy refuses an offset that reads in a second or finer") {
+		t.Errorf("keploy test: %+v %q %v; want main's refusal", o, why, ok)
+	}
+	client := (&Window{Rec: Span{From: rec.from, To: rec.to, Began: rec.to.Add(-5 * sec)}, F: Span{From: f.from, To: f.to, Began: f.to.Add(-5 * sec)}}).ComparesOffsets()
+	if o, why, ok := clockInWindow(p, r, l, client, nil); !ok || why != "" || o.Since != models.SinceTestBegin || o.Unit() != day {
+		t.Errorf("client test: %+v %q %v; want clock + 30d read from its test's begin", o, why, ok)
+	}
+}
+
+// A time to live of an application that cuts its read to the second and
+// adds thirty minutes, written in milliseconds (every value at .000), whose
+// two values stand 61 s apart (a whole number of seconds, its own cut, and
+// no whole minute): read at its own cut, and its line says so; it never
+// says its digits show no such cut, which they show.
+func TestATimeToLiveAtItsOwnCutNeverNamesAStepItsDigitsShow(t *testing.T) {
+	sec, ms := time.Second, time.Millisecond
+	p := "body.expiresAt"
+	value := func(read time.Time) time.Time { return read.Truncate(sec).Add(30 * time.Minute) }
+	start := time.Date(2026, 11, 1, 15, 21, 40, 20e6, time.UTC)
+	rec, f := v5Call(start, 61*ms, 4*ms), v5Call(start.Add(61*sec), 61*ms, 4*ms)
+	o, why, ok := clockInWindow(p, v5Instant(value(rec.read), ms), v5Instant(value(f.read), ms), v5Window(rec, f), nil)
+	if !ok || o.Res != sec || o.Step != sec {
+		t.Fatalf("%+v %q %v; want clock + 30m at the second", o, why, ok)
+	}
+	if !strings.Contains(o.Why, ", cut to a second.") || strings.Contains(o.Why, "show no such cut") {
+		t.Errorf("the line does not read it at its own cut: %s", o.Why)
 	}
 }
 
