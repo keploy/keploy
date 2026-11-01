@@ -294,6 +294,50 @@ func TestOutcomeAnAnswersInstantBindsWhereFsViewIsNotStated(t *testing.T) {
 	oRefused(t, "an answer's instant with no answer time", d, "pick", "mock-7")
 }
 
+// An answer that holds only the date of a time the call sends (a timetable's
+// day, its times of day neither run's): the date reads as the recorded time
+// cut to a day, but the time of day the app wrote beside it is none of the
+// answer's, and it is all that changed. Bound to the answer, a replay would
+// check the day alone, and any time that day would pass: the answer is no
+// source. With no window that holds it the time is refused; where the call's
+// window holds it, it is the app's own clock read (instants_test.go:1064).
+func TestOutcomeAServedDateIsNoSourceOfTheTimeOfDayBesideIt(t *testing.T) {
+	const p = "body.departure"
+	rAt := oAt.Add(2 * time.Hour)
+	fAt := rAt.Add(time.Hour)
+	rec, live := iMs(rAt.Add(-50*time.Millisecond)), iMs(fAt.Add(-50*time.Millisecond))
+	day := oAnswer("mock-7", 100*time.Millisecond, oAt.Format("2006-01-02"))
+	d := oWord(t, Decide(iCall(p, String, rec, live, rAt, fAt, nil, nil, []Raw{day.ServedAs(1)})), rec, live)
+	if d.Outcome == OutcomeValue {
+		t.Errorf("FALSE GREEN: a time bound to the date beside it: %s", oDescribe([]Decision{d}))
+	}
+	d = oWord(t, Decide(iCall(p, String, rec, live, rAt, fAt, iWin(rAt, fAt, 60*time.Millisecond), nil, []Raw{day.ServedAs(1)})), rec, live)
+	iClock(t, "a time the call's window holds, beside a served date", d)
+	// The same answer holding the time itself still binds it.
+	whole := oAnswer("mock-7", 100*time.Millisecond, rec)
+	d = oWord(t, Decide(iCall(p, String, rec, live, rAt, fAt, nil, nil, []Raw{whole.ServedAs(1)})), rec, live)
+	iValue(t, "an answer holding the time itself", d, "mock-7")
+}
+
+// A request sent before the call that held the recorded minute and, in round
+// F, grew to hold that minute and F's ("since R" to "since R until F"): it
+// did not move with the value, so the value is no copy of it. Where it moved
+// ("since R" to "since F") it is (instants_test.go:1507).
+func TestOutcomeASendThatHoldsBothRunsMomentsIsNoCopy(t *testing.T) {
+	const p = "body.at"
+	rAt := time.Date(2026, 10, 22, 11, 20, 0, 0, time.UTC)
+	rec, live := "2026-10-22T11:14:00Z", "2026-10-22T11:15:00Z"
+	sent := func(f string) []Earlier {
+		return []Earlier{iSent("mock-1", rAt.Add(-time.Second), "body.range", String, "since 1792667640000", f)}
+	}
+	d := oWord(t, Decide(iCall(p, String, rec, live, rAt, rAt, nil, sent("since 1792667700000"), nil)), rec, live)
+	iValue(t, "a send that moved with the value", d, "mock-1")
+	d = oWord(t, Decide(iCall(p, String, rec, live, rAt, rAt, nil, sent("since 1792667640000 until 1792667700000"), nil)), rec, live)
+	if d.Outcome == OutcomeValue {
+		t.Errorf("a send that holds both runs' moments in F bound the value: %s", oDescribe([]Decision{d}))
+	}
+}
+
 // A number of an instant's length that does not parse as one (a 10-digit
 // number past 2100) is matched by its exact text: the test's earlier send of
 // the same text in each run binds it; one that held the recorded text whole
