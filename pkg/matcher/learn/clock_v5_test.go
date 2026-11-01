@@ -1532,3 +1532,26 @@ func TestAMillisecondsLeadUnderASecondIsLeftToItsBegin(t *testing.T) {
 		t.Errorf("clock + 30s from a test's begin five seconds back: %+v %q %v; want refused, as main refuses it", o, why, ok)
 	}
 }
+
+// The same through the order: the reading's refusal stands where the window
+// holds the value as a plain read too, so a BSON date's now - 2s is refused
+// in every window a quiet one refuses it in, never a plain read that fails
+// the application's value on a quiet replay and passes a dropped look-back.
+// A plain read made just before its call stays one.
+func TestAMillisecondsLookBackIsRefusedThroughTheOrderInEveryWindow(t *testing.T) {
+	sec, ms := time.Second, time.Millisecond
+	const p = "body.filter.dirtyAt.$lte"
+	at := time.Date(2026, 10, 31, 9, 0, 0, 400e6, time.UTC)
+	fAt := at.Add(2*time.Hour + 17*time.Minute + 23*time.Second + 153*ms)
+	millis := func(t time.Time) string { return strconv.FormatInt(t.UnixMilli(), 10) }
+	for _, width := range []time.Duration{30 * ms, 1100 * ms, 2500 * ms, 3200 * ms, 6 * sec} {
+		d := v5Decide(t, p, Number, millis(at.Add(-4*ms-2*sec)), millis(fAt.Add(-4*ms-2*sec)), at, fAt, width)
+		if d.Clock != nil || d.Outcome != OutcomeRefused || d.Refusal == nil || !strings.Contains(d.Refusal.Why, "so keploy refuses an offset that reads in a second or finer") {
+			t.Errorf("now - 2s in a window %s wide: %+v; want refused, as a quiet window refuses it", width, d)
+		}
+		d = v5Decide(t, p, Number, millis(at.Add(-4*ms)), millis(fAt.Add(-4*ms)), at, fAt, width)
+		if d.Clock == nil || !d.Clock.Plain() {
+			t.Errorf("a plain read in a window %s wide: %+v; want a plain read", width, d)
+		}
+	}
+}
