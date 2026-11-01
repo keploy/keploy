@@ -458,3 +458,48 @@ func TestWriteStopOutcomeSettlesTheRunUnderTheSwitch(t *testing.T) {
 		})
 	}
 }
+
+// learnedOutcomeProxy is an outcomeProxy whose learn step taught recordings
+// from calls made in other windows than theirs.
+type learnedOutcomeProxy struct {
+	outcomeProxy
+	learned []models.MockState
+}
+
+func (p *learnedOutcomeProxy) LearnedElsewhere() []models.MockState { return p.learned }
+
+// Under docker compose the CLI cannot ask the stopped agent anything: what
+// record's full round learned onto recordings from calls made in other
+// windows reaches it only in the outcome the agent leaves as it stops, beside
+// what it served. An outcome without it would write the timer's recording
+// with nothing learned, though the agent learned it.
+func TestWriteStopOutcomeCarriesWhatCallsInOtherWindowsTaught(t *testing.T) {
+	prev := ActiveHooks
+	ActiveHooks = &AgentHook{}
+	t.Cleanup(func() { ActiveHooks = prev })
+	learned := []models.MockState{{
+		Name:     "mock-9",
+		Clocks:   map[string]models.ClockOffset{"claimed_at": {Min: -time.Minute, Max: -time.Minute, Res: time.Millisecond}},
+		TaughtIn: []models.TeachingWindow{{Test: "test-2", At: time.Date(2026, 11, 1, 9, 0, 0, 0, time.UTC)}},
+	}}
+	proxy := &learnedOutcomeProxy{outcomeProxy: outcomeProxy{consumed: []models.MockState{{Name: "mock-0"}}}, learned: learned}
+	a := &Agent{Proxy: proxy, logger: zap.NewNop()}
+	path := filepath.Join(t.TempDir(), "outcome.json")
+	if err := a.writeStopOutcome(context.Background(), path); err != nil {
+		t.Fatalf("writeStopOutcome: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("no outcome left: %v", err)
+	}
+	var got models.MockOutcome
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("the outcome is not a models.MockOutcome: %v\n%s", err, raw)
+	}
+	if !reflect.DeepEqual(got.LearnedElsewhere, learned) {
+		t.Fatalf("the outcome carries %+v as learned across windows; want %+v", got.LearnedElsewhere, learned)
+	}
+	if len(got.Consumed) != 1 {
+		t.Fatalf("the outcome carries %+v as served; want mock-0 alone", got.Consumed)
+	}
+}
