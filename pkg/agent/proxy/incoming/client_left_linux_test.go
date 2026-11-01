@@ -149,6 +149,101 @@ func TestAnAnswerThatArrivedWholeIsRecordedThoughItsForwardFails(t *testing.T) {
 	}
 }
 
+// An answer whose end had not arrived as its client went is not the app's
+// whole answer to the request, and is not recorded although the forward's
+// failure sends the ingress on to read it (finishAnswer): the read stops at
+// what had arrived, the end not found there, and never waits on the app for
+// more. The drop is told at Info, once. Two ways the read-on is bounded:
+//
+//   - unwatched: the client sent its next request with the first, so the
+//     ingress does not watch it (watchClient), and its going is seen only as
+//     the forward fails. The app sent the headers and half of a
+//     Content-Length body, and holds the rest until its connection is closed:
+//     nothing tells it, so the bound is what has arrived by the failure.
+//   - deaf: a watched client, a close-delimited answer (its end is the app's
+//     close). Told of the going, the app streams on and never closes: the
+//     bound is what had arrived when the watch saw the going.
+//
+// Were the bound dropped or overrun, the handler would wait on the app (the
+// test's deadline fails it); were the verdict to skip the end, the half
+// answer would be recorded; were the drop told below Info, it would be silent.
+func TestAnAnswerWhoseEndHadNotArrivedIsNotRecordedThoughItsForwardFails(t *testing.T) {
+	for _, synchronous := range []bool{false, true} {
+		for _, kind := range []string{"unwatched", "deaf"} {
+			t.Run(fmt.Sprintf("synchronous %v, %s", synchronous, kind), func(t *testing.T) {
+				const size = 64 << 10
+				half := strings.Repeat("h", size/2)
+				appLn := listenForApp(t)
+				sent, told := make(chan struct{}), make(chan struct{})
+				go func() {
+					c, err := appLn.Accept()
+					if err != nil {
+						return
+					}
+					defer func() { _ = c.Close() }()
+					br := bufio.NewReader(c)
+					if _, err := http.ReadRequest(br); err != nil {
+						return
+					}
+					if kind == "deaf" {
+						_, _ = fmt.Fprintf(c, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n%s", half)
+					} else {
+						_, _ = fmt.Fprintf(c, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: %d\r\n\r\n%s", size, half)
+					}
+					waitAcked(t, c)
+					close(sent)
+					// Until told (deaf: a half-close) or closed (unwatched).
+					_, _ = io.Copy(io.Discard, br)
+					close(told)
+					if kind == "deaf" {
+						more := []byte(strings.Repeat("m", 1<<10))
+						for {
+							if _, err := c.Write(more); err != nil {
+								return
+							}
+						}
+					}
+				}()
+				left := make(chan struct{})
+				var proxied net.Conn
+				holdBodyReads(t, func(nth int) {
+					switch {
+					case nth == 0 && kind == "unwatched":
+						waitFor(t, "the client did not go", left)
+						waitReset(t, proxied)
+					case nth == 0:
+						waitFor(t, "the client did not go, or the app was not told of it", left, told)
+					case nth == 1:
+						waitReset(t, proxied)
+					}
+				})
+				gets := 1
+				if kind == "unwatched" {
+					gets = 2
+				}
+				pm, client, served, logs := serveGETs(t, synchronous, appLn, &proxied, gets)
+				readHeaders(t, bufio.NewReader(client))
+				waitFor(t, "the app's half answer did not reach the ingress", sent)
+				if kind == "unwatched" {
+					if err := client.(*net.TCPConn).SetLinger(0); err != nil {
+						t.Fatal(err)
+					}
+				}
+				_ = client.Close()
+				close(left)
+				tcs, toldLeft := queuedOnceGone(t, pm, served, logs)
+				if len(tcs) != 0 || toldLeft != 1 {
+					recorded := ""
+					if len(tcs) > 0 {
+						recorded = fmt.Sprintf(" (a body of %d bytes of %d)", len(tcs[0].HTTPResp.Body), size)
+					}
+					t.Fatalf("%d test cases recorded%s and %d told at Info, from an answer whose end had not arrived as its client went; want 0 and 1", len(tcs), recorded, toldLeft)
+				}
+			})
+		}
+	}
+}
+
 // A close-delimited answer (Connection: close, no length) ends where the app
 // closes its connection, and that close is a part of what arrives from the
 // app, one more than its bytes. Its client took what had come, the headers
