@@ -147,6 +147,60 @@ func poolSpentBetweenTests(t *testing.T, consume func(mm *MockManager, m *models
 	}
 }
 
+// Under the background rules the spend through a door that keeps a
+// recording is the pool's alone. The worker scope, which the replay stages
+// apart from the pool (models.ExactServing.Worker), keeps its own rule: a
+// door that keeps a reached worker: recording answers every call outside
+// every test, before and after a test's window spent it, while the pool
+// recording beside it answers one; in the windows of the staging it answers
+// one call. So a call the app makes more often between tests when replay is
+// slower (a poller) never spends a recording a later test's window needs,
+// and the pool still never answers every identical call of the set.
+func TestTheBackgroundRulesSpendOnlyThePoolThroughAKeepingDoor(t *testing.T) {
+	for door, consume := range keepingDoors {
+		t.Run(door, func(t *testing.T) { workerKeptBetweenTestsUnderTheBackgroundRules(t, consume) })
+	}
+}
+
+func workerKeptBetweenTestsUnderTheBackgroundRules(t *testing.T, consume func(mm *MockManager, m *models.Mock) bool) {
+	mm, ms := s12Set(t)
+	poll := func(prefix string) string {
+		t.Helper()
+		return pollKept(t, mm, prefix, consume)
+	}
+	mm.ServeExactBackground(models.RecordedWithS12Routing, []string{"pool"}, []string{"w-boot", "w-later"})
+	mm.ServeExactWorker([]string{"w-boot"})
+	mm.ServeExactPool(models.PoolKeyNone, []string{"pool"})
+	for call := 1; call <= 3; call++ {
+		if got := poll("w-boot"); got != "w-boot" {
+			t.Fatalf("between tests, call %d of a reached worker: recording was answered by %s", call, got)
+		}
+	}
+	if got := poll("pool"); got != "pool" {
+		t.Fatalf("the pool slice did not answer a call between tests: %s", got)
+	}
+	if got := poll("pool"); got != "a miss" {
+		t.Fatalf("a pool recording answered twice between tests: %s", got)
+	}
+	mm.ServeExactTest("T1", []*models.Mock{ms["own"]})
+	if got := poll("w-boot"); got != "w-boot" {
+		t.Fatalf("the worker: recording the gap reused did not answer in T1's window: %s", got)
+	}
+	if got := poll("w-boot"); got != "a miss" {
+		t.Fatalf("a worker: recording answered twice in T1's window: %s", got)
+	}
+	mm.ServeExactPool(models.PoolKeyNone, []string{"pool"})
+	for call := 1; call <= 3; call++ {
+		if got := poll("w-boot"); got != "w-boot" {
+			t.Fatalf("between tests after a window spent it, call %d of the worker: recording was answered by %s", call, got)
+		}
+	}
+	mm.ServeExactTest("T2", []*models.Mock{ms["other"]})
+	if got := poll("w-boot"); got != "a miss" {
+		t.Fatalf("a worker: recording T1's window spent answered in T2's: %s", got)
+	}
+}
+
 // What the background rules spend through the marking door is the pool's
 // data-plane recordings only. A protocol-phase recording the pool names (the
 // pool is every recording no test's mapping lists: a connection's config
