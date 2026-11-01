@@ -851,13 +851,20 @@ func (h *HTTP) variableMember(ctx context.Context, input *req, scope varScope, h
 // a disagreement of the check and the table: a problem, never a retry, which
 // would be refused again forever.
 func (h *HTTP) serveVariables(ctx context.Context, hit *varHit, mockDb integrations.MockMemDb) (served *models.Mock, problem *varProblem, retry bool, err error) {
-	return h.serveVariablesBy(hit, func(m *models.Mock) bool { return h.updateMock(ctx, m, mockDb, nil) })
+	return h.serveVariablesBy(hit, mockDb, func(m *models.Mock) bool { return h.updateMock(ctx, m, mockDb, nil) })
 }
 
 // serveVariablesBy is serveVariables with consume taking the mock from the
 // mock store (false: another connection took it first): the HTTP parser's
-// updateMock, or another parser's own consume (VariableMatch).
-func (h *HTTP) serveVariablesBy(hit *varHit, consume func(*models.Mock) bool) (served *models.Mock, problem *varProblem, retry bool, err error) {
+// updateMock, or another parser's own consume (VariableMatch). A background
+// recording mockDb refuses the call (integrations.RefusesAnswer: the call is
+// one of the open test's own) binds nothing and is refused as at its consume
+// door: the call is checked again, and the recording's variables stay
+// unbound for the call it is the recording of.
+func (h *HTTP) serveVariablesBy(hit *varHit, mockDb integrations.MockMemDb, consume func(*models.Mock) bool) (served *models.Mock, problem *varProblem, retry bool, err error) {
+	if integrations.RefusesAnswer(mockDb, hit.mock) {
+		return nil, nil, true, nil
+	}
 	loaded, err := withResponse(hit.mock)
 	if err != nil {
 		return nil, nil, false, err

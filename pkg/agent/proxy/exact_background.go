@@ -393,6 +393,27 @@ func (m *MockManager) BackgroundCursor() (integrations.MockCursor, bool) {
 	return backgroundCursor{m: m}, true
 }
 
+// InBackground implements integrations.BackgroundMember: name is one of the
+// background's recordings, and the view in force holds it as no test's own
+// (one judging moved into a test is that test's, as hidesName reads it): the
+// pool's or the worker scope's of a set the view serves by the background
+// rules, or, in a test under any rules, one of the worker scope the run
+// reached (isWorker). False with exact serving off.
+func (m *MockManager) InBackground(name string) bool {
+	v := m.exactView()
+	if v == nil {
+		return false
+	}
+	// Neither the background's nor, in a test, the reached worker scope's.
+	if !v.bg.has(name) && (v.test == "" || !v.isWorker(name)) {
+		return false
+	}
+	_, own := v.index[name]
+	return !own
+}
+
+var _ integrations.BackgroundMember = (*MockManager)(nil)
+
 // backgroundCursor is the background's stateful cursor (BackgroundCursor),
 // and, in a test under any rules, the worker scope's (SequenceView.Between):
 // the one the calls between tests advance.

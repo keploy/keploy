@@ -27,8 +27,10 @@ import (
 //     mapping) answer, each at most one request, in recorded order, and the
 //     pool answers only protocol-phase requests (handshakes, session
 //     settings, DNS). One more request identical to one a test mock already
-//     answered finds no test mock: a miss (models.MissExtraCall), unless a
-//     worker-scope mock the run has reached (below) is that request.
+//     answered finds no test mock: a miss (models.MissExtraCall). Under the
+//     proven switch no worker-scope mock (below) answers it either
+//     (integrations.OwnRepeatRead); with the switch off, one the run has
+//     reached that is that request does.
 //   - While no test is open, the current key's pool slice answers, with
 //     reuse or cursor-saturate as its mocks were recorded, beside the
 //     protocol-phase mocks. Its stateful cursors are the key's own.
@@ -2716,6 +2718,9 @@ func (m *MockManager) exactConsume(mk *models.Mock, evicts bool) exactVerdict {
 // (exact_round.go), as every snapshot does, so a snapshot sees a consume,
 // its take and the observer's account of it all, or none of them.
 func (m *MockManager) exactConsumeAt(mk *models.Mock, evicts bool, g *roundGuard, observe func()) exactVerdict {
+	if f := m.exact.round.onConsume.Load(); f != nil && mk != nil {
+		(*f)(mk.Name)
+	}
 	return settleInForce(m, exactRefused, func(v *exactView) (exactVerdict, <-chan struct{}) {
 		if v != nil && mk != nil && (evicts || v.isWorker(mk.Name)) {
 			if _, own := v.index[mk.Name]; !own {

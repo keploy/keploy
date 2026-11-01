@@ -547,6 +547,61 @@ func TestLearnMatchOutsideATestPairsOnlyThePool(t *testing.T) {
 	}
 }
 
+// bgLearnDb is a learnDb whose session mocks named in bg are the background
+// the store shows the open test (integrations.BackgroundMember).
+type bgLearnDb struct {
+	*learnDb
+	bg map[string]bool
+}
+
+func (d *bgLearnDb) InBackground(name string) bool { return d.bg[name] }
+
+// The learn step, on a store that reads no round snapshot (learnRules),
+// holds a request one more than the open test recorded as a miss whatever
+// the background the store shows the test holds of it: an exact copy among
+// the background (integrations.InBackground) answers no request the test's
+// own answered recording matches exactly (learn.Candidate.Background). Read
+// as any other candidate, it answered the test's second POST /a, and a test
+// that made its recorded call twice passed. A request the test never
+// recorded is still answered by the background.
+func TestLearnMatchTheBackgroundNeverAnswersOneCallMoreThanTheTestRecorded(t *testing.T) {
+	h, n, opts := learnOn(t)
+	tr := learn.NewTracker()
+	tr.Begin()
+	ctx := learn.WithTracker(context.Background(), tr)
+	own := learnRecorded("mock-0", 0, "POST", "/a", `{"id":"x"}`, nil, `{"from":"own"}`)
+	bg := learnRecorded("bg-0", 5*time.Second, "POST", "/a", `{"id":"x"}`, nil, `{"from":"bg"}`)
+	other := learnRecorded("bg-1", 6*time.Second, "POST", "/b", `{"id":"x"}`, nil, `{"from":"bg"}`)
+	db := &bgLearnDb{
+		learnDb: &learnDb{
+			mockMemDb: mockMemDb{mocks: []*models.Mock{bg, other}},
+			perTest:   []*models.Mock{own},
+			pool:      map[time.Time]bool{bg.Spec.ReqTimestampMock: true, other.Spec.ReqTimestampMock: true},
+			observe:   tr.ServedMock,
+		},
+		bg: map[string]bool{bg.Name: true, other.Name: true},
+	}
+	call := func(path string) string {
+		served, _, err := h.learnMatch(ctx, live("POST", path, `{"id":"x"}`, nil), db, n, opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if served == nil {
+			return ""
+		}
+		return served.Name
+	}
+	if got := call("/a"); got != own.Name {
+		t.Fatalf("the test's POST /a was answered by %q; want its own %s", got, own.Name)
+	}
+	if got := call("/a"); got != "" {
+		t.Fatalf("the test's second POST /a, one more than it recorded, was answered by %q", got)
+	}
+	if got := call("/b"); got != other.Name {
+		t.Fatalf("the test's POST /b, a request it never recorded, was answered by %q; want the background's %s", got, other.Name)
+	}
+}
+
 // umDb is a store as keploy mock replay's is under the proven switch: no
 // recorded test windows (it implements no integrations.TestWindows), and its
 // scope table's pool slices name the mocks recorded while no test was open
