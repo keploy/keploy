@@ -950,6 +950,23 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 			"the same moment was sent at "+slots[0].name+" and "+slots[1].name+", two separate reads", names(slots), dc.wordNoise(path, n))
 	}
 
+	// 4. and 6. A copy: requests of the call's scope or the start-up, sent
+	// before the call in both runs, holding the same moment in both runs.
+	// One that holds the other run's moment too (a range that grew in F to
+	// hold the recorded moment and F's) did not move with the value: no
+	// copy's source.
+	copies := func(fine bool) []evPlace {
+		return heldWhere(hs, func(h instantHold) bool {
+			p := h.p
+			if p.side != Request || p.given || !inScope(p) || !before(p) || !h.hr || !h.hl || (h.fr && h.fl) != fine {
+				return false
+			}
+			rf, _, _ := dc.holds(p, p.t.live, r, c.rm, c.byText)
+			fr, _, _ := dc.holds(p, p.t.rec, l, c.lm, c.byText)
+			return !rf && !fr
+		})
+	}
+
 	// 3. Answer: an answer of the call's scope or the start-up, given
 	// before the call in both runs, holds R's value, and F's text there
 	// holds F's or is not stated.
@@ -987,27 +1004,17 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 			return dc.refuse(path, at, n, r, l, RefusalUnknown, why+", beside "+answers[0].name+": two sources", []string{late, answers[0].name},
 				Edit{Kind: EditReRecord}, dc.wordNoise(path, n))
 		}
+		// A send before every such answer, at a fine cut, showing the same
+		// moment: the answer reads back what the application wrote, and
+		// the value is bound where a word's is, at its earliest place.
+		if fine := copies(true); len(fine) > 0 && earliest(fine).at.Before(earliest(answers).at) {
+			return dc.copied(path, at, n, c, fine, fineCopy)
+		}
 		return dc.bound(path, at, n, c, answers, ": an answer given before the call holds it: the dependency's value")
 	}
 
-	// 4. and 6. A copy: requests of the call's scope or the start-up, sent
-	// before the call in both runs, holding the same moment in both runs.
-	// One that holds the other run's moment too (a range that grew in F to
-	// hold the recorded moment and F's) did not move with the value: no
-	// copy's source.
-	copies := func(fine bool) []evPlace {
-		return heldWhere(hs, func(h instantHold) bool {
-			p := h.p
-			if p.side != Request || p.given || !inScope(p) || !before(p) || !h.hr || !h.hl || (h.fr && h.fl) != fine {
-				return false
-			}
-			rf, _, _ := dc.holds(p, p.t.live, r, c.rm, c.byText)
-			fr, _, _ := dc.holds(p, p.t.rec, l, c.lm, c.byText)
-			return !rf && !fr
-		})
-	}
 	if fine := copies(true); len(fine) > 0 {
-		return dc.copied(path, at, n, c, fine, ": the same moment, at a cut finer than a millisecond, was sent before the call in both runs: one read, copied")
+		return dc.copied(path, at, n, c, fine, fineCopy)
 	}
 
 	// An answer outside the call's scope that would bind it at step 3 were
@@ -1358,6 +1365,9 @@ func answeredAt(echo []variables.Address, rec string) string {
 	}
 	return "; answered at " + addrList(echo) + ", where the call's answer holds " + strconv.Quote(rec) + " whole as recorded"
 }
+
+// fineCopy is the rule of a value bound as a copy at a fine cut.
+const fineCopy = ": the same moment, at a cut finer than a millisecond, was sent before the call in both runs: one read, copied"
 
 // twoClockReads reports whether the earliest of src and a later one were
 // each learned as their call's read of the clock.
