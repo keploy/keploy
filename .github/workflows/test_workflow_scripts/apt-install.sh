@@ -80,12 +80,46 @@
 # install them. That run fetches nothing and has the same budget again, in one
 # piece, so dpkg no longer gets only the time a slow download left over.
 #
-# `apt-get update` is not sliced: it has the budget in one piece, as it always
-# had. None of the five jobs above failed in it: the same mirror served them
-# the 50.7 MB of package lists in 5 to 22 s, and of the jobs of that day whose
-# logs were read, the slowest update took 28 s (job 113006293757). apt also
-# does not say how much of the lists is still to come, so there would be no
-# rate to judge a mirror by, only a guess at how long an update may take.
+# THE PACKAGE LISTS
+#
+# `apt-get update` is sliced the same way, within a budget of its own, for the
+# same reason. On 2026-10-31 (run 41251324201) azure did not answer three jobs
+# at all, two on the WSL lane and one on a hosted image. apt gave azure up for
+# each InRelease after 30 to 80 s, fetched those from archive.ubuntu.com, and
+# then fetched nothing more, without another line, until the single bound
+# around the update ran out, eight to nine minutes later:
+#
+#   Get:5 http://archive.ubuntu.com/ubuntu jammy-security InRelease [129 kB]
+#   ##[error]apt-install.sh: apt-get update was not done within 600 s (exit 124). [...]
+#
+# An ubuntu:22.04 container whose azure.archive.ubuntu.com is an address that
+# drops every packet does the same. apt does not leave a mirror that trickles
+# its lists either, as the tests show with a stub that serves them at 256 B/s.
+#
+# A slice of the update that runs out is judged by the bytes the machine
+# received in it, read from /proc/net/dev (every interface but lo). Under
+# APT_INSTALL_LIST_RATE bytes a second (100000) the next mirror is put in front
+# before apt is started again; at or above it the mirror stays in front. The
+# download is judged by what is still to fetch, but an update does not say how
+# much of the lists is still to come (`--print-uris` names only the InRelease
+# files). So the floor is that judgement made for the largest update seen
+# here: the 50.7 MB of lists of the WSL lane arrive within the 600 s budget at
+# 85 kB/s, and the same mirror served them in 5 to 22 s on 2026-10-07. A
+# mirror under 100 kB/s cannot bring them in time, and one that is up does so
+# at many times that rate.
+#
+# Not apt's files, as for the .debs: apt unpacks each list next to its download
+# as soon as it is in, at about five times its size, and deletes the download
+# once its suite is done, so the files under /var/lib/apt/lists grow by more
+# than was fetched and then shrink. What the machine received is what apt
+# fetched (36.7 MB against apt's own "Fetched 36.3 MB" in an ubuntu:22.04
+# container) when nothing else downloads during the update. Bytes something
+# else receives meanwhile count for the mirror, which can keep a slow mirror
+# in front, never send a fast one back.
+#
+# Stopping the update loses little. apt asks again for a list it has part or
+# all of from where it stopped (a Range request, which another mirror honours
+# too when its copy is the same), and fetches only the InRelease files anew.
 #
 # The lists reordered are the ones an entry that apt reads here names, with two
 # or more mirrors that are all the Ubuntu archive: this script's own, or the
@@ -94,14 +128,14 @@
 # is still a correct list, and the next run rewrites this script's own. Without
 # such a list (a self-hosted runner, whose files are never touched;
 # ubuntu-ports; old-releases) there is no other mirror to put in front, and the
-# download gets its budget in one piece, as before.
+# update and the download each get their budget in one piece, as before.
 #
 # If every mirror is slow the budget still runs out. The script then exits 124,
 # as it used to, and its last line is an ::error:: that says how much was
-# fetched, at what rate, and which mirror was in front for each slice. An
-# update or an install that outlasts its budget ends the same way, with an
-# ::error:: that says which of the two it was. The two variables above exist
-# for the tests, which cannot wait ten minutes.
+# fetched (for the update, received), at what rate, and which mirror was in
+# front for each slice. An install that outlasts its budget ends the same way,
+# with an ::error:: that says so. The three variables above exist for the
+# tests, which cannot wait ten minutes.
 #
 # A SCRIPT THAT IS STOPPED ITSELF
 #
@@ -190,6 +224,15 @@ for seconds in "$slice" "$budget"; do
       ;;
   esac
 done
+# Bytes a second; see THE PACKAGE LISTS. 0 keeps every mirror that is not done
+# in front, as apt alone does.
+list_rate="${APT_INSTALL_LIST_RATE:-100000}"
+case "$list_rate" in
+  '' | 0?* | *[!0-9]*)
+    echo "apt-install: APT_INSTALL_LIST_RATE is a whole number of bytes a second, 0 or more" >&2
+    exit 2
+    ;;
+esac
 
 if [ "$(id -u)" -eq 0 ]; then
   as_root() { "$@"; }
@@ -491,21 +534,40 @@ apt_for() {
   return "$rc"
 }
 
-# download_in_slices <apt-get install argument ...>
-# Downloads the packages within $budget, $slice at a time while there is a
-# mirror list to reorder; see A MIRROR THAT IS UP BUT SLOW. Returns apt-get's
-# own exit code, and exits 124 when the budget runs out.
-download_in_slices() {
-  local began=$SECONDS had now got=0 all=0 took left run rc front next to_fetch still said slices=""
-  had="$(bytes_under "$archives")"
+# The bytes this machine has received, over every interface but lo; see THE
+# PACKAGE LISTS. A name can touch its first number ("eth0:123"), so the colon
+# splits too. %.0f, as in bytes_under.
+received() {
+  awk 'NR > 2 { sub(/^[ \t]+/, ""); split($0, f, /[: \t]+/); if (f[1] != "lo") sum += f[2] }
+    END { printf "%.0f\n", sum }' /proc/net/dev
+}
+
+# slice_bytes update|download: what a slice of either is judged by, the bytes
+# received for the update and those in apt's archive cache for the download.
+slice_bytes() { if [ "$1" = update ]; then received; else bytes_under "$archives"; fi; }
+
+# in_slices update|download <apt-get argument ...>
+# Runs `apt-get update` or the download within $budget, $slice at a time while
+# there is a mirror list to reorder; see A MIRROR THAT IS UP BUT SLOW and THE
+# PACKAGE LISTS. Returns apt-get's own exit code, and exits 124 when the budget
+# runs out.
+in_slices() {
+  local kind="$1" began=$SECONDS had now got=0 all=0 took left run rc front next to_fetch still said slices="" did
+  shift
+  had="$(slice_bytes "$kind")"
   while :; do
     left=$((began + budget - SECONDS))
     # Out of time, or apt was stopped and there is no other mirror to put in
     # front. Looked at here, right before apt runs, and not only after a
     # slice: finding out what is still to fetch takes time as well.
     if [ "$left" -le 0 ] || { [ -n "$slices" ] && [ "${#lists[@]}" -eq 0 ]; }; then
-      said="the packages were not downloaded within $budget s, so none was installed (exit 124)."
-      said+=" Fetched $(human "$all") in that time ($(human $((all / budget)))/s)."
+      if [ "$kind" = update ]; then
+        said="apt-get update was not done within $budget s (exit 124)."
+        said+=" Received $(human "$all") in that time ($(human $((all / budget)))/s)."
+      else
+        said="the packages were not downloaded within $budget s, so none was installed (exit 124)."
+        said+=" Fetched $(human "$all") in that time ($(human $((all / budget)))/s)."
+      fi
       if [ "${#lists[@]}" -gt 0 ]; then
         said+=" Mirror in front, slice by slice: $slices."
       else
@@ -518,7 +580,7 @@ download_in_slices() {
     if [ "${#lists[@]}" -gt 0 ] && [ "$slice" -lt "$run" ]; then run=$slice; fi
     took=$SECONDS
     rc=0
-    apt_for "$run" install --download-only "$@" || rc=$?
+    apt_for "$run" "$@" || rc=$?
     # Anything but the time limit is apt's own answer: a file that failed on
     # every mirror, a package that does not exist. Another mirror order would
     # not change it.
@@ -526,12 +588,12 @@ download_in_slices() {
     took=$((SECONDS - took))
     if [ "$took" -lt 1 ]; then took=1; fi
     front="$(front_mirror)"
-    # The next slice is measured from what the cache holds now, which can be
-    # less than it held: apt begins a .deb anew when the copy it is offered is
-    # not the one it has part of. Measured from the old, higher count, the
-    # slices after that would seem to fetch nothing, and a fast mirror would
-    # be left for a slow one.
-    now="$(bytes_under "$archives")"
+    # The next slice is measured from the bytes there are now, which can be
+    # fewer than there were: apt begins a .deb anew when the copy it is
+    # offered is not the one it has part of. Measured from the old, higher
+    # count, the slices after that would seem to fetch nothing, and a fast
+    # mirror would be left for a slow one.
+    now="$(slice_bytes "$kind")"
     got=$((now - had))
     if [ "$got" -lt 0 ]; then got=0; fi
     had=$now
@@ -540,11 +602,24 @@ download_in_slices() {
     # That was the last slice: the top of the loop says so.
     if [ $((began + budget - SECONDS)) -le 0 ] || [ "${#lists[@]}" -eq 0 ]; then continue; fi
 
+    if [ "$kind" = update ]; then
+      did="$took s of apt-get update with $front in front received $(human "$got") ($(human $((got / took)))/s)"
+      if [ $((got / took)) -ge "$list_rate" ]; then
+        echo "apt-install: $did, at least the $(human "$list_rate")/s that the package lists need, so it stays in front."
+        continue
+      fi
+      next_mirror
+      next="$(front_mirror)"
+      echo "apt-install: $did, under the $(human "$list_rate")/s that the package lists need." \
+        "Putting $next in front; apt goes on from what it has fetched."
+      continue
+    fi
+
     # What apt would still fetch, less the part it has of the .deb it was
     # stopped in. --print-uris only lists it: nothing is downloaded. If apt
     # cannot say, the mirror is taken to be too slow.
     still="what is still to fetch"
-    to_fetch="$(apt_for 120 install --download-only "$@" --print-uris -qq |
+    to_fetch="$(apt_for 120 "$@" --print-uris -qq |
       awk -v quote="'" 'index($0, quote) == 1 { sum += $3 } END { printf "%.0f\n", sum }')" || to_fetch=""
     # The time left is read now, and not before apt was asked: its answer took
     # some of it, and may have taken all. Then no mirror is put in front for a
@@ -604,16 +679,8 @@ fi
 archives=/var/cache/apt/archives
 eval "$(apt-config shell archives Dir::Cache::Archives/d)"
 
-# Not sliced; see A MIRROR THAT IS UP BUT SLOW for why.
-apt_for "$budget" update || {
-  rc=$?
-  if [ "$rc" -eq 124 ]; then
-    echo "::error::apt-install.sh: apt-get update was not done within $budget s (exit 124)." \
-      "No other mirror was put in front for it: the script does that while it downloads packages, not for the package lists." >&2
-  fi
-  exit "$rc"
-}
-download_in_slices "$@"
+in_slices update update
+in_slices download install --download-only "$@"
 # Every .deb is in the cache now, so this fetches nothing and cannot be slow
 # for a mirror's sake. --no-download holds it to that.
 apt_for "$budget" install --no-download "$@" || {

@@ -54,6 +54,23 @@
 #   fetched, at what rate and from which mirrors, install nothing, and put
 #   the mirror list back. The budget is three slices, so the third mirror's
 #   slice is the last, and there are exactly three.
+# slow lists (ubuntu:22.04, the helper's own mirror list; ubuntu:24.04, a list
+# the image already had)
+#   The stub answers azure's package lists, InRelease first, at 256 B/s, so
+#   the update stalls on azure as it did on run 41251324201 (where azure did
+#   not answer, and apt fetched nothing more after the InRelease files).
+#   Through apt-install.sh, with 20 s slices in an 80 s budget, the install
+#   has to succeed: azure is asked first, the helper finds that the update
+#   received under 100 kB/s and puts archive.ubuntu.com in front, that mirror
+#   serves the lists, the download and the install follow, and the mirror
+#   list ends as it began. Its control (ubuntu:22.04) is the same stub under
+#   `timeout 45 apt-get update` alone: it has to run into the limit without
+#   an Ign: or Err: line and without asking another mirror.
+# every mirror's lists slow (ubuntu:22.04)
+#   All three mirrors answer the lists at 256 B/s. The helper has to put each
+#   in front in turn, exit 124 when the budget is spent, say in an ::error::
+#   line how much was received, at what rate and with which mirror in front,
+#   download and install nothing, and put the mirror list back.
 # rewrite (ubuntu:22.04 and ubuntu:24.04, no network, apt-get shimmed out)
 #   Fixture sources: exactly the .../ubuntu URIs on archive.ubuntu.com,
 #   security.ubuntu.com and their subdomains are rewritten, the mirror
@@ -75,11 +92,16 @@
 #   and no file changes; a slice counts all it fetched, also the one after a
 #   slice in which apt began its .deb anew; a spent budget ends in exit 124
 #   and the ::error:: line, with nothing installed, also when it runs out
-#   between two slices, and then no mirror is put in front any more; an update
-#   or an install that outlasts the budget ends in exit 124 too, each with an
-#   ::error:: line of its own, and the update in one piece, with no list
-#   reordered; and with no list to reorder, or on a self-hosted runner, the
-#   download gets its budget in one piece and no file changes.
+#   between two slices, and then no mirror is put in front any more; an
+#   install that outlasts the budget ends in exit 124 too, with an ::error::
+#   line of its own. An update that outlasts every slice, receiving nothing,
+#   puts the next mirror in front for each, ends in exit 124 with an ::error::
+#   line that names them, downloads nothing and puts the lists back; with
+#   APT_INSTALL_LIST_RATE=0 its mirror stays in front, slice after slice, and
+#   the run goes on to install once the update is done; a floor that is not a
+#   whole number of bytes a second is refused. With no list to reorder, or on
+#   a self-hosted runner, the download gets its budget in one piece and no
+#   file changes, and with no list the update does too.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -146,8 +168,8 @@ import http.server, os, socketserver, sys, time, urllib.error, urllib.request
 UPSTREAMS = ("http://azure.archive.ubuntu.com", "http://archive.ubuntu.com")
 AZURE = "azure.archive.ubuntu.com"
 REPO = "/repo"
-# A slow answer is 128 bytes every half second: 256 B/s, at which no .deb here
-# is done within a test, and never 30 s of silence, after which apt would give
+# A slow answer is 128 bytes every half second: 256 B/s, at which no .deb and
+# no InRelease here is done within a test, and never 30 s of silence, after which apt would give
 # the mirror up by itself.
 CHUNK, PAUSE = 128, 0.5
 # What the real mirror answered for everything but a .deb, by path. The package
@@ -201,13 +223,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if len(agent) == 3 and agent[0] == "apt-install-tests":
             fault, case = agent[1], agent[2]
         deb = self.path.endswith(".deb")
-        if deb:
+        lists = fault in ("slow-lists", "slow-lists-everywhere")
+        # A case about the lists has every list request logged as well.
+        if deb or lists:
             self.log_message("case=%s host=%s range=%s %s", case, host,
                              self.headers.get("Range", "-"), self.path)
         if deb and fault == "refuse":
             return self.reply(502, "Proxy Error", b"502 Proxy Error\n")
         slow = deb and ((fault == "slow-debs" and host == AZURE)
                         or fault == "slow-debs-everywhere")
+        # The package lists, InRelease included, under a slow-lists fault.
+        slow = slow or (not deb and ((fault == "slow-lists" and host == AZURE)
+                                     or fault == "slow-lists-everywhere"))
         whole = "Range" not in self.headers
         if whole and self.path in LISTS:
             return self.reply(200, "OK", *LISTS[self.path], slow)
@@ -406,7 +433,8 @@ fallbacks_to_stub=(--add-host "archive.ubuntu.com:$stub_ip" --add-host "security
 # is asked for. `none` is a healthy mirror.
 # shellcheck disable=SC2016 # expands inside the container
 fault_fn='fault() { echo "Acquire::http::User-Agent \"apt-install-tests $1 $2\";" >/etc/apt/apt.conf.d/99stub; }'
-# stub_saw <case>: the requests for a .deb the stub got in that case.
+# stub_saw <case>: the requests for a .deb the stub got in that case, and for a
+# list in a case about the lists.
 stub_saw() { docker logs "$stub" 2>&1 | grep -F "case=$1 " || true; }
 # after_download <log>: what follows apt's last word on a finished download.
 after_download() { sed -n '/^Download complete and in download only mode$/,$p' "$1" | sed 1d; }
@@ -555,6 +583,120 @@ done
 for host in archive.ubuntu.com security.ubuntu.com; do
   expect "$work/slow-everywhere.stub" "$host was asked to go on where the mirror before it stopped" \
     "host=${host//./\\.} range=bytes=[1-9][0-9]*- "
+done
+show_log_if_failed "$log" "$started"
+
+# The package lists. $case and $list are set by the script it ends, after a
+# healthy run that left the mirror list in place. bc is a package that no
+# earlier run installed.
+# shellcheck disable=SC2016 # expands inside the container
+past_slow_lists='
+  echo "--- helper"
+  fault slow-lists "$case"
+  APT_INSTALL_SLICE_SECONDS=20 APT_INSTALL_BUDGET_SECONDS=80 bash /h/apt-install.sh bc
+  echo "exit $?"
+  echo "1+1=$(echo 1+1 | bc)"
+  if cmp /tmp/list.before "$list"; then echo "mirror list: as it was"; fi
+  echo "--- end"'
+
+# slow_lists_checks <image> <codename> <case> <log>
+slow_lists_checks() {
+  local image="$1" codename="$2" case="$3" log="$4"
+  section "$log" helper >"$work/$case.helper"
+  expect "$work/$case.helper" "$image: the helper installs past an azure that trickles its lists" '^exit 0$'
+  expect "$work/$case.helper" "$image: azure is asked first for the lists" \
+    "^Get:[0-9]+ http://azure\.archive\.ubuntu\.com/ubuntu $codename InRelease"
+  expect "$work/$case.helper" "$image: the helper finds the update too slow and puts archive.ubuntu.com in front" \
+    "^apt-install: [0-9]+ s of apt-get update with http://azure\.archive\.ubuntu\.com/ubuntu/ in front received $size \($size/s\), under the 100 kB/s that the package lists need\. Putting http://archive\.ubuntu\.com/ubuntu/ in front; apt goes on from what it has fetched\.\$"
+  expect "$work/$case.helper" "$image: archive.ubuntu.com serves the lists" \
+    "^(Get|Hit):[0-9]+ http://archive\.ubuntu\.com/ubuntu $codename InRelease"
+  absent "$work/$case.helper" "$image: azure failed no fetch, so it was not apt that left it" \
+    "^(Ign|Err):[0-9]+ http://azure\.archive\.ubuntu\.com/"
+  absent "$work/$case.helper" "$image: nothing is written on a line apt was stopped in" "$glued"
+  expect "$work/$case.helper" "$image: the download follows the update" '^Download complete and in download only mode$'
+  expect "$work/$case.helper" "$image: bc runs" '^1\+1=2$'
+  expect "$work/$case.helper" "$image: the mirror list ends as it began" '^mirror list: as it was$'
+  stub_saw "$case" >"$work/$case.stub"
+  expect "$work/$case.stub" "$image: the stub was asked for a list as azure" \
+    'host=azure\.archive\.ubuntu\.com range=[^ ]+ /ubuntu/dists/'
+  expect "$work/$case.stub" "$image: and as archive.ubuntu.com" \
+    'host=archive\.ubuntu\.com range=[^ ]+ /ubuntu/dists/'
+}
+
+echo "--- slow lists: azure trickles its package lists, the helper's own mirror list (ubuntu:22.04)"
+log="$work/lists-jammy.log"
+started=$failures
+# shellcheck disable=SC2016 # expands inside the container
+rc="$(in_ubuntu ubuntu:22.04 "$log" "$fault_fn"'
+  case=lists-jammy list=/etc/apt/ubuntu-mirrors.txt
+  fault none "$case"
+  bash /h/apt-install.sh hello >/dev/null
+  cp "$list" /tmp/list.before
+  echo "--- control"
+  fault slow-lists "$case-control"
+  opts="-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120"
+  rc=0
+  timeout 45 apt-get $opts -y update || rc=$?
+  echo
+  echo "exit $rc"'"$past_slow_lists" "${fallbacks_to_stub[@]}")"
+[ "$rc" = 0 ] || fail "ubuntu:22.04: the slow-lists case exited $rc"
+section "$log" control >"$work/lists-control"
+expect "$work/lists-control" "control: apt alone runs into the time limit on the update" '^exit 124$'
+expect "$work/lists-control" "control: having asked azure for the lists" \
+  "^Get:[0-9]+ http://azure\.archive\.ubuntu\.com/ubuntu jammy InRelease"
+absent "$work/lists-control" "control: with no failed fetch to act on" '^(Ign|Err):'
+absent "$work/lists-control" "control: and no other mirror in its output" '^(Get|Hit):[0-9]+ http://(archive|security)\.ubuntu\.com/'
+stub_saw lists-jammy-control >"$work/lists-control.stub"
+absent "$work/lists-control.stub" "control: the stub was asked for no list under another name" 'host=(archive|security)\.ubuntu\.com '
+slow_lists_checks ubuntu:22.04 jammy lists-jammy "$log"
+show_log_if_failed "$log" "$started"
+
+echo "--- slow lists: azure trickles its package lists, a mirror list the image already had (ubuntu:24.04)"
+log="$work/lists-noble.log"
+started=$failures
+# shellcheck disable=SC2016 # expands inside the container
+rc="$(in_ubuntu ubuntu:24.04 "$log" "$fault_fn"'
+  case=lists-noble list=/etc/apt/apt-mirrors.txt
+  printf "%s\tpriority:%s\n" http://azure.archive.ubuntu.com/ubuntu/ 1 \
+    http://archive.ubuntu.com/ubuntu/ 2 http://security.ubuntu.com/ubuntu/ 3 >"$list"
+  sed -i -E "s#http://(archive|security)\.ubuntu\.com/ubuntu/?#mirror+file:$list#" \
+    /etc/apt/sources.list.d/ubuntu.sources
+  fault none "$case"
+  bash /h/apt-install.sh hello >/dev/null
+  cp "$list" /tmp/list.before'"$past_slow_lists" "${fallbacks_to_stub[@]}")"
+[ "$rc" = 0 ] || fail "ubuntu:24.04: the slow-lists case exited $rc"
+slow_lists_checks ubuntu:24.04 noble lists-noble "$log"
+show_log_if_failed "$log" "$started"
+
+echo "--- every mirror trickles its package lists (ubuntu:22.04)"
+log="$work/lists-everywhere.log"
+started=$failures
+# shellcheck disable=SC2016 # expands inside the container
+rc="$(in_ubuntu ubuntu:22.04 "$log" "$fault_fn"'
+  case=lists-everywhere list=/etc/apt/ubuntu-mirrors.txt
+  fault none "$case"
+  bash /h/apt-install.sh hello >/dev/null
+  cp "$list" /tmp/list.before
+  echo "--- helper"
+  fault slow-lists-everywhere "$case"
+  # Three slices, one for each mirror, as in the every-mirror-slow case.
+  APT_INSTALL_SLICE_SECONDS=30 APT_INSTALL_BUDGET_SECONDS=90 bash /h/apt-install.sh bc
+  echo "exit $?"
+  if ! command -v bc >/dev/null; then echo "bc: not installed"; fi
+  if cmp /tmp/list.before "$list"; then echo "mirror list: as it was"; fi
+  echo "--- end"' "${fallbacks_to_stub[@]}")"
+[ "$rc" = 0 ] || fail "the every-mirror-lists-slow case exited $rc"
+section "$log" helper >"$work/lists-everywhere.helper"
+expect "$work/lists-everywhere.helper" "with every mirror's lists slow the helper exits 124" '^exit 124$'
+expect "$work/lists-everywhere.helper" "and says how much it received, how fast, and from which mirrors: one slice each" \
+  "^::error::apt-install\.sh: apt-get update was not done within 90 s \(exit 124\)\. Received $size in that time \($size/s\)\. Mirror in front, slice by slice: $(slice_of 'http://azure\.archive\.ubuntu\.com/ubuntu/'); $(slice_of 'http://archive\.ubuntu\.com/ubuntu/'); $(slice_of 'http://security\.ubuntu\.com/ubuntu/')\.\$"
+absent "$work/lists-everywhere.helper" "it downloads nothing" '^Download complete'
+absent "$work/lists-everywhere.helper" "nothing is written on a line apt was stopped in" "$glued"
+expect "$work/lists-everywhere.helper" "nothing is installed" '^bc: not installed$'
+expect "$work/lists-everywhere.helper" "the mirror list ends as it began" '^mirror list: as it was$'
+stub_saw lists-everywhere >"$work/lists-everywhere.stub"
+for host in azure.archive.ubuntu.com archive.ubuntu.com security.ubuntu.com; do
+  expect "$work/lists-everywhere.stub" "$host was asked for a list" "host=${host//./\\.} range=[^ ]+ /ubuntu/dists/"
 done
 show_log_if_failed "$log" "$started"
 
@@ -885,14 +1027,29 @@ slow 0 0
 touch /tmp/slow/no-download
 slow_run "slow install" 1 3 hello
 
-# The update never ends. It has the budget in one piece although there are
-# lists to reorder, and they are left as they are: only a download leaves a
-# slow mirror.
-snap >/tmp/before
+# The update never ends, and the machine receives nothing (no network here).
+# Every slice of it puts the next mirror in front, and the budget is several
+# slices more than the three that put each mirror in front once.
+sums >/tmp/before
 slow 99 0
-slow_run "slow update" 1 3 hello
+slow_run "slow update" 1 8 hello
+sums >/tmp/after
+if diff /tmp/before /tmp/after; then echo "slow update: lists put back"; fi
+
+# With a floor of 0, two slices of the update run out and the mirror stays in
+# front for each; the third update is done, and the run goes on to install.
+snap >/tmp/before
+slow 2 0
+APT_INSTALL_LIST_RATE=0 slow_run "update on course" 1 30 hello
 snap >/tmp/after
-if diff /tmp/before /tmp/after; then echo "slow update: no change"; fi
+if diff /tmp/before /tmp/after; then echo "update on course: no change"; fi
+
+# A floor that is no whole number of bytes a second stops the helper first.
+for rate in x 01 -1; do
+  rc=0
+  APT_INSTALL_LIST_RATE="$rate" bash /h/apt-install.sh hello >/tmp/out 2>&1 || rc=$?
+  echo "rate [$rate]: exit $rc: $(cat /tmp/out)"
+done
 
 # A self-hosted runner has the same lists, and the helper must leave them be.
 fixture
@@ -907,6 +1064,9 @@ rm -rf /etc/apt/*-mirrors.txt /etc/apt/sources.list.d/*
 printf "deb http://ports.ubuntu.com/ubuntu-ports jammy main\n" >/etc/apt/sources.list
 slow 0 99 2000
 slow_run "no list" 1 3 hello
+# And with no mirror list the update, too, gets its budget in one piece.
+slow 99 0
+slow_run "no list, slow update" 1 3 hello
 '
 
 L='mirror+file:/etc/apt/ubuntu-mirrors.txt'
@@ -1199,16 +1359,33 @@ for image in ubuntu:22.04 ubuntu:24.04; do
   expect "$log" "$image: and the helper says the packages were there" \
     '^slow install: ::error::apt-install\.sh: the packages were downloaded, but installing them was not done within 3 s \(exit 124\)\.$'
 
-  if [ "$(grep -c '^slow update: slow: update:' "$log")" = 1 ]; then
-    echo "ok: $image: the update gets its budget in one piece, with lists it could reorder"
-  else
-    fail "$image: the update did not run exactly once"
-  fi
+  for order in "$azure_first" "$archive_first" "$security_first"; do
+    expect "$log" "$image: an update slice with ${order%% *} in front" \
+      "^slow update: slow: update: own list: $order, image list: $order\$"
+  done
+  expect "$log" "$image: an update slice that receives nothing puts the next mirror in front" \
+    "^slow update: apt-install: [0-9]+ s of apt-get update with $azure in front received 0 B \(0 B/s\), under the 100 kB/s that the package lists need\. Putting $archive in front; apt goes on from what it has fetched\.\$"
   expect "$log" "$image: an update that outlasts the budget exits 124" '^slow update: exit 124$'
-  expect "$log" "$image: and the helper says so, and that it put no other mirror in front" \
-    '^slow update: ::error::apt-install\.sh: apt-get update was not done within 3 s \(exit 124\)\. No other mirror was put in front for it: the script does that while it downloads packages, not for the package lists\.$'
+  expect "$log" "$image: and the helper says what was received, how fast, and from which mirrors" \
+    "^slow update: ::error::apt-install\.sh: apt-get update was not done within 8 s \(exit 124\)\. Received 0 B in that time \(0 B/s\)\. Mirror in front, slice by slice: $azure 0 B in [0-9]+ s \(0 B/s\); $archive 0 B in [0-9]+ s \(0 B/s\); $security 0 B in [0-9]+ s \(0 B/s\)[;.]"
   absent "$log" "$image: no download follows" '^slow update: slow: download-only:'
-  expect "$log" "$image: and no file under /etc/apt was written" '^slow update: no change$'
+  expect "$log" "$image: and both lists are put back" '^slow update: lists put back$'
+
+  if [ "$(grep -c "^update on course: slow: update: own list: $azure_first, image list: $azure_first\$" "$log")" = 3 ]; then
+    echo "ok: $image: an update on course keeps its mirror in front, slice after slice"
+  else
+    fail "$image: the update did not run three times with azure in front"
+  fi
+  expect "$log" "$image: the helper says why it stays" \
+    "^update on course: apt-install: [0-9]+ s of apt-get update with $azure in front received 0 B \(0 B/s\), at least the 0 B/s that the package lists need, so it stays in front\.\$"
+  expect "$log" "$image: that run goes on to install" '^update on course: slow: no-download: '
+  expect "$log" "$image: and installs" '^update on course: exit 0$'
+  expect "$log" "$image: and writes no file under /etc/apt" '^update on course: no change$'
+
+  for rate in x 01 -1; do
+    expect "$log" "$image: APT_INSTALL_LIST_RATE=$rate is refused" \
+      "^rate \[$rate\]: exit 2: apt-install: APT_INSTALL_LIST_RATE is a whole number of bytes a second, 0 or more\$"
+  done
 
   for label in 'self-hosted, slow' 'no list'; do
     if [ "$(grep -c "^$label: slow: download-only:" "$log")" = 1 ]; then
@@ -1224,6 +1401,13 @@ for image in ubuntu:22.04 ubuntu:24.04; do
     "^self-hosted, slow: ::error::apt-install\.sh: the packages were not downloaded within 3 s, so none was installed \(exit 124\)\. Fetched 2 kB in that time \($size/s\)\. This is a self-hosted runner, whose mirror lists the script does not reorder, so no other mirror was tried\.\$"
   expect "$log" "$image: without a list the helper says there was no other mirror" \
     "^no list: ::error::apt-install\.sh: the packages were not downloaded within 3 s, so none was installed \(exit 124\)\. Fetched 2 kB in that time \($size/s\)\. apt reads no mirror list with a second Ubuntu mirror here, so there was no other mirror to try\.\$"
+  if [ "$(grep -c '^no list, slow update: slow: update:' "$log")" = 1 ]; then
+    echo "ok: $image: no list: the update gets its budget in one piece"
+  else
+    fail "$image: no list: the update did not run exactly once"
+  fi
+  expect "$log" "$image: no list: and the helper says there was no other mirror for it" \
+    "^no list, slow update: ::error::apt-install\.sh: apt-get update was not done within 3 s \(exit 124\)\. Received 0 B in that time \(0 B/s\)\. apt reads no mirror list with a second Ubuntu mirror here, so there was no other mirror to try\.\$"
   show_log_if_failed "$log" "$started"
 done
 
