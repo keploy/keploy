@@ -350,15 +350,19 @@ type UnrecordedConn struct {
 
 	stopped atomic.Bool
 	ended   atomic.Bool
-	// running: a goroutine is following the connection, with a span open.
+	// running: a span is open and a goroutine follows the connection with it.
+	// Set once the span is open, and cleared before an idle close closes it,
+	// so bytes seen with it set are inside a span, and bytes seen with it
+	// clear open their own. spanMu orders those opens and that close.
 	running atomic.Bool
-	// armed: the span was closed for idleness, so the next Note starts a new
-	// active spell, and records where (resume).
-	armed atomic.Bool
+	spanMu  sync.Mutex
 	// seen is when bytes were last observed on this process's clock (UnixNano),
-	// the clock idleness is judged on. resume is when the first bytes after an
-	// idle close were on the wire, where the next span starts.
-	seen, resume atomic.Int64
+	// the clock idleness is judged on.
+	seen atomic.Int64
+
+	// ticks, set only by tests, stands in for the follower's ticker: each
+	// check of idleness is then one the test sent, as of the instant it names.
+	ticks <-chan time.Time
 
 	endCh   chan struct{}
 	endOnce sync.Once
@@ -384,15 +388,13 @@ func (u *UnrecordedConn) Note(at time.Time) {
 	if !u.stopped.Load() {
 		return
 	}
+	if u.running.Load() || u.ended.Load() {
+		return
+	}
 	if at.IsZero() {
 		at = time.Now()
 	}
-	if u.armed.Load() && u.armed.CompareAndSwap(true, false) {
-		u.resume.Store(at.UnixNano())
-	}
-	if !u.running.Load() && !u.ended.Load() && u.running.CompareAndSwap(false, true) {
-		u.start(at)
-	}
+	u.start(at)
 }
 
 // Stop says the connection stopped being recorded at `at` (zero: now): a span
@@ -405,9 +407,7 @@ func (u *UnrecordedConn) Stop(at time.Time) bool {
 	if at.IsZero() {
 		at = time.Now()
 	}
-	if u.running.CompareAndSwap(false, true) {
-		u.start(at)
-	}
+	u.start(at)
 	return true
 }
 
@@ -437,41 +437,46 @@ func (u *UnrecordedConn) End() {
 	})
 }
 
-// start opens a span from `from` and follows the connection with it. The span
-// opens before start returns, so a test case checked as soon as the stop or
-// the traffic has been seen is already covered; only closing it waits for the
-// follower.
+// start opens a span from `from` and follows the connection with it, unless a
+// span is open already. Either way one is open when start returns, so a test
+// case checked as soon as the stop or the traffic has been seen is already
+// covered; only closing it waits for the follower.
 func (u *UnrecordedConn) start(from time.Time) {
-	go u.follow(u.open(from))
+	u.spanMu.Lock()
+	defer u.spanMu.Unlock()
+	if u.running.Load() {
+		return
+	}
+	closeSpan := u.open(from)
+	u.running.Store(true)
+	go u.follow(closeSpan)
 }
 
 // follow keeps closeSpan's span open until the connection ends or falls idle.
 func (u *UnrecordedConn) follow(closeSpan func()) {
-	t := time.NewTicker(u.checkEvery)
-	defer t.Stop()
+	ticks := u.ticks
+	if ticks == nil {
+		t := time.NewTicker(u.checkEvery)
+		defer t.Stop()
+		ticks = t.C
+	}
 	for {
 		select {
 		case <-u.endCh:
 			closeSpan()
 			return
-		case now := <-t.C:
+		case now := <-ticks:
 			if now.UnixNano()-u.seen.Load() <= int64(u.idleGrace) {
 				continue
 			}
-			// Idle: the span ends here, and the next Note starts a new one
-			// from its own bytes.
-			u.resume.Store(0)
-			u.armed.Store(true)
-			closeSpan()
+			// Idle: the span ends here. A Note that saw running set came before
+			// the close, inside this span. The first one to see it clear
+			// waits for the close and opens the next span from its own bytes,
+			// so no later Note can open it past those.
+			u.spanMu.Lock()
 			u.running.Store(false)
-			// A Note that ran after the arming but before running was cleared
-			// saw a follower still running and left the restart to it: this
-			// one. (One after the clear restarts on its own; the CAS keeps it
-			// to one follower.)
-			if r := u.resume.Load(); r != 0 && !u.ended.Load() && u.running.CompareAndSwap(false, true) {
-				closeSpan = u.open(time.Unix(0, r))
-				continue
-			}
+			closeSpan()
+			u.spanMu.Unlock()
 			return
 		}
 	}
