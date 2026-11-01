@@ -38,9 +38,10 @@ import (
 //     worker: lists, SetScopeWorker) answers whether a test is open or not,
 //     after the open test's own, and is required of no test
 //     (serveKeyWorker). In a test's window each answers at most once in
-//     the staging's windows; between tests each is served as the pool
-//     slice's is (reused, or saturated on its last answer), so a poller
-//     that calls more often when replay is slower moves no verdict.
+//     the staging's windows; between tests each answers again, of any
+//     lifetime, through any door (walked by placement, then saturated on
+//     its last answer), so a poller that calls more often when replay is
+//     slower moves no verdict.
 //   - At its end, each test mock the test did not consume is evidence.
 //
 // The replay's mocks are staged on the proxy once per session, whole; exact
@@ -103,9 +104,9 @@ func (a *Agent) servePoolExactly(ctx context.Context) error {
 // which recordings it shows whether a test is open or not: key's worker
 // scope (SetScopeWorker), each name of it that key's pool slice holds, and
 // so staged. In a test's window the proxy answers each at most one request
-// in the staging's windows, after the open test's own; between tests it
-// serves each as the pool slice's (reused, or saturated on its last
-// answer). No test's end requires it
+// in the staging's windows, after the open test's own; between tests each
+// answers again, through any door (walked by placement, then saturated on
+// its last answer). No test's end requires it
 // (ExactTestOutcome reads a test's own mocks only). A test process claimed
 // again starts them afresh with the rest of its slice (restartKey). An
 // empty scope clears what the previous key or set showed.

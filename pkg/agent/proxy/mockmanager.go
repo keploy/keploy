@@ -928,6 +928,18 @@ func (m *MockManager) kindRevisions(kind models.Kind) (rev, staged, stored *uint
 	return rev, staged, stored
 }
 
+// bumpGapOrder moves the revisions and the staging generations, every
+// kind's and kind's, for a call between tests that first consumed one of the
+// worker scope's recordings of kind in the staging (consumeBetween): it
+// spends nothing, but the reads between tests hand it out after the rest
+// from now on (gapOrder), so an index built once per generation is built
+// again. It moves at most once per worker recording in a staging.
+func (m *MockManager) bumpGapOrder(kind models.Kind) {
+	atomic.AddUint64(&m.staged, 1)
+	atomic.AddUint64(&m.rev, 1)
+	m.bumpViewKind(kind)
+}
+
 // bumpConsumed moves the revisions for a consume or a spend under exact
 // serving of a mock of kind: Revision and RevisionByKind move, so a parser
 // that keys what it read on them reads again, as before; the staging
@@ -943,8 +955,11 @@ func (m *MockManager) bumpConsumed(kind models.Kind) {
 // makes. It moves when the staged set changes (a staging, a store into a
 // tree, a delete; outside exact serving a consume deletes the mock from its
 // tree, so it moves then too) and when exact serving installs a view (a test
-// opens or ends, a key restarts), never when a parser consumes or spends a
-// mock the view in force shows. So what a read gives (GetPerTestMocksInWindow,
+// opens or ends, a key restarts), and when a call between tests first
+// consumes one of the worker scope's recordings in the staging, which moves
+// it after the rest in the reads between tests (gapOrder, bumpGapOrder);
+// never otherwise when a parser consumes or spends a mock the view in force
+// shows. So what a read gives (GetPerTestMocksInWindow,
 // GetSessionMocks, GetUnFilteredMocks, GetStartupMocks, ...) while one
 // generation holds is what it gave when the generation began, less the mocks
 // MockSpent reports: a parser can build its index once per generation and

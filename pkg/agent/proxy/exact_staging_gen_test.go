@@ -230,6 +230,13 @@ func TestAStagingGenerationIndexIsTheReadUnderRandomChanges(t *testing.T) {
 			}
 			mk := shown[rng.Intn(len(shown))]
 			consume = !mk.IsProtocolPhase() && mm.exactView() != nil
+			if v := mm.exactView(); consume && v.test == "" && v.isWorker(mk.Name) && !v.usedBetween(mk.Name) {
+				// The first call between tests to consume one of the
+				// worker scope's spends nothing, and moves it after the
+				// rest in the reads between tests (gapOrder): the
+				// generation moves, so an index is built again.
+				consume = false
+			}
 			var ok bool
 			switch rng.Intn(3) {
 			case 0:

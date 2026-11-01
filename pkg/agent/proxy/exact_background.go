@@ -366,6 +366,18 @@ func (m *MockManager) spendByKindIn(v *exactView, mk *models.Mock, g *roundGuard
 		v.mu.Unlock()
 		return false, wait
 	}
+	if v.spendsBetween(mk, windowed) {
+		// Outside every window one of the worker scope's answers again
+		// (consumeBetween): it is listed spent for the next by-kind answer
+		// between tests (spentBackground), which reuses it once its kind's
+		// unused ones are used up, and the other doors still read it.
+		verdict, first := m.consumeBetween(mk)
+		v.mu.Unlock()
+		if first {
+			m.bumpGapOrder(mk.Kind)
+		}
+		return verdict == exactServed, nil
+	}
 	verdict := m.consumeOutside(mk, v.spendsInTests(mk, windowed))
 	v.mu.Unlock()
 	if verdict != exactServed {
@@ -380,7 +392,15 @@ var _ integrations.ByKindBackground = (*MockManager)(nil)
 // spentBackground reports whether name, one of the background's recordings,
 // is spent: consumed in the view, or for the staging.
 func (v *exactView) spentBackground(name string) bool {
-	return v.spentIn(name) || v.spentOutside(name)
+	return v.spentIn(name) || v.spentOutside(name) || v.usedBetween(name)
+}
+
+// usedBetween reports whether name, one of the worker scope's, answered a
+// call read with no test open in the staging, read in a view with no test
+// open (outsideState.between): it is no spend, and orders the gap's reads
+// alone.
+func (v *exactView) usedBetween(name string) bool {
+	return v.test == "" && v.outside != nil && v.isWorker(name) && v.outside.consumedBetween(name, v.epoch.Load())
 }
 
 // BackgroundCursor is, under the background rules, the stateful cursor of
