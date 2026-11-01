@@ -104,11 +104,78 @@ const (
 // address, answer an echo at one, and state what round F's answers held.
 type Caps struct{ BindAtWord, AnswerAtWord, FViewStated bool }
 
+// Scope is where mappings.yaml names a mock, as models.Mapping.MockPlaces
+// writes it: "test <name>" for a test's own list, "startup:", "worker:", or
+// another section. ScopeUnknown: no lookup, or a mock named in no place or
+// in more than one; a decision then reads Earlier's marks alone.
+type Scope string
+
+// The scopes a decision tells apart (ScopeTest names a test's own list).
+const (
+	ScopeUnknown Scope = ""
+	ScopeStartup Scope = "startup:"
+	ScopeWorker  Scope = "worker:"
+)
+
+// ScopeTest is the scope of test name's own list.
+func ScopeTest(name string) Scope { return Scope("test " + name) }
+
+// ScopesOf is the scope lookup (Input.Scope) of mappings.yaml m, one rule
+// for every adapter.
+func ScopesOf(m *models.Mapping) func(mock string) Scope {
+	places := m.MockPlaces()
+	return func(mock string) Scope {
+		if p := places[mock]; len(p) == 1 {
+			return Scope(p[0])
+		}
+		return ScopeUnknown
+	}
+}
+
+// Landing is where round F's call reached keploy.
+type Landing uint8
+
+const (
+	// LandedUnknown is the zero value: the adapter did not say.
+	LandedUnknown Landing = iota
+	// LandedOwn: in its own test's window.
+	LandedOwn
+	// LandedOther: in another test's window, Landed.Test.
+	LandedOther
+	// LandedBetween: between tests' windows.
+	LandedBetween
+)
+
+// Landed is where round F's call reached keploy; Test names the other test
+// of LandedOther.
+type Landed struct {
+	Where Landing
+	Test  string
+}
+
+// String is l as a line names it.
+func (l Landed) String() string {
+	switch l.Where {
+	case LandedOwn:
+		return "its own test's window"
+	case LandedOther:
+		if l.Test == "" {
+			return "another test's window"
+		}
+		return l.Test + "'s window"
+	case LandedBetween:
+		return "between tests"
+	}
+	return "a window keploy was not told"
+}
+
 // Input is one call to decide: its drifted leaves, both shapes, when it was
 // recorded and when round F's call reached keploy, the earlier places, the
 // raw recordings, its answer's leaves, its window, the test's givens, which
-// test and mock it is, the Mode, the adapter's Caps, and the noise
-// keploy.yml declares (word -1: the whole field).
+// test and mock it is, the Mode, the adapter's Caps, the noise keploy.yml
+// declares (word -1: the whole field), each mock's scope in mappings.yaml
+// (nil: none known; read it through ScopeOf), and where round F's call
+// landed.
 type Input struct {
 	Drifts    *DriftCache
 	Drift     []string
@@ -125,6 +192,16 @@ type Input struct {
 	Mode      Mode
 	Caps      Caps
 	Declared  func(field string, word int) bool
+	Scope     func(mock string) Scope
+	Landed    Landed
+}
+
+// ScopeOf is mock's scope by in.Scope, ScopeUnknown where in has none.
+func (in Input) ScopeOf(mock string) Scope {
+	if in.Scope == nil {
+		return ScopeUnknown
+	}
+	return in.Scope(mock)
 }
 
 // Decision is one changed word: where it stands, its recorded and round F

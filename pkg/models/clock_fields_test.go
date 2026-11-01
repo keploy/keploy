@@ -11,6 +11,11 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// declaredHoldsStep is holdsStep as variables.go declares it: package
+// variables are all set before any init runs, so it holds the default even
+// where another file's init registers a reading of a Step.
+var declaredHoldsStep = holdsStep
+
 // The ClockOffset and ClockWord of a keploy before Why, Step and Form, field
 // for field and tag for tag: what every mock file holds today.
 type clockWordBefore struct {
@@ -119,12 +124,13 @@ func TestClockFieldsMeetAndHold(t *testing.T) {
 	}
 	stepped := read
 	stepped.Step = time.Hour
+	defer func(f func(ClockOffset, time.Time, time.Duration, time.Time, time.Time) bool) { holdsStep = f }(holdsStep)
+	holdsStep = declaredHoldsStep
 	if stepped.Holds(at, time.Millisecond, from, to) {
 		t.Error("a read with a Step holds with no keploy to read it")
 	}
 	apart := read
 	apart.Step = StepApart
-	defer func(f func(ClockOffset, time.Time, time.Duration, time.Time, time.Time) bool) { holdsStep = f }(holdsStep)
 	var asked ClockOffset
 	holdsStep = func(o ClockOffset, _ time.Time, _ time.Duration, _, _ time.Time) bool { asked = o; return true }
 	if !stepped.Holds(at, time.Millisecond, from, to) || asked != stepped {

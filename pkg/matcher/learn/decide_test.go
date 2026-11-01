@@ -5,8 +5,14 @@ import (
 	"strings"
 	"testing"
 
+	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/variables"
 )
+
+// The seams as decide.go declares them: package variables are all set
+// before any init runs, so these hold the defaults even where another file's
+// init registers an order or a clock.
+var declaredDecideBy, declaredClockInWindow, declaredClockSinceBegin = decideBy, clockInWindow, clockSinceBegin
 
 // TestReplayAndLearnShareOneWordRule (TY3): variables.Words, the word rule
 // replay reads, finds the runs learn's isWord finds.
@@ -45,6 +51,9 @@ func TestReplayAndLearnShareOneWordRule(t *testing.T) {
 // yet, a leaf whose words do not pair by position whole, and never gives a
 // Clock, a Value or a fresh word.
 func TestDecideWithNoOrderRefusesEveryChangedWord(t *testing.T) {
+	was := decideBy
+	decideBy = refuseAll
+	t.Cleanup(func() { decideBy = was })
 	leaves := func(kv ...string) map[string]Leaf {
 		m := map[string]Leaf{}
 		for i := 0; i < len(kv); i += 2 {
@@ -98,18 +107,61 @@ func TestDecideWithNoOrderRefusesEveryChangedWord(t *testing.T) {
 	}
 }
 
-// TestTheSeamsDefaultToMainsReadings: until v5's order and clock register,
-// Decide's order refuses every word, and its clock seams are main's
-// readings (offsetReading, sinceTestBegin).
+// TestTheSeamsDefaultToMainsReadings: as declared, Decide's order refuses
+// every word, and its clock seams are main's readings (offsetReading,
+// sinceTestBegin); Decide asks whichever order is registered.
 func TestTheSeamsDefaultToMainsReadings(t *testing.T) {
 	same := func(a, b interface{}) bool { return reflect.ValueOf(a).Pointer() == reflect.ValueOf(b).Pointer() }
-	if !same(decideBy, refuseAll) || !same(clockInWindow, offsetReading) || !same(clockSinceBegin, sinceTestBegin) {
+	if !same(declaredDecideBy, refuseAll) || !same(declaredClockInWindow, offsetReading) || !same(declaredClockSinceBegin, sinceTestBegin) {
 		t.Fatal("a seam does not default to main's reading")
 	}
-	if ln, ok := clockSinceBegin(Learned{Kind: KindNoise}); ok || ln.Kind != KindNoise {
+	if ln, ok := declaredClockSinceBegin(Learned{Kind: KindNoise}); ok || ln.Kind != KindNoise {
 		t.Errorf("clockSinceBegin of noise = %+v, %v", ln, ok)
 	}
-	if _, why, ok := clockInWindow("body.at", typedInstant{}, typedInstant{}, nil, nil); ok || why != "" {
+	if _, why, ok := declaredClockInWindow("body.at", typedInstant{}, typedInstant{}, nil, nil); ok || why != "" {
 		t.Errorf("clockInWindow with no window = %q, %v", why, ok)
+	}
+	was := decideBy
+	t.Cleanup(func() { decideBy = was })
+	decideBy = func(in Input) []Decision { return []Decision{{Line: in.Mock}} }
+	if ds := Decide(Input{Mock: "mock-9"}); len(ds) != 1 || ds[0].Line != "mock-9" {
+		t.Errorf("Decide does not ask the registered order: %+v", ds)
+	}
+}
+
+// TestInputNamesEachMocksScopeAndWhereTheCallLanded: ScopesOf reads
+// mappings.yaml's places (a test's own list, startup:, worker:, any other
+// section), a mock named in no place or in two is unknown, an Input with
+// no lookup knows no scope, and Landed names the window in a line.
+func TestInputNamesEachMocksScopeAndWhereTheCallLanded(t *testing.T) {
+	m := &models.Mapping{
+		TestCases: []models.MappedTestCase{{ID: "test-1", Mocks: []models.MockEntry{{Name: "mock-1"}, {Name: "mock-2"}}}},
+		Startup:   []models.MockEntry{{Name: "mock-3"}},
+		Worker:    []models.MockEntry{{Name: "mock-4"}, {Name: "mock-2"}},
+		Shared:    []models.MockEntry{{Name: "mock-5"}},
+	}
+	in := Input{Scope: ScopesOf(m)}
+	for mock, want := range map[string]Scope{
+		"mock-1": ScopeTest("test-1"), "mock-2": ScopeUnknown, "mock-3": ScopeStartup,
+		"mock-4": ScopeWorker, "mock-5": "shared:", "mock-6": ScopeUnknown,
+	} {
+		if got := in.ScopeOf(mock); got != want {
+			t.Errorf("scope of %s = %q; want %q", mock, got, want)
+		}
+	}
+	if got := (Input{}).ScopeOf("mock-1"); got != ScopeUnknown {
+		t.Errorf("an Input with no lookup knows %s's scope: %q", "mock-1", got)
+	}
+	if got := ScopesOf(nil)("mock-1"); got != ScopeUnknown {
+		t.Errorf("no mappings.yaml knows a scope: %q", got)
+	}
+	for l, want := range map[Landed]string{
+		{}: "a window keploy was not told", {Where: LandedOwn}: "its own test's window",
+		{Where: LandedOther, Test: "test-2"}: "test-2's window", {Where: LandedOther}: "another test's window",
+		{Where: LandedBetween}: "between tests",
+	} {
+		if got := l.String(); got != want {
+			t.Errorf("%+v names %q; want %q", l, got, want)
+		}
 	}
 }
