@@ -353,6 +353,15 @@ type matchOptions struct {
 	// bodiesBuilt, when set, counts the live request bodies the command
 	// builds (strictGate.liveRequestBody).
 	bodiesBuilt *int
+	// compared, when set, counts the candidates the strict gate compares
+	// with the live request (strictGate.compare), so a test can check what
+	// a command costs without timing it.
+	compared *int
+	// eagerGate gates each fallback of a COM_STMT_EXECUTE as the walk meets
+	// it, as the matcher did before it deferred the gate past the walk
+	// (execFallbacks): the reference a test checks that the deferred gate
+	// serves, reports and learns the same against.
+	eagerGate bool
 	// probed, when set, makes the match a dry one (ownRepeats): the scan picks
 	// the recording that would answer the command, and the match stops there
 	// and writes it to *probed (nil when no recording would), before any
@@ -1258,10 +1267,13 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 	// when strict enforcement, the rule of exact serving or detection first
 	// reads it.
 	gate := newStrictGate(noiseEngine, logger, req.Header.Type, &req.PacketBundle, liveStatementParams, liveStmtQuery, userBodyNoise)
-	gate.bodiesBuilt = opts.bodiesBuilt
+	gate.bodiesBuilt, gate.compared = opts.bodiesBuilt, opts.compared
 	if opts.eagerBody {
 		gate.liveRequestBody()
 	}
+	// fallbacks are a COM_STMT_EXECUTE's FIFO and score candidates, gated
+	// after the walk, in the selection's rank (execFallbacks).
+	fallbacks := execFallbacks{gate: gate, sameStatementOnly: sameStatementOnly, testsOwn: testsOwn, eager: opts.eagerGate}
 
 	var (
 		// Score-based candidate tracking. Every non-definitive matcher returns
@@ -1309,18 +1321,16 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 		// exists for the query, and no recording with the command's
 		// parameters, defExecMock, either) separately so a stale
 		// earlier-test read-back mock living in the startup/session tier
-		// cannot win over the current test's own in-window row.
-		fifoExecResp       *mysql.Response
-		fifoExecMock       *models.Mock
-		fifoExecRespWindow *mysql.Response
-		fifoExecMockWindow *models.Mock
+		// cannot win over the current test's own in-window row. The walk
+		// lists them in fallbacks, which picks them after it
+		// (fallbacks.windowPick, fallbacks.anyPick).
 
 		// defExecResp/defExecMock hold a definitive (query+params exact)
 		// COM_STMT_EXECUTE match that is NOT an in-window per-test mock
 		// (i.e. it lives in the startup/session/connection tier). Used only
 		// when no in-window definitive match exists, so a genuinely unique
 		// reusable read still resolves while an in-window row always wins.
-		// It ranks above the any-tier FIFO candidate (fifoExecMock).
+		// It ranks above the any-tier FIFO candidate (fallbacks.anyPick).
 		// defExecMock is one recorded outside every recorded test's window
 		// (at start-up or between two tests): the first of the best
 		// outsideGapRank, so the one of the command's own gap. Under exact
@@ -1709,6 +1719,7 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 						// A match on the parameters alone (the recorded
 						// statement unknown) is weaker: it does not stop the
 						// scan, see paramsOnlyMockWindow.
+						fallbacks.addDefinitive(mock)
 						if !gate.allows(mock) {
 							continue
 						}
@@ -1768,31 +1779,15 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 						if !queryExact {
 							trackNearest(mock, expectedQuery, "")
 						}
-						// Strict gate: a query-exact candidate with drifted bound
-						// parameters may only become a FIFO/score candidate when
-						// the drifting params (body.parameters.N.value) are
-						// covered by learned/user noise. One gate call covers both
-						// the FIFO and score branches below.
-						if (queryExact || c > maxMatchedCount) && !gate.allows(mock) {
-							continue
-						}
-						if queryExact && sameStatementOnly && !gate.allowsDrift(mock) {
-							continue
-						}
-						if queryExact {
-							if testsOwn(mock) {
-								if fifoExecMockWindow == nil {
-									fifoExecRespWindow, fifoExecMockWindow = &mock.Spec.MySQLResponses[0], mock
-								}
-							} else if fifoExecMock == nil {
-								fifoExecResp, fifoExecMock = &mock.Spec.MySQLResponses[0], mock
-							}
-						}
-						if c > maxMatchedCount {
-							// fallback score-based candidate: a recording of the
-							// statement's shape, or one whose statement is
-							// unknown, without exact serving (sameStatementOnly)
-							maxMatchedCount, matchedResp, matchedMock = c, &mock.Spec.MySQLResponses[0], mock
+						// A query-exact candidate is a FIFO candidate, and
+						// one that scored the score candidate's: a recording
+						// of the statement's shape, or one whose statement
+						// is unknown, without exact serving
+						// (sameStatementOnly). The strict gate decides on
+						// them after the walk, when the selection reads its
+						// pick (execFallbacks).
+						if queryExact || c > 0 {
+							fallbacks.add(mock, c, queryExact)
 						}
 					}
 
@@ -1828,7 +1823,7 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 		settled := queryMatched || stmtMatched ||
 			// See firstPass: the window's FIFO candidate, and its match on the
 			// parameters alone, outrank every other fallback.
-			(windowPass && req.Header.Type == sCOM_STMT_EXEC && (fifoExecMockWindow != nil || paramsOnlyMockWindow != nil)) ||
+			(windowPass && req.Header.Type == sCOM_STMT_EXEC && (paramsOnlyMockWindow != nil || fallbacks.windowPick() != nil)) ||
 			// With no window, the keyed pass has compared every candidate of
 			// the live query and every mock the open test owns (exact
 			// serving: the per-test tier is the open test's unanswered mocks,
@@ -1838,8 +1833,8 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 			// on the parameters alone and its FIFO candidate rank above
 			// every unowned one, and the FIFO and definitive candidates of
 			// the live query above the rest.
-			(keyedExec && (fifoExecMock != nil || defExecMock != nil ||
-				fifoExecMockWindow != nil || paramsOnlyMockWindow != nil)) ||
+			(keyedExec && (defExecMock != nil || paramsOnlyMockWindow != nil ||
+				fallbacks.windowPick() != nil || fallbacks.anyPick() != nil)) ||
 			// The CLOSE pass scored every recorded CLOSE.
 			(req.Header.Type == sCOM_STMT_CLOSE && matchedMock != nil)
 		if !firstPass || settled {
@@ -1859,8 +1854,7 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 		queryMatched, stmtMatched = false, false
 		bestPartialMock, bestPartialQuery = nil, ""
 		nearestMock, nearestQuery, nearestPrefix = nil, "", 0
-		fifoExecResp, fifoExecMock = nil, nil
-		fifoExecRespWindow, fifoExecMockWindow = nil, nil
+		fallbacks.reset()
 		defExecResp, defExecMock, defExecRank = nil, nil, 0
 		defExecRespTest, defExecMockTest = nil, nil
 		paramsOnlyRespWindow, paramsOnlyMockWindow = nil, nil
@@ -1941,9 +1935,15 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 		// takes an earlier gap's recording of its request when the gap
 		// before that window holds one, and a command replayed two or more
 		// tests after its gap a later gap's (outsideGapRank).
+		//
+		// The FIFO candidates and the score candidate (6, when none of the
+		// five is found) are gated here, in this rank, each when it is
+		// read (execFallbacks): the walk only listed them.
 		chosenResp, chosenMock := paramsOnlyRespWindow, paramsOnlyMockWindow
+		inWindow := chosenMock != nil
 		if chosenMock == nil {
-			chosenResp, chosenMock = fifoExecRespWindow, fifoExecMockWindow
+			chosenMock = fallbacks.windowPick()
+			chosenResp, inWindow = recordedResponse(chosenMock), chosenMock != nil
 		}
 		if chosenMock == nil && defExecMock != nil {
 			chosenResp, chosenMock = defExecResp, defExecMock
@@ -1952,24 +1952,32 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 			chosenResp, chosenMock = defExecRespTest, defExecMockTest
 		}
 		if chosenMock == nil {
-			chosenResp, chosenMock = fifoExecResp, fifoExecMock
+			chosenMock = fallbacks.anyPick()
+			chosenResp = recordedResponse(chosenMock)
 		}
 		if chosenMock == nil && paramsOnlyMock != nil {
 			chosenResp, chosenMock = paramsOnlyResp, paramsOnlyMock
 		}
 		if chosenMock != nil {
-			if debugOn && (matchedMock == nil || matchedMock != chosenMock) {
-				logger.Debug("COM_STMT_EXECUTE FIFO fallback selected next unconsumed mock in recorded order",
-					zap.String("mock_name", chosenMock.Name),
-					zap.Bool("in_window", chosenMock == fifoExecMockWindow || chosenMock == paramsOnlyMockWindow),
-					zap.String("score_based_mock", func() string {
-						if matchedMock != nil {
-							return matchedMock.Name
-						}
-						return "<none>"
-					}()))
+			if debugOn {
+				if scored := fallbacks.scorePick(); scored != chosenMock {
+					name := "<none>"
+					if scored != nil {
+						name = scored.Name
+					}
+					logger.Debug("COM_STMT_EXECUTE FIFO fallback selected next unconsumed mock in recorded order",
+						zap.String("mock_name", chosenMock.Name),
+						zap.Bool("in_window", inWindow),
+						zap.String("score_based_mock", name))
+				}
 			}
 			matchedResp, matchedMock = chosenResp, chosenMock
+		} else if matchedMock = fallbacks.scorePick(); matchedMock != nil {
+			matchedResp = recordedResponse(matchedMock)
+		} else {
+			// A miss: its report reads the gate's diagnostics as the walk
+			// gave them.
+			fallbacks.diagnose()
 		}
 	}
 

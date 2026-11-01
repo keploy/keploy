@@ -95,6 +95,21 @@ func MatchCommandBodiesForTest(ctx context.Context, logger *zap.Logger, req mysq
 	return resp, ok, missText, built, err
 }
 
+// MatchCommandGateForTest is MatchCommandForTest that also returns how many
+// candidates the strict gate compared with the live request
+// (matchOptions.compared). With eager the gate decides on each fallback of a
+// COM_STMT_EXECUTE as the walk meets it, as the matcher did before it
+// deferred the gate past the walk (matchOptions.eagerGate).
+func MatchCommandGateForTest(ctx context.Context, logger *zap.Logger, req mysql.Request, db integrations.MockMemDb, dctx *wire.DecodeContext, eng *mocknoise.Engine, eager bool) (*mysql.Response, bool, string, int, error) {
+	compared := 0
+	resp, ok, miss, err := matchCommandWith(ctx, logger, req, db, dctx, eng, nil, matchOptions{compared: &compared, eagerGate: eager})
+	missText := ""
+	if miss != nil {
+		missText = fmt.Sprintf("%+v", *miss)
+	}
+	return resp, ok, missText, compared, err
+}
+
 // NoiseEngineForTest is the schema-noise engine matchCommand runs with, with
 // detection (auto-replay learning request-body noise) and strict enforcement
 // on or off.
