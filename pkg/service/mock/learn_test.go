@@ -641,3 +641,52 @@ func TestKeployMockSaysEveryTeachingOfARecordingAcrossWindows(t *testing.T) {
 		t.Fatalf("said as learned elsewhere %+v, on the pool %v; want %+v and nothing on the pool", out.elsewhere, out.pool, want)
 	}
 }
+
+// A recording no test's mapping lists is said, on the line for what a call
+// in another window taught it and on the line for what its own pairing
+// voided, as the set's start-up and pool's, even when the mapping lists it
+// under worker:: keploy mock record serves a worker: entry as the pool's
+// (unknownBesideTests), so it names no worker scope. The receipt names no
+// owner test for it either.
+func TestKeployMockSaysARecordingNoTestOwnsAsTheSetsStartUpAndPools(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	minute := models.ClockOffset{Min: -time.Minute, Max: -time.Minute, Res: time.Millisecond}
+	inA := []models.TeachingWindow{{Test: "o::A", At: time.Date(2026, 11, 1, 9, 0, 0, 0, time.UTC)}}
+	mp := &models.Mapping{
+		TestCases: []models.MappedTestCase{{ID: "o::A", Mocks: []models.MockEntry{{Name: "mock-1"}}}},
+		Worker:    []models.MockEntry{{Name: "mock-w1"}, {Name: "mock-w2"}},
+	}
+	// A poll in o::A's window taught both worker: recordings; a call of
+	// the round consumed mock-w2, so its own pairing wins.
+	consumed := []models.MockState{{Name: "mock-w2", Clocks: map[string]models.ClockOffset{"lease_at": minute}}}
+	elsewhere := []models.MockState{
+		{Name: "mock-w1", Clocks: map[string]models.ClockOffset{"claimed_at": minute}, TaughtIn: inA},
+		{Name: "mock-w2", Clocks: map[string]models.ClockOffset{"dirty_at": minute}, TaughtIn: inA},
+	}
+	core, logs := observer.New(zap.InfoLevel)
+	m := &mockService{config: &config.Config{}, mockDB: &mergingStore{}, mappingDB: setTableDB{mapping: mp}, logger: zap.New(core), instrumentation: clientTestsInstr{reads: true}}
+	out, err := m.keepLearned(context.Background(), "s", consumed, nil, elsewhere, nil, map[string][]models.MockEntry{"o::A": {{Name: "mock-1"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const pool = "the set's start-up and pool"
+	learned := logs.FilterMessageSnippet("from calls made in other windows").AllUntimed()
+	if len(learned) != 1 || learned[0].ContextMap()["mock"] != "mock-w1" || learned[0].ContextMap()["test"] != pool {
+		t.Fatalf("%d learned lines, the first %v; want mock-w1's alone, said as %s", len(learned), firstContext(learned), pool)
+	}
+	void := logs.FilterMessageSnippet("voided what a call made in another window taught").AllUntimed()
+	if len(void) != 1 || void[0].ContextMap()["mock"] != "mock-w2" || void[0].ContextMap()["test"] != pool {
+		t.Fatalf("%d voided lines, the first %v; want mock-w2's alone, said as %s", len(void), firstContext(void), pool)
+	}
+	if len(out.elsewhere) != 1 || out.elsewhere[0].Mock != "mock-w1" || out.elsewhere[0].Owner != "" {
+		t.Fatalf("said as learned elsewhere %+v; want mock-w1's, with no owner test", out.elsewhere)
+	}
+}
+
+// firstContext is the first line's fields, nil for none.
+func firstContext(lines []observer.LoggedEntry) map[string]interface{} {
+	if len(lines) == 0 {
+		return nil
+	}
+	return lines[0].ContextMap()
+}
