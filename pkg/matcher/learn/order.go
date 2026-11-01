@@ -321,6 +321,15 @@ func evHolds(t *readerText, w string) bool {
 	return h
 }
 
+// unreadFloorBits is the wordBits under which a word is no evidence at a
+// place keploy cannot read round F's side of (a recording F did not serve,
+// or served with no view it can read): a word of one or two characters of
+// any class (two of letters and digits carry 10.3 bits), or three digits.
+// Words that short stand all over a set, so one at such a place names no
+// source, and it is fresh. A 4-hex word there stays refused as unknown, and
+// a place keploy reads counts at any length.
+const unreadFloorBits = 11
+
 // word decides one changed word that is no instant (any other word), at
 // its address (w.At) in text, the text the leaf at bare opens to.
 func (dc *decider) word(path string, bare variables.Address, rec, live, text string, w readWord) Decision {
@@ -335,10 +344,16 @@ func (dc *decider) word(path string, bare variables.Address, rec, live, text str
 	orderUnknown(dc.in, ps, cand)
 	swapUnknown(dc.in, ps, w)
 	// aside: places that held R's word where F's did not follow, too
-	// little to be a conflict; a fresh word's line names them.
-	var src, outside, conflict, unknown, aside []evPlace
+	// little to be a conflict; a fresh word's line names them. unread:
+	// places keploy cannot read, which say nothing of a word this short.
+	var src, outside, conflict, unknown, aside, unread []evPlace
+	short := wordBits(w.Rec) < unreadFloorBits && wordBits(w.Live) < unreadFloorBits
 	for _, p := range ps {
 		ev, read := evidenceAt(p, w.Rec, w.Live)
+		if short && (!read || ev == evUnknown && p.fUnstated) {
+			unread = append(unread, p)
+			continue
+		}
 		if !read {
 			unknown = append(unknown, evPlace{name: p.name, why: "past the call's budget"})
 			continue
@@ -387,6 +402,10 @@ func (dc *decider) word(path string, bare variables.Address, rec, live, text str
 		case evShown:
 			outside = append(outside, p)
 		case evUnknown:
+			if short && g.fUnread() {
+				unread = append(unread, p)
+				break
+			}
 			p.why = setUnknownWhy(g, dc.in.At)
 			unknown = append(unknown, p)
 		case evDisproven:
@@ -449,13 +468,15 @@ func (dc *decider) word(path string, bare variables.Address, rec, live, text str
 	if r, no := dc.unanswerable(path, bare, rec, live, echo, unnamed); no {
 		return r
 	}
-	rule := "no place before the call shows it; bound at its first call"
+	rule := "no place before the call shows it"
 	if len(aside) > 0 {
 		p := aside[0]
-		rule = "no place before the call shows it (" + p.name + " held " + strconv.Quote(w.Rec) + " and round F gave " + gaveAt(p, w.Live) +
-			" there: set aside, as a copy moves with its source); bound at its first call"
+		rule += " (" + p.name + " held " + strconv.Quote(w.Rec) + " and round F gave " + gaveAt(p, w.Live) + " there: set aside, as a copy moves with its source)"
 	}
-	d := dc.learned(path, at, n, w.Rec, w.Live, OutcomeFresh, rule+answeredAt(echo, rec), names(aside))
+	if len(unread) > 0 {
+		rule += " (keploy cannot read round F's side of " + unread[0].name + ", and a word under " + strconv.Itoa(unreadFloorBits) + " bits is no evidence at such a place)"
+	}
+	d := dc.learned(path, at, n, w.Rec, w.Live, OutcomeFresh, rule+"; bound at its first call"+answeredAt(echo, rec), names(append(aside, unread...)))
 	d.Echo = echo
 	return d
 }
