@@ -1,6 +1,7 @@
 package learn
 
 import (
+	"encoding/base64"
 	"strings"
 	"testing"
 	"time"
@@ -424,5 +425,44 @@ func TestOutcomeOneNewValueAtSeveralPlacesOfACallIsOneVariable(t *testing.T) {
 	for i, d := range ds[:2] {
 		other := []string{"mock-300 u.set.id", "mock-300 q.id"}[i]
 		oRefused(t, "one recorded value round F sent as two new values", d, "two-sources", other)
+	}
+}
+
+// A field whose adapter names decode steps at its place (Input.PlaceOf, a
+// Mongo field read as base64) is read in the text those steps open: each
+// changed word is named through the steps, so its address reads its own
+// recorded and round F values. A step that does not open both runs, or
+// opens them to one text (only the encoding changed), refuses the field
+// whole, as written, at its place with no step.
+func TestOutcomeAnAdaptersStepsOpenAFieldBeforeItsWordsAreRead(t *testing.T) {
+	b64 := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
+	withB64 := func(l Leaf, a bool) (string, bool) { s, ok := VarPlace(l, true); return s + "|b64", ok }
+	for _, c := range []struct {
+		name, r, f, at string
+		word           int
+		refused        bool
+	}{
+		{"the steps open both runs", b64("order-17"), b64("order-42"), "body.name|b64#1", 1, false},
+		{"a step opens one run", b64("order-17"), "order-42", "body.name", -1, true},
+		{"a step opens neither run", "order-17", "order-42", "body.name", -1, true},
+		{"only the encoding changed", b64("order-17"), strings.TrimRight(b64("order-17"), "="), "body.name", -1, true},
+	} {
+		in := oInput("body.name", c.r, c.f, nil, nil)
+		in.PlaceOf = withB64
+		ds := Decide(in)
+		if len(ds) != 1 {
+			t.Errorf("%s: %s; want one decision", c.name, oDescribe(ds))
+			continue
+		}
+		d := ds[0]
+		if w, ok := d.At.WordOf(c.r); !ok || w != d.Recorded {
+			t.Errorf("%s: At %q reads %q, %v in the recording; its Recorded is %q", c.name, d.At, w, ok, d.Recorded)
+		}
+		if w, ok := d.At.WordOf(c.f); !ok || w != d.Full {
+			t.Errorf("%s: At %q reads %q, %v in round F; its Full is %q", c.name, d.At, w, ok, d.Full)
+		}
+		if d.At.String() != c.at || d.At.Word != c.word || (d.Outcome == OutcomeRefused) != c.refused {
+			t.Errorf("%s: %s at %q word %d; want at %q word %d, refused %v", c.name, oDescribe(ds), d.At, d.At.Word, c.at, c.word, c.refused)
+		}
 	}
 }
