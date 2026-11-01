@@ -37,11 +37,11 @@ type decider struct {
 	ps       []evPlace
 	x        *readerIndex
 	allScope bool
-	// set: the recordings the set read once (Input.Given); sw: the words
-	// of each recording outside the call's scope (setWords), read once.
+	// set: the recordings the set read once (Input.Given); op: what each
+	// recording outside the call's scope holds (outside), read once.
 	set    []GivenPlaces
-	sw     []givenWords
-	swDone bool
+	op     *offsetPlaces
+	opDone bool
 }
 
 // decideWords decides every changed word of in, and the field each
@@ -489,6 +489,31 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	}
 	if fine := copies(true); len(fine) > 0 {
 		return dc.copied(path, at, n, r, l, fine, "the same moment, at a cut finer than a millisecond, was sent before the call in both runs: one read, copied")
+	}
+
+	// An answer outside the call's scope that would bind it at step 3 were
+	// it of the scope: a source outside the scope, refused naming the edit,
+	// as a word's is; never a read of the clock. So is one main's echo of the
+	// recordings outside the scope refuses (echoedElsewhere): there a
+	// recording's instants are read as recorded, F's view of them is not
+	// kept, so an instant only F's view of one holds is a Clock, as on main.
+	var gaveOutside []string
+	for _, h := range hs {
+		if p := h.p; p.side == Response && !p.given && !inScope(p) && p.state == stateBefore && h.hr && (p.fUnstated || h.hl) {
+			gaveOutside = append(gaveOutside, p.mock)
+		}
+	}
+	if mock, ok := dc.echoedOutside(c); ok {
+		gaveOutside = append(gaveOutside, mock)
+	}
+	if len(gaveOutside) > 0 {
+		if gaveOutside[0] == "" {
+			return dc.refuse(path, at, n, r, l, RefusalPick, "round F's moment, or the recorded one, stands in an answer round F gave before the call outside its scope", nil, Edit{Kind: EditReRecord}, dc.wordNoise(path, n))
+		}
+		m := gaveOutside[0]
+		return dc.refuse(path, at, n, r, l, RefusalAnotherScope,
+			"the moment stands in "+m+"'s answer, which round F gave before the call outside its scope: a copy or a pick from it, never a read of the clock; keploy binds only within a test and the start-up", []string{m},
+			Edit{Kind: EditMoveToMocks, Mock: m}, Edit{Kind: EditMoveToStartup, Mock: m}, dc.wordNoise(path, n))
 	}
 
 	// 5. Clock: the call's own window holds it, as a plain read; or, where
