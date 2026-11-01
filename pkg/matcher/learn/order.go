@@ -503,9 +503,8 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	// An answer outside the call's scope that would bind it at step 3 were
 	// it of the scope: a source outside the scope, refused naming the edit,
 	// as a word's is; never a read of the clock. So is one main's echo of the
-	// recordings outside the scope refuses (echoedElsewhere): there a
-	// recording's instants are read as recorded, F's view of them is not
-	// kept, so an instant only F's view of one holds is a Clock, as on main.
+	// recordings outside the scope refuses (echoedElsewhere), and one round
+	// F's view of a recording of the set holds (echoedOutside).
 	var gaveOutside []string
 	for _, h := range hs {
 		if p := h.p; p.side == Response && !p.given && !inScope(p) && p.state == stateBefore && h.hr && (p.fUnstated || h.hl) {

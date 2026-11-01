@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 // Rows for the evidence at a place (Decide): which earlier places count,
@@ -216,10 +217,11 @@ func TestOutcomeARecordingFServedWithNoViewStatedLeavesTheWordUnknown(t *testing
 // holds too: a source outside the scope, refused naming the edit as a
 // word's is, never a read of the clock. On main the first binds to the
 // other test's answer and the second is a Clock: both stricter here. The
-// call's own test's answer binds it. The set's recordings keep their
-// instants as recorded, not round F's view of them, so an instant only F's
-// serve of one holds is a Clock, as on main (it goes red at replay where
-// the application copies it, never green).
+// call's own test's answer binds it. A recording of the set is read as
+// recorded where round F gave it so; where F's serve of it was told with a
+// view of its own (kept under the proven switch), F's moment stands in what
+// F gave there, so the instant is refused naming the edit too, where main
+// learns a Clock.
 func TestOutcomeAnInstantAnAnswerOutsideTheScopeGaveIsRefusedNamingTheEdit(t *testing.T) {
 	const p = "body.seenAt"
 	fAt := oAt.Add(time.Hour)
@@ -244,9 +246,21 @@ func TestOutcomeAnInstantAnAnswerOutsideTheScopeGaveIsRefusedNamingTheEdit(t *te
 	}
 	iValue(t, "an instant the test's own answer gave", oWord(t, Decide(call([]Raw{served()})), rec, live), "mock-41")
 
-	in := call(nil)
-	in.Given = func() ([]GivenPlaces, error) { return []GivenPlaces{PlacesOf(served())}, nil }
-	iClock(t, "an instant a recording of the set gave, read as recorded", oWord(t, Decide(in), rec, live))
+	set := func(view bool) Input {
+		g := PlacesOf(served())
+		if view {
+			g.fView = viewAnswerMoments(ans(live))
+			for i := range g.fView {
+				g.fView[i].at = g.at
+			}
+		}
+		in := call(nil)
+		in.Given = func() ([]GivenPlaces, error) { return []GivenPlaces{g}, nil }
+		return in
+	}
+	iClock(t, "an instant a recording of the set F gave as recorded holds", oWord(t, Decide(set(false)), rec, live))
+	t.Setenv(provenswitch.Env, "1")
+	oRefused(t, "an instant round F's view of a recording of the set holds", oWord(t, Decide(set(true)), rec, live), "another-scope", "mock-41")
 }
 
 // A recording of the set (another test's answer, read once for the set)
