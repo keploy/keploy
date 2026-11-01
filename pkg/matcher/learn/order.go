@@ -177,6 +177,8 @@ func (dc *decider) word(path string, at variables.Address, rec, live string, w r
 		if ev == evNone || ev == evDisproven {
 			if tokenShown(p, w) {
 				ev = evShown
+			} else if ev == evNone && dc.gluedAt(p, w) {
+				ev, p.why = evUnknown, "glued to the bytes around it, in a body that declares no media type (no Content-Type): keploy cannot tell the words the application was given there from the bytes that frame them"
 			}
 		}
 		switch ev {
@@ -204,7 +206,7 @@ func (dc *decider) word(path string, at variables.Address, rec, live string, w r
 		case evShown:
 			outside = append(outside, p)
 		case evUnknown:
-			p.why = "round F gave it there; keploy keeps its words, and cannot tell this word did not come from it"
+			p.why = setUnknownWhy(g, dc.in.At)
 			unknown = append(unknown, p)
 		case evDisproven:
 			if wordBits(w.Rec) >= 32 || wordBits(w.Live) >= 32 {

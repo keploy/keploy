@@ -248,3 +248,71 @@ func TestOutcomeAnInstantAnAnswerOutsideTheScopeGaveIsRefusedNamingTheEdit(t *te
 	in.Given = func() ([]GivenPlaces, error) { return []GivenPlaces{PlacesOf(served())}, nil }
 	iClock(t, "an instant a recording of the set gave, read as recorded", oWord(t, Decide(in), rec, live))
 }
+
+// A recording of the set (another test's answer, read once for the set)
+// that holds a short word of the value unchanged shows the word is chance
+// only where it is before the call in both runs, as a recording handed to
+// the call does: one with no answer time, or answered at the call's own
+// instant, is unknown, refused naming why (chance_word_test.go:83).
+func TestOutcomeASetRecordingWithNoTimeBeforeTheCallShowsNothing(t *testing.T) {
+	const p = "body.appId"
+	before := r1Insert.Add(-time.Minute)
+	answered := func(res time.Time) Raw {
+		m := receiveOf("mock-31", "bb7ed9ee-670e-48d1-982f-b54b2b73982f", before)
+		m.Spec.ResTimestampMock = res
+		return clockedDrifts().RawOf(m, true).ServedAs(3).ServedAsRecorded()
+	}
+	for _, c := range []struct {
+		what, why string
+		x         Raw
+	}{
+		{"answered before the call", "", answered(before.Add(time.Second))},
+		{"no answer time", noAnswerAt, answered(time.Time{})},
+		{"answered at the call's own instant", atCallWhy, answered(r1Insert)},
+		{"answered after the call", "before the call", answered(r1Insert.Add(time.Second))},
+	} {
+		x := c.x
+		in := oInput(p, "5c0e9a7b-1f2d-48d1-9a3b-c4d5e6f70812", "0c1d2e3f-4a5b-4c7d-8e9f-a0b1c2d3e4f5", nil, nil)
+		in.At, in.Arrived = r1Insert, r1Insert
+		in.Given = func() ([]GivenPlaces, error) { return []GivenPlaces{PlacesOf(x)}, nil }
+		d := oWord(t, Decide(in), "48d1", "4c7d")
+		switch {
+		case c.why == "" && d.Outcome != OutcomeFresh:
+			t.Errorf("%s: %s; want fresh (a short word by chance)", c.what, oDescribe([]Decision{d}))
+		case c.why != "":
+			oRefused(t, c.what, d, "unknown", "mock-31")
+			if d.Refusal != nil && !strings.Contains(d.Refusal.Why, c.why) {
+				t.Errorf("%s: %s; want it to say %q", c.what, d.Refusal.Why, c.why)
+			}
+		}
+	}
+}
+
+// A word glued to the bytes around it ("s17" of "BAs17") in a test case's
+// request body that declares no media type shows nothing: keploy cannot
+// tell a protobuf's printable tag and length from a word, so the word is
+// unknown there, refused naming it (given_test.go:1211). The same bytes
+// declared text are read by their words: "BAs17" is no word "s17".
+func TestOutcomeAWordGluedInABodyOfNoDeclaredTypeIsUnknown(t *testing.T) {
+	v17, v18 := "s17"+strings.Repeat("x", 62), "s18"+strings.Repeat("x", 62)
+	framed := "BA" + v17 + "BA" + v18
+	req := func(ct string) []Earlier {
+		parts := []models.TestRequestPart{{Name: "body", Recorded: framed, Sent: framed}}
+		if ct != "" {
+			parts = append(parts, models.TestRequestPart{Name: "header.Content-Type", Recorded: ct, Sent: ct})
+		}
+		return []Earlier{GivenRequest(&models.TestRequest{Test: "test-1", Parts: parts})}
+	}
+	for _, c := range []struct{ what, rec, live string }{{"a word", "s17", "s18"}, {"a whole field", v17, v18}} {
+		in := costCall(clockedDrifts(), "body.slot", c.rec, c.live, costAt, req(""), nil, nil, nil)
+		d := oWord(t, Decide(in), c.rec, c.live)
+		oRefused(t, c.what+" glued in a body of no media type", d, "unknown", "test-1")
+		if d.Refusal != nil && !strings.Contains(d.Refusal.Why, "declares no media type") {
+			t.Errorf("%s: %s; want it to say the body declares no media type", c.what, d.Refusal.Why)
+		}
+	}
+	d := oWord(t, Decide(costCall(clockedDrifts(), "body.slot", "s17", "s18", costAt, req("text/plain"), nil, nil, nil)), "s17", "s18")
+	if d.Outcome != OutcomeFresh {
+		t.Errorf("s17 glued in a body declared text: %s; want fresh", oDescribe([]Decision{d}))
+	}
+}

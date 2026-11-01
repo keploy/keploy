@@ -46,6 +46,10 @@ type evPlace struct {
 	// gave: a value the test gave keploy (#5016), read by its text alone,
 	// never by a moment; given without gave is the test case's request.
 	gave bool
+	// undeclared: a body of the test case's request that declares no media
+	// type, read by its bytes (Seen.Undeclared): a word glued to the bytes
+	// around it there may be one, and shows nothing (gluedAt).
+	undeclared bool
 	// clock: the earlier call learned this place as its own read of the
 	// application's clock: a separate read, never a copy of another.
 	clock bool
@@ -164,7 +168,7 @@ func placesOf(in Input) (ps []evPlace, unread string) {
 			ps = append(ps, evPlace{
 				name: e.Mock + " " + path, mock: e.Mock, path: path,
 				rec: s.Leaf.Value, live: s.Live, side: s.Side, leaf: s.Leaf,
-				given: e.Given, gave: e.Gave, clock: s.Clock, startUp: startUp, otherTest: other, scope: scope,
+				given: e.Given, gave: e.Gave, undeclared: s.Undeclared, clock: s.Clock, startUp: startUp, otherTest: other, scope: scope,
 				at: e.At, state: st, why: why,
 			})
 			if s.Side == Response && st == stateBefore && e.Payload.isRead() {
@@ -542,9 +546,12 @@ func (dc *decider) echoedOutside(c changedInstant) (mock string, ok bool) {
 // setEvidence is what g shows of the changed word r (R) to f (F), and
 // whether round F changed it: the evidence table, read by words. Its
 // recorded words count for R only where it was recorded before the call.
+// It shows or disproves only where it is before the call in both runs, as a
+// recording handed to the call is (rawState): one with no answer time, or
+// recorded or answered at the call's own instant, is unknown there.
 func setEvidence(g givenWords, r, f string, at time.Time) (ev wordEvidence, changed bool) {
 	hr := listsHold(g.answerLists, r)
-	before := !g.at.After(at)
+	before := g.at.Before(at) && !g.noTime && !g.answered.IsZero() && g.answered.Before(at)
 	switch {
 	case g.unstated || g.unread:
 		// Round F served it and keploy cannot tell what it gave there.
@@ -588,6 +595,32 @@ func setEvidence(g givenWords, r, f string, at time.Time) (ev wordEvidence, chan
 		return evUnknown, false
 	}
 	return evNone, false
+}
+
+// gluedAt reports whether p, a body that declares no media type, holds R's
+// or F's word glued to the bytes around it, in any form it declares (main's
+// gluedIn): keploy cannot tell its words from the bytes that frame them.
+func (dc *decider) gluedAt(p evPlace, w readWord) bool {
+	if !p.undeclared {
+		return false
+	}
+	ed := dc.drifts().of(p.rec, p.live)
+	return gluedIn(ed, w.Rec, true) || gluedIn(ed, w.Live, false)
+}
+
+// setUnknownWhy is why a recording of the set shows nothing of a word: its
+// time, where keploy cannot place it before the call (rawState), else that
+// keploy keeps only its words.
+func setUnknownWhy(g givenWords, at time.Time) string {
+	switch {
+	case g.noTime || g.answered.IsZero():
+		return noAnswerAt
+	case g.at.Equal(at) || g.answered.Equal(at):
+		return atCallWhy
+	case g.at.After(at) || g.answered.After(at):
+		return "the recording did not give the application that word before the call"
+	}
+	return "round F gave it there; keploy keeps its words, and cannot tell this word did not come from it"
 }
 
 // listsHold reports whether l holds the word t in any reading, stamps read
