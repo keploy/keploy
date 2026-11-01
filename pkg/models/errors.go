@@ -430,8 +430,11 @@ type ParserError struct {
 	// the proven switch.
 	MissKind string
 	// Recorded is, for MissExtraCall, how many times the call was recorded
-	// for the test.
+	// for the test, and ExtraOf the test's own recording the call repeats
+	// (MockMismatchReport.ExtraOf): both carried from the report, and
+	// dropped where the proxy files the miss as no extra call.
 	Recorded int
+	ExtraOf  string
 	// Staging is, under exact serving, that the miss was made while the
 	// replay was staging a test set's mocks, which then answer no call: its
 	// read says so in the call's next steps.
