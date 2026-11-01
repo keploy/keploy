@@ -750,6 +750,43 @@ func TestOutcomeAClientTestsReadARefusedOffsetBeforeItsWindowIsAClockSinceItsBeg
 	}
 }
 
+// api-server's outbox carries an app's createdAt in seconds, read when the app
+// was made. The harness's name for that app holds a UnixNano of the same
+// second, sent before the call in both runs. A variable holds one text, so
+// that name is no place to bind the seconds at: no adapter can use the copy.
+// The value goes on to the read since the test began, and its check goes red
+// where it was no read. A place that holds the same text still binds, and it
+// binds ahead of an earlier place in another form. With no begin to read
+// from, the copy stands, and the adapter refuses it.
+func TestOutcomeASecondInsideANanosecondNameIsNoCopyToBind(t *testing.T) {
+	const p = "body.docs.msgs.0.app.createdAt"
+	secs := func(t time.Time) string { return strconv.FormatInt(t.Unix(), 10) }
+	nanos := func(t time.Time) string { return "app-crud-" + strconv.FormatInt(t.UnixNano(), 10) }
+	r0 := oAt.Add(6300 * time.Millisecond)
+	rAt := r0.Add(900 * time.Millisecond)
+	f0 := oAt.Add(61*time.Second + 14800*time.Millisecond)
+	fAt := f0.Add(1400 * time.Millisecond)
+	w := iWin(rAt, fAt, 100*time.Millisecond)
+	w.Rec.Began, w.F.Began = r0, f0
+	rec, live := secs(r0.Add(100*time.Millisecond)), secs(f0.Add(200*time.Millisecond))
+	name := iSent("mock-502", rAt.Add(-300*time.Millisecond), "body.cmd.query.app.name", String, nanos(r0.Add(90*time.Millisecond)), nanos(f0.Add(190*time.Millisecond)))
+	in := iCall(p, Number, rec, live, rAt, fAt, w, []Earlier{name}, nil)
+	in.Drifts = oClientDrifts()
+	d := oWord(t, Decide(in), rec, live)
+	iClock(t, "a second that stands only inside a nanosecond's text", d)
+	if d.Clock != nil && d.Clock.Since != models.SinceTestBegin {
+		t.Errorf("%+v; want a read since the test began", *d.Clock)
+	}
+	sent := iSent("mock-503", rAt.Add(-200*time.Millisecond), "body.docs.0.createdAt", Number, rec, live)
+	in = iCall(p, Number, rec, live, rAt, fAt, w, []Earlier{name, sent}, nil)
+	in.Drifts = oClientDrifts()
+	iValue(t, "the same second sent whole at a later place", oWord(t, Decide(in), rec, live), "mock-503")
+	noBegin := iWin(rAt, fAt, 100*time.Millisecond)
+	in = iCall(p, Number, rec, live, rAt, fAt, noBegin, []Earlier{name}, nil)
+	in.Drifts = oClientDrifts()
+	iValue(t, "no begin to read from", oWord(t, Decide(in), rec, live), "mock-502")
+}
+
 // A client test's token expiry, a read the application made earlier in its
 // test plus a time to live of 30 days cut to the second (expires_at =
 // cut_s(now) + 30d), 3.2 s before its call in the recording and 5.9 s in
