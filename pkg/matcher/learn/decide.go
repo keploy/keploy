@@ -71,9 +71,11 @@ const (
 // Edit is one edit that would accept a refused word: Mock and Field name
 // where, Name a given's name; Word -1 is the whole field.
 type Edit struct {
-	Kind              EditKind
-	Mock, Field, Name string
-	Word              int
+	Kind  EditKind `json:"kind"`
+	Mock  string   `json:"mock,omitempty"`
+	Field string   `json:"field,omitempty"`
+	Name  string   `json:"name,omitempty"`
+	Word  int      `json:"word,omitempty"`
 }
 
 // Refusal is a refused word: its kind, where it stands, both values (as
@@ -81,13 +83,16 @@ type Edit struct {
 // place, which state, which rule), at most three "mock-N <path>" places, and
 // the edits that would accept it, likeliest first.
 type Refusal struct {
-	Kind              RefusalKind
-	Test, Mock, Field string
-	Word              int
-	Recorded, Full    string
-	Why               string
-	Places            []string
-	Edits             []Edit
+	Kind     RefusalKind `json:"kind"`
+	Test     string      `json:"test,omitempty"`
+	Mock     string      `json:"mock,omitempty"`
+	Field    string      `json:"field,omitempty"`
+	Word     int         `json:"word,omitempty"`
+	Recorded string      `json:"recorded,omitempty"`
+	Full     string      `json:"full,omitempty"`
+	Why      string      `json:"why,omitempty"`
+	Places   []string    `json:"places,omitempty"`
+	Edits    []Edit      `json:"edits,omitempty"`
 }
 
 // Mode is where a word's sources may be.
