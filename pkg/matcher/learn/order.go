@@ -319,6 +319,11 @@ func (dc *decider) word(path string, bare variables.Address, rec, live, text str
 				ev = evShown
 			} else if ev == evNone && dc.gluedAt(p, w) {
 				ev, p.why = evUnknown, "glued to the bytes around it, in a body that declares no media type (no Content-Type): keploy cannot tell the words the application was given there from the bytes that frame them"
+			} else if ev == evNone && p.gave && p.rec != p.live && p.rec != "" && p.live != "" && strings.Contains(w.Rec, p.rec) && strings.Contains(w.Live, p.live) {
+				// A given glued inside the word in both runs is a part of
+				// it (#5016), at any length: the test gave it, so the word
+				// changed with it, and keploy binds a given only whole.
+				ev, p.why = evUnknown, "the given stands inside the word in both runs, glued to the text around it: keploy binds a given only as a whole word"
 			}
 		} else if ev == evShown {
 			if why := movedField(p, w.Rec, w.Live); why != "" {
