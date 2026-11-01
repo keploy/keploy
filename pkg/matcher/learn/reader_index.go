@@ -240,9 +240,9 @@ func (t *readerText) holdsWord(w string) (held, read bool) {
 // wordIn reports whether the text holds w as a word in any of the readings
 // rs (indices of main's readings) and any declared form: from the words the
 // entry keeps (tokensOf), or, past the budget, by a scan of the text read
-// now and its other forms (DriftCache.rawExtra: one per line, and no
-// reading continues a word across a line's end), which reads no other word
-// of it and keeps nothing. read is false where the recording was not read.
+// now and its other declared forms (textForms, the forms main's word lists
+// read), which reads no other word of it and keeps nothing, in no cache
+// either. read is false where the recording was not read.
 func (t *readerText) wordIn(w string, rs ...int) (held, read bool) {
 	if t.e == nil || !t.e.tokensKept {
 		s, ok := t.read()
@@ -250,7 +250,7 @@ func (t *readerText) wordIn(w string, rs ...int) (held, read bool) {
 			return false, false
 		}
 		if !t.e.tokensKept && !t.x.mayKeep(t.e, s) {
-			for _, f := range [2]string{s, t.x.dc.rawExtra(s)} {
+			for _, f := range textForms(s) {
 				for _, r := range rs {
 					if heldBy(f, w, readings[r]) {
 						return true, true
