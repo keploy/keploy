@@ -164,10 +164,15 @@ func (st Step) valid() bool {
 }
 
 // String is the address as ParseAddress reads it; a plain place's is
-// Place.String's.
+// Place.String's. An address of no place (Place.String "") names nothing,
+// whatever its steps and word, and prints "".
 func (a Address) String() string {
+	place := a.Place.String()
+	if place == "" {
+		return ""
+	}
 	var b strings.Builder
-	b.WriteString(a.Place.String())
+	b.WriteString(place)
 	for _, st := range a.Steps {
 		b.WriteString("|" + escapeName(string(st)))
 	}

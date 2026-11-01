@@ -174,8 +174,9 @@ func (l Landed) String() string {
 // raw recordings, its answer's leaves, its window, the test's givens, which
 // test and mock it is, the Mode, the adapter's Caps, the noise keploy.yml
 // declares (word -1: the whole field), each mock's scope in mappings.yaml
-// (nil: none known; read it through ScopeOf), and where round F's call
-// landed.
+// (nil: none known; read it through ScopeOf), where round F's call landed,
+// and how the adapter names a leaf's place (nil: VarPlace; read it through
+// AddressOf).
 type Input struct {
 	Drifts    *DriftCache
 	Drift     []string
@@ -194,6 +195,30 @@ type Input struct {
 	Declared  func(field string, word int) bool
 	Scope     func(mock string) Scope
 	Landed    Landed
+	PlaceOf   func(l Leaf, answer bool) (string, bool)
+}
+
+// AddressOf is the address of l, a leaf of the call's request (answer
+// false) or of its answer, with word -1 (the whole leaf). in.PlaceOf names
+// the place where the adapter set it: a shape with no Body (Mongo) names its
+// places in its own path dialect, and may add steps that decode the leaf
+// (`|b64`). Else VarPlace names it: a request leaf as JSON only where the
+// request's body is, an answer leaf as JSON (Resp holds a JSON answer's
+// leaves). The zero Address (Word -1) where neither names a place that
+// parses. Every order builds each Decision's At and Echo here, and its
+// FromAt from the earlier answer's leaf (answer true).
+func (in Input) AddressOf(l Leaf, answer bool) variables.Address {
+	place := func(l Leaf, answer bool) (string, bool) { return VarPlace(l, answer || in.Rec.Body != nil) }
+	if in.PlaceOf != nil {
+		place = in.PlaceOf
+	}
+	if s, ok := place(l, answer); ok {
+		if a, err := variables.ParseAddress(s); err == nil {
+			a.Word = -1
+			return a
+		}
+	}
+	return variables.Address{Word: -1}
 }
 
 // ScopeOf is mock's scope by in.Scope, ScopeUnknown where in has none.
@@ -239,12 +264,7 @@ func refuseAll(in Input) []Decision {
 	var out []Decision
 	for _, path := range in.Drift {
 		rec, live := in.Rec.Leaves[path], in.Live.Leaves[path]
-		at := variables.Address{Word: -1}
-		if s, ok := VarPlace(rec, in.Rec.Body != nil); ok {
-			if a, err := variables.ParseAddress(s); err == nil {
-				at = a
-			}
-		}
+		at := in.AddressOf(rec, false)
 		n := len(out)
 		if rw, lw := variables.Words(rec.Value), variables.Words(live.Value); rec.Type != Instant && live.Type != Instant && len(rw) == len(lw) && apart(rec.Value, rw) == apart(live.Value, lw) {
 			for i := range rw {

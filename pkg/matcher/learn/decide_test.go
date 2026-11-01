@@ -165,3 +165,53 @@ func TestInputNamesEachMocksScopeAndWhereTheCallLanded(t *testing.T) {
 		}
 	}
 }
+
+// TestABodylessShapeNamesItsPlacesByTheAdapter: a shape with no Body (Mongo's)
+// gets its words' places from Input.PlaceOf, steps included; with none set,
+// VarPlace names a request leaf as JSON only where the request's body is, and
+// an answer leaf as JSON.
+func TestABodylessShapeNamesItsPlacesByTheAdapter(t *testing.T) {
+	was := decideBy
+	decideBy = refuseAll
+	t.Cleanup(func() { decideBy = was })
+	rec := Shape{Leaves: map[string]Leaf{"body.name": {Path: "body.name", Type: String, Value: "order-17"}}}
+	live := Shape{Leaves: map[string]Leaf{"body.name": {Path: "body.name", Type: String, Value: "order-42"}}}
+	at := func(placeOf func(Leaf, bool) (string, bool)) []string {
+		var out []string
+		for _, d := range Decide(Input{Rec: rec, Live: live, Drift: []string{"body.name"}, PlaceOf: placeOf}) {
+			out = append(out, d.At.String())
+		}
+		return out
+	}
+	var asked []bool
+	mongo := func(l Leaf, answer bool) (string, bool) { asked = append(asked, answer); return VarPlace(l, true) }
+	for _, c := range []struct {
+		name    string
+		placeOf func(Leaf, bool) (string, bool)
+		want    []string
+	}{
+		{"no PlaceOf: a body with no JSON names no place", nil, []string{""}},
+		{"the adapter's places", mongo, []string{"body.name#1"}},
+		{"the adapter's steps", func(l Leaf, a bool) (string, bool) { s, ok := VarPlace(l, true); return s + "|b64", ok }, []string{"body.name|b64#1"}},
+		{"a place that does not parse", func(Leaf, bool) (string, bool) { return "body", true }, []string{""}},
+	} {
+		if got := at(c.placeOf); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("%s: At %q, want %q", c.name, got, c.want)
+		}
+	}
+	if !reflect.DeepEqual(asked, []bool{false}) {
+		t.Errorf("PlaceOf asked answer=%v for the request's leaf, want [false]", asked)
+	}
+	in := Input{Rec: rec}
+	ans := Leaf{Path: "body.id", Type: String, Value: "17"}
+	if got := in.AddressOf(ans, true); got.String() != "body.id" || got.Word != -1 {
+		t.Errorf("answer leaf: %+v, want body.id word -1", got)
+	}
+	if got := in.AddressOf(ans, false); got.String() != "" || got.Word != -1 {
+		t.Errorf("request leaf of a body with no JSON: %+v, want none", got)
+	}
+	in.PlaceOf = mongo
+	if got := in.AddressOf(ans, true); got.String() != "body.id" || asked[len(asked)-1] != true {
+		t.Errorf("PlaceOf on an answer leaf: %+v, asked %v", got, asked)
+	}
+}

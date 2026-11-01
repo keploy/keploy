@@ -75,6 +75,12 @@ func TestAWordAddressReadsAsItIsWritten(t *testing.T) {
 			t.Errorf("ParseAddress(%q) = %+v, want an error", s, a)
 		}
 	}
+	// A word or a step of no place names nothing, and prints as Place{} does.
+	for _, a := range []Address{{Word: -1}, {Word: 1}, {Steps: []Step{StepB64}, Word: 0}} {
+		if s := a.String(); s != "" {
+			t.Errorf("%+v prints %q, want \"\"", a, s)
+		}
+	}
 }
 
 // TestAWordIsReadAndReplacedThroughItsSteps (TY2): WordOf and ReplaceWord
