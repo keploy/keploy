@@ -7,7 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
+	"net/netip"
+	"os"
+	"runtime"
+	"slices"
+	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -34,6 +41,20 @@ func heldPair(t *testing.T, network, addr string) (p *Proxy, app, proxySide *net
 // heldPairOn is heldPair on p, paired as application connection appSeq.
 func heldPairOn(t *testing.T, p *Proxy, appSeq uint64, network, addr string) (app, proxySide *net.TCPConn, reader net.Conn) {
 	t.Helper()
+	return heldPairBound(t, p, appSeq, network, addr, "", "")
+}
+
+// heldPairBound is heldPairOn with the listener's socket bound to the device
+// listenDev, and the application's to the device appDev (SO_BINDTODEVICE),
+// each when named. The proxy's side, accepted from a listener bound to a
+// device, is bound to it too, as one accepted on a VRF's device is.
+//
+// network "tcp" is the proxy's own listener (proxy.go listens on ":port"
+// with "tcp"): one dual-stack IPv6 socket. The application dials it over
+// IPv4 (127.0.0.1), so its own socket is an IPv4 one while the proxy's side
+// reads both ends as v4-mapped addresses, which the lookups are given.
+func heldPairBound(t *testing.T, p *Proxy, appSeq uint64, network, addr, listenDev, appDev string) (app, proxySide *net.TCPConn, reader net.Conn) {
+	t.Helper()
 	lc := net.ListenConfig{Control: func(_, _ string, rc syscall.RawConn) error {
 		var serr error
 		if err := rc.Control(func(fd uintptr) {
@@ -42,6 +63,9 @@ func heldPairOn(t *testing.T, p *Proxy, appSeq uint64, network, addr string) (ap
 			// own, 64 KiB, would hold it shut until the persist timer).
 			if serr = unix.SetsockoptInt(int(fd), unix.IPPROTO_TCP, unix.TCP_MAXSEG, 1024); serr == nil {
 				serr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_RCVBUF, 16384)
+			}
+			if serr == nil && listenDev != "" {
+				serr = unix.BindToDevice(int(fd), listenDev)
 			}
 		}); err != nil {
 			return err
@@ -53,7 +77,12 @@ func heldPairOn(t *testing.T, p *Proxy, appSeq uint64, network, addr string) (ap
 		t.Skipf("no %s here: %v", network, err)
 	}
 	defer ln.Close()
-	c, err := net.Dial(network, ln.Addr().String())
+	dialNet, dialAddr := network, ln.Addr().String()
+	if network == "tcp" {
+		dialNet, dialAddr = "tcp4", net.JoinHostPort("127.0.0.1", fmt.Sprint(ln.Addr().(*net.TCPAddr).Port))
+	}
+	d := net.Dialer{Control: boundTo(appDev)}
+	c, err := d.Dial(dialNet, dialAddr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,6 +97,13 @@ func heldPairOn(t *testing.T, p *Proxy, appSeq uint64, network, addr string) (ap
 	}
 	proxySide = s.(*net.TCPConn)
 	t.Cleanup(func() { _ = proxySide.Close() })
+	if network == "tcp" {
+		for _, a := range []net.Addr{proxySide.RemoteAddr(), proxySide.LocalAddr()} {
+			if !mustAddrPort(t, a).Addr().Is4In6() {
+				t.Fatalf("premise: the dual-stack listener's accepted end %s is not v4-mapped", a)
+			}
+		}
+	}
 	p.paired.add(proxySide, appSeq)
 	tracked := p.inflight.track(proxySide)
 	tracked.beforeClose = func() { p.pairClosing(context.Background(), proxySide, tracked) }
@@ -105,14 +141,34 @@ func received(t *testing.T, c *net.TCPConn) uint64 {
 	return ti.Bytes_received
 }
 
+// pairShapes are the paired connections the wait reads, as heldPairBound
+// makes them: over IPv4 and IPv6, behind the proxy's own dual-stack
+// listener (network "tcp"), each with the application's socket bound to no
+// device and to lo.
+var pairShapes = []struct{ name, network, addr, dev string }{
+	{"tcp4", "tcp4", "127.0.0.1:0", ""},
+	{"tcp6", "tcp6", "[::1]:0", ""},
+	{"dual-stack listener, tcp4 app", "tcp", ":0", ""},
+	{"tcp4 bound to lo", "tcp4", "127.0.0.1:0", "lo"},
+	{"tcp6 bound to lo", "tcp6", "[::1]:0", "lo"},
+	{"dual-stack listener, tcp4 app bound to lo", "tcp", ":0", "lo"},
+}
+
 // A call written to a connection the proxy already holds (a pooled one) is
 // waited for until every byte the application had written when the wait
 // began has reached the proxy's side, however long the bytes take; an idle
 // connection holds nothing back. Over IPv4 and IPv6.
+//
+// An application socket bound to a device (SO_BINDTODEVICE; a VRF's sockets
+// are bound to its device) is waited for alike: sock_diag's exact lookup,
+// asked with no device, never finds one, and the wait would read it as gone.
+// Also behind the proxy's own dual-stack listener, whose ends for an IPv4
+// application are v4-mapped while the application's socket is an IPv4 one.
 func TestThePairedBytesAreWaitedForUntilTheyArrive(t *testing.T) {
-	for _, tc := range []struct{ network, addr string }{{"tcp4", "127.0.0.1:0"}, {"tcp6", "[::1]:0"}} {
-		t.Run(tc.network, func(t *testing.T) {
-			p, app, proxySide, reader := heldPair(t, tc.network, tc.addr)
+	for _, tc := range pairShapes {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &Proxy{logger: zap.NewNop()}
+			app, proxySide, reader := heldPairBound(t, p, 1, tc.network, tc.addr, "", tc.dev)
 			// Idle: nothing written, nothing to wait for.
 			if err := p.WaitPairedBytes(context.Background(), 1); err != nil {
 				t.Fatalf("WaitPairedBytes on an idle connection: %v", err)
@@ -234,15 +290,274 @@ func TestABytesWaitWithNoPairedConnectionNeedsNoCounts(t *testing.T) {
 }
 
 // The first paired connection proves the application's sockets are seen from
-// the proxy's network namespace: its application end is found.
+// the proxy's network namespace: its application end is found, bound to a
+// device or not, behind a listener of either family or the proxy's own
+// dual-stack one.
 func TestAPairedConnectionProvesTheApplicationsSocketsSeen(t *testing.T) {
-	p, _, proxySide, _ := heldPair(t, "tcp4", "127.0.0.1:0")
-	if p.paired.visible.Load() {
-		t.Fatal("seen before any proof")
+	for _, tc := range pairShapes {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &Proxy{logger: zap.NewNop()}
+			_, proxySide, _ := heldPairBound(t, p, 1, tc.network, tc.addr, "", tc.dev)
+			if p.paired.visible.Load() {
+				t.Fatal("seen before any proof")
+			}
+			p.proveAppVisible(proxySide)
+			if !p.paired.visible.Load() {
+				t.Fatal("the application's end of a live paired connection was not found")
+			}
+		})
 	}
-	p.proveAppVisible(proxySide)
-	if !p.paired.visible.Load() {
-		t.Fatal("the application's end of a live paired connection was not found")
+}
+
+// closingPair is the paired connection of proxySide and a sock_diag socket
+// to read its application end on.
+func closingPair(t *testing.T, p *Proxy, proxySide *net.TCPConn) (*pairedConn, *diagSock) {
+	t.Helper()
+	p.paired.mu.Lock()
+	pc := p.paired.byConn[proxySide]
+	p.paired.mu.Unlock()
+	if pc == nil {
+		t.Fatal("no paired connection")
+	}
+	ds, err := openDiag()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(ds.close)
+	return pc, ds
+}
+
+// wantFINCounted checks that the application's socket is in state, and that
+// the wait reads it as there: n bytes written and its FIN, which pairTarget
+// counts from the states where the application has closed and its FIN is not
+// yet acknowledged.
+func wantFINCounted(t *testing.T, p *Proxy, ds *diagSock, pc *pairedConn, state uint8, n uint64) {
+	t.Helper()
+	if got, err := ds.lookup(pc.app, pc.proxy); err != nil || got.state != state {
+		t.Fatalf("lookup of the application's socket %s -> %s = TCP state %d, %v; want %d", pc.app, pc.proxy, got.state, err, state)
+	}
+	tg, err := p.pairTarget(ds, pc)
+	if err != nil || tg == nil || tg.gone || !tg.finCounted || tg.want != n+1 {
+		t.Fatalf("pairTarget in TCP state %d = %+v, %v; want %d with its FIN counted, not gone", state, tg, err, n+1)
+	}
+}
+
+// readAndSettle has the proxy read the n bytes the application left behind,
+// and checks that the wait settles on them with no loss.
+func readAndSettle(t *testing.T, p *Proxy, reader net.Conn, n uint64) {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() { done <- p.WaitPairedBytes(context.Background(), 1) }()
+	if _, err := io.ReadFull(reader, make([]byte, n)); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("WaitPairedBytes: %v", err)
+	}
+	if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 0 {
+		t.Fatalf("%d losses, want none", l)
+	}
+}
+
+// movedTo waits until the kernel's own table of sockets lists the
+// application's socket of pc in the state want, and checks that the lookup's
+// first read after that finds it there. It fails, naming what it saw, if the
+// table lists the socket in a state outside passing (the states it moves
+// through on its way) or no longer lists it, and if the lookup misses the
+// socket or reads it in another state.
+//
+// The table (/proc/net/tcp and tcp6) is read apart from sock_diag and the
+// code under test: the kernel moves the socket on its own, so a lookup that
+// never reads want cannot keep the wait going. want is a state the socket
+// stays in, so once the table lists it there, the lookup reads it there.
+// Before 6.11 the kernel listed a timewait socket a step before it took the
+// socket's reference, and a lookup in that step misses the socket, so the
+// table must list it with its reference.
+//
+// The table is read under each chain's lock, and a socket moves to the
+// timewait table under that lock, so the table lists it all the way. But a
+// read of the table restarts its walk at each page it fills, and a socket
+// that moves in its chain at a restart can be left out of that read. So a
+// socket is no longer listed when two reads running leave it out: a socket
+// the kernel destroyed (with no timewait socket for it, TCPTimeWaitOverflow)
+// is left out of every read.
+func movedTo(t *testing.T, ds *diagSock, pc *pairedConn, want uint8, passing ...uint8) {
+	t.Helper()
+	for missed := 0; ; runtime.Gosched() {
+		state, refs, listed := kernelTCPState(t, pc.app, pc.proxy)
+		if !listed {
+			if missed++; missed == 2 {
+				t.Fatalf("the kernel's own table no longer lists the application's socket %s -> %s, on its way to TCP state %d", pc.app, pc.proxy, want)
+			}
+			continue
+		}
+		missed = 0
+		if state == want && refs > 0 {
+			break
+		}
+		if state != want && !slices.Contains(passing, state) {
+			t.Fatalf("the kernel's own table lists the application's socket %s -> %s in TCP state %d, on its way to %d; want one of %v first", pc.app, pc.proxy, state, want, passing)
+		}
+	}
+	if got, err := ds.lookup(pc.app, pc.proxy); err != nil || got.state != want {
+		t.Fatalf("lookup of the application's socket %s -> %s, once the kernel lists it in TCP state %d = TCP state %d, %v; want %d", pc.app, pc.proxy, want, got.state, err, want)
+	}
+}
+
+// kernelTCPState is the TCP state the kernel's own table of sockets
+// (/proc/net/tcp and tcp6) lists the socket from local to remote in, the
+// references held to it, and whether the table lists it. Ends are compared
+// unmapped: the table lists an IPv4 socket with IPv4 ends.
+func kernelTCPState(t *testing.T, local, remote netip.AddrPort) (uint8, int, bool) {
+	t.Helper()
+	local = netip.AddrPortFrom(local.Addr().Unmap(), local.Port())
+	remote = netip.AddrPortFrom(remote.Addr().Unmap(), remote.Port())
+	for _, table := range []string{"/proc/net/tcp", "/proc/net/tcp6"} {
+		b, err := os.ReadFile(table)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue // no IPv6 here
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		// sl local_address rem_address st tx_queue:rx_queue tr:tm->when
+		// retrnsmt uid timeout inode ref pointer ...
+		for _, line := range strings.Split(string(b), "\n")[1:] {
+			f := strings.Fields(line)
+			if len(f) < 11 || procAddrPort(f[1]) != local || procAddrPort(f[2]) != remote {
+				continue
+			}
+			state, serr := strconv.ParseUint(f[3], 16, 8)
+			refs, rerr := strconv.Atoi(f[10])
+			if serr != nil || rerr != nil {
+				t.Fatalf("%s: %q", table, line)
+			}
+			return uint8(state), refs, true
+		}
+	}
+	return 0, 0, false
+}
+
+// procAddrPort is an address:port as /proc/net/tcp and tcp6 list it, both in
+// hex, the address in 32-bit words of host byte order (procIP), unmapped.
+func procAddrPort(h string) netip.AddrPort {
+	ip, port, _ := strings.Cut(h, ":")
+	n, err := strconv.ParseUint(port, 16, 16)
+	a, ok := netip.AddrFromSlice(procIP(ip))
+	if err != nil || !ok {
+		return netip.AddrPort{}
+	}
+	return netip.AddrPortFrom(a.Unmap(), uint16(n))
+}
+
+// An application socket on its way to closed is read by the wait, bound to a
+// device or not: how much it wrote, never gone. For a socket bound to a
+// device that is the dump's answer, so the dump has to ask for each closing
+// state, among them FIN_WAIT1, CLOSING and LAST_ACK, the states the
+// application's FIN is counted in.
+//
+// close(2) sets FIN_WAIT1 and LAST_ACK itself. The FIN goes out behind the
+// bytes the proxy has not read, so those bytes hold these states, and
+// CLOSING, still.
+func TestAClosingApplicationSocketIsReadNotGone(t *testing.T) {
+	for _, tc := range pairShapes {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Run("CLOSE_WAIT", func(t *testing.T) {
+				p := &Proxy{logger: zap.NewNop()}
+				app, proxySide, _ := heldPairBound(t, p, 1, tc.network, tc.addr, "", tc.dev)
+				if _, err := app.Write([]byte("x")); err != nil {
+					t.Fatal(err)
+				}
+				if err := proxySide.CloseWrite(); err != nil {
+					t.Fatal(err)
+				}
+				// The application has the FIN once its read ends: its socket
+				// is in CLOSE_WAIT from then on.
+				if _, err := app.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
+					t.Fatalf("the application's read after the proxy's shutdown: %v, want EOF", err)
+				}
+				pc, ds := closingPair(t, p, proxySide)
+				if got, err := ds.lookup(pc.app, pc.proxy); err != nil || got.state != tcpCloseWait {
+					t.Fatalf("lookup of the application's socket %s -> %s = TCP state %d, %v; want CLOSE_WAIT", pc.app, pc.proxy, got.state, err)
+				}
+				tg, err := p.pairTarget(ds, pc)
+				if err != nil || tg == nil || tg.gone || tg.want != 1 {
+					t.Fatalf("pairTarget = %+v, %v; want 1 byte written, not gone", tg, err)
+				}
+			})
+			t.Run("FIN_WAIT1 then CLOSING", func(t *testing.T) {
+				p := &Proxy{logger: zap.NewNop()}
+				app, proxySide, reader := heldPairBound(t, p, 1, tc.network, tc.addr, "", tc.dev)
+				n := queue(t, app)
+				pc, ds := closingPair(t, p, proxySide)
+				if err := app.Close(); err != nil {
+					t.Fatal(err)
+				}
+				wantFINCounted(t, p, ds, pc, tcpFinWait1, n)
+				if err := proxySide.CloseWrite(); err != nil {
+					t.Fatal(err)
+				}
+				// The proxy's FIN moves it to CLOSING when the host gets to
+				// deliver the FIN, and the bytes hold it there.
+				movedTo(t, ds, pc, tcpClosing, tcpFinWait1)
+				wantFINCounted(t, p, ds, pc, tcpClosing, n)
+				readAndSettle(t, p, reader, n)
+			})
+			t.Run("LAST_ACK", func(t *testing.T) {
+				p := &Proxy{logger: zap.NewNop()}
+				app, proxySide, reader := heldPairBound(t, p, 1, tc.network, tc.addr, "", tc.dev)
+				if err := proxySide.CloseWrite(); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := app.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
+					t.Fatalf("the application's read after the proxy's shutdown: %v, want EOF", err)
+				}
+				n := queue(t, app)
+				pc, ds := closingPair(t, p, proxySide)
+				if err := app.Close(); err != nil {
+					t.Fatal(err)
+				}
+				wantFINCounted(t, p, ds, pc, tcpLastAck, n)
+				readAndSettle(t, p, reader, n)
+			})
+			t.Run("TIME_WAIT", func(t *testing.T) {
+				p := &Proxy{logger: zap.NewNop()}
+				app, proxySide, _ := heldPairBound(t, p, 1, tc.network, tc.addr, "", tc.dev)
+				pc, ds := closingPair(t, p, proxySide)
+				if err := app.Close(); err != nil {
+					t.Fatal(err)
+				}
+				if err := proxySide.CloseWrite(); err != nil {
+					t.Fatal(err)
+				}
+				// Here the socket does move: on its way the kernel swaps it
+				// for a timewait socket, in FIN_WAIT2 or TIME_WAIT, which
+				// stays in TIME_WAIT for 60 s. The exact lookup, which takes
+				// no lock, can catch the swap and miss the socket or read it
+				// closed, so the case reads TIME_WAIT once the kernel's own
+				// table lists it there.
+				movedTo(t, ds, pc, tcpTimeWait, tcpFinWait1, tcpFinWait2, tcpClosing)
+				if tg, err := p.pairTarget(ds, pc); err != nil || tg != nil {
+					t.Fatalf("pairTarget in TIME_WAIT = %+v, %v; want nothing to wait for", tg, err)
+				}
+			})
+		})
+	}
+}
+
+// boundTo is a dialler's or listener's Control that binds its socket to the
+// device dev (SO_BINDTODEVICE), or leaves it bound to none when dev is "".
+// Linux lets an unprivileged process bind a socket that is bound to none.
+func boundTo(dev string) func(_, _ string, rc syscall.RawConn) error {
+	return func(_, _ string, rc syscall.RawConn) error {
+		if dev == "" {
+			return nil
+		}
+		var serr error
+		if err := rc.Control(func(fd uintptr) { serr = unix.BindToDevice(int(fd), dev) }); err != nil {
+			return err
+		}
+		return serr
 	}
 }
 
