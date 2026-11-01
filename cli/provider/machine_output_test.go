@@ -11,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.keploy.io/server/v3/utils/log"
 	"go.uber.org/zap"
@@ -549,5 +550,20 @@ func TestPrintLogoToAConsoleThatFailsReturns(t *testing.T) {
 		if w.writes == 0 {
 			t.Errorf("PrintLogo(disableANSI=%v) wrote nothing: the row did not reach a failing write", disableANSI)
 		}
+	}
+}
+
+// Under the proven switch the console keeps the version and the log's path,
+// and leaves out the logo's art, which an agent reading the run line by
+// line gains nothing from. Mutation: print the art under the switch.
+func TestPrintLogoUnderTheSwitchKeepsTheVersionAndTheLog(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	var b strings.Builder
+	PrintLogo(&b, true)
+	if strings.Contains(b.String(), "OPEN SOURCE") || strings.Contains(b.String(), "▓") {
+		t.Fatalf("the art was printed under the switch:\n%s", b.String())
+	}
+	if !strings.Contains(b.String(), utils.VersionIdentifier+": ") {
+		t.Fatalf("the version line is gone:\n%s", b.String())
 	}
 }
