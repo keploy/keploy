@@ -424,6 +424,26 @@ func TestReaderTextOfARecordingPinsNothingPastTheBudget(t *testing.T) {
 	if got := dc.Loads(); got <= loads {
 		t.Errorf("a recording past the budget answered without reading it again (%d loads, want more than %d): something keeps its text", got, loads)
 	}
+	// Past the budget each question reads the recording once: its text and
+	// its fields from one read, its instants and their declared forms from
+	// one read.
+	last := places[n-1]
+	for _, q := range []struct {
+		name string
+		ask  func()
+	}{
+		{"a word", func() { last.holdsWord("zzz") }},
+		{"a base64 run", func() { last.holdsToken(tokenB64, "QUJDREVGR0g") }},
+		{"a word's fields", func() { last.fieldsWith("zzz") }},
+		{"an instant", func() { last.holdsMoment(moment{}) }},
+		{"its instants", func() { last.spansOf() }},
+	} {
+		loads = dc.Loads()
+		q.ask()
+		if got := dc.Loads() - loads; got != 1 {
+			t.Errorf("%s, past the budget: the recording was read %d times for one question; want once", q.name, got)
+		}
+	}
 	if s, ok := places[0].textNow(); !ok || s != raws[0].Text() {
 		t.Errorf("the first recording's text: ok %v, the payload's %v", ok, s == raws[0].Text())
 	}
@@ -439,7 +459,7 @@ func TestReaderTextOfARecordingPinsNothingPastTheBudget(t *testing.T) {
 
 // A base64 token is held where it stands whole, no byte of the base64
 // alphabets or its padding on either side. The index reads a text's whole
-// runs once (runsOf) instead of scanning the text per token, and past its
+// runs once (holdsToken's kept runs) instead of scanning the text per token, and past its
 // budget finds a run by a scan that lists no other (eachB64Run): each base64
 // token (isB64Run, as tokenSpans cuts them) is held by both exactly where
 // the scan holds it.
@@ -640,8 +660,8 @@ func TestReaderIndexKeepsNoAnswerPastItsCap(t *testing.T) {
 	if held, read := tt.holdsWord("w17"); !held || !read {
 		t.Fatalf("held %v read %v; want held", held, read)
 	}
-	if x.used > x.budget || tt.e.tokensKept {
-		t.Errorf("the index keeps %d bytes (words kept %v) within a cap of %d", x.used, tt.e.tokensKept, x.budget)
+	if x.used > x.budget || tt.e.tokens.ok {
+		t.Errorf("the index keeps %d bytes (words kept %v) within a cap of %d", x.used, tt.e.tokens.ok, x.budget)
 	}
 }
 

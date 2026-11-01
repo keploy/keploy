@@ -58,19 +58,23 @@ type readerIndex struct {
 // fits the budget: the caller's handle holds the text while it asks (or, of
 // a recording, reads it per question), and nothing here holds it after.
 type readerEntry struct {
-	n                               int
-	text                            string
-	tokens                          []map[string]bool
-	runs                            map[string]bool
-	spans, extraSpans               []instant
-	fields                          fieldWords
-	tokensKept, runsKept, spansKept bool
-	extraKept, fieldsKept           bool
+	n                 int
+	text              string
+	tokens            answer[[]map[string]bool]
+	runs              answer[map[string]bool]
+	spans, extraSpans answer[[]instant]
+	fields            answer[fieldWords]
 	// past: an answer of the text did not fit what was left of the
 	// budget, which only fills, so the entry keeps none from then on: each
 	// question is answered from the text read again, a word by a scan of
 	// it (wordIn) that builds no list of its other words.
 	past bool
+}
+
+// answer is one kind of answer an entry keeps: v, once kept (ok).
+type answer[V any] struct {
+	v  V
+	ok bool
 }
 
 // readerText is one text as a caller asks the index about it, and the
@@ -166,26 +170,29 @@ func (x *readerIndex) entryOf(s string) *readerEntry {
 }
 
 // read is the text, read now from its recording where the caller handed
-// one, with its entry found where t has none yet; ok false where the
-// recording was not read (counted unread, once per handle).
-func (t *readerText) read() (string, bool) {
-	s := t.text
-	if t.raw != nil {
-		if t.rawUnread {
-			return "", false
+// one, with that recording's fields (none for a handed text), and with its
+// entry found where t has none yet; ok false where the recording was not
+// read (counted unread, once per handle).
+func (t *readerText) read() (string, []rawField, bool) {
+	if t.raw == nil {
+		if t.e == nil {
+			t.e = t.x.entryOf(t.text)
 		}
-		b := t.raw.payload()
-		if !b.read {
-			t.rawUnread = true
-			t.x.unreadTexts++
-			return "", false
-		}
-		s = b.text
+		return t.text, nil, true
+	}
+	if t.rawUnread {
+		return "", nil, false
+	}
+	b := t.raw.payload()
+	if !b.read {
+		t.rawUnread = true
+		t.x.unreadTexts++
+		return "", nil, false
 	}
 	if t.e == nil {
-		t.e = t.x.entryOf(s)
+		t.e = t.x.entryOf(b.text)
 	}
-	return s, true
+	return b.text, b.fields, true
 }
 
 // own is the bytes keeping s adds to e: its length, where e keeps no text
@@ -197,38 +204,43 @@ func (e *readerEntry) own(s string) int64 {
 	return 0
 }
 
-// indexOnce is what one kind of question asks of the text: the answer the
-// entry keeps (kept marks it kept), or the one of derives from the text read
-// now. That answer is kept, with the text that tells it apart, where both
-// fit what is left of the budget; past it, the answer is the caller's for
-// this question alone and nothing here holds it, so the same question asked
-// again reads the text again (through main's caches, which keep what fits
-// theirs). ok is false only where the recording was not read.
-func indexOnce[V any](t *readerText, kept func(*readerEntry) *bool, get func(*readerEntry) V, of func(string) V, size func(V) int64, keep func(*readerEntry, V)) (V, bool) {
-	if t.e != nil && *kept(t.e) {
-		return get(t.e), true
+// indexOnce is what one kind of question (slot) asks of the text: the
+// answer the entry keeps, or the one of builds from the text read now (and
+// its recording's fields). That answer is kept, with the text that tells it
+// apart, where both fit what is left of the budget. Past it, scan (where
+// given) answers the caller's one question from the text read now, and
+// builds no answer (scanned true); else the answer is the caller's for
+// this question alone. Nothing here holds either, so the same question
+// asked again reads the text again (through main's caches, which keep what
+// fits theirs). The text is read once per question. ok is false only
+// where the recording was not read.
+func indexOnce[V any](t *readerText, slot func(*readerEntry) *answer[V], of func(string, []rawField) V, size func(V) int64, scan func(string, []rawField)) (v V, scanned, ok bool) {
+	if t.e != nil && slot(t.e).ok {
+		return slot(t.e).v, false, true
 	}
-	s, ok := t.read()
+	s, fields, ok := t.read()
 	if !ok {
-		var none V
-		return none, false
+		return v, false, false
 	}
-	e, x := t.e, t.x
-	if *kept(e) {
-		return get(e), true
+	e, x, a := t.e, t.x, slot(t.e)
+	if a.ok {
+		return a.v, false, true
 	}
 	if !x.mayKeep(e, s) {
-		return of(s), true
+		if scan != nil {
+			scan(s, fields)
+			return v, true, true
+		}
+		return of(s, fields), false, true
 	}
-	v := of(s)
+	v = of(s, fields)
 	if x.claim(size(v) + e.own(s)) {
 		e.text = s
-		keep(e, v)
-		*kept(e) = true
+		a.v, a.ok = v, true
 	} else {
 		e.past = true
 	}
-	return v, true
+	return v, false, true
 }
 
 // mayKeep reports whether an answer of s may still be kept in e: e is not
@@ -241,33 +253,23 @@ func (x *readerIndex) mayKeep(e *readerEntry, s string) bool {
 	return !e.past
 }
 
-// tokensOf are the text's words in every declared form, by reading
-// (isWord, wordByte, idByte), read once for the call where they fit the
-// budget; ok false where the recording was not read.
-func (t *readerText) tokensOf() ([]map[string]bool, bool) {
-	return indexOnce(t, func(e *readerEntry) *bool { return &e.tokensKept }, func(e *readerEntry) []map[string]bool { return e.tokens },
-		t.x.dc.rawTokens, tokensBytes, func(e *readerEntry, v []map[string]bool) { e.tokens = v })
-}
-
-// runsOf are the text's base64 runs that stand whole outside its
-// instants (eachB64Run), read once for the call where they fit the budget;
-// ok false where the recording was not read.
-func (t *readerText) runsOf() (map[string]bool, bool) {
-	dc := t.x.dc
-	return indexOnce(t, func(e *readerEntry) *bool { return &e.runsKept }, func(e *readerEntry) map[string]bool { return e.runs },
-		func(s string) map[string]bool {
-			runs := map[string]bool{}
-			eachB64Run(s, dc.spansOf(s), func(a, b int) bool { runs[s[a:b]] = true; return true })
-			return runs
-		}, wordsBytes, func(e *readerEntry, v map[string]bool) { e.runs = v })
+// tokens are the text's words in every declared form, by reading (isWord,
+// wordByte, idByte), read once for the call where they fit the budget, scan
+// answering past it (indexOnce).
+func (t *readerText) tokens(scan func(string, []rawField)) ([]map[string]bool, bool, bool) {
+	return indexOnce(t, func(e *readerEntry) *answer[[]map[string]bool] { return &e.tokens },
+		func(s string, _ []rawField) []map[string]bool { return t.x.dc.rawTokens(s) }, tokensBytes, scan)
 }
 
 // spansOf are the text's instants (instantSpans), read once for the call
 // where they fit the budget; ok false where the recording was not read.
 func (t *readerText) spansOf() ([]instant, bool) {
-	return indexOnce(t, func(e *readerEntry) *bool { return &e.spansKept }, func(e *readerEntry) []instant { return e.spans },
-		t.x.dc.spansOf, spansBytes, func(e *readerEntry, v []instant) { e.spans = v })
+	v, _, ok := indexOnce(t, spansSlot, func(s string, _ []rawField) []instant { return t.x.dc.spansOf(s) }, spansBytes, nil)
+	return v, ok
 }
+
+// spansSlot is the entry's slot for the text's instants.
+func spansSlot(e *readerEntry) *answer[[]instant] { return &e.spans }
 
 // extraSpansOf are the instants of the text's other declared forms
 // (rawExtra: decoded, case-folded, its encoded runs' text), read once for
@@ -275,8 +277,9 @@ func (t *readerText) spansOf() ([]instant, bool) {
 // read.
 func (t *readerText) extraSpansOf() ([]instant, bool) {
 	dc := t.x.dc
-	return indexOnce(t, func(e *readerEntry) *bool { return &e.extraKept }, func(e *readerEntry) []instant { return e.extraSpans },
-		func(s string) []instant { return dc.spansOf(dc.rawExtra(s)) }, spansBytes, func(e *readerEntry, v []instant) { e.extraSpans = v })
+	v, _, ok := indexOnce(t, func(e *readerEntry) *answer[[]instant] { return &e.extraSpans },
+		func(s string, _ []rawField) []instant { return dc.spansOf(dc.rawExtra(s)) }, spansBytes, nil)
+	return v, ok
 }
 
 // textNow is the text itself, for a question the index keeps no answer to
@@ -291,7 +294,8 @@ func (t *readerText) textNow() (string, bool) {
 	if t.e != nil && t.e.text != "" {
 		return t.e.text, true
 	}
-	return t.read()
+	s, _, ok := t.read()
+	return s, ok
 }
 
 // holdsWord reports whether the text holds w as a word in any of main's
@@ -303,37 +307,19 @@ func (t *readerText) holdsWord(w string) (held, read bool) {
 
 // wordIn reports whether the text holds w as a word in any of the readings
 // rs (indices of main's readings) and any declared form: from the words the
-// entry keeps (tokensOf), or, past the budget, by a scan of the text read
+// entry keeps (tokens), or, past the budget, by a scan of the text read
 // now and its other declared forms (textForms, the forms main's word lists
 // read), which reads no other word of it and keeps nothing, in no cache
 // either. read is false where the recording was not read.
 func (t *readerText) wordIn(w string, rs ...int) (held, read bool) {
-	if t.e == nil || !t.e.tokensKept {
-		s, ok := t.read()
-		if !ok {
-			return false, false
-		}
-		if !t.e.tokensKept && !t.x.mayKeep(t.e, s) {
-			for _, f := range textForms(s) {
-				for _, r := range rs {
-					if heldBy(f, w, readings[r]) {
-						return true, true
-					}
-				}
-			}
-			return false, true
-		}
+	in := func(f string) bool {
+		return slices.ContainsFunc(rs, func(r int) bool { return heldBy(f, w, readings[r]) })
 	}
-	sets, ok := t.tokensOf()
-	if !ok {
-		return false, false
+	sets, scanned, ok := t.tokens(func(s string, _ []rawField) { held = slices.ContainsFunc(textForms(s), in) })
+	if scanned || !ok {
+		return held, ok
 	}
-	for _, r := range rs {
-		if r < len(sets) && sets[r][w] {
-			return true, true
-		}
-	}
-	return false, true
+	return slices.ContainsFunc(rs, func(r int) bool { return r < len(sets) && sets[r][w] }), true
 }
 
 // heldBy reports whether w is a word of s as word reads it (tokensBy(s,
@@ -397,27 +383,10 @@ func fieldWordsBytes(f fieldWords) int64 {
 // of the text read now, which keeps nothing. read is false where the
 // recording was not read.
 func (t *readerText) fieldsWith(w string) (at []fieldAt, read bool) {
-	if t.e == nil || !t.e.fieldsKept {
-		s, ok := t.read()
-		if !ok {
-			return nil, false
-		}
-		if !t.e.fieldsKept && !t.x.mayKeep(t.e, s) {
-			t.eachField(s, func(f fieldAt, text string) {
-				for _, form := range textForms(text) {
-					if slices.ContainsFunc(readings, func(r func(byte) bool) bool { return heldBy(form, w, r) }) {
-						at = append(at, f)
-						return
-					}
-				}
-			})
-			return at, true
-		}
-	}
-	fw, ok := indexOnce(t, func(e *readerEntry) *bool { return &e.fieldsKept }, func(e *readerEntry) fieldWords { return e.fields },
-		func(s string) fieldWords {
+	fw, scanned, ok := indexOnce(t, func(e *readerEntry) *answer[fieldWords] { return &e.fields },
+		func(s string, fields []rawField) fieldWords {
 			fw := fieldWords{of: map[string][]int32{}}
-			t.eachField(s, func(f fieldAt, text string) {
+			eachField(s, fields, func(f fieldAt, text string) {
 				k := int32(len(fw.at))
 				fw.at = append(fw.at, f)
 				for _, set := range tokensOfForms(textForms(text)) {
@@ -429,22 +398,29 @@ func (t *readerText) fieldsWith(w string) (at []fieldAt, read bool) {
 				}
 			})
 			return fw
-		}, fieldWordsBytes, func(e *readerEntry, v fieldWords) { e.fields = v })
+		}, fieldWordsBytes, func(s string, fields []rawField) {
+			eachField(s, fields, func(f fieldAt, text string) {
+				if slices.ContainsFunc(textForms(text), func(form string) bool {
+					return slices.ContainsFunc(readings, func(r func(byte) bool) bool { return heldBy(form, w, r) })
+				}) {
+					at = append(at, f)
+				}
+			})
+		})
+	if scanned || !ok {
+		return at, ok
+	}
 	for _, k := range fw.of[w] {
 		at = append(at, fw.at[k])
 	}
-	return at, ok
+	return at, true
 }
 
 // eachField calls yield with each field of s, the text read now, and the
-// field's text: a recording's fields, a field that is a JSON object or
-// array (an HTTP body) by its own fields below its path (textFields), else
-// s whole as one field.
-func (t *readerText) eachField(s string, yield func(fieldAt, string)) {
-	var fields []rawField
-	if t.raw != nil {
-		fields = t.raw.payload().fields
-	}
+// field's text: its recording's fields (fields, read with s), a field that
+// is a JSON object or array (an HTTP body) by its own fields below its
+// path (textFields), else s whole as one field.
+func eachField(s string, fields []rawField, yield func(fieldAt, string)) {
 	if len(fields) == 0 {
 		yield(fieldAt{}, s)
 	}
@@ -489,22 +465,18 @@ func (t *readerText) holdsToken(kind tokenKind, tok string) (held, read bool) {
 	if kind == tokenID {
 		return t.wordIn(tok, len(readings)-1)
 	}
-	if t.e == nil || !t.e.runsKept {
-		s, ok := t.read()
-		if !ok {
-			return false, false
-		}
-		if !t.e.runsKept && !t.x.mayKeep(t.e, s) {
-			spans, _ := t.spansOf()
-			eachB64Run(s, spans, func(a, b int) bool {
-				held = s[a:b] == tok
-				return !held
-			})
-			return held, true
-		}
+	runs, scanned, ok := indexOnce(t, func(e *readerEntry) *answer[map[string]bool] { return &e.runs },
+		func(s string, _ []rawField) map[string]bool {
+			runs := map[string]bool{}
+			eachB64Run(s, t.x.dc.spansOf(s), func(a, b int) bool { runs[s[a:b]] = true; return true })
+			return runs
+		}, wordsBytes, func(s string, _ []rawField) {
+			eachB64Run(s, t.x.dc.spansOf(s), func(a, b int) bool { held = s[a:b] == tok; return !held })
+		})
+	if scanned || !ok {
+		return held, ok
 	}
-	runs, ok := t.runsOf()
-	return runs[tok], ok
+	return runs[tok], true
 }
 
 // eachB64Run calls yield with [start, end) of each of s's base64 runs that
@@ -553,13 +525,10 @@ func eachB64Run(s string, spans []instant, yield func(start, end int) bool) {
 // (byMoment), and whether one does so at a fine cut, in the text or any of
 // its declared forms, the forms main reads an instant in (holdsExact(text)
 // || holdsExact(rawExtra(text))) and holdsWord reads a word in; read as
-// holdsWord.
+// holdsWord. Past the budget the text and its forms are read from one read
+// of it.
 func (t *readerText) holdsMoment(m moment) (held, fine, read bool) {
-	for _, of := range []func() ([]instant, bool){t.spansOf, t.extraSpansOf} {
-		spans, ok := of()
-		if !ok {
-			return false, false, false
-		}
+	look := func(spans []instant) bool {
 		for _, sp := range spans {
 			if !sp.keyed {
 				continue
@@ -568,10 +537,22 @@ func (t *readerText) holdsMoment(m moment) (held, fine, read bool) {
 				held, fine = true, fine || f
 			}
 		}
-		if fine {
-			break
-		}
+		return fine
 	}
+	dc := t.x.dc
+	spans, scanned, ok := indexOnce(t, spansSlot, func(s string, _ []rawField) []instant { return dc.spansOf(s) }, spansBytes, func(s string, _ []rawField) {
+		if !look(dc.spansOf(s)) {
+			look(dc.spansOf(dc.rawExtra(s)))
+		}
+	})
+	if scanned || !ok || look(spans) {
+		return held, fine, ok
+	}
+	extra, ok := t.extraSpansOf()
+	if !ok {
+		return false, false, false
+	}
+	look(extra)
 	return held, fine, true
 }
 

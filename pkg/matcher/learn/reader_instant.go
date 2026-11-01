@@ -56,15 +56,9 @@ func (iw *instantWord) fine() bool {
 func epochDigits(s string) bool {
 	switch len(s) {
 	case 10, 13, 16, 19:
-	default:
-		return false
+		return allDigits(s)
 	}
-	for i := 0; i < len(s); i++ {
-		if !isDigit(s[i]) {
-			return false
-		}
-	}
-	return true
+	return false
 }
 
 // spanAt is the index of the instant of spans that holds at whole, -1
