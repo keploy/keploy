@@ -195,20 +195,21 @@ func strictDiff(ctx context.Context, input *req, live destination, m *models.Moc
 	out = append(out, k.queryDiffs(recQuery, liveQuery)...)
 	out = append(out, k.headerDiffs(r.Header, input.header, input.sentBody())...)
 	out = append(out, k.bodyDiffs(r, input)...)
-	return append(out, k.clockDiffs(ctx, input)...)
+	return append(out, k.clockDiffs(ctx, input, m)...)
 }
 
 // clockDiffs are the places the learn step learned as reads of the
 // application's clock (k.clocks) at which the call carries no such read made
-// in its own window on the application's clock (learn.ClockSpanFrom,
-// learn.CheckClockRead), each with the reason it gives; none where
+// in its own window on the application's clock (learn.ClockSpanOf for the
+// recording m it is checked against, learn.CheckClockRead), each with the
+// reason it gives; none where
 // keploy.yml's noise reaches the place, which the user declared not
 // compared. Every place is checked, whatever the walk found: a value equal to
 // its recording is a read of this run's clock only where the application's
 // clock showed it in the call's window, and a place the call does not carry,
 // or keploy cannot read, is refused. So is every place where keploy cannot
 // tell the application's clock at the call.
-func (k strictKnown) clockDiffs(ctx context.Context, input *req) []strictField {
+func (k strictKnown) clockDiffs(ctx context.Context, input *req, m *models.Mock) []strictField {
 	if len(k.clocks) == 0 {
 		return nil
 	}
@@ -216,7 +217,7 @@ func (k strictKnown) clockDiffs(ctx context.Context, input *req) []strictField {
 	if input.url != nil {
 		leaves = learnNoise{}.shape(liveParts(ctx, input), "").Leaves
 	}
-	span, known := learn.ClockSpanFrom(ctx, input.arrived)
+	span, known := learn.ClockSpanOf(ctx, input.arrived, m)
 	places := make([]string, 0, len(k.clocks))
 	for p := range k.clocks {
 		places = append(places, p)
