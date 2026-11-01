@@ -2,6 +2,7 @@ package learn
 
 import (
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -1186,9 +1187,10 @@ func TestATimeToLiveInAWindowAsWideAsItsCutIsRefusedUnderAMinute(t *testing.T) {
 
 // v5Decide is the order's decision on the one changed value of a call,
 // recorded as rec and seen in record's full round as live, in a window
-// width wide in both runs. Where the order is not on this tree (Decide then
-// refuses every word) the row is skipped: it runs wherever the two meet.
-func v5Decide(t *testing.T, path string, typ Type, rec, live string, rAt, fAt time.Time, width time.Duration) Decision {
+// width wide in both runs, after the places earlier. Where the order is not
+// on this tree (Decide then refuses every word) the row is skipped: it runs
+// wherever the two meet.
+func v5Decide(t *testing.T, path string, typ Type, rec, live string, rAt, fAt time.Time, width time.Duration, earlier ...Earlier) Decision {
 	t.Helper()
 	if reflect.ValueOf(decideBy).Pointer() == reflect.ValueOf(refuseAll).Pointer() {
 		t.Skip("the order of a changed word is not on this tree")
@@ -1200,7 +1202,7 @@ func v5Decide(t *testing.T, path string, typ Type, rec, live string, rAt, fAt ti
 	dc.appClock = true
 	ds := Decide(Input{
 		Drifts: dc, Drift: []string{path}, Live: leaf(live), Rec: leaf(rec),
-		At: rAt, Arrived: fAt, Test: "test-2", Mock: "mock-300", Mode: ModeOwn,
+		At: rAt, Arrived: fAt, Test: "test-2", Mock: "mock-300", Mode: ModeOwn, Earlier: earlier,
 		Window: v5Window(v5Call(rAt, width, 0), v5Call(fAt, width, 0)),
 		Landed: Landed{Where: LandedBetween},
 		Caps:   Caps{BindAtWord: true, AnswerAtWord: true, FViewStated: true},
@@ -1253,6 +1255,48 @@ func TestAPollsDebounceIsAClockThroughTheOrderInEveryWindow(t *testing.T) {
 					t.Errorf("FALSE GREEN: window %s, now - %s dropped, %s into its second", width, back, ph)
 				}
 			}
+		}
+	}
+}
+
+// A look-back whose moment a call of an earlier test sent before the call in
+// both runs (a token's lastUsedAt, sent again nine seconds later as a login
+// code's authTime) is that call's value carried, never a read of the
+// clock: its offset is the gap between the two tests, which a replay moves.
+// The order refuses it naming that call, in every window, where without
+// the earlier send the same values are a Clock of exactly that look-back.
+// The same send by the call's own test (a debounce beside the mark that set
+// dirtyAt = now) stays a Clock, as the order reads a coarse copy after the
+// clock; so does a plain read its own window holds beside an earlier test's
+// send of the same second. It waits for the order's carried-value step
+// (handed to the order's owner as a patch).
+func TestALookBackAnEarlierTestSentIsItsValueCarriedThroughTheOrder(t *testing.T) {
+	sec, ms := time.Second, time.Millisecond
+	const p, sent = "body.cmd.documents.0.authTime", "body.cmd.updates.0.u.$set.lastUsedAt"
+	at := time.Date(2026, 10, 31, 9, 0, 0, 400e6, time.UTC)
+	fAt := at.Add(2*time.Hour + 17*time.Minute + 23*time.Second + 150*ms)
+	secs := func(t time.Time) string { return strconv.FormatInt(t.Unix(), 10) }
+	sentBy := func(earlierTest bool, back time.Duration, rec, live string) Earlier {
+		return Earlier{Mock: "mock-a", At: at.Add(-back), Own: !earlierTest, Run: earlierTest,
+			Seen: []Seen{{Side: Request, Leaf: Leaf{Path: sent, Noise: sent, Type: Number, Value: rec}, Live: live}}}
+	}
+	for _, width := range []time.Duration{61 * ms, 1100 * ms, 3200 * ms} {
+		for _, back := range []time.Duration{2 * sec, 9 * sec, 15 * sec} {
+			rec, live := secs(at.Add(-4*ms-back)), secs(fAt.Add(-4*ms-back))
+			d := v5Decide(t, p, Number, rec, live, at, fAt, width, sentBy(true, back, rec, live))
+			if d.Clock != nil || d.Outcome != OutcomeRefused || d.Refusal == nil || d.Refusal.Kind != RefusalNoClockRead || !slices.Contains(d.Refusal.Places, "mock-a "+sent) {
+				t.Errorf("window %s, an earlier test's value sent again %s later: %+v; want refused (no-clock-read) naming mock-a %s", width, back, d, sent)
+			}
+			if d := v5Decide(t, p, Number, rec, live, at, fAt, width); d.Clock == nil || d.Outcome != OutcomeClock {
+				t.Errorf("window %s, now - %s with no earlier send: %+v; want a Clock", width, back, d)
+			}
+			if d := v5Decide(t, p, Number, rec, live, at, fAt, width, sentBy(false, back, rec, live)); d.Clock == nil || d.Outcome != OutcomeClock {
+				t.Errorf("window %s, now - %s beside its own test's send: %+v; want a Clock", width, back, d)
+			}
+		}
+		rec, live := secs(at.Add(-4*ms)), secs(fAt.Add(-4*ms))
+		if d := v5Decide(t, p, Number, rec, live, at, fAt, width, sentBy(true, 10*ms, rec, live)); d.Clock == nil || !d.Clock.Plain() {
+			t.Errorf("window %s, a plain read beside an earlier test's send of its second: %+v; want a plain read", width, d)
 		}
 	}
 }
