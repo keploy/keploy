@@ -32,8 +32,9 @@ func startGroupLeader(t *testing.T, argv ...string) (*exec.Cmd, <-chan struct{})
 }
 
 // beforeTheDeadline fires a quarter of the way to the test binary's
-// deadline, and never with none: a wait it bounds fails only for what never
-// happens, however long a loaded host takes, and still says what before the
+// deadline, and never with none: a wait it bounds fails only when it takes
+// over a quarter of the time the binary has left, far longer than a loaded
+// host takes for what does happen, and says what it waited on before the
 // binary's own panic.
 func beforeTheDeadline(t *testing.T) <-chan time.Time {
 	t.Helper()

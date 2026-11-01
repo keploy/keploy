@@ -51,12 +51,13 @@ func inOwnProcess(t *testing.T) bool {
 		t.Cleanup(endWhatItStarted)
 		return true
 	}
-	cmd := exec.Command(os.Args[0], "-test.run=^"+t.Name()+"$", "-test.v", "-test.count=1")
+	cmd := exec.Command(os.Args[0], ownProcessArgs(t, t.Name())...)
 	cmd.Env = append(os.Environ(), adoptHelperEnv+"="+t.Name())
-	// A process of its own that hangs ends with the test binary, at its
-	// timeout, rather than outliving it holding what it adopted. The
-	// signal comes when the thread that started it exits: it is held for
-	// as long as the process runs.
+	// A process of its own that hangs ends at its own timeout
+	// (ownProcessArgs), and if this test binary ends first, with it,
+	// rather than outliving it holding what it adopted. The signal comes
+	// when the thread that started it exits: it is held for as long as
+	// the process runs.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
 	runtime.LockOSThread()
 	out, err := cmd.CombinedOutput()
@@ -68,6 +69,23 @@ func inOwnProcess(t *testing.T) bool {
 		t.Skipf("skipped in its own process:\n%s", out)
 	}
 	return false
+}
+
+// ownProcessArgs runs test name alone in a copy of this test binary, with a
+// timeout of its own: three quarters of the time left to this binary's. So
+// the bounds of the copy's waits (beforeTheDeadline) have a deadline to come
+// before, and they, or the copy's own timeout panic, say what it waited on
+// while this binary still reads its output, instead of this binary's timeout
+// ending both and saying only that it ran out. With no timeout here, the
+// copy has none either.
+func ownProcessArgs(t *testing.T, name string) []string {
+	args := []string{"-test.run=^" + name + "$", "-test.v", "-test.count=1"}
+	if dl, ok := t.Deadline(); ok {
+		if left := time.Until(dl) * 3 / 4; left > 0 {
+			args = append(args, "-test.timeout="+left.String())
+		}
+	}
+	return args
 }
 
 // endWhatItStarted kills every process this one still runs: each it started,
@@ -212,7 +230,7 @@ func TestATestInItsOwnProcessLeavesNothingBehind(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer out.Close()
-	cmd := exec.Command(os.Args[0], "-test.run=^TestOwnProcessLeftoverHelper$", "-test.v", "-test.count=1")
+	cmd := exec.Command(os.Args[0], ownProcessArgs(t, "TestOwnProcessLeftoverHelper")...)
 	cmd.Env = append(os.Environ(), adoptHelperEnv+"=TestOwnProcessLeftoverHelper", leftoverDirEnv+"="+dir)
 	cmd.Stdout, cmd.Stderr = out, out
 	runErr := cmd.Run()
@@ -454,8 +472,9 @@ func startDaemon(command string, args ...string) (int, error) {
 }
 
 // beforeTheDeadline fires a quarter of the way to the test binary's
-// deadline, and never with none: a wait it bounds fails only for what never
-// happens, however long a loaded host takes, and still says what before the
+// deadline, and never with none: a wait it bounds fails only when it takes
+// over a quarter of the time the binary has left, far longer than a loaded
+// host takes for what does happen, and says what it waited on before the
 // binary's own panic.
 func beforeTheDeadline(t *testing.T) <-chan time.Time {
 	t.Helper()
@@ -967,7 +986,7 @@ func TestADaemonEndsWithTheProcessThatStartedIt(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = out.Close() })
-	cmd := exec.Command(os.Args[0], "-test.run=^TestOwnProcessKilledHelper$", "-test.v", "-test.count=1")
+	cmd := exec.Command(os.Args[0], ownProcessArgs(t, "TestOwnProcessKilledHelper")...)
 	cmd.Env = append(os.Environ(), adoptHelperEnv+"=TestOwnProcessKilledHelper", killedDirEnv+"="+dir)
 	cmd.Stdout, cmd.Stderr = out, out
 	in, err := cmd.StdinPipe()
