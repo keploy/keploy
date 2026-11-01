@@ -330,3 +330,48 @@ func TestOutcomeAWordGluedInABodyOfNoDeclaredTypeIsUnknown(t *testing.T) {
 		t.Errorf("s17 glued in a body declared text: %s; want fresh", oDescribe([]Decision{d}))
 	}
 }
+
+// An answer before the call in both runs (mock-42, round F's view not
+// stated) holds the changed minute by a cut, and an exchange recorded after
+// the call (mock-44), which round F gave the application before it, holds
+// round F's minute: binding the instant to mock-42 is then a guess between
+// two sources, so it is refused, naming mock-44, as main refuses it
+// (offset_test.go:2054). Without mock-44 holding round F's minute (it holds
+// the recorded minute alone), mock-42 binds it.
+func TestOutcomeAnAnswersInstantBesideALaterRecordingFGaveIsRefused(t *testing.T) {
+	const p = "body.sent_at"
+	at := r1Insert
+	recT := at.Truncate(time.Second)
+	const minute = "2006-01-02T15:04Z07:00"
+	rec, live := recT.Format(minute), recT.Add(time.Minute).Format(minute)
+	base := recT.Truncate(time.Minute)
+	own := RawOf(sentAtReceive("mock-42", at.Add(-time.Second), base.Add(45*time.Second).Format(time.RFC3339)), true).ServedAs(2)
+	call := func(earlier []Earlier, raw []Raw) Input {
+		return Input{Drifts: clockedDrifts(), Drift: []string{p}, Live: strLeaf(p, live), Rec: strLeaf(p, rec), At: at, Arrived: at,
+			Earlier: earlier, Raw: append(raw, own), Test: "test-2", Mock: "mock-300",
+			Caps: Caps{BindAtWord: true, AnswerAtWord: true, FViewStated: true}}
+	}
+	for _, sent := range []struct{ what, v string }{
+		{"15:51:05, cut to F's minute", base.Add(65 * time.Second).Format(time.RFC3339)},
+		{"15:50:40, rounded to F's minute", base.Add(40 * time.Second).Format(time.RFC3339)},
+		{"the minute 15:51 verbatim", base.Add(time.Minute).Format(minute)},
+	} {
+		for _, later := range []struct {
+			what string
+			at   time.Time
+			own  bool
+		}{
+			{"later in the call's own test's window", at.Add(30 * time.Second), true},
+			{"in a later test's window", at.Add(2 * time.Minute), false},
+		} {
+			nb := sentAtReceive("mock-44", later.at, sent.v)
+			what := sent.what + ", recorded " + later.what
+			d := oWord(t, Decide(call([]Earlier{leafedOf(nb, later.own, 1)}, nil)), rec, live)
+			oRefused(t, what+", served leaf by leaf", d, "unknown", "mock-44")
+			d = oWord(t, Decide(call(nil, []Raw{RawOf(nb, true).ServedAs(1).OfAnotherTest()})), rec, live)
+			oRefused(t, what+", handed as a recording", d, "unknown", "mock-44")
+		}
+	}
+	alone := sentAtReceive("mock-44", at.Add(30*time.Second), base.Add(10*time.Second).Format(time.RFC3339))
+	iValue(t, "the recorded minute alone at the later recording", oWord(t, Decide(call([]Earlier{leafedOf(alone, true, 1)}, nil)), rec, live), "mock-42")
+}
