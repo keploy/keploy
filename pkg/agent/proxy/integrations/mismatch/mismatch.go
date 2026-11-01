@@ -279,6 +279,22 @@ func RecordCommand() string {
 	return "keploy record"
 }
 
+// ExtraCallNextSteps is the next step of a miss on a call one more than the
+// test recorded (models.MissExtraCall): identical, as the matcher judges it,
+// to of, the test's own recording that already answered it, which the test
+// recorded recorded times. keploy cannot tell a read the application makes
+// again on its own timing from a call it should not make, so the person who
+// owns the test's mappings entry decides: the mark `repeat: any` on of
+// (models.MockEntry.Repeat) serves its answer to every identical call of the
+// test, and a re-record is for an application that changed on purpose.
+func ExtraCallNextSteps(of string, recorded int) string {
+	set := "test set"
+	if mockMode.Load() {
+		set = "mock set"
+	}
+	return fmt.Sprintf("This call is identical to %s, which already answered it in this test: the application made it more often than the test recorded it %d time(s). If the application may make it any number of times with the same answer (a read it repeats on its own timing), mark %s `repeat: any` in the test's mocks: list in its mappings file; if the application changed on purpose, re-record the %s with '%s'.", of, recorded, of, set, RecordCommand())
+}
+
 // defaultNextSteps derives an actionable hint from the report shape. The
 // wording deliberately never references commands that don't exist; the two
 // real remedies are noise (for drifting values) and re-recording (for

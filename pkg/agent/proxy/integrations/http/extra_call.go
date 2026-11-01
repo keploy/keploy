@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mismatch"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/variables"
@@ -26,20 +27,20 @@ func (h *HTTP) extraCall(ctx context.Context, input *req, mockDb integrations.Mo
 
 // extraCallOf is extraCall with the recording the call repeats: of the
 // test's answered mocks the call matches on its own, the first to answer
-// (models.MockMismatchReport.ExtraOf); "" when n is 0, and when the call
+// (models.MockMismatchReport.ExtraOf); nil when n is 0, and when the call
 // matched only the answered mocks together.
-func (h *HTTP) extraCallOf(ctx context.Context, input *req, mockDb integrations.MockMemDb, headerNoise, bodyNoise map[string][]string, urlNoise []string, autoURLDynamic, schemaNoiseDetection, schemaNoiseStrict, mockCorrelation bool) (n int, of string) {
+func (h *HTTP) extraCallOf(ctx context.Context, input *req, mockDb integrations.MockMemDb, headerNoise, bodyNoise map[string][]string, urlNoise []string, autoURLDynamic, schemaNoiseDetection, schemaNoiseStrict, mockCorrelation bool) (n int, of *models.Mock) {
 	er, ok := mockDb.(integrations.ExactConsumedReader)
 	if !ok {
-		return 0, ""
+		return 0, nil
 	}
 	answered := FilterHTTPMocks(er.ConsumedTestMocks())
 	if len(answered) == 0 {
-		return 0, ""
+		return 0, nil
 	}
 	dry := h.answeredMatch(ctx, input, mockDb, headerNoise, bodyNoise, urlNoise, autoURLDynamic, schemaNoiseDetection, schemaNoiseStrict, mockCorrelation)
 	if !dry(answered) {
-		return 0, ""
+		return 0, nil
 	}
 	// How often the test recorded the call: each answered mock the call
 	// matches on its own (recordings of one call may differ where its
@@ -47,12 +48,29 @@ func (h *HTTP) extraCallOf(ctx context.Context, input *req, mockDb integrations.
 	for _, a := range answered {
 		if dry([]*models.Mock{a}) {
 			if n == 0 {
-				of = a.Name
+				of = a
 			}
 			n++
 		}
 	}
 	return max(n, 1), of
+}
+
+// markExtraCall makes report the miss of a call one more than the test
+// recorded (extraCallOf): identical, as the matcher judges it (noise and
+// learned places included), to of, the test's own recording that already
+// answered it, which the test recorded recorded times. of is its closest
+// mock, with no field named as differing, since none does: the live pool's
+// closest is another recording (of answered and left every read), whose
+// differences say nothing of this call, and a reader that took them for the
+// call's would re-record a call that did not change. The next step says how
+// often the test recorded the call and names the mark that answers a read
+// the application repeats on its own timing (mismatch.ExtraCallNextSteps).
+func markExtraCall(report *models.MockMismatchReport, of *models.Mock, recorded int) {
+	report.ClosestMock = of.Name
+	report.FieldDiffs, report.Differs, report.FieldReasons, report.Diff = nil, nil, nil, ""
+	report.ClosestMockReq = renderMockRequest(of.Spec.HTTPReq, of.Noise)
+	report.NextSteps = mismatch.ExtraCallNextSteps(of.Name, recorded)
 }
 
 // ownCall reports whether the request is one of the open test's own calls
@@ -117,8 +135,8 @@ func (h *HTTP) answeredMatch(ctx context.Context, input *req, mockDb integration
 // never served: the match already failed. diag is returned as
 // it is when exact serving is off, when the test has no answered mock, and
 // for a miss whose recording fit but whose variables did not hold, and for a
-// stateful walk's (matchDiag.answered): that is what each reports. The caller leaves an extra call's diagnosis as the
-// match found it.
+// stateful walk's (matchDiag.answered): that is what each reports. An extra
+// call is diagnosed against the recording it repeats (markExtraCall).
 func (h *HTTP) answeredDiag(ctx context.Context, input *req, mockDb integrations.MockMemDb, diag *matchDiag, headerNoise, bodyNoise map[string][]string, urlNoise []string) *matchDiag {
 	if !provenswitch.On() || (diag != nil && (diag.variable != nil || diag.answered != nil)) {
 		return diag

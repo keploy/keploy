@@ -500,6 +500,39 @@ func TestAnExtraCallDifferingOnlyInANoisedHeaderNamesItsCopy(t *testing.T) {
 	}
 }
 
+// An extra call is diagnosed against the copy it repeats, never against the
+// live pool's closest other recording: the call does not differ from its
+// copy, so the miss names that copy as its closest with no difference, and
+// its next step says the call was made more often than recorded and names
+// the mark (`repeat: any`) that answers a read the application repeats,
+// never "Request structure changed". A call the test never recorded keeps
+// the pool's closest and its difference.
+func TestAnExtraCallNamesItsCopyNotThePoolsClosest(t *testing.T) {
+	const addr, host = "127.0.0.1:8099", "localhost:8099"
+	const path = "/cluster?name=local-test"
+	t.Setenv(provenswitch.Env, "1")
+	near := onHost("mock-74", "/cluster?name=default", host)
+	rec := onHost("mock-77", path, host)
+	pool := earlierDb{mockMemDb: &mockMemDb{mocks: []*models.Mock{near}}}
+	r := missReport(t, gateDb{earlierDb: pool, consumed: []*models.Mock{rec}}, addr, host, path, models.OutgoingOptions{})
+	if r.MissKind != models.MissExtraCall || r.Recorded != 1 || r.ExtraOf != "mock-77" {
+		t.Fatalf("a second identical read is kind %q (recorded %d) of %q; want extra_call, recorded once, of mock-77", r.MissKind, r.Recorded, r.ExtraOf)
+	}
+	if r.ClosestMock != "mock-77" || len(r.Differs) != 0 || len(r.FieldDiffs) != 0 || len(r.FieldReasons) != 0 || r.Diff != "" {
+		t.Fatalf("the extra read's miss is closest %q, differs %v, diffs %v, reasons %+v, diff %q; want mock-77 with no difference named", r.ClosestMock, r.Differs, r.FieldDiffs, r.FieldReasons, r.Diff)
+	}
+	if !strings.Contains(r.ClosestMockReq, "name=local-test") {
+		t.Fatalf("the extra read's closest request is %q; want mock-77's", r.ClosestMockReq)
+	}
+	if strings.Contains(r.NextSteps, "Request structure changed") || !strings.Contains(r.NextSteps, "mock-77 `repeat: any`") || !strings.Contains(r.NextSteps, "recorded it 1 time") {
+		t.Fatalf("the extra read's next step is %q; want it to say how often the test recorded it and name the mark on mock-77", r.NextSteps)
+	}
+	r = missReport(t, gateDb{earlierDb: pool, consumed: []*models.Mock{onHost("mock-1", "/cluster?name=other", host)}}, addr, host, path, models.OutgoingOptions{})
+	if r.MissKind == models.MissExtraCall || r.ClosestMock != "mock-74" || len(r.Differs) == 0 || strings.Contains(r.NextSteps, "repeat: any") {
+		t.Fatalf("a call the test never recorded is kind %q, closest %q, differs %v, next step %q; want no extra call, mock-74 with its difference and no mark", r.MissKind, r.ClosestMock, r.Differs, r.NextSteps)
+	}
+}
+
 // perTestDb is earlierDb whose per-test read shows perTest, or fails with
 // readErr; spent are the recordings it reports spent (integrations.
 // SpentReader), and others those it tells are not the open test's own
