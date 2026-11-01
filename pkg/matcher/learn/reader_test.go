@@ -265,3 +265,35 @@ func BenchmarkReaderIndex498KB(b *testing.B) {
 	}
 	b.ReportMetric(float64(peak)/(1<<20), "heapMiB")
 }
+
+// RD8: a call asking about many large earlier recordings, each handed over
+// and dropped in turn as keploy's store streams them, holds at once only
+// what fits its budget: a text past the budget is unread, and the index
+// keeps no byte of it.
+func TestReaderIndexHoldsNoTextPastItsBudget(t *testing.T) {
+	defer func(b int64) { readerBudget = b }(readerBudget)
+	readerBudget = 1 << 20
+	const n, size = 64, 1 << 20
+	heap := func() uint64 {
+		runtime.GC()
+		var st runtime.MemStats
+		runtime.ReadMemStats(&st)
+		return st.HeapAlloc
+	}
+	x := newReaderIndex(NewDriftCache())
+	before := heap()
+	for i := 0; i < n; i++ {
+		text := fmt.Sprintf("%07d ", i) + strings.Repeat("a", size-8)
+		if held, read := x.holdsWord(text, fmt.Sprintf("%07d", i)); held && !read {
+			t.Fatalf("recording %d: held but unread", i)
+		}
+	}
+	grew := int64(heap()) - int64(before)
+	runtime.KeepAlive(x)
+	if !x.unread() {
+		t.Fatalf("%d recordings of %d bytes against a %d byte budget: want unread", n, size, readerBudget)
+	}
+	if grew > 8<<20 {
+		t.Fatalf("the index holds %d MiB after %d recordings of 1 MiB were asked about and dropped: it keeps texts past its %d MiB budget", grew>>20, n, readerBudget>>20)
+	}
+}
