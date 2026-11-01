@@ -55,15 +55,14 @@ func (m *mockService) learningTests() map[string]bool {
 // theirs, for learning only (the agent's LearnedElsewhere): its clock reads
 // alone are written onto the recordings with the rest (withLearnedElsewhere),
 // and no test's flow holds them.
-func (m *mockService) keepLearned(ctx context.Context, set string, consumed []models.MockState, consumedErr error, elsewhere []models.MockState, flows []FlowMocks, expected map[string][]models.MockEntry) (map[string][]string, []string, error) {
+func (m *mockService) keepLearned(ctx context.Context, set string, consumed []models.MockState, consumedErr error, elsewhere []models.MockState, flows []FlowMocks, expected map[string][]models.MockEntry) (learnedOut, error) {
 	if consumedErr != nil {
-		return nil, nil, fmt.Errorf("what the learn step learned could not be read from keploy's agent: %w", consumedErr)
+		return learnedOut{}, fmt.Errorf("what the learn step learned could not be read from keploy's agent: %w", consumedErr)
 	}
-	consumed = withLearnedElsewhere(consumed, elsewhere)
 	if !m.clientTestsRead() {
-		notKept := m.learnedOnto(consumed, expected)
+		notKept := m.learnedOnto(withLearnedElsewhere(consumed, elsewhere), expected)
 		if len(notKept) == 0 {
-			return nil, nil, nil
+			return learnedOut{}, nil
 		}
 		// The agent by the version its answer named, or as one that named
 		// none (models.AgentVersionHeader).
@@ -73,9 +72,21 @@ func (m *mockService) keepLearned(ctx context.Context, set string, consumed []mo
 			zap.Strings("notKept", notKept),
 			zap.String("agent", didNotSay),
 			zap.String("next_step", clientTestsRemedy()))
-		return nil, nil, fmt.Errorf("keploy kept nothing its agent learned in record's full round (%s): %s, so a value the harness gave the application may have been learned as noise, and the round's tests ran on it; %s", firstFields(notKept, 10), didNotSay, clientTestsRemedy())
+		return learnedOut{}, fmt.Errorf("keploy kept nothing its agent learned in record's full round (%s): %s, so a value the harness gave the application may have been learned as noise, and the round's tests ran on it; %s", firstFields(notKept, 10), didNotSay, clientTestsRemedy())
 	}
-	return m.persistLearned(ctx, set, consumed, flows, expected)
+	return m.persistLearned(ctx, set, consumed, elsewhere, flows, expected)
+}
+
+// learnedOut is what record's full round wrote onto the set's mocks
+// (persistLearned), as the record says it: byTest by test, each field as
+// "<mock> <what was added>"; pool what it wrote onto mocks no test consumed
+// (the set's start-up and pool), sorted; elsewhere what calls made in other
+// windows than their recordings' taught them, by recording
+// (LearnedElsewhere). A field only such a call taught is in elsewhere alone.
+type learnedOut struct {
+	byTest    map[string][]string
+	pool      []string
+	elsewhere []LearnedElsewhere
 }
 
 // withLearnedElsewhere is consumed with elsewhere's clock reads merged onto
@@ -184,16 +195,20 @@ type learnedPersister interface {
 
 // persistLearned writes what the learn step learned onto the set's mocks, so
 // the recording the record commits carries it, says per test what was
-// learned (design §7.2 step 10), and returns it by test, each field as
-// "<mock> <what mockdb's PersistLearned added>", and what it wrote onto mocks
-// no test consumed (the set's start-up and pool), sorted. With config.Test.LearnTests set it writes only
-// onto the mocks of those tests (and onto the pool's with LearnPool): a test
-// the record did not record again keeps its recording as it is. expected is
-// each test's own mocks, by its mapping.
-func (m *mockService) persistLearned(ctx context.Context, set string, consumed []models.MockState, flows []FlowMocks, expected map[string][]models.MockEntry) (map[string][]string, []string, error) {
+// learned (design §7.2 step 10), and returns it (learnedOut): by test, each
+// field as "<mock> <what mockdb's PersistLearned added>", what it wrote onto
+// mocks no test consumed (the set's start-up and pool), and what calls made
+// in other windows than their recordings' taught them (elsewhere's clock
+// reads, merged onto consumed's: withLearnedElsewhere), each said with the
+// test whose recording it is and the windows that taught it. With
+// config.Test.LearnTests set it writes only onto the mocks of those tests
+// (and onto the pool's with LearnPool): a test the record did not record
+// again keeps its recording as it is. expected is each test's own mocks, by
+// its mapping.
+func (m *mockService) persistLearned(ctx context.Context, set string, consumed, elsewhere []models.MockState, flows []FlowMocks, expected map[string][]models.MockEntry) (learnedOut, error) {
 	p, ok := m.mockDB.(learnedPersister)
 	if !ok {
-		return nil, nil, errors.New("keploy's mock store cannot write what the learn step learned")
+		return learnedOut{}, errors.New("keploy's mock store cannot write what the learn step learned")
 	}
 	owner := map[string]string{}
 	for test, entries := range expected {
@@ -201,8 +216,9 @@ func (m *mockService) persistLearned(ctx context.Context, set string, consumed [
 			owner[e.Name] = test
 		}
 	}
-	all := make(map[string]models.MockState, len(consumed))
-	for _, st := range consumed {
+	written := withLearnedElsewhere(consumed, elsewhere)
+	all := make(map[string]models.MockState, len(written))
+	for _, st := range written {
 		all[st.Name] = st
 	}
 	all, taken := learn.RunTakesPlaces(all, func(mock string) string { return owner[mock] })
@@ -210,7 +226,7 @@ func (m *mockService) persistLearned(ctx context.Context, set string, consumed [
 		m.logger.Info("keploy follows a test's own variable as the test set's: a later test sends the value it sent",
 			zap.String("test", t.Test), zap.String("variable", t.Own), zap.String("setVariable", t.Run), zap.String("mock", t.Mock), zap.String("field", t.Place))
 	}
-	states := make(map[string]models.MockState, len(consumed))
+	states := make(map[string]models.MockState, len(written))
 	for _, st := range all {
 		if !m.learnsOnto(owner[st.Name]) {
 			continue
@@ -220,21 +236,25 @@ func (m *mockService) persistLearned(ctx context.Context, set string, consumed [
 		// be written whole.
 		for target := range st.Binds {
 			if !m.learnsOnto(owner[target]) {
-				return nil, nil, fmt.Errorf("the learn step learned a variable of %s bound at %s, a recording this record did not make", st.Name, target)
+				return learnedOut{}, fmt.Errorf("the learn step learned a variable of %s bound at %s, a recording this record did not make", st.Name, target)
 			}
 		}
 		states[st.Name] = st
 	}
 	added, err := p.PersistLearned(ctx, set, states)
 	if err != nil {
-		return nil, nil, fmt.Errorf("writing what the learn step learned onto keploy/%s: %w", set, err)
+		return learnedOut{}, fmt.Errorf("writing what the learn step learned onto keploy/%s: %w", set, err)
 	}
+	taught := taughtFields(consumed, elsewhere, added)
 	byTest := map[string][]string{}
 	seen := map[string]bool{}
 	for _, f := range flows {
 		var fields []string
 		for _, st := range f.Consumed {
 			for _, a := range added[st.Name] {
+				if taught.only(st.Name, a) {
+					continue
+				}
 				fields = append(fields, st.Name+" "+a)
 			}
 			if len(added[st.Name]) > 0 {
@@ -252,6 +272,9 @@ func (m *mockService) persistLearned(ctx context.Context, set string, consumed [
 			continue
 		}
 		for _, a := range as {
+			if taught.only(name, a) {
+				continue
+			}
 			rest = append(rest, name+" "+a)
 		}
 	}
@@ -259,7 +282,110 @@ func (m *mockService) persistLearned(ctx context.Context, set string, consumed [
 		sort.Strings(rest)
 		m.logger.Info("learned fields that changed between record and replay, on mocks no test consumed", zap.Strings("fields", rest))
 	}
-	return byTest, rest, nil
+	out := learnedOut{byTest: byTest, pool: rest, elsewhere: taught.said(owner)}
+	for _, e := range out.elsewhere {
+		m.logger.Info("learned fields that changed between record and replay, from calls made in other windows than their recording's, for learning only",
+			zap.String("mock", e.Mock), zap.String("test", orStartupAndPool(e.Owner)), zap.Strings("fields", e.Fields), zap.String("taughtIn", e.Windows()))
+	}
+	return out, nil
+}
+
+// taught is, by recording, what calls made in other windows than its own
+// taught it (the agent's LearnedElsewhere) that the round wrote onto it
+// (taughtFields).
+type taught map[string]taughtMock
+
+type taughtMock struct {
+	// fields are the fields written of the paths such calls taught,
+	// as mockdb's PersistLearned said it added them; own those of them a
+	// consumed state of the recording learned too.
+	fields []string
+	own    map[string]bool
+	from   []models.TeachingWindow
+}
+
+// taughtFields is, of added (by recording, what the round wrote onto it),
+// the fields at the paths elsewhere taught each recording, with the
+// windows that taught it. A field a consumed state of the recording learned
+// too is its consumer's as well (taught.only is false there).
+func taughtFields(consumed, elsewhere []models.MockState, added map[string][]string) taught {
+	out := taught{}
+	for _, e := range elsewhere {
+		if e.Name == "" || len(e.Clocks) == 0 || len(added[e.Name]) == 0 {
+			continue
+		}
+		t := taughtMock{from: e.TaughtIn}
+		for _, a := range added[e.Name] {
+			if fieldPath(a, e.Clocks) != "" {
+				t.fields = append(t.fields, a)
+			}
+		}
+		if len(t.fields) > 0 {
+			out[e.Name] = t
+		}
+	}
+	for _, st := range consumed {
+		t, ok := out[st.Name]
+		if !ok {
+			continue
+		}
+		for _, a := range t.fields {
+			if p := fieldPath(a, st.Clocks); p != "" {
+				if t.own == nil {
+					t.own = map[string]bool{}
+				}
+				t.own[a] = true
+			}
+		}
+		out[st.Name] = t
+	}
+	return out
+}
+
+// fieldPath is the path of clocks a field as mockdb's PersistLearned says
+// it ("<path> (<what>)") is at, "" for none.
+func fieldPath(field string, clocks map[string]models.ClockOffset) string {
+	path, _, ok := strings.Cut(field, " (")
+	if !ok {
+		return ""
+	}
+	if _, at := clocks[path]; !at {
+		return ""
+	}
+	return path
+}
+
+// only reports whether field, written onto mock, was taught by calls made
+// in other windows alone: no consumed state of mock learned it.
+func (t taught) only(mock, field string) bool {
+	tm, ok := t[mock]
+	return ok && slices.Contains(tm.fields, field) && !tm.own[field]
+}
+
+// said is t as the record's receipt says it (LearnedElsewhere), by
+// recording, each with its owner's name (owner, "" for the set's start-up
+// and pool) and the windows that taught it, in time order.
+func (t taught) said(owner map[string]string) []LearnedElsewhere {
+	out := make([]LearnedElsewhere, 0, len(t))
+	for _, mock := range slices.Sorted(maps.Keys(t)) {
+		tm := t[mock]
+		from := slices.Clone(tm.from)
+		sort.SliceStable(from, func(i, j int) bool { return from[i].At.Before(from[j].At) })
+		out = append(out, LearnedElsewhere{Mock: mock, Owner: owner[mock], Fields: slices.Clone(tm.fields), TaughtIn: from})
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// orStartupAndPool is test, or what the record calls the set's start-up and
+// pool when it is "".
+func orStartupAndPool(test string) string {
+	if test == "" {
+		return "the set's start-up and pool"
+	}
+	return test
 }
 
 // learnsOnto reports whether what the learn step learned is kept on a mock

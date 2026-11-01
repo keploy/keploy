@@ -306,8 +306,48 @@ type TestsReceipt struct {
 	// Learned is what the learn step of a record's full round wrote onto
 	// mocks no test consumed (the set's start-up and pool), each field as
 	// "<mock> <path> (<kind>)"; a test's own is on its line (design v14
-	// §7.2 step 10).
+	// §7.2 step 10). What a call made in another window than its
+	// recording's taught it is LearnedElsewhere's, not this.
 	Learned []string `yaml:"learned,omitempty" json:"learned,omitempty"`
+	// LearnedElsewhere is what the learn step of a record's full round
+	// wrote onto recordings from calls made in other windows than theirs,
+	// for learning only (a timer's call that fired in another test's
+	// window): by recording, with the test whose recording it is and the
+	// windows that taught it. Such learning is that window's: whatever
+	// undoes what a window learned undoes it too.
+	LearnedElsewhere []LearnedElsewhere `yaml:"learnedElsewhere,omitempty" json:"learnedElsewhere,omitempty"`
+}
+
+// LearnedElsewhere is what calls made in other windows than a recording's
+// taught it, as a record's receipt says it (TestsReceipt.LearnedElsewhere).
+type LearnedElsewhere struct {
+	// Mock is the recording.
+	Mock string `yaml:"mock" json:"mock"`
+	// Owner is the test whose mapping lists the recording, "" for the set's
+	// start-up and pool. No call of its own taught it what Fields says.
+	Owner string `yaml:"owner,omitempty" json:"owner,omitempty"`
+	// Fields are what was written onto the recording at the places such
+	// calls taught, each as "<path> (<clock read>)". One a call of the
+	// recording's own test taught too is on that test's line as well.
+	Fields []string `yaml:"fields" json:"fields"`
+	// TaughtIn are the windows those calls came in, in time order: the test
+	// open when they came, "" between tests or where keploy no longer knew
+	// it, and when the last of each taught the recording.
+	TaughtIn []models.TeachingWindow `yaml:"taughtIn" json:"taughtIn"`
+}
+
+// Windows is l's windows as the record says them: "<test>'s window" or
+// "between tests", comma-separated.
+func (l LearnedElsewhere) Windows() string {
+	out := make([]string, 0, len(l.TaughtIn))
+	for _, w := range l.TaughtIn {
+		if w.Test == "" {
+			out = append(out, "between tests")
+			continue
+		}
+		out = append(out, w.Test+"'s window")
+	}
+	return strings.Join(out, ", ")
 }
 
 // empty reports whether the run reported no test and keploy refused

@@ -13,6 +13,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml/mapdb"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -70,17 +71,17 @@ func TestPersistLearnedSaysEveryField(t *testing.T) {
 	m := &mockService{config: &config.Config{}, mockDB: store, logger: zap.NewNop()}
 	consumed := []models.MockState{{Name: "mock-1"}, {Name: "startup-0"}}
 	flows := []FlowMocks{{Flow: "o::A", Consumed: []models.MockState{{Name: "mock-1"}}}}
-	byTest, pool, err := m.persistLearned(context.Background(), "s", consumed, flows, map[string][]models.MockEntry{"o::A": {{Name: "mock-1"}}})
+	out, err := m.persistLearned(context.Background(), "s", consumed, nil, flows, map[string][]models.MockEntry{"o::A": {{Name: "mock-1"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(byTest, map[string][]string{"o::A": {"mock-1 body.ts (noise)"}}) || !reflect.DeepEqual(pool, []string{"startup-0 body.ts (noise)"}) {
-		t.Fatalf("by test %v, pool %v", byTest, pool)
+	if !reflect.DeepEqual(out.byTest, map[string][]string{"o::A": {"mock-1 body.ts (noise)"}}) || !reflect.DeepEqual(out.pool, []string{"startup-0 body.ts (noise)"}) {
+		t.Fatalf("by test %v, pool %v", out.byTest, out.pool)
 	}
 
 	m.config.Test.LearnTests = map[string]bool{"o::A": true}
 	bound := []models.MockState{{Name: "mock-1", Binds: map[string]models.MockVariables{"mock-old": {"id": {Recorded: "1", Bind: "body.id"}}}}}
-	if _, _, err := m.persistLearned(context.Background(), "s", bound, flows, map[string][]models.MockEntry{"o::A": {{Name: "mock-1"}}, "o::B": {{Name: "mock-old"}}}); err == nil {
+	if _, err := m.persistLearned(context.Background(), "s", bound, nil, flows, map[string][]models.MockEntry{"o::A": {{Name: "mock-1"}}, "o::B": {{Name: "mock-old"}}}); err == nil {
 		t.Fatal("a bind onto a recording the record did not make was written")
 	}
 }
@@ -131,27 +132,27 @@ func TestKeployMockKeepsWhatItsAgentLearnedOnlyFromAClientTestsReader(t *testing
 			store := &learnedStore{}
 			core, logs := observer.New(zap.WarnLevel)
 			m := &mockService{config: &config.Config{}, mockDB: store, logger: zap.New(core), instrumentation: tc.instr}
-			byTest, _, err := m.keepLearned(context.Background(), "s", consumed, nil, nil, flows, expected)
+			out, err := m.keepLearned(context.Background(), "s", consumed, nil, nil, flows, expected)
 			if tc.kept {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if store.got == nil || len(byTest["o::A"]) != 1 {
-					t.Fatalf("persisted %v, by test %v; want what was learned kept", store.got, byTest)
+				if store.got == nil || len(out.byTest["o::A"]) != 1 {
+					t.Fatalf("persisted %v, by test %v; want what was learned kept", store.got, out.byTest)
 				}
 				return
 			}
 			if err == nil || !strings.Contains(err.Error(), "keploy kept nothing its agent learned in record's full round (mock-1 body.ts (noise)): "+tc.why+", so ") || !strings.Contains(err.Error(), "run keploy mock record with the keploy agent of its own version (v3.7.0)") {
 				t.Fatalf("err %v; want the round failed, saying what it did not keep, and %q", err, tc.why)
 			}
-			if store.got != nil || byTest != nil {
-				t.Fatalf("persisted %v, by test %v; want nothing kept", store.got, byTest)
+			if store.got != nil || out.byTest != nil {
+				t.Fatalf("persisted %v, by test %v; want nothing kept", store.got, out.byTest)
 			}
 			if said := logs.FilterMessageSnippet("keploy kept nothing its agent learned").FilterField(zap.String("agent", tc.why)); said.Len() != 1 {
 				t.Fatalf("logs %v; want the round to say it kept nothing, and %q", logs.All(), tc.why)
 			}
 			// Nothing learned: nothing lost, and the round completes.
-			if _, _, err := m.keepLearned(context.Background(), "s", []models.MockState{{Name: "mock-1"}}, nil, nil, flows, expected); err != nil {
+			if _, err := m.keepLearned(context.Background(), "s", []models.MockState{{Name: "mock-1"}}, nil, nil, flows, expected); err != nil {
 				t.Fatalf("nothing learned: %v", err)
 			}
 			// Each kind of learning, alone, is learning not kept: a variable,
@@ -166,14 +167,14 @@ func TestKeployMockKeepsWhatItsAgentLearnedOnlyFromAClientTestsReader(t *testing
 				{models.MockState{Name: "mock-1", Binds: map[string]models.MockVariables{"mock-0": {"id": {Recorded: "1", Bind: "body.id"}}}}, "mock-1 id (bound at mock-0)"},
 				{models.MockState{Name: "mock-1", Clocks: map[string]models.ClockOffset{"body.since": {Res: time.Millisecond}}}, "mock-1 body.since (clock)"},
 			} {
-				if _, _, err := m.keepLearned(context.Background(), "s", []models.MockState{only.learned}, nil, nil, flows, expected); err == nil || !strings.Contains(err.Error(), "keploy kept nothing its agent learned in record's full round ("+only.said+"): ") {
+				if _, err := m.keepLearned(context.Background(), "s", []models.MockState{only.learned}, nil, nil, flows, expected); err == nil || !strings.Contains(err.Error(), "keploy kept nothing its agent learned in record's full round ("+only.said+"): ") {
 					t.Fatalf("only %s learned: err %v; want the round failed, naming it", only.said, err)
 				}
 			}
 		})
 	}
 	m := &mockService{config: &config.Config{}, mockDB: &learnedStore{}, logger: zap.NewNop(), instrumentation: clientTestsInstr{reads: true}}
-	if _, _, err := m.keepLearned(context.Background(), "s", consumed, errors.New("agent gone"), nil, flows, expected); err == nil {
+	if _, err := m.keepLearned(context.Background(), "s", consumed, errors.New("agent gone"), nil, flows, expected); err == nil {
 		t.Fatal("a round whose consumed mocks could not be read kept what was learned")
 	}
 }
@@ -249,7 +250,7 @@ func TestPersistLearnedGivesTheRunsVariableAnEarlierTestsOwnPlace(t *testing.T) 
 		{Name: "mock-2", Variables: models.MockVariables{"run-order": v("", "path1")}, Binds: map[string]models.MockVariables{"mock-0": {"run-order": v("body.order")}}},
 	}
 	expected := map[string][]models.MockEntry{"o::B": {{Name: "mock-0"}, {Name: "mock-1"}}, "o::C": {{Name: "mock-2"}}}
-	if _, _, err := m.persistLearned(context.Background(), "s", consumed, nil, expected); err != nil {
+	if _, err := m.persistLearned(context.Background(), "s", consumed, nil, nil, expected); err != nil {
 		t.Fatal(err)
 	}
 	if got := store.got["mock-1"]; !reflect.DeepEqual(got.Variables, models.MockVariables{"run-order": v("", "path1")}) ||
@@ -472,25 +473,74 @@ func TestMockReplayHandsTheAgentTheTestsItLearnsOnto(t *testing.T) {
 	}
 }
 
+// mergingStore is a mock store whose PersistLearned merges each state onto
+// a recording that carries nothing yet (learn.MergeLearned), as mockdb's
+// does, and says what that added.
+type mergingStore struct {
+	MockDB
+	got map[string]models.MockState
+}
+
+func (s *mergingStore) PersistLearned(_ context.Context, _ string, states map[string]models.MockState) (map[string][]string, error) {
+	s.got = states
+	out := map[string][]string{}
+	for name, st := range states {
+		if a := learn.MergeLearned(&models.Mock{Name: name}, st, nil); len(a) > 0 {
+			out[name] = a
+		}
+	}
+	return out, nil
+}
+
 // What record's full round's learn step taught a recording from a call made
 // in another window than its own (the agent's LearnedElsewhere) is written
 // onto the recording beside what consumed recordings learned, merged with a
 // consumed recording's own: a timer's recording no test consumed carries its
-// clock reads. It is no consumption: no test's flow holds it, it is said
-// apart (on mocks no test consumed), the consumed states are not changed,
-// and a recording of a test the round does not learn onto keeps nothing.
+// clock reads. It is no consumption: no test's flow holds it, the consumed
+// states are not changed, and a recording of a test the round does not
+// learn onto keeps nothing. The record says it apart, under the test whose
+// recording it is, with the windows that taught it: never as the set's
+// start-up and pool's, nor on a consumer's line, but for a field the
+// consumer learned too.
 func TestKeployMockWritesWhatACallInAnotherWindowTaughtOntoTheRecording(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
 	minute := models.ClockOffset{Min: -time.Minute, Max: -time.Minute, Res: time.Millisecond}
-	consumed := []models.MockState{{Name: "mock-1", ReqBodyNoise: map[string][]string{"body.ts": {}}}}
+	consumed := []models.MockState{{Name: "mock-1", ReqBodyNoise: map[string][]string{"body.ts": {}}, Clocks: map[string]models.ClockOffset{"lease_at": minute}}}
+	began := time.Date(2026, 11, 1, 9, 0, 0, 0, time.UTC)
+	inC := []models.TeachingWindow{{Test: "o::C", At: began.Add(time.Second)}}
 	elsewhere := []models.MockState{
-		{Name: "mock-9", Clocks: map[string]models.ClockOffset{"claimed_at": minute}},
-		{Name: "mock-1", Clocks: map[string]models.ClockOffset{"dirty_at": minute}},
+		{Name: "mock-9", Clocks: map[string]models.ClockOffset{"claimed_at": minute}, TaughtIn: []models.TeachingWindow{{At: began.Add(2 * time.Second)}, {Test: "o::C", At: began}}},
+		{Name: "mock-1", Clocks: map[string]models.ClockOffset{"dirty_at": minute, "lease_at": minute}, TaughtIn: inC},
 	}
 	flows := []FlowMocks{{Flow: "o::A", Consumed: []models.MockState{{Name: "mock-1"}}}}
 	expected := map[string][]models.MockEntry{"o::A": {{Name: "mock-1"}}, "o::B": {{Name: "mock-9"}}}
+	merging := &mergingStore{}
+	m := &mockService{config: &config.Config{}, mockDB: merging, logger: zap.NewNop(), instrumentation: clientTestsInstr{reads: true}}
+	out, err := m.keepLearned(context.Background(), "s", consumed, nil, elsewhere, flows, expected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock := " (" + minute.String() + ")"
+	if !reflect.DeepEqual(out.byTest, map[string][]string{"o::A": {"mock-1 body.ts (noise)", "mock-1 lease_at" + clock}}) || out.pool != nil {
+		t.Fatalf("by test %v, on the set's start-up and pool %v; want o::A's own fields alone, and none on the pool", out.byTest, out.pool)
+	}
+	want := []LearnedElsewhere{
+		{Mock: "mock-1", Owner: "o::A", Fields: []string{"dirty_at" + clock, "lease_at" + clock}, TaughtIn: inC},
+		{Mock: "mock-9", Owner: "o::B", Fields: []string{"claimed_at" + clock}, TaughtIn: []models.TeachingWindow{{Test: "o::C", At: began}, {At: began.Add(2 * time.Second)}}},
+	}
+	if !reflect.DeepEqual(out.elsewhere, want) {
+		t.Fatalf("said as learned elsewhere %+v; want %+v", out.elsewhere, want)
+	}
+	if got := out.elsewhere[1].Windows(); got != "o::C's window, between tests" {
+		t.Fatalf("mock-9's windows said %q", got)
+	}
+	if len(consumed) != 1 || len(consumed[0].Clocks) != 1 || len(flows[0].Consumed) != 1 {
+		t.Fatalf("the consumed states changed: %+v, flows %+v", consumed, flows)
+	}
+
 	store := &learnedStore{}
-	m := &mockService{config: &config.Config{}, mockDB: store, logger: zap.NewNop(), instrumentation: clientTestsInstr{reads: true}}
-	byTest, rest, err := m.keepLearned(context.Background(), "s", consumed, nil, elsewhere, flows, expected)
+	m.mockDB = store
+	out, err = m.keepLearned(context.Background(), "s", consumed, nil, elsewhere, flows, expected)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -504,12 +554,6 @@ func TestKeployMockWritesWhatACallInAnotherWindowTaughtOntoTheRecording(t *testi
 	if _, ok := one.ReqBodyNoise["body.ts"]; !ok {
 		t.Fatalf("a consumed recording lost its own learning: %+v", one)
 	}
-	if !reflect.DeepEqual(byTest, map[string][]string{"o::A": {"mock-1 body.ts (noise)"}}) || !reflect.DeepEqual(rest, []string{"mock-9 body.ts (noise)"}) {
-		t.Fatalf("by test %v, on mocks no test consumed %v; want mock-9 said apart, under no test", byTest, rest)
-	}
-	if len(consumed) != 1 || consumed[0].Clocks != nil || len(flows[0].Consumed) != 1 {
-		t.Fatalf("the consumed states changed: %+v, flows %+v", consumed, flows)
-	}
 
 	// Clock reads alone: what a call made in another window carried as
 	// noise, or a variable, is never written, whatever the agent sent (an
@@ -521,7 +565,7 @@ func TestKeployMockWritesWhatACallInAnotherWindowTaughtOntoTheRecording(t *testi
 		{Name: "mock-1", ReqBodyNoise: map[string][]string{"body.lease": {}}, Variables: models.MockVariables{"id": {Recorded: "1", Bind: "body.id"}}},
 		{Name: "mock-7", ReqBodyNoise: map[string][]string{"body._id": {}}},
 	}
-	if _, _, err := m.keepLearned(context.Background(), "s", consumed, nil, loose, flows, expected); err != nil {
+	if _, err := m.keepLearned(context.Background(), "s", consumed, nil, loose, flows, expected); err != nil {
 		t.Fatal(err)
 	}
 	if nine := store.got["mock-9"]; len(nine.ReqBodyNoise) != 0 || len(nine.Clocks) != 1 {
@@ -537,7 +581,7 @@ func TestKeployMockWritesWhatACallInAnotherWindowTaughtOntoTheRecording(t *testi
 	// A test the round does not learn onto keeps its recording as it is.
 	m.config.Test.LearnTests = map[string]bool{"o::A": true}
 	store.got = nil
-	if _, _, err := m.keepLearned(context.Background(), "s", consumed, nil, elsewhere, flows, expected); err != nil {
+	if _, err := m.keepLearned(context.Background(), "s", consumed, nil, elsewhere, flows, expected); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := store.got["mock-9"]; ok {
@@ -547,7 +591,7 @@ func TestKeployMockWritesWhatACallInAnotherWindowTaughtOntoTheRecording(t *testi
 	// An agent that does not read client tests keeps none of it, and says so.
 	m.config.Test.LearnTests = nil
 	m.instrumentation = clientTestsInstr{reads: false}
-	if _, _, err := m.keepLearned(context.Background(), "s", nil, nil, elsewhere[:1], nil, expected); err == nil || !strings.Contains(err.Error(), "mock-9 claimed_at") {
+	if _, err := m.keepLearned(context.Background(), "s", nil, nil, elsewhere[:1], nil, expected); err == nil || !strings.Contains(err.Error(), "mock-9 claimed_at") {
 		t.Fatalf("err %v; want the round failed, naming mock-9's clock read it did not keep", err)
 	}
 }
