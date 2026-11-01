@@ -330,8 +330,8 @@ func (s *scopedMockDb) LearnElsewhereCandidates(kind models.Kind) []*models.Mock
 	return integrations.LearnElsewhereCandidates(s.MockMemDb, kind)
 }
 
-func (s *scopedMockDb) LearnElsewhere(m *models.Mock, noise map[string][]string, clocks map[string]models.ClockOffset) bool {
-	return integrations.LearnElsewhereOnto(s.MockMemDb, m, noise, clocks)
+func (s *scopedMockDb) LearnElsewhere(m *models.Mock, clocks map[string]models.ClockOffset) bool {
+	return integrations.LearnElsewhereOnto(s.MockMemDb, m, clocks)
 }
 
 var (
