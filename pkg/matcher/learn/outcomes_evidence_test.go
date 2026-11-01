@@ -375,3 +375,30 @@ func TestOutcomeAnAnswersInstantBesideALaterRecordingFGaveIsRefused(t *testing.T
 	alone := sentAtReceive("mock-44", at.Add(30*time.Second), base.Add(10*time.Second).Format(time.RFC3339))
 	iValue(t, "the recorded minute alone at the later recording", oWord(t, Decide(call([]Earlier{leafedOf(alone, true, 1)}, nil)), rec, live), "mock-42")
 }
+
+// An exchange served leaf by leaf whose request was recorded after the call,
+// which round F gave the application before it with no view of its answer
+// stated, may hold round F's new word anywhere its leaves do not show: the
+// word is unknown, refused naming it, as main refuses it
+// (served_elsewhere_test.go:134). Said served as recorded, it shows nothing,
+// and the word is made anew.
+func TestOutcomeALateExchangeWithNoViewStatedLeavesAWordUnknown(t *testing.T) {
+	const path = "bind.$8"
+	m := jobsMock(chanceSrcRec, "5")
+	m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock = eRecAt.Add(time.Second), eRecAt.Add(time.Second+time.Millisecond)
+	for _, asRecorded := range []bool{false, true} {
+		e := Earlier{Mock: m.Name, At: m.Spec.ReqTimestampMock, AsRecorded: asRecorded, Payload: RawOf(m, true),
+			Seen: []Seen{{Side: Response, Leaf: Leaf{Path: "row.0.n", Type: String, Value: "5"}, Live: "5"}}}
+		in := Input{Drifts: clockedDrifts(), Drift: []string{path}, Rec: strLeaf(path, "82"), Live: strLeaf(path, "6c7d"),
+			At: eRecAt, Arrived: eRecAt, Earlier: []Earlier{e}, Raw: eStartup(), Test: "test-2", Mock: "mock-300",
+			Caps: Caps{BindAtWord: true, AnswerAtWord: true, FViewStated: true}}
+		d := oWord(t, Decide(in), "82", "6c7d")
+		if asRecorded {
+			if d.Outcome != OutcomeFresh {
+				t.Errorf("a late exchange said served as recorded: %s; want a value made anew", oDescribe([]Decision{d}))
+			}
+			continue
+		}
+		oRefused(t, "a late exchange with no view stated", d, "unknown", m.Name)
+	}
+}
