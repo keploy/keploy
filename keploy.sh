@@ -464,7 +464,7 @@ installKeploy (){
                 install_keploy_arm
             else
                 echo "Unsupported architecture: $ARCH"
-                return
+                return 1
             fi
         elif [[ "$OS_NAME" == MINGW32_NT* ]] || [[ "$OS_NAME" == MINGW64_NT* ]] || [[ "$OS_NAME" == MSYS_NT* ]] || [[ "$OS_NAME" == CYGWIN_NT* ]]; then
             # The --oss build intercepts with eBPF and therefore has no native
@@ -485,8 +485,10 @@ installKeploy (){
             echo "This build also supports running your application in Docker on every"
             echo "platform. Download keploy_windows_amd64 from the releases page first:"
             echo "  https://github.com/keploy/keploy/releases"
+            return 1
         else
             echo "Unknown OS, install Linux to run Keploy"
+            return 1
         fi
     else
         if [ "$OS_NAME" = "Darwin" ]; then
@@ -498,7 +500,7 @@ installKeploy (){
             install_keploy_arm
         else
             echo "Unsupported architecture: $ARCH"
-            return
+            return 1
         fi
     fi
 }
@@ -514,11 +516,13 @@ for arg in "$@"; do
 done
 set -- "${forwarded_args[@]}"
 
-# Neither route deletes or writes anything in the caller's working directory:
-# run from a repo root, an `install.sh` there is the repo's own file. This one
-# used to download the installer below over ./install.sh, source whatever was
+# This script deletes and writes nothing in the caller's working directory:
+# run from a repo root, an `install.sh` there is the repo's own file. It used
+# to download the installer below over ./install.sh, source whatever was
 # there, and `rm -rf keploy.sh install.sh` afterwards. Downloads go to a
-# mktemp directory of the installer's own, removed when it is done.
+# mktemp directory of the installer's own, removed when it is done. (The
+# installer the default route hands off to deleted ./install.sh and
+# ./keploy-enterprise.sh too, until the release that stopped it.)
 if [ "$USE_OSS" = false ]; then
     echo "Installing Keploy"
     keploy_installer_dir=$(mktemp -d) || {
@@ -539,7 +543,9 @@ if [ "$USE_OSS" = false ]; then
     # Intel Mac (and a bad -v) with status 1, and this is the default route
     # `curl ... install.sh && source install.sh` takes, so exiting 0 here
     # would turn that refusal into a green CI step with nothing installed.
-    return $ent_status 2>/dev/null || exit $ent_status
+    # eval expands the status first, so ent_status is not left set in the
+    # caller's shell.
+    eval "unset ent_status; return $ent_status 2>/dev/null || exit $ent_status"
 fi
 
 # The release is downloaded and extracted in a mktemp directory of this run's

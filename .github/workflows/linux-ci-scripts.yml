@@ -170,8 +170,10 @@ jobs:
         run: bash .github/workflows/test_workflow_scripts/compose-proven-setend-linux.tests.sh
 
   installer:
-    # Seven cases, under bash and under zsh; a few seconds.
-    timeout-minutes: 5
+    # Seventeen cases, under bash and under zsh; a few seconds. The one on a
+    # terminal (script(1), in bsdutils on ubuntu) bounds itself at 120 s per
+    # shell, so both hanging still leave the log time to show.
+    timeout-minutes: 8
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -182,4 +184,5 @@ jobs:
       - name: Test keploy.sh (leaves the caller's directory alone; downloads into a temp directory of its own)
         env:
           REQUIRE_ZSH: '1'
+          REQUIRE_PTY: '1'
         run: bash .github/workflows/test_workflow_scripts/keploy-installer.tests.sh

@@ -18,14 +18,22 @@
 #     FAKE_ENT_STATUS) wherever curl was told to write it, `-o FILE` or, like
 #     the real curl, ./install.sh for -O. A download of a release tarball
 #     writes a stand-in release (a keploy that logs its runs, LICENSE,
-#     README.md, READMEes-Es.md).
+#     README.md, READMEes-Es.md). FAKE_HTTP_404 makes the installer URL answer
+#     with an error page: written, exit 0, unless curl is told to --fail.
 #   - rm, mv, tar and mkdir run the real command only when every absolute path
 #     they are given is inside this test's own directory, and curl writes only
-#     there; anything else is logged as "fenced:" and fails. sudo always fails
-#     and is logged. So a keploy.sh that reaches for fixed /tmp paths, as the
-#     --oss route once did, fails here without touching the host's /tmp.
+#     there; anything else is logged as "fenced:" and fails. sudo fails and is
+#     logged, except in the root cases (FAKE_SUDO_ROOT), where `sudo mkdir` and
+#     `sudo mv` run as the caller, through those fenced commands, with
+#     /usr/local/bin mapped into the case's directory. So a keploy.sh that
+#     reaches for fixed /tmp paths, as the --oss route once did, fails here
+#     without touching the host's /tmp.
+#   - uname reports FAKE_UNAME_S / FAKE_UNAME_M when they are set.
 # keploy.sh itself runs unmodified, SOURCED the way users run it, under bash
-# and under zsh when it is installed.
+# and under zsh when it is installed; one case sources it from an interactive
+# shell on a terminal (util-linux script(1)). After the source, the shell logs
+# that it lived on, job control before and after, and the status variables
+# keploy.sh left set.
 #
 # What it pins down:
 #   - run from a directory that holds the caller's own install.sh and
@@ -43,9 +51,19 @@
 #     under $TMPDIR that is removed afterwards, installs the release's binary
 #     (never a keploy that was already in the temp directory), and keeps the
 #     files of someone else's that were there.
-#   - with --oss, a failed or corrupt download fails the install and installs
-#     nothing.
-#   - no case touches a path outside its own directories, or runs sudo.
+#   - with --oss, a failed, corrupt or cut-off download, or a release with no
+#     keploy in it, fails the install and installs nothing, not even the part
+#     of keploy that was extracted.
+#   - --oss as root puts the release's keploy in /usr/local/bin with sudo,
+#     from its private temp directory.
+#   - an error page from the installer URL is never sourced.
+#   - an unsupported architecture or OS, and Windows, fail the --oss install.
+#   - a failed install returns, never exits: the shell it was sourced into
+#     lives on, and the temp directory is still removed.
+#   - job control is as it was: on in an interactive shell, off in a CI step.
+#   - keploy.sh leaves no status variable set in the caller's shell.
+#   - no case touches a path outside its own directories, or runs sudo for
+#     anything but the root cases' mkdir and mv.
 
 set -u
 
@@ -102,6 +120,15 @@ case "$*" in
     [ -n "$out" ] || exit 1
     fenced "$@" && exit 23
     [ -z "${FAKE_DOWNLOAD_FAIL:-}" ] || exit 22
+    if [ -n "${FAKE_HTTP_404:-}" ]; then
+      # As curl does with a 404: without --fail it writes the error page and
+      # exits 0.
+      for a in "$@"; do
+        case "$a" in --fail | --fail-with-body | -[!-]*f*) exit 22 ;; esac
+      done
+      echo 'echo "the error page was sourced" >> "$STUB_LOG"' > "$out"
+      exit 0
+    fi
     echo "download-to $out" >> "$STUB_LOG"
     cp "$FAKE_ENT_INSTALLER" "$out"
     ;;
@@ -136,10 +163,36 @@ for cmd in rm mv tar mkdir; do ln -s fence "$stubs/$cmd"; done
 
 cat > "$stubs/sudo" << 'EOF'
 #!/bin/sh
+if [ -n "${FAKE_SUDO_ROOT:-}" ]; then
+  case "$1" in
+    mkdir | mv)
+      echo "sudo-mapped: $*" >> "$STUB_LOG"
+      cmd=$1
+      shift
+      for a in "$@"; do
+        case "$a" in /usr/local/bin | /usr/local/bin/*) a="$FAKE_SUDO_ROOT$a" ;; esac
+        set -- "$@" "$a"
+        shift
+      done
+      exec "$cmd" "$@"
+      ;;
+  esac
+fi
 echo "sudo: $*" >> "$STUB_LOG"
 exit 1
 EOF
-chmod +x "$stubs/curl" "$stubs/fence" "$stubs/sudo"
+
+cat > "$stubs/uname" << 'EOF'
+#!/bin/sh
+case "$*" in
+  -s | "") [ -z "${FAKE_UNAME_S:-}" ] || { echo "$FAKE_UNAME_S"; exit 0; } ;;
+  -m) [ -z "${FAKE_UNAME_M:-}" ] || { echo "$FAKE_UNAME_M"; exit 0; } ;;
+esac
+PATH=/usr/bin:/bin
+export PATH
+exec uname "$@"
+EOF
+chmod +x "$stubs/curl" "$stubs/fence" "$stubs/sudo" "$stubs/uname"
 
 # The stand-in release, laid out like goreleaser's tarball.
 release="$tmp/release"
@@ -152,6 +205,25 @@ chmod +x "$release/keploy"
 for f in LICENSE README.md READMEes-Es.md; do echo "the release's $f" > "$release/$f"; done
 tar czf "$tmp/release.tar.gz" -C "$release" keploy LICENSE README.md READMEes-Es.md
 echo "not a tarball" > "$tmp/corrupt.tar.gz"
+tar czf "$tmp/no-keploy.tar.gz" -C "$release" LICENSE README.md READMEes-Es.md
+
+# A release tarball cut off partway through its keploy, as a dropped
+# connection leaves it: tar extracts the start of keploy, then fails.
+cut="$tmp/release-cut"
+mkdir -p "$cut"
+{
+  cat "$release/keploy"
+  head -c 200000 /dev/urandom | base64 | sed 's/^/# /'
+} > "$cut/keploy"
+chmod +x "$cut/keploy"
+tar czf "$tmp/cut.tar.gz" -C "$cut" keploy
+head -c $(($(wc -c < "$tmp/cut.tar.gz") / 2)) "$tmp/cut.tar.gz" > "$tmp/truncated.tar.gz"
+# The cut-off case means something only if tar here does leave part of
+# keploy behind.
+mkdir -p "$tmp/cut-probe"
+if tar xzf "$tmp/truncated.tar.gz" -C "$tmp/cut-probe" 2> /dev/null || [ ! -s "$tmp/cut-probe/keploy" ]; then
+  fail "fixture: extracting the cut-off tarball fails and leaves part of keploy behind"
+fi
 
 # ---------------------------------------------------------------- harness
 
@@ -168,7 +240,10 @@ CALLERS_ENT="the caller's own keploy-enterprise.sh"
 # keploy-enterprise.sh of the caller's. With case_in_repo set it is a repo root
 # instead: it holds the caller's own install.sh and keploy-enterprise.sh, and
 # keploy.sh is sourced from another directory. Extra environment goes in the
-# case_env array. Leaves $work, $out, $log, $scratch and $rc.
+# case_env array. case_sudo_root lets sudo mkdir and mv run, mapped into
+# $root_dir; case_home_blocked makes ~/.keploy a file, so nothing can be put
+# in ~/.keploy/bin; case_pty sources keploy.sh from an interactive shell on a
+# terminal. Leaves $work, $out, $log, $scratch, $root_dir and $rc.
 install() {
   local dir="$tmp/$run_shell-$1"
   shift
@@ -177,8 +252,11 @@ install() {
   log="$dir/stub.log"
   scratch="$dir/tmp"
   dir_home="$dir/home"
-  mkdir -p "$dir/home" "$work" "$scratch" "$dir/dl"
+  root_dir="$dir/root"
+  mkdir -p "$dir/home" "$work" "$scratch" "$dir/dl" "$root_dir"
   : > "$log"
+  [ -z "$case_home_blocked" ] || echo "a file, not a directory" > "$dir/home/.keploy"
+  [ -z "$case_sudo_root" ] || case_env+=(FAKE_SUDO_ROOT="$root_dir")
   local f
   for f in $THEIRS; do echo "someone else's $f" > "$scratch/$f"; done
   local src=./install.sh
@@ -190,21 +268,41 @@ install() {
   else
     cp "$installer" "$work/install.sh"
   fi
+  local runner
+  if [ -n "$case_pty" ]; then
+    local cmd flags=(-f)
+    [ "$run_shell" = bash ] && flags=(--norc --noprofile)
+    printf -v cmd '%q ' "$run_shell" "${flags[@]}" -i -c "$BODY" install "$src" "$@"
+    runner=(timeout 120 script -qec "$cmd" /dev/null)
+  else
+    runner=("$run_shell" -c "$BODY" install "$src" "$@")
+  fi
   (
     cd "$work" || exit 1
-    # The single-quoted $1, $src and $@ are the inner shell's to expand.
-    # shellcheck disable=SC2016
     env -i HOME="$dir/home" PATH="$stubs:/usr/bin:/bin" TMPDIR="$scratch" TERM=dumb \
       STUB_LOG="$log" FENCE="$tmp" FAKE_ENT_INSTALLER="$tmp/fake-ent-install.sh" \
       FAKE_RELEASE_TARBALL="$tmp/release.tar.gz" ${case_env[@]+"${case_env[@]}"} \
-      "$run_shell" -c 'src=$1; shift; source "$src" "$@"' install "$src" "$@"
+      "${runner[@]}" < /dev/null
   ) > "$out" 2>&1
   rc=$?
   case_env=()
   case_in_repo=""
+  case_sudo_root=""
+  case_home_blocked=""
+  case_pty=""
 }
+# What the inner shell runs: it sources keploy.sh the way users do, then logs
+# that it lived on (an `exit` in keploy.sh would have closed it) with the
+# status, job control before and after ($-, read outside any $(...): zsh drops
+# m inside one), and whether keploy.sh left its status variables set. The
+# single-quoted variables are the inner shell's to expand.
+# shellcheck disable=SC2016
+BODY='src=$1; shift; jc_before=$-; source "$src" "$@"; st=$?; jc_after=$-; echo "the shell lived on: status=$st jobctl-before=$jc_before jobctl-after=$jc_after ent_status=${ent_status-unset} oss_status=${oss_status-unset}" >> "$STUB_LOG"; exit $st'
 case_env=()
 case_in_repo=""
+case_sudo_root=""
+case_home_blocked=""
+case_pty=""
 # Files of someone else's in each case's TMPDIR, named like the ones the --oss
 # route downloads and extracts.
 THEIRS="keploy keploy.tar.gz LICENSE README.md READMEes-Es.md"
@@ -241,10 +339,32 @@ used_private_dir_and_cleaned_up() { # <stub log key> <file>
   case "${to#"$scratch"/}" in */*/*) return 1 ;; esac
   tmp_left_as_it_was
 }
-# Nothing outside the case's directories was touched, and sudo never ran.
+# Nothing outside the case's directories was touched, and sudo never ran
+# (but for the root cases' mapped mkdir and mv).
 stayed_inside() { ! grep -qE '^(fenced|sudo):' "$log"; }
 installed() { cmp -s "$release/keploy" "$dir_home/.keploy/bin/keploy"; }
-nothing_installed() { [ ! -e "$dir_home/.keploy/bin/keploy" ]; }
+installed_as_root() { cmp -s "$release/keploy" "$root_dir/usr/local/bin/keploy"; }
+nothing_installed() { [ ! -e "$dir_home/.keploy/bin/keploy" ] && [ ! -e "$root_dir/usr/local/bin/keploy" ]; }
+nothing_downloaded() { ! grep -q '^release-download-to ' "$log"; }
+error_page_not_sourced() { ! grep -qF "the error page was sourced" "$log"; }
+# The shell keploy.sh was sourced into lived on after it; after_source <name>
+# is what that shell logged for <name>.
+lived_on() { grep -q '^the shell lived on: ' "$log"; }
+after_source() { sed -n 's/^the shell lived on: //p' "$log" | tr ' ' '\n' | sed -n "s/^$1=//p"; }
+has_monitor() { case $1 in *m*) return 0 ;; esac; return 1; }
+# job_control on|off: job control was on (off) before the install, and still is.
+job_control() {
+  lived_on || return 1
+  local before after
+  before=$(after_source jobctl-before)
+  after=$(after_source jobctl-after)
+  if [ "$1" = on ]; then
+    has_monitor "$before" && has_monitor "$after"
+  else
+    ! has_monitor "$before" && ! has_monitor "$after"
+  fi
+}
+no_status_left() { [ "$(after_source ent_status)" = unset ] && [ "$(after_source oss_status)" = unset ]; }
 release_keploy_ran() { grep -qF "the release's keploy ran: example" "$log"; }
 release_keploy_did_not_run() { ! grep -qF "the release's keploy ran" "$log"; }
 ent_ran_with() { grep -qF "ent-installer ran from $work with: $1" "$log"; }
@@ -268,6 +388,7 @@ suite() {
   check "the repo's install.sh is never run" callers_install_not_run
   check "the download used a private temp directory, removed afterwards" used_private_dir_and_cleaned_up download-to install.sh
   check "nothing outside its own directories is touched, and sudo is not run" stayed_inside
+  check "no status variable is left set in the caller's shell" no_status_left
 
   echo "== sourced as ./install.sh, the way the docs say"
   install documented -noRoot
@@ -288,12 +409,24 @@ suite() {
   check "nothing else runs either" ent_did_not_run
   check "the repo's files are kept unchanged" callers_dir_untouched callers
   check "the private temp directory is still removed, and the temp directory is otherwise as it was" tmp_left_as_it_was
+  check "no status variable is left set in the caller's shell" no_status_left
+
+  echo "== the installer URL answers with an error page, from a repo root"
+  case_in_repo=1
+  case_env=(FAKE_HTTP_404=1)
+  install error-page -noRoot
+  check "the install fails" test "$rc" -ne 0
+  check "it says the download failed" said "could not download the Keploy installer"
+  check "the error page is never sourced" error_page_not_sourced
+  check "the repo's files are kept unchanged" callers_dir_untouched callers
+  check "the private temp directory is still removed, and the temp directory is otherwise as it was" tmp_left_as_it_was
 
   echo "== the other installer refuses (an Intel Mac, a bad -v)"
   case_env=(FAKE_ENT_STATUS=1)
   install ent-refuses
   check "the install fails with it" test "$rc" -eq 1
   check "the private temp directory is still removed, and the temp directory is otherwise as it was" tmp_left_as_it_was
+  check "no status variable is left set in the caller's shell" no_status_left
 
   echo "== --oss from a repo root, with someone else's keploy, LICENSE and README.md in the temp directory"
   case_in_repo=1
@@ -306,6 +439,31 @@ suite() {
   check "nothing outside its own directories is touched, and sudo is not run" stayed_inside
   check "the repo's install.sh and keploy-enterprise.sh are kept unchanged, and nothing is added" callers_dir_untouched callers
   check "the other installer does not run" ent_did_not_run
+  check "job control stays off, as it was in this non-interactive shell" job_control off
+  check "no status variable is left set in the caller's shell" no_status_left
+
+  echo "== --oss from an interactive shell on a terminal"
+  if [ -n "$have_pty" ]; then
+    case_pty=1
+    install oss-interactive --oss -noRoot
+    [ "$rc" -eq 0 ] || show_output
+    check "the install succeeds" test "$rc" -eq 0
+    check "the release's keploy is installed in ~/.keploy/bin" installed
+    check "job control is still on afterwards" job_control on
+  else
+    echo "     skipped: no util-linux script(1) here to give the shell a terminal"
+  fi
+
+  echo "== --oss as root (-isCI), from a repo root"
+  case_in_repo=1
+  case_sudo_root=1
+  install oss-root --oss -isCI
+  [ "$rc" -eq 0 ] || show_output
+  check "the install succeeds" test "$rc" -eq 0
+  check "the release's keploy is put in /usr/local/bin with sudo" installed_as_root
+  check "the download and extraction used a private temp directory, removed afterwards; the other files there are kept unchanged" used_private_dir_and_cleaned_up release-download-to keploy.tar.gz
+  check "nothing outside its own directories is touched, and sudo runs only mkdir and mv" stayed_inside
+  check "the repo's install.sh and keploy-enterprise.sh are kept unchanged, and nothing is added" callers_dir_untouched callers
 
   echo "== --oss, the download fails"
   case_env=(FAKE_RELEASE_DOWNLOAD_FAIL=1)
@@ -322,8 +480,59 @@ suite() {
   check "nothing is installed, and no keploy runs" eval 'nothing_installed && release_keploy_did_not_run'
   check "the private temp directory is still removed, and the temp directory is otherwise as it was" tmp_left_as_it_was
   check "nothing outside its own directories is touched, and sudo is not run" stayed_inside
+
+  echo "== --oss, the download is cut off partway through keploy"
+  case_env=(FAKE_RELEASE_TARBALL="$tmp/truncated.tar.gz")
+  install oss-cut-off --oss -noRoot
+  check "the install fails" test "$rc" -ne 0
+  check "the part of keploy that was extracted is not installed, and no keploy runs" eval 'nothing_installed && release_keploy_did_not_run'
+  check "the private temp directory is still removed, and the temp directory is otherwise as it was" tmp_left_as_it_was
+  check "nothing outside its own directories is touched, and sudo is not run" stayed_inside
+
+  echo "== --oss, the release tarball has no keploy in it"
+  case_env=(FAKE_RELEASE_TARBALL="$tmp/no-keploy.tar.gz")
+  install oss-no-binary --oss -noRoot
+  check "the install fails" test "$rc" -ne 0
+  check "the shell it was sourced into lives on: keploy.sh returns, never exits" lived_on
+  check "nothing is installed, and no keploy runs" eval 'nothing_installed && release_keploy_did_not_run'
+  check "the private temp directory is still removed, and the temp directory is otherwise as it was" tmp_left_as_it_was
+  check "nothing outside its own directories is touched, and sudo is not run" stayed_inside
+
+  echo "== --oss, ~/.keploy is a file, so keploy cannot be put in ~/.keploy/bin"
+  case_home_blocked=1
+  install oss-cannot-place --oss -noRoot
+  check "the install fails" test "$rc" -ne 0
+  check "the shell it was sourced into lives on: keploy.sh returns, never exits" lived_on
+  check "no keploy runs" release_keploy_did_not_run
+  check "the private temp directory is still removed, and the temp directory is otherwise as it was" tmp_left_as_it_was
+  check "nothing outside its own directories is touched, and sudo is not run" stayed_inside
+
+  local row name what env args said_what
+  for row in \
+    "oss-riscv64|an unsupported architecture|FAKE_UNAME_M=riscv64|-noRoot|Unsupported architecture: riscv64" \
+    "oss-riscv64-ci|an unsupported architecture, with -isCI|FAKE_UNAME_M=riscv64|-isCI|Unsupported architecture: riscv64" \
+    "oss-windows|Windows, from Git Bash|FAKE_UNAME_S=MINGW64_NT-10.0-19045|-noRoot|no native Windows support" \
+    "oss-freebsd|an OS it has no build for|FAKE_UNAME_S=FreeBSD|-noRoot|Unknown OS"; do
+    IFS='|' read -r name what env args said_what <<< "$row"
+    echo "== --oss on $what"
+    case_env=("$env")
+    install "$name" --oss "$args"
+    check "the install fails" test "$rc" -ne 0
+    check "it says why" said "$said_what"
+    check "nothing is downloaded or installed, and no keploy runs" eval 'nothing_downloaded && nothing_installed && release_keploy_did_not_run'
+    check "the private temp directory is still removed, and the temp directory is otherwise as it was" tmp_left_as_it_was
+    check "nothing outside its own directories is touched, and sudo is not run" stayed_inside
+  done
 }
 ent_run_with_args() { ent_ran_with "-noRoot"; }
+
+have_pty=""
+if script -qec true /dev/null < /dev/null > /dev/null 2>&1; then
+  have_pty=1
+elif [ -n "${REQUIRE_PTY:-}" ]; then
+  # CI sets this: the interactive case is the only one that sees job control on.
+  fail "util-linux script(1) is required (REQUIRE_PTY is set) but is missing or does not work"
+fi
 
 run_shell=bash
 suite
