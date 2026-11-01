@@ -453,6 +453,7 @@ func (dc *decider) textInstant(path string, bare variables.Address, rec, live st
 		return dc.cannotCheck(path, bare, -1, rec, live, "keploy cannot read this instant in both runs")
 	}
 	c := changedInstant{r: rd.Rec[iw.RecAt[0]:iw.RecAt[1]], l: rd.Live[iw.LiveAt[0]:iw.LiveAt[1]], byText: iw.ByText, text: true}
+	c.word, c.noWord = clockWordOf(rec, live, rd, iw)
 	if iw.Rec != nil && iw.Live != nil && !iw.ByText {
 		c.rm, c.lm = iw.Rec, iw.Live
 		c.ri = typedInstant{at: time.Unix(0, iw.Rec.key.at).UTC(), res: iw.Rec.res, names: namesMoment}
@@ -483,8 +484,33 @@ type changedInstant struct {
 	ri, li typedInstant
 	rm, lm *moment
 	byText bool
-	// text: an instant in a text, whose layout the Clock keeps.
-	text bool
+	// text: an instant in a text, whose layout the Clock keeps; word, where
+	// it stands in the leaf's recorded text (clockWordOf); noWord, why a
+	// Clock there is no check a replay makes.
+	text   bool
+	word   models.ClockWord
+	noWord string
+}
+
+// clockWordOf is where iw, an instant rd reads, stands in rec, its leaf's
+// recorded text, for a Clock (models.ClockOffset.Word): zero where it is
+// the text whole; its bytes in rec where it is one word of rec as written
+// and the text on each side of it is the same in both runs, which a replay
+// checks by their hashes. noWord is why not otherwise: a part of the text
+// keploy opened (a decode step, a cookie's or a token's part), where a
+// replay reads no clock yet, or a text that changed around it too.
+func clockWordOf(rec, live string, rd textReading, iw *instantWord) (word models.ClockWord, noWord string) {
+	if len(rd.At.Steps) > 0 || rd.Rec != rec || rd.Live != live {
+		return word, "it stands in a part of the text keploy opened, where a replay reads no clock yet"
+	}
+	rs, re, ls, le := iw.RecAt[0], iw.RecAt[1], iw.LiveAt[0], iw.LiveAt[1]
+	switch {
+	case rs == 0 && re == len(rec) && ls == 0 && le == len(live):
+		return word, ""
+	case rec[:rs] != live[:ls] || rec[re:] != live[le:]:
+		return word, "the text around it changed too"
+	}
+	return models.ClockWordOf(rec, rs, re), ""
 }
 
 // holds is what t, one run's text at p, holds of w (that run's word)
@@ -955,7 +981,10 @@ func (dc *decider) swappable(p evPlace, c changedInstant) bool {
 // clock is c learned as a read of the application's clock with its check
 // off, the rule naming the window that holds it: refused where the call's
 // own recorded answer holds it (replay would serve that answer's recorded
-// moment) or its two runs write it in different layouts.
+// moment), its two runs write it in different layouts, or it stands in a
+// text where no replay checks it as one word (clockWordOf). A read that is
+// one word of a longer text carries where (models.ClockOffset.Word), for
+// every adapter alike.
 func (dc *decider) clock(path string, at variables.Address, n int, c changedInstant, off models.ClockOffset, rule string) Decision {
 	r, l := c.r, c.l
 	if echo := dc.instantEchoed(c); echo != "" {
@@ -966,7 +995,10 @@ func (dc *decider) clock(path string, at variables.Address, n int, c changedInst
 		if lay == "" || lay == models.LayoutApart {
 			return dc.cannotCheck(path, at, n, r, l, "its two runs write it in different layouts")
 		}
-		off.Layout = lay
+		if c.noWord != "" {
+			return dc.cannotCheck(path, at, n, r, l, "a replay checks a clock read inside a text only as one word of the text as recorded, and "+c.noWord)
+		}
+		off.Layout, off.Word = lay, c.word
 	}
 	d := dc.learned(path, at, n, r, l, OutcomeClock, rule, nil)
 	if off.Why == "" {
