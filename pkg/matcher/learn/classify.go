@@ -1,7 +1,6 @@
 package learn
 
 import (
-	"encoding/hex"
 	"encoding/json"
 	"net/url"
 	"regexp"
@@ -1491,6 +1490,10 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 	// those F gave earlier in the set (given), which no other rule reads.
 	all := raw
 	raw = ownPlaces(raw)
+	// The moments the call's earlier places hold (echoedIn), read once for
+	// the call: every leaf and window of every value it classifies holds
+	// its moments against the same places.
+	var eh earlierHeld
 	var op *offsetPlaces
 	places := func() *offsetPlaces {
 		if op == nil {
@@ -1529,7 +1532,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 			fol = &follows{dc: dc, rec: r.Value, live: l.Value, at: at, served: served, raw: raw, places: places}
 		}
 		if r.Value != "" {
-			if from, ok := appearedIn(dc, dc.ofIn(r.Value, l.Value, w, at), at, served, raw, fol); ok && skip&skipSource == 0 {
+			if from, ok := appearedIn(dc, dc.ofIn(r.Value, l.Value, w, at), at, served, raw, fol, &eh); ok && skip&skipSource == 0 {
 				ln.Kind, ln.From = KindVariable, from
 				if from.Side == "" || from.Echo {
 					ln.Why = evidence(dc.ofIn(r.Value, l.Value, w, at), from)
@@ -1559,7 +1562,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 				// any lead or window excuses its words (offset.go).
 				why = offsetWhy(m)
 				offWhy = why
-			} else if why = unaccounted(dc, v, at, served, raw, fol); why != "" {
+			} else if why = unaccounted(dc, v, at, served, raw, fol, &eh); why != "" {
 				sourced = true
 				if fol != nil && fol.refused != "" {
 					why += "; " + fol.refused
@@ -3024,39 +3027,17 @@ func clockWord(t string, recorded bool, d *valueDrift, cs ...clockSet) bool {
 // "\\" as "\", and the others of a JSON string ("\n", "\t", "\"", "\/") as
 // a space, a separator: a value right after one ("uploads%2F<id>",
 // "\n<id>") is a word of its own there.
+//
+// It scans by hand (every text form of every value read goes through it,
+// most of them holding no escape at all); unescapedByPattern in the tests is
+// the regular-expression reading it must agree with on every text.
 func unescaped(s string) string {
 	// Each escape on its own (a stray '%' leaves the others to decode), and
 	// again while that changes anything, a few times at most (a value
-	// encoded inside a value encoded again: "%252F", "\\\\n").
+	// encoded inside a value encoded again: "%252F", "\\\\n"). Every escape
+	// read is shorter than its text, so a pass that reads one changes s.
 	for i := 0; i < 4; i++ {
-		d := percentEscape.ReplaceAllStringFunc(s, func(m string) string {
-			b, err := hex.DecodeString(m[1:])
-			if err != nil {
-				return m
-			}
-			return string(b)
-		})
-		d = escapedSurrogates.ReplaceAllStringFunc(d, func(m string) string {
-			// Four hex digits each (escapedSurrogates): 16 bits.
-			hi, _ := strconv.ParseUint(m[2:6], 16, 16)
-			lo, _ := strconv.ParseUint(m[8:12], 16, 16)
-			return string(utf16.DecodeRune(rune(hi), rune(lo)))
-		})
-		d = backslashEscape.ReplaceAllStringFunc(d, func(m string) string {
-			switch {
-			case m == `\\`:
-				return `\`
-			case m[1] == 'u':
-				// The character it names (a JSON writer's escape of what
-				// is beyond ASCII).
-				// Four hex digits (backslashEscape): 16 bits.
-				if r, err := strconv.ParseUint(m[2:], 16, 16); err == nil {
-					return string(rune(r))
-				}
-			}
-			return " "
-		})
-
+		d := backslashesRead(surrogatesRead(percentsDecoded(s)))
 		if d == s {
 			break
 		}
@@ -3065,13 +3046,136 @@ func unescaped(s string) string {
 	return s
 }
 
-var (
-	// escapedSurrogates are a high and a low surrogate escaped as two
-	// \uXXXX: one character beyond the basic plane (an emoji).
-	escapedSurrogates = regexp.MustCompile(`\\u[dD][89abAB][0-9a-fA-F]{2}\\u[dD][c-fC-F][0-9a-fA-F]{2}`)
-	percentEscape     = regexp.MustCompile(`%[0-9a-fA-F]{2}`)
-	backslashEscape   = regexp.MustCompile(`\\(?:u[0-9a-fA-F]{4}|[nrtbf"\\/])`)
-)
+// percentsDecoded is s with each "%XX" (two hex digits, either case) the
+// byte it names, read left to right, none overlapping; s itself when it
+// holds none.
+func percentsDecoded(s string) string {
+	var b []byte
+	last := 0
+	for i := 0; ; {
+		j := strings.IndexByte(s[i:], '%')
+		if j < 0 {
+			break
+		}
+		i += j
+		if !hexAt(s, i+1, 2) {
+			i++
+			continue
+		}
+		if b == nil {
+			b = make([]byte, 0, len(s))
+		}
+		b = append(b, s[last:i]...)
+		b = append(b, byte(hexValue(s[i+1:i+3])))
+		i += 3
+		last = i
+	}
+	if b == nil {
+		return s
+	}
+	return string(append(b, s[last:]...))
+}
+
+// surrogatesRead is s with each high and low surrogate escaped as two
+// \uXXXX ("😀") the one character beyond the basic plane they
+// name (an emoji), read left to right, none overlapping; s itself when it
+// holds none.
+func surrogatesRead(s string) string {
+	var b []byte
+	last := 0
+	for i := 0; ; {
+		j := strings.IndexByte(s[i:], '\\')
+		if j < 0 {
+			break
+		}
+		i += j
+		if !escapedSurrogatePairAt(s, i) {
+			i++
+			continue
+		}
+		if b == nil {
+			b = make([]byte, 0, len(s))
+		}
+		b = append(b, s[last:i]...)
+		// Four hex digits each: 16 bits.
+		b = utf8.AppendRune(b, utf16.DecodeRune(rune(hexValue(s[i+2:i+6])), rune(hexValue(s[i+8:i+12]))))
+		i += 12
+		last = i
+	}
+	if b == nil {
+		return s
+	}
+	return string(append(b, s[last:]...))
+}
+
+// escapedSurrogatePairAt reports whether s holds at i a high surrogate
+// escaped as \uXXXX (D800-DBFF) and right after it a low one (DC00-DFFF).
+func escapedSurrogatePairAt(s string, i int) bool {
+	if i+12 > len(s) || s[i+6] != '\\' {
+		return false
+	}
+	return s[i] == '\\' && s[i+1] == 'u' && s[i+2]|0x20 == 'd' && strings.IndexByte("89abAB", s[i+3]) >= 0 && hexAt(s, i+4, 2) &&
+		s[i+7] == 'u' && s[i+8]|0x20 == 'd' && strings.IndexByte("cdefCDEF", s[i+9]) >= 0 && hexAt(s, i+10, 2)
+}
+
+// backslashesRead is s with each backslash escape of a JSON string read,
+// left to right, none overlapping: "\uXXXX" as the character it names (a
+// JSON writer's escape of what is beyond ASCII; a lone surrogate names
+// none: the replacement character), "\\" as "\", and "\n", "\r", "\t",
+// "\b", "\f", "\"" and "\/" as a space; s itself when it holds none.
+func backslashesRead(s string) string {
+	var b []byte
+	last := 0
+	for i := 0; ; {
+		j := strings.IndexByte(s[i:], '\\')
+		if j < 0 || i+j+1 >= len(s) {
+			break
+		}
+		i += j
+		var r rune
+		n := 2
+		switch c := s[i+1]; {
+		case c == 'u' && hexAt(s, i+2, 4):
+			// Four hex digits: 16 bits.
+			r, n = rune(hexValue(s[i+2:i+6])), 6
+		case c == '\\':
+			r = '\\'
+		case strings.IndexByte(`nrtbf"/`, c) >= 0:
+			r = ' '
+		default:
+			i++
+			continue
+		}
+		if b == nil {
+			b = make([]byte, 0, len(s))
+		}
+		b = append(b, s[last:i]...)
+		b = utf8.AppendRune(b, r)
+		i += n
+		last = i
+	}
+	if b == nil {
+		return s
+	}
+	return string(append(b, s[last:]...))
+}
+
+// hexValue is the number the hex digits h (either case, checked by the
+// caller with hexAt) write.
+func hexValue(h string) uint32 {
+	var v uint32
+	for i := 0; i < len(h); i++ {
+		c := h[i]
+		switch {
+		case c <= '9':
+			c -= '0'
+		default:
+			c = (c | 0x20) - 'a' + 10
+		}
+		v = v<<4 | uint32(c)
+	}
+	return v
+}
 
 // sources reports whether the earlier place e (what F saw drift there) is
 // where the drifted value v came from, whole or in part (whole: the earlier
@@ -3164,7 +3268,7 @@ func sources(e, v *valueDrift) (found, whole bool) {
 // raw mock served before or recorded before at (of which F saw no live
 // value).
 func appeared(dc *DriftCache, recorded, now string, at time.Time, served []Earlier, raw []Raw) (Place, bool) {
-	return appearedIn(dc, dc.of(recorded, now), at, served, raw, nil)
+	return appearedIn(dc, dc.of(recorded, now), at, served, raw, nil, nil)
 }
 
 // appearedIn is appeared of the drifted value v, read in its call's window.
@@ -3184,7 +3288,7 @@ func appeared(dc *DriftCache, recorded, now string, at time.Time, served []Earli
 // A leaf that held the recorded value whole is the value's source only where
 // it held the value F saw too: one F saw hold another value is set aside the
 // same way, and named so (follows.refuteSeen).
-func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, raw []Raw, fol *follows) (Place, bool) {
+func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, raw []Raw, fol *follows, eh *earlierHeld) (Place, bool) {
 	recorded := v.rec
 	// The place is where the value was sent whole, not where it was answered
 	// or sent inside a longer value (a variable is bound where the
@@ -3234,7 +3338,7 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 	// moment v was recorded with is where it came from, before any lead or
 	// window excuses a word of it. An exchange F served leaf by leaf first,
 	// then a raw mock (below).
-	echoed := dc.echoedIn(v, at, served, raw)
+	echoed := dc.echoedIn(v, at, served, raw, eh)
 	if from, ok := dc.echoServed(echoed, recorded, served); ok {
 		return from, true
 	}
@@ -3671,11 +3775,36 @@ func seenPlace(e Earlier, s Seen, whole bool) Place {
 // test or recorded before at (raw), in every form, and every value of an
 // exchange F served earlier (served), on either side, as recorded and as F
 // served it (an answer's), in every form. nil when none.
-func (dc *DriftCache) echoedIn(v *valueDrift, at time.Time, served []Earlier, raw []Raw) []echoMatch {
+// eh, where not nil, holds the moments of these earlier places, read once
+// for the call.
+func (dc *DriftCache) echoedIn(v *valueDrift, at time.Time, served []Earlier, raw []Raw, eh *earlierHeld) []echoMatch {
 	if len(v.instants) == 0 {
 		return nil
 	}
-	return echoedInstants(v, dc.earlierMoments(at, served, raw), dc.recordedMoments(at, served, raw))
+	if eh == nil {
+		eh = &earlierHeld{}
+	}
+	held, recorded := eh.of(dc, at, served, raw)
+	return echoedInstants(v, held, recorded)
+}
+
+// earlierHeld are the moments a call's earlier places hold (earlierMoments,
+// recordedMoments), read the first time a value of the call is held against
+// them (echoedIn) and kept for the call's other values, leaves and windows:
+// every one of them reads the same places (the call's at, served and raw),
+// and none changes what they hold. Each is read by one call alone.
+type earlierHeld struct {
+	held, recorded *heldMoments
+}
+
+// of are the moments the earlier places of a call recorded at at hold
+// (earlierMoments) and those their recordings hold (recordedMoments), read
+// once.
+func (eh *earlierHeld) of(dc *DriftCache, at time.Time, served []Earlier, raw []Raw) (held, recorded *heldMoments) {
+	if eh.held == nil {
+		eh.held, eh.recorded = dc.earlierMoments(at, served, raw), dc.recordedMoments(at, served, raw)
+	}
+	return eh.held, eh.recorded
 }
 
 // earlierMoments are the moments the earlier places of a call recorded at
