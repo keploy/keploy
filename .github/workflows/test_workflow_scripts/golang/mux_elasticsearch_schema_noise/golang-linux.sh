@@ -137,7 +137,7 @@ replay() {
 
 checkout_passed() {  # post-documents testcase passed?
   grep -oE '"testcase id": "[^"]*document[^"]*".*"passed": "[^"]+"' "$1" \
-    | strip_ansi | grep -q '"passed": "true"'
+    | strip_ansi | grep '"passed": "true"' >/dev/null
 }
 # Request-body schema noise is written under the unified `noise:` block as a
 # `req:` list of field paths (this replaced the legacy top-level `req_body_noise:`
@@ -253,7 +253,7 @@ test:
     schemaNoiseStrict: true
 EOF
 replay "$APP_DIR/test_strict.log" --schema-noise-detection --config-path "$STRICT_CFG" --debug
-if grep 'strict req-body match rejected mock' "$APP_DIR/test_strict.log" | grep -q 'body.content'; then
+if grep 'strict req-body match rejected mock' "$APP_DIR/test_strict.log" | grep 'body.content' >/dev/null; then
   pass "strict matching rejected the mock on non-noise drift (body.content)"
 else
   fail "expected strict rejection on body.content"

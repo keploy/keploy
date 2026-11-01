@@ -140,7 +140,7 @@ run_fuzz() {
     return 1
   }
   echo "$out"
-  if ! printf '%s' "$out" | grep -q '"ok":true'; then
+  if ! printf '%s' "$out" | grep '"ok":true' >/dev/null; then
     echo "::error::the fuzzer run did not pass while recording: every RPC must reach the server and match"
     return 1
   fi

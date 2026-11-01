@@ -103,7 +103,7 @@ cd "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/python/repeated-he
 wait_for_port() {
     local port=$1 what=$2
     for i in $(seq 1 30); do
-        if ss -tln | awk '{print $4}' | grep -q ":${port}$"; then
+        if ss -tln | awk '{print $4}' | grep ":${port}$" >/dev/null; then
             echo "$what listening after ${i}s"
             return 0
         fi

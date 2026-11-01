@@ -69,7 +69,7 @@ upstream_pid=$!
 # Wait for the upstream's listening socket via ss (no extra TCP conn).
 ready=0
 for i in $(seq 1 20); do
-    if ss -tln | awk '{print $4}' | grep -q ":9091$"; then
+    if ss -tln | awk '{print $4}' | grep ":9091$" >/dev/null; then
         echo "upstream listening after ${i}s"
         ready=1
         break

@@ -161,7 +161,7 @@ tests_of() {
     local f n=0
     for f in keploy/test-set-0/tests/*.yaml; do
         [ -f "$f" ] || continue
-        yq -e '.spec.req.url' "$f" 2>/dev/null | grep -Eq "$1" && n=$((n + 1))
+        yq -e '.spec.req.url' "$f" 2>/dev/null | grep -E "$1" >/dev/null && n=$((n + 1))
     done
     echo "$n"
 }

@@ -282,13 +282,13 @@ REC_PID=$!
 wait_for_port "$APP" 360 || { echo "FAIL: the app did not start under keploy record"; tail -30 record.log; exit 1; }
 for item in pen book; do
   out="$(curl -s -XPOST "http://127.0.0.1:$APP/orders" -H 'Content-Type: application/json' -d "{\"item\":\"$item\"}")"
-  echo "$out" | grep -q '"statuses": \["new", "ready"\]' && echo "$out" | grep -q '"read_same_id": true' ||
+  echo "$out" | grep '"statuses": \["new", "ready"\]' >/dev/null && echo "$out" | grep '"read_same_id": true' >/dev/null ||
     fail "the create of $item answered '$out'"
 done
 user="$(curl -s -XPOST "http://127.0.0.1:$APP/users" -H 'Content-Type: application/json' -d '{"name":"ann"}')"
 UID_REC="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["id"])' "$user" 2>/dev/null)"
 [ -n "$UID_REC" ] || fail "the user create answered '$user'"
-curl -s "http://127.0.0.1:$APP/users/$UID_REC" | grep -q "\"$UID_REC\"" || fail "the user read-back did not answer the id"
+curl -s "http://127.0.0.1:$APP/users/$UID_REC" | grep "\"$UID_REC\"" >/dev/null || fail "the user read-back did not answer the id"
 wait_for_tests 4 || fail "keploy record wrote $(test_files) test cases, want 4"
 stop_pid "$REC_PID"; REC_PID=""; own
 kill "$DEP_PID" 2>/dev/null; wait "$DEP_PID" 2>/dev/null
@@ -318,7 +318,7 @@ expect_rc 0 "step 4"
 [ "$(set_status)" = PASSED ] || { fail "with the variables the set must pass (status: $(set_status))"; grep -nE 'status:|match_phase|diff:|next_steps' "$(REPORT)" | head -40; tail -40 follow.log; }
 cmp -s "$MOCKS" mocks.declared.yaml || fail "keploy test rewrote the mocks"
 grep -q '^ *variables:$' "$(REPORT)" || fail "the report lists no variable the tests bound"
-grep -A6 '^ *variables:$' "$(REPORT)" | grep -q 'given: true' || fail "the report does not list the id the read-back's request gave"
+grep -A6 '^ *variables:$' "$(REPORT)" | grep 'given: true' >/dev/null || fail "the report does not list the id the read-back's request gave"
 grep -q ' ERROR ' follow.log && { fail "the passing run logged an ERROR"; grep ' ERROR ' follow.log | head; }
 
 echo "== 5. the app reads back another id: the set fails with the variable as evidence =="
@@ -350,7 +350,7 @@ replay useranswer user-answer-other KEPLOY_PROVEN=1
 expect_rc 1 "step 8b"
 [ "$(test_status "$UCN")" = FAILED ] || fail "step 8b: the user create must fail (status: $(test_status "$UCN"))"
 grep -q 'as id to its dependency' "$(REPORT)" || { fail "step 8b: the report does not say the app answered another id than it sent its dependency"; grep -n -A3 'template_failures' "$(REPORT)" | head; }
-sed 's/\x1b\[[0-9;]*m//g' useranswer.log | grep -q "\"testcase id\": \"$UCN\".*\"passed\": \"false\"" || fail "step 8b: the log does not say the create failed"
+sed 's/\x1b\[[0-9;]*m//g' useranswer.log | grep "\"testcase id\": \"$UCN\".*\"passed\": \"false\"" >/dev/null || fail "step 8b: the log does not say the create failed"
 
 echo "== 8c. the user read-back asks its dependency for another id: the read-back fails =="
 replay userread user-wrong-read KEPLOY_PROVEN=1

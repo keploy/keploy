@@ -367,7 +367,7 @@ echo "good! HTTP routes returned"
 curl -fsS -X POST "http://localhost:8080/mysql/items?name=ci-${MODE_NAME}-mysql" >/dev/null
 MYSQL_BODY=$(curl -fsS http://localhost:8080/mysql/items)
 echo "mysql GET body: $MYSQL_BODY"
-echo "$MYSQL_BODY" | grep -q "ci-${MODE_NAME}-mysql" || {
+echo "$MYSQL_BODY" | grep "ci-${MODE_NAME}-mysql" >/dev/null || {
   echo "::error::MySQL round-trip failed — inserted name not present in GET response"
   exit 1
 }
@@ -377,7 +377,7 @@ echo "good! MySQL round-trip succeeded through keploy proxy"
 curl -fsS -X POST "http://localhost:8080/postgres/items?name=ci-${MODE_NAME}-pg" >/dev/null
 PG_BODY=$(curl -fsS http://localhost:8080/postgres/items)
 echo "postgres GET body: $PG_BODY"
-echo "$PG_BODY" | grep -q "ci-${MODE_NAME}-pg" || {
+echo "$PG_BODY" | grep "ci-${MODE_NAME}-pg" >/dev/null || {
   echo "::error::Postgres round-trip failed — inserted name not present in GET response"
   exit 1
 }
@@ -507,15 +507,15 @@ DECRYPTED_REQS=$(tshark_tls "$PCAP" -Y "http.request" -T fields -e http.host -e 
 echo "decrypted HTTP requests:"
 echo "$DECRYPTED_REQS"
 
-echo "$DECRYPTED_REQS" | grep -q "$QUOTE_HOST" || {
+echo "$DECRYPTED_REQS" | grep "$QUOTE_HOST" >/dev/null || {
   echo "::error::tshark did not see decrypted GET to $QUOTE_HOST"
   exit 1
 }
-echo "$DECRYPTED_REQS" | grep -q "$ECHO_HOST" || {
+echo "$DECRYPTED_REQS" | grep "$ECHO_HOST" >/dev/null || {
   echo "::error::tshark did not see decrypted GET to $ECHO_HOST"
   exit 1
 }
-echo "$DECRYPTED_REQS" | grep -q "ci-${MODE_NAME}" || {
+echo "$DECRYPTED_REQS" | grep "ci-${MODE_NAME}" >/dev/null || {
   echo "::error::ci-${MODE_NAME} query string did not survive into the decrypted pcap"
   exit 1
 }
@@ -645,11 +645,11 @@ HELLO_SNIS=$(tshark_tls "$PCAP" -Y "tls.handshake.type==1" \
 HELLO_COUNT=$(tshark_tls "$PCAP" -Y "tls.handshake.type==1" | wc -l)
 echo "TLS ClientHello frames in pcap: $HELLO_COUNT"
 echo "ClientHello SNIs:"; echo "$HELLO_SNIS"
-echo "$HELLO_SNIS" | grep -q "$QUOTE_HOST" || {
+echo "$HELLO_SNIS" | grep "$QUOTE_HOST" >/dev/null || {
   echo "::error::no captured ClientHello carried SNI $QUOTE_HOST — /quote did not cross the proxy as TLS"
   exit 1
 }
-echo "$HELLO_SNIS" | grep -q "$ECHO_HOST" || {
+echo "$HELLO_SNIS" | grep "$ECHO_HOST" >/dev/null || {
   echo "::error::no captured ClientHello carried SNI $ECHO_HOST — /echo did not cross the proxy as TLS"
   exit 1
 }
