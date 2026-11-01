@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/coverage/report"
 	"go.keploy.io/server/v3/pkg/platform/safeyaml"
@@ -339,15 +340,7 @@ type LearnedElsewhere struct {
 // Windows is l's windows as the record says them: "<test>'s window" or
 // "between tests", comma-separated.
 func (l LearnedElsewhere) Windows() string {
-	out := make([]string, 0, len(l.TaughtIn))
-	for _, w := range l.TaughtIn {
-		if w.Test == "" {
-			out = append(out, "between tests")
-			continue
-		}
-		out = append(out, w.Test+"'s window")
-	}
-	return strings.Join(out, ", ")
+	return learn.SayWindows(l.TaughtIn)
 }
 
 // empty reports whether the run reported no test and keploy refused
