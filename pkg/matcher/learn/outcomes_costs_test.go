@@ -190,12 +190,11 @@ func TestOutcomeCostTheEvidenceTablesPinnedRowsStayRefused(t *testing.T) {
 	costRefused(t, "a 7 the recording gave between them, F did not serve it (follows_test.go:479)", d, costUnknown, "mock-c")
 }
 
-// Refused where main binds (stricter, a red only): a copy of a place that
-// holds both values, recorded after the call, or answered at the call's own
-// instant (follows_test.go:390-392); of a place F did not serve or served
-// changed with no view, from the floor up (:388, :389); a value that took
-// part of a longer word F gave (:318); a row holding both 50 and a/b
-// (:401-405).
+// Refused where main binds (stricter, a red only): a copy of a place F did
+// not serve, served changed with no view, that holds both values, recorded
+// after the call, or answered at the call's own instant (follows_test.go:
+// 388-392); a value that took part of a longer word F gave (:318); a row
+// holding both 50 and a/b (:401-405).
 func TestOutcomeCostACopyOfAPlaceNotBeforeInBothRunsIsRefused(t *testing.T) {
 	before := eRecAt.Add(-150 * time.Millisecond)
 	startup := func(x Raw) []Raw { return append(eStartup(), x) }
@@ -203,30 +202,13 @@ func TestOutcomeCostACopyOfAPlaceNotBeforeInBothRunsIsRefused(t *testing.T) {
 		what, live string
 		raw        []Raw
 	}{
+		{"F did not serve the CREATE TABLE (follows_test.go:388)", "7", startup(eHistory(before, 0, false))},
+		{"F served the CREATE TABLE changed, no view (:389)", "7", startup(eHistory(before, 6, false))},
 		{"the CREATE TABLE holds F's value too (:390)", "200", startup(eHistory(before, 6, true))},
 		{"the CREATE TABLE was recorded after the call (:391)", "7", startup(eHistory(eRecAt.Add(10*time.Millisecond), 6, true))},
 		{"the CREATE TABLE was answered at the call's own instant (:392)", "7", startup(eHistory(eRecAt.Add(-time.Millisecond), 6, true))},
 	} {
 		costRefused(t, c.what, oWord(t, Decide(costF("50", c.live, nil, c.raw, nil)), "50", c.live), costUnknown, "mock-5")
-	}
-	// Keploy cannot read F's side of a statement F did not serve, or served
-	// changed with no view (:388, :389): a literal of 11 bits or more stays
-	// refused there; a word under them says nothing there, so flyway's
-	// execution_time beside VARCHAR(50) is fresh, naming the statement.
-	literal := func(served int) Raw {
-		x := ePgAnswered("mock-5", eRecAt.Sub(before), before.Add(time.Millisecond), `CREATE TABLE "t" ("v" VARCHAR(2048))`, nil, "CREATE TABLE")
-		if served > 0 {
-			return x.ServedAs(served)
-		}
-		return x
-	}
-	for _, served := range []int{0, 6} {
-		costRefused(t, "a 2048 of a statement keploy cannot read F's side of", oWord(t, Decide(costF("2048", "731", nil, startup(literal(served)), nil)), "2048", "731"), costUnknown, "mock-5")
-		d := oWord(t, Decide(costF("50", "7", nil, startup(eHistory(before, served, false)), nil)), "50", "7")
-		costFresh(t, "a 50 of a statement keploy cannot read F's side of", d)
-		if !strings.Contains(d.Line, "under 11 bits") || !strings.Contains(d.Line, "mock-5") {
-			t.Errorf("the line %q does not state the floor and name mock-5", d.Line)
-		}
 	}
 	d := oWord(t, Decide(costF("k-48d1", "k-6c7d", nil, append(eStartup(), eRow("48d1 aaaa", "x", "y").ServedAs(6).ServedLive(eRow("6c7daaaa", "x", "y"))), nil)), "48d1", "6c7d")
 	costRefused(t, "the value took a part of a longer word F gave (follows_test.go:318)", d, costUnknown, "mock-6")

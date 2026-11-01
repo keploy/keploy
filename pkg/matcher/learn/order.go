@@ -291,7 +291,7 @@ func (dc *decider) text(path string, bare variables.Address, rec, live string, r
 		case w.RecIdx < 0 || w.LiveIdx < 0:
 			return append(out, dc.unpaired(path, bare, rec, live, rd)), true
 		default:
-			out = append(out, dc.word(path, bare, rec, live, rd.Rec, w))
+			out = append(out, dc.word(path, bare, rec, live, rd.Rec, w, pieceOfAnId(rd, w)))
 		}
 	}
 	return out, false
@@ -324,7 +324,7 @@ func (dc *decider) oneToken(path string, bare variables.Address, rec, live strin
 			}
 		}
 	}
-	return dc.word(path, bare, rec, live, rec, whole), true
+	return dc.word(path, bare, rec, live, rec, whole, false), true
 }
 
 // randomToken reports whether rec and live are one value of one generator:
@@ -379,18 +379,33 @@ func evHolds(t *readerText, w string) bool {
 	return h
 }
 
-// unreadFloorBits is the wordBits under which a word is no evidence at a
-// place keploy cannot read round F's side of (a recording F did not serve,
-// or served with no view it can read): a word of one or two characters of
-// any class (two of letters and digits carry 10.3 bits), or three digits.
-// Words that short stand all over a set, so one at such a place names no
-// source, and it is fresh. A 4-hex word there stays refused as unknown, and
-// a place keploy reads counts at any length.
+// unreadFloorBits is the wordBits under which a piece of a longer value
+// (pieceOfAnId) is no evidence at a recording round F never served: one or
+// two characters of any class (two of letters and digits carry 10.3 bits), or
+// three digits. A piece that short stands all over a set, so it names no
+// source. A 4-hex word there stays refused as unknown, as does a word of any
+// size that is the field's value, or stands beside words that stayed: that may
+// be the very value the recording gave ("50", "user-12").
 const unreadFloorBits = 11
 
+// pieceOfAnId reports whether w is under the floor and another changed word of
+// its text carries chance bits in both runs ("k" of "k-Rq7Lm2Xv9Tp4Wn8Zc"): the
+// text is one value, and w a piece of it.
+func pieceOfAnId(rd textReading, w readWord) bool {
+	return wordBits(w.Rec) < unreadFloorBits && wordBits(w.Live) < unreadFloorBits && slices.ContainsFunc(rd.Words, func(o readWord) bool {
+		return wordBits(o.Rec) >= chanceBits && wordBits(o.Live) >= chanceBits
+	})
+}
+
+// neverServed reports whether the set's read saw no serve of mock.
+func (dc *decider) neverServed(mock string) bool {
+	return slices.ContainsFunc(dc.set, func(g GivenPlaces) bool { return g.mock == mock && g.first == 0 })
+}
+
 // word decides one changed word that is no instant (any other word), at
-// its address (w.At) in text, the text the leaf at bare opens to.
-func (dc *decider) word(path string, bare variables.Address, rec, live, text string, w readWord) Decision {
+// its address (w.At) in text, the text the leaf at bare opens to. piece:
+// pieceOfAnId.
+func (dc *decider) word(path string, bare variables.Address, rec, live, text string, w readWord, piece bool) Decision {
 	at, n := w.At, w.At.Word
 	ps := append([]evPlace(nil), dc.ps...)
 	cand := map[string]bool{}
@@ -417,14 +432,13 @@ func (dc *decider) word(path string, bare variables.Address, rec, live, text str
 	}
 	swapUnknown(dc.in, ps, w)
 	// aside: places that held R's word where F's did not follow, too
-	// little to be a conflict; a fresh word's line names them. unread:
-	// places keploy cannot read, which say nothing of a word this short.
-	var src, outside, conflict, unknown, aside, unread []evPlace
-	short := wordBits(w.Rec) < unreadFloorBits && wordBits(w.Live) < unreadFloorBits
+	// little to be a conflict; a fresh word's line names them. unserved:
+	// recordings round F never served, which say nothing of a piece.
+	var src, outside, conflict, unknown, aside, unserved []evPlace
 	for i, p := range ps {
 		ev, read := evidenceAt(p, w.Rec, w.Live)
-		if short && (!read || ev == evUnknown && p.fUnstated) {
-			unread = append(unread, p)
+		if piece && ev == evUnknown && p.fUnstated && !p.fGave {
+			unserved = append(unserved, p)
 			continue
 		}
 		if !read {
@@ -475,8 +489,8 @@ func (dc *decider) word(path string, bare variables.Address, rec, live, text str
 		case evShown:
 			outside = append(outside, p)
 		case evUnknown:
-			if short && g.fUnread() {
-				unread = append(unread, p)
+			if piece && dc.neverServed(g.mock) {
+				unserved = append(unserved, p)
 				break
 			}
 			p.why = setUnknownWhy(g, dc.in.At)
@@ -538,10 +552,10 @@ func (dc *decider) word(path string, bare variables.Address, rec, live, text str
 		p := aside[0]
 		rule += " (" + p.name + " held " + strconv.Quote(w.Rec) + " and round F gave " + gaveAt(p, w.Live) + " there: set aside, as a copy moves with its source)"
 	}
-	if len(unread) > 0 {
-		rule += " (keploy cannot read round F's side of " + unread[0].name + ", and a word under " + strconv.Itoa(unreadFloorBits) + " bits is no evidence at such a place)"
+	if len(unserved) > 0 {
+		rule += " (round F never served " + unserved[0].name + ", and a piece of a longer value under " + strconv.Itoa(unreadFloorBits) + " bits is no evidence at such a place)"
 	}
-	d := dc.learned(path, at, n, w.Rec, w.Live, OutcomeFresh, rule+"; bound at its first call"+answeredAt(echo, rec), names(append(aside, unread...)))
+	d := dc.learned(path, at, n, w.Rec, w.Live, OutcomeFresh, rule+"; bound at its first call"+answeredAt(echo, rec), names(append(aside, unserved...)))
 	d.Echo = echo
 	return d
 }
