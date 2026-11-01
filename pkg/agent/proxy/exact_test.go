@@ -2672,10 +2672,13 @@ func TestTheNextTestsCallInFlightBindsInItsScopeInTheGap(t *testing.T) {
 
 // The set's worker scope (ServeExactWorker): a worker-scope mock the run has
 // reached the place of answers whether a test is open or not, after the open
-// test's own, and at most one request in the staging, through whichever door
-// a parser consumes it: a consume in a test spends it for the gap after and
-// the next test too. One the run has not reached the place of answers
-// nothing, in a test or out of one, until a later ServeExactWorker names it.
+// test's own. In a test's window it answers at most one request in the
+// staging's windows, through whichever door a parser consumes it: a consume
+// in a test spends it for the next test too. Outside every test it is served
+// by the pool slice's rule, whatever a window spent: a delete door (this
+// parser's) answers once in the staging and spends it for every view after.
+// One the run has not reached the place of answers nothing, in a test or
+// out of one, until a later ServeExactWorker names it.
 func TestTheWorkerScopeAnswersFromItsPlaceOnInAndOutOfTests(t *testing.T) {
 	own := httpCall("own", 0, "/orders")
 	boot := httpCall("w-boot", time.Second, "/receive")
@@ -2711,20 +2714,35 @@ func TestTheWorkerScopeAnswersFromItsPlaceOnInAndOutOfTests(t *testing.T) {
 	}
 
 	// T1 ends: w-later's place (after T1) is reached. w-boot, spent in T1,
-	// stays spent in the gap and the next test.
+	// answers the gap after once, as the pool slice's recording a delete
+	// door consumes does, and is then spent for the staging: the gap's
+	// second call and the next test find none.
 	mm.ServeExactWorker([]string{"w-boot", "w-later"})
 	mm.ServeExactPool("k", []string{"pool"})
+	if got := pollFirst(t, mm, "w-boot"); got != "w-boot" {
+		t.Fatalf("a worker mock spent in a test did not answer the gap after by the pool's rule: %s", got)
+	}
 	if got := pollFirst(t, mm, "w-boot"); got != "a miss" {
-		t.Fatalf("a worker mock spent in a test answered again in the gap after: %s", got)
+		t.Fatalf("a delete door's worker mock answered twice outside every test: %s", got)
 	}
 	mm.ServeExactWorker([]string{"w-boot", "w-later"})
 	mm.ServeExactTest("T2", nil)
+	if got := pollFirst(t, mm, "w-boot"); got != "a miss" {
+		t.Fatalf("a worker mock spent for the staging between tests answered in T2: %s", got)
+	}
 	if got := pollFirst(t, mm, "w-later"); got != "w-later" {
 		t.Fatalf("a worker mock placed after T1 did not answer in T2: %s", got)
 	}
-	mm.ServeExactPool("k", []string{"pool"})
 	if got := pollFirst(t, mm, "w-later"); got != "a miss" {
-		t.Fatalf("a worker mock answered again after its one request: %s", got)
+		t.Fatalf("a worker mock answered twice in a test: %s", got)
+	}
+	mm.ServeExactTest("T3", nil)
+	if got := pollFirst(t, mm, "w-later"); got != "a miss" {
+		t.Fatalf("a worker mock spent in T2's window answered in T3's: %s", got)
+	}
+	mm.ServeExactPool("k", []string{"pool"})
+	if got := pollFirst(t, mm, "w-later"); got != "w-later" {
+		t.Fatalf("a worker mock spent in a test did not answer outside every test: %s", got)
 	}
 	// The next staging answers afresh.
 	mm.SetMocksWithWindow(nil, []*models.Mock{own, boot, later, pool}, models.BaseTime, time.Now())
@@ -2733,6 +2751,59 @@ func TestTheWorkerScopeAnswersFromItsPlaceOnInAndOutOfTests(t *testing.T) {
 	if got := pollFirst(t, mm, "w-boot"); got != "w-boot" {
 		t.Fatalf("the next staging's worker mock did not answer: %s", got)
 	}
+}
+
+// A worker-scope recording a parser serves through a door that keeps it
+// (HTTP's MarkMockAsUsed of a reusable or cursor recording) is served
+// between tests as the pool slice's is: again and again, whatever a test's
+// window spent. In a window it answers once in the staging's windows. A
+// poller that calls twice as often between tests when replay is slower is
+// answered every time, as before its recording was listed in worker:.
+func TestAWorkerRecordingAKeepingDoorServesAnswersEveryCallBetweenTests(t *testing.T) {
+	poll := httpCall("w-poll", time.Second, "/poll")
+	mm := stagedManager(t, nil, []*models.Mock{poll})
+	mm.ServeExactWorker([]string{"w-poll"})
+	mm.ServeExactPool("k", []string{"w-poll"})
+	for i := 0; i < 4; i++ {
+		if got := markFirst(t, mm, "w-poll"); got != "w-poll" {
+			t.Fatalf("between tests, call %d of the poller: %s; want w-poll, as the pool answers it", i+1, got)
+		}
+	}
+	mm.ServeExactTest("T1", nil)
+	if got := markFirst(t, mm, "w-poll"); got != "w-poll" {
+		t.Fatalf("the worker recording did not answer in a test's window: %s", got)
+	}
+	if got := markFirst(t, mm, "w-poll"); got != "a miss" {
+		t.Fatalf("the worker recording answered twice in a test's window: %s", got)
+	}
+	mm.ServeExactPool("k", []string{"w-poll"})
+	for i := 0; i < 4; i++ {
+		if got := markFirst(t, mm, "w-poll"); got != "w-poll" {
+			t.Fatalf("after a window spent it, call %d between tests: %s; want w-poll", i+1, got)
+		}
+	}
+	mm.ServeExactTest("T2", nil)
+	if got := markFirst(t, mm, "w-poll"); got != "a miss" {
+		t.Fatalf("the worker recording answered in a second window of the staging: %s", got)
+	}
+}
+
+// markFirst answers a call as a parser that takes the first recording in
+// read order and serves it through a door that keeps it (MarkMockAsUsed, as
+// HTTP does a reusable recording); "a miss" when none is read or the consume
+// is refused.
+func markFirst(t *testing.T, mm *MockManager, prefix string) string {
+	t.Helper()
+	mocks, _ := mm.GetSessionScopedMocks()
+	for _, mk := range mocks {
+		if strings.HasPrefix(mk.Name, prefix) {
+			if mm.MarkMockAsUsed(*mk) {
+				return mk.Name
+			}
+			return "a miss"
+		}
+	}
+	return "a miss"
 }
 
 // stagedNotOwnedNow is mm's lookup of a recording made elsewhere for a call

@@ -37,9 +37,18 @@ import (
 //   - Whether a test is open or not, the set's worker-scope mocks its run
 //     has reached the place of answer (ServeExactWorker,
 //     models.Mapping.Worker): no test owns them. In a test they come after
-//     the test's own. Each answers at most one request in the staging,
-//     consumed through a delete door as a data-plane recording is outside
-//     every test (decision 31): no begin or end brings it back.
+//     the test's own, and each answers at most one request in the windows
+//     of the staging, through whichever door a parser consumes it. Outside
+//     every test each is served by the pool slice's rule, whatever a test's
+//     window spent: reused, or walked to its last answer and saturated
+//     there, by a door that keeps it; spent for the staging by a delete
+//     door (decision 31). A call the app makes more often between tests
+//     when replay is slower (a poller, a retry, a heartbeat) is then
+//     answered as the pool answered it before the call was listed in
+//     worker:, and the verdicts do not move with load. That rule is the
+//     pool slice's without the background rules (exact_background.go):
+//     under them one of the pool's is spent through a door that keeps it
+//     too, and the worker scope, staged apart from the pool, keeps it.
 //
 // A data-plane recording a parser consumes through a delete door while no
 // test is open (a call before the first test or between tests) is consumed
@@ -600,6 +609,12 @@ type outsideState struct {
 	staged map[string]*models.Mock
 	// spent holds the names consumed: the first consume of one wins.
 	spent sync.Map
+	// inTests holds the names of the worker scope's recordings consumed in
+	// a test's window: each answers at most one call in the windows of the
+	// staging. A view with no test open does not read it: outside every
+	// test the worker scope is served by the pool slice's rule
+	// (exactView.spentOutside).
+	inTests sync.Map
 	// unstaged holds the names of the recordings a door named that staged
 	// does not hold, once each is said (MockManager.servedAsNamed).
 	unstaged sync.Map
@@ -613,6 +628,17 @@ func (o *outsideAnswers) hidden(name string, epoch uint64) bool {
 		return false
 	}
 	_, spent := st.spent.Load(name)
+	return spent
+}
+
+// hiddenInTests reports whether name, one of the worker scope's, answered a
+// call in a test's window in the staging epoch is (outsideState.inTests).
+func (o *outsideAnswers) hiddenInTests(name string, epoch uint64) bool {
+	st := o.cur.Load()
+	if st == nil || st.epoch != epoch {
+		return false
+	}
+	_, spent := st.inTests.Load(name)
 	return spent
 }
 
@@ -657,6 +683,7 @@ func (m *MockManager) RestartExactKey(key string, names []string) {
 	if st := m.exact.outside.cur.Load(); st != nil {
 		for _, n := range names {
 			st.spent.Delete(n)
+			st.inTests.Delete(n)
 		}
 	}
 	m.restoreLocked(names)
@@ -683,7 +710,12 @@ func (m *MockManager) RestartExactKey(key string, names []string) {
 // one that is not the staging's own (read before the staging landed, under
 // a name the staging stages too or none it stages) and any consume while a
 // staging lands: the parser reads again. It takes no tree lock.
-func (m *MockManager) consumeOutside(mk *models.Mock) exactVerdict {
+//
+// inTest is a consume of one of the worker scope's in a test's window
+// (spendsInTests): it is spent for the windows of the staging alone
+// (outsideState.inTests), and refused when a call outside every test spent
+// it for the staging.
+func (m *MockManager) consumeOutside(mk *models.Mock, inTest bool) exactVerdict {
 	st := m.exact.outside.cur.Load()
 	if st == nil || st.epoch != m.stagingEpoch.Load() {
 		return exactRefused
@@ -693,10 +725,27 @@ func (m *MockManager) consumeOutside(mk *models.Mock) exactVerdict {
 		!staged.Spec.ResTimestampMock.Equal(mk.Spec.ResTimestampMock) {
 		return exactRefused
 	}
+	if inTest {
+		if _, out := st.spent.Load(mk.Name); out {
+			return exactRefused
+		}
+		if _, taken := st.inTests.LoadOrStore(mk.Name, true); taken {
+			return exactRefused
+		}
+		return exactServed
+	}
 	if _, taken := st.spent.LoadOrStore(mk.Name, true); taken {
 		return exactRefused
 	}
 	return exactServed
+}
+
+// spendsInTests reports whether a consume of mk in v spends it for the
+// windows of the staging only: mk is one of the worker scope's, not
+// protocol-phase, and a test is open. Outside every test the worker scope is
+// served by the pool slice's rule (consumeOutside, spentOutside).
+func (v *exactView) spendsInTests(mk *models.Mock) bool {
+	return v.test != "" && v.isWorker(mk.Name) && !mk.IsProtocolPhase()
 }
 
 // exactView returns the view exact serving shows, nil when it is off.
@@ -2226,10 +2275,18 @@ func (v *exactView) isWorker(name string) bool {
 	return ok
 }
 
-// spentOutside reports whether name, a data-plane recording, was consumed
-// outside every test in the current staging (outsideAnswers).
+// spentOutside reports whether name, a data-plane recording, was spent for
+// the staging in the current staging (outsideAnswers): consumed outside
+// every test; or, in a test's view, one of the worker scope's a test's
+// window consumed (outsideState.inTests). A view with no test open shows
+// the worker scope a window spent: outside every test it is served by the
+// pool slice's rule.
 func (v *exactView) spentOutside(name string) bool {
-	return v.outside != nil && v.outside.hidden(name, v.epoch.Load())
+	if v.outside == nil {
+		return false
+	}
+	e := v.epoch.Load()
+	return v.outside.hidden(name, e) || (v.test != "" && v.outside.hiddenInTests(name, e))
 }
 
 var _ integrations.StagingGenerations = (*MockManager)(nil)
@@ -2703,8 +2760,10 @@ const (
 // DeleteStartupMock): a staged mock the view shows is then spent, and the
 // staged trees keep it. A data-plane recording consumed with no test open is
 // spent for the staging (consumeOutside); any other, until the view changes.
-// One of the worker scope's, and under the background rules one of the
-// pool's, is spent for the staging through a door that does not evict too.
+// One of the worker scope's consumed in a test's window is spent for the
+// windows of the staging, and under the background rules one of the pool's
+// is spent for the staging in a test or between tests, through a door that
+// does not evict too.
 //
 // A consume that finds its view closed (a begin or an end replacing it) is no
 // refusal: it waits until the replacing view is installed and the revisions
@@ -2732,7 +2791,7 @@ func (m *MockManager) exactConsumeAt(mk *models.Mock, evicts bool, g *roundGuard
 		(*f)(mk.Name)
 	}
 	return settleInForce(m, exactRefused, func(v *exactView) (exactVerdict, <-chan struct{}) {
-		if v != nil && mk != nil && (evicts || v.isWorker(mk.Name) || v.spendsAsPool(mk)) {
+		if v != nil && mk != nil && (evicts || v.spendsInTests(mk) || v.spendsAsPool(mk)) {
 			if _, own := v.index[mk.Name]; !own {
 				// What a spend reads (consumeOutside), and the staged
 				// recording its take names (stagedRecording), before the
@@ -2845,24 +2904,32 @@ func (m *MockManager) exactConsumeIn(v *exactView, mk *models.Mock, evicts bool)
 	if !v.shows(mk) {
 		return exactRefused, nil, nil
 	}
-	// One of the worker scope's answers at most one request in the staging,
-	// as a test's own mock does in its test, through whichever door a parser
-	// consumes it: a parser that keeps a session mock it serves (HTTP's
-	// MarkMockAsUsed) spends it too. So does one of the pool's under the
-	// background rules, in a test or between tests: a parser that consumes
-	// only through a door that never evicts (MarkMockAsUsed: enterprise
-	// Redis and Aerospike; UpdateUnFilteredMock: keploy's Generic) would
-	// else have one pool recording answer every identical call of the set.
-	worker := v.isWorker(mk.Name) && !mk.IsProtocolPhase()
+	// In a test's window one of the worker scope's answers at most one
+	// request in the windows of the staging, as a test's own mock does in
+	// its test, through whichever door a parser consumes it: a parser that
+	// keeps a session mock it serves (HTTP's MarkMockAsUsed) spends it too.
+	// Outside every test it is served as the pool slice's is without the
+	// background rules, below: a door that keeps it passes, a delete door
+	// spends it for the staging. One of the pool's under the background
+	// rules answers at most one request in the staging, in a test or between
+	// tests, through any door: a parser that consumes only through a door
+	// that never evicts (MarkMockAsUsed: enterprise Redis and Aerospike;
+	// UpdateUnFilteredMock: keploy's Generic) would else have one pool
+	// recording answer every identical call of the set. That spend is the
+	// pool's alone: the replay stages the worker scope apart from the pool
+	// (models.ExactServing.Worker), so a call the app makes more often
+	// between tests when replay is slower never spends a worker: recording
+	// a later test's window needs.
+	worker := v.spendsInTests(mk)
 	if !evicts && !worker && !v.spendsAsPool(mk) {
 		return exactPass, nil, nil
 	}
 	// A data-plane recording consumed through a delete door with no test
-	// open, and one of the worker scope's whether a test is open or not, is
-	// spent for the staging: it answers at most one request in the set. So
-	// is one of the pool's a test consumes under the background rules,
-	// through any door: the background is the set's, whoever's call it
-	// answers.
+	// open is spent for the staging: it answers at most one request in the
+	// set. So is one of the pool's under the background rules, in a test or
+	// between tests, through any door: the background is the set's, whoever's
+	// call it answers. One of the worker scope's a test consumes is spent for
+	// the windows of the staging (consumeOutside's inTest).
 	if (v.test == "" || worker || v.inBackgroundPool(mk)) && !mk.IsProtocolPhase() {
 		// The view's closed check and the spend are one step: no begin or
 		// end lands between them.
@@ -2871,7 +2938,7 @@ func (m *MockManager) exactConsumeIn(v *exactView, mk *models.Mock, evicts bool)
 			v.mu.Unlock()
 			return exactRefused, wait, nil
 		}
-		verdict := m.consumeOutside(mk)
+		verdict := m.consumeOutside(mk, worker)
 		v.mu.Unlock()
 		if verdict != exactServed {
 			return verdict, nil, nil

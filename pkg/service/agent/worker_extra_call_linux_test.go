@@ -102,3 +102,50 @@ func TestATestAfterAKeyChangeIsShownItsOwnKeysWorkerScope(t *testing.T) {
 	require.Equal(t, "200 p's first use", got[1], "key p's worker scope must answer its test")
 	require.Equal(t, models.ScopeActionFail, e.Action, "o's /token is the p test's miss")
 }
+
+// The load row: a poller the app runs between tests, whose two calls record
+// listed in worker:. On replay the app polls as often as it did at record
+// (1x) and, as when replay is slower, twice as often (2x). Between tests the
+// worker scope is served as the start-up pool is (reused, or saturated on
+// its last answer), so every poll is answered, nothing is left unanswered
+// outside every test, and each test's verdict at 2x is the one at 1x.
+func TestKeployMockABetweenTestPollerAtTwiceItsCallsMovesNoVerdict(t *testing.T) {
+	run := func(polls int) (verdicts, answers []string, misses []models.UnmatchedCall) {
+		a, _ := wireAgent(t, models.MODE_TEST)
+		p := newServingProxy()
+		a.Proxy = p
+		ctx := context.Background()
+		require.NoError(t, a.StoreMocks(ctx, nil, []*models.Mock{
+			pingMock("mock-1", "/a", "a", t0),
+			pingMock("mock-2", "/poll", "poll", t0.Add(time.Second)),
+			pingMock("mock-3", "/poll", "poll", t0.Add(2*time.Second)),
+			pingMock("mock-4", "/b", "b", t0.Add(3*time.Second)),
+		}))
+		require.NoError(t, a.SetScopeTable(ctx, map[string][]string{"o::TestA": {"mock-1"}, "o::TestB": {"mock-4"}}))
+		require.NoError(t, a.SetScopeWorker(ctx, map[string][]string{"o": {"mock-2", "mock-3"}}))
+		require.NoError(t, a.SetScopePool(ctx, map[string][]string{"o": {"mock-2", "mock-3"}}))
+		claimSelf(t, a)
+		for i, name := range []string{"TestA", "TestB"} {
+			got, e := runTest(t, a, p, name, []string{"/a", "/b"}[i])
+			verdicts = append(verdicts, fmt.Sprintf("%s %v %s %q", name, got, e.Action, e.Reason))
+			if i > 0 {
+				break
+			}
+			for j := 0; j < polls; j++ {
+				code, body := p.call(t, "/poll")
+				answers = append(answers, fmt.Sprintf("%d %s", code, strings.TrimSpace(body)))
+			}
+		}
+		return verdicts, answers, a.takeChargedMisses()
+	}
+	v1, a1, m1 := run(2)
+	v2, a2, m2 := run(4)
+	require.Equal(t, []string{"200 poll", "200 poll"}, a1, "1x: a poll between tests went unanswered")
+	require.Equal(t, []string{"200 poll", "200 poll", "200 poll", "200 poll"}, a2, "2x: a poll between tests went unanswered")
+	require.Empty(t, m1, "1x: a miss was charged")
+	require.Empty(t, m2, "2x: a call between tests was left unanswered outside every test")
+	require.Equal(t, v1, v2, "a test's verdict moved when the poller called twice as often")
+	for _, v := range v1 {
+		require.NotContains(t, v, " "+models.ScopeActionFail+" ", "a test that made its own calls failed")
+	}
+}

@@ -494,8 +494,9 @@ func (a *Agent) SetScopePool(ctx context.Context, pool map[string][]string) erro
 // (models.ScopeTableReq.Worker): the names of its pool slice the set's
 // worker: lists. The pool slices sent next serve them (SetScopePool): from
 // then on, whenever the key holds the claim, each answers in a test's window
-// or between tests, at most once in the staging, and no test is required to
-// make it. None leaves the set none, never the previous set's.
+// at most once in the staging's windows, and between tests as the pool
+// slice's does (reused, or saturated on its last answer); no test is
+// required to make it. None leaves the set none, never the previous set's.
 func (a *Agent) SetScopeWorker(ctx context.Context, worker map[string][]string) error {
 	if err := a.wire.lock(ctx); err != nil {
 		return err

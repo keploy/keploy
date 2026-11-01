@@ -623,8 +623,8 @@ func servedPick(group []*models.Mock, cs integrations.MockCursor) (int, func()) 
 // fixed whichever of them earlier calls spent: it answers the first of them
 // that is live and not served in the view, else the last of them again,
 // while it is live. When the last can answer no more (spent: one of the
-// worker scope's answers at most one request in the staging; or not
-// offered) the call is answered nothing (answered, the miss's reason), never
+// worker scope's answers at most one request in the windows of the staging;
+// or not offered) the call is answered nothing (answered, the miss's reason), never
 // a recording outside them: an earlier one again, which would take the
 // sequence back, or another test's. The index is into live; the commit
 // marks the answer served in the same view's cursor, whichever view is in

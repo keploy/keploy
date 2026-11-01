@@ -360,7 +360,7 @@ func (m *MockManager) spendByKindIn(v *exactView, mk *models.Mock) (bool, <-chan
 		v.mu.Unlock()
 		return false, wait
 	}
-	verdict := m.consumeOutside(mk)
+	verdict := m.consumeOutside(mk, v.spendsInTests(mk))
 	v.mu.Unlock()
 	if verdict != exactServed {
 		return false, nil
