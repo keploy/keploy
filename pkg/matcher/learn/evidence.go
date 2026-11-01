@@ -408,25 +408,63 @@ func setUnread(in Input) ([]GivenPlaces, string) {
 	return set, ""
 }
 
-// setWords are the words of each recording outside the call's scope that
-// round F gave before it, read once for the call, as main's word rule reads
-// them (offsetPlacesOf: the set's and raw's, each recording once).
-func (dc *decider) setWords() []givenWords {
-	if !dc.swDone {
-		dc.swDone = true
+// outside are the recordings outside the call's scope that round F gave
+// before it, read once for the call, as main's word rule and echo read them
+// (offsetPlacesOf: the set's and raw's, each recording once): their
+// answers' words and instants. nil where the call has none.
+func (dc *decider) outside() *offsetPlaces {
+	if !dc.opDone {
+		dc.opDone = true
 		elsewhere := len(dc.set) > 0
 		for _, r := range dc.in.Raw {
 			elsewhere = elsewhere || r.elsewhere
 		}
 		if elsewhere {
-			d := dc.in.Drifts
-			if d == nil {
-				d = NewDriftCache()
-			}
-			dc.sw = d.offsetPlacesOf(dc.in.At, dc.in.Earlier, dc.in.Raw, dc.set).words
+			dc.op = dc.drifts().offsetPlacesOf(dc.in.At, dc.in.Earlier, dc.in.Raw, dc.set)
 		}
 	}
-	return dc.sw
+	return dc.op
+}
+
+// setWords are the words of each recording outside the call's scope that
+// round F gave before it (outside).
+func (dc *decider) setWords() []givenWords {
+	if op := dc.outside(); op != nil {
+		return op.words
+	}
+	return nil
+}
+
+// drifts is the call's drift cache, or an empty one.
+func (dc *decider) drifts() *DriftCache {
+	if dc.in.Drifts != nil {
+		return dc.in.Drifts
+	}
+	return NewDriftCache()
+}
+
+// echoedOutside names the recording outside the call's scope whose answer,
+// as round F gave it before the call, holds the changed instant c: round F's
+// moment, or the recorded one where it was recorded before the call, by a
+// cut that does not name the other run's too. ok where main's echo of those
+// places (echoedElsewhere) refuses c, mock "" where no one recording names
+// it alone. An instant there is a copy of what F gave the application, or a
+// pick from it, never a read of the clock.
+func (dc *decider) echoedOutside(c changedInstant) (mock string, ok bool) {
+	op := dc.outside()
+	if op == nil || len(op.answers) == 0 || c.rm == nil || c.lm == nil {
+		return "", false
+	}
+	pair := []driftedInstant{{rec: *c.rm, live: *c.lm}}
+	if dc.drifts().echoedElsewhere(pair, dc.in.At, dc.in.Earlier, dc.in.Raw, func() *offsetPlaces { return op }) == "" {
+		return "", false
+	}
+	for _, g := range op.answers {
+		if namesMomentApart(g.m, *c.lm, *c.rm, nil) || !g.at.After(dc.in.At) && namesMomentApart(g.m, *c.rm, *c.lm, nil) {
+			return g.mock, true
+		}
+	}
+	return "", true
 }
 
 // setEvidence is what g shows of the changed word r (R) to f (F), and
