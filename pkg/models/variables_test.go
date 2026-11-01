@@ -1716,6 +1716,24 @@ func TestAnOffsetLearnedAtAStepHoldsByItsStepAndItsGuards(t *testing.T) {
 	if lo, hi := own.CutOffsets(); lo != -2*sec || hi != -2*sec || !own.Narrow() || own.Fine() {
 		t.Fatalf("clock - 2s at the second: cuts %s to %s, Narrow %v, Fine %v", lo, hi, own.Narrow(), own.Fine())
 	}
+	// A plain read learned at a Step holds as a plain read only at its own
+	// cut; at a Step above its Res (no learn step writes one: a hand-edited
+	// file) it holds nothing, not even the read itself.
+	plain := ClockOffset{Res: sec, Layout: LayoutTyped, Step: sec}
+	if !plain.Holds(to.Truncate(sec), sec, from, to) {
+		t.Error("FALSE RED: a plain read at its own second does not hold the read")
+	}
+	plain.Step = time.Minute
+	if plain.Holds(to.Truncate(sec), sec, from, to) {
+		t.Error("FALSE GREEN: a plain read at a Step above its Res holds")
+	}
+	// A range at its own cut wider than its unit (clock + 29d to 31d at the
+	// second: no cut no unit holds three of, nor a phase lock) is no narrow
+	// offset, so the order's guard refuses it as for an offset learned
+	// before Step.
+	if spread := (ClockOffset{Min: 29 * 24 * time.Hour, Max: 31 * 24 * time.Hour, Res: sec, Layout: LayoutTyped, Step: sec}); spread.Narrow() || spread.CoarseCut() {
+		t.Errorf("FALSE GREEN: clock + 29d to 31d at the second is Narrow (%v) or a cut (%v)", spread.Narrow(), spread.CoarseCut())
+	}
 	for phase := time.Duration(0); phase < sec; phase += 50 * time.Millisecond {
 		f := from.Truncate(sec).Add(phase)
 		tt := f.Add(61 * time.Millisecond)
@@ -1736,6 +1754,18 @@ func TestAnOffsetLearnedAtAStepHoldsByItsStepAndItsGuards(t *testing.T) {
 	bt := time.Date(2026, 10, 25, 1, 0, 0, 30e6, time.UTC)
 	if bf := bt.Add(-61 * time.Millisecond); own.Holds(bt.Truncate(sec).Add(-2*sec).In(berlin), sec, bf, bt) {
 		t.Error("FALSE GREEN: clock - 2s at the second holds across Berlin's turn back")
+	}
+	// A day's phase lock whose range holds two steps (both runs' calls
+	// straddled midnight: clock - 2h to clock - 26h, cut to the day, at the
+	// second), read in Europe/Berlin just after the midnight that starts its
+	// 23-hour day (2026-03-29, 02:00 CET to 03:00 CEST): the step before the
+	// next midnight is that midnight, 23 hours back, so the application's
+	// value (the midnight less 2 h) holds.
+	day := 24 * time.Hour
+	twoDays := ClockOffset{Min: -2*time.Hour - day, Max: -2*time.Hour + sec, Res: sec, Layout: LayoutTyped, Step: day}
+	spring := time.Date(2026, 3, 29, 0, 0, 0, 0, berlin)
+	if sf := spring.Add(10 * time.Minute); !twoDays.Holds(spring.Add(-2*time.Hour), sec, sf, sf.Add(61*time.Millisecond)) {
+		t.Error("FALSE RED: a day's phase lock of two steps does not hold its value after Berlin's 23-hour day starts")
 	}
 	old := own
 	old.Step = 0
