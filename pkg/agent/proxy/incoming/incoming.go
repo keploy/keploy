@@ -3,12 +3,15 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"go.keploy.io/server/v3/config"
@@ -78,6 +81,22 @@ type IngressProxyManager struct {
 
 	ingressHook IngressHook
 
+	// portHolder is the hooks, when they hold the application's moved ports
+	// from inside their bind (ingress_lookup.c): the manager serves what its
+	// park accepts, and registers each forwarder it starts for the lookup.
+	// nil when the hooks do not implement it or hold nothing, and the
+	// forwarder covers the window as it did before (shrunk by binding the
+	// port as soon as the bind event arrives).
+	portHolder IngressPortHolder
+	// parkedServed and parkedServedV6 count the parked IPv4 and IPv6
+	// connections the manager forwarded (serveParked), for the run's summary.
+	parkedServed   atomic.Uint64
+	parkedServedV6 atomic.Uint64
+	// portSems are the synchronous mode's per-port semaphores, which a
+	// port's forwarder and the park share (portSem). Guarded by semMu.
+	semMu    sync.Mutex
+	portSems map[uint16]chan struct{}
+
 	// relocated maps an app port whose bind the record hooks moved (keploy's
 	// ingress forwarder then holds the port) to the port the app was moved
 	// to, for each forwarder that started with a known one. Guarded by mu.
@@ -119,6 +138,9 @@ func New(logger *zap.Logger, h agent.Hooks, cfg *config.Config) *IngressProxyMan
 	}
 	// Default to the Go TCP forwarder; can be replaced via SetIngressHook.
 	pm.ingressHook = newGoTCPIngressHook(pm)
+	if holder, ok := h.(IngressPortHolder); ok {
+		pm.portHolder = holder
+	}
 	return pm
 }
 
@@ -157,6 +179,9 @@ func (pm *IngressProxyManager) Start(ctx context.Context, opts models.IncomingOp
 	// without the gate, each reconnect would leak another watcher.
 	pm.startOnce.Do(func() {
 		go pm.ListenForIngressEvents(ctx)
+		if park := pm.ingressPark(); park != nil {
+			go pm.serveParkedConnections(ctx, park)
+		}
 	})
 	return pm.tcChan
 }
@@ -205,6 +230,11 @@ func (pm *IngressProxyManager) StartIngressProxy(ctx context.Context, origAppPor
 			// of ERROR so it doesn't trip error-grep gates in CI record output.
 			pm.logger.Debug("Ingress forwarder start aborted; agent shutting down",
 				zap.Uint16("orig_port", origAppPort), zap.Uint16("new_port", newAppPort), zap.Error(err))
+		} else if errors.Is(err, errIngressPortYielded) {
+			// keploy left the port to the listener that holds it, on
+			// purpose, and its WARN said so: not a failure.
+			pm.logger.Debug("Ingress forwarder not started: the port is another listener's",
+				zap.Uint16("orig_port", origAppPort), zap.Uint16("new_port", newAppPort), zap.Error(err))
 		} else {
 			pm.logger.Error("Ingress hook failed to start; verify hook configuration/permissions and required kernel features, or disable the custom ingress hook",
 				zap.Uint16("orig_port", origAppPort), zap.Uint16("new_port", newAppPort), zap.Error(err))
@@ -231,18 +261,31 @@ func (pm *IngressProxyManager) StartIngressProxy(ctx context.Context, origAppPor
 }
 
 // AppListenPort is the port the app's own socket listens on for its port orig.
-// That is orig, unless the record hooks moved the app's bind elsewhere and
-// keploy's ingress forwarder holds orig: then it is the port the app was moved
-// to, and ok is false while that port is not known (the forwarder is still
-// starting, or the bind event did not carry it).
+// That is orig, unless the record hooks moved the app's bind elsewhere: then
+// it is the port the app was moved to. keploy's forwarder holds orig once it
+// listens, and before that the hooks hold it from the app's bind (the park
+// serves its calls, and records them as tests on orig): so a test can be on
+// orig while the forwarder is still starting, or before its bind event is
+// read, and the hold's own record of the move says where the app went. ok is
+// false while the forwarder holds orig and that port is not known (no hold,
+// and the forwarder is still starting or the bind event did not carry it).
 func (pm *IngressProxyManager) AppListenPort(orig uint16) (port uint16, ok bool) {
 	pm.mu.Lock()
-	defer pm.mu.Unlock()
-	if _, forwarded := pm.active[orig]; !forwarded {
+	_, forwarded := pm.active[orig]
+	moved, relocated := pm.relocated[orig]
+	pm.mu.Unlock()
+	if relocated {
+		return moved, true
+	}
+	if pm.portHolder != nil {
+		if moved, ok := pm.portHolder.MovedPort(orig); ok {
+			return moved, true
+		}
+	}
+	if !forwarded {
 		return orig, true
 	}
-	moved, ok := pm.relocated[orig]
-	return moved, ok
+	return 0, false
 }
 
 // StopAll gracefully shuts down all active ingress proxies.
@@ -287,6 +330,7 @@ func (pm *IngressProxyManager) ListenForIngressEvents(ctx context.Context) {
 		pm.StartIngressProxy(ctx, e.OrigAppPort, e.NewAppPort)
 	}
 	pm.logger.Debug("Stopping ingress event listener as the event channel was closed.")
+	pm.logIngressHoldEnd()
 	pm.StopAll()
 }
 
@@ -322,7 +366,43 @@ func (h *goTCPIngressHook) StartIngress(ctx context.Context, origPort, newPort u
 	newAppAddr := "127.0.0.1:" + strconv.Itoa(int(newPort))
 	logger := h.pm.logger
 
-	if waited, err := waitForIngressTargetWhenKnown(ctx, newPort, newAppAddr, ingressTargetListenTimeout); waited {
+	// Bind the app's port first, then wait for the app to listen on its moved
+	// one. When nothing holds the port during that wait (no hold: a kernel
+	// without sk_lookup), a call is refused; binding first leaves only this
+	// bind as that window, not the whole wait. When keploy holds the port from
+	// inside the app's bind (BPF sk_lookup), its park serves the port until
+	// this forwarder is registered below, after the wait; binding first then
+	// finds at once a port another listener holds already (not keploy's), and
+	// the hold yields it to that listener. Binding early is safe: the accept
+	// loop starts below either way, and a call that arrives before it does
+	// waits in the listen backlog.
+	held := h.pm.ingressHeld()
+	listener, err := h.bindIngress(ctx, origAppAddr)
+	if err != nil {
+		if held && errors.Is(err, syscall.EADDRINUSE) {
+			return h.yieldIngressPort(origPort, newPort, "IPv4", err)
+		}
+		return err
+	}
+	// The forwarder listens on IPv4 only, so its bind does not find a
+	// listener that holds the port on IPv6 alone ([::1]:P, or [::]:P with
+	// IPV6_V6ONLY). The hold takes the port's IPv6 calls for the whole run
+	// where the app's sockets take IPv6 (an IPv6 socket on :: or on an IPv6
+	// address; not one on a v4-mapped address, which takes IPv4 only), so
+	// check each of those addresses as the app's own bind did: without
+	// keploy, that bind would have failed there.
+	if held {
+		for _, addr := range h.pm.appIPv6Binds(origPort) {
+			if perr := ingressIPv6Probe(addr, origPort); errors.Is(perr, syscall.EADDRINUSE) {
+				_ = listener.Close()
+				return h.yieldIngressPort(origPort, newPort, "IPv6", fmt.Errorf("bind [%s]:%d: %w", addr, origPort, perr))
+			} else if perr != nil {
+				logger.Debug("could not check the application's port for an IPv6 listener; holding it", zap.Uint16("port", origPort), zap.Stringer("address", addr), zap.Error(perr))
+			}
+		}
+	}
+
+	if waited, err := ingressTargetWait(ctx, newPort, newAppAddr, ingressTargetListenTimeout); waited {
 		if err != nil {
 			logger.Warn("Redirected ingress target was not listening before proxy bind; starting ingress forwarder anyway",
 				zap.String("target", newAppAddr),
@@ -337,38 +417,26 @@ func (h *goTCPIngressHook) StartIngress(ctx context.Context, origPort, newPort u
 			zap.Uint16("orig_port", origPort))
 	}
 
-	// If the agent is already shutting down, do NOT bind the ingress listener.
-	// A forwarder bound during teardown (e.g. from a late/stale bind event whose
-	// target wait above returned context.Canceled) can outlive StopAll's snapshot
-	// and linger holding the app's port (commonly 8000), so the next record run's
+	// If the agent is shutting down (the context was canceled during the
+	// wait), release the port instead of starting the forwarder. A forwarder
+	// started during teardown (e.g. from a late/stale bind event whose target
+	// wait above returned context.Canceled) can outlive StopAll's snapshot and
+	// linger holding the app's port (commonly 8000), so the next record run's
 	// application fails to bind it with "address already in use" — the flaky
-	// port-8000 reuse failure. Aborting here is safe: a canceled context means no
-	// ingress traffic will be served anyway.
+	// port-8000 reuse failure. A canceled context means no ingress traffic
+	// will be served anyway.
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		logger.Debug("Skipping ingress forwarder bind; agent context canceled (shutting down)",
+		_ = listener.Close()
+		logger.Debug("Skipping ingress forwarder start; agent context canceled (shutting down)",
 			zap.String("target", newAppAddr), zap.Error(ctxErr))
 		return ctxErr
 	}
+	tcpListener := listener.(*net.TCPListener)
 
-	// Plain TCP, never Go's default MPTCP: this is the application's own port
-	// on every interface, and the application never chose MPTCP for it.
-	listener, err := plaintcp.Listen(context.Background(), "tcp4", origAppAddr)
-	if err != nil {
-		return fmt.Errorf("ingress proxy failed to listen on %s: %w", origAppAddr, err)
-	}
-	// Close the residual race: if the context was canceled while net.Listen was
-	// binding, release the port immediately and do NOT register the forwarder —
-	// otherwise it would linger holding the port and leave a stale forwarder entry
-	// that blocks re-arming it later.
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		_ = listener.Close()
-		return ctxErr
-	}
-	tcpListener, ok := listener.(*net.TCPListener)
-	if !ok {
-		listener.Close()
-		return fmt.Errorf("listener on %s was not a TCP listener", origAppAddr)
-	}
+	// Steer the moved port's connections to this forwarder, now that it
+	// listens, instead of to the park (a no-op when nothing is held). The
+	// park stops seeing the port the moment this returns.
+	h.pm.registerIngressForwarder(origPort, listener)
 
 	logger.Debug("Started Ingress forwarder", zap.String("listening_on", origAppAddr), zap.String("forwarding_to", newAppAddr))
 	ctx, cancel := context.WithCancel(ctx)
@@ -382,7 +450,8 @@ func (h *goTCPIngressHook) StartIngress(ctx context.Context, origPort, newPort u
 		// may also close it — and this runs before close(done) so a StopIngress
 		// waiter observes the port freed. Prevents the port from lingering post-exit.
 		defer func() { _ = listener.Close() }()
-		sem := make(chan struct{}, 1)
+		// Shared with the park's calls to this port (portSem).
+		sem := h.pm.portSem(origPort)
 		for {
 			select {
 			case <-ctx.Done():
@@ -419,6 +488,49 @@ func (h *goTCPIngressHook) StartIngress(ctx context.Context, origPort, newPort u
 
 	return nil
 }
+
+// errIngressPortYielded is StartIngress's error for a port another listener
+// (not keploy's) holds, which the hold left to it on purpose with a WARN: the
+// manager does not log it as a failure.
+var errIngressPortYielded = errors.New("another listener holds the application's port; keploy's hold yielded it")
+
+// ingressIPv6Probe is StartIngress's IPv6 check of the app's port
+// (probeIPv6Port); a variable so a test can make it fail as on a host
+// without IPv6.
+var ingressIPv6Probe = probeIPv6Port
+
+// yieldIngressPort leaves the whole of the app's port orig to the listener
+// that holds it on family (keploy's bind there failed with err): the hold
+// stops taking any of the port's calls, which are then the kernel's, as
+// without keploy, and no forwarder starts. One WARN names the port and the
+// family.
+func (h *goTCPIngressHook) yieldIngressPort(orig, newPort uint16, family string, err error) error {
+	h.pm.yieldIngressPort(orig)
+	h.pm.logger.Warn("another listener, not keploy's, holds the application's port, so keploy leaves the port's calls to it and records none of them; stop that listener to record this port",
+		zap.Uint16("port", orig), zap.String("family", family), zap.Uint16("application_listens_on", newPort), zap.Error(err))
+	return fmt.Errorf("%w: %w", errIngressPortYielded, err)
+}
+
+// appIPv6Binds is the IPv6 addresses the app's binds of orig take calls on,
+// which the hold takes the port's IPv6 calls on (IngressPortHolder's
+// AppIPv6Binds). When the hooks cannot say, it is :: (all of IPv6): a hold
+// must never take calls from a listener keploy does not own.
+func (pm *IngressProxyManager) appIPv6Binds(orig uint16) []netip.Addr {
+	if pm.portHolder == nil {
+		return nil
+	}
+	addrs, err := pm.portHolder.AppIPv6Binds(orig)
+	if err != nil {
+		pm.logger.Debug("could not read which IPv6 addresses the application's binds of the port take; checking all of IPv6", zap.Uint16("port", orig), zap.Error(err))
+		return []netip.Addr{netip.IPv6Unspecified()}
+	}
+	return addrs
+}
+
+// ingressTargetWait is StartIngress's wait for the app to listen on its moved
+// port (waitForIngressTargetWhenKnown); a variable so a test can see what is
+// bound when the wait begins.
+var ingressTargetWait = waitForIngressTargetWhenKnown
 
 func waitForIngressTargetWhenKnown(ctx context.Context, newPort uint16, addr string, timeout time.Duration) (bool, error) {
 	if newPort == 0 {
@@ -489,10 +601,37 @@ func (h *goTCPIngressHook) StopIngress(origPort uint16) error {
 	delete(h.forwarders, origPort)
 	h.mu.Unlock()
 
+	// Take this forwarder out of the lookup's sockhash before closing it (a
+	// no-op when nothing is held; a closed socket leaves the sockhash by
+	// itself, so this only tidies the entry).
+	h.pm.unregisterIngressForwarder(origPort)
 	st.cancel()
 	_ = st.listener.Close()
 	<-st.done
 	return nil
+}
+
+// bindIngress binds the ingress forwarder's listener on addr: plain TCP (a Go
+// listener is MPTCP by default on a kernel with MPTCP, and the lookup's
+// sockhash cannot take an MPTCP socket), aborting if the context was canceled
+// while it bound so a late bind does not leave the port held.
+func (h *goTCPIngressHook) bindIngress(ctx context.Context, addr string) (net.Listener, error) {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, ctxErr
+	}
+	listener, err := plaintcp.Listen(ctx, "tcp4", addr)
+	if err != nil {
+		return nil, fmt.Errorf("ingress proxy failed to listen on %s: %w", addr, err)
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		_ = listener.Close()
+		return nil, ctxErr
+	}
+	if _, ok := listener.(*net.TCPListener); !ok {
+		_ = listener.Close()
+		return nil, fmt.Errorf("listener on %s was not a TCP listener", addr)
+	}
+	return listener, nil
 }
 
 const clientPreface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
