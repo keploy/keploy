@@ -214,7 +214,7 @@ func (dc *decider) word(path string, at variables.Address, rec, live string, w r
 	case len(outside) > 0:
 		p := outside[0]
 		return dc.refuse(path, at, n, w.Rec, w.Live, RefusalAnotherScope,
-			"the value "+p.name+" sent in an earlier test or between tests; keploy binds only within a test and the start-up", names(outside),
+			"the value "+p.name+" sent in "+scopeName(p)+"; keploy binds only within a test and the start-up", names(outside),
 			Edit{Kind: EditMoveToMocks, Mock: p.mock}, Edit{Kind: EditMoveToStartup, Mock: p.mock}, dc.wordNoise(path, n))
 	}
 	if d, ok := dc.atWord(path, at, n, w, rec, live); !ok {
@@ -508,14 +508,15 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	if cutWhy != "" {
 		why += " (" + cutWhy + ")"
 	}
-	var outside []string
+	var outside, sentIn []string
 	for _, h := range hs {
 		if h.hr && h.hl && h.p.otherTest && !dc.allScope && len(outside) < maxLinePlaces {
 			outside = append(outside, h.p.name)
+			sentIn = append(sentIn, h.p.name+" in "+scopeName(h.p))
 		}
 	}
 	if len(outside) > 0 {
-		why += " [but " + strings.Join(outside, ", ") + " in another test or between tests did]"
+		why += " [but " + strings.Join(sentIn, ", ") + " did]"
 	}
 	return dc.refuse(path, at, n, r, l, RefusalNoClockRead, why, outside, dc.wordNoise(path, n), Edit{Kind: EditReRecord})
 }
@@ -662,7 +663,7 @@ func (dc *decider) learned(path string, at variables.Address, n int, r, f string
 	at.Word = n
 	from := ""
 	if dc.allScope {
-		from = "another window"
+		from = dc.in.Landed.String()
 	}
 	return Decision{At: at, Recorded: r, Full: f, Outcome: o, Line: learnedLine(learnedWord{
 		Test: dc.in.Test, Mock: dc.in.Mock, Field: path, Word: n, Recorded: r, Full: f,
@@ -714,6 +715,14 @@ func gaveAt(p evPlace, f string) string {
 		return "a value without " + f
 	}
 	return p.live
+}
+
+// scopeName names p's scope outside the call for a line.
+func scopeName(p evPlace) string {
+	if p.scope != "" {
+		return p.scope
+	}
+	return "an earlier test or between tests"
 }
 
 // lastSegment is path's last key, a given's name.
