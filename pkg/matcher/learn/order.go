@@ -1336,6 +1336,8 @@ func (dc *decider) clock(path string, at variables.Address, n int, c changedInst
 			return dc.cannotCheck(path, at, n, r, l, "a replay checks a clock read inside a text only as one word of the text as recorded, and "+c.noWord)
 		}
 		off.Layout, off.Word = lay, c.word
+	} else if off.Layout == "" {
+		off.Layout = models.LayoutTyped
 	}
 	if !off.Plain() {
 		// The window holds the read; the value is the read plus this.
