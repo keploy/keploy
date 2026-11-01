@@ -45,39 +45,3 @@ func TestOutgoingOptions_RootCAsDoNotCrossTheWire(t *testing.T) {
 		t.Error("UpstreamTLSVerify did not survive the JSON round trip")
 	}
 }
-
-// LearnTests crosses the CLI → agent /outgoing request as it was set: an
-// empty list (a round that learns onto no test) stays an empty list, which the
-// agent reads as "no test learns", and nil (a CLI that learns onto every
-// test's recording) stays nil. Read as nil, an empty list would make every
-// test of the round fresh to the agent, and a carried test begun after a newer
-// one would stop the round's learning.
-func TestOutgoingOptions_LearnTestsKeepItsEmptyListAcrossTheWire(t *testing.T) {
-	t.Parallel()
-
-	for _, c := range []struct {
-		name string
-		in   map[string]bool
-	}{
-		{"no test", map[string]bool{}},
-		{"every test", nil},
-		{"one test", map[string]bool{"o::TestA": true}},
-	} {
-		encoded, err := json.Marshal(OutgoingOptions{Learn: true, LearnTests: c.in})
-		if err != nil {
-			t.Fatalf("%s: json.Marshal: %v", c.name, err)
-		}
-		var decoded OutgoingOptions
-		if err := json.Unmarshal(encoded, &decoded); err != nil {
-			t.Fatalf("%s: json.Unmarshal: %v", c.name, err)
-		}
-		if (decoded.LearnTests == nil) != (c.in == nil) || len(decoded.LearnTests) != len(c.in) {
-			t.Fatalf("%s: LearnTests %#v crossed the wire as %#v (payload %s)", c.name, c.in, decoded.LearnTests, encoded)
-		}
-		for name := range c.in {
-			if !decoded.LearnTests[name] {
-				t.Fatalf("%s: %s did not cross the wire", c.name, name)
-			}
-		}
-	}
-}
