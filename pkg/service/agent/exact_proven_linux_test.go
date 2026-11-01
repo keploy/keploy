@@ -250,7 +250,7 @@ func TestOneCallMoreThanRecordedIsAnExtraCall(t *testing.T) {
 	require.Equal(t, models.MissExtraCall, ev.Misses[0].Kind)
 	require.Equal(t, 2, ev.Misses[0].Recorded)
 	// The test's evidence names the recording the call repeats, the first
-	// copy to answer: the one a mappings edit marks `repeat: any`.
+	// copy to answer: which copy was made more often than recorded.
 	require.Equal(t, "mock-1", ev.Misses[0].ExtraOf, "the evidence dropped the recording the extra call repeats")
 	require.Empty(t, ev.Unconsumed)
 }
