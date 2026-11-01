@@ -145,6 +145,32 @@ type ScopeReq struct {
 	// A Go test sends neither; its instance's key is the path.
 	File    string `json:"file,omitempty"`
 	Project string `json:"project,omitempty"`
+	// Random, sent with /agent/scope/begin, says how the test's browser drew
+	// its random numbers (ScopeRandomSeeded or ScopeRandomOwn), from a
+	// harness that drives one (@keploy/playwright). Optional: without it
+	// keploy knows nothing of the test's randomness.
+	Random string `json:"random,omitempty"`
+}
+
+// How a test's browser drew its random numbers (ScopeReq.Random):
+// ScopeRandomSeeded from a stream its harness seeded for the test, the same
+// in its recording and every replay, so a call that still varies is drawn on
+// a server or in a worker the seeding does not reach; ScopeRandomOwn from the
+// browser's own, as its harness was told not to seed them.
+const (
+	ScopeRandomSeeded = "seeded"
+	ScopeRandomOwn    = "own"
+)
+
+// NormalizeScopeRandom is ScopeRandomSeeded or ScopeRandomOwn for a begin that
+// says one of them, in any case, and "" for anything else: a word keploy does
+// not know says nothing of the test's randomness.
+func NormalizeScopeRandom(s string) string {
+	switch v := strings.ToLower(strings.TrimSpace(s)); v {
+	case ScopeRandomSeeded, ScopeRandomOwn:
+		return v
+	}
+	return ""
 }
 
 // The verdicts a harness reports in ScopeReq.Outcome, and the two the agent
@@ -271,6 +297,9 @@ type ScopeWindow struct {
 	// Outcome failed and Reported passed: a judge reads the two apart, as a
 	// test that failed on its own makes calls a passing one does not.
 	Reported string `json:"reported,omitempty"`
+	// Random is how the test's browser drew its random numbers, as its
+	// begin said (ScopeReq.Random, normalized); "" when it said nothing.
+	Random string `json:"random,omitempty"`
 	// Evidence is, under the proven wire, what keploy saw that failed the
 	// test at its end in a replay; nil when nothing did.
 	Evidence *ScopeEvidence `json:"evidence,omitempty"`

@@ -408,6 +408,36 @@ func TestTestReceiptsMarkAnUnreportedCount(t *testing.T) {
 		testReceipts([]FlowMocks{{Flow: "pkg.TestB", Outcome: models.ScopeOutcomeFailed, Reported: models.ScopeOutcomePassed}}, true, true))
 }
 
+// A test's receipt says how its browser drew its random numbers in its
+// latest run (TestReceipt.Random), in a replay's receipt and in a record's.
+func TestATestsReceiptSaysHowItsBrowserDrewItsRandomNumbers(t *testing.T) {
+	at := func(ms int) time.Time { return time.Unix(0, int64(ms)*int64(time.Millisecond)) }
+	windows := []models.ScopeWindow{
+		{Name: "ui::tr", Start: at(0), End: at(100), Outcome: models.ScopeOutcomePassed, Random: models.ScopeRandomOwn},
+		{Name: "ui::tr", Start: at(200), End: at(300), Outcome: models.ScopeOutcomePassed, Random: models.ScopeRandomSeeded}, // its latest run
+		{Name: "ui::cases", Start: at(400), End: at(500), Outcome: models.ScopeOutcomeFailed, Random: models.ScopeRandomOwn},
+		{Name: "go::TestA", Start: at(600), End: at(700), Outcome: models.ScopeOutcomePassed}, // a harness that says nothing
+	}
+	expected := map[string][]models.MockEntry{"ui::tr": {{Name: "mock-0"}}}
+	got := map[string]string{}
+	for _, r := range testReceipts(attributeMocks(windows, expected, nil, nil), true, true) {
+		got[r.Name] = r.Random
+	}
+	want := map[string]string{"ui::tr": models.ScopeRandomSeeded, "ui::cases": models.ScopeRandomOwn, "go::TestA": ""}
+	require.Equal(t, want, got, "a replay's receipt: each test's latest run, with mocks of its own or none")
+
+	keployDir := t.TempDir()
+	writeRecordTestsReceipt(zap.NewNop(), keployDir, TestsReceipt{Set: "ui"}, windows[1:])
+	rec, err := ReadRecordTestsReceipt(keployDir, "ui")
+	require.NoError(t, err)
+	require.NotNil(t, rec)
+	got = map[string]string{}
+	for _, r := range rec.Tests {
+		got[r.Name] = r.Random
+	}
+	require.Equal(t, want, got, "a record's receipt")
+}
+
 // gatePusher records the gate a replay pushes.
 type gatePusher struct {
 	Instrumentation

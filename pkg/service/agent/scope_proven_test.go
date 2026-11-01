@@ -637,6 +637,34 @@ func TestAReplayedTestKeepsWhatItsHarnessReportedBesideKeploysVerdict(t *testing
 	}
 }
 
+// A test's window keeps how its browser drew its random numbers, as its begin
+// said (ScopeWindow.Random), normalized: a judge that finds the test's calls
+// vary between runs then tells a draw the seeding reaches from one it does not.
+func TestATestsWindowKeepsHowItsBrowserDrewItsRandomNumbers(t *testing.T) {
+	for _, tc := range []struct{ sent, kept string }{
+		{"seeded", models.ScopeRandomSeeded},
+		{" OWN ", models.ScopeRandomOwn},
+		{"", ""},
+		{"dice", ""}, // a word keploy does not know says nothing
+	} {
+		t.Run("sent "+tc.sent, func(t *testing.T) {
+			for _, mode := range []models.Mode{models.MODE_RECORD, models.MODE_TEST} {
+				a, _ := wireAgent(t, mode)
+				ctx := context.Background()
+				_, serr := a.ClaimInstance(ctx, models.InstanceReq{Key: "ui"}, os.Getpid())
+				require.Nil(t, serr)
+				req := begin("tr renders the case list")
+				req.Random = tc.sent
+				_, serr = a.ProvenBegin(ctx, req)
+				require.Nil(t, serr)
+				_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "tr renders the case list", Outcome: "passed"})
+				require.Nil(t, serr)
+				require.Equal(t, tc.kept, windowOf(t, a, "ui::tr renders the case list").Random, mode)
+			}
+		})
+	}
+}
+
 func TestAnEndOfATestThatIsNotOpenIsRefused(t *testing.T) {
 	a, _ := wireAgent(t, models.MODE_TEST)
 	_, serr := a.ProvenEnd(context.Background(), models.ScopeReq{Name: "TestA", Outcome: "passed"})

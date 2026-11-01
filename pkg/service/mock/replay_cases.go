@@ -35,9 +35,12 @@ type FlowMocks struct {
 	// Outcome is the verdict of the test's latest run this replay
 	// (models.ScopeOutcome*, ScopeOutcomeGated when the replay told it not to
 	// run); "" when its harness reported none. Reported is the verdict its
-	// harness itself reported for that run (models.ScopeWindow.Reported).
+	// harness itself reported for that run (models.ScopeWindow.Reported),
+	// and Random how its browser drew its random numbers in that run
+	// (models.ScopeWindow.Random).
 	Outcome  string
 	Reported string
+	Random   string
 }
 
 // CaseReader is an optional MappingDB extension: which cases each flow recorded.
@@ -249,10 +252,10 @@ func attributeMocks(windows []models.ScopeWindow, expected map[string][]models.M
 	}
 	for name, w := range latest {
 		if f, known := byFlow[name]; known {
-			f.Outcome, f.Reported = w.Outcome, w.Reported
+			f.Outcome, f.Reported, f.Random = w.Outcome, w.Reported, w.Random
 		} else if w.Outcome != "" {
 			f := get(name)
-			f.Outcome, f.Reported = w.Outcome, w.Reported
+			f.Outcome, f.Reported, f.Random = w.Outcome, w.Reported, w.Random
 		}
 	}
 	if len(byFlow) == 0 {

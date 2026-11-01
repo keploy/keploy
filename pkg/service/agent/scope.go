@@ -332,7 +332,7 @@ func (a *Agent) closeWindow(name string, pid int, at time.Time) bool {
 		if a.replaying() {
 			meta.given = nil
 		}
-		a.scopeWindows = append(a.scopeWindows, models.ScopeWindow{Name: name, Start: start, End: end, PID: uint32(pid), Dir: meta.dir, Suite: meta.suite, Outcome: meta.outcome, Reported: meta.reported, Evidence: ev, Real: meta.real, Given: meta.given})
+		a.scopeWindows = append(a.scopeWindows, models.ScopeWindow{Name: name, Start: start, End: end, PID: uint32(pid), Dir: meta.dir, Suite: meta.suite, Outcome: meta.outcome, Reported: meta.reported, Random: meta.random, Evidence: ev, Real: meta.real, Given: meta.given})
 		delete(a.scopeMeta, k)
 	}
 	a.scopeMu.Unlock()
@@ -507,6 +507,9 @@ type scopeMeta struct {
 	// reported is the verdict the test's harness itself reported
 	// (ScopeWindow.Reported).
 	reported string
+	// random is how the test's browser drew its random numbers, as its
+	// begin said (ScopeWindow.Random).
+	random   string
 	evidence *models.ScopeEvidence
 	// real are the mock.real destinations the test used while open.
 	real []models.RealUse
@@ -528,6 +531,28 @@ func (a *Agent) NoteScope(name string, pid int, dir string, suite bool) {
 	}
 	a.scopeMeta[scopeKey{pid: uint32(pid), name: name}] = scopeMeta{dir: dir, suite: suite}
 	a.scopeMu.Unlock()
+}
+
+// noteScopeRandom records how a beginning test's browser draws its random
+// numbers (ScopeWindow.Random), after NoteScope noted the test's folder:
+// NoteScope starts the test's notes afresh. A begin that says nothing
+// clears what an earlier begin of the test left.
+func (a *Agent) noteScopeRandom(name string, pid int, random string) {
+	if name == "" {
+		return
+	}
+	a.scopeMu.Lock()
+	defer a.scopeMu.Unlock()
+	k := scopeKey{pid: uint32(pid), name: name}
+	meta, ok := a.scopeMeta[k]
+	if !ok && random == "" {
+		return
+	}
+	if a.scopeMeta == nil {
+		a.scopeMeta = make(map[scopeKey]scopeMeta)
+	}
+	meta.random = random
+	a.scopeMeta[k] = meta
 }
 
 // NoteScopeOutcome records the verdict a test's harness reported as it ended

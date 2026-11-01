@@ -905,6 +905,7 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 	// the listener's drops with these.
 	a.markDrops(ctx, drops)
 	a.NoteScope(id, 0, dir, false)
+	a.noteScopeRandom(id, 0, models.NormalizeScopeRandom(req.Random))
 	// opened: the test's capture window opened (open), so a begin that
 	// fails after it takes the window back.
 	var open func()
