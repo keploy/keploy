@@ -969,6 +969,40 @@ func TestOutcomeAReadMinusADebounceIsTheCallsClockBeforeACoarseCopy(t *testing.T
 	iValue(t, "the same read where the clock reading finds no offset", oWord(t, Decide(in), rec, live), "mock-299")
 }
 
+// A window load widened holds the same read as a plain one and as a read
+// two seconds back. The reading is asked first, so a debounce is learned with
+// its offset: learned plain, the application fails nearly every replay and a
+// dropped look-back passes. Where the reading finds nothing, the window's
+// plain read stands.
+func TestOutcomeTheReadingIsAskedBeforeAWideWindowsPlainRead(t *testing.T) {
+	const p = "body.filter.dirtyAt.$lte"
+	rAt := oAt.Add(400 * time.Millisecond)
+	fAt := oAt.Add(2*time.Hour + 17*time.Minute + 23*time.Second + 150*time.Millisecond)
+	secs := func(t time.Time) string { return strconv.FormatInt(t.Unix(), 10) }
+	rec, live := secs(rAt.Add(-2*time.Second)), secs(fAt.Add(-2*time.Second))
+	in := iCall(p, Number, rec, live, rAt, fAt, iWin(rAt, fAt, 3200*time.Millisecond).ComparesOffsets(), nil, nil)
+	in.Landed = Landed{Where: LandedBetween}
+	defer func(f func(string, typedInstant, typedInstant, *Window, *time.Location) (models.ClockOffset, string, bool)) {
+		clockInWindow = f
+	}(clockInWindow)
+	clockInWindow = func(string, typedInstant, typedInstant, *Window, *time.Location) (models.ClockOffset, string, bool) {
+		return models.ClockOffset{Min: -2010 * time.Millisecond, Max: -1990 * time.Millisecond, Res: time.Millisecond, Why: "the stub reading's line"}, "", true
+	}
+	d := oWord(t, Decide(in), rec, live)
+	iClock(t, "a read two seconds back in a window that also holds it plain", d)
+	if d.Clock != nil && (d.Clock.Min > -2*time.Second || d.Clock.Max < -2*time.Second) {
+		t.Errorf("the Clock's offset is %v..%v; want the reading's, around -2s", d.Clock.Min, d.Clock.Max)
+	}
+	clockInWindow = func(string, typedInstant, typedInstant, *Window, *time.Location) (models.ClockOffset, string, bool) {
+		return models.ClockOffset{}, "", false
+	}
+	d = oWord(t, Decide(in), rec, live)
+	iClock(t, "the same read where the reading finds no offset", d)
+	if d.Clock != nil && (d.Clock.Min != 0 || d.Clock.Max != 0) {
+		t.Errorf("the Clock's offset is %v..%v; want none where the reading finds none", d.Clock.Min, d.Clock.Max)
+	}
+}
+
 // A read plus a time to live (a lease until now + 30 min, in epoch
 // milliseconds) its call's window holds in both runs is a Clock with that
 // offset, and its line names the offset: the window alone holds the read,
