@@ -318,6 +318,10 @@ func (dc *decider) word(path string, bare variables.Address, rec, live, text str
 			} else if ev == evNone && dc.gluedAt(p, w) {
 				ev, p.why = evUnknown, "glued to the bytes around it, in a body that declares no media type (no Content-Type): keploy cannot tell the words the application was given there from the bytes that frame them"
 			}
+		} else if ev == evShown {
+			if why := movedField(p, w.Rec, w.Live); why != "" {
+				ev, p.why = evUnknown, why
+			}
 		}
 		switch ev {
 		case evShown:
@@ -364,12 +368,6 @@ func (dc *decider) word(path string, bare variables.Address, rec, live, text str
 			return d
 		}
 		rule := "bound to " + first.name + ", the earliest place before the call that shows it in both runs"
-		if first.leaf.Path == "" {
-			// A text read whole: R's word and F's may stand at two fields
-			// of it, so the line says only what keploy read.
-			rule = "bound to " + first.name + ", the earliest place before the call that holds " + strconv.Quote(w.Rec) + " as recorded and " +
-				strconv.Quote(w.Live) + " as round F gave it, each run's text read whole, not field by field"
-		}
 		echo, unnamed := dc.readBack(path, at, w, rec, false)
 		if r, no := dc.unanswerable(path, bare, rec, live, echo, unnamed); no {
 			return r
