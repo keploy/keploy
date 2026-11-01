@@ -365,6 +365,9 @@ func TestOutcomeAReadBackIsAnsweredWhereItsAnswerHoldsTheRequestsTextWhole(t *te
 	unnamed := in()
 	unnamed.Resp = append(unnamed.Resp, Leaf{Path: "body.cursor.firstBatch[2]._id", Type: String, Value: "app-0b1e", Unnamed: true})
 	oRefused(t, "a read-back at a place keploy cannot name", oWord(t, Decide(unnamed), "0b1e", "77c4"), RefusalCannotCheck, "cannot name")
+	keyed := in()
+	keyed.Resp = append(keyed.Resp, Leaf{Path: "body.cursor{keys}", Type: Keys, Value: "_id\napp-0b1e\nname", Unnamed: true})
+	oRefused(t, "a read-back at an answer key", oWord(t, Decide(keyed), "0b1e", "77c4"), RefusalCannotCheck, "body.cursor{keys}")
 	// No answer leaf holds the id whole: no echo, the Value as before.
 	none := in()
 	none.Resp = none.Resp[1:3]
@@ -548,5 +551,25 @@ func TestOutcomeAFreshWordIsAnsweredOnlyWhereItsAnswerHoldsTheRequestsTextWhole(
 			t.Errorf("%s (%s to %s): %s, echo %q, line %q; want fresh, answered at %q only, its line naming just that",
 				c.name, c.rec, c.live, oDescribe([]Decision{d}), got, d.Line, c.echo)
 		}
+	}
+}
+
+// A key of the call's answer that is the request's whole recorded text
+// ({"A7K29QXM":{"ok":true}} answering a lookup of A7K29QXM) reads the
+// request back, as a field holding it whole does; keploy cannot name a key
+// to the adapter, so the word is refused, never learned fresh with that
+// key served as recorded (main refuses it: http learn_test.go:2367). A key
+// that only holds the request inside a longer text is served as recorded,
+// as such a field is.
+func TestOutcomeAnAnswerKeyThatIsTheRequestsWholeTextIsRefused(t *testing.T) {
+	call := func(keys string) Decision {
+		in := oInput("body.id", "A7K29QXM", "Zq81Lm0X", nil, nil)
+		in.PlaceOf = func(l Leaf, answer bool) (string, bool) { return VarPlace(l, true) }
+		in.Resp = []Leaf{{Path: "body{keys}", Type: Keys, Value: keys, Unnamed: true}, {Path: "body.ok", Noise: "body.ok", Type: Bool, Value: "true"}}
+		return oWord(t, Decide(in), "A7K29QXM", "Zq81Lm0X")
+	}
+	oRefused(t, "an answer key that is the request's whole text", call("A7K29QXM\nok"), RefusalCannotCheck, "body{keys}")
+	if d := call("A7K29QXM-meta\nok"); d.Outcome != OutcomeFresh || len(d.Echo) > 0 {
+		t.Errorf("an answer key holding the request inside a longer text: %s, echo %v; want fresh, served as recorded", oDescribe([]Decision{d}), d.Echo)
 	}
 }
