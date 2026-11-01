@@ -113,7 +113,9 @@ func TestAPollsLookBackCutToTheSecondIsTheCallsClockCheckedAtTheCut(t *testing.T
 // A look-back of an application that cuts its read to a minute and then
 // subtracts 103 s, written in seconds (cut_m(now) - 103s), whose two runs
 // read at different phases of their minutes, so no offset at the values'
-// own second holds both, is read at the minute its two values stand a
+// own second holds both (or one does, of no whole second: reads 700 ms
+// apart in their minutes, 7.5 s and 8.2 s), is read at the minute its two
+// values stand a
 // whole number of apart and locked to the remainder both share within it:
 // clock - 1m43s, read cut to a minute. A replay passes the application's
 // value at every phase of the minute, and fails at every phase a dropped
@@ -126,7 +128,7 @@ func TestAMinuteCutLookBackLearnedAtItsStepIsLockedToItsPhase(t *testing.T) {
 	p := "body.lastSeen.$lte"
 	base := time.Date(2026, 10, 26, 11, 14, 0, 0, time.UTC)
 	learned := 0
-	for _, ph := range []struct{ r, f time.Duration }{{7 * sec, 21 * sec}, {50 * sec, 3 * sec}, {31*sec + 500*ms, 33 * sec}} {
+	for _, ph := range []struct{ r, f time.Duration }{{7 * sec, 21 * sec}, {50 * sec, 3 * sec}, {31*sec + 500*ms, 33 * sec}, {7*sec + 500*ms, 8*sec + 200*ms}} {
 		rec := v5Call(base.Add(ph.r), 61*ms, 20*ms)
 		f := v5Call(base.Add(3*min+ph.f), 61*ms, 20*ms)
 		rv, lv := cutter(rec.read), cutter(f.read)
@@ -149,13 +151,22 @@ func TestAMinuteCutLookBackLearnedAtItsStepIsLockedToItsPhase(t *testing.T) {
 				{"a dropped look-back", read.Truncate(sec), false},
 				{"half a minute shorter", cutter(read).Add(30 * sec), false},
 				{"half a minute longer", cutter(read).Add(-30 * sec), false},
+				{"a second shorter", cutter(read).Add(sec), false},
+				{"a second longer", cutter(read).Add(-sec), false},
 			} {
 				if got, why := v5Check(p, o, recText, row.at, s); got != row.want {
 					t.Errorf("%s: phases %v, a replay %s into its minute, %s: %v (%s)", map[bool]string{true: "FALSE RED", false: "FALSE GREEN"}[row.want], ph, phase, row.name, got, why)
 				}
 			}
 		}
-		for _, part := range []string{"read cut to 1m0s before the offset", "A replay passes a value only where it is a whole 1m of its call's window", "a look-back dropped, or changed by part of 1m, fails at every read", "a false red, never a false green"} {
+		// A replay whose read fell 500 ms before its window, in the minute
+		// before the one its window starts 300 ms into: within one Res of
+		// the window, its value passes.
+		s := Span{From: base.Add(48*time.Hour + min + 300*ms), To: base.Add(48*time.Hour + min + 361*ms)}
+		if got, why := v5Check(p, o, recText, cutter(s.From.Add(-500*ms)), s); !got {
+			t.Errorf("FALSE RED: phases %v, a read 500 ms before a window that starts 300 ms into its minute: %s", ph, why)
+		}
+		for _, part := range []string{"read cut to 1m0s before the offset", "A replay passes a value only where it is a whole 1m of its call's window", "a look-back dropped, or changed by part of 1m, fails at every read", "fails a replay wherever its value's remainder within 1m moves (a false red), and passes one where that remainder lands on the learned one, about one read in 60, whatever its look-back"} {
 			if !strings.Contains(o.Why, part) {
 				t.Errorf("the line does not say %q: %s", part, o.Why)
 			}
@@ -192,6 +203,7 @@ func TestATimeToLiveAddedToAnEarlyReadIsCheckedFromItsTestsBegin(t *testing.T) {
 		step5, step7 bool
 	}{
 		{"waits within a second (step 5)", 3200 * ms, 2900 * ms, true, false},
+		{"waits equal, its call's window showing a whole second (step 5)", 3 * sec, 3 * sec, true, false},
 		{"waits 2.7 s apart (step 7)", 3200 * ms, 5900 * ms, false, true},
 	} {
 		rs, rr := run(call, c.recW)
@@ -422,5 +434,173 @@ func TestAMillisecondsSecondCutterIsLockedToItsPhaseOrRefused(t *testing.T) {
 	t.Logf("cut_s(now) - 1500ms: %d of 100 recordings refused, %d locked to their phase", refused, locked)
 	if refused == 0 || locked == 0 {
 		t.Errorf("bands: %d refused, %d locked; want both", refused, locked)
+	}
+}
+
+// api-server's TestStaffBlockAnOAuthClient: an OAuth grant's expires_at =
+// now + 30d, a millisecond $date the application does not cut, whose two
+// values stand a whole number of seconds apart by chance (1m49s), is
+// learned at the second (clock + 30d, from 719h59m59.999s to 720h0m1.001s)
+// and its line says exactly what a replay passes: a read in its call's
+// window plus an offset from one second below Min to one second above Max
+// passes at every read (a time to live changed by a second less, or two
+// more), one up to one more second and the window's width below that or
+// the window's width above it only at some reads, and one further out at
+// no read (a time to live changed by three seconds, or a day). Before, the
+// line said only that one changed by a day or more fails.
+func TestAnOAuthGrantsThirtyDaysLineSaysWhatAReplayPasses(t *testing.T) {
+	const p = "body.docs.msgs.{}.expires_at"
+	ms, sec, day := time.Millisecond, time.Second, 24*time.Hour
+	call := time.Date(2026, 10, 30, 19, 44, 12, 155e6, time.UTC)
+	read := call.Add(-ms)
+	fread := read.Add(109 * sec)
+	w := (&Window{Rec: Span{From: call.Add(-2 * ms), To: call}, F: Span{From: fread.Add(-ms), To: fread.Add(ms)}}).ComparesOffsets()
+	o, why, ok := clockInWindow(p, v5Instant(read.Add(30*day), ms), v5Instant(fread.Add(30*day), ms), w, nil)
+	if !ok || why != "" || o.Min != 30*day-ms || o.Max != 30*day+sec+ms || o.Res != sec {
+		t.Fatalf("FALSE RED: %+v %q %v; want clock + 30d from 719h59m59.999s to 720h0m1.001s at the second", o, why, ok)
+	}
+	for _, part := range []string{
+		"A replay checks a value written as recorded at 1s: it passes one from one 1s before the start of the 1s that holds its call's window's start plus 719h59m59.999s up to one 1s after the window's end plus 720h0m1.001s.",
+		"So a read in that window plus an offset from 719h59m58.999s to 720h0m2.001s passes at every read; plus an offset from one 1s and the window's width below 719h59m58.999s up to it, or from 720h0m2.001s up to the window's width above it, only where the read falls late or early enough in the window and its 1s; and plus any other offset (a time to live changed by more) at no read",
+	} {
+		if !strings.Contains(o.Why, part) {
+			t.Errorf("the line does not say %q: %s", part, o.Why)
+		}
+	}
+	if strings.Contains(o.Why, "a day or more fails") {
+		t.Errorf("the line still says only that a day or more fails: %s", o.Why)
+	}
+	every, some := [2]time.Duration{o.Min - o.Res, o.Max + o.Res}, [2]time.Duration{o.Min - 2*o.Res, o.Max + o.Res}
+	for _, width := range []time.Duration{2 * ms, 50 * ms, 400 * ms} {
+		passes := map[time.Duration]int{}
+		phases := 0
+		for phase := time.Duration(0); phase < sec; phase += 10 * ms {
+			from := time.Date(2026, 11, 2, 9, 0, 7, 0, time.UTC).Add(phase)
+			to := from.Add(width)
+			phases++
+			for d := 30*day - 3*sec; d <= 30*day+3*sec; d += 250 * ms {
+				for _, r := range []time.Time{from, from.Add(width / 2), to} {
+					got := o.Holds(r.Add(d).Truncate(ms), ms, from, to)
+					switch {
+					case d >= every[0] && d <= every[1] && !got:
+						t.Errorf("FALSE RED against the line: window %s, %s into its second, a read %s into it plus %s fails", width, phase, r.Sub(from), d)
+					case (d <= some[0]-width || d > some[1]+width) && got:
+						t.Errorf("FALSE GREEN against the line: window %s, %s into its second, a read %s into it plus %s passes", width, phase, r.Sub(from), d)
+					}
+					if got && r.Equal(to) {
+						passes[d-30*day]++
+					}
+				}
+			}
+		}
+		// The time to live as review measured it, the read at the window's end.
+		if passes[2*sec] != phases || passes[-sec] != phases || passes[3*sec] != 0 || passes[-3*sec] != 0 {
+			t.Errorf("window %s: of %d phases, a time to live changed by +2s passes %d, -1s %d, +3s %d, -3s %d; want all, all, none, none", width, phases, passes[2*sec], passes[-sec], passes[3*sec], passes[-3*sec])
+		}
+	}
+}
+
+// A look-back of an application that does not cut (lastSeen <= now - 90s,
+// or - 75s, an epoch's seconds) whose read was made before its call's
+// window, 100 ms before it in the recording and 1.5 s in record's full
+// round (or 300 ms and 900 ms), and whose two values stand a whole minute
+// apart by chance (about one recording in sixty). Where an offset at the
+// values' own second holds both runs it is read there: the application's
+// value passes at every replay read, and a dropped look-back, or one
+// changed by half a minute, at none. Else it is read at the minute and
+// locked to the remainder both runs share within it: the application's
+// value passes at a replay whose read keeps that remainder and fails
+// where it moves (a false red), and any value, a dropped look-back too,
+// passes only where its remainder lands on the learned one (a read in
+// sixty), never at every read; the line states both. An earlier reading
+// at the step passed a dropped look-back at 70 to 100 % of reads, and
+// main's reading refuses every such recording. Values that both show :00
+// (one such recording in sixty) read as a minute's cut, whose line states
+// that a look-back changed by a minute passes at every read.
+func TestAnEarlyReadLookBackOfAWriterThatDoesNotCutNeverPassesADroppedLookBack(t *testing.T) {
+	sec, ms, min := time.Second, time.Millisecond, time.Minute
+	const p = "body.lastSeen.$lte"
+	base := time.Date(2026, 10, 26, 11, 14, 0, 0, time.UTC)
+	for _, back := range []time.Duration{75 * sec, 90 * sec} {
+		for _, waits := range [][2]time.Duration{{100 * ms, 1500 * ms}, {300 * ms, 900 * ms}} {
+			kinds := map[string]int{}
+			falseRed, replays := 0, 0
+			for k := 0; k < 44; k++ {
+				rread := base.Add(time.Duration(k) * 1370 * ms)
+				fread := rread.Truncate(sec).Add(3*min + time.Duration(k*37%1000)*ms)
+				rec, f := v5Call(rread.Add(waits[0]), 61*ms, waits[0]), v5Call(fread.Add(waits[1]), 61*ms, waits[1])
+				rv, lv := rread.Truncate(sec).Add(-back), fread.Truncate(sec).Add(-back)
+				o, why, ok := clockInWindow(p, v5Instant(rv, sec), v5Instant(lv, sec), v5Window(rec, f), nil)
+				switch {
+				case !ok:
+					kinds["refused or none"]++
+					continue
+				case o.Step == min && o.Res == min:
+					kinds["both at :00, at the minute's cut"]++
+					if rv.Second() != 0 || !strings.Contains(o.Why, "a look-back changed by one minute passes there at every read") {
+						t.Errorf("back %s, waits %v, k %d: %+v at a minute's cut: %s", back, waits, k, o, o.Why)
+					}
+					continue
+				case o.Step == sec && o.Res == sec:
+					kinds["at its own second"]++
+				case o.Step == min && o.Res == sec:
+					kinds["locked to its phase"]++
+					if !strings.Contains(o.Why, "an application that does not cut and wrote these two values by chance fails a replay wherever its value's remainder within 1m moves (a false red), and passes one where that remainder lands on the learned one, about one read in 60, whatever its look-back") {
+						t.Errorf("the line does not state what a replay of an application that does not cut passes: %s", o.Why)
+					}
+				default:
+					t.Errorf("back %s, waits %v, k %d: %+v %q", back, waits, k, o, why)
+					continue
+				}
+				recText := strconv.FormatInt(rv.Unix(), 10)
+				// Replays three days later keep each run's remainder.
+				for i, run := range []v5Read{rec, f} {
+					s := Span{From: run.from.Add(72 * time.Hour), To: run.to.Add(72 * time.Hour)}
+					if got, why := v5Check(p, o, recText, run.read.Add(72*time.Hour).Truncate(sec).Add(-back), s); !got {
+						t.Errorf("FALSE RED: back %s, waits %v, k %d (%+v): a replay that keeps run %d's remainder fails: %s", back, waits, k, o, i, why)
+					}
+				}
+				// Replays at every second of the minute, with either run's wait.
+				greens, n := map[string]int{}, 0
+				for phase := time.Duration(0); phase < min; phase += sec + 10*ms {
+					for _, wait := range waits {
+						call := base.Add(72*time.Hour + phase)
+						s := Span{From: call.Add(-61 * ms), To: call}
+						read := call.Add(-wait).Truncate(sec)
+						n++
+						for _, row := range []struct {
+							name string
+							at   time.Time
+						}{
+							{"a dropped look-back", read},
+							{"half a minute shorter", read.Add(-back + 30*sec)},
+							{"half a minute longer", read.Add(-back - 30*sec)},
+						} {
+							if got, _ := v5Check(p, o, recText, row.at, s); got {
+								greens[row.name]++
+							}
+						}
+						if got, _ := v5Check(p, o, recText, read.Add(-back), s); !got {
+							greens["the application's value fails"]++
+						}
+					}
+				}
+				replays += n
+				falseRed += greens["the application's value fails"]
+				for name, g := range greens {
+					switch {
+					case name == "the application's value fails" && o.Step == sec && g > 0:
+						t.Errorf("FALSE RED: back %s, waits %v, k %d (%+v): the application's value fails %d of %d replays", back, waits, k, o, g, n)
+					case name == "the application's value fails":
+					case o.Step == sec && g > 0, 20*g > n:
+						t.Errorf("FALSE GREEN: back %s, waits %v, k %d (%+v): %s passes %d of %d replays", back, waits, k, o, name, g, n)
+					}
+				}
+			}
+			if kinds["at its own second"] == 0 && kinds["locked to its phase"] == 0 {
+				t.Errorf("back %s, waits %v: nothing learned (%v)", back, waits, kinds)
+			}
+			t.Logf("back %s, waits %v: %v; the application's value fails %d of %d replays (the stated false red of a phase lock)", back, waits, kinds, falseRed, replays)
+		}
 	}
 }
