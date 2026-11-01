@@ -6,12 +6,15 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.uber.org/zap"
 )
 
 // keepingDoors are the doors that keep the recording they consume in the
 // trees: MarkMockAsUsed (enterprise Redis and Aerospike consume a data-plane
 // recording through no other door) and UpdateUnFilteredMock (a reusable-tier
-// recording's, in HTTP, MySQL and Mongo).
+// recording's, in HTTP, MySQL and Mongo; keploy's Generic parser consumes
+// every recording through it, TestAPoolExchangeTheGenericParserServesAnswersOnce).
 var keepingDoors = map[string]func(mm *MockManager, m *models.Mock) bool{
 	"MarkMockAsUsed": func(mm *MockManager, m *models.Mock) bool { return mm.MarkMockAsUsed(*m) },
 	"UpdateUnFilteredMock": func(mm *MockManager, m *models.Mock) bool {
@@ -197,4 +200,53 @@ func TestTheMarkingDoorSpendsOnlyTheBackgroundsDataPlanePool(t *testing.T) {
 			}
 		}
 	})
+}
+
+// keploy's Generic parser consumes every recording, filtered or not, only
+// through UpdateUnFilteredMock, a door that keeps it in the trees. Under the
+// background rules one data-plane exchange in the pool (stated per-test, as
+// the recorder writes a connection's later exchanges) that no test owns
+// answers one identical exchange in the staging, in a test and between
+// tests; the next two miss. Before, it answered all three.
+func TestAPoolExchangeTheGenericParserServesAnswersOnce(t *testing.T) {
+	for _, inTest := range []bool{true, false} {
+		name := "between tests"
+		if inTest {
+			name = "in a test"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, "1")
+			now := time.Now()
+			start := now.Add(time.Second)
+			perTest := func() map[string]string {
+				return map[string]string{"type": "config", models.MetadataLifetimeKey: models.MetadataLifetimePerTest}
+			}
+			pool := ownRepeatExchange("mock-pool-info", "INFO", "INF0", now)
+			pool.Spec.Metadata = perTest()
+			own := ownRepeatExchange("mock-own-ping", "PING", "OWN1", start.Add(100*time.Millisecond))
+			own.Spec.Metadata = perTest()
+			mm := NewMockManager(nil, nil, zap.NewNop())
+			t.Cleanup(mm.Close)
+			mm.SeedRecordedWindows([]models.TestWindow{{TestCase: "test-0", Start: start, End: start.Add(900 * time.Millisecond)}})
+			mm.SetMocksWithWindow([]*models.Mock{own}, []*models.Mock{pool}, models.BaseTime, now.Add(time.Hour))
+			poolNames := []string{pool.Name}
+			mm.ServeExactBackground(models.RecordedWithS12Routing, poolNames, nil)
+			mm.ServeExactPool(models.PoolKeyNone, poolNames)
+			if inTest {
+				mm.ServeExactTest("test-0", []*models.Mock{roundMock(mm, own.Name)})
+			}
+			if pool.IsProtocolPhase() || !mm.ExactServing() {
+				t.Fatalf("the staging is not a data-plane pool exchange served exactly: protocol-phase %v, exact %v", pool.IsProtocolPhase(), mm.ExactServing())
+			}
+			if got, _ := genericCall(t, mm, "INFO"); got != "INF0" {
+				t.Fatalf("the pool's exchange did not answer the first INFO: %q", got)
+			}
+			for call := 2; call <= 3; call++ {
+				if got, _ := genericCall(t, mm, "INFO"); got != "" {
+					t.Fatalf("call %d of the exchange the pool holds once was answered by the pool (%q); want a miss", call, got)
+				}
+			}
+			equalNames(t, "the spent background", mm.SpentBackground(models.GENERIC), pool.Name)
+		})
+	}
 }
