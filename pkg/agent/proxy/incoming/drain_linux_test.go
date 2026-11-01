@@ -185,6 +185,36 @@ func TestWhatADrainReadOutlivesTheConnsClose(t *testing.T) {
 		t.Fatalf("read past what the drain held: %v, want the close's error", err)
 	}
 
+	// A drain, and the close after it, can come in as the consumer goes
+	// from what the drain held, nothing, to the socket: its read of the
+	// socket fails on the close, and what the drain read is read next all
+	// the same.
+	app3, ingress3 := tcpPair(t)
+	d3 := newDrainConn(ingress3)
+	t.Cleanup(d3.release)
+	if _, err := io.WriteString(app3, answer); err != nil {
+		t.Fatal(err)
+	}
+	waitAcked(t, app3)
+	saved := socketReading
+	t.Cleanup(func() { socketReading = saved })
+	cameIn := false
+	socketReading = func() {
+		if cameIn {
+			return
+		}
+		cameIn = true
+		d3.drain()
+		_ = ingress3.Close()
+	}
+	n, err = d3.Read(got)
+	if !cameIn || err != nil || string(got[:n]) != answer {
+		t.Fatalf("read %q, %v once a drain and the close came in before the socket's read (came in: %v); want %q", got[:n], err, cameIn, answer)
+	}
+	if _, err := d3.Read(got); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("read past what the drain held: %v, want the close's error", err)
+	}
+
 	// Not read: given back at the release.
 	app2, ingress2 := tcpPair(t)
 	d2 := newDrainConn(ingress2)

@@ -47,18 +47,25 @@ import (
 // client resets its connection: the watch closes the app's connection (an
 // app is told of a reset by a close), and what its socket held unread would
 // be lost with it, but the drain has read it first.
+//
+// And a client the ingress does not watch: it sent its next request with the
+// first, so the ingress holds that one read as it forwards the first
+// (watchClient). Its going is seen only as the forward fails, and nothing has
+// read the app's side then: the ingress drains it before it reads on, so the
+// answer the app's send queue held is read whole there too.
 func TestAnAnswerThatArrivedWholeIsRecordedThoughItsForwardFails(t *testing.T) {
 	type answerCase struct {
 		size int
 		// queued: the app's send queue still holds part of the answer as
 		// the client goes. reset: the client resets its connection.
-		queued, reset bool
+		// unwatched: the client sends a second request with the first.
+		queued, reset, unwatched bool
 	}
-	cases := []answerCase{{size: 8 << 10}, {size: 64 << 10}, {size: 512 << 10, queued: true}, {size: 64 << 10, reset: true}, {size: 512 << 10, queued: true, reset: true}}
+	cases := []answerCase{{size: 8 << 10}, {size: 64 << 10}, {size: 512 << 10, queued: true}, {size: 64 << 10, reset: true}, {size: 512 << 10, queued: true, reset: true}, {size: 512 << 10, queued: true, reset: true, unwatched: true}}
 	for _, synchronous := range []bool{false, true} {
 		for _, tc := range cases {
 			size := tc.size
-			t.Run(fmt.Sprintf("synchronous %v, %d KB, queued %v, reset %v", synchronous, size>>10, tc.queued, tc.reset), func(t *testing.T) {
+			t.Run(fmt.Sprintf("synchronous %v, %d KB, queued %v, reset %v, unwatched %v", synchronous, size>>10, tc.queued, tc.reset, tc.unwatched), func(t *testing.T) {
 				if tc.queued {
 					saved := aheadMax
 					aheadMax = 16 << 10
@@ -99,24 +106,25 @@ func TestAnAnswerThatArrivedWholeIsRecordedThoughItsForwardFails(t *testing.T) {
 				left := make(chan struct{})
 				var proxied net.Conn
 				holdBodyReads(t, func(nth int) {
-					switch nth {
-					case 0:
+					switch {
+					case nth == 0 && tc.unwatched:
+						// Nothing tells the app: the first write fails on
+						// the client's reset.
+						waitFor(t, "the client did not go", left)
+						waitReset(t, proxied)
+					case nth == 0:
 						waitFor(t, "the client did not go, or the app was not told of it", left, told)
-					case 1:
+					case nth == 1:
 						// The first write reached a closed client: its reset
 						// comes back, and the next write fails on it.
-						for tcpState(t, proxied) != tcpClose {
-							select {
-							case <-never(t):
-								t.Error("the client's reset never came back")
-								return
-							default:
-								runtime.Gosched()
-							}
-						}
+						waitReset(t, proxied)
 					}
 				})
-				pm, client, served, logs := serveOneGET(t, synchronous, appLn, &proxied)
+				gets := 1
+				if tc.unwatched {
+					gets = 2
+				}
+				pm, client, served, logs := serveGETs(t, synchronous, appLn, &proxied, gets)
 				readHeaders(t, bufio.NewReader(client))
 				waitFor(t, "the app's answer did not reach the ingress", sent, readAll)
 				if tc.queued && unsent.Load() == 0 {
@@ -365,6 +373,14 @@ func waitFor(t *testing.T, what string, chans ...chan struct{}) {
 // client's connection. The exchange's handler has returned by the test's end.
 func serveOneGET(t *testing.T, synchronous bool, appLn net.Listener, proxied *net.Conn) (pm *IngressProxyManager, client net.Conn, served <-chan struct{}, logs *observer.ObservedLogs) {
 	t.Helper()
+	return serveGETs(t, synchronous, appLn, proxied, 1)
+}
+
+// serveGETs is serveOneGET with n GETs sent in one write. Past the first, the
+// ingress holds the next read as it forwards the first, and so does not
+// watch the client (watchClient).
+func serveGETs(t *testing.T, synchronous bool, appLn net.Listener, proxied *net.Conn, n int) (pm *IngressProxyManager, client net.Conn, served <-chan struct{}, logs *observer.ObservedLogs) {
+	t.Helper()
 	mgr := syncMock.New(zap.NewNop())
 	mgr.SetFirstRequestSignaled()
 	t.Cleanup(mgr.AddWatermark(quietCapture{}))
@@ -381,7 +397,7 @@ func serveOneGET(t *testing.T, synchronous bool, appLn net.Listener, proxied *ne
 		_ = client.Close()
 		<-served
 	})
-	if _, err := client.Write([]byte("GET /whoami HTTP/1.1\r\nHost: api\r\n\r\n")); err != nil {
+	if _, err := client.Write([]byte(strings.Repeat("GET /whoami HTTP/1.1\r\nHost: api\r\n\r\n", n))); err != nil {
 		t.Fatal(err)
 	}
 	return pm, client, served, logs
@@ -496,6 +512,20 @@ func unsentBy(t *testing.T, conn net.Conn) int {
 
 // tcpClose is TCP_CLOSE, the state a socket is in once reset.
 const tcpClose = 7
+
+// waitReset waits until conn's socket is reset (tcpClose): a write on it
+// fails from then.
+func waitReset(t *testing.T, conn net.Conn) {
+	for tcpState(t, conn) != tcpClose {
+		select {
+		case <-never(t):
+			t.Error("the client's reset never came back")
+			return
+		default:
+			runtime.Gosched()
+		}
+	}
+}
 
 // tcpState is the TCP state of conn's socket (TCP_INFO).
 func tcpState(t *testing.T, conn net.Conn) uint8 {

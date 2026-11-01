@@ -59,6 +59,11 @@ type drainConn struct {
 // lower it). The read-aheads' bound in all (aheadMaxInAll) holds too.
 var drainMax int64 = 1 << 20
 
+// socketReading, when set (tests only), runs as a Read goes to the socket,
+// having found nothing the drain held: the instant a drain and the socket's
+// close can come in before the socket's read.
+var socketReading func()
+
 // newDrainConn wraps conn, the ingress's new connection to the app, before
 // anything is read of it.
 func newDrainConn(conn net.Conn) *drainConn {
@@ -149,6 +154,9 @@ func (d *drainConn) Read(p []byte) (int, error) {
 	}
 	if n, err, ok := d.takeHeld(p); ok {
 		return n, err
+	}
+	if socketReading != nil {
+		socketReading()
 	}
 	var n int
 	var err error
