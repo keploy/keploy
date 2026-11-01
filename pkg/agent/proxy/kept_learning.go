@@ -187,9 +187,11 @@ func (m *MockManager) learnedAfterEndAt(found, caller *models.Mock) bool {
 // noise path and variable caller carries reads as learned beyond it (fail
 // closed: its consumers get no verdict, never a pass through what nothing
 // keeps), said in a Warn naming the recording, once a staging per name
-// (warnUnstaged). A door that took the value out of its tree passes it
-// instead (learnedAfterEndAt): the staging's values may be read after the
-// take.
+// (warnUnstaged). nil too when a staging starts its epoch between building
+// the outside answers and reading them: there is no base to read against
+// then, said in its own Warn (warnStagingBegunUnder). A door that took the
+// value out of its tree passes it instead (learnedAfterEndAt): the staging's
+// values may be read after the take.
 func (m *MockManager) servedAsNamed(caller *models.Mock) *models.Mock {
 	m.prepareOutside()
 	if f := m.exact.outside.onPrepared; f != nil {
@@ -197,7 +199,7 @@ func (m *MockManager) servedAsNamed(caller *models.Mock) *models.Mock {
 	}
 	st := m.outsideNow()
 	if st == nil {
-		m.warnUnstaged(caller.Name)
+		m.warnStagingBegunUnder(caller.Name)
 		return nil
 	}
 	return m.servedAsIn(st, caller)
@@ -232,6 +234,19 @@ func (m *MockManager) warnUnstaged(name string) {
 		return
 	}
 	m.logger.Warn("a parser consumed a recording the test set's staging does not hold after the set's learn step ended, so keploy reads every noise path and variable it carries as learned then, and the tests that consumed it have no verdict",
+		zap.String("mock", name))
+}
+
+// warnStagingBegunUnder says that a new staging began while keploy read the
+// staged base of name, a recording a parser consumed after the set's learn
+// step ended: with no base to read its copy against, everything the copy
+// carries is read as learned then (servedAsNamed). The recording may well be
+// staged; the staging moved under the read.
+func (m *MockManager) warnStagingBegunUnder(name string) {
+	if m.logger == nil {
+		return
+	}
+	m.logger.Warn("a new staging began while keploy read the staged recording a parser consumed after the test set's learn step ended, so keploy has no base to read its copy against: it reads every noise path and variable the copy carries as learned then, and the tests that consumed it have no verdict",
 		zap.String("mock", name))
 }
 
