@@ -49,6 +49,12 @@ type decider struct {
 // decision is of; allScope reads every earlier place of the run as the
 // call's scope (Mode Elsewhere).
 func decideWords(in Input, allScope bool) ([]Decision, []string) {
+	// An exchange served leaf by leaf whose request was recorded after the
+	// call gave the recorded application nothing before it: it is read as a
+	// recording F gave before the call, outside the call's own test, so only
+	// what F served there counts, never its leaves as a place both runs
+	// were given (main's leafedAfterCall).
+	in.Earlier, in.Raw = leafedAfterCall(in.Earlier, in.Raw, in.At)
 	ps, unread := placesOf(in)
 	set, setUnread := setUnread(in)
 	if unread == "" {
