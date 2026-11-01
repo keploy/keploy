@@ -1129,3 +1129,45 @@ func TestOutcomeAClockLineNamesThePlaceSetAside(t *testing.T) {
 		t.Errorf("the clock line %q; want it to name mock-645, set aside", d.Line)
 	}
 }
+
+// An app's createdAt in seconds, read when the app was made, beside an
+// earlier send of its test that holds the same second: a PUT's lastUsedAt,
+// seconds with a fraction, which its own call learned as its read of the
+// clock. The two share a second only when the runs' timing puts them in one,
+// so a copy bound there flips with load: at a millisecond or coarser, a send
+// that is itself a read of the clock is no copy's source, and the value is
+// read as the clock, here since the test began. A send its call did not
+// learn as a read of the clock stays the copy's source, and so does a clock
+// read at a cut finer than a millisecond, which no second shares by chance.
+func TestOutcomeACoarseCopyOfAClockReadIsAClock(t *testing.T) {
+	const p = "body.docs.msgs.0.app.createdAt"
+	secs := func(t time.Time) string { return strconv.FormatInt(t.Unix(), 10) }
+	frac := func(t time.Time) string { return secs(t) + "." + fmt.Sprintf("%06d", t.Nanosecond()/1000) }
+	r0, f0 := oAt.Add(6300*time.Millisecond), oAt.Add(61*time.Second+14800*time.Millisecond)
+	rAt, fAt := r0.Add(900*time.Millisecond), f0.Add(1400*time.Millisecond)
+	w := iWin(rAt, fAt, 100*time.Millisecond)
+	w.Rec.Began, w.F.Began = r0, f0
+	rec, live := secs(r0.Add(100*time.Millisecond)), secs(f0.Add(150*time.Millisecond))
+	call := func(put Earlier) Input {
+		in := iCall(p, Number, rec, live, rAt, fAt, w, []Earlier{put}, nil)
+		in.Drifts = oClientDrifts()
+		return in
+	}
+	put := iSent("mock-204", rAt.Add(-500*time.Millisecond), "body.data.lastUsedAt", Number, frac(r0.Add(120*time.Millisecond)), frac(f0.Add(170*time.Millisecond)))
+	put.Seen[0].Clock = true
+	d := oWord(t, Decide(call(put)), rec, live)
+	iClock(t, "a second shared with a send that is its own read of the clock", d)
+	if d.Clock != nil && d.Clock.Since != models.SinceTestBegin {
+		t.Errorf("%+v; want a read since the test began", *d.Clock)
+	}
+	put.Seen[0].Clock = false
+	iValue(t, "a second shared with a send that is no read of the clock", oWord(t, Decide(call(put)), rec, live), "mock-204")
+
+	const q = "body.docs.msgs.0.app.createdAtNanos"
+	nr, nf := iEpochNs(r0.Add(100*time.Millisecond+7)), iEpochNs(f0.Add(150*time.Millisecond+9))
+	fine := iSent("mock-204", rAt.Add(-500*time.Millisecond), "body.data.lastUsedAtNanos", Number, nr, nf)
+	fine.Seen[0].Clock = true
+	in := iCall(q, Number, nr, nf, rAt, fAt, w, []Earlier{fine}, nil)
+	in.Drifts = oClientDrifts()
+	iValue(t, "a nanosecond sent by an earlier read of the clock", oWord(t, Decide(in), nr, nf), "mock-204")
+}
