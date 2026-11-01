@@ -1857,10 +1857,38 @@ func (t *Tracker) CallWindow(paired *models.Mock, recorded []*models.Mock, arriv
 // where the clock's run began after it where the hooks tell that
 // (SetAppClockRun).
 func (t *Tracker) CallWindowFrom(prevRec time.Time, paired *models.Mock, arrival time.Time) *Window {
-	if t == nil || paired == nil || paired.Spec.ReqTimestampMock.IsZero() {
+	if t == nil {
 		return nil
 	}
 	lc, recBegan := t.liveClockAt(arrival)
+	return lc.window(prevRec, recBegan, paired, arrival)
+}
+
+// CallWindowIn is CallWindowFrom with the recording's half of a client
+// test's window bounded by recBegan, the recorded begin of the test whose
+// recorded window paired lies in, instead of the running test's: a
+// recording another test made (a timer's call recorded in an earlier test's
+// window, which a call of the running test pairs with) read the clock in
+// that test's run of it, which that test's begin moved the clock to, and
+// the running test's recorded begin, after the recording, bounds no span
+// of it (CallWindowFrom has none there). Zero recBegan is none given, as a
+// test begun with no recorded begin. keploy test reads no recorded begin,
+// so its window is CallWindowFrom's.
+func (t *Tracker) CallWindowIn(prevRec, recBegan time.Time, paired *models.Mock, arrival time.Time) *Window {
+	if t == nil {
+		return nil
+	}
+	lc, _ := t.liveClockAt(arrival)
+	return lc.window(prevRec, recBegan, paired, arrival)
+}
+
+// window is the window of the call that reached keploy at arrival, paired
+// with paired, with the recording's half bounded by prevRec and, in a client
+// test, by recBegan (CallWindowFrom).
+func (lc liveClock) window(prevRec, recBegan time.Time, paired *models.Mock, arrival time.Time) *Window {
+	if paired == nil || paired.Spec.ReqTimestampMock.IsZero() {
+		return nil
+	}
 	recFrom := prevRec
 	if lc.client && recBegan.After(recFrom) {
 		recFrom = recBegan

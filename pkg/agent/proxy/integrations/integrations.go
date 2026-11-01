@@ -938,6 +938,21 @@ type RecordedTests interface {
 	BeforeTestWindow(t time.Time) (before, known bool)
 }
 
+// RecordedTestBegins is an optional TestWindows capability: where the
+// recorded test whose window a recording lies in began. In keploy mock's
+// client tests, whose begin moves the application's clock, a learn step reads
+// the clock reads of a recording another test made (a timer's call recorded
+// in an earlier test's window) from that test's recorded begin
+// (learn.Tracker.CallWindowIn), never from the running test's.
+type RecordedTestBegins interface {
+	// RecordedTestBegan is the start of the recorded test window t lies in
+	// (the test case's recorded begin, or its first recording where it
+	// carries none); ok is false where t is zero or inside none, the replay
+	// sent none, or the window carries no test's name (windows that overlap
+	// are one window named by no test).
+	RecordedTestBegan(t time.Time) (began time.Time, ok bool)
+}
+
 // TestWindows is an optional MockMemDb capability: where the request time of
 // a recorded mock falls among the replay's test windows. The learn step tells
 // the open test's own mocks, the pool's and other tests' apart by it where

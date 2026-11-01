@@ -537,6 +537,23 @@ func (s RoundSnapshot) RecordedTestAt(t time.Time) string {
 	return ""
 }
 
+// RecordedTestBegan implements RecordedTestBegins: the start of the
+// staging's recorded test window t lies in (the earliest-starting one, as
+// RecordedTestAt reads it), where that window names a test.
+func (s RoundSnapshot) RecordedTestBegan(t time.Time) (time.Time, bool) {
+	if s.windows.Len() == 0 || t.IsZero() {
+		return time.Time{}, false
+	}
+	if i := s.windows.IndexOf(t); i >= 0 {
+		if w := s.windows.Window(i); w.TestCase != "" {
+			return w.Start, true
+		}
+	}
+	return time.Time{}, false
+}
+
+var _ RecordedTestBegins = RoundSnapshot{}
+
 // BeforeTestWindow implements RecordedTests: t is before the start of the
 // recorded window of the view's test (the staging's recorded windows, by test
 // case), else of the test window the snapshot read.
