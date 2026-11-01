@@ -120,8 +120,9 @@ func TestAPollsLookBackCutToTheSecondIsTheCallsClockCheckedAtTheCut(t *testing.T
 // clock - 1m43s, read cut to a minute. A replay passes the application's
 // value at every phase of the minute, and fails at every phase a dropped
 // look-back (the read cut to the second) and one changed by half a minute
-// either way. Main's reading learns it as a whole minute's offset, which a
-// dropped look-back passes.
+// either way; a value a whole minute stale fails except where the window
+// starts in its minute's first second (one Res of slack). Main's reading
+// learns it as a whole minute's offset, which a dropped look-back passes.
 func TestAMinuteCutLookBackLearnedAtItsStepIsLockedToItsPhase(t *testing.T) {
 	sec, ms, min := time.Second, time.Millisecond, time.Minute
 	cutter := func(t time.Time) time.Time { return t.Truncate(min).Add(-103 * sec) }
@@ -153,6 +154,10 @@ func TestAMinuteCutLookBackLearnedAtItsStepIsLockedToItsPhase(t *testing.T) {
 				{"half a minute longer", cutter(read).Add(-30 * sec), false},
 				{"a second shorter", cutter(read).Add(sec), false},
 				{"a second longer", cutter(read).Add(-sec), false},
+				// A minute stale is the cut of a read a minute before:
+				// within one Res of the window only where it starts in
+				// its minute's first second.
+				{"a whole minute stale", cutter(read).Add(-min), phase < sec},
 			} {
 				if got, why := v5Check(p, o, recText, row.at, s); got != row.want {
 					t.Errorf("%s: phases %v, a replay %s into its minute, %s: %v (%s)", map[bool]string{true: "FALSE RED", false: "FALSE GREEN"}[row.want], ph, phase, row.name, got, why)
