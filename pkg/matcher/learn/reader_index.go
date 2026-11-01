@@ -1,9 +1,6 @@
 package learn
 
-import (
-	"hash/maphash"
-	"strings"
-)
+import "hash/maphash"
 
 // The reader's index (DESIGN §1, M5): what the places before a call hold
 // of its changed words, read lazily, per changed word, for one Decide call.
@@ -12,7 +9,9 @@ import (
 // reading), and kept for the call within readerBudget bytes. A text past
 // the budget is not read: the index says so (unread), and the caller
 // refuses every change of the call (New 1), never binding a source it found
-// before the budget ran out.
+// before the budget ran out. A place that is a recording keeps its handle
+// (textOf), never its text: the text is read from the set's store of
+// payloads only for a question the index has not answered yet.
 
 // readerBudget, where a row sets it (>0), is the bytes one call's index
 // keeps; 0 in keploy itself: a quarter of the set's budget (setBudget,
@@ -30,7 +29,7 @@ func readerBudgetBytes() int64 {
 
 // readerIndex is one Decide call's index: what it kept of each text asked
 // about, by the text's hash, the bytes that takes, and how many reads it
-// left undone past the budget.
+// left undone: past the budget, or of a recording keploy could not read.
 type readerIndex struct {
 	dc           *DriftCache
 	budget, used int64
@@ -39,31 +38,42 @@ type readerIndex struct {
 	unreadTexts  int
 }
 
-// readerEntry is what the index keeps of one text: its words and instants,
-// each once read within the budget, and then the text itself (counted in
-// the budget) to tell it from another text of its hash. A text that lay past
-// the budget keeps no byte of itself, only that it did, so a call that asks
-// about many large recordings holds at once only what fits the budget: the
-// caller's handle holds the text while it asks, and nothing here holds it
-// after. A later text of the same hash and length is read as that one
+// readerEntry is what the index keeps of one text: its words, its base64
+// runs and its instants, each once read within the budget, and then the
+// text itself (counted in the budget once) to tell it from another text of
+// its hash. A text that lay past the budget keeps no byte of itself, only
+// that it did, so a call that asks about many large recordings holds at once
+// only what fits the budget: the caller's handle holds the text while it
+// asks (or, of a recording, reads it per question), and nothing here holds
+// it after. A later text of the same hash and length is read as that one
 // (unread, where it lay past: fail closed).
 type readerEntry struct {
-	n                       int
-	text                    string
-	tokens                  []map[string]bool
-	spans                   []instant
-	tokensAsked, spansAsked bool
+	n                                  int
+	text                               string
+	tokens                             []map[string]bool
+	runs                               map[string]bool
+	spans                              []instant
+	tokensAsked, runsAsked, spansAsked bool
+	// past: the text alone did not fit what was left of the budget.
+	past bool
 }
 
-// readerText is one text as a caller asks the index about it: the text,
-// which the caller holds while it asks, and the index's entry for it.
-// Finding it hashes the text, so a caller asks text once per place and
-// keeps the handle: a 498 KB answer hashed per word costs more than reading
-// it.
+// readerText is one text as a caller asks the index about it, and the
+// index's entry for it once found. The caller hands the text, which it holds
+// while it asks (text), or the recording that holds it (textOf), whose text
+// is read only for a question the entry has not answered yet, through the
+// set's bounded store of payloads, and let go once answered: a place keeps
+// the handle, never the text. Finding the entry hashes the text, so a caller
+// asks through one handle per place: a 498 KB answer hashed per word costs
+// more than reading it.
 type readerText struct {
 	x    *readerIndex
 	text string
-	e    *readerEntry
+	// raw is the recording the text is read from (textOf); nil where the
+	// caller handed the text. rawUnread: keploy could not read it.
+	raw       *Raw
+	rawUnread bool
+	e         *readerEntry
 }
 
 // newReaderIndex is an empty index for one call, reading through dc's
@@ -72,17 +82,52 @@ func newReaderIndex(dc *DriftCache) *readerIndex {
 	return &readerIndex{dc: dc, budget: readerBudgetBytes(), seed: maphash.MakeSeed(), texts: map[uint64][]*readerEntry{}}
 }
 
-// text is s as the index holds it, read lazily.
-func (x *readerIndex) text(s string) *readerText {
+// text is s as the index holds it, read lazily; the caller holds s while it
+// asks.
+func (x *readerIndex) text(s string) *readerText { return &readerText{x: x, text: s} }
+
+// textOf is r's text as the index holds it, read lazily from r (its
+// payload, through the set's store, for a lazy Raw) per question the index
+// has not answered: the handle holds r, never its text, and the index keeps
+// the text only within its budget. A recording keploy could not read
+// (Raw.Read) is unread.
+func (x *readerIndex) textOf(r Raw) *readerText { return &readerText{x: x, raw: &r} }
+
+// entryOf is s's entry: the one of its hash and length that keeps s, or
+// that lay past the budget; a new one where none does.
+func (x *readerIndex) entryOf(s string) *readerEntry {
 	h := maphash.String(x.seed, s)
 	for _, e := range x.texts[h] {
 		if e.n == len(s) && (e.text == s || e.text == "") {
-			return &readerText{x: x, text: s, e: e}
+			return e
 		}
 	}
 	e := &readerEntry{n: len(s)}
 	x.texts[h] = append(x.texts[h], e)
-	return &readerText{x: x, text: s, e: e}
+	return e
+}
+
+// read is the text, read now from its recording where the caller handed
+// one, with its entry found where t has none yet; ok false where the
+// recording was not read (counted unread).
+func (t *readerText) read() (string, bool) {
+	s := t.text
+	if t.raw != nil {
+		if t.rawUnread {
+			return "", false
+		}
+		b := t.raw.payload()
+		if !b.read {
+			t.rawUnread = true
+			t.x.unreadTexts++
+			return "", false
+		}
+		s = b.text
+	}
+	if t.e == nil {
+		t.e = t.x.entryOf(s)
+	}
+	return s, true
 }
 
 // fits reports whether n more bytes fit the budget, counting a read that
@@ -95,61 +140,115 @@ func (x *readerIndex) fits(n int64) bool {
 	return true
 }
 
-// keep counts n bytes read of t within the budget, the text's own among
-// them, and keeps the text to tell it by.
-func (t *readerText) keep(n int64) {
-	t.x.used += n
-	t.e.text = t.text
+// own is the bytes keeping s adds to e: its length, where e keeps no text
+// yet.
+func (e *readerEntry) own(s string) int64 {
+	if e.text == "" {
+		return int64(len(s))
+	}
+	return 0
+}
+
+// indexOnce reads, once for the call, what one kind of question asks of the
+// text (asked marks it asked): a text whose copy alone passes what is left
+// of the budget is not read (past: the budget only fills, so it is not read
+// again either, nor its recording loaded again); what of derives, and the
+// text kept to tell it by, are kept where they fit (true), and nothing is
+// kept where they do not (false, counted unread).
+func indexOnce[V any](t *readerText, asked func(*readerEntry) *bool, of func(string) V, size func(V) int64, set func(*readerEntry, V)) bool {
+	if t.e != nil && t.e.past {
+		t.x.unreadTexts++
+		return false
+	}
+	s, ok := t.read()
+	if !ok {
+		return false
+	}
+	e, x := t.e, t.x
+	if *asked(e) {
+		return true
+	}
+	*asked(e) = true
+	if !x.fits(e.own(s) + headerBytes) {
+		e.past = true
+		return false
+	}
+	v := of(s)
+	n := size(v) + e.own(s)
+	if !x.fits(n) {
+		return false
+	}
+	x.used += n
+	e.text = s
+	set(e, v)
+	return true
 }
 
 // tokensOf are the text's words in every declared form, by reading
 // (isWord, wordByte, idByte), read once for the call; ok false where they
-// lie past the budget. A text whose copy alone passes what is left is not
-// read at all.
+// lie past the budget.
 func (t *readerText) tokensOf() ([]map[string]bool, bool) {
-	e := t.e
-	if !e.tokensAsked {
-		e.tokensAsked = true
-		x := t.x
-		if !x.fits(int64(len(t.text)) + headerBytes) {
+	if t.e == nil || !t.e.tokensAsked {
+		if !indexOnce(t, func(e *readerEntry) *bool { return &e.tokensAsked }, t.x.dc.rawTokens, tokensBytes, func(e *readerEntry, v []map[string]bool) {
+			e.tokens = v
+			if e.tokens == nil {
+				e.tokens = []map[string]bool{}
+			}
+		}) {
 			return nil, false
-		}
-		tok := x.dc.rawTokens(t.text)
-		n := tokensBytes(tok) + int64(len(t.text))
-		if !x.fits(n) {
-			return nil, false
-		}
-		t.keep(n)
-		e.tokens = tok
-		if e.tokens == nil {
-			e.tokens = []map[string]bool{}
 		}
 	}
-	return e.tokens, e.tokens != nil
+	return t.e.tokens, t.e.tokens != nil
+}
+
+// runsOf are the text's base64 runs that stand whole (wholeB64Runs), read once
+// for the call; ok false where they lie past the budget.
+func (t *readerText) runsOf() (map[string]bool, bool) {
+	if t.e == nil || !t.e.runsAsked {
+		if !indexOnce(t, func(e *readerEntry) *bool { return &e.runsAsked }, wholeB64Runs, wordsBytes, func(e *readerEntry, v map[string]bool) { e.runs = v }) {
+			return nil, false
+		}
+	}
+	return t.e.runs, t.e.runs != nil
 }
 
 // spansOf are the text's instants (instantSpans), read once for the call;
 // ok false where they lie past the budget.
 func (t *readerText) spansOf() ([]instant, bool) {
-	e := t.e
-	if !e.spansAsked {
-		e.spansAsked = true
-		x := t.x
-		if !x.fits(int64(len(t.text)) + headerBytes) {
+	if t.e == nil || !t.e.spansAsked {
+		if !indexOnce(t, func(e *readerEntry) *bool { return &e.spansAsked }, t.x.dc.spansOf, spansBytes, func(e *readerEntry, v []instant) {
+			e.spans = v
+			if e.spans == nil {
+				e.spans = []instant{}
+			}
+		}) {
 			return nil, false
-		}
-		s := x.dc.spansOf(t.text)
-		n := spansBytes(s) + int64(len(t.text))
-		if !x.fits(n) {
-			return nil, false
-		}
-		t.keep(n)
-		e.spans = s
-		if e.spans == nil {
-			e.spans = []instant{}
 		}
 	}
-	return e.spans, e.spans != nil
+	return t.e.spans, t.e.spans != nil
+}
+
+// textNow is the text itself, for a question the index keeps no answer to
+// (two places the same text, one holding another's): the caller's, the one
+// the entry keeps, or read now from the recording and kept by no one here;
+// ok false where the recording was not read, or where its text does not fit
+// what is left of the budget (counted unread).
+func (t *readerText) textNow() (string, bool) {
+	if t.raw == nil {
+		return t.text, true
+	}
+	if t.e != nil && t.e.text != "" {
+		return t.e.text, true
+	}
+	if t.e != nil && t.e.past {
+		t.x.unreadTexts++
+		return "", false
+	}
+	s, ok := t.read()
+	if !ok || t.e.text == "" && !t.x.fits(int64(len(s))) {
+		return "", false
+	}
+	return s, true
 }
 
 // holdsWord reports whether the text holds w as a word in any of main's
@@ -182,30 +281,36 @@ func (t *readerText) holdsToken(kind tokenKind, tok string) (held, read bool) {
 		}
 		return sets[len(sets)-1][tok], true
 	}
-	if tok == "" {
-		return false, true
-	}
-	text := t.text
-	for i := 0; i+len(tok) <= len(text); {
-		j := indexFrom(text, tok, i)
-		if j < 0 {
-			break
-		}
-		end := j + len(tok)
-		if (j == 0 || !isB64Byte(text[j-1])) && (end == len(text) || !isB64Byte(text[end]) && text[end] != '=') {
-			return true, true
-		}
-		i = j + 1
-	}
-	return false, true
+	// A base64 token (tokenSpans cuts it as nextB64Run does) is held
+	// exactly where it is one of the text's whole runs.
+	runs, ok := t.runsOf()
+	return runs[tok], ok
 }
 
-// indexFrom is the index of the first v in s at or after i, -1 where none.
-func indexFrom(s, v string, i int) int {
-	if j := strings.Index(s[i:], v); j >= 0 {
-		return i + j
+// wholeB64Runs are s's base64 runs whole, each with all the padding after it,
+// that no byte of the base64 alphabets follows: the tokens holdsToken finds
+// in s, no byte of the alphabets or padding on either side.
+func wholeB64Runs(s string) map[string]bool {
+	runs := map[string]bool{}
+	for i := 0; i < len(s); {
+		if !isB64Byte(s[i]) {
+			i++
+			continue
+		}
+		j := i
+		for j < len(s) && isB64Byte(s[j]) {
+			j++
+		}
+		k := j
+		for k < len(s) && s[k] == '=' {
+			k++
+		}
+		if k == len(s) || !isB64Byte(s[k]) {
+			runs[s[i:k]] = true
+		}
+		i = k
 	}
-	return -1
+	return runs
 }
 
 // holdsMoment reports whether an instant of the text names m by moment
@@ -239,5 +344,5 @@ func (x *readerIndex) holdsMoment(text string, m moment) (held, fine, read bool)
 }
 
 // unread reports whether the call's index left a text unread: past its
-// budget.
+// budget, or a recording keploy could not read.
 func (x *readerIndex) unread() bool { return x.unreadTexts > 0 }
