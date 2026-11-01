@@ -308,6 +308,10 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				stub  *models.Mock
 				diag  *matchDiag
 				lmiss *learnMiss
+				// extra is the full round's own-repeat check (extraCall),
+				// asked before its pairing; -1 where it was not asked. A
+				// miss reads it rather than asking again.
+				extra = -1
 				// call is where the request's first read of the round
 				// found it made (integrations.CallRound): a miss's lookup
 				// of a recording made elsewhere is asked of that round.
@@ -332,20 +336,28 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				stub, lmiss, err = h.learnMatchIn(reqCtx, input, mockDb, h.newLearnNoise(opts, bodyNoise, urlNoise), opts, &call)
 				ok = stub != nil
 				if !ok && err == nil {
-					// Then the pairing, under the background rules:
-					// a call that is exactly another test's recording is
-					// answered with it, reported for judging, not missed.
+					// Then the pairing, under the background rules: a call
+					// that is exactly another test's recording is answered
+					// with it, reported for judging, not missed. The
+					// own-repeat check comes first, read of the store held
+					// to the round the call first read (HoldToRound): a
+					// call one more than the test recorded, its own
+					// identical recordings spent (extraCall), never claims
+					// another test's identical recording. It misses as
+					// such below, so judging never moves the other test's
+					// recording to the worker scope on its account. A call
+					// whose test recorded none of its kind still pairs.
+					held, _ := integrations.HoldToRound(mockDb, call)
+					extra = h.extraCall(reqCtx, input, held, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableMockCorrelation)
 					strict := h.newStrictNoise(headerNoise, bodyNoise, urlNoise)
-					if answer, x := h.pairExactlyFrom(reqCtx, input, mockDb, strict, call); answer != nil {
-						// Its repeat note is asked as a miss's is: of the
-						// store held to the round the call first read
-						// (HoldToRound), and none for a call one more than
-						// the test recorded (repeatNoteOf).
-						held, _ := integrations.HoldToRound(mockDb, call)
-						extra := h.extraCall(reqCtx, input, held, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableMockCorrelation)
-						a, repeat := repeatNoteOf(reqCtx, input, held, strict, extra)
-						reportPairing(reqCtx, input, x, a, repeat)
-						stub, ok, lmiss = answer, true, nil
+					if extra == 0 {
+						if answer, x := h.pairExactlyFrom(reqCtx, input, mockDb, strict, call); answer != nil {
+							// Its repeat note is asked as a miss's is
+							// (repeatNoteOf).
+							a, repeat := repeatNoteOf(reqCtx, input, held, strict, extra)
+							reportPairing(reqCtx, input, x, a, repeat)
+							stub, ok, lmiss = answer, true, nil
+						}
 					}
 				}
 				if !ok {
@@ -432,7 +444,10 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// Both read the request's destination as it came (reqCtx): a
 				// reading now would be a use of its connection's container in
 				// the scope open now, the next test's once a test ended.
-				n := h.extraCall(reqCtx, input, db, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableMockCorrelation)
+				n := extra
+				if n < 0 {
+					n = h.extraCall(reqCtx, input, db, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableMockCorrelation)
+				}
 				if n == 0 && lmiss == nil {
 					// (A learn-step miss names the candidate it refused.)
 					diag = h.answeredDiag(reqCtx, input, db, diag, headerNoise, bodyNoise, urlNoise)

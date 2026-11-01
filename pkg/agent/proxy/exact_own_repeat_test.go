@@ -418,21 +418,22 @@ func pairedRepeatRun(t *testing.T, baked bool) (*Proxy, *MockManager) {
 // recorded GET /dup once and test-1 recorded the identical call once. A
 // test-0 that calls it twice:
 //
-//   - In record's full round the second call is paired with test-1's
-//     recording: answered with it, a claim reported for judging
-//     (models.AnswerProvisional, NotOwned), not consumed. This is the full
-//     round's stated limit: the full round learns, its pairing gives no
-//     verdict.
-//   - Judging then voids the pairing when test-1 consumed its recording
-//     itself (it stays test-1's), or else moves the recording into the set's
-//     worker scope. Either way the confirming round, a plain replay, misses
-//     the second call as one call more than test-0 recorded
-//     (models.MissExtraCall, recorded 1), and the recording still answers
-//     test-1's call: test-1's own, or the worker scope's, which the miss left
-//     unspent.
+//   - In record's full round the second call is one more than test-0
+//     recorded, its own identical recording spent: it misses as such
+//     (models.MissExtraCall, recorded 1) and is never paired with test-1's
+//     recording. A pairing would be a claim reported for judging
+//     (models.AnswerProvisional, NotOwned), and judging would void it or move
+//     test-1's recording into the set's worker scope on its account. test-1's
+//     recording stays test-1's: its own call is answered with it.
+//   - In the confirming round, a plain replay, whether judging left the
+//     recording test-1's or (on another account) moved it into the worker
+//     scope, the second call misses the same way, and the recording still
+//     answers test-1's call: test-1's own, or the worker scope's, which the
+//     miss left unspent.
 //
 // Answered by the worker scope's copy in the confirming round, a test that
-// made its recorded call twice passed.
+// made its recorded call twice passed; paired in the full round, it moved
+// test-1's recording to the worker scope on that account.
 func TestACallPairedInTheFullRoundOneMoreThanTheTestRecordedMissesInTheConfirmingRound(t *testing.T) {
 	t.Run("full round", func(t *testing.T) {
 		p, mm := pairedRepeatRun(t, false)
@@ -444,15 +445,21 @@ func TestACallPairedInTheFullRoundOneMoreThanTheTestRecordedMissesInTheConfirmin
 		if code, body := r3SendVia(t, context.Background(), h, p, mm, opts, httpGet("/dup")); code != http.StatusOK || body != `{"test":0}` {
 			t.Fatalf("test-0's GET /dup got %d %s; want its own", code, body)
 		}
-		if code, body := r3SendVia(t, context.Background(), h, p, mm, opts, httpGet("/dup")); code != http.StatusOK || body != `{"test":1}` {
-			t.Fatalf("test-0's second GET /dup got %d %s; want test-1's recording, paired", code, body)
+		if code, body, err := callWithinOpts(h, p, mm, opts, httpGet("/dup"), true); err == nil && code == http.StatusOK {
+			t.Fatalf("test-0's second GET /dup, one more than it recorded, was answered %s; want a miss, never test-1's recording paired", body)
 		}
 		calls, err := p.GetMockErrors(context.Background())
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(calls) != 1 || calls[0].Answer != models.AnswerProvisional || !calls[0].NotOwned || calls[0].ClosestMock != "mock-own-1" {
-			t.Fatalf("reported %+v; want the one pairing with mock-own-1, an answer for judging", calls)
+		if len(calls) != 1 || calls[0].Answer == models.AnswerProvisional || calls[0].NotOwned || calls[0].Kind != models.MissExtraCall || calls[0].Recorded != 1 {
+			t.Fatalf("reported %+v; want one extra_call miss of GET /dup, recorded 1, and no pairing with mock-own-1", calls)
+		}
+		mm.ServeExactPool(models.PoolKeyNone, nil)
+		mm.ServeExactTest("test-1", []*models.Mock{roundMock(mm, "mock-own-1")})
+		p.ContinueTestErrorCapture()
+		if code, body := r3SendVia(t, context.Background(), h, p, mm, opts, httpGet("/dup")); code != http.StatusOK || body != `{"test":1}` {
+			t.Fatalf("test-1's GET /dup got %d %s; want its own mock-own-1, left in its list", code, body)
 		}
 	})
 	for _, tc := range []struct {
