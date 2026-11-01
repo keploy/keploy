@@ -5,28 +5,29 @@ import (
 	"strings"
 )
 
-// The reader's index (DESIGN §1, M5): what the places before a call hold
-// of its changed words, read lazily, per changed word, for one Decide call.
-// A place's text is read the first time a changed word asks about it, in
-// main's caches (DriftCache.rawTokens, spansOf: every declared form, every
-// reading), and what it answers is kept for the call within readerBudget
-// bytes. Past the budget the index keeps nothing more: a question is
-// answered from the text read again (the caller's, or the recording's,
-// through the set's store of payloads), and dropped with it, as main's
-// derived caches drop what passes theirs. So a call holds at once only the
-// budget and the one text it reads, however many places it asks about, and
-// it decides as a small set does: the budget bounds what is held, never
-// what is read. A place that is a recording keeps its handle (textOf),
-// never its text. The index reports unread only a recording keploy could
-// not read (New 1).
+// The reader's index: what the places before a call hold of its changed
+// words, read lazily, per changed word, for one Decide call. A place's text
+// is read the first time a changed word asks about it, in main's caches
+// (DriftCache.rawTokens, spansOf: every declared form, every reading), and
+// what it answers is kept for the call within its cap (readerBudgetBytes)
+// and, in a set, on the set's one budget (claim), the one its tiers keep
+// within, never on a budget beside it. Past either the index keeps nothing
+// more: a question is answered from the text read again (the caller's, or
+// the recording's, through the set's store of payloads), and dropped with
+// it, as main's derived caches drop what passes theirs. So a call holds at
+// once only what the set's budget lets it keep and the one text it reads,
+// however many places it asks about, and it decides as a small set does:
+// the budget bounds what is held, never what is read. A place that is a
+// recording keeps its handle (textOf), never its text. The index reports
+// unread only a recording keploy could not read.
 
-// readerBudget, where a row sets it (>0), is the bytes one call's index
-// keeps; 0 in keploy itself: a quarter of the set's budget (setBudget,
-// which is a quarter of the agent's memory limit, so at most a sixteenth of
-// it).
+// readerBudget, where a row sets it (>0), caps what one call's index keeps;
+// 0 in keploy itself: a quarter of the set's budget (setBudget), within
+// that budget, not beside it (claim), so one call's index never takes all
+// that the set's words and payloads keep.
 var readerBudget int64
 
-// readerBudgetBytes is the bytes one call's index keeps (readerBudget).
+// readerBudgetBytes is the cap of what one call's index keeps (readerBudget).
 func readerBudgetBytes() int64 {
 	if readerBudget > 0 {
 		return readerBudget
@@ -35,10 +36,12 @@ func readerBudgetBytes() int64 {
 }
 
 // readerIndex is one Decide call's index: what it kept of each text asked
-// about, by the text's hash, the bytes that takes, and how many recordings
-// keploy could not read.
+// about, by the text's hash, the bytes that takes (counted on the set's budget
+// too where the call is a set's), and how many recordings keploy could not
+// read.
 type readerIndex struct {
 	dc           *DriftCache
+	set          *setDerived
 	budget, used int64
 	seed         maphash.Seed
 	texts        map[uint64][]*readerEntry
@@ -57,8 +60,9 @@ type readerEntry struct {
 	text                            string
 	tokens                          []map[string]bool
 	runs                            map[string]bool
-	spans                           []instant
+	spans, extraSpans               []instant
 	tokensKept, runsKept, spansKept bool
+	extraKept                       bool
 	// past: an answer of the text did not fit what was left of the
 	// budget, which only fills, so the entry keeps none from then on: each
 	// question is answered from the text read again, a word by a scan of
@@ -87,7 +91,50 @@ type readerText struct {
 // newReaderIndex is an empty index for one call, reading through dc's
 // caches (nil: none).
 func newReaderIndex(dc *DriftCache) *readerIndex {
-	return &readerIndex{dc: dc, budget: readerBudgetBytes(), seed: maphash.MakeSeed(), texts: map[uint64][]*readerEntry{}}
+	x := &readerIndex{dc: dc, budget: readerBudgetBytes(), seed: maphash.MakeSeed(), texts: map[uint64][]*readerEntry{}}
+	if dc != nil {
+		x.set = dc.set
+	}
+	return x
+}
+
+// claim counts n bytes more of what the index keeps, and reports whether
+// they fit: within its cap, and, where the call is a set's, on the set's
+// one budget, as a tier that lets none go keeps there (tier.keep): it first
+// has the set let go of what it is past its budget (budget.letGo: the
+// words, then the payloads, each read again where asked for), and past the
+// budget still it counts none.
+func (x *readerIndex) claim(n int64) bool {
+	if x.used+n > x.budget {
+		return false
+	}
+	if s := x.set; s != nil {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		b := s.budget
+		if need := b.used + n - b.limit; need > 0 && b.letGo != nil {
+			b.letGo(need)
+		}
+		if b.used+n > b.limit {
+			return false
+		}
+		b.used += n
+	}
+	x.used += n
+	return true
+}
+
+// release gives the set's budget back what the index keeps, once its call
+// is over (the caller's: defer x.release()), and lets go of it: the index
+// keeps nothing more, and a question asked after reads the text again.
+func (x *readerIndex) release() {
+	if s := x.set; s != nil && x.used > 0 {
+		s.mu.Lock()
+		s.budget.used -= x.used
+		s.mu.Unlock()
+	}
+	x.used, x.budget = 0, 0
+	x.texts = map[uint64][]*readerEntry{}
 }
 
 // text is s as the index holds it, read lazily; the caller holds s while it
@@ -171,8 +218,7 @@ func indexOnce[V any](t *readerText, kept func(*readerEntry) *bool, get func(*re
 		return of(s), true
 	}
 	v := of(s)
-	if n := size(v) + e.own(s); x.used+n <= x.budget {
-		x.used += n
+	if x.claim(size(v) + e.own(s)) {
 		e.text = s
 		keep(e, v)
 		*kept(e) = true
@@ -213,6 +259,16 @@ func (t *readerText) runsOf() (map[string]bool, bool) {
 func (t *readerText) spansOf() ([]instant, bool) {
 	return indexOnce(t, func(e *readerEntry) *bool { return &e.spansKept }, func(e *readerEntry) []instant { return e.spans },
 		t.x.dc.spansOf, spansBytes, func(e *readerEntry, v []instant) { e.spans = v })
+}
+
+// extraSpansOf are the instants of the text's other declared forms
+// (rawExtra: decoded, case-folded, its encoded runs' text), read once for
+// the call where they fit the budget; ok false where the recording was not
+// read.
+func (t *readerText) extraSpansOf() ([]instant, bool) {
+	dc := t.x.dc
+	return indexOnce(t, func(e *readerEntry) *bool { return &e.extraKept }, func(e *readerEntry) []instant { return e.extraSpans },
+		func(s string) []instant { return dc.spansOf(dc.rawExtra(s)) }, spansBytes, func(e *readerEntry, v []instant) { e.extraSpans = v })
 }
 
 // textNow is the text itself, for a question the index keeps no answer to
@@ -338,18 +394,26 @@ func wholeB64Runs(s string) map[string]bool {
 }
 
 // holdsMoment reports whether an instant of the text names m by moment
-// (byMoment), and whether one does so at a fine cut; read as holdsWord.
+// (byMoment), and whether one does so at a fine cut, in the text or any of
+// its declared forms, the forms main reads an instant in (holdsExact(text)
+// || holdsExact(rawExtra(text))) and holdsWord reads a word in; read as
+// holdsWord.
 func (t *readerText) holdsMoment(m moment) (held, fine, read bool) {
-	spans, ok := t.spansOf()
-	if !ok {
-		return false, false, false
-	}
-	for _, sp := range spans {
-		if !sp.keyed {
-			continue
+	for _, of := range []func() ([]instant, bool){t.spansOf, t.extraSpansOf} {
+		spans, ok := of()
+		if !ok {
+			return false, false, false
 		}
-		if h, f := byMoment(sp.moment(), m); h {
-			held, fine = true, fine || f
+		for _, sp := range spans {
+			if !sp.keyed {
+				continue
+			}
+			if h, f := byMoment(sp.moment(), m); h {
+				held, fine = true, fine || f
+			}
+		}
+		if fine {
+			break
 		}
 	}
 	return held, fine, true
