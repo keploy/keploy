@@ -18,6 +18,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/async"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/identity"
 	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
@@ -438,5 +439,65 @@ func TestANoBodyResponseKeepsItsContentLength(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// identityAnswer is a recorded POST to path on api.example, answered body.
+func identityAnswer(name, path, body string) *models.Mock {
+	m := recorded(name, path, nil, "")
+	m.Spec.HTTPReq.ProtoMajor, m.Spec.HTTPReq.ProtoMinor = 1, 1
+	m.Spec.HTTPResp.Body = body
+	return m
+}
+
+// A client keeps its connection to a dependency open across test sets, and the
+// proxy copied the session's options when it accepted that connection. The
+// second set's request on it is matched with the second set's recorded pod
+// (identity.Current), not the first set's: it went out under the first set's
+// identity and got the first set's answer.
+func TestDecodeHTTPAliasesEachRequestToTheTestSetArmedWhenItIsRead(t *testing.T) {
+	live := identity.Live().Name // what the agent aliases from (identity.For reads the same)
+	app, proxy := tcpPair(t)
+	h := &HTTP{Logger: zaptest.NewLogger(t)}
+	set1 := &models.IdentityAliasing{RecordedPods: []models.PodIdentity{{Name: "api-55f5fd9659-set1"}}}
+	set2 := &models.IdentityAliasing{RecordedPods: []models.PodIdentity{{Name: "api-55f5fd9659-set2"}}}
+	db := &mockMemDb{mocks: []*models.Mock{
+		identityAnswer("set1", "/pods/api-55f5fd9659-set1", `{"set":1}`),
+		identityAnswer("set2", "/pods/api-55f5fd9659-set2", `{"set":2}`),
+	}, updateUnFilteredReturn: true}
+	var armed atomic.Pointer[models.IdentityAliasing]
+	armed.Store(set1)
+	request := "POST /pods/" + live + " HTTP/1.1\r\nHost: api.example\r\nContent-Length: 0\r\n\r\n"
+	runDecode(t, proxy, func(ctx context.Context) error {
+		ctx = identity.WithCurrent(ctx, func() (*models.IdentityAliasing, bool) { return armed.Load(), true })
+		// The connection's own copy is the first set's: what the accept copied.
+		return h.decodeHTTP(ctx, []byte(request), proxy, nil, db, models.OutgoingOptions{Identity: set1})
+	})
+	if got := readUntil(app, `{"set":1}`, time.Minute); !strings.Contains(got, `{"set":1}`) {
+		t.Fatalf("the first set's request was answered %q, want the first set's mock", got)
+	}
+	armed.Store(set2) // the next test set is armed; the client keeps the connection
+	if _, err := app.Write([]byte(request)); err != nil {
+		t.Fatal(err)
+	}
+	if got := readUntil(app, `{"set":2}`, time.Minute); !strings.Contains(got, `{"set":2}`) {
+		t.Fatalf("the second set's request on the kept connection was answered %q, want the second set's mock", got)
+	}
+}
+
+// Without a lookup on the context (a parser used outside the proxy), the
+// connection's own copy of the options decides, as before.
+func TestDecodeHTTPAliasesWithTheConnectionsCopyWithoutALookup(t *testing.T) {
+	live := identity.Live().Name
+	app, proxy := tcpPair(t)
+	h := &HTTP{Logger: zaptest.NewLogger(t)}
+	set1 := &models.IdentityAliasing{RecordedPods: []models.PodIdentity{{Name: "api-55f5fd9659-set1"}}}
+	db := &mockMemDb{mocks: []*models.Mock{identityAnswer("set1", "/pods/api-55f5fd9659-set1", `{"set":1}`)}, updateUnFilteredReturn: true}
+	request := "POST /pods/" + live + " HTTP/1.1\r\nHost: api.example\r\nContent-Length: 0\r\n\r\n"
+	runDecode(t, proxy, func(ctx context.Context) error {
+		return h.decodeHTTP(ctx, []byte(request), proxy, nil, db, models.OutgoingOptions{Identity: set1})
+	})
+	if got := readUntil(app, `{"set":1}`, time.Minute); !strings.Contains(got, `{"set":1}`) {
+		t.Fatalf("answered %q, want the mock of the identity the connection copied", got)
 	}
 }

@@ -36,6 +36,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/cbshim"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/async"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/identity"
 	"go.keploy.io/server/v3/pkg/agent/proxy/relay"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
@@ -1577,6 +1578,19 @@ func (p *Proxy) getSession() *agent.Session {
 	return p.session
 }
 
+// currentIdentity is the identity aliasing of the test session armed now
+// (identity.WithCurrent), read per request so a connection kept open across
+// test sets is matched with the current set's identity. ok is false when no
+// test session is armed. A session is never changed once set (Mock and Record
+// set a new one), so reading its field after getSession is race-free.
+func (p *Proxy) currentIdentity() (*models.IdentityAliasing, bool) {
+	s := p.getSession()
+	if s == nil || s.Mode != models.MODE_TEST {
+		return nil, false
+	}
+	return s.Identity, true
+}
+
 // setSession replaces the current session in a thread-safe manner.
 func (p *Proxy) setSession(s *agent.Session) {
 	p.sessionMu.Lock()
@@ -2805,6 +2819,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	parserCtx = context.WithValue(parserCtx, models.ErrGroupKey, parserErrGrp)
 	parserCtx = context.WithValue(parserCtx, models.ClientConnectionIDKey, fmt.Sprint(clientConnID))
 	parserCtx = context.WithValue(parserCtx, models.DestConnectionIDKey, fmt.Sprint(destConnID))
+	// The parsers alias the identity of the test set armed when a request is
+	// read, not the one outgoingOpts copied at this accept (identity.Current).
+	parserCtx = identity.WithCurrent(parserCtx, p.currentIdentity)
 	// Under the proven switch, or settleReads, the accept kept the connection
 	// (inflight.go): a parser that reads ahead says through it which requests
 	// it holds (integrations.HoldRequest).
