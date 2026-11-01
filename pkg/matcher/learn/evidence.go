@@ -38,10 +38,10 @@ type evPlace struct {
 	// there, its view or src) and reads their texts only when a question
 	// asks (recText, liveText), never keeping one: a call that asks about
 	// many large recordings holds one at a time, not all of them.
-	rec, live string
-	src, fSrc *Raw
-	side      Side
-	given, startUp   bool
+	rec, live      string
+	src, fSrc      *Raw
+	side           Side
+	given, startUp bool
 	// gave: a value the test gave keploy (#5016), read by its text alone,
 	// never by a moment; given without gave is the test case's request.
 	gave bool

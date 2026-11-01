@@ -530,6 +530,13 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 			off, inWindow = models.ClockOffset{Res: max(c.rm.res, c.lm.res)}, true
 		} else if copies(false) == nil {
 			off, cutWhy, inWindow = clockInWindow(path, c.ri, c.li, dc.in.Window, zone)
+			if inWindow {
+				if g, uncompared := dc.offsetGuard(path, off, max(c.rm.res, c.lm.res)); uncompared {
+					return dc.refuse(path, at, n, r, l, RefusalCannotCheck, g, nil, dc.fieldNoise(path))
+				} else if g != "" {
+					off, cutWhy, inWindow = models.ClockOffset{}, g, false
+				}
+			}
 		}
 	}
 	if inWindow {
@@ -571,6 +578,30 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 		why += " [but " + strings.Join(sentIn, ", ") + " did]"
 	}
 	return dc.refuse(path, at, n, r, l, RefusalNoClockRead, why, outside, dc.wordNoise(path, n), Edit{Kind: EditReRecord})
+}
+
+// offsetGuard is main's refusal of a read plus an offset its call's window
+// holds (typed.go's clockOffset), whichever reading found the offset: one
+// keploy cannot narrow to one value, one a window meets a wall time shown
+// twice in (the application may resolve it to its first showing, an hour
+// early), and one the adapter's replay does not compare (uncompared:
+// keploy's limit, refused as one it cannot check). "" where none holds.
+func (dc *decider) offsetGuard(path string, off models.ClockOffset, enc time.Duration) (why string, uncompared bool) {
+	if off.Min == 0 && off.Max == 0 {
+		return "", false
+	}
+	drifts := dc.in.Drifts
+	if drifts == nil {
+		drifts = &DriftCache{}
+	}
+	w := dc.in.Window
+	switch {
+	case !w.offsets:
+		return clockOffsetUncomparedWhy(path, off), true
+	case !off.Narrow():
+		return clockOffsetWideWhy(path, off, enc), false
+	}
+	return drifts.offsetFallBackWhy(path, off, enc, w), false
 }
 
 // rank is how closely text names w (its moment m): 0 by its exact text,
