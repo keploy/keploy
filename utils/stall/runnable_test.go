@@ -8,25 +8,35 @@ import (
 // fakeSource is a process's clocks, moved by the test: each step moves the
 // wall clock and the CPU time by what it says.
 type fakeSource struct {
-	wall    time.Time
-	cpu     time.Duration
-	limit   float64       // CPUs; 0: none
-	reads   int           // of the CPU limit
-	held    time.Duration // the threads' wait the next heldOff says
-	heldNow bool          // whether heldOff says a thread is held off now
-	heldN   int           // calls of heldOff
+	wall     time.Time
+	cpu      time.Duration
+	limit    float64       // CPUs; 0: none
+	reads    int           // of the CPU limit
+	held     time.Duration // the threads' wait the next heldOff says
+	heldNow  bool          // whether heldOff says a thread is held off now (holdOff)
+	heldFrom int           // the call of heldOff from which it is
+	heldFor  uint64        // the calls of heldOff it has been held off for
+	heldN    int           // calls of heldOff
 }
+
+// holdOff says a thread is held off from the next read of the threads on, or
+// is no longer.
+func (f *fakeSource) holdOff(now bool) { f.heldNow, f.heldFrom = now, f.heldN+1 }
 
 func (f *fakeSource) now() (time.Time, time.Duration, bool) { return f.wall, f.cpu, true }
 func (f *fakeSource) cpuLimit() (float64, bool) {
 	f.reads++
 	return f.limit, f.limit > 0
 }
-func (f *fakeSource) heldOff() (time.Duration, bool) {
+func (f *fakeSource) heldOff() (time.Duration, uint64) {
 	d := f.held
 	f.held = 0
 	f.heldN++
-	return d, f.heldNow
+	f.heldFor = 0
+	if f.heldNow {
+		f.heldFor = uint64(f.heldN - f.heldFrom + 1)
+	}
+	return d, f.heldFor
 }
 
 // newFakeSampler is a sampler over a fakeSource, started as acquire starts
@@ -161,7 +171,7 @@ func (c heldClock) Runnable() time.Duration { return time.Duration(c.s.ran.Load(
 func (c heldClock) After(time.Duration) (<-chan time.Time, func() bool) {
 	return nil, func() bool { return true }
 }
-func (c heldClock) owed() (time.Duration, bool, uint64) { return c.s.owed() }
+func (c heldClock) owed() (time.Duration, uint64, uint64) { return c.s.owed() }
 
 // The verdict is what must not wait for the next read: a stall that reaches
 // its bound on samples that counted a wait not read yet has not expired, and
@@ -214,14 +224,15 @@ func TestMeter_AVerdictWaitsForAThreadHeldOffNow(t *testing.T) {
 	for range 5 {
 		step() // the consumer works
 	}
-	src.heldNow = true // the host takes its CPU
+	src.holdOff(true) // the host takes its CPU
 	for range 25 {
 		step()
 		if m.Expired() {
 			t.Fatalf("expired at %v on the samples while a thread is held off now", m.Stalled())
 		}
 	}
-	src.heldNow, src.held = false, 250*time.Millisecond // back, and the steal shows
+	src.holdOff(false)
+	src.held = 250 * time.Millisecond // back, and the steal shows
 	step()
 	if m.Expired() || m.due.Load() != 0 {
 		t.Fatalf("expired or due on %v on the samples, %v of it the host's", m.Stalled(), s.waitOwed)
@@ -237,6 +248,41 @@ func TestMeter_AVerdictWaitsForAThreadHeldOffNow(t *testing.T) {
 	}
 	if n != 5 {
 		t.Fatalf("expired %d samples after the host gave the CPU back, want 5: due at 4, drawn at 5", n)
+	}
+}
+
+// A thread first found held off at the read after the one that found the
+// stall due has not run since that read, and the host may have taken its CPU
+// just after it: its wait began before the stall was due, and the verdict
+// waits for it too.
+func TestMeter_AVerdictWaitsForAThreadHeldOffFromTheReadAfterItWasDue(t *testing.T) {
+	s, src := newFakeSampler(0)
+	m := NewMeter(heldClock{s}, 100*time.Millisecond)
+	step := func() {
+		src.wall, src.cpu = src.wall.Add(Tick), src.cpu+Tick/4
+		s.sample()
+	}
+	for n := 0; m.due.Load() == 0; n++ {
+		if n > 20 {
+			t.Fatal("never due")
+		}
+		step()
+		if m.Expired() {
+			t.Fatal("expired at the look that found it due")
+		}
+	}
+	src.holdOff(true) // the next read finds it held off
+	for range 25 {
+		step()
+		if m.Expired() {
+			t.Fatalf("expired at %v on the samples while a thread held off since the read after it was due is", m.Stalled())
+		}
+	}
+	src.holdOff(false)
+	src.held = 300 * time.Millisecond // back, and the steal shows: since 50 ms before it was due
+	step()
+	if m.Expired() || m.due.Load() != 0 {
+		t.Fatalf("expired or due on %v on the samples, %v of it the host's", m.Stalled(), s.waitOwed)
 	}
 }
 
