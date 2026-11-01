@@ -2751,10 +2751,11 @@ func (m *MockManager) consumeAt(mk *models.Mock, evicts bool, g *roundGuard, tie
 // consume, its take and the observer's account of it all, or none of them.
 //
 // tier runs at most once, holding the round lock, so it takes no lock that
-// must come before it (swapMu). Only UpdateUnFilteredMock's and
-// MarkMockAsUsed's tiers do: a view never passes a delete door's consume
-// (exactConsumeIn settles those itself), so a delete tier, which reads the
-// staging under swapMu, runs only with exact serving off.
+// must come before it (swapMu): what it reads of the staging its door
+// prepared before it (learnedAfterEndPrepared). Only UpdateUnFilteredMock's
+// and MarkMockAsUsed's tiers run here: a view never passes a delete door's
+// consume (exactConsumeIn settles those itself), so a delete tier, which
+// reads the staging under swapMu, runs only with exact serving off.
 func (m *MockManager) exactConsumeAt(mk *models.Mock, evicts bool, g *roundGuard, tier func() bool, observe func()) exactVerdict {
 	if f := m.exact.round.onConsume.Load(); f != nil && mk != nil {
 		(*f)(mk.Name)
@@ -2776,21 +2777,28 @@ func (m *MockManager) exactConsumeAt(mk *models.Mock, evicts bool, g *roundGuard
 		if ok, wait := m.guardLocked(g, v); !ok {
 			return exactRefused, wait
 		}
-		verdict, wait, after := m.exactConsumeIn(v, mk, evicts)
-		// One the view passes is its tier's to take, in this step: a tier
-		// that refuses it refuses the consume.
-		if wait == nil && verdict == exactPass && tier != nil && !tier() {
-			verdict = exactRefused
-		}
-		// Told once the consume went through, in this step, still holding
-		// the round lock: never of one refused. One that found this view
-		// closed (wait) is told once, as it settles as a serve in the view
-		// that replaces it.
-		if wait == nil && verdict != exactRefused && observe != nil {
-			observe()
-			observe = nil
-		}
-		m.exact.round.mu.Unlock()
+		verdict, wait, after := func() (exactVerdict, <-chan struct{}, func()) {
+			// Let go however this step ends. A parser's goroutine recovers
+			// a panic and loses its connection; one that held the round
+			// lock past it would leave every consume, snapshot and boundary
+			// after it waiting for good, with no error.
+			defer m.exact.round.mu.Unlock()
+			verdict, wait, after := m.exactConsumeIn(v, mk, evicts)
+			// One the view passes is its tier's to take, in this step: a
+			// tier that refuses it refuses the consume.
+			if wait == nil && verdict == exactPass && tier != nil && !tier() {
+				verdict = exactRefused
+			}
+			// Told once the consume went through, in this step, still
+			// holding the round lock: never of one refused. One that found
+			// this view closed (wait) is told once, as it settles as a
+			// serve in the view that replaces it.
+			if wait == nil && verdict != exactRefused && observe != nil {
+				observe()
+				observe = nil
+			}
+			return verdict, wait, after
+		}()
 		if f := m.exact.round.onSettled; f != nil && verdict == exactServed {
 			f()
 		}

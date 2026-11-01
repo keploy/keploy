@@ -143,14 +143,32 @@ func (m *MockManager) servedAs(mk *models.Mock) *models.Mock {
 }
 
 // learnedAfterEndNamed is learnedAfterEnd for a door that names only the
-// caller's copy (a spend, MarkMockAsUsed, a tree's delete door): its base is
-// the staged recording of the caller's name as exact serving hands it out
+// caller's copy (a spend, a tree's delete door): its base is the staged
+// recording of the caller's name as exact serving hands it out
 // (servedAsNamed).
 func (m *MockManager) learnedAfterEndNamed(caller *models.Mock) bool {
 	if caller == nil || !provenswitch.On() || !m.exact.learnEnded.Load() {
 		return false
 	}
 	return learnsBeyond(m.servedAsNamed(caller), caller)
+}
+
+// learnedAfterEndPrepared is learnedAfterEndNamed for a tier that may hold
+// the round lock (MarkMockAsUsed's), which must not take swapMu to read the
+// staging: it reads the outside answers the door prepared before it. ok is
+// false when they are not this staging's (a staging landed, or the learn step
+// ended, since the door looked), so nothing says what the consume learned.
+// The tier refuses that consume and the parser reads again, as a consume
+// outside every test does while a staging lands (consumeOutside).
+func (m *MockManager) learnedAfterEndPrepared(caller *models.Mock) (learned, ok bool) {
+	if !provenswitch.On() || !m.exact.learnEnded.Load() {
+		return false, true
+	}
+	st := m.outsideNow()
+	if st == nil {
+		return false, false
+	}
+	return learnsBeyond(m.servedAsIn(st, caller), caller), true
 }
 
 // learnedAfterEndAt is learnedAfterEnd for a door that found found, the
@@ -174,15 +192,32 @@ func (m *MockManager) learnedAfterEndAt(found, caller *models.Mock) bool {
 // take.
 func (m *MockManager) servedAsNamed(caller *models.Mock) *models.Mock {
 	m.prepareOutside()
-	if st := m.exact.outside.cur.Load(); st != nil && st.epoch == m.stagingEpoch.Load() {
-		if r := st.staged[caller.Name]; r != nil {
-			return m.servedAs(r)
-		}
-		if _, said := st.unstaged.LoadOrStore(caller.Name, true); said {
-			return nil
-		}
+	st := m.outsideNow()
+	if st == nil {
+		m.warnUnstaged(caller.Name)
+		return nil
 	}
-	m.warnUnstaged(caller.Name)
+	return m.servedAsIn(st, caller)
+}
+
+// outsideNow is the outside answers prepared for the current staging, nil
+// when none are. It takes no lock.
+func (m *MockManager) outsideNow() *outsideState {
+	if st := m.exact.outside.cur.Load(); st != nil && st.epoch == m.stagingEpoch.Load() {
+		return st
+	}
+	return nil
+}
+
+// servedAsIn is servedAsNamed read from st, the current staging's outside
+// answers.
+func (m *MockManager) servedAsIn(st *outsideState, caller *models.Mock) *models.Mock {
+	if r := st.staged[caller.Name]; r != nil {
+		return m.servedAs(r)
+	}
+	if _, said := st.unstaged.LoadOrStore(caller.Name, true); !said {
+		m.warnUnstaged(caller.Name)
+	}
 	return nil
 }
 

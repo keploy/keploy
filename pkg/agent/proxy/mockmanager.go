@@ -4204,19 +4204,25 @@ func (m *MockManager) markMockAsUsed(mock models.Mock, g *roundGuard) bool {
 		// The observer is told of no unnamed mock.
 		return false
 	}
-	// Read before the door: it reads the staging under swapMu, which nothing
-	// holding the round lock takes, and the tier may run holding it.
-	learned := m.learnedAfterEndNamed(&mock)
-	return m.consumeValueAt(mock, false, g, true, func(mk models.Mock) bool {
-		return m.markUsedTier(mk, learned)
-	})
+	// What the tier reads of the staging (learnedAfterEndPrepared), prepared
+	// before the door: that takes swapMu, which nothing holding the round
+	// lock takes, and the tier may run holding it.
+	if provenswitch.On() && m.exact.learnEnded.Load() {
+		m.prepareOutside()
+	}
+	return m.consumeValueAt(mock, false, g, true, m.markUsedTier)
 }
 
-// markUsedTier records mock's use, learned its MockState.LearnedAfterEnd, and
-// reports whether it was consumed. It may run holding the round lock
-// (consumeAt).
-func (m *MockManager) markUsedTier(mock models.Mock, learned bool) bool {
+// markUsedTier records mock's use, and reports whether it was consumed. It
+// may run holding the round lock (consumeAt). A consume a view settles itself
+// never gets here, so a test's own mock, which the staging does not hold, is
+// never read against the staging.
+func (m *MockManager) markUsedTier(mock models.Mock) bool {
 	if m.stalePooled(&mock) {
+		return false
+	}
+	learned, ok := m.learnedAfterEndPrepared(&mock)
+	if !ok {
 		return false
 	}
 	m.bumpHitCount(mock.Name, mock.Kind)

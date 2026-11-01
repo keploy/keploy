@@ -35,8 +35,10 @@ import (
 //   - a staging's new epoch (bumpStagingEpoch).
 //
 // Lock order: swapMu (read) before the round lock; the round lock before a
-// view's mu and the leaves (claims, staging names, the tracker, mirrorMu,
-// treesMu, a tree's, consumedMu, hitMu, windowMu read, the disk store's).
+// view's mu and the leaves (claims, staging names, the tracker, the disk
+// store's, and what a consume's tier takes in the settle: mirrorMu, hitMu,
+// treesMu, connMu read, a tree's, windowMu read, consumedMu, revMu,
+// answeredLog.mu, the kept learning's filedBases.mu and keptLoad.mu).
 // Nothing holding it takes swapMu, a variables table's lock or a consume door:
 // prepareOutside, which takes swapMu, runs before it. A view install that
 // begins variables takes the variables' lock and then this one
