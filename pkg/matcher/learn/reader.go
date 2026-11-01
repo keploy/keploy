@@ -26,7 +26,7 @@ import (
 //     there, or is fresh or refused (the caller decides). A stretch only
 //     one run has ("a,b" to "a,b,c") is a changed shape.
 //   - A whole token is main's idByte token (classify.go), or a base64 run
-//     that stands whole (wholeB64Spans) outside the text's instants: a
+//     that stands whole (eachB64Run) outside the text's instants: a
 //     zone's sign glued to an instant's seconds ("13+05" of
 //     "…16:20:13+05:30") is the instant's, never a run. The reader lists
 //     the whole tokens around each changed word (and around a stretch) in
@@ -306,7 +306,7 @@ func bytesOf(spans [][2]int, r [2]int) [2]int { return [2]int{spans[r[0]][0], sp
 type wholeTokenSpans struct{ id, b64 [][2]int }
 
 // tokenSpans are s's whole tokens: its idByte runs, and its base64 runs
-// that stand whole (wholeB64Spans) outside its instants (spans).
+// that stand whole outside its instants (spans: eachB64Run).
 func tokenSpans(s string, spans []instant) wholeTokenSpans {
 	var t wholeTokenSpans
 	for i := 0; i < len(s); {
@@ -321,17 +321,10 @@ func tokenSpans(s string, spans []instant) wholeTokenSpans {
 		t.id = append(t.id, [2]int{i, j})
 		i = j
 	}
-	from := 0
-	gap := func(to int) {
-		for _, sp := range wholeB64Spans(s[from:to]) {
-			t.b64 = append(t.b64, [2]int{from + sp[0], from + sp[1]})
-		}
-	}
-	for _, in := range spans {
-		gap(in.start)
-		from = in.end
-	}
-	gap(len(s))
+	eachB64Run(s, spans, func(a, b int) bool {
+		t.b64 = append(t.b64, [2]int{a, b})
+		return true
+	})
 	return t
 }
 
