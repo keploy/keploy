@@ -402,3 +402,27 @@ func TestOutcomeAnOffsetNearAWallTimeShownTwiceIsRefused(t *testing.T) {
 		t.Errorf("the same read a day later: %s; want a Clock, plus two hours", oDescribe([]Decision{d}))
 	}
 }
+
+// A call that carries no app clock (no window: the adapter read none) is
+// refused naming that cause, never in the words of a window that does not
+// hold the time; a window that does not hold it keeps those words.
+func TestOutcomeACallWithNoAppClockSaysSo(t *testing.T) {
+	const p = "body.at"
+	rAt, fAt := oAt, oAt.Add(FullRoundLead)
+	// R and F apart by no constant offset from the call: no read plus an
+	// offset either.
+	rec, live := "2026-10-31T08:50:00Z", "2026-10-31T08:13:00Z"
+	for _, tc := range []struct {
+		what, want, not string
+		w               *Window
+	}{
+		{"no window", "the call carries no app clock", "window does not hold", nil},
+		{"a window that does not hold it", "a time its call's window does not hold in both runs", "no app clock", iWin(rAt, fAt, 20*time.Millisecond)},
+	} {
+		d := oWord(t, Decide(iCall(p, String, rec, live, rAt, fAt, tc.w, nil, nil)), rec, live)
+		oRefused(t, tc.what, d, "no-clock-read", tc.want)
+		if d.Refusal != nil && strings.Contains(d.Refusal.Why, tc.not) {
+			t.Errorf("%s: refused %q; want no %q", tc.what, d.Refusal.Why, tc.not)
+		}
+	}
+}

@@ -157,7 +157,7 @@ func placesOf(in Input) (ps []evPlace, unread string) {
 	for _, e := range in.Earlier {
 		if e.Unread != "" {
 			if unread == "" {
-				unread = e.Mock + " (" + e.Unread + ")"
+				unread = unreadName(e.Mock, e) + " (" + e.Unread + ")"
 			}
 			continue
 		}
@@ -190,7 +190,11 @@ func placesOf(in Input) (ps []evPlace, unread string) {
 	for i, r := range in.Raw {
 		if !r.Read() {
 			if unread == "" {
-				unread = r.Mock() + " (keploy could not read its recording)"
+				why := r.unreadWhy()
+				if why == "" {
+					why = "it was not read from its mock, learn.RawOf"
+				}
+				unread = unreadName(r.Mock(), Earlier{}) + " (" + why + ")"
 			}
 			continue
 		}
@@ -222,6 +226,21 @@ func placesOf(in Input) (ps []evPlace, unread string) {
 		})
 	}
 	return ps, unread
+}
+
+// unreadName names a place keploy could not read in its refusal: its mock,
+// else what it is (the run's values, the test case's request, a
+// recording of the test), never an empty name.
+func unreadName(mock string, e Earlier) string {
+	switch {
+	case mock != "":
+		return mock
+	case e.Run:
+		return "the run's values"
+	case e.Given:
+		return "the test case's request"
+	}
+	return "a recording of the test"
 }
 
 // inScope is a place's scope: mappings.yaml's (Input.Scope) where it names
