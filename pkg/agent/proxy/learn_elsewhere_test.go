@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"fmt"
 	"slices"
 	"testing"
 	"time"
@@ -8,6 +9,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.uber.org/zap"
 )
 
 // learnedNames is the names LearnedElsewhere holds, in its order.
@@ -28,13 +30,13 @@ func TestLearnElsewhereCandidatesAreOtherTestsUnconsumedRecordings(t *testing.T)
 	mm.ServeExactBackground(models.RecordedWithS12Routing, []string{"pool"}, []string{"w-boot", "w-later"})
 	mm.SetPairing(true)
 	mm.ServeExactTest("T1", []*models.Mock{ms["own"]})
-	equalNames(t, "the candidates under the background rules", mm.LearnElsewhereCandidates(models.HTTP), "other")
+	equalNames(t, "the candidates under the background rules", mm.LearnElsewhereCandidates(models.HTTP, nil), "other")
 
 	// Today's rules: no background is named, and the open test's own is
 	// still no candidate.
 	mm.ServeExactBackground("", nil, nil)
 	mm.ServeExactTest("T1", []*models.Mock{ms["own"]})
-	got := exactNames(mm.LearnElsewhereCandidates(models.HTTP))
+	got := exactNames(mm.LearnElsewhereCandidates(models.HTTP, nil))
 	if !slices.Contains(got, "other") || slices.Contains(got, "own") {
 		t.Fatalf("the candidates under today's rules are %v; want other's, never the open test's own", got)
 	}
@@ -45,9 +47,90 @@ func TestLearnElsewhereCandidatesAreOtherTestsUnconsumedRecordings(t *testing.T)
 	if err := mm.flagMockAsUsed(models.MockState{Name: "other", Kind: models.HTTP, Usage: models.Updated}, 0); err != nil {
 		t.Fatal(err)
 	}
-	if c := mm.LearnElsewhereCandidates(models.HTTP); len(c) != 0 {
+	if c := mm.LearnElsewhereCandidates(models.HTTP, nil); len(c) != 0 {
 		t.Fatalf("a recording its owner consumed is a candidate: %v", exactNames(c))
 	}
+}
+
+// A call's learning-only candidates are read by its request keys: of the
+// recordings the trees hold and those kept on disk, only those filed under
+// one of the call's keys, and one on disk is decoded only then. A full round
+// parks thousands of other tests' recordings on disk, and every miss of the
+// learn step asks: read by kind alone, each miss decoded every one of them.
+// Without keys, or of a kind whose parser declares none, every recording of
+// the kind is a candidate, as before.
+func TestLearnElsewhereCandidatesDecodeOnlyRecordingsUnderTheCallsKeys(t *testing.T) {
+	undoHTTP := models.RegisterRequestKeys(models.HTTP, func(m *models.Mock) []string {
+		if m.Spec.HTTPReq == nil {
+			return nil
+		}
+		return []string{m.Spec.HTTPReq.URL}
+	})
+	t.Cleanup(undoHTTP)
+	undoMongo := models.RegisterRequestKeys(models.Mongo, nil)
+	t.Cleanup(undoMongo)
+	mm, ms := s12Set(t)
+	disk, err := NewDiskMocks(zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = disk.Close() })
+	timer := exactMock("timer-on-disk", 500*time.Millisecond, models.LifetimePerTest)
+	timer.Spec.HTTPReq = &models.HTTPReq{Method: "GET", URL: "/other"}
+	parked := []*models.Mock{timer}
+	for i := 0; i < 50; i++ {
+		mk := exactMock(fmt.Sprintf("parked-%02d", i), time.Duration(600+i)*time.Millisecond, models.LifetimePerTest)
+		mk.Spec.HTTPReq = &models.HTTPReq{Method: "GET", URL: fmt.Sprintf("/parked-%02d", i)}
+		parked = append(parked, mk)
+	}
+	mongo := exactMock("mongo-on-disk", 700*time.Millisecond, models.LifetimePerTest)
+	mongo.Kind = models.Mongo
+	parked = append(parked, mongo)
+	for _, mk := range parked {
+		if err := disk.Add(mk); err != nil {
+			t.Fatal(err)
+		}
+	}
+	disk.Finalize()
+	loaded := map[string]int{}
+	counted := func(visit func(string, func() (*models.Mock, error)) bool) func(string, func() (*models.Mock, error)) bool {
+		return func(name string, load func() (*models.Mock, error)) bool {
+			return visit(name, func() (*models.Mock, error) { loaded[name]++; return load() })
+		}
+	}
+	mm.SetRecordingSource(func(kind models.Kind, keys []string, visit func(string, func() (*models.Mock, error)) bool) error {
+		return disk.RangeKeys(kind, keys, counted(visit))
+	})
+	mm.SetRecordedOfKind(func(kind models.Kind, visit func(string, func() (*models.Mock, error)) bool) error {
+		return disk.RangeKind(kind, counted(visit))
+	})
+	mm.SetPairing(true)
+	mm.ServeExactTest("T1", []*models.Mock{ms["own"]})
+
+	equalNames(t, "the candidates under the call's key", mm.LearnElsewhereCandidates(models.HTTP, []string{"/other"}),
+		"timer-on-disk", "other")
+	for name, n := range loaded {
+		if name != "timer-on-disk" || n != 1 {
+			t.Fatalf("the call's keys file timer-on-disk alone, yet the read decoded %v", loaded)
+		}
+	}
+	clear(loaded)
+	if c := mm.LearnElsewhereCandidates(models.HTTP, []string{"/nothing-filed"}); len(c) != 0 || len(loaded) != 0 {
+		t.Fatalf("a key nothing is filed under gave %v and decoded %v", exactNames(c), loaded)
+	}
+
+	// Without keys, every recording of the kind, decoded.
+	all := exactNames(mm.LearnElsewhereCandidates(models.HTTP, nil))
+	for _, mk := range append([]*models.Mock{ms["other"]}, parked[:len(parked)-1]...) {
+		if !slices.Contains(all, mk.Name) {
+			t.Fatalf("without keys the candidates are %v; want other and every one parked of the kind", all)
+		}
+	}
+	if slices.Contains(all, "own") || slices.Contains(all, "mongo-on-disk") {
+		t.Fatalf("without keys the candidates are %v: the open test's own, or another kind's", all)
+	}
+	// A kind whose parser declares no keys is read whole, keys or not.
+	equalNames(t, "a kind with no request keys", mm.LearnElsewhereCandidates(models.Mongo, []string{"/other"}), "mongo-on-disk")
 }
 
 // The learning-only candidates exist only while record's full round's learn
@@ -61,7 +144,7 @@ func TestLearnElsewhereIsOffOutsideTheLearnStep(t *testing.T) {
 	clocks := map[string]models.ClockOffset{"claimed_at": {Min: -time.Minute, Max: -time.Minute, Res: time.Millisecond}}
 	off := func(why string) {
 		t.Helper()
-		if c := mm.LearnElsewhereCandidates(models.HTTP); c != nil {
+		if c := mm.LearnElsewhereCandidates(models.HTTP, nil); c != nil {
 			t.Fatalf("%s: candidates %v", why, exactNames(c))
 		}
 		if mm.LearnElsewhere(ms["other"], clocks) {
@@ -70,7 +153,7 @@ func TestLearnElsewhereIsOffOutsideTheLearnStep(t *testing.T) {
 	}
 	off("without Learn")
 	mm.SetPairing(true)
-	equalNames(t, "precondition: the candidates with Learn", mm.LearnElsewhereCandidates(models.HTTP), "other")
+	equalNames(t, "precondition: the candidates with Learn", mm.LearnElsewhereCandidates(models.HTTP, nil), "other")
 	mm.SetLearnEnded(true)
 	off("the learn step ended")
 	mm.SetLearnEnded(false)
@@ -85,7 +168,7 @@ func TestLearnElsewhereIsOffOutsideTheLearnStep(t *testing.T) {
 	off("a staging view")
 	mm.ServeExactBackground(models.RecordedWithS12Routing, []string{"pool"}, []string{"w-boot", "w-later"})
 	mm.ServeExactTest("T1", []*models.Mock{ms["own"]})
-	equalNames(t, "precondition: the candidates once the set's background is named", mm.LearnElsewhereCandidates(models.HTTP), "other")
+	equalNames(t, "precondition: the candidates once the set's background is named", mm.LearnElsewhereCandidates(models.HTTP, nil), "other")
 	t.Setenv(provenswitch.Env, "")
 	mm.SetPairing(true)
 	off("the switch off")
