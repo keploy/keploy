@@ -1,6 +1,7 @@
 package learn
 
 import (
+	"cmp"
 	"sort"
 	"strconv"
 	"strings"
@@ -412,6 +413,9 @@ func (dc *decider) textInstant(path string, at variables.Address, rec, live stri
 type instantHold struct {
 	p              evPlace
 	hr, hl, fr, fl bool
+	// coarseR: R's text holds R's value only as an instant of a coarser
+	// unit (a day, an hour) that the value, cut to it, is (coarserOnly).
+	coarseR bool
 	// rank orders the places that name a value: by its exact text (0),
 	// else by the finest cut that gives it (its unit in nanoseconds).
 	rank int64
@@ -460,6 +464,26 @@ func (dc *decider) holds(p evPlace, t *readerText, w string, m *moment, byText b
 	return h, h && fineCut(m.res), true
 }
 
+// coarserOnly reports whether t, which holds w (moment m), holds it only
+// as an instant of a coarser unit that m, cut to it, is (cutsEach's finer
+// rule: a served date beside the application's own time of day). Such a
+// place gives none of m's part below that unit, where its change lies, so
+// it is no answer's source: bound to it, a replay would check the date
+// alone and pass any time of that day.
+func coarserOnly(t *readerText, w string, m moment) bool {
+	text, ok := t.textNow()
+	spans, read := t.spansOf()
+	if !ok || !read || strings.Contains(text, w) {
+		return false
+	}
+	for _, sp := range spans {
+		if h := sp.moment(); sp.keyed && (h.key == m.key || cuts(h, m, func(c cutRule) bool { return !c.finer })) {
+			return false
+		}
+	}
+	return true
+}
+
 // instant decides one changed instant by the one order: a conflict at
 // a fine cut (0), a pick (1), a given's text, one templated slot of the
 // test case's request (2), an answer (3), a fine copy (4), a Clock its
@@ -476,7 +500,8 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 			return dc.refuse(path, at, n, r, l, RefusalUnread, "keploy could not read the run's values past their budget, which came before this call", nil, Edit{Kind: EditReRecord}, dc.fieldNoise(path))
 		}
 		if hr || hl {
-			hs = append(hs, instantHold{p: p, hr: hr, hl: hl, fr: fr, fl: fl, rank: min(dc.rank(p.t.rec, r, c.rm, hr), dc.rank(p.t.live, l, c.lm, hl))})
+			hs = append(hs, instantHold{p: p, hr: hr, hl: hl, fr: fr, fl: fl, coarseR: hr && c.rm != nil && coarserOnly(p.t.rec, r, *c.rm),
+				rank: min(dc.rank(p.t.rec, r, c.rm, hr), dc.rank(p.t.live, l, c.lm, hl))})
 		}
 	}
 	// A place that holds a value by its exact text is named before one
@@ -573,7 +598,7 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	var answers []evPlace
 	for _, h := range hs {
 		p := h.p
-		if p.side == Response && !p.given && inScope(p) && p.state == stateBefore && h.hr && (p.fUnstated || h.hl) {
+		if p.side == Response && !p.given && inScope(p) && p.state == stateBefore && h.hr && !h.coarseR && (p.fUnstated || h.hl) {
 			answers = append(answers, p)
 		}
 	}
@@ -603,12 +628,18 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 
 	// 4. and 6. A copy: requests of the call's scope or the start-up, sent
 	// before the call in both runs, holding the same moment in both runs.
+	// One that holds the other run's moment too (a range that grew in F to
+	// hold the recorded moment and F's) did not move with the value: no
+	// copy's source.
 	copies := func(fine bool) []evPlace {
 		var out []evPlace
 		for _, h := range hs {
 			p := h.p
 			if p.side == Request && !p.given && inScope(p) && before(p) && h.hr && h.hl && (h.fr && h.fl) == fine {
-				out = append(out, p)
+				rf, _, _ := dc.holds(p, p.t.live, r, c.rm, c.byText)
+				if fr, _, _ := dc.holds(p, p.t.rec, l, c.lm, c.byText); !rf && !fr {
+					out = append(out, p)
+				}
 			}
 		}
 		return out
@@ -943,10 +974,7 @@ func (dc *decider) wordNoise(path string, n int) Edit {
 // names are ps' line names, first three.
 func names(ps []evPlace) []string {
 	var out []string
-	for _, p := range ps {
-		if len(out) == maxLinePlaces {
-			break
-		}
+	for _, p := range ps[:min(len(ps), maxLinePlaces)] {
 		out = append(out, p.name)
 	}
 	return out
@@ -965,10 +993,7 @@ func gaveAt(p evPlace, f string) string {
 
 // scopeName names p's scope outside the call for a line.
 func scopeName(p evPlace) string {
-	if p.scope != "" {
-		return p.scope
-	}
-	return "an earlier test or between tests"
+	return cmp.Or(p.scope, "an earlier test or between tests")
 }
 
 // lastSegment is path's last key, a given's name.
