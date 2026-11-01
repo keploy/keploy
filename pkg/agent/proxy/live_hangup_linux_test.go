@@ -593,7 +593,6 @@ func serveLiveCallWith(t *testing.T, synchronous bool, h http.Handler) *liveCall
 // Not parallel: the switch is the environment's.
 func serveTreeCall(t *testing.T, synchronous, real bool, h http.Handler) (lc *liveCall, handed <-chan string) {
 	t.Helper()
-	p, _ := provenTreeProxy(t)
 	srv := &http.Server{Handler: h}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -601,7 +600,15 @@ func serveTreeCall(t *testing.T, synchronous, real bool, h http.Handler) (lc *li
 	}
 	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(func() { _ = srv.Close() })
-	addr := ln.Addr().String()
+	return serveTreeCallTo(t, synchronous, real, ln.Addr().(*net.TCPAddr))
+}
+
+// serveTreeCallTo is serveTreeCall to a listener the caller started, at
+// addr (this process's).
+func serveTreeCallTo(t *testing.T, synchronous, real bool, tcpAddr *net.TCPAddr) (lc *liveCall, handed <-chan string) {
+	t.Helper()
+	p, _ := provenTreeProxy(t)
+	addr := tcpAddr.String()
 	if real {
 		if err := p.SetRealDeps(context.Background(), []string{addr}); err != nil {
 			t.Fatal(err)
@@ -618,7 +625,7 @@ func serveTreeCall(t *testing.T, synchronous, real bool, h http.Handler) (lc *li
 		lc.pm.ServeLive(ctx, conn, upstream, port)
 	}
 	lc.app, lc.proxy = acceptedPair(t, lc.tr)
-	port := uint32(ln.Addr().(*net.TCPAddr).Port)
+	port := uint32(tcpAddr.Port)
 	dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: uint32(os.Getppid()), AgentNsPid: uint32(os.Getppid())}
 	go func() {
 		defer close(lc.served)
