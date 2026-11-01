@@ -255,9 +255,49 @@ func TestSetScopeMocks(t *testing.T) {
 	require.Len(t, startup, len(mocks))
 	require.Empty(t, worker)
 
+	// Under claims each call keeps its claim's key. users claimed the run
+	// after the last test and began none: its call never reached a test of
+	// its own, so it is start-up's.
 	claims := []models.ScopeWindow{{Claim: "orders", Start: at(-1)}, {Claim: "users", Start: at(200)}}
-	_, worker = setScopeMocks(windows, mocks, claims)
-	require.Equal(t, []models.MockEntry{{Name: "mock-3", Kind: string(models.HTTP), Key: "orders"}, {Name: "mock-6", Kind: string(models.Mongo), Key: "users"}}, worker)
+	startup, worker = setScopeMocks(windows, mocks, claims)
+	require.Equal(t, []models.MockEntry{{Name: "mock-0", Kind: string(models.Postgres)}, {Name: "mock-2", Key: "orders"}, {Name: "mock-4", Key: "orders"}, {Name: "mock-6", Kind: string(models.Mongo), Key: "users"}}, startup)
+	require.Equal(t, []models.MockEntry{{Name: "mock-3", Kind: string(models.HTTP), Key: "orders"}}, worker)
+}
+
+// A run of two test binaries (go test ./... runs one per package, each
+// claiming the run under its own key): each binary's start-up is what it did
+// before its own first test, so second's init and TestMain calls, made after
+// first's tests ended, are start-up's, under second's key, and only what a
+// binary did between or after its own tests is worker:'s. A call made under
+// no claim keeps the run's first test. Mutation: split by the run's first
+// test for every key (the split before), and users' init call is worker:'s.
+func TestSetScopeMocksTwoKeys(t *testing.T) {
+	at := func(ms int) time.Time { return runnerT0.Add(time.Duration(ms) * time.Millisecond) }
+	claims := []models.ScopeWindow{{Claim: "orders", Start: at(-1)}, {Claim: "users", Start: at(110)}, {Claim: "audit", Start: at(300)}}
+	windows := []models.ScopeWindow{
+		{Name: "orders/e2e.TestA", Start: at(0), End: at(100)},
+		{Name: "users/e2e.TestB", Start: at(150), End: at(200)},
+		{Name: "users/e2e.TestC", Start: at(210), End: at(240)},
+	}
+	mocks := []capturedMock{
+		{name: "mock-0", ts: at(-5)},                  // before every claim
+		{name: "mock-1", ts: at(20)},                  // TestA's
+		{name: "mock-2", ts: at(105)},                 // orders, after its test
+		{name: "mock-3", ts: at(120)},                 // users' init, after orders' test
+		{name: "mock-4", ts: at(130), protocol: true}, // users' handshake
+		{name: "mock-5", ts: at(170)},                 // TestB's
+		{name: "mock-6", ts: at(205)},                 // users, between its tests
+		{name: "mock-7", ts: at(250)},                 // users' TestMain, after its last test
+		{name: "mock-8", ts: at(310)},                 // audit, which began no test
+	}
+	startup, worker := setScopeMocks(windows, mocks, claims)
+	require.Equal(t, []models.MockEntry{{Name: "mock-0"}, {Name: "mock-3", Key: "users"}, {Name: "mock-4", Key: "users"}, {Name: "mock-8", Key: "audit"}}, startup)
+	require.Equal(t, []models.MockEntry{{Name: "mock-2", Key: "orders"}, {Name: "mock-6", Key: "users"}, {Name: "mock-7", Key: "users"}}, worker)
+
+	// Recorded without claims, every call keeps the run's first test.
+	startup, worker = setScopeMocks(windows, mocks, nil)
+	require.Equal(t, []models.MockEntry{{Name: "mock-0"}, {Name: "mock-4"}}, startup)
+	require.Equal(t, []models.MockEntry{{Name: "mock-2"}, {Name: "mock-3"}, {Name: "mock-6"}, {Name: "mock-7"}, {Name: "mock-8"}}, worker)
 }
 
 // Under the proven switch keploy mock record writes the whole contract into
