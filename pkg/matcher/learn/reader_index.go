@@ -58,12 +58,12 @@ type readerIndex struct {
 // fits the budget: the caller's handle holds the text while it asks (or, of
 // a recording, reads it per question), and nothing here holds it after.
 type readerEntry struct {
-	n                 int
-	text              string
-	tokens            answer[[]map[string]bool]
-	runs              answer[map[string]bool]
-	spans, extraSpans answer[[]instant]
-	fields            answer[fieldWords]
+	n                int
+	text             string
+	tokens           answer[[]map[string]bool]
+	runs             answer[map[string]bool]
+	spans, formSpans answer[[]instant]
+	fields           answer[fieldWords]
 	// past: an answer of the text did not fit what was left of the
 	// budget, which only fills, so the entry keeps none from then on: each
 	// question is answered from the text read again, a word by a scan of
@@ -264,21 +264,7 @@ func (t *readerText) tokens(scan func(string, []rawField)) ([]map[string]bool, b
 // spansOf are the text's instants (instantSpans), read once for the call
 // where they fit the budget; ok false where the recording was not read.
 func (t *readerText) spansOf() ([]instant, bool) {
-	v, _, ok := indexOnce(t, spansSlot, func(s string, _ []rawField) []instant { return t.x.dc.spansOf(s) }, spansBytes, nil)
-	return v, ok
-}
-
-// spansSlot is the entry's slot for the text's instants.
-func spansSlot(e *readerEntry) *answer[[]instant] { return &e.spans }
-
-// extraSpansOf are the instants of the text's other declared forms
-// (rawExtra: decoded, case-folded, its encoded runs' text), read once for
-// the call where they fit the budget; ok false where the recording was not
-// read.
-func (t *readerText) extraSpansOf() ([]instant, bool) {
-	dc := t.x.dc
-	v, _, ok := indexOnce(t, func(e *readerEntry) *answer[[]instant] { return &e.extraSpans },
-		func(s string, _ []rawField) []instant { return dc.spansOf(dc.rawExtra(s)) }, spansBytes, nil)
+	v, _, ok := indexOnce(t, func(e *readerEntry) *answer[[]instant] { return &e.spans }, func(s string, _ []rawField) []instant { return t.x.dc.spansOf(s) }, spansBytes, nil)
 	return v, ok
 }
 
@@ -525,47 +511,22 @@ func eachB64Run(s string, spans []instant, yield func(start, end int) bool) {
 // (byMoment), and whether one does so at a fine cut, in the text or any of
 // its declared forms, the forms main reads an instant in (holdsExact(text)
 // || holdsExact(rawExtra(text))) and holdsWord reads a word in; read as
-// holdsWord. Past the budget the text and its forms are read from one read
-// of it.
+// holdsWord, the instants of the text and its forms from one read of it.
 func (t *readerText) holdsMoment(m moment) (held, fine, read bool) {
-	look := func(spans []instant) bool {
-		for _, sp := range spans {
-			if !sp.keyed {
-				continue
-			}
-			if h, f := byMoment(sp.moment(), m); h {
-				held, fine = true, fine || f
-			}
-		}
-		return fine
-	}
 	dc := t.x.dc
-	spans, scanned, ok := indexOnce(t, spansSlot, func(s string, _ []rawField) []instant { return dc.spansOf(s) }, spansBytes, func(s string, _ []rawField) {
-		if !look(dc.spansOf(s)) {
-			look(dc.spansOf(dc.rawExtra(s)))
+	spans, _, ok := indexOnce(t, func(e *readerEntry) *answer[[]instant] { return &e.formSpans },
+		func(s string, _ []rawField) []instant {
+			return slices.Concat(dc.spansOf(s), dc.spansOf(dc.rawExtra(s)))
+		}, spansBytes, nil)
+	for _, sp := range spans {
+		if !sp.keyed {
+			continue
 		}
-	})
-	if scanned || !ok || look(spans) {
-		return held, fine, ok
+		if h, f := byMoment(sp.moment(), m); h {
+			held, fine = true, fine || f
+		}
 	}
-	extra, ok := t.extraSpansOf()
-	if !ok {
-		return false, false, false
-	}
-	look(extra)
-	return held, fine, true
-}
-
-// holdsWord, holdsToken and holdsMoment ask text once (readerText's); a
-// caller asking one place about many words keeps x.text(s) instead.
-func (x *readerIndex) holdsWord(text, w string) (held, read bool) { return x.text(text).holdsWord(w) }
-
-func (x *readerIndex) holdsToken(text string, kind tokenKind, tok string) (held, read bool) {
-	return x.text(text).holdsToken(kind, tok)
-}
-
-func (x *readerIndex) holdsMoment(text string, m moment) (held, fine, read bool) {
-	return x.text(text).holdsMoment(m)
+	return held, fine, ok
 }
 
 // unread reports whether the call asked about a recording keploy could not

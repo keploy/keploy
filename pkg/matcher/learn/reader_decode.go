@@ -127,21 +127,12 @@ func openWhole(st variables.Step, rec, live string) (string, string, bool) {
 	}
 	if st == variables.StepB64 || st == variables.StepB64URL {
 		for _, c := range [][2]string{{rec, r}, {live, l}} {
-			if len(c[0]) < minEncodedRun || allDigits(c[0]) || !isText([]byte(c[1])) {
+			if len(c[0]) < minEncodedRun || isDigitsOnly(c[0]) || !isText([]byte(c[1])) {
 				return "", "", false
 			}
 		}
 	}
 	return r, l, true
-}
-
-func allDigits(s string) bool {
-	for i := 0; i < len(s); i++ {
-		if s[i] < '0' || s[i] > '9' {
-			return false
-		}
-	}
-	return true
 }
 
 // readSpans reads (rec, live) opened at spans: the text between them as it
