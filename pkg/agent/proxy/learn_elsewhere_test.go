@@ -322,6 +322,32 @@ func TestLearnElsewhereKeepsWhatAPollTaughtAnIdleBackgroundRecording(t *testing.
 	}
 }
 
+// An idle answer a call of the set consumed was paired in its own window: a
+// poll's call in another window teaches it nothing, as any consumed
+// recording, so both records never void what the agent said it kept. An
+// idle answer no call consumed is still taught.
+func TestLearnElsewhereTeachesNoIdleAnswerACallConsumed(t *testing.T) {
+	mm, ms := s12Set(t)
+	t.Cleanup(models.RegisterIdleAnswer(models.HTTP, func(m *models.Mock) bool { return m.Name == "w-later" || m.Name == "w-boot" }))
+	mm.ServeExactBackground(models.RecordedWithS12Routing, []string{"pool"}, []string{"w-boot", "w-later"})
+	mm.SetPairing(true)
+	mm.ServeExactWorker([]string{"w-later", "w-boot"})
+	mm.ServeExactTest("T1", []*models.Mock{ms["own"]})
+	if p := pollFirst(t, mm, "w-later"); p != "w-later" || !mm.consumedInSet("w-later") {
+		t.Fatalf("the poll did not consume w-later: %s", p)
+	}
+	minute := map[string]models.ClockOffset{"dirty_at": {Min: -time.Minute, Max: -time.Minute, Res: time.Millisecond}}
+	if mm.LearnElsewhere(ms["w-later"], minute) {
+		t.Fatal("a call in another window taught an idle answer a call of the set consumed")
+	}
+	if !mm.LearnElsewhere(ms["w-boot"], minute) {
+		t.Fatal("an idle answer no call consumed was taught nothing")
+	}
+	if got := mm.LearnedElsewhere(); len(got) != 1 || got[0].Name != "w-boot" {
+		t.Fatalf("learned elsewhere %v; want w-boot alone", learnedNames(got))
+	}
+}
+
 // What a call made in another window teaches a recording is that window's:
 // each state names the test open when the call came, with the instant it
 // taught, and "" for a call between tests. A call whose round moved since

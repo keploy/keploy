@@ -109,16 +109,18 @@ func (m *MockManager) learnElsewhereAt(mk *models.Mock, clocks map[string]models
 // does, so whatever undoes a window's learning undoes it with any.
 //
 // Besides what pairable offers, an idle answer of the background (a
-// worker's "nothing yet", models.IsIdleAnswer) is kept: a poll's call
-// teaches the idle recordings of its request their clock reads wherever
-// it lands, as the parser carries them, and without that the recording
-// cannot answer a later poll whose clock read moved.
+// worker's "nothing yet", models.IsIdleAnswer) no call of the set consumed
+// is kept: a poll's call teaches the idle recordings of its request their
+// clock reads wherever it lands, as the parser carries them, and without
+// that the recording cannot answer a later poll whose clock read moved. One
+// a call consumed was paired in its own window, and is taught nothing
+// across windows, as any recording.
 func (m *MockManager) learnElsewhereLocked(mk *models.Mock, clocks map[string]models.ClockOffset, read *callRead) bool {
 	v, epoch := m.learningElsewhere()
 	if v == nil {
 		return false
 	}
-	if idle := v.isBackgroundRecording(mk) && models.IsIdleAnswer(mk); !idle && !m.pairable(v, epoch, mk) {
+	if idle := v.isBackgroundRecording(mk) && models.IsIdleAnswer(mk) && !m.consumedInSet(mk.Name); !idle && !m.pairable(v, epoch, mk) {
 		return false
 	}
 	window := models.TeachingWindow{Test: v.test, At: time.Now()}
