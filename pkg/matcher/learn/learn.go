@@ -631,9 +631,10 @@ type Candidate struct {
 	// it is the closest to, is one call more than recorded, a miss, never
 	// paired with a farther recording.
 	Spent bool
-	// Background: a recording of the set's background (its pool's or the
-	// worker scope's, under the background rules) that is not the open
-	// test's own. It answers a request it matches exactly that no recording
+	// Background: a recording of the set's background that is not the open
+	// test's own: its pool's or its worker scope's under the background
+	// rules, or, in a test under any rules, the worker scope the run
+	// reached (integrations.BackgroundMember). It answers a request it matches exactly that no recording
 	// of the test answered already: a request a spent candidate matches
 	// exactly is one call more than the test recorded, a miss, whatever the
 	// background holds of it.

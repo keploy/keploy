@@ -67,9 +67,11 @@ type BackgroundHider interface {
 
 // BackgroundMember is an optional capability of a store (and of a
 // RoundSnapshot): whether a recording, by name, is one of the background's
-// (the pool's or the worker scope's) of a set served by the background
-// rules that the view in force holds as no test's own. The learn step reads it to keep the background from answering a
-// call one more than the open test recorded (learn.Candidate.Background).
+// that the view in force holds as no test's own: the pool's or the worker
+// scope's of a set served by the background rules, or, in a test under any
+// rules, one of the worker scope the run reached. The learn step reads it to
+// keep the background from answering a call one more than the open test
+// recorded (learn.Candidate.Background).
 // The agent's MockManager implements it, and every MockMemDb wrapper that
 // forwards RoundHolder must forward it.
 type BackgroundMember interface {
