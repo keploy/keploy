@@ -2585,15 +2585,23 @@ func TestAProcessIsNamedByItsStart(t *testing.T) {
 
 // Each step an app's processes take on their way out (a file closed, a
 // thread or a process gone) moves the run's teardown scope, which the run's
-// drains wait on; a process that only stays is no movement.
+// drains wait on; a process that only stays is no movement. The app takes
+// its step once the stop has looked at it once: by then the stop has its
+// mark of where the app began, and a step before that mark is in it, no step
+// the stop sees. Taken at the test's own pace, a step every fifth of a
+// second, the app's five steps were all over before a stop slowed by a
+// loaded host took that mark, and it saw none.
 func TestAStopsStepsOutMoveTheRunsTeardown(t *testing.T) {
 	shortStall(t, time.Hour)
+	var looks atomic.Uint64
+	looked := func() { looks.Add(1) }
+	exitLooked.Store(&looked)
+	defer exitLooked.Store(nil)
 	dir := t.TempDir()
-	// It closes one of its files at each step file the test makes, and
-	// exits at "go".
-	cmd, reaped := startGroupLeader(t, "sh", "-c", `cd `+dir+` && exec 3</dev/null 4</dev/null 5</dev/null 6</dev/null 7</dev/null
+	// It closes a file of its own at "step", and exits at "go".
+	cmd, reaped := startGroupLeader(t, "sh", "-c", `cd `+dir+` && exec 3</dev/null
 : > ready
-for fd in 3 4 5 6 7; do while [ ! -e step$fd ]; do sleep 0.01; done; eval "exec $fd<&-"; done
+while [ ! -e step ]; do sleep 0.01; done; exec 3<&-
 while [ ! -e go ]; do sleep 0.01; done`)
 	for deadline := time.Now().Add(time.Minute); ; time.Sleep(10 * time.Millisecond) {
 		if _, err := os.Stat(filepath.Join(dir, "ready")); err == nil {
@@ -2613,18 +2621,39 @@ while [ ! -e go ]; do sleep 0.01; done`)
 		end, _ := WaitExitByEvents(zap.NewNop(), make(chan struct{}), []Reached{p}, scope)
 		ended <- end
 	}()
-	// The steps, until the stop has seen one: the first may come before it
-	// took its first look.
-	for fd, deadline := 3, time.Now().Add(time.Minute); scope.Moves() == 0; fd++ {
-		if fd <= 7 {
-			if err := os.WriteFile(filepath.Join(dir, "step"+strconv.Itoa(fd)), nil, 0o644); err != nil {
-				t.Fatal(err)
+	// awaitLooks waits until the stop has looked at the app n times; the
+	// test's own timeout is its only bound.
+	awaitLooks := func(n uint64, when string) {
+		for looks.Load() < n {
+			select {
+			case end := <-ended:
+				t.Fatalf("the wait ended %v %s", end, when)
+			case <-time.After(10 * time.Millisecond):
 			}
 		}
-		if time.Now().After(deadline) { // only turns a hang into a failure
-			t.Fatal("the app's steps out did not move the run's teardown")
+	}
+	awaitLooks(1, "before its first look")
+	if err := os.WriteFile(filepath.Join(dir, "step"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fd3 := filepath.Join("/proc", strconv.Itoa(p.PID), "fd", "3")
+	for {
+		if _, err := os.Lstat(fd3); errors.Is(err, fs.ErrNotExist) {
+			break
 		}
-		time.Sleep(200 * time.Millisecond)
+		select {
+		case end := <-ended:
+			t.Fatalf("the wait ended %v before the app's step", end)
+		case <-reaped:
+			t.Fatal("the app exited before its step")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	// A look that began after the step reads the app past it, and the look
+	// after that begins once that one is over.
+	awaitLooks(looks.Load()+2, "before it looked at the app past its step")
+	if scope.Moves() == 0 {
+		t.Fatal("the app's step out did not move the run's teardown")
 	}
 	if err := os.WriteFile(filepath.Join(dir, "go"), nil, 0o644); err != nil {
 		t.Fatal(err)
