@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"strconv"
@@ -26,7 +25,8 @@ import (
 // "/", "=" and "." always split. #n counts them from 0 in the text the last
 // step gives; with no #n the address names that text whole. A plain place
 // (no step, no word) is written as Place.String writes it, so a place
-// written before word addresses reads the same.
+// written before word addresses prints the same (and reads the same through
+// Parse; ParseAddress states its limit).
 //
 // The steps:
 //
@@ -67,14 +67,16 @@ type Address struct {
 	Word  int
 }
 
-// ErrAddress marks a word address that is not in the grammar.
-var ErrAddress = errors.New("not a word address")
-
 // ParseAddress reads a word address. A string with no step and no word reads
 // as Parse reads it, with Word -1; so does one Parse reads whole whose '|'
 // or '#' does not start a step or a word (a name written before the escape).
 // So a mistyped step reads as part of a name no call holds: it fails at
 // replay (nothing there to bind or check), not here. On an error, Word -1.
+//
+// Its limit: a name written before word addresses that ends in #<digits>
+// ("url.query.page#2") reads here as a word of the shorter name, where
+// Parse reads the whole name. A field written before word addresses is
+// read with Parse, never with ParseAddress.
 func ParseAddress(s string) (Address, error) {
 	a, err := parseAddress(s)
 	if err != nil {
@@ -98,7 +100,7 @@ func parseAddress(s string) (Address, error) {
 		n := nameEnd(rest, 1)
 		st := Step(unescapeName(rest[1:n]))
 		if !st.valid() {
-			return Address{}, fmt.Errorf("%w: %q: step %q (want pct, json, b64, b64url, jwt.<claim> or cookie.<name>)", ErrAddress, s, rest[1:n])
+			return Address{}, fmt.Errorf("not a word address: %q: step %q (want pct, json, b64, b64url, jwt.<claim> or cookie.<name>)", s, rest[1:n])
 		}
 		a.Steps = append(a.Steps, st)
 		rest = rest[n:]
@@ -106,12 +108,12 @@ func parseAddress(s string) (Address, error) {
 	if strings.HasPrefix(rest, "#") {
 		n, err := strconv.Atoi(rest[1:])
 		if err != nil || n < 0 || strconv.Itoa(n) != rest[1:] {
-			return Address{}, fmt.Errorf("%w: %q: the word is a number from 0", ErrAddress, s)
+			return Address{}, fmt.Errorf("not a word address: %q: the word is a number from 0", s)
 		}
 		a.Word, rest = n, ""
 	}
 	if rest != "" {
-		return Address{}, fmt.Errorf("%w: %q: %q after the place", ErrAddress, s, rest)
+		return Address{}, fmt.Errorf("not a word address: %q: %q after the place", s, rest)
 	}
 	return a, nil
 }
@@ -238,10 +240,13 @@ func wordAt(text string, n int) (string, bool) {
 // ReplaceWord is leaf with the word a names set to v, every step encoded
 // back the way leaf was, every other byte kept where a step allows (pct
 // and cookie keep them; b64 and json re-encode the text, where leaf is
-// their own encoding of it). ok is false where it cannot: a step leaf does
-// not decode by, a JWT claim (its signature would break), a word a does not
-// find, a re-encoding that is not leaf's own, or a v that a reads back
-// otherwise (one that joins the words beside it).
+// their own encoding of it). base64 keeps leaf's padding, padded or raw;
+// where leaf does not show which (its text needs no '=') and the padded
+// and raw forms of the new text differ, it refuses. ok is false where it
+// cannot: a step leaf does not decode by, a JWT claim (its signature would
+// break), a word a does not find, a re-encoding that is not leaf's own, a
+// padding leaf does not show, a cookie value v cannot be, or a v that a
+// reads back otherwise (one that joins the words beside it).
 func (a Address) ReplaceWord(leaf, v string) (string, bool) {
 	out, ok := replaceIn(leaf, a.Steps, a.Word, v)
 	if !ok {
@@ -291,9 +296,13 @@ func splice(st Step, text, inner, next string) (string, bool) {
 		at := pctOffsets(text)
 		return text[:at[p]] + pctEncode(next[p:len(next)-q]) + text[at[len(inner)-q]:], true
 	case st == StepB64 || st == StepB64URL:
-		for _, e := range b64Encodings(st) {
-			if e.EncodeToString([]byte(inner)) == text {
-				return e.EncodeToString([]byte(next)), true
+		// In the recording's own form, padded or raw. Where text shows
+		// neither (inner needs no '='), next must need none either.
+		e := b64Encodings(st)
+		for i, form := range e {
+			if form.EncodeToString([]byte(inner)) == text {
+				out := form.EncodeToString([]byte(next))
+				return out, e[1-i].EncodeToString([]byte(inner)) != text || out == e[1-i].EncodeToString([]byte(next))
 			}
 		}
 	case st == StepJSON && text == inner:

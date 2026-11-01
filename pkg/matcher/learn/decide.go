@@ -1,6 +1,7 @@
 package learn
 
 import (
+	"slices"
 	"strconv"
 	"time"
 
@@ -9,12 +10,12 @@ import (
 )
 
 // Decide is learning's one entry: every word that changed between a call's
-// recording (R) and round F is exactly one WordOutcome, a Clock, a Value
-// (bound to the earliest place that shows it, or fresh at its first call)
-// or Refused, each with one line a person or a tool reads. It is called
-// only under the proven switch. Until an order is registered (decideBy) it
-// refuses every changed word as one keploy cannot check yet: it fails
-// closed.
+// recording and the same call in record's full round is exactly one
+// WordOutcome, a Clock, a Value (bound to the earliest place that shows it,
+// or fresh at its first call) or Refused, each with one line a person or a
+// tool reads. It is called only under the proven switch. Until an order is
+// registered (decideBy) it refuses every changed word as one keploy cannot
+// check yet: it fails closed.
 
 // WordOutcome is what a changed word is (Outcome is what L decided about a
 // request).
@@ -75,9 +76,9 @@ type Edit struct {
 }
 
 // Refusal is a refused word: its kind, where it stands, both values (as
-// recorded, and in Full: record's full round, round F), the kind's clause (which place,
-// which state, which rule), at most three "mock-N <path>" places, and the
-// edits that would accept it, likeliest first.
+// recorded, and in Full: record's full round), the kind's clause (which
+// place, which state, which rule), at most three "mock-N <path>" places, and
+// the edits that would accept it, likeliest first.
 type Refusal struct {
 	Kind              RefusalKind
 	Test, Mock, Field string
@@ -101,13 +102,15 @@ const (
 )
 
 // Caps is what the call's adapter can do at replay: bind a Value at a word
-// address, answer an echo at one, and state what round F's answers held.
+// address, answer an echo at one, and state what the full round's answers
+// held.
 type Caps struct{ BindAtWord, AnswerAtWord, FViewStated bool }
 
 // Scope is where mappings.yaml names a mock, as models.Mapping.MockPlaces
 // writes it: "test <name>" for a test's own list, "startup:", "worker:", or
-// another section. ScopeUnknown: no lookup, or a mock named in no place or
-// in more than one; a decision then reads Earlier's marks alone.
+// another section. ScopeUnknown: no lookup, or a mock the lookup cannot
+// place (named in no place, or in more than one); a decision then reads
+// Earlier's marks alone.
 type Scope string
 
 // The scopes a decision tells apart (ScopeTest names a test's own list).
@@ -120,19 +123,7 @@ const (
 // ScopeTest is the scope of test name's own list.
 func ScopeTest(name string) Scope { return Scope("test " + name) }
 
-// ScopesOf is the scope lookup (Input.Scope) of mappings.yaml m, one rule
-// for every adapter.
-func ScopesOf(m *models.Mapping) func(mock string) Scope {
-	places := m.MockPlaces()
-	return func(mock string) Scope {
-		if p := places[mock]; len(p) == 1 {
-			return Scope(p[0])
-		}
-		return ScopeUnknown
-	}
-}
-
-// Landing is where round F's call reached keploy.
+// Landing is where the full round's call reached keploy.
 type Landing uint8
 
 const (
@@ -146,7 +137,8 @@ const (
 	LandedBetween
 )
 
-// Landed is where round F's call reached keploy; Test names the other test
+// Landed is where the full round's call reached keploy; Test names the
+// other test
 // of LandedOther.
 type Landed struct {
 	Where Landing
@@ -170,13 +162,13 @@ func (l Landed) String() string {
 }
 
 // Input is one call to decide: its drifted leaves, both shapes, when it was
-// recorded and when round F's call reached keploy, the earlier places, the
-// raw recordings, its answer's leaves, its window, the test's givens, which
-// test and mock it is, the Mode, the adapter's Caps, the noise keploy.yml
-// declares (word -1: the whole field), each mock's scope in mappings.yaml
-// (nil: none known; read it through ScopeOf), where round F's call landed,
-// and how the adapter names a leaf's place (nil: VarPlace; read it through
-// AddressOf).
+// recorded and when the full round's call reached keploy, the earlier
+// places, the raw recordings, its answer's leaves, its window, the test's
+// givens, which test and mock it is, the Mode, the adapter's Caps, the noise
+// keploy.yml declares (word -1: the whole field), each mock's scope in
+// mappings.yaml (nil: none known; read it through ScopeOf), where the full
+// round's call landed, and how the adapter names a leaf's place (nil:
+// VarPlace; read it through AddressOf).
 type Input struct {
 	Drifts    *DriftCache
 	Drift     []string
@@ -229,9 +221,10 @@ func (in Input) ScopeOf(mock string) Scope {
 	return in.Scope(mock)
 }
 
-// Decision is one changed word: where it stands, its recorded and round F
-// (Full: record's full round) values, its WordOutcome, a Value's bind place, the answer places that echo
-// it, a Clock's check (its Why set) or the Refusal, and its line.
+// Decision is one changed word: where it stands, its values as recorded and
+// in record's full round (Full), its WordOutcome, a Value's bind place, the
+// answer places that echo it, a Clock's check (its Why set) or the Refusal,
+// and its line. At reads Recorded in the recording's leaf (At.WordOf).
 type Decision struct {
 	At             variables.Address
 	Recorded, Full string
@@ -247,52 +240,59 @@ type Decision struct {
 // Decide is every changed word of in, decided (see above).
 func Decide(in Input) []Decision { return decideBy(in) }
 
-// The seams v5's other parts set from their own files: decideBy is the
-// order (DESIGN §3); clockInWindow is a Clock the call's window holds and
-// clockSinceBegin one read since its test began. Their defaults are main's
-// readings, and an order that refuses every word.
+// The seams other parts of learning set from their own files: decideBy is
+// the order a changed word is decided in; clockInWindow is a Clock the
+// call's window holds and clockSinceBegin one read since its test began.
+// Their defaults are main's readings, and an order that refuses every word.
 var (
 	decideBy        = refuseAll
 	clockInWindow   = offsetReading
 	clockSinceBegin = sinceTestBegin
 )
 
-// refuseAll refuses every changed word of in as one keploy cannot check:
-// each word of a drifted leaf whose words pair by position, else the leaf
-// whole (a word added or dropped, a separator changed, a typed instant).
+// refuseAll refuses every changed word of in as one keploy cannot check.
+// Both values are opened through the steps of the leaf's address, and their
+// words split there: each word of a leaf whose words pair by position, else
+// the opened text whole (a word added or dropped, a separator changed, a
+// typed instant). Where a step does not open a side, the field is refused
+// whole as written, at its place with no step.
 func refuseAll(in Input) []Decision {
 	var out []Decision
 	for _, path := range in.Drift {
 		rec, inRec := in.Rec.Leaves[path]
 		live := in.Live.Leaves[path]
 		at := in.AddressOf(rec, false)
-		if !inRec { // a leaf only round F has: its place is round F's
+		if !inRec { // a leaf only the full round has: its place is the full round's
 			at = in.AddressOf(live, false)
 		}
+		r, rok := at.WordOf(rec.Value)
+		f, fok := at.WordOf(live.Value)
+		if !rok || !fok {
+			at.Steps, r, f = nil, rec.Value, live.Value
+		}
 		n := len(out)
-		if rw, lw := variables.Words(rec.Value), variables.Words(live.Value); rec.Type != Instant && live.Type != Instant && len(rw) == len(lw) && apart(rec.Value, rw) == apart(live.Value, lw) {
+		if rw, lw := variables.Words(r), variables.Words(f); rok && fok && rec.Type != Instant && live.Type != Instant && len(rw) == len(lw) && slices.Equal(apart(r, rw), apart(f, lw)) {
 			for i := range rw {
-				r, f := rec.Value[rw[i][0]:rw[i][1]], live.Value[lw[i][0]:lw[i][1]]
-				if r != f {
-					out = append(out, cannotCheck(in, path, at, i, r, f))
+				if a, b := r[rw[i][0]:rw[i][1]], f[lw[i][0]:lw[i][1]]; a != b {
+					out = append(out, cannotCheck(in, path, at, i, a, b))
 				}
 			}
 		}
 		if len(out) == n {
-			out = append(out, cannotCheck(in, path, at, -1, rec.Value, live.Value))
+			out = append(out, cannotCheck(in, path, at, -1, r, f))
 		}
 	}
 	return out
 }
 
-// apart is s with each of its words cut out: what separates them.
-func apart(s string, ws [][2]int) string {
-	b, last := make([]byte, 0, len(s)), 0
+// apart is what separates s's words ws: the text before each, then after
+// the last.
+func apart(s string, ws [][2]int) []string {
+	out, last := make([]string, 0, len(ws)+1), 0
 	for _, w := range ws {
-		b = append(append(b, s[last:w[0]]...), 0)
-		last = w[1]
+		out, last = append(out, s[last:w[0]]), w[1]
 	}
-	return string(append(b, s[last:]...))
+	return append(out, s[last:])
 }
 
 func cannotCheck(in Input, field string, at variables.Address, word int, r, f string) Decision {

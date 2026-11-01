@@ -1,6 +1,7 @@
 package learn
 
 import (
+	"encoding/base64"
 	"reflect"
 	"strings"
 	"testing"
@@ -14,7 +15,7 @@ import (
 // init registers an order or a clock.
 var declaredDecideBy, declaredClockInWindow, declaredClockSinceBegin = decideBy, clockInWindow, clockSinceBegin
 
-// TestReplayAndLearnShareOneWordRule (TY3): variables.Words, the word rule
+// TestReplayAndLearnShareOneWordRule: variables.Words, the word rule
 // replay reads, finds the runs learn's isWord finds.
 func TestReplayAndLearnShareOneWordRule(t *testing.T) {
 	for c := 0; c < 256; c++ {
@@ -51,7 +52,7 @@ func TestReplayAndLearnShareOneWordRule(t *testing.T) {
 	}
 }
 
-// TestDecideWithNoOrderRefusesEveryChangedWord (TY4): with no order
+// TestDecideWithNoOrderRefusesEveryChangedWord: with no order
 // registered, Decide refuses every drifted word as one keploy cannot check
 // yet, a leaf whose words do not pair by position whole, and never gives a
 // Clock, a Value or a fresh word.
@@ -72,9 +73,9 @@ func TestDecideWithNoOrderRefusesEveryChangedWord(t *testing.T) {
 	}
 	in := Input{
 		Test: "test-1", Mock: "mock-3",
-		Rec:   Shape{Leaves: leaves("body.id", "order-17-a-5", "body.sep", "a-b", "header.date", "2026-11-01T10:00:00Z", "body.more", "a b", "body.mix", "a-17"), Body: map[string]interface{}{}},
-		Live:  Shape{Leaves: leaves("body.id", "order-42-a-6", "body.sep", "a_b", "header.date", "2026-11-01T10:00:05Z", "body.more", "a b c", "body.mix", "a_42", "body.added", "new"), Body: map[string]interface{}{}},
-		Drift: []string{"body.id", "body.sep", "header.date", "body.more", "body.gone", "body.mix", "body.added"},
+		Rec:   Shape{Leaves: leaves("body.id", "order-17-a-5", "body.sep", "a-b", "header.date", "2026-11-01T10:00:00Z", "body.more", "a b", "body.mix", "a-17", "body.nul", "a\x00\x00b"), Body: map[string]interface{}{}},
+		Live:  Shape{Leaves: leaves("body.id", "order-42-a-6", "body.sep", "a_b", "header.date", "2026-11-01T10:00:05Z", "body.more", "a b c", "body.mix", "a_42", "body.added", "new", "body.nul", "\x00c\x00d"), Body: map[string]interface{}{}},
+		Drift: []string{"body.id", "body.sep", "header.date", "body.more", "body.gone", "body.mix", "body.added", "body.nul"},
 	}
 	ds := Decide(in)
 	type got struct {
@@ -104,6 +105,7 @@ func TestDecideWithNoOrderRefusesEveryChangedWord(t *testing.T) {
 		{"body.gone", "", "", "", -1},
 		{"body.mix", "body.mix", "a-17", "a_42", -1},
 		{"body.added", "body.added", "", "new", -1},
+		{"body.nul", "body.nul", "a\x00\x00b", "\x00c\x00d", -1},
 	}
 	if !reflect.DeepEqual(gots, want) {
 		t.Errorf("Decide refused\n%+v\nwant\n%+v", gots, want)
@@ -135,31 +137,30 @@ func TestTheSeamsDefaultToMainsReadings(t *testing.T) {
 	}
 }
 
-// TestInputNamesEachMocksScopeAndWhereTheCallLanded: ScopesOf reads
-// mappings.yaml's places (a test's own list, startup:, worker:, any other
-// section), a mock named in no place or in two is unknown, an Input with
-// no lookup knows no scope, and Landed names the window in a line.
+// TestInputNamesEachMocksScopeAndWhereTheCallLanded: ScopeOf asks the
+// adapter's lookup, an Input with no lookup knows no scope, the scopes are
+// written as mappings.yaml's places are (models.Mapping.MockPlaces), and
+// Landed names the window in a line.
 func TestInputNamesEachMocksScopeAndWhereTheCallLanded(t *testing.T) {
 	m := &models.Mapping{
-		TestCases: []models.MappedTestCase{{ID: "test-1", Mocks: []models.MockEntry{{Name: "mock-1"}, {Name: "mock-2"}}}},
+		TestCases: []models.MappedTestCase{{ID: "test-1", Mocks: []models.MockEntry{{Name: "mock-1"}}}},
 		Startup:   []models.MockEntry{{Name: "mock-3"}},
-		Worker:    []models.MockEntry{{Name: "mock-4"}, {Name: "mock-2"}},
-		Shared:    []models.MockEntry{{Name: "mock-5"}},
+		Worker:    []models.MockEntry{{Name: "mock-4"}},
 	}
-	in := Input{Scope: ScopesOf(m)}
-	for mock, want := range map[string]Scope{
-		"mock-1": ScopeTest("test-1"), "mock-2": ScopeUnknown, "mock-3": ScopeStartup,
-		"mock-4": ScopeWorker, "mock-5": "shared:", "mock-6": ScopeUnknown,
-	} {
+	places := m.MockPlaces()
+	in := Input{Scope: func(mock string) Scope {
+		if p := places[mock]; len(p) == 1 {
+			return Scope(p[0])
+		}
+		return ScopeUnknown
+	}}
+	for mock, want := range map[string]Scope{"mock-1": ScopeTest("test-1"), "mock-3": ScopeStartup, "mock-4": ScopeWorker, "mock-6": ScopeUnknown} {
 		if got := in.ScopeOf(mock); got != want {
 			t.Errorf("scope of %s = %q; want %q", mock, got, want)
 		}
 	}
 	if got := (Input{}).ScopeOf("mock-1"); got != ScopeUnknown {
 		t.Errorf("an Input with no lookup knows %s's scope: %q", "mock-1", got)
-	}
-	if got := ScopesOf(nil)("mock-1"); got != ScopeUnknown {
-		t.Errorf("no mappings.yaml knows a scope: %q", got)
 	}
 	for l, want := range map[Landed]string{
 		{}: "a window keploy was not told", {Where: LandedOwn}: "its own test's window",
@@ -173,38 +174,60 @@ func TestInputNamesEachMocksScopeAndWhereTheCallLanded(t *testing.T) {
 }
 
 // TestABodylessShapeNamesItsPlacesByTheAdapter: a shape with no Body (Mongo's)
-// gets its words' places from Input.PlaceOf, steps included; with none set,
-// VarPlace names a request leaf as JSON only where the request's body is, and
-// an answer leaf as JSON.
+// gets its words' places from Input.PlaceOf, steps included, and its words
+// are split in the value those steps open, so each decision's At reads its
+// own Recorded and Full; where a step does not open a side, the field is
+// refused whole, as written. With no PlaceOf set, VarPlace names a request
+// leaf as JSON only where the request's body is, and an answer leaf as JSON.
 func TestABodylessShapeNamesItsPlacesByTheAdapter(t *testing.T) {
 	was := decideBy
 	decideBy = refuseAll
 	t.Cleanup(func() { decideBy = was })
-	rec := Shape{Leaves: map[string]Leaf{"body.name": {Path: "body.name", Type: String, Value: "order-17"}}}
-	live := Shape{Leaves: map[string]Leaf{"body.name": {Path: "body.name", Type: String, Value: "order-42"}}}
-	at := func(placeOf func(Leaf, bool) (string, bool)) []string {
-		var out []string
+	b64 := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
+	type got struct {
+		at, r, f string
+		word     int
+	}
+	at := func(placeOf func(Leaf, bool) (string, bool), r, f string) []got {
+		rec := Shape{Leaves: map[string]Leaf{"body.name": {Path: "body.name", Type: String, Value: r}}}
+		live := Shape{Leaves: map[string]Leaf{"body.name": {Path: "body.name", Type: String, Value: f}}}
+		var out []got
 		for _, d := range Decide(Input{Rec: rec, Live: live, Drift: []string{"body.name"}, PlaceOf: placeOf}) {
-			out = append(out, d.At.String())
+			if w, ok := d.At.WordOf(r); !ok || w != d.Recorded {
+				t.Errorf("At %q reads %q, %v in the recording; its Recorded is %q", d.At, w, ok, d.Recorded)
+			}
+			if w, ok := d.At.WordOf(f); !ok || w != d.Full {
+				t.Errorf("At %q reads %q, %v in the full round; its Full is %q", d.At, w, ok, d.Full)
+			}
+			out = append(out, got{d.At.String(), d.Recorded, d.Full, d.Refusal.Word})
 		}
 		return out
 	}
-	var asked []bool
-	mongo := func(l Leaf, answer bool) (string, bool) { asked = append(asked, answer); return VarPlace(l, true) }
+	withB64 := func(l Leaf, a bool) (string, bool) { s, ok := VarPlace(l, true); return s + "|b64", ok }
 	for _, c := range []struct {
 		name    string
 		placeOf func(Leaf, bool) (string, bool)
-		want    []string
+		r, f    string
+		want    []got
 	}{
-		{"no PlaceOf: a body with no JSON names no place", nil, []string{""}},
-		{"the adapter's places", mongo, []string{"body.name#1"}},
-		{"the adapter's steps", func(l Leaf, a bool) (string, bool) { s, ok := VarPlace(l, true); return s + "|b64", ok }, []string{"body.name|b64#1"}},
-		{"a place that does not parse", func(Leaf, bool) (string, bool) { return "body", true }, []string{""}},
+		{"no PlaceOf: a body with no JSON names no place", nil, "order-17", "order-42", []got{{"", "17", "42", 1}}},
+		{"the adapter's places", func(l Leaf, a bool) (string, bool) { return VarPlace(l, true) }, "order-17", "order-42", []got{{"body.name#1", "17", "42", 1}}},
+		{"the adapter's steps open both sides", withB64, b64("order-17"), b64("order-42"), []got{{"body.name|b64#1", "17", "42", 1}}},
+		{"a step opens neither side", withB64, "order-17", "order-42", []got{{"body.name", "order-17", "order-42", -1}}},
+		{"a step opens one side", withB64, b64("order-17"), "order-42", []got{{"body.name", b64("order-17"), "order-42", -1}}},
+		{"opened, the words do not pair", withB64, b64("order-17"), b64("order-17-x"), []got{{"body.name|b64", "order-17", "order-17-x", -1}}},
+		{"a word the adapter names is the leaf whole", func(l Leaf, a bool) (string, bool) { s, ok := withB64(l, a); return s + "#3", ok }, b64("order-17"), b64("order-42"), []got{{"body.name|b64#1", "17", "42", 1}}},
+		{"a place that does not parse", func(Leaf, bool) (string, bool) { return "body", true }, "order-17", "order-42", []got{{"", "17", "42", 1}}},
 	} {
-		if got := at(c.placeOf); !reflect.DeepEqual(got, c.want) {
-			t.Errorf("%s: At %q, want %q", c.name, got, c.want)
+		if g := at(c.placeOf, c.r, c.f); !reflect.DeepEqual(g, c.want) {
+			t.Errorf("%s: %+v, want %+v", c.name, g, c.want)
 		}
 	}
+	rec := Shape{Leaves: map[string]Leaf{"body.name": {Path: "body.name", Type: String, Value: "order-17"}}}
+	live := Shape{Leaves: map[string]Leaf{"body.name": {Path: "body.name", Type: String, Value: "order-42"}}}
+	var asked []bool
+	mongo := func(l Leaf, answer bool) (string, bool) { asked = append(asked, answer); return VarPlace(l, true) }
+	Decide(Input{Rec: rec, Live: live, Drift: []string{"body.name"}, PlaceOf: mongo})
 	if !reflect.DeepEqual(asked, []bool{false}) {
 		t.Errorf("PlaceOf asked answer=%v for the request's leaf, want [false]", asked)
 	}
@@ -219,5 +242,9 @@ func TestABodylessShapeNamesItsPlacesByTheAdapter(t *testing.T) {
 	in.PlaceOf = mongo
 	if got := in.AddressOf(ans, true); got.String() != "body.id" || asked[len(asked)-1] != true {
 		t.Errorf("PlaceOf on an answer leaf: %+v, asked %v", got, asked)
+	}
+	in.PlaceOf = func(Leaf, bool) (string, bool) { return "body.id|b64#3", true }
+	if got := in.AddressOf(ans, true); got.String() != "body.id|b64" || got.Word != -1 {
+		t.Errorf("a word PlaceOf names: %+v, want the leaf whole (word -1)", got)
 	}
 }

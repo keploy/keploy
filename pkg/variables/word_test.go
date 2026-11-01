@@ -8,7 +8,7 @@ import (
 	"go.keploy.io/server/v3/pkg/templates"
 )
 
-// TestAWordAddressReadsAsItIsWritten (TY1): every step and a word index
+// TestAWordAddressReadsAsItIsWritten: every step and a word index
 // round-trip through ParseAddress and String, and a plain place reads with
 // no step and Word -1, written byte for byte as Parse and Place.String do.
 func TestAWordAddressReadsAsItIsWritten(t *testing.T) {
@@ -69,6 +69,16 @@ func TestAWordAddressReadsAsItIsWritten(t *testing.T) {
 	if a, err := ParseAddress("header.X|Y"); err != nil || a.Place.Name != "X|Y" || a.Word != -1 {
 		t.Errorf("an unescaped name reads as %+v, %v", a, err)
 	}
+	// The limit: a name written before word addresses that ends in #<digits>
+	// reads through ParseAddress as a word of the shorter name. Such a field
+	// is read with Parse, which keeps the whole name.
+	for _, c := range []struct{ s, short, whole string }{{"url.query.page#2", "page", "page#2"}, {"header.X-Id#1", "X-Id", "X-Id#1"}} {
+		a, _ := ParseAddress(c.s)
+		p, err := Parse(c.s)
+		if a.Place.Name != c.short || a.Word < 0 || err != nil || p.Name != c.whole {
+			t.Errorf("%q: ParseAddress %+v, Parse %+v %v", c.s, a, p, err)
+		}
+	}
 
 	for _, s := range []string{"url.path[2]|nope", "url.path[2]#x", "url.path[2]#01", "header.", "url.path[2]|jwt.", "body"} {
 		if a, err := ParseAddress(s); err == nil || a.Word != -1 {
@@ -83,7 +93,7 @@ func TestAWordAddressReadsAsItIsWritten(t *testing.T) {
 	}
 }
 
-// TestAWordIsReadAndReplacedThroughItsSteps (TY2): WordOf and ReplaceWord
+// TestAWordIsReadAndReplacedThroughItsSteps: WordOf and ReplaceWord
 // through pct, json, b64, b64url and cookie.<name>, every other byte kept;
 // a JWT claim reads, and refuses to be replaced.
 func TestAWordIsReadAndReplacedThroughItsSteps(t *testing.T) {
@@ -114,6 +124,23 @@ func TestAWordIsReadAndReplacedThroughItsSteps(t *testing.T) {
 		{"an empty value", "a-17-b", nil, 1, "17", "", ""},
 		{"a cookie value with a ;", "sid=abc-17", []Step{Cookie("sid")}, 1, "17", "4;2", ""},
 		{"no plain word", "abc", nil, 0, "abc", "x7", "x7"},
+		// base64 keeps the recording's own padding: shown by its '=', or by its
+		// length where it needed one and has none; where neither shows it, a
+		// value whose padded and raw forms differ is refused.
+		{"b64 padded stays padded", "aWQtMTI=", []Step{StepB64}, 1, "12", "1234", "aWQtMTIzNA=="},
+		{"b64url raw stays raw", "aWQtMTI", []Step{StepB64URL}, 1, "12", "1234", "aWQtMTIzNA"},
+		{"b64url padding not shown, forms equal", "aWQtMTIz", []Step{StepB64URL}, 1, "123", "456", "aWQtNDU2"},
+		{"b64url padding not shown, forms differ", "aWQtMTIz", []Step{StepB64URL}, 1, "123", "1234", ""},
+		{"b64 padding not shown, forms differ", "aWQtMTIz", []Step{StepB64}, 1, "123", "12", ""},
+		// json re-encodes only a string it writes the same way.
+		{"json keeps its HTML escape", `"a\u003cb-17"`, []Step{StepJSON}, 2, "17", "18", `"a\u003cb-18"`},
+		{"json without an HTML escape", `"a<b-17"`, []Step{StepJSON}, 2, "17", "18", `"a<b-18"`},
+		{"json escaping a / no encoder escapes", `"a\/b-17"`, []Step{StepJSON}, 2, "17", "18", ""},
+		// A cookie value never takes a byte a cookie value cannot hold.
+		{"a cookie value with a space", "sid=abc-17", []Step{Cookie("sid")}, -1, "abc-17", "a b", ""},
+		{"a cookie value with a quote", "sid=abc-17", []Step{Cookie("sid")}, -1, "abc-17", `a"b`, ""},
+		{"a cookie value with a comma", "sid=abc-17", []Step{Cookie("sid")}, -1, "abc-17", "a,b", ""},
+		{"a cookie value with a backslash", "sid=abc-17", []Step{Cookie("sid")}, -1, "abc-17", `a\b`, ""},
 	} {
 		a := Address{Place: q, Steps: c.steps, Word: c.word}
 		got, ok := a.WordOf(c.leaf)
@@ -147,6 +174,8 @@ func TestAWordIsReadAndReplacedThroughItsSteps(t *testing.T) {
 		{`1]`, []Step{StepJSON}, -1},
 		{"a-b", nil, 2},
 		{"", []Step{StepB64}, -1},
+		{"x." + b64url(`{"sub":"u1"}`), []Step{JWTClaim("sub")}, -1},
+		{"x." + b64url(`{"sub":"u1"}`) + ".c.d", []Step{JWTClaim("sub")}, -1},
 	} {
 		a := Address{Place: q, Steps: c.steps, Word: c.word}
 		if got, ok := a.WordOf(c.leaf); ok {

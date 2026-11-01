@@ -320,7 +320,10 @@ type ClockOffset struct {
 	Word ClockWord `json:"word,omitzero" yaml:"word,omitempty" bson:"word,omitempty"`
 	// Why is the line the learn step wrote for the read: what, where, both
 	// values, the rule and the undo, for a person or a tool reading the mock.
-	// Nothing replays it. Meet keeps the first that is not "".
+	// Nothing replays it. Meet keeps the lesser of two that are set, so one
+	// line in either order; after a Meet that narrows the offset, that line
+	// may quote the wider range one learning saw, until the learn step
+	// writes Why again from the met offset.
 	Why string `json:"why,omitempty" yaml:"why,omitempty" bson:"why,omitempty"`
 	// Step is the cut the application made its clock read to before it added
 	// the offset (a read cut to the hour, plus thirty days): a replay checks
@@ -366,7 +369,11 @@ type ClockWord struct {
 	// base64 runs decoded where they stand (a percent-encoded instant, one
 	// written with "\u002b" for its '+', one inside a base64 cursor), where
 	// the word and its sides are read, so the sides are compared as decoded
-	// text. A form this keploy does not read is no place of a text (Valid).
+	// text. Any other form is no place of a text (Valid). WordOf does not
+	// decode yet: the replay that reads Decoded lands before any learn step
+	// writes it, and until then nothing writes it. A Decoded word read raw
+	// fails its decoded sides' hashes, or, as the whole value, is the raw
+	// text checked whole, which the learned layout does not read.
 	Form string `json:"form,omitempty" yaml:"form,omitempty" bson:"form,omitempty"`
 }
 

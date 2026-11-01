@@ -51,7 +51,7 @@ var clockCodecs = []codec{
 	{"bson", bson.Marshal, bson.Unmarshal},
 }
 
-// TestClockFieldsRoundTripAndLeaveOldFilesAlone (TY5): Why, Step and Form
+// TestClockFieldsRoundTripAndLeaveOldFilesAlone: Why, Step and Form
 // round-trip through YAML, JSON and BSON, and at their zero values a
 // ClockOffset encodes byte for byte as one did before them.
 func TestClockFieldsRoundTripAndLeaveOldFilesAlone(t *testing.T) {
@@ -89,7 +89,7 @@ func TestClockFieldsRoundTripAndLeaveOldFilesAlone(t *testing.T) {
 	}
 }
 
-// TestClockFieldsMeetAndHold (TY5): Meet keeps one Why in either order, meets two
+// TestClockFieldsMeetAndHold: Meet keeps one Why in either order, meets two
 // Steps as StepApart (Empty); Holds of a Step above zero is holdsStep's,
 // which holds nothing until a keploy reads it; Valid reads a decoded Form.
 func TestClockFieldsMeetAndHold(t *testing.T) {
