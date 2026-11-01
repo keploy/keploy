@@ -8,12 +8,13 @@ import (
 // fakeSource is a process's clocks, moved by the test: each step moves the
 // wall clock and the CPU time by what it says.
 type fakeSource struct {
-	wall  time.Time
-	cpu   time.Duration
-	limit float64       // CPUs; 0: none
-	reads int           // of the CPU limit
-	held  time.Duration // the threads' wait the next heldOff says
-	heldN int           // calls of heldOff
+	wall    time.Time
+	cpu     time.Duration
+	limit   float64       // CPUs; 0: none
+	reads   int           // of the CPU limit
+	held    time.Duration // the threads' wait the next heldOff says
+	heldNow bool          // whether heldOff says a thread is held off now
+	heldN   int           // calls of heldOff
 }
 
 func (f *fakeSource) now() (time.Time, time.Duration, bool) { return f.wall, f.cpu, true }
@@ -21,11 +22,11 @@ func (f *fakeSource) cpuLimit() (float64, bool) {
 	f.reads++
 	return f.limit, f.limit > 0
 }
-func (f *fakeSource) heldOff() time.Duration {
+func (f *fakeSource) heldOff() (time.Duration, bool) {
 	d := f.held
 	f.held = 0
 	f.heldN++
-	return d
+	return d, f.heldNow
 }
 
 // newFakeSampler is a sampler over a fakeSource, started as acquire starts
@@ -160,7 +161,7 @@ func (c heldClock) Runnable() time.Duration { return time.Duration(c.s.ran.Load(
 func (c heldClock) After(time.Duration) (<-chan time.Time, func() bool) {
 	return nil, func() bool { return true }
 }
-func (c heldClock) owed() time.Duration { return c.s.owed() }
+func (c heldClock) owed() (time.Duration, bool, uint64) { return c.s.owed() }
 
 // The verdict is what must not wait for the next read: a stall that reaches
 // its bound on samples that counted a wait not read yet has not expired, and
@@ -187,8 +188,55 @@ func TestMeter_AVerdictReadsTheWaitsFirst(t *testing.T) {
 		t.Fatalf("expired after %v on the samples, %v owed", m.Stalled(), s.waitOwed)
 	}
 	step(1)
+	if m.Expired() {
+		t.Fatal("expired at the look that found it due: the verdict is the next look's")
+	}
+	if m.Expired() {
+		t.Fatal("expired with no read of the threads since the look that found it due")
+	}
+	step(1)
 	if !m.Expired() {
 		t.Fatalf("not expired on 200 ms that could run: %v on the samples, %v owed", m.Stalled(), s.waitOwed)
+	}
+}
+
+// A thread held off right now (the host took its virtual CPU, or it waits on
+// a run queue) has a wait the kernel shows only once it ends. The verdict
+// waits for it: on a VM whose host took the consumer's CPU for 250 ms, while
+// the sampler ran on time on another, the stall was not the consumer's.
+func TestMeter_AVerdictWaitsForAThreadHeldOffNow(t *testing.T) {
+	s, src := newFakeSampler(0)
+	m := NewMeter(heldClock{s}, 100*time.Millisecond)
+	step := func() {
+		src.wall, src.cpu = src.wall.Add(Tick), src.cpu+Tick/4
+		s.sample()
+	}
+	for range 5 {
+		step() // the consumer works
+	}
+	src.heldNow = true // the host takes its CPU
+	for range 25 {
+		step()
+		if m.Expired() {
+			t.Fatalf("expired at %v on the samples while a thread is held off now", m.Stalled())
+		}
+	}
+	src.heldNow, src.held = false, 250*time.Millisecond // back, and the steal shows
+	step()
+	if m.Expired() || m.due.Load() != 0 {
+		t.Fatalf("expired or due on %v on the samples, %v of it the host's", m.Stalled(), s.waitOwed)
+	}
+	// The stall goes on as what the process could run: 60 ms of the 100,
+	// due 40 ms on, drawn at the look after.
+	n := 0
+	for !m.Expired() {
+		if n++; n > 10 {
+			t.Fatal("never expired")
+		}
+		step()
+	}
+	if n != 5 {
+		t.Fatalf("expired %d samples after the host gave the CPU back, want 5: due at 4, drawn at 5", n)
 	}
 }
 

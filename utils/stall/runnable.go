@@ -70,7 +70,7 @@ func (processClock) After(d time.Duration) (<-chan time.Time, func() bool) {
 	return t.C, t.Stop
 }
 
-func (processClock) owed() time.Duration { return proc.owed() }
+func (processClock) owed() (time.Duration, bool, uint64) { return proc.owed() }
 
 // proc samples the process while it is held (Process).
 var proc = &sampler{src: realSource{}, tick: Tick}
@@ -105,8 +105,16 @@ var proc = &sampler{src: realSource{}, tick: Tick}
 // CPU (readWaits): the most any one thread waited, as what a stall waits on
 // is one goroutine, on one thread at a time. Late samples have paid already:
 // they count what the process ran. A stall about to be judged reads the waits
-// first (Meter.Expired). What that cannot see is the wait in progress, which
-// the kernel adds up when it ends: one turn behind the work on a CPU.
+// first (Meter.Expired). The same goes for a virtual CPU the host did not
+// run (steal): on a VM whose host is busy, a thread running on it stops for
+// as long as the host takes it, 250 ms at a time on a loaded host, and it
+// neither runs nor waits on a run queue meanwhile; so a thread's wait is its
+// run delay and the steal of the CPU it is on. Neither shows while it lasts:
+// the kernel adds a wait to the run delay as it ends, and steal to the CPU's
+// at its first tick back. So a verdict is not drawn while a thread of the
+// process is held off right now (runnable, and not moved since the last
+// read), and is drawn at the look after the one that found it due, on a read
+// of the threads made since (Meter.Expired).
 type sampler struct {
 	src  source
 	tick time.Duration
@@ -121,10 +129,14 @@ type sampler struct {
 	lastCPU  time.Duration
 	cpuOK    bool
 	// The last read of the threads' waits (readWaits), what on-time samples
-	// counted that no wait has taken, and what they have yet to pay for.
+	// counted that no wait has taken, and what they have yet to pay for;
+	// whether that read found a thread held off right now, and how many
+	// reads there have been.
 	waitWall time.Time
 	onTime   time.Duration
 	waitOwed time.Duration
+	heldNow  bool
+	reads    uint64
 }
 
 // heldEvery is how often the sampler reads how long the process's threads
@@ -137,9 +149,10 @@ const heldEvery = time.Second
 type source interface {
 	now() (wall time.Time, cpu time.Duration, ok bool)
 	cpuLimit() (cpus float64, ok bool)
-	// heldOff is the most any one thread of the process waited for a CPU
-	// since the last call, 0 where that cannot be read.
-	heldOff() time.Duration
+	// heldOff is the most any one thread of the process was held off a CPU
+	// since the last call (its run delay, and the steal of its CPU), 0
+	// where that cannot be read; and whether a thread is held off now.
+	heldOff() (time.Duration, bool)
 }
 
 // acquire adds a user, starting the sampling with the first, and returns the
@@ -157,7 +170,7 @@ func (s *sampler) acquire() func() {
 			s.src.heldOff()
 			s.waitWall = s.lastWall
 		}
-		s.onTime, s.waitOwed = 0, 0
+		s.onTime, s.waitOwed, s.heldNow = 0, 0, false
 		s.stop, s.done = make(chan struct{}), make(chan struct{})
 		go s.run(s.stop, s.done)
 	}
@@ -230,23 +243,27 @@ func (s *sampler) sample() {
 // worth of time, and a stall that is real goes on counting when the host
 // quietens. Called with mu held.
 func (s *sampler) readWaits() {
-	took := min(s.src.heldOff(), s.onTime)
+	held, now := s.src.heldOff()
+	took := min(held, s.onTime)
 	s.waitOwed += took
 	s.onTime, s.waitWall = min(s.onTime-took, heldEvery), s.lastWall
+	s.heldNow = now
+	s.reads++
 }
 
-// owed reads the waits, and says what on-time samples owe as of now: time on
-// the clock that the process could not run. It reads them only if a sample
-// came since the last read: the clock has not moved since then, and stalls
-// at their verdict on every connection of a starved process must not read
-// every thread at each of their looks, with the CPU it lacks.
-func (s *sampler) owed() time.Duration {
+// owed reads the waits, and says what on-time samples owe as of now (time on
+// the clock that the process could not run), whether a thread is held off
+// right now, and which read that is. It reads them only if a sample came
+// since the last read: the clock has not moved since then, and stalls at
+// their verdict on every connection of a starved process must not read every
+// thread at each of their looks, with the CPU it lacks.
+func (s *sampler) owed() (owed time.Duration, heldNow bool, read uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.lastWall.After(s.waitWall) {
 		s.readWaits()
 	}
-	return s.waitOwed
+	return s.waitOwed, s.heldNow, s.reads
 }
 
 // accrue is what a process could run in an interval iv between two samples
@@ -277,7 +294,7 @@ func (realSource) now() (time.Time, time.Duration, bool) {
 // procWaits is the process's threads' waits; the sampler's lock guards it.
 var procWaits threadWaits
 
-func (realSource) heldOff() time.Duration { return procWaits.longest() }
+func (realSource) heldOff() (time.Duration, bool) { return procWaits.longest() }
 
 // cpuLimit is ProcessCPULimit, read at most once per cpuLimitRefresh: reading
 // the cgroup files at every sample would cost a starved process the CPU it
@@ -318,6 +335,9 @@ type Meter struct {
 	check   time.Duration
 	start   atomic.Int64 // Runnable at the stall's start, ns
 	release func()
+	// due is the read of the threads (sampler.owed) at the look that found
+	// the stall due, 0 while it is not.
+	due atomic.Uint64
 
 	timerMu   sync.Mutex
 	stopTimer func() bool
@@ -358,13 +378,35 @@ func (m *Meter) Stalled() time.Duration {
 
 // Expired reports whether the process has had the whole grace to run since
 // the stall began. A clock that knows of time on it the process could not run
-// (the process clock: sampler.owed) is asked at the verdict, not before it.
+// (the process clock: sampler.owed) is asked at the verdict, not before it,
+// and the verdict waits for what it cannot know yet: the look that finds the
+// stall due only marks it, and a later look draws it, on a read of the
+// threads made since that finds none held off right now (sampler). So a
+// stall is acted on a look or two after it is due, once the process's
+// threads have had their turn.
 func (m *Meter) Expired() bool {
 	if m.Stalled() < m.grace {
+		m.due.Store(0)
 		return false
 	}
-	c, ok := m.clk.(interface{ owed() time.Duration })
-	return !ok || m.Stalled()-c.owed() >= m.grace
+	c, ok := m.clk.(interface {
+		owed() (time.Duration, bool, uint64)
+	})
+	if !ok {
+		return true
+	}
+	owed, heldNow, read := c.owed()
+	if m.Stalled()-owed < m.grace {
+		m.due.Store(0)
+		return false
+	}
+	if due := m.due.Load(); due == 0 || heldNow || read == due {
+		// Due at this look (or still held off, or no read since): look
+		// again on the next read.
+		m.due.Store(read)
+		return false
+	}
+	return true
 }
 
 // Grace is the stall's bound.
