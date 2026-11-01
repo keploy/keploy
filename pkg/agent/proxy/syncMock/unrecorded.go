@@ -353,7 +353,11 @@ type UnrecordedConn struct {
 	// running: a span is open and a goroutine follows the connection with it.
 	// Set once the span is open, and cleared before an idle close closes it,
 	// so bytes seen with it set are inside a span, and bytes seen with it
-	// clear open their own. spanMu orders those opens and that close.
+	// clear open their own. spanMu orders those opens: the first start opens
+	// the span, and one behind it finds it open. The idle close takes it too,
+	// only so that the next span opens once this one closed (a connection
+	// has one span open at a time); covering the bytes needs only the clear
+	// before the close.
 	running atomic.Bool
 	spanMu  sync.Mutex
 	// seen is when bytes were last observed on this process's clock (UnixNano),
@@ -471,8 +475,8 @@ func (u *UnrecordedConn) follow(closeSpan func()) {
 			}
 			// Idle: the span ends here. A Note that saw running set came before
 			// the close, inside this span. The first one to see it clear
-			// waits for the close and opens the next span from its own bytes,
-			// so no later Note can open it past those.
+			// opens the next span from its own bytes (start), once this close
+			// is over.
 			u.spanMu.Lock()
 			u.running.Store(false)
 			closeSpan()
