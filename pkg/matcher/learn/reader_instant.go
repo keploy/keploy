@@ -8,7 +8,7 @@ import (
 	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
-// The reader's instants (D3). An instant is judged whole, never word by
+// The reader's instants. An instant is judged whole, never word by
 // word:
 //   - every typed datetime (an Instant leaf: a BSON date), whole
 //     (readTypedPair);
