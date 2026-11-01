@@ -2,7 +2,6 @@ package learn
 
 import (
 	"encoding/json"
-	"regexp"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -11,19 +10,19 @@ import (
 // A refused word's line is one line a person, an LLM or a tool
 // reads:
 //
-//	[<test> ]<mock> <field>[ word <n>]: recorded "<r>", round F "<f>": refused (<kind>): <why>. Places: <p>, <p>, <p>. Edits: <edit>; or <edit>. edits=[{"kind":...}]
+//	[<test> ]<mock> <field>[ word <n>]: recorded "<r>", round F "<f>": refused (<kind>): <why>. Places: <p>, <p>, <p>. Edits: <edit>; or <edit>. refusal={"kind":...}
 //
 // The values are always quoted (strconv.Quote), so a value with quotes,
 // colons or newlines stays on one line and reads back as it was. A name
 // (test, mock, field, a given's name) is printed bare where it holds no
-// space, quote or separator, and quoted otherwise. The why is printed bare
-// unless it holds a section's start (". Places: ", ". Edits: "), a control
-// byte or a leading quote. At most three places are printed; the edits are
-// likeliest first, each in the words of the edit to make (keploy never
-// makes it). The line ends with the same edits in one fixed form, a JSON
-// array of {kind, mock, field, word, name} (lineEdit) after "edits=", for a
-// tool to read without parsing the words. ParseRefusal reads every such
-// line back to its Refusal.
+// space, quote or separator, and quoted otherwise. A why or a place is
+// printed bare unless that would break the line. At most three places are
+// printed; the edits are likeliest first, each in the words of the edit to
+// make (keploy never makes it). The line ends with the refusal but for its
+// two values and its why in one fixed form, a JSON object after "refusal=",
+// for a tool to read without parsing the words; each value stands once, in
+// the sentence, where that tail fixes it. ParseRefusal reads every such line
+// back to its Refusal.
 
 // maxLinePlaces is the most places a line names.
 const maxLinePlaces = 3
@@ -31,23 +30,9 @@ const maxLinePlaces = 3
 const (
 	recordedMark = ": recorded "
 	roundFMark   = ", round F "
-	refusedMark  = ": refused ("
-	limitMark    = ", keploy's limit"
-	placesMark   = ". Places: "
-	editsMark    = ". Edits: "
+	refusalTail  = " refusal="
 	editSep      = "; or "
-	placeSep     = ", "
-	editsTail    = " edits="
 )
-
-// lineEdit is an Edit in the line's fixed form.
-type lineEdit struct {
-	Kind  EditKind `json:"kind"`
-	Mock  string   `json:"mock,omitempty"`
-	Field string   `json:"field,omitempty"`
-	Name  string   `json:"name,omitempty"`
-	Word  int      `json:"word,omitempty"`
-}
 
 // editForms is each edit's words. %m is the mock, %f the field, %w the
 // word, %n a given's name; each kind carries only the fields its words
@@ -73,45 +58,45 @@ var refusalKinds = map[RefusalKind]bool{
 
 // RefusalLine is r's one line (see above).
 func RefusalLine(r Refusal) string {
-	var b strings.Builder
-	b.WriteString(wordWhere(r.Test, r.Mock, r.Field, r.Word))
-	b.WriteString(recordedMark + strconv.Quote(r.Recorded) + roundFMark + strconv.Quote(r.Full))
-	b.WriteString(refusedMark + string(r.Kind))
-	if r.Kind == RefusalCannotCheck {
-		b.WriteString(limitMark)
-	}
-	b.WriteString("): ")
-	if plainWhy(r.Why) {
-		b.WriteString(r.Why)
-	} else {
-		b.WriteString(strconv.Quote(r.Why))
-	}
-	b.WriteString(placesPart(r.Places))
-	tail, words := make([]lineEdit, len(r.Edits)), make([]string, len(r.Edits))
-	for i, e := range r.Edits {
-		tail[i], words[i] = lineEdit(e), editWords(e)
-	}
-	if len(words) > 0 {
-		b.WriteString(editsMark + strings.Join(words, editSep))
-	}
-	js, _ := json.Marshal(tail) // a slice of strings and ints always marshals
-	b.WriteString("." + editsTail + string(js))
-	return b.String()
+	return wordWhere(r.Test, r.Mock, r.Field, r.Word) + recordedMark + strconv.Quote(r.Recorded) + roundFMark + strconv.Quote(r.Full) +
+		refusedClause(r.Kind) + printed(r.Why) + refusalFoot(r)
 }
 
-// placesPart is a line's places, each bare or quoted, at most three.
+// refusedClause is what stands between a line's values and its why.
+func refusedClause(k RefusalKind) string {
+	if k == RefusalCannotCheck {
+		return ": refused (" + string(k) + ", keploy's limit): "
+	}
+	return ": refused (" + string(k) + "): "
+}
+
+// refusalFoot is what follows r's why: its places, its edits in words and
+// the line's fixed tail.
+func refusalFoot(r Refusal) string {
+	r.Places = r.Places[:min(len(r.Places), maxLinePlaces)]
+	s := placesPart(r.Places)
+	for i, e := range r.Edits {
+		if i == 0 {
+			s += ". Edits: " + editWords(e)
+		} else {
+			s += editSep + editWords(e)
+		}
+	}
+	r.Recorded, r.Full, r.Why = "", "", ""
+	js, _ := json.Marshal(r) // a struct of strings and ints always marshals
+	return s + "." + refusalTail + string(js)
+}
+
+// placesPart is a line's places, at most three.
 func placesPart(ps []string) string {
 	if len(ps) == 0 {
 		return ""
 	}
 	out := make([]string, 0, maxLinePlaces)
 	for _, p := range ps[:min(len(ps), maxLinePlaces)] {
-		if !plainPlace(p) {
-			p = strconv.Quote(p)
-		}
-		out = append(out, p)
+		out = append(out, printed(p))
 	}
-	return placesMark + strings.Join(out, placeSep)
+	return ". Places: " + strings.Join(out, ", ")
 }
 
 // wordWhere is "[<test> ]<mock> <field>[ word <n>]", each name bare or quoted.
@@ -136,59 +121,45 @@ func editWords(e Edit) string {
 	return strings.NewReplacer("%m", lineName(e.Mock), "%f", lineName(e.Field), "%w", strconv.Itoa(e.Word), "%n", strconv.Quote(e.Name)).Replace(form)
 }
 
-// lineName is s bare where it is a plain name: not empty, valid UTF-8, no
-// space, separator, quote or control byte, and not ending in '.'; else s
-// quoted.
-func lineName(s string) string {
-	if s == "" || !utf8.ValidString(s) || strings.HasSuffix(s, ".") || strings.ContainsAny(s, " :;,\"") || hasControl(s) {
+// printed is a why or a place as a line prints it: bare, or quoted where it
+// is empty or bare would break the line.
+func printed(s string) string {
+	if s == "" || !utf8.ValidString(s) || strings.ContainsFunc(s, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
 		return strconv.Quote(s)
 	}
 	return s
 }
 
-// plainWhy reports whether why prints bare: it reads back whole.
-func plainWhy(why string) bool {
-	return why != "" && utf8.ValidString(why) && !hasControl(why) && !strings.HasPrefix(why, `"`) &&
-		!strings.Contains(why, placesMark) && !strings.Contains(why, editsMark)
-}
-
-// plainPlace reports whether a place prints bare: it reads back whole.
-func plainPlace(p string) bool {
-	return p != "" && utf8.ValidString(p) && !hasControl(p) && !strings.HasPrefix(p, `"`) &&
-		!strings.HasSuffix(p, ".") && !strings.Contains(p, placeSep) && !strings.Contains(p, ". ")
-}
-
-func hasControl(s string) bool {
-	for i := 0; i < len(s); i++ {
-		if s[i] < 0x20 || s[i] == 0x7f {
-			return true
-		}
+// lineName is s bare where it is a plain name: printed bare, with no space,
+// separator or quote, and not ending in '.'; else s quoted.
+func lineName(s string) string {
+	if printed(s) != s || strings.HasSuffix(s, ".") || strings.ContainsAny(s, " :;,\"") {
+		return strconv.Quote(s)
 	}
-	return false
+	return s
 }
 
 // ParseRefusal reads a refused word's line back to its Refusal; ok false
-// where line is not one (a learned line, an edit of no known kind, text).
-// A line printed with more than three places reads back with three. It
-// takes the edits from the line's fixed tail, reads the head, and keeps
-// the result only where printing it gives the line again, so a line it
-// misreads is no refusal (fail closed).
+// where line is not one (a learned line, a kind or an edit of no known kind,
+// text). A line printed with more than three places reads back with three.
+// It takes all but the values and the why from the line's fixed tail, reads
+// those where the tail fixes them, and keeps the result only where printing
+// it gives the line again, so a line it misreads is no refusal (fail closed).
 func ParseRefusal(line string) (Refusal, bool) {
-	// The tail is the last "edits=" whose rest is a JSON array; an earlier
+	// The tail is the last "refusal=" whose rest is a JSON object; an earlier
 	// one inside a quoted value never parses to the line's end.
 	for end := len(line); end > 0; {
-		if end = strings.LastIndex(line[:end], editsTail); end < 0 {
+		if end = strings.LastIndex(line[:end], refusalTail); end < 0 {
 			break
 		}
-		var tail []lineEdit
-		if json.Unmarshal([]byte(line[end+len(editsTail):]), &tail) != nil {
+		var r Refusal
+		if json.Unmarshal([]byte(line[end+len(refusalTail):]), &r) != nil {
 			continue
 		}
-		r, ok := parseHead(line[:end])
-		for _, e := range tail {
+		ok := refusalKinds[r.Kind] && readTexts(&r, line)
+		for _, e := range r.Edits {
 			_, known := editForms[e.Kind]
 			ok = ok && known
-			r.Edits = append(r.Edits, Edit(e))
 		}
 		if ok && RefusalLine(r) == line {
 			return r, true
@@ -197,76 +168,28 @@ func ParseRefusal(line string) (Refusal, bool) {
 	return Refusal{}, false
 }
 
-// whereEnds matches what follows a line's second name where that name is the
-// field, in a line of no test.
-var whereEnds = regexp.MustCompile("^( word [0-9]+)?" + recordedMark)
-
-// parseHead reads the line before its tail: the word, both values, the
-// kind, the why and the places. The words of the edits are skipped: the
-// tail holds them.
-func parseHead(s string) (Refusal, bool) {
-	r := Refusal{Word: -1}
-	p := lineReader{s: strings.TrimSuffix(s, "."), ok: strings.HasSuffix(s, ".")}
-	r.Mock, r.Field = p.text(" "), p.lit(" ").text(" ", ":")
-	if !whereEnds.MatchString(p.s) {
-		r.Test, r.Mock, r.Field = r.Mock, r.Field, p.lit(" ").text(" ", ":")
+// readTexts reads r's two values and its why from line, between the parts
+// r's tail fixes; false where line does not hold them there.
+func readTexts(r *Refusal, line string) bool {
+	s, atRec := strings.CutPrefix(line, wordWhere(r.Test, r.Mock, r.Field, r.Word)+recordedMark)
+	rec, s, okR := cutQuoted(s)
+	s, atF := strings.CutPrefix(s, roundFMark)
+	full, s, okF := cutQuoted(s)
+	s, atWhy := strings.CutPrefix(s, refusedClause(r.Kind))
+	why, ended := strings.CutSuffix(s, refusalFoot(*r))
+	if u, err := strconv.Unquote(why); err == nil && printed(u) == why {
+		why = u
 	}
-	if p.ok && strings.HasPrefix(p.s, " word ") {
-		w, err := strconv.Atoi(p.lit(" word ").text(":"))
-		r.Word, p.ok = w, p.ok && err == nil
-	}
-	r.Recorded = p.lit(recordedMark).text(",")
-	r.Full = p.lit(roundFMark).text(":")
-	r.Kind = RefusalKind(p.lit(refusedMark).text(",", ")"))
-	if r.Kind == RefusalCannotCheck {
-		p.lit(limitMark)
-	}
-	r.Why = p.lit("): ").text(placesMark, editsMark)
-	if p.ok && strings.HasPrefix(p.s, placesMark) {
-		for r.Places = []string{p.lit(placesMark).text(placeSep, editsMark)}; p.ok && strings.HasPrefix(p.s, placeSep); {
-			r.Places = append(r.Places, p.lit(placeSep).text(placeSep, editsMark))
-		}
-	}
-	if p.ok && strings.HasPrefix(p.s, editsMark) {
-		p.s = ""
-	}
-	return r, p.ok && p.s == "" && refusalKinds[r.Kind]
+	r.Recorded, r.Full, r.Why = rec, full, why
+	return atRec && okR && atF && okF && atWhy && ended
 }
 
-// lineReader reads s from the front; ok turns false at the first piece
-// that is not there, and every later read then gives nothing.
-type lineReader struct {
-	s  string
-	ok bool
-}
-
-// lit consumes lit where s starts with it.
-func (p *lineReader) lit(lit string) *lineReader {
-	p.ok = p.ok && strings.HasPrefix(p.s, lit)
-	if p.ok {
-		p.s = p.s[len(lit):]
+// cutQuoted reads one Go-quoted string from the front of s, and the rest.
+func cutQuoted(s string) (v, rest string, ok bool) {
+	q, err := strconv.QuotedPrefix(s)
+	if err != nil {
+		return "", s, false
 	}
-	return p
-}
-
-// text consumes one Go-quoted string, or bare text up to the first stop
-// (or s's end), as lineName, plainWhy and plainPlace print it.
-func (p *lineReader) text(stops ...string) string {
-	if !p.ok {
-		return ""
-	}
-	if q, err := strconv.QuotedPrefix(p.s); err == nil && strings.HasPrefix(p.s, `"`) {
-		v, _ := strconv.Unquote(q)
-		p.s = p.s[len(q):]
-		return v
-	}
-	end := len(p.s)
-	for _, st := range stops {
-		if j := strings.Index(p.s, st); j >= 0 && j < end {
-			end = j
-		}
-	}
-	v := p.s[:end]
-	p.s, p.ok = p.s[end:], end > 0
-	return v
+	v, err = strconv.Unquote(q)
+	return v, s[len(q):], err == nil
 }

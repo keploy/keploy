@@ -96,26 +96,43 @@ func TestOutcomeRefusalLinesReadBackWhatTheySay(t *testing.T) {
 			t.Errorf("ParseRefusal(%q) read a refusal", s)
 		}
 	}
-	// The edits end the line in one fixed form a tool reads as JSON.
+	// The refusal ends the line in one fixed form a tool reads as JSON, its
+	// edits last, and its two values and its why stand once, in the sentence.
 	r.Edits = []Edit{{Kind: "move-to-mocks", Mock: "mock-9"}, {Kind: "noise-at-word", Mock: "mock-300", Field: "body.slot", Word: 0}, {Kind: "give", Name: `a "b"`}}
-	const tail = ` edits=[{"kind":"move-to-mocks","mock":"mock-9"},{"kind":"noise-at-word","mock":"mock-300","field":"body.slot"},{"kind":"give","name":"a \"b\""}]`
+	const tail = ` refusal={"kind":"conflict","test":"test-2","mock":"mock-300","field":"body.slot","word":-1,"places":["mock-1 a","mock-2 b","mock-3 c"],"edits":[{"kind":"move-to-mocks","mock":"mock-9"},{"kind":"noise-at-word","mock":"mock-300","field":"body.slot"},{"kind":"give","name":"a \"b\""}]}`
 	if line := RefusalLine(r); !strings.HasSuffix(line, "."+tail) {
-		t.Errorf("edits: %q; want it to end %q", line, tail)
+		t.Errorf("tail: %q; want it to end %q", line, tail)
 	}
-	// Text that looks like the tail, in a value, a why, a place or a name,
-	// reads back as it was; an empty why prints quoted.
-	odd := rfBase("unknown", `see edits=[] here`, []string{`mock-1 a edits=[]`, `"q", r`}, Edit{Kind: "give", Name: `x. edits=[{"kind":"none"}]`})
-	odd.Recorded, odd.Full, odd.Mock = ` edits=[{"kind":"none"}]`, `"`, `m edits=[]`
+	// Text that looks like the tail or a section, in a value, a why, a place
+	// or a name, reads back as it was; an empty why prints quoted, and a why
+	// that starts with a quoted value prints bare, as it reads.
+	odd := rfBase("unknown", `see refusal={} here. Places: a. Edits: b`, []string{`mock-1 a refusal={}`, `"q", r`}, Edit{Kind: "give", Name: `x. refusal={"kind":"none"}`})
+	odd.Recorded, odd.Full, odd.Mock = ` refusal={"kind":"pick"}`, `"`, `m refusal={}`
 	empty := rfBase("pick", "", nil)
-	for _, r := range []Refusal{odd, empty} {
-		if back, ok := ParseRefusal(RefusalLine(r)); !ok || !reflect.DeepEqual(back, r) {
-			t.Errorf("ParseRefusal(%q) = %+v, %v; want %+v", RefusalLine(r), back, ok, r)
+	quoted := rfBase("conflict", `"a" stood whole at mock-1 b; round F gave "c" there`, nil)
+	broken := rfBase("conflict", "two\nlines", nil)
+	whole := rfBase("conflict", `"a"`, nil)
+	for _, r := range []Refusal{odd, empty, quoted, broken, whole} {
+		line := RefusalLine(r)
+		if strings.Contains(line, "\n") {
+			t.Errorf("%q is not one line", line)
 		}
+		if back, ok := ParseRefusal(line); !ok || !reflect.DeepEqual(back, r) {
+			t.Errorf("ParseRefusal(%q) = %+v, %v; want %+v", line, back, ok, r)
+		}
+	}
+	if line := RefusalLine(quoted); !strings.Contains(line, `): "a" stood whole`) {
+		t.Errorf("a why that starts with a value: %q; want it bare", line)
+	}
+	// A value never stands twice: the tail holds neither value nor the why.
+	if line := RefusalLine(r); strings.Contains(line[strings.LastIndex(line, " refusal="):], "stood whole") || strings.Count(line, "elsewhere") != 1 {
+		t.Errorf("the tail repeats the sentence: %q", line)
 	}
 	// An edit of no known kind, or a tail that is cut, is no refusal.
 	unknown := rfBase("pick", "a pick", nil, Edit{Kind: "rewrite-history"})
+	badKind := rfBase("rewrite-history", "a pick", nil)
 	cut := RefusalLine(rfBase("pick", "a pick", nil, Edit{Kind: "re-record"}))
-	for _, s := range []string{RefusalLine(unknown), cut[:len(cut)-2], strings.Replace(cut, "re-record", "none", 1)} {
+	for _, s := range []string{RefusalLine(unknown), RefusalLine(badKind), cut[:len(cut)-2], strings.Replace(cut, "re-record", "none", 1)} {
 		if _, ok := ParseRefusal(s); ok {
 			t.Errorf("ParseRefusal(%q) read a refusal", s)
 		}
