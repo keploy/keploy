@@ -88,6 +88,7 @@ func bothWays(in Input, ds []Decision, fields []string, as []Decision, afields [
 			rf := *a.Refusal
 			rf.Word, rf.Recorded, rf.Full = d.At.Word, d.Recorded, d.Full
 			rf.Why += "; read as an earlier place of the test instead, it would be " + names[d.Outcome] + ", yet keploy refuses a value either reading refuses"
+			hideSecrets(&rf)
 			ds[i] = Decision{At: d.At, Recorded: d.Recorded, Full: d.Full, Refusal: &rf, Line: RefusalLine(rf)}
 		default:
 			ds[i] = dc.refuse(fields[i], d.At, d.At.Word, d.Recorded, d.Full, RefusalUnknown,
@@ -337,7 +338,7 @@ func (dc *decider) word(path string, bare variables.Address, rec, live, text str
 		p := evPlace{name: g.mock, mock: g.mock, otherTest: true, scope: "another test, or after this call", at: g.at}
 		ev, changed := setEvidence(g, w.Rec, w.Live, dc.in.At)
 		if changed {
-			p.live = "a value without " + w.Live
+			p.live = withoutMark + w.Live
 		}
 		switch ev {
 		case evShown:
@@ -384,7 +385,7 @@ func (dc *decider) word(path string, bare variables.Address, rec, live, text str
 	case len(conflict) > 0:
 		p := conflict[0]
 		return dc.refuse(path, at, n, w.Rec, w.Live, RefusalConflict,
-			w.Rec+" stood whole at "+p.name+"; round F gave "+gaveAt(p, w.Live)+" there and the value did not follow", names(conflict),
+			strconv.Quote(w.Rec)+" stood whole at "+p.name+"; round F gave "+gaveAt(p, w.Live)+" there and the value did not follow", names(conflict),
 			Edit{Kind: EditFixApp}, dc.fieldNoise(path), Edit{Kind: EditGive, Name: lastSegment(path)})
 	case len(unknown) > 0:
 		p := unknown[0]
@@ -640,7 +641,7 @@ func (dc *decider) instant(path string, at variables.Address, n int, c changedIn
 	if len(conflict) > 0 {
 		p := conflict[0]
 		return dc.refuse(path, at, n, r, l, RefusalConflict,
-			r+" stood whole at "+p.name+"; round F gave "+gaveAt(p, l)+" there and the value did not follow", names(conflict),
+			strconv.Quote(r)+" stood whole at "+p.name+"; round F gave "+gaveAt(p, l)+" there and the value did not follow", names(conflict),
 			Edit{Kind: EditFixApp}, dc.fieldNoise(path), Edit{Kind: EditGive, Name: lastSegment(path)})
 	}
 
@@ -1181,6 +1182,7 @@ func (dc *decider) learned(path string, at variables.Address, n int, r, f string
 func (dc *decider) refuse(path string, at variables.Address, n int, r, f string, kind RefusalKind, why string, places []string, edits ...Edit) Decision {
 	at.Word = n
 	rf := &Refusal{Kind: kind, Test: dc.in.Test, Mock: dc.in.Mock, Field: path, Word: n, Recorded: r, Full: f, Why: why, Places: places, Edits: edits}
+	hideSecrets(rf)
 	return Decision{At: at, Recorded: r, Full: f, Outcome: OutcomeRefused, Refusal: rf, Line: RefusalLine(*rf)}
 }
 
@@ -1209,15 +1211,16 @@ func names(ps []evPlace) []string {
 	return out
 }
 
-// gaveAt is what round F gave at p, in a line's words.
+// gaveAt is what round F gave at p, in a line's words, its value quoted
+// (a line quotes every value it names: hidden).
 func gaveAt(p evPlace, f string) string {
 	if p.same() {
 		return "the same text"
 	}
-	if l := p.liveText(); len(l) <= 40 {
-		return l
+	if l := p.liveText(); len(l) <= 40 && !strings.HasPrefix(l, withoutMark) {
+		return strconv.Quote(l)
 	}
-	return "a value without " + f
+	return withoutMark + strconv.Quote(f)
 }
 
 // scopeName names p's scope outside the call for a line.

@@ -50,6 +50,7 @@ func elsewhere(in Input, ds []Decision, fields []string) []Decision {
 		if d.Refusal != nil {
 			rf.Places = d.Refusal.Places
 		}
+		hideSecrets(rf)
 		out = append(out, Decision{At: d.At, Recorded: d.Recorded, Full: d.Full, Outcome: OutcomeRefused, Refusal: rf, Line: RefusalLine(*rf)})
 	}
 	return out
