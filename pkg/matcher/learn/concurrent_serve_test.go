@@ -9,14 +9,16 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 )
 
-// concurrentRun is the timeline of keploy test's post-url-2 in the sqs
-// sample's forced variant (CI 2026-10-31, r9/fail-head4): the test's begin
-// moves the app's clock to the recorded begin .933485077; the handler reads
-// its clock 0.6 ms later and writes the upsert's created at a cut of a
-// millisecond, .934; the consumer, a goroutine of its own, makes two calls
-// keploy serves after that read (1.3 ms and 3.9 ms after the move); the
-// handler's upsert reaches keploy only after them (4.4 ms), its driver
-// having waited for the pooled connection the consumer held.
+// concurrentRun models keploy test's post-url-2 in the sqs sample's forced
+// variant (CI 2026-10-31): the test's begin moves the app's clock to the
+// recorded begin .933485077; the handler reads its clock after the move and
+// writes the upsert's created at a cut of a millisecond, .934 (so a read at
+// least 0.51 ms after the move); the consumer, a goroutine of its own, makes
+// two calls (a count and an insert) on the pooled connection, which keploy
+// serves after that read; the handler's upsert reaches keploy only after
+// them. The logs fix that order, not the times within it: the row's times
+// after the move (the read at 0.6 ms, the serves at 1.3 ms and 3.5 ms, the
+// upsert's arrival at 4.4 ms) are illustrative.
 type concurrentRun struct {
 	move              runWrite
 	began, prevTest   time.Time // the test's begin and the previous test's last serve
@@ -36,7 +38,7 @@ func newConcurrentRun() concurrentRun {
 		prevTest: base.Add(-25 * time.Millisecond),
 		read:     move.to.Add(600 * time.Microsecond),
 		a:        move.to.Add(1300 * time.Microsecond),
-		b:        move.to.Add(3900 * time.Microsecond),
+		b:        move.to.Add(3500 * time.Microsecond),
 		upTo:     move.to.Add(4400 * time.Microsecond),
 		clock:    &runClock{writes: []runWrite{move}},
 		recBegin: recBegin,
@@ -65,12 +67,12 @@ func (r concurrentRun) tracker(client bool) *Tracker {
 // began: another goroutine's call that keploy serves after the test began
 // (a consumer beside the test's handler) can be served between a read of
 // the clock and the call that carries it, so it bounds nothing. The
-// handler's upsert, whose created the app read 0.6 ms after the test's
-// begin moved its clock and wrote at a cut of a millisecond (.934), reached
-// keploy after the consumer's two calls, served 1.3 ms and 3.9 ms after the
-// move: the replay's check (record's confirming round, and keploy test)
-// passes it, in a server test and in a client test alike, as it passes a
-// read at the move itself and one at the call's arrival. A value outside
+// handler's upsert, whose created the app read after the test's begin
+// moved its clock and wrote at a cut of a millisecond (.934), reached
+// keploy after the consumer's two calls were served: the replay's check
+// (record's confirming round, and keploy test) passes it, in a server test
+// and in a client test alike, as it passes a read at the move itself and
+// one at the call's arrival. A value outside
 // the test's span is refused as before: a read of the clock before the
 // move (the previous test's), a value a millisecond before the recorded
 // begin's cut and less a cut, and one more than a cut after the arrival.
@@ -112,8 +114,12 @@ func TestAConcurrentServeAfterTheReadDoesNotNarrowItsCallsSpan(t *testing.T) {
 // began no later than the call, and the app's clock ran as one from there:
 // in a server test where the hooks tell the clock's run (SetAppClockRun),
 // in a client test where they tell none too (as its span's begin is read).
-// The span itself still starts at the last serve, which the learn step's
-// windows read (CallWindowFrom), and the next set's begin clears it.
+// The table here moves the clock after the test began, so its server test
+// with no run told is refused by that move; the run told itself is pinned
+// on a clock that ran as one by
+// TestATestsBeginIsCarriedWithNoRunToldOnlyInAClientTest. The span itself
+// still starts at the last serve, which the learn step's windows read
+// (CallWindowFrom), and the next set's begin clears it.
 func TestALiveSpanCarriesItsTestsBeginOnlyWhereALaterServeStartsIt(t *testing.T) {
 	r := newConcurrentRun()
 	want := Span{From: r.b.Add(r.move.offset), To: r.upTo.Add(r.move.offset), TestFrom: r.recBegin}
@@ -129,7 +135,7 @@ func TestALiveSpanCarriesItsTestsBeginOnlyWhereALaterServeStartsIt(t *testing.T)
 		{"no serve after the test began", func(tr *Tracker) {}, r.a.Add(-time.Microsecond)},
 		{"the test ended", func(tr *Tracker) { tr.End() }, r.upTo},
 		{"a call that reached keploy before its test began", func(tr *Tracker) {}, r.began.Add(-time.Microsecond)},
-		{"a server test whose hooks tell no run", func(tr *Tracker) { tr.SetAppClockRun(nil) }, r.upTo},
+		{"a server test whose hooks tell no run, its clock moved since the test began", func(tr *Tracker) { tr.SetAppClockRun(nil) }, r.upTo},
 		{"the next set", func(tr *Tracker) { tr.NewSetAt(r.b.Add(time.Microsecond)) }, r.upTo},
 	} {
 		tr := r.tracker(false)
@@ -148,6 +154,44 @@ func TestALiveSpanCarriesItsTestsBeginOnlyWhereALaterServeStartsIt(t *testing.T)
 	}
 }
 
+// Where the hooks tell no run of the app's clock, a server test's span
+// carries no test's begin even on a clock that ran as one from it (here the
+// real clock, which from() reads as one run): the clock may have left the
+// begin's offset and come back to it since, so keploy cannot vouch for that
+// span, and a read made in the test before the last serve is refused. A
+// client test's span, whose hooks tell none either, carries its begin (its
+// harness acts after the begin, as its span's begin is read), and the read
+// passes.
+func TestATestsBeginIsCarriedWithNoRunToldOnlyInAClientTest(t *testing.T) {
+	base := time.Date(2026, 10, 31, 9, 0, 0, 0, time.UTC)
+	served, arrival := base.Add(4*time.Millisecond), base.Add(5*time.Millisecond)
+	const p = "body.created"
+	read := models.ClockOffset{Res: time.Millisecond, Layout: models.LayoutTyped}
+	early := InstantLeaf(p, p, base.Add(time.Millisecond), time.Millisecond)
+	for _, client := range []bool{false, true} {
+		tr := NewTracker()
+		tr.SetClientTests(client)
+		tr.SetAppClock(func(r time.Time) (time.Time, bool) { return r, true })
+		tr.NewSetAt(base.Add(-time.Second))
+		tr.BeginAt(base)
+		tr.ServedMockAt(&models.Mock{Name: "mock-1", Kind: models.Mongo}, served)
+		s, ok := tr.LiveSpan(arrival)
+		if !ok || !s.From.Equal(served) {
+			t.Fatalf("client %v: span = %+v,%v; want from the serve", client, s, ok)
+		}
+		var want time.Time
+		if client {
+			want = base
+		}
+		if !s.TestFrom.Equal(want) {
+			t.Errorf("client %v: span %+v carries test's begin %v; want %v", client, s, s.TestFrom, want)
+		}
+		if ok, why := CheckClockRead(p, read, early, s, true); ok != client {
+			t.Errorf("client %v: a read in the test before the last serve (%s): ok %v (%s); want %v", client, early.Value, ok, why, client)
+		}
+	}
+}
+
 // A read plus an offset is checked in the span from the last serve first:
 // a time to live checkable there may not be in the test's longer span
 // (models.ClockOffset.Checkable), where the replay would refuse it rather
@@ -155,7 +199,8 @@ func TestALiveSpanCarriesItsTestsBeginOnlyWhereALaterServeStartsIt(t *testing.T)
 // that began two minutes before its call: now + 30m read after the last
 // serve passes, as it did before; one read in the test before that serve
 // is refused, its check uncheckable in the test's span, as before; one
-// changed by a minute is refused.
+// changed by a minute is refused. Each refusal gives the reason the span
+// from the last serve gives it, not the test's span's.
 func TestAReadPlusAnOffsetIsCheckedInTheSpanFromTheLastServeFirst(t *testing.T) {
 	base := time.Date(2026, 10, 31, 9, 0, 0, 0, time.UTC)
 	began, served, arrival := base, base.Add(2*time.Minute), base.Add(2*time.Minute+10*time.Millisecond)
@@ -188,8 +233,16 @@ func TestAReadPlusAnOffsetIsCheckedInTheSpanFromTheLastServeFirst(t *testing.T) 
 		{"now + 30m, read in the test before the last serve", began.Add(time.Minute + 30*time.Minute), false},
 		{"now + 31m", served.Add(31 * time.Minute), false},
 	} {
-		if ok, why := CheckClockRead(p, ttl, text(c.v), s, true); ok != c.ok {
+		ok, why := CheckClockRead(p, ttl, text(c.v), s, true)
+		if ok != c.ok {
 			t.Errorf("%s: ok %v (%s); want %v", c.what, ok, why, c.ok)
+		}
+		if !ok {
+			narrow := s
+			narrow.TestFrom = time.Time{}
+			if _, nwhy := CheckClockRead(p, ttl, text(c.v), narrow, true); why != nwhy {
+				t.Errorf("%s: refused with %q; want the reason of the span from the last serve, %q", c.what, why, nwhy)
+			}
 		}
 	}
 }
