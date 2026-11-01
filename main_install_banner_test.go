@@ -23,7 +23,7 @@ func TestTheUpgradeBannerPrintsTheInstallCommand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { r.Close() })
+	t.Cleanup(func() { _ = r.Close() })
 	os.Stderr = w
 	printEnterpriseUpgradeBanner()
 	os.Stderr = savedStderr
