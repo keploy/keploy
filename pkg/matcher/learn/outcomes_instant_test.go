@@ -81,7 +81,7 @@ func iValue(t *testing.T, what string, d Decision, mock string) {
 // A background call's look-back ("dirtyAt <= now-2s", a $numberLong of
 // milliseconds) that round F made at another phase of its second than the
 // recording did: the call's window holds it 2 s back in both runs, so it is
-// a Clock at -2 s, never a word made anew each run (CRITIQUE row 1, B1).
+// a Clock at -2 s, never a word made anew each run.
 func TestOutcomeALookBackReadAtAnotherPhaseIsAClock(t *testing.T) {
 	const p = "body.filter.dirtyAt.$lte"
 	rAt := oAt.Add(300 * time.Millisecond)
@@ -98,8 +98,8 @@ func TestOutcomeALookBackReadAtAnotherPhaseIsAClock(t *testing.T) {
 // A look-back the app cut to its second or its millisecond (now-2s and
 // now-90s as Unix seconds, 2 s as Unix milliseconds) is a read of the clock:
 // a Clock, or refused as no clock read where the call's window cannot hold
-// it, never a word made anew each run and never a Value (CRITIQUE row 2,
-// B2). Which offset is learned is the clock rows'.
+// it, never a word made anew each run and never a Value (a separate
+// read). Which offset is learned is the clock rows'.
 func TestOutcomeALookBackIsNeverFreshNorAValue(t *testing.T) {
 	const p = "body.filter.lastActive.$lt"
 	rAt := oAt.Add(400 * time.Millisecond)
@@ -128,7 +128,7 @@ func TestOutcomeALookBackIsNeverFreshNorAValue(t *testing.T) {
 // round F's departure but not the recorded one: F's moment stands unchanged
 // at that answer, which does not show it. A pick, refused naming the place,
 // before any window (http learn_test.go:4108 "one unlisted at record", at
-// learn level; H3).
+// learn level).
 func TestOutcomeAPickFromAnAnswerIsRefused(t *testing.T) {
 	const p = "body.departure"
 	rAt := oAt.Add(200 * time.Millisecond)
@@ -155,7 +155,7 @@ func TestOutcomeAPickFromAnAnswerIsRefused(t *testing.T) {
 // Two reads one database round trip apart that share a millisecond in both
 // runs: the earlier send and the call each hold the same millisecond, and
 // the call's own window holds it. At a coarse cut that is no copy: a Clock
-// each, checked in its own span, never bound to the other (C4-N2).
+// each, checked in its own span, never bound to the other.
 func TestOutcomeTwoReadsInOneMillisecondAreAClockEach(t *testing.T) {
 	const p = "body.updatedAt"
 	rAt := oAt.Add(500 * time.Microsecond)
@@ -168,11 +168,11 @@ func TestOutcomeTwoReadsInOneMillisecondAreAClockEach(t *testing.T) {
 
 // A millisecond read carried to a later send that its own window does not
 // hold (a read 40 ms before the call, the window 10 ms) is bound to its first
-// send at the coarse copy step, before any begin or fresh word (C4-N2). So it
+// send at the coarse copy step, before any begin or fresh word. So it
 // is where another flow's call came between the read and the send and pushed
 // the read out of the window: it binds to the earlier send in the same cut,
-// never fresh, and the replay goes red when the two cross the cut (CHECK5 S4;
-// it fails closed).
+// never fresh, and the replay goes red when the two cross the cut:
+// it fails closed.
 func TestOutcomeACarriedMillisecondReadBindsToItsFirstSend(t *testing.T) {
 	const p = "body.since"
 	rAt := oAt.Add(700 * time.Millisecond)
@@ -191,7 +191,7 @@ func TestOutcomeACarriedMillisecondReadBindsToItsFirstSend(t *testing.T) {
 // A recorded millisecond that stood whole at an earlier send which round F
 // moved, while the call sent its own: at a coarse cut two reads may share
 // one millisecond, so that place is a coincidence, never a conflict; the
-// call's window holds the read, a Clock (P1 at a millisecond cut; C4-N2).
+// call's window holds the read, a Clock (two reads that share a millisecond are no conflict).
 func TestOutcomeAMillisecondCutIsNoConflict(t *testing.T) {
 	const p = "body.updatedAt"
 	rAt := oAt.Add(500 * time.Microsecond)
@@ -205,7 +205,7 @@ func TestOutcomeAMillisecondCutIsNoConflict(t *testing.T) {
 
 // A microsecond read the test sent earlier and the call carries in both runs
 // is one read copied: bound to its first send, before the call's window is
-// read, even where the window holds it too (D5 at a fine cut).
+// read, even where the window holds it too (at a cut finer than a millisecond).
 func TestOutcomeAMicrosecondCopyBindsBeforeTheWindow(t *testing.T) {
 	const p = "body.since"
 	rAt := oAt.Add(900 * time.Microsecond)
@@ -223,7 +223,7 @@ func TestOutcomeAMicrosecondCopyBindsBeforeTheWindow(t *testing.T) {
 // read. The read binds to the create's send (step 4), whether a worker poll
 // arrived between the clock read and the create (the create's window then
 // does not hold it) or not: load never decides between a checked Value and
-// an unchecked Clock (CHECK2's N2).
+// an unchecked Clock.
 func TestOutcomeANanosecondNameCarriedToALaterSendBindsToItsFirstSend(t *testing.T) {
 	const p = "body.name"
 	rAt, fAt := oAt.Add(40*time.Millisecond), oAt.Add(time.Hour+45*time.Millisecond)
@@ -239,7 +239,7 @@ func TestOutcomeANanosecondNameCarriedToALaterSendBindsToItsFirstSend(t *testing
 // A carried millisecond read (the call's own window does not hold it) that
 // two earlier sends of the test hold in both runs, one of them its own read
 // of the clock (learned a Clock there): two separate reads, so the word is
-// refused naming both, never bound to either (H2).
+// refused naming both, never bound to either.
 func TestOutcomeAReReadBesideACarriedReadIsTwoSources(t *testing.T) {
 	const p = "body.since"
 	rAt, fAt := oAt.Add(300*time.Millisecond), oAt.Add(time.Hour+320*time.Millisecond)
@@ -254,7 +254,7 @@ func TestOutcomeAReReadBesideACarriedReadIsTwoSources(t *testing.T) {
 // A 19-digit UnixNano (a fine cut) that stood whole at the test's earlier
 // send, which round F moved to another value while the call sent a third:
 // the value did not follow its place. A conflict, refused before any bind
-// (client_bind_test.go:75-81 at learn level, where main binds to mock-1; P1).
+// (client_bind_test.go:75-81 at learn level, where main binds to mock-1: a nanosecond cut is fine).
 func TestOutcomeAFineCutThatStoppedFollowingIsAConflict(t *testing.T) {
 	const p = "body.cmd.query.app.name"
 	rAt := oAt
@@ -271,7 +271,7 @@ func TestOutcomeAFineCutThatStoppedFollowingIsAConflict(t *testing.T) {
 
 // An instant an answer of the call's own test gave before the call, whose
 // text round F's adapter did not state: an answer's instant is the
-// dependency's value, bound there before any window (step 3, P2). The same
+// dependency's value, bound there before any window (step 3). The same
 // answer with no answer time is a place whose state keploy cannot tell: a
 // pick, refused naming it (step 1 (iii)).
 func TestOutcomeAnAnswersInstantBindsWhereFsViewIsNotStated(t *testing.T) {
@@ -290,7 +290,7 @@ func TestOutcomeAnAnswersInstantBindsWhereFsViewIsNotStated(t *testing.T) {
 // A number of an instant's length that does not parse as one (a 10-digit
 // number past 2100) is matched by its exact text: the test's earlier send of
 // the same text in each run binds it; one that held the recorded text whole
-// and that round F moved is a conflict (New 2).
+// and that round F moved is a conflict.
 func TestOutcomeANumberThatDoesNotParseIsMatchedByItsText(t *testing.T) {
 	const p = "body.ref"
 	rAt := oAt.Add(300 * time.Millisecond)
