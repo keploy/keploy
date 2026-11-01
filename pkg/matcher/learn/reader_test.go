@@ -1,6 +1,7 @@
 package learn
 
 import (
+	"encoding/base64"
 	"fmt"
 	"runtime"
 	"strings"
@@ -578,5 +579,47 @@ func TestReaderKeptWordsPastTheCapComparesNoTable(t *testing.T) {
 	// Within the cap, the same shift keeps the words that moved along.
 	if kept := keptWords(rec[:60], append([]string{"a", "new"}, rec[1:59]...)); len(kept) != 59 {
 		t.Errorf("within the cap: kept %d pairs; want the 59 shared words", len(kept))
+	}
+}
+
+// A recording's words are read field by field (fieldsWith), each field at
+// its path, which round F's view of the recording shares, so a word is at
+// the same place in both runs only where one field holds it in each
+// (inOneField): one that moved to another field in F is not, though each
+// text whole still holds it; one that stayed is, in a field's declared
+// form too (a base64 of it). A text the caller hands is one field. Within
+// the index's budget and past it.
+func TestReaderFieldsOfARecordingHoldItsWordsWhereTheyStand(t *testing.T) {
+	defer func(b int64) { readerBudget = b }(readerBudget)
+	const w = "ord7Kq2Xw9"
+	answer := func(body string) Raw { return RawOf(getAnswer("mock-1", "http://api/items/1", body, eRecAt), false) }
+	rec := answer(`{"a":"` + w + `","b":"x"}`)
+	moved := answer(`{"a":"tok","b":"` + w + `"}`)
+	stayed := answer(`{"a":"` + w + `","b":"y"}`)
+	encoded := answer(`{"a":"` + base64.StdEncoding.EncodeToString([]byte("id "+w)) + `","b":"y"}`)
+	for _, budget := range []int64{0, 1} {
+		readerBudget = budget
+		x := newReaderIndex(nil)
+		r := x.textOf(rec)
+		at, read := r.fieldsWith(w)
+		if len(at) != 1 || !read || !strings.HasSuffix(at[0].path, ".a") || at[0].key {
+			t.Errorf("budget %d: %q is at %v (read %v); want the one field a", budget, w, at, read)
+		}
+		for _, c := range []struct {
+			what string
+			live Raw
+			want bool
+		}{{"moved to b", moved, false}, {"stayed at a", stayed, true}, {"at a, base64 there", encoded, true}} {
+			l := x.textOf(c.live)
+			if held, _ := l.holdsWord(w); !held {
+				t.Fatalf("fixture %s: F's text does not hold %q", c.what, w)
+			}
+			if same, read := inOneField(r, w, l, w); same != c.want || !read {
+				t.Errorf("budget %d, %s: in one field %v read %v; want %v", budget, c.what, same, read, c.want)
+			}
+		}
+		if same, read := inOneField(x.text("id "+w), w, x.text(w+" ok"), w); !same || !read {
+			t.Errorf("budget %d: two texts the caller hands, each holding %q: in one field %v read %v", budget, w, same, read)
+		}
 	}
 }

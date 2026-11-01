@@ -1,7 +1,9 @@
 package learn
 
 import (
+	"encoding/json"
 	"hash/maphash"
+	"slices"
 	"strings"
 )
 
@@ -61,8 +63,9 @@ type readerEntry struct {
 	tokens                          []map[string]bool
 	runs                            map[string]bool
 	spans, extraSpans               []instant
+	fields                          fieldWords
 	tokensKept, runsKept, spansKept bool
-	extraKept                       bool
+	extraKept, fieldsKept           bool
 	// past: an answer of the text did not fit what was left of the
 	// budget, which only fills, so the entry keeps none from then on: each
 	// question is answered from the text read again, a word by a scan of
@@ -357,6 +360,124 @@ func heldBy(s, w string, word func(byte) bool) bool {
 		off = i + 1
 	}
 	return false
+}
+
+// fieldAt names one field of a recording's text (rawBody.fields, whose
+// paths round F's view of it shares): its path, and whether it is the
+// field's name rather than its value. A text the caller hands, or a
+// recording read with no fields, is one field: the zero fieldAt.
+type fieldAt struct {
+	path string
+	key  bool
+}
+
+// fieldWords is what the index keeps of a text's fields: each field, and,
+// by word, the fields (indices into at) whose own text holds it.
+type fieldWords struct {
+	at []fieldAt
+	of map[string][]int32
+}
+
+func fieldWordsBytes(f fieldWords) int64 {
+	n := int64(headerBytes) * int64(1+len(f.at))
+	for _, a := range f.at {
+		n += int64(len(a.path))
+	}
+	for w, at := range f.of {
+		n += wordBytes + int64(len(w)+4*len(at))
+	}
+	return n
+}
+
+// fieldsWith are the fields of the text that hold w as a word, in any of
+// main's readings and any declared form of the field's own text (holdsWord,
+// field by field): a recording's by its fields, so a word that moved to
+// another field in round F's view is not at its recorded field. Read once
+// for the call where they fit the budget; past it, by a scan of the fields
+// of the text read now, which keeps nothing. read is false where the
+// recording was not read.
+func (t *readerText) fieldsWith(w string) (at []fieldAt, read bool) {
+	if t.e == nil || !t.e.fieldsKept {
+		s, ok := t.read()
+		if !ok {
+			return nil, false
+		}
+		if !t.e.fieldsKept && !t.x.mayKeep(t.e, s) {
+			t.eachField(s, func(f fieldAt, text string) {
+				for _, form := range textForms(text) {
+					if slices.ContainsFunc(readings, func(r func(byte) bool) bool { return heldBy(form, w, r) }) {
+						at = append(at, f)
+						return
+					}
+				}
+			})
+			return at, true
+		}
+	}
+	fw, ok := indexOnce(t, func(e *readerEntry) *bool { return &e.fieldsKept }, func(e *readerEntry) fieldWords { return e.fields },
+		func(s string) fieldWords {
+			fw := fieldWords{of: map[string][]int32{}}
+			t.eachField(s, func(f fieldAt, text string) {
+				k := int32(len(fw.at))
+				fw.at = append(fw.at, f)
+				for _, set := range tokensOfForms(textForms(text)) {
+					for w := range set {
+						if l := fw.of[w]; len(l) == 0 || l[len(l)-1] != k {
+							fw.of[w] = append(l, k)
+						}
+					}
+				}
+			})
+			return fw
+		}, fieldWordsBytes, func(e *readerEntry, v fieldWords) { e.fields = v })
+	for _, k := range fw.of[w] {
+		at = append(at, fw.at[k])
+	}
+	return at, ok
+}
+
+// eachField calls yield with each field of s, the text read now, and the
+// field's text: a recording's fields, a field that is a JSON object or
+// array (an HTTP body) by its own fields below its path (textFields), else
+// s whole as one field.
+func (t *readerText) eachField(s string, yield func(fieldAt, string)) {
+	var fields []rawField
+	if t.raw != nil {
+		fields = t.raw.payload().fields
+	}
+	if len(fields) == 0 {
+		yield(fieldAt{}, s)
+	}
+	for _, f := range fields {
+		if f.end > len(s) {
+			continue
+		}
+		text := s[f.start:f.end]
+		var v any
+		d := json.NewDecoder(strings.NewReader(text))
+		d.UseNumber()
+		if f.key || !strings.ContainsAny(text[:min(1, len(text))], "{[") || d.Decode(&v) != nil || d.More() {
+			yield(fieldAt{f.path, f.key}, text)
+			continue
+		}
+		doc, subs := textFields(v)
+		for _, g := range subs {
+			yield(fieldAt{strings.TrimSuffix(f.path+"."+g.path, "."), g.key}, doc[g.start:g.end])
+		}
+	}
+}
+
+// inOneField reports whether one field holds rw in r's text and lw in l's
+// (fieldsWith): a recording and round F's view of it, whose fields share
+// their paths, hold a changed word at one place in both runs only there.
+// read is false where either recording was not read.
+func inOneField(r *readerText, rw string, l *readerText, lw string) (same, read bool) {
+	rf, okR := r.fieldsWith(rw)
+	lf, okL := l.fieldsWith(lw)
+	for _, f := range rf {
+		same = same || slices.Contains(lf, f)
+	}
+	return same && okR && okL, okR && okL
 }
 
 // holdsToken reports whether the text holds tok whole, as a token of its
