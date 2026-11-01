@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"testing"
 	"time"
 
@@ -126,6 +127,12 @@ func workerProbe(name string, at time.Duration, path, body string) *models.Mock 
 // it was answered with, or, when it was answered no 200, the miss's report.
 func httpMissCall(t *testing.T, mm *MockManager, path string) (string, *models.MockMismatchReport) {
 	t.Helper()
+	return httpMissSend(t, mm, "GET "+path+" HTTP/1.1\r\nHost: deps\r\n\r\n")
+}
+
+// httpMissSend is httpMissCall for the whole request raw.
+func httpMissSend(t *testing.T, mm *MockManager, raw string) (string, *models.MockMismatchReport) {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), callDeadline)
 	defer cancel()
 	app, agentEnd := net.Pipe()
@@ -136,7 +143,7 @@ func httpMissCall(t *testing.T, mm *MockManager, path string) (string, *models.M
 		_ = agentEnd.Close()
 		done <- err
 	}()
-	if _, err := io.WriteString(app, "GET "+path+" HTTP/1.1\r\nHost: deps\r\n\r\n"); err != nil {
+	if _, err := io.WriteString(app, raw); err != nil {
 		t.Fatal(err)
 	}
 	resp, err := http.ReadResponse(bufio.NewReader(app), nil)
@@ -152,7 +159,7 @@ func httpMissCall(t *testing.T, mm *MockManager, path string) (string, *models.M
 		MismatchReport() *models.MockMismatchReport
 	}
 	if !errors.As(err, &r) || r.MismatchReport() == nil {
-		t.Fatalf("GET %s was answered no 200, and its miss has no report: %v", path, err)
+		t.Fatalf("%q was answered no 200, and its miss has no report: %v", raw, err)
 	}
 	return "", r.MismatchReport()
 }
@@ -198,6 +205,54 @@ func TestTheWorkerScopeNeverAnswersARequestOneMoreThanTheTestRecorded(t *testing
 	mm.ServeExactPool(models.PoolKeyNone, nil)
 	if got, miss := httpMissCall(t, mm, "/x"); got != "worker" {
 		t.Fatalf("the GET /x between tests was answered %q (miss %+v); want the worker scope's, unspent", got, miss)
+	}
+}
+
+// A request that differs from the open test's own answered recording only
+// where learning made noise (an id the application sends anew on each call)
+// is one call more than the test recorded too. The learned-noise pass
+// (learnedMatch) picks from every unspent recording it matches modulo that
+// noise, the worker scope's copy among them; the copy's consume door asks
+// the own-call check, which reads the recording's learned noise as the
+// strict matcher does, and refuses it. The request misses as an extra call,
+// recorded once, and the worker scope's recording stays unspent: between
+// tests it answers the request.
+func TestALearnedNoiseRequestOneMoreThanTheTestRecordedIsNotTheWorkerScopes(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	const recorded = `{"id":"rec","q":1}`
+	noisy := func(m *models.Mock) *models.Mock {
+		m.Spec.HTTPReq.Method = models.Method("POST")
+		m.Spec.HTTPReq.Header["Content-Type"] = "application/json"
+		m.Spec.HTTPReq.Body = recorded
+		m.Spec.ReqBodyNoise = map[string][]string{"body.id": {}}
+		return m
+	}
+	post := func(id string) string {
+		b := `{"id":"` + id + `","q":1}`
+		return "POST /x HTTP/1.1\r\nHost: deps\r\nContent-Type: application/json\r\nContent-Length: " + strconv.Itoa(len(b)) + "\r\n\r\n" + b
+	}
+	worker := noisy(workerProbe("mock-worker-x", time.Second, "/x", "worker"))
+	own := noisy(workerProbe("mock-own-x", 4*time.Second, "/x", "own"))
+	mm := stagedManager(t, nil, []*models.Mock{worker, own})
+	mm.SeedRecordedWindows([]models.TestWindow{{TestCase: "test-a", Start: exactT0.Add(3 * time.Second), End: exactT0.Add(5 * time.Second)}})
+	mm.ServeExactWorker([]string{worker.Name})
+	mm.ServeExactPool(models.PoolKeyNone, nil)
+	mm.ServeExactTest("test-a", []*models.Mock{roundMock(mm, own.Name)})
+
+	if got, miss := httpMissSend(t, mm, post("r1")); got != "own" {
+		t.Fatalf("test-a's POST /x was answered %q (miss %+v); want its own, through its learned noise", got, miss)
+	}
+	got, miss := httpMissSend(t, mm, post("r2"))
+	if got != "" {
+		t.Fatalf("test-a's second POST /x, one more than it recorded, was answered %q", got)
+	}
+	if miss.MissKind != models.MissExtraCall || miss.Recorded != 1 {
+		t.Fatalf("the second POST /x missed as %q, recorded %d; want %q, recorded 1", miss.MissKind, miss.Recorded, models.MissExtraCall)
+	}
+
+	mm.ServeExactPool(models.PoolKeyNone, nil)
+	if got, miss := httpMissSend(t, mm, post("r3")); got != "worker" {
+		t.Fatalf("the POST /x between tests was answered %q (miss %+v); want the worker scope's, unspent", got, miss)
 	}
 }
 
