@@ -468,9 +468,9 @@ func (a *Agent) HandleServedMocks(w http.ResponseWriter, r *http.Request) {
 // taught recordings from calls made in other windows than theirs, for
 // learning only: one state per recording, none of it consumption (unlike
 // /consumedmocks). 501 from an agent that cannot say, so a caller tells
-// "this agent learns none" from "it learned none". keploy mock record reads
-// it; keploy record's own full round (service/replay) does not yet, a
-// stated limit: there the agent keeps it and the CLI writes none of it.
+// "this agent learns none" from "it learned none". keploy mock record and
+// keploy record's own full round (service/replay) both read it and write
+// it onto the recordings.
 func (a *Agent) HandleLearnedElsewhere(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	s, ok := a.svc.(learnedElsewhereReader)
