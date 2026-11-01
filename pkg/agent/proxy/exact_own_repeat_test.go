@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"slices"
 	"strconv"
 	"testing"
 	"time"
@@ -246,6 +247,48 @@ func TestTheWorkerScopeNeverAnswersARequestOneMoreThanTheTestRecorded(t *testing
 	mm.ServeExactPool(models.PoolKeyNone, nil)
 	if got, miss := httpMissCall(t, mm, "/x"); got != "worker" {
 		t.Fatalf("the GET /x between tests was answered %q (miss %+v); want the worker scope's, unspent", got, miss)
+	}
+}
+
+// A worker's read of the test's own call, made inside the test's window, is
+// one more read to keploy, which cannot tell the worker's call from the
+// test's. Unmarked, the test's recording answers once and the second read
+// misses as an extra call that names the recording it repeats (ExtraOf),
+// the worker scope's identical copy unspent. Marked `repeat: any`, the
+// test's recording answers the second read too, whoever made it: nothing
+// misses and the recording is the test's one consumed.
+func TestAWorkersIdenticalReadInATestsWindowIsAnsweredOnlyUnderTheMark(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	for _, marked := range []bool{false, true} {
+		worker := workerProbe("mock-worker-x", time.Second, "/x", "worker")
+		own := workerProbe("mock-own-x", 4*time.Second, "/x", "own")
+		mm := stagedManager(t, nil, []*models.Mock{worker, own})
+		mm.SeedRecordedWindows([]models.TestWindow{{TestCase: "test-a", Start: exactT0.Add(3 * time.Second), End: exactT0.Add(5 * time.Second)}})
+		mm.ServeExactWorker([]string{worker.Name})
+		mm.ServeExactPool(models.PoolKeyNone, nil)
+		c := roundMock(mm, own.Name).ShallowCopy()
+		c.TestModeInfo.Repeat = marked
+		mm.ServeExactTest("test-a", []*models.Mock{c})
+
+		if got, miss := httpMissCall(t, mm, "/x"); got != "own" {
+			t.Fatalf("marked %v: the test's GET /x was answered %q (miss %+v); want its own", marked, got, miss)
+		}
+		got, miss := httpMissCall(t, mm, "/x")
+		if marked {
+			if got != "own" {
+				t.Fatalf("marked: the worker's identical GET /x in the test's window was answered %q (miss %+v); want the marked recording's answer", got, miss)
+			}
+		} else if got != "" || miss.MissKind != models.MissExtraCall || miss.ExtraOf != own.Name {
+			t.Fatalf("unmarked: the worker's identical GET /x in the test's window was answered %q, missed as %q naming %q; want an extra call naming %s", got, miss.MissKind, miss.ExtraOf, own.Name)
+		}
+		_, consumed, unconsumed, ok := mm.ExactTestOutcome()
+		if !ok || !slices.Equal(consumed, []string{own.Name}) || len(unconsumed) != 0 {
+			t.Fatalf("marked %v: consumed %v, unconsumed %v; want the test's own recording consumed, none left", marked, consumed, unconsumed)
+		}
+		mm.ServeExactPool(models.PoolKeyNone, nil)
+		if got, miss := httpMissCall(t, mm, "/x"); got != "worker" {
+			t.Fatalf("marked %v: the GET /x between tests was answered %q (miss %+v); want the worker scope's, unspent", marked, got, miss)
+		}
 	}
 }
 
