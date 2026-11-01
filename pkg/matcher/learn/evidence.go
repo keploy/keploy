@@ -447,18 +447,20 @@ func unchangedFor(p evPlace, r, f string) bool {
 
 // movedField is why p does not show r and f in both runs though its texts
 // hold them: no one field holds r in the recording and f in round F's view
-// (inOneField), so F gave the word at another field than the recorded one
-// (main reads a recording field by field). "" where one field holds both.
+// (inOneField's rule), so F gave the word at another field than the
+// recorded one (main reads a recording field by field). "" where one field
+// holds both. It reads each text's fields once: past the budget each read
+// scans the text.
 func movedField(p evPlace, r, f string) string {
-	same, read := inOneField(p.t.rec, r, p.t.live, f)
+	rf, okR := p.t.rec.fieldsWith(r)
+	lf, okL := p.t.live.fieldsWith(f)
 	switch {
-	case !read:
+	case !okR || !okL:
 		return "past the call's budget"
-	case same:
+	case slices.ContainsFunc(rf, func(a fieldAt) bool { return slices.Contains(lf, a) }):
 		return ""
-	}
-	if at, _ := p.t.live.fieldsWith(f); len(at) > 0 {
-		return "its view gave " + strconv.Quote(f) + " at " + at[0].path + ", not at a field whose recorded text holds " + strconv.Quote(r)
+	case len(lf) > 0:
+		return "its view gave " + strconv.Quote(f) + " at " + lf[0].path + ", not at a field whose recorded text holds " + strconv.Quote(r)
 	}
 	return "its view holds " + strconv.Quote(f) + " at no one field"
 }
