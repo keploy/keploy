@@ -60,8 +60,9 @@ type drainConn struct {
 var drainMax int64 = 1 << 20
 
 // socketReading, when set (tests only), runs as a Read goes to the socket,
-// having found nothing the drain held: the instant a drain and the socket's
-// close can come in before the socket's read.
+// having found nothing the drain held: the instant a drain, and after it the
+// socket's close or more of the app's bytes, can come in before the socket's
+// read.
 var socketReading func()
 
 // newDrainConn wraps conn, the ingress's new connection to the app, before

@@ -139,6 +139,38 @@ func TestADrainNeitherWaitsOnItsConsumerNorReordersTheBytes(t *testing.T) {
 	}
 }
 
+// A drain can come in as its consumer goes from what the drain held, nothing,
+// to the socket, and the app send more after it: the consumer's read of the
+// socket returns what the drain read first, and the socket's bytes after.
+func TestADrainThatCameInAsItsConsumerWentToTheSocketKeepsTheOrder(t *testing.T) {
+	app, ingress := tcpPair(t)
+	d := newDrainConn(ingress)
+	t.Cleanup(d.release)
+	saved := socketReading
+	t.Cleanup(func() { socketReading = saved })
+	cameIn := false
+	socketReading = func() {
+		if cameIn {
+			return
+		}
+		cameIn = true
+		if _, err := io.WriteString(app, "first"); err != nil {
+			t.Error(err)
+		}
+		waitAcked(t, app)
+		d.drain()
+		if _, err := io.WriteString(app, "second"); err != nil {
+			t.Error(err)
+		}
+		waitAcked(t, app)
+	}
+	const want = "firstsecond"
+	got, err := io.ReadAll(io.LimitReader(d, int64(len(want))))
+	if !cameIn || err != nil || string(got) != want {
+		t.Fatalf("read %q, %v (the drain came in: %v); want %q", got, err, cameIn, want)
+	}
+}
+
 // A drain holds at most drainMax of a connection: what the socket holds past
 // that stays there, and its consumer reads it after what the drain held, in
 // order. Here nothing else reads the socket, so the bound alone stops the
