@@ -68,15 +68,31 @@ var noteIngressRequest = memoryguard.IngressRequest
 type wireTimeConn struct {
 	net.Conn
 	lastReadNano atomic.Int64
+	// read is what has been read, counted as bytes with the close that ends
+	// the stream (io.EOF) as one more, before the reader has any of it.
+	read    atomic.Int64
+	eofRead atomic.Bool
 }
 
 func (c *wireTimeConn) Read(p []byte) (int, error) {
 	n, err := c.Conn.Read(p)
 	if n > 0 {
 		c.lastReadNano.Store(clockNow().UnixNano())
+		c.read.Add(int64(n))
+	}
+	if errors.Is(err, io.EOF) && c.eofRead.CompareAndSwap(false, true) {
+		c.read.Add(1)
 	}
 	return n, err
 }
+
+// Arrived is what has been read from the conn: its bytes, and its close
+// (io.EOF) as one more. It may be read from any goroutine. What arrives is
+// read only as it is taken, so it is also what has been taken (Taken).
+func (c *wireTimeConn) Arrived() int64 { return c.read.Load() }
+
+// Taken is Arrived: the conn is read only as its reader takes it.
+func (c *wireTimeConn) Taken() int64 { return c.read.Load() }
 
 // LastReadTime returns the time of the most recent non-empty Read on
 // the wrapped conn, or the zero time if no bytes have been read yet.
@@ -370,13 +386,17 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 	// and reports whether the client ended the exchange.
 	watch, clientEnded := noClientEnd, false
 	appConn := func() net.Conn { return upConn }
-	endWatch := func() bool {
-		if watch() {
+	// endWatchAt is endWatch once the answer's end is found: answerEnd is
+	// where it ended in what arrived from the app (upAhead's count), so a
+	// client that went once it had arrived did not end the exchange.
+	endWatchAt := func(answerEnd int64) bool {
+		if watch(answerEnd) {
 			clientEnded = true
 		}
 		watch = noClientEnd
 		return clientEnded
 	}
+	endWatch := func() bool { return endWatchAt(-1) }
 	defer endWatch()
 
 	for {
@@ -558,7 +578,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 				return
 			}
 			req.Body.Close() // Close explicitly to avoid defer leak in loop.
-			watch = watchClient(logger, clientConn, clientReader, appConn)
+			watch = watchClient(logger, clientConn, clientReader, appConn, upAhead.Arrived)
 		}
 
 		resp, _, err := readFinalResponse(upstreamReader, req, clientConn)
@@ -606,7 +626,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		} else if relay != nil {
 			// The body that waited for the 100 is all read: the app holds
 			// the whole request now.
-			watch = watchClient(logger, clientConn, clientReader, appConn)
+			watch = watchClient(logger, clientConn, clientReader, appConn, upAhead.Arrived)
 		}
 
 		// Response modifications for sync/sampling modes. appResp is the
@@ -685,8 +705,10 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		waitPastEnd := func() {
 			// The answer's end is read from the app: what the client does
 			// from here (it closes the connection once it has the end) is
-			// not a going the app should be told of.
-			endWatch()
+			// not a going the app should be told of. It ended where the
+			// reads from the app have got to, less what is read but not yet
+			// taken: a going seen once that had arrived came after it.
+			endWatchAt(upAhead.Taken() - int64(upstreamReader.Buffered()))
 			if captureEligible && !reqCapture.Truncated() && !respCapture.Truncated() {
 				end := endAt()
 				// From here the client can have the whole answer: a stop
@@ -1120,13 +1142,17 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		}
 		return nil
 	}
-	endWatch := func() bool {
-		if watch() {
+	// endWatchAt is endWatch once the answer's end is found: answerEnd is
+	// where it ended in what was read from the app (upWire's count), so a
+	// client that went once it had arrived did not end the exchange.
+	endWatchAt := func(answerEnd int64) bool {
+		if watch(answerEnd) {
 			clientEnded = true
 		}
 		watch = noClientEnd
 		return clientEnded
 	}
+	endWatch := func() bool { return endWatchAt(-1) }
 	defer endWatch()
 	// t == nil → caller (sampling-bypass path) wants MSG_PEEK protection
 	// without capture. Suppress capture for this connection's lifetime.
@@ -1546,7 +1572,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 			_ = req.Body.Close()
 		}
 		if relay == nil {
-			watch = watchClient(logger, clientConn, clientReader, appConn)
+			watch = watchClient(logger, clientConn, clientReader, appConn, upWire.Arrived)
 		}
 
 		// Read response. Empty-response on idempotent methods is also
@@ -1605,7 +1631,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 				if req.Body != nil {
 					_ = req.Body.Close()
 				}
-				watch = watchClient(logger, clientConn, clientReader, appConn)
+				watch = watchClient(logger, clientConn, clientReader, appConn, upWire.Arrived)
 				resp, _, err = readFinalResponse(upstreamReader, req, clientConn)
 				if err != nil && endWatch() {
 					logger.Debug("The client ended the connection before the app answered its request; the app was told as the client's going would have told it", zap.Error(err))
@@ -1656,7 +1682,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		} else if relay != nil {
 			// The body that waited for the 100 is all read: the app holds
 			// the whole request now.
-			watch = watchClient(logger, clientConn, clientReader, appConn)
+			watch = watchClient(logger, clientConn, clientReader, appConn, upWire.Arrived)
 		}
 
 		captureEligible = captureEnabled && requestWhole
@@ -1702,8 +1728,10 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		markEnd := func() {
 			// The answer's end is read from the app: what the client does
 			// from here (it closes the connection once it has the end) is
-			// not a going the app should be told of.
-			endWatch()
+			// not a going the app should be told of. It ended where the
+			// reads from the app have got to, less what is read but not yet
+			// taken: a going seen once that had arrived came after it.
+			endWatchAt(upWire.Taken() - int64(upstreamReader.Buffered()))
 			ended = true
 			if closeDelimited {
 				endAt = clockNow()

@@ -164,8 +164,8 @@ func TestAClientThatCannotBeWatchedIsToldOnce(t *testing.T) {
 	c := unwatchable{proxied}
 	unwatched.Delete(fmt.Sprintf("%T", c)) // a run before this one (-count) told it
 	for i := 0; i < 2; i++ {
-		stop := watchClient(logger, c, bufio.NewReader(c), func() net.Conn { return nil })
-		if stop() {
+		stop := watchClient(logger, c, bufio.NewReader(c), func() net.Conn { return nil }, nothingArrived)
+		if stop(-1) {
 			t.Fatal("an unwatched client reported an end")
 		}
 	}
@@ -178,6 +178,50 @@ func TestAClientThatCannotBeWatchedIsToldOnce(t *testing.T) {
 
 // unwatchable wraps a conn and does not give it (no NetConn).
 type unwatchable struct{ net.Conn }
+
+// nothingArrived is a watch's count of what arrived from an app that sent
+// nothing.
+func nothingArrived() int64 { return 0 }
+
+// Whether a client went before the answer's end is decided by what had
+// arrived from the app as its going was seen, not by when the ingress found
+// the end: the count read as the going is seen, before the app is told,
+// against where the answer ended in it. A client that went once the answer's
+// end had arrived (a client that took the headers and closed, the body
+// already with keploy) did not end the exchange; one that went before it
+// did, and so did one whose answer's end was never found.
+func TestAClientEndsTheExchangeOnlyBeforeTheAnswersEndArrived(t *testing.T) {
+	const answerEnd = 120
+	for _, tc := range []struct {
+		name    string
+		arrived int64
+		end     int64
+		want    bool
+	}{
+		{"the end had arrived", answerEnd, answerEnd, false},
+		{"more than the end had arrived", answerEnd + 40, answerEnd, false},
+		{"the end had not arrived", answerEnd - 1, answerEnd, true},
+		{"the end was never found", answerEnd, -1, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client, proxied := tcpPairForWatch(t)
+			appSide, app := tcpPairForWatch(t)
+			var arrived atomic.Int64
+			arrived.Store(tc.arrived)
+			stop := watchClient(zap.NewNop(), proxied, bufio.NewReader(proxied), func() net.Conn { return appSide }, arrived.Load)
+			_ = client.Close()
+			// The app is told: its end of the connection reads the end.
+			if n, err := app.Read(make([]byte, 1)); n != 0 || err != io.EOF {
+				t.Fatalf("the app read %d %v, want the client's going", n, err)
+			}
+			// What arrives after the going was seen counts for nothing.
+			arrived.Add(1000)
+			if ended := stop(tc.end); ended != tc.want {
+				t.Fatalf("with %d arrived as the client went and the answer's end at %d, stop reported an end %v, want %v", tc.arrived, tc.end, ended, tc.want)
+			}
+		})
+	}
+}
 
 // The connection the proxy keeps under a watched client (proxyutil.
 // HangUpTeller) holds the client's hang-up from the watch's start, and, once
@@ -195,7 +239,7 @@ func TestAWatchedClientsHangUpIsHeldUntilToldOn(t *testing.T) {
 			client, proxied := tcpPairForWatch(t)
 			appSide, app := tcpPairForWatch(t)
 			c := &hangUpTeller{Conn: proxied}
-			stop := watchClient(zap.NewNop(), c, bufio.NewReader(c), func() net.Conn { return appSide })
+			stop := watchClient(zap.NewNop(), c, bufio.NewReader(c), func() net.Conn { return appSide }, nothingArrived)
 			if held, released, told := c.counts(); held != 1 || released != 0 || told != 0 {
 				t.Fatalf("as the watch runs: held %d, released %d, told %d; want the hang-up held once", held, released, told)
 			}
@@ -206,10 +250,10 @@ func TestAWatchedClientsHangUpIsHeldUntilToldOn(t *testing.T) {
 					t.Fatalf("the app read %d %v, want the client's going", n, err)
 				}
 			}
-			if ended := stop(); ended != leaves {
+			if ended := stop(-1); ended != leaves {
 				t.Fatalf("stop reported an end %v, want %v", ended, leaves)
 			}
-			_ = stop()
+			_ = stop(-1)
 			want := 0
 			if leaves {
 				want = 1
@@ -230,11 +274,11 @@ func TestAnUnwatchedKeptConnHoldsNoHangUp(t *testing.T) {
 	a, b := net.Pipe() // no socket under it
 	t.Cleanup(func() { _ = a.Close(); _ = b.Close() })
 	c := &hangUpTeller{Conn: b}
-	stop := watchClient(zap.NewNop(), c, bufio.NewReader(c), func() net.Conn { return nil })
+	stop := watchClient(zap.NewNop(), c, bufio.NewReader(c), func() net.Conn { return nil }, nothingArrived)
 	if held, released, told := c.counts(); held != 1 || released != 1 || told != 0 {
 		t.Fatalf("an unwatched client: held %d, released %d, told %d; want held and released at once, nothing told", held, released, told)
 	}
-	if stop() {
+	if stop(-1) {
 		t.Fatal("an unwatched client reported an end")
 	}
 	if held, released, told := c.counts(); held != 1 || released != 1 || told != 0 {

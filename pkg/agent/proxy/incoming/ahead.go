@@ -31,6 +31,14 @@ import (
 type aheadReader struct {
 	conn     net.Conn
 	lastNano atomic.Int64
+	// arrived is what has arrived from the app, counted as bytes with the
+	// close that ends the stream (io.EOF) as one more: counted before the
+	// consumer can take any of it, so a count read anywhere holds all the
+	// consumer has taken. taken is what the consumer has taken, counted
+	// alike. Where an answer ends in the stream is taken less what the
+	// consumer's buffer still holds (watchClient).
+	arrived atomic.Int64
+	taken   atomic.Int64
 
 	mu      sync.Mutex
 	cond    *sync.Cond
@@ -39,6 +47,7 @@ type aheadReader struct {
 	err     error        // what ended the reads; with errAt, when
 	errAt   time.Time
 	closed  bool
+	eofRead bool // Read has returned io.EOF, counted in taken
 }
 
 // aheadPiece is what one or more reads brought, and when the last of them did.
@@ -111,9 +120,13 @@ func (a *aheadReader) run() {
 
 		a.mu.Lock()
 		if n > 0 && !a.closed {
+			a.arrived.Add(int64(n))
 			a.queueLocked(buf[:n], at)
 		}
 		if err != nil {
+			if errors.Is(err, io.EOF) && !a.closed {
+				a.arrived.Add(1)
+			}
 			a.err, a.errAt = err, at
 		}
 		a.cond.Broadcast()
@@ -167,6 +180,7 @@ func (a *aheadReader) Read(p []byte) (int, error) {
 		c := &a.queue[0]
 		n := copy(p, c.data)
 		a.lastNano.Store(c.readAt.UnixNano())
+		a.taken.Add(int64(n))
 		c.data = c.data[n:]
 		if len(c.data) == 0 {
 			a.charge(c, 0)
@@ -184,9 +198,20 @@ func (a *aheadReader) Read(p []byte) (int, error) {
 	}
 	if errors.Is(a.err, io.EOF) {
 		a.lastNano.Store(a.errAt.UnixNano())
+		if !a.eofRead {
+			a.eofRead = true
+			a.taken.Add(1)
+		}
 	}
 	return 0, a.err
 }
+
+// Arrived is what has arrived from the connection: its bytes, and its close
+// (io.EOF) as one more. It may be read from any goroutine.
+func (a *aheadReader) Arrived() int64 { return a.arrived.Load() }
+
+// Taken is what the consumer has taken by Read, counted as Arrived counts.
+func (a *aheadReader) Taken() int64 { return a.taken.Load() }
 
 // LastReadTime returns when what the latest Read returned arrived from the
 // connection (or when its end was found), the zero time before any.

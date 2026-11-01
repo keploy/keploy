@@ -26,6 +26,22 @@ import (
 // the exchange so; one that did is not recorded: its client did not take the
 // answer, and the app's end of it may be the client's going.
 //
+// Whether the client went before the answer's end is decided by what had
+// arrived from the app when its going was seen, not by how far the ingress
+// had forwarded the answer: arrived counts what the app's side has brought
+// (its bytes, and its close as one more), and is read as the going is seen,
+// before the app is told of it; stop is given where the answer ended in that
+// count (answerEnd), or -1 while its end is not found. A client that went
+// once the answer's end had arrived did not end the exchange: the app sent
+// that end before it could learn of the going, so the answer is the app's
+// answer to the request, whatever the client then took of it. A client that
+// takes the headers and closes without reading the body (Go's http.Get and a
+// Body.Close, a client that wanted only the status) does that as soon as
+// the ingress forwards the headers, which it does before it reads the body
+// on: an answer the app wrote whole at once, its end in the read that brought
+// its headers, was not recorded whenever the watch saw the close before the
+// ingress read the body, which a loaded host makes often.
+//
 // The watch only peeks at the client's socket: what the client sends next
 // (a request it pipelined) stays for the next read, and ends the watch. A
 // client whose next bytes the ingress has already read (buffered) is not
@@ -39,9 +55,10 @@ import (
 //
 // Under the proxy's settle, the connection it keeps under client holds the
 // hang-up while the watch runs and, once the hang-up is told on to the app,
-// holds no test's work (proxyutil.HoldHangUp): the exchange is not recorded
-// and nothing asserts its answer.
-func watchClient(logger *zap.Logger, client net.Conn, buffered *bufio.Reader, app func() net.Conn) (stop func() (ended bool)) {
+// holds no test's work (proxyutil.HoldHangUp): the exchange is not recorded,
+// or, its answer's end with keploy before the client went, is recorded from
+// what had arrived, and nothing waits on what the app sends after.
+func watchClient(logger *zap.Logger, client net.Conn, buffered *bufio.Reader, app func() net.Conn, arrived func() int64) (stop func(answerEnd int64) (ended bool)) {
 	if buffered.Buffered() > 0 {
 		return noClientEnd
 	}
@@ -57,7 +74,12 @@ func watchClient(logger *zap.Logger, client net.Conn, buffered *bufio.Reader, ap
 	// client left (one deaf to its request's context) is no test's to wait
 	// for.
 	release := proxyutil.HoldHangUp(conn)
+	// What had arrived from the app when the client's going was seen: read
+	// by the watch before it tells the app, and by stop only once the watch
+	// has ended (stopWatch returns after the callback).
+	var arrivedAtEnd int64
 	stopWatch, watched := proxyutil.WatchPeerEnd(conn, func(reset bool) {
+		arrivedAtEnd = arrived()
 		up := app()
 		if up == nil {
 			return
@@ -70,16 +92,16 @@ func watchClient(logger *zap.Logger, client net.Conn, buffered *bufio.Reader, ap
 	if !watched {
 		release(false)
 		tellUnwatched(logger, conn)
-		return stopWatch
+		return noClientEnd
 	}
-	return func() bool {
+	return func(answerEnd int64) bool {
 		ended := stopWatch()
 		release(false) // no-op once told
-		return ended
+		return ended && (answerEnd < 0 || arrivedAtEnd < answerEnd)
 	}
 }
 
-func noClientEnd() bool { return false }
+func noClientEnd(int64) bool { return false }
 
 // unwatched is the kinds of client connection told as not watched
 // (tellUnwatched), by type: a handful at most, as the proxy's wrappers are.
