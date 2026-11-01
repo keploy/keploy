@@ -323,3 +323,54 @@ func TestReaderIndexHoldsAnInstantInEveryFormMainReads(t *testing.T) {
 		}
 	}
 }
+
+// An instant whose word count changes between the runs is one instant read
+// whole in each run: a zero fraction dropped (RFC3339Nano, Java's
+// Instant.toString), or a ' ' to 'T' with a zone added. Its moved words are
+// an unequal stretch, and the instants each run's words lie in pair by
+// position. Where the runs' words there lie in unequal counts of instants,
+// nothing pairs, and each run's instant stays one-sided.
+func TestReaderAnInstantWhoseWordCountChangesIsOneInstant(t *testing.T) {
+	for _, c := range []struct{ rec, live, rInst, lInst string }{
+		{"x 2026-10-31T10:50:13.305Z y", "x 2026-10-31T10:51:27Z y", "2026-10-31T10:50:13.305Z", "2026-10-31T10:51:27Z"},
+		{"2026-10-31 10:50:13.305+05:30", "2026-10-31 10:51:27+05:30", "2026-10-31 10:50:13.305+05:30", "2026-10-31 10:51:27+05:30"},
+		{"2024-01-02 03:04:05", "2024-01-02T03:04:05Z", "2024-01-02 03:04:05", "2024-01-02T03:04:05Z"},
+		{"x 2026-10-31T10:50:13.305Z y 17", "x 2026-10-31T10:51:27Z y 18", "2026-10-31T10:50:13.305Z", "2026-10-31T10:51:27Z"},
+	} {
+		rd := readText(c.rec, c.live)
+		var one *instantWord
+		for _, w := range rd.Words {
+			if w.Rec == "17" {
+				if w.Instant != nil {
+					t.Errorf("%q -> %q: the word 17>18 reads as an instant %+v", c.rec, c.live, w.Instant)
+				}
+				continue
+			}
+			if w.Instant == nil || one != nil && w.Instant != one {
+				t.Errorf("%q -> %q: word %q>%q instant %+v; want the one instant", c.rec, c.live, w.Rec, w.Live, w.Instant)
+				continue
+			}
+			one = w.Instant
+		}
+		if one == nil || one.Rec == nil || one.Live == nil || len(rd.Instants) != 1 {
+			t.Errorf("%q -> %q: %d instants, %+v; want one, with a moment in each run", c.rec, c.live, len(rd.Instants), one)
+			continue
+		}
+		if got := c.rec[one.RecAt[0]:one.RecAt[1]]; got != c.rInst {
+			t.Errorf("%q: R's instant %q; want %q", c.rec, got, c.rInst)
+		}
+		if got := c.live[one.LiveAt[0]:one.LiveAt[1]]; got != c.lInst {
+			t.Errorf("%q: F's instant %q; want %q", c.live, got, c.lInst)
+		}
+	}
+	// R's moved words lie in two instants, F's in one: nothing pairs.
+	rd := readText("at 10:50:13.305 10:50:14 b", "at 10:51:27 b")
+	for _, iw := range rd.Instants {
+		if iw.Rec != nil && iw.Live != nil {
+			t.Errorf("an instant paired across unequal counts of instants: %+v", iw)
+		}
+	}
+	if len(rd.Instants) < 2 {
+		t.Errorf("%d instants; want each run's own", len(rd.Instants))
+	}
+}
