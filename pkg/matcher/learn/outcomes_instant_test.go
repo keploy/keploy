@@ -2,6 +2,7 @@ package learn
 
 import (
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -87,9 +88,14 @@ func TestOutcomeALookBackReadAtAnotherPhaseIsAClock(t *testing.T) {
 	rAt := oAt.Add(300 * time.Millisecond)
 	fAt := oAt.Add(time.Hour + 800*time.Millisecond)
 	rec, live := iEpochMs(rAt.Add(-2*time.Second-5*time.Millisecond)), iEpochMs(fAt.Add(-2*time.Second-7*time.Millisecond))
-	in := iCall(p, Number, rec, live, rAt, fAt, iWin(rAt, fAt, 20*time.Millisecond), nil, nil)
+	// Mongo's replay compares an offset (Window.ComparesOffsets); one that
+	// does not refuses it as one it cannot check.
+	in := iCall(p, Number, rec, live, rAt, fAt, iWin(rAt, fAt, 20*time.Millisecond).ComparesOffsets(), nil, nil)
 	d := oWord(t, Decide(in), rec, live)
 	iClock(t, "dirtyAt <= now-2s at another phase", d)
+	in.Window = iWin(rAt, fAt, 20*time.Millisecond)
+	oRefused(t, "dirtyAt <= now-2s where the replay compares no offset", oWord(t, Decide(in), rec, live), "cannot-check")
+	in.Window = iWin(rAt, fAt, 20*time.Millisecond).ComparesOffsets()
 	if d.Outcome == OutcomeClock && d.Clock != nil && (d.Clock.Min > -2*time.Second || d.Clock.Max < -2*time.Second) {
 		t.Errorf("dirtyAt <= now-2s: the Clock's offset [%v, %v]; want it to hold -2s", d.Clock.Min, d.Clock.Max)
 	}
@@ -98,8 +104,9 @@ func TestOutcomeALookBackReadAtAnotherPhaseIsAClock(t *testing.T) {
 // A look-back the app cut to its second or its millisecond (now-2s and
 // now-90s as Unix seconds, 2 s as Unix milliseconds) is a read of the clock:
 // a Clock, or refused as no clock read where the call's window cannot hold
-// it, never a word made anew each run and never a Value (a separate
-// read). Which offset is learned is the clock rows'.
+// it, or as one keploy cannot check where the replay compares no offset;
+// never a word made anew each run and never a Value (a separate read).
+// Which offset is learned is the clock rows'.
 func TestOutcomeALookBackIsNeverFreshNorAValue(t *testing.T) {
 	const p = "body.filter.lastActive.$lt"
 	rAt := oAt.Add(400 * time.Millisecond)
@@ -116,9 +123,9 @@ func TestOutcomeALookBackIsNeverFreshNorAValue(t *testing.T) {
 			d := oWord(t, Decide(iCall(p, Number, tc.rec, tc.live, rAt, fAt, w, nil, nil)), tc.rec, tc.live)
 			switch {
 			case d.Outcome == OutcomeClock:
-			case d.Outcome == OutcomeRefused && d.Refusal != nil && d.Refusal.Kind == "no-clock-read":
+			case d.Outcome == OutcomeRefused && d.Refusal != nil && (d.Refusal.Kind == "no-clock-read" || d.Refusal.Kind == "cannot-check"):
 			default:
-				t.Errorf("%s, window %v: %s; want a Clock or refused as no clock read", tc.what, w != nil, oDescribe([]Decision{d}))
+				t.Errorf("%s, window %v: %s; want a Clock, or refused as no clock read or as one keploy cannot check", tc.what, w != nil, oDescribe([]Decision{d}))
 			}
 		}
 	}
@@ -352,4 +359,46 @@ func TestOutcomeAClientTestsReadSinceItsBeginIsAClock(t *testing.T) {
 	}
 	in.Drifts, in.Window = oDrifts(), w
 	oRefused(t, "a keploy test's read 2 s and 3 s before its call", oWord(t, Decide(in), rec, live), "no-clock-read")
+}
+
+// A read plus a time to live, cut to the minute in Europe/Berlin, in the
+// hour its clocks go back (2026-10-25, 03:00 CEST to 02:00 CET): an
+// application that resolves a wall time shown twice to its first showing
+// writes it an hour early there, so the offset both runs show can stand an
+// hour from the one it adds. Refused, naming the turn, as main refuses it,
+// whichever reading found the offset; the same read a day later is a Clock.
+func TestOutcomeAnOffsetNearAWallTimeShownTwiceIsRefused(t *testing.T) {
+	ber, err := time.LoadLocation("Europe/Berlin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const p = "body.expiresAt"
+	ms := time.Millisecond
+	val := func(read time.Time) time.Time { return firstShowingIn(read, time.Minute, ber).Add(2 * time.Hour) }
+	decide := func(call time.Time) Decision {
+		t.Helper()
+		dc := oDrifts()
+		dc.zone = ber
+		fcall := call.Add(FullRoundLead)
+		w := (&Window{Rec: Span{From: call.Add(-100 * ms), To: call}, F: Span{From: fcall.Add(-100 * ms), To: fcall}}).ComparesOffsets()
+		leaf := func(at time.Time) Shape { return Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, at, ms)}} }
+		ds := Decide(Input{Drifts: dc, Drift: []string{p}, Live: leaf(val(fcall.Add(-30 * ms))), Rec: leaf(val(call.Add(-30 * ms))),
+			At: call, Arrived: fcall, Window: w, Test: "test-2", Mock: "mock-300",
+			Caps: Caps{BindAtWord: true, AnswerAtWord: true, FViewStated: true}})
+		if len(ds) != 1 {
+			t.Fatalf("at %s: %d decisions (%s); want one", call, len(ds), oDescribe(ds))
+		}
+		return ds[0]
+	}
+	turn := time.Date(2026, 10, 25, 1, 0, 0, 0, time.UTC)
+	for _, call := range []time.Time{turn.Add(10*time.Minute + 7300*ms), turn.Add(40*time.Minute + 7300*ms)} {
+		d := decide(call)
+		oRefused(t, "a time to live read in the hour shown twice", d, "no-clock-read")
+		if !strings.Contains(d.Line, "keploy refuses it rather than learn it") {
+			t.Errorf("at %s: %q; want the line to name the turn", call, d.Line)
+		}
+	}
+	if d := decide(time.Date(2026, 10, 26, 10, 0, 7, 300e6, time.UTC)); d.Outcome != OutcomeClock || d.Clock == nil || d.Clock.Min > 2*time.Hour || d.Clock.Max < 2*time.Hour {
+		t.Errorf("the same read a day later: %s; want a Clock, plus two hours", oDescribe([]Decision{d}))
+	}
 }
