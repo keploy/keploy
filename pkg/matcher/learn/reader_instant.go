@@ -261,10 +261,12 @@ func viewAnswerMoments(lv Raw) []givenMoment {
 // gave the application earlier in the set (GivenPlaces.fView): the instants
 // of each different view the serves of it the read saw were told with
 // (Order.viewsLocked, ServedMockLive), as the set keeps them
-// (setPlaces.viewWords), each standing where the recording does in time (w:
-// when it was recorded, Raw.late, Raw.noTime), as its answer's are read
-// (GivenPlaces.answer). None where every serve was told as recorded (F gave
-// the recording itself: answer), where m's recording holds no answer
+// (setPlaces.viewWords), each standing where the recording does in time,
+// as its answer's are read (GivenPlaces.answer): a view is read as the
+// recording's Raw (viewRaw: its at, whatever the view's own stamps say),
+// and, as the recording's own answer is here, with no call's late or
+// noTime. None where every serve was told as recorded (F gave the
+// recording itself: answer), where m's recording holds no answer
 // (answers), and where keploy cannot tell what F gave there (w.unstated,
 // w.unread: its words say so, and their reader refuses); none with the
 // proven switch off. unread is w.unread, or true where a view its words
@@ -286,10 +288,7 @@ func (o Order) viewMoments(m *models.Mock, w givenWords, answers bool) (moments 
 		if !read {
 			return nil, true
 		}
-		for _, a := range v.moments {
-			a.at, a.late, a.noTime = w.at, w.late, w.noTime
-			moments = append(moments, a)
-		}
+		moments = append(moments, v.moments...)
 	}
 	return moments, false
 }
