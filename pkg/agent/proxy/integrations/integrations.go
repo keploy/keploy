@@ -561,6 +561,10 @@ type CallRound struct {
 	// unrouted is why the read's view's set was not served by proven
 	// routing (InRouting): Unrouted.
 	unrouted string
+	// listed is, of keploy mock replay's mappings, the tests whose lists
+	// hold each recording, as the read's view was installed with
+	// (InListing): ListedFor. nil when the agent handed none.
+	listed map[string][]string
 }
 
 // NewCallRound is a store's CallRound of staging epoch, held telling, by

@@ -640,6 +640,17 @@ type ExactUnroutedStager interface {
 	StageExactUnrouted(why string) error
 }
 
+// ExactListingSetter is implemented by a proxy that names, on a call keploy
+// mock replay made that its parsers refuse as a recording the open view does
+// not show, the tests whose lists in mappings.yaml hold that recording, beside
+// the test whose window the call was made in. SetExactListing hands it, of the
+// session's scope table, the tests listing each recording by name; the agent
+// hands it with the table's pool, before the pool is served. A proxy that
+// does not implement it names the receipt, which lists them (recorded_in).
+type ExactListingSetter interface {
+	SetExactListing(listed map[string][]string) error
+}
+
 // RecordedOfKindSetter is implemented by a proxy whose pairing (record's full
 // round) reads, beside what is staged, the set's recordings of
 // a kind the agent keeps on disk: a test's own are staged only as it opens.

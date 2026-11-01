@@ -339,3 +339,56 @@ func TestKeployMocksMappingEditNamesTheTestTheCallWasMadeIn(t *testing.T) {
 		}
 	}
 }
+
+// keploy mock replay's mapping-edit miss names, beside the window the call was
+// made in, the tests whose lists in mappings.yaml hold its recording, as the
+// call's first read found them (CallRound.ListedFor), and the edit for that
+// place: out of their lists to worker:, or, for a recording no test lists
+// (startup:, another test process's), into the worker: of the process that
+// made the call, never to where it already is. With no listing it names the
+// receipt.
+func TestKeployMocksMappingEditNamesTheTestsItsRecordingIsListedFor(t *testing.T) {
+	m := onHost("mock-3", "/delete", "localhost:1")
+	for _, tc := range []struct {
+		name   string
+		listed map[string][]string
+		want   []string
+		never  []string
+	}{
+		{"one test", map[string][]string{"mock-3": {"o::TestA"}, "mock-1": {"o::TestB"}},
+			[]string{"This call, made in o::TestB's window, is mock-3, which mappings.yaml lists for o::TestA.", "move mock-3 out of o::TestA's list to worker: in mappings.yaml"},
+			[]string{"recorded_in", "lists for no test"}},
+		{"two tests", map[string][]string{"mock-3": {"o::TestA", "o::TestC"}},
+			[]string{"which mappings.yaml lists for o::TestA and o::TestC.", "move mock-3 out of the lists of o::TestA and o::TestC to worker:"},
+			nil},
+		{"three tests", map[string][]string{"mock-3": {"o::TestA", "o::TestC", "o::TestD"}},
+			[]string{"which mappings.yaml lists for o::TestA, o::TestC and o::TestD."},
+			nil},
+		{"no test", map[string][]string{"mock-1": {"o::TestB"}},
+			[]string{"which mappings.yaml lists for no test: in startup:, which answers between tests only, or for another test process.", "move mock-3 to the worker: of the test process that made the call"},
+			[]string{"move mock-3 to worker: in mappings.yaml", "recorded_in", "from a place this replay had not reached"}},
+		{"no listing", nil,
+			[]string{"which mappings.yaml lists where this replay did not make it: for another test (the receipt names it under recorded_in), in startup:, which answers between tests only, or for another test process."},
+			[]string{"from a place this replay had not reached"}},
+	} {
+		r := &models.MockMismatchReport{}
+		call := integrations.NewCallRound(1, nil).InRouting(models.UnroutedUnstaged).InListing(tc.listed).WithSequence(integrations.SequenceView{Test: "o::TestB"})
+		markNotOwned(r, m, call)
+		for _, want := range tc.want {
+			if !strings.Contains(r.NextSteps, want) {
+				t.Errorf("%s: the miss does not say %q: %q", tc.name, want, r.NextSteps)
+			}
+		}
+		for _, never := range append(tc.never, "record again", "judging") {
+			if strings.Contains(r.NextSteps, never) {
+				t.Errorf("%s: the miss says %q: %q", tc.name, never, r.NextSteps)
+			}
+		}
+	}
+	// keploy test's set never reads the listing: record's judging is told.
+	r := &models.MockMismatchReport{}
+	markNotOwned(r, m, integrations.NewCallRound(1, nil).InRouting(models.UnroutedUnmarked).InListing(map[string][]string{"mock-3": {"o::TestA"}}))
+	if r.NextSteps != notOwnedNextSteps("mock-3") {
+		t.Fatalf("an unmarked keploy test set was told %q", r.NextSteps)
+	}
+}

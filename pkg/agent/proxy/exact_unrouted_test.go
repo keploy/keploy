@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"slices"
 	"testing"
 	"time"
 
@@ -80,6 +81,16 @@ func TestACallsMarkSaysWhyItsSetIsNotRouted(t *testing.T) {
 			mm.ResetForReplaySession()
 			mockReplay(mm)
 		}, nil, models.UnroutedUnstaged},
+		// keploy test's next set: its staging said its reason, and its first
+		// view is not installed yet. The view a call reads there is the one
+		// the reset installed, which nobody said a reason for: never the
+		// reason the next set's views will read.
+		{"keploy test's next set, said but before its first view", func(mm *MockManager) {
+			stage("", models.UnroutedUnmarked, true)(mm)
+			mm.ResetForReplaySession()
+			mm.StageExactBackground("")
+			mm.StageExactUnrouted(models.UnroutedNotEnabled)
+		}, nil, ""},
 	} {
 		for how, mark := range marks {
 			t.Run(how+": "+tc.name, func(t *testing.T) {
@@ -101,6 +112,84 @@ func TestACallsMarkSaysWhyItsSetIsNotRouted(t *testing.T) {
 	}
 	if got := (integrations.CallRound{}).Unrouted(); got != "" {
 		t.Fatalf("the zero CallRound says %q; want none", got)
+	}
+}
+
+// A call's mark names, of keploy mock replay's mappings, the tests whose lists
+// hold each recording (integrations.CallRound.ListedFor), as the view its
+// first read found was installed with: the listing the agent handed
+// (SetExactListing) before the view, through the store's mark, a scoped
+// view's and a round snapshot alike. A view installed before it reads none,
+// a session reset forgets it until the next session's table, and an empty
+// table is a listing that holds no recording, never none.
+func TestACallsMarkNamesTheTestsItsRecordingIsListedFor(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	listing := map[string][]string{"mock-2": {"o::TestA"}, "mock-5": {"o::TestA", "o::TestC"}}
+	next := map[string][]string{"mock-2": {"o::TestB"}}
+	mockReplay := func(listed map[string][]string) func(mm *MockManager) {
+		return func(mm *MockManager) {
+			mm.SetExactListing(listed)
+			mm.StageExactUnrouted(models.UnroutedUnstaged)
+			mm.ServeExactPool(models.PoolKeyNone, nil)
+		}
+	}
+	marks := map[string]func(mm *MockManager) integrations.CallRound{
+		"the store's mark": func(mm *MockManager) integrations.CallRound { return mm.MarkCallRound() },
+		"a scoped view's mark": func(mm *MockManager) integrations.CallRound {
+			return integrations.MarkCallRound(&scopedMockDb{MockMemDb: mm})
+		},
+		"a round snapshot": func(mm *MockManager) integrations.CallRound {
+			snap, ok := mm.RoundSnapshot(integrations.RoundQuery{})
+			if !ok {
+				t.Fatal("no snapshot")
+			}
+			return snap.CallRound()
+		},
+	}
+	for _, tc := range []struct {
+		name   string
+		before func(mm *MockManager)
+		want   map[string][]string
+	}{
+		{"keploy mock replay's session", mockReplay(listing), listing},
+		{"an empty table", mockReplay(nil), map[string][]string{}},
+		{"a view installed before the listing", func(mm *MockManager) {
+			mm.StageExactUnrouted(models.UnroutedUnstaged)
+			mm.ServeExactPool(models.PoolKeyNone, nil)
+			mm.SetExactListing(listing)
+		}, nil},
+		{"after a session reset, before the next table", func(mm *MockManager) {
+			mockReplay(listing)(mm)
+			mm.ResetForReplaySession()
+			mm.StageExactUnrouted(models.UnroutedUnstaged)
+			mm.ServeExactPool(models.PoolKeyNone, nil)
+		}, nil},
+		{"the next session's own", func(mm *MockManager) {
+			mockReplay(listing)(mm)
+			mm.ResetForReplaySession()
+			mockReplay(next)(mm)
+		}, next},
+	} {
+		for how, mark := range marks {
+			t.Run(how+": "+tc.name, func(t *testing.T) {
+				mm := NewMockManager(nil, nil, zap.NewNop())
+				t.Cleanup(mm.Close)
+				tc.before(mm)
+				call := mark(mm)
+				if !call.Read() {
+					t.Fatal("precondition: the call was not marked")
+				}
+				for _, name := range []string{"mock-2", "mock-5", "mock-9"} {
+					got, known := call.ListedFor(name)
+					if known != (tc.want != nil) || !slices.Equal(got, tc.want[name]) {
+						t.Fatalf("%s reads listed for %v (known %v); want %v (known %v)", name, got, known, tc.want[name], tc.want != nil)
+					}
+				}
+			})
+		}
+	}
+	if _, known := (integrations.CallRound{}).ListedFor("mock-2"); known {
+		t.Fatal("the zero CallRound knows a listing")
 	}
 }
 
@@ -144,7 +233,7 @@ func TestKeployTestsSetBoundaryNeverReadsAsKeployMockReplay(t *testing.T) {
 // round's snapshot read why its set is not routed too. With the tracker ahead
 // of the store's view in the staged set (TrackerAhead: of its pool view, or
 // of test-1's view as test-2 begins), the call is the staged set's, and reads
-// the reason its view was installed with. Once the tracker began a test set
+// the reason (and the listing) its view was installed with. Once the tracker began a test set
 // the store has not staged (SetUnstaged), the call is that next set's, whose
 // staging has said no reason yet: it reads none, never the set before's.
 func TestALearnRoundsCallReadsWhyItsOwnSetIsNotRouted(t *testing.T) {
@@ -171,7 +260,9 @@ func TestALearnRoundsCallReadsWhyItsOwnSetIsNotRouted(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p, mm := heldOrdersWith(t, false, zap.NewNop(), nil)
-			// The set's staging says it carries no mark, before its views.
+			// The set's staging says it carries no mark, before its views,
+			// and the listing its views read.
+			mm.SetExactListing(map[string][]string{"mock-own1": {"test-1"}})
 			mm.StageExactUnrouted(models.UnroutedUnmarked)
 			mm.ServeExactPool(models.PoolKeyNone, []string{"mock-pool"})
 			tc.move(p, mm)
@@ -184,6 +275,13 @@ func TestALearnRoundsCallReadsWhyItsOwnSetIsNotRouted(t *testing.T) {
 			}
 			if got := mm.MarkCallRound().Unrouted(); got != tc.want {
 				t.Fatalf("the store's mark reads as not routed because %q; want %q", got, tc.want)
+			}
+			// The listing goes with the reason: the staged set's, and none
+			// for the next set's call.
+			for how, call := range map[string]integrations.CallRound{"the snapshot's call": snap.CallRound(), "the store's mark": mm.MarkCallRound()} {
+				if got, known := call.ListedFor("mock-own1"); known != tc.ahead || (tc.ahead && !slices.Equal(got, []string{"test-1"})) {
+					t.Fatalf("%s reads mock-own1 listed for %v (known %v); want test-1 only while the call is the staged set's", how, got, known)
+				}
 			}
 		})
 	}

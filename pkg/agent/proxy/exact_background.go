@@ -104,6 +104,31 @@ func (m *MockManager) StageExactUnrouted(why string) {
 	m.exact.unrouted.Store(&why)
 }
 
+// SetExactListing hands the store, of keploy mock replay's mappings, the
+// tests whose lists hold each recording, by recording name (none for a
+// startup: or worker: entry): every view installed from now on reads it, and
+// a call one of them refuses that keploy mock replay made names them
+// (integrations.CallRound.ListedFor, integrations.NotOwnedMappingEdit), as
+// the test the call's recording is listed for beside the one whose window
+// the call was made in. The agent hands it with the session's table, before
+// the table's pool is served; a session reset forgets it. listed is never
+// changed after.
+func (m *MockManager) SetExactListing(listed map[string][]string) {
+	if listed == nil {
+		listed = map[string][]string{}
+	}
+	m.exact.listed.Store(&listed)
+}
+
+// listedNow is the listing the agent last handed (SetExactListing); nil when
+// it handed none since the session's reset.
+func (m *MockManager) listedNow() map[string][]string {
+	if p := m.exact.listed.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
+
 // unroutedNow is why the staged set is not served by the background rules,
 // as the agent last said it (StageExactUnrouted): models.UnroutedUnmarked or
 // models.UnroutedNotEnabled from keploy test's staging,

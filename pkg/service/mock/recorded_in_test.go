@@ -65,7 +65,7 @@ func TestTheTestsReceiptNamesTheTestThatRecordedAMiss(t *testing.T) {
 					got = append(got, tr.Name+" "+c.ActualSummary+" -> "+c.RecordedIn)
 				}
 			}
-			said := logs.FilterMessageSnippet("tests made a call that another test recorded")
+			said := logs.FilterMessageSnippet("tests made a call that mappings.yaml lists for another test")
 			if !on {
 				require.Len(t, got, len(misses), "the windows' misses are on the receipt")
 				for _, line := range got {
@@ -82,6 +82,12 @@ func TestTheTestsReceiptNamesTheTestThatRecordedAMiss(t *testing.T) {
 			}, got, "only the miss that is another test's recording names that test")
 			require.Equal(t, 1, said.Len(), "the replay says once which calls another test recorded")
 			require.Equal(t, []any{"o::TestB: GET /a (mock-0, recorded in o::TestA)"}, said.All()[0].ContextMap()["calls"])
+			// keploy mock does not decide whose a call is: the step is the
+			// mapping edit, never a record again.
+			next, _ := said.All()[0].ContextMap()["next_step"].(string)
+			require.Contains(t, next, "move its recording to worker: in mappings.yaml", "the step is the mapping edit")
+			require.NotContains(t, next, "again", "keploy mock replay never says to record again")
+			require.NotContains(t, next, "keploy mock record", "keploy mock replay never says to record again")
 			// The agent's windows are read, never written: the name is on the
 			// receipt's own copy.
 			require.Empty(t, instr.windows[1].Evidence.Misses[0].RecordedIn)

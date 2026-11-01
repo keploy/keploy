@@ -412,12 +412,22 @@ func (p *unroutedWireProxy) StageExactUnrouted(why string) error {
 	return nil
 }
 
+// SetExactListing implements coreAgent.ExactListingSetter: p keeps each
+// listing it is handed in told, as "listed:" and the listing, with how many
+// views were installed before it.
+func (p *unroutedWireProxy) SetExactListing(listed map[string][]string) error {
+	p.told = append(p.told, fmt.Sprintf("listed:%v@%d", listed, p.views))
+	return nil
+}
+
 // keploy mock replay's agent tells the proxy its session stages no test set
 // and routes none (models.UnroutedUnstaged) before the session's first view,
 // so a call the proxy's parsers refuse in any view of the session names the
 // mapping edit. The proxy never infers it from what is not staged (keploy
 // test's set boundary stages nothing too): only this says it, once per
-// staging of the session.
+// staging of the session. With the table's pool, before it is served, the
+// agent hands the proxy the tests listing each recording, for that miss to
+// name the test its recording is listed for.
 func TestKeployMockReplayTellsTheProxyItStagesNoTestSet(t *testing.T) {
 	a, wp := wireAgent(t, models.MODE_TEST)
 	p := &unroutedWireProxy{wireProxy: wp}
@@ -435,7 +445,19 @@ func TestKeployMockReplayTellsTheProxyItStagesNoTestSet(t *testing.T) {
 	if _, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", Outcome: "passed"}); serr != nil {
 		t.Fatal(serr)
 	}
-	if want := []string{models.UnroutedUnstaged + "@0"}; !reflect.DeepEqual(p.told, want) || p.views < 3 {
+	if want := []string{"listed:map[mock-2:[o::TestA]]@0", models.UnroutedUnstaged + "@0"}; !reflect.DeepEqual(p.told, want) || p.views < 3 {
 		t.Fatalf("the proxy was told %q over %d views; want %q, before the session's first view", p.told, p.views, want)
+	}
+}
+
+// listedFor names, of a scope table, the tests listing each recording, in
+// sorted order and once each; a table with no test is a listing, never none.
+func TestListedForNamesEachRecordingsTests(t *testing.T) {
+	got := listedFor(map[string][]string{"o::TestB": {"mock-1", "mock-1"}, "o::TestA": {"mock-1", "mock-2"}, "o::TestC": nil})
+	if want := map[string][]string{"mock-1": {"o::TestA", "o::TestB"}, "mock-2": {"o::TestA"}}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("listed %v; want %v", got, want)
+	}
+	if got := listedFor(nil); got == nil || len(got) != 0 {
+		t.Fatalf("an empty table listed %v; want an empty listing", got)
 	}
 }

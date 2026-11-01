@@ -245,6 +245,10 @@ type RoundSnapshot struct {
 	// (CallRound.Unrouted): the staged set's reason, which a call of a set
 	// the store has not staged (SetUnstaged) never reads.
 	Unrouted string
+	// Listed: of keploy mock replay's mappings, the tests whose lists hold
+	// each recording, as the view was installed with (CallRound.ListedFor);
+	// nil when the agent handed none.
+	Listed map[string][]string
 	// Staging: the store's view is one the replay serves while it stages a
 	// set's mocks, where no recording answers a call (CallRound.Staging).
 	Staging bool
@@ -484,13 +488,13 @@ func (s RoundSnapshot) CallRound() CallRound {
 	// store's MarkCallRound says (its sequence view's Worker).
 	worker := s.Test != "" && len(s.worker) > 0
 	if s.TrackerAhead() {
-		return NewCallRound(s.At.Epoch, HoldsEvery).ReadAt(s.At).InStaging(s.Staging).InView(s.Test != "", s.Background).InRouting(s.Unrouted).InWorkerView(worker)
+		return NewCallRound(s.At.Epoch, HoldsEvery).ReadAt(s.At).InStaging(s.Staging).InView(s.Test != "", s.Background).InRouting(s.Unrouted).InListing(s.Listed).InWorkerView(worker)
 	}
 	owners, ended := s.owners, s.endedOwn
 	return NewCallRound(s.At.Epoch, func(name string) bool {
 		_, own := ended[name]
 		return own || owners[name] != OwnerNone
-	}).ReadAt(s.At).InStaging(s.Staging).InView(s.Test != "", s.Background).InRouting(s.Unrouted).InWorkerView(worker)
+	}).ReadAt(s.At).InStaging(s.Staging).InView(s.Test != "", s.Background).InRouting(s.Unrouted).InListing(s.Listed).InWorkerView(worker)
 }
 
 // HoldsEvery holds every recording as a call's own (NewCallRound): the mark

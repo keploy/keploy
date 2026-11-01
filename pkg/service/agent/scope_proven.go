@@ -483,7 +483,37 @@ func (a *Agent) SetScopePool(ctx context.Context, pool map[string][]string) erro
 			return err
 		}
 	}
+	// Whose list holds each recording, for a call keploy mock replay makes
+	// that the open view refuses to name the test it is listed for beside
+	// the one it was made in: handed before the pool is served, so every
+	// view the serve installs reads it.
+	if ls, ok := a.Proxy.(coreAgent.ExactListingSetter); ok {
+		a.scopeMu.Lock()
+		listed := listedFor(a.scopeTable)
+		a.scopeMu.Unlock()
+		if err := ls.SetExactListing(listed); err != nil {
+			return err
+		}
+	}
 	return a.applyPool(ctx)
+}
+
+// listedFor is, of a replay's scope table (test ID -> the mocks it lists),
+// the tests listing each mock, by mock name, each mock's in sorted order and
+// once. A table with no test is an empty listing, never nil: the table came.
+func listedFor(table map[string][]string) map[string][]string {
+	out := make(map[string][]string)
+	for id, names := range table {
+		for _, n := range names {
+			if !slices.Contains(out[n], id) {
+				out[n] = append(out[n], id)
+			}
+		}
+	}
+	for _, ids := range out {
+		slices.Sort(ids)
+	}
+	return out
 }
 
 // teardownOwners is, of a replay's scope table (test ID -> the mocks it

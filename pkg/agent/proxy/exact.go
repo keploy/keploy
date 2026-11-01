@@ -123,6 +123,10 @@ type exactView struct {
 	// background rules as the view was installed (MockManager.unroutedNow):
 	// a call the view refuses names it (integrations.CallRound.Unrouted).
 	unrouted string
+	// listed is, of keploy mock replay's mappings, the tests whose lists
+	// hold each recording as the view was installed (MockManager.listedNow):
+	// a call the view refuses names them (integrations.CallRound.ListedFor).
+	listed map[string][]string
 	// staging is whether the view was installed while a set's mocks were
 	// being staged (StageExactBackground until ServeExactBackground): a miss
 	// it refuses says so (stagingMissNote).
@@ -323,6 +327,11 @@ type exactState struct {
 	// session reset and until the agent says, read as "" (unroutedNow,
 	// exact_background.go).
 	unrouted atomic.Pointer[string]
+	// listed is, of keploy mock replay's mappings, the tests whose lists
+	// hold each recording, by name, as the agent handed them
+	// (SetExactListing). nil since a session reset and until the agent
+	// hands the session's (listedNow, exact_background.go).
+	listed atomic.Pointer[map[string][]string]
 	// shared numbers the test views' shared parts (exactView.shared); held
 	// under the round lock.
 	shared sharedViews
@@ -792,7 +801,7 @@ func (m *MockManager) MarkCallRound() integrations.CallRound {
 	case ended != nil:
 		held = func(name string) bool { return v.holds(name) || ended.holds(name) }
 	}
-	return integrations.NewCallRound(at.Epoch, held).ReadAt(at).InStaging(v.staging).InView(v.test != "", v.bg != nil).InRouting(v.unrouted).WithSequence(m.sequenceViewOf(v))
+	return integrations.NewCallRound(at.Epoch, held).ReadAt(at).InStaging(v.staging).InView(v.test != "", v.bg != nil).InRouting(v.unrouted).InListing(v.listed).WithSequence(m.sequenceViewOf(v))
 }
 
 // endedName is the test of v, the view the store ended while the learn
@@ -1653,7 +1662,7 @@ func (m *MockManager) installExactWith(v *exactView, under func(r *roundState)) 
 			v.workerOrder = w.order
 		}
 	} else {
-		v.unrouted = m.unroutedNow()
+		v.unrouted, v.listed = m.unroutedNow(), m.listedNow()
 	}
 	// The generation moves, and the learn tracker's open test is bound to a
 	// test's view, before the view is visible: holding the round lock, which

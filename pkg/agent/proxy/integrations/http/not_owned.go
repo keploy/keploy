@@ -188,39 +188,21 @@ func init() {
 	models.RegisterRequestKeys(models.HTTP, recordedRequestKeys)
 }
 
-// markNotOwned makes report the miss of a call that is m, a recording the
-// open view does not show (notOwnedRecording): m is its closest mock, with no
+// markNotOwned makes report the miss of a call that is m, a recording the open
+// view does not show (notOwnedRecording): m is its closest mock, with no
 // field named as differing, since none does, and its rendered request is m's.
 // call is where the call's first read found it made: a call keploy mock
 // replay made (no set staged, models.UnroutedUnstaged) is told the mapping
-// edit (notOwnedMappingEdit), never record's judging, which keploy mock has
-// none of.
+// edit (integrations.NotOwnedMappingEdit), never record's judging, which
+// keploy mock has none of.
 func markNotOwned(report *models.MockMismatchReport, m *models.Mock, call integrations.CallRound) {
 	report.ClosestMock, report.NotOwned = m.Name, true
 	report.FieldDiffs, report.Differs, report.FieldReasons = nil, nil, nil
 	report.ClosestMockReq = renderMockRequest(m.Spec.HTTPReq, m.Noise)
 	report.NextSteps = notOwnedNextSteps(m.Name)
 	if call.Unrouted() == models.UnroutedUnstaged {
-		sv, _ := call.Sequence()
-		report.NextSteps = notOwnedMappingEdit(m.Name, sv.Test)
+		report.NextSteps = integrations.NotOwnedMappingEdit(m.Name, call)
 	}
-}
-
-// notOwnedMappingEdit says what a miss on a call that is a recording the open
-// view does not show means under keploy mock replay, which marks no set and
-// routes none: the test framework's begin and end set each test's window,
-// and a call made outside its recording's window is a mapping edit the
-// reader makes (worker:), as keploy mock replay's end says it. test is the
-// test whose window the call was made in, as its first read found it ("":
-// between tests). The test whose window it was recorded in is the one
-// mappings.yaml lists it for, which the proxy does not know: keploy mock
-// replay's receipt names it on the miss (recorded_in).
-func notOwnedMappingEdit(name, test string) string {
-	made := "between tests"
-	if test != "" {
-		made = "in " + test + "'s window"
-	}
-	return fmt.Sprintf("This call, made %s, is %s, which the test set's mappings.yaml lists where this replay did not make it: for another test, whose window it was recorded in (the receipt names it under recorded_in), or in worker: from a place this replay had not reached. keploy mock does not decide whose a call is: each test's begin and end set its window. If the call is the application's own work (a queue consumer, a scheduler), move %s to worker: in mappings.yaml, which answers it in any test's window or between tests and requires it of none; if it is the test's own, the test made it outside the window it was recorded in.", made, name, name)
 }
 
 // notOwnedNextSteps says what a miss on a call that is a recording the open

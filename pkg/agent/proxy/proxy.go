@@ -4977,6 +4977,19 @@ func (p *Proxy) StageExactUnrouted(why string) error {
 
 var _ agent.ExactUnroutedStager = (*Proxy)(nil)
 
+// SetExactListing implements agent.ExactListingSetter
+// (MockManager.SetExactListing).
+func (p *Proxy) SetExactListing(listed map[string][]string) error {
+	m := p.getMockManager()
+	if m == nil {
+		return errNoMockManager
+	}
+	m.SetExactListing(listed)
+	return nil
+}
+
+var _ agent.ExactListingSetter = (*Proxy)(nil)
+
 // SetRecordedOfKind implements agent.RecordedOfKindSetter
 // (exact_background.go).
 func (p *Proxy) SetRecordedOfKind(src func(kind models.Kind, visit func(name string, load func() (*models.Mock, error)) bool) error) error {

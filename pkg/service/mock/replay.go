@@ -2207,10 +2207,14 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 	// owns names that test, as keploy test's replay does (markRecordedIn):
 	// judging lists it as the root of the test's entry.
 	if named := withRecordedIn(counts.tests, m.mockOwners); len(named) > 0 {
-		m.logger.Warn("tests made a call that another test recorded: likely, at record time that test made it on a connection it opened, whose handshake was recorded there (KEPLOY_PROVEN=1); each is named under evidence.misses.recorded_in in "+TestsReceiptFile,
+		// keploy mock does not decide whose a call is (the test framework's
+		// begin and end set each test's window): the step is a mapping edit,
+		// in the words the proxy's parsers give each such miss
+		// (integrations.NotOwnedMappingEdit), never a record again.
+		m.logger.Warn("tests made a call that mappings.yaml lists for another test (KEPLOY_PROVEN=1); each is named under evidence.misses.recorded_in in "+TestsReceiptFile,
 			zap.String("mock-set", m.setName()),
 			zap.Strings("calls", named[:min(len(named), 20)]),
-			zap.String("next_step", "record the set again with keploy mock record so each test opens the connections it uses, or keep the application's connection reuse as it was when recording"))
+			zap.String("next_step", "if the call is the application's own work (a queue consumer, a scheduler, a connection it keeps open across tests), move its recording to worker: in mappings.yaml, which answers it in any test's window or between tests and requires it of none; if it is the test's own, it was made outside the window of the test that recorded it"))
 	}
 	if provenswitch.On() {
 		// When each test began serves the proven flow's reading of a cut

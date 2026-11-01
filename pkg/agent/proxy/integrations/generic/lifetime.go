@@ -71,8 +71,15 @@ func notOwnedExchange(reqBuffs [][]byte, mockDb integrations.MockMemDb, call int
 const restagedExchangeNote = "keploy replay staged a test set again while it decided this request, so keploy answered it with no recorded exchange and names none made elsewhere for it: a request is never answered with, nor named as, an exchange of a staging made after it began."
 
 // notOwnedExchangeNextSteps says what a miss on an exchange the test does not
-// own (notOwnedExchange) likely means, and what to do.
-func notOwnedExchangeNextSteps(name string) string {
+// own (notOwnedExchange) likely means, and what to do. call is where the
+// request's first read found it made: under keploy mock replay
+// (models.UnroutedUnstaged), which has no judging and records nothing again, it is
+// the mapping edit every parser words (integrations.NotOwnedMappingEdit),
+// with how keploy serves a connection's exchanges.
+func notOwnedExchangeNextSteps(name string, call integrations.CallRound) string {
+	if call.Unrouted() == models.UnroutedUnstaged {
+		return integrations.NotOwnedMappingEdit(name, call) + " This is an exchange of a connection outside this test: keploy serves a connection's first exchange, its handshake, to every test, unless the whole connection lay inside one test, which then owns it all; every other exchange is listed where it was recorded."
+	}
 	return fmt.Sprintf("This request is %s, which keploy recorded where this replay did not make it (in another test's window, or after a test this replay had not reached): an exchange of a connection outside this test (keploy serves a connection's first exchange, its handshake, to every test, unless the whole connection lay inside one test, which then owns it all; every other exchange goes to the test that recorded it). Likely, at replay this test made the call on a connection it opened itself, which it did not do when recording, or the call was made in this test where it was made in another when recording: record again so each test opens the connections it uses, or keep the application's connection reuse and timing as they were when recording. If this is a heartbeat or keepalive on a long-lived connection, it is to be declared session in keploy.yaml, by destination and request prefix: that rule for Generic connections is not available yet, so until it is, a test that sends one where it was not recorded fails.", name)
 }
 

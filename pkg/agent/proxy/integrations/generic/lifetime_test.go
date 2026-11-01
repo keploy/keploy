@@ -126,13 +126,17 @@ type exactStore struct {
 	exact  bool
 	own    map[string]bool
 	staged []*models.Mock
+	// unrouted and listed are what its view was installed with
+	// (integrations.CallRound.InRouting, InListing).
+	unrouted string
+	listed   map[string][]string
 }
 
 func (s exactStore) MarkCallRound() integrations.CallRound {
 	if !s.exact {
 		return integrations.CallRound{}
 	}
-	return integrations.NewCallRound(1, nil)
+	return integrations.NewCallRound(1, nil).InRouting(s.unrouted).InListing(s.listed)
 }
 
 // HoldToRound implements integrations.RoundHolder: s never stages again, so
@@ -223,6 +227,41 @@ func TestAMissOnAnExchangeTheTestDoesNotOwnIsNamed(t *testing.T) {
 	r := missReport(t, store, "AUTH step2")
 	if r.ClosestMock != "mock-auth-x" || !r.NotOwned || !strings.Contains(r.NextSteps, "Likely, at replay this test made the call on a connection it opened itself") {
 		t.Fatalf("the miss names %q (not owned %v) and says %q", r.ClosestMock, r.NotOwned, r.NextSteps)
+	}
+}
+
+// Under keploy mock replay (its agent says it stages no set) the miss on an
+// exchange the test does not own is the mapping edit, naming the test whose
+// list holds the exchange, never a record again; under keploy test, for
+// either side that lacks proven routing, it stays what record's judging
+// reads.
+func TestUnderKeployMockAMissOnAnExchangeTheTestDoesNotOwnIsTheMappingEdit(t *testing.T) {
+	m := exchange("mock-auth-x", "AUTH step2")
+	m.Spec.Metadata = map[string]string{"type": "config", models.MetadataLifetimeKey: models.MetadataLifetimePerTest}
+	store := exactStore{exact: true, staged: []*models.Mock{m}, unrouted: models.UnroutedUnstaged, listed: map[string][]string{"mock-auth-x": {"o::TestA"}}}
+	r := missReport(t, store, "AUTH step2")
+	if r.ClosestMock != "mock-auth-x" || !r.NotOwned {
+		t.Fatalf("the miss names %q (not owned %v)", r.ClosestMock, r.NotOwned)
+	}
+	for _, want := range []string{
+		"This call, made between tests, is mock-auth-x, which mappings.yaml lists for o::TestA.",
+		"move mock-auth-x out of o::TestA's list to worker: in mappings.yaml",
+		"keploy serves a connection's first exchange, its handshake, to every test",
+	} {
+		if !strings.Contains(r.NextSteps, want) {
+			t.Errorf("keploy mock's miss does not say %q: %q", want, r.NextSteps)
+		}
+	}
+	for _, never := range []string{"record again", "Likely, at replay"} {
+		if strings.Contains(r.NextSteps, never) {
+			t.Errorf("keploy mock's miss says %q: %q", never, r.NextSteps)
+		}
+	}
+	for _, why := range []string{models.UnroutedUnmarked, models.UnroutedNotEnabled, ""} {
+		store.unrouted = why
+		if r := missReport(t, store, "AUTH step2"); !strings.Contains(r.NextSteps, "Likely, at replay this test made the call on a connection it opened itself") || strings.Contains(r.NextSteps, "keploy mock does not decide") {
+			t.Errorf("unrouted %q: keploy test's miss is not record's: %q", why, r.NextSteps)
+		}
 	}
 }
 
