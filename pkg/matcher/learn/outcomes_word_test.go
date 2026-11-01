@@ -331,6 +331,48 @@ func TestOutcomeABodylessRecordNamesItsPlacesThroughItsAdapter(t *testing.T) {
 	}
 }
 
+// A read-back: a find by an id ("app-0b1e") whose changed word an earlier
+// insert of the test sent inside its longer name binds that word there, and
+// its own answer, which holds the find's recorded id whole, is answered at
+// the same word with this run's word, its line naming the answer place.
+// Only there: a longer text holding the word (the name read back) and the
+// word alone stay served as recorded. An adapter that cannot answer at a
+// word, or an answer place keploy cannot name, refuses it: a Value whose
+// read-back keploy would serve as recorded is never learned.
+func TestOutcomeAReadBackIsAnsweredWhereItsAnswerHoldsTheRequestsTextWhole(t *testing.T) {
+	src := oServed("mock-23", false, false, Request, oText("body.documents[0].name", "owner-app-0b1e"), "owner-app-77c4", time.Millisecond)
+	in := func() Input {
+		in := oInput("body.cmd.filter._id", "app-0b1e", "app-77c4", src, nil)
+		in.PlaceOf = func(l Leaf, answer bool) (string, bool) { return VarPlace(l, true) }
+		in.Resp = []Leaf{oText("body.cursor.firstBatch[0]._id", "app-0b1e"), oText("body.cursor.firstBatch[0].name", "owner-app-0b1e"),
+			oText("body.cursor.firstBatch[0].tag", "0b1e"), oText("body.cursor.firstBatch[1]._id", "app-0b1e")}
+		return in
+	}
+	d := oWord(t, Decide(in()), "0b1e", "77c4")
+	var echo []string
+	for _, a := range d.Echo {
+		echo = append(echo, a.String())
+	}
+	want := "body.cursor.firstBatch[0]._id#1, body.cursor.firstBatch[1]._id#1"
+	if d.Outcome != OutcomeValue || d.FromAt.String() != "body.documents[0].name#2" || strings.Join(echo, ", ") != want ||
+		!strings.Contains(d.Line, "answered at "+want+", where the call's answer holds \"app-0b1e\" whole as recorded") {
+		t.Errorf("FALSE RED: a find whose cursor reads its id back: %s from %q, echo %v, line %q; want a Value from body.documents[0].name#2 answered at %s, its line naming them",
+			oDescribe([]Decision{d}), d.FromAt.String(), echo, d.Line, want)
+	}
+	noWord := in()
+	noWord.Caps.AnswerAtWord = false
+	oRefused(t, "a read-back an adapter cannot answer at its word", oWord(t, Decide(noWord), "0b1e", "77c4"), RefusalCannotCheck, "cannot answer a word")
+	unnamed := in()
+	unnamed.Resp = append(unnamed.Resp, Leaf{Path: "body.cursor.firstBatch[2]._id", Type: String, Value: "app-0b1e", Unnamed: true})
+	oRefused(t, "a read-back at a place keploy cannot name", oWord(t, Decide(unnamed), "0b1e", "77c4"), RefusalCannotCheck, "cannot name")
+	// No answer leaf holds the id whole: no echo, the Value as before.
+	none := in()
+	none.Resp = none.Resp[1:3]
+	if d := oWord(t, Decide(none), "0b1e", "77c4"); d.Outcome != OutcomeValue || len(d.Echo) != 0 || strings.Contains(d.Line, "answered at") {
+		t.Errorf("a find whose answer holds the word only inside other text: %s, echo %v; want a Value with no echo", oDescribe([]Decision{d}), d.Echo)
+	}
+}
+
 // A word that stands in a connection's start-up where a swap of start-ups
 // can change it (a backend pid, a secret key, a server parameter set per
 // pool) is unknown, refused naming the start-up: keploy gives each

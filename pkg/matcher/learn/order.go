@@ -365,9 +365,18 @@ func (dc *decider) word(path string, bare variables.Address, rec, live, text str
 		if d, ok := dc.atWord(path, bare, n, w, rec, live); !ok {
 			return d
 		}
-		d := dc.learned(path, at, n, w.Rec, w.Live, OutcomeValue, "bound to "+first.name+", the earliest place before the call that shows it in both runs", names(src))
+		rule := "bound to " + first.name + ", the earliest place before the call that shows it in both runs"
+		echo, unnamed := dc.readBack(path, at, w, rec)
+		if r, no := dc.unanswerable(path, bare, rec, live, echo, unnamed); no {
+			return r
+		}
+		if len(echo) > 0 {
+			rule += "; answered at " + addrList(echo) + ", where the call's answer holds " + strconv.Quote(rec) + " whole as recorded"
+		}
+		d := dc.learned(path, at, n, w.Rec, w.Live, OutcomeValue, rule, names(src))
 		d.From = Place{Mock: first.mock, Side: first.side, Path: first.path, Live: w.Live}
 		d.FromAt = dc.fromAt(first, w.Rec)
+		d.Echo = echo
 		return d
 	case len(conflict) > 0:
 		p := conflict[0]
@@ -396,15 +405,11 @@ func (dc *decider) word(path string, bare variables.Address, rec, live, text str
 		return d
 	}
 	d := dc.learned(path, at, n, w.Rec, w.Live, OutcomeFresh, "no place before the call shows it; bound at its first call", nil)
-	d.Echo = dc.echoes(w.Rec)
-	if len(d.Echo) > 0 && !dc.in.Caps.AnswerAtWord {
-		return dc.cannotCheck(path, bare, -1, rec, live, "the adapter cannot answer a word inside its answer yet")
+	echo, unnamed := dc.echoes(w.Rec)
+	if r, no := dc.unanswerable(path, bare, rec, live, echo, unnamed); no {
+		return r
 	}
-	for i, a := range d.Echo {
-		if a.Place.Part == 0 {
-			return dc.cannotCheck(path, bare, -1, rec, live, "its recorded answer echoes it at "+dc.echoPath(w.Rec, i)+", a place keploy cannot name to the adapter yet")
-		}
-	}
+	d.Echo = echo
 	return d
 }
 
@@ -967,36 +972,76 @@ func (dc *decider) instantEchoed(c changedInstant) string {
 	return ""
 }
 
-// echoes are the call's answer places that hold v (the recorded value).
-func (dc *decider) echoes(v string) []variables.Address {
-	var out []variables.Address
-	for _, l := range dc.in.Resp {
-		ws := variables.Words(l.Value)
-		for i, w := range ws {
+// echoes are the call's answer places that hold v (the recorded value),
+// each word of an answer leaf that is v.
+func (dc *decider) echoes(v string) ([]variables.Address, string) {
+	return dc.answerAt(func(l Leaf) (out []int) {
+		for i, w := range variables.Words(l.Value) {
 			if l.Value[w[0]:w[1]] == v {
-				a := dc.in.AddressOf(l, true)
-				a.Word = i
-				out = append(out, a)
+				out = append(out, i)
 			}
 		}
-	}
-	return out
+		return out
+	})
 }
 
-// echoPath is the path of the call's i-th answer place that holds v.
-func (dc *decider) echoPath(v string, i int) string {
+// readBack is where the call's own answer reads back w, a word of a longer
+// value (the request leaf at path, recorded rec, at at's word, through no
+// decode step): the same word of every answer leaf whose recorded text is
+// rec whole (a find by a key its cursor echoes). A longer or shorter text
+// that holds the word is served as recorded: a word that short may stand
+// there by chance. A whole value's echo is the adapter's, as main answers
+// it.
+func (dc *decider) readBack(path string, at variables.Address, w readWord, rec string) ([]variables.Address, string) {
+	r := dc.in.Rec.Leaves[path]
+	if at.Word < 0 || len(at.Steps) > 0 || w.Rec == rec {
+		return nil, ""
+	}
+	return dc.answerAt(func(l Leaf) []int {
+		if l.Type == r.Type && l.Value == rec {
+			return []int{at.Word}
+		}
+		return nil
+	})
+}
+
+// answerAt is each word of the call's answer that words gives, at its
+// address, and the path of the first such leaf keploy cannot name to the
+// adapter ("" where it names each).
+func (dc *decider) answerAt(words func(Leaf) []int) (out []variables.Address, unnamed string) {
 	for _, l := range dc.in.Resp {
-		ws := variables.Words(l.Value)
-		for _, w := range ws {
-			if l.Value[w[0]:w[1]] == v {
-				if i == 0 {
-					return l.Path
-				}
-				i--
+		for _, i := range words(l) {
+			a := dc.in.AddressOf(l, true)
+			if a.Place.Part == 0 && unnamed == "" {
+				unnamed = l.Path
 			}
+			a.Word = i
+			out = append(out, a)
 		}
 	}
-	return "its answer"
+	return out, unnamed
+}
+
+// unanswerable refuses a word whose answer places (echo, unnamed: as
+// answerAt gives them) the adapter cannot answer: at a word, where it
+// cannot answer one, or at a place keploy cannot name to it.
+func (dc *decider) unanswerable(path string, bare variables.Address, rec, live string, echo []variables.Address, unnamed string) (Decision, bool) {
+	switch {
+	case len(echo) > 0 && !dc.in.Caps.AnswerAtWord:
+		return dc.cannotCheck(path, bare, -1, rec, live, "the adapter cannot answer a word inside its answer yet"), true
+	case unnamed != "":
+		return dc.cannotCheck(path, bare, -1, rec, live, "its recorded answer holds it at "+unnamed+", a place keploy cannot name to the adapter yet"), true
+	}
+	return Decision{}, false
+}
+
+// addrList is as, each as its address prints, comma-separated.
+func addrList(as []variables.Address) string {
+	s := make([]string, len(as))
+	for i, a := range as {
+		s[i] = a.String()
+	}
+	return strings.Join(s, ", ")
 }
 
 // addressOf is l's word address, word -1 (the whole leaf).
