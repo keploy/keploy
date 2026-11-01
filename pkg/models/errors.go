@@ -271,9 +271,13 @@ type MockMismatchReport struct {
 	// one the open test's own mocks had already answered (exact serving,
 	// under the proven switch), and Recorded is how many times that call was
 	// recorded for the test. The proxy files every other miss by where it was
-	// made. Empty without the switch.
+	// made. Empty without the switch. ExtraOf is then the test's own
+	// recording the call repeats: of those that answered and that the call
+	// matches on its own, the first; "" for every other miss, and when the
+	// matcher could not name one.
 	MissKind string
 	Recorded int
+	ExtraOf  string
 	// Differs names the compared fields in which the call differs from the
 	// closest recording (host, header.<name>, body.<path>, ...), never a
 	// value: the reason keploy gives for a failed test names them (proven

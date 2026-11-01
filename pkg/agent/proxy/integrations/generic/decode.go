@@ -135,7 +135,7 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 				// Under exact serving: one exchange more than the test
 				// recorded? Any other miss is compared with the test's
 				// answered exchanges too: they are in no read now.
-				n := extraCall(genericRequests, db)
+				n, extraOf := extraCallOf(genericRequests, db)
 				var answered []*models.Mock
 				if n == 0 {
 					answered = answeredExchanges(db)
@@ -145,7 +145,7 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 				// round: whether that read found a staging is told from it.
 				integrations.StampMark(report, call)
 				if n > 0 {
-					report.MissKind, report.Recorded = models.MissExtraCall, n
+					report.MissKind, report.Recorded, report.ExtraOf = models.MissExtraCall, n, extraOf
 				} else if name, restaged := notOwnedExchange(genericRequests, db, call); name != "" {
 					report.ClosestMock, report.NotOwned = name, true
 					report.NextSteps = notOwnedExchangeNextSteps(name)

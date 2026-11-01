@@ -481,8 +481,8 @@ func TestACallPairedInTheFullRoundOneMoreThanTheTestRecordedMissesInTheConfirmin
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(misses) != 1 || misses[0].ActualSummary != "GET /dup" || misses[0].Kind != models.MissExtraCall || misses[0].Recorded != 1 {
-				t.Fatalf("misses %+v; want one extra_call miss of GET /dup, recorded 1", misses)
+			if len(misses) != 1 || misses[0].ActualSummary != "GET /dup" || misses[0].Kind != models.MissExtraCall || misses[0].Recorded != 1 || misses[0].ExtraOf != "mock-own-0" {
+				t.Fatalf("misses %+v; want one extra_call miss of GET /dup, recorded 1, that repeats mock-own-0", misses)
 			}
 			mm.ServeExactPool(models.PoolKeyNone, nil)
 			var owned []*models.Mock

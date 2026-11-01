@@ -5336,6 +5336,16 @@ func (p *Proxy) markedBeforeSet(err error) bool {
 	return r.Mark != models.RoundUnmarked && r.MarkEpoch < at
 }
 
+// extraOf is the test's own recording a miss repeats
+// (models.UnmatchedCall.ExtraOf): its report's, for a miss the proxy filed
+// as one call more than the test recorded only; "" for every other.
+func extraOf(e models.ParserError) string {
+	if e.MissKind != models.MissExtraCall || e.MismatchReport == nil {
+		return ""
+	}
+	return e.MismatchReport.ExtraOf
+}
+
 // stagingMissNote is what a miss made while the replay was staging a test
 // set's mocks says first in its next steps (models.ParserError.Staging):
 // no recording answers a call made then, whatever it recorded.
@@ -5896,6 +5906,7 @@ func (p *Proxy) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 					ReceivedReq:      parserErr.MismatchReport.ReceivedReq,
 					Kind:             parserErr.MissKind,
 					Recorded:         parserErr.Recorded,
+					ExtraOf:          extraOf(parserErr),
 					Differs:          parserErr.MismatchReport.Differs,
 					FieldReasons:     parserErr.MismatchReport.FieldReasons,
 					VariablePlaces:   parserErr.MismatchReport.VariablePlaces,
