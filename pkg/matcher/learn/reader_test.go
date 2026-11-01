@@ -538,3 +538,37 @@ func TestReaderCutsABase64TokenAsItFindsOne(t *testing.T) {
 		}
 	}
 }
+
+// Past maxMovedCells, keptWords compares no table (main's movedWords'
+// guard): every word between the common start and end has moved. Two
+// drifted 498 KB answers hold about 60k words each, and their table would
+// be (60k)² int32, gigabytes; here 600 words a side, past the cap, keep
+// only the common start and end, and allocate far less than the table.
+func TestReaderKeptWordsPastTheCapComparesNoTable(t *testing.T) {
+	const n = 600
+	if n*n <= maxMovedCells {
+		t.Fatalf("fixture: %d x %d words are within the cap %d", n, n, maxMovedCells)
+	}
+	rec, live := []string{"a"}, []string{"a", "new"}
+	for i := 0; i < n; i++ {
+		rec = append(rec, fmt.Sprintf("x%d", i))
+		if i < n-1 {
+			live = append(live, fmt.Sprintf("x%d", i))
+		}
+	}
+	rec, live = append(rec, "z"), append(live, "z")
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	kept := keptWords(rec, live)
+	runtime.ReadMemStats(&after)
+	if want := [][2]int{{0, 0}, {n + 1, n + 1}}; fmt.Sprint(kept) != fmt.Sprint(want) {
+		t.Errorf("kept %d pairs (%v...); want only the common start and end %v", len(kept), kept[:min(len(kept), 4)], want)
+	}
+	if got, table := after.TotalAlloc-before.TotalAlloc, uint64((n+1)*(n+1)*4); got >= table/8 {
+		t.Errorf("keptWords allocated %d bytes; the table it must not build is %d", got, table)
+	}
+	// Within the cap, the same shift keeps the words that moved along.
+	if kept := keptWords(rec[:60], append([]string{"a", "new"}, rec[1:59]...)); len(kept) != 59 {
+		t.Errorf("within the cap: kept %d pairs; want the 59 shared words", len(kept))
+	}
+}
