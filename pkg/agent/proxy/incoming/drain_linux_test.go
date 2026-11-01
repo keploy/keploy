@@ -139,6 +139,40 @@ func TestADrainNeitherWaitsOnItsConsumerNorReordersTheBytes(t *testing.T) {
 	}
 }
 
+// A drain holds at most drainMax of a connection: what the socket holds past
+// that stays there, and its consumer reads it after what the drain held, in
+// order. Here nothing else reads the socket, so the bound alone stops the
+// drain.
+func TestADrainHoldsAtMostItsBound(t *testing.T) {
+	saved := drainMax
+	drainMax = 4 << 10
+	t.Cleanup(func() { drainMax = saved })
+	app, ingress := tcpPair(t)
+	d := newDrainConn(ingress)
+	t.Cleanup(d.release)
+	answer := make([]byte, 64<<10)
+	for i := range answer {
+		answer[i] = byte('a' + i/(4<<10))
+	}
+	if _, err := app.Write(answer); err != nil {
+		t.Fatal(err)
+	}
+	waitAcked(t, app)
+	for range 2 {
+		d.drain()
+		d.mu.Lock()
+		held := len(d.held)
+		d.mu.Unlock()
+		if int64(held) != drainMax {
+			t.Fatalf("with %d bytes in the socket, the drain holds %d, want its bound of %d", len(answer), held, drainMax)
+		}
+	}
+	got := make([]byte, len(answer))
+	if _, err := io.ReadFull(d, got); err != nil || !bytes.Equal(got, answer) {
+		t.Fatalf("the consumer read the %d bytes out of their order (%v)", len(answer), err)
+	}
+}
+
 // readerWaits reports whether a goroutine waits in a drainConn's read for the
 // socket to bring something.
 func readerWaits() bool {
