@@ -426,8 +426,23 @@ func evidenceAt(p evPlace, r, f string, piece bool) (ev wordEvidence, read bool)
 		return evUnknown, true
 	case hr && !strings.Contains(p.liveText(), f):
 		return evDisproven, true
+	case !hr && unchangedFor(p, r, f):
+		// Changed elsewhere, as recorded for the word: a start-up answer
+		// served as recorded to a request of round F's own session.
+		return evDisproven, true
 	}
 	return evUnknown, true
+}
+
+// unchangedFor reports whether p, changed, is unchanged for the word: one
+// field holds f in both texts, and round F's holds no r (a text keploy could
+// not read does not: fail closed).
+func unchangedFor(p evPlace, r, f string) bool {
+	if hl, ok := p.t.live.holdsWord(r); hl || !ok {
+		return false
+	}
+	same, _ := inOneField(p.t.rec, f, p.t.live, f)
+	return same
 }
 
 // movedField is why p does not show r and f in both runs though its texts
