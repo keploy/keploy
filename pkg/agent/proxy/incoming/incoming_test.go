@@ -26,136 +26,6 @@ import (
 	"golang.org/x/net/http2/hpack"
 )
 
-func TestWaitForIngressTargetReady(t *testing.T) {
-	ln, err := net.Listen("tcp4", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	defer ln.Close()
-
-	accepted := make(chan struct{})
-	go func() {
-		conn, err := ln.Accept()
-		if err == nil {
-			_ = conn.Close()
-		}
-		close(accepted)
-	}()
-
-	if err := waitForIngressTarget(context.Background(), ln.Addr().String(), 250*time.Millisecond); err != nil {
-		t.Fatalf("waitForIngressTarget returned error: %v", err)
-	}
-
-	select {
-	case <-accepted:
-	case <-time.After(250 * time.Millisecond):
-		t.Fatal("waitForIngressTarget did not dial the ready listener")
-	}
-}
-
-func TestWaitForIngressTargetTimeout(t *testing.T) {
-	addr := testnet.RefusedAddr(t, "tcp")
-
-	if err := waitForIngressTarget(context.Background(), addr, 40*time.Millisecond); err == nil {
-		t.Fatal("expected timeout waiting for unused port")
-	}
-}
-
-func TestWaitForIngressTargetWhenKnownSkipsUnknownPort(t *testing.T) {
-	start := time.Now()
-	waited, err := waitForIngressTargetWhenKnown(context.Background(), 0, "127.0.0.1:0", 5*time.Second)
-	if err != nil {
-		t.Fatalf("waitForIngressTargetWhenKnown returned error: %v", err)
-	}
-	if waited {
-		t.Fatal("expected unknown redirected port to skip target wait")
-	}
-	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
-		t.Fatalf("unknown redirected port should skip immediately, took %s", elapsed)
-	}
-}
-
-// A dial to an app that has not listened yet waits for its listener, for as
-// long as the call's context lasts: the listener appearing answers it, not a
-// time. It comes here later than the 3 s the dial once gave up after.
-func TestDialAppWaitsForAnAppThatHasNotListenedYet(t *testing.T) {
-	// The port is held for the test's life (testnet.SharedPort): a dial to
-	// it is refused until the app listens there, and no other socket can
-	// take it meanwhile.
-	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(testnet.SharedPort(t)))
-	pm := New(zap.NewNop(), nil, &config.Config{})
-
-	listening := make(chan net.Listener, 1)
-	go func() {
-		time.Sleep(ingressTargetListenTimeout + 250*time.Millisecond)
-		l, err := testnet.OpenShared("tcp4", addr)
-		if err != nil {
-			listening <- nil
-			return
-		}
-		listening <- l
-	}()
-
-	conn, err := pm.dialApp(context.Background(), addr)
-	if err != nil {
-		t.Fatalf("dialApp returned error: %v", err)
-	}
-	_ = conn.Close()
-	if l := <-listening; l == nil {
-		t.Fatal("app listener could not rebind the port")
-	} else {
-		_ = l.Close()
-	}
-}
-
-// Once the app has listened at an address, a refusal there is final: the app
-// closed its listener (a recording that stops the app it started does), and
-// the dial returns at once, with the refusal itself. It used to retry it for
-// 3 s and make its last try past that deadline on 1 ms, so a loaded host got
-// "i/o timeout" back, which no caller can tell from an app that hangs.
-func TestDialAppReturnsTheRefusalOfAnAppThatHasGone(t *testing.T) {
-	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(testnet.SharedPort(t)))
-	pm := New(zap.NewNop(), nil, &config.Config{})
-	l, err := testnet.OpenShared("tcp4", addr)
-	if err != nil {
-		t.Fatalf("listen at %s: %v", addr, err)
-	}
-	conn, err := pm.dialApp(context.Background(), addr)
-	if err != nil {
-		t.Fatalf("dialApp to the listening app: %v", err)
-	}
-	_ = conn.Close()
-	_ = l.Close()
-
-	// Long enough that a dial still retrying the refusal ends with it.
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-	if _, err := pm.dialApp(ctx, addr); !isConnRefused(err) {
-		t.Fatalf("dialApp to the app that closed its listener returned %v, want its refusal", err)
-	}
-	if ctx.Err() != nil {
-		t.Fatal("dialApp retried the refusal of an app that had listened until its context ended")
-	}
-
-	// A new bind of the port moves an app there again: its refusal is
-	// again one of an app that has not listened yet.
-	pm.forgetListened(addr)
-	if pm.hasListened(addr) {
-		t.Fatal("the app is still known to have listened after forgetListened")
-	}
-}
-
-func TestDialAppStopsWhenItsContextEnds(t *testing.T) {
-	addr := testnet.RefusedAddr(t, "tcp")
-	pm := New(zap.NewNop(), nil, &config.Config{})
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if _, err := pm.dialApp(ctx, addr); err == nil {
-		t.Fatal("expected an error dialing a port nothing listens on")
-	}
-}
-
 func newTestIngressHook() *goTCPIngressHook {
 	return newGoTCPIngressHook(&IngressProxyManager{logger: zap.NewNop()})
 }
@@ -450,7 +320,7 @@ func TestDialAppReachesAnIPv6App(t *testing.T) {
 		t.Skipf("no IPv6 loopback: %v", err)
 	}
 	defer ln.Close()
-	conn, err := New(zap.NewNop(), nil, &config.Config{}).dialApp(context.Background(), ln.Addr().String())
+	conn, err := New(zap.NewNop(), nil, &config.Config{}).dialApp(context.Background(), ln.Addr().String(), nil)
 	if err != nil {
 		t.Fatalf("dialApp(%s): %v", ln.Addr(), err)
 	}

@@ -44,8 +44,10 @@ type IngressProxyManager struct {
 	// stopping: the recording it serves is stopping, and its app is
 	// stopped on purpose (SetStopping, stopping.go).
 	stopping atomic.Bool
-	// listened holds the app addresses a dial has connected to (appdial.go).
-	listened sync.Map
+	// waits is the shared wait of the calls that found an app address
+	// refusing, by address (appdial.go), guarded by waitsMu.
+	waitsMu  sync.Mutex
+	waits    map[string]*appWait
 	mu       sync.Mutex
 	active   map[uint16]proxyStop
 	logger   *zap.Logger
@@ -223,11 +225,6 @@ func (pm *IngressProxyManager) StartIngressProxy(ctx context.Context, origAppPor
 		return hook.StopIngress(origAppPort)
 	}
 	pm.mu.Unlock()
-	// A new bind of the port: what a dial to the app waits for is this
-	// bind's listener, not one an earlier bind of it moved there (dialApp).
-	if newAppPort != 0 {
-		pm.forgetListened("127.0.0.1:" + strconv.Itoa(int(newAppPort)))
-	}
 
 	if err := hook.StartIngress(ctx, origAppPort, newAppPort); err != nil {
 		close(startDone)
@@ -305,7 +302,6 @@ func (pm *IngressProxyManager) StopAll() {
 	pm.active = make(map[uint16]proxyStop)
 	pm.relocated = nil
 	pm.mu.Unlock()
-	pm.forgetAllListened()
 
 	for p, s := range stops {
 		if err := s(); err != nil {
@@ -356,10 +352,9 @@ type tcpForwarderState struct {
 	done     chan struct{} // closed when the accept loop exits
 }
 
-const (
-	ingressTargetListenTimeout = 3 * time.Second
-	ingressTargetPollInterval  = 25 * time.Millisecond
-)
+// ingressTargetPollInterval is how often a call that waits for the app to
+// listen looks for its listener (appdial.go).
+const ingressTargetPollInterval = 25 * time.Millisecond
 
 func newGoTCPIngressHook(pm *IngressProxyManager) *goTCPIngressHook {
 	return &goTCPIngressHook{
@@ -374,16 +369,19 @@ func (h *goTCPIngressHook) StartIngress(ctx context.Context, origPort, newPort u
 	newAppAddr := "127.0.0.1:" + strconv.Itoa(int(newPort))
 	logger := h.pm.logger
 
-	// Bind the app's port first, then wait for the app to listen on its moved
-	// one. When nothing holds the port during that wait (no hold: a kernel
-	// without sk_lookup), a call is refused; binding first leaves only this
-	// bind as that window, not the whole wait. When keploy holds the port from
-	// inside the app's bind (BPF sk_lookup), its park serves the port until
-	// this forwarder is registered below, after the wait; binding first then
-	// finds at once a port another listener holds already (not keploy's), and
-	// the hold yields it to that listener. Binding early is safe: the accept
-	// loop starts below either way, and a call that arrives before it does
-	// waits in the listen backlog.
+	// Bind the app's port and start forwarding at once, whether or not the
+	// app listens on its moved port yet: a call that comes before it does
+	// waits for its listener in its dial (dialApp), which no time ends. (The
+	// forwarder used to wait up to 3 s here, dialing the app on 25 ms tries:
+	// it only delayed the forwarder, a loaded host timed those tries out
+	// against an app that listened and logged a false WARN, and each start
+	// opened and closed a connection to the app.) When nothing holds the
+	// port until this bind (no hold: a kernel without sk_lookup), a call is
+	// refused only before it. When keploy holds the port from inside the
+	// app's bind (BPF sk_lookup), its park serves the port until this
+	// forwarder is registered below; the bind finds at once a port another
+	// listener holds already (not keploy's), and the hold yields it to that
+	// listener.
 	held := h.pm.ingressHeld()
 	listener, err := h.bindIngress(ctx, origAppAddr)
 	if err != nil {
@@ -410,29 +408,13 @@ func (h *goTCPIngressHook) StartIngress(ctx context.Context, origPort, newPort u
 		}
 	}
 
-	if waited, err := ingressTargetWait(ctx, newPort, newAppAddr, ingressTargetListenTimeout); waited {
-		if err != nil {
-			logger.Warn("Redirected ingress target was not listening before proxy bind; starting ingress forwarder anyway",
-				zap.String("target", newAppAddr),
-				zap.Duration("timeout", ingressTargetListenTimeout),
-				zap.Error(err))
-		} else {
-			logger.Debug("Redirected ingress target is listening; starting ingress forwarder",
-				zap.String("target", newAppAddr))
-		}
-	} else {
-		logger.Debug("Redirected ingress target port is unknown; using runtime destination lookup",
-			zap.Uint16("orig_port", origPort))
-	}
-
-	// If the agent is shutting down (the context was canceled during the
-	// wait), release the port instead of starting the forwarder. A forwarder
-	// started during teardown (e.g. from a late/stale bind event whose target
-	// wait above returned context.Canceled) can outlive StopAll's snapshot and
-	// linger holding the app's port (commonly 8000), so the next record run's
-	// application fails to bind it with "address already in use" — the flaky
-	// port-8000 reuse failure. A canceled context means no ingress traffic
-	// will be served anyway.
+	// If the agent is shutting down (the context was canceled as it bound),
+	// release the port instead of starting the forwarder. A forwarder
+	// started during teardown (e.g. from a late/stale bind event) can
+	// outlive StopAll's snapshot and linger holding the app's port (commonly
+	// 8000), so the next record run's application fails to bind it with
+	// "address already in use" — the flaky port-8000 reuse failure. A
+	// canceled context means no ingress traffic will be served anyway.
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		_ = listener.Close()
 		logger.Debug("Skipping ingress forwarder start; agent context canceled (shutting down)",
@@ -535,44 +517,6 @@ func (pm *IngressProxyManager) appIPv6Binds(orig uint16) []netip.Addr {
 	return addrs
 }
 
-// ingressTargetWait is StartIngress's wait for the app to listen on its moved
-// port (waitForIngressTargetWhenKnown); a variable so a test can see what is
-// bound when the wait begins.
-var ingressTargetWait = waitForIngressTargetWhenKnown
-
-func waitForIngressTargetWhenKnown(ctx context.Context, newPort uint16, addr string, timeout time.Duration) (bool, error) {
-	if newPort == 0 {
-		return false, nil
-	}
-	return true, waitForIngressTarget(ctx, addr, timeout)
-}
-
-func waitForIngressTarget(ctx context.Context, addr string, timeout time.Duration) error {
-	deadline := time.NewTimer(timeout)
-	defer deadline.Stop()
-
-	ticker := time.NewTicker(ingressTargetPollInterval)
-	defer ticker.Stop()
-
-	var lastErr error
-	for {
-		conn, err := net.DialTimeout("tcp4", addr, ingressTargetPollInterval)
-		if err == nil {
-			_ = conn.Close()
-			return nil
-		}
-		lastErr = err
-
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-deadline.C:
-			return fmt.Errorf("timed out waiting for %s to listen: %w", addr, lastErr)
-		case <-ticker.C:
-		}
-	}
-}
-
 func (h *goTCPIngressHook) StopIngress(origPort uint16) error {
 	h.mu.Lock()
 	st, ok := h.forwarders[origPort]
@@ -637,7 +581,7 @@ func (pm *IngressProxyManager) handleConnection(ctx context.Context, clientConn 
 		// (the original) instead.
 		actualPort := appPort
 
-		upConn, err := pm.dialApp(ctx, finalAppAddr)
+		upConn, err := pm.dialApp(ctx, finalAppAddr, clientConn)
 		if err != nil {
 			pm.logAppDialFailure(logger, "Failed to connect to upstream gRPC server. Verify that the application is listening on the resolved address and port, and that ingress redirection is configured correctly.",
 				err, zap.String("final_app_addr", finalAppAddr))
@@ -684,7 +628,7 @@ func (r *replayConn) CloseWrite() error {
 
 func (pm *IngressProxyManager) ServeLive(ctx context.Context, conn net.Conn, upstream string, port uint16) {
 	if !pm.requests {
-		up, err := pm.dialApp(ctx, upstream)
+		up, err := pm.dialApp(ctx, upstream, conn)
 		if err != nil {
 			pm.logger.Debug("the app is not reachable", zap.String("upstream", upstream), zap.Error(err))
 			return
