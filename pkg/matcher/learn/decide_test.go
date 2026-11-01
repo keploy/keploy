@@ -73,14 +73,17 @@ func TestDecideWithNoOrderRefusesEveryChangedWord(t *testing.T) {
 	}
 	in := Input{
 		Test: "test-1", Mock: "mock-3",
-		Rec:   Shape{Leaves: leaves("body.id", "order-17-a-5", "body.sep", "a-b", "header.date", "2026-11-01T10:00:00Z", "body.more", "a b", "body.mix", "a-17", "body.nul", "a\x00\x00b", "body.tail", "a-17", "body.when", "17-a"), Body: map[string]interface{}{}},
-		Live:  Shape{Leaves: leaves("body.id", "order-42-a-6", "body.sep", "a_b", "header.date", "2026-11-01T10:00:05Z", "body.more", "a b c", "body.mix", "a_42", "body.added", "new", "body.nul", "\x00c\x00d", "body.tail", "a-42-", "body.when", "42-a"), Body: map[string]interface{}{}},
-		Drift: []string{"body.id", "body.sep", "header.date", "body.more", "body.gone", "body.mix", "body.added", "body.nul", "body.tail", "body.when"},
+		Rec:   Shape{Leaves: leaves("body.id", "order-17-a-5", "body.sep", "a-b", "header.date", "2026-11-01T10:00:00Z", "body.more", "a b", "body.mix", "a-17", "body.nul", "a\x00\x00b", "body.tail", "a-17", "body.when", "17-a", "body.lead", "-a17", "body.was", "17-a", "body.first", "17-a"), Body: map[string]interface{}{}},
+		Live:  Shape{Leaves: leaves("body.id", "order-42-a-6", "body.sep", "a_b", "header.date", "2026-11-01T10:00:05Z", "body.more", "a b c", "body.mix", "a_42", "body.added", "new", "body.nul", "\x00c\x00d", "body.tail", "a-42-", "body.when", "42-a", "body.lead", "a42", "body.was", "42-a", "body.first", "42-a"), Body: map[string]interface{}{}},
+		Drift: []string{"body.id", "body.sep", "header.date", "body.more", "body.gone", "body.mix", "body.added", "body.nul", "body.tail", "body.when", "body.lead", "body.was", "body.first"},
 	}
-	// Typed an instant in the full round alone: still not split into words.
+	// Typed an instant in one round alone: still not split into words.
 	when := in.Live.Leaves["body.when"]
 	when.Type = Instant
 	in.Live.Leaves["body.when"] = when
+	recWhen := in.Rec.Leaves["body.was"]
+	recWhen.Type = Instant
+	in.Rec.Leaves["body.was"] = recWhen
 	ds := Decide(in)
 	type got struct {
 		field, at, r, f string
@@ -116,12 +119,19 @@ func TestDecideWithNoOrderRefusesEveryChangedWord(t *testing.T) {
 		{"body.nul", "body.nul", "a\x00\x00b", "\x00c\x00d", -1},
 		{"body.tail", "body.tail", "a-17", "a-42-", -1},
 		{"body.when", "body.when", "17-a", "42-a", -1},
+		{"body.lead", "body.lead", "-a17", "a42", -1},
+		{"body.was", "body.was", "17-a", "42-a", -1},
+		{"body.first", "body.first#0", "17", "42", 0},
 	}
 	if !reflect.DeepEqual(gots, want) {
 		t.Errorf("Decide refused\n%+v\nwant\n%+v", gots, want)
 	}
 	if !strings.HasPrefix(ds[0].Line, `test-1 mock-3 body.id word 1: recorded "17", round F "42": `) {
 		t.Errorf("line %q", ds[0].Line)
+	}
+	// Word 0 is a word: its line names it, not the field.
+	if l := ds[len(ds)-1].Line; !strings.HasPrefix(l, `test-1 mock-3 body.first word 0: recorded "17", round F "42": keploy cannot check this word yet`) {
+		t.Errorf("line %q", l)
 	}
 }
 
@@ -226,6 +236,7 @@ func TestABodylessShapeNamesItsPlacesByTheAdapter(t *testing.T) {
 		{"the adapter's steps open both sides", withB64, b64("order-17"), b64("order-42"), []got{{"body.name|b64#1", "17", "42", 1}}},
 		{"a step opens neither side", withB64, "order-17", "order-42", []got{{"body.name", "order-17", "order-42", -1}}},
 		{"a step opens one side", withB64, b64("order-17"), "order-42", []got{{"body.name", b64("order-17"), "order-42", -1}}},
+		{"a step opens the full round only", withB64, "order-17", b64("order-42"), []got{{"body.name", "order-17", b64("order-42"), -1}}},
 		{"opened, the words do not pair", withB64, b64("order-17"), b64("order-17-x"), []got{{"body.name|b64", "order-17", "order-17-x", -1}}},
 		{"a word the adapter names is the leaf whole", func(l Leaf, a bool) (string, bool) { s, ok := withB64(l, a); return s + "#3", ok }, b64("order-17"), b64("order-42"), []got{{"body.name|b64#1", "17", "42", 1}}},
 		{"a place that does not parse", func(Leaf, bool) (string, bool) { return "body", true }, "order-17", "order-42", []got{{"", "17", "42", 1}}},

@@ -3,6 +3,7 @@ package variables
 import (
 	"encoding/base64"
 	"reflect"
+	"strings"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/templates"
@@ -76,6 +77,12 @@ func TestAWordAddressReadsAsItIsWritten(t *testing.T) {
 			t.Errorf("%+v prints %q, which reads as %+v, %v", a, a.String(), b, err)
 		}
 	}
+	// A quoted JSON key's escaped '"' does not end the key, so a '|' after it
+	// is the key's own.
+	a = Address{Place: BodyPlace([]templates.PathSeg{{Key: `a"|b`}}), Steps: []Step{StepB64}, Word: 1}
+	if b, err := ParseAddress(a.String()); a.String() != `body["a\"|b"]|b64#1` || err != nil || !reflect.DeepEqual(a, b) {
+		t.Errorf("%+v prints %q, which reads as %+v, %v", a, a.String(), b, err)
+	}
 	// One written before the escape reads as it did.
 	if a, err := ParseAddress("header.X|Y"); err != nil || a.Place.Name != "X|Y" || a.Word != -1 {
 		t.Errorf("an unescaped name reads as %+v, %v", a, err)
@@ -90,8 +97,21 @@ func TestAWordAddressReadsAsItIsWritten(t *testing.T) {
 			t.Errorf("%q: ParseAddress %+v, Parse %+v %v", c.s, a, p, err)
 		}
 	}
+	// So does one holding '|' and a step's name: ParseAddress reads the step.
+	// Parse keeps the whole name (and prints it escaped).
+	for _, c := range []struct {
+		s, short, whole string
+		st              Step
+	}{{"url.query.a|json", "url.query.a", `url.query.a\|json`, StepJSON}, {"body.a|b64", "body.a", `body["a|b64"]`, StepB64}} {
+		a, err := ParseAddress(c.s)
+		short, _ := Parse(c.short)
+		whole, perr := Parse(c.s)
+		if err != nil || !reflect.DeepEqual(a, Address{Place: short, Steps: []Step{c.st}, Word: -1}) || perr != nil || whole.String() != c.whole {
+			t.Errorf("%q: ParseAddress %+v %v, Parse %+v %v", c.s, a, err, whole, perr)
+		}
+	}
 
-	for _, s := range []string{"url.path[2]|nope", "url.path[2]#x", "url.path[2]#01", "header.", "url.path[2]|jwt.", "url.path[2]|cookie.", "body"} {
+	for _, s := range []string{"url.path[2]|nope", "url.path[2]#x", "url.path[2]#01", "url.path[2]#-1", "header.", "url.path[2]|jwt.", "url.path[2]|cookie.", "body"} {
 		if a, err := ParseAddress(s); err == nil || a.Word != -1 {
 			t.Errorf("ParseAddress(%q) = %+v, %v; want an error and word -1 (the whole value)", s, a, err)
 		}
@@ -112,6 +132,12 @@ func TestAWordIsReadAndReplacedThroughItsSteps(t *testing.T) {
 	b64 := base64.StdEncoding.EncodeToString
 	b64url := func(s string) string { return base64.RawURLEncoding.EncodeToString([]byte(s)) }
 	jwt := b64url(`{"alg":"HS256"}`) + "." + b64url(`{"sub":"user-17","n":5,"o":{}}`) + ".c2ln"
+	// A payload whose base64url text holds both '-' and '_': only the URL
+	// alphabet opens it.
+	urlJWT := b64url(`{"alg":"HS256"}`) + "." + b64url(`{"sub":"user-17","k":"??~","j":"~~>"}`) + ".c2ln"
+	if p := strings.Split(urlJWT, ".")[1]; !strings.Contains(p, "-") || !strings.Contains(p, "_") {
+		t.Fatalf("payload %q holds no '-' and '_'", p)
+	}
 	for _, c := range []struct {
 		name       string
 		leaf       string
@@ -127,10 +153,12 @@ func TestAWordIsReadAndReplacedThroughItsSteps(t *testing.T) {
 		{"b64", b64([]byte("user:17")), []Step{StepB64}, 1, "17", "42", b64([]byte("user:42"))},
 		{"b64url", b64url(`{"id":"o-17"}`), []Step{StepB64URL}, 2, "17", "42", b64url(`{"id":"o-42"}`)},
 		{"b64url then json", b64url(`"o-17"`), []Step{StepB64URL, StepJSON}, 1, "17", "42", b64url(`"o-42"`)},
+		{"b64url in its own alphabet", "-_8tMTc=", []Step{StepB64URL}, 0, "17", "42", "-_8tNDI="},
 		{"cookie", "a=1; sid=abc-17; b=2", []Step{Cookie("sid")}, 1, "17", "42", "a=1; sid=abc-42; b=2"},
 		{"set-cookie", "sid=abc-17; Path=/", []Step{Cookie("sid")}, -1, "abc-17", "x9", "sid=x9; Path=/"},
 		{"jwt claim reads, never replaced", jwt, []Step{JWTClaim("sub")}, 1, "17", "42", ""},
 		{"jwt number claim", jwt, []Step{JWTClaim("n")}, -1, "5", "6", ""},
+		{"jwt payload in the URL alphabet", urlJWT, []Step{JWTClaim("sub")}, 1, "17", "42", ""},
 		{"a value that joins its neighbours", "a-17-b", nil, 1, "17", "x-y", ""},
 		{"an empty value", "a-17-b", nil, 1, "17", "", ""},
 		{"a cookie value with a ;", "sid=abc-17", []Step{Cookie("sid")}, 1, "17", "4;2", ""},

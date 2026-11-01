@@ -74,9 +74,11 @@ type Address struct {
 // replay (nothing there to bind or check), not here. On an error, Word -1.
 //
 // Its limit: a name written before word addresses that ends in #<digits>
-// ("url.query.page#2") reads here as a word of the shorter name, where
-// Parse reads the whole name. A field written before word addresses is
-// read with Parse, never with ParseAddress.
+// ("url.query.page#2") reads here as a word of the shorter name, and one
+// that holds '|' and a step's name ("url.query.a|json", "body.a|b64") reads
+// here as the shorter name and that step, where Parse reads the whole name
+// in both. A field written before word addresses is read with Parse, never
+// with ParseAddress.
 func ParseAddress(s string) (Address, error) {
 	a, err := parseAddress(s)
 	if err != nil {
