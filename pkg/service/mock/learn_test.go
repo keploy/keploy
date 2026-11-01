@@ -4,13 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/yaml/mapdb"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -391,6 +395,78 @@ func TestTheReplaysEndSettlesTheAgentBeforeItReadsTheOutcome(t *testing.T) {
 			}
 			if want := map[bool]int{true: -1, false: 1}[c.err != nil]; counts.consumed != want {
 				t.Fatalf("consumed %d, want %d", counts.consumed, want)
+			}
+		})
+	}
+}
+
+// outgoingInstr is the agent keploy mock replay starts, keeping the options
+// the replay handed MockOutgoing.
+type outgoingInstr struct {
+	*runnerInstr
+	got []models.OutgoingOptions
+}
+
+func (o *outgoingInstr) MockOutgoing(ctx context.Context, opts models.OutgoingOptions) error {
+	o.got = append(o.got, opts)
+	return o.runnerInstr.MockOutgoing(ctx, opts)
+}
+
+// keploy mock replay hands the agent the tests its learn step learns onto
+// (config.Test.LearnTests) while it learns, an empty list as an empty list,
+// and nil when it does not learn or learns onto every test. That one field is
+// what tells the agent a carried test neither ends nor moves the recorded
+// order (keepRecordedOrder): without it every test is fresh to the agent, and
+// a carried test run after a newer one stops the round's learning again.
+func TestMockReplayHandsTheAgentTheTestsItLearnsOnto(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		sw     bool
+		learn  bool
+		tests  map[string]bool
+		want   map[string]bool
+		wantOn bool
+	}{
+		{"learning onto the tests a record made anew", true, true, map[string]bool{"o::TestA": true}, map[string]bool{"o::TestA": true}, true},
+		{"learning onto no test", true, true, map[string]bool{}, map[string]bool{}, true},
+		{"learning onto every test", true, true, nil, nil, true},
+		{"not learning", true, false, map[string]bool{"o::TestA": true}, nil, false},
+		{"without the switch", false, true, map[string]bool{"o::TestA": true}, nil, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if c.sw {
+				provenOn(t)
+			} else {
+				t.Setenv(provenswitch.Env, "")
+			}
+			instr := &outgoingInstr{runnerInstr: newRunnerInstr(t)}
+			repo := t.TempDir()
+			t.Chdir(repo)
+			keployDir := filepath.Join(repo, "keploy")
+			require.NoError(t, os.MkdirAll(filepath.Join(keployDir, "set"), 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mocks.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: Http\nname: mock-0\n"), 0o644))
+			writeMapping(t, keployDir)
+			instr.consumedMocks = []models.MockState{{Name: "mock-0"}}
+			cfg := instrConfig(instr.composeInstr, utils.Native, "go test -p 1 -json ./...")
+			cfg.Path = keployDir
+			cfg.Mock.OnMiss = "fail"
+			cfg.Test.Learn = c.learn
+			cfg.Test.LearnTests = c.tests
+			utils.ErrCode = 0
+			t.Cleanup(func() { utils.ErrCode = 0 })
+			require.NoError(t, New(zap.NewNop(), instr, named("mock-0"), mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background()))
+
+			require.Len(t, instr.got, 1, "the replay did not put the agent in mock-serving mode once")
+			got := instr.got[0]
+			require.Equal(t, c.wantOn, got.Learn)
+			require.Equal(t, c.want == nil, got.LearnTests == nil, "learn tests %v, want %v", got.LearnTests, c.want)
+			require.Equal(t, len(c.want), len(got.LearnTests))
+			for name := range c.want {
+				require.True(t, got.LearnTests[name], "%s is not handed to the agent", name)
+			}
+			if c.tests != nil && got.LearnTests != nil {
+				got.LearnTests["o::Other"] = true
+				require.False(t, cfg.Test.LearnTests["o::Other"], "the agent was handed the config's own map")
 			}
 		})
 	}

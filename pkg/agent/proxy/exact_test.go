@@ -473,17 +473,17 @@ func TestEachTestProcessesTeardownIsBoundedByItsOwnTests(t *testing.T) {
 		key  string
 		want bool
 	}{{"a", true}, {"a", true}, {"b", false}, {"a", true}, {models.PoolKeyNone, false}} {
-		if after := mm.teardownAfter(tc.key); after == nil || after(at) != tc.want {
+		if after := mm.teardownAfter(tc.key, ""); after == nil || after(at) != tc.want {
 			t.Errorf("read %d, key %q: a-end is the teardown = %v, want %v", i, tc.key, after != nil && after(at), tc.want)
 		}
 	}
-	if after := mm.teardownAfter("b"); after == nil || !after(bEnd.Spec.ReqTimestampMock) {
+	if after := mm.teardownAfter("b", ""); after == nil || !after(bEnd.Spec.ReqTimestampMock) {
 		t.Errorf("key b: b-end is not b's teardown")
 	}
 	// New owners in the same generation move a's bound: b1 now a's too.
-	mm.teardownAfter("a")
+	mm.teardownAfter("a", "")
 	mm.SetPoolOwners(map[string]string{"a1": "a", "a2": "a", "b1": "a"})
-	if after := mm.teardownAfter("a"); after == nil || after(at) {
+	if after := mm.teardownAfter("a", ""); after == nil || after(at) {
 		t.Errorf("FALSE GREEN? new owners naming b1 a's: a-end still a's teardown (a stale bound)")
 	}
 	mm.SetPoolOwners(owners)
@@ -534,12 +534,12 @@ func TestTheTeardownBoundIsReadOncePerTreeRevision(t *testing.T) {
 	end := exactMongo("end-sessions", 3*time.Second, models.LifetimePerTest)
 	mm := stagedManager(t, []*models.Mock{owned, end}, nil)
 	mm.SetPoolNames([]string{"end-sessions"})
-	after := mm.teardownAfter("k")
+	after := mm.teardownAfter("k", "")
 	b := mm.exact.teardownLast.Load()
 	if after == nil || b == nil || !after(end.Spec.ReqTimestampMock) || after(owned.Spec.ReqTimestampMock) {
 		t.Fatalf("precondition: end-sessions is not the teardown alone (bound %+v)", b)
 	}
-	if mm.teardownAfter("k"); mm.exact.teardownLast.Load() != b {
+	if mm.teardownAfter("k", ""); mm.exact.teardownLast.Load() != b {
 		t.Errorf("a second read in one revision read the trees again")
 	}
 	// Three bursts of three reads, an exact serve after the second: one scan
@@ -557,7 +557,7 @@ func TestTheTeardownBoundIsReadOncePerTreeRevision(t *testing.T) {
 		for _, read := range []func(){
 			func() { _, _ = mm.GetFilteredMocks() },
 			func() { _, _ = mm.GetFilteredMocksByKind(models.Mongo) },
-			func() { mm.teardownAfter("k") },
+			func() { mm.teardownAfter("k", "") },
 		} {
 			read()
 			if c := mm.exact.teardownLast.Load(); c != last {
@@ -581,11 +581,11 @@ func TestTheTeardownBoundIsReadOncePerTreeRevision(t *testing.T) {
 	mm.ServeExactPool("k", nil)
 	late := exactMongo("owned-late", 4*time.Second, models.LifetimePerTest)
 	mm.SetMocksWithWindow([]*models.Mock{owned, end, late}, nil, models.BaseTime, time.Now())
-	if after := mm.teardownAfter("k"); after == nil || after(end.Spec.ReqTimestampMock) || !after(late.Spec.ResTimestampMock.Add(time.Millisecond)) {
+	if after := mm.teardownAfter("k", ""); after == nil || after(end.Spec.ReqTimestampMock) || !after(late.Spec.ResTimestampMock.Add(time.Millisecond)) {
 		t.Errorf("FALSE GREEN? a new staging, a test's recording made after end-sessions: end-sessions still the teardown (a stale bound)")
 	}
 	mm.SetPoolNames([]string{"end-sessions", "owned-late"})
-	if after := mm.teardownAfter("k"); after == nil || !after(end.Spec.ReqTimestampMock) {
+	if after := mm.teardownAfter("k", ""); after == nil || !after(end.Spec.ReqTimestampMock) {
 		t.Errorf("a new scope table naming owned-late the pool's: end-sessions is not the teardown (a stale bound)")
 	}
 }

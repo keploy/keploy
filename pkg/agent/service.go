@@ -640,10 +640,11 @@ type RecordedOfKindSetter interface {
 // reads, beside what is staged, the times of the set's recordings the agent
 // keeps on disk: a test's own are staged only as it opens, and the bound is
 // the latest of them. SetRecordingTimes sets where (src visits every on-disk
-// mock with its name, request and answer times and whether it is
-// protocol-phase, decoding none; nil for none).
+// mock with its name, request and answer times, whether it is
+// protocol-phase and its clock (models.Origin.Clock), decoding none; nil for
+// none).
 type RecordingTimesSetter interface {
-	SetRecordingTimes(src func(visit func(name string, req, res time.Time, protocolPhase bool) bool) error) error
+	SetRecordingTimes(src func(visit func(name string, req, res time.Time, protocolPhase bool, clock string) bool) error) error
 }
 
 // RecordingSourceSetter is implemented by a proxy whose miss diagnosis under
@@ -683,6 +684,14 @@ type LearnSetWarmer interface {
 // every keploy test filter, before the filter's view goes live.
 type LearnEndSetter interface {
 	SetLearnEnded(ended bool) error
+}
+
+// LearnHolder is implemented by a proxy whose learn step can be held for a
+// while and released, unlike LearnEndSetter's end, which lasts for the set:
+// the agent holds it while a test of record's full round whose recording the
+// round does not learn onto is open (models.OutgoingOptions.LearnTests).
+type LearnHolder interface {
+	SetLearnHeld(held bool) error
 }
 
 // KeptLearningSetter is implemented by a proxy that serves a test set's

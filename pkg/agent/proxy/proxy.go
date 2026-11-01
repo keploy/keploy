@@ -4471,6 +4471,10 @@ func (p *Proxy) Mock(ctx context.Context, opts models.OutgoingOptions) error {
 		// a set's later cycle (SetLearnEnded).
 		p.getMockManager().SetLearnEnded(false)
 		p.learnTracker.SetLearnEnded(false)
+		// Nor is it held: a test that held it belongs to the previous
+		// session (SetLearnHeld).
+		p.getMockManager().SetLearnHeld(false)
+		p.learnTracker.SetLearnHeld(false)
 	}
 
 	// Drop any per-worker scopes from a prior session so a crashed worker that
@@ -4949,7 +4953,7 @@ func (p *Proxy) SetRecordedOfKind(src func(kind models.Kind, visit func(name str
 var _ agent.RecordedOfKindSetter = (*Proxy)(nil)
 
 // SetRecordingTimes implements agent.RecordingTimesSetter (exact.go).
-func (p *Proxy) SetRecordingTimes(src func(visit func(name string, req, res time.Time, protocolPhase bool) bool) error) error {
+func (p *Proxy) SetRecordingTimes(src func(visit func(name string, req, res time.Time, protocolPhase bool, clock string) bool) error) error {
 	m := p.getMockManager()
 	if m == nil {
 		return errNoMockManager
@@ -5061,6 +5065,27 @@ func (p *Proxy) SetLearnEnded(ended bool) error {
 }
 
 var _ agent.LearnEndSetter = (*Proxy)(nil)
+
+// SetLearnHeld implements agent.LearnHolder: the mock store holds the learn
+// step (MockManager.SetLearnHeld), and so does the learn tracker the parsers
+// find on their connection's context (learn.Tracker.SetLearnHeld). With no
+// mock manager there is no learn step to release; one to hold is refused
+// (errNoMockManager).
+func (p *Proxy) SetLearnHeld(held bool) error {
+	m := p.getMockManager()
+	if m == nil {
+		if held {
+			return errNoMockManager
+		}
+		p.learnTracker.SetLearnHeld(false)
+		return nil
+	}
+	m.SetLearnHeld(held)
+	p.learnTracker.SetLearnHeld(held)
+	return nil
+}
+
+var _ agent.LearnHolder = (*Proxy)(nil)
 
 // SetKeptLearning implements agent.KeptLearningSetter: the mock store puts
 // what keploy record keeps of the set's first-cycle learning on the staged

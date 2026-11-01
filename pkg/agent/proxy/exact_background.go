@@ -151,8 +151,29 @@ func (m *MockManager) SetLearnEnded(ended bool) {
 	}
 }
 
+// SetLearnHeld holds the learn step, or releases it: while it is held the
+// session pairs nothing (pairing), and the learn tracker's classification
+// refuses every changed value (learn.Tracker.SetLearnHeld, which the proxy
+// sets beside it), but nothing else changes: it has not ended (LearnEnded),
+// so every parser's learn step still decides the requests, serves what is
+// exactly a recording as it is, and states what it served, as for any test,
+// and releasing it takes the learn step back up as it was. The agent holds
+// it while a test of record's full round whose recording the round does not
+// learn onto is open (a test that keeps an earlier record's recording):
+// what its calls differ in would otherwise be learned in memory onto a
+// recording that keeps none of it, so the round would judge it on learning
+// no later replay has. A session's start releases it.
+func (m *MockManager) SetLearnHeld(held bool) {
+	m.exact.learnHeld.Store(held)
+}
+
+// LearnHeld reports whether the learn step is held (SetLearnHeld).
+func (m *MockManager) LearnHeld() bool {
+	return m.exact.learnHeld.Load()
+}
+
 // LearnEnded implements integrations.LearnEnder: the set's learn step has
-// ended (SetLearnEnded).
+// ended (SetLearnEnded). A held one (SetLearnHeld) has not.
 func (m *MockManager) LearnEnded() bool {
 	return m.exact.learnEnded.Load()
 }
@@ -399,17 +420,19 @@ var _ integrations.BackgroundCursor = (*MockManager)(nil)
 
 // learns reports whether the running set's learn step is on: the session is
 // record's full round (SetPairing) and the set's learn step has not ended
-// (SetLearnEnded).
+// (SetLearnEnded). A held one (SetLearnHeld) is on: it still reads the set's
+// recordings to serve what is exactly one, so the staging's read of them
+// (warmLearnSet) stands while it is held.
 func (m *MockManager) learns() bool {
 	return m.exact.pairs.Load() && !m.exact.learnEnded.Load()
 }
 
 // pairing is the view to pair in, and the staging's epoch: a view of a set
 // served by the background rules, its background named (not settling), while
-// the session pairs and the set's learn step has not ended (SetLearnEnded);
-// nil when none is.
+// the session pairs and the set's learn step has not ended (SetLearnEnded)
+// and is not held (SetLearnHeld); nil when none is.
 func (m *MockManager) pairing() (*exactView, uint64) {
-	if !m.exact.pairs.Load() || m.exact.learnEnded.Load() {
+	if !m.exact.pairs.Load() || m.exact.learnEnded.Load() || m.exact.learnHeld.Load() {
 		return nil, 0
 	}
 	v := m.exactView()
