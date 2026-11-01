@@ -1041,6 +1041,44 @@ func TestAWindowAtATurnOfTheSecondReadsTheWholeSecondNearestItsCall(t *testing.T
 	}
 }
 
+// A plain read in the last second before a call that ends on a whole second
+// writes the second before the call's. Read from the call's end it stands
+// at offsets from -1s up to, not including, zero, so an application that
+// cuts its read and subtracts a second writes it only of a read at the
+// call's very nanosecond, and Holds holds nothing for a range that ends at
+// zero (no look-back in it is below zero at every offset). So the read
+// nearest its call reads no look-back there, in either run or both, in a
+// window of any width: the window's reading (a plain read in both runs)
+// stands, and the order goes on to it. A value two seconds before the same
+// call is the look-back nearest it.
+func TestAValueOneSecondBeforeACallEndingOnAWholeSecondIsNoLookBack(t *testing.T) {
+	sec, ms := time.Second, time.Millisecond
+	p := "body.cmd.query.dirtyAt.$lte"
+	s := time.Date(2026, 11, 1, 15, 21, 40, 0, time.UTC)
+	call := func(to, width time.Duration) v5Read { return v5Read{from: s.Add(to - width), to: s.Add(to)} }
+	for _, row := range []struct {
+		name string
+		w    *Window
+	}{
+		{"the recording's call on a whole second, 2.5 s windows", v5Window(call(0, 2500*ms), call(63500*ms, 2500*ms))},
+		{"round F's call on a whole second, 2.5 s windows", v5Window(call(500*ms, 2500*ms), call(63*sec, 2500*ms))},
+		{"both on a whole second, 1.5 s windows", v5Window(call(0, 1500*ms), call(63*sec, 1500*ms))},
+		{"both on a whole second, 900 ms windows", v5Window(call(0, 900*ms), call(63*sec, 900*ms))},
+		{"both on a whole second, 61 ms windows", v5Window(call(0, 61*ms), call(63*sec, 61*ms))},
+		{"the recording's call on a whole second, 6 s windows", v5Window(call(0, 6*sec), call(63500*ms, 6*sec))},
+	} {
+		r, l := v5Instant(s.Add(-sec), sec), v5Instant(s.Add(62*sec), sec)
+		if o, why, ok := clockInWindow(p, r, l, row.w, nil); ok || why != "" {
+			t.Errorf("%s, the value a second before the call: %+v %q %v; want no offset and no refusal: a plain read in its last second", row.name, o, why, ok)
+		}
+		r, l = v5Instant(s.Add(-2*sec), sec), v5Instant(s.Add(61*sec), sec)
+		o, why, ok := clockInWindow(p, r, l, row.w, nil)
+		if lo, hi := o.CutOffsets(); !ok || why != "" || lo != -2*sec || hi != -2*sec {
+			t.Errorf("%s, the value two seconds before the call: %+v %q %v, CutOffsets %s..%s; want clock - 2s", row.name, o, why, ok, lo, hi)
+		}
+	}
+}
+
 // A look-back one cut below its step (the end of the last minute: an
 // application's now.Truncate(time.Minute).Add(-time.Second)) has offsets
 // from one cut below zero up to, not including, zero: Max 0 says no value

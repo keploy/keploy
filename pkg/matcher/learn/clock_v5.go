@@ -202,9 +202,11 @@ const noLookBack = "a read with no look-back"
 // less each run's call (Min) up to one cut, or a second where the cut is
 // finer, above it, so the one whole cut, or second, they hold is the latest
 // one both runs' windows put a read in. ok only where they hold one and it
-// is a look-back in both runs: one run's wide window beside the other's
-// narrow one may leave no whole cut, and no read nearest its call stands
-// there.
+// is a look-back in both runs (below zero at every offset, as Holds needs:
+// one ending at zero, a value a whole cut before a call that ends on a
+// whole cut, is a plain read in its last cut): one run's wide window beside
+// the other's narrow one may leave no whole cut, and no read nearest its
+// call stands there.
 //
 // The reading of a window holds every whole cut of look-back from its call
 // back to its start, and a read with no look-back as well where it runs
