@@ -66,11 +66,8 @@ func (s *diffSide) matchBody(ctx context.Context, req mysql.Request, eng *mockno
 // TestLazyBodyServesReportsAndLearnsWhatTheEagerBodyDoes replays each
 // recording twice, the live request body built before the scan on one side
 // and on its first read on the other, under every noise setting, and requires
-// the two to serve, consume, report and learn the same at every command. The
-// recordings are the windowed and between-test replays of
-// TestFirstPassesServeWhatTheFullScanServes, and sets of 100, 1,000 and 10,000
-// mocks with no window whose commands read recorded rows, rows never recorded
-// and EXECUTEs whose parameters drifted.
+// the two to serve, consume, report and learn the same at every command
+// (replayCorpora).
 func TestLazyBodyServesReportsAndLearnsWhatTheEagerBodyDoes(t *testing.T) {
 	seeds := int64(30)
 	sizes := []int{100, 1000, 10000}
@@ -78,89 +75,105 @@ func TestLazyBodyServesReportsAndLearnsWhatTheEagerBodyDoes(t *testing.T) {
 		seeds, sizes = 6, sizes[:2]
 	}
 	for _, ne := range noiseEngines {
-		// learned and rejected count the commands that learned noise and the
-		// misses strict enforcement made, so the rows cannot pass by never
-		// reading the body.
-		learned, rejected := 0, 0
-		compare := func(want, got string) bool {
-			if !strings.HasSuffix(want, "; learned") {
-				learned++
-			}
-			if strings.Contains(want, "strictRejected:") && !strings.Contains(want, "strictRejected:0") {
-				rejected++
-			}
-			return want == got
-		}
-		for seed := int64(1); seed <= seeds; seed++ {
-			r := rand.New(rand.NewSource(seed))
-			windows := 4 + r.Intn(5)
-			pool := diffPool(r, windows)
-			ref, lazy := newDiffSide(pool), newDiffSide(pool)
-			for _, s := range []*diffSide{ref, lazy} {
-				s.stage(models.BaseTime, time.Now())
-			}
-			for w := 0; w < windows; w++ {
-				start, end := diffWindow(w)
-				for _, s := range []*diffSide{ref, lazy} {
-					s.stage(start, end)
-				}
-				for c := 0; c < 5+r.Intn(25); c++ {
-					between := r.Intn(6) == 0
-					if between {
-						ref.mm.SetCurrentTestWindow(time.Time{}, time.Time{})
-						lazy.mm.SetCurrentTestWindow(time.Time{}, time.Time{})
-					}
-					req, desc := diffCommand(r)
-					ctx := context.Background()
-					if conn := []string{"", "c1", "c2"}[r.Intn(3)]; conn != "" {
-						ctx = context.WithValue(ctx, models.ClientConnectionIDKey, conn)
-					}
-					want, _ := ref.matchBody(ctx, req, ne.eng(), true)
-					got, _ := lazy.matchBody(ctx, req, ne.eng(), false)
-					if !compare(want, got) {
-						t.Fatalf("noise %s seed %d window %d command %d (%s), between tests=%v:\n eager body: %s\n lazy body:  %s", ne.name, seed, w, c, desc, between, want, got)
-					}
-					if between {
-						ref.mm.SetCurrentTestWindow(start, end)
-						lazy.mm.SetCurrentTestWindow(start, end)
-					}
-				}
-			}
-			ref.mm.Close()
-			lazy.mm.Close()
-		}
-		for _, n := range sizes {
-			pool := keyedSet(n, models.LifetimePerTest)
-			ref, lazy := newDiffSide(pool), newDiffSide(pool)
-			ref.stageNoWindow()
-			lazy.stageNoWindow()
-			for i := 0; i < n; i += n / 100 {
-				var reqs []mysql.Request
-				switch i % 4 {
-				case 0, 1:
-					reqs = []mysql.Request{queryReq(keyedSetText(i)), queryReq(keyedSetText(i) + " LIMIT 1")}
-				case 2:
-					reqs = []mysql.Request{executeReq(7, fmt.Sprintf("k%d", i%500)), executeReq(7, "never-recorded")}
-				default:
-					reqs = []mysql.Request{executeReq(8, fmt.Sprintf("k%d", i%500)), executeReq(8, "never-recorded")}
-				}
-				for _, req := range reqs {
-					want, _ := ref.matchBody(context.Background(), req, ne.eng(), true)
-					got, _ := lazy.matchBody(context.Background(), req, ne.eng(), false)
-					if !compare(want, got) {
-						t.Fatalf("noise %s set of %d command for mock %d:\n eager body: %s\n lazy body:  %s", ne.name, n, i, want, got)
-					}
-				}
-			}
-			ref.mm.Close()
-			lazy.mm.Close()
-		}
+		learned, rejected := replayCorpora(t, ne.name, ne.eng, seeds, sizes, [2]string{"eager body", "lazy body"},
+			func(s *diffSide, ctx context.Context, req mysql.Request, eng *mocknoise.Engine, ref bool) string {
+				got, _ := s.matchBody(ctx, req, eng, ref)
+				return got
+			})
 		// Under strict, the drift detection learns from is a miss instead.
 		detects, stricts := ne.name == "detect", strings.Contains(ne.name, "strict")
 		if detects != (learned > 0) || stricts != (rejected > 0) {
 			t.Errorf("noise %s: %d commands learned noise and strict rejected candidates on %d", ne.name, learned, rejected)
 		}
 	}
+}
+
+// replayCorpora replays, under the noise setting name (eng), each recording
+// twice, on a reference side and on another, matching every command on each
+// with match (ref true on the reference side), and fails at the first command
+// the two serve, consume, report or learn differently; sides name the two in
+// that message. The recordings are the windowed and between-test replays of
+// TestFirstPassesServeWhatTheFullScanServes (seeds of them), and sets of
+// sizes mocks with no window whose commands read recorded rows, rows never
+// recorded and EXECUTEs whose parameters drifted. It returns how many
+// commands learned noise and how many were misses strict enforcement made,
+// so a row cannot pass by never reading the body.
+func replayCorpora(t *testing.T, name string, eng func() *mocknoise.Engine, seeds int64, sizes []int, sides [2]string, match func(s *diffSide, ctx context.Context, req mysql.Request, eng *mocknoise.Engine, ref bool) string) (learned, rejected int) {
+	t.Helper()
+	compare := func(want, got string) bool {
+		if !strings.HasSuffix(want, "; learned") {
+			learned++
+		}
+		if strings.Contains(want, "strictRejected:") && !strings.Contains(want, "strictRejected:0") {
+			rejected++
+		}
+		return want == got
+	}
+	for seed := int64(1); seed <= seeds; seed++ {
+		r := rand.New(rand.NewSource(seed))
+		windows := 4 + r.Intn(5)
+		pool := diffPool(r, windows)
+		ref, other := newDiffSide(pool), newDiffSide(pool)
+		for _, s := range []*diffSide{ref, other} {
+			s.stage(models.BaseTime, time.Now())
+		}
+		for w := 0; w < windows; w++ {
+			start, end := diffWindow(w)
+			for _, s := range []*diffSide{ref, other} {
+				s.stage(start, end)
+			}
+			for c := 0; c < 5+r.Intn(25); c++ {
+				between := r.Intn(6) == 0
+				if between {
+					ref.mm.SetCurrentTestWindow(time.Time{}, time.Time{})
+					other.mm.SetCurrentTestWindow(time.Time{}, time.Time{})
+				}
+				req, desc := diffCommand(r)
+				ctx := context.Background()
+				if conn := []string{"", "c1", "c2"}[r.Intn(3)]; conn != "" {
+					ctx = context.WithValue(ctx, models.ClientConnectionIDKey, conn)
+				}
+				want := match(ref, ctx, req, eng(), true)
+				got := match(other, ctx, req, eng(), false)
+				if !compare(want, got) {
+					t.Fatalf("noise %s seed %d window %d command %d (%s), between tests=%v:\n %s: %s\n %s: %s", name, seed, w, c, desc, between, sides[0], want, sides[1], got)
+				}
+				if between {
+					ref.mm.SetCurrentTestWindow(start, end)
+					other.mm.SetCurrentTestWindow(start, end)
+				}
+			}
+		}
+		ref.mm.Close()
+		other.mm.Close()
+	}
+	for _, n := range sizes {
+		pool := keyedSet(n, models.LifetimePerTest)
+		ref, other := newDiffSide(pool), newDiffSide(pool)
+		ref.stageNoWindow()
+		other.stageNoWindow()
+		for i := 0; i < n; i += n / 100 {
+			var reqs []mysql.Request
+			switch i % 4 {
+			case 0, 1:
+				reqs = []mysql.Request{queryReq(keyedSetText(i)), queryReq(keyedSetText(i) + " LIMIT 1")}
+			case 2:
+				reqs = []mysql.Request{executeReq(7, fmt.Sprintf("k%d", i%500)), executeReq(7, "never-recorded")}
+			default:
+				reqs = []mysql.Request{executeReq(8, fmt.Sprintf("k%d", i%500)), executeReq(8, "never-recorded")}
+			}
+			for _, req := range reqs {
+				want := match(ref, context.Background(), req, eng(), true)
+				got := match(other, context.Background(), req, eng(), false)
+				if !compare(want, got) {
+					t.Fatalf("noise %s set of %d command for mock %d:\n %s: %s\n %s: %s", name, n, i, sides[0], want, sides[1], got)
+				}
+			}
+		}
+		ref.mm.Close()
+		other.mm.Close()
+	}
+	return learned, rejected
 }
 
 // TestCommandBuildsItsBodyOnlyForStrictOrDetection: a command builds the

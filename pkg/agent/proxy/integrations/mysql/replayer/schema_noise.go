@@ -168,6 +168,11 @@ type strictGate struct {
 	liveBodyOK, liveBodyRead bool
 	bodiesBuilt              *int
 
+	// compared, when set, counts the candidates compare compared with the
+	// live body (its verdicts, each read once), as bodiesBuilt counts the
+	// builds.
+	compared *int
+
 	// liveQuery and liveParams are a live COM_STMT_EXECUTE's statement and
 	// its own parameter count (-1 not known): a recording of that statement
 	// is compared on as many of its parameters (recordedStatementParams).
@@ -425,6 +430,9 @@ func (g *strictGate) compare(engine *mocknoise.Engine, verdicts *map[*models.Moc
 	if !seen {
 		recorded, recordedOK := g.recordedBody(mock)
 		v.allowed, v.drift = engine.StrictRejectRecorded(mock, recorded, recordedOK, body, noise)
+		if g.compared != nil {
+			*g.compared++
+		}
 		if *verdicts == nil {
 			*verdicts = make(map[*models.Mock]gateVerdict)
 		}
