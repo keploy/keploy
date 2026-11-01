@@ -492,6 +492,27 @@ func (s *mergingStore) PersistLearned(_ context.Context, _ string, states map[st
 	return out, nil
 }
 
+// A consumed recording that learned clock reads of its own keeps them beside
+// those a call made in another window taught it: merged, never overwritten.
+// The consumed states handed in are not changed, whichever the merge reaches
+// first (a consumed recording's, before any state of its own is added).
+func TestWithLearnedElsewhereMergesOntoAConsumedRecordingsOwnClockReads(t *testing.T) {
+	minute := models.ClockOffset{Min: -time.Minute, Max: -time.Minute, Res: time.Millisecond}
+	second := models.ClockOffset{Min: -time.Second, Max: -time.Second, Res: time.Millisecond}
+	consumed := []models.MockState{{Name: "mock-1", Clocks: map[string]models.ClockOffset{"own_at": minute}}}
+	elsewhere := []models.MockState{
+		{Name: "mock-1", Clocks: map[string]models.ClockOffset{"claimed_at": second}},
+		{Name: "mock-9", Clocks: map[string]models.ClockOffset{"claimed_at": second}},
+	}
+	out := withLearnedElsewhere(consumed, elsewhere)
+	if len(out) != 2 || out[0].Name != "mock-1" || !reflect.DeepEqual(out[0].Clocks, map[string]models.ClockOffset{"own_at": minute, "claimed_at": second}) {
+		t.Fatalf("written %+v; want mock-1 with its own_at and the claimed_at another window taught, then mock-9", out)
+	}
+	if len(consumed) != 1 || !reflect.DeepEqual(consumed[0].Clocks, map[string]models.ClockOffset{"own_at": minute}) {
+		t.Fatalf("the consumed states changed: %+v", consumed)
+	}
+}
+
 // What record's full round's learn step taught a recording from a call made
 // in another window than its own (the agent's LearnedElsewhere) is written
 // onto the recording beside what consumed recordings learned, merged with a
