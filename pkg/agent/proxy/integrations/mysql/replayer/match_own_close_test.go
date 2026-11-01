@@ -18,15 +18,19 @@ import (
 // an extra call, recorded once: the connection's CLOSE of the statement,
 // which the pool holds, is no recording of the test's.
 //
-// keploy record maps a CLOSE to the test whose window holds it: its recorder
-// types it "mocks" and states its lifetime as its connection's, so it is
-// reusable only by its statement (models.Mock.ReusableByStatementOnly), and
-// syncMock attributedReusable attributes it to its window. One made between
-// tests is mapped to no test, and is the pool's. Both are connection
-// recordings, so the dry match that counts the test's own (ownRepeats) reads
-// the pool's CLOSE too (GetConnectionMocks). It finds the test's own CLOSE
-// first, then the pool's, and passes the pool's over (own_repeat.go).
-// Counted as the test's own, the miss said the test recorded the CLOSE twice.
+// Which mapping lists a CLOSE under a test depends on who writes it. An agent
+// that maps the recording itself (syncMock: keploy record --sync, or
+// enterprise's agent-side mapping, which the background rules serve) maps a
+// CLOSE to the test whose window holds it, and a PREPARE to no test. keploy
+// record's own window mappings (no --sync) list neither. keploy mock record's
+// app-start path maps both by window. The replay owns whatever a mapping
+// lists (newExactPlan), and this row stages such a mapping: the test's CLOSE
+// listed under it, and one made between tests, which no mapping lists, the
+// pool's. Both are connection recordings, so the dry match that counts the
+// test's own (ownRepeats) reads the pool's CLOSE too (GetConnectionMocks). It
+// finds the test's own CLOSE first, then the pool's, and passes the pool's
+// over (own_repeat.go). Counted as the test's own, the miss said the test
+// recorded the CLOSE twice.
 func TestACloseOneMoreThanTheTestRecordedCountsOnlyTheTestsOwnClose(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	s1, _ := diffWindow(1)
