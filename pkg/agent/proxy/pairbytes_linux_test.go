@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"runtime"
 	"syscall"
 	"testing"
 
@@ -302,45 +303,167 @@ func TestAPairedConnectionProvesTheApplicationsSocketsSeen(t *testing.T) {
 	}
 }
 
-// An application socket in CLOSE_WAIT (the proxy's side shut its write; the
-// application has read the FIN and not closed) is read by the wait, bound to
-// a device or not: how much it wrote, never gone. For a socket bound to a
-// device that is the dump's answer, so the dump asks for the closing states
-// too.
+// closingPair is the paired connection of proxySide and a sock_diag socket
+// to read its application end on.
+func closingPair(t *testing.T, p *Proxy, proxySide *net.TCPConn) (*pairedConn, *diagSock) {
+	t.Helper()
+	p.paired.mu.Lock()
+	pc := p.paired.byConn[proxySide]
+	p.paired.mu.Unlock()
+	if pc == nil {
+		t.Fatal("no paired connection")
+	}
+	ds, err := openDiag()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(ds.close)
+	return pc, ds
+}
+
+// wantFINCounted checks that the application's socket is in state, and that
+// the wait reads it as there: n bytes written and its FIN, which pairTarget
+// counts from the states where the application has closed and its FIN is not
+// yet acknowledged.
+func wantFINCounted(t *testing.T, p *Proxy, ds *diagSock, pc *pairedConn, state uint8, n uint64) {
+	t.Helper()
+	if got, err := ds.lookup(pc.app, pc.proxy); err != nil || got.state != state {
+		t.Fatalf("lookup of the application's socket %s -> %s = TCP state %d, %v; want %d", pc.app, pc.proxy, got.state, err, state)
+	}
+	tg, err := p.pairTarget(ds, pc)
+	if err != nil || tg == nil || tg.gone || !tg.finCounted || tg.want != n+1 {
+		t.Fatalf("pairTarget in TCP state %d = %+v, %v; want %d with its FIN counted, not gone", state, tg, err, n+1)
+	}
+}
+
+// readAndSettle has the proxy read the n bytes the application left behind,
+// and checks that the wait settles on them with no loss.
+func readAndSettle(t *testing.T, p *Proxy, reader net.Conn, n uint64) {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() { done <- p.WaitPairedBytes(context.Background(), 1) }()
+	if _, err := io.ReadFull(reader, make([]byte, n)); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("WaitPairedBytes: %v", err)
+	}
+	if l := lossesOf(p, models.CaptureLossAppBytesLost); l != 0 {
+		t.Fatalf("%d losses, want none", l)
+	}
+}
+
+// An application socket on its way to closed is read by the wait, bound to a
+// device or not: how much it wrote, never gone. For a socket bound to a
+// device that is the dump's answer, so the dump has to ask for each closing
+// state, among them FIN_WAIT1, CLOSING and LAST_ACK, the states the
+// application's FIN is counted in.
+//
+// close(2) sets FIN_WAIT1 and LAST_ACK itself. The FIN goes out behind the
+// bytes the proxy has not read, so those bytes hold these states, and
+// CLOSING, still.
 func TestAClosingApplicationSocketIsReadNotGone(t *testing.T) {
 	for _, tc := range pairShapes {
 		t.Run(tc.name, func(t *testing.T) {
-			p := &Proxy{logger: zap.NewNop()}
-			app, proxySide, _ := heldPairBound(t, p, 1, tc.network, tc.addr, "", tc.dev)
-			if _, err := app.Write([]byte("x")); err != nil {
-				t.Fatal(err)
-			}
-			if err := proxySide.CloseWrite(); err != nil {
-				t.Fatal(err)
-			}
-			// The application has the FIN once its read ends: its socket
-			// is in CLOSE_WAIT from then on.
-			if _, err := app.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
-				t.Fatalf("the application's read after the proxy's shutdown: %v, want EOF", err)
-			}
-			p.paired.mu.Lock()
-			pc := p.paired.byConn[proxySide]
-			p.paired.mu.Unlock()
-			if pc == nil {
-				t.Fatal("no paired connection")
-			}
-			ds, err := openDiag()
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer ds.close()
-			if got, err := ds.lookup(pc.app, pc.proxy); err != nil || got.state != tcpCloseWait {
-				t.Fatalf("lookup of the application's socket %s -> %s = TCP state %d, %v; want CLOSE_WAIT", pc.app, pc.proxy, got.state, err)
-			}
-			tg, err := p.pairTarget(ds, pc)
-			if err != nil || tg == nil || tg.gone || tg.want != 1 {
-				t.Fatalf("pairTarget = %+v, %v; want 1 byte written, not gone", tg, err)
-			}
+			t.Run("CLOSE_WAIT", func(t *testing.T) {
+				p := &Proxy{logger: zap.NewNop()}
+				app, proxySide, _ := heldPairBound(t, p, 1, tc.network, tc.addr, "", tc.dev)
+				if _, err := app.Write([]byte("x")); err != nil {
+					t.Fatal(err)
+				}
+				if err := proxySide.CloseWrite(); err != nil {
+					t.Fatal(err)
+				}
+				// The application has the FIN once its read ends: its socket
+				// is in CLOSE_WAIT from then on.
+				if _, err := app.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
+					t.Fatalf("the application's read after the proxy's shutdown: %v, want EOF", err)
+				}
+				pc, ds := closingPair(t, p, proxySide)
+				if got, err := ds.lookup(pc.app, pc.proxy); err != nil || got.state != tcpCloseWait {
+					t.Fatalf("lookup of the application's socket %s -> %s = TCP state %d, %v; want CLOSE_WAIT", pc.app, pc.proxy, got.state, err)
+				}
+				tg, err := p.pairTarget(ds, pc)
+				if err != nil || tg == nil || tg.gone || tg.want != 1 {
+					t.Fatalf("pairTarget = %+v, %v; want 1 byte written, not gone", tg, err)
+				}
+			})
+			t.Run("FIN_WAIT1 then CLOSING", func(t *testing.T) {
+				p := &Proxy{logger: zap.NewNop()}
+				app, proxySide, reader := heldPairBound(t, p, 1, tc.network, tc.addr, "", tc.dev)
+				n := queue(t, app)
+				pc, ds := closingPair(t, p, proxySide)
+				if err := app.Close(); err != nil {
+					t.Fatal(err)
+				}
+				wantFINCounted(t, p, ds, pc, tcpFinWait1, n)
+				if err := proxySide.CloseWrite(); err != nil {
+					t.Fatal(err)
+				}
+				// The FIN moves it when the host gets to deliver it, and it
+				// stays where the kernel keeps it, so a lookup finds it
+				// throughout.
+				got, err := ds.lookup(pc.app, pc.proxy)
+				for err == nil && got.state == tcpFinWait1 {
+					runtime.Gosched()
+					got, err = ds.lookup(pc.app, pc.proxy)
+				}
+				if err != nil || got.state != tcpClosing {
+					t.Fatalf("lookup of the application's socket %s -> %s after the proxy's FIN = TCP state %d, %v; want CLOSING", pc.app, pc.proxy, got.state, err)
+				}
+				wantFINCounted(t, p, ds, pc, tcpClosing, n)
+				readAndSettle(t, p, reader, n)
+			})
+			t.Run("LAST_ACK", func(t *testing.T) {
+				p := &Proxy{logger: zap.NewNop()}
+				app, proxySide, reader := heldPairBound(t, p, 1, tc.network, tc.addr, "", tc.dev)
+				if err := proxySide.CloseWrite(); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := app.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
+					t.Fatalf("the application's read after the proxy's shutdown: %v, want EOF", err)
+				}
+				n := queue(t, app)
+				pc, ds := closingPair(t, p, proxySide)
+				if err := app.Close(); err != nil {
+					t.Fatal(err)
+				}
+				wantFINCounted(t, p, ds, pc, tcpLastAck, n)
+				readAndSettle(t, p, reader, n)
+			})
+			t.Run("TIME_WAIT", func(t *testing.T) {
+				p := &Proxy{logger: zap.NewNop()}
+				app, proxySide, _ := heldPairBound(t, p, 1, tc.network, tc.addr, "", tc.dev)
+				pc, ds := closingPair(t, p, proxySide)
+				// Found while it stays put, so the read below waits on a
+				// socket the lookup can see, not on a lookup that cannot.
+				if _, err := ds.lookup(pc.app, pc.proxy); err != nil {
+					t.Fatalf("lookup of the application's socket %s -> %s: %v", pc.app, pc.proxy, err)
+				}
+				if err := app.Close(); err != nil {
+					t.Fatal(err)
+				}
+				if err := proxySide.CloseWrite(); err != nil {
+					t.Fatal(err)
+				}
+				// Here the socket does move: the kernel swaps it for a
+				// timewait socket, and a lookup can catch the swap and read
+				// it closed, or not find it. So FIN_WAIT2 is only a state it
+				// passes through, and TIME_WAIT is where it stays.
+				for {
+					got, err := ds.lookup(pc.app, pc.proxy)
+					if err == nil && got.state == tcpTimeWait {
+						break
+					}
+					if err != nil && !errors.Is(err, errNoSocket) {
+						t.Fatal(err)
+					}
+					runtime.Gosched()
+				}
+				if tg, err := p.pairTarget(ds, pc); err != nil || tg != nil {
+					t.Fatalf("pairTarget in TIME_WAIT = %+v, %v; want nothing to wait for", tg, err)
+				}
+			})
 		})
 	}
 }
